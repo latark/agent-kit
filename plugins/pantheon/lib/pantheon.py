@@ -1929,7 +1929,8 @@ def task_cmd(rest):
                 print("pantheon task new: входящие создаёт только доска владельца; Зевс заводит задачу сразу в направлении",
                       file=sys.stderr)
                 return 2
-            tid, p = T.task_new(PANTHEON, now(), opt("--direction"), opt("--title"), project=opt("--project"), **fields)
+            tid, p = T.task_new(PANTHEON, now(), opt("--direction"), opt("--title"), project=opt("--project"),
+                                text=opt("--text"), **fields)
             print(f"{tid} {os.path.relpath(p, PANTHEON)}")
         elif sub == "set" and args:
             tid, changes, note, i = args[0], {}, None, 1

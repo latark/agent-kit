@@ -462,7 +462,7 @@ def _file_for(pantheon, direction, tid):
     return os.path.join(base, tid + ".md")
 
 
-def task_new(pantheon, t, direction, title, project=None, actor="агент", **fields):
+def task_new(pantheon, t, direction, title, project=None, actor="агент", text=None, **fields):
     if not DIRECTION_RE.fullmatch(str(direction)):
         raise ValueError(f"направление не по образцу: {direction!r}")
     if direction != "inbox" and not os.path.isdir(os.path.join(pantheon, "directions", direction)):
@@ -485,7 +485,9 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", **
     if errs:
         remove(path)
         raise ValueError("; ".join(errs))
-    write(path, head, f"\n# {title.strip()}\n\n## Журнал\n\n- {now_iso(t)[:16].replace('T', ' ')} — {actor}: создана\n")
+    desc = "\n".join(("\\" + ln) if ln.startswith("## ") else ln for ln in (text or "").strip().split("\n")).strip()
+    write(path, head, f"\n# {title.strip()}\n\n" + (desc + "\n\n" if desc else "")
+          + f"## Журнал\n\n- {now_iso(t)[:16].replace('T', ' ')} — {actor}: создана\n")
     return tid, path
 
 
@@ -530,6 +532,24 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
     with dir_lock(os.path.dirname(tasks[tid][0])):
         return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck)
+
+
+def task_note(pantheon, t, tid, note):
+    """Заметка владельца с доски: текст — в «Заметки владельца» задачи, в журнал — строка, что она пришла."""
+    tasks = load_tasks(pantheon)
+    if tid not in tasks:
+        raise ValueError(f"нет задачи {tid}")
+    path = tasks[tid][0]
+    with dir_lock(os.path.dirname(path)):
+        head, body = read(path)
+        if not head or head.get("id") != tid:
+            raise ValueError(f"задача {tid} изменилась — повторите")
+        stamp = now_iso(t)[:16].replace("T", " ")
+        body = add_owner_note(body, stamp, note)
+        body = append_log(body, f"{stamp} — владелец: новая заметка — в разделе «Заметки владельца»")
+        head["updated"] = now_iso(t)
+        write(path, head, body)
+    return path
 
 
 def task_claim(pantheon, t, tid, by, hours=1.0):
@@ -590,8 +610,12 @@ def ready(pantheon, t, direction=None, owner=None):
 
 # --- доска владельца ------------------------------------------------------------
 
-CARD_ORDER = ["Статус", "Проект", "Внимание", "Приоритет", "Срок", "Кто", "Дальше", "Ждёт", "Заметка агенту", "id"]
-NOTE_KEY = "Заметка агенту"
+CARD_ORDER = ["Статус", "Проект", "Внимание", "Приоритет", "Срок", "Кто", "Дальше", "Ждёт", "id"]
+NOTE_KEY = "Заметка агенту"  # прежнее поле заметки: в карточку больше не рисуется, но со старых карточек ещё читается
+NOTES_HEAD = "## ✍️ Ваши заметки"
+NOTES_HINT = ("<small>Пишите ниже своими словами: мысли, задачи, правки. Через минуту после того, как закончите, тик "
+              "передаст их исполнителю — он прочитает до начала работы и ответит в журнале.</small>")
+OWNER_NOTES = "## Заметки владельца"  # раздел файла задачи: сюда тик переносит текст из карточки
 QUIET = 30  # с: новую карточку берём, когда у неё есть название и её столько не меняли (ответ и заметка — сразу)
 UNTITLED = ("Без названия", "Untitled")
 PROJECT_MARK = {"Пантеон": "⬛", "BrokerAssistant": "🟦", "alexbroker": "🟧", "MorphStream": "🟪", "expert-corpus": "🟫",
@@ -641,7 +665,7 @@ def _one(v):
     return "\\" + text if re.match(r"[-*+]\s*\[", text) else text
 
 
-def render_card(head, body, src_rel, t, conflict=None):
+def render_card(head, body, src_rel, t, conflict=None, notes=None):
     head = {k: (_one(v) if isinstance(v, str) else [_one(x) for x in v] if isinstance(v, list) else v)
             for k, v in head.items()}
     lab = label_of(head)
@@ -651,7 +675,7 @@ def render_card(head, body, src_rel, t, conflict=None):
             "Приоритет": PRIORITY_MARK.get(prio) if prio is not None else None, "Срок": head.get("due"),
             "Кто": head.get("owner"), "Дальше": None if head.get("status") in ("done", "dropped") else head.get("next"),
             "Ждёт": head.get("waiting_on") if head.get("waiting_on") not in (None, "human") else None,
-            NOTE_KEY: "", "id": head.get("id")}
+            "id": head.get("id")}
     due = f" · 📅 {head['due'][8:10]}.{head['due'][5:7]}" if head.get("due") else ""
     who = f" · 👤 {head['owner']}" if head.get("owner") else ""
     parts = [f"> [!{CALLOUT.get(lab, 'note')}] {STATUS_MARK.get(lab, '')} {lab} · {card['Проект']}{who}{due}"
@@ -666,6 +690,9 @@ def render_card(head, body, src_rel, t, conflict=None):
         parts[-1] += f"\n> **Ждёт:** {head['waiting_on']}"
     if conflict:
         parts.append(f"> [!warning] {conflict}")
+    desc = description(body)
+    if desc:
+        parts.append(desc)
     if head.get("question"):
         risky = head.get("risky") is True
         parts.append("## ❓ Нужно решить" + (" · ⚠ рискованно" if risky else "") + "\n\n" + head["question"].strip())
@@ -693,12 +720,74 @@ def render_card(head, body, src_rel, t, conflict=None):
     m = re.search(r"## Журнал\n(.*)$", body, re.S)
     if m:
         log = [x for x in m.group(1).strip().split("\n") if x.startswith("- ")][-3:][::-1]
-        if log:
-            parts.append("## Последнее\n\n" + "\n".join(log))
+        if log:  # «- [x] …» из журнала (его пишут агенты) не должна читаться как ваша галочка
+            parts.append("## Последнее\n\n" + "\n".join("- " + ("\\" if x[2:].lstrip()[:1] == "[" else "") + x[2:]
+                                                        for x in log))
     # без отметки времени: иначе тик переписывал бы каждую карточку каждую минуту, а Obsidian перечитывал бы доску
-    # подсказка «как написать агенту» — одна на доску, в Сводке, а не в каждой карточке
     parts.append(f"<small>Источник: `{src_rel}` · задача обновлена {str(head.get('updated') or '')[:16].replace('T', ' ')}</small>")
+    parts.append(notes_block(notes or []))
     return card, "\n" + "\n\n".join(parts) + "\n"
+
+
+def description(body, limit=40):
+    """Текст задачи под заголовком до первого раздела «## …». Пишут агенты — строка «- [x] …» в нём не станет
+    галочкой, «## …» — новым разделом карточки."""
+    m = re.search(r"^# [^\n]*\n(.*?)(?=^## |\Z)", body, re.S | re.M)
+    if not m or not m.group(1).strip():
+        return ""
+    out = []
+    for ln in m.group(1).strip().split("\n")[:limit]:
+        if re.match(r"\s*[-*+]\s*\[", ln):
+            ln = ln.replace("[", "\\[", 1)
+        out.append(ln)
+    more = len(m.group(1).strip().split("\n")) > limit
+    return "\n".join(out) + ("\n\n…" if more else "")
+
+
+def notes_block(notes):
+    """Раздел карточки в самом низу: ваши переданные заметки, под ними — место для новых. Берутся из журнала доски
+    (owner-log/board.jsonl — ролям не записать), а не из файла задачи: его направление может дописать от вашего имени.
+    Цитатой: строка «- [x]» в заметке не станет галочкой."""
+    text = NOTES_HEAD + "\n\n" + NOTES_HINT
+    lines = []
+    for rec in notes:
+        lines.append(f"> **{str(rec.get('time') or '')[:16].replace('T', ' ')}**")
+        lines += ["> " + ln.rstrip() for ln in str(rec.get("text") or "").strip().split("\n") if ln.strip()]
+    if lines:
+        text += "\n\n" + "\n".join(lines)
+    return text + "\n"
+
+
+def owner_notes_all(log_path):
+    """Ваши заметки по задачам из журнала доски: {id: [запись, …]}."""
+    out = {}
+    try:
+        with open(log_path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and rec.get("kind") == "note" and not rec.get("inbox") and rec.get("text"):
+                    out.setdefault(rec.get("id"), []).append(rec)
+    except OSError:
+        pass
+    return out
+
+
+def add_owner_note(body, stamp, note):
+    """Заметку из карточки — в раздел «Заметки владельца» файла задачи (перед журналом). Строки — цитатой: текст
+    владельца не начнёт новый раздел файла."""
+    entry = f"- {stamp}\n" + "\n".join("  > " + ln.rstrip() for ln in note.strip().split("\n")) + "\n"
+    if OWNER_NOTES not in body:
+        i = body.find("## Журнал")
+        block = OWNER_NOTES + "\n\n"
+        body = (body[:i] + block + "\n" + body[i:]) if i >= 0 else body.rstrip("\n") + "\n\n" + block
+    i = body.index(OWNER_NOTES) + len(OWNER_NOTES)
+    j = body.find("\n## ", i)
+    j = len(body) if j < 0 else j
+    section = body[i:j].rstrip("\n") + "\n\n" + entry
+    return body[:i] + section + body[j:]
 
 
 def owner_added(rendered, body):
@@ -855,7 +944,7 @@ def _summary(tasks, t, inbox=None):
     return ("# Сводка\n\n" + sec("🔴 Ждёт вас", rows["wait"]) + "\n" + sec("⏰ Просрочено", rows["overdue"]) + "\n"
             + sec("📥 Входящие заявки направлениям", rows["inbox"]) + "\n"
             + sec("🟡 В работе", rows["doing"]) + "\n" + sec("🟢 Готово за сутки", rows["done"])
-            + "\n✍️ Написать агенту — поле «Заметка агенту» в карточке. Перенести — перетащите карточку на доске. "
+            + "\n✍️ Написать агенту — текстом в раздел «Ваши заметки» внизу карточки. Перенести — перетащите карточку на доске. "
               "Готовые карточки уходят с доски через 7 дней.\n"), rows
 
 
@@ -895,7 +984,7 @@ def render_inbox_card(item, project, conflict=None):
     card = {"Статус": "Входящие", "Проект": f"{PROJECT_MARK.get(proj, '▪️')} {proj}".strip(),
             "Внимание": "⚠ конфликт" if conflict else "📥 заявка направлению", "Кто": item["direction"],
             "Дальше": "разобрать: в «Очередь» — станет задачей направления, в «Отменено» — в архив",
-            NOTE_KEY: "", "id": item["id"]}
+            "id": item["id"]}
     body = re.sub(r"^# .+\n", "", item["text"], count=1, flags=re.M)
     body = re.sub(r"^От: .+\n", "", body, count=1, flags=re.M).strip()
     lines = body.split("\n")
@@ -906,8 +995,9 @@ def render_inbox_card(item, project, conflict=None):
         parts.append(f"> [!warning] {conflict}")
     parts.append(short)
     rel = f"directions/{item['direction']}/inbox/{item['file']}"
-    parts.append("✍️ Перенесите в «Очередь» — заявка станет задачей направления; в «Отменено» — уйдёт в архив входящих.\n\n"
+    parts.append("Перенесите в «Очередь» — заявка станет задачей направления; в «Отменено» — уйдёт в архив входящих.\n\n"
                  f"<small>Источник: `{rel}`</small>")
+    parts.append(notes_block(""))
     return card, "\n" + "\n\n".join(parts) + "\n"
 
 
@@ -1025,8 +1115,12 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
 
     # 3. ходы владельца на известных карточках (перенос — сразу: он делается одним движением;
     #    заметку Obsidian сохраняет по Enter или уходу из поля, галочку — щелчком: берём сразу)
+    typing = set()
     for cid, (p, head, body) in present.items():
         st = cards.get(cid)
+        if st and digest(p) != st.get("card_hash") and t - mtime[p] < QUIET and owner_added(st.get("rendered"), body):
+            typing.add(cid)  # вы ещё пишете заметку: не забираем недописанное и не перерисовываем карточку под курсором
+            continue
         if not st or digest(p) == st.get("card_hash"):
             continue  # карточку никто не трогал
         want = head.get("Статус")
@@ -1088,9 +1182,8 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                     st["conflict_at"] = t
                     st["conflict"] = f"ход «{want}» не применён: {e}"
         if note:
-            task_set(pantheon, t, cid, {}, note=" / ".join(x.strip() for x in note.strip().split("\n") if x.strip())[:2000],
-                     actor="владелец")
-            _owner_log(log_path, t, kind="note", id=cid, text=note.strip()[:2000])
+            task_note(pantheon, t, cid, note.strip()[:4000])
+            _owner_log(log_path, t, kind="note", id=cid, text=note.strip()[:4000])
             done_lines.append(f"{cid}: заметка владельца передана")
         risky = src_head.get("risky") is True
         current = src_head.get("requested") if risky else src_head.get("answer")
@@ -1132,6 +1225,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
 
     # 6. перерисовать карточки: задачи и заявки направлений
     names, items = {}, []
+    notes_by_id = owner_notes_all(log_path)
     for tid, (p, h, b) in sorted(tasks.items()):
         if _live(h, t):
             items.append((tid, card_name(h), p, h, b))
@@ -1148,10 +1242,10 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         if h is None:
             card, cbody = render_inbox_card(inbox[cid], projects.get(inbox[cid]["direction"]), st.get("conflict"))
         else:
-            card, cbody = render_card(h, b, rel(src), t, st.get("conflict"))
+            card, cbody = render_card(h, b, rel(src), t, st.get("conflict"), notes_by_id.get(cid))
         target = os.path.join(board, name + ".md")
         old = present.get(cid)
-        if old and digest(old[0]) != seen.get(cid):
+        if old and (digest(old[0]) != seen.get(cid) or cid in typing):
             continue  # владелец правит карточку прямо сейчас — следующий проход
         if old and old[0] != target:
             os.remove(old[0])  # задачу переименовали
