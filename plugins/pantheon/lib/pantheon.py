@@ -1328,9 +1328,10 @@ def start_target(target, rest):
 
 
 def start(rest):
-    """pantheon start <направление> [поручение] | workshop <задача> [поручение] | zeus  [--from кто] [--dry-run]"""
+    """pantheon start <направление> [поручение] | workshop <задача> [поручение] | zeus [--restart]  [--from кто] [--dry-run]"""
     dry = "--dry-run" in rest
-    rest = [a for a in rest if a != "--dry-run"]
+    restart = "--restart" in rest
+    rest = [a for a in rest if a not in ("--dry-run", "--restart")]
     origin = "owner"
     if "--from" in rest:
         i = rest.index("--from")
@@ -1354,6 +1355,17 @@ def start(rest):
         if not sys.stdin.isatty():
             print("штаб запускается в вашем терминале: pantheon start zeus", file=sys.stderr)
             return 2
+        # Зевс — одна сессия. Вкладка iTerm — только окно к фоновой сессии: закрыть вкладку или убить её процесс
+        # мало, сессия живёт дальше, и новый запуск становится «zeus-<два слова>» (15.10 так появилось два Зевса)
+        live = [a for a in agents_all() or [] if a.get("cwd") == PANTHEON
+                and (a.get("name") or "").startswith("zeus") and a.get("state") != "done"]
+        if live and not restart:
+            print(f"Зевс уже запущен ({', '.join(a.get('name') + ' ' + a.get('id') for a in live)}): открыть — "
+                  f"claude attach {live[0].get('id')}; начать заново — pantheon start zeus --restart", file=sys.stderr)
+            return 1
+        for a in live:
+            subprocess.run([claude_bin(), "stop", a.get("id")], capture_output=True, text=True, timeout=60)
+            start_log(f"stop-restart\tzeus\t{a.get('name')}\t{a.get('id')}")
         start_log(f"zeus\t{origin}\t{PANTHEON}")
         os.chdir(PANTHEON)
         os.execv(argv[0], argv)
