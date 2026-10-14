@@ -1249,6 +1249,7 @@ def sandbox_build(domains, policy_path, stores=None):
     hq["sandbox"]["excludedCommands"] = list(HQ_EXCLUDED)
     hq["sandbox"]["filesystem"]["denyWrite"] += [os.path.join(root, ".git"), os.path.join(root, "alerts.md")]
     hq["sandbox"]["network"]["allowedDomains"] = []
+    hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
     write_json(os.path.join(out_dir, "hq.json"), hq)
     built.append("hq")
     for f in os.listdir(out_dir):
@@ -1404,6 +1405,7 @@ def start(rest):
     data = read_json(win, {})
     data.setdefault("env", {})["PANTHEON_ORIGIN"] = origin
     data["env"]["PANTHEON_SESSION"] = name
+    data["env"]["PANTHEON_ROLE"] = role
     run = path("settings", "run", name + ".json")
     task = " ".join(rest).strip() or default_task
     prompt = f"{START_MARK} поручение от {origin}] {task}"

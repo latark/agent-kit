@@ -393,7 +393,7 @@ def remember_session(ev):
         old = [s for s in rec.get("sessions") or [] if s.get("id") == sid]
         first = old[0].get("first") if old else not rec.get("sessions")
         ss.append({"id": sid, "transcript": ev.get("transcript_path") or "",
-                   "role": ev.get("agent_type") or (old[0].get("role") if old else "") or "",
+                   "role": ev.get("agent_type") or os.environ.get("PANTHEON_ROLE") or (old[0].get("role") if old else "") or "",
                    "first": bool(first), "t": time.time()})
         rec["sessions"] = ss[-10:]
         save_json(path, rec)
@@ -710,7 +710,7 @@ def file_for_context(path, desc, budget):
 def cmd_start(ev):
     remember_session(ev)
     prune_records()
-    role = ev.get("agent_type") or ""
+    role = session_role(ev)
     if ev.get("agent_id"):
         return 0
     if ev.get("source") == "compact":
@@ -741,6 +741,11 @@ def session_role(ev):
     берём ту, что запомнил SessionStart для этой сессии этого процесса (~/.local/state/pantheon/ctx — ролям не записать)."""
     if ev.get("agent_type") or ev.get("agent_id"):
         return ev.get("agent_type") or ""
+    # 15.10: и в SessionStart фоновой сессии --agent hq роль не приходит — окно Пантеона ставит её переменной
+    # (settings env, файл окна ролям не записать)
+    env_role = os.environ.get("PANTHEON_ROLE") or ""
+    if env_role in ROLES_WITH_LOG:
+        return env_role
     sid = ev.get("session_id")
     for s in proc_record(os.environ.get("CLAUDE_PID")).get("sessions") or []:
         if sid and s.get("id") == sid:

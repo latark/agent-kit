@@ -386,5 +386,10 @@ check("ввод в окне Зевса без agent_type в событии → �
 run("owner-log", {"session_id": "s-unknown", "transcript_path": tr, "hook_event_name": "UserPromptSubmit",
                   "prompt": "чужая сессия без роли", "prompt_id": "p-norole"})
 check("сессия без записи старта и без роли → журнала нет", "чужая сессия без роли" not in log_text("zeus"))
+append(tr, user("слово из окна с переменной роли", "p-envrole", time.time()))
+run("owner-log", {"session_id": "s-envrole", "transcript_path": tr, "hook_event_name": "UserPromptSubmit",
+                  "prompt": "слово из окна с переменной роли", "prompt_id": "p-envrole"}, PANTHEON_ROLE="hq")
+check("роли нет ни в событии, ни в записи старта, окно задаёт PANTHEON_ROLE=hq → строка в zeus.md",
+      "слово из окна с переменной роли" in log_text("zeus"))
 print("\n%d/%d" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
