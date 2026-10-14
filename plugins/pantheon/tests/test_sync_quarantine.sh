@@ -28,7 +28,7 @@ check "CLAUDE.md и память ушли сами, без карточки" 're
 # 2. правка кода — карантин с объяснением и копией
 echo "echo hi" >> sync-copy.sh; S; task=$(sed -n 's/^task=//p' .sync-held)
 check "код в карантине: не ушёл, есть карточка" '! remote sync-copy.sh | grep -q hi && [ -n "$task" ]'
-check "в вопросе объяснение: что за файл, кто изменил, совет" 'grep -q "Кто:" "$TASKS/$task.md" && grep -q "Совет:" "$TASKS/$task.md" && grep -q "Откатить правку" "$TASKS/$task.md"'
+check "в вопросе объяснение: что за файл, кто изменил, совет" 'grep -qi "кто:" "$TASKS/$task.md" && grep -q "Совет:" "$TASKS/$task.md" && grep -q "Откатить правку" "$TASKS/$task.md"'
 check "копия в ветке quarantine/$HOST" 'git fetch -q origin && git show "origin/quarantine/$HOST:sync-copy.sh" | grep -q hi'
 S; check "повтор без ответа — тот же вопрос" '[ "$(ntasks)" = 1 ]'
 answer "$task" "Пока держать"; S; check "«пока держать» — держит" '! remote sync-copy.sh | grep -q hi && [ -f .sync-held ]'

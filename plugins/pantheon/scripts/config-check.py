@@ -390,38 +390,46 @@ def explain(repo, flags, stats):
         files[fl["file"]]["kinds"].append(fl["kind"])
         files[fl["file"]]["reasons"].append(fl["reason"])
     home = os.path.expanduser("~")
-    unknown, parts = [], []
+    unknown, rows, sessions = [], [], {}
     for path, info in files.items():
         w = who_changed(os.path.join(repo, path))
         add, rem = stats.get(path, ("?", "?"))
         info.update(role=file_role(path), added=add, removed=rem)
         if w:
             name = f"«{w['title']}» ({w['sid']})" if w["title"] else w["sid"]
-            how = w["tool"] if w["strong"] else "команда Bash с этим файлом"
+            how = w["tool"] if w["strong"] else "команда Bash"
             info["who"] = (f"сессия Claude {name}{', субагент' if w['sub'] else ''} в {w['cwd'].replace(home, '~')}, "
                            f"{local_time(w['ts'])}, {how}")
+            sessions[path] = (name, f"{local_time(w['ts'])}, {how}")
         else:
             info["who"] = "не сессия Claude: за 14 дней ни одна сессия этот файл не правила — правку сделала программа или скрипт"
             info["who"] = ("не сессия Claude: после последней правки сессией этот файл менял кто-то другой "
                            "(программа или скрипт)") if os.path.exists(os.path.join(repo, path)) else info["who"]
             unknown.append(path)
-        why = "; ".join(dict.fromkeys(info["reasons"]))[:300]
-        parts.append(f"• {path} — {info['role']}. Изменено: +{add} −{rem} строк. Кто: {info['who']}. Почему спрашиваю: {why}.")
+        rows.append((path, info, "; ".join(dict.fromkeys(info["reasons"]))[:300]))
+    # одна сессия на все файлы — «кто» один раз сверху, а не в каждой строке
+    names = {n for n, _ in sessions.values()}
+    common = next(iter(names)) if len(names) == 1 and len(sessions) == len(files) else None
+    parts = []
+    for path, info, why in rows:
+        who = f"когда: {sessions[path][1]}" if common else f"кто: {info['who']}"
+        parts.append(f"- **`{path}`** — {info['role']} · +{info['added']} −{info['removed']} строк\n"
+                     f"    - {who}\n    - почему спрашиваю: {why}")
     bad = {k for f in files.values() for k in f["kinds"]} & {"danger", "injection", "secret"}
     if bad or unknown:
-        advice = ("Совет: НЕ отправлять, пока не разберётесь. "
+        advice = ("**Совет: НЕ отправлять**, пока не разберётесь. "
                   + ("Есть признаки опасного кода или внедрения. " if bad else "")
                   + ("Файл изменила не сессия Claude — так выглядела атака Cisco (правку внёс установочный скрипт пакета). " if unknown else "")
-                  + "Если сомневаетесь — «Откатить»: копия правки останется в ветке quarantine на GitHub.")
+                  + "Сомневаетесь — «Откатить»: копия правки останется в ветке quarantine на GitHub.")
         recommend = "Откатить правку"
     else:
-        advice = ("Совет: если вы сегодня просили меня или Метиду менять эти файлы — «Отправить». "
-                  "Если такой просьбы не было — «Откатить».")
+        advice = ("**Совет:** просили меня или Метиду менять эти файлы — «Отправить». Не просили — «Откатить».")
         recommend = "Отправить на другие Mac"
     n = len(files)
-    question = (f"Правки ~/.claude на этом Mac ({n}) не ушли на другие Mac — они в карантине, пока вы не решите. "
-                + " ".join(parts) + " " + advice
-                + " Посмотреть разницу: cd ~/.claude && git diff -- " + " ".join(files))
+    question = (f"Правки `~/.claude` на этом Mac ({n}) не ушли на другие Mac — ждут вашего решения."
+                + (f" Кто: сессия Claude {common} — все правки." if common else "")
+                + "\n\n" + "\n".join(parts) + "\n\n" + advice
+                + "\n\nПосмотреть разницу: `cd ~/.claude && git diff -- " + " ".join(files) + "`")
     kinds = sorted({KIND_WORD.get(k, k) for f in files.values() for k in f["kinds"]})
     title = f"Карантин правок ~/.claude: {', '.join(list(files)[:2])}{' и др.' if n > 2 else ''} ({', '.join(kinds)})"
     return files, {"title": title[:150], "question": question[:2500], "recommend": recommend,
