@@ -144,6 +144,30 @@ def main():
     check("заметка агенту: в журнале задачи, в карточке очищена",
           "владелец: Сделайте как проще" in text and 'Заметка агенту: ""' in ct)
 
+    # ответ можно поменять, пока задача не закрыта
+    t2 = open(c2, encoding="utf-8").read()
+    check("после ответа варианты остаются, текущий отмечен", "- [x] В копии" in t2 and "- [ ] В knowledge" in t2)
+    open(c2, "w", encoding="utf-8").write(t2.replace("- [x] В копии", "- [ ] В копии").replace("- [ ] В knowledge", "- [x] В knowledge"))
+    run(env, "board", t=T0 + 380)
+    h, text = head_of(src("metis-pantheon", "metis-0002"))
+    check("смена ответа: новый ответ, в журнале — каким был", h.get("answer") == "В knowledge" and "был «В копии»" in text)
+    # рискованный вопрос: галочка — только выбор, подтверждение словом
+    run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Отправить коммиты", "--status", "waiting",
+        "--waiting-on", "human", "--next", "ваш ответ", "--question", "Отправить?", "--option", "Да", "--option", "Нет",
+        "--risky", "--project", "Пантеон", t=T0 + 385)
+    run(env, "board", t=T0 + 390)
+    rc = card(view, "Отправить коммиты")
+    rtext = open(rc, encoding="utf-8").read()
+    open(rc, "w", encoding="utf-8").write(rtext.replace("- [ ] Да", "- [x] Да"))
+    run(env, "board", t=T0 + 395)
+    rid = [f for f in os.listdir(os.path.join(home, "directions", "metis-pantheon", "tasks")) if "Отправить коммиты" in open(os.path.join(home, "directions", "metis-pantheon", "tasks", f), encoding="utf-8").read()][0]
+    rh, _ = head_of(os.path.join(home, "directions", "metis-pantheon", "tasks", rid))
+    rch, rct = head_of(rc)
+    lastlog = json.loads(open(os.path.join(state, "owner-log", "board.jsonl")).read().strip().split("\n")[-1])
+    check("рискованное: галочка — только выбор, задача ждёт подтверждения словом",
+          rh.get("status") == "waiting" and rh.get("requested") == "Да" and not rh.get("answer")
+          and "подтвердите словом" in rch.get("Внимание", "") and lastlog["kind"] == "request")
+
     # новая карточка во «Входящих»: пока владелец пишет — не трогаем, через 2 минуты тишины — задача
     nc = os.path.join(view, "Доска", "Купить домен для лендинга.md")
     open(nc, "w", encoding="utf-8").write("---\nСтатус: Входящие\n---\nдо пятницы\n")

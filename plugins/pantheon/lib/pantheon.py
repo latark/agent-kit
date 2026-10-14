@@ -1065,6 +1065,7 @@ def tasks_mod():
         spec = importlib.util.spec_from_file_location("pantheon_tasks", os.path.join(LIB, "tasks.py"))
         _TASKS = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(_TASKS)
+        _TASKS.set_root(PANTHEON)  # внутри ~/ai/pantheon — ввод-вывод без перехода по ссылкам
     return _TASKS
 
 
@@ -1149,7 +1150,8 @@ def task_cmd(rest):
             fields = {"status": opt("--status"), "priority": int(opt("--priority")) if opt("--priority") else None,
                       "due": opt("--due"), "next": opt("--next"), "owner": opt("--owner"),
                       "waiting_on": opt("--waiting-on"), "question": opt("--question"),
-                      "options": opt("--option", True) or None, "depends_on": opt("--depends-on", True) or None}
+                      "options": opt("--option", True) or None, "depends_on": opt("--depends-on", True) or None,
+                      "risky": True if "--risky" in args else None}
             if not opt("--direction") or not opt("--title"):
                 print("pantheon task new: нужны --direction и --title", file=sys.stderr)
                 return 2
@@ -1173,7 +1175,7 @@ def task_cmd(rest):
                     print(f"pantheon task set: поле {k} ставит только доска владельца", file=sys.stderr)
                     return 2
                 kind = T.FIELDS.get(k, ("str",))[0]
-                changes[k] = None if v in ("", "null") else int(v) if kind == "int" else \
+                changes[k] = None if v in ("", "null") else int(v) if kind == "int" else (v == "true") if kind == "bool" else \
                     [x.strip() for x in v.split(",") if x.strip()] if kind == "list" else v
                 i += 1
             p, head = T.task_set(PANTHEON, now(), tid, changes, note=note)

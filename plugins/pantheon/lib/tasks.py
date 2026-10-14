@@ -41,6 +41,7 @@ FIELDS = {
     "waiting_on": ("str", False), "depends_on": ("list", False), "claimed_by": ("str", False),
     "claimed_until": ("datetime", False), "parent": ("str", False), "result": ("str", False),
     "question": ("str", False), "options": ("list", False), "answer": ("str", False),
+    "risky": ("bool", False), "requested": ("str", False),
     # этап и проект
     "goal": ("str", False), "start": ("date", False), "exit_criteria": ("list", False), "repo_path": ("str", False),
     "health": ("str", False), "review_on": ("date", False),
@@ -159,24 +160,160 @@ def join(head, body, order=None):
     return "---\n" + "\n".join(lines) + "\n---\n" + body
 
 
+# --- файлы внутри ~/ai/pantheon: без перехода по ссылкам ------------------------
+# Тик работает с правами владельца, а папки направлений пишут роли. Проверка «это не ссылка» и сама запись
+# раздельно оставляют окно для подмены, поэтому внутри корня папки открываются цепочкой от корня — каждая
+# ступень с O_NOFOLLOW, — а файлы читаются, пишутся, переносятся и удаляются относительно уже открытой папки.
+
+_ROOT = None
+
+
+def set_root(pantheon):
+    global _ROOT
+    _ROOT = os.path.realpath(pantheon)
+
+
+def _parts(path):
+    if not _ROOT:
+        return None
+    a = os.path.abspath(path)
+    if a == _ROOT or not a.startswith(_ROOT + os.sep):
+        return None
+    parts = a[len(_ROOT) + 1:].split(os.sep)
+    if any(x in ("", ".", "..") for x in parts):  # noqa: путь собран кодом, это страховка
+        raise ValueError(f"путь не по образцу: {path}")
+    return parts
+
+
+def _open_chain(parts, create=False):
+    fd = os.open(_ROOT, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for x in parts:
+            if create:
+                try:
+                    os.mkdir(x, 0o755, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            nfd = os.open(x, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+@contextlib.contextmanager
+def _in_dir(path, create=False):
+    """→ (fd папки или None, имя файла). None — путь вне корня: обычный ввод-вывод."""
+    parts = _parts(path)
+    if parts is None:
+        yield None, path
+        return
+    fd = _open_chain(parts[:-1], create)
+    try:
+        yield fd, parts[-1]
+    finally:
+        os.close(fd)
+
+
+def read_text(path):
+    with _in_dir(path) as (fd, name):
+        if fd is None:
+            with open(path, encoding="utf-8") as fh:
+                return fh.read()
+        f = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+        with os.fdopen(f, encoding="utf-8") as fh:
+            return fh.read()
+
+
+def write_text(path, text):
+    with _in_dir(path, create=True) as (fd, name):
+        if fd is None:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            os.replace(tmp, path)
+            return
+        tmp = f".{name}.{os.getpid()}.tmp"
+        f = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644, dir_fd=fd)
+        with os.fdopen(f, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
+
+
+def create_excl(path):
+    with _in_dir(path, create=True) as (fd, name):
+        if fd is None:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW))
+        else:
+            os.close(os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644, dir_fd=fd))
+
+
+def remove(path):
+    with _in_dir(path) as (fd, name):
+        os.unlink(name if fd is not None else path, dir_fd=fd)
+
+
+def append_text(path, text):
+    with _in_dir(path) as (fd, name):
+        f = os.open(name if fd is not None else path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, dir_fd=fd)
+        with os.fdopen(f, "a", encoding="utf-8") as fh:
+            fh.write(text)
+
+
+def move(src, dst):
+    with _in_dir(src) as (sfd, sname), _in_dir(dst, create=True) as (dfd, dname):
+        if sfd is None or dfd is None:
+            raise ValueError("перенос — только внутри корня Пантеона")
+        try:
+            os.stat(dname, dir_fd=dfd, follow_symlinks=False)
+        except FileNotFoundError:
+            os.rename(sname, dname, src_dir_fd=sfd, dst_dir_fd=dfd)
+            return
+        raise FileExistsError(dst)
+
+
+def list_dir(d):
+    """Имена в папке внутри корня (папка открыта цепочкой, без ссылок); [] — нет папки или по пути ссылка."""
+    parts = _parts(d)
+    try:
+        if parts is None:
+            return sorted(os.listdir(d))
+        fd = _open_chain(parts)
+        try:
+            return sorted(os.listdir(fd))
+        finally:
+            os.close(fd)
+    except OSError:
+        return []
+
+
+def is_file(d, name):
+    """Обычный файл (не ссылка, не папка) — внутри корня проверяется относительно открытой папки."""
+    try:
+        with _in_dir(os.path.join(d, name)) as (fd, n):
+            st = os.stat(n if fd is not None else os.path.join(d, name), dir_fd=fd, follow_symlinks=False)
+        import stat as _st
+        return _st.S_ISREG(st.st_mode)
+    except OSError:
+        return False
+
+
 def read(path):
-    with open(path, encoding="utf-8") as fh:
-        return split(fh.read())
+    return split(read_text(path))
 
 
 def write(path, head, body, order=None):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(join(head, body, order))
-    os.replace(tmp, path)
+    write_text(path, join(head, body, order))
 
 
 def digest(path):
     try:
-        with open(path, "rb") as fh:
-            return hashlib.sha256(fh.read()).hexdigest()[:16]
-    except OSError:
+        return hashlib.sha256(read_text(path).encode("utf-8")).hexdigest()[:16]
+    except (OSError, UnicodeDecodeError, ValueError):
         return ""
 
 
@@ -195,7 +332,7 @@ def check_head(head):
         kind = FIELDS[k][0]
         if v is None:
             continue
-        ok = {"str": isinstance(v, str), "int": isinstance(v, int) and not isinstance(v, bool),
+        ok = {"str": isinstance(v, str), "int": isinstance(v, int) and not isinstance(v, bool), "bool": isinstance(v, bool),
               "list": isinstance(v, list), "date": isinstance(v, str) and bool(DATE_RE.fullmatch(v)),
               "datetime": isinstance(v, str) and bool(DATETIME_RE.fullmatch(v) or DATE_RE.fullmatch(v))}[kind]
         if not ok:
@@ -238,25 +375,16 @@ def check_file(path):
 
 # --- где лежат задачи -----------------------------------------------------------
 
-def real_dir(path, expected_parent):
-    """Папка существует, это не ссылка и лежит ровно там, где должна (никаких ссылок по пути)."""
-    return (os.path.isdir(path) and not os.path.islink(path)
-            and os.path.realpath(path) == os.path.join(os.path.realpath(expected_parent), os.path.basename(path)))
-
-
 def task_dirs(pantheon):
-    out = [os.path.join(pantheon, "inbox", "tasks")]
     d = os.path.join(pantheon, "directions")
-    if real_dir(d, pantheon):
-        out += [os.path.join(d, x, "tasks") for x in sorted(os.listdir(d))
-                if DIRECTION_RE.fullmatch(x) and real_dir(os.path.join(d, x), d)]
-    return [x for x in out if real_dir(x, os.path.dirname(x))]
+    return [os.path.join(pantheon, "inbox", "tasks")] + [os.path.join(d, x, "tasks") for x in list_dir(d)
+                                                          if DIRECTION_RE.fullmatch(x)]
 
 
 def task_files(pantheon):
     for d in task_dirs(pantheon):
-        for f in sorted(os.listdir(d)):
-            if f.endswith(".md") and not f.startswith(".") and not os.path.islink(os.path.join(d, f)):
+        for f in list_dir(d):  # папка, открытая без ссылок; файлы — только обычные
+            if f.endswith(".md") and not f.startswith(".") and is_file(d, f):
                 yield os.path.join(d, f)
 
 
@@ -305,9 +433,11 @@ def _file_for(pantheon, direction, tid):
         raise ValueError(f"направление или id не по образцу: {direction!r}, {tid!r}")
     base = os.path.join(pantheon, "inbox", "tasks") if direction == "inbox" else \
         os.path.join(pantheon, "directions", direction, "tasks")
-    os.makedirs(base, exist_ok=True)
-    if not (real_dir(base, os.path.dirname(base)) and real_dir(os.path.dirname(base), os.path.dirname(os.path.dirname(base)))):
-        raise ValueError(f"папка задач {base} — ссылка или не на своём месте")
+    try:
+        with _in_dir(os.path.join(base, ".probe"), create=True):
+            pass  # папка открывается цепочкой без ссылок (и создаётся, если её нет)
+    except OSError as e:
+        raise ValueError(f"папка задач {base} — ссылка или не на своём месте ({e.strerror})") from e
     return os.path.join(base, tid + ".md")
 
 
@@ -318,10 +448,9 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", **
         raise ValueError(f"нет направления {direction}")
     tid = new_id(pantheon, direction)
     path = _file_for(pantheon, direction, tid)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     while True:
         try:
-            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            create_excl(path)
             break
         except FileExistsError:
             pre, num = tid.rsplit("-", 1)
@@ -333,7 +462,7 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", **
     head.update({k: v for k, v in fields.items() if v is not None})
     errs, _ = check_head(head)
     if errs:
-        os.remove(path)
+        remove(path)
         raise ValueError("; ".join(errs))
     write(path, head, f"\n# {title.strip()}\n\n## Журнал\n\n- {now_iso(t)[:16].replace('T', ' ')} — {actor}: создана\n")
     return tid, path
@@ -351,8 +480,11 @@ def dir_lock(d, wait=10.0):
     Без перехода по ссылке; ждём не дольше wait — роль, держащая блокировку, не подвесит тик."""
     import time as _time
     wait = float(os.environ.get("PANTHEON_LOCK_WAIT") or wait)
-    os.makedirs(d, exist_ok=True)
-    fd = os.open(os.path.join(d, ".lock"), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    with _in_dir(os.path.join(d, ".lock"), create=True) as (dfd, name):
+        if dfd is None:
+            os.makedirs(d, exist_ok=True)
+        fd = os.open(name if dfd is not None else os.path.join(d, ".lock"),
+                     os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o644, dir_fd=dfd)
     try:
         end = _time.monotonic() + wait
         while True:
@@ -404,8 +536,8 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck):
         head[k] = v
     if head.get("status") != "waiting":
         head["waiting_on"] = None
-        if head.get("status") != "doing":
-            head["question"], head["options"] = None, None
+    if head.get("status") in ("done", "dropped"):
+        head["question"], head["options"], head["requested"] = None, None, None
     head["updated"] = now_iso(t)
     errs, _ = check_head(head)
     if errs:
@@ -468,7 +600,9 @@ def attention(head, t, conflict=None):
     out, today = [], now_iso(t)[:10]
     if conflict:
         out.append("⚠ конфликт")
-    if head.get("question") and head.get("status") == "waiting" and head.get("waiting_on") == "human":
+    if head.get("risky") is True and head.get("requested"):
+        out.append("⚠ подтвердите словом")
+    elif head.get("question") and head.get("status") == "waiting" and head.get("waiting_on") == "human":
         out.append("❓ вопрос к вам")
     due = head.get("due")
     if due and head.get("status") not in ("done", "dropped"):
@@ -499,12 +633,19 @@ def render_card(head, body, src_rel, t, conflict=None):
     if conflict:
         parts.append(f"> [!warning] {conflict}")
     if head.get("question"):
-        parts.append("## ❓ Вопрос к вам\n\n" + head["question"].strip())
+        risky = head.get("risky") is True
+        parts.append("## ❓ Вопрос к вам" + (" · ⚠ рискованно" if risky else "") + "\n\n" + head["question"].strip())
         opts = head.get("options") or []
+        cur = head.get("requested") if risky else head.get("answer")
         if opts:
-            parts.append("Отметьте один вариант — агент получит ответ в течение минуты:\n\n" +
-                         "\n".join(f"- [ ] {o}" for o in opts))
-    if head.get("answer"):
+            hint = ("Отметьте вариант — это только ваш выбор: действие начнётся после подтверждения словом в окне Зевса."
+                    if risky else "Отметьте один вариант — агент получит ответ в течение минуты. Передумали — снимите "
+                                  "галочку и отметьте другой, пока задача не закрыта.")
+            parts.append(hint + "\n\n" + "\n".join(f"- [{'x' if o == cur else ' '}] {o}" for o in opts))
+        if risky and head.get("requested"):
+            parts.append(f"> [!warning] Вы выбрали «{head['requested']}». Подтвердите словом в окне Зевса: "
+                         f"«да, {head['requested']}» — без этого агент не начнёт.")
+    if head.get("answer") and not head.get("question"):
         parts.append(f"**Ваш ответ:** {head['answer']}")
     m = re.search(r"## Журнал\n(.*)$", body, re.S)
     if m:
@@ -553,7 +694,7 @@ views:
 """
 
 
-OWNER_ONLY_FIELDS = ("answer",)  # ставит только доска: ответ владельца
+OWNER_ONLY_FIELDS = ("answer", "requested")  # ставит только доска: ответ владельца и выбор по рискованному
 
 
 def owner_words(log_path, tid):
@@ -624,18 +765,17 @@ def card_url(vault, name):
 def inbox_items(pantheon):
     """Входящие направлений: свободные заявки directions/<имя>/inbox/*.md (разбирает координатор)."""
     out, d = {}, os.path.join(pantheon, "directions")
-    for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+    for name in list_dir(d):
         ib = os.path.join(d, name, "inbox")
-        if not DIRECTION_RE.fullmatch(name) or not real_dir(os.path.join(d, name), d) or not real_dir(ib, os.path.join(d, name)):
+        if not DIRECTION_RE.fullmatch(name):
             continue
-        for f in sorted(os.listdir(ib)):
+        for f in list_dir(ib):
             path = os.path.join(ib, f)
-            if not f.endswith(".md") or f.startswith(".") or not os.path.isfile(path) or os.path.islink(path):
+            if not f.endswith(".md") or f.startswith(".") or not is_file(ib, f):
                 continue
             try:
-                with open(path, encoding="utf-8") as fh:
-                    text = fh.read(20000)
-            except (OSError, UnicodeDecodeError):
+                text = read_text(path)[:20000]
+            except (OSError, UnicodeDecodeError, ValueError):
                 continue
             m = re.search(r"^# (.+)$", text, re.M)
             frm = re.search(r"^От: (.+)$", text, re.M)
@@ -667,24 +807,21 @@ def render_inbox_card(item, project, conflict=None):
 
 
 def _inbox_done(item, t, prefix="", check_only=False):
-    ib = os.path.dirname(item["path"])
-    done = os.path.join(ib, "done")
-    if not os.path.lexists(done):
-        os.mkdir(done)
-    if not real_dir(done, ib) or os.path.islink(item["path"]):
-        raise ValueError("inbox/done или файл заявки — ссылка; заявку не трогаю")
+    """Заявку — в inbox/done/ (папки открываются цепочкой без ссылок; check_only — только проверить путь)."""
+    done = os.path.join(os.path.dirname(item["path"]), "done")
+    try:
+        with _in_dir(os.path.join(done, ".probe"), create=True) as (fd, _):
+            if fd is None:
+                raise ValueError("заявка вне корня Пантеона")
+    except OSError as e:
+        raise ValueError(f"inbox/done — ссылка или не папка ({e.strerror}); заявку не трогаю") from e
     if check_only:
         return
     dst = os.path.join(done, prefix + item["file"])
-    if os.path.lexists(dst):
-        dst = os.path.join(done, f"{prefix}{int(t)}-{item['file']}")
-    os.replace(item["path"], dst)
-
-
-def _append_nofollow(path, text):
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
-    with os.fdopen(fd, "a", encoding="utf-8") as fh:
-        fh.write(text)
+    try:
+        move(item["path"], dst)
+    except FileExistsError:
+        move(item["path"], os.path.join(done, f"{prefix}{int(t)}-{item['file']}"))
 
 
 def _accept_inbox(want, it, cid, p, pantheon, t, projects, log_path, rel, done_lines, cards, inbox, moved_by_owner, st):
@@ -792,7 +929,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         if cid in inbox:  # заявка направлению
             it = inbox[cid]
             if note:
-                _append_nofollow(it["path"], f"\n\n- {now_iso(t)[:16].replace('T', ' ')} — владелец: {' '.join(note.split())[:1000]}\n")
+                append_text(it["path"], f"\n\n- {now_iso(t)[:16].replace('T', ' ')} — владелец: {' '.join(note.split())[:1000]}\n")
                 _owner_log(log_path, t, kind="note", id=cid, text=note.strip()[:1000], inbox=rel(it["path"]))
                 done_lines.append(f"{cid}: заметка владельца к заявке")
             try:
@@ -841,13 +978,22 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             task_set(pantheon, t, cid, {}, note=note.strip()[:1000], actor="владелец")
             _owner_log(log_path, t, kind="note", id=cid, text=note.strip()[:1000])
             done_lines.append(f"{cid}: заметка владельца передана")
-        if answer and answer != "?":
-            ch = {"answer": answer}
-            if src_head.get("status") == "waiting" and src_head.get("waiting_on") == "human":
-                ch["status"] = "todo"
-            task_set(pantheon, t, cid, ch, note=f"ответ: {answer}", actor="владелец")
-            _owner_log(log_path, t, kind="answer", id=cid, answer=answer)
-            done_lines.append(f"{cid}: ответ владельца «{answer}»")
+        risky = src_head.get("risky") is True
+        current = src_head.get("requested") if risky else src_head.get("answer")
+        if answer and answer != "?" and answer != current:
+            if risky:  # согласие на рискованное — только словом в окне Зевса; галочка — лишь выбор
+                task_set(pantheon, t, cid, {"requested": answer},
+                         note=f"выбрал «{answer}» — нужно подтверждение словом в окне Зевса", actor="владелец")
+                _owner_log(log_path, t, kind="request", id=cid, answer=answer)
+                done_lines.append(f"{cid}: выбор владельца «{answer}» по рискованному — ждёт подтверждения словом")
+            else:
+                ch = {"answer": answer}
+                if src_head.get("status") == "waiting" and src_head.get("waiting_on") == "human":
+                    ch["status"] = "todo"
+                task_set(pantheon, t, cid, ch, note=f"ответ: {answer}" + (f" (был «{current}»)" if current else ""),
+                         actor="владелец")
+                _owner_log(log_path, t, kind="answer", id=cid, answer=answer)
+                done_lines.append(f"{cid}: ответ владельца «{answer}»")
             moved_by_owner.add(cid)
         elif answer == "?":
             st["conflict_at"] = t
