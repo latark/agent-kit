@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""project-tools на временных папках: карта стеков, apply и его повтор, монорепозиторий, Next 15 и 16, отличие от
+карты и --update, «одобрять всё» → явный список, замена плагина, отказы владельца, Codex, битые файлы, подсказка.
+
+Запуск: python3 -I plugins/project-tools/tests/test_project_tools.py  (код выхода 0 — все прошли)
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+
+PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CLI = os.path.join(PLUGIN, "lib", "project_tools.py")
+MAP = json.load(open(os.path.join(PLUGIN, "stacks.json"), encoding="utf-8"))
+NEXT = MAP["tools"]["next-devtools"]["mcp"]
+CHROME = MAP["tools"]["chrome-devtools"]["mcp"]
+results = []
+
+
+def check(name, ok):
+    results.append(bool(ok))
+    print(("ok  " if ok else "FAIL") + " " + name)
+
+
+def make_home():
+    home = os.path.realpath(tempfile.mkdtemp(prefix="project-tools-test-"))
+    os.makedirs(os.path.join(home, ".claude"))
+    return home
+
+
+def env_for(home):
+    path = ":".join(p for p in os.environ["PATH"].split(":") if not os.path.exists(os.path.join(p, "codex")))
+    return {"PATH": path, "HOME": home, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+
+
+def project(home, name, files, git=True):
+    root = os.path.join(home, "projects", name)
+    for rel, content in files.items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(content if isinstance(content, str) else json.dumps(content, indent=2))
+    os.makedirs(root, exist_ok=True)
+    if git:
+        subprocess.run(["git", "init", "-q", root], check=True, env=env_for(home))
+    return root
+
+
+def run(home, *args, cwd=None, stdin=None):
+    return subprocess.run([sys.executable, "-I", CLI, *args], env=env_for(home), cwd=cwd or home,
+                          capture_output=True, text=True, input=stdin, timeout=60)
+
+
+def load(path):
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def pkg(**deps):
+    return {"name": "x", "dependencies": deps}
+
+
+home = make_home()
+
+# 1. Next 16: всё по карте, повтор ничего не меняет
+r16 = project(home, "app16", {"package.json": pkg(next="^16.2.2", react="19.2.4")})
+r = run(home, "check", "--dir", r16)
+check("Next 16: check видит next-devtools и chrome-devtools, код 3",
+      r.returncode == 3 and "next-devtools" in r.stdout and "chrome-devtools" in r.stdout and "Next.js 16" in r.stdout)
+check("check ничего не пишет", not os.path.exists(os.path.join(r16, ".mcp.json")))
+r = run(home, "apply", "--dir", r16)
+mcp = load(os.path.join(r16, ".mcp.json"))["mcpServers"]
+local = load(os.path.join(r16, ".claude", "settings.local.json"))
+check("apply: .mcp.json — записи из карты", r.returncode == 0 and mcp == {"chrome-devtools": CHROME, "next-devtools": NEXT})
+check("apply: оба сервера одобрены в settings.local.json",
+      local == {"enabledMcpjsonServers": ["chrome-devtools", "next-devtools"]})
+check("apply: settings.json не создан (плагинов не нужно)", not os.path.exists(os.path.join(r16, ".claude", "settings.json")))
+check("apply называет файлы для коммита без settings.local.json", "Для коммита: .mcp.json." in r.stdout)
+before = {f: open(os.path.join(r16, f)).read() for f in (".mcp.json", ".claude/settings.local.json")}
+r = run(home, "apply", "--dir", r16)
+check("повтор apply: менять нечего", "Менять нечего" in r.stdout and
+      all(open(os.path.join(r16, f)).read() == t for f, t in before.items()))
+check("повтор check: код 0", run(home, "check", "--dir", r16).returncode == 0)
+check("check из папки внутри проекта находит корень git", run(home, "check", cwd=os.path.join(r16, ".claude")).returncode == 0)
+
+# 2. Next 15: next-devtools не нужен (MCP Next.js — с 16)
+r15 = project(home, "app15", {"package.json": pkg(next="^15.5.0")})
+run(home, "apply", "--dir", r15)
+check("Next 15: только chrome-devtools", list(load(os.path.join(r15, ".mcp.json"))["mcpServers"]) == ["chrome-devtools"])
+
+# 3. Монорепозиторий: next и components.json в apps/web, node_modules не считается
+mono = project(home, "mono", {
+    "package.json": {"name": "root", "devDependencies": {"turbo": "2"}},
+    "apps/web/package.json": pkg(next="workspace:*"),
+    "apps/web/node_modules/next/package.json": {"name": "next", "version": "16.1.0"},
+    "apps/web/components.json": "{}",
+    "apps/web/node_modules/evil/package.json": pkg(**{"@supabase/supabase-js": "2"}),
+})
+run(home, "apply", "--dir", mono)
+servers = load(os.path.join(mono, ".mcp.json"))["mcpServers"]
+check("монорепозиторий: next (версия из node_modules), shadcn по components.json",
+      set(servers) == {"next-devtools", "chrome-devtools", "shadcn"})
+check("монорепозиторий: package.json внутри node_modules не читается",
+      not os.path.exists(os.path.join(mono, ".claude", "settings.json")))
+
+# 4. Готовая запись не как в карте: не трогает, --update заменяет
+diff = project(home, "diff", {"package.json": pkg(next="16.2.6"),
+                              ".mcp.json": {"mcpServers": {"chrome-devtools": {"command": "npx", "args": ["chrome-devtools-mcp@latest"]}}}})
+r = run(home, "apply", "--dir", diff)
+mcp = load(os.path.join(diff, ".mcp.json"))["mcpServers"]
+check("отличие от карты: запись не тронута, заметка с --update",
+      mcp["chrome-devtools"]["args"] == ["chrome-devtools-mcp@latest"] and "--update chrome-devtools" in r.stdout)
+r = run(home, "apply", "--dir", diff, "--update", "chrome-devtools")
+check("--update chrome-devtools: запись по карте", load(os.path.join(diff, ".mcp.json"))["mcpServers"]["chrome-devtools"] == CHROME)
+check("--update неизвестного имени: код 2", run(home, "apply", "--dir", diff, "--update", "nope").returncode == 2)
+same = project(home, "same", {"components.json": "{}", ".mcp.json": {"mcpServers": {"shadcn": {
+    "type": "stdio", "command": "npx", "args": [a for a in MAP["tools"]["shadcn"]["mcp"]["args"] if a != "-y"]}}}})
+r = run(home, "check", "--dir", same)
+check("без «-y» и с type: stdio — та же запись: не отличие, только одобрение",
+      "не как в карте" not in r.stdout and "одобрены shadcn" in r.stdout)
+
+# 5. «Одобрять всё» → явный список; одобрения несуществующих серверов сняты
+allp = project(home, "allp", {
+    "package.json": pkg(next="16.0.0", **{"@supabase/supabase-js": "^2"}),
+    ".mcp.json": {"mcpServers": {"grafana": {"command": "bash", "args": ["./g.sh"]}}},
+    ".claude/settings.local.json": {"enableAllProjectMcpServers": True, "enabledMcpjsonServers": ["supabase"],
+                                    "permissions": {"allow": ["Bash(ls)"]}},
+    ".claude/settings.json": {"enabledPlugins": {"chrome-devtools-mcp@claude-plugins-official": True}, "model": "opus"},
+})
+r = run(home, "apply", "--dir", allp)
+local = load(os.path.join(allp, ".claude", "settings.local.json"))
+shared = load(os.path.join(allp, ".claude", "settings.json"))
+check("enableAllProjectMcpServers снят, явный список с grafana", "enableAllProjectMcpServers" not in local and
+      local["enabledMcpjsonServers"] == ["chrome-devtools", "grafana", "next-devtools"])
+check("одобрение supabase (нет в .mcp.json) снято, чужие ключи целы",
+      "supabase" not in local["enabledMcpjsonServers"] and local["permissions"] == {"allow": ["Bash(ls)"]})
+check("плагин chrome-devtools-mcp выключен, Supabase включён, model цел",
+      shared["enabledPlugins"] == {"chrome-devtools-mcp@claude-plugins-official": False,
+                                   "supabase@claude-plugins-official": True} and shared["model"] == "opus")
+check("заметка: плагин Supabase не установлен", "claude plugin install supabase@claude-plugins-official" in r.stdout)
+
+# 6. Отказы владельца уважаются
+rej = project(home, "rej", {"package.json": pkg(next="16.0.0"),
+                            ".claude/settings.local.json": {"disabledMcpjsonServers": ["next-devtools"]}})
+r = run(home, "apply", "--dir", rej)
+check("disabledMcpjsonServers: next-devtools не добавлен",
+      list(load(os.path.join(rej, ".mcp.json"))["mcpServers"]) == ["chrome-devtools"] and "отклонён вами" in r.stdout)
+glob = project(home, "glob", {"package.json": pkg(next="16.0.0")})
+with open(os.path.join(home, ".claude.json"), "w") as fh:
+    json.dump({"mcpServers": {"next-devtools": NEXT},
+               "projects": {glob: {"disabledMcpServers": ["chrome-devtools"]}}}, fh)
+r = run(home, "apply", "--dir", glob)
+check("сервер в ~/.claude.json и выключенный в /mcp не добавляются",
+      not os.path.exists(os.path.join(glob, ".mcp.json")) and "claude mcp remove next-devtools -s user" in r.stdout
+      and "выключен вами в /mcp" in r.stdout)
+os.remove(os.path.join(home, ".claude.json"))
+
+# 7. Codex: свой блок, чужая запись не дублируется, повтор ничего не меняет
+cdx = project(home, "cdx", {"package.json": pkg(next="16.0.0"),
+                            ".codex/config.toml": 'model = "gpt-5"\n\n[mcp_servers.next-devtools]\ncommand = "node"\nargs = ["x.js"]\n'})
+r = run(home, "apply", "--dir", cdx)
+text = open(os.path.join(cdx, ".codex", "config.toml")).read()
+conf = tomllib.loads(text)
+check("Codex: блок с chrome-devtools, своя запись next-devtools цела, TOML читается",
+      conf["mcp_servers"]["chrome-devtools"] == CHROME and conf["mcp_servers"]["next-devtools"]["command"] == "node"
+      and conf["model"] == "gpt-5" and text.count("[mcp_servers.next-devtools]") == 1)
+check("Codex: повтор не меняет файл", run(home, "apply", "--dir", cdx).returncode == 0 and
+      open(os.path.join(cdx, ".codex", "config.toml")).read() == text)
+cdx2 = project(home, "cdx2", {"package.json": pkg(next="16.0.0"), ".codex/.keep": ""})
+run(home, "apply", "--dir", cdx2)
+conf2 = tomllib.loads(open(os.path.join(cdx2, ".codex", "config.toml")).read())
+check("Codex: next-devtools с env из карты", conf2["mcp_servers"]["next-devtools"] == NEXT and NEXT.get("env"))
+check("без Codex и папки .codex блок не пишется", not os.path.exists(os.path.join(r16, ".codex")))
+
+# 8. Битые и чужие места: ничего не пишется
+bad = project(home, "bad", {"package.json": pkg(next="16.0.0"), ".mcp.json": "{ не json"})
+r = run(home, "apply", "--dir", bad)
+check("битый .mcp.json: код 2, ничего не записано",
+      r.returncode == 2 and not os.path.exists(os.path.join(bad, ".claude")) and "Ничего не записано" in r.stderr)
+lnk = project(home, "lnk", {"package.json": pkg(next="16.0.0")})
+os.symlink(os.path.join(home, ".claude"), os.path.join(lnk, ".claude"))
+check(".claude — ссылка: код 2", run(home, "apply", "--dir", lnk).returncode == 2)
+check("домашняя папка — не проект: код 2", run(home, "apply", "--dir", home).returncode == 2)
+
+# 9. Подсказка SessionStart
+def hint(cwd, extra=None):
+    event = {"hook_event_name": "SessionStart", "source": "startup", "cwd": cwd, **(extra or {})}
+    return run(home, "hint", stdin=json.dumps(event))
+
+
+fresh = project(home, "fresh", {"package.json": pkg(next="16.0.0", **{"@supabase/supabase-js": "2"})})
+r = hint(fresh)
+ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"] if r.stdout.strip() else ""
+check("подсказка: одна строка с недостающими инструментами",
+      r.returncode == 0 and "next-devtools" in ctx and "supabase" in ctx and "\n" not in ctx)
+check("подсказка ничего не пишет", not os.path.exists(os.path.join(fresh, ".mcp.json")))
+check("подсказка молчит, когда всё по карте", hint(r16).stdout == "")
+check("подсказка молчит в домашней папке", hint(home).stdout == "")
+loose = project(home, "loose", {"notes.md": "x"}, git=False)
+check("подсказка молчит в папке без git и package.json", hint(loose).stdout == "")
+r = run(home, "hint", stdin="мусор")
+check("подсказка: мусор на входе — молча, код 0, запись в журнал", r.returncode == 0 and r.stdout == "" and
+      os.path.exists(os.path.join(home, ".local", "state", "pantheon", "logs", "project-tools.log")))
+check("подсказка: битый .mcp.json — молча, код 0", hint(bad).returncode == 0 and hint(bad).stdout == "")
+
+# 9a. Стиль файла сохраняется: ручные массивы в строку остаются, файлы Claude Code — как JSON.stringify(…, 2)
+hand = project(home, "hand", {"package.json": pkg(next="16.0.0"),
+                              ".mcp.json": '{\n  "mcpServers": {\n    "g": {\n      "command": "bash",\n      "args": ["./g.sh"]\n    }\n  }\n}\n'})
+run(home, "apply", "--dir", hand)
+text = open(os.path.join(hand, ".mcp.json")).read()
+check("ручной .mcp.json: старые строки целы, новые массивы тоже в строку",
+      text.startswith('{\n  "mcpServers": {\n    "g": {\n      "command": "bash",\n      "args": ["./g.sh"]\n    },')
+      and '"args": ["-y", "next-devtools-mcp@' in text and json.load(open(os.path.join(hand, ".mcp.json"))))
+sys.path.insert(0, os.path.join(PLUGIN, "lib"))
+import project_tools  # noqa: E402
+sample = {"permissions": {"allow": ["Bash(ls)", "Read"], "deny": []}, "hooks": {"Stop": [{"hooks": [{"x": 1}]}]},
+          "enabledPlugins": {"a@b": True}, "empty": {}, "n": None, "s": "ё"}
+check("стиль Claude Code совпадает с json.dumps(indent=2)",
+      project_tools.dumps(sample, False) == json.dumps(sample, indent=2, ensure_ascii=False))
+
+# 10. Карта: у каждого инструмента сервер или плагин, стеки ссылаются на существующие инструменты
+check("карта: стеки ссылаются на инструменты из tools",
+      all(t in MAP["tools"] for st in MAP["stacks"] for t in st["tools"]))
+check("карта: у stdio-серверов закреплены версии", all(
+    any(a.startswith(t["npm"] + "@") and a.split("@", 1)[1][:1].isdigit() for a in t["mcp"]["args"])
+    for t in MAP["tools"].values() if "mcp" in t))
+
+shutil.rmtree(home)
+print(f"\n{sum(results)}/{len(results)}")
+sys.exit(0 if all(results) else 1)

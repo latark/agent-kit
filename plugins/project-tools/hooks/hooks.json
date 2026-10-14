@@ -1,0 +1,13 @@
+{
+  "description": "Подсказка при старте сессии: в проекте есть стек из карты, а его инструмента нет. Сама ничего не меняет.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/project-tools\" hint", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

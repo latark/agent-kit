@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "about": "Карта стеков project-tools (TOOL-07): признак в проекте → какие MCP-серверы и плагины подключить. Правит metis-pantheon; новый инструмент — запись в tools и строка в stacks. Версии закреплены: свежие показывает `project-tools outdated`.",
+  "tools": {
+    "next-devtools": {
+      "about": "ошибки сборки и рантайма, логи, маршруты и server actions живого dev-сервера Next.js 16+",
+      "npm": "next-devtools-mcp",
+      "mcp": { "command": "npx", "args": ["-y", "next-devtools-mcp@0.4.0"], "env": { "NEXT_TELEMETRY_DISABLED": "1" } }
+    },
+    "chrome-devtools": {
+      "about": "проверка страниц в отдельном Chrome без окна: консоль, сеть, скриншоты, производительность; у каждой сессии свой временный профиль",
+      "npm": "chrome-devtools-mcp",
+      "mcp": { "command": "npx", "args": ["-y", "chrome-devtools-mcp@1.10.1", "--isolated", "--headless"] },
+      "replaces_plugins": ["chrome-devtools-mcp@claude-plugins-official"]
+    },
+    "shadcn": {
+      "about": "поиск и установка компонентов shadcn/ui из реестра",
+      "npm": "shadcn",
+      "mcp": { "command": "npx", "args": ["-y", "shadcn@4.8.2", "mcp"] }
+    },
+    "supabase": {
+      "about": "MCP Supabase (удалённый, вход через OAuth): таблицы, миграции, советы безопасности",
+      "plugin": "supabase@claude-plugins-official"
+    }
+  },
+  "stacks": [
+    {
+      "name": "Next.js",
+      "dependency": "next",
+      "tools": { "chrome-devtools": {}, "next-devtools": { "min_major": 16 } }
+    },
+    {
+      "name": "shadcn/ui",
+      "file": "components.json",
+      "tools": { "shadcn": {} }
+    },
+    {
+      "name": "Supabase",
+      "dependency": "@supabase/supabase-js",
+      "tools": { "supabase": {} }
+    }
+  ]
+}

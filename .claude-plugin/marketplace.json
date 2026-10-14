@@ -14,6 +14,11 @@
       "name": "pantheon",
       "source": "./plugins/pantheon",
       "description": "Механика Пантеона: планировщик pantheon-tick, команда pantheon, копия для Obsidian, коммит ~/ai/pantheon."
+    },
+    {
+      "name": "project-tools",
+      "source": "./plugins/project-tools",
+      "description": "Инструменты проекта по карте стеков: MCP-серверы и плагины — в проект, а не во все сессии; команда project-tools, навык и подсказка при старте."
     }
   ]
 }

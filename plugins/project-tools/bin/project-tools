@@ -1,0 +1,4 @@
+#!/bin/sh
+# Команда project-tools — инструменты проекта по карте стеков. Код — ../lib/project_tools.py.
+here=$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")" && pwd)
+exec python3 -I "$here/../lib/project_tools.py" "$@"
