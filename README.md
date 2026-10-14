@@ -23,7 +23,9 @@
   в фоне — строка только для ввода, который Claude Code сам пометил в транскрипте как ваш), `stop` (подсказка
   «пора очистить» на 150 тыс. и далее каждые +100 тыс.), `start` (после сжатия — файл состояния, штабу — новые
   тревоги и сводка журналов), `rewake` (после `/clear` будит Claude, если файл состояния обновлён после вашего
-  последнего сообщения). Состояние — `~/.local/state/pantheon/ctx/` и `…/owner-log/`; выключатель — `PANTHEON_CTX_OFF=1`.
+  последнего сообщения). Состояние — `~/.local/state/pantheon/ctx/` и `…/owner-log/` (ввод без пометки транскрипта —
+  в `…/owner-log/unconfirmed/`, это не ваши слова); выключатель хуков контекста — `PANTHEON_CTX_OFF=1`. Хуки запускают
+  `python3` из PATH (3.9+): на чистом Mac нужны Command Line Tools (`xcode-select --install`), иначе это заглушка.
 - `plugins/pantheon/scripts/git-crypt-merge.sh` — слияние файлов под git-crypt как текста (для `~/ai/pantheon` и `me/`).
 - `plugins/pantheon/scripts/decision-map-check.py` — сверка карты решений с `revisits.toml`.
 - `plugins/pantheon/scripts/baseline.py` — замер «как сейчас» по git и транскриптам (ORD-06); правила подсчёта — в шапке.
