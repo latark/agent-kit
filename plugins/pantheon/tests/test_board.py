@@ -213,6 +213,36 @@ def main():
     check("заявка → «Очередь»: задача направления с текстом заявки, файл в inbox/done", done_dir == ["2026-10-14-guard-rule.md"]
           and len(made) == 1 and "Сделать запрет импорта" in open(os.path.join(home, "directions", "metis-pantheon", "tasks", made[0]), encoding="utf-8").read())
 
+    # ссылки вместо папок: тик их не принимает и ничего не переносит
+    ib2 = os.path.join(home, "directions", "athena-broker", "inbox")
+    os.makedirs(ib2, exist_ok=True)
+    open(os.path.join(ib2, "заявка.md"), "w", encoding="utf-8").write("# Заявка со ссылкой\n\nтекст\n")
+    trap = os.path.join(tmp, "trap")
+    os.makedirs(trap)
+    os.symlink(trap, os.path.join(ib2, "done"))
+    run(env, "board", t=T0 + 720)
+    sc = card(view, "Заявка со ссылкой")
+    set_card(sc, "Статус", "Очередь")
+    n_before = len(os.listdir(os.path.join(home, "directions", "athena-broker", "tasks")))
+    run(env, "board", t=T0 + 730)
+    _, sct = head_of(sc)
+    check("ссылка вместо inbox/done: задача не создана, заявка на месте, ничего не перенесено",
+          not os.listdir(trap) and os.path.exists(os.path.join(ib2, "заявка.md")) and "ссылка" in sct
+          and len(os.listdir(os.path.join(home, "directions", "athena-broker", "tasks"))) == n_before)
+    os.remove(os.path.join(ib2, "done"))
+    os.makedirs(os.path.join(home, "directions", "evil"))
+    os.symlink(os.path.join(home, "directions", "metis-pantheon", "tasks"), os.path.join(home, "directions", "evil", "tasks"))
+    r = run(env, "task", "new", "--direction", "evil", "--title", "через ссылку")
+    check("папка задач — ссылка: задача не создаётся", r.returncode == 1 and "ссылка" in r.stderr)
+    # чужая роль держит блокировку: правка ждёт недолго и отказывает, тик не виснет
+    import fcntl as _f
+    lk = os.open(os.path.join(home, "directions", "athena-broker", "tasks", ".lock"), os.O_WRONLY | os.O_CREAT)
+    _f.flock(lk, _f.LOCK_EX)
+    r = run(dict(env, PANTHEON_LOCK_WAIT="0.5"), "task", "set", "athena-0001", "next=x")
+    _f.flock(lk, _f.LOCK_UN)
+    os.close(lk)
+    check("занятая блокировка: отказ за полсекунды, а не вечное ожидание", r.returncode == 1 and "занята" in r.stderr)
+
     # умные уведомления: новый вопрос от агента — одно уведомление с карточкой; ночью — тишина
     open(nlog, "w").close()
     run(env, "task", "new", "--direction", "athena-broker", "--title", "Выбрать тариф", "--status", "waiting",

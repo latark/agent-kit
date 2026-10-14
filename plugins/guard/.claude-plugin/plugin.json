@@ -1,6 +1,6 @@
 {
   "name": "guard",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Правила, которые Claude Code проверяет сам, а не на память модели: dev-server, attribution, cdp, tg-secret, nextjs, domain, pantheon-acl.",
   "author": { "name": "latark" }
 }

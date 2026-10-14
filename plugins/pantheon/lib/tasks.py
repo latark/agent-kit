@@ -238,18 +238,25 @@ def check_file(path):
 
 # --- где лежат задачи -----------------------------------------------------------
 
+def real_dir(path, expected_parent):
+    """Папка существует, это не ссылка и лежит ровно там, где должна (никаких ссылок по пути)."""
+    return (os.path.isdir(path) and not os.path.islink(path)
+            and os.path.realpath(path) == os.path.join(os.path.realpath(expected_parent), os.path.basename(path)))
+
+
 def task_dirs(pantheon):
     out = [os.path.join(pantheon, "inbox", "tasks")]
     d = os.path.join(pantheon, "directions")
-    if os.path.isdir(d):
-        out += [os.path.join(d, x, "tasks") for x in sorted(os.listdir(d)) if not x.startswith(".")]
-    return [x for x in out if os.path.isdir(x)]
+    if real_dir(d, pantheon):
+        out += [os.path.join(d, x, "tasks") for x in sorted(os.listdir(d))
+                if DIRECTION_RE.fullmatch(x) and real_dir(os.path.join(d, x), d)]
+    return [x for x in out if real_dir(x, os.path.dirname(x))]
 
 
 def task_files(pantheon):
     for d in task_dirs(pantheon):
         for f in sorted(os.listdir(d)):
-            if f.endswith(".md") and not f.startswith("."):
+            if f.endswith(".md") and not f.startswith(".") and not os.path.islink(os.path.join(d, f)):
                 yield os.path.join(d, f)
 
 
@@ -298,9 +305,9 @@ def _file_for(pantheon, direction, tid):
         raise ValueError(f"направление или id не по образцу: {direction!r}, {tid!r}")
     base = os.path.join(pantheon, "inbox", "tasks") if direction == "inbox" else \
         os.path.join(pantheon, "directions", direction, "tasks")
-    real = os.path.realpath(os.path.join(base, tid + ".md"))
-    if not real.startswith(os.path.realpath(pantheon) + os.sep):
-        raise ValueError(f"путь задачи вне {pantheon}")
+    os.makedirs(base, exist_ok=True)
+    if not (real_dir(base, os.path.dirname(base)) and real_dir(os.path.dirname(base), os.path.dirname(os.path.dirname(base)))):
+        raise ValueError(f"папка задач {base} — ссылка или не на своём месте")
     return os.path.join(base, tid + ".md")
 
 
@@ -339,16 +346,29 @@ def append_log(body, line):
 
 
 @contextlib.contextmanager
-def dir_lock(d):
-    """Блокировка папки задач (файл .lock в ней же: роли в песочнице пишут только в папку своего направления)."""
+def dir_lock(d, wait=10.0):
+    """Блокировка папки задач (файл .lock в ней же: роли в песочнице пишут только в папку своего направления).
+    Без перехода по ссылке; ждём не дольше wait — роль, держащая блокировку, не подвесит тик."""
+    import time as _time
+    wait = float(os.environ.get("PANTHEON_LOCK_WAIT") or wait)
     os.makedirs(d, exist_ok=True)
-    fh = open(os.path.join(d, ".lock"), "a")
+    fd = os.open(os.path.join(d, ".lock"), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o644)
     try:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        end = _time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if _time.monotonic() > end:
+                    raise ValueError("папка задач занята другой правкой — повторите позже")
+                _time.sleep(0.05)
         yield
     finally:
-        fcntl.flock(fh, fcntl.LOCK_UN)
-        fh.close()
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None):
@@ -568,13 +588,17 @@ def _live(head, t):
     return (head.get("updated") or "") >= now_iso(t - 7 * 86400)
 
 
+def _plain(text):
+    return re.sub(r"[\[\]|<>`]", "·", str(text or ""))
+
+
 def _summary(tasks, t, inbox=None):
     today = now_iso(t)[:10]
     rows = {"wait": [], "overdue": [], "doing": [], "done": [],
-            "inbox": [f"[[Доска/{card_name({'title': it['title']})}|{it['title']}]] · {it['direction']}"
+            "inbox": [f"[[Доска/{card_name({'title': it['title']})}|{_plain(it['title'])}]] · {it['direction']}"
                       for it in (inbox or {}).values()]}
     for tid, (p, h, _) in sorted(tasks.items()):
-        name = f"[[Доска/{card_name(h)}|{h.get('title')}]] · {h.get('project')}"
+        name = f"[[Доска/{card_name(h)}|{_plain(h.get('title'))}]] · {_plain(h.get('project'))}"
         if h.get("status") == "waiting" and h.get("waiting_on") == "human":
             rows["wait"].append(name)
         if h.get("due") and h["due"] < today and h.get("status") not in ("done", "dropped"):
@@ -602,7 +626,7 @@ def inbox_items(pantheon):
     out, d = {}, os.path.join(pantheon, "directions")
     for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
         ib = os.path.join(d, name, "inbox")
-        if not DIRECTION_RE.fullmatch(name) or not os.path.isdir(ib):
+        if not DIRECTION_RE.fullmatch(name) or not real_dir(os.path.join(d, name), d) or not real_dir(ib, os.path.join(d, name)):
             continue
         for f in sorted(os.listdir(ib)):
             path = os.path.join(ib, f)
@@ -642,10 +666,55 @@ def render_inbox_card(item, project, conflict=None):
     return card, "\n" + "\n\n".join(parts) + "\n"
 
 
-def _inbox_done(item, t, prefix=""):
-    done = os.path.join(os.path.dirname(item["path"]), "done")
-    os.makedirs(done, exist_ok=True)
-    os.replace(item["path"], os.path.join(done, prefix + item["file"]))
+def _inbox_done(item, t, prefix="", check_only=False):
+    ib = os.path.dirname(item["path"])
+    done = os.path.join(ib, "done")
+    if not os.path.lexists(done):
+        os.mkdir(done)
+    if not real_dir(done, ib) or os.path.islink(item["path"]):
+        raise ValueError("inbox/done или файл заявки — ссылка; заявку не трогаю")
+    if check_only:
+        return
+    dst = os.path.join(done, prefix + item["file"])
+    if os.path.lexists(dst):
+        dst = os.path.join(done, f"{prefix}{int(t)}-{item['file']}")
+    os.replace(item["path"], dst)
+
+
+def _append_nofollow(path, text):
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def _accept_inbox(want, it, cid, p, pantheon, t, projects, log_path, rel, done_lines, cards, inbox, moved_by_owner, st):
+    """Ход владельца по заявке направлению: в «Очередь»/«В работе» — задача, в «Отменено» — архив."""
+    if want in ("Очередь", "В работе"):
+        _inbox_done(it, t, check_only=True)  # сначала — можно ли убрать заявку, потом — задача
+        body_text = re.sub(r"^# .+\n", "", it["text"], count=1, flags=re.M).strip()
+        tid, tp = task_new(pantheon, t, it["direction"], it["title"], project=projects.get(it["direction"]),
+                           owner=it["direction"], status="todo" if want == "Очередь" else "doing",
+                           next="разобрать заявку" if want == "В работе" else None, actor="владелец")
+        th, tb = read(tp)
+        tb = tb.replace("\n## Журнал", f"\n{body_text}\n\n## Журнал", 1)
+        write(tp, th, append_log(tb, f"{now_iso(t)[:16].replace('T', ' ')} — владелец: заявка из входящих → «{want}»"))
+        _inbox_done(it, t)
+        _owner_log(log_path, t, kind="inbox-accept", id=cid, task=tid, dst=want, inbox=rel(it["path"]))
+        done_lines.append(f"{cid}: заявка стала задачей {tid} («{want}»)")
+        os.remove(p)
+        cards.pop(cid, None)
+        inbox.pop(cid)
+        moved_by_owner.add(tid)
+    elif want == "Отменено":
+        _inbox_done(it, t, "отклонено-")
+        _owner_log(log_path, t, kind="inbox-drop", id=cid, inbox=rel(it["path"]))
+        done_lines.append(f"{cid}: заявка в архив входящих")
+        os.remove(p)
+        cards.pop(cid, None)
+        inbox.pop(cid)
+    elif want != "Входящие":
+        st["conflict_at"] = t
+        st["conflict"] = "заявку можно перенести в «Очередь», «В работе» или «Отменено»"
 
 
 def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None, primary=True, projects=None):
@@ -723,35 +792,14 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         if cid in inbox:  # заявка направлению
             it = inbox[cid]
             if note:
-                with open(it["path"], "a", encoding="utf-8") as fh:
-                    fh.write(f"\n\n- {now_iso(t)[:16].replace('T', ' ')} — владелец: {' '.join(note.split())[:1000]}\n")
+                _append_nofollow(it["path"], f"\n\n- {now_iso(t)[:16].replace('T', ' ')} — владелец: {' '.join(note.split())[:1000]}\n")
                 _owner_log(log_path, t, kind="note", id=cid, text=note.strip()[:1000], inbox=rel(it["path"]))
                 done_lines.append(f"{cid}: заметка владельца к заявке")
-            if want in ("Очередь", "В работе"):
-                body_text = re.sub(r"^# .+\n", "", it["text"], count=1, flags=re.M).strip()
-                tid, tp = task_new(pantheon, t, it["direction"], it["title"], project=projects.get(it["direction"]),
-                                   owner=it["direction"], status="todo" if want == "Очередь" else "doing",
-                                   next="разобрать заявку" if want == "В работе" else None, actor="владелец")
-                th, tb = read(tp)
-                tb = tb.replace("\n## Журнал", f"\n{body_text}\n\n## Журнал", 1)
-                write(tp, th, append_log(tb, f"{now_iso(t)[:16].replace('T', ' ')} — владелец: заявка из входящих → «{want}»"))
-                _inbox_done(it, t)
-                _owner_log(log_path, t, kind="inbox-accept", id=cid, task=tid, dst=want, inbox=rel(it["path"]))
-                done_lines.append(f"{cid}: заявка стала задачей {tid} («{want}»)")
-                os.remove(p)
-                cards.pop(cid, None)
-                inbox.pop(cid)
-                moved_by_owner.add(tid)
-            elif want == "Отменено":
-                _inbox_done(it, t, "отклонено-")
-                _owner_log(log_path, t, kind="inbox-drop", id=cid, inbox=rel(it["path"]))
-                done_lines.append(f"{cid}: заявка в архив входящих")
-                os.remove(p)
-                cards.pop(cid, None)
-                inbox.pop(cid)
-            elif want != "Входящие":
+            try:
+                _accept_inbox(want, it, cid, p, pantheon, t, projects, log_path, rel, done_lines, cards, inbox, moved_by_owner, st)
+            except (ValueError, OSError) as e:
                 st["conflict_at"] = t
-                st["conflict"] = "заявку можно перенести в «Очередь», «В работе» или «Отменено»"
+                st["conflict"] = f"заявку не перенести: {e}"
             continue
         if cid not in tasks:
             continue
