@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from collections import deque
@@ -276,8 +277,7 @@ def make_plan(root, is_git, update=(), tolerant=False):
     unknown = [u for u in update if u not in cmap["tools"]]
     if unknown:
         raise Broken(f"нет в карте: {', '.join(unknown)}")
-    if os.path.islink(p.path(".claude")):
-        raise Broken(f"{short(p.path('.claude'))} — символическая ссылка: настройки проекта не пишу")
+    check_no_links(root)
 
     mcp_doc = read_json(p.path(".mcp.json"))
     servers = mcp_doc.get("mcpServers") if isinstance(mcp_doc.get("mcpServers"), dict) else {}
@@ -438,14 +438,41 @@ def _tracked(root, rel):
         return False
 
 
+# Всё, что команда читает и пишет в проекте. Ссылка среди них — отказ: .mcp.json → ~/.claude.json дал бы прочитать
+# ваш файл с ключами и записать его содержимое в проект (оттуда — в коммит), а ссылка-папка увела бы запись наружу.
+OWN_PATHS = (".mcp.json", ".claude", ".claude/settings.json", ".claude/settings.local.json", ".codex",
+             ".codex/config.toml")
+
+
+def check_no_links(root):
+    for rel in OWN_PATHS:
+        path = os.path.join(root, rel)
+        if os.path.islink(path):
+            raise Broken(f"{short(path)} — символическая ссылка: настройки проекта не читаю и не пишу")
+        if os.path.lexists(path) and not os.path.realpath(path).startswith(root + os.sep):
+            raise Broken(f"{short(path)} ведёт за пределы проекта")
+
+
 def write_atomic(path, text):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.project-tools-{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    if os.path.exists(path) and not os.path.islink(path):
-        os.chmod(tmp, os.stat(path).st_mode & 0o777)
-    os.replace(tmp, path)
+    """Запись через временный файл рядом: mkstemp создаёт его заново (O_EXCL), чужая ссылка с тем же именем не
+    сработает; os.replace меняет запись в папке, не идя по ссылке."""
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    if os.path.islink(path) or os.path.islink(folder):
+        raise Broken(f"{short(path)} — символическая ссылка: не пишу")
+    fd, tmp = tempfile.mkstemp(dir=folder, prefix=".project-tools-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        if os.path.exists(path):
+            os.chmod(tmp, os.stat(path).st_mode & 0o777)
+        else:
+            os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 def report(p, applied):

@@ -183,6 +183,25 @@ check("битый .mcp.json: код 2, ничего не записано",
 lnk = project(home, "lnk", {"package.json": pkg(next="16.0.0")})
 os.symlink(os.path.join(home, ".claude"), os.path.join(lnk, ".claude"))
 check(".claude — ссылка: код 2", run(home, "apply", "--dir", lnk).returncode == 2)
+secret = os.path.join(home, "secret.json")
+with open(secret, "w") as fh:
+    json.dump({"oauthAccount": {"token": "СЕКРЕТ"}}, fh)
+for rel in (".mcp.json", ".claude/settings.local.json", ".codex/config.toml"):
+    victim = project(home, "victim-" + rel.replace("/", "-"), {"package.json": pkg(next="16.0.0"), ".codex/.keep": ""})
+    os.makedirs(os.path.dirname(os.path.join(victim, rel)), exist_ok=True)
+    os.symlink(secret, os.path.join(victim, rel))
+    r = run(home, "apply", "--dir", victim)
+    leaked = any("СЕКРЕТ" in open(os.path.join(dp, f), errors="ignore").read()
+                 for dp, _, fs in os.walk(victim) for f in fs if not os.path.islink(os.path.join(dp, f)))
+    check(f"{rel} — ссылка на чужой файл: код 2, содержимое в проект не попало, ссылка цела",
+          r.returncode == 2 and not leaked and os.path.islink(os.path.join(victim, rel)))
+out = project(home, "outdir", {"package.json": pkg(next="16.0.0")})
+os.symlink(os.path.join(home, "elsewhere"), os.path.join(out, ".codex"))
+os.makedirs(os.path.join(home, "elsewhere"))
+check(".codex — ссылка на папку снаружи: код 2, снаружи ничего не записано",
+      run(home, "apply", "--dir", out).returncode == 2 and os.listdir(os.path.join(home, "elsewhere")) == [])
+check("временных файлов project-tools не осталось", not any(
+    f.startswith(".project-tools-") for dp, _, fs in os.walk(os.path.join(home, "projects")) for f in fs))
 check("домашняя папка — не проект: код 2", run(home, "apply", "--dir", home).returncode == 2)
 
 # 9. Подсказка SessionStart
