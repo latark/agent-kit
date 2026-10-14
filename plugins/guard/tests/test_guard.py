@@ -47,7 +47,7 @@ def setup(home):
         'mnemo-brain = ["~/ai/knowledge"]\n[agent_extra]\nprometheus = ["~/ai/knowledge"]\n')
 
 
-def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None):
+def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None, raw=False):
     event = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input,
              "cwd": os.path.join(home, cwd if cwd is not None else pdir)}
     if role:
@@ -58,6 +58,8 @@ def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None):
            "TMPDIR": "/nonexistent-tmp"}
     out = subprocess.run([python or sys.executable, "-I", GUARD], input=json.dumps(event), capture_output=True,
                          text=True, env=env, timeout=10).stdout
+    if raw:
+        return out
     return "deny" if '"deny"' in out else "allow"
 
 
@@ -394,6 +396,12 @@ def main():
     failed += not ok
     cases.append(None)
     print(f"{'ok  ' if ok else 'FAIL'} управляемые настройки: хук плагина молчит только при guard --managed: {results}")
+    # hq задевает только ключ git-crypt (grep -r по ~/ai/pantheon): текст про ключ, а не «личное только hq…»
+    out = run(home, "ai/pantheon", "hq", "Bash", {"command": "grep -rln слово ."}, raw=True)
+    ok = '"deny"' in out and "ключ git-crypt" in out and "--exclude-dir=.git" in out and "только hq" not in out
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} private: отказ hq по ключу git-crypt — понятный текст")
     print(f"\n{len(cases) - failed} из {len(cases)} прошли")
     sys.exit(1 if failed else 0)
 

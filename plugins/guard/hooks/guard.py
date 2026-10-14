@@ -2331,6 +2331,9 @@ def check_private(event, tool, tool_input):
         priv = [p for p in priv if "/.git/git-crypt" in p + "/"]
         if not priv:
             return None
+        keys_only = True
+    else:
+        keys_only = False
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     hits = []
     if tool == "Bash":
@@ -2357,6 +2360,10 @@ def check_private(event, tool, tool_input):
                 hits.append(p)
     if not hits:
         return None
+    if keys_only:
+        # личное этой роли открыто — задет только ключ: иначе текст «только hq, chiron…» сбивает с толку саму hq
+        return (f"Правило private: ключ git-crypt ({hits[0].replace(HOME, '~')}) роли «{role}» закрыт — коммитит не "
+                "она. Поиск по всей папке задевает .git: сузь путь или добавь --exclude-dir=.git.")
     return (f"Правило private: роль «{role or 'субагент'}»{' (субагент)' if sub else ''} не читает и не пишет личное "
             f"({hits[0].replace(HOME, '~')}): me/, ключи git-crypt и журнал штаба — только hq, chiron и mnemo-brain. "
             "Если путь задевает личную папку случайно (поиск по всей ~/ai/knowledge), сузь его: raw/, wiki/, inbox/.")
