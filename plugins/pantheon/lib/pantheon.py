@@ -26,9 +26,12 @@ PANTHEON_NO_NOTIFY.
 """
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
+import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -43,10 +46,16 @@ HOME = os.path.expanduser("~")
 PANTHEON = os.path.realpath(os.environ.get("PANTHEON_HOME") or os.path.join(HOME, "pantheon"))
 STATE = os.path.realpath(os.environ.get("PANTHEON_STATE") or os.path.join(HOME, ".local", "state", "pantheon"))
 VIEW = os.environ.get("PANTHEON_VIEW") or os.path.join(HOME, "pantheon-view")
-VIEW_INBOX = os.environ.get("PANTHEON_VIEW_INBOX") or os.path.join(HOME, "knowledge", "inbox")
+VIEW_INBOX = os.environ.get("PANTHEON_VIEW_INBOX") or os.path.join(PANTHEON, "inbox-view")
 LIB = os.path.dirname(os.path.realpath(__file__))
 PLUGIN = os.path.dirname(LIB)
 LABEL = "com.latark.pantheon-tick"
+# Неизменный путь к плагину: на него смотрят задача launchd, команда ~/.local/bin/pantheon и обработчики слияния
+# в ~/pantheon/.git/config. `pantheon install` перевешивает ссылку на ту копию плагина, из которой запущен
+# (до шага 0.4 — рабочая копия agent-kit, с 0.4 — клон маркетплейса), поэтому обновление плагина путей не ломает.
+CURRENT = os.path.join(HOME, ".local", "share", "pantheon", "current")
+TEMPFAIL = 75   # задача ждёт (нет сети): не сбой, тревоги нет
+ALERTED = 76    # сбой, о котором задача уже сообщила сама: вторую тревогу не давать
 PLIST = os.path.join(HOME, "Library", "LaunchAgents", LABEL + ".plist")
 LIMIT_SNAPSHOT = os.path.join(HOME, ".local", "state", "claude-statusline", "five-hour")
 DEFAULTS = {"heavy_gap_min": 2, "wake_quiet_min": 10, "idle_min": 10, "limit_max_pct": 70}
@@ -62,8 +71,18 @@ def stamp(t=None):
     return datetime.fromtimestamp(t if t is not None else now()).strftime("%Y-%m-%d %H:%M")
 
 
+_HOST = None
+
+
 def host():
-    return os.environ.get("PANTHEON_HOST") or socket.gethostname().split(".")[0]
+    """Имя Mac — LocalHostName (не меняется от сети, в отличие от имени ядра)."""
+    global _HOST
+    if os.environ.get("PANTHEON_HOST"):
+        return os.environ["PANTHEON_HOST"]
+    if _HOST is None:
+        out = subprocess.run(["scutil", "--get", "LocalHostName"], capture_output=True, text=True).stdout.strip()
+        _HOST = out or socket.gethostname().split(".")[0]
+    return _HOST
 
 
 def path(*parts):
@@ -135,6 +154,7 @@ def run_env():
 
 def alert(text, who="pantheon"):
     """Строка в ~/pantheon/alerts.md: время · кто · что. Файл только дописывается."""
+    text, who = " ".join(str(text).split()), " ".join(str(who).split()) or "pantheon"
     if os.environ.get("PANTHEON_DRYRUN") == "1" and not os.environ.get("PANTHEON_ALERTS_IN_DRYRUN"):
         print(f"[alert] {who} · {text}")
         return
@@ -145,7 +165,53 @@ def alert(text, who="pantheon"):
             if new:
                 fh.write("# Тревоги\n\nТолько дописывание: `pantheon alert`. Строка — время · кто · что. "
                          "В «ждёт вас» на доске переносит штаб; старше 30 дней уносит `pantheon archive`.\n\n")
-            fh.write(f"{stamp()} · {who} · {text.strip()}\n")
+            fh.write(f"{stamp()} · {who} · {text}\n")
+
+
+def alert_once(key, value, text, who="pantheon", note=None):
+    """Тревога (и уведомление note) один раз на значение value: повтор того же состояния молчит."""
+    mark = once_path(key)
+    try:
+        if open(mark).read() == str(value):
+            return
+    except OSError:
+        pass
+    alert(text, who)
+    if note:
+        notify(note)
+    os.makedirs(path("once"), exist_ok=True)
+    open(mark, "w").write(str(value))
+
+
+def once_path(key):
+    safe = re.sub(r"[^\w.-]", "_", key)[:60]
+    return path("once", f"{safe}-{hashlib.sha1(key.encode()).hexdigest()[:8]}")
+
+
+def clear_once(key):
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(once_path(key))
+
+
+def parse_command(cmd):
+    """Команда задачи из schedule.toml → argv без оболочки. Разрешены только `pantheon …`, `claude -p …`
+    и скрипты внутри самого плагина; спецсимволы оболочки запрещены. Иначе — None (задача не идёт)."""
+    if not isinstance(cmd, str) or re.search(r"[;&|`$<>\n\\]", cmd):
+        return None
+    try:
+        argv = shlex.split(cmd)
+    except ValueError:
+        return None
+    if not argv:
+        return None
+    if argv[0] == "pantheon":
+        return [os.path.join(PLUGIN, "bin", "pantheon")] + argv[1:]
+    if argv[0] == "claude" and "-p" in argv[1:3]:
+        return argv
+    real = os.path.realpath(os.path.expanduser(argv[0]))
+    if real.startswith(PLUGIN + os.sep):
+        return [real] + argv[1:]
+    return None
 
 
 def notify(text, title="Пантеон"):
@@ -276,7 +342,17 @@ def tick():
             st = job_state(name)
             if job.get("enabled") is False or st.get("disabled"):
                 continue
-            if job.get("hosts", "all") == "primary" and primary and me != primary:
+            if job.get("hosts", "all") == "primary":
+                if not primary:
+                    alert_once("no-primary", "1", "в schedule.toml нет primary_host: задачи с общим результатом "
+                               "(hosts = \"primary\") не идут ни на одном Mac", "pantheon-tick")
+                    continue
+                if me != primary:
+                    continue
+            if parse_command(job.get("command")) is None:
+                alert_once("badcmd-" + name, job.get("command"), f"задача {name}: команда не разрешённого вида "
+                           "(только pantheon …, claude -p …, скрипт плагина; без ; & | $ > <) — пропущена",
+                           "pantheon-tick", note=f"Задача {name} пропущена: команда не разрешена")
                 continue
             if st.get("paused"):
                 continue
@@ -304,12 +380,15 @@ def tick():
 def tick_heavy(sched, heavy, t):
     gap = sched["defaults"]["heavy_gap_min"] * 60
     hs = read_json(path("heavy.json"))
-    busy = locked("heavy-run") or (hs.get("last_end") is not None and t - hs["last_end"] < gap)
+    # heavy-cmd-1/2 — два места общей блокировки тяжёлых команд направлений (обёртка `heavy`, MEM-03, шаг 1.2)
+    busy = (locked("heavy-run") or locked("heavy-cmd-1") or locked("heavy-cmd-2")
+            or (hs.get("last_end") is not None and t - hs["last_end"] < gap))
     heavy.sort(key=lambda x: (-int(x[0].get("priority", 0)), x[2]))
     started = False
     for job, st, due_at in heavy:
         overdue = job.get("max_delay") is not None and t - due_at >= float(job["max_delay"]) * 60
-        reason = "идёт другая тяжёлая задача или пауза между ними" if (busy or started) else heavy_wait_reason(job, sched, t, overdue)
+        reason = ("идёт другая тяжёлая задача, сборка или тесты направления, или пауза между ними"
+                  if (busy or started) else heavy_wait_reason(job, sched, t, overdue))
         if reason:
             st["waiting"] = reason
             st.setdefault("waiting_since", t)
@@ -329,6 +408,9 @@ def run_job(name):
     job = next((j for j in sched.get("job") or [] if j["name"] == name), None)
     if not job:
         return 2
+    argv = parse_command(job.get("command"))
+    if argv is None:
+        return 2
     heavy = job.get("class") == "heavy"
     with lock("job-" + name, block=False) as got:
         if not got:
@@ -337,32 +419,46 @@ def run_job(name):
             if not hgot:
                 return 0
             st = job_state(name)
-            st.update(last_start=now(), running=True)
+            st.update(last_start=now())
             save_job_state(name, st)
             os.makedirs(path("logs"), exist_ok=True)
             log = path("logs", name + ".log")
             started = time.time()
+            timeout = float(job.get("timeout", 600))
+            # Своя группа процессов: по таймауту гасится вся задача, а не только первый процесс.
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, env=run_env(), cwd=HOME, start_new_session=True)
             try:
-                # Команда — строка из ~/pantheon/schedule.toml: его правит только штаб, файл зашифрован
-                # и под картой прав guard — то же доверие, что у crontab, поэтому оболочка допустима.
-                proc = subprocess.run(job["command"], shell=True, capture_output=True, text=True,
-                                      timeout=float(job.get("timeout", 600)), env=run_env(), cwd=HOME)
-                rc, out = proc.returncode, (proc.stdout + proc.stderr)
-            except subprocess.TimeoutExpired as e:
-                rc, out = 124, f"таймаут {job.get('timeout', 600)} с\n" + (e.stdout or "" if isinstance(e.stdout, str) else "")
+                out, _ = proc.communicate(timeout=timeout)
+                rc = proc.returncode
+            except subprocess.TimeoutExpired:
+                for sig in (signal.SIGTERM, signal.SIGKILL):
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(proc.pid, sig)
+                    try:
+                        out, _ = proc.communicate(timeout=5)
+                        break
+                    except subprocess.TimeoutExpired:
+                        out = ""
+                rc, out = 124, f"таймаут {int(timeout)} с, группа процессов остановлена\n{out or ''}"
             with open(log, "a", encoding="utf-8") as fh:
-                fh.write(f"--- {stamp()} rc={rc} {time.time() - started:.1f} с\n{out[-4000:]}")
+                fh.write(f"--- {stamp()} rc={rc} {time.time() - started:.1f} с\n{(out or '')[-4000:]}")
             if os.path.getsize(log) > 400_000:
                 data = open(log, encoding="utf-8", errors="ignore").read()[-200_000:]
                 open(log, "w", encoding="utf-8").write(data)
             st = job_state(name)
-            st.update(last_end=now(), last_rc=rc, running=False)
-            st["fails"] = 0 if rc == 0 else int(st.get("fails") or 0) + 1
+            st.update(last_end=now(), last_rc=rc)
+            st.pop("running", None)
+            if rc == TEMPFAIL:
+                st["waiting"] = "нет сети или GitHub недоступен"
+            else:
+                st.pop("waiting", None)
+                st["fails"] = 0 if rc == 0 else int(st.get("fails") or 0) + 1
             save_job_state(name, st)
             if heavy:
                 write_json(path("heavy.json"), {"last_end": now()})
-            if rc != 0 and st["fails"] in (1, 5, 20):
-                tail = out.strip().splitlines()[-1:] or [""]
+            if rc not in (0, TEMPFAIL, ALERTED) and st["fails"] in (1, 5, 20):
+                tail = (out or "").strip().splitlines()[-1:] or [""]
                 alert(f"задача {name} упала (код {rc}, подряд {st['fails']}): {tail[0][:200]} — журнал {log.replace(HOME, '~')}",
                       "pantheon-tick")
                 if job.get("notify", True):
@@ -379,6 +475,23 @@ def ago(t):
     return f"{int(s)} с назад" if s < 90 else f"{int(s // 60)} мин назад" if s < 5400 else stamp(t)
 
 
+def next_run(job, st, t):
+    if job.get("enabled") is False or st.get("disabled") or st.get("paused"):
+        return "—"
+    if locked("job-" + job["name"]):
+        return "идёт"
+    if st.get("waiting"):
+        return "ждёт условий"
+    if st.get("last_start") is None:
+        return "на ближайшем тике"
+    if job.get("every", "tick") == "tick":
+        return "каждый тик"
+    left = st["last_start"] + every_sec(job) - t
+    if left <= 60:
+        return "на ближайшем тике"
+    return f"через {int(left // 60)} мин" if left < 5400 else stamp(st["last_start"] + every_sec(job))
+
+
 def jobs_show():
     lt = None
     with contextlib.suppress(OSError, ValueError):
@@ -390,7 +503,8 @@ def jobs_show():
         tick_line += " · весь планировщик на паузе (pantheon jobs resume --all)"
     sched = load_schedule()
     print(f"{tick_line} · этот Mac: {host()} · главный: {sched.get('primary_host') or '—'}\n")
-    rows = [("задача", "класс", "где", "как часто", "последний запуск", "состояние")]
+    rows = [("задача", "класс", "где", "как часто", "последний запуск", "дальше", "состояние")]
+    t = now()
     for job in sched.get("job") or []:
         st = job_state(job["name"])
         every = "каждый тик" if job.get("every", "tick") == "tick" else f"{job['every']} мин"
@@ -398,8 +512,10 @@ def jobs_show():
             state = "выключена"
         elif st.get("paused"):
             state = f"пауза{': ' + st['paused_reason'] if st.get('paused_reason') else ''}"
-        elif st.get("running"):
+        elif locked("job-" + job["name"]):
             state = "идёт"
+        elif parse_command(job.get("command")) is None:
+            state = "команда не разрешена — пропускается"
         elif st.get("waiting"):
             state = f"ждёт: {st['waiting']}"
         elif st.get("last_rc") not in (None, 0):
@@ -409,14 +525,18 @@ def jobs_show():
         if st.get("lease_until"):
             state += f" · аренда до {stamp(st['lease_until'])[:10]}"
         last = ago(st.get("last_start")) if st.get("last_start") else "—"
-        rows.append((job["name"], job.get("class", "light"), job.get("hosts", "all"), every, last, state))
-    widths = [max(len(r[i]) for r in rows) for i in range(5)]
+        rows.append((job["name"], job.get("class", "light"), job.get("hosts", "all"), every, last,
+                     next_run(job, st, t), state))
+    widths = [max(len(r[i]) for r in rows) for i in range(6)]
     for r in rows:
-        print("  ".join(c.ljust(w) for c, w in zip(r[:5], widths)) + "  " + r[5])
+        print("  ".join(c.ljust(w) for c, w in zip(r[:6], widths)) + "  " + r[6])
 
 
 def jobs_set(action, name, arg=None):
     if name == "--all":
+        if action not in ("pause", "resume"):
+            print("--all бывает только у pause и resume", file=sys.stderr)
+            return 2
         if action == "pause":
             open(path("paused"), "w").write(stamp())
             alert("весь планировщик на паузе (pantheon jobs pause --all)", "pantheon")
@@ -462,7 +582,9 @@ def git(*args, check=True):
 
 
 def commit():
-    """commit → pull без rebase → push, как Obsidian Git. Слияние шифрованных файлов — git-crypt-merge.sh."""
+    """commit → pull без rebase → push, как Obsidian Git. Слияние шифрованных файлов — git-crypt-merge.sh
+    (дописываемые файлы — объединением). Без сети — код TEMPFAIL и тишина; тревога, только если синхронизации
+    нет дольше 6 часов. Конфликт — слияние отменяется, тревога одна на каждый новый коммит другого Mac."""
     if not os.path.isdir(os.path.join(PANTHEON, ".git")):
         return 0
     with lock("pantheon-git"):
@@ -471,42 +593,61 @@ def commit():
             git("commit", "-q", "-m", f"pantheon: {host()} {stamp()}")
         if not git("remote", check=False).stdout.strip():
             return 0
+
+        def offline(stderr):
+            ok = read_json(path("commit-ok.json")).get("t") or 0
+            if now() - ok > 6 * 3600:
+                alert_once("commit-offline", int(ok), "~/pantheon не синхронизируется с GitHub больше 6 часов: "
+                           f"{(stderr.strip().splitlines() or [''])[-1][:200]}", "pantheon-commit",
+                           note="~/pantheon давно не синхронизируется с GitHub")
+            print(stderr.strip(), file=sys.stderr)
+            return TEMPFAIL
+
         pull = git("pull", "--no-rebase", "--no-edit", "-q", check=False)
         if pull.returncode != 0:
             if os.path.exists(os.path.join(PANTHEON, ".git", "MERGE_HEAD")):
                 files = git("diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
+                theirs = git("rev-parse", "MERGE_HEAD", check=False).stdout.strip()
                 git("merge", "--abort", check=False)
-                alert(f"~/pantheon: конфликт слияния с другим Mac ({', '.join(files) or 'файлы не названы'}); "
-                      "локальный коммит цел, слияние отменено — разобрать вручную", "pantheon-commit")
-                notify("~/pantheon: конфликт слияния, нужен разбор")
-                return 1
-            print(pull.stderr.strip(), file=sys.stderr)
-            return pull.returncode
+                alert_once("merge-conflict", theirs, f"~/pantheon: конфликт слияния с другим Mac "
+                           f"({', '.join(files) or 'файлы не названы'}); локальный коммит цел, слияние отменено — "
+                           "разобрать вручную", "pantheon-commit", note="~/pantheon: конфликт слияния, нужен разбор")
+                return ALERTED
+            return offline(pull.stderr)
+        clear_once("merge-conflict")
         ahead = git("rev-list", "--count", "@{u}..HEAD", check=False).stdout.strip()
         if ahead and ahead != "0":
             push = git("push", "-q", check=False)
             if push.returncode != 0:
-                print(push.stderr.strip(), file=sys.stderr)
-                return push.returncode
+                return offline(push.stderr)
+        write_json(path("commit-ok.json"), {"t": now()})
+        clear_once("commit-offline")
     return 0
 
 
 DONE_HEAD = re.compile(r"^##\s+Сделано\s*$")
 DATE_ISO = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
-DATE_RU = re.compile(r"\b(\d{1,2})\.(\d{2})(?:\.(\d{4}))?\b")
+DATE_RU = re.compile(r"(?<![\d.])(\d{1,2})\.(\d{2})(?:\.(\d{4}))?(?![\d.])")
 
 
 def line_date(line, t):
-    m = DATE_ISO.search(line)
-    if m:
-        return datetime(int(m[1]), int(m[2]), int(m[3]))
-    m = DATE_RU.search(line)
-    if m:
+    """Первая корректная дата строки: сначала ГГГГ-ММ-ДД, потом ДД.ММ[.ГГГГ] (версии вроде 2.1.12 — не даты)."""
+    for m in DATE_ISO.finditer(line):
+        with contextlib.suppress(ValueError):
+            return datetime(int(m[1]), int(m[2]), int(m[3]))
+    for m in DATE_RU.finditer(line):
         year = int(m[3]) if m[3] else datetime.fromtimestamp(t).year
         with contextlib.suppress(ValueError):
             d = datetime(year, int(m[2]), int(m[1]))
             return d if d <= datetime.fromtimestamp(t) + timedelta(days=1) else d.replace(year=year - 1)
     return None
+
+
+def write_atomic(p, text):
+    tmp = f"{p}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, p)
 
 
 def archive():
@@ -515,6 +656,8 @@ def archive():
     t = now()
     today = datetime.fromtimestamp(t)
     moved = {"board": 0, "alerts": 0}
+    lk = lock("pantheon-git")  # коммит тика не захватит доску посреди переписывания
+    lk.__enter__()
     os.makedirs(os.path.join(PANTHEON, "archive"), exist_ok=True)
 
     def append(name, lines):
@@ -542,7 +685,7 @@ def archive():
         for key, items in sorted(old.items()):
             append(f"board-{key}.md", items)
         if moved["board"]:
-            open(board, "w", encoding="utf-8").write("".join(out))
+            write_atomic(board, "".join(out))
     alerts = os.path.join(PANTHEON, "alerts.md")
     if os.path.exists(alerts):
         with lock("alerts"):
@@ -558,25 +701,52 @@ def archive():
             for key, items in sorted(old.items()):
                 append(f"alerts-{key}.md", items)
             if moved["alerts"]:
-                open(alerts, "w", encoding="utf-8").write("".join(out))
+                write_atomic(alerts, "".join(out))
+    lk.__exit__(None, None, None)
     print(f"в архив: доска — {moved['board']} строк, тревоги — {moved['alerts']} строк")
     return 0
 
 
-def domains_build():
-    """Реестр направлений → domains.json для guard. Привилегий тут нет: они в ~/.claude/pantheon/policy.toml."""
-    with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
+def domains_build(if_changed=False):
+    """Реестр направлений → domains.json для guard. Привилегий тут нет: они в ~/.claude/pantheon/policy.toml.
+    Папку привилегированного координатора (из [coordinators] policy.toml) чужое направление получить не может:
+    такая папка пропускается с тревогой — иначе правкой реестра можно было бы отдать чужому код guard или me/."""
+    reg_path = os.path.join(PANTHEON, "directions.toml")
+    policy_path = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
+    if if_changed:
+        built = read_json(path("domains.json")).get("built_ts") or 0
+        newest = max((os.path.getmtime(p) for p in (reg_path, policy_path) if os.path.exists(p)), default=0)
+        if built >= newest:
+            return 0
+    with open(reg_path, "rb") as fh:
         reg = tomllib.load(fh)
+    try:
+        with open(policy_path, "rb") as fh:
+            priv = tomllib.load(fh).get("coordinators") or {}
+    except (OSError, ValueError):
+        priv = {}
+    norm = lambda p: os.path.realpath(os.path.expanduser(p))
+    overlap = lambda a, b: a == b or a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/")
     domains = {}
     for d in reg.get("direction") or []:
-        if not re.fullmatch(r"[a-z0-9-]+", d.get("name", "")):
-            print(f"пропущено направление с именем не по образцу: {d.get('name')!r}", file=sys.stderr)
+        name = d.get("name", "")
+        if not re.fullmatch(r"[a-z0-9-]+", name):
+            print(f"пропущено направление с именем не по образцу: {name!r}", file=sys.stderr)
             continue
-        domains[d["name"]] = list(d.get("folders") or [])
+        folders = []
+        for f in d.get("folders") or []:
+            owner = next((o for o, ps in priv.items() if o != name and any(overlap(norm(f), norm(p)) for p in ps)), None)
+            if owner:
+                alert_once(f"domains-{name}-{f}", "1", f"directions.toml: папка {f} отдана направлению {name}, "
+                           f"но это папка {owner} (policy.toml) — пропущена при сборке domains.json", "pantheon")
+                continue
+            folders.append(f)
+        domains[name] = folders
     write_json(path("domains.json"), {
         "_comment": "Собрано `pantheon domains build` из ~/pantheon/directions.toml. Руками не править.",
-        "built": stamp(), "domains": domains})
-    print(f"domains.json: {len(domains)} направлений → {path('domains.json').replace(HOME, '~')}")
+        "built": stamp(), "built_ts": now(), "domains": domains})
+    if not if_changed:
+        print(f"domains.json: {len(domains)} направлений → {path('domains.json').replace(HOME, '~')}")
     return 0
 
 
@@ -603,9 +773,14 @@ PLIST_TMPL = """<?xml version="1.0" encoding="UTF-8"?>
 
 
 def install():
-    tick_bin = os.path.join(PLUGIN, "bin", "pantheon-tick")
+    """Задача launchd, команда pantheon и обработчики слияния ~/pantheon — через неизменную ссылку CURRENT."""
     os.makedirs(path("logs"), exist_ok=True)
     os.makedirs(os.path.dirname(PLIST), exist_ok=True)
+    os.makedirs(os.path.dirname(CURRENT), exist_ok=True)
+    if os.path.islink(CURRENT) or os.path.exists(CURRENT):
+        os.remove(CURRENT)
+    os.symlink(PLUGIN, CURRENT)
+    tick_bin = os.path.join(CURRENT, "bin", "pantheon-tick")
     env_path = ":".join([os.path.dirname(sys.executable), "/opt/homebrew/bin",
                          os.path.join(HOME, ".local", "bin"), "/usr/bin:/bin:/usr/sbin:/sbin"])
     with open(PLIST, "w") as fh:
@@ -614,14 +789,21 @@ def install():
     os.makedirs(os.path.dirname(link), exist_ok=True)
     if os.path.islink(link) or os.path.exists(link):
         os.remove(link)
-    os.symlink(os.path.join(PLUGIN, "bin", "pantheon"), link)
+    os.symlink(os.path.join(CURRENT, "bin", "pantheon"), link)
+    if os.path.isdir(os.path.join(PANTHEON, ".git")):
+        merge = os.path.join(CURRENT, "scripts", "git-crypt-merge.sh")
+        git("config", "merge.gitcrypt-text.name", "git-crypt text merge")
+        git("config", "merge.gitcrypt-text.driver", f"{merge} %O %A %B")
+        git("config", "merge.gitcrypt-union.name", "git-crypt union merge (дописываемые файлы)")
+        git("config", "merge.gitcrypt-union.driver", f"{merge} --union %O %A %B")
     uid = os.getuid()
     subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"], capture_output=True)
     r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", PLIST], capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stderr.strip(), file=sys.stderr)
         return r.returncode
-    print(f"установлено: {PLIST.replace(HOME, '~')} → {tick_bin.replace(HOME, '~')}; команда {link.replace(HOME, '~')}")
+    print(f"установлено: {PLIST.replace(HOME, '~')} и команда {link.replace(HOME, '~')} → "
+          f"{CURRENT.replace(HOME, '~')} → {PLUGIN.replace(HOME, '~')}")
     return 0
 
 
@@ -654,13 +836,19 @@ def main(argv):
         who = "agent"
         if "--from" in rest:
             i = rest.index("--from")
+            if i + 1 >= len(rest):
+                print("pantheon alert: после --from нужно имя", file=sys.stderr)
+                return 2
             who, rest = rest[i + 1], rest[:i] + rest[i + 2:]
+        if not " ".join(rest).strip():
+            print("pantheon alert: пустая строка", file=sys.stderr)
+            return 2
         alert(" ".join(rest), who)
         return 0
     if cmd == "archive":
         return archive()
     if cmd == "domains" and rest[:1] == ["build"]:
-        return domains_build()
+        return domains_build(if_changed="--if-changed" in rest)
     if cmd == "view":
         return view(quiet="--quiet" in rest)
     if cmd == "commit":

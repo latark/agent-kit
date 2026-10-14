@@ -244,22 +244,27 @@ def check_nextjs(event):
 
 # --- domain и pantheon-acl ----------------------------------------------------
 # Кто пишет куда. Роль — agent_type события; субагент или тиммейт — есть agent_id. Ваши сессии без
-# роли не ограничены. Направление координатора guard узнаёт по папке, где запущена сессия
-# (CLAUDE_PROJECT_DIR не меняется всю сессию, в отличие от cwd), а не по agent_type: у всех семи
-# координаторов он один — domain-coordinator.
-#   domain       — субагент, тиммейт, координатор и сессия мастерской пишут только в своё
-#                  направление: папки из domains.json (его собирает `pantheon domains build` из
-#                  ~/pantheon/directions.toml), своё направление в ~/pantheon, временные папки,
-#                  ~/.claude/agent-memory и agent_extra из policy.toml. Мастерская — папка запуска.
-#   pantheon-acl — запись в ~/pantheon по карте прав (STATE-06 карты решений); в копию
-#                  ~/pantheon-view и в ~/.local/state/pantheon (метки тика, журналы owner-log,
-#                  domains.json) роли не пишут вовсе; git в ~/pantheon роли не трогают — коммитит тик.
+# роли не ограничены. Роли Пантеона — PANTHEON_ROLES (hq, domain-coordinator, workshop, нижние роли);
+# встроенные и ваши собственные субагенты живут по прежнему правилу domain.
+# Направление координатора guard узнаёт по папке, где запущена сессия (CLAUDE_PROJECT_DIR не меняется
+# всю сессию, в отличие от cwd), а не по agent_type: у всех семи координаторов он один.
+#   domain       — субагент, тиммейт и любая роль Пантеона, кроме штаба, пишут только в своё направление:
+#                  папки из domains.json (собирает `pantheon domains build` из ~/pantheon/directions.toml),
+#                  временные папки, ~/.claude/agent-memory и agent_extra из policy.toml. Мастерская — папка
+#                  запуска. Записи в ~/pantheon проверяет pantheon-acl.
+#   pantheon-acl — запись в ~/pantheon по карте прав (STATE-06 карты решений; карта — здесь, в коде, а не в
+#                  domains.json: его собирают из реестра, который правит штаб); в копию ~/pantheon-view и в
+#                  ~/.local/state/pantheon (метки тика, журналы owner-log, domains.json) не пишет никто, кроме
+#                  ваших сессий без роли; git в ~/pantheon роли не трогают — коммитит тик; команды пульта
+#                  (`pantheon archive|install|uninstall|commit`, `pantheon jobs pause|resume|disable|enable|renew`)
+#                  — только штаб и ваши сессии.
 # Привилегии (кто mnemo-brain и metis-pantheon, у кого доступ к me/) — в ~/.claude/pantheon/policy.toml:
-# реестр правит штаб, и его правкой прав не выдать.
-# Bash проверяется по явным целям записи (>, tee, rm/mkdir/touch/ln/chmod, cp/mv, sed -i, git -C,
-# cd … && запись); запись изнутри скрипта (python -c …) так не поймать — это защита от случайности.
+# реестр правит штаб, и его правкой их не выдать.
+# Bash разбирается по словам с учётом кавычек, `cd` и текущей папки: >, >>, tee, rm/mkdir/touch/ln/chmod/…,
+# cp и mv (у mv — и источник), rsync, sed -i, dd of=, git (-C, -c) с командами записи. Запись изнутри
+# скрипта (python -c …, node -e …) так не поймать — это защита от случайности, а не от намеренного обхода.
 
-import tomllib
+import shlex
 
 STATE_DIR = os.path.realpath(os.path.join(HOME, ".local", "state", "pantheon"))
 DOMAINS_FILE = os.path.join(STATE_DIR, "domains.json")
@@ -267,15 +272,25 @@ LEGACY_DOMAINS_FILE = os.path.join(HOME, ".claude", "hooks", "domains.json")
 POLICY_FILE = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
 PANTHEON = os.path.realpath(os.path.join(HOME, "pantheon"))
 PANTHEON_VIEW = os.path.realpath(os.path.join(HOME, "pantheon-view"))
-WRITE_CMDS = r"rm|rmdir|mkdir|touch|ln|chmod|chown|truncate|install"
-GIT_WRITE = r"add|commit|push|pull|fetch|checkout|switch|reset|merge|rebase|stash|apply|am|cherry-pick|restore|rm|mv|tag|clean|init"
 TEMP_ROOTS = [os.path.realpath(p) for p in (os.environ.get("TMPDIR", ""), "/tmp", "/private/tmp", "/dev/null") if p]
+PANTHEON_ROLES = {"hq", "domain-coordinator", "workshop", "chiron", "argus", "talos", "prometheus", "clio",
+                  "iris", "dev-opus", "dev-sonnet", "dev-haiku"}
+PANTHEON_ROLE_PREFIXES = ("hephaestus-", "apollo-")
+GIT_WRITE = {"add", "commit", "push", "pull", "fetch", "checkout", "switch", "reset", "merge", "rebase", "stash",
+             "apply", "am", "cherry-pick", "restore", "rm", "mv", "tag", "clean", "init", "revert", "commit-tree"}
+ALL_ARGS = {"rm", "rmdir", "mkdir", "touch", "truncate", "tee", "shred", "unlink"}
+FIRST_IS_MODE = {"chmod", "chown", "chgrp", "chflags"}
+LAST_ARG = {"cp", "ln", "install", "rsync", "ditto"}
+WRAPPERS = {"sudo", "env", "command", "nohup", "time", "exec", "builtin", "nice"}
+HEREDOC = re.compile(r"<<-?\s*'?\"?(\w+)'?\"?.*?^\s*\1\s*$", re.S | re.M)
+PANTHEON_PRIVILEGED = {"archive", "install", "uninstall", "commit"}
+PANTHEON_JOB_ACTIONS = {"pause", "resume", "disable", "enable", "renew"}
 
 
-def _path(p, cwd):
-    p = p.strip("'\"").replace("$HOME", HOME)
-    p = os.path.expanduser(p)
-    return os.path.realpath(p if os.path.isabs(p) else os.path.join(cwd, p))
+def _expand(word, cwd):
+    w = word.replace("${HOME}", HOME).replace("$HOME", HOME)
+    w = os.path.expanduser(w)
+    return os.path.realpath(w if os.path.isabs(w) else os.path.join(cwd, w))
 
 
 def _inside(path, roots):
@@ -298,10 +313,15 @@ def load_domains():
 
 def load_policy():
     try:
+        import tomllib  # Python 3.11+; на старом Python guard работает без привилегий, а не падает
         with open(POLICY_FILE, "rb") as fh:
             return tomllib.load(fh)
-    except (OSError, ValueError):
+    except (ImportError, OSError, ValueError):
         return {}
+
+
+def is_pantheon_role(role):
+    return role in PANTHEON_ROLES or role.startswith(PANTHEON_ROLE_PREFIXES)
 
 
 def who(event):
@@ -322,41 +342,134 @@ def privileged(policy, name, role, pdir):
     return role == "domain-coordinator" and _inside(pdir, _norm((policy.get("coordinators") or {}).get(name, [])))
 
 
-def bash_targets(cmd):
-    targets = re.findall(r"(?<![<>&\d])>>?\s*([~/$][^\s;|&)]*)", cmd)
-    targets += re.findall(r"\btee\s+(?:-a\s+)?([~/$][^\s;|&]*)", cmd)
-    for seg in re.split(r"&&|\|\||;|\|", cmd):
-        words = seg.split()
-        if not words:
+def _segments(cmd):
+    """Команда Bash → список простых команд (списки слов). Кавычки снимаются, тела heredoc выбрасываются;
+    скобки, ;, &&, ||, | и & — границы; перенаправления остаются отдельными словами."""
+    cmd = HEREDOC.sub(" ", cmd)
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=";&|()<>")
+        lex.whitespace_split = True
+        lex.commenters = ""
+        toks = list(lex)
+    except ValueError:
+        toks = cmd.split()
+    segs, cur = [], []
+    for t in toks:
+        if t and set(t) <= set(";&|()") and not t.startswith(("&>", ">")):
+            if cur:
+                segs.append(cur)
+            cur = []
+        else:
+            cur.append(t)
+    if cur:
+        segs.append(cur)
+    return segs
+
+
+def bash_targets(cmd, cwd):
+    """Абсолютные пути, в которые пишет команда Bash. Учитывает cd внутри команды."""
+    out = []
+    for words in _segments(cmd):
+        # перенаправления: > >> &> >| и 2> (цифра — отдельным словом)
+        rest, i = [], 0
+        while i < len(words):
+            w = words[i]
+            if w in (">", ">>", "&>", "&>>", ">|") and i + 1 < len(words):
+                tgt = words[i + 1]
+                if tgt and not tgt.isdigit() and not tgt.startswith("&"):
+                    out.append(_expand(tgt, cwd))
+                i += 2
+                continue
+            if w in ("<", "<<", "<<<", ">&", "<&") and i + 1 < len(words):
+                i += 2
+                continue
+            rest.append(w)
+            i += 1
+        while rest and (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", rest[0]) or rest[0] in WRAPPERS):
+            rest = rest[1:]
+        if not rest:
             continue
-        head = words[0]
-        paths = [w for w in words[1:] if w[:1] in "~/$" or w.startswith("'/") or w.startswith('"/')]
-        if re.fullmatch(WRITE_CMDS, head) or (head == "sed" and any(w.startswith("-i") for w in words)):
-            targets += paths
-        elif head in ("cp", "mv", "rsync") and paths:
-            targets.append(paths[-1])
-        elif head == "git" and "-C" in words:
-            i = words.index("-C")
-            if i + 2 < len(words) and re.fullmatch(GIT_WRITE, words[i + 2]):
-                targets.append(words[i + 1])
-    m = re.search(r"\bcd\s+([~/$][^\s;&|]*)\s*&&(.*)", cmd)
-    if m and (re.search(r"\bgit\s+(" + GIT_WRITE + r")\b|>|\btee\b|\b(" + WRITE_CMDS + r"|cp|mv)\b", m.group(2))):
-        targets.append(m.group(1))
-    return [t for t in targets if t.strip("'\"")]
+        head, args = os.path.basename(rest[0]), rest[1:]
+        plain = [a for a in args if a and not a.startswith("-")]
+        if head == "cd":
+            cwd = _expand(plain[0], cwd) if plain else HOME
+        elif head in ALL_ARGS:
+            out += [_expand(a, cwd) for a in plain]
+        elif head in FIRST_IS_MODE:
+            out += [_expand(a, cwd) for a in plain[1:]]
+        elif head == "mv":
+            out += [_expand(a, cwd) for a in plain]
+        elif head in LAST_ARG and plain:
+            out.append(_expand(plain[-1], cwd))
+            if head == "rsync" and "--remove-source-files" in args:
+                out += [_expand(a, cwd) for a in plain[:-1]]
+        elif head == "dd":
+            out += [_expand(a[3:], cwd) for a in args if a.startswith("of=")]
+        elif head in ("sed", "gsed", "perl") and any(a == "-i" or a.startswith(("-i", "--in-place")) for a in args):
+            files, skip_next, script_seen, explicit = [], False, False, "-e" in args or "-f" in args
+            for j, a in enumerate(args):
+                if skip_next:
+                    skip_next = False
+                    continue
+                if a in ("-e", "-f"):
+                    skip_next = True
+                    continue
+                if a == "-i" and j + 1 < len(args) and (args[j + 1] == "" or args[j + 1].startswith(".")):
+                    skip_next = True  # BSD sed: -i '' или -i .bak
+                    continue
+                if a.startswith("-") or a == "":
+                    continue
+                if not explicit and not script_seen:
+                    script_seen = True
+                    continue
+                files.append(a)
+            out += [_expand(a, cwd) for a in files]
+        elif head == "git":
+            repo, j = cwd, 0
+            while j < len(args):
+                a = args[j]
+                if a == "-C" and j + 1 < len(args):
+                    repo = _expand(args[j + 1], repo)
+                    j += 2
+                elif a in ("-c", "--git-dir", "--work-tree", "--namespace") and j + 1 < len(args):
+                    j += 2
+                elif a.startswith("-"):
+                    j += 1
+                else:
+                    if a in GIT_WRITE:
+                        out.append(repo)
+                    break
+    return out
+
+
+def pantheon_cli(cmd):
+    """Привилегированные подкоманды пульта pantheon в команде Bash (список строк для причины)."""
+    found = []
+    for words in _segments(cmd):
+        while words and (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]) or words[0] in WRAPPERS):
+            words = words[1:]
+        if not words or os.path.basename(words[0]) != "pantheon" or len(words) < 2:
+            continue
+        sub = words[1]
+        if sub in PANTHEON_PRIVILEGED or (sub == "jobs" and len(words) > 2 and words[2] in PANTHEON_JOB_ACTIONS):
+            found.append(" ".join(words[:3]))
+    return found
 
 
 def write_targets(event, tool, tool_input):
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     if tool == "Bash":
-        raw = bash_targets(tool_input.get("command") or "")
+        raw = bash_targets(tool_input.get("command") or "", cwd)
     else:
-        raw = [tool_input.get("file_path") or tool_input.get("notebook_path") or ""]
-    return cwd, sorted({_path(t, cwd) for t in raw if t})
+        p = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        raw = [_expand(p, cwd)] if p else []
+    return cwd, sorted(set(raw))
 
 
 def check_domain(event, tool, tool_input):
     role, sub, pdir = who(event)
-    if not sub and role not in ("domain-coordinator", "workshop"):
+    pantheon_role = is_pantheon_role(role)
+    if not sub and (not pantheon_role or role == "hq"):
         return None
     domains, policy = load_domains(), load_policy()
     cwd, targets = write_targets(event, tool, tool_input)
@@ -365,8 +478,8 @@ def check_domain(event, tool, tool_input):
         return None
     if role == "workshop" and not sub:
         roots = [pdir]
-    elif sub and not direction_of(domains, pdir)[0]:
-        # субагент вне направлений (ваша сессия без роли и т. п.): направление по cwd, иначе git-репозиторий
+    elif not pantheon_role:
+        # встроенный или ваш собственный субагент: прежнее правило — направление по cwd, иначе git-репозиторий
         name, roots = direction_of(domains, cwd)
         if not roots:
             top = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
@@ -374,9 +487,11 @@ def check_domain(event, tool, tool_input):
             roots = [os.path.realpath(top or cwd)]
     else:
         name, roots = direction_of(domains, pdir)
-        if not roots:
+        if not roots and sub:
+            name, roots = direction_of(domains, cwd)
+        if not roots and role == "domain-coordinator":
             roots = [pdir]
-    roots = roots + _norm((policy.get("agent_extra") or domains.get("agent_extra") or {}).get(role, []))
+    roots = list(roots) + _norm((policy.get("agent_extra") or domains.get("agent_extra") or {}).get(role, []))
     roots += _norm(policy.get("always") or domains.get("always") or ["~/.claude/agent-memory"])
     roots += TEMP_ROOTS
     bad = [p for p in targets if not _inside(p, roots)]
@@ -390,9 +505,9 @@ def check_domain(event, tool, tool_input):
             "координатор — Зевсу файлом в inbox/ того направления.")
 
 
-# Карта прав ~/pantheon (STATE-06). Ключ — путь от корня ~/pantheon; значение — кто пишет.
-HQ_ONLY = ("board.md", "decisions.md", "revisits.toml", "schedule.toml", "backlog.md",
-           "directions.toml", "approvals.toml", "README.md", "archive", "handoff")
+# Карта прав ~/pantheon (STATE-06). Ключ — первый элемент пути от корня ~/pantheon.
+HQ_ONLY = ("board.md", "decisions.md", "revisits.toml", "schedule.toml", "backlog.md", "directions.toml",
+           "approvals.toml", "scout.toml", "README.md", "archive", "handoff", "inbox-view")
 
 
 def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
@@ -431,12 +546,18 @@ def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
 
 def check_pantheon(event, tool, tool_input):
     role, sub, pdir = who(event)
-    if not role:
-        return None
+    if not role and not sub:
+        return None  # ваша сессия без роли
+    pantheon_role = is_pantheon_role(role) or not role
+    if tool == "Bash" and pantheon_role and not (role == "hq" and not sub):
+        cli = pantheon_cli(tool_input.get("command") or "")
+        if cli:
+            return (f"Правило pantheon-acl: «{cli[0]}» — команда пульта, её запускают только штаб и ваши сессии. "
+                    "Архив, коммит и пауза задач — через Зевса; дописать тревогу — `pantheon alert`.")
     cwd, targets = write_targets(event, tool, tool_input)
     if not targets:
         return None
-    domains, policy = None, None
+    domains = policy = None
     for p in targets:
         if _inside(p, [STATE_DIR]):
             return ("Правило pantheon-acl: ~/.local/state/pantheon (метки тика, журналы ваших слов owner-log, "
@@ -444,14 +565,14 @@ def check_pantheon(event, tool, tool_input):
         if _inside(p, [PANTHEON_VIEW]):
             return ("Правило pantheon-acl: ~/pantheon-view — копия только для чтения для Obsidian. "
                     "Пиши в ~/pantheon по карте прав.")
-        if not _inside(p, [PANTHEON]):
+        if not _inside(p, [PANTHEON]) or not pantheon_role:
             continue
         if domains is None:
             domains, policy = load_domains(), load_policy()
         rel = os.path.relpath(p, PANTHEON)
         ok, why = pantheon_allowed(role, sub, pdir, rel, tool, os.path.exists(p), domains, policy)
         if not ok:
-            return (f"Правило pantheon-acl: роль «{role}»{' (субагент)' if sub else ''} не пишет в "
+            return (f"Правило pantheon-acl: роль «{role or 'субагент'}»{' (субагент)' if sub else ''} не пишет в "
                     f"~/pantheon/{rel}: {why}. Нужна правка — опиши её Зевсу (штабу) или своему координатору.")
     return None
 

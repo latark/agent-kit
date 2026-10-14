@@ -5,13 +5,18 @@
 # Подключение в репозитории (его делает установщик на каждом Mac, в .git/config, с репозиторием не едет):
 #   git config merge.gitcrypt-text.name "git-crypt text merge"
 #   git config merge.gitcrypt-text.driver "<путь>/git-crypt-merge.sh %O %A %B"
+#   git config merge.gitcrypt-union.driver "<путь>/git-crypt-merge.sh --union %O %A %B"
 #   в .gitattributes: <шаблон> filter=git-crypt diff=git-crypt merge=gitcrypt-text
 # git-crypt — полным путём через /opt/homebrew/bin: Obsidian, запущенный из Dock, видит короткий PATH.
 # Проверено 13.10 на тестовых репозиториях (git-crypt 0.8.0).
+# С --union (обработчик merge.gitcrypt-union) — объединение без маркеров: для файлов, которые только
+# дописываются (alerts.md, decisions.md, archive/), где обе стороны добавили строки в конец.
 GC="${GIT_CRYPT:-/opt/homebrew/bin/git-crypt}"
+UNION=""
+[ "$1" = "--union" ] && { UNION="--union"; shift; }
 d=$(mktemp -d)
 "$GC" smudge < "$1" > "$d/base" && "$GC" smudge < "$2" > "$d/ours" && "$GC" smudge < "$3" > "$d/theirs" || { rm -rf "$d"; exit 2; }
-git merge-file -L ours -L base -L theirs "$d/ours" "$d/base" "$d/theirs"; rc=$?
+git merge-file $UNION -L ours -L base -L theirs "$d/ours" "$d/base" "$d/theirs"; rc=$?
 "$GC" clean < "$d/ours" > "$2" || { rm -rf "$d"; exit 2; }
 rm -rf "$d"
 exit $rc

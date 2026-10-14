@@ -35,16 +35,16 @@ def setup(home):
         'mnemo-brain = ["~/knowledge"]\n[agent_extra]\nprometheus = ["~/knowledge"]\n')
 
 
-def run(home, pdir, role, tool, tool_input, sub=False):
+def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None):
     event = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input,
-             "cwd": os.path.join(home, pdir)}
+             "cwd": os.path.join(home, cwd if cwd is not None else pdir)}
     if role:
         event["agent_type"] = role
     if sub:
         event["agent_id"] = "a1"
     env = {"HOME": home, "PATH": os.environ["PATH"], "CLAUDE_PROJECT_DIR": os.path.join(home, pdir),
            "TMPDIR": "/nonexistent-tmp"}
-    out = subprocess.run([sys.executable, "-I", GUARD], input=json.dumps(event), capture_output=True,
+    out = subprocess.run([python or sys.executable, "-I", GUARD], input=json.dumps(event), capture_output=True,
                          text=True, env=env, timeout=10).stdout
     return "deny" if '"deny"' in out else "allow"
 
@@ -85,13 +85,56 @@ def main():
         ("мастерская — отказ вне папки задачи", "deny", ws, "workshop", False, W(os.path.join(home, alex, "x.md"))),
         ("prometheus пишет в ~/knowledge (agent_extra)", "allow", br, "prometheus", True, W(os.path.join(home, "knowledge/raw/a.md"))),
         ("dev-server по-прежнему запрещён", "deny", br, "", False, B("pnpm run dev")),
+        # обходы через Bash (ревизия шага 0.3, № 5): роль координатора, cwd = ~/pantheon
+        ("Bash: >> alerts.md из ~/pantheon", "deny", br, "domain-coordinator", False, B("echo x >> alerts.md"), "pantheon"),
+        ("Bash: sed -i board.md из ~/pantheon", "deny", br, "domain-coordinator", False, B("sed -i '' 's/a/b/' board.md"), "pantheon"),
+        ("Bash: cd ~/pantheon && sed -i", "deny", br, "domain-coordinator", False, B(f"cd {home}/pantheon && sed -i '' 's/a/b/' board.md")),
+        ("Bash: > \"$HOME/pantheon/board.md\"", "deny", br, "domain-coordinator", False, B('echo x > "$HOME/pantheon/board.md"')),
+        ("Bash: tee \"$HOME/…\"", "deny", br, "domain-coordinator", False, B('echo x | tee "$HOME/pantheon/board.md"')),
+        ("Bash: mv доски как источника", "deny", br, "domain-coordinator", False, B(f"mv {home}/pantheon/board.md /tmp/b.md")),
+        ("Bash: (cd ~/pantheon; git commit)", "deny", br, "domain-coordinator", False, B(f"(cd {home}/pantheon; git commit -am x)")),
+        ("Bash: git -C ~/pantheon -c k=v commit", "deny", br, "domain-coordinator", False, B(f"git -C {home}/pantheon -c user.name=x commit -m y")),
+        ("Bash: чтение ~/pantheon можно", "allow", br, "domain-coordinator", False, B(f"cat {home}/pantheon/board.md && git -C {home}/pantheon log -1")),
+        ("Bash: вывод во временную папку можно", "allow", br, "domain-coordinator", False, B("grep x board.md > /tmp/out.txt 2>&1"), "pantheon"),
+        ("Bash: heredoc с > внутри текста — не цель", "allow", br, "domain-coordinator", False,
+         B("cat > /tmp/note.md <<'EOF'\nстрелка > ~/pantheon/board.md в тексте\nEOF")),
+        # команды пульта (№ 6)
+        ("координатор: pantheon archive — отказ", "deny", br, "domain-coordinator", False, B("pantheon archive")),
+        ("координатор: pantheon jobs pause --all — отказ", "deny", br, "domain-coordinator", False, B("pantheon jobs pause --all")),
+        ("координатор: pantheon jobs и alert можно", "allow", br, "domain-coordinator", False, B("pantheon jobs; pantheon alert 'x' --from athena")),
+        ("hq: pantheon archive можно", "allow", ".", "hq", False, B("pantheon archive")),
+        ("ваша сессия: pantheon uninstall можно", "allow", ".", "", False, B("pantheon uninstall")),
+        # роли отдельной сессией (№ 7)
+        ("clio сессией: запись в alexbroker — отказ", "deny", ".", "clio", False, W(os.path.join(home, alex, "x.md"))),
+        ("clio сессией: запись в ~/knowledge (agent_extra нет в тестовой политике) — отказ", "deny", ".", "clio", False, W(os.path.join(home, "knowledge/wiki/x.md"))),
+        ("prometheus сессией: ~/knowledge по agent_extra", "allow", ".", "prometheus", False, W(os.path.join(home, "knowledge/raw/x.md"))),
+        ("iris сессией: policy.toml — отказ", "deny", ".", "iris", False, W(os.path.join(home, ".claude/pantheon/policy.toml"))),
+        ("hq пишет в alexbroker (штаб не ограничен domain)", "allow", ".", "hq", False, W(os.path.join(home, alex, "x.md"))),
+        ("субагент без agent_type — отказ на board.md (№ 27)", "deny", br, "", True, W(P("board.md"))),
+        ("встроенный субагент вашей сессии пишет отчёт в handoff/", "allow", "pantheon", "general-purpose", True, W(P("handoff/x/r.md"))),
+        # прежние правила (№ 28)
+        ("attribution: пометка Claude в коммите — отказ", "deny", br, "", False,
+         B('git commit -m "x\n\nCo-' + 'Authored-By: Claude <noreply@' + 'anthropic.com>"')),
+        ("cdp: свой скрипт подключения — отказ", "deny", br, "", False,
+         ("Write", {"file_path": os.path.join(home, br, "c.mjs"), "content": "read DevTools" + "ActivePort"})),
+        ("tg-secret: чтение ключа tg-read — отказ", "deny", br, "", False,
+         B("security find-generic-" + "password -s tg-" + "read -w")),
     ]
     failed = 0
-    for name, want, pdir, role, sub, (tool, ti) in cases:
-        got = run(home, os.path.normpath(pdir), role, tool, ti, sub)
+    for case in cases:
+        name, want, pdir, role, sub, (tool, ti) = case[:6]
+        cwd = case[6] if len(case) > 6 else None
+        got = run(home, os.path.normpath(pdir), role, tool, ti, sub, cwd)
         mark = "ok  " if got == want else "FAIL"
         failed += got != want
         print(f"{mark} {name}: {got}")
+    # № 1: на системном Python 3.9 (без tomllib) guard не падает и прежние правила работают
+    if os.path.exists("/usr/bin/python3"):
+        got = run(home, br, "", "Bash", {"command": "pnpm run dev"}, python="/usr/bin/python3")
+        ok = got == "deny"
+        failed += not ok
+        cases.append(None)
+        print(f"{'ok  ' if ok else 'FAIL'} системный Python 3.9: dev-server запрещён: {got}")
     print(f"\n{len(cases) - failed} из {len(cases)} прошли")
     sys.exit(1 if failed else 0)
 

