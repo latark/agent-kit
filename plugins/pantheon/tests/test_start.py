@@ -46,8 +46,9 @@ def main():
     open(agents_file, "w").write("[]")
     open(os.path.join(home, "directions.toml"), "w").write(
         '[[direction]]\nname = "athena-broker"\nproject = "BrokerAssistant"\nfolders = ["~/projects/br"]\n'
-        'leads = ["hephaestus", "apollo"]\n'
-        '[[direction]]\nname = "hermes-alex"\nfolders = ["~/projects/alex"]\nleads = ["hephaestus"]\n')
+        'leads = ["hephaestus", "apollo"]\npnpm_store = "~/projects/br/.pnpm-store"\n'
+        '[[direction]]\nname = "hermes-alex"\nfolders = ["~/projects/alex"]\nleads = ["hephaestus"]\n'
+        'pnpm_store = "~/elsewhere/.pnpm-store"\n')
     env = {"PATH": bindir + os.pathsep + os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home,
            "PANTHEON_STATE": state, "FAKE_AGENTS": agents_file, "FAKE_LOG": log, "PANTHEON_NO_NOTIFY": "1"}
 
@@ -71,6 +72,11 @@ def main():
     open(os.path.join(agents_dir, "hephaestus-old.md"), "w").write(
         "---\nname: hephaestus-old\n---\n<!-- собрано pantheon roles build из hephaestus.tmpl — руками не править -->\n")
     r = run("domains", "build")
+    win = lambda n: json.load(open(os.path.join(state, "settings", n + ".json")))
+    check("domains build: pnpm_store внутри папок направления — npm_config_store_dir окна; вне папок — нет",
+          win("athena-broker")["env"].get("npm_config_store_dir") == os.path.realpath(os.path.join(tmp, "projects", "br"))
+          + "/.pnpm-store" and "npm_config_store_dir" not in win("workshop")["env"]
+          and "npm_config_store_dir" not in win("hermes-alex")["env"])
     hb = os.path.join(agents_dir, "hephaestus-broker.md")
     text = open(hb).read() if os.path.exists(hb) else ""
     check("roles build: лид собран из шаблона по полю leads, метка после шапки, подстановки",

@@ -983,7 +983,7 @@ def domains_build(if_changed=False):
         priv = {}
     norm = lambda p: os.path.realpath(os.path.expanduser(p))
     overlap = lambda a, b: a == b or a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/")
-    domains = {}
+    domains, stores = {}, {}
     for d in reg.get("direction") or []:
         name = d.get("name", "")
         if not re.fullmatch(r"[a-z0-9-]+", name):
@@ -998,10 +998,12 @@ def domains_build(if_changed=False):
                 continue
             folders.append(f)
         domains[name] = folders
+        if isinstance(d.get("pnpm_store"), str):
+            stores[name] = d["pnpm_store"]
     write_json(path("domains.json"), {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml. Руками не править.",
         "built": stamp(), "built_ts": now(), "domains": domains})
-    built = sandbox_build(domains, policy_path)
+    built = sandbox_build(domains, policy_path, stores)
     os.makedirs(path("locks"), exist_ok=True)
     for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):  # места обёртки heavy: роль в песочнице сама их не создаст
         open(path("locks", slot + ".lock"), "a").close()
@@ -1024,9 +1026,11 @@ def domains_build(if_changed=False):
 # Личное из [private] policy.toml закрыто для чтения всем, кроме координаторов с этой привилегией.
 # Сеть — через прокси песочницы: хосты вне списка проверяет классификатор режима auto.
 # Пути в файле — настоящие абсолютные (свои у каждого Mac): ссылка, подставленная позже, их не сдвинет.
-# Хранилище pnpm не подменяется: node_modules помнит своё хранилище, и разные хранилища у координатора и ваших
-# сессий в одной папке ломают pnpm («Unexpected store location»). Общее хранилище направления — store-dir в
-# .npmrc внутри папки направления (решается при запуске координатора, SEC-19).
+# Хранилище pnpm по умолчанию не подменяется: node_modules помнит своё хранилище, и разные хранилища у координатора и
+# ваших сессий в одной папке ломают pnpm (вопрос «modules directory will be removed», без терминала — код 0 и ничего не
+# поставлено). Общее хранилище направления — поле pnpm_store реестра (путь внутри папок направления): окно получает
+# npm_config_store_dir, а ваш терминал — тот же store-dir в .npmrc проекта (вариант А athena-0001, 15.10). Переменная
+# нужна копиям разработчиков: .npmrc вне git в них не попадает.
 # Координаторам там же — окно сжатия 200k (CTX-04).
 SANDBOX_ROOTS = ["~/projects", "~/ai/knowledge"]   # папки направлений для песочницы — только внутри этих
 SANDBOX_DOMAINS = ["registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "files.pythonhosted.org",
@@ -1143,7 +1147,7 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
     return data
 
 
-def sandbox_build(domains, policy_path):
+def sandbox_build(domains, policy_path, stores=None):
     """domains.json и policy.toml → ~/.local/state/pantheon/settings/<направление>.json и workshop.json."""
     try:
         with open(policy_path, "rb") as fh:
@@ -1172,8 +1176,16 @@ def sandbox_build(domains, policy_path):
         write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r]
         cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
         ok = [r for r in real if r]
-        write_json(os.path.join(out_dir, name + ".json"),
-                   role_settings(ok, own_real, write, cache, any(ssh_remote(r) for r in ok), deny, compact, guard))
+        data = role_settings(ok, own_real, write, cache, any(ssh_remote(r) for r in ok), deny, compact, guard)
+        store = (stores or {}).get(name)
+        if store:
+            st = os.path.realpath(os.path.expanduser(store))
+            if any(st.startswith(r.rstrip("/") + "/") for r in ok):
+                data["env"]["npm_config_store_dir"] = st
+            else:
+                alert_once(f"pnpm-store-{name}", store, f"directions.toml: pnpm_store {store} направления {name} — вне "
+                           "его папок, окно его не получит", "pantheon")
+        write_json(os.path.join(out_dir, name + ".json"), data)
 
     built = []
     for name, folders in domains.items():
