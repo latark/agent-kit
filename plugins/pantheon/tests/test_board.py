@@ -182,6 +182,52 @@ def main():
     r2 = run(env, "task", "claim", "metis-0002", "--by", "dev-sonnet", t=T0 + 520)
     check("claim: второй агент не берёт чужую аренду", r1.returncode == 0 and r2.returncode == 1)
 
+    # одновременные правки одной задачи: ни одна не теряется
+    import concurrent.futures as cf
+    with cf.ThreadPoolExecutor(8) as ex:
+        list(ex.map(lambda i: run(env, "task", "set", "athena-0001", f"next=шаг {i}", "--note", f"правка {i}", t=T0 + 600 + i), range(8)))
+    _, text = head_of(src("athena-broker", "athena-0001"))
+    check("8 одновременных правок одной задачи — все 8 строк журнала на месте", all(f"правка {i}" in text for i in range(8)))
+    run(env, "task", "set", "athena-0001", "status=todo", t=T0 + 620)
+    with cf.ThreadPoolExecutor(6) as ex:
+        rs = list(ex.map(lambda i: run(env, "task", "claim", "athena-0001", "--by", f"agent{i}", t=T0 + 630), range(6)))
+    check("6 одновременных claim — берёт ровно один", sum(r.returncode == 0 for r in rs) == 1)
+
+    # заявка направлению — карточка во «Входящих»; перенос в «Очередь» — задача направления
+    ib = os.path.join(home, "directions", "metis-pantheon", "inbox")
+    os.makedirs(ib, exist_ok=True)
+    open(os.path.join(ib, "2026-10-14-guard-rule.md"), "w", encoding="utf-8").write(
+        "# Перенести правило в guard\n\nОт: соседняя сессия\n\nСделать запрет импорта.\n")
+    nlog = os.path.join(tmp, "notify.log")
+    env2 = dict(env, PANTHEON_NOTIFY_LOG=nlog)
+    run(env2, "board", t=T0 + 640)
+    ic = card(view, "Перенести правило в guard")
+    ih, itext = head_of(ic)
+    check("заявка направлению: карточка во «Входящих» с отправителем", ih.get("Статус") == "Входящие"
+          and "От:** соседняя сессия" in itext and ih.get("Кто") == "metis-pantheon")
+    set_card(ic, "Статус", "Очередь")
+    run(env2, "board", t=T0 + 700)
+    done_dir = os.listdir(os.path.join(ib, "done")) if os.path.isdir(os.path.join(ib, "done")) else []
+    made = [f for f in os.listdir(os.path.join(home, "directions", "metis-pantheon", "tasks"))
+            if "Перенести правило" in open(os.path.join(home, "directions", "metis-pantheon", "tasks", f), encoding="utf-8").read()]
+    check("заявка → «Очередь»: задача направления с текстом заявки, файл в inbox/done", done_dir == ["2026-10-14-guard-rule.md"]
+          and len(made) == 1 and "Сделать запрет импорта" in open(os.path.join(home, "directions", "metis-pantheon", "tasks", made[0]), encoding="utf-8").read())
+
+    # умные уведомления: новый вопрос от агента — одно уведомление с карточкой; ночью — тишина
+    open(nlog, "w").close()
+    run(env, "task", "new", "--direction", "athena-broker", "--title", "Выбрать тариф", "--status", "waiting",
+        "--waiting-on", "human", "--next", "ответ", "--question", "Какой тариф?", "--option", "A", "--option", "B",
+        "--project", "BrokerAssistant", t=T0 + 710)
+    day = 1791968400  # 2026-10-14 12:00 по Москве
+    run(env2, "board", t=day)
+    lines = [l for l in open(nlog, encoding="utf-8").read().split("\n") if l]
+    check("уведомление «❓ Вопрос к вам» ведёт в карточку", any("Вопрос к вам: Выбрать тариф" in l and "file=" in l and "%D0%92%D1%8B%D0%B1%D1%80" in l for l in lines))
+    open(nlog, "w").close()
+    run(env, "task", "new", "--direction", "athena-broker", "--title", "Ночной вопрос", "--status", "waiting",
+        "--waiting-on", "human", "--next", "ответ", "--project", "BrokerAssistant", t=day + 60)
+    run(env2, "board", t=day + 12 * 3600)  # 00:00
+    check("ночью вопрос — без уведомления", not open(nlog, encoding="utf-8").read().strip())
+
     # копия не трогает Доску
     src_dir, dst = os.path.join(tmp, "src"), os.path.join(tmp, "dst")
     os.makedirs(os.path.join(src_dir, "x"))

@@ -257,8 +257,31 @@ def parse_command(cmd):
     return None
 
 
-def notify(text, title="Пантеон"):
+APP = os.path.join(HOME, "Applications", "Доска.app")
+
+
+def board_url(name="Доска.base"):
+    from urllib.parse import quote
+    return f"obsidian://open?vault={quote(os.path.basename(VIEW))}&file={quote('Доска/' + name)}"
+
+
+def notify(text, title="Пантеон", target=None):
+    """Уведомление macOS. Через программу «Доска»: её кнопка «Показать» открывает target (карточку или доску)."""
+    if os.environ.get("PANTHEON_NOTIFY_LOG"):  # для тестов: что и куда ушло бы
+        with open(os.environ["PANTHEON_NOTIFY_LOG"], "a", encoding="utf-8") as fh:
+            fh.write(f"{title}|{text}|{target or ''}\n")
+        return
     if os.environ.get("PANTHEON_NO_NOTIFY") or os.environ.get("PANTHEON_DRYRUN") == "1":
+        return
+    if os.path.isdir(APP):
+        d = path("notify")
+        os.makedirs(d, exist_ok=True)
+        for name, val in (("target.txt", target or board_url()), ("pending.txt", f"{title}\n{' '.join(str(text).split())}")):
+            tmp = os.path.join(d, name + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(val)
+            os.replace(tmp, os.path.join(d, name))
+        subprocess.run(["open", "-g", "-j", APP], capture_output=True, timeout=10)
         return
     esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
     subprocess.run(["osascript", "-e", f'display notification "{esc(text)}" with title "{esc(title)}"'],
@@ -989,6 +1012,7 @@ def install():
         git("config", "merge.gitcrypt-text.driver", f"{merge} %O %A %B")
         git("config", "merge.gitcrypt-union.name", "git-crypt union merge (дописываемые файлы)")
         git("config", "merge.gitcrypt-union.driver", f"{merge} --union %O %A %B")
+    build_app()
     uid = os.getuid()
     subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"], capture_output=True)
     r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", PLIST], capture_output=True, text=True)
@@ -998,6 +1022,27 @@ def install():
     print(f"установлено: {PLIST.replace(HOME, '~')} и команда {link.replace(HOME, '~')} → "
           f"{CURRENT.replace(HOME, '~')} → {PLUGIN.replace(HOME, '~')}")
     return 0
+
+
+def build_app():
+    """~/Applications/Доска.app: Spotlight «Доска» открывает доску; уведомления Пантеона идут от её имени."""
+    import tempfile
+    with open(os.path.join(LIB, "board-app.applescript"), encoding="utf-8") as fh:
+        src = fh.read().replace("BOARD_URL", board_url())
+    with tempfile.TemporaryDirectory() as td:
+        sp = os.path.join(td, "app.applescript")
+        with open(sp, "w", encoding="utf-8") as fh:
+            fh.write(src)
+        os.makedirs(os.path.dirname(APP), exist_ok=True)
+        r = subprocess.run(["osacompile", "-o", APP, sp], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"программа «Доска» не собрана: {r.stderr.strip()}", file=sys.stderr)
+        return
+    plist = os.path.join(APP, "Contents", "Info.plist")
+    subprocess.run(["plutil", "-replace", "LSUIElement", "-bool", "YES", plist], capture_output=True)  # без значка в Dock
+    subprocess.run(["plutil", "-replace", "CFBundleIdentifier", "-string", "com.latark.pantheon-board", plist],
+                   capture_output=True)
+    subprocess.run(["codesign", "--force", "--sign", "-", APP], capture_output=True)
 
 
 def uninstall():
@@ -1034,9 +1079,20 @@ def board():
     with lock("board", block=False) as got:
         if not got:
             return 0
+        try:
+            with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
+                projects = {d.get("name"): d.get("project") for d in tomllib.load(fh).get("direction") or []}
+        except (OSError, ValueError):
+            projects = {}
         lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
                              alert=lambda k, v, text, who="board", note=None: alert_once(k, v, text, who, note),
-                             notify=notify, primary=primary)
+                             notify=lambda text, target=None: notify(text, target=target), primary=primary,
+                             projects=projects)
+        once_dir = path("once")  # отметки «уже сообщали» старше 90 дней — убрать: папка не растёт без конца
+        for f in os.listdir(once_dir) if os.path.isdir(once_dir) else []:
+            fp = os.path.join(once_dir, f)
+            if now() - os.path.getmtime(fp) > 90 * 86400:
+                os.remove(fp)
     for ln in lines:
         print(ln)
     return 0
@@ -1137,16 +1193,8 @@ def task_cmd(rest):
             for tid, h in T.ready(PANTHEON, now(), opt("--direction"), opt("--owner")):
                 print(f"{tid}\t{T.PRIORITY.get(h.get('priority', 2), '')}\t{h.get('due') or '—'}\t{h.get('title')}")
         elif sub == "claim" and args and opt("--by"):
-            until = T.now_iso(now() + 3600 * float(opt("--hours") or 1))
-            tasks = T.load_tasks(PANTHEON)
-            h = tasks.get(args[0], (None, {}, None))[1]
-            if h.get("claimed_by") not in (None, opt("--by")) and (h.get("claimed_until") or "") > T.now_iso(now()):
-                print(f"{args[0]} уже взята: {h['claimed_by']} до {h['claimed_until']}", file=sys.stderr)
-                return 1
-            T.task_set(PANTHEON, now(), args[0], {"claimed_by": opt("--by"), "claimed_until": until,
-                                                  "status": "doing" if h.get("status") == "todo" else h.get("status")},
-                       note=f"взял {opt('--by')} до {until[11:16]}")
-            print(f"{args[0]}: взята {opt('--by')} до {until}")
+            p, head = T.task_claim(PANTHEON, now(), args[0], opt("--by"), float(opt("--hours") or 1))
+            print(f"{args[0]}: взята {opt('--by')} до {head.get('claimed_until')}")
         else:
             print(f"pantheon task: не понял «{' '.join(rest)}»", file=sys.stderr)
             return 2

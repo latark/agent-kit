@@ -11,6 +11,8 @@
 пишется в журнал владельца ~/.local/state/pantheon/owner-log/board.jsonl. Роли в папку доски писать не могут
 (guard: вся ~/ai/pantheon-view; песочница: её нет в allowWrite), поэтому ход владельца им не подделать.
 """
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -336,11 +338,46 @@ def append_log(body, line):
     return body.rstrip("\n") + f"\n- {line}\n"
 
 
-def task_set(pantheon, t, tid, changes, note=None, actor="агент"):
+@contextlib.contextmanager
+def dir_lock(d):
+    """Блокировка папки задач (файл .lock в ней же: роли в песочнице пишут только в папку своего направления)."""
+    os.makedirs(d, exist_ok=True)
+    fh = open(os.path.join(d, ".lock"), "a")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        fh.close()
+
+
+def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None):
     tasks = load_tasks(pantheon)
     if tid not in tasks:
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
-    path, head, body = tasks[tid]
+    with dir_lock(os.path.dirname(tasks[tid][0])):
+        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck)
+
+
+def task_claim(pantheon, t, tid, by, hours=1.0):
+    """Аренда задачи: проверка «не взята ли» и запись — под одной блокировкой."""
+    def precheck(head):
+        cu = head.get("claimed_until") or ""
+        if head.get("claimed_by") not in (None, by) and cu > now_iso(t):
+            raise ValueError(f"{tid} уже взята: {head['claimed_by']} до {cu}")
+    until = now_iso(t + 3600 * float(hours))
+    return task_set(pantheon, t, tid, {"claimed_by": by, "claimed_until": until, "status": "doing"},
+                    note=f"взял {by} до {until[11:16]}", precheck=precheck)
+
+
+def _task_set_locked(path, t, tid, changes, note, actor, precheck):
+    head, body = read(path)  # заново, уже под блокировкой: чужая правка между чтением и записью не потеряется
+    if not head or head.get("id") != tid:
+        raise ValueError(f"задача {tid} изменилась — повторите")
+    if precheck:
+        precheck(head)
+    if changes.get("status") == "doing" and head.get("status") not in ("todo", "doing") and "claimed_by" in changes:
+        changes = dict(changes, status=head.get("status"))
     for k, v in changes.items():
         if k not in FIELDS or k in ("type", "id", "created", "schema_version"):
             raise ValueError(f"поле {k} так не меняется")
@@ -531,9 +568,11 @@ def _live(head, t):
     return (head.get("updated") or "") >= now_iso(t - 7 * 86400)
 
 
-def _summary(tasks, t):
+def _summary(tasks, t, inbox=None):
     today = now_iso(t)[:10]
-    rows = {"wait": [], "overdue": [], "doing": [], "done": []}
+    rows = {"wait": [], "overdue": [], "doing": [], "done": [],
+            "inbox": [f"[[Доска/{card_name({'title': it['title']})}|{it['title']}]] · {it['direction']}"
+                      for it in (inbox or {}).values()]}
     for tid, (p, h, _) in sorted(tasks.items()):
         name = f"[[Доска/{card_name(h)}|{h.get('title')}]] · {h.get('project')}"
         if h.get("status") == "waiting" and h.get("waiting_on") == "human":
@@ -546,22 +585,88 @@ def _summary(tasks, t):
             rows["done"].append(name)
     sec = lambda title, xs: f"## {title} ({len(xs)})\n\n" + ("\n".join(f"- {x}" for x in xs) if xs else "—") + "\n"
     return ("# Сводка\n\n" + sec("🔴 Ждёт вас", rows["wait"]) + "\n" + sec("⏰ Просрочено", rows["overdue"]) + "\n"
+            + sec("📥 Входящие заявки направлениям", rows["inbox"]) + "\n"
             + sec("🟡 В работе", rows["doing"]) + "\n" + sec("🟢 Готово за сутки", rows["done"])), rows
 
 
-def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None, primary=True):
+QUIET_HOURS = (23, 8)  # ночью сразу не уведомляем: всё попадёт в утреннюю сводку
+
+
+def card_url(vault, name):
+    from urllib.parse import quote
+    return f"obsidian://open?vault={quote(vault)}&file={quote('Доска/' + name + '.md')}"
+
+
+def inbox_items(pantheon):
+    """Входящие направлений: свободные заявки directions/<имя>/inbox/*.md (разбирает координатор)."""
+    out, d = {}, os.path.join(pantheon, "directions")
+    for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        ib = os.path.join(d, name, "inbox")
+        if not DIRECTION_RE.fullmatch(name) or not os.path.isdir(ib):
+            continue
+        for f in sorted(os.listdir(ib)):
+            path = os.path.join(ib, f)
+            if not f.endswith(".md") or f.startswith(".") or not os.path.isfile(path) or os.path.islink(path):
+                continue
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read(20000)
+            except (OSError, UnicodeDecodeError):
+                continue
+            m = re.search(r"^# (.+)$", text, re.M)
+            frm = re.search(r"^От: (.+)$", text, re.M)
+            cid = "in-" + hashlib.sha1(f"{name}/{f}".encode()).hexdigest()[:10]
+            out[cid] = {"path": path, "direction": name, "file": f, "title": (m.group(1).strip() if m else f[:-3]),
+                        "from": frm.group(1).strip() if frm else None, "text": text}
+    return out
+
+
+def render_inbox_card(item, project, conflict=None):
+    proj = project or item["direction"]
+    card = {"Статус": "Входящие", "Проект": f"{PROJECT_MARK.get(proj, '▪️')} {proj}".strip(),
+            "Внимание": "⚠ конфликт" if conflict else "📥 заявка направлению", "Кто": item["direction"],
+            "Дальше": "разобрать: в «Очередь» — станет задачей направления, в «Отменено» — в архив",
+            NOTE_KEY: "", "id": item["id"]}
+    body = re.sub(r"^# .+\n", "", item["text"], count=1, flags=re.M)
+    body = re.sub(r"^От: .+\n", "", body, count=1, flags=re.M).strip()
+    lines = body.split("\n")
+    short = "\n".join(lines[:30]) + ("\n\n…" if len(lines) > 30 else "")
+    parts = [f"> [!note] 📥 Входящие · {card['Проект']} · 👤 {item['direction']}"
+             + (f"\n> **От:** {item['from']}" if item.get("from") else "")]
+    if conflict:
+        parts.append(f"> [!warning] {conflict}")
+    parts.append(short)
+    rel = f"directions/{item['direction']}/inbox/{item['file']}"
+    parts.append("✍️ Перенесите в «Очередь» — заявка станет задачей направления; в «Отменено» — уйдёт в архив входящих.\n\n"
+                 f"<small>Источник: `{rel}`</small>")
+    return card, "\n" + "\n\n".join(parts) + "\n"
+
+
+def _inbox_done(item, t, prefix=""):
+    done = os.path.join(os.path.dirname(item["path"]), "done")
+    os.makedirs(done, exist_ok=True)
+    os.replace(item["path"], os.path.join(done, prefix + item["file"]))
+
+
+def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None, primary=True, projects=None):
     """Один проход доски. → список строк «что сделано» (для журнала тика)."""
     alert = alert or (lambda *a, **k: None)
     notify = notify or (lambda *a, **k: None)
-    done_lines = []
+    projects = projects or {}
+    vault = os.path.basename(os.path.dirname(os.path.abspath(board)))
+    done_lines, events, moved_by_owner = [], [], set()
     os.makedirs(board, exist_ok=True)
     try:
         with open(state_path, encoding="utf-8") as fh:
             state = json.load(fh)
     except (OSError, ValueError):
         state = {}
+    first_run = "cards" not in state
     cards = state.setdefault("cards", {})
     tasks = load_tasks(pantheon)
+    inbox = inbox_items(pantheon)
+    for cid, it in inbox.items():
+        it["id"] = cid
     rel = lambda p: os.path.relpath(p, pantheon)
 
     # 1. что сейчас лежит в доске
@@ -591,7 +696,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         if t - mtime[p] < QUIET or (name.startswith(UNTITLED) and t - mtime[p] < 600):
             continue  # владелец ещё пишет карточку; без названия ждём, пока назовёт (или 10 минут)
         text = (head.get(NOTE_KEY) or "").strip() if isinstance(head.get(NOTE_KEY), str) else ""
-        title = name if not name.startswith(("Без названия", "Untitled")) else (text or body.strip().split("\n")[0] or name)
+        title = name if not name.startswith(UNTITLED) else (text or body.strip().split("\n")[0] or name)
         try:
             tid, path = task_new(pantheon, t, "inbox", title, project="входящие", owner="zeus", status="inbox",
                                  actor="владелец")
@@ -607,25 +712,58 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         done_lines.append(f"новая задача {tid} из карточки «{name}»")
         tasks = load_tasks(pantheon)
 
-    # 3. ходы владельца на известных карточках (перенос — сразу: он делается одним движением)
-    busy = set()
+    # 3. ходы владельца на известных карточках (перенос — сразу: он делается одним движением;
+    #    заметку Obsidian сохраняет по Enter или уходу из поля, галочку — щелчком: берём сразу)
     for cid, (p, head, body) in present.items():
         st = cards.get(cid)
-        if cid not in tasks or not st:
+        if not st or digest(p) == st.get("card_hash"):
+            continue  # карточку никто не трогал
+        want = head.get("Статус")
+        note = head.get(NOTE_KEY) if isinstance(head.get(NOTE_KEY), str) and head.get(NOTE_KEY).strip() else None
+        if cid in inbox:  # заявка направлению
+            it = inbox[cid]
+            if note:
+                with open(it["path"], "a", encoding="utf-8") as fh:
+                    fh.write(f"\n\n- {now_iso(t)[:16].replace('T', ' ')} — владелец: {' '.join(note.split())[:1000]}\n")
+                _owner_log(log_path, t, kind="note", id=cid, text=note.strip()[:1000], inbox=rel(it["path"]))
+                done_lines.append(f"{cid}: заметка владельца к заявке")
+            if want in ("Очередь", "В работе"):
+                body_text = re.sub(r"^# .+\n", "", it["text"], count=1, flags=re.M).strip()
+                tid, tp = task_new(pantheon, t, it["direction"], it["title"], project=projects.get(it["direction"]),
+                                   owner=it["direction"], status="todo" if want == "Очередь" else "doing",
+                                   next="разобрать заявку" if want == "В работе" else None, actor="владелец")
+                th, tb = read(tp)
+                tb = tb.replace("\n## Журнал", f"\n{body_text}\n\n## Журнал", 1)
+                write(tp, th, append_log(tb, f"{now_iso(t)[:16].replace('T', ' ')} — владелец: заявка из входящих → «{want}»"))
+                _inbox_done(it, t)
+                _owner_log(log_path, t, kind="inbox-accept", id=cid, task=tid, dst=want, inbox=rel(it["path"]))
+                done_lines.append(f"{cid}: заявка стала задачей {tid} («{want}»)")
+                os.remove(p)
+                cards.pop(cid, None)
+                inbox.pop(cid)
+                moved_by_owner.add(tid)
+            elif want == "Отменено":
+                _inbox_done(it, t, "отклонено-")
+                _owner_log(log_path, t, kind="inbox-drop", id=cid, inbox=rel(it["path"]))
+                done_lines.append(f"{cid}: заявка в архив входящих")
+                os.remove(p)
+                cards.pop(cid, None)
+                inbox.pop(cid)
+            elif want != "Входящие":
+                st["conflict_at"] = t
+                st["conflict"] = "заявку можно перенести в «Очередь», «В работе» или «Отменено»"
+            continue
+        if cid not in tasks:
             continue
         src_path, src_head, _ = tasks[cid]
-        if digest(p) == st.get("card_hash"):
-            continue  # карточку никто не трогал
         src_moved = digest(src_path) != st.get("src_hash")
-        want = head.get("Статус")
-        # заметку Obsidian сохраняет по Enter или уходу из поля, галочку — щелчком: берём сразу
-        note = head.get(NOTE_KEY) if isinstance(head.get(NOTE_KEY), str) and head.get(NOTE_KEY).strip() else None
         answer = checked_option(body) if src_head.get("options") else None
         if want != st.get("synced"):
             if src_moved:
                 st["conflict_at"] = t
                 st["conflict"] = f"пока вы переносили карточку в «{want}», агент изменил задачу — статус сейчас «{label_of(src_head)}». Перенесите ещё раз, если нужно."
                 done_lines.append(f"{cid}: конфликт — ход «{want}» не применён")
+                events.append((f"⚠ Перенос не применён: {src_head.get('title')}", cid))
             elif want not in OWNER_TARGETS:
                 st["conflict_at"] = t
                 st["conflict"] = f"в «{want}» карточку переносит агент; вы можете: {', '.join(OWNER_TARGETS)}."
@@ -641,10 +779,11 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                     task_set(pantheon, t, cid, ch, note=f"перенёс «{st.get('synced')}» → «{want}»", actor="владелец")
                     _owner_log(log_path, t, kind="move", id=cid, src=st.get("synced"), dst=want)
                     done_lines.append(f"{cid}: ход владельца «{st.get('synced')}» → «{want}»")
-                    if want == "В работе":
+                    moved_by_owner.add(cid)
+                    if want == "В работе":  # будит исполнителя (с шага 1.4 — pantheon wake); вас не уведомляем
                         alert(f"wake-{cid}-{now_iso(t)[:16]}", "1",
                               f"«Сделать сейчас»: {src_head.get('title')} ({cid}) — разбудить {src_head.get('owner') or src_head.get('direction')}",
-                              "board", note="Сделать сейчас")
+                              "board")
                     st.pop("conflict", None)
                     st.pop("conflict_at", None)
                 except ValueError as e:
@@ -661,6 +800,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             task_set(pantheon, t, cid, ch, note=f"ответ: {answer}", actor="владелец")
             _owner_log(log_path, t, kind="answer", id=cid, answer=answer)
             done_lines.append(f"{cid}: ответ владельца «{answer}»")
+            moved_by_owner.add(cid)
         elif answer == "?":
             st["conflict_at"] = t
             st["conflict"] = "отмечено несколько вариантов — оставьте один"
@@ -674,7 +814,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             done_lines.append(f"{tid}: разблокирована ({w} готова)")
     tasks = load_tasks(pantheon)
 
-    # 5. застрявшие и просроченные — одна тревога на задачу
+    # 5. застрявшие и просроченные — одна тревога на задачу (вам — в утренней сводке)
     today = now_iso(t)[:10]
     for tid, (_, h, _) in (tasks.items() if primary else []):
         if h.get("status") == "doing" and (h.get("updated") or "") < now_iso(t - 3 * 86400):
@@ -682,25 +822,28 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         if h.get("due") and h["due"] < today and h.get("status") not in ("done", "dropped"):
             alert(f"overdue-{tid}", h["due"], f"просрочена: {h.get('title')} ({tid}), срок {h['due']}", "board")
 
-    # 6. перерисовать карточки
-    names = {}
+    # 6. перерисовать карточки: задачи и заявки направлений
+    names, items = {}, []
     for tid, (p, h, b) in sorted(tasks.items()):
-        if not _live(h, t):
-            continue
-        name = card_name(h)
+        if _live(h, t):
+            items.append((tid, card_name(h), p, h, b))
+    for cid, it in inbox.items():
+        items.append((cid, card_name({"title": it["title"], "id": cid}), it["path"], None, None))
+    for cid, name, src, h, b in items:
         if name in names.values():
-            name = f"{name} ({tid})"
-        names[tid] = name
-        st = cards.setdefault(tid, {})
+            name = f"{name} ({cid})"
+        names[cid] = name
+        st = cards.setdefault(cid, {})
         if st.get("conflict") and t - st.get("conflict_at", t) > 86400:
             st.pop("conflict", None)
             st.pop("conflict_at", None)
-        card, cbody = render_card(h, b, rel(p), t, st.get("conflict"))
+        if h is None:
+            card, cbody = render_inbox_card(inbox[cid], projects.get(inbox[cid]["direction"]), st.get("conflict"))
+        else:
+            card, cbody = render_card(h, b, rel(src), t, st.get("conflict"))
         target = os.path.join(board, name + ".md")
-        old = present.get(tid)
-        if old and (digest(old[0]) != seen.get(tid) or tid in busy):
-            if tid in busy:
-                st["synced"] = old[1].get("Статус")
+        old = present.get(cid)
+        if old and digest(old[0]) != seen.get(cid):
             continue  # владелец правит карточку прямо сейчас — следующий проход
         if old and old[0] != target:
             os.remove(old[0])  # задачу переименовали
@@ -711,29 +854,41 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                 cur = fh.read()
         if cur != new_text:
             write(target, card, cbody, CARD_ORDER)
-        st.update({"file": name, "synced": card["Статус"], "src_hash": digest(p), "card_hash": digest(target)})
-    # карточки ушедших задач
-    for tid, (p, _, _) in present.items():
-        if tid not in names:
-            st = cards.get(tid, {})
+        prev = st.get("synced")
+        if (card["Статус"] == HUMAN_WAIT and prev != HUMAN_WAIT and not first_run and cid not in moved_by_owner):
+            events.append((f"❓ Вопрос к вам: {h.get('title') if h else name}", cid))
+        st.update({"file": name, "synced": card["Статус"], "src_hash": digest(src), "card_hash": digest(target)})
+    # карточки ушедших задач и разобранных заявок
+    for cid, (p, _, _) in present.items():
+        if cid not in names:
+            st = cards.get(cid, {})
             if digest(p) == st.get("card_hash"):
                 os.remove(p)
-                cards.pop(tid, None)
-    for tid in list(cards):
-        if tid not in names and tid not in present:
-            cards.pop(tid, None)
+                cards.pop(cid, None)
+    for cid in list(cards):
+        if cid not in names and cid not in present:
+            cards.pop(cid, None)
 
-    # 7. сводка и вид
-    text, rows = _summary(tasks, t)
+    # 7. сводка, уведомления, вид
+    text, rows = _summary(tasks, t, inbox)
     sp = os.path.join(board, "Сводка.md")
     old = open(sp, encoding="utf-8").read() if os.path.exists(sp) else ""
     if old != text:
         with open(sp, "w", encoding="utf-8") as fh:
             fh.write(text)
-    if datetime.fromtimestamp(t).hour >= 8 and state.get("digest_day") != today:
+    hour = datetime.fromtimestamp(t).hour
+    night = hour >= QUIET_HOURS[0] or hour < QUIET_HOURS[1]
+    if hour >= QUIET_HOURS[1] and state.get("digest_day") != today:
         state["digest_day"] = today
-        if rows["wait"] or rows["overdue"]:
-            notify(f"Ждёт вас: {len(rows['wait'])}, просрочено: {len(rows['overdue'])}. Сводка — в Obsidian, «Доска».")
+        if rows["wait"] or rows["overdue"] or rows["inbox"]:
+            notify(f"Доброе утро. Ждёт вас: {len(rows['wait'])}, просрочено: {len(rows['overdue'])}, "
+                   f"входящих заявок: {len(rows['inbox'])}.", card_url(vault, "Сводка"))
+    elif events and not night:
+        if len(events) == 1:
+            notify(events[0][0], card_url(vault, names.get(events[0][1], "Сводка")))
+        else:
+            notify(f"На доске {len(events)} новых события: " + "; ".join(e[0] for e in events[:3]),
+                   card_url(vault, "Сводка"))
     bp = os.path.join(board, "Доска.base")
     if not os.path.exists(bp):
         with open(bp, "w", encoding="utf-8") as fh:
