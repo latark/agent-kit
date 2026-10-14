@@ -317,6 +317,19 @@ r = subprocess.run([sys.executable, "-I", "-c", driver, os.path.join(PLUGIN, "li
                    capture_output=True, text=True)
 check("неожиданный сбой без .mcp.json: молча", r.returncode == 0 and r.stdout == "")
 
+# 9d. Другой Mac: .mcp.json пришёл из git, одобрений и отпечатков нет — подсказка предлагает apply, после него молчит
+other = project(home, "other-mac", {"package.json": pkg(next="16.0.0"),
+                                    ".mcp.json": {"mcpServers": {"chrome-devtools": CHROME, "next-devtools": NEXT}}})
+r = hint(other)
+check("другой Mac: подсказка предлагает apply", "project-tools apply" in r.stdout and "не по карте" in r.stdout)
+check("другой Mac: check — код 3", run(home, "check", "--dir", other).returncode == 3)
+run(home, "apply", "--dir", other)
+check("после apply подсказка молчит", hint(other).stdout == "")
+nostack = project(home, "nostack", {"README.md": "x", ".mcp.json": {"mcpServers": {"g": {"command": "bash", "args": ["g.sh"]}}},
+                                    ".claude/settings.local.json": {"enableAllProjectMcpServers": True}})
+r = hint(nostack)
+check("проект без стека с «одобрять всё»: подсказка предлагает apply", "project-tools apply" in r.stdout)
+
 # 9c. Отказы из ~/.claude.json, подмена HOME, оборванный блок Codex, сбой записи посередине, старый Python
 cjr = project(home, "cjr", {"package.json": pkg(next="16.0.0")})
 with open(os.path.join(home, ".claude.json"), "w") as fh:

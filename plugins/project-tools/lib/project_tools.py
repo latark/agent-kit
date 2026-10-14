@@ -319,7 +319,7 @@ class Plan:
     def __init__(self, root, is_git):
         self.root, self.is_git = root, is_git
         self.stacks, self.wanted = [], {}
-        self.changes, self.notes, self.missing, self.drift = [], [], [], []
+        self.changes, self.notes, self.missing, self.drift, self.unrecorded = [], [], [], [], []
         self.writes = {}  # путь → новое содержимое (текст)
         self.originals = {}  # путь → содержимое при чтении: apply не пишет, если файл успели изменить
         self.fingerprints = {}  # одобренный сервер → отпечаток записи, который apply запомнит
@@ -480,6 +480,11 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
                            f"не ваше — `project-tools skip {shown}`")
         else:
             p.fingerprints[name] = now
+            if not was:
+                p.unrecorded.append(name)
+    if p.unrecorded:
+        p.notes.append(f"отпечатки одобренных серверов не записаны на этом Mac: {names(p.unrecorded)} — apply запомнит "
+                       "их, и подсказка заметит подмену после git pull")
     if new_local_plugins != (local.get("enabledPlugins") or {}):
         new_local["enabledPlugins"] = new_local_plugins
     if new_local != local:
@@ -595,7 +600,7 @@ def cmd_check(args):
     guard_root(root)
     p = make_plan(root, is_git, args.update or ())
     report(p, applied=False)
-    return 3 if p.changes or p.drift else 0
+    return 3 if p.changes or p.drift or p.unrecorded else 0
 
 
 def save_approved(root, fingerprints):
@@ -695,7 +700,7 @@ def cmd_hint(_args):
             if os.path.lexists(os.path.join(root, ".mcp.json")):
                 hint_warning(e)
             return 0
-        if not p.missing and not p.drift:
+        if not (p.missing or p.drift or p.changes or p.unrecorded):
             return 0
         lines, out = [], {}
         if p.drift:
@@ -709,6 +714,13 @@ def cmd_hint(_args):
                          f"{', '.join(p.missing)}. Один раз предложи владельцу: «Подключить инструменты проекта?» "
                          "(навык project-tools, команда `project-tools apply`; «не надо» — `project-tools skip`). "
                          "В окне роли Пантеона не подключай — `project-tools check` и вопрос владельцу.")
+        elif p.changes or p.unrecorded:
+            # например, другой Mac: .mcp.json пришёл из git, а одобрений и отпечатков здесь нет
+            why = ([f"{len(p.changes)} правок по карте"] if p.changes else []) + \
+                  ([f"не записаны отпечатки: {names(p.unrecorded)}"] if p.unrecorded else [])
+            lines.append(f"project-tools: настройки MCP проекта на этом Mac не по карте ({'; '.join(why)}). Один раз "
+                         "предложи владельцу `project-tools apply` (что поменяется — `project-tools check`). "
+                         "В окне роли Пантеона не применяй — только вопрос владельцу.")
         out["hookSpecificOutput"] = {"hookEventName": "SessionStart", "additionalContext": " ".join(lines)}
         print(json.dumps(out, ensure_ascii=False))
     except Exception as e:
