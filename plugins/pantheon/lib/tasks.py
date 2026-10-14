@@ -271,7 +271,7 @@ def now_iso(t):
 
 
 def new_id(pantheon, direction, prefix=None):
-    prefix = prefix or re.sub(r"[^a-z0-9]", "", direction.split("-")[0])[:6] or "task"
+    prefix = prefix or re.sub(r"[^a-z0-9]", "", direction.split("-")[0])[:8] or "task"
     nums = [int(i.split("-")[1]) for i in load_ids(pantheon) if i.startswith(prefix + "-")]
     return f"{prefix}-{max(nums, default=0) + 1:04d}"
 
@@ -389,7 +389,8 @@ def label_of(head):
 
 
 def card_name(head):
-    name = re.sub(r'[\\/:*?"<>|#^\[\]]', "·", str(head.get("title") or head.get("id")))[:90].strip()
+    name = str(head.get("title") or head.get("id")).replace(":", "꞉").replace("/", "⁄")  # похожие знаки, допустимые в имени
+    name = re.sub(r'[\\*?"<>|#^\[\]]', "·", name)[:90].strip()
     return name or str(head.get("id"))
 
 
