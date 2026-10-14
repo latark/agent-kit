@@ -1243,6 +1243,16 @@ PARTS = os.path.join(AGENTS, "_parts")
 LEAD_ROLES = ("hephaestus", "apollo")
 ROLE_MARK = "<!-- собрано pantheon roles build из {tmpl} — правят шаблон, а не этот файл -->"
 ROLE_NAME = re.compile(r"[a-z][a-z0-9-]{0,40}")
+# значения из реестра в шаблон лида: одна строка без разметки YAML. Реестр может править штаб из песочницы, а шапка
+# роли (hooks, mcpServers) запускает команды вне её — перевод строки в project дописал бы в шапку хук (проверка
+# безопасности 15.10). Сверх образца — сверка ключей шапки до и после подстановки.
+ROLE_PROJECT = re.compile(r"[\w][\w .,()«»+-]{0,59}")
+ROLE_FOLDER = re.compile(r"~?/[\w.-]+(?:/[\w.-]+)*")
+
+
+def _head_keys(text):
+    end = text.find("\n---\n", 3) if text.startswith("---\n") else -1
+    return [ln.split(":", 1)[0] for ln in text[4:end].splitlines() if re.match(r"[A-Za-z_]", ln)] if end > 0 else None
 
 
 def _role_text(tmpl_text):
@@ -1285,9 +1295,18 @@ def roles_build():
             if base not in (d.get("leads") or []) or not re.fullmatch(r"[a-z0-9]+-[a-z0-9-]+", name):
                 continue
             short = name.split("-", 1)[1]
-            want[f"{base}-{short}.md"] = (f, text.replace("{{direction}}", name).replace("{{short}}", short)
-                                          .replace("{{project}}", d.get("project", ""))
-                                          .replace("{{folders}}", ", ".join(d.get("folders") or [])))
+            project, folders = d.get("project", ""), d.get("folders") or []
+            if not (isinstance(project, str) and (not project or ROLE_PROJECT.fullmatch(project))) \
+                    or not isinstance(folders, list) \
+                    or not all(isinstance(x, str) and ROLE_FOLDER.fullmatch(x) for x in folders):
+                errors.append(f"{f} → {base}-{short}.md: project или folders направления {name} не по образцу")
+                continue
+            out_text = (text.replace("{{direction}}", name).replace("{{short}}", short)
+                        .replace("{{project}}", project).replace("{{folders}}", ", ".join(folders)))
+            if _head_keys(out_text) != _head_keys(text):
+                errors.append(f"{f} → {base}-{short}.md: подстановка поменяла шапку роли")
+                continue
+            want[f"{base}-{short}.md"] = (f, out_text)
     made = []
     for fname, (tmpl, text) in sorted(want.items()):
         out = os.path.join(AGENTS, fname)

@@ -2239,17 +2239,21 @@ def check_protect_config(event, tool, tool_input):
 #   terminal (SEC-30) — ввод в терминал: osascript, tmux send-keys, screen -X stuff, cliclick. Такой ввод Claude Code
 #            помечает как ваш (origin.kind: human), и журнал ваших слов принял бы его за ваши слова.
 
-READ_TOOLS = {"Read", "Grep", "Glob", "NotebookRead"}
+READ_TOOLS = {"Read", "Grep", "Glob", "NotebookRead", "WebFetch"}
 DEFAULT_PRIVATE = {"roles": ["hq", "chiron"], "coordinators": ["mnemo-brain"],
                    "paths": ["~/ai/knowledge/me", "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.git/git-crypt",
                              "~/.local/state/pantheon/owner-log/zeus.md"]}
 # команды, которые обходят папку целиком: путь-предок личной папки для них — то же, что сама папка
 RECURSIVE = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "fd", "tar", "gtar", "zip", "rsync", "cp", "gcp",
              "ditto", "qmd"}
-CDP_TARGET = re.compile(r"(?:127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0):93(?:3[3-9])\b|cdp-daemon", re.I)
+# порт демона или браузера — отдельным числом, при любой записи адреса петли (127.1, 0x7f000001, [::ffff:…]) и без
+# адреса вовсе (nc localhost 9222, socket.connect((h, 9222))): разбор адреса здесь не граница, ловим по числу
+CDP_TARGET = re.compile(r"(?<![\w.])93(?:3[3-9])(?![\w.])|cdp-daemon", re.I)
 # отладочный порт самого браузера (Comet — 9222, Chrome 144+ — порт из DevToolsActivePort): мимо демона — никому из ролей
-CDP_DIRECT = re.compile(r"(?:127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0):9222\b|DevToolsActivePort|/devtools/(?:browser|page)/"
-                        r"|remote-debugging", re.I)
+CDP_DIRECT = re.compile(r"(?<![\w.])9222(?![\w.])|DevToolsActivePort|/devtools/(?:browser|page)/|remote-debugging", re.I)
+# WebFetch ролей — только наружу: адрес петли и локальной сети — это демон браузера или dev-сервер владельца
+LOCAL_URL = re.compile(r"^\w+://(?:[^/@]*@)?(?:localhost|[\d.]+|0x[0-9a-f]+|\[[0-9a-f:.]*\]|[^/:]*\.local)(?::\d+)?(?:/|$)",
+                       re.I)
 CDP_READERS = {"prometheus"}
 CDP_ACTORS = {"workshop"}
 PROTECTED_BRANCHES = {"main", "master"}
@@ -2276,6 +2280,20 @@ def private_ok(policy, role, sub, pdir):
     if role in conf["roles"]:
         return True
     return not sub and any(privileged(policy, c, role, pdir) for c in conf["coordinators"])
+
+
+def _glob_reaches(p, priv):
+    """Путь с * ? [ ] может раскрыться в личное: ~/ai/knowledge/m?/x.md, ~/ai/*/me, ~/ai/kn*."""
+    if not re.search(r"[*?\[]", p):
+        return False
+    import fnmatch
+    pat = [c for c in p.split("/") if c]
+    for x in priv:
+        parts = [c for c in x.split("/") if c]
+        n = min(len(pat), len(parts))
+        if "**" in pat[:n] or all(fnmatch.fnmatchcase(parts[i], pat[i]) for i in range(n)):
+            return True
+    return False
 
 
 def _pathlike(w):
@@ -2326,7 +2344,8 @@ def check_private(event, tool, tool_input):
                     continue
                 for d in (cwds if not w.startswith(("/", "~", "$")) else [cwd]):
                     p = _expand(w, d)
-                    if _inside(p, priv) or (name in RECURSIVE and any(_inside(x, [p]) for x in priv)):
+                    if _inside(p, priv) or (name in RECURSIVE and any(_inside(x, [p]) for x in priv)) \
+                            or _glob_reaches(p, priv):
                         hits.append(p)
         hits += [p for p in write_targets(event, tool, tool_input)[1] if p != UNRESOLVED and _inside(p, priv)]
     elif tool in EDIT_TOOLS:
@@ -2344,6 +2363,9 @@ def check_private(event, tool, tool_input):
 
 def check_cdp_role(event, tool, tool_input):
     ok, role, sub, _ = limited(event)
+    if ok and tool == "WebFetch" and LOCAL_URL.match((tool_input.get("url") or "").strip()):
+        return ("Правило cdp-role: WebFetch ролей — только в интернет; локальные адреса (демон браузера, чужой "
+                "dev-сервер) закрыты. Своё приложение — chrome-devtools в своей worktree.")
     if not ok or tool != "Bash":
         return None
     cmd = tool_input.get("command") or ""
@@ -2362,6 +2384,26 @@ def check_cdp_role(event, tool, tool_input):
     return (f"Правило cdp-role: роль «{role or 'субагент'}» не пользуется браузером с входами владельца (демон CDP). "
             "Читать сайт — поручение prometheus через координатора; действие на сайте — мастерская после «да» владельца. "
             "Проверить своё приложение на localhost — chrome-devtools-mcp --isolated или Playwright (talos).")
+
+
+def _gh_api_writes(args):
+    """gh api … пишет: метод не GET, поля -f/-F/--input (gh тогда шлёт POST) или аргумент не разобрать."""
+    for i, a in enumerate(args):
+        if a is None:
+            return True
+        if a in ("-X", "--method"):
+            m = args[i + 1] if i + 1 < len(args) else None
+            if m is None or m.upper() != "GET":
+                return True
+        elif a.startswith(("--method=", "-X")) and a not in ("-X",):
+            if a.split("=", 1)[-1].lstrip("-X").upper() != "GET":
+                return True
+        elif a in ("-f", "-F", "--field", "--raw-field", "--input") or a.startswith(("--field=", "--raw-field=",
+                                                                                      "--input=", "-f", "-F")):
+            if not any(x in ("-X", "--method") and i2 + 1 < len(args) and (args[i2 + 1] or "").upper() == "GET"
+                       for i2, x in enumerate(args)):
+                return True
+    return False
 
 
 def _git_sub(texts):
@@ -2425,7 +2467,8 @@ def push_problem(texts, cwd, moved):
         if up and "/" in up:
             dests.append(up.split("/", 1)[1])
     for spec in pos[1:]:
-        spec = spec.lstrip("+")
+        if spec.startswith("+"):
+            return f"принудительная отправка ({spec})"
         src, _, dst = spec.partition(":")
         if ":" in spec and not src:
             return f"удаление ветки ({spec})"
@@ -2448,13 +2491,16 @@ def check_push(event, tool, tool_input):
     _, cmds = bash_analysis(tool_input.get("command") or "", cwd)
     moved = any(n in ("cd", "chdir", "pushd", "popd") for n, _ in cmds)
     can_push = role == "domain-coordinator" or role.startswith(PANTHEON_ROLE_PREFIXES) or (role == "workshop" and not sub)
-    # координатор с доступом к личному (mnemo-brain) не отправляет сам: он видит me/ и читает выписки из веба —
-    # третье свойство (наружу) ему не даём (SEC-13, 15.10); хранилище синхронизирует Obsidian Git
+    # координатор, в чьей папке лежит личное (mnemo-brain: ~/ai/knowledge/me), не отправляет сам: он видит me/ и читает
+    # выписки из веба — третье свойство (наружу) ему не даём (SEC-13, 15.10); хранилище отправляет Obsidian Git. По
+    # папке, а не по policy.toml: без tomllib (Python 3.9) политика пуста, а запрет должен остаться
     if can_push and role == "domain-coordinator":
-        policy = load_policy()
-        if any(privileged(policy, c, role, pdir) for c in private_conf(policy)["coordinators"]):
+        if any(_inside(x, [pdir]) for x in _norm(private_conf(load_policy())["paths"])):
             can_push = False
     for name, texts in cmds:
+        if name == "gh" and texts[:1] == ["api"] and _gh_api_writes(texts[1:]):
+            return ("Правило push: gh api с записью (POST, PUT, PATCH, DELETE) ролям закрыто — слияние, ветки и файлы "
+                    "репозитория меняют git push в свою ветку и gh pr create; остальное — владелец.")
         if name == "gh" and texts[:2] == ["pr", "merge"]:
             return ("Правило push: gh pr merge — слияние делает владелец. Подготовь PR и карточку рисков: "
                     "тесты, вердикт argus, что меняется для клиента.")

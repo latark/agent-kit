@@ -1,36 +1,39 @@
 #!/usr/bin/env python3
-"""Stop разработчика (DONE-02 карты решений): с красными проверками работу не сдать.
+"""Stop разработчика (DONE-02 карты решений): с непроверенной или красной работой не сдать.
 
 Подключён в ролях dev-opus, dev-sonnet, dev-haiku (поле hooks: Stop — у субагента Claude Code превращает его в
 SubagentStop). Основа — stop-verify.sh BrokerAssistant: ход, закончившийся текстом, — ещё не готовность, а правку
 без прогона проверок никто не смотрел.
 
-Что делает. Если в worktree разработчика есть правки (незакоммиченные файлы или коммиты поверх ветки, от которой
-она ответвилась), хук сам запускает проверку проекта через общую блокировку тяжёлых команд (`heavy`, MEM-03):
-  1. строка из файла .pantheon-verify в корне репозитория (её кладёт лид или координатор);
+Хук сам код проекта НЕ запускает: хуки идут вне песочницы, а `.pantheon-verify`, `package.json` и тесты в worktree
+разработчик может поменять — запуск их из хука был бы выходом из песочницы (находка проверки безопасности 15.10).
+Вместо этого хук читает транскрипт разработчика (agent_transcript_path) и требует, чтобы проверку проекта он прогнал
+сам — в своей песочнице, через `heavy` — и чтобы последний её прогон после последней правки был зелёным.
+
+Какая проверка — по версии файлов в точке, от которой ответвилась ветка разработчика (не по его правкам):
+  1. первая строка .pantheon-verify в корне репозитория (её кладёт лид или координатор);
   2. иначе скрипт test, а без него check из package.json — менеджером из packageManager или lock-файла;
   3. иначе pytest, если в pyproject.toml есть [tool.pytest] (через uv, если есть uv.lock).
-Нечем проверить — не держит. Места heavy заняты дольше 5 минут — отпускает с требованием написать «частично,
-проверка не запускалась» (очередь — не красная проверка и не возврат). Красная проверка — выход 2 и конец вывода: разработчик чинит и пробует снова. Не
-больше трёх возвратов подряд на одного разработчика: дальше хук отпускает с пометкой, а лид пишет в отчёте статус
-«заблокировано» и выносит вопрос наверх («ждёт вас» — через координатора и Зевса).
+Нечем проверить или правок нет — не держит. Иначе — выход 2 с тем, что запустить; не больше трёх возвратов подряд
+на одного разработчика: дальше хук отпускает, а разработчик пишет в отчёте «заблокировано» (лид выносит наверх).
 
 Python 3.9+ (хуки запускает python3 из PATH). Состояние — ~/.local/state/pantheon/ctx/dev-stop/<agent_id>.
 """
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 
 HOME = os.path.expanduser("~")
 STATE = os.path.realpath(os.environ.get("PANTHEON_STATE") or os.path.join(HOME, ".local", "state", "pantheon"))
 MAX_RETURNS = 3
-WAIT_MAX = int(os.environ.get("PANTHEON_DEV_STOP_WAIT") or 300)  # ждать места heavy; не дождались — «очередь»
-TIMEOUT = 840    # всё вместе; хук в роли — 900 с
-TAIL = 4000
-WAIT_EXIT = 75   # код heavy «места не дождалась»
+EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+# Bash, после которого файлы могли поменяться (защита от ошибки, а не от обмана: проверку можно и не запускать)
+BASH_WRITES = re.compile(r"(?:^|[;&|]\s*)(?:sed\s+-i|perl\s+-[a-z]*i|mv|cp|rm|tee|touch|patch|truncate|"
+                         r"git\s+(?:apply|am|checkout|switch|restore|merge|rebase|cherry-pick|reset|stash|pull|revert)|"
+                         r"\S*(?:pnpm|npm|yarn|npx)\s+(?:add|remove|install|i|up|update))\b"
+                         r"|[^<>&0-9]>{1,2}\s*[^&\s]")
 
 
 def git(cwd, *args):
@@ -38,29 +41,32 @@ def git(cwd, *args):
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
-def changed(root):
-    """Незакоммиченные правки или коммиты, которые есть только на этой ветке (worktree ответвилась от ветки эпика:
-    её коммиты достижимы и из других веток, а коммиты разработчика — только отсюда)."""
-    if git(root, "status", "--porcelain", "--untracked-files=normal"):
-        return True
+def own_commits(root):
+    """Коммиты, которые есть только на ветке разработчика (worktree ответвилась от ветки эпика)."""
     branch = git(root, "symbolic-ref", "-q", "HEAD")
     if not branch:
-        return False
+        return 0
     short = branch[len("refs/heads/"):]  # для --branches git сравнивает --exclude с коротким именем
-    own = git(root, "rev-list", "--count", "HEAD", "--not", f"--exclude={short}", "--branches", "--remotes")
-    return own.isdigit() and int(own) > 0
+    n = git(root, "rev-list", "--count", "HEAD", "--not", f"--exclude={short}", "--branches", "--remotes")
+    return int(n) if n.isdigit() else 0
 
 
-def verify_command(root):
-    p = os.path.join(root, ".pantheon-verify")
-    if os.path.isfile(p):
-        line = next((x.strip() for x in open(p, encoding="utf-8") if x.strip() and not x.startswith("#")), "")
+def show(root, rev, name):
+    r = subprocess.run(["git", "-C", root, "show", f"{rev}:{name}"], capture_output=True, text=True, timeout=30)
+    return r.stdout if r.returncode == 0 else None
+
+
+def verify_commands(root, base):
+    """→ (как назвать, [варианты строки команды]) по файлам из точки ответвления base."""
+    text = show(root, base, ".pantheon-verify")
+    if text:
+        line = next((x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")), "")
         if line:
-            return line
-    pkg = os.path.join(root, "package.json")
-    if os.path.isfile(pkg):
+            return line, [line]
+    pkg = show(root, base, "package.json")
+    if pkg:
         try:
-            data = json.load(open(pkg, encoding="utf-8"))
+            data = json.loads(pkg)
         except ValueError:
             data = {}
         scripts = data.get("scripts") or {}
@@ -68,13 +74,56 @@ def verify_command(root):
         if script:
             pm = (data.get("packageManager") or "").split("@")[0]
             if not pm:
-                pm = "pnpm" if os.path.exists(os.path.join(root, "pnpm-lock.yaml")) else \
-                    "yarn" if os.path.exists(os.path.join(root, "yarn.lock")) else "npm"
-            return f"{pm} run {script}"
-    pyproject = os.path.join(root, "pyproject.toml")
-    if os.path.isfile(pyproject) and re.search(r"^\[tool\.pytest", open(pyproject, encoding="utf-8").read(), re.M):
-        return "uv run pytest -q" if os.path.exists(os.path.join(root, "uv.lock")) else "python3 -m pytest -q"
-    return None
+                pm = "pnpm" if show(root, base, "pnpm-lock.yaml") is not None else \
+                    "yarn" if show(root, base, "yarn.lock") is not None else "npm"
+            return f"{pm} run {script}", [f"{pm} run {script}", f"{pm} {script}"]
+    pyproject = show(root, base, "pyproject.toml")
+    if pyproject and re.search(r"^\[tool\.pytest", pyproject, re.M):
+        return ("uv run pytest" if show(root, base, "uv.lock") is not None else "python3 -m pytest"), ["pytest"]
+    return None, []
+
+
+def norm(cmd):
+    return " ".join(str(cmd).split())
+
+
+def last_runs(transcript, variants):
+    """По транскрипту: (был ли прогон проверки после последней правки, зелёный ли последний такой прогон)."""
+    uses, results, order = {}, {}, []
+    try:
+        fh = open(transcript, encoding="utf-8")
+    except OSError:
+        return None
+    with fh:
+        for line in fh:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            content = (d.get("message") or {}).get("content")
+            if not isinstance(content, list):
+                continue
+            for x in content:
+                if not isinstance(x, dict):
+                    continue
+                if x.get("type") == "tool_use":
+                    uses[x.get("id")] = (x.get("name"), x.get("input") or {})
+                    order.append(x.get("id"))
+                elif x.get("type") == "tool_result":
+                    results[x.get("tool_use_id")] = bool(x.get("is_error"))
+    last_edit, last_run = -1, None
+    for i, uid in enumerate(order):
+        name, inp = uses[uid]
+        cmd = norm(inp.get("command", "")) if name == "Bash" else ""
+        if name == "Bash" and any(v in cmd for v in variants):
+            if uid in results:
+                last_run = (i, not results[uid])
+            continue
+        if name in EDIT_TOOLS or (name == "Bash" and BASH_WRITES.search(cmd)):
+            last_edit = i
+    if last_run is None or last_run[0] < last_edit:
+        return False, False
+    return True, last_run[1]
 
 
 def counter(agent_id, value=None):
@@ -100,44 +149,38 @@ def main():
         return 0
     cwd = os.path.realpath(ev.get("cwd") or os.getcwd())
     root = git(cwd, "rev-parse", "--show-toplevel")
-    if not root or not changed(root):
+    if not root:
         return 0
-    cmd = verify_command(root)
-    if not cmd:
+    n_own = own_commits(root)
+    dirty = bool(git(root, "status", "--porcelain", "--untracked-files=normal"))
+    if not n_own and not dirty:
+        return 0
+    label, variants = verify_commands(root, f"HEAD~{n_own}" if n_own else "HEAD")
+    if not variants:
         return 0
     agent = ev.get("agent_id") or ev.get("session_id") or ""
-    heavy = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "bin", "heavy")
-    argv = [sys.executable, heavy, "/bin/sh", "-c", cmd] if os.path.isfile(heavy) else ["/bin/sh", "-c", cmd]
-    env = dict(os.environ, HEAVY_WAIT_MAX=str(WAIT_MAX))
-    # своя группа процессов: по таймауту гасим и обёртку, и саму проверку, а не только обёртку
-    proc = subprocess.Popen(argv, cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            start_new_session=True)
-    try:
-        out, _ = proc.communicate(timeout=TIMEOUT)
-        code = proc.returncode
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        out, _ = proc.communicate()
-        code, out = 124, f"проверка не уложилась в {TIMEOUT} с\n" + (out or "")
-    if code == 0:
+    seen = last_runs(ev.get("agent_transcript_path") or ev.get("transcript_path") or "", [norm(v) for v in variants])
+    if seen is None:
+        return 0  # транскрипта нет — проверить нечем, не держим
+    ran, green = seen
+    if ran and green:
         counter(agent, 0)
-        return 0
-    if code == WAIT_EXIT:
-        # места заняты другими тяжёлыми командами: проверку не запускали — это не красная проверка и не возврат
-        print(f"Проверка проекта «{cmd}» не запускалась: оба места тяжёлых команд заняты дольше {WAIT_MAX} с "
-              "(`heavy --status`). Работа не проверена — так и напиши в отчёте: «Статус: частично, проверка не "
-              "запускалась (очередь)».", file=sys.stderr)
         return 0
     n = counter(agent) + 1
     if n > MAX_RETURNS:
         counter(agent, 0)
-        print(f"Проверка «{cmd}» красная после {MAX_RETURNS} возвратов — отпускаю. В отчёте статус «заблокировано», "
-              "что падает и почему не починить.", file=sys.stderr)
+        print(f"Проверка проекта «{label}» после последней правки {'красная' if ran else 'не прогнана'} — после "
+              f"{MAX_RETURNS} возвратов отпускаю. В отчёте статус «заблокировано»: что падает и почему не починить.",
+              file=sys.stderr)
         return 0
     counter(agent, n)
-    print(f"СТОП ({n} из {MAX_RETURNS}): проверка проекта красная — «{cmd}» (код {code}). Работа не сдана, пока "
-          f"проверка не зелёная. Почини и закончи снова; если причина вне твоей задачи — опиши её в отчёте по формату "
-          f"«Находка» и закончи со статусом «заблокировано».\n\nКонец вывода:\n{out[-TAIL:]}", file=sys.stderr)
+    if ran:
+        why = (f"последний прогон проверки проекта «{label}» после правок — красный. Работа не сдана, пока проверка не "
+               "зелёная: почини и прогони снова.")
+    else:
+        why = f"после последней правки ты не прогнал проверку проекта. Запусти `heavy {label}` и добейся зелёного результата."
+    print(f"СТОП ({n} из {MAX_RETURNS}): {why} Если причина вне твоей задачи — опиши её в отчёте по формату «Находка» "
+          "и закончи со статусом «заблокировано».", file=sys.stderr)
     return 2
 
 
