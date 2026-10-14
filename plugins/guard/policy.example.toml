@@ -20,3 +20,8 @@ clio = ["~/knowledge"]
 roles = ["hq", "chiron"]
 coordinators = ["mnemo-brain"]
 paths = ["~/knowledge/me", "~/knowledge/.git/git-crypt", "~/pantheon/.git/git-crypt", "~/.local/state/pantheon/owner-log/zeus.md"]
+
+# Куда ещё пишут команды в песочнице окна направления (SEC-19): только кэши своих инструментов внутри
+# ~/.cache или ~/Library/Caches. Папки направления берутся из реестра, остальное закрыто.
+[sandbox_write]
+themis-sources = ["~/.cache/expert-corpus"]

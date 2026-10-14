@@ -219,25 +219,42 @@ def main():
     os.makedirs(br)
     subprocess.run(["git", "init", "-q", br], check=True)
     subprocess.run(["git", "-C", br, "remote", "add", "origin", "git@github.com:x/y.git"], check=True)
-    open(os.path.join(home, "directions.toml"), "a").write('sandbox_write = ["~/.cache/metis", "/etc"]\n')
+    with open(os.path.join(home, "directions.toml"), "a") as fh:
+        fh.write('sandbox_write = ["~/.ssh"]\n'
+                 '[[direction]]\nname = "mnemo-brain"\nfolders = ["~/knowledge"]\n'
+                 '[[direction]]\nname = "zz"\nfolders = ["~/pantheon", "~/projects", "~/projects/zz", "~/.claude"]\n')
+    with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "a") as fh:
+        fh.write('[sandbox_write]\nmetis-pantheon = ["~/.cache/metis", "~/pantheon", "~/.cache/../.ssh"]\n'
+                 '[private]\ncoordinators = ["mnemo-brain"]\npaths = ["~/knowledge/me"]\n')
     os.makedirs(os.path.join(state, "settings"), exist_ok=True)
     open(os.path.join(state, "settings", "old-direction.json"), "w").write("{}")
     subprocess.run([sys.executable, "-I", LIB, "domains", "build"], env=env, capture_output=True)
-    sa = json.load(open(os.path.join(state, "settings", "athena-broker.json")))
-    sm = json.load(open(os.path.join(state, "settings", "metis-pantheon.json")))
-    sw = json.load(open(os.path.join(state, "settings", "workshop.json")))
+    load = lambda n: json.load(open(os.path.join(state, "settings", n + ".json")))
+    sa, sm, sw, sn, sz = load("athena-broker"), load("metis-pantheon"), load("workshop"), load("mnemo-brain"), load("zz")
     box = sa["sandbox"]
+    aw = box["filesystem"]["allowWrite"]
     check("песочница: строгий вид, папки направления и своё directions/<имя>/, окно сжатия координатора",
           box["enabled"] and box["failIfUnavailable"] and box["allowUnsandboxedCommands"] is False
-          and "~/projects/br" in box["filesystem"]["allowWrite"]
-          and "~/pantheon/directions/athena-broker" in box["filesystem"]["allowWrite"]
-          and "~/projects/agent-kit" not in box["filesystem"]["allowWrite"]
+          and "~/projects/br" in aw and "~/pantheon/directions/athena-broker" in aw and "~/projects/agent-kit" not in aw
           and "~/**/.git/config" in box["filesystem"]["denyWrite"] and sa["autoCompactWindow"] == 200000)
     check("песочница: SSH-remote → git push/fetch/pull мимо песочницы только у этого направления",
           "git push *" in box["excludedCommands"] and "git push *" not in sm["sandbox"]["excludedCommands"])
-    check("песочница: sandbox_write — только пути от ~/; мастерская; старый файл убран",
+    check("песочница: кэши свои у направления, общих в записи нет",
+          sa["env"]["npm_config_cache"].endswith("pantheon-sandbox/athena-broker/npm")
+          and sa["env"]["XDG_CACHE_HOME"] != sm["env"]["XDG_CACHE_HOME"]
+          and "~/Library/Caches/pantheon-sandbox/athena-broker" in aw
+          and not any(x in aw for x in ("~/.npm", "~/.cache/uv", "~/Library/pnpm")))
+    check("песочница: доп. запись — только из policy.toml и только кэши; реестр права не даёт",
           "~/.cache/metis" in sm["sandbox"]["filesystem"]["allowWrite"]
-          and "/etc" not in sm["sandbox"]["filesystem"]["allowWrite"]
+          and not any(x in sm["sandbox"]["filesystem"]["allowWrite"] for x in ("~/pantheon", "~/.cache/../.ssh"))
+          and "~/.ssh" not in json.dumps(sa) + json.dumps(sm))
+    check("песочница: папки направления — только внутри ~/projects и ~/knowledge",
+          sz["sandbox"]["filesystem"]["allowWrite"][:1] == ["~/projects/zz"]
+          and not any(x in sz["sandbox"]["filesystem"]["allowWrite"] for x in ("~/pantheon", "~/projects", "~/.claude"))
+          and "~/knowledge" in sn["sandbox"]["filesystem"]["allowWrite"])
+    check("песочница: личное закрыто для чтения всем, кроме координатора с привилегией; мастерская; старый файл убран",
+          "~/knowledge/me" in box["filesystem"]["denyRead"] and not sn["sandbox"]["filesystem"]["denyRead"]
+          and "~/knowledge/me" in sw["sandbox"]["filesystem"]["denyRead"]
           and "~/projects/workshop" in sw["sandbox"]["filesystem"]["allowWrite"] and "autoCompactWindow" not in sw
           and not os.path.exists(os.path.join(state, "settings", "old-direction.json")))
 

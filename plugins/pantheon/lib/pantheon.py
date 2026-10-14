@@ -784,8 +784,7 @@ def domains_build(if_changed=False):
     write_json(path("domains.json"), {
         "_comment": "Собрано `pantheon domains build` из ~/pantheon/directions.toml. Руками не править.",
         "built": stamp(), "built_ts": now(), "domains": domains})
-    extra = {d.get("name"): d.get("sandbox_write") or [] for d in reg.get("direction") or []}
-    built = sandbox_build(domains, extra)
+    built = sandbox_build(domains, policy_path)
     if not if_changed:
         print(f"domains.json: {len(domains)} направлений → {path('domains.json').replace(HOME, '~')}; "
               f"настройки окон ролей: {', '.join(built)} → {path('settings').replace(HOME, '~')}/")
@@ -794,14 +793,15 @@ def domains_build(if_changed=False):
 
 # Песочница окон ролей (SEC-19): файл для `claude … --settings <файл>` у каждого направления и у мастерской.
 # Строгий вид: без отката мимо песочницы, без неё сессия не стартует. Писать можно в папку запуска, папки
-# направления, своё ~/pantheon/directions/<имя>/, кэши инструментов и временную папку. Чтение открыто, кроме
-# того, что закрывают deny-правила настроек. .git/config и .git/hooks закрыты для записи: git по сети у
-# направлений с SSH-remote и gh идут мимо песочницы и прочли бы их. Сеть — через прокси песочницы: хосты вне
-# списка проверяет классификатор режима auto. Координаторам там же — окно сжатия 200k (CTX-04).
-SANDBOX_CACHES = ["~/.npm", "~/Library/pnpm", "~/Library/Caches/pnpm", "~/Library/Caches/pip", "~/.cache/uv",
-                  "~/.cache/node", "~/.cache/huggingface", "~/Library/Caches/ms-playwright",
-                  "~/Library/Caches/node-gyp", "~/Library/Caches/typescript",
-                  "~/Library/Application Support/turborepo", "~/Library/Preferences/nextjs-nodejs"]
+# направления внутри ~/projects и ~/knowledge, своё ~/pantheon/directions/<имя>/, свою папку кэшей и временную
+# папку. Общие кэши инструментов закрыты: ими пользуются ваши сессии без песочницы, поэтому кэши направления
+# (npm, pnpm, uv, pip, corepack, ~/.cache через XDG_CACHE_HOME) — свои, через переменные окружения. Сверх
+# этого — только [sandbox_write] из policy.toml (правит Метида), не из реестра: правкой реестра права не выдать.
+# .git/config и .git/hooks закрыты для записи: сетевой git у направлений с SSH-remote и gh идут мимо песочницы.
+# Личное из [private] policy.toml закрыто для чтения всем, кроме координаторов с этой привилегией.
+# Сеть — через прокси песочницы: хосты вне списка проверяет классификатор режима auto.
+# Координаторам там же — окно сжатия 200k (CTX-04).
+SANDBOX_ROOTS = ["~/projects", "~/knowledge"]   # папки направлений для песочницы — только внутри этих
 SANDBOX_DOMAINS = ["registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "files.pythonhosted.org",
                    "github.com", "api.github.com", "codeload.github.com", "objects.githubusercontent.com",
                    "raw.githubusercontent.com"]
@@ -826,18 +826,43 @@ def ssh_remote(folder):
     return False
 
 
-def role_settings(folders, own_dir, extra_write, ssh, compact=None):
-    excluded = SANDBOX_EXCLUDED + (GIT_NETWORK if ssh else [])
+def _under(p, roots, strict=False):
+    """Путь от ~/ внутри одной из папок roots (strict — не сама папка)."""
+    if not isinstance(p, str) or not p.startswith("~/") or "*" in p or ".." in p.split("/"):
+        return False
+    k = os.path.realpath(os.path.expanduser(p))
+    for r in roots:
+        rk = os.path.realpath(os.path.expanduser(r))
+        if k.startswith(rk + "/") or (k == rk and not strict):
+            return True
+    return False
+
+
+def role_settings(name, folders, own_dir, extra_write, ssh, deny_read, compact=None):
+    cache = os.path.join(HOME, "Library", "Caches", "pantheon-sandbox", name)
     data = {
-        "_comment": "Собрано `pantheon domains build` из ~/pantheon/directions.toml (SEC-19). Руками не править.",
+        "_comment": "Собрано `pantheon domains build` из ~/pantheon/directions.toml и policy.toml (SEC-19). Руками не править.",
+        "env": {
+            "XDG_CACHE_HOME": os.path.join(cache, "xdg"),
+            "npm_config_cache": os.path.join(cache, "npm"),
+            "npm_config_store_dir": os.path.join(cache, "pnpm-store"),
+            "npm_config_devdir": os.path.join(cache, "node-gyp"),
+            "COREPACK_HOME": os.path.join(cache, "corepack"),
+            "UV_CACHE_DIR": os.path.join(cache, "uv"),
+            "PIP_CACHE_DIR": os.path.join(cache, "pip"),
+            "NEXT_TELEMETRY_DISABLED": "1",
+            "TURBO_TELEMETRY_DISABLED": "1",
+            "DO_NOT_TRACK": "1",
+        },
         "sandbox": {
             "enabled": True,
             "failIfUnavailable": True,
             "allowUnsandboxedCommands": False,
-            "excludedCommands": excluded,
+            "excludedCommands": SANDBOX_EXCLUDED + (GIT_NETWORK if ssh else []),
             "filesystem": {
-                "allowWrite": list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + SANDBOX_CACHES,
+                "allowWrite": list(folders) + [own_dir] + list(extra_write) + [cache.replace(HOME, "~", 1)],
                 "denyWrite": ["~/**/.git/config", "~/**/.git/hooks"],
+                "denyRead": list(deny_read),
             },
             "network": {"allowedDomains": SANDBOX_DOMAINS},
         },
@@ -847,24 +872,34 @@ def role_settings(folders, own_dir, extra_write, ssh, compact=None):
     return data
 
 
-def sandbox_build(domains, extra):
-    """domains.json → ~/.local/state/pantheon/settings/<направление>.json и workshop.json; лишние файлы убираются."""
+def sandbox_build(domains, policy_path):
+    """domains.json и policy.toml → ~/.local/state/pantheon/settings/<направление>.json и workshop.json."""
+    try:
+        with open(policy_path, "rb") as fh:
+            policy = tomllib.load(fh)
+    except (OSError, ValueError):
+        policy = {}
+    extra = policy.get("sandbox_write") or {}
+    private = policy.get("private") or {}
+    private_paths = [p for p in private.get("paths") or [] if isinstance(p, str) and p.startswith("~/")]
+    private_dirs = set(private.get("coordinators") or [])
     out_dir = path("settings")
     os.makedirs(out_dir, exist_ok=True)
     built = []
     for name, folders in domains.items():
-        bad = [p for p in extra.get(name, []) if not isinstance(p, str) or not p.startswith("~/")]
-        if bad:
-            alert_once(f"sandbox-{name}", "1", f"directions.toml: sandbox_write у {name} — только пути от ~/; "
-                       f"пропущено: {bad}", "pantheon")
-        write = [p for p in extra.get(name, []) if p not in bad]
-        own = f"~/pantheon/directions/{name}"
+        ok = [f for f in folders if _under(f, SANDBOX_ROOTS[:1], strict=True) or _under(f, SANDBOX_ROOTS[1:])]
+        if len(ok) < len(folders):
+            print(f"песочница {name}: папки вне ~/projects и ~/knowledge — только через Write/Edit: "
+                  f"{[f for f in folders if f not in ok]}", file=sys.stderr)
+        write = [p for p in extra.get(name, []) if _under(p, ["~/.cache", "~/Library/Caches"], strict=True)]
+        deny = [] if name in private_dirs else private_paths
         write_json(os.path.join(out_dir, name + ".json"),
-                   role_settings(folders, own, write, any(ssh_remote(f) for f in folders), COORDINATOR_COMPACT))
+                   role_settings(name, ok, f"~/pantheon/directions/{name}", write,
+                                 any(ssh_remote(f) for f in ok), deny, COORDINATOR_COMPACT))
         built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски
     write_json(os.path.join(out_dir, "workshop.json"),
-               role_settings(["~/projects/workshop"], "~/pantheon/workshop", [], False))
+               role_settings("workshop", ["~/projects/workshop"], "~/pantheon/workshop", [], False, private_paths))
     built.append("workshop")
     for f in os.listdir(out_dir):
         if f.endswith(".json") and f[:-5] not in built:
