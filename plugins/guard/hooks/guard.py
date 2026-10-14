@@ -2284,9 +2284,10 @@ def private_ok(policy, role, sub, pdir):
 
 def _glob_reaches(p, priv):
     """Путь с * ? [ ] может раскрыться в личное: ~/ai/knowledge/m?/x.md, ~/ai/*/me, ~/ai/kn*."""
-    if not re.search(r"[*?\[]", p):
+    if not re.search(r"[*?\[{]", p):
         return False
     import fnmatch
+    p = re.sub(r"\{[^}]*\}", "*", p)  # {me,x} — как *
     pat = [c for c in p.split("/") if c]
     for x in priv:
         parts = [c for c in x.split("/") if c]
@@ -2361,14 +2362,56 @@ def check_private(event, tool, tool_input):
             "Если путь задевает личную папку случайно (поиск по всей ~/ai/knowledge), сузь его: raw/, wiki/, inbox/.")
 
 
+try:
+    import ipaddress as _ip
+    FAKE_IP_NET = _ip.ip_network("198.18.0.0/15")
+except Exception:  # noqa: BLE001
+    FAKE_IP_NET = ()
+
+
+def _local_url(url):
+    """Адрес петли, локальной сети или имя, которое в них разрешается (localtest.me, 127.0.0.1.nip.io)."""
+    if LOCAL_URL.match(url):
+        return True
+    import ipaddress
+    import socket
+    from urllib.parse import urlsplit
+    try:
+        host = urlsplit(url if "://" in url else "http://" + url).hostname
+    except ValueError:
+        return True
+    if not host:
+        return True
+    if re.search(r"(?:^|\.)(?:localhost|localtest\.me|lvh\.me|vcap\.me|nip\.io|sslip\.io|xip\.io|traefik\.me|"
+                 r"local|internal|home\.arpa)$", host, re.I):
+        return True
+    try:
+        socket.setdefaulttimeout(2)
+        infos = socket.getaddrinfo(host, None)
+    except (OSError, UnicodeError):
+        return False  # не разрешается — WebFetch тоже не дойдёт
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        except ValueError:
+            return True
+        ip = getattr(ip, "ipv4_mapped", None) or ip
+        if ip in FAKE_IP_NET:
+            continue  # Surge и подобные отдают имена через 198.18.0.0/15 — настоящий адрес отсюда не виден
+        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified or ip.is_reserved:
+            return True
+    return False
+
+
 def check_cdp_role(event, tool, tool_input):
     ok, role, sub, _ = limited(event)
-    if ok and tool == "WebFetch" and LOCAL_URL.match((tool_input.get("url") or "").strip()):
+    if ok and tool == "WebFetch" and _local_url((tool_input.get("url") or "").strip()):
         return ("Правило cdp-role: WebFetch ролей — только в интернет; локальные адреса (демон браузера, чужой "
                 "dev-сервер) закрыты. Своё приложение — chrome-devtools в своей worktree.")
     if not ok or tool != "Bash":
         return None
     cmd = tool_input.get("command") or ""
+    cmd = cmd + "\n" + re.sub(r"[\"'\\]", "", cmd)
     if CDP_DIRECT.search(cmd):
         return ("Правило cdp-role: прямое подключение к отладочному порту браузера владельца ролям закрыто — только через "
                 "общий демон (`curl 127.0.0.1:9333/…`), и только prometheus (чтение) и мастерской.")
@@ -2384,6 +2427,20 @@ def check_cdp_role(event, tool, tool_input):
     return (f"Правило cdp-role: роль «{role or 'субагент'}» не пользуется браузером с входами владельца (демон CDP). "
             "Читать сайт — поручение prometheus через координатора; действие на сайте — мастерская после «да» владельца. "
             "Проверить своё приложение на localhost — chrome-devtools-mcp --isolated или Playwright (talos).")
+
+
+def push_foreign(texts, cwd, cmds, pdir):
+    """Отправляют только свой репозиторий: папки своего направления (мастерская — своя папка задачи)."""
+    _, own = direction_of(load_domains(), pdir)
+    own = own or [pdir]
+    gdir = (_git_sub(texts) or (None,))[0]
+    dirs = [cwd] + [_expand(t[0], cwd) for n, t in cmds if n in ("cd", "chdir", "pushd") and t and t[0]]
+    if gdir:
+        dirs = [_expand(gdir, d) for d in dirs]
+    for d in dirs:
+        if d == UNRESOLVED or not _inside(os.path.realpath(d), own):
+            return f"репозиторий вне своего направления ({str(d).replace(HOME, '~')})"
+    return None
 
 
 def _gh_api_writes(args):
@@ -2517,6 +2574,8 @@ def check_push(event, tool, tool_input):
                 return (f"Правило push: роль «{role or 'субагент'}» не отправляет в удалённый репозиторий: отправляют "
                         "координатор и лиды. Закоммить в свою ветку и опиши результат в отчёте.")
             why = push_problem(texts, cwd, moved) if name == "git" else "команду не разобрать"
+            if not why and name == "git":
+                why = push_foreign(texts, cwd, cmds, pdir)
             if why:
                 return (f"Правило push: {why}. Роли отправляют только свои ветки (develop — лид); в main и master "
                         "сливает владелец, принудительная отправка и удаление веток — тоже только он.")
