@@ -9,11 +9,11 @@
   nextjs       — после правок в Next.js-проекте с запущенным dev-сервером проверить get_errors;
   tg-secret    — не читать ключ сессии tg-read из Связки ключей ни командой, ни своим кодом;
   domain       — субагент, тиммейт, координатор и сессия мастерской пишут только в своё направление;
-  pantheon-acl — запись в ~/pantheon по карте прав; копия ~/pantheon-view и ~/.local/state/pantheon — ни одной роли.
+  pantheon-acl — запись в ~/ai/pantheon по карте прав; копия ~/ai/pantheon-view и ~/.local/state/pantheon — ни одной роли.
 
 Плагин guard из маркетплейса agent-kit (latark/agent-kit); до шага 0.4 очереди работает старая копия
 ~/.claude/hooks/guard.py. Данные: ~/.local/state/pantheon/domains.json (собирает `pantheon domains build`
-из ~/pantheon/directions.toml) и ~/.claude/pantheon/policy.toml (привилегии, правит только metis-pantheon).
+из ~/ai/pantheon/directions.toml) и ~/.claude/pantheon/policy.toml (привилегии, правит только metis-pantheon).
 
 Выключить одно правило: GUARD_OFF=dev-server,nextjs (через запятую) в env settings.json.
 Любой сбой самого скрипта пропускает действие: правило не должно ломать работу.
@@ -246,13 +246,13 @@ def check_nextjs(event):
 # Направление координатора guard узнаёт по папке, где запущена сессия (CLAUDE_PROJECT_DIR не меняется
 # всю сессию, в отличие от cwd), а не по agent_type: у всех семи координаторов он один.
 #   domain       — субагент, тиммейт и любая роль Пантеона, кроме штаба, пишут только в своё направление:
-#                  папки из domains.json (собирает `pantheon domains build` из ~/pantheon/directions.toml),
+#                  папки из domains.json (собирает `pantheon domains build` из ~/ai/pantheon/directions.toml),
 #                  временные папки, ~/.claude/agent-memory и agent_extra из policy.toml. Мастерская — папка
-#                  запуска. Записи в ~/pantheon проверяет pantheon-acl.
-#   pantheon-acl — запись в ~/pantheon по карте прав (STATE-06 карты решений; карта — здесь, в коде, а не в
-#                  domains.json: его собирают из реестра, который правит штаб); в копию ~/pantheon-view и в
+#                  запуска. Записи в ~/ai/pantheon проверяет pantheon-acl.
+#   pantheon-acl — запись в ~/ai/pantheon по карте прав (STATE-06 карты решений; карта — здесь, в коде, а не в
+#                  domains.json: его собирают из реестра, который правит штаб); в копию ~/ai/pantheon-view и в
 #                  ~/.local/state/pantheon (метки тика, журналы owner-log, domains.json) не пишет никто, кроме
-#                  ваших сессий без роли; git в ~/pantheon роли не трогают — коммитит тик; команды пульта
+#                  ваших сессий без роли; git в ~/ai/pantheon роли не трогают — коммитит тик; команды пульта
 #                  (`pantheon archive|install|uninstall|commit`, `pantheon jobs pause|resume|disable|enable|renew`)
 #                  — только штаб и ваши сессии.
 # Привилегии (кто mnemo-brain и metis-pantheon, у кого доступ к me/) — в ~/.claude/pantheon/policy.toml:
@@ -276,8 +276,9 @@ STATE_DIR = os.path.realpath(os.path.join(HOME, ".local", "state", "pantheon"))
 DOMAINS_FILE = os.path.join(STATE_DIR, "domains.json")
 LEGACY_DOMAINS_FILE = os.path.join(HOME, ".claude", "hooks", "domains.json")
 POLICY_FILE = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
-PANTHEON = os.path.realpath(os.path.join(HOME, "pantheon"))
-PANTHEON_VIEW = os.path.realpath(os.path.join(HOME, "pantheon-view"))
+AI_HOME = os.path.join(HOME, "ai")  # рабочие папки системы: pantheon, pantheon-view, knowledge (переезд 14.10)
+PANTHEON = os.path.realpath(os.path.join(AI_HOME, "pantheon"))
+PANTHEON_VIEW = os.path.realpath(os.path.join(AI_HOME, "pantheon-view"))
 TEMP_ROOTS = [os.path.realpath(p) for p in (os.environ.get("TMPDIR", ""), "/tmp", "/private/tmp", "/dev/null") if p]
 PANTHEON_ROLES = {"hq", "domain-coordinator", "workshop", "chiron", "argus", "talos", "prometheus", "clio",
                   "iris", "dev-opus", "dev-sonnet", "dev-haiku"}
@@ -1811,7 +1812,7 @@ def pantheon_cli(cmd, cwd):
     """Привилегированные подкоманды пульта pantheon в команде Bash (список строк для причины)."""
     found = []
     for name, texts in bash_analysis(cmd, cwd)[1]:
-        # файл пульта (~/.local/bin/pantheon, lib/pantheon.py), а не папка ~/pantheon
+        # файл пульта (~/.local/bin/pantheon, lib/pantheon.py), а не папка ~/ai/pantheon
         bases = ["pantheon" if x and os.path.basename(x.rstrip("/")).lower() in ("pantheon", "pantheon.py")
                  and _key(os.path.realpath(os.path.expanduser(x))) != _key(PANTHEON) else "" for x in texts]
         if name in _MOVE | _COPY and "pantheon" in bases[:-1]:
@@ -1884,7 +1885,7 @@ def check_domain(event, tool, tool_input):
             "координатор — Зевсу файлом в inbox/ того направления.")
 
 
-# Карта прав ~/pantheon (STATE-06). Ключ — первый элемент пути от корня ~/pantheon (в нижнем регистре:
+# Карта прав ~/ai/pantheon (STATE-06). Ключ — первый элемент пути от корня ~/ai/pantheon (в нижнем регистре:
 # так сравнивает файловая система macOS).
 HQ_ONLY = {x.casefold() for x in ("board.md", "decisions.md", "revisits.toml", "schedule.toml", "backlog.md",
                                   "directions.toml", "approvals.toml", "scout.toml", "README.md", "archive",
@@ -1895,7 +1896,7 @@ def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
     top = rel.split("/", 1)[0]
     hq = role == "hq" and not sub
     if rel in (".", "") or top in (".git", ".gitattributes", ".gitignore"):
-        return False, "git и служебные файлы ~/pantheon роли не трогают: коммитит задача тика pantheon-commit"
+        return False, "git и служебные файлы ~/ai/pantheon роли не трогают: коммитит задача тика pantheon-commit"
     if top == "alerts.md":
         return False, "alerts.md только дописывается — командой `pantheon alert \"<строка>\"`; архив — `pantheon archive`"
     if top == "system.md":
@@ -1921,7 +1922,7 @@ def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
             if len(parts) > 3 and parts[2] == "inbox" and not exists and tool in ("Write", "Bash"):
                 return True, ""
         return False, ("в чужом направлении можно только создать новый файл в его inbox/; "
-                       "свой STATUS.md и планы — в ~/pantheon/directions/<своё направление>/")
+                       "свой STATUS.md и планы — в ~/ai/pantheon/directions/<своё направление>/")
     return hq, f"{rel} правит только штаб (hq)"
 
 
@@ -1935,7 +1936,7 @@ def check_pantheon(event, tool, tool_input):
     role, sub, pdir = who(event)
     if not role and not sub:
         return None  # ваша сессия без роли
-    # Карта прав ~/pantheon — для ролей Пантеона и для любого субагента: встроенный субагент координатора
+    # Карта прав ~/ai/pantheon — для ролей Пантеона и для любого субагента: встроенный субагент координатора
     # (general-purpose и т. п.) иначе обходил бы её. Ваши собственные роли главной сессии — как ваши сессии.
     pantheon_role = is_pantheon_role(role) or sub
     if tool == "Bash" and pantheon_role and not (role == "hq" and not sub):
@@ -1955,11 +1956,11 @@ def check_pantheon(event, tool, tool_input):
             return ("Правило pantheon-acl: ~/.local/state/pantheon (метки тика, журналы ваших слов owner-log, "
                     "domains.json) пишут только скрипты Пантеона и хуки, не роли.")
         if _inside(p, [PANTHEON_VIEW]) or (pantheon_role and _inside(PANTHEON_VIEW, [p])):
-            return ("Правило pantheon-acl: ~/pantheon-view — копия только для чтения для Obsidian. "
-                    "Пиши в ~/pantheon по карте прав.")
+            return ("Правило pantheon-acl: ~/ai/pantheon-view — копия только для чтения для Obsidian. "
+                    "Пиши в ~/ai/pantheon по карте прав.")
         if pantheon_role and _inside(PANTHEON, [p]) and not _inside(p, [PANTHEON]):
-            return (f"Правило pantheon-acl: запись в {p.replace(HOME, '~') or '/'} задевает ~/pantheon, который внутри. "
-                    "Назови точный путь вне ~/pantheon.")
+            return (f"Правило pantheon-acl: запись в {p.replace(HOME, '~') or '/'} задевает ~/ai/pantheon, который внутри. "
+                    "Назови точный путь вне ~/ai/pantheon.")
         if not _inside(p, [PANTHEON]) or not pantheon_role:
             continue
         if domains is None:
@@ -1968,7 +1969,7 @@ def check_pantheon(event, tool, tool_input):
         ok, why = pantheon_allowed(role, sub, pdir, rel, tool, os.path.exists(p), domains, policy)
         if not ok:
             return (f"Правило pantheon-acl: роль «{role or 'субагент'}»{' (субагент)' if sub else ''} не пишет в "
-                    f"~/pantheon/{rel}: {why}. Нужна правка — опиши её Зевсу (штабу) или своему координатору.")
+                    f"~/ai/pantheon/{rel}: {why}. Нужна правка — опиши её Зевсу (штабу) или своему координатору.")
     return None
 
 

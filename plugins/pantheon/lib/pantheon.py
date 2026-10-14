@@ -2,7 +2,7 @@
 """Пантеон: планировщик pantheon-tick и команда pantheon.
 
 Всё, что Пантеон делает сам по времени, идёт через одну задачу launchd `pantheon-tick` (раз в 60 с).
-Список задач — ~/pantheon/schedule.toml (правит штаб); метки запусков — ~/.local/state/pantheon/
+Список задач — ~/ai/pantheon/schedule.toml (правит штаб); метки запусков — ~/.local/state/pantheon/
 (свои у каждого Mac). Что пора запускать, тик решает по меткам, а не по часам: пропуски за сон Mac
 сливаются в один запуск. Лёгкие задачи (копия, коммит, дежурный) идут сразу; тяжёлые — по одной,
 с паузой, не в первые минуты после пробуждения, от сети, а задачи на Claude — ещё при простое и
@@ -13,12 +13,12 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon jobs                         что установлено, когда шло, что дальше и почему ждёт
   pantheon jobs pause|resume|disable|enable <задача>   (--all — весь планировщик)
   pantheon jobs renew <задача> [дней]   продлить аренду задачи
-  pantheon alert "<строка>" [--from кто]   дописать строку в ~/pantheon/alerts.md
+  pantheon alert "<строка>" [--from кто]   дописать строку в ~/ai/pantheon/alerts.md
   pantheon archive                      «Сделано» доски старше 7 дней и тревоги старше 30 — в archive/
-  pantheon domains build                ~/pantheon/directions.toml → ~/.local/state/pantheon/domains.json
+  pantheon domains build                ~/ai/pantheon/directions.toml → ~/.local/state/pantheon/domains.json
                                         и настройки окон ролей с песочницей …/settings/<направление>.json
-  pantheon view [--quiet]               обновить копию ~/pantheon-view для Obsidian
-  pantheon commit                       commit → pull без rebase → push ~/pantheon
+  pantheon view [--quiet]               обновить копию ~/ai/pantheon-view для Obsidian
+  pantheon commit                       commit → pull без rebase → push ~/ai/pantheon
   pantheon install | uninstall          поставить или снять задачу launchd com.latark.pantheon-tick
   pantheon tick                         один проход планировщика (его вызывает launchd)
 Для синтетических тестов: PANTHEON_HOME, PANTHEON_STATE, PANTHEON_NOW, PANTHEON_HOST,
@@ -44,15 +44,16 @@ if sys.version_info < (3, 11):
 import tomllib
 
 HOME = os.path.expanduser("~")
-PANTHEON = os.path.realpath(os.environ.get("PANTHEON_HOME") or os.path.join(HOME, "pantheon"))
+AI_HOME = os.path.join(HOME, "ai")  # рабочие папки системы: pantheon, pantheon-view, knowledge (переезд 14.10)
+PANTHEON = os.path.realpath(os.environ.get("PANTHEON_HOME") or os.path.join(AI_HOME, "pantheon"))
 STATE = os.path.realpath(os.environ.get("PANTHEON_STATE") or os.path.join(HOME, ".local", "state", "pantheon"))
-VIEW = os.environ.get("PANTHEON_VIEW") or os.path.join(HOME, "pantheon-view")
+VIEW = os.environ.get("PANTHEON_VIEW") or os.path.join(AI_HOME, "pantheon-view")
 VIEW_INBOX = os.environ.get("PANTHEON_VIEW_INBOX") or os.path.join(PANTHEON, "inbox-view")
 LIB = os.path.dirname(os.path.realpath(__file__))
 PLUGIN = os.path.dirname(LIB)
 LABEL = "com.latark.pantheon-tick"
 # Неизменный путь к плагину: на него смотрят задача launchd, команда ~/.local/bin/pantheon и обработчики слияния
-# в ~/pantheon/.git/config. `pantheon install` перевешивает ссылку на ту копию плагина, из которой запущен
+# в ~/ai/pantheon/.git/config. `pantheon install` перевешивает ссылку на ту копию плагина, из которой запущен
 # (до шага 0.4 — рабочая копия agent-kit, с 0.4 — клон маркетплейса), поэтому обновление плагина путей не ломает.
 CURRENT = os.path.join(HOME, ".local", "share", "pantheon", "current")
 TEMPFAIL = 75   # задача ждёт (нет сети): не сбой, тревоги нет
@@ -168,7 +169,7 @@ def run_env():
 
 
 def alert(text, who="pantheon"):
-    """Строка в ~/pantheon/alerts.md: время · кто · что. Файл только дописывается."""
+    """Строка в ~/ai/pantheon/alerts.md: время · кто · что. Файл только дописывается."""
     text, who = " ".join(str(text).split()), " ".join(str(who).split()) or "pantheon"
     if os.environ.get("PANTHEON_DRYRUN") == "1" and not os.environ.get("PANTHEON_ALERTS_IN_DRYRUN"):
         print(f"[alert] {who} · {text}")
@@ -636,9 +637,9 @@ def commit():
         def offline(stderr):
             ok = read_json(path("commit-ok.json")).get("t") or 0
             if now() - ok > 6 * 3600:
-                alert_once("commit-offline", int(ok), "~/pantheon не синхронизируется с GitHub больше 6 часов: "
+                alert_once("commit-offline", int(ok), "~/ai/pantheon не синхронизируется с GitHub больше 6 часов: "
                            f"{(stderr.strip().splitlines() or [''])[-1][:200]}", "pantheon-commit",
-                           note="~/pantheon давно не синхронизируется с GitHub")
+                           note="~/ai/pantheon давно не синхронизируется с GitHub")
             print(stderr.strip(), file=sys.stderr)
             return TEMPFAIL
 
@@ -648,9 +649,9 @@ def commit():
                 files = git("diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
                 theirs = git("rev-parse", "MERGE_HEAD", check=False).stdout.strip()
                 git("merge", "--abort", check=False)
-                alert_once("merge-conflict", theirs, f"~/pantheon: конфликт слияния с другим Mac "
+                alert_once("merge-conflict", theirs, f"~/ai/pantheon: конфликт слияния с другим Mac "
                            f"({', '.join(files) or 'файлы не названы'}); локальный коммит цел, слияние отменено — "
-                           "разобрать вручную", "pantheon-commit", note="~/pantheon: конфликт слияния, нужен разбор")
+                           "разобрать вручную", "pantheon-commit", note="~/ai/pantheon: конфликт слияния, нужен разбор")
                 return ALERTED
             return offline(pull.stderr)
         clear_once("merge-conflict")
@@ -690,7 +691,7 @@ def write_atomic(p, text):
 
 
 def archive():
-    """Раздел «Сделано» доски старше 7 дней и строки alerts.md старше 30 дней — в ~/pantheon/archive/.
+    """Раздел «Сделано» доски старше 7 дней и строки alerts.md старше 30 дней — в ~/ai/pantheon/archive/.
     Запускает Зевс при утренней сводке, поэтому у доски остаётся один писатель."""
     t = now()
     today = datetime.fromtimestamp(t)
@@ -782,7 +783,7 @@ def domains_build(if_changed=False):
             folders.append(f)
         domains[name] = folders
     write_json(path("domains.json"), {
-        "_comment": "Собрано `pantheon domains build` из ~/pantheon/directions.toml. Руками не править.",
+        "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml. Руками не править.",
         "built": stamp(), "built_ts": now(), "domains": domains})
     built = sandbox_build(domains, policy_path)
     if not if_changed:
@@ -793,7 +794,7 @@ def domains_build(if_changed=False):
 
 # Песочница окон ролей (SEC-19): файл для `claude … --settings <файл>` у каждого направления и у мастерской.
 # Строгий вид: без отката мимо песочницы, без неё сессия не стартует. Писать можно в папку запуска, папки
-# направления внутри ~/projects и ~/knowledge, своё ~/pantheon/directions/<имя>/, свою папку кэшей и временную
+# направления внутри ~/projects и ~/ai/knowledge, своё ~/ai/pantheon/directions/<имя>/, свою папку кэшей и временную
 # папку. Общие кэши инструментов закрыты: ими пользуются ваши сессии без песочницы, поэтому кэши направления
 # (npm, pnpm, uv, pip, corepack, ~/.cache через XDG_CACHE_HOME) — свои, через переменные окружения. Сверх
 # этого — только [sandbox_write] из policy.toml (правит Метида), не из реестра: правкой реестра права не выдать.
@@ -805,7 +806,7 @@ def domains_build(if_changed=False):
 # сессий в одной папке ломают pnpm («Unexpected store location»). Общее хранилище направления — store-dir в
 # .npmrc внутри папки направления (решается при запуске координатора, SEC-19).
 # Координаторам там же — окно сжатия 200k (CTX-04).
-SANDBOX_ROOTS = ["~/projects", "~/knowledge"]   # папки направлений для песочницы — только внутри этих
+SANDBOX_ROOTS = ["~/projects", "~/ai/knowledge"]   # папки направлений для песочницы — только внутри этих
 SANDBOX_DOMAINS = ["registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "files.pythonhosted.org",
                    "github.com", "api.github.com", "codeload.github.com", "objects.githubusercontent.com",
                    "raw.githubusercontent.com"]
@@ -864,7 +865,7 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
     deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + [f"{r}{sub}" for r in allow for sub in
                                                              ("/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks")]
     data = {
-        "_comment": "Собрано `pantheon domains build` из ~/pantheon/directions.toml и policy.toml (SEC-19). Руками не править.",
+        "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml и policy.toml (SEC-19). Руками не править.",
         "env": {
             "XDG_CACHE_HOME": os.path.join(cache, "xdg"),
             "npm_config_cache": os.path.join(cache, "npm"),
@@ -913,7 +914,7 @@ def sandbox_build(domains, policy_path):
         real = [_real_dir(f, SANDBOX_ROOTS[:1], strict=True) or _real_dir(f, SANDBOX_ROOTS[1:]) for f in folders]
         skipped = [f for f, r in zip(folders, real) if not r]
         if skipped:
-            print(f"песочница {name}: вне ~/projects и ~/knowledge, ссылка или нет папки — только через Write/Edit: "
+            print(f"песочница {name}: вне ~/projects и ~/ai/knowledge, ссылка или нет папки — только через Write/Edit: "
                   f"{skipped}", file=sys.stderr)
         own_real = os.path.realpath(own) if os.path.isdir(own) and not os.path.islink(own) else None
         write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r]
@@ -959,7 +960,7 @@ PLIST_TMPL = """<?xml version="1.0" encoding="UTF-8"?>
 
 
 def install():
-    """Задача launchd, команда pantheon и обработчики слияния ~/pantheon — через неизменную ссылку CURRENT."""
+    """Задача launchd, команда pantheon и обработчики слияния ~/ai/pantheon — через неизменную ссылку CURRENT."""
     os.makedirs(path("logs"), exist_ok=True)
     os.makedirs(os.path.dirname(PLIST), exist_ok=True)
     os.makedirs(os.path.dirname(CURRENT), exist_ok=True)

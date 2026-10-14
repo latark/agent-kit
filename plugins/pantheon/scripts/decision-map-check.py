@@ -12,7 +12,7 @@
     (для недельной сверки библиотекаря).
 
 Запуск: python3 -I decision-map-check.py [путь к decision-map.md] [--files] [--by-step]
-По умолчанию берёт ~/pantheon/decision-map.md и revisits.toml рядом с ним.
+По умолчанию берёт ~/ai/pantheon/decision-map.md и revisits.toml рядом с ним.
 Код выхода 0 — ошибок нет (предупреждения не считаются), 1 — есть ошибки.
 """
 import os
@@ -53,7 +53,7 @@ def expand(path):
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    map_path = args[0] if args else os.path.expanduser("~/pantheon/decision-map.md")
+    map_path = args[0] if args else os.path.expanduser("~/ai/pantheon/decision-map.md")
     rev_path = os.path.join(os.path.dirname(map_path), "revisits.toml")
 
     text = open(map_path, encoding="utf-8").read()

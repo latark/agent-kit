@@ -219,17 +219,17 @@ def main():
     os.makedirs(br)
     subprocess.run(["git", "init", "-q", br], check=True)
     subprocess.run(["git", "-C", br, "remote", "add", "origin", "git@github.com:x/y.git"], check=True)
-    for d in ("pantheon/directions/athena-broker", "projects/zz", "knowledge", ".cache/metis", ".ssh"):
+    for d in ("pantheon/directions/athena-broker", "projects/zz", "ai/knowledge", ".cache/metis", ".ssh"):
         os.makedirs(os.path.join(tmp, d), exist_ok=True)
     os.symlink(os.path.join(tmp, "pantheon"), os.path.join(tmp, "projects", "ln"))
     with open(os.path.join(home, "directions.toml"), "a") as fh:
         fh.write('sandbox_write = ["~/.ssh"]\n'
-                 '[[direction]]\nname = "mnemo-brain"\nfolders = ["~/knowledge"]\n'
-                 '[[direction]]\nname = "zz"\nfolders = ["~/pantheon", "~/projects", "~/projects/zz", "~/.claude", '
+                 '[[direction]]\nname = "mnemo-brain"\nfolders = ["~/ai/knowledge"]\n'
+                 '[[direction]]\nname = "zz"\nfolders = ["~/ai/pantheon", "~/projects", "~/projects/zz", "~/.claude", '
                  '"~/projects/ln"]\n')
     with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "a") as fh:
-        fh.write('[sandbox_write]\nmetis-pantheon = ["~/.cache/metis", "~/pantheon", "~/.cache/../.ssh"]\n'
-                 '[private]\ncoordinators = ["mnemo-brain"]\npaths = ["~/knowledge/me"]\n')
+        fh.write('[sandbox_write]\nmetis-pantheon = ["~/.cache/metis", "~/ai/pantheon", "~/.cache/../.ssh"]\n'
+                 '[private]\ncoordinators = ["mnemo-brain"]\npaths = ["~/ai/knowledge/me"]\n')
     os.makedirs(os.path.join(state, "settings"), exist_ok=True)
     open(os.path.join(state, "settings", "old-direction.json"), "w").write("{}")
     subprocess.run([sys.executable, "-I", LIB, "domains", "build"], env=env, capture_output=True)
@@ -255,16 +255,16 @@ def main():
           real(".cache/metis") in mw and not any(x.endswith(("/pantheon", "/.ssh")) for x in mw)
           and ".ssh" not in json.dumps(sa) + json.dumps(sm))
     zw = sz["sandbox"]["filesystem"]["allowWrite"]
-    check("песочница: папки направления — только внутри ~/projects и ~/knowledge, ссылки пропущены",
+    check("песочница: папки направления — только внутри ~/projects и ~/ai/knowledge, ссылки пропущены",
           zw[0] == real("projects/zz") and real("projects") not in zw and real("pantheon") not in zw
-          and not any(x.endswith(("/.claude", "/ln")) for x in zw) and real("knowledge") in sn["sandbox"]["filesystem"]["allowWrite"])
+          and not any(x.endswith(("/.claude", "/ln")) for x in zw) and real("ai/knowledge") in sn["sandbox"]["filesystem"]["allowWrite"])
     dw, dr = box["filesystem"]["denyWrite"], box["filesystem"]["denyRead"]
     check("песочница: запреты и настоящими путями — .git внутри каждой разрешённой папки, личное — оба вида",
           real("projects/br") + "/**/.git/config" in dw and real("projects/br") + "/.git/hooks" in dw
-          and cache_a + "/**/.git/hooks" in dw and real("knowledge/me") in dr and "~/knowledge/me" in dr)
+          and cache_a + "/**/.git/hooks" in dw and real("ai/knowledge/me") in dr and "~/ai/knowledge/me" in dr)
     check("песочница: личное закрыто для чтения всем, кроме координатора с привилегией; мастерская; старый файл убран",
-          "~/knowledge/me" in box["filesystem"]["denyRead"] and not sn["sandbox"]["filesystem"]["denyRead"]
-          and "~/knowledge/me" in sw["sandbox"]["filesystem"]["denyRead"] and "autoCompactWindow" not in sw
+          "~/ai/knowledge/me" in box["filesystem"]["denyRead"] and not sn["sandbox"]["filesystem"]["denyRead"]
+          and "~/ai/knowledge/me" in sw["sandbox"]["filesystem"]["denyRead"] and "autoCompactWindow" not in sw
           and not os.path.exists(os.path.join(state, "settings", "old-direction.json")))
 
     # архив (STATE-14)

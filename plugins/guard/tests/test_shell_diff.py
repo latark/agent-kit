@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Сверка guard с настоящей оболочкой: каждая команда выполняется в zsh и bash на временном HOME, и если
-оболочка изменила ~/pantheon (или ~/pantheon-view), а guard команду пропустил, — это обход разбора.
+оболочка изменила ~/ai/pantheon (или ~/ai/pantheon-view), а guard команду пропустил, — это обход разбора.
 
 Запуск: python3 -I plugins/guard/tests/test_shell_diff.py [--verbose]   (код выхода 0 — обходов нет)
 Команды меняют только временную папку: HOME подменён, пути в них — через ~ и относительные, /tmp не трогают.
@@ -21,12 +21,12 @@ GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHELLS = [s for s in ("/bin/zsh", "/bin/bash") if os.path.exists(s)]
 PROJECT = "projects/brokerAssistantApp"
 
-# Цели: разные записи одного и того же файла ~/pantheon/alerts.md (и папки ~/pantheon)
+# Цели: разные записи одного и того же файла ~/ai/pantheon/alerts.md (и папки ~/ai/pantheon)
 TARGETS = [
-    "~/pantheon/alerts.md", "$HOME/pantheon/alerts.md", '"$HOME"/pantheon/alerts.md', "~/pan''theon/alerts.md",
-    "~/pantheon/alert?.md", "~/pantheon/{alerts,zz}.md", "../../pantheon/alerts.md", "~/PANTHEON/alerts.md",
-    "~/pantheon/./x/../alerts.md", '~/"pantheon"/alerts.md', "~/pantheon/a*s.md", "$PWD/../../pantheon/alerts.md",
-    "~/pantheon/al\\erts.md", "${HOME}/pantheon/alerts.md", "~+/../../pantheon/alerts.md",
+    "~/ai/pantheon/alerts.md", "$HOME/ai/pantheon/alerts.md", '"$HOME"/ai/pantheon/alerts.md', "~/ai/pan''theon/alerts.md",
+    "~/ai/pantheon/alert?.md", "~/ai/pantheon/{alerts,zz}.md", "../../ai/pantheon/alerts.md", "~/ai/PANTHEON/alerts.md",
+    "~/ai/pantheon/./x/../alerts.md", '~/ai/"pantheon"/alerts.md', "~/ai/pantheon/a*s.md", "$PWD/../../ai/pantheon/alerts.md",
+    "~/ai/pantheon/al\\erts.md", "${HOME}/ai/pantheon/alerts.md", "~+/../../ai/pantheon/alerts.md",
 ]
 # Действия записи
 ACTIONS = [
@@ -45,48 +45,48 @@ WRAPS = [
 ]
 # Отдельные случаи: обходы из проверки безопасности и формы zsh
 EXTRA = [
-    "cd ~/pantheon\nrm alerts.md", "echo $'\\'' > ~/pantheon/alerts.md #'", "touch {.,~/pantheon}/alerts.md",
-    "command -p rm ~/pantheon/alerts.md", "read D <<< ~/pantheon; echo x > $D/alerts.md",
-    "for d in ~/pantheon; do echo x > $d/alerts.md; done", "echo x > ${P:-~/pantheon}/alerts.md",
-    "set -- ~/pantheon; echo x > $1/alerts.md", "pushd ~/pantheon >/dev/null && rm alerts.md",
-    "cd ~/pantheon; cd ~/tmp; cd -; rm alerts.md", "f() { rm ~/pantheon/alerts.md; }; f",
-    "if true; then rm ~/pantheon/alerts.md; fi", "echo x >! ~/pantheon/alerts.md", "=rm ~/pantheon/alerts.md",
-    "echo x > >(cat > ~/pantheon/alerts.md)", "cat <(rm ~/pantheon/alerts.md)", "r\\\nm ~/pantheon/alerts.md",
-    "exec -a x rm ~/pantheon/alerts.md", "echo ~/pantheon/alerts.md | xargs rm",
-    "find ~/pantheon -name alerts.md -exec sh -c 'rm \"$0\"' {} \\;", "export P=$(echo ~); rm $P/pantheon/alerts.md",
-    "cd ~/pantheon; cd ~/tmp; rm ~-/alerts.md", "noglob rm ~/pantheon/alerts.md", "{ rm ~/pantheon/alerts.md}",
-    "{rm ~/pantheon/alerts.md}", "if [[ -n x ]] rm ~/pantheon/alerts.md", "for f (~/pantheon/alerts.md) rm $f",
-    "rm ~/pantheon/(alerts|zz).md", "rm ~/pantheon/alerts.md(.)", "repeat 1 rm ~/pantheon/alerts.md",
-    "X=~/pantheon; (X=~/tmp); rm $X/alerts.md", "cd /nonexistent-dir 2>/dev/null || rm alerts.md",
-    "true | cd ~/pantheon; rm alerts.md", "ln -s ~/pantheon/alerts.md l && echo x > l", "ln -s ~/pantheon p; rm p/alerts.md",
-    "cd ~; rm -rf pantheon/alerts.md", "cd ~/pantheon/directions && rm -rf ../alerts.md", "git -C ~/pantheon add -A",
-    "cd ~/pantheon/directions && git add -A", "arr=(~/pantheon/alerts.md); rm $arr", "X='a b'; rm $X ~/pantheon/alerts.md",
-    "IFS=:; X=a:~/pantheon/alerts.md; rm $X", "D=~/pantheon; f() { rm $D/alerts.md; }; D=~/tmp; f",
-    "hash -p /bin/rm myrm 2>/dev/null; myrm ~/pantheon/alerts.md", "mkdir -p ~/pantheon/zz", "rm -rf ~/pantheon/",
-    "cd ~/pantheon && rm -- -x alerts.md", "rm -rf ~/pantheon-view/board.md", "echo x > ~/pantheon-view/new.md",
-    "cp -R ~/tmp/. ~/pantheon/", "tar -cf ~/pantheon/alerts.md ~/tmp", "cd ~/pantheon && tar -xf ~/tmp/a.tar",
-    "cd ~/pantheon && unzip -o ~/tmp/a.zip >/dev/null", "awk 'BEGIN{print \"x\" > \"'$HOME'/pantheon/alerts.md\"}'",
-    "sed -n 'w '$HOME'/pantheon/alerts.md' /dev/null", "gzip ~/pantheon/alerts.md", "sort -o ~/pantheon/alerts.md /dev/null",
-    "zsh -fc 'rm ~/pantheon/alerts.md'", "bash -ec 'rm ~/pantheon/alerts.md'", "sh -s <<< 'rm ~/pantheon/alerts.md'",
-    "trap 'rm ~/pantheon/alerts.md' EXIT", "eval \"$(echo rm ~/pantheon/alerts.md)\"", "x=rm; $x ~/pantheon/alerts.md",
-    "${=:-rm} ~/pantheon/alerts.md", "RM ~/pantheon/alerts.md", "/BIN/RM ~/pantheon/alerts.md",
-    "rm ~/pantheon/ALERTS.MD", "cd ~/pantheon && rm *.md", "rm ~/pantheon/.git/HEAD", "rm -rf ~/pantheon/.g*",
-    "cd ~/pantheon; echo x | tee -a alerts.md", "cd ~/pantheon && echo x > 'alerts.md'", "cd ~ && echo x > pantheon/alerts.md",
-    "cd ~/projects && cd ../pantheon && rm alerts.md", "mv ~/pantheon ~/tmp/p2", "rm -rf ~/projects/..",
+    "cd ~/ai/pantheon\nrm alerts.md", "echo $'\\'' > ~/ai/pantheon/alerts.md #'", "touch {.,~/ai/pantheon}/alerts.md",
+    "command -p rm ~/ai/pantheon/alerts.md", "read D <<< ~/ai/pantheon; echo x > $D/alerts.md",
+    "for d in ~/ai/pantheon; do echo x > $d/alerts.md; done", "echo x > ${P:-~/pantheon}/alerts.md",
+    "set -- ~/ai/pantheon; echo x > $1/alerts.md", "pushd ~/ai/pantheon >/dev/null && rm alerts.md",
+    "cd ~/ai/pantheon; cd ~/tmp; cd -; rm alerts.md", "f() { rm ~/ai/pantheon/alerts.md; }; f",
+    "if true; then rm ~/ai/pantheon/alerts.md; fi", "echo x >! ~/ai/pantheon/alerts.md", "=rm ~/ai/pantheon/alerts.md",
+    "echo x > >(cat > ~/ai/pantheon/alerts.md)", "cat <(rm ~/ai/pantheon/alerts.md)", "r\\\nm ~/ai/pantheon/alerts.md",
+    "exec -a x rm ~/ai/pantheon/alerts.md", "echo ~/ai/pantheon/alerts.md | xargs rm",
+    "find ~/ai/pantheon -name alerts.md -exec sh -c 'rm \"$0\"' {} \\;", "export P=$(echo ~); rm $P/ai/pantheon/alerts.md",
+    "cd ~/ai/pantheon; cd ~/tmp; rm ~-/alerts.md", "noglob rm ~/ai/pantheon/alerts.md", "{ rm ~/ai/pantheon/alerts.md}",
+    "{rm ~/ai/pantheon/alerts.md}", "if [[ -n x ]] rm ~/ai/pantheon/alerts.md", "for f (~/ai/pantheon/alerts.md) rm $f",
+    "rm ~/ai/pantheon/(alerts|zz).md", "rm ~/ai/pantheon/alerts.md(.)", "repeat 1 rm ~/ai/pantheon/alerts.md",
+    "X=~/ai/pantheon; (X=~/tmp); rm $X/alerts.md", "cd /nonexistent-dir 2>/dev/null || rm alerts.md",
+    "true | cd ~/ai/pantheon; rm alerts.md", "ln -s ~/ai/pantheon/alerts.md l && echo x > l", "ln -s ~/ai/pantheon p; rm p/alerts.md",
+    "cd ~/ai; rm -rf pantheon/alerts.md", "cd ~/ai/pantheon/directions && rm -rf ../alerts.md", "git -C ~/ai/pantheon add -A",
+    "cd ~/ai/pantheon/directions && git add -A", "arr=(~/ai/pantheon/alerts.md); rm $arr", "X='a b'; rm $X ~/ai/pantheon/alerts.md",
+    "IFS=:; X=a:~/ai/pantheon/alerts.md; rm $X", "D=~/ai/pantheon; f() { rm $D/alerts.md; }; D=~/tmp; f",
+    "hash -p /bin/rm myrm 2>/dev/null; myrm ~/ai/pantheon/alerts.md", "mkdir -p ~/ai/pantheon/zz", "rm -rf ~/ai/pantheon/",
+    "cd ~/ai/pantheon && rm -- -x alerts.md", "rm -rf ~/ai/pantheon-view/board.md", "echo x > ~/ai/pantheon-view/new.md",
+    "cp -R ~/tmp/. ~/ai/pantheon/", "tar -cf ~/ai/pantheon/alerts.md ~/tmp", "cd ~/ai/pantheon && tar -xf ~/tmp/a.tar",
+    "cd ~/ai/pantheon && unzip -o ~/tmp/a.zip >/dev/null", "awk 'BEGIN{print \"x\" > \"'$HOME'/ai/pantheon/alerts.md\"}'",
+    "sed -n 'w '$HOME'/ai/pantheon/alerts.md' /dev/null", "gzip ~/ai/pantheon/alerts.md", "sort -o ~/ai/pantheon/alerts.md /dev/null",
+    "zsh -fc 'rm ~/ai/pantheon/alerts.md'", "bash -ec 'rm ~/ai/pantheon/alerts.md'", "sh -s <<< 'rm ~/ai/pantheon/alerts.md'",
+    "trap 'rm ~/ai/pantheon/alerts.md' EXIT", "eval \"$(echo rm ~/ai/pantheon/alerts.md)\"", "x=rm; $x ~/ai/pantheon/alerts.md",
+    "${=:-rm} ~/ai/pantheon/alerts.md", "RM ~/ai/pantheon/alerts.md", "/BIN/RM ~/ai/pantheon/alerts.md",
+    "rm ~/ai/pantheon/ALERTS.MD", "cd ~/ai/pantheon && rm *.md", "rm ~/ai/pantheon/.git/HEAD", "rm -rf ~/ai/pantheon/.g*",
+    "cd ~/ai/pantheon; echo x | tee -a alerts.md", "cd ~/ai/pantheon && echo x > 'alerts.md'", "cd ~/ai && echo x > pantheon/alerts.md",
+    "cd ~/projects && cd ../ai/pantheon && rm alerts.md", "mv ~/ai/pantheon ~/tmp/p2", "rm -rf ~/projects/..",
     # раунд 3: модификаторы и срезы zsh, квалификаторы с кодом, cdpath, опции git
-    "echo x > $PWD:h:h/pantheon/alerts.md", "echo x > \"$PWD:h:h\"/pantheon/alerts.md",
-    "X=$HOME/pantheon/alerts.md; rm -f $X[1,500]", "cd ~/pantheon && ls *(e:'rm -f alerts.md':) >/dev/null",
-    "cdpath=(~); cd pantheon && rm alerts.md", "git diff --no-index --output=$HOME/pantheon/alerts.md /dev/null ~/tmp/z",
-    "cd ~/tmp && git grep --no-index -O'rm -f ~/pantheon/alerts.md' line",
-    "X=--output=$HOME/pantheon/alerts.md; git diff --no-index $X /dev/null ~/tmp/z",
+    "echo x > $PWD:h:h/ai/pantheon/alerts.md", "echo x > \"$PWD:h:h\"/ai/pantheon/alerts.md",
+    "X=$HOME/ai/pantheon/alerts.md; rm -f $X[1,500]", "cd ~/ai/pantheon && ls *(e:'rm -f alerts.md':) >/dev/null",
+    "cdpath=(~/ai); cd pantheon && rm alerts.md", "git diff --no-index --output=$HOME/ai/pantheon/alerts.md /dev/null ~/tmp/z",
+    "cd ~/tmp && git grep --no-index -O'rm -f ~/ai/pantheon/alerts.md' line",
+    "X=--output=$HOME/ai/pantheon/alerts.md; git diff --no-index $X /dev/null ~/tmp/z",
 ]
 
 
 def build(home):
-    for d in ("pantheon/directions/athena-broker", "pantheon/directions/hermes-alex/inbox", "pantheon/.git",
-              "pantheon-view", ".local/state/pantheon", ".claude/pantheon", PROJECT + "/src", "tmp"):
+    for d in ("ai/pantheon/directions/athena-broker", "ai/pantheon/directions/hermes-alex/inbox", "ai/pantheon/.git",
+              "ai/pantheon-view", ".local/state/pantheon", ".claude/pantheon", PROJECT + "/src", "tmp"):
         os.makedirs(os.path.join(home, d), exist_ok=True)
-    for f in ("pantheon/board.md", "pantheon/alerts.md", "pantheon/.git/HEAD", "pantheon-view/board.md",
+    for f in ("ai/pantheon/board.md", "ai/pantheon/alerts.md", "ai/pantheon/.git/HEAD", "ai/pantheon-view/board.md",
               PROJECT + "/src/a.ts", "tmp/z"):
         with open(os.path.join(home, f), "w") as fh:
             fh.write("line\n")
@@ -98,7 +98,7 @@ def build(home):
 
 def snapshot(home):
     res = {}
-    for top in ("pantheon", "pantheon-view"):
+    for top in ("ai/pantheon", "ai/pantheon-view"):
         root = os.path.join(home, top)
         if not os.path.lexists(root):
             res[top] = "нет"
@@ -154,11 +154,11 @@ def cases():
     return seen + EXTRA
 
 
-# Что закрыто от роли: координатору — весь ~/pantheon (кроме своего направления, его тут не трогают) и копия;
-# штабу — alerts.md, .git и копия (остальное в ~/pantheon он правит сам).
+# Что закрыто от роли: координатору — весь ~/ai/pantheon (кроме своего направления, его тут не трогают) и копия;
+# штабу — alerts.md, .git и копия (остальное в ~/ai/pantheon он правит сам).
 ROLES = {
-    "domain-coordinator": ("pantheon", "pantheon-view"),
-    "hq": ("pantheon/alerts.md", "pantheon/.git", "pantheon-view"),
+    "domain-coordinator": ("ai/pantheon", "ai/pantheon-view"),
+    "hq": ("ai/pantheon/alerts.md", "ai/pantheon/.git", "ai/pantheon-view"),
 }
 
 
@@ -173,7 +173,7 @@ def check(cmd):
         os.makedirs(home)
         build(home)
         changed = {role: [sh for sh, ch in changes.items()
-                          if any(k == p or k.startswith(p + "/") or k == "pantheon" for k in ch for p in closed)]
+                          if any(k == p or k.startswith(p + "/") or k in ("ai", "ai/pantheon") for k in ch for p in closed)]
                    for role, closed in ROLES.items()}
         return cmd, changed, {role: guard_says(home, cmd, role) for role in ROLES}
     finally:

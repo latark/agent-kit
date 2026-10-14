@@ -2,7 +2,7 @@
 """Синтетические тесты guard: подменённый HOME во временной папке, события PreToolUse на stdin.
 
 Запуск: python3 -I plugins/guard/tests/test_guard.py   (код выхода 0 — все прошли)
-Проверяет карту прав ~/pantheon (pantheon-acl), правило domain для координаторов и мастерской,
+Проверяет карту прав ~/ai/pantheon (pantheon-acl), правило domain для координаторов и мастерской,
 привилегии из policy.toml и что прежние правила (dev-server) не сломались.
 """
 import json
@@ -15,13 +15,13 @@ GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def setup(home):
-    for d in ("pantheon/.git", "pantheon/directions/athena-broker", "pantheon/directions/hermes-alex/inbox",
-              "pantheon/scout", "pantheon-view", ".local/state/pantheon/owner-log", ".claude/pantheon",
+    for d in ("ai/pantheon/.git", "ai/pantheon/directions/athena-broker", "ai/pantheon/directions/hermes-alex/inbox",
+              "ai/pantheon/scout", "ai/pantheon-view", ".local/state/pantheon/owner-log", ".claude/pantheon",
               "projects/brokerAssistantApp/app", "projects/alexbroker", "projects/agent-kit",
-              "projects/workshop/visa", "knowledge"):
+              "projects/workshop/visa", "ai/knowledge"):
         os.makedirs(os.path.join(home, d), exist_ok=True)
-    for f in ("pantheon/board.md", "pantheon/alerts.md", "pantheon/decision-map.md",
-              "pantheon/directions/hermes-alex/STATUS.md", "pantheon/directions/hermes-alex/inbox/old.md"):
+    for f in ("ai/pantheon/board.md", "ai/pantheon/alerts.md", "ai/pantheon/decision-map.md",
+              "ai/pantheon/directions/hermes-alex/STATUS.md", "ai/pantheon/directions/hermes-alex/inbox/old.md"):
         open(os.path.join(home, f), "w").close()
     json.dump({"domains": {
         "athena-broker": ["~/projects/brokerAssistantApp"],
@@ -32,7 +32,7 @@ def setup(home):
     }}, open(os.path.join(home, ".local/state/pantheon/domains.json"), "w"))
     open(os.path.join(home, ".claude/pantheon/policy.toml"), "w").write(
         'always = ["~/.claude/agent-memory"]\n[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n'
-        'mnemo-brain = ["~/knowledge"]\n[agent_extra]\nprometheus = ["~/knowledge"]\n')
+        'mnemo-brain = ["~/ai/knowledge"]\n[agent_extra]\nprometheus = ["~/ai/knowledge"]\n')
 
 
 def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None):
@@ -52,7 +52,7 @@ def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None):
 def main():
     home = os.path.realpath(tempfile.mkdtemp(prefix="guard-test-"))
     setup(home)
-    P = lambda rel: os.path.join(home, "pantheon", rel)
+    P = lambda rel: os.path.join(home, "ai", "pantheon", rel)
     W = lambda path: ("Write", {"file_path": path, "content": "x"})
     E = lambda path: ("Edit", {"file_path": path, "old_string": "a", "new_string": "b"})
     B = lambda cmd: ("Bash", {"command": cmd})
@@ -71,11 +71,11 @@ def main():
         ("iris дописывает через pantheon alert", "allow", ".", "iris", False, B('pantheon alert "новая версия Claude Code"')),
         ("iris пишет в scout/", "allow", ".", "iris", False, W(P("scout/2026-10-14.md"))),
         ("clio не пишет в scout/", "deny", ".", "clio", False, W(P("scout/x.md"))),
-        ("правка в копии — отказ", "deny", br, "domain-coordinator", False, W(os.path.join(home, "pantheon-view/board.md"))),
+        ("правка в копии — отказ", "deny", br, "domain-coordinator", False, W(os.path.join(home, "ai/pantheon-view/board.md"))),
         ("запись модели в owner-log — отказ", "deny", br, "domain-coordinator", False,
          B(f"echo да >> {home}/.local/state/pantheon/owner-log/athena-broker.md")),
-        ("роль не коммитит ~/pantheon", "deny", ".", "hq", False, B(f"git -C {home}/pantheon commit -am x")),
-        ("ваша сессия коммитит ~/pantheon", "allow", ".", "", False, B(f"git -C {home}/pantheon commit -am x")),
+        ("роль не коммитит ~/ai/pantheon", "deny", ".", "hq", False, B(f"git -C {home}/ai/pantheon commit -am x")),
+        ("ваша сессия коммитит ~/ai/pantheon", "allow", ".", "", False, B(f"git -C {home}/ai/pantheon commit -am x")),
         ("Метида правит карту решений", "allow", ak, "domain-coordinator", False, E(P("decision-map.md"))),
         ("athena не правит карту решений", "deny", br, "domain-coordinator", False, E(P("decision-map.md"))),
         ("реестр не выдаёт прав Метиды", "deny", ak + "/../brokerAssistantApp", "domain-coordinator", False, E(P("decision-map.md"))),
@@ -83,21 +83,21 @@ def main():
         ("athena — отказ на запись в alexbroker (SEC-12)", "deny", br, "domain-coordinator", False, W(os.path.join(home, alex, "x.md"))),
         ("мастерская пишет в папку задачи", "allow", ws, "workshop", False, W(os.path.join(home, ws, "form.md"))),
         ("мастерская — отказ вне папки задачи", "deny", ws, "workshop", False, W(os.path.join(home, alex, "x.md"))),
-        ("prometheus пишет в ~/knowledge (agent_extra)", "allow", br, "prometheus", True, W(os.path.join(home, "knowledge/raw/a.md"))),
+        ("prometheus пишет в ~/ai/knowledge (agent_extra)", "allow", br, "prometheus", True, W(os.path.join(home, "ai/knowledge/raw/a.md"))),
         ("dev-server по-прежнему запрещён", "deny", br, "", False, B("pnpm run dev")),
-        # обходы через Bash (ревизия шага 0.3, № 5): роль координатора, cwd = ~/pantheon
-        ("Bash: >> alerts.md из ~/pantheon", "deny", br, "domain-coordinator", False, B("echo x >> alerts.md"), "pantheon"),
-        ("Bash: sed -i board.md из ~/pantheon", "deny", br, "domain-coordinator", False, B("sed -i '' 's/a/b/' board.md"), "pantheon"),
-        ("Bash: cd ~/pantheon && sed -i", "deny", br, "domain-coordinator", False, B(f"cd {home}/pantheon && sed -i '' 's/a/b/' board.md")),
-        ("Bash: > \"$HOME/pantheon/board.md\"", "deny", br, "domain-coordinator", False, B('echo x > "$HOME/pantheon/board.md"')),
-        ("Bash: tee \"$HOME/…\"", "deny", br, "domain-coordinator", False, B('echo x | tee "$HOME/pantheon/board.md"')),
-        ("Bash: mv доски как источника", "deny", br, "domain-coordinator", False, B(f"mv {home}/pantheon/board.md /tmp/b.md")),
-        ("Bash: (cd ~/pantheon; git commit)", "deny", br, "domain-coordinator", False, B(f"(cd {home}/pantheon; git commit -am x)")),
-        ("Bash: git -C ~/pantheon -c k=v commit", "deny", br, "domain-coordinator", False, B(f"git -C {home}/pantheon -c user.name=x commit -m y")),
-        ("Bash: чтение ~/pantheon можно", "allow", br, "domain-coordinator", False, B(f"cat {home}/pantheon/board.md && git -C {home}/pantheon log -1")),
-        ("Bash: вывод во временную папку можно", "allow", br, "domain-coordinator", False, B("grep x board.md > /tmp/out.txt 2>&1"), "pantheon"),
+        # обходы через Bash (ревизия шага 0.3, № 5): роль координатора, cwd = ~/ai/pantheon
+        ("Bash: >> alerts.md из ~/ai/pantheon", "deny", br, "domain-coordinator", False, B("echo x >> alerts.md"), "ai/pantheon"),
+        ("Bash: sed -i board.md из ~/ai/pantheon", "deny", br, "domain-coordinator", False, B("sed -i '' 's/a/b/' board.md"), "ai/pantheon"),
+        ("Bash: cd ~/ai/pantheon && sed -i", "deny", br, "domain-coordinator", False, B(f"cd {home}/ai/pantheon && sed -i '' 's/a/b/' board.md")),
+        ("Bash: > \"$HOME/ai/pantheon/board.md\"", "deny", br, "domain-coordinator", False, B('echo x > "$HOME/ai/pantheon/board.md"')),
+        ("Bash: tee \"$HOME/…\"", "deny", br, "domain-coordinator", False, B('echo x | tee "$HOME/ai/pantheon/board.md"')),
+        ("Bash: mv доски как источника", "deny", br, "domain-coordinator", False, B(f"mv {home}/ai/pantheon/board.md /tmp/b.md")),
+        ("Bash: (cd ~/ai/pantheon; git commit)", "deny", br, "domain-coordinator", False, B(f"(cd {home}/ai/pantheon; git commit -am x)")),
+        ("Bash: git -C ~/ai/pantheon -c k=v commit", "deny", br, "domain-coordinator", False, B(f"git -C {home}/ai/pantheon -c user.name=x commit -m y")),
+        ("Bash: чтение ~/ai/pantheon можно", "allow", br, "domain-coordinator", False, B(f"cat {home}/ai/pantheon/board.md && git -C {home}/ai/pantheon log -1")),
+        ("Bash: вывод во временную папку можно", "allow", br, "domain-coordinator", False, B("grep x board.md > /tmp/out.txt 2>&1"), "ai/pantheon"),
         ("Bash: heredoc с > внутри текста — не цель", "allow", br, "domain-coordinator", False,
-         B("cat > /tmp/note.md <<'EOF'\nстрелка > ~/pantheon/board.md в тексте\nEOF")),
+         B("cat > /tmp/note.md <<'EOF'\nстрелка > ~/ai/pantheon/board.md в тексте\nEOF")),
         # команды пульта (№ 6)
         ("координатор: pantheon archive — отказ", "deny", br, "domain-coordinator", False, B("pantheon archive")),
         ("координатор: pantheon jobs pause --all — отказ", "deny", br, "domain-coordinator", False, B("pantheon jobs pause --all")),
@@ -106,42 +106,42 @@ def main():
         ("ваша сессия: pantheon uninstall можно", "allow", ".", "", False, B("pantheon uninstall")),
         # роли отдельной сессией (№ 7)
         ("clio сессией: запись в alexbroker — отказ", "deny", ".", "clio", False, W(os.path.join(home, alex, "x.md"))),
-        ("clio сессией: запись в ~/knowledge (agent_extra нет в тестовой политике) — отказ", "deny", ".", "clio", False, W(os.path.join(home, "knowledge/wiki/x.md"))),
-        ("prometheus сессией: ~/knowledge по agent_extra", "allow", ".", "prometheus", False, W(os.path.join(home, "knowledge/raw/x.md"))),
+        ("clio сессией: запись в ~/ai/knowledge (agent_extra нет в тестовой политике) — отказ", "deny", ".", "clio", False, W(os.path.join(home, "ai/knowledge/wiki/x.md"))),
+        ("prometheus сессией: ~/ai/knowledge по agent_extra", "allow", ".", "prometheus", False, W(os.path.join(home, "ai/knowledge/raw/x.md"))),
         ("iris сессией: policy.toml — отказ", "deny", ".", "iris", False, W(os.path.join(home, ".claude/pantheon/policy.toml"))),
         ("hq пишет в alexbroker (штаб не ограничен domain)", "allow", ".", "hq", False, W(os.path.join(home, alex, "x.md"))),
         ("субагент без agent_type — отказ на board.md (№ 27)", "deny", br, "", True, W(P("board.md"))),
-        ("встроенный субагент — тоже под картой прав ~/pantheon", "deny", "pantheon", "general-purpose", True, W(P("handoff/x/r.md"))),
-        ("встроенный субагент координатора — отказ на board.md", "deny", br, "general-purpose", True, B("echo x >> ~/pantheon/board.md")),
+        ("встроенный субагент — тоже под картой прав ~/ai/pantheon", "deny", "ai/pantheon", "general-purpose", True, W(P("handoff/x/r.md"))),
+        ("встроенный субагент координатора — отказ на board.md", "deny", br, "general-purpose", True, B("echo x >> ~/ai/pantheon/board.md")),
         # расхождения разбора (проверка безопасности коммитов)
-        ("bash -c с записью в ~/pantheon", "deny", br, "domain-coordinator", False, B('bash -c "echo x > ~/pantheon/board.md"')),
-        ("eval с записью в ~/pantheon", "deny", br, "domain-coordinator", False, B('eval "echo x > ~/pantheon/board.md"')),
-        ("переменная из той же команды", "deny", br, "domain-coordinator", False, B("P=~/pantheon; echo x > $P/board.md")),
+        ("bash -c с записью в ~/ai/pantheon", "deny", br, "domain-coordinator", False, B('bash -c "echo x > ~/ai/pantheon/board.md"')),
+        ("eval с записью в ~/ai/pantheon", "deny", br, "domain-coordinator", False, B('eval "echo x > ~/ai/pantheon/board.md"')),
+        ("переменная из той же команды", "deny", br, "domain-coordinator", False, B("P=~/ai/pantheon; echo x > $P/board.md")),
         ("шаблон пути ~/pant*on", "deny", br, "domain-coordinator", False, B("echo x > ~/pant*on/board.md")),
-        ("$(…) в цели записи — не разобрать", "deny", br, "domain-coordinator", False, B("echo x > $(echo ~/pantheon)/board.md")),
-        ("find -delete в ~/pantheon", "deny", br, "domain-coordinator", False, B("find ~/pantheon -name board.md -delete")),
+        ("$(…) в цели записи — не разобрать", "deny", br, "domain-coordinator", False, B("echo x > $(echo ~/ai/pantheon)/board.md")),
+        ("find -delete в ~/ai/pantheon", "deny", br, "domain-coordinator", False, B("find ~/ai/pantheon -name board.md -delete")),
         ("xargs rm — не разобрать", "deny", br, "domain-coordinator", False, B("ls | xargs rm")),
         ("$(…) в тексте коммита — можно", "allow", br, "domain-coordinator", False, B('git commit -m "$(cat /tmp/msg)"')),
         # раунд 2 проверки безопасности: расхождения разбора с bash и zsh (живая сверка — test_shell_diff.py)
         *[(f"обход: {c!r}", "deny", br, "domain-coordinator", False, B(c)) for c in (
-            "echo hi\nrm ~/pantheon/alerts.md", "cd ~/pantheon\nrm alerts.md", "echo $'\\'' > ~/pantheon/board.md #'",
-            "touch {.,~/pantheon}/board.md", "command -p rm ~/pantheon/alerts.md", "env -i rm ~/pantheon/alerts.md",
-            "nice -n 5 rm ~/pantheon/alerts.md", "read D <<< ~/pantheon; echo x > $D/board.md",
-            "echo x > ${P:-~/pantheon}/board.md", "cp -t ~/pantheon a.md", "rsync -a a.md ~/pantheon/board.md --exclude x",
-            "sed --in-place=.bak --expression=s/a/b/ ~/pantheon/board.md", "perl -pi -e 's/a/b/' ~/pantheon/board.md",
-            "pushd ~/pantheon && rm alerts.md", "f() { rm ~/pantheon/alerts.md; }; f", "if true; then rm ~/pantheon/alerts.md; fi",
-            "! rm ~/pantheon/alerts.md", "echo x >& ~/pantheon/board.md", "exec 3<> ~/pantheon/board.md",
-            "echo x >! ~/pantheon/board.md", "=rm ~/pantheon/alerts.md", "echo x > >(tee ~/pantheon/board.md)",
-            "cat <(rm ~/pantheon/alerts.md)", "r\\\nm ~/pantheon/alerts.md", "rm ~/pantheon/alerts.md #\0",
-            "find ~/pantheon -name alerts.md -exec sh -c 'rm \"$0\"' {} \\;", "{rm ~/pantheon/alerts.md}",
-            "if [[ -n x ]] rm ~/pantheon/alerts.md", "repeat 1 rm ~/pantheon/alerts.md", "rm ~/pantheon/(alerts|x).md",
-            "cd ~/pantheon; cd /tmp; cd -; rm alerts.md",
-            "true | cd ~/pantheon; rm alerts.md", "X=~/pantheon; (X=/tmp); rm $X/alerts.md",
-            "ln -s ~/pantheon/alerts.md l && echo x > l", "echo x | sh", "sh <<< 'rm ~/pantheon/alerts.md'",
+            "echo hi\nrm ~/ai/pantheon/alerts.md", "cd ~/ai/pantheon\nrm alerts.md", "echo $'\\'' > ~/ai/pantheon/board.md #'",
+            "touch {.,~/ai/pantheon}/board.md", "command -p rm ~/ai/pantheon/alerts.md", "env -i rm ~/ai/pantheon/alerts.md",
+            "nice -n 5 rm ~/ai/pantheon/alerts.md", "read D <<< ~/ai/pantheon; echo x > $D/board.md",
+            "echo x > ${P:-~/pantheon}/board.md", "cp -t ~/ai/pantheon a.md", "rsync -a a.md ~/ai/pantheon/board.md --exclude x",
+            "sed --in-place=.bak --expression=s/a/b/ ~/ai/pantheon/board.md", "perl -pi -e 's/a/b/' ~/ai/pantheon/board.md",
+            "pushd ~/ai/pantheon && rm alerts.md", "f() { rm ~/ai/pantheon/alerts.md; }; f", "if true; then rm ~/ai/pantheon/alerts.md; fi",
+            "! rm ~/ai/pantheon/alerts.md", "echo x >& ~/ai/pantheon/board.md", "exec 3<> ~/ai/pantheon/board.md",
+            "echo x >! ~/ai/pantheon/board.md", "=rm ~/ai/pantheon/alerts.md", "echo x > >(tee ~/ai/pantheon/board.md)",
+            "cat <(rm ~/ai/pantheon/alerts.md)", "r\\\nm ~/ai/pantheon/alerts.md", "rm ~/ai/pantheon/alerts.md #\0",
+            "find ~/ai/pantheon -name alerts.md -exec sh -c 'rm \"$0\"' {} \\;", "{rm ~/ai/pantheon/alerts.md}",
+            "if [[ -n x ]] rm ~/ai/pantheon/alerts.md", "repeat 1 rm ~/ai/pantheon/alerts.md", "rm ~/ai/pantheon/(alerts|x).md",
+            "cd ~/ai/pantheon; cd /tmp; cd -; rm alerts.md",
+            "true | cd ~/ai/pantheon; rm alerts.md", "X=~/ai/pantheon; (X=/tmp); rm $X/alerts.md",
+            "ln -s ~/ai/pantheon/alerts.md l && echo x > l", "echo x | sh", "sh <<< 'rm ~/ai/pantheon/alerts.md'",
             "awk 'BEGIN{print 1 > \"'$HOME'/pantheon/board.md\"}'", "sed -n 'w '$HOME'/pantheon/board.md' /dev/null",
-            "RM ~/PANTHEON/ALERTS.MD", "cd ~/pantheon/directions/athena-broker && git commit -am x",
-            "git --git-dir=$HOME/pantheon/.git commit -m x", "git -c alias.x='!rm ~/pantheon/alerts.md' x",
-            "hash -p /bin/rm myrm; myrm ~/pantheon/alerts.md", "IFS=:; X=a:$HOME/pantheon/alerts.md; rm $X")],
+            "RM ~/ai/PANTHEON/ALERTS.MD", "cd ~/ai/pantheon/directions/athena-broker && git commit -am x",
+            "git --git-dir=$HOME/ai/pantheon/.git commit -m x", "git -c alias.x='!rm ~/ai/pantheon/alerts.md' x",
+            "hash -p /bin/rm myrm; myrm ~/ai/pantheon/alerts.md", "IFS=:; X=a:$HOME/ai/pantheon/alerts.md; rm $X")],
         *[(f"обычная команда: {c!r}", "allow", br, "domain-coordinator", False, B(c)) for c in (
             "pnpm test", "cd app && pnpm lint", "mkdir -p src/{a,b}/c", "rm -rf node_modules dist",
             "sed -i '' 's/a/b/' src/a.ts", "find . -name '*.log' -delete",
@@ -150,27 +150,27 @@ def main():
             "set -euo pipefail; pnpm build", "OUT=/tmp/res.txt; pnpm test > \"$OUT\" 2>&1",
             "tmp=$(mktemp -d); cp src/a.ts \"$tmp\"/", "git add -A && git commit -m 'x' && git push",
             "tar -xzf /tmp/a.tgz -C build", "touch \"$(pwd)/x.txt\"", "rsync -a ~/projects/x/ ./vendor/",
-            "ln -s ../shared src/shared", "while read -r l; do echo \"$l\"; done < src/a.ts", "git -C ~/pantheon log -3")],
+            "ln -s ../shared src/shared", "while read -r l; do echo \"$l\"; done < src/a.ts", "git -C ~/ai/pantheon log -3")],
         # раунд 3: zsh-модификаторы и квалификаторы, cdpath, опасные опции git, переменные-программы, пульт по пути
         *[(f"обход (раунд 3): {c!r}", "deny", br, "domain-coordinator", False, B(c)) for c in (
             "echo x > $PWD:h:h/pantheon/board.md", "echo x > \"$PWD:h:h\"/pantheon/board.md",
-            "X=$HOME/pantheon/board.md; rm $X[1,500]", "cd ~/pantheon && ls *(e:'rm alerts.md':)",
+            "X=$HOME/ai/pantheon/board.md; rm $X[1,500]", "cd ~/ai/pantheon && ls *(e:'rm alerts.md':)",
             "ls ~/x(+myfunc)", "cdpath=(~); cd pantheon && rm alerts.md",
-            "git diff --no-index --output=$HOME/pantheon/board.md /dev/null /dev/null",
-            "git grep -O'rm ~/pantheon/alerts.md' x", "git -c core.pager='rm ~/pantheon/alerts.md' log",
-            "git ls-remote --upload-pack='rm ~/pantheon/alerts.md' .", "EDITOR='rm ~/pantheon/alerts.md' git commit",
-            "export GIT_SSH_COMMAND='rm ~/pantheon/alerts.md'; git fetch",
-            "X=--output=$HOME/pantheon/board.md; git log $X", "set -- --output=$HOME/pantheon/board.md; git log \"$1\"",
+            "git diff --no-index --output=$HOME/ai/pantheon/board.md /dev/null /dev/null",
+            "git grep -O'rm ~/ai/pantheon/alerts.md' x", "git -c core.pager='rm ~/ai/pantheon/alerts.md' log",
+            "git ls-remote --upload-pack='rm ~/ai/pantheon/alerts.md' .", "EDITOR='rm ~/ai/pantheon/alerts.md' git commit",
+            "export GIT_SSH_COMMAND='rm ~/ai/pantheon/alerts.md'; git fetch",
+            "X=--output=$HOME/ai/pantheon/board.md; git log $X", "set -- --output=$HOME/ai/pantheon/board.md; git log \"$1\"",
             "sh ~/.local/bin/pantheon archive", "python3 -I ~/projects/agent-kit/plugins/pantheon/lib/pantheon.py jobs pause x",
             "cp ~/.local/bin/pantheon /tmp/p && /tmp/p archive")],
         *[(f"обычная команда (раунд 3): {c!r}", "allow", br, "domain-coordinator", False, B(c)) for c in (
             "git -c color.ui=false log --oneline -5", "git diff HEAD~1 -- src", "git log --format=%h -3",
-            "cp -R ~/pantheon/directions/athena-broker /tmp/backup", "ls ~/pantheon")],
+            "cp -R ~/ai/pantheon/directions/athena-broker /tmp/backup", "ls ~/ai/pantheon")],
         ("argus не пишет в память штаба", "deny", br, "argus", True, W(os.path.join(home, ".claude/agent-memory/hq/MEMORY.md"))),
         ("argus пишет в свою память", "allow", br, "argus", True, W(os.path.join(home, ".claude/agent-memory/argus/MEMORY.md"))),
-        ("hq: регистр не обходит alerts.md", "deny", ".", "hq", False, B("rm ~/PANTHEON/Alerts.md")),
-        ("hq: папка, внутри которой ~/pantheon, — отказ", "deny", ".", "hq", False, B("find ~ -name '*.md' -delete")),
-        ("hq: обычная правка доски можно", "allow", ".", "hq", False, B("cd ~/pantheon && sed -i '' 's/a/b/' board.md")),
+        ("hq: регистр не обходит alerts.md", "deny", ".", "hq", False, B("rm ~/ai/PANTHEON/Alerts.md")),
+        ("hq: папка, внутри которой ~/ai/pantheon, — отказ", "deny", ".", "hq", False, B("find ~ -name '*.md' -delete")),
+        ("hq: обычная правка доски можно", "allow", ".", "hq", False, B("cd ~/ai/pantheon && sed -i '' 's/a/b/' board.md")),
         ("сбой разбора — отказ роли", "deny", br, "domain-coordinator", False, ("Bash", {"command": ["rm", "x"]})),
         ("сбой проверки tg-secret останавливает и вашу сессию (SEC-10)", "deny", br, "", False, ("Bash", {"command": ["rm", "x"]})),
         # прежние правила (№ 28)

@@ -1,25 +1,25 @@
 # Привилегии guard — образец. Рабочий файл: ~/.claude/pantheon/policy.toml (у каждого свой).
 # Правит только metis-pantheon после «да» владельца в её сессии. Реестр направлений
-# ~/pantheon/directions.toml правит штаб, поэтому привилегий в нём нет: его правкой их не выдать.
+# ~/ai/pantheon/directions.toml правит штаб, поэтому привилегий в нём нет: его правкой их не выдать.
 
 # Куда ещё пишут все роли (кроме своего направления и временных папок).
 always = ["~/.claude/agent-memory"]
 
 # Координатор с привилегией: роль domain-coordinator, запущенная в одной из этих папок.
 [coordinators]
-mnemo-brain = ["~/knowledge"]
+mnemo-brain = ["~/ai/knowledge"]
 metis-pantheon = ["~/projects/agent-kit", "~/projects/mac-setup", "~/projects/pixel-agents", "~/.claude"]
 
 # Куда ещё пишет роль (правило domain).
 [agent_extra]
-prometheus = ["~/knowledge"]
-clio = ["~/knowledge"]
+prometheus = ["~/ai/knowledge"]
+clio = ["~/ai/knowledge"]
 
 # Личное (правило private, шаг 1.2 очереди): кто читает и пишет.
 [private]
 roles = ["hq", "chiron"]
 coordinators = ["mnemo-brain"]
-paths = ["~/knowledge/me", "~/knowledge/.git/git-crypt", "~/pantheon/.git/git-crypt", "~/.local/state/pantheon/owner-log/zeus.md"]
+paths = ["~/ai/knowledge/me", "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.git/git-crypt", "~/.local/state/pantheon/owner-log/zeus.md"]
 
 # Куда ещё пишут команды в песочнице окна направления (SEC-19): только кэши своих инструментов внутри
 # ~/.cache или ~/Library/Caches. Папки направления берутся из реестра, остальное закрыто.

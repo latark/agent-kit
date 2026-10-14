@@ -4,8 +4,8 @@
       {
         "matcher": "Write|Edit|MultiEdit",
         "hooks": [
-          { "type": "command", "if": "Write(~/pantheon/**)", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" view --quiet", "async": true, "timeout": 60 },
-          { "type": "command", "if": "Edit(~/pantheon/**)", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" view --quiet", "async": true, "timeout": 60 }
+          { "type": "command", "if": "Write(~/ai/pantheon/**)", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" view --quiet", "async": true, "timeout": 60 },
+          { "type": "command", "if": "Edit(~/ai/pantheon/**)", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" view --quiet", "async": true, "timeout": 60 }
         ]
       }
     ]
