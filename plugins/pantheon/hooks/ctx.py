@@ -530,6 +530,10 @@ def same_text(entry, prompt):
 def cmd_owner_log(ev):
     role = ev.get("agent_type") or ""
     if ev.get("agent_id") or role not in ROLES_WITH_LOG or automation():
+        # причина пропуска — в журнал хуков для окон Пантеона: 15.10 ввод в окне Зевса не попал в журнал, а почему —
+        # не видно (роль не пришла в событии или фоновая сессия выглядит как claude -p)
+        if not ev.get("agent_id") and (role in ROLES_WITH_LOG or os.path.realpath(ev.get("cwd") or "").startswith(PANTHEON)):
+            hook_log("owner-log", "пропуск: agent_type=%r entrypoint=%r" % (role, os.environ.get("CLAUDE_CODE_ENTRYPOINT")))
         return 0  # claude -p никто не набирает руками
     name = log_name(role, ev)
     prompt = ev.get("prompt") or ""
