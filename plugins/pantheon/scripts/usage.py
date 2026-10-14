@@ -3,9 +3,6 @@
 import glob, json, os, sys, time
 from collections import defaultdict
 
-DAYS = int(sys.argv[1]) if len(sys.argv) > 1 else 30
-since = time.time() - DAYS * 86400
-
 # in, cache write 5m, cache write 1h, cache read, out
 PRICE = {
     'opus-5-5': (4, 5, 8, 0.20, 20),
@@ -37,70 +34,77 @@ def cost(fam, u):
     return {k: v / 1e6 for k, v in parts.items()}, {'input': inp, 'write': w5 + w1, 'read': rd, 'output': out,
             'thinking': ((u.get('output_tokens_details') or {}).get('thinking_tokens', 0) or 0)}
 
-files = [f for f in glob.glob(os.path.expanduser('~/.claude/projects/**/*.jsonl'), recursive=True)
-         if os.path.getmtime(f) >= since]
+def main():
+    DAYS = int(sys.argv[1]) if len(sys.argv) > 1 else 30
+    since = time.time() - DAYS * 86400
+    files = [f for f in glob.glob(os.path.expanduser('~/.claude/projects/**/*.jsonl'), recursive=True)
+             if os.path.getmtime(f) >= since]
 
-agg = defaultdict(lambda: defaultdict(float))       # (kind, model, effort) -> sums
-sess_ctx = defaultdict(list)                         # main session -> context sizes per request
-spawn_first = []                                     # first-request context of each subagent
-seen = set()
-unknown = defaultdict(int)
-for f in files:
-    kind = 'subagent' if '/subagents/' in f else 'main'
-    first = True
-    for line in open(f, errors='replace'):
-        try:
-            d = json.loads(line)
-        except ValueError:
-            continue
-        m = d.get('message') or {}
-        u = m.get('usage')
-        if d.get('type') != 'assistant' or not u:
-            continue
-        ts = d.get('timestamp', '')
-        try:
-            if time.mktime(time.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')) < since:
+    agg = defaultdict(lambda: defaultdict(float))       # (kind, model, effort) -> sums
+    sess_ctx = defaultdict(list)                         # main session -> context sizes per request
+    spawn_first = []                                     # first-request context of each subagent
+    seen = set()
+    unknown = defaultdict(int)
+    for f in files:
+        kind = 'subagent' if '/subagents/' in f else 'main'
+        first = True
+        for line in open(f, errors='replace'):
+            try:
+                d = json.loads(line)
+            except ValueError:
                 continue
-        except ValueError:
-            pass
-        key = d.get('requestId') or m.get('id')
-        if key in seen:
-            continue
-        seen.add(key)
-        fam = family(m.get('model'))
-        if not fam:
-            unknown[m.get('model')] += 1
-            continue
-        k = 'subagent' if (kind == 'subagent' or d.get('isSidechain')) else 'main'
-        eff = d.get('effort') or '-'
-        c, t = cost(fam, u)
-        a = agg[(k, fam, eff)]
-        a['requests'] += 1
-        for kk, v in c.items():
-            a['$' + kk] += v
-        for kk, v in t.items():
-            a[kk] += v
-        ctx = t['input'] + t['write'] + t['read']
-        if k == 'main':
-            sess_ctx[f].append(ctx)
-        elif first:
-            spawn_first.append(ctx)
-        first = False
+            m = d.get('message') or {}
+            u = m.get('usage')
+            if d.get('type') != 'assistant' or not u:
+                continue
+            ts = d.get('timestamp', '')
+            try:
+                if time.mktime(time.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')) < since:
+                    continue
+            except ValueError:
+                pass
+            key = d.get('requestId') or m.get('id')
+            if key in seen:
+                continue
+            seen.add(key)
+            fam = family(m.get('model'))
+            if not fam:
+                unknown[m.get('model')] += 1
+                continue
+            k = 'subagent' if (kind == 'subagent' or d.get('isSidechain')) else 'main'
+            eff = d.get('effort') or '-'
+            c, t = cost(fam, u)
+            a = agg[(k, fam, eff)]
+            a['requests'] += 1
+            for kk, v in c.items():
+                a['$' + kk] += v
+            for kk, v in t.items():
+                a[kk] += v
+            ctx = t['input'] + t['write'] + t['read']
+            if k == 'main':
+                sess_ctx[f].append(ctx)
+            elif first:
+                spawn_first.append(ctx)
+            first = False
 
-tot = sum(sum(v for kk, v in a.items() if kk.startswith('$')) for a in agg.values())
-print(f'Период: {DAYS} дн., файлов: {len(files)}, запросов: {len(seen)}, неизвестные модели: {dict(unknown)}')
-print(f'Итого в ценах API: ${tot:,.0f}\n')
-print(f"{'кто':9} {'модель':11} {'effort':7} {'запр.':>6} {'$':>8} {'доля':>5} | {'чтение кэша':>11} {'запись':>7} {'вывод':>7} {'из них мысли':>12} | {'$чтение':>7} {'$запись':>7} {'$вывод':>7}")
-for (k, fam, eff), a in sorted(agg.items(), key=lambda x: -sum(v for kk, v in x[1].items() if kk.startswith('$'))):
-    s = sum(v for kk, v in a.items() if kk.startswith('$'))
-    print(f"{k:9} {fam:11} {eff:7} {a['requests']:6.0f} {s:8.0f} {s / tot:5.0%} | {a['read'] / 1e6:10.1f}M {a['write'] / 1e6:6.1f}M {a['output'] / 1e6:6.2f}M {a['thinking'] / 1e6:11.2f}M | {a['$read']:7.0f} {a['$write']:7.0f} {a['$output']:7.0f}")
+    tot = sum(sum(v for kk, v in a.items() if kk.startswith('$')) for a in agg.values())
+    print(f'Период: {DAYS} дн., файлов: {len(files)}, запросов: {len(seen)}, неизвестные модели: {dict(unknown)}')
+    print(f'Итого в ценах API: ${tot:,.0f}\n')
+    print(f"{'кто':9} {'модель':11} {'effort':7} {'запр.':>6} {'$':>8} {'доля':>5} | {'чтение кэша':>11} {'запись':>7} {'вывод':>7} {'из них мысли':>12} | {'$чтение':>7} {'$запись':>7} {'$вывод':>7}")
+    for (k, fam, eff), a in sorted(agg.items(), key=lambda x: -sum(v for kk, v in x[1].items() if kk.startswith('$'))):
+        s = sum(v for kk, v in a.items() if kk.startswith('$'))
+        print(f"{k:9} {fam:11} {eff:7} {a['requests']:6.0f} {s:8.0f} {s / tot:5.0%} | {a['read'] / 1e6:10.1f}M {a['write'] / 1e6:6.1f}M {a['output'] / 1e6:6.2f}M {a['thinking'] / 1e6:11.2f}M | {a['$read']:7.0f} {a['$write']:7.0f} {a['$output']:7.0f}")
 
-ctxs = sorted(x for v in sess_ctx.values() for x in v)
-if ctxs:
-    q = lambda p: ctxs[min(len(ctxs) - 1, int(p * len(ctxs)))]
-    print(f'\nКонтекст одного запроса основной сессии: медиана {q(.5)/1e3:.0f}K, 75% {q(.75)/1e3:.0f}K, 90% {q(.9)/1e3:.0f}K, макс {ctxs[-1]/1e3:.0f}K')
-    big = sum(1 for x in ctxs if x >= 150_000) / len(ctxs)
-    print(f'Запросов основной сессии с контекстом от 150K: {big:.0%}')
-if spawn_first:
-    spawn_first.sort()
-    print(f'Субагентов: {len(spawn_first)}, стартовый контекст: медиана {spawn_first[len(spawn_first)//2]/1e3:.0f}K')
+    ctxs = sorted(x for v in sess_ctx.values() for x in v)
+    if ctxs:
+        q = lambda p: ctxs[min(len(ctxs) - 1, int(p * len(ctxs)))]
+        print(f'\nКонтекст одного запроса основной сессии: медиана {q(.5)/1e3:.0f}K, 75% {q(.75)/1e3:.0f}K, 90% {q(.9)/1e3:.0f}K, макс {ctxs[-1]/1e3:.0f}K')
+        big = sum(1 for x in ctxs if x >= 150_000) / len(ctxs)
+        print(f'Запросов основной сессии с контекстом от 150K: {big:.0%}')
+    if spawn_first:
+        spawn_first.sort()
+        print(f'Субагентов: {len(spawn_first)}, стартовый контекст: медиана {spawn_first[len(spawn_first)//2]/1e3:.0f}K')
+
+
+if __name__ == '__main__':
+    main()
