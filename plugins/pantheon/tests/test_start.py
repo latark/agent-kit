@@ -150,6 +150,15 @@ def main():
     c = calls()
     check("start: прошлый эпик «done» — его сессия останавливается, новая запускается с тем же именем",
           r.returncode == 0 and c[-2]["argv"] == ["stop", "a1"] and c[-1]["argv"][4] == "athena-broker")
+    alerts_md = os.path.join(home, "alerts.md")
+    said = lambda: open(alerts_md).read().count("без вашего слова") if os.path.exists(alerts_md) else 0
+    check("start --from zeus без вашего слова в окне Зевса — тревога (лазейка видна)", said() == 1)
+    os.makedirs(os.path.join(state, "owner-log"), exist_ok=True)
+    with open(os.path.join(state, "owner-log", "zeus.md"), "w") as fh:
+        fh.write(time.strftime("## %Y-%m-%d %H:%M:%S\nзапусти athena\n\n"))
+    open(agents_file, "w").write("[]")
+    run("start", "athena-broker", "проверка", "--from", "zeus")
+    check("start --from zeus сразу после вашего слова — без тревоги", said() == 1)
     open(agents_file, "w").write("[]")
     r = run("start", "athena-broker")
     c = calls()

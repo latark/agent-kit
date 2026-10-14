@@ -41,6 +41,9 @@ FIELDS = {
     "waiting_on": ("str", False), "depends_on": ("list", False), "claimed_by": ("str", False),
     "claimed_until": ("datetime", False), "parent": ("str", False), "result": ("str", False),
     "question": ("str", False), "options": ("list", False), "answer": ("str", False),
+    # вопрос владельцу по шаблону (исследование 15.10): question — одна фраза «что решить», why — почему сейчас,
+    # options — полные строки «А — название (совет). Что изменится. Цена: …», recommend — совет с причиной
+    "why": ("str", False), "recommend": ("str", False), "if_no_answer": ("str", False),
     "risky": ("bool", False), "requested": ("str", False),
     # этап и проект
     "goal": ("str", False), "start": ("date", False), "exit_criteria": ("list", False), "repo_path": ("str", False),
@@ -363,6 +366,16 @@ def check_head(head):
             errs.append("priority — 0 (срочно) … 3 (низкий)")
         if head.get("options") and not head.get("question"):
             warns.append("options без question")
+        q = head.get("question") or ""
+        if len(q.split()) > 25:
+            warns.append("question длиннее 25 слов — одна фраза «что решить», объяснение — в why")
+        if q and head.get("status") == "waiting" and not head.get("why"):
+            warns.append("вопрос без why — одна-две фразы «почему сейчас»")
+        if len(head.get("options") or []) > 1 and not head.get("recommend"):
+            warns.append("варианты без recommend — совет и причина")
+        short = [o for o in head.get("options") or [] if len(str(o).split()) < 4]
+        if short:
+            warns.append(f"варианты без объяснения ({', '.join(map(str, short))}) — «название. Что изменится. Цена»")
     if head.get("schema_version") not in (None, SCHEMA_VERSION):
         warns.append(f"schema_version {head.get('schema_version')} — текущая {SCHEMA_VERSION}")
     return errs, warns
@@ -634,7 +647,10 @@ def render_card(head, body, src_rel, t, conflict=None):
     who = f" · 👤 {head['owner']}" if head.get("owner") else ""
     parts = [f"> [!{CALLOUT.get(lab, 'note')}] {STATUS_MARK.get(lab, '')} {lab} · {card['Проект']}{who}{due}"
              + (f" · {card['Приоритет']}" if prio in (0, 1) else "")]
-    if head.get("next"):
+    closed = head.get("status") in ("done", "dropped")
+    if closed and (head.get("result") or head.get("next")):
+        parts[-1] += f"\n> **Итог:** {head.get('result') or head['next']}"
+    elif head.get("next"):
         parts[-1] += f"\n> **Дальше:** {head['next']}"
     if head.get("waiting_on") not in (None, "human"):
         parts[-1] += f"\n> **Ждёт:** {head['waiting_on']}"
@@ -642,7 +658,9 @@ def render_card(head, body, src_rel, t, conflict=None):
         parts.append(f"> [!warning] {conflict}")
     if head.get("question"):
         risky = head.get("risky") is True
-        parts.append("## ❓ Вопрос к вам" + (" · ⚠ рискованно" if risky else "") + "\n\n" + head["question"].strip())
+        parts.append("## ❓ Нужно решить" + (" · ⚠ рискованно" if risky else "") + "\n\n" + head["question"].strip())
+        if head.get("why"):
+            parts.append(f"**Почему сейчас:** {head['why'].strip()}")
         opts = head.get("options") or []
         cur = head.get("requested") if risky else head.get("answer")
         if opts:
@@ -650,6 +668,13 @@ def render_card(head, body, src_rel, t, conflict=None):
                     if risky else "Отметьте один вариант — агент получит ответ в течение минуты. Передумали — снимите "
                                   "галочку и отметьте другой, пока задача не закрыта.")
             parts.append(hint + "\n\n" + "\n".join(f"- [{'x' if o == cur else ' '}] {o}" for o in opts))
+        tail = []
+        if head.get("recommend"):
+            tail.append(f"**Совет:** {head['recommend'].strip()}")
+        if head.get("if_no_answer"):
+            tail.append(f"**Без ответа:** {head['if_no_answer'].strip()}")
+        if tail:
+            parts.append("\n".join(tail))
         if risky and head.get("requested"):
             parts.append(f"> [!warning] Вы выбрали «{head['requested']}». Подтвердите словом в окне Зевса: "
                          f"«да, {head['requested']}» — без этого агент не начнёт.")
@@ -657,12 +682,12 @@ def render_card(head, body, src_rel, t, conflict=None):
         parts.append(f"**Ваш ответ:** {head['answer']}")
     m = re.search(r"## Журнал\n(.*)$", body, re.S)
     if m:
-        log = [x for x in m.group(1).strip().split("\n") if x.startswith("- ")][-5:]
+        log = [x for x in m.group(1).strip().split("\n") if x.startswith("- ")][-3:][::-1]
         if log:
             parts.append("## Последнее\n\n" + "\n".join(log))
     # без отметки времени: иначе тик переписывал бы каждую карточку каждую минуту, а Obsidian перечитывал бы доску
-    parts.append("✍️ Написать агенту — поле «Заметка агенту» вверху. Перенести — перетащите карточку на доске.\n\n"
-                 f"<small>Источник: `{src_rel}` · задача обновлена {str(head.get('updated') or '')[:16].replace('T', ' ')}</small>")
+    # подсказка «как написать агенту» — одна на доску, в Сводке, а не в каждой карточке
+    parts.append(f"<small>Источник: `{src_rel}` · задача обновлена {str(head.get('updated') or '')[:16].replace('T', ' ')}</small>")
     return card, "\n" + "\n\n".join(parts) + "\n"
 
 
@@ -819,7 +844,9 @@ def _summary(tasks, t, inbox=None):
     sec = lambda title, xs: f"## {title} ({len(xs)})\n\n" + ("\n".join(f"- {x}" for x in xs) if xs else "—") + "\n"
     return ("# Сводка\n\n" + sec("🔴 Ждёт вас", rows["wait"]) + "\n" + sec("⏰ Просрочено", rows["overdue"]) + "\n"
             + sec("📥 Входящие заявки направлениям", rows["inbox"]) + "\n"
-            + sec("🟡 В работе", rows["doing"]) + "\n" + sec("🟢 Готово за сутки", rows["done"])), rows
+            + sec("🟡 В работе", rows["doing"]) + "\n" + sec("🟢 Готово за сутки", rows["done"])
+            + "\n✍️ Написать агенту — поле «Заметка агенту» в карточке. Перенести — перетащите карточку на доске. "
+              "Готовые карточки уходят с доски через 7 дней.\n"), rows
 
 
 QUIET_HOURS = (23, 8)  # ночью сразу не уведомляем: всё попадёт в утреннюю сводку

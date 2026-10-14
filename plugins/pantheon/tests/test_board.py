@@ -91,6 +91,8 @@ def main():
           and ch1.get("Приоритет") == "🔥 высокий" and "type" not in ch1 and ch1.get("id") == "metis-0001")
     _, t2 = head_of(c2)
     check("board: вопрос с вариантами — галочки в карточке", "Статус: Ждёт вас" in t2 and "- [ ] В копии" in t2)
+    check("board: вопрос по шаблону — «Нужно решить», без подсказки агенту в карточке",
+          "## ❓ Нужно решить" in t2 and "Написать агенту" not in t2)
     check("board: Доска.base и Сводка", os.path.exists(os.path.join(view, "Доска", "Доска.base"))
           and "Ждёт вас (1)" in open(os.path.join(view, "Доска", "Сводка.md"), encoding="utf-8").read())
     # сортировка: формулы Доска.base опираются на слова в карточках — слова должны совпадать
@@ -343,6 +345,17 @@ def main():
     ro = not os.access(os.path.join(dst, "board.md"), os.W_OK)
     check("копия: Доска цела и записываема, остальное — только чтение", kept and writable and ro)
 
+    r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Выбрать хранилище", "--status", "waiting",
+            "--waiting-on", "human", "--next", "ответ", "--question", "Где хранить пакеты?",
+            "--why", "Агенты не могут ставить зависимости.", "--option", "А — в папке проекта. Одна пересборка.",
+            "--option", "Б", "--recommend", "А — чинит и разработчиков.", "--if-no-answer", "агенты ждут",
+            "--project", "Пантеон")
+    run(env, "board")
+    _, t3 = head_of(card(view, "Выбрать хранилище"))
+    check("board: «Почему сейчас», совет и «Без ответа» в карточке", "**Почему сейчас:** Агенты не могут" in t3
+          and "**Совет:** А — чинит" in t3 and "**Без ответа:** агенты ждут" in t3 and "- [ ] А — в папке проекта" in t3)
+    r = run(env, "check", src("metis-pantheon", r.stdout.split()[0]))
+    check("check: вариант без объяснения — предупреждение", "варианты без объяснения (Б)" in r.stdout + r.stderr)
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 

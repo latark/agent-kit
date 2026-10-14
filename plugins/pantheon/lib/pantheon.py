@@ -23,7 +23,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
   pantheon task new --direction D --title T [--status S --priority N --due ГГГГ-ММ-ДД --next X --owner O
-                    --project P --waiting-on W --question Q --option A --option B --depends-on ID]
+                    --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
+                    --recommend "А — потому что …" --if-no-answer "…" --depends-on ID]
   pantheon task set ID поле=значение … [--note "строка в журнал"]   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
@@ -1401,9 +1402,36 @@ def start(rest):
     write_json(run, data)
     r = subprocess.run(argv, cwd=folder, capture_output=True, text=True, timeout=180)
     start_log(f"{name}\t{origin}\t{folder}\t{r.returncode}")
+    if origin == "zeus" and r.returncode == 0 and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
+        alert(f"запуск {name} по поручению Зевса без вашего слова в его окне за {OWNER_WORD_WINDOW // 60} мин — "
+              "возможно, по сообщению другой сессии (лазейка на время доработки, decisions.md 15.10)", "pantheon-start")
     sys.stdout.write(r.stdout)
     sys.stderr.write(r.stderr)
     return r.returncode
+
+
+# Лазейка на время доработки (ваше решение 15.10): Зевс запускает направления и по сообщениям других сессий. Чтобы это
+# было видно, запуск «от Зевса» без вашей строки в его журнале owner-log за последние минуты — строка в тревогах.
+OWNER_WORD_WINDOW = 15 * 60
+OWNER_HEAD = re.compile(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", re.M)
+
+
+def owner_spoke_recently(session, window):
+    """Есть ли в ~/.local/state/pantheon/owner-log/<session>.md запись владельца не старше window секунд."""
+    try:
+        with open(path("owner-log", session + ".md"), "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 65536))
+            heads = OWNER_HEAD.findall(fh.read().decode("utf-8", "replace"))
+    except OSError:
+        return False
+    if not heads:
+        return False
+    try:
+        last = datetime.strptime(heads[-1], "%Y-%m-%d %H:%M:%S").timestamp()
+    except ValueError:
+        return False
+    return now() - last <= window
 
 
 def open_tasks(name):
@@ -1873,7 +1901,8 @@ def task_cmd(rest):
         if sub == "new":
             fields = {"status": opt("--status"), "priority": int(opt("--priority")) if opt("--priority") else None,
                       "due": opt("--due"), "next": opt("--next"), "owner": opt("--owner"),
-                      "waiting_on": opt("--waiting-on"), "question": opt("--question"),
+                      "waiting_on": opt("--waiting-on"), "question": opt("--question"), "why": opt("--why"),
+                      "recommend": opt("--recommend"), "if_no_answer": opt("--if-no-answer"),
                       "options": opt("--option", True) or None, "depends_on": opt("--depends-on", True) or None,
                       "risky": True if "--risky" in args else None}
             if not opt("--direction") or not opt("--title"):
