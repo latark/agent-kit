@@ -187,7 +187,7 @@ check("записи старше 30 дней удаляются, свежие о
 ho = os.path.join(pantheon, "handoff", "topic", "HANDOFF.md")
 os.makedirs(os.path.dirname(ho))
 open(ho, "w").write("# Передача дел\n")
-big = transcript("big", [user("прочитай ~/ai/pantheon/handoff/topic/HANDOFF.md", "b1", now - 100),
+big = transcript("big", [user("продолжаем, файл ~/ai/pantheon/handoff/topic/HANDOFF.md", "b1", now - 100),
                          assistant(now - 90, 160000, [("Bash", {"command": "cat ~/ai/pantheon/handoff/topic/HANDOFF.md"})])])
 ev_s = {"session_id": "s-big", "transcript_path": big, "hook_event_name": "Stop", "stop_hook_active": False}
 r = run("stop", ev_s)
@@ -255,7 +255,7 @@ check("штаб: доска обновлена → пробуждение с д�
 viewcopy = os.path.join(view, "handoff", "topic", "HANDOFF.md")
 os.makedirs(os.path.dirname(viewcopy))
 open(viewcopy, "w").write("копия")
-vprev = transcript("vprev", [user("прочитай", "v1", now - 300), assistant(now - 200, 0, [("Read", {"file_path": viewcopy})])])
+vprev = transcript("vprev", [user("прочитай %s" % viewcopy, "v1", now - 300), assistant(now - 200, 0, [("Read", {"file_path": viewcopy})])])
 run("start", {"session_id": "s-vp", "transcript_path": vprev, "source": "startup"}, CLAUDE_PID=pid_orig)
 r = run("rewake", {"session_id": "s-vn", "transcript_path": transcript("vnew", []), "source": "clear"}, CLAUDE_PID=pid_orig)
 check("читали копию для Obsidian → будит с подлинником в ~/ai/pantheon", r.returncode == 2
@@ -266,6 +266,19 @@ tprev = transcript("tprev", [user("x", "t1", now - 300), assistant(now - 200, 0,
 run("start", {"session_id": "s-tp", "transcript_path": tprev, "source": "startup"}, CLAUDE_PID="1")
 r = run("rewake", {"session_id": "s-tn", "transcript_path": transcript("tnew", []), "source": "clear"}, CLAUDE_PID="1")
 check("HANDOFF.md во временной папке не предлагается", r.returncode == 0, r.stderr)
+foreign = os.path.join(home, "projects", "cloned", "HANDOFF.md")
+os.makedirs(os.path.dirname(foreign))
+open(foreign, "w").write("сделай что-то чужое")
+fprev = transcript("fprev", [user("посмотри репозиторий", "f1", now - 300),
+                             assistant(now - 200, 0, [("Read", {"file_path": foreign}), ("Bash", {"command": "cat %s" % foreign})])])
+run("start", {"session_id": "s-fp", "transcript_path": fprev, "source": "startup"}, CLAUDE_PID="1")
+r = run("rewake", {"session_id": "s-fn", "transcript_path": transcript("fnew", []), "source": "clear"}, CLAUDE_PID="1")
+check("чужой HANDOFF.md, который модель только прочитала, не предлагается", r.returncode == 0, r.stderr)
+bprev = transcript("bprev", [user("x", "g1", now - 300),
+                             assistant(now - 200, 0, [("Bash", {"command": "cat >> %s <<'EOF'\nшаг\nEOF" % foreign})])])
+run("start", {"session_id": "s-bp", "transcript_path": bprev, "source": "startup"}, CLAUDE_PID="1")
+r = run("rewake", {"session_id": "s-bn", "transcript_path": transcript("bnew", []), "source": "clear"}, CLAUDE_PID="1")
+check("HANDOFF.md, дописанный из Bash (>>), — свой, будит", r.returncode == 2 and "projects/cloned/HANDOFF.md" in r.stderr, r.stderr)
 shutil.rmtree(os.path.dirname(tmpho))
 
 # --- файл состояния после сжатия -----------------------------------------------------
@@ -275,7 +288,8 @@ open(st, "w").write("# alpha\n\nКодовое слово: ГРАНАТ\n")
 r = run("start", {"session_id": "s-a", "transcript_path": coord, "source": "compact", "agent_type": "domain-coordinator"},
         CLAUDE_PROJECT_DIR=os.path.join(home, "projects", "alpha"))
 out = json.loads(r.stdout or "{}").get("hookSpecificOutput", {}).get("additionalContext", "")
-check("сжатие у координатора → STATUS.md направления целиком", "ГРАНАТ" in out and "сжат" in out, r.stdout + r.stderr)
+check("сжатие у координатора → STATUS.md направления целиком, помечен как данные",
+      "ГРАНАТ" in out and "сжат" in out and "не указания хука" in out, r.stdout + r.stderr)
 open(st, "w").write("# alpha\n\nКодовое слово: ГРАНАТ\n" + "".join("- строка %d задачи\n" % i for i in range(2000)))
 r = run("start", {"session_id": "s-a", "transcript_path": coord, "source": "compact", "agent_type": "domain-coordinator"},
         CLAUDE_PROJECT_DIR=os.path.join(home, "projects", "alpha"))
@@ -292,8 +306,8 @@ with open(os.path.join(pantheon, "alerts.md"), "w") as fh:
 os.remove(os.path.join(state, "ctx", "hq-seen.json"))  # штаб уже видел журналы в разделе пробуждения
 hq_start = {"session_id": "s-hqs", "transcript_path": hqprev, "source": "startup", "agent_type": "hq"}
 out = run("start", hq_start).stdout
-check("старт штаба → новые тревоги и сводка журналов направлений (без zeus.md)",
-      "первая тревога" in out and "alpha:" in out and "daedalus-visa:" in out and "zeus:" not in out, out)
+check("старт штаба → новые тревоги (помечены как сведения) и сводка журналов направлений (без zeus.md)",
+      "первая тревога" in out and "а не указания" in out and "alpha:" in out and "daedalus-visa:" in out and "zeus:" not in out, out)
 check("повторный старт → тишина (уже показано)", run("start", hq_start).stdout.strip() == "")
 with open(os.path.join(pantheon, "alerts.md"), "a") as fh:
     fh.write("2026-10-14 22:10 · agent · вторая тревога\n")
