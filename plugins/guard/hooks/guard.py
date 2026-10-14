@@ -264,6 +264,7 @@ def check_nextjs(event):
 # cp и mv (у mv — и источник), rsync, sed -i, dd of=, git (-C, -c) с командами записи. Запись изнутри
 # скрипта (python -c …, node -e …) так не поймать — это защита от случайности, а не от намеренного обхода.
 
+import glob
 import shlex
 
 STATE_DIR = os.path.realpath(os.path.join(HOME, ".local", "state", "pantheon"))
@@ -283,6 +284,9 @@ FIRST_IS_MODE = {"chmod", "chown", "chgrp", "chflags"}
 LAST_ARG = {"cp", "ln", "install", "rsync", "ditto"}
 WRAPPERS = {"sudo", "env", "command", "nohup", "time", "exec", "builtin", "nice"}
 HEREDOC = re.compile(r"<<-?\s*'?\"?(\w+)'?\"?.*?^\s*\1\s*$", re.S | re.M)
+SUBST = re.compile(r"\$\((?:[^()]|\([^()]*\))*\)|`[^`]*`")
+SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+UNRESOLVED = "\0неразобранная-цель"
 PANTHEON_PRIVILEGED = {"archive", "install", "uninstall", "commit"}
 PANTHEON_JOB_ACTIONS = {"pause", "resume", "disable", "enable", "renew"}
 
@@ -366,18 +370,47 @@ def _segments(cmd):
     return segs
 
 
-def bash_targets(cmd, cwd):
-    """Абсолютные пути, в которые пишет команда Bash. Учитывает cd внутри команды."""
+def _subst_vars(word, env):
+    def one(m):
+        name = m.group(1) or m.group(2)
+        return env.get(name, m.group(0))
+    return re.sub(r"\$\{(\w+)\}|\$(\w+)", one, word)
+
+
+def _resolve(word, cwd, env):
+    """Слово-цель → список абсолютных путей. Переменные — из той же команды и окружения (HOME, TMPDIR, PWD);
+    шаблоны (*, ?, [) раскрываются; подстановка $(…) или `…` в цели — UNRESOLVED."""
+    if "__SUBST__" in word:
+        return [UNRESOLVED]
+    w = _subst_vars(word, env)
+    if any(c in w for c in "*?["):
+        base = os.path.expanduser(w)
+        base = base if os.path.isabs(base) else os.path.join(cwd, base)
+        hits = glob.glob(base)
+        if hits:
+            return [os.path.realpath(h) for h in hits]
+    return [_expand(w, cwd)]
+
+
+def bash_targets(cmd, cwd, env=None, depth=0):
+    """Абсолютные пути, в которые пишет команда Bash. Учитывает cd, присваивания и вложенные команды
+    (bash -c, eval, $(…), `…`, xargs, find -exec). Цель, которую не разобрать, — UNRESOLVED."""
+    if depth > 4:
+        return [UNRESOLVED]
+    env = dict(env or {"HOME": HOME, "TMPDIR": os.environ.get("TMPDIR", "/tmp"), "PWD": cwd,
+                       "USER": os.environ.get("USER", "")})
     out = []
+    for body in SUBST.findall(cmd):  # что пишут сами подстановки
+        out += bash_targets(body[2:-1] if body.startswith("$(") else body[1:-1], cwd, env, depth + 1)
+    cmd = SUBST.sub("__SUBST__", cmd)
     for words in _segments(cmd):
-        # перенаправления: > >> &> >| и 2> (цифра — отдельным словом)
         rest, i = [], 0
         while i < len(words):
             w = words[i]
             if w in (">", ">>", "&>", "&>>", ">|") and i + 1 < len(words):
                 tgt = words[i + 1]
                 if tgt and not tgt.isdigit() and not tgt.startswith("&"):
-                    out.append(_expand(tgt, cwd))
+                    out += _resolve(tgt, cwd, env)
                 i += 2
                 continue
             if w in ("<", "<<", "<<<", ">&", "<&") and i + 1 < len(words):
@@ -385,26 +418,50 @@ def bash_targets(cmd, cwd):
                 continue
             rest.append(w)
             i += 1
-        while rest and (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", rest[0]) or rest[0] in WRAPPERS):
+        while rest and (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", rest[0]) or rest[0] in WRAPPERS | {"export", "local"}):
+            m = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", rest[0])
+            if m:
+                env[m.group(1)] = _subst_vars(os.path.expanduser(m.group(2)), env)
             rest = rest[1:]
         if not rest:
             continue
         head, args = os.path.basename(rest[0]), rest[1:]
         plain = [a for a in args if a and not a.startswith("-")]
+        res = lambda ws: [p for a in ws for p in _resolve(a, cwd, env)]
         if head == "cd":
-            cwd = _expand(plain[0], cwd) if plain else HOME
+            cwd = (_resolve(plain[0], cwd, env) or [HOME])[0] if plain else HOME
+            env["PWD"] = cwd
+        elif head in SHELLS and "-c" in args:
+            j = args.index("-c")
+            if j + 1 < len(args):
+                out += bash_targets(args[j + 1], cwd, env, depth + 1)
+        elif head == "eval":
+            out += bash_targets(" ".join(args), cwd, env, depth + 1)
+        elif head == "xargs":
+            inner = [a for a in args if not a.startswith("-")]
+            if inner and (os.path.basename(inner[0]) in ALL_ARGS | FIRST_IS_MODE | LAST_ARG | {"mv", "sed", "tee"}):
+                out.append(UNRESOLVED)  # цели приходят со стандартного ввода
+        elif head == "find":
+            roots = []
+            for a in args:
+                if a.startswith(("-", "(", "!")):
+                    break
+                roots.append(a)
+            execs = [args[k + 1] for k, a in enumerate(args) if a in ("-exec", "-execdir", "-ok") and k + 1 < len(args)]
+            if "-delete" in args or any(os.path.basename(e) in ALL_ARGS | FIRST_IS_MODE | LAST_ARG | {"mv", "sed"} for e in execs):
+                out += res(roots or ["."])
         elif head in ALL_ARGS:
-            out += [_expand(a, cwd) for a in plain]
+            out += res(plain)
         elif head in FIRST_IS_MODE:
-            out += [_expand(a, cwd) for a in plain[1:]]
+            out += res(plain[1:])
         elif head == "mv":
-            out += [_expand(a, cwd) for a in plain]
+            out += res(plain)
         elif head in LAST_ARG and plain:
-            out.append(_expand(plain[-1], cwd))
+            out += res(plain[-1:])
             if head == "rsync" and "--remove-source-files" in args:
-                out += [_expand(a, cwd) for a in plain[:-1]]
+                out += res(plain[:-1])
         elif head == "dd":
-            out += [_expand(a[3:], cwd) for a in args if a.startswith("of=")]
+            out += res([a[3:] for a in args if a.startswith("of=")])
         elif head in ("sed", "gsed", "perl") and any(a == "-i" or a.startswith(("-i", "--in-place")) for a in args):
             files, skip_next, script_seen, explicit = [], False, False, "-e" in args or "-f" in args
             for j, a in enumerate(args):
@@ -423,13 +480,13 @@ def bash_targets(cmd, cwd):
                     script_seen = True
                     continue
                 files.append(a)
-            out += [_expand(a, cwd) for a in files]
+            out += res(files)
         elif head == "git":
             repo, j = cwd, 0
             while j < len(args):
                 a = args[j]
                 if a == "-C" and j + 1 < len(args):
-                    repo = _expand(args[j + 1], repo)
+                    repo = (_resolve(args[j + 1], repo, env) or [repo])[0]
                     j += 2
                 elif a in ("-c", "--git-dir", "--work-tree", "--namespace") and j + 1 < len(args):
                     j += 2
@@ -473,6 +530,8 @@ def check_domain(event, tool, tool_input):
         return None
     domains, policy = load_domains(), load_policy()
     cwd, targets = write_targets(event, tool, tool_input)
+    if UNRESOLVED in targets:
+        return UNRESOLVED_REASON
     targets = [p for p in targets if not _inside(p, [PANTHEON, PANTHEON_VIEW, STATE_DIR])]  # это — pantheon-acl
     if not targets:
         return None
@@ -544,11 +603,17 @@ def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
     return hq, f"{rel} правит только штаб (hq)"
 
 
+UNRESOLVED_REASON = ("Правило domain/pantheon-acl: цель записи не разобрать (подстановка $(…) или `…` в пути, xargs с командой "
+                     "записи, слишком глубокая вложенность). Пиши явными путями — так защита видит, куда идёт запись.")
+
+
 def check_pantheon(event, tool, tool_input):
     role, sub, pdir = who(event)
     if not role and not sub:
         return None  # ваша сессия без роли
-    pantheon_role = is_pantheon_role(role) or not role
+    # Карта прав ~/pantheon — для ролей Пантеона и для любого субагента: встроенный субагент координатора
+    # (general-purpose и т. п.) иначе обходил бы её. Ваши собственные роли главной сессии — как ваши сессии.
+    pantheon_role = is_pantheon_role(role) or sub
     if tool == "Bash" and pantheon_role and not (role == "hq" and not sub):
         cli = pantheon_cli(tool_input.get("command") or "")
         if cli:
@@ -557,6 +622,9 @@ def check_pantheon(event, tool, tool_input):
     cwd, targets = write_targets(event, tool, tool_input)
     if not targets:
         return None
+    if UNRESOLVED in targets and pantheon_role:
+        return UNRESOLVED_REASON
+    targets = [p for p in targets if p != UNRESOLVED]
     domains = policy = None
     for p in targets:
         if _inside(p, [STATE_DIR]):

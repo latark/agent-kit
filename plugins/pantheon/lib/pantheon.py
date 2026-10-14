@@ -128,19 +128,33 @@ def write_json(p, data):
     os.replace(tmp, p)
 
 
+def _job_name(name):
+    if not JOB_NAME.fullmatch(str(name)):
+        raise ValueError(f"имя задачи не по образцу: {name!r}")
+    return name
+
+
 def job_state(name):
-    return read_json(path("jobs", name + ".json"))
+    return read_json(path("jobs", _job_name(name) + ".json"))
 
 
 def save_job_state(name, st):
-    write_json(path("jobs", name + ".json"), st)
+    write_json(path("jobs", _job_name(name) + ".json"), st)
 
 
 def load_schedule():
+    """schedule.toml; задачи с именем не по образцу [a-z0-9-] отбрасываются (имя идёт в пути меток и блокировок)."""
     p = os.path.join(PANTHEON, "schedule.toml")
     with open(p, "rb") as fh:
         sched = tomllib.load(fh)
     sched["defaults"] = {**DEFAULTS, **(sched.get("defaults") or {})}
+    jobs = []
+    for j in sched.get("job") or []:
+        if isinstance(j, dict) and JOB_NAME.fullmatch(str(j.get("name", ""))):
+            jobs.append(j)
+        else:
+            sched.setdefault("bad_names", []).append(str(j.get("name") if isinstance(j, dict) else j))
+    sched["job"] = jobs
     return sched
 
 
@@ -193,9 +207,17 @@ def clear_once(key):
         os.remove(once_path(key))
 
 
+JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
+# Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
+TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout"}
+CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
+
+
 def parse_command(cmd):
-    """Команда задачи из schedule.toml → argv без оболочки. Разрешены только `pantheon …`, `claude -p …`
-    и скрипты внутри самого плагина; спецсимволы оболочки запрещены. Иначе — None (задача не идёт)."""
+    """Команда задачи из schedule.toml → argv без оболочки, или None (задача не идёт). Разрешено только:
+      pantheon <view|commit|domains|watch|revisits|scout> [аргументы без спецсимволов];
+      claude -p --agent <роль> [--model M] [--max-turns N] [--name N] "<поручение>" — без флагов прав и настроек;
+      скрипт из bin/ или scripts/ самого плагина."""
     if not isinstance(cmd, str) or re.search(r"[;&|`$<>\n\\]", cmd):
         return None
     try:
@@ -205,11 +227,24 @@ def parse_command(cmd):
     if not argv:
         return None
     if argv[0] == "pantheon":
+        if len(argv) < 2 or argv[1] not in TICK_SUBCOMMANDS:
+            return None
         return [os.path.join(PLUGIN, "bin", "pantheon")] + argv[1:]
-    if argv[0] == "claude" and "-p" in argv[1:3]:
+    if argv[0] == "claude":
+        if argv[1:2] != ["-p"]:
+            return None
+        seen, j = {}, 2
+        while j < len(argv) - 1:
+            flag = argv[j]
+            if flag not in CLAUDE_VALUE_FLAGS or flag in seen or argv[j + 1].startswith("-"):
+                return None
+            seen[flag] = argv[j + 1]
+            j += 2
+        if j != len(argv) - 1 or argv[-1].startswith("-") or not JOB_NAME.fullmatch(seen.get("--agent", "")):
+            return None
         return argv
     real = os.path.realpath(os.path.expanduser(argv[0]))
-    if real.startswith(PLUGIN + os.sep):
+    if any(real.startswith(os.path.join(PLUGIN, d) + os.sep) for d in ("bin", "scripts")):
         return [real] + argv[1:]
     return None
 
@@ -336,6 +371,9 @@ def tick():
         with contextlib.suppress(FileNotFoundError):
             os.remove(path("schedule-error"))
         me, primary = host(), sched.get("primary_host")
+        for bad in sched.get("bad_names") or []:
+            alert_once("badname-" + re.sub(r"[^\w-]", "_", bad)[:40], bad, f"schedule.toml: задача с именем не по образцу "
+                       f"({bad[:60]!r}; только a-z, 0-9, дефис) — пропущена", "pantheon-tick")
         heavy = []
         for job in sched.get("job") or []:
             name = job["name"]
@@ -825,6 +863,9 @@ def main(argv):
         tick()
         return 0
     if cmd == "run-job":
+        if not rest or not JOB_NAME.fullmatch(rest[0]):
+            print("pantheon run-job: имя задачи не по образцу", file=sys.stderr)
+            return 2
         return run_job(rest[0])
     if cmd == "jobs":
         if not rest:

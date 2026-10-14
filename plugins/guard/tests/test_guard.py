@@ -111,7 +111,17 @@ def main():
         ("iris сессией: policy.toml — отказ", "deny", ".", "iris", False, W(os.path.join(home, ".claude/pantheon/policy.toml"))),
         ("hq пишет в alexbroker (штаб не ограничен domain)", "allow", ".", "hq", False, W(os.path.join(home, alex, "x.md"))),
         ("субагент без agent_type — отказ на board.md (№ 27)", "deny", br, "", True, W(P("board.md"))),
-        ("встроенный субагент вашей сессии пишет отчёт в handoff/", "allow", "pantheon", "general-purpose", True, W(P("handoff/x/r.md"))),
+        ("встроенный субагент — тоже под картой прав ~/pantheon", "deny", "pantheon", "general-purpose", True, W(P("handoff/x/r.md"))),
+        ("встроенный субагент координатора — отказ на board.md", "deny", br, "general-purpose", True, B("echo x >> ~/pantheon/board.md")),
+        # расхождения разбора (проверка безопасности коммитов)
+        ("bash -c с записью в ~/pantheon", "deny", br, "domain-coordinator", False, B('bash -c "echo x > ~/pantheon/board.md"')),
+        ("eval с записью в ~/pantheon", "deny", br, "domain-coordinator", False, B('eval "echo x > ~/pantheon/board.md"')),
+        ("переменная из той же команды", "deny", br, "domain-coordinator", False, B("P=~/pantheon; echo x > $P/board.md")),
+        ("шаблон пути ~/pant*on", "deny", br, "domain-coordinator", False, B("echo x > ~/pant*on/board.md")),
+        ("$(…) в цели записи — не разобрать", "deny", br, "domain-coordinator", False, B("echo x > $(echo ~/pantheon)/board.md")),
+        ("find -delete в ~/pantheon", "deny", br, "domain-coordinator", False, B("find ~/pantheon -name board.md -delete")),
+        ("xargs rm — не разобрать", "deny", br, "domain-coordinator", False, B("ls | xargs rm")),
+        ("$(…) в тексте коммита — можно", "allow", br, "domain-coordinator", False, B('git commit -m "$(cat /tmp/msg)"')),
         # прежние правила (№ 28)
         ("attribution: пометка Claude в коммите — отказ", "deny", br, "", False,
          B('git commit -m "x\n\nCo-' + 'Authored-By: Claude <noreply@' + 'anthropic.com>"')),
