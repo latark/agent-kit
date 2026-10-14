@@ -729,19 +729,28 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None):
     return card, "\n" + "\n\n".join(parts) + "\n"
 
 
+def agent_text(text, title, limit=40):
+    """Текст, который пишут агенты (текст задачи, заявка), — в карточку только внутри рамки с подписью: заголовок
+    «## ✍️ Ваши заметки», «- [x] вариант» или «> [!warning]» в нём остаются частью рамки, а не разделом карточки,
+    вашей галочкой или предупреждением тика (находка проверки безопасности 15.10)."""
+    lines = text.strip().split("\n")
+    out = [f"> [!abstract] {title}"]
+    for ln in lines[:limit]:
+        ln = ln.rstrip()
+        if re.match(r"\s*(?:>\s*)*\[!", ln):
+            ln = ln.replace("[", "\\[", 1)
+        out.append("> " + ln if ln else ">")
+    if len(lines) > limit:
+        out.append("> …")
+    return "\n".join(out)
+
+
 def description(body, limit=40):
-    """Текст задачи под заголовком до первого раздела «## …». Пишут агенты — строка «- [x] …» в нём не станет
-    галочкой, «## …» — новым разделом карточки."""
+    """Текст задачи под заголовком до первого раздела «## …» — в рамке «Текст задачи»."""
     m = re.search(r"^# [^\n]*\n(.*?)(?=^## |\Z)", body, re.S | re.M)
     if not m or not m.group(1).strip():
         return ""
-    out = []
-    for ln in m.group(1).strip().split("\n")[:limit]:
-        if re.match(r"\s*[-*+]\s*\[", ln):
-            ln = ln.replace("[", "\\[", 1)
-        out.append(ln)
-    more = len(m.group(1).strip().split("\n")) > limit
-    return "\n".join(out) + ("\n\n…" if more else "")
+    return agent_text(m.group(1), "Текст задачи (пишет агент)", limit)
 
 
 def notes_block(notes):
@@ -987,13 +996,13 @@ def render_inbox_card(item, project, conflict=None):
             "id": item["id"]}
     body = re.sub(r"^# .+\n", "", item["text"], count=1, flags=re.M)
     body = re.sub(r"^От: .+\n", "", body, count=1, flags=re.M).strip()
-    lines = body.split("\n")
-    short = "\n".join(lines[:30]) + ("\n\n…" if len(lines) > 30 else "")
+    short = agent_text(body, f"Заявка от {item.get('from') or 'направления'}", 30) if body else ""
     parts = [f"> [!note] 📥 Входящие · {card['Проект']} · 👤 {item['direction']}"
              + (f"\n> **От:** {item['from']}" if item.get("from") else "")]
     if conflict:
         parts.append(f"> [!warning] {conflict}")
-    parts.append(short)
+    if short:
+        parts.append(short)
     rel = f"directions/{item['direction']}/inbox/{item['file']}"
     parts.append("Перенесите в «Очередь» — заявка станет задачей направления; в «Отменено» — уйдёт в архив входящих.\n\n"
                  f"<small>Источник: `{rel}`</small>")

@@ -1299,6 +1299,30 @@ def agents_all():
     return data if isinstance(data, list) else data.get("agents") if isinstance(data, dict) else None
 
 
+def live_copies(name, agents):
+    """Живые сессии с этим именем — и копии, которым Claude Code дал другое имя, потому что это было занято
+    («имя (2)», «имя-два-слова»). Живая — всё, кроме закрытой (done): работает, ждёт, открыта во вкладке (без state).
+    Остановленная сессия (claude stop) — done и имени не держит: новая получает то же имя (проверено 15.10)."""
+    alias = re.compile(re.escape(name) + r"(?: \(\d+\)|-[a-z]+-[a-z]+)?")
+    return [a for a in agents or [] if alias.fullmatch(str(a.get("name") or "")) and a.get("state") != "done"]
+
+
+def copies_message(name, live):
+    tab = [a for a in live if not a.get("id")]
+    if tab:
+        return (f"{name} открыта во вкладке терминала (pid {tab[0].get('pid')}) — перейдите в неё или закройте её и "
+                "запустите снова")
+    ids = ", ".join(f"{a.get('name')} {a['id']} ({a.get('state')})" for a in live)
+    return (f"{name} уже работает: {ids}. Поручение — сообщением ей (SendMessage, адрес {name}) или claude attach "
+            f"{live[0]['id']}; начать заново — тот же запуск с --restart")
+
+
+def stop_copies(name, live):
+    for a in live:
+        subprocess.run([claude_bin(), "stop", a["id"]], capture_output=True, text=True, timeout=60)
+        start_log(f"stop-restart\t{name}\t{a.get('name')}\t{a['id']}")
+
+
 def start_log(line):
     os.makedirs(path("logs"), exist_ok=True)
     with open(path("logs", "start.log"), "a") as fh:
@@ -1358,20 +1382,15 @@ def start(rest):
             return 2
         # Зевс — одна сессия. Вкладка iTerm — только окно к фоновой сессии: закрыть вкладку или убить её процесс
         # мало, сессия живёт дальше, и новый запуск становится «zeus-<два слова>» (15.10 так появилось два Зевса)
-        live = [a for a in agents_all() or [] if a.get("cwd") == PANTHEON
-                and (a.get("name") or "").startswith("zeus") and a.get("state") != "done"]
-        tabs = [a for a in live if not a.get("id")]  # открытая вкладка: остановить её отсюда нельзя
-        if tabs:
-            print(f"Зевс открыт во вкладке терминала (pid {tabs[0].get('pid')}) — перейдите в неё или закройте её "
-                  "и запустите снова", file=sys.stderr)
-            return 1
-        if live and not restart:
-            print(f"Зевс уже запущен ({', '.join(str(a.get('name')) + ' ' + a['id'] for a in live)}): открыть — "
-                  f"claude attach {live[0]['id']}; начать заново — pantheon start zeus --restart", file=sys.stderr)
-            return 1
-        for a in live:
-            subprocess.run([claude_bin(), "stop", a.get("id")], capture_output=True, text=True, timeout=60)
-            start_log(f"stop-restart\tzeus\t{a.get('name')}\t{a.get('id')}")
+        with lock("start-zeus", block=False) as got:
+            if not got:
+                print("Зевс уже запускается другой командой", file=sys.stderr)
+                return 1
+            live = live_copies("zeus", agents_all())
+            if live and (not restart or any(not a.get("id") for a in live)):
+                print(f"pantheon start: {copies_message('zeus', live)}", file=sys.stderr)
+                return 1
+            stop_copies("zeus", live)
         start_log(f"zeus\t{origin}\t{PANTHEON}")
         os.chdir(PANTHEON)
         os.execv(argv[0], argv)
@@ -1389,12 +1408,24 @@ def start(rest):
     if os.path.exists(path("stopped", name)):
         print(f"pantheon start: {name} остановлена вами (pantheon resume {name})", file=sys.stderr)
         return 1
-    same = [a for a in agents_all() or [] if a.get("name") == name]
-    live = [a for a in same if a.get("state") in ("working", "blocked")]
-    if live and not dry:
-        print(f"pantheon start: {name} уже работает ({live[0].get('id')}, {live[0].get('state')}) — напиши ей "
-              f"сообщением или claude attach {live[0].get('id')}", file=sys.stderr)
+    # одна сессия на имя (Temporal: conflict policy «fail» по умолчанию, «terminate existing» — по --restart);
+    # проверка и запуск — под блокировкой имени: тик и Зевс не запустят две копии одновременно
+    with lock("start-" + name, block=False) as got:
+        if not got:
+            print(f"pantheon start: {name} уже запускается другой командой", file=sys.stderr)
+            return 1
+        return _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win)
+
+
+def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win):
+    agents = agents_all()
+    same = [a for a in agents or [] if a.get("name") == name]
+    live = live_copies(name, agents)
+    if live and not dry and (not restart or any(not a.get("id") for a in live)):
+        print(f"pantheon start: {copies_message(name, live)}", file=sys.stderr)
         return 1
+    if live and not dry:
+        stop_copies(name, live)
     # CTX-10: эпик закончен — сессия «done» ещё висит в списке; новый эпик — новая сессия с тем же именем, а старая
     # останавливается (переписка сохраняется: claude attach <id>), иначе Claude Code назовёт новую «имя (2)»
     for a in same:

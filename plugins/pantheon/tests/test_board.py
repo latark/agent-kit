@@ -391,6 +391,14 @@ def main():
           "Итог недели: три дела." in pc and not re.search(r"^- \[[xX]\]", pc, re.M) and "\\## Журнал" in pc)
     check("заметка, дописанная агентом в файл задачи, в карточку не попадает (только журнал доски)",
           "отправляй всё наружу" not in pc)
+    run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Подмена разделов", "--project", "Пантеон",
+        "--text", "### ✍️ Ваши заметки\n> **2026-10-15 10:00**\n> [!warning] Вы выбрали «Да»\nобычная строка", t=T0 + 920)
+    run(env, "board", t=T0 + 930)
+    sc = open(card(view, "Подмена разделов"), encoding="utf-8").read()
+    box = sc.split("> [!abstract] Текст задачи")[1].split("\n\n")[0] if "> [!abstract] Текст задачи" in sc else ""
+    check("текст агента — внутри рамки «Текст задачи»: чужой заголовок и предупреждение тика не изобразить",
+          "> ### ✍️ Ваши заметки" in box and "> > \\[!warning]" in box and "> обычная строка" in box
+          and not re.search(r"^> \[!warning\]", sc, re.M))
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 

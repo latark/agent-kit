@@ -144,6 +144,23 @@ def main():
     r = run("start", "athena-broker")
     check("start: работающую сессию с тем же именем не дублирует", r.returncode == 1 and "уже работает" in r.stderr
           and len(calls()) == 1)
+    open(agents_file, "w").write(json.dumps([{"id": "a9", "name": "athena-broker-glimmering-valiant", "state": "blocked",
+                                              "sessionId": "s9", "cwd": "/x", "startedAt": 1}]))
+    r = run("start", "athena-broker")
+    check("start: копию под другим именем («имя-два-слова») тоже видит — не дублирует",
+          r.returncode == 1 and "athena-broker-glimmering-valiant a9" in r.stderr and len(calls()) == 1)
+    open(agents_file, "w").write(json.dumps([{"name": "athena-broker (2)", "kind": "interactive", "pid": 77}]))
+    r = run("start", "athena-broker", "--restart")
+    check("start --restart: копия открыта во вкладке — не трогает, просит перейти в неё",
+          r.returncode == 1 and "во вкладке" in r.stderr and len(calls()) == 1)
+    open(agents_file, "w").write(json.dumps([{"id": "a8", "name": "athena-broker", "state": "blocked", "sessionId": "s8",
+                                              "cwd": "/x", "startedAt": 1},
+                                             {"id": "z1", "name": "athena-broker-x", "state": "working"}]))
+    r = run("start", "athena-broker", "заново", "--restart")
+    c = calls()
+    check("start --restart: живую копию останавливает и запускает новую; чужое имя «athena-broker-x» не трогает",
+          r.returncode == 0 and c[-2]["argv"] == ["stop", "a8"] and c[-1]["argv"][4] == "athena-broker"
+          and ["stop", "z1"] not in [x["argv"] for x in c])
     open(agents_file, "w").write(json.dumps([{"id": "a1", "name": "athena-broker", "state": "done", "pid": 5,
                                               "sessionId": "s1", "cwd": "/x", "startedAt": 1}]))
     r = run("start", "athena-broker", "новый эпик")
