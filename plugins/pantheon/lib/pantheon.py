@@ -1097,6 +1097,10 @@ def task_cmd(rest):
             if not opt("--direction") or not opt("--title"):
                 print("pantheon task new: нужны --direction и --title", file=sys.stderr)
                 return 2
+            if opt("--direction") == "inbox":
+                print("pantheon task new: входящие создаёт только доска владельца; Зевс заводит задачу сразу в направлении",
+                      file=sys.stderr)
+                return 2
             tid, p = T.task_new(PANTHEON, now(), opt("--direction"), opt("--title"), project=opt("--project"), **fields)
             print(f"{tid} {os.path.relpath(p, PANTHEON)}")
         elif sub == "set" and args:
@@ -1108,6 +1112,9 @@ def task_cmd(rest):
                 k, eq, v = args[i].partition("=")
                 if not eq:
                     print(f"pantheon task set: «{args[i]}» — нужно поле=значение", file=sys.stderr)
+                    return 2
+                if k in T.OWNER_ONLY_FIELDS:
+                    print(f"pantheon task set: поле {k} ставит только доска владельца", file=sys.stderr)
                     return 2
                 kind = T.FIELDS.get(k, ("str",))[0]
                 changes[k] = None if v in ("", "null") else int(v) if kind == "int" else \
@@ -1121,6 +1128,11 @@ def task_cmd(rest):
                 print(f"нет задачи {args[0]}", file=sys.stderr)
                 return 1
             print(open(tasks[args[0]][0], encoding="utf-8").read())
+            words = T.owner_words(path("owner-log", "board.jsonl"), args[0])
+            print("## Слова владельца (журнал владельца — только это подтверждает его решение)\n")
+            for w in words or [{"time": "—", "kind": "нет записей"}]:
+                print(f"- {w.get('time', '')[:16].replace('T', ' ')} · {w.get('kind')} · "
+                      f"{w.get('dst') or w.get('answer') or w.get('text') or w.get('title') or ''}")
         elif sub == "ready":
             for tid, h in T.ready(PANTHEON, now(), opt("--direction"), opt("--owner")):
                 print(f"{tid}\t{T.PRIORITY.get(h.get('priority', 2), '')}\t{h.get('due') or '—'}\t{h.get('title')}")

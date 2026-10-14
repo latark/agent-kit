@@ -20,6 +20,10 @@ def setup(home):
               "projects/brokerAssistantApp/app", "projects/alexbroker", "projects/agent-kit",
               "projects/workshop/visa", "ai/knowledge"):
         os.makedirs(os.path.join(home, d), exist_ok=True)
+    os.makedirs(os.path.join(home, "ai/pantheon/directions/metis-pantheon/tasks"), exist_ok=True)
+    os.makedirs(os.path.join(home, "ai/pantheon/directions/athena-broker/tasks"), exist_ok=True)
+    for f in ("ai/pantheon/directions/metis-pantheon/tasks/metis-0001.md", "ai/pantheon/directions/athena-broker/tasks/athena-0001.md"):
+        open(os.path.join(home, f), "w").close()
     for f in ("ai/pantheon/board.md", "ai/pantheon/alerts.md", "ai/pantheon/decision-map.md",
               "ai/pantheon/directions/hermes-alex/STATUS.md", "ai/pantheon/directions/hermes-alex/inbox/old.md"):
         open(os.path.join(home, f), "w").close()
@@ -103,6 +107,16 @@ def main():
         ("координатор: pantheon jobs pause --all — отказ", "deny", br, "domain-coordinator", False, B("pantheon jobs pause --all")),
         ("координатор: pantheon jobs и alert можно", "allow", br, "domain-coordinator", False, B("pantheon jobs; pantheon alert 'x' --from athena")),
         ("hq: pantheon archive можно", "allow", ".", "hq", False, B("pantheon archive")),
+        ("координатор: своя задача — можно", "allow", br, "domain-coordinator", False, B("pantheon task set athena-0001 status=doing")),
+        ("координатор: новая задача своего направления — можно", "allow", br, "domain-coordinator", False,
+         B("pantheon task new --direction athena-broker --title x")),
+        ("координатор: чужая задача — отказ", "deny", br, "domain-coordinator", False, B("pantheon task set metis-0001 status=done")),
+        ("координатор: новая задача чужому направлению — отказ", "deny", br, "domain-coordinator", False,
+         B("pantheon task new --direction metis-pantheon --title x")),
+        ("координатор: задача, которой нет, — отказ", "deny", br, "domain-coordinator", False, B("pantheon task claim zz-0001 --by a")),
+        ("субагент координатора: чужая задача — отказ", "deny", br, "hephaestus-broker", True, B("pantheon task set metis-0001 next=x")),
+        ("координатор: task ready и show — можно", "allow", br, "domain-coordinator", False, B("pantheon task ready; pantheon task show metis-0001")),
+        ("hq: любая задача — можно", "allow", ".", "hq", False, B("pantheon task set athena-0001 status=todo")),
         ("ваша сессия: pantheon uninstall можно", "allow", ".", "", False, B("pantheon uninstall")),
         # роли отдельной сессией (№ 7)
         ("clio сессией: запись в alexbroker — отказ", "deny", ".", "clio", False, W(os.path.join(home, alex, "x.md"))),

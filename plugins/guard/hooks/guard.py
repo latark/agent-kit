@@ -1832,6 +1832,34 @@ def pantheon_cli(cmd, cwd):
     return found
 
 
+def task_targets(cmd, cwd):
+    """`pantheon task new|set|claim` в команде → направления, которые она меняет (None — не определить)."""
+    out = []
+    for name, texts in bash_analysis(cmd, cwd)[1]:
+        bases = ["pantheon" if x and os.path.basename(x.rstrip("/")).lower() in ("pantheon", "pantheon.py")
+                 and _key(os.path.realpath(os.path.expanduser(x))) != _key(PANTHEON) else "" for x in texts]
+        k = next((i for i, b in enumerate(bases) if b), None)
+        if name not in ("pantheon", "?") and k is not None:
+            name, texts = "pantheon", texts[k + 1:]
+        if name not in ("pantheon", "?") or len(texts) < 2 or texts[0] != "task":
+            continue
+        act = texts[1]
+        if act is None:
+            out.append(None)
+        elif act == "new":
+            d = [texts[i + 1] for i in range(2, len(texts) - 1) if texts[i] == "--direction"]
+            out.append(d[-1] if d and d[-1] and re.fullmatch(r"[a-z0-9][a-z0-9-]*", d[-1]) else None)
+        elif act in ("set", "claim"):
+            tid = texts[2] if len(texts) > 2 else None
+            hits = [os.path.basename(os.path.dirname(os.path.dirname(f)))
+                    for f in glob.glob(os.path.join(PANTHEON, "directions", "*", "tasks", f"{tid}.md"))] \
+                if tid and re.fullmatch(r"[a-z][a-z0-9]{1,11}-\d{3,}", tid) else []
+            if tid and os.path.exists(os.path.join(PANTHEON, "inbox", "tasks", f"{tid}.md")):
+                hits.append("inbox")
+            out.append(hits[0] if len(hits) == 1 else None)
+    return out
+
+
 def write_targets(event, tool, tool_input):
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     if tool == "Bash":
@@ -1944,6 +1972,16 @@ def check_pantheon(event, tool, tool_input):
         if cli:
             return (f"Правило pantheon-acl: «{cli[0]}» — команда пульта, её запускают только штаб и ваши сессии. "
                     "Архив, коммит и пауза задач — через Зевса; дописать тревогу — `pantheon alert`.")
+        dirs = task_targets(tool_input.get("command") or "", os.path.realpath(event.get("cwd") or os.getcwd()))
+        if dirs:
+            own, _ = direction_of(load_domains(), pdir)
+            if not own and sub:
+                own, _ = direction_of(load_domains(), os.path.realpath(event.get("cwd") or os.getcwd()))
+            bad = [d for d in dirs if d is None or d != own]
+            if bad:
+                return (f"Правило pantheon-acl: роль «{role or 'субагент'}» ведёт задачи только своего направления "
+                        f"({own or 'нет направления'}), а команда трогает {bad[0] or 'задачу, направление которой не определить'}. "
+                        "Задачу другому направлению — новым файлом в его inbox/ (Write); входящие владельца пишет только доска.")
     cwd, targets = write_targets(event, tool, tool_input)
     if not targets:
         return None

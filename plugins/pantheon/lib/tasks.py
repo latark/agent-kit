@@ -288,13 +288,23 @@ def load_ids(pantheon):
     return ids
 
 
+DIRECTION_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
+
+
 def _file_for(pantheon, direction, tid):
+    if not DIRECTION_RE.fullmatch(str(direction)) or not ID_RE.fullmatch(str(tid)):
+        raise ValueError(f"направление или id не по образцу: {direction!r}, {tid!r}")
     base = os.path.join(pantheon, "inbox", "tasks") if direction == "inbox" else \
         os.path.join(pantheon, "directions", direction, "tasks")
+    real = os.path.realpath(os.path.join(base, tid + ".md"))
+    if not real.startswith(os.path.realpath(pantheon) + os.sep):
+        raise ValueError(f"путь задачи вне {pantheon}")
     return os.path.join(base, tid + ".md")
 
 
-def task_new(pantheon, t, direction, title, project=None, **fields):
+def task_new(pantheon, t, direction, title, project=None, actor="агент", **fields):
+    if not DIRECTION_RE.fullmatch(str(direction)):
+        raise ValueError(f"направление не по образцу: {direction!r}")
     if direction != "inbox" and not os.path.isdir(os.path.join(pantheon, "directions", direction)):
         raise ValueError(f"нет направления {direction}")
     tid = new_id(pantheon, direction)
@@ -316,7 +326,7 @@ def task_new(pantheon, t, direction, title, project=None, **fields):
     if errs:
         os.remove(path)
         raise ValueError("; ".join(errs))
-    write(path, head, f"\n# {title.strip()}\n\n## Журнал\n\n- {now_iso(t)[:16].replace('T', ' ')} — создана\n")
+    write(path, head, f"\n# {title.strip()}\n\n## Журнал\n\n- {now_iso(t)[:16].replace('T', ' ')} — {actor}: создана\n")
     return tid, path
 
 
@@ -326,7 +336,7 @@ def append_log(body, line):
     return body.rstrip("\n") + f"\n- {line}\n"
 
 
-def task_set(pantheon, t, tid, changes, note=None):
+def task_set(pantheon, t, tid, changes, note=None, actor="агент"):
     tasks = load_tasks(pantheon)
     if tid not in tasks:
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
@@ -344,7 +354,7 @@ def task_set(pantheon, t, tid, changes, note=None):
     if errs:
         raise ValueError("; ".join(errs))
     if note:
-        body = append_log(body, f"{now_iso(t)[:16].replace('T', ' ')} — {note}")
+        body = append_log(body, f"{now_iso(t)[:16].replace('T', ' ')} — {actor}: {' '.join(str(note).split())}")
     write(path, head, body)
     return path, head
 
@@ -372,6 +382,7 @@ def ready(pantheon, t, direction=None, owner=None):
 
 CARD_ORDER = ["Статус", "Проект", "Внимание", "Приоритет", "Срок", "Кто", "Дальше", "Ждёт", "Заметка агенту", "id"]
 NOTE_KEY = "Заметка агенту"
+QUIET = 120  # с: новую карточку, заметку и ответ берём, когда карточку не трогали столько
 PROJECT_MARK = {"Пантеон": "⬛", "BrokerAssistant": "🟦", "alexbroker": "🟧", "MorphStream": "🟪", "expert-corpus": "🟫",
                 "legal-watch": "🟫", "content-machine": "🟩", "second-brain": "🟨", "входящие": "📥"}
 STATUS_MARK = {"Входящие": "📥", HUMAN_WAIT: "🔴", "Очередь": "⚪", "В работе": "🟡", "Ждёт": "⏸",
@@ -483,6 +494,27 @@ views:
 """
 
 
+OWNER_ONLY_FIELDS = ("answer",)  # ставит только доска: ответ владельца
+
+
+def owner_words(log_path, tid):
+    """Записи журнала владельца по задаче — единственное подтверждение его слов (строки «владелец:» в журнале
+    задачи и поле answer — копия для удобства: направление может их переписать)."""
+    out = []
+    try:
+        with open(log_path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("id") == tid:
+                    out.append(rec)
+    except OSError:
+        pass
+    return out
+
+
 def _owner_log(path, t, **rec):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     rec = {"time": now_iso(t), **rec}
@@ -531,7 +563,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     rel = lambda p: os.path.relpath(p, pantheon)
 
     # 1. что сейчас лежит в доске
-    present, fresh, seen = {}, [], {}
+    present, fresh, seen, mtime = {}, [], {}, {}
     for f in sorted(os.listdir(board)):
         if not f.endswith(".md") or f.startswith((".", "_")) or f in ("Сводка.md", "Проблемы.md"):
             continue
@@ -543,6 +575,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             continue
         head = head or {}
         cid = head.get("id")
+        mtime[p] = os.path.getmtime(p)
         if cid and cid in present:
             continue
         if cid:
@@ -553,22 +586,27 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
 
     # 2. новые карточки владельца (без id) → задача во входящих, разбирает Зевс
     for p, name, head, body in fresh:
+        if t - mtime[p] < QUIET:
+            continue  # владелец ещё пишет карточку
         text = (head.get(NOTE_KEY) or "").strip() if isinstance(head.get(NOTE_KEY), str) else ""
         title = name if not name.startswith(("Без названия", "Untitled")) else (text or body.strip().split("\n")[0] or name)
         try:
-            tid, path = task_new(pantheon, t, "inbox", title, project="входящие", owner="zeus", status="inbox")
+            tid, path = task_new(pantheon, t, "inbox", title, project="входящие", owner="zeus", status="inbox",
+                                 actor="владелец")
         except ValueError as e:
             alert(f"board-new-{name}", "1", f"доска: не создать задачу из карточки «{name}»: {e}")
             continue
         if body.strip() or text:
             src_head, src_body = read(path)
-            write(path, src_head, append_log(src_body, f"от владельца: {(text or body.strip())[:500]}"))
+            write(path, src_head, append_log(src_body, f"{now_iso(t)[:16].replace('T', ' ')} — владелец: "
+                                                       f"{' '.join((text or body.strip()).split())[:500]}"))
         _owner_log(log_path, t, kind="new", id=tid, title=title)
         os.remove(p)
         done_lines.append(f"новая задача {tid} из карточки «{name}»")
         tasks = load_tasks(pantheon)
 
-    # 3. ходы владельца на известных карточках
+    # 3. ходы владельца на известных карточках (перенос — сразу: он делается одним движением)
+    busy = set()
     for cid, (p, head, body) in present.items():
         st = cards.get(cid)
         if cid not in tasks or not st:
@@ -578,8 +616,12 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             continue  # карточку никто не трогал
         src_moved = digest(src_path) != st.get("src_hash")
         want = head.get("Статус")
+        quiet = t - mtime[p] >= QUIET
         note = head.get(NOTE_KEY) if isinstance(head.get(NOTE_KEY), str) and head.get(NOTE_KEY).strip() else None
         answer = checked_option(body) if src_head.get("options") else None
+        if not quiet and (note or answer):
+            busy.add(cid)  # заметку и ответ возьмём, когда владелец закончит; карточку пока не перерисовываем
+            note = answer = None
         if want != st.get("synced"):
             if src_moved:
                 st["conflict_at"] = t
@@ -597,7 +639,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                 if status == "todo":
                     ch["claimed_by"], ch["claimed_until"] = None, None
                 try:
-                    task_set(pantheon, t, cid, ch, note=f"ход владельца: «{st.get('synced')}» → «{want}»")
+                    task_set(pantheon, t, cid, ch, note=f"перенёс «{st.get('synced')}» → «{want}»", actor="владелец")
                     _owner_log(log_path, t, kind="move", id=cid, src=st.get("synced"), dst=want)
                     done_lines.append(f"{cid}: ход владельца «{st.get('synced')}» → «{want}»")
                     if want == "В работе":
@@ -610,14 +652,14 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                     st["conflict_at"] = t
                     st["conflict"] = f"ход «{want}» не применён: {e}"
         if note:
-            task_set(pantheon, t, cid, {}, note=f"от владельца: {note.strip()[:1000]}")
+            task_set(pantheon, t, cid, {}, note=note.strip()[:1000], actor="владелец")
             _owner_log(log_path, t, kind="note", id=cid, text=note.strip()[:1000])
             done_lines.append(f"{cid}: заметка владельца передана")
         if answer and answer != "?":
             ch = {"answer": answer}
             if src_head.get("status") == "waiting" and src_head.get("waiting_on") == "human":
                 ch["status"] = "todo"
-            task_set(pantheon, t, cid, ch, note=f"ответ владельца: {answer}")
+            task_set(pantheon, t, cid, ch, note=f"ответ: {answer}", actor="владелец")
             _owner_log(log_path, t, kind="answer", id=cid, answer=answer)
             done_lines.append(f"{cid}: ответ владельца «{answer}»")
         elif answer == "?":
@@ -629,7 +671,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     for tid, (_, h, _) in (list(tasks.items()) if primary else []):
         w = h.get("waiting_on")
         if h.get("status") == "waiting" and w in tasks and tasks[w][1].get("status") == "done":
-            task_set(pantheon, t, tid, {"status": "todo"}, note=f"разблокирована: {w} готова")
+            task_set(pantheon, t, tid, {"status": "todo"}, note=f"разблокирована: {w} готова", actor="тик")
             done_lines.append(f"{tid}: разблокирована ({w} готова)")
     tasks = load_tasks(pantheon)
 
@@ -657,7 +699,9 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         card, cbody = render_card(h, b, rel(p), t, st.get("conflict"))
         target = os.path.join(board, name + ".md")
         old = present.get(tid)
-        if old and digest(old[0]) != seen.get(tid):
+        if old and (digest(old[0]) != seen.get(tid) or tid in busy):
+            if tid in busy:
+                st["synced"] = old[1].get("Статус")
             continue  # владелец правит карточку прямо сейчас — следующий проход
         if old and old[0] != target:
             os.remove(old[0])  # задачу переименовали
