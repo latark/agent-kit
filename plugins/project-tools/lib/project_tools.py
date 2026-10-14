@@ -218,12 +218,16 @@ def read_json_quiet(path):
 
 
 def norm_server(cfg):
-    """«-y» у npx и "type": "stdio" смысла записи не меняют."""
+    """Для сравнения с картой: "type": "stdio" и «-y» самого npx (до имени пакета) смысла записи не меняют.
+    Аргументы после пакета идут серверу и не трогаются."""
     if not isinstance(cfg, dict):
         return cfg
     cfg = {k: v for k, v in cfg.items() if not (k == "type" and v == "stdio")}
-    if os.path.basename(str(cfg.get("command", ""))) == "npx":
-        cfg["args"] = [a for a in cfg.get("args") or [] if a not in ("-y", "--yes")]
+    if os.path.basename(str(cfg.get("command", ""))) == "npx" and isinstance(cfg.get("args"), list):
+        args, i = list(cfg["args"]), 0
+        while i < len(args) and str(args[i]).startswith("-"):
+            i += 1
+        cfg["args"] = [a for a in args[:i] if a not in ("-y", "--yes")] + args[i:]
     return cfg
 
 
@@ -232,7 +236,21 @@ def same_server(cur, want):
 
 
 def fingerprint(cfg):
-    return hashlib.sha256(json.dumps(norm_server(cfg), sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+    """Отпечаток одобренной записи — как она лежит в файле, без нормализации: любая правка заметна."""
+    return hashlib.sha256(json.dumps(cfg, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+
+
+def safe_name(name):
+    """Имя сервера из чужого .mcp.json в выводе агенту и в терминал: только безопасные символы, иначе — лишь
+    отпечаток, чтобы имя не стало ни инструкцией модели, ни управляющей последовательностью терминала."""
+    name = str(name)
+    if re.fullmatch(r"[A-Za-z0-9_.@-]{1,64}", name):
+        return name
+    return f"«имя с недопустимыми символами #{hashlib.sha256(name.encode()).hexdigest()[:6]}»"
+
+
+def names(items):
+    return ", ".join(safe_name(x) for x in sorted(items))
 
 
 def clip(text, limit=80):
@@ -430,16 +448,16 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
         approved |= set(new_servers) - rejected
         del new_local["enableAllProjectMcpServers"]
         p.changes.append(".claude/settings.local.json: enableAllProjectMcpServers заменён явным списком "
-                         f"({', '.join(sorted(set(new_servers) - rejected)) or 'пусто'}) — новый сервер из "
+                         f"({names(set(new_servers) - rejected) or 'пусто'}) — новый сервер из "
                          "репозитория больше не запустится без вашего одобрения")
     approved |= approve
     stale = approved - set(new_servers)
     if stale:
         p.changes.append(f".claude/settings.local.json: сняты одобрения серверов, которых нет в .mcp.json: "
-                         f"{', '.join(sorted(stale))}")
+                         f"{names(stale)}")
     approved -= stale
     if approve - before:
-        p.changes.append(f".claude/settings.local.json: одобрены {', '.join(sorted(approve - before))}")
+        p.changes.append(f".claude/settings.local.json: одобрены {names(approve - before)}")
     if approved or "enabledMcpjsonServers" in local:
         new_local["enabledMcpjsonServers"] = sorted(approved)
 
@@ -452,9 +470,10 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
         if was and was != now and name not in accept and name not in update:
             p.drift.append(name)
             p.fingerprints[name] = was
-            p.notes.append(f"⚠ {name}: запись в .mcp.json изменилась после одобрения, теперь «{describe(new_servers[name])}». "
-                           f"Проверьте `git log -p .mcp.json`; ваше — `project-tools apply --accept {name}`, "
-                           f"не ваше — `project-tools skip {name}`")
+            shown = safe_name(name)
+            p.notes.append(f"⚠ {shown}: запись в .mcp.json изменилась после одобрения, теперь «{describe(new_servers[name])}». "
+                           f"Проверьте `git log -p .mcp.json`; ваше — `project-tools apply --accept {shown}`, "
+                           f"не ваше — `project-tools skip {shown}`")
         else:
             p.fingerprints[name] = now
     if new_local_plugins != (local.get("enabledPlugins") or {}):
@@ -629,9 +648,9 @@ def cmd_skip(args):
             new["disabledMcpjsonServers"] = sorted(set(new.get("disabledMcpjsonServers") or []) | {name})
             if name in (new.get("enabledMcpjsonServers") or []):
                 new["enabledMcpjsonServers"] = [x for x in new["enabledMcpjsonServers"] if x != name]
-            done.append(f"{name} отклонён (disabledMcpjsonServers)")
+            done.append(f"{safe_name(name)} отклонён (disabledMcpjsonServers)")
         else:
-            raise Broken(f"{name}: нет ни в карте, ни в .mcp.json")
+            raise Broken(f"{safe_name(name)}: нет ни в карте, ни в .mcp.json")
     if new != local:
         original = read_text(lpath)
         text = json_text(lpath, new, False)
@@ -655,15 +674,25 @@ def cmd_hint(_args):
             return 0
         if not is_git and not os.path.isfile(os.path.join(root, "package.json")):
             return 0
-        p = make_plan(root, is_git, tolerant=True)
+        try:
+            p = make_plan(root, is_git, tolerant=True)
+        except Broken as e:
+            # .mcp.json, который не разбирается здесь, Claude Code мог прочитать иначе — подмену не проверить
+            if os.path.lexists(os.path.join(root, ".mcp.json")):
+                msg = f"project-tools: ⚠ настройки MCP проекта не проверить ({clip(e, 160)}). Проверьте: project-tools check"
+                print(json.dumps({"systemMessage": msg, "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": msg + ". Скажи владельцу; серверы из .mcp.json не вызывай, пока он не ответит."}},
+                    ensure_ascii=False))
+            return 0
         if not p.missing and not p.drift:
             return 0
         lines, out = [], {}
         if p.drift:
-            lines.append(f"project-tools: ⚠ в .mcp.json после одобрения изменились серверы {', '.join(p.drift)}, "
+            lines.append(f"project-tools: ⚠ в .mcp.json после одобрения изменились серверы {names(p.drift)}, "
                          "и Claude Code уже запустил их без вопроса. Сразу скажи владельцу и покажи "
                          "`project-tools check`; сам эти серверы не вызывай, пока он не ответит.")
-            out["systemMessage"] = (f"project-tools: ⚠ в .mcp.json изменились одобренные серверы: {', '.join(p.drift)}. "
+            out["systemMessage"] = (f"project-tools: ⚠ в .mcp.json изменились одобренные серверы: {names(p.drift)}. "
                                     "Проверьте: project-tools check")
         if p.missing:
             lines.append(f"project-tools: в проекте {', '.join(p.stacks)}; по карте стеков не подключены: "
