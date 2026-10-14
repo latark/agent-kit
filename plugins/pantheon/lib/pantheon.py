@@ -19,6 +19,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         и настройки окон ролей с песочницей …/settings/<направление>.json
   pantheon view [--quiet]               обновить копию ~/ai/pantheon-view для Obsidian
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
+  pantheon status                       один экран для отладки: тик, сессии, вопросы к вам, тревоги, защиты, sync, места heavy, версии
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
   pantheon task new --direction D --title T [--status S --priority N --due ГГГГ-ММ-ДД --next X --owner O
@@ -613,6 +614,178 @@ def jobs_show():
     widths = [max(len(r[i]) for r in rows) for i in range(6)]
     for r in rows:
         print("  ".join(c.ljust(w) for c, w in zip(r[:6], widths)) + "  " + r[6])
+
+
+# --- pantheon status: один экран для отладки --------------------------------------------------------------------
+# Только читает: тик, задачи тика, сессии, вопросы к владельцу, тревоги, guard, карантин ~/.claude, места heavy,
+# управляемые настройки, версии, память. Первая строка — итог: «всё в порядке» или число того, что требует внимания.
+MANAGED = "/Library/Application Support/ClaudeCode/managed-settings.json"
+
+
+def _sh(*cmd, timeout=20):
+    try:
+        r = subprocess.run(list(cmd), capture_output=True, text=True, timeout=timeout)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _plugin_version(name):
+    d = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", name, ".claude-plugin",
+                     "plugin.json")
+    with contextlib.suppress(OSError, ValueError):
+        return json.load(open(d)).get("version", "?")
+    return "?"
+
+
+def status():
+    t = now()
+    warn, sections = [], []
+
+    def section(title, lines):
+        sections.append((title, lines or ["—"]))
+
+    # тик и его задачи
+    lt = None
+    with contextlib.suppress(OSError, ValueError):
+        lt = float(open(path("last-tick")).read())
+    lines = [f"последний проход: {ago(lt)}" if lt else "ещё не шёл (pantheon install)"]
+    if not lt or t - lt > 180:
+        warn.append("тик стоит")
+        lines[0] += " — СТОИТ"
+    if os.path.exists(path("paused")):
+        lines.append("весь планировщик на паузе (pantheon jobs resume --all)")
+    try:
+        jobs_list = load_schedule().get("job") or []
+    except (OSError, ValueError) as e:
+        jobs_list = []
+        lines.append(f"schedule.toml не прочитать: {type(e).__name__}")
+        warn.append("schedule.toml")
+    for job in jobs_list:
+        st = job_state(job["name"])
+        if job.get("enabled") is False or st.get("disabled"):
+            continue
+        if parse_command(job.get("command")) is None:
+            bad = "команда не разрешена"
+        elif st.get("paused"):
+            bad = "на паузе"
+        elif st.get("last_rc") not in (None, 0):
+            bad = f"упала, код {st['last_rc']} ({ago(st.get('last_start'))})"
+        else:
+            continue
+        lines.append(f"{job['name']}: {bad}")
+        warn.append(f"задача {job['name']}")
+    section("Тик", lines)
+
+    # сессии
+    data = agents_all()
+    lines = []
+    if data is None:
+        lines.append("claude agents не ответил")
+        warn.append("claude agents")
+    else:
+        by = {}
+        for a in data:
+            if a.get("kind") == "interactive":
+                by.setdefault("interactive", []).append(a)
+                continue
+            by.setdefault(a.get("state") or "?", []).append(a)
+        order = ("interactive", "working", "blocked", "failed", "done", "stopped")
+        word = {"interactive": "открыты в терминале", "working": "фоновые работают", "blocked": "ждут вас",
+                "failed": "упали", "done": "закончили ход", "stopped": "остановлены"}
+        lines.append(" · ".join(f"{word.get(k, k)}: {len(by[k])}" for k in sorted(by, key=lambda k: (
+            order.index(k) if k in order else 9))) or "фоновых сессий нет")
+        for k in ("blocked", "failed"):
+            for a in by.get(k, []):
+                why = a.get("waitingFor") or a.get("status") or ""
+                lines.append(f"{word[k]}: {a.get('name') or a.get('id')} — {str(why)[:80]}")
+                warn.append(f"сессия {a.get('name') or a.get('id')}")
+    section("Сессии", lines)
+
+    # вопросы к владельцу на доске
+    lines = []
+    with contextlib.suppress(Exception):
+        waiting = [(tid, head) for tid, (_, head, _) in tasks_mod().load_tasks(PANTHEON).items()
+                   if head.get("status") == "waiting" and head.get("waiting_on") == "human"]
+        lines = [f"{len(waiting)} на доске"] + [f"{tid}: {str(h.get('title'))[:70]}" for tid, h in waiting[:5]]
+    section("Ждут вас", lines)
+
+    # тревоги за сутки
+    lines = []
+    day = stamp(t - 86400)[:16].replace("T", " ")
+    with contextlib.suppress(OSError):
+        recent = [ln.strip() for ln in open(os.path.join(PANTHEON, "alerts.md"), encoding="utf-8")
+                  if re.match(r"\d{4}-\d\d-\d\d \d\d:\d\d · ", ln) and ln[:16] >= day]
+        lines = [f"за сутки: {len(recent)}"] + [ln[:110] for ln in recent[-3:]]
+    section("Тревоги", lines)
+
+    # guard и защиты
+    lines = []
+    n_fail = 0
+    with contextlib.suppress(OSError):
+        since = stamp(t - 86400)[:19]
+        n_fail = sum(1 for ln in open(path("logs", "guard-failures.log"), encoding="utf-8") if ln[:19] >= since)
+    lines.append(f"сбоев guard за сутки: {n_fail}")
+    if n_fail:
+        warn.append("сбои guard")
+    plug = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "managed-settings.json")
+    if not os.path.exists(MANAGED):
+        lines.append("управляемые настройки: НЕ установлены (README guard, sudo)")
+        warn.append("управляемые настройки")
+    elif open(MANAGED, "rb").read() != (open(plug, "rb").read() if os.path.exists(plug) else b""):
+        lines.append("управляемые настройки: отстали от guard — обновить той же командой sudo")
+        warn.append("управляемые настройки")
+    else:
+        lines.append("управляемые настройки: установлены, совпадают с guard")
+    section("Защиты", lines)
+
+    # синхронизация ~/.claude
+    lines, cfg = [], os.path.join(HOME, ".claude")
+    marks = {".sync-held": "карантин правок — ответ на доске", ".sync-incoming": "правка с другого Mac — на доске",
+             ".sync-conflict": "конфликт с другим Mac", ".sync-error": "ошибка синхронизации"}
+    for f, what in marks.items():
+        if os.path.exists(os.path.join(cfg, f)):
+            lines.append(what)
+            warn.append("sync")
+    section("Синхронизация ~/.claude", lines or ["в порядке"])
+
+    # места heavy, память, версии
+    lines = []
+    for name in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):
+        p = path("locks", name + ".lock")
+        if not os.path.exists(p):
+            lines.append(f"{name}: нет (pantheon install)")
+            continue
+        try:
+            fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                lines.append(f"{name}: свободно")
+            except OSError:
+                lines.append(f"{name}: занято")
+            finally:
+                os.close(fd)
+        except OSError:
+            lines.append(f"{name}: не открыть")
+    sw = re.search(r"used = ([\d.,]+)M", _sh("sysctl", "vm.swapusage"))
+    if sw:
+        used = float(sw.group(1).replace(",", "."))
+        lines.append(f"swap: {used / 1024:.1f} ГБ")
+        if used > 4096:
+            warn.append("swap")
+    lines.append(f"Claude Code {(_sh('claude', '--version').split() or ['?'])[0]} · guard {_plugin_version('guard')} · "
+                 f"pantheon {_plugin_version('pantheon')}")
+    section("Mac", lines)
+
+    head = "всё в порядке" if not warn else f"требует внимания: {len(warn)} — " + ", ".join(dict.fromkeys(warn))
+    print(f"Пантеон · {host()} · {stamp(t)[:16].replace('T', ' ')} · {head}\n")
+    for title, lines in sections:
+        print(title)
+        for ln in lines:
+            print(f"  {ln}")
+        print()
+    return 0 if not warn else 1
 
 
 def jobs_set(action, name, arg=None):
@@ -1741,6 +1914,8 @@ def main(argv):
         return board()
     if cmd == "sync-answers":
         return sync_answers()
+    if cmd == "status":
+        return status()
     if cmd == "check":
         return check([a for a in rest if not a.startswith("-")] or None, quiet="--quiet" in rest)
     if cmd == "task":

@@ -301,6 +301,16 @@ def main():
     r = run("sync-answers")
     check("sync-answers: «отправить» по своей задаче — sync.sh запущен", r.returncode == 0 and os.path.exists(mark))
 
+    # status: один экран, только читает
+    open(agents_file, "w").write(json.dumps([
+        {"id": "a1", "kind": "background", "state": "blocked", "name": "athena-broker", "waitingFor": "разрешение Bash"},
+        {"id": "a2", "kind": "background", "state": "working", "name": "hermes-alex"},
+        {"kind": "interactive", "state": None, "name": "artemk-1"}]))
+    r = run("status")
+    check("status: итог сверху, ждущая сессия названа, терминальные — отдельно, код 1 при проблемах",
+          r.returncode == 1 and r.stdout.startswith("Пантеон · ") and "athena-broker — разрешение Bash" in r.stdout
+          and "открыты в терминале: 1" in r.stdout and "фоновые работают: 1" in r.stdout and "Тик" in r.stdout)
+
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 
