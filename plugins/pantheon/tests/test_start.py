@@ -281,6 +281,26 @@ def main():
     check("heavy --server: второй сервер ждёт (75 по пределу), обычная команда при этом идёт",
           r2.returncode == 75 and "сервер уже запущен" in r2.stderr and r3.returncode == 0)
 
+    # sync-answers: ответ на доске по карантину ~/.claude — тик запускает sync.sh сам
+    cl = os.path.join(tmp, ".claude")
+    mark = os.path.join(tmp, "sync-ran")
+    open(os.path.join(cl, "sync.sh"), "w").write(f"#!/bin/sh\ntouch {mark}\n")
+    os.chmod(os.path.join(cl, "sync.sh"), 0o755)
+    r = run("sync-answers")
+    check("sync-answers: держания нет — sync.sh не запускается", r.returncode == 0 and not os.path.exists(mark))
+    open(os.path.join(cl, ".sync-held"), "w").write("hash=abc\ntask=metis-0099\nfiles=1\n")
+    os.makedirs(os.path.join(state, "owner-log"), exist_ok=True)
+    olog = os.path.join(state, "owner-log", "board.jsonl")
+    open(olog, "w").write(json.dumps({"kind": "answer", "id": "metis-0099", "answer": "Пока держать"}) + "\n")
+    r = run("sync-answers")
+    check("sync-answers: «пока держать» — не запускает", r.returncode == 0 and not os.path.exists(mark))
+    open(olog, "a").write(json.dumps({"kind": "answer", "id": "metis-0098", "answer": "Отправить на другие Mac"}) + "\n")
+    run("sync-answers")
+    check("sync-answers: ответ по другой задаче — не запускает", not os.path.exists(mark))
+    open(olog, "a").write(json.dumps({"kind": "answer", "id": "metis-0099", "answer": "Отправить на другие Mac"}) + "\n")
+    r = run("sync-answers")
+    check("sync-answers: «отправить» по своей задаче — sync.sh запущен", r.returncode == 0 and os.path.exists(mark))
+
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 

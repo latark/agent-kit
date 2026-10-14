@@ -19,6 +19,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         и настройки окон ролей с песочницей …/settings/<направление>.json
   pantheon view [--quiet]               обновить копию ~/ai/pantheon-view для Obsidian
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
+  pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
   pantheon task new --direction D --title T [--status S --priority N --due ГГГГ-ММ-ДД --next X --owner O
                     --project P --waiting-on W --question Q --option A --option B --depends-on ID]
@@ -1519,6 +1520,48 @@ def tasks_mod():
 BOARD = os.path.join(VIEW, "Доска")
 
 
+# --- ответ владельца по карантину ~/.claude (SEC-15) ---------------------------------------------------------
+# sync.sh читает ответ с доски только при своём запуске — на старте сессии. Тик после board проверяет: есть
+# держание (.sync-held или .sync-incoming), а в журнале ваших слов (owner-log/board.jsonl) по его задаче — ответ
+# «отправить» или «откатить»; тогда запускает sync.sh сам. Решает по-прежнему sync.sh по тому же журналу; здесь —
+# только «пора». Без ответа или «пока держать» — ничего не запускает.
+SYNC_DIR = os.path.join(HOME, ".claude")
+SYNC_ACT = {"Отправить на другие Mac", "Откатить правку", "Всё в порядке — правка наша", "Откатить на всех Mac"}
+
+
+def sync_answers():
+    owner_log = os.path.join(STATE, "owner-log", "board.jsonl")
+    waiting = []
+    for held in (".sync-held", ".sync-incoming"):
+        try:
+            text = open(os.path.join(SYNC_DIR, held), encoding="utf-8").read()
+        except OSError:
+            continue
+        m = re.search(r"^task=(\S+)$", text, re.M)
+        if m:
+            waiting.append(m.group(1))
+    if not waiting or not os.path.exists(owner_log):
+        return 0
+    last = {}
+    for line in open(owner_log, encoding="utf-8"):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("kind") == "answer" and d.get("id") in waiting:
+            last[d["id"]] = d.get("answer") or ""
+    if not any(last.get(t) in SYNC_ACT for t in waiting):
+        return 0
+    script = os.path.join(SYNC_DIR, "sync.sh")
+    try:
+        r = subprocess.run([script], capture_output=True, text=True, timeout=240)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"sync-answers: sync.sh не отработал: {e}", file=sys.stderr)
+        return 1
+    print(f"sync-answers: ответ по {', '.join(waiting)} применён (sync.sh, код {r.returncode})")
+    return 0
+
+
 def board():
     """Доска владельца: ходы → задачи и журнал владельца, карточки ← задачи. Только на этом Mac, под блокировкой."""
     T = tasks_mod()
@@ -1696,6 +1739,8 @@ def main(argv):
         return commit()
     if cmd == "board":
         return board()
+    if cmd == "sync-answers":
+        return sync_answers()
     if cmd == "check":
         return check([a for a in rest if not a.startswith("-")] or None, quiet="--quiet" in rest)
     if cmd == "task":
