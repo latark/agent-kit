@@ -236,8 +236,11 @@ def write_text(path, text):
                 fh.write(text)
             os.replace(tmp, path)
             return
-        tmp = f".{name}.{os.getpid()}.tmp"
-        f = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644, dir_fd=fd)
+        # временный файл — только новый и со случайным именем: заранее подложенный (в том числе жёсткой ссылкой
+        # на чужой файл) не перезапишется
+        import secrets
+        tmp = f".{name}.{secrets.token_hex(8)}.tmp"
+        f = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fd)
         with os.fdopen(f, "w", encoding="utf-8") as fh:
             fh.write(text)
         os.replace(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
@@ -258,8 +261,13 @@ def remove(path):
 
 
 def append_text(path, text):
+    import stat as _st
     with _in_dir(path) as (fd, name):
         f = os.open(name if fd is not None else path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, dir_fd=fd)
+        info = os.fstat(f)
+        if not _st.S_ISREG(info.st_mode) or info.st_nlink != 1:  # жёсткая ссылка на чужой файл — не дописываем
+            os.close(f)
+            raise ValueError(f"{path}: не обычный файл или у него несколько ссылок — не дописываю")
         with os.fdopen(f, "a", encoding="utf-8") as fh:
             fh.write(text)
 
@@ -658,6 +666,16 @@ def render_card(head, body, src_rel, t, conflict=None):
     return card, "\n" + "\n\n".join(parts) + "\n"
 
 
+def owner_added(rendered, body):
+    """Строки, которые владелец дописал в тело карточки сверх нарисованного тиком (галочки ответов — не в счёт)."""
+    if rendered is None:
+        return None
+    old = {ln.strip() for ln in rendered.split("\n")}
+    added = [ln.strip() for ln in body.split("\n") if ln.strip() and ln.strip() not in old
+             and not re.match(r"^- \[[ xXхХ]\] ", ln.strip())]
+    return "\n".join(added) or None
+
+
 def checked_option(body):
     m = re.findall(r"^- \[[xXхХ]\] (.+)$", body, re.M)
     return m[0].strip() if len(m) == 1 else (None if not m else "?")
@@ -928,6 +946,9 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         note = head.get(NOTE_KEY) if isinstance(head.get(NOTE_KEY), str) and head.get(NOTE_KEY).strip() else None
         if cid in inbox:  # заявка направлению
             it = inbox[cid]
+            extra = owner_added(st.get("rendered"), body)
+            if extra:
+                note = f"{note.strip()}\n{extra}" if note else extra
             if note:
                 append_text(it["path"], f"\n\n- {now_iso(t)[:16].replace('T', ' ')} — владелец: {' '.join(note.split())[:1000]}\n")
                 _owner_log(log_path, t, kind="note", id=cid, text=note.strip()[:1000], inbox=rel(it["path"]))
@@ -943,6 +964,9 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         src_path, src_head, _ = tasks[cid]
         src_moved = digest(src_path) != st.get("src_hash")
         answer = checked_option(body) if src_head.get("options") else None
+        extra = owner_added(st.get("rendered"), body)  # текст, дописанный прямо в карточку, — тоже заметка
+        if extra:
+            note = f"{note.strip()}\n{extra}" if note else extra
         if want != st.get("synced"):
             if src_moved:
                 st["conflict_at"] = t
@@ -975,8 +999,9 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                     st["conflict_at"] = t
                     st["conflict"] = f"ход «{want}» не применён: {e}"
         if note:
-            task_set(pantheon, t, cid, {}, note=note.strip()[:1000], actor="владелец")
-            _owner_log(log_path, t, kind="note", id=cid, text=note.strip()[:1000])
+            task_set(pantheon, t, cid, {}, note=" / ".join(x.strip() for x in note.strip().split("\n") if x.strip())[:2000],
+                     actor="владелец")
+            _owner_log(log_path, t, kind="note", id=cid, text=note.strip()[:2000])
             done_lines.append(f"{cid}: заметка владельца передана")
         risky = src_head.get("risky") is True
         current = src_head.get("requested") if risky else src_head.get("answer")
@@ -1051,7 +1076,8 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         prev = st.get("synced")
         if (card["Статус"] == HUMAN_WAIT and prev != HUMAN_WAIT and not first_run and cid not in moved_by_owner):
             events.append((f"❓ Вопрос к вам: {h.get('title') if h else name}", cid))
-        st.update({"file": name, "synced": card["Статус"], "src_hash": digest(src), "card_hash": digest(target)})
+        st.update({"file": name, "synced": card["Статус"], "src_hash": digest(src), "card_hash": digest(target),
+                   "rendered": cbody})
     # карточки ушедших задач и разобранных заявок
     for cid, (p, _, _) in present.items():
         if cid not in names:
@@ -1076,13 +1102,13 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         state["digest_day"] = today
         if rows["wait"] or rows["overdue"] or rows["inbox"]:
             notify(f"Доброе утро. Ждёт вас: {len(rows['wait'])}, просрочено: {len(rows['overdue'])}, "
-                   f"входящих заявок: {len(rows['inbox'])}.", card_url(vault, "Сводка"))
+                   f"входящих заявок: {len(rows['inbox'])}.", card_url(vault, "Сводка"), "digest")
     elif events and not night:
         if len(events) == 1:
-            notify(events[0][0], card_url(vault, names.get(events[0][1], "Сводка")))
+            notify(events[0][0], card_url(vault, names.get(events[0][1], "Сводка")), events[0][1])
         else:
             notify(f"На доске {len(events)} новых события: " + "; ".join(e[0] for e in events[:3]),
-                   card_url(vault, "Сводка"))
+                   card_url(vault, "Сводка"), "events")
     bp = os.path.join(board, "Доска.base")
     if not os.path.exists(bp):
         with open(bp, "w", encoding="utf-8") as fh:

@@ -265,24 +265,31 @@ def board_url(name="Доска.base"):
     return f"obsidian://open?vault={quote(os.path.basename(VIEW))}&file={quote('Доска/' + name)}"
 
 
-def notify(text, title="Пантеон", target=None):
-    """Уведомление macOS. Через программу «Доска»: её кнопка «Показать» открывает target (карточку или доску)."""
+def _notifier():
+    for c in ("/opt/homebrew/bin/terminal-notifier", "/usr/local/bin/terminal-notifier"):
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def notify(text, title="Пантеон", target=None, group=None):
+    """Уведомление macOS. Через terminal-notifier 3 (UserNotifications): щелчок открывает target — карточку или доску,
+    group заменяет прежнее уведомление о том же. Без него — обычное уведомление без перехода."""
     if os.environ.get("PANTHEON_NOTIFY_LOG"):  # для тестов: что и куда ушло бы
         with open(os.environ["PANTHEON_NOTIFY_LOG"], "a", encoding="utf-8") as fh:
             fh.write(f"{title}|{text}|{target or ''}\n")
         return
     if os.environ.get("PANTHEON_NO_NOTIFY") or os.environ.get("PANTHEON_DRYRUN") == "1":
         return
-    if os.path.isdir(APP):
-        d = path("notify")
-        os.makedirs(d, exist_ok=True)
-        for name, val in (("target.txt", target or board_url()), ("pending.txt", f"{title}\n{' '.join(str(text).split())}")):
-            tmp = os.path.join(d, name + ".tmp")
-            with open(tmp, "w", encoding="utf-8") as fh:
-                fh.write(val)
-            os.replace(tmp, os.path.join(d, name))
-        subprocess.run(["open", "-g", "-j", APP], capture_output=True, timeout=10)
-        return
+    text = " ".join(str(text).split())
+    tn = _notifier()
+    if tn:
+        args = [tn, "-title", title, "-message", text, "-open", target or board_url()]
+        if group:
+            args += ["-group", "pantheon-" + re.sub(r"[^\w.-]", "_", group)[:60]]
+        r = subprocess.run(args, capture_output=True, timeout=15)
+        if r.returncode == 0:
+            return
     esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
     subprocess.run(["osascript", "-e", f'display notification "{esc(text)}" with title "{esc(title)}"'],
                    capture_output=True, timeout=10)
@@ -1025,7 +1032,7 @@ def install():
 
 
 def build_app():
-    """~/Applications/Доска.app: Spotlight «Доска» открывает доску; уведомления Пантеона идут от её имени."""
+    """~/Applications/Доска.app: Spotlight «Доска» и значок в Dock открывают доску в Obsidian."""
     import tempfile
     with open(os.path.join(LIB, "board-app.applescript"), encoding="utf-8") as fh:
         src = fh.read().replace("BOARD_URL", board_url())
@@ -1039,9 +1046,10 @@ def build_app():
         print(f"программа «Доска» не собрана: {r.stderr.strip()}", file=sys.stderr)
         return
     plist = os.path.join(APP, "Contents", "Info.plist")
-    subprocess.run(["plutil", "-replace", "LSUIElement", "-bool", "YES", plist], capture_output=True)  # без значка в Dock
     subprocess.run(["plutil", "-replace", "CFBundleIdentifier", "-string", "com.latark.pantheon-board", plist],
                    capture_output=True)
+    if not _notifier():
+        print("для уведомлений с переходом в карточку: brew install terminal-notifier", file=sys.stderr)
     subprocess.run(["codesign", "--force", "--sign", "-", APP], capture_output=True)
 
 
@@ -1087,7 +1095,8 @@ def board():
             projects = {}
         lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
                              alert=lambda k, v, text, who="board", note=None: alert_once(k, v, text, who, note),
-                             notify=lambda text, target=None: notify(text, target=target), primary=primary,
+                             notify=lambda text, target=None, group=None: notify(text, target=target, group=group),
+                             primary=primary,
                              projects=projects)
         once_dir = path("once")  # отметки «уже сообщали» старше 90 дней — убрать: папка не растёт без конца
         for f in os.listdir(once_dir) if os.path.isdir(once_dir) else []:

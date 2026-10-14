@@ -144,6 +144,15 @@ def main():
     check("заметка агенту: в журнале задачи, в карточке очищена",
           "владелец: Сделайте как проще" in text and 'Заметка агенту: ""' in ct)
 
+    # текст, дописанный прямо в тело карточки, — тоже заметка агенту
+    c3 = card(view, "Налоги беты")
+    open(c3, "a", encoding="utf-8").write("\nУточнение: сначала НДФЛ, потом НДС\n")
+    run(env, "board", t=T0 + 370)
+    _, t3 = head_of(src("athena-broker", "athena-0001"))
+    _, ct3 = head_of(c3)
+    check("текст в теле карточки: передан в журнал задачи, карточка перерисована",
+          "владелец: Уточнение: сначала НДФЛ, потом НДС" in t3 and ct3.count("Уточнение: сначала НДФЛ") == 1)
+
     # ответ можно поменять, пока задача не закрыта
     t2 = open(c2, encoding="utf-8").read()
     check("после ответа варианты остаются, текущий отмечен", "- [x] В копии" in t2 and "- [ ] В knowledge" in t2)
@@ -258,6 +267,19 @@ def main():
     os.symlink(os.path.join(home, "directions", "metis-pantheon", "tasks"), os.path.join(home, "directions", "evil", "tasks"))
     r = run(env, "task", "new", "--direction", "evil", "--title", "через ссылку")
     check("папка задач — ссылка: задача не создаётся", r.returncode == 1 and "ссылка" in r.stderr)
+    # жёсткая ссылка вместо файла заявки: заметку владельца в чужой файл не дописываем
+    victim = os.path.join(tmp, "victim.txt")
+    open(victim, "w").write("не трогать\n")
+    hl = os.path.join(ib2, "жёсткая.md")
+    os.link(victim, hl)
+    run(env, "board", t=T0 + 735)
+    hc = card(view, "жёсткая")
+    if os.path.exists(hc):
+        set_card(hc, "Заметка агенту", "проверка")
+        run(env, "board", t=T0 + 740)
+    check("жёсткая ссылка на чужой файл: заметка в него не дописана", open(victim).read() == "не трогать\n")
+    os.remove(hl)
+
     # чужая роль держит блокировку: правка ждёт недолго и отказывает, тик не виснет
     import fcntl as _f
     lk = os.open(os.path.join(home, "directions", "athena-broker", "tasks", ".lock"), os.O_WRONLY | os.O_CREAT)
