@@ -409,6 +409,7 @@ class _Lexer:
         self.s, self.n = src, len(src)
         self.toks, self.inner, self.taint = [], [], set()
         self.lit, self.mask, self.started, self.proc, self.zglob = [], [], False, False, False
+        self.danger = False      # zsh: квалификатор шаблона (e:…:), (+функция) выполняет код при раскрытии
         self.seg = []            # слова текущей простой команды — для «позиции команды»
         self.heredocs = []       # (перенаправление, ограничитель, в кавычках ли) — ждут тела после \n
         self.want_delim = None   # перенаправление <<, которому нужно слово-ограничитель
@@ -440,6 +441,7 @@ class _Lexer:
         j = lx.run(i, stop=stop)
         self.inner.append(lx)
         self.taint |= lx.taint
+        self.danger = self.danger or lx.danger
         return j, lx
 
     def skip_quoted(self, j):
@@ -546,7 +548,9 @@ class _Lexer:
                     i += 1
                     continue
                 j = self.match(i, "(", ")")
-                if re.search(r"[\s;&]", s[i + 1:j]):
+                if re.search(r"e[^\w\s()|]|\+[A-Za-z_]", s[i + 1:j]):
+                    self.danger = True  # zsh: *(e:'код':), *(+функция) — код при раскрытии шаблона
+                if not self.started and re.search(r"[\s;&]", s[i + 1:j]):
                     self.op("(")  # подоболочка или тело короткой формы zsh: разбираем как команды
                     depth += 1
                     i += 1
@@ -712,6 +716,7 @@ class _Lexer:
         lx.run()
         self.inner.append(lx)
         self.taint |= lx.taint
+        self.danger = self.danger or lx.danger
         if text.strip() == "pwd":
             self.add(_PWD_MARK, "q")
         else:
@@ -734,6 +739,7 @@ class _Lexer:
                 i += 1
         self.inner.extend(lx.inner)
         self.taint |= lx.taint
+        self.danger = self.danger or lx.danger
 
     def read_heredocs(self, i):
         s, n = self.s, self.n
@@ -901,6 +907,12 @@ def _params(st, lit, mask, assign=False):
             if not name:
                 put("$", "q")
                 i += 1
+                continue
+            braced = lit[i + 1] == "{"
+            if j < n and mask[j] == m and (lit[j] == "[" or (not braced and lit[j] == ":" and j + 1 < n
+                                                             and lit[j + 1].isascii() and lit[j + 1].isalpha())):
+                join({None}, "u")  # zsh: $PWD:h — родитель, $X[1,5] — срез; значение не вычислить
+                i = j
                 continue
             join(st.var(name), "v" if m == "u" else "q")
             i = j
@@ -1085,7 +1097,16 @@ GIT_READ = {"status", "log", "show", "diff", "blame", "annotate", "rev-parse", "
             "cat-file", "describe", "shortlog", "grep", "help", "version", "check-ignore", "check-attr", "name-rev",
             "for-each-ref", "rev-list", "show-ref", "show-branch", "var", "whatchanged", "count-objects",
             "diff-tree", "diff-files", "diff-index", "merge-base", "cherry", "range-diff", "verify-commit",
-            "verify-tag", "fsck"}
+            "verify-tag"}
+# git -c: ключи, которые ничего не запускают; любой другой (core.pager, alias.*, diff.external …) — «не разобрать»
+GIT_SAFE_CONFIG = re.compile(r"(user|author|committer|color|advice|init|push|pull|fetch|merge\.ff|rebase\.autostash|"
+                             r"commit\.gpgsign|tag\.gpgsign|log|format\.(?!headers)|status|column|i18n|safe\.directory|"
+                             r"core\.(quotepath|autocrlf|safecrlf|filemode|ignorecase|precomposeunicode|longpaths))(\.|=|$)", re.I)
+# Переменные, по которым программы запускают другие программы: присвоение в команде — «не разобрать»
+EXEC_VARS = re.compile(r"(EDITOR|VISUAL|PAGER|MANPAGER|GIT_(EXTERNAL_DIFF|PAGER|SSH|SSH_COMMAND|EDITOR|SEQUENCE_EDITOR|"
+                       r"EXEC_PATH|ASKPASS|PROXY_COMMAND|TEMPLATE_DIR|CONFIG\w*|DIR|WORK_TREE)|SSH_ASKPASS|LESSOPEN|"
+                       r"LESSCLOSE|BROWSER|BASH_ENV|ENV|ZDOTDIR|PROMPT_COMMAND|LD_PRELOAD|DYLD_\w+|PYTHONSTARTUP|"
+                       r"NODE_OPTIONS|PERL5OPT|RUBYOPT)")
 
 
 def _opts(texts):
@@ -1104,6 +1125,13 @@ def _opts(texts):
 def _opt_value(st, a, t, longs, shorts):
     """Значения опций: «--out X», «--out=X», «-o X», «-oX», «-abo X» (shorts — буквы с значением)."""
     out, k = [], 0
+
+    def tail(k, cut):
+        # значение — из вычисленного текста; из сырого слова — только если его начало и есть сама опция
+        if a[k].lit[:cut] == t[k][:cut] and a[k].mask[:cut] == "u" * cut:
+            return _tail(a[k], cut)
+        return _Word(t[k][cut:], "q" * len(t[k][cut:]))
+
     while k < len(t):
         x = t[k]
         if x is None:
@@ -1115,12 +1143,12 @@ def _opt_value(st, a, t, longs, shorts):
             continue
         hit = next((p for p in longs if x.startswith(p + "=")), None)
         if hit:
-            out.append(_tail(a[k], len(hit) + 1))
+            out.append(tail(k, len(hit) + 1))
         elif shorts and x.startswith("-") and not x.startswith("--"):
             for p, ch in enumerate(x[1:], 1):
                 if ch in shorts:
                     if p + 1 < len(x):
-                        out.append(_tail(a[k], p + 1))
+                        out.append(tail(k, p + 1))
                     elif k + 1 < len(a):
                         out.append(a[k + 1])
                         k += 1
@@ -1179,6 +1207,8 @@ def _run(words, st, stdin, piped, depth):
         if m and w0.mask[:m.end()] == "u" * m.end():
             vals = {None if _DYN in v else v for v, _ in _params(st, w0.lit[m.end():], w0.mask[m.end():], assign=True)}
             st.assign(m.group(1), vals, bool(m.group(2)))
+            if EXEC_VARS.fullmatch(m.group(1)):
+                st.out.append(UNRESOLVED)  # EDITOR=…, PAGER=…, GIT_SSH_COMMAND=… — программа запустит команду
             argv = argv[1:]
         elif b in _LEAD:
             argv = argv[1:]
@@ -1234,7 +1264,7 @@ def _dispatch(name, a, t, st, stdin, piped, depth):
             return  # стек папок: всё в нём уже среди возможных
         else:
             x = t[plain[0]]
-            if st.cdable or ((st.vars.get("CDPATH") or os.environ.get("CDPATH"))
+            if st.cdable or ((st.vars.get("CDPATH") or st.vars.get("cdpath") or os.environ.get("CDPATH"))
                              and not (x or "/").startswith(("/", "./", "../")) and x not in (".", "..")):
                 st.add_cwd({None})
             st.add_cwd({None if p == UNRESOLVED else p for p in _targets(st, a[plain[0]])})
@@ -1299,6 +1329,8 @@ def _dispatch(name, a, t, st, stdin, piped, depth):
             if m and w.mask[:m.end()] == "u" * m.end() and not nameref:
                 vals = {None if _DYN in v else v for v, _ in _params(st, w.lit[m.end():], w.mask[m.end():], assign=True)}
                 st.assign(m.group(1), vals, bool(m.group(2)))
+                if EXEC_VARS.fullmatch(m.group(1)):
+                    st.out.append(UNRESOLVED)
             elif x and _IDENT.fullmatch(x.split("=")[0]):
                 if nameref:
                     st.taint(x.split("=")[0])
@@ -1545,9 +1577,8 @@ def _dispatch(name, a, t, st, stdin, piped, depth):
                 extra.append(_tail(a[j], x.index("=") + 1))
                 j += 1
             elif x == "-c" and j + 1 < len(t):
-                cfg = (t[j + 1] or "alias").lower()
-                if cfg.startswith(("alias.", "core.worktree", "core.hookspath", "core.fsmonitor", "core.sshcommand", "include")):
-                    st.out.append(UNRESOLVED)
+                if not GIT_SAFE_CONFIG.match(t[j + 1] or ""):
+                    st.out.append(UNRESOLVED)  # core.pager, alias.*, diff.external … запускают команды
                 j += 2
             elif x is None:
                 st.out.append(UNRESOLVED)
@@ -1557,7 +1588,24 @@ def _dispatch(name, a, t, st, stdin, piped, depth):
             else:
                 sub = x.lower()
                 break
-        if sub is None or _git_read(sub, t[j + 1:]):
+        rest = t[j + 1:]
+        risky = sub in ("log", "diff", "show", "grep", "format-patch", "range-diff", "whatchanged", "shortlog", "blame",
+                        "ls-remote", "fetch", "pull", "clone", "archive", "submodule", "bundle")
+        for k, x in enumerate(rest):
+            prev = rest[k - 1] if k else None
+            if x is None:
+                # значение не вычислить: у этих подкоманд оно может оказаться опцией --output=…, -O…, --upload-pack=…
+                if risky and "--" not in rest[:k] and not (prev and prev.startswith("-") and "=" not in prev):
+                    st.out.append(UNRESOLVED)
+            elif (x.startswith(("--open-files-in-pager", "--upload-pack", "--receive-pack", "--exec=", "--exec-path",
+                                "--ext-diff", "--config-env")) or x == "--exec"
+                  or (sub == "grep" and re.fullmatch(r"-[A-Za-z]*O.*", x))
+                  or (sub in ("ls-remote", "clone") and x == "-u")):
+                st.out.append(UNRESOLVED)  # опция запускает команду
+        for w in _opt_value(st, a[j + 1:], rest, ("--output", "--output-directory"),
+                            "o" if sub in ("format-patch", "archive", "bundle") else ""):
+            _tgt(st, w)  # git log/diff --output=файл пишет файл
+        if sub is None or (sub != "fsck" and _git_read(sub, rest)):
             return
         for r in repos:
             dirs = [d for d in st.cwds] if r is None else [os.path.realpath(r)]
@@ -1720,6 +1768,8 @@ def _analyze(lex, st, depth):
 def _analyze_string(text, st, depth):
     lex = _Lexer(text)
     lex.run()
+    if lex.danger:
+        st.out.append(UNRESOLVED)
     _analyze(lex, st, depth)
 
 
@@ -1735,6 +1785,8 @@ def bash_analysis(cmd, cwd):
             raise _ParseError("нулевой байт в команде")
         lex = _Lexer(cmd)
         lex.run()
+        if lex.danger:
+            raise _ParseError("квалификатор шаблона zsh выполняет код")
         st = _State(cwd)
         loops = _nonlinear(lex)
         for _ in range(6):
@@ -1759,6 +1811,16 @@ def pantheon_cli(cmd, cwd):
     """Привилегированные подкоманды пульта pantheon в команде Bash (список строк для причины)."""
     found = []
     for name, texts in bash_analysis(cmd, cwd)[1]:
+        # файл пульта (~/.local/bin/pantheon, lib/pantheon.py), а не папка ~/pantheon
+        bases = ["pantheon" if x and os.path.basename(x.rstrip("/")).lower() in ("pantheon", "pantheon.py")
+                 and _key(os.path.realpath(os.path.expanduser(x))) != _key(PANTHEON) else "" for x in texts]
+        if name in _MOVE | _COPY and "pantheon" in bases[:-1]:
+            found.append(f"{name} pantheon (копия пульта под другим именем)")
+            continue
+        # sh ~/.local/bin/pantheon archive, python3 …/lib/pantheon.py archive — тот же пульт по пути
+        k = next((i for i, b in enumerate(bases) if b), None)
+        if name not in ("pantheon", "?") and k is not None:
+            name, texts = "pantheon", texts[k + 1:]
         if name not in ("pantheon", "?") or not texts:
             continue
         sub, act = texts[0], texts[1] if len(texts) > 1 else ""
@@ -1807,7 +1869,9 @@ def check_domain(event, tool, tool_input):
         if not roots and role == "domain-coordinator":
             roots = [pdir]
     roots = list(roots) + _norm((policy.get("agent_extra") or domains.get("agent_extra") or {}).get(role, []))
-    roots += _norm(policy.get("always") or domains.get("always") or ["~/.claude/agent-memory"])
+    # своя память, а не вся ~/.claude/agent-memory: память другой роли загружается в её контекст
+    roots += [os.path.join(r, role) if os.path.basename(r) == "agent-memory" else r
+              for r in _norm(policy.get("always") or domains.get("always") or ["~/.claude/agent-memory"]) if role]
     roots += TEMP_ROOTS
     bad = [p for p in targets if not _inside(p, roots)]
     if not bad:

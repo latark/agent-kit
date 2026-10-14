@@ -73,6 +73,12 @@ EXTRA = [
     "rm ~/pantheon/ALERTS.MD", "cd ~/pantheon && rm *.md", "rm ~/pantheon/.git/HEAD", "rm -rf ~/pantheon/.g*",
     "cd ~/pantheon; echo x | tee -a alerts.md", "cd ~/pantheon && echo x > 'alerts.md'", "cd ~ && echo x > pantheon/alerts.md",
     "cd ~/projects && cd ../pantheon && rm alerts.md", "mv ~/pantheon ~/tmp/p2", "rm -rf ~/projects/..",
+    # раунд 3: модификаторы и срезы zsh, квалификаторы с кодом, cdpath, опции git
+    "echo x > $PWD:h:h/pantheon/alerts.md", "echo x > \"$PWD:h:h\"/pantheon/alerts.md",
+    "X=$HOME/pantheon/alerts.md; rm -f $X[1,500]", "cd ~/pantheon && ls *(e:'rm -f alerts.md':) >/dev/null",
+    "cdpath=(~); cd pantheon && rm alerts.md", "git diff --no-index --output=$HOME/pantheon/alerts.md /dev/null ~/tmp/z",
+    "cd ~/tmp && git grep --no-index -O'rm -f ~/pantheon/alerts.md' line",
+    "X=--output=$HOME/pantheon/alerts.md; git diff --no-index $X /dev/null ~/tmp/z",
 ]
 
 

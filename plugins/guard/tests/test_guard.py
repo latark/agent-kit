@@ -151,6 +151,23 @@ def main():
             "tmp=$(mktemp -d); cp src/a.ts \"$tmp\"/", "git add -A && git commit -m 'x' && git push",
             "tar -xzf /tmp/a.tgz -C build", "touch \"$(pwd)/x.txt\"", "rsync -a ~/projects/x/ ./vendor/",
             "ln -s ../shared src/shared", "while read -r l; do echo \"$l\"; done < src/a.ts", "git -C ~/pantheon log -3")],
+        # раунд 3: zsh-модификаторы и квалификаторы, cdpath, опасные опции git, переменные-программы, пульт по пути
+        *[(f"обход (раунд 3): {c!r}", "deny", br, "domain-coordinator", False, B(c)) for c in (
+            "echo x > $PWD:h:h/pantheon/board.md", "echo x > \"$PWD:h:h\"/pantheon/board.md",
+            "X=$HOME/pantheon/board.md; rm $X[1,500]", "cd ~/pantheon && ls *(e:'rm alerts.md':)",
+            "ls ~/x(+myfunc)", "cdpath=(~); cd pantheon && rm alerts.md",
+            "git diff --no-index --output=$HOME/pantheon/board.md /dev/null /dev/null",
+            "git grep -O'rm ~/pantheon/alerts.md' x", "git -c core.pager='rm ~/pantheon/alerts.md' log",
+            "git ls-remote --upload-pack='rm ~/pantheon/alerts.md' .", "EDITOR='rm ~/pantheon/alerts.md' git commit",
+            "export GIT_SSH_COMMAND='rm ~/pantheon/alerts.md'; git fetch",
+            "X=--output=$HOME/pantheon/board.md; git log $X", "set -- --output=$HOME/pantheon/board.md; git log \"$1\"",
+            "sh ~/.local/bin/pantheon archive", "python3 -I ~/projects/agent-kit/plugins/pantheon/lib/pantheon.py jobs pause x",
+            "cp ~/.local/bin/pantheon /tmp/p && /tmp/p archive")],
+        *[(f"обычная команда (раунд 3): {c!r}", "allow", br, "domain-coordinator", False, B(c)) for c in (
+            "git -c color.ui=false log --oneline -5", "git diff HEAD~1 -- src", "git log --format=%h -3",
+            "cp -R ~/pantheon/directions/athena-broker /tmp/backup", "ls ~/pantheon")],
+        ("argus не пишет в память штаба", "deny", br, "argus", True, W(os.path.join(home, ".claude/agent-memory/hq/MEMORY.md"))),
+        ("argus пишет в свою память", "allow", br, "argus", True, W(os.path.join(home, ".claude/agent-memory/argus/MEMORY.md"))),
         ("hq: регистр не обходит alerts.md", "deny", ".", "hq", False, B("rm ~/PANTHEON/Alerts.md")),
         ("hq: папка, внутри которой ~/pantheon, — отказ", "deny", ".", "hq", False, B("find ~ -name '*.md' -delete")),
         ("hq: обычная правка доски можно", "allow", ".", "hq", False, B("cd ~/pantheon && sed -i '' 's/a/b/' board.md")),
