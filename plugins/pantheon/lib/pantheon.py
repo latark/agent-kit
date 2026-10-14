@@ -801,6 +801,9 @@ def domains_build(if_changed=False):
 # Личное из [private] policy.toml закрыто для чтения всем, кроме координаторов с этой привилегией.
 # Сеть — через прокси песочницы: хосты вне списка проверяет классификатор режима auto.
 # Пути в файле — настоящие абсолютные (свои у каждого Mac): ссылка, подставленная позже, их не сдвинет.
+# Хранилище pnpm не подменяется: node_modules помнит своё хранилище, и разные хранилища у координатора и ваших
+# сессий в одной папке ломают pnpm («Unexpected store location»). Общее хранилище направления — store-dir в
+# .npmrc внутри папки направления (решается при запуске координатора, SEC-19).
 # Координаторам там же — окно сжатия 200k (CTX-04).
 SANDBOX_ROOTS = ["~/projects", "~/knowledge"]   # папки направлений для песочницы — только внутри этих
 SANDBOX_DOMAINS = ["registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "files.pythonhosted.org",
@@ -865,7 +868,6 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
         "env": {
             "XDG_CACHE_HOME": os.path.join(cache, "xdg"),
             "npm_config_cache": os.path.join(cache, "npm"),
-            "npm_config_store_dir": os.path.join(cache, "pnpm-store"),
             "npm_config_devdir": os.path.join(cache, "node-gyp"),
             "COREPACK_HOME": os.path.join(cache, "corepack"),
             "UV_CACHE_DIR": os.path.join(cache, "uv"),
