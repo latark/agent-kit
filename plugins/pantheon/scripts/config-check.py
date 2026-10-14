@@ -79,6 +79,11 @@ SECRETS = [
     (re.compile(r"-----BEGIN (RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY-----"), "приватный ключ"),
 ]
 EXEC_EXT = (".sh", ".py", ".js", ".mjs", ".cjs", ".ts", ".zsh", ".bash")
+# Файлы, которые меняют саму синхронизацию; безобидные — уходят сами; всё незнакомое — в карантин (по умолчанию —
+# проверить нечем, значит спросить; находка проверки безопасности 14.10)
+SYNC_RULES = {".gitignore": "меняет, какие файлы ~/.claude уходят на GitHub (можно открыть записи сессий, а в них ключи)",
+              "sessync.conf": "меняет синхронизацию сессий — куда уходит ваша переписка"}
+HARMLESS = {"keybindings.json"}
 EXEC_FILES = ("sync.sh", "statusline.sh", "bootstrap.sh")
 
 
@@ -253,8 +258,13 @@ def check_file(path, old, new):
         flags += check_policy(old, new) if new is not None else [("policy", "policy.toml удалён")]
     elif base in EXEC_FILES or path.startswith(("hooks/", "tools/")) or base.endswith(EXEC_EXT):
         flags += check_exec(path, lines, deleted=new is None)
-    elif base.endswith(".md") or path.startswith(("skills/", "agents/", "rules/", "commands/", "output-styles/")):
+    elif base.endswith(".md") or path.startswith(("skills/", "agents/", "rules/", "commands/", "output-styles/",
+                                                  "agent-memory/")):
         flags += check_instructions(path, old, new, lines)
+    elif base in SYNC_RULES:
+        flags.append(("settings", SYNC_RULES[base]))
+    elif base not in HARMLESS:
+        flags.append(("settings", "незнакомый тип файла — проверить его содержимое нечем"))
     seen, out = set(), []
     for kind, reason in flags:
         if (kind, reason) not in seen:
@@ -275,6 +285,8 @@ FILE_ROLE = [
     ("agents/", "роль агента"),
     ("skills/", "навык — инструкция для агентов"),
     ("rules/", "правило для сессий"),
+    (".gitignore", "список того, что из ~/.claude уходит на GitHub"),
+    ("sessync.conf", "настройка синхронизации сессий"),
     ("commands/", "команда-заготовка"),
     ("CLAUDE.md", "ваши глобальные правила: грузятся в каждую сессию"),
     ("projects/", "автопамять Claude для папки: грузится в сессии там"),
@@ -301,9 +313,11 @@ def numstat(repo, staged, a=None, b=None):
 
 
 def who_changed(abs_path, days=14):
-    """Последняя правка файла сессией Claude по записям ~/.claude/projects: (сессия, папка, время, инструмент).
+    """Кто последним правил файл — по записям сессий в ~/.claude/projects.
     Смотрятся только записи, которые менялись не раньше самого файла: если после сессии файл правил кто-то
-    ещё (программа, скрипт), сессия уже не последний автор — и ответ «не сессия Claude» верный."""
+    ещё (программа, скрипт), сессия уже не последний автор — и ответ «не сессия Claude» верный.
+    Правка инструментом (Edit, Write, MultiEdit, NotebookEdit) важнее упоминания файла в команде Bash.
+    → {"sid", "title", "cwd", "ts", "tool", "sub", "strong"} или None."""
     import glob
     import time
     root = os.path.join(os.path.expanduser("~"), ".claude", "projects")
@@ -312,7 +326,7 @@ def who_changed(abs_path, days=14):
         since = max(time.time() - days * 86400, os.path.getmtime(abs_path) - 60)
     except OSError:
         since = time.time() - days * 86400  # файл удалён — ищем за весь срок
-    best = None
+    best = {True: None, False: None}
     for f in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True):
         try:
             if os.path.getmtime(f) < since:
@@ -320,8 +334,17 @@ def who_changed(abs_path, days=14):
             fh = open(f, encoding="utf-8", errors="replace")
         except OSError:
             continue
+        custom, ai, hits = "", "", []
         with fh:
             for line in fh:
+                if '"custom-title"' in line or '"ai-title"' in line:
+                    try:
+                        d = json.loads(line)
+                    except ValueError:
+                        continue
+                    custom = d.get("customTitle") or custom   # название, которое дали вы, главнее
+                    ai = d.get("aiTitle") or ai
+                    continue
                 if abs_path not in line and tilde not in line:
                     continue
                 try:
@@ -334,13 +357,20 @@ def who_changed(abs_path, days=14):
                 for c in content:
                     if not isinstance(c, dict) or c.get("type") != "tool_use":
                         continue
-                    inp = c.get("input") or {}
-                    hit = inp.get("file_path") == abs_path or inp.get("notebook_path") == abs_path or (
-                        c.get("name") == "Bash" and (abs_path in str(inp.get("command")) or tilde in str(inp.get("command"))))
-                    if hit and (best is None or str(d.get("timestamp")) > best[2]):
-                        best = (str(d.get("sessionId") or "")[:8], d.get("cwd") or "", str(d.get("timestamp") or ""),
-                                c.get("name"), d.get("agentId") or "")
-    return best
+                    inp, name = c.get("input") or {}, c.get("name")
+                    strong = name in ("Edit", "Write", "MultiEdit", "NotebookEdit") and abs_path in (
+                        inp.get("file_path"), inp.get("notebook_path"))
+                    weak = name == "Bash" and (abs_path in str(inp.get("command")) or tilde in str(inp.get("command")))
+                    if strong or weak:
+                        hits.append({"sid": str(d.get("sessionId") or "")[:8], "cwd": d.get("cwd") or "",
+                                     "ts": str(d.get("timestamp") or ""), "tool": name, "sub": bool(d.get("agentId")),
+                                     "strong": strong})
+        for h in hits:
+            h["title"] = custom or ai
+            cur = best[h["strong"]]
+            if cur is None or h["ts"] > cur["ts"]:
+                best[h["strong"]] = h
+    return best[True] or best[False]
 
 
 def local_time(ts):
@@ -364,9 +394,10 @@ def explain(repo, flags, stats):
         add, rem = stats.get(path, ("?", "?"))
         info.update(role=file_role(path), added=add, removed=rem)
         if w:
-            sid, cwd, ts, tool, agent = w
-            info["who"] = (f"сессия Claude {sid}{' (субагент)' if agent else ''} в {cwd.replace(home, '~')}, "
-                           f"{local_time(ts)}, {tool}")
+            name = f"«{w['title']}» ({w['sid']})" if w["title"] else w["sid"]
+            how = w["tool"] if w["strong"] else "команда Bash с этим файлом"
+            info["who"] = (f"сессия Claude {name}{', субагент' if w['sub'] else ''} в {w['cwd'].replace(home, '~')}, "
+                           f"{local_time(w['ts'])}, {how}")
         else:
             info["who"] = "не сессия Claude: за 14 дней ни одна сессия этот файл не правила — правку сделала программа или скрипт"
             info["who"] = ("не сессия Claude: после последней правки сессией этот файл менял кто-то другой "

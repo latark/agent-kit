@@ -219,8 +219,10 @@ def main():
     os.makedirs(br)
     subprocess.run(["git", "init", "-q", br], check=True)
     subprocess.run(["git", "-C", br, "remote", "add", "origin", "git@github.com:x/y.git"], check=True)
-    for d in ("pantheon/directions/athena-broker", "projects/zz", "ai/knowledge", ".cache/metis", ".ssh"):
+    for d in ("pantheon/directions/athena-broker", "projects/zz", "ai/knowledge", ".cache/metis", ".ssh",
+              ".claude/plugins/marketplaces/agent-kit/plugins/guard/hooks"):
         os.makedirs(os.path.join(tmp, d), exist_ok=True)
+    open(os.path.join(tmp, ".claude/plugins/marketplaces/agent-kit/plugins/guard/hooks/guard.py"), "w").write("# guard\n")
     os.symlink(os.path.join(tmp, "pantheon"), os.path.join(tmp, "projects", "ln"))
     with open(os.path.join(home, "directions.toml"), "a") as fh:
         fh.write('sandbox_write = ["~/.ssh"]\n'
@@ -270,10 +272,10 @@ def main():
           and "~/ai/knowledge/me" in sw["sandbox"]["filesystem"]["denyRead"] and "autoCompactWindow" not in sw
           and not os.path.exists(os.path.join(state, "settings", "old-direction.json")))
     hk = [h for g in sa.get("hooks", {}).get("PreToolUse", []) for h in g["hooks"]]
-    gpath = os.path.realpath(os.path.join(os.path.dirname(os.path.dirname(LIB)), "..", "guard", "hooks", "guard.py"))
-    check("строгий guard в окне роли (SEC-29): --strict, onFailure block, настоящий путь, у мастерской тоже",
+    gpath = os.path.realpath(os.path.join(tmp, ".claude/plugins/marketplaces/agent-kit/plugins/guard/hooks/guard.py"))
+    check("строгий guard в окне роли (SEC-29): --strict, onFailure block, только клон маркетплейса, у мастерской тоже",
           len(hk) == 1 and hk[0]["onFailure"] == "block" and hk[0]["command"] == f"python3 {gpath} --strict"
-          and os.path.isfile(gpath) and sw["hooks"] == sa["hooks"]
+          and "projects" not in hk[0]["command"] and sw["hooks"] == sa["hooks"]
           and sa["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Write|Edit|MultiEdit|NotebookEdit")
 
     # архив (STATE-14)

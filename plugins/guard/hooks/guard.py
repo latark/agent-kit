@@ -2153,16 +2153,33 @@ def check_pantheon(event, tool, tool_input):
 # субагенты сюда не пишут (domain пустил бы субагентов Метиды: ~/.claude — её направление). Ваши сессии без роли
 # не ограничены. Сюда же — метка .sync-held, по которой sync.sh держит неодобренные правки ~/.claude (SEC-15),
 # и .git репозитория claude-config: коммит в обход sync.sh отправил бы правку на другие Mac без «да».
+# Список расширен по проверке безопасности 14.10: всё, откуда код или инструкции запускаются сами — инструменты и
+# глобальные правила ~/.claude, ссылка тика и команды в ~/.local, задачи launchd, профили оболочки, настройки git
+# (hooksPath, алиасы с «!»), ~/.ssh (authorized_keys, ProxyCommand), ~/.claude.json (MCP-серверы запускают команды);
+# в любом репозитории — .claude/settings*.json, .mcp.json, .git/hooks и .git/config.
 PROTECTED = [os.path.realpath(os.path.join(HOME, ".claude", x)) for x in
              ("hooks", "agents", "plugins", "pantheon", "settings.json", "settings.local.json", "sync.sh",
-              "statusline.sh", "bootstrap.sh", ".sync-held", ".git")] + [os.path.realpath(os.path.join(HOME, ".zshrc"))]
+              "statusline.sh", "bootstrap.sh", ".sync-held", ".sync-incoming", ".git", "tools", "CLAUDE.md", "rules",
+              "commands", "output-styles")] + \
+            [os.path.realpath(os.path.join(HOME, x)) for x in
+             (".zshrc", ".zprofile", ".zshenv", ".zlogin", ".bashrc", ".bash_profile", ".profile", ".gitconfig",
+              ".config/git", ".ssh", ".claude.json", ".local/share/pantheon", ".local/bin", "Library/LaunchAgents")]
 SETTINGS_NAMES = {"settings.json", "settings.local.json"}
 
 
 def _settings_file(p):
-    """.claude/settings.json или settings.local.json любого проекта: ими меняют разрешения и хуки сессий там."""
+    """Настройки, которые меняют разрешения, хуки или запускают код в любом репозитории: .claude/settings*.json,
+    .mcp.json, .git/hooks/… и .git/config."""
     parent, base = os.path.split(p)
-    return _key(base) in SETTINGS_NAMES and _key(os.path.basename(parent)) == ".claude"
+    if _key(base) in SETTINGS_NAMES and _key(os.path.basename(parent)) == ".claude":
+        return True
+    if _key(base) == ".mcp.json":
+        return True
+    parts = [_key(x) for x in p.split("/")]
+    for i, x in enumerate(parts[:-1]):
+        if x == ".git" and (parts[i + 1] == "hooks" or (parts[i + 1] == "config" and i + 2 == len(parts))):
+            return True
+    return False
 
 
 def check_protect_config(event, tool, tool_input):

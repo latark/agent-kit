@@ -900,16 +900,17 @@ def _deny_forms(paths):
 
 
 # Строгий guard окна роли (SEC-29): тот же guard.py, но с --strict и onFailure "block" — сбой, таймаут, плохой вход
-# или пропавший файл защиты останавливают действие, а не пропускают. Путь — настоящий: рядом с этим плагином
-# (клон маркетплейса или рабочая копия), иначе клон маркетплейса. Ваших сессий без роли это не касается.
+# или пропавший файл защиты останавливают действие, а не пропускают. Путь — только клон маркетплейса внутри
+# ~/.claude/plugins (туда ролям писать нельзя: protect-config), а не «рядом с этим плагином»: рабочая копия
+# ~/projects/agent-kit — папка metis-pantheon, её правят субагенты, и подменённый там guard стал бы защитой окон
+# (находка проверки безопасности 14.10). Ваших сессий без роли это не касается.
 GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit"
 MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks", "guard.py")
 
 
 def guard_script():
-    for p in (os.path.join(PLUGIN, "..", "guard", "hooks", "guard.py"), MARKET_GUARD):
-        if os.path.isfile(p):
-            return os.path.realpath(p)
+    if os.path.isfile(MARKET_GUARD) and not os.path.islink(MARKET_GUARD):
+        return os.path.realpath(MARKET_GUARD)
     return MARKET_GUARD  # файла нет — окно роли не пустит ни одной записи (отказ при сбое), тревога в sandbox_build
 
 

@@ -212,6 +212,13 @@ def main():
         ("protect-config: мастерская не стирает ~/.claude", "deny", ws, "workshop", False, B("rm -rf ~/.claude")),
         ("protect-config: Метида пишет policy.toml", "allow", ak, "domain-coordinator", False, E(os.path.join(home, ".claude/pantheon/policy.toml"))),
         ("protect-config: ваша сессия правит settings.json", "allow", ".", "", False, E(os.path.join(home, ".claude/settings.json"))),
+        ("protect-config: штаб не подменяет ссылку тика", "deny", ".", "hq", False, B("ln -sfn /tmp/x ~/.local/share/pantheon/current")),
+        ("protect-config: штаб не ставит задачу launchd", "deny", ".", "hq", False, W(os.path.join(home, "Library/LaunchAgents/x.plist"))),
+        ("protect-config: координатор не пишет git-хук своего репозитория", "deny", br, "domain-coordinator", False, W(os.path.join(home, br, ".git/hooks/pre-commit"))),
+        ("protect-config: координатор не пишет .mcp.json", "deny", br, "domain-coordinator", False, W(os.path.join(home, br, ".mcp.json"))),
+        ("protect-config: субагент Метиды не правит инструмент ~/.claude/tools", "deny", ak, "hephaestus-pantheon", True, W(os.path.join(home, ".claude/tools/x.mjs"))),
+        ("protect-config: штаб не правит ~/.claude.json (MCP)", "deny", ".", "hq", False, E(os.path.join(home, ".claude.json"))),
+        ("protect-config: координатор коммитит в своём репозитории", "allow", br, "domain-coordinator", False, B("git commit -am x")),
         # прежние правила (№ 28)
         ("attribution: пометка Claude в коммите — отказ", "deny", br, "", False,
          B('git commit -m "x\n\nCo-' + 'Authored-By: Claude <noreply@' + 'anthropic.com>"')),
