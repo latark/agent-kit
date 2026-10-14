@@ -258,6 +258,10 @@ def main():
     check("песочница: папки направления — только внутри ~/projects и ~/knowledge, ссылки пропущены",
           zw[0] == real("projects/zz") and real("projects") not in zw and real("pantheon") not in zw
           and not any(x.endswith(("/.claude", "/ln")) for x in zw) and real("knowledge") in sn["sandbox"]["filesystem"]["allowWrite"])
+    dw, dr = box["filesystem"]["denyWrite"], box["filesystem"]["denyRead"]
+    check("песочница: запреты и настоящими путями — .git внутри каждой разрешённой папки, личное — оба вида",
+          real("projects/br") + "/**/.git/config" in dw and real("projects/br") + "/.git/hooks" in dw
+          and cache_a + "/**/.git/hooks" in dw and real("knowledge/me") in dr and "~/knowledge/me" in dr)
     check("песочница: личное закрыто для чтения всем, кроме координатора с привилегией; мастерская; старый файл убран",
           "~/knowledge/me" in box["filesystem"]["denyRead"] and not sn["sandbox"]["filesystem"]["denyRead"]
           and "~/knowledge/me" in sw["sandbox"]["filesystem"]["denyRead"] and "autoCompactWindow" not in sw

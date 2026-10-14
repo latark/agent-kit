@@ -845,7 +845,21 @@ def _real_dir(p, roots, strict=False, create=False):
     return None
 
 
+def _deny_forms(paths):
+    """Запрет и в виде «~/…», и настоящим путём: правила разрешений — настоящие пути, запреты должны совпасть."""
+    out = []
+    for p in paths:
+        for x in (p, os.path.realpath(os.path.expanduser(p))):
+            if x not in out:
+                out.append(x)
+    return out
+
+
 def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None):
+    allow = list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + [cache]
+    # .git/config и .git/hooks — внутри каждой разрешённой папки (её настоящим путём) и под ~ в целом
+    deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + [f"{r}{sub}" for r in allow for sub in
+                                                             ("/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks")]
     data = {
         "_comment": "Собрано `pantheon domains build` из ~/pantheon/directions.toml и policy.toml (SEC-19). Руками не править.",
         "env": {
@@ -866,9 +880,9 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "allowUnsandboxedCommands": False,
             "excludedCommands": SANDBOX_EXCLUDED + (GIT_NETWORK if ssh else []),
             "filesystem": {
-                "allowWrite": list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + [cache],
-                "denyWrite": ["~/**/.git/config", "~/**/.git/hooks"],
-                "denyRead": list(deny_read),
+                "allowWrite": allow,
+                "denyWrite": deny_write,
+                "denyRead": _deny_forms(deny_read),
             },
             "network": {"allowedDomains": SANDBOX_DOMAINS},
         },

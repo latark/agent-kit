@@ -1,6 +1,6 @@
 {
   "name": "pantheon",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Механика Пантеона: планировщик pantheon-tick, команда pantheon, копия ~/pantheon-view для Obsidian, коммит ~/pantheon, сверка карты решений.",
   "author": { "name": "latark" }
 }
