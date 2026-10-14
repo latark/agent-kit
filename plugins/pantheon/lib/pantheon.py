@@ -1359,9 +1359,14 @@ def start(rest):
         # мало, сессия живёт дальше, и новый запуск становится «zeus-<два слова>» (15.10 так появилось два Зевса)
         live = [a for a in agents_all() or [] if a.get("cwd") == PANTHEON
                 and (a.get("name") or "").startswith("zeus") and a.get("state") != "done"]
+        tabs = [a for a in live if not a.get("id")]  # открытая вкладка: остановить её отсюда нельзя
+        if tabs:
+            print(f"Зевс открыт во вкладке терминала (pid {tabs[0].get('pid')}) — перейдите в неё или закройте её "
+                  "и запустите снова", file=sys.stderr)
+            return 1
         if live and not restart:
-            print(f"Зевс уже запущен ({', '.join(a.get('name') + ' ' + a.get('id') for a in live)}): открыть — "
-                  f"claude attach {live[0].get('id')}; начать заново — pantheon start zeus --restart", file=sys.stderr)
+            print(f"Зевс уже запущен ({', '.join(str(a.get('name')) + ' ' + a['id'] for a in live)}): открыть — "
+                  f"claude attach {live[0]['id']}; начать заново — pantheon start zeus --restart", file=sys.stderr)
             return 1
         for a in live:
             subprocess.run([claude_bin(), "stop", a.get("id")], capture_output=True, text=True, timeout=60)
