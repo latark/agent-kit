@@ -382,7 +382,8 @@ def ready(pantheon, t, direction=None, owner=None):
 
 CARD_ORDER = ["Статус", "Проект", "Внимание", "Приоритет", "Срок", "Кто", "Дальше", "Ждёт", "Заметка агенту", "id"]
 NOTE_KEY = "Заметка агенту"
-QUIET = 120  # с: новую карточку, заметку и ответ берём, когда карточку не трогали столько
+QUIET = 30  # с: новую карточку берём, когда у неё есть название и её столько не меняли (ответ и заметка — сразу)
+UNTITLED = ("Без названия", "Untitled")
 PROJECT_MARK = {"Пантеон": "⬛", "BrokerAssistant": "🟦", "alexbroker": "🟧", "MorphStream": "🟪", "expert-corpus": "🟫",
                 "legal-watch": "🟫", "content-machine": "🟩", "second-brain": "🟨", "входящие": "📥"}
 STATUS_MARK = {"Входящие": "📥", HUMAN_WAIT: "🔴", "Очередь": "⚪", "В работе": "🟡", "Ждёт": "⏸",
@@ -587,8 +588,8 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
 
     # 2. новые карточки владельца (без id) → задача во входящих, разбирает Зевс
     for p, name, head, body in fresh:
-        if t - mtime[p] < QUIET:
-            continue  # владелец ещё пишет карточку
+        if t - mtime[p] < QUIET or (name.startswith(UNTITLED) and t - mtime[p] < 600):
+            continue  # владелец ещё пишет карточку; без названия ждём, пока назовёт (или 10 минут)
         text = (head.get(NOTE_KEY) or "").strip() if isinstance(head.get(NOTE_KEY), str) else ""
         title = name if not name.startswith(("Без названия", "Untitled")) else (text or body.strip().split("\n")[0] or name)
         try:
@@ -617,12 +618,9 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             continue  # карточку никто не трогал
         src_moved = digest(src_path) != st.get("src_hash")
         want = head.get("Статус")
-        quiet = t - mtime[p] >= QUIET
+        # заметку Obsidian сохраняет по Enter или уходу из поля, галочку — щелчком: берём сразу
         note = head.get(NOTE_KEY) if isinstance(head.get(NOTE_KEY), str) and head.get(NOTE_KEY).strip() else None
         answer = checked_option(body) if src_head.get("options") else None
-        if not quiet and (note or answer):
-            busy.add(cid)  # заметку и ответ возьмём, когда владелец закончит; карточку пока не перерисовываем
-            note = answer = None
         if want != st.get("synced"):
             if src_moved:
                 st["conflict_at"] = t
