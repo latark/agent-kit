@@ -9,14 +9,17 @@
 # удаляем, остальное переносим во входящие внутри зашифрованного ~/ai/pantheon (inbox-view/ — разбирает штаб).
 # В незашифрованное (например ~/ai/knowledge) отсюда ничего не уходит: в ~/ai/pantheon имена и дела клиентов.
 SRC="${1:-$HOME/ai/pantheon}"; DST="${2:-$HOME/ai/pantheon-view}"; INBOX="${3:-$SRC/inbox-view}"
+# Доска владельца — единственная записываемая папка копии: её карточки рисует `pantheon board`, двигает владелец;
+# копия её не трогает (ни перенос «лишнего», ни rsync --delete, ни снятие прав).
+BOARD="Доска"
 mkdir -p "$DST"
 stamp=$(date +%Y%m%d-%H%M%S)
 
 # открыть папки копии на время обновления (rsync и перенос лишнего пишут в них)
-find "$DST" -mindepth 1 -path "$DST/.obsidian" -prune -o -type d ! -perm -u+w -print0 | xargs -0 chmod u+w 2>/dev/null
+find "$DST" -mindepth 1 \( -path "$DST/.obsidian" -o -path "$DST/$BOARD" \) -prune -o -type d ! -perm -u+w -print0 | xargs -0 chmod u+w 2>/dev/null
 
 src_hashes=""
-find "$DST" -path "$DST/.obsidian" -prune -o -type f -print | while IFS= read -r f; do
+find "$DST" \( -path "$DST/.obsidian" -o -path "$DST/$BOARD" \) -prune -o -type f -print | while IFS= read -r f; do
   rel="${f#$DST/}"
   [[ -e "$SRC/$rel" ]] && continue          # файл из оригинала — его обновит rsync
   [[ "${rel:t}" == .* ]] && continue         # .DS_Store и прочие служебные — удалит rsync
@@ -32,9 +35,9 @@ find "$DST" -path "$DST/.obsidian" -prune -o -type f -print | while IFS= read -r
   fi
 done
 # -rlt без -p: права копии не тянем из оригинала, их снимают строки ниже
-/usr/bin/rsync -rlt --delete --exclude .obsidian --exclude .git "$SRC/" "$DST/"
+/usr/bin/rsync -rlt --delete --exclude .obsidian --exclude .git --exclude "/$BOARD" "$SRC/" "$DST/"
 # только новые и обновлённые файлы (openrsync всё равно касается времени каждого файла — Obsidian это
 # не замечает, проверено 14.10: событие modify приходит только на изменённый файл)
-find "$DST" -path "$DST/.obsidian" -prune -o -type f -perm -u+w -exec chmod a-w {} +
-find "$DST" -mindepth 1 -path "$DST/.obsidian" -prune -o -type d -perm -u+w -print0 | xargs -0 chmod a-w 2>/dev/null
+find "$DST" \( -path "$DST/.obsidian" -o -path "$DST/$BOARD" \) -prune -o -type f -perm -u+w -exec chmod a-w {} +
+find "$DST" -mindepth 1 \( -path "$DST/.obsidian" -o -path "$DST/$BOARD" \) -prune -o -type d -perm -u+w -print0 | xargs -0 chmod a-w 2>/dev/null
 exit 0

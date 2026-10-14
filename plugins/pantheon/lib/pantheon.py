@@ -18,6 +18,12 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon domains build                ~/ai/pantheon/directions.toml → ~/.local/state/pantheon/domains.json
                                         и настройки окон ролей с песочницей …/settings/<направление>.json
   pantheon view [--quiet]               обновить копию ~/ai/pantheon-view для Obsidian
+  pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
+  pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
+  pantheon task new --direction D --title T [--status S --priority N --due ГГГГ-ММ-ДД --next X --owner O
+                    --project P --waiting-on W --question Q --option A --option B --depends-on ID]
+  pantheon task set ID поле=значение … [--note "строка в журнал"]   pantheon task show ID
+  pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
   pantheon commit                       commit → pull без rebase → push ~/ai/pantheon
   pantheon install | uninstall          поставить или снять задачу launchd com.latark.pantheon-tick
   pantheon tick                         один проход планировщика (его вызывает launchd)
@@ -211,7 +217,7 @@ def clear_once(key):
 
 JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
-TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout"}
+TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "check"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 
 
@@ -1003,6 +1009,141 @@ def uninstall():
     return 0
 
 
+_TASKS = None
+
+
+def tasks_mod():
+    """lib/tasks.py — схема задач и доска владельца (python3 -I не кладёт папку скрипта в путь импорта)."""
+    global _TASKS
+    if _TASKS is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_tasks", os.path.join(LIB, "tasks.py"))
+        _TASKS = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_TASKS)
+    return _TASKS
+
+
+BOARD = os.path.join(VIEW, "Доска")
+
+
+def board():
+    """Доска владельца: ходы → задачи и журнал владельца, карточки ← задачи. Только на этом Mac, под блокировкой."""
+    T = tasks_mod()
+    sched = load_schedule()
+    primary = not sched.get("primary_host") or sched.get("primary_host") == host()
+    with lock("board", block=False) as got:
+        if not got:
+            return 0
+        lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
+                             alert=lambda k, v, text, who="board", note=None: alert_once(k, v, text, who, note),
+                             notify=notify, primary=primary)
+    for ln in lines:
+        print(ln)
+    return 0
+
+
+def check(paths=None, quiet=False):
+    T = tasks_mod()
+    files = paths or list(T.task_files(PANTHEON))
+    bad, noheader, n = [], 0, 0
+    for f in files:
+        kind, errs, warns = T.check_file(f)
+        n += 1
+        if kind == "noheader":
+            noheader += 1
+        elif kind in ("broken", "error"):
+            bad.append((f, errs, warns))
+        elif warns and not quiet:
+            print(f"предупреждение · {os.path.relpath(f, PANTHEON)}: {'; '.join(warns)}")
+    for f, errs, _ in bad:
+        print(f"ОШИБКА · {os.path.relpath(f, PANTHEON) if f.startswith(PANTHEON) else f}: {'; '.join(errs)}")
+    if not paths and os.path.isdir(BOARD):
+        text = "# Проблемы задач\n\nФайлы, которые выпали из доски: шапка не по схеме (schema.md).\n\n" + (
+            "\n".join(f"- `{os.path.relpath(f, PANTHEON)}` — {'; '.join(e)}" for f, e, _ in bad) or "Нет — всё в порядке.") + "\n"
+        pp = os.path.join(BOARD, "Проблемы.md")
+        old = open(pp, encoding="utf-8").read() if os.path.exists(pp) else ""
+        if old != text:
+            with open(pp, "w", encoding="utf-8") as fh:
+                fh.write(text)
+    if not quiet or bad:
+        print(f"задач: {n}, с ошибками: {len(bad)}, без шапки: {noheader}")
+    if quiet:  # тик: одна тревога на набор проблем, а не сбой задачи каждые 5 минут
+        if bad:
+            alert_once("check-problems", ",".join(sorted(f for f, _, _ in bad)),
+                       f"задачи с битой шапкой: {len(bad)} — список в Доска/Проблемы.md", "check")
+        else:
+            clear_once("check-problems")
+        return 0
+    return 1 if bad else 0
+
+
+def task_cmd(rest):
+    T = tasks_mod()
+    if not rest:
+        print("pantheon task new|set|show|ready|claim — справка: pantheon help", file=sys.stderr)
+        return 2
+    sub, args = rest[0], rest[1:]
+
+    def opt(name, many=False):
+        vals = [args[i + 1] for i, a in enumerate(args[:-1]) if a == name]
+        return vals if many else (vals[-1] if vals else None)
+
+    try:
+        if sub == "new":
+            fields = {"status": opt("--status"), "priority": int(opt("--priority")) if opt("--priority") else None,
+                      "due": opt("--due"), "next": opt("--next"), "owner": opt("--owner"),
+                      "waiting_on": opt("--waiting-on"), "question": opt("--question"),
+                      "options": opt("--option", True) or None, "depends_on": opt("--depends-on", True) or None}
+            if not opt("--direction") or not opt("--title"):
+                print("pantheon task new: нужны --direction и --title", file=sys.stderr)
+                return 2
+            tid, p = T.task_new(PANTHEON, now(), opt("--direction"), opt("--title"), project=opt("--project"), **fields)
+            print(f"{tid} {os.path.relpath(p, PANTHEON)}")
+        elif sub == "set" and args:
+            tid, changes, note, i = args[0], {}, None, 1
+            while i < len(args):
+                if args[i] == "--note" and i + 1 < len(args):
+                    note, i = args[i + 1], i + 2
+                    continue
+                k, eq, v = args[i].partition("=")
+                if not eq:
+                    print(f"pantheon task set: «{args[i]}» — нужно поле=значение", file=sys.stderr)
+                    return 2
+                kind = T.FIELDS.get(k, ("str",))[0]
+                changes[k] = None if v in ("", "null") else int(v) if kind == "int" else \
+                    [x.strip() for x in v.split(",") if x.strip()] if kind == "list" else v
+                i += 1
+            p, head = T.task_set(PANTHEON, now(), tid, changes, note=note)
+            print(f"{tid}: {head.get('status')} · {os.path.relpath(p, PANTHEON)}")
+        elif sub == "show" and args:
+            tasks = T.load_tasks(PANTHEON)
+            if args[0] not in tasks:
+                print(f"нет задачи {args[0]}", file=sys.stderr)
+                return 1
+            print(open(tasks[args[0]][0], encoding="utf-8").read())
+        elif sub == "ready":
+            for tid, h in T.ready(PANTHEON, now(), opt("--direction"), opt("--owner")):
+                print(f"{tid}\t{T.PRIORITY.get(h.get('priority', 2), '')}\t{h.get('due') or '—'}\t{h.get('title')}")
+        elif sub == "claim" and args and opt("--by"):
+            until = T.now_iso(now() + 3600 * float(opt("--hours") or 1))
+            tasks = T.load_tasks(PANTHEON)
+            h = tasks.get(args[0], (None, {}, None))[1]
+            if h.get("claimed_by") not in (None, opt("--by")) and (h.get("claimed_until") or "") > T.now_iso(now()):
+                print(f"{args[0]} уже взята: {h['claimed_by']} до {h['claimed_until']}", file=sys.stderr)
+                return 1
+            T.task_set(PANTHEON, now(), args[0], {"claimed_by": opt("--by"), "claimed_until": until,
+                                                  "status": "doing" if h.get("status") == "todo" else h.get("status")},
+                       note=f"взял {opt('--by')} до {until[11:16]}")
+            print(f"{args[0]}: взята {opt('--by')} до {until}")
+        else:
+            print(f"pantheon task: не понял «{' '.join(rest)}»", file=sys.stderr)
+            return 2
+    except ValueError as e:
+        print(f"pantheon task: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(__doc__)
@@ -1043,6 +1184,12 @@ def main(argv):
         return view(quiet="--quiet" in rest)
     if cmd == "commit":
         return commit()
+    if cmd == "board":
+        return board()
+    if cmd == "check":
+        return check([a for a in rest if not a.startswith("-")] or None, quiet="--quiet" in rest)
+    if cmd == "task":
+        return task_cmd(rest)
     if cmd == "install":
         return install()
     if cmd == "uninstall":
