@@ -16,6 +16,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon alert "<строка>" [--from кто]   дописать строку в ~/pantheon/alerts.md
   pantheon archive                      «Сделано» доски старше 7 дней и тревоги старше 30 — в archive/
   pantheon domains build                ~/pantheon/directions.toml → ~/.local/state/pantheon/domains.json
+                                        и настройки окон ролей с песочницей …/settings/<направление>.json
   pantheon view [--quiet]               обновить копию ~/pantheon-view для Obsidian
   pantheon commit                       commit → pull без rebase → push ~/pantheon
   pantheon install | uninstall          поставить или снять задачу launchd com.latark.pantheon-tick
@@ -783,9 +784,92 @@ def domains_build(if_changed=False):
     write_json(path("domains.json"), {
         "_comment": "Собрано `pantheon domains build` из ~/pantheon/directions.toml. Руками не править.",
         "built": stamp(), "built_ts": now(), "domains": domains})
+    extra = {d.get("name"): d.get("sandbox_write") or [] for d in reg.get("direction") or []}
+    built = sandbox_build(domains, extra)
     if not if_changed:
-        print(f"domains.json: {len(domains)} направлений → {path('domains.json').replace(HOME, '~')}")
+        print(f"domains.json: {len(domains)} направлений → {path('domains.json').replace(HOME, '~')}; "
+              f"настройки окон ролей: {', '.join(built)} → {path('settings').replace(HOME, '~')}/")
     return 0
+
+
+# Песочница окон ролей (SEC-19): файл для `claude … --settings <файл>` у каждого направления и у мастерской.
+# Строгий вид: без отката мимо песочницы, без неё сессия не стартует. Писать можно в папку запуска, папки
+# направления, своё ~/pantheon/directions/<имя>/, кэши инструментов и временную папку. Чтение открыто, кроме
+# того, что закрывают deny-правила настроек. .git/config и .git/hooks закрыты для записи: git по сети у
+# направлений с SSH-remote и gh идут мимо песочницы и прочли бы их. Сеть — через прокси песочницы: хосты вне
+# списка проверяет классификатор режима auto. Координаторам там же — окно сжатия 200k (CTX-04).
+SANDBOX_CACHES = ["~/.npm", "~/Library/pnpm", "~/Library/Caches/pnpm", "~/Library/Caches/pip", "~/.cache/uv",
+                  "~/.cache/node", "~/.cache/huggingface", "~/Library/Caches/ms-playwright",
+                  "~/Library/Caches/node-gyp", "~/Library/Caches/typescript",
+                  "~/Library/Application Support/turborepo", "~/Library/Preferences/nextjs-nodejs"]
+SANDBOX_DOMAINS = ["registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "files.pythonhosted.org",
+                   "github.com", "api.github.com", "codeload.github.com", "objects.githubusercontent.com",
+                   "raw.githubusercontent.com"]
+# Мимо песочницы: gh (в ней не работает — TLS Go на macOS) — только эти подкоманды; дописать тревогу
+SANDBOX_EXCLUDED = ["gh pr *", "gh issue *", "gh run *", "gh repo view *", "gh api *", "gh auth status",
+                    "pantheon alert *"]
+# git по SSH в песочнице macOS не работает: у направлений с таким remote сетевые команды git — мимо неё
+GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
+COORDINATOR_COMPACT = 200000
+
+
+def ssh_remote(folder):
+    """Есть ли у репозитория в папке (или в её подпапках первого уровня) remote по SSH."""
+    root = os.path.expanduser(folder)
+    repos = [root] + ([os.path.join(root, x) for x in sorted(os.listdir(root))] if os.path.isdir(root) else [])
+    for r in repos:
+        if not os.path.exists(os.path.join(r, ".git")):
+            continue
+        out = subprocess.run(["git", "-C", r, "remote", "-v"], capture_output=True, text=True).stdout
+        if re.search(r"\s(ssh://|[\w.-]+@[\w.-]+:)", out):
+            return True
+    return False
+
+
+def role_settings(folders, own_dir, extra_write, ssh, compact=None):
+    excluded = SANDBOX_EXCLUDED + (GIT_NETWORK if ssh else [])
+    data = {
+        "_comment": "Собрано `pantheon domains build` из ~/pantheon/directions.toml (SEC-19). Руками не править.",
+        "sandbox": {
+            "enabled": True,
+            "failIfUnavailable": True,
+            "allowUnsandboxedCommands": False,
+            "excludedCommands": excluded,
+            "filesystem": {
+                "allowWrite": list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + SANDBOX_CACHES,
+                "denyWrite": ["~/**/.git/config", "~/**/.git/hooks"],
+            },
+            "network": {"allowedDomains": SANDBOX_DOMAINS},
+        },
+    }
+    if compact:
+        data["autoCompactWindow"] = compact
+    return data
+
+
+def sandbox_build(domains, extra):
+    """domains.json → ~/.local/state/pantheon/settings/<направление>.json и workshop.json; лишние файлы убираются."""
+    out_dir = path("settings")
+    os.makedirs(out_dir, exist_ok=True)
+    built = []
+    for name, folders in domains.items():
+        bad = [p for p in extra.get(name, []) if not isinstance(p, str) or not p.startswith("~/")]
+        if bad:
+            alert_once(f"sandbox-{name}", "1", f"directions.toml: sandbox_write у {name} — только пути от ~/; "
+                       f"пропущено: {bad}", "pantheon")
+        write = [p for p in extra.get(name, []) if p not in bad]
+        own = f"~/pantheon/directions/{name}"
+        write_json(os.path.join(out_dir, name + ".json"),
+                   role_settings(folders, own, write, any(ssh_remote(f) for f in folders), COORDINATOR_COMPACT))
+        built.append(name)
+    # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски
+    write_json(os.path.join(out_dir, "workshop.json"),
+               role_settings(["~/projects/workshop"], "~/pantheon/workshop", [], False))
+    built.append("workshop")
+    for f in os.listdir(out_dir):
+        if f.endswith(".json") and f[:-5] not in built:
+            os.remove(os.path.join(out_dir, f))
+    return built
 
 
 # --- установка ----------------------------------------------------------------------

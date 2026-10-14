@@ -214,6 +214,33 @@ def main():
     check("реестр: папка Метиды у athena пропущена, у Метиды осталась",
           dj["athena-broker"] == ["~/projects/br"] and dj["metis-pantheon"] == ["~/projects/agent-kit"])
 
+    # песочница окон ролей (SEC-19): строгий вид, папки направления, SSH-remote → сетевой git мимо песочницы
+    br = os.path.join(tmp, "projects", "br", "app")
+    os.makedirs(br)
+    subprocess.run(["git", "init", "-q", br], check=True)
+    subprocess.run(["git", "-C", br, "remote", "add", "origin", "git@github.com:x/y.git"], check=True)
+    open(os.path.join(home, "directions.toml"), "a").write('sandbox_write = ["~/.cache/metis", "/etc"]\n')
+    os.makedirs(os.path.join(state, "settings"), exist_ok=True)
+    open(os.path.join(state, "settings", "old-direction.json"), "w").write("{}")
+    subprocess.run([sys.executable, "-I", LIB, "domains", "build"], env=env, capture_output=True)
+    sa = json.load(open(os.path.join(state, "settings", "athena-broker.json")))
+    sm = json.load(open(os.path.join(state, "settings", "metis-pantheon.json")))
+    sw = json.load(open(os.path.join(state, "settings", "workshop.json")))
+    box = sa["sandbox"]
+    check("песочница: строгий вид, папки направления и своё directions/<имя>/, окно сжатия координатора",
+          box["enabled"] and box["failIfUnavailable"] and box["allowUnsandboxedCommands"] is False
+          and "~/projects/br" in box["filesystem"]["allowWrite"]
+          and "~/pantheon/directions/athena-broker" in box["filesystem"]["allowWrite"]
+          and "~/projects/agent-kit" not in box["filesystem"]["allowWrite"]
+          and "~/**/.git/config" in box["filesystem"]["denyWrite"] and sa["autoCompactWindow"] == 200000)
+    check("песочница: SSH-remote → git push/fetch/pull мимо песочницы только у этого направления",
+          "git push *" in box["excludedCommands"] and "git push *" not in sm["sandbox"]["excludedCommands"])
+    check("песочница: sandbox_write — только пути от ~/; мастерская; старый файл убран",
+          "~/.cache/metis" in sm["sandbox"]["filesystem"]["allowWrite"]
+          and "/etc" not in sm["sandbox"]["filesystem"]["allowWrite"]
+          and "~/projects/workshop" in sw["sandbox"]["filesystem"]["allowWrite"] and "autoCompactWindow" not in sw
+          and not os.path.exists(os.path.join(state, "settings", "old-direction.json")))
+
     # архив (STATE-14)
     tmp = tempfile.mkdtemp(prefix="tick-test-")
     home, state = make(tmp, "")
