@@ -116,6 +116,7 @@ def main():
           r.returncode == 0 and len(c) == 1 and c[0]["argv"][:6] == ["--bg", "--agent", "domain-coordinator", "--name",
                                                                      "athena-broker", "--settings"]
           and c[0]["argv"][6] == run_file and c[0]["argv"][7].startswith("/goal [Пантеон: поручение от zeus] закрой эпик Цель достигнута, когда")
+          and "критерий «готово» этого поручения" in c[0]["argv"][7] and "чек-листа эпика" not in c[0]["argv"][7]
           and c[0]["cwd"] == os.path.join(tmp, "projects", "br"))
     check("start: окно запуска = окно направления + PANTHEON_ORIGIN и PANTHEON_SESSION; песочница на месте",
           rs.get("env", {}).get("PANTHEON_ORIGIN") == "zeus" and rs["env"].get("PANTHEON_SESSION") == "athena-broker"
@@ -132,6 +133,11 @@ def main():
     c = calls()
     check("start: прошлый эпик «done» — его сессия останавливается, новая запускается с тем же именем",
           r.returncode == 0 and c[-2]["argv"] == ["stop", "a1"] and c[-1]["argv"][4] == "athena-broker")
+    open(agents_file, "w").write("[]")
+    r = run("start", "athena-broker")
+    c = calls()
+    check("start: без поручения — продолжать эпик, цель по чек-листу эпика в STATUS.md",
+          r.returncode == 0 and "STATUS.md" in c[-1]["argv"][7] and "чек-листа эпика" in c[-1]["argv"][7])
     open(log, "w").close()
     r = run("start", "hermes-alex")
     check("start: направление без папки на этом Mac — отказ", r.returncode == 2 and "нет папки" in r.stderr)
