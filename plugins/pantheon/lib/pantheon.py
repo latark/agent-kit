@@ -852,6 +852,10 @@ SANDBOX_EXCLUDED = ["gh pr *", "gh issue *", "gh run *", "gh repo view *", "gh a
 # git по SSH в песочнице macOS не работает: у направлений с таким remote сетевые команды git — мимо неё
 GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
 COORDINATOR_COMPACT = 200000
+# terminal-notifier по щелчку открывает ссылку или выполняет команду — от имени владельца, вне песочницы. Ролям его
+# не прочитать, а значит и не запустить: уведомления Пантеона шлёт только тик (поддельное «от Пантеона» не пройдёт).
+NOTIFIER_PATHS = ["/opt/homebrew/Cellar/terminal-notifier", "/opt/homebrew/opt/terminal-notifier",
+                  "/usr/local/Cellar/terminal-notifier", "/usr/local/opt/terminal-notifier"]
 
 
 def ssh_remote(folder):
@@ -921,7 +925,7 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "filesystem": {
                 "allowWrite": allow,
                 "denyWrite": deny_write,
-                "denyRead": _deny_forms(deny_read),
+                "denyRead": _deny_forms(deny_read) + NOTIFIER_PATHS,
             },
             "network": {"allowedDomains": SANDBOX_DOMAINS},
         },

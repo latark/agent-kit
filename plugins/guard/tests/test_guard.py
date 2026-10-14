@@ -125,6 +125,9 @@ def main():
         ("субагент координатора: чужая задача — отказ", "deny", br, "hephaestus-broker", True, B("pantheon task set metis-0001 next=x")),
         ("координатор: task ready и show — можно", "allow", br, "domain-coordinator", False, B("pantheon task ready; pantheon task show metis-0001")),
         ("hq: любая задача — можно", "allow", ".", "hq", False, B("pantheon task set athena-0001 status=todo")),
+        ("координатор: terminal-notifier — отказ", "deny", br, "domain-coordinator", False,
+         B('terminal-notifier -title "Пантеон" -message "x"')),
+        ("субагент: terminal-notifier по пути — отказ", "deny", br, "argus", True, B("/opt/homebrew/bin/terminal-notifier -message x")),
         ("ваша сессия: pantheon uninstall можно", "allow", ".", "", False, B("pantheon uninstall")),
         # роли отдельной сессией (№ 7)
         ("clio сессией: запись в alexbroker — отказ", "deny", ".", "clio", False, W(os.path.join(home, alex, "x.md"))),

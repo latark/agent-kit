@@ -2048,6 +2048,11 @@ def check_pantheon(event, tool, tool_input):
         if cli:
             return (f"Правило pantheon-acl: «{cli[0]}» — команда пульта, её запускают только штаб и ваши сессии. "
                     "Архив, коммит и пауза задач — через Зевса; дописать тревогу — `pantheon alert`.")
+        names = {n for n, _ in bash_analysis(tool_input.get("command") or "", os.path.realpath(event.get("cwd") or os.getcwd()))[1]}
+        if "terminal-notifier" in names or "?" in names and "terminal-notifier" in (tool_input.get("command") or ""):
+            return ("Правило pantheon-acl: terminal-notifier ролям недоступен — по щелчку он выполняет команду от имени "
+                    "владельца. Уведомления Пантеона шлёт тик; нужно сообщить владельцу — `pantheon alert` или вопрос "
+                    "на доске (`pantheon task new … --waiting-on human --question …`).")
         dirs = task_targets(tool_input.get("command") or "", os.path.realpath(event.get("cwd") or os.getcwd()))
         if dirs:
             own, _ = direction_of(load_domains(), pdir)

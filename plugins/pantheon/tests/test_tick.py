@@ -262,8 +262,11 @@ def main():
     check("песочница: запреты и настоящими путями — .git внутри каждой разрешённой папки, личное — оба вида",
           real("projects/br") + "/**/.git/config" in dw and real("projects/br") + "/.git/hooks" in dw
           and cache_a + "/**/.git/hooks" in dw and real("ai/knowledge/me") in dr and "~/ai/knowledge/me" in dr)
+    check("песочница: terminal-notifier ролям не прочитать и не запустить",
+          "/opt/homebrew/Cellar/terminal-notifier" in box["filesystem"]["denyRead"]
+          and "/opt/homebrew/Cellar/terminal-notifier" in sw["sandbox"]["filesystem"]["denyRead"])
     check("песочница: личное закрыто для чтения всем, кроме координатора с привилегией; мастерская; старый файл убран",
-          "~/ai/knowledge/me" in box["filesystem"]["denyRead"] and not sn["sandbox"]["filesystem"]["denyRead"]
+          "~/ai/knowledge/me" in box["filesystem"]["denyRead"] and not any("knowledge" in x for x in sn["sandbox"]["filesystem"]["denyRead"])
           and "~/ai/knowledge/me" in sw["sandbox"]["filesystem"]["denyRead"] and "autoCompactWindow" not in sw
           and not os.path.exists(os.path.join(state, "settings", "old-direction.json")))
 
