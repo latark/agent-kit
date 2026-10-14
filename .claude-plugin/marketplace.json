@@ -13,7 +13,7 @@
     {
       "name": "pantheon",
       "source": "./plugins/pantheon",
-      "description": "Механика Пантеона: планировщик pantheon-tick, команда pantheon, копия для Obsidian, коммит ~/ai/pantheon."
+      "description": "Механика Пантеона: планировщик pantheon-tick, команда pantheon, копия для Obsidian, коммит ~/ai/pantheon, хуки контекста и журнал ваших слов."
     },
     {
       "name": "project-tools",

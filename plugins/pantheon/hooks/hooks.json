@@ -8,6 +8,33 @@
           { "type": "command", "if": "Edit(~/ai/pantheon/**)", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" view --quiet", "async": true, "timeout": 60 }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" owner-log", "async": true }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" stop", "timeout": 15 }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" start", "timeout": 15 }
+        ]
+      },
+      {
+        "matcher": "clear",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" rewake", "asyncRewake": true, "timeout": 60 }
+        ]
+      }
     ]
   }
 }
