@@ -1147,6 +1147,25 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
     return data
 
 
+def pnpm_store_check(name, folders, store):
+    """node_modules на этом Mac собраны с другим хранилищем (store-dir в .npmrc не в git — на другой Mac не приезжает):
+    pnpm в окне спросит, сносить ли node_modules, и без терминала молча ничего не поставит — тревога с командой."""
+    for f in folders:
+        for d in [f] + sorted(os.path.join(f, x) for x in os.listdir(f) if not x.startswith(".")
+                              and os.path.isdir(os.path.join(f, x))):
+            try:
+                text = open(os.path.join(d, "node_modules", ".modules.yaml")).read()
+            except OSError:
+                continue
+            m = re.search(r"^storeDir:\s*(\S+)", text, re.M)
+            got = os.path.realpath(m.group(1)) if m else ""
+            if got and got != store and os.path.dirname(got) != store:
+                alert_once(f"pnpm-store-{name}-{d}", got, f"{name}: {d.replace(HOME, '~')}/node_modules собраны с "
+                           f"хранилищем {got.replace(HOME, '~')}, а у направления {store.replace(HOME, '~')} — pnpm в окне "
+                           f"ничего не поставит. В {d.replace(HOME, '~')}: .npmrc со строкой store-dir={store} (в "
+                           ".git/info/exclude), затем CI=true pnpm install --frozen-lockfile", "pantheon")
+
+
 def sandbox_build(domains, policy_path, stores=None):
     """domains.json и policy.toml → ~/.local/state/pantheon/settings/<направление>.json и workshop.json."""
     try:
@@ -1182,6 +1201,7 @@ def sandbox_build(domains, policy_path, stores=None):
             st = os.path.realpath(os.path.expanduser(store))
             if any(st.startswith(r.rstrip("/") + "/") for r in ok):
                 data["env"]["npm_config_store_dir"] = st
+                pnpm_store_check(name, ok, st)
             else:
                 alert_once(f"pnpm-store-{name}", store, f"directions.toml: pnpm_store {store} направления {name} — вне "
                            "его папок, окно его не получит", "pantheon")

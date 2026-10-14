@@ -71,7 +71,15 @@ def main():
     open(os.path.join(agents_dir, "apollo-alex.md"), "w").write("---\nname: apollo-alex\n---\nсвоя роль\n")
     open(os.path.join(agents_dir, "hephaestus-old.md"), "w").write(
         "---\nname: hephaestus-old\n---\n<!-- собрано pantheon roles build из hephaestus.tmpl — руками не править -->\n")
+    br = os.path.join(tmp, "projects", "br")
+    for sub, store in (("app", "/elsewhere/pnpm/store/v3"), ("ok", os.path.join(br, ".pnpm-store", "v3"))):
+        os.makedirs(os.path.join(br, sub, "node_modules"))
+        open(os.path.join(br, sub, "node_modules", ".modules.yaml"), "w").write(f"layoutVersion: 5\nstoreDir: {store}\n")
     r = run("domains", "build")
+    alerts = open(os.path.join(home, "alerts.md")).read() if os.path.exists(os.path.join(home, "alerts.md")) else ""
+    check("domains build: node_modules с чужим хранилищем — тревога с командой; со своим — молчит",
+          "br/app/node_modules собраны с хранилищем /elsewhere/pnpm/store/v3" in alerts and "CI=true pnpm install" in alerts
+          and "br/ok/node_modules" not in alerts)
     win = lambda n: json.load(open(os.path.join(state, "settings", n + ".json")))
     check("domains build: pnpm_store внутри папок направления — npm_config_store_dir окна; вне папок — нет",
           win("athena-broker")["env"].get("npm_config_store_dir") == os.path.realpath(os.path.join(tmp, "projects", "br"))
