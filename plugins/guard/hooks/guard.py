@@ -2389,7 +2389,7 @@ def _local_url(url):
         socket.setdefaulttimeout(2)
         infos = socket.getaddrinfo(host, None)
     except (OSError, UnicodeError):
-        return False  # не разрешается — WebFetch тоже не дойдёт
+        return True  # не разрешается отсюда — не знаем, куда уйдёт: отказ (сбой — закрыто)
     for info in infos:
         try:
             ip = ipaddress.ip_address(info[4][0].split("%")[0])
