@@ -634,7 +634,16 @@ def attention(head, t, conflict=None):
     return " ".join(out) or None
 
 
+def _one(v):
+    """Поле шапки в карточку — одной строкой: в кавычках "…" JSON раскрывает \\n, а строка «- [x] вариант» с начала
+    строки читается тиком как ваш ответ (находка проверки безопасности 15.10). Начало «- [» тоже гасим."""
+    text = re.sub(r"\s*[\r\n\u2028\u2029]+\s*", " ", str(v)).strip()
+    return "\\" + text if re.match(r"[-*+]\s*\[", text) else text
+
+
 def render_card(head, body, src_rel, t, conflict=None):
+    head = {k: (_one(v) if isinstance(v, str) else [_one(x) for x in v] if isinstance(v, list) else v)
+            for k, v in head.items()}
     lab = label_of(head)
     proj = head.get("project") or ""
     prio = head.get("priority")
@@ -1042,6 +1051,8 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         src_path, src_head, _ = tasks[cid]
         src_moved = digest(src_path) != st.get("src_hash")
         answer = checked_option(body) if src_head.get("options") else None
+        if answer and answer != "?" and answer not in [_one(o) for o in src_head.get("options") or []]:
+            answer = None  # отмечена строка, которой нет среди вариантов задачи, — не ваш ответ
         extra = owner_added(st.get("rendered"), body)  # текст, дописанный прямо в карточку, — тоже заметка
         if extra:
             note = f"{note.strip()}\n{extra}" if note else extra
