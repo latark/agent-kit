@@ -1,0 +1,13 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          { "type": "command", "if": "Write(~/pantheon/**)", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" view --quiet", "async": true, "timeout": 60 },
+          { "type": "command", "if": "Edit(~/pantheon/**)", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" view --quiet", "async": true, "timeout": 60 }
+        ]
+      }
+    ]
+  }
+}

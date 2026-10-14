@@ -1,0 +1,4 @@
+#!/bin/sh
+# Задача launchd com.latark.pantheon-tick (раз в 60 с): один проход планировщика Пантеона.
+here=$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")" && pwd)
+exec python3 -I "$here/../lib/pantheon.py" tick

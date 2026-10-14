@@ -1,0 +1,4 @@
+#!/bin/sh
+# Команда pantheon — пульт фоновых задач Пантеона, тревоги, архив, сборка domains.json. Код — ../lib/pantheon.py.
+here=$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")" && pwd)
+exec python3 -I "$here/../lib/pantheon.py" "$@"
