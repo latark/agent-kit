@@ -48,6 +48,7 @@ import re
 import shlex
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -1147,15 +1148,37 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
     return data
 
 
+def _read_small_regular(p, limit=8 << 20):
+    """Текст обычного файла не больше limit, иначе None. Папки проекта пишут роли, а читает тик вне песочницы:
+    FIFO, устройство или ссылка вместо файла не должны его повесить, огромный файл — съесть память."""
+    try:
+        fd = os.open(p, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            return fh.read(limit).decode("utf-8", "replace")
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
 def pnpm_store_check(name, folders, store):
     """node_modules на этом Mac собраны с другим хранилищем (store-dir в .npmrc не в git — на другой Mac не приезжает):
     pnpm в окне спросит, сносить ли node_modules, и без терминала молча ничего не поставит — тревога с командой."""
     for f in folders:
-        for d in [f] + sorted(os.path.join(f, x) for x in os.listdir(f) if not x.startswith(".")
-                              and os.path.isdir(os.path.join(f, x))):
-            try:
-                text = open(os.path.join(d, "node_modules", ".modules.yaml")).read()
-            except OSError:
+        try:
+            subs = sorted(os.path.join(f, x) for x in os.listdir(f) if not x.startswith(".")
+                          and stat.S_ISDIR(os.lstat(os.path.join(f, x)).st_mode))
+        except OSError:
+            subs = []
+        for d in [f] + subs:
+            text = _read_small_regular(os.path.join(d, "node_modules", ".modules.yaml"))
+            if text is None:
                 continue
             m = re.search(r"^storeDir:\s*(\S+)", text, re.M)
             got = os.path.realpath(m.group(1)) if m else ""

@@ -75,6 +75,9 @@ def main():
     for sub, store in (("app", "/elsewhere/pnpm/store/v3"), ("ok", os.path.join(br, ".pnpm-store", "v3"))):
         os.makedirs(os.path.join(br, sub, "node_modules"))
         open(os.path.join(br, sub, "node_modules", ".modules.yaml"), "w").write(f"layoutVersion: 5\nstoreDir: {store}\n")
+    os.makedirs(os.path.join(br, "fifo", "node_modules"))
+    os.mkfifo(os.path.join(br, "fifo", "node_modules", ".modules.yaml"))  # роль подложила FIFO: тик не должен повиснуть
+    os.symlink("/etc", os.path.join(br, "link"))
     r = run("domains", "build")
     alerts = open(os.path.join(home, "alerts.md")).read() if os.path.exists(os.path.join(home, "alerts.md")) else ""
     check("domains build: node_modules с чужим хранилищем — тревога с командой; со своим — молчит",
