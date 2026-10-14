@@ -392,7 +392,8 @@ def remember_session(ev):
         ss = [s for s in rec.get("sessions") or [] if s.get("id") != sid]
         old = [s for s in rec.get("sessions") or [] if s.get("id") == sid]
         first = old[0].get("first") if old else not rec.get("sessions")
-        ss.append({"id": sid, "transcript": ev.get("transcript_path") or "", "role": ev.get("agent_type") or "",
+        ss.append({"id": sid, "transcript": ev.get("transcript_path") or "",
+                   "role": ev.get("agent_type") or (old[0].get("role") if old else "") or "",
                    "first": bool(first), "t": time.time()})
         rec["sessions"] = ss[-10:]
         save_json(path, rec)
@@ -528,7 +529,7 @@ def same_text(entry, prompt):
 
 
 def cmd_owner_log(ev):
-    role = ev.get("agent_type") or ""
+    role = session_role(ev)
     if ev.get("agent_id") or role not in ROLES_WITH_LOG or automation():
         # причина пропуска — в журнал хуков для окон Пантеона: 15.10 ввод в окне Зевса не попал в журнал, а почему —
         # не видно (роль не пришла в событии или фоновая сессия выглядит как claude -p)
@@ -734,6 +735,18 @@ def cmd_start(ev):
 
 
 # --- продолжение после /clear (CTX-02) -----------------------------------------
+
+def session_role(ev):
+    """Роль основной сессии: в UserPromptSubmit Claude Code не присылает agent_type (проверено 15.10 на Зевсе) —
+    берём ту, что запомнил SessionStart для этой сессии этого процесса (~/.local/state/pantheon/ctx — ролям не записать)."""
+    if ev.get("agent_type") or ev.get("agent_id"):
+        return ev.get("agent_type") or ""
+    sid = ev.get("session_id")
+    for s in proc_record(os.environ.get("CLAUDE_PID")).get("sessions") or []:
+        if sid and s.get("id") == sid:
+            return s.get("role") or ""
+    return ""
+
 
 def rewake_message(ev):
     """Текст пробуждения или None, если будить не нужно."""

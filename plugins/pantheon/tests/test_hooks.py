@@ -375,5 +375,16 @@ check("/add-dir штабу → строка в alerts.md с папкой; у д�
       "вы открыли Зевсу папку ~/projects/alpha" in al and "/x" not in al, (al, r.stderr))
 
 shutil.rmtree(tmp)
+# 15.10: в UserPromptSubmit основной сессии с --agent нет agent_type — роль берётся из записи SessionStart
+os.makedirs(os.path.dirname(tr), exist_ok=True)
+run("start", {"session_id": "s-hq2", "transcript_path": tr, "source": "startup", "agent_type": "hq"})
+append(tr, user("слово без роли в событии", "p-norole", time.time()))
+run("owner-log", {"session_id": "s-hq2", "transcript_path": tr, "hook_event_name": "UserPromptSubmit",
+                  "prompt": "слово без роли в событии", "prompt_id": "p-norole"})
+check("ввод в окне Зевса без agent_type в событии → строка в zeus.md (роль из записи старта)",
+      "слово без роли в событии" in log_text("zeus"), log_text("zeus"))
+run("owner-log", {"session_id": "s-unknown", "transcript_path": tr, "hook_event_name": "UserPromptSubmit",
+                  "prompt": "чужая сессия без роли", "prompt_id": "p-norole"})
+check("сессия без записи старта и без роли → журнала нет", "чужая сессия без роли" not in log_text("zeus"))
 print("\n%d/%d" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
