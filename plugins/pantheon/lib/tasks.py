@@ -640,7 +640,7 @@ def render_card(head, body, src_rel, t, conflict=None):
     prio = head.get("priority")
     card = {"Статус": lab, "Проект": f"{PROJECT_MARK.get(proj, '▪️')} {proj}".strip(), "Внимание": attention(head, t, conflict),
             "Приоритет": PRIORITY_MARK.get(prio) if prio is not None else None, "Срок": head.get("due"),
-            "Кто": head.get("owner"), "Дальше": head.get("next"),
+            "Кто": head.get("owner"), "Дальше": None if head.get("status") in ("done", "dropped") else head.get("next"),
             "Ждёт": head.get("waiting_on") if head.get("waiting_on") not in (None, "human") else None,
             NOTE_KEY: "", "id": head.get("id")}
     due = f" · 📅 {head['due'][8:10]}.{head['due'][5:7]}" if head.get("due") else ""
@@ -648,8 +648,9 @@ def render_card(head, body, src_rel, t, conflict=None):
     parts = [f"> [!{CALLOUT.get(lab, 'note')}] {STATUS_MARK.get(lab, '')} {lab} · {card['Проект']}{who}{due}"
              + (f" · {card['Приоритет']}" if prio in (0, 1) else "")]
     closed = head.get("status") in ("done", "dropped")
-    if closed and (head.get("result") or head.get("next")):
-        parts[-1] += f"\n> **Итог:** {head.get('result') or head['next']}"
+    if closed:
+        if head.get("result"):  # «Дальше» у закрытой задачи — устаревший шаг, итогом его не показываем
+            parts[-1] += f"\n> **Итог:** {head['result']}"
     elif head.get("next"):
         parts[-1] += f"\n> **Дальше:** {head['next']}"
     if head.get("waiting_on") not in (None, "human"):
