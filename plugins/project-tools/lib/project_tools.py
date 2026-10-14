@@ -4,26 +4,37 @@
 Карта ../stacks.json: признак в проекте (зависимость в package.json или файл) → какие MCP-серверы и плагины нужны.
 Команды:
   project-tools check [--dir D]                    что подключить или поправить; ничего не меняет
-  project-tools apply [--dir D] [--update ИМЯ]…    записать .mcp.json, одобрения, плагины, блок Codex
-  project-tools hint                               хук SessionStart: одна строка в контекст, если чего-то нет
+  project-tools apply [--dir D] [--update ИМЯ]… [--accept ИМЯ]…
+                                                   записать .mcp.json, одобрения, плагины, блок Codex
+  project-tools skip ИМЯ… [--dir D]                ваше «не надо»: отказ от сервера или плагина, подсказка замолкает
+  project-tools hint                               хук SessionStart: строка в контекст, если чего-то нет или
+                                                   одобренный сервер изменился
   project-tools outdated                           закреплённые версии против свежих в npm
   project-tools map                                карта стеков
 
-Пишет только записи из карты рядом с этим файлом: другой карты команда не принимает, поэтому произвольный сервер
-через неё не подключить. В окнах ролей запись в .mcp.json и .claude/settings*.json запрещают песочница Claude Code
+Добавляет только записи из карты рядом с этим файлом: другой карты команда не принимает, поэтому произвольный
+сервер через неё не подключить. В окнах ролей запись в .mcp.json и .claude/settings*.json запрещают песочница Claude Code
 (protected paths) и guard (SEC-14): там роль запускает только check и спрашивает владельца.
 
 Куда пишет apply (корень проекта — вершина git-репозитория, иначе папка):
   .mcp.json                     серверы из карты; чужие записи не трогает, отличие от карты меняет только --update
   .claude/settings.local.json   enabledMcpjsonServers — тогда Claude не спрашивает одобрения; enableAllProjectMcpServers
-                                заменяет явным списком (иначе любой новый сервер из репозитория запустится без вопроса)
+                                заменяет списком серверов, которые уже лежат в .mcp.json (их вы одобрили этим флагом):
+                                новый сервер из репозитория без вопроса больше не запустится
   .claude/settings.json         enabledPlugins: плагины из карты; плагины, которые заменяет сервер из карты, — false
   .codex/config.toml            блок [mcp_servers.*], если Codex установлен или папка .codex уже есть
+
+Одобрение в Claude Code — по имени сервера: после git pull под тем же именем может прийти другая команда, и она
+запустится без вопроса. Поэтому apply запоминает отпечаток каждой одобренной записи (на этом Mac, вне репозитория),
+а подсказка при старте сессии говорит вам и Claude, если запись изменилась. Принять — apply --accept ИМЯ,
+отказаться — skip ИМЯ.
 """
 import argparse
 import json
 import os
+import pwd
 import re
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -32,14 +43,16 @@ import time
 import traceback
 from collections import deque
 
-if sys.version_info < (3, 11):
-    sys.exit("project-tools: нужен Python 3.11 или новее (tomllib)")
+if sys.version_info < (3, 11):  # обёртка bin/project-tools ищет 3.11+; сюда попадает только прямой запуск
+    sys.exit(0 if sys.argv[1:2] == ["hint"] else "project-tools: нужен Python 3.11 или новее (tomllib)")
 import tomllib
 
 PLUGIN = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 MAP = os.path.join(PLUGIN, "stacks.json")
 HOME = os.path.realpath(os.path.expanduser("~"))
+REAL_HOME = os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir)  # подмена $HOME не делает домашнюю папку проектом
 LOG = os.path.join(HOME, ".local", "state", "pantheon", "logs", "project-tools.log")
+APPROVED = os.path.join(HOME, ".local", "state", "pantheon", "project-tools", "approved.json")
 SKIP_DIRS = {"node_modules", "dist", "build", "out", "coverage", "vendor", "venv", "env", "__pycache__", "target",
              "Pods", "DerivedData"}
 SCAN_DEPTH, SCAN_LIMIT = 3, 400
@@ -49,6 +62,10 @@ CODEX_END = "# <<< project-tools"
 
 class Broken(Exception):
     """Файл настроек не читается или стоит не там: apply не пишет ничего."""
+
+
+class PartlyWritten(Broken):
+    """Запись оборвалась на середине: в сообщении — что уже записано."""
 
 
 def short(path):
@@ -200,16 +217,36 @@ def read_json_quiet(path):
         return {}
 
 
-def same_server(cur, want):
-    """Запись совпадает с картой: «-y» у npx и "type": "stdio" смысла не меняют."""
-    def norm(cfg):
-        if not isinstance(cfg, dict):
-            return cfg
-        cfg = {k: v for k, v in cfg.items() if not (k == "type" and v == "stdio")}
-        if os.path.basename(str(cfg.get("command", ""))) == "npx":
-            cfg["args"] = [a for a in cfg.get("args") or [] if a not in ("-y", "--yes")]
+def norm_server(cfg):
+    """«-y» у npx и "type": "stdio" смысла записи не меняют."""
+    if not isinstance(cfg, dict):
         return cfg
-    return norm(cur) == norm(want)
+    cfg = {k: v for k, v in cfg.items() if not (k == "type" and v == "stdio")}
+    if os.path.basename(str(cfg.get("command", ""))) == "npx":
+        cfg["args"] = [a for a in cfg.get("args") or [] if a not in ("-y", "--yes")]
+    return cfg
+
+
+def same_server(cur, want):
+    return norm_server(cur) == norm_server(want)
+
+
+def fingerprint(cfg):
+    return hashlib.sha256(json.dumps(norm_server(cfg), sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+
+
+def clip(text, limit=80):
+    """Строка из репозитория в выводе агенту: без управляющих символов и не длиннее limit."""
+    text = "".join(ch if ch.isprintable() else "?" for ch in str(text))
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def describe(cfg):
+    if not isinstance(cfg, dict):
+        return clip(cfg)
+    if cfg.get("url"):
+        return clip(cfg["url"])
+    return clip(" ".join([str(cfg.get("command", ""))] + [str(a) for a in cfg.get("args") or []]))
 
 
 def toml_value(v):
@@ -229,6 +266,8 @@ def codex_block(servers):
 
 
 def strip_codex_block(text):
+    if text.count(CODEX_BEGIN) != text.count(CODEX_END):
+        raise Broken("в .codex/config.toml оборван блок project-tools (нет одной из меток) — поправьте руками")
     pattern = re.compile(r"\n*" + re.escape(CODEX_BEGIN) + r".*?" + re.escape(CODEX_END) + r"\n?", re.S)
     return pattern.sub("\n", text)
 
@@ -262,14 +301,25 @@ class Plan:
     def __init__(self, root, is_git):
         self.root, self.is_git = root, is_git
         self.stacks, self.wanted = [], {}
-        self.changes, self.notes, self.missing = [], [], []
+        self.changes, self.notes, self.missing, self.drift = [], [], [], []
         self.writes = {}  # путь → новое содержимое (текст)
+        self.originals = {}  # путь → содержимое при чтении: apply не пишет, если файл успели изменить
+        self.fingerprints = {}  # одобренный сервер → отпечаток записи, который apply запомнит
+
+    def write(self, path, text):
+        self.originals[path] = read_text(path)
+        self.writes[path] = text
 
     def path(self, *parts):
         return os.path.join(self.root, *parts)
 
 
-def make_plan(root, is_git, update=(), tolerant=False):
+def load_approved():
+    data = read_json_quiet(APPROVED)
+    return data if isinstance(data, dict) else {}
+
+
+def make_plan(root, is_git, update=(), accept=(), tolerant=False):
     """Что apply запишет в проект. tolerant — для подсказки: битый ~/.claude.json не мешает."""
     cmap = load_map()
     p = Plan(root, is_git)
@@ -295,8 +345,11 @@ def make_plan(root, is_git, update=(), tolerant=False):
     local_servers = proj.get("mcpServers") or {}
     toggled_off = set(proj.get("disabledMcpServers") or [])
     rejected = set()
-    for layer in (local, shared, user):
+    for layer in (local, shared, user, proj):
         rejected |= set(layer.get("disabledMcpjsonServers") or [])
+    if user.get("enableAllProjectMcpServers") is True:
+        p.notes.append("~/.claude/settings.json: enableAllProjectMcpServers одобряет любой сервер любого репозитория — "
+                       "уберите")
 
     new_servers = dict(servers)
     approve, codex = set(), {}
@@ -337,8 +390,7 @@ def make_plan(root, is_git, update=(), tolerant=False):
                 approve.add(name)
                 codex[name] = want
             else:
-                was = " ".join([str(cur.get("command", ""))] + [str(a) for a in cur.get("args") or []])
-                p.notes.append(f"{name}: в .mcp.json не как в карте ({was}) — заменить: "
+                p.notes.append(f"{name}: в .mcp.json не как в карте ({describe(cur)}) — заменить: "
                                f"`project-tools apply --update {name}`")
             for plugin in tool.get("replaces_plugins", []):
                 if name in new_servers and plugin_value(plugin, {"enabledPlugins": new_local_plugins},
@@ -368,7 +420,7 @@ def make_plan(root, is_git, update=(), tolerant=False):
     if new_servers != servers:
         doc = dict(mcp_doc)
         doc["mcpServers"] = new_servers
-        p.writes[p.path(".mcp.json")] = json_text(p.path(".mcp.json"), doc, True)
+        p.write(p.path(".mcp.json"), json_text(p.path(".mcp.json"), doc, True))
 
     # одобрения: явный список вместо «одобрять всё», без имён, которых в .mcp.json нет
     new_local = dict(local)
@@ -390,11 +442,26 @@ def make_plan(root, is_git, update=(), tolerant=False):
         p.changes.append(f".claude/settings.local.json: одобрены {', '.join(sorted(approve - before))}")
     if approved or "enabledMcpjsonServers" in local:
         new_local["enabledMcpjsonServers"] = sorted(approved)
+
+    # одобренные записи против запомненных отпечатков: подмена команды под одобренным именем
+    remembered = load_approved().get(root) or {}
+    live = (approved | set(proj.get("enabledMcpjsonServers") or [])) - rejected - toggled_off
+    for name in sorted(live & set(new_servers)):
+        now = fingerprint(new_servers[name])
+        was = remembered.get(name)
+        if was and was != now and name not in accept and name not in update:
+            p.drift.append(name)
+            p.fingerprints[name] = was
+            p.notes.append(f"⚠ {name}: запись в .mcp.json изменилась после одобрения, теперь «{describe(new_servers[name])}». "
+                           f"Проверьте `git log -p .mcp.json`; ваше — `project-tools apply --accept {name}`, "
+                           f"не ваше — `project-tools skip {name}`")
+        else:
+            p.fingerprints[name] = now
     if new_local_plugins != (local.get("enabledPlugins") or {}):
         new_local["enabledPlugins"] = new_local_plugins
     if new_local != local:
-        p.writes[p.path(".claude", "settings.local.json")] = json_text(p.path(".claude", "settings.local.json"),
-                                                                         new_local, False)
+        p.write(p.path(".claude", "settings.local.json"),
+                json_text(p.path(".claude", "settings.local.json"), new_local, False))
     if shared.get("enableAllProjectMcpServers") is True:
         p.notes.append(".claude/settings.json: enableAllProjectMcpServers одобряет любой сервер из репозитория — "
                        "уберите (project-tools общие настройки сам не чистит)")
@@ -402,7 +469,7 @@ def make_plan(root, is_git, update=(), tolerant=False):
     if new_shared_plugins != (shared.get("enabledPlugins") or {}):
         new_shared = dict(shared)
         new_shared["enabledPlugins"] = new_shared_plugins
-        p.writes[p.path(".claude", "settings.json")] = json_text(p.path(".claude", "settings.json"), new_shared, False)
+        p.write(p.path(".claude", "settings.json"), json_text(p.path(".claude", "settings.json"), new_shared, False))
 
     # Codex: тот же набор серверов из карты, своим блоком
     if os.path.isdir(p.path(".codex")) or shutil.which("codex"):
@@ -418,7 +485,7 @@ def make_plan(root, is_git, update=(), tolerant=False):
             del codex[name]
         new = "\n\n".join(([rest + "\n"] if rest else []) + ([codex_block(codex)] if codex else []))
         if new.strip() != old.strip():
-            p.writes[cpath] = new
+            p.write(cpath, new)
             p.changes.append(f".codex/config.toml: серверы для Codex — {', '.join(codex) or 'блок убран'}")
 
     if p.writes and not is_git and not os.path.isfile(p.path("package.json")):
@@ -492,7 +559,7 @@ def report(p, applied):
 
 
 def not_project(root):
-    return root in (HOME, "/", os.path.dirname(HOME))
+    return root in (HOME, REAL_HOME, "/", os.path.dirname(HOME), os.path.dirname(REAL_HOME))
 
 
 def guard_root(root):
@@ -505,19 +572,76 @@ def cmd_check(args):
     guard_root(root)
     p = make_plan(root, is_git, args.update or ())
     report(p, applied=False)
-    return 3 if p.changes else 0
+    return 3 if p.changes or p.drift else 0
+
+
+def save_approved(root, fingerprints):
+    data = load_approved()
+    if (data.get(root) or {}) == fingerprints:
+        return
+    data[root] = fingerprints
+    write_atomic(APPROVED, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
 def cmd_apply(args):
     root, is_git = project_root(args.dir)
     guard_root(root)
-    p = make_plan(root, is_git, args.update or ())
+    p = make_plan(root, is_git, args.update or (), args.accept or ())
+    changed = [x for x, old in p.originals.items() if read_text(x) != old]
+    if changed:
+        raise Broken(f"{', '.join(short(x) for x in changed)} изменился во время работы — повторите")
+    done = []
     for path, text in p.writes.items():
-        write_atomic(path, text)
+        try:
+            write_atomic(path, text)
+        except OSError as e:
+            raise PartlyWritten(f"запись {short(path)} не удалась ({e.strerror or e}); "
+                                + (f"уже записано: {', '.join(short(x) for x in done)}" if done else "ничего не записано"))
+        done.append(path)
+    try:
+        save_approved(root, p.fingerprints)
+    except (OSError, Broken) as e:
+        p.notes.append(f"отпечатки одобрений не запомнены ({e}) — подсказка не заметит подмену")
     report(p, applied=True)
     shared = sorted(os.path.relpath(x, root) for x in p.writes if not x.endswith("settings.local.json"))
     if p.writes:
         print("Серверы подключатся в новой сессии." + (f" Для коммита: {', '.join(shared)}." if shared else ""))
+    return 0
+
+
+def cmd_skip(args):
+    """Ваше «не надо»: сервер — в disabledMcpjsonServers (Claude его не запустит), плагин — false; всё в
+    settings.local.json, подсказка о нём больше не говорит."""
+    root, is_git = project_root(args.dir)
+    guard_root(root)
+    check_no_links(root)
+    cmap = load_map()
+    lpath = os.path.join(root, ".claude", "settings.local.json")
+    local = read_json(lpath)
+    servers = read_json(os.path.join(root, ".mcp.json")).get("mcpServers") or {}
+    new, done = dict(local), []
+    for name in args.names:
+        tool = cmap["tools"].get(name) or {}
+        if "plugin" in tool:
+            new["enabledPlugins"] = {**(new.get("enabledPlugins") or {}), tool["plugin"]: False}
+            done.append(f"плагин {tool['plugin']} выключен")
+        elif name in servers or "mcp" in tool:
+            new["disabledMcpjsonServers"] = sorted(set(new.get("disabledMcpjsonServers") or []) | {name})
+            if name in (new.get("enabledMcpjsonServers") or []):
+                new["enabledMcpjsonServers"] = [x for x in new["enabledMcpjsonServers"] if x != name]
+            done.append(f"{name} отклонён (disabledMcpjsonServers)")
+        else:
+            raise Broken(f"{name}: нет ни в карте, ни в .mcp.json")
+    if new != local:
+        original = read_text(lpath)
+        text = json_text(lpath, new, False)
+        if read_text(lpath) != original:
+            raise Broken(f"{short(lpath)} изменился во время работы — повторите")
+        write_atomic(lpath, text)
+    print(f"Проект: {short(root)}")
+    for d in done:
+        print(f"  − .claude/settings.local.json: {d}")
+    print("Серверы и плагины перестанут запускаться в новой сессии; вернуть — убрать запись из settings.local.json.")
     return 0
 
 
@@ -532,14 +656,22 @@ def cmd_hint(_args):
         if not is_git and not os.path.isfile(os.path.join(root, "package.json")):
             return 0
         p = make_plan(root, is_git, tolerant=True)
-        if not p.missing:
+        if not p.missing and not p.drift:
             return 0
-        line = (f"project-tools: в проекте {', '.join(p.stacks)}; по карте стеков не подключены: "
-                f"{', '.join(p.missing)}. Один раз предложи владельцу: «Подключить инструменты проекта?» "
-                "(навык project-tools, команда `project-tools apply`). В окне роли Пантеона не подключай — "
-                "`project-tools check` и вопрос владельцу.")
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": line}},
-                         ensure_ascii=False))
+        lines, out = [], {}
+        if p.drift:
+            lines.append(f"project-tools: ⚠ в .mcp.json после одобрения изменились серверы {', '.join(p.drift)}, "
+                         "и Claude Code уже запустил их без вопроса. Сразу скажи владельцу и покажи "
+                         "`project-tools check`; сам эти серверы не вызывай, пока он не ответит.")
+            out["systemMessage"] = (f"project-tools: ⚠ в .mcp.json изменились одобренные серверы: {', '.join(p.drift)}. "
+                                    "Проверьте: project-tools check")
+        if p.missing:
+            lines.append(f"project-tools: в проекте {', '.join(p.stacks)}; по карте стеков не подключены: "
+                         f"{', '.join(p.missing)}. Один раз предложи владельцу: «Подключить инструменты проекта?» "
+                         "(навык project-tools, команда `project-tools apply`; «не надо» — `project-tools skip`). "
+                         "В окне роли Пантеона не подключай — `project-tools check` и вопрос владельцу.")
+        out["hookSpecificOutput"] = {"hookEventName": "SessionStart", "additionalContext": " ".join(lines)}
+        print(json.dumps(out, ensure_ascii=False))
     except Exception:
         try:
             os.makedirs(os.path.dirname(LOG), exist_ok=True)
@@ -594,12 +726,21 @@ def main(argv=None):
         s = sub.add_parser(name)
         s.add_argument("--dir", default=os.getcwd())
         s.add_argument("--update", action="append", metavar="ИМЯ", help="заменить запись .mcp.json по карте")
+        if name == "apply":
+            s.add_argument("--accept", action="append", metavar="ИМЯ",
+                           help="принять изменённую после одобрения запись .mcp.json как вашу")
+    s = sub.add_parser("skip")
+    s.add_argument("names", nargs="+", metavar="ИМЯ")
+    s.add_argument("--dir", default=os.getcwd())
     for name in ("hint", "outdated", "map"):
         sub.add_parser(name)
     args = ap.parse_args(argv)
     try:
-        return {"check": cmd_check, "apply": cmd_apply, "hint": cmd_hint, "outdated": cmd_outdated,
+        return {"check": cmd_check, "apply": cmd_apply, "skip": cmd_skip, "hint": cmd_hint, "outdated": cmd_outdated,
                 "map": cmd_map}[args.cmd](args)
+    except PartlyWritten as e:
+        print(f"project-tools: {e}.", file=sys.stderr)
+        return 2
     except Broken as e:
         print(f"project-tools: {e}. Ничего не записано.", file=sys.stderr)
         return 2

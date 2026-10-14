@@ -1,4 +1,12 @@
 #!/bin/sh
 # Команда project-tools — инструменты проекта по карте стеков. Код — ../lib/project_tools.py.
+# Нужен Python 3.11+ (tomllib); /usr/bin/python3 на macOS старше, поэтому ищем дальше. Подсказка без него молчит.
 here=$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")" && pwd)
-exec python3 -I "$here/../lib/project_tools.py" "$@"
+for py in python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do
+  if "$py" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then
+    exec "$py" -I "$here/../lib/project_tools.py" "$@"
+  fi
+done
+[ "$1" = hint ] && exit 0
+echo "project-tools: нужен Python 3.11 или новее (brew install python)" >&2
+exit 2

@@ -240,6 +240,63 @@ sample = {"permissions": {"allow": ["Bash(ls)", "Read"], "deny": []}, "hooks": {
 check("стиль Claude Code совпадает с json.dumps(indent=2)",
       project_tools.dumps(sample, False) == json.dumps(sample, indent=2, ensure_ascii=False))
 
+# 9b. Подмена одобренного сервера после pull: подсказка предупреждает, --accept принимает, skip отказывает
+drift = project(home, "drift", {"package.json": pkg(next="16.0.0")})
+run(home, "apply", "--dir", drift)
+state = os.path.join(home, ".local", "state", "pantheon", "project-tools", "approved.json")
+check("apply запомнил отпечатки одобренных записей", set(load(state)[drift]) == {"chrome-devtools", "next-devtools"})
+doc = load(os.path.join(drift, ".mcp.json"))
+doc["mcpServers"]["next-devtools"]["args"] = ["-y", "evil@1\x1b[31m" + "x" * 200]
+open(os.path.join(drift, ".mcp.json"), "w").write(json.dumps(doc))
+r = hint(drift)
+out = json.loads(r.stdout) if r.stdout.strip() else {}
+check("подмена: подсказка говорит и вам (systemMessage), и Claude",
+      "next-devtools" in out.get("systemMessage", "") and "изменились" in out["hookSpecificOutput"]["additionalContext"])
+r = run(home, "check", "--dir", drift)
+check("подмена: check — код 3, ⚠ и подсказка про --accept и skip",
+      r.returncode == 3 and "⚠ next-devtools" in r.stdout and "--accept next-devtools" in r.stdout)
+check("чужая строка в выводе обрезана и без управляющих символов", "\x1b" not in r.stdout and "x" * 100 not in r.stdout)
+run(home, "apply", "--dir", drift)
+check("apply без --accept подмену не принимает", "изменились" in hint(drift).stdout)
+run(home, "apply", "--dir", drift, "--accept", "next-devtools")
+check("apply --accept: подмена принята, подсказка молчит", hint(drift).stdout == "")
+r = run(home, "skip", "next-devtools", "--dir", drift)
+local = load(os.path.join(drift, ".claude", "settings.local.json"))
+check("skip: сервер в disabledMcpjsonServers и без одобрения", r.returncode == 0 and
+      local["disabledMcpjsonServers"] == ["next-devtools"] and "next-devtools" not in local["enabledMcpjsonServers"])
+skp = project(home, "skp", {"package.json": pkg(**{"@supabase/supabase-js": "2"})})
+run(home, "skip", "supabase", "--dir", skp)
+check("skip плагина: false в settings.local.json, подсказка молчит",
+      load(os.path.join(skp, ".claude", "settings.local.json"))["enabledPlugins"] == {"supabase@claude-plugins-official": False}
+      and hint(skp).stdout == "")
+check("skip неизвестного имени: код 2", run(home, "skip", "nope", "--dir", skp).returncode == 2)
+
+# 9c. Отказы из ~/.claude.json, подмена HOME, оборванный блок Codex, сбой записи посередине, старый Python
+cjr = project(home, "cjr", {"package.json": pkg(next="16.0.0")})
+with open(os.path.join(home, ".claude.json"), "w") as fh:
+    json.dump({"projects": {cjr: {"disabledMcpjsonServers": ["next-devtools"]}}}, fh)
+run(home, "apply", "--dir", cjr)
+check("отказ в ~/.claude.json (projects[…].disabledMcpjsonServers) уважается",
+      list(load(os.path.join(cjr, ".mcp.json"))["mcpServers"]) == ["chrome-devtools"])
+os.remove(os.path.join(home, ".claude.json"))
+import pwd  # noqa: E402
+check("настоящая домашняя папка — не проект и при подменённом HOME",
+      run(home, "check", "--dir", pwd.getpwuid(os.getuid()).pw_dir).returncode == 2)
+cut = project(home, "cut", {"package.json": pkg(next="16.0.0"),
+                            ".codex/config.toml": "# >>> project-tools (agent-kit): блок пишет `project-tools apply`, руками не править\n"})
+check("оборванный блок Codex: код 2", run(home, "apply", "--dir", cut).returncode == 2)
+ro = project(home, "ro", {"package.json": pkg(next="16.0.0"), ".claude/keep": ""})
+os.remove(os.path.join(ro, ".claude", "keep"))
+os.chmod(os.path.join(ro, ".claude"), 0o555)
+r = run(home, "apply", "--dir", ro)
+os.chmod(os.path.join(ro, ".claude"), 0o755)
+check("сбой записи посередине: код 2 и список уже записанного",
+      r.returncode == 2 and "уже записано" in r.stderr and ".mcp.json" in r.stderr and "Ничего не записано" not in r.stderr)
+old_py = "/usr/bin/python3"
+if os.path.exists(old_py) and subprocess.run([old_py, "-c", "import sys; sys.exit(sys.version_info >= (3, 11))"]).returncode == 0:
+    r = subprocess.run([old_py, "-I", CLI, "hint"], input="{}", capture_output=True, text=True, env=env_for(home))
+    check("Python старше 3.11: подсказка молчит, код 0", r.returncode == 0 and r.stdout == "" and r.stderr == "")
+
 # 10. Карта: у каждого инструмента сервер или плагин, стеки ссылаются на существующие инструменты
 check("карта: стеки ссылаются на инструменты из tools",
       all(t in MAP["tools"] for st in MAP["stacks"] for t in st["tools"]))
