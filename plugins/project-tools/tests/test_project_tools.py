@@ -297,6 +297,26 @@ check("имя сервера из репозитория в подсказке �
 r = run(home, "check", "--dir", strict)
 check("и в check тоже", "Ignore" not in r.stdout and "\x1b" not in r.stdout)
 
+# 9b''. Сбой проверки при .mcp.json — предупреждение, а не молчание
+broken_state = os.path.join(home, ".local", "state", "pantheon", "project-tools", "approved.json")
+saved = open(broken_state).read()
+open(broken_state, "w").write("{ битый")
+r = hint(strict)
+check("битый файл отпечатков: подсказка предупреждает", "не проверить" in r.stdout and r.returncode == 0)
+check("битый файл отпечатков: apply отказывает, файл не перезаписан",
+      run(home, "apply", "--dir", strict).returncode == 2 and open(broken_state).read() == "{ битый")
+open(broken_state, "w").write(saved)
+driver = ("import io, json, sys; sys.path.insert(0, sys.argv[1]); import project_tools as m\n"
+          "def boom(*a, **k): raise RuntimeError('x')\n"
+          "m.make_plan = boom; sys.stdin = io.StringIO(json.dumps({'cwd': sys.argv[2]})); m.cmd_hint(None)")
+r = subprocess.run([sys.executable, "-I", "-c", driver, os.path.join(PLUGIN, "lib"), strict], env=env_for(home),
+                   capture_output=True, text=True)
+check("неожиданный сбой при .mcp.json: предупреждение вам", r.returncode == 0 and "сбой проверки" in r.stdout)
+check("у проекта fresh нет .mcp.json", not os.path.exists(os.path.join(fresh, ".mcp.json")))
+r = subprocess.run([sys.executable, "-I", "-c", driver, os.path.join(PLUGIN, "lib"), fresh], env=env_for(home),
+                   capture_output=True, text=True)
+check("неожиданный сбой без .mcp.json: молча", r.returncode == 0 and r.stdout == "")
+
 # 9c. Отказы из ~/.claude.json, подмена HOME, оборванный блок Codex, сбой записи посередине, старый Python
 cjr = project(home, "cjr", {"package.json": pkg(next="16.0.0")})
 with open(os.path.join(home, ".claude.json"), "w") as fh:

@@ -1,6 +1,6 @@
 {
   "name": "project-tools",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Инструменты проекта по карте стеков: MCP-серверы и плагины подключаются в проект, а не во все сессии (next-devtools, chrome-devtools, shadcn, Supabase). Команда project-tools, навык и подсказка при старте.",
   "author": { "name": "latark" }
 }

@@ -333,8 +333,12 @@ class Plan:
 
 
 def load_approved():
-    data = read_json_quiet(APPROVED)
-    return data if isinstance(data, dict) else {}
+    """Отпечатки одобренных записей. Битый файл — отказ, а не «пусто»: иначе проверка подмены тихо выключится."""
+    if not os.path.lexists(APPROVED):
+        return {}
+    if os.path.islink(APPROVED):
+        raise Broken(f"{short(APPROVED)} — символическая ссылка")
+    return read_json(APPROVED)
 
 
 def make_plan(root, is_git, update=(), accept=(), tolerant=False):
@@ -664,8 +668,19 @@ def cmd_skip(args):
     return 0
 
 
+def hint_warning(reason):
+    msg = f"project-tools: ⚠ настройки MCP проекта не проверить ({clip(reason, 160)}). Проверьте: project-tools check"
+    print(json.dumps({"systemMessage": msg, "hookSpecificOutput": {
+        "hookEventName": "SessionStart",
+        "additionalContext": msg + ". Скажи владельцу; серверы из .mcp.json не вызывай, пока он не ответит."}},
+        ensure_ascii=False))
+
+
 def cmd_hint(_args):
-    """SessionStart: одна строка в контекст, если по карте чего-то не хватает. Сбой — молча, запись в журнал."""
+    """SessionStart: строка в контекст, если по карте чего-то не хватает или одобренная запись изменилась. Вне
+    проекта и без .mcp.json сбой — молча (запись в журнал); при .mcp.json любой сбой — предупреждение вам: молчание
+    выключило бы проверку подмены."""
+    root = None
     try:
         raw = sys.stdin.read() if not sys.stdin.isatty() else ""
         event = json.loads(raw) if raw.strip() else {}
@@ -677,13 +692,8 @@ def cmd_hint(_args):
         try:
             p = make_plan(root, is_git, tolerant=True)
         except Broken as e:
-            # .mcp.json, который не разбирается здесь, Claude Code мог прочитать иначе — подмену не проверить
             if os.path.lexists(os.path.join(root, ".mcp.json")):
-                msg = f"project-tools: ⚠ настройки MCP проекта не проверить ({clip(e, 160)}). Проверьте: project-tools check"
-                print(json.dumps({"systemMessage": msg, "hookSpecificOutput": {
-                    "hookEventName": "SessionStart",
-                    "additionalContext": msg + ". Скажи владельцу; серверы из .mcp.json не вызывай, пока он не ответит."}},
-                    ensure_ascii=False))
+                hint_warning(e)
             return 0
         if not p.missing and not p.drift:
             return 0
@@ -701,13 +711,15 @@ def cmd_hint(_args):
                          "В окне роли Пантеона не подключай — `project-tools check` и вопрос владельцу.")
         out["hookSpecificOutput"] = {"hookEventName": "SessionStart", "additionalContext": " ".join(lines)}
         print(json.dumps(out, ensure_ascii=False))
-    except Exception:
+    except Exception as e:
         try:
             os.makedirs(os.path.dirname(LOG), exist_ok=True)
             with open(LOG, "a", encoding="utf-8") as fh:
-                fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} hint {os.getcwd()}\n{traceback.format_exc()}\n")
+                fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} hint {root or os.getcwd()}\n{traceback.format_exc()}\n")
         except OSError:
             pass
+        if root and not not_project(root) and os.path.lexists(os.path.join(root, ".mcp.json")):
+            hint_warning(f"сбой проверки: {type(e).__name__}; подробности — {short(LOG)}")
     return 0
 
 
