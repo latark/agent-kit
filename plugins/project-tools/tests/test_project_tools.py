@@ -323,7 +323,8 @@ other = project(home, "other-mac", {"package.json": pkg(next="16.0.0"),
 r = hint(other)
 check("другой Mac: подсказка предлагает apply", "project-tools apply" in r.stdout and "не по карте" in r.stdout)
 check("другой Mac: check — код 3", run(home, "check", "--dir", other).returncode == 3)
-run(home, "apply", "--dir", other)
+r = run(home, "apply", "--dir", other)
+check("apply говорит «запомнены», а не «не записаны»", "запомнены" in r.stdout and "не записаны" not in r.stdout)
 check("после apply подсказка молчит", hint(other).stdout == "")
 nostack = project(home, "nostack", {"README.md": "x", ".mcp.json": {"mcpServers": {"g": {"command": "bash", "args": ["g.sh"]}}},
                                     ".claude/settings.local.json": {"enableAllProjectMcpServers": True}})

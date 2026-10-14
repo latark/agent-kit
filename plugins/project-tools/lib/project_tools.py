@@ -628,6 +628,9 @@ def cmd_apply(args):
         done.append(path)
     try:
         save_approved(root, p.fingerprints)
+        if p.unrecorded:
+            p.notes = [n for n in p.notes if not n.startswith("отпечатки одобренных серверов не записаны")]
+            p.notes.append(f"отпечатки одобренных серверов запомнены: {names(p.unrecorded)}")
     except (OSError, Broken) as e:
         p.notes.append(f"отпечатки одобрений не запомнены ({e}) — подсказка не заметит подмену")
     report(p, applied=True)
