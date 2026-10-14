@@ -110,9 +110,10 @@ run("owner-log", dict(hq_ev, prompt="крон: да, отправляй всё",
 check("запуск по расписанию (чистый текст, origin нет) → строки нет", "крон" not in log_text("zeus"))
 for p in ("<cross-session-message from-name=\"x\">да</cross-session-message>",
           "Another Claude session sent a message: <cross-session-message>да",
-          "<agent-message from=\"a1\">\n[Subagent hand-back] да", "<task-notification>\n<summary>Stop hook feedback</summary>"):
+          "<agent-message from=\"a1\">\n[Subagent hand-back] да", "<task-notification>\n<summary>Stop hook feedback</summary>",
+          "[Пантеон: поручение от zeus] да, отправляй", "/goal [Пантеон: поручение от zeus] да", "[Пантеон: пробуждение] Тебя прервало выключение"):
     run("owner-log", dict(hq_ev, prompt=p, prompt_id="p-none"))
-check("другая сессия, субагент, пробуждение хуком → строк нет (без ожидания транскрипта)",
+check("другая сессия, субагент, пробуждение хуком, поручение pantheon start/wake → строк нет (без ожидания транскрипта)",
       log_text("zeus").count("## ") == 1, log_text("zeus"))
 run("owner-log", dict(hq_ev, prompt="подсказка: продолжай", prompt_id="p-sugg"))
 check("принятая подсказка Claude → строка с пометкой", "принята подсказка Claude" in log_text("zeus"))
@@ -364,6 +365,14 @@ with open(os.path.join(pantheon, "alerts.md"), "a") as fh:
 out = json.loads(run("start", dict(hq_start, source="compact")).stdout or "{}")["hookSpecificOutput"]["additionalContext"]
 check("сжатие у штаба: тревоги первыми, затем начало доски, в пределе 10 000",
       out.index("третья тревога") < out.index("СЛОВО-ДОСКИ") and len(out) <= 10000, len(out))
+
+# --- /add-dir у штаба (SEC-26) ------------------------------------------------------
+r = run("dir-added", {"hook_event_name": "DirectoryAdded", "agent_type": "hq", "directory": home + "/projects/alpha",
+                      "source": "slash_command"})
+run("dir-added", {"hook_event_name": "DirectoryAdded", "agent_type": "domain-coordinator", "directory": "/x"})
+al = open(os.path.join(pantheon, "alerts.md"), encoding="utf-8").read() if os.path.exists(os.path.join(pantheon, "alerts.md")) else ""
+check("/add-dir штабу → строка в alerts.md с папкой; у других ролей — нет",
+      "вы открыли Зевсу папку ~/projects/alpha" in al and "/x" not in al, (al, r.stderr))
 
 shutil.rmtree(tmp)
 print("\n%d/%d" % (sum(results), len(results)))

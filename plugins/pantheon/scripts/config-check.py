@@ -215,6 +215,8 @@ def check_instructions(path, old, new, lines):
             flags.append(("injection", f"«скачай и выполни»: {line.strip()[:120]}"))
         if re.match(r"^\s*permissionMode:\s*bypassPermissions\b", line):
             flags.append(("injection", "роль с permissionMode: bypassPermissions"))
+        if path.startswith("agents/") and re.match(r"^\s*(?:-\s*)?(?:command|args|url):", line):
+            flags.append(("code", f"команда в шапке роли (hooks или mcpServers) — запускается сама: {line.strip()[:120]}"))
     if new is not None and len(new.encode()) - len((old or "").encode()) > MD_GROWTH:
         flags.append(("injection", f"файл вырос больше чем на {MD_GROWTH // 1000} КБ за раз"))
     return flags

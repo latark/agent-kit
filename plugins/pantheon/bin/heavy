@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""heavy <команда …> — тяжёлая команда (сборка, тесты, dev-сервер) через общую блокировку (MEM-03).
+
+Одновременно идут не больше двух тяжёлых команд на Mac: два места — ~/.local/state/pantheon/locks/heavy-cmd-1.lock и
+heavy-cmd-2.lock. Свободного места нет — команда ждёт и пишет, чего ждёт. Те же места проверяет тик перед своими
+тяжёлыми задачами. Файлы мест создаёт `pantheon install` (и `domains build`): роль в песочнице открывает их только на
+чтение — flock от этого не зависит. Мест нет — команда идёт без блокировки, а не падает.
+
+  heavy pnpm test
+  heavy --server pnpm dev  долгий процесс (dev-сервер): одновременно не больше одного на Mac, второе место всегда
+                           остаётся сборкам и тестам — два сервера не повесят всех остальных
+  heavy --status          кто занимает места
+HEAVY_WAIT_MAX=<с> — ждать места не дольше: не дождалась — код 75 без запуска (Stop-хук разработчика так отличает
+«очередь» от «красной проверки»). Python 3.9+.
+"""
+import fcntl
+import os
+import signal
+import subprocess
+import sys
+import time
+
+LOCKS = os.path.join(os.path.realpath(os.environ.get("PANTHEON_STATE") or
+                                      os.path.join(os.path.expanduser("~"), ".local", "state", "pantheon")), "locks")
+SLOTS = ("heavy-cmd-1", "heavy-cmd-2")
+SERVER = "heavy-server"  # жетон долгого процесса: держит его не больше одного сервера
+WAIT_EXIT = 75
+
+
+def try_slot(names=SLOTS):
+    for name in names:
+        p = os.path.join(LOCKS, name + ".lock")
+        try:
+            fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd, name
+        except BlockingIOError:
+            os.close(fd)
+    return None, None
+
+
+def status():
+    for name in SLOTS + (SERVER,):
+        p = os.path.join(LOCKS, name + ".lock")
+        try:
+            fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            print(f"{name}: нет файла места")
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            print(f"{name}: свободно")
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except BlockingIOError:
+            print(f"{name}: занято")
+        os.close(fd)
+    return 0
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 2
+    if argv[0] == "--status":
+        return status()
+    server = argv[0] == "--server"
+    if server:
+        argv = argv[1:]
+    if not argv:
+        print(__doc__)
+        return 2
+    if not any(os.path.exists(os.path.join(LOCKS, n + ".lock")) for n in SLOTS):
+        print("heavy: мест блокировки нет (pantheon install их создаёт) — запускаю без неё", file=sys.stderr)
+        return subprocess.call(argv)
+    try:
+        wait_max = float(os.environ.get("HEAVY_WAIT_MAX") or 0)
+    except ValueError:
+        wait_max = 0
+    held, waited = [], 0
+    need = ([((SERVER,), "сервер уже запущен другой ролью")] if server else []) + \
+        [(SLOTS, "оба места заняты другими тяжёлыми командами")]
+    for names, what in need:
+        fd, _ = try_slot(names)
+        while fd is None:
+            if wait_max and waited >= wait_max:
+                print(f"heavy: {what} — не дождалась места за {int(waited)} с, команда не запускалась",
+                      file=sys.stderr)
+                return WAIT_EXIT
+            if waited % 60 == 0:
+                print(f"heavy: {what} — жду ({waited // 60} мин)", file=sys.stderr)
+            time.sleep(2)
+            waited += 2
+            fd, _ = try_slot(names)
+        held.append(fd)
+    proc = subprocess.Popen(argv)
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda s, _f: proc.send_signal(s))
+    code = proc.wait()
+    for fd in held:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

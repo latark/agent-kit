@@ -7,11 +7,12 @@
                      в транскрипте как ваш (origin.kind = human): хук получает и сообщения других сессий, и отчёты
                      фоновых субагентов, и запуски по расписанию (`/loop`, CronCreate — их текст приходит чистым,
                      без обёртки, его пишет модель), и пробуждение хуком после /clear. Стартовое поручение сессии,
-                     которую запустили Зевс или тик (переменная PANTHEON_ORIGIN), — тоже не ваше слово.
+                     которую запустили Зевс или тик (переменная PANTHEON_ORIGIN и пометка «[Пантеон: …]» в начале), — тоже не ваше слово.
   ctx.py stop        Stop: контекст 150 тыс., дальше каждые +100 тыс. → Claude сверяет файл состояния, дописывает
                      недостающее и одной строкой говорит «Пора очистить: …» (штаб и сессии без роли; не claude -p).
   ctx.py start       SessionStart: запоминает сессию процесса (CLAUDE_PID не меняется при /clear); после сжатия
                      кладёт файл состояния; штабу — новые строки alerts.md и сводку новых строк журналов.
+  ctx.py dir-added   DirectoryAdded: штабу открыли папку через /add-dir — строка в alerts.md (SEC-26).
   ctx.py rewake      SessionStart clear, asyncRewake: если файл состояния обновлён после вашего последнего
                      сообщения, будит Claude «прочитай и продолжай»; иначе /clear — обычный чистый лист.
 
@@ -48,7 +49,9 @@ LOG_MAX = 1000000         # журнал сбоев хуков, байт
 INJECT_MAX = 9800         # Claude Code режет текст хука на 10 000 знаков
 ROLES_WITH_LOG = ("hq", "domain-coordinator", "workshop")
 # Обёртки, которые Claude Code ставит не вашему вводу. Это только быстрый отсев: решает пометка в транскрипте.
-NOT_OWNER = ("<cross-session-message", "Another Claude session sent a message", "<agent-message", "<task-notification",
+# «[Пантеон: …]» — поручение `pantheon start` и сообщение `pantheon wake` (их пишет не владелец). Пометку подделать
+# можно только в сторону «не записать»: строка с ней просто не попадёт в журнал.
+NOT_OWNER = ("[Пантеон:", "/goal [Пантеон:", "<cross-session-message", "Another Claude session sent a message", "<agent-message", "<task-notification",
              "[Cross-session", "Your claude.ai usage limit has reset", "<local-command-", "<command-name>")
 NEWLINES = re.compile("\r\n|[\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")  # всё, что Python считает концом строки
 HANDOFF_RE = re.compile(r"(?:~|/)[^\s'\"`;|&<>()]*?/HANDOFF\.md")
@@ -772,11 +775,32 @@ def hook_log(cmd, text):
         pass
 
 
+# --- /add-dir у штаба (SEC-26) ---------------------------------------------------
+
+def cmd_dir_added(ev):
+    """DirectoryAdded: Зевсу папку вне ~/ai/pantheon открываете только вы (/add-dir) — строка в alerts.md, чтобы
+    расширение прав было видно и его не забыли снять (снять — /permissions или перезапуск штаба)."""
+    if ev.get("agent_type") != "hq" or ev.get("agent_id"):
+        return 0
+    skip = {"transcript_path", "cwd", "session_id", "hook_event_name", "agent_type", "agent_id", "permission_mode"}
+    dirs = [str(v) for k, v in ev.items() if k not in skip and isinstance(v, str) and ("dir" in k or "path" in k)]
+    what = dirs[0] if dirs else json.dumps({k: v for k, v in ev.items() if k not in skip}, ensure_ascii=False)[:200]
+    line = "%s · штаб · вы открыли Зевсу папку %s (/add-dir) — снять: /permissions или перезапуск штаба" % (
+        datetime.now().strftime("%Y-%m-%d %H:%M"), " ".join(tilde(what).split()))
+    os.makedirs(os.path.join(STATE, "locks"), exist_ok=True)
+    with open(os.path.join(STATE, "locks", "alerts.lock"), "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        with open(os.path.join(PANTHEON, "alerts.md"), "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    return 0
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
-    fn = {"owner-log": cmd_owner_log, "stop": cmd_stop, "start": cmd_start, "rewake": cmd_rewake}.get(cmd)
+    fn = {"owner-log": cmd_owner_log, "stop": cmd_stop, "start": cmd_start, "rewake": cmd_rewake,
+          "dir-added": cmd_dir_added}.get(cmd)
     if not fn:
-        print("ctx.py: owner-log | stop | start | rewake", file=sys.stderr)
+        print("ctx.py: owner-log | stop | start | rewake | dir-added", file=sys.stderr)
         return 0
     try:
         return fn(read_event())

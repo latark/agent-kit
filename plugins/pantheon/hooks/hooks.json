@@ -23,6 +23,13 @@
         ]
       }
     ],
+    "DirectoryAdded": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" dir-added", "timeout": 10 }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [

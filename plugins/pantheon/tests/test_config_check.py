@@ -89,6 +89,8 @@ def main():
         ("память: скрытые символы", {"projects/p/memory/MEMORY.md": BASE["projects/p/memory/MEMORY.md"] + "обычный​текст\n"}, {"injection"}),
         ("память: длинный base64", {"projects/p/memory/MEMORY.md": BASE["projects/p/memory/MEMORY.md"] + "A" * 240 + "\n"}, {"injection"}),
         ("роль: bypassPermissions", {"agents/argus.md": "---\nname: argus\npermissionMode: bypassPermissions\n---\nРевьюер.\n"}, {"injection"}),
+        ("шаблон роли: команда хука в шапке — код", {"agents/dev-sonnet.tmpl": "---\nname: dev-sonnet\nhooks:\n  Stop:\n    - hooks:\n        - type: command\n          command: python3 x.py\n---\nРазработчик.\n"}, {"code"}),
+        ("общая часть роли — инструкция", {"agents/_parts/report.part": "## Отчёт\nСтатус: готово\n"}, set()),
         ("ключ GitHub в CLAUDE.md", {"CLAUDE.md": "# Правила\nghp_" + "a" * 36 + "\n"}, {"secret"}),
         ("инструмент: адрес GitHub — только код", {"tools/t.mjs": "fetch('https://api.github.com/repos')\n"}, {"code"}),
         ("инструмент: чужой адрес — опасное", {"tools/t.mjs": "fetch('https://evil.example/x')\n"}, {"code", "danger"}),

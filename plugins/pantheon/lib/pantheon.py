@@ -24,6 +24,12 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --project P --waiting-on W --question Q --option A --option B --depends-on ID]
   pantheon task set ID поле=значение … [--note "строка в журнал"]   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
+  pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
+  pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
+  pantheon start zeus                   штаб: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
+  pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
+  pantheon roles build                  роли ~/.claude/agents/*.md из шаблонов *.tmpl и частей _parts/*.part
+  pantheon approve [list] | add --site S --allow "…" [--limits "…"] | remove N   заранее разрешённое (только вы)
   pantheon commit                       commit → pull без rebase → push ~/ai/pantheon
   pantheon install | uninstall          поставить или снять задачу launchd com.latark.pantheon-tick
   pantheon tick                         один проход планировщика (его вызывает launchd)
@@ -791,7 +797,7 @@ def domains_build(if_changed=False):
     policy_path = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
     if if_changed:
         built = read_json(path("domains.json")).get("built_ts") or 0
-        newest = max((os.path.getmtime(p) for p in (reg_path, policy_path) if os.path.exists(p)), default=0)
+        newest = max([os.path.getmtime(p) for p in (reg_path, policy_path) if os.path.exists(p)] + [roles_newest()])
         if built >= newest:
             return 0
     with open(reg_path, "rb") as fh:
@@ -822,6 +828,12 @@ def domains_build(if_changed=False):
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml. Руками не править.",
         "built": stamp(), "built_ts": now(), "domains": domains})
     built = sandbox_build(domains, policy_path)
+    os.makedirs(path("locks"), exist_ok=True)
+    for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):  # места обёртки heavy: роль в песочнице сама их не создаст
+        open(path("locks", slot + ".lock"), "a").close()
+    roles = roles_build()
+    if roles:
+        print(f"роли: {', '.join(roles)}")
     if not if_changed:
         print(f"domains.json: {len(domains)} направлений → {path('domains.json').replace(HOME, '~')}; "
               f"настройки окон ролей: {', '.join(built)} → {path('settings').replace(HOME, '~')}/")
@@ -904,7 +916,7 @@ def _deny_forms(paths):
 # ~/.claude/plugins (туда ролям писать нельзя: protect-config), а не «рядом с этим плагином»: рабочая копия
 # ~/projects/agent-kit — папка metis-pantheon, её правят субагенты, и подменённый там guard стал бы защитой окон
 # (находка проверки безопасности 14.10). Ваших сессий без роли это не касается.
-GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit"
+GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob"
 MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks", "guard.py")
 
 
@@ -950,7 +962,10 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "type": "command", "command": f"python3 {shlex.quote(guard)} --strict", "timeout": 10,
             "onFailure": "block"}]}]}
     if compact:
+        # координатор: окно сжатия 200k (CTX-04); фоновая сессия уходит в свою worktree, и worktree работников лида
+        # ответвляются от неё (HEAD ветки эпика), а не от основной ветки (по умолчанию — "fresh")
         data["autoCompactWindow"] = compact
+        data["worktree"] = {"baseRef": "head"}
     return data
 
 
@@ -994,10 +1009,383 @@ def sandbox_build(domains, policy_path):
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
     built.append("workshop")
+    # штаб (SEC-26, вариант А): Зевс пишет только в ~/ai/pantheon, кроме .git и alerts.md; сеть закрыта (в веб он не
+    # ходит, SEC-13); мимо песочницы — только `pantheon start|wake|alert`: запуск сессий и тревоги. Личное ему открыто
+    # (SEC-11), кроме ключей git-crypt.
+    hq_cache = _real_dir(f"{caches}/hq", [caches], strict=True, create=True)
+    root = os.path.realpath(PANTHEON)
+    keys = [p for p in private_paths if "/.git/git-crypt" in p + "/"]  # ключи — не штабу: ~/ai/pantheon коммитит тик
+    hq = role_settings([root], None, [], hq_cache, False, keys, None, guard)
+    hq["sandbox"]["excludedCommands"] = list(HQ_EXCLUDED)
+    hq["sandbox"]["filesystem"]["denyWrite"] += [os.path.join(root, ".git"), os.path.join(root, "alerts.md")]
+    hq["sandbox"]["network"]["allowedDomains"] = []
+    write_json(os.path.join(out_dir, "hq.json"), hq)
+    built.append("hq")
     for f in os.listdir(out_dir):
         if f.endswith(".json") and f[:-5] not in built:
             os.remove(os.path.join(out_dir, f))
     return built
+
+
+# --- запуск сессий (SEC-26, COMM-10, ROLE-01, ROLE-02) -----------------------------------
+# Сессии Пантеона запускает только `pantheon start`: флаги — здесь, в коде, а не в файлах, которые пишет Зевс; настройки
+# окна — из ~/.local/state/pantheon/settings/ (собирает `pantheon domains build`, Зевсу и ролям туда не записать). Флагов
+# обхода разрешений нет и не будет. Поручение идёт позиционным аргументом и начинается с пометки «[Пантеон: …]»: хук
+# журнала ваших слов (ctx.py owner-log) такую строку не пишет, а ваш первый ответ сессии — пишет. Та же пометка — у
+# сообщения `pantheon wake`. Сессии с пометкой «остановлено вами» (~/.local/state/pantheon/stopped/<имя>, ставит
+# `pantheon stop`, шаг 1.4) не будит никто.
+# команды пульта штаба, которые пишут вне ~/ai/pantheon (alerts.md, ~/.local/state/pantheon) или запускают сессии со
+# своей песочницей; guard проверяет их и здесь (pantheon-acl)
+HQ_EXCLUDED = ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheon wake *", "pantheon archive",
+               "pantheon jobs *", "pantheon domains build", "pantheon roles build"]
+START_MARK = "[Пантеон:"
+WAKE_TEXT = (START_MARK + " пробуждение] Тебя прервало выключение или перезапуск. Сверь файл состояния и «начато» без "
+             "«сделано» (не повторяй внешнее действие, пока не проверишь, что оно не ушло), затем продолжай задачу.")
+COORDINATOR_GOAL = ("Цель достигнута, когда последний отчёт сессии — по формату отчёта роли, и либо «Статус: готово» и все "
+                    "пункты чек-листа эпика в STATUS.md отмечены сделанными, либо «Статус: заблокировано» с названным "
+                    "блокером и вопросом владельцу или Зевсу.")
+SESSION_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
+WORKSHOP = os.path.join(HOME, "projects", "workshop")
+OPEN_STATUSES = {"todo", "doing", "review"}  # «ждёт» не будят: ответа ещё нет
+
+
+def claude_bin():
+    import shutil
+    return shutil.which("claude") or os.path.join(HOME, ".local", "bin", "claude")
+
+
+def agents_all():
+    r = subprocess.run([claude_bin(), "agents", "--json", "--all"], capture_output=True, text=True, timeout=60)
+    try:
+        data = json.loads(r.stdout or "[]")
+    except ValueError:
+        return None
+    return data if isinstance(data, list) else data.get("agents") if isinstance(data, dict) else None
+
+
+def start_log(line):
+    os.makedirs(path("logs"), exist_ok=True)
+    with open(path("logs", "start.log"), "a") as fh:
+        fh.write(f"{stamp()}\t{line}\n")
+
+
+def start_target(target, rest):
+    """→ (имя сессии, роль, папка запуска, файл окна, поручение по умолчанию) или текст ошибки."""
+    domains = read_json(path("domains.json"), {}).get("domains") or {}
+    if target == "workshop":
+        if not rest or not SESSION_NAME.fullmatch(rest[0]):
+            return "pantheon start workshop <задача> [поручение]: имя задачи — a-z, 0-9, дефис"
+        task, folder = rest[0], os.path.join(WORKSHOP, rest[0])
+        os.makedirs(folder, exist_ok=True)
+        if os.path.islink(folder) or not os.path.realpath(folder).startswith(os.path.realpath(WORKSHOP) + "/"):
+            return f"папка задачи мастерской {folder} — ссылка или вне ~/projects/workshop"
+        return (f"daedalus-{task}", "workshop", folder, "workshop",
+                f"Прочитай ~/ai/pantheon/workshop/{task}.md и выполни задачу. Внешние действия — только по "
+                "approvals.toml или после «да» владельца в этой сессии.")
+    if target not in domains:
+        return f"нет направления «{target}» в domains.json (реестр ~/ai/pantheon/directions.toml → pantheon domains build)"
+    folders = [os.path.realpath(os.path.expanduser(f)) for f in domains[target]]
+    folder = next((f for f in folders if os.path.isdir(f)), None)
+    if not folder:
+        return f"у направления {target} нет папки на этом Mac: {domains[target]}"
+    return (target, "domain-coordinator", folder, target,
+            f"Прочитай ~/ai/pantheon/directions/{target}/STATUS.md и inbox/, затем продолжай текущий эпик по нему.")
+
+
+def start(rest):
+    """pantheon start <направление> [поручение] | workshop <задача> [поручение] | zeus  [--from кто] [--dry-run]"""
+    dry = "--dry-run" in rest
+    rest = [a for a in rest if a != "--dry-run"]
+    origin = "owner"
+    if "--from" in rest:
+        i = rest.index("--from")
+        if i + 1 >= len(rest) or rest[i + 1] not in ("zeus", "tick", "owner"):
+            print("pantheon start: --from zeus | tick | owner", file=sys.stderr)
+            return 2
+        origin, rest = rest[i + 1], rest[:i] + rest[i + 2:]
+    if not rest:
+        print(start.__doc__, file=sys.stderr)
+        return 2
+    target, rest = rest[0], rest[1:]
+    if target == "zeus":
+        # штаб — ваша интерактивная сессия в iTerm: команда заменяет себя на claude в ~/ai/pantheon
+        argv = [claude_bin(), "--agent", "hq", "--name", "zeus", "--settings", path("settings", "hq.json")]
+        if dry:
+            print(shlex.join(argv), f"(папка {PANTHEON})")
+            return 0
+        if not os.path.isfile(path("settings", "hq.json")):
+            print("нет окна штаба — сначала pantheon domains build", file=sys.stderr)
+            return 1
+        if not sys.stdin.isatty():
+            print("штаб запускается в вашем терминале: pantheon start zeus", file=sys.stderr)
+            return 2
+        start_log(f"zeus\t{origin}\t{PANTHEON}")
+        os.chdir(PANTHEON)
+        os.execv(argv[0], argv)
+    got = start_target(target, rest)
+    if isinstance(got, str):
+        print(f"pantheon start: {got}", file=sys.stderr)
+        return 2
+    name, role, folder, window, default_task = got
+    if target == "workshop":
+        rest = rest[1:]
+    win = path("settings", window + ".json")
+    if not os.path.isfile(win):
+        print(f"pantheon start: нет окна {win.replace(HOME, '~')} — pantheon domains build", file=sys.stderr)
+        return 1
+    if os.path.exists(path("stopped", name)):
+        print(f"pantheon start: {name} остановлена вами (pantheon resume {name})", file=sys.stderr)
+        return 1
+    same = [a for a in agents_all() or [] if a.get("name") == name]
+    live = [a for a in same if a.get("state") in ("working", "blocked")]
+    if live and not dry:
+        print(f"pantheon start: {name} уже работает ({live[0].get('id')}, {live[0].get('state')}) — напиши ей "
+              f"сообщением или claude attach {live[0].get('id')}", file=sys.stderr)
+        return 1
+    # CTX-10: эпик закончен — сессия «done» ещё висит в списке; новый эпик — новая сессия с тем же именем, а старая
+    # останавливается (переписка сохраняется: claude attach <id>), иначе Claude Code назовёт новую «имя (2)»
+    for a in same:
+        if a.get("state") == "done" and a.get("pid") and not dry:
+            subprocess.run([claude_bin(), "stop", a.get("id")], capture_output=True, text=True, timeout=60)
+            start_log(f"stop-done\t{name}\t{a.get('id')}")
+    # окно этого запуска: настройки окна + PANTHEON_ORIGIN (кто запустил) — переменная сессии и её хуков
+    data = read_json(win, {})
+    data.setdefault("env", {})["PANTHEON_ORIGIN"] = origin
+    data["env"]["PANTHEON_SESSION"] = name
+    run = path("settings", "run", name + ".json")
+    task = " ".join(rest).strip() or default_task
+    prompt = f"{START_MARK} поручение от {origin}] {task}"
+    if role == "domain-coordinator":
+        # DONE-02: /goal первым словом поручения — Stop-хук сессии с отдельной проверяющей моделью: координатор не
+        # закончит, пока условие не выполнено (проверено вживую 15.10: `claude --bg "/goal …"` включает цель)
+        prompt = "/goal " + prompt + " " + COORDINATOR_GOAL
+    argv = [claude_bin(), "--bg", "--agent", role, "--name", name, "--settings", run, prompt]
+    if dry:
+        print(shlex.join(argv), f"(папка {folder})")
+        return 0
+    os.makedirs(os.path.dirname(run), exist_ok=True)
+    write_json(run, data)
+    r = subprocess.run(argv, cwd=folder, capture_output=True, text=True, timeout=180)
+    start_log(f"{name}\t{origin}\t{folder}\t{r.returncode}")
+    sys.stdout.write(r.stdout)
+    sys.stderr.write(r.stderr)
+    return r.returncode
+
+
+def open_tasks(name):
+    """Открытые задачи, которые ведёт сессия: её направление, владелец или аренда."""
+    out = []
+    for tid, (_, head, _) in tasks_mod().load_tasks(PANTHEON).items():
+        if head.get("status") not in OPEN_STATUSES:
+            continue
+        if name in (head.get("owner"), head.get("claimed_by"), head.get("direction")):
+            out.append(tid)
+    return out
+
+
+def wake(rest):
+    """pantheon wake [--dry-run]: прерванные сессии Пантеона (failed, stopped) с открытой задачей — поднять и сказать
+    «продолжай». Свои метки «остановлено вами» и чужие сессии (не направление и не daedalus-*) не трогает."""
+    dry = "--dry-run" in rest
+    with lock("wake", block=False) as got:
+        if not got:
+            print("pantheon wake: уже идёт в другом процессе")
+            return 0
+        return _wake(dry)
+
+
+def _wake(dry):
+    agents = agents_all()
+    if agents is None:
+        print("pantheon wake: claude agents --json не ответил", file=sys.stderr)
+        return 1
+    domains = read_json(path("domains.json"), {}).get("domains") or {}
+    done = 0
+    for a in agents:
+        name, state = a.get("name") or "", a.get("state")
+        if state not in ("failed", "stopped") or not (name in domains or name.startswith("daedalus-")):
+            continue
+        if os.path.exists(path("stopped", name)):
+            continue
+        newer = [b for b in agents if b.get("name") == name and (b.get("startedAt") or 0) > (a.get("startedAt") or 0)]
+        if newer:
+            continue  # эпик уже продолжен новой сессией с тем же именем
+        tasks = open_tasks(name)
+        if not tasks:
+            continue
+        argv = [claude_bin(), "--resume", a.get("sessionId") or a.get("id"), "--bg", WAKE_TEXT]
+        print(f"{'будет поднята' if dry else 'поднимаю'}: {name} ({a.get('id')}, {state}) — задачи {', '.join(tasks[:3])}")
+        if dry:
+            continue
+        r = subprocess.run(argv, cwd=a.get("cwd") or HOME, capture_output=True, text=True, timeout=180)
+        start_log(f"wake\t{name}\t{a.get('id')}\t{r.returncode}")
+        if r.returncode:
+            alert(f"pantheon wake: {name} не поднялась ({r.stderr.strip()[:200]})", "pantheon")
+        done += 1
+    if not done:
+        print("будить некого")
+    return 0
+
+
+# --- роли (ROLE-15, ROLE-16, ROLE-17) -------------------------------------------------------
+# Источник ролей — шаблоны ~/.claude/agents/<роль>.tmpl и общие части ~/.claude/agents/_parts/<часть>.part (их
+# синхронизирует claude-config; правит только metis-pantheon — guard protect-config). Сборка кладёт рядом <роль>.md —
+# то, что читает Claude Code; собранные файлы claude-config не синхронизирует (строки в ~/.claude/.gitignore): на каждом
+# Mac их собирает тик вместе с domains.json, когда меняется шаблон, часть или реестр.
+#   {{> часть}}         — текст части (одна общая формулировка: отчёт, находка, внешние действия, доведение до конца);
+#   hephaestus, apollo  — роли лидов: по одной на направление с этим лидом в поле leads реестра,
+#                         hephaestus-<коротко> (athena-broker → broker), подстановки {{direction}} {{short}}
+#                         {{project}} {{folders}}.
+# Свой файл узнаётся по строке-метке после шапки; файл без метки (свой ли, чужой ли) сборка не трогает, собранный файл
+# без шаблона — убирает. Ошибка в шаблоне (нет части, осталась {{…}}) — роль не пишется, старая версия остаётся.
+AGENTS = os.path.join(HOME, ".claude", "agents")
+PARTS = os.path.join(AGENTS, "_parts")
+LEAD_ROLES = ("hephaestus", "apollo")
+ROLE_MARK = "<!-- собрано pantheon roles build из {tmpl} — правят шаблон, а не этот файл -->"
+ROLE_NAME = re.compile(r"[a-z][a-z0-9-]{0,40}")
+
+
+def _role_text(tmpl_text):
+    def part(m):
+        p = os.path.join(PARTS, m.group(1) + ".part")
+        if not ROLE_NAME.fullmatch(m.group(1)) or not os.path.isfile(p):
+            raise ValueError(f"нет части {m.group(1)}")
+        return open(p, encoding="utf-8").read().rstrip("\n")
+    return re.sub(r"\{\{>\s*([\w-]+)\s*\}\}", part, tmpl_text)
+
+
+def _marked(text, tmpl):
+    """Метка — сразу после шапки YAML: файл роли должен начинаться с ---."""
+    end = text.find("\n---\n", 3) if text.startswith("---\n") else -1
+    if end < 0:
+        raise ValueError("нет шапки YAML (--- … ---)")
+    return text[:end + 5] + ROLE_MARK.format(tmpl=tmpl) + "\n" + text[end + 5:]
+
+
+def roles_build():
+    with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
+        reg = tomllib.load(fh)
+    want, errors = {}, []
+    tmpls = sorted(f for f in os.listdir(AGENTS) if f.endswith(".tmpl")) if os.path.isdir(AGENTS) else []
+    for f in tmpls:
+        base = f[:-5]
+        if not ROLE_NAME.fullmatch(base):
+            errors.append(f"{f}: имя не по образцу")
+            continue
+        try:
+            text = _role_text(open(os.path.join(AGENTS, f), encoding="utf-8").read())
+        except (OSError, ValueError) as e:
+            errors.append(f"{f}: {e}")
+            continue
+        if base not in LEAD_ROLES:
+            want[base + ".md"] = (f, text)
+            continue
+        for d in reg.get("direction") or []:
+            name = d.get("name", "")
+            if base not in (d.get("leads") or []) or not re.fullmatch(r"[a-z0-9]+-[a-z0-9-]+", name):
+                continue
+            short = name.split("-", 1)[1]
+            want[f"{base}-{short}.md"] = (f, text.replace("{{direction}}", name).replace("{{short}}", short)
+                                          .replace("{{project}}", d.get("project", ""))
+                                          .replace("{{folders}}", ", ".join(d.get("folders") or [])))
+    made = []
+    for fname, (tmpl, text) in sorted(want.items()):
+        out = os.path.join(AGENTS, fname)
+        try:
+            if "{{" in text:
+                raise ValueError("осталась подстановка {{…}}")
+            text = _marked(text, tmpl)
+        except ValueError as e:
+            errors.append(f"{tmpl} → {fname}: {e}")
+            continue
+        old = open(out, encoding="utf-8").read() if os.path.exists(out) else None
+        if old is not None and "pantheon roles build" not in old[:2000]:
+            errors.append(f"{fname} есть и написан не сборкой — не трогаю (убрать его или шаблон {tmpl})")
+            continue
+        if old != text:
+            write_atomic(out, text)
+            made.append(fname)
+    for f in sorted(os.listdir(AGENTS)) if os.path.isdir(AGENTS) else []:
+        p = os.path.join(AGENTS, f)
+        if f.endswith(".md") and f not in want and not os.path.islink(p) and os.path.isfile(p):
+            if "pantheon roles build" in open(p, encoding="utf-8").read(2000):
+                os.remove(p)
+                made.append(f"-{f}")
+    for e in errors:
+        print(f"roles build: {e}", file=sys.stderr)
+    if errors:
+        alert_once("roles-build", "\n".join(errors), f"pantheon roles build: {errors[0]}"
+                   + (f" (и ещё {len(errors) - 1})" if len(errors) > 1 else ""), "pantheon")
+    return made
+
+
+def roles_newest():
+    files = [os.path.join(PANTHEON, "directions.toml")]
+    for d in (AGENTS, PARTS):
+        if os.path.isdir(d):
+            files += [os.path.join(d, f) for f in os.listdir(d) if f.endswith((".tmpl", ".part"))]
+    return max((os.path.getmtime(p) for p in files if os.path.exists(p)), default=0)
+
+
+# --- заранее разрешённые действия (DONE-11, SEC-26: красный флаг исследования) ------------------
+# approvals.toml — ваше согласие заранее, поэтому он лежит вне зоны записи Зевса и ролей: ~/.claude/pantheon/ (песочница
+# и guard protect-config), а пишет его только эта команда, которую guard не даёт ни одной роли, даже штабу. Вы набираете
+# её сами: в своём терминале или в окне Зевса после «!». Деньги, новые публикации, сообщения людям и удаление сюда не
+# вносятся — всегда отдельное «да».
+APPROVALS = os.path.join(HOME, ".claude", "pantheon", "approvals.toml")
+APPROVALS_HEAD = """# Заранее разрешённые действия мастерской на сайтах (DONE-11 карты решений).
+# Пишет только команда владельца `pantheon approve` (роли и штаб её запустить не могут — guard). Мастерская читает этот
+# файл перед действием на сайте; деньги, новые публикации, сообщения людям, удаление и всё, чего тут нет, — отдельное «да».
+"""
+
+
+def approvals_load():
+    try:
+        with open(APPROVALS, "rb") as fh:
+            return tomllib.load(fh).get("approval") or []
+    except (OSError, ValueError):
+        return []
+
+
+def toml_str(s):
+    return json.dumps(str(s), ensure_ascii=False)
+
+
+def approve(rest):
+    """pantheon approve [list] | add --site S --allow "что можно" [--limits "граница"] | remove N"""
+    items = approvals_load()
+    if not rest or rest[0] == "list":
+        if not items:
+            print("заранее разрешённых действий нет")
+        for i, a in enumerate(items, 1):
+            print(f"{i}. {a.get('site')}: {a.get('allow')}" + (f" (граница: {a['limits']})" if a.get("limits") else "")
+                  + f" — с {a.get('added', '?')}")
+        return 0
+    if rest[0] == "add":
+        def opt(k):
+            return rest[rest.index(k) + 1] if k in rest and rest.index(k) + 1 < len(rest) else None
+        site, allow, limits = opt("--site"), opt("--allow"), opt("--limits")
+        if not site or not allow:
+            print(approve.__doc__, file=sys.stderr)
+            return 2
+        if re.search(r"оплат|плат[её]ж|перевод денег|удал|публикац|сообщени|письм", allow, re.I):
+            print("деньги, удаление, публикации и сообщения людям заранее не разрешаются — только отдельное «да»",
+                  file=sys.stderr)
+            return 2
+        items.append({"site": site, "allow": allow, "limits": limits or "", "added": stamp(), "host": host()})
+    elif rest[0] == "remove" and len(rest) > 1 and rest[1].isdigit() and 1 <= int(rest[1]) <= len(items):
+        items.pop(int(rest[1]) - 1)
+    else:
+        print(approve.__doc__, file=sys.stderr)
+        return 2
+    body = APPROVALS_HEAD + "".join(
+        f"\n[[approval]]\nsite = {toml_str(a.get('site'))}\nallow = {toml_str(a.get('allow'))}\n"
+        f"limits = {toml_str(a.get('limits', ''))}\nadded = {toml_str(a.get('added', ''))}\nhost = {toml_str(a.get('host', ''))}\n"
+        for a in items)
+    os.makedirs(os.path.dirname(APPROVALS), exist_ok=True)
+    write_atomic(APPROVALS, body)
+    start_log(f"approve\t{rest[0]}\t{len(items)}")
+    return approve(["list"])
 
 
 # --- установка ----------------------------------------------------------------------
@@ -1035,11 +1423,16 @@ def install():
                          os.path.join(HOME, ".local", "bin"), "/usr/bin:/bin:/usr/sbin:/sbin"])
     with open(PLIST, "w") as fh:
         fh.write(PLIST_TMPL.format(label=LABEL, tick=tick_bin, path=env_path, log=path("logs", "tick.log")))
+    for cmd in ("pantheon", "heavy"):  # heavy — обёртка тяжёлых команд для ролей (MEM-03)
+        link = os.path.join(HOME, ".local", "bin", cmd)
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        if os.path.islink(link) or os.path.exists(link):
+            os.remove(link)
+        os.symlink(os.path.join(CURRENT, "bin", cmd), link)
     link = os.path.join(HOME, ".local", "bin", "pantheon")
-    os.makedirs(os.path.dirname(link), exist_ok=True)
-    if os.path.islink(link) or os.path.exists(link):
-        os.remove(link)
-    os.symlink(os.path.join(CURRENT, "bin", "pantheon"), link)
+    os.makedirs(path("locks"), exist_ok=True)
+    for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):
+        open(path("locks", slot + ".lock"), "a").close()
     if os.path.isdir(os.path.join(PANTHEON, ".git")):
         merge = os.path.join(CURRENT, "scripts", "git-crypt-merge.sh")
         git("config", "merge.gitcrypt-text.name", "git-crypt text merge")
@@ -1082,10 +1475,10 @@ def build_app():
 
 def uninstall():
     subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
-    for p in (PLIST, os.path.join(HOME, ".local", "bin", "pantheon")):
+    for p in (PLIST, os.path.join(HOME, ".local", "bin", "pantheon"), os.path.join(HOME, ".local", "bin", "heavy")):
         with contextlib.suppress(FileNotFoundError):
             os.remove(p)
-    print("снято: задача launchd и команда pantheon (метки в ~/.local/state/pantheon остались)")
+    print("снято: задача launchd и команды pantheon и heavy (метки в ~/.local/state/pantheon остались)")
     return 0
 
 
@@ -1288,6 +1681,16 @@ def main(argv):
         return check([a for a in rest if not a.startswith("-")] or None, quiet="--quiet" in rest)
     if cmd == "task":
         return task_cmd(rest)
+    if cmd == "start":
+        return start(rest)
+    if cmd == "wake":
+        return wake(rest)
+    if cmd == "roles" and rest[:1] == ["build"]:
+        made = roles_build()
+        print(f"роли: {', '.join(made) if made else 'без изменений'}")
+        return 0
+    if cmd == "approve":
+        return approve(rest)
     if cmd == "install":
         return install()
     if cmd == "uninstall":

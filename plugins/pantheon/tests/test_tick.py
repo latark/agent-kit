@@ -231,7 +231,7 @@ def main():
                  '"~/projects/ln"]\n')
     with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "a") as fh:
         fh.write('[sandbox_write]\nmetis-pantheon = ["~/.cache/metis", "~/ai/pantheon", "~/.cache/../.ssh"]\n'
-                 '[private]\ncoordinators = ["mnemo-brain"]\npaths = ["~/ai/knowledge/me"]\n')
+                 '[private]\ncoordinators = ["mnemo-brain"]\npaths = ["~/ai/knowledge/me", "~/ai/pantheon/.git/git-crypt"]\n')
     os.makedirs(os.path.join(state, "settings"), exist_ok=True)
     open(os.path.join(state, "settings", "old-direction.json"), "w").write("{}")
     subprocess.run([sys.executable, "-I", LIB, "domains", "build"], env=env, capture_output=True)
@@ -276,7 +276,18 @@ def main():
     check("строгий guard в окне роли (SEC-29): --strict, onFailure block, только клон маркетплейса, у мастерской тоже",
           len(hk) == 1 and hk[0]["onFailure"] == "block" and hk[0]["command"] == f"python3 {gpath} --strict"
           and "projects" not in hk[0]["command"] and sw["hooks"] == sa["hooks"]
-          and sa["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Write|Edit|MultiEdit|NotebookEdit")
+          and sa["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob")
+    hq = load("hq")
+    hb = hq["sandbox"]
+    check("окно штаба (SEC-26): пишет только ~/ai/pantheon без .git и alerts.md, сети нет, мимо песочницы — start/wake/alert",
+          hb["filesystem"]["allowWrite"][0] == real("pantheon") and real("projects/br") not in hb["filesystem"]["allowWrite"]
+          and real("pantheon/.git") in hb["filesystem"]["denyWrite"] and real("pantheon/alerts.md") in hb["filesystem"]["denyWrite"]
+          and hb["network"]["allowedDomains"] == [] and "~/ai/pantheon/.git/git-crypt" in hb["filesystem"]["denyRead"] and "pantheon start *" in hb["excludedCommands"]
+          and "git push *" not in hb["excludedCommands"] and hq["hooks"] == sa["hooks"] and "worktree" not in hq
+          and "~/ai/knowledge/me" not in hb["filesystem"]["denyRead"])
+    check("окна направлений: worktree от HEAD (эпик), у мастерской — нет; места heavy созданы",
+          sa["worktree"] == {"baseRef": "head"} and sm["worktree"] == {"baseRef": "head"} and "worktree" not in sw
+          and os.path.exists(os.path.join(state, "locks", "heavy-cmd-2.lock")))
 
     # архив (STATE-14)
     tmp = tempfile.mkdtemp(prefix="tick-test-")
