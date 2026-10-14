@@ -35,6 +35,13 @@ def setup(home):
         # реестр «по ошибке» отдаёт athena папку agent-kit — привилегий Метиды это не даёт
         "athena-broker-2": ["~/projects/agent-kit/sub"],
     }}, open(os.path.join(home, ".local/state/pantheon/domains.json"), "w"))
+    # шаг 1.2: репозиторий брокера на ветке эпика, alexbroker — на main (правило push); личное в ~/ai/knowledge/me
+    for repo, branch in (("projects/brokerAssistantApp", "epic-tax"), ("projects/alexbroker", "main")):
+        subprocess.run(["git", "init", "-q", "-b", branch, os.path.join(home, repo)], check=True)
+    os.makedirs(os.path.join(home, "ai/knowledge/me"), exist_ok=True)
+    os.makedirs(os.path.join(home, "ai/knowledge/raw"), exist_ok=True)
+    open(os.path.join(home, "ai/knowledge/me/finance.md"), "w").close()
+    os.makedirs(os.path.join(home, "projects/brokerAssistantApp/.claude/worktrees/agent-1"), exist_ok=True)
     open(os.path.join(home, ".claude/pantheon/policy.toml"), "w").write(
         'always = ["~/.claude/agent-memory"]\n[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n'
         'mnemo-brain = ["~/ai/knowledge"]\n[agent_extra]\nprometheus = ["~/ai/knowledge"]\n')
@@ -61,6 +68,9 @@ def main():
     W = lambda path: ("Write", {"file_path": path, "content": "x"})
     E = lambda path: ("Edit", {"file_path": path, "old_string": "a", "new_string": "b"})
     B = lambda cmd: ("Bash", {"command": cmd})
+    R = lambda path: ("Read", {"file_path": path})
+    G = lambda path: ("Grep", {"pattern": "налог", "path": path})
+    K = lambda rel: os.path.join(home, "ai", "knowledge", rel)
     br, ak, alex, ws = "projects/brokerAssistantApp", "projects/agent-kit", "projects/alexbroker", "projects/workshop/visa"
     cases = [
         # (имя, ожидание, папка запуска, роль, субагент, (инструмент, вход))
@@ -226,6 +236,84 @@ def main():
          ("Write", {"file_path": os.path.join(home, br, "c.mjs"), "content": "read DevTools" + "ActivePort"})),
         ("tg-secret: чтение ключа tg-read — отказ", "deny", br, "", False,
          B("security find-generic-" + "password -s tg-" + "read -w")),
+        # --- шаг 1.2: команды пульта start/wake/roles — штаб и вы; approve — только вы ---
+        ("hq: pantheon start athena-broker", "allow", "ai/pantheon", "hq", False, B("pantheon start athena-broker --from zeus")),
+        ("координатор: pantheon start — отказ", "deny", br, "domain-coordinator", False, B("pantheon start hermes-alex")),
+        ("субагент: pantheon wake — отказ", "deny", br, "general-purpose", True, B("pantheon wake")),
+        ("hq: pantheon approve — отказ", "deny", "ai/pantheon", "hq", False, B("pantheon approve add --site a --allow b")),
+        ("вы: pantheon approve", "allow", ".", "", False, B("pantheon approve add --site a --allow b")),
+        ("мастерская: pantheon approve list — отказ", "deny", ws, "workshop", False, B("pantheon approve list")),
+        # --- шаг 1.2: private (SEC-11, SEC-21) ---
+        ("private: argus читает me/ — отказ", "deny", br, "argus", True, R(K("me/finance.md"))),
+        ("private: prometheus Grep по всей ~/ai/knowledge — отказ", "deny", br, "prometheus", True, G(K(""))),
+        ("private: prometheus Grep по raw/ — можно", "allow", br, "prometheus", True, G(K("raw"))),
+        ("private: hq читает me/", "allow", ".", "hq", False, R(K("me/finance.md"))),
+        ("private: hq — ключ git-crypt нет", "deny", ".", "hq", False, R(K(".git/git-crypt/keys/default"))),
+        ("private: chiron — ключ git-crypt pantheon нет", "deny", ".", "chiron", True, B("cat ~/ai/pantheon/.git/git-crypt/keys/default")),
+        ("private: chiron (субагент Зевса) читает me/", "allow", ".", "chiron", True, R(K("me/finance.md"))),
+        ("private: mnemo-brain пишет в me/", "allow", "ai/knowledge", "domain-coordinator", False, W(K("me/x.md"))),
+        ("push: mnemo-brain не отправляет сам (SEC-13)", "deny", "ai/knowledge", "domain-coordinator", False,
+         B("git push origin wiki-sync")),
+        ("push: mnemo-brain коммитит", "allow", "ai/knowledge", "domain-coordinator", False, B("git commit -qm wiki")),
+        ("private: субагент mnemo-brain — отказ", "deny", "ai/knowledge", "general-purpose", True, R(K("me/finance.md"))),
+        ("private: athena после cd ~/ai/knowledge — отказ", "deny", br, "domain-coordinator", False,
+         B(f"cd {home}/ai/knowledge && cat me/finance.md")),
+        ("private: Метида — отказ (SEC-21)", "deny", ak, "domain-coordinator", False, R(K("me/finance.md"))),
+        ("private: workshop Glob ~/ai/knowledge/me/** — отказ", "deny", ws, "workshop", False,
+         ("Glob", {"pattern": f"{home}/ai/knowledge/me/**/*.md"})),
+        ("private: журнал штаба zeus.md — отказ координатору", "deny", br, "domain-coordinator", False,
+         R(os.path.join(home, ".local/state/pantheon/owner-log/zeus.md"))),
+        ("private: ваша сессия без роли читает me/", "allow", ".", "", False, R(K("me/finance.md"))),
+        ("private: rg по ~/ai/knowledge — отказ prometheus", "deny", br, "prometheus", True, B(f"rg налог {home}/ai/knowledge")),
+        ("private: ls ~/ai/knowledge — можно", "allow", br, "prometheus", True, B(f"ls {home}/ai/knowledge")),
+        # --- cdp-role (SEC-13, BROW-06, SEC-21) ---
+        ("cdp: координатор вызывает демон — отказ", "deny", br, "domain-coordinator", False,
+         B("curl -s 127.0.0.1:9333/health")),
+        ("cdp: Метида вызывает демон — отказ", "deny", ak, "domain-coordinator", False,
+         B("curl -s -X POST localhost:9334/eval -d '{}'")),
+        ("cdp: мастерская действует через демон", "allow", ws, "workshop", False,
+         B("curl -s -X POST 127.0.0.1:9333/cmd -d '{}'")),
+        ("cdp: prometheus читает /eval", "allow", br, "prometheus", True, B("curl -s -X POST 127.0.0.1:9333/eval -d '{}'")),
+        ("cdp: prometheus /cmd — отказ", "deny", br, "prometheus", True, B("curl -s -X POST 127.0.0.1:9333/cmd -d '{}'")),
+        ("cdp: /close — отказ и мастерской", "deny", ws, "workshop", False, B("curl -s -X POST 127.0.0.1:9333/close")),
+        ("cdp: hq запускает демон — отказ", "deny", ".", "hq", False, B("node ~/.claude/tools/cdp-daemon.mjs comet")),
+        ("cdp: ваша сессия без роли — можно", "allow", ".", "", False, B("curl -s 127.0.0.1:9333/health")),
+        ("cdp: мастерская мимо демона на 9222 — отказ", "deny", ws, "workshop", False, B("curl -s 127.0.0.1:9222/json/version")),
+        ("cdp: prometheus читает DevToolsActivePort — отказ", "deny", br, "prometheus", True,
+         B("cat ~/Library/Application\\ Support/Comet/DevToolsActivePort")),
+        ("cdp: ws devtools/browser — отказ", "deny", br, "dev-sonnet", True,
+         B("node -e \"new WebSocket('ws://127.0.0.1:9222/devtools/browser/x')\"")),
+        ("cdp: ваша сессия на 9222 — можно", "allow", ".", "", False, B("curl -s 127.0.0.1:9222/json/version")),
+        # --- push (DONE-07, SEC-13) ---
+        ("push: координатор отправляет ветку эпика", "allow", br, "domain-coordinator", False, B("git push")),
+        ("push: лид — в develop", "allow", br, "hephaestus-broker", True, B("git push origin epic-tax:develop")),
+        ("push: лид — в main — отказ", "deny", br, "hephaestus-broker", True, B("git push origin develop:main")),
+        ("push: HEAD:refs/heads/master — отказ", "deny", br, "domain-coordinator", False, B("git push origin HEAD:refs/heads/master")),
+        ("push: текущая ветка main — отказ", "deny", alex, "domain-coordinator", False, B("git push")),
+        ("push: --force — отказ", "deny", br, "domain-coordinator", False, B("git push --force-with-lease origin epic-tax")),
+        ("push: удаление ветки — отказ", "deny", br, "domain-coordinator", False, B("git push origin :develop")),
+        ("push: --all — отказ", "deny", br, "domain-coordinator", False, B("git push --all")),
+        ("push: dev-sonnet — отказ", "deny", br, "dev-sonnet", True, B("git push origin epic-tax")),
+        ("push: argus — отказ", "deny", br, "argus", True, B("git -C . push origin x")),
+        ("push: hq — отказ", "deny", ".", "hq", False, B("git push origin x")),
+        ("push: cd и push без ветки — отказ", "deny", br, "domain-coordinator", False, B(f"cd {home}/{alex} && git push")),
+        ("push: gh pr merge — отказ", "deny", br, "domain-coordinator", False, B("gh pr merge 12 --merge")),
+        ("push: ваша сессия в main — можно", "allow", alex, "", False, B("git push origin main")),
+        ("push: git push внутри текста коммита — не отправка", "allow", br, "dev-sonnet", True,
+         B("git commit -m 'не делать git push в main'")),
+        # --- terminal (SEC-30) ---
+        ("terminal: osascript — отказ координатору", "deny", br, "domain-coordinator", False,
+         B("osascript -e 'tell application \"iTerm2\" to tell current session of current window to write text \"да\"'")),
+        ("terminal: tmux send-keys — отказ", "deny", br, "dev-haiku", True, B("tmux send-keys -t 0 'да' Enter")),
+        ("terminal: env osascript — отказ", "deny", ws, "workshop", False, B("env osascript -e 'beep'")),
+        ("terminal: screen stuff — отказ", "deny", br, "domain-coordinator", False, B("screen -S x -X stuff 'да\\n'")),
+        ("terminal: ваша сессия без роли — можно", "allow", ".", "", False, B("osascript -e 'beep'")),
+        # --- dev-server: исключение для разработчика и talos в worktree (ROLE-23) ---
+        ("dev-server: dev-sonnet в worktree — можно", "allow", br, "dev-sonnet", True, B("PORT=4123 pnpm dev"),
+         br + "/.claude/worktrees/agent-1"),
+        ("dev-server: dev-sonnet вне worktree — отказ", "deny", br, "dev-sonnet", True, B("pnpm dev")),
+        ("dev-server: координатор в worktree — отказ", "deny", br, "domain-coordinator", False, B("pnpm dev"),
+         br + "/.claude/worktrees/agent-1"),
     ]
     failed = 0
     for case in cases:

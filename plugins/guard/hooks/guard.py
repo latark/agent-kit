@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Правила из ~/.claude/CLAUDE.md, которые Claude Code проверяет сам, а не на память модели.
 
-Вызывается hook'ами PreToolUse (Bash, Write, Edit, MultiEdit) и Stop плагина guard (hooks/hooks.json).
+Вызывается hook'ами PreToolUse (Bash, Write, Edit, MultiEdit, NotebookEdit, Read, Grep, Glob) и Stop плагина guard
+(hooks/hooks.json).
 Правила:
   dev-server   — не запускать dev-сервер (next dev, npm/pnpm/yarn/bun run dev, turbo dev);
   attribution  — никаких пометок об авторстве Claude в коммитах, тегах и PR;
@@ -12,7 +13,11 @@
   domain       — субагент, тиммейт, координатор и сессия мастерской пишут только в своё направление;
   pantheon-acl — запись в ~/ai/pantheon по карте прав; копия ~/ai/pantheon-view и ~/.local/state/pantheon — ни одной роли;
   protect-config — защиты (хуки, роли, плагины, policy.toml, настройки, sync.sh, ~/.zshrc) правит только
-                 metis-pantheon в своей сессии; остальные роли и любые субагенты — нет (SEC-14).
+                 metis-pantheon в своей сессии; остальные роли и любые субагенты — нет (SEC-14);
+  private      — личное (me/, ключи git-crypt, журнал штаба) читают и пишут только hq, chiron и mnemo-brain (SEC-11);
+  cdp-role     — демон браузера с вашими входами — только мастерская и prometheus (чтение), /close — никому (SEC-13);
+  push         — git push: координатор, лиды и мастерская, не в main и master; gh pr merge — нет (DONE-07);
+  terminal     — роли не печатают в терминал: osascript, tmux send-keys, screen stuff (SEC-30).
 
 Модель угроз (SEC-27, решено 14.10). guard ловит ошибки агента: запись не в своё направление, правку чужого
 файла штаба или защит, команду пульта не той ролью. От намеренного обхода и внедрённых инструкций он не
@@ -33,7 +38,7 @@
   --strict      — хук окна роли с onFailure: "block" (собирает `pantheon domains build`, SEC-29): любой сбой
                   самого скрипта — выход 2, действие остановлено.
 При сбое (SEC-10): правила-подсказки (dev-server, attribution, cdp, nextjs) пропускают действие; проверка прав
-(domain, pantheon-acl, protect-config) и tg-secret останавливают роль; сбой всего скрипта в вашей сессии
+(domain, pantheon-acl, protect-config, private, cdp-role, push, terminal) и tg-secret останавливают роль; сбой всего скрипта в вашей сессии
 пропускает действие, в окне роли — останавливает. Каждый сбой — строка в
 ~/.local/state/pantheon/logs/guard-failures.log (время, режим, место, тип ошибки — без текста команды);
 строка статуса показывает число сбоев за сутки.
@@ -104,7 +109,19 @@ def strip_quoted(cmd):
     return re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", " ", cmd)
 
 
-def check_dev_server(cmd):
+# Исключение (ROLE-23): разработчик и talos — субагенты в своей worktree (.claude/worktrees/…) — сами поднимают
+# dev-сервер на выделенном порту и гасят его после проверки. Ваши сессии и координаторы — по-прежнему нет.
+DEV_SERVER_ROLES = {"dev-opus", "dev-sonnet", "dev-haiku", "talos"}
+
+
+def in_worktree(event):
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    return "/.claude/worktrees/" in cwd + "/"
+
+
+def check_dev_server(cmd, event=None):
+    if event and event.get("agent_id") and event.get("agent_type") in DEV_SERVER_ROLES and in_worktree(event):
+        return None
     if DEV_SERVER.search(strip_quoted(cmd)):
         return (
             "Правило пользователя (CLAUDE.md): dev-сервер сам не запускай и не перезапускай. "
@@ -385,8 +402,8 @@ def check_nextjs(event):
 #                  domains.json: его собирают из реестра, который правит штаб); в копию ~/ai/pantheon-view и в
 #                  ~/.local/state/pantheon (метки тика, журналы owner-log, domains.json) не пишет никто, кроме
 #                  ваших сессий без роли; git в ~/ai/pantheon роли не трогают — коммитит тик; команды пульта
-#                  (`pantheon archive|install|uninstall|commit`, `pantheon jobs pause|resume|disable|enable|renew`)
-#                  — только штаб и ваши сессии.
+#                  (`pantheon archive|install|uninstall|commit|start|wake|roles`, `pantheon jobs pause|resume|disable|
+#                  enable|renew`) — только штаб и ваши сессии; `pantheon approve` (заранее разрешённое) — только ваши.
 # Привилегии (кто mnemo-brain и metis-pantheon, у кого доступ к me/) — в ~/.claude/pantheon/policy.toml:
 # реестр правит штаб, и его правкой их не выдать.
 # Пути сравниваются без учёта регистра и формы Юникода: так их сравнивает файловая система macOS.
@@ -416,7 +433,8 @@ PANTHEON_ROLES = {"hq", "domain-coordinator", "workshop", "chiron", "argus", "ta
                   "iris", "dev-opus", "dev-sonnet", "dev-haiku"}
 PANTHEON_ROLE_PREFIXES = ("hephaestus-", "apollo-")
 UNRESOLVED = "\0неразобранная-цель"
-PANTHEON_PRIVILEGED = {"archive", "install", "uninstall", "commit"}
+PANTHEON_PRIVILEGED = {"archive", "install", "uninstall", "commit", "start", "wake", "roles"}
+PANTHEON_OWNER_ONLY = {"approve"}  # заранее разрешённое (DONE-11) — только вы, не штаб: согласие не от имени владельца
 PANTHEON_JOB_ACTIONS = {"pause", "resume", "disable", "enable", "renew"}
 IS_MAC = sys.platform == "darwin"
 
@@ -1959,7 +1977,7 @@ def pantheon_cli(cmd, cwd):
         sub, act = texts[0], texts[1] if len(texts) > 1 else ""
         if sub is None and name == "pantheon":
             found.append("pantheon <подкоманда не разобрана>")
-        elif sub in PANTHEON_PRIVILEGED or (sub == "jobs" and (act is None or act in PANTHEON_JOB_ACTIONS)):
+        elif sub in PANTHEON_PRIVILEGED | PANTHEON_OWNER_ONLY or (sub == "jobs" and (act is None or act in PANTHEON_JOB_ACTIONS)):
             found.append(f"pantheon {sub} {act or ''}".strip())
     return found
 
@@ -2099,8 +2117,12 @@ def check_pantheon(event, tool, tool_input):
     # Карта прав ~/ai/pantheon — для ролей Пантеона и для любого субагента: встроенный субагент координатора
     # (general-purpose и т. п.) иначе обходил бы её. Ваши собственные роли главной сессии — как ваши сессии.
     pantheon_role = is_pantheon_role(role) or sub
-    if tool == "Bash" and pantheon_role and not (role == "hq" and not sub):
+    if tool == "Bash" and pantheon_role:
         cli = pantheon_cli(tool_input.get("command") or "", os.path.realpath(event.get("cwd") or os.getcwd()))
+        if any(c.split()[1:2] and c.split()[1] in PANTHEON_OWNER_ONLY for c in cli):
+            return ("Правило pantheon-acl: `pantheon approve` — согласие владельца заранее, его набирает только владелец "
+                    "(в своём терминале или в окне Зевса после «!»). Предложи строку разрешения владельцу словами.")
+    if tool == "Bash" and pantheon_role and not (role == "hq" and not sub):
         if cli:
             return (f"Правило pantheon-acl: «{cli[0]}» — команда пульта, её запускают только штаб и ваши сессии. "
                     "Архив, коммит и пауза задач — через Зевса; дописать тревогу — `pantheon alert`.")
@@ -2201,6 +2223,287 @@ def check_protect_config(event, tool, tool_input):
             "Нужна правка — опиши её координатору metis-pantheon файлом в ~/ai/pantheon/directions/metis-pantheon/inbox/.")
 
 
+# --- private, cdp-role, push, terminal (шаг 1.2) ------------------------------------
+# Касаются ролей Пантеона и любых субагентов, как pantheon-acl: встроенный субагент координатора иначе обходил бы
+# правило. Ваши сессии без роли не ограничены.
+#   private  (SEC-11, SEC-21) — личное из [private] policy.toml (me/, ключи git-crypt, журнал штаба) читают и пишут
+#            только роли из [private].roles (hq, chiron) и главная сессия координатора из [private].coordinators
+#            (mnemo-brain). Read, Grep, Glob, правки и Bash — по явным путям: это защита от случайности; в окнах
+#            ролей Bash к личному закрыт ещё и песочницей (denyRead).
+#   cdp-role (SEC-13, BROW-06) — демон браузера с вашими входами (127.0.0.1:9333–9339, cdp-daemon.mjs): только
+#            мастерская (действует после вашего «да») и prometheus (читает: без /cmd). /close — никому из ролей:
+#            демон общий для всех сессий.
+#   push     (DONE-07, SEC-13) — git push: только координатор, лиды (hephaestus-*, apollo-*) и мастерская; в main и
+#            master — никто из ролей (в main сливаете вы); --all, --mirror, удаление и принудительная отправка — тоже
+#            нет. gh pr merge — нет.
+#   terminal (SEC-30) — ввод в терминал: osascript, tmux send-keys, screen -X stuff, cliclick. Такой ввод Claude Code
+#            помечает как ваш (origin.kind: human), и журнал ваших слов принял бы его за ваши слова.
+
+READ_TOOLS = {"Read", "Grep", "Glob", "NotebookRead"}
+DEFAULT_PRIVATE = {"roles": ["hq", "chiron"], "coordinators": ["mnemo-brain"],
+                   "paths": ["~/ai/knowledge/me", "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.git/git-crypt",
+                             "~/.local/state/pantheon/owner-log/zeus.md"]}
+# команды, которые обходят папку целиком: путь-предок личной папки для них — то же, что сама папка
+RECURSIVE = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "fd", "tar", "gtar", "zip", "rsync", "cp", "gcp",
+             "ditto", "qmd"}
+CDP_TARGET = re.compile(r"(?:127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0):93(?:3[3-9])\b|cdp-daemon", re.I)
+# отладочный порт самого браузера (Comet — 9222, Chrome 144+ — порт из DevToolsActivePort): мимо демона — никому из ролей
+CDP_DIRECT = re.compile(r"(?:127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0):9222\b|DevToolsActivePort|/devtools/(?:browser|page)/"
+                        r"|remote-debugging", re.I)
+CDP_READERS = {"prometheus"}
+CDP_ACTORS = {"workshop"}
+PROTECTED_BRANCHES = {"main", "master"}
+TERMINAL_CMDS = {"osascript", "cliclick", "xdotool"}
+_GIT_OPT_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"}
+_PUSH_OPT_ARG = {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}
+_PUSH_BAD = {"--all", "--mirror", "--delete", "-d", "--prune", "--force", "-f", "--force-with-lease",
+             "--force-if-includes"}
+
+
+def limited(event):
+    """Роль Пантеона или любой субагент — правила шага 1.2 касаются их; ваша сессия без роли — нет."""
+    role, sub, pdir = who(event)
+    return (is_pantheon_role(role) or sub), role, sub, pdir
+
+
+def private_conf(policy):
+    p = policy.get("private") or {}
+    return {k: p.get(k) or v for k, v in DEFAULT_PRIVATE.items()}
+
+
+def private_ok(policy, role, sub, pdir):
+    conf = private_conf(policy)
+    if role in conf["roles"]:
+        return True
+    return not sub and any(privileged(policy, c, role, pdir) for c in conf["coordinators"])
+
+
+def _pathlike(w):
+    return bool(w) and (w[0] in "/~.$" or "/" in w)
+
+
+def read_paths(event, tool, tool_input):
+    """Пути, которые читает или обходит инструмент: [(путь, обходит ли целиком)]."""
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    if tool in ("Read", "NotebookRead"):
+        p = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        return [(_expand(p, cwd), False)] if p else []
+    if tool in ("Grep", "Glob"):
+        root = _expand(tool_input.get("path") or cwd, cwd)
+        out = [(root, True)]
+        pat = (tool_input.get("pattern") or "") if tool == "Glob" else ""
+        if pat[:1] in ("/", "~") or pat.startswith("$HOME"):
+            out.append((_expand(pat.split("*", 1)[0] or "/", cwd), True))
+        return out
+    return []
+
+
+def check_private(event, tool, tool_input):
+    ok, role, sub, pdir = limited(event)
+    if not ok:
+        return None
+    policy = load_policy()
+    priv = _norm(private_conf(policy)["paths"])
+    if private_ok(policy, role, sub, pdir):
+        # ключи git-crypt нужны только git самого координатора (mnemo-brain коммитит ~/ai/knowledge); штабу и коучу
+        # личное открыто, а ключ — нет: ~/ai/pantheon коммитит тик, не штаб
+        if role not in private_conf(policy)["roles"]:
+            return None
+        priv = [p for p in priv if "/.git/git-crypt" in p + "/"]
+        if not priv:
+            return None
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    hits = []
+    if tool == "Bash":
+        cmd = tool_input.get("command") or ""
+        _, cmds = bash_analysis(cmd, cwd)
+        # относительные пути — от папки события и от каждой папки, куда команда делает cd
+        cwds = [cwd] + [_expand(t[0], cwd) for n, t in cmds if n in ("cd", "chdir", "pushd") and t and t[0]]
+        hits += [d for d in cwds if _inside(d, priv) and cmds]
+        for name, texts in cmds:
+            for w in [name] + [x for x in texts if x]:
+                if not _pathlike(w):
+                    continue
+                for d in (cwds if not w.startswith(("/", "~", "$")) else [cwd]):
+                    p = _expand(w, d)
+                    if _inside(p, priv) or (name in RECURSIVE and any(_inside(x, [p]) for x in priv)):
+                        hits.append(p)
+        hits += [p for p in write_targets(event, tool, tool_input)[1] if p != UNRESOLVED and _inside(p, priv)]
+    elif tool in EDIT_TOOLS:
+        hits = [p for p in write_targets(event, tool, tool_input)[1] if p != UNRESOLVED and _inside(p, priv)]
+    else:
+        for p, whole in read_paths(event, tool, tool_input):
+            if _inside(p, priv) or (whole and any(_inside(x, [p]) for x in priv)):
+                hits.append(p)
+    if not hits:
+        return None
+    return (f"Правило private: роль «{role or 'субагент'}»{' (субагент)' if sub else ''} не читает и не пишет личное "
+            f"({hits[0].replace(HOME, '~')}): me/, ключи git-crypt и журнал штаба — только hq, chiron и mnemo-brain. "
+            "Если путь задевает личную папку случайно (поиск по всей ~/ai/knowledge), сузь его: raw/, wiki/, inbox/.")
+
+
+def check_cdp_role(event, tool, tool_input):
+    ok, role, sub, _ = limited(event)
+    if not ok or tool != "Bash":
+        return None
+    cmd = tool_input.get("command") or ""
+    if CDP_DIRECT.search(cmd):
+        return ("Правило cdp-role: прямое подключение к отладочному порту браузера владельца ролям закрыто — только через "
+                "общий демон (`curl 127.0.0.1:9333/…`), и только prometheus (чтение) и мастерской.")
+    if not CDP_TARGET.search(cmd):
+        return None
+    if re.search(r"/close\b", cmd):
+        return ("Правило cdp-role: /close выключает общий демон браузера у всех сессий — ролям нельзя. "
+                "Вкладку демона закрывать не нужно.")
+    if role in CDP_ACTORS and not sub:
+        return None
+    if role in CDP_READERS and not re.search(r"/cmd\b", cmd):
+        return None
+    return (f"Правило cdp-role: роль «{role or 'субагент'}» не пользуется браузером с входами владельца (демон CDP). "
+            "Читать сайт — поручение prometheus через координатора; действие на сайте — мастерская после «да» владельца. "
+            "Проверить своё приложение на localhost — chrome-devtools-mcp --isolated или Playwright (talos).")
+
+
+def _git_sub(texts):
+    """git [-C dir] [-c k=v] … <подкоманда> аргументы → (dir, подкоманда, аргументы); None — не разобрать."""
+    i, gdir = 0, None
+    while i < len(texts):
+        a = texts[i]
+        if a is None:
+            return None
+        if a in _GIT_OPT_ARG:
+            if i + 1 >= len(texts) or texts[i + 1] is None:
+                return None
+            if a == "-C":
+                gdir = texts[i + 1] if gdir is None else os.path.join(gdir, texts[i + 1])
+            i += 2
+        elif a.startswith("-"):
+            i += 1
+        else:
+            return gdir, a, texts[i + 1:]
+    return gdir, None, []
+
+
+def _git_out(d, *args):
+    r = subprocess.run(["git", "-C", d, *args], capture_output=True, text=True, timeout=3)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def push_problem(texts, cwd, moved):
+    """Почему эта отправка ролям нельзя, или None."""
+    parsed = _git_sub(texts)
+    if parsed is None:
+        return "аргументы git не разобрать"
+    gdir, sub, args = parsed
+    if sub != "push":
+        return None
+    if any(a is None for a in args):
+        return "аргументы push не разобрать"
+    pos, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a in _PUSH_BAD or a.split("=", 1)[0] in _PUSH_BAD or re.fullmatch(r"-[a-zA-Z]*[fd][a-zA-Z]*", a):
+            return f"флаг {a}"
+        if a in _PUSH_OPT_ARG:
+            i += 2
+            continue
+        if not a.startswith("-"):
+            pos.append(a)
+        i += 1
+    d = _expand(gdir, cwd) if gdir else cwd
+    current = None
+    if not pos[1:] or any(x.lstrip("+").split(":")[-1] in ("HEAD", "@") for x in pos[1:]):
+        if moved:
+            return "в команде есть cd — назови ветку явно: git push origin <ветка>"
+        current = _git_out(d, "symbolic-ref", "--short", "HEAD")
+        if not current:
+            return "не понять текущую ветку — назови её явно: git push origin <ветка>"
+    dests = []
+    if not pos[1:]:
+        dests.append(current)
+        up = _git_out(d, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{push}")
+        if up and "/" in up:
+            dests.append(up.split("/", 1)[1])
+    for spec in pos[1:]:
+        spec = spec.lstrip("+")
+        src, _, dst = spec.partition(":")
+        if ":" in spec and not src:
+            return f"удаление ветки ({spec})"
+        dst = dst if ":" in spec else src
+        if not dst:
+            return f"refspec «{spec}»"
+        dests.append(current if dst in ("HEAD", "@") else dst)
+    for x in dests:
+        name = re.sub(r"^refs/heads/", "", x or "")
+        if not name or name in PROTECTED_BRANCHES or "*" in name:
+            return f"отправка в {name or 'неизвестную ветку'}"
+    return None
+
+
+def check_push(event, tool, tool_input):
+    ok, role, sub, pdir = limited(event)
+    if not ok or tool != "Bash":
+        return None
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    _, cmds = bash_analysis(tool_input.get("command") or "", cwd)
+    moved = any(n in ("cd", "chdir", "pushd", "popd") for n, _ in cmds)
+    can_push = role == "domain-coordinator" or role.startswith(PANTHEON_ROLE_PREFIXES) or (role == "workshop" and not sub)
+    # координатор с доступом к личному (mnemo-brain) не отправляет сам: он видит me/ и читает выписки из веба —
+    # третье свойство (наружу) ему не даём (SEC-13, 15.10); хранилище синхронизирует Obsidian Git
+    if can_push and role == "domain-coordinator":
+        policy = load_policy()
+        if any(privileged(policy, c, role, pdir) for c in private_conf(policy)["coordinators"]):
+            can_push = False
+    for name, texts in cmds:
+        if name == "gh" and texts[:2] == ["pr", "merge"]:
+            return ("Правило push: gh pr merge — слияние делает владелец. Подготовь PR и карточку рисков: "
+                    "тесты, вердикт argus, что меняется для клиента.")
+        if name not in ("git", "?"):
+            continue
+        parsed = _git_sub(texts) if name == "git" else None
+        if name == "?" and "push" not in texts:
+            continue
+        if name == "?" or (parsed and parsed[1] == "push"):
+            if not can_push and role == "domain-coordinator":
+                return ("Правило push: координатор с доступом к личному не отправляет сам (видит me/ и выписки из веба — "
+                        "третье свойство ему закрыто, SEC-13). Закоммить: хранилище отправит Obsidian Git.")
+            if not can_push:
+                return (f"Правило push: роль «{role or 'субагент'}» не отправляет в удалённый репозиторий: отправляют "
+                        "координатор и лиды. Закоммить в свою ветку и опиши результат в отчёте.")
+            why = push_problem(texts, cwd, moved) if name == "git" else "команду не разобрать"
+            if why:
+                return (f"Правило push: {why}. Роли отправляют только свои ветки (develop — лид); в main и master "
+                        "сливает владелец, принудительная отправка и удаление веток — тоже только он.")
+    return None
+
+
+def check_terminal(event, tool, tool_input):
+    ok, role, sub, _ = limited(event)
+    if not ok or tool != "Bash":
+        return None
+    cmd = tool_input.get("command") or ""
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    for name, texts in bash_analysis(cmd, cwd)[1]:
+        t = [x for x in texts if x]
+        if name in TERMINAL_CMDS or (name == "tmux" and set(t) & {"send-keys", "send", "paste-buffer", "pasteb"}) \
+                or (name == "screen" and "-X" in t and "stuff" in t) \
+                or (name == "?" and re.search(r"\b(osascript|cliclick|send-keys)\b", cmd)):
+            return ("Правило terminal: роли не печатают в терминал и не управляют программами владельца "
+                    "(osascript, tmux send-keys, screen stuff): такой ввод Claude Code записывает как слова владельца. "
+                    "Нужно что-то сказать владельцу — `pantheon alert` или вопрос на доске.")
+    return None
+
+
+def check_roles(event, tool, tool_input):
+    for rule, check in (("private", check_private), ("cdp-role", check_cdp_role), ("push", check_push),
+                        ("terminal", check_terminal)):
+        if rule not in OFF:
+            reason = check(event, tool, tool_input)
+            if reason:
+                return reason
+    return None
+
+
 def strict(check, event, tool, tool_input):
     """Проверка прав: сбой самой проверки останавливает роль, а не пропускает запись (SEC-10)."""
     try:
@@ -2243,7 +2546,7 @@ def main():
         if tool == "Bash":
             cmd = tool_input.get("command") or ""
             if "dev-server" not in OFF:
-                reason = soft(check_dev_server, cmd)
+                reason = soft(check_dev_server, cmd, event)
             if not reason and "attribution" not in OFF:
                 reason = soft(check_attribution, cmd)
             if not reason and "tg-secret" not in OFF:
@@ -2253,6 +2556,8 @@ def main():
                 reason = soft(check_cdp, tool_input)
             if not reason and "tg-secret" not in OFF:
                 reason = hard(check_tg_secret_file, tool_input)
+        if not reason and (tool == "Bash" or tool in EDIT_TOOLS or tool in READ_TOOLS):
+            reason = strict(check_roles, event, tool, tool_input)
         if not reason and "pantheon-acl" not in OFF and (tool == "Bash" or tool in EDIT_TOOLS):
             reason = strict(check_pantheon, event, tool, tool_input)
         if not reason and "protect-config" not in OFF and (tool == "Bash" or tool in EDIT_TOOLS):
