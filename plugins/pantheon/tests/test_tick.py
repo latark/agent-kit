@@ -269,6 +269,12 @@ def main():
           "~/ai/knowledge/me" in box["filesystem"]["denyRead"] and not any("knowledge" in x for x in sn["sandbox"]["filesystem"]["denyRead"])
           and "~/ai/knowledge/me" in sw["sandbox"]["filesystem"]["denyRead"] and "autoCompactWindow" not in sw
           and not os.path.exists(os.path.join(state, "settings", "old-direction.json")))
+    hk = [h for g in sa.get("hooks", {}).get("PreToolUse", []) for h in g["hooks"]]
+    gpath = os.path.realpath(os.path.join(os.path.dirname(os.path.dirname(LIB)), "..", "guard", "hooks", "guard.py"))
+    check("строгий guard в окне роли (SEC-29): --strict, onFailure block, настоящий путь, у мастерской тоже",
+          len(hk) == 1 and hk[0]["onFailure"] == "block" and hk[0]["command"] == f"python3 {gpath} --strict"
+          and os.path.isfile(gpath) and sw["hooks"] == sa["hooks"]
+          and sa["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Write|Edit|MultiEdit|NotebookEdit")
 
     # архив (STATE-14)
     tmp = tempfile.mkdtemp(prefix="tick-test-")

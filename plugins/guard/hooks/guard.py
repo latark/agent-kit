@@ -10,14 +10,35 @@
   tg-secret    — не читать ключ сессии tg-read из Связки ключей ни командой, ни своим кодом, и не подключать
                  tg_read как модуль (перенесено 14.10 из старого ~/.claude/hooks/guard.py, коммит 8672c67);
   domain       — субагент, тиммейт, координатор и сессия мастерской пишут только в своё направление;
-  pantheon-acl — запись в ~/ai/pantheon по карте прав; копия ~/ai/pantheon-view и ~/.local/state/pantheon — ни одной роли.
+  pantheon-acl — запись в ~/ai/pantheon по карте прав; копия ~/ai/pantheon-view и ~/.local/state/pantheon — ни одной роли;
+  protect-config — защиты (хуки, роли, плагины, policy.toml, настройки, sync.sh, ~/.zshrc) правит только
+                 metis-pantheon в своей сессии; остальные роли и любые субагенты — нет (SEC-14).
 
-Плагин guard из маркетплейса agent-kit (latark/agent-kit); до шага 0.4 очереди работает старая копия
-~/.claude/hooks/guard.py. Данные: ~/.local/state/pantheon/domains.json (собирает `pantheon domains build`
-из ~/ai/pantheon/directions.toml) и ~/.claude/pantheon/policy.toml (привилегии, правит только metis-pantheon).
+Модель угроз (SEC-27, решено 14.10). guard ловит ошибки агента: запись не в своё направление, правку чужого
+файла штаба или защит, команду пульта не той ролью. От намеренного обхода и внедрённых инструкций он не
+защищает: что пишет программа изнутри (python script.py, node -e, make), он не видит, и свой разбор Bash мы
+больше не наращиваем. Настоящая граница — песочница macOS в окнах ролей (SEC-19, SEC-26) и управляемые
+настройки /Library/Application Support/ClaudeCode/managed-settings.json (SEC-28): их не перебить настройками
+проекта и модами. Находку проверки безопасности по разбору Bash разбираем как «ошибка агента или граница
+песочницы», а не как новый раунд обходов.
+
+Плагин guard из маркетплейса agent-kit (latark/agent-kit). Данные: ~/.local/state/pantheon/domains.json (собирает
+`pantheon domains build` из ~/ai/pantheon/directions.toml) и ~/.claude/pantheon/policy.toml (привилегии, правит
+только metis-pantheon).
+
+Режимы запуска (аргумент):
+  без аргумента — хук плагина; если управляемые настройки уже вызывают guard (--managed), он молчит, чтобы
+                  проверка не шла дважды;
+  --managed     — хук из управляемых настроек: то же, что плагин;
+  --strict      — хук окна роли с onFailure: "block" (собирает `pantheon domains build`, SEC-29): любой сбой
+                  самого скрипта — выход 2, действие остановлено.
+При сбое (SEC-10): правила-подсказки (dev-server, attribution, cdp, nextjs) пропускают действие; проверка прав
+(domain, pantheon-acl, protect-config) и tg-secret останавливают роль; сбой всего скрипта в вашей сессии
+пропускает действие, в окне роли — останавливает. Каждый сбой — строка в
+~/.local/state/pantheon/logs/guard-failures.log (время, режим, место, тип ошибки — без текста команды);
+строка статуса показывает число сбоев за сутки.
 
 Выключить одно правило: GUARD_OFF=dev-server,nextjs (через запятую) в env settings.json.
-Любой сбой самого скрипта пропускает действие: правило не должно ломать работу.
 """
 
 import json
@@ -25,9 +46,44 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 OFF = {r.strip() for r in os.environ.get("GUARD_OFF", "").split(",") if r.strip()}
 HOME = os.path.expanduser("~")
+MODE = "strict" if "--strict" in sys.argv[1:] else "managed" if "--managed" in sys.argv[1:] else "plugin"
+FAIL_LOG = os.path.join(HOME, ".local", "state", "pantheon", "logs", "guard-failures.log")
+MANAGED_FILE = "/Library/Application Support/ClaudeCode/managed-settings.json"
+MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks", "guard.py")
+
+
+def log_failure(where, e):
+    """Строка в журнал сбоев: время, режим, место, тип ошибки и строка кода. Текст команды не пишется."""
+    try:
+        tb, line = e.__traceback__, 0
+        while tb is not None:
+            line, tb = tb.tb_lineno, tb.tb_next
+        os.makedirs(os.path.dirname(FAIL_LOG), exist_ok=True)
+        with open(FAIL_LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\t{MODE}\t{where}\t{type(e).__name__}:{line}\n")
+    except Exception:
+        pass
+
+
+def managed_guard_active():
+    """Управляемые настройки сами вызывают guard (--managed), и его файл на месте: хуку плагина молчать."""
+    try:
+        with open(MANAGED_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    if not os.path.isfile(MARKET_GUARD):
+        return False
+    for group in ((data.get("hooks") or {}).get("PreToolUse") or []):
+        for h in group.get("hooks") or []:
+            cmd = h.get("command") or ""
+            if "guard.py" in cmd and "--managed" in cmd:
+                return True
+    return False
 
 # --- dev-server --------------------------------------------------------------
 
@@ -2092,11 +2148,48 @@ def check_pantheon(event, tool, tool_input):
     return None
 
 
+# protect-config (SEC-14): защиты правит только metis-pantheon — главная сессия координатора, чья папка запуска
+# в её записи policy.toml, — задачей после вашего «да» в её сессии. Её субагенты, штаб, другие роли и любые
+# субагенты сюда не пишут (domain пустил бы субагентов Метиды: ~/.claude — её направление). Ваши сессии без роли
+# не ограничены. Сюда же — метка .sync-held, по которой sync.sh держит неодобренные правки ~/.claude (SEC-15),
+# и .git репозитория claude-config: коммит в обход sync.sh отправил бы правку на другие Mac без «да».
+PROTECTED = [os.path.realpath(os.path.join(HOME, ".claude", x)) for x in
+             ("hooks", "agents", "plugins", "pantheon", "settings.json", "settings.local.json", "sync.sh",
+              "statusline.sh", "bootstrap.sh", ".sync-held", ".git")] + [os.path.realpath(os.path.join(HOME, ".zshrc"))]
+SETTINGS_NAMES = {"settings.json", "settings.local.json"}
+
+
+def _settings_file(p):
+    """.claude/settings.json или settings.local.json любого проекта: ими меняют разрешения и хуки сессий там."""
+    parent, base = os.path.split(p)
+    return _key(base) in SETTINGS_NAMES and _key(os.path.basename(parent)) == ".claude"
+
+
+def check_protect_config(event, tool, tool_input):
+    role, sub, pdir = who(event)
+    if not (is_pantheon_role(role) or sub):
+        return None  # ваша сессия без роли или ваша собственная роль главной сессии
+    if not sub and privileged(load_policy(), "metis-pantheon", role, pdir):
+        return None
+    cwd, targets = write_targets(event, tool, tool_input)
+    if UNRESOLVED in targets:
+        return UNRESOLVED_REASON
+    bad = [p for p in targets
+           if _inside(p, PROTECTED) or _settings_file(p) or any(_inside(x, [p]) for x in PROTECTED)]
+    if not bad:
+        return None
+    return (f"Правило protect-config: роль «{role or 'субагент'}»{' (субагент)' if sub else ''} не правит защиты "
+            f"({', '.join(p.replace(HOME, '~') for p in bad[:3])}): хуки, роли, плагины, policy.toml, настройки, "
+            "sync.sh и ~/.zshrc меняет только metis-pantheon в своей сессии после «да» владельца. "
+            "Нужна правка — опиши её координатору metis-pantheon файлом в ~/ai/pantheon/directions/metis-pantheon/inbox/.")
+
+
 def strict(check, event, tool, tool_input):
     """Проверка прав: сбой самой проверки останавливает роль, а не пропускает запись (SEC-10)."""
     try:
         return check(event, tool, tool_input)
     except Exception as e:
+        log_failure(check.__name__, e)
         role, sub, _ = who(event)
         if sub or is_pantheon_role(role):
             return (f"guard: сбой проверки прав ({type(e).__name__}) — действие остановлено, чтобы запись не прошла "
@@ -2108,7 +2201,8 @@ def soft(check, *args):
     """Правила-подсказки (dev-server, attribution, cdp, nextjs): их сбой пропускает действие."""
     try:
         return check(*args)
-    except Exception:
+    except Exception as e:
+        log_failure(check.__name__, e)
         return None
 
 
@@ -2117,10 +2211,13 @@ def hard(check, *args):
     try:
         return check(*args)
     except Exception as e:
+        log_failure(check.__name__, e)
         return f"guard: сбой проверки tg-secret ({type(e).__name__}) — действие остановлено. Повтори проще."
 
 
 def main():
+    if MODE == "plugin" and managed_guard_active():
+        return  # ту же проверку уже делает хук из управляемых настроек
     event = json.load(sys.stdin)
     name = event.get("hook_event_name")
     if name == "PreToolUse":
@@ -2141,6 +2238,8 @@ def main():
                 reason = hard(check_tg_secret_file, tool_input)
         if not reason and "pantheon-acl" not in OFF and (tool == "Bash" or tool in EDIT_TOOLS):
             reason = strict(check_pantheon, event, tool, tool_input)
+        if not reason and "protect-config" not in OFF and (tool == "Bash" or tool in EDIT_TOOLS):
+            reason = strict(check_protect_config, event, tool, tool_input)
         if not reason and "domain" not in OFF and (tool == "Bash" or tool in EDIT_TOOLS):
             reason = strict(check_domain, event, tool, tool_input)
         if reason:
@@ -2158,5 +2257,11 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
+    except Exception as e:
+        log_failure("main", e)
+        if MODE == "strict":
+            # окно роли (SEC-29): сбой самой защиты — отказ, а не пропуск
+            print(f"guard: сбой проверки ({type(e).__name__}) — действие остановлено: в окне роли защита при сбое "
+                  "не пропускает. Повтори проще (явные пути) или сообщи координатору.", file=sys.stderr)
+            sys.exit(2)
         sys.exit(0)

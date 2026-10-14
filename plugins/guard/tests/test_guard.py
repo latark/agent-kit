@@ -18,7 +18,8 @@ def setup(home):
     for d in ("ai/pantheon/.git", "ai/pantheon/directions/athena-broker", "ai/pantheon/directions/hermes-alex/inbox",
               "ai/pantheon/scout", "ai/pantheon-view", ".local/state/pantheon/owner-log", ".claude/pantheon",
               "projects/brokerAssistantApp/app", "projects/alexbroker", "projects/agent-kit",
-              "projects/workshop/visa", "ai/knowledge"):
+              "projects/workshop/visa", "ai/knowledge", ".claude/agents", ".claude/skills/x", ".claude/.git",
+              "projects/brokerAssistantApp/.claude"):
         os.makedirs(os.path.join(home, d), exist_ok=True)
     os.makedirs(os.path.join(home, "ai/pantheon/directions/metis-pantheon/tasks"), exist_ok=True)
     os.makedirs(os.path.join(home, "ai/pantheon/directions/athena-broker/tasks"), exist_ok=True)
@@ -30,7 +31,7 @@ def setup(home):
     json.dump({"domains": {
         "athena-broker": ["~/projects/brokerAssistantApp"],
         "hermes-alex": ["~/projects/alexbroker"],
-        "metis-pantheon": ["~/projects/agent-kit"],
+        "metis-pantheon": ["~/projects/agent-kit", "~/.claude"],
         # реестр «по ошибке» отдаёт athena папку agent-kit — привилегий Метиды это не даёт
         "athena-broker-2": ["~/projects/agent-kit/sub"],
     }}, open(os.path.join(home, ".local/state/pantheon/domains.json"), "w"))
@@ -198,6 +199,19 @@ def main():
         ("hq: обычная правка доски можно", "allow", ".", "hq", False, B("cd ~/ai/pantheon && sed -i '' 's/a/b/' board.md")),
         ("сбой разбора — отказ роли", "deny", br, "domain-coordinator", False, ("Bash", {"command": ["rm", "x"]})),
         ("сбой проверки tg-secret останавливает и вашу сессию (SEC-10)", "deny", br, "", False, ("Bash", {"command": ["rm", "x"]})),
+        # protect-config (SEC-14): защиты правит только главная сессия metis-pantheon
+        ("protect-config: Метида правит роль", "allow", ak, "domain-coordinator", False, E(os.path.join(home, ".claude/agents/argus.md"))),
+        ("protect-config: субагент Метиды не правит роль", "deny", ak, "hephaestus-pantheon", True, E(os.path.join(home, ".claude/agents/argus.md"))),
+        ("protect-config: субагент Метиды правит навык (не защита)", "allow", ak, "hephaestus-pantheon", True, W(os.path.join(home, ".claude/skills/x/SKILL.md"))),
+        ("protect-config: athena не правит роль", "deny", br, "domain-coordinator", False, E(os.path.join(home, ".claude/agents/argus.md"))),
+        ("protect-config: штаб не правит settings.json", "deny", ".", "hq", False, E(os.path.join(home, ".claude/settings.json"))),
+        ("protect-config: штаб не дописывает ~/.zshrc", "deny", ".", "hq", False, B("echo 'alias x=y' >> ~/.zshrc")),
+        ("protect-config: координатор не правит настройки своего проекта", "deny", br, "domain-coordinator", False, W(os.path.join(home, br, ".claude/settings.local.json"))),
+        ("protect-config: субагент Метиды не трогает метку sync", "deny", ak, "hephaestus-pantheon", True, W(os.path.join(home, ".claude/.sync-held"))),
+        ("protect-config: субагент Метиды не коммитит claude-config", "deny", ak, "hephaestus-pantheon", True, B("git -C ~/.claude commit -am x")),
+        ("protect-config: мастерская не стирает ~/.claude", "deny", ws, "workshop", False, B("rm -rf ~/.claude")),
+        ("protect-config: Метида пишет policy.toml", "allow", ak, "domain-coordinator", False, E(os.path.join(home, ".claude/pantheon/policy.toml"))),
+        ("protect-config: ваша сессия правит settings.json", "allow", ".", "", False, E(os.path.join(home, ".claude/settings.json"))),
         # прежние правила (№ 28)
         ("attribution: пометка Claude в коммите — отказ", "deny", br, "", False,
          B('git commit -m "x\n\nCo-' + 'Authored-By: Claude <noreply@' + 'anthropic.com>"')),
@@ -221,6 +235,41 @@ def main():
         failed += not ok
         cases.append(None)
         print(f"{'ok  ' if ok else 'FAIL'} системный Python 3.9: dev-server запрещён: {got}")
+    # SEC-29/SEC-10: сбой всего скрипта — в окне роли (--strict) выход 2, в плагине выход 0; оба — в журнал
+    env = {"HOME": home, "PATH": os.environ["PATH"], "TMPDIR": "/nonexistent-tmp"}
+    for mode, want_code in (("--strict", 2), (None, 0)):
+        argv = [sys.executable, "-I", GUARD] + ([mode] if mode else [])
+        r = subprocess.run(argv, input="не json", capture_output=True, text=True, env=env, timeout=10)
+        ok = r.returncode == want_code
+        failed += not ok
+        cases.append(None)
+        print(f"{'ok  ' if ok else 'FAIL'} сбой скрипта, режим {mode or 'плагин'}: код {r.returncode}, ждали {want_code}")
+    log = os.path.join(home, ".local/state/pantheon/logs/guard-failures.log")
+    lines = open(log).read().splitlines() if os.path.exists(log) else []
+    ok = any("\tstrict\tmain\tJSONDecodeError" in x for x in lines) and any("\tplugin\tmain\t" in x for x in lines) \
+        and not any("не json" in x for x in lines)
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} журнал сбоев: {len(lines)} строк, без текста ввода")
+    # управляемые настройки вызывают guard (--managed) — хук плагина молчит; без них — работает
+    probe = os.path.join(home, "managed-probe.py")
+    with open(probe, "w") as fh:
+        fh.write("import sys, json, importlib.util\n"
+                 "spec = importlib.util.spec_from_file_location('g', sys.argv[1]); g = importlib.util.module_from_spec(spec)\n"
+                 "spec.loader.exec_module(g)\n"
+                 "g.MANAGED_FILE, g.MARKET_GUARD = sys.argv[2], sys.argv[1]\n"
+                 "print(g.managed_guard_active())\n")
+    mf = os.path.join(home, "managed.json")
+    results = []
+    for content in ('{"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "python3 guard.py --managed"}]}]}}',
+                    '{"permissions": {"deny": ["Bash(x)"]}}', "битый json"):
+        open(mf, "w").write(content)
+        results.append(subprocess.run([sys.executable, "-I", probe, GUARD, mf], capture_output=True, text=True,
+                                      env=env, timeout=10).stdout.strip())
+    ok = results == ["True", "False", "False"]
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} управляемые настройки: хук плагина молчит только при guard --managed: {results}")
     print(f"\n{len(cases) - failed} из {len(cases)} прошли")
     sys.exit(1 if failed else 0)
 

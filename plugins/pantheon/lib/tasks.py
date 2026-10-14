@@ -686,6 +686,11 @@ BASE_FILE = """filters:
     - file.inFolder("Доска")
     - file.name != "Сводка"
     - file.name != "Проблемы"
+formulas:
+  urgency: 'if(note["Внимание"], if(note["Внимание"].contains("⚠"), 0, if(note["Внимание"].contains("просрочено"), 1, if(note["Внимание"].contains("скоро"), 2, 3))), 3)'
+  prio_rank: 'if(note["Приоритет"], if(note["Приоритет"].contains("срочно"), 0, if(note["Приоритет"].contains("высокий"), 1, if(note["Приоритет"].contains("низкий"), 3, 2))), 2)'
+  age_key: 'if(note["Статус"] == "Готово", 0 - number(file.mtime), number(file.ctime))'
+  stage: 'if(note["Статус"] == "Ждёт вас", 0, if(note["Статус"] == "Входящие", 1, if(note["Статус"] == "На проверке", 2, if(note["Статус"] == "В работе", 3, if(note["Статус"] == "Ждёт", 4, if(note["Статус"] == "Очередь", 5, 6))))))'
 properties:
   file.name:
     displayName: Задача
@@ -696,18 +701,63 @@ views:
       property: note.Статус
       direction: ASC
     groupOrder: [Входящие, Ждёт вас, Очередь, В работе, Ждёт, На проверке, Готово]
+    sort:
+      - property: formula.urgency
+        direction: ASC
+      - property: formula.prio_rank
+        direction: ASC
+      - property: note.Срок
+        direction: ASC
+      - property: formula.age_key
+        direction: ASC
     order: [file.name, note.Проект, note.Внимание, note.Приоритет, note.Срок, note.Кто]
   - type: table
     name: Ждёт вас
     filters:
       and:
         - 'note["Статус"] == "Ждёт вас"'
+    sort:
+      - property: formula.urgency
+        direction: ASC
+      - property: formula.prio_rank
+        direction: ASC
+      - property: note.Срок
+        direction: ASC
+      - property: formula.age_key
+        direction: ASC
     order: [file.name, note.Проект, note.Внимание, note.Дальше, note.Срок]
+  - type: table
+    name: Горит
+    filters:
+      and:
+        - 'formula.urgency < 3'
+        - 'note["Статус"] != "Готово"'
+    sort:
+      - property: formula.urgency
+        direction: ASC
+      - property: note.Срок
+        direction: ASC
+      - property: formula.prio_rank
+        direction: ASC
+      - property: formula.age_key
+        direction: ASC
+    order: [file.name, note.Проект, note.Статус, note.Внимание, note.Срок, note.Дальше]
   - type: table
     name: Все задачи
     groupBy:
       property: note.Проект
       direction: ASC
+    sort:
+      - property: formula.stage
+        direction: ASC
+      - property: formula.urgency
+        direction: ASC
+      - property: formula.prio_rank
+        direction: ASC
+      - property: note.Срок
+        direction: ASC
+      - property: formula.age_key
+        direction: ASC
     order: [file.name, note.Статус, note.Внимание, note.Приоритет, note.Кто, note.Срок, note.Дальше]
 """
 

@@ -899,7 +899,21 @@ def _deny_forms(paths):
     return out
 
 
-def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None):
+# Строгий guard окна роли (SEC-29): тот же guard.py, но с --strict и onFailure "block" — сбой, таймаут, плохой вход
+# или пропавший файл защиты останавливают действие, а не пропускают. Путь — настоящий: рядом с этим плагином
+# (клон маркетплейса или рабочая копия), иначе клон маркетплейса. Ваших сессий без роли это не касается.
+GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit"
+MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks", "guard.py")
+
+
+def guard_script():
+    for p in (os.path.join(PLUGIN, "..", "guard", "hooks", "guard.py"), MARKET_GUARD):
+        if os.path.isfile(p):
+            return os.path.realpath(p)
+    return MARKET_GUARD  # файла нет — окно роли не пустит ни одной записи (отказ при сбое), тревога в sandbox_build
+
+
+def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None):
     allow = list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + [cache]
     # .git/config и .git/hooks — внутри каждой разрешённой папки (её настоящим путём) и под ~ в целом
     deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + [f"{r}{sub}" for r in allow for sub in
@@ -930,6 +944,10 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "network": {"allowedDomains": SANDBOX_DOMAINS},
         },
     }
+    if guard:
+        data["hooks"] = {"PreToolUse": [{"matcher": GUARD_MATCHER, "hooks": [{
+            "type": "command", "command": f"python3 {shlex.quote(guard)} --strict", "timeout": 10,
+            "onFailure": "block"}]}]}
     if compact:
         data["autoCompactWindow"] = compact
     return data
@@ -948,6 +966,10 @@ def sandbox_build(domains, policy_path):
     private_dirs = set(private.get("coordinators") or [])
     caches = "~/Library/Caches/pantheon-sandbox"
     out_dir = path("settings")
+    guard = guard_script()
+    if not os.path.isfile(guard):
+        alert_once("guard-missing", guard, f"нет {guard.replace(HOME, '~')}: окна ролей не пропустят ни одной записи "
+                   "(строгий guard, SEC-29) — переустановить плагин guard", "pantheon")
     os.makedirs(out_dir, exist_ok=True)
 
     def one(name, folders, own, compact, deny):
@@ -961,7 +983,7 @@ def sandbox_build(domains, policy_path):
         cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
         ok = [r for r in real if r]
         write_json(os.path.join(out_dir, name + ".json"),
-                   role_settings(ok, own_real, write, cache, any(ssh_remote(r) for r in ok), deny, compact))
+                   role_settings(ok, own_real, write, cache, any(ssh_remote(r) for r in ok), deny, compact, guard))
 
     built = []
     for name, folders in domains.items():

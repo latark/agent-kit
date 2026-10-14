@@ -93,6 +93,32 @@ def main():
     check("board: вопрос с вариантами — галочки в карточке", "Статус: Ждёт вас" in t2 and "- [ ] В копии" in t2)
     check("board: Доска.base и Сводка", os.path.exists(os.path.join(view, "Доска", "Доска.base"))
           and "Ждёт вас (1)" in open(os.path.join(view, "Доска", "Сводка.md"), encoding="utf-8").read())
+    # сортировка: формулы Доска.base опираются на слова в карточках — слова должны совпадать
+    base_txt = open(os.path.join(view, "Доска", "Доска.base"), encoding="utf-8").read()
+    sys.path.insert(0, LIB)
+    import tasks as _tasks
+    try:
+        import yaml
+        base = yaml.safe_load(base_txt)
+    except ImportError:
+        base = None
+    views_ = (base or {}).get("views", [])
+    known = {"formula." + k for k in (base or {}).get("formulas", {})}
+    sorts_ok = bool(views_) and all(v.get("sort") for v in views_) and all(
+        x["property"] in known or x["property"].startswith("note.") for v in views_ for x in v["sort"])
+    hidden_ok = bool(views_) and not any(p.startswith("formula.") for v in views_ for p in v.get("order", []))
+    check("board: Доска.base — сортировка в каждом представлении, формулы не на карточке",
+          base is None or (sorts_ok and hidden_ok))
+    f_att = base_txt.split("urgency:")[1].split("\n")[0] if "urgency:" in base_txt else ""
+    f_pri = base_txt.split("prio_rank:")[1].split("\n")[0] if "prio_rank:" in base_txt else ""
+    marks_ok = all(w in f_att for w in ("⚠", "просрочено", "скоро")) and all(
+        w in f_pri for w in ("срочно", "высокий", "низкий"))
+    cards_ok = ("🔴 просрочено" in _tasks.attention({"due": "2026-10-01", "status": "todo"}, T0)
+                and "🟠 скоро" in _tasks.attention({"due": "2026-10-16", "status": "todo"}, T0)
+                and "⚠ конфликт" in _tasks.attention({}, T0, "конфликт")
+                and "срочно" in _tasks.PRIORITY_MARK[0] and "высокий" in _tasks.PRIORITY_MARK[1]
+                and "низкий" in _tasks.PRIORITY_MARK[3] and "срочно" not in _tasks.PRIORITY_MARK[2])
+    check("board: слова в формулах сортировки совпадают со словами на карточках", marks_ok and cards_ok)
     check("board: просрочка — одна тревога", "просрочена: Налоги беты" in r.stdout)
     before = {f: os.stat(os.path.join(view, "Доска", f)).st_mtime_ns for f in os.listdir(os.path.join(view, "Доска"))}
     before["state"] = os.stat(os.path.join(state, "board.json")).st_mtime_ns
