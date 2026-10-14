@@ -453,8 +453,9 @@ def render_card(head, body, src_rel, t, conflict=None):
         log = [x for x in m.group(1).strip().split("\n") if x.startswith("- ")][-5:]
         if log:
             parts.append("## Последнее\n\n" + "\n".join(log))
+    # без отметки времени: иначе тик переписывал бы каждую карточку каждую минуту, а Obsidian перечитывал бы доску
     parts.append("✍️ Написать агенту — поле «Заметка агенту» вверху. Перенести — перетащите карточку на доске.\n\n"
-                 f"<small>Источник: `{src_rel}` · обновлено {now_iso(t)[:16].replace('T', ' ')}</small>")
+                 f"<small>Источник: `{src_rel}` · задача обновлена {str(head.get('updated') or '')[:16].replace('T', ' ')}</small>")
     return card, "\n" + "\n\n".join(parts) + "\n"
 
 
@@ -739,9 +740,16 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     if not os.path.exists(bp):
         with open(bp, "w", encoding="utf-8") as fh:
             fh.write(BASE_FILE)
-    tmp = f"{state_path}.{os.getpid()}"
-    os.makedirs(os.path.dirname(state_path), exist_ok=True)
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(state, fh, ensure_ascii=False, indent=1)
-    os.replace(tmp, state_path)
+    new_state = json.dumps(state, ensure_ascii=False, indent=1)
+    try:
+        with open(state_path, encoding="utf-8") as fh:
+            same = fh.read() == new_state
+    except OSError:
+        same = False
+    if not same:  # без изменений не пишем: тик идёт каждую минуту
+        tmp = f"{state_path}.{os.getpid()}"
+        os.makedirs(os.path.dirname(state_path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(new_state)
+        os.replace(tmp, state_path)
     return done_lines

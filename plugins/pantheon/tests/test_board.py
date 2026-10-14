@@ -94,8 +94,13 @@ def main():
     check("board: Доска.base и Сводка", os.path.exists(os.path.join(view, "Доска", "Доска.base"))
           and "Ждёт вас (1)" in open(os.path.join(view, "Доска", "Сводка.md"), encoding="utf-8").read())
     check("board: просрочка — одна тревога", "просрочена: Налоги беты" in r.stdout)
+    before = {f: os.stat(os.path.join(view, "Доска", f)).st_mtime_ns for f in os.listdir(os.path.join(view, "Доска"))}
+    before["state"] = os.stat(os.path.join(state, "board.json")).st_mtime_ns
     r = run(env, "board", t=T0 + 60)
-    check("board: повтор — без второй тревоги и без перерисовки", "просрочена" not in r.stdout)
+    after = {f: os.stat(os.path.join(view, "Доска", f)).st_mtime_ns for f in os.listdir(os.path.join(view, "Доска"))}
+    after["state"] = os.stat(os.path.join(state, "board.json")).st_mtime_ns
+    check("board: повтор через минуту — без второй тревоги и без единой записи на диск", "просрочена" not in r.stdout
+          and before == after)
 
     # ход владельца
     set_card(c1, "Статус", "В работе")
