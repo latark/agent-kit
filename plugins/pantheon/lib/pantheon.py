@@ -224,13 +224,13 @@ def clear_once(key):
 
 JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
-TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "check"}
+TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 
 
 def parse_command(cmd):
     """Команда задачи из schedule.toml → argv без оболочки, или None (задача не идёт). Разрешено только:
-      pantheon <view|commit|domains|watch|revisits|scout> [аргументы без спецсимволов];
+      pantheon <view|commit|domains|watch|revisits|scout|board|sync-answers|…> [аргументы без спецсимволов];
       claude -p --agent <роль> [--model M] [--max-turns N] [--name N] "<поручение>" — без флагов прав и настроек;
       скрипт из bin/ или scripts/ самого плагина."""
     if not isinstance(cmd, str) or re.search(r"[;&|`$<>\n\\]", cmd):
