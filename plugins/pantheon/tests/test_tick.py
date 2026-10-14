@@ -219,10 +219,14 @@ def main():
     os.makedirs(br)
     subprocess.run(["git", "init", "-q", br], check=True)
     subprocess.run(["git", "-C", br, "remote", "add", "origin", "git@github.com:x/y.git"], check=True)
+    for d in ("pantheon/directions/athena-broker", "projects/zz", "knowledge", ".cache/metis", ".ssh"):
+        os.makedirs(os.path.join(tmp, d), exist_ok=True)
+    os.symlink(os.path.join(tmp, "pantheon"), os.path.join(tmp, "projects", "ln"))
     with open(os.path.join(home, "directions.toml"), "a") as fh:
         fh.write('sandbox_write = ["~/.ssh"]\n'
                  '[[direction]]\nname = "mnemo-brain"\nfolders = ["~/knowledge"]\n'
-                 '[[direction]]\nname = "zz"\nfolders = ["~/pantheon", "~/projects", "~/projects/zz", "~/.claude"]\n')
+                 '[[direction]]\nname = "zz"\nfolders = ["~/pantheon", "~/projects", "~/projects/zz", "~/.claude", '
+                 '"~/projects/ln"]\n')
     with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "a") as fh:
         fh.write('[sandbox_write]\nmetis-pantheon = ["~/.cache/metis", "~/pantheon", "~/.cache/../.ssh"]\n'
                  '[private]\ncoordinators = ["mnemo-brain"]\npaths = ["~/knowledge/me"]\n')
@@ -231,31 +235,32 @@ def main():
     subprocess.run([sys.executable, "-I", LIB, "domains", "build"], env=env, capture_output=True)
     load = lambda n: json.load(open(os.path.join(state, "settings", n + ".json")))
     sa, sm, sw, sn, sz = load("athena-broker"), load("metis-pantheon"), load("workshop"), load("mnemo-brain"), load("zz")
+    real = lambda x: os.path.realpath(os.path.join(tmp, x))
     box = sa["sandbox"]
     aw = box["filesystem"]["allowWrite"]
-    check("песочница: строгий вид, папки направления и своё directions/<имя>/, окно сжатия координатора",
+    check("песочница: строгий вид, папки направления и своё directions/<имя>/ настоящими путями, окно сжатия",
           box["enabled"] and box["failIfUnavailable"] and box["allowUnsandboxedCommands"] is False
-          and "~/projects/br" in aw and "~/pantheon/directions/athena-broker" in aw and "~/projects/agent-kit" not in aw
+          and real("projects/br") in aw and real("pantheon/directions/athena-broker") in aw
+          and not any("~" in x or "agent-kit" in x for x in aw)
           and "~/**/.git/config" in box["filesystem"]["denyWrite"] and sa["autoCompactWindow"] == 200000)
     check("песочница: SSH-remote → git push/fetch/pull мимо песочницы только у этого направления",
           "git push *" in box["excludedCommands"] and "git push *" not in sm["sandbox"]["excludedCommands"])
-    check("песочница: кэши свои у направления, общих в записи нет",
-          sa["env"]["npm_config_cache"].endswith("pantheon-sandbox/athena-broker/npm")
-          and sa["env"]["XDG_CACHE_HOME"] != sm["env"]["XDG_CACHE_HOME"]
-          and "~/Library/Caches/pantheon-sandbox/athena-broker" in aw
-          and not any(x in aw for x in ("~/.npm", "~/.cache/uv", "~/Library/pnpm")))
+    cache_a = real("Library/Caches/pantheon-sandbox/athena-broker")
+    check("песочница: кэши свои у направления (папка создана), общих в записи нет",
+          sa["env"]["npm_config_cache"] == os.path.join(cache_a, "npm") and os.path.isdir(cache_a)
+          and sa["env"]["XDG_CACHE_HOME"] != sm["env"]["XDG_CACHE_HOME"] and cache_a in aw
+          and not any(x.endswith(("/.npm", "/.cache/uv", "/Library/pnpm")) for x in aw))
+    mw = sm["sandbox"]["filesystem"]["allowWrite"]
     check("песочница: доп. запись — только из policy.toml и только кэши; реестр права не даёт",
-          "~/.cache/metis" in sm["sandbox"]["filesystem"]["allowWrite"]
-          and not any(x in sm["sandbox"]["filesystem"]["allowWrite"] for x in ("~/pantheon", "~/.cache/../.ssh"))
-          and "~/.ssh" not in json.dumps(sa) + json.dumps(sm))
-    check("песочница: папки направления — только внутри ~/projects и ~/knowledge",
-          sz["sandbox"]["filesystem"]["allowWrite"][:1] == ["~/projects/zz"]
-          and not any(x in sz["sandbox"]["filesystem"]["allowWrite"] for x in ("~/pantheon", "~/projects", "~/.claude"))
-          and "~/knowledge" in sn["sandbox"]["filesystem"]["allowWrite"])
+          real(".cache/metis") in mw and not any(x.endswith(("/pantheon", "/.ssh")) for x in mw)
+          and ".ssh" not in json.dumps(sa) + json.dumps(sm))
+    zw = sz["sandbox"]["filesystem"]["allowWrite"]
+    check("песочница: папки направления — только внутри ~/projects и ~/knowledge, ссылки пропущены",
+          zw[0] == real("projects/zz") and real("projects") not in zw and real("pantheon") not in zw
+          and not any(x.endswith(("/.claude", "/ln")) for x in zw) and real("knowledge") in sn["sandbox"]["filesystem"]["allowWrite"])
     check("песочница: личное закрыто для чтения всем, кроме координатора с привилегией; мастерская; старый файл убран",
           "~/knowledge/me" in box["filesystem"]["denyRead"] and not sn["sandbox"]["filesystem"]["denyRead"]
-          and "~/knowledge/me" in sw["sandbox"]["filesystem"]["denyRead"]
-          and "~/projects/workshop" in sw["sandbox"]["filesystem"]["allowWrite"] and "autoCompactWindow" not in sw
+          and "~/knowledge/me" in sw["sandbox"]["filesystem"]["denyRead"] and "autoCompactWindow" not in sw
           and not os.path.exists(os.path.join(state, "settings", "old-direction.json")))
 
     # архив (STATE-14)

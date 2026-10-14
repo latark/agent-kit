@@ -800,6 +800,7 @@ def domains_build(if_changed=False):
 # .git/config и .git/hooks закрыты для записи: сетевой git у направлений с SSH-remote и gh идут мимо песочницы.
 # Личное из [private] policy.toml закрыто для чтения всем, кроме координаторов с этой привилегией.
 # Сеть — через прокси песочницы: хосты вне списка проверяет классификатор режима auto.
+# Пути в файле — настоящие абсолютные (свои у каждого Mac): ссылка, подставленная позже, их не сдвинет.
 # Координаторам там же — окно сжатия 200k (CTX-04).
 SANDBOX_ROOTS = ["~/projects", "~/knowledge"]   # папки направлений для песочницы — только внутри этих
 SANDBOX_DOMAINS = ["registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "files.pythonhosted.org",
@@ -826,20 +827,25 @@ def ssh_remote(folder):
     return False
 
 
-def _under(p, roots, strict=False):
-    """Путь от ~/ внутри одной из папок roots (strict — не сама папка)."""
+def _real_dir(p, roots, strict=False, create=False):
+    """Папка от ~/ внутри одной из roots → её настоящий абсолютный путь; None — вне них, ссылка или папки нет.
+    В настройки идёт настоящий путь, а не «~/…»: подмена папки ссылкой после сборки не сдвинет границу."""
     if not isinstance(p, str) or not p.startswith("~/") or "*" in p or ".." in p.split("/"):
-        return False
-    k = os.path.realpath(os.path.expanduser(p))
+        return None
+    x = os.path.expanduser(p)
+    if create and not os.path.lexists(x):
+        os.makedirs(x, exist_ok=True)
+    if os.path.islink(x) or not os.path.isdir(x):
+        return None
+    k = os.path.realpath(x)
     for r in roots:
         rk = os.path.realpath(os.path.expanduser(r))
         if k.startswith(rk + "/") or (k == rk and not strict):
-            return True
-    return False
+            return k
+    return None
 
 
-def role_settings(name, folders, own_dir, extra_write, ssh, deny_read, compact=None):
-    cache = os.path.join(HOME, "Library", "Caches", "pantheon-sandbox", name)
+def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None):
     data = {
         "_comment": "Собрано `pantheon domains build` из ~/pantheon/directions.toml и policy.toml (SEC-19). Руками не править.",
         "env": {
@@ -860,7 +866,7 @@ def role_settings(name, folders, own_dir, extra_write, ssh, deny_read, compact=N
             "allowUnsandboxedCommands": False,
             "excludedCommands": SANDBOX_EXCLUDED + (GIT_NETWORK if ssh else []),
             "filesystem": {
-                "allowWrite": list(folders) + [own_dir] + list(extra_write) + [cache.replace(HOME, "~", 1)],
+                "allowWrite": list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + [cache],
                 "denyWrite": ["~/**/.git/config", "~/**/.git/hooks"],
                 "denyRead": list(deny_read),
             },
@@ -883,23 +889,30 @@ def sandbox_build(domains, policy_path):
     private = policy.get("private") or {}
     private_paths = [p for p in private.get("paths") or [] if isinstance(p, str) and p.startswith("~/")]
     private_dirs = set(private.get("coordinators") or [])
+    caches = "~/Library/Caches/pantheon-sandbox"
     out_dir = path("settings")
     os.makedirs(out_dir, exist_ok=True)
+
+    def one(name, folders, own, compact, deny):
+        real = [_real_dir(f, SANDBOX_ROOTS[:1], strict=True) or _real_dir(f, SANDBOX_ROOTS[1:]) for f in folders]
+        skipped = [f for f, r in zip(folders, real) if not r]
+        if skipped:
+            print(f"песочница {name}: вне ~/projects и ~/knowledge, ссылка или нет папки — только через Write/Edit: "
+                  f"{skipped}", file=sys.stderr)
+        own_real = os.path.realpath(own) if os.path.isdir(own) and not os.path.islink(own) else None
+        write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r]
+        cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
+        ok = [r for r in real if r]
+        write_json(os.path.join(out_dir, name + ".json"),
+                   role_settings(ok, own_real, write, cache, any(ssh_remote(r) for r in ok), deny, compact))
+
     built = []
     for name, folders in domains.items():
-        ok = [f for f in folders if _under(f, SANDBOX_ROOTS[:1], strict=True) or _under(f, SANDBOX_ROOTS[1:])]
-        if len(ok) < len(folders):
-            print(f"песочница {name}: папки вне ~/projects и ~/knowledge — только через Write/Edit: "
-                  f"{[f for f in folders if f not in ok]}", file=sys.stderr)
-        write = [p for p in extra.get(name, []) if _under(p, ["~/.cache", "~/Library/Caches"], strict=True)]
-        deny = [] if name in private_dirs else private_paths
-        write_json(os.path.join(out_dir, name + ".json"),
-                   role_settings(name, ok, f"~/pantheon/directions/{name}", write,
-                                 any(ssh_remote(f) for f in ok), deny, COORDINATOR_COMPACT))
+        one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
+            [] if name in private_dirs else private_paths)
         built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски
-    write_json(os.path.join(out_dir, "workshop.json"),
-               role_settings("workshop", ["~/projects/workshop"], "~/pantheon/workshop", [], False, private_paths))
+    one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
     built.append("workshop")
     for f in os.listdir(out_dir):
         if f.endswith(".json") and f[:-5] not in built:
