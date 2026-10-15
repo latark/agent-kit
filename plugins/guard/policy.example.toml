@@ -31,3 +31,8 @@ themis-sources = ["~/.cache/expert-corpus"]
 # не видит — их проверяет роль (metis-0027, «да» владельца 15.10).
 [merge]
 themis-sources = ["~/projects/expert-corpus", "~/projects/legal-watch"]
+
+# Чужой репозиторий в gh pr merge -R / --repo — только из этого списка (owner/repo на github.com) и только той же
+# роли из [merge]: сессия Фемиды стоит в legal-watch, а сливает и PR expert-corpus (themis-0015, ответ владельца 15.10).
+[merge_repos]
+themis-sources = ["latark/expert-corpus"]

@@ -17,7 +17,8 @@
   private      — личное (me/, ключи git-crypt, журнал штаба) читают и пишут только hq, chiron и mnemo-brain (SEC-11);
   cdp-role     — демон браузера с вашими входами — только мастерская и prometheus (чтение), /close — никому (SEC-13);
   push         — git push: координатор, лиды и мастерская, не в main и master; gh pr merge — только координатор
-                 из [merge] policy.toml в своём репозитории (DONE-07, metis-0027);
+                 из [merge] policy.toml в своём репозитории, -R — только из [merge_repos] (DONE-07, metis-0027,
+                 themis-0015);
   terminal     — роли не печатают в терминал: osascript, tmux send-keys, screen stuff (SEC-30).
   corpus-role  — роли не запускают пополнение корпуса (corpus add, channel --videos, krisp, скрипты Krisp и
                  Диска) и не читают его ключи из Связки: только через посредника; штабу (hq) корпус закрыт целиком
@@ -2556,31 +2557,64 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd=""):
     Тесты и вердикт argus guard не видит — их проверяет роль; здесь только кто, где и без обхода правил ветки."""
     if role != "domain-coordinator" or sub:
         return "слияние делает владелец"
+    policy = load_policy()
     # только списки: строка вместо списка перебиралась бы по буквам, и корнем стал бы «/» (ревью argus 15.10)
-    roots = next((_norm(paths) for paths in (load_policy().get("merge") or {}).values()
+    found = next(((name, _norm(paths)) for name, paths in (policy.get("merge") or {}).items()
                   if isinstance(paths, list) and _inside(pdir, _norm(paths))), None)
-    if not roots:
+    if not found:
         return "слияние делает владелец"
+    name, roots = found
     if moved or not _inside(cwd, roots):
         return "только из папки своего репозитория, без cd в команде"
     if re.search(r"\bGH_(?:REPO|HOST)\b", cmd):
         return "без чужого репозитория (GH_REPO, GH_HOST)"
+    # -R — только репозиторий из [merge_repos] этого направления: сессия Фемиды стоит в legal-watch, а сливает и
+    # PR expert-corpus (themis-0015, ответ владельца 15.10 «А и Б»). Сверка по точному owner/repo на github.com
+    repos = (policy.get("merge_repos") or {}).get(name)
+    repos = {r.strip().lower() for r in repos if isinstance(r, str)} if isinstance(repos, list) else set()
     takes_value = {"-t", "--subject", "-b", "--body", "-F", "--body-file", "-A", "--author-email",
                    "--match-head-commit"}
-    skip = False
+    skip = repo_next = False
+    has_repo = has_number = False
     for a in args:
+        if repo_next:
+            repo_next = False
+            if not _merge_repo_ok(a, repos):
+                return "без чужого репозитория (-R)"
+            continue
         if skip:
             skip = False
             continue
         if not a:
             return "PR указывай номером"
-        if a == "--admin" or a in ("-R", "--repo") or a.startswith("--repo=") or a.startswith("-R"):
+        if a == "--admin":
             return "без --admin и без чужого репозитория (-R)"
-        if a in takes_value:
+        if a in ("-R", "--repo"):
+            has_repo = repo_next = True
+        elif a.startswith("--repo=") or (a.startswith("-R") and not a.startswith("--")):
+            has_repo = True
+            if not _merge_repo_ok(a[7:] if a.startswith("--repo=") else a[2:], repos):
+                return "без чужого репозитория (-R)"
+        elif a in takes_value:
             skip = True
         elif not a.startswith("-") and not a.isdigit():
             return "PR указывай номером"
+        elif a.isdigit():
+            has_number = True
+    if repo_next:
+        return "без чужого репозитория (-R)"
+    if has_repo and not has_number:
+        return "с -R PR указывай номером"
     return None
+
+
+def _merge_repo_ok(value, repos):
+    """-R для gh pr merge: owner/repo (или github.com/owner/repo) ровно из [merge_repos] направления."""
+    v = (value or "").strip().lower()
+    v = re.sub(r"^https?://", "", v)
+    v = re.sub(r"^github\.com/", "", v)
+    v = re.sub(r"(?:\.git)?/?$", "", v)
+    return bool(re.fullmatch(r"[a-z0-9_.-]+/[a-z0-9_.-]+", v)) and v in repos
 
 
 def _gh_pr_sub(texts):

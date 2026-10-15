@@ -34,11 +34,11 @@ def setup(home):
         "metis-pantheon": ["~/projects/agent-kit", "~/.claude"],
         # реестр «по ошибке» отдаёт athena папку agent-kit — привилегий Метиды это не даёт
         "athena-broker-2": ["~/projects/agent-kit/sub"],
-        "themis-sources": ["~/projects/expert-corpus"],
+        "themis-sources": ["~/projects/expert-corpus", "~/projects/legal-watch"],
     }}, open(os.path.join(home, ".local/state/pantheon/domains.json"), "w"))
     # шаг 1.2: репозиторий брокера на ветке эпика, alexbroker — на main (правило push); личное в ~/ai/knowledge/me
     for repo, branch in (("projects/brokerAssistantApp", "epic-tax"), ("projects/alexbroker", "main"),
-                         ("projects/expert-corpus", "main")):
+                         ("projects/expert-corpus", "main"), ("projects/legal-watch", "main")):
         subprocess.run(["git", "init", "-q", "-b", branch, os.path.join(home, repo)], check=True)
     os.makedirs(os.path.join(home, "ai/knowledge/me"), exist_ok=True)
     os.makedirs(os.path.join(home, "ai/knowledge/raw"), exist_ok=True)
@@ -47,7 +47,8 @@ def setup(home):
     open(os.path.join(home, ".claude/pantheon/policy.toml"), "w").write(
         'always = ["~/.claude/agent-memory"]\n[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n'
         'mnemo-brain = ["~/ai/knowledge"]\n[agent_extra]\nprometheus = ["~/ai/knowledge"]\n'
-        '[merge]\nthemis-sources = ["~/projects/expert-corpus"]\n')
+        '[merge]\nthemis-sources = ["~/projects/expert-corpus", "~/projects/legal-watch"]\n'
+        '[merge_repos]\nthemis-sources = ["latark/expert-corpus"]\n')
 
 
 def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None, raw=False):
@@ -77,7 +78,7 @@ def main():
     G = lambda path: ("Grep", {"pattern": "налог", "path": path})
     K = lambda rel: os.path.join(home, "ai", "knowledge", rel)
     br, ak, alex, ws = "projects/brokerAssistantApp", "projects/agent-kit", "projects/alexbroker", "projects/workshop/visa"
-    ec = "projects/expert-corpus"
+    ec, lw = "projects/expert-corpus", "projects/legal-watch"
     try:  # без tomllib (Python 3.9) политика пуста — слияние закрыто, это безопасный отказ
         import tomllib  # noqa: F401
         MERGE_OK = "allow"
@@ -410,6 +411,38 @@ def main():
          B("python3 -m pytest -c pytest.ini tests/test_krisp_trash.py")),
         ("corpus-role: python -c с runpy скрипта Krisp — отказ", "deny", br, "dev-sonnet", True,
          B("python3 -c 'import runpy; runpy.run_path(\"tools/krisp_trash.py\")'")),
+        # --- merge -R из [merge_repos]: Фемида в legal-watch сливает PR expert-corpus (themis-0015) ---
+        ("merge -R: Фемида из legal-watch в expert-corpus — можно", MERGE_OK, lw, "domain-coordinator", False,
+         B("gh pr merge 2 -R latark/expert-corpus --merge")),
+        ("merge -R: --repo= и регистр — можно", MERGE_OK, lw, "domain-coordinator", False,
+         B("gh pr merge 2 --repo=Latark/Expert-Corpus --squash")),
+        ("merge -R: github.com/owner/repo — можно", MERGE_OK, lw, "domain-coordinator", False,
+         B("gh pr merge 2 --repo github.com/latark/expert-corpus")),
+        ("merge -R: -Rowner/repo слитно — можно", MERGE_OK, lw, "domain-coordinator", False,
+         B("gh pr merge 2 -Rlatark/expert-corpus")),
+        ("merge -R: gh pr -R … merge — можно", MERGE_OK, lw, "domain-coordinator", False,
+         B("gh pr -R latark/expert-corpus merge 2")),
+        ("merge -R: другой репозиторий — отказ", "deny", lw, "domain-coordinator", False,
+         B("gh pr merge 2 -R latark/alexbroker")),
+        ("merge -R: похожее имя — отказ", "deny", lw, "domain-coordinator", False,
+         B("gh pr merge 2 -R latark/expert-corpus-fork")),
+        ("merge -R: чужой хост — отказ", "deny", lw, "domain-coordinator", False,
+         B("gh pr merge 2 -R evil.example/latark/expert-corpus")),
+        ("merge -R: два -R, второй чужой — отказ", "deny", lw, "domain-coordinator", False,
+         B("gh pr merge 2 -R latark/expert-corpus -R latark/alexbroker")),
+        ("merge -R: без номера — отказ", "deny", lw, "domain-coordinator", False,
+         B("gh pr merge -R latark/expert-corpus --merge")),
+        ("merge -R: -R без значения — отказ", "deny", lw, "domain-coordinator", False, B("gh pr merge 2 -R")),
+        ("merge -R: с --admin — отказ", "deny", lw, "domain-coordinator", False,
+         B("gh pr merge 2 -R latark/expert-corpus --admin")),
+        ("merge -R: $REPO вместо имени — отказ", "deny", lw, "domain-coordinator", False,
+         B("gh pr merge 2 -R $REPO")),
+        ("merge -R: субагент Фемиды — отказ", "deny", lw, "hephaestus-sources", True,
+         B("gh pr merge 2 -R latark/expert-corpus")),
+        ("merge -R: Афина с репо Фемиды — отказ", "deny", br, "domain-coordinator", False,
+         B("gh pr merge 2 -R latark/expert-corpus")),
+        ("merge -R: Фемида с GH_REPO — по-прежнему отказ", "deny", lw, "domain-coordinator", False,
+         B("GH_REPO=latark/expert-corpus gh pr merge 2")),
         ("merge: Афина (нет в [merge]) — отказ", "deny", br, "domain-coordinator", False, B("gh pr merge 1")),
         ("merge: Фемида git push в main — по-прежнему отказ", "deny", ec, "domain-coordinator", False,
          B("git push origin main")),
@@ -432,13 +465,25 @@ def main():
     home2 = os.path.realpath(tempfile.mkdtemp(prefix="guard-test-"))
     setup(home2)
     pol = os.path.join(home2, ".claude", "pantheon", "policy.toml")
-    open(pol, "w").write(open(pol).read().replace('themis-sources = ["~/projects/expert-corpus"]',
-                                                  'themis-sources = "~/projects/expert-corpus"'))
+    open(pol, "w").write(open(pol).read().replace(
+        'themis-sources = ["~/projects/expert-corpus", "~/projects/legal-watch"]',
+        'themis-sources = "~/projects/expert-corpus"'))
     got = run(home2, br, "domain-coordinator", "Bash", {"command": "gh pr merge 1"})
     ok = got == "deny"
     failed += not ok
     cases.append(None)
     print(f"{'ok  ' if ok else 'FAIL'} merge: строка вместо списка в [merge] — отказ: {got}")
+    # [merge_repos] строкой — -R закрыт (подстрока «latark/expert-corpus» не должна совпасть по буквам)
+    home3 = os.path.realpath(tempfile.mkdtemp(prefix="guard-test-"))
+    setup(home3)
+    pol = os.path.join(home3, ".claude", "pantheon", "policy.toml")
+    open(pol, "w").write(open(pol).read().replace('themis-sources = ["latark/expert-corpus"]',
+                                                  'themis-sources = "latark/expert-corpus"'))
+    got = run(home3, lw, "domain-coordinator", "Bash", {"command": "gh pr merge 2 -R latark/expert-corpus"})
+    ok = got == "deny"
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} merge -R: строка вместо списка в [merge_repos] — отказ: {got}")
     # № 1: на системном Python 3.9 (без tomllib) guard не падает и прежние правила работают
     if os.path.exists("/usr/bin/python3"):
         got = run(home, br, "", "Bash", {"command": "pnpm run dev"}, python="/usr/bin/python3")
