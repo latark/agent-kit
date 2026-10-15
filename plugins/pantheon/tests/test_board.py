@@ -302,7 +302,7 @@ def main():
         "--waiting-on", "human", "--next", "ваш ответ", "--question", "Где держать доску?\nВторая строка",
         "--option", "Да", "--option", "Нет", "--project", "Пантеон", t=T0 + 395)
     run(env, "board", t=T0 + 396)
-    cm = card(view, [f for f in os.listdir(os.path.join(view, "Доска")) if f.startswith("Многострочный")][0][:-3])
+    cm = card(view, [f for f in os.listdir(os.path.join(view, "Доска")) if "Многострочный" in f][0][:-3])
     mtext = open(cm, encoding="utf-8").read().replace("- [ ] Да", "- [x] Да")
     open(cm, "w", encoding="utf-8").write(mtext)
     os.utime(cm, (T0 + 360, T0 + 360))  # правка старше 30 с — тик её забирает
