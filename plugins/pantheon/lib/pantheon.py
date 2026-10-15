@@ -2882,10 +2882,15 @@ def usage_report(rest):
 # Тик раз в 10 минут, вне песочницы: каталог agent-kit → новые версии установленных плагинов → тесты новой версии и
 # установленной (база) на одних и тех же python → есть новые падения — не ставим, тревога; нет — claude plugin update.
 # База нужна, чтобы падения от места запуска (временная папка, python 3.9) не держали обновление вечно.
+# Хеш дерева проверенной копии сверяется с тем, что встало: update сам обновляет каталог и может поставить версию
+# новее проверенной. Метка testing ловит прерванный прогон (таймаут задачи тика, сбой): такая версия — красная.
 
 MARKETPLACE = "agent-kit"
-PLUGIN_TEST_TIMEOUT = 600
+PLUGIN_TEST_TIMEOUT = 600    # один файл тестов
+PLUGIN_RUN_LIMIT = 1800      # весь прогон плагина (новая + база, все python) — меньше timeout задачи в schedule.toml
+NO_TESTS = "нет тестов"
 _TMP_RE = None
+ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])")
 
 
 def _plugins_journal(line):
@@ -2950,6 +2955,34 @@ def _plugins_catalog():
     return out
 
 
+def _tree_hash(root):
+    """sha256 дерева плагина: относительные пути и содержимое, ссылки — по тексту ссылки. Без .git и __pycache__ на
+    любой глубине и без точечных файлов и папок верхнего уровня, кроме .claude-plugin (в кэше лишний `.in_use`).
+    None — папки нет."""
+    if not isinstance(root, str) or not os.path.isdir(root):
+        return None
+    h = hashlib.sha256()
+
+    def walk(d, rel):
+        for e in sorted(os.scandir(d), key=lambda e: e.name):
+            if e.name in (".git", "__pycache__") or (not rel and e.name.startswith(".") and e.name != ".claude-plugin"):
+                continue
+            r = f"{rel}/{e.name}" if rel else e.name
+            if e.is_symlink():
+                h.update(b"L\0" + r.encode() + b"\0" + os.readlink(e.path).encode() + b"\0")
+            elif e.is_dir():
+                walk(e.path, r)
+            elif e.is_file():
+                fh = hashlib.sha256()
+                with open(e.path, "rb") as f:
+                    for chunk in iter(lambda: f.read(1 << 20), b""):
+                        fh.update(chunk)
+                h.update(b"F\0" + r.encode() + b"\0" + fh.hexdigest().encode() + b"\0")
+
+    walk(root, "")
+    return h.hexdigest()
+
+
 def _test_pythons():
     """python3 из PATH и системный /usr/bin/python3 — если он есть, инструменты командной строки установлены
     (иначе macOS покажет окно установки) и это не тот же python."""
@@ -2971,54 +3004,65 @@ def _tmp_re():
     global _TMP_RE
     if _TMP_RE is None:
         pre = {"/private/tmp/", "/tmp/", "/private/var/folders/", "/var/folders/"}
-        for t in (tempfile.gettempdir(), os.path.realpath(tempfile.gettempdir())):
-            pre.add(t.rstrip("/") + "/")
+        for t in (tempfile.gettempdir(), path("plugins", "tmp")):
+            for v in (t, os.path.realpath(t)):
+                pre.add(v.rstrip("/") + "/")
         alts = "|".join(re.escape(p) for p in sorted(pre, key=len, reverse=True))
         _TMP_RE = re.compile(rf"(?:{alts})[^\s'\"(),:;]*")
     return _TMP_RE
 
 
 def _failure_signatures(fname, out, rc):
-    """Подписи падений одного файла тестов: строки FAIL, исключение в конце вывода, иначе ненулевой код;
-    rc None — таймаут."""
+    """Подписи падений одного файла тестов: строки FAIL, исключение в конце вывода, ненулевой код (всегда — иначе
+    гибель по сигналу прячется за старой строкой FAIL); rc None — таймаут, rc "срок" — не успел в срок прогона."""
+    out = ANSI.sub("", out)
     sigs = [_tmp_re().sub("<tmp>", ln.strip()) for ln in out.splitlines() if ln.lstrip().startswith("FAIL")]
     if rc is None:
         return sigs + [f"{fname}: таймаут"]
+    if rc == "срок":
+        return sigs + [f"{fname}: срок прогона"]
     lines = [ln for ln in out.splitlines() if ln.strip()]
-    exc = None
     if "Traceback (most recent call last):" in out and lines and not lines[-1][:1].isspace():
         m = re.match(r"([A-Za-z_][\w.]*)(?::|$)", lines[-1])
-        exc = m.group(1) if m else None
-    if exc:
-        sigs.append(f"{fname}: исключение {exc}")
-    elif rc != 0 and not sigs:
+        if m:
+            sigs.append(f"{fname}: исключение {m.group(1)}")
+    if rc != 0:
         sigs.append(f"{fname}: код {rc}")
     return sigs
 
 
-def _run_plugin_tests(pdir, pythons, tmp, log, label):
+def _test_files(pdir):
+    tests_dir = os.path.join(pdir, "tests") if pdir else ""
+    return sorted(f for f in os.listdir(tests_dir) if f.startswith("test_") and f.endswith(".py")) \
+        if tests_dir and os.path.isdir(tests_dir) else []
+
+
+def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline):
     """tests/test_*.py папки pdir по одному на каждом python → Counter подписей (python, файл, подпись)."""
     sigs = collections.Counter()
-    if not pdir:
-        return sigs
-    tests_dir = os.path.join(pdir, "tests")
-    files = sorted(f for f in os.listdir(tests_dir) if f.startswith("test_") and f.endswith(".py")) \
-        if os.path.isdir(tests_dir) else []
-    env0 = {k: v for k, v in os.environ.items() if not k.startswith("PANTHEON_")}
+    env0 = {k: v for k, v in os.environ.items()
+            if not k.startswith("PANTHEON_") and k not in ("FORCE_COLOR", "CLICOLOR_FORCE")}
+    env0.update({"NO_COLOR": "1", "PYTHON_COLORS": "0"})
     for py in pythons:
-        for f in files:
-            home = tempfile.mkdtemp(prefix="home-", dir=tmp)
-            try:
-                r = subprocess.run([py, "-I", os.path.join("tests", f)], cwd=pdir, env={**env0, "HOME": home},
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   timeout=PLUGIN_TEST_TIMEOUT)
-                out, rc = r.stdout, r.returncode
-            except subprocess.TimeoutExpired as e:
-                out, rc = e.stdout or b"", None
-            except OSError as e:
-                out, rc = str(e), 127
-            out = out.decode("utf-8", "replace") if isinstance(out, bytes) else out
-            log.write(f"\n===== {label} · {py} · {f} · {'таймаут' if rc is None else f'код {rc}'} =====\n{out}")
+        for f in _test_files(pdir):
+            left = deadline - time.monotonic()
+            if left <= 0:
+                out, rc = "", "срок"
+            else:
+                home = tempfile.mkdtemp(prefix="home-", dir=tmp)
+                limit = min(PLUGIN_TEST_TIMEOUT, left)
+                try:
+                    r = subprocess.run([py, "-I", os.path.join("tests", f)], cwd=pdir, env={**env0, "HOME": home},
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                       timeout=limit)
+                    out, rc = r.stdout, r.returncode
+                except subprocess.TimeoutExpired as e:
+                    out, rc = e.stdout or b"", None if limit >= PLUGIN_TEST_TIMEOUT else "срок"
+                except OSError as e:
+                    out, rc = str(e), 127
+                out = out.decode("utf-8", "replace") if isinstance(out, bytes) else out
+            state = {None: "таймаут", "срок": "срок прогона"}.get(rc, f"код {rc}")
+            log.write(f"\n===== {label} · {py} · {f} · {state} =====\n{out}")
             log.flush()
             for s in _failure_signatures(f, out, rc):
                 sigs[(py, f, s)] += 1
@@ -3026,7 +3070,7 @@ def _run_plugin_tests(pdir, pythons, tmp, log, label):
 
 
 def _plugins_mark(marks, name, mark):
-    """Метка сразу после каждого плагина: следующий плагин может упасть, а сделанное не повторяется."""
+    """Метка сразу после каждого шага: следующий может упасть, а сделанное не повторяется."""
     if mark is None:
         marks.pop(name, None)
     else:
@@ -3034,8 +3078,9 @@ def _plugins_mark(marks, name, mark):
     write_json(path("plugins", "marks.json"), marks)
 
 
-def _plugin_install(name, old, new, log, marks, quiet):
-    """claude plugin update без -y (новая команда установки в каталоге должна требовать человека) и сверка версии."""
+def _plugin_install(name, old, new, log, marks, quiet, digest):
+    """claude plugin update без -y (новая команда установки в каталоге должна требовать человека) и сверка того, что
+    встало, с проверенной копией: версия и хеш дерева installPath."""
     try:
         r = subprocess.run([claude_bin(), "plugin", "update", f"{name}@{MARKETPLACE}", "-s", "user"],
                            capture_output=True, text=True, timeout=600)
@@ -3043,50 +3088,70 @@ def _plugin_install(name, old, new, log, marks, quiet):
         why = f"код {r.returncode}: {' '.join((r.stderr or r.stdout or '').split())[:200]}"
     except (OSError, subprocess.TimeoutExpired) as e:
         ok, why = False, type(e).__name__
-    got = ((_plugins_installed() or {}).get(name) or {}).get("version")
-    if ok and got == new:
+    row = (_plugins_installed() or {}).get(name) or {}
+    got = row.get("version")
+    if got == new and _tree_hash(row.get("installPath")) == digest:
         _plugins_mark(marks, name, None)
         _plugins_journal(f"{name} {old} → {new}: обновлён")
         alert(f"обновлён {name} {old} → {new}, сессии увидят после перезапуска", "plugins-update")
         if not quiet:
             print(f"{name}: обновлён {old} → {new}")
         return 0
-    if ok:
-        why = f"после update версия {got or 'неизвестна'}, а не {new}"
-    _plugins_mark(marks, name, {"version": new, "result": "green", "log": log})
-    _plugins_journal(f"{name} {old} → {new}: тесты зелёные, установка не удалась ({why})")
-    alert_once(f"plugins-update-{name}", new, f"{name} {new}: тесты прошли, но claude plugin update не поставил "
-               f"({why}). Руками: claude plugin update {name}@{MARKETPLACE}", "plugins-update")
+    if got == old or (got is None and not ok):
+        # ничего не встало: тесты зелёные, установка не удалась — пробуем на следующих запусках без тестов
+        if ok:
+            why = f"после update версия {got}, а не {new}"
+        _plugins_mark(marks, name, {"version": new, "result": "green", "log": log, "hash": digest})
+        _plugins_journal(f"{name} {old} → {new}: тесты зелёные, установка не удалась ({why})")
+        alert_once(f"plugins-update-{name}", new, f"{name} {new}: тесты прошли, но claude plugin update не поставил "
+                   f"({why}). Руками: claude plugin update {name}@{MARKETPLACE}", "plugins-update")
+        if not quiet:
+            print(f"{name}: {new} — тесты прошли, установка не удалась ({why})")
+        return ALERTED
+    # встало не то, что проверяли: другая версия или другое содержимое (update сам обновил каталог)
+    _plugins_mark(marks, name, None)
+    seen = got or "неизвестна"
+    _plugins_journal(f"{name} {old} → {seen}: встала непроверенная версия (проверялась {new}, хеш {digest})")
+    text = f"встала непроверенная версия {name} {seen} (проверялась {new})"
+    alert("КРИТИЧНО: " + text, "plugins-update")
+    notify(text, title="Пантеон · критично", group="critical")
     if not quiet:
-        print(f"{name}: {new} — тесты прошли, установка не удалась ({why})")
+        print(f"{name}: КРИТИЧНО — {text}")
     return ALERTED
 
 
-def _plugin_check(name, old, new, src, base):
-    """Тесты новой версии против установленной. Отдаёт (лог, новые подписи)."""
+def _plugin_check(name, old, new, src, base, marks):
+    """Тесты новой версии против установленной. Отдаёт (лог, хеш проверенной копии, новые подписи)."""
     log = path("plugins", f"{_plugins_safe(name)}-{_plugins_safe(new)}.log")
-    os.makedirs(path("plugins"), exist_ok=True)
-    tmp = tempfile.mkdtemp(prefix=f"plugins-{_plugins_safe(name)}-")
+    tmp = tempfile.mkdtemp(prefix=f"{_plugins_safe(name)}-", dir=path("plugins", "tmp"))
+    deadline = time.monotonic() + PLUGIN_RUN_LIMIT
     try:
         ign = shutil.ignore_patterns(".git", "__pycache__")
         new_dir = os.path.join(tmp, "new", _plugins_safe(name))
         shutil.copytree(src, new_dir, symlinks=True, ignore=ign)
+        digest = _tree_hash(new_dir)
+        _plugins_mark(marks, name, {"version": new, "result": "testing", "log": log, "hash": digest})
         base_dir = None
         if isinstance(base, str) and os.path.isdir(base):
             base_dir = os.path.join(tmp, "base", _plugins_safe(name))
             shutil.copytree(base, base_dir, symlinks=True, ignore=ign)
         pythons = _test_pythons()
         with open(log, "w", encoding="utf-8") as fh:
-            fh.write(f"{stamp()} {name}: новая {new} из {src}, база {old} из {base_dir and base or '—'}; "
-                     f"python: {', '.join(pythons)}\n")
-            fresh = (_run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}")
-                     - _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}"))
+            fh.write(f"{stamp()} {name}: новая {new} из {src} (хеш {digest}), база {old} из "
+                     f"{base_dir and base or '—'}; python: {', '.join(pythons)}\n")
+            got_new = _run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}", deadline)
+            fresh = got_new - _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline)
+            for k, n in got_new.items():  # не успевшее у новой не гасится тем, что не успело и у базы
+                if k[2].endswith(": срок прогона"):
+                    fresh[k] = n
+            if not _test_files(new_dir):  # без тестов зелёного нет, даже если их нет и у базы
+                fresh[("-", "-", NO_TESTS)] = 1
             fh.write(f"\n===== новых падений: {sum(fresh.values())} =====\n")
             for (py, f, s) in sorted(fresh):
                 fh.write(f"{py} · {f} · {s}\n")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    return log, fresh
+    return log, digest, fresh
 
 
 def plugins_update(quiet=False):
@@ -3094,7 +3159,17 @@ def plugins_update(quiet=False):
         return _plugins_update(quiet) if got else 0
 
 
+def _plugins_red(marks, name, old, new, log, what):
+    _plugins_mark(marks, name, {"version": new, "result": "red", "log": log})
+    _plugins_journal(f"{name} {old} → {new}: {what}, не ставлю ({log})")
+    alert(f"{name} {new} не поставлен: {what}. Лог: {log.replace(HOME, '~')}", "plugins-update")
+    return ALERTED
+
+
 def _plugins_update(quiet):
+    # остатки прогона, прерванного таймаутом задачи или сбоем (блокировка взята — чужого прогона нет)
+    shutil.rmtree(path("plugins", "tmp"), ignore_errors=True)
+    os.makedirs(path("plugins", "tmp"), exist_ok=True)
     try:
         ok = subprocess.run([claude_bin(), "plugin", "marketplace", "update", MARKETPLACE],
                             capture_output=True, text=True, timeout=300).returncode == 0
@@ -3110,7 +3185,7 @@ def _plugins_update(quiet):
         return 1
     catalog = _plugins_catalog()
     marks = read_json(path("plugins", "marks.json"))
-    rc = 0
+    rc, tested = 0, False
     for name in sorted(installed):
         if name not in catalog:
             continue
@@ -3120,26 +3195,36 @@ def _plugins_update(quiet):
                 print(f"{name}: {old}, новее нет")
             continue
         mark = marks.get(name) if isinstance(marks.get(name), dict) else {}
-        if mark.get("version") == new and mark.get("result") == "red":
+        same = mark.get("version") == new
+        log = mark.get("log") or path("plugins", f"{_plugins_safe(name)}-{_plugins_safe(new)}.log")
+        if same and mark.get("result") == "red":
             if not quiet:
                 print(f"{name}: {new} не ставлю — тесты были красные ({mark.get('log')})")
             continue
-        if mark.get("version") == new and mark.get("result") == "green":
-            rc = max(rc, _plugin_install(name, old, new, mark.get("log"), marks, quiet))
+        if same and mark.get("result") == "testing":
+            rc = max(rc, _plugins_red(marks, name, old, new, log, "прогон тестов прерван — таймаут задачи или сбой"))
+            if not quiet:
+                print(f"{name}: {new} не ставлю — прошлый прогон тестов прерван")
             continue
-        log, fresh = _plugin_check(name, old, new, src, installed[name].get("installPath"))
+        if same and mark.get("result") == "green" and mark.get("hash") and _tree_hash(src) == mark["hash"]:
+            rc = max(rc, _plugin_install(name, old, new, log, marks, quiet, mark["hash"]))
+            continue
+        if tested:  # тесты — не больше одного плагина за запуск: иначе не уложиться в timeout задачи
+            if not quiet:
+                print(f"{name}: {new} — проверю на следующем запуске")
+            continue
+        tested = True
+        log, digest, fresh = _plugin_check(name, old, new, src, installed[name].get("installPath"), marks)
         if not fresh:
-            rc = max(rc, _plugin_install(name, old, new, log, marks, quiet))
+            rc = max(rc, _plugin_install(name, old, new, log, marks, quiet, digest))
             continue
         # одна подпись на двух python — одна строка в тревоге
-        first = list(dict.fromkeys(s if s.startswith(f + ":") else f"{f}: {s}" for (py, f, s) in sorted(fresh)))[:3]
-        _plugins_mark(marks, name, {"version": new, "result": "red", "log": log})
-        _plugins_journal(f"{name} {old} → {new}: новые падения тестов, не ставлю ({log})")
-        alert(f"{name} {new} не поставлен: новые падения тестов ({sum(fresh.values())}) — {'; '.join(first)}. "
-              f"Лог: {log.replace(HOME, '~')}", "plugins-update")
+        first = list(dict.fromkeys(s if s.startswith(f + ":") or f == "-" else f"{f}: {s}"
+                                   for (py, f, s) in sorted(fresh)))[:3]
+        rc = _plugins_red(marks, name, old, new, log,
+                          f"новые падения тестов ({sum(fresh.values())}) — {'; '.join(first)}")
         if not quiet:
             print(f"{name}: {new} не ставлю — новые падения тестов, лог {log}")
-        rc = ALERTED
     return rc
 
 

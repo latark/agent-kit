@@ -36,6 +36,15 @@ OK = 'print("ok")\n'
 OLD_FAIL = 'import os\nprint("FAIL старое падение в " + os.path.abspath(__file__))\nraise SystemExit(1)\n'
 NEW_FAIL = 'print("FAIL новая ошибка")\nraise SystemExit(1)\n'
 NEW_EXC = 'raise KeyError("x")\n'
+OLD_FAIL_RC = 'print("FAIL старое", flush=True)\nraise SystemExit(1)\n'
+NEW_KILLED = 'print("FAIL старое", flush=True)\nimport os, signal\nos.kill(os.getpid(), signal.SIGKILL)\n'
+# цветной трейсбек (так печатает 3.13+ при FORCE_COLOR): без вырезания ANSI тип исключения не разобрать
+NEW_COLOR_EXC = ('print("\\x1b[35mTraceback (most recent call last):\\x1b[0m")\nprint("  File \\"t.py\\", line 1")\n'
+                 'print("\\x1b[1;35mKeyError\\x1b[0m: \\x1b[35m\'x\'\\x1b[0m")\nraise SystemExit(1)\n')
+# тесты идут без цвета: FORCE_COLOR снят, NO_COLOR=1, PYTHON_COLORS=0
+COLORLESS = ('import os\nif os.environ.get("FORCE_COLOR") or os.environ.get("CLICOLOR_FORCE") '
+             'or os.environ.get("NO_COLOR") != "1" or os.environ.get("PYTHON_COLORS") != "0":\n'
+             '    print("FAIL цвет включён")\n    raise SystemExit(1)\n')
 
 
 def pantheon_python():
@@ -63,13 +72,20 @@ class Env:
         self.home, self.stub = os.path.join(t, "home"), os.path.join(t, "stub")
         self.pantheon, self.state = os.path.join(t, "pantheon"), os.path.join(t, "state")
         self.counter = os.path.join(t, "runs.log")
-        for d in (self.home, self.stub, self.pantheon):
+        self.tmpdir = os.path.join(t, "T")  # свой TMPDIR: уборку проверяем здесь, а не в общей временной папке
+        self.notes = os.path.join(t, "notify.log")
+        for d in (self.home, self.stub, self.pantheon, self.tmpdir):
             os.makedirs(d)
         plugins = os.path.join(self.home, ".claude", "plugins")
         mkt = os.path.join(plugins, "marketplaces", "agent-kit")
         cache = os.path.join(plugins, "cache", "agent-kit", "x", installed)
-        self.plugin(os.path.join(mkt, "plugins", "x"), catalog, new_test)
+        self.src = os.path.join(mkt, "plugins", "x")
+        self.plugin(self.src, catalog, new_test)
         self.plugin(cache, installed, base_test)
+        # что поставит `claude plugin update`: копия каталога в кэше плюс служебный .in_use
+        self.after = os.path.join(plugins, "cache", "agent-kit", "x", catalog + "-new")
+        shutil.copytree(self.src, self.after, symlinks=True)
+        self.write(os.path.join(self.after, ".in_use"), "1")
         self.write(os.path.join(mkt, ".claude-plugin", "marketplace.json"),
                    json.dumps({"name": "agent-kit", "plugins": [{"name": "x", "source": "./plugins/x"},
                                                                {"name": "far", "source": "../../elsewhere"}]}))
@@ -80,7 +96,8 @@ class Env:
                  {"id": "x@agent-kit", "version": "0.0.1", "scope": "project", "installPath": "/nowhere"}]
         row = {"id": "x@agent-kit", "version": installed, "scope": "user", "installPath": cache}
         self.write(os.path.join(self.stub, "list.json"), json.dumps(other + [row]))
-        self.write(os.path.join(self.stub, "list-after.json"), json.dumps(other + [{**row, "version": catalog}]))
+        self.write(os.path.join(self.stub, "list-after.json"),
+                   json.dumps(other + [{**row, "version": catalog, "installPath": self.after}]))
         self.write(os.path.join(self.stub, "claude"), STUB)
         os.chmod(os.path.join(self.stub, "claude"), 0o755)
 
@@ -91,15 +108,24 @@ class Env:
 
     def plugin(self, d, version, body):
         self.write(os.path.join(d, ".claude-plugin", "plugin.json"), json.dumps({"name": "x", "version": version}))
-        self.write(os.path.join(d, "tests", "test_a.py"),
-                   f"with open({self.counter!r}, 'a') as fh:\n    fh.write('run\\n')\n" + body)
+        if body is not None:  # None — у версии нет tests/test_*.py
+            self.write(os.path.join(d, "tests", "test_a.py"),
+                       f"with open({self.counter!r}, 'a') as fh:\n    fh.write('run\\n')\n" + body)
         self.write(os.path.join(d, "tests", "helper.py"), "raise SystemExit(3)\n")  # не test_*.py — не гоняется
+
+    def leftovers(self):
+        """Что осталось от прогона: своя TMPDIR и STATE/plugins/tmp."""
+        st = os.path.join(self.state, "plugins", "tmp")
+        return os.listdir(self.tmpdir) + (os.listdir(st) if os.path.isdir(st) else [])
+
+    def notified(self):
+        return open(self.notes, encoding="utf-8").read() if os.path.exists(self.notes) else ""
 
     def run(self, *args, extra=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith(("PANTHEON_", "STUB_"))}
         env.update({"PATH": self.stub + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.home,
                     "PANTHEON_HOME": self.pantheon, "PANTHEON_STATE": self.state, "PANTHEON_NO_NOTIFY": "1",
-                    "STUB_DIR": self.stub})
+                    "PANTHEON_NOTIFY_LOG": self.notes, "STUB_DIR": self.stub, "TMPDIR": self.tmpdir})
         env.update(extra or {})
         args = args or ("plugins", "update", "--quiet")
         return subprocess.run([PY, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=300)
@@ -166,8 +192,106 @@ def main():
     check("зелёные: в логе обе версии, helper.py не гонялся",
           os.path.exists(log) and "новая 1.1.0" in open(log).read() and "база 1.0.0" in open(log).read()
           and "helper.py" not in open(log).read())
-    check("зелёные: временная папка тестов убрана",
-          not any(f.startswith("plugins-x-") for f in os.listdir(tempfile.gettempdir())))
+    check("зелёные: временные копии убраны (своя TMPDIR и STATE/plugins/tmp пусты)", e.leftovers() == [],
+          e.leftovers())
+    check("зелёные: без критической тревоги (хеш кэша с .in_use совпал с проверенной копией)",
+          "КРИТИЧНО" not in e.alerts() and e.notified() == "")
+    e.close()
+
+    # Встало не то, что проверяли: update сам подтянул каталог — другое содержимое той же версии
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    e.write(os.path.join(e.after, "hooks", "evil.py"), "print('не проверялось')\n")
+    r = e.run()
+    check("TOCTOU, другое содержимое: КРИТИЧНО в alerts.md и уведомление, код 76, метки нет",
+          r.returncode == 76 and "КРИТИЧНО: встала непроверенная версия x 1.1.0 (проверялась 1.1.0)" in e.alerts()
+          and "Пантеон · критично|встала непроверенная версия x 1.1.0" in e.notified() and "x" not in e.marks()
+          and "Руками" not in e.alerts() and "обновлён" not in e.alerts(), f"{r.returncode} {e.alerts()!r}")
+    e.close()
+
+    # Встало не то, что проверяли: другая версия
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    p = os.path.join(e.stub, "list-after.json")
+    rows = json.load(open(p))
+    rows[-1]["version"] = "1.2.0"
+    e.write(p, json.dumps(rows))
+    r = e.run()
+    check("TOCTOU, другая версия: КРИТИЧНО «x 1.2.0 (проверялась 1.1.0)», код 76",
+          r.returncode == 76 and "встала непроверенная версия x 1.2.0 (проверялась 1.1.0)" in e.alerts()
+          and "x" not in e.marks(), e.alerts())
+    e.close()
+
+    # Нет тестов у новой версии — красное, даже если их нет и у базы
+    e = Env("1.0.0", "1.1.0", None, None)
+    r = e.run()
+    check("нет tests/test_*.py ни у новой, ни у базы: красное «нет тестов», update не вызван",
+          r.returncode == 76 and "нет тестов" in e.alerts() and "plugin update" not in e.argv(), e.alerts())
+    e.close()
+    e = Env("1.0.0", "1.1.0", OK, None)
+    r = e.run()
+    check("нет тестов у новой, у базы есть: красное", r.returncode == 76 and "plugin update" not in e.argv())
+    e.close()
+
+    # Гибель по сигналу за той же строкой FAIL, что и у базы, — новое падение («код -9»)
+    e = Env("1.0.0", "1.1.0", OLD_FAIL_RC, NEW_KILLED)
+    r = e.run()
+    check("SIGKILL при старой строке FAIL: красное с «код -9»",
+          r.returncode == 76 and "test_a.py: код -9" in e.alerts() and "plugin update" not in e.argv(), e.alerts())
+    e.close()
+
+    # Цветной трейсбек: ANSI вырезается до разбора
+    e = Env("1.0.0", "1.1.0", OK, NEW_COLOR_EXC)
+    r = e.run()
+    check("цветной трейсбек: подпись «исключение KeyError»",
+          r.returncode == 76 and "test_a.py: исключение KeyError" in e.alerts(), e.alerts())
+    e.close()
+
+    # Тесты идут без цвета, даже если у тика FORCE_COLOR
+    e = Env("1.0.0", "1.1.0", OK, COLORLESS)
+    r = e.run(extra={"FORCE_COLOR": "1", "CLICOLOR_FORCE": "1", "NO_COLOR": ""})
+    check("окружение тестов: FORCE_COLOR снят, NO_COLOR=1, PYTHON_COLORS=0",
+          r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), e.alerts())
+    e.close()
+
+    # Прерванный прогон: метка testing той же версии — красное без прогона; остатки временных копий убраны
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    e.write(os.path.join(e.state, "plugins", "marks.json"),
+            json.dumps({"x": {"version": "1.1.0", "result": "testing", "log": "x.log", "at": "раньше"}}))
+    e.write(os.path.join(e.state, "plugins", "tmp", "x-old", "new", "x", "f.py"), "остаток\n")
+    r = e.run()
+    check("метка testing: красное «прогон прерван» без прогона, update не вызван",
+          r.returncode == 76 and "прогон тестов прерван" in e.alerts() and e.runs() == 0
+          and "plugin update" not in e.argv() and e.marks().get("x", {}).get("result") == "red", e.alerts())
+    check("остатки прерванного прогона в STATE/plugins/tmp удалены", e.leftovers() == [], e.leftovers())
+    e.close()
+
+    # За один запуск — тесты не больше одного плагина
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    mkt = os.path.dirname(os.path.dirname(e.src))
+    e.plugin(os.path.join(mkt, "plugins", "y"), "2.1.0", OK)
+    ycache = os.path.join(e.home, ".claude", "plugins", "cache", "agent-kit", "y", "2.0.0")
+    e.plugin(ycache, "2.0.0", OK)
+    e.write(os.path.join(mkt, ".claude-plugin", "marketplace.json"),
+            json.dumps({"name": "agent-kit", "plugins": [{"name": "x", "source": "./plugins/x"},
+                                                        {"name": "y", "source": "./plugins/y"}]}))
+    yrow = {"id": "y@agent-kit", "version": "2.0.0", "scope": "user", "installPath": ycache}
+    for f in ("list.json", "list-after.json"):
+        p = os.path.join(e.stub, f)
+        e.write(p, json.dumps(json.load(open(p)) + [yrow]))
+    r = e.run()
+    check("два плагина с новыми версиями: за запуск проверен и поставлен один",
+          r.returncode == 0 and "plugin update x@agent-kit" in e.argv() and "plugin update y@agent-kit" not in e.argv()
+          and "y" not in e.marks(), f"{r.returncode} {e.argv()!r} {e.marks()}")
+    e.run()
+    check("второй плагин — на следующем запуске", "plugin update y@agent-kit" in e.argv(), e.argv())
+    e.close()
+
+    # Метка testing старой версии не мешает новой
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    e.write(os.path.join(e.state, "plugins", "marks.json"),
+            json.dumps({"x": {"version": "1.0.5", "result": "testing", "log": "x.log", "at": "раньше"}}))
+    r = e.run()
+    check("метка testing другой версии: тесты и установка", r.returncode == 0 and e.runs() > 0
+          and "обновлён x 1.0.0 → 1.1.0" in e.alerts())
     e.close()
 
     # Новая, тесты красные — не ставим, тревога с логом, метка red, код 76
@@ -229,6 +353,16 @@ def main():
           r.returncode == 0 and "обновлён x 1.0.0 → 1.1.0" in e.alerts() and "x" not in e.marks() and e.runs() == n)
     e.close()
 
+    # Метка green, а каталог той же версии изменился — тесты заново
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    e.run(extra={"STUB_UPD_RC": "1"})
+    n = e.runs()
+    check("метка green хранит хеш проверенной копии", len(e.marks().get("x", {}).get("hash") or "") == 64, e.marks())
+    e.write(os.path.join(e.src, "hooks", "new.py"), "print('другое содержимое')\n")
+    r = e.run(extra={"STUB_UPD_RC": "1"})
+    check("green, хеш каталога другой: тесты гоняются заново", e.runs() > n, f"{n} {e.runs()}")
+    e.close()
+
     # Каталог не обновился (нет сети) — 75, дальше не идём
     e = Env("1.0.0", "1.1.0", OK, OK)
     r = e.run(extra={"STUB_MKT_RC": "1"})
@@ -258,6 +392,7 @@ print(json.dumps({{
   "tmp": sig("t.py", "FAIL x " + p.tempfile.gettempdir() + "/abc/new/x/f.py\\n  FAIL y /private/tmp/q/z\\n", 1),
   "code": sig("t.py", "что-то\\n", 2), "ok": sig("t.py", "ok\\n", 0), "timeout": sig("t.py", "", None),
   "exc": sig("t.py", "FAIL a\\nTraceback (most recent call last):\\n  File \\"t.py\\", line 1\\nValueError: b\\n", 1),
+  "ansi": sig("t.py", "\\x1b[31mFAIL c\\x1b[0m\\n", 1), "killed": sig("t.py", "FAIL d\\n", -9),
   "newer": [p._version_newer("0.11.10", "0.11.9"), p._version_newer("1.0", "1.0"), p._version_newer("1.0-rc", "1.0")],
 }}))
 """
@@ -273,12 +408,15 @@ print(json.dumps({{
     check("parse_command не пропускает plugins foo, plugins, update с другим флагом",
           cmds and not any(cmds[c] for c in ("pantheon plugins foo", "pantheon plugins update --force",
                                               "pantheon plugins")), cmds)
-    check("подписи: временные пути → <tmp>", got.get("tmp") == ["FAIL x <tmp>", "FAIL y <tmp>"], got.get("tmp"))
+    check("подписи: временные пути → <tmp>", got.get("tmp") == ["FAIL x <tmp>", "FAIL y <tmp>", "t.py: код 1"],
+          got.get("tmp"))
     check("подписи: код без FAIL, зелёный файл, таймаут",
           got.get("code") == ["t.py: код 2"] and got.get("ok") == [] and got.get("timeout") == ["t.py: таймаут"],
           got)
-    check("подписи: FAIL и исключение в конце", got.get("exc") == ["FAIL a", "t.py: исключение ValueError"],
-          got.get("exc"))
+    check("подписи: FAIL, исключение в конце и код", got.get("exc") == ["FAIL a", "t.py: исключение ValueError",
+                                                                        "t.py: код 1"], got.get("exc"))
+    check("подписи: ANSI вырезан, код при FAIL — всегда",
+          got.get("ansi") == ["FAIL c", "t.py: код 1"] and got.get("killed") == ["FAIL d", "t.py: код -9"], got)
     check("версии: числа, равные, не разобрать", got.get("newer") == [True, False, True], got.get("newer"))
     r = subprocess.run([PY, "-I", LIB, "plugins", "foo"], capture_output=True, text=True, timeout=60)
     check("pantheon plugins foo — код 2", r.returncode == 2)

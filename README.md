@@ -31,6 +31,8 @@
   каталоге гоняет `tests/test_*.py` новой и установленной версии во временной папке на `python3` и `/usr/bin/python3`.
   Новых падений нет — `claude plugin update <плагин>@agent-kit` без `-y` и тревога «обновлён X → Y»; есть — не ставит,
   тревога с логом, эту версию больше не гоняет. Метки, журнал и логи тестов — `~/.local/state/pantheon/plugins/`.
+  Встало не то, что проверялось (другая версия или хеш дерева), — критическая тревога. Проверить ту же версию заново —
+  удалить запись плагина из `~/.local/state/pantheon/plugins/marks.json`.
 - `plugins/pantheon/lib/qmd.py` — общий поиск qmd (шаг 1.5): `pantheon qmd config|update|embed|serve|install|status`.
   Коллекции — `~/ai/pantheon/qmd.toml` (только штаб); `~/.config/qmd/index.yml` пересобирается из него перед каждым
   запуском qmd и без ключа `update` (его qmd исполняет через bash). Сервер MCP — служба `qmd` на 127.0.0.1:8181;
