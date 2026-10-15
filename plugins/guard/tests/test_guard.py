@@ -51,6 +51,12 @@ def setup(home):
         '[merge_repos]\nthemis-sources = ["latark/expert-corpus"]\n')
 
 
+def _read(path):
+    """Прочитать файл целиком до того, как его откроют на запись (open(p, "w") обнуляет сразу)."""
+    with open(path) as fh:
+        return fh.read()
+
+
 def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None, raw=False):
     event = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input,
              "cwd": os.path.join(home, cwd if cwd is not None else pdir)}
@@ -441,6 +447,20 @@ def main():
          B("gh pr merge 2 -R latark/expert-corpus")),
         ("merge -R: Афина с репо Фемиды — отказ", "deny", br, "domain-coordinator", False,
          B("gh pr merge 2 -R latark/expert-corpus")),
+        ("merge -R: склеенные -dR<чужой> — отказ", "deny", lw, "domain-coordinator", False,
+         B("gh pr merge 2 -dRlatark/alexbroker")),
+        ("merge -R: склеенные -dR<чужой> из папки репозитория — отказ", "deny", ec, "domain-coordinator", False,
+         B("gh pr merge 2 -dRlatark/alexbroker")),
+        ("merge -R: gh pr -sR<чужой> merge — отказ", "deny", lw, "domain-coordinator", False,
+         B("gh pr -sRlatark/alexbroker merge 2")),
+        ("merge -R: -dR <чужой> через пробел — отказ", "deny", lw, "domain-coordinator", False,
+         B("gh pr merge 2 -dR latark/alexbroker")),
+        ("merge -R: склеенные -dR<свой> — можно", MERGE_OK, lw, "domain-coordinator", False,
+         B("gh pr merge 2 -dRlatark/expert-corpus")),
+        ("merge -R: -R=<свой> — можно", MERGE_OK, lw, "domain-coordinator", False,
+         B("gh pr merge 2 -R=latark/expert-corpus")),
+        ("merge: -tR… — R в заголовке, а не -R — можно", MERGE_OK, ec, "domain-coordinator", False,
+         B("gh pr merge 2 -tRelease")),
         ("merge -R: Фемида с GH_REPO — по-прежнему отказ", "deny", lw, "domain-coordinator", False,
          B("GH_REPO=latark/expert-corpus gh pr merge 2")),
         ("merge: Афина (нет в [merge]) — отказ", "deny", br, "domain-coordinator", False, B("gh pr merge 1")),
@@ -465,9 +485,10 @@ def main():
     home2 = os.path.realpath(tempfile.mkdtemp(prefix="guard-test-"))
     setup(home2)
     pol = os.path.join(home2, ".claude", "pantheon", "policy.toml")
-    open(pol, "w").write(open(pol).read().replace(
+    text = _read(pol).replace(
         'themis-sources = ["~/projects/expert-corpus", "~/projects/legal-watch"]',
-        'themis-sources = "~/projects/expert-corpus"'))
+        'themis-sources = "~/projects/expert-corpus"')
+    open(pol, "w").write(text)
     got = run(home2, br, "domain-coordinator", "Bash", {"command": "gh pr merge 1"})
     ok = got == "deny"
     failed += not ok
@@ -477,13 +498,23 @@ def main():
     home3 = os.path.realpath(tempfile.mkdtemp(prefix="guard-test-"))
     setup(home3)
     pol = os.path.join(home3, ".claude", "pantheon", "policy.toml")
-    open(pol, "w").write(open(pol).read().replace('themis-sources = ["latark/expert-corpus"]',
-                                                  'themis-sources = "latark/expert-corpus"'))
+    text = _read(pol).replace('themis-sources = ["latark/expert-corpus"]',
+                                                  'themis-sources = "latark/expert-corpus"')
+    open(pol, "w").write(text)
     got = run(home3, lw, "domain-coordinator", "Bash", {"command": "gh pr merge 2 -R latark/expert-corpus"})
     ok = got == "deny"
     failed += not ok
     cases.append(None)
     print(f"{'ok  ' if ok else 'FAIL'} merge -R: строка вместо списка в [merge_repos] — отказ: {got}")
+    # [merge_repos] списком на верхнем уровне — -R закрыт, обычное слияние без -R работает (ревью argus 15.10)
+    text = open(pol).read().replace('[merge_repos]\nthemis-sources = "latark/expert-corpus"\n', "")
+    open(pol, "w").write('merge_repos = ["latark/expert-corpus"]\n' + text)  # ключ верхнего уровня — до таблиц
+    got = (run(home3, lw, "domain-coordinator", "Bash", {"command": "gh pr merge 2 -R latark/expert-corpus"}),
+           run(home3, ec, "domain-coordinator", "Bash", {"command": "gh pr merge 2"}))
+    ok = got == ("deny", MERGE_OK)
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} merge -R: merge_repos не таблицей — -R закрыт, слияние без -R как было: {got}")
     # № 1: на системном Python 3.9 (без tomllib) guard не падает и прежние правила работают
     if os.path.exists("/usr/bin/python3"):
         got = run(home, br, "", "Bash", {"command": "pnpm run dev"}, python="/usr/bin/python3")

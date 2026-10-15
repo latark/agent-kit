@@ -2559,7 +2559,8 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd=""):
         return "слияние делает владелец"
     policy = load_policy()
     # только списки: строка вместо списка перебиралась бы по буквам, и корнем стал бы «/» (ревью argus 15.10)
-    found = next(((name, _norm(paths)) for name, paths in (policy.get("merge") or {}).items()
+    merge = policy.get("merge")
+    found = next(((name, _norm(paths)) for name, paths in (merge if isinstance(merge, dict) else {}).items()
                   if isinstance(paths, list) and _inside(pdir, _norm(paths))), None)
     if not found:
         return "слияние делает владелец"
@@ -2570,10 +2571,10 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd=""):
         return "без чужого репозитория (GH_REPO, GH_HOST)"
     # -R — только репозиторий из [merge_repos] этого направления: сессия Фемиды стоит в legal-watch, а сливает и
     # PR expert-corpus (themis-0015, ответ владельца 15.10 «А и Б»). Сверка по точному owner/repo на github.com
-    repos = (policy.get("merge_repos") or {}).get(name)
+    repos = policy.get("merge_repos")
+    repos = repos.get(name) if isinstance(repos, dict) else None
     repos = {r.strip().lower() for r in repos if isinstance(r, str)} if isinstance(repos, list) else set()
-    takes_value = {"-t", "--subject", "-b", "--body", "-F", "--body-file", "-A", "--author-email",
-                   "--match-head-commit"}
+    takes_value = {"--subject", "--body", "--body-file", "--author-email", "--match-head-commit"}
     skip = repo_next = False
     has_repo = has_number = False
     for a in args:
@@ -2589,12 +2590,29 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd=""):
             return "PR указывай номером"
         if a == "--admin":
             return "без --admin и без чужого репозитория (-R)"
-        if a in ("-R", "--repo"):
+        if a == "--repo":
             has_repo = repo_next = True
-        elif a.startswith("--repo=") or (a.startswith("-R") and not a.startswith("--")):
+        elif a.startswith("--repo="):
             has_repo = True
-            if not _merge_repo_ok(a[7:] if a.startswith("--repo=") else a[2:], repos):
+            if not _merge_repo_ok(a[7:], repos):
                 return "без чужого репозитория (-R)"
+        elif a.startswith("-") and not a.startswith("--") and len(a) > 1:
+            # короткие флаги склеиваются (pflag): -dR<репо> — это -d и -R <репо> (ревью argus 15.10)
+            for i, c in enumerate(a[1:]):
+                rest = a[2 + i:]
+                if c == "R":
+                    has_repo = True
+                    rest = rest[1:] if rest.startswith("=") else rest
+                    if not rest:
+                        repo_next = True
+                    elif not _merge_repo_ok(rest, repos):
+                        return "без чужого репозитория (-R)"
+                    break
+                if c in "tbFA":  # флаг со значением: остаток токена — его значение
+                    skip = not rest
+                    break
+                if c not in "dsmr":
+                    break
         elif a in takes_value:
             skip = True
         elif not a.startswith("-") and not a.isdigit():
