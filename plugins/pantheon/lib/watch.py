@@ -324,16 +324,43 @@ GIT_LOCAL_OK = re.compile(
     r"push\.(default|autosetupremote)|fetch\.prune|init\.defaultbranch|gc\.auto")
 
 
-def _git(*args, timeout=30):
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+def _git(*args, timeout=30, env=None):
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", **(env or {}))
     return subprocess.run(["git", *GIT_SAFE, *args], capture_output=True, text=True, timeout=timeout, env=env)
 
 
-def unsafe_config(wt):
+def wt_env(root, wt):
+    """Каталог git копии — тот, что записан в основном репозитории (.git/worktrees/<id>/gitdir указывает на wt/.git),
+    а не тот, куда ведёт указатель wt/.git: его пишет роль (проверка безопасности 0.10.2). Указатель с записью
+    расходится — копию не трогаем. Все команды git по копии — с этими GIT_DIR, GIT_COMMON_DIR, GIT_WORK_TREE."""
+    common = os.path.join(root, ".git")
+    base = os.path.join(common, "worktrees")
+    with contextlib.suppress(OSError):
+        for d in os.listdir(base):
+            gd = os.path.join(base, d)
+            try:
+                to = open(os.path.join(gd, "gitdir"), encoding="utf-8").read().strip()
+            except OSError:
+                continue
+            if os.path.realpath(os.path.dirname(to)) != wt:
+                continue
+            try:
+                ptr = open(os.path.join(wt, ".git"), encoding="utf-8").read().strip()
+            except OSError:
+                return None
+            if not ptr.startswith("gitdir: ") or os.path.realpath(ptr[8:]) != os.path.realpath(gd):
+                return None
+            return {"GIT_DIR": gd, "GIT_COMMON_DIR": common, "GIT_WORK_TREE": wt}
+    return None
+
+
+def unsafe_config(wt, env=None):
     """Ключи конфигурации самого репозитория (не вашей глобальной) вне списка GIT_LOCAL_OK — в той конфигурации, которую
     git прочтёт в этой копии (по указателю .git копии, с include). Вывод -z: пары «область\\0ключ\\0» — имя подраздела
     с переводом строки разбор не собьёт. Не прочиталась — тоже нельзя."""
-    r = _git("-C", wt, "config", "--list", "--show-scope", "--name-only", "--includes", "-z")
+    if env is None:
+        return "каталог git копии не совпадает с записью основного репозитория"
+    r = _git("-C", wt, "config", "--list", "--show-scope", "--name-only", "--includes", "-z", env=env)
     if r.returncode not in (0, 1):
         return "конфигурация git не читается"
     parts = r.stdout.split("\0")
@@ -345,6 +372,9 @@ def unsafe_config(wt):
                   if sc not in ("system", "global", "command") and not GIT_LOCAL_OK.fullmatch(k.lower())})
     if os.path.exists(os.path.join(wt, ".gitmodules")):
         bad.append("подмодули")
+    ls = _git("-C", wt, "ls-files", "-s", "-z", env=env)
+    if ls.returncode != 0 or any(x.startswith("160000 ") for x in ls.stdout.split("\0")):
+        bad.append("подмодули в индексе")
     return ", ".join(bad) or None
 
 
@@ -390,14 +420,17 @@ def worktrees(agents, registry, doms, t):
                 head = re.search(r"^HEAD ([0-9a-f]{40})$", block, re.M)
                 branch = re.search(r"^branch refs/heads/(.+)$", block, re.M)
                 short = wt.replace(P.HOME, "~")
-                if age > WORKTREE_CLEAN_HOURS and head and "locked" not in block and not unsafe_config(wt):
+                env = wt_env(root, wt)
+                if age > WORKTREE_CLEAN_HOURS and head and "locked" not in block and not unsafe_config(wt, env):
                     base = base or _base_ref(root)
-                    st = _git("-C", wt, "status", "--porcelain", "--ignore-submodules=all")
+                    st = _git("-C", wt, "status", "--porcelain", "--ignore-submodules=all", env=env)
                     clean = st.returncode == 0 and st.stdout.strip() == ""
                     merged = bool(base) and _git("-C", root, "merge-base", "--is-ancestor", head.group(1),
                                                  base).returncode == 0
                     if clean and merged:
-                        rm = _git("-C", root, "worktree", "remove", wt, timeout=60)
+                        # чистота уже проверена своим status по записанному каталогу; без --force git проверил бы её
+                        # ещё раз своим status — уже по конфигурации, которую мы не смотрели
+                        rm = _git("-C", root, "worktree", "remove", "--force", wt, timeout=60)
                         if rm.returncode == 0:
                             if branch:
                                 _git("-C", root, "branch", "-d", branch.group(1))
