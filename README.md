@@ -18,7 +18,7 @@
   `plugins/guard/policy.example.toml`), правит только metis-pantheon.
 - `plugins/pantheon/lib/pantheon.py` — планировщик и команда; `pantheon help` — список команд.
   Задачи — `~/ai/pantheon/schedule.toml`, метки и журналы запусков — `~/.local/state/pantheon/` (свои у каждого Mac).
-- Окна ролей (с 0.11.7, `sandbox_build`): окну координатора направления дано правило `Bash(gh pr merge *)` — слияние PR
+- Окна ролей (с 0.11.9, `sandbox_build`): окну координатора направления дано правило `Bash(gh pr merge *)` — слияние PR
   без вопроса классификатора auto (`COORDINATOR_ALLOW`); мастерской и штабу правила нет. Каждое слияние по-прежнему
   проверяет guard: только главная сессия domain-coordinator, свои папки, без `--admin` и `--auto`.
   Песочница всех окон (направления, мастерская, штаб) пускает запись в `~/.claude/agent-memory/<роль>` каждой
@@ -28,7 +28,7 @@
   Write/Edit и для тех записей Bash, которые он распознаёт. Запись в память чужой роли (например, argus) остаётся
   возможной только командой Bash, которую guard не разобрал (скрипт, интерпретатор). Исключение — главная сессия
   штаба: правило domain её не ограничивает (`check_domain` в guard.py), поэтому Зевс пишет в память любой такой роли
-  и через Write/Edit (как и раньше), и обычной командой Bash (с 0.11.7). Субагенты в окне штаба ограничены своей
+  и через Write/Edit (как и раньше), и обычной командой Bash (с 0.11.9). Субагенты в окне штаба ограничены своей
   папкой, как везде. Граница та же, что у остальных папок окна: guard — защита от ошибок, а не от намеренного обхода.
 - `plugins/pantheon/lib/watch.py` — дежурный и управление сессиями (шаг 1.4): `pantheon watch [--dry-run]`, `agents`,
   `who`, `revisits`, `wake <имя>`, `stop|resume <имя>|--all`, `pause <имя>|--all --reason limit|swap|manual`,
@@ -38,6 +38,13 @@
   или скрипт плагина). Тик сверяет launchd с расписанием; `pantheon jobs pause|resume|disable|enable <служба>` действует
   сразу, `pantheon jobs` показывает pid. `pantheon jobs pause --all` и нечитаемый `schedule.toml` службы не трогают:
   они идут как шли (тик выходит раньше сверки), пауза службы — только по её имени.
+- Обновления плагинов (с 0.11.8, metis-0052): `pantheon plugins update [--quiet]` — тик раз в 10 минут, вне песочницы.
+  Обновляет каталог agent-kit (не вышло — код 75), для установленных плагинов уровня пользователя с новой версией в
+  каталоге гоняет `tests/test_*.py` новой и установленной версии во временной папке на `python3` и `/usr/bin/python3`.
+  Новых падений нет — `claude plugin update <плагин>@agent-kit` без `-y` и тревога «обновлён X → Y»; есть — не ставит,
+  тревога с логом, эту версию больше не гоняет. Метки, журнал и логи тестов — `~/.local/state/pantheon/plugins/`.
+  Встало не то, что проверялось (другая версия или хеш дерева), — критическая тревога. Проверить ту же версию заново —
+  удалить запись плагина из `~/.local/state/pantheon/plugins/marks.json`.
 - `plugins/pantheon/lib/qmd.py` — общий поиск qmd (шаг 1.5): `pantheon qmd config|update|embed|serve|install|status`.
   Коллекции — `~/ai/pantheon/qmd.toml` (только штаб); `~/.config/qmd/index.yml` пересобирается из него перед каждым
   запуском qmd и без ключа `update` (его qmd исполняет через bash). Сервер MCP — служба `qmd` на 127.0.0.1:8181;
@@ -78,6 +85,7 @@
     python3 -I plugins/pantheon/tests/test_start.py   # start, wake, roles build, approve, heavy, Stop-хук разработчика
     python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры
     python3 -I plugins/pantheon/tests/test_tick.py    # планировщик: сон, пробуждение, питание, простой, лимит, главный Mac
+    python3 -I plugins/pantheon/tests/test_plugins_update.py   # обновления agent-kit тиком: тесты, база, метки, коды
     python3 -I plugins/pantheon/tests/test_baseline.py   # замер «как сейчас»: задачи по git commit, сообщения, возвраты, цена
     python3 -I plugins/pantheon/tests/test_hooks.py   # хуки контекста и owner-log (и на системном: CTX_TEST_PYTHON=/usr/bin/python3)
     python3 -I plugins/project-tools/tests/test_project_tools.py   # карта стеков, apply, одобрения, Codex, подсказка
