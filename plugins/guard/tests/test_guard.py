@@ -244,8 +244,14 @@ def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None, ra
         event["agent_id"] = "a1"
     env = {"HOME": home, "PATH": os.path.join(home, "fake-bin") + os.pathsep + os.environ["PATH"],
            "CLAUDE_PROJECT_DIR": os.path.join(home, pdir), "TMPDIR": "/nonexistent-tmp", **(penv or {})}
-    out = subprocess.run([python or sys.executable, "-I", SHIM, GUARD], input=json.dumps(event), capture_output=True,
-                         text=True, env=env, timeout=10).stdout
+    r = subprocess.run([python or sys.executable, "-I", SHIM, GUARD], input=json.dumps(event), capture_output=True,
+                       text=True, env=env, timeout=10)
+    out = r.stdout
+    if r.returncode == 2:  # сбой (metis-0094): Claude Code понимает код 2 как отказ с причиной из stderr
+        out = json.dumps({"hookSpecificOutput": {"permissionDecision": "deny", "exit2": True,
+                                                 "permissionDecisionReason": r.stderr}}, ensure_ascii=False)
+    elif r.returncode != 0:
+        out += f"\n[код {r.returncode}] {r.stderr}"
     if raw:
         return out
     return "deny" if '"deny"' in out else "allow"
@@ -436,6 +442,107 @@ def merge_security_checks(home, MERGE_OK, cases):
     out = M(h, "gh pr merge 5", raw=True)
     check("нет папки состояния — отказ по правилу, без сбоя скрипта", deny(out) and "сбой проверки" not in out)
     return failed
+
+
+def failure_checks(home, env, cases):
+    """metis-0094: искусственный сбой в каждом хуке guard → код 2 и причина в stderr (Stop — код 0). Подмена функций —
+    через GUARD_SHIM_BOOM / GUARD_SHIM_HANG в _guard_shim.py. Возвращает число упавших проверок."""
+    failed = 0
+    ak = "projects/agent-kit"
+    mf = os.path.join(home, "managed-fail.json")  # управляемые настройки вызывают guard --managed
+    with open(mf, "w") as fh:
+        fh.write('{"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "python3 guard.py --managed"}]}]}}')
+
+    def hook(stdin, mode=None, role="", tool="Bash", ti=None, name="PreToolUse", penv=None, extra=None):
+        if stdin is None:
+            ev = {"hook_event_name": name, "session_id": "s-test", "cwd": os.path.join(home, ak),
+                  "tool_use_id": "toolu_" + uuid.uuid4().hex}
+            if tool:
+                ev.update(tool_name=tool, tool_input=ti if ti is not None else {"command": "ls"})
+            if role:
+                ev["agent_type"] = role
+            ev.update(extra or {})
+            stdin = json.dumps(ev)
+        e = dict(env, CLAUDE_PROJECT_DIR=os.path.join(home, ak), **(penv or {}))
+        t0 = time.monotonic()
+        r = subprocess.run([sys.executable, "-I", SHIM, GUARD] + ([mode] if mode else []), input=stdin,
+                           capture_output=True, text=True, env=e, timeout=20)
+        return r, time.monotonic() - t0
+
+    def check(name, ok, r=None):
+        nonlocal failed
+        failed += not ok
+        cases.append(None)
+        tail = f" — код {r.returncode}, stderr {r.stderr.strip()[:160]!r}" if (r is not None and not ok) else ""
+        print(f"{'ok  ' if ok else 'FAIL'} сбой (metis-0094): {name}{tail}")
+
+    def blocked(r, word):
+        return r.returncode == 2 and word in r.stderr and "Traceback" not in r.stderr and '"deny"' not in r.stdout
+
+    # неразобранный вход — во всех режимах, и у хука плагина при активных управляемых настройках (раньше молчал)
+    for label, mode, penv in (("плагин", None, None), ("--managed", "--managed", None), ("--strict", "--strict", None),
+                              ("плагин при управляемых настройках", None, {"GUARD_SHIM_MANAGED": mf})):
+        r, _ = hook("не json", mode, penv=penv)
+        check(f"событие не JSON, {label} — код 2 и причина", blocked(r, "не JSON"), r)
+    for label, stdin in (("массив", "[1, 2]"), ("строка", '"x"'), ("объект без hook_event_name", "{}")):
+        r, _ = hook(stdin)
+        check(f"событие не объект события ({label}) — код 2", blocked(r, "не разобрать"), r)
+    # PreToolUse: исключение в проверке прав — блок и в вашей сессии без роли, во всех режимах
+    for label, boom, mode, tool, ti in (
+            ("domain, ваша сессия", "check_domain", None, "Bash", None),
+            ("pantheon-acl, --managed", "check_pantheon", "--managed", "Bash", None),
+            ("карта прав (check_roles), --strict", "check_roles", "--strict", "Read", {"file_path": "/etc/hosts"}),
+            ("protect_config.py", "check_protect_config", None, "Write",
+             {"file_path": os.path.join(home, ak, "x.txt"), "content": "x"}),
+            ("tg-secret", "check_tg_secret_bash", None, "Bash", None)):
+        r, _ = hook(None, mode, tool=tool, ti=ti, penv={"GUARD_SHIM_BOOM": boom})
+        check(f"PreToolUse, {label} — код 2 и причина", blocked(r, "сбой проверки"), r)
+    # merge_gate.py в PreToolUse: gh pr merge координатора — сбой запора не пропускает
+    r, _ = hook(None, role="domain-coordinator", ti={"command": "gh pr merge 5 --match-head-commit " + "a" * 40},
+                penv={"GUARD_SHIM_BOOM": "merge_problem"})
+    check("PreToolUse, merge_gate.py (gh pr merge) — код 2", blocked(r, "сбой проверки прав"), r)
+    # окно (hq-telegram, chiron): и в окне штаба, и в вашей сессии без роли — блок (раньше у вас — пропуск)
+    for label, penv in (("окно штаба", {"PANTHEON_ROLE": "hq"}), ("ваша сессия", {})):
+        r, _ = hook(None, tool="Agent", ti={"subagent_type": "x", "prompt": "x"},
+                    penv=dict(penv, GUARD_SHIM_BOOM="check_hq_telegram"))
+        check(f"PreToolUse Agent, сбой проверки окна, {label} — код 2", blocked(r, "сбой проверки окна"), r)
+    # аргументы вызова не объект — сбой скрипта, код 2
+    r, _ = hook(None, ti=["ls"])
+    check("PreToolUse, tool_input не объект — код 2", blocked(r, "сбой хука"), r)
+    # свой срок: проверка висит — код 2 до таймаута хука, а не пропуск по таймауту Claude Code
+    r, took = hook(None, penv={"GUARD_SHIM_HANG": "check_domain", "GUARD_SHIM_DEADLINE": "1"})
+    check(f"PreToolUse, проверка висит — код 2 за {took:.1f} с", blocked(r, "не уложилась") and took < 8, r)
+    # подсказка (dev-server) при сбое пропускает к остальным проверкам — обычная команда проходит
+    r, _ = hook(None, penv={"GUARD_SHIM_BOOM": "check_dev_server"})
+    check("PreToolUse, сбой подсказки dev-server — пропуск к остальным проверкам (код 0)",
+          r.returncode == 0 and r.stdout.strip() == "", r)
+    # PostToolUse: сбой записи журнала запора — код 2 (команда уже выполнена, причина — агенту); без сбоя — 0
+    post = {"tool_response": {"stdout": "", "stderr": "", "interrupted": False, "isImage": False}}
+    r, _ = hook(None, name="PostToolUse", extra=post, penv={"GUARD_SHIM_BOOM": "merge_gate.record"})
+    check("PostToolUse, сбой merge_gate.record — код 2 и причина", blocked(r, "журнала запора"), r)
+    r, _ = hook(None, name="PostToolUse", extra=post)
+    check("PostToolUse без сбоя — код 0", r.returncode == 0 and r.stderr == "", r)
+    # Stop: сбой — код 0 (код 2 не дал бы закончить ход), причина в stderr и строка в журнале
+    r, _ = hook(None, name="Stop", tool=None, extra={"transcript_path": os.path.join(home, "none.jsonl")},
+                penv={"GUARD_SHIM_BOOM": "soft"})
+    check("Stop, сбой — код 0, без трассировки, с причиной", r.returncode == 0 and "Stop" in r.stderr
+          and "Traceback" not in r.stderr and '"block"' not in r.stdout, r)
+    # сбой загрузки самого guard (рядом нет merge_gate.py) — тоже код 2 с причиной, на Stop — 0; запуск как у хука
+    lone = tempfile.mkdtemp(prefix="guard-lone-")
+    shutil.copy(GUARD, lone)
+    for label, ev, want in (("PreToolUse", {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                            "tool_input": {"command": "ls"}}, 2),
+                            ("Stop", {"hook_event_name": "Stop"}, 0)):
+        r = subprocess.run([sys.executable, "-I", os.path.join(lone, "guard.py")], input=json.dumps(ev),
+                           capture_output=True, text=True, env=env, timeout=20)
+        check(f"сбой загрузки guard (нет merge_gate.py), {label} — код {want} и причина",
+              r.returncode == want and "сбой загрузки" in r.stderr and "Traceback" not in r.stderr, r)
+    shutil.rmtree(lone, ignore_errors=True)
+    # обычные отказ и пропуск прежние: отказ — JSON и код 0
+    r, _ = hook(None, role="domain-coordinator", ti={"command": "tmux send-keys -t 0 'да' Enter"})
+    check("обычный отказ — JSON deny и код 0, как раньше", r.returncode == 0 and '"deny"' in r.stdout, r)
+    return failed
+
 
 def main():
     home = os.path.realpath(tempfile.mkdtemp(prefix="guard-test-"))
@@ -1274,19 +1381,14 @@ def main():
         cases.append(None)
         print(f"{'ok  ' if ok else 'FAIL'} Stop, {label}: код {r.returncode}, без блокировки и без записи в журнал сбоев")
     shutil.rmtree(stop_home, ignore_errors=True)
-    # SEC-29/SEC-10: сбой всего скрипта — в окне роли (--strict) выход 2, в плагине выход 0; оба — в журнал
+    # metis-0094: любой сбой — код 2 и причина в stderr во всех режимах (плагин, --managed, --strict), в вашей сессии
+    # тоже; ни выхода 0 (пропуск), ни трассировки с кодом 1. Исключение — Stop (код 2 не дал бы закончить ход)
     env = {"HOME": home, "PATH": os.environ["PATH"], "TMPDIR": "/nonexistent-tmp"}
-    for mode, want_code in (("--strict", 2), (None, 0)):
-        argv = [sys.executable, "-I", SHIM, GUARD] + ([mode] if mode else [])
-        r = subprocess.run(argv, input="не json", capture_output=True, text=True, env=env, timeout=10)
-        ok = r.returncode == want_code
-        failed += not ok
-        cases.append(None)
-        print(f"{'ok  ' if ok else 'FAIL'} сбой скрипта, режим {mode or 'плагин'}: код {r.returncode}, ждали {want_code}")
+    failed += failure_checks(home, env, cases)
     log = os.path.join(home, ".local/state/pantheon/logs/guard-failures.log")
     lines = open(log).read().splitlines() if os.path.exists(log) else []
     ok = any("\tstrict\tmain\tJSONDecodeError" in x for x in lines) and any("\tplugin\tmain\t" in x for x in lines) \
-        and not any("не json" in x for x in lines)
+        and any("\tmanaged\tmain\t" in x for x in lines) and not any("не json" in x for x in lines)
     failed += not ok
     cases.append(None)
     print(f"{'ok  ' if ok else 'FAIL'} журнал сбоев: {len(lines)} строк, без текста ввода")
@@ -1351,15 +1453,15 @@ def main():
                  "g.check_hq_telegram = boom\n"
                  "g.MANAGED_FILE = sys.argv[2]\n"
                  "sys.stdin = io.StringIO(sys.argv[3])\n"
-                 "g.main()\n")
+                 "g.run_hook()\n")
     ev = {"hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input": {"subagent_type": "x", "prompt": "x"},
           "session_id": "s-test", "cwd": os.path.join(home, "ai/pantheon")}
     got = [subprocess.run([sys.executable, "-I", probe3, GUARD, os.path.join(home, "no-managed.json"), json.dumps(ev)],
-                          capture_output=True, text=True, env=e, timeout=10).stdout for e in (menv, env)]
-    ok = '"deny"' in got[0] and "сбой" in got[0] and '"deny"' not in got[1]
+                          capture_output=True, text=True, env=e, timeout=10) for e in (menv, env)]
+    ok = all(r.returncode == 2 and "сбой проверки окна" in r.stderr for r in got)
     failed += not ok
     cases.append(None)
-    print(f"{'ok  ' if ok else 'FAIL'} сбой проверки окна: в окне роли — отказ, в вашей сессии без роли — пропуск")
+    print(f"{'ok  ' if ok else 'FAIL'} сбой проверки окна: и в окне роли, и в вашей сессии без роли — код 2 (metis-0094)")
     print(f"\n{len(cases) - failed} из {len(cases)} прошли")
     sys.exit(1 if failed else 0)
 

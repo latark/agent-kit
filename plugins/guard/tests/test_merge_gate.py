@@ -128,10 +128,7 @@ class Home:
                  "agent_type": role}
         if agent_id:
             event["agent_id"] = agent_id
-        out = self.hook(event, pdir).stdout
-        if '"deny"' not in out:
-            return "allow", ""
-        return "deny", json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+        return decision(self.hook(event, pdir))
 
     def pre_input(self, tool_input, role, agent_id=None, pdir="projects/tg-read"):
         """PreToolUse с полным tool_input (run_in_background и т. п.) → (решение, причина)."""
@@ -139,10 +136,7 @@ class Home:
                  "session_id": "s-coord", "tool_use_id": "toolu_" + uuid.uuid4().hex, "agent_type": role}
         if agent_id:
             event["agent_id"] = agent_id
-        out = self.hook(event, pdir).stdout
-        if '"deny"' not in out:
-            return "allow", ""
-        return "deny", json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+        return decision(self.hook(event, pdir))
 
     def post(self, cmd, role, cwd="projects/tg-read", agent_id="x1", session="s-coord", name="PostToolUse", mode=(),
              background=False, response=NORMAL):
@@ -158,6 +152,15 @@ class Home:
         if response is not MISSING and (name != "PostToolUseFailure" or response is not NORMAL):
             event["tool_response"] = dict(response) if isinstance(response, dict) else response
         return self.hook(event, cwd, mode)
+
+
+def decision(r):
+    """(решение, причина) по ответу хука; код 2 (сбой, metis-0094) Claude Code понимает как отказ с причиной из stderr."""
+    if r.returncode == 2:
+        return "deny", r.stderr
+    if '"deny"' not in r.stdout:
+        return "allow", ""
+    return "deny", json.loads(r.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def rec(kind, repo, pr, sha, who="argus", agent_id="argus1", session="s-coord"):

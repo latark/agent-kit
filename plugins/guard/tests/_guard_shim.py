@@ -3,7 +3,7 @@
 
     python3 -I _guard_shim.py <путь к guard.py> [--strict|--managed]   (stdin — событие хука)
 
-guard.py не меняется. Подменяется только обвязка запуска:
+guard.py не меняется; запуск — его же вход run_hook. Подменяется только обвязка:
 1. Временный HOME тестов лежит в $TMPDIR, а в окне агента это /tmp/claude-<uid>: guard считает /tmp и /private/tmp
    временными корнями (TEMP_ROOTS) и разрешает запись во всё, что внутри, — в том числе в ~/ai/pantheon тестового HOME.
    Для путей внутри HOME теста корни, в которых лежит сам HOME, из TEMP_ROOTS не берутся. Пути вне HOME
@@ -55,11 +55,32 @@ def _inside(p, roots):
 
 g._inside = _inside
 
-try:
-    g.main()
-except Exception as e:  # как в блоке __main__ guard.py
-    g.log_failure("main", e)
-    if g.MODE == "strict":
-        print(f"guard: сбой проверки ({type(e).__name__}) — действие остановлено", file=sys.stderr)
-        sys.exit(2)
-    sys.exit(0)
+
+# Искусственный сбой (metis-0094): GUARD_SHIM_BOOM=<имя>[,<имя>] — функция модуля guard (или merge_gate.record)
+# бросает исключение; GUARD_SHIM_HANG=<имя> — висит 15 с, а срок guard (DEADLINE) — GUARD_SHIM_DEADLINE секунд.
+def _target(name):
+    obj, attr = g, name
+    if "." in name:
+        mod, attr = name.split(".", 1)
+        obj = getattr(g, mod)
+    return obj, attr
+
+
+def _boom(*a, **kw):
+    raise RuntimeError("искусственный сбой")
+
+
+def _hang(*a, **kw):
+    import time
+    time.sleep(15)
+
+
+for _name in filter(None, os.environ.get("GUARD_SHIM_BOOM", "").split(",")):
+    setattr(*_target(_name), _boom)
+if os.environ.get("GUARD_SHIM_HANG"):
+    setattr(*_target(os.environ["GUARD_SHIM_HANG"]), _hang)
+    g.DEADLINE = float(os.environ.get("GUARD_SHIM_DEADLINE") or 1)
+if os.environ.get("GUARD_SHIM_MANAGED"):  # файл управляемых настроек вместо настоящего
+    g.MANAGED_FILE, g.MARKET_GUARD = os.environ["GUARD_SHIM_MANAGED"], path
+
+g.run_hook()  # тот же вход, что в блоке __main__ guard.py: сбой — код 2 с причиной в stderr
