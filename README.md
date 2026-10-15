@@ -21,6 +21,16 @@
 - `plugins/pantheon/lib/watch.py` — дежурный и управление сессиями (шаг 1.4): `pantheon watch [--dry-run]`, `agents`,
   `who`, `revisits`, `wake <имя>`, `stop|resume <имя>|--all`, `pause <имя>|--all --reason limit|swap|manual`,
   `restart --prepare|--status|--go|--cancel`, `saved`, `infra-check`. Подключает его `pantheon.py` (`watch_cmd`).
+- Службы (с 0.11.0, SCHED-05): `[[service]]` в `schedule.toml` — постоянный процесс, своя задача launchd
+  `com.latark.pantheon-svc.<имя>` с KeepAlive, запуск через `pantheon service-run <имя>` (команда — только `pantheon …`
+  или скрипт плагина). Тик сверяет launchd с расписанием; `pantheon jobs pause|resume|disable|enable <служба>` действует
+  сразу, `pantheon jobs` показывает pid. `pantheon jobs pause --all` и нечитаемый `schedule.toml` службы не трогают:
+  они идут как шли (тик выходит раньше сверки), пауза службы — только по её имени.
+- `plugins/pantheon/lib/qmd.py` — общий поиск qmd (шаг 1.5): `pantheon qmd config|update|embed|serve|install|status`.
+  Коллекции — `~/ai/pantheon/qmd.toml` (только штаб); `~/.config/qmd/index.yml` пересобирается из него перед каждым
+  запуском qmd и без ключа `update` (его qmd исполняет через bash). Сервер MCP — служба `qmd` на 127.0.0.1:8181;
+  подключение на новом Mac — `npm install -g @tobilu/qmd`, затем `pantheon qmd install` (MCP уровня пользователя).
+  Хук `ctx.py qmd-query` пропускает только поиск `vec`/`lex` в названных коллекциях с `rerank: false` (QMD-04).
 - `plugins/pantheon/lib/view-sync.sh` — копия `~/ai/pantheon` только для чтения для Obsidian.
 - `plugins/pantheon/hooks/ctx.py` — хуки контекста и журнала ваших слов (шаг 1.1): `owner-log` (UserPromptSubmit,
   в фоне — строка только для ввода, который Claude Code сам пометил в транскрипте как ваш), `stop` (подсказка
