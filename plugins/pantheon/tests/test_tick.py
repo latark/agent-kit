@@ -297,11 +297,12 @@ def main():
           "~/ai/knowledge/me" in box["filesystem"]["denyRead"] and not any("knowledge" in x for x in sn["sandbox"]["filesystem"]["denyRead"])
           and "~/ai/knowledge/me" in sw["sandbox"]["filesystem"]["denyRead"] and "autoCompactWindow" not in sw
           and not os.path.exists(os.path.join(state, "settings", "old-direction.json")))
-    hk = [h for g in sa.get("hooks", {}).get("PreToolUse", []) for h in g["hooks"]]
+    # вторая запись PreToolUse у координаторов и штаба — хук субагентов окна (P0-6, test_agent_allowlist.py)
+    hk = [h for g in sa.get("hooks", {}).get("PreToolUse", []) if g["matcher"] != "Agent|Task|Skill" for h in g["hooks"]]
     gpath = os.path.realpath(os.path.join(tmp, ".claude/plugins/marketplaces/agent-kit/plugins/guard/hooks/guard.py"))
     check("строгий guard в окне роли (SEC-29): --strict, onFailure block, только клон маркетплейса, у мастерской тоже",
           len(hk) == 1 and hk[0]["onFailure"] == "block" and hk[0]["command"] == f"python3 {gpath} --strict"
-          and "projects" not in hk[0]["command"] and sw["hooks"] == sa["hooks"]
+          and "projects" not in hk[0]["command"] and sw["hooks"]["PreToolUse"] == sa["hooks"]["PreToolUse"][:1]
           and sa["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill")
     hq = load("hq")
     hb = hq["sandbox"]
@@ -309,7 +310,8 @@ def main():
           hb["filesystem"]["allowWrite"][0] == real("pantheon") and real("projects/br") not in hb["filesystem"]["allowWrite"]
           and real("pantheon/.git") in hb["filesystem"]["denyWrite"] and real("pantheon/alerts.md") in hb["filesystem"]["denyWrite"]
           and hb["network"]["allowedDomains"] == [] and "~/ai/pantheon/.git/git-crypt" in hb["filesystem"]["denyRead"] and "pantheon start *" in hb["excludedCommands"]
-          and "git push *" not in hb["excludedCommands"] and hq["hooks"] == sa["hooks"] and "worktree" not in hq
+          and "git push *" not in hb["excludedCommands"]
+          and hq["hooks"]["PreToolUse"][0] == sa["hooks"]["PreToolUse"][0] and "worktree" not in hq
           and "~/ai/knowledge/me" not in hb["filesystem"]["denyRead"])
     check("окно штаба: корпус закрыт для чтения — песочница и правило Read (SEC-13, решение 15.10)",
           all(x in hb["filesystem"]["denyRead"] for x in ("~/projects/expert-corpus", "~/.cache/qmd",

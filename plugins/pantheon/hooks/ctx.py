@@ -1114,7 +1114,8 @@ def _qmd_why(ev):
     if not isinstance(ti, dict):
         return "аргументы не разобрать"
     tool = ev.get("tool_name") or ""
-    # окно штаба целиком, с помощниками Зевса (Explore, general-purpose): у них свой agent_type, но то же окно с личным
+    # окно штаба целиком, с помощниками Зевса (Explore, prometheus, clio, chiron; general-purpose штабу закрыт, P0-6):
+    # у них свой agent_type, но то же окно с личным
     # и действиями наружу — пересказ выдачи принёс бы чужой текст Зевсу. Поручение Фемиде или координатору — их окна
     hq = session_role(ev) == "hq" or os.environ.get("PANTHEON_ROLE") == "hq"
     why = None
