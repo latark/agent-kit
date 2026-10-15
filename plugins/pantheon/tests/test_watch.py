@@ -859,6 +859,24 @@ def test_worktree_prune_unreadable_0118():
         os.chmod(wts2, 0o755)
     e2.run("watch", t=T0)
     check(ids2() == ["w-noacc"], f"после возврата доступа prune не убрал пропавшую: {ids2()}")
+    # chmod 000 на саму копию (родитель читается): git видит <копия>/.git как «нет файла» — prune снёс бы обе записи
+    e3, folder3, g3 = _wt_repo("g-dir")
+    self_wt = os.path.join(folder3, ".claude", "worktrees", "w-self")
+    g3("worktree", "add", "-q", "-b", "w-self", self_wt)
+    gone3 = os.path.join(e3.tmp, "ak-gone3")
+    g3("worktree", "add", "-q", "-b", "o-gone3", gone3)
+    shutil.rmtree(gone3)
+    ids3 = lambda: sorted(os.listdir(os.path.join(folder3, ".git", "worktrees")))
+    os.chmod(self_wt, 0o000)
+    try:
+        e3.run("watch", t=T0)
+        check(ids3() == ["ak-gone3", "w-self"], f"prune снял запись копии с chmod 000: {ids3()}")
+        check("недоступна" in e3.alerts(), "нет тревоги о недоступной копии")
+    finally:
+        os.chmod(self_wt, 0o755)
+    check(g3("status", "--porcelain", cwd=self_wt).returncode == 0, "копия сломана")
+    e3.run("watch", t=T0)
+    check(ids3() == ["w-self"], f"после возврата доступа prune не убрал пропавшую: {ids3()}")
 
 
 def test_tick_subcommands():
