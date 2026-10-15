@@ -18,6 +18,16 @@
   `plugins/guard/policy.example.toml`), правит только metis-pantheon.
 - `plugins/pantheon/lib/pantheon.py` — планировщик и команда; `pantheon help` — список команд.
   Задачи — `~/ai/pantheon/schedule.toml`, метки и журналы запусков — `~/.local/state/pantheon/` (свои у каждого Mac).
+- Окна ролей (с 0.11.7, `sandbox_build`): окну координатора направления дано правило `Bash(gh pr merge *)` — слияние PR
+  без вопроса классификатора auto (`COORDINATOR_ALLOW`); мастерской и штабу правила нет. Каждое слияние по-прежнему
+  проверяет guard: только главная сессия domain-coordinator, свои папки, без `--admin` и `--auto`.
+  Песочница всех окон (направления, мастерская, штаб) пускает запись в `~/.claude/agent-memory/<роль>` каждой
+  роли-субагента, у которой в шапке `~/.claude/agents/<роль>.md` есть ключ `memory:` (роли главных сессий не берутся;
+  папку сборка создаёт, ссылку вместо папки пропускает). Новый файл роли тик подхватывает сам. Риск: песочница пускает
+  Bash-запись в память всех таких ролей, а guard (правило domain) — каждую роль только в её собственную папку, для
+  Write/Edit и для тех записей Bash, которые он распознаёт. Запись в память чужой роли (например, argus) остаётся
+  возможной только командой Bash, которую guard не разобрал (скрипт, интерпретатор). Граница та же, что у остальных
+  папок окна: guard — защита от ошибок, а не от намеренного обхода.
 - `plugins/pantheon/lib/watch.py` — дежурный и управление сессиями (шаг 1.4): `pantheon watch [--dry-run]`, `agents`,
   `who`, `revisits`, `wake <имя>`, `stop|resume <имя>|--all`, `pause <имя>|--all --reason limit|swap|manual`,
   `restart --prepare|--status|--go|--cancel`, `saved`, `infra-check`. Подключает его `pantheon.py` (`watch_cmd`).
