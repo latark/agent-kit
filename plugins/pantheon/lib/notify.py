@@ -400,15 +400,22 @@ class Policy:
             c["last"] = t
 
     # --- сбои и критичное ---
-    def fault(self, key, text, target=None, group=None):
+    def fault(self, key, text, target=None, group=None, once=False):
         """Сбой класса «скоро» (задача упала, аренда, сессия ждёт вас, тревога с note): macOS только при «нет», не
         ночью, в бюджете, одна на ключ события за repeat_min; сейчас нельзя — в очередь дайджеста. Повтор считается
         по key (событие), group только заменяет уведомление в Центре уведомлений (по умолчанию key). faults[key] —
         время последней ОТПРАВКИ: событие, которое держится (вызывают каждый проход), дойдёт macOS, когда вы уйдёте.
+        once — событие, которое держится (сессия ждёт вас, самозапуск встал): не больше одной macOS, пока его не
+        снимут clear_fault (таблица 6.3: «одна macOS, если простой»); повтор раз в час съел бы бюджет дня.
         → "sent" | "queued" | "skip"."""
         rec = self.st["faults"].get(key)
         last, last_text = (rec.get("t"), rec.get("text")) if isinstance(rec, dict) else (rec, None)
         flat = " ".join(str(text).split())
+        if once and isinstance(rec, dict) and rec.get("once"):
+            if flat == last_text:
+                return "skip"
+            self._enqueue("fault", key, text)  # уже показывали, а текст новый — без macOS, но в сводку
+            return "queued"
         if isinstance(last, (int, float)) and 0 <= self.t - last < self.cfg["repeat_min"] * 60:
             if flat == last_text:
                 return "skip"
@@ -418,8 +425,12 @@ class Policy:
             self._enqueue("fault", key, text)  # дубли по key+text отсекает _enqueue
             return "queued"
         self._send(text, "fault", [key], target, group or key)
-        self.st["faults"][key] = {"t": self.t, "text": flat}
+        self.st["faults"][key] = {"t": self.t, "text": flat, **({"once": True} if once else {})}
         return "sent"
+
+    def clear_fault(self, key):
+        """Событие снято (сессия больше не ждёт, самозапуск вернули): следующее такое — снова macOS."""
+        return self.st["faults"].pop(key, None) is not None
 
     def critical(self, text, title="Пантеон · критично", send=True, group="critical"):
         """COMM-08: сразу и всегда (ночью тоже — менять это может только владелец); в счёт бюджета и в журнал.
@@ -435,8 +446,9 @@ class Policy:
         t = self.t
         self.st["queue"] = [x for x in self.st["queue"] if isinstance(x, dict) and t - x.get("t", 0) < 2 * DAY]
         stamp = lambda v: v.get("t") if isinstance(v, dict) else v
+        keep = lambda v: 7 * DAY if isinstance(v, dict) and v.get("once") else DAY  # once — пока не снимут, до 7 дней
         self.st["faults"] = {k: v for k, v in self.st["faults"].items()
-                             if isinstance(stamp(v), (int, float)) and t - stamp(v) < DAY}
+                             if isinstance(stamp(v), (int, float)) and t - stamp(v) < keep(v)}
         os.makedirs(os.path.dirname(self.state_path) or ".", exist_ok=True)
         tmp = f"{self.state_path}.{os.getpid()}"
         with open(tmp, "w", encoding="utf-8") as fh:

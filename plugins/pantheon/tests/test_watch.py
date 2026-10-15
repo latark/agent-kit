@@ -184,8 +184,8 @@ def _give_up(e):
 
 
 def test_session_waits_reaches_you():
-    """Ревью argus: сессия «ждёт вас», пока вы у Mac, — в очередь; ушли, а она всё ждёт — одна macOS, повтор не
-    раньше часа; «упала» той же сессии — своё событие (свой ключ), а не «уже сообщали»."""
+    """Ревью argus: сессия «ждёт вас», пока вы у Mac, — в очередь; ушли, а она всё ждёт — одна macOS и больше
+    ни одной, пока ждёт; «упала» той же сессии — своё событие (свой ключ), а не «уже сообщали»."""
     e = Env()
     e.direction("coord-x")
     e.notify_mode(0)
@@ -202,8 +202,34 @@ def test_session_waits_reaches_you():
     check("ждёт вас" not in a and "watch-blocked-sess0001" in e.queued(), f"«здесь»: без macOS и в очереди: {a!r}")
     check(b.count("coord-x ждёт вас") == 1, f"ушли — одна macOS: {b!r}")
     check(c.count("coord-x ждёт вас") == 1, f"через 25 мин — второй нет: {c!r}")
-    check(d.count("coord-x ждёт вас") == 2 and "|session-coord-x" in d, f"через 65 мин — повтор: {d!r}")
+    check(d.count("coord-x ждёт вас") == 1 and "|session-coord-x" in d, f"через 65 мин — повтора нет: {d!r}")
     check(e.alerts().count("coord-x (sess0001) ждёт вас") == 1, "тревога в alerts.md — не разовая")
+    # «готово» (сессия работает), затем снова «ждёт» — ещё одна macOS
+    e.agents([bg("coord-x", "working", "sess0001-aaaa", pid=31)])
+    e.run("watch", t=T0 + 4500)
+    e.agents([bg("coord-x", "blocked", "sess0001-aaaa", pid=31)])
+    e.run("watch", t=T0 + 4800)
+    check(e.sent().count("coord-x ждёт вас") == 2, f"снова «ждёт» после снятия — без второй macOS: {e.sent()!r}")
+    # весь день ждут две сессии, вас нет: по одной macOS на сессию, бюджет не съеден — решение «Нужен ответ» дойдёт
+    e = Env()
+    e.extra["TZ"] = "Europe/Moscow"
+    e.direction("coord-x")
+    e.direction("coord-y")
+    e.notify_mode(1200)
+    e.agents([bg("coord-x", "blocked", "sess0004-dddd", pid=34), bg("coord-y", "blocked", "sess0005-eeee", pid=35)])
+    day = T0 - 8 * 3600 - 46 * 60                                  # 2026-10-14 12:00 по Москве
+    for k in range(34):                                          # 12:00 … 23:00, каждые 20 мин
+        e.run("watch", t=day + k * 1200)
+    s = e.sent()
+    used = json.load(open(e.st("notify.json"))).get("used")
+    check(s.count("coord-x ждёт вас") == 1 and s.count("coord-y ждёт вас") == 1 and used == 2,
+          f"день ожидания двух сессий — по одной macOS, бюджет 2: {s!r} used={used}")
+    r = e.run("task", "new", "--direction", "coord-x", "--title", "Решить вечером", "--status", "waiting",
+              "--waiting-on", "human", "--next", "ответ", "--question", "Что выбрать?", "--project", "coord-x",
+              t=day + 11 * 3600 - 120)
+    e.run("board", t=day + 11 * 3600 - 60)                       # 22:59 — ещё не тихие часы
+    check(r.returncode == 0 and "Вопрос к вам: Решить вечером" in e.sent(),
+          f"после дня ожидания решение «Нужен ответ» без macOS: {r.stderr} {e.sent()!r}")
     # «ждёт», через 10 мин «упала» той же сессии — при «нет» отдельная macOS
     e = Env()
     e.direction("coord-x")

@@ -2482,18 +2482,31 @@ def notify_critical(text, title="Пантеон · критично", group="cri
         time.sleep(0.1)
 
 
-def notify_soon(key, text, group=None, policy=None):
+def notify_soon(key, text, group=None, policy=None, once=False):
     """Сбой класса «скоро»: macOS только если вас нет у Mac, не ночью и в бюджете, одна на ключ события за час; иначе —
     в утреннюю сводку. key — событие (по нему повтор), group — вид в Центре уведомлений (заменяет прежнее того же
     вида). Событие, которое держится, вызывать каждый проход: дойдёт, когда вы уйдёте от Mac. policy — уже взятая под
-    lock("notify") (flock в том же процессе второй раз не взять)."""
+    lock("notify") (flock в том же процессе второй раз не взять). once — событие, которое держится: одна macOS, пока
+    его не снимет clear_fault."""
     if policy is not None:
-        policy.fault(key, text, group=group)
+        policy.fault(key, text, group=group, once=once)
         return
     with lock("notify"):
         pol = notify_policy()
-        pol.fault(key, text, group=group)
+        pol.fault(key, text, group=group, once=once)
         pol.save()
+
+
+def clear_fault(*keys):
+    """Событие снято — сбросить его в политике уведомлений (следующее такое — снова macOS). Без записи, если сбрасывать
+    нечего: дежурный зовёт это на каждом проходе."""
+    st = read_json(path("notify.json"))
+    if not any(k in (st.get("faults") or {}) for k in keys):
+        return
+    with lock("notify"):
+        pol = notify_policy()
+        if any([pol.clear_fault(k) for k in keys]):
+            pol.save()
 
 
 def tasks_mod():

@@ -238,13 +238,15 @@ def sessions(agents, doms):
         key = f"watch-state-{sid}"
         if state not in word:
             P.clear_once(key)
+            P.clear_fault(*(f"watch-{s}-{sid}" for s in word))  # состояние снялось — следующее снова macOS
             continue
+        P.clear_fault(*(f"watch-{s}-{sid}" for s in word if s != state))
         why = " ".join(str(a.get("waitingFor") or "").split())[:120]
         P.alert_once(key, state, f"{name} ({sid}) {word[state]}" + (f": {why}" if why else "")
                      + f" — claude attach {sid}", "watch")
         # ключ события — сессия и состояние: «упала» после «ждёт вас» — своё уведомление, вид — один на сессию
         P.notify_soon(f"watch-{state}-{sid}", f"{name} {word[state]}" + (f": {why[:80]}" if why else ""),
-                      group=f"session-{name}")
+                      group=f"session-{name}", once=True)
 
 
 def status_files(doms, t):
@@ -732,7 +734,7 @@ def fail(d, s, t, why):
         s["gave_up"] = True
         P.alert(f"самозапуск {d} остановлен после {s['fails']} сбоев подряд (последний: {why}) — разобраться и вернуть: "
                 f"pantheon resume {d} или pantheon wake {d}", "watch")
-        P.notify_soon(f"autostart-gaveup-{d}", gave_up_note(d, s), group=f"autostart-{d}")
+        P.notify_soon(f"autostart-gaveup-{d}", gave_up_note(d, s), group=f"autostart-{d}", once=True)
     else:
         P.alert(f"самозапуск {d}: сбой {s['fails']} из {AUTOSTART_FAILS_MAX} ({why}); следующая попытка не раньше "
                 f"{P.stamp(s['next'])[11:16]}", "watch")
@@ -803,12 +805,17 @@ def autostart(agents, registry, doms, t, dry=False):
         if dry:
             say(f"{d}: " + (f"ждёт — {why}" if why else f"поднял бы сейчас (задачи {', '.join(tids[:5])})"))
             continue
+        if not s.get("gave_up"):  # сбои сняты (resume, удачный запуск) — следующий «встал» снова macOS
+            P.clear_fault(f"autostart-gaveup-{d}")
+        if got is not None and not isinstance(got, str) and not (why or "").startswith("нет доверия"):
+            P.clear_fault(f"autostart-trust-{d}")  # доверие есть
         if why:
-            if s.get("gave_up"):  # самозапуск встал и держится — уведомление каждый проход
-                P.notify_soon(f"autostart-gaveup-{d}", gave_up_note(d, s), group=f"autostart-{d}")
+            if s.get("gave_up"):  # самозапуск встал и держится — одна macOS, пока не снимут
+                P.notify_soon(f"autostart-gaveup-{d}", gave_up_note(d, s), group=f"autostart-{d}", once=True)
             if why.startswith("нет доверия"):
                 P.alert_once(f"autostart-trust-{d}", got[2], f"самозапуск {d} невозможен: {why}", "watch")
-                P.notify_soon(f"autostart-trust-{d}", f"{d}: нужно ваше доверие к папке", group=f"autostart-{d}")
+                P.notify_soon(f"autostart-trust-{d}", f"{d}: нужно ваше доверие к папке", group=f"autostart-{d}",
+                              once=True)
             elif not why.startswith(("пауза между", "одна сессия", "не главный Mac")):
                 P.alert_once(f"autostart-wait-{d}", f"{today(t)}-{why[:40]}", f"самозапуск {d} ждёт: {why} (задачи "
                              f"{', '.join(tids[:3])})", "watch")
