@@ -764,6 +764,28 @@ def test_worktree_outward_links_0101():
     check(not os.path.exists(in_wt), "копия со ссылкой внутрь не убрана")
 
 
+def test_outward_links_walk_limit_0101():
+    """Обход длиннее WALK_LIMIT — None (копия небезопасна); в пределах лимита — число ссылок наружу."""
+    import importlib
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    w = importlib.import_module("watch")
+    d = tempfile.mkdtemp(prefix="walk-", dir=os.environ.get("TMPDIR"))
+    saved = w.WALK_LIMIT
+    try:
+        for i in range(10):
+            open(os.path.join(d, f"f{i}"), "w").close()
+        w.WALK_LIMIT = 5
+        check(w.outward_links(d) is None, "обход длиннее лимита не признан небезопасным")
+        w.WALK_LIMIT = 50
+        check(w.outward_links(d) == (0, None), "обход в пределах лимита без ссылок не (0, None)")
+        os.symlink(tempfile.gettempdir(), os.path.join(d, "out"))
+        res = w.outward_links(d)
+        check(res and res[0] == 1 and res[1][0] == "out", "ссылка наружу не найдена")
+    finally:
+        w.WALK_LIMIT = saved
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_worktree_outside_and_prune_0118():
     """Копии вне .claude/worktrees: тревога после WORKTREE_DAYS, никогда не удаляются; запись без папки чистится."""
     e = Env()
