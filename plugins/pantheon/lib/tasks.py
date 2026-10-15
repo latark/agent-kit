@@ -790,7 +790,7 @@ def attention(head, t, conflict=None):
 def _one(v):
     """Поле шапки в карточку — одной строкой: в кавычках "…" JSON раскрывает \\n, а строка «- [x] вариант» с начала
     строки читается тиком как ваш ответ (находка проверки безопасности 15.10). Начало «- [» тоже гасим."""
-    text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f\x85]", " ", str(v))  # NUL \u0438 \u043f\u0440\u043e\u0447\u0438\u0435 \u0443\u043f\u0440\u0430\u0432\u043b\u044f\u044e\u0449\u0438\u0435 \u2014 \u0442\u043e\u0436\u0435 \u0432 \u043f\u0440\u043e\u0431\u0435\u043b
+    text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f\x85]", " ", str(v))  # NUL и прочие управляющие — тоже в пробел
     text = re.sub(r"\s*[\r\n\u2028\u2029]+\s*", " ", text).strip()
     return "\\" + text if re.match(r"[-*+]\s*\[", text) else text
 
@@ -1145,7 +1145,7 @@ def _live(head, t):
 
 
 def _plain(text):
-    return re.sub(r"[\[\]|<>`]", "·", one_line(text))  # одной строкой: перевод строки рвал бы список сводки
+    return re.sub(r"[\[\]|<>`#]", "·", one_line(text))  # одной строкой: перевод строки рвал бы список сводки; # — не тег
 
 
 def _summary(tasks, t, inbox=None, names=None):
