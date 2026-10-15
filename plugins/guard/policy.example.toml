@@ -26,13 +26,14 @@ paths = ["~/ai/knowledge/me", "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.g
 [sandbox_write]
 themis-sources = ["~/.cache/expert-corpus"]
 
-# gh pr merge (правило push, metis-0038, guard 0.5.0): сливает главная сессия domain-coordinator в папках своего
-# направления из domains.json. Защиты — папки [coordinators] metis-pantheon и их репозитории (git remote; клон
-# agent-kit в другой папке — тоже защиты) — только Метида по «да» владельца в окне вопросов Зевса. Вопрос:
-# «[metis-NNNN] Слить https://github.com/latark/agent-kit/pull/N?», слияние: gh pr merge N --subject
-# "[metis-NNNN] …". Одно «да» — одно слияние: отметки использованных — в ~/.local/state/pantheon/merge-consent/.
-# Без этого файла или без непустого списка metis-pantheon слияние закрыто всем. Подробно — README guard, раздел
-# «Слияние PR».
+# gh pr merge (правило push, metis-0038; запор — P1-4, guard 0.5.4): сливает главная сессия domain-coordinator в
+# папках своего направления из domains.json или её лид. Защиты — папки [coordinators] metis-pantheon и их
+# репозитории (git remote; клон agent-kit в другой папке — тоже защиты) — только Метида или её лид. Везде действует
+# запор: gh pr merge N --match-head-commit <SHA>, где на этот SHA есть запись тестов (pantheon review test) и
+# последнее «принять» от argus (pantheon review accept); для продукта — ещё talos и строка с откатом в alerts.md;
+# PR, который задевает ядро защит (Д3), сливает только владелец кнопкой. Поштучного «да» владельца нет, таблицу
+# [merge_protect] guard больше не читает. Без этого файла или без непустого списка metis-pantheon слияние закрыто
+# всем. Подробно — README guard, раздел «Слияние PR».
 #
 # Совместимость: свои папки теперь берутся из domains.json, [merge] больше не нужен. Его папки по-прежнему
 # добавляются к папкам направления (ключ — имя направления, значение — список).
@@ -40,24 +41,19 @@ themis-sources = ["~/.cache/expert-corpus"]
 themis-sources = ["~/projects/expert-corpus", "~/projects/legal-watch"]
 
 # Включение: новая схема слияния включается этой таблицей (даже пустой). Без неё — как в 0.4.7: свои папки сливают
-# только направления из [merge]; режим защит и проверки сбоев действуют и без неё.
-# Продукт для клиентов: направление → папки. guard пропускает слияние так же, как во внутреннем режиме, а в тексте
-# отказа напоминает о большем: проверку talos, строку Зевсу «что ушло» и откат одной командой в STATUS guard
-# проверить не может — это обязанность координатора.
+# только направления из [merge]; режим защит, запор и проверки сбоев действуют и без неё.
+# Продукт для клиентов: направление → папки. Сверх общего запор требует запись talos на этот PR и SHA и строку
+# в ~/ai/pantheon/alerts.md со ссылкой owner/repo#N и словом «откат» (pantheon alert).
 [merge_client]
 athena-brokerassistant = ["~/projects/brokerAssistantApp"]
 hermes-alex = ["~/projects/alexbroker"]
 
-# Чужой репозиторий в gh pr merge -R / --repo — только из этого списка (owner/repo на github.com) и только для
-# координатора этого направления: сессия Фемиды стоит в legal-watch, а сливает и PR expert-corpus (themis-0015).
-# У Метиды любой -R требует того же согласия, что и защиты (вопрос — с ссылкой на этот PR). -R на репозиторий
-# защит — это слияние защит, даже если он есть в списке другого направления.
+# Репозитории, которые направление сливает (owner/repo на github.com) — и свои, и чужие через -R / --repo.
+# С guard 0.5.4 строка нужна каждому сливающему направлению: без неё запор закрывает слияние и без -R.
+# Сессия Фемиды стоит в legal-watch, а сливает и PR expert-corpus (themis-0015). -R на репозиторий защит — это
+# слияние защит, даже если он есть в списке другого направления.
 [merge_repos]
-themis-sources = ["latark/expert-corpus"]
-
-# Поштучное «да» владельца на слияние защит (metis-0049, guard 0.5.2). consent = false снимает только его: --subject
-# "[metis-NNNN] …", запись в окне вопросов и отметки merge-consent/ не нужны. Остальные проверки остаются: защиты
-# сливает только Метида или её лид, один номер PR, без --auto, -R только из [merge_repos], сбой — отказ.
-# По умолчанию (нет таблицы или ключа, не булево false) «да» обязательно. Правит только Метида.
-# [merge_protect]
-# consent = false
+themis-sources = ["latark/expert-corpus", "latark/legal-watch"]
+metis-pantheon = ["latark/agent-kit", "latark/tg-read"]
+athena-brokerassistant = ["latark/brokerAssistantApp"]
+hermes-alex = ["latark/alexbroker"]
