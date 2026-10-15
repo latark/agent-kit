@@ -419,10 +419,14 @@ def main():
     head37, _ = T37.read(src("athena-broker", t37))
     check("task set --option: варианты с запятыми и кавычками записаны и читаются обратно",
           r.returncode == 0 and head37.get("options") == [opt1, opt2])
+    r = run(env, "task", "set", t37, "options=", "--option", "Д, с запятой")
+    check("task set options= --option …: варианты заменены, без падения",
+          r.returncode == 0 and T37.read(src("athena-broker", t37))[0].get("options") == ["Д, с запятой"])
+    r = run(env, "task", "set", t37, "--option", opt1, "--option", opt2)
     r = run(env, "task", "set", t37, 'options=["А, б", "в"]')
     head37b, _ = T37.read(src("athena-broker", t37))
     check("task set options=… — отказ с подсказкой, файл цел", r.returncode == 2 and "--option" in r.stderr
-          and head37b.get("options") == [opt1, opt2])
+          and T37.read(src("athena-broker", t37))[0].get("options") == [opt1, opt2])
     check("шапка: \\\" внутри элемента списка читается (как пишет join)",
           T37._scalar('["a \\"b\\", c", "d"]') == ['a "b", c', "d"])
     xp = os.path.join(tmp, "x.md")

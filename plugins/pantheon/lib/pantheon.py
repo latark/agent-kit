@@ -2328,7 +2328,7 @@ def task_cmd(rest):
                     note, i = args[i + 1], i + 2
                     continue
                 if args[i] == "--option" and i + 1 < len(args):  # варианты с запятыми и кавычками (metis-0037)
-                    changes.setdefault("options", []).append(args[i + 1])
+                    changes["options"] = (changes.get("options") or []) + [args[i + 1]]  # и после options= (argus)
                     i += 2
                     continue
                 k, eq, v = args[i].partition("=")
