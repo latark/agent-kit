@@ -68,6 +68,7 @@ class Home:
         # поддельный gh: pr view отдаёт $HOME/gh.json, с $HOME/gh.fail — сбой; вызовы — в $HOME/gh.log
         with open(j("bin/gh"), "w") as fh:
             fh.write('#!/bin/sh\necho "$@" >> "$HOME/gh.log"\n[ -f "$HOME/gh.fail" ] && exit 1\n'
+                     'if [ "$1" = api ]; then [ -f "$HOME/gh.api.fail" ] && exit 1; cat "$HOME/gh.files"; exit 0; fi\n'
                      'cat "$HOME/gh.json"\n')
         os.chmod(j("bin/gh"), 0o755)
 
@@ -81,16 +82,20 @@ class Home:
     def reset(self):
         """Перед каждым случаем: пустой журнал, пустая сводка, gh отвечает PR без ядра на текущем SHA agent-kit."""
         shutil.rmtree(self.j(".local/state/pantheon/merge-gate"), ignore_errors=True)
-        for f in ("gh.fail", "gh.log"):
+        for f in ("gh.fail", "gh.log", "gh.api.fail"):
             if os.path.exists(self.j(f)):
                 os.remove(self.j(f))
         open(self.j("ai/pantheon/alerts.md"), "w").close()
         self.gh(["README.md", "plugins/guard/hooks/guard.py"])
 
-    def gh(self, files, count=None, head=None):
+    def gh(self, files, count=None, head=None, raw=None):
+        """files — имена или словари REST (filename, status, previous_filename); raw — сырой вывод gh api."""
         with open(self.j("gh.json"), "w") as fh:
-            json.dump({"files": [{"path": f} for f in files], "changedFiles": len(files) if count is None else count,
+            json.dump({"changedFiles": len(files) if count is None else count,
                        "headRefOid": head or self.sha["agent-kit"]}, fh)
+        recs = [f if isinstance(f, dict) else {"filename": f, "status": "modified"} for f in files]
+        with open(self.j("gh.files"), "w") as fh:
+            fh.write(raw if raw is not None else "".join(json.dumps(x) + "\n" for x in recs))
 
     def seed(self, *recs):
         os.makedirs(os.path.dirname(self.records), mode=0o700, exist_ok=True)
@@ -203,6 +208,8 @@ def t_no_tests(h):
     h.seed(rec("tests", "latark/tg-read", None, OLD, "dev-opus"), rec("accept", "latark/tg-read", 3, sha))
     merge_case("нет записи тестов на этот SHA — отказ", h.pre(f"gh pr merge 3 --match-head-commit {sha}"), False,
                "нет записи тестов")
+    merge_case("отказ про тесты подсказывает не-фон и timeout 600000", h.pre(f"gh pr merge 3 --match-head-commit {sha}"),
+               False, "timeout до 600000 мс")
 
 
 def t_author_is_reviewer(h):
@@ -260,15 +267,33 @@ def t_core(h):
     merge_case("защиты: PR не задевает ядро — проходит", h.pre(cmd, pdir="projects/agent-kit"), True)
     if HAVE_TOML:
         log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
-        check("gh pr view зовётся с -R и номером", "pr view 7 -R latark/agent-kit --json files,changedFiles,headRefOid"
-              in log, log)
+        check("gh pr view зовётся с -R и номером", "pr view 7 -R latark/agent-kit --json headRefOid,changedFiles"
+              in log and "api repos/latark/agent-kit/pulls/7/files" in log and "--paginate" in log, log)
     h.gh(["README.md", "plugins/guard/hooks/merge_gate.py"])
     merge_case("защиты: PR задевает ядро (merge_gate.py) — отказ", h.pre(cmd, pdir="projects/agent-kit"), False, CORE + ": PR задевает")
+    h.gh([{"filename": "plugins/guard/hooks/merge_core.py", "status": "renamed",
+           "previous_filename": "plugins/guard/hooks/merge_gate.py"}])
+    merge_case("защиты: переименование ядра (previous_filename) — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
+               CORE + ": PR задевает plugins/guard/hooks/merge_gate.py")
+    h.gh([], raw='[{"filename": "README.md"}]\n[{"filename": "plugins/guard/hooks/protect_config.py"}]\n', count=2)
+    merge_case("защиты: страницы --paginate склеены `[..][..]` — ядро видно", h.pre(cmd, pdir="projects/agent-kit"),
+               False, CORE + ": PR задевает")
+    h.gh([], raw='[{"filename": "README.md"}][{"filename": "a.py"}]', count=2)
+    merge_case("защиты: две страницы без ядра — проходит", h.pre(cmd, pdir="projects/agent-kit"), True)
+    h.gh([], raw="не json", count=1)
+    merge_case("защиты: неразборный ответ gh api — отказ", h.pre(cmd, pdir="projects/agent-kit"), False, "неполон")
+    h.gh(["README.md"])
+    open(h.j("gh.api.fail"), "w").close()
+    merge_case("защиты: gh api упал — отказ", h.pre(cmd, pdir="projects/agent-kit"), False, "неполон")
+    os.remove(h.j("gh.api.fail"))
     h.gh(["plugins/guard/managed-settings.json"])
     merge_case("защиты: PR задевает managed-settings.json — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
                CORE + ": PR задевает")
     h.gh(["README.md"], count=150)
     merge_case("защиты: список файлов неполон — отказ", h.pre(cmd, pdir="projects/agent-kit"), False, "неполон")
+    h.gh(["README.md", "a", "b"], count=2)
+    merge_case("защиты: файлов больше, чем changedFiles — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
+               "неполон")
     h.gh(["README.md"], head=OLD)
     merge_case("защиты: PR на другом коммите — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
                "на другом коммите")
@@ -422,6 +447,17 @@ def t_bg_task_id(h):
     check("backgroundTaskId в tool_response — записи нет", h.read() == [], h.read())
 
 
+def t_bg_task_id_value(h):
+    """backgroundTaskId с null или пустой строкой — не фон: запись есть; с числом — фон."""
+    for val in (None, ""):
+        h.reset()
+        h.post("pantheon review test -- true", "dev-opus", response=dict(NORMAL, backgroundTaskId=val))
+        check(f"backgroundTaskId={val!r} — не фон, запись есть", len(h.read()) == 1, h.read())
+    h.reset()
+    h.post("pantheon review test -- true", "dev-opus", response=dict(NORMAL, backgroundTaskId=7))
+    check("backgroundTaskId=7 — фон, записи нет", h.read() == [], h.read())
+
+
 def t_bad_response(h):
     sha = h.sha["tg-read"]
     for resp in ("ok", None, ["x"], MISSING):
@@ -469,7 +505,7 @@ def t_pre_not_simple(h):
 
 CASES = [t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
-         t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bad_response, t_fg_records, t_pre_background,
+         t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple]
 
 
