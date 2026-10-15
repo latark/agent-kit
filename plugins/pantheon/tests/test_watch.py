@@ -735,6 +735,62 @@ def test_tick_subcommands():
     check(p.parse_command("pantheon restart --go") is None, "тик пускает restart")
 
 
+def test_infra_check_managed_mode():
+    """infra-check зовёт guard как живой хук: с --managed, когда управляемые настройки активны (metis-0114)."""
+    import importlib.util
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    import importlib
+    p = importlib.import_module("pantheon")
+    spec = importlib.util.spec_from_file_location("pantheon_watch_t", os.path.join(ROOT, "lib", "watch.py"))
+    w = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(w)
+    w.set_core(p)
+    d = tempfile.mkdtemp(prefix="infra-")
+    managed = os.path.join(d, "managed-settings.json")
+    journal = os.path.join(d, "argv.log")
+    fake = os.path.join(d, "guard.py")
+    with open(fake, "w", encoding="utf-8") as fh:
+        fh.write(
+            "import json, sys\n"
+            f"MANAGED = {managed!r}\n"
+            f"JOURNAL = {journal!r}\n"
+            "open(JOURNAL, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "mode = 'managed' if '--managed' in sys.argv else 'plugin'\n"
+            "def active():\n"
+            "    try:\n"
+            "        data = json.load(open(MANAGED))\n"
+            "    except (OSError, ValueError):\n"
+            "        return False\n"
+            "    for g in (data.get('hooks') or {}).get('PreToolUse') or []:\n"
+            "        for h in g.get('hooks') or []:\n"
+            "            c = h.get('command') or ''\n"
+            "            if 'guard.py' in c and '--managed' in c:\n"
+            "                return True\n"
+            "    return False\n"
+            "sys.stdin.read()\n"
+            "if mode == 'plugin' and active():\n"
+            "    sys.exit(0)\n"
+            "print(json.dumps({'hookSpecificOutput': {'permissionDecision': 'deny'}}))\n")
+    saved = {k: getattr(p, k) for k in ("MANAGED", "HOME", "guard_script", "agents_all")}
+    want = "готово  guard отказывает на git push --force (роль dev-haiku)"
+    try:
+        p.MANAGED, p.HOME, p.guard_script, p.agents_all = managed, d, (lambda: fake), (lambda: [])
+        with open(managed, "w", encoding="utf-8") as fh:
+            json.dump({"hooks": {"PreToolUse": [{"hooks": [
+                {"type": "command", "command": f'python3 "{fake}" --managed'}]}]}}, fh)
+        _, lines = w.infra_check()
+        check(want in lines, f"управляемые настройки активны: проба guard не отказала ({lines[:1]})")
+        check("--managed" in open(journal).read(), "управляемые настройки активны: проба без --managed")
+        os.remove(managed)
+        os.remove(journal)
+        _, lines = w.infra_check()
+        check(want in lines, f"управляемых настроек нет: проба guard не отказала ({lines[:1]})")
+        check("--managed" not in open(journal).read(), "управляемых настроек нет: проба с --managed")
+    finally:
+        for k, v in saved.items():
+            setattr(p, k, v)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
