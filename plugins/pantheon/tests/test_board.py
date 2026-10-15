@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
 CLI = os.path.join(LIB, "pantheon.py")
@@ -47,7 +48,13 @@ def head_of(path):
 
 
 def card(view, title):
-    return os.path.join(view, "Доска", title + ".md")
+    """Карточка по заголовку: у задачи имя «<id> <заголовок>», у заявки направлению — заголовок."""
+    d = os.path.join(view, "Доска")
+    names = os.listdir(d) if os.path.isdir(d) else []
+    for f in sorted(names):
+        if re.fullmatch(r"[a-z][a-z0-9]{1,11}-\d{3,} " + re.escape(title) + r"\.md", f):
+            return os.path.join(d, f)
+    return os.path.join(d, title + ".md")
 
 
 def set_card(path, key, value):
@@ -88,13 +95,35 @@ def main():
     c1, c2 = card(view, "Схема свойств"), card(view, "Вопрос владельцу")
     ch1, _ = head_of(c1)
     check("board: карточка с русскими полями, колонка «Очередь»", ch1.get("Статус") == "Очередь"
-          and ch1.get("Приоритет") == "🔥 высокий" and "type" not in ch1 and ch1.get("id") == "metis-0001")
+          and ch1.get("Приоритет") == "1" and "type" not in ch1 and ch1.get("id") == "metis-0001")
     _, t2 = head_of(c2)
-    check("board: вопрос с вариантами — галочки в карточке", "Статус: Ждёт вас" in t2 and "- [ ] В копии" in t2)
+    check("board: вопрос с вариантами — галочки в карточке", "Статус: Нужен ответ" in t2 and "- [ ] В копии" in t2)
     check("board: вопрос по шаблону — «Нужно решить», без подсказки агенту в карточке",
           "## ❓ Нужно решить" in t2 and "Написать агенту" not in t2)
+    summ = open(os.path.join(view, "Доска", "Сводка.md"), encoding="utf-8").read()
     check("board: Доска.base и Сводка", os.path.exists(os.path.join(view, "Доска", "Доска.base"))
-          and "Ждёт вас (1)" in open(os.path.join(view, "Доска", "Сводка.md"), encoding="utf-8").read())
+          and "🔴 Нужен ответ (1)" in summ and "Ждёт вас" not in summ)
+    # п. 7: id в имени карточки, «Кому» — ссылка на узел; ссылка сводки — с подписью-заголовком
+    ch2, _ = head_of(c2)
+    check("board: имя карточки «<id> <заголовок>», «Кому» обязательно — координатор, если owner не задан",
+          os.path.basename(c1) == "metis-0001 Схема свойств.md" and os.path.basename(c2) == "metis-0002 Вопрос владельцу.md"
+          and ch1.get("Кому") == "[[Метида]]" and ch2.get("Кому") == "[[Метида]]" and "Кто" not in ch1
+          and "[[Доска/metis-0002 Вопрос владельцу|Вопрос владельцу]]" in summ)
+    h2src, _ = head_of(src("metis-pantheon", "metis-0002"))
+    check("task new без --owner: owner = координатор направления", h2src.get("owner") == "metis-pantheon")
+    # п. 3: типы полей
+    _, t3x = head_of(card(view, "Налоги беты"))
+    check("board: «Внимание» — YAML-список слов без эмодзи, пусто — без ключа; «Приоритет» — число; «Срок» — дата",
+          "\nВнимание: [вопрос к вам]\n" in t2 and "\nВнимание: [просрочено]\n" in t3x and "Внимание" not in open(c1).read()
+          and "\nПриоритет: 1\n" in open(c1).read() and "\nСрок: 2026-10-10\n" in t3x and "Тип: задача" in t2)
+    # п. 4: даты из источника
+    check("board: «Создана» и «Вопрос задан» — из файла задачи; question_at ставит task new с --question",
+          h2src.get("question_at") == datetime.fromtimestamp(T0).strftime("%Y-%m-%dT%H:%M:%S")
+          and f"\nВопрос задан: {h2src.get('question_at')}\n" in t2 and f"\nСоздана: {h2src['created']}\n" in t2
+          and "Закрыта" not in t2)
+    # п. 5: тег направления
+    check("board: тег направление/<имя> на карточке задачи","\ntags: [направление/metis-pantheon]\n" in t2
+          and "\ntags: [направление/athena-broker]\n" in t3x)
     # сортировка: формулы Доска.base опираются на слова в карточках — слова должны совпадать
     base_txt = open(os.path.join(view, "Доска", "Доска.base"), encoding="utf-8").read()
     sys.path.insert(0, LIB)
@@ -113,24 +142,41 @@ def main():
           base is None or (sorts_ok and hidden_ok))
     f_att = base_txt.split("urgency:")[1].split("\n")[0] if "urgency:" in base_txt else ""
     f_pri = base_txt.split("prio_rank:")[1].split("\n")[0] if "prio_rank:" in base_txt else ""
-    marks_ok = all(w in f_att for w in ("⚠", "просрочено", "скоро")) and all(
-        w in f_pri for w in ("срочно", "высокий", "низкий"))
-    cards_ok = ("🔴 просрочено" in _tasks.attention({"due": "2026-10-01", "status": "todo"}, T0)
-                and "🟠 срок скоро" in _tasks.attention({"due": "2026-10-16", "status": "todo"}, T0)
-                and "⚠ конфликт" in _tasks.attention({}, T0, "конфликт")
+    f_age = base_txt.split("age_key:")[1].split("\n")[0] if "age_key:" in base_txt else ""
+    in_formula = set(re.findall(r'contains\("([^"]+)"\)', f_att))
+    marks_ok = in_formula == {"конфликт", "подтвердите словом", "просрочено", "срок скоро"} and not re.search(
+        r"[⚠🔴🟠❓]", f_att) and "contains" not in f_pri and 'note["Приоритет"]' in f_pri and "2" in f_pri
+    words = [_tasks.attention({"due": "2026-10-01", "status": "todo"}, T0),
+             _tasks.attention({"due": "2026-10-16", "status": "todo"}, T0), _tasks.attention({}, T0, "конфликт"),
+             _tasks.attention({"risky": True, "requested": "Да"}, T0)]
+    cards_ok = (words == [["просрочено"], ["срок скоро"], ["конфликт"], ["подтвердите словом"]]
                 and _tasks.attention({"question": "q", "status": "waiting", "waiting_on": "human", "due": "2026-10-16"},
-                                     T0) == "❓ вопрос к вам · 🟠 срок скоро"
-                and "срочно" in _tasks.PRIORITY_MARK[0] and "высокий" in _tasks.PRIORITY_MARK[1]
-                and "низкий" in _tasks.PRIORITY_MARK[3] and "срочно" not in _tasks.PRIORITY_MARK[2])
+                                     T0) == ["вопрос к вам", "срок скоро"]
+                and _tasks.attention({"status": "todo"}, T0) is None
+                and in_formula <= set(_tasks.ATTENTION_WORDS)
+                and "срочно" in _tasks.PRIORITY_MARK[0] and "низкий" in _tasks.PRIORITY_MARK[3])
     check("board: слова в формулах сортировки совпадают со словами на карточках", marks_ok and cards_ok)
+    check("board: age_key — по «Закрыта»/«Создана» из карточки, а не по времени файла",
+          'note["Закрыта"]' in f_age and 'note["Создана"]' in f_age and "file." not in f_age)
+    # п. 6: «Нужен ответ» — во всех местах .base, где слово сравнивается; «Отменено» — в порядке колонок
+    go = re.search(r"groupOrder: \[(.*)\]", base_txt)
+    cols = [x.strip() for x in go.group(1).split(",")] if go else []
+    check("board: Доска.base — колонки = COLUMNS (с «Нужен ответ» и «Отменено»), «Ждёт вас» нигде нет",
+          cols == _tasks.COLUMNS and "Ждёт вас" not in base_txt and 'note["Статус"] == "Нужен ответ"' in base_txt
+          and "name: Нужен ответ" in base_txt and "note.Кому" in base_txt and "note.Кто" not in base_txt)
+    check("board: узлы не на доске — фильтр по папке Доска", "'file.folder == \"Доска\"'" in base_txt)
     check("board: просрочка — одна тревога", "просрочена: Налоги беты" in r.stdout)
-    before = {f: os.stat(os.path.join(view, "Доска", f)).st_mtime_ns for f in os.listdir(os.path.join(view, "Доска"))}
-    before["state"] = os.stat(os.path.join(state, "board.json")).st_mtime_ns
+    def stamps():
+        out = {os.path.relpath(os.path.join(dp, f), view): os.stat(os.path.join(dp, f)).st_mtime_ns
+               for dp, _, fs in os.walk(view) for f in fs}
+        out["state"] = os.stat(os.path.join(state, "board.json")).st_mtime_ns
+        return out
+    before = stamps()
     r = run(env, "board", t=T0 + 60)
-    after = {f: os.stat(os.path.join(view, "Доска", f)).st_mtime_ns for f in os.listdir(os.path.join(view, "Доска"))}
-    after["state"] = os.stat(os.path.join(state, "board.json")).st_mtime_ns
-    check("board: повтор через минуту — без второй тревоги и без единой записи на диск", "просрочена" not in r.stdout
-          and before == after)
+    after = stamps()
+    check("board: повтор через минуту — без второй тревоги и без единой записи на диск (карточки, узлы, types.json)",
+          "просрочена" not in r.stdout and before == after and any(k.startswith("Доска/Узлы/") for k in before)
+          and ".obsidian/types.json" in before)
 
     # ход владельца
     set_card(c1, "Статус", "В работе")
@@ -317,8 +363,10 @@ def main():
     run(env2, "board", t=T0 + 640)
     ic = card(view, "Перенести правило в guard")
     ih, itext = head_of(ic)
-    check("заявка направлению: карточка во «Входящих» с отправителем", ih.get("Статус") == "Входящие"
-          and "От:** соседняя сессия" in itext and ih.get("Кто") == "metis-pantheon")
+    check("заявка направлению: карточка во «Входящих» с отправителем; «Тип: заявка», «Внимание» без значка заявки",
+          ih.get("Статус") == "Входящие" and "От:** соседняя сессия" in itext and ih.get("Кому") == "[[Метида]]"
+          and ih.get("Тип") == "заявка" and "Внимание" not in ih and "заявка направлению" not in itext
+          and ih.get("tags") == "[направление/metis-pantheon]" and os.path.basename(ic) == "Перенести правило в guard.md")
     set_card(ic, "Статус", "Очередь")
     run(env2, "board", t=T0 + 700)
     done_dir = os.listdir(os.path.join(ib, "done")) if os.path.isdir(os.path.join(ib, "done")) else []
@@ -441,8 +489,221 @@ def main():
     check("текст агента — внутри рамки «Текст задачи»: чужой заголовок и предупреждение тика не изобразить",
           "> ### ✍️ Ваши заметки" in box and "> > \\[!warning]" in box and "> обычная строка" in box
           and not re.search(r"^> \[!warning\]", sc, re.M))
+
+    board_extra(tmp, home, state, view, env, src)
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
+
+
+def new_task(env, *args, t):
+    r = run(env, "task", "new", *args, t=t)
+    return r.stdout.split()[0] if r.returncode == 0 else r.stderr
+
+
+def board_extra(tmp, home, state, view, env, src):
+    """Выпуск 0.9.28 (metis-0020, шаг 1): .base по версии, неверная галочка, типы, даты, тег, «Нужен ответ»,
+    «Кому» и id в имени, узлы."""
+    sys.path.insert(0, LIB)
+    import tasks as T
+    bd = os.path.join(view, "Доска")
+    bpath = os.path.join(bd, "Доска.base")
+    spath = os.path.join(state, "board.json")
+    st_load = lambda: json.load(open(spath, encoding="utf-8"))
+
+    def st_save(s):
+        json.dump(s, open(spath, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+
+    backups = lambda: sorted(f for f in os.listdir(state) if f.startswith("board-base-"))
+    t = T0 + 2000
+
+    # п. 1: Доска.base — та же версия: правку владельца не трогаем
+    open(bpath, "a", encoding="utf-8").write("# мой вид\n")
+    r = run(env, "board", t=t)
+    check(".base: версия та же — файл с правкой владельца не тронут, без копии и тревоги",
+          open(bpath, encoding="utf-8").read().endswith("# мой вид\n") and not backups() and "Доска.base" not in r.stdout)
+    # версия сменилась, владелец правил — его файл в папку состояния, одна тревога, шаблон записан
+    s = st_load()
+    s["base_version"] = "старая"
+    st_save(s)
+    r = run(env, "board", t=t + 10)
+    b = backups()
+    check(".base: версия сменилась, владелец правил — новый шаблон, его версия в папке состояния, одна тревога",
+          open(bpath, encoding="utf-8").read() == T.BASE_FILE and len(b) == 1
+          and open(os.path.join(state, b[0]), encoding="utf-8").read().endswith("# мой вид\n")
+          and "Доска.base обновлён, ваша версия сохранена в" in r.stdout and st_load()["base_version"] == T.BASE_VERSION)
+    # версия сменилась, владелец не правил — перезапись без копии и тревоги
+    s = st_load()
+    s["base_version"] = "старая-2"
+    st_save(s)
+    r = run(env, "board", t=t + 20)
+    check(".base: версия сменилась, файл не правлен — перезапись без копии и тревоги",
+          open(bpath, encoding="utf-8").read() == T.BASE_FILE and backups() == b and "Доска.base" not in r.stdout
+          and st_load()["base_version"] == T.BASE_VERSION)
+    # старая установка: в состоянии нет версии, в файле прежний шаблон с «Ждёт вас» — перезапись
+    s = st_load()
+    s.pop("base_version", None)
+    s.pop("base_hash", None)
+    st_save(s)
+    open(bpath, "w", encoding="utf-8").write("views:\n  - type: table\n    name: Ждёт вас\n")
+    run(env, "board", t=t + 30)
+    check(".base: старая установка без версии — шаблон записан («Ждёт вас» ушло), прежний файл сохранён",
+          open(bpath, encoding="utf-8").read() == T.BASE_FILE and len(backups()) == 2)
+
+    # п. 3: types.json — слить с чужими ключами; битый JSON не трогать
+    tj = os.path.join(view, ".obsidian", "types.json")
+    json.dump({"types": {"мой ключ": "checkbox", "Приоритет": "text"}, "other": 1}, open(tj, "w", encoding="utf-8"))
+    run(env, "board", t=t + 40)
+    tjd = json.load(open(tj, encoding="utf-8"))
+    check("types.json: свои ключи поставлены, чужие и прочее не тронуты",
+          tjd["types"].get("мой ключ") == "checkbox" and tjd.get("other") == 1
+          and all(tjd["types"].get(k) == v for k, v in T.PROP_TYPES.items()) and tjd["types"]["Внимание"] == "multitext")
+    open(tj, "w", encoding="utf-8").write("{битый")
+    r = run(env, "board", t=t + 50)
+    check("types.json: битый JSON — не тронут, тревога", open(tj, encoding="utf-8").read() == "{битый"
+          and "битый JSON" in r.stdout)
+    os.remove(tj)
+
+    # п. 2: отмечен вариант, которого нет в задаче, — конфликт в карточке; верный ответ его снимает
+    qid = new_task(env, "--direction", "athena-broker", "--title", "Выбрать банк", "--status", "waiting",
+                   "--waiting-on", "human", "--next", "ответ", "--question", "Какой банк?", "--option", "Первый банк",
+                   "--option", "Второй банк", "--project", "BrokerAssistant", t=t + 60)
+    run(env, "board", t=t + 70)
+    qc = card(view, "Выбрать банк")
+    qtext = open(qc, encoding="utf-8").read()
+    open(qc, "w", encoding="utf-8").write(qtext.replace("- [ ] Первый банк", "- [x] Третий банк"))
+    run(env, "board", t=t + 80)
+    qh, qct = head_of(qc)
+    sh, _ = head_of(src("athena-broker", qid))
+    check("галочка на вариант не из задачи: не ответ, конфликт в карточке и во «Внимании»",
+          not sh.get("answer") and "отмечен вариант, которого нет в задаче: «Третий банк»" in qct
+          and "конфликт" in qh.get("Внимание", "") and "- [ ] Первый банк" in qct)
+    open(qc, "w", encoding="utf-8").write(qct.replace("- [ ] Второй банк", "- [x] Второй банк"))
+    run(env, "board", t=t + 90)
+    qh, qct = head_of(qc)
+    sh, _ = head_of(src("athena-broker", qid))
+    check("после верного ответа конфликт снят", sh.get("answer") == "Второй банк" and "отмечен вариант" not in qct
+          and "конфликт" not in qh.get("Внимание", ""))
+
+    # п. 4: question_at и closed — ставит CLI
+    did = new_task(env, "--direction", "metis-pantheon", "--title", "Даты задачи", "--project", "Пантеон", t=t + 100)
+    sp = src("metis-pantheon", did)
+    run(env, "task", "set", did, "question=Какую дату?", t=t + 110)
+    h1, _ = head_of(sp)
+    run(env, "task", "set", did, "question=Какую дату?", "next=x", t=t + 120)
+    h2, _ = head_of(sp)
+    run(env, "task", "set", did, "question=Другую?", t=t + 130)
+    h3, _ = head_of(sp)
+    run(env, "task", "set", did, "question=", t=t + 140)
+    h4, _ = head_of(sp)
+    iso = lambda x: datetime.fromtimestamp(x).strftime("%Y-%m-%dT%H:%M:%S")
+    check("question_at: ставится с новым вопросом, тот же вопрос — не меняется, вопрос снят — снято",
+          h1.get("question_at") == iso(t + 110) and h2.get("question_at") == iso(t + 110)
+          and h3.get("question_at") == iso(t + 130) and "question_at" not in h4)
+    run(env, "task", "set", did, "status=done", "result=готово", t=t + 150)
+    h5, _ = head_of(sp)
+    run(env, "board", t=t + 160)
+    dh, _ = head_of(card(view, "Даты задачи"))
+    run(env, "task", "set", did, "status=todo", t=t + 170)
+    h6, _ = head_of(sp)
+    check("closed: done ставит дату закрытия, на карточке «Закрыта»; вернули в работу — снято",
+          h5.get("closed") == iso(t + 150)[:10] and dh.get("Закрыта") == iso(t + 150)[:10] and "closed" not in h6)
+
+    # п. 7: owner не очищается; задача без owner — предупреждение check, на карточке координатор
+    r = run(env, "task", "set", did, "owner=", t=t + 180)
+    check("task set owner= — отказ «owner не очищается»", r.returncode == 1 and "owner не очищается" in r.stderr)
+    raw = os.path.join(home, "directions", "athena-broker", "tasks", "athena-0090.md")
+    open(raw, "w", encoding="utf-8").write(
+        "---\ntype: task\nid: athena-0090\ntitle: Без исполнителя\nstatus: todo\nproject: BrokerAssistant\n"
+        "direction: athena-broker\ncreated: 2026-10-01\nupdated: 2026-10-01T10:00\nschema_version: 1\n---\n\n# Без исполнителя\n")
+    r = run(env, "check", raw)
+    run(env, "board", t=t + 190)
+    nh, _ = head_of(card(view, "Без исполнителя"))
+    check("check: нет owner — предупреждение, не ошибка; карточка «Кому» — координатор направления",
+          r.returncode == 0 and "нет owner" in r.stdout and nh.get("Кому") == "[[Афина]]"
+          and os.path.basename(card(view, "Без исполнителя")) == "athena-0090 Без исполнителя.md")
+
+    # п. 8: узлы для графа
+    lid = new_task(env, "--direction", "metis-pantheon", "--title", "Задача лида", "--owner", "hephaestus-pantheon",
+                   "--due", "2026-12-01", "--project", "Пантеон", t=t + 200)
+    oid = new_task(env, "--direction", "metis-pantheon", "--title", "Задача разработчика", "--owner", "dev-opus",
+                   "--project", "Пантеон", t=t + 200)
+    n_inbox = len(os.listdir(os.path.join(home, "inbox", "tasks")))
+    run(env, "board", t=t + 210)
+    nd = os.path.join(bd, "Узлы")
+    node = lambda n: head_of(os.path.join(nd, n + ".md")) if os.path.exists(os.path.join(nd, n + ".md")) else ({}, "")
+    (gh, gt), (mh, mt), (zh, zt), (vh, vt), (ah, at), (dh2, dt) = (node(n) for n in (
+        "Гефест · pantheon", "Метида", "Зевс", "Владелец", "Афина", "dev-opus"))
+    check("узлы: лид → координатор своего направления → Зевс → Владелец; тег направления; незнакомый слаг — как есть",
+          gh.get("type") == "узел" and gh.get("parent") == "[[Метида]]" and gh.get("tags") == "[направление/metis-pantheon]"
+          and mh.get("parent") == "[[Зевс]]" and zh.get("parent") == "[[Владелец]]" and "parent" not in vh
+          and ah.get("id") == "athena-broker" and dh2.get("parent") == "[[Зевс]]" and "Руководитель: [[Метида]]" in gt)
+    lc = open(card(view, "Задача лида"), encoding="utf-8").read()
+    check("узлы: в узле — только открытые задачи ссылками «id заголовок|id»; в карточке строка «Кому» для графа",
+          f"[[{lid} Задача лида|{lid}]] · Задача лида · Очередь · срок 2026-12-01" in gt and "## Открытые задачи (1)" in gt
+          and f"{did}" in mt and "Кому: \"[[Гефест · pantheon]]\"" in lc
+          and "> Кому: [[Гефест · pantheon]] · Направление: metis-pantheon" in lc)
+    check("узлы: подпапка Узлы не считается новой карточкой владельца",
+          len(os.listdir(os.path.join(home, "inbox", "tasks"))) == n_inbox)
+    # роль ушла из «Кому»: свой узел удалён, правленный владельцем — оставлен
+    open(os.path.join(nd, "dev-opus.md"), "a", encoding="utf-8").write("\nмоя пометка\n")
+    run(env, "task", "set", lid, "owner=metis-pantheon", t=t + 220)
+    run(env, "task", "set", oid, "owner=metis-pantheon", t=t + 220)
+    run(env, "board", t=t + 230)
+    check("узлы: ушедшая роль — свой узел удалён, правленный владельцем остался",
+          not os.path.exists(os.path.join(nd, "Гефест · pantheon.md")) and os.path.exists(os.path.join(nd, "dev-opus.md")))
+    roles = T.Roles(["metis-pantheon", "athena-brokerassistant", "daedalus-a", "daedalus-b"])
+    check("узлы: имена по богам — координатор, лид с суффиксом, владелец, Зевс, два направления одного бога",
+          [roles.name(x) for x in ("athena-brokerassistant", "apollo-brokerassistant", "вы", "hq", "zeus", "argus",
+                                   "daedalus-a", "Странная Роль")]
+          == ["Афина", "Аполлон · brokerassistant", "Владелец", "Зевс", "Зевс", "Аргус", "Дедал · a", "Странная Роль"]
+          and roles.parent("apollo-brokerassistant") == "athena-brokerassistant" and roles.parent("hephaestus-x") == "zeus"
+          and roles.parent("owner") is None and roles.parent("hq") == "owner")
+
+    # п. 6: переход «Ждёт вас» → «Нужен ответ» — старая карточка со старым именем и старое состояние
+    nlog = os.path.join(tmp, "notify2.log")
+    env2 = dict(env, PANTHEON_NOTIFY_LOG=nlog)
+    day = 1791968400 + 3 * 3600  # 2026-10-14 15:00 по Москве — днём уведомления не глушатся
+    wid = new_task(env, "--direction", "athena-broker", "--title", "Старый вопрос", "--status", "waiting",
+                   "--waiting-on", "human", "--next", "ответ", "--question", "Как раньше?", "--option", "Так",
+                   "--option", "Иначе", "--project", "BrokerAssistant", t=day - 100)
+    run(env2, "board", t=day - 60)
+    newc = card(view, "Старый вопрос")
+    oldc = os.path.join(bd, "Старый вопрос.md")
+    text = open(newc, encoding="utf-8").read().replace("Статус: Нужен ответ", "Статус: Ждёт вас")
+    os.remove(newc)
+    open(oldc, "w", encoding="utf-8").write(text)
+    s = st_load()
+    s["cards"][wid].update({"synced": "Ждёт вас", "file": "Старый вопрос", "card_hash": T.digest(oldc)})
+    st_save(s)
+    open(nlog, "w").close()
+    nmoves = sum(1 for x in open(os.path.join(state, "owner-log", "board.jsonl")) if '"move"' in x)
+    run(env2, "board", t=day)
+    wh, _ = head_of(newc)
+    sh, _ = head_of(src("athena-broker", wid))
+    check("переход «Ждёт вас»: старая карточка переименована в «<id> <заголовок>», колонка «Нужен ответ», "
+          "без ложного уведомления и хода",
+          not os.path.exists(oldc) and wh.get("Статус") == "Нужен ответ" and "Вопрос к вам" not in open(nlog).read()
+          and sh.get("status") == "waiting" and st_load()["cards"][wid]["synced"] == "Нужен ответ"
+          and sum(1 for x in open(os.path.join(state, "owner-log", "board.jsonl")) if '"move"' in x) == nmoves)
+    # в карточке старое слово, в состоянии — уже новое: это не ход владельца и не конфликт
+    text = open(newc, encoding="utf-8").read().replace("Статус: Нужен ответ", "Статус: Ждёт вас")
+    open(newc, "w", encoding="utf-8").write(text)
+    run(env2, "board", t=day + 5)
+    wh, wt = head_of(newc)
+    sh, _ = head_of(src("athena-broker", wid))
+    check("переход «Ждёт вас»: старое слово в карточке при новом в состоянии — ни хода, ни конфликта",
+          sh.get("status") == "waiting" and wh.get("Статус") == "Нужен ответ" and "переносит агент" not in wt
+          and "конфликт" not in wh.get("Внимание", "")
+          and sum(1 for x in open(os.path.join(state, "owner-log", "board.jsonl")) if '"move"' in x) == nmoves)
+    # владелец отметил ответ на старой карточке («Ждёт вас»), в состоянии — уже новое слово: ответ, не ход
+    text = open(newc, encoding="utf-8").read().replace("Статус: Нужен ответ", "Статус: Ждёт вас")
+    open(newc, "w", encoding="utf-8").write(text.replace("- [ ] Так", "- [x] Так"))
+    run(env2, "board", t=day + 10)
+    sh, _ = head_of(src("athena-broker", wid))
+    wh, wt = head_of(newc)
+    check("переход «Ждёт вас»: старое слово в карточке = «Нужен ответ» — ответ применён, ни хода, ни конфликта",
+          sh.get("answer") == "Так" and "переносит агент" not in wt and "конфликт" not in wh.get("Внимание", "")
+          and sum(1 for x in open(os.path.join(state, "owner-log", "board.jsonl")) if '"move"' in x) == nmoves)
 
 
 if __name__ == "__main__":
