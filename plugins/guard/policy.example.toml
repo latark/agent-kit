@@ -30,7 +30,7 @@ themis-sources = ["~/.cache/expert-corpus"]
 # направления из domains.json. Защиты — папки [coordinators] metis-pantheon и их репозитории (git remote; клон
 # agent-kit в другой папке — тоже защиты) — только Метида по «да» владельца в окне вопросов Зевса. Вопрос:
 # «[metis-NNNN] Слить https://github.com/latark/agent-kit/pull/N?», слияние: gh pr merge N --subject
-# "[metis-NNNN] …". Одно «да» — одно слияние: использованные — в ~/.local/state/pantheon/logs/merge-consent-used.jsonl.
+# "[metis-NNNN] …". Одно «да» — одно слияние: отметки использованных — в ~/.local/state/pantheon/merge-consent/.
 # Без этого файла или без непустого списка metis-pantheon слияние закрыто всем. Подробно — README guard, раздел
 # «Слияние PR».
 #

@@ -12,6 +12,8 @@ import sys
 import tempfile
 import time
 import uuid
+import hashlib
+import stat
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
 
@@ -128,6 +130,7 @@ def write_zeus(home):
         (650, " · окно вопросов", f"вопрос: [metis-0075] Слить {ak5}?\nответ: да"),
         (650, " · окно вопросов", f"вопрос: [metis-0076] Слить {ak5}?\nответ: ДА."),
         (650, " · окно вопросов", f"вопрос: [metis-0077] Слить {ak5}?\nответ: "),
+        (650, " · окно вопросов", f"вопрос: [metis-0078] Слить {ak5}?\nответ: Да1"),
     ]
     with open(os.path.join(home, ".local/state/pantheon/owner-log/zeus.md"), "w") as fh:
         fh.write("".join(f"## {ago if isinstance(ago, str) else stamp(ago)}{note}\n{body}\n\n"
@@ -161,15 +164,26 @@ def merge_fixtures(home):
         subprocess.run(git + ["worktree", "add", "-q", "-b", branch, j(wt)], check=True, capture_output=True)
 
 
-def used_file(home):
-    return os.path.join(home, ".local/state/pantheon/logs/merge-consent-used.jsonl")
+def mark_dir(home):
+    """Отметки использованных согласий: файл на каждое «да» (metis-0038)."""
+    return os.path.join(home, ".local/state/pantheon/merge-consent")
+
+
+def marks(home):
+    d = mark_dir(home)
+    return sorted(f for f in os.listdir(d) if not f.startswith(".")) if os.path.isdir(d) and not os.path.islink(d) else []
 
 
 def reset_used(home):
-    f = used_file(home)
-    if os.path.lexists(f):
-        os.chmod(f, 0o600)
-        os.remove(f)
+    d = mark_dir(home)
+    if os.path.islink(d) or os.path.isfile(d):
+        os.remove(d)
+    elif os.path.isdir(d):
+        for f in os.listdir(d):
+            fp = os.path.join(d, f)
+            if not os.path.islink(fp):
+                os.chmod(fp, 0o600)
+            os.remove(fp)
 
 
 def _read(path):
@@ -216,6 +230,33 @@ def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None, ra
     return "deny" if '"deny"' in out else "allow"
 
 
+# guard как модуль: проверка согласия в merge_problem, затем в zeus.md дописан более поздний ответ на тот же id и PR,
+# затем commit_consent — согласие сверяется заново и не совпадает с проверенным
+RECHECK_PROBE = r"""
+import importlib.util, os, sys, time
+guard_path, home = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("g", guard_path)
+g = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(g)
+os.environ["CLAUDE_PROJECT_DIR"] = os.path.join(home, "projects/agent-kit")
+pdir = os.path.realpath(os.path.join(home, "projects/agent-kit"))
+event = {"session_id": "s", "tool_use_id": "toolu_probe"}
+why = g.merge_problem("domain-coordinator", False, pdir, pdir, False, ["5", "-t", "[metis-0038] x"],
+                      'gh pr merge 5 -t "[metis-0038] x"', event)
+print("pending", len(g.PENDING_CONSENT))
+zeus = os.path.join(home, ".local/state/pantheon/owner-log/zeus.md")
+with open(zeus) as fh:
+    text = fh.read()
+with open(zeus, "w") as fh:
+    fh.write(text + "## " + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 2)) + " · окно вопросов\n"
+             "вопрос: [metis-0038] Слить https://github.com/latark/agent-kit/pull/5?\nответ: Да\n\n")
+r = g.commit_consent(event, "Bash", {})
+print("commit:", "изменился" if r and "изменился" in r else r)
+d = os.path.join(home, ".local/state/pantheon/merge-consent")
+print("marks", len([f for f in os.listdir(d) if not f.startswith(".")]) if os.path.isdir(d) else 0)
+"""
+
+
 def merge_security_checks(home, MERGE_OK, cases):
     """Находка проверки безопасности 2eda45f: одно «да» — одно слияние, защиты по remote, любой сбой — отказ.
     Возвращает число упавших проверок."""
@@ -256,11 +297,16 @@ def merge_security_checks(home, MERGE_OK, cases):
     check("одноразовость: тот же вызов вторым хуком (тот же tool_use_id) — как первый, следующий вызов — отказ",
           a == MERGE_OK and b == MERGE_OK and deny(c) and ("уже использовано" in c or not allow_ok))
     if allow_ok:
-        lines = _read(used_file(home)).splitlines()
-        rec = json.loads(lines[0]) if lines else {}
-        check("одноразовость: в журнале одна запись — id, PR, репозиторий, время записи окна",
-              len(lines) == 1 and rec.get("id") == "metis-0038" and rec.get("pr") == 5
-              and rec.get("repo") == "latark/agent-kit" and bool(rec.get("entry")))
+        names = marks(home)
+        rec = json.loads(_read(os.path.join(mark_dir(home), names[0]))) if names else {}
+        key = json.dumps([rec.get("id"), rec.get("entry"), rec.get("repo"), rec.get("pr")], ensure_ascii=False)
+        check("одноразовость: одна отметка, имя — sha256(id, entry, repo, pr), внутри id, PR, репозиторий, вызов; "
+              "папка 0700, файл 0600",
+              len(names) == 1 and names[0] == hashlib.sha256(key.encode("utf-8")).hexdigest()
+              and rec.get("id") == "metis-0038" and rec.get("pr") == 5 and rec.get("repo") == "latark/agent-kit"
+              and rec.get("tool_use_id") == "toolu_a" and bool(rec.get("entry"))
+              and stat.S_IMODE(os.stat(mark_dir(home)).st_mode) == 0o700
+              and stat.S_IMODE(os.stat(os.path.join(mark_dir(home), names[0])).st_mode) == 0o600)
     reset_used(home)
     cmd = 'gh pr merge 5 -t "[metis-0057] guard"'
     first, second = M(home, cmd), M(home, cmd)
@@ -277,13 +323,13 @@ def merge_security_checks(home, MERGE_OK, cases):
     check(f"одноразовость: «да» на один id для двух PR — каждый по разу: {got}", got == [MERGE_OK, MERGE_OK, "deny"])
     reset_used(home)
     got = M(home, 'gh pr merge 5 -t "[metis-0038] x" && gh pr merge 5 -t "[metis-0038] x"')
-    check(f"одноразовость: два слияния по одному «да» в одной команде — отказ, журнал не тронут: {got}",
-          got == "deny" and not os.path.lexists(used_file(home)))
+    check(f"одноразовость: два слияния по одному «да» в одной команде — отказ, отметки нет: {got}",
+          got == "deny" and not marks(home))
     reset_used(home)
     got = (M(home, 'gh pr merge 5 -t "[metis-0038] x" && osascript -e beep'), M(home, 'gh pr merge 5 -t "[metis-0038] x"'))
     check(f"одноразовость: другое правило отказало в том же вызове — «да» не сгорает: {got}", got == ("deny", MERGE_OK))
-    # toctou: два вызова guard одновременно (разные tool_use_id) на одно «да» — проходит ровно один: повторная
-    # сверка идёт под flock
+    # toctou: два вызова guard одновременно (разные tool_use_id) на одно «да» — проходит ровно один: отметку
+    # ставит os.link, который при уже стоящей отметке падает с EEXIST
     reset_used(home)
     procs = [start(home, ak, "domain-coordinator", "Bash", {"command": 'gh pr merge 5 -t "[metis-0038] x"'})
              for _ in range(2)]
@@ -294,17 +340,66 @@ def merge_security_checks(home, MERGE_OK, cases):
     out = M(home, 'gh pr merge --squash -t "[metis-0038] x"', raw=True)
     check("согласие: без номера PR в команде — отказ по правилу (номер нужен для сверки с вопросом)",
           deny(out) and ("одним номером" in out or not allow_ok))
-    os.makedirs(os.path.dirname(used_file(home)), exist_ok=True)
-    open(used_file(home), "w").close()
-    os.chmod(used_file(home), 0)
-    out = M(home, 'gh pr merge 5 -t "[metis-0038] x"', raw=True)
-    os.chmod(used_file(home), 0o600)
-    check("сбой: журнал использованных есть, но не читается (chmod 000) — отказ",
-          deny(out) and ("не читается" in out or not allow_ok))
-    with open(used_file(home), "w") as fh:
-        fh.write("не json\n")
-    out = M(home, 'gh pr merge 5 -t "[metis-0038] x"', raw=True)
-    check("сбой: журнал использованных битый — отказ", deny(out) and ("не читается" in out or not allow_ok))
+    # отметки: симлинк вместо папки или файла, нечитаемая и битая отметка — отказ
+    cmd = 'gh pr merge 5 -t "[metis-0038] x"'
+    reset_used(home)
+    first = M(home, cmd, tuid="toolu_m")
+    names = marks(home)
+    if allow_ok and names:
+        mp = os.path.join(mark_dir(home), names[0])
+        content = _read(mp)
+        os.chmod(mp, 0)
+        out = M(home, cmd, tuid="toolu_m", raw=True)
+        os.chmod(mp, 0o600)
+        check("сбой: отметка не читается (chmod 000), даже тот же вызов — отказ", deny(out) and "не читается" in out)
+        with open(mp, "w") as fh:
+            fh.write("не json")
+        out = M(home, cmd, tuid="toolu_m", raw=True)
+        check("сбой: отметка не разбирается — отказ", deny(out) and "не читается" in out)
+        with open(mp, "w") as fh:
+            fh.write(json.dumps(dict(json.loads(content), id="metis-9999")))
+        out = M(home, cmd, tuid="toolu_m", raw=True)
+        check("сбой: отметка с чужим содержимым под этим именем — отказ", deny(out) and "не читается" in out)
+        os.remove(mp)
+        other = os.path.join(home, "mark-target.json")
+        with open(other, "w") as fh:
+            fh.write(content)
+        os.symlink(other, mp)
+        out = M(home, cmd, tuid="toolu_m", raw=True)
+        check("сбой: окончательная отметка — симлинк (на верную отметку того же вызова) — отказ",
+              deny(out) and "не читается" in out)
+    else:
+        check(f"отметки: без tomllib слияние закрыто, отметка не ставится: {first}, {names}",
+              first == "deny" and not names and not allow_ok)
+    reset_used(home)
+    os.rmdir(mark_dir(home)) if os.path.isdir(mark_dir(home)) else None
+    os.makedirs(os.path.join(home, "mark-elsewhere"), exist_ok=True)
+    os.symlink(os.path.join(home, "mark-elsewhere"), mark_dir(home))
+    out = M(home, cmd, raw=True)
+    check("сбой: папка merge-consent — симлинк — отказ",
+          deny(out) and ("симлинк" in out or not allow_ok) and not os.listdir(os.path.join(home, "mark-elsewhere")))
+    os.remove(mark_dir(home))
+    with open(mark_dir(home), "w") as fh:
+        fh.write("x")
+    out = M(home, cmd, raw=True)
+    check("сбой: merge-consent — файл, а не папка — отказ", deny(out) and ("симлинк" in out or not allow_ok))
+    os.remove(mark_dir(home))
+    # zeus.md — симлинк (на настоящий журнал) — отказ
+    zeus = os.path.join(home, ".local/state/pantheon/owner-log/zeus.md")
+    real = os.path.join(home, "zeus-real.md")
+    os.rename(zeus, real)
+    os.symlink(real, zeus)
+    out = M(home, cmd, raw=True)
+    os.remove(zeus)
+    os.rename(real, zeus)
+    check("сбой: zeus.md — симлинк — отказ", deny(out) and ("симлинк" in out or not allow_ok))
+    # zeus.md изменился между проверкой (merge_problem) и отметкой (commit_consent) — отказ
+    reset_used(home)
+    out = subprocess.run([sys.executable, "-I", "-c", RECHECK_PROBE, GUARD, home], capture_output=True, text=True,
+                         env={"HOME": home, "PATH": os.environ["PATH"], "TMPDIR": "/nonexistent-tmp"},
+                         timeout=30).stdout.strip().splitlines()
+    want = ["pending 1", "commit: изменился", "marks 0"] if allow_ok else ["pending 0", "commit: None", "marks 0"]
+    check(f"повторная сверка: zeus.md изменился между проверкой и отметкой — отказ, отметки нет: {out}", out == want)
     reset_used(home)
     # --- сбой в политике и реестре — отказ по правилу, а не пропуск и не сбой скрипта ---
     for name, kw in (
@@ -945,6 +1040,7 @@ def main():
         ("ответ «Отмена» — отказ", "deny", ak, "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0071] x"')),
         ("ответ «No» — отказ", "deny", ak, "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0072] x"')),
         ("ответ «Дальше» — отказ", "deny", ak, "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0073] x"')),
+        ("ответ «Да1» — отказ", "deny", ak, "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0078] x"')),
         ("ответ пустой — отказ", "deny", ak, "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0077] x"')),
         ("ответ «Да — слить» — можно", MERGE_OK, ak, "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0074] x"')),
         ("ответ «да» — можно", MERGE_OK, ak, "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0075] x"')),

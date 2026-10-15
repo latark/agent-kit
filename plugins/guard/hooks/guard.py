@@ -426,6 +426,8 @@ def check_nextjs(event):
 # видит. Это защита от ошибки агента, а не от намеренного обхода; настоящая граница — песочница (SEC-19).
 
 import glob
+import hashlib
+import stat
 import unicodedata
 
 STATE_DIR = os.path.realpath(os.path.join(HOME, ".local", "state", "pantheon"))
@@ -2246,7 +2248,7 @@ def check_protect_config(event, tool, tool_input):
 #            команде. Защиты — cwd в папках [coordinators] metis-pantheon или репозиторий команды (-R, иначе git
 #            remote папки cwd) совпадает с remote этих папок: только Метида, с --subject "[metis-NNNN] …", номером PR
 #            и записью «· окно вопросов» на этот id и этот PR в owner-log/zeus.md за сутки (решает последняя), без
-#            --auto; использованное «да» — в logs/merge-consent-used.jsonl, второй раз — отказ. Своё направление
+#            --auto; использованное «да» — отметка-файл в merge-consent/, второй раз — отказ. Своё направление
 #            (самый длинный корень domains.json, для совместимости [merge]) и продукт ([merge_client]) — можно; -R —
 #            только из [merge_repos], у Метиды — с тем же согласием. Любой сбой (политика, реестр, git, журналы) —
 #            отказ; координатору с личным в папке — тоже. Тесты, argus, talos и откат guard не видит — их делает роль.
@@ -2575,10 +2577,10 @@ MERGE_CONSENT_ID = re.compile(r"\[(metis-\d{4})\]")
 MERGE_CONSENT_AGE = 86400  # согласие действует сутки: «да» на позавчерашний вопрос — не «да» на сегодняшнее слияние
 # PR в первой строке вопроса: ссылка github.com/<owner>/<repo>/pull/<N> или <owner>/<repo>#<N>
 MERGE_PR_REF = re.compile(r"github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)|(?<![\w./#-])([\w.-]+)/([\w.-]+)#(\d+)", re.I)
-# согласие — только ответ, который начинается с «Да» (без учёта регистра, после «Да» не буква): «Да — слить», «да»,
+# согласие — только ответ, который начинается с «Да» (без учёта регистра, после «Да» не буква и не цифра): «Да — слить», «да»,
 # «ДА.»; «Дальше», «Отложить», «Отмена», «No», «Нет — …», пустой — нет (решение Метиды «А», 15.10)
-MERGE_YES = re.compile(r"да(?![а-яёa-z])", re.I)
-MERGE_USED_FILE = os.path.join(STATE_DIR, "logs", "merge-consent-used.jsonl")
+MERGE_YES = re.compile(r"да(?!\w)", re.I)  # после «Да» — не буква и не цифра: «Да1» — не согласие
+MERGE_MARK_DIR = os.path.join(STATE_DIR, "merge-consent")  # отметки использованных согласий: файл на каждое
 MERGE_AMBIGUOUS = "\0два направления"
 # согласия, которые использует этот вызов: в журнал они попадают, только если весь вызов разрешён (main)
 PENDING_CONSENT = []
@@ -2695,10 +2697,11 @@ def owner_consent(qid, number, repos):
     любой ответ, кроме «Да…», — не согласие. Ответов на этот id и PR несколько — решает последний. Любой сбой — отказ:
     файл не читается, время записи не разобрать, запись из будущего."""
     try:
-        with open(os.path.join(STATE_DIR, "owner-log", "zeus.md"), encoding="utf-8") as fh:
+        fd = os.open(os.path.join(STATE_DIR, "owner-log", "zeus.md"), os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, encoding="utf-8") as fh:
             text = fh.read()
     except (OSError, ValueError):
-        return None, None, "журнал ответов владельца owner-log/zeus.md не читается"
+        return None, None, "журнал ответов владельца owner-log/zeus.md не читается (или это симлинк)"
     own = re.compile(r"вопрос: \[" + re.escape(qid) + r"\]", re.I)
     now, found = time.time(), []
     heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
@@ -2739,75 +2742,103 @@ def owner_consent(qid, number, repos):
     return top[0][2], top[0][3], None
 
 
-def _consent_conflict(text, rec):
-    """Журнал использованных согласий: "other" — это «да» уже использовал другой вызов, "same" — уже записал этот же
-    вызов (guard стоит и хуком плагина, и строгим хуком окна: оба видят один tool_use_id), False — не использовано,
-    None — журнал не разобрать."""
-    same = False
-    for ln in text.splitlines():
-        if not ln.strip():
-            continue
-        try:
-            old = json.loads(ln)
-        except ValueError:
-            return None
-        if not isinstance(old, dict):
-            return None
-        if all(old.get(k) == rec[k] for k in ("id", "entry", "repo", "pr")):
-            if rec["tool_use_id"] and old.get("session") == rec["session"] and old.get("tool_use_id") == rec["tool_use_id"]:
-                same = True
-                continue
-            return "other"
-    return "same" if same else False
+def _mark_path(rec):
+    """Отметка использованного согласия: файл с именем sha256(id, entry, repo, pr) в STATE_DIR/merge-consent/."""
+    key = json.dumps([rec["id"], rec["entry"], rec["repo"], rec["pr"]], ensure_ascii=False)
+    return os.path.join(MERGE_MARK_DIR, hashlib.sha256(key.encode("utf-8")).hexdigest())
 
 
-def _consent_used(rec):
-    if not os.path.lexists(MERGE_USED_FILE):
-        return False
+def _mark_dir_state():
+    """Папка отметок: True — настоящая папка, False — её нет, None — симлинк или не папка (тогда отказ)."""
     try:
-        with open(MERGE_USED_FILE, encoding="utf-8") as fh:
-            return _consent_conflict(fh.read(), rec)
+        st = os.lstat(MERGE_MARK_DIR)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    return True if stat.S_ISDIR(st.st_mode) else None
+
+
+def _mark_read(path, rec):
+    """Прочитать отметку без перехода по симлинку: "same" — её поставил этот же вызов (session_id и tool_use_id:
+    guard стоит и хуком плагина, и строгим хуком окна), "other" — другой вызов, None — не читается или не разобрать."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, encoding="utf-8") as fh:
+            old = json.load(fh)
     except (OSError, ValueError):
         return None
+    if not isinstance(old, dict) or any(old.get(k) != rec[k] for k in ("id", "entry", "repo", "pr")):
+        return None
+    if rec["tool_use_id"] and old.get("session") == rec["session"] and old.get("tool_use_id") == rec["tool_use_id"]:
+        return "same"
+    return "other"
+
+
+def _mark_state(rec):
+    """До отметки (в merge_problem): False — согласие не использовано, "same"/"other" — см. _mark_read, None — сбой."""
+    d = _mark_dir_state()
+    if d is None:
+        return None
+    path = _mark_path(rec)
+    if not d or not os.path.lexists(path):
+        return False
+    return _mark_read(path, rec)
+
+
+def _mark_create(rec):
+    """Поставить отметку атомарно: временный файл (O_EXCL|O_NOFOLLOW) → fsync → os.link в окончательное имя. link
+    падает с EEXIST, если отметка уже есть, и второй вызов никогда не видит полупустой файл. → None (поставлена или
+    уже стоит от этого же вызова) или текст отказа."""
+    used = ("это «да» владельца на [{}] уже использовано: одно «да» — одно слияние, нужен новый вопрос окном. "
+            .format(rec["id"]) + MERGE_PROTECT)
+    broken = "отметку использованного согласия в ~/.local/state/pantheon/merge-consent/ не {}. " + MERGE_OWNER
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        try:
+            os.mkdir(MERGE_MARK_DIR, 0o700)
+        except FileExistsError:
+            pass
+        if not _mark_dir_state():
+            return broken.format("поставить: папка — симлинк или не папка")
+        final = _mark_path(rec)
+        tmp = os.path.join(MERGE_MARK_DIR, f".tmp-{os.getpid()}-{os.urandom(8).hex()}")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            try:
+                os.write(fd, json.dumps(rec, ensure_ascii=False).encode("utf-8"))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            try:
+                os.link(tmp, final)
+                return None
+            except FileExistsError:
+                state = _mark_read(final, rec)
+                if state == "same":
+                    return None
+                return used if state == "other" else broken.format("прочитать (симлинк или не разбирается)")
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass  # временный файл остался — решение уже принято по os.link
+    except OSError:
+        return broken.format("поставить")
 
 
 def commit_consent(event, tool, tool_input):
-    """Записать использованные согласия (одноразовость, metis-0038). Пишет только сам хук, когда весь вызов
-    разрешён; роли в ~/.local/state/pantheon не пишут (pantheon-acl). Запись не удалась — отказ."""
-    if not PENDING_CONSENT:
-        return None
-    refuse = ("Правило push: gh pr merge — журнал использованных согласий ~/.local/state/pantheon/logs/"
-              "merge-consent-used.jsonl не {}, поэтому одноразовость «да» не проверить. " + MERGE_OWNER)
-    try:
-        import fcntl
-        os.makedirs(os.path.dirname(MERGE_USED_FILE), exist_ok=True)
-        fd = os.open(MERGE_USED_FILE, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)  # хук плагина и строгий хук окна идут параллельно
-            os.lseek(fd, 0, os.SEEK_SET)
-            chunks = []
-            while True:
-                b = os.read(fd, 65536)
-                if not b:
-                    break
-                chunks.append(b)
-            text = b"".join(chunks).decode("utf-8")
-            new = []
-            for rec in PENDING_CONSENT:
-                c = _consent_conflict(text, rec)
-                if c is None:
-                    return refuse.format("разбирается")
-                if c == "other":
-                    return ("Правило push: gh pr merge — это «да» владельца уже использовано: одно «да» — одно "
-                            "слияние, нужен новый вопрос окном. " + MERGE_PROTECT)
-                if not c:
-                    new.append(rec)
-            if new:
-                os.write(fd, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in new).encode("utf-8"))
-        finally:
-            os.close(fd)
-    except (OSError, ValueError, ImportError):
-        return refuse.format("пишется")
+    """Отметить использованные согласия (одноразовость, metis-0038), только когда весь вызов разрешён. Перед
+    отметкой согласие сверяется заново: запись окна должна быть той же, что при проверке, иначе zeus.md изменился
+    между проверкой и отметкой. Пишет только сам хук; роли в ~/.local/state/pantheon не пишут (pantheon-acl)."""
+    for rec, (qid, number, tails) in PENDING_CONSENT:
+        entry, repo, why = owner_consent(qid, number, set(tails))
+        if why or entry != rec["entry"] or repo != rec["repo"]:
+            return ("Правило push: gh pr merge — журнал ответов владельца изменился между проверкой и отметкой "
+                    f"согласия на [{qid}]. Повтори слияние. " + MERGE_PROTECT)
+        why = _mark_create(rec)
+        if why:
+            return "Правило push: gh pr merge — " + why
     return None
 
 
@@ -2969,20 +3000,22 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
         if not subjects or None in ids or len(ids) != 1:
             return f"{what} — только с --subject \"[metis-NNNN] …\" (id вопроса владельцу). {MERGE_PROTECT}"
         qid = ids.pop()
-        entry, repo, why = owner_consent(qid, numbers[0], {_repo_tail(r) for r in cmd_repos})
+        tails = sorted({_repo_tail(r) for r in cmd_repos})
+        entry, repo, why = owner_consent(qid, numbers[0], set(tails))
         if why:
             return f"на {what} {why}. {MERGE_PROTECT}"
         event = event or {}
         rec = {"id": qid, "entry": entry, "repo": repo, "pr": numbers[0], "used": time.strftime("%Y-%m-%d %H:%M:%S"),
                "session": event.get("session_id") or "", "tool_use_id": event.get("tool_use_id") or ""}
-        used = _consent_used(rec)
+        used = _mark_state(rec)
         if used is None:
-            return ("журнал использованных согласий ~/.local/state/pantheon/logs/merge-consent-used.jsonl не "
-                    "читается, поэтому одноразовость «да» не проверить. " + MERGE_OWNER)
-        if used == "other" or any(all(p[k] == rec[k] for k in ("id", "entry", "repo", "pr")) for p in PENDING_CONSENT):
+            return ("отметка использованного согласия в ~/.local/state/pantheon/merge-consent/ не читается (симлинк "
+                    "или не разбирается), поэтому одноразовость «да» не проверить. " + MERGE_OWNER)
+        if used == "other" or any(all(p[k] == rec[k] for k in ("id", "entry", "repo", "pr"))
+                                  for p, _ in PENDING_CONSENT):
             return (f"это «да» владельца на [{qid}] уже использовано: одно «да» — одно слияние, нужен новый вопрос "
                     f"окном. {MERGE_PROTECT}")
-        PENDING_CONSENT.append(rec)
+        PENDING_CONSENT.append((rec, (qid, numbers[0], tails)))
     return None
 
 
