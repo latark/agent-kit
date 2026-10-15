@@ -28,6 +28,11 @@ send-keys и т. п. — ввод от имени владельца), попо�
 - **управляемые настройки** `/Library/Application Support/ClaudeCode/managed-settings.json` (SEC-28) —
   главные запреты и хук guard, которые не перебить настройками проекта и модами.
 
+Границы песочницы, а не guard: `python3 -c "…os.system(base64.b64decode(…))"` guard не ловит (что делает программа
+изнутри, он не видит); «прочитай .env» держат правила `Read(.env)`, `Read(.env.local)`, `Read(.env.*.local)`,
+`Read(secrets/**)` в managed-settings.json, которые Claude Code вливает в denyRead песочницы (тест — `test_canaries.py`).
+Grep штаба по `.git` держит только песочница, guard — нет.
+
 Находку проверки безопасности по разбору Bash разбираем как «ошибка агента или граница песочницы», а не как
 новый раунд поиска обходов.
 
@@ -254,4 +259,6 @@ remote, cwd не репозиторий или без remote, журнал пр�
 
     python3 -I tests/test_guard.py        # правила, карта прав, привилегии, protect-config, режимы и журнал сбоев
     python3 -I tests/test_merge_gate.py   # запор слияния: журнал проверок, pantheon review, Д3 — по случаю на тест
+    python3 -I tests/test_canaries.py     # канарейки ролей: скачать-и-выполнить, base64 в шелл, eval — deny; правила Read(.env*)
+    python3 -I tests/test_hooks_json.py   # onFailure=block на PreToolUse guard и pantheon
     python3 -I tests/test_shell_diff.py   # живая сверка разбора Bash с настоящими zsh и bash (~1 мин)
