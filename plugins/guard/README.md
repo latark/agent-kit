@@ -261,4 +261,5 @@ remote, cwd не репозиторий или без remote, журнал пр�
     python3 -I tests/test_merge_gate.py   # запор слияния: журнал проверок, pantheon review, Д3 — по случаю на тест
     python3 -I tests/test_canaries.py     # канарейки ролей: скачать-и-выполнить, base64 в шелл, eval — deny; правила Read(.env*)
     python3 -I tests/test_hooks_json.py   # onFailure=block на PreToolUse guard и pantheon
+    python3 -I tests/test_tg_self.py     # tg-secret не трогает файлы самого плагина guard в любой копии, но не шире
     python3 -I tests/test_shell_diff.py   # живая сверка разбора Bash с настоящими zsh и bash (~1 мин)
