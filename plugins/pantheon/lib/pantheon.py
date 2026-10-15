@@ -1363,7 +1363,9 @@ MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
 # позвал бы своих dev-*, навык audit — general-purpose. В deny окна — только жёсткие границы, не нужные и лидам.
 # Координатору — ещё свои лиды (из реестра). Explore — только чтение: без него координатор читает код в свой контекст
 # (CTX-09); веба через него не больше, чем через prometheus и лидов. clio зовут Зевс и mnemo-brain (роль clio).
-HQ_AGENTS = ["prometheus", "clio", "chiron", "Explore"]
+# momus — ревизор навыка audit (metis-0095, решение владельца 15.10): только чтение и веб, пишет лишь свой отчёт в
+# ~/ai/knowledge/Inbox. Координаторам его нет — без отдельного слова владельца.
+HQ_AGENTS = ["prometheus", "clio", "chiron", "momus", "Explore"]
 COORDINATOR_AGENTS = ["argus", "talos", "prometheus", "Explore"]
 COORDINATOR_EXTRA_AGENTS = {"mnemo-brain": ["clio"]}
 # Skill — навык с context: fork идёт субагентом своего agent: мимо инструмента Agent (Claude Code 2.1.292)
