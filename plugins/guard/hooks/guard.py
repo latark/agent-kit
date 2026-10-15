@@ -3068,7 +3068,9 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
         # лид — только своего направления: имя роли собирает pantheon roles build из имени направления
         short = name.split("-", 1)[1] if name and name != MERGE_AMBIGUOUS and "-" in name else None
         if not short or lead_role not in {f"{b}-{short}" for b in MERGE_LEADS}:
-            return (f"{lead_role} — не лид направления этой сессии ({name if short else 'направление не установлено'}): "
+            where = (name if short else f"у направления {name} нет лидов по имени" if name and name != MERGE_AMBIGUOUS
+                     else "направление не установлено")
+            return (f"{lead_role} — не лид направления этой сессии ({where}): "
                     "лид сливает только PR своего направления. " + MERGE_CLOSED)
     # лид получает права Метиды только как лид metis-pantheon: папка из её [coordinators], которую реестр по ошибке
     # отдал другому направлению, лиду того направления защиты не открывает
