@@ -26,8 +26,31 @@ paths = ["~/ai/knowledge/me", "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.g
 [sandbox_write]
 themis-sources = ["~/.cache/expert-corpus"]
 
-# Кто сам сливает свои PR в main командой gh pr merge (правило push, DONE-07): роль domain-coordinator, запущенная
-# в одной из этих папок, и только в них. Без --admin и -R; прямой push в main закрыт. Тесты и вердикт argus guard
-# не видит — их проверяет роль (metis-0027, «да» владельца 15.10).
+# gh pr merge (правило push, metis-0038, guard 0.5.0): сливает главная сессия domain-coordinator в папках своего
+# направления из domains.json. Защиты — папки [coordinators] metis-pantheon и их репозитории (git remote; клон
+# agent-kit в другой папке — тоже защиты) — только Метида по «да» владельца в окне вопросов Зевса. Вопрос:
+# «[metis-NNNN] Слить https://github.com/latark/agent-kit/pull/N?», слияние: gh pr merge N --subject
+# "[metis-NNNN] …". Одно «да» — одно слияние: отметки использованных — в ~/.local/state/pantheon/merge-consent/.
+# Без этого файла или без непустого списка metis-pantheon слияние закрыто всем. Подробно — README guard, раздел
+# «Слияние PR».
+#
+# Совместимость: свои папки теперь берутся из domains.json, [merge] больше не нужен. Его папки по-прежнему
+# добавляются к папкам направления (ключ — имя направления, значение — список).
 [merge]
 themis-sources = ["~/projects/expert-corpus", "~/projects/legal-watch"]
+
+# Включение: новая схема слияния включается этой таблицей (даже пустой). Без неё — как в 0.4.7: свои папки сливают
+# только направления из [merge]; режим защит и проверки сбоев действуют и без неё.
+# Продукт для клиентов: направление → папки. guard пропускает слияние так же, как во внутреннем режиме, а в тексте
+# отказа напоминает о большем: проверку talos, строку Зевсу «что ушло» и откат одной командой в STATUS guard
+# проверить не может — это обязанность координатора.
+[merge_client]
+athena-brokerassistant = ["~/projects/brokerAssistantApp"]
+hermes-alex = ["~/projects/alexbroker"]
+
+# Чужой репозиторий в gh pr merge -R / --repo — только из этого списка (owner/repo на github.com) и только для
+# координатора этого направления: сессия Фемиды стоит в legal-watch, а сливает и PR expert-corpus (themis-0015).
+# У Метиды любой -R требует того же согласия, что и защиты (вопрос — с ссылкой на этот PR). -R на репозиторий
+# защит — это слияние защит, даже если он есть в списке другого направления.
+[merge_repos]
+themis-sources = ["latark/expert-corpus"]
