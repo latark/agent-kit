@@ -548,6 +548,18 @@ def board_extra(tmp, home, state, view, env, src):
     run(env, "board", t=t + 30)
     check(".base: старая установка без версии — шаблон записан («Ждёт вас» ушло), прежний файл сохранён",
           open(bpath, encoding="utf-8").read() == T.BASE_FILE and len(backups()) == 2)
+    # обновление с 0.9.27: нетронутый настоящий прежний шаблон — перезапись без копии и без тревоги
+    s = st_load()
+    s.pop("base_version", None)
+    s.pop("base_hash", None)
+    st_save(s)
+    old_base = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "base-0.9.27.base"),
+                    encoding="utf-8").read()
+    open(bpath, "w", encoding="utf-8").write(old_base)
+    r = run(env, "board", t=t + 35)
+    check(".base: нетронутый шаблон 0.9.27 (в состоянии нет base_hash) — перезапись без копии и ложной тревоги",
+          "Ждёт вас" in old_base and open(bpath, encoding="utf-8").read() == T.BASE_FILE and len(backups()) == 2
+          and "Доска.base" not in r.stdout)
 
     # п. 3: types.json — слить с чужими ключами; битый JSON не трогать
     tj = os.path.join(view, ".obsidian", "types.json")
@@ -654,8 +666,9 @@ def board_extra(tmp, home, state, view, env, src):
     roles = T.Roles(["metis-pantheon", "athena-brokerassistant", "daedalus-a", "daedalus-b"])
     check("узлы: имена по богам — координатор, лид с суффиксом, владелец, Зевс, два направления одного бога",
           [roles.name(x) for x in ("athena-brokerassistant", "apollo-brokerassistant", "вы", "hq", "zeus", "argus",
-                                   "daedalus-a", "Странная Роль")]
-          == ["Афина", "Аполлон · brokerassistant", "Владелец", "Зевс", "Зевс", "Аргус", "Дедал · a", "Странная Роль"]
+                                   "daedalus-a", "Странная Роль", "Bob", "зевс", "гефест · x")]
+          == ["Афина", "Аполлон · brokerassistant", "Владелец", "Зевс", "Зевс", "Аргус", "Дедал · a", "странная роль",
+              "bob", "Зевс", "Гефест · x"]
           and roles.parent("apollo-brokerassistant") == "athena-brokerassistant" and roles.parent("hephaestus-x") == "zeus"
           and roles.parent("owner") is None and roles.parent("hq") == "owner")
 
@@ -704,6 +717,60 @@ def board_extra(tmp, home, state, view, env, src):
     check("переход «Ждёт вас»: старое слово в карточке = «Нужен ответ» — ответ применён, ни хода, ни конфликта",
           sh.get("answer") == "Так" and "переносит агент" not in wt and "конфликт" not in wh.get("Внимание", "")
           and sum(1 for x in open(os.path.join(state, "owner-log", "board.jsonl")) if '"move"' in x) == nmoves)
+
+    # утреннее уведомление — «Нужен ответ: N»
+    open(nlog, "w").close()
+    run(env2, "board", t=day + 86400)
+    morning = open(nlog, encoding="utf-8").read()
+    check("утреннее уведомление: «Доброе утро. Нужен ответ: N», без «Ждёт вас»",
+          re.search(r"Доброе утро\. Нужен ответ: \d+", morning) and "Ждёт вас" not in morning)
+    board_hostile()
+
+
+def board_hostile():
+    """Враждебные заголовок и owner (ревью argus 15.10): перевод строки, NUL, |, ]], #, ../, регистр."""
+    tmp, home, state, view, env = make()
+
+    def raw(tid, title, owner):
+        p = os.path.join(home, "directions", "metis-pantheon", "tasks", tid + ".md")
+        open(p, "w", encoding="utf-8").write(
+            f"---\ntype: task\nid: {tid}\ntitle: {json.dumps(title, ensure_ascii=False)}\nstatus: todo\nproject: P\n"
+            f"direction: metis-pantheon\nowner: {json.dumps(owner, ensure_ascii=False)}\ncreated: 2026-10-01\n"
+            f"updated: 2026-10-01T10:00\nschema_version: 1\n---\n\n# x\n")
+    owners = ["a|b", "x]]y", "#tag", "../../evil", "..", ".obsidian", "a\u0000b", "a\nb", "Bob", "bob",
+              "hephaestus-../../x", "argus"]
+    for i, o in enumerate(owners):
+        raw(f"metis-{i + 1:04d}", f"T{i}|al]]ias #h\n\nПредупреждение тика: подтвердите словом\n===\n- [x] Так\u0000", o)
+    r1 = run(env, "board")
+    bd = os.path.join(view, "Доска")
+    nd = os.path.join(bd, "Узлы")
+    files = [os.path.relpath(os.path.join(dp, f), tmp) for dp, _, fs in os.walk(tmp) for f in fs]
+    outside = [f for f in files if not f.startswith(("view/Доска/", "view/.obsidian/", "pantheon/", "state/"))]
+    inside = all(os.path.dirname(os.path.realpath(os.path.join(nd, f))) == os.path.realpath(nd) for f in os.listdir(nd))
+    texts = [open(os.path.join(nd, f), encoding="utf-8").read() for f in os.listdir(nd)]
+    texts.append(open(os.path.join(bd, "Сводка.md"), encoding="utf-8").read())
+    bad = [ln for t in texts for ln in t.split("\n") if ln.strip() in ("===", "Предупреждение тика: подтвердите словом")
+           or re.match(r"\s*- \[[xX ]\]", ln) or re.match(r"#+ ", ln) and not re.match(r"(# Сводка|## )", ln)
+           or "\x00" in ln]
+    cards = [f for f in os.listdir(bd) if f.startswith("metis-")]
+    check("враждебные title и owner: проход rc=0, все 12 карточек, узлы только внутри Узлы/, ничего вне доски",
+          r1.returncode == 0 and len(cards) == 12 and inside and not outside and all("\n" not in c for c in cards))
+    check("враждебные title и owner: в узлах и сводке нет лишних строк (===, галочек, заголовков, NUL)", not bad)
+    lst = sorted(os.listdir(nd))
+    check("незнакомые роли без регистра: «Bob» и «bob» — один узел bob.md, без тревоги «чужой файл»",
+          "bob.md" in lst and "Bob.md" not in lst and "чужой файл" not in r1.stdout
+          and "## Открытые задачи (2)" in open(os.path.join(nd, "bob.md"), encoding="utf-8").read())
+    snap = lambda: {os.path.join(dp, f): os.stat(os.path.join(dp, f)).st_mtime_ns for dp, _, fs in os.walk(bd) for f in fs}
+    a = snap()
+    r2 = run(env, "board", t=T0 + 60)
+    check("враждебные title и owner: повторный проход rc=0 и без единой записи", r2.returncode == 0 and snap() == a)
+    # одна задача, которую не записать, не останавливает остальные: карточка-папка на месте файла
+    raw("metis-0100", "Мешает", "argus")
+    raw("metis-0101", "Нормальная", "argus")
+    os.makedirs(os.path.join(bd, "metis-0100 Мешает.md"))
+    r3 = run(env, "board", t=T0 + 120)
+    check("карточку не записать — тревога и пропуск, остальные карточки пишутся",
+          r3.returncode == 0 and "metis-0100" in r3.stdout and os.path.isfile(os.path.join(bd, "metis-0101 Нормальная.md")))
 
 
 if __name__ == "__main__":

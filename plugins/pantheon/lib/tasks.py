@@ -664,15 +664,26 @@ def label_of(head):
     return LABELS.get(st, st)
 
 
+CONTROL_RE = re.compile(r"[\s\x00-\x1f\x7f\x85  ]+")  # переводы строк, NUL и прочие управляющие, пробелы
+
+
+def one_line(s):
+    """Одна строка без управляющих знаков: перевод строки в имени файла или ссылке рвал строку узла (там появлялся
+    заголовок «===»), NUL в пути валил весь проход доски (ревью argus 15.10)."""
+    return CONTROL_RE.sub(" ", str(s or "")).strip()
+
+
 def card_name(head, with_id=None):
     """Имя файла карточки: у задачи «<id> <заголовок>», у заявки направлению и узла — без id."""
     with_id = bool(head.get("type") == "task" and head.get("id")) if with_id is None else with_id
-    title = str(head.get("title") or head.get("id"))
-    if with_id and title != str(head.get("id")):
-        title = f"{head['id']} {title}"
+    title = one_line(head.get("title") or head.get("id"))
+    if with_id and title != one_line(head.get("id")):
+        title = f"{one_line(head['id'])} {title}"
     name = title.replace(":", "꞉").replace("/", "⁄")  # похожие знаки, допустимые в имени
     name = re.sub(r'[\\*?"<>|#^\[\]]', "·", name)[:90].strip()
-    return name or str(head.get("id"))
+    # с точки или «_» — скрытый файл: доска его не видит, а «..» — не имя
+    name = name.lstrip("._ ").strip()
+    return name or one_line(head.get("id")).lstrip("._ ") or "—"
 
 
 # --- заметки-узлы ролей: «Кому» на карточке ссылается на узел, узлы связаны в дерево до «Владелец» ---------------
@@ -696,7 +707,7 @@ class Roles:
 
     @staticmethod
     def slug(s):
-        return re.sub(r"\s+", " ", str(s or "")).strip().lower()
+        return one_line(s).lower()
 
     def name(self, s):
         low = self.slug(s)
@@ -704,8 +715,14 @@ class Roles:
             return OWNER_NODE
         first, _, rest = low.partition("-")
         god = GODS.get(first)
-        if not god:  # незнакомый — сам слаг как есть
-            return card_name({"title": re.sub(r"\s+", " ", str(s or "")).strip() or "—"}, with_id=False)
+        if not god:
+            # незнакомый — слаг в нижнем регистре: файловая система Mac регистр не различает, «Bob» и «bob» — один
+            # узел. Совпал с именем бога («зевс», «гефест · x») — это узел бога, а не второй файл с тем же именем
+            n = card_name({"title": low or "—"}, with_id=False)
+            for g in set(GODS.values()) | {OWNER_NODE}:
+                if n == g.lower() or n.startswith(g.lower() + " · "):
+                    return g + n[len(g):]
+            return n
         if not rest or (low in self.directions and first not in self.shared):
             return god
         return card_name({"title": f"{god} · {rest}"}, with_id=False)
@@ -773,7 +790,8 @@ def attention(head, t, conflict=None):
 def _one(v):
     """Поле шапки в карточку — одной строкой: в кавычках "…" JSON раскрывает \\n, а строка «- [x] вариант» с начала
     строки читается тиком как ваш ответ (находка проверки безопасности 15.10). Начало «- [» тоже гасим."""
-    text = re.sub(r"\s*[\r\n\u2028\u2029]+\s*", " ", str(v)).strip()
+    text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f\x85]", " ", str(v))  # NUL \u0438 \u043f\u0440\u043e\u0447\u0438\u0435 \u0443\u043f\u0440\u0430\u0432\u043b\u044f\u044e\u0449\u0438\u0435 \u2014 \u0442\u043e\u0436\u0435 \u0432 \u043f\u0440\u043e\u0431\u0435\u043b
+    text = re.sub(r"\s*[\r\n\u2028\u2029]+\s*", " ", text).strip()
     return "\\" + text if re.match(r"[-*+]\s*\[", text) else text
 
 
@@ -1079,6 +1097,9 @@ views:
     order: [file.name, note.Статус, note.Внимание, note.Приоритет, note.Кому, note.Срок, note.Дальше, note.Создана, note.Закрыта]
 """
 BASE_VERSION = hashlib.sha256(BASE_FILE.encode("utf-8")).hexdigest()[:12]  # сменился шаблон — тик перепишет Доска.base
+# sha256[:16] шаблонов BASE_FILE до 0.9.28 (c616683 — 0.9.27, 7be0aa5 — раньше): тогда в состоянии не было base_hash,
+# и нетронутый старый файл иначе считался бы правкой владельца. Дальше то, что записал тик, помнит base_hash
+OLD_BASE_HASHES = {"917c6bef26511e65", "44467393293d25f4"}
 
 
 OWNER_ONLY_FIELDS = ("answer", "requested")  # ставит только доска: ответ владельца и выбор по рискованному
@@ -1124,7 +1145,7 @@ def _live(head, t):
 
 
 def _plain(text):
-    return re.sub(r"[\[\]|<>`]", "·", str(text or ""))
+    return re.sub(r"[\[\]|<>`]", "·", one_line(text))  # одной строкой: перевод строки рвал бы список сводки
 
 
 def _summary(tasks, t, inbox=None, names=None):
@@ -1141,7 +1162,7 @@ def _summary(tasks, t, inbox=None, names=None):
         if h.get("due") and h["due"] < today and h.get("status") not in ("done", "dropped"):
             rows["overdue"].append(f"{name} · срок {h['due']}")
         if h.get("status") == "doing":
-            rows["doing"].append(f"{name} · {h.get('owner') or '—'}")
+            rows["doing"].append(f"{name} · {_plain(h.get('owner')) or '—'}")
         if h.get("status") == "done" and (h.get("updated") or "") >= now_iso(t - 86400):
             rows["done"].append(name)
     sec = lambda title, xs: f"## {title} ({len(xs)})\n\n" + ("\n".join(f"- {x}" for x in xs) if xs else "—") + "\n"
@@ -1304,39 +1325,48 @@ def _sync_nodes(board, state, roles, tasks, names, slugs, alert):
     """Узлы в Доска/Узлы/: свои (хеш в состоянии) переписывает и удаляет; чужой файл с тем же именем и узел, который
     владелец правил, при удалении не трогает."""
     d = os.path.join(board, NODES_DIR)
-    old = state.get("nodes") or {}
+    # имена сравниваются без регистра: файловая система Mac его не различает («Bob.md» и «bob.md» — один файл)
+    old = {k.casefold(): v for k, v in (state.get("nodes") or {}).items()}
     mine = {}
     for n, text in node_texts(roles, tasks, names, slugs).items():
         p = os.path.join(d, n + ".md")
+        if os.path.dirname(os.path.abspath(p)) != os.path.abspath(d):  # страховка: имя узла не выводит из Узлы/
+            alert(f"board-node-path-{_sha(n)}", "1", f"доска: имя узла «{n[:60]}» не по образцу — пропущен", "board")
+            continue
         try:
-            with open(p, encoding="utf-8") as fh:
-                cur = fh.read()
-        except FileNotFoundError:
-            cur = None
-        except (OSError, UnicodeDecodeError):
-            cur = ""
-        if cur == text:
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    cur = fh.read()
+            except FileNotFoundError:
+                cur = None
+            except (OSError, UnicodeDecodeError):
+                cur = ""
+            if cur == text:
+                mine[n] = _sha(text)
+                continue
+            if cur is not None and n.casefold() not in old:
+                alert(f"board-node-{n}", _sha(cur), f"доска: в Доска/{NODES_DIR}/ лежит чужой файл «{n}.md» — узел "
+                                                    f"роли не записан; переименуйте или удалите файл", "board")
+                continue
+            _write_plain(p, text)
             mine[n] = _sha(text)
-            continue
-        if cur is not None and n not in old:
-            alert(f"board-node-{n}", _sha(cur), f"доска: в Доска/{NODES_DIR}/ лежит чужой файл «{n}.md» — узел роли "
-                                                f"не записан; переименуйте или удалите файл", "board")
-            continue
-        _write_plain(p, text)
-        mine[n] = _sha(text)
+        except (OSError, ValueError, UnicodeError) as e:  # один битый узел не останавливает проход
+            alert(f"board-node-{_sha(n)}", type(e).__name__, f"доска: узел «{n[:60]}» не записать ({e}) — пропущен",
+                  "board")
+    kept = {m.casefold() for m in mine}
     for f in (sorted(os.listdir(d)) if os.path.isdir(d) else []):
         n = f[:-3]
-        if not f.endswith(".md") or n in mine or n not in old:
+        if not f.endswith(".md") or n.casefold() in kept or n.casefold() not in old:
             continue
         p = os.path.join(d, f)
         try:
             with open(p, encoding="utf-8") as fh:
                 cur = fh.read()
             head, _ = split(cur)
+            if _sha(cur) == old[n.casefold()] and (head or {}).get("type") == "узел":
+                os.remove(p)  # узел ушедшей роли; правленный владельцем — оставляем
         except (OSError, UnicodeDecodeError, HeaderError):
             continue
-        if _sha(cur) == old[n] and (head or {}).get("type") == "узел":
-            os.remove(p)  # узел ушедшей роли; правленный владельцем — оставляем
     if mine or "nodes" in state:
         state["nodes"] = mine
 
@@ -1353,7 +1383,8 @@ def _sync_base(board, state, state_path, t, alert):
     if cur is not None and state.get("base_version") == BASE_VERSION:
         return
     new = BASE_FILE.encode("utf-8")
-    if cur is not None and cur != new and _sha(cur) != state.get("base_hash"):
+    # нетронутый прежний шаблон (у 0.9.27 и раньше в состоянии нет base_hash) — не правка владельца
+    if cur is not None and cur != new and _sha(cur) != state.get("base_hash") and _sha(cur) not in OLD_BASE_HASHES:
         keep = os.path.join(os.path.dirname(os.path.abspath(state_path)),
                             f"board-base-{datetime.fromtimestamp(t).strftime('%Y%m%d-%H%M%S')}.base")
         os.makedirs(os.path.dirname(keep), exist_ok=True)
@@ -1597,7 +1628,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         items.append((cid, card_name({"title": it["title"], "id": cid}, with_id=False), it["path"], None, None))
         slugs[cid] = it["direction"]
     for cid, name, src, h, b in items:
-        if name in names.values():
+        if name.casefold() in {x.casefold() for x in names.values()}:  # Mac: «Bob.md» и «bob.md» — один файл
             name = f"{name} ({cid})"
         names[cid] = name
         st = cards.setdefault(cid, {})
@@ -1619,15 +1650,19 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         old = present.get(cid)
         if old and (digest(old[0]) != seen.get(cid) or cid in typing):
             continue  # владелец правит карточку прямо сейчас — следующий проход
-        if old and old[0] != target:
-            os.remove(old[0])  # задачу переименовали
-        new_text = join(card, cbody, CARD_ORDER)
-        cur = ""
-        if os.path.exists(target):
-            with open(target, encoding="utf-8") as fh:
-                cur = fh.read()
-        if cur != new_text:
-            write(target, card, cbody, CARD_ORDER)
+        try:  # одна битая задача не останавливает проход: тревога, остальные карточки пишутся
+            if old and old[0] != target:
+                os.remove(old[0])  # задачу переименовали
+            new_text = join(card, cbody, CARD_ORDER)
+            cur = ""
+            if os.path.exists(target):
+                with open(target, encoding="utf-8") as fh:
+                    cur = fh.read()
+            if cur != new_text:
+                write(target, card, cbody, CARD_ORDER)
+        except (OSError, ValueError, UnicodeError) as e:
+            alert(f"board-card-{cid}", type(e).__name__, f"доска: карточку {cid} не записать ({e}) — пропущена", "board")
+            continue
         prev = norm_label(st.get("synced"))
         if (card["Статус"] == HUMAN_WAIT and prev != HUMAN_WAIT and not first_run and cid not in moved_by_owner):
             events.append((f"❓ Вопрос к вам: {h.get('title') if h else name}", cid))
@@ -1658,7 +1693,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     if hour >= QUIET_HOURS[1] and state.get("digest_day") != today:
         state["digest_day"] = today
         if rows["wait"] or rows["overdue"] or rows["inbox"]:
-            notify(f"Доброе утро. Ждёт вас: {len(rows['wait'])}, просрочено: {len(rows['overdue'])}, "
+            notify(f"Доброе утро. {HUMAN_WAIT}: {len(rows['wait'])}, просрочено: {len(rows['overdue'])}, "
                    f"входящих заявок: {len(rows['inbox'])}.", card_url(vault, "Сводка"), "digest")
     elif events and not night:
         if len(events) == 1:
