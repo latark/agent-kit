@@ -42,14 +42,15 @@ MERGE_PRODUCT = ("Продукт для клиентов сливай после
                  "SHA, строка в сводке «что ушло» со ссылкой owner/repo#N и откатом (`pantheon alert`), затем "
                  "gh pr merge N --match-head-commit <SHA>.")
 MERGE_PROTECT = ("Защиты сливает только Метида или её лид через запор: тесты и «принять» от argus на этот SHA, "
-                 "gh pr merge N --match-head-commit <SHA>; PR, который задевает ядро защит (merge_gate.py, "
-                 "protect_config.py, managed-settings.json), сливает только владелец кнопкой (Д3).")
+                 "gh pr merge N --match-head-commit <SHA>; PR, который задевает ядро защит (весь "
+                 "plugins/guard/), сливает только владелец кнопкой (Д3).")
 MERGE_OWNER = "Слияние делает владелец."
 MERGE_AMBIGUOUS = "\0два направления"
 MERGE_CORE = "ядро защит — только кнопка владельца (Д3)"
 # ядро защит (Д3): эти файлы агенты не сливают — гарантия, что запор не ослабит сам себя
 CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_config.py",
               "plugins/guard/managed-settings.json")
+CORE_DIR = "plugins/guard"  # и весь плагин guard (metis-0092): код, тесты, README, настройки
 GH_TIMEOUT = 6
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 REPO_RE = re.compile(r"[a-z0-9_.-]+/[a-z0-9_.-]+")
@@ -440,6 +441,14 @@ def _gh_json(args):
         return None
 
 
+def _is_core(path, core_files):
+    """Ядро (metis-0092, решение владельца 15.10): весь plugins/guard/ без учёта регистра и отдельные файлы вне него."""
+    p = path.strip("/").casefold()
+    while p.startswith("./"):
+        p = p[2:].lstrip("/")
+    return p in core_files or p == CORE_DIR or p.startswith(CORE_DIR + "/")
+
+
 def _core_problem(repo, pr, sha):
     """Д3: PR защит, который задевает ядро, — только кнопка владельца. Файлы — из REST pulls/N/files (там есть
     status и previous_filename: переименование ядра не прячет старый путь). Ответа gh нет, список файлов неполон,
@@ -463,7 +472,7 @@ def _core_problem(repo, pr, sha):
     if not isinstance(head, str) or head.lower() != sha:
         return f"{MERGE_CORE}: PR сейчас на другом коммите ({head}), а не на {sha}"
     core = {c.casefold() for c in CORE_FILES}
-    hit = [p for p in paths if p.strip("/").casefold() in core]
+    hit = [p for p in paths if _is_core(p, core)]
     if hit:
         return f"{MERGE_CORE}: PR задевает {', '.join(hit)}"
     return None
