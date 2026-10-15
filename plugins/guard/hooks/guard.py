@@ -2574,14 +2574,14 @@ def owner_consent(qid):
     (plugins/pantheon/lib/pantheon.py; guard ставится отдельным плагином и его не импортирует). Запись пишет хук
     answer плагина pantheon с пометкой «· окно вопросов»; свободный текст («· окно вопросов, свой текст») и
     галочка на доске (board.jsonl) — не согласие. Ответ, который начинается с «Нет» или «Не », — не согласие.
-    Файл не читается — согласия нет."""
+    Ответов на один id несколько — решает последний по времени. Файл не читается — согласия нет."""
     try:
         with open(os.path.join(STATE_DIR, "owner-log", "zeus.md"), encoding="utf-8") as fh:
             text = fh.read()
     except (OSError, ValueError):
         return False
     own = re.compile(r"вопрос: \[" + re.escape(qid) + r"\]", re.I)
-    now = time.time()
+    now, found = time.time(), []
     heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
     for i, m in enumerate(heads):
         if m.group(2).strip() != "· окно вопросов":
@@ -2596,9 +2596,11 @@ def owner_consent(qid):
         if not own.match(body):
             continue
         answer = next((ln[len("ответ:"):].strip() for ln in body.split("\n")[1:] if ln.startswith("ответ:")), None)
-        if answer and not re.match(r"не(?:т|(?![а-яёa-z0-9]))", answer, re.I):
-            return True
-    return False
+        found.append((t, bool(answer) and not re.match(r"не(?:т|(?![а-яёa-z0-9]))", answer, re.I)))
+    # ответов на один id несколько — решает последний: владелец мог передумать. Ответы в одну секунду — согласие,
+    # только если все они «да»
+    last = max((t for t, _ in found), default=None)
+    return last is not None and all(ok for t, ok in found if t == last)
 
 
 def _merge_args(args):

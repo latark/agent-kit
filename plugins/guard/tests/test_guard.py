@@ -75,6 +75,11 @@ def write_zeus(home):
         (300, " · окно вопросов", "вопрос: Слить то, что в [metis-0043]?\nответ: Да"),
         (200, " · окно вопросов", "вопрос: [athena-0001] Слить сайт?\nответ: Да"),
         (100, "", "да, [metis-0045] сливай"),
+        # несколько ответов на один id — решает последний по времени заголовка, а не по месту в файле
+        (3600, " · окно вопросов", "вопрос: [metis-0046] Слить guard?\nответ: Нет — сливаю сам"),
+        (7200, " · окно вопросов", "вопрос: [metis-0046] Слить guard?\nответ: Да"),
+        (7200, " · окно вопросов", "вопрос: [metis-0047] Слить guard?\nответ: Нет — сливаю сам"),
+        (3600, " · окно вопросов", "вопрос: [metis-0047] Слить guard?\nответ: Да"),
     ]
     with open(os.path.join(home, ".local/state/pantheon/owner-log/zeus.md"), "w") as fh:
         fh.write("".join(f"## {stamp(ago)}{note}\n{body}\n\n" for ago, note, body in entries))
@@ -553,6 +558,10 @@ def main():
          B('gh pr merge 5 --subject "[metis-0041] x"')),
         ("защиты: ответ «Нет — сливаю сам» — отказ", "deny", ak, "domain-coordinator", False,
          B('gh pr merge 5 --subject "[metis-0042] x"')),
+        ("защиты: «да», потом «Нет — сливаю сам» — отказ", "deny", ak, "domain-coordinator", False,
+         B('gh pr merge 5 --subject "[metis-0046] x"')),
+        ("защиты: «Нет», потом «Да» — можно", MERGE_OK, ak, "domain-coordinator", False,
+         B('gh pr merge 5 --subject "[metis-0047] x"')),
         ("защиты: чужой id (в журнале 0038, в subject 0039) — отказ", "deny", ak, "domain-coordinator", False,
          B('gh pr merge 5 --subject "[metis-0039] x"')),
         ("защиты: id в теле без «вопрос: [id]» — отказ", "deny", ak, "domain-coordinator", False,
