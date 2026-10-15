@@ -2691,7 +2691,10 @@ def owner_consent(qid, number, repos):
             return None, None, f"запись {m.group(1)} на [{qid}] — из будущего"
         if t < now - MERGE_CONSENT_AGE:
             continue
-        answer = next((ln[len("ответ:"):].strip() for ln in body.split("\n")[1:] if ln.startswith("ответ:")), None)
+        # ответ — только вторая строка тела: хук пишет «вопрос:», затем «ответ:», а ниже «заметка:» — многострочный
+        # текст владельца, где «ответ: Да» может стоять своей строкой
+        lines = body.split("\n")
+        answer = lines[1][len("ответ:"):].strip() if len(lines) > 1 and lines[1].startswith("ответ:") else None
         # «да» — только на вопрос ровно об одном PR: одно «да» на два PR — не ответ ни на один
         found.append((t, bool(answer) and not MERGE_NO.match(answer) and len(refs) == 1, m.group(1), mine[0]))
     if not found:
