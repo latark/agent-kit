@@ -7,6 +7,7 @@ COST-04, TOOL-04 на временных папках. Claude Code подмен�
 список из файла, остальные вызовы пишутся в журнал (запуски не настоящие).
 """
 import json
+import shutil
 import os
 import subprocess
 import sys
@@ -347,7 +348,16 @@ def test_owner_logs_daily():
     open(os.path.join(d, "gone.md"), "w").write(f"## {old}\nтолько старое\n\n")
     e.board("x-0001", T0 - 40 * 86400)
     e.board("x-0002", T0 - 86400)
+    os.makedirs(e.st("logs"), exist_ok=True)
+    hl = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(T0 - 3600))
+    open(e.st("logs", "ctx-hooks.log"), "w").write(f"{hl} owner-log пропуск: agent_type=''\n")
     e.run("watch", t=T0)
+    check("хуки контекста" not in e.alerts(), "тревога на пояснения в ctx-hooks.log")
+    with open(e.st("logs", "ctx-hooks.log"), "a") as fh:
+        fh.write(f"{hl} start KeyError: 'x'\n")
+    os.remove(e.st("watch-daily"))
+    e.run("watch", t=T0)
+    check("хуки контекста: сбоев за сутки 1" in e.alerts(), "сбой хука без тревоги")
     text = open(p).read()
     check("старое" not in text and "свежее" in text, f"уборка журнала: {text}")
     check(not os.path.exists(os.path.join(d, "gone.md")), "пустой журнал не удалён")
@@ -469,6 +479,53 @@ def test_owner_log_shrink_and_u2028():
     os.remove(p)
     e.run("watch", t=T0 + 2 * 86400)
     check("x.md пропал" in e.alerts(), "пропажа журнала не замечена")
+
+
+def test_security_0100():
+    """Проверка безопасности 0.10.0: git в копии роли не исполняет конфигурацию; pause --off не выходит из pauses/;
+    из сессии Claude метку и ручную паузу без вашей строки не снять; saved — только имя сессии."""
+    e = Env()
+    folder = e.direction("g-dir")
+    shutil.rmtree(os.path.join(folder, ".git"))
+    g = lambda *a, cwd=folder: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd,
+                                              capture_output=True, text=True, env=dict(os.environ, HOME=e.home))
+    g("init", "-q", "-b", "main")
+    g("commit", "-q", "--allow-empty", "-m", "x")
+    for n in ("w-ok", "w-bad"):
+        g("worktree", "add", "-q", "-b", n, os.path.join(folder, ".claude", "worktrees", n))
+    pwn = os.path.join(e.tmp, "pwned")
+    bad = os.path.join(folder, ".claude", "worktrees", "w-bad")
+    # роль подменяет указатель .git своей копии на собственный каталог git с исполняемым fsmonitor
+    evil = os.path.join(bad, "evil.git")
+    subprocess.run(["cp", "-R", os.path.join(folder, ".git", "worktrees", "w-bad"), evil])
+    open(os.path.join(evil, "commondir"), "w").write(os.path.join(folder, ".git") + "\n")
+    open(os.path.join(evil, "config.worktree"), "w").write(f"[core]\n\tfsmonitor = touch {pwn}\n")
+    open(os.path.join(bad, ".git"), "w").write(f"gitdir: {evil}\n")
+    g("config", "extensions.worktreeConfig", "true")
+    old = T0 - 3 * 86400
+    for n in ("w-ok", "w-bad"):
+        os.utime(os.path.join(folder, ".claude", "worktrees", n), (old, old))
+    e.run("watch", t=T0)
+    check(not os.path.exists(pwn), "git исполнил fsmonitor из копии роли")
+    check(not os.path.exists(os.path.join(folder, ".claude", "worktrees", "w-ok")), "чистая слитая копия не убрана")
+    check(os.path.exists(bad), "копия с исполняемой конфигурацией убрана")
+    # pause --off не выходит из pauses/
+    open(e.st("maintenance.json"), "w").write("{}")
+    r = e.run("pause", "--off", "../maintenance", t=T0)
+    check(r.returncode == 2 and os.path.exists(e.st("maintenance.json")), "pause --off удалил файл вне pauses/")
+    os.remove(e.st("maintenance.json"))
+    # из сессии Claude без роли — нужна ваша строка
+    e.run("pause", "g-dir", "--reason", "manual", t=T0)
+    e.run("stop", "g-dir", t=T0)
+    cl = {"CLAUDECODE": "1"}
+    r = e.run("resume", "g-dir", t=T0 + 10, extra=cl)
+    check(r.returncode == 1 and os.path.exists(e.st("stopped", "g-dir")), "сессия Claude сняла метку без вашего слова")
+    r = e.run("pause", "--off", "g-dir", t=T0 + 10, extra=cl)
+    check(r.returncode == 1 and os.path.exists(e.st("pauses", "g-dir.json")), "сессия Claude сняла ручную паузу")
+    r = e.run("pause", "--off", "g-dir", t=T0 + 10)
+    check(r.returncode == 0 and not os.path.exists(e.st("pauses", "g-dir.json")), "терминал не снял паузу")
+    r = e.run("saved", "--by", "../x", t=T0 + 10)
+    check(r.returncode != 0 and not os.path.exists(e.st("maintenance", "../x.json")), "saved с путём в имени")
 
 
 def test_tick_subcommands():

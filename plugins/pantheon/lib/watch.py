@@ -311,8 +311,29 @@ def swap(agents, t):
             if att else "; открытых claude attach / claude agents нет"), "watch")
 
 
+# Дежурный работает вне песочницы, а worktree пишут роли: git в ней не должен исполнять чужое из конфигурации
+# (core.fsmonitor, хуки, фильтры clean/process; проверка безопасности 0.10.0). fsmonitor и хуки выключены всегда;
+# прочее исполняемое из конфигурации репозитория — повод не трогать копию (unsafe_config).
+GIT_SAFE = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false"]
+GIT_EXEC_KEY = re.compile(r"(filter|diff|merge)\.[^\n]+\.(clean|smudge|process|textconv|command|driver)|"
+                          r"core\.(fsmonitor|hookspath|sshcommand|gitproxy|pager|editor|askpass|attributesfile)|"
+                          r"(credential|uploadpack|receivepack|gpg|sequence|protocol|alias|include|includeif)\..*")
+
+
 def _git(*args, timeout=30):
-    return subprocess.run(["git", *args], capture_output=True, text=True, timeout=timeout)
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+    return subprocess.run(["git", *GIT_SAFE, *args], capture_output=True, text=True, timeout=timeout, env=env)
+
+
+def unsafe_config(wt):
+    """Исполняемые ключи из конфигурации самого репозитория (не вашей глобальной), которую git прочтёт в этой копии, —
+    ровно та, что увидит git status: по указателю .git копии, с include. Не прочиталась — тоже нельзя."""
+    r = _git("-C", wt, "config", "--list", "--show-scope", "--name-only", "--includes")
+    if r.returncode not in (0, 1):
+        return "конфигурация git не читается"
+    bad = sorted({k for sc, _, k in (ln.partition("\t") for ln in r.stdout.splitlines())
+                  if sc in ("local", "worktree") and GIT_EXEC_KEY.fullmatch(k.lower())})
+    return ", ".join(bad) or None
 
 
 def _base_ref(root):
@@ -357,9 +378,10 @@ def worktrees(agents, registry, doms, t):
                 head = re.search(r"^HEAD ([0-9a-f]{40})$", block, re.M)
                 branch = re.search(r"^branch refs/heads/(.+)$", block, re.M)
                 short = wt.replace(P.HOME, "~")
-                if age > WORKTREE_CLEAN_HOURS and head and "locked" not in block:
+                if age > WORKTREE_CLEAN_HOURS and head and "locked" not in block and not unsafe_config(wt):
                     base = base or _base_ref(root)
-                    clean = _git("-C", wt, "status", "--porcelain").stdout.strip() == ""
+                    st = _git("-C", wt, "status", "--porcelain")
+                    clean = st.returncode == 0 and st.stdout.strip() == ""
                     merged = bool(base) and _git("-C", root, "merge-base", "--is-ancestor", head.group(1),
                                                  base).returncode == 0
                     if clean and merged:
@@ -483,7 +505,17 @@ def pause(rest, who):
     """pantheon pause <имя>|--all --reason limit|swap|manual ["почему"]  |  pantheon pause --off [<имя>|--all]"""
     if rest[:1] == ["--off"]:
         target = rest[1] if len(rest) > 1 else "--all"
-        names = list(pauses()) if target == "--all" else ["_all" if target == "_all" else target]
+        if target not in ("--all", "_all") and not P.SESSION_NAME.fullmatch(target):
+            print("pantheon pause --off [<имя>|--all]", file=P.sys.stderr)
+            return 2
+        names = list(pauses()) if target == "--all" else [target]
+        # вашу паузу (manual) снимает ваше слово, как и метку «остановлено вами»; лимит и swap — кто угодно
+        mine = [n for n in names if (pauses().get(n) or {}).get("reason") == "manual"]
+        if mine and not owner_word_ok():
+            print("pantheon pause --off: ручную паузу снимает только слово владельца — в журнале Зевса нет его строки "
+                  f"за {P.OWNER_WORD_WINDOW // 60} мин", file=P.sys.stderr)
+            P.alert(f"pantheon pause --off {target} от {who} отклонён: нет свежего слова владельца", "pantheon-stop")
+            return 1
         gone = []
         for n in names:
             with contextlib.suppress(FileNotFoundError):
@@ -891,6 +923,9 @@ def _old_json(line, edge_iso):
         return False
 
 
+HOOK_FAIL = re.compile(r"\b[A-Z]\w*(?:Error|Exception|Exit)\b: |без доставки")
+
+
 def hook_log(t):
     p = P.path("logs", "ctx-hooks.log")
     try:
@@ -901,9 +936,10 @@ def hook_log(t):
     recent = 0
     with contextlib.suppress(OSError):
         for ln in open(p, encoding="utf-8", errors="replace"):
-            recent += ln[:16] >= since and bool(re.match(r"\d{4}-\d\d-\d\d", ln))
+            # в журнале и пояснения (пропуск, сверка по транскрипту) — тревога только на сбой хука и недоставленный текст
+            recent += ln[:16] >= since and bool(re.match(r"\d{4}-\d\d-\d\d", ln)) and bool(HOOK_FAIL.search(ln))
     if recent:
-        P.alert_once("ctx-hooks-log", today(t), f"хуки контекста: записей в ctx-hooks.log за сутки {recent} — "
+        P.alert_once("ctx-hooks-log", today(t), f"хуки контекста: сбоев за сутки {recent} — "
                      "журнал ~/.local/state/pantheon/logs/ctx-hooks.log (Метиде)", "watch")
     if size > HOOK_LOG_MAX:
         data = open(p, "rb").read()[-HOOK_LOG_MAX // 2:]
@@ -974,10 +1010,15 @@ def _forget_autostart(name):
     P.write_atomic(P.path("autostart-reset", name), P.stamp() + "\n")
 
 
+CLAUDE_MARKS = ("PANTHEON_ROLE", "PANTHEON_SESSION", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
+
+
 def owner_word_ok():
-    """Снять метку «остановлено вами» — ваше слово: ваша сессия без роли или Зевс при вашей строке в его журнале
-    owner-log за последние 15 мин (как запуск --from zeus; ревью argus 15.10)."""
-    if not os.environ.get("PANTHEON_ROLE"):
+    """Снять метку «остановлено вами» или ручную паузу — ваше слово: команда из вашего терминала (не из сессии Claude)
+    или при вашей строке в журнале Зевса owner-log за 15 мин (как запуск --from zeus; ревью argus 15.10). По умолчанию —
+    нельзя: любой признак сессии Claude требует строки журнала (проверка безопасности 0.10.0). Убрать признаки из
+    окружения роль не может, не выйдя из своей строки excludedCommands, — а в песочнице состояние ей не записать."""
+    if not any(os.environ.get(k) for k in CLAUDE_MARKS):
         return True
     return P.owner_spoke_recently("zeus", P.OWNER_WORD_WINDOW)
 
@@ -985,7 +1026,7 @@ def owner_word_ok():
 def resume(rest, who):
     if not owner_word_ok():
         print("pantheon resume: снять метку можно только по слову владельца — в журнале Зевса нет его строки за "
-              f"{P.OWNER_WORD_WINDOW // 60} мин; попросите его сказать «верни …» или выполнить команду самому",
+              f"{P.OWNER_WORD_WINDOW // 60} мин; попросите его сказать Зевсу «верни …» или выполнить команду в своём терминале",
               file=P.sys.stderr)
         P.alert(f"pantheon resume {' '.join(rest)[:60]} от {who} отклонён: нет свежего слова владельца", "pantheon-stop")
         return 1
@@ -1166,6 +1207,9 @@ def saved_cmd(rest, who):
         return rest[rest.index(k) + 1] if k in rest and rest.index(k) + 1 < len(rest) else None
     name, state = opt("--by") or P.os.environ.get("PANTHEON_SESSION") or "", opt("--state") or ""
     own = P.os.environ.get("PANTHEON_SESSION")
+    if not P.SESSION_NAME.fullmatch(name):
+        print("pantheon saved --by <имя сессии> --state <путь>", file=P.sys.stderr)
+        return 2
     if own and name != own:
         print(f"pantheon saved: сессия {own} отмечает только себя, не {name}", file=P.sys.stderr)
         return 2
