@@ -59,12 +59,14 @@ PostToolUse (Bash:
   без аргумента — хук плагина; если управляемые настройки уже вызывают guard (--managed), он молчит, чтобы
                   проверка не шла дважды, — кроме Agent, Task и Skill: их управляемые настройки guard не передают;
   --managed     — хук из управляемых настроек: то же, что плагин;
-  --strict      — хук окна роли с onFailure: "block" (собирает `pantheon domains build`, SEC-29): любой сбой
-                  самого скрипта — выход 2, действие остановлено.
-При сбое (SEC-10): правила-подсказки (dev-server, attribution, cdp, nextjs) пропускают действие; проверка прав
-(domain, pantheon-acl, protect-config, private, cdp-role, push, terminal, hq-telegram, chiron) и tg-secret
-останавливают роль; сбой всего скрипта в вашей сессии
-пропускает действие, в окне роли — останавливает. Каждый сбой — строка в
+  --strict      — хук окна роли с onFailure: "block" (собирает `pantheon domains build`, SEC-29).
+При сбое (SEC-10, metis-0094) — во всех трёх режимах одинаково, обёртка run_hook: событие не JSON или не объект,
+исключение в проверке прав (domain, pantheon-acl, protect-config, private, cdp-role, push, terminal, hq-telegram,
+chiron) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
+stderr: Claude Code блокирует вызов на любой версии, и в вашей сессии тоже. PostToolUse (журнал запора слияния):
+код 2 только показывает причину агенту — команда уже выполнена. Исключения: правила-подсказки (dev-server,
+attribution, cdp, nextjs) при сбое пропускают к остальным проверкам; сбой на Stop — выход 0 (код 2 не дал бы
+закончить ход, сессия крутилась бы). Каждый сбой — строка в
 ~/.local/state/pantheon/logs/guard-failures.log (время, режим, место, тип ошибки — без текста команды);
 строка статуса показывает число сбоев за сутки.
 
@@ -74,6 +76,7 @@ PostToolUse (Bash:
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -84,6 +87,22 @@ MODE = "strict" if "--strict" in sys.argv[1:] else "managed" if "--managed" in s
 FAIL_LOG = os.path.join(HOME, ".local", "state", "pantheon", "logs", "guard-failures.log")
 MANAGED_FILE = "/Library/Application Support/ClaudeCode/managed-settings.json"
 MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks", "guard.py")
+
+
+DEADLINE = 8       # с: таймаут хука PreToolUse и PostToolUse — 10 с, а таймаут Claude Code пропускает вызов
+EVENT_NAME = None  # hook_event_name разобранного события: сбой на Stop не блокирует (run_hook)
+
+
+class HookFailure(Exception):
+    """Сбой с готовой причиной для stderr (metis-0094). logged — строка в журнал сбоев уже записана."""
+
+    def __init__(self, msg, logged=False):
+        super().__init__(msg)
+        self.logged = logged
+
+
+class HookTimeout(BaseException):
+    """Свой срок DEADLINE вышел. Не Exception: проверки с `except Exception` его не проглотят и не пойдут дальше."""
 
 
 def log_failure(where, e):
@@ -97,6 +116,29 @@ def log_failure(where, e):
             fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\t{MODE}\t{where}\t{type(e).__name__}:{line}\n")
     except Exception:
         pass
+
+
+def _load_crash(tp, e, tb):
+    """Сбой при загрузке самого guard (нет merge_gate.py, ошибка в модуле ядра) — до run_hook: тоже код 2 с причиной,
+    а не трассировка с кодом 1 (metis-0094). На Stop — код 0, как в run_hook."""
+    code = 2
+    try:
+        log_failure("load", e)
+        try:
+            ev = json.loads(sys.stdin.read() or "null")
+            if isinstance(ev, dict) and ev.get("hook_event_name") == "Stop":
+                code = 0
+        except Exception:
+            pass
+        sys.stderr.write(f"guard: сбой загрузки guard ({tp.__name__}) — действие остановлено. Сообщи координатору "
+                         "или владельцу: защита не загрузилась.\n")
+        sys.stderr.flush()
+    finally:
+        os._exit(code)
+
+
+if __name__ == "__main__":
+    sys.excepthook = _load_crash
 
 
 def managed_guard_active():
@@ -2937,16 +2979,13 @@ def check_window(event, tool, tool_input):
 
 
 def strict_window(check, event, tool, tool_input):
-    """Как strict, но сбой — отказ и в окне роли, где события без agent_type (фоновая сессия: PANTHEON_ROLE задан)."""
+    """Проверка окна (hq-telegram, chiron): сбой — блок кодом 2 в любой сессии, как strict (metis-0094)."""
     try:
         return check(event, tool, tool_input)
     except Exception as e:
         log_failure(check.__name__, e)
-        role, sub, _ = who(event)
-        if sub or is_pantheon_role(role) or window_role():
-            return (f"guard: сбой проверки прав ({type(e).__name__}) — действие остановлено. Повтори проще или "
-                    "сообщи координатору.")
-        return None
+        raise HookFailure(f"guard: сбой проверки окна {check.__name__} ({type(e).__name__}) — действие остановлено. "
+                          "Повтори проще или сообщи координатору.", logged=True) from e
 
 
 def check_roles(event, tool, tool_input):
@@ -2961,20 +3000,20 @@ def check_roles(event, tool, tool_input):
 
 
 def strict(check, event, tool, tool_input):
-    """Проверка прав: сбой самой проверки останавливает роль, а не пропускает запись (SEC-10)."""
+    """Проверка прав: сбой самой проверки — блок кодом 2 с причиной в stderr, в любой сессии, и у вас тоже (SEC-10,
+    metis-0094): запись не проходит мимо карты прав."""
     try:
         return check(event, tool, tool_input)
     except Exception as e:
         log_failure(check.__name__, e)
-        role, sub, _ = who(event)
-        if sub or is_pantheon_role(role):
-            return (f"guard: сбой проверки прав ({type(e).__name__}) — действие остановлено, чтобы запись не прошла "
-                    "мимо карты прав. Повтори проще (явные пути) или сообщи координатору.")
-        return None
+        raise HookFailure(f"guard: сбой проверки прав {check.__name__} ({type(e).__name__}) — действие остановлено, "
+                          "чтобы запись не прошла мимо карты прав. Повтори проще (явные пути) или сообщи "
+                          "координатору.", logged=True) from e
 
 
 def soft(check, *args):
-    """Правила-подсказки (dev-server, attribution, cdp, nextjs): их сбой пропускает действие."""
+    """Правила-подсказки (dev-server, attribution, cdp, nextjs): их сбой пропускает к остальным проверкам — это
+    подсказки, а не защита; сбой — строка в журнале сбоев."""
     try:
         return check(*args)
     except Exception as e:
@@ -2983,27 +3022,40 @@ def soft(check, *args):
 
 
 def hard(check, *args):
-    """tg-secret: сбой проверки останавливает действие (SEC-10)."""
+    """tg-secret: сбой проверки — блок кодом 2 (SEC-10, metis-0094)."""
     try:
         return check(*args)
     except Exception as e:
         log_failure(check.__name__, e)
-        return f"guard: сбой проверки tg-secret ({type(e).__name__}) — действие остановлено. Повтори проще."
+        raise HookFailure(f"guard: сбой проверки tg-secret ({type(e).__name__}) — действие остановлено. Повтори "
+                          "проще.", logged=True) from e
 
 
 def main():
+    global EVENT_NAME
     try:
         event = json.load(sys.stdin)
-    except ValueError:
-        if MODE == "plugin" and managed_guard_active():
-            return  # как раньше: хук плагина при управляемых настройках молчит, даже если события не разобрать
-        raise
+    except ValueError as e:  # и UnicodeDecodeError; при управляемых настройках хук плагина тоже не молчит
+        raise HookFailure("guard: событие хука не JSON — действие остановлено.") from e
     name = event.get("hook_event_name") if isinstance(event, dict) else None
+    if not isinstance(name, str):
+        raise HookFailure("guard: событие хука не разобрать (не объект JSON или нет hook_event_name) — действие "
+                          "остановлено.")
+    EVENT_NAME = name
+    if name == "Stop":
+        set_deadline(0)  # подсказка nextjs: у Stop свой таймаут 15 с, сбой не блокирует (run_hook)
     if name == "PostToolUse":
         # запись журнала запора слияния (P1-4): только хук плагина и без проверки управляемых настроек — они
-        # PostToolUse не вызывают; --managed и --strict PostToolUse не обрабатывают. PostToolUseFailure — ничего
+        # PostToolUse не вызывают; --managed и --strict PostToolUse не обрабатывают. PostToolUseFailure — ничего.
+        # Сбой записи — код 2: команда уже выполнена, Claude Code только показывает причину агенту (metis-0094)
         if MODE == "plugin" and "push" not in OFF:
-            soft(merge_gate.record, event)
+            try:
+                merge_gate.record(event)
+            except Exception as e:
+                log_failure("record", e)
+                raise HookFailure(f"guard: запись журнала запора слияния не сделана ({type(e).__name__}) — команда "
+                                  "выполнена, но её запись (тесты или вердикт) запор не увидит. Повтори команду или "
+                                  "сообщи координатору.", logged=True) from e
         return
     tool = event.get("tool_name") if name == "PreToolUse" else None
     if MODE == "plugin" and tool not in WINDOW_ONLY_TOOLS and managed_guard_active():
@@ -3050,14 +3102,56 @@ def main():
             print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
 
 
-if __name__ == "__main__":
+def _out_of_time(signum, frame):
+    raise HookTimeout(f"guard: проверка не уложилась в {DEADLINE} с — действие остановлено. Повтори проще или "
+                      "сообщи координатору.")
+
+
+def set_deadline(seconds):
+    """Свой срок раньше таймаута хука: таймаут Claude Code пропускает вызов, а свой — блок кодом 2. 0 — снять."""
+    if hasattr(signal, "setitimer"):
+        if seconds:
+            signal.signal(signal.SIGALRM, _out_of_time)
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+
+
+def failure_code(e):
+    """Код выхода и причина для stderr по сбою; строка в журнал сбоев, если её ещё нет."""
+    if not getattr(e, "logged", False):
+        log_failure("main", e.__cause__ if isinstance(e, HookFailure) and e.__cause__ else e)
+    if isinstance(e, (HookFailure, HookTimeout)):
+        why = str(e)
+    else:
+        why = (f"guard: сбой хука ({type(e).__name__}) — действие остановлено. Повтори проще (явные пути) или сообщи "
+               "координатору.")
+    if EVENT_NAME == "Stop":
+        # Stop: код 2 не даёт сессии закончить ход, а сбой, который не проходит, крутил бы её без конца. Здесь
+        # только подсказка nextjs — пропуск, сбой в журнале (metis-0094)
+        return 0, why + " (Stop: подсказка, пропуск)"
+    return 2, why
+
+
+def run_hook():
+    """Вход хука во всех режимах (metis-0094, как обёртка main в plugins/pantheon/hooks/agents.py). Любой сбой —
+    исключение, событие не JSON или не объект, свой срок DEADLINE — выход 2 с причиной в stderr: Claude Code
+    блокирует вызов на любой версии (onFailure: block — только с 2.1.295), а код 1 и таймаут пропустили бы его.
+    Исключение — сбой на Stop (failure_code). Не возвращается."""
+    code = 2
     try:
-        main()
-    except Exception as e:
-        log_failure("main", e)
-        if MODE == "strict":
-            # окно роли (SEC-29): сбой самой защиты — отказ, а не пропуск
-            print(f"guard: сбой проверки ({type(e).__name__}) — действие остановлено: в окне роли защита при сбое "
-                  "не пропускает. Повтори проще (явные пути) или сообщи координатору.", file=sys.stderr)
-            sys.exit(2)
-        sys.exit(0)
+        try:
+            set_deadline(DEADLINE)
+            main()
+            set_deadline(0)
+            sys.stdout.flush()
+            code = 0
+        except BaseException as e:  # noqa: B036 — любой сбой, и KeyboardInterrupt тоже, — блок, а не пропуск
+            set_deadline(0)
+            code, why = failure_code(e)
+            sys.stderr.write(why + "\n")
+            sys.stderr.flush()
+    finally:
+        os._exit(code)
+
+
+if __name__ == "__main__":
+    run_hook()
