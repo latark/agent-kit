@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
 
@@ -36,6 +37,14 @@ def setup(home):
         "athena-broker-2": ["~/projects/agent-kit/sub"],
         "themis-sources": ["~/projects/expert-corpus", "~/projects/legal-watch"],
     }}, open(os.path.join(home, ".local/state/pantheon/domains.json"), "w"))
+    # guard 0.5.0 (metis-0038): внутренняя папка Метиды вне защит и сайт брокера из [merge_client] вне domains.json
+    os.makedirs(os.path.join(home, "projects/other/tg-read-dev"), exist_ok=True)
+    os.makedirs(os.path.join(home, "projects/broker-landing"), exist_ok=True)
+    domains_file = os.path.join(home, ".local/state/pantheon/domains.json")
+    domains = json.loads(_read(domains_file))
+    domains["domains"]["metis-pantheon"].append("~/projects/other/tg-read-dev")
+    with open(domains_file, "w") as fh:
+        json.dump(domains, fh)
     # шаг 1.2: репозиторий брокера на ветке эпика, alexbroker — на main (правило push); личное в ~/ai/knowledge/me
     for repo, branch in (("projects/brokerAssistantApp", "epic-tax"), ("projects/alexbroker", "main"),
                          ("projects/expert-corpus", "main"), ("projects/legal-watch", "main")):
@@ -48,7 +57,31 @@ def setup(home):
         'always = ["~/.claude/agent-memory"]\n[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n'
         'mnemo-brain = ["~/ai/knowledge"]\n[agent_extra]\nprometheus = ["~/ai/knowledge"]\n'
         '[merge]\nthemis-sources = ["~/projects/expert-corpus", "~/projects/legal-watch"]\n'
-        '[merge_repos]\nthemis-sources = ["latark/expert-corpus"]\n')
+        '[merge_repos]\nthemis-sources = ["latark/expert-corpus"]\nmetis-pantheon = ["latark/tg-read"]\n'
+        '[merge_client]\nathena-broker = ["~/projects/brokerAssistantApp", "~/projects/broker-landing"]\n')
+    write_zeus(home)
+
+
+def write_zeus(home):
+    """Журнал ответов владельца в окне вопросов Зевса (так его пишет хук answer плагина pantheon). Время — от
+    текущего, чтобы тест не зависел от даты."""
+    now = time.time()
+    stamp = lambda ago: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - ago))
+    entries = [
+        (600, " · окно вопросов", "вопрос: [metis-0038] Слить guard 0.5.0?\nответ: Да — сливай"),
+        (25 * 3600, " · окно вопросов", "вопрос: [metis-0040] Слить вчерашнее?\nответ: Да"),
+        (500, " · окно вопросов, свой текст", "вопрос: [metis-0041] Слить?\nответ: Да"),
+        (400, " · окно вопросов", "вопрос: [metis-0042] Слить guard?\nответ: Нет — сливаю сам"),
+        (300, " · окно вопросов", "вопрос: Слить то, что в [metis-0043]?\nответ: Да"),
+        (200, " · окно вопросов", "вопрос: [athena-0001] Слить сайт?\nответ: Да"),
+        (100, "", "да, [metis-0045] сливай"),
+    ]
+    with open(os.path.join(home, ".local/state/pantheon/owner-log/zeus.md"), "w") as fh:
+        fh.write("".join(f"## {stamp(ago)}{note}\n{body}\n\n" for ago, note, body in entries))
+    # галочка на доске — для слияния защит не согласие
+    with open(os.path.join(home, ".local/state/pantheon/owner-log/board.jsonl"), "w") as fh:
+        fh.write(json.dumps({"kind": "answer", "id": "metis-0044", "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                             "question": "[metis-0044] Слить guard?", "answer": "Да"}, ensure_ascii=False) + "\n")
 
 
 def _read(path):
@@ -344,7 +377,10 @@ def main():
         ("push: argus — отказ", "deny", br, "argus", True, B("git -C . push origin x")),
         ("push: hq — отказ", "deny", ".", "hq", False, B("git push origin x")),
         ("push: cd и push без ветки — отказ", "deny", br, "domain-coordinator", False, B(f"cd {home}/{alex} && git push")),
-        ("push: gh pr merge — отказ", "deny", br, "domain-coordinator", False, B("gh pr merge 12 --merge")),
+        # до 0.5.0 здесь был отказ: Афины нет в [merge]. С 0.5.0 свои папки берутся из domains.json, и
+        # brokerAssistantApp — её продукт ([merge_client]): слияние открыто, talos и откат — обязанность роли
+        ("push: gh pr merge Афиной в своём продукте — можно (0.5.0)", MERGE_OK, br, "domain-coordinator", False,
+         B("gh pr merge 12 --merge")),
         ("push: ваша сессия в main — можно", "allow", alex, "", False, B("git push origin main")),
         ("push: git push внутри текста коммита — не отправка", "allow", br, "dev-sonnet", True,
          B("git commit -m 'не делать git push в main'")),
@@ -464,9 +500,106 @@ def main():
          B("gh pr merge 2 -tRelease")),
         ("merge -R: Фемида с GH_REPO — по-прежнему отказ", "deny", lw, "domain-coordinator", False,
          B("GH_REPO=latark/expert-corpus gh pr merge 2")),
-        ("merge: Афина (нет в [merge]) — отказ", "deny", br, "domain-coordinator", False, B("gh pr merge 1")),
+        ("merge: Афина без [merge] — можно: папки из domains.json (0.5.0)", MERGE_OK, br, "domain-coordinator", False,
+         B("gh pr merge 1")),
         ("merge: Фемида git push в main — по-прежнему отказ", "deny", ec, "domain-coordinator", False,
          B("git push origin main")),
+        # --- guard 0.5.0 (metis-0038): слияние по схеме владельца ---
+        # внутреннее: своё направление по domains.json
+        ("merge 0.5: Гермес в своей папке — можно", MERGE_OK, alex, "domain-coordinator", False, B("gh pr merge 4 --squash")),
+        ("merge 0.5: Гермес в чужой папке (cwd без cd) — отказ", "deny", alex, "domain-coordinator", False,
+         B("gh pr merge 4"), br),
+        ("merge 0.5: Гермес из своей папки с cd в чужую — отказ", "deny", alex, "domain-coordinator", False,
+         B(f"cd {home}/{br} && gh pr merge 4")),
+        ("merge 0.5: субагент Гермеса — отказ", "deny", alex, "hephaestus-alex", True, B("gh pr merge 4")),
+        # продукт: [merge_client] — пропуск так же, папка из [merge_client] вне domains.json — тоже
+        ("merge 0.5: Афина в brokerAssistantApp — можно", MERGE_OK, br, "domain-coordinator", False,
+         B("gh pr merge 7 --squash --delete-branch")),
+        ("merge 0.5: Афина в папке [merge_client] вне domains.json — можно", MERGE_OK, br, "domain-coordinator", False,
+         B("gh pr merge 7"), "projects/broker-landing"),
+        ("merge 0.5: субагент Афины в продукте — отказ", "deny", br, "hephaestus-broker", True, B("gh pr merge 7")),
+        ("merge 0.5: Гермес в продукте Афины — отказ", "deny", alex, "domain-coordinator", False, B("gh pr merge 7"), br),
+        ("merge 0.5: Гермес в [merge_client] Афины — отказ", "deny", alex, "domain-coordinator", False,
+         B("gh pr merge 7"), "projects/broker-landing"),
+        ("merge 0.5: Афина в продукте с --admin — отказ", "deny", br, "domain-coordinator", False,
+         B("gh pr merge 7 --admin")),
+        ("merge 0.5: Афина в продукте с --auto — можно (не защиты)", MERGE_OK, br, "domain-coordinator", False,
+         B("gh pr merge 7 --auto --squash")),
+        # кому слияние закрыто
+        ("merge 0.5: hq — отказ", "deny", ".", "hq", False, B("gh pr merge 1"), ak),
+        ("merge 0.5: мастерская — отказ", "deny", ws, "workshop", False, B("gh pr merge 1")),
+        ("merge 0.5: лид главной сессией — отказ", "deny", br, "hephaestus-broker", False, B("gh pr merge 1")),
+        ("merge 0.5: dev-opus — отказ", "deny", br, "dev-opus", True, B("gh pr merge 1")),
+        ("merge 0.5: argus — отказ", "deny", br, "argus", True, B("gh pr merge 1")),
+        ("merge 0.5: mnemo-brain в ~/ai/knowledge — отказ", "deny", "ai/knowledge", "domain-coordinator", False,
+         B("gh pr merge 1")),
+        # защиты: только Метида и только по «да» владельца в окне вопросов Зевса
+        ("защиты: Метида без согласия — отказ", "deny", ak, "domain-coordinator", False, B("gh pr merge 5 --squash")),
+        ("защиты: Метида с согласием и --subject — можно", MERGE_OK, ak, "domain-coordinator", False,
+         B('gh pr merge 5 --squash --subject "[metis-0038] guard 0.5.0"')),
+        ("защиты: Метида с согласием и -t — можно", MERGE_OK, ak, "domain-coordinator", False,
+         B('gh pr merge 5 -t "[metis-0038] guard 0.5.0"')),
+        ("защиты: Метида с согласием и --subject= — можно", MERGE_OK, ak, "domain-coordinator", False,
+         B('gh pr merge 5 "--subject=[metis-0038] guard 0.5.0"')),
+        ("защиты: Метида с согласием и склеенным -st — можно", MERGE_OK, ak, "domain-coordinator", False,
+         B('gh pr merge 5 "-st[metis-0038] guard 0.5.0"')),
+        ("защиты: Метида без номера (текущая ветка) с согласием — можно", MERGE_OK, ak, "domain-coordinator", False,
+         B('gh pr merge --squash --subject "[metis-0038] guard 0.5.0"')),
+        ("защиты: согласие старше суток — отказ", "deny", ak, "domain-coordinator", False,
+         B('gh pr merge 5 --subject "[metis-0040] x"')),
+        ("защиты: только галочка на доске — отказ", "deny", ak, "domain-coordinator", False,
+         B('gh pr merge 5 --subject "[metis-0044] x"')),
+        ("защиты: «окно вопросов, свой текст» — отказ", "deny", ak, "domain-coordinator", False,
+         B('gh pr merge 5 --subject "[metis-0041] x"')),
+        ("защиты: ответ «Нет — сливаю сам» — отказ", "deny", ak, "domain-coordinator", False,
+         B('gh pr merge 5 --subject "[metis-0042] x"')),
+        ("защиты: чужой id (в журнале 0038, в subject 0039) — отказ", "deny", ak, "domain-coordinator", False,
+         B('gh pr merge 5 --subject "[metis-0039] x"')),
+        ("защиты: id в теле без «вопрос: [id]» — отказ", "deny", ak, "domain-coordinator", False,
+         B('gh pr merge 5 --subject "[metis-0043] x"')),
+        ("защиты: id в словах владельца без окна вопросов — отказ", "deny", ak, "domain-coordinator", False,
+         B('gh pr merge 5 --subject "[metis-0045] x"')),
+        ("защиты: subject без [id] — отказ", "deny", ak, "domain-coordinator", False,
+         B('gh pr merge 5 --subject "guard 0.5.0"')),
+        ("защиты: id не metis (athena-0001) — отказ", "deny", ak, "domain-coordinator", False,
+         B('gh pr merge 5 --subject "[athena-0001] x"')),
+        ("защиты: id не в начале subject — отказ", "deny", ak, "domain-coordinator", False,
+         B('gh pr merge 5 --subject "guard [metis-0038]"')),
+        ("защиты: второй subject без id — отказ", "deny", ak, "domain-coordinator", False,
+         B('gh pr merge 5 -t "[metis-0038] guard" --subject "другое"')),
+        ("защиты: --auto с согласием — отказ", "deny", ak, "domain-coordinator", False,
+         B('gh pr merge 5 --auto --subject "[metis-0038] guard"')),
+        ("защиты: --admin с согласием — отказ", "deny", ak, "domain-coordinator", False,
+         B('gh pr merge 5 --admin --subject "[metis-0038] guard"')),
+        ("защиты: субагент dev-opus Метиды — отказ", "deny", ak, "dev-opus", True,
+         B('gh pr merge 5 --subject "[metis-0038] guard"')),
+        ("защиты: hephaestus-pantheon (субагент) — отказ", "deny", ak, "hephaestus-pantheon", True,
+         B('gh pr merge 5 --subject "[metis-0038] guard"')),
+        ("защиты: другой координатор в agent-kit — отказ", "deny", br, "domain-coordinator", False,
+         B('gh pr merge 5 --subject "[metis-0038] guard"'), ak),
+        ("защиты: реестр отдал agent-kit/sub Афине — отказ", "deny", br, "domain-coordinator", False,
+         B('gh pr merge 5 --subject "[metis-0038] guard"'), ak + "/sub"),
+        ("защиты: Метида с cd в agent-kit — отказ", "deny", ak, "domain-coordinator", False,
+         B(f'cd {home}/{ak} && gh pr merge 5 --subject "[metis-0038] guard"'), "projects/other/tg-read-dev"),
+        # Метида во внутренней папке: без -R — без согласия; любой -R — только с согласием
+        ("Метида внутреннее: без -R — можно без согласия", MERGE_OK, ak, "domain-coordinator", False,
+         B("gh pr merge 3 --squash"), "projects/other/tg-read-dev"),
+        ("Метида внутреннее: -R без согласия — отказ", "deny", ak, "domain-coordinator", False,
+         B("gh pr merge 3 -R latark/tg-read"), "projects/other/tg-read-dev"),
+        ("Метида внутреннее: -R из [merge_repos] с согласием — можно", MERGE_OK, ak, "domain-coordinator", False,
+         B('gh pr merge 3 -R latark/tg-read --subject "[metis-0038] tg-read"'), "projects/other/tg-read-dev"),
+        ("Метида внутреннее: -R agent-kit (нет в [merge_repos]) с согласием — отказ", "deny", ak, "domain-coordinator",
+         False, B('gh pr merge 3 -R latark/agent-kit --subject "[metis-0038] x"'), "projects/other/tg-read-dev"),
+        ("Метида внутреннее: -R с согласием и --auto — отказ", "deny", ak, "domain-coordinator", False,
+         B('gh pr merge 3 -R latark/tg-read --auto -t "[metis-0038] x"'), "projects/other/tg-read-dev"),
+        ("Метида внутреннее: -R с ответом «Нет…» — отказ", "deny", ak, "domain-coordinator", False,
+         B('gh pr merge 3 -R latark/tg-read -t "[metis-0042] x"'), "projects/other/tg-read-dev"),
+        ("Метида из tg-read-dev как папки запуска: -R без согласия — отказ", "deny", "projects/other/tg-read-dev",
+         "domain-coordinator", False, B("gh pr merge 3 -R latark/tg-read")),
+        ("Метида из tg-read-dev как папки запуска: -R с согласием — можно", MERGE_OK, "projects/other/tg-read-dev",
+         "domain-coordinator", False, B('gh pr merge 3 -R latark/tg-read -t "[metis-0038] x"')),
+        ("Фемида -R без согласия — можно (согласие только у Метиды)", MERGE_OK, lw, "domain-coordinator", False,
+         B("gh pr merge 2 -R latark/expert-corpus")),
         # --- dev-server: исключение для разработчика и talos в worktree (ROLE-23) ---
         ("dev-server: dev-sonnet в worktree — можно", "allow", br, "dev-sonnet", True, B("PORT=4123 pnpm dev"),
          br + "/.claude/worktrees/agent-1"),
@@ -490,11 +623,75 @@ def main():
         'themis-sources = ["~/projects/expert-corpus", "~/projects/legal-watch"]',
         'themis-sources = "~/projects/expert-corpus"')
     open(pol, "w").write(text)
-    got = run(home2, br, "domain-coordinator", "Bash", {"command": "gh pr merge 1"})
+    # 0.5.0: свои папки — из domains.json, поэтому проверка — на чужой папке: строка по буквам дала бы корень «/»
+    got = run(home2, ec, "domain-coordinator", "Bash", {"command": "gh pr merge 1"}, cwd=alex)
     ok = got == "deny"
     failed += not ok
     cases.append(None)
-    print(f"{'ok  ' if ok else 'FAIL'} merge: строка вместо списка в [merge] — отказ: {got}")
+    print(f"{'ok  ' if ok else 'FAIL'} merge: строка вместо списка в [merge] — чужая папка не открывается: {got}")
+    # [merge_client] строкой — то же
+    text = _read(pol) + '\n[merge_client]\nhermes-alex = "~/projects/alexbroker"\n'
+    text = text.replace('[merge_client]\nathena-broker = ["~/projects/brokerAssistantApp", "~/projects/broker-landing"]\n', "")
+    open(pol, "w").write(text)
+    got = run(home2, alex, "domain-coordinator", "Bash", {"command": "gh pr merge 1"}, cwd=br)
+    ok = got == "deny"
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} merge: строка вместо списка в [merge_client] — чужая папка не открывается: {got}")
+    # 0.5.0: тексты отказов — по режиму, с тем, что делать вместо
+    texts = {
+        "закрыто": run(home, br, "dev-opus", "Bash", {"command": "gh pr merge 1"}, sub=True, raw=True),
+        "внутреннее": run(home, alex, "domain-coordinator", "Bash", {"command": "gh pr merge 1 --admin"}, raw=True),
+        "продукт": run(home, br, "domain-coordinator", "Bash", {"command": "gh pr merge 1 --admin"}, raw=True),
+        "защиты": run(home, ak, "domain-coordinator", "Bash", {"command": "gh pr merge 1"}, raw=True),
+        "личное": run(home, "ai/knowledge", "domain-coordinator", "Bash", {"command": "gh pr merge 1"}, raw=True),
+    }
+    if MERGE_OK == "allow":
+        want = {"закрыто": ("gh pr create", "отчёте координатору"), "внутреннее": ("argus", "--admin"),
+                "продукт": ("talos", "Зевсу", "откат"), "защиты": ("окном вопросов", "--subject", "[metis-NNNN]"),
+                "личное": ("личному",)}
+        ok = all('"deny"' in texts[k] and all(w in texts[k] for w in ws) for k, ws in want.items()) \
+            and "talos" not in texts["внутреннее"]
+    else:  # без tomllib политика пуста: всем, кроме ролей, которым слияние закрыто, — отказ «политика не прочиталась»
+        ok = "gh pr create" in texts["закрыто"] and all("политика" in texts[k] for k in texts if k != "закрыто")
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} merge 0.5: тексты отказов по режиму (закрыто, внутреннее, продукт, защиты, личное)")
+    # нет zeus.md — согласия нет, отказ (а не сбой); нет policy.toml — отказ всем, даже Фемиде
+    home4 = os.path.realpath(tempfile.mkdtemp(prefix="guard-test-"))
+    setup(home4)
+    os.remove(os.path.join(home4, ".local/state/pantheon/owner-log/zeus.md"))
+    got = (run(home4, ak, "domain-coordinator", "Bash", {"command": 'gh pr merge 5 --subject "[metis-0038] x"'}),
+           run(home4, ak, "domain-coordinator", "Bash", {"command": "gh pr merge 3"}, cwd="projects/other/tg-read-dev"))
+    ok = got == ("deny", MERGE_OK)
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} защиты: нет zeus.md — отказ, внутреннее без -R — как было: {got}")
+    os.remove(os.path.join(home4, ".claude/pantheon/policy.toml"))
+    got = (run(home4, ec, "domain-coordinator", "Bash", {"command": "gh pr merge 1"}, raw=True),
+           run(home4, br, "domain-coordinator", "Bash", {"command": "gh pr merge 1"}, raw=True))
+    ok = all('"deny"' in x and "политика" in x for x in got)  # отказ по правилу, а не сбой скрипта
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} merge 0.5: нет policy.toml — отказ всем, текст про политику")
+    # второй subject без id — отказ по правилу (а не сбой на разборе)
+    out = run(home, ak, "domain-coordinator", "Bash",
+              {"command": 'gh pr merge 5 -t "[metis-0038] guard" --subject "другое"'}, raw=True)
+    ok = '"deny"' in out and ("только с --subject" in out or MERGE_OK == "deny")
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} защиты: два subject, второй без id — отказ с текстом про --subject")
+    # координатор из [private].coordinators, в чьей папке нет личного из [private].paths, — тоже не сливает
+    home5 = os.path.realpath(tempfile.mkdtemp(prefix="guard-test-"))
+    setup(home5)
+    pol = os.path.join(home5, ".claude", "pantheon", "policy.toml")
+    text = _read(pol) + '\n[private]\ncoordinators = ["mnemo-brain"]\npaths = ["~/ai/pantheon/.git/git-crypt"]\n'
+    open(pol, "w").write(text)
+    out = run(home5, "ai/knowledge", "domain-coordinator", "Bash", {"command": "gh pr merge 1"}, raw=True)
+    ok = '"deny"' in out and ("личному" in out or MERGE_OK == "deny")
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} merge 0.5: координатор из [private].coordinators — отказ про личное")
     # [merge_repos] строкой — -R закрыт (подстрока «latark/expert-corpus» не должна совпасть по буквам)
     home3 = os.path.realpath(tempfile.mkdtemp(prefix="guard-test-"))
     setup(home3)

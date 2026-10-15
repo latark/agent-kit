@@ -26,13 +26,25 @@ paths = ["~/ai/knowledge/me", "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.g
 [sandbox_write]
 themis-sources = ["~/.cache/expert-corpus"]
 
-# Кто сам сливает свои PR в main командой gh pr merge (правило push, DONE-07): роль domain-coordinator, запущенная
-# в одной из этих папок, и только в них. Без --admin и -R; прямой push в main закрыт. Тесты и вердикт argus guard
-# не видит — их проверяет роль (metis-0027, «да» владельца 15.10).
+# gh pr merge (правило push, metis-0038, guard 0.5.0): сливает главная сессия domain-coordinator в папках своего
+# направления из domains.json; защиты — папки [coordinators] metis-pantheon — только Метида по «да» владельца в окне
+# вопросов Зевса (--subject "[metis-NNNN] …"). Без этого файла слияние закрыто всем. Подробно — README guard,
+# раздел «Слияние PR».
+#
+# Совместимость: свои папки теперь берутся из domains.json, [merge] больше не нужен. Его папки по-прежнему
+# добавляются к папкам направления (ключ — имя направления, значение — список).
 [merge]
 themis-sources = ["~/projects/expert-corpus", "~/projects/legal-watch"]
 
-# Чужой репозиторий в gh pr merge -R / --repo — только из этого списка (owner/repo на github.com) и только той же
-# роли из [merge]: сессия Фемиды стоит в legal-watch, а сливает и PR expert-corpus (themis-0015, ответ владельца 15.10).
+# Продукт для клиентов: направление → папки. guard пропускает слияние так же, как во внутреннем режиме, а в тексте
+# отказа напоминает о большем: проверку talos, строку Зевсу «что ушло» и откат одной командой в STATUS guard
+# проверить не может — это обязанность координатора.
+[merge_client]
+athena-brokerassistant = ["~/projects/brokerAssistantApp"]
+hermes-alex = ["~/projects/alexbroker"]
+
+# Чужой репозиторий в gh pr merge -R / --repo — только из этого списка (owner/repo на github.com) и только для
+# координатора этого направления: сессия Фемиды стоит в legal-watch, а сливает и PR expert-corpus (themis-0015).
+# У Метиды любой -R требует того же согласия, что и защиты: guard узнаёт защиты по папке, а не по репозиторию.
 [merge_repos]
 themis-sources = ["latark/expert-corpus"]
