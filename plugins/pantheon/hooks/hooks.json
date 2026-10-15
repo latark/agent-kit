@@ -29,6 +29,26 @@
             "timeout": 15
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"${PANTHEON_STATE:-$HOME/.local/state/pantheon}/maintenance.json\"; [ -f \"$f\" ] || exit 0; exec python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" maint-post",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"${PANTHEON_STATE:-$HOME/.local/state/pantheon}/maintenance.json\"; [ -f \"$f\" ] || exit 0; exec python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" maint-pre",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -66,6 +86,16 @@
       }
     ],
     "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "d=\"${PANTHEON_STATE:-$HOME/.local/state/pantheon}/push\"; [ -d \"$d\" ] || exit 0; exec python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" push",
+            "asyncRewake": true,
+            "timeout": 60
+          }
+        ]
+      },
       {
         "hooks": [
           {

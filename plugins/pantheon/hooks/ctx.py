@@ -19,6 +19,13 @@
   ctx.py start       SessionStart: запоминает сессию процесса (CLAUDE_PID не меняется при /clear); после сжатия
                      кладёт файл состояния; штабу — новые строки alerts.md и сводку новых строк журналов.
   ctx.py dir-added   DirectoryAdded: штабу открыли папку через /add-dir — строка в alerts.md (SEC-26).
+  ctx.py maint-post  PostToolUse, пока стоит метка технического перезапуска (SCHED-15, <STATE>/maintenance.json):
+                     сессии из её списка, которая ещё не сохранилась, — один раз указание сохраниться и
+                     выполнить `pantheon saved`. Без метки python не запускается (проверка оболочкой в hooks.json).
+  ctx.py maint-pre   PreToolUse там же: сохранившаяся сессия (кроме Зевса) новых шагов не делает — пропуск только
+                     SendMessage, `pantheon saved` и `pantheon restart --status`.
+  ctx.py push        SessionStart, asyncRewake: после `claude respawn` будит сессию текстом из <STATE>/push/<sessionId>.txt
+                     (кладёт pantheon; один раз, не старше 30 мин, ≤ 4000 знаков, только с пометкой «[Пантеон:»).
   ctx.py rewake      SessionStart clear, asyncRewake: если файл состояния обновлён после вашего последнего
                      сообщения, будит Claude «прочитай и продолжай»; иначе /clear — обычный чистый лист.
 
@@ -48,7 +55,7 @@ UNCONFIRMED = os.path.join(OWNER_LOG, "unconfirmed")  # ввод без поме
 CTX = os.path.join(STATE, "ctx")
 AT = int(os.environ.get("PANTHEON_CTX_AT") or 150000)
 STEP = int(os.environ.get("PANTHEON_CTX_STEP") or 100000)
-KEEP_DAYS = 30            # журналы ваших слов
+KEEP_DAYS = 30            # записи процессов и метки подсказок (журналы ваших слов убирает дежурный)
 CONFIRM_WAIT = 30         # сколько owner-log ждёт запись ввода в транскрипте, с
 ENTRY_MAX_AGE = 180       # запись ввода в транскрипте не старше, с (иначе это чужой, прошлый ввод)
 IMAGE_MARK = re.compile(r"\[Image #\d+\]")
@@ -553,37 +560,6 @@ def read_log(path):
     return [(t, note, "\n".join(body).strip()) for t, note, body in out]
 
 
-def prune_owner_logs(now=None):
-    """Записи журналов старше 30 дней — раз в сутки. По карте это работа дежурного (шаг 1.4); пока его нет — хук."""
-    now = now or time.time()
-    mark = os.path.join(OWNER_LOG, ".pruned")
-    try:
-        if now - os.path.getmtime(mark) < 86400:
-            return
-    except OSError:
-        pass
-    private_dir(OWNER_LOG)
-    edge = stamp(now - KEEP_DAYS * 86400)
-    paths = [os.path.join(OWNER_LOG, n) for n in os.listdir(OWNER_LOG) if n.endswith(".md")]
-    if os.path.isdir(UNCONFIRMED):
-        paths += [os.path.join(UNCONFIRMED, n) for n in os.listdir(UNCONFIRMED) if n.endswith(".md")]
-    for path in paths:
-        with locked(path):
-            items = read_log(path)
-            keep = [x for x in items if x[0] >= edge]
-            if len(keep) == len(items):
-                continue
-            text = "".join("## %s%s\n%s\n\n" % (t, (" · " + note) if note else "", body) for t, note, body in keep)
-            tmp = path + ".tmp"
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-                f.write(text)
-            os.replace(tmp, path)
-    with open(mark, "w"):
-        pass
-    os.utime(mark, (now, now))
-
-
 def same_text(entry, prompt):
     """Запись транскрипта — это тот же ввод: текст совпадает целиком (пробелы и переводы строк не в счёт, метки
     вставленных картинок «[Image #N]» — тоже). Только точное равенство: по префиксу машинный промпт с тем же началом,
@@ -637,7 +613,6 @@ def cmd_owner_log(ev):
             append_owner_line(name, t, prompt, "вложение очереди уже засчитано", folder=UNCONFIRMED)
             return 0
         append_owner_line(name, queued[1], prompt, note)
-        prune_owner_logs()
         return 0
     if entry is None:
         # Подлинник — только подтверждённое: без пометки транскрипта строка уходит в unconfirmed/, Зевс её не сводит
@@ -659,7 +634,6 @@ def cmd_owner_log(ev):
             note = "принята подсказка Claude"
         t = iso_ts(entry.get("timestamp")) or t
     append_owner_line(name, t, prompt, note)
-    prune_owner_logs()
     return 0
 
 
@@ -872,6 +846,44 @@ def cmd_rewake(ev):
     return 2
 
 
+# --- текст сессии после claude respawn -------------------------------------------
+
+PUSH = os.path.join(STATE, "push")   # <sessionId>.txt кладёт pantheon перед `claude respawn <id>`
+PUSH_MAX_AGE = 1800                  # старше — не доставляется: перезапуск, ради которого его клали, давно прошёл
+PUSH_MAX = 4000
+PUSH_MARK = "[Пантеон:"              # с этой пометкой owner-log не примет текст за слова владельца (NOT_OWNER)
+
+
+def cmd_push(ev):
+    """SessionStart, asyncRewake: `claude respawn` возвращает сессию, но хода не начинает, а отправить ей текст из
+    CLI нечем. Файл забирается переименованием — два старта одной сессии не доставят его дважды."""
+    sid = ev.get("session_id") or ""
+    if ev.get("agent_id") or not re.fullmatch(r"[\w-]{1,100}", sid):
+        return 0
+    src = os.path.join(PUSH, sid + ".txt")
+    taken = "%s.taken.%d" % (src, os.getpid())
+    try:
+        os.rename(src, taken)
+    except OSError:
+        return 0
+    try:
+        age = time.time() - os.path.getmtime(taken)
+        with open(taken, encoding="utf-8", errors="replace") as f:
+            text = f.read().strip()
+    finally:
+        os.remove(taken)
+    if age > PUSH_MAX_AGE:
+        hook_log("push", "%s: файл старше %d мин — удалён без доставки (source=%s)" % (sid, PUSH_MAX_AGE // 60, ev.get("source")))
+        return 0
+    if not text.startswith(PUSH_MARK) or len(text) > PUSH_MAX:
+        hook_log("push", "%s: текст без «%s» в начале или длиннее %d — удалён без доставки" % (sid, PUSH_MARK, PUSH_MAX))
+        return 0
+    hook_log("push", "%s: доставлено (source=%s)" % (sid, ev.get("source")))
+    time.sleep(float(os.environ.get("PANTHEON_REWAKE_DELAY") or 1))  # как у rewake: пусть сессия дорисуется
+    print(text, file=sys.stderr)
+    return 2
+
+
 def hook_log(cmd, text):
     path = os.path.join(STATE, "logs", "ctx-hooks.log")
     try:
@@ -954,16 +966,109 @@ def cmd_answer(ev):
         if isinstance(extra, dict) and isinstance(extra.get("notes"), str) and extra["notes"].strip():
             line += "\nзаметка: " + extra["notes"].strip()
         append_owner_line(name, t, line, ANSWER_NOTE)
-    prune_owner_logs()
+    return 0
+
+
+# --- технический перезапуск (SCHED-15) ---------------------------------------------
+
+MAINT = os.path.join(STATE, "maintenance.json")
+MAINT_SAVED = os.path.join(STATE, "maintenance")   # <имя>.json — сессия сохранилась (пишет `pantheon saved`)
+# Пропуск у сохранившейся сессии: только эти команды целиком, без цепочек и подстановок оболочки
+MAINT_BASH_OK = re.compile(r"pantheon (?:saved|restart --status)(?:\s[^;&|`$()<>\n\r]*)?")
+
+
+def maint_mark():
+    """Метка перезапуска, если она стоит, читается и не истекла; иначе None."""
+    m = load_json(MAINT)
+    try:
+        if not isinstance(m, dict) or time.time() > float(m.get("expires") or 0):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return m if isinstance(m.get("sessions"), list) else None
+
+
+def session_name(ev):
+    """Имя сессии: переменная окна PANTHEON_SESSION, иначе реестр Claude Code ~/.claude/sessions/*.json по session_id."""
+    name = os.environ.get("PANTHEON_SESSION")
+    if name:
+        return name
+    sid = ev.get("session_id")
+    folder = os.path.join(HOME, ".claude", "sessions")
+    try:
+        files = os.listdir(folder)
+    except OSError:
+        return None
+    for n in files:
+        if n.endswith(".json"):
+            d = load_json(os.path.join(folder, n))
+            if sid and isinstance(d, dict) and d.get("sessionId") == sid and isinstance(d.get("name"), str):
+                return d["name"]
+    return None
+
+
+def maint_session(ev):
+    """(метка, имя, сохранилась ли) для сессии из списка перезапуска, иначе None. Уже перезапущенная
+    (`pantheon restart --go` кладёт <имя>.done) — None: метка может стоять ради других сессий."""
+    m = maint_mark()
+    if not m:
+        return None
+    name = session_name(ev)
+    if not name or name not in m["sessions"] or "/" in name or name.startswith("."):
+        return None
+    if os.path.exists(os.path.join(MAINT_SAVED, name + ".done")):
+        return None
+    return m, name, os.path.isfile(os.path.join(MAINT_SAVED, name + ".json"))
+
+
+def cmd_maint_post(ev):
+    """PostToolUse: сессии из списка, которая ещё не сохранилась, — указание сохраниться, один раз на метку и сессию.
+    Субагенту не говорим: он забрал бы единственный показ у основной сессии."""
+    s = maint_session(ev)
+    if ev.get("agent_id") or not s or s[2]:
+        return 0
+    m, name, _ = s
+    told = os.path.join(MAINT_SAVED, ".told-" + _h("%s|%s" % (m.get("id"), ev.get("session_id"))))
+    private_dir(MAINT_SAVED)
+    try:
+        os.close(os.open(told, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except FileExistsError:
+        return 0
+    msg = ("[Пантеон: технический перезапуск] Владелец перезапускает систему (%s). Допиши свой файл состояния "
+           "(STATUS.md направления или файл задачи мастерской): где остановилась и следующий шаг; незакоммиченное в "
+           "своей ветке — закоммить или запиши, где лежит. Затем `pantheon saved --by %s --state <путь файла "
+           "состояния>`, строкой отчитайся Зевсу (SendMessage zeus) и больше шагов не начинай. Это не ответ владельца "
+           "и не согласие." % (" ".join(str(m.get("reason") or "технический перезапуск").split()), name))
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": msg}},
+                     ensure_ascii=False))
+    return 0
+
+
+def cmd_maint_pre(ev):
+    """PreToolUse: сессия отметилась «сохранилась» — новых шагов нет до `pantheon restart --go`. Пропуск: SendMessage
+    (отчёт Зевсу), `pantheon saved` и `pantheon restart --status`. Зевса не держим: он ведёт перезапуск."""
+    s = maint_session(ev)
+    if not s or not s[2] or s[1].startswith("zeus"):
+        return 0
+    tool = ev.get("tool_name")
+    cmd = (ev.get("tool_input") or {}).get("command") if tool == "Bash" else None
+    if tool == "SendMessage" or (isinstance(cmd, str) and MAINT_BASH_OK.fullmatch(cmd.strip())):
+        return 0
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": "deny",
+        "permissionDecisionReason": "Ты отметилась «сохранилась» перед техническим перезапуском — стой, новых шагов не "
+                                    "начинай. Отчёт Зевсу — SendMessage. Перезапуск сделает pantheon restart --go."}},
+        ensure_ascii=False))
     return 0
 
 
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     fn = {"owner-log": cmd_owner_log, "answer": cmd_answer, "stop": cmd_stop, "start": cmd_start,
-          "rewake": cmd_rewake, "dir-added": cmd_dir_added}.get(cmd)
+          "rewake": cmd_rewake, "dir-added": cmd_dir_added, "maint-post": cmd_maint_post,
+          "maint-pre": cmd_maint_pre, "push": cmd_push}.get(cmd)
     if not fn:
-        print("ctx.py: owner-log | answer | stop | start | rewake | dir-added", file=sys.stderr)
+        print("ctx.py: owner-log | answer | stop | start | rewake | dir-added | maint-post | maint-pre | push", file=sys.stderr)
         return 0
     try:
         return fn(read_event())
