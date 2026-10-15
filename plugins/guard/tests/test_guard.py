@@ -646,6 +646,17 @@ def main():
              "ai/pantheon/directions/athena-broker/tasks"),
             ("hephaestus-broker", True, br, "Write своей задачи", W(P("directions/athena-broker/tasks/athena-0001.md"))),
             ("general-purpose", True, br, "Edit своей задачи", E(P("directions/athena-broker/tasks/athena-0001.md"))),
+            # ревью argus f437a81: запись в папку над tasks/ целиком
+            ("hq", False, ".", "cp -R в directions/", B(f"cp -R /tmp/forge/tasks {home}/ai/pantheon/directions/")),
+            ("hq", False, ".", "rsync в папку направления", B(f"rsync -a /tmp/forge/ {home}/ai/pantheon/directions/athena-broker/")),
+            ("hq", False, ".", "cp во входящие владельца целиком", B(f"cp -R /tmp/forge/tasks {home}/ai/pantheon/inbox/")),
+            ("hq", False, ".", "tar -C в directions", B(f"tar -xf /tmp/x.tar -C {home}/ai/pantheon/directions")),
+            ("domain-coordinator", False, br, "tar -C в своё направление",
+             B("tar -xf /tmp/x.tar -C ~/ai/pantheon/directions/athena-broker")),
+            ("domain-coordinator", False, br, "unzip -d в своё направление",
+             B("unzip -o /tmp/x.zip -d ~/ai/pantheon/directions/athena-broker")),
+            ("domain-coordinator", False, br, "cp в папку своего направления", B("cp /tmp/a.md ~/ai/pantheon/directions/athena-broker/")),
+            ("hq", False, ".", "заглушка с другим именем", B(f"touch {home}/ai/pantheon/directions/athena-broker/tasks/.keep.md")),
         )],
         *[(f"0044 {r}: {n} — можно", "allow", d, r, False, x) for r, d, n, x in (
             ("hq", ".", "pantheon task set", B("pantheon task set athena-0001 status=todo next=x --note y")),
@@ -656,6 +667,15 @@ def main():
             ("hq", ".", "файл tasks.md рядом с папкой", W(P("directions/athena-broker/tasks.md"))),
             ("domain-coordinator", br, "план эпика", W(P("directions/athena-broker/epic-x.md"))),
             ("hq", ".", "чтение задачи", B(f"cat {home}/ai/pantheon/directions/athena-broker/tasks/athena-0001.md")),
+            # ревью argus f437a81: заглушка в tasks/ нового направления (пустую папку тик в git не положит)
+            ("hq", ".", "mkdir tasks/ и .gitkeep нового направления",
+             B(f"mkdir -p {home}/ai/pantheon/directions/janus-x/tasks && touch {home}/ai/pantheon/directions/janus-x/tasks/.gitkeep")),
+            ("hq", ".", "Write .keep в tasks/", W(P("directions/hermes-alex/tasks/.keep"))),
+            ("hq", ".", "mkdir нового направления", B(f"mkdir -p {home}/ai/pantheon/directions/janus-x")),
+            ("domain-coordinator", br, "cp с именем файла в своё направление",
+             B("cp /tmp/a.md ~/ai/pantheon/directions/athena-broker/a.md")),
+            ("domain-coordinator", br, "mv заявки в inbox/done/", B("mv ~/ai/pantheon/directions/athena-broker/inbox/x.md "
+                                                                  "~/ai/pantheon/directions/athena-broker/inbox/done/")),
         )],
         ("роль не коммитит ~/ai/pantheon", "deny", ".", "hq", False, B(f"git -C {home}/ai/pantheon commit -am x")),
         ("ваша сессия коммитит ~/ai/pantheon", "allow", ".", "", False, B(f"git -C {home}/ai/pantheon commit -am x")),

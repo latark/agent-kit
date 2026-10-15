@@ -2094,11 +2094,20 @@ def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
         return False, "git и служебные файлы ~/ai/pantheon роли не трогают: коммитит задача тика pantheon-commit"
     parts = rel.split("/")
     # файлы задач (metis-0044): directions/<имя>/tasks/ и входящие владельца inbox/tasks/ — только `pantheon task`,
-    # всем ролям и субагентам, штабу тоже. Создать ещё не существующую папку tasks/ — можно (пустая папка)
+    # всем ролям и субагентам, штабу тоже. Можно создать ещё не существующую папку tasks/ и заглушку .gitkeep или
+    # .keep в ней (пустую папку тик в git не положит): ответа в них нет
     tasks_at = 2 if top == "directions" else 1 if top == "inbox" else 0
-    if tasks_at and len(parts) > tasks_at and parts[tasks_at] == "tasks" and (len(parts) > tasks_at + 1 or exists):
-        return False, ("файлы задач меняет только команда `pantheon task` (new, set, claim): прямой правкой поле answer "
-                       "попало бы в задачу мимо журнала слов владельца. Ответ владельца пишет тик из его журнала")
+    if tasks_at and len(parts) > tasks_at and parts[tasks_at] == "tasks":
+        stub = len(parts) == tasks_at + 2 and parts[-1] in (".gitkeep", ".keep") and not exists
+        if (len(parts) > tasks_at + 1 or exists) and not stub:
+            return False, ("файлы задач меняет только команда `pantheon task` (new, set, claim): прямой правкой поле "
+                           "answer попало бы в задачу мимо журнала слов владельца. Ответ владельца пишет тик из его журнала")
+    # запись в папку над tasks/ целиком (cp -R, rsync, tar -C, unzip -d в directions/<имя>, в directions или inbox)
+    # положила бы в tasks/ что угодно: такой цели нет, назови точный файл. Новую папку направления создать можно
+    if tasks_at and (len(parts) <= tasks_at and (exists or parts[-1] == ANY_FILE)
+                     or len(parts) == tasks_at + 1 and parts[-1] == ANY_FILE):
+        return False, (f"запись в {rel} целиком задела бы файлы задач в tasks/ — назови точный файл "
+                       "(cp a.md <папка>/a.md); задачи меняет только `pantheon task`")
     if top == "alerts.md":
         return False, "alerts.md только дописывается — командой `pantheon alert \"<строка>\"`; архив — `pantheon archive`"
     if top == "system.md":
