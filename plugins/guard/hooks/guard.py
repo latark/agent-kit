@@ -18,7 +18,7 @@
   protect-config — защиты (хуки, роли, плагины, policy.toml, настройки, sync.sh, ~/.zshrc) правит только
                  metis-pantheon в своей сессии; остальные роли и любые субагенты — нет (SEC-14);
   private      — личное (me/, ключи git-crypt, журнал штаба) читают и пишут только hq, chiron и mnemo-brain (SEC-11);
-  cdp-role     — демон браузера с вашими входами — только мастерская и prometheus (чтение), /close — никому (SEC-13);
+  cdp-role     — демон браузера с вашими входами — только мастерская, /close — никому (SEC-13);
   push         — git push: координатор, лиды и мастерская, не в main и master; gh pr merge — главная сессия
                  координатора или его лид (hephaestus-/apollo-<направление> субагентом, metis-0054) в папках своего
                  направления (domains.json, [merge], [merge_client]); защиты — папки metis-pantheon и их
@@ -2239,7 +2239,7 @@ def check_pantheon(event, tool, tool_input):
 #            (mnemo-brain). Read, Grep, Glob, правки и Bash — по явным путям: это защита от случайности; в окнах
 #            ролей Bash к личному закрыт ещё и песочницей (denyRead).
 #   cdp-role (SEC-13, BROW-06) — демон браузера с вашими входами (127.0.0.1:9333–9339, cdp-daemon.mjs): только
-#            мастерская (действует после вашего «да») и prometheus (читает: без /cmd). /close — никому из ролей:
+#            мастерская (действует после вашего «да»); prometheus и остальные — нет (metis-0087). /close — никому из ролей:
 #            демон общий для всех сессий.
 #   push     (DONE-07, SEC-13) — git push: только координатор, лиды (hephaestus-*, apollo-*) и мастерская; в main и
 #            master — никто из ролей (в main сливаете вы); --all, --mirror, удаление и принудительная отправка — тоже
@@ -2273,7 +2273,7 @@ CDP_DIRECT = re.compile(r"(?<![\w.])9222(?![\w.])|DevToolsActivePort|/devtools/(
 # WebFetch ролей — только наружу: адрес петли и локальной сети — это демон браузера или dev-сервер владельца
 LOCAL_URL = re.compile(r"^\w+://(?:[^/@]*@)?(?:localhost|[\d.]+|0x[0-9a-f]+|\[[0-9a-f:.]*\]|[^/:]*\.local)(?::\d+)?(?:/|$)",
                        re.I)
-CDP_READERS = {"prometheus"}
+CDP_READERS = set()  # демон с входами владельца — только мастерской (metis-0087, шаг 2); читателей нет
 CDP_ACTORS = {"workshop"}
 PROTECTED_BRANCHES = {"main", "master"}
 TERMINAL_CMDS = {"osascript", "cliclick", "xdotool"}
@@ -2440,7 +2440,7 @@ def check_cdp_role(event, tool, tool_input):
     cmd = cmd + "\n" + re.sub(r"[\"'\\]", "", cmd)
     if CDP_DIRECT.search(cmd):
         return ("Правило cdp-role: прямое подключение к отладочному порту браузера владельца ролям закрыто — только через "
-                "общий демон (`curl 127.0.0.1:9333/…`), и только prometheus (чтение) и мастерской.")
+                "общий демон (`curl 127.0.0.1:9333/…`), и только мастерской.")
     if not CDP_TARGET.search(cmd):
         return None
     if re.search(r"/close\b", cmd):
@@ -2451,7 +2451,7 @@ def check_cdp_role(event, tool, tool_input):
     if role in CDP_READERS and not re.search(r"/cmd\b", cmd):
         return None
     return (f"Правило cdp-role: роль «{role or 'субагент'}» не пользуется браузером с входами владельца (демон CDP). "
-            "Читать сайт — поручение prometheus через координатора; действие на сайте — мастерская после «да» владельца. "
+            "Читать сайт и действовать на нём — мастерская после «да» владельца; публичные страницы — веб-поиск prometheus без входов. "
             "Проверить своё приложение на localhost — chrome-devtools-mcp --isolated или Playwright (talos).")
 
 

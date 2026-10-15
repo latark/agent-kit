@@ -112,8 +112,8 @@ def gate_fixtures(home):
                 fh.write(f"2026-10-15 20:00 · athena-broker · {repo}#{pr} ушло; откат: git revert x\n")
     os.makedirs(os.path.join(home, "fake-bin"), exist_ok=True)
     with open(os.path.join(home, "fake-bin/gh"), "w") as fh:
-        fh.write("#!/bin/sh\necho '" + json.dumps({"files": [{"path": "README.md"}], "changedFiles": 1,
-                                                    "headRefOid": SHA_OK}) + "'\n")
+        fh.write("#!/bin/sh\n[ \"$1\" = api ] && { echo '" + json.dumps({"filename": "README.md", "status": "modified"})
+                 + "'; exit 0; }\necho '" + json.dumps({"changedFiles": 1, "headRefOid": SHA_OK}) + "'\n")
     os.chmod(os.path.join(home, "fake-bin/gh"), 0o755)
 
 
@@ -752,7 +752,8 @@ def main():
          B("curl -s -X POST localhost:9334/eval -d '{}'")),
         ("cdp: мастерская действует через демон", "allow", ws, "workshop", False,
          B("curl -s -X POST 127.0.0.1:9333/cmd -d '{}'")),
-        ("cdp: prometheus читает /eval", "allow", br, "prometheus", True, B("curl -s -X POST 127.0.0.1:9333/eval -d '{}'")),
+        ("cdp: prometheus /eval — отказ (демон только мастерской)", "deny", br, "prometheus", True, B("curl -s -X POST 127.0.0.1:9333/eval -d '{}'")),
+        ("cdp: prometheus curl 127.0.0.1:9333/open — отказ", "deny", br, "prometheus", True, B("curl -s -X POST 127.0.0.1:9333/open -d '{}'")),
         ("cdp: prometheus /cmd — отказ", "deny", br, "prometheus", True, B("curl -s -X POST 127.0.0.1:9333/cmd -d '{}'")),
         ("cdp: /close — отказ и мастерской", "deny", ws, "workshop", False, B("curl -s -X POST 127.0.0.1:9333/close")),
         ("cdp: hq запускает демон — отказ", "deny", ".", "hq", False, B("node ~/.claude/tools/cdp-daemon.mjs comet")),
