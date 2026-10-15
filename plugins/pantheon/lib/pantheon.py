@@ -1239,7 +1239,10 @@ def domains_build(if_changed=False):
     policy_path = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
     if if_changed:
         built = read_json(path("domains.json")).get("built_ts") or 0
-        newest = max([os.path.getmtime(p) for p in (reg_path, policy_path) if os.path.exists(p)] + [roles_newest()])
+        # и новые папки сессий: окно штаба закрывает чужие перечнем (их выводы) — новая папка тоже должна попасть в hq.json
+        watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"),
+                   os.path.join(os.path.realpath("/tmp"), f"claude-{os.getuid()}"))
+        newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
         if built >= newest:
             return 0
     with open(reg_path, "rb") as fh:
