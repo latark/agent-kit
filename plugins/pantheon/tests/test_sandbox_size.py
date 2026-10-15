@@ -4,7 +4,7 @@
 Запуск: python3 -I plugins/pantheon/tests/test_sandbox_size.py  (код выхода 0 — все прошли)
 Проверяет на временных папках (HOME, PANTHEON_*, PANTHEON_CLAUDE_TMP — подменены, настоящие не трогаются):
 - список запретов штаба не растёт с числом папок в /tmp/claude-<uid>: 50 и 5000 папок дают одинаковый hq.json;
-- чужие папки закрыты и песочницей, и правилом Read; свои (папка штаба и его worktree) — открыты;
+- чужие папки закрыты и песочницей, и правилом Read; свои (папка штаба и его worktree) и временные файлы\n  в корне $TMPDIR (heredoc, mktemp) — открыты;
 - предохранитель: окно с песочницей больше предела не пересобирается, приходит одна тревога.
 """
 import atexit
@@ -22,8 +22,11 @@ atexit.register(shutil.rmtree, ROOT, True)
 dash = lambda p: re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(p))  # noqa: E731
 
 
-def glob_re(g):
-    """Шаблон пути Claude Code → regex: «**» — любые папки, «*» — внутри одного имени."""
+def glob_re(g, sandbox=False):
+    """Шаблон пути Claude Code → regex: «**» — любые папки, «*» — внутри одного имени. sandbox — как запрет-шаблон
+    denyRead в Seatbelt (Claude Code 2.1.300): хвост «/**» срезан, совпадает и всё поддерево."""
+    if sandbox and g.endswith("/**"):
+        g = g[:-3]
     out, i = "", 0
     while i < len(g):
         if g.startswith("/**", i):
@@ -96,16 +99,14 @@ def main():
           r.returncode == 0 and fs2["denyRead"] == fs["denyRead"]
           and hq2["permissions"]["deny"] == hq1["permissions"]["deny"] and len(fs2["denyRead"]) < 80)
 
-    deny_sb = [glob_re(x) for x in fs2["denyRead"] if x.startswith("/")]
-    allow_sb = [glob_re(x) for x in fs2.get("allowRead", [])]
+    deny_sb = [glob_re(x, sandbox=True) for x in fs2["denyRead"] if x.startswith("/")]
+    deny_sb += [glob_re("/" + x[len("Read(//"):-1], sandbox=True) for x in hq2["permissions"]["deny"]
+                if x.startswith("Read(//")]  # правила Read Claude Code вливает в песочницу
     deny_rd = [glob_re("/" + x[len("Read(//"):-1]) for x in hq2["permissions"]["deny"] if x.startswith("Read(//")]
     deny_rd += [glob_re(os.path.join(tmp, x[len("Read(~/"):-1])) for x in hq2["permissions"]["deny"]
                 if x.startswith("Read(~/")]
 
-    def sb_closed(p):  # узкое разрешение внутри широкого запрета (sandbox.filesystem.allowRead)
-        d = max((m.pattern for m in deny_sb if m.fullmatch(p)), key=len, default=None)
-        a = max((m.pattern for m in allow_sb if m.fullmatch(p)), key=len, default=None)
-        return d is not None and (a is None or len(a) < len(d))
+    sb_closed = lambda p: any(m.fullmatch(p) for m in deny_sb)  # noqa: E731
 
     rd_closed = lambda p: any(m.fullmatch(p) for m in deny_rd)  # noqa: E731
     junk = [f"guard-test-{i:05d}" for i in (0, 4999)] + ["cfgcheck-00001", "watch-test-00299"]
@@ -113,9 +114,12 @@ def main():
     check("чужие выводы в /tmp/claude-<uid> (сессии, мусор тестов) закрыты песочницей и правилом Read",
           all(sb_closed(p) and rd_closed(p) for p in others))
     ours = [os.path.join(tasks, n, "s", "tasks", "b1.output") for n in mine]
-    check("свои выводы штаба и его worktree открыты: allowRead и ни одного правила Read",
-          all(not sb_closed(p) and not rd_closed(p) for p in ours)
-          and fs2["allowRead"] == [f"{tasks}/{own}", f"{tasks}/{own}--claude-worktrees-*"])
+    check("свои выводы штаба и его worktree открыты и песочницей, и правилом Read; allowRead нет",
+          all(not sb_closed(p) and not rd_closed(p) for p in ours) and "allowRead" not in fs2)
+    # корень CLAUDE_TMP — $TMPDIR песочницы: heredoc zsh ($TMPPREFIX=$TMPDIR/zsh), mktemp, tempfile (argus 15.10)
+    roots = [os.path.join(tasks, n) for n in ("zshAbC123", "tmp.Xy12ab", "tmpk3j_x9", "guard-test-x.log", "a.txt")]
+    check("временные файлы в корне $TMPDIR (heredoc, mktemp) читаются: песочница и правило Read их не задевают",
+          all(not sb_closed(p) and not rd_closed(p) for p in roots))
     check("tool-results: чужие закрыты правилом Read, свои — нет",
           all(rd_closed(os.path.join(projects, n, "s1", "tool-results", "x.txt")) for n in foreign)
           and not any(rd_closed(os.path.join(projects, n, "s1", "tool-results", "x.txt")) for n in mine))

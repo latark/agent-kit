@@ -1385,9 +1385,14 @@ HQ_CLOSED_DIRS = ["~/projects/expert-corpus", "~/.cache/expert-corpus", "~/.cach
 # CLAUDE_CODE_TMPDIR: внутри сессии Claude Code ставит его уже с /claude-<uid> на конце. PANTHEON_CLAUDE_TMP — тестам
 CLAUDE_TMP = os.path.realpath(os.environ.get("PANTHEON_CLAUDE_TMP") or os.path.join("/tmp", f"claude-{os.getuid()}"))
 # Seatbelt не собирает профиль больше 64 КБ: Bash окна не запускается совсем («sandbox-exec: data object length …
-# exceeds maximum (65535)», hq 15.10 — 4359 путей). Сумма путей песочницы окна — грубая верхняя оценка; выше порога
-# окно не пересобирается (остаётся прежний файл) и приходит тревога
-SANDBOX_SIZE_LIMIT = int(os.environ.get("PANTHEON_SANDBOX_LIMIT") or 48 * 1024)
+# exceeds maximum (65535)», hq 15.10 — 4359 путей). Оценка — сумма байтов путей песочницы окна; это не размер
+# профиля: 15.10 hq с 985 путями (~150 КБ путей) Bash запускал, а 4359 путей дали 69 833 байт, — порог с запасом в
+# безопасную сторону. Списки ~/.claude/settings.json, которые сливаются с окном, не учтены. Выше порога окно не
+# пересобирается (остаётся прежний файл) и приходит тревога
+try:
+    SANDBOX_SIZE_LIMIT = int(os.environ.get("PANTHEON_SANDBOX_LIMIT") or 48 * 1024)
+except ValueError:
+    SANDBOX_SIZE_LIMIT = 48 * 1024
 GLOB_SAFE = re.compile(r"[A-Za-z0-9._-]+")
 
 
@@ -1649,29 +1654,31 @@ def sandbox_build(domains, policy_path, stores=None):
     # у Claude Code: всё, кроме букв и цифр, → «-»); открыты свои выводы, автопамять (memory/*.md) и задачи штаба.
     # Не перечислением папок (15.10 их было 4121 — мусор тестов, профиль Seatbelt вырос за 64 КБ и Bash штаба не
     # запускался), а постоянным числом записей:
-    # - песочница: CLAUDE_TMP закрыт целиком, свои папки открыты allowRead (узкое разрешение внутри широкого запрета —
-    #   по документации Claude Code, sandbox.filesystem.allowRead). Закрыт и корень $TMPDIR штаба — его временные файлы
-    #   читать только в своих папках (scratchpad сессии лежит в них);
-    # - правило Read (инструменты Read, Grep, Glob): разрешения внутри запрета у правил нет, поэтому шаблоны по
-    #   префиксам, которые расходятся со своим именем (_others_globs) — их число не растёт с числом папок
+    # - шаблоны по префиксам, которые расходятся со своим именем (_others_globs): их число не растёт с числом папок.
+    #   Одни и те же записи — правилом Read (инструменты Read, Grep, Glob) и в denyRead песочницы (Claude Code и так
+    #   вливает правила Read в песочницу);
+    # - закрыто содержимое чужих папок CLAUDE_TMP («<префикс>*/*» и «<префикс>*/*/**»), а не сами имена: CLAUDE_TMP —
+    #   и общий $TMPDIR песочницы, в его корне лежат временные файлы Bash (heredoc zsh — $TMPPREFIX, mktemp, tempfile).
+    #   Шаблон «<префикс>*» закрыл бы и их, а Claude Code срезает хвост «/**» и запрет-шаблон закрывает всё поддерево.
+    #   Корень открыт, как было до 0.11.17; allowRead не нужен (разрешение-шаблон в Seatbelt — точное имя, без поддерева)
     dash = lambda p: re.sub(r"[^A-Za-z0-9]", "-", p)  # noqa: E731
     own, home_d = dash(os.path.realpath(PANTHEON)), dash(os.path.realpath(HOME))
     tasks, projects = CLAUDE_TMP, os.path.join(HOME, ".claude", "projects")
     files = ["~/.claude/projects/**/*.jsonl", f"~/.claude/projects/{home_d}-projects-*/**/tool-results/**",
-             f"{tasks}/{home_d}-projects-*/**"]
-    for base, short, tail in ((projects, "~/.claude/projects", "/**/tool-results/**"), (tasks, tasks, "/**")):
+             f"{tasks}/{home_d}-projects-*/*", f"{tasks}/{home_d}-projects-*/*/**"]
+    for base, short, tails in ((projects, "~/.claude/projects", ("/**/tool-results/**",)),
+                               (tasks, tasks, ("/*", "/*/**"))):
         try:
             names = os.listdir(base)
         except OSError:
             names = []
         globs, skipped = _others_globs(names, own)
-        files += [f"{short}/{g}{tail}" for g in globs]
+        files += [f"{short}/{g}{tail}" for g in globs for tail in tails]
         if skipped:
-            print(f"песочница hq: имена с символами шаблона в {short} — правилом Read не закрыты: {skipped[:5]}",
+            print(f"песочница hq: имена с символами шаблона в {short} не закрыты: {skipped[:5]}",
                   file=sys.stderr)
     fsys = hq["sandbox"]["filesystem"]
-    fsys["denyRead"] += _deny_forms(closed) + [tasks] + _deny_forms(files)
-    fsys["allowRead"] = [f"{tasks}/{own}", f"{tasks}/{own}--claude-worktrees-*"]
+    fsys["denyRead"] += _deny_forms(closed) + _deny_forms(files)
     rule = lambda x: f"Read({x})" if x.startswith("~") else f"Read(/{x})"  # noqa: E731 — «//» — абсолютный путь
     hq.setdefault("permissions", {}).setdefault("deny", []).extend(
         [rule(x + "/**") for x in _deny_forms(closed)] + [rule(x) for x in _deny_forms(files)])
