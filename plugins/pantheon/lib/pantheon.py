@@ -30,7 +30,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon task new --direction D --title T [--status S --priority N --due ГГГГ-ММ-ДД --next X --owner O
                     --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
                     --recommend "А — потому что …" --if-no-answer "…" --depends-on ID]
-  pantheon task set ID поле=значение … [--note "строка в журнал"]   pantheon task show ID
+  pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"]   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
@@ -2327,12 +2327,20 @@ def task_cmd(rest):
                 if args[i] == "--note" and i + 1 < len(args):
                     note, i = args[i + 1], i + 2
                     continue
+                if args[i] == "--option" and i + 1 < len(args):  # варианты с запятыми и кавычками (metis-0037)
+                    changes.setdefault("options", []).append(args[i + 1])
+                    i += 2
+                    continue
                 k, eq, v = args[i].partition("=")
                 if not eq:
                     print(f"pantheon task set: «{args[i]}» — нужно поле=значение", file=sys.stderr)
                     return 2
                 if k in T.OWNER_ONLY_FIELDS:
                     print(f"pantheon task set: поле {k} ставит только доска владельца", file=sys.stderr)
+                    return 2
+                if k == "options" and v not in ("", "null"):
+                    print("pantheon task set: варианты — повторяемым --option \"…\" (в тексте бывают запятые); "
+                          "options= только чтобы очистить", file=sys.stderr)
                     return 2
                 kind = T.FIELDS.get(k, ("str",))[0]
                 changes[k] = None if v in ("", "null") else int(v) if kind == "int" else (v == "true") if kind == "bool" else \
