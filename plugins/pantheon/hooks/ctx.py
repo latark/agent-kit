@@ -1069,7 +1069,15 @@ QMD_HOW = ("Ищи по смыслу в своей коллекции: searches=
 
 
 QMD_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,30}")
-QMD_HQ_CLOSED = {"corpus"}  # штабу корпус закрыт (решение владельца 15.10, SEC-13; guard corpus-role — то же для Bash)
+# Штабу закрыты: corpus — корпус лекций (решение владельца 15.10, SEC-13; guard corpus-role — то же для Bash); legal —
+# право и выгрузки Telegram-каналов legal-watch (P0-1, metis-0060): у Зевса личное и действия наружу, чужой текст
+# каналов в его окне — путь внедрения. Вопросы по корпусу, праву и каналам — Фемиде (themis-sources) поручением.
+QMD_HQ_CLOSED = {"corpus", "legal"}
+QMD_HQ_CLOSED_WHY = {
+    "corpus": "штабу корпус закрыт (решение владельца 15.10) — просьбу «по Куклину» передай Фемиде или координатору",
+    "legal": "штабу коллекция legal закрыта (P0-1, metis-0060) — вопросы по праву и Telegram-каналам передай Фемиде "
+             "(themis-sources) через поручение",
+}
 
 
 def _qmd_hq_target_ok(item):
@@ -1087,7 +1095,7 @@ def cmd_qmd_query(ev):
     """PreToolUse mcp__qmd__query|get|multi_get. query: только поиск по смыслу или по словам в названных коллекциях,
     без доранжирования. Полный режим (query без searches — переформулировка моделью, rerank) держит в памяти сервера
     три модели (~2 ГБ против ~0,3) и в 50–100 раз медленнее; без collections большая коллекция legal вытесняет
-    остальные (QMD-04). Штабу (hq) коллекция corpus закрыта во всех трёх инструментах."""
+    остальные (QMD-04). Штабу (hq) коллекции corpus и legal закрыты во всех трёх инструментах."""
     try:
         why = _qmd_why(ev)
     except Exception as e:  # отказ, а не пропуск: сбой разбора не должен открывать полный режим или корпус
@@ -1122,18 +1130,20 @@ def _qmd_why(ev):
         elif any(not isinstance(x, dict) or x.get("type") not in ("vec", "lex") for x in ti["searches"]):
             why = "только type \"vec\" (по смыслу) или \"lex\" (номера и коды); hyde не используем"
         elif hq and any(not isinstance(c, str) or c.strip() in QMD_HQ_CLOSED for c in colls):
-            why = "штабу корпус закрыт (решение владельца 15.10) — просьбу «по Куклину» передай Фемиде или координатору"
+            bad = next((c.strip() for c in colls if isinstance(c, str) and c.strip() in QMD_HQ_CLOSED), "corpus")
+            why = QMD_HQ_CLOSED_WHY[bad]
     elif hq and tool == "ReadMcpResourceTool":
         # ресурс qmd://… сервер ищет без схемы и по окончанию пути во всех коллекциях: «pantheon/x.md» найдёт и
         # corpus/my-pantheon/x.md (ревью argus 15.10) — штабу ресурсы qmd закрыты целиком, get даёт то же по точному адресу
         if str(ti.get("server") or "").strip().casefold() == "qmd":
-            why = "штабу ресурсы qmd закрыты (корпус штабу закрыт, решение владельца 15.10) — читай инструментом get"
+            why = "штабу ресурсы qmd закрыты (корпус и legal штабу закрыты, 15.10) — читай инструментом get"
     elif hq and (tool.endswith("__get") or tool.endswith("__multi_get")):
         raw = ti.get("file") if tool.endswith("__get") else ti.get("pattern")
         items = str(raw or "").split(",") if tool.endswith("__multi_get") else [str(raw or "")]
         if not all(_qmd_hq_target_ok(x) for x in items):
-            why = ("штабу — только адреса qmd://<коллекция>/<путь> из результатов поиска, без docid и коллекции corpus "
-                   "(корпус штабу закрыт, решение владельца 15.10)")
+            why = ("штабу — только адреса qmd://<коллекция>/<путь> из результатов поиска, без docid и коллекций corpus "
+                   "и legal (корпус закрыт решением владельца 15.10; право и Telegram-каналы — Фемиде (themis-sources) "
+                   "через поручение, metis-0060)")
     return why
 
 

@@ -8,6 +8,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
+# Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение,
+# выход из подпроцесса); TMPDIR — для подпроцессов, которые тоже создают временные папки (как в 9587c02).
+import atexit as _atexit
+_ROOT = tempfile.mkdtemp(prefix="review-root-")
+tempfile.tempdir = _ROOT
+os.environ["TMPDIR"] = _ROOT
+_atexit.register(shutil.rmtree, _ROOT, True)
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "pantheon.py")
 SHA = "a" * 40
@@ -20,6 +27,9 @@ def check(name, cond):
 
 
 def main():
+    if sys.version_info < (3, 11):  # pantheon.py сам требует 3.11 (tomllib): на 3.9 он отвечал бы отказом на всё
+        print("ok   пропуск: pantheon review требует Python 3.11+ (здесь %d.%d)" % sys.version_info[:2])
+        return 0
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="review-test-"))
     try:
         run_all(tmp)

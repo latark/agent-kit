@@ -25,6 +25,17 @@ import time
 import uuid
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
+SHIM = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_guard_shim.py")  # запуск guard без зависимости от места тестов
+try:  # привилегии из policy.toml читает tomllib (Python 3.11+); на системном 3.9 политика пуста — это безопасный отказ
+    import tomllib  # noqa: F401
+    HAS_TOMLLIB = True
+except ImportError:
+    HAS_TOMLLIB = False
+# случаи, где «allow» держится только на привилегии/agent_extra из policy.toml: без tomllib guard их честно закрывает
+# (тот же приём, что MERGE_OK ниже). Обвязка не ослабляет проверку: с tomllib ожидание прежнее — allow.
+NEEDS_POLICY = {"Метида правит карту решений", "prometheus пишет в ~/ai/knowledge (agent_extra)",
+                "prometheus сессией: ~/ai/knowledge по agent_extra", "protect-config: Метида правит роль",
+                "protect-config: Метида пишет policy.toml", "private: mnemo-brain пишет в me/"}
 
 
 def setup(home):
@@ -112,8 +123,8 @@ def gate_fixtures(home):
                 fh.write(f"2026-10-15 20:00 · athena-broker · {repo}#{pr} ушло; откат: git revert x\n")
     os.makedirs(os.path.join(home, "fake-bin"), exist_ok=True)
     with open(os.path.join(home, "fake-bin/gh"), "w") as fh:
-        fh.write("#!/bin/sh\necho '" + json.dumps({"files": [{"path": "README.md"}], "changedFiles": 1,
-                                                    "headRefOid": SHA_OK}) + "'\n")
+        fh.write("#!/bin/sh\n[ \"$1\" = api ] && { echo '" + json.dumps({"filename": "README.md", "status": "modified"})
+                 + "'; exit 0; }\necho '" + json.dumps({"changedFiles": 1, "headRefOid": SHA_OK}) + "'\n")
     os.chmod(os.path.join(home, "fake-bin/gh"), 0o755)
 
 
@@ -223,7 +234,7 @@ def _read(path):
         return fh.read()
 
 
-def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None, raw=False, tuid=None):
+def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None, raw=False, tuid=None, penv=None):
     event = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": with_head(tool, tool_input),
              "cwd": os.path.join(home, cwd if cwd is not None else pdir), "session_id": "s-test",
              "tool_use_id": tuid or "toolu_" + uuid.uuid4().hex}
@@ -232,9 +243,15 @@ def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None, ra
     if sub:
         event["agent_id"] = "a1"
     env = {"HOME": home, "PATH": os.path.join(home, "fake-bin") + os.pathsep + os.environ["PATH"],
-           "CLAUDE_PROJECT_DIR": os.path.join(home, pdir), "TMPDIR": "/nonexistent-tmp"}
-    out = subprocess.run([python or sys.executable, "-I", GUARD], input=json.dumps(event), capture_output=True,
-                         text=True, env=env, timeout=10).stdout
+           "CLAUDE_PROJECT_DIR": os.path.join(home, pdir), "TMPDIR": "/nonexistent-tmp", **(penv or {})}
+    r = subprocess.run([python or sys.executable, "-I", SHIM, GUARD], input=json.dumps(event), capture_output=True,
+                       text=True, env=env, timeout=10)
+    out = r.stdout
+    if r.returncode == 2:  # сбой (metis-0094): Claude Code понимает код 2 как отказ с причиной из stderr
+        out = json.dumps({"hookSpecificOutput": {"permissionDecision": "deny", "exit2": True,
+                                                 "permissionDecisionReason": r.stderr}}, ensure_ascii=False)
+    elif r.returncode != 0:
+        out += f"\n[код {r.returncode}] {r.stderr}"
     if raw:
         return out
     return "deny" if '"deny"' in out else "allow"
@@ -426,6 +443,107 @@ def merge_security_checks(home, MERGE_OK, cases):
     check("нет папки состояния — отказ по правилу, без сбоя скрипта", deny(out) and "сбой проверки" not in out)
     return failed
 
+
+def failure_checks(home, env, cases):
+    """metis-0094: искусственный сбой в каждом хуке guard → код 2 и причина в stderr (Stop — код 0). Подмена функций —
+    через GUARD_SHIM_BOOM / GUARD_SHIM_HANG в _guard_shim.py. Возвращает число упавших проверок."""
+    failed = 0
+    ak = "projects/agent-kit"
+    mf = os.path.join(home, "managed-fail.json")  # управляемые настройки вызывают guard --managed
+    with open(mf, "w") as fh:
+        fh.write('{"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "python3 guard.py --managed"}]}]}}')
+
+    def hook(stdin, mode=None, role="", tool="Bash", ti=None, name="PreToolUse", penv=None, extra=None):
+        if stdin is None:
+            ev = {"hook_event_name": name, "session_id": "s-test", "cwd": os.path.join(home, ak),
+                  "tool_use_id": "toolu_" + uuid.uuid4().hex}
+            if tool:
+                ev.update(tool_name=tool, tool_input=ti if ti is not None else {"command": "ls"})
+            if role:
+                ev["agent_type"] = role
+            ev.update(extra or {})
+            stdin = json.dumps(ev)
+        e = dict(env, CLAUDE_PROJECT_DIR=os.path.join(home, ak), **(penv or {}))
+        t0 = time.monotonic()
+        r = subprocess.run([sys.executable, "-I", SHIM, GUARD] + ([mode] if mode else []), input=stdin,
+                           capture_output=True, text=True, env=e, timeout=20)
+        return r, time.monotonic() - t0
+
+    def check(name, ok, r=None):
+        nonlocal failed
+        failed += not ok
+        cases.append(None)
+        tail = f" — код {r.returncode}, stderr {r.stderr.strip()[:160]!r}" if (r is not None and not ok) else ""
+        print(f"{'ok  ' if ok else 'FAIL'} сбой (metis-0094): {name}{tail}")
+
+    def blocked(r, word):
+        return r.returncode == 2 and word in r.stderr and "Traceback" not in r.stderr and '"deny"' not in r.stdout
+
+    # неразобранный вход — во всех режимах, и у хука плагина при активных управляемых настройках (раньше молчал)
+    for label, mode, penv in (("плагин", None, None), ("--managed", "--managed", None), ("--strict", "--strict", None),
+                              ("плагин при управляемых настройках", None, {"GUARD_SHIM_MANAGED": mf})):
+        r, _ = hook("не json", mode, penv=penv)
+        check(f"событие не JSON, {label} — код 2 и причина", blocked(r, "не JSON"), r)
+    for label, stdin in (("массив", "[1, 2]"), ("строка", '"x"'), ("объект без hook_event_name", "{}")):
+        r, _ = hook(stdin)
+        check(f"событие не объект события ({label}) — код 2", blocked(r, "не разобрать"), r)
+    # PreToolUse: исключение в проверке прав — блок и в вашей сессии без роли, во всех режимах
+    for label, boom, mode, tool, ti in (
+            ("domain, ваша сессия", "check_domain", None, "Bash", None),
+            ("pantheon-acl, --managed", "check_pantheon", "--managed", "Bash", None),
+            ("карта прав (check_roles), --strict", "check_roles", "--strict", "Read", {"file_path": "/etc/hosts"}),
+            ("protect_config.py", "check_protect_config", None, "Write",
+             {"file_path": os.path.join(home, ak, "x.txt"), "content": "x"}),
+            ("tg-secret", "check_tg_secret_bash", None, "Bash", None)):
+        r, _ = hook(None, mode, tool=tool, ti=ti, penv={"GUARD_SHIM_BOOM": boom})
+        check(f"PreToolUse, {label} — код 2 и причина", blocked(r, "сбой проверки"), r)
+    # merge_gate.py в PreToolUse: gh pr merge координатора — сбой запора не пропускает
+    r, _ = hook(None, role="domain-coordinator", ti={"command": "gh pr merge 5 --match-head-commit " + "a" * 40},
+                penv={"GUARD_SHIM_BOOM": "merge_problem"})
+    check("PreToolUse, merge_gate.py (gh pr merge) — код 2", blocked(r, "сбой проверки прав"), r)
+    # окно (hq-telegram, chiron): и в окне штаба, и в вашей сессии без роли — блок (раньше у вас — пропуск)
+    for label, penv in (("окно штаба", {"PANTHEON_ROLE": "hq"}), ("ваша сессия", {})):
+        r, _ = hook(None, tool="Agent", ti={"subagent_type": "x", "prompt": "x"},
+                    penv=dict(penv, GUARD_SHIM_BOOM="check_hq_telegram"))
+        check(f"PreToolUse Agent, сбой проверки окна, {label} — код 2", blocked(r, "сбой проверки окна"), r)
+    # аргументы вызова не объект — сбой скрипта, код 2
+    r, _ = hook(None, ti=["ls"])
+    check("PreToolUse, tool_input не объект — код 2", blocked(r, "сбой хука"), r)
+    # свой срок: проверка висит — код 2 до таймаута хука, а не пропуск по таймауту Claude Code
+    r, took = hook(None, penv={"GUARD_SHIM_HANG": "check_domain", "GUARD_SHIM_DEADLINE": "1"})
+    check(f"PreToolUse, проверка висит — код 2 за {took:.1f} с", blocked(r, "не уложилась") and took < 8, r)
+    # подсказка (dev-server) при сбое пропускает к остальным проверкам — обычная команда проходит
+    r, _ = hook(None, penv={"GUARD_SHIM_BOOM": "check_dev_server"})
+    check("PreToolUse, сбой подсказки dev-server — пропуск к остальным проверкам (код 0)",
+          r.returncode == 0 and r.stdout.strip() == "", r)
+    # PostToolUse: сбой записи журнала запора — код 2 (команда уже выполнена, причина — агенту); без сбоя — 0
+    post = {"tool_response": {"stdout": "", "stderr": "", "interrupted": False, "isImage": False}}
+    r, _ = hook(None, name="PostToolUse", extra=post, penv={"GUARD_SHIM_BOOM": "merge_gate.record"})
+    check("PostToolUse, сбой merge_gate.record — код 2 и причина", blocked(r, "журнала запора"), r)
+    r, _ = hook(None, name="PostToolUse", extra=post)
+    check("PostToolUse без сбоя — код 0", r.returncode == 0 and r.stderr == "", r)
+    # Stop: сбой — код 0 (код 2 не дал бы закончить ход), причина в stderr и строка в журнале
+    r, _ = hook(None, name="Stop", tool=None, extra={"transcript_path": os.path.join(home, "none.jsonl")},
+                penv={"GUARD_SHIM_BOOM": "soft"})
+    check("Stop, сбой — код 0, без трассировки, с причиной", r.returncode == 0 and "Stop" in r.stderr
+          and "Traceback" not in r.stderr and '"block"' not in r.stdout, r)
+    # сбой загрузки самого guard (рядом нет merge_gate.py) — тоже код 2 с причиной, на Stop — 0; запуск как у хука
+    lone = tempfile.mkdtemp(prefix="guard-lone-")
+    shutil.copy(GUARD, lone)
+    for label, ev, want in (("PreToolUse", {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                            "tool_input": {"command": "ls"}}, 2),
+                            ("Stop", {"hook_event_name": "Stop"}, 0)):
+        r = subprocess.run([sys.executable, "-I", os.path.join(lone, "guard.py")], input=json.dumps(ev),
+                           capture_output=True, text=True, env=env, timeout=20)
+        check(f"сбой загрузки guard (нет merge_gate.py), {label} — код {want} и причина",
+              r.returncode == want and "сбой загрузки" in r.stderr and "Traceback" not in r.stderr, r)
+    shutil.rmtree(lone, ignore_errors=True)
+    # обычные отказ и пропуск прежние: отказ — JSON и код 0
+    r, _ = hook(None, role="domain-coordinator", ti={"command": "tmux send-keys -t 0 'да' Enter"})
+    check("обычный отказ — JSON deny и код 0, как раньше", r.returncode == 0 and '"deny"' in r.stdout, r)
+    return failed
+
+
 def main():
     home = os.path.realpath(tempfile.mkdtemp(prefix="guard-test-"))
     setup(home)
@@ -436,6 +554,9 @@ def main():
     R = lambda path: ("Read", {"file_path": path})
     G = lambda path: ("Grep", {"pattern": "налог", "path": path})
     K = lambda rel: os.path.join(home, "ai", "knowledge", rel)
+    A = lambda name: ("Agent", {"subagent_type": name, "description": "x", "prompt": "x"})
+    HQ = {"PANTHEON_ROLE": "hq"}  # env окна штаба (pantheon start zeus), guard 0.5.5
+    TGR = "tg_read" + ".py"  # имя скрипта tg-read: так этот файл не задевает правило tg-secret живого хука
     br, ak, alex, ws = "projects/brokerAssistantApp", "projects/agent-kit", "projects/alexbroker", "projects/workshop/visa"
     ec, lw = "projects/expert-corpus", "projects/legal-watch"
     merge_fixtures(home)
@@ -568,6 +689,23 @@ def main():
         ("координатор: pantheon jobs pause --all — отказ", "deny", br, "domain-coordinator", False, B("pantheon jobs pause --all")),
         ("координатор: pantheon jobs и alert можно", "allow", br, "domain-coordinator", False, B("pantheon jobs; pantheon alert 'x' --from athena")),
         ("hq: pantheon archive можно", "allow", ".", "hq", False, B("pantheon archive")),
+        ("argus: roles build --out TMPDIR/r — можно", "allow", br, "argus", False, B('pantheon roles build --out "$TMPDIR/r"')),
+        ("argus: roles build --out /tmp/x --src /tmp/y — можно", "allow", br, "argus", False, B('pantheon roles build --out /tmp/x --src /tmp/y')),
+        ("argus: roles build без --out — отказ", "deny", br, "argus", False, B('pantheon roles build')),
+        ("argus: roles build --out вне временных папок — отказ", "deny", br, "argus", False, B("pantheon roles build --out /var/agents-x")),
+        ("argus: roles build --out $(echo x) — отказ", "deny", br, "argus", False, B('pantheon roles build --out $(echo x)')),
+        ("argus: roles build лишний аргумент — отказ", "deny", br, "argus", False, B('pantheon roles build --out /tmp/x --force')),
+        ("argus: roles build --out /dev/null — отказ", "deny", br, "argus", False, B('pantheon roles build --out /dev/null')),
+        ("argus: roles build --src без --out — отказ", "deny", br, "argus", False, B('pantheon roles build --src /tmp/y')),
+        ("hephaestus-broker: roles build --out TMPDIR/r — можно", "allow", br, "hephaestus-broker", False, B('pantheon roles build --out "$TMPDIR/r"')),
+        ("hephaestus-broker: roles build --out /tmp/x --src /tmp/y — можно", "allow", br, "hephaestus-broker", False, B('pantheon roles build --out /tmp/x --src /tmp/y')),
+        ("hephaestus-broker: roles build без --out — отказ", "deny", br, "hephaestus-broker", False, B('pantheon roles build')),
+        ("hephaestus-broker: roles build --out вне временных папок — отказ", "deny", br, "hephaestus-broker", False, B("pantheon roles build --out /var/agents-x")),
+        ("hephaestus-broker: roles build --out $(echo x) — отказ", "deny", br, "hephaestus-broker", False, B('pantheon roles build --out $(echo x)')),
+        ("hephaestus-broker: roles build лишний аргумент — отказ", "deny", br, "hephaestus-broker", False, B('pantheon roles build --out /tmp/x --force')),
+        ("hephaestus-broker: roles build --out /dev/null — отказ", "deny", br, "hephaestus-broker", False, B('pantheon roles build --out /dev/null')),
+        ("hephaestus-broker: roles build --src без --out — отказ", "deny", br, "hephaestus-broker", False, B('pantheon roles build --src /tmp/y')),
+        ("hq: roles build без --out — можно (привилегированная роль)", "allow", ".", "hq", False, B("pantheon roles build")),
         # tg-secret: tg_read — только командой (правило перенесено из старого хука 14.10)
         ("tg_read командой — можно", "allow", ".", "", False, B("~/projects/other/tg-read/tg_read.py status")),
         ("python -c с импортом tg_read — отказ", "deny", ".", "", False, B('python3 -c "import tg_read; print(1)"')),
@@ -634,7 +772,7 @@ def main():
             "git commit -m \"$(cat <<'EOF'\nfeat: x\n\nтело (со скобками) и 'кавычками'\nEOF\n)\"",
             "for f in src/*.ts; do sed -i '' 's/a/b/' \"$f\"; done", "echo hi # комментарий с апострофом don't",
             "set -euo pipefail; pnpm build", "OUT=/tmp/res.txt; pnpm test > \"$OUT\" 2>&1",
-            "tmp=$(mktemp -d); cp src/a.ts \"$tmp\"/", "git add -A && git commit -m 'x' && git push",
+            "tmp=$(mktemp -d -p \"$TMPDIR\"); cp src/a.ts \"$tmp\"/", "git add -A && git commit -m 'x' && git push",
             "tar -xzf /tmp/a.tgz -C build", "touch \"$(pwd)/x.txt\"", "rsync -a ~/projects/x/ ./vendor/",
             "ln -s ../shared src/shared", "while read -r l; do echo \"$l\"; done < src/a.ts", "git -C ~/ai/pantheon log -3")],
         # раунд 3: zsh-модификаторы и квалификаторы, cdpath, опасные опции git, переменные-программы, пульт по пути
@@ -700,7 +838,72 @@ def main():
         ("private: hq читает me/", "allow", ".", "hq", False, R(K("me/finance.md"))),
         ("private: hq — ключ git-crypt нет", "deny", ".", "hq", False, R(K(".git/git-crypt/keys/default"))),
         ("private: chiron — ключ git-crypt pantheon нет", "deny", ".", "chiron", True, B("cat ~/ai/pantheon/.git/git-crypt/keys/default")),
-        ("private: chiron (субагент Зевса) читает me/", "allow", ".", "chiron", True, R(K("me/finance.md"))),
+        ("private: chiron (субагент Зевса) в окне штаба читает me/", "allow", ".", "chiron", True,
+         R(K("me/finance.md")), None, HQ),
+        # P0-2 (metis-0061): личное chiron — только в окне штаба
+        ("private: chiron в окне координатора — me/ отказ", "deny", br, "chiron", True, R(K("me/finance.md")), None,
+         {"PANTHEON_ROLE": "domain-coordinator"}),
+        ("private: chiron без окна (PANTHEON_ROLE нет) — me/ отказ", "deny", ".", "chiron", True, R(K("me/finance.md"))),
+        ("chiron: Agent chiron из окна координатора — отказ", "deny", br, "domain-coordinator", False,
+         A("chiron"), None, {"PANTHEON_ROLE": "domain-coordinator"}),
+        ("chiron: Task chiron из окна координатора без agent_type — отказ", "deny", br, "", False,
+         ("Task", {"subagent_type": "chiron", "prompt": "x"}), None, {"PANTHEON_ROLE": "athena-broker"}),
+        ("chiron: Agent chiron из субагента лида — отказ", "deny", br, "hephaestus-broker", True, A("chiron")),
+        ("chiron: Agent chiron из штаба — можно", "allow", "ai/pantheon", "hq", False, A("chiron"), None, HQ),
+        ("chiron: Agent chiron из главной сессии штаба без agent_type — можно", "allow", "ai/pantheon", "", False,
+         A("chiron"), None, HQ),
+        ("chiron: Agent chiron из вашей сессии без роли — можно", "allow", ".", "", False, A("chiron")),
+        ("chiron: Agent другой субагент из окна координатора — можно", "allow", br, "domain-coordinator", False,
+         A("hephaestus-broker"), None, {"PANTHEON_ROLE": "domain-coordinator"}),
+        # P0-1 (metis-0060): штабу Telegram закрыт
+        ("hq-telegram: Agent tg-reader из штаба — отказ", "deny", "ai/pantheon", "hq", False, A("tg-reader"), None, HQ),
+        ("hq-telegram: Task plugin:tg-reader из штаба — отказ", "deny", "ai/pantheon", "", False,
+         ("Task", {"subagent_type": "x:tg-reader", "prompt": "x"}), None, HQ),
+        ("hq-telegram: Skill telegram-read из штаба — отказ", "deny", "ai/pantheon", "hq", False,
+         ("Skill", {"skill": "telegram-read"}), None, HQ),
+        ("hq-telegram: Skill plugin:telegram-read из штаба — отказ", "deny", "ai/pantheon", "hq", False,
+         ("Skill", {"skill": "tg:telegram-read", "args": "x"}), None, HQ),
+        ("hq-telegram: Bash скрипт tg-read из штаба — отказ", "deny", "ai/pantheon", "hq", False,
+         B("~/projects/other/tg-read/" + TGR + " dialogs"), None, HQ),
+        ("hq-telegram: Bash демон tg-readd из штаба — отказ", "deny", "ai/pantheon", "hq", False,
+         B("launchctl kickstart gui/501/tg-readd"), None, HQ),
+        ("hq-telegram: Bash обычный из штаба — можно", "allow", "ai/pantheon", "hq", False, B("ls tg-reader-notes"),
+         None, HQ),
+        ("hq-telegram: Skill другой из штаба — можно", "allow", "ai/pantheon", "hq", False,
+         ("Skill", {"skill": "research"}), None, HQ),
+        ("hq-telegram: Agent tg-reader из окна координатора — можно", "allow", lw, "domain-coordinator", False,
+         A("tg-reader"), None, {"PANTHEON_ROLE": "themis-sources"}),
+        ("hq-telegram: Skill telegram-read из окна координатора — можно", "allow", lw, "domain-coordinator", False,
+         ("Skill", {"skill": "telegram-read"}), None, {"PANTHEON_ROLE": "themis-sources"}),
+        ("hq-telegram: Agent tg-reader из вашей сессии — можно", "allow", ".", "", False, A("tg-reader")),
+        # metis-0047: пульт окон — только привилегированным
+        ("координатор: pantheon stop --all — отказ", "deny", br, "domain-coordinator", False, B("pantheon stop --all")),
+        ("координатор: pantheon resume — отказ", "deny", br, "domain-coordinator", False, B("pantheon resume athena-broker")),
+        ("координатор: pantheon pause — отказ", "deny", br, "domain-coordinator", False, B("pantheon pause hermes-alex")),
+        ("координатор: pantheon restart — отказ", "deny", br, "domain-coordinator", False, B("pantheon restart hermes-alex")),
+        ("hq: pantheon stop --all можно", "allow", "ai/pantheon", "hq", False, B("pantheon stop --all")),
+        ("hq: pantheon resume, pause, restart можно", "allow", "ai/pantheon", "hq", False,
+         B("pantheon resume athena-broker; pantheon pause hermes-alex; pantheon restart hermes-alex")),
+        ("координатор: pantheon saved и who можно", "allow", br, "domain-coordinator", False,
+         B("pantheon saved; pantheon who")),
+        ("координатор: pantheon jobs resume --all — отказ, как раньше", "deny", br, "domain-coordinator", False,
+         B("pantheon jobs resume --all")),
+        ("hq: pantheon jobs pause --all можно, как раньше", "allow", "ai/pantheon", "hq", False,
+         B("pantheon jobs pause --all")),
+        # metis-0084: hq — поиск по папке выше ключа можно, явный путь в ключ — отказ
+        ("private: hq grep -rn по ~/ai/pantheon — можно", "allow", "ai/pantheon", "hq", False,
+         B(f"grep -rn foo {home}/ai/pantheon"), None, HQ),
+        ("private: hq Grep по ~/ai/pantheon — можно", "allow", "ai/pantheon", "hq", False, G(P("")), None, HQ),
+        ("private: hq Glob **/*.md по ~/ai/pantheon — можно", "allow", "ai/pantheon", "hq", False,
+         ("Glob", {"pattern": "**/*.md", "path": P("")}), None, HQ),
+        ("private: hq cat ключа git-crypt — отказ", "deny", "ai/pantheon", "hq", False,
+         B(f"cat {home}/ai/pantheon/.git/git-crypt/keys/default"), None, HQ),
+        ("private: hq ls .git/* (шаблон раскрывается в ключ) — отказ", "deny", "ai/pantheon", "hq", False,
+         B(f"ls {home}/ai/pantheon/.git/*"), None, HQ),
+        ("private: hq Glob .git/git-crypt/** — отказ", "deny", "ai/pantheon", "hq", False,
+         ("Glob", {"pattern": ".git/git-crypt/**", "path": P("")}), None, HQ),
+        ("private: argus grep -r по ~/ai/knowledge — отказ, как раньше", "deny", br, "argus", True,
+         B(f"grep -r foo {home}/ai/knowledge")),
         ("private: mnemo-brain пишет в me/", "allow", "ai/knowledge", "domain-coordinator", False, W(K("me/x.md"))),
         ("push: mnemo-brain не отправляет сам (SEC-13)", "deny", "ai/knowledge", "domain-coordinator", False,
          B("git push origin wiki-sync")),
@@ -752,11 +955,52 @@ def main():
          B("curl -s -X POST localhost:9334/eval -d '{}'")),
         ("cdp: мастерская действует через демон", "allow", ws, "workshop", False,
          B("curl -s -X POST 127.0.0.1:9333/cmd -d '{}'")),
-        ("cdp: prometheus читает /eval", "allow", br, "prometheus", True, B("curl -s -X POST 127.0.0.1:9333/eval -d '{}'")),
+        ("cdp: prometheus /eval — отказ (демон только мастерской)", "deny", br, "prometheus", True, B("curl -s -X POST 127.0.0.1:9333/eval -d '{}'")),
+        ("cdp: prometheus curl 127.0.0.1:9333/open — отказ", "deny", br, "prometheus", True, B("curl -s -X POST 127.0.0.1:9333/open -d '{}'")),
         ("cdp: prometheus /cmd — отказ", "deny", br, "prometheus", True, B("curl -s -X POST 127.0.0.1:9333/cmd -d '{}'")),
         ("cdp: /close — отказ и мастерской", "deny", ws, "workshop", False, B("curl -s -X POST 127.0.0.1:9333/close")),
         ("cdp: hq запускает демон — отказ", "deny", ".", "hq", False, B("node ~/.claude/tools/cdp-daemon.mjs comet")),
         ("cdp: ваша сессия без роли — можно", "allow", ".", "", False, B("curl -s 127.0.0.1:9333/health")),
+        *[(f"mktemp: {c!r} — запись в $TMPDIR, можно", "allow", br, "dev-sonnet", True, B(c)) for c in (
+            'f=$(mktemp -p "$TMPDIR"); echo x > $f', 'f=$(mktemp -p $TMPDIR); echo x > $f',
+            'f=$(mktemp -p "${TMPDIR}"); echo x > $f', 'f=$(mktemp -d -p "$TMPDIR"); echo x > $f/a',
+            'f=$(mktemp -p "$TMPDIR" -t foo); echo x > $f', 'f=$(mktemp -t foo -p "$TMPDIR"); echo x > $f')],
+        *[(f"mktemp: {c!r} — не в $TMPDIR, цель не разобрать", "deny", br, "dev-sonnet", True, B(c)) for c in (
+            'f=$(mktemp); echo x > $f', 'f=$(mktemp -d); echo x > $f/a', 'f=$(mktemp -t foo); echo x > $f')],
+        ("mktemp: -p в личную папку — как обычная запись, отказ", "deny", br, "dev-sonnet", True,
+         B(f"f=$(mktemp -p {home}/ai/pantheon); echo x > $f")),
+        ("tg-readd: роль — status можно", "allow", br, "dev-sonnet", True, B("tg-readd status")),
+        ("tg-readd: роль — kickstart можно", "allow", br, "dev-sonnet", True, B("tg-readd kickstart")),
+        ("tg-readd: роль — logout отказ", "deny", br, "dev-sonnet", True, B("tg-readd logout")),
+        ("tg-readd: роль — login отказ", "deny", br, "argus", True, B("tg-readd login")),
+        ("tg-readd: роль — путь к бинарю, logout отказ", "deny", br, "dev-sonnet", True,
+         B("/usr/local/opt/tg-readd/bin/tg-readd logout")),
+        ("tg-readd: роль — tg-readd-update отказ", "deny", br, "dev-sonnet", True, B("tg-readd-update")),
+        ("tg-readd: роль — tg-readd-uninstall отказ", "deny", br, "dev-sonnet", True, B("tg-readd-uninstall")),
+        ("tg-readd: роль — tg-readd-acl-test отказ", "deny", br, "dev-sonnet", True, B("tg-readd-acl-test")),
+        ("tg-readd: env tg-readd logout — отказ", "deny", br, "dev-sonnet", True, B("env tg-readd logout")),
+        ("tg-readd: sh -c 'tg-readd logout' — отказ", "deny", br, "dev-sonnet", True, B("sh -c 'tg-readd logout'")),
+        ("tg-readd: переменная X=logout — отказ", "deny", br, "dev-sonnet", True, B("X=logout; tg-readd $X")),
+        ("tg-readd: env tg-readd status — можно", "allow", br, "dev-sonnet", True, B("env tg-readd status")),
+        ("tg-readd: launchctl bootout — отказ", "deny", br, "dev-sonnet", True,
+         B("launchctl bootout gui/501/local.tg-read.daemon")),
+        ("tg-readd: launchctl kill — отказ", "deny", br, "dev-sonnet", True,
+         B("launchctl kill TERM system/local.tg-read.daemon")),
+        ("tg-readd: launchctl unload -w — отказ", "deny", br, "dev-sonnet", True,
+         B("launchctl unload -w ~/Library/LaunchAgents/local.tg-read.daemon.plist")),
+        ("tg-readd: sudo launchctl unload — отказ", "deny", br, "dev-sonnet", True,
+         B("sudo launchctl unload /Library/LaunchDaemons/local.tg-read.daemon.plist")),
+        ("tg-readd: launchctl stop — отказ", "deny", br, "dev-sonnet", True,
+         B("launchctl stop local.tg-read.daemon")),
+        ("tg-readd: владелец launchctl stop — можно", "allow", ".", "", False,
+         B("launchctl stop local.tg-read.daemon")),
+        ("tg-readd: launchctl print — можно", "allow", br, "dev-sonnet", True,
+         B("launchctl print gui/501/local.tg-read.daemon")),
+        ("tg-readd: sudo rm в /usr/local/opt/tg-readd — отказ", "deny", br, "dev-sonnet", True,
+         B("sudo rm -rf /usr/local/opt/tg-readd")),
+        ("tg-readd: сессия владельца logout — можно", "allow", ".", "", False, B("tg-readd logout")),
+        ("tg-readd: владелец bootout — можно", "allow", ".", "", False,
+         B("launchctl bootout gui/501/local.tg-read.daemon")),
         ("cdp: мастерская мимо демона на 9222 — отказ", "deny", ws, "workshop", False, B("curl -s 127.0.0.1:9222/json/version")),
         ("cdp: prometheus читает DevToolsActivePort — отказ", "deny", br, "prometheus", True,
          B("cat ~/Library/Application\\ Support/Comet/DevToolsActivePort")),
@@ -1039,8 +1283,11 @@ def main():
     failed = 0
     for case in cases:
         name, want, pdir, role, sub, (tool, ti) = case[:6]
+        if want == "allow" and name in NEEDS_POLICY and not HAS_TOMLLIB:
+            want = "deny"  # без tomllib привилегий нет (см. NEEDS_POLICY)
         cwd = case[6] if len(case) > 6 else None
-        got = run(home, os.path.normpath(pdir), role, tool, ti, sub, cwd)
+        penv = case[7] if len(case) > 7 else None  # env окна: PANTHEON_ROLE (guard 0.5.5)
+        got = run(home, os.path.normpath(pdir), role, tool, ti, sub, cwd, penv=penv)
         mark = "ok  " if got == want else "FAIL"
         failed += got != want
         print(f"{mark} {name}: {got}")
@@ -1151,7 +1398,7 @@ def main():
         if os.path.exists(stop_log):  # свой журнал на каждый случай: FAIL достаётся тому, кто его вызвал
             os.remove(stop_log)
         ev ={"hook_event_name": "Stop", "transcript_path": tp, "session_id": "s-test", "cwd": stop_home}
-        r = subprocess.run([sys.executable, "-I", GUARD], input=json.dumps(ev), capture_output=True, text=True,
+        r = subprocess.run([sys.executable, "-I", SHIM, GUARD], input=json.dumps(ev), capture_output=True, text=True,
                            env=stop_env, timeout=10)
         ok = r.returncode == 0 and '"block"' not in r.stdout and '"deny"' not in r.stdout \
             and not os.path.exists(stop_log)
@@ -1159,19 +1406,14 @@ def main():
         cases.append(None)
         print(f"{'ok  ' if ok else 'FAIL'} Stop, {label}: код {r.returncode}, без блокировки и без записи в журнал сбоев")
     shutil.rmtree(stop_home, ignore_errors=True)
-    # SEC-29/SEC-10: сбой всего скрипта — в окне роли (--strict) выход 2, в плагине выход 0; оба — в журнал
+    # metis-0094: любой сбой — код 2 и причина в stderr во всех режимах (плагин, --managed, --strict), в вашей сессии
+    # тоже; ни выхода 0 (пропуск), ни трассировки с кодом 1. Исключение — Stop (код 2 не дал бы закончить ход)
     env = {"HOME": home, "PATH": os.environ["PATH"], "TMPDIR": "/nonexistent-tmp"}
-    for mode, want_code in (("--strict", 2), (None, 0)):
-        argv = [sys.executable, "-I", GUARD] + ([mode] if mode else [])
-        r = subprocess.run(argv, input="не json", capture_output=True, text=True, env=env, timeout=10)
-        ok = r.returncode == want_code
-        failed += not ok
-        cases.append(None)
-        print(f"{'ok  ' if ok else 'FAIL'} сбой скрипта, режим {mode or 'плагин'}: код {r.returncode}, ждали {want_code}")
+    failed += failure_checks(home, env, cases)
     log = os.path.join(home, ".local/state/pantheon/logs/guard-failures.log")
     lines = open(log).read().splitlines() if os.path.exists(log) else []
     ok = any("\tstrict\tmain\tJSONDecodeError" in x for x in lines) and any("\tplugin\tmain\t" in x for x in lines) \
-        and not any("не json" in x for x in lines)
+        and any("\tmanaged\tmain\t" in x for x in lines) and not any("не json" in x for x in lines)
     failed += not ok
     cases.append(None)
     print(f"{'ok  ' if ok else 'FAIL'} журнал сбоев: {len(lines)} строк, без текста ввода")
@@ -1194,12 +1436,57 @@ def main():
     failed += not ok
     cases.append(None)
     print(f"{'ok  ' if ok else 'FAIL'} управляемые настройки: хук плагина молчит только при guard --managed: {results}")
-    # hq задевает только ключ git-crypt (grep -r по ~/ai/pantheon): текст про ключ, а не «личное только hq…»
+    # metis-0084: hq grep -r по ~/ai/pantheon проходит; явный путь в ключ — отказ с текстом про ключ, а не «только hq…»
     out = run(home, "ai/pantheon", "hq", "Bash", {"command": "grep -rln слово ."}, raw=True)
-    ok = '"deny"' in out and "ключ git-crypt" in out and "--exclude-dir=.git" in out and "только hq" not in out
+    key = run(home, "ai/pantheon", "hq", "Bash", {"command": "cat .git/git-crypt/keys/default"}, raw=True)
+    ok = '"deny"' not in out and '"deny"' in key and "ключ git-crypt" in key and "только hq" not in key
     failed += not ok
     cases.append(None)
-    print(f"{'ok  ' if ok else 'FAIL'} private: отказ hq по ключу git-crypt — понятный текст")
+    print(f"{'ok  ' if ok else 'FAIL'} private: hq grep -r по ~/ai/pantheon можно, ключ — отказ с понятным текстом")
+    # P0-1: при управляемых настройках с guard --managed хук плагина Agent, Task и Skill всё равно проверяет
+    # (управляемые настройки их guard не передают), а Bash — пропускает (его проверяет хук --managed)
+    probe2 = os.path.join(home, "managed-main.py")
+    with open(probe2, "w") as fh:
+        fh.write("import sys, io, importlib.util\n"
+                 "spec = importlib.util.spec_from_file_location('g', sys.argv[1]); g = importlib.util.module_from_spec(spec)\n"
+                 "spec.loader.exec_module(g)\n"
+                 "g.MANAGED_FILE, g.MARKET_GUARD, g.MODE = sys.argv[2], sys.argv[1], 'plugin'\n"
+                 "sys.stdin = io.StringIO(sys.argv[3])\n"
+                 "g.main()\n")
+    open(mf, "w").write('{"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "python3 guard.py --managed"}]}]}}')
+    menv = dict(env, PANTHEON_ROLE="hq")
+    outs = {}
+    for label, tool, ti in (("Agent", "Agent", {"subagent_type": "tg-reader", "prompt": "x"}),
+                            ("Skill", "Skill", {"skill": "telegram-read"}),
+                            ("Bash", "Bash", {"command": "pnpm dev"})):
+        ev = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": ti, "session_id": "s-test",
+              "cwd": os.path.join(home, "ai/pantheon"), "agent_type": "hq"}
+        outs[label] = subprocess.run([sys.executable, "-I", probe2, GUARD, mf, json.dumps(ev)], capture_output=True,
+                                     text=True, env=menv, timeout=10).stdout
+    ok = '"deny"' in outs["Agent"] and "hq-telegram" in outs["Agent"] and '"deny"' in outs["Skill"] \
+        and outs["Bash"].strip() == ""
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} управляемые настройки: хук плагина проверяет Agent и Skill (hq-telegram), Bash — нет")
+    # сбой проверки окна — отказ и в главной сессии окна роли без agent_type (strict_window)
+    probe3 = os.path.join(home, "window-fail.py")
+    with open(probe3, "w") as fh:
+        fh.write("import sys, io, importlib.util\n"
+                 "spec = importlib.util.spec_from_file_location('g', sys.argv[1]); g = importlib.util.module_from_spec(spec)\n"
+                 "spec.loader.exec_module(g)\n"
+                 "def boom(*a):\n    raise RuntimeError('x')\n"
+                 "g.check_hq_telegram = boom\n"
+                 "g.MANAGED_FILE = sys.argv[2]\n"
+                 "sys.stdin = io.StringIO(sys.argv[3])\n"
+                 "g.run_hook()\n")
+    ev = {"hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input": {"subagent_type": "x", "prompt": "x"},
+          "session_id": "s-test", "cwd": os.path.join(home, "ai/pantheon")}
+    got = [subprocess.run([sys.executable, "-I", probe3, GUARD, os.path.join(home, "no-managed.json"), json.dumps(ev)],
+                          capture_output=True, text=True, env=e, timeout=10) for e in (menv, env)]
+    ok = all(r.returncode == 2 and "сбой проверки окна" in r.stderr for r in got)
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} сбой проверки окна: и в окне роли, и в вашей сессии без роли — код 2 (metis-0094)")
     print(f"\n{len(cases) - failed} из {len(cases)} прошли")
     sys.exit(1 if failed else 0)
 

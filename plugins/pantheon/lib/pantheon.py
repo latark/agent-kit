@@ -56,6 +56,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon infra-check                  опоры системы после обновления Claude Code
   pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (тик раз в неделю)
   pantheon roles build                  роли ~/.claude/agents/*.md из шаблонов *.tmpl и частей _parts/*.part
+  pantheon roles build --out <папка> [--src <папка шаблонов>]   проба: собрать роли из --src (по умолчанию
+                                        ~/.claude/agents) в --out, живые роли не трогает, сигналов нет; --out в
+                                        ~/.claude/agents или внутри — отказ (код 2)
   pantheon approve [list] | add --site S --allow "…" [--limits "…"] | remove N   заранее разрешённое (только вы)
   pantheon consent <id> [--days N]      ваш ответ Зевсу на вопрос <id> (журнал owner-log Зевса, по умолчанию 7 дней) —
                                         для исполнителя: согласие, данное в окне Зевса
@@ -1403,9 +1406,12 @@ def _real_dir(p, roots, strict=False, create=False):
     return None
 
 
-# корпус и его копии: индексы qmd и самого корпуса хранят полный текст, переписка сессий Фемиды — выдержки
+# корпус и его копии: индексы qmd и самого корпуса хранят полный текст, переписка сессий Фемиды — выдержки.
+# legal-watch/cache и inbox (P0-1, metis-0060): там выгрузки Telegram-каналов (cache/telegram) и входящие сырые
+# материалы — чужой текст, как корпус; штабу его не читать (у Зевса личное и действия наружу). Вопросы по праву и
+# каналам — Фемиде (themis-sources) поручением; коллекцию qmd legal штабу закрывает хук qmd-query
 HQ_CLOSED_DIRS = ["~/projects/expert-corpus", "~/.cache/expert-corpus", "~/.cache/qmd",
-                  "~/.claude/projects/*expert-corpus*"]
+                  "~/.claude/projects/*expert-corpus*", "~/projects/legal-watch/cache", "~/projects/legal-watch/inbox"]
 
 
 # выводы фоновых задач и TMPDIR песочницы всех сессий Claude Code: /tmp/claude-<uid> (на macOS по умолчанию). Не из
@@ -1481,8 +1487,9 @@ def _deny_forms(paths):
 # или пропавший файл защиты останавливают действие, а не пропускают. Путь — только клон маркетплейса внутри
 # ~/.claude/plugins (туда ролям писать нельзя: protect-config), а не «рядом с этим плагином»: рабочая копия
 # ~/projects/agent-kit — папка metis-pantheon, её правят субагенты, и подменённый там guard стал бы защитой окон
-# (находка проверки безопасности 14.10). Ваших сессий без роли это не касается.
-GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob"
+# (находка проверки безопасности 14.10). Ваших сессий без роли это не касается. Agent|Task|Skill — правила
+# hq-telegram и chiron (P0-1, P0-2): штабу — ни tg-reader, ни telegram-read; коуч с личным — только у Зевса.
+GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill"
 MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks", "guard.py")
 
 
@@ -2220,9 +2227,9 @@ def _head_keys(text):
     return [ln.split(":", 1)[0] for ln in text[4:end].splitlines() if re.match(r"[A-Za-z_]", ln)] if end > 0 else None
 
 
-def _role_text(tmpl_text):
+def _role_text(tmpl_text, parts=None):
     def part(m):
-        p = os.path.join(PARTS, m.group(1) + ".part")
+        p = os.path.join(parts or PARTS, m.group(1) + ".part")
         if not ROLE_NAME.fullmatch(m.group(1)) or not os.path.isfile(p):
             raise ValueError(f"нет части {m.group(1)}")
         return open(p, encoding="utf-8").read().rstrip("\n")
@@ -2237,18 +2244,30 @@ def _marked(text, tmpl):
     return text[:end + 5] + ROLE_MARK.format(tmpl=tmpl) + "\n" + text[end + 5:]
 
 
-def roles_build():
+def roles_build(src=None, out=None):
+    """Роли из шаблонов src (по умолчанию ~/.claude/agents) в папку out (по умолчанию она же). Режим с out — проба
+    (metis-0097): пишет и чистит только в out, владельцу сигнал не шлёт; out в ~/.claude/agents или внутри — ValueError."""
+    probe = out is not None
+    src = src or AGENTS
+    if probe:
+        real_out, real_agents = os.path.realpath(os.path.expanduser(out)), os.path.realpath(AGENTS)
+        if real_out == real_agents or real_out.startswith(real_agents + os.sep):
+            raise ValueError(f"--out {out} совпадает с {AGENTS} или лежит внутри: пробная сборка живые роли не трогает")
+        out = real_out
+    else:
+        out = AGENTS
+    parts = os.path.join(src, "_parts")
     with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
         reg = tomllib.load(fh)
     want, errors = {}, []
-    tmpls = sorted(f for f in os.listdir(AGENTS) if f.endswith(".tmpl")) if os.path.isdir(AGENTS) else []
+    tmpls = sorted(f for f in os.listdir(src) if f.endswith(".tmpl")) if os.path.isdir(src) else []
     for f in tmpls:
         base = f[:-5]
         if not ROLE_NAME.fullmatch(base):
             errors.append(f"{f}: имя не по образцу")
             continue
         try:
-            text = _role_text(open(os.path.join(AGENTS, f), encoding="utf-8").read())
+            text = _role_text(open(os.path.join(src, f), encoding="utf-8").read(), parts)
         except (OSError, ValueError) as e:
             errors.append(f"{f}: {e}")
             continue
@@ -2273,8 +2292,10 @@ def roles_build():
                 continue
             want[f"{base}-{short}.md"] = (f, out_text)
     made = []
+    if probe:
+        os.makedirs(out, exist_ok=True)
     for fname, (tmpl, text) in sorted(want.items()):
-        out = os.path.join(AGENTS, fname)
+        out_file = os.path.join(out, fname)
         try:
             if "{{" in text:
                 raise ValueError("осталась подстановка {{…}}")
@@ -2282,22 +2303,22 @@ def roles_build():
         except ValueError as e:
             errors.append(f"{tmpl} → {fname}: {e}")
             continue
-        old = open(out, encoding="utf-8").read() if os.path.exists(out) else None
+        old = open(out_file, encoding="utf-8").read() if os.path.exists(out_file) else None
         if old is not None and "pantheon roles build" not in old[:2000]:
             errors.append(f"{fname} есть и написан не сборкой — не трогаю (убрать его или шаблон {tmpl})")
             continue
         if old != text:
-            write_atomic(out, text)
+            write_atomic(out_file, text)
             made.append(fname)
-    for f in sorted(os.listdir(AGENTS)) if os.path.isdir(AGENTS) else []:
-        p = os.path.join(AGENTS, f)
+    for f in sorted(os.listdir(out)) if os.path.isdir(out) else []:
+        p = os.path.join(out, f)
         if f.endswith(".md") and f not in want and not os.path.islink(p) and os.path.isfile(p):
             if "pantheon roles build" in open(p, encoding="utf-8").read(2000):
                 os.remove(p)
                 made.append(f"-{f}")
     for e in errors:
         print(f"roles build: {e}", file=sys.stderr)
-    if errors:
+    if errors and not probe:
         alert_once("roles-build", "\n".join(errors), f"pantheon roles build: {errors[0]}"
                    + (f" (и ещё {len(errors) - 1})" if len(errors) > 1 else ""), "pantheon")
     return made
@@ -3921,7 +3942,19 @@ def main(argv):
             return watch_cmd("wake", rest)
         return wake(rest)
     if cmd == "roles" and rest[:1] == ["build"]:
-        made = roles_build()
+        src = out = None
+        flags = rest[1:]
+        try:
+            if flags:
+                if len(flags) % 2 or any(a not in ("--out", "--src") for a in flags[::2]) \
+                        or len(set(flags[::2])) != len(flags) // 2 or "--out" not in flags[::2]:
+                    raise ValueError("roles build [--out <папка> [--src <папка шаблонов>]]")
+                kv = dict(zip(flags[::2], flags[1::2]))
+                out, src = kv["--out"], kv.get("--src")
+            made = roles_build(src, out)
+        except ValueError as e:
+            print(f"roles build: {e}", file=sys.stderr)
+            return 2
         print(f"роли: {', '.join(made) if made else 'без изменений'}")
         return 0
     if cmd == "direction":
