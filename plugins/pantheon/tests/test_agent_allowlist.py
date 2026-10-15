@@ -84,7 +84,9 @@ def agents_hook(data):
 
 
 def agent_entries(data):
-    return [e for e in (data.get("hooks") or {}).get("PreToolUse") or [] if "Agent" in e.get("matcher", "")]
+    """Записи PreToolUse с Agent в matcher, кроме строгого guard: он тоже ловит Agent|Task|Skill (guard 0.5.5)."""
+    return [e for e in (data.get("hooks") or {}).get("PreToolUse") or [] if "Agent" in e.get("matcher", "")
+            and not any("guard.py" in h.get("command", "") for h in e.get("hooks") or [])]
 
 
 def agent_rules(data):

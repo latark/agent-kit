@@ -235,7 +235,7 @@ def test_qmd_config():
                   r.stderr)
 
 
-def hook(ti, tool="mcp__qmd__query", role=None, window=None):
+def hook(ti, tool="mcp__qmd__query", role=None, window=None, raw=False):
     ev = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": ti}
     if role:
         ev["agent_type"] = role
@@ -244,7 +244,7 @@ def hook(ti, tool="mcp__qmd__query", role=None, window=None):
         env["PANTHEON_ROLE"] = window
     r = subprocess.run([sys.executable, CTX, "qmd-query"], input=json.dumps(ev),
         capture_output=True, text=True, timeout=30, env=env)
-    return "deny" in r.stdout
+    return r.stdout if raw else "deny" in r.stdout
 
 
 def test_hook():
@@ -272,7 +272,18 @@ def test_hook():
     check("штаб: multi_get со списком, где есть corpus — отказ",
           hook({"pattern": "qmd://pantheon/a.md,qmd://corpus/b.md"}, m, "hq"))
     check("штаб: multi_get глоб {corpus,…} — отказ", hook({"pattern": "qmd://{corpus,pantheon}/*.md"}, m, "hq"))
-    check("штаб: multi_get qmd://legal/… — пропуск", not hook({"pattern": "qmd://legal/2026-09*.md"}, m, "hq"))
+    # P0-1 (metis-0060): штабу закрыта и коллекция legal — право и выгрузки Telegram-каналов, только Фемиде
+    check("штаб (окно hq): query по legal — отказ", hook({**q, "collections": ["legal"]}, window="hq"))
+    check("штаб: query по legal и pantheon — отказ", hook({**q, "collections": ["pantheon", " legal"]}, role="hq"))
+    out = hook({**q, "collections": ["legal"]}, window="hq", raw=True)
+    check("штаб: отказ по legal — Фемиде (themis-sources) поручением", "themis-sources" in out and "Telegram" in out
+          and "Куклин" not in out, out)
+    check("штаб (окно hq): query по pantheon — пропуск", not hook({**q, "collections": ["pantheon"]}, window="hq"))
+    check("штаб: get qmd://legal/… — отказ", hook({"file": "qmd://legal/x.md"}, g, window="hq"))
+    check("штаб: multi_get qmd://legal/… — отказ", hook({"pattern": "qmd://legal/2026-09*.md"}, m, "hq"))
+    check("координатор: query по legal — пропуск", not hook({**q, "collections": ["legal"]}, role="domain-coordinator",
+                                                             window="domain-coordinator"))
+    check("координатор: get qmd://legal/… — пропуск", not hook({"file": "qmd://legal/x.md"}, g, "domain-coordinator"))
     check("координатор: get по docid — пропуск", not hook({"file": "#abc123"}, g, "domain-coordinator"))
     check("штаб: get с %2e%2e — отказ", hook({"file": "qmd://pantheon/%2e%2e/corpus/x.md"}, g, "hq"))
     check("штаб: get с обратной косой — отказ", hook({"file": "qmd://pantheon\\..\\corpus/x.md"}, g, "hq"))

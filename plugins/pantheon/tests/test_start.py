@@ -133,6 +133,41 @@ def main():
     run("roles", "build")
     check("roles build: шаблон убран — собранная роль убрана", not os.path.exists(os.path.join(agents_dir, "argus.md")))
 
+    # roles build --out (metis-0097): проба в чужую папку, живые роли не трогает
+    def snap(d):
+        return {f: open(os.path.join(d, f), encoding="utf-8").read() for f in sorted(os.listdir(d))
+                if os.path.isfile(os.path.join(d, f))}
+    psrc, pout = os.path.join(tmp, "probe-src"), os.path.join(tmp, "probe-out")
+    os.makedirs(os.path.join(psrc, "_parts"))
+    os.makedirs(pout)
+    open(os.path.join(psrc, "_parts", "report.part"), "w").write("## Отчёт\n\nСтатус: проба\n")
+    open(os.path.join(psrc, "argus.tmpl"), "w").write("---\nname: argus\n---\n\nПробный ревьюер.\n{{> report}}\n")
+    open(os.path.join(pout, "gone.md"), "w").write("---\nname: gone\n---\n<!-- собрано pantheon roles build из gone.tmpl — x -->\n")
+    open(os.path.join(pout, "mine.md"), "w").write("---\nname: mine\n---\nчужая\n")
+    before = snap(agents_dir)
+    r = run("roles", "build", "--out", pout, "--src", psrc)
+    got = snap(pout)
+    check("roles build --out: роли собраны из --src в --out, устаревшая собранная убрана, чужая цела",
+          r.returncode == 0 and "Пробный ревьюер" in got.get("argus.md", "") and "Статус: проба" in got["argus.md"]
+          and "gone.md" not in got and got.get("mine.md", "").endswith("чужая\n"))
+    check("roles build --out: ~/.claude/agents до и после — тот же состав и содержимое", snap(agents_dir) == before)
+    open(os.path.join(psrc, "iris.tmpl"), "w").write("---\nname: iris\n---\n{{> nope}}\n")
+    al0 = open(os.path.join(home, "alerts.md")).read()
+    r = run("roles", "build", "--out", pout, "--src", psrc)
+    check("roles build --out: ошибка шаблона — в stderr, сигнала владельцу нет",
+          "нет части nope" in r.stderr and open(os.path.join(home, "alerts.md")).read() == al0)
+    before = snap(agents_dir)
+    for bad in (agents_dir, os.path.join(agents_dir, "sub"), os.path.join(tmp, ".claude", "x", "..", "agents")):
+        r = run("roles", "build", "--out", bad)
+        check(f"roles build --out {os.path.relpath(bad, tmp)}: внутри ~/.claude/agents — код 2",
+              r.returncode == 2 and snap(agents_dir) == before and not os.path.exists(os.path.join(agents_dir, "sub")))
+    link = os.path.join(tmp, "agents-link")
+    os.symlink(agents_dir, link)
+    r = run("roles", "build", "--out", link)
+    check("roles build --out: симлинк на ~/.claude/agents — код 2", r.returncode == 2 and snap(agents_dir) == before)
+    r = run("roles", "build", "--src", psrc)
+    check("roles build --src без --out — код 2", r.returncode == 2 and snap(agents_dir) == before)
+
     # start: координатор направления
     r = run("start", "athena-broker", "закрой", "эпик", "--from", "zeus")
     c = calls()

@@ -131,9 +131,9 @@ def guard_says(home, cmd, role):
              "cwd": os.path.join(home, PROJECT), "agent_type": role}
     env = {"HOME": home, "PATH": os.environ["PATH"], "CLAUDE_PROJECT_DIR": os.path.join(home, PROJECT),
            "TMPDIR": os.path.join(home, "tmp")}
-    out = subprocess.run([sys.executable, "-I", GUARD], input=json.dumps(event), capture_output=True, text=True,
-                         env=env, timeout=20).stdout
-    return "deny" if '"deny"' in out else "allow"
+    r = subprocess.run([sys.executable, "-I", GUARD], input=json.dumps(event), capture_output=True, text=True,
+                       env=env, timeout=20)
+    return "deny" if r.returncode == 2 or '"deny"' in r.stdout else "allow"  # код 2 — сбой, отказ (metis-0094)
 
 
 def shell_changes(home, shell, cmd):
