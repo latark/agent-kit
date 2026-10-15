@@ -1496,6 +1496,11 @@ def sandbox_build(domains, policy_path, stores=None):
         cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
         ok = [r for r in real if r]
         data = role_settings(ok, own_real, write, cache, any(ssh_remote(r) for r in ok), deny, compact, guard)
+        if name == "metis-pantheon":
+            # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> — вне папок окна
+            # Метиды, в песочнице упал бы. Мимо неё — только эта подкоманда и только у Метиды; ворота у команды свои:
+            # галочка владельца в журнале доски owner-log, который пишет тик, — роли её не подделают.
+            data["sandbox"]["excludedCommands"].append("pantheon direction init *")
         store = (stores or {}).get(name)
         if store:
             st = os.path.realpath(os.path.expanduser(store))
