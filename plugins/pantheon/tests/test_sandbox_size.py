@@ -139,7 +139,8 @@ def main():
     sa = json.load(open(os.path.join(state, "settings", "athena-broker.json")))
     check("окно направления: legal-watch штабу закрыт, координатору — нет",
           not any("legal-watch" in x for x in sa["sandbox"]["filesystem"]["denyRead"]))
-    gm = [g["matcher"] for w in (hq2, sa) for g in w["hooks"]["PreToolUse"]]
+    gm = [g["matcher"] for w in (hq2, sa) for g in w["hooks"]["PreToolUse"]
+          if any("guard.py" in h.get("command", "") for h in g.get("hooks") or [])]  # без хука agents.py (P0-6)
     check("строгий guard окон штаба и направления: matcher с Agent|Task|Skill (hq-telegram, chiron)",
           len(gm) == 2 and all({"Agent", "Task", "Skill", "Bash", "Read"} <= set(m.split("|")) for m in gm))
     check("окно направления: allowRead нет, запретов чтения — единицы (координаторы не раздуваются)",
