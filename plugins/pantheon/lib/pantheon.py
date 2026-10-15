@@ -1246,7 +1246,9 @@ def domains_build(if_changed=False):
     if if_changed:
         built = read_json(path("domains.json")).get("built_ts") or 0
         # и новые папки сессий: окно штаба закрывает чужие перечнем (их выводы) — новая папка тоже должна попасть в hq.json
-        watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"),
+        # и каталог ролей: новая роль с memory: должна попасть в песочницу окон (metis-0051). Цикла нет: roles_build
+        # пишет файл, только если текст изменился, — пересборка одна, следующий тик уже тихий
+        watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS,
                    os.path.join(os.path.realpath("/tmp"), f"claude-{os.getuid()}"))
         newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
         if built >= newest:
@@ -1319,6 +1321,12 @@ SANDBOX_EXCLUDED = ["gh pr *", "gh issue *", "gh run *", "gh repo view *", "gh a
 # git по SSH в песочнице macOS не работает: у направлений с таким remote сетевые команды git — мимо неё
 GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
 COORDINATOR_COMPACT = 200000
+# Окну координатора направления — слияние PR без вопроса классификатора режима auto (metis-0050). Каждое слияние
+# по-прежнему проверяет guard (merge_problem): только главная сессия domain-coordinator, свои папки, без --admin и
+# --auto. Мастерской и штабу правила нет.
+COORDINATOR_ALLOW = ["Bash(gh pr merge *)"]
+# Роли главных сессий: их память в песочницу не добавляется, даже если в шапке есть memory:
+MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
 # terminal-notifier по щелчку открывает ссылку или выполняет команду — от имени владельца, вне песочницы. Ролям его
 # не прочитать, а значит и не запустить: уведомления Пантеона шлёт только тик (поддельное «от Пантеона» не пройдёт).
 NOTIFIER_PATHS = ["/opt/homebrew/Cellar/terminal-notifier", "/opt/homebrew/opt/terminal-notifier",
@@ -1448,6 +1456,27 @@ def _read_small_regular(p, limit=8 << 20):
         os.close(fd)
 
 
+def memory_dirs():
+    """Папки ~/.claude/agent-memory/<роль> ролей-субагентов с ключом memory: в шапке (metis-0051): их Bash-запись
+    песочнице окна иначе недоступна. Настоящие пути; папку создаёт, ссылку вместо папки пропускает."""
+    out = []
+    try:
+        names = sorted(os.listdir(AGENTS))
+    except OSError:
+        return out
+    for f in names:
+        role = f[:-3]
+        if not f.endswith(".md") or not ROLE_NAME.fullmatch(role) or role in MAIN_ROLES:
+            continue
+        text = _read_small_regular(os.path.join(AGENTS, f))
+        if text is None or "memory" not in (_head_keys(text) or []):
+            continue
+        d = _real_dir(f"~/.claude/agent-memory/{role}", ["~/.claude/agent-memory"], strict=True, create=True)
+        if d:
+            out.append(d)
+    return out
+
+
 def pnpm_store_check(name, folders, store):
     """node_modules на этом Mac собраны с другим хранилищем (store-dir в .npmrc не в git — на другой Mac не приезжает):
     pnpm в окне спросит, сносить ли node_modules, и без терминала молча ничего не поставит — тревога с командой."""
@@ -1489,17 +1518,21 @@ def sandbox_build(domains, policy_path, stores=None):
                    "(строгий guard, SEC-29) — переустановить плагин guard", "pantheon")
     os.makedirs(out_dir, exist_ok=True)
 
-    def one(name, folders, own, compact, deny):
+    memory = memory_dirs()
+
+    def one(name, folders, own, compact, deny, allow=None):
         real = [_real_dir(f, SANDBOX_ROOTS[:1], strict=True) or _real_dir(f, SANDBOX_ROOTS[1:]) for f in folders]
         skipped = [f for f, r in zip(folders, real) if not r]
         if skipped:
             print(f"песочница {name}: вне ~/projects и ~/ai/knowledge, ссылка или нет папки — только через Write/Edit: "
                   f"{skipped}", file=sys.stderr)
         own_real = os.path.realpath(own) if os.path.isdir(own) and not os.path.islink(own) else None
-        write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r]
+        write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r] + memory
         cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
         ok = [r for r in real if r]
         data = role_settings(ok, own_real, write, cache, any(ssh_remote(r) for r in ok), deny, compact, guard)
+        if allow:
+            data.setdefault("permissions", {}).setdefault("allow", []).extend(allow)
         store = (stores or {}).get(name)
         if store:
             st = os.path.realpath(os.path.expanduser(store))
@@ -1514,7 +1547,7 @@ def sandbox_build(domains, policy_path, stores=None):
     built = []
     for name, folders in domains.items():
         one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
-            [] if name in private_dirs else private_paths)
+            [] if name in private_dirs else private_paths, COORDINATOR_ALLOW)
         built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
@@ -1527,7 +1560,7 @@ def sandbox_build(domains, policy_path, stores=None):
     hq_cache = _real_dir(f"{caches}/hq", [caches], strict=True, create=True)
     root = os.path.realpath(PANTHEON)
     keys = [p for p in private_paths if "/.git/git-crypt" in p + "/"]  # ключи — не штабу: ~/ai/pantheon коммитит тик
-    hq = role_settings([root], None, [], hq_cache, False, keys, None, guard)
+    hq = role_settings([root], None, memory, hq_cache, False, keys, None, guard)
     hq["sandbox"]["excludedCommands"] = list(HQ_EXCLUDED)
     hq["sandbox"]["filesystem"]["denyWrite"] += [os.path.join(root, ".git"), os.path.join(root, "alerts.md")]
     hq["sandbox"]["network"]["allowedDomains"] = []
