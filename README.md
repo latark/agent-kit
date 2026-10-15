@@ -7,7 +7,7 @@
 | Плагин | Что делает | Состояние |
 | --- | --- | --- |
 | `guard` | Правила, которые Claude Code проверяет сам: dev-server, attribution, cdp, tg-secret, nextjs, domain, pantheon-acl, protect-config, private, cdp-role, push, terminal; модель угроз и режимы — `plugins/guard/README.md` | работает с 14.10 (шаг 0.4); управляемые настройки — шаг 0.6, ставятся через `sudo` |
-| `pantheon` | Планировщик `pantheon-tick` (launchd, раз в 60 с), команда `pantheon`, копия `~/ai/pantheon-view` для Obsidian, задачи и доска владельца, коммит `~/ai/pantheon`, настройки окон ролей с песочницей и строгим guard, сверка карты решений; хуки контекста (подсказка «пора очистить», продолжение после `/clear`, файл состояния после сжатия) и журнал ваших слов owner-log; запуск сессий (`pantheon start`, `wake`), сборка ролей (`pantheon roles build`), заранее разрешённое (`pantheon approve`), обёртка `heavy`, Stop-хук разработчика | работает с 14.10 (шаг 0.4); хуки — с шага 1.1; роли и запуск — с шага 1.2 |
+| `pantheon` | Планировщик `pantheon-tick` (launchd, раз в 60 с), команда `pantheon`, копия `~/ai/pantheon-view` для Obsidian, задачи и доска владельца, коммит `~/ai/pantheon`, настройки окон ролей с песочницей и строгим guard, сверка карты решений; хуки контекста (подсказка «пора очистить», продолжение после `/clear`, файл состояния после сжатия) и журнал ваших слов owner-log; запуск сессий (`pantheon start`, `wake`), сборка ролей (`pantheon roles build`), заранее разрешённое (`pantheon approve`), обёртка `heavy`, Stop-хук разработчика; дежурный без модели (`pantheon watch`: сессии, swap, worktree, версия Claude Code, паузы, самозапуск по вашим решениям, журналы ваших слов), пересмотры, остановка и пауза, технический перезапуск, продолжение сессий `claude respawn` с текстом через хук | работает с 14.10 (шаг 0.4); хуки — с шага 1.1; роли и запуск — с шага 1.2; дежурный и перезапуск — с 0.10.0 (шаг 1.4) |
 | `project-tools` | Инструменты проекта по карте стеков `stacks.json`: MCP-серверы (next-devtools, chrome-devtools, shadcn) — в `.mcp.json` проекта с одобрением, плагины (Supabase) — в настройки проекта, блок для Codex; команда `project-tools` (check, apply, skip, outdated), навык, подсказка при старте сессии; отпечатки одобренных записей — предупреждение о подмене после `git pull` | с 14.10 (шаг 0.7) |
 
 ## Где что лежит
@@ -18,6 +18,9 @@
   `plugins/guard/policy.example.toml`), правит только metis-pantheon.
 - `plugins/pantheon/lib/pantheon.py` — планировщик и команда; `pantheon help` — список команд.
   Задачи — `~/ai/pantheon/schedule.toml`, метки и журналы запусков — `~/.local/state/pantheon/` (свои у каждого Mac).
+- `plugins/pantheon/lib/watch.py` — дежурный и управление сессиями (шаг 1.4): `pantheon watch [--dry-run]`, `agents`,
+  `who`, `revisits`, `wake <имя>`, `stop|resume <имя>|--all`, `pause <имя>|--all --reason limit|swap|manual`,
+  `restart --prepare|--status|--go|--cancel`, `saved`, `infra-check`. Подключает его `pantheon.py` (`watch_cmd`).
 - `plugins/pantheon/lib/view-sync.sh` — копия `~/ai/pantheon` только для чтения для Obsidian.
 - `plugins/pantheon/hooks/ctx.py` — хуки контекста и журнала ваших слов (шаг 1.1): `owner-log` (UserPromptSubmit,
   в фоне — строка только для ввода, который Claude Code сам пометил в транскрипте как ваш), `stop` (подсказка
@@ -26,6 +29,10 @@
   последнего сообщения). Состояние — `~/.local/state/pantheon/ctx/` и `…/owner-log/` (ввод без пометки транскрипта —
   в `…/owner-log/unconfirmed/`, это не ваши слова); выключатель хуков контекста — `PANTHEON_CTX_OFF=1`. Хуки запускают
   `python3` из PATH (3.9+): на чистом Mac нужны Command Line Tools (`xcode-select --install`), иначе это заглушка.
+- `ctx.py` с 0.10.0 (шаг 1.4): `maint-post` и `maint-pre` — при метке техперезапуска сессия из списка один раз получает
+  «сохранись», после `pantheon saved` ей закрыты инструменты (кроме отчёта Зевсу); `push` (SessionStart, asyncRewake) —
+  отдаёт сессии текст из `~/.local/state/pantheon/push/<сессия>.txt` после `claude respawn`. Уборку журналов ваших слов
+  делает дежурный, хук только дописывает.
 - `plugins/pantheon/bin/heavy` — тяжёлые команды через общую блокировку: два места, `--server` — один долгий процесс (MEM-03).
 - `plugins/pantheon/hooks/dev-stop-verify.py` — Stop разработчика (в шапке ролей dev-*): красная проверка проекта
   возвращает, не больше трёх раз; очередь `heavy` — не возврат (DONE-02).
@@ -47,6 +54,7 @@
     python3 -I plugins/pantheon/tests/test_config_check.py   # правила карантина правок ~/.claude (SEC-15)
     bash plugins/pantheon/tests/test_sync_quarantine.sh ~/.claude/sync.sh "$(readlink ~/.local/bin/pantheon)" "$PWD/plugins/pantheon"
     python3 -I plugins/pantheon/tests/test_start.py   # start, wake, roles build, approve, heavy, Stop-хук разработчика
+    python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры
     python3 -I plugins/pantheon/tests/test_tick.py    # планировщик: сон, пробуждение, питание, простой, лимит, главный Mac
     python3 -I plugins/pantheon/tests/test_baseline.py   # замер «как сейчас»: задачи по git commit, сообщения, возвраты, цена
     python3 -I plugins/pantheon/tests/test_hooks.py   # хуки контекста и owner-log (и на системном: CTX_TEST_PYTHON=/usr/bin/python3)

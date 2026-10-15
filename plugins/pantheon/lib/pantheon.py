@@ -36,6 +36,17 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
   pantheon start zeus                   штаб: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
+  pantheon watch [--dry-run]            дежурный (тик раз в 5 мин): сессии, STATUS.md, swap, worktree, версия Claude Code,
+                                        паузы, самозапуск по вашим решениям; --dry-run — кого поднял бы и почему нет
+  pantheon agents | who                 снимок claude agents для строки статуса | таблица координаторов
+  pantheon revisits                     пересмотры к сроку и по событиям (тик раз в сутки)
+  pantheon wake <имя> ["толчок"]        поднять уснувшую сессию направления той же сессией
+  pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами») и вернуть
+  pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
+  pantheon restart --prepare [причина]|--status|--go [--force]|--cancel   технический перезапуск всех сессий
+  pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском
+  pantheon infra-check                  опоры системы после обновления Claude Code
+  pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (тик раз в неделю)
   pantheon roles build                  роли ~/.claude/agents/*.md из шаблонов *.tmpl и частей _parts/*.part
   pantheon approve [list] | add --site S --allow "…" [--limits "…"] | remove N   заранее разрешённое (только вы)
   pantheon consent <id> [--days N]      ваш ответ Зевсу на вопрос <id> (журнал owner-log Зевса, по умолчанию 7 дней) —
@@ -208,8 +219,9 @@ def alert(text, who="pantheon"):
             fh.write(f"{stamp()} · {who} · {text}\n")
 
 
-def alert_once(key, value, text, who="pantheon", note=None):
-    """Тревога (и уведомление note) один раз на значение value: повтор того же состояния молчит."""
+def alert_once(key, value, text, who="pantheon", note=None, group=None):
+    """Тревога (и уведомление note) один раз на значение value: повтор того же состояния молчит. group — вид
+    уведомления: новое того же вида заменяет прежнее в Центре уведомлений (по умолчанию — ключ тревоги)."""
     mark = once_path(key)
     try:
         if open(mark).read() == str(value):
@@ -218,7 +230,7 @@ def alert_once(key, value, text, who="pantheon", note=None):
         pass
     alert(text, who)
     if note:
-        notify(note)
+        notify(note, group=group or key)
     os.makedirs(path("once"), exist_ok=True)
     open(mark, "w").write(str(value))
 
@@ -236,7 +248,7 @@ def clear_once(key):
 JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
-                    "instructions"}
+                    "instructions", "agents", "usage"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 
 
@@ -376,8 +388,13 @@ def lease_expired(job, st, t):
 
 
 def heavy_wait_reason(job, sched, t, overdue):
+    """Почему тяжёлая задача ждёт. max_delay (overdue) снимает все условия, кроме лимита у задач на Claude: сессия
+    `claude -p` при упоре в лимит обрывается на середине (TOOL-04), поэтому её тик переносит, а не запускает."""
     d = sched["defaults"]
     if overdue:
+        pct = limit_pct() if job.get("claude") else None
+        if pct is not None and pct >= d["limit_max_pct"]:
+            return f"пятичасовой лимит {pct:.0f} % ≥ {d['limit_max_pct']} % (задача на Claude ждёт и после max_delay)"
         return None
     if t - wake_time() < d["wake_quiet_min"] * 60:
         return f"первые {d['wake_quiet_min']} мин после пробуждения — только лёгкие"
@@ -686,6 +703,25 @@ def status():
             continue
         lines.append(f"{job['name']}: {bad}")
         warn.append(f"задача {job['name']}")
+    # дежурный (watch.py): время прохода и упавшие проверки; метка техперезапуска; паузы по нагрузке
+    wl = read_json(path("watch-last"), None)
+    if wl and wl.get("time"):
+        line = f"дежурный: {ago(wl['time'])}"
+        if t - float(wl["time"]) > 900:
+            line += " — НЕ ХОДИТ (задача watch раз в 5 мин)"
+            warn.append("дежурный")
+        if wl.get("failed"):
+            line += f"; упали проверки: {', '.join(wl['failed'])}"
+            warn.append("проверки дежурного")
+        lines.append(line)
+    m = maintenance_active()
+    if m:
+        lines.append(f"технический перезапуск: с {str(m.get('id'))[11:16]} ({m.get('reason')}) — pantheon restart --status")
+        warn.append("техперезапуск")
+    with contextlib.suppress(OSError):
+        ps = sorted(f[:-5] for f in os.listdir(path("pauses")) if f.endswith(".json"))
+        if ps:
+            lines.append("пауза по нагрузке: " + ", ".join("все" if p == "_all" else p for p in ps))
     section("Тик", lines)
 
     # сессии
@@ -1049,7 +1085,7 @@ SANDBOX_DOMAINS = ["registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "fi
                    "raw.githubusercontent.com"]
 # Мимо песочницы: gh (в ней не работает — TLS Go на macOS) — только эти подкоманды; дописать тревогу
 SANDBOX_EXCLUDED = ["gh pr *", "gh issue *", "gh run *", "gh repo view *", "gh api *", "gh auth status",
-                    "pantheon alert *", "pantheon consent *"]
+                    "pantheon alert *", "pantheon consent *", "pantheon saved *"]
 # git по SSH в песочнице macOS не работает: у направлений с таким remote сетевые команды git — мимо неё
 GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
 COORDINATOR_COMPACT = 200000
@@ -1277,7 +1313,9 @@ def sandbox_build(domains, policy_path, stores=None):
 # команды пульта штаба, которые пишут вне ~/ai/pantheon (alerts.md, ~/.local/state/pantheon) или запускают сессии со
 # своей песочницей; guard проверяет их и здесь (pantheon-acl)
 HQ_EXCLUDED = ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheon wake *", "pantheon archive",
-               "pantheon jobs *", "pantheon domains build", "pantheon roles build"]
+               "pantheon jobs *", "pantheon domains build", "pantheon roles build", "pantheon stop *",
+               "pantheon resume *", "pantheon pause *", "pantheon restart *", "pantheon saved *", "pantheon who",
+               "pantheon agents"]
 START_MARK = "[Пантеон:"
 WAKE_TEXT = (START_MARK + " пробуждение] Тебя прервало выключение или перезапуск. Сверь файл состояния и «начато» без "
              "«сделано» (не повторяй внешнее действие, пока не проверишь, что оно не ушло), затем продолжай задачу.")
@@ -1308,12 +1346,153 @@ def agents_all():
     return data if isinstance(data, list) else data.get("agents") if isinstance(data, dict) else None
 
 
-def live_copies(name, agents):
-    """Живые сессии с этим именем — и копии, которым Claude Code дал другое имя, потому что это было занято
-    («имя (2)», «имя-два-слова»). Живая — всё, кроме закрытой (done): работает, ждёт, открыта во вкладке (без state).
-    Остановленная сессия (claude stop) — done и имени не держит: новая получает то же имя (проверено 15.10)."""
-    alias = re.compile(re.escape(name) + r"(?: \(\d+\)|-[a-z]+-[a-z]+)?")
-    return [a for a in agents or [] if alias.fullmatch(str(a.get("name") or "")) and a.get("state") != "done"]
+def pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, ValueError, TypeError) as e:
+        return isinstance(e, PermissionError)
+    return True
+
+
+def sessions_registry():
+    """Реестр имён Claude Code ~/.claude/sessions/<pid>.json: в нём и интерактивные вкладки, которых нет в
+    `claude agents --json` (15.10 имя zeus держал забытый процесс вкладки). Только записи с живым процессом; ключи
+    жетонов не читаются."""
+    out, d = [], os.path.join(HOME, ".claude", "sessions")
+    with contextlib.suppress(OSError):
+        for f in os.listdir(d):
+            if not re.fullmatch(r"\d+\.json", f):
+                continue
+            rec = read_json(os.path.join(d, f), {})
+            if not isinstance(rec, dict) or not pid_alive(rec.get("pid")):
+                continue
+            out.append({"name": rec.get("name"), "sessionId": rec.get("sessionId"), "pid": rec.get("pid"),
+                        "kind": "interactive" if rec.get("kind") == "interactive" else "background",
+                        "cwd": rec.get("cwd"), "registry": True})
+    return out
+
+
+def name_alias(name):
+    """Имя и копии, которым Claude Code дал другое имя, потому что это было занято: «имя (2)», «имя-два-слова»."""
+    return re.compile(re.escape(name) + r"(?: \(\d+\)|-[a-z]+-[a-z]+)?")
+
+
+def live_copies(name, agents, registry=None):
+    """Живые сессии с этим именем и его копии. Живая — работает (working), ждёт (blocked), открыта во вкладке (нет
+    state) или закончила ход с живым процессом (done и pid — такую новый запуск останавливает сам, CTX-10, поэтому
+    здесь её нет). Остановленная (stopped, claude stop), упавшая (failed) и закрытая (done без процесса) имени не держат
+    (15.10: claude agents даёт после claude stop именно stopped, metis-0041). Плюс интерактивные вкладки из реестра
+    ~/.claude/sessions, которых нет в claude agents."""
+    alias = name_alias(name)
+    out = [a for a in agents or [] if alias.fullmatch(str(a.get("name") or ""))
+           and a.get("state") not in ("done", "stopped", "failed")]
+    known = {a.get("sessionId") for a in agents or []}
+    for r in sessions_registry() if registry is None else registry:
+        if r.get("kind") == "interactive" and r.get("sessionId") not in known and alias.fullmatch(str(r.get("name") or "")):
+            out.append({k: v for k, v in r.items() if k != "registry"})
+    return out
+
+
+def maintenance_active():
+    """Метка технического перезапуска (SCHED-15), если она стоит и не истекла: пока она есть, дежурный и
+    pantheon wake никого не будят."""
+    m = read_json(path("maintenance.json"), None)
+    if not isinstance(m, dict) or not m:
+        return None
+    if now() > float(m.get("expires") or 0):
+        return None
+    return m
+
+
+def load_pause(name):
+    """Пауза по нагрузке (COST-04) этого направления или общая (_all): запись или None."""
+    for n in (name, "_all"):
+        p = read_json(path("pauses", n + ".json"), None)
+        if isinstance(p, dict) and p:
+            return p
+    return None
+
+
+def run_settings(name, role, window, origin):
+    """Окно этого запуска: настройки окна + PANTHEON_ORIGIN (кто запустил), имя и роль — переменные сессии и её
+    хуков. → путь файла или None (окна нет: pantheon domains build)."""
+    win = path("settings", window + ".json")
+    if not os.path.isfile(win):
+        return None
+    data = read_json(win, {})
+    data.setdefault("env", {})["PANTHEON_ORIGIN"] = origin
+    data["env"]["PANTHEON_SESSION"] = name
+    data["env"]["PANTHEON_ROLE"] = role
+    run = path("settings", "run", name + ".json")
+    write_json(run, data)
+    return run
+
+
+COPY_NOTE = re.compile(r"started a copy as ([0-9a-f]{8})")
+PUSH_MAX_AGE = 30 * 60
+
+
+def push_text(session_id, text):
+    """Текст, который хук ctx.py push отдаст сессии при следующем старте её процесса (SessionStart + asyncRewake):
+    `claude respawn` сам хода не начинает, а команды «сказать фоновой сессии» у Claude Code нет (проверено 15.10)."""
+    if not re.fullmatch(r"[0-9a-f-]{8,64}", str(session_id or "")) or not str(text).startswith(START_MARK):
+        return None
+    os.makedirs(path("push"), mode=0o700, exist_ok=True)
+    p = path("push", session_id + ".txt")
+    fd = os.open(p + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(str(text)[:4000])
+    os.replace(p + ".tmp", p)
+    return p
+
+
+def resume_session(name, a, text, origin, recheck=None):
+    """Продолжить сессию направления или мастерской той же сессией (контекст эпика сохраняется). Есть в claude agents
+    (остановлена, упала, закончила ход) — `claude respawn <id>`: тот же id, имя и флаги запуска, в том числе окно
+    --settings, новые плагины и Claude Code; текст ей отдаёт хук push при старте процесса. Нет её там (удалена из
+    списка) — `claude --resume <сессия> --bg --name <имя> --settings <окно>`: без --name имя теряется, без --settings —
+    окно с песочницей. `--resume` на сессии, которую Claude Code ещё считает живой, делает копию («started a copy as
+    <id>», 15.10 так было и после claude stop) — это строка в тревогах. → (код, id копии или None)."""
+    # та же блокировка имени, что у pantheon start и pantheon stop: Зевс, тик и вы не поднимут две копии и не
+    # разбудят сессию, которую в эту минуту останавливают; под ней — повторная проверка «можно ли будить» (ревью argus)
+    with lock("start-" + name, block=False) as got_lock:
+        if not got_lock:
+            start_log(f"resume-busy\t{name}\t{a.get('id')}\t{origin}")
+            return 1, None
+        why = recheck() if recheck else None
+        if why:
+            start_log(f"resume-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
+            return 1, None
+        return _resume_session(name, a, text, origin)
+
+
+def _resume_session(name, a, text, origin):
+    target, rest = (("workshop", [name[len("daedalus-"):]]) if name.startswith("daedalus-") else (name, []))
+    got = start_target(target, rest)
+    if os.environ.get("PANTHEON_DRYRUN") == "1":
+        print(f"[resume] {name} {a.get('id')} {origin}")
+        return 0, None
+    run = run_settings(name, got[1], got[3], origin) if not isinstance(got, str) else None
+    sid = a.get("sessionId")
+    if not str(text).startswith(START_MARK):
+        text = f"{START_MARK} поручение от {origin}] {text}"
+    pushed = push_text(sid, text) if a.get("id") else None
+    if pushed:  # без текста respawn поднял бы сессию молча — тогда сразу запасной путь, он текст передаёт
+        r = subprocess.run([claude_bin(), "respawn", a["id"]], capture_output=True, text=True, timeout=180)
+        start_log(f"respawn\t{name}\t{a['id']}\t{origin}\t{r.returncode}")
+        if r.returncode == 0:
+            return 0, None
+        with contextlib.suppress(OSError):
+            os.remove(pushed)
+    argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--name", name] + (["--settings", run] if run else []) \
+        + [text]
+    r = subprocess.run(argv, cwd=a.get("cwd") or HOME, capture_output=True, text=True, timeout=180)
+    m = COPY_NOTE.search((r.stdout or "") + (r.stderr or ""))
+    start_log(f"resume\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\tcopy {m.group(1)}" if m else ""))
+    if m:
+        alert(f"{name}: --resume сделал копию {m.group(1)} — исходная сессия {a.get('id')} ещё числится живой; проверить "
+              f"claude agents, лишнюю остановить", "pantheon")
+    return r.returncode, (m.group(1) if m else None)
 
 
 def copies_message(name, live):
@@ -1441,11 +1620,6 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
         if a.get("state") == "done" and a.get("pid") and not dry:
             subprocess.run([claude_bin(), "stop", a.get("id")], capture_output=True, text=True, timeout=60)
             start_log(f"stop-done\t{name}\t{a.get('id')}")
-    # окно этого запуска: настройки окна + PANTHEON_ORIGIN (кто запустил) — переменная сессии и её хуков
-    data = read_json(win, {})
-    data.setdefault("env", {})["PANTHEON_ORIGIN"] = origin
-    data["env"]["PANTHEON_SESSION"] = name
-    data["env"]["PANTHEON_ROLE"] = role
     run = path("settings", "run", name + ".json")
     task = " ".join(rest).strip() or default_task
     prompt = f"{START_MARK} поручение от {origin}] {task}"
@@ -1457,8 +1631,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     if dry:
         print(shlex.join(argv), f"(папка {folder})")
         return 0
-    os.makedirs(os.path.dirname(run), exist_ok=True)
-    write_json(run, data)
+    run_settings(name, role, window, origin)
     r = subprocess.run(argv, cwd=folder, capture_output=True, text=True, timeout=180)
     start_log(f"{name}\t{origin}\t{folder}\t{r.returncode}")
     if origin == "zeus" and r.returncode == 0 and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
@@ -1504,6 +1677,19 @@ def open_tasks(name):
     return out
 
 
+def wake_recheck(name):
+    """Под блокировкой имени перед подъёмом: метка, пауза, техперезапуск, живая копия «имя (2)» (ревью argus)."""
+    if os.path.exists(path("stopped", name)):
+        return "остановлено вами"
+    if load_pause(name):
+        return "пауза по нагрузке"
+    if maintenance_active():
+        return "технический перезапуск"
+    if live_copies(name, agents_all() or []):
+        return "уже работает"
+    return None
+
+
 def wake(rest):
     """pantheon wake [--dry-run]: прерванные сессии Пантеона (failed, stopped) с открытой задачей — поднять и сказать
     «продолжай». Свои метки «остановлено вами» и чужие сессии (не направление и не daedalus-*) не трогает."""
@@ -1516,6 +1702,10 @@ def wake(rest):
 
 
 def _wake(dry):
+    m = maintenance_active()
+    if m:
+        print(f"идёт технический перезапуск ({m.get('reason')}) — будить некого до pantheon restart --go")
+        return 0
     agents = agents_all()
     if agents is None:
         print("pantheon wake: claude agents --json не ответил", file=sys.stderr)
@@ -1526,7 +1716,7 @@ def _wake(dry):
         name, state = a.get("name") or "", a.get("state")
         if state not in ("failed", "stopped") or not (name in domains or name.startswith("daedalus-")):
             continue
-        if os.path.exists(path("stopped", name)):
+        if os.path.exists(path("stopped", name)) or load_pause(name):
             continue
         newer = [b for b in agents if b.get("name") == name and (b.get("startedAt") or 0) > (a.get("startedAt") or 0)]
         if newer:
@@ -1534,14 +1724,12 @@ def _wake(dry):
         tasks = open_tasks(name)
         if not tasks:
             continue
-        argv = [claude_bin(), "--resume", a.get("sessionId") or a.get("id"), "--bg", WAKE_TEXT]
         print(f"{'будет поднята' if dry else 'поднимаю'}: {name} ({a.get('id')}, {state}) — задачи {', '.join(tasks[:3])}")
         if dry:
             continue
-        r = subprocess.run(argv, cwd=a.get("cwd") or HOME, capture_output=True, text=True, timeout=180)
-        start_log(f"wake\t{name}\t{a.get('id')}\t{r.returncode}")
-        if r.returncode:
-            alert(f"pantheon wake: {name} не поднялась ({r.stderr.strip()[:200]})", "pantheon")
+        rc, _ = resume_session(name, a, WAKE_TEXT, "wake", recheck=lambda n=name: wake_recheck(n))
+        if rc:
+            alert(f"pantheon wake: {name} не поднялась (код {rc})", "pantheon")
         done += 1
     if not done:
         print("будить некого")
@@ -2366,6 +2554,43 @@ def task_cmd(rest):
     return 0
 
 
+# --- дежурный и управление сессиями (шаг 1.4) — lib/watch.py ---------------------------------------------------------
+WATCH_CMDS = {"watch", "agents", "revisits", "stop", "resume", "pause", "restart", "saved", "who", "infra-check"}
+
+
+def watch_cmd(cmd, rest):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_watch", os.path.join(LIB, "watch.py"))
+    w = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(w)
+    w.set_core(sys.modules[__name__])
+    who = " ".join((os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "владелец").split())[:40]
+    if cmd == "wake":
+        return w.wake_one(rest, who)
+    return {"watch": lambda: w.watch(dry="--dry-run" in rest), "agents": w.agents_cmd, "revisits": w.revisits,
+            "stop": lambda: w.stop(rest, who), "resume": lambda: w.resume(rest, who), "pause": lambda: w.pause(rest, who),
+            "restart": lambda: w.restart(rest, who), "saved": lambda: w.saved_cmd(rest, who), "who": w.who,
+            "infra-check": w.infra_cmd}[cmd]()
+
+
+def usage_report(rest):
+    """pantheon usage [дней] — отчёт расхода (scripts/usage.py) в ~/ai/pantheon/metrics/usage/<дата>.txt, строка в
+    тревогах (SCHED-11: раз в неделю)."""
+    days = rest[0] if rest and rest[0].isdigit() else "7"
+    r = subprocess.run([sys.executable, "-I", os.path.join(PLUGIN, "scripts", "usage.py"), days], capture_output=True,
+                       text=True, timeout=600)
+    if r.returncode:
+        print(r.stderr[-2000:], file=sys.stderr)
+        return r.returncode
+    out = os.path.join(PANTHEON, "metrics", "usage", stamp()[:10] + ".txt")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    write_atomic(out, r.stdout)
+    total = next((ln for ln in r.stdout.splitlines() if ln.startswith("Итого")), "").strip()
+    alert(f"отчёт расхода за {days} дн.: {total or 'готов'} — {out.replace(HOME, '~')}", "usage")
+    print(out)
+    return 0
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(__doc__)
@@ -2426,6 +2651,8 @@ def main(argv):
     if cmd == "start":
         return start(rest)
     if cmd == "wake":
+        if rest and not rest[0].startswith("-"):
+            return watch_cmd("wake", rest)
         return wake(rest)
     if cmd == "roles" and rest[:1] == ["build"]:
         made = roles_build()
@@ -2439,6 +2666,10 @@ def main(argv):
         return approve(rest)
     if cmd == "consent":
         return consent(rest)
+    if cmd in WATCH_CMDS:
+        return watch_cmd(cmd, rest)
+    if cmd == "usage":
+        return usage_report(rest)
     if cmd == "install":
         return install()
     if cmd == "uninstall":
