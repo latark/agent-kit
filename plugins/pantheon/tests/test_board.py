@@ -31,7 +31,8 @@ def make():
     os.makedirs(view)
     open(os.path.join(home, "schedule.toml"), "w").write('primary_host = "mac-a"\n')
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
-           "PANTHEON_VIEW": view, "PANTHEON_HOST": "mac-a", "PANTHEON_DRYRUN": "1", "PANTHEON_NO_NOTIFY": "1"}
+           "PANTHEON_VIEW": view, "PANTHEON_HOST": "mac-a", "PANTHEON_DRYRUN": "1", "PANTHEON_NO_NOTIFY": "1",
+           "PANTHEON_FAKE_IDLE": "0"}  # простой — явно: уведомления зависят от присутствия (metis-0023)
     return tmp, home, state, view, env
 
 
@@ -144,7 +145,7 @@ def main():
     f_pri = base_txt.split("prio_rank:")[1].split("\n")[0] if "prio_rank:" in base_txt else ""
     f_age = base_txt.split("age_key:")[1].split("\n")[0] if "age_key:" in base_txt else ""
     in_formula = set(re.findall(r'contains\("([^"]+)"\)', f_att))
-    marks_ok = in_formula == {"конфликт", "подтвердите словом", "просрочено", "срок скоро"} and not re.search(
+    marks_ok = in_formula == {"конфликт", "подтвердите словом", "просрочено", "долго ждёт", "срок скоро"} and not re.search(
         r"[⚠🔴🟠❓]", f_att) and "contains" not in f_pri and 'note["Приоритет"]' in f_pri and "2" in f_pri
     words = [_tasks.attention({"due": "2026-10-01", "status": "todo"}, T0),
              _tasks.attention({"due": "2026-10-16", "status": "todo"}, T0), _tasks.attention({}, T0, "конфликт"),
@@ -458,18 +459,21 @@ def main():
     check("занятая блокировка: отказ за полсекунды, а не вечное ожидание", r.returncode == 1 and "занята" in r.stderr)
 
     # умные уведомления: новый вопрос от агента — одно уведомление с карточкой; ночью — тишина
+    day = 1791968400  # 2026-10-14 12:00 по Москве
+    away = dict(env2, PANTHEON_FAKE_IDLE="1200")  # macOS по решению — только когда вас нет у Mac (metis-0023)
+    open(nlog, "w").close()
+    run(away, "board", t=day - 600)  # прежние вопросы показаны раньше: в проходе ниже — только новый
     open(nlog, "w").close()
     run(env, "task", "new", "--direction", "athena-broker", "--title", "Выбрать тариф", "--status", "waiting",
         "--waiting-on", "human", "--next", "ответ", "--question", "Какой тариф?", "--option", "A", "--option", "B",
-        "--project", "BrokerAssistant", t=T0 + 710)
-    day = 1791968400  # 2026-10-14 12:00 по Москве
-    run(env2, "board", t=day)
+        "--project", "BrokerAssistant", t=day - 60)
+    run(away, "board", t=day)
     lines = [l for l in open(nlog, encoding="utf-8").read().split("\n") if l]
     check("уведомление «❓ Вопрос к вам» ведёт в карточку", any("Вопрос к вам: Выбрать тариф" in l and "file=" in l and "%D0%92%D1%8B%D0%B1%D1%80" in l for l in lines))
     open(nlog, "w").close()
     run(env, "task", "new", "--direction", "athena-broker", "--title", "Ночной вопрос", "--status", "waiting",
         "--waiting-on", "human", "--next", "ответ", "--project", "BrokerAssistant", t=day + 60)
-    run(env2, "board", t=day + 12 * 3600)  # 00:00
+    run(away, "board", t=day + 12 * 3600)  # 00:00
     check("ночью вопрос — без уведомления", not open(nlog, encoding="utf-8").read().strip())
 
     # копия не трогает Доску
@@ -759,7 +763,7 @@ def board_extra(tmp, home, state, view, env, src):
 
     # утреннее уведомление — «Нужен ответ: N»
     open(nlog, "w").close()
-    run(env2, "board", t=day + 86400)
+    run(env2, "board", t=day + 86400)  # простой 0 — вы у Mac: утреннее при первом движении
     morning = open(nlog, encoding="utf-8").read()
     check("утреннее уведомление: «Доброе утро. Нужен ответ: N», без «Ждёт вас»",
           re.search(r"Доброе утро\. Нужен ответ: \d+", morning) and "Ждёт вас" not in morning)
