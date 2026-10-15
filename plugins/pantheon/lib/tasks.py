@@ -862,9 +862,30 @@ def _date(v, n):
     return v[:n] if isinstance(v, str) and DATE_RE.match(v) else None
 
 
-def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, who=None, long_wait=False):
+TASK_ID_RE = re.compile(r"(?<![\w\[|/.-])([a-z][a-z0-9]*-\d{4})(?![\w-])")
+
+
+def link_ids(text, names, own=None):
+    """Номера задач в тексте карточки (metis-0042) — ссылкой на их карточку: [[<имя карточки>|metis-0042]]. Только
+    известные доске номера; внутри `кода` и уже готовых ссылок [[…]] не трогаем."""
+    if not names:
+        return text
+    def one(m):
+        tid = m.group(1)
+        return f"[[{names[tid]}|{tid}]]" if tid in names and tid != own else tid
+    def line(ln):
+        # строки вариантов «- [ ] …» не трогаем: отмеченный вариант тик сверяет с options дословно (ревью argus 15.10)
+        if re.match(r"\s*[-*+]\s*\[[ xXхХ]\]", ln):
+            return ln
+        parts = re.split(r"(`[^`\n]*`|\[\[[^\]\n]*\]\])", ln)
+        return "".join(x if i % 2 else TASK_ID_RE.sub(one, x) for i, x in enumerate(parts))
+    return "\n".join(line(ln) for ln in text.split("\n"))
+
+
+def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, who=None, long_wait=False, names=None):
     """who — имя узла «Кому» (board_sync считает его по реестру направлений); без него — по слагу без реестра.
-    long_wait — «долго ждёт» во «Внимание» (решает политика уведомлений)."""
+    long_wait — «долго ждёт» во «Внимание» (решает политика уведомлений).
+    names — id → имя карточки: номера задач в тексте станут ссылками (link_ids)."""
     head = {k: (_one(v) if isinstance(v, str) else [_one(x) for x in v] if isinstance(v, list) else v)
             for k, v in head.items()}
     lab = label_of(head)
@@ -882,7 +903,8 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
             "Ждёт": head.get("waiting_on") if head.get("waiting_on") not in (None, "human") else None,
             "Создана": _date(head.get("created"), 10),
             "Вопрос задан": _date(head.get("question_at"), 19) if head.get("question") else None,
-            "Закрыта": _date(head.get("closed"), 10) if closed else None,
+            # закрытые до 0.9.28 даты закрытия не имеют — тогда последнее изменение задачи (из её шапки)
+            "Закрыта": (_date(head.get("closed"), 10) or _date(head.get("updated"), 10)) if closed else None,
             "Тип": "задача", "id": head.get("id"), "tags": [f"направление/{direction}"]}
     due = f" · 📅 {due_text(head['due'])}" if head.get("due") else ""
     who = f" · 👤 {head['owner']}" if head.get("owner") else ""
@@ -936,6 +958,7 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
         if log:  # «- [x] …» из журнала (его пишут агенты) не должна читаться как ваша галочка
             parts.append("## Последнее\n\n" + "\n".join("- " + ("\\" if x[2:].lstrip()[:1] == "[" else "") + x[2:]
                                                         for x in log))
+    parts = [link_ids(x, names, head.get("id")) for x in parts]  # до «Источника» и ваших заметок — их не трогаем
     # без отметки времени: иначе тик переписывал бы каждую карточку каждую минуту, а Obsidian перечитывал бы доску
     parts.append(f"<small>Источник: `{src_rel}` · задача обновлена {str(head.get('updated') or '')[:16].replace('T', ' ')}</small>")
     parts.append(notes_block(notes or []))
@@ -1101,9 +1124,17 @@ formulas:
   prio_rank: 'if(note["Приоритет"].isEmpty(), 2, number(note["Приоритет"]))'
   age_key: 'if(note["Статус"] == "Готово", if(note["Закрыта"], 0 - number(note["Закрыта"]), 0), if(note["Создана"], number(note["Создана"]), 0))'
   stage: 'if(note["Статус"] == "Нужен ответ", 0, if(note["Статус"] == "Входящие", 1, if(note["Статус"] == "На проверке", 2, if(note["Статус"] == "В работе", 3, if(note["Статус"] == "Ждёт", 4, if(note["Статус"] == "Очередь", 5, if(note["Статус"] == "Готово", 6, 7)))))))'
+  status_view: 'if(note["Статус"] == "Нужен ответ", "🔴 Нужен ответ", if(note["Статус"] == "Входящие", "📥 Входящие", if(note["Статус"] == "В работе", "🟡 В работе", if(note["Статус"] == "На проверке", "🔵 На проверке", if(note["Статус"] == "Ждёт", "⏸ Ждёт", if(note["Статус"] == "Очередь", "⚪ Очередь", if(note["Статус"] == "Готово", "🟢 Готово", if(note["Статус"] == "Отменено", "⚫ Отменено", note["Статус"]))))))))'
+  prio_view: 'if(note["Приоритет"].isEmpty(), "", if(number(note["Приоритет"]) == 0, "🔥🔥 0 срочно", if(number(note["Приоритет"]) == 1, "🔥 1 высокий", if(number(note["Приоритет"]) == 2, "2 обычный", "▫️ 3 низкий"))))'
 properties:
   file.name:
     displayName: Задача
+  note.id:
+    displayName: №
+  formula.status_view:
+    displayName: Статус
+  formula.prio_view:
+    displayName: Приоритет
 views:
   - type: kanban
     name: Доска
@@ -1120,7 +1151,7 @@ views:
         direction: ASC
       - property: formula.age_key
         direction: ASC
-    order: [file.name, note.Проект, note.Внимание, note.Приоритет, note.Срок, note.Кому]
+    order: [file.name, note.Проект, note.Внимание, formula.prio_view, note.Срок, note.Кому]
   - type: table
     name: Нужен ответ
     filters:
@@ -1135,7 +1166,7 @@ views:
         direction: ASC
       - property: formula.age_key
         direction: ASC
-    order: [file.name, note.Проект, note.Внимание, note.Дальше, note.Срок, note.Вопрос задан]
+    order: [note.id, file.name, note.Проект, note.Внимание, formula.prio_view, note.Дальше, note.Срок, note.Вопрос задан]
   - type: table
     name: Горит
     filters:
@@ -1151,7 +1182,7 @@ views:
         direction: ASC
       - property: formula.age_key
         direction: ASC
-    order: [file.name, note.Проект, note.Статус, note.Внимание, note.Срок, note.Дальше]
+    order: [note.id, file.name, note.Проект, formula.status_view, note.Внимание, formula.prio_view, note.Срок, note.Дальше]
   - type: table
     name: Все задачи
     groupBy:
@@ -1168,7 +1199,7 @@ views:
         direction: ASC
       - property: formula.age_key
         direction: ASC
-    order: [file.name, note.Статус, note.Внимание, note.Приоритет, note.Кому, note.Срок, note.Дальше, note.Создана, note.Закрыта]
+    order: [note.id, file.name, formula.status_view, formula.prio_view, note.Внимание, note.Кому, note.Срок, note.Дальше, note.Создана, note.Закрыта]
 """
 BASE_VERSION = hashlib.sha256(BASE_FILE.encode("utf-8")).hexdigest()[:12]  # сменился шаблон — тик перепишет Доска.base
 # sha256[:16] шаблонов BASE_FILE до 0.9.28 (c616683 — 0.9.27, 7be0aa5 — раньше): тогда в состоянии не было base_hash,
@@ -1304,6 +1335,7 @@ def render_inbox_card(item, project, conflict=None, who=None):
     card = {"Статус": "Входящие", "Проект": f"{PROJECT_MARK.get(proj, '▪️')} {proj}".strip(),
             "Внимание": ["конфликт"] if conflict else None, "Кому": link(who or Roles(()).name(item["direction"])),
             "Дальше": "разобрать: в «Очередь» — станет задачей направления, в «Отменено» — в архив",
+            "Создана": _date(item["file"][:10], 10),
             "Тип": "заявка", "id": item["id"], "tags": [f"направление/{item['direction']}"]}
     body = re.sub(r"^# .+\n", "", item["text"], count=1, flags=re.M)
     body = re.sub(r"^От: .+\n", "", body, count=1, flags=re.M).strip()
@@ -1741,6 +1773,8 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         if name.casefold() in {x.casefold() for x in names.values()}:  # Mac: «Bob.md» и «bob.md» — один файл
             name = f"{name} ({cid})"
         names[cid] = name
+    for cid, _, src, h, b in items:
+        name = names[cid]
         st = cards.setdefault(cid, {})
         if st.get("conflict") and t - st.get("conflict_at", t) > 86400:
             st.pop("conflict", None)
@@ -1755,7 +1789,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                 alert(f"answer-mismatch-{cid}", str(h.get("requested") if h.get("risky") is True else h.get("answer")),
                       f"конфликт ответа: {h.get('title')} ({cid}) — {forged}", "board")
             card, cbody = render_card(h, b, rel(src), t, " · ".join(x for x in (st.get("conflict"), forged) if x) or None,
-                                      notes_by_id.get(cid), logged, who, long_wait=cid in long_ids)
+                                      notes_by_id.get(cid), logged, who, long_wait=cid in long_ids, names=names)
         target = os.path.join(board, name + ".md")
         old = present.get(cid)
         if old and (digest(old[0]) != seen.get(cid) or cid in typing):

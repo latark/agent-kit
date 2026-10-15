@@ -1248,7 +1248,10 @@ def domains_build(if_changed=False):
     policy_path = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
     if if_changed:
         built = read_json(path("domains.json")).get("built_ts") or 0
-        newest = max([os.path.getmtime(p) for p in (reg_path, policy_path) if os.path.exists(p)] + [roles_newest()])
+        # и новые папки сессий: окно штаба закрывает чужие перечнем (их выводы) — новая папка тоже должна попасть в hq.json
+        watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"),
+                   os.path.join(os.path.realpath("/tmp"), f"claude-{os.getuid()}"))
+        newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
         if built >= newest:
             return 0
     with open(reg_path, "rb") as fh:
@@ -1538,11 +1541,21 @@ def sandbox_build(domains, policy_path, stores=None):
     with contextlib.suppress(OSError):
         cache_dirs |= {n for n in os.listdir(os.path.expanduser(caches)) if n != "hq"}
     closed = HQ_CLOSED_DIRS + [f"{caches}/{n}" for n in sorted(cache_dirs)]
-    # переписка сессий (координаторы зовут corpus search — выдача оседает в *.jsonl), большие выводы и выводы фоновых
-    # задач сессий в ~/projects. Свои выводы, автопамять (memory/*.md) и задачи штаба (~/ai/pantheon) — открыты
-    dashed = HOME.replace(os.sep, "-")
-    files = ["~/.claude/projects/**/*.jsonl", f"~/.claude/projects/{dashed}-projects-*/**/tool-results/**",
-             os.path.join(os.path.realpath("/tmp"), f"claude-{os.getuid()}", f"{dashed}-projects-*", "**")]
+    # переписка сессий (координаторы зовут corpus search — выдача оседает в *.jsonl), большие выводы (tool-results) и
+    # выводы фоновых задач (/tmp/claude-<uid>) всех сессий, кроме своих: папки, что есть сейчас, и шаблон для будущих
+    # сессий в ~/projects. Имя папки — как у Claude Code: всё, кроме букв и цифр, → «-». Свои выводы, автопамять
+    # (memory/*.md) и задачи штаба (~/ai/pantheon и его worktree) открыты
+    dash = lambda p: re.sub(r"[^A-Za-z0-9]", "-", p)  # noqa: E731
+    own, home_d = dash(os.path.realpath(PANTHEON)), dash(os.path.realpath(HOME))
+    mine = lambda n: n == own or n.startswith(own + "--claude-worktrees-")  # noqa: E731
+    tasks = os.path.join(os.path.realpath("/tmp"), f"claude-{os.getuid()}")
+    files = ["~/.claude/projects/**/*.jsonl", f"~/.claude/projects/{home_d}-projects-*/**/tool-results/**",
+             f"{tasks}/{home_d}-projects-*/**"]
+    with contextlib.suppress(OSError):
+        files += [f"~/.claude/projects/{n}/**/tool-results/**"
+                  for n in sorted(os.listdir(os.path.join(HOME, ".claude", "projects"))) if not mine(n)]
+    with contextlib.suppress(OSError):
+        files += [f"{tasks}/{n}/**" for n in sorted(os.listdir(tasks)) if not mine(n)]
     hq["sandbox"]["filesystem"]["denyRead"] += _deny_forms(closed) + _deny_forms(files)
     rule = lambda x: f"Read({x})" if x.startswith("~") else f"Read(/{x})"  # noqa: E731 — «//» — абсолютный путь
     hq.setdefault("permissions", {}).setdefault("deny", []).extend(

@@ -138,7 +138,10 @@ def main():
     known = {"formula." + k for k in (base or {}).get("formulas", {})}
     sorts_ok = bool(views_) and all(v.get("sort") for v in views_) and all(
         x["property"] in known or x["property"].startswith("note.") for v in views_ for x in v["sort"])
-    hidden_ok = bool(views_) and not any(p.startswith("formula.") for v in views_ for p in v.get("order", []))
+    # на виду — только формулы-значки статуса и приоритета (status_view, prio_view), служебные — для сортировки
+    shown = {"formula.status_view", "formula.prio_view"}
+    hidden_ok = bool(views_) and not any(p.startswith("formula.") and p not in shown
+                                         for v in views_ for p in v.get("order", []))
     check("board: Доска.base — сортировка в каждом представлении, формулы не на карточке",
           base is None or (sorts_ok and hidden_ok))
     f_att = base_txt.split("urgency:")[1].split("\n")[0] if "urgency:" in base_txt else ""
@@ -561,6 +564,30 @@ def main():
     check("write_task: шапка, которая не прочитается обратно, — отказ, файл не создан", not bad)
 
     board_extra(tmp, home, state, view, env, src)
+    # номера задач — ссылками, «Закрыта» у старых закрытых, «№» и значки в таблицах (замечания владельца 15.10)
+    nm = {"metis-0042": "metis-0042 Завести janus-probe", "themis-0016": "themis-0016 Пересборщик"}
+    lt = _tasks.link_ids("после metis-0042 и themis-0016; `metis-0042` в коде; [[x|metis-0042]]; metis-9999; "
+                         "ametis-0042", nm, own="themis-0016")
+    check("ссылки: номер известной задачи — [[карточка|номер]], свой, в коде, в ссылке и чужой — как есть",
+          lt.startswith("после [[metis-0042 Завести janus-probe|metis-0042]] и themis-0016;")
+          and "`metis-0042` в коде" in lt and "[[x|metis-0042]]" in lt and "metis-9999" in lt and "ametis-0042" in lt)
+    hd = {"id": "metis-0001", "type": "task", "title": "Старая", "status": "done", "updated": "2026-10-14T10:00:00",
+          "next": "см. metis-0042", "result": "сделано вместе с metis-0042"}
+    cd, bd = _tasks.render_card(hd, "", "directions/x/tasks/metis-0001.md", 0, names=nm)
+    check("Закрыта: у закрытой без даты закрытия — дата последнего изменения; итог со ссылкой на номер",
+          cd["Закрыта"] == "2026-10-14" and "[[metis-0042 Завести janus-probe|metis-0042]]" in bd
+          and "`directions/x/tasks/metis-0001.md`" in bd)
+    hq_ = {"id": "metis-0050", "type": "task", "title": "Вопрос", "status": "waiting", "waiting_on": "human",
+           "question": "Что раньше — metis-0042?", "options": ["А — сначала metis-0042", "Б — потом"]}
+    _, bq = _tasks.render_card(hq_, "", "directions/x/tasks/metis-0050.md", 0, names=nm)
+    ticked = bq.replace("- [ ] А — сначала metis-0042", "- [x] А — сначала metis-0042")
+    check("ссылки: в вопросе — ссылка, в строках вариантов — нет; отмеченный вариант совпадает с options",
+          "[[metis-0042 Завести janus-probe|metis-0042]]?" in bq and "- [ ] А — сначала metis-0042" in bq
+          and _tasks.checked_option(ticked) in hq_["options"])
+    bt = _tasks.BASE_FILE
+    check("Доска.base: колонка №, значки статуса и приоритета в таблицах",
+          "note.id:\n    displayName: №" in bt and "🔴 Нужен ответ" in bt and "🔥 1 высокий" in bt
+          and "order: [note.id, file.name, formula.status_view, formula.prio_view" in bt)
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 
