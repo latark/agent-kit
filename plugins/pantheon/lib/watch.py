@@ -430,7 +430,9 @@ def worktrees(agents, registry, doms, t):
     сессии в ней — дежурный убирает сам: `git worktree remove` без --force (грязную git не отдаст) и `git branch -d`
     (неслитую не удалит). Прочие без живой сессии дольше WORKTREE_DAYS — тревога координатору: в них может быть
     неотправленная работа. Копию со ссылками наружу (outward_links) не удаляем и тревожим: старые Claude Code при
-    удалении сносили цель ссылки вне копии."""
+    удалении сносили цель ссылки вне копии.
+    Копии вне .claude/worktrees (кроме основного checkout) — только тревога после WORKTREE_DAYS без сессии, никогда
+    не удаляются. Записи с пропавшей папкой чистит один `git worktree prune` на репозиторий."""
     live = [os.path.realpath(a["cwd"]) for a in list(agents) + list(registry) if a.get("cwd") and a.get("pid")]
     seen = set()
     for name, folders in doms.items():
@@ -441,12 +443,29 @@ def worktrees(agents, registry, doms, t):
             seen.add(root)
             r = _git("-C", root, "worktree", "list", "--porcelain")
             base = None
+            need_prune = False
             for block in r.stdout.split("\n\n"):
                 m = re.search(r"^worktree (.+)$", block, re.M)
                 if not m:
                     continue
                 wt = os.path.realpath(m.group(1))
+                if wt == root:
+                    continue
+                if not os.path.isdir(wt):
+                    need_prune = True  # запись без папки; locked git и сам не тронет
+                    continue
                 if os.sep + os.path.join(".claude", "worktrees") + os.sep not in wt + os.sep:
+                    # копия вне штатной папки: только тревога, никогда не удаляем
+                    if any(c == wt or c.startswith(wt + os.sep) for c in live):
+                        continue
+                    try:
+                        out_age = (t - os.stat(wt).st_mtime) / 3600
+                    except OSError:
+                        continue
+                    if out_age > WORKTREE_DAYS * 24:
+                        P.alert_once(f"watch-wt-{wt}", "1", f"копия вне штатной папки {wt.replace(P.HOME, '~')} "
+                                     f"({name}, {out_age / 24:.0f} дн. без сессии) — координатору: слить или убрать",
+                                     "watch")
                     continue
                 if any(c == wt or c.startswith(wt + os.sep) for c in live):
                     continue
@@ -486,6 +505,10 @@ def worktrees(agents, registry, doms, t):
                 if age > WORKTREE_DAYS * 24:
                     P.alert_once(f"watch-wt-{wt}", "1", f"забытая копия {short} ({name}, {age / 24:.0f} дн. без "
                                  "сессии, не слита или не чистая) — координатору: слить или убрать", "watch")
+            if need_prune:
+                # без --expire: git worktree prune по умолчанию убирает записи без папки сразу (срок
+                # gc.worktreePruneExpire — только у gc); locked-записи git не трогает
+                _git("-C", root, "worktree", "prune")
 
 
 def cc_version(t):

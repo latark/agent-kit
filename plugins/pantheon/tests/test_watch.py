@@ -764,6 +764,34 @@ def test_worktree_outward_links_0101():
     check(not os.path.exists(in_wt), "копия со ссылкой внутрь не убрана")
 
 
+def test_worktree_outside_and_prune_0118():
+    """Копии вне .claude/worktrees: тревога после WORKTREE_DAYS, никогда не удаляются; запись без папки чистится."""
+    e = Env()
+    folder = e.direction("g-dir")
+    shutil.rmtree(os.path.join(folder, ".git"))
+    g = lambda *a, cwd=folder: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd,
+                                              capture_output=True, text=True, env=dict(os.environ, HOME=e.home))
+    g("init", "-q", "-b", "main")
+    g("commit", "-q", "--allow-empty", "-m", "x")
+    outside = os.path.join(e.tmp, "ak-outside")
+    young = os.path.join(e.tmp, "ak-young")
+    gone = os.path.join(e.tmp, "ak-gone")
+    for n, w in (("o-old", outside), ("o-young", young), ("o-gone", gone)):
+        g("worktree", "add", "-q", "-b", n, w)
+    shutil.rmtree(gone)
+    old = T0 - 4 * 86400
+    os.utime(outside, (old, old))
+    os.utime(young, (T0, T0))
+    e.run("watch", t=T0)
+    check(os.path.isdir(outside), "копия вне штатной папки убрана")
+    a = e.alerts()
+    check("вне штатной папки" in a and "ak-outside" in a, "нет тревоги о копии вне штатной папки")
+    check("ak-young" not in a, "тревога о молодой копии вне папки")
+    lst = g("worktree", "list", "--porcelain").stdout
+    check("ak-gone" not in lst and "ak-outside" in lst and "ak-young" in lst, "запись без папки не вычищена")
+    check(g("rev-parse", "--verify", "-q", "o-old").returncode == 0, "ветка копии вне папки удалена")
+
+
 def test_tick_subcommands():
     sys.path.insert(0, os.path.join(ROOT, "lib"))
     import importlib
