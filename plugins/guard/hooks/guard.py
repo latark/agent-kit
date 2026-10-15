@@ -318,8 +318,11 @@ NEXT_EXT = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".css", ".scss
 
 def turn_tool_uses(transcript_path):
     """tool_use текущего хода: всё после последнего настоящего сообщения пользователя."""
-    with open(transcript_path, encoding="utf-8", errors="ignore") as f:
-        lines = f.readlines()
+    try:
+        with open(transcript_path, encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except OSError:
+        return None  # транскрипта нет (сессию удалили) или он не читается — проверять нечего
     uses = []
     for line in reversed(lines):
         try:
@@ -374,6 +377,8 @@ def check_nextjs(event):
     if event.get("stop_hook_active") or not event.get("transcript_path"):
         return None
     uses = turn_tool_uses(event["transcript_path"])
+    if uses is None:
+        return None
     last_edit, roots = -1, set()
     for i, use in enumerate(uses):
         path = (use.get("input") or {}).get("file_path") or (use.get("input") or {}).get("notebook_path") or ""

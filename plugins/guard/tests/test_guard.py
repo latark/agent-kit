@@ -1445,6 +1445,28 @@ def main():
         failed += not ok
         cases.append(None)
         print(f"{'ok  ' if ok else 'FAIL'} системный Python 3.9: dev-server запрещён: {got}")
+    # metis-0079: Stop без транскрипта (файла нет / по пути папка) — без сбоя в журнале и без блокировки
+    stop_home = tempfile.mkdtemp(prefix="guard-stop-")
+    stop_log = os.path.join(stop_home, ".local/state/pantheon/logs/guard-failures.log")
+    stop_env = {"HOME": stop_home, "PATH": os.environ["PATH"], "TMPDIR": "/nonexistent-tmp"}
+    good = os.path.join(stop_home, "good.jsonl")
+    with open(good, "w") as fh:
+        fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "привет"}}) + "\n")
+    os.makedirs(os.path.join(stop_home, "dir.jsonl"))
+    for label, tp in (("файла нет", os.path.join(stop_home, "gone.jsonl")),
+                      ("по пути папка", os.path.join(stop_home, "dir.jsonl")),
+                      ("обычный транскрипт", good)):
+        if os.path.exists(stop_log):  # свой журнал на каждый случай: FAIL достаётся тому, кто его вызвал
+            os.remove(stop_log)
+        ev ={"hook_event_name": "Stop", "transcript_path": tp, "session_id": "s-test", "cwd": stop_home}
+        r = subprocess.run([sys.executable, "-I", GUARD], input=json.dumps(ev), capture_output=True, text=True,
+                           env=stop_env, timeout=10)
+        ok = r.returncode == 0 and '"block"' not in r.stdout and '"deny"' not in r.stdout \
+            and not os.path.exists(stop_log)
+        failed += not ok
+        cases.append(None)
+        print(f"{'ok  ' if ok else 'FAIL'} Stop, {label}: код {r.returncode}, без блокировки и без записи в журнал сбоев")
+    shutil.rmtree(stop_home, ignore_errors=True)
     # SEC-29/SEC-10: сбой всего скрипта — в окне роли (--strict) выход 2, в плагине выход 0; оба — в журнал
     env = {"HOME": home, "PATH": os.environ["PATH"], "TMPDIR": "/nonexistent-tmp"}
     for mode, want_code in (("--strict", 2), (None, 0)):
