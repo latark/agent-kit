@@ -312,6 +312,21 @@ def main():
     check("архив: тревоги старше 30 дней ушли", "старая тревога" not in al and "свежая тревога" in al
           and os.path.exists(os.path.join(home, "archive", "alerts-2026-09.md")))
 
+    # критичная находка (COMM-08): строка с пометкой и уведомление; обычная — без уведомления
+    tmp = tempfile.mkdtemp(prefix="tick-test-")
+    home, state = make(tmp, "")
+    log = os.path.join(tmp, "notify.log")
+    env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
+           "PANTHEON_NOTIFY_LOG": log}
+    subprocess.run([sys.executable, "-I", LIB, "alert", "обычная", "--from", "athena"], env=env, capture_output=True)
+    rc = subprocess.run([sys.executable, "-I", LIB, "alert", "ключ в логе", "--critical", "--from", "zeus"],
+                        env=env, capture_output=True).returncode
+    al = open(os.path.join(home, "alerts.md")).read()
+    sent = open(log).read() if os.path.exists(log) else ""
+    check("alert --critical: «КРИТИЧНО» в alerts.md и одно уведомление от того, кто нашёл",
+          rc == 0 and "zeus · КРИТИЧНО: ключ в логе" in al and "athena · обычная" in al
+          and sent.count("\n") == 1 and "критично · zeus|ключ в логе" in sent)
+
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 

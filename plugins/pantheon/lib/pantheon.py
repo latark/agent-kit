@@ -13,7 +13,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon jobs                         что установлено, когда шло, что дальше и почему ждёт
   pantheon jobs pause|resume|disable|enable <задача>   (--all — весь планировщик)
   pantheon jobs renew <задача> [дней]   продлить аренду задачи
-  pantheon alert "<строка>" [--from кто]   дописать строку в ~/ai/pantheon/alerts.md
+  pantheon direction check <имя>        что готово у нового направления (навык new-direction): реестр, «да»,
+                                        папки, STATUS.md, domains.json, AGENTS.md, доверие, autoMode
+  pantheon alert "<строка>" [--from кто] [--critical]   дописать строку в ~/ai/pantheon/alerts.md
+                                          (--critical — ещё и уведомление macOS: COMM-08)
   pantheon archive                      «Сделано» доски старше 7 дней и тревоги старше 30 — в archive/
   pantheon domains build                ~/ai/pantheon/directions.toml → ~/.local/state/pantheon/domains.json
                                         и настройки окон ролей с песочницей …/settings/<направление>.json
@@ -1670,6 +1673,86 @@ APPROVALS_HEAD = """# Заранее разрешённые действия м�
 """
 
 
+DIRECTION_NAME = re.compile(r"[a-z]+-[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
+def direction_check(name):
+    """Навык new-direction (ROLE-05, STATE-11): всё ли готово у направления. → [(готово, что)]."""
+    res = []
+    add = lambda ok, text: res.append((bool(ok), text))
+    add(DIRECTION_NAME.fullmatch(name) and len(name) <= 40,
+        f"имя «{name}» по образцу <бог>-<проект>: латиница, цифры, дефис, до 40 знаков")
+    god = name.split("-", 1)[0]
+    try:
+        dec = open(os.path.join(PANTHEON, "decisions.md"), encoding="utf-8").read()
+    except OSError:
+        dec = ""
+    said = [l for l in dec.splitlines() if l.startswith("|") and re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", l)
+            and "Ваши слова" in l]
+    add(said, "ваше «да» в decisions.md: строка с именем направления и «Ваши слова»")
+    try:
+        with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
+            reg = {d.get("name"): d for d in tomllib.load(fh).get("direction") or []}
+    except (OSError, ValueError):
+        reg = {}
+    d = reg.get(name) or {}
+    add(d, "запись в directions.toml")
+    add(d.get("does") and d.get("does_not") and 3 <= len(d.get("examples") or []) <= 6,
+        "в записи есть does, does_not и 3–5 examples (ROLE-11)")
+    folders = [os.path.realpath(os.path.expanduser(f)) for f in d.get("folders") or []]
+    add(folders and all(os.path.isdir(f) for f in folders), "папки направления есть на этом Mac")
+    launch = next((f for f in folders if os.path.isdir(os.path.join(f, ".git"))), folders[0] if folders else "")
+    home_dir = os.path.join(PANTHEON, "directions", name)
+    add(all(os.path.exists(os.path.join(home_dir, x)) for x in ("STATUS.md", "inbox", "tasks")),
+        f"~/ai/pantheon/directions/{name}/: STATUS.md, inbox/, tasks/ (STATE-07)")
+    dom = (read_json(path("domains.json"), {}).get("domains") or {}).get(name)
+    add(dom, "направление в domains.json (pantheon domains build) — guard его знает")
+    add(os.path.isfile(path("settings", name + ".json")), "окно роли settings/" + name + ".json")
+    agents = os.path.join(launch, "AGENTS.md")
+    claude_md = os.path.join(launch, "CLAUDE.md")
+    cm = open(claude_md, encoding="utf-8").read(200) if os.path.isfile(claude_md) else None
+    add(os.path.isfile(agents) and (cm is None or cm.lstrip().startswith("@AGENTS.md")),
+        "AGENTS.md в папке запуска; CLAUDE.md нет или начинается с @AGENTS.md (STATE-12)")
+    try:
+        cj = json.load(open(os.path.join(HOME, ".claude.json"), encoding="utf-8"))
+    except (OSError, ValueError):
+        cj = {}
+    add(((cj.get("projects") or {}).get(launch) or {}).get("hasTrustDialogAccepted"),
+        f"доверие к {launch.replace(HOME, '~')} — владелец, одна интерактивная сессия (без него claude --bg не стартует)")
+    remote = ""
+    if os.path.isdir(os.path.join(launch, ".git")):
+        r = subprocess.run(["git", "-C", launch, "remote", "get-url", "origin"], capture_output=True, text=True)
+        remote = r.stdout.strip() if r.returncode == 0 else ""
+    owner = re.search(r"[:/]([\w.-]+)/[\w.-]+?(?:\.git)?$", remote)
+    try:
+        env = "\n".join(json.load(open(os.path.join(HOME, ".claude", "settings.json"), encoding="utf-8"))
+                        .get("autoMode", {}).get("environment") or [])
+    except (OSError, ValueError):
+        env = ""
+    add(not remote or (owner and (owner.group(1) + "/") in env),
+        "владелец remote в autoMode.environment (" + (remote or "remote нет") + ")")
+    try:
+        names = open(os.path.join(PARTS, "names.part"), encoding="utf-8").read()
+    except OSError:
+        names = ""
+    add(f"({name})" in names, f"бог направления ({god}) и его род — в _parts/names.part")
+    for lead in d.get("leads") or []:
+        short = name.split("-", 1)[-1]
+        add(os.path.isfile(os.path.join(AGENTS, f"{lead}-{short}.md")), f"роль лида {lead}-{short} (pantheon roles build)")
+    return res
+
+
+def direction(rest):
+    """pantheon direction check <имя> — что готово у нового направления (навык new-direction)."""
+    if len(rest) != 2 or rest[0] != "check":
+        print(direction.__doc__, file=sys.stderr)
+        return 2
+    res = direction_check(rest[1])
+    for ok, text in res:
+        print(("готово  " if ok else "НЕТ     ") + text)
+    return 0 if all(ok for ok, _ in res) else 1
+
+
 def approvals_load():
     try:
         with open(APPROVALS, "rb") as fh:
@@ -2037,10 +2120,15 @@ def main(argv):
                 print("pantheon alert: после --from нужно имя", file=sys.stderr)
                 return 2
             who, rest = rest[i + 1], rest[:i] + rest[i + 2:]
+        critical = "--critical" in rest
+        rest = [a for a in rest if a != "--critical"]
         if not " ".join(rest).strip():
             print("pantheon alert: пустая строка", file=sys.stderr)
             return 2
-        alert(" ".join(rest), who)
+        alert(("КРИТИЧНО: " if critical else "") + " ".join(rest), who)
+        if critical:  # COMM-08: безопасность, деньги, данные клиентов, юридическое, прод, контракт — сразу владельцу
+            notify(" ".join(rest)[:200], title=f"Пантеон · критично · {' '.join(who.split())[:40]}",
+                   group="critical-" + who)
         return 0
     if cmd == "archive":
         return archive()
@@ -2068,6 +2156,8 @@ def main(argv):
         made = roles_build()
         print(f"роли: {', '.join(made) if made else 'без изменений'}")
         return 0
+    if cmd == "direction":
+        return direction(rest)
     if cmd == "approve":
         return approve(rest)
     if cmd == "install":
