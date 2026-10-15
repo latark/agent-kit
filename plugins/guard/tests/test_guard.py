@@ -115,8 +115,11 @@ def gate_fixtures(home):
             fh.write(json.dumps({"v": 1, "kind": "tests", "repo": [repo], "pr": None, "sha": SHA_OK, "by": by}) + "\n")
             for pr in range(1, 13):
                 for kind in ("accept", "talos"):
-                    fh.write(json.dumps({"v": 1, "kind": kind, "repo": [repo], "pr": pr, "sha": SHA_OK,
-                                         "by": dict(by, agent_type="argus" if kind == "accept" else "talos")}) + "\n")
+                    r = {"v": 1, "kind": kind, "repo": [repo], "pr": pr, "sha": SHA_OK,
+                         "by": dict(by, agent_type="argus" if kind == "accept" else "talos")}
+                    if kind == "accept":  # Б6 (guard 0.5.6): запор пускает только «принять» с перечнем проверенного
+                        r["checklist"] = {"opened": "дифф PR", "ran": "тесты", "unchecked": "живой gh"}
+                    fh.write(json.dumps(r) + "\n")
     with open(os.path.join(home, "ai/pantheon/alerts.md"), "w") as fh:
         for repo in ("latark/brokerAssistantApp", "latark/broker-landing"):
             for pr in range(1, 13):

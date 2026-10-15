@@ -9,19 +9,22 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
 1. Журнал проверок STATE_DIR/merge-gate/records.jsonl. Пишет только хук guard на PostToolUse (record): команда
    Bash успешно завершилась, она простая (без ; | & && || $( ` и перенаправлений) и это `pantheon review <вид> …`.
      tests          — `pantheon review test -- <команда>`: SHA — HEAD папки cwd, дерево чистое; repo — её remote;
-     accept, reject — `pantheon review accept|reject <owner/repo> <PR> <SHA>`, только agent_type argus;
+                      программа после обёрток (heavy, env VAR=…, time, nice, timeout N) — не пустая (true, echo…);
+     accept, reject — `pantheon review accept|reject <owner/repo> <PR> <SHA> [--opened … --ran … --unchecked …]`,
+                      только agent_type argus; у accept все три поля перечня (Б6) обязательны и непусты;
      talos          — `pantheon review talos <owner/repo> <PR> <SHA>`, только agent_type talos.
    Строка: {"v":1,"kind","repo":[owner/repo…],"pr":N|null,"sha","by":{agent_type,agent_id,session_id},"cwd","time",
-   "tool_use_id","cmd"}. Подделать запись роль не может: ~/.local/state/pantheon закрыт ролям песочницей и
+   "tool_use_id","cmd"}, у accept (и у reject с полями) — ещё "checklist":{"opened","ran","unchecked"}. Подделать запись роль не может: ~/.local/state/pantheon закрыт ролям песочницей и
    pantheon-acl, а вид записи хук берёт из agent_type события, а не из текста команды. Битые строки при чтении
    пропускаются: битая запись может только не дать разрешения.
 2. merge_problem — правило gh pr merge: кто сливает (координатор или его лид), чьё направление, защиты, затем запор:
    один номер PR, без --auto и --admin, ровно один --match-head-commit <SHA> (его сверяет GitHub), все репозитории
    команды — из [merge_repos] направления, запись tests на (repo, SHA), последний вердикт argus на (repo, PR, SHA) —
-   accept, рецензент — не тот, кто сливает; продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
+   accept с полным перечнем проверенного (Б6), рецензент — не тот, кто сливает; продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
    owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро: весь plugins/guard/**, casefold;
    файлы из pulls/N/files с previous_filename.
-Чего guard не проверяет: правдивость строки в сводке и то, что выбранная команда тестов — настоящие тесты.
+Чего guard не проверяет: правдивость строки в сводке и перечня argus и то, что выбранная команда тестов — настоящие
+тесты: пустую программу (true, echo…) он ловит, а обёртку вроде `sh -c true` — нет (защита от ошибки, не от обхода).
 """
 
 import json
@@ -44,13 +47,14 @@ MERGE_PRODUCT = ("Продукт для клиентов сливай после
                  "gh pr merge N --match-head-commit <SHA>.")
 MERGE_PROTECT = ("Защиты сливает только Метида или её лид через запор: тесты и «принять» от argus на этот SHA, "
                  "gh pr merge N --match-head-commit <SHA>; PR, который задевает ядро защит (весь "
-                 "plugins/guard/), сливает только владелец кнопкой (Д3).")
+                 "plugins/guard/ и .claude-plugin/marketplace.json), сливает только владелец кнопкой (Д3).")
 MERGE_OWNER = "Слияние делает владелец."
 MERGE_AMBIGUOUS = "\0два направления"
 MERGE_CORE = "ядро защит — только кнопка владельца (Д3)"
 # ядро защит (Д3): эти файлы агенты не сливают — гарантия, что запор не ослабит сам себя
 CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_config.py",
-              "plugins/guard/managed-settings.json")
+              "plugins/guard/managed-settings.json",
+              ".claude-plugin/marketplace.json")  # откуда ставятся плагины: подмена источника guard (metis-0115)
 CORE_DIR = "plugins/guard"  # и весь плагин guard (metis-0092): код, тесты, README, настройки
 GH_TIMEOUT = 6
 SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -60,6 +64,14 @@ RECORD_V = 1
 REVIEW_KINDS = {"accept": "argus", "reject": "argus", "talos": "talos"}  # вид записи → кто её пишет
 # простая команда: без цепочек, конвейеров, подстановок и перенаправлений (разбор guard для неё не нужен)
 NOT_SIMPLE = re.compile(r"[;|&<>`\n\r]|\$\(")
+# перечень проверенного в «принять» (Б6): что argus открыл, что запустил, чего не проверял — поля записи и флаги
+CHECKLIST = ("opened", "ran", "unchecked")
+CHECKLIST_HINT = '--opened "<что открыл>" --ran "<что запустил>" --unchecked "<что не проверял>"'
+# пустая команда тестов: программа, которая ничего не проверяет (защита от ошибки: `sh -c true` не ловится)
+EMPTY_TEST_PROGRAMS = {"true", ":", "echo", "printf", "exit", "test", "[", "sleep", "yes"}
+# обёртки перед программой тестов: имя → флаги, за которыми идёт отдельное значение
+TEST_WRAPPERS = {"heavy": set(), "env": {"-u", "--unset", "-C", "--chdir"}, "time": set(),
+                 "nice": {"-n", "--adjustment"}, "timeout": {"-s", "--signal", "-k", "--kill-after"}}
 
 
 def _str_list(v):
@@ -311,6 +323,87 @@ def verdict_args(args):
     return repo, int(pr), sha
 
 
+def verdict_parse(kind, args):
+    """Аргументы `pantheon review accept|reject|talos …` → ((repo, pr, sha), перечень {поле: значение}, None) или
+    (None, None, текст ошибки). Флаги перечня (Б6) — только у accept и reject, в любом месте, `--ran X` или
+    `--ran=X`; у accept все три обязательны и непусты, у reject — по желанию (пустые не сохраняются)."""
+    flags = kind in ("accept", "reject")
+    fmt = f"`pantheon review {kind} <owner/repo> <номер PR> <SHA 40 знаков>" + (
+        f" {CHECKLIST_HINT}`" if kind == "accept" else " [--opened … --ran … --unchecked …]`" if flags else "`")
+    pos, checklist, i = [], {}, 0
+    while i < len(args):
+        a = args[i]
+        if not isinstance(a, str):
+            return None, None, f"{fmt} — аргументы не в этом формате"
+        if flags and a.startswith("--") and len(a) > 2:
+            name, eq, val = a[2:].partition("=")
+            if name not in CHECKLIST:
+                return None, None, f"{fmt} — неизвестный флаг --{name}"
+            if name in checklist:
+                return None, None, f"{fmt} — --{name} указан дважды"
+            if not eq:
+                if i + 1 >= len(args) or not isinstance(args[i + 1], str):
+                    return None, None, f"{fmt} — у --{name} нет значения"
+                i += 1
+                val = args[i]
+            checklist[name] = val.strip()
+        else:
+            pos.append(a)
+        i += 1
+    parsed = verdict_args(pos)
+    if parsed is None:
+        return None, None, f"{fmt} — аргументы не в этом формате (SHA — полный, из `gh pr view N --json headRefOid`)"
+    if kind == "accept":
+        missing = [f"--{k}" for k in CHECKLIST if not checklist.get(k)]
+        if missing:
+            return None, None, (f"«принять» без перечня проверенного (Б6): нет или пусто {', '.join(missing)}. Формат: "
+                                f"{fmt}. Запор пускает только «принять», где сказано, что открыто, что запущено и "
+                                "чего argus не проверял")
+    return parsed, {k: v for k, v in checklist.items() if v}, None
+
+
+def checklist_ok(rec):
+    """У записи accept — полный перечень Б6: словарь с непустыми строками opened, ran, unchecked."""
+    c = rec.get("checklist")
+    return isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in CHECKLIST)
+
+
+def test_program(argv):
+    """Программа команды тестов после обёрток heavy, env (VAR=…, флаги), time, nice, timeout N — в нижнем регистре
+    (macOS не различает регистр: TRUE — это true); None — после обёрток ничего нет."""
+    i = 0
+    while i < len(argv):
+        name = os.path.basename(argv[i].rstrip("/")).lower()
+        if name not in TEST_WRAPPERS:
+            return name or None
+        takes, i = TEST_WRAPPERS[name], i + 1
+        while i < len(argv):
+            a = argv[i]
+            if a == "--":
+                i += 1
+                break
+            if a in takes:
+                i += 2
+            elif a.startswith("-") or (name == "env" and "=" in a):
+                i += 1
+            else:
+                break
+        if name == "timeout":
+            i += 1  # длительность
+    return None
+
+
+def empty_test_problem(argv):
+    """Команда тестов ничего не проверяет (true, echo ok, heavy :, env X=1 timeout 5 sleep 1) — текст отказа; иначе
+    None. Защита от ошибки, а не от обхода: `sh -c true`, `python3 -c pass` не ловятся."""
+    prog = test_program(argv)
+    if prog is None or prog in EMPTY_TEST_PROGRAMS:
+        return (f"команда тестов `{' '.join(argv) or 'пусто'}` ничего не проверяет (программа «{prog or 'нет'}»): "
+                "запор пишет тесты только для настоящей команды — например, `pantheon review test -- heavy python3 -I "
+                "tests/test_x.py` или `pantheon review test -- heavy pnpm test`")
+    return None
+
+
 def _is_pantheon(word):
     return isinstance(word, str) and os.path.basename(word.rstrip("/")) == "pantheon"
 
@@ -344,6 +437,9 @@ def record(event):
     if not isinstance(tool_input, dict) or tool_input.get("run_in_background") \
             or not isinstance(resp, dict) or _bg_id(resp):
         return None
+    # упавшая команда приходит PostToolUseFailure; если код выхода всё же есть в ответе и он не 0 — тоже не пишем
+    if any(resp.get(k) not in (0, None) for k in ("exit_code", "exitCode", "returnCode")):
+        return None
     cmd = tool_input.get("command") or ""
     words = simple_review(cmd)
     if not words:
@@ -352,7 +448,7 @@ def record(event):
     role = event.get("agent_type") or ""
     cwd = os.path.realpath(event.get("cwd") or "")
     if kind == "test":
-        if len(args) < 2 or args[0] != "--":
+        if len(args) < 2 or args[0] != "--" or empty_test_problem(args[1:]):
             return None
         sha = (_git(cwd, "rev-parse", "HEAD") or "").strip().lower()
         status = _git(cwd, "status", "--porcelain")
@@ -363,18 +459,21 @@ def record(event):
     elif kind in REVIEW_KINDS:
         if role != REVIEW_KINDS[kind]:
             return None
-        parsed = verdict_args(args)
+        parsed, checklist, _ = verdict_parse(kind, args)
         if not parsed:
             return None
         repo, pr, sha = parsed
         rec_kind, repos = kind, [repo]
     else:
         return None
-    append_record({"v": RECORD_V, "kind": rec_kind, "repo": repos, "pr": pr, "sha": sha,
-                   "by": {"agent_type": role, "agent_id": event.get("agent_id") or "",
-                          "session_id": event.get("session_id") or ""},
-                   "cwd": cwd, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                   "tool_use_id": event.get("tool_use_id") or "", "cmd": cmd})
+    rec = {"v": RECORD_V, "kind": rec_kind, "repo": repos, "pr": pr, "sha": sha,
+           "by": {"agent_type": role, "agent_id": event.get("agent_id") or "",
+                  "session_id": event.get("session_id") or ""},
+           "cwd": cwd, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+           "tool_use_id": event.get("tool_use_id") or "", "cmd": cmd}
+    if rec_kind in ("accept", "reject") and checklist:
+        rec["checklist"] = checklist
+    append_record(rec)
     return rec_kind
 
 
@@ -392,15 +491,14 @@ def review_problem(role, args, cmd="", background=False):
         return (f"`pantheon review {kind}` — только отдельной простой командой, без `;`, `|`, `&`, `<`, `>`, `$(`, "
                 "обратных кавычек и переводов строки: иначе код выхода был бы не от тестов, и запись не сделается.")
     if kind == "test":
-        return None
+        why = empty_test_problem(args[3:]) if len(args) >= 4 and args[2] == "--" else None
+        return f"{why}. Записи не будет." if why else None
     need = REVIEW_KINDS[kind]
     if role != need:
         return (f"`pantheon review {kind}` записывает только {need}: хук guard пишет вердикт по роли, у роли "
                 f"«{role or 'субагент'}» записи не будет. Позови {need} — он проверит и запишет сам.")
-    if verdict_args(args[2:]) is None:
-        return (f"`pantheon review {kind} <owner/repo> <номер PR> <SHA 40 знаков>` — аргументы не в этом формате "
-                "(SHA — полный, из `gh pr view N --json headRefOid`).")
-    return None
+    _, _, why = verdict_parse(kind, args[2:])
+    return f"{why}. Записи не будет." if why else None
 
 
 # --- запор gh pr merge ------------------------------------------------------------------------------------------
@@ -517,11 +615,14 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     verdicts = [r for r in records if mine(r, ("accept", "reject"), "argus")]
     if not verdicts:
         return (f"нет «принять» от argus на {repo}#{pr}@{sha[:12]}: позови argus, он проверит и запишет "
-                f"`pantheon review accept {repo} {pr} {sha}`. {advice}")
+                f"`pantheon review accept {repo} {pr} {sha} {CHECKLIST_HINT}`. {advice}")
     last = verdicts[-1]
     if last["kind"] != "accept":
         return (f"последний вердикт argus на {repo}#{pr}@{sha[:12]} — «вернуть» (reject): исправь, проверь заново "
                 f"и получи новое `pantheon review accept {repo} {pr} <новый SHA>`. {advice}")
+    if not checklist_ok(last):
+        return (f"«принять» argus на {repo}#{pr}@{sha[:12]} — без перечня проверенного (Б6): запись старого формата "
+                f"или неполная. argus, повтори `pantheon review accept {repo} {pr} {sha} {CHECKLIST_HINT}`. {advice}")
     me = ((event or {}).get("session_id") or "", (event or {}).get("agent_id") or "")
     if (last["by"].get("session_id") or "", last["by"].get("agent_id") or "") == me:
         return f"рецензент и сливающий — одна и та же сессия: «принять» должен дать отдельный argus. {advice}"
