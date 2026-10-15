@@ -15,6 +15,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon jobs renew <задача> [дней]   продлить аренду задачи
   pantheon direction check <имя>        что готово у нового направления (навык new-direction): реестр, «да»,
                                         папки, STATUS.md, domains.json, AGENTS.md, доверие, autoMode
+  pantheon instructions [--quiet]       дойдут ли инструкции целиком: Codex (лимит на путь), MEMORY.md
+                                        (200 строк / 25 КБ), CLAUDE.md с импортами длиннее 200 строк
   pantheon alert "<строка>" [--from кто] [--critical]   дописать строку в ~/ai/pantheon/alerts.md
                                           (--critical — ещё и уведомление macOS: COMM-08)
   pantheon archive                      «Сделано» доски старше 7 дней и тревоги старше 30 — в archive/
@@ -50,6 +52,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import stat
@@ -230,7 +233,8 @@ def clear_once(key):
 
 JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
-TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check"}
+TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
+                    "instructions"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 
 
@@ -1699,6 +1703,160 @@ def owner_approved(name, days=14):
     return False
 
 
+# Пределы инструкций (исследование 15.10, ~/ai/knowledge/inbox/research-2026-10-15-agents-md.md; docs Claude Code memory).
+CLAUDE_LINES = 200          # CLAUDE.md длиннее хуже соблюдается (рекомендация документации, файл грузится целиком)
+MEMORY_LINES, MEMORY_BYTES = 200, 25 * 1024   # MEMORY.md автопамяти: дальше при старте не грузится
+CODEX_DEFAULT = 32 * 1024   # Codex project_doc_max_bytes: сверх — молча обрезает
+SKIP_DIRS = {"node_modules", "vendor", "dist", "build", "target", "__pycache__", "venv", ".venv", "coverage"}
+
+
+def codex_setup():
+    """→ (Codex на этом Mac, лимит байт, байт глобального AGENTS.md). Глобальный файл считаем в тот же бюджет:
+    документация Codex говорит о «combined size» без уточнения — берём худший случай."""
+    home = os.environ.get("CODEX_HOME") or os.path.join(HOME, ".codex")
+    here = os.path.isdir(home) or bool(shutil.which("codex"))
+    limit = CODEX_DEFAULT
+    try:
+        with open(os.path.join(home, "config.toml"), "rb") as fh:
+            limit = int(tomllib.load(fh).get("project_doc_max_bytes") or CODEX_DEFAULT)
+    except (OSError, ValueError, TypeError):
+        pass
+    glob_size = 0
+    for n in ("AGENTS.override.md", "AGENTS.md"):
+        f = os.path.join(home, n)
+        if os.path.isfile(f):
+            glob_size = os.path.getsize(f)
+            break
+    return here, limit, glob_size
+
+
+def _lines(f):
+    try:
+        with open(f, "rb") as fh:
+            return fh.read(4 << 20).count(b"\n")
+    except OSError:
+        return 0
+
+
+def _claude_lines(f, depth=0, seen=None):
+    """Строки CLAUDE.md вместе с импортами @файл (как грузит Claude Code: до четырёх переходов)."""
+    seen = seen if seen is not None else set()
+    rf = os.path.realpath(f)
+    if rf in seen or depth > 4 or not os.path.isfile(rf):
+        return 0
+    seen.add(rf)
+    n = _lines(rf)
+    try:
+        text = open(rf, encoding="utf-8", errors="replace").read(1 << 20)
+    except OSError:
+        return n
+    for m in re.finditer(r"(?m)^\s*@(\S+\.md)\s*$", text):
+        target = os.path.expanduser(m.group(1))
+        n += _claude_lines(target if os.path.isabs(target) else os.path.join(os.path.dirname(rf), target), depth + 1, seen)
+    return n
+
+
+def instruction_files(root, max_depth=5, max_dirs=5000):
+    """Папки с инструкциями внутри root → [(папка, байт цепочки Codex от корня git, строк CLAUDE.md с импортами)].
+    Codex склеивает AGENTS.override.md (или AGENTS.md) каждой папки от корня git до текущей."""
+    out, count = [], 0
+    stack = [(os.path.realpath(root), 0, 0)]
+    while stack and count < max_dirs:
+        d, depth, chain = stack.pop()
+        count += 1
+        if os.path.isdir(os.path.join(d, ".git")):
+            chain = 0
+        agents = next((os.path.join(d, n) for n in ("AGENTS.override.md", "AGENTS.md")
+                       if os.path.isfile(os.path.join(d, n))), None)
+        if agents:
+            chain += os.path.getsize(agents)
+        claude_md = os.path.join(d, "CLAUDE.md")
+        cl = _claude_lines(claude_md) if os.path.isfile(claude_md) else (_lines(agents) if agents else 0)
+        if agents or os.path.isfile(claude_md):
+            out.append((d, chain, cl))
+        if depth >= max_depth:
+            continue
+        try:
+            subs = [e for e in os.scandir(d) if e.is_dir(follow_symlinks=False)
+                    and not e.name.startswith(".") and e.name not in SKIP_DIRS]
+        except OSError:
+            subs = []
+        stack.extend((e.path, depth + 1, chain) for e in subs)
+    return out
+
+
+def memory_files():
+    """MEMORY.md автопамяти проектов и памяти ролей → [(файл, строк, байт)]."""
+    res = []
+    for base, pattern in ((os.path.join(HOME, ".claude", "projects"), ("memory", "MEMORY.md")),
+                          (os.path.join(HOME, ".claude", "agent-memory"), ("MEMORY.md",))):
+        try:
+            names = os.listdir(base)
+        except OSError:
+            continue
+        for n in names:
+            f = os.path.join(base, n, *pattern)
+            if os.path.isfile(f):
+                res.append((f, _lines(f), os.path.getsize(f)))
+    return res
+
+
+def instructions_check(quiet=False):
+    """pantheon instructions: дойдут ли инструкции до агента целиком (Claude и Codex). Тик — раз в сутки.
+    Срез (Codex сверх лимита, MEMORY.md сверх 200 строк или 25 КБ) — тревога на каждый файл; длинные CLAUDE.md —
+    одна тревога на набор."""
+    try:
+        with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
+            reg = tomllib.load(fh).get("direction") or []
+    except (OSError, ValueError):
+        reg = []
+    roots = []
+    for d in reg:
+        for f in d.get("folders") or []:
+            r = os.path.realpath(os.path.expanduser(f))
+            if os.path.isdir(r) and not any(r == x or r.startswith(x.rstrip("/") + "/") for x in roots):
+                roots = [x for x in roots if not x.startswith(r.rstrip("/") + "/")] + [r]
+    here, limit, glob_size = codex_setup()
+    short = lambda p: p.replace(HOME, "~")
+    cut, long_ = [], []
+    for root in sorted(roots):
+        for d, chain, lines in instruction_files(root):
+            total = chain + glob_size
+            if chain and total > limit:
+                msg = (f"Codex: инструкции до {short(d)} — {total // 1024} КиБ при лимите {limit // 1024} КиБ: "
+                       "сверх Codex молча обрезает. Общее — в корневой AGENTS.md, подробности — во вложенные AGENTS.md "
+                       "папок, процедуры — в навыки")
+                cut.append(("codex-" + d, total, msg, here))
+            if lines > CLAUDE_LINES:
+                long_.append(f"{short(d)} — {lines} строк")
+    for f, n, b in memory_files():
+        if n > MEMORY_LINES or b > MEMORY_BYTES:
+            cut.append(("memory-" + f, f"{n}/{b}", f"Claude: {short(f)} — {n} строк, {b // 1024} КБ: дальше "
+                        f"{MEMORY_LINES} строк или {MEMORY_BYTES // 1024} КБ при старте не грузится. Сжать: строка на "
+                        "запись, подробности — в файлы тем", True))
+    if not quiet:
+        print(f"Codex на этом Mac: {'да' if here else 'нет'}; лимит {limit // 1024} КиБ"
+              + (f", глобальный AGENTS.md {glob_size // 1024} КиБ" if glob_size else ""))
+        for _, _, msg, alerting in cut:
+            print(("СРЕЗ    " if alerting else "Codex*  ") + msg)
+        for x in long_:
+            print(f"ДЛИННО  Claude: {x} (с импортами; больше {CLAUDE_LINES} — хуже соблюдается)")
+        if not cut and not long_:
+            print("всё доходит целиком")
+        if any(not a for *_, a in cut):
+            print("* Codex на этом Mac нет — без тревоги; у того, кто работает в Codex, тревога будет")
+        return 1 if any(a for *_, a in cut) else 0
+    for key, value, msg, alerting in cut:
+        if alerting:
+            alert_once("instr-" + key, value, msg, "instructions")
+    if long_:
+        alert_once("instr-long", ",".join(sorted(long_)), f"Claude: инструкции длиннее {CLAUDE_LINES} строк (хуже "
+                   f"соблюдаются): {'; '.join(long_)} — разнести по .claude/rules или вложенным файлам", "instructions")
+    else:
+        clear_once("instr-long")
+    return 0
+
+
 DIRECTION_NAME = re.compile(r"[a-z]+-[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
@@ -1742,9 +1900,14 @@ def direction_check(name):
     cm = open(claude_md, encoding="utf-8").read(200) if os.path.isfile(claude_md) else None
     add(os.path.isfile(agents) and (cm is None or cm.lstrip().startswith("@AGENTS.md")),
         "AGENTS.md в папке запуска; CLAUDE.md нет или начинается с @AGENTS.md (STATE-12)")
-    if os.path.isfile(agents):
-        size = os.path.getsize(agents)
-        add(size <= 32768, f"AGENTS.md до 32 КиБ ({size // 1024} КиБ): сверх лимита Codex молча обрезает инструкции")
+    if os.path.isdir(launch):
+        here, limit, glob_size = codex_setup()
+        found = instruction_files(launch)
+        worst = max((c + glob_size for _, c, _ in found), default=0)
+        add(not here or worst <= limit, f"Codex: инструкции до {limit // 1024} КиБ на путь (сейчас {worst // 1024} КиБ"
+            + ("" if here else "; Codex на этом Mac нет — не блокирует") + "): сверх Codex молча обрезает")
+        longest = max((n for _, _, n in found), default=0)
+        add(longest <= CLAUDE_LINES, f"Claude: CLAUDE.md с импортами до {CLAUDE_LINES} строк (сейчас {longest})")
     try:
         cj = json.load(open(os.path.join(HOME, ".claude.json"), encoding="utf-8"))
     except (OSError, ValueError):
@@ -2192,6 +2355,8 @@ def main(argv):
         return 0
     if cmd == "direction":
         return direction(rest)
+    if cmd == "instructions":
+        return instructions_check(quiet="--quiet" in rest)
     if cmd == "approve":
         return approve(rest)
     if cmd == "install":

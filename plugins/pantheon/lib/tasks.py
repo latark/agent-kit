@@ -654,8 +654,8 @@ def attention(head, t, conflict=None):
         if due < today:
             out.append("🔴 просрочено")
         elif due <= now_iso(t + 3 * 86400)[:10]:
-            out.append("🟠 скоро")
-    return " ".join(out) or None
+            out.append("🟠 срок скоро")
+    return " · ".join(out) or None  # «❓ вопрос к вам 🟠 скоро» читалось одной фразой
 
 
 def _one(v):

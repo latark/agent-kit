@@ -93,7 +93,15 @@ def main():
     check("CLAUDE.md, который начинается с @AGENTS.md, — готово", run("iris-demo").returncode == 0)
 
     write(os.path.join(repo, "AGENTS.md"), "x" * 40000)
-    check("AGENTS.md больше 32 КиБ — не готово (Codex обрежет)", "НЕТ     AGENTS.md до 32 КиБ" in run("iris-demo").stdout)
+    out = run("iris-demo").stdout
+    check("AGENTS.md больше 32 КиБ без Codex на Mac — не блокирует, но видно",
+          "готово  Codex: инструкции до 32 КиБ на путь (сейчас 39 КиБ; Codex на этом Mac нет" in out)
+    os.makedirs(os.path.join(tmp, ".codex"))
+    check("с Codex на Mac — не готово (Codex обрежет)", "НЕТ     Codex: инструкции до 32 КиБ" in run("iris-demo").stdout)
+    os.rmdir(os.path.join(tmp, ".codex"))
+    write(os.path.join(repo, "AGENTS.md"), "x\n" * 250)
+    check("AGENTS.md 250 строк — Claude: длинно, не готово", "НЕТ     Claude: CLAUDE.md с импортами до 200 строк (сейчас 25"
+          in run("iris-demo").stdout)
     write(os.path.join(repo, "AGENTS.md"), "# demo\n")
     write(settings, json.dumps({"autoMode": {"environment": ["**Source control**: GitHub `github.com/other/*`"]}}))
     check("владелец remote не описан в autoMode.environment — не готово",

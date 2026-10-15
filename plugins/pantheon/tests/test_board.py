@@ -116,8 +116,10 @@ def main():
     marks_ok = all(w in f_att for w in ("⚠", "просрочено", "скоро")) and all(
         w in f_pri for w in ("срочно", "высокий", "низкий"))
     cards_ok = ("🔴 просрочено" in _tasks.attention({"due": "2026-10-01", "status": "todo"}, T0)
-                and "🟠 скоро" in _tasks.attention({"due": "2026-10-16", "status": "todo"}, T0)
+                and "🟠 срок скоро" in _tasks.attention({"due": "2026-10-16", "status": "todo"}, T0)
                 and "⚠ конфликт" in _tasks.attention({}, T0, "конфликт")
+                and _tasks.attention({"question": "q", "status": "waiting", "waiting_on": "human", "due": "2026-10-16"},
+                                     T0) == "❓ вопрос к вам · 🟠 срок скоро"
                 and "срочно" in _tasks.PRIORITY_MARK[0] and "высокий" in _tasks.PRIORITY_MARK[1]
                 and "низкий" in _tasks.PRIORITY_MARK[3] and "срочно" not in _tasks.PRIORITY_MARK[2])
     check("board: слова в формулах сортировки совпадают со словами на карточках", marks_ok and cards_ok)
