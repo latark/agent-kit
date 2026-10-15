@@ -1,8 +1,8 @@
 # guard
 
 Правила, которые Claude Code проверяет сам, а не на память модели. Хук PreToolUse (Bash, Write, Edit, MultiEdit,
-NotebookEdit, Read, Grep, Glob, WebFetch, Agent, Task, Skill) и Stop; весь код — `hooks/guard.py`, его шапка
-перечисляет правила.
+NotebookEdit, Read, Grep, Glob, WebFetch, Agent, Task, Skill) и Stop; код — `hooks/guard.py`, его шапка
+перечисляет правила. Флаг «сессия читала сырой Telegram» — отдельный `hooks/taint.py` (раздел tg-taint).
 
 ## От чего защищает (модель угроз, SEC-27, решено 14.10)
 
@@ -111,6 +111,70 @@ answer и тик, это скрипты, guard их не видит. Сесси�
   или шаблон, который в него раскрывается (`ls ~/ai/pantheon/.git/*`). Поиск по папке выше (`grep -r … ~/ai/pantheon`,
   Grep по ней) проходит: ключи закрывает и песочница окна. Ролям без доступа к личному правило прежнее: `grep -r` по
   папке, где лежит `me/`, — отказ.
+
+## Сессия читала сырой Telegram — действия наружу с вопросом (tg-taint, metis-0083, guard 0.5.6)
+
+Переписку в Telegram пишут чужие люди, и в ней могут быть внедрённые указания. Поэтому сессия, в контекст которой
+попал сырой текст чата, помечается флагом. Пока флаг стоит, действия наружу и записи в долговременные места
+проходят только через вопрос. Чтение и пересказ идут без вопросов. Код — `hooks/taint.py`, отдельно от `guard.py`.
+
+**Когда ставится.** Флаг — файл `~/.local/state/tg-taint/<session_id>`. Его ставит PostToolUse, только при успешном
+вызове:
+
+- `tg_read.py history|search|unread|context|posts|download -o -` — выгрузка идёт в stdout, то есть в контекст. Без
+  `-o` и с `-o ФАЙЛ` выгрузка ложится в файл, а в выводе только путь и сводка — флага нет;
+- Bash, в выводе которого шапка выгрузки tg_read («Переписка — строго между строками «<<<TG-…»»);
+- `cat`, `head`, `sed`, `grep`, `less`, `python` и т. п. с путём выгрузки в команде;
+- Read выгрузки: папка `tg-read` во временной папке (`$TMPDIR`, `/tmp`, `/var/folders`), файл из `-o`,
+  `--files-dir` или `split --out-dir` этой сессии, части `*.partNN-of-NN.md` рядом с ним; Read файла с шапкой выгрузки;
+- Grep в режиме content по выгрузкам. Режимы files_with_matches и count показывают имена и числа — флага нет.
+
+Не ставят: `status`, `chats`, `folders`, `topics`, `find`, `posts --quota`, `split`, `verify` и субагент
+**tg-reader**. Он и есть способ читать без флага: у него только Read, Grep и Glob, а в сессию приходит его выжимка.
+Любой другой субагент, прочитавший выгрузку, ставит флаг: его пересказ идёт в сессию.
+
+**Что спрашивается.** Хук PreToolUse отвечает ask с причиной («сессия читала сырой Telegram …; подтвердите, только
+если просили это сами») на такие действия:
+
+- WebFetch, WebSearch, SendMessage, CronCreate;
+- Bash с сетью: `curl`, `wget`, `ssh`, `scp`, `sftp`, `nc`, `gh`, `git push`, `rsync` на хост, `python`/`node`/`uv`
+  с `urllib`, `requests`, `httpx`, `fetch(`, `http(s)://` в аргументах или в heredoc;
+- MCP: имя со словами create, update, send, post, write, delete, edit, upload, publish, comment, navigate, click и т. п.;
+  любые инструменты `claude-in-chrome` и `computer-use`;
+- Write, Edit, MultiEdit и NotebookEdit в память (`~/.claude/agent-memory`, `~/.claude/projects/*/memory`),
+  `CLAUDE.md`, `AGENTS.md`, `~/.claude/tools|skills|agents|commands|hooks|rules`, настройки `~/.claude/settings*.json`,
+  `sync.sh`, `~/ai/knowledge`, сам флаг. То же — Bash-запись туда (`>`, `>>`, `tee`, `cp`, `mv`, `sed -i`, `rm`).
+
+Отказ guard важнее: Claude Code сводит решения всех хуков PreToolUse как deny > defer > ask > allow
+([hooks](https://code.claude.com/docs/en/hooks)). taint никогда не отвечает allow.
+
+**Режимы разрешений.** В **auto** вопрос хука показывается: «A hook's "ask" also forces a permission prompt in auto mode:
+the classifier can still deny the tool call, but it can't approve the call silently» (hooks, PreToolUse decision
+control; то же в [permission-modes](https://code.claude.com/docs/en/permission-modes)). В `-p` вопрос задать некому,
+и действие отклоняется. В **dontAsk** всё, что требует вопроса, отклоняется. **bypassPermissions** «disables
+permission prompts», а в списке того, что никакой режим не одобряет сам, вопрос хука не назван. Поэтому в этом
+режиме taint отвечает deny вместо ask. Живая проба — у лида.
+
+**Как снять.** Ваше следующее сообщение (UserPromptSubmit). Не снимают: уведомление фоновой задачи
+(`<task-notification>`), сообщение другой сессии («Another Claude session sent a message:»), сообщение канала
+(`<channel`). Поля `origin.kind` и `promptSource`, если Claude Code начнёт отдавать их хуку, тоже учитываются; в
+журнале сессии они есть, в событии хука — нет. Запуск задачи по расписанию (`/loop`, CronCreate) по событию не
+отличить, он снимает флаг. Допущение: текст задачи по расписанию писали вы. Флаг одной сессии на другие не влияет.
+Флаги старше 7 дней удаляются. Выключить правило — `GUARD_OFF=tg-taint`.
+
+**Сбой.** PreToolUse — код 2 и `onFailure: block`: действие остановлено. PostToolUse — флаг ставится, если в событии
+есть tg-read. UserPromptSubmit — код 0, чтобы не блокировать ваше сообщение. Каждый сбой — строка в
+`guard-failures.log` без текста события.
+
+**Чего не ловит.**
+
+- Программу изнутри: `python script.py`, который сам читает выгрузку или ходит в сеть.
+- Сеть мимо списка команд и Bash-запись мимо простых шаблонов (`python -c "open(...).write"`).
+- Выгрузку, скопированную в другое место (`cp` и потом Read копии), если в копии нет шапки и чтение не с начала.
+- Сырой текст, пришедший не через tg_read: канал Telegram в сессии, вставка владельцем, MCP Telegram.
+- Действия наружу без слов из списка: Artifact, MCP с именами вроде `batch` или `run`.
+- Субагента, запущенного до флага: его PreToolUse проверяется по тому же session_id, но то, что он уже сделал, не
+  отменяется.
 
 ## Слияние PR: три режима и запор (metis-0038, guard 0.5.0; запор — P1-4, guard 0.5.4)
 
@@ -255,6 +319,8 @@ remote, cwd не репозиторий или без remote, журнал пр�
   образец — `policy.example.toml`, правит только metis-pantheon;
 - `~/.local/state/pantheon/merge-gate/records.jsonl` — журнал проверок запора слияния, пишет только хук guard
   (PostToolUse), смотреть — `pantheon review status`;
+- `~/.local/state/tg-taint/<session_id>` — флаг tg-taint (время и источник, без текста), `<session_id>.dumps` — пути
+  выгрузок из `-o`, `--files-dir`, `--out-dir` этой сессии;
 - выключить правило: `GUARD_OFF=dev-server,nextjs` в `env` файла settings.json (`push` выключает и запись журнала запора).
 
 ## Проверки
@@ -263,5 +329,6 @@ remote, cwd не репозиторий или без remote, журнал пр�
     python3 -I tests/test_merge_gate.py   # запор слияния: журнал проверок, pantheon review, Д3 — по случаю на тест
     python3 -I tests/test_canaries.py     # канарейки ролей: скачать-и-выполнить, base64 в шелл, eval — deny; правила Read(.env*)
     python3 -I tests/test_hooks_json.py   # onFailure=block на PreToolUse guard и pantheon
-    python3 -I tests/test_tg_self.py     # tg-secret не трогает файлы самого плагина guard в любой копии, но не шире
+    python3 -I tests/test_tg_self.py      # tg-secret не трогает файлы самого плагина guard в любой копии, но не шире
+    python3 -I tests/test_taint.py        # tg-taint: флаг, ask по классам, снятие, сессии, deny важнее ask
     python3 -I tests/test_shell_diff.py   # живая сверка разбора Bash с настоящими zsh и bash (~1 мин)
