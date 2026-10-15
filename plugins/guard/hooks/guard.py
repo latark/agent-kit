@@ -2094,6 +2094,18 @@ def bash_targets(cmd, cwd):
     return bash_analysis(cmd, cwd)[0]
 
 
+def roles_probe_ok(texts):
+    """`pantheon roles build --out X [--src Y]` (metis-0097): пробная сборка в TEMP_ROOTS. Нужно: X — разобранный
+    литерал внутри временной папки (не /dev/null), Y — разобранный литерал, других аргументов нет."""
+    args = texts[2:]
+    if len(args) not in (2, 4) or args[0] != "--out" or (len(args) == 4 and args[2] != "--src"):
+        return False
+    if any(not a or a.startswith("\0") or a == UNRESOLVED for a in args):
+        return False
+    real = os.path.realpath(os.path.expanduser(args[1]))
+    return any(real.startswith(r + os.sep) for r in TEMP_ROOTS if r != os.path.realpath("/dev/null"))
+
+
 def pantheon_cli(cmd, cwd):
     """Привилегированные подкоманды пульта pantheon в команде Bash (список строк для причины)."""
     found = []
@@ -2111,6 +2123,8 @@ def pantheon_cli(cmd, cwd):
         if name not in ("pantheon", "?") or not texts:
             continue
         sub, act = texts[0], texts[1] if len(texts) > 1 else ""
+        if sub == "roles" and act == "build" and roles_probe_ok(texts):
+            continue
         if sub is None and name == "pantheon":
             found.append("pantheon <подкоманда не разобрана>")
         elif sub in PANTHEON_PRIVILEGED | PANTHEON_OWNER_ONLY or (sub == "jobs" and (act is None or act in PANTHEON_JOB_ACTIONS)):
