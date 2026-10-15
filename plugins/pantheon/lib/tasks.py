@@ -1141,7 +1141,8 @@ def seen_question(card_body):
 def _owner_log(path, t, **rec):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     rec = {"time": now_iso(t), **rec}
-    with open(path, "a", encoding="utf-8") as fh:
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)  # журнал ваших слов — только вам (COMM-10)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 

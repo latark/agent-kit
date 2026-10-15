@@ -215,7 +215,7 @@ def main():
             "schema_version: 1\n---\n\n## Журнал\n")
     task("athena-0001", "doing")
     open(agents_file, "w").write(json.dumps([
-        {"id": "a1", "name": "athena-broker", "state": "failed", "sessionId": "s-a1", "cwd": tmp, "startedAt": 1},
+        {"id": "a1", "name": "athena-broker", "state": "failed", "sessionId": "5a1a1a1a-0001", "cwd": tmp, "startedAt": 1},
         {"id": "b1", "name": "hermes-alex", "state": "stopped", "sessionId": "s-b1", "cwd": tmp, "startedAt": 1},
         {"id": "c1", "name": "random", "state": "failed", "sessionId": "s-c1", "cwd": tmp, "startedAt": 1},
         {"id": "d1", "name": "daedalus-site", "state": "failed", "sessionId": "s-d1", "cwd": tmp, "startedAt": 1}]))
@@ -223,17 +223,16 @@ def main():
     r = run("wake")
     c = calls()
     check("wake: поднимает только прерванное направление с открытой задачей (--resume <сессия> --bg «[Пантеон: …]»)",
-          r.returncode == 0 and len(c) == 1 and c[0]["argv"][:3] == ["--resume", "s-a1", "--bg"]
-          and c[0]["argv"][3].startswith("[Пантеон: пробуждение]"))
+          r.returncode == 0 and len(c) == 1 and c[0]["argv"] == ["respawn", "a1"])
     open(agents_file, "w").write(json.dumps([
-        {"id": "a1", "name": "athena-broker", "state": "failed", "sessionId": "s-a1", "cwd": tmp, "startedAt": 1},
+        {"id": "a1", "name": "athena-broker", "state": "failed", "sessionId": "5a1a1a1a-0001", "cwd": tmp, "startedAt": 1},
         {"id": "a2", "name": "athena-broker", "state": "working", "sessionId": "s-a2", "cwd": tmp, "startedAt": 2}]))
     open(log, "w").close()
     r = run("wake")
     check("wake: сессию, продолженную новой с тем же именем, не будит", r.returncode == 0 and not calls())
     task("athena-0001", "waiting")
     open(agents_file, "w").write(json.dumps([
-        {"id": "a1", "name": "athena-broker", "state": "stopped", "sessionId": "s-a1", "cwd": tmp, "startedAt": 1}]))
+        {"id": "a1", "name": "athena-broker", "state": "stopped", "sessionId": "5a1a1a1a-0001", "cwd": tmp, "startedAt": 1}]))
     r = run("wake")
     check("wake: задача «ждёт» — не будит", r.returncode == 0 and not calls() and "будить некого" in r.stdout)
 

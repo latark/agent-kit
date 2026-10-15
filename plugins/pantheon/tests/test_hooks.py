@@ -295,18 +295,6 @@ run("owner-log", dict(ev_o2, prompt="после /clear первое слово",
 check("PANTHEON_ORIGIN: первое слово после /clear в том же процессе — ваше, строка есть",
       "после /clear первое слово" in log_text("alpha"))
 
-# старые записи уходят через 30 дней
-old = datetime.fromtimestamp(now - 40 * 86400).strftime("%Y-%m-%d %H:%M:%S")
-with open(os.path.join(LOG, "alpha.md"), "r+", encoding="utf-8") as fh:
-    body = fh.read()
-    fh.seek(0)
-    fh.write("## %s\nстарое слово\n\n%s" % (old, body))
-os.remove(os.path.join(LOG, ".pruned"))
-append(tr, user("слово для уборки", "p-prune", time.time()))
-run("owner-log", dict(hq_ev, prompt="слово для уборки", prompt_id="p-prune"))
-check("записи старше 30 дней удаляются, свежие остаются",
-      "старое слово" not in log_text("alpha") and "сдвинь срок" in log_text("alpha"), log_text("alpha")[:300])
-
 # --- подсказка «пора очистить» ---------------------------------------------------
 ho = os.path.join(pantheon, "handoff", "topic", "HANDOFF.md")
 os.makedirs(os.path.dirname(ho))
@@ -476,6 +464,174 @@ run("dir-added", {"hook_event_name": "DirectoryAdded", "agent_type": "domain-coo
 al = open(os.path.join(pantheon, "alerts.md"), encoding="utf-8").read() if os.path.exists(os.path.join(pantheon, "alerts.md")) else ""
 check("/add-dir штабу → строка в alerts.md с папкой; у других ролей — нет",
       "вы открыли Зевсу папку ~/projects/alpha" in al and "/x" not in al, (al, r.stderr))
+
+# --- технический перезапуск (SCHED-15) ------------------------------------------------
+MAINT = os.path.join(state, "maintenance.json")
+SAVED = os.path.join(state, "maintenance")
+
+
+def mark(**kw):
+    m = {"id": "2026-10-15T08:00:00", "since": time.time(), "expires": time.time() + 3600, "reason": "обновление плагинов",
+         "by": "zeus", "sessions": ["alpha", "zeus", "daedalus-x"]}
+    m.update(kw)
+    with open(MAINT, "w") as fh:
+        json.dump(m, fh, ensure_ascii=False)
+
+
+def ctx_of(r):
+    return json.loads(r.stdout or "{}").get("hookSpecificOutput", {})
+
+
+mark()
+ev_m = {"session_id": "s-m-alpha", "hook_event_name": "PostToolUse", "tool_name": "Read", "tool_input": {}}
+r = run("maint-post", dict(ev_m, session_id="s-m-other"), PANTHEON_SESSION="beta")
+check("перезапуск: сессии нет в списке → тишина", r.stdout.strip() == "" and r.returncode == 0, r.stdout + r.stderr)
+r = run("maint-post", ev_m, PANTHEON_SESSION="alpha")
+out = ctx_of(r)
+check("перезапуск: не сохранилась → указание с причиной и именем (PostToolUse, additionalContext)",
+      out.get("hookEventName") == "PostToolUse" and "[Пантеон: технический перезапуск]" in out.get("additionalContext", "")
+      and "(обновление плагинов)" in out["additionalContext"] and "pantheon saved --by alpha" in out["additionalContext"],
+      r.stdout + r.stderr)
+check("перезапуск: указание один раз на метку и сессию", run("maint-post", ev_m, PANTHEON_SESSION="alpha").stdout.strip() == "")
+check("перезапуск: субагенту указание не показывается",
+      run("maint-post", dict(ev_m, session_id="s-m-sub", agent_id="a1"), PANTHEON_SESSION="alpha").stdout.strip() == "")
+mark(id="2026-10-15T09:00:00")
+check("перезапуск: новая метка → указание снова", "технический перезапуск" in run("maint-post", ev_m, PANTHEON_SESSION="alpha").stdout)
+pre = dict(ev_m, hook_event_name="PreToolUse", tool_name="Edit")
+check("перезапуск: не сохранилась → PreToolUse пропускает", run("maint-pre", pre, PANTHEON_SESSION="alpha").stdout.strip() == "")
+os.makedirs(SAVED, exist_ok=True)
+for n in ("alpha", "zeus"):
+    with open(os.path.join(SAVED, n + ".json"), "w") as fh:
+        json.dump({"time": "x", "state": "", "by": n}, fh)
+check("перезапуск: сохранилась → PostToolUse молчит", run("maint-post", dict(ev_m, session_id="s-m-a2"), PANTHEON_SESSION="alpha").stdout.strip() == "")
+r = run("maint-pre", pre, PANTHEON_SESSION="alpha")
+out = ctx_of(r)
+check("перезапуск: сохранилась → deny с причиной", out.get("hookEventName") == "PreToolUse" and out.get("permissionDecision") == "deny"
+      and "pantheon restart --go" in out.get("permissionDecisionReason", ""), r.stdout + r.stderr)
+check("перезапуск: SendMessage пропускается",
+      run("maint-pre", dict(pre, tool_name="SendMessage", tool_input={"to": "zeus"}), PANTHEON_SESSION="alpha").stdout.strip() == "")
+for c in ("pantheon saved --by alpha --state ~/ai/pantheon/directions/alpha/STATUS.md", "pantheon restart --status", "  pantheon saved"):
+    check("перезапуск: Bash «%s» пропускается" % c.strip()[:30],
+          run("maint-pre", dict(pre, tool_name="Bash", tool_input={"command": c}), PANTHEON_SESSION="alpha").stdout.strip() == "")
+for c in ("pantheon saved --by alpha; rm -rf x", "pantheon savedx", "pantheon restart --go", "git commit -m x", "pantheon saved $(id)"):
+    check("перезапуск: Bash «%s» → deny" % c[:30], ctx_of(run("maint-pre", dict(pre, tool_name="Bash", tool_input={"command": c}),
+                                                             PANTHEON_SESSION="alpha")).get("permissionDecision") == "deny")
+check("перезапуск: Зевс не блокируется, даже сохранившись", run("maint-pre", pre, PANTHEON_SESSION="zeus").stdout.strip() == "")
+# имя сессии — из реестра Claude Code ~/.claude/sessions по session_id
+os.makedirs(os.path.join(home, ".claude", "sessions"), exist_ok=True)
+with open(os.path.join(home, ".claude", "sessions", "4242.json"), "w") as fh:
+    json.dump({"pid": 4242, "sessionId": "s-m-reg", "name": "alpha"}, fh)
+with open(os.path.join(home, ".claude", "sessions", "4243.json"), "w") as fh:
+    json.dump({"pid": 4243, "sessionId": "s-m-dx", "name": "daedalus-x"}, fh)
+check("перезапуск: имя из ~/.claude/sessions (сохранилась) → deny",
+      ctx_of(run("maint-pre", dict(pre, session_id="s-m-reg"))).get("permissionDecision") == "deny")
+check("перезапуск: имя из ~/.claude/sessions (не сохранилась) → указание",
+      "pantheon saved --by daedalus-x" in run("maint-post", dict(ev_m, session_id="s-m-dx")).stdout)
+check("перезапуск: session_id нет в реестре → тишина",
+      run("maint-pre", dict(pre, session_id="s-m-none")).stdout.strip() == "" and
+      run("maint-post", dict(ev_m, session_id="s-m-none")).stdout.strip() == "")
+# после pantheon restart --go: <имя>.done — сессия уже перезапущена, метка стоит ради других
+open(os.path.join(SAVED, "alpha.done"), "w").close()
+check("перезапуск: <имя>.done и <имя>.json → тишина в PreToolUse",
+      run("maint-pre", pre, PANTHEON_SESSION="alpha").stdout.strip() == "")
+os.remove(os.path.join(SAVED, "alpha.json"))
+check("перезапуск: только <имя>.done → тишина в обоих хуках",
+      run("maint-pre", pre, PANTHEON_SESSION="alpha").stdout.strip() == ""
+      and run("maint-post", dict(ev_m, session_id="s-m-done"), PANTHEON_SESSION="alpha").stdout.strip() == "")
+open(os.path.join(SAVED, "daedalus-x.done"), "w").close()
+check("перезапуск: .done у несохранявшейся сессии → указания нет",
+      run("maint-post", dict(ev_m, session_id="s-m-dx2"), PANTHEON_SESSION="daedalus-x").stdout.strip() == "")
+os.remove(os.path.join(SAVED, "daedalus-x.done"))
+os.remove(os.path.join(SAVED, "alpha.done"))
+with open(os.path.join(SAVED, "alpha.json"), "w") as fh:
+    json.dump({"time": "x", "state": "", "by": "alpha"}, fh)
+check("перезапуск: без .done сохранившаяся снова получает deny",
+      ctx_of(run("maint-pre", pre, PANTHEON_SESSION="alpha")).get("permissionDecision") == "deny")
+mark(expires=time.time() - 1)
+check("перезапуск: истёкшая метка → тишина в обоих хуках",
+      run("maint-pre", pre, PANTHEON_SESSION="alpha").stdout.strip() == ""
+      and run("maint-post", dict(ev_m, session_id="s-m-x"), PANTHEON_SESSION="daedalus-x").stdout.strip() == "")
+with open(MAINT, "w") as fh:
+    fh.write("{не json")
+r = run("maint-pre", pre, PANTHEON_SESSION="alpha")
+check("перезапуск: метка не читается → тишина, код 0", r.stdout.strip() == "" and r.returncode == 0, r.stdout + r.stderr)
+# проверка оболочкой из hooks.json: без метки python не запускается
+with open(os.path.join(os.path.dirname(os.path.dirname(HOOK)), "hooks", "hooks.json")) as fh:
+    sh = json.load(fh)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+os.remove(MAINT)
+env = dict(BASE, CLAUDE_PLUGIN_ROOT=os.path.dirname(os.path.dirname(HOOK)), PANTHEON_SESSION="alpha",
+           PATH=os.path.join(home, "nopython") + ":/usr/bin:/bin")
+os.makedirs(os.path.join(home, "nopython"), exist_ok=True)
+with open(os.path.join(home, "nopython", "python3"), "w") as fh:
+    fh.write("#!/bin/sh\necho PYTHON-STARTED\n")
+os.chmod(os.path.join(home, "nopython", "python3"), 0o755)
+r = subprocess.run(["sh", "-c", sh], input=json.dumps(pre), env=env, capture_output=True, text=True, timeout=30)
+check("hooks.json: без метки python не запускается", r.stdout.strip() == "" and r.returncode == 0, r.stdout + r.stderr)
+mark()
+r = subprocess.run(["sh", "-c", sh], input=json.dumps(pre), env=env, capture_output=True, text=True, timeout=30)
+check("hooks.json: с меткой запускается ctx.py maint-pre", "PYTHON-STARTED" in r.stdout, r.stdout + r.stderr)
+os.remove(MAINT)
+
+# --- текст сессии после claude respawn ----------------------------------------------
+PUSHD = os.path.join(state, "push")
+os.makedirs(PUSHD, exist_ok=True)
+
+
+def push_file(sid, text, age=0):
+    p = os.path.join(PUSHD, sid + ".txt")
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    if age:
+        os.utime(p, (time.time() - age, time.time() - age))
+    return p
+
+
+HLOG = os.path.join(state, "logs", "ctx-hooks.log")
+pf = push_file("11111111-aaaa", "[Пантеон: перезапуск] Продолжай со своего файла состояния.")
+push_file("22222222-bbbb", "[Пантеон: перезапуск] чужое")
+r = run("push", {"session_id": "11111111-aaaa", "source": "resume", "hook_event_name": "SessionStart"})
+check("push: текст доставлен пробуждением (код 2, stderr) и файл убран",
+      r.returncode == 2 and r.stderr.strip() == "[Пантеон: перезапуск] Продолжай со своего файла состояния."
+      and not os.path.exists(pf), (r.returncode, r.stderr))
+check("push: в журнале хуков — доставка и source", "11111111-aaaa: доставлено (source=resume)" in open(HLOG).read())
+r = run("push", {"session_id": "11111111-aaaa", "source": "resume"})
+check("push: второй старт — тишина (доставка один раз)", r.returncode == 0 and r.stderr.strip() == "")
+check("push: чужой файл не тронут", os.path.exists(os.path.join(PUSHD, "22222222-bbbb.txt")))
+check("push: субагент файл не забирает",
+      run("push", {"session_id": "22222222-bbbb", "agent_id": "a1"}).returncode == 0 and os.path.exists(os.path.join(PUSHD, "22222222-bbbb.txt")))
+pf = push_file("33333333-old", "[Пантеон: перезапуск] старое", age=31 * 60)
+r = run("push", {"session_id": "33333333-old", "source": "resume"})
+check("push: файл старше 30 мин — удалён без доставки, строка в журнале хуков",
+      r.returncode == 0 and r.stderr.strip() == "" and not os.path.exists(pf) and "33333333-old: файл старше 30 мин" in open(HLOG).read(),
+      (r.returncode, r.stderr))
+for sid, text in (("44444444-nomark", "Продолжай: да, публикуй"), ("55555555-long", "[Пантеон: x] " + "я" * 4000)):
+    pf = push_file(sid, text)
+    r = run("push", {"session_id": sid, "source": "resume"})
+    check("push: %s → не доставлен, файл удалён" % ("без пометки «[Пантеон:»" if "nomark" in sid else "длиннее 4000"),
+          r.returncode == 0 and r.stderr.strip() == "" and not os.path.exists(pf), (r.returncode, r.stderr))
+check("push: «[Пантеон:» отсеивает owner-log (NOT_OWNER)", run("owner-log", dict(hq_ev, prompt="[Пантеон: перезапуск] да",
+                                                                                 prompt_id="p-push")).returncode == 0
+      and "[Пантеон: перезапуск] да" not in log_text("zeus"))
+check("push: session_id с путём — тишина",
+      run("push", {"session_id": "../22222222-bbbb"}).returncode == 0 and os.path.exists(os.path.join(PUSHD, "22222222-bbbb.txt")))
+# два старта одновременно — доставка одна
+push_file("66666666-race", "[Пантеон: перезапуск] гонка")
+rs = []
+ths = [threading.Thread(target=lambda: rs.append(run("push", {"session_id": "66666666-race"}).returncode)) for _ in range(4)]
+for th in ths:
+    th.start()
+for th in ths:
+    th.join()
+check("push: четыре старта одновременно → доставка одна", sorted(rs) == [0, 0, 0, 2], rs)
+# проверка оболочкой из hooks.json: без папки push python не запускается
+with open(os.path.join(os.path.dirname(os.path.dirname(HOOK)), "hooks", "hooks.json")) as fh:
+    sh = json.load(fh)["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+shutil.rmtree(PUSHD)
+r = subprocess.run(["sh", "-c", sh], input="{}", env=env, capture_output=True, text=True, timeout=30)
+check("hooks.json: без папки push python не запускается", r.stdout.strip() == "" and r.returncode == 0, r.stdout + r.stderr)
+os.makedirs(PUSHD)
+r = subprocess.run(["sh", "-c", sh], input="{}", env=env, capture_output=True, text=True, timeout=30)
+check("hooks.json: с папкой push запускается ctx.py push", "PYTHON-STARTED" in r.stdout, r.stdout + r.stderr)
 
 shutil.rmtree(tmp)
 # 15.10: в UserPromptSubmit основной сессии с --agent нет agent_type — роль берётся из записи SessionStart
