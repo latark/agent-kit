@@ -6,6 +6,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+# Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
+# TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
+import atexit as _atexit
+import os as _os
+import shutil as _shutil
+_ROOT = tempfile.mkdtemp(prefix="instructions-root-")
+tempfile.tempdir = _ROOT
+_os.environ["TMPDIR"] = _ROOT
+_atexit.register(_shutil.rmtree, _ROOT, True)
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "pantheon.py")
 results = []
