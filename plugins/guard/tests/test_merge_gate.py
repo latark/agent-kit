@@ -86,7 +86,7 @@ class Home:
             if os.path.exists(self.j(f)):
                 os.remove(self.j(f))
         open(self.j("ai/pantheon/alerts.md"), "w").close()
-        self.gh(["README.md", "plugins/guard/hooks/guard.py"])
+        self.gh(["README.md", "plugins/pantheon/lib/pantheon.py"])
 
     def gh(self, files, count=None, head=None, raw=None):
         """files — имена или словари REST (filename, status, previous_filename); raw — сырой вывод gh api."""
@@ -271,10 +271,20 @@ def t_core(h):
               in log and "api repos/latark/agent-kit/pulls/7/files" in log and "--paginate" in log, log)
     h.gh(["README.md", "plugins/guard/hooks/merge_gate.py"])
     merge_case("защиты: PR задевает ядро (merge_gate.py) — отказ", h.pre(cmd, pdir="projects/agent-kit"), False, CORE + ": PR задевает")
+    for path in ("plugins/guard/tests/x.py", "plugins/guard/README.md", "PLUGINS/Guard/x.py", "plugins/guard/hooks/guard.py"):
+        h.gh(["README.md", path])
+        merge_case(f"защиты: весь plugins/guard — {path} — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
+                   CORE + ": PR задевает")
+    h.gh([{"filename": "plugins/other/g.py", "status": "renamed", "previous_filename": "plugins/guard/hooks/guard.py"}])
+    merge_case("защиты: вынос файла из plugins/guard наружу — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
+               CORE + ": PR задевает plugins/guard/hooks/guard.py")
+    h.gh(["plugins/pantheon/lib/pantheon.py", "plugins/guardian/x.py", "plugins/pantheon/tests/test_a.py"])
+    merge_case("защиты: PR только в plugins/pantheon (и plugins/guardian) — проходит",
+               h.pre(cmd, pdir="projects/agent-kit"), True)
     h.gh([{"filename": "plugins/guard/hooks/merge_core.py", "status": "renamed",
            "previous_filename": "plugins/guard/hooks/merge_gate.py"}])
     merge_case("защиты: переименование ядра (previous_filename) — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
-               CORE + ": PR задевает plugins/guard/hooks/merge_gate.py")
+               CORE + ": PR задевает plugins/guard/hooks/merge_core.py, plugins/guard/hooks/merge_gate.py")
     h.gh([], raw='[{"filename": "README.md"}]\n[{"filename": "plugins/guard/hooks/protect_config.py"}]\n', count=2)
     merge_case("защиты: страницы --paginate склеены `[..][..]` — ядро видно", h.pre(cmd, pdir="projects/agent-kit"),
                False, CORE + ": PR задевает")

@@ -866,8 +866,17 @@ class _Lexer:
             body = s[i + 2:j - 1].strip()
             if body == "pwd":
                 self.add(_PWD_MARK, "q")
-            elif re.fullmatch(r"mktemp(\s+-[dqu]+)*(\s+-t\s+[\w.-]+)?", body):
-                self.add(_TMP_MARK, "q")
+            elif re.match(r"mktemp(?:\s|$)", body):
+                # macOS: голый mktemp и -t пишут в /var/folders, а не в $TMPDIR (песочница режет) — только -p <папка>
+                m_p = re.fullmatch(r"mktemp(?:\s+(?:-[dqu]+|-t(?:\s+[\w.-]+)?))*\s+-p\s+(\S+)(?:\s+(?:-[dqu]+|-t(?:\s+[\w.-]+)?|[\w.-]+))*",
+                                   body)
+                d = m_p.group(1) if m_p else ""
+                if re.fullmatch(r"(?:\"\$TMPDIR\"|\$TMPDIR|\"\$\{TMPDIR\}\"|\$\{TMPDIR\})", d):
+                    self.add(_TMP_MARK, "q")
+                elif re.fullmatch(r"[\w./-]+", d):
+                    self.add(d.rstrip("/") + "/" + ANY_FILE, "q")  # другая папка — как обычная запись в неё
+                else:
+                    self.add(_DYN, "u")
             else:
                 self.add(_DYN, "u")
             return j
@@ -2207,7 +2216,8 @@ def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
 UNRESOLVED_REASON = ("Правило domain/pantheon-acl: цель записи не разобрать — подстановка $(…) или переменная, "
                      "которую не вычислить, в пути; шаблон zsh; xargs, find -exec или цикл с командой записи; "
                      "команды оболочке из конвейера; незакрытая кавычка или скобка. Пиши явными путями — так "
-                     "защита видит, куда идёт запись.")
+                     "защита видит, куда идёт запись. Временный файл — `mktemp -p \"$TMPDIR\"` (голый mktemp и -t "
+                     "на macOS пишут в /var/folders, песочница это режет).")
 
 
 OWNER_RECORDS_REASON = ("Правило pantheon-acl: в доску ~/ai/pantheon-view (карточки, ваши галочки и заметки) и в "
