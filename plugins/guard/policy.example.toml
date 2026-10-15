@@ -27,9 +27,12 @@ paths = ["~/ai/knowledge/me", "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.g
 themis-sources = ["~/.cache/expert-corpus"]
 
 # gh pr merge (правило push, metis-0038, guard 0.5.0): сливает главная сессия domain-coordinator в папках своего
-# направления из domains.json; защиты — папки [coordinators] metis-pantheon — только Метида по «да» владельца в окне
-# вопросов Зевса (--subject "[metis-NNNN] …"). Без этого файла слияние закрыто всем. Подробно — README guard,
-# раздел «Слияние PR».
+# направления из domains.json. Защиты — папки [coordinators] metis-pantheon и их репозитории (git remote; клон
+# agent-kit в другой папке — тоже защиты) — только Метида по «да» владельца в окне вопросов Зевса. Вопрос:
+# «[metis-NNNN] Слить https://github.com/latark/agent-kit/pull/N?», слияние: gh pr merge N --subject
+# "[metis-NNNN] …". Одно «да» — одно слияние: использованные — в ~/.local/state/pantheon/logs/merge-consent-used.jsonl.
+# Без этого файла или без непустого списка metis-pantheon слияние закрыто всем. Подробно — README guard, раздел
+# «Слияние PR».
 #
 # Совместимость: свои папки теперь берутся из domains.json, [merge] больше не нужен. Его папки по-прежнему
 # добавляются к папкам направления (ключ — имя направления, значение — список).
@@ -45,6 +48,7 @@ hermes-alex = ["~/projects/alexbroker"]
 
 # Чужой репозиторий в gh pr merge -R / --repo — только из этого списка (owner/repo на github.com) и только для
 # координатора этого направления: сессия Фемиды стоит в legal-watch, а сливает и PR expert-corpus (themis-0015).
-# У Метиды любой -R требует того же согласия, что и защиты: guard узнаёт защиты по папке, а не по репозиторию.
+# У Метиды любой -R требует того же согласия, что и защиты (вопрос — с ссылкой на этот PR). -R на репозиторий
+# защит — это слияние защит, даже если он есть в списке другого направления.
 [merge_repos]
 themis-sources = ["latark/expert-corpus"]
