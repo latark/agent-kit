@@ -1,5 +1,5 @@
-"""Запор слияния guard (P1-4, Д2, Д3, guard 0.5.4) — часть ядра защит: этот файл, protect_config.py и
-managed-settings.json агенты не сливают, только кнопка владельца (Д3).
+"""Запор слияния guard (P1-4, Д2, Д3, guard 0.5.4) — часть ядра защит: ядро — весь plugins/guard/**, casefold;
+файлы из pulls/N/files с previous_filename. PR, задевающий ядро, агенты не сливают, только кнопка владельца (Д3).
 
 Модуль без своего состояния: общие помощники guard.py (load_policy, privileged, private_conf, _inside, _norm, _key,
 STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — его присваивает guard.py при загрузке
@@ -19,7 +19,8 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    один номер PR, без --auto и --admin, ровно один --match-head-commit <SHA> (его сверяет GitHub), все репозитории
    команды — из [merge_repos] направления, запись tests на (repo, SHA), последний вердикт argus на (repo, PR, SHA) —
    accept, рецензент — не тот, кто сливает; продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
-   owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает файлы ядра (gh pr view).
+   owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро: весь plugins/guard/**, casefold;
+   файлы из pulls/N/files с previous_filename.
 Чего guard не проверяет: правдивость строки в сводке и то, что выбранная команда тестов — настоящие тесты.
 """
 

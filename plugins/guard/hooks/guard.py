@@ -34,8 +34,8 @@ PostToolUse (Bash:
                  merge_gate.py): один номер PR, без --auto и --admin, ровно один --match-head-commit <SHA>,
                  репозитории — из [merge_repos], записи журнала merge-gate: тесты на SHA и последнее «принять» от
                  argus на (repo, PR, SHA), рецензент — не сливающий; продукт — ещё talos и строка «откат» в
-                 alerts.md; защиты — ещё Д3: PR не задевает ядро (merge_gate.py, protect_config.py,
-                 managed-settings.json), его сливает только владелец. Журнал пишет этот же хук на PostToolUse
+                 alerts.md; защиты — ещё Д3: PR не задевает ядро (весь plugins/guard/**, casefold; файлы из
+                 pulls/N/files с previous_filename), его сливает только владелец. Журнал пишет этот же хук на PostToolUse
                  (`pantheon review …`). argus не делает git commit, merge, rebase и другие правки истории. Любой сбой
                  — отказ (DONE-07, metis-0027, themis-0015, metis-0038, metis-0071);
   terminal     — роли не печатают в терминал: osascript, tmux send-keys, screen stuff (SEC-30).
@@ -313,7 +313,7 @@ def check_tg_secret_bash(cmd):
 # удаление и проверка ACL — владелец. Защита от ошибки агента: разбор команд — общий bash_analysis (обёртки env,
 # sh -c, переменные), новых разборов нет.
 TG_READD_ROLE_OK = {"status", "kickstart"}
-TG_READD_LAUNCHD = {"bootout", "disable", "remove", "kill"}
+TG_READD_LAUNCHD = {"bootout", "disable", "remove", "kill", "unload", "stop"}
 TG_READD_REASON = (
     "Правило tg-secret: демон tg-readd роли не трогают, кроме `tg-readd status` и `tg-readd kickstart`. Вход и выход, "
     "обновление, удаление, проверка ACL, остановка службы local.tg-read.daemon и правка /usr/local/opt/tg-readd — "
