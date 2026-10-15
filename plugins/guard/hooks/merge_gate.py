@@ -326,6 +326,12 @@ def simple_review(cmd):
     return words[1:]
 
 
+def _bg_id(resp):
+    """Фоновая — только если backgroundTaskId непустой (строка или число); null и пустое — не фон."""
+    v = resp.get("backgroundTaskId")
+    return (isinstance(v, str) and bool(v.strip())) or (isinstance(v, (int, float)) and not isinstance(v, bool))
+
+
 def record(event):
     """PostToolUse (только успешная команда): запись в журнал проверок или ничего."""
     if event.get("tool_name") != "Bash":
@@ -334,7 +340,7 @@ def record(event):
     # фоновая команда: Claude Code шлёт PostToolUse при запуске, а не по итогу, и PostToolUseFailure не будет
     # (ревью argus PR #18) — по ней ничего не пишем; уведённую в фон (Ctrl+B) выдаёт backgroundTaskId в ответе
     if not isinstance(tool_input, dict) or tool_input.get("run_in_background") \
-            or not isinstance(resp, dict) or "backgroundTaskId" in resp:
+            or not isinstance(resp, dict) or _bg_id(resp):
         return None
     cmd = tool_input.get("command") or ""
     words = simple_review(cmd)
@@ -411,23 +417,49 @@ def _alert_ok(repo, pr):
     return any(head.match(ln) and ref.search(ln) and "откат" in ln.lower() for ln in lines)
 
 
-def _core_problem(repo, pr, sha):
-    """Д3: PR защит, который задевает ядро, — только кнопка владельца. Ответа gh нет, список файлов неполон,
-    PR на другом коммите — тоже отказ."""
+def _gh_json(args):
+    """Вывод gh как список JSON-значений подряд (--paginate склеивает страницы: `[..][..]` или объекты по строкам);
+    None — сбой gh или неразборный ответ."""
     env = {k: v for k, v in os.environ.items() if k not in ("GH_REPO", "GH_HOST")}
     try:
-        r = subprocess.run(["gh", "pr", "view", str(pr), "-R", repo, "--json", "files,changedFiles,headRefOid"],
-                           capture_output=True, text=True, timeout=GH_TIMEOUT, env=env)
-        data = json.loads(r.stdout) if r.returncode == 0 else None
+        r = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=GH_TIMEOUT, env=env)
+        if r.returncode != 0:
+            return None
+        dec, text, pos, out = json.JSONDecoder(), r.stdout, 0, []
+        while True:
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+            if pos >= len(text):
+                return out
+            val, pos = dec.raw_decode(text, pos)
+            if isinstance(val, list):
+                out.extend(val)
+            else:
+                out.append(val)
     except (OSError, ValueError, subprocess.SubprocessError):
-        data = None
+        return None
+
+
+def _core_problem(repo, pr, sha):
+    """Д3: PR защит, который задевает ядро, — только кнопка владельца. Файлы — из REST pulls/N/files (там есть
+    status и previous_filename: переименование ядра не прячет старый путь). Ответа gh нет, список файлов неполон,
+    PR на другом коммите — тоже отказ."""
+    heads = _gh_json(["pr", "view", str(pr), "-R", repo, "--json", "headRefOid,changedFiles"])
+    data = heads[0] if isinstance(heads, list) and len(heads) == 1 else None
     if not isinstance(data, dict):
         return f"{MERGE_CORE}: gh pr view {pr} -R {repo} не ответил, а без списка файлов PR ядро не проверить"
-    files, count, head = data.get("files"), data.get("changedFiles"), data.get("headRefOid")
-    paths = [f.get("path") for f in files if isinstance(f, dict)] if isinstance(files, list) else None
+    count, head = data.get("changedFiles"), data.get("headRefOid")
+    files = _gh_json(["api", f"repos/{repo}/pulls/{pr}/files?per_page=100", "--paginate", "--jq", ".[]"])
+    paths = None
+    if isinstance(files, list) and all(isinstance(f, dict) for f in files):
+        paths = []
+        for f in files:
+            paths.append(f.get("filename"))
+            if f.get("previous_filename") is not None:
+                paths.append(f.get("previous_filename"))
     if paths is None or not all(isinstance(p, str) for p in paths) or not isinstance(count, int) \
-            or len(paths) != count:
-        return f"{MERGE_CORE}: список файлов PR неполон (gh отдаёт до 100), ядро не проверить"
+            or isinstance(count, bool) or len(files) != count:
+        return f"{MERGE_CORE}: список файлов PR не получен или неполон, ядро не проверить"
     if not isinstance(head, str) or head.lower() != sha:
         return f"{MERGE_CORE}: PR сейчас на другом коммите ({head}), а не на {sha}"
     core = {c.casefold() for c in CORE_FILES}
@@ -465,7 +497,8 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                 f"записи не сверить. {MERGE_OWNER}")
     if not any(r["kind"] == "tests" and r["sha"] == sha and repo in [x.lower() for x in r["repo"]] for r in records):
         return (f"нет записи тестов на {repo}@{sha[:12]}: в чистом дереве на этом коммите запусти "
-                f"`pantheon review test -- <команда тестов>` (запишет хук guard). {advice}")
+                f"`pantheon review test -- <команда тестов>` (запишет хук guard). Тесты долгие: запускай "
+                "`pantheon review test` не в фоне, с timeout до 600000 мс (у Bash по умолчанию 120 с). {advice}")
 
     def mine(r, kinds, who):
         return (r["kind"] in kinds and r["by"].get("agent_type") == who and r["pr"] == pr and r["sha"] == sha

@@ -112,8 +112,8 @@ def gate_fixtures(home):
                 fh.write(f"2026-10-15 20:00 · athena-broker · {repo}#{pr} ушло; откат: git revert x\n")
     os.makedirs(os.path.join(home, "fake-bin"), exist_ok=True)
     with open(os.path.join(home, "fake-bin/gh"), "w") as fh:
-        fh.write("#!/bin/sh\necho '" + json.dumps({"files": [{"path": "README.md"}], "changedFiles": 1,
-                                                    "headRefOid": SHA_OK}) + "'\n")
+        fh.write("#!/bin/sh\n[ \"$1\" = api ] && { echo '" + json.dumps({"filename": "README.md", "status": "modified"})
+                 + "'; exit 0; }\necho '" + json.dumps({"changedFiles": 1, "headRefOid": SHA_OK}) + "'\n")
     os.chmod(os.path.join(home, "fake-bin/gh"), 0o755)
 
 
@@ -820,11 +820,36 @@ def main():
          B("curl -s -X POST localhost:9334/eval -d '{}'")),
         ("cdp: мастерская действует через демон", "allow", ws, "workshop", False,
          B("curl -s -X POST 127.0.0.1:9333/cmd -d '{}'")),
-        ("cdp: prometheus читает /eval", "allow", br, "prometheus", True, B("curl -s -X POST 127.0.0.1:9333/eval -d '{}'")),
+        ("cdp: prometheus /eval — отказ (демон только мастерской)", "deny", br, "prometheus", True, B("curl -s -X POST 127.0.0.1:9333/eval -d '{}'")),
+        ("cdp: prometheus curl 127.0.0.1:9333/open — отказ", "deny", br, "prometheus", True, B("curl -s -X POST 127.0.0.1:9333/open -d '{}'")),
         ("cdp: prometheus /cmd — отказ", "deny", br, "prometheus", True, B("curl -s -X POST 127.0.0.1:9333/cmd -d '{}'")),
         ("cdp: /close — отказ и мастерской", "deny", ws, "workshop", False, B("curl -s -X POST 127.0.0.1:9333/close")),
         ("cdp: hq запускает демон — отказ", "deny", ".", "hq", False, B("node ~/.claude/tools/cdp-daemon.mjs comet")),
         ("cdp: ваша сессия без роли — можно", "allow", ".", "", False, B("curl -s 127.0.0.1:9333/health")),
+        ("tg-readd: роль — status можно", "allow", br, "dev-sonnet", True, B("tg-readd status")),
+        ("tg-readd: роль — kickstart можно", "allow", br, "dev-sonnet", True, B("tg-readd kickstart")),
+        ("tg-readd: роль — logout отказ", "deny", br, "dev-sonnet", True, B("tg-readd logout")),
+        ("tg-readd: роль — login отказ", "deny", br, "argus", True, B("tg-readd login")),
+        ("tg-readd: роль — путь к бинарю, logout отказ", "deny", br, "dev-sonnet", True,
+         B("/usr/local/opt/tg-readd/bin/tg-readd logout")),
+        ("tg-readd: роль — tg-readd-update отказ", "deny", br, "dev-sonnet", True, B("tg-readd-update")),
+        ("tg-readd: роль — tg-readd-uninstall отказ", "deny", br, "dev-sonnet", True, B("tg-readd-uninstall")),
+        ("tg-readd: роль — tg-readd-acl-test отказ", "deny", br, "dev-sonnet", True, B("tg-readd-acl-test")),
+        ("tg-readd: env tg-readd logout — отказ", "deny", br, "dev-sonnet", True, B("env tg-readd logout")),
+        ("tg-readd: sh -c 'tg-readd logout' — отказ", "deny", br, "dev-sonnet", True, B("sh -c 'tg-readd logout'")),
+        ("tg-readd: переменная X=logout — отказ", "deny", br, "dev-sonnet", True, B("X=logout; tg-readd $X")),
+        ("tg-readd: env tg-readd status — можно", "allow", br, "dev-sonnet", True, B("env tg-readd status")),
+        ("tg-readd: launchctl bootout — отказ", "deny", br, "dev-sonnet", True,
+         B("launchctl bootout gui/501/local.tg-read.daemon")),
+        ("tg-readd: launchctl kill — отказ", "deny", br, "dev-sonnet", True,
+         B("launchctl kill TERM system/local.tg-read.daemon")),
+        ("tg-readd: launchctl print — можно", "allow", br, "dev-sonnet", True,
+         B("launchctl print gui/501/local.tg-read.daemon")),
+        ("tg-readd: sudo rm в /usr/local/opt/tg-readd — отказ", "deny", br, "dev-sonnet", True,
+         B("sudo rm -rf /usr/local/opt/tg-readd")),
+        ("tg-readd: сессия владельца logout — можно", "allow", ".", "", False, B("tg-readd logout")),
+        ("tg-readd: владелец bootout — можно", "allow", ".", "", False,
+         B("launchctl bootout gui/501/local.tg-read.daemon")),
         ("cdp: мастерская мимо демона на 9222 — отказ", "deny", ws, "workshop", False, B("curl -s 127.0.0.1:9222/json/version")),
         ("cdp: prometheus читает DevToolsActivePort — отказ", "deny", br, "prometheus", True,
          B("cat ~/Library/Application\\ Support/Comet/DevToolsActivePort")),
