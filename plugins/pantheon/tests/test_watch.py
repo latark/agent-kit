@@ -726,6 +726,44 @@ def test_security_0100():
     check(r.returncode != 0 and not os.path.exists(e.st("maintenance", "../x.json")), "saved с путём в имени")
 
 
+def test_worktree_outward_links_0101():
+    """Дежурный не удаляет слитую чистую копию со ссылкой наружу (старый Claude Code сносил цель ссылки); ссылка
+    внутрь копии удалению не мешает."""
+    e = Env()
+    folder = e.direction("g-dir")
+    shutil.rmtree(os.path.join(folder, ".git"))
+    g = lambda *a, cwd=folder: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd,
+                                              capture_output=True, text=True, env=dict(os.environ, HOME=e.home))
+    g("init", "-q", "-b", "main")
+    g("commit", "-q", "--allow-empty", "-m", "x")
+    out_wt = os.path.join(folder, ".claude", "worktrees", "w-out")
+    in_wt = os.path.join(folder, ".claude", "worktrees", "w-in")
+    for n, w in (("w-out", out_wt), ("w-in", in_wt)):
+        g("worktree", "add", "-q", "-b", n, w)
+    target = os.path.join(e.tmp, "outside-data")
+    os.makedirs(target)
+    open(os.path.join(target, "keep.txt"), "w").write("x")
+    os.symlink(target, os.path.join(out_wt, "link-out"))
+    os.makedirs(os.path.join(in_wt, "sub"))
+    os.symlink(os.path.join(in_wt, "sub"), os.path.join(in_wt, "link-in"))
+    os.symlink("nowhere", os.path.join(in_wt, "link-broken"))
+    for w in (out_wt, in_wt):  # копия чистая для git status: ссылки и папка игнорируются
+        ex = subprocess.run(["git", "-C", w, "rev-parse", "--git-path", "info/exclude"], capture_output=True,
+                            text=True).stdout.strip()
+        ex = ex if os.path.isabs(ex) else os.path.join(w, ex)
+        os.makedirs(os.path.dirname(ex), exist_ok=True)
+        open(ex, "a").write("link-*\nsub\n")
+        check(g("status", "--porcelain", cwd=w).stdout.strip() == "", "копия не чистая для git")
+    old = T0 - 3 * 86400
+    for w in (out_wt, in_wt):
+        os.utime(w, (old, old))
+    e.run("watch", t=T0)
+    check(os.path.exists(out_wt) and os.path.exists(os.path.join(target, "keep.txt")),
+          "копия со ссылкой наружу убрана или цель тронута")
+    check("не убрана" in e.alerts() and "link-out" in e.alerts() and "w-out" in e.alerts(), "нет тревоги о ссылках")
+    check(not os.path.exists(in_wt), "копия со ссылкой внутрь не убрана")
+
+
 def test_tick_subcommands():
     sys.path.insert(0, os.path.join(ROOT, "lib"))
     import importlib

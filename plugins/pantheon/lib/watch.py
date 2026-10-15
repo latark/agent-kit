@@ -399,11 +399,38 @@ def _base_ref(root):
     return None
 
 
+WALK_LIMIT = 5000
+
+
+def outward_links(wt):
+    """Символические ссылки копии, чья цель (realpath) лежит вне неё. Обход без перехода по ссылкам, папку .git
+    копии пропускаем. Допущение: больше WALK_LIMIT записей — копия считается небезопасной (None) и не удаляется.
+    Возвращает (число, первая как (путь относительно копии, цель)) или None при превышении."""
+    root = os.path.realpath(wt)
+    n, first, seen = 0, None, 0
+    for d, dirs, files in os.walk(root, followlinks=False):
+        if d == root and ".git" in dirs:
+            dirs.remove(".git")
+        for name in dirs + files:
+            seen += 1
+            if seen > WALK_LIMIT:
+                return None
+            p = os.path.join(d, name)
+            if not os.path.islink(p):
+                continue
+            target = os.path.realpath(p)
+            if target != root and not target.startswith(root + os.sep):
+                n += 1
+                first = first or (os.path.relpath(p, root), target)
+    return (n, first) if n else (0, None)
+
+
 def worktrees(agents, registry, doms, t):
     """Копии .claude/worktrees/* (QA-05). Слитая в основную ветку и чистая (git status пуст), старше суток и без живой
     сессии в ней — дежурный убирает сам: `git worktree remove` без --force (грязную git не отдаст) и `git branch -d`
     (неслитую не удалит). Прочие без живой сессии дольше WORKTREE_DAYS — тревога координатору: в них может быть
-    неотправленная работа."""
+    неотправленная работа. Копию со ссылками наружу (outward_links) не удаляем и тревожим: старые Claude Code при
+    удалении сносили цель ссылки вне копии."""
     live = [os.path.realpath(a["cwd"]) for a in list(agents) + list(registry) if a.get("cwd") and a.get("pid")]
     seen = set()
     for name, folders in doms.items():
@@ -438,6 +465,14 @@ def worktrees(agents, registry, doms, t):
                     merged = bool(base) and _git("-C", root, "merge-base", "--is-ancestor", head.group(1),
                                                  base).returncode == 0
                     if clean and merged:
+                        out = outward_links(wt)
+                        if out is None or out[0]:
+                            what = ("обход длиннее %d записей" % WALK_LIMIT if out is None else
+                                    "ссылки наружу (%d, первая: %s → %s)" % (out[0], out[1][0],
+                                                                         out[1][1].replace(P.HOME, "~")))
+                            P.alert_once(f"watch-wt-{wt}", "links", f"копия {short} не убрана: в ней {what} — "
+                                         "координатору: убрать ссылки и удалить вручную", "watch")
+                            continue
                         # чистота уже проверена своим status по записанному каталогу; без --force git проверил бы её
                         # ещё раз своим status — уже по конфигурации, которую мы не смотрели
                         rm = _git("-C", root, "worktree", "remove", "--force", wt, timeout=60)
