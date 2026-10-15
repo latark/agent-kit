@@ -814,6 +814,53 @@ def test_worktree_outside_and_prune_0118():
     check(g("rev-parse", "--verify", "-q", "o-old").returncode == 0, "ветка копии вне папки удалена")
 
 
+def _wt_repo(name):
+    e = Env()
+    folder = e.direction(name)
+    shutil.rmtree(os.path.join(folder, ".git"))
+    g = lambda *a, cwd=folder: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd,
+                                              capture_output=True, text=True, env=dict(os.environ, HOME=e.home))
+    g("init", "-q", "-b", "main")
+    g("commit", "-q", "--allow-empty", "-m", "x")
+    return e, folder, g
+
+
+def test_worktree_prune_unreadable_0118():
+    """Недоступная папка (EACCES) — не пропавшая: живая копия не теряет запись, prune откладывается и при другой
+    пропавшей записи; когда доступ вернулся, prune чистит только пропавшую."""
+    e, folder, g = _wt_repo("g-dir")
+    wts = os.path.join(folder, ".claude", "worktrees")
+    live_wt = os.path.join(wts, "w-live")
+    g("worktree", "add", "-q", "-b", "w-live", live_wt)
+    e.agents([{"id": "live0001", "sessionId": "live0001-x", "name": "w", "state": "working", "pid": os.getpid(),
+               "kind": "background", "cwd": live_wt, "startedAt": (T0 - 100) * 1000}])
+    ids = lambda: sorted(os.listdir(os.path.join(folder, ".git", "worktrees")))
+    os.chmod(wts, 0o000)
+    try:
+        e.run("watch", t=T0)
+        check("w-live" in ids(), "запись живой копии с недоступной папкой снята prune")
+        check("недоступна" in e.alerts() and "prune отложен" in e.alerts(), "нет тревоги о недоступной записи")
+    finally:
+        os.chmod(wts, 0o755)
+    check(os.path.exists(os.path.join(live_wt, ".git")), "копия повреждена")
+    # недоступная копия без сессии + реально пропавшая запись: prune не делается
+    e2, folder2, g2 = _wt_repo("g-dir")
+    wts2 = os.path.join(folder2, ".claude", "worktrees")
+    g2("worktree", "add", "-q", "-b", "w-noacc", os.path.join(wts2, "w-noacc"))
+    gone = os.path.join(e2.tmp, "ak-gone2")
+    g2("worktree", "add", "-q", "-b", "o-gone", gone)
+    shutil.rmtree(gone)
+    ids2 = lambda: sorted(os.listdir(os.path.join(folder2, ".git", "worktrees")))
+    os.chmod(wts2, 0o000)
+    try:
+        e2.run("watch", t=T0)
+        check(ids2() == ["ak-gone2", "w-noacc"], f"prune сработал при недоступной записи: {ids2()}")
+    finally:
+        os.chmod(wts2, 0o755)
+    e2.run("watch", t=T0)
+    check(ids2() == ["w-noacc"], f"после возврата доступа prune не убрал пропавшую: {ids2()}")
+
+
 def test_tick_subcommands():
     sys.path.insert(0, os.path.join(ROOT, "lib"))
     import importlib

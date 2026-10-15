@@ -432,7 +432,9 @@ def worktrees(agents, registry, doms, t):
     неотправленная работа. Копию со ссылками наружу (outward_links) не удаляем и тревожим: старые Claude Code при
     удалении сносили цель ссылки вне копии.
     Копии вне .claude/worktrees (кроме основного checkout) — только тревога после WORKTREE_DAYS без сессии, никогда
-    не удаляются. Записи с пропавшей папкой чистит один `git worktree prune` на репозиторий."""
+    не удаляются. Записи с пропавшей папкой (os.lstat: только FileNotFoundError/NotADirectoryError, без живой сессии) чистит один
+    `git worktree prune` на репозиторий. Любая другая ошибка lstat (недоступна) или живая сессия в пропавшей папке
+    блокирует prune во всём репозитории (он глобален и снёс бы живую запись), недоступная — ещё и тревога."""
     live = [os.path.realpath(a["cwd"]) for a in list(agents) + list(registry) if a.get("cwd") and a.get("pid")]
     seen = set()
     for name, folders in doms.items():
@@ -443,7 +445,7 @@ def worktrees(agents, registry, doms, t):
             seen.add(root)
             r = _git("-C", root, "worktree", "list", "--porcelain")
             base = None
-            need_prune = False
+            need_prune = keep_all = False
             for block in r.stdout.split("\n\n"):
                 m = re.search(r"^worktree (.+)$", block, re.M)
                 if not m:
@@ -451,8 +453,21 @@ def worktrees(agents, registry, doms, t):
                 wt = os.path.realpath(m.group(1))
                 if wt == root:
                     continue
-                if not os.path.isdir(wt):
-                    need_prune = True  # запись без папки; locked git и сам не тронет
+                here = any(c == wt or c.startswith(wt + os.sep) for c in live)
+                try:
+                    os.lstat(wt)
+                except (FileNotFoundError, NotADirectoryError):
+                    # пропавшая — только так; живая сессия в папке — не пропавшая
+                    if here:
+                        keep_all = True
+                    else:
+                        need_prune = True  # locked git и сам не тронет
+                    continue
+                except OSError as ex:
+                    # недоступна (EACCES/EPERM: TCC, песочница) — не пропавшая; prune глобален, откладываем весь
+                    keep_all = True
+                    P.alert_once(f"watch-wt-{wt}", "unreadable", f"запись копии {wt.replace(P.HOME, '~')} "
+                                 f"недоступна ({ex.strerror or ex}) — prune отложен", "watch")
                     continue
                 if os.sep + os.path.join(".claude", "worktrees") + os.sep not in wt + os.sep:
                     # копия вне штатной папки: только тревога, никогда не удаляем
@@ -505,7 +520,7 @@ def worktrees(agents, registry, doms, t):
                 if age > WORKTREE_DAYS * 24:
                     P.alert_once(f"watch-wt-{wt}", "1", f"забытая копия {short} ({name}, {age / 24:.0f} дн. без "
                                  "сессии, не слита или не чистая) — координатору: слить или убрать", "watch")
-            if need_prune:
+            if need_prune and not keep_all:
                 # без --expire: git worktree prune по умолчанию убирает записи без папки сразу (срок
                 # gc.worktreePruneExpire — только у gc); locked-записи git не трогает
                 _git("-C", root, "worktree", "prune")
