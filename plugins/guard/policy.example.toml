@@ -25,3 +25,9 @@ paths = ["~/ai/knowledge/me", "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.g
 # ~/.cache или ~/Library/Caches. Папки направления берутся из реестра, остальное закрыто.
 [sandbox_write]
 themis-sources = ["~/.cache/expert-corpus"]
+
+# Кто сам сливает свои PR в main командой gh pr merge (правило push, DONE-07): роль domain-coordinator, запущенная
+# в одной из этих папок, и только в них. Без --admin и -R; прямой push в main закрыт. Тесты и вердикт argus guard
+# не видит — их проверяет роль (metis-0027, «да» владельца 15.10).
+[merge]
+themis-sources = ["~/projects/expert-corpus", "~/projects/legal-watch"]

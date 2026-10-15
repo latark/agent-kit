@@ -34,9 +34,11 @@ def setup(home):
         "metis-pantheon": ["~/projects/agent-kit", "~/.claude"],
         # реестр «по ошибке» отдаёт athena папку agent-kit — привилегий Метиды это не даёт
         "athena-broker-2": ["~/projects/agent-kit/sub"],
+        "themis-sources": ["~/projects/expert-corpus"],
     }}, open(os.path.join(home, ".local/state/pantheon/domains.json"), "w"))
     # шаг 1.2: репозиторий брокера на ветке эпика, alexbroker — на main (правило push); личное в ~/ai/knowledge/me
-    for repo, branch in (("projects/brokerAssistantApp", "epic-tax"), ("projects/alexbroker", "main")):
+    for repo, branch in (("projects/brokerAssistantApp", "epic-tax"), ("projects/alexbroker", "main"),
+                         ("projects/expert-corpus", "main")):
         subprocess.run(["git", "init", "-q", "-b", branch, os.path.join(home, repo)], check=True)
     os.makedirs(os.path.join(home, "ai/knowledge/me"), exist_ok=True)
     os.makedirs(os.path.join(home, "ai/knowledge/raw"), exist_ok=True)
@@ -44,7 +46,8 @@ def setup(home):
     os.makedirs(os.path.join(home, "projects/brokerAssistantApp/.claude/worktrees/agent-1"), exist_ok=True)
     open(os.path.join(home, ".claude/pantheon/policy.toml"), "w").write(
         'always = ["~/.claude/agent-memory"]\n[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n'
-        'mnemo-brain = ["~/ai/knowledge"]\n[agent_extra]\nprometheus = ["~/ai/knowledge"]\n')
+        'mnemo-brain = ["~/ai/knowledge"]\n[agent_extra]\nprometheus = ["~/ai/knowledge"]\n'
+        '[merge]\nthemis-sources = ["~/projects/expert-corpus"]\n')
 
 
 def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None, raw=False):
@@ -74,6 +77,12 @@ def main():
     G = lambda path: ("Grep", {"pattern": "налог", "path": path})
     K = lambda rel: os.path.join(home, "ai", "knowledge", rel)
     br, ak, alex, ws = "projects/brokerAssistantApp", "projects/agent-kit", "projects/alexbroker", "projects/workshop/visa"
+    ec = "projects/expert-corpus"
+    try:  # без tomllib (Python 3.9) политика пуста — слияние закрыто, это безопасный отказ
+        import tomllib  # noqa: F401
+        MERGE_OK = "allow"
+    except ImportError:
+        MERGE_OK = "deny"
     cases = [
         # (имя, ожидание, папка запуска, роль, субагент, (инструмент, вход))
         ("hq пишет доску", "allow", ".", "hq", False, W(P("board.md"))),
@@ -339,6 +348,43 @@ def main():
         ("terminal: env osascript — отказ", "deny", ws, "workshop", False, B("env osascript -e 'beep'")),
         ("terminal: screen stuff — отказ", "deny", br, "domain-coordinator", False, B("screen -S x -X stuff 'да\\n'")),
         ("terminal: ваша сессия без роли — можно", "allow", ".", "", False, B("osascript -e 'beep'")),
+        # --- corpus-role (metis-0021) ---
+        ("corpus-role: corpus add — отказ координатору", "deny", br, "domain-coordinator", False,
+         B("corpus add https://youtu.be/x")),
+        ("corpus-role: uv run corpus krisp import — отказ", "deny", br, "dev-sonnet", True,
+         B("uv run corpus krisp import a.m4a")),
+        ("corpus-role: .venv/bin/corpus channel --videos — отказ", "deny", br, "domain-coordinator", False,
+         B(".venv/bin/corpus channel t.me/x --author kuklin --videos")),
+        ("corpus-role: python -m expert_corpus add — отказ", "deny", br, "domain-coordinator", False,
+         B("python3 -m expert_corpus add https://rutube.ru/x")),
+        ("corpus-role: bash -c corpus add — отказ", "deny", br, "domain-coordinator", False, B("bash -c 'corpus add u'")),
+        ("corpus-role: скрипт удаления Krisp — отказ", "deny", br, "dev-sonnet", True,
+         B("uv run python tools/krisp_trash.py --id 1")),
+        ("corpus-role: ключ Диска из Связки — отказ", "deny", br, "domain-coordinator", False,
+         B("security find-generic-password -s expert-corpus-yadisk -a token -w")),
+        ("corpus-role: corpus search — можно", "allow", br, "domain-coordinator", False, B("corpus search задаток")),
+        ("corpus-role: corpus channel без --videos — можно", "allow", br, "domain-coordinator", False,
+         B("corpus channel t.me/x --author kuklin")),
+        ("corpus-role: чтение скрипта — можно", "allow", br, "dev-sonnet", True, B("cat tools/krisp_trash.py")),
+        ("corpus-role: штаб ищет в корпусе — отказ", "deny", ".", "hq", False, B("corpus search задаток")),
+        ("corpus-role: ваша сессия без роли — можно", "allow", ".", "", False, B("corpus add https://youtu.be/x")),
+        # --- push: gh pr merge координатору из [merge] (metis-0027) ---
+        ("merge: Фемида сливает свой PR — можно", MERGE_OK, ec, "domain-coordinator", False, B("gh pr merge 1 --squash")),
+        ("merge: Фемида без номера (текущая ветка) — можно", MERGE_OK, ec, "domain-coordinator", False,
+         B("gh pr merge --merge --delete-branch")),
+        ("merge: Фемида с заголовком слияния — можно", MERGE_OK, ec, "domain-coordinator", False,
+         B("gh pr merge 1 --squash --subject 'Индекс только для чтения'")),
+        ("merge: Фемида с --admin — отказ", "deny", ec, "domain-coordinator", False, B("gh pr merge 1 --admin")),
+        ("merge: Фемида в чужой репозиторий -R — отказ", "deny", ec, "domain-coordinator", False,
+         B("gh pr merge 1 -R latark/alexbroker")),
+        ("merge: Фемида по ссылке — отказ", "deny", ec, "domain-coordinator", False,
+         B("gh pr merge https://github.com/latark/alexbroker/pull/1")),
+        ("merge: Фемида через cd в чужую папку — отказ", "deny", ec, "domain-coordinator", False,
+         B(f"cd {home}/{alex} && gh pr merge 1")),
+        ("merge: субагент Фемиды — отказ", "deny", ec, "hephaestus-sources", True, B("gh pr merge 1")),
+        ("merge: Афина (нет в [merge]) — отказ", "deny", br, "domain-coordinator", False, B("gh pr merge 1")),
+        ("merge: Фемида git push в main — по-прежнему отказ", "deny", ec, "domain-coordinator", False,
+         B("git push origin main")),
         # --- dev-server: исключение для разработчика и talos в worktree (ROLE-23) ---
         ("dev-server: dev-sonnet в worktree — можно", "allow", br, "dev-sonnet", True, B("PORT=4123 pnpm dev"),
          br + "/.claude/worktrees/agent-1"),
