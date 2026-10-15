@@ -1347,6 +1347,11 @@ def _real_dir(p, roots, strict=False, create=False):
     return None
 
 
+# корпус и его копии: индексы qmd и самого корпуса хранят полный текст, переписка сессий Фемиды — выдержки
+HQ_CLOSED_DIRS = ["~/projects/expert-corpus", "~/.cache/expert-corpus", "~/.cache/qmd",
+                  "~/.claude/projects/*expert-corpus*"]
+
+
 def _deny_forms(paths):
     """Запрет и в виде «~/…», и настоящим путём: правила разрешений — настоящие пути, запреты должны совпасть."""
     out = []
@@ -1515,6 +1520,12 @@ def sandbox_build(domains, policy_path, stores=None):
     hq["sandbox"]["excludedCommands"] = list(HQ_EXCLUDED)
     hq["sandbox"]["filesystem"]["denyWrite"] += [os.path.join(root, ".git"), os.path.join(root, "alerts.md")]
     hq["sandbox"]["network"]["allowedDomains"] = []
+    # корпус лекций — чужой контент (SEC-13, metis-0025): у Зевса уже есть личное и действия наружу, поэтому корпус ему
+    # закрыт (решение владельца 15.10) — guard corpus-role (команда corpus), хук qmd-query (поиск), а здесь — чтение
+    # файлов: Read (Claude Code применяет его и к Grep, Glob) и cat/grep в песочнице
+    hq["sandbox"]["filesystem"]["denyRead"] += _deny_forms(HQ_CLOSED_DIRS)
+    hq.setdefault("permissions", {}).setdefault("deny", []).extend(
+        f"Read({x}/**)" if x.startswith("~") else f"Read(/{x}/**)" for x in _deny_forms(HQ_CLOSED_DIRS))
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
     write_json(os.path.join(out_dir, "hq.json"), hq)
     built.append("hq")

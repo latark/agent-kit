@@ -285,6 +285,12 @@ def main():
           and hb["network"]["allowedDomains"] == [] and "~/ai/pantheon/.git/git-crypt" in hb["filesystem"]["denyRead"] and "pantheon start *" in hb["excludedCommands"]
           and "git push *" not in hb["excludedCommands"] and hq["hooks"] == sa["hooks"] and "worktree" not in hq
           and "~/ai/knowledge/me" not in hb["filesystem"]["denyRead"])
+    check("окно штаба: корпус закрыт для чтения — песочница и правило Read (SEC-13, решение 15.10)",
+          all(x in hb["filesystem"]["denyRead"] for x in ("~/projects/expert-corpus", "~/.cache/qmd",
+                                                           "~/.cache/expert-corpus", "~/.claude/projects/*expert-corpus*"))
+          and "Read(~/.cache/qmd/**)" in hq["permissions"]["deny"]
+          and "Read(~/projects/expert-corpus/**)" in hq["permissions"]["deny"]
+          and any(x.startswith("Read(//") and x.endswith("/expert-corpus/**)") for x in hq["permissions"]["deny"]))
     check("окна направлений: worktree от HEAD (эпик), у мастерской — нет; места heavy созданы",
           sa["worktree"] == {"baseRef": "head"} and sm["worktree"] == {"baseRef": "head"} and "worktree" not in sw
           and os.path.exists(os.path.join(state, "locks", "heavy-cmd-2.lock")))
