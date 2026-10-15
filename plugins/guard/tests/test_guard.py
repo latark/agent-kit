@@ -362,6 +362,17 @@ def main():
          B("uv run python tools/krisp_trash.py --id 1")),
         ("corpus-role: ключ Диска из Связки — отказ", "deny", br, "domain-coordinator", False,
          B("security find-generic-password -s expert-corpus-yadisk -a token -w")),
+        ("corpus-role: python3 tools/krisp_trash.py — отказ", "deny", br, "domain-coordinator", False,
+         B("python3 tools/krisp_trash.py --id 1")),
+        ("corpus-role: python3 -I tools/ydapi.py — отказ", "deny", br, "domain-coordinator", False,
+         B("python3 -I tools/ydapi.py")),
+        ("corpus-role: python3 -X dev tools/restructure_apply.py — отказ", "deny", br, "dev-sonnet", True,
+         B("python3 -X dev tools/restructure_apply.py")),
+        ("corpus-role: python -m tools.krisp_trash — отказ", "deny", br, "domain-coordinator", False,
+         B("python -m tools.krisp_trash")),
+        ("corpus-role: штаб python3 tools/ydapi.py — отказ", "deny", ".", "hq", False, B("python3 tools/ydapi.py")),
+        ("corpus-role: python3 своего скрипта — можно", "allow", br, "domain-coordinator", False,
+         B("python3 tools/report.py")),
         ("corpus-role: corpus search — можно", "allow", br, "domain-coordinator", False, B("corpus search задаток")),
         ("corpus-role: corpus channel без --videos — можно", "allow", br, "domain-coordinator", False,
          B("corpus channel t.me/x --author kuklin")),
@@ -382,6 +393,13 @@ def main():
         ("merge: Фемида через cd в чужую папку — отказ", "deny", ec, "domain-coordinator", False,
          B(f"cd {home}/{alex} && gh pr merge 1")),
         ("merge: субагент Фемиды — отказ", "deny", ec, "hephaestus-sources", True, B("gh pr merge 1")),
+        ("merge: Фемида с GH_REPO — отказ", "deny", ec, "domain-coordinator", False,
+         B("GH_REPO=latark/alexbroker gh pr merge 1")),
+        ("merge: Фемида gh pr -R … merge — отказ", "deny", ec, "domain-coordinator", False,
+         B("gh pr -R latark/alexbroker merge 1")),
+        ("merge: Афина gh pr -R … merge — отказ", "deny", br, "domain-coordinator", False,
+         B("gh pr -R latark/alexbroker merge 1")),
+        ("merge: Фемида $N вместо номера — отказ", "deny", ec, "domain-coordinator", False, B("gh pr merge $N")),
         ("merge: Афина (нет в [merge]) — отказ", "deny", br, "domain-coordinator", False, B("gh pr merge 1")),
         ("merge: Фемида git push в main — по-прежнему отказ", "deny", ec, "domain-coordinator", False,
          B("git push origin main")),
@@ -400,6 +418,17 @@ def main():
         mark = "ok  " if got == want else "FAIL"
         failed += got != want
         print(f"{mark} {name}: {got}")
+    # [merge] со строкой вместо списка не открывает слияние всем (ревью argus 15.10)
+    home2 = os.path.realpath(tempfile.mkdtemp(prefix="guard-test-"))
+    setup(home2)
+    pol = os.path.join(home2, ".claude", "pantheon", "policy.toml")
+    open(pol, "w").write(open(pol).read().replace('themis-sources = ["~/projects/expert-corpus"]',
+                                                  'themis-sources = "~/projects/expert-corpus"'))
+    got = run(home2, br, "domain-coordinator", "Bash", {"command": "gh pr merge 1"})
+    ok = got == "deny"
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} merge: строка вместо списка в [merge] — отказ: {got}")
     # № 1: на системном Python 3.9 (без tomllib) guard не падает и прежние правила работают
     if os.path.exists("/usr/bin/python3"):
         got = run(home, br, "", "Bash", {"command": "pnpm run dev"}, python="/usr/bin/python3")
