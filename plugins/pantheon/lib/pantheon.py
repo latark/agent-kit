@@ -1518,6 +1518,12 @@ def sandbox_build(domains, policy_path, stores=None):
         built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
+    # мастерская сама поднимает демон CDP (127.0.0.1) для чтения страниц — metis-0053, «да» владельца 15.10;
+    # окнам направлений и hq порт не нужен
+    ws = os.path.join(out_dir, "workshop.json")
+    data = read_json(ws, {})
+    data["sandbox"]["network"]["allowLocalBinding"] = True
+    write_json(ws, data)
     built.append("workshop")
     # штаб (SEC-26, вариант А): Зевс пишет только в ~/ai/pantheon, кроме .git и alerts.md; сеть закрыта (в веб он не
     # ходит, SEC-13); мимо песочницы — только `pantheon start|wake|alert`: запуск сессий и тревоги. Личное ему открыто
@@ -2406,13 +2412,13 @@ def direction(rest):
 # owner-log/zeus.md (ввод владельца, выбор в окне вопросов), тик — в owner-log/board.jsonl (галочка на карточке; текст
 # вопроса тик берёт из отмеченной карточки). Журналы личные — роли их не читают; эта команда отдаёт исполнителю только
 # записи с номером его вопроса.
-CONSENT_ID = re.compile(r"[a-z][a-z0-9]*-\d{4}")
+CONSENT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 CONSENT_MAX = 1500
 
 
 def consent(rest):
     if not rest or not CONSENT_ID.fullmatch(rest[0]):
-        print("pantheon consent <id> [--days N] — id задачи вида metis-0032", file=sys.stderr)
+        print("pantheon consent <id> [--days N] — id задачи вида metis-0032 или tbankrot-8057746", file=sys.stderr)
         return 2
     qid, days = rest[0], 7.0
     if "--days" in rest:
