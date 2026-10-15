@@ -6,6 +6,7 @@
 задачи не запускаются (PANTHEON_DRYRUN), решения тика пишутся в dryrun.log.
 """
 import json
+import re
 import os
 import subprocess
 import sys
@@ -234,6 +235,9 @@ def main():
                  '[private]\ncoordinators = ["mnemo-brain"]\npaths = ["~/ai/knowledge/me", "~/ai/pantheon/.git/git-crypt"]\n')
     os.makedirs(os.path.join(state, "settings"), exist_ok=True)
     open(os.path.join(state, "settings", "old-direction.json"), "w").write("{}")
+    dash = lambda p: re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(p))
+    for n in (dash(home), dash(home) + "--claude-worktrees-x", dash(tmp)):
+        os.makedirs(os.path.join(tmp, ".claude", "projects", n), exist_ok=True)
     subprocess.run([sys.executable, "-I", LIB, "domains", "build"], env=env, capture_output=True)
     load = lambda n: json.load(open(os.path.join(state, "settings", n + ".json")))
     sa, sm, sw, sn, sz = load("athena-broker"), load("metis-pantheon"), load("workshop"), load("mnemo-brain"), load("zz")
@@ -293,7 +297,10 @@ def main():
           and not any(x.endswith("pantheon-sandbox/hq") for x in hb["filesystem"]["denyRead"])
           and "Read(~/.claude/projects/**/*.jsonl)" in hq["permissions"]["deny"]
           and any("tool-results" in x and "-projects-*" in x for x in hq["permissions"]["deny"])
-          and any(f"claude-{os.getuid()}" in x for x in hb["filesystem"]["denyRead"])
+          and any(f"claude-{os.getuid()}" in x for x in hb["filesystem"]["denyRead"]))
+    check("окно штаба: выводы чужих сессий закрыты (и в ~), свои и своих worktree — нет",
+          f"Read(~/.claude/projects/{dash(tmp)}/**/tool-results/**)" in hq["permissions"]["deny"]
+          and not any(dash(home) in x for x in hq["permissions"]["deny"])
           and "Read(~/projects/expert-corpus/**)" in hq["permissions"]["deny"]
           and any(x.startswith("Read(//") and x.endswith("/expert-corpus/**)") for x in hq["permissions"]["deny"]))
     check("окна направлений: worktree от HEAD (эпик), у мастерской — нет; места heavy созданы",
