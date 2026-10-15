@@ -393,6 +393,7 @@ def main():
         ("merge: Фемида с заголовком слияния — можно", MERGE_OK, ec, "domain-coordinator", False,
          B("gh pr merge 1 --squash --subject 'Индекс только для чтения'")),
         ("merge: Фемида с --admin — отказ", "deny", ec, "domain-coordinator", False, B("gh pr merge 1 --admin")),
+        ("merge: Фемида с --admin=true — отказ", "deny", ec, "domain-coordinator", False, B("gh pr merge 1 --admin=true")),
         ("merge: Фемида в чужой репозиторий -R — отказ", "deny", ec, "domain-coordinator", False,
          B("gh pr merge 1 -R latark/alexbroker")),
         ("merge: Фемида по ссылке — отказ", "deny", ec, "domain-coordinator", False,

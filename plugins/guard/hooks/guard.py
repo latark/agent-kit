@@ -2588,7 +2588,7 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd=""):
             continue
         if not a:
             return "PR указывай номером"
-        if a == "--admin":
+        if a == "--admin" or a.startswith("--admin="):  # gh принимает --admin=true (ревью argus 15.10)
             return "без --admin и без чужого репозитория (-R)"
         if a == "--repo":
             has_repo = repo_next = True
