@@ -1523,9 +1523,21 @@ def sandbox_build(domains, policy_path, stores=None):
     # корпус лекций — чужой контент (SEC-13, metis-0025): у Зевса уже есть личное и действия наружу, поэтому корпус ему
     # закрыт (решение владельца 15.10) — guard corpus-role (команда corpus), хук qmd-query (поиск), а здесь — чтение
     # файлов: Read (Claude Code применяет его и к Grep, Glob) и cat/grep в песочнице
-    hq["sandbox"]["filesystem"]["denyRead"] += _deny_forms(HQ_CLOSED_DIRS)
+    # и временные файлы других ролей (их TMPDIR и кэши — песочные папки окон, в том числе брошенные после
+    # переименования роли): у Фемиды там выдача корпуса
+    cache_dirs = set(built)
+    with contextlib.suppress(OSError):
+        cache_dirs |= {n for n in os.listdir(os.path.expanduser(caches)) if n != "hq"}
+    closed = HQ_CLOSED_DIRS + [f"{caches}/{n}" for n in sorted(cache_dirs)]
+    # переписка сессий (координаторы зовут corpus search — выдача оседает в *.jsonl), большие выводы и выводы фоновых
+    # задач сессий в ~/projects. Свои выводы, автопамять (memory/*.md) и задачи штаба (~/ai/pantheon) — открыты
+    dashed = HOME.replace(os.sep, "-")
+    files = ["~/.claude/projects/**/*.jsonl", f"~/.claude/projects/{dashed}-projects-*/**/tool-results/**",
+             os.path.join(os.path.realpath("/tmp"), f"claude-{os.getuid()}", f"{dashed}-projects-*", "**")]
+    hq["sandbox"]["filesystem"]["denyRead"] += _deny_forms(closed) + _deny_forms(files)
+    rule = lambda x: f"Read({x})" if x.startswith("~") else f"Read(/{x})"  # noqa: E731 — «//» — абсолютный путь
     hq.setdefault("permissions", {}).setdefault("deny", []).extend(
-        f"Read({x}/**)" if x.startswith("~") else f"Read(/{x}/**)" for x in _deny_forms(HQ_CLOSED_DIRS))
+        [rule(x + "/**") for x in _deny_forms(closed)] + [rule(x) for x in _deny_forms(files)])
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
     write_json(os.path.join(out_dir, "hq.json"), hq)
     built.append("hq")

@@ -289,6 +289,11 @@ def main():
           all(x in hb["filesystem"]["denyRead"] for x in ("~/projects/expert-corpus", "~/.cache/qmd",
                                                            "~/.cache/expert-corpus", "~/.claude/projects/*expert-corpus*"))
           and "Read(~/.cache/qmd/**)" in hq["permissions"]["deny"]
+          and any(x.endswith("pantheon-sandbox/workshop") for x in hb["filesystem"]["denyRead"])
+          and not any(x.endswith("pantheon-sandbox/hq") for x in hb["filesystem"]["denyRead"])
+          and "Read(~/.claude/projects/**/*.jsonl)" in hq["permissions"]["deny"]
+          and any("tool-results" in x and "-projects-*" in x for x in hq["permissions"]["deny"])
+          and any(f"claude-{os.getuid()}" in x for x in hb["filesystem"]["denyRead"])
           and "Read(~/projects/expert-corpus/**)" in hq["permissions"]["deny"]
           and any(x.startswith("Read(//") and x.endswith("/expert-corpus/**)") for x in hq["permissions"]["deny"]))
     check("окна направлений: worktree от HEAD (эпик), у мастерской — нет; места heavy созданы",
