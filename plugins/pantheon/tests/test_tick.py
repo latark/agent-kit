@@ -333,8 +333,21 @@ def main():
     # голый mktemp на macOS пишет в /var/folders/…/T (_CS_DARWIN_USER_TEMP_DIR раньше TMPDIR); владелец 15.10 решил не
     # открывать эту общую временную папку всех программ, а роли берут `mktemp -p "$TMPDIR"` (metis-0091)
     every = (sa, sm, sw, sn, sz, hq)
+    # тестовый корень tmp лежит под TMPDIR: при TMPDIR=/var/folders/… его путь сам содержит /var/folders. Срезаем
+    # префикс tmp (и его realpath) до поиска, поэтому проверка смотрит только на пути вне тестового корня (metis-0117)
+    cut = sorted({tmp, os.path.realpath(tmp)}, key=len, reverse=True)
+
+    def outside(p):
+        for c in cut:
+            p = p.replace(c, "")
+        return p
+
+    def wide_path(p):
+        q = outside(p)
+        return "/var/folders" in q or q.rstrip("/") in ("/var", "/private/var", "/private")
+
     wide = [x for w in every for x in w["sandbox"]["filesystem"]["allowWrite"] + list(w["env"].values())
-            if "/var/folders" in x or x.rstrip("/") in ("/var", "/private/var", "/private")]
+            if wide_path(x)]
     check("временные файлы: /var/folders не открыт ни одному окну, TMPDIR окно не подменяет (metis-0091, решение 15.10)",
           not wide and not any("TMPDIR" in w["env"] for w in every))
 
