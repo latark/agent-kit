@@ -216,15 +216,54 @@ def test_init():
           r.returncode == 0 and "доделано ~/projects/empty: git init, AGENTS.md, коммит" in r.stdout
           and git(empty, "rev-list", "--count", "HEAD") == "1")
 
+    # чужое не трогаем: пустой клон с remote, чужой коммит без remote
+    clone = os.path.join(projects, "clone")
+    subprocess.run(["git", "init", "-q", "-b", "main", clone], env=env, check=True)
+    subprocess.run(["git", "-C", clone, "remote", "add", "origin", "git@github.com:x/clone.git"], env=env, check=True)
+    setreg(["~/projects/clone"])
+    r = run("init", "iris-new")
+    check("init: пустой клон с remote — не тронут (нет AGENTS.md, нет коммита), код 0",
+          r.returncode == 0 and "не пуста" in r.stdout and os.listdir(clone) == [".git"]
+          and subprocess.run(["git", "-C", clone, "rev-parse", "--verify", "-q", "HEAD"], env=env).returncode != 0)
+    alien = os.path.join(projects, "alien")
+    subprocess.run(["git", "init", "-q", "-b", "main", alien], env=env, check=True)
+    subprocess.run(["git", "-C", alien, "commit", "-q", "--allow-empty", "-m", "чужой"], env=env, check=True)
+    setreg(["~/projects/alien"])
+    r = run("init", "iris-new")
+    check("init: чужой коммит без remote — не тронут, код 0",
+          r.returncode == 0 and "не пуста" in r.stdout and os.listdir(alien) == [".git"]
+          and git(alien, "rev-list", "--count", "HEAD") == "1")
+
+    # папка запуска — по правилу start: первая существующая папка записи (после init — первая в списке)
+    old = os.path.join(projects, "oldrepo")
+    write(os.path.join(old, "main.py"), "print(1)\n")
+    subprocess.run(["git", "init", "-q", "-b", "main", old], env=env, check=True)
+    subprocess.run(["git", "-C", old, "add", "main.py"], env=env, check=True)
+    subprocess.run(["git", "-C", old, "commit", "-q", "-m", "старое"], env=env, check=True)
+    setreg(["~/projects/oldrepo", "~/projects/newa"])
+    r = run("init", "iris-new")
+    newa = os.path.join(projects, "newa")
+    check("init A: папка запуска — существующий репозиторий: он не тронут, новая папка — только mkdir",
+          r.returncode == 0 and "папка запуска" in r.stdout and "создано ~/projects/newa" in r.stdout
+          and os.path.isdir(newa) and os.listdir(newa) == [] and sorted(os.listdir(old)) == [".git", "main.py"]
+          and git(old, "rev-list", "--count", "HEAD") == "1")
     other = os.path.join(projects, "other", "y")
     write(os.path.join(other, "main.py"), "print(1)\n")
-    setreg(["~/projects/other/y", "~/projects/newz", "~/projects/newq"])
+    setreg(["~/projects/other/y", "~/projects/newz"])
     r = run("init", "iris-new")
-    newz, newq = os.path.join(projects, "newz"), os.path.join(projects, "newq")
-    check("init: существующая папка вне ~/projects/<x> — «есть, пропущено»; папка запуска — первая созданная",
-          r.returncode == 0 and "есть, пропущено ~/projects/other/y" in r.stdout and os.listdir(other) == ["main.py"]
-          and os.path.isfile(os.path.join(newz, "AGENTS.md")) and git(newz, "rev-list", "--count", "HEAD") == "1"
-          and os.path.isdir(newq) and os.listdir(newq) == [])
+    newz = os.path.join(projects, "newz")
+    check("init B: папка запуска вне ~/projects/<x> без git — «есть, пропущено», про папку запуска; новая — только mkdir",
+          r.returncode == 0 and "есть, пропущено ~/projects/other/y — папка запуска" in r.stdout
+          and os.listdir(other) == ["main.py"] and os.path.isdir(newz) and os.listdir(newz) == [])
+    setreg(["~/projects/newb", "~/projects/newc"])
+    r = run("init", "iris-new")
+    newb, newc = os.path.join(projects, "newb"), os.path.join(projects, "newc")
+    check("init: все папки новые — git и AGENTS.md в первой (папка запуска), остальные — только mkdir",
+          r.returncode == 0 and git(newb, "rev-list", "--count", "HEAD") == "1"
+          and os.path.isfile(os.path.join(newb, "AGENTS.md")) and os.listdir(newc) == [])
+    setreg(["~/projects/other/y", "~/projects/newb"])
+    check("check: папка запуска — первая существующая (правило start), а не первая с .git",
+          "НЕТ     AGENTS.md в папке запуска" in run("check", "iris-new").stdout)
 
     # вызов из хука git: GIT_DIR чужого репозитория не уводит коммит туда
     outer = os.path.join(tmp, "outer")
