@@ -16,6 +16,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         (службы [[service]] — те же pause|resume|disable|enable: launchd снимается сразу)
   pantheon qmd config|update|embed|serve|install|status   общий поиск qmd: index.yml из ~/ai/pantheon/qmd.toml,
                                         освежить индекс, сервер MCP (служба), подключить к Claude на этом Mac
+  pantheon plugins update [--quiet]     новые версии плагинов agent-kit (тик раз в 10 мин): тесты новой и
+                                        установленной версии; нет новых падений — claude plugin update, есть — тревога
   pantheon direction check <имя>        что готово у нового направления (навык new-direction): реестр, «да»,
                                         папки, STATUS.md, domains.json, AGENTS.md, доверие, autoMode
   pantheon instructions [--quiet]       дойдут ли инструкции целиком: Codex (лимит на путь), MEMORY.md
@@ -62,6 +64,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
 PANTHEON_FAKE_WAKE, PANTHEON_FAKE_AC, PANTHEON_FAKE_IDLE, PANTHEON_FAKE_LIMIT, PANTHEON_DRYRUN,
 PANTHEON_NO_NOTIFY.
 """
+import collections
 import contextlib
 import fcntl
 import hashlib
@@ -75,6 +78,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta
 
@@ -261,7 +265,7 @@ def clear_once(key):
 JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
-                    "instructions", "agents", "usage", "qmd"}
+                    "instructions", "agents", "usage", "qmd", "plugins"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 
 
@@ -283,6 +287,8 @@ def parse_command(cmd):
             return None
         if argv[1] == "qmd" and argv[2:3] not in (["update"], ["embed"], ["serve"]):
             return None  # install (claude mcp add уровня пользователя) и прочее — только руками
+        if argv[1] == "plugins" and (argv[2:3] != ["update"] or any(a != "--quiet" for a in argv[3:])):
+            return None
         return [os.path.join(PLUGIN, "bin", "pantheon")] + argv[1:]
     if argv[0] == "claude":
         if argv[1:2] != ["-p"]:
@@ -2872,6 +2878,278 @@ def usage_report(rest):
     return 0
 
 
+# --- обновления плагинов agent-kit (metis-0052) ----------------------------------------------------------------
+# Тик раз в 10 минут, вне песочницы: каталог agent-kit → новые версии установленных плагинов → тесты новой версии и
+# установленной (база) на одних и тех же python → есть новые падения — не ставим, тревога; нет — claude plugin update.
+# База нужна, чтобы падения от места запуска (временная папка, python 3.9) не держали обновление вечно.
+
+MARKETPLACE = "agent-kit"
+PLUGIN_TEST_TIMEOUT = 600
+_TMP_RE = None
+
+
+def _plugins_journal(line):
+    os.makedirs(path("plugins"), exist_ok=True)
+    with open(path("plugins", "journal.log"), "a", encoding="utf-8") as fh:
+        fh.write(f"{stamp()} {line}\n")
+
+
+def _plugins_safe(s):
+    return re.sub(r"[^\w.+-]", "_", str(s))[:80] or "_"
+
+
+def _version_newer(new, old):
+    """Новее ли версия каталога установленной: сравнение кортежей чисел; не разобрать — новая, если строки разные."""
+    try:
+        return tuple(int(x) for x in str(new).split(".")) > tuple(int(x) for x in str(old).split("."))
+    except ValueError:
+        return str(new) != str(old)
+
+
+def _plugins_installed():
+    """{имя: {version, installPath}} — плагины agent-kit уровня пользователя по `claude plugin list --json`; None — сбой."""
+    try:
+        r = subprocess.run([claude_bin(), "plugin", "list", "--json"], capture_output=True, text=True, timeout=120)
+        data = json.loads(r.stdout or "null")
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if isinstance(data, dict):
+        data = data.get("plugins")
+    if r.returncode != 0 or not isinstance(data, list):
+        return None
+    out = {}
+    for p in data:
+        if not isinstance(p, dict) or p.get("scope") != "user":
+            continue
+        name, _, mkt = str(p.get("id", "")).partition("@")
+        if mkt == MARKETPLACE and name:
+            out[name] = {"version": str(p.get("version", "")), "installPath": p.get("installPath")}
+    return out
+
+
+def _plugins_catalog():
+    """{имя: (версия, папка плагина)} из клона каталога agent-kit."""
+    known = read_json(os.path.join(HOME, ".claude", "plugins", "known_marketplaces.json"))
+    entry = known.get(MARKETPLACE) if isinstance(known, dict) else None
+    loc = entry.get("installLocation") if isinstance(entry, dict) else None
+    if not isinstance(loc, str) or not os.path.isdir(loc):
+        loc = os.path.join(HOME, ".claude", "plugins", "marketplaces", MARKETPLACE)
+    root = os.path.realpath(loc)
+    mkt = read_json(os.path.join(root, ".claude-plugin", "marketplace.json"))
+    out = {}
+    for p in (mkt.get("plugins") or []) if isinstance(mkt, dict) else []:
+        if not isinstance(p, dict) or not isinstance(p.get("source"), str) or not p.get("name"):
+            continue
+        d = os.path.realpath(os.path.join(root, p["source"]))
+        if not d.startswith(root + os.sep):
+            continue  # источник вне клона каталога (абсолютный путь, ../) — не наш
+        meta = read_json(os.path.join(d, ".claude-plugin", "plugin.json"))
+        ver = meta.get("version") if isinstance(meta, dict) else None
+        if ver:
+            out[str(p["name"])] = (str(ver), d)
+    return out
+
+
+def _test_pythons():
+    """python3 из PATH и системный /usr/bin/python3 — если он есть, инструменты командной строки установлены
+    (иначе macOS покажет окно установки) и это не тот же python."""
+    first = shutil.which("python3") or sys.executable
+    out = [first]
+    sysp = "/usr/bin/python3"
+    if os.path.exists(sysp) and os.path.realpath(sysp) != os.path.realpath(first):
+        try:
+            ok = subprocess.run(["xcode-select", "-p"], capture_output=True, timeout=30).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            ok = False
+        if ok:
+            out.append(sysp)
+    return out
+
+
+def _tmp_re():
+    """Пути во временных папках — до <tmp>: у новой версии и базы они разные, а падение одно."""
+    global _TMP_RE
+    if _TMP_RE is None:
+        pre = {"/private/tmp/", "/tmp/", "/private/var/folders/", "/var/folders/"}
+        for t in (tempfile.gettempdir(), os.path.realpath(tempfile.gettempdir())):
+            pre.add(t.rstrip("/") + "/")
+        alts = "|".join(re.escape(p) for p in sorted(pre, key=len, reverse=True))
+        _TMP_RE = re.compile(rf"(?:{alts})[^\s'\"(),:;]*")
+    return _TMP_RE
+
+
+def _failure_signatures(fname, out, rc):
+    """Подписи падений одного файла тестов: строки FAIL, исключение в конце вывода, иначе ненулевой код;
+    rc None — таймаут."""
+    sigs = [_tmp_re().sub("<tmp>", ln.strip()) for ln in out.splitlines() if ln.lstrip().startswith("FAIL")]
+    if rc is None:
+        return sigs + [f"{fname}: таймаут"]
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    exc = None
+    if "Traceback (most recent call last):" in out and lines and not lines[-1][:1].isspace():
+        m = re.match(r"([A-Za-z_][\w.]*)(?::|$)", lines[-1])
+        exc = m.group(1) if m else None
+    if exc:
+        sigs.append(f"{fname}: исключение {exc}")
+    elif rc != 0 and not sigs:
+        sigs.append(f"{fname}: код {rc}")
+    return sigs
+
+
+def _run_plugin_tests(pdir, pythons, tmp, log, label):
+    """tests/test_*.py папки pdir по одному на каждом python → Counter подписей (python, файл, подпись)."""
+    sigs = collections.Counter()
+    if not pdir:
+        return sigs
+    tests_dir = os.path.join(pdir, "tests")
+    files = sorted(f for f in os.listdir(tests_dir) if f.startswith("test_") and f.endswith(".py")) \
+        if os.path.isdir(tests_dir) else []
+    env0 = {k: v for k, v in os.environ.items() if not k.startswith("PANTHEON_")}
+    for py in pythons:
+        for f in files:
+            home = tempfile.mkdtemp(prefix="home-", dir=tmp)
+            try:
+                r = subprocess.run([py, "-I", os.path.join("tests", f)], cwd=pdir, env={**env0, "HOME": home},
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   timeout=PLUGIN_TEST_TIMEOUT)
+                out, rc = r.stdout, r.returncode
+            except subprocess.TimeoutExpired as e:
+                out, rc = e.stdout or b"", None
+            except OSError as e:
+                out, rc = str(e), 127
+            out = out.decode("utf-8", "replace") if isinstance(out, bytes) else out
+            log.write(f"\n===== {label} · {py} · {f} · {'таймаут' if rc is None else f'код {rc}'} =====\n{out}")
+            log.flush()
+            for s in _failure_signatures(f, out, rc):
+                sigs[(py, f, s)] += 1
+    return sigs
+
+
+def _plugins_mark(marks, name, mark):
+    """Метка сразу после каждого плагина: следующий плагин может упасть, а сделанное не повторяется."""
+    if mark is None:
+        marks.pop(name, None)
+    else:
+        marks[name] = {**mark, "at": stamp()}
+    write_json(path("plugins", "marks.json"), marks)
+
+
+def _plugin_install(name, old, new, log, marks, quiet):
+    """claude plugin update без -y (новая команда установки в каталоге должна требовать человека) и сверка версии."""
+    try:
+        r = subprocess.run([claude_bin(), "plugin", "update", f"{name}@{MARKETPLACE}", "-s", "user"],
+                           capture_output=True, text=True, timeout=600)
+        ok = r.returncode == 0
+        why = f"код {r.returncode}: {' '.join((r.stderr or r.stdout or '').split())[:200]}"
+    except (OSError, subprocess.TimeoutExpired) as e:
+        ok, why = False, type(e).__name__
+    got = ((_plugins_installed() or {}).get(name) or {}).get("version")
+    if ok and got == new:
+        _plugins_mark(marks, name, None)
+        _plugins_journal(f"{name} {old} → {new}: обновлён")
+        alert(f"обновлён {name} {old} → {new}, сессии увидят после перезапуска", "plugins-update")
+        if not quiet:
+            print(f"{name}: обновлён {old} → {new}")
+        return 0
+    if ok:
+        why = f"после update версия {got or 'неизвестна'}, а не {new}"
+    _plugins_mark(marks, name, {"version": new, "result": "green", "log": log})
+    _plugins_journal(f"{name} {old} → {new}: тесты зелёные, установка не удалась ({why})")
+    alert_once(f"plugins-update-{name}", new, f"{name} {new}: тесты прошли, но claude plugin update не поставил "
+               f"({why}). Руками: claude plugin update {name}@{MARKETPLACE}", "plugins-update")
+    if not quiet:
+        print(f"{name}: {new} — тесты прошли, установка не удалась ({why})")
+    return ALERTED
+
+
+def _plugin_check(name, old, new, src, base):
+    """Тесты новой версии против установленной. Отдаёт (лог, новые подписи)."""
+    log = path("plugins", f"{_plugins_safe(name)}-{_plugins_safe(new)}.log")
+    os.makedirs(path("plugins"), exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix=f"plugins-{_plugins_safe(name)}-")
+    try:
+        ign = shutil.ignore_patterns(".git", "__pycache__")
+        new_dir = os.path.join(tmp, "new", _plugins_safe(name))
+        shutil.copytree(src, new_dir, symlinks=True, ignore=ign)
+        base_dir = None
+        if isinstance(base, str) and os.path.isdir(base):
+            base_dir = os.path.join(tmp, "base", _plugins_safe(name))
+            shutil.copytree(base, base_dir, symlinks=True, ignore=ign)
+        pythons = _test_pythons()
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write(f"{stamp()} {name}: новая {new} из {src}, база {old} из {base_dir and base or '—'}; "
+                     f"python: {', '.join(pythons)}\n")
+            fresh = (_run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}")
+                     - _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}"))
+            fh.write(f"\n===== новых падений: {sum(fresh.values())} =====\n")
+            for (py, f, s) in sorted(fresh):
+                fh.write(f"{py} · {f} · {s}\n")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return log, fresh
+
+
+def plugins_update(quiet=False):
+    with lock("plugins-update", block=False) as got:
+        return _plugins_update(quiet) if got else 0
+
+
+def _plugins_update(quiet):
+    try:
+        ok = subprocess.run([claude_bin(), "plugin", "marketplace", "update", MARKETPLACE],
+                            capture_output=True, text=True, timeout=300).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    if not ok:  # нет сети или каталог недоступен — подождём следующего раза, без тревоги
+        if not quiet:
+            print(f"каталог {MARKETPLACE} не обновился — попробую в следующий раз")
+        return TEMPFAIL
+    installed = _plugins_installed()
+    if installed is None:
+        print("pantheon plugins update: не прочитал claude plugin list --json", file=sys.stderr)
+        return 1
+    catalog = _plugins_catalog()
+    marks = read_json(path("plugins", "marks.json"))
+    rc = 0
+    for name in sorted(installed):
+        if name not in catalog:
+            continue
+        old, (new, src) = installed[name]["version"], catalog[name]
+        if not _version_newer(new, old):
+            if not quiet:
+                print(f"{name}: {old}, новее нет")
+            continue
+        mark = marks.get(name) if isinstance(marks.get(name), dict) else {}
+        if mark.get("version") == new and mark.get("result") == "red":
+            if not quiet:
+                print(f"{name}: {new} не ставлю — тесты были красные ({mark.get('log')})")
+            continue
+        if mark.get("version") == new and mark.get("result") == "green":
+            rc = max(rc, _plugin_install(name, old, new, mark.get("log"), marks, quiet))
+            continue
+        log, fresh = _plugin_check(name, old, new, src, installed[name].get("installPath"))
+        if not fresh:
+            rc = max(rc, _plugin_install(name, old, new, log, marks, quiet))
+            continue
+        # одна подпись на двух python — одна строка в тревоге
+        first = list(dict.fromkeys(s if s.startswith(f + ":") else f"{f}: {s}" for (py, f, s) in sorted(fresh)))[:3]
+        _plugins_mark(marks, name, {"version": new, "result": "red", "log": log})
+        _plugins_journal(f"{name} {old} → {new}: новые падения тестов, не ставлю ({log})")
+        alert(f"{name} {new} не поставлен: новые падения тестов ({sum(fresh.values())}) — {'; '.join(first)}. "
+              f"Лог: {log.replace(HOME, '~')}", "plugins-update")
+        if not quiet:
+            print(f"{name}: {new} не ставлю — новые падения тестов, лог {log}")
+        rc = ALERTED
+    return rc
+
+
+def plugins_cmd(rest):
+    if rest[:1] == ["update"] and all(a == "--quiet" for a in rest[1:]):
+        return plugins_update(quiet="--quiet" in rest)
+    print("pantheon plugins: есть только update [--quiet]", file=sys.stderr)
+    return 2
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(__doc__)
@@ -2953,6 +3231,8 @@ def main(argv):
         return usage_report(rest)
     if cmd == "qmd":
         return qmd_mod().main(rest)
+    if cmd == "plugins":
+        return plugins_cmd(rest)
     if cmd == "service-run":
         if len(rest) != 1 or not JOB_NAME.fullmatch(rest[0]):
             print("pantheon service-run: имя службы не по образцу", file=sys.stderr)
