@@ -44,6 +44,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
 from datetime import datetime
 
 HOME = os.path.expanduser("~")
@@ -1062,13 +1063,73 @@ def cmd_maint_pre(ev):
     return 0
 
 
+QMD_HOW = ("Ищи по смыслу в своей коллекции: searches=[{\"type\": \"vec\", \"query\": \"вопрос обычными словами\"}], "
+           "collections=[\"<коллекция>\"], rerank=false; точные номера и коды (дела, статьи, И-N) — type \"lex\". "
+           "Коллекции — инструмент status. Правило QMD-04, ~/ai/pantheon/qmd.toml.")
+
+
+QMD_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,30}")
+QMD_HQ_CLOSED = {"corpus"}  # штабу корпус закрыт (решение владельца 15.10, SEC-13; guard corpus-role — то же для Bash)
+
+
+def _qmd_hq_target_ok(item):
+    """Адрес документа для штаба: только qmd://<коллекция>/<путь> открытой ему коллекции, без «..». docid (#abc),
+    относительный или абсолютный путь и глоб без коллекции могут указать на корпус — их штабу не даём."""
+    item = item.strip()
+    if not item.startswith("qmd://") or ".." in item:
+        return False
+    coll = item[len("qmd://"):].split("/", 1)[0]
+    return bool(QMD_NAME.fullmatch(coll)) and coll not in QMD_HQ_CLOSED
+
+
+def cmd_qmd_query(ev):
+    """PreToolUse mcp__qmd__query|get|multi_get. query: только поиск по смыслу или по словам в названных коллекциях,
+    без доранжирования. Полный режим (query без searches — переформулировка моделью, rerank) держит в памяти сервера
+    три модели (~2 ГБ против ~0,3) и в 50–100 раз медленнее; без collections большая коллекция legal вытесняет
+    остальные (QMD-04). Штабу (hq) коллекция corpus закрыта во всех трёх инструментах."""
+    ti = ev.get("tool_input") or {}
+    tool = ev.get("tool_name") or ""
+    hq = session_role(ev) == "hq"
+    why = None
+    if tool.endswith("__query"):
+        colls = ti.get("collections")
+        if ti.get("query") or not ti.get("searches"):
+            why = "полный режим (query с переформулировкой) не используем"
+        elif ti.get("rerank") is not False:
+            why = "доранжирование моделью выключай: rerank=false"
+        elif not colls or not isinstance(colls, list):
+            why = "назови коллекцию: collections=[…]"
+        elif any(not isinstance(x, dict) or x.get("type") not in ("vec", "lex") for x in ti["searches"]):
+            why = "только type \"vec\" (по смыслу) или \"lex\" (номера и коды); hyde не используем"
+        elif hq and any(not isinstance(c, str) or c.strip() in QMD_HQ_CLOSED for c in colls):
+            why = "штабу корпус закрыт (решение владельца 15.10) — просьбу «по Куклину» передай Фемиде или координатору"
+    elif hq and tool == "ReadMcpResourceTool":
+        # ресурс qmd://… сервер ищет без схемы и по окончанию пути во всех коллекциях: «pantheon/x.md» найдёт и
+        # corpus/my-pantheon/x.md (ревью argus 15.10) — штабу ресурсы qmd закрыты целиком, get даёт то же по точному адресу
+        if str(ti.get("server") or "").strip().casefold() == "qmd":
+            why = "штабу ресурсы qmd закрыты (корпус штабу закрыт, решение владельца 15.10) — читай инструментом get"
+    elif hq and (tool.endswith("__get") or tool.endswith("__multi_get")):
+        raw = ti.get("file") if tool.endswith("__get") else ti.get("pattern")
+        items = str(raw or "").split(",") if tool.endswith("__multi_get") else [str(raw or "")]
+        if not all(_qmd_hq_target_ok(x) for x in items):
+            why = ("штабу — только адреса qmd://<коллекция>/<путь> из результатов поиска, без docid и коллекции corpus "
+                   "(корпус штабу закрыт, решение владельца 15.10)")
+    if not why:
+        return 0
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": "deny",
+        "permissionDecisionReason": f"qmd: {why}. {QMD_HOW}"}}, ensure_ascii=False))
+    return 0
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     fn = {"owner-log": cmd_owner_log, "answer": cmd_answer, "stop": cmd_stop, "start": cmd_start,
           "rewake": cmd_rewake, "dir-added": cmd_dir_added, "maint-post": cmd_maint_post,
-          "maint-pre": cmd_maint_pre, "push": cmd_push}.get(cmd)
+          "maint-pre": cmd_maint_pre, "push": cmd_push, "qmd-query": cmd_qmd_query}.get(cmd)
     if not fn:
-        print("ctx.py: owner-log | answer | stop | start | rewake | dir-added | maint-post | maint-pre | push", file=sys.stderr)
+        print("ctx.py: owner-log | answer | stop | start | rewake | dir-added | maint-post | maint-pre | push | qmd-query",
+              file=sys.stderr)
         return 0
     try:
         return fn(read_event())

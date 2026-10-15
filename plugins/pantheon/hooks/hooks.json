@@ -49,6 +49,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "mcp__qmd__query|mcp__qmd__get|mcp__qmd__multi_get|ReadMcpResourceTool",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" qmd-query",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [

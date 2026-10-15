@@ -13,6 +13,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon jobs                         что установлено, когда шло, что дальше и почему ждёт
   pantheon jobs pause|resume|disable|enable <задача>   (--all — весь планировщик)
   pantheon jobs renew <задача> [дней]   продлить аренду задачи
+                                        (службы [[service]] — те же pause|resume|disable|enable: launchd снимается сразу)
+  pantheon qmd config|update|embed|serve|install|status   общий поиск qmd: index.yml из ~/ai/pantheon/qmd.toml,
+                                        освежить индекс, сервер MCP (служба), подключить к Claude на этом Mac
   pantheon direction check <имя>        что готово у нового направления (навык new-direction): реестр, «да»,
                                         папки, STATUS.md, domains.json, AGENTS.md, доверие, autoMode
   pantheon instructions [--quiet]       дойдут ли инструкции целиком: Codex (лимит на путь), MEMORY.md
@@ -193,6 +196,15 @@ def load_schedule():
         else:
             sched.setdefault("bad_names", []).append(str(j.get("name") if isinstance(j, dict) else j))
     sched["job"] = jobs
+    # Службы (SCHED-05): постоянные процессы под launchd с KeepAlive — имена общие с задачами (одна метка состояния)
+    services, names = [], {j["name"] for j in jobs}
+    for s in sched.get("service") or []:
+        if isinstance(s, dict) and JOB_NAME.fullmatch(str(s.get("name", ""))) and s["name"] not in names:
+            services.append(s)
+            names.add(s["name"])
+        else:
+            sched.setdefault("bad_names", []).append(str(s.get("name") if isinstance(s, dict) else s))
+    sched["service"] = services
     return sched
 
 
@@ -249,7 +261,7 @@ def clear_once(key):
 JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
-                    "instructions", "agents", "usage"}
+                    "instructions", "agents", "usage", "qmd"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 
 
@@ -269,6 +281,8 @@ def parse_command(cmd):
     if argv[0] == "pantheon":
         if len(argv) < 2 or argv[1] not in TICK_SUBCOMMANDS:
             return None
+        if argv[1] == "qmd" and argv[2:3] not in (["update"], ["embed"], ["serve"]):
+            return None  # install (claude mcp add уровня пользователя) и прочее — только руками
         return [os.path.join(PLUGIN, "bin", "pantheon")] + argv[1:]
     if argv[0] == "claude":
         if argv[1:2] != ["-p"]:
@@ -447,8 +461,8 @@ def tick():
             os.remove(path("schedule-error"))
         me, primary = host(), sched.get("primary_host")
         for bad in sched.get("bad_names") or []:
-            alert_once("badname-" + re.sub(r"[^\w-]", "_", bad)[:40], bad, f"schedule.toml: задача с именем не по образцу "
-                       f"({bad[:60]!r}; только a-z, 0-9, дефис) — пропущена", "pantheon-tick")
+            alert_once("badname-" + re.sub(r"[^\w-]", "_", bad)[:40], bad, f"schedule.toml: задача или служба с именем не по образцу "
+                       f"или повтором имени ({bad[:60]!r}; только a-z, 0-9, дефис, имена не повторяются) — пропущена", "pantheon-tick")
         heavy = []
         for job in sched.get("job") or []:
             name = job["name"]
@@ -488,6 +502,11 @@ def tick():
                 launch(name, t)
         if heavy:
             tick_heavy(sched, heavy, t)
+        try:
+            services_sync(sched)
+        except Exception as e:  # сбой служб не должен останавливать задачи тика
+            alert_once("svc-sync", type(e).__name__, f"службы: сверка с launchd упала ({type(e).__name__}: {e})",
+                       "pantheon-tick")
 
 
 def tick_heavy(sched, heavy, t):
@@ -514,6 +533,179 @@ def tick_heavy(sched, heavy, t):
         if os.environ.get("PANTHEON_DRYRUN") == "1":
             write_json(path("heavy.json"), {"last_end": t})
         started = True
+
+
+# --- службы (SCHED-05) ------------------------------------------------------------------
+# [[service]] в schedule.toml — постоянный процесс (сервер qmd, позже бот одобрения, Pixel Agents, «Пульт»). Каждая —
+# своя задача launchd com.latark.pantheon-svc.<имя> с KeepAlive; запускает её `pantheon service-run <имя>`, который
+# перечитывает schedule.toml и проверяет команду (только `pantheon …` или скрипт плагина). Тик сверяет launchd с
+# расписанием: нужна и не запущена — поднять, пауза, выключена, убрана из расписания или чужой Mac — снять.
+
+SVC_PREFIX = "com.latark.pantheon-svc."
+SVC_TMPL = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{label}</string>
+  <key>ProgramArguments</key>
+  <array><string>{bin}</string><string>service-run</string><string>{name}</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>{path}</string></dict>
+  <key>StandardOutPath</key><string>{log}</string>
+  <key>StandardErrorPath</key><string>{log}</string>
+</dict>
+</plist>
+"""
+
+
+def parse_service_command(cmd):
+    """Команда службы: как у задачи, но без `claude -p` — служба живёт постоянно, а сессия Claude — нет."""
+    argv = parse_command(cmd)
+    if argv is None or argv[0] == "claude":
+        return None
+    return argv
+
+
+def service_wanted(svc, sched, st=None):
+    """(нужна ли служба на этом Mac, почему нет)."""
+    st = job_state(svc["name"]) if st is None else st
+    if svc.get("enabled") is False or st.get("disabled"):
+        return False, "выключена"
+    if st.get("paused"):
+        return False, "пауза"
+    if svc.get("hosts", "all") == "primary" and host() != sched.get("primary_host"):
+        return False, "не этот Mac"
+    if parse_service_command(svc.get("command")) is None:
+        return False, "команда не разрешена"
+    return True, ""
+
+
+def _svc_plist(name):
+    return os.path.join(HOME, "Library", "LaunchAgents", SVC_PREFIX + name + ".plist")
+
+
+def svc_running(name):
+    """pid службы по launchctl print, 0 — загружена, но не идёт, None — не загружена."""
+    if os.environ.get("PANTHEON_DRYRUN") == "1":
+        return read_json(path("svc-dry.json")).get(name)
+    r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{SVC_PREFIX}{name}"], capture_output=True,
+                       text=True, timeout=15)
+    if r.returncode != 0:
+        return None
+    m = re.search(r"^\s*pid = (\d+)", r.stdout, re.M)
+    return int(m.group(1)) if m else 0
+
+
+def _launchctl(verb, target, name):
+    """launchctl bootstrap|bootout|kickstart; при PANTHEON_DRYRUN — строка в dryrun.log и мнимое состояние."""
+    if os.environ.get("PANTHEON_DRYRUN") == "1":
+        with open(path("dryrun.log"), "a") as fh:
+            fh.write(f"{int(now())} svc-{verb} {name}\n")
+        dry = read_json(path("svc-dry.json"))
+        if verb == "bootout":
+            dry.pop(name, None)
+        else:
+            dry[name] = 4242
+        write_json(path("svc-dry.json"), dry)
+        return True, ""
+    r = subprocess.run(["launchctl", verb, *target], capture_output=True, text=True, timeout=30)
+    return r.returncode == 0, (r.stderr or r.stdout).strip()
+
+
+def _svc_path():
+    """PATH служб — тот же, что у задачи тика (python3 из него запускает pantheon): от того, каким python вызван
+    `pantheon jobs`, plist не меняется и служба не перезапускается зря (ревью argus 15.10)."""
+    import plistlib
+    with contextlib.suppress(OSError, ValueError, KeyError, TypeError, plistlib.InvalidFileException):
+        with open(PLIST, "rb") as fh:
+            return str(plistlib.load(fh)["EnvironmentVariables"]["PATH"])
+    return ":".join([os.path.dirname(sys.executable), "/opt/homebrew/bin", os.path.join(HOME, ".local", "bin"),
+                     "/usr/bin:/bin:/usr/sbin:/sbin"])
+
+
+def services_sync(sched, only=None):
+    """Сверить задачи launchd служб с расписанием. only — одна служба (пульт: пауза снимает её сразу). Тик и пульт
+    сверяют под одной блокировкой — иначе двойной bootstrap и ложная тревога."""
+    with lock("svc"):
+        _services_sync(sched, only)
+
+
+def _services_sync(sched, only):
+    uid = os.getuid()
+    env_path = _svc_path()
+    want = {}
+    for svc in sched.get("service") or []:
+        ok, _ = service_wanted(svc, sched)
+        if ok:
+            want[svc["name"]] = svc
+    agents = os.path.join(HOME, "Library", "LaunchAgents")
+    have = set()
+    with contextlib.suppress(OSError):
+        have = {f[len(SVC_PREFIX):-6] for f in os.listdir(agents) if f.startswith(SVC_PREFIX) and f.endswith(".plist")}
+    for name in sorted(have | set(want)):
+        if only and name != only:
+            continue
+        plist = _svc_plist(name)
+        if name not in want:
+            if svc_running(name) is not None:
+                _launchctl("bootout", [f"gui/{uid}/{SVC_PREFIX}{name}"], name)
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(plist)
+            continue
+        text = SVC_TMPL.format(label=SVC_PREFIX + name, bin=os.path.join(CURRENT, "bin", "pantheon"), name=name,
+                               path=env_path, log=path("logs", f"svc-{name}.log"))
+        try:
+            same = open(plist).read() == text
+        except OSError:
+            same = False
+        state = svc_running(name)
+        if not same:
+            os.makedirs(agents, exist_ok=True)
+            os.makedirs(path("logs"), exist_ok=True)
+            with open(plist, "w") as fh:
+                fh.write(text)
+            if state is not None:
+                _launchctl("bootout", [f"gui/{uid}/{SVC_PREFIX}{name}"], name)
+            state = None
+        if state is None:
+            ok, err = _launchctl("bootstrap", [f"gui/{uid}", plist], name)
+            if not ok and svc_running(name) is None:
+                alert_once("svc-" + name, err[:80], f"служба {name}: launchd не принял ({err[:160]})", "pantheon-tick",
+                           note=f"Служба {name} не запустилась")
+                continue
+            clear_once("svc-" + name)
+        elif state == 0:
+            # загружена, но процесса нет (KeepAlive сдался после частых падений) — толкнуть, раз в тик
+            _launchctl("kickstart", [f"gui/{uid}/{SVC_PREFIX}{name}"], name)
+            alert_once("svc-down-" + name, "down", f"служба {name} не работает — launchd её перезапускает; журнал "
+                       f"{path('logs', f'svc-{name}.log').replace(HOME, '~')}", "pantheon-tick",
+                       note=f"Служба {name} не работает")
+        else:
+            clear_once("svc-down-" + name)
+
+
+def service_run(name):
+    """Точка входа службы для launchd: перечитать расписание, проверить и заменить себя командой."""
+    try:
+        sched = load_schedule()
+    except (OSError, ValueError) as e:
+        print(f"schedule.toml не читается: {e}", file=sys.stderr)
+        time.sleep(60)
+        return 1
+    svc = next((s for s in sched.get("service") or [] if s["name"] == name), None)
+    ok, why = service_wanted(svc, sched) if svc else (False, "нет в schedule.toml")
+    if not ok:
+        print(f"{stamp()} служба {name} не идёт: {why}", file=sys.stderr)
+        time.sleep(60)  # KeepAlive перезапустит; тик снимет задачу launchd за минуту
+        return 0
+    argv = parse_service_command(svc.get("command"))
+    print(f"{stamp()} служба {name}: {' '.join(argv)}", file=sys.stderr, flush=True)
+    os.chdir(HOME)
+    os.execve(argv[0], argv, run_env())
 
 
 def run_job(name):
@@ -643,6 +835,19 @@ def jobs_show():
     widths = [max(len(r[i]) for r in rows) for i in range(6)]
     for r in rows:
         print("  ".join(c.ljust(w) for c, w in zip(r[:6], widths)) + "  " + r[6])
+    if sched.get("service"):
+        print()
+        rows = [("служба", "где", "состояние", "что")]
+        for svc in sched["service"]:
+            ok, why = service_wanted(svc, sched)
+            pid = svc_running(svc["name"])
+            state = (f"идёт, pid {pid}" if pid else "не идёт — тик поднимет") if ok else why
+            if not ok and pid:
+                state += f" (ещё идёт, pid {pid}: тик снимет)"
+            rows.append((svc["name"], svc.get("hosts", "all"), state, str(svc.get("description", ""))[:70]))
+        widths = [max(len(r[i]) for r in rows) for i in range(3)]
+        for r in rows:
+            print("  ".join(c.ljust(w) for c, w in zip(r[:3], widths)) + "  " + r[3])
 
 
 # --- pantheon status: один экран для отладки --------------------------------------------------------------------
@@ -704,6 +909,15 @@ def status():
             continue
         lines.append(f"{job['name']}: {bad}")
         warn.append(f"задача {job['name']}")
+    with contextlib.suppress(OSError, ValueError):
+        sched_s = load_schedule()
+        for svc in sched_s.get("service") or []:
+            ok, why = service_wanted(svc, sched_s)
+            if ok and not svc_running(svc["name"]):
+                lines.append(f"служба {svc['name']}: НЕ ИДЁТ — журнал ~/.local/state/pantheon/logs/svc-{svc['name']}.log")
+                warn.append(f"служба {svc['name']}")
+            elif not ok and why in ("пауза", "команда не разрешена"):
+                lines.append(f"служба {svc['name']}: {why}")
     # дежурный (watch.py): время прохода и упавшие проверки; метка техперезапуска; паузы по нагрузке
     wl = read_json(path("watch-last"), None)
     if wl and wl.get("time"):
@@ -849,9 +1063,13 @@ def jobs_set(action, name, arg=None):
                 os.remove(path("paused"))
         return 0
     sched = load_schedule()
-    job = next((j for j in sched.get("job") or [] if j["name"] == name), None)
+    job = next((j for j in (sched.get("job") or []) + (sched.get("service") or []) if j["name"] == name), None)
     if not job:
-        print(f"нет задачи {name}; список — pantheon jobs", file=sys.stderr)
+        print(f"нет задачи или службы {name}; список — pantheon jobs", file=sys.stderr)
+        return 2
+    is_svc = job in (sched.get("service") or [])
+    if is_svc and action == "renew":
+        print("у служб нет аренды", file=sys.stderr)
         return 2
     st = job_state(name)
     if action == "pause":
@@ -866,6 +1084,8 @@ def jobs_set(action, name, arg=None):
         days = float(arg or job.get("lease_days") or 30)
         st.update(lease_until=now() + days * 86400, paused=False, paused_reason=None)
     save_job_state(name, st)
+    if is_svc:
+        services_sync(sched, only=name)  # служба встаёт или поднимается сразу, а не на следующем тике
     return 0
 
 
@@ -2351,14 +2571,30 @@ def build_app():
 
 def uninstall():
     subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
+    agents = os.path.dirname(PLIST)
+    with contextlib.suppress(OSError):
+        for f in os.listdir(agents):
+            if f.startswith(SVC_PREFIX) and f.endswith(".plist"):
+                subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{f[:-6]}"], capture_output=True)
+                os.remove(os.path.join(agents, f))
     for p in (PLIST, os.path.join(HOME, ".local", "bin", "pantheon"), os.path.join(HOME, ".local", "bin", "heavy")):
         with contextlib.suppress(FileNotFoundError):
             os.remove(p)
-    print("снято: задача launchd и команды pantheon и heavy (метки в ~/.local/state/pantheon остались)")
+    print("снято: задачи launchd (тик и службы) и команды pantheon и heavy (метки в ~/.local/state/pantheon остались)")
     return 0
 
 
 _TASKS = None
+
+
+def qmd_mod():
+    """lib/qmd.py — общий поиск qmd (шаг 1.5)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_qmd", os.path.join(LIB, "qmd.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    m.set_core(sys.modules[__name__])
+    return m
 
 
 def tasks_mod():
@@ -2679,6 +2915,13 @@ def main(argv):
         return watch_cmd(cmd, rest)
     if cmd == "usage":
         return usage_report(rest)
+    if cmd == "qmd":
+        return qmd_mod().main(rest)
+    if cmd == "service-run":
+        if len(rest) != 1 or not JOB_NAME.fullmatch(rest[0]):
+            print("pantheon service-run: имя службы не по образцу", file=sys.stderr)
+            return 2
+        return service_run(rest[0])
     if cmd == "install":
         return install()
     if cmd == "uninstall":
