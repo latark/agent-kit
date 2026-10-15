@@ -302,7 +302,7 @@ def main():
     check("строгий guard в окне роли (SEC-29): --strict, onFailure block, только клон маркетплейса, у мастерской тоже",
           len(hk) == 1 and hk[0]["onFailure"] == "block" and hk[0]["command"] == f"python3 {gpath} --strict"
           and "projects" not in hk[0]["command"] and sw["hooks"] == sa["hooks"]
-          and sa["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob")
+          and sa["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill")
     hq = load("hq")
     hb = hq["sandbox"]
     check("окно штаба (SEC-26): пишет только ~/ai/pantheon без .git и alerts.md, сети нет, мимо песочницы — start/wake/alert",

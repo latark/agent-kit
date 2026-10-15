@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Правила из ~/.claude/CLAUDE.md, которые Claude Code проверяет сам, а не на память модели.
 
-Вызывается hook'ами PreToolUse (Bash, Write, Edit, MultiEdit, NotebookEdit, Read, Grep, Glob), PostToolUse (Bash:
+Вызывается hook'ами PreToolUse (Bash, Write, Edit, MultiEdit, NotebookEdit, Read, Grep, Glob, Agent, Task, Skill),
+PostToolUse (Bash:
 журнал запора слияния) и Stop плагина guard (hooks/hooks.json). Код запора слияния и protect-config — в merge_gate.py
 и protect_config.py рядом (ядро защит, Д3).
 Правила:
@@ -17,7 +18,12 @@
                  ~/ai/pantheon-view и журналы ваших слов owner-log — ни одной сессии Claude, без роли тоже (metis-0044);
   protect-config — защиты (хуки, роли, плагины, policy.toml, настройки, sync.sh, ~/.zshrc) правит только
                  metis-pantheon в своей сессии; остальные роли и любые субагенты — нет (SEC-14);
-  private      — личное (me/, ключи git-crypt, журнал штаба) читают и пишут только hq, chiron и mnemo-brain (SEC-11);
+  private      — личное (me/, ключи git-crypt, журнал штаба) читают и пишут только hq, chiron (только в окне штаба,
+                 PANTHEON_ROLE=hq, P0-2) и mnemo-brain (SEC-11); hq и chiron закрыты лишь ключи — отказ на явный путь
+                 в ключ или шаблон, который в него раскрывается, а не на обход папки выше (grep -r, metis-0084);
+  hq-telegram  — окну штаба (PANTHEON_ROLE=hq) Telegram закрыт: субагент tg-reader, навык telegram-read, скрипт
+                 tg-read и демон tg-readd в Bash (P0-1, metis-0060);
+  chiron       — субагента chiron зовут только в окне штаба и в вашей сессии без роли (P0-2, metis-0061);
   cdp-role     — демон браузера с вашими входами — только мастерская и prometheus (чтение), /close — никому (SEC-13);
   push         — git push: координатор, лиды и мастерская, не в main и master; gh pr merge — главная сессия
                  координатора или его лид (hephaestus-/apollo-<направление> субагентом, metis-0054) в папках своего
@@ -49,12 +55,13 @@
 
 Режимы запуска (аргумент):
   без аргумента — хук плагина; если управляемые настройки уже вызывают guard (--managed), он молчит, чтобы
-                  проверка не шла дважды;
+                  проверка не шла дважды, — кроме Agent, Task и Skill: их управляемые настройки guard не передают;
   --managed     — хук из управляемых настроек: то же, что плагин;
   --strict      — хук окна роли с onFailure: "block" (собирает `pantheon domains build`, SEC-29): любой сбой
                   самого скрипта — выход 2, действие остановлено.
 При сбое (SEC-10): правила-подсказки (dev-server, attribution, cdp, nextjs) пропускают действие; проверка прав
-(domain, pantheon-acl, protect-config, private, cdp-role, push, terminal) и tg-secret останавливают роль; сбой всего скрипта в вашей сессии
+(domain, pantheon-acl, protect-config, private, cdp-role, push, terminal, hq-telegram, chiron) и tg-secret
+останавливают роль; сбой всего скрипта в вашей сессии
 пропускает действие, в окне роли — останавливает. Каждый сбой — строка в
 ~/.local/state/pantheon/logs/guard-failures.log (время, режим, место, тип ошибки — без текста команды);
 строка статуса показывает число сбоев за сутки.
@@ -428,8 +435,10 @@ def check_nextjs(event):
 #                  тоже (guard 0.5.1). У сессии без роли запрет — по явным целям внутри этих двух папок: цель «не
 #                  разобрать» и запись в папку выше ей не запрещены; git в ~/ai/pantheon роли не трогают — коммитит
 #                  тик; команды пульта
-#                  (`pantheon archive|install|uninstall|commit|start|wake|roles`, `pantheon jobs pause|resume|disable|
-#                  enable|renew`) — только штаб и ваши сессии; `pantheon approve` (заранее разрешённое) — только ваши.
+#                  (`pantheon archive|install|uninstall|commit|start|wake|roles|stop|resume|pause|restart`,
+#                  `pantheon jobs pause|resume|disable|enable|renew`) — только штаб и ваши сессии (stop, resume, pause и
+#                  restart — с guard 0.5.5, metis-0047: роль не гасит и не будит чужие окна; `pantheon saved` и
+#                  `pantheon who` — всем); `pantheon approve` (заранее разрешённое) — только ваши.
 # Привилегии (кто mnemo-brain и metis-pantheon, у кого доступ к me/) — в ~/.claude/pantheon/policy.toml:
 # реестр правит штаб, и его правкой их не выдать.
 # Пути сравниваются без учёта регистра и формы Юникода: так их сравнивает файловая система macOS.
@@ -462,7 +471,9 @@ PANTHEON_ROLES = {"hq", "domain-coordinator", "workshop", "chiron", "argus", "ta
                   "iris", "dev-opus", "dev-sonnet", "dev-haiku"}
 PANTHEON_ROLE_PREFIXES = ("hephaestus-", "apollo-")
 UNRESOLVED = "\0неразобранная-цель"
-PANTHEON_PRIVILEGED = {"archive", "install", "uninstall", "commit", "start", "wake", "roles"}
+# stop|resume|pause|restart — окна сессий (metis-0047); `pantheon jobs pause|resume` — другая команда (PANTHEON_JOB_ACTIONS)
+PANTHEON_PRIVILEGED = {"archive", "install", "uninstall", "commit", "start", "wake", "roles",
+                       "stop", "resume", "pause", "restart"}
 PANTHEON_OWNER_ONLY = {"approve"}  # заранее разрешённое (DONE-11) — только вы, не штаб: согласие не от имени владельца
 PANTHEON_JOB_ACTIONS = {"pause", "resume", "disable", "enable", "renew"}
 IS_MAC = sys.platform == "darwin"
@@ -2294,15 +2305,28 @@ def private_conf(policy):
     return {k: p.get(k) or v for k, v in DEFAULT_PRIVATE.items()}
 
 
+def window_role():
+    """Роль окна, которую ставит `pantheon start` (run_settings, sandbox_build: env PANTHEON_ROLE). Она одна на всё
+    окно — главную сессию и её субагентов; в событиях фоновой сессии agent_type нет, а у субагента он свой. Ролям файл
+    окна не записать (protect-config, песочница), поэтому переменной можно верить как роли окна."""
+    return os.environ.get("PANTHEON_ROLE") or ""
+
+
 def private_ok(policy, role, sub, pdir):
     conf = private_conf(policy)
+    if role == "chiron":
+        # P0-2 (metis-0061): коуч видит личное только субагентом Зевса — в окне штаба. Зовут его и в других окнах
+        # (правило chiron ниже это закрывает), а без окна штаба он был бы дверью к личному для любой роли
+        return role in conf["roles"] and window_role() == "hq"
     if role in conf["roles"]:
         return True
     return not sub and any(privileged(policy, c, role, pdir) for c in conf["coordinators"])
 
 
-def _glob_reaches(p, priv):
-    """Путь с * ? [ ] может раскрыться в личное: ~/ai/knowledge/m?/x.md, ~/ai/*/me, ~/ai/kn*."""
+def _glob_reaches(p, priv, whole=False):
+    """Путь с * ? [ ] может раскрыться в личное: ~/ai/knowledge/m?/x.md, ~/ai/*/me, ~/ai/kn*. whole — только сам
+    личный путь или что-то внутри него (~/ai/pantheon/.git/git-cr*), а не папка выше (~/ai/pantheon/*): для роли,
+    которой закрыт лишь ключ git-crypt (metis-0084)."""
     if not re.search(r"[*?\[{]", p):
         return False
     import fnmatch
@@ -2310,10 +2334,34 @@ def _glob_reaches(p, priv):
     pat = [c for c in p.split("/") if c]
     for x in priv:
         parts = [c for c in x.split("/") if c]
+        if whole:
+            if _glob_covers(pat, parts):
+                return True
+            continue
         n = min(len(pat), len(parts))
         if "**" in pat[:n] or all(fnmatch.fnmatchcase(parts[i], pat[i]) for i in range(n)):
             return True
     return False
+
+
+def _glob_covers(pat, parts):
+    """Шаблон (по частям пути) раскрывается в parts или путь внутри него — как в оболочке: * ? [ ] и ** не берут
+    имя на точку (.git), если часть шаблона сама не начинается с точки. Шаблон короче parts — это папка выше."""
+    import fnmatch
+
+    def comp(name, pc):
+        return (pc.startswith(".") or not name.startswith(".")) and fnmatch.fnmatchcase(name, pc)
+
+    def m(i, j):
+        if j == len(parts):
+            return True
+        if i == len(pat):
+            return False
+        if pat[i] == "**":
+            return m(i + 1, j) or (not parts[j].startswith(".") and m(i, j + 1))
+        return comp(parts[j], pat[i]) and m(i + 1, j + 1)
+
+    return m(0, 0)
 
 
 def _pathlike(w):
@@ -2354,6 +2402,12 @@ def check_private(event, tool, tool_input):
     else:
         keys_only = False
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    # metis-0084: роли, которой личное открыто, закрыт только ключ git-crypt — отказ лишь по явному пути в ключ или
+    # шаблону, который в него раскрывается. Обход папки выше (grep -r по ~/ai/pantheon, Grep по ней) — не отказ: файл
+    # ключа штабу закрыт песочницей окна (denyRead), а Grep Claude Code в .git не заходит. Роли без доступа к личному —
+    # как было: обход предка личной папки (grep -r по ~/ai/knowledge, где me/) — отказ
+    ancestor = not keys_only
+    reaches = (lambda p: _glob_reaches(p, priv, whole=True)) if keys_only else (lambda p: _glob_reaches(p, priv))
     hits = []
     if tool == "Bash":
         cmd = tool_input.get("command") or ""
@@ -2367,25 +2421,32 @@ def check_private(event, tool, tool_input):
                     continue
                 for d in (cwds if not w.startswith(("/", "~", "$")) else [cwd]):
                     p = _expand(w, d)
-                    if _inside(p, priv) or (name in RECURSIVE and any(_inside(x, [p]) for x in priv)) \
-                            or _glob_reaches(p, priv):
+                    if _inside(p, priv) or (ancestor and name in RECURSIVE and any(_inside(x, [p]) for x in priv)) \
+                            or reaches(p):
                         hits.append(p)
         hits += [p for p in write_targets(event, tool, tool_input)[1] if p != UNRESOLVED and _inside(p, priv)]
     elif tool in EDIT_TOOLS:
         hits = [p for p in write_targets(event, tool, tool_input)[1] if p != UNRESOLVED and _inside(p, priv)]
     else:
         for p, whole in read_paths(event, tool, tool_input):
-            if _inside(p, priv) or (whole and any(_inside(x, [p]) for x in priv)):
+            if _inside(p, priv) or (ancestor and whole and any(_inside(x, [p]) for x in priv)):
                 hits.append(p)
+        pat = (tool_input.get("pattern") or "") if tool == "Glob" else ""
+        if keys_only and pat:
+            # шаблон Glob — от path («.git/git-crypt/**» из ~/ai/pantheon) или абсолютный: раскрывается ли в ключ
+            full = _expand(pat, _expand(tool_input.get("path") or cwd, cwd))
+            if reaches(full):
+                hits.append(full)
     if not hits:
         return None
     if keys_only:
         # личное этой роли открыто — задет только ключ: иначе текст «только hq, chiron…» сбивает с толку саму hq
         return (f"Правило private: ключ git-crypt ({hits[0].replace(HOME, '~')}) роли «{role}» закрыт — коммитит не "
-                "она. Поиск по всей папке задевает .git: сузь путь или добавь --exclude-dir=.git.")
+                "она. Поиск по папке выше (grep -r, Grep) можно: назови путь мимо .git/git-crypt.")
     return (f"Правило private: роль «{role or 'субагент'}»{' (субагент)' if sub else ''} не читает и не пишет личное "
-            f"({hits[0].replace(HOME, '~')}): me/, ключи git-crypt и журнал штаба — только hq, chiron и mnemo-brain. "
-            "Если путь задевает личную папку случайно (поиск по всей ~/ai/knowledge), сузь его: raw/, wiki/, inbox/.")
+            f"({hits[0].replace(HOME, '~')}): me/, ключи git-crypt и журнал штаба — только hq, chiron (в окне штаба) и "
+            "mnemo-brain. Если путь задевает личную папку случайно (поиск по всей ~/ai/knowledge), сузь его: raw/, "
+            "wiki/, inbox/.")
 
 
 try:
@@ -2756,6 +2817,83 @@ def check_corpus_role(event, tool, tool_input):
     return None
 
 
+# --- hq-telegram и chiron (P0-1 metis-0060, P0-2 metis-0061, guard 0.5.5) -------------------------------------------
+# Роль окна — переменная PANTHEON_ROLE (window_role): в событиях фоновой сессии agent_type нет, а у субагента он свой,
+# так что «это окно штаба» по событию не узнать. Касается главной сессии окна и всех её субагентов.
+#   hq-telegram — штабу Telegram закрыт: у Зевса личное и действия наружу, а переписка и каналы — чужой текст (путь
+#                 внедрения). Отказ: Agent/Task с subagent_type tg-reader, Skill telegram-read (и «плагин:telegram-read»),
+#                 Bash, где в тексте команды есть скрипт tg-read (регулярка TG_FILE) или демон tg-readd — по тексту, без
+#                 разбора: защита от ошибки. Коллекцию qmd legal и выгрузки legal-watch штабу закрывают хук qmd-query и
+#                 песочница окна (pantheon domains build).
+#   chiron      — коуч видит личное (private_ok), поэтому звать его можно только в окне штаба. Отказ на Agent/Task
+#                 с subagent_type chiron, если PANTHEON_ROLE задан и не hq, или если зовёт роль Пантеона или субагент вне
+#                 окна штаба. Ваша сессия без роли и без PANTHEON_ROLE позвать может, но личного chiron там не увидит.
+AGENT_TOOLS = {"Agent", "Task"}
+WINDOW_ONLY_TOOLS = AGENT_TOOLS | {"Skill"}  # их проверяет только хук плагина и окна: управляемые настройки не зовут
+TG_DAEMON = re.compile(r"(?<![\w-])tg-readd(?![\w-])")
+
+
+def _named(value, name):
+    """Имя субагента или навыка без префикса плагина и «/»: «plugin:tg-reader», «/telegram-read»."""
+    if not isinstance(value, str):
+        return False
+    return value.strip().lstrip("/").rsplit(":", 1)[-1].strip().casefold() == name
+
+
+def check_hq_telegram(event, tool, tool_input):
+    if window_role() != "hq":
+        return None
+    hit = None
+    if tool in AGENT_TOOLS and _named(tool_input.get("subagent_type"), "tg-reader"):
+        hit = "субагент tg-reader"
+    elif tool == "Skill" and _named(tool_input.get("skill"), "telegram-read"):
+        hit = "навык telegram-read"
+    elif tool == "Bash":
+        cmd = tool_input.get("command") or ""
+        if TG_FILE.search(cmd) or TG_DAEMON.search(cmd):
+            hit = "скрипт tg-read или демон tg-readd"
+    if hit:
+        return (f"Правило hq-telegram: штабу Telegram закрыт ({hit}; P0-1, metis-0060) — у Зевса личное и действия "
+                "наружу, а переписка и каналы — чужой текст. Вопросы по Telegram-каналам и праву — Фемиде "
+                "(themis-sources) через поручение; свою переписку владелец разбирает в своей сессии.")
+    return None
+
+
+def check_chiron_call(event, tool, tool_input):
+    if tool not in AGENT_TOOLS or not _named(tool_input.get("subagent_type"), "chiron"):
+        return None
+    win = window_role()
+    if win == "hq":
+        return None
+    ok, role, sub, _ = limited(event)
+    if win or ok:
+        return (f"Правило chiron: коуч с личным — только у Зевса, в окне штаба (P0-2, metis-0061); здесь окно "
+                f"«{win or role or 'субагент'}». Разговор о целях и личном — владельцу с Зевсом.")
+    return None
+
+
+def check_window(event, tool, tool_input):
+    for rule, check in (("hq-telegram", check_hq_telegram), ("chiron", check_chiron_call)):
+        if rule not in OFF:
+            reason = check(event, tool, tool_input)
+            if reason:
+                return reason
+    return None
+
+
+def strict_window(check, event, tool, tool_input):
+    """Как strict, но сбой — отказ и в окне роли, где события без agent_type (фоновая сессия: PANTHEON_ROLE задан)."""
+    try:
+        return check(event, tool, tool_input)
+    except Exception as e:
+        log_failure(check.__name__, e)
+        role, sub, _ = who(event)
+        if sub or is_pantheon_role(role) or window_role():
+            return (f"guard: сбой проверки прав ({type(e).__name__}) — действие остановлено. Повтори проще или "
+                    "сообщи координатору.")
+        return None
+
+
 def check_roles(event, tool, tool_input):
     for rule, check in (("private", check_private), ("cdp-role", check_cdp_role), ("push", check_push),
                         ("terminal", check_terminal), ("corpus-role", check_corpus_role)):
@@ -2811,11 +2949,16 @@ def main():
         if MODE == "plugin" and "push" not in OFF:
             soft(merge_gate.record, event)
         return
-    if MODE == "plugin" and managed_guard_active():
-        return  # ту же проверку уже делает хук из управляемых настроек
+    tool = event.get("tool_name") if name == "PreToolUse" else None
+    if MODE == "plugin" and tool not in WINDOW_ONLY_TOOLS and managed_guard_active():
+        # ту же проверку уже делает хук из управляемых настроек; Agent, Task и Skill они guard не передают
+        # (matcher Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch) — их проверяет плагин
+        return
     if name == "PreToolUse":
-        tool, tool_input = event.get("tool_name"), event.get("tool_input") or {}
+        tool_input = event.get("tool_input") or {}
         reason = None
+        if tool in WINDOW_ONLY_TOOLS:
+            reason = strict_window(check_window, event, tool, tool_input)
         if tool == "Bash":
             cmd = tool_input.get("command") or ""
             if "dev-server" not in OFF:
@@ -2824,6 +2967,8 @@ def main():
                 reason = soft(check_attribution, cmd)
             if not reason and "tg-secret" not in OFF:
                 reason = hard(check_tg_secret_bash, cmd)
+            if not reason:
+                reason = strict_window(check_window, event, tool, tool_input)
         elif tool in EDIT_TOOLS:
             if "cdp" not in OFF:
                 reason = soft(check_cdp, tool_input)

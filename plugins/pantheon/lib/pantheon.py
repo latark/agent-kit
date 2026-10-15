@@ -1382,9 +1382,12 @@ def _real_dir(p, roots, strict=False, create=False):
     return None
 
 
-# корпус и его копии: индексы qmd и самого корпуса хранят полный текст, переписка сессий Фемиды — выдержки
+# корпус и его копии: индексы qmd и самого корпуса хранят полный текст, переписка сессий Фемиды — выдержки.
+# legal-watch/cache и inbox (P0-1, metis-0060): там выгрузки Telegram-каналов (cache/telegram) и входящие сырые
+# материалы — чужой текст, как корпус; штабу его не читать (у Зевса личное и действия наружу). Вопросы по праву и
+# каналам — Фемиде (themis-sources) поручением; коллекцию qmd legal штабу закрывает хук qmd-query
 HQ_CLOSED_DIRS = ["~/projects/expert-corpus", "~/.cache/expert-corpus", "~/.cache/qmd",
-                  "~/.claude/projects/*expert-corpus*"]
+                  "~/.claude/projects/*expert-corpus*", "~/projects/legal-watch/cache", "~/projects/legal-watch/inbox"]
 
 
 # выводы фоновых задач и TMPDIR песочницы всех сессий Claude Code: /tmp/claude-<uid> (на macOS по умолчанию). Не из
@@ -1460,8 +1463,9 @@ def _deny_forms(paths):
 # или пропавший файл защиты останавливают действие, а не пропускают. Путь — только клон маркетплейса внутри
 # ~/.claude/plugins (туда ролям писать нельзя: protect-config), а не «рядом с этим плагином»: рабочая копия
 # ~/projects/agent-kit — папка metis-pantheon, её правят субагенты, и подменённый там guard стал бы защитой окон
-# (находка проверки безопасности 14.10). Ваших сессий без роли это не касается.
-GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob"
+# (находка проверки безопасности 14.10). Ваших сессий без роли это не касается. Agent|Task|Skill — правила
+# hq-telegram и chiron (P0-1, P0-2): штабу — ни tg-reader, ни telegram-read; коуч с личным — только у Зевса.
+GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill"
 MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks", "guard.py")
 
 
