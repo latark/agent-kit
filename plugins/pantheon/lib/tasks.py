@@ -808,10 +808,13 @@ def owner_answers_all(log_path):
 
 
 def _question_key(text):
-    """Вопрос для сверки файла задачи с журналом: в журнал он попадает из карточки (переносы, «\\» перед «- [»,
-    обрезка до 2000), поэтому сравниваем без пробельной разницы, без ведущего «\\» и по первым 1500 знакам (ревью argus)."""
-    t = re.sub(r"\s+", " ", str(text or "")).strip().lstrip("\\").strip()
-    return t[:1500]
+    """Вопрос для сверки файла задачи с журналом — целиком, с точностью до пробелов и переносов (карточка их склеивает);
+    «\\» снимается только там, где его ставит _one (перед «- [»). Обрезанная запись журнала (2000 знаков) не
+    сверяется: хвост вопроса мог измениться (проверка безопасности 15.10). Пустой ключ — «вопроса нет»."""
+    t = re.sub(r"\s+", " ", str(text or "")).strip()
+    if re.match(r"\\[-*+]\s*\[", t):
+        t = t[1:]
+    return t
 
 
 def logged_for(head, recs):
@@ -824,7 +827,9 @@ def logged_for(head, recs):
     for rec in recs or []:
         if opts and rec["answer"] not in opts:
             continue
-        if q and _question_key(rec.get("question")) != q:  # запись без вопроса (до 0.9.26) — не на нынешний
+        rq = rec.get("question") or ""
+        # запись без вопроса (до 0.9.26) или обрезанная — на нынешний вопрос не засчитывается
+        if q and (len(rq) >= 2000 or _question_key(rq) != q):
             continue
         out[rec["kind"]] = rec["answer"]
     return out

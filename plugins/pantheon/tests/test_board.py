@@ -270,6 +270,16 @@ def main():
           T.logged_for({"question": "Удалить всё?", "options": ["Да", "Нет"]}, [{"kind": "answer", "answer": "Да"}]) == {}
           and T.logged_for({"question": "Удалить\nвсё?", "options": ["Да"]},
                            [{"kind": "answer", "answer": "Да", "question": "Удалить всё?"}]) == {"answer": "Да"})
+    long_q = "Удалить черновики? " + "подробности " * 200
+    check("сверка вопроса целиком: дописанный хвост длинного вопроса и обрезанная запись — не засчитаны",
+          T.logged_for({"question": long_q + "и базу клиентов", "options": ["Да"]},
+                       [{"kind": "answer", "answer": "Да", "question": long_q.strip()}]) == {}
+          and T.logged_for({"question": long_q, "options": ["Да"]},
+                           [{"kind": "answer", "answer": "Да", "question": long_q.strip()[:2000]}]) == {}
+          and T.logged_for({"question": "- [x] Да?", "options": ["Да"]},
+                           [{"kind": "answer", "answer": "Да", "question": "\\- [x] Да?"}]) == {"answer": "Да"}
+          and T.logged_for({"question": "\\ Удалить?", "options": ["Да"]},
+                           [{"kind": "answer", "answer": "Да", "question": "Удалить?"}]) == {})
     # рискованный вопрос: галочка — только выбор, подтверждение словом
     run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Отправить коммиты", "--status", "waiting",
         "--waiting-on", "human", "--next", "ваш ответ", "--question", "Отправить?", "--option", "Да", "--option", "Нет",
