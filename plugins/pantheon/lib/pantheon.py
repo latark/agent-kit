@@ -240,7 +240,7 @@ def alert_once(key, value, text, who="pantheon", note=None, group=None, policy=N
     if note and critical:
         notify_critical(note, group=group or key, policy=policy)
     elif note:
-        notify_soon(group or key, note, policy=policy)
+        notify_soon(key, note, group=group or key, policy=policy)
     os.makedirs(path("once"), exist_ok=True)
     open(mark, "w").write(str(value))
 
@@ -2482,15 +2482,17 @@ def notify_critical(text, title="Пантеон · критично", group="cri
         time.sleep(0.1)
 
 
-def notify_soon(key, text, policy=None):
-    """Сбой класса «скоро»: macOS только если вас нет у Mac, не ночью и в бюджете, одна на ключ за час; иначе — в
-    утреннюю сводку. policy — уже взятая под lock("notify") (flock в том же процессе второй раз не взять)."""
+def notify_soon(key, text, group=None, policy=None):
+    """Сбой класса «скоро»: macOS только если вас нет у Mac, не ночью и в бюджете, одна на ключ события за час; иначе —
+    в утреннюю сводку. key — событие (по нему повтор), group — вид в Центре уведомлений (заменяет прежнее того же
+    вида). Событие, которое держится, вызывать каждый проход: дойдёт, когда вы уйдёте от Mac. policy — уже взятая под
+    lock("notify") (flock в том же процессе второй раз не взять)."""
     if policy is not None:
-        policy.fault(key, text)
+        policy.fault(key, text, group=group)
         return
     with lock("notify"):
         pol = notify_policy()
-        pol.fault(key, text)
+        pol.fault(key, text, group=group)
         pol.save()
 
 

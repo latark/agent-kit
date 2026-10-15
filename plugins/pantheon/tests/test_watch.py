@@ -183,18 +183,65 @@ def _give_up(e):
     return t
 
 
+def test_session_waits_reaches_you():
+    """Ревью argus: сессия «ждёт вас», пока вы у Mac, — в очередь; ушли, а она всё ждёт — одна macOS, повтор не
+    раньше часа; «упала» той же сессии — своё событие (свой ключ), а не «уже сообщали»."""
+    e = Env()
+    e.direction("coord-x")
+    e.notify_mode(0)
+    e.agents([bg("coord-x", "blocked", "sess0001-aaaa", pid=31)])
+    e.run("watch", t=T0)                                         # «здесь»
+    a = e.sent()
+    e.notify_mode(1200)                                          # ушли
+    e.run("watch", t=T0 + 300)
+    b = e.sent()
+    e.run("watch", t=T0 + 1800)
+    c = e.sent()
+    e.run("watch", t=T0 + 4200)
+    d = e.sent()
+    check("ждёт вас" not in a and "watch-blocked-sess0001" in e.queued(), f"«здесь»: без macOS и в очереди: {a!r}")
+    check(b.count("coord-x ждёт вас") == 1, f"ушли — одна macOS: {b!r}")
+    check(c.count("coord-x ждёт вас") == 1, f"через 25 мин — второй нет: {c!r}")
+    check(d.count("coord-x ждёт вас") == 2 and "|session-coord-x" in d, f"через 65 мин — повтор: {d!r}")
+    check(e.alerts().count("coord-x (sess0001) ждёт вас") == 1, "тревога в alerts.md — не разовая")
+    # «ждёт», через 10 мин «упала» той же сессии — при «нет» отдельная macOS
+    e = Env()
+    e.direction("coord-x")
+    e.notify_mode(1200)
+    e.agents([bg("coord-x", "blocked", "sess0002-bbbb", pid=32)])
+    e.run("watch", t=T0)
+    e.agents([bg("coord-x", "failed", "sess0002-bbbb", pid=32)])
+    e.run("watch", t=T0 + 600)
+    s = e.sent()
+    check("coord-x ждёт вас" in s and "coord-x упала" in s, f"«упала» после «ждёт» при «нет» — своя macOS: {s!r}")
+    # то же при «здесь» — обе строки в очереди сводки
+    e = Env()
+    e.direction("coord-x")
+    e.notify_mode(0)
+    e.agents([bg("coord-x", "blocked", "sess0003-cccc", pid=33)])
+    e.run("watch", t=T0)
+    e.agents([bg("coord-x", "failed", "sess0003-cccc", pid=33)])
+    e.run("watch", t=T0 + 600)
+    q = e.queued()
+    check(not e.sent() and "watch-blocked-sess0003" in q and "watch-failed-sess0003" in q,
+          f"«упала» после «ждёт» при «здесь» — строка в очереди: {q}")
+
+
 def test_watch_notify_through_policy():
     """Уведомления дежурного — через политику (metis-0023): сбой «скоро» — macOS только при «нет» и не ночью,
     иначе в очередь сводки; подделка журнала ваших слов — критичное: сразу, и ночью, и когда вы у Mac."""
     e = Env()
     e.notify_mode(0)                                           # вы у Mac, день
-    _give_up(e)
-    check("Самозапуск" not in e.sent() and "autostart-hermes-x" in e.queued(),
+    t = _give_up(e)
+    check("Самозапуск" not in e.sent() and "autostart-gaveup-hermes-x" in e.queued(),
           f"самозапуск встал при «здесь»: уведомление или нет в очереди: {e.sent()!r} {e.queued()}")
+    e.notify_mode(1200)                                        # ушли, а самозапуск так и стоит — macOS дойдёт
+    e.run("watch", t=t + 60)
+    check(e.sent().count("Самозапуск hermes-x встал") == 1, f"самозапуск стоит, вы ушли — без macOS: {e.sent()!r}")
     e = Env()
     e.notify_mode(1200, ("12:00", "11:59"))                    # нет у Mac, ночь (тихие часы весь день)
     _give_up(e)
-    check("Самозапуск" not in e.sent() and "autostart-hermes-x" in e.queued(),
+    check("Самозапуск" not in e.sent() and "autostart-gaveup-hermes-x" in e.queued(),
           f"самозапуск встал ночью: уведомление или нет в очереди: {e.sent()!r}")
     e = Env()
     e.notify_mode(1200)                                        # нет у Mac, день

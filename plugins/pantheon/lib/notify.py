@@ -400,17 +400,25 @@ class Policy:
             c["last"] = t
 
     # --- сбои и критичное ---
-    def fault(self, key, text, target=None):
-        """Сбой класса «скоро» (задача упала, аренда, тревога с note): macOS только при «нет», не ночью, в бюджете,
-        одна на ключ за repeat_min; иначе — в очередь дайджеста. → "sent" | "queued" | "skip"."""
-        last = self.st["faults"].get(key)
+    def fault(self, key, text, target=None, group=None):
+        """Сбой класса «скоро» (задача упала, аренда, сессия ждёт вас, тревога с note): macOS только при «нет», не
+        ночью, в бюджете, одна на ключ события за repeat_min; сейчас нельзя — в очередь дайджеста. Повтор считается
+        по key (событие), group только заменяет уведомление в Центре уведомлений (по умолчанию key). faults[key] —
+        время последней ОТПРАВКИ: событие, которое держится (вызывают каждый проход), дойдёт macOS, когда вы уйдёте.
+        → "sent" | "queued" | "skip"."""
+        rec = self.st["faults"].get(key)
+        last, last_text = (rec.get("t"), rec.get("text")) if isinstance(rec, dict) else (rec, None)
+        flat = " ".join(str(text).split())
         if isinstance(last, (int, float)) and 0 <= self.t - last < self.cfg["repeat_min"] * 60:
-            return "skip"
-        self.st["faults"][key] = self.t
-        if self.quiet or self.presence != "away" or not self.budget_left():
-            self._enqueue("fault", key, text)
+            if flat == last_text:
+                return "skip"
+            self._enqueue("fault", key, text)  # недавно отправляли, а текст новый — без macOS, но в сводку
             return "queued"
-        self._send(text, "fault", [key], target, key)
+        if self.quiet or self.presence != "away" or not self.budget_left():
+            self._enqueue("fault", key, text)  # дубли по key+text отсекает _enqueue
+            return "queued"
+        self._send(text, "fault", [key], target, group or key)
+        self.st["faults"][key] = {"t": self.t, "text": flat}
         return "sent"
 
     def critical(self, text, title="Пантеон · критично", send=True, group="critical"):
@@ -426,8 +434,9 @@ class Policy:
     def save(self):
         t = self.t
         self.st["queue"] = [x for x in self.st["queue"] if isinstance(x, dict) and t - x.get("t", 0) < 2 * DAY]
+        stamp = lambda v: v.get("t") if isinstance(v, dict) else v
         self.st["faults"] = {k: v for k, v in self.st["faults"].items()
-                             if isinstance(v, (int, float)) and t - v < DAY}
+                             if isinstance(stamp(v), (int, float)) and t - stamp(v) < DAY}
         os.makedirs(os.path.dirname(self.state_path) or ".", exist_ok=True)
         tmp = f"{self.state_path}.{os.getpid()}"
         with open(tmp, "w", encoding="utf-8") as fh:
