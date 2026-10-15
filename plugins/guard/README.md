@@ -47,8 +47,10 @@ Grep штаба по `.git` держит только песочница, guard 
 **Любой сбой — выход 2 с причиной в stderr, во всех трёх режимах и в вашей сессии тоже** (metis-0094, guard 0.5.5).
 Сбой — событие не JSON или не объект, исключение в проверке прав (domain, pantheon-acl, protect-config, private,
 cdp-role, push, terminal, hq-telegram, chiron) или tg-secret, сбой всего скрипта, свой срок 8 с (таймаут хука —
-10 с, а таймаут Claude Code вызов пропускает). Код 2 Claude Code понимает как блок на любой версии; `onFailure:
-block` в hooks.json появится после обновления Claude Code до 2.1.295+. Как это сделано — обёртка `run_hook` в
+10 с, а таймаут Claude Code вызов пропускает). Код 2 Claude Code понимает как блок на любой версии. Второй слой
+(guard 0.5.6, metis-0094) — `"onFailure": "block"` у обработчиков PreToolUse guard и pantheon в hooks.json (Claude
+Code 2.1.295+): таймаут, выход не 0 и не 2 или незапуск хука тоже блокируют вызов (проверено вживую на 2.1.301). У
+maint-pre pantheon это значит: сбой ctx.py при maintenance.json закрывает инструменты до снятия обслуживания. Как это сделано — обёртка `run_hook` в
 `guard.py`, образец — `plugins/pantheon/hooks/agents.py`.
 
 | Событие | Код 2 в Claude Code | Сбой guard |
