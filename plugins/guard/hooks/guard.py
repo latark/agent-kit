@@ -2252,6 +2252,9 @@ def check_protect_config(event, tool, tool_input):
 #            (самый длинный корень domains.json, для совместимости [merge]) и продукт ([merge_client]) — можно; -R —
 #            только из [merge_repos], у Метиды — с тем же согласием. Любой сбой (политика, реестр, git, журналы) —
 #            отказ; координатору с личным в папке — тоже. Тесты, argus, talos и откат guard не видит — их делает роль.
+#            Новая схема для своих папок включается строкой [merge_client] в policy.toml; без неё — как в 0.4.7
+#            (только направления из [merge]). Отметки — формат v1; файл другого формата в папке и запись в старом
+#            logs/merge-consent-used.jsonl — отказ.
 #   terminal (SEC-30) — ввод в терминал: osascript, tmux send-keys, screen -X stuff, cliclick. Такой ввод Claude Code
 #            помечает как ваш (origin.kind: human), и журнал ваших слов принял бы его за ваши слова.
 
@@ -2581,6 +2584,8 @@ MERGE_PR_REF = re.compile(r"github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)|(?<![\w./
 # «ДА.»; «Дальше», «Отложить», «Отмена», «No», «Нет — …», пустой — нет (решение Метиды «А», 15.10)
 MERGE_YES = re.compile(r"да(?!\w)", re.I)  # после «Да» — не буква и не цифра: «Да1» — не согласие
 MERGE_MARK_DIR = os.path.join(STATE_DIR, "merge-consent")  # отметки использованных согласий: файл на каждое
+MERGE_MARK_V = 1  # версия формата отметки: входит в ключ; файл другого формата в папке — отказ
+MERGE_OLD_LOG = os.path.join(STATE_DIR, "logs", "merge-consent-used.jsonl")  # журнал ee8f356: только читается
 MERGE_AMBIGUOUS = "\0два направления"
 # согласия, которые использует этот вызов: в журнал они попадают, только если весь вызов разрешён (main)
 PENDING_CONSENT = []
@@ -2744,7 +2749,7 @@ def owner_consent(qid, number, repos):
 
 def _mark_path(rec):
     """Отметка использованного согласия: файл с именем sha256(id, entry, repo, pr) в STATE_DIR/merge-consent/."""
-    key = json.dumps([rec["id"], rec["entry"], rec["repo"], rec["pr"]], ensure_ascii=False)
+    key = json.dumps([rec["v"], rec["id"], rec["entry"], rec["repo"], rec["pr"]], ensure_ascii=False)
     return os.path.join(MERGE_MARK_DIR, hashlib.sha256(key.encode("utf-8")).hexdigest())
 
 
@@ -2768,7 +2773,7 @@ def _mark_read(path, rec):
             old = json.load(fh)
     except (OSError, ValueError):
         return None
-    if not isinstance(old, dict) or any(old.get(k) != rec[k] for k in ("id", "entry", "repo", "pr")):
+    if not isinstance(old, dict) or any(old.get(k) != rec[k] for k in ("v", "id", "entry", "repo", "pr")):
         return None
     if rec["tool_use_id"] and old.get("session") == rec["session"] and old.get("tool_use_id") == rec["tool_use_id"]:
         return "same"
@@ -2784,6 +2789,63 @@ def _mark_state(rec):
     if not d or not os.path.lexists(path):
         return False
     return _mark_read(path, rec)
+
+
+def _marks_problem():
+    """Перед проверкой согласия: каждый файл папки отметок — отметка v1 под своим именем, кроме своих временных
+    (*.tmp свежее минуты). Иначе (старый формат, другая версия, мусор, симлинк) — текст отказа: отметка неизвестного
+    формата могла бы не узнать использованное «да». Старый журнал ee8f356 (merge-consent-used.jsonl), если есть, —
+    только читается: не читается или не разбирается — отказ."""
+    d = _mark_dir_state()
+    if d is None:
+        return "папка отметок ~/.local/state/pantheon/merge-consent — симлинк или не папка"
+    names = os.listdir(MERGE_MARK_DIR) if d else []
+    now = time.time()
+    for n in names:
+        path = os.path.join(MERGE_MARK_DIR, n)
+        if n.endswith(".tmp"):
+            try:
+                st = os.lstat(path)
+            except OSError:
+                continue  # временный файл другого вызова уже удалён
+            if stat.S_ISREG(st.st_mode) and now - st.st_mtime < 60:
+                continue
+            return f"в папке отметок старый временный файл {n}"
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, encoding="utf-8") as fh:
+                rec = json.load(fh)
+        except (OSError, ValueError):
+            rec = None
+        ok = isinstance(rec, dict) and rec.get("v") == MERGE_MARK_V and all(
+            isinstance(rec.get(k), str) for k in ("id", "entry", "repo")) and isinstance(rec.get("pr"), int)
+        if not ok or _mark_path(rec) != path:
+            return f"неизвестный формат отметки {n}"
+    return None
+
+
+def _old_log_used(rec):
+    """Старый журнал ee8f356: True — это «да» там уже записано, False — нет или журнала нет, None — сбой."""
+    if not os.path.lexists(MERGE_OLD_LOG):
+        return False
+    try:
+        fd = os.open(MERGE_OLD_LOG, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except (OSError, ValueError):
+        return None
+    for ln in lines:
+        if not ln.strip():
+            continue
+        try:
+            old = json.loads(ln)
+        except ValueError:
+            return None
+        if not isinstance(old, dict):
+            return None
+        if all(old.get(k) == rec[k] for k in ("id", "entry", "repo", "pr")):
+            return True
+    return False
 
 
 def _mark_create(rec):
@@ -2802,7 +2864,7 @@ def _mark_create(rec):
         if not _mark_dir_state():
             return broken.format("поставить: папка — симлинк или не папка")
         final = _mark_path(rec)
-        tmp = os.path.join(MERGE_MARK_DIR, f".tmp-{os.getpid()}-{os.urandom(8).hex()}")
+        tmp = os.path.join(MERGE_MARK_DIR, f".{os.getpid()}-{os.urandom(8).hex()}.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
             try:
@@ -2958,11 +3020,25 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
         cmd_repos = sorted(set(cmd_repos) | set(resolved))
     # защиты — по пути и по репозиторию, раньше реестра: domains.json может по ошибке отдать agent-kit другому
     protect = _inside(cwd, metis_roots) or any(_repo_tail(r) in protect_repos for r in cmd_repos)
+    repo_name = name  # чей [merge_repos]: направление по domains.json (в режиме 0.4.7 — имя из [merge])
     if protect:
         if not metis_ok:
             return ("это защиты (папка или репозиторий metis-pantheon), а сессия запущена не Метидой. " + MERGE_PROTECT +
                     " Нужна правка защит — опиши её Метиде файлом в ~/ai/pantheon/directions/metis-pantheon/inbox/.")
         advice = MERGE_PROTECT
+    elif not isinstance(policy.get("merge_client"), dict):
+        # новая схема включается строкой [merge_client] в policy.toml (шаг Метиды); до неё — как в 0.4.7: сливают
+        # только направления из [merge], в его папках, -R — из [merge_repos] по имени из [merge]
+        merge = policy.get("merge")
+        found = next(((n, _norm(v)) for n, v in (merge.items() if isinstance(merge, dict) else ())
+                      if _str_list(v) and _inside(pdir, _norm(v))), None)
+        if not found:
+            return ("слияние делает владелец: новая схема не включена ([merge_client] в policy.toml нет), а "
+                    "направления нет в [merge]. " + MERGE_INTERNAL)
+        repo_name, roots = found
+        if not _inside(cwd, roots):
+            return "только из папки своего репозитория из [merge]. " + MERGE_INTERNAL
+        advice = MERGE_INTERNAL
     else:
         def listed(table):
             t = policy.get(table)
@@ -2981,7 +3057,7 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
         # -R — только репозиторий из [merge_repos] направления: сессия Фемиды стоит в legal-watch, а сливает и
         # PR expert-corpus (themis-0015, ответ владельца 15.10 «А и Б»). Сверка по точному owner/repo на github.com
         allowed = policy.get("merge_repos")
-        allowed = allowed.get(name) if isinstance(allowed, dict) and name else None
+        allowed = allowed.get(repo_name) if isinstance(allowed, dict) and repo_name else None
         allowed = {r.strip().lower() for r in allowed if isinstance(r, str)} if isinstance(allowed, list) else set()
         if not all(_merge_repo_ok(r, allowed) for r in repos):
             return f"без чужого репозитория (-R): только из [merge_repos] своего направления. {advice}"
@@ -3000,13 +3076,24 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
         if not subjects or None in ids or len(ids) != 1:
             return f"{what} — только с --subject \"[metis-NNNN] …\" (id вопроса владельцу). {MERGE_PROTECT}"
         qid = ids.pop()
+        bad = _marks_problem()
+        if bad:
+            return f"{bad} — одноразовость «да» не проверить. {MERGE_OWNER}"
         tails = sorted({_repo_tail(r) for r in cmd_repos})
         entry, repo, why = owner_consent(qid, numbers[0], set(tails))
         if why:
             return f"на {what} {why}. {MERGE_PROTECT}"
         event = event or {}
-        rec = {"id": qid, "entry": entry, "repo": repo, "pr": numbers[0], "used": time.strftime("%Y-%m-%d %H:%M:%S"),
-               "session": event.get("session_id") or "", "tool_use_id": event.get("tool_use_id") or ""}
+        rec = {"v": MERGE_MARK_V, "id": qid, "entry": entry, "repo": repo, "pr": numbers[0],
+               "used": time.strftime("%Y-%m-%d %H:%M:%S"), "session": event.get("session_id") or "",
+               "tool_use_id": event.get("tool_use_id") or ""}
+        old = _old_log_used(rec)
+        if old is None:
+            return ("старый журнал ~/.local/state/pantheon/logs/merge-consent-used.jsonl не читается или не "
+                    "разбирается — одноразовость «да» не проверить. " + MERGE_OWNER)
+        if old:
+            return (f"это «да» владельца на [{qid}] уже использовано (старый журнал): одно «да» — одно слияние, "
+                    f"нужен новый вопрос окном. {MERGE_PROTECT}")
         used = _mark_state(rec)
         if used is None:
             return ("отметка использованного согласия в ~/.local/state/pantheon/merge-consent/ не читается (симлинк "

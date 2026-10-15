@@ -7,6 +7,7 @@
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -289,6 +290,7 @@ def merge_security_checks(home, MERGE_OK, cases):
         return h
 
     deny = lambda out: '"deny"' in out
+    bad_mark = lambda out: "не читается" in out or "неизвестный формат отметки" in out
     # --- одно «да» — одно слияние ---
     reset_used(home)
     cmd = 'gh pr merge 5 -t "[metis-0038] guard"'
@@ -299,11 +301,13 @@ def merge_security_checks(home, MERGE_OK, cases):
     if allow_ok:
         names = marks(home)
         rec = json.loads(_read(os.path.join(mark_dir(home), names[0]))) if names else {}
-        key = json.dumps([rec.get("id"), rec.get("entry"), rec.get("repo"), rec.get("pr")], ensure_ascii=False)
-        check("одноразовость: одна отметка, имя — sha256(id, entry, repo, pr), внутри id, PR, репозиторий, вызов; "
+        key = json.dumps([rec.get("v"), rec.get("id"), rec.get("entry"), rec.get("repo"), rec.get("pr")],
+                         ensure_ascii=False)
+        check("одноразовость: одна отметка v1, имя — sha256(v, id, entry, repo, pr), внутри id, PR, репозиторий, вызов; "
               "папка 0700, файл 0600",
               len(names) == 1 and names[0] == hashlib.sha256(key.encode("utf-8")).hexdigest()
-              and rec.get("id") == "metis-0038" and rec.get("pr") == 5 and rec.get("repo") == "latark/agent-kit"
+              and rec.get("v") == 1 and rec.get("id") == "metis-0038" and rec.get("pr") == 5
+              and rec.get("repo") == "latark/agent-kit"
               and rec.get("tool_use_id") == "toolu_a" and bool(rec.get("entry"))
               and stat.S_IMODE(os.stat(mark_dir(home)).st_mode) == 0o700
               and stat.S_IMODE(os.stat(os.path.join(mark_dir(home), names[0])).st_mode) == 0o600)
@@ -351,15 +355,15 @@ def merge_security_checks(home, MERGE_OK, cases):
         os.chmod(mp, 0)
         out = M(home, cmd, tuid="toolu_m", raw=True)
         os.chmod(mp, 0o600)
-        check("сбой: отметка не читается (chmod 000), даже тот же вызов — отказ", deny(out) and "не читается" in out)
+        check("сбой: отметка не читается (chmod 000), даже тот же вызов — отказ", deny(out) and bad_mark(out))
         with open(mp, "w") as fh:
             fh.write("не json")
         out = M(home, cmd, tuid="toolu_m", raw=True)
-        check("сбой: отметка не разбирается — отказ", deny(out) and "не читается" in out)
+        check("сбой: отметка не разбирается — отказ", deny(out) and bad_mark(out))
         with open(mp, "w") as fh:
             fh.write(json.dumps(dict(json.loads(content), id="metis-9999")))
         out = M(home, cmd, tuid="toolu_m", raw=True)
-        check("сбой: отметка с чужим содержимым под этим именем — отказ", deny(out) and "не читается" in out)
+        check("сбой: отметка с чужим содержимым под этим именем — отказ", deny(out) and bad_mark(out))
         os.remove(mp)
         other = os.path.join(home, "mark-target.json")
         with open(other, "w") as fh:
@@ -367,7 +371,7 @@ def merge_security_checks(home, MERGE_OK, cases):
         os.symlink(other, mp)
         out = M(home, cmd, tuid="toolu_m", raw=True)
         check("сбой: окончательная отметка — симлинк (на верную отметку того же вызова) — отказ",
-              deny(out) and "не читается" in out)
+              deny(out) and bad_mark(out))
     else:
         check(f"отметки: без tomllib слияние закрыто, отметка не ставится: {first}, {names}",
               first == "deny" and not names and not allow_ok)
@@ -474,6 +478,85 @@ def merge_security_checks(home, MERGE_OK, cases):
     got = M(h, "gh pr merge 1", pdir=ec)
     check(f"сбой git: у папки защит сломан .git — отказ всем, без .git — как было: {got}",
           deny(out) and ("не читается git remote" in out or not allow_ok) and got == MERGE_OK)
+    # --- включение новой схемы строкой [merge_client]: без неё — как в 0.4.7 (решение лида, 15.10) ---
+    no_client = lambda t: t.replace('[merge_client]\nathena-broker = ["~/projects/brokerAssistantApp", '
+                                    '"~/projects/broker-landing"]\n', "")
+    h = variant(policy_fn=no_client)
+    alex, br, lw = "projects/alexbroker", "projects/brokerAssistantApp", "projects/legal-watch"
+    got = (M(h, "gh pr merge 1", pdir=ec), M(h, "gh pr merge 2 -R latark/expert-corpus", pdir=lw),
+           M(h, "gh pr merge 1", pdir=alex), M(h, "gh pr merge 1", pdir=br),
+           M(h, 'gh pr merge 5 -t "[metis-0038] x"'), M(h, "gh pr merge 5"),
+           M(h, "gh pr merge 3", cwd="projects/other/tg-read-dev"), M(h, "gh pr merge 1", pdir=ec, cwd=alex))
+    check(f"без [merge_client] (как у владельца сейчас): Фемида и её -R — можно, Гермес и Афина — нельзя, Метида в "
+          f"agent-kit по согласию — можно, без согласия — нельзя, её внутренняя папка (нет в [merge]) — нельзя, "
+          f"Фемида в чужой папке (cwd без cd) — нельзя: {got}",
+          got == (MERGE_OK, MERGE_OK, "deny", "deny", MERGE_OK, "deny", "deny", "deny"))
+    h = variant(policy_fn=lambda t: no_client(t) + "[merge_client]\n")
+    got = (M(h, "gh pr merge 1", pdir=alex), M(h, "gh pr merge 1", pdir=br), M(h, "gh pr merge 1", pdir=ec))
+    check(f"пустая [merge_client] — новая схема: Гермес, Афина и Фемида в своих папках — можно: {got}",
+          got == (MERGE_OK, MERGE_OK, MERGE_OK))
+    h = variant(policy_fn=lambda t: 'merge_client = "x"\n' + no_client(t))  # ключ верхнего уровня — до таблиц
+    got = M(h, "gh pr merge 1", pdir=alex)
+    check(f"[merge_client] не таблицей — как без неё (0.4.7): Гермес — нельзя: {got}", got == "deny")
+    # --- миграция отметок: формат v1, мусор в папке, старый журнал ee8f356, нет папки состояния ---
+    cmd = 'gh pr merge 5 -t "[metis-0038] x"'
+    reset_used(home)
+    M(home, cmd, tuid="toolu_v")
+    names = marks(home)
+    rec = json.loads(_read(os.path.join(mark_dir(home), names[0]))) if names else None
+    reset_used(home)
+    if allow_ok and rec:
+        def with_file(name, content, mtime=None):
+            reset_used(home)
+            fp = os.path.join(mark_dir(home), name)
+            with open(fp, "w") as fh:
+                fh.write(content)
+            if mtime:
+                os.utime(fp, (mtime, mtime))
+            out = M(home, cmd, raw=True)
+            reset_used(home)
+            return out
+        nov = {k: rec[k] for k in ("id", "entry", "repo", "pr")}
+        old_key = json.dumps([nov["id"], nov["entry"], nov["repo"], nov["pr"]], ensure_ascii=False)
+        old_name = hashlib.sha256(old_key.encode("utf-8")).hexdigest()
+        v2 = dict(rec, v=2)
+        v2_name = hashlib.sha256(json.dumps([2, rec["id"], rec["entry"], rec["repo"], rec["pr"]],
+                                            ensure_ascii=False).encode("utf-8")).hexdigest()
+        for label, args, want_text in (
+                ("отметка без v (формат 40e5900)", (old_name, json.dumps(nov)), "неизвестный формат"),
+                ("отметка v=2", (v2_name, json.dumps(v2)), "неизвестный формат"),
+                ("мусорный файл в папке", ("notes.txt", "x"), "неизвестный формат"),
+                ("старый временный файл (*.tmp старше минуты)", ("x.tmp", "", time.time() - 3600), "временный")):
+            out = with_file(*args)
+            check(f"миграция: {label} — отказ", deny(out) and want_text in out)
+        out = with_file("y.tmp", "")
+        check("миграция: свежий временный файл другого вызова — не помеха", not deny(out))
+        logs = os.path.join(home, ".local/state/pantheon/logs")
+        os.makedirs(logs, exist_ok=True)
+        old_log = os.path.join(logs, "merge-consent-used.jsonl")
+        with open(old_log, "w") as fh:
+            fh.write(json.dumps(dict(nov, used="x", session="s", tool_use_id="t"), ensure_ascii=False) + "\n")
+        out = M(home, cmd, raw=True)
+        check("миграция: старый merge-consent-used.jsonl с этим «да» — уже использовано",
+              deny(out) and "старый журнал" in out)
+        with open(old_log, "w") as fh:
+            fh.write(json.dumps(dict(nov, pr=99), ensure_ascii=False) + "\n")
+        got = M(home, cmd)
+        check(f"миграция: старый журнал с другим PR — не помеха: {got}", got == "allow")
+        reset_used(home)
+        with open(old_log, "w") as fh:
+            fh.write("не json\n")
+        out = M(home, cmd, raw=True)
+        check("миграция: старый журнал битый — отказ", deny(out) and "старый журнал" in out)
+        os.remove(old_log)
+        reset_used(home)
+    else:
+        check(f"миграция: без tomllib слияние закрыто, отметка не ставится: {names}", not names and not allow_ok)
+    h = variant()
+    shutil.rmtree(os.path.join(h, ".local/state/pantheon"))
+    out = M(h, cmd, raw=True)
+    check("миграция: нет папки состояния — отказ по правилу, без сбоя скрипта",
+          deny(out) and "сбой проверки" not in out)
     return failed
 
 
