@@ -92,6 +92,9 @@ def main():
     write(os.path.join(repo, "CLAUDE.md"), "@AGENTS.md\n\nТолько для Claude.\n")
     check("CLAUDE.md, который начинается с @AGENTS.md, — готово", run("iris-demo").returncode == 0)
 
+    write(os.path.join(repo, "AGENTS.md"), "x" * 40000)
+    check("AGENTS.md больше 32 КиБ — не готово (Codex обрежет)", "НЕТ     AGENTS.md до 32 КиБ" in run("iris-demo").stdout)
+    write(os.path.join(repo, "AGENTS.md"), "# demo\n")
     write(settings, json.dumps({"autoMode": {"environment": ["**Source control**: GitHub `github.com/other/*`"]}}))
     check("владелец remote не описан в autoMode.environment — не готово",
           "НЕТ     владелец remote" in run("iris-demo").stdout)

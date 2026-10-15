@@ -1742,6 +1742,9 @@ def direction_check(name):
     cm = open(claude_md, encoding="utf-8").read(200) if os.path.isfile(claude_md) else None
     add(os.path.isfile(agents) and (cm is None or cm.lstrip().startswith("@AGENTS.md")),
         "AGENTS.md в папке запуска; CLAUDE.md нет или начинается с @AGENTS.md (STATE-12)")
+    if os.path.isfile(agents):
+        size = os.path.getsize(agents)
+        add(size <= 32768, f"AGENTS.md до 32 КиБ ({size // 1024} КиБ): сверх лимита Codex молча обрезает инструкции")
     try:
         cj = json.load(open(os.path.join(HOME, ".claude.json"), encoding="utf-8"))
     except (OSError, ValueError):
