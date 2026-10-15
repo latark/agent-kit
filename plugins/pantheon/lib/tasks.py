@@ -24,7 +24,8 @@ TYPES = ("task", "stage", "project")
 STATUSES = ("inbox", "todo", "doing", "waiting", "review", "done", "dropped")
 LABELS = {"inbox": "Входящие", "todo": "Очередь", "doing": "В работе", "waiting": "Ждёт", "review": "На проверке",
           "done": "Готово", "dropped": "Отменено"}
-HUMAN_WAIT = "Ждёт вас"
+HUMAN_WAIT = "Нужен ответ"
+OLD_HUMAN_WAIT = "Ждёт вас"  # прежнее имя колонки (до 0.9.28): в старых карточках и состоянии читается как HUMAN_WAIT
 COLUMNS = ["Входящие", HUMAN_WAIT, "Очередь", "В работе", "Ждёт", "На проверке", "Готово", "Отменено"]
 # куда владелец может перенести карточку сам; «Ждёт» и «На проверке» ставят агенты
 OWNER_TARGETS = {"Входящие": ("inbox", None), "Очередь": ("todo", None), "В работе": ("doing", None),
@@ -41,6 +42,8 @@ FIELDS = {
     "waiting_on": ("str", False), "depends_on": ("list", False), "claimed_by": ("str", False),
     "claimed_until": ("datetime", False), "parent": ("str", False), "result": ("str", False),
     "question": ("str", False), "options": ("list", False), "answer": ("str", False),
+    # когда задан нынешний вопрос и когда задача закрыта — ставит CLI, на карточке «Вопрос задан» и «Закрыта»
+    "question_at": ("datetime", False), "closed": ("date", False),
     # вопрос владельцу по шаблону (исследование 15.10): question — одна фраза «что решить», why — почему сейчас,
     # options — полные строки «А — название (совет). Что изменится. Цена: …», recommend — совет с причиной
     "why": ("str", False), "recommend": ("str", False), "if_no_answer": ("str", False),
@@ -357,6 +360,8 @@ def check_head(head):
     if head.get("id") and not ID_RE.fullmatch(str(head["id"])):
         errs.append(f"id «{head['id']}» — нужен вид «pan-0001»")
     if t == "task":
+        if not head.get("owner"):  # не ошибка: старые задачи без owner выпали бы с доски
+            warns.append("нет owner (кому) — на доске будет координатор направления")
         if st in ("doing", "waiting") and not head.get("next"):
             warns.append(f"при {st} нужно поле next — следующий шаг")
         if st == "waiting" and not head.get("waiting_on"):
@@ -481,6 +486,10 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
             "project": project or direction, "direction": direction, "created": now_iso(t)[:10],
             "updated": now_iso(t), "schema_version": SCHEMA_VERSION}
     head.update({k: v for k, v in fields.items() if v is not None})
+    if not head.get("owner"):  # «Кому» обязательно: без --owner — координатор направления (входящие — Зевс)
+        head["owner"] = "zeus" if direction == "inbox" else direction
+    if head.get("question"):
+        head["question_at"] = now_iso(t)
     errs, _ = check_head(head)
     if errs:
         remove(path)
@@ -571,6 +580,9 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck):
         precheck(head)
     if changes.get("status") == "doing" and head.get("status") not in ("todo", "doing") and "claimed_by" in changes:
         changes = dict(changes, status=head.get("status"))
+    if "owner" in changes and not changes["owner"]:
+        raise ValueError("owner не очищается: у задачи всегда есть «Кому» — поставьте другого исполнителя")
+    old_q, was_closed = head.get("question"), head.get("status") in ("done", "dropped")
     for k, v in changes.items():
         if k not in FIELDS or k in ("type", "id", "created", "schema_version"):
             raise ValueError(f"поле {k} так не меняется")
@@ -579,6 +591,14 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck):
         head["waiting_on"] = None
     if head.get("status") in ("done", "dropped"):
         head["question"], head["options"], head["requested"] = None, None, None
+        if not was_closed:
+            head["closed"] = now_iso(t)[:10]
+    elif was_closed:
+        head["closed"] = None
+    if not head.get("question"):
+        head["question_at"] = None
+    elif head.get("question") != old_q:
+        head["question_at"] = now_iso(t)
     head["updated"] = now_iso(t)
     errs, _ = check_head(head)
     if errs:
@@ -610,7 +630,12 @@ def ready(pantheon, t, direction=None, owner=None):
 
 # --- доска владельца ------------------------------------------------------------
 
-CARD_ORDER = ["Статус", "Проект", "Внимание", "Приоритет", "Срок", "Кто", "Дальше", "Ждёт", "id"]
+CARD_ORDER = ["Статус", "Проект", "Внимание", "Приоритет", "Срок", "Кому", "Дальше", "Ждёт", "Создана", "Вопрос задан",
+              "Закрыта", "Тип", "id", "tags"]
+# типы свойств карточек для Obsidian (.obsidian/types.json хранилища): тик ставит свои ключи, чужие не трогает
+PROP_TYPES = {"Внимание": "multitext", "Приоритет": "number", "Срок": "date", "Создана": "date",
+              "Вопрос задан": "datetime", "Закрыта": "date", "Кому": "text", "tags": "tags"}
+NODES_DIR = "Узлы"  # заметки-узлы ролей для графа — внутри Доска: копия view-sync.sh стирает всё вне Доска и .obsidian
 NOTE_KEY = "Заметка агенту"  # прежнее поле заметки: в карточку больше не рисуется, но со старых карточек ещё читается
 NOTES_HEAD = "## ✍️ Ваши заметки"
 NOTES_HINT = ("<small>Пишите ниже своими словами: мысли, задачи, правки. Через минуту после того, как закончите, тик "
@@ -627,6 +652,11 @@ CALLOUT = {HUMAN_WAIT: "danger", "В работе": "warning", "Готово": "
            "Отменено": "quote", "Входящие": "note", "Очередь": "note"}
 
 
+def norm_label(x):
+    """Колонка из карточки или состояния: прежнее «Ждёт вас» — это нынешнее «Нужен ответ» (переход без ложных ходов)."""
+    return HUMAN_WAIT if x == OLD_HUMAN_WAIT else x
+
+
 def label_of(head):
     st = head.get("status")
     if st == "waiting" and head.get("waiting_on") == "human":
@@ -634,52 +664,165 @@ def label_of(head):
     return LABELS.get(st, st)
 
 
-def card_name(head):
-    name = str(head.get("title") or head.get("id")).replace(":", "꞉").replace("/", "⁄")  # похожие знаки, допустимые в имени
+CONTROL_RE = re.compile(r"[\s\x00-\x1f\x7f\x85  ]+")  # переводы строк, NUL и прочие управляющие, пробелы
+
+
+def one_line(s):
+    """Одна строка без управляющих знаков: перевод строки в имени файла или ссылке рвал строку узла (там появлялся
+    заголовок «===»), NUL в пути валил весь проход доски (ревью argus 15.10)."""
+    return CONTROL_RE.sub(" ", str(s or "")).strip()
+
+
+def card_name(head, with_id=None):
+    """Имя файла карточки: у задачи «<id> <заголовок>», у заявки направлению и узла — без id."""
+    with_id = bool(head.get("type") == "task" and head.get("id")) if with_id is None else with_id
+    title = one_line(head.get("title") or head.get("id"))
+    if with_id and title != one_line(head.get("id")):
+        title = f"{one_line(head['id'])} {title}"
+    name = title.replace(":", "꞉").replace("/", "⁄")  # похожие знаки, допустимые в имени
     name = re.sub(r'[\\*?"<>|#^\[\]]', "·", name)[:90].strip()
-    return name or str(head.get("id"))
+    # с точки или «_» — скрытый файл: доска его не видит, а «..» — не имя
+    name = name.lstrip("._ ").strip()
+    return name or one_line(head.get("id")).lstrip("._ ") or "—"
+
+
+# --- заметки-узлы ролей: «Кому» на карточке ссылается на узел, узлы связаны в дерево до «Владелец» ---------------
+
+GODS = {"zeus": "Зевс", "hq": "Зевс", "athena": "Афина", "hermes": "Гермес", "proteus": "Протей", "themis": "Фемида",
+        "calliope": "Каллиопа", "mnemo": "Мнемозина", "metis": "Метида", "janus": "Янус", "daedalus": "Дедал",
+        "apollo": "Аполлон", "hephaestus": "Гефест", "argus": "Аргус", "chiron": "Хирон", "prometheus": "Прометей",
+        "talos": "Талос", "clio": "Клио", "iris": "Ирида"}
+OWNER_SLUGS = ("вы", "владелец", "owner", "human")
+OWNER_NODE, HQ_NODE = "Владелец", "Зевс"
+LEAD_GODS = ("hephaestus", "apollo")  # лиды направлений: подчиняются координатору направления с тем же суффиксом
+
+
+class Roles:
+    """Имена узлов и дерево подчинения по слагу роли. directions — имена направлений (координатор = имя направления)."""
+
+    def __init__(self, directions):
+        self.directions = sorted({str(d) for d in directions if d and d != "inbox"})
+        firsts = [d.split("-")[0] for d in self.directions]
+        self.shared = {f for f in firsts if firsts.count(f) > 1}  # два направления одного бога — узлы с суффиксом
+
+    @staticmethod
+    def slug(s):
+        return one_line(s).lower()
+
+    def name(self, s):
+        low = self.slug(s)
+        if low in OWNER_SLUGS:
+            return OWNER_NODE
+        first, _, rest = low.partition("-")
+        god = GODS.get(first)
+        if not god:
+            # незнакомый — слаг в нижнем регистре: файловая система Mac регистр не различает, «Bob» и «bob» — один
+            # узел. Совпал с именем бога («зевс», «гефест · x») — это узел бога, а не второй файл с тем же именем
+            n = card_name({"title": low or "—"}, with_id=False)
+            for g in set(GODS.values()) | {OWNER_NODE}:
+                if n == g.lower() or n.startswith(g.lower() + " · "):
+                    return g + n[len(g):]
+            return n
+        if not rest or (low in self.directions and first not in self.shared):
+            return god
+        return card_name({"title": f"{god} · {rest}"}, with_id=False)
+
+    def direction(self, s):
+        """Направление узла: координатор — своё, лид — направление с тем же суффиксом, остальные — None."""
+        low = self.slug(s)
+        if low in self.directions:
+            return low
+        first, _, rest = low.partition("-")
+        if first in LEAD_GODS and rest:
+            for d in self.directions:
+                if d.endswith("-" + rest):
+                    return d
+        return None
+
+    def parent(self, s):
+        """→ слаг руководителя; None — у Владельца."""
+        low = self.slug(s)
+        name = self.name(low)
+        if name == OWNER_NODE:
+            return None
+        if name == HQ_NODE:
+            return "owner"
+        if low in self.directions:
+            return "zeus"
+        first, _, rest = low.partition("-")
+        if first in LEAD_GODS and rest:
+            return self.direction(low) or "zeus"
+        return "zeus"
+
+
+def assignee(head):
+    """Слаг «Кому»: owner задачи, без него — координатор направления (входящие — Зевс)."""
+    d = head.get("direction")
+    return head.get("owner") or ("zeus" if d in (None, "", "inbox") else d)
+
+
+def link(name):
+    return f"[[{name}]]"
+
+
+ATTENTION_WORDS = ("конфликт", "подтвердите словом", "вопрос к вам", "просрочено", "срок скоро")
 
 
 def attention(head, t, conflict=None):
-    """Значки «Внимание» — их считает тик, формулам Bases не доверяем."""
+    """«Внимание» — список слов без эмодзи (считает тик, формулам Bases не доверяем); пусто — None, ключа нет.
+    Список: формула Bases сравнивает по элементу (contains), эмодзи этому мешали бы."""
     out, today = [], now_iso(t)[:10]
     if conflict:
-        out.append("⚠ конфликт")
+        out.append("конфликт")
     if head.get("risky") is True and head.get("requested"):
-        out.append("⚠ подтвердите словом")
+        out.append("подтвердите словом")
     elif head.get("question") and head.get("status") == "waiting" and head.get("waiting_on") == "human":
-        out.append("❓ вопрос к вам")
+        out.append("вопрос к вам")
     due = head.get("due")
     if due and head.get("status") not in ("done", "dropped"):
         if due < today:
-            out.append("🔴 просрочено")
+            out.append("просрочено")
         elif due <= now_iso(t + 3 * 86400)[:10]:
-            out.append("🟠 срок скоро")
-    return " · ".join(out) or None  # «❓ вопрос к вам 🟠 скоро» читалось одной фразой
+            out.append("срок скоро")
+    return out or None
 
 
 def _one(v):
     """Поле шапки в карточку — одной строкой: в кавычках "…" JSON раскрывает \\n, а строка «- [x] вариант» с начала
     строки читается тиком как ваш ответ (находка проверки безопасности 15.10). Начало «- [» тоже гасим."""
-    text = re.sub(r"\s*[\r\n\u2028\u2029]+\s*", " ", str(v)).strip()
+    text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f\x85]", " ", str(v))  # NUL и прочие управляющие — тоже в пробел
+    text = re.sub(r"\s*[\r\n\u2028\u2029]+\s*", " ", text).strip()
     return "\\" + text if re.match(r"[-*+]\s*\[", text) else text
 
 
-def render_card(head, body, src_rel, t, conflict=None, notes=None):
+def _date(v, n):
+    """Дата из файла-источника (не из файловой системы) — первые n знаков; не дата — None."""
+    return v[:n] if isinstance(v, str) and DATE_RE.match(v) else None
+
+
+def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, who=None):
+    """who — имя узла «Кому» (board_sync считает его по реестру направлений); без него — по слагу без реестра."""
     head = {k: (_one(v) if isinstance(v, str) else [_one(x) for x in v] if isinstance(v, list) else v)
             for k, v in head.items()}
     lab = label_of(head)
     proj = head.get("project") or ""
     prio = head.get("priority")
+    node = who or Roles(()).name(assignee(head))
+    direction = head.get("direction") or "inbox"
+    closed = head.get("status") in ("done", "dropped")
     card = {"Статус": lab, "Проект": f"{PROJECT_MARK.get(proj, '▪️')} {proj}".strip(), "Внимание": attention(head, t, conflict),
-            "Приоритет": PRIORITY_MARK.get(prio) if prio is not None else None, "Срок": head.get("due"),
-            "Кто": head.get("owner"), "Дальше": None if head.get("status") in ("done", "dropped") else head.get("next"),
+            "Приоритет": prio if isinstance(prio, int) and not isinstance(prio, bool) else None, "Срок": head.get("due"),
+            "Кому": link(node), "Дальше": None if closed else head.get("next"),
             "Ждёт": head.get("waiting_on") if head.get("waiting_on") not in (None, "human") else None,
-            "id": head.get("id")}
+            "Создана": _date(head.get("created"), 10),
+            "Вопрос задан": _date(head.get("question_at"), 19) if head.get("question") else None,
+            "Закрыта": _date(head.get("closed"), 10) if closed else None,
+            "Тип": "задача", "id": head.get("id"), "tags": [f"направление/{direction}"]}
     due = f" · 📅 {head['due'][8:10]}.{head['due'][5:7]}" if head.get("due") else ""
     who = f" · 👤 {head['owner']}" if head.get("owner") else ""
     parts = [f"> [!{CALLOUT.get(lab, 'note')}] {STATUS_MARK.get(lab, '')} {lab} · {card['Проект']}{who}{due}"
-             + (f" · {card['Приоритет']}" if prio in (0, 1) else "")]
+             + (f" · {PRIORITY_MARK[prio]}" if prio in (0, 1) else "")
+             + f"\n> Кому: {link(node)} · Направление: {direction}"]  # страховка: граф может не брать ссылки из свойств
     closed = head.get("status") in ("done", "dropped")
     if closed:
         if head.get("result"):  # «Дальше» у закрытой задачи — устаревший шаг, итогом его не показываем
@@ -699,7 +842,10 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None):
         if head.get("why"):
             parts.append(f"**Почему сейчас:** {head['why'].strip()}")
         opts = head.get("options") or []
-        cur = head.get("requested") if risky else head.get("answer")
+        if logged is None:  # без журнала (старые вызовы) — как раньше, из файла
+            cur = head.get("requested") if risky else head.get("answer")
+        else:
+            cur = logged.get("request" if risky else "answer")
         if opts:
             hint = ("Отметьте вариант — это только ваш выбор: действие начнётся после подтверждения словом в окне Зевса."
                     if risky else "Отметьте один вариант — агент получит ответ в течение минуты. Передумали — снимите "
@@ -715,8 +861,9 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None):
         if risky and head.get("requested"):
             parts.append(f"> [!warning] Вы выбрали «{head['requested']}». Подтвердите словом в окне Зевса: "
                          f"«да, {head['requested']}» — без этого агент не начнёт.")
-    if head.get("answer") and not head.get("question"):
-        parts.append(f"**Ваш ответ:** {head['answer']}")
+    shown = head.get("answer") if logged is None else logged.get("answer")
+    if shown and not head.get("question"):
+        parts.append(f"**Ваш ответ:** {shown}")
     m = re.search(r"## Журнал\n(.*)$", body, re.S)
     if m:
         log = [x for x in m.group(1).strip().split("\n") if x.startswith("- ")][-3:][::-1]
@@ -784,6 +931,69 @@ def owner_notes_all(log_path):
     return out
 
 
+def owner_answers_all(log_path):
+    """Ваши ответы с доски из журнала owner-log/board.jsonl: {id: {"answer": последний, "request": последний}}.
+    Карточка показывает ответ отсюда, а не из поля answer файла задачи: файл может поправить и агент (metis-0024)."""
+    out = {}
+    try:
+        with open(log_path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if (isinstance(rec, dict) and rec.get("kind") in ("answer", "request")
+                        and isinstance(rec.get("answer"), str) and rec.get("id")):
+                    out.setdefault(rec["id"], []).append(rec)
+    except OSError:
+        pass
+    return out
+
+
+def _question_key(text):
+    """Вопрос для сверки файла задачи с журналом — целиком, с точностью до пробелов и переносов (карточка их склеивает);
+    «\\» снимается только там, где его ставит _one (перед «- [»). Обрезанная запись журнала (2000 знаков) не
+    сверяется: хвост вопроса мог измениться (проверка безопасности 15.10). Пустой ключ — «вопроса нет»."""
+    t = re.sub(r"\s+", " ", str(text or "")).strip()
+    if re.match(r"\\[-*+]\s*\[", t):
+        t = t[1:]
+    return t
+
+
+def logged_for(head, recs):
+    """Ваш действующий ответ на ТЕКУЩИЙ вопрос задачи: последняя запись журнала, у которой вариант есть среди
+    нынешних options, а вопрос (если записан) совпадает с нынешним. Ответ на прежний вопрос той же задачи
+    новым не засчитывается (проверка безопасности 15.10)."""
+    opts = [_one(o) for o in head.get("options") or []]
+    q = _question_key(head.get("question"))
+    out = {}
+    for rec in recs or []:
+        if opts and rec["answer"] not in opts:
+            continue
+        rq = rec.get("question") or ""
+        # запись без вопроса (до 0.9.26) или обрезанная — на нынешний вопрос не засчитывается
+        if q and (len(rq) >= 2000 or _question_key(rq) != q):
+            continue
+        out[rec["kind"]] = rec["answer"]
+    return out
+
+
+def answer_conflict(head, logged, recs=None):
+    """Поле answer/requested файла задачи не равно ПОСЛЕДНЕМУ вашему ответу этого вида по задаче (на любой
+    вопрос) → текст конфликта, иначе None. Тик пишет поле и журнал одним ходом, поэтому честный файл всегда равен
+    последней записи; прежний ответ после нового вопроса — тоже она. Правкой текста вопроса это не обойти
+    (проверка безопасности 15.10)."""
+    risky = head.get("risky") is True
+    field, kind = ("requested", "request") if risky else ("answer", "answer")
+    in_file = head.get(field)
+    last = next((r["answer"] for r in reversed(recs or []) if r.get("kind") == kind), None)
+    if in_file and in_file != last:
+        return (f"ответ в файле задачи («{str(in_file)[:120]}») не из вашего журнала"
+                + (f" — там последним «{last[:120]}»" if last else " — там ответа нет")
+                + ". Карточка показывает ответ из журнала; агент его не видит как ваш.")
+    return None
+
+
 def add_owner_note(body, stamp, note):
     """Заметку из карточки — в раздел «Заметки владельца» файла задачи (перед журналом). Строки — цитатой: текст
     владельца не начнёт новый раздел файла."""
@@ -817,13 +1027,14 @@ def checked_option(body):
 BASE_FILE = """filters:
   and:
     - file.inFolder("Доска")
+    - 'file.folder == "Доска"'
     - file.name != "Сводка"
     - file.name != "Проблемы"
 formulas:
-  urgency: 'if(note["Внимание"], if(note["Внимание"].contains("⚠"), 0, if(note["Внимание"].contains("просрочено"), 1, if(note["Внимание"].contains("скоро"), 2, 3))), 3)'
-  prio_rank: 'if(note["Приоритет"], if(note["Приоритет"].contains("срочно"), 0, if(note["Приоритет"].contains("высокий"), 1, if(note["Приоритет"].contains("низкий"), 3, 2))), 2)'
-  age_key: 'if(note["Статус"] == "Готово", 0 - number(file.mtime), number(file.ctime))'
-  stage: 'if(note["Статус"] == "Ждёт вас", 0, if(note["Статус"] == "Входящие", 1, if(note["Статус"] == "На проверке", 2, if(note["Статус"] == "В работе", 3, if(note["Статус"] == "Ждёт", 4, if(note["Статус"] == "Очередь", 5, 6))))))'
+  urgency: 'if(note["Внимание"], if(note["Внимание"].contains("конфликт"), 0, if(note["Внимание"].contains("подтвердите словом"), 0, if(note["Внимание"].contains("просрочено"), 1, if(note["Внимание"].contains("срок скоро"), 2, 3)))), 3)'
+  prio_rank: 'if(note["Приоритет"].isEmpty(), 2, number(note["Приоритет"]))'
+  age_key: 'if(note["Статус"] == "Готово", if(note["Закрыта"], 0 - number(note["Закрыта"]), 0), if(note["Создана"], number(note["Создана"]), 0))'
+  stage: 'if(note["Статус"] == "Нужен ответ", 0, if(note["Статус"] == "Входящие", 1, if(note["Статус"] == "На проверке", 2, if(note["Статус"] == "В работе", 3, if(note["Статус"] == "Ждёт", 4, if(note["Статус"] == "Очередь", 5, if(note["Статус"] == "Готово", 6, 7)))))))'
 properties:
   file.name:
     displayName: Задача
@@ -833,7 +1044,7 @@ views:
     groupBy:
       property: note.Статус
       direction: ASC
-    groupOrder: [Входящие, Ждёт вас, Очередь, В работе, Ждёт, На проверке, Готово]
+    groupOrder: [Входящие, Нужен ответ, Очередь, В работе, Ждёт, На проверке, Готово, Отменено]
     sort:
       - property: formula.urgency
         direction: ASC
@@ -843,12 +1054,12 @@ views:
         direction: ASC
       - property: formula.age_key
         direction: ASC
-    order: [file.name, note.Проект, note.Внимание, note.Приоритет, note.Срок, note.Кто]
+    order: [file.name, note.Проект, note.Внимание, note.Приоритет, note.Срок, note.Кому]
   - type: table
-    name: Ждёт вас
+    name: Нужен ответ
     filters:
       and:
-        - 'note["Статус"] == "Ждёт вас"'
+        - 'note["Статус"] == "Нужен ответ"'
     sort:
       - property: formula.urgency
         direction: ASC
@@ -858,7 +1069,7 @@ views:
         direction: ASC
       - property: formula.age_key
         direction: ASC
-    order: [file.name, note.Проект, note.Внимание, note.Дальше, note.Срок]
+    order: [file.name, note.Проект, note.Внимание, note.Дальше, note.Срок, note.Вопрос задан]
   - type: table
     name: Горит
     filters:
@@ -891,8 +1102,12 @@ views:
         direction: ASC
       - property: formula.age_key
         direction: ASC
-    order: [file.name, note.Статус, note.Внимание, note.Приоритет, note.Кто, note.Срок, note.Дальше]
+    order: [file.name, note.Статус, note.Внимание, note.Приоритет, note.Кому, note.Срок, note.Дальше, note.Создана, note.Закрыта]
 """
+BASE_VERSION = hashlib.sha256(BASE_FILE.encode("utf-8")).hexdigest()[:12]  # сменился шаблон — тик перепишет Доска.base
+# sha256[:16] шаблонов BASE_FILE до 0.9.28 (c616683 — 0.9.27, 7be0aa5 — раньше): тогда в состоянии не было base_hash,
+# и нетронутый старый файл иначе считался бы правкой владельца. Дальше то, что записал тик, помнит base_hash
+OLD_BASE_HASHES = {"917c6bef26511e65", "44467393293d25f4"}
 
 
 OWNER_ONLY_FIELDS = ("answer", "requested")  # ставит только доска: ответ владельца и выбор по рискованному
@@ -939,26 +1154,28 @@ def _live(head, t):
 
 
 def _plain(text):
-    return re.sub(r"[\[\]|<>`]", "·", str(text or ""))
+    return re.sub(r"[\[\]|<>`#]", "·", one_line(text))  # одной строкой: перевод строки рвал бы список сводки; # — не тег
 
 
-def _summary(tasks, t, inbox=None):
+def _summary(tasks, t, inbox=None, names=None):
+    """names — id → имя файла карточки (как его записал проход доски); ссылки — с подписью-заголовком."""
     today = now_iso(t)[:10]
+    names = names or {}
     rows = {"wait": [], "overdue": [], "doing": [], "done": [],
-            "inbox": [f"[[Доска/{card_name({'title': it['title']})}|{_plain(it['title'])}]] · {it['direction']}"
-                      for it in (inbox or {}).values()]}
+            "inbox": [f"[[Доска/{names.get(cid) or card_name({'title': it['title']})}|{_plain(it['title'])}]] · "
+                      f"{it['direction']}" for cid, it in (inbox or {}).items()]}
     for tid, (p, h, _) in sorted(tasks.items()):
-        name = f"[[Доска/{card_name(h)}|{_plain(h.get('title'))}]] · {_plain(h.get('project'))}"
+        name = f"[[Доска/{names.get(tid) or card_name(h)}|{_plain(h.get('title'))}]] · {_plain(h.get('project'))}"
         if h.get("status") == "waiting" and h.get("waiting_on") == "human":
             rows["wait"].append(name)
         if h.get("due") and h["due"] < today and h.get("status") not in ("done", "dropped"):
             rows["overdue"].append(f"{name} · срок {h['due']}")
         if h.get("status") == "doing":
-            rows["doing"].append(f"{name} · {h.get('owner') or '—'}")
+            rows["doing"].append(f"{name} · {_plain(h.get('owner')) or '—'}")
         if h.get("status") == "done" and (h.get("updated") or "") >= now_iso(t - 86400):
             rows["done"].append(name)
     sec = lambda title, xs: f"## {title} ({len(xs)})\n\n" + ("\n".join(f"- {x}" for x in xs) if xs else "—") + "\n"
-    return ("# Сводка\n\n" + sec("🔴 Ждёт вас", rows["wait"]) + "\n" + sec("⏰ Просрочено", rows["overdue"]) + "\n"
+    return ("# Сводка\n\n" + sec(f"🔴 {HUMAN_WAIT}", rows["wait"]) + "\n" + sec("⏰ Просрочено", rows["overdue"]) + "\n"
             + sec("📥 Входящие заявки направлениям", rows["inbox"]) + "\n"
             + sec("🟡 В работе", rows["doing"]) + "\n" + sec("🟢 Готово за сутки", rows["done"])
             + "\n✍️ Написать агенту — текстом в раздел «Ваши заметки» внизу карточки. Перенести — перетащите карточку на доске. "
@@ -996,12 +1213,12 @@ def inbox_items(pantheon):
     return out
 
 
-def render_inbox_card(item, project, conflict=None):
+def render_inbox_card(item, project, conflict=None, who=None):
     proj = project or item["direction"]
     card = {"Статус": "Входящие", "Проект": f"{PROJECT_MARK.get(proj, '▪️')} {proj}".strip(),
-            "Внимание": "⚠ конфликт" if conflict else "📥 заявка направлению", "Кто": item["direction"],
+            "Внимание": ["конфликт"] if conflict else None, "Кому": link(who or Roles(()).name(item["direction"])),
             "Дальше": "разобрать: в «Очередь» — станет задачей направления, в «Отменено» — в архив",
-            "id": item["id"]}
+            "Тип": "заявка", "id": item["id"], "tags": [f"направление/{item['direction']}"]}
     body = re.sub(r"^# .+\n", "", item["text"], count=1, flags=re.M)
     body = re.sub(r"^От: .+\n", "", body, count=1, flags=re.M).strip()
     short = agent_text(body, f"Заявка от {item.get('from') or 'направления'}", 30) if body else ""
@@ -1064,6 +1281,156 @@ def _accept_inbox(want, it, cid, p, pantheon, t, projects, log_path, rel, done_l
     elif want != "Входящие":
         st["conflict_at"] = t
         st["conflict"] = "заявку можно перенести в «Очередь», «В работе» или «Отменено»"
+
+
+def _sha(data):
+    return hashlib.sha256(data if isinstance(data, bytes) else data.encode("utf-8")).hexdigest()[:16]
+
+
+def _write_plain(path, text):
+    """Запись вне корня Пантеона (папка доски, хранилище, состояние): через временный файл."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
+def node_texts(roles, tasks, names, slugs):
+    """Заметки-узлы ролей: {имя узла: текст}. Узлы — для тех, кто в «Кому» живых карточек, и их цепочки вверх
+    (Зевс, Владелец, координатор направления лида): иначе дерево графа рвётся. Без отметки времени — пишется,
+    только когда изменилось."""
+    nodes = {}
+
+    def add(slug):
+        while slug is not None:
+            n = roles.name(slug)
+            if n in nodes:
+                return
+            parent = roles.parent(slug)
+            nodes[n] = {"id": "zeus" if n == HQ_NODE else "owner" if n == OWNER_NODE else roles.slug(slug),
+                        "parent": roles.name(parent) if parent is not None else None,
+                        "direction": roles.direction(slug), "tasks": []}
+            slug = parent
+
+    for cid in sorted(slugs):
+        add(slugs[cid])
+    for tid, (_, h, _) in sorted(tasks.items()):
+        if tid in slugs and tid in names and h.get("status") not in ("done", "dropped"):
+            due = f" · срок {h['due']}" if h.get("due") else ""
+            nodes[roles.name(slugs[tid])]["tasks"].append(
+                f"- [[{names[tid]}|{tid}]] · {_plain(_one(h.get('title') or ''))} · {label_of(h)}{due}")
+    out = {}
+    for n, nd in nodes.items():
+        head = {"type": "узел", "id": nd["id"], "parent": link(nd["parent"]) if nd["parent"] else None,
+                "tags": [f"направление/{nd['direction']}"] if nd["direction"] else None}
+        body = ("\n> Сгенерировано тиком. Не править.\n\n" + (f"Руководитель: {link(nd['parent'])}\n\n" if nd["parent"] else "")
+                + f"## Открытые задачи ({len(nd['tasks'])})\n\n" + ("\n".join(nd["tasks"]) or "—") + "\n")
+        out[n] = join(head, body, ["type", "id", "parent", "tags"])
+    return out
+
+
+def _sync_nodes(board, state, roles, tasks, names, slugs, alert):
+    """Узлы в Доска/Узлы/: свои (хеш в состоянии) переписывает и удаляет; чужой файл с тем же именем и узел, который
+    владелец правил, при удалении не трогает."""
+    d = os.path.join(board, NODES_DIR)
+    # имена сравниваются без регистра: файловая система Mac его не различает («Bob.md» и «bob.md» — один файл)
+    old = {k.casefold(): v for k, v in (state.get("nodes") or {}).items()}
+    mine = {}
+    for n, text in node_texts(roles, tasks, names, slugs).items():
+        p = os.path.join(d, n + ".md")
+        if os.path.dirname(os.path.abspath(p)) != os.path.abspath(d):  # страховка: имя узла не выводит из Узлы/
+            alert(f"board-node-path-{_sha(n)}", "1", f"доска: имя узла «{n[:60]}» не по образцу — пропущен", "board")
+            continue
+        try:
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    cur = fh.read()
+            except FileNotFoundError:
+                cur = None
+            except (OSError, UnicodeDecodeError):
+                cur = ""
+            if cur == text:
+                mine[n] = _sha(text)
+                continue
+            if cur is not None and n.casefold() not in old:
+                alert(f"board-node-{n}", _sha(cur), f"доска: в Доска/{NODES_DIR}/ лежит чужой файл «{n}.md» — узел "
+                                                    f"роли не записан; переименуйте или удалите файл", "board")
+                continue
+            _write_plain(p, text)
+            mine[n] = _sha(text)
+        except (OSError, ValueError, UnicodeError) as e:  # один битый узел не останавливает проход
+            alert(f"board-node-{_sha(n)}", type(e).__name__, f"доска: узел «{n[:60]}» не записать ({e}) — пропущен",
+                  "board")
+    kept = {m.casefold() for m in mine}
+    for f in (sorted(os.listdir(d)) if os.path.isdir(d) else []):
+        n = f[:-3]
+        if not f.endswith(".md") or n.casefold() in kept or n.casefold() not in old:
+            continue
+        p = os.path.join(d, f)
+        try:
+            with open(p, encoding="utf-8") as fh:
+                cur = fh.read()
+            head, _ = split(cur)
+            if _sha(cur) == old[n.casefold()] and (head or {}).get("type") == "узел":
+                os.remove(p)  # узел ушедшей роли; правленный владельцем — оставляем
+        except (OSError, UnicodeDecodeError, HeaderError):
+            continue
+    if mine or "nodes" in state:
+        state["nodes"] = mine
+
+
+def _sync_base(board, state, state_path, t, alert):
+    """Доска.base: нет файла или сменилась версия шаблона — записать; владелец правил файл — его версию сохранить
+    в папку состояния и одна тревога. Та же версия — не трогать: настройки вида владельца живут."""
+    bp = os.path.join(board, "Доска.base")
+    try:
+        with open(bp, "rb") as fh:
+            cur = fh.read()
+    except FileNotFoundError:
+        cur = None
+    if cur is not None and state.get("base_version") == BASE_VERSION:
+        return
+    new = BASE_FILE.encode("utf-8")
+    # нетронутый прежний шаблон (у 0.9.27 и раньше в состоянии нет base_hash) — не правка владельца
+    if cur is not None and cur != new and _sha(cur) != state.get("base_hash") and _sha(cur) not in OLD_BASE_HASHES:
+        keep = os.path.join(os.path.dirname(os.path.abspath(state_path)),
+                            f"board-base-{datetime.fromtimestamp(t).strftime('%Y%m%d-%H%M%S')}.base")
+        os.makedirs(os.path.dirname(keep), exist_ok=True)
+        with open(keep, "wb") as fh:
+            fh.write(cur)
+        alert(f"board-base-{BASE_VERSION}", BASE_VERSION, f"Доска.base обновлён, ваша версия сохранена в {keep}", "board")
+    if cur != new:
+        _write_plain(bp, BASE_FILE)
+    state["base_version"], state["base_hash"] = BASE_VERSION, _sha(new)
+
+
+def _sync_types(vault, alert):
+    """.obsidian/types.json хранилища: типы свойств карточек. Свои ключи ставит, чужие не трогает, пишет только при
+    изменении; битый JSON — не трогает, одна тревога."""
+    p = os.path.join(vault, ".obsidian", "types.json")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            raw = fh.read()
+    except FileNotFoundError:
+        raw = None
+    except (OSError, UnicodeDecodeError) as e:
+        alert("board-types", "unreadable", f"доска: {p} не читается ({e}) — типы свойств не обновлены", "board")
+        return
+    data = {"types": {}}
+    if raw is not None:
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict) or not isinstance(data.setdefault("types", {}), dict):
+                raise ValueError("нет словаря types")
+        except ValueError as e:
+            alert("board-types", _sha(raw), f"доска: {p} — битый JSON ({e}); типы свойств не обновлены, файл не тронут",
+                  "board")
+            return
+    if all(data["types"].get(k) == v for k, v in PROP_TYPES.items()):
+        return
+    data["types"].update(PROP_TYPES)
+    _write_plain(p, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
 def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None, primary=True, projects=None):
@@ -1133,6 +1500,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     # 3. ходы владельца на известных карточках (перенос — сразу: он делается одним движением;
     #    заметку Obsidian сохраняет по Enter или уходу из поля, галочку — щелчком: берём сразу)
     typing = set()
+    answers_by_id = owner_answers_all(log_path)
     for cid, (p, head, body) in present.items():
         st = cards.get(cid)
         if st and digest(p) != st.get("card_hash") and t - mtime[p] < QUIET and owner_added(st.get("rendered"), body):
@@ -1140,7 +1508,8 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             continue
         if not st or digest(p) == st.get("card_hash"):
             continue  # карточку никто не трогал
-        want = head.get("Статус")
+        want = norm_label(head.get("Статус"))
+        synced = norm_label(st.get("synced"))
         note = head.get(NOTE_KEY) if isinstance(head.get(NOTE_KEY), str) and head.get(NOTE_KEY).strip() else None
         if cid in inbox:  # заявка направлению
             it = inbox[cid]
@@ -1160,14 +1529,20 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         if cid not in tasks:
             continue
         src_path, src_head, _ = tasks[cid]
+        logged = logged_for(src_head, answers_by_id.get(cid))
         src_moved = digest(src_path) != st.get("src_hash")
         answer = checked_option(body) if src_head.get("options") else None
         if answer and answer != "?" and answer not in [_one(o) for o in src_head.get("options") or []]:
-            answer = None  # отмечена строка, которой нет среди вариантов задачи, — не ваш ответ
+            # отмечена строка, которой нет среди вариантов задачи, — не ваш ответ, но и не молча: конфликт в карточке
+            st["conflict_at"] = t
+            st["conflict"] = (f"отмечен вариант, которого нет в задаче: «{_one(answer)[:120]}». "
+                              f"Отметьте один из вариантов ниже")
+            done_lines.append(f"{cid}: отмечен вариант не из задачи — конфликт в карточке")
+            answer = None
         extra = owner_added(st.get("rendered"), body)  # текст, дописанный прямо в карточку, — тоже заметка
         if extra:
             note = f"{note.strip()}\n{extra}" if note else extra
-        if want != st.get("synced"):
+        if want != synced:
             if src_moved:
                 st["conflict_at"] = t
                 st["conflict"] = f"пока вы переносили карточку в «{want}», агент изменил задачу — статус сейчас «{label_of(src_head)}». Перенесите ещё раз, если нужно."
@@ -1185,9 +1560,9 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                 if status == "todo":
                     ch["claimed_by"], ch["claimed_until"] = None, None
                 try:
-                    task_set(pantheon, t, cid, ch, note=f"перенёс «{st.get('synced')}» → «{want}»", actor="владелец")
-                    _owner_log(log_path, t, kind="move", id=cid, src=st.get("synced"), dst=want)
-                    done_lines.append(f"{cid}: ход владельца «{st.get('synced')}» → «{want}»")
+                    task_set(pantheon, t, cid, ch, note=f"перенёс «{synced}» → «{want}»", actor="владелец")
+                    _owner_log(log_path, t, kind="move", id=cid, src=synced, dst=want)
+                    done_lines.append(f"{cid}: ход владельца «{synced}» → «{want}»")
                     moved_by_owner.add(cid)
                     if want == "В работе":  # будит исполнителя (с шага 1.4 — pantheon wake); вас не уведомляем
                         alert(f"wake-{cid}-{now_iso(t)[:16]}", "1",
@@ -1203,12 +1578,13 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             _owner_log(log_path, t, kind="note", id=cid, text=note.strip()[:4000])
             done_lines.append(f"{cid}: заметка владельца передана")
         risky = src_head.get("risky") is True
-        current = src_head.get("requested") if risky else src_head.get("answer")
+        # текущий ответ — из журнала, а не из файла: иначе поддельное answer в файле глушило бы вашу галочку
+        current = logged.get("request" if risky else "answer")
         if answer and answer != "?" and answer != current:
             if risky:  # согласие на рискованное — только словом в окне Зевса; галочка — лишь выбор
                 task_set(pantheon, t, cid, {"requested": answer},
                          note=f"выбрал «{answer}» — нужно подтверждение словом в окне Зевса", actor="владелец")
-                _owner_log(log_path, t, kind="request", id=cid, answer=answer)
+                _owner_log(log_path, t, kind="request", id=cid, answer=answer, question=seen_question(body))
                 done_lines.append(f"{cid}: выбор владельца «{answer}» по рискованному — ждёт подтверждения словом")
             else:
                 ch = {"answer": answer}
@@ -1224,6 +1600,8 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                 alert(f"answer-{cid}", answer, f"ответ владельца на доске: {cid} — «{answer[:120]}». Если исполнитель "
                       f"ждёт — сообщи ему: pantheon consent {cid}", "board")
             moved_by_owner.add(cid)
+            st.pop("conflict", None)  # верный вариант применён — прежний конфликт (неверная галочка, несколько) снят
+            st.pop("conflict_at", None)
         elif answer == "?":
             st["conflict_at"] = t
             st["conflict"] = "отмечено несколько вариантов — оставьте один"
@@ -1248,37 +1626,53 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     # 6. перерисовать карточки: задачи и заявки направлений
     names, items = {}, []
     notes_by_id = owner_notes_all(log_path)
+    answers_by_id = owner_answers_all(log_path)
+    roles = Roles(list(projects) + [d for d in list_dir(os.path.join(pantheon, "directions")) if DIRECTION_RE.fullmatch(d)])
+    slugs = {}  # id карточки → слаг «Кому»
     for tid, (p, h, b) in sorted(tasks.items()):
         if _live(h, t):
             items.append((tid, card_name(h), p, h, b))
+            slugs[tid] = assignee(h)
     for cid, it in inbox.items():
-        items.append((cid, card_name({"title": it["title"], "id": cid}), it["path"], None, None))
+        items.append((cid, card_name({"title": it["title"], "id": cid}, with_id=False), it["path"], None, None))
+        slugs[cid] = it["direction"]
     for cid, name, src, h, b in items:
-        if name in names.values():
+        if name.casefold() in {x.casefold() for x in names.values()}:  # Mac: «Bob.md» и «bob.md» — один файл
             name = f"{name} ({cid})"
         names[cid] = name
         st = cards.setdefault(cid, {})
         if st.get("conflict") and t - st.get("conflict_at", t) > 86400:
             st.pop("conflict", None)
             st.pop("conflict_at", None)
+        who = roles.name(slugs[cid])
         if h is None:
-            card, cbody = render_inbox_card(inbox[cid], projects.get(inbox[cid]["direction"]), st.get("conflict"))
+            card, cbody = render_inbox_card(inbox[cid], projects.get(inbox[cid]["direction"]), st.get("conflict"), who)
         else:
-            card, cbody = render_card(h, b, rel(src), t, st.get("conflict"), notes_by_id.get(cid))
+            logged = logged_for(h, answers_by_id.get(cid))
+            forged = answer_conflict(h, logged, answers_by_id.get(cid))
+            if forged:
+                alert(f"answer-mismatch-{cid}", str(h.get("requested") if h.get("risky") is True else h.get("answer")),
+                      f"конфликт ответа: {h.get('title')} ({cid}) — {forged}", "board")
+            card, cbody = render_card(h, b, rel(src), t, " · ".join(x for x in (st.get("conflict"), forged) if x) or None,
+                                      notes_by_id.get(cid), logged, who)
         target = os.path.join(board, name + ".md")
         old = present.get(cid)
         if old and (digest(old[0]) != seen.get(cid) or cid in typing):
             continue  # владелец правит карточку прямо сейчас — следующий проход
-        if old and old[0] != target:
-            os.remove(old[0])  # задачу переименовали
-        new_text = join(card, cbody, CARD_ORDER)
-        cur = ""
-        if os.path.exists(target):
-            with open(target, encoding="utf-8") as fh:
-                cur = fh.read()
-        if cur != new_text:
-            write(target, card, cbody, CARD_ORDER)
-        prev = st.get("synced")
+        try:  # одна битая задача не останавливает проход: тревога, остальные карточки пишутся
+            if old and old[0] != target:
+                os.remove(old[0])  # задачу переименовали
+            new_text = join(card, cbody, CARD_ORDER)
+            cur = ""
+            if os.path.exists(target):
+                with open(target, encoding="utf-8") as fh:
+                    cur = fh.read()
+            if cur != new_text:
+                write(target, card, cbody, CARD_ORDER)
+        except (OSError, ValueError, UnicodeError) as e:
+            alert(f"board-card-{cid}", type(e).__name__, f"доска: карточку {cid} не записать ({e}) — пропущена", "board")
+            continue
+        prev = norm_label(st.get("synced"))
         if (card["Статус"] == HUMAN_WAIT and prev != HUMAN_WAIT and not first_run and cid not in moved_by_owner):
             events.append((f"❓ Вопрос к вам: {h.get('title') if h else name}", cid))
         st.update({"file": name, "synced": card["Статус"], "src_hash": digest(src), "card_hash": digest(target),
@@ -1294,8 +1688,10 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         if cid not in names and cid not in present:
             cards.pop(cid, None)
 
+    _sync_nodes(board, state, roles, tasks, names, slugs, alert)
+
     # 7. сводка, уведомления, вид
-    text, rows = _summary(tasks, t, inbox)
+    text, rows = _summary(tasks, t, inbox, names)
     sp = os.path.join(board, "Сводка.md")
     old = open(sp, encoding="utf-8").read() if os.path.exists(sp) else ""
     if old != text:
@@ -1306,7 +1702,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     if hour >= QUIET_HOURS[1] and state.get("digest_day") != today:
         state["digest_day"] = today
         if rows["wait"] or rows["overdue"] or rows["inbox"]:
-            notify(f"Доброе утро. Ждёт вас: {len(rows['wait'])}, просрочено: {len(rows['overdue'])}, "
+            notify(f"Доброе утро. {HUMAN_WAIT}: {len(rows['wait'])}, просрочено: {len(rows['overdue'])}, "
                    f"входящих заявок: {len(rows['inbox'])}.", card_url(vault, "Сводка"), "digest")
     elif events and not night:
         if len(events) == 1:
@@ -1314,10 +1710,8 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         else:
             notify(f"На доске {len(events)} новых события: " + "; ".join(e[0] for e in events[:3]),
                    card_url(vault, "Сводка"), "events")
-    bp = os.path.join(board, "Доска.base")
-    if not os.path.exists(bp):
-        with open(bp, "w", encoding="utf-8") as fh:
-            fh.write(BASE_FILE)
+    _sync_base(board, state, state_path, t, alert)
+    _sync_types(os.path.dirname(os.path.abspath(board)), alert)
     new_state = json.dumps(state, ensure_ascii=False, indent=1)
     try:
         with open(state_path, encoding="utf-8") as fh:
