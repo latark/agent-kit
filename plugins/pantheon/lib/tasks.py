@@ -801,19 +801,42 @@ def owner_answers_all(log_path):
                     continue
                 if (isinstance(rec, dict) and rec.get("kind") in ("answer", "request")
                         and isinstance(rec.get("answer"), str) and rec.get("id")):
-                    out.setdefault(rec["id"], {})[rec["kind"]] = rec["answer"]
+                    out.setdefault(rec["id"], []).append(rec)
     except OSError:
         pass
     return out
 
 
-def answer_conflict(head, logged):
-    """Поле answer/requested файла задачи не совпадает с вашим журналом → текст конфликта, иначе None."""
+def logged_for(head, recs):
+    """Ваш действующий ответ на ТЕКУЩИЙ вопрос задачи: последняя запись журнала, у которой вариант есть среди
+    нынешних options, а вопрос (если записан) совпадает с нынешним. Ответ на прежний вопрос той же задачи
+    новым не засчитывается (проверка безопасности 15.10)."""
+    opts = [_one(o) for o in head.get("options") or []]
+    q = (head.get("question") or "").strip()[:2000]
+    out = {}
+    for rec in recs or []:
+        if opts and rec["answer"] not in opts:
+            continue
+        rq = (rec.get("question") or "").strip()
+        if rq and q and rq != q:
+            continue
+        out[rec["kind"]] = rec["answer"]
+    return out
+
+
+def answer_conflict(head, logged, recs=None):
+    """Поле answer/requested файла задачи, которого нет среди ваших ответов в журнале по этой задаче (ни на
+    нынешний, ни на прежний вопрос), → текст конфликта, иначе None. Прежний ответ после нового вопроса не конфликт:
+    поле answer агент очистить не может."""
     risky = head.get("risky") is True
-    field = "requested" if risky else "answer"
+    field, kind = ("requested", "request") if risky else ("answer", "answer")
     in_file = head.get(field)
-    in_log = (logged or {}).get("request" if risky else "answer")
-    if in_file and in_file != in_log:
+    in_log = (logged or {}).get(kind)
+    q = (head.get("question") or "").strip()[:2000]
+    # законный след прошлого: ответы на ДРУГОЙ (прежний) вопрос; на нынешний — только последний (in_log)
+    ever = {r["answer"] for r in recs or [] if r.get("kind") == kind
+            and (r.get("question") or "").strip() and q and (r.get("question") or "").strip() != q}
+    if in_file and in_file != in_log and in_file not in ever:
         return (f"ответ в файле задачи («{str(in_file)[:120]}») не из вашего журнала"
                 + (f" — там «{in_log[:120]}»" if in_log else " — там ответа нет")
                 + ". Карточка показывает ответ из журнала; агент его не видит как ваш.")
@@ -1196,7 +1219,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         if cid not in tasks:
             continue
         src_path, src_head, _ = tasks[cid]
-        logged = answers_by_id.get(cid) or {}
+        logged = logged_for(src_head, answers_by_id.get(cid))
         src_moved = digest(src_path) != st.get("src_hash")
         answer = checked_option(body) if src_head.get("options") else None
         if answer and answer != "?" and answer not in [_one(o) for o in src_head.get("options") or []]:
@@ -1303,12 +1326,13 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         if h is None:
             card, cbody = render_inbox_card(inbox[cid], projects.get(inbox[cid]["direction"]), st.get("conflict"))
         else:
-            forged = answer_conflict(h, answers_by_id.get(cid))
+            logged = logged_for(h, answers_by_id.get(cid))
+            forged = answer_conflict(h, logged, answers_by_id.get(cid))
             if forged:
                 alert(f"answer-mismatch-{cid}", str(h.get("requested") if h.get("risky") is True else h.get("answer")),
                       f"конфликт ответа: {h.get('title')} ({cid}) — {forged}", "board")
             card, cbody = render_card(h, b, rel(src), t, " · ".join(x for x in (st.get("conflict"), forged) if x) or None,
-                                      notes_by_id.get(cid), answers_by_id.get(cid) or {})
+                                      notes_by_id.get(cid), logged)
         target = os.path.join(board, name + ".md")
         old = present.get(cid)
         if old and (digest(old[0]) != seen.get(cid) or cid in typing):

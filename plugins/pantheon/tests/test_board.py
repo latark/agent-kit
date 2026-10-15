@@ -229,6 +229,18 @@ def main():
     t2 = open(c2, encoding="utf-8").read()
     check("галочка на вариант, совпавший с подделкой: в журнал доски, конфликт снят",
           alog[-1].get("answer") == "В копии" and alog[-1].get("id") == "metis-0002" and "не из вашего журнала" not in t2)
+    # новый вопрос той же задаче: прежний ответ не засчитан как ответ на новый и не считается подделкой
+    run(env, "task", "set", "metis-0002", "question=Где держать копию теперь?", t=T0 + 386)
+    run(env, "board", t=T0 + 388)
+    t2 = open(c2, encoding="utf-8").read()
+    check("новый вопрос: прежний ответ из журнала не отмечен, конфликта нет",
+          "- [ ] В копии" in t2 and "- [ ] В knowledge" in t2 and "не из вашего журнала" not in t2)
+    open(c2, "w", encoding="utf-8").write(t2.replace("- [ ] В копии", "- [x] В копии"))
+    run(env, "board", t=T0 + 390)
+    alog = [json.loads(x) for x in open(os.path.join(state, "owner-log", "board.jsonl")) if '"answer"' in x]
+    check("новый вопрос: та же галочка — новый ответ в журнале с новым вопросом",
+          alog[-1].get("answer") == "В копии" and alog[-1].get("question") == "Где держать копию теперь?"
+          and "- [x] В копии" in open(c2, encoding="utf-8").read())
     # рискованный вопрос: галочка — только выбор, подтверждение словом
     run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Отправить коммиты", "--status", "waiting",
         "--waiting-on", "human", "--next", "ваш ответ", "--question", "Отправить?", "--option", "Да", "--option", "Нет",
