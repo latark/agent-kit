@@ -396,9 +396,89 @@ def legacy_and_due_case():
     check("переход: на следующий день утреннее есть", any("Доброе утро" in x[1] for x in b))
 
 
+def review_case():
+    """Ревью argus 15.10: ночью срочно только срок до конца тихих часов; ваш перенос в «Нужен ответ» — без пингов и не
+    ответ; критичное не ждёт прохода доски; ready — по времени срока; срок-дата — напоминания вечером, не ночью."""
+    import fcntl
+    import time as _time
+    # 1. ночью срок после утра (08:30) — не срочно: очередь; утром при «нет» — срочный пинг
+    w = make()
+    q = question(w, "Срок после утра", at(20, 4, 50), due="2026-10-20T08:30")
+    board(w, at(20, 5), idle=1200)
+    a = sent(w)
+    st = json.load(open(os.path.join(w["state"], "notify.json"), encoding="utf-8"))
+    board(w, at(20, 8, 5), idle=1200)
+    b = sent(w)
+    check("ревью 1: 05:00, срок 08:30 — без пинга, в очереди; 08:05 при «нет» — срочный пинг",
+          not a and any(x["id"] == q for x in st["queue"]) and len(b) == 1 and "Срочно" in b[0][1] and b[0][3] == q)
+    # 2. вы сами перенесли карточку в «Нужен ответ» — пингов нет; это не ответ
+    w = make()
+    r = run(w, "task", "new", "--direction", "metis-pantheon", "--title", "Сам спрошу", "--project", "Пантеон",
+            "--next", "шаг", t=at(20, 12))
+    tid = r.stdout.split()[0]
+    board(w, at(20, 12, 1), idle=0)
+    edit(card(w, tid), "Статус: Очередь", "Статус: Нужен ответ")
+    board(w, at(20, 12, 2), idle=1200)
+    board(w, at(20, 12, 22), idle=1200)
+    board(w, at(20, 13, 22), idle=1200)
+    c = pings(sent(w))
+    with open(src(w, tid), encoding="utf-8") as fh:
+        moved = "status: waiting" in fh.read()
+    check("ревью 2: ваш перенос в «Нужен ответ» — ни одного пинга через 20 и 80 мин при простое 20 мин",
+          moved and not c)
+    check("ревью 2: перенос не закрывает цикл исходом answer",
+          not any(x["id"] == tid and x.get("outcome") for x in journal(w)))
+    run(w, "task", "set", tid, "status=todo", t=at(20, 13, 30))
+    board(w, at(20, 13, 31), idle=1200)
+    rec = [x for x in journal(w) if x["id"] == tid and x.get("outcome")]
+    check("ревью 2: карточка ушла — исход closed, без answered",
+          len(rec) == 1 and rec[0]["outcome"] == "closed" and "answered" not in rec[0])
+    # 3. критичное не ждёт блокировки прохода доски
+    w = make()
+    os.makedirs(os.path.join(w["state"], "locks"), exist_ok=True)
+    fd = os.open(os.path.join(w["state"], "locks", "notify.lock"), os.O_WRONLY | os.O_CREAT)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    t0 = _time.time()
+    r = subprocess.run([sys.executable, "-I", CLI, "alert", "прод упал", "--critical", "--from", "zeus"],
+                       env=dict(w["env"], PANTHEON_NOW=str(at(20, 12))), capture_output=True, text=True, timeout=60)
+    took = _time.time() - t0
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+    d = sent(w)
+    check("ревью 3: блокировка notify занята — критичное всё равно ушло, команда не висит (< 8 с)",
+          r.returncode == 0 and len(d) == 1 and "прод упал" in d[0][1] and took < 8)
+    # 4. ready — по времени срока: дата-время того же дня раньше даты без времени
+    w = make()
+    for title, due in (("Срок днём", "2026-10-21"), ("Срок утром", "2026-10-21T09:00")):
+        run(w, "task", "new", "--direction", "metis-pantheon", "--title", title, "--project", "Пантеон", "--due", due,
+            t=at(20, 12))
+    r = run(w, "task", "ready", t=at(20, 12))
+    order = [l.split("\t")[-1] for l in r.stdout.splitlines() if "\t" in l]
+    check("ревью 4: task ready — «Срок утром» (09:00) раньше «Срок днём» (дата, конец дня)",
+          order == ["Срок утром", "Срок днём"])
+    # 5. срок-дата: опорное время — начало тихих часов (23:00): срочно вечером, напоминания 22:00 и 22:30, ночью тихо
+    w = make()
+    q = question(w, "Срок сегодня", at(20, 20), due="2026-10-20")
+    board(w, at(20, 20, 30), idle=0)
+    e = pings(sent(w))
+    board(w, at(20, 22, 0), idle=0)
+    f = pings(sent(w))
+    board(w, at(20, 22, 30), idle=0)
+    g = pings(sent(w))
+    q2 = question(w, "Срок сегодня поздно", at(20, 22, 40), due="2026-10-20")  # первый к 23:10 уже «долго ждёт»
+    board(w, at(20, 23, 10), idle=1200)
+    h = sent(w)
+    st = json.load(open(os.path.join(w["state"], "notify.json"), encoding="utf-8"))
+    check("ревью 5: срок-дата, 20:30 при «здесь» — срочный пинг", len(e) == 1 and "Срочно" in e[0][1])
+    check("ревью 5: срок-дата — напоминания в 22:00 и 22:30", len(f) == 1 and len(g) == 1)
+    check("ревью 5: срок-дата, 23:10 — тишина и очередь", not h and any(x["id"] == q2 for x in st["queue"]))
+    check("ревью 5: истечение срока-даты — по концу дня, не в 23:00",
+          not any(x["id"] == q and x.get("outcome") for x in journal(w)))
+
+
 def main():
     for case in (presence_case, quiet_case, repeat_case, group_case, journal_case, budget_case, config_case,
-                 faults_case, conflict_case, legacy_and_due_case):
+                 faults_case, conflict_case, legacy_and_due_case, review_case):
         case()
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)

@@ -2191,10 +2191,11 @@ def notify_mod():
 
 
 def owner_acts():
-    """Ответы владельца по id: {id: [метка времени, …]} — из журнала доски (answer и request с вариантом, move не в
-    «Нужен ответ») и окна вопросов Зевса (вопрос «[id] …»). Только журналы, которые пишут хук и тик: поле answer
+    """→ (ответы, переносы в «Нужен ответ»), оба {id: [метка времени, …]}. Ответы — из журнала доски (answer и
+    request с вариантом, move не в «Нужен ответ») и окна вопросов Зевса (вопрос «[id] …»); перенос карточки в «Нужен
+    ответ» вами самими — не ответ, а знак «пингов не надо». Только журналы, которые пишут хук и тик: поле answer
     файла задачи и текст других сессий ответом не считаются."""
-    out = {}
+    out, put = {}, {}
     try:
         lines = open(path("owner-log", "board.jsonl"), encoding="utf-8").read().splitlines()
     except OSError:
@@ -2211,6 +2212,8 @@ def owner_acts():
         if (kind in ("answer", "request") and isinstance(rec.get("answer"), str) and rec["answer"].strip()
                 or kind == "move" and rec.get("dst") not in ("Нужен ответ", "Ждёт вас")):
             out.setdefault(tid, []).append(t)
+        elif kind == "move":
+            put.setdefault(tid, []).append(t)
     try:
         with open(path("owner-log", "zeus.md"), encoding="utf-8") as fh:
             text = fh.read()
@@ -2230,20 +2233,27 @@ def owner_acts():
         except ValueError:
             continue
         out.setdefault(q.group(1).lower(), []).append(t)
-    return out
+    return out, put
 
 
-def owner_answered_fn():
-    """→ answered(id, since): время (ISO) первого ответа владельца по id не раньше since, иначе None.
-    Журналы читаются один раз за проход и лениво — после того, как проход доски записал новые ходы."""
+def owner_log_fns():
+    """→ (answered, owner_put). answered(id, since) — время (ISO) первого ответа владельца по id не раньше since,
+    иначе None; owner_put(id, since) — вы сами перенесли карточку в «Нужен ответ» не раньше since. Журналы читаются
+    один раз за проход и лениво — после того, как проход доски записал новые ходы."""
     cache = []
 
-    def answered(tid, since):
+    def acts():
         if not cache:
             cache.append(owner_acts())
-        hits = sorted(x for x in cache[0].get(tid, []) if x >= int(since))
+        return cache[0]
+
+    def answered(tid, since):
+        hits = sorted(x for x in acts()[0].get(tid, []) if x >= int(since))
         return notify_mod().iso(hits[0]) if hits else None
-    return answered
+
+    def owner_put(tid, since):
+        return any(x >= int(since) for x in acts()[1].get(tid, []))
+    return answered, owner_put
 
 
 def notify_policy(sched=None):
@@ -2254,9 +2264,10 @@ def notify_policy(sched=None):
             sched = load_schedule()
         except (OSError, ValueError):
             sched = {}
+    answered, owner_put = owner_log_fns()
     return N.Policy(path("notify.json"), path("notify-log.jsonl"), sched.get("notify") or N.settings(), now(),
                     idle=idle_sec, send=lambda text, title, target, group: notify(text, title, target, group),
-                    answered=owner_answered_fn())
+                    answered=answered, owner_put=owner_put)
 
 
 def notify_soon(key, text, policy=None):
@@ -2505,10 +2516,18 @@ def main(argv):
             # отправителя называет он сам (--from, PANTHEON_ROLE — переменные вызова): заголовок не утверждает, кто
             # прислал, имя — в тексте со словами «со слов». Сразу всегда (и ночью), но в счёт бюджета и в журнал
             text = f"{' '.join(rest)[:200]} (со слов: {' '.join(who.split())[:40]})"
-            with lock("notify"):
-                pol = notify_policy()
-                pol.critical(text)
-                pol.save()
+            notify(text, title="Пантеон · критично", group="critical")  # сразу, мимо блокировки прохода доски
+            deadline = time.time() + 5  # учёт в бюджете и журнале: блокировку не взяли за 5 с — без учёта
+            while True:
+                with lock("notify", block=False) as got:
+                    if got:
+                        pol = notify_policy()
+                        pol.critical(text, send=False)
+                        pol.save()
+                        break
+                if time.time() > deadline:
+                    break
+                time.sleep(0.1)
         return 0
     if cmd == "archive":
         return archive()

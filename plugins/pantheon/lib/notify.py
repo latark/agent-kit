@@ -159,13 +159,15 @@ class Policy:
     первого ответа владельца по id после since (ISO) или None; idle — простой в секундах (число или функция).
     Вызывающий держит lock("notify") от создания до save()."""
 
-    def __init__(self, state_path, log_path, cfg=None, t=None, idle=0, send=None, answered=None):
+    def __init__(self, state_path, log_path, cfg=None, t=None, idle=0, send=None, answered=None, owner_put=None):
         self.cfg = cfg or settings()
         self.t = time.time() if t is None else t
         self._idle = idle
         self._presence = None
         self.send_fn = send or (lambda *a, **k: None)
         self.answered = answered or (lambda tid, since: None)
+        # owner_put(id, since) — вы сами перенесли карточку в «Нужен ответ» не раньше since: цикл без пингов
+        self.owner_put = owner_put or (lambda tid, since: False)
         self.state_path, self.log_path = state_path, log_path
         try:
             with open(state_path, encoding="utf-8") as fh:
@@ -227,11 +229,26 @@ class Policy:
             pass
 
     # --- решения ---
-    def _urgent(self, d):
+    def _ref(self, d):
+        """Опорное время срока для пингов (срочно и напоминания). Срок-дата (due_day) — начало тихих часов дня срока:
+        напоминать вечером, а не ночью. Истечение и «просрочено» — по самому сроку (у даты — конец дня)."""
         due = d.get("due")
-        if due is None or self.t >= due:
+        if due is None or not d.get("due_day"):
+            return due
+        a, b = _hm(self.cfg["quiet_start"]), _hm(self.cfg["quiet_end"])
+        if a == b:
+            return due
+        ref = datetime.fromtimestamp(due).replace(hour=a // 60, minute=a % 60, second=0, microsecond=0).timestamp()
+        return min(ref, due)
+
+    def _urgent(self, d):
+        """Срочно: в тихие часы — только срок раньше их конца; вне тихих часов — срок ближе urgent_hours."""
+        ref = self._ref(d)
+        if ref is None or self.t >= ref:
             return False
-        return due - self.t <= self.cfg["urgent_hours"] * 3600 or (self.quiet and due < quiet_until(self.t, self.cfg))
+        if self.quiet:
+            return ref < quiet_until(self.t, self.cfg)
+        return ref - self.t <= self.cfg["urgent_hours"] * 3600
 
     def _close(self, tid, c, outcome, answered=None):
         c["out"] = outcome
@@ -270,6 +287,8 @@ class Policy:
             c["due"] = d.get("due")
             if c.get("out"):
                 continue
+            if not c.get("owner_put") and self.owner_put(tid, c["since"]):
+                c["owner_put"] = True  # не ответ: исход при уходе — по обычным правилам
             ans = self.answered(tid, c["since"])
             if ans:
                 self._close(tid, c, "answer", ans)
@@ -330,8 +349,11 @@ class Policy:
             d = self._cur.get(tid)
             if d is None or c.get("out"):
                 continue
+            if c.get("owner_put"):
+                continue  # карточку в «Нужен ответ» перенесли вы сами: только доска и сводка
             if self._urgent(d):
-                crossed = [m for m in cfg["urgent_remind_min"] if t >= d["due"] - m * 60 and m not in c["rem"]]
+                ref = self._ref(d)
+                crossed = [m for m in cfg["urgent_remind_min"] if t >= ref - m * 60 and m not in c["rem"]]
                 if not c.get("urgent") or crossed:
                     c["urgent"], c["level"] = True, "urgent"
                     c["rem"] = sorted(set(c["rem"]) | set(crossed), reverse=True)
@@ -391,9 +413,15 @@ class Policy:
         self._send(text, "fault", [key], target, key)
         return "sent"
 
-    def critical(self, text, title="Пантеон · критично"):
-        """COMM-08: сразу и всегда (ночью тоже — менять это может только владелец); в счёт бюджета и в журнал."""
-        self._send(text, "critical", ["critical"], None, "critical", title)
+    def critical(self, text, title="Пантеон · критично", send=True):
+        """COMM-08: сразу и всегда (ночью тоже — менять это может только владелец); в счёт бюджета и в журнал.
+        send=False — уведомление уже ушло мимо блокировки (pantheon alert --critical), здесь только учёт."""
+        if send:
+            self._send(text, "critical", ["critical"], None, "critical", title)
+            return
+        self.st["used"] = int(self.st.get("used") or 0) + 1
+        self.sent.append(("critical", text))
+        journal(self.log_path, self.t, "critical", "critical", shown=iso(self.t))
 
     def save(self):
         t = self.t

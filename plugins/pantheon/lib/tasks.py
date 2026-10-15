@@ -659,7 +659,8 @@ def ready(pantheon, t, direction=None, owner=None):
             continue
         if any(d not in done for d in h.get("depends_on") or []):
             continue
-        out.append((h.get("priority", 2), h.get("due") or "9999", tid, h))
+        d = due_ts(h.get("due"))  # по времени: дата без времени (конец дня) — после даты-времени того же дня
+        out.append((h.get("priority", 2), float("inf") if d is None else d, tid, h))
     return [x[2:] for x in sorted(out, key=lambda x: (x[0], x[1], x[2]))]
 
 
@@ -1694,6 +1695,8 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                 q = hashlib.sha256(_question_key(h.get("question")).encode("utf-8")).hexdigest()[:12]
                 decs.append({"id": tid, "sig": f"{h.get('question_at') or ''}|{q}", "since": ts_of(h.get("question_at")),
                              "due": due_ts(h.get("due")), "due_text": due_text(h.get("due")),
+                             # срок-дата: пинги по сроку — к началу тихих часов дня срока, не ночью
+                             "due_day": bool(DATE_RE.fullmatch(str(h.get("due") or ""))),
                              "title": one_line(h.get("title") or tid)[:120], "recommend": h.get("recommend")})
         long_ids = policy.decisions(decs)
 
