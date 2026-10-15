@@ -2551,17 +2551,20 @@ def push_problem(texts, cwd, moved):
     return None
 
 
-def merge_problem(role, sub, pdir, cwd, moved, args):
+def merge_problem(role, sub, pdir, cwd, moved, args, cmd=""):
     """gh pr merge: координатору из [merge] в policy.toml — в его репозиториях (metis-0027, «да» владельца 15.10).
     Тесты и вердикт argus guard не видит — их проверяет роль; здесь только кто, где и без обхода правил ветки."""
     if role != "domain-coordinator" or sub:
         return "слияние делает владелец"
+    # только списки: строка вместо списка перебиралась бы по буквам, и корнем стал бы «/» (ревью argus 15.10)
     roots = next((_norm(paths) for paths in (load_policy().get("merge") or {}).values()
-                  if _inside(pdir, _norm(paths))), None)
+                  if isinstance(paths, list) and _inside(pdir, _norm(paths))), None)
     if not roots:
         return "слияние делает владелец"
     if moved or not _inside(cwd, roots):
         return "только из папки своего репозитория, без cd в команде"
+    if re.search(r"\bGH_(?:REPO|HOST)\b", cmd):
+        return "без чужого репозитория (GH_REPO, GH_HOST)"
     takes_value = {"-t", "--subject", "-b", "--body", "-F", "--body-file", "-A", "--author-email",
                    "--match-head-commit"}
     skip = False
@@ -2569,12 +2572,29 @@ def merge_problem(role, sub, pdir, cwd, moved, args):
         if skip:
             skip = False
             continue
+        if not a:
+            return "PR указывай номером"
         if a == "--admin" or a in ("-R", "--repo") or a.startswith("--repo=") or a.startswith("-R"):
             return "без --admin и без чужого репозитория (-R)"
         if a in takes_value:
             skip = True
         elif not a.startswith("-") and not a.isdigit():
             return "PR указывай номером"
+    return None
+
+
+def _gh_pr_sub(texts):
+    """Индекс подкоманды `gh pr <sub>`: первое слово после pr, не флаг; значение -R/--repo пропускается."""
+    if texts[:1] != ["pr"]:
+        return None
+    skip = False
+    for i, a in enumerate(texts[1:], 1):
+        if skip:
+            skip = False
+        elif a in ("-R", "--repo"):
+            skip = True
+        elif not a or not a.startswith("-"):
+            return i if a else None
     return None
 
 
@@ -2596,8 +2616,10 @@ def check_push(event, tool, tool_input):
         if name == "gh" and texts[:1] == ["api"] and _gh_api_writes(texts[1:]):
             return ("Правило push: gh api с записью (POST, PUT, PATCH, DELETE) ролям закрыто — слияние, ветки и файлы "
                     "репозитория меняют git push в свою ветку и gh pr create; остальное — владелец.")
-        if name == "gh" and texts[:2] == ["pr", "merge"]:
-            why = merge_problem(role, sub, pdir, cwd, moved, texts[2:])
+        i = _gh_pr_sub(texts) if name == "gh" else None
+        if i is not None and texts[i] == "merge":
+            # `gh pr -R x merge` — флаги до merge тоже его флаги (ревью argus 15.10)
+            why = merge_problem(role, sub, pdir, cwd, moved, texts[1:i] + texts[i + 1:], tool_input.get("command") or "")
             if why:
                 return (f"Правило push: gh pr merge — {why}. Подготовь PR и карточку рисков: тесты, вердикт argus, "
                         "что меняется для клиента.")
@@ -2656,6 +2678,22 @@ CORPUS_REASON = (
 )
 
 
+def _python_target(args):
+    """Что запускает python: ("file", путь), ("-m", модуль) или ("-c", код) и индекс цели. Смотрим только флаги
+    самого python до цели: -W и -X берут значение; что после цели — аргументы скрипта (ревью argus 15.10)."""
+    skip = False
+    for i, a in enumerate(args):
+        if skip:
+            skip = False
+        elif a in ("-W", "-X"):
+            skip = True
+        elif a in ("-m", "-c"):
+            return (a, args[i + 1], i + 1) if i + 1 < len(args) else ("", "", i)
+        elif not a.startswith("-"):
+            return ("file", a, i)
+    return ("", "", len(args))
+
+
 def _corpus_sub(args):
     rest = [a for a in args if a and not a.startswith("-")]
     return rest[0] if rest else ""
@@ -2674,10 +2712,18 @@ def check_corpus_role(event, tool, tool_input):
         base = os.path.basename(name or "")
         if base in CORPUS_SCRIPTS:
             return CORPUS_REASON
-        if re.fullmatch(r"python[\d.]*|pypy[\d.]*", base) and "-m" in args:
-            i = args.index("-m")
-            if i + 1 < len(args) and args[i + 1].split(".")[0] == "expert_corpus":
-                base, args = "corpus", args[i + 2:]
+        if re.fullmatch(r"python[\d.]*|pypy[\d.]*", base):
+            # `python3 tools/krisp_trash.py` — у скриптов корпуса нет права на запуск, так их и зовут (ревью argus 15.10)
+            kind, target, i = _python_target(args)
+            if kind == "-c" and any(x[:-3] in target for x in CORPUS_SCRIPTS):
+                return CORPUS_REASON  # runpy и импорт скрипта корпуса из -c
+            if kind == "file" and os.path.basename(target) in CORPUS_SCRIPTS:
+                return CORPUS_REASON
+            if kind == "-m":
+                if target.rsplit(".", 1)[-1] + ".py" in CORPUS_SCRIPTS:
+                    return CORPUS_REASON
+                if target.split(".")[0] == "expert_corpus":
+                    base, args = "corpus", args[i + 1:]
         if base == "corpus" and role == "hq":
             return ("Правило corpus-role: штабу корпус закрыт (решение владельца 15.10, SEC-13: у Зевса уже есть личное "
                     "и действия наружу, выдача корпуса — чужой текст). Просьбу «по Куклину» передай координатору "
