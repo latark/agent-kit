@@ -665,7 +665,7 @@ def _one(v):
     return "\\" + text if re.match(r"[-*+]\s*\[", text) else text
 
 
-def render_card(head, body, src_rel, t, conflict=None, notes=None):
+def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None):
     head = {k: (_one(v) if isinstance(v, str) else [_one(x) for x in v] if isinstance(v, list) else v)
             for k, v in head.items()}
     lab = label_of(head)
@@ -699,7 +699,10 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None):
         if head.get("why"):
             parts.append(f"**Почему сейчас:** {head['why'].strip()}")
         opts = head.get("options") or []
-        cur = head.get("requested") if risky else head.get("answer")
+        if logged is None:  # без журнала (старые вызовы) — как раньше, из файла
+            cur = head.get("requested") if risky else head.get("answer")
+        else:
+            cur = logged.get("request" if risky else "answer")
         if opts:
             hint = ("Отметьте вариант — это только ваш выбор: действие начнётся после подтверждения словом в окне Зевса."
                     if risky else "Отметьте один вариант — агент получит ответ в течение минуты. Передумали — снимите "
@@ -715,8 +718,9 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None):
         if risky and head.get("requested"):
             parts.append(f"> [!warning] Вы выбрали «{head['requested']}». Подтвердите словом в окне Зевса: "
                          f"«да, {head['requested']}» — без этого агент не начнёт.")
-    if head.get("answer") and not head.get("question"):
-        parts.append(f"**Ваш ответ:** {head['answer']}")
+    shown = head.get("answer") if logged is None else logged.get("answer")
+    if shown and not head.get("question"):
+        parts.append(f"**Ваш ответ:** {shown}")
     m = re.search(r"## Журнал\n(.*)$", body, re.S)
     if m:
         log = [x for x in m.group(1).strip().split("\n") if x.startswith("- ")][-3:][::-1]
@@ -782,6 +786,38 @@ def owner_notes_all(log_path):
     except OSError:
         pass
     return out
+
+
+def owner_answers_all(log_path):
+    """Ваши ответы с доски из журнала owner-log/board.jsonl: {id: {"answer": последний, "request": последний}}.
+    Карточка показывает ответ отсюда, а не из поля answer файла задачи: файл может поправить и агент (metis-0024)."""
+    out = {}
+    try:
+        with open(log_path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if (isinstance(rec, dict) and rec.get("kind") in ("answer", "request")
+                        and isinstance(rec.get("answer"), str) and rec.get("id")):
+                    out.setdefault(rec["id"], {})[rec["kind"]] = rec["answer"]
+    except OSError:
+        pass
+    return out
+
+
+def answer_conflict(head, logged):
+    """Поле answer/requested файла задачи не совпадает с вашим журналом → текст конфликта, иначе None."""
+    risky = head.get("risky") is True
+    field = "requested" if risky else "answer"
+    in_file = head.get(field)
+    in_log = (logged or {}).get("request" if risky else "answer")
+    if in_file and in_file != in_log:
+        return (f"ответ в файле задачи («{str(in_file)[:120]}») не из вашего журнала"
+                + (f" — там «{in_log[:120]}»" if in_log else " — там ответа нет")
+                + ". Карточка показывает ответ из журнала; агент его не видит как ваш.")
+    return None
 
 
 def add_owner_note(body, stamp, note):
@@ -1132,6 +1168,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     # 3. ходы владельца на известных карточках (перенос — сразу: он делается одним движением;
     #    заметку Obsidian сохраняет по Enter или уходу из поля, галочку — щелчком: берём сразу)
     typing = set()
+    answers_by_id = owner_answers_all(log_path)
     for cid, (p, head, body) in present.items():
         st = cards.get(cid)
         if st and digest(p) != st.get("card_hash") and t - mtime[p] < QUIET and owner_added(st.get("rendered"), body):
@@ -1159,6 +1196,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         if cid not in tasks:
             continue
         src_path, src_head, _ = tasks[cid]
+        logged = answers_by_id.get(cid) or {}
         src_moved = digest(src_path) != st.get("src_hash")
         answer = checked_option(body) if src_head.get("options") else None
         if answer and answer != "?" and answer not in [_one(o) for o in src_head.get("options") or []]:
@@ -1202,7 +1240,8 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             _owner_log(log_path, t, kind="note", id=cid, text=note.strip()[:4000])
             done_lines.append(f"{cid}: заметка владельца передана")
         risky = src_head.get("risky") is True
-        current = src_head.get("requested") if risky else src_head.get("answer")
+        # текущий ответ — из журнала, а не из файла: иначе поддельное answer в файле глушило бы вашу галочку
+        current = logged.get("request" if risky else "answer")
         if answer and answer != "?" and answer != current:
             if risky:  # согласие на рискованное — только словом в окне Зевса; галочка — лишь выбор
                 task_set(pantheon, t, cid, {"requested": answer},
@@ -1247,6 +1286,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     # 6. перерисовать карточки: задачи и заявки направлений
     names, items = {}, []
     notes_by_id = owner_notes_all(log_path)
+    answers_by_id = owner_answers_all(log_path)
     for tid, (p, h, b) in sorted(tasks.items()):
         if _live(h, t):
             items.append((tid, card_name(h), p, h, b))
@@ -1263,7 +1303,12 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         if h is None:
             card, cbody = render_inbox_card(inbox[cid], projects.get(inbox[cid]["direction"]), st.get("conflict"))
         else:
-            card, cbody = render_card(h, b, rel(src), t, st.get("conflict"), notes_by_id.get(cid))
+            forged = answer_conflict(h, answers_by_id.get(cid))
+            if forged:
+                alert(f"answer-mismatch-{cid}", str(h.get("requested") if h.get("risky") is True else h.get("answer")),
+                      f"конфликт ответа: {h.get('title')} ({cid}) — {forged}", "board")
+            card, cbody = render_card(h, b, rel(src), t, " · ".join(x for x in (st.get("conflict"), forged) if x) or None,
+                                      notes_by_id.get(cid), answers_by_id.get(cid) or {})
         target = os.path.join(board, name + ".md")
         old = present.get(cid)
         if old and (digest(old[0]) != seen.get(cid) or cid in typing):

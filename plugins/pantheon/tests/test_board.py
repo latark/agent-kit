@@ -209,6 +209,26 @@ def main():
     run(env, "board", t=T0 + 380)
     h, text = head_of(src("metis-pantheon", "metis-0002"))
     check("смена ответа: новый ответ, в журнале — каким был", h.get("answer") == "В knowledge" and "был «В копии»" in text)
+    # подделка ответа прямой правкой файла задачи (metis-0024): карточка — из журнала доски, конфликт и тревога
+    sp = src("metis-pantheon", "metis-0002")
+    forged = open(sp, encoding="utf-8").read()
+    forged = forged.replace('answer: "В knowledge"', 'answer: "В копии"').replace("answer: В knowledge", "answer: В копии")
+    open(sp, "w", encoding="utf-8").write(forged)
+    rf = run(env, "board", t=T0 + 382)
+    t2 = open(c2, encoding="utf-8").read()
+    alerts = rf.stdout
+    check("подделка answer в файле: карточка отмечает ответ из журнала, конфликт в карточке, тревога",
+          "- [x] В knowledge" in t2 and "- [ ] В копии" in t2 and "не из вашего журнала" in t2
+          and "конфликт ответа" in alerts and "metis-0002" in alerts)
+    h, _ = head_of(sp)
+    check("подделка answer: тик не принимает её за ваш ответ и не переписывает файл", h.get("answer") == "В копии")
+    # ваша галочка на подделанный вариант — применяется (текущий ответ берётся из журнала, а не из файла)
+    open(c2, "w", encoding="utf-8").write(t2.replace("- [x] В knowledge", "- [ ] В knowledge").replace("- [ ] В копии", "- [x] В копии"))
+    run(env, "board", t=T0 + 384)
+    alog = [json.loads(x) for x in open(os.path.join(state, "owner-log", "board.jsonl")) if '"answer"' in x]
+    t2 = open(c2, encoding="utf-8").read()
+    check("галочка на вариант, совпавший с подделкой: в журнал доски, конфликт снят",
+          alog[-1].get("answer") == "В копии" and alog[-1].get("id") == "metis-0002" and "не из вашего журнала" not in t2)
     # рискованный вопрос: галочка — только выбор, подтверждение словом
     run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Отправить коммиты", "--status", "waiting",
         "--waiting-on", "human", "--next", "ваш ответ", "--question", "Отправить?", "--option", "Да", "--option", "Нет",
