@@ -678,7 +678,7 @@ def test_security_0100():
     folder = e.direction("g-dir")
     shutil.rmtree(os.path.join(folder, ".git"))
     g = lambda *a, cwd=folder: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd,
-                                              capture_output=True, text=True, env=dict(os.environ, HOME=e.home))
+                                              capture_output=True, text=True, env={"PATH": os.environ["PATH"], "HOME": e.home})  # без GIT_*/PANTHEON_* внешней среды
     g("init", "-q", "-b", "main")
     g("commit", "-q", "--allow-empty", "-m", "x")
     for n in ("w-ok", "w-bad"):

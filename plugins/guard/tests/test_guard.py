@@ -39,10 +39,12 @@ NEEDS_POLICY = {"Метида правит карту решений", "promethe
 
 
 def setup(home):
+    # ai/knowledge/.git нужен: без него guard ищет репозиторий вверх по дереву (_git_top) и находит чужой .git над
+    # временной папкой (при сборке вне песочницы) — «mnemo-brain коммитит» тогда deny (metis-0090)
     for d in ("ai/pantheon/.git", "ai/pantheon/directions/athena-broker", "ai/pantheon/directions/hermes-alex/inbox",
               "ai/pantheon/scout", "ai/pantheon-view", ".local/state/pantheon/owner-log", ".claude/pantheon",
               "projects/brokerAssistantApp/app", "projects/alexbroker", "projects/agent-kit",
-              "projects/workshop/visa", "ai/knowledge", ".claude/agents", ".claude/skills/x", ".claude/.git",
+              "projects/workshop/visa", "ai/knowledge", "ai/knowledge/.git", ".claude/agents", ".claude/skills/x", ".claude/.git",
               "projects/brokerAssistantApp/.claude"):
         os.makedirs(os.path.join(home, d), exist_ok=True)
     os.makedirs(os.path.join(home, "ai/pantheon/directions/metis-pantheon/tasks"), exist_ok=True)
