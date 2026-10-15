@@ -502,6 +502,37 @@ def merge_security_checks(home, MERGE_OK, cases):
     h = variant(policy_fn=lambda t: 'merge_client = "x"\n' + no_client(t))  # ключ верхнего уровня — до таблиц
     got = M(h, "gh pr merge 1", pdir=alex)
     check(f"[merge_client] не таблицей — как без неё (0.4.7): Гермес — нельзя: {got}", got == "deny")
+    # --- [merge_protect] consent = false (metis-0049, guard 0.5.2): поштучное «да» на защиты снято, остальное — как было
+    tg = "projects/other/tg-read-dev"
+    h = variant(policy_fn=lambda t: t + "[merge_protect]\nconsent = false\n")
+    os.makedirs(os.path.join(h, ak, "sub"), exist_ok=True)
+    got = (M(h, "gh pr merge 5"), M(h, "gh pr merge 3 -R latark/tg-read", cwd=tg))
+    check(f"consent = false: Метида сливает защиты без --subject и -R из [merge_repos] без согласия — можно, "
+          f"папки merge-consent/ нет: {got}",
+          got == (MERGE_OK, MERGE_OK) and not os.path.lexists(mark_dir(h)))
+    got = (M(h, "gh pr merge 5", pdir=br, cwd=ak), M(h, "gh pr merge 5", pdir=br, cwd=ak + "/sub"),
+           run(h, ak, "domain-coordinator", "Bash", {"command": "gh pr merge 5"}, sub=True),
+           run(h, ak, "hephaestus-pantheon", "Bash", {"command": "gh pr merge 5"}, sub=True),
+           M(h, "gh pr merge 5 --auto"), M(h, "gh pr merge 5 6"), M(h, "gh pr merge 3 -R latark/tg-read --auto", cwd=tg),
+           M(h, "gh pr merge 3 -R latark/alexbroker", cwd=tg), M(h, "gh pr merge 5 -R latark/agent-kit", cwd=tg),
+           M(h, f"cd {h}/{ak} && gh pr merge 5", cwd=tg), M(h, "GH_REPO=latark/agent-kit gh pr merge 5"))
+    check(f"consent = false: другой координатор в agent-kit, субагенты Метиды, --auto, два номера, -R вне "
+          f"[merge_repos], cd и GH_REPO — отказ: {got}", got == ("deny",) * 11)
+    out = M(h, "gh pr merge 5 --auto", raw=True)
+    check("consent = false: отказ не просит «да» владельца, а называет [merge_protect]",
+          deny(out) and (("[merge_protect]" in out and "окн" not in out and "--subject" not in out) or not allow_ok))
+    check(f"consent = false: отметок в merge-consent/ не появилось: {marks(h)}", not os.path.lexists(mark_dir(h)))
+    # «да» снимается только булевым false в таблице: остальное — как раньше, --subject и согласие обязательны
+    for label, fn in (("consent = true", lambda t: t + "[merge_protect]\nconsent = true\n"),
+                      ("таблица без ключа", lambda t: t + "[merge_protect]\n"),
+                      ('consent = "false"', lambda t: t + '[merge_protect]\nconsent = "false"\n'),
+                      ("consent = 0", lambda t: t + "[merge_protect]\nconsent = 0\n"),
+                      ('merge_protect = "x" не таблицей', lambda t: 'merge_protect = "x"\n' + t)):
+        h = variant(policy_fn=fn)
+        out = M(h, "gh pr merge 5", raw=True)
+        got = (M(h, "gh pr merge 3 -R latark/tg-read", cwd=tg), M(h, 'gh pr merge 5 -t "[metis-0038] x"'))
+        check(f"{label}: без --subject — прежний отказ, -R у Метиды без согласия — отказ, с согласием — можно: {got}",
+              deny(out) and ("--subject" in out or not allow_ok) and got == ("deny", MERGE_OK))
     # --- миграция отметок: формат v1, мусор в папке, старый журнал ee8f356, нет папки состояния ---
     cmd = 'gh pr merge 5 -t "[metis-0038] x"'
     reset_used(home)
