@@ -126,7 +126,22 @@ def main():
     check("tool-results: чужие закрыты правилом Read, свои — нет",
           all(rd_closed(os.path.join(projects, n, "s1", "tool-results", "x.txt")) for n in foreign)
           and not any(rd_closed(os.path.join(projects, n, "s1", "tool-results", "x.txt")) for n in mine))
+    # P0-1 (metis-0060): выгрузки Telegram legal-watch (cache, inbox) штабу закрыты — песочница и правило Read
+    tg = ("~/projects/legal-watch/cache", "~/projects/legal-watch/inbox")
+    check("окно штаба: legal-watch/cache и inbox — в denyRead песочницы и в правилах Read",
+          all(x in fs2["denyRead"] and f"Read({x}/**)" in hq2["permissions"]["deny"] for x in tg)
+          and all(os.path.join(tmp, x[2:]) in fs2["denyRead"] for x in tg))
+    deny_tg = [glob_re(os.path.join(tmp, x[len("Read(~/"):-1])) for x in hq2["permissions"]["deny"]
+               if x.startswith("Read(~/projects/legal-watch")]
+    check("окно штаба: файл выгрузки legal-watch/cache/telegram/… закрыт правилом Read, папка src/ — нет",
+          any(m.fullmatch(os.path.join(tmp, "projects/legal-watch/cache/telegram/ch.json")) for m in deny_tg)
+          and not any(m.fullmatch(os.path.join(tmp, "projects/legal-watch/src/a.py")) for m in deny_tg))
     sa = json.load(open(os.path.join(state, "settings", "athena-broker.json")))
+    check("окно направления: legal-watch штабу закрыт, координатору — нет",
+          not any("legal-watch" in x for x in sa["sandbox"]["filesystem"]["denyRead"]))
+    gm = [g["matcher"] for w in (hq2, sa) for g in w["hooks"]["PreToolUse"]]
+    check("строгий guard окон штаба и направления: matcher с Agent|Task|Skill (hq-telegram, chiron)",
+          len(gm) == 2 and all({"Agent", "Task", "Skill", "Bash", "Read"} <= set(m.split("|")) for m in gm))
     check("окно направления: allowRead нет, запретов чтения — единицы (координаторы не раздуваются)",
           "allowRead" not in sa["sandbox"]["filesystem"] and len(sa["sandbox"]["filesystem"]["denyRead"]) < 20)
 
