@@ -1497,6 +1497,22 @@ def wake_one(rest, who="владелец"):
 
 # --- проверка опор (SEC-16) -------------------------------------------------------------------------------
 
+def _managed_guard_active():
+    """Управляемые настройки сами вызывают guard с --managed (то же условие, что managed_guard_active() в guard.py,
+    файл — P.MANAGED на момент вызова): тогда и проба зовёт его так же, как живой хук."""
+    try:
+        with open(P.MANAGED, encoding="utf-8") as fh:
+            data = json.load(fh)
+        for group in ((data.get("hooks") or {}).get("PreToolUse") or []):
+            for h in group.get("hooks") or []:
+                cmd = h.get("command") or ""
+                if "guard.py" in cmd and "--managed" in cmd:
+                    return True
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False
+    return False
+
+
 def infra_check():
     """Лёгкие проверки без модели: guard отказывает на запретном, хуки плагина на месте, claude agents отвечает,
     управляемые настройки совпадают с guard. Живые проверки (пробуждение после /clear, сообщение между сессиями,
@@ -1510,7 +1526,8 @@ def infra_check():
     if g and os.path.exists(g):
         probe = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "agent_type": "dev-haiku",
                             "cwd": P.HOME, "tool_input": {"command": "git push --force origin main"}})
-        r = subprocess.run(["python3", "-I", g], input=probe, capture_output=True, text=True, timeout=30)
+        argv = ["python3", "-I", g] + (["--managed"] if _managed_guard_active() else [])
+        r = subprocess.run(argv, input=probe, capture_output=True, text=True, timeout=30)
         add(r.returncode == 2 or '"deny"' in r.stdout, "guard отказывает на git push --force (роль dev-haiku)")
     else:
         add(False, "guard найден")
