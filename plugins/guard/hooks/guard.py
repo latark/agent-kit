@@ -2568,13 +2568,16 @@ MERGE_PRODUCT = ("Продукт для клиентов сливай после
                  "строка Зевсу «что ушло», откат одной командой в STATUS.")
 MERGE_PROTECT = ("Защиты сливает только Метида по «да» владельца в окне вопросов Зевса: вопрос владельцу через Зевса "
                  "окном вопросов «[metis-NNNN] Слить https://github.com/<owner>/<repo>/pull/N?», затем "
-                 "gh pr merge N --subject \"[metis-NNNN] …\". Одно «да» — одно слияние.")
+                 "gh pr merge N --subject \"[metis-NNNN] …\". Вариант согласия Зевс пишет «Да — …». Одно «да» — одно "
+                 "слияние.")
 MERGE_OWNER = "Слияние делает владелец."
 MERGE_CONSENT_ID = re.compile(r"\[(metis-\d{4})\]")
 MERGE_CONSENT_AGE = 86400  # согласие действует сутки: «да» на позавчерашний вопрос — не «да» на сегодняшнее слияние
 # PR в первой строке вопроса: ссылка github.com/<owner>/<repo>/pull/<N> или <owner>/<repo>#<N>
 MERGE_PR_REF = re.compile(r"github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)|(?<![\w./#-])([\w.-]+)/([\w.-]+)#(\d+)", re.I)
-MERGE_NO = re.compile(r"не(?:т|(?![а-яёa-z0-9]))", re.I)  # «Нет…», «Не …», «Не» — не согласие
+# согласие — только ответ, который начинается с «Да» (без учёта регистра, после «Да» не буква): «Да — слить», «да»,
+# «ДА.»; «Дальше», «Отложить», «Отмена», «No», «Нет — …», пустой — нет (решение Метиды «А», 15.10)
+MERGE_YES = re.compile(r"да(?![а-яёa-z])", re.I)
 MERGE_USED_FILE = os.path.join(STATE_DIR, "logs", "merge-consent-used.jsonl")
 MERGE_AMBIGUOUS = "\0два направления"
 # согласия, которые использует этот вызов: в журнал они попадают, только если весь вызов разрешён (main)
@@ -2625,9 +2628,38 @@ def _git_remotes(d):
     return sorted({_remote_id(ln.split()[1]) for ln in r.stdout.splitlines() if len(ln.split()) >= 2})
 
 
+def _gh_resolved(d):
+    """Значения remote.<имя>.gh-resolved (gh repo set-default): gh может слить туда, а не в remote. «base» — это
+    сам remote, его пропускаем. → список owner/repo; код 1 (ключей нет) — пусто; другой сбой — None."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    try:
+        r = subprocess.run(["git", "-C", d, "config", "--get-regexp", r"^remote\..*\.gh-resolved$"],
+                           capture_output=True, text=True, timeout=3, env=env)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if r.returncode == 1 and not r.stdout.strip():
+        return []
+    if r.returncode != 0:
+        return None
+    out = []
+    for ln in r.stdout.splitlines():
+        parts = ln.split(None, 1)
+        if len(parts) != 2:
+            return None
+        if parts[1].strip().lower() != "base":
+            out.append(_repo_arg(parts[1]))
+    return out
+
+
 def _merge_domains():
-    """Реестр направлений для слияния: {имя: [корни]}; None — реестр пуст или битый (тогда слияние закрыто)."""
-    data = load_domains()
+    """Реестр направлений для слияния: {имя: [корни]}; None — реестр пуст или битый (тогда слияние закрыто).
+    Только domains.json, без отката на старый ~/.claude/hooks/domains.json, как у load_domains(): в старом реестре
+    направления шире, и с ним Гермес слил бы в legal-watch (ревью argus 210766a)."""
+    try:
+        with open(DOMAINS_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
     dom = data.get("domains") if isinstance(data, dict) else None
     if not isinstance(dom, dict) or not dom:
         return None
@@ -2659,8 +2691,8 @@ def owner_consent(qid, number, repos):
     """«Да» владельца на вопрос «[qid] Слить <PR>?» в окне вопросов Зевса за сутки → (время записи, репозиторий PR,
     None) или (None, None, причина). Разбор — как у `pantheon consent` (guard ставится отдельным плагином и его не
     импортирует): заголовок ровно «· окно вопросов» (его пишет хук answer плагина pantheon), тело начинается с
-    «вопрос: [qid]», в первой строке — этот PR (номер и репозиторий команды). Свободный текст, галочка на доске,
-    ответ «Нет…»/«Не …» — не согласие. Ответов на этот id и PR несколько — решает последний. Любой сбой — отказ:
+    «вопрос: [qid]», в первой строке — этот PR (номер и репозиторий команды, owner/repo без хоста). Свободный текст, галочка на доске,
+    любой ответ, кроме «Да…», — не согласие. Ответов на этот id и PR несколько — решает последний. Любой сбой — отказ:
     файл не читается, время записи не разобрать, запись из будущего."""
     try:
         with open(os.path.join(STATE_DIR, "owner-log", "zeus.md"), encoding="utf-8") as fh:
@@ -2696,14 +2728,14 @@ def owner_consent(qid, number, repos):
         lines = body.split("\n")
         answer = lines[1][len("ответ:"):].strip() if len(lines) > 1 and lines[1].startswith("ответ:") else None
         # «да» — только на вопрос ровно об одном PR: одно «да» на два PR — не ответ ни на один
-        found.append((t, bool(answer) and not MERGE_NO.match(answer) and len(refs) == 1, m.group(1), mine[0]))
+        found.append((t, bool(answer) and bool(MERGE_YES.match(answer)) and len(refs) == 1, m.group(1), mine[0]))
     if not found:
         return None, None, (f"нет «да» владельца на [{qid}] про PR #{number} этого репозитория в окне вопросов Зевса "
                             "за сутки (галочка на доске и свободный текст не годятся, в вопросе нужна ссылка на PR)")
     last = max(x[0] for x in found)
     top = [x for x in found if x[0] == last]
     if not all(x[1] for x in top):
-        return None, None, f"последний ответ владельца на [{qid}] про PR #{number} — не «да» (или вопрос о нескольких PR)"
+        return None, None, f"последний ответ владельца на [{qid}] про PR #{number} — не «Да…» (или вопрос о нескольких PR); вариант согласия Зевс пишет «Да — …»"
     return top[0][2], top[0][3], None
 
 
@@ -2888,6 +2920,11 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
         if not cmd_repos:
             return ("не понять репозиторий: папка не репозиторий git, у него нет remote или git не ответил. "
                     + (MERGE_PROTECT if is_metis else MERGE_INTERNAL))
+        resolved = _gh_resolved(cwd)
+        if resolved is None:
+            return ("не понять репозиторий: git config (gh-resolved, gh repo set-default) не читается. "
+                    + (MERGE_PROTECT if is_metis else MERGE_INTERNAL))
+        cmd_repos = sorted(set(cmd_repos) | set(resolved))
     # защиты — по пути и по репозиторию, раньше реестра: domains.json может по ошибке отдать agent-kit другому
     protect = _inside(cwd, metis_roots) or any(_repo_tail(r) in protect_repos for r in cmd_repos)
     if protect:
@@ -2932,7 +2969,7 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
         if not subjects or None in ids or len(ids) != 1:
             return f"{what} — только с --subject \"[metis-NNNN] …\" (id вопроса владельцу). {MERGE_PROTECT}"
         qid = ids.pop()
-        entry, repo, why = owner_consent(qid, numbers[0], set(cmd_repos))
+        entry, repo, why = owner_consent(qid, numbers[0], {_repo_tail(r) for r in cmd_repos})
         if why:
             return f"на {what} {why}. {MERGE_PROTECT}"
         event = event or {}

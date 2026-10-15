@@ -119,6 +119,15 @@ def write_zeus(home):
         (-600, " · окно вопросов", f"вопрос: [metis-0058] Слить {ak5}?\nответ: Да"),
         (650, " · окно вопросов", "вопрос: [metis-0038] Слить latark/agent-kit#5? [metis-0039]\nответ: Да"),
         (650, " · окно вопросов", f"вопрос: [METIS-0064] Слить {ak5}?\nответ: Да"),
+        # согласие — только ответ «Да…» (решение Метиды «А», 15.10)
+        (650, " · окно вопросов", f"вопрос: [metis-0070] Слить {ak5}?\nответ: Отложить"),
+        (650, " · окно вопросов", f"вопрос: [metis-0071] Слить {ak5}?\nответ: Отмена"),
+        (650, " · окно вопросов", f"вопрос: [metis-0072] Слить {ak5}?\nответ: No"),
+        (650, " · окно вопросов", f"вопрос: [metis-0073] Слить {ak5}?\nответ: Дальше"),
+        (650, " · окно вопросов", f"вопрос: [metis-0074] Слить {ak5}?\nответ: Да — слить"),
+        (650, " · окно вопросов", f"вопрос: [metis-0075] Слить {ak5}?\nответ: да"),
+        (650, " · окно вопросов", f"вопрос: [metis-0076] Слить {ak5}?\nответ: ДА."),
+        (650, " · окно вопросов", f"вопрос: [metis-0077] Слить {ak5}?\nответ: "),
     ]
     with open(os.path.join(home, ".local/state/pantheon/owner-log/zeus.md"), "w") as fh:
         fh.write("".join(f"## {ago if isinstance(ago, str) else stamp(ago)}{note}\n{body}\n\n"
@@ -138,6 +147,13 @@ def merge_fixtures(home):
     git_repo(j("projects/alexbroker/alias-clone"), "main", "git@gh-work:latark/agent-kit.git")
     git_repo(j("projects/alexbroker/no-remote"), "main", None)
     os.makedirs(j("projects/agent-kit/sub"), exist_ok=True)
+    git_repo(j("projects/other/tg-read-dev/alias"), "main", "git@gh-work:latark/agent-kit.git")
+    git_repo(j("projects/alexbroker/fork"), "main", "git@github.com:someone/agent-kit-fork.git")
+    subprocess.run(["git", "-C", j("projects/alexbroker/fork"), "config", "remote.origin.gh-resolved",
+                    "latark/agent-kit"], check=True)
+    git_repo(j("projects/alexbroker/base-clone"), "main", "git@github.com:latark/alexbroker.git")
+    subprocess.run(["git", "-C", j("projects/alexbroker/base-clone"), "config", "remote.origin.gh-resolved", "base"],
+                   check=True)
     os.symlink(j("projects/agent-kit"), j("projects/alexbroker/ak-link"))
     git = ["git", "-C", j("projects/agent-kit"), "-c", "user.name=t", "-c", "user.email=t@example.com"]
     subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "init"], check=True)
@@ -335,6 +351,23 @@ def merge_security_checks(home, MERGE_OK, cases):
     out = M(h, "gh pr merge 1", pdir="projects", cwd="projects/alexbroker", raw=True)
     check("сбой — отказ: папки одного направления строкой — широкий корень не получает его папку",
           deny(out) and ("domains.json" in out or not allow_ok))
+    # ревью argus 210766a: domains.json битый или удалён — без отката на старый ~/.claude/hooks/domains.json, где
+    # направление шире (broker = brokerAssistantApp + alexbroker + legal-watch): Гермес слил бы в legal-watch
+    legacy = {"domains": {"broker": ["~/projects/brokerAssistantApp", "~/projects/alexbroker", "~/projects/legal-watch"]}}
+    for label, broken in (("битый", True), ("удалён", False)):
+        h = variant()
+        os.makedirs(os.path.join(h, ".claude/hooks"), exist_ok=True)
+        with open(os.path.join(h, ".claude/hooks/domains.json"), "w") as fh:
+            json.dump(legacy, fh)
+        dom = os.path.join(h, ".local/state/pantheon/domains.json")
+        if broken:
+            with open(dom, "w") as fh:
+                fh.write("{не json")
+        else:
+            os.remove(dom)
+        out = M(h, "gh pr merge 2", pdir="projects/alexbroker", cwd="projects/legal-watch", raw=True)
+        check(f"старый реестр: domains.json {label}, ~/.claude/hooks/domains.json есть — Гермес в legal-watch — отказ",
+              deny(out) and ("domains.json" in out or not allow_ok))
     # папка защит с .git, у которой remote не читается, — отказ всем; без .git — защищена только по пути
     h = variant(policy_fn=lambda t: t.replace('metis-pantheon = ["~/projects/agent-kit"]',
                                               'metis-pantheon = ["~/projects/agent-kit", "~/projects/broken-prot"]'))
@@ -908,6 +941,21 @@ def main():
          "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0039] x"')),
         ("регистр: [METIS-0064] в журнале, [metis-0064] в subject — тот же id, можно", MERGE_OK, ak,
          "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0064] x"')),
+        ("ответ «Отложить» — отказ", "deny", ak, "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0070] x"')),
+        ("ответ «Отмена» — отказ", "deny", ak, "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0071] x"')),
+        ("ответ «No» — отказ", "deny", ak, "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0072] x"')),
+        ("ответ «Дальше» — отказ", "deny", ak, "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0073] x"')),
+        ("ответ пустой — отказ", "deny", ak, "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0077] x"')),
+        ("ответ «Да — слить» — можно", MERGE_OK, ak, "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0074] x"')),
+        ("ответ «да» — можно", MERGE_OK, ak, "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0075] x"')),
+        ("ответ «ДА.» — можно", MERGE_OK, ak, "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0076] x"')),
+        # ревью argus 210766a: согласие сверяется по owner/repo без хоста; gh-resolved — тоже репозиторий команды
+        ("ssh-псевдоним: клон agent-kit через gh-work, «да» на latark/agent-kit#5 — можно", MERGE_OK, ak,
+         "domain-coordinator", False, B('gh pr merge 5 -t "[metis-0038] x"'), "projects/other/tg-read-dev/alias"),
+        ("gh-resolved: клон форка у Гермеса, set-default = latark/agent-kit — отказ", "deny", alex, "domain-coordinator",
+         False, B("gh pr merge 5"), alex + "/fork"),
+        ("gh-resolved: «base» — сам remote, своё слияние — можно", MERGE_OK, alex, "domain-coordinator", False,
+         B("gh pr merge 5"), alex + "/base-clone"),
         ("регистр: [METIS-0064] в subject — отказ (subject — только строчными)", "deny", ak, "domain-coordinator",
          False, B('gh pr merge 5 -t "[METIS-0064] x"')),
         # --- dev-server: исключение для разработчика и talos в worktree (ROLE-23) ---
