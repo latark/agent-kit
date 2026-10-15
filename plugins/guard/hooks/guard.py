@@ -11,7 +11,9 @@
   tg-secret    — не читать ключ сессии tg-read из Связки ключей ни командой, ни своим кодом, и не подключать
                  tg_read как модуль (перенесено 14.10 из старого ~/.claude/hooks/guard.py, коммит 8672c67);
   domain       — субагент, тиммейт, координатор и сессия мастерской пишут только в своё направление;
-  pantheon-acl — запись в ~/ai/pantheon по карте прав; копия ~/ai/pantheon-view и ~/.local/state/pantheon — ни одной роли;
+  pantheon-acl — запись в ~/ai/pantheon по карте прав; ~/.local/state/pantheon — ни одной роли; файлы задач
+                 (directions/*/tasks/, inbox/tasks/) — ни одной роли, штабу тоже: только `pantheon task`; доска
+                 ~/ai/pantheon-view и журналы ваших слов owner-log — ни одной сессии Claude, без роли тоже (metis-0044);
   protect-config — защиты (хуки, роли, плагины, policy.toml, настройки, sync.sh, ~/.zshrc) правит только
                  metis-pantheon в своей сессии; остальные роли и любые субагенты — нет (SEC-14);
   private      — личное (me/, ключи git-crypt, журнал штаба) читают и пишут только hq, chiron и mnemo-brain (SEC-11);
@@ -397,8 +399,8 @@ def check_nextjs(event):
 
 # --- domain и pantheon-acl ----------------------------------------------------
 # Кто пишет куда. Роль — agent_type события; субагент или тиммейт — есть agent_id. Ваши сессии без
-# роли не ограничены. Роли Пантеона — PANTHEON_ROLES (hq, domain-coordinator, workshop, нижние роли);
-# встроенные и ваши собственные субагенты живут по прежнему правилу domain.
+# роли не ограничены, кроме доски и журналов ваших слов (pantheon-acl ниже). Роли Пантеона — PANTHEON_ROLES (hq,
+# domain-coordinator, workshop, нижние роли); встроенные и ваши собственные субагенты живут по прежнему правилу domain.
 # Направление координатора guard узнаёт по папке, где запущена сессия (CLAUDE_PROJECT_DIR не меняется
 # всю сессию, в отличие от cwd), а не по agent_type: у всех семи координаторов он один.
 #   domain       — субагент, тиммейт и любая роль Пантеона, кроме штаба, пишут только в своё направление:
@@ -406,9 +408,14 @@ def check_nextjs(event):
 #                  временные папки, ~/.claude/agent-memory и agent_extra из policy.toml. Мастерская — папка
 #                  запуска. Записи в ~/ai/pantheon проверяет pantheon-acl.
 #   pantheon-acl — запись в ~/ai/pantheon по карте прав (STATE-06 карты решений; карта — здесь, в коде, а не в
-#                  domains.json: его собирают из реестра, который правит штаб); в копию ~/ai/pantheon-view и в
-#                  ~/.local/state/pantheon (метки тика, журналы owner-log, domains.json) не пишет никто, кроме
-#                  ваших сессий без роли; git в ~/ai/pantheon роли не трогают — коммитит тик; команды пульта
+#                  domains.json: его собирают из реестра, который правит штаб); файлы задач (directions/*/tasks/,
+#                  inbox/tasks/) роли и любые субагенты, штаб тоже, меняют только командой `pantheon task`: прямой
+#                  правкой вписали бы answer мимо журнала ваших слов (metis-0044); в ~/.local/state/pantheon (метки
+#                  тика, domains.json) пишут только ваши сессии без роли, а в доску ~/ai/pantheon-view (её правите вы
+#                  в Obsidian) и в журналы ваших слов owner-log (их пишут хук и тик) — ни одна сессия Claude, без роли
+#                  тоже (guard 0.5.1). У сессии без роли запрет — по явным целям внутри этих двух папок: цель «не
+#                  разобрать» и запись в папку выше ей не запрещены; git в ~/ai/pantheon роли не трогают — коммитит
+#                  тик; команды пульта
 #                  (`pantheon archive|install|uninstall|commit|start|wake|roles`, `pantheon jobs pause|resume|disable|
 #                  enable|renew`) — только штаб и ваши сессии; `pantheon approve` (заранее разрешённое) — только ваши.
 # Привилегии (кто mnemo-brain и metis-pantheon, у кого доступ к me/) — в ~/.claude/pantheon/policy.toml:
@@ -431,6 +438,7 @@ import stat
 import unicodedata
 
 STATE_DIR = os.path.realpath(os.path.join(HOME, ".local", "state", "pantheon"))
+OWNER_LOG = os.path.join(STATE_DIR, "owner-log")  # журналы ваших слов: пишут хук и тик, ни одна сессия Claude
 DOMAINS_FILE = os.path.join(STATE_DIR, "domains.json")
 LEGACY_DOMAINS_FILE = os.path.join(HOME, ".claude", "hooks", "domains.json")
 POLICY_FILE = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
@@ -2084,6 +2092,22 @@ def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
     hq = role == "hq" and not sub
     if rel in (".", "") or top in (".git", ".gitattributes", ".gitignore"):
         return False, "git и служебные файлы ~/ai/pantheon роли не трогают: коммитит задача тика pantheon-commit"
+    parts = rel.split("/")
+    # файлы задач (metis-0044): directions/<имя>/tasks/ и входящие владельца inbox/tasks/ — только `pantheon task`,
+    # всем ролям и субагентам, штабу тоже. Можно создать ещё не существующую папку tasks/ и заглушку .gitkeep или
+    # .keep в ней (пустую папку тик в git не положит): ответа в них нет
+    tasks_at = 2 if top == "directions" else 1 if top == "inbox" else 0
+    if tasks_at and len(parts) > tasks_at and parts[tasks_at] == "tasks":
+        stub = len(parts) == tasks_at + 2 and parts[-1] in (".gitkeep", ".keep") and not exists
+        if (len(parts) > tasks_at + 1 or exists) and not stub:
+            return False, ("файлы задач меняет только команда `pantheon task` (new, set, claim): прямой правкой поле "
+                           "answer попало бы в задачу мимо журнала слов владельца. Ответ владельца пишет тик из его журнала")
+    # запись в папку над tasks/ целиком (cp -R, rsync, tar -C, unzip -d в directions/<имя>, в directions или inbox)
+    # положила бы в tasks/ что угодно: такой цели нет, назови точный файл. Новую папку направления создать можно
+    if tasks_at and (len(parts) <= tasks_at and (exists or parts[-1] == ANY_FILE)
+                     or len(parts) == tasks_at + 1 and parts[-1] == ANY_FILE):
+        return False, (f"запись в {rel} целиком задела бы файлы задач в tasks/ — назови точный файл "
+                       "(cp a.md <папка>/a.md); задачи меняет только `pantheon task`")
     if top == "alerts.md":
         return False, "alerts.md только дописывается — командой `pantheon alert \"<строка>\"`; архив — `pantheon archive`"
     if top == "system.md":
@@ -2098,7 +2122,6 @@ def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
     if top in HQ_ONLY:
         return hq, f"{top} правит только штаб (hq)"
     if top == "directions":
-        parts = rel.split("/")
         target = parts[1] if len(parts) > 1 else ""
         if hq:
             return True, ""
@@ -2119,10 +2142,26 @@ UNRESOLVED_REASON = ("Правило domain/pantheon-acl: цель записи 
                      "защита видит, куда идёт запись.")
 
 
+OWNER_RECORDS_REASON = ("Правило pantheon-acl: в доску ~/ai/pantheon-view (карточки, ваши галочки и заметки) и в "
+                        "журналы ваших слов ~/.local/state/pantheon/owner-log не пишет ни одна сессия Claude, и без "
+                        "роли тоже: доску владелец правит в Obsidian, журналы пишут хук и тик. Иначе ответ на "
+                        "карточке можно подделать мимо журнала. Задачу меняй командой `pantheon task`; нужна правка "
+                        "доски — попроси владельца сделать её в Obsidian.")
+
+
+def owner_records_problem(event, tool, tool_input):
+    """Сессия без роли (metis-0044): запрет — только по явным целям внутри доски и owner-log. Цель «не разобрать» и
+    запись в папку выше (`cp a ~/` даёт цель «~») не запрещаются: иначе встали бы обычные команды ваших сессий."""
+    _, targets = write_targets(event, tool, tool_input)
+    if any(p != UNRESOLVED and _inside(p, [PANTHEON_VIEW, OWNER_LOG]) for p in targets):
+        return OWNER_RECORDS_REASON
+    return None
+
+
 def check_pantheon(event, tool, tool_input):
     role, sub, pdir = who(event)
     if not role and not sub:
-        return None  # ваша сессия без роли
+        return owner_records_problem(event, tool, tool_input)  # ваша сессия без роли: только доска и owner-log
     # Карта прав ~/ai/pantheon — для ролей Пантеона и для любого субагента: встроенный субагент координатора
     # (general-purpose и т. п.) иначе обходил бы её. Ваши собственные роли главной сессии — как ваши сессии.
     pantheon_role = is_pantheon_role(role) or sub
