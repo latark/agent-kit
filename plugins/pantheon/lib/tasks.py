@@ -85,11 +85,15 @@ def _scalar(v):
         body = v[1:-1].strip()
         if not body:
             return []
-        out, cur, q = [], "", None
+        out, cur, q, esc = [], "", None, False
         for ch in body:
             if q:
                 cur += ch
-                if ch == q:
+                if esc:  # \" внутри "…" — экранированная кавычка, так её пишет join (json.dumps) — metis-0037
+                    esc = False
+                elif ch == "\\" and q == '"':
+                    esc = True
+                elif ch == q:
                     q = None
             elif ch in "\"'":
                 q = ch
@@ -150,7 +154,9 @@ def _fmt(v):
     if isinstance(v, int):
         return str(v)
     if isinstance(v, list):
-        return "[" + ", ".join(_fmt(x) for x in v) + "]"
+        # элемент с запятой — в кавычках: без них список «[А, б, в]» читается как три элемента (metis-0037)
+        return "[" + ", ".join(json.dumps(x, ensure_ascii=False) if isinstance(x, str) and "," in x else _fmt(x)
+                               for x in v) + "]"
     s = str(v)
     if (DATE_RE.fullmatch(s) or DATETIME_RE.fullmatch(s)) or (re.fullmatch(r"[\wА-Яа-яЁё][\wА-Яа-яЁё .,()/-]*", s)
                                                             and s.strip() == s and s.lower() not in (
@@ -324,6 +330,19 @@ def write(path, head, body, order=None):
     write_text(path, join(head, body, order))
 
 
+def write_task(path, head, body):
+    """Файл задачи — только если шапка прочитается обратно такой же: иначе отказ, а не битый файл (metis-0037)."""
+    text = join(head, body)
+    try:
+        back, _ = split(text)
+    except HeaderError as e:
+        raise ValueError(f"шапка не прочитается после записи ({e}) — файл не тронут") from e
+    for k, v in head.items():
+        if v not in (None, []) and back.get(k) != v:
+            raise ValueError(f"поле {k} не прочитается обратно таким же — файл не тронут")
+    write_text(path, text)
+
+
 def digest(path):
     try:
         return hashlib.sha256(read_text(path).encode("utf-8")).hexdigest()[:16]
@@ -495,8 +514,12 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
         remove(path)
         raise ValueError("; ".join(errs))
     desc = "\n".join(("\\" + ln) if ln.startswith("## ") else ln for ln in (text or "").strip().split("\n")).strip()
-    write(path, head, f"\n# {title.strip()}\n\n" + (desc + "\n\n" if desc else "")
-          + f"## Журнал\n\n- {now_iso(t)[:16].replace('T', ' ')} — {actor}: создана\n")
+    try:
+        write_task(path, head, f"\n# {title.strip()}\n\n" + (desc + "\n\n" if desc else "")
+                   + f"## Журнал\n\n- {now_iso(t)[:16].replace('T', ' ')} — {actor}: создана\n")
+    except ValueError:
+        remove(path)  # заготовку create_excl не оставляем
+        raise
     return tid, path
 
 
@@ -557,7 +580,7 @@ def task_note(pantheon, t, tid, note):
         body = add_owner_note(body, stamp, note)
         body = append_log(body, f"{stamp} — владелец: новая заметка — в разделе «Заметки владельца»")
         head["updated"] = now_iso(t)
-        write(path, head, body)
+        write_task(path, head, body)
     return path
 
 
@@ -605,7 +628,7 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck):
         raise ValueError("; ".join(errs))
     if note:
         body = append_log(body, f"{now_iso(t)[:16].replace('T', ' ')} — {actor}: {' '.join(str(note).split())}")
-    write(path, head, body)
+    write_task(path, head, body)
     return path, head
 
 
