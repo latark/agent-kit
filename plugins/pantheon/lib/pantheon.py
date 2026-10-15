@@ -1256,11 +1256,12 @@ def domains_build(if_changed=False):
     policy_path = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
     if if_changed:
         built = read_json(path("domains.json")).get("built_ts") or 0
-        # и новые папки сессий: окно штаба закрывает чужие перечнем (их выводы) — новая папка тоже должна попасть в hq.json
+        # и новые папки сессий: правило Read окна штаба закрывает чужие шаблонами по префиксам — новый префикс тоже должен
+        # попасть в hq.json
         # и каталог ролей: новая роль с memory: должна попасть в песочницу окон (metis-0051). Цикла нет: roles_build
         # пишет файл, только если текст изменился, — пересборка одна, следующий тик уже тихий
         watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS,
-                   os.path.join(os.path.realpath("/tmp"), f"claude-{os.getuid()}"))
+                   CLAUDE_TMP)
         newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
         if built >= newest:
             return 0
@@ -1378,6 +1379,60 @@ def _real_dir(p, roots, strict=False, create=False):
 # корпус и его копии: индексы qmd и самого корпуса хранят полный текст, переписка сессий Фемиды — выдержки
 HQ_CLOSED_DIRS = ["~/projects/expert-corpus", "~/.cache/expert-corpus", "~/.cache/qmd",
                   "~/.claude/projects/*expert-corpus*"]
+
+
+# выводы фоновых задач и TMPDIR песочницы всех сессий Claude Code: /tmp/claude-<uid> (на macOS по умолчанию). Не из
+# CLAUDE_CODE_TMPDIR: внутри сессии Claude Code ставит его уже с /claude-<uid> на конце. PANTHEON_CLAUDE_TMP — тестам
+CLAUDE_TMP = os.path.realpath(os.environ.get("PANTHEON_CLAUDE_TMP") or os.path.join("/tmp", f"claude-{os.getuid()}"))
+# Seatbelt не собирает профиль больше 64 КБ: Bash окна не запускается совсем («sandbox-exec: data object length …
+# exceeds maximum (65535)», hq 15.10 — 4359 путей). Сумма путей песочницы окна — грубая верхняя оценка; выше порога
+# окно не пересобирается (остаётся прежний файл) и приходит тревога
+SANDBOX_SIZE_LIMIT = int(os.environ.get("PANTHEON_SANDBOX_LIMIT") or 48 * 1024)
+GLOB_SAFE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _others_globs(names, own):
+    """Папки чужих сессий среди names → немного шаблонов «<префикс>*» (и точных имён), ни один из которых не совпадает
+    со своими: own и own--claude-worktrees-*. Префикс — до первой буквы, где имя расходится со всеми своими, поэтому
+    тысячи guard-test-* дают один «g*»: список не растёт с числом папок. Имя с символами шаблона пропускается —
+    вернётся в skipped."""
+    wt = own + "--claude-worktrees-"
+    out, skipped = set(), []
+    for n in names:
+        if n == own or n.startswith(wt):
+            continue
+        p = next((n[:i] for i in range(1, len(n) + 1)
+                  if not (own.startswith(n[:i]) or wt.startswith(n[:i]))), None)
+        x = n if p is None else p + "*"
+        if GLOB_SAFE.fullmatch(n if p is None else p):
+            out.add(x)
+        else:
+            skipped.append(n)
+    return sorted(out), skipped
+
+
+def sandbox_size(data):
+    """Байты путей песочницы окна: списки filesystem и правила Read/Edit (Claude Code добавляет их в песочницу)."""
+    fs = (data.get("sandbox") or {}).get("filesystem") or {}
+    perms = data.get("permissions") or {}
+    items = [x for k in ("allowWrite", "denyWrite", "denyRead", "allowRead") for x in fs.get(k) or []]
+    items += [x for k in ("deny", "allow", "ask") for x in perms.get(k) or [] if x.startswith(("Read(", "Edit("))]
+    return sum(len(x.encode()) + 1 for x in items)
+
+
+def write_window(out_dir, name, data):
+    """Файл окна, если его песочница в пределах SANDBOX_SIZE_LIMIT; иначе тревога и прежний файл остаётся."""
+    size, key = sandbox_size(data), f"sandbox-size-{name}"
+    if size > SANDBOX_SIZE_LIMIT:
+        print(f"песочница {name}: {size} байт путей > {SANDBOX_SIZE_LIMIT} — окно не пересобрано", file=sys.stderr)
+        alert_once(key, "over", f"песочница окна {name}: {size} байт путей, предел {SANDBOX_SIZE_LIMIT} (профиль Seatbelt "
+                   "до 64 КБ, иначе Bash окна не запускается) — окно не пересобрано, оставлен прежний файл. Сжать "
+                   "списки в sandbox_build (каталоги и шаблоны вместо перечисления)", "pantheon",
+                   note=f"Песочница окна {name} не помещается в предел — окно не пересобрано")
+        return False
+    clear_once(key)
+    write_json(os.path.join(out_dir, name + ".json"), data)
+    return True
 
 
 def _deny_forms(paths):
@@ -1558,7 +1613,7 @@ def sandbox_build(domains, policy_path, stores=None):
             else:
                 alert_once(f"pnpm-store-{name}", store, f"directions.toml: pnpm_store {store} направления {name} — вне "
                            "его папок, окно его не получит", "pantheon")
-        write_json(os.path.join(out_dir, name + ".json"), data)
+        write_window(out_dir, name, data)
 
     built = []
     for name, folders in domains.items():
@@ -1590,26 +1645,38 @@ def sandbox_build(domains, policy_path, stores=None):
         cache_dirs |= {n for n in os.listdir(os.path.expanduser(caches)) if n != "hq"}
     closed = HQ_CLOSED_DIRS + [f"{caches}/{n}" for n in sorted(cache_dirs)]
     # переписка сессий (координаторы зовут corpus search — выдача оседает в *.jsonl), большие выводы (tool-results) и
-    # выводы фоновых задач (/tmp/claude-<uid>) всех сессий, кроме своих: папки, что есть сейчас, и шаблон для будущих
-    # сессий в ~/projects. Имя папки — как у Claude Code: всё, кроме букв и цифр, → «-». Свои выводы, автопамять
-    # (memory/*.md) и задачи штаба (~/ai/pantheon и его worktree) открыты
+    # выводы фоновых задач и TMPDIR (CLAUDE_TMP) всех сессий, кроме своих. Своё — папка штаба и его worktree (имя как
+    # у Claude Code: всё, кроме букв и цифр, → «-»); открыты свои выводы, автопамять (memory/*.md) и задачи штаба.
+    # Не перечислением папок (15.10 их было 4121 — мусор тестов, профиль Seatbelt вырос за 64 КБ и Bash штаба не
+    # запускался), а постоянным числом записей:
+    # - песочница: CLAUDE_TMP закрыт целиком, свои папки открыты allowRead (узкое разрешение внутри широкого запрета —
+    #   по документации Claude Code, sandbox.filesystem.allowRead). Закрыт и корень $TMPDIR штаба — его временные файлы
+    #   читать только в своих папках (scratchpad сессии лежит в них);
+    # - правило Read (инструменты Read, Grep, Glob): разрешения внутри запрета у правил нет, поэтому шаблоны по
+    #   префиксам, которые расходятся со своим именем (_others_globs) — их число не растёт с числом папок
     dash = lambda p: re.sub(r"[^A-Za-z0-9]", "-", p)  # noqa: E731
     own, home_d = dash(os.path.realpath(PANTHEON)), dash(os.path.realpath(HOME))
-    mine = lambda n: n == own or n.startswith(own + "--claude-worktrees-")  # noqa: E731
-    tasks = os.path.join(os.path.realpath("/tmp"), f"claude-{os.getuid()}")
+    tasks, projects = CLAUDE_TMP, os.path.join(HOME, ".claude", "projects")
     files = ["~/.claude/projects/**/*.jsonl", f"~/.claude/projects/{home_d}-projects-*/**/tool-results/**",
              f"{tasks}/{home_d}-projects-*/**"]
-    with contextlib.suppress(OSError):
-        files += [f"~/.claude/projects/{n}/**/tool-results/**"
-                  for n in sorted(os.listdir(os.path.join(HOME, ".claude", "projects"))) if not mine(n)]
-    with contextlib.suppress(OSError):
-        files += [f"{tasks}/{n}/**" for n in sorted(os.listdir(tasks)) if not mine(n)]
-    hq["sandbox"]["filesystem"]["denyRead"] += _deny_forms(closed) + _deny_forms(files)
+    for base, short, tail in ((projects, "~/.claude/projects", "/**/tool-results/**"), (tasks, tasks, "/**")):
+        try:
+            names = os.listdir(base)
+        except OSError:
+            names = []
+        globs, skipped = _others_globs(names, own)
+        files += [f"{short}/{g}{tail}" for g in globs]
+        if skipped:
+            print(f"песочница hq: имена с символами шаблона в {short} — правилом Read не закрыты: {skipped[:5]}",
+                  file=sys.stderr)
+    fsys = hq["sandbox"]["filesystem"]
+    fsys["denyRead"] += _deny_forms(closed) + [tasks] + _deny_forms(files)
+    fsys["allowRead"] = [f"{tasks}/{own}", f"{tasks}/{own}--claude-worktrees-*"]
     rule = lambda x: f"Read({x})" if x.startswith("~") else f"Read(/{x})"  # noqa: E731 — «//» — абсолютный путь
     hq.setdefault("permissions", {}).setdefault("deny", []).extend(
         [rule(x + "/**") for x in _deny_forms(closed)] + [rule(x) for x in _deny_forms(files)])
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
-    write_json(os.path.join(out_dir, "hq.json"), hq)
+    write_window(out_dir, "hq", hq)
     built.append("hq")
     for f in os.listdir(out_dir):
         if f.endswith(".json") and f[:-5] not in built:
