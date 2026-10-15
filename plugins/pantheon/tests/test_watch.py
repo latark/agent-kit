@@ -178,19 +178,18 @@ def test_autostart_backoff_and_give_up():
 
 
 def test_autostart_healthy_resets_and_limits():
-    """Сессия проработала ≥ 30 мин — сбои забыты; три направления уже работают — четвёртое ждёт места (лимит 3, 15.10)."""
+    """Сессия проработала ≥ 30 мин — сбои забыты; два направления уже работают — третье ждёт места."""
     e = Env()
-    for d in ("a-one", "b-two", "c-three", "d-four"):
+    for d in ("a-one", "b-two", "c-three"):
         e.direction(d)
-    for d, tid in (("a-one", "aa-0001"), ("b-two", "bb-0001"), ("c-three", "cc-0001"), ("d-four", "dd-0001")):
+    for d, tid in (("a-one", "aa-0001"), ("b-two", "bb-0001"), ("c-three", "cc-0001")):
         e.task(tid, d)
     e.run("watch", t=T0)
-    for tid in ("aa-0001", "bb-0001", "cc-0001", "dd-0001"):
+    for tid in ("aa-0001", "bb-0001", "cc-0001"):
         e.board(tid, T0 + 10)
-    e.agents([bg("a-one", "working", "aaaaaaaa-1", pid=11), bg("b-two", "working", "bbbbbbbb-1", pid=12),
-              bg("c-three", "working", "cccccccc-1", pid=13)])
+    e.agents([bg("a-one", "working", "aaaaaaaa-1", pid=11), bg("b-two", "working", "bbbbbbbb-1", pid=12)])
     e.run("watch", t=T0 + 60)
-    check(not [c for c in e.calls() if c[:1] == ["--bg"]], "четвёртое направление запущено сверх трёх")
+    check(not [c for c in e.calls() if c[:1] == ["--bg"]], "третье направление запущено сверх двух")
     check("нет места" in e.alerts(), "тревога «нет места»")
     # здоровая сессия сбрасывает сбои
     json.dump({"a-one": {"last": T0, "pending": True, "fails": 2}}, open(e.st("autostart.json"), "w"))
