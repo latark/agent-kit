@@ -20,6 +20,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         установленной версии; нет новых падений — claude plugin update, есть — тревога
   pantheon direction check <имя>        что готово у нового направления (навык new-direction): реестр, «да»,
                                         папки, STATUS.md, domains.json, AGENTS.md, доверие, autoMode
+  pantheon direction init <имя>         папка ~/projects/<имя> по вашей галочке: git init, AGENTS.md, локальный
+                                        коммит; без remote
   pantheon instructions [--quiet]       дойдут ли инструкции целиком: Codex (лимит на путь), MEMORY.md
                                         (200 строк / 25 КБ), CLAUDE.md с импортами длиннее 200 строк
   pantheon alert "<строка>" [--from кто] [--critical]   дописать строку в ~/ai/pantheon/alerts.md
@@ -1540,6 +1542,11 @@ def sandbox_build(domains, policy_path, stores=None):
         cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
         ok = [r for r in real if r]
         data = role_settings(ok, own_real, write, cache, any(ssh_remote(r) for r in ok), deny, compact, guard)
+        if name == "metis-pantheon":
+            # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> — вне папок окна
+            # Метиды, в песочнице упал бы. Мимо неё — только эта подкоманда и только у Метиды; ворота у команды свои:
+            # галочка владельца в журнале доски owner-log, который пишет тик, — роли её не подделают.
+            data["sandbox"]["excludedCommands"].append("pantheon direction init *")
         if allow:
             data.setdefault("permissions", {}).setdefault("allow", []).extend(allow)
         store = (stores or {}).get(name)
@@ -1824,6 +1831,13 @@ def start_log(line):
         fh.write(f"{stamp()}\t{line}\n")
 
 
+def launch_folder(folders):
+    """Папка запуска координатора — одно правило для start, direction check и direction init: первая существующая
+    папка записи (настоящим путём), иначе первая в списке, иначе ""."""
+    real = [os.path.realpath(os.path.expanduser(f)) for f in folders or [] if isinstance(f, str) and f]
+    return next((f for f in real if os.path.isdir(f)), real[0] if real else "")
+
+
 def start_target(target, rest):
     """→ (имя сессии, роль, папка запуска, файл окна, поручение по умолчанию) или текст ошибки."""
     domains = read_json(path("domains.json"), {}).get("domains") or {}
@@ -1839,9 +1853,8 @@ def start_target(target, rest):
                 "approvals.toml или после «да» владельца в этой сессии.")
     if target not in domains:
         return f"нет направления «{target}» в domains.json (реестр ~/ai/pantheon/directions.toml → pantheon domains build)"
-    folders = [os.path.realpath(os.path.expanduser(f)) for f in domains[target]]
-    folder = next((f for f in folders if os.path.isdir(f)), None)
-    if not folder:
+    folder = launch_folder(domains[target])
+    if not os.path.isdir(folder):
         return f"у направления {target} нет папки на этом Mac: {domains[target]}"
     return (target, "domain-coordinator", folder, target,
             f"Прочитай ~/ai/pantheon/directions/{target}/STATUS.md и inbox/, затем продолжай текущий эпик по нему.")
@@ -2357,13 +2370,13 @@ def instructions_check(quiet=False):
 DIRECTION_NAME = re.compile(r"[a-z]+-[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
-def direction_check(name):
-    """Навык new-direction (ROLE-05, STATE-11): всё ли готово у направления. → [(готово, что)]."""
+def direction_gate(name):
+    """Ворота нового направления — общие у `direction check` и `direction init`: имя по образцу, ваше «да» в
+    decisions.md, ваша галочка в журнале доски, запись в directions.toml. → ([(готово, что)], запись реестра)."""
     res = []
     add = lambda ok, text: res.append((bool(ok), text))
     add(DIRECTION_NAME.fullmatch(name) and len(name) <= 40,
         f"имя «{name}» по образцу <бог>-<проект>: латиница, цифры, дефис, до 40 знаков")
-    god = name.split("-", 1)[0]
     try:
         dec = open(os.path.join(PANTHEON, "decisions.md"), encoding="utf-8").read()
     except OSError:
@@ -2381,11 +2394,19 @@ def direction_check(name):
         reg = {}
     d = reg.get(name) or {}
     add(d, "запись в directions.toml")
+    return res, d
+
+
+def direction_check(name):
+    """Навык new-direction (ROLE-05, STATE-11): всё ли готово у направления. → [(готово, что)]."""
+    res, d = direction_gate(name)
+    add = lambda ok, text: res.append((bool(ok), text))
+    god = name.split("-", 1)[0]
     add(d.get("does") and d.get("does_not") and 3 <= len(d.get("examples") or []) <= 6,
         "в записи есть does, does_not и 3–5 examples (ROLE-11)")
     folders = [os.path.realpath(os.path.expanduser(f)) for f in d.get("folders") or []]
     add(folders and all(os.path.isdir(f) for f in folders), "папки направления есть на этом Mac")
-    launch = next((f for f in folders if os.path.isdir(os.path.join(f, ".git"))), folders[0] if folders else "")
+    launch = launch_folder(d.get("folders"))
     home_dir = os.path.join(PANTHEON, "directions", name)
     add(all(os.path.exists(os.path.join(home_dir, x)) for x in ("STATUS.md", "inbox", "tasks")),
         f"~/ai/pantheon/directions/{name}/: STATUS.md, inbox/, tasks/ (STATE-07)")
@@ -2434,11 +2455,179 @@ def direction_check(name):
     return res
 
 
+# `pantheon direction init` (metis-0042): папку нового направления создаёт команда, а не Метида — её окну guard и
+# песочница не дают писать в ~/projects/<новое>. Ворота — те же, что у check (ваша галочка в журнале доски). Создаёт
+# только ровно ~/projects/<x>; существующие папки не трогает, ссылки и «..» — отказ; сначала проверяет все папки
+# записи, потом создаёт. Повтор доделывает прерванный запуск и ничего не меняет у готового.
+INIT_OWN = {".git", "AGENTS.md"}   # что оставляет init: папка только с этим — начатая им, её можно доделать
+INIT_COMMIT = "AGENTS.md (pantheon direction init)"
+
+
+def _git_env():
+    """Окружение git без переменных, которые увели бы его в чужой репозиторий (вызов из хука git)."""
+    return {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
+
+
+def _init_own(p):
+    """Папка пуста или в ней только то, что оставляет init: .git — папка, AGENTS.md — обычный файл, без ссылок; у
+    репозитория нет remote и нет коммитов, кроме одного своего (INIT_COMMIT). Пустой клон с remote или чужой коммит —
+    чужое, не трогаем. git — с явным --git-dir: сломанный .git не уведёт его в репозиторий выше."""
+    try:
+        names = os.listdir(p)
+    except OSError:
+        return False
+    if not set(names) <= INIT_OWN:
+        return False
+    git, agents = os.path.join(p, ".git"), os.path.join(p, "AGENTS.md")
+    if os.path.lexists(agents) and (os.path.islink(agents) or not os.path.isfile(agents)):
+        return False
+    if not os.path.lexists(git):
+        return True
+    if os.path.islink(git) or not os.path.isdir(git):
+        return False
+    env = _git_env()
+    run = lambda *a: subprocess.run(["git", "--git-dir=" + git, *a], capture_output=True, text=True, env=env)
+    r = run("config", "--local", "--get-regexp", r"^remote\.")
+    if r.returncode != 1 or r.stdout.strip():   # 1 — ничего не найдено; 0 — есть remote; другое — не репозиторий
+        return False
+    if run("rev-parse", "--verify", "-q", "HEAD").returncode:
+        return True
+    return (run("rev-list", "--count", "HEAD").stdout.strip() == "1"
+            and run("log", "-1", "--format=%s", "HEAD").stdout.strip() == INIT_COMMIT)
+
+
+def direction_init(name):
+    """pantheon direction init <имя>: папка нового направления по вашей галочке. → код выхода."""
+    res, d = direction_gate(name)
+    if not all(ok for ok, _ in res):
+        for ok, text in res:
+            print(("готово  " if ok else "НЕТ     ") + text)
+        print("ничего не создано: ворота не пройдены")
+        return 1
+    folders = d.get("folders") or []
+    if not isinstance(folders, list) or not folders:
+        print(f"в записи {name} в directions.toml нет folders — нечего создавать")
+        return 1
+    projects = os.path.join(HOME, "projects")
+    short = lambda p: "~" + p[len(HOME):] if p == HOME or p.startswith(HOME + "/") else p
+
+    def new_ok(p):
+        """Создавать можно только ровно ~/projects/<x>: один компонент, не скрытый, ~/projects — не ссылка в сторону
+        (сравнение с настоящим путём HOME: сам HOME может быть ссылкой, как /var → /private/var)."""
+        base = os.path.basename(p)
+        return (os.path.dirname(p) == projects and base and not base.startswith(".")
+                and os.path.realpath(projects) == os.path.join(os.path.realpath(HOME), "projects"))
+
+    plan, bad = [], []   # plan: (путь, create | resume | skip | busy)
+    for f in folders:
+        if not isinstance(f, str) or not f.strip():
+            bad.append(f"{f!r}: пустая строка вместо папки — не создаю")
+            continue
+        if ".." in f.split("/"):
+            bad.append(f"{f}: «..» в пути — не создаю")
+            continue
+        p = os.path.normpath(os.path.expanduser(f))
+        if not os.path.isabs(p):
+            bad.append(f"{f}: не абсолютный путь и не от ~/ — не создаю")
+        elif os.path.islink(p):
+            bad.append(f"{short(p)}: ссылка — не создаю и не трогаю")
+        elif os.path.isdir(p):
+            if not new_ok(p):
+                plan.append((p, "skip"))
+            elif _init_own(p):
+                plan.append((p, "resume"))
+            else:
+                plan.append((p, "busy"))
+        elif os.path.lexists(p):
+            bad.append(f"{short(p)}: есть, но не папка — не трогаю")
+        elif new_ok(p):
+            plan.append((p, "create"))
+        else:
+            bad.append(f"{short(p)}: вне ~/projects — не создаю (новая папка — только ~/projects/<имя>)")
+    if bad:
+        for x in bad:
+            print("отказ   " + x)
+        print("ничего не создано: сначала поправить folders в directions.toml")
+        return 1
+
+    # папка запуска — по правилу start (launch_folder): первая существующая папка записи; после init есть все, значит
+    # это первая папка записи. git init, AGENTS.md и коммит — только если её создаёт или доделывает init
+    launch = plan[0][0]
+    note = " — папка запуска: AGENTS.md в ней дописывает координатор направления"
+    rc = 0
+    for p, kind in plan:
+        if kind == "skip":
+            print(f"есть, пропущено {short(p)}" + (note if p == launch else ""))
+            continue
+        if kind == "busy":
+            print(f"есть, не пуста — не трогаю {short(p)}" + (note if p == launch else ""))
+            continue
+        if kind == "create":
+            try:
+                os.makedirs(projects, exist_ok=True)
+                os.mkdir(p)
+            except OSError as e:
+                print(f"отказ   {short(p)}: не создана ({e.strerror or e})")
+                return 1
+        if p != launch:
+            print(f"создано {short(p)}" if kind == "create" else f"есть, пропущено {short(p)}")
+            continue
+        done, err = _init_launch(p, name, d)
+        if kind == "create":
+            print(f"создано {short(p)}" + (": " + ", ".join(done) if done else ""))
+        elif done:
+            print(f"доделано {short(p)}: " + ", ".join(done))
+        elif not err:
+            print(f"есть, пропущено {short(p)}")
+        if err:
+            print(f"сбой    {short(p)}: {err}")
+            rc = 1
+    return rc
+
+
+def _init_launch(p, name, d):
+    """Папка запуска: git init, стартовый AGENTS.md, первый коммит — только недостающее. → ([что сделано], ошибка)."""
+    env = _git_env()
+    git = lambda *a: subprocess.run(["git", "-C", p, *a], capture_output=True, text=True, env=env)
+    done = []
+    if not os.path.lexists(os.path.join(p, ".git")):
+        r = git("init", "-q", "-b", "main")
+        if r.returncode:
+            return done, "git init: " + (r.stderr.strip() or f"код {r.returncode}")
+        done.append("git init")
+    agents = os.path.join(p, "AGENTS.md")
+    if not os.path.lexists(agents):
+        text = (f"# {d.get('project') or os.path.basename(p)}\n\n"
+                f"Направление Пантеона `{name}`.\n\n"
+                f"Что делает: {d.get('does') or '—'}\n\n"
+                f"Чего не делает: {d.get('does_not') or '—'}\n\n"
+                "Команды сборки и тестов — дополнит координатор.\n")
+        try:
+            with open(agents, "x", encoding="utf-8") as fh:   # "x": не перезапишет и не пройдёт по ссылке
+                fh.write(text)
+        except OSError as e:
+            return done, f"AGENTS.md: {e.strerror or e}"
+        done.append("AGENTS.md")
+    if git("rev-parse", "--verify", "-q", "HEAD").returncode:
+        r = git("add", "AGENTS.md")
+        if r.returncode == 0:
+            r = git("commit", "-q", "-m", INIT_COMMIT)
+        if r.returncode:
+            return done, "git commit: " + ((r.stderr or r.stdout).strip() or f"код {r.returncode}") + \
+                " — повтор `pantheon direction init` доделает"
+        done.append("коммит")
+    return done, ""
+
+
 def direction(rest):
-    """pantheon direction check <имя> — что готово у нового направления (навык new-direction)."""
-    if len(rest) != 2 or rest[0] != "check":
+    """pantheon direction check <имя> — что готово у нового направления (навык new-direction).
+    pantheon direction init <имя>  — папка ~/projects/<имя> по вашей галочке: git init, AGENTS.md, локальный коммит;
+                                     без remote."""
+    if len(rest) != 2 or rest[0] not in ("check", "init"):
         print(direction.__doc__, file=sys.stderr)
         return 2
+    if rest[0] == "init":
+        return direction_init(rest[1])
     res = direction_check(rest[1])
     for ok, text in res:
         print(("готово  " if ok else "НЕТ     ") + text)

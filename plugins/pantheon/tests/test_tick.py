@@ -261,6 +261,9 @@ def main():
           and "~/**/.git/config" in box["filesystem"]["denyWrite"] and sa["autoCompactWindow"] == 200000)
     check("песочница: SSH-remote → git push/fetch/pull мимо песочницы только у этого направления",
           "git push *" in box["excludedCommands"] and "git push *" not in sm["sandbox"]["excludedCommands"])
+    check("песочница: `pantheon direction init *` мимо неё только в окне Метиды (metis-0042)",
+          "pantheon direction init *" in sm["sandbox"]["excludedCommands"]
+          and not any("direction" in x for w in (sa, sw, sn, sz) for x in w["sandbox"]["excludedCommands"]))
     cache_a = real("Library/Caches/pantheon-sandbox/athena-broker")
     check("песочница: кэши свои у направления (папка создана), общих в записи нет",
           sa["env"]["npm_config_cache"] == os.path.join(cache_a, "npm") and os.path.isdir(cache_a)
