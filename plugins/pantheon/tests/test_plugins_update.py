@@ -14,6 +14,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+# Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
+# TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
+import atexit as _atexit
+import os as _os
+import shutil as _shutil
+_ROOT = tempfile.mkdtemp(prefix="plugins_update-root-")
+tempfile.tempdir = _ROOT
+_os.environ["TMPDIR"] = _ROOT
+_atexit.register(_shutil.rmtree, _ROOT, True)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, "lib", "pantheon.py")
@@ -41,6 +50,8 @@ NEW_KILLED = 'print("FAIL старое", flush=True)\nimport os, signal\nos.kill
 # цветной трейсбек (так печатает 3.13+ при FORCE_COLOR): без вырезания ANSI тип исключения не разобрать
 NEW_COLOR_EXC = ('print("\\x1b[35mTraceback (most recent call last):\\x1b[0m")\nprint("  File \\"t.py\\", line 1")\n'
                  'print("\\x1b[1;35mKeyError\\x1b[0m: \\x1b[35m\'x\'\\x1b[0m")\nraise SystemExit(1)\n')
+# подпроцесс тестов пишет свой TMPDIR в файл: он обязан лежать внутри временной папки прогона
+REC_TMPDIR = 'import os\nopen(os.environ["REC_FILE"] + ".t", "a").write(os.environ.get("TMPDIR", "") + "\\n")\n'
 # тесты идут без цвета: FORCE_COLOR снят, NO_COLOR=1, PYTHON_COLORS=0
 COLORLESS = ('import os\nif os.environ.get("FORCE_COLOR") or os.environ.get("CLICOLOR_FORCE") '
              'or os.environ.get("NO_COLOR") != "1" or os.environ.get("PYTHON_COLORS") != "0":\n'
@@ -196,6 +207,18 @@ def main():
           e.leftovers())
     check("зелёные: без критической тревоги (хеш кэша с .in_use совпал с проверенной копией)",
           "КРИТИЧНО" not in e.alerts() and e.notified() == "")
+    e.close()
+
+    # Подпроцесс тестов получает TMPDIR внутри временной папки прогона (STATE/plugins/tmp), а не общий
+    e = Env("1.0.0", "1.1.0", REC_TMPDIR, REC_TMPDIR)
+    rec = os.path.join(e.tmp, "rec")
+    r = e.run(extra={"REC_FILE": rec})
+    seen = open(rec + ".t").read().split() if os.path.exists(rec + ".t") else []
+    root = os.path.join(e.state, "plugins", "tmp") + os.sep
+    check("TMPDIR подпроцесса тестов — внутри временной папки прогона, не общий",
+          len(seen) >= 2 and all(os.path.realpath(t).startswith(os.path.realpath(root)) for t in seen)
+          and e.tmpdir not in seen, f"{seen} {r.stderr!r}")
+    check("TMPDIR подпроцесса: после прогона папок не осталось", e.leftovers() == [], e.leftovers())
     e.close()
 
     # Встало не то, что проверяли: update сам подтянул каталог — другое содержимое той же версии

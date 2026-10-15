@@ -3492,9 +3492,11 @@ def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline):
                 out, rc = "", "срок"
             else:
                 home = tempfile.mkdtemp(prefix="home-", dir=tmp)
+                # TMPDIR внутри папки прогона: временные папки тестов уходят вместе с ней, а не копятся в общем TMPDIR
+                tdir = tempfile.mkdtemp(prefix="tmpdir-", dir=tmp)
                 limit = min(PLUGIN_TEST_TIMEOUT, left)
                 try:
-                    r = subprocess.run([py, "-I", os.path.join("tests", f)], cwd=pdir, env={**env0, "HOME": home},
+                    r = subprocess.run([py, "-I", os.path.join("tests", f)], cwd=pdir, env={**env0, "HOME": home, "TMPDIR": tdir},
                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        timeout=limit)
                     out, rc = r.stdout, r.returncode
