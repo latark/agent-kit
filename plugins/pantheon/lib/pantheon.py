@@ -1673,28 +1673,25 @@ APPROVALS_HEAD = """# Заранее разрешённые действия м�
 """
 
 
-def owner_said(quote, days=14):
-    """Есть ли quote в журналах owner-log (кроме unconfirmed/): реплика целиком или её кусок от 12 знаков."""
-    q = " ".join(quote.split()).casefold()
-    if not q:
-        return False
+def owner_approved(name, days=14):
+    """Ваше «да» новому направлению: в журнале доски owner-log/board.jsonl (его пишет тик по вашей галочке, роли туда
+    не пишут) ответ, который начинается с «Да», на вопрос, где названо это имя; ответу не больше days дней. Текст
+    вопроса тик пишет в журнал в момент ответа — правка карточки после вашего ответа ничего не меняет."""
     since = now() - days * 86400
-    logs = path("owner-log")
-    for f in os.listdir(logs) if os.path.isdir(logs) else []:
-        if not f.endswith(".md"):
-            continue
+    word = re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])")
+    try:
+        lines = open(path("owner-log", "board.jsonl"), encoding="utf-8").read().splitlines()
+    except OSError:
+        return False
+    for line in lines:
         try:
-            text = open(os.path.join(logs, f), encoding="utf-8").read()
-        except OSError:
+            rec = json.loads(line)
+            ts = time.mktime(time.strptime(rec.get("time", "")[:19], "%Y-%m-%dT%H:%M:%S"))
+        except (ValueError, TypeError, AttributeError):
             continue
-        for m in re.finditer(r"^## (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\n(.*?)(?=^## \d{4}-|\Z)", text, re.M | re.S):
-            try:
-                ts = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
-            except ValueError:
-                continue
-            said = " ".join(m.group(2).split()).casefold()
-            if ts >= since and (said.strip(" .!-—") == q.strip(" .!-—") or (len(q) >= 12 and q in said)):
-                return True
+        if (rec.get("kind") == "answer" and ts >= since and word.search(str(rec.get("question") or ""))
+                and str(rec.get("answer") or "").strip().casefold().startswith("да")):
+            return True
     return False
 
 
@@ -1715,11 +1712,9 @@ def direction_check(name):
     said = [l for l in dec.splitlines() if l.startswith("|") and re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", l)
             and "Ваши слова" in l]
     add(said, "ваше «да» в decisions.md: строка с именем направления и «Ваши слова»")
-    # decisions.md пишет Зевс — сама строка не доказательство. Цитата из неё должна быть в журнале ваших слов
-    # owner-log (его пишет хук по пометке транскрипта, роли туда не пишут — COMM-10): совпадать с вашей репликой
-    # целиком или быть её куском от 12 знаков, реплика — не старше 14 дней.
-    add(any(owner_said(q) for l in said for q in re.findall(r"«([^«»]{2,300})»", l.split("Ваши слова", 1)[1])),
-        "эти слова есть в журнале ваших слов owner-log (не старше 14 дней)")
+    # decisions.md пишет Зевс — сама строка не доказательство; текст реплики тоже (простое «да» подошло бы к любому
+    # вопросу). Доказательство — ваша галочка на карточке «Завести направление <имя>?» в журнале доски.
+    add(owner_approved(name), "ваша галочка «Да…» на карточке с этим именем в журнале доски (не старше 14 дней)")
     try:
         with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
             reg = {d.get("name"): d for d in tomllib.load(fh).get("direction") or []}
@@ -2157,12 +2152,10 @@ def main(argv):
             return 2
         alert(("КРИТИЧНО: " if critical else "") + " ".join(rest), who)
         if critical:  # COMM-08: безопасность, деньги, данные клиентов, юридическое, прод, контракт — сразу владельцу
-            # --from называет сам отправитель; в заголовке — роль окна (PANTHEON_ROLE ставит окно роли), иначе
-            # любая роль прислала бы «критично · zeus»
-            win = os.environ.get("PANTHEON_ROLE") or "вне окна роли"
-            sender = " ".join(who.split())[:40]
-            label = sender if sender == win or (win == "hq" and sender == "zeus") else f"{win}, называет себя {sender}"
-            notify(" ".join(rest)[:200], title=f"Пантеон · критично · {label}", group="critical-" + win)
+            # отправителя называет он сам (--from, PANTHEON_ROLE — переменные вызова): заголовок не утверждает, кто
+            # прислал, имя — в тексте со словами «со слов»
+            notify(f"{' '.join(rest)[:200]} (со слов: {' '.join(who.split())[:40]})", title="Пантеон · критично",
+                   group="critical")
         return 0
     if cmd == "archive":
         return archive()

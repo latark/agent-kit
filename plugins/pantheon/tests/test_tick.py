@@ -325,12 +325,12 @@ def main():
     sent = open(log).read() if os.path.exists(log) else ""
     check("alert --critical: «КРИТИЧНО» в alerts.md и одно уведомление от того, кто нашёл",
           rc == 0 and "zeus · КРИТИЧНО: ключ в логе" in al and "athena · обычная" in al
-          and sent.count("\n") == 1 and "критично · zeus|ключ в логе" in sent)
+          and sent.count("\n") == 1 and "Пантеон · критично|ключ в логе (со слов: zeus)" in sent)
     subprocess.run([sys.executable, "-I", LIB, "alert", "прод упал", "--critical", "--from", "zeus"],
                    env={**env, "PANTHEON_ROLE": "workshop"}, capture_output=True)
     sent = open(log).read()
-    check("alert --critical от чужого имени: в заголовке роль окна, а не --from",
-          "критично · workshop, называет себя zeus|прод упал" in sent)
+    check("alert --critical: заголовок не называет отправителя — имя только «со слов»",
+          "Пантеон · критично|прод упал (со слов: zeus)" in sent and "· zeus|" not in sent)
 
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)

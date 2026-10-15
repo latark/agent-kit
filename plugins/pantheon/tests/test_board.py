@@ -169,6 +169,9 @@ def main():
     h, text = head_of(src("metis-pantheon", "metis-0002"))
     _, ct = head_of(c2)
     check("ответ галочкой: answer и задача в очередь", h.get("answer") == "В копии" and h["status"] == "todo")
+    alog = [json.loads(x) for x in open(os.path.join(state, "owner-log", "board.jsonl")) if '"answer"' in x]
+    check("ответ в журнале доски — вместе с текстом вопроса, который владелец видел",
+          alog and alog[-1].get("id") == "metis-0002" and alog[-1].get("question") == h.get("question") and h.get("question"))
     check("прежнее поле «Заметка агенту» со старой карточки: в «Заметки владельца» задачи, поля в карточке больше нет",
           "## Заметки владельца" in text and "  > Сделайте как проще" in text and "Заметка агенту" not in ct
           and "> Сделайте как проще" in ct)

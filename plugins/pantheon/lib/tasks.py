@@ -1208,7 +1208,8 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                     ch["status"] = "todo"
                 task_set(pantheon, t, cid, ch, note=f"ответ: {answer}" + (f" (был «{current}»)" if current else ""),
                          actor="владелец")
-                _owner_log(log_path, t, kind="answer", id=cid, answer=answer)
+                _owner_log(log_path, t, kind="answer", id=cid, answer=answer,
+                           question=str(src_head.get("question") or "")[:2000])  # что вы видели, отвечая
                 done_lines.append(f"{cid}: ответ владельца «{answer}»")
             moved_by_owner.add(cid)
         elif answer == "?":

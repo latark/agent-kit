@@ -51,16 +51,22 @@ def main():
                                       capture_output=True, text=True)
 
     r = run("iris-demo")
-    check("слов нет в owner-log — «НЕТ»: строку decisions.md пишет Зевс, сама она не доказательство",
-          r.returncode == 1 and "НЕТ     эти слова есть в журнале" in r.stdout)
+    check("галочки на доске нет — «НЕТ»: строку decisions.md пишет Зевс, сама она не доказательство",
+          r.returncode == 1 and "НЕТ     ваша галочка" in r.stdout)
     import time
-    stamp = lambda days: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - days * 86400))
-    olog = os.path.join(state, "owner-log", "zeus.md")
-    write(olog, f"## {stamp(20)}\nда\n\n")
-    check("ваше «да» старше 14 дней не засчитывается", run("iris-demo").returncode == 1)
-    write(os.path.join(state, "owner-log", "unconfirmed", "zeus.md"), f"## {stamp(0)}\nда\n\n")
-    check("неподтверждённая строка (unconfirmed/) не засчитывается", run("iris-demo").returncode == 1)
-    write(olog, f"## {stamp(20)}\nда\n\n## {stamp(0)}\nДа.\n\n")
+    iso = lambda days: time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - days * 86400))
+    blog = os.path.join(state, "owner-log", "board.jsonl")
+    rec = lambda days, q, a: json.dumps({"time": iso(days), "kind": "answer", "id": "x-0001", "answer": a,
+                                         "question": q}, ensure_ascii=False) + "\n"
+    write(blog, rec(0, "Сделать обзор недели?", "Да"))
+    check("ваше «Да» на другой вопрос не засчитывается", run("iris-demo").returncode == 1)
+    write(blog, rec(0, "Завести направление iris-demo-old?", "Да"))
+    check("«Да» на вопрос о направлении с тем же началом имени не засчитывается", run("iris-demo").returncode == 1)
+    write(blog, rec(0, "Завести направление iris-demo?", "Нет — пока не нужно"))
+    check("ответ «Нет» не засчитывается", run("iris-demo").returncode == 1)
+    write(blog, rec(20, "Завести направление iris-demo?", "Да — завести"))
+    check("«Да» старше 14 дней не засчитывается", run("iris-demo").returncode == 1)
+    write(blog, rec(0, "Завести направление iris-demo?", "Да — завести"))
     r = run("iris-demo")
     check("всё готово — код 0, ни одного «НЕТ»", r.returncode == 0 and "НЕТ" not in r.stdout)
 
