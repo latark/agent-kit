@@ -25,6 +25,17 @@ import time
 import uuid
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
+SHIM = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_guard_shim.py")  # запуск guard без зависимости от места тестов
+try:  # привилегии из policy.toml читает tomllib (Python 3.11+); на системном 3.9 политика пуста — это безопасный отказ
+    import tomllib  # noqa: F401
+    HAS_TOMLLIB = True
+except ImportError:
+    HAS_TOMLLIB = False
+# случаи, где «allow» держится только на привилегии/agent_extra из policy.toml: без tomllib guard их честно закрывает
+# (тот же приём, что MERGE_OK ниже). Обвязка не ослабляет проверку: с tomllib ожидание прежнее — allow.
+NEEDS_POLICY = {"Метида правит карту решений", "prometheus пишет в ~/ai/knowledge (agent_extra)",
+                "prometheus сессией: ~/ai/knowledge по agent_extra", "protect-config: Метида правит роль",
+                "protect-config: Метида пишет policy.toml", "private: mnemo-brain пишет в me/"}
 
 
 def setup(home):
@@ -233,7 +244,7 @@ def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None, ra
         event["agent_id"] = "a1"
     env = {"HOME": home, "PATH": os.path.join(home, "fake-bin") + os.pathsep + os.environ["PATH"],
            "CLAUDE_PROJECT_DIR": os.path.join(home, pdir), "TMPDIR": "/nonexistent-tmp", **(penv or {})}
-    out = subprocess.run([python or sys.executable, "-I", GUARD], input=json.dumps(event), capture_output=True,
+    out = subprocess.run([python or sys.executable, "-I", SHIM, GUARD], input=json.dumps(event), capture_output=True,
                          text=True, env=env, timeout=10).stdout
     if raw:
         return out
@@ -1132,6 +1143,8 @@ def main():
     failed = 0
     for case in cases:
         name, want, pdir, role, sub, (tool, ti) = case[:6]
+        if want == "allow" and name in NEEDS_POLICY and not HAS_TOMLLIB:
+            want = "deny"  # без tomllib привилегий нет (см. NEEDS_POLICY)
         cwd = case[6] if len(case) > 6 else None
         penv = case[7] if len(case) > 7 else None  # env окна: PANTHEON_ROLE (guard 0.5.5)
         got = run(home, os.path.normpath(pdir), role, tool, ti, sub, cwd, penv=penv)
@@ -1245,7 +1258,7 @@ def main():
         if os.path.exists(stop_log):  # свой журнал на каждый случай: FAIL достаётся тому, кто его вызвал
             os.remove(stop_log)
         ev ={"hook_event_name": "Stop", "transcript_path": tp, "session_id": "s-test", "cwd": stop_home}
-        r = subprocess.run([sys.executable, "-I", GUARD], input=json.dumps(ev), capture_output=True, text=True,
+        r = subprocess.run([sys.executable, "-I", SHIM, GUARD], input=json.dumps(ev), capture_output=True, text=True,
                            env=stop_env, timeout=10)
         ok = r.returncode == 0 and '"block"' not in r.stdout and '"deny"' not in r.stdout \
             and not os.path.exists(stop_log)
@@ -1256,7 +1269,7 @@ def main():
     # SEC-29/SEC-10: сбой всего скрипта — в окне роли (--strict) выход 2, в плагине выход 0; оба — в журнал
     env = {"HOME": home, "PATH": os.environ["PATH"], "TMPDIR": "/nonexistent-tmp"}
     for mode, want_code in (("--strict", 2), (None, 0)):
-        argv = [sys.executable, "-I", GUARD] + ([mode] if mode else [])
+        argv = [sys.executable, "-I", SHIM, GUARD] + ([mode] if mode else [])
         r = subprocess.run(argv, input="не json", capture_output=True, text=True, env=env, timeout=10)
         ok = r.returncode == want_code
         failed += not ok
