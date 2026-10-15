@@ -241,6 +241,16 @@ def main():
     check("новый вопрос: та же галочка — новый ответ в журнале с новым вопросом",
           alog[-1].get("answer") == "В копии" and alog[-1].get("question") == "Где держать копию теперь?"
           and "- [x] В копии" in open(c2, encoding="utf-8").read())
+    # обход: агент правит текст вопроса и подделывает answer прежним вашим ответом — всё равно конфликт
+    run(env, "task", "set", "metis-0002", "question=Где держать копию теперь??", t=T0 + 392)
+    sp = src("metis-pantheon", "metis-0002")
+    forged = open(sp, encoding="utf-8").read()
+    forged = forged.replace('answer: "В копии"', 'answer: "В knowledge"').replace("answer: В копии", "answer: В knowledge")
+    open(sp, "w", encoding="utf-8").write(forged)
+    rf = run(env, "board", t=T0 + 394)
+    t2 = open(c2, encoding="utf-8").read()
+    check("правка вопроса + answer прежним ответом: конфликт и тревога, отметки нет",
+          "не из вашего журнала" in t2 and "конфликт ответа" in rf.stdout and "- [x]" not in t2)
     # рискованный вопрос: галочка — только выбор, подтверждение словом
     run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Отправить коммиты", "--status", "waiting",
         "--waiting-on", "human", "--next", "ваш ответ", "--question", "Отправить?", "--option", "Да", "--option", "Нет",

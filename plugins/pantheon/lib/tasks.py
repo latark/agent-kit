@@ -825,20 +825,17 @@ def logged_for(head, recs):
 
 
 def answer_conflict(head, logged, recs=None):
-    """Поле answer/requested файла задачи, которого нет среди ваших ответов в журнале по этой задаче (ни на
-    нынешний, ни на прежний вопрос), → текст конфликта, иначе None. Прежний ответ после нового вопроса не конфликт:
-    поле answer агент очистить не может."""
+    """Поле answer/requested файла задачи не равно ПОСЛЕДНЕМУ вашему ответу этого вида по задаче (на любой
+    вопрос) → текст конфликта, иначе None. Тик пишет поле и журнал одним ходом, поэтому честный файл всегда равен
+    последней записи; прежний ответ после нового вопроса — тоже она. Правкой текста вопроса это не обойти
+    (проверка безопасности 15.10)."""
     risky = head.get("risky") is True
     field, kind = ("requested", "request") if risky else ("answer", "answer")
     in_file = head.get(field)
-    in_log = (logged or {}).get(kind)
-    q = (head.get("question") or "").strip()[:2000]
-    # законный след прошлого: ответы на ДРУГОЙ (прежний) вопрос; на нынешний — только последний (in_log)
-    ever = {r["answer"] for r in recs or [] if r.get("kind") == kind
-            and (r.get("question") or "").strip() and q and (r.get("question") or "").strip() != q}
-    if in_file and in_file != in_log and in_file not in ever:
+    last = next((r["answer"] for r in reversed(recs or []) if r.get("kind") == kind), None)
+    if in_file and in_file != last:
         return (f"ответ в файле задачи («{str(in_file)[:120]}») не из вашего журнала"
-                + (f" — там «{in_log[:120]}»" if in_log else " — там ответа нет")
+                + (f" — там последним «{last[:120]}»" if last else " — там ответа нет")
                 + ". Карточка показывает ответ из журнала; агент его не видит как ваш.")
     return None
 
@@ -1269,7 +1266,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             if risky:  # согласие на рискованное — только словом в окне Зевса; галочка — лишь выбор
                 task_set(pantheon, t, cid, {"requested": answer},
                          note=f"выбрал «{answer}» — нужно подтверждение словом в окне Зевса", actor="владелец")
-                _owner_log(log_path, t, kind="request", id=cid, answer=answer)
+                _owner_log(log_path, t, kind="request", id=cid, answer=answer, question=seen_question(body))
                 done_lines.append(f"{cid}: выбор владельца «{answer}» по рискованному — ждёт подтверждения словом")
             else:
                 ch = {"answer": answer}
