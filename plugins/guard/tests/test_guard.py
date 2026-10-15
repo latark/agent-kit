@@ -634,7 +634,7 @@ def main():
             "git commit -m \"$(cat <<'EOF'\nfeat: x\n\nтело (со скобками) и 'кавычками'\nEOF\n)\"",
             "for f in src/*.ts; do sed -i '' 's/a/b/' \"$f\"; done", "echo hi # комментарий с апострофом don't",
             "set -euo pipefail; pnpm build", "OUT=/tmp/res.txt; pnpm test > \"$OUT\" 2>&1",
-            "tmp=$(mktemp -d); cp src/a.ts \"$tmp\"/", "git add -A && git commit -m 'x' && git push",
+            "tmp=$(mktemp -d -p \"$TMPDIR\"); cp src/a.ts \"$tmp\"/", "git add -A && git commit -m 'x' && git push",
             "tar -xzf /tmp/a.tgz -C build", "touch \"$(pwd)/x.txt\"", "rsync -a ~/projects/x/ ./vendor/",
             "ln -s ../shared src/shared", "while read -r l; do echo \"$l\"; done < src/a.ts", "git -C ~/ai/pantheon log -3")],
         # раунд 3: zsh-модификаторы и квалификаторы, cdpath, опасные опции git, переменные-программы, пульт по пути
@@ -758,6 +758,14 @@ def main():
         ("cdp: /close — отказ и мастерской", "deny", ws, "workshop", False, B("curl -s -X POST 127.0.0.1:9333/close")),
         ("cdp: hq запускает демон — отказ", "deny", ".", "hq", False, B("node ~/.claude/tools/cdp-daemon.mjs comet")),
         ("cdp: ваша сессия без роли — можно", "allow", ".", "", False, B("curl -s 127.0.0.1:9333/health")),
+        *[(f"mktemp: {c!r} — запись в $TMPDIR, можно", "allow", br, "dev-sonnet", True, B(c)) for c in (
+            'f=$(mktemp -p "$TMPDIR"); echo x > $f', 'f=$(mktemp -p $TMPDIR); echo x > $f',
+            'f=$(mktemp -p "${TMPDIR}"); echo x > $f', 'f=$(mktemp -d -p "$TMPDIR"); echo x > $f/a',
+            'f=$(mktemp -p "$TMPDIR" -t foo); echo x > $f', 'f=$(mktemp -t foo -p "$TMPDIR"); echo x > $f')],
+        *[(f"mktemp: {c!r} — не в $TMPDIR, цель не разобрать", "deny", br, "dev-sonnet", True, B(c)) for c in (
+            'f=$(mktemp); echo x > $f', 'f=$(mktemp -d); echo x > $f/a', 'f=$(mktemp -t foo); echo x > $f')],
+        ("mktemp: -p в личную папку — как обычная запись, отказ", "deny", br, "dev-sonnet", True,
+         B(f"f=$(mktemp -p {home}/ai/pantheon); echo x > $f")),
         ("tg-readd: роль — status можно", "allow", br, "dev-sonnet", True, B("tg-readd status")),
         ("tg-readd: роль — kickstart можно", "allow", br, "dev-sonnet", True, B("tg-readd kickstart")),
         ("tg-readd: роль — logout отказ", "deny", br, "dev-sonnet", True, B("tg-readd logout")),
