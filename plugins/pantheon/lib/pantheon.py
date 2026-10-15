@@ -1518,12 +1518,8 @@ def sandbox_build(domains, policy_path, stores=None):
         built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
-    # мастерская сама поднимает демон CDP (127.0.0.1) для чтения страниц — metis-0053, «да» владельца 15.10;
-    # окнам направлений и hq порт не нужен
-    ws = os.path.join(out_dir, "workshop.json")
-    data = read_json(ws, {})
-    data["sandbox"]["network"]["allowLocalBinding"] = True
-    write_json(ws, data)
+    # местные порты мастерской закрыты: на macOS allowLocalBinding открывает все порты 127.0.0.1, в том числе демон CDP
+    # с входами владельца; браузеры владельца — только у роли Харон (решение владельца 15.10, отмена metis-0053)
     built.append("workshop")
     # штаб (SEC-26, вариант А): Зевс пишет только в ~/ai/pantheon, кроме .git и alerts.md; сеть закрыта (в веб он не
     # ходит, SEC-13); мимо песочницы — только `pantheon start|wake|alert`: запуск сессий и тревоги. Личное ему открыто
