@@ -20,9 +20,10 @@
       этот режим отключает запросы разрешения, а вопрос хука в списке исключений не назван. Отказ guard.py (deny)
       важнее: Claude Code сводит решения всех хуков PreToolUse как deny > defer > ask > allow.
   UserPromptSubmit — снимает флаг на вашем сообщении. Уведомление фоновой задачи («<task-notification>»), сообщение
-      другой сессии («Another Claude session sent a message:»), сообщение канала («<channel») флаг не снимают; поля
-      origin.kind и promptSource, если Claude Code начнёт передавать их хуку, учитываются тоже. Запуск по расписанию
-      (/loop, задача по времени) отличить нельзя — он снимает флаг (допущение: его текст писали вы).
+      другой сессии («Another Claude session sent a message:»), сообщение канала («<channel») флаг не снимают.
+      Поле source события (Claude Code 2.1.29x): снимает только "user" или его отсутствие; system, sdk, loop_wakeup,
+      schedule_wakeup, poll_event (пробуждение, /loop, задача по времени, SDK) не снимают — как журнал owner-log
+      pantheon. Поля origin.kind и promptSource, если Claude Code начнёт передавать их хуку, учитываются тоже.
 
 Сбой: PreToolUse — выход 2 (действие остановлено, как у guard), в hooks.json — onFailure: block. PostToolUse — если
 в событии упоминается tg-read, флаг ставится (лучше лишний вопрос, чем пропуск), выход 0. UserPromptSubmit — выход 0
@@ -69,7 +70,8 @@ TEMP_TG_RX = r"(?:\$\{?TMPDIR\}?|/tmp|/private/tmp|/var/folders/[^\s'\";|&]*)/+t
 # --- что спрашивать ---------------------------------------------------------------------------------------------
 ASK_TOOLS = {"WebFetch": "запрос в интернет (WebFetch)", "WebSearch": "поиск в интернете (WebSearch)",
              "SendMessage": "сообщение другой сессии (SendMessage)",
-             "CronCreate": "задача по расписанию (CronCreate) — она запустится позже с этим текстом"}
+             "CronCreate": "задача по расписанию (CronCreate) — она запустится позже с этим текстом",
+             "ScheduleWakeup": "задача-пробуждение (ScheduleWakeup) — она запустится позже с этим текстом"}
 EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 MCP_ALWAYS = ("claude-in-chrome", "computer-use")
 MCP_WRITE_WORDS = {"create", "update", "send", "post", "write", "delete", "edit", "insert", "upload", "publish",
@@ -222,11 +224,12 @@ def head(seg):
         w = seg[i]
         if re.fullmatch(r"[A-Za-z_]\w*=.*", w, re.S):
             i += 1
-        elif w in WRAPPERS:
+        elif os.path.basename(w) in WRAPPERS:  # и полным путём: /usr/bin/env, /usr/bin/nohup
+            w = os.path.basename(w)
             i += 1
             if w in ("timeout", "gtimeout", "nice") and i < len(seg) and re.fullmatch(r"-?[\d.]+[smhd]?", seg[i]):
                 i += 1
-        elif w.startswith("-") and i > 0 and seg[i - 1] in WRAPPERS:
+        elif w.startswith("-") and i > 0 and os.path.basename(seg[i - 1]) in WRAPPERS:
             i += 1
         else:
             return os.path.basename(w), i
@@ -368,9 +371,8 @@ def _bash_source(event, sid, cmd):
         return hit
     if re.search(DUMP_SIGNATURE_RX, _resp_text(event.get("tool_response"))):
         return "Bash: вывод выгрузки tg_read"
-    dumps = load_dumps(sid) if sid else []
-    if not (re.search(TEMP_TG_RX, cmd) or any(d in cmd for d in dumps)):
-        return None
+    if not (re.search(TEMP_TG_RX, cmd) or (sid and load_dumps(sid))):
+        return None  # путь выгрузки может стоять в команде относительным (tail out.md) — сверка по словам ниже
     tg_vars = _tg_vars(cmd)
     for seg in segments(cmd):
         if any(_is_tg_word(w, tg_vars) for w in seg):
@@ -489,7 +491,10 @@ def ask_reason(event):
 # --- снятие -----------------------------------------------------------------------------------------------------
 
 def owner_prompt(event):
-    """UserPromptSubmit от вас, а не уведомление задачи или сообщение другой сессии."""
+    """UserPromptSubmit от вас, а не уведомление задачи, сообщение другой сессии, расписание или SDK."""
+    src = event.get("source")
+    if src is not None and src != "user":
+        return False  # system, sdk, loop_wakeup, schedule_wakeup, poll_event: текст пишет не владелец (как owner-log)
     origin = event.get("origin")
     if isinstance(origin, dict) and origin.get("kind") not in (None, "human"):
         return False

@@ -8,7 +8,7 @@
         ]
       },
       {
-        "matcher": "WebFetch|WebSearch|Bash|Write|Edit|MultiEdit|NotebookEdit|SendMessage|CronCreate|mcp__.*",
+        "matcher": "WebFetch|WebSearch|Bash|Write|Edit|MultiEdit|NotebookEdit|SendMessage|CronCreate|ScheduleWakeup|mcp__.*",
         "hooks": [
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/taint.py\"", "timeout": 10, "onFailure": "block" }
         ]

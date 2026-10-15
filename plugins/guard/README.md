@@ -136,7 +136,7 @@ answer и тик, это скрипты, guard их не видит. Сесси�
 **Что спрашивается.** Хук PreToolUse отвечает ask с причиной («сессия читала сырой Telegram …; подтвердите, только
 если просили это сами») на такие действия:
 
-- WebFetch, WebSearch, SendMessage, CronCreate;
+- WebFetch, WebSearch, SendMessage, CronCreate, ScheduleWakeup;
 - Bash с сетью: `curl`, `wget`, `ssh`, `scp`, `sftp`, `nc`, `gh`, `git push`, `rsync` на хост, `python`/`node`/`uv`
   с `urllib`, `requests`, `httpx`, `fetch(`, `http(s)://` в аргументах или в heredoc;
 - MCP: имя со словами create, update, send, post, write, delete, edit, upload, publish, comment, navigate, click и т. п.;
@@ -157,9 +157,10 @@ permission prompts», а в списке того, что никакой реж�
 
 **Как снять.** Ваше следующее сообщение (UserPromptSubmit). Не снимают: уведомление фоновой задачи
 (`<task-notification>`), сообщение другой сессии («Another Claude session sent a message:»), сообщение канала
-(`<channel`). Поля `origin.kind` и `promptSource`, если Claude Code начнёт отдавать их хуку, тоже учитываются; в
-журнале сессии они есть, в событии хука — нет. Запуск задачи по расписанию (`/loop`, CronCreate) по событию не
-отличить, он снимает флаг. Допущение: текст задачи по расписанию писали вы. Флаг одной сессии на другие не влияет.
+(`<channel`). Поле события `source` (Claude Code 2.1.29x): флаг снимает только `user` или событие без поля.
+Пробуждение и запуск по расписанию (`loop_wakeup`, `schedule_wakeup`, `poll_event`), системный промпт (`system`) и
+SDK (`sdk`) флаг не снимают — так же журнал owner-log в pantheon решает, что текст писали не вы. Поля `origin.kind` и
+`promptSource`, если Claude Code начнёт отдавать их хуку, тоже учитываются. Флаг одной сессии на другие не влияет.
 Флаги старше 7 дней удаляются. Выключить правило — `GUARD_OFF=tg-taint`.
 
 **Сбой.** PreToolUse — код 2 и `onFailure: block`: действие остановлено. PostToolUse — флаг ставится, если в событии

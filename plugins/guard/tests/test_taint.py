@@ -3,7 +3,8 @@
 
 Запуск: python3 -I plugins/guard/tests/test_taint.py   (код выхода 0 — все прошли)
 Проверяет: когда флаг ставится и когда нет (-o -, -o ФАЙЛ, без -o, status, --quota, tg-reader), ask на каждый класс
-действий наружу, чтение без вопроса, снятие на сообщении владельца (и не на уведомлении или чужой сессии), deny guard
+действий наружу, чтение без вопроса, снятие на сообщении владельца (и не на уведомлении, чужой сессии, source
+не user), deny guard
 важнее ask, флаг одной сессии не трогает другую, bypassPermissions — deny, сбой — по правилу события.
 """
 import json
@@ -114,6 +115,19 @@ def test_sets():
         h = new_home()
         rc, _, err = bash(h, cmd)
         check(f"флаг ставит: {name}", rc == 0 and flag(h), err[-200:])
+
+    # выгрузка в относительный путь: -o out.md, затем чтение по тому же относительному пути (cwd события)
+    h = new_home()
+    bash(h, f"{T} history Чат --days 1 -o out.md", stdout="Сохранено: out.md")
+    check("подготовка: -o out.md сам флаг не ставит", not flag(h))
+    bash(h, "tail -n 50 other.md")
+    check("не ставит: чтение другого относительного файла", not flag(h))
+    bash(h, "tail -n 50 out.md")
+    check("флаг ставит: tail -n 50 out.md после -o out.md (путь от cwd)", flag(h))
+    h = new_home()
+    bash(h, f"{T} history Чат -o dumps/chat.md")
+    bash(h, "cat ./dumps/chat.md | head")
+    check("флаг ставит: cat ./dumps/chat.md после -o dumps/chat.md", flag(h))
 
     h = new_home()
     bash(h, "cat notes.md", stdout="шапка\n" + SIG + "\n…")
@@ -236,6 +250,7 @@ def test_asks():
         ("WebSearch", "WebSearch", {"query": "x"}),
         ("SendMessage", "SendMessage", {"to": "zeus", "message": "x"}),
         ("CronCreate", "CronCreate", {"cron": "0 9 * * *", "prompt": "x"}),
+        ("ScheduleWakeup", "ScheduleWakeup", {"delaySeconds": 1200, "prompt": "x", "reason": "x"}),
         ("curl", "Bash", {"command": "curl -s https://example.com/x -d @data"}),
         ("wget", "Bash", {"command": "wget -q https://example.com"}),
         ("ssh", "Bash", {"command": "ssh host 'ls'"}),
@@ -249,6 +264,8 @@ def test_asks():
         ("python requests в heredoc", "Bash", {"command": "python3 - <<'EOF'\nimport requests\nrequests.post('https://x')\nEOF"}),
         ("node fetch", "Bash", {"command": "node -e \"fetch('https://x', {method: 'POST'})\""}),
         ("curl после timeout/env", "Bash", {"command": "timeout 5 env A=1 curl https://x"}),
+        ("curl после /usr/bin/env -i (обёртка полным путём)", "Bash", {"command": "/usr/bin/env -i curl x"}),
+        ("curl после /usr/bin/nohup", "Bash", {"command": "/usr/bin/nohup curl -d @f https://x"}),
         ("curl после && и в подкоманде", "Bash", {"command": "ls && (cd x; curl -T f https://x)"}),
         ("MCP create", "mcp__plugin_Notion_notion__notion-create-pages", {}),
         ("MCP sendMessage", "mcp__slack__sendMessage", {}),
@@ -314,6 +331,8 @@ def test_bypass_and_deny_wins():
     h = tainted_home()
     d = pre(h, "WebFetch", {"url": "https://x"}, permission_mode="bypassPermissions")
     check("bypassPermissions: вместо ask — deny", d == "deny", str(d))
+    d = pre(h, "ScheduleWakeup", {"delaySeconds": 1200, "prompt": "x"}, permission_mode="bypassPermissions")
+    check("bypassPermissions: ScheduleWakeup — deny", d == "deny", str(d))
     d = pre(h, "WebFetch", {"url": "https://x"}, permission_mode="auto")
     check("auto: ask (вопрос хука показывается и в auto)", d == "ask", str(d))
     d = pre(h, "WebFetch", {"url": "https://x"}, permission_mode="acceptEdits")
@@ -356,6 +375,17 @@ def test_clear_and_sessions():
     bash(h, f"{T} search x -o -")
     prompt(h, "ещё", origin={"kind": "human"}, promptSource="typed")
     check("снимает: origin human + promptSource typed", not flag(h))
+
+    # поле source (Claude Code 2.1.29x): снимает только user или его отсутствие — как owner-log в pantheon (Р12)
+    h = tainted_home()
+    for src in ("loop_wakeup", "schedule_wakeup", "system", "poll_event", "sdk"):
+        rc, _, _ = prompt(h, "Да, отправляй", source=src)
+        check(f"не снимает: source {src}", rc == 0 and flag(h))
+    rc, _, _ = prompt(h, "Да, отправляй", source="user")
+    check("снимает: source user", rc == 0 and not flag(h))
+    bash(h, f"{T} search x -o -")
+    rc, _, _ = prompt(h, "Да, отправляй")
+    check("снимает: поля source нет", rc == 0 and not flag(h))
 
     # две сессии на одном HOME
     h = new_home()
@@ -413,9 +443,10 @@ def test_hooks_json():
     check("hooks.json: PreToolUse taint с onFailure block",
           len(pre_) == 1 and all(x.get("onFailure") == "block" for x in pre_[0]["hooks"]))
     m = pre_[0]["matcher"].split("|") if pre_ else []
-    check("hooks.json: PreToolUse ловит WebFetch, WebSearch, Bash, Write, Edit, SendMessage, mcp__",
+    check("hooks.json: PreToolUse ловит WebFetch, WebSearch, Bash, Write, Edit, SendMessage, CronCreate, "
+          "ScheduleWakeup, mcp__",
           all(t in m for t in ("WebFetch", "WebSearch", "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
-                               "SendMessage", "mcp__.*")), str(m))
+                               "SendMessage", "CronCreate", "ScheduleWakeup", "mcp__.*")), str(m))
     post_ = taint("PostToolUse")
     check("hooks.json: PostToolUse taint на Bash|Read|Grep",
           len(post_) == 1 and set(post_[0]["matcher"].split("|")) == {"Bash", "Read", "Grep"})
