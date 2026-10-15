@@ -236,7 +236,7 @@ class Policy:
         if due is None or not d.get("due_day"):
             return due
         a, b = _hm(self.cfg["quiet_start"]), _hm(self.cfg["quiet_end"])
-        if a == b:
+        if a <= b:  # тихие часы не переходят через полночь (00:30–08:00): конец дня срока не тихий — опора сам срок
             return due
         ref = datetime.fromtimestamp(due).replace(hour=a // 60, minute=a % 60, second=0, microsecond=0).timestamp()
         return min(ref, due)
