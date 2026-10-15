@@ -62,6 +62,24 @@ class Env:
         self.agents([])
         open(os.path.join(self.pantheon, "schedule.toml"), "w").write('primary_host = "mac-a"\n[defaults]\nlimit_max_pct = 70\n')
         self.doms = {}
+        # уведомления идут через политику (metis-0023): простой — явно, по умолчанию «вы у Mac»
+        self.extra = {"PANTHEON_FAKE_IDLE": "0"}
+
+    def notify_mode(self, idle, quiet=None):
+        """Простой (с) и тихие часы для политики уведомлений: quiet=None — без тихих часов (как днём),
+        quiet=(начало, конец) — свои, например ("12:00", "11:59") — тихо всегда, кроме минуты 11:59 (как ночью)."""
+        self.extra["PANTHEON_FAKE_IDLE"] = str(idle)
+        a, b = quiet or ("00:00", "00:00")
+        p = os.path.join(self.pantheon, "schedule.toml")
+        text = open(p).read().split("\n[notify]")[0]
+        open(p, "w").write(text + f'\n[notify]\nquiet_start = "{a}"\nquiet_end = "{b}"\n')
+
+    def sent(self):
+        return open(self.notify, encoding="utf-8").read() if os.path.exists(self.notify) else ""
+
+    def queued(self):
+        p = os.path.join(self.state, "notify.json")
+        return [x.get("id") for x in json.load(open(p)).get("queue", [])] if os.path.exists(p) else []
 
     def agents(self, lst):
         json.dump(lst, open(self.agents_file, "w"))
@@ -96,6 +114,7 @@ class Env:
                "PANTHEON_NOTIFY_LOG": self.notify, "FAKE_CLAUDE_LOG": self.log, "FAKE_AGENTS": self.agents_file,
                "PANTHEON_FAKE_SWAP": "1.0", "PANTHEON_FAKE_PS": "", "PANTHEON_FAKE_CC": "2.1.292",
                "PANTHEON_FAKE_LIMIT": "10"}
+        env.update(self.extra)
         env.update(extra or {})
         return subprocess.run([sys.executable, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=60)
 
@@ -149,9 +168,149 @@ def test_autostart_only_new_sanctions():
     check("нет доверия" in e2.alerts(), "тревога о доверии")
 
 
+def _give_up(e):
+    """Три сбоя самозапуска hermes-x подряд — самозапуск встаёт. → время последнего прохода."""
+    e.direction("hermes-x")
+    e.task("hermes-0001", "hermes-x")
+    e.run("watch", t=T0)
+    e.board("hermes-0001", T0 + 10)
+    t = T0 + 60
+    for _ in range(3):
+        e.run("watch", t=t)
+        e.run("watch", t=t + 400)
+        t = json.load(open(e.st("autostart.json")))["hermes-x"]["next"] + 10
+    check(json.load(open(e.st("autostart.json")))["hermes-x"].get("gave_up"), "самозапуск не встал")
+    return t
+
+
+def test_session_waits_reaches_you():
+    """Ревью argus: сессия «ждёт вас», пока вы у Mac, — в очередь; ушли, а она всё ждёт — одна macOS и больше
+    ни одной, пока ждёт; «упала» той же сессии — своё событие (свой ключ), а не «уже сообщали»."""
+    e = Env()
+    e.direction("coord-x")
+    e.notify_mode(0)
+    e.agents([bg("coord-x", "blocked", "sess0001-aaaa", pid=31)])
+    e.run("watch", t=T0)                                         # «здесь»
+    a = e.sent()
+    e.notify_mode(1200)                                          # ушли
+    e.run("watch", t=T0 + 300)
+    b = e.sent()
+    e.run("watch", t=T0 + 1800)
+    c = e.sent()
+    e.run("watch", t=T0 + 4200)
+    d = e.sent()
+    check("ждёт вас" not in a and "watch-blocked-sess0001" in e.queued(), f"«здесь»: без macOS и в очереди: {a!r}")
+    check(b.count("coord-x ждёт вас") == 1, f"ушли — одна macOS: {b!r}")
+    check(c.count("coord-x ждёт вас") == 1, f"через 25 мин — второй нет: {c!r}")
+    check(d.count("coord-x ждёт вас") == 1 and "|session-coord-x" in d, f"через 65 мин — повтора нет: {d!r}")
+    check(e.alerts().count("coord-x (sess0001) ждёт вас") == 1, "тревога в alerts.md — не разовая")
+    # «готово» (сессия работает), затем снова «ждёт» — ещё одна macOS
+    e.agents([bg("coord-x", "working", "sess0001-aaaa", pid=31)])
+    e.run("watch", t=T0 + 4500)
+    e.agents([bg("coord-x", "blocked", "sess0001-aaaa", pid=31)])
+    e.run("watch", t=T0 + 4800)
+    check(e.sent().count("coord-x ждёт вас") == 2, f"снова «ждёт» после снятия — без второй macOS: {e.sent()!r}")
+    # весь день ждут две сессии, вас нет: по одной macOS на сессию, бюджет не съеден — решение «Нужен ответ» дойдёт
+    e = Env()
+    e.extra["TZ"] = "Europe/Moscow"
+    e.direction("coord-x")
+    e.direction("coord-y")
+    e.notify_mode(1200)
+    e.agents([bg("coord-x", "blocked", "sess0004-dddd", pid=34), bg("coord-y", "blocked", "sess0005-eeee", pid=35)])
+    day = T0 - 8 * 3600 - 46 * 60                                  # 2026-10-14 12:00 по Москве
+    for k in range(34):                                          # 12:00 … 23:00, каждые 20 мин
+        e.run("watch", t=day + k * 1200)
+    s = e.sent()
+    used = json.load(open(e.st("notify.json"))).get("used")
+    check(s.count("coord-x ждёт вас") == 1 and s.count("coord-y ждёт вас") == 1 and used == 2,
+          f"день ожидания двух сессий — по одной macOS, бюджет 2: {s!r} used={used}")
+    r = e.run("task", "new", "--direction", "coord-x", "--title", "Решить вечером", "--status", "waiting",
+              "--waiting-on", "human", "--next", "ответ", "--question", "Что выбрать?", "--project", "coord-x",
+              t=day + 11 * 3600 - 120)
+    e.run("board", t=day + 11 * 3600 - 60)                       # 22:59 — ещё не тихие часы
+    check(r.returncode == 0 and "Вопрос к вам: Решить вечером" in e.sent(),
+          f"после дня ожидания решение «Нужен ответ» без macOS: {r.stderr} {e.sent()!r}")
+    # «ждёт», через 10 мин «упала» той же сессии — при «нет» отдельная macOS
+    e = Env()
+    e.direction("coord-x")
+    e.notify_mode(1200)
+    e.agents([bg("coord-x", "blocked", "sess0002-bbbb", pid=32)])
+    e.run("watch", t=T0)
+    e.agents([bg("coord-x", "failed", "sess0002-bbbb", pid=32)])
+    e.run("watch", t=T0 + 600)
+    s = e.sent()
+    check("coord-x ждёт вас" in s and "coord-x упала" in s, f"«упала» после «ждёт» при «нет» — своя macOS: {s!r}")
+    # то же при «здесь» — обе строки в очереди сводки
+    e = Env()
+    e.direction("coord-x")
+    e.notify_mode(0)
+    e.agents([bg("coord-x", "blocked", "sess0003-cccc", pid=33)])
+    e.run("watch", t=T0)
+    e.agents([bg("coord-x", "failed", "sess0003-cccc", pid=33)])
+    e.run("watch", t=T0 + 600)
+    q = e.queued()
+    check(not e.sent() and "watch-blocked-sess0003" in q and "watch-failed-sess0003" in q,
+          f"«упала» после «ждёт» при «здесь» — строка в очереди: {q}")
+
+
+def test_watch_notify_through_policy():
+    """Уведомления дежурного — через политику (metis-0023): сбой «скоро» — macOS только при «нет» и не ночью,
+    иначе в очередь сводки; подделка журнала ваших слов — критичное: сразу, и ночью, и когда вы у Mac."""
+    e = Env()
+    e.notify_mode(0)                                           # вы у Mac, день
+    t = _give_up(e)
+    check("Самозапуск" not in e.sent() and "autostart-gaveup-hermes-x" in e.queued(),
+          f"самозапуск встал при «здесь»: уведомление или нет в очереди: {e.sent()!r} {e.queued()}")
+    e.notify_mode(1200)                                        # ушли, а самозапуск так и стоит — macOS дойдёт
+    e.run("watch", t=t + 60)
+    check(e.sent().count("Самозапуск hermes-x встал") == 1, f"самозапуск стоит, вы ушли — без macOS: {e.sent()!r}")
+    e = Env()
+    e.notify_mode(1200, ("12:00", "11:59"))                    # нет у Mac, ночь (тихие часы весь день)
+    _give_up(e)
+    check("Самозапуск" not in e.sent() and "autostart-gaveup-hermes-x" in e.queued(),
+          f"самозапуск встал ночью: уведомление или нет в очереди: {e.sent()!r}")
+    e = Env()
+    e.notify_mode(1200)                                        # нет у Mac, день
+    _give_up(e)
+    check("Самозапуск hermes-x встал" in e.sent(), "самозапуск встал при «нет» днём — без уведомления")
+    # проверка опор после обновления Claude Code не прошла — сбой «скоро»: при «здесь» без уведомления
+    e = Env()
+    e.notify_mode(0)
+    e.run("watch", t=T0)
+    e.run("watch", t=T0 + 60, extra={"PANTHEON_FAKE_CC": "2.1.300"})
+    check("НЕ в порядке" in e.alerts() and "проверка опор" not in e.sent() and "infra" in e.queued(),
+          f"infra при «здесь»: {e.sent()!r} {e.queued()}")
+    # техперезапуск истёк — сбой «скоро»: при «здесь» без уведомления
+    e = Env()
+    e.notify_mode(0)
+    e.direction("mm-dir")
+    e.run("restart", "--prepare", "обновление", t=T0)
+    e.run("watch", t=T0 + 7300)
+    check("истекла" in e.alerts() and "Техперезапуск" not in e.sent() and "restart" in e.queued(),
+          f"restart при «здесь»: {e.sent()!r} {e.queued()}")
+    # журнал ваших слов изменён задним числом — критичное: и при «здесь», и ночью
+    for idle, quiet in ((0, None), (1200, ("12:00", "11:59"))):
+        e = Env()
+        e.notify_mode(idle, quiet)
+        p = os.path.join(e.st("owner-log"), "athena.md")
+        new = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(T0 - 86400))
+        open(p, "w").write(f"## {new}\nсвежее\n\n")
+        e.run("watch", t=T0)
+        open(p, "w").write(f"## {new}\nподменённое\n\n")
+        e.run("watch", t=T0 + 86400)
+        check("изменена уже записанная часть" in e.alerts() and "Журнал ваших слов изменён задним числом" in e.sent()
+              and "критично" in e.sent(), f"подделка журнала (простой {idle}, тихие {quiet}): {e.sent()!r}")
+        os.remove(p)
+        e.run("watch", t=T0 + 2 * 86400)
+        check("Журнал ваших слов удалён" in e.sent(), f"удаление журнала (простой {idle}, тихие {quiet}): {e.sent()!r}")
+        nl = os.path.join(e.state, "notify-log.jsonl")
+        check(os.path.exists(nl) and '"critical"' in open(nl).read(), "критичное дежурного не в журнале уведомлений")
+
+
 def test_autostart_backoff_and_give_up():
     """Сбой — пауза растёт; три сбоя подряд — самозапуск направления встаёт, уведомление; resume сбрасывает."""
     e = Env()
+    e.notify_mode(1200)  # «нет у Mac» и без тихих часов: сбой «скоро» уходит уведомлением (metis-0023)
     e.direction("hermes-x")
     e.task("hermes-0001", "hermes-x")
     e.run("watch", t=T0)
@@ -175,6 +334,28 @@ def test_autostart_backoff_and_give_up():
     e.run("resume", "hermes-x", t=t + 99999)
     e.run("watch", t=t + 99999)
     check(not json.load(open(e.st("autostart.json")))["hermes-x"].get("gave_up"), "resume не сбросил счётчик сбоев")
+    # снова встал (ревью argus): отметка once прежнего эпизода не снята (после resume живая сессия — сброса нет);
+    # новый эпизод «встал» всё равно даёт macOS
+    np = e.st("notify.json")
+
+    def stale(at):  # отметка прежнего эпизода, которую autostart() не снял
+        nst = json.load(open(np, encoding="utf-8"))
+        nst.setdefault("faults", {})["autostart-gaveup-hermes-x"] = {"t": at, "text": "старое", "once": True}
+        data = json.dumps(nst, ensure_ascii=False)
+        with open(np, "w", encoding="utf-8") as fh:
+            fh.write(data)
+    before = open(e.notify).read().count("Самозапуск hermes-x встал")
+    t = t + 99999 + 3 * 86400
+    for i in range(3):
+        e.run("watch", t=t)
+        if i == 2:
+            stale(t - 3 * 86400)  # прямо перед третьим сбоем: дальше — только fail()
+        e.run("watch", t=t + 400)
+        st = json.load(open(e.st("autostart.json")))["hermes-x"]
+        if i < 2:
+            t = st["next"] + 10
+    check(st.get("gave_up") and open(e.notify).read().count("Самозапуск hermes-x встал") == before + 1,
+          f"снова встал через 3 дня при неснятой отметке — нет второй macOS: {st}")
 
 
 def test_autostart_healthy_resets_and_limits():

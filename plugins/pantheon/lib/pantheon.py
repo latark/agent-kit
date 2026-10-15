@@ -16,6 +16,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         (службы [[service]] — те же pause|resume|disable|enable: launchd снимается сразу)
   pantheon qmd config|update|embed|serve|install|status   общий поиск qmd: index.yml из ~/ai/pantheon/qmd.toml,
                                         освежить индекс, сервер MCP (служба), подключить к Claude на этом Mac
+  pantheon plugins update [--quiet]     новые версии плагинов agent-kit (тик раз в 10 мин): тесты новой и
+                                        установленной версии; нет новых падений — claude plugin update, есть — тревога
   pantheon direction check <имя>        что готово у нового направления (навык new-direction): реестр, «да»,
                                         папки, STATUS.md, domains.json, AGENTS.md, доверие, autoMode
   pantheon direction init <имя>         папка ~/projects/<имя> по вашей галочке: git init, AGENTS.md, локальный
@@ -32,7 +34,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon status                       один экран для отладки: тик, сессии, вопросы к вам, тревоги, защиты, sync, места heavy, версии
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
-  pantheon task new --direction D --title T [--status S --priority N --due ГГГГ-ММ-ДД --next X --owner O
+  pantheon task new --direction D --title T [--status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ] --next X --owner O
                     --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
                     --recommend "А — потому что …" --if-no-answer "…" --depends-on ID]
                     без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ
@@ -60,10 +62,14 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon commit                       commit → pull без rebase → push ~/ai/pantheon
   pantheon install | uninstall          поставить или снять задачу launchd com.latark.pantheon-tick
   pantheon tick                         один проход планировщика (его вызывает launchd)
-Для синтетических тестов: PANTHEON_HOME, PANTHEON_STATE, PANTHEON_NOW, PANTHEON_HOST,
-PANTHEON_FAKE_WAKE, PANTHEON_FAKE_AC, PANTHEON_FAKE_IDLE, PANTHEON_FAKE_LIMIT, PANTHEON_DRYRUN,
-PANTHEON_NO_NOTIFY.
+Уведомления (lib/notify.py): присутствие по простою, тихие часы, утренний дайджест, повтор и «долго ждёт», склейка
+по id решения, бюджет в день; пороги — таблица [notify] в schedule.toml, состояние и журнал — notify.json и
+notify-log.jsonl в ~/.local/state/pantheon/.
+Для синтетических тестов: PANTHEON_HOME, PANTHEON_STATE, PANTHEON_NOW — «сейчас», PANTHEON_HOST,
+PANTHEON_FAKE_WAKE, PANTHEON_FAKE_AC, PANTHEON_FAKE_IDLE — простой в секундах, PANTHEON_FAKE_LIMIT, PANTHEON_DRYRUN,
+PANTHEON_NO_NOTIFY — без уведомлений, PANTHEON_NOTIFY_LOG — уведомления строкой «заголовок|текст|ссылка|группа» в файл.
 """
+import collections
 import contextlib
 import fcntl
 import hashlib
@@ -77,6 +83,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta
 
@@ -191,6 +198,7 @@ def load_schedule():
     with open(p, "rb") as fh:
         sched = tomllib.load(fh)
     sched["defaults"] = {**DEFAULTS, **(sched.get("defaults") or {})}
+    sched["notify"] = notify_mod().settings(sched.get("notify"))
     jobs = []
     for j in sched.get("job") or []:
         if isinstance(j, dict) and JOB_NAME.fullmatch(str(j.get("name", ""))):
@@ -234,9 +242,12 @@ def alert(text, who="pantheon"):
             fh.write(f"{stamp()} · {who} · {text}\n")
 
 
-def alert_once(key, value, text, who="pantheon", note=None, group=None):
-    """Тревога (и уведомление note) один раз на значение value: повтор того же состояния молчит. group — вид
-    уведомления: новое того же вида заменяет прежнее в Центре уведомлений (по умолчанию — ключ тревоги)."""
+def alert_once(key, value, text, who="pantheon", note=None, group=None, policy=None, critical=False):
+    """Тревога (и уведомление note — сбой класса «скоро», через политику уведомлений) один раз на значение value:
+    повтор того же состояния молчит. group — вид уведомления: новое того же вида заменяет прежнее в Центре
+    уведомлений и считается тем же сбоем для повтора (по умолчанию — ключ тревоги). policy — политика, уже взятая
+    под lock("notify") (проход доски), иначе берётся своя. critical — класс COMM-08 (подделка журнала ваших слов и
+    т. п.): уведомление сразу, и ночью, и когда вы у Mac — в счёт бюджета и в журнал."""
     mark = once_path(key)
     try:
         if open(mark).read() == str(value):
@@ -244,8 +255,10 @@ def alert_once(key, value, text, who="pantheon", note=None, group=None):
     except OSError:
         pass
     alert(text, who)
-    if note:
-        notify(note, group=group or key)
+    if note and critical:
+        notify_critical(note, group=group or key, policy=policy)
+    elif note:
+        notify_soon(key, note, group=group or key, policy=policy)
     os.makedirs(path("once"), exist_ok=True)
     open(mark, "w").write(str(value))
 
@@ -263,7 +276,7 @@ def clear_once(key):
 JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
-                    "instructions", "agents", "usage", "qmd"}
+                    "instructions", "agents", "usage", "qmd", "plugins"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 
 
@@ -285,6 +298,8 @@ def parse_command(cmd):
             return None
         if argv[1] == "qmd" and argv[2:3] not in (["update"], ["embed"], ["serve"]):
             return None  # install (claude mcp add уровня пользователя) и прочее — только руками
+        if argv[1] == "plugins" and (argv[2:3] != ["update"] or any(a != "--quiet" for a in argv[3:])):
+            return None
         return [os.path.join(PLUGIN, "bin", "pantheon")] + argv[1:]
     if argv[0] == "claude":
         if argv[1:2] != ["-p"]:
@@ -325,7 +340,7 @@ def notify(text, title="Пантеон", target=None, group=None):
     group заменяет прежнее уведомление о том же. Без него — обычное уведомление без перехода."""
     if os.environ.get("PANTHEON_NOTIFY_LOG"):  # для тестов: что и куда ушло бы
         with open(os.environ["PANTHEON_NOTIFY_LOG"], "a", encoding="utf-8") as fh:
-            fh.write(f"{title}|{text}|{target or ''}\n")
+            fh.write(f"{title}|{text}|{target or ''}|{group or ''}\n")
         return
     if os.environ.get("PANTHEON_NO_NOTIFY") or os.environ.get("PANTHEON_DRYRUN") == "1":
         return
@@ -493,7 +508,7 @@ def tick():
                 save_job_state(name, st)
                 alert(f"задача {name}: аренда истекла, поставлена на паузу — продлить: pantheon jobs renew {name}",
                       "pantheon-tick")
-                notify(f"Задача {name} на паузе: аренда истекла")
+                notify_soon("lease-" + name, f"Задача {name} на паузе: аренда истекла")
                 continue
             is_due, due_at = due(job, st, t)
             if not is_due or locked("job-" + name):
@@ -769,7 +784,7 @@ def run_job(name):
                 alert(f"задача {name} упала (код {rc}, подряд {st['fails']}): {tail[0][:200]} — журнал {log.replace(HOME, '~')}",
                       "pantheon-tick")
                 if job.get("notify", True):
-                    notify(f"Задача {name} упала (код {rc})")
+                    notify_soon("job-" + name, f"Задача {name} упала (код {rc})")
             return rc
 
 
@@ -1242,7 +1257,9 @@ def domains_build(if_changed=False):
     if if_changed:
         built = read_json(path("domains.json")).get("built_ts") or 0
         # и новые папки сессий: окно штаба закрывает чужие перечнем (их выводы) — новая папка тоже должна попасть в hq.json
-        watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"),
+        # и каталог ролей: новая роль с memory: должна попасть в песочницу окон (metis-0051). Цикла нет: roles_build
+        # пишет файл, только если текст изменился, — пересборка одна, следующий тик уже тихий
+        watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS,
                    os.path.join(os.path.realpath("/tmp"), f"claude-{os.getuid()}"))
         newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
         if built >= newest:
@@ -1315,6 +1332,12 @@ SANDBOX_EXCLUDED = ["gh pr *", "gh issue *", "gh run *", "gh repo view *", "gh a
 # git по SSH в песочнице macOS не работает: у направлений с таким remote сетевые команды git — мимо неё
 GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
 COORDINATOR_COMPACT = 200000
+# Окну координатора направления — слияние PR без вопроса классификатора режима auto (metis-0050). Каждое слияние
+# по-прежнему проверяет guard (merge_problem): только главная сессия domain-coordinator, свои папки, без --admin и
+# --auto. Мастерской и штабу правила нет.
+COORDINATOR_ALLOW = ["Bash(gh pr merge *)"]
+# Роли главных сессий: их память в песочницу не добавляется, даже если в шапке есть memory:
+MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
 # terminal-notifier по щелчку открывает ссылку или выполняет команду — от имени владельца, вне песочницы. Ролям его
 # не прочитать, а значит и не запустить: уведомления Пантеона шлёт только тик (поддельное «от Пантеона» не пройдёт).
 NOTIFIER_PATHS = ["/opt/homebrew/Cellar/terminal-notifier", "/opt/homebrew/opt/terminal-notifier",
@@ -1444,6 +1467,27 @@ def _read_small_regular(p, limit=8 << 20):
         os.close(fd)
 
 
+def memory_dirs():
+    """Папки ~/.claude/agent-memory/<роль> ролей-субагентов с ключом memory: в шапке (metis-0051): их Bash-запись
+    песочнице окна иначе недоступна. Настоящие пути; папку создаёт, ссылку вместо папки пропускает."""
+    out = []
+    try:
+        names = sorted(os.listdir(AGENTS))
+    except OSError:
+        return out
+    for f in names:
+        role = f[:-3]
+        if not f.endswith(".md") or not ROLE_NAME.fullmatch(role) or role in MAIN_ROLES:
+            continue
+        text = _read_small_regular(os.path.join(AGENTS, f))
+        if text is None or "memory" not in (_head_keys(text) or []):
+            continue
+        d = _real_dir(f"~/.claude/agent-memory/{role}", ["~/.claude/agent-memory"], strict=True, create=True)
+        if d:
+            out.append(d)
+    return out
+
+
 def pnpm_store_check(name, folders, store):
     """node_modules на этом Mac собраны с другим хранилищем (store-dir в .npmrc не в git — на другой Mac не приезжает):
     pnpm в окне спросит, сносить ли node_modules, и без терминала молча ничего не поставит — тревога с командой."""
@@ -1485,14 +1529,16 @@ def sandbox_build(domains, policy_path, stores=None):
                    "(строгий guard, SEC-29) — переустановить плагин guard", "pantheon")
     os.makedirs(out_dir, exist_ok=True)
 
-    def one(name, folders, own, compact, deny):
+    memory = memory_dirs()
+
+    def one(name, folders, own, compact, deny, allow=None):
         real = [_real_dir(f, SANDBOX_ROOTS[:1], strict=True) or _real_dir(f, SANDBOX_ROOTS[1:]) for f in folders]
         skipped = [f for f, r in zip(folders, real) if not r]
         if skipped:
             print(f"песочница {name}: вне ~/projects и ~/ai/knowledge, ссылка или нет папки — только через Write/Edit: "
                   f"{skipped}", file=sys.stderr)
         own_real = os.path.realpath(own) if os.path.isdir(own) and not os.path.islink(own) else None
-        write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r]
+        write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r] + memory
         cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
         ok = [r for r in real if r]
         data = role_settings(ok, own_real, write, cache, any(ssh_remote(r) for r in ok), deny, compact, guard)
@@ -1501,6 +1547,8 @@ def sandbox_build(domains, policy_path, stores=None):
             # Метиды, в песочнице упал бы. Мимо неё — только эта подкоманда и только у Метиды; ворота у команды свои:
             # галочка владельца в журнале доски owner-log, который пишет тик, — роли её не подделают.
             data["sandbox"]["excludedCommands"].append("pantheon direction init *")
+        if allow:
+            data.setdefault("permissions", {}).setdefault("allow", []).extend(allow)
         store = (stores or {}).get(name)
         if store:
             st = os.path.realpath(os.path.expanduser(store))
@@ -1515,10 +1563,12 @@ def sandbox_build(domains, policy_path, stores=None):
     built = []
     for name, folders in domains.items():
         one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
-            [] if name in private_dirs else private_paths)
+            [] if name in private_dirs else private_paths, COORDINATOR_ALLOW)
         built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
+    # местные порты мастерской закрыты: на macOS allowLocalBinding открывает все порты 127.0.0.1, в том числе демон CDP
+    # с входами владельца; браузеры владельца — только у роли Харон (решение владельца 15.10, отмена metis-0053)
     built.append("workshop")
     # штаб (SEC-26, вариант А): Зевс пишет только в ~/ai/pantheon, кроме .git и alerts.md; сеть закрыта (в веб он не
     # ходит, SEC-13); мимо песочницы — только `pantheon start|wake|alert`: запуск сессий и тревоги. Личное ему открыто
@@ -1526,7 +1576,7 @@ def sandbox_build(domains, policy_path, stores=None):
     hq_cache = _real_dir(f"{caches}/hq", [caches], strict=True, create=True)
     root = os.path.realpath(PANTHEON)
     keys = [p for p in private_paths if "/.git/git-crypt" in p + "/"]  # ключи — не штабу: ~/ai/pantheon коммитит тик
-    hq = role_settings([root], None, [], hq_cache, False, keys, None, guard)
+    hq = role_settings([root], None, memory, hq_cache, False, keys, None, guard)
     hq["sandbox"]["excludedCommands"] = list(HQ_EXCLUDED)
     hq["sandbox"]["filesystem"]["denyWrite"] += [os.path.join(root, ".git"), os.path.join(root, "alerts.md")]
     hq["sandbox"]["network"]["allowedDomains"] = []
@@ -2589,13 +2639,13 @@ def direction(rest):
 # owner-log/zeus.md (ввод владельца, выбор в окне вопросов), тик — в owner-log/board.jsonl (галочка на карточке; текст
 # вопроса тик берёт из отмеченной карточки). Журналы личные — роли их не читают; эта команда отдаёт исполнителю только
 # записи с номером его вопроса.
-CONSENT_ID = re.compile(r"[a-z][a-z0-9]*-\d{4}")
+CONSENT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 CONSENT_MAX = 1500
 
 
 def consent(rest):
     if not rest or not CONSENT_ID.fullmatch(rest[0]):
-        print("pantheon consent <id> [--days N] — id задачи вида metis-0032", file=sys.stderr)
+        print("pantheon consent <id> [--days N] — id задачи вида metis-0032 или tbankrot-8057746", file=sys.stderr)
         return 2
     qid, days = rest[0], 7.0
     if "--days" in rest:
@@ -2810,6 +2860,145 @@ def uninstall():
 
 
 _TASKS = None
+_NOTIFY = None
+
+
+def notify_mod():
+    """lib/notify.py — политика уведомлений (загрузка как у tasks_mod: python3 -I не кладёт папку скрипта в путь)."""
+    global _NOTIFY
+    if _NOTIFY is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_notify", os.path.join(LIB, "notify.py"))
+        _NOTIFY = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_NOTIFY)
+    return _NOTIFY
+
+
+def owner_acts():
+    """→ (ответы, переносы в «Нужен ответ»), оба {id: [метка времени, …]}. Ответы — из журнала доски (answer и
+    request с вариантом, move не в «Нужен ответ») и окна вопросов Зевса (вопрос «[id] …»); перенос карточки в «Нужен
+    ответ» вами самими — не ответ, а знак «пингов не надо». Только журналы, которые пишут хук и тик: поле answer
+    файла задачи и текст других сессий ответом не считаются."""
+    out, put = {}, {}
+    try:
+        lines = open(path("owner-log", "board.jsonl"), encoding="utf-8").read().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            rec = json.loads(line)
+            t = time.mktime(time.strptime(rec.get("time", "")[:19], "%Y-%m-%dT%H:%M:%S"))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        kind, tid = rec.get("kind"), rec.get("id")
+        if not isinstance(tid, str):
+            continue
+        if (kind in ("answer", "request") and isinstance(rec.get("answer"), str) and rec["answer"].strip()
+                or kind == "move" and rec.get("dst") not in ("Нужен ответ", "Ждёт вас")):
+            out.setdefault(tid, []).append(t)
+        elif kind == "move":
+            put.setdefault(tid, []).append(t)
+    try:
+        with open(path("owner-log", "zeus.md"), encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        text = ""
+    # как consent: пометку «окно вопросов» ставит хук answer, ответ — на вопрос, который начинается с [<id>]
+    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
+    for i, m in enumerate(heads):
+        if m.group(2).strip() != "· окно вопросов":
+            continue
+        body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
+        q = re.match(r"вопрос: \[([^\]\s]{1,40})\]", body, re.I)
+        if not q:
+            continue
+        try:
+            t = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+        except ValueError:
+            continue
+        out.setdefault(q.group(1).lower(), []).append(t)
+    return out, put
+
+
+def owner_log_fns():
+    """→ (answered, owner_put). answered(id, since) — время (ISO) первого ответа владельца по id не раньше since,
+    иначе None; owner_put(id, since) — вы сами перенесли карточку в «Нужен ответ» не раньше since. Журналы читаются
+    один раз за проход и лениво — после того, как проход доски записал новые ходы."""
+    cache = []
+
+    def acts():
+        if not cache:
+            cache.append(owner_acts())
+        return cache[0]
+
+    def answered(tid, since):
+        hits = sorted(x for x in acts()[0].get(tid, []) if x >= int(since))
+        return notify_mod().iso(hits[0]) if hits else None
+
+    def owner_put(tid, since):
+        return any(x >= int(since) for x in acts()[1].get(tid, []))
+    return answered, owner_put
+
+
+def notify_policy(sched=None):
+    """Политика уведомлений на этот проход; вызывать под lock("notify") и закончить save()."""
+    N = notify_mod()
+    if sched is None:
+        try:
+            sched = load_schedule()
+        except (OSError, ValueError):
+            sched = {}
+    answered, owner_put = owner_log_fns()
+    return N.Policy(path("notify.json"), path("notify-log.jsonl"), sched.get("notify") or N.settings(), now(),
+                    idle=idle_sec, send=lambda text, title, target, group: notify(text, title, target, group),
+                    answered=answered, owner_put=owner_put)
+
+
+def notify_critical(text, title="Пантеон · критично", group="critical", policy=None):
+    """Критичное (COMM-08): уведомление сразу, мимо блокировки прохода доски; учёт в бюджете и журнале — под
+    lock("notify"), не взяли за 5 с — без учёта (отправка уже ушла). policy — уже взятая под блокировкой."""
+    if policy is not None:
+        policy.critical(text, title, group=group)
+        return
+    notify(text, title=title, group=group)
+    deadline = time.time() + 5
+    while True:
+        with lock("notify", block=False) as got:
+            if got:
+                pol = notify_policy()
+                pol.critical(text, title, send=False, group=group)
+                pol.save()
+                return
+        if time.time() > deadline:
+            return
+        time.sleep(0.1)
+
+
+def notify_soon(key, text, group=None, policy=None, once=False):
+    """Сбой класса «скоро»: macOS только если вас нет у Mac, не ночью и в бюджете, одна на ключ события за час; иначе —
+    в утреннюю сводку. key — событие (по нему повтор), group — вид в Центре уведомлений (заменяет прежнее того же
+    вида). Событие, которое держится, вызывать каждый проход: дойдёт, когда вы уйдёте от Mac. policy — уже взятая под
+    lock("notify") (flock в том же процессе второй раз не взять). once — событие, которое держится: одна macOS, пока
+    его не снимет clear_fault."""
+    if policy is not None:
+        policy.fault(key, text, group=group, once=once)
+        return
+    with lock("notify"):
+        pol = notify_policy()
+        pol.fault(key, text, group=group, once=once)
+        pol.save()
+
+
+def clear_fault(*keys):
+    """Событие снято — сбросить его в политике уведомлений (следующее такое — снова macOS). Без записи, если сбрасывать
+    нечего: дежурный зовёт это на каждом проходе."""
+    st = read_json(path("notify.json"))
+    if not any(k in (st.get("faults") or {}) for k in keys):
+        return
+    with lock("notify"):
+        pol = notify_policy()
+        if any([pol.clear_fault(k) for k in keys]):
+            pol.save()
 
 
 def qmd_mod():
@@ -2892,11 +3081,14 @@ def board():
                 projects = {d.get("name"): d.get("project") for d in tomllib.load(fh).get("direction") or []}
         except (OSError, ValueError):
             projects = {}
-        lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
-                             alert=lambda k, v, text, who="board", note=None: alert_once(k, v, text, who, note),
-                             notify=lambda text, target=None, group=None: notify(text, target=target, group=group),
-                             primary=primary,
-                             projects=projects)
+        # политика уведомлений — под своей блокировкой на весь проход: сбои из run-job ждут, а не теряются
+        with lock("notify"):
+            pol = notify_policy(sched)
+            lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
+                                 alert=lambda k, v, text, who="board", note=None: alert_once(k, v, text, who, note,
+                                                                                            policy=pol),
+                                 primary=primary, projects=projects, policy=pol)
+            pol.save()
         once_dir = path("once")  # отметки «уже сообщали» старше 90 дней — убрать: папка не растёт без конца
         for f in os.listdir(once_dir) if os.path.isdir(once_dir) else []:
             fp = os.path.join(once_dir, f)
@@ -3061,6 +3253,363 @@ def usage_report(rest):
     return 0
 
 
+# --- обновления плагинов agent-kit (metis-0052) ----------------------------------------------------------------
+# Тик раз в 10 минут, вне песочницы: каталог agent-kit → новые версии установленных плагинов → тесты новой версии и
+# установленной (база) на одних и тех же python → есть новые падения — не ставим, тревога; нет — claude plugin update.
+# База нужна, чтобы падения от места запуска (временная папка, python 3.9) не держали обновление вечно.
+# Хеш дерева проверенной копии сверяется с тем, что встало: update сам обновляет каталог и может поставить версию
+# новее проверенной. Метка testing ловит прерванный прогон (таймаут задачи тика, сбой): такая версия — красная.
+
+MARKETPLACE = "agent-kit"
+PLUGIN_TEST_TIMEOUT = 600    # один файл тестов
+PLUGIN_RUN_LIMIT = 1800      # весь прогон плагина (новая + база, все python) — меньше timeout задачи в schedule.toml
+NO_TESTS = "нет тестов"
+_TMP_RE = None
+ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])")
+
+
+def _plugins_journal(line):
+    os.makedirs(path("plugins"), exist_ok=True)
+    with open(path("plugins", "journal.log"), "a", encoding="utf-8") as fh:
+        fh.write(f"{stamp()} {line}\n")
+
+
+def _plugins_safe(s):
+    return re.sub(r"[^\w.+-]", "_", str(s))[:80] or "_"
+
+
+def _version_newer(new, old):
+    """Новее ли версия каталога установленной: сравнение кортежей чисел; не разобрать — новая, если строки разные."""
+    try:
+        return tuple(int(x) for x in str(new).split(".")) > tuple(int(x) for x in str(old).split("."))
+    except ValueError:
+        return str(new) != str(old)
+
+
+def _plugins_installed():
+    """{имя: {version, installPath}} — плагины agent-kit уровня пользователя по `claude plugin list --json`; None — сбой."""
+    try:
+        r = subprocess.run([claude_bin(), "plugin", "list", "--json"], capture_output=True, text=True, timeout=120)
+        data = json.loads(r.stdout or "null")
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if isinstance(data, dict):
+        data = data.get("plugins")
+    if r.returncode != 0 or not isinstance(data, list):
+        return None
+    out = {}
+    for p in data:
+        if not isinstance(p, dict) or p.get("scope") != "user":
+            continue
+        name, _, mkt = str(p.get("id", "")).partition("@")
+        if mkt == MARKETPLACE and name:
+            out[name] = {"version": str(p.get("version", "")), "installPath": p.get("installPath")}
+    return out
+
+
+def _plugins_catalog():
+    """{имя: (версия, папка плагина)} из клона каталога agent-kit."""
+    known = read_json(os.path.join(HOME, ".claude", "plugins", "known_marketplaces.json"))
+    entry = known.get(MARKETPLACE) if isinstance(known, dict) else None
+    loc = entry.get("installLocation") if isinstance(entry, dict) else None
+    if not isinstance(loc, str) or not os.path.isdir(loc):
+        loc = os.path.join(HOME, ".claude", "plugins", "marketplaces", MARKETPLACE)
+    root = os.path.realpath(loc)
+    mkt = read_json(os.path.join(root, ".claude-plugin", "marketplace.json"))
+    out = {}
+    for p in (mkt.get("plugins") or []) if isinstance(mkt, dict) else []:
+        if not isinstance(p, dict) or not isinstance(p.get("source"), str) or not p.get("name"):
+            continue
+        d = os.path.realpath(os.path.join(root, p["source"]))
+        if not d.startswith(root + os.sep):
+            continue  # источник вне клона каталога (абсолютный путь, ../) — не наш
+        meta = read_json(os.path.join(d, ".claude-plugin", "plugin.json"))
+        ver = meta.get("version") if isinstance(meta, dict) else None
+        if ver:
+            out[str(p["name"])] = (str(ver), d)
+    return out
+
+
+def _tree_hash(root):
+    """sha256 дерева плагина: относительные пути и содержимое, ссылки — по тексту ссылки. Без .git и __pycache__ на
+    любой глубине и без точечных файлов и папок верхнего уровня, кроме .claude-plugin (в кэше лишний `.in_use`).
+    None — папки нет."""
+    if not isinstance(root, str) or not os.path.isdir(root):
+        return None
+    h = hashlib.sha256()
+
+    def walk(d, rel):
+        for e in sorted(os.scandir(d), key=lambda e: e.name):
+            if e.name in (".git", "__pycache__") or (not rel and e.name.startswith(".") and e.name != ".claude-plugin"):
+                continue
+            r = f"{rel}/{e.name}" if rel else e.name
+            if e.is_symlink():
+                h.update(b"L\0" + r.encode() + b"\0" + os.readlink(e.path).encode() + b"\0")
+            elif e.is_dir():
+                walk(e.path, r)
+            elif e.is_file():
+                fh = hashlib.sha256()
+                with open(e.path, "rb") as f:
+                    for chunk in iter(lambda: f.read(1 << 20), b""):
+                        fh.update(chunk)
+                h.update(b"F\0" + r.encode() + b"\0" + fh.hexdigest().encode() + b"\0")
+
+    walk(root, "")
+    return h.hexdigest()
+
+
+def _test_pythons():
+    """python3 из PATH и системный /usr/bin/python3 — если он есть, инструменты командной строки установлены
+    (иначе macOS покажет окно установки) и это не тот же python."""
+    first = shutil.which("python3") or sys.executable
+    out = [first]
+    sysp = "/usr/bin/python3"
+    if os.path.exists(sysp) and os.path.realpath(sysp) != os.path.realpath(first):
+        try:
+            ok = subprocess.run(["xcode-select", "-p"], capture_output=True, timeout=30).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            ok = False
+        if ok:
+            out.append(sysp)
+    return out
+
+
+def _tmp_re():
+    """Пути во временных папках — до <tmp>: у новой версии и базы они разные, а падение одно."""
+    global _TMP_RE
+    if _TMP_RE is None:
+        pre = {"/private/tmp/", "/tmp/", "/private/var/folders/", "/var/folders/"}
+        for t in (tempfile.gettempdir(), path("plugins", "tmp")):
+            for v in (t, os.path.realpath(t)):
+                pre.add(v.rstrip("/") + "/")
+        alts = "|".join(re.escape(p) for p in sorted(pre, key=len, reverse=True))
+        _TMP_RE = re.compile(rf"(?:{alts})[^\s'\"(),:;]*")
+    return _TMP_RE
+
+
+def _failure_signatures(fname, out, rc):
+    """Подписи падений одного файла тестов: строки FAIL, исключение в конце вывода, ненулевой код (всегда — иначе
+    гибель по сигналу прячется за старой строкой FAIL); rc None — таймаут, rc "срок" — не успел в срок прогона."""
+    out = ANSI.sub("", out)
+    sigs = [_tmp_re().sub("<tmp>", ln.strip()) for ln in out.splitlines() if ln.lstrip().startswith("FAIL")]
+    if rc is None:
+        return sigs + [f"{fname}: таймаут"]
+    if rc == "срок":
+        return sigs + [f"{fname}: срок прогона"]
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    if "Traceback (most recent call last):" in out and lines and not lines[-1][:1].isspace():
+        m = re.match(r"([A-Za-z_][\w.]*)(?::|$)", lines[-1])
+        if m:
+            sigs.append(f"{fname}: исключение {m.group(1)}")
+    if rc != 0:
+        sigs.append(f"{fname}: код {rc}")
+    return sigs
+
+
+def _test_files(pdir):
+    tests_dir = os.path.join(pdir, "tests") if pdir else ""
+    return sorted(f for f in os.listdir(tests_dir) if f.startswith("test_") and f.endswith(".py")) \
+        if tests_dir and os.path.isdir(tests_dir) else []
+
+
+def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline):
+    """tests/test_*.py папки pdir по одному на каждом python → Counter подписей (python, файл, подпись)."""
+    sigs = collections.Counter()
+    env0 = {k: v for k, v in os.environ.items()
+            if not k.startswith("PANTHEON_") and k not in ("FORCE_COLOR", "CLICOLOR_FORCE")}
+    env0.update({"NO_COLOR": "1", "PYTHON_COLORS": "0"})
+    for py in pythons:
+        for f in _test_files(pdir):
+            left = deadline - time.monotonic()
+            if left <= 0:
+                out, rc = "", "срок"
+            else:
+                home = tempfile.mkdtemp(prefix="home-", dir=tmp)
+                limit = min(PLUGIN_TEST_TIMEOUT, left)
+                try:
+                    r = subprocess.run([py, "-I", os.path.join("tests", f)], cwd=pdir, env={**env0, "HOME": home},
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                       timeout=limit)
+                    out, rc = r.stdout, r.returncode
+                except subprocess.TimeoutExpired as e:
+                    out, rc = e.stdout or b"", None if limit >= PLUGIN_TEST_TIMEOUT else "срок"
+                except OSError as e:
+                    out, rc = str(e), 127
+                out = out.decode("utf-8", "replace") if isinstance(out, bytes) else out
+            state = {None: "таймаут", "срок": "срок прогона"}.get(rc, f"код {rc}")
+            log.write(f"\n===== {label} · {py} · {f} · {state} =====\n{out}")
+            log.flush()
+            for s in _failure_signatures(f, out, rc):
+                sigs[(py, f, s)] += 1
+    return sigs
+
+
+def _plugins_mark(marks, name, mark):
+    """Метка сразу после каждого шага: следующий может упасть, а сделанное не повторяется."""
+    if mark is None:
+        marks.pop(name, None)
+    else:
+        marks[name] = {**mark, "at": stamp()}
+    write_json(path("plugins", "marks.json"), marks)
+
+
+def _plugin_install(name, old, new, log, marks, quiet, digest):
+    """claude plugin update без -y (новая команда установки в каталоге должна требовать человека) и сверка того, что
+    встало, с проверенной копией: версия и хеш дерева installPath."""
+    try:
+        r = subprocess.run([claude_bin(), "plugin", "update", f"{name}@{MARKETPLACE}", "-s", "user"],
+                           capture_output=True, text=True, timeout=600)
+        ok = r.returncode == 0
+        why = f"код {r.returncode}: {' '.join((r.stderr or r.stdout or '').split())[:200]}"
+    except (OSError, subprocess.TimeoutExpired) as e:
+        ok, why = False, type(e).__name__
+    row = (_plugins_installed() or {}).get(name) or {}
+    got = row.get("version")
+    if got == new and _tree_hash(row.get("installPath")) == digest:
+        _plugins_mark(marks, name, None)
+        _plugins_journal(f"{name} {old} → {new}: обновлён")
+        alert(f"обновлён {name} {old} → {new}, сессии увидят после перезапуска", "plugins-update")
+        if not quiet:
+            print(f"{name}: обновлён {old} → {new}")
+        return 0
+    if got == old or (got is None and not ok):
+        # ничего не встало: тесты зелёные, установка не удалась — пробуем на следующих запусках без тестов
+        if ok:
+            why = f"после update версия {got}, а не {new}"
+        _plugins_mark(marks, name, {"version": new, "result": "green", "log": log, "hash": digest})
+        _plugins_journal(f"{name} {old} → {new}: тесты зелёные, установка не удалась ({why})")
+        alert_once(f"plugins-update-{name}", new, f"{name} {new}: тесты прошли, но claude plugin update не поставил "
+                   f"({why}). Руками: claude plugin update {name}@{MARKETPLACE}", "plugins-update")
+        if not quiet:
+            print(f"{name}: {new} — тесты прошли, установка не удалась ({why})")
+        return ALERTED
+    # встало не то, что проверяли: другая версия или другое содержимое (update сам обновил каталог)
+    _plugins_mark(marks, name, None)
+    seen = got or "неизвестна"
+    _plugins_journal(f"{name} {old} → {seen}: встала непроверенная версия (проверялась {new}, хеш {digest})")
+    text = f"встала непроверенная версия {name} {seen} (проверялась {new})"
+    alert("КРИТИЧНО: " + text, "plugins-update")
+    notify(text, title="Пантеон · критично", group="critical")
+    if not quiet:
+        print(f"{name}: КРИТИЧНО — {text}")
+    return ALERTED
+
+
+def _plugin_check(name, old, new, src, base, marks):
+    """Тесты новой версии против установленной. Отдаёт (лог, хеш проверенной копии, новые подписи)."""
+    log = path("plugins", f"{_plugins_safe(name)}-{_plugins_safe(new)}.log")
+    tmp = tempfile.mkdtemp(prefix=f"{_plugins_safe(name)}-", dir=path("plugins", "tmp"))
+    deadline = time.monotonic() + PLUGIN_RUN_LIMIT
+    try:
+        ign = shutil.ignore_patterns(".git", "__pycache__")
+        new_dir = os.path.join(tmp, "new", _plugins_safe(name))
+        shutil.copytree(src, new_dir, symlinks=True, ignore=ign)
+        digest = _tree_hash(new_dir)
+        _plugins_mark(marks, name, {"version": new, "result": "testing", "log": log, "hash": digest})
+        base_dir = None
+        if isinstance(base, str) and os.path.isdir(base):
+            base_dir = os.path.join(tmp, "base", _plugins_safe(name))
+            shutil.copytree(base, base_dir, symlinks=True, ignore=ign)
+        pythons = _test_pythons()
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write(f"{stamp()} {name}: новая {new} из {src} (хеш {digest}), база {old} из "
+                     f"{base_dir and base or '—'}; python: {', '.join(pythons)}\n")
+            got_new = _run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}", deadline)
+            fresh = got_new - _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline)
+            for k, n in got_new.items():  # не успевшее у новой не гасится тем, что не успело и у базы
+                if k[2].endswith(": срок прогона"):
+                    fresh[k] = n
+            if not _test_files(new_dir):  # без тестов зелёного нет, даже если их нет и у базы
+                fresh[("-", "-", NO_TESTS)] = 1
+            fh.write(f"\n===== новых падений: {sum(fresh.values())} =====\n")
+            for (py, f, s) in sorted(fresh):
+                fh.write(f"{py} · {f} · {s}\n")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return log, digest, fresh
+
+
+def plugins_update(quiet=False):
+    with lock("plugins-update", block=False) as got:
+        return _plugins_update(quiet) if got else 0
+
+
+def _plugins_red(marks, name, old, new, log, what):
+    _plugins_mark(marks, name, {"version": new, "result": "red", "log": log})
+    _plugins_journal(f"{name} {old} → {new}: {what}, не ставлю ({log})")
+    alert(f"{name} {new} не поставлен: {what}. Лог: {log.replace(HOME, '~')}", "plugins-update")
+    return ALERTED
+
+
+def _plugins_update(quiet):
+    # остатки прогона, прерванного таймаутом задачи или сбоем (блокировка взята — чужого прогона нет)
+    shutil.rmtree(path("plugins", "tmp"), ignore_errors=True)
+    os.makedirs(path("plugins", "tmp"), exist_ok=True)
+    try:
+        ok = subprocess.run([claude_bin(), "plugin", "marketplace", "update", MARKETPLACE],
+                            capture_output=True, text=True, timeout=300).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    if not ok:  # нет сети или каталог недоступен — подождём следующего раза, без тревоги
+        if not quiet:
+            print(f"каталог {MARKETPLACE} не обновился — попробую в следующий раз")
+        return TEMPFAIL
+    installed = _plugins_installed()
+    if installed is None:
+        print("pantheon plugins update: не прочитал claude plugin list --json", file=sys.stderr)
+        return 1
+    catalog = _plugins_catalog()
+    marks = read_json(path("plugins", "marks.json"))
+    rc, tested = 0, False
+    for name in sorted(installed):
+        if name not in catalog:
+            continue
+        old, (new, src) = installed[name]["version"], catalog[name]
+        if not _version_newer(new, old):
+            if not quiet:
+                print(f"{name}: {old}, новее нет")
+            continue
+        mark = marks.get(name) if isinstance(marks.get(name), dict) else {}
+        same = mark.get("version") == new
+        log = mark.get("log") or path("plugins", f"{_plugins_safe(name)}-{_plugins_safe(new)}.log")
+        if same and mark.get("result") == "red":
+            if not quiet:
+                print(f"{name}: {new} не ставлю — тесты были красные ({mark.get('log')})")
+            continue
+        if same and mark.get("result") == "testing":
+            rc = max(rc, _plugins_red(marks, name, old, new, log, "прогон тестов прерван — таймаут задачи или сбой"))
+            if not quiet:
+                print(f"{name}: {new} не ставлю — прошлый прогон тестов прерван")
+            continue
+        if same and mark.get("result") == "green" and mark.get("hash") and _tree_hash(src) == mark["hash"]:
+            rc = max(rc, _plugin_install(name, old, new, log, marks, quiet, mark["hash"]))
+            continue
+        if tested:  # тесты — не больше одного плагина за запуск: иначе не уложиться в timeout задачи
+            if not quiet:
+                print(f"{name}: {new} — проверю на следующем запуске")
+            continue
+        tested = True
+        log, digest, fresh = _plugin_check(name, old, new, src, installed[name].get("installPath"), marks)
+        if not fresh:
+            rc = max(rc, _plugin_install(name, old, new, log, marks, quiet, digest))
+            continue
+        # одна подпись на двух python — одна строка в тревоге
+        first = list(dict.fromkeys(s if s.startswith(f + ":") or f == "-" else f"{f}: {s}"
+                                   for (py, f, s) in sorted(fresh)))[:3]
+        rc = _plugins_red(marks, name, old, new, log,
+                          f"новые падения тестов ({sum(fresh.values())}) — {'; '.join(first)}")
+        if not quiet:
+            print(f"{name}: {new} не ставлю — новые падения тестов, лог {log}")
+    return rc
+
+
+def plugins_cmd(rest):
+    if rest[:1] == ["update"] and all(a == "--quiet" for a in rest[1:]):
+        return plugins_update(quiet="--quiet" in rest)
+    print("pantheon plugins: есть только update [--quiet]", file=sys.stderr)
+    return 2
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(__doc__)
@@ -3096,9 +3645,8 @@ def main(argv):
         alert(("КРИТИЧНО: " if critical else "") + " ".join(rest), who)
         if critical:  # COMM-08: безопасность, деньги, данные клиентов, юридическое, прод, контракт — сразу владельцу
             # отправителя называет он сам (--from, PANTHEON_ROLE — переменные вызова): заголовок не утверждает, кто
-            # прислал, имя — в тексте со словами «со слов»
-            notify(f"{' '.join(rest)[:200]} (со слов: {' '.join(who.split())[:40]})", title="Пантеон · критично",
-                   group="critical")
+            # прислал, имя — в тексте со словами «со слов». Сразу всегда (и ночью), но в счёт бюджета и в журнал
+            notify_critical(f"{' '.join(rest)[:200]} (со слов: {' '.join(who.split())[:40]})")
         return 0
     if cmd == "archive":
         return archive()
@@ -3142,6 +3690,8 @@ def main(argv):
         return usage_report(rest)
     if cmd == "qmd":
         return qmd_mod().main(rest)
+    if cmd == "plugins":
+        return plugins_cmd(rest)
     if cmd == "service-run":
         if len(rest) != 1 or not JOB_NAME.fullmatch(rest[0]):
             print("pantheon service-run: имя службы не по образцу", file=sys.stderr)

@@ -38,7 +38,7 @@ FIELDS = {
     "type": ("str", True), "id": ("str", True), "title": ("str", True), "status": ("str", True),
     "project": ("str", True), "direction": ("str", True), "owner": ("str", False), "created": ("date", True),
     "updated": ("datetime", True), "schema_version": ("int", True), "tags": ("list", False),
-    "stage": ("str", False), "priority": ("int", False), "due": ("date", False), "next": ("str", False),
+    "stage": ("str", False), "priority": ("int", False), "due": ("datetime", False), "next": ("str", False),
     "waiting_on": ("str", False), "depends_on": ("list", False), "claimed_by": ("str", False),
     "claimed_until": ("datetime", False), "parent": ("str", False), "result": ("str", False),
     "question": ("str", False), "options": ("list", False), "answer": ("str", False),
@@ -52,6 +52,7 @@ FIELDS = {
     "goal": ("str", False), "start": ("date", False), "exit_criteria": ("list", False), "repo_path": ("str", False),
     "health": ("str", False), "review_on": ("date", False),
 }
+# срок due — дата (срок — конец дня) или дата со временем «ГГГГ-ММ-ДДTЧЧ:ММ» (умные уведомления, metis-0023)
 ORDER = list(FIELDS)
 PRIORITY = {0: "срочно", 1: "высокий", 2: "обычный", 3: "низкий"}
 
@@ -452,6 +453,40 @@ def now_iso(t):
     return datetime.fromtimestamp(t).strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def ts_of(v):
+    """Дата или дата-время из шапки → метка времени (дата — её начало), иначе None."""
+    if not isinstance(v, str):
+        return None
+    try:
+        if DATETIME_RE.fullmatch(v):
+            return datetime.strptime(v[:16], "%Y-%m-%dT%H:%M").timestamp() + (int(v[17:19]) if len(v) > 16 else 0)
+        if DATE_RE.fullmatch(v):
+            return datetime.strptime(v, "%Y-%m-%d").timestamp()
+    except ValueError:
+        return None
+    return None
+
+
+def due_ts(v):
+    """Срок → метка времени: дата со временем — это время, дата без времени — конец дня."""
+    t = ts_of(v)
+    if t is None:
+        return None
+    return t if "T" in v else datetime.fromtimestamp(t + 86400 + 3600).replace(hour=0, minute=0, second=0).timestamp() - 1
+
+
+def due_text(v):
+    """Срок для человека: «15.10» или «15.10 07:00»."""
+    if not isinstance(v, str) or len(v) < 10:
+        return ""
+    return f"{v[8:10]}.{v[5:7]}" + (f" {v[11:16]}" if "T" in v and len(v) >= 16 else "")
+
+
+def overdue(h, t):
+    d = due_ts(h.get("due"))
+    return d is not None and t > d and h.get("status") not in ("done", "dropped")
+
+
 def new_id(pantheon, direction, prefix=None):
     prefix = prefix or re.sub(r"[^a-z0-9]", "", direction.split("-")[0])[:8] or "task"
     nums = [int(i.split("-")[1]) for i in load_ids(pantheon) if i.startswith(prefix + "-")]
@@ -647,7 +682,8 @@ def ready(pantheon, t, direction=None, owner=None):
             continue
         if any(d not in done for d in h.get("depends_on") or []):
             continue
-        out.append((h.get("priority", 2), h.get("due") or "9999", tid, h))
+        d = due_ts(h.get("due"))  # по времени: дата без времени (конец дня) — после даты-времени того же дня
+        out.append((h.get("priority", 2), float("inf") if d is None else d, tid, h))
     return [x[2:] for x in sorted(out, key=lambda x: (x[0], x[1], x[2]))]
 
 
@@ -788,24 +824,27 @@ def link(name):
     return f"[[{name}]]"
 
 
-ATTENTION_WORDS = ("конфликт", "подтвердите словом", "вопрос к вам", "просрочено", "срок скоро")
+ATTENTION_WORDS = ("конфликт", "подтвердите словом", "вопрос к вам", "долго ждёт", "просрочено", "срок скоро")
 
 
-def attention(head, t, conflict=None):
+def attention(head, t, conflict=None, long_wait=False):
     """«Внимание» — список слов без эмодзи (считает тик, формулам Bases не доверяем); пусто — None, ключа нет.
-    Список: формула Bases сравнивает по элементу (contains), эмодзи этому мешали бы."""
-    out, today = [], now_iso(t)[:10]
+    Список: формула Bases сравнивает по элементу (contains), эмодзи этому мешали бы. long_wait — решение без ответа
+    дольше порога (политика уведомлений): карточка поднимается наверх колонки."""
+    out = []
     if conflict:
         out.append("конфликт")
     if head.get("risky") is True and head.get("requested"):
         out.append("подтвердите словом")
     elif head.get("question") and head.get("status") == "waiting" and head.get("waiting_on") == "human":
         out.append("вопрос к вам")
+    if long_wait:
+        out.append("долго ждёт")
     due = head.get("due")
-    if due and head.get("status") not in ("done", "dropped"):
-        if due < today:
+    if isinstance(due, str) and due and head.get("status") not in ("done", "dropped"):
+        if overdue(head, t):
             out.append("просрочено")
-        elif due <= now_iso(t + 3 * 86400)[:10]:
+        elif due[:10] <= now_iso(t + 3 * 86400)[:10]:
             out.append("срок скоро")
     return out or None
 
@@ -843,8 +882,9 @@ def link_ids(text, names, own=None):
     return "\n".join(line(ln) for ln in text.split("\n"))
 
 
-def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, who=None, names=None):
+def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, who=None, long_wait=False, names=None):
     """who — имя узла «Кому» (board_sync считает его по реестру направлений); без него — по слагу без реестра.
+    long_wait — «долго ждёт» во «Внимание» (решает политика уведомлений).
     names — id → имя карточки: номера задач в тексте станут ссылками (link_ids)."""
     head = {k: (_one(v) if isinstance(v, str) else [_one(x) for x in v] if isinstance(v, list) else v)
             for k, v in head.items()}
@@ -854,8 +894,11 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
     node = who or Roles(()).name(assignee(head))
     direction = head.get("direction") or "inbox"
     closed = head.get("status") in ("done", "dropped")
-    card = {"Статус": lab, "Проект": f"{PROJECT_MARK.get(proj, '▪️')} {proj}".strip(), "Внимание": attention(head, t, conflict),
-            "Приоритет": prio if isinstance(prio, int) and not isinstance(prio, bool) else None, "Срок": head.get("due"),
+    card = {"Статус": lab, "Проект": f"{PROJECT_MARK.get(proj, '▪️')} {proj}".strip(),
+            "Внимание": attention(head, t, conflict, long_wait),
+            # «Срок» — свойство-дата Bases: только дата; время срока — в выноске карточки
+            "Приоритет": prio if isinstance(prio, int) and not isinstance(prio, bool) else None,
+            "Срок": _date(head.get("due"), 10),
             "Кому": link(node), "Дальше": None if closed else head.get("next"),
             "Ждёт": head.get("waiting_on") if head.get("waiting_on") not in (None, "human") else None,
             "Создана": _date(head.get("created"), 10),
@@ -863,7 +906,7 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
             # закрытые до 0.9.28 даты закрытия не имеют — тогда последнее изменение задачи (из её шапки)
             "Закрыта": (_date(head.get("closed"), 10) or _date(head.get("updated"), 10)) if closed else None,
             "Тип": "задача", "id": head.get("id"), "tags": [f"направление/{direction}"]}
-    due = f" · 📅 {head['due'][8:10]}.{head['due'][5:7]}" if head.get("due") else ""
+    due = f" · 📅 {due_text(head['due'])}" if head.get("due") else ""
     who = f" · 👤 {head['owner']}" if head.get("owner") else ""
     parts = [f"> [!{CALLOUT.get(lab, 'note')}] {STATUS_MARK.get(lab, '')} {lab} · {card['Проект']}{who}{due}"
              + (f" · {PRIORITY_MARK[prio]}" if prio in (0, 1) else "")
@@ -1077,7 +1120,7 @@ BASE_FILE = """filters:
     - file.name != "Сводка"
     - file.name != "Проблемы"
 formulas:
-  urgency: 'if(note["Внимание"], if(note["Внимание"].contains("конфликт"), 0, if(note["Внимание"].contains("подтвердите словом"), 0, if(note["Внимание"].contains("просрочено"), 1, if(note["Внимание"].contains("срок скоро"), 2, 3)))), 3)'
+  urgency: 'if(note["Внимание"], if(note["Внимание"].contains("конфликт"), 0, if(note["Внимание"].contains("подтвердите словом"), 0, if(note["Внимание"].contains("просрочено"), 1, if(note["Внимание"].contains("долго ждёт"), 1, if(note["Внимание"].contains("срок скоро"), 2, 3))))), 3)'
   prio_rank: 'if(note["Приоритет"].isEmpty(), 2, number(note["Приоритет"]))'
   age_key: 'if(note["Статус"] == "Готово", if(note["Закрыта"], 0 - number(note["Закрыта"]), 0), if(note["Создана"], number(note["Создана"]), 0))'
   stage: 'if(note["Статус"] == "Нужен ответ", 0, if(note["Статус"] == "Входящие", 1, if(note["Статус"] == "На проверке", 2, if(note["Статус"] == "В работе", 3, if(note["Статус"] == "Ждёт", 4, if(note["Статус"] == "Очередь", 5, if(note["Статус"] == "Готово", 6, 7)))))))'
@@ -1211,32 +1254,52 @@ def _plain(text):
     return re.sub(r"[\[\]|<>`#]", "·", one_line(text))  # одной строкой: перевод строки рвал бы список сводки; # — не тег
 
 
-def _summary(tasks, t, inbox=None, names=None):
-    """names — id → имя файла карточки (как его записал проход доски); ссылки — с подписью-заголовком."""
-    today = now_iso(t)[:10]
-    names = names or {}
+SUMMARY_WAIT_TOP = 5  # «Нужен ответ» в сводке: столько с советом, остальные — «ещё N»
+
+
+def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None):
+    """names — id → имя файла карточки (как его записал проход доски); ссылки — с подписью-заголовком.
+    long_ids — решения «долго ждёт»; queue — что политика уведомлений отложила без пинга за сутки."""
+    names, long_ids = names or {}, long_ids or set()
     rows = {"wait": [], "overdue": [], "doing": [], "done": [],
             "inbox": [f"[[Доска/{names.get(cid) or card_name({'title': it['title']})}|{_plain(it['title'])}]] · "
                       f"{it['direction']}" for cid, it in (inbox or {}).items()]}
+    wait = []
     for tid, (p, h, _) in sorted(tasks.items()):
         name = f"[[Доска/{names.get(tid) or card_name(h)}|{_plain(h.get('title'))}]] · {_plain(h.get('project'))}"
         if h.get("status") == "waiting" and h.get("waiting_on") == "human":
             rows["wait"].append(name)
-        if h.get("due") and h["due"] < today and h.get("status") not in ("done", "dropped"):
+            line = name + (f" · срок {due_text(h['due'])}" if h.get("due") else "")
+            if h.get("recommend"):
+                rec = _plain(h["recommend"])
+                line += " · совет: " + (rec if len(rec) <= 120 else rec[:119] + "…")
+            if tid in long_ids:
+                line += " · ⏳ долго ждёт"
+            since = ts_of(h.get("question_at")) or ts_of(h.get("created")) or t
+            wait.append((due_ts(h.get("due")) or float("inf"), since, tid, line))
+        if overdue(h, t):
             rows["overdue"].append(f"{name} · срок {h['due']}")
         if h.get("status") == "doing":
             rows["doing"].append(f"{name} · {_plain(h.get('owner')) or '—'}")
         if h.get("status") == "done" and (h.get("updated") or "") >= now_iso(t - 86400):
             rows["done"].append(name)
-    sec = lambda title, xs: f"## {title} ({len(xs)})\n\n" + ("\n".join(f"- {x}" for x in xs) if xs else "—") + "\n"
-    return ("# Сводка\n\n" + sec(f"🔴 {HUMAN_WAIT}", rows["wait"]) + "\n" + sec("⏰ Просрочено", rows["overdue"]) + "\n"
+    sec = lambda title, xs, n=None: (f"## {title} ({len(xs) if n is None else n})\n\n"
+                                     + ("\n".join(f"- {x}" for x in xs) if xs else "—") + "\n")
+    # «Нужен ответ» — по сроку (ближний сверху), затем по возрасту (старый сверху); до 5 с советом, дальше «ещё N»
+    wait.sort(key=lambda x: (x[0], x[1], x[2]))
+    top = [x[3] for x in wait[:SUMMARY_WAIT_TOP]]
+    if len(wait) > SUMMARY_WAIT_TOP:
+        top.append(f"ещё {len(wait) - SUMMARY_WAIT_TOP} — колонка «{HUMAN_WAIT}» на доске")
+    quiet = [f"{when} · {_plain(text)}" for when, _, _, text in (queue or [])]
+    return ("# Сводка\n\n" + sec(f"🔴 {HUMAN_WAIT}", top, len(wait)) + "\n"
+            + sec("⏰ Просрочено", rows["overdue"]) + "\n"
             + sec("📥 Входящие заявки направлениям", rows["inbox"]) + "\n"
             + sec("🟡 В работе", rows["doing"]) + "\n" + sec("🟢 Готово за сутки", rows["done"])
+            + ("\n" + sec("🔕 Без уведомления за сутки", quiet) if quiet else "")
             + "\n✍️ Написать агенту — текстом в раздел «Ваши заметки» внизу карточки. Перенести — перетащите карточку на доске. "
               "Готовые карточки уходят с доски через 7 дней.\n"), rows
 
 
-QUIET_HOURS = (23, 8)  # ночью сразу не уведомляем: всё попадёт в утреннюю сводку
 
 
 def card_url(vault, name):
@@ -1488,20 +1551,21 @@ def _sync_types(vault, alert):
     _write_plain(p, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
-def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None, primary=True, projects=None):
-    """Один проход доски. → список строк «что сделано» (для журнала тика)."""
+def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None, primary=True, projects=None,
+               policy=None):
+    """Один проход доски. → список строк «что сделано» (для журнала тика). policy — политика уведомлений
+    (lib/notify.py, её передаёт pantheon.py): решает, что показать, что отложить в сводку. Без неё — без
+    уведомлений; notify — прежний параметр, не используется."""
     alert = alert or (lambda *a, **k: None)
-    notify = notify or (lambda *a, **k: None)
     projects = projects or {}
     vault = os.path.basename(os.path.dirname(os.path.abspath(board)))
-    done_lines, events, moved_by_owner = [], [], set()
+    done_lines, moved_by_owner = [], set()
     os.makedirs(board, exist_ok=True)
     try:
         with open(state_path, encoding="utf-8") as fh:
             state = json.load(fh)
     except (OSError, ValueError):
         state = {}
-    first_run = "cards" not in state
     cards = state.setdefault("cards", {})
     tasks = load_tasks(pantheon)
     inbox = inbox_items(pantheon)
@@ -1602,7 +1666,8 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                 st["conflict_at"] = t
                 st["conflict"] = f"пока вы переносили карточку в «{want}», агент изменил задачу — статус сейчас «{label_of(src_head)}». Перенесите ещё раз, если нужно."
                 done_lines.append(f"{cid}: конфликт — ход «{want}» не применён")
-                events.append((f"⚠ Перенос не применён: {src_head.get('title')}", cid))
+                if policy is not None:  # конфликт карточки — без пинга, в сводку (таблица 6.3)
+                    policy.later("conflict", cid, f"⚠ Перенос не применён: {one_line(src_head.get('title') or cid)}")
             elif want not in OWNER_TARGETS:
                 st["conflict_at"] = t
                 st["conflict"] = f"в «{want}» карточку переносит агент; вы можете: {', '.join(OWNER_TARGETS)}."
@@ -1671,12 +1736,25 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     tasks = load_tasks(pantheon)
 
     # 5. застрявшие и просроченные — одна тревога на задачу (вам — в утренней сводке)
-    today = now_iso(t)[:10]
     for tid, (_, h, _) in (tasks.items() if primary else []):
         if h.get("status") == "doing" and (h.get("updated") or "") < now_iso(t - 3 * 86400):
             alert(f"stale-{tid}", h.get("updated"), f"задача застряла: {h.get('title')} ({tid}) — в работе без движения с {h.get('updated', '')[:10]}", "board")
-        if h.get("due") and h["due"] < today and h.get("status") not in ("done", "dropped"):
+        if overdue(h, t):
             alert(f"overdue-{tid}", h["due"], f"просрочена: {h.get('title')} ({tid}), срок {h['due']}", "board")
+
+    # 5а. решения «Нужен ответ» — циклы политики уведомлений: ответ, истекло, закрыто, «долго ждёт»
+    long_ids = set()
+    if policy is not None:
+        decs = []
+        for tid, (_, h, _) in tasks.items():
+            if h.get("status") == "waiting" and h.get("waiting_on") == "human" and _live(h, t):
+                q = hashlib.sha256(_question_key(h.get("question")).encode("utf-8")).hexdigest()[:12]
+                decs.append({"id": tid, "sig": f"{h.get('question_at') or ''}|{q}", "since": ts_of(h.get("question_at")),
+                             "due": due_ts(h.get("due")), "due_text": due_text(h.get("due")),
+                             # срок-дата: пинги по сроку — к началу тихих часов дня срока, не ночью
+                             "due_day": bool(DATE_RE.fullmatch(str(h.get("due") or ""))),
+                             "title": one_line(h.get("title") or tid)[:120], "recommend": h.get("recommend")})
+        long_ids = policy.decisions(decs)
 
     # 6. перерисовать карточки: задачи и заявки направлений
     names, items = {}, []
@@ -1711,7 +1789,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                 alert(f"answer-mismatch-{cid}", str(h.get("requested") if h.get("risky") is True else h.get("answer")),
                       f"конфликт ответа: {h.get('title')} ({cid}) — {forged}", "board")
             card, cbody = render_card(h, b, rel(src), t, " · ".join(x for x in (st.get("conflict"), forged) if x) or None,
-                                      notes_by_id.get(cid), logged, who, names)
+                                      notes_by_id.get(cid), logged, who, long_wait=cid in long_ids, names=names)
         target = os.path.join(board, name + ".md")
         old = present.get(cid)
         if old and (digest(old[0]) != seen.get(cid) or cid in typing):
@@ -1729,9 +1807,6 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         except (OSError, ValueError, UnicodeError) as e:
             alert(f"board-card-{cid}", type(e).__name__, f"доска: карточку {cid} не записать ({e}) — пропущена", "board")
             continue
-        prev = norm_label(st.get("synced"))
-        if (card["Статус"] == HUMAN_WAIT and prev != HUMAN_WAIT and not first_run and cid not in moved_by_owner):
-            events.append((f"❓ Вопрос к вам: {h.get('title') if h else name}", cid))
         st.update({"file": name, "synced": card["Статус"], "src_hash": digest(src), "card_hash": digest(target),
                    "rendered": cbody})
     # карточки ушедших задач и разобранных заявок
@@ -1747,26 +1822,19 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
 
     _sync_nodes(board, state, roles, tasks, names, slugs, alert)
 
-    # 7. сводка, уведомления, вид
-    text, rows = _summary(tasks, t, inbox, names)
+    # 7. уведомления (политика: утренний дайджест, пинги по решениям), сводка, вид
+    _, rows = _summary(tasks, t, inbox, names, long_ids)
+    if policy is not None:
+        # digest_day прежнего board.json (до 0.11.15) — политике: в день обновления второго утреннего не будет
+        policy.run((len(rows["wait"]), len(rows["overdue"]), len(rows["inbox"])),
+                   lambda tid: card_url(vault, names.get(tid, "Сводка")), card_url(vault, "Сводка"),
+                   legacy_digest_day=state.pop("digest_day", None))
+    text, rows = _summary(tasks, t, inbox, names, long_ids, policy.queue_view() if policy is not None else None)
     sp = os.path.join(board, "Сводка.md")
     old = open(sp, encoding="utf-8").read() if os.path.exists(sp) else ""
     if old != text:
         with open(sp, "w", encoding="utf-8") as fh:
             fh.write(text)
-    hour = datetime.fromtimestamp(t).hour
-    night = hour >= QUIET_HOURS[0] or hour < QUIET_HOURS[1]
-    if hour >= QUIET_HOURS[1] and state.get("digest_day") != today:
-        state["digest_day"] = today
-        if rows["wait"] or rows["overdue"] or rows["inbox"]:
-            notify(f"Доброе утро. {HUMAN_WAIT}: {len(rows['wait'])}, просрочено: {len(rows['overdue'])}, "
-                   f"входящих заявок: {len(rows['inbox'])}.", card_url(vault, "Сводка"), "digest")
-    elif events and not night:
-        if len(events) == 1:
-            notify(events[0][0], card_url(vault, names.get(events[0][1], "Сводка")), events[0][1])
-        else:
-            notify(f"На доске {len(events)} новых события: " + "; ".join(e[0] for e in events[:3]),
-                   card_url(vault, "Сводка"), "events")
     _sync_base(board, state, state_path, t, alert)
     _sync_types(os.path.dirname(os.path.abspath(board)), alert)
     new_state = json.dumps(state, ensure_ascii=False, indent=1)
