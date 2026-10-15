@@ -1280,7 +1280,7 @@ def domains_build(if_changed=False):
         priv = {}
     norm = lambda p: os.path.realpath(os.path.expanduser(p))
     overlap = lambda a, b: a == b or a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/")
-    domains, stores = {}, {}
+    domains, stores, leads = {}, {}, {}
     for d in reg.get("direction") or []:
         name = d.get("name", "")
         if not re.fullmatch(r"[a-z0-9-]+", name):
@@ -1297,10 +1297,15 @@ def domains_build(if_changed=False):
         domains[name] = folders
         if isinstance(d.get("pnpm_store"), str):
             stores[name] = d["pnpm_store"]
+        # лиды направления — субагенты его окна (P0-6); имена как у roles_build
+        bases = d.get("leads") if isinstance(d.get("leads"), list) else []
+        if re.fullmatch(r"[a-z0-9]+-[a-z0-9-]+", name):
+            short = name.split("-", 1)[1]
+            leads[name] = [f"{b}-{short}" for b in LEAD_ROLES if b in bases]
     write_json(path("domains.json"), {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml. Руками не править.",
         "built": stamp(), "built_ts": now(), "domains": domains})
-    built = sandbox_build(domains, policy_path, stores)
+    built = sandbox_build(domains, policy_path, stores, leads)
     os.makedirs(path("locks"), exist_ok=True)
     for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):  # места обёртки heavy: роль в песочнице сама их не создаст
         open(path("locks", slot + ".lock"), "a").close()
@@ -1345,6 +1350,19 @@ COORDINATOR_COMPACT = 200000
 COORDINATOR_ALLOW = ["Bash(gh pr merge *)"]
 # Роли главных сессий: их память в песочницу не добавляется, даже если в шапке есть memory:
 MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
+# Субагенты главной сессии окна (P0-6; SEC-09, SEC-13, ROLE-32): штаб и координатор зовут только этих — general-purpose
+# и claude (веб и все инструменты) обошли бы запреты окна. Проверяет хук `ctx.py agents` и только у главной сессии (в
+# её событии нет agent_id): tools: Agent(…) в шаблоне роли и permissions.deny действуют и на субагентов окна — лид не
+# позвал бы своих dev-*, навык audit — general-purpose. В deny окна — только жёсткие границы, не нужные и лидам.
+# Координатору — ещё свои лиды (из реестра). Explore — только чтение: без него координатор читает код в свой контекст
+# (CTX-09); веба через него не больше, чем через prometheus и лидов. clio зовут Зевс и mnemo-brain (роль clio).
+HQ_AGENTS = ["prometheus", "clio", "chiron", "Explore"]
+COORDINATOR_AGENTS = ["argus", "talos", "prometheus", "Explore"]
+COORDINATOR_EXTRA_AGENTS = {"mnemo-brain": ["clio"]}
+# Skill — навык с context: fork идёт субагентом своего agent: мимо инструмента Agent (Claude Code 2.1.292)
+AGENT_MATCHER = "Agent|Task|Skill"
+# копия из ~/.claude/plugins, а не рабочая копия agent-kit — довод как у MARKET_GUARD (guard_script)
+MARKET_CTX = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "pantheon", "hooks", "ctx.py")
 # terminal-notifier по щелчку открывает ссылку или выполняет команду — от имени владельца, вне песочницы. Ролям его
 # не прочитать, а значит и не запустить: уведомления Пантеона шлёт только тик (поддельное «от Пантеона» не пройдёт).
 NOTIFIER_PATHS = ["/opt/homebrew/Cellar/terminal-notifier", "/opt/homebrew/opt/terminal-notifier",
@@ -1471,6 +1489,24 @@ def guard_script():
     return MARKET_GUARD  # файла нет — окно роли не пустит ни одной записи (отказ при сбое), тревога в sandbox_build
 
 
+def ctx_script():
+    if os.path.isfile(MARKET_CTX) and not os.path.islink(MARKET_CTX):
+        return os.path.realpath(MARKET_CTX)
+    return MARKET_CTX  # файла нет — python упадёт, хук с onFailure: block — окно не позовёт никого; тревога в sandbox_build
+
+
+def agents_window(data, allowed, deny, ctx):
+    """Окну (P0-6): хук `ctx.py agents <список>` для главной сессии и правила deny Agent(<тип>) на всё окно. Запись
+    guard и прежние правила (Read у штаба) остаются; без дублей, порядок стабильный."""
+    uniq = lambda xs: list(dict.fromkeys(xs))  # noqa: E731
+    data.setdefault("hooks", {}).setdefault("PreToolUse", []).append({"matcher": AGENT_MATCHER, "hooks": [{
+        "type": "command", "command": f"python3 {shlex.quote(ctx)} agents {shlex.quote(','.join(uniq(allowed)))}",
+        "timeout": 10, "onFailure": "block"}]})
+    rules = data.setdefault("permissions", {}).setdefault("deny", [])
+    rules.extend([r for r in uniq(f"Agent({x})" for x in deny) if r not in rules])
+    return data
+
+
 def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None):
     allow = list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + [cache]
     # .git/config и .git/hooks — внутри каждой разрешённой папки (её настоящим путём) и под ~ в целом
@@ -1576,8 +1612,9 @@ def pnpm_store_check(name, folders, store):
                            ".git/info/exclude), затем CI=true pnpm install --frozen-lockfile", "pantheon")
 
 
-def sandbox_build(domains, policy_path, stores=None):
-    """domains.json и policy.toml → ~/.local/state/pantheon/settings/<направление>.json и workshop.json."""
+def sandbox_build(domains, policy_path, stores=None, leads=None):
+    """domains.json и policy.toml → ~/.local/state/pantheon/settings/<направление>.json и workshop.json.
+    leads — {направление: ["hephaestus-<коротко>", "apollo-<коротко>"]}: субагенты окна (P0-6)."""
     try:
         with open(policy_path, "rb") as fh:
             policy = tomllib.load(fh)
@@ -1593,11 +1630,17 @@ def sandbox_build(domains, policy_path, stores=None):
     if not os.path.isfile(guard):
         alert_once("guard-missing", guard, f"нет {guard.replace(HOME, '~')}: окна ролей не пропустят ни одной записи "
                    "(строгий guard, SEC-29) — переустановить плагин guard", "pantheon")
+    ctx = ctx_script()
+    if not os.path.isfile(ctx):
+        alert_once("ctx-missing", ctx, f"нет {ctx.replace(HOME, '~')}: окна штаба и координаторов не позовут ни одного "
+                   "субагента (хук agents, P0-6) — переустановить плагин pantheon", "pantheon")
+    leads = leads or {}
+    all_leads = [x for n in leads for x in leads[n]]
     os.makedirs(out_dir, exist_ok=True)
 
     memory = memory_dirs()
 
-    def one(name, folders, own, compact, deny, allow=None):
+    def one(name, folders, own, compact, deny, allow=None, agents=None):
         real = [_real_dir(f, SANDBOX_ROOTS[:1], strict=True) or _real_dir(f, SANDBOX_ROOTS[1:]) for f in folders]
         skipped = [f for f, r in zip(folders, real) if not r]
         if skipped:
@@ -1615,6 +1658,8 @@ def sandbox_build(domains, policy_path, stores=None):
             data["sandbox"]["excludedCommands"].append("pantheon direction init *")
         if allow:
             data.setdefault("permissions", {}).setdefault("allow", []).extend(allow)
+        if agents:
+            agents_window(data, agents[0], agents[1], ctx)
         store = (stores or {}).get(name)
         if store:
             st = os.path.realpath(os.path.expanduser(store))
@@ -1628,10 +1673,14 @@ def sandbox_build(domains, policy_path, stores=None):
 
     built = []
     for name, folders in domains.items():
+        mine = leads.get(name, [])
+        # chiron видит личное (me/) — только Зевсу (P0-2); главные роли и чужие лиды не нужны и лидам окна
+        agents = (mine + COORDINATOR_AGENTS + COORDINATOR_EXTRA_AGENTS.get(name, []),
+                  ["chiron"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
         one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
-            [] if name in private_dirs else private_paths, COORDINATOR_ALLOW)
+            [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents)
         built.append(name)
-    # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски
+    # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски; список субагентов — вне P0-6
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
     # местные порты мастерской закрыты: на macOS allowLocalBinding открывает все порты 127.0.0.1, в том числе демон CDP
     # с входами владельца; браузеры владельца — только у роли Харон (решение владельца 15.10, отмена metis-0053)
@@ -1690,6 +1739,8 @@ def sandbox_build(domains, policy_path, stores=None):
     rule = lambda x: f"Read({x})" if x.startswith("~") else f"Read(/{x})"  # noqa: E731 — «//» — абсолютный путь
     hq.setdefault("permissions", {}).setdefault("deny", []).extend(
         [rule(x + "/**") for x in _deny_forms(closed)] + [rule(x) for x in _deny_forms(files)])
+    # P0-6: код — поручение направлению, а не лид в окне штаба
+    agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES), ctx)
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
     write_window(out_dir, "hq", hq)
     built.append("hq")
