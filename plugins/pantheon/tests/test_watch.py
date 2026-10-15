@@ -509,6 +509,14 @@ def test_security_0100():
     check(not os.path.exists(pwn), "git исполнил fsmonitor из копии роли")
     check(not os.path.exists(os.path.join(folder, ".claude", "worktrees", "w-ok")), "чистая слитая копия не убрана")
     check(os.path.exists(bad), "копия с исполняемой конфигурацией убрана")
+    # подраздел с U+2028 в имени не прячет фильтр от разбора
+    w3 = os.path.join(folder, ".claude", "worktrees", "w-ok")
+    g("worktree", "add", "-q", "-b", "w3", w3)
+    g("config", "filter.x\u2028y.clean", f"touch {pwn}")
+    open(os.path.join(w3, ".gitattributes"), "w").write("* filter=x\u2028y\n")
+    os.utime(w3, (old, old))
+    e.run("watch", t=T0 + 86400)
+    check(not os.path.exists(pwn) and os.path.exists(w3), "фильтр с U+2028 в имени исполнился или копия убрана")
     # pause --off не выходит из pauses/
     open(e.st("maintenance.json"), "w").write("{}")
     r = e.run("pause", "--off", "../maintenance", t=T0)

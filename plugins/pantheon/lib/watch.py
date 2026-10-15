@@ -312,12 +312,16 @@ def swap(agents, t):
 
 
 # Дежурный работает вне песочницы, а worktree пишут роли: git в ней не должен исполнять чужое из конфигурации
-# (core.fsmonitor, хуки, фильтры clean/process; проверка безопасности 0.10.0). fsmonitor и хуки выключены всегда;
-# прочее исполняемое из конфигурации репозитория — повод не трогать копию (unsafe_config).
+# (core.fsmonitor, хуки, фильтры clean/process; проверки безопасности 0.10.0 и 0.10.1). fsmonitor и хуки выключены
+# всегда, подмодули git не обходит; в конфигурации самого репозитория допустимы только ключи из короткого списка без
+# исполняемого — с любым другим копию не трогаем (своё не убрать безопаснее, чем исполнить чужое).
 GIT_SAFE = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false"]
-GIT_EXEC_KEY = re.compile(r"(filter|diff|merge)\.[^\n]+\.(clean|smudge|process|textconv|command|driver)|"
-                          r"core\.(fsmonitor|hookspath|sshcommand|gitproxy|pager|editor|askpass|attributesfile)|"
-                          r"(credential|uploadpack|receivepack|gpg|sequence|protocol|alias|include|includeif)\..*")
+GIT_LOCAL_OK = re.compile(
+    r"core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks|autocrlf|"
+    r"eol|safecrlf|sparsecheckout|sparsecheckoutcone|quotepath|checkstat|trustctime|preloadindex|abbrev)|"
+    r"remote\.[^.]+\.(url|pushurl|fetch|push|tagopt|prune|mirror)|branch\.[^.]+\.(remote|merge|rebase|pushremote)|"
+    r"extensions\.(worktreeconfig|objectformat|refstorage)|user\.(name|email)|pull\.(rebase|ff)|"
+    r"push\.(default|autosetupremote)|fetch\.prune|init\.defaultbranch|gc\.auto")
 
 
 def _git(*args, timeout=30):
@@ -326,13 +330,21 @@ def _git(*args, timeout=30):
 
 
 def unsafe_config(wt):
-    """Исполняемые ключи из конфигурации самого репозитория (не вашей глобальной), которую git прочтёт в этой копии, —
-    ровно та, что увидит git status: по указателю .git копии, с include. Не прочиталась — тоже нельзя."""
-    r = _git("-C", wt, "config", "--list", "--show-scope", "--name-only", "--includes")
+    """Ключи конфигурации самого репозитория (не вашей глобальной) вне списка GIT_LOCAL_OK — в той конфигурации, которую
+    git прочтёт в этой копии (по указателю .git копии, с include). Вывод -z: пары «область\\0ключ\\0» — имя подраздела
+    с переводом строки разбор не собьёт. Не прочиталась — тоже нельзя."""
+    r = _git("-C", wt, "config", "--list", "--show-scope", "--name-only", "--includes", "-z")
     if r.returncode not in (0, 1):
         return "конфигурация git не читается"
-    bad = sorted({k for sc, _, k in (ln.partition("\t") for ln in r.stdout.splitlines())
-                  if sc in ("local", "worktree") and GIT_EXEC_KEY.fullmatch(k.lower())})
+    parts = r.stdout.split("\0")
+    if parts and parts[-1] == "":
+        parts.pop()
+    if len(parts) % 2:
+        return "конфигурация git не разобрана"
+    bad = sorted({k for sc, k in zip(parts[::2], parts[1::2])
+                  if sc not in ("system", "global", "command") and not GIT_LOCAL_OK.fullmatch(k.lower())})
+    if os.path.exists(os.path.join(wt, ".gitmodules")):
+        bad.append("подмодули")
     return ", ".join(bad) or None
 
 
@@ -380,7 +392,7 @@ def worktrees(agents, registry, doms, t):
                 short = wt.replace(P.HOME, "~")
                 if age > WORKTREE_CLEAN_HOURS and head and "locked" not in block and not unsafe_config(wt):
                     base = base or _base_ref(root)
-                    st = _git("-C", wt, "status", "--porcelain")
+                    st = _git("-C", wt, "status", "--porcelain", "--ignore-submodules=all")
                     clean = st.returncode == 0 and st.stdout.strip() == ""
                     merged = bool(base) and _git("-C", root, "merge-base", "--is-ancestor", head.group(1),
                                                  base).returncode == 0
