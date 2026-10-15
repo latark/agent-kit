@@ -28,12 +28,6 @@
                      (кладёт pantheon; один раз, не старше 30 мин, ≤ 4000 знаков, только с пометкой «[Пантеон:»).
   ctx.py rewake      SessionStart clear, asyncRewake: если файл состояния обновлён после вашего последнего
                      сообщения, будит Claude «прочитай и продолжай»; иначе /clear — обычный чистый лист.
-  ctx.py agents <список через запятую>
-                     PreToolUse Agent|Task|Skill в окнах штаба и координаторов (P0-6, ставит `pantheon domains build`
-                     в настройки окна): главная сессия зовёт только субагентов из списка; пустой тип — general-purpose.
-                     Навык с context: fork в шапке SKILL.md идёт субагентом своего agent: (по умолчанию
-                     general-purpose) — проверяется тот же тип. Событие с agent_id (зовёт субагент окна: лид — dev-*,
-                     argus) не проверяется. Отказ при сбое: событие не разобрать, пустой список — отказ.
 
 Файл состояния по роли (agent_type): hq — ~/ai/pantheon/board.md; domain-coordinator — STATUS.md направления в
 ~/ai/pantheon/directions/<имя>/ (направление — по папке запуска, как у guard); workshop —
@@ -43,12 +37,10 @@ PANTHEON_CTX_STEP; папки — PANTHEON_HOME, PANTHEON_STATE (для пров
 из PATH, на чистом Mac это системный 3.9.
 """
 import fcntl
-import glob
 import hashlib
 import json
 import os
 import re
-import stat
 import subprocess
 import sys
 import time
@@ -1145,138 +1137,19 @@ def _qmd_why(ev):
     return why
 
 
-# --- субагенты главной сессии окна (P0-6) ------------------------------------------------
-
-SKILL_NAME = re.compile(r"[A-Za-z0-9_.:-]+")
-SKILL_HEAD_MAX = 64 << 10
-
-
-def agents_deny(why):
-    print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": "PreToolUse", "permissionDecision": "deny",
-        "permissionDecisionReason": "P0-6: %s" % why}}, ensure_ascii=False))
-    return 0
-
-
-def cmd_agents(ev):
-    """PreToolUse Agent|Task|Skill: список разрешённых — аргумент команды (собирает `pantheon domains build`). Отказ
-    при сбое: main() глотает исключения пропуском, здесь сбой — отказ."""
-    allowed = [x for x in (sys.argv[2] if len(sys.argv) > 2 else "").split(",") if x]
-    try:
-        why = _agents_why(ev, allowed)
-    except Exception as e:
-        hook_log("agents", "%s: %r" % (type(e).__name__, e))
-        why = "вызов не разобрать — отказ при сбое"
-    return agents_deny(why) if why else 0
-
-
-def _agents_how(allowed):
-    return ("Этому окну можно: %s. Веб — через prometheus, код — через своего лида (у штаба — поручение направлению)."
-            % (", ".join(allowed) or "никого"))
-
-
-def _agents_why(ev, allowed):
-    if not isinstance(ev, dict) or not ev:
-        return "событие не разобрать — отказ при сбое"
-    if not allowed:
-        return "списка разрешённых субагентов нет (настройки окна собраны с ошибкой) — отказ всем"
-    if ev.get("agent_id"):
-        return None  # зовёт субагент окна (лид — dev-*, argus): его список — tools: роли и deny окна
-    ti = ev.get("tool_input")
-    if not isinstance(ti, dict):
-        return "аргументы вызова не разобрать"
-    if ev.get("tool_name") == "Skill":
-        name, types = _skill_fork(ev, ti)
-        bad = [t for t in types if t not in allowed]
-        if not bad:
-            return None
-        return "навык %s идёт субагентом %s, окну он не положен. %s" % (name, bad[0], _agents_how(allowed))
-    typ = ti.get("subagent_type")
-    if typ is None or typ == "":
-        typ = "general-purpose"  # так делает Claude Code
-    if not isinstance(typ, str):
-        return "тип субагента не разобрать"
-    if typ in allowed:
-        return None
-    return "субагент %s этому окну не положен. %s" % (typ, _agents_how(allowed))
-
-
-def _read_head(p):
-    """Начало обычного файла (≤ SKILL_HEAD_MAX) или None. Ссылки — как есть (папки навыков бывают ссылками); FIFO и
-    устройство не читаются и не вешают хук (O_NONBLOCK)."""
-    try:
-        fd = os.open(p, os.O_RDONLY | os.O_NONBLOCK)
-    except OSError:
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        return os.read(fd, SKILL_HEAD_MAX).decode("utf-8", "replace")
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
-
-
-def _fork_agent(text):
-    """Тип субагента навыка с context: fork в шапке YAML; None — навык идёт в главной сессии."""
-    lines = text.lstrip(chr(0xFEFF)).splitlines()  # BOM
-    if not lines or lines[0].strip() != "---":
-        return None
-    head = {}
-    for ln in lines[1:]:
-        if ln.strip() == "---":
-            break
-        m = re.match(r"(context|agent)\s*:(.*)$", ln)
-        if m:
-            head[m.group(1)] = re.sub(r"\s+#.*$", "", m.group(2)).strip().strip("'\"").strip()
-    else:
-        return None  # шапка не закрыта — не шапка
-    if head.get("context") != "fork":
-        return None
-    return head.get("agent") or "general-purpose"
-
-
-def _skill_fork(ev, ti):
-    """(имя навыка, [типы субагента навыка с context: fork]). Не навык, не найден, не прочитан, без fork — []: guard —
-    защита от ошибок агента, а не от намеренного обхода (AGENTS.md)."""
-    name = ti.get("skill")
-    if not isinstance(name, str):
-        return name, []
-    name = name.strip().lstrip("/")
-    if not SKILL_NAME.fullmatch(name) or ".." in name:
-        return name, []
-    if ":" in name:
-        plugin, skill = name.split(":", 1)
-        if not plugin or not skill or ":" in skill:
-            return name, []
-        # в кэше бывает несколько версий плагина — проверяются все
-        paths = sorted(glob.glob(os.path.join(HOME, ".claude", "plugins", "cache", "*", plugin, "*", "skills", skill,
-                                              "SKILL.md")))
-        texts = [_read_head(p) for p in paths]
-    else:
-        cwd = ev.get("cwd")
-        paths = ([os.path.join(cwd, ".claude", "skills", name, "SKILL.md")] if isinstance(cwd, str) and cwd else []) \
-            + [os.path.join(HOME, ".claude", "skills", name, "SKILL.md")]
-        texts = next(([t] for t in (_read_head(p) for p in paths) if t is not None), [])
-    return name, [t for t in (_fork_agent(x) for x in texts if x is not None) if t]
-
-
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     fn = {"owner-log": cmd_owner_log, "answer": cmd_answer, "stop": cmd_stop, "start": cmd_start,
           "rewake": cmd_rewake, "dir-added": cmd_dir_added, "maint-post": cmd_maint_post,
-          "maint-pre": cmd_maint_pre, "push": cmd_push, "qmd-query": cmd_qmd_query, "agents": cmd_agents}.get(cmd)
+          "maint-pre": cmd_maint_pre, "push": cmd_push, "qmd-query": cmd_qmd_query}.get(cmd)
     if not fn:
-        print("ctx.py: owner-log | answer | stop | start | rewake | dir-added | maint-post | maint-pre | push | qmd-query"
-              " | agents <список>", file=sys.stderr)
+        print("ctx.py: owner-log | answer | stop | start | rewake | dir-added | maint-post | maint-pre | push | qmd-query",
+              file=sys.stderr)
         return 0
     try:
         return fn(read_event())
     except Exception as e:  # сбой хука не должен мешать сессии; журнал сбоев — рядом с guard
         hook_log(cmd, "%s: %r" % (type(e).__name__, e))
-        if cmd == "agents":  # кроме списка субагентов окна: там отказ при сбое (P0-6)
-            return agents_deny("сбой хука — отказ при сбое")
         return 0
 
 

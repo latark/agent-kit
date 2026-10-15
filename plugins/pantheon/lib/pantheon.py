@@ -1351,7 +1351,7 @@ COORDINATOR_ALLOW = ["Bash(gh pr merge *)"]
 # Роли главных сессий: их память в песочницу не добавляется, даже если в шапке есть memory:
 MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
 # Субагенты главной сессии окна (P0-6; SEC-09, SEC-13, ROLE-32): штаб и координатор зовут только этих — general-purpose
-# и claude (веб и все инструменты) обошли бы запреты окна. Проверяет хук `ctx.py agents` и только у главной сессии (в
+# и claude (веб и все инструменты) обошли бы запреты окна. Проверяет хук hooks/agents.py и только у главной сессии (в
 # её событии нет agent_id): tools: Agent(…) в шаблоне роли и permissions.deny действуют и на субагентов окна — лид не
 # позвал бы своих dev-*, навык audit — general-purpose. В deny окна — только жёсткие границы, не нужные и лидам.
 # Координатору — ещё свои лиды (из реестра). Explore — только чтение: без него координатор читает код в свой контекст
@@ -1362,7 +1362,10 @@ COORDINATOR_EXTRA_AGENTS = {"mnemo-brain": ["clio"]}
 # Skill — навык с context: fork идёт субагентом своего agent: мимо инструмента Agent (Claude Code 2.1.292)
 AGENT_MATCHER = "Agent|Task|Skill"
 # копия из ~/.claude/plugins, а не рабочая копия agent-kit — довод как у MARKET_GUARD (guard_script)
-MARKET_CTX = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "pantheon", "hooks", "ctx.py")
+# Отдельный файл, а не команда ctx.py: старая копия ctx.py без команды пропускала бы всё, а отсутствующий agents.py
+# — код 2 у python, то есть блок (onFailure: block работает только с Claude Code 2.1.295).
+MARKET_AGENTS = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "pantheon", "hooks",
+                             "agents.py")
 # terminal-notifier по щелчку открывает ссылку или выполняет команду — от имени владельца, вне песочницы. Ролям его
 # не прочитать, а значит и не запустить: уведомления Пантеона шлёт только тик (поддельное «от Пантеона» не пройдёт).
 NOTIFIER_PATHS = ["/opt/homebrew/Cellar/terminal-notifier", "/opt/homebrew/opt/terminal-notifier",
@@ -1489,18 +1492,18 @@ def guard_script():
     return MARKET_GUARD  # файла нет — окно роли не пустит ни одной записи (отказ при сбое), тревога в sandbox_build
 
 
-def ctx_script():
-    if os.path.isfile(MARKET_CTX) and not os.path.islink(MARKET_CTX):
-        return os.path.realpath(MARKET_CTX)
-    return MARKET_CTX  # файла нет — python упадёт, хук с onFailure: block — окно не позовёт никого; тревога в sandbox_build
+def agents_script():
+    if os.path.isfile(MARKET_AGENTS) and not os.path.islink(MARKET_AGENTS):
+        return os.path.realpath(MARKET_AGENTS)
+    return MARKET_AGENTS  # файла нет — python выйдет с кодом 2, окно не позовёт никого; тревога в sandbox_build
 
 
-def agents_window(data, allowed, deny, ctx):
-    """Окну (P0-6): хук `ctx.py agents <список>` для главной сессии и правила deny Agent(<тип>) на всё окно. Запись
+def agents_window(data, allowed, deny, script):
+    """Окну (P0-6): хук `agents.py <список>` для главной сессии и правила deny Agent(<тип>) на всё окно. Запись
     guard и прежние правила (Read у штаба) остаются; без дублей, порядок стабильный."""
     uniq = lambda xs: list(dict.fromkeys(xs))  # noqa: E731
     data.setdefault("hooks", {}).setdefault("PreToolUse", []).append({"matcher": AGENT_MATCHER, "hooks": [{
-        "type": "command", "command": f"python3 {shlex.quote(ctx)} agents {shlex.quote(','.join(uniq(allowed)))}",
+        "type": "command", "command": f"python3 {shlex.quote(script)} {shlex.quote(','.join(uniq(allowed)))}",
         "timeout": 10, "onFailure": "block"}]})
     rules = data.setdefault("permissions", {}).setdefault("deny", [])
     rules.extend([r for r in uniq(f"Agent({x})" for x in deny) if r not in rules])
@@ -1630,10 +1633,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
     if not os.path.isfile(guard):
         alert_once("guard-missing", guard, f"нет {guard.replace(HOME, '~')}: окна ролей не пропустят ни одной записи "
                    "(строгий guard, SEC-29) — переустановить плагин guard", "pantheon")
-    ctx = ctx_script()
-    if not os.path.isfile(ctx):
-        alert_once("ctx-missing", ctx, f"нет {ctx.replace(HOME, '~')}: окна штаба и координаторов не позовут ни одного "
-                   "субагента (хук agents, P0-6) — переустановить плагин pantheon", "pantheon")
+    agents_py = agents_script()
+    if not os.path.isfile(agents_py):
+        alert_once("agents-missing", agents_py, f"нет {agents_py.replace(HOME, '~')}: окна штаба и координаторов не позовут ни одного "
+                   "субагента (хук agents.py, P0-6) — переустановить плагин pantheon", "pantheon")
     leads = leads or {}
     all_leads = [x for n in leads for x in leads[n]]
     os.makedirs(out_dir, exist_ok=True)
@@ -1659,7 +1662,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
         if allow:
             data.setdefault("permissions", {}).setdefault("allow", []).extend(allow)
         if agents:
-            agents_window(data, agents[0], agents[1], ctx)
+            agents_window(data, agents[0], agents[1], agents_py)
         store = (stores or {}).get(name)
         if store:
             st = os.path.realpath(os.path.expanduser(store))
@@ -1740,7 +1743,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
     hq.setdefault("permissions", {}).setdefault("deny", []).extend(
         [rule(x + "/**") for x in _deny_forms(closed)] + [rule(x) for x in _deny_forms(files)])
     # P0-6: код — поручение направлению, а не лид в окне штаба
-    agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES), ctx)
+    agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES), agents_py)
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
     write_window(out_dir, "hq", hq)
     built.append("hq")
