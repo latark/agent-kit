@@ -1106,7 +1106,9 @@ def _qmd_why(ev):
     if not isinstance(ti, dict):
         return "аргументы не разобрать"
     tool = ev.get("tool_name") or ""
-    hq = session_role(ev) == "hq"
+    # окно штаба целиком, с помощниками Зевса (Explore, general-purpose): у них свой agent_type, но то же окно с личным
+    # и действиями наружу — пересказ выдачи принёс бы чужой текст Зевсу. Поручение Фемиде или координатору — их окна
+    hq = session_role(ev) == "hq" or os.environ.get("PANTHEON_ROLE") == "hq"
     why = None
     if tool.endswith("__query"):
         colls = ti.get("collections")

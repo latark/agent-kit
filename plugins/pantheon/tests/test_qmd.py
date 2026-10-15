@@ -226,12 +226,15 @@ def test_qmd_config():
                   r.stderr)
 
 
-def hook(ti, tool="mcp__qmd__query", role=None):
+def hook(ti, tool="mcp__qmd__query", role=None, window=None):
     ev = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": ti}
     if role:
         ev["agent_type"] = role
+    env = {"PATH": os.environ["PATH"], "HOME": tempfile.gettempdir()}
+    if window:
+        env["PANTHEON_ROLE"] = window
     r = subprocess.run([sys.executable, CTX, "qmd-query"], input=json.dumps(ev),
-        capture_output=True, text=True, timeout=30, env={"PATH": os.environ["PATH"], "HOME": tempfile.gettempdir()})
+        capture_output=True, text=True, timeout=30, env=env)
     return "deny" in r.stdout
 
 
@@ -265,6 +268,11 @@ def test_hook():
     check("штаб: get с %2e%2e — отказ", hook({"file": "qmd://pantheon/%2e%2e/corpus/x.md"}, g, "hq"))
     check("штаб: get с обратной косой — отказ", hook({"file": "qmd://pantheon\\..\\corpus/x.md"}, g, "hq"))
     check("аргументы не объект — отказ", hook(["x"]))
+    corpus_q = {"searches": vec, "collections": ["corpus"], "rerank": False}
+    check("помощник Зевса (Explore в окне штаба): corpus — отказ", hook(corpus_q, role="Explore", window="hq"))
+    check("Explore вне окна штаба: corpus — пропуск", not hook(corpus_q, role="Explore"))
+    check("помощник Зевса: get qmd://corpus/… — отказ",
+          hook({"file": "qmd://corpus/x.md"}, g, "general-purpose", window="hq"))
     rr = "ReadMcpResourceTool"
     check("штаб: ресурс qmd://corpus/… — отказ", hook({"server": "qmd", "uri": "qmd://corpus/x.md"}, rr, "hq"))
     check("штаб: ресурс с %2e%2e — отказ",
