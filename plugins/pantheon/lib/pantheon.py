@@ -59,6 +59,12 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon approve [list] | add --site S --allow "…" [--limits "…"] | remove N   заранее разрешённое (только вы)
   pantheon consent <id> [--days N]      ваш ответ Зевсу на вопрос <id> (журнал owner-log Зевса, по умолчанию 7 дней) —
                                         для исполнителя: согласие, данное в окне Зевса
+  pantheon review test -- <команда…>    тесты для запора слияния (guard 0.5.4): в чистом дереве git запустить
+                                        команду (без оболочки); HEAD и дерево после неё те же — выход с её кодом
+                                        и SHA; запись в журнал делает хук guard (PostToolUse), сама команда не пишет
+  pantheon review accept|reject|talos <owner/repo> <PR> <SHA>   вердикт argus (accept, reject) или проверка talos на
+                                        этот SHA; проверяет формат, запись — хук guard и только по роли
+  pantheon review status [<owner/repo> <PR>]   записи журнала ~/.local/state/pantheon/merge-gate/records.jsonl
   pantheon commit                       commit → pull без rebase → push ~/ai/pantheon
   pantheon install | uninstall          поставить или снять задачу launchd com.latark.pantheon-tick
   pantheon tick                         один проход планировщика (его вызывает launchd)
@@ -1274,7 +1280,7 @@ def domains_build(if_changed=False):
         priv = {}
     norm = lambda p: os.path.realpath(os.path.expanduser(p))
     overlap = lambda a, b: a == b or a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/")
-    domains, stores = {}, {}
+    domains, stores, leads = {}, {}, {}
     for d in reg.get("direction") or []:
         name = d.get("name", "")
         if not re.fullmatch(r"[a-z0-9-]+", name):
@@ -1291,10 +1297,15 @@ def domains_build(if_changed=False):
         domains[name] = folders
         if isinstance(d.get("pnpm_store"), str):
             stores[name] = d["pnpm_store"]
+        # лиды направления — субагенты его окна (P0-6); имена как у roles_build
+        bases = d.get("leads") if isinstance(d.get("leads"), list) else []
+        if re.fullmatch(r"[a-z0-9]+-[a-z0-9-]+", name):
+            short = name.split("-", 1)[1]
+            leads[name] = [f"{b}-{short}" for b in LEAD_ROLES if b in bases]
     write_json(path("domains.json"), {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml. Руками не править.",
         "built": stamp(), "built_ts": now(), "domains": domains})
-    built = sandbox_build(domains, policy_path, stores)
+    built = sandbox_build(domains, policy_path, stores, leads)
     os.makedirs(path("locks"), exist_ok=True)
     for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):  # места обёртки heavy: роль в песочнице сама их не создаст
         open(path("locks", slot + ".lock"), "a").close()
@@ -1339,6 +1350,22 @@ COORDINATOR_COMPACT = 200000
 COORDINATOR_ALLOW = ["Bash(gh pr merge *)"]
 # Роли главных сессий: их память в песочницу не добавляется, даже если в шапке есть memory:
 MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
+# Субагенты главной сессии окна (P0-6; SEC-09, SEC-13, ROLE-32): штаб и координатор зовут только этих — general-purpose
+# и claude (веб и все инструменты) обошли бы запреты окна. Проверяет хук hooks/agents.py и только у главной сессии (в
+# её событии нет agent_id): tools: Agent(…) в шаблоне роли и permissions.deny действуют и на субагентов окна — лид не
+# позвал бы своих dev-*, навык audit — general-purpose. В deny окна — только жёсткие границы, не нужные и лидам.
+# Координатору — ещё свои лиды (из реестра). Explore — только чтение: без него координатор читает код в свой контекст
+# (CTX-09); веба через него не больше, чем через prometheus и лидов. clio зовут Зевс и mnemo-brain (роль clio).
+HQ_AGENTS = ["prometheus", "clio", "chiron", "Explore"]
+COORDINATOR_AGENTS = ["argus", "talos", "prometheus", "Explore"]
+COORDINATOR_EXTRA_AGENTS = {"mnemo-brain": ["clio"]}
+# Skill — навык с context: fork идёт субагентом своего agent: мимо инструмента Agent (Claude Code 2.1.292)
+AGENT_MATCHER = "Agent|Task|Skill"
+# копия из ~/.claude/plugins, а не рабочая копия agent-kit — довод как у MARKET_GUARD (guard_script)
+# Отдельный файл, а не команда ctx.py: старая копия ctx.py без команды пропускала бы всё, а отсутствующий agents.py
+# — код 2 у python, то есть блок (onFailure: block работает только с Claude Code 2.1.295).
+MARKET_AGENTS = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "pantheon", "hooks",
+                             "agents.py")
 # terminal-notifier по щелчку открывает ссылку или выполняет команду — от имени владельца, вне песочницы. Ролям его
 # не прочитать, а значит и не запустить: уведомления Пантеона шлёт только тик (поддельное «от Пантеона» не пройдёт).
 NOTIFIER_PATHS = ["/opt/homebrew/Cellar/terminal-notifier", "/opt/homebrew/opt/terminal-notifier",
@@ -1465,6 +1492,24 @@ def guard_script():
     return MARKET_GUARD  # файла нет — окно роли не пустит ни одной записи (отказ при сбое), тревога в sandbox_build
 
 
+def agents_script():
+    if os.path.isfile(MARKET_AGENTS) and not os.path.islink(MARKET_AGENTS):
+        return os.path.realpath(MARKET_AGENTS)
+    return MARKET_AGENTS  # файла нет — python выйдет с кодом 2, окно не позовёт никого; тревога в sandbox_build
+
+
+def agents_window(data, allowed, deny, script):
+    """Окну (P0-6): хук `agents.py <список>` для главной сессии и правила deny Agent(<тип>) на всё окно. Запись
+    guard и прежние правила (Read у штаба) остаются; без дублей, порядок стабильный."""
+    uniq = lambda xs: list(dict.fromkeys(xs))  # noqa: E731
+    data.setdefault("hooks", {}).setdefault("PreToolUse", []).append({"matcher": AGENT_MATCHER, "hooks": [{
+        "type": "command", "command": f"python3 {shlex.quote(script)} {shlex.quote(','.join(uniq(allowed)))}",
+        "timeout": 10, "onFailure": "block"}]})
+    rules = data.setdefault("permissions", {}).setdefault("deny", [])
+    rules.extend([r for r in uniq(f"Agent({x})" for x in deny) if r not in rules])
+    return data
+
+
 def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None):
     allow = list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + [cache]
     # .git/config и .git/hooks — внутри каждой разрешённой папки (её настоящим путём) и под ~ в целом
@@ -1570,8 +1615,9 @@ def pnpm_store_check(name, folders, store):
                            ".git/info/exclude), затем CI=true pnpm install --frozen-lockfile", "pantheon")
 
 
-def sandbox_build(domains, policy_path, stores=None):
-    """domains.json и policy.toml → ~/.local/state/pantheon/settings/<направление>.json и workshop.json."""
+def sandbox_build(domains, policy_path, stores=None, leads=None):
+    """domains.json и policy.toml → ~/.local/state/pantheon/settings/<направление>.json и workshop.json.
+    leads — {направление: ["hephaestus-<коротко>", "apollo-<коротко>"]}: субагенты окна (P0-6)."""
     try:
         with open(policy_path, "rb") as fh:
             policy = tomllib.load(fh)
@@ -1587,11 +1633,17 @@ def sandbox_build(domains, policy_path, stores=None):
     if not os.path.isfile(guard):
         alert_once("guard-missing", guard, f"нет {guard.replace(HOME, '~')}: окна ролей не пропустят ни одной записи "
                    "(строгий guard, SEC-29) — переустановить плагин guard", "pantheon")
+    agents_py = agents_script()
+    if not os.path.isfile(agents_py):
+        alert_once("agents-missing", agents_py, f"нет {agents_py.replace(HOME, '~')}: окна штаба и координаторов не позовут ни одного "
+                   "субагента (хук agents.py, P0-6) — переустановить плагин pantheon", "pantheon")
+    leads = leads or {}
+    all_leads = [x for n in leads for x in leads[n]]
     os.makedirs(out_dir, exist_ok=True)
 
     memory = memory_dirs()
 
-    def one(name, folders, own, compact, deny, allow=None):
+    def one(name, folders, own, compact, deny, allow=None, agents=None):
         real = [_real_dir(f, SANDBOX_ROOTS[:1], strict=True) or _real_dir(f, SANDBOX_ROOTS[1:]) for f in folders]
         skipped = [f for f, r in zip(folders, real) if not r]
         if skipped:
@@ -1609,6 +1661,8 @@ def sandbox_build(domains, policy_path, stores=None):
             data["sandbox"]["excludedCommands"].append("pantheon direction init *")
         if allow:
             data.setdefault("permissions", {}).setdefault("allow", []).extend(allow)
+        if agents:
+            agents_window(data, agents[0], agents[1], agents_py)
         store = (stores or {}).get(name)
         if store:
             st = os.path.realpath(os.path.expanduser(store))
@@ -1622,10 +1676,14 @@ def sandbox_build(domains, policy_path, stores=None):
 
     built = []
     for name, folders in domains.items():
+        mine = leads.get(name, [])
+        # chiron видит личное (me/) — только Зевсу (P0-2); главные роли и чужие лиды не нужны и лидам окна
+        agents = (mine + COORDINATOR_AGENTS + COORDINATOR_EXTRA_AGENTS.get(name, []),
+                  ["chiron"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
         one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
-            [] if name in private_dirs else private_paths, COORDINATOR_ALLOW)
+            [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents)
         built.append(name)
-    # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски
+    # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски; список субагентов — вне P0-6
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
     # местные порты мастерской закрыты: на macOS allowLocalBinding открывает все порты 127.0.0.1, в том числе демон CDP
     # с входами владельца; браузеры владельца — только у роли Харон (решение владельца 15.10, отмена metis-0053)
@@ -1684,6 +1742,8 @@ def sandbox_build(domains, policy_path, stores=None):
     rule = lambda x: f"Read({x})" if x.startswith("~") else f"Read(/{x})"  # noqa: E731 — «//» — абсолютный путь
     hq.setdefault("permissions", {}).setdefault("deny", []).extend(
         [rule(x + "/**") for x in _deny_forms(closed)] + [rule(x) for x in _deny_forms(files)])
+    # P0-6: код — поручение направлению, а не лид в окне штаба
+    agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES), agents_py)
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
     write_window(out_dir, "hq", hq)
     built.append("hq")
@@ -3688,11 +3748,121 @@ def plugins_cmd(rest):
     return 2
 
 
+# --- review: записи для запора слияния guard (P1-4, guard 0.5.4) -------------------------------------------------
+# Сама команда ничего не пишет: журнал STATE/merge-gate/records.jsonl пишет хук guard на PostToolUse по успешной
+# простой команде `pantheon review …` и по agent_type сессии (accept, reject — argus, talos — talos). Поэтому
+# запись нельзя сделать текстом команды от чужой роли, а сама команда только проверяет условия и формат.
+REVIEW_SHA = re.compile(r"[0-9a-f]{40}")
+REVIEW_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+REVIEW_PR = re.compile(r"[1-9][0-9]{0,8}")
+REVIEW_USAGE = ("pantheon review test -- <команда…> | accept|reject|talos <owner/repo> <PR> <SHA 40 знаков> | "
+                "status [<owner/repo> <PR>]")
+
+
+def _review_git(*args):
+    """Вывод git в текущей папке (без переменных GIT_*); None — не репозиторий или сбой."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    try:
+        r = subprocess.run(["git", *args], capture_output=True, text=True, timeout=30, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _review_state():
+    """(HEAD, дерево чистое) текущей папки; HEAD None — не git или коммитов нет."""
+    head = (_review_git("rev-parse", "HEAD") or "").strip().lower()
+    status = _review_git("status", "--porcelain")
+    return (head if REVIEW_SHA.fullmatch(head) else None), (status is not None and not status.strip())
+
+
+def review_records(repo=None, pr=None):
+    """Записи журнала запора (битые строки пропускаются); файл — симлинк или не читается — пусто."""
+    try:
+        fd = os.open(os.path.join(STATE, "merge-gate", "records.jsonl"), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return []
+    out = []
+    with os.fdopen(fd, "rb") as fh:
+        for raw in fh:
+            try:
+                rec = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if not isinstance(rec, dict) or not isinstance(rec.get("repo"), list):
+                continue
+            if repo and repo.lower() not in [str(x).lower() for x in rec["repo"]]:
+                continue
+            if pr is not None and rec.get("pr") not in (pr, None):
+                continue
+            out.append(rec)
+    return out
+
+
+def review_cmd(rest):
+    sub = rest[0] if rest else ""
+    if sub == "test":
+        if len(rest) < 3 or rest[1] != "--":
+            print(f"pantheon review: {REVIEW_USAGE}", file=sys.stderr)
+            return 2
+        head, clean = _review_state()
+        if head is None:
+            print("pantheon review test: папка не репозиторий git или в нём нет коммитов", file=sys.stderr)
+            return 2
+        if not clean:
+            print("pantheon review test: дерево не чистое — закоммить или убери правки: тесты пишутся на коммит, "
+                  "а не на незакоммиченное", file=sys.stderr)
+            return 2
+        try:
+            rc = subprocess.run(rest[2:]).returncode
+        except OSError as e:
+            print(f"pantheon review test: команда не запустилась: {e}", file=sys.stderr)
+            return 127
+        head2, clean2 = _review_state()
+        if head2 != head or not clean2:
+            print(f"pantheon review test: команда изменила HEAD или дерево (было {head}, стало {head2 or '?'}, "
+                  f"чистое: {'да' if clean2 else 'нет'}) — запись не делается", file=sys.stderr)
+            return 3
+        print(head)
+        print(f"pantheon review test: код {rc} на {head}" + (" — запись тестов сделает хук guard" if rc == 0 else
+                                                             " — тесты не прошли, записи не будет"))
+        return rc
+    if sub in ("accept", "reject", "talos"):
+        args = rest[1:]
+        if len(args) != 3 or not REVIEW_REPO.fullmatch(args[0]) or not REVIEW_PR.fullmatch(args[1]) \
+                or not REVIEW_SHA.fullmatch(args[2].lower()):
+            print(f"pantheon review {sub} <owner/repo> <номер PR> <SHA 40 знаков> — аргументы не в этом формате "
+                  "(SHA — полный: gh pr view N --json headRefOid)", file=sys.stderr)
+            return 2
+        who = "argus" if sub != "talos" else "talos"
+        print(f"pantheon review {sub}: {args[0].lower()}#{args[1]} @ {args[2].lower()} — записано хуком guard, "
+              f"если роль подходит ({who})")
+        return 0
+    if sub == "status":
+        args = rest[1:]
+        if args and (len(args) != 2 or not REVIEW_REPO.fullmatch(args[0]) or not REVIEW_PR.fullmatch(args[1])):
+            print("pantheon review status [<owner/repo> <номер PR>]", file=sys.stderr)
+            return 2
+        recs = review_records(args[0] if args else None, int(args[1]) if args else None)
+        if not recs:
+            print("pantheon review status: записей нет")
+        for r in recs:
+            by = r.get("by") if isinstance(r.get("by"), dict) else {}
+            pr = f"#{r['pr']}" if r.get("pr") else ""
+            print(f"{r.get('time', '?')}  {r.get('kind', '?'):<6}  {','.join(map(str, r['repo']))}{pr}  "
+                  f"{str(r.get('sha', ''))[:12]}  {by.get('agent_type') or '—'}")
+        return 0
+    print(f"pantheon review: {REVIEW_USAGE}", file=sys.stderr)
+    return 2
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(__doc__)
         return 0
     cmd, rest = argv[0], argv[1:]
+    if cmd == "review":
+        return review_cmd(rest)
     if cmd == "tick":
         tick()
         return 0
