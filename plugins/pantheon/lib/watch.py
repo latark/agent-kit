@@ -222,8 +222,14 @@ def _watch(dry=False):
     return 0 if not failed else P.ALERTED
 
 
+def gave_up_note(d, s):
+    """Текст уведомления «самозапуск встал» — один и тот же при сбое и в каждом проходе (повтор сверяет текст)."""
+    return f"Самозапуск {d} встал: {s.get('fails')} сбоя подряд"
+
+
 def sessions(agents, doms):
-    """Ждёт вас (blocked) или упала (failed) — тревога и уведомление один раз на состояние сессии."""
+    """Ждёт вас (blocked) или упала (failed) — тревога один раз на состояние сессии; уведомление — сбой «скоро»
+    каждый проход, пока состояние держится (политика решает: macOS, когда вас нет, не чаще раза в час на событие)."""
     word = {"blocked": "ждёт вас", "failed": "упала"}
     for a in agents:
         name, sid, state = a.get("name") or "", a.get("id") or a.get("sessionId") or "", a.get("state")
@@ -232,11 +238,15 @@ def sessions(agents, doms):
         key = f"watch-state-{sid}"
         if state not in word:
             P.clear_once(key)
+            P.clear_fault(*(f"watch-{s}-{sid}" for s in word))  # состояние снялось — следующее снова macOS
             continue
+        P.clear_fault(*(f"watch-{s}-{sid}" for s in word if s != state))
         why = " ".join(str(a.get("waitingFor") or "").split())[:120]
         P.alert_once(key, state, f"{name} ({sid}) {word[state]}" + (f": {why}" if why else "")
-                     + f" — claude attach {sid}", "watch",
-                     note=f"{name} {word[state]}" + (f": {why[:80]}" if why else ""), group=f"session-{name}")
+                     + f" — claude attach {sid}", "watch")
+        # ключ события — сессия и состояние: «упала» после «ждёт вас» — своё уведомление, вид — один на сессию
+        P.notify_soon(f"watch-{state}-{sid}", f"{name} {word[state]}" + (f": {why[:80]}" if why else ""),
+                      group=f"session-{name}", once=True)
 
 
 def status_files(doms, t):
@@ -468,7 +478,7 @@ def cc_version(t):
                + " — Метиде: разобрать (pantheon infra-check)")
             + "; журнал изменений сверяет iris", "watch")
     if not ok:
-        P.notify(f"Claude Code {v}: проверка опор не прошла — pantheon infra-check", group="infra")
+        P.notify_soon("infra", f"Claude Code {v}: проверка опор не прошла — pantheon infra-check")
 
 
 def event(kind, t, **extra):
@@ -724,7 +734,10 @@ def fail(d, s, t, why):
         s["gave_up"] = True
         P.alert(f"самозапуск {d} остановлен после {s['fails']} сбоев подряд (последний: {why}) — разобраться и вернуть: "
                 f"pantheon resume {d} или pantheon wake {d}", "watch")
-        P.notify(f"Самозапуск {d} встал: {s['fails']} сбоя подряд", group=f"autostart-{d}")
+        # новый эпизод «встал»: прежняя отметка once могла не сняться (после resume сессия жива — сброса в
+        # autostart() нет), иначе повторное «встал» в течение 7 дней пропало бы без macOS и без сводки (ревью argus)
+        P.clear_fault(f"autostart-gaveup-{d}")
+        P.notify_soon(f"autostart-gaveup-{d}", gave_up_note(d, s), group=f"autostart-{d}", once=True)
     else:
         P.alert(f"самозапуск {d}: сбой {s['fails']} из {AUTOSTART_FAILS_MAX} ({why}); следующая попытка не раньше "
                 f"{P.stamp(s['next'])[11:16]}", "watch")
@@ -795,10 +808,17 @@ def autostart(agents, registry, doms, t, dry=False):
         if dry:
             say(f"{d}: " + (f"ждёт — {why}" if why else f"поднял бы сейчас (задачи {', '.join(tids[:5])})"))
             continue
+        if not s.get("gave_up"):  # сбои сняты (resume, удачный запуск) — следующий «встал» снова macOS
+            P.clear_fault(f"autostart-gaveup-{d}")
+        if got is not None and not isinstance(got, str) and not (why or "").startswith("нет доверия"):
+            P.clear_fault(f"autostart-trust-{d}")  # доверие есть
         if why:
+            if s.get("gave_up"):  # самозапуск встал и держится — одна macOS, пока не снимут
+                P.notify_soon(f"autostart-gaveup-{d}", gave_up_note(d, s), group=f"autostart-{d}", once=True)
             if why.startswith("нет доверия"):
-                P.alert_once(f"autostart-trust-{d}", got[2], f"самозапуск {d} невозможен: {why}", "watch",
-                             note=f"{d}: нужно ваше доверие к папке", group=f"autostart-{d}")
+                P.alert_once(f"autostart-trust-{d}", got[2], f"самозапуск {d} невозможен: {why}", "watch")
+                P.notify_soon(f"autostart-trust-{d}", f"{d}: нужно ваше доверие к папке", group=f"autostart-{d}",
+                              once=True)
             elif not why.startswith(("пауза между", "одна сессия", "не главный Mac")):
                 P.alert_once(f"autostart-wait-{d}", f"{today(t)}-{why[:40]}", f"самозапуск {d} ждёт: {why} (задачи "
                              f"{', '.join(tids[:3])})", "watch")
@@ -904,7 +924,8 @@ def owner_logs(t):
                 P.alert_once(f"owner-log-changed-{key}", _sha(raw)[:16], f"журнал ваших слов {key}: "
                              + ("укорочен" if len(raw) < prev["size"] else "изменена уже записанная часть")
                              + " — не дописывание и не уборка дежурного; проверить, кто правил", "watch",
-                             note="Журнал ваших слов изменён задним числом", group="owner-log")
+                             note="Журнал ваших слов изменён задним числом", group="owner-log",
+                             critical=True)  # подделка журнала согласия — COMM-08: сразу, и ночью
             if os.stat(f).st_mode & 0o077:
                 os.chmod(f, 0o600)
                 P.alert_once(f"owner-log-perm-{key}", "1", f"журнал ваших слов {key} был открыт другим — права сужены "
@@ -943,7 +964,8 @@ def owner_logs(t):
     for key in list(hashes):
         if key not in seen:
             P.alert_once(f"owner-log-gone-{key}", "1", f"журнал ваших слов {key} пропал — удалён не уборкой дежурного; "
-                         "проверить, кто удалил", "watch", note="Журнал ваших слов удалён", group="owner-log")
+                         "проверить, кто удалил", "watch", note="Журнал ваших слов удалён", group="owner-log",
+                         critical=True)
             hashes.pop(key)
     P.write_json(hashes_p, hashes)
     with contextlib.suppress(OSError):
@@ -1145,7 +1167,7 @@ def maint_expire(t):
         P.alert(f"метка технического перезапуска ({m.get('reason')}, с {str(m.get('id'))[11:16]}) истекла за "
                 f"{MAINT_HOURS} ч без pantheon restart --go — снята, самозапуск и wake снова работают; сохранившиеся "
                 "сессии стоят — поднять: pantheon wake <имя>", "watch")
-        P.notify("Техперезапуск не завершён: метка снята по сроку", group="restart")
+        P.notify_soon("restart", "Техперезапуск не завершён: метка снята по сроку")
 
 
 def restart(rest, who):

@@ -32,7 +32,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon status                       один экран для отладки: тик, сессии, вопросы к вам, тревоги, защиты, sync, места heavy, версии
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
-  pantheon task new --direction D --title T [--status S --priority N --due ГГГГ-ММ-ДД --next X --owner O
+  pantheon task new --direction D --title T [--status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ] --next X --owner O
                     --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
                     --recommend "А — потому что …" --if-no-answer "…" --depends-on ID]
                     без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ
@@ -60,9 +60,12 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon commit                       commit → pull без rebase → push ~/ai/pantheon
   pantheon install | uninstall          поставить или снять задачу launchd com.latark.pantheon-tick
   pantheon tick                         один проход планировщика (его вызывает launchd)
-Для синтетических тестов: PANTHEON_HOME, PANTHEON_STATE, PANTHEON_NOW, PANTHEON_HOST,
-PANTHEON_FAKE_WAKE, PANTHEON_FAKE_AC, PANTHEON_FAKE_IDLE, PANTHEON_FAKE_LIMIT, PANTHEON_DRYRUN,
-PANTHEON_NO_NOTIFY.
+Уведомления (lib/notify.py): присутствие по простою, тихие часы, утренний дайджест, повтор и «долго ждёт», склейка
+по id решения, бюджет в день; пороги — таблица [notify] в schedule.toml, состояние и журнал — notify.json и
+notify-log.jsonl в ~/.local/state/pantheon/.
+Для синтетических тестов: PANTHEON_HOME, PANTHEON_STATE, PANTHEON_NOW — «сейчас», PANTHEON_HOST,
+PANTHEON_FAKE_WAKE, PANTHEON_FAKE_AC, PANTHEON_FAKE_IDLE — простой в секундах, PANTHEON_FAKE_LIMIT, PANTHEON_DRYRUN,
+PANTHEON_NO_NOTIFY — без уведомлений, PANTHEON_NOTIFY_LOG — уведомления строкой «заголовок|текст|ссылка|группа» в файл.
 """
 import collections
 import contextlib
@@ -193,6 +196,7 @@ def load_schedule():
     with open(p, "rb") as fh:
         sched = tomllib.load(fh)
     sched["defaults"] = {**DEFAULTS, **(sched.get("defaults") or {})}
+    sched["notify"] = notify_mod().settings(sched.get("notify"))
     jobs = []
     for j in sched.get("job") or []:
         if isinstance(j, dict) and JOB_NAME.fullmatch(str(j.get("name", ""))):
@@ -236,9 +240,12 @@ def alert(text, who="pantheon"):
             fh.write(f"{stamp()} · {who} · {text}\n")
 
 
-def alert_once(key, value, text, who="pantheon", note=None, group=None):
-    """Тревога (и уведомление note) один раз на значение value: повтор того же состояния молчит. group — вид
-    уведомления: новое того же вида заменяет прежнее в Центре уведомлений (по умолчанию — ключ тревоги)."""
+def alert_once(key, value, text, who="pantheon", note=None, group=None, policy=None, critical=False):
+    """Тревога (и уведомление note — сбой класса «скоро», через политику уведомлений) один раз на значение value:
+    повтор того же состояния молчит. group — вид уведомления: новое того же вида заменяет прежнее в Центре
+    уведомлений и считается тем же сбоем для повтора (по умолчанию — ключ тревоги). policy — политика, уже взятая
+    под lock("notify") (проход доски), иначе берётся своя. critical — класс COMM-08 (подделка журнала ваших слов и
+    т. п.): уведомление сразу, и ночью, и когда вы у Mac — в счёт бюджета и в журнал."""
     mark = once_path(key)
     try:
         if open(mark).read() == str(value):
@@ -246,8 +253,10 @@ def alert_once(key, value, text, who="pantheon", note=None, group=None):
     except OSError:
         pass
     alert(text, who)
-    if note:
-        notify(note, group=group or key)
+    if note and critical:
+        notify_critical(note, group=group or key, policy=policy)
+    elif note:
+        notify_soon(key, note, group=group or key, policy=policy)
     os.makedirs(path("once"), exist_ok=True)
     open(mark, "w").write(str(value))
 
@@ -329,7 +338,7 @@ def notify(text, title="Пантеон", target=None, group=None):
     group заменяет прежнее уведомление о том же. Без него — обычное уведомление без перехода."""
     if os.environ.get("PANTHEON_NOTIFY_LOG"):  # для тестов: что и куда ушло бы
         with open(os.environ["PANTHEON_NOTIFY_LOG"], "a", encoding="utf-8") as fh:
-            fh.write(f"{title}|{text}|{target or ''}\n")
+            fh.write(f"{title}|{text}|{target or ''}|{group or ''}\n")
         return
     if os.environ.get("PANTHEON_NO_NOTIFY") or os.environ.get("PANTHEON_DRYRUN") == "1":
         return
@@ -497,7 +506,7 @@ def tick():
                 save_job_state(name, st)
                 alert(f"задача {name}: аренда истекла, поставлена на паузу — продлить: pantheon jobs renew {name}",
                       "pantheon-tick")
-                notify(f"Задача {name} на паузе: аренда истекла")
+                notify_soon("lease-" + name, f"Задача {name} на паузе: аренда истекла")
                 continue
             is_due, due_at = due(job, st, t)
             if not is_due or locked("job-" + name):
@@ -773,7 +782,7 @@ def run_job(name):
                 alert(f"задача {name} упала (код {rc}, подряд {st['fails']}): {tail[0][:200]} — журнал {log.replace(HOME, '~')}",
                       "pantheon-tick")
                 if job.get("notify", True):
-                    notify(f"Задача {name} упала (код {rc})")
+                    notify_soon("job-" + name, f"Задача {name} упала (код {rc})")
             return rc
 
 
@@ -2662,6 +2671,145 @@ def uninstall():
 
 
 _TASKS = None
+_NOTIFY = None
+
+
+def notify_mod():
+    """lib/notify.py — политика уведомлений (загрузка как у tasks_mod: python3 -I не кладёт папку скрипта в путь)."""
+    global _NOTIFY
+    if _NOTIFY is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_notify", os.path.join(LIB, "notify.py"))
+        _NOTIFY = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_NOTIFY)
+    return _NOTIFY
+
+
+def owner_acts():
+    """→ (ответы, переносы в «Нужен ответ»), оба {id: [метка времени, …]}. Ответы — из журнала доски (answer и
+    request с вариантом, move не в «Нужен ответ») и окна вопросов Зевса (вопрос «[id] …»); перенос карточки в «Нужен
+    ответ» вами самими — не ответ, а знак «пингов не надо». Только журналы, которые пишут хук и тик: поле answer
+    файла задачи и текст других сессий ответом не считаются."""
+    out, put = {}, {}
+    try:
+        lines = open(path("owner-log", "board.jsonl"), encoding="utf-8").read().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            rec = json.loads(line)
+            t = time.mktime(time.strptime(rec.get("time", "")[:19], "%Y-%m-%dT%H:%M:%S"))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        kind, tid = rec.get("kind"), rec.get("id")
+        if not isinstance(tid, str):
+            continue
+        if (kind in ("answer", "request") and isinstance(rec.get("answer"), str) and rec["answer"].strip()
+                or kind == "move" and rec.get("dst") not in ("Нужен ответ", "Ждёт вас")):
+            out.setdefault(tid, []).append(t)
+        elif kind == "move":
+            put.setdefault(tid, []).append(t)
+    try:
+        with open(path("owner-log", "zeus.md"), encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        text = ""
+    # как consent: пометку «окно вопросов» ставит хук answer, ответ — на вопрос, который начинается с [<id>]
+    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
+    for i, m in enumerate(heads):
+        if m.group(2).strip() != "· окно вопросов":
+            continue
+        body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
+        q = re.match(r"вопрос: \[([^\]\s]{1,40})\]", body, re.I)
+        if not q:
+            continue
+        try:
+            t = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+        except ValueError:
+            continue
+        out.setdefault(q.group(1).lower(), []).append(t)
+    return out, put
+
+
+def owner_log_fns():
+    """→ (answered, owner_put). answered(id, since) — время (ISO) первого ответа владельца по id не раньше since,
+    иначе None; owner_put(id, since) — вы сами перенесли карточку в «Нужен ответ» не раньше since. Журналы читаются
+    один раз за проход и лениво — после того, как проход доски записал новые ходы."""
+    cache = []
+
+    def acts():
+        if not cache:
+            cache.append(owner_acts())
+        return cache[0]
+
+    def answered(tid, since):
+        hits = sorted(x for x in acts()[0].get(tid, []) if x >= int(since))
+        return notify_mod().iso(hits[0]) if hits else None
+
+    def owner_put(tid, since):
+        return any(x >= int(since) for x in acts()[1].get(tid, []))
+    return answered, owner_put
+
+
+def notify_policy(sched=None):
+    """Политика уведомлений на этот проход; вызывать под lock("notify") и закончить save()."""
+    N = notify_mod()
+    if sched is None:
+        try:
+            sched = load_schedule()
+        except (OSError, ValueError):
+            sched = {}
+    answered, owner_put = owner_log_fns()
+    return N.Policy(path("notify.json"), path("notify-log.jsonl"), sched.get("notify") or N.settings(), now(),
+                    idle=idle_sec, send=lambda text, title, target, group: notify(text, title, target, group),
+                    answered=answered, owner_put=owner_put)
+
+
+def notify_critical(text, title="Пантеон · критично", group="critical", policy=None):
+    """Критичное (COMM-08): уведомление сразу, мимо блокировки прохода доски; учёт в бюджете и журнале — под
+    lock("notify"), не взяли за 5 с — без учёта (отправка уже ушла). policy — уже взятая под блокировкой."""
+    if policy is not None:
+        policy.critical(text, title, group=group)
+        return
+    notify(text, title=title, group=group)
+    deadline = time.time() + 5
+    while True:
+        with lock("notify", block=False) as got:
+            if got:
+                pol = notify_policy()
+                pol.critical(text, title, send=False, group=group)
+                pol.save()
+                return
+        if time.time() > deadline:
+            return
+        time.sleep(0.1)
+
+
+def notify_soon(key, text, group=None, policy=None, once=False):
+    """Сбой класса «скоро»: macOS только если вас нет у Mac, не ночью и в бюджете, одна на ключ события за час; иначе —
+    в утреннюю сводку. key — событие (по нему повтор), group — вид в Центре уведомлений (заменяет прежнее того же
+    вида). Событие, которое держится, вызывать каждый проход: дойдёт, когда вы уйдёте от Mac. policy — уже взятая под
+    lock("notify") (flock в том же процессе второй раз не взять). once — событие, которое держится: одна macOS, пока
+    его не снимет clear_fault."""
+    if policy is not None:
+        policy.fault(key, text, group=group, once=once)
+        return
+    with lock("notify"):
+        pol = notify_policy()
+        pol.fault(key, text, group=group, once=once)
+        pol.save()
+
+
+def clear_fault(*keys):
+    """Событие снято — сбросить его в политике уведомлений (следующее такое — снова macOS). Без записи, если сбрасывать
+    нечего: дежурный зовёт это на каждом проходе."""
+    st = read_json(path("notify.json"))
+    if not any(k in (st.get("faults") or {}) for k in keys):
+        return
+    with lock("notify"):
+        pol = notify_policy()
+        if any([pol.clear_fault(k) for k in keys]):
+            pol.save()
 
 
 def qmd_mod():
@@ -2744,11 +2892,14 @@ def board():
                 projects = {d.get("name"): d.get("project") for d in tomllib.load(fh).get("direction") or []}
         except (OSError, ValueError):
             projects = {}
-        lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
-                             alert=lambda k, v, text, who="board", note=None: alert_once(k, v, text, who, note),
-                             notify=lambda text, target=None, group=None: notify(text, target=target, group=group),
-                             primary=primary,
-                             projects=projects)
+        # политика уведомлений — под своей блокировкой на весь проход: сбои из run-job ждут, а не теряются
+        with lock("notify"):
+            pol = notify_policy(sched)
+            lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
+                                 alert=lambda k, v, text, who="board", note=None: alert_once(k, v, text, who, note,
+                                                                                            policy=pol),
+                                 primary=primary, projects=projects, policy=pol)
+            pol.save()
         once_dir = path("once")  # отметки «уже сообщали» старше 90 дней — убрать: папка не растёт без конца
         for f in os.listdir(once_dir) if os.path.isdir(once_dir) else []:
             fp = os.path.join(once_dir, f)
@@ -3305,9 +3456,8 @@ def main(argv):
         alert(("КРИТИЧНО: " if critical else "") + " ".join(rest), who)
         if critical:  # COMM-08: безопасность, деньги, данные клиентов, юридическое, прод, контракт — сразу владельцу
             # отправителя называет он сам (--from, PANTHEON_ROLE — переменные вызова): заголовок не утверждает, кто
-            # прислал, имя — в тексте со словами «со слов»
-            notify(f"{' '.join(rest)[:200]} (со слов: {' '.join(who.split())[:40]})", title="Пантеон · критично",
-                   group="critical")
+            # прислал, имя — в тексте со словами «со слов». Сразу всегда (и ночью), но в счёт бюджета и в журнал
+            notify_critical(f"{' '.join(rest)[:200]} (со слов: {' '.join(who.split())[:40]})")
         return 0
     if cmd == "archive":
         return archive()
