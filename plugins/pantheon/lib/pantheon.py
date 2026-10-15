@@ -1526,7 +1526,7 @@ def sandbox_build(domains, policy_path, stores=None):
         ok = [r for r in real if r]
         data = role_settings(ok, own_real, write, cache, any(ssh_remote(r) for r in ok), deny, compact, guard)
         if allow:
-            data["permissions"] = {"allow": list(allow)}
+            data.setdefault("permissions", {}).setdefault("allow", []).extend(allow)
         store = (stores or {}).get(name)
         if store:
             st = os.path.realpath(os.path.expanduser(store))

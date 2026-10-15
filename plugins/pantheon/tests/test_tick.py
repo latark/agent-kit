@@ -319,7 +319,7 @@ def main():
 
     merge = "Bash(gh pr merge *)"
     check("окно координатора направления: gh pr merge в permissions.allow; у мастерской и штаба правила нет (metis-0050)",
-          sa["permissions"]["allow"] == [merge] and sm["permissions"]["allow"] == [merge]
+          sa.get("permissions", {}).get("allow") == [merge] and sm.get("permissions", {}).get("allow") == [merge]
           and merge not in json.dumps(sw.get("permissions", {})) and merge not in json.dumps(hq.get("permissions", {})))
     mem_a = real(".claude/agent-memory/argus")
     wins = (sa, sm, sw, hq)
