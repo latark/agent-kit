@@ -539,12 +539,16 @@ def t_checklist(h):
     h.reset()
     for cmd in (base, base + ' --opened a --ran b', base + ' --opened "" --ran b --unchecked c',
                 base + " --opened '  ' --ran b --unchecked c", base + " --opened a --ran b --unchecked c --extra d",
-                base + " --opened a --opened b --ran b --unchecked c", base + " --opened a --ran b --unchecked"):
+                base + " --opened a --opened b --ran b --unchecked c", base + " --opened a --ran b --unchecked",
+                base + " --opened --ran --ran --unchecked --unchecked --opened",  # имена флагов как значения (PR #25)
+                base + " --opened=--ran --ran b --unchecked c", base + " --opened a --ran ' --x' --unchecked c"):
         h.post(cmd, "argus")
         d, why = h.pre(cmd, role="argus", agent_id="a1")
         check(f"accept `{cmd[len(base):] or '(без полей)'}` — PreToolUse отказ", d == "deny" and "Записи не будет" in why,
               why)
     check("accept без полного перечня — записи нет", h.read() == [], h.read())
+    d, why = h.pre(base + " --opened --ran --ran --unchecked --unchecked --opened", role="argus", agent_id="a1")
+    check("перечень из имён флагов — отказ «начинается с «--»»", d == "deny" and "начинается с «--»" in why, why)
     d, why = h.pre(base, role="argus", agent_id="a1")
     check("отказ без перечня называет флаги", "--opened" in why and "--unchecked" in why and "Б6" in why, why)
     h.post(f"pantheon review reject latark/tg-read 3 {sha}", "argus")

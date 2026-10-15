@@ -3810,6 +3810,8 @@ def _review_verdict(sub, args):
                     return pos, {}, f"у --{name} нет значения. Формат: {fmt}"
                 i += 1
                 val = args[i]
+            if val.strip().startswith("--"):  # `--opened --ran …`: имя флага — не значение
+                return pos, {}, f"значение --{name} начинается с «--»: похоже, пропущено значение. Формат: {fmt}"
             checklist[name] = val.strip()
         else:
             pos.append(a)

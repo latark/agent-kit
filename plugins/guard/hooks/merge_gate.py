@@ -346,6 +346,8 @@ def verdict_parse(kind, args):
                     return None, None, f"{fmt} — у --{name} нет значения"
                 i += 1
                 val = args[i]
+            if val.strip().startswith("--"):  # `--opened --ran …`: имя флага — не значение (ревью argus, PR #25)
+                return None, None, f"{fmt} — значение --{name} начинается с «--»: похоже, пропущено значение"
             checklist[name] = val.strip()
         else:
             pos.append(a)

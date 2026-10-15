@@ -96,7 +96,9 @@ def run_all(tmp):
     check("accept — форма --x=V и флаги в любом месте: код 0", r.returncode == 0 and "запустил: b c" in r.stdout)
     for extra, why in (([], "без перечня"), (cl[:4], "пусто --unchecked"), (["--opened", "", *cl[2:]], "пусто --opened"),
                        (["--opened", "  ", *cl[2:]], "пусто --opened"), ([*cl, "--foo", "x"], "неизвестный флаг"),
-                       ([*cl, "--opened", "b"], "дважды"), ([*cl[:5]], "нет значения")):
+                       ([*cl, "--opened", "b"], "дважды"), ([*cl[:5]], "нет значения"),
+                       (["--opened", "--ran", "--ran", "--unchecked", "--unchecked", "--opened"], "начинается с «--»"),
+                       (["--opened=--ran", *cl[2:]], "начинается с «--»")):
         r = pantheon("review", "accept", "latark/agent-kit", "17", SHA, *extra)
         check(f"accept {' '.join(extra)[:40] or '(без полей)'} — код 2, «{why}»",
               r.returncode == 2 and why in r.stderr and "Б6" in r.stderr if why == "без перечня"
