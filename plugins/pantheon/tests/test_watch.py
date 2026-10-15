@@ -334,6 +334,28 @@ def test_autostart_backoff_and_give_up():
     e.run("resume", "hermes-x", t=t + 99999)
     e.run("watch", t=t + 99999)
     check(not json.load(open(e.st("autostart.json")))["hermes-x"].get("gave_up"), "resume не сбросил счётчик сбоев")
+    # снова встал (ревью argus): отметка once прежнего эпизода не снята (после resume живая сессия — сброса нет);
+    # новый эпизод «встал» всё равно даёт macOS
+    np = e.st("notify.json")
+
+    def stale(at):  # отметка прежнего эпизода, которую autostart() не снял
+        nst = json.load(open(np, encoding="utf-8"))
+        nst.setdefault("faults", {})["autostart-gaveup-hermes-x"] = {"t": at, "text": "старое", "once": True}
+        data = json.dumps(nst, ensure_ascii=False)
+        with open(np, "w", encoding="utf-8") as fh:
+            fh.write(data)
+    before = open(e.notify).read().count("Самозапуск hermes-x встал")
+    t = t + 99999 + 3 * 86400
+    for i in range(3):
+        e.run("watch", t=t)
+        if i == 2:
+            stale(t - 3 * 86400)  # прямо перед третьим сбоем: дальше — только fail()
+        e.run("watch", t=t + 400)
+        st = json.load(open(e.st("autostart.json")))["hermes-x"]
+        if i < 2:
+            t = st["next"] + 10
+    check(st.get("gave_up") and open(e.notify).read().count("Самозапуск hermes-x встал") == before + 1,
+          f"снова встал через 3 дня при неснятой отметке — нет второй macOS: {st}")
 
 
 def test_autostart_healthy_resets_and_limits():

@@ -734,6 +734,9 @@ def fail(d, s, t, why):
         s["gave_up"] = True
         P.alert(f"самозапуск {d} остановлен после {s['fails']} сбоев подряд (последний: {why}) — разобраться и вернуть: "
                 f"pantheon resume {d} или pantheon wake {d}", "watch")
+        # новый эпизод «встал»: прежняя отметка once могла не сняться (после resume сессия жива — сброса в
+        # autostart() нет), иначе повторное «встал» в течение 7 дней пропало бы без macOS и без сводки (ревью argus)
+        P.clear_fault(f"autostart-gaveup-{d}")
         P.notify_soon(f"autostart-gaveup-{d}", gave_up_note(d, s), group=f"autostart-{d}", once=True)
     else:
         P.alert(f"самозапуск {d}: сбой {s['fails']} из {AUTOSTART_FAILS_MAX} ({why}); следующая попытка не раньше "
