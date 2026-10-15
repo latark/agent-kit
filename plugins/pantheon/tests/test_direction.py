@@ -51,6 +51,17 @@ def main():
                                       capture_output=True, text=True)
 
     r = run("iris-demo")
+    check("слов нет в owner-log — «НЕТ»: строку decisions.md пишет Зевс, сама она не доказательство",
+          r.returncode == 1 and "НЕТ     эти слова есть в журнале" in r.stdout)
+    import time
+    stamp = lambda days: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - days * 86400))
+    olog = os.path.join(state, "owner-log", "zeus.md")
+    write(olog, f"## {stamp(20)}\nда\n\n")
+    check("ваше «да» старше 14 дней не засчитывается", run("iris-demo").returncode == 1)
+    write(os.path.join(state, "owner-log", "unconfirmed", "zeus.md"), f"## {stamp(0)}\nда\n\n")
+    check("неподтверждённая строка (unconfirmed/) не засчитывается", run("iris-demo").returncode == 1)
+    write(olog, f"## {stamp(20)}\nда\n\n## {stamp(0)}\nДа.\n\n")
+    r = run("iris-demo")
     check("всё готово — код 0, ни одного «НЕТ»", r.returncode == 0 and "НЕТ" not in r.stdout)
 
     write(decisions, "| 15.10.2026 | Новое направление `iris-demo` — совет Зевса | — |\n")

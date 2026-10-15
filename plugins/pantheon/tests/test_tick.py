@@ -320,12 +320,17 @@ def main():
            "PANTHEON_NOTIFY_LOG": log}
     subprocess.run([sys.executable, "-I", LIB, "alert", "обычная", "--from", "athena"], env=env, capture_output=True)
     rc = subprocess.run([sys.executable, "-I", LIB, "alert", "ключ в логе", "--critical", "--from", "zeus"],
-                        env=env, capture_output=True).returncode
+                        env={**env, "PANTHEON_ROLE": "hq"}, capture_output=True).returncode
     al = open(os.path.join(home, "alerts.md")).read()
     sent = open(log).read() if os.path.exists(log) else ""
     check("alert --critical: «КРИТИЧНО» в alerts.md и одно уведомление от того, кто нашёл",
           rc == 0 and "zeus · КРИТИЧНО: ключ в логе" in al and "athena · обычная" in al
           and sent.count("\n") == 1 and "критично · zeus|ключ в логе" in sent)
+    subprocess.run([sys.executable, "-I", LIB, "alert", "прод упал", "--critical", "--from", "zeus"],
+                   env={**env, "PANTHEON_ROLE": "workshop"}, capture_output=True)
+    sent = open(log).read()
+    check("alert --critical от чужого имени: в заголовке роль окна, а не --from",
+          "критично · workshop, называет себя zeus|прод упал" in sent)
 
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)

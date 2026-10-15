@@ -1673,6 +1673,31 @@ APPROVALS_HEAD = """# Заранее разрешённые действия м�
 """
 
 
+def owner_said(quote, days=14):
+    """Есть ли quote в журналах owner-log (кроме unconfirmed/): реплика целиком или её кусок от 12 знаков."""
+    q = " ".join(quote.split()).casefold()
+    if not q:
+        return False
+    since = now() - days * 86400
+    logs = path("owner-log")
+    for f in os.listdir(logs) if os.path.isdir(logs) else []:
+        if not f.endswith(".md"):
+            continue
+        try:
+            text = open(os.path.join(logs, f), encoding="utf-8").read()
+        except OSError:
+            continue
+        for m in re.finditer(r"^## (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\n(.*?)(?=^## \d{4}-|\Z)", text, re.M | re.S):
+            try:
+                ts = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+            except ValueError:
+                continue
+            said = " ".join(m.group(2).split()).casefold()
+            if ts >= since and (said.strip(" .!-—") == q.strip(" .!-—") or (len(q) >= 12 and q in said)):
+                return True
+    return False
+
+
 DIRECTION_NAME = re.compile(r"[a-z]+-[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
@@ -1690,6 +1715,11 @@ def direction_check(name):
     said = [l for l in dec.splitlines() if l.startswith("|") and re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", l)
             and "Ваши слова" in l]
     add(said, "ваше «да» в decisions.md: строка с именем направления и «Ваши слова»")
+    # decisions.md пишет Зевс — сама строка не доказательство. Цитата из неё должна быть в журнале ваших слов
+    # owner-log (его пишет хук по пометке транскрипта, роли туда не пишут — COMM-10): совпадать с вашей репликой
+    # целиком или быть её куском от 12 знаков, реплика — не старше 14 дней.
+    add(any(owner_said(q) for l in said for q in re.findall(r"«([^«»]{2,300})»", l.split("Ваши слова", 1)[1])),
+        "эти слова есть в журнале ваших слов owner-log (не старше 14 дней)")
     try:
         with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
             reg = {d.get("name"): d for d in tomllib.load(fh).get("direction") or []}
@@ -2127,8 +2157,12 @@ def main(argv):
             return 2
         alert(("КРИТИЧНО: " if critical else "") + " ".join(rest), who)
         if critical:  # COMM-08: безопасность, деньги, данные клиентов, юридическое, прод, контракт — сразу владельцу
-            notify(" ".join(rest)[:200], title=f"Пантеон · критично · {' '.join(who.split())[:40]}",
-                   group="critical-" + who)
+            # --from называет сам отправитель; в заголовке — роль окна (PANTHEON_ROLE ставит окно роли), иначе
+            # любая роль прислала бы «критично · zeus»
+            win = os.environ.get("PANTHEON_ROLE") or "вне окна роли"
+            sender = " ".join(who.split())[:40]
+            label = sender if sender == win or (win == "hq" and sender == "zeus") else f"{win}, называет себя {sender}"
+            notify(" ".join(rest)[:200], title=f"Пантеон · критично · {label}", group="critical-" + win)
         return 0
     if cmd == "archive":
         return archive()
