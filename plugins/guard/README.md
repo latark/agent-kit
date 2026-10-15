@@ -126,8 +126,13 @@ answer и тик, это скрипты, guard их не видит. Сесси�
 - `pantheon review talos <owner/repo> <PR> <SHA>` — только если роль — talos.
 - `pantheon review status [<owner/repo> <PR>]` — показать записи.
 
+Фоновая команда записи не даёт: для неё PostToolUse приходит при запуске, а не по итогу, а PostToolUseFailure не
+приходит вовсе. Поэтому хук не пишет, если во входе `run_in_background`, в ответе `backgroundTaskId` или ответ — не
+словарь.
+
 Не той роли или с плохими аргументами `pantheon review accept|reject|talos` получает отказ сразу на PreToolUse:
-иначе команда прошла бы, а записи не появилось. argus ещё запрещены `git commit`, `merge`, `rebase`, `cherry-pick`,
+иначе команда прошла бы, а записи не появилось. Так же сразу отказ для `pantheon review test|accept|reject|talos` в
+фоне и не простой командой. argus ещё запрещены `git commit`, `merge`, `rebase`, `cherry-pick`,
 `am`, `revert`, `pull`, `commit-tree`: рецензент не меняет то, что проверяет.
 
 **Почему журнал не подделать ошибкой агента.** Папку `~/.local/state/pantheon/` роли не пишут (pantheon-acl), а

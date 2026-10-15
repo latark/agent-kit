@@ -34,6 +34,11 @@ def git(path, *args):
                           check=True, capture_output=True, text=True).stdout.strip()
 
 
+NORMAL = {"stdout": "", "stderr": "", "interrupted": False, "isImage": False}  # ответ обычной команды
+BG = dict(NORMAL, backgroundTaskId="bxyz")  # ответ фоновой: PostToolUse приходит при запуске (ревью argus PR #18)
+MISSING = object()
+
+
 class Home:
     def __init__(self, root):
         self.root = root
@@ -123,15 +128,30 @@ class Home:
             return "allow", ""
         return "deny", json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
 
-    def post(self, cmd, role, cwd="projects/tg-read", agent_id="x1", session="s-coord", name="PostToolUse", mode=()):
-        event = {"hook_event_name": name, "tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": self.j(cwd),
+    def pre_input(self, tool_input, role, agent_id=None, pdir="projects/tg-read"):
+        """PreToolUse с полным tool_input (run_in_background и т. п.) → (решение, причина)."""
+        event = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": tool_input, "cwd": self.j(pdir),
+                 "session_id": "s-coord", "tool_use_id": "toolu_" + uuid.uuid4().hex, "agent_type": role}
+        if agent_id:
+            event["agent_id"] = agent_id
+        out = self.hook(event, pdir).stdout
+        if '"deny"' not in out:
+            return "allow", ""
+        return "deny", json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+
+    def post(self, cmd, role, cwd="projects/tg-read", agent_id="x1", session="s-coord", name="PostToolUse", mode=(),
+             background=False, response=NORMAL):
+        tool_input = {"command": cmd}
+        if background:
+            tool_input["run_in_background"] = True
+        event = {"hook_event_name": name, "tool_name": "Bash", "tool_input": tool_input, "cwd": self.j(cwd),
                  "session_id": session, "tool_use_id": "toolu_" + uuid.uuid4().hex, "agent_type": role}
         if agent_id:
             event["agent_id"] = agent_id
         if name == "PostToolUseFailure":
             event["error"] = "Exit code 1"
-        else:
-            event["tool_response"] = {"stdout": "", "stderr": "", "interrupted": False}
+        if response is not MISSING and (name != "PostToolUseFailure" or response is not NORMAL):
+            event["tool_response"] = dict(response) if isinstance(response, dict) else response
         return self.hook(event, cwd, mode)
 
 
@@ -323,8 +343,9 @@ def t_not_simple(h):
 
 def t_failure(h):
     sha = h.sha["tg-read"]
-    h.post("pantheon review test -- true", "dev-opus", name="PostToolUseFailure")
-    h.post(f"pantheon review accept latark/tg-read 3 {sha}", "argus", name="PostToolUseFailure")
+    # с ответом словарём, как у успешной: отсекает имя события, а не отсутствие tool_response
+    h.post("pantheon review test -- true", "dev-opus", name="PostToolUseFailure", response=dict(NORMAL))
+    h.post(f"pantheon review accept latark/tg-read 3 {sha}", "argus", name="PostToolUseFailure", response=dict(NORMAL))
     check("PostToolUseFailure — записи нет", h.read() == [], h.read())
     for mode in (["--strict"], ["--managed"]):
         h.post(f"pantheon review accept latark/tg-read 3 {sha}", "argus", mode=mode)
@@ -360,7 +381,7 @@ def t_managed(h):
                   fh)
     event = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "agent_type": "argus", "agent_id": "a1",
              "session_id": "s-coord", "tool_use_id": "t1", "cwd": h.j("projects/tg-read"),
-             "tool_input": {"command": f"pantheon review accept latark/tg-read 3 {sha}"}}
+             "tool_input": {"command": f"pantheon review accept latark/tg-read 3 {sha}"}, "tool_response": NORMAL}
     r = subprocess.run([sys.executable, "-I", "-c", MANAGED_PROBE, GUARD, mf, json.dumps(event)], capture_output=True,
                        text=True, env=h.env("projects/tg-read"), timeout=20)
     check("при активных управляемых настройках PostToolUse пишет",
@@ -384,9 +405,72 @@ def t_broken_journal(h):
     os.remove(os.path.dirname(h.records))
 
 
+def t_bg_flag(h):
+    """Фон по run_in_background: PostToolUse пришёл при запуске, итога тестов ещё нет — ни одной записи."""
+    sha = h.sha["tg-read"]
+    h.post("pantheon review test -- true", "dev-opus", background=True, response=BG)
+    h.post(f"pantheon review accept latark/tg-read 3 {sha}", "argus", background=True, response=BG)
+    h.post(f"pantheon review talos latark/tg-read 3 {sha}", "talos", background=True, response=NORMAL)
+    check("run_in_background — записи нет (tests, accept, talos)", h.read() == [], h.read())
+
+
+def t_bg_task_id(h):
+    """Уведённая в фон (Ctrl+B): флага во входе нет, но в ответе backgroundTaskId — записи нет."""
+    sha = h.sha["tg-read"]
+    h.post("pantheon review test -- true", "dev-opus", response=BG)
+    h.post(f"pantheon review reject latark/tg-read 3 {sha}", "argus", response=BG)
+    check("backgroundTaskId в tool_response — записи нет", h.read() == [], h.read())
+
+
+def t_bad_response(h):
+    sha = h.sha["tg-read"]
+    for resp in ("ok", None, ["x"], MISSING):
+        h.post("pantheon review test -- true", "dev-opus", response=resp)
+        h.post(f"pantheon review accept latark/tg-read 3 {sha}", "argus", response=resp)
+    check("tool_response не словарь или его нет — записи нет", h.read() == [], h.read())
+
+
+def t_fg_records(h):
+    sha = h.sha["tg-read"]
+    h.post("pantheon review test -- true", "dev-opus", response=NORMAL)
+    h.post(f"pantheon review accept latark/tg-read 3 {sha}", "argus", response=NORMAL)
+    check("обычный запуск (не фон, ответ словарём) — записи tests и accept есть",
+          [r["kind"] for r in h.read()] == ["tests", "accept"], h.read())
+
+
+def t_pre_background(h):
+    sha = h.sha["tg-read"]
+    ev = {"command": "pantheon review test -- true", "run_in_background": True}
+    d, why = h.pre_input(ev, role="dev-opus", agent_id="d1")
+    check("PreToolUse: review test в фоне — отказ, текст «без фона»", d == "deny" and "без фона" in why, why)
+    d, why = h.pre_input({"command": f"pantheon review accept latark/tg-read 3 {sha}", "run_in_background": True},
+                         role="argus", agent_id="a1")
+    check("PreToolUse: review accept в фоне — отказ", d == "deny" and "без фона" in why, why)
+    d, why = h.pre_input({"command": "pantheon review test -- true", "run_in_background": False}, role="dev-opus",
+                         agent_id="d1")
+    check("PreToolUse: review test без фона — можно", d == "allow", why)
+    d, why = h.pre_input({"command": "pantheon review status", "run_in_background": True}, role="dev-opus",
+                         agent_id="d1")
+    check("PreToolUse: review status в фоне — можно (записи не делает)", d == "allow", why)
+
+
+def t_pre_not_simple(h):
+    sha = h.sha["tg-read"]
+    for cmd in ("pantheon review test -- pytest 2>&1 | tail -5", "pantheon review test -- true; true",
+                "cd x && pantheon review test -- true", "pantheon review test -- true > out.txt",
+                "pantheon review test -- echo $(id)", "pantheon review test -- echo `id`"):
+        d, why = h.pre(cmd, role="dev-opus", agent_id="d1")
+        check(f"PreToolUse: непростая `{cmd}` — отказ, код не от тестов", d == "deny" and "код выхода" in why, why)
+    d, why = h.pre(f"pantheon review accept latark/tg-read 3 {sha} | cat", role="argus", agent_id="a1")
+    check("PreToolUse: accept с | — отказ", d == "deny" and "код выхода" in why, why)
+    d, why = h.pre("pantheon review status | head", role="dev-opus", agent_id="d1")
+    check("PreToolUse: status с | — можно (записи не делает)", d == "allow", why)
+
+
 CASES = [t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
-         t_managed, t_broken_journal]
+         t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bad_response, t_fg_records, t_pre_background,
+         t_pre_not_simple]
 
 
 def main():

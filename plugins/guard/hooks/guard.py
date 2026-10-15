@@ -2637,7 +2637,7 @@ def check_push(event, tool, tool_input):
                 return f"Правило push: gh pr merge — {why}"
             continue
         if name and os.path.basename(name.rstrip("/")) == "pantheon":
-            why = review_problem(role, texts)
+            why = review_problem(role, texts, tool_input.get("command") or "", bool(tool_input.get("run_in_background")))
             if why:
                 return f"Правило push (запор слияния): {why}"
             continue

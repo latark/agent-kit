@@ -330,7 +330,13 @@ def record(event):
     """PostToolUse (только успешная команда): запись в журнал проверок или ничего."""
     if event.get("tool_name") != "Bash":
         return None
-    cmd = (event.get("tool_input") or {}).get("command") or ""
+    tool_input, resp = event.get("tool_input") or {}, event.get("tool_response")
+    # фоновая команда: Claude Code шлёт PostToolUse при запуске, а не по итогу, и PostToolUseFailure не будет
+    # (ревью argus PR #18) — по ней ничего не пишем; уведённую в фон (Ctrl+B) выдаёт backgroundTaskId в ответе
+    if not isinstance(tool_input, dict) or tool_input.get("run_in_background") \
+            or not isinstance(resp, dict) or "backgroundTaskId" in resp:
+        return None
+    cmd = tool_input.get("command") or ""
     words = simple_review(cmd)
     if not words:
         return None
@@ -364,12 +370,22 @@ def record(event):
     return rec_kind
 
 
-def review_problem(role, args):
-    """PreToolUse: `pantheon review accept|reject|talos …` не той ролью или с плохими аргументами — сразу отказ,
-    чем команда пройдёт, а запись не появится. args — слова после pantheon."""
-    if len(args) < 2 or args[0] != "review" or args[1] not in REVIEW_KINDS:
+def review_problem(role, args, cmd="", background=False):
+    """PreToolUse: `pantheon review test|accept|reject|talos …`, после которой записи не будет, — сразу отказ, чем
+    команда пройдёт, а запись не появится: в фоне, не простой командой, не той ролью, с плохими аргументами.
+    args — слова после pantheon, cmd — вся команда Bash, background — run_in_background."""
+    if len(args) < 2 or args[0] != "review" or (args[1] != "test" and args[1] not in REVIEW_KINDS):
         return None
-    kind, need = args[1], REVIEW_KINDS[args[1]]
+    kind = args[1]
+    if background:
+        return (f"`pantheon review {kind}` в фоне (run_in_background) записи не даст: фоновую команду хук видит при "
+                "запуске, а не по итогу. Запусти без фона — запись делается по итогу команды.")
+    if NOT_SIMPLE.search(cmd or ""):
+        return (f"`pantheon review {kind}` — только отдельной простой командой, без `;`, `|`, `&`, `<`, `>`, `$(`, "
+                "обратных кавычек и переводов строки: иначе код выхода был бы не от тестов, и запись не сделается.")
+    if kind == "test":
+        return None
+    need = REVIEW_KINDS[kind]
     if role != need:
         return (f"`pantheon review {kind}` записывает только {need}: хук guard пишет вердикт по роли, у роли "
                 f"«{role or 'субагент'}» записи не будет. Позови {need} — он проверит и запишет сам.")
