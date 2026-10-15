@@ -1219,6 +1219,9 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                 # задачи: его направление может поправить между вашей галочкой и тиком
                 _owner_log(log_path, t, kind="answer", id=cid, answer=answer, question=seen_question(body))
                 done_lines.append(f"{cid}: ответ владельца «{answer}»")
+                # Зевсу — тревогой (её видит хук штаба): исполнитель ждёт его сигнала «pantheon consent» (metis-0022)
+                alert(f"answer-{cid}", answer, f"ответ владельца на доске: {cid} — «{answer[:120]}». Если исполнитель "
+                      f"ждёт — сообщи ему: pantheon consent {cid}", "board")
             moved_by_owner.add(cid)
         elif answer == "?":
             st["conflict_at"] = t

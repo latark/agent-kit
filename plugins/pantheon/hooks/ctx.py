@@ -8,6 +8,12 @@
                      фоновых субагентов, и запуски по расписанию (`/loop`, CronCreate — их текст приходит чистым,
                      без обёртки, его пишет модель), и пробуждение хуком после /clear. Стартовое поручение сессии,
                      которую запустили Зевс или тик (переменная PANTHEON_ORIGIN и пометка «[Пантеон: …]» в начале), — тоже не ваше слово.
+                     Ввод во время хода агента Claude Code пишет вложением queued_command (origin.kind = human,
+                     metis-0028): сверка — точный текст, время ±3 мин, каждое вложение засчитывается один раз;
+                     поле события source не «user» (расписание, /loop, пробуждение) — не пишется вовсе.
+  ctx.py answer      PostToolUse AskUserQuestion: ваш выбор в окне вопросов → журнал с пометкой «окно вопросов»
+                     (metis-0022; по ней согласие выдаёт `pantheon consent <id>`). Закрытое по простою
+                     (afkTimeoutMs) и частичное (followUp) — не пишется; свой текст в окне — строка без статуса ответа.
   ctx.py stop        Stop: контекст 150 тыс., дальше каждые +100 тыс. → Claude сверяет файл состояния, дописывает
                      недостающее и одной строкой говорит «Пора очистить: …» (штаб и сессии без роли; не claude -p).
   ctx.py start       SessionStart: запоминает сессию процесса (CLAUDE_PID не меняется при /clear); после сжатия
@@ -45,6 +51,8 @@ STEP = int(os.environ.get("PANTHEON_CTX_STEP") or 100000)
 KEEP_DAYS = 30            # журналы ваших слов
 CONFIRM_WAIT = 30         # сколько owner-log ждёт запись ввода в транскрипте, с
 ENTRY_MAX_AGE = 180       # запись ввода в транскрипте не старше, с (иначе это чужой, прошлый ввод)
+IMAGE_MARK = re.compile(r"\[Image #\d+\]")
+QUEUED_WAIT = 540         # ввод во время хода агента: Claude Code пишет его в транскрипт, когда ход его заберёт, с
 LOG_MAX = 1000000         # журнал сбоев хуков, байт
 INJECT_MAX = 9800         # Claude Code режет текст хука на 10 000 знаков
 ROLES_WITH_LOG = ("hq", "domain-coordinator", "workshop")
@@ -215,6 +223,62 @@ def prompt_entry(path, prompt_id):
                 and ("origin" in d or "promptSource" in d):
             return d
     return None
+
+
+def queued_key(d):
+    a = d.get("attachment") or {}
+    return str(a.get("source_uuid") or a.get("delivery_id") or d.get("uuid") or "")
+
+
+def queued_used(sid):
+    return set(load_json(os.path.join(CTX, "queued-used.json")).get(sid) or [])
+
+
+def queued_mark(sid, key):
+    """Вложение очереди засчитывается один раз: второй ввод с тем же текстом его не заберёт. → False, если его уже
+    засчитал другой хук (два одновременных ввода с одним текстом)."""
+    p = os.path.join(CTX, "queued-used.json")
+    with locked(p):
+        data = load_json(p)
+        keys = (data.get(sid) or [])[-200:]
+        if key in keys:
+            return False
+        keys.append(key)
+        data[sid] = keys
+        if len(data) > 50:
+            for k in sorted(data)[:len(data) - 50]:
+                data.pop(k, None)
+        save_json(p, data)
+    return True
+
+
+def queued_entry(path, prompt, t, used=()):
+    """Ваш ввод во время хода агента (metis-0028): Claude Code пишет его не записью user с promptId, а вложением
+    queued_command с origin.kind = human, когда ход его заберёт (проверено 15.10 на транскриптах Зевса). Сообщения
+    других сессий там же — kind = peer, уведомления — task-notification. promptId у вложения нет: сверка по тексту и
+    времени постановки в очередь. → (запись, время) или None."""
+    for d in reversed(list(entries(x for x in tail_lines(path, 4000000) if b"queued_command" in x))):
+        a = d.get("attachment") or {}
+        if d.get("type") != "attachment" or d.get("isSidechain") or a.get("type") != "queued_command":
+            continue
+        if (a.get("origin") or {}).get("kind") != "human" or a.get("commandMode") != "prompt":
+            continue
+        if not same_text({"message": {"content": a.get("prompt")}}, prompt):
+            continue
+        te = iso_ts(a.get("timestamp") or d.get("timestamp"))
+        if te is not None and abs(t - te) <= ENTRY_MAX_AGE and queued_key(d) and queued_key(d) not in used:
+            return d, te
+    return None
+
+
+def queued_pending(path, prompt, t):
+    """Ввод стоит в очереди хода (queue-operation enqueue с тем же текстом): ждать вложение дольше обычного."""
+    for d in reversed(list(entries(x for x in tail_lines(path, 4000000) if b'"enqueue"' in x))):
+        if d.get("type") == "queue-operation" and d.get("operation") == "enqueue" \
+                and same_text({"message": {"content": d.get("content")}}, prompt):
+            te = iso_ts(d.get("timestamp"))
+            return te is not None and abs(t - te) <= ENTRY_MAX_AGE
+    return False
 
 
 def _text(content):
@@ -521,11 +585,12 @@ def prune_owner_logs(now=None):
 
 
 def same_text(entry, prompt):
-    """Запись транскрипта — это тот же ввод: текст совпадает (без пробелов и переводов строк по краям и внутри)."""
-    norm = lambda x: re.sub(r"\s+", " ", clean_text(x)).strip()
+    """Запись транскрипта — это тот же ввод: текст совпадает целиком (пробелы и переводы строк не в счёт, метки
+    вставленных картинок «[Image #N]» — тоже). Только точное равенство: по префиксу машинный промпт с тем же началом,
+    что и ваш ввод («да» → «да, удаляй…»), прошёл бы за ваш (ревью argus 15.10)."""
+    norm = lambda x: re.sub(r"\s+", " ", IMAGE_MARK.sub(" ", clean_text(x))).strip()
     got = norm(_text((entry.get("message") or {}).get("content")))
-    want = norm(prompt)
-    return bool(got) and (got == want or want.startswith(got) or got.startswith(want))
+    return bool(got) and got == norm(prompt)
 
 
 def cmd_owner_log(ev):
@@ -540,14 +605,40 @@ def cmd_owner_log(ev):
     prompt = ev.get("prompt") or ""
     if not name or not prompt.strip() or prompt.lstrip().startswith(NOT_OWNER):
         return 0
+    src = ev.get("source")
+    if src is not None and src != "user":
+        return 0  # расписание, /loop, пробуждение, SDK: текст пишет не владелец (поле Claude Code 2.1.29x)
+    if src is None:
+        hook_log("owner-log", "в событии нет поля source — сверка только по транскрипту")
     t = time.time()
-    entry, deadline = None, t + float(os.environ.get("PANTHEON_CONFIRM_WAIT") or CONFIRM_WAIT)
+    tpath = ev.get("transcript_path") or ""
+    sid = ev.get("session_id") or ""
+    used = queued_used(sid)
+    entry, queued, extended = None, None, False
+    deadline = t + float(os.environ.get("PANTHEON_CONFIRM_WAIT") or CONFIRM_WAIT)
     while True:  # Claude Code пишет транскрипт сам и с задержкой: ждём запись этого ввода
-        entry = prompt_entry(ev.get("transcript_path") or "", ev.get("prompt_id"))
-        if entry is not None or time.time() >= deadline:
+        entry = prompt_entry(tpath, ev.get("prompt_id"))
+        if entry is not None and same_text(entry, prompt):
+            if not is_owner_entry(entry):
+                return 0  # у этого ввода своя запись, и она не ваша — в очередь не смотрим
             break
+        queued = queued_entry(tpath, prompt, t, used)
+        if queued is not None:
+            break
+        if time.time() >= deadline:
+            if extended or not queued_pending(tpath, prompt, t):
+                break
+            extended = True  # ввод в очереди хода: вложение появится, когда ход его заберёт
+            deadline = t + float(os.environ.get("PANTHEON_QUEUED_WAIT") or QUEUED_WAIT)
         time.sleep(0.3)
     note = ""
+    if queued is not None:
+        if not queued_mark(sid, queued_key(queued[0])):
+            append_owner_line(name, t, prompt, "вложение очереди уже засчитано", folder=UNCONFIRMED)
+            return 0
+        append_owner_line(name, queued[1], prompt, note)
+        prune_owner_logs()
+        return 0
     if entry is None:
         # Подлинник — только подтверждённое: без пометки транскрипта строка уходит в unconfirmed/, Зевс её не сводит
         append_owner_line(name, t, prompt, "записи ввода в транскрипте нет", folder=UNCONFIRMED)
@@ -817,12 +908,62 @@ def cmd_dir_added(ev):
     return 0
 
 
+# --- ответ в окне вопросов (metis-0022) -------------------------------------------
+
+ANSWER_NOTE = "окно вопросов"          # пометка заголовка: по ней (и только по ней) pantheon consent узнаёт ответ
+ANSWER_FREE_NOTE = "окно вопросов, свой текст"   # свободный текст в окне — не согласие, только слова
+
+
+def cmd_answer(ev):
+    """PostToolUse AskUserQuestion: ваш выбор в окне вопросов — в журнал ваших слов. Вопрос и варианты пишет модель,
+    а ответ приходит от Claude Code (в событии хука, его роли не подделать). Строка с пометкой «окно вопросов»:
+    «вопрос» → «ответ» — по ней исполнитель сверяет согласие командой `pantheon consent <id>`, если вопрос
+    начинался с [<id>]. Условие безопасности: ни один хук PreToolUse или PermissionRequest не возвращает для
+    AskUserQuestion allow с updatedInput — иначе ответы в событие могла бы подставить сама модель (ревью argus 15.10)."""
+    role = session_role(ev)
+    if ev.get("agent_id") or role not in ROLES_WITH_LOG or automation() or ev.get("tool_name") != "AskUserQuestion":
+        return 0
+    name = log_name(role, ev)
+    resp = ev.get("tool_response")
+    if isinstance(resp, str):
+        try:
+            resp = json.loads(resp)
+        except ValueError:
+            resp = None
+    if not name or not isinstance(resp, dict):
+        return 0
+    if resp.get("afkTimeoutMs") or resp.get("followUp"):
+        # окно закрылось по простою («выбранное до ухода») или ответ частичный — это не ваш ответ
+        hook_log("answer", "пропуск: %s" % ("закрыто по простою" if resp.get("afkTimeoutMs") else "частичный ответ"))
+        return 0
+    answers = resp.get("answers") or {}
+    notes = resp.get("annotations") or {}
+    t = time.time()
+    if isinstance(resp.get("response"), str) and resp["response"].strip():
+        append_owner_line(name, t, resp["response"].strip(), ANSWER_FREE_NOTE)
+    if not isinstance(answers, dict):
+        return 0
+    for q, a in answers.items():
+        if not isinstance(q, str) or not isinstance(a, str) or not a.strip():
+            continue
+        # вопрос пишет модель: «→», кавычки-ёлочки и переводы строк из него убираем, ответ — отдельной строкой,
+        # иначе вопрос «…? » → «Да» изобразил бы ответ (ревью argus 15.10, проба B)
+        qq = re.sub(r"\s+", " ", re.sub(r"[→«»]", " ", q)).strip()
+        line = "вопрос: %s\nответ: %s" % (qq, re.sub(r"\s+", " ", a).strip())
+        extra = notes.get(q) if isinstance(notes, dict) else None
+        if isinstance(extra, dict) and isinstance(extra.get("notes"), str) and extra["notes"].strip():
+            line += "\nзаметка: " + extra["notes"].strip()
+        append_owner_line(name, t, line, ANSWER_NOTE)
+    prune_owner_logs()
+    return 0
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
-    fn = {"owner-log": cmd_owner_log, "stop": cmd_stop, "start": cmd_start, "rewake": cmd_rewake,
-          "dir-added": cmd_dir_added}.get(cmd)
+    fn = {"owner-log": cmd_owner_log, "answer": cmd_answer, "stop": cmd_stop, "start": cmd_start,
+          "rewake": cmd_rewake, "dir-added": cmd_dir_added}.get(cmd)
     if not fn:
-        print("ctx.py: owner-log | stop | start | rewake | dir-added", file=sys.stderr)
+        print("ctx.py: owner-log | answer | stop | start | rewake | dir-added", file=sys.stderr)
         return 0
     try:
         return fn(read_event())

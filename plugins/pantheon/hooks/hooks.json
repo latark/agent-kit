@@ -4,42 +4,86 @@
       {
         "matcher": "Write|Edit|MultiEdit",
         "hooks": [
-          { "type": "command", "if": "Write(~/ai/pantheon/**)", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" view --quiet", "async": true, "timeout": 60 },
-          { "type": "command", "if": "Edit(~/ai/pantheon/**)", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" view --quiet", "async": true, "timeout": 60 }
+          {
+            "type": "command",
+            "if": "Write(~/ai/pantheon/**)",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" view --quiet",
+            "async": true,
+            "timeout": 60
+          },
+          {
+            "type": "command",
+            "if": "Edit(~/ai/pantheon/**)",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" view --quiet",
+            "async": true,
+            "timeout": 60
+          }
+        ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" answer",
+            "timeout": 15
+          }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" owner-log", "async": true }
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" owner-log",
+            "async": true,
+            "timeout": 600
+          }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" stop", "timeout": 15 }
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" stop",
+            "timeout": 15
+          }
         ]
       }
     ],
     "DirectoryAdded": [
       {
         "hooks": [
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" dir-added", "timeout": 10 }
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" dir-added",
+            "timeout": 10
+          }
         ]
       }
     ],
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" start", "timeout": 15 }
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" start",
+            "timeout": 15
+          }
         ]
       },
       {
         "matcher": "clear",
         "hooks": [
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" rewake", "asyncRewake": true, "timeout": 60 }
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" rewake",
+            "asyncRewake": true,
+            "timeout": 60
+          }
         ]
       }
     ]

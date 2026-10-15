@@ -38,6 +38,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
   pantheon roles build                  роли ~/.claude/agents/*.md из шаблонов *.tmpl и частей _parts/*.part
   pantheon approve [list] | add --site S --allow "…" [--limits "…"] | remove N   заранее разрешённое (только вы)
+  pantheon consent <id> [--days N]      ваш ответ Зевсу на вопрос <id> (журнал owner-log Зевса, по умолчанию 7 дней) —
+                                        для исполнителя: согласие, данное в окне Зевса
   pantheon commit                       commit → pull без rebase → push ~/ai/pantheon
   pantheon install | uninstall          поставить или снять задачу launchd com.latark.pantheon-tick
   pantheon tick                         один проход планировщика (его вызывает launchd)
@@ -1047,7 +1049,7 @@ SANDBOX_DOMAINS = ["registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "fi
                    "raw.githubusercontent.com"]
 # Мимо песочницы: gh (в ней не работает — TLS Go на macOS) — только эти подкоманды; дописать тревогу
 SANDBOX_EXCLUDED = ["gh pr *", "gh issue *", "gh run *", "gh repo view *", "gh api *", "gh auth status",
-                    "pantheon alert *"]
+                    "pantheon alert *", "pantheon consent *"]
 # git по SSH в песочнице macOS не работает: у направлений с таким remote сетевые команды git — мимо неё
 GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
 COORDINATOR_COMPACT = 200000
@@ -1948,6 +1950,82 @@ def direction(rest):
     return 0 if all(ok for ok, _ in res) else 1
 
 
+# --- согласие через Зевса (metis-0022, решение 15.10) ---------------------------------
+# Вопрос владельцу задаёт Зевс (окном вопросов или карточкой «Нужен ответ» на доске). Ответ пишут не роли: хук — в
+# owner-log/zeus.md (ввод владельца, выбор в окне вопросов), тик — в owner-log/board.jsonl (галочка на карточке; текст
+# вопроса тик берёт из отмеченной карточки). Журналы личные — роли их не читают; эта команда отдаёт исполнителю только
+# записи с номером его вопроса.
+CONSENT_ID = re.compile(r"[a-z][a-z0-9]*-\d{4}")
+CONSENT_MAX = 1500
+
+
+def consent(rest):
+    if not rest or not CONSENT_ID.fullmatch(rest[0]):
+        print("pantheon consent <id> [--days N] — id задачи вида metis-0032", file=sys.stderr)
+        return 2
+    qid, days = rest[0], 7.0
+    if "--days" in rest:
+        try:
+            days = min(30.0, max(0.1, float(rest[rest.index("--days") + 1])))
+        except (IndexError, ValueError):
+            print("pantheon consent: --days — число дней", file=sys.stderr)
+            return 2
+    try:
+        with open(path("owner-log", "zeus.md"), encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        text = ""
+    word = re.compile(r"(?<![\w-])" + re.escape(qid) + r"(?![\w-])", re.I)
+    # ответ — только выбор в окне вопросов (пометку «окно вопросов» ставит хук answer, ввод владельца её не получает)
+    # на вопрос, который начинается с [<id>]; id в свободном тексте, цитате или заметке к чужому вопросу — не ответ
+    own = re.compile(r"вопрос: \[" + re.escape(qid) + r"\]", re.I)
+    since, found, mentions = now() - days * 86400, [], 0
+    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
+    for i, m in enumerate(heads):
+        body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
+        try:
+            t = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+        except ValueError:
+            continue
+        if t < since:
+            continue
+        if m.group(2).strip() == "· окно вопросов" and own.match(body):
+            found.append((t, m.group(1) + " · окно вопросов у Зевса", body))
+        elif word.search(body):
+            mentions += 1
+    try:
+        board_lines = open(path("owner-log", "board.jsonl"), encoding="utf-8").read().splitlines()
+    except OSError:
+        board_lines = []
+    for line in board_lines:
+        try:
+            rec = json.loads(line)
+            t = time.mktime(time.strptime(rec.get("time", "")[:19], "%Y-%m-%dT%H:%M:%S"))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        q, a = rec.get("question"), rec.get("answer")
+        # скрытый текст Obsidian (%%…%%, <!-- -->) в вопросе — вы его не видели, такой ответ не согласие (как owner_approved)
+        if rec.get("kind") != "answer" or rec.get("id") != qid or t < since or not isinstance(q, str) \
+                or not isinstance(a, str) or re.search(r"%%|<", q):
+            continue
+        found.append((t, rec["time"][:19].replace("T", " ") + " · доска, галочка на карточке (деньги, публикации, "
+                      "сообщения людям, удаление — не по галочке, только окном вопросов)",
+                      f"вопрос: {q.strip()}\nответ: {a.strip()}"))
+    found.sort(key=lambda x: x[0])
+    found = [(head, body if len(body) <= CONSENT_MAX else body[:CONSENT_MAX] + "…") for _, head, body in found]
+    hint = (f"\nУпоминаний {qid} в словах владельца без окна вопросов: {mentions} — это не ответ; попроси Зевса "
+            f"переспросить окном вопросов «[{qid}] …»." if mentions else "")
+    if not found:
+        print(f"ответа владельца на {qid} в окне вопросов Зевса и на доске за {days:g} дн. нет{hint}")
+        return 1
+    print(f"Ответы владельца на {qid} (журналы пишут хук и тик, не роли; сверь, что ответ — на твой вопрос и твоё действие):")
+    for t, body in found:
+        print(f"\n## {t}\n{body}")
+    if hint:
+        print(hint)
+    return 0
+
+
 def approvals_load():
     try:
         with open(APPROVALS, "rb") as fh:
@@ -2359,6 +2437,8 @@ def main(argv):
         return instructions_check(quiet="--quiet" in rest)
     if cmd == "approve":
         return approve(rest)
+    if cmd == "consent":
+        return consent(rest)
     if cmd == "install":
         return install()
     if cmd == "uninstall":
