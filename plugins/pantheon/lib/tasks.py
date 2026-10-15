@@ -807,18 +807,24 @@ def owner_answers_all(log_path):
     return out
 
 
+def _question_key(text):
+    """Вопрос для сверки файла задачи с журналом: в журнал он попадает из карточки (переносы, «\\» перед «- [»,
+    обрезка до 2000), поэтому сравниваем без пробельной разницы, без ведущего «\\» и по первым 1500 знакам (ревью argus)."""
+    t = re.sub(r"\s+", " ", str(text or "")).strip().lstrip("\\").strip()
+    return t[:1500]
+
+
 def logged_for(head, recs):
     """Ваш действующий ответ на ТЕКУЩИЙ вопрос задачи: последняя запись журнала, у которой вариант есть среди
     нынешних options, а вопрос (если записан) совпадает с нынешним. Ответ на прежний вопрос той же задачи
     новым не засчитывается (проверка безопасности 15.10)."""
     opts = [_one(o) for o in head.get("options") or []]
-    q = (head.get("question") or "").strip()[:2000]
+    q = _question_key(head.get("question"))
     out = {}
     for rec in recs or []:
         if opts and rec["answer"] not in opts:
             continue
-        rq = (rec.get("question") or "").strip()
-        if rq and q and rq != q:
+        if q and _question_key(rec.get("question")) != q:  # запись без вопроса (до 0.9.26) — не на нынешний
             continue
         out[rec["kind"]] = rec["answer"]
     return out
