@@ -468,7 +468,7 @@ def cc_version(t):
                + " — Метиде: разобрать (pantheon infra-check)")
             + "; журнал изменений сверяет iris", "watch")
     if not ok:
-        P.notify(f"Claude Code {v}: проверка опор не прошла — pantheon infra-check", group="infra")
+        P.notify_soon("infra", f"Claude Code {v}: проверка опор не прошла — pantheon infra-check")
 
 
 def event(kind, t, **extra):
@@ -724,7 +724,7 @@ def fail(d, s, t, why):
         s["gave_up"] = True
         P.alert(f"самозапуск {d} остановлен после {s['fails']} сбоев подряд (последний: {why}) — разобраться и вернуть: "
                 f"pantheon resume {d} или pantheon wake {d}", "watch")
-        P.notify(f"Самозапуск {d} встал: {s['fails']} сбоя подряд", group=f"autostart-{d}")
+        P.notify_soon(f"autostart-{d}", f"Самозапуск {d} встал: {s['fails']} сбоя подряд")
     else:
         P.alert(f"самозапуск {d}: сбой {s['fails']} из {AUTOSTART_FAILS_MAX} ({why}); следующая попытка не раньше "
                 f"{P.stamp(s['next'])[11:16]}", "watch")
@@ -904,7 +904,8 @@ def owner_logs(t):
                 P.alert_once(f"owner-log-changed-{key}", _sha(raw)[:16], f"журнал ваших слов {key}: "
                              + ("укорочен" if len(raw) < prev["size"] else "изменена уже записанная часть")
                              + " — не дописывание и не уборка дежурного; проверить, кто правил", "watch",
-                             note="Журнал ваших слов изменён задним числом", group="owner-log")
+                             note="Журнал ваших слов изменён задним числом", group="owner-log",
+                             critical=True)  # подделка журнала согласия — COMM-08: сразу, и ночью
             if os.stat(f).st_mode & 0o077:
                 os.chmod(f, 0o600)
                 P.alert_once(f"owner-log-perm-{key}", "1", f"журнал ваших слов {key} был открыт другим — права сужены "
@@ -943,7 +944,8 @@ def owner_logs(t):
     for key in list(hashes):
         if key not in seen:
             P.alert_once(f"owner-log-gone-{key}", "1", f"журнал ваших слов {key} пропал — удалён не уборкой дежурного; "
-                         "проверить, кто удалил", "watch", note="Журнал ваших слов удалён", group="owner-log")
+                         "проверить, кто удалил", "watch", note="Журнал ваших слов удалён", group="owner-log",
+                         critical=True)
             hashes.pop(key)
     P.write_json(hashes_p, hashes)
     with contextlib.suppress(OSError):
@@ -1145,7 +1147,7 @@ def maint_expire(t):
         P.alert(f"метка технического перезапуска ({m.get('reason')}, с {str(m.get('id'))[11:16]}) истекла за "
                 f"{MAINT_HOURS} ч без pantheon restart --go — снята, самозапуск и wake снова работают; сохранившиеся "
                 "сессии стоят — поднять: pantheon wake <имя>", "watch")
-        P.notify("Техперезапуск не завершён: метка снята по сроку", group="restart")
+        P.notify_soon("restart", "Техперезапуск не завершён: метка снята по сроку")
 
 
 def restart(rest, who):

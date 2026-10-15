@@ -224,11 +224,12 @@ def alert(text, who="pantheon"):
             fh.write(f"{stamp()} · {who} · {text}\n")
 
 
-def alert_once(key, value, text, who="pantheon", note=None, group=None, policy=None):
+def alert_once(key, value, text, who="pantheon", note=None, group=None, policy=None, critical=False):
     """Тревога (и уведомление note — сбой класса «скоро», через политику уведомлений) один раз на значение value:
     повтор того же состояния молчит. group — вид уведомления: новое того же вида заменяет прежнее в Центре
     уведомлений и считается тем же сбоем для повтора (по умолчанию — ключ тревоги). policy — политика, уже взятая
-    под lock("notify") (проход доски), иначе берётся своя."""
+    под lock("notify") (проход доски), иначе берётся своя. critical — класс COMM-08 (подделка журнала ваших слов и
+    т. п.): уведомление сразу, и ночью, и когда вы у Mac — в счёт бюджета и в журнал."""
     mark = once_path(key)
     try:
         if open(mark).read() == str(value):
@@ -236,7 +237,9 @@ def alert_once(key, value, text, who="pantheon", note=None, group=None, policy=N
     except OSError:
         pass
     alert(text, who)
-    if note:
+    if note and critical:
+        notify_critical(note, group=group or key, policy=policy)
+    elif note:
         notify_soon(group or key, note, policy=policy)
     os.makedirs(path("once"), exist_ok=True)
     open(mark, "w").write(str(value))
@@ -2459,6 +2462,26 @@ def notify_policy(sched=None):
                     answered=answered, owner_put=owner_put)
 
 
+def notify_critical(text, title="Пантеон · критично", group="critical", policy=None):
+    """Критичное (COMM-08): уведомление сразу, мимо блокировки прохода доски; учёт в бюджете и журнале — под
+    lock("notify"), не взяли за 5 с — без учёта (отправка уже ушла). policy — уже взятая под блокировкой."""
+    if policy is not None:
+        policy.critical(text, title, group=group)
+        return
+    notify(text, title=title, group=group)
+    deadline = time.time() + 5
+    while True:
+        with lock("notify", block=False) as got:
+            if got:
+                pol = notify_policy()
+                pol.critical(text, title, send=False, group=group)
+                pol.save()
+                return
+        if time.time() > deadline:
+            return
+        time.sleep(0.1)
+
+
 def notify_soon(key, text, policy=None):
     """Сбой класса «скоро»: macOS только если вас нет у Mac, не ночью и в бюджете, одна на ключ за час; иначе — в
     утреннюю сводку. policy — уже взятая под lock("notify") (flock в том же процессе второй раз не взять)."""
@@ -2749,19 +2772,7 @@ def main(argv):
         if critical:  # COMM-08: безопасность, деньги, данные клиентов, юридическое, прод, контракт — сразу владельцу
             # отправителя называет он сам (--from, PANTHEON_ROLE — переменные вызова): заголовок не утверждает, кто
             # прислал, имя — в тексте со словами «со слов». Сразу всегда (и ночью), но в счёт бюджета и в журнал
-            text = f"{' '.join(rest)[:200]} (со слов: {' '.join(who.split())[:40]})"
-            notify(text, title="Пантеон · критично", group="critical")  # сразу, мимо блокировки прохода доски
-            deadline = time.time() + 5  # учёт в бюджете и журнале: блокировку не взяли за 5 с — без учёта
-            while True:
-                with lock("notify", block=False) as got:
-                    if got:
-                        pol = notify_policy()
-                        pol.critical(text, send=False)
-                        pol.save()
-                        break
-                if time.time() > deadline:
-                    break
-                time.sleep(0.1)
+            notify_critical(f"{' '.join(rest)[:200]} (со слов: {' '.join(who.split())[:40]})")
         return 0
     if cmd == "archive":
         return archive()

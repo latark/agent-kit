@@ -413,11 +413,11 @@ class Policy:
         self._send(text, "fault", [key], target, key)
         return "sent"
 
-    def critical(self, text, title="Пантеон · критично", send=True):
+    def critical(self, text, title="Пантеон · критично", send=True, group="critical"):
         """COMM-08: сразу и всегда (ночью тоже — менять это может только владелец); в счёт бюджета и в журнал.
-        send=False — уведомление уже ушло мимо блокировки (pantheon alert --critical), здесь только учёт."""
+        send=False — уведомление уже ушло мимо блокировки (notify_critical в pantheon.py), здесь только учёт."""
         if send:
-            self._send(text, "critical", ["critical"], None, "critical", title)
+            self._send(text, "critical", ["critical"], None, group, title)
             return
         self.st["used"] = int(self.st.get("used") or 0) + 1
         self.sent.append(("critical", text))
