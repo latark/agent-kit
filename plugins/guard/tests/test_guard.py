@@ -28,7 +28,11 @@ def setup(home):
         os.makedirs(os.path.join(home, d), exist_ok=True)
     os.makedirs(os.path.join(home, "ai/pantheon/directions/metis-pantheon/tasks"), exist_ok=True)
     os.makedirs(os.path.join(home, "ai/pantheon/directions/athena-broker/tasks"), exist_ok=True)
-    for f in ("ai/pantheon/directions/metis-pantheon/tasks/metis-0001.md", "ai/pantheon/directions/athena-broker/tasks/athena-0001.md"):
+    # metis-0044: входящие владельца и папка доски с карточкой
+    os.makedirs(os.path.join(home, "ai/pantheon/inbox/tasks"), exist_ok=True)
+    os.makedirs(os.path.join(home, "ai/pantheon-view/Доска"), exist_ok=True)
+    for f in ("ai/pantheon/directions/metis-pantheon/tasks/metis-0001.md", "ai/pantheon/directions/athena-broker/tasks/athena-0001.md",
+              "ai/pantheon/inbox/tasks/inbox-0001.md", "ai/pantheon-view/Доска/athena-0001 Вопрос.md"):
         open(os.path.join(home, f), "w").close()
     for f in ("ai/pantheon/board.md", "ai/pantheon/alerts.md", "ai/pantheon/decision-map.md",
               "ai/pantheon/directions/hermes-alex/STATUS.md", "ai/pantheon/directions/hermes-alex/inbox/old.md"):
@@ -595,6 +599,64 @@ def main():
         ("правка в копии — отказ", "deny", br, "domain-coordinator", False, W(os.path.join(home, "ai/pantheon-view/board.md"))),
         ("запись модели в owner-log — отказ", "deny", br, "domain-coordinator", False,
          B(f"echo да >> {home}/.local/state/pantheon/owner-log/athena-broker.md")),
+        # metis-0044, п. 1: доска и журналы ваших слов — ни одной сессии Claude, и без роли тоже
+        *[(f"0044 без роли: {n} — отказ", "deny", ".", "", False, x) for n, x in (
+            ("Write карточки", W(os.path.join(home, "ai/pantheon-view/Доска/athena-0001 Вопрос.md"))),
+            ("Edit галочки на карточке", E(os.path.join(home, "ai/pantheon-view/Доска/athena-0001 Вопрос.md"))),
+            ("новая карточка", W(os.path.join(home, "ai/pantheon-view/Доска/new.md"))),
+            ("Bash >> в карточку", B(f"echo '- [x] Да' >> '{home}/ai/pantheon-view/Доска/athena-0001 Вопрос.md'")),
+            ("Bash через ~ и cd", B("cd ~/ai/pantheon-view/Доска && echo x > a.md")),
+            ("rm -rf доски", B("rm -rf ~/ai/pantheon-view")),
+            ("Write в owner-log", W(os.path.join(home, ".local/state/pantheon/owner-log/zeus.md"))),
+            ("Edit board.jsonl", E(os.path.join(home, ".local/state/pantheon/owner-log/board.jsonl"))),
+            ("sed -i в owner-log", B("sed -i '' 's/Нет/Да/' ~/.local/state/pantheon/owner-log/board.jsonl")),
+            ("mv в owner-log", B("mv /tmp/forged.jsonl ~/.local/state/pantheon/owner-log/board.jsonl")),
+            ("регистр пути", W(os.path.join(home, "ai/PANTHEON-VIEW/Доска/x.md"))),
+        )],
+        ("0044 без роли: запись из cwd доски — отказ", "deny", ".", "", False, B("echo x > a.md"), "ai/pantheon-view/Доска"),
+        ("0044 субагент без agent_type: доска — отказ", "deny", ".", "", True, W(os.path.join(home, "ai/pantheon-view/Доска/x.md"))),
+        ("0044 ваша роль главной сессии: owner-log — отказ", "deny", ".", "my-helper", False,
+         W(os.path.join(home, ".local/state/pantheon/owner-log/board.jsonl"))),
+        *[(f"0044 без роли: {n} — можно", "allow", ".", "", False, x) for n, x in (
+            ("Read карточки", R(os.path.join(home, "ai/pantheon-view/Доска/athena-0001 Вопрос.md"))),
+            ("cat доски и журнала", B(f"cat ~/ai/pantheon-view/Доска/*.md ~/.local/state/pantheon/owner-log/board.jsonl")),
+            ("pantheon view и board", B("pantheon view; pantheon board")),
+            ("pantheon task set", B("pantheon task set athena-0001 status=doing --note x")),
+            ("остальной ~/.local/state/pantheon", W(os.path.join(home, ".local/state/pantheon/logs/x.log"))),
+            ("cp в домашнюю папку", B("cp a.md ~/")),
+            ("цель не разобрать", B("echo x > $SOMEDIR/a.md")),
+            ("файл задачи", E(P("directions/athena-broker/tasks/athena-0001.md"))),
+            ("свой проект", W(os.path.join(home, br, "app/x.ts"))),
+        )],
+        # metis-0044, п. 2: файлы задач — только `pantheon task`, ролям и субагентам, штабу тоже
+        *[(f"0044 {r}{' (субагент)' if s else ''}: {n} — отказ", "deny", d, r, s, x, *cwd) for r, s, d, n, x, *cwd in (
+            ("hq", False, ".", "Edit answer в чужой задаче", E(P("directions/athena-broker/tasks/athena-0001.md"))),
+            ("hq", False, ".", "Write новой задачи", W(P("directions/athena-broker/tasks/athena-0002.md"))),
+            ("hq", False, ".", "Write во входящие владельца", W(P("inbox/tasks/inbox-0001.md"))),
+            ("hq", False, ".", "Bash >> answer", B(f"echo 'answer: Да' >> {home}/ai/pantheon/directions/athena-broker/tasks/athena-0001.md")),
+            ("hq", False, ".", "cp в папку задач", B(f"cp /tmp/t.md {home}/ai/pantheon/directions/athena-broker/tasks/")),
+            ("hq", False, ".", "mv задачи", B(f"mv {home}/ai/pantheon/directions/athena-broker/tasks/athena-0001.md /tmp/")),
+            ("hq", False, ".", "rm -rf папки задач", B(f"rm -rf {home}/ai/pantheon/directions/athena-broker/tasks")),
+            ("hq", False, ".", "регистр TASKS", E(P("directions/athena-broker/TASKS/athena-0001.md"))),
+            ("hq", False, ".", "служебный .lock", B(f"touch {home}/ai/pantheon/directions/athena-broker/tasks/.lock")),
+            ("domain-coordinator", False, br, "Edit своей задачи", E(P("directions/athena-broker/tasks/athena-0001.md"))),
+            ("domain-coordinator", False, br, "sed -i своей задачи",
+             B("sed -i '' 's/^status: .*/status: done/' ~/ai/pantheon/directions/athena-broker/tasks/athena-0001.md")),
+            ("domain-coordinator", False, br, "из cwd tasks/", B("echo 'answer: Да' >> athena-0001.md"),
+             "ai/pantheon/directions/athena-broker/tasks"),
+            ("hephaestus-broker", True, br, "Write своей задачи", W(P("directions/athena-broker/tasks/athena-0001.md"))),
+            ("general-purpose", True, br, "Edit своей задачи", E(P("directions/athena-broker/tasks/athena-0001.md"))),
+        )],
+        *[(f"0044 {r}: {n} — можно", "allow", d, r, False, x) for r, d, n, x in (
+            ("hq", ".", "pantheon task set", B("pantheon task set athena-0001 status=todo next=x --note y")),
+            ("hq", ".", "pantheon task new", B("pantheon task new --direction athena-broker --title x")),
+            ("domain-coordinator", br, "pantheon task set своей", B("pantheon task set athena-0001 status=doing --note y")),
+            ("domain-coordinator", br, "pantheon task claim своей", B("pantheon task claim athena-0001 --by hephaestus")),
+            ("hq", ".", "mkdir tasks/ нового направления", B(f"mkdir -p {home}/ai/pantheon/directions/hermes-alex/tasks")),
+            ("hq", ".", "файл tasks.md рядом с папкой", W(P("directions/athena-broker/tasks.md"))),
+            ("domain-coordinator", br, "план эпика", W(P("directions/athena-broker/epic-x.md"))),
+            ("hq", ".", "чтение задачи", B(f"cat {home}/ai/pantheon/directions/athena-broker/tasks/athena-0001.md")),
+        )],
         ("роль не коммитит ~/ai/pantheon", "deny", ".", "hq", False, B(f"git -C {home}/ai/pantheon commit -am x")),
         ("ваша сессия коммитит ~/ai/pantheon", "allow", ".", "", False, B(f"git -C {home}/ai/pantheon commit -am x")),
         ("Метида правит карту решений", "allow", ak, "domain-coordinator", False, E(P("decision-map.md"))),
