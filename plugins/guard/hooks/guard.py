@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Правила из ~/.claude/CLAUDE.md, которые Claude Code проверяет сам, а не на память модели.
 
-Вызывается hook'ами PreToolUse (Bash, Write, Edit, MultiEdit, NotebookEdit, Read, Grep, Glob) и Stop плагина guard
-(hooks/hooks.json).
+Вызывается hook'ами PreToolUse (Bash, Write, Edit, MultiEdit, NotebookEdit, Read, Grep, Glob), PostToolUse (Bash:
+журнал запора слияния) и Stop плагина guard (hooks/hooks.json). Код запора слияния и protect-config — в merge_gate.py
+и protect_config.py рядом (ядро защит, Д3).
 Правила:
   dev-server   — не запускать dev-сервер (next dev, npm/pnpm/yarn/bun run dev, turbo dev);
   attribution  — никаких пометок об авторстве Claude в коммитах, тегах и PR;
@@ -21,11 +22,14 @@
   push         — git push: координатор, лиды и мастерская, не в main и master; gh pr merge — главная сессия
                  координатора или его лид (hephaestus-/apollo-<направление> субагентом, metis-0054) в папках своего
                  направления (domains.json, [merge], [merge_client]); защиты — папки metis-pantheon и их
-                 репозитории по git remote — только Метида или её лид по «да» владельца на этот PR в окне
-                 вопросов Зевса (--subject "[metis-NNNN] …"), одно «да» — одно слияние; -R — только из [merge_repos],
-                 у Метиды — тоже по «да»; [merge_protect] consent = false в policy.toml снимает это «да», остальное
-                 остаётся (один номер PR, без --auto); любой сбой — отказ (DONE-07, metis-0027, themis-0015,
-                 metis-0038, metis-0049);
+                 репозитории по git remote — только Метида или её лид. Во всех режимах — запор (P1-4, guard 0.5.4,
+                 merge_gate.py): один номер PR, без --auto и --admin, ровно один --match-head-commit <SHA>,
+                 репозитории — из [merge_repos], записи журнала merge-gate: тесты на SHA и последнее «принять» от
+                 argus на (repo, PR, SHA), рецензент — не сливающий; продукт — ещё talos и строка «откат» в
+                 alerts.md; защиты — ещё Д3: PR не задевает ядро (merge_gate.py, protect_config.py,
+                 managed-settings.json), его сливает только владелец. Журнал пишет этот же хук на PostToolUse
+                 (`pantheon review …`). argus не делает git commit, merge, rebase и другие правки истории. Любой сбой
+                 — отказ (DONE-07, metis-0027, themis-0015, metis-0038, metis-0071);
   terminal     — роли не печатают в терминал: osascript, tmux send-keys, screen stuff (SEC-30).
   corpus-role  — роли не запускают пополнение корпуса (corpus add, channel --videos, krisp, скрипты Krisp и
                  Диска) и не читают его ключи из Связки: только через посредника; штабу (hq) корпус закрыт целиком
@@ -2226,58 +2230,6 @@ def check_pantheon(event, tool, tool_input):
     return None
 
 
-# protect-config (SEC-14): защиты правит только metis-pantheon — главная сессия координатора, чья папка запуска
-# в её записи policy.toml, — задачей после вашего «да» в её сессии. Её субагенты, штаб, другие роли и любые
-# субагенты сюда не пишут (domain пустил бы субагентов Метиды: ~/.claude — её направление). Ваши сессии без роли
-# не ограничены. Сюда же — метка .sync-held, по которой sync.sh держит неодобренные правки ~/.claude (SEC-15),
-# и .git репозитория claude-config: коммит в обход sync.sh отправил бы правку на другие Mac без «да».
-# Список расширен по проверке безопасности 14.10: всё, откуда код или инструкции запускаются сами — инструменты и
-# глобальные правила ~/.claude, ссылка тика и команды в ~/.local, задачи launchd, профили оболочки, настройки git
-# (hooksPath, алиасы с «!»), ~/.ssh (authorized_keys, ProxyCommand), ~/.claude.json (MCP-серверы запускают команды);
-# в любом репозитории — .claude/settings*.json, .mcp.json, .git/hooks и .git/config.
-PROTECTED = [os.path.realpath(os.path.join(HOME, ".claude", x)) for x in
-             ("hooks", "agents", "plugins", "pantheon", "settings.json", "settings.local.json", "sync.sh",
-              "statusline.sh", "bootstrap.sh", ".sync-held", ".sync-incoming", ".git", "tools", "CLAUDE.md", "rules",
-              "commands", "output-styles")] + \
-            [os.path.realpath(os.path.join(HOME, x)) for x in
-             (".zshrc", ".zprofile", ".zshenv", ".zlogin", ".bashrc", ".bash_profile", ".profile", ".gitconfig",
-              ".config/git", ".ssh", ".claude.json", ".local/share/pantheon", ".local/bin", "Library/LaunchAgents")]
-SETTINGS_NAMES = {"settings.json", "settings.local.json"}
-
-
-def _settings_file(p):
-    """Настройки, которые меняют разрешения, хуки или запускают код в любом репозитории: .claude/settings*.json,
-    .mcp.json, .git/hooks/… и .git/config."""
-    parent, base = os.path.split(p)
-    if _key(base) in SETTINGS_NAMES and _key(os.path.basename(parent)) == ".claude":
-        return True
-    if _key(base) == ".mcp.json":
-        return True
-    parts = [_key(x) for x in p.split("/")]
-    for i, x in enumerate(parts[:-1]):
-        if x == ".git" and (parts[i + 1] == "hooks" or (parts[i + 1] == "config" and i + 2 == len(parts))):
-            return True
-    return False
-
-
-def check_protect_config(event, tool, tool_input):
-    role, sub, pdir = who(event)
-    if not (is_pantheon_role(role) or sub):
-        return None  # ваша сессия без роли или ваша собственная роль главной сессии
-    if not sub and privileged(load_policy(), "metis-pantheon", role, pdir):
-        return None
-    cwd, targets = write_targets(event, tool, tool_input)
-    if UNRESOLVED in targets:
-        return UNRESOLVED_REASON
-    bad = [p for p in targets
-           if _inside(p, PROTECTED) or _settings_file(p) or any(_inside(x, [p]) for x in PROTECTED)]
-    if not bad:
-        return None
-    return (f"Правило protect-config: роль «{role or 'субагент'}»{' (субагент)' if sub else ''} не правит защиты "
-            f"({', '.join(p.replace(HOME, '~') for p in bad[:3])}): хуки, роли, плагины, policy.toml, настройки, "
-            "sync.sh и ~/.zshrc меняет только metis-pantheon в своей сессии после «да» владельца. "
-            "Нужна правка — опиши её координатору metis-pantheon файлом в ~/ai/pantheon/directions/metis-pantheon/inbox/.")
-
 
 # --- private, cdp-role, push, terminal (шаг 1.2) ------------------------------------
 # Касаются ролей Пантеона и любых субагентов, как pantheon-acl: встроенный субагент координатора иначе обходил бы
@@ -2294,22 +2246,15 @@ def check_protect_config(event, tool, tool_input):
 #            нет. gh pr merge (metis-0038, guard 0.5.0) — только главная сессия domain-coordinator, без cd в
 #            команде, или её лид (metis-0054, guard 0.5.2): субагент hephaestus-<short> или apollo-<short>, где short —
 #            имя направления папки запуска (domains.json) после первого «-», как собирает pantheon roles build; дальше
-#            лид проверяется как координатор (личное, Метида, защиты, согласие). Лид чужого направления, сессия без
-#            направления и остальные субагенты (dev-*, argus, talos…) — отказ. Защиты — cwd в папках [coordinators] metis-pantheon или репозиторий команды (-R, иначе git
-#            remote папки cwd) совпадает с remote этих папок: только Метида, с --subject "[metis-NNNN] …", номером PR
-#            и записью «· окно вопросов» на этот id и этот PR в owner-log/zeus.md за сутки (решает последняя), без
-#            --auto; использованное «да» — отметка-файл в merge-consent/, второй раз — отказ. Своё направление
-#            (самый длинный корень domains.json, для совместимости [merge]) и продукт ([merge_client]) — можно; -R —
-#            только из [merge_repos], у Метиды — с тем же согласием. Любой сбой (политика, реестр, git, журналы) —
-#            отказ; координатору с личным в папке — тоже. Тесты, argus, talos и откат guard не видит — их делает роль.
+#            лид проверяется как координатор (личное, Метида, защиты). Лид чужого направления, сессия без
+#            направления и остальные субагенты (dev-*, argus, talos…) — отказ. Защиты — cwd в папках [coordinators]
+#            metis-pantheon или репозиторий команды (-R, иначе git remote папки cwd) совпадает с remote этих папок:
+#            только Метида или её лид. Затем во всех режимах — запор слияния (P1-4, guard 0.5.4, merge_gate.py): что
+#            проверено тестами и argus, ровно то и сливается (--match-head-commit), а ядро защит — кнопкой владельца
+#            (Д3). Согласие владельца на PR (--subject, owner-log, merge-consent/, [merge_protect]) снято: его
+#            заменили записи журнала merge-gate. Любой сбой (политика, реестр, git, журнал, gh) — отказ.
 #            Новая схема для своих папок включается строкой [merge_client] в policy.toml; без неё — как в 0.4.7
-#            (только направления из [merge]). Отметки — формат v1; файл другого формата в папке и запись в старом
-#            logs/merge-consent-used.jsonl — отказ.
-#            [merge_protect] consent = false (metis-0049, guard 0.5.2; решение владельца 15.10: агенты сливают все PR
-#            сами) снимает только «да» владельца: --subject, owner-log и отметки merge-consent/ не нужны и не
-#            трогаются. Остаётся: только Метида или её лид, один номер PR, без --auto, один -R из [merge_repos],
-#            без cd и GH_REPO/GH_HOST, сбой — отказ. Снято только при bool false в таблице; нет таблицы или ключа,
-#            "false", 0 — «да» обязательно.
+#            (только направления из [merge]).
 #   terminal (SEC-30) — ввод в терминал: osascript, tmux send-keys, screen -X stuff, cliclick. Такой ввод Claude Code
 #            помечает как ваш (origin.kind: human), и журнал ваших слов принял бы его за ваши слова.
 
@@ -2621,596 +2566,33 @@ def push_problem(texts, cwd, moved):
     return None
 
 
-MERGE_CLOSED = ("слияние делает лид направления (hephaestus-*, apollo-* субагентом) или главная сессия его "
-                "координатора. Вместо него отправь свою ветку, открой PR (gh pr create) и в отчёте лиду напиши, что "
-                "проверено и что меняется.")
-MERGE_LEADS = ("hephaestus", "apollo")  # лиды: <база>-<направление после первого «-»>, как их собирает pantheon roles build
-MERGE_INTERNAL = "Внутреннее сливай после зелёных тестов и «принять» от argus."
-MERGE_PRODUCT = ("Продукт для клиентов сливай после зелёных тестов и «принять» от argus, плюс проверка talos, "
-                 "строка Зевсу «что ушло», откат одной командой в STATUS.")
-MERGE_PROTECT = ("Защиты сливает только Метида или её лид по «да» владельца в окне вопросов Зевса: вопрос владельцу через Зевса "
-                 "окном вопросов «[metis-NNNN] Слить https://github.com/<owner>/<repo>/pull/N?», затем "
-                 "gh pr merge N --subject \"[metis-NNNN] …\". Вариант согласия Зевс пишет «Да — …». Одно «да» — одно "
-                 "слияние.")
-MERGE_PROTECT_AUTO = ("Защиты сливает только Метида или её лид после зелёных тестов и «принять» от argus: gh pr merge N — один "
-                      "номер PR, без --auto, -R только из [merge_repos]. Поштучное «да» владельца снято "
-                      "([merge_protect] consent = false в policy.toml).")
-MERGE_OWNER = "Слияние делает владелец."
-MERGE_CONSENT_ID = re.compile(r"\[(metis-\d{4})\]")
-MERGE_CONSENT_AGE = 86400  # согласие действует сутки: «да» на позавчерашний вопрос — не «да» на сегодняшнее слияние
-# PR в первой строке вопроса: ссылка github.com/<owner>/<repo>/pull/<N> или <owner>/<repo>#<N>
-MERGE_PR_REF = re.compile(r"github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)|(?<![\w./#-])([\w.-]+)/([\w.-]+)#(\d+)", re.I)
-# согласие — только ответ, который начинается с «Да» (без учёта регистра, после «Да» не буква и не цифра): «Да — слить», «да»,
-# «ДА.»; «Дальше», «Отложить», «Отмена», «No», «Нет — …», пустой — нет (решение Метиды «А», 15.10)
-MERGE_YES = re.compile(r"да(?!\w)", re.I)  # после «Да» — не буква и не цифра: «Да1» — не согласие
-MERGE_MARK_DIR = os.path.join(STATE_DIR, "merge-consent")  # отметки использованных согласий: файл на каждое
-MERGE_MARK_V = 1  # версия формата отметки: входит в ключ; файл другого формата в папке — отказ
-MERGE_OLD_LOG = os.path.join(STATE_DIR, "logs", "merge-consent-used.jsonl")  # журнал ee8f356: только читается
-MERGE_AMBIGUOUS = "\0два направления"
-# согласия, которые использует этот вызов: в журнал они попадают, только если весь вызов разрешён (main)
-PENDING_CONSENT = []
+# --- запор слияния и protect-config: ядро защит (Д3, guard 0.5.4) -----------------------------------------
+# Код запора gh pr merge (merge_gate.py) и protect-config (protect_config.py) — в отдельных файлах рядом: вместе с
+# managed-settings.json это ядро защит, которое агенты не сливают (Д3). Модули берут общие помощники отсюда через G.
+# Хуки плагина запускают guard без -I, тесты — с -I (папки скрипта нет в sys.path), поэтому путь — явно. Модуль,
+# загруженный через importlib без записи в sys.modules (тесты), видят через _Globals.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import merge_gate  # noqa: E402
+import protect_config  # noqa: E402
 
 
-def merge_consent_off(policy):
-    """[merge_protect] consent = false в policy.toml (metis-0049, решение владельца 15.10): поштучное «да» владельца на
-    слияние защит снято. Только bool False внутри таблицы; нет таблицы или ключа, строка "false", 0, ключ не таблицей
-    — «да» обязательно, как раньше."""
-    table = policy.get("merge_protect")
-    consent = table.get("consent") if isinstance(table, dict) else None
-    return isinstance(consent, bool) and consent is False
-
-
-def _str_list(v):
-    """Непустой список непустых строк — или None: строка вместо списка перебиралась бы по буквам, и корнем стал бы «/»."""
-    return v if isinstance(v, list) and v and all(isinstance(x, str) and x.strip() for x in v) else None
-
-
-def _repo_arg(value):
-    """Значение -R/--repo → owner/repo (github.com) или host/owner/repo, в нижнем регистре."""
-    v = (value or "").strip().lower()
-    v = re.sub(r"^https?://", "", v)
-    v = re.sub(r"^(?:www\.)?github\.com/", "", v)
-    return re.sub(r"(?:\.git)?/*$", "", v)
-
-
-def _remote_id(url):
-    """Адрес remote → owner/repo (github.com) или host/owner/repo, в нижнем регистре. git@github.com:o/r.git,
-    https://github.com/o/r(.git), ssh://git@github.com/o/r; локальный путь и прочее — как есть."""
-    u = (url or "").strip()
-    m = re.match(r"^[a-z][a-z0-9+.-]*://(?:[^@/]*@)?([^/:]+)(?::\d*)?/+(.+)$", u, re.I) or \
-        re.match(r"^(?:[^@/:]+@)?([^/:]+):(?!/)(.+)$", u)
-    if not m:
-        return u.lower()
-    host, path = m.group(1).lower(), re.sub(r"(?:\.git)?/*$", "", m.group(2).lower()).strip("/")
-    return path if host in ("github.com", "www.github.com") else f"{host}/{path}"
-
-
-def _repo_tail(repo):
-    """owner/repo без хоста: псевдоним ssh (git@gh-work:latark/agent-kit) gh понимает как github.com, поэтому
-    репозитории защит сравниваются по двум последним частям, а не по хосту."""
-    return "/".join(repo.split("/")[-2:])
-
-
-def _git_remotes(d):
-    """Адреса remote репозитория в папке d; None — git не ответил (не репозиторий, сбой, таймаут). Переменные GIT_*
-    окружения не передаются: GIT_DIR подменил бы репозиторий."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    try:
-        r = subprocess.run(["git", "-C", d, "remote", "-v"], capture_output=True, text=True, timeout=3, env=env)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-    if r.returncode != 0:
-        return None
-    return sorted({_remote_id(ln.split()[1]) for ln in r.stdout.splitlines() if len(ln.split()) >= 2})
-
-
-def _gh_resolved(d):
-    """Значения remote.<имя>.gh-resolved (gh repo set-default): gh может слить туда, а не в remote. «base» — это
-    сам remote, его пропускаем. → список owner/repo; код 1 (ключей нет) — пусто; другой сбой — None."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    try:
-        r = subprocess.run(["git", "-C", d, "config", "--get-regexp", r"^remote\..*\.gh-resolved$"],
-                           capture_output=True, text=True, timeout=3, env=env)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-    if r.returncode == 1 and not r.stdout.strip():
-        return []
-    if r.returncode != 0:
-        return None
-    out = []
-    for ln in r.stdout.splitlines():
-        parts = ln.split(None, 1)
-        if len(parts) != 2:
-            return None
-        if parts[1].strip().lower() != "base":
-            out.append(_repo_arg(parts[1]))
-    return out
-
-
-def _merge_domains():
-    """Реестр направлений для слияния: {имя: [корни]}; None — реестр пуст или битый (тогда слияние закрыто).
-    Только domains.json, без отката на старый ~/.claude/hooks/domains.json, как у load_domains(): в старом реестре
-    направления шире, и с ним Гермес слил бы в legal-watch (ревью argus 210766a)."""
-    try:
-        with open(DOMAINS_FILE, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return None
-    dom = data.get("domains") if isinstance(data, dict) else None
-    if not isinstance(dom, dict) or not dom:
-        return None
-    out = {}
-    for name, paths in dom.items():
-        paths = _str_list(paths)
-        if paths is None:
-            return None
-        out[name] = _norm(paths)
-    return out
-
-
-def _merge_owner(domains, path):
-    """Направление папки — по самому длинному совпавшему корню: корень «~/projects» у одного направления не
-    открывает папку другого внутри. Два направления с одним корнем — MERGE_AMBIGUOUS (не совпадёт ни с кем)."""
-    best, size = None, -1
-    for name, roots in domains.items():
-        for r in roots:
-            if _inside(path, [r]):
-                n = len(_key(r).rstrip("/"))
-                if n > size:
-                    best, size = name, n
-                elif n == size and name != best:
-                    best = MERGE_AMBIGUOUS
-    return best
-
-
-def owner_consent(qid, number, repos):
-    """«Да» владельца на вопрос «[qid] Слить <PR>?» в окне вопросов Зевса за сутки → (время записи, репозиторий PR,
-    None) или (None, None, причина). Разбор — как у `pantheon consent` (guard ставится отдельным плагином и его не
-    импортирует): заголовок ровно «· окно вопросов» (его пишет хук answer плагина pantheon), тело начинается с
-    «вопрос: [qid]», в первой строке — этот PR (номер и репозиторий команды, owner/repo без хоста). Свободный текст, галочка на доске,
-    любой ответ, кроме «Да…», — не согласие. Ответов на этот id и PR несколько — решает последний. Любой сбой — отказ:
-    файл не читается, время записи не разобрать, запись из будущего."""
-    try:
-        fd = os.open(os.path.join(STATE_DIR, "owner-log", "zeus.md"), os.O_RDONLY | os.O_NOFOLLOW)
-        with os.fdopen(fd, encoding="utf-8") as fh:
-            text = fh.read()
-    except (OSError, ValueError):
-        return None, None, "журнал ответов владельца owner-log/zeus.md не читается (или это симлинк)"
-    own = re.compile(r"вопрос: \[" + re.escape(qid) + r"\]", re.I)
-    now, found = time.time(), []
-    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
-    for i, m in enumerate(heads):
-        if m.group(2).strip() != "· окно вопросов":
-            continue
-        body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
-        if not own.match(body):
-            continue
-        refs = set()
-        for r in MERGE_PR_REF.finditer(body.split("\n", 1)[0]):
-            o, n, k = r.group(1, 2, 3) if r.group(3) else r.group(4, 5, 6)
-            refs.add((o.lower() + "/" + re.sub(r"\.git$", "", n.lower()), int(k)))
-        mine = [rp for rp, k in refs if k == number and rp in repos]
-        if not mine:
-            continue
+class _Globals:
+    """Доступ к глобальным именам этого модуля, когда его нет в sys.modules."""
+    def __getattr__(self, k):
         try:
-            t = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))  # местное время, как у хука
-        except (ValueError, OverflowError):
-            return None, None, f"запись {m.group(1)} на [{qid}] — время не разобрать"
-        if t > now + 120:
-            return None, None, f"запись {m.group(1)} на [{qid}] — из будущего"
-        if t < now - MERGE_CONSENT_AGE:
-            continue
-        # ответ — только вторая строка тела: хук пишет «вопрос:», затем «ответ:», а ниже «заметка:» — многострочный
-        # текст владельца, где «ответ: Да» может стоять своей строкой
-        lines = body.split("\n")
-        answer = lines[1][len("ответ:"):].strip() if len(lines) > 1 and lines[1].startswith("ответ:") else None
-        # «да» — только на вопрос ровно об одном PR: одно «да» на два PR — не ответ ни на один
-        found.append((t, bool(answer) and bool(MERGE_YES.match(answer)) and len(refs) == 1, m.group(1), mine[0]))
-    if not found:
-        return None, None, (f"нет «да» владельца на [{qid}] про PR #{number} этого репозитория в окне вопросов Зевса "
-                            "за сутки (галочка на доске и свободный текст не годятся, в вопросе нужна ссылка на PR)")
-    last = max(x[0] for x in found)
-    top = [x for x in found if x[0] == last]
-    if not all(x[1] for x in top):
-        return None, None, f"последний ответ владельца на [{qid}] про PR #{number} — не «Да…» (или вопрос о нескольких PR); вариант согласия Зевс пишет «Да — …»"
-    return top[0][2], top[0][3], None
+            return globals()[k]
+        except KeyError:
+            raise AttributeError(k) from None
 
 
-def _mark_path(rec):
-    """Отметка использованного согласия: файл с именем sha256(id, entry, repo, pr) в STATE_DIR/merge-consent/."""
-    key = json.dumps([rec["v"], rec["id"], rec["entry"], rec["repo"], rec["pr"]], ensure_ascii=False)
-    return os.path.join(MERGE_MARK_DIR, hashlib.sha256(key.encode("utf-8")).hexdigest())
-
-
-def _mark_dir_state():
-    """Папка отметок: True — настоящая папка, False — её нет, None — симлинк или не папка (тогда отказ)."""
-    try:
-        st = os.lstat(MERGE_MARK_DIR)
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return None
-    return True if stat.S_ISDIR(st.st_mode) else None
-
-
-def _mark_read(path, rec):
-    """Прочитать отметку без перехода по симлинку: "same" — её поставил этот же вызов (session_id и tool_use_id:
-    guard стоит и хуком плагина, и строгим хуком окна), "other" — другой вызов, None — не читается или не разобрать."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        with os.fdopen(fd, encoding="utf-8") as fh:
-            old = json.load(fh)
-    except (OSError, ValueError):
-        return None
-    if not isinstance(old, dict) or any(old.get(k) != rec[k] for k in ("v", "id", "entry", "repo", "pr")):
-        return None
-    if rec["tool_use_id"] and old.get("session") == rec["session"] and old.get("tool_use_id") == rec["tool_use_id"]:
-        return "same"
-    return "other"
-
-
-def _mark_state(rec):
-    """До отметки (в merge_problem): False — согласие не использовано, "same"/"other" — см. _mark_read, None — сбой."""
-    d = _mark_dir_state()
-    if d is None:
-        return None
-    path = _mark_path(rec)
-    if not d or not os.path.lexists(path):
-        return False
-    return _mark_read(path, rec)
-
-
-def _marks_problem():
-    """Перед проверкой согласия: каждый файл папки отметок — отметка v1 под своим именем, кроме своих временных
-    (*.tmp свежее минуты). Иначе (старый формат, другая версия, мусор, симлинк) — текст отказа: отметка неизвестного
-    формата могла бы не узнать использованное «да». Старый журнал ee8f356 (merge-consent-used.jsonl), если есть, —
-    только читается: не читается или не разбирается — отказ."""
-    d = _mark_dir_state()
-    if d is None:
-        return "папка отметок ~/.local/state/pantheon/merge-consent — симлинк или не папка"
-    names = os.listdir(MERGE_MARK_DIR) if d else []
-    now = time.time()
-    for n in names:
-        path = os.path.join(MERGE_MARK_DIR, n)
-        if n.endswith(".tmp"):
-            try:
-                st = os.lstat(path)
-            except OSError:
-                continue  # временный файл другого вызова уже удалён
-            if stat.S_ISREG(st.st_mode) and now - st.st_mtime < 60:
-                continue
-            return f"в папке отметок старый временный файл {n}"
-        try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-            with os.fdopen(fd, encoding="utf-8") as fh:
-                rec = json.load(fh)
-        except (OSError, ValueError):
-            rec = None
-        ok = isinstance(rec, dict) and rec.get("v") == MERGE_MARK_V and all(
-            isinstance(rec.get(k), str) for k in ("id", "entry", "repo")) and isinstance(rec.get("pr"), int)
-        if not ok or _mark_path(rec) != path:
-            return f"неизвестный формат отметки {n}"
-    return None
-
-
-def _old_log_used(rec):
-    """Старый журнал ee8f356: True — это «да» там уже записано, False — нет или журнала нет, None — сбой."""
-    if not os.path.lexists(MERGE_OLD_LOG):
-        return False
-    try:
-        fd = os.open(MERGE_OLD_LOG, os.O_RDONLY | os.O_NOFOLLOW)
-        with os.fdopen(fd, encoding="utf-8") as fh:
-            lines = fh.read().splitlines()
-    except (OSError, ValueError):
-        return None
-    for ln in lines:
-        if not ln.strip():
-            continue
-        try:
-            old = json.loads(ln)
-        except ValueError:
-            return None
-        if not isinstance(old, dict):
-            return None
-        if all(old.get(k) == rec[k] for k in ("id", "entry", "repo", "pr")):
-            return True
-    return False
-
-
-def _mark_create(rec):
-    """Поставить отметку атомарно: временный файл (O_EXCL|O_NOFOLLOW) → fsync → os.link в окончательное имя. link
-    падает с EEXIST, если отметка уже есть, и второй вызов никогда не видит полупустой файл. → None (поставлена или
-    уже стоит от этого же вызова) или текст отказа."""
-    used = ("это «да» владельца на [{}] уже использовано: одно «да» — одно слияние, нужен новый вопрос окном. "
-            .format(rec["id"]) + MERGE_PROTECT)
-    broken = "отметку использованного согласия в ~/.local/state/pantheon/merge-consent/ не {}. " + MERGE_OWNER
-    try:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        try:
-            os.mkdir(MERGE_MARK_DIR, 0o700)
-        except FileExistsError:
-            pass
-        if not _mark_dir_state():
-            return broken.format("поставить: папка — симлинк или не папка")
-        final = _mark_path(rec)
-        tmp = os.path.join(MERGE_MARK_DIR, f".{os.getpid()}-{os.urandom(8).hex()}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        try:
-            try:
-                os.write(fd, json.dumps(rec, ensure_ascii=False).encode("utf-8"))
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            try:
-                os.link(tmp, final)
-                return None
-            except FileExistsError:
-                state = _mark_read(final, rec)
-                if state == "same":
-                    return None
-                return used if state == "other" else broken.format("прочитать (симлинк или не разбирается)")
-        finally:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass  # временный файл остался — решение уже принято по os.link
-    except OSError:
-        return broken.format("поставить")
-
-
-def commit_consent(event, tool, tool_input):
-    """Отметить использованные согласия (одноразовость, metis-0038), только когда весь вызов разрешён. Перед
-    отметкой согласие сверяется заново: запись окна должна быть той же, что при проверке, иначе zeus.md изменился
-    между проверкой и отметкой. Пишет только сам хук; роли в ~/.local/state/pantheon не пишут (pantheon-acl)."""
-    for rec, (qid, number, tails) in PENDING_CONSENT:
-        entry, repo, why = owner_consent(qid, number, set(tails))
-        if why or entry != rec["entry"] or repo != rec["repo"]:
-            return ("Правило push: gh pr merge — журнал ответов владельца изменился между проверкой и отметкой "
-                    f"согласия на [{qid}]. Повтори слияние. " + MERGE_PROTECT)
-        why = _mark_create(rec)
-        if why:
-            return "Правило push: gh pr merge — " + why
-    return None
-
-
-def _merge_args(args):
-    """Разбор флагов gh pr merge: (ошибка, [значения -R], [номера PR], --auto, [заголовки --subject/-t])."""
-    takes_value = {"--body", "--body-file", "--author-email", "--match-head-commit"}
-    nxt = None  # чьё значение — следующее слово: "repo", "subject" или "skip"
-    repos, subjects, numbers, auto = [], [], [], False
-    for a in args:
-        if nxt:
-            if nxt == "repo":
-                repos.append(a)
-            elif nxt == "subject":
-                subjects.append(a)
-            nxt = None
-            continue
-        if not a:
-            return "PR указывай номером", repos, numbers, auto, subjects
-        if a == "--admin" or a.startswith("--admin="):  # gh принимает --admin=true (ревью argus 15.10)
-            return "без --admin", repos, numbers, auto, subjects
-        if a == "--auto" or a.startswith("--auto="):
-            auto = True
-        elif a == "--repo":
-            nxt = "repo"
-        elif a.startswith("--repo="):
-            repos.append(a[7:])
-        elif a == "--subject":
-            nxt = "subject"
-        elif a.startswith("--subject="):
-            subjects.append(a[10:])
-        elif a.startswith("-") and not a.startswith("--") and len(a) > 1:
-            # короткие флаги склеиваются (pflag): -dR<репо> — это -d и -R <репо>, -st<текст> — -s и -t <текст>
-            for i, c in enumerate(a[1:]):
-                rest = a[2 + i:]
-                if c in "RtbFA":  # флаг со значением: остаток токена — его значение
-                    if c == "R":
-                        rest = rest[1:] if rest.startswith("=") else rest
-                    kind = {"R": "repo", "t": "subject"}.get(c, "skip")
-                    if not rest:
-                        nxt = kind
-                    elif kind == "repo":
-                        repos.append(rest)
-                    elif kind == "subject":
-                        subjects.append(rest)
-                    break
-                if c not in "dsmr":
-                    break
-        elif a in takes_value:
-            nxt = "skip"
-        elif a.isdigit():
-            numbers.append(int(a))
-        elif not a.startswith("-"):
-            return "PR указывай номером", repos, numbers, auto, subjects
-    if nxt == "repo":
-        return "-R без репозитория", repos, numbers, auto, subjects
-    return None, repos, numbers, auto, subjects
-
-
-def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
-    """gh pr merge (metis-0038, guard 0.5.0). Сливает главная сессия координатора направления или его лид
-    (metis-0054): субагент hephaestus-<short> или apollo-<short>, где short — имя направления папки запуска после
-    первого «-» (hermes-alex → alex). Дальше лид проверяется как координатор: личное, Метида, защиты — те же правила.
-    Режим: защиты — cwd в папках [coordinators] metis-pantheon или репозиторий команды (-R или remote папки cwd)
-    совпадает с remote этих папок: только Метида (или её лид), по «да» владельца на этот PR в окне вопросов Зевса,
-    одно «да» — одно слияние; продукт ([merge_client]) и внутреннее (своё направление по domains.json, для
-    совместимости — [merge]) — можно. [merge_protect] consent = false (metis-0049) снимает только «да» владельца
-    (--subject, owner-log, отметки merge-consent/): защиты и -R у Метиды — по-прежнему только Метида или её лид,
-    один номер PR, без --auto, один -R из [merge_repos], без cd и GH_REPO. Любой сбой (политика, реестр, git,
-    журналы) — отказ. Тесты, вердикт argus, проверку talos и откат guard не видит — их делает роль. Возвращает текст
-    отказа (с тем, что делать вместо) или None."""
-    lead = bool(sub) and role.startswith(PANTHEON_ROLE_PREFIXES)
-    if not lead and (role != "domain-coordinator" or sub):
-        return MERGE_CLOSED
-    lead_role = role
-    if lead:
-        role = "domain-coordinator"  # лид сливает за координатора: privileged() ниже — по роли координатора
-    policy = load_policy()
-    coords = policy.get("coordinators")
-    if not isinstance(coords, dict):
-        # без политики (нет tomllib на Python 3.9 или нет policy.toml) guard не знает папок защит — закрыто всем
-        return "политика ~/.claude/pantheon/policy.toml не прочиталась, а без неё папки защит неизвестны. " + MERGE_OWNER
-    metis = _str_list(coords.get("metis-pantheon"))
-    if metis is None:
-        return ("в policy.toml нет списка папок [coordinators] metis-pantheon, а без него папки защит неизвестны. "
-                + MERGE_OWNER)
-    metis_roots = _norm(metis)
-    consent_off = merge_consent_off(policy)
-    protect_advice = MERGE_PROTECT_AUTO if consent_off else MERGE_PROTECT
-    conf = private_conf(policy)
-    ppaths, pcoords = _str_list(conf["paths"]), conf["coordinators"]
-    if ppaths is None or not isinstance(pcoords, list) or not all(isinstance(c, str) for c in pcoords):
-        return "[private] в policy.toml не разобрать, а без него неизвестно, у кого личное. " + MERGE_OWNER
-    if any(_inside(x, [pdir]) for x in _norm(ppaths)) or any(privileged(policy, c, role, pdir) for c in pcoords):
-        return ("координатор с доступом к личному не сливает: третье свойство (наружу) ему закрыто, как и push "
-                "(SEC-13). " + MERGE_OWNER)
-    domains = _merge_domains()
-    if domains is None:
-        return "реестр направлений ~/.local/state/pantheon/domains.json пуст или не разбирается. " + MERGE_OWNER
-    name = _merge_owner(domains, pdir)
-    if lead:
-        # лид — только своего направления: имя роли собирает pantheon roles build из имени направления
-        short = name.split("-", 1)[1] if name and name != MERGE_AMBIGUOUS and "-" in name else None
-        if not short or lead_role not in {f"{b}-{short}" for b in MERGE_LEADS}:
-            where = (name if short else f"у направления {name} нет лидов по имени" if name and name != MERGE_AMBIGUOUS
-                     else "направление не установлено")
-            return (f"{lead_role} — не лид направления этой сессии ({where}): "
-                    "лид сливает только PR своего направления. " + MERGE_CLOSED)
-    # лид получает права Метиды только как лид metis-pantheon: папка из её [coordinators], которую реестр по ошибке
-    # отдал другому направлению, лиду того направления защиты не открывает
-    metis_ok = privileged(policy, "metis-pantheon", role, pdir) and (not lead or name == "metis-pantheon")
-    is_metis = metis_ok or name == "metis-pantheon"
-    if moved:
-        return "только из папки своего репозитория, без cd в команде. " + (protect_advice if is_metis else MERGE_INTERNAL)
-    if re.search(r"\bGH_(?:REPO|HOST)\b", cmd):
-        return "без чужого репозитория (GH_REPO, GH_HOST). " + (protect_advice if is_metis else MERGE_INTERNAL)
-    why, repos, numbers, auto, subjects = _merge_args(args)
-    # репозитории защит — remote папок metis-pantheon: gh сливает в репозиторий из remote папки, а не в папку, и клон
-    # agent-kit в своей папке иначе слился бы как внутреннее
-    protect_repos = set()
-    for r in metis_roots:
-        if os.path.lexists(os.path.join(r, ".git")):
-            remotes = _git_remotes(r)
-            if remotes is None:
-                return (f"у папки защит {r.replace(HOME, '~')} не читается git remote — репозитории защит не "
-                        "установить. " + MERGE_OWNER)
-            protect_repos |= {_repo_tail(x) for x in remotes}
-    if repos:
-        cmd_repos = [_repo_arg(r) for r in repos]
-    else:
-        cmd_repos = _git_remotes(cwd)
-        if not cmd_repos:
-            return ("не понять репозиторий: папка не репозиторий git, у него нет remote или git не ответил. "
-                    + (protect_advice if is_metis else MERGE_INTERNAL))
-        resolved = _gh_resolved(cwd)
-        if resolved is None:
-            return ("не понять репозиторий: git config (gh-resolved, gh repo set-default) не читается. "
-                    + (protect_advice if is_metis else MERGE_INTERNAL))
-        cmd_repos = sorted(set(cmd_repos) | set(resolved))
-    # защиты — по пути и по репозиторию, раньше реестра: domains.json может по ошибке отдать agent-kit другому
-    protect = _inside(cwd, metis_roots) or any(_repo_tail(r) in protect_repos for r in cmd_repos)
-    repo_name = name  # чей [merge_repos]: направление по domains.json (в режиме 0.4.7 — имя из [merge])
-    if protect:
-        if not metis_ok:
-            return ("это защиты (папка или репозиторий metis-pantheon), а сессия запущена не Метидой. " + protect_advice +
-                    " Нужна правка защит — опиши её Метиде файлом в ~/ai/pantheon/directions/metis-pantheon/inbox/.")
-        advice = protect_advice
-    elif not isinstance(policy.get("merge_client"), dict):
-        # новая схема включается строкой [merge_client] в policy.toml (шаг Метиды); до неё — как в 0.4.7: сливают
-        # только направления из [merge], в его папках, -R — из [merge_repos] по имени из [merge]
-        merge = policy.get("merge")
-        found = next(((n, _norm(v)) for n, v in (merge.items() if isinstance(merge, dict) else ())
-                      if _str_list(v) and _inside(pdir, _norm(v))), None)
-        if not found:
-            return ("слияние делает владелец: новая схема не включена ([merge_client] в policy.toml нет), а "
-                    "направления нет в [merge]. " + MERGE_INTERNAL)
-        repo_name, roots = found
-        if not _inside(cwd, roots):
-            return "только из папки своего репозитория из [merge]. " + MERGE_INTERNAL
-        advice = MERGE_INTERNAL
-    else:
-        def listed(table):
-            t = policy.get(table)
-            v = _str_list(t.get(name)) if isinstance(t, dict) and name else None
-            return _norm(v) if v else []
-        client = listed("merge_client")
-        owner = _merge_owner(domains, cwd)
-        mine = owner == name if owner is not None else _inside(cwd, listed("merge") + client)
-        if not name or name == MERGE_AMBIGUOUS or not mine:
-            return ("только в папках своего направления (domains.json), а это чужая папка — её сливает свой "
-                    "координатор или владелец. " + MERGE_INTERNAL)
-        advice = MERGE_PRODUCT if _inside(cwd, client) else MERGE_INTERNAL
-    if why:
-        return f"{why}. {advice}"
-    if repos:
-        # -R — только репозиторий из [merge_repos] направления: сессия Фемиды стоит в legal-watch, а сливает и
-        # PR expert-corpus (themis-0015, ответ владельца 15.10 «А и Б»). Сверка по точному owner/repo на github.com
-        allowed = policy.get("merge_repos")
-        allowed = allowed.get(repo_name) if isinstance(allowed, dict) and repo_name else None
-        allowed = {r.strip().lower() for r in allowed if isinstance(r, str)} if isinstance(allowed, list) else set()
-        if not all(_merge_repo_ok(r, allowed) for r in repos):
-            return f"без чужого репозитория (-R): только из [merge_repos] своего направления. {advice}"
-        if not numbers:
-            return f"с -R PR указывай номером. {advice}"
-    # согласие — на защиты и на любой -R у Метиды: -R latark/agent-kit из внутренней папки иначе обошёл бы «да»
-    if protect or (is_metis and repos):
-        what = "слияние защит" if protect else "-R у Метиды"
-        # один номер, без --auto и один -R — и при снятом «да» ([merge_protect] consent = false, решение лида 15.10):
-        # сливается ровно тот PR, который проверен сейчас
-        if auto:
-            reason = ("слияние — сейчас, по проверенному PR, а не позже само" if consent_off
-                      else "согласие действует на момент слияния")
-            return f"{what} — без --auto: {reason}. {protect_advice}"
-        if len(numbers) != 1:
-            reason = "одно слияние — один проверенный PR" if consent_off else "«да» владельца — на этот PR"
-            return f"{what} — только с одним номером PR: {reason}. {protect_advice}"
-        if repos and len(set(cmd_repos)) != 1:
-            return f"{what} — с одним -R. {protect_advice}"
-        if consent_off:
-            # «да» снято: --subject, owner-log и отметки merge-consent/ не нужны и не трогаются, PENDING_CONSENT пуст
-            return None
-        ids = {(MERGE_CONSENT_ID.match(s) or [None, None])[1] for s in subjects}
-        if not subjects or None in ids or len(ids) != 1:
-            return f"{what} — только с --subject \"[metis-NNNN] …\" (id вопроса владельцу). {MERGE_PROTECT}"
-        qid = ids.pop()
-        bad = _marks_problem()
-        if bad:
-            return f"{bad} — одноразовость «да» не проверить. {MERGE_OWNER}"
-        tails = sorted({_repo_tail(r) for r in cmd_repos})
-        entry, repo, why = owner_consent(qid, numbers[0], set(tails))
-        if why:
-            return f"на {what} {why}. {MERGE_PROTECT}"
-        event = event or {}
-        rec = {"v": MERGE_MARK_V, "id": qid, "entry": entry, "repo": repo, "pr": numbers[0],
-               "used": time.strftime("%Y-%m-%d %H:%M:%S"), "session": event.get("session_id") or "",
-               "tool_use_id": event.get("tool_use_id") or ""}
-        old = _old_log_used(rec)
-        if old is None:
-            return ("старый журнал ~/.local/state/pantheon/logs/merge-consent-used.jsonl не читается или не "
-                    "разбирается — одноразовость «да» не проверить. " + MERGE_OWNER)
-        if old:
-            return (f"это «да» владельца на [{qid}] уже использовано (старый журнал): одно «да» — одно слияние, "
-                    f"нужен новый вопрос окном. {MERGE_PROTECT}")
-        used = _mark_state(rec)
-        if used is None:
-            return ("отметка использованного согласия в ~/.local/state/pantheon/merge-consent/ не читается (симлинк "
-                    "или не разбирается), поэтому одноразовость «да» не проверить. " + MERGE_OWNER)
-        if used == "other" or any(all(p[k] == rec[k] for k in ("id", "entry", "repo", "pr"))
-                                  for p, _ in PENDING_CONSENT):
-            return (f"это «да» владельца на [{qid}] уже использовано: одно «да» — одно слияние, нужен новый вопрос "
-                    f"окном. {MERGE_PROTECT}")
-        PENDING_CONSENT.append((rec, (qid, numbers[0], tails)))
-    return None
-
-
-def _merge_repo_ok(value, repos):
-    """-R для gh pr merge: owner/repo (или github.com/owner/repo) ровно из [merge_repos] направления."""
-    v = (value or "").strip().lower()
-    v = re.sub(r"^https?://", "", v)
-    v = re.sub(r"^github\.com/", "", v)
-    v = re.sub(r"(?:\.git)?/?$", "", v)
-    return bool(re.fullmatch(r"[a-z0-9_.-]+/[a-z0-9_.-]+", v)) and v in repos
+merge_gate.G = protect_config.G = sys.modules.get(__name__) or _Globals()
+from merge_gate import (MERGE_CLOSED, MERGE_LEADS, MERGE_INTERNAL, MERGE_PRODUCT, MERGE_PROTECT,  # noqa: E402,F401
+                        MERGE_OWNER, MERGE_AMBIGUOUS, CORE_FILES, merge_problem, _merge_args, _merge_repo_ok,
+                        _str_list, _repo_arg, _remote_id, _repo_tail, _git_remotes, _gh_resolved, _merge_domains,
+                        _merge_owner, read_records, review_problem)
+from protect_config import SETTINGS_NAMES, _settings_file, check_protect_config  # noqa: E402,F401
+PROTECTED = protect_config.protected()
+ARGUS_GIT_BAN = {"commit", "merge", "rebase", "cherry-pick", "am", "revert", "pull", "commit-tree"}
 
 
 def _gh_pr_sub(texts):
@@ -3254,9 +2636,18 @@ def check_push(event, tool, tool_input):
             if why:
                 return f"Правило push: gh pr merge — {why}"
             continue
+        if name and os.path.basename(name.rstrip("/")) == "pantheon":
+            why = review_problem(role, texts, tool_input.get("command") or "", bool(tool_input.get("run_in_background")))
+            if why:
+                return f"Правило push (запор слияния): {why}"
+            continue
         if name not in ("git", "?"):
             continue
         parsed = _git_sub(texts) if name == "git" else None
+        if role == "argus" and parsed and parsed[1] in ARGUS_GIT_BAN:
+            # рецензент не меняет то, что проверяет: вердикт argus — на чужой SHA (запор слияния, P1-4)
+            return (f"Правило push (запор слияния): argus не делает git {parsed[1]} — рецензент проверяет чужой "
+                    "коммит и не меняет его. Нашёл, что исправить, — верни «reject» и опиши в отчёте лиду.")
         if name == "?" and "push" not in texts:
             continue
         if name == "?" or (parsed and parsed[1] == "push"):
@@ -3407,10 +2798,21 @@ def hard(check, *args):
 
 
 def main():
+    try:
+        event = json.load(sys.stdin)
+    except ValueError:
+        if MODE == "plugin" and managed_guard_active():
+            return  # как раньше: хук плагина при управляемых настройках молчит, даже если события не разобрать
+        raise
+    name = event.get("hook_event_name") if isinstance(event, dict) else None
+    if name == "PostToolUse":
+        # запись журнала запора слияния (P1-4): только хук плагина и без проверки управляемых настроек — они
+        # PostToolUse не вызывают; --managed и --strict PostToolUse не обрабатывают. PostToolUseFailure — ничего
+        if MODE == "plugin" and "push" not in OFF:
+            soft(merge_gate.record, event)
+        return
     if MODE == "plugin" and managed_guard_active():
         return  # ту же проверку уже делает хук из управляемых настроек
-    event = json.load(sys.stdin)
-    name = event.get("hook_event_name")
     if name == "PreToolUse":
         tool, tool_input = event.get("tool_name"), event.get("tool_input") or {}
         reason = None
@@ -3435,9 +2837,6 @@ def main():
             reason = strict(check_protect_config, event, tool, tool_input)
         if not reason and "domain" not in OFF and (tool == "Bash" or tool in EDIT_TOOLS):
             reason = strict(check_domain, event, tool, tool_input)
-        if not reason and PENDING_CONSENT:
-            # одноразовость «да» на слияние: в журнал — только когда весь вызов разрешён (metis-0038)
-            reason = strict(commit_consent, event, tool, tool_input)
         if reason:
             print(json.dumps({"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",

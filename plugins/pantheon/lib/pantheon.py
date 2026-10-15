@@ -59,6 +59,12 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon approve [list] | add --site S --allow "…" [--limits "…"] | remove N   заранее разрешённое (только вы)
   pantheon consent <id> [--days N]      ваш ответ Зевсу на вопрос <id> (журнал owner-log Зевса, по умолчанию 7 дней) —
                                         для исполнителя: согласие, данное в окне Зевса
+  pantheon review test -- <команда…>    тесты для запора слияния (guard 0.5.4): в чистом дереве git запустить
+                                        команду (без оболочки); HEAD и дерево после неё те же — выход с её кодом
+                                        и SHA; запись в журнал делает хук guard (PostToolUse), сама команда не пишет
+  pantheon review accept|reject|talos <owner/repo> <PR> <SHA>   вердикт argus (accept, reject) или проверка talos на
+                                        этот SHA; проверяет формат, запись — хук guard и только по роли
+  pantheon review status [<owner/repo> <PR>]   записи журнала ~/.local/state/pantheon/merge-gate/records.jsonl
   pantheon commit                       commit → pull без rebase → push ~/ai/pantheon
   pantheon install | uninstall          поставить или снять задачу launchd com.latark.pantheon-tick
   pantheon tick                         один проход планировщика (его вызывает launchd)
@@ -3688,11 +3694,121 @@ def plugins_cmd(rest):
     return 2
 
 
+# --- review: записи для запора слияния guard (P1-4, guard 0.5.4) -------------------------------------------------
+# Сама команда ничего не пишет: журнал STATE/merge-gate/records.jsonl пишет хук guard на PostToolUse по успешной
+# простой команде `pantheon review …` и по agent_type сессии (accept, reject — argus, talos — talos). Поэтому
+# запись нельзя сделать текстом команды от чужой роли, а сама команда только проверяет условия и формат.
+REVIEW_SHA = re.compile(r"[0-9a-f]{40}")
+REVIEW_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+REVIEW_PR = re.compile(r"[1-9][0-9]{0,8}")
+REVIEW_USAGE = ("pantheon review test -- <команда…> | accept|reject|talos <owner/repo> <PR> <SHA 40 знаков> | "
+                "status [<owner/repo> <PR>]")
+
+
+def _review_git(*args):
+    """Вывод git в текущей папке (без переменных GIT_*); None — не репозиторий или сбой."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    try:
+        r = subprocess.run(["git", *args], capture_output=True, text=True, timeout=30, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _review_state():
+    """(HEAD, дерево чистое) текущей папки; HEAD None — не git или коммитов нет."""
+    head = (_review_git("rev-parse", "HEAD") or "").strip().lower()
+    status = _review_git("status", "--porcelain")
+    return (head if REVIEW_SHA.fullmatch(head) else None), (status is not None and not status.strip())
+
+
+def review_records(repo=None, pr=None):
+    """Записи журнала запора (битые строки пропускаются); файл — симлинк или не читается — пусто."""
+    try:
+        fd = os.open(os.path.join(STATE, "merge-gate", "records.jsonl"), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return []
+    out = []
+    with os.fdopen(fd, "rb") as fh:
+        for raw in fh:
+            try:
+                rec = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if not isinstance(rec, dict) or not isinstance(rec.get("repo"), list):
+                continue
+            if repo and repo.lower() not in [str(x).lower() for x in rec["repo"]]:
+                continue
+            if pr is not None and rec.get("pr") not in (pr, None):
+                continue
+            out.append(rec)
+    return out
+
+
+def review_cmd(rest):
+    sub = rest[0] if rest else ""
+    if sub == "test":
+        if len(rest) < 3 or rest[1] != "--":
+            print(f"pantheon review: {REVIEW_USAGE}", file=sys.stderr)
+            return 2
+        head, clean = _review_state()
+        if head is None:
+            print("pantheon review test: папка не репозиторий git или в нём нет коммитов", file=sys.stderr)
+            return 2
+        if not clean:
+            print("pantheon review test: дерево не чистое — закоммить или убери правки: тесты пишутся на коммит, "
+                  "а не на незакоммиченное", file=sys.stderr)
+            return 2
+        try:
+            rc = subprocess.run(rest[2:]).returncode
+        except OSError as e:
+            print(f"pantheon review test: команда не запустилась: {e}", file=sys.stderr)
+            return 127
+        head2, clean2 = _review_state()
+        if head2 != head or not clean2:
+            print(f"pantheon review test: команда изменила HEAD или дерево (было {head}, стало {head2 or '?'}, "
+                  f"чистое: {'да' if clean2 else 'нет'}) — запись не делается", file=sys.stderr)
+            return 3
+        print(head)
+        print(f"pantheon review test: код {rc} на {head}" + (" — запись тестов сделает хук guard" if rc == 0 else
+                                                             " — тесты не прошли, записи не будет"))
+        return rc
+    if sub in ("accept", "reject", "talos"):
+        args = rest[1:]
+        if len(args) != 3 or not REVIEW_REPO.fullmatch(args[0]) or not REVIEW_PR.fullmatch(args[1]) \
+                or not REVIEW_SHA.fullmatch(args[2].lower()):
+            print(f"pantheon review {sub} <owner/repo> <номер PR> <SHA 40 знаков> — аргументы не в этом формате "
+                  "(SHA — полный: gh pr view N --json headRefOid)", file=sys.stderr)
+            return 2
+        who = "argus" if sub != "talos" else "talos"
+        print(f"pantheon review {sub}: {args[0].lower()}#{args[1]} @ {args[2].lower()} — записано хуком guard, "
+              f"если роль подходит ({who})")
+        return 0
+    if sub == "status":
+        args = rest[1:]
+        if args and (len(args) != 2 or not REVIEW_REPO.fullmatch(args[0]) or not REVIEW_PR.fullmatch(args[1])):
+            print("pantheon review status [<owner/repo> <номер PR>]", file=sys.stderr)
+            return 2
+        recs = review_records(args[0] if args else None, int(args[1]) if args else None)
+        if not recs:
+            print("pantheon review status: записей нет")
+        for r in recs:
+            by = r.get("by") if isinstance(r.get("by"), dict) else {}
+            pr = f"#{r['pr']}" if r.get("pr") else ""
+            print(f"{r.get('time', '?')}  {r.get('kind', '?'):<6}  {','.join(map(str, r['repo']))}{pr}  "
+                  f"{str(r.get('sha', ''))[:12]}  {by.get('agent_type') or '—'}")
+        return 0
+    print(f"pantheon review: {REVIEW_USAGE}", file=sys.stderr)
+    return 2
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(__doc__)
         return 0
     cmd, rest = argv[0], argv[1:]
+    if cmd == "review":
+        return review_cmd(rest)
     if cmd == "tick":
         tick()
         return 0
