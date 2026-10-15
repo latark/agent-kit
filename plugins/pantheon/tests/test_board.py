@@ -172,6 +172,11 @@ def main():
     alog = [json.loads(x) for x in open(os.path.join(state, "owner-log", "board.jsonl")) if '"answer"' in x]
     check("ответ в журнале доски — вместе с текстом вопроса, который владелец видел",
           alog and alog[-1].get("id") == "metis-0002" and alog[-1].get("question") == h.get("question") and h.get("question"))
+    sys.path.insert(0, os.path.join(os.path.dirname(LIB)))
+    import tasks as T
+    check("вопрос для журнала берётся из карточки: до «Почему сейчас» и вариантов",
+          T.seen_question("## ❓ Нужно решить\n\nЗавести направление x?\n\n**Почему сейчас:** y\n\n- [x] Да") == "Завести направление x?"
+          and T.seen_question("без вопроса") == "")
     check("прежнее поле «Заметка агенту» со старой карточки: в «Заметки владельца» задачи, поля в карточке больше нет",
           "## Заметки владельца" in text and "  > Сделайте как проще" in text and "Заметка агенту" not in ct
           and "> Сделайте как проще" in ct)

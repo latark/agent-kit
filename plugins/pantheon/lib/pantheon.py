@@ -1675,10 +1675,13 @@ APPROVALS_HEAD = """# Заранее разрешённые действия м�
 
 def owner_approved(name, days=14):
     """Ваше «да» новому направлению: в журнале доски owner-log/board.jsonl (его пишет тик по вашей галочке, роли туда
-    не пишут) ответ, который начинается с «Да», на вопрос, где названо это имя; ответу не больше days дней. Текст
-    вопроса тик пишет в журнал в момент ответа — правка карточки после вашего ответа ничего не меняет."""
+    не пишут) ответ «Да…» на вопрос «Завести направление <имя>?»; ответу не больше days дней. Текст вопроса тик берёт
+    из отмеченной вами карточки (её рисует тик) — правка файла задачи до или после ответа ничего не меняет."""
     since = now() - days * 86400
-    word = re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])")
+    # вопрос — ровно «Завести направление <имя>?» в начале, без скрытого Obsidian текста (%%…%%, <!-- -->, теги):
+    # имя должно быть там, где вы его видите; ответ — «Да» отдельным словом («Давай позже» — не согласие)
+    ask = re.compile(rf"Завести направление [`«\"]?{re.escape(name)}[`»\"]?(?![\w-])")
+    yes = re.compile(r"да(?![а-яёa-z0-9])", re.I)
     try:
         lines = open(path("owner-log", "board.jsonl"), encoding="utf-8").read().splitlines()
     except OSError:
@@ -1689,8 +1692,9 @@ def owner_approved(name, days=14):
             ts = time.mktime(time.strptime(rec.get("time", "")[:19], "%Y-%m-%dT%H:%M:%S"))
         except (ValueError, TypeError, AttributeError):
             continue
-        if (rec.get("kind") == "answer" and ts >= since and word.search(str(rec.get("question") or ""))
-                and str(rec.get("answer") or "").strip().casefold().startswith("да")):
+        q = rec.get("question")
+        if (rec.get("kind") == "answer" and ts >= since and isinstance(q, str) and ask.match(q.strip())
+                and not re.search(r"%%|<", q) and yes.match(str(rec.get("answer") or "").strip())):
             return True
     return False
 
