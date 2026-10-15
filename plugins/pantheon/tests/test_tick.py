@@ -330,6 +330,13 @@ def main():
     check("окна направлений: worktree от HEAD (эпик), у мастерской — нет; места heavy созданы",
           sa["worktree"] == {"baseRef": "head"} and sm["worktree"] == {"baseRef": "head"} and "worktree" not in sw
           and os.path.exists(os.path.join(state, "locks", "heavy-cmd-2.lock")))
+    # голый mktemp на macOS пишет в /var/folders/…/T (_CS_DARWIN_USER_TEMP_DIR раньше TMPDIR); владелец 15.10 решил не
+    # открывать эту общую временную папку всех программ, а роли берут `mktemp -p "$TMPDIR"` (metis-0091)
+    every = (sa, sm, sw, sn, sz, hq)
+    wide = [x for w in every for x in w["sandbox"]["filesystem"]["allowWrite"] + list(w["env"].values())
+            if "/var/folders" in x or x.rstrip("/") in ("/var", "/private/var", "/private")]
+    check("временные файлы: /var/folders не открыт ни одному окну, TMPDIR окно не подменяет (metis-0091, решение 15.10)",
+          not wide and not any("TMPDIR" in w["env"] for w in every))
 
     merge = "Bash(gh pr merge *)"
     check("окно координатора направления: gh pr merge в permissions.allow; у мастерской и штаба правила нет (metis-0050)",
