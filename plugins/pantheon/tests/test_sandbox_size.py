@@ -72,7 +72,7 @@ def main():
     own = dash(home)
     projects = os.path.join(tmp, ".claude", "projects")
     mine = [own, own + "--claude-worktrees-x"]
-    foreign = [dash(tmp) + "-projects-br", dash(tmp), own + "-view", "-private-tmp-x", "tmp.Ab12", "zz"]
+    foreign = [dash(tmp) + "-projects-br", dash(tmp), own + "-view", "-private-tmp-x", "tick-test-ab12", "zz"]
     for n in mine + foreign:
         os.makedirs(os.path.join(tasks, n))
         os.makedirs(os.path.join(projects, n, "s1", "tool-results"))
@@ -118,8 +118,11 @@ def main():
           all(not sb_closed(p) and not rd_closed(p) for p in ours) and "allowRead" not in fs2)
     # корень CLAUDE_TMP — $TMPDIR песочницы: heredoc zsh ($TMPPREFIX=$TMPDIR/zsh), mktemp, tempfile (argus 15.10)
     roots = [os.path.join(tasks, n) for n in ("zshAbC123", "tmp.Xy12ab", "tmpk3j_x9", "guard-test-x.log", "a.txt")]
-    check("временные файлы в корне $TMPDIR (heredoc, mktemp) читаются: песочница и правило Read их не задевают",
+    roots += [os.path.join(tasks, n, "f.txt") for n in ("tmp.Zeus1", "tmpk3j_x9", "tmp")]  # mktemp -d, mkdtemp
+    check("временные файлы и папки штаба в корне $TMPDIR (heredoc, mktemp, mktemp -d, mkdtemp) читаются",
           all(not sb_closed(p) and not rd_closed(p) for p in roots))
+    check("чужие папки на «t» (tick-test-*) закрыты, шаблон не задевает tmp*",
+          sb_closed(os.path.join(tasks, "tick-test-ab12", "x")) and rd_closed(os.path.join(tasks, "tick-test-ab12", "x")))
     check("tool-results: чужие закрыты правилом Read, свои — нет",
           all(rd_closed(os.path.join(projects, n, "s1", "tool-results", "x.txt")) for n in foreign)
           and not any(rd_closed(os.path.join(projects, n, "s1", "tool-results", "x.txt")) for n in mine))

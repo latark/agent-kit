@@ -1396,18 +1396,18 @@ except ValueError:
 GLOB_SAFE = re.compile(r"[A-Za-z0-9._-]+")
 
 
-def _others_globs(names, own):
+def _others_globs(names, own, keep=()):
     """Папки чужих сессий среди names → немного шаблонов «<префикс>*» (и точных имён), ни один из которых не совпадает
-    со своими: own и own--claude-worktrees-*. Префикс — до первой буквы, где имя расходится со всеми своими, поэтому
-    тысячи guard-test-* дают один «g*»: список не растёт с числом папок. Имя с символами шаблона пропускается —
-    вернётся в skipped."""
+    со своими: own, own--claude-worktrees-* и имена на префиксы keep (они остаются открыты). Префикс — до первой
+    буквы, где имя расходится со всеми своими, поэтому тысячи guard-test-* дают один «g*»: список не растёт с числом
+    папок. Имя с символами шаблона пропускается — вернётся в skipped."""
     wt = own + "--claude-worktrees-"
+    mine = (own, wt) + tuple(keep)
     out, skipped = set(), []
     for n in names:
-        if n == own or n.startswith(wt):
+        if n == own or n.startswith(wt) or n.startswith(tuple(keep)):
             continue
-        p = next((n[:i] for i in range(1, len(n) + 1)
-                  if not (own.startswith(n[:i]) or wt.startswith(n[:i]))), None)
+        p = next((n[:i] for i in range(1, len(n) + 1) if not any(m.startswith(n[:i]) for m in mine)), None)
         x = n if p is None else p + "*"
         if GLOB_SAFE.fullmatch(n if p is None else p):
             out.add(x)
@@ -1660,19 +1660,21 @@ def sandbox_build(domains, policy_path, stores=None):
     # - закрыто содержимое чужих папок CLAUDE_TMP («<префикс>*/*» и «<префикс>*/*/**»), а не сами имена: CLAUDE_TMP —
     #   и общий $TMPDIR песочницы, в его корне лежат временные файлы Bash (heredoc zsh — $TMPPREFIX, mktemp, tempfile).
     #   Шаблон «<префикс>*» закрыл бы и их, а Claude Code срезает хвост «/**» и запрет-шаблон закрывает всё поддерево.
+    #   Имена на «tmp» не закрываются: это временные папки самого штаба (mktemp -d — tmp.XXXX, tempfile — tmpXXXX),
+    #   новая закрылась бы с момента создания. Цена — чужие tmp*-папки открыты (в 0.11.16 так же до пересборки);
     #   Корень открыт, как было до 0.11.17; allowRead не нужен (разрешение-шаблон в Seatbelt — точное имя, без поддерева)
     dash = lambda p: re.sub(r"[^A-Za-z0-9]", "-", p)  # noqa: E731
     own, home_d = dash(os.path.realpath(PANTHEON)), dash(os.path.realpath(HOME))
     tasks, projects = CLAUDE_TMP, os.path.join(HOME, ".claude", "projects")
     files = ["~/.claude/projects/**/*.jsonl", f"~/.claude/projects/{home_d}-projects-*/**/tool-results/**",
              f"{tasks}/{home_d}-projects-*/*", f"{tasks}/{home_d}-projects-*/*/**"]
-    for base, short, tails in ((projects, "~/.claude/projects", ("/**/tool-results/**",)),
-                               (tasks, tasks, ("/*", "/*/**"))):
+    for base, short, tails, keep in ((projects, "~/.claude/projects", ("/**/tool-results/**",), ()),
+                                     (tasks, tasks, ("/*", "/*/**"), ("tmp",))):
         try:
             names = os.listdir(base)
         except OSError:
             names = []
-        globs, skipped = _others_globs(names, own)
+        globs, skipped = _others_globs(names, own, keep)
         files += [f"{short}/{g}{tail}" for g in globs for tail in tails]
         if skipped:
             print(f"песочница hq: имена с символами шаблона в {short} не закрыты: {skipped[:5]}",
