@@ -18,9 +18,10 @@
                  metis-pantheon в своей сессии; остальные роли и любые субагенты — нет (SEC-14);
   private      — личное (me/, ключи git-crypt, журнал штаба) читают и пишут только hq, chiron и mnemo-brain (SEC-11);
   cdp-role     — демон браузера с вашими входами — только мастерская и prometheus (чтение), /close — никому (SEC-13);
-  push         — git push: координатор, лиды и мастерская, не в main и master; gh pr merge — только главная сессия
-                 координатора в папках своего направления (domains.json, [merge], [merge_client]); защиты — папки
-                 metis-pantheon и их репозитории по git remote — только Метида по «да» владельца на этот PR в окне
+  push         — git push: координатор, лиды и мастерская, не в main и master; gh pr merge — главная сессия
+                 координатора или его лид (hephaestus-/apollo-<направление> субагентом, metis-0054) в папках своего
+                 направления (domains.json, [merge], [merge_client]); защиты — папки metis-pantheon и их
+                 репозитории по git remote — только Метида или её лид по «да» владельца на этот PR в окне
                  вопросов Зевса (--subject "[metis-NNNN] …"), одно «да» — одно слияние; -R — только из [merge_repos],
                  у Метиды — тоже по «да»; [merge_protect] consent = false в policy.toml снимает это «да», остальное
                  остаётся (один номер PR, без --auto); любой сбой — отказ (DONE-07, metis-0027, themis-0015,
@@ -2286,7 +2287,10 @@ def check_protect_config(event, tool, tool_input):
 #   push     (DONE-07, SEC-13) — git push: только координатор, лиды (hephaestus-*, apollo-*) и мастерская; в main и
 #            master — никто из ролей (в main сливаете вы); --all, --mirror, удаление и принудительная отправка — тоже
 #            нет. gh pr merge (metis-0038, guard 0.5.0) — только главная сессия domain-coordinator, без cd в
-#            команде. Защиты — cwd в папках [coordinators] metis-pantheon или репозиторий команды (-R, иначе git
+#            команде, или её лид (metis-0054, guard 0.5.2): субагент hephaestus-<short> или apollo-<short>, где short —
+#            имя направления папки запуска (domains.json) после первого «-», как собирает pantheon roles build; дальше
+#            лид проверяется как координатор (личное, Метида, защиты, согласие). Лид чужого направления, сессия без
+#            направления и остальные субагенты (dev-*, argus, talos…) — отказ. Защиты — cwd в папках [coordinators] metis-pantheon или репозиторий команды (-R, иначе git
 #            remote папки cwd) совпадает с remote этих папок: только Метида, с --subject "[metis-NNNN] …", номером PR
 #            и записью «· окно вопросов» на этот id и этот PR в owner-log/zeus.md за сутки (решает последняя), без
 #            --auto; использованное «да» — отметка-файл в merge-consent/, второй раз — отказ. Своё направление
@@ -2298,7 +2302,7 @@ def check_protect_config(event, tool, tool_input):
 #            logs/merge-consent-used.jsonl — отказ.
 #            [merge_protect] consent = false (metis-0049, guard 0.5.2; решение владельца 15.10: агенты сливают все PR
 #            сами) снимает только «да» владельца: --subject, owner-log и отметки merge-consent/ не нужны и не
-#            трогаются. Остаётся: только главная сессия Метиды, один номер PR, без --auto, один -R из [merge_repos],
+#            трогаются. Остаётся: только Метида или её лид, один номер PR, без --auto, один -R из [merge_repos],
 #            без cd и GH_REPO/GH_HOST, сбой — отказ. Снято только при bool false в таблице; нет таблицы или ключа,
 #            "false", 0 — «да» обязательно.
 #   terminal (SEC-30) — ввод в терминал: osascript, tmux send-keys, screen -X stuff, cliclick. Такой ввод Claude Code
@@ -2612,16 +2616,18 @@ def push_problem(texts, cwd, moved):
     return None
 
 
-MERGE_CLOSED = ("слияние делает только главная сессия координатора направления. Вместо него отправь свою ветку, "
-                "открой PR (gh pr create) и в отчёте координатору напиши, что проверено и что меняется.")
+MERGE_CLOSED = ("слияние делает лид направления (hephaestus-*, apollo-* субагентом) или главная сессия его "
+                "координатора. Вместо него отправь свою ветку, открой PR (gh pr create) и в отчёте лиду напиши, что "
+                "проверено и что меняется.")
+MERGE_LEADS = ("hephaestus", "apollo")  # лиды: <база>-<направление после первого «-»>, как их собирает pantheon roles build
 MERGE_INTERNAL = "Внутреннее сливай после зелёных тестов и «принять» от argus."
 MERGE_PRODUCT = ("Продукт для клиентов сливай после зелёных тестов и «принять» от argus, плюс проверка talos, "
                  "строка Зевсу «что ушло», откат одной командой в STATUS.")
-MERGE_PROTECT = ("Защиты сливает только Метида по «да» владельца в окне вопросов Зевса: вопрос владельцу через Зевса "
+MERGE_PROTECT = ("Защиты сливает только Метида или её лид по «да» владельца в окне вопросов Зевса: вопрос владельцу через Зевса "
                  "окном вопросов «[metis-NNNN] Слить https://github.com/<owner>/<repo>/pull/N?», затем "
                  "gh pr merge N --subject \"[metis-NNNN] …\". Вариант согласия Зевс пишет «Да — …». Одно «да» — одно "
                  "слияние.")
-MERGE_PROTECT_AUTO = ("Защиты сливает только Метида после зелёных тестов и «принять» от argus: gh pr merge N — один "
+MERGE_PROTECT_AUTO = ("Защиты сливает только Метида или её лид после зелёных тестов и «принять» от argus: gh pr merge N — один "
                       "номер PR, без --auto, -R только из [merge_repos]. Поштучное «да» владельца снято "
                       "([merge_protect] consent = false в policy.toml).")
 MERGE_OWNER = "Слияние делает владелец."
@@ -3018,16 +3024,23 @@ def _merge_args(args):
 
 
 def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
-    """gh pr merge (metis-0038, guard 0.5.0). Сливает только главная сессия координатора направления.
+    """gh pr merge (metis-0038, guard 0.5.0). Сливает главная сессия координатора направления или его лид
+    (metis-0054): субагент hephaestus-<short> или apollo-<short>, где short — имя направления папки запуска после
+    первого «-» (hermes-alex → alex). Дальше лид проверяется как координатор: личное, Метида, защиты — те же правила.
     Режим: защиты — cwd в папках [coordinators] metis-pantheon или репозиторий команды (-R или remote папки cwd)
-    совпадает с remote этих папок: только Метида, по «да» владельца на этот PR в окне вопросов Зевса, одно «да» —
-    одно слияние; продукт ([merge_client]) и внутреннее (своё направление по domains.json, для совместимости —
-    [merge]) — можно. [merge_protect] consent = false (metis-0049) снимает только «да» владельца (--subject, owner-log,
-    отметки merge-consent/): защиты и -R у Метиды — по-прежнему только главная сессия Метиды, один номер PR, без
-    --auto, один -R из [merge_repos], без cd и GH_REPO. Любой сбой (политика, реестр, git, журналы) — отказ. Тесты, вердикт argus, проверку talos и
-    откат guard не видит — их делает роль. Возвращает текст отказа (с тем, что делать вместо) или None."""
-    if role != "domain-coordinator" or sub:
+    совпадает с remote этих папок: только Метида (или её лид), по «да» владельца на этот PR в окне вопросов Зевса,
+    одно «да» — одно слияние; продукт ([merge_client]) и внутреннее (своё направление по domains.json, для
+    совместимости — [merge]) — можно. [merge_protect] consent = false (metis-0049) снимает только «да» владельца
+    (--subject, owner-log, отметки merge-consent/): защиты и -R у Метиды — по-прежнему только Метида или её лид,
+    один номер PR, без --auto, один -R из [merge_repos], без cd и GH_REPO. Любой сбой (политика, реестр, git,
+    журналы) — отказ. Тесты, вердикт argus, проверку talos и откат guard не видит — их делает роль. Возвращает текст
+    отказа (с тем, что делать вместо) или None."""
+    lead = bool(sub) and role.startswith(PANTHEON_ROLE_PREFIXES)
+    if not lead and (role != "domain-coordinator" or sub):
         return MERGE_CLOSED
+    lead_role = role
+    if lead:
+        role = "domain-coordinator"  # лид сливает за координатора: privileged() ниже — по роли координатора
     policy = load_policy()
     coords = policy.get("coordinators")
     if not isinstance(coords, dict):
@@ -3051,7 +3064,15 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
     if domains is None:
         return "реестр направлений ~/.local/state/pantheon/domains.json пуст или не разбирается. " + MERGE_OWNER
     name = _merge_owner(domains, pdir)
-    metis_ok = privileged(policy, "metis-pantheon", role, pdir)
+    if lead:
+        # лид — только своего направления: имя роли собирает pantheon roles build из имени направления
+        short = name.split("-", 1)[1] if name and name != MERGE_AMBIGUOUS and "-" in name else None
+        if not short or lead_role not in {f"{b}-{short}" for b in MERGE_LEADS}:
+            return (f"{lead_role} — не лид направления этой сессии ({name if short else 'направление не установлено'}): "
+                    "лид сливает только PR своего направления. " + MERGE_CLOSED)
+    # лид получает права Метиды только как лид metis-pantheon: папка из её [coordinators], которую реестр по ошибке
+    # отдал другому направлению, лиду того направления защиты не открывает
+    metis_ok = privileged(policy, "metis-pantheon", role, pdir) and (not lead or name == "metis-pantheon")
     is_metis = metis_ok or name == "metis-pantheon"
     if moved:
         return "только из папки своего репозитория, без cd в команде. " + (protect_advice if is_metis else MERGE_INTERNAL)

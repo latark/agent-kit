@@ -512,7 +512,7 @@ def merge_security_checks(home, MERGE_OK, cases):
           got == (MERGE_OK, MERGE_OK) and not os.path.lexists(mark_dir(h)))
     got = (M(h, "gh pr merge 5", pdir=br, cwd=ak), M(h, "gh pr merge 5", pdir=br, cwd=ak + "/sub"),
            run(h, ak, "domain-coordinator", "Bash", {"command": "gh pr merge 5"}, sub=True),
-           run(h, ak, "hephaestus-pantheon", "Bash", {"command": "gh pr merge 5"}, sub=True),
+           run(h, ak, "dev-sonnet", "Bash", {"command": "gh pr merge 5"}, sub=True),
            M(h, "gh pr merge 5 --auto"), M(h, "gh pr merge 5 6"), M(h, "gh pr merge 3 -R latark/tg-read --auto", cwd=tg),
            M(h, "gh pr merge 3 -R latark/alexbroker", cwd=tg), M(h, "gh pr merge 5 -R latark/agent-kit", cwd=tg),
            M(h, f"cd {h}/{ak} && gh pr merge 5", cwd=tg), M(h, "GH_REPO=latark/agent-kit gh pr merge 5"))
@@ -521,7 +521,41 @@ def merge_security_checks(home, MERGE_OK, cases):
     out = M(h, "gh pr merge 5 --auto", raw=True)
     check("consent = false: отказ не просит «да» владельца, а называет [merge_protect]",
           deny(out) and (("[merge_protect]" in out and "окн" not in out and "--subject" not in out) or not allow_ok))
+    # metis-0054: лид Метиды (hephaestus-pantheon субагентом) — по тем же правилам, что Метида
+    def L(h, cmd, role="hephaestus-pantheon", pdir=ak, cwd=None, raw=False):
+        return run(h, pdir, role, "Bash", {"command": cmd}, sub=True, cwd=cwd, raw=raw)
+    got = (L(h, "gh pr merge 5 --squash"), L(h, "gh pr merge 3 -R latark/tg-read", cwd=tg))
+    check(f"consent = false: лид Метиды сливает защиты без --subject и -R из [merge_repos] — можно: {got}",
+          got == (MERGE_OK, MERGE_OK))
+    got = (L(h, "gh pr merge 5 --auto"), L(h, "gh pr merge 5 6"), L(h, "gh pr merge 3 -R latark/alexbroker", cwd=tg),
+           L(h, "gh pr merge 3 -R latark/tg-read -R latark/agent-kit", cwd=tg),
+           L(h, "gh pr merge 5", pdir=br, cwd=ak), L(h, "gh pr merge 5", role="hephaestus-broker"),
+           L(h, "gh pr merge 5", role="apollo-pantheon", pdir="ai/pantheon", cwd=ak))
+    check(f"consent = false: лид Метиды с --auto, двумя номерами, -R вне [merge_repos], двумя -R; лид Афины в "
+          f"agent-kit и из своей сессии; лид в сессии штаба — отказ: {got}", got == ("deny",) * 7)
     check(f"consent = false: отметок в merge-consent/ не появилось: {marks(h)}", not os.path.lexists(mark_dir(h)))
+    # metis-0054: кто не лид — отказ с текстом «сливает лид или координатор, остальные — PR и отчёт лиду»
+    for r in ("dev-sonnet", "argus", "talos", "prometheus", "hephaestus", "hephaestus-"):
+        out = L(home, "gh pr merge 1", role=r, pdir=br, raw=True)
+        check(f"merge: {r} субагентом — отказ, текст про лида и отчёт лиду",
+              deny(out) and (("лид направления" in out and "отчёте лиду" in out) or not allow_ok))
+    out = L(home, "gh pr merge 4", role="hephaestus-broker", pdir=alex, raw=True)
+    check("merge: лид чужого направления (hephaestus-broker в сессии hermes-alex) — отказ, текст про своё направление",
+          deny(out) and ("не лид направления этой сессии (hermes-alex)" in out or not allow_ok))
+    out = L(home, "gh pr merge 1", role="hephaestus-broker", pdir=br, raw=True)
+    check("merge: лид своего направления — можно (текст отказа не про лида)",
+          (allow_ok and not deny(out)) or (not allow_ok and "не лид" not in out))
+    # реестр «по ошибке» отдал agent-kit/sub Афине (athena-broker-2): его лид — hephaestus-broker-2, защиты ему закрыты
+    got = (L(home, "gh pr merge 5", role="hephaestus-broker-2", pdir=ak + "/sub"),
+           L(home, 'gh pr merge 5 -t "[metis-0038] x"', role="hephaestus-broker-2", pdir=ak + "/sub"))
+    check(f"merge: лид athena-broker-2 в agent-kit/sub (защиты) — отказ и с согласием Метиды: {got}",
+          got == ("deny", "deny"))
+    # лид mnemo-brain: у направления личное — как и координатор, не сливает
+    h = variant(domains_fn=lambda t: json.dumps(dict(json.loads(t), domains=dict(
+        json.loads(t)["domains"], **{"mnemo-brain": ["~/ai/knowledge"]}))))
+    out = L(h, "gh pr merge 1", role="hephaestus-brain", pdir="ai/knowledge", raw=True)
+    check("merge: лид mnemo-brain (hephaestus-brain) — отказ, у направления личное",
+          deny(out) and ("личному" in out or not allow_ok))
     # «да» снимается только булевым false в таблице: остальное — как раньше, --subject и согласие обязательны
     for label, fn in (("consent = true", lambda t: t + "[merge_protect]\nconsent = true\n"),
                       ("таблица без ключа", lambda t: t + "[merge_protect]\n"),
@@ -1004,7 +1038,10 @@ def main():
          B("gh pr merge https://github.com/latark/alexbroker/pull/1")),
         ("merge: Фемида через cd в чужую папку — отказ", "deny", ec, "domain-coordinator", False,
          B(f"cd {home}/{alex} && gh pr merge 1")),
-        ("merge: субагент Фемиды — отказ", "deny", ec, "hephaestus-sources", True, B("gh pr merge 1")),
+        ("merge: лид Фемиды (hephaestus-sources) — можно (metis-0054)", MERGE_OK, ec, "hephaestus-sources", True,
+         B("gh pr merge 1")),
+        ("merge: лид Фемиды с --admin — отказ", "deny", ec, "hephaestus-sources", True, B("gh pr merge 1 --admin")),
+        ("merge: dev-sonnet Фемиды — отказ", "deny", ec, "dev-sonnet", True, B("gh pr merge 1")),
         ("merge: Фемида с GH_REPO — отказ", "deny", ec, "domain-coordinator", False,
          B("GH_REPO=latark/alexbroker gh pr merge 1")),
         ("merge: Фемида gh pr -R … merge — отказ", "deny", ec, "domain-coordinator", False,
@@ -1048,7 +1085,11 @@ def main():
          B("gh pr merge 2 -R latark/expert-corpus --admin")),
         ("merge -R: $REPO вместо имени — отказ", "deny", lw, "domain-coordinator", False,
          B("gh pr merge 2 -R $REPO")),
-        ("merge -R: субагент Фемиды — отказ", "deny", lw, "hephaestus-sources", True,
+        ("merge -R: лид Фемиды из [merge_repos] — можно", MERGE_OK, lw, "hephaestus-sources", True,
+         B("gh pr merge 2 -R latark/expert-corpus")),
+        ("merge -R: лид Фемиды вне [merge_repos] — отказ", "deny", lw, "hephaestus-sources", True,
+         B("gh pr merge 2 -R latark/alexbroker")),
+        ("merge -R: dev-sonnet Фемиды — отказ", "deny", lw, "dev-sonnet", True,
          B("gh pr merge 2 -R latark/expert-corpus")),
         ("merge -R: Афина с репо Фемиды — отказ", "deny", br, "domain-coordinator", False,
          B("gh pr merge 2 -R latark/expert-corpus")),
@@ -1079,13 +1120,23 @@ def main():
          B("gh pr merge 4"), br),
         ("merge 0.5: Гермес из своей папки с cd в чужую — отказ", "deny", alex, "domain-coordinator", False,
          B(f"cd {home}/{br} && gh pr merge 4")),
-        ("merge 0.5: субагент Гермеса — отказ", "deny", alex, "hephaestus-alex", True, B("gh pr merge 4")),
+        ("merge 0.5: лид Гермеса hephaestus-alex — можно", MERGE_OK, alex, "hephaestus-alex", True, B("gh pr merge 4")),
+        ("merge 0.5: лид дизайна Гермеса apollo-alex — можно", MERGE_OK, alex, "apollo-alex", True, B("gh pr merge 4")),
+        ("merge 0.5: лид Гермеса в чужой папке (cwd без cd) — отказ", "deny", alex, "hephaestus-alex", True,
+         B("gh pr merge 4"), br),
+        ("merge 0.5: лид Гермеса в сессии Афины — отказ", "deny", br, "hephaestus-alex", True, B("gh pr merge 4")),
+        ("merge 0.5: лид Афины в сессии Гермеса — отказ", "deny", alex, "hephaestus-broker", True, B("gh pr merge 4")),
+        ("merge 0.5: dev-sonnet Гермеса — отказ", "deny", alex, "dev-sonnet", True, B("gh pr merge 4")),
         # продукт: [merge_client] — пропуск так же, папка из [merge_client] вне domains.json — тоже
         ("merge 0.5: Афина в brokerAssistantApp — можно", MERGE_OK, br, "domain-coordinator", False,
          B("gh pr merge 7 --squash --delete-branch")),
         ("merge 0.5: Афина в папке [merge_client] вне domains.json — можно", MERGE_OK, br, "domain-coordinator", False,
          B("gh pr merge 7"), "projects/broker-landing"),
-        ("merge 0.5: субагент Афины в продукте — отказ", "deny", br, "hephaestus-broker", True, B("gh pr merge 7")),
+        ("merge 0.5: лид Афины в продукте — можно", MERGE_OK, br, "hephaestus-broker", True, B("gh pr merge 7")),
+        ("merge 0.5: apollo-broker в [merge_client] вне domains.json — можно", MERGE_OK, br, "apollo-broker", True,
+         B("gh pr merge 7"), "projects/broker-landing"),
+        ("merge 0.5: лид Гермеса в [merge_client] Афины — отказ", "deny", alex, "hephaestus-alex", True,
+         B("gh pr merge 7"), "projects/broker-landing"),
         ("merge 0.5: Гермес в продукте Афины — отказ", "deny", alex, "domain-coordinator", False, B("gh pr merge 7"), br),
         ("merge 0.5: Гермес в [merge_client] Афины — отказ", "deny", alex, "domain-coordinator", False,
          B("gh pr merge 7"), "projects/broker-landing"),
@@ -1099,6 +1150,13 @@ def main():
         ("merge 0.5: лид главной сессией — отказ", "deny", br, "hephaestus-broker", False, B("gh pr merge 1")),
         ("merge 0.5: dev-opus — отказ", "deny", br, "dev-opus", True, B("gh pr merge 1")),
         ("merge 0.5: argus — отказ", "deny", br, "argus", True, B("gh pr merge 1")),
+        ("merge 0.5: talos — отказ", "deny", br, "talos", True, B("gh pr merge 1")),
+        ("merge 0.5: prometheus — отказ", "deny", br, "prometheus", True, B("gh pr merge 1")),
+        ("merge 0.5: лид без agent_type-префикса (general-purpose) — отказ", "deny", br, "general-purpose", True,
+         B("gh pr merge 1")),
+        ("merge 0.5: лид в сессии штаба (~/ai/pantheon) — отказ", "deny", "ai/pantheon", "hephaestus-pantheon", True,
+         B("gh pr merge 1"), ak),
+        ("merge 0.5: лид в мастерской — отказ", "deny", ws, "hephaestus-workshop", True, B("gh pr merge 1")),
         ("merge 0.5: mnemo-brain в ~/ai/knowledge — отказ", "deny", "ai/knowledge", "domain-coordinator", False,
          B("gh pr merge 1")),
         # защиты: только Метида и только по «да» владельца в окне вопросов Зевса
@@ -1147,8 +1205,23 @@ def main():
          B('gh pr merge 5 --admin --subject "[metis-0038] guard"')),
         ("защиты: субагент dev-opus Метиды — отказ", "deny", ak, "dev-opus", True,
          B('gh pr merge 5 --subject "[metis-0038] guard"')),
-        ("защиты: hephaestus-pantheon (субагент) — отказ", "deny", ak, "hephaestus-pantheon", True,
+        ("защиты: лид Метиды с согласием — можно (metis-0054)", MERGE_OK, ak, "hephaestus-pantheon", True,
          B('gh pr merge 5 --subject "[metis-0038] guard"')),
+        ("защиты: лид Метиды без --subject — отказ", "deny", ak, "hephaestus-pantheon", True, B("gh pr merge 5")),
+        ("защиты: лид Метиды без согласия на этот id — отказ", "deny", ak, "hephaestus-pantheon", True,
+         B('gh pr merge 5 --subject "[metis-0039] guard"')),
+        ("защиты: лид Метиды с --auto — отказ", "deny", ak, "hephaestus-pantheon", True,
+         B('gh pr merge 5 --auto --subject "[metis-0038] guard"')),
+        ("защиты: лид Метиды с двумя номерами — отказ", "deny", ak, "hephaestus-pantheon", True,
+         B('gh pr merge 5 6 --subject "[metis-0038] guard"')),
+        ("защиты: apollo-pantheon с согласием — можно", MERGE_OK, ak, "apollo-pantheon", True,
+         B('gh pr merge 5 --subject "[metis-0038] guard"')),
+        ("защиты: лид Афины в agent-kit с согласием Метиды — отказ", "deny", br, "hephaestus-broker", True,
+         B('gh pr merge 5 --subject "[metis-0038] guard"'), ak),
+        ("Метида внутреннее: лид без -R — можно без согласия", MERGE_OK, ak, "hephaestus-pantheon", True,
+         B("gh pr merge 3 --squash"), "projects/other/tg-read-dev"),
+        ("Метида внутреннее: лид с -R без согласия — отказ", "deny", ak, "hephaestus-pantheon", True,
+         B("gh pr merge 3 -R latark/tg-read"), "projects/other/tg-read-dev"),
         ("защиты: другой координатор в agent-kit — отказ", "deny", br, "domain-coordinator", False,
          B('gh pr merge 5 --subject "[metis-0038] guard"'), ak),
         ("защиты: реестр отдал agent-kit/sub Афине — отказ", "deny", br, "domain-coordinator", False,
@@ -1298,7 +1371,7 @@ def main():
         "личное": run(home, "ai/knowledge", "domain-coordinator", "Bash", {"command": "gh pr merge 1"}, raw=True),
     }
     if MERGE_OK == "allow":
-        want = {"закрыто": ("gh pr create", "отчёте координатору"), "внутреннее": ("argus", "--admin"),
+        want = {"закрыто": ("gh pr create", "отчёте лиду"), "внутреннее": ("argus", "--admin"),
                 "продукт": ("talos", "Зевсу", "откат"), "защиты": ("окном вопросов", "--subject", "[metis-NNNN]"),
                 "личное": ("личному",)}
         ok = all('"deny"' in texts[k] and all(w in texts[k] for w in ws) for k, ws in want.items()) \
