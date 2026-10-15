@@ -140,7 +140,7 @@ def main():
 
     # --- окна ---------------------------------------------------------------------------------------------------------
     want = {
-        "hq": (hq, ["prometheus", "clio", "chiron", "Explore"],
+        "hq": (hq, ["prometheus", "clio", "chiron", "momus", "Explore"],
                ["hephaestus-broker", "apollo-broker", "hephaestus-sources"] + MAIN),
         "athena-broker": (ab, ["hephaestus-broker", "apollo-broker"] + COORD, ["chiron"] + MAIN + ["hephaestus-sources"]),
         "themis-sources": (ts, ["hephaestus-sources"] + COORD,
@@ -163,6 +163,9 @@ def main():
     check("chiron закрыт координаторам и открыт штабу",
           all("chiron" in agent_rules(d) for d in (ab, ts, mb)) and "chiron" not in agent_rules(hq)
           and "chiron" in agents_hook(hq)[1])
+    check("momus (ревизор навыка audit, metis-0095) — у штаба есть, у координаторов нет; general-purpose у штаба нет",
+          "momus" in agents_hook(hq)[1] and all("momus" not in agents_hook(d)[1] for d in (ab, ts, mb))
+          and "general-purpose" not in agents_hook(hq)[1] and "claude" not in agents_hook(hq)[1])
     check("чужие лиды — в deny у каждого координатора",
           "hephaestus-sources" in agent_rules(ab) and {"hephaestus-broker", "apollo-broker"} <= set(agent_rules(ts)))
     reads = [x for x in hq["permissions"]["deny"] if not x.startswith("Agent(")]
@@ -231,6 +234,12 @@ def main():
           res.startswith("deny:") and "навык aud" in res and "general-purpose" in res)
     check("тот же навык как /aud — отказ", run_hook(cenv, lst, sk("/aud")).startswith("deny:"))
     check("тот же навык из субагента (agent_id) — пропуск", run_hook(cenv, lst, sk("aud", agent_id="a1")) == "allow")
+    skill_file(tmp, "aud", "context: fork\nagent: momus\n")
+    hq_lst = ",".join(want["hq"][1])
+    check("навык с fork и agent: momus (как audit) — штабу пропуск, координатору отказ",
+          run_hook(cenv, hq_lst, sk("aud")) == "allow" and run_hook(cenv, lst, sk("aud")).startswith("deny:"))
+    skill_file(tmp, "aud", "context: fork\nagent: general-purpose\n")
+    check("навык с fork и agent: general-purpose — штабу тоже отказ", run_hook(cenv, hq_lst, sk("aud")).startswith("deny:"))
     skill_file(tmp, "aud", "context: 'fork'\nagent: \"Explore\"\n")
     check("навык с fork и agent: Explore — пропуск", run_hook(cenv, lst, sk("aud")) == "allow")
     skill_file(tmp, "aud", "context: fork\n")
