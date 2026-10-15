@@ -1076,7 +1076,8 @@ def _qmd_hq_target_ok(item):
     """Адрес документа для штаба: только qmd://<коллекция>/<путь> открытой ему коллекции, без «..». docid (#abc),
     относительный или абсолютный путь и глоб без коллекции могут указать на корпус — их штабу не даём."""
     item = item.strip()
-    if not item.startswith("qmd://") or ".." in item:
+    # «..», %XX (qmd может раскодировать), обратная косая и управляющие — не адрес из результатов поиска
+    if not item.startswith("qmd://") or ".." in item or "%" in item or "\\" in item or any(ord(c) < 32 for c in item):
         return False
     coll = item[len("qmd://"):].split("/", 1)[0]
     return bool(QMD_NAME.fullmatch(coll)) and coll not in QMD_HQ_CLOSED
@@ -1087,7 +1088,23 @@ def cmd_qmd_query(ev):
     без доранжирования. Полный режим (query без searches — переформулировка моделью, rerank) держит в памяти сервера
     три модели (~2 ГБ против ~0,3) и в 50–100 раз медленнее; без collections большая коллекция legal вытесняет
     остальные (QMD-04). Штабу (hq) коллекция corpus закрыта во всех трёх инструментах."""
-    ti = ev.get("tool_input") or {}
+    try:
+        why = _qmd_why(ev)
+    except Exception as e:  # отказ, а не пропуск: сбой разбора не должен открывать полный режим или корпус
+        hook_log("qmd-query", "%s: %r" % (type(e).__name__, e))
+        why = "запрос не разобрать"
+    if not why:
+        return 0
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": "deny",
+        "permissionDecisionReason": f"qmd: {why}. {QMD_HOW}"}}, ensure_ascii=False))
+    return 0
+
+
+def _qmd_why(ev):
+    ti = ev.get("tool_input")
+    if not isinstance(ti, dict):
+        return "аргументы не разобрать"
     tool = ev.get("tool_name") or ""
     hq = session_role(ev) == "hq"
     why = None
@@ -1114,12 +1131,7 @@ def cmd_qmd_query(ev):
         if not all(_qmd_hq_target_ok(x) for x in items):
             why = ("штабу — только адреса qmd://<коллекция>/<путь> из результатов поиска, без docid и коллекции corpus "
                    "(корпус штабу закрыт, решение владельца 15.10)")
-    if not why:
-        return 0
-    print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": "PreToolUse", "permissionDecision": "deny",
-        "permissionDecisionReason": f"qmd: {why}. {QMD_HOW}"}}, ensure_ascii=False))
-    return 0
+    return why
 
 
 def main():

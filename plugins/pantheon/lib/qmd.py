@@ -33,6 +33,7 @@ DEFAULT_MASK = "**/*.md"
 # (ревью argus 15.10). С --index проектный конфиг не читается.
 INDEX = ["--index", "index"]
 PLAIN_DIR = re.compile(r"[\w. -]+")
+MD_GLOB = re.compile(r"[^{}()|@+!]*\.md")
 
 
 def set_core(core):
@@ -70,6 +71,11 @@ def load():
         p = os.path.realpath(os.path.expanduser(str(c.get("path", ""))))
         if not p.startswith(os.path.realpath(P.HOME) + os.sep):
             raise ValueError(f"collection {name}: путь должен быть внутри домашней папки ({c.get('path')!r})")
+        # скрытые папки дома (~/.claude — память ролей и транскрипты, ~/.ssh, ~/.config) и ~/Library (почта, iCloud,
+        # заметки приложений) — не для общего индекса, который видят все роли
+        under = p[len(os.path.realpath(P.HOME)) + 1:].split(os.sep)
+        if any(x.startswith(".") for x in under) or under[0].casefold() == "library":
+            raise ValueError(f"collection {name}: путь через скрытую папку или ~/Library ({c.get('path')!r})")
         mask = c.get("mask", DEFAULT_MASK)
         ignore = c.get("ignore", [])
         context = c.get("context", "")
@@ -85,6 +91,9 @@ def load():
         # глоб уходит в qmd как есть: « me/**» с пробелом fast-glob не исключит me/, а проверка ниже сочла бы иначе
         if any(g != g.strip() or not g for g in [*mask.split(","), *ignore]):
             raise ValueError(f"collection {name}: пробелы по краям или пустой глоб в mask/ignore")
+        # индекс — только markdown: маска вида **/*.json(l) открыла бы журналы, выгрузки и ключи в рабочих папках
+        if not all(MD_GLOB.fullmatch(g.rsplit("/", 1)[-1]) for g in mask.split(",")):
+            raise ValueError(f"collection {name}: mask — только файлы .md (последняя часть глоба вида *.md)")
         # APFS не различает регистр — пути сравниваем через casefold; rel — срезом, а не relpath (с ним ~/AI/… дал бы
         # «../../ai/…», а «..» сошёл бы за скрытую папку)
         pc = p.casefold()

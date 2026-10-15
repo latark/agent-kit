@@ -212,7 +212,14 @@ def test_qmd_config():
                          ('[[collection]]\nname = "k"\npath = "~/ai/knowledge"\nignore = [" me/**"]\n',
                           "ignore с пробелом"),
                          ('[[collection]]\nname = "k"\npath = "~/ai/knowledge"\nmask = "@(me)/**/*.md"\n',
-                          "расширенный глоб @(me)")):
+                          "расширенный глоб @(me)"),
+                         ('[[collection]]\nname = "x"\npath = "~/.claude"\n', "скрытая папка ~/.claude"),
+                         ('[[collection]]\nname = "x"\npath = "~/notes/.git"\n', "скрытая часть пути"),
+                         ('[[collection]]\nname = "x"\npath = "~/Library/Mobile Documents"\n', "~/Library"),
+                         ('[[collection]]\nname = "x"\npath = "~/notes"\nmask = "**/*.jsonl"\n', "маска не .md"),
+                         ('[[collection]]\nname = "x"\npath = "~/notes"\nmask = "**/*.{md,txt}"\n',
+                          "маска со скобками"),
+                         ('[[collection]]\nname = "x"\npath = "~/notes"\nmask = "a/*.md,**/*"\n', "вторая маска — всё")):
             open(os.path.join(pan, "qmd.toml"), "w").write(bad)
             r = run(home, pan, state, "qmd", "update", extra=extra)
             check(f"qmd.toml с ошибкой ({why}) — отказ без запуска qmd", r.returncode == 1 and "qmd.toml" in r.stderr,
@@ -255,6 +262,9 @@ def test_hook():
     check("штаб: multi_get глоб {corpus,…} — отказ", hook({"pattern": "qmd://{corpus,pantheon}/*.md"}, m, "hq"))
     check("штаб: multi_get qmd://legal/… — пропуск", not hook({"pattern": "qmd://legal/2026-09*.md"}, m, "hq"))
     check("координатор: get по docid — пропуск", not hook({"file": "#abc123"}, g, "domain-coordinator"))
+    check("штаб: get с %2e%2e — отказ", hook({"file": "qmd://pantheon/%2e%2e/corpus/x.md"}, g, "hq"))
+    check("штаб: get с обратной косой — отказ", hook({"file": "qmd://pantheon\\..\\corpus/x.md"}, g, "hq"))
+    check("аргументы не объект — отказ", hook(["x"]))
     rr = "ReadMcpResourceTool"
     check("штаб: ресурс qmd://corpus/… — отказ", hook({"server": "qmd", "uri": "qmd://corpus/x.md"}, rr, "hq"))
     check("штаб: ресурс с %2e%2e — отказ",
