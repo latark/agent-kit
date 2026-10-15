@@ -287,6 +287,45 @@ def main():
     check("новый вопрос: та же галочка — новый ответ в журнале с новым вопросом",
           alog[-1].get("answer") == "В копии" and alog[-1].get("question") == "Где держать копию теперь?"
           and "- [x] В копии" in open(c2, encoding="utf-8").read())
+    # обход: агент правит текст вопроса и подделывает answer прежним вашим ответом — всё равно конфликт
+    run(env, "task", "set", "metis-0002", "question=Где держать копию теперь??", t=T0 + 392)
+    sp = src("metis-pantheon", "metis-0002")
+    forged = open(sp, encoding="utf-8").read()
+    forged = forged.replace('answer: "В копии"', 'answer: "В knowledge"').replace("answer: В копии", "answer: В knowledge")
+    open(sp, "w", encoding="utf-8").write(forged)
+    rf = run(env, "board", t=T0 + 394)
+    t2 = open(c2, encoding="utf-8").read()
+    check("правка вопроса + answer прежним ответом: конфликт и тревога, отметки нет",
+          "не из вашего журнала" in t2 and "конфликт ответа" in rf.stdout and "- [x]" not in t2)
+    # многострочный вопрос: ваша галочка остаётся отмеченной, повторной записи нет (ревью argus)
+    run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Многострочный вопрос", "--status", "waiting",
+        "--waiting-on", "human", "--next", "ваш ответ", "--question", "Где держать доску?\nВторая строка",
+        "--option", "Да", "--option", "Нет", "--project", "Пантеон", t=T0 + 395)
+    run(env, "board", t=T0 + 396)
+    cm = card(view, [f for f in os.listdir(os.path.join(view, "Доска")) if f.startswith("Многострочный")][0][:-3])
+    mtext = open(cm, encoding="utf-8").read().replace("- [ ] Да", "- [x] Да")
+    open(cm, "w", encoding="utf-8").write(mtext)
+    os.utime(cm, (T0 + 360, T0 + 360))  # правка старше 30 с — тик её забирает
+    run(env, "board", t=T0 + 398)
+    run(env, "board", t=T0 + 400)
+    mlog = [json.loads(x) for x in open(os.path.join(state, "owner-log", "board.jsonl")) if '"answer"' in x]
+    mlog = [r for r in mlog if r.get("answer") == "Да" and "Вторая строка" in (r.get("question") or "")]
+    check("многострочный вопрос: отметка держится, в журнале одна запись",
+          "- [x] Да" in open(cm, encoding="utf-8").read() and len(mlog) == 1)
+    check("запись журнала без вопроса (до 0.9.26) не засчитана на нынешний вопрос, с тем же вопросом — засчитана",
+          T.logged_for({"question": "Удалить всё?", "options": ["Да", "Нет"]}, [{"kind": "answer", "answer": "Да"}]) == {}
+          and T.logged_for({"question": "Удалить\nвсё?", "options": ["Да"]},
+                           [{"kind": "answer", "answer": "Да", "question": "Удалить всё?"}]) == {"answer": "Да"})
+    long_q = "Удалить черновики? " + "подробности " * 200
+    check("сверка вопроса целиком: дописанный хвост длинного вопроса и обрезанная запись — не засчитаны",
+          T.logged_for({"question": long_q + "и базу клиентов", "options": ["Да"]},
+                       [{"kind": "answer", "answer": "Да", "question": long_q.strip()}]) == {}
+          and T.logged_for({"question": long_q, "options": ["Да"]},
+                           [{"kind": "answer", "answer": "Да", "question": long_q.strip()[:2000]}]) == {}
+          and T.logged_for({"question": "- [x] Да?", "options": ["Да"]},
+                           [{"kind": "answer", "answer": "Да", "question": "\\- [x] Да?"}]) == {"answer": "Да"}
+          and T.logged_for({"question": "\\ Удалить?", "options": ["Да"]},
+                           [{"kind": "answer", "answer": "Да", "question": "Удалить?"}]) == {})
     # рискованный вопрос: галочка — только выбор, подтверждение словом
     run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Отправить коммиты", "--status", "waiting",
         "--waiting-on", "human", "--next", "ваш ответ", "--question", "Отправить?", "--option", "Да", "--option", "Нет",
