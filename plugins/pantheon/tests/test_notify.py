@@ -384,7 +384,7 @@ def legacy_and_due_case():
     sent(w)
     board(w, at(20, 9), idle=0)
     a = sent(w)
-    check("переход: утреннее уже было по board.json (до 0.9.30) — второго нет", not any("Доброе утро" in x[1] for x in a))
+    check("переход: утреннее уже было по board.json (до 0.11.15) — второго нет", not any("Доброе утро" in x[1] for x in a))
     with open(card(w, q), encoding="utf-8") as fh:
         ct = fh.read()
     check("срок с временем: «Срок» — дата, в выноске — дата и время",

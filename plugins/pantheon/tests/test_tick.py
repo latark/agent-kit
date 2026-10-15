@@ -238,6 +238,16 @@ def main():
     dash = lambda p: re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(p))
     for n in (dash(home), dash(home) + "--claude-worktrees-x", dash(tmp)):
         os.makedirs(os.path.join(tmp, ".claude", "projects", n), exist_ok=True)
+    # память субагентов (metis-0051): роль с memory:, без неё, главная роль с memory:, роль-ссылка
+    ag = os.path.join(tmp, ".claude", "agents")
+    os.makedirs(ag, exist_ok=True)
+    for r, hd in (("argus", "name: argus\nmemory: user\n"), ("dev-sonnet", "name: dev-sonnet\nmodel: sonnet\n"),
+                  ("domain-coordinator", "name: domain-coordinator\nmemory: user\n"),
+                  ("linked", "name: linked\nmemory: user\n")):
+        open(os.path.join(ag, r + ".md"), "w").write(f"---\n{hd}---\nтекст\n")
+    os.makedirs(os.path.join(tmp, "foreign-mem"))
+    os.makedirs(os.path.join(tmp, ".claude", "agent-memory"), exist_ok=True)
+    os.symlink(os.path.join(tmp, "foreign-mem"), os.path.join(tmp, ".claude", "agent-memory", "linked"))
     subprocess.run([sys.executable, "-I", LIB, "domains", "build"], env=env, capture_output=True)
     load = lambda n: json.load(open(os.path.join(state, "settings", n + ".json")))
     sa, sm, sw, sn, sz = load("athena-broker"), load("metis-pantheon"), load("workshop"), load("mnemo-brain"), load("zz")
@@ -306,6 +316,33 @@ def main():
     check("окна направлений: worktree от HEAD (эпик), у мастерской — нет; места heavy созданы",
           sa["worktree"] == {"baseRef": "head"} and sm["worktree"] == {"baseRef": "head"} and "worktree" not in sw
           and os.path.exists(os.path.join(state, "locks", "heavy-cmd-2.lock")))
+
+    merge = "Bash(gh pr merge *)"
+    check("окно координатора направления: gh pr merge в permissions.allow; у мастерской и штаба правила нет (metis-0050)",
+          sa.get("permissions", {}).get("allow") == [merge] and sm.get("permissions", {}).get("allow") == [merge]
+          and merge not in json.dumps(sw.get("permissions", {})) and merge not in json.dumps(hq.get("permissions", {})))
+    mem_a = real(".claude/agent-memory/argus")
+    wins = (sa, sm, sw, hq)
+    check("память субагентов в песочнице всех окон: роль с memory: настоящим путём, папка создана (metis-0051)",
+          os.path.isdir(mem_a) and all(mem_a in w["sandbox"]["filesystem"]["allowWrite"] for w in wins)
+          and mem_a + "/.git/config" in sa["sandbox"]["filesystem"]["denyWrite"])
+    check("память субагентов: роли без memory:, главной роли и ссылки в песочнице нет",
+          not any(x.endswith(("/agent-memory/dev-sonnet", "/agent-memory/domain-coordinator", "/agent-memory/linked"))
+                  or x == real("foreign-mem") for w in wins for x in w["sandbox"]["filesystem"]["allowWrite"])
+          and not os.path.exists(os.path.join(tmp, ".claude", "agent-memory", "dev-sonnet"))
+          and not os.path.exists(os.path.join(tmp, ".claude", "agent-memory", "domain-coordinator"))
+          and "foreign-mem" not in json.dumps(wins))
+    # «не пересобирает» напрямую не проверить: --if-changed следит и за общей /tmp/claude-<uid>, её трогают другие сессии.
+    # Поэтому: сборка не трогает каталог ролей (цикла нет), а новая роль с memory: пересборку вызывает
+    t0 = json.load(open(os.path.join(state, "domains.json")))["built_ts"]
+    no_loop = os.path.getmtime(ag) <= t0
+    open(os.path.join(ag, "prometheus.md"), "w").write("---\nname: prometheus\nmemory: user\n---\nтекст\n")
+    subprocess.run([sys.executable, "-I", LIB, "domains", "build", "--if-changed"], env=env, capture_output=True)
+    mem_p = real(".claude/agent-memory/prometheus")
+    check("каталог ролей: сборка его не трогает, новая роль с memory: — пересборка и её память в окнах",
+          no_loop and json.load(open(os.path.join(state, "domains.json")))["built_ts"] > t0
+          and mem_p in load("athena-broker")["sandbox"]["filesystem"]["allowWrite"]
+          and mem_p in load("hq")["sandbox"]["filesystem"]["allowWrite"])
 
     # архив (STATE-14)
     tmp = tempfile.mkdtemp(prefix="tick-test-")

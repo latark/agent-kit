@@ -1825,7 +1825,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     # 7. уведомления (политика: утренний дайджест, пинги по решениям), сводка, вид
     _, rows = _summary(tasks, t, inbox, names, long_ids)
     if policy is not None:
-        # digest_day прежнего board.json (до 0.9.30) — политике: в день обновления второго утреннего не будет
+        # digest_day прежнего board.json (до 0.11.15) — политике: в день обновления второго утреннего не будет
         policy.run((len(rows["wait"]), len(rows["overdue"]), len(rows["inbox"])),
                    lambda tid: card_url(vault, names.get(tid, "Сводка")), card_url(vault, "Сводка"),
                    legacy_digest_day=state.pop("digest_day", None))

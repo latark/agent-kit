@@ -317,7 +317,7 @@ class Policy:
 
     def run(self, counts=None, url=None, summary_url=None, legacy_digest_day=None):
         """Утренний дайджест и пинги по решениям этого прохода. counts — (нужен ответ, просрочено, входящих);
-        url(id) — ссылка на карточку. legacy_digest_day — digest_day прежнего board.json (до 0.9.30): в день
+        url(id) — ссылка на карточку. legacy_digest_day — digest_day прежнего board.json (до 0.11.15): в день
         обновления второго утреннего не будет."""
         url = url or (lambda tid: None)
         if "digest_day" not in self.st and legacy_digest_day:
