@@ -34,6 +34,9 @@ try:
     check("compile(open(скрипт).read()) — загрузка",
           g.loads_tg_read(f'compile(open("{f}").read(), "x", "exec")'))
     check("exec( — загрузка", g.loads_tg_read(f'exec(open("{f}").read())'))
+    check("builtins.exec( — загрузка", g.loads_tg_read(f'import builtins; builtins.exec(open("{f}").read())'))
+    check("__builtins__.compile( — загрузка",
+          g.loads_tg_read(f'__builtins__.compile(open("{f}").read(), "x", "exec")'))
     check("exec ( после точки с запятой — загрузка", g.loads_tg_read(f'a=1; exec (open("{f}").read())'))
     check("importlib — загрузка, как раньше", g.loads_tg_read(f"import importlib; importlib.x('{f}')"))
     check("runpy — загрузка, как раньше", g.loads_tg_read(f"python3 -m runpy {f}"))

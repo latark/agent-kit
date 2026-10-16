@@ -297,7 +297,7 @@ TG_IMPORT = re.compile(
 TG_FILE = re.compile(r"(?<![\w-])tg_read\.py\b")
 PY_LOADER = re.compile(
     r"\brunpy\b|\bimportlib\b|\bspec_from_file_location\b|\bSourceFileLoader\b|\bload_source\b"
-    r"|(?<![\w.])exec\s*\(|(?<![\w.])compile\s*\(|\b__import__\b"
+    r"|(?:(?<![\w.])|(?<=builtins\.)|(?<=__builtins__\.))(?:exec|compile)\s*\(|\b__import__\b"
 )
 # Текст tg_read.py, поданный в Python: $(cat tg_read.py), cat tg_read.py | python3 -, python3 - < tg_read.py
 TG_SOURCE = re.compile(
@@ -2863,14 +2863,14 @@ def check_push(event, tool, tool_input):
         if name and os.path.basename(name.rstrip("/")) == "pantheon":
             why = review_problem(role, texts, tool_input.get("command") or "", bool(tool_input.get("run_in_background")))
             if why:
-                return f"Правило push (запор слияния): {why}"
+                return f"Правило push (шлюз слияния): {why}"
             continue
         if name not in ("git", "?"):
             continue
         parsed = _git_sub(texts) if name == "git" else None
         if role == "argus" and parsed and parsed[1] in ARGUS_GIT_BAN:
             # рецензент не меняет то, что проверяет: вердикт argus — на чужой SHA (запор слияния, P1-4)
-            return (f"Правило push (запор слияния): argus не делает git {parsed[1]} — рецензент проверяет чужой "
+            return (f"Правило push (шлюз слияния): argus не делает git {parsed[1]} — рецензент проверяет чужой "
                     "коммит и не меняет его. Нашёл, что исправить, — верни «reject» и опиши в отчёте лиду.")
         if name == "?" and "push" not in texts:
             continue
