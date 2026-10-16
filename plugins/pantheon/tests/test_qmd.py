@@ -345,10 +345,60 @@ def test_old_labels():
               and not os.path.exists(plist(home, "qmd")) and os.path.exists(stranger), r.stderr)
 
 
+def test_old_drop_bootout_fails():
+    """drop_old: bootout упал, а задача ещё загружена (print → 0) — plist остаётся и в счёт не идёт; «нет такой» (113) — удалён."""
+    for print_rc, loaded in ((0, True), (113, False)):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, pan, state = setup(tmp)
+            agents = os.path.join(home, "Library", "LaunchAgents")
+            os.makedirs(agents)
+            old = os.path.join(agents, "com.zorba.pantheon-svc.qmd.plist")
+            open(old, "w").write("<plist/>")
+            bindir = os.path.join(tmp, "bin")
+            os.makedirs(bindir)
+            fake = os.path.join(bindir, "launchctl")
+            open(fake, "w").write(f'#!/bin/sh\nif [ "$1" = bootout ]; then exit 5; fi\n'
+                                  f'if [ "$1" = print ]; then exit {print_rc}; fi\nexit 0\n')
+            os.chmod(fake, 0o755)
+            env = {"PATH": bindir + ":" + os.environ["PATH"], "HOME": home, "PANTHEON_HOME": pan,
+                   "PANTHEON_STATE": state, "PANTHEON_NOW": str(T0), "TMPDIR": _ROOT}
+            code = ("import importlib.util,sys;s=importlib.util.spec_from_file_location('pan',sys.argv[1]);"
+                    "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);print(m.drop_old(m.OLD_SVC_GLOB))")
+            r = subprocess.run([PY311, "-I", "-c", code, LIB], env=env, capture_output=True, text=True, timeout=60)
+            tag = "служба ещё загружена" if loaded else "службы нет"
+            if loaded:
+                check(f"drop_old, {tag}: plist остался, в счёт не включён, предупреждение в stderr",
+                      os.path.exists(old) and r.stdout.strip() == "0" and "com.zorba.pantheon-svc.qmd" in r.stderr,
+                      f"{r.stdout} {r.stderr}")
+            else:
+                check(f"drop_old, {tag}: plist удалён и посчитан",
+                      not os.path.exists(old) and r.stdout.strip() == "1", f"{r.stdout} {r.stderr}")
+
+
+def test_pause_drops_only_own_old():
+    """Пульт снимает одну службу (jobs pause qmd): прежняя служба с другим именем остаётся, с этим — снята."""
+    with tempfile.TemporaryDirectory() as tmp:
+        home, pan, state = setup(tmp)
+        agents = os.path.join(home, "Library", "LaunchAgents")
+        os.makedirs(agents)
+        mine = os.path.join(agents, "com.zorba.pantheon-svc.qmd.plist")
+        other = os.path.join(agents, "com.zorba.pantheon-svc.only-b.plist")
+        wild = os.path.join(agents, "com.zorba.pantheon-svc.qmd2.plist")
+        for f in (mine, other, wild):
+            open(f, "w").write("<plist/>")
+        r = run(home, pan, state, "jobs", "pause", "qmd")
+        log = open(os.path.join(state, "dryrun.log")).read()
+        check("пульт: прежняя служба с этим именем снята, остальные прежние нетронуты",
+              r.returncode == 0 and not os.path.exists(mine) and os.path.exists(other) and os.path.exists(wild)
+              and "old-bootout com.zorba.pantheon-svc.qmd\n" in log and "only-b" not in log, f"{r.stderr} {log}")
+
+
 if __name__ == "__main__":
     test_services()
     test_qmd_config()
     test_hook()
     test_old_labels()
+    test_old_drop_bootout_fails()
+    test_pause_drops_only_own_old()
     print(f"{len(OK)} из {len(OK) + len(FAIL)} прошли")
     sys.exit(1 if FAIL else 0)

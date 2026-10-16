@@ -666,6 +666,13 @@ def main():
           pm("zorba") == "🟥 zorba" and pm("nomark") == "⬜ nomark" and pm("входящие") == "📥 входящие")
     check("значок проекта: перевод строки, «: x», пробел, «#», длиннее 4 знаков — ⬜",
           all(pm(k) == f"⬜ {k}" for k in ("bad1", "bad2", "bad3", "bad4", "bad5")))
+    mk2 = {"c1": "\x7f", "c2": "\x9b", "c3": "\u202e", "c4": "\ufffe", "c5": "\U0001fffe", "c6": "\u200b",
+           "ok1": "🟦", "ok2": "🏳\ufe0f\u200d🌈"}
+    pm = lambda pr: _tasks.render_card({"id": "metis-0002", "type": "task", "title": "T", "status": "ready",
+                                        "project": pr}, "", "x.md", 0, marks=mk2)[0]["Проект"]
+    check("значок проекта: \\x7f, \\x9b, RLO, несимволы, невидимый пробел — ⬜",
+          all(pm(k) == f"⬜ {k}" for k in ("c1", "c2", "c3", "c4", "c5", "c6")))
+    check("значок проекта: 🟦 и составной эмодзи с ZWJ проходят", pm("ok1") == "🟦 ok1" and pm("ok2").startswith("🏳"))
     ib = _tasks.render_inbox_card({"direction": "d", "file": "2026-10-15-x.md", "id": "i1", "text": "# t\ntext"},
                                   "zorba", marks=mk)[0]["Проект"]
     check("значок проекта: входящая карточка берёт значок из реестра", ib == "🟥 zorba")

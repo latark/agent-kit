@@ -433,8 +433,8 @@ def main():
           "направлений в тексте правил нет (metis-0098, решение 16.10)",
           bool(gated) and bool(gm) and "(`acme-co/br-app`)" in gated[0] and "acme-co/kit" not in gated[0]
           and "(`acme-co/kit`, `tools-org/sync`)" in gm[0] and "bad owner" not in gm[0] and "kit``" not in gm[0]
-          and not any(x in texts for x in ("latark", "ExampleApp", "DemoStream", "athena-shop",
-                                           "metis-pantheon", "mnemo-brain", "agent-kit")))
+          and not any(x in texts for x in ("athena-shop", "metis-pantheon", "mnemo-brain", "workshop",
+                                           "agent-kit", "projects/br", "ai/knowledge")))
     check("правило Gated Merge: обе формы репозитория, перечень argus, ядро — кнопка владельца, --admin/--auto не "
           "разрешает (metis-0098)",
           bool(gated) and all(x in gated[0] for x in ("`-R <owner/repo>`", "`--repo <owner/repo>`",

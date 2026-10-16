@@ -18,8 +18,9 @@
   Разговор      — один основной транскрипт ~/.claude/projects/*/<id>.jsonl, начатый вами (entrypoint не sdk-*).
                   sdk-py и sdk-cli — автоматические прогоны (бот, claude -p): в задачи не входят,
                   их цена — отдельной колонкой.
-  Направление   — по папке запуска (cwd первой записи) против folders в directions.toml; старые пути до переезда
-                  14.10 (~/knowledge, ~/pantheon) и папка данных направления — к своим направлениям.
+  Направление   — по папке запуска (cwd первой записи) против folders в directions.toml; прежние пути папок
+                  направления — поле old_folders там же — и встроенные ~/knowledge, ~/pantheon (старые пути до
+                  переезда 14.10) — к своим направлениям.
   Ваше сообщение — запись type=user с текстом от вас: не результат инструмента, не служебная вставка
                   (<command-…>, <local-command-…>, <task-notification>, «Caveat:», прерывание).
   Задача доведена до конца — разговор с хотя бы одним своим коммитом в репозитории направления; направление
@@ -125,7 +126,7 @@ def load_directions():
         dirs = tomllib.load(fh)["direction"]
     roots = []
     for d in dirs:
-        for f in d.get("folders") or []:
+        for f in [*(d.get("folders") or []), *(d.get("old_folders") or [])]:
             roots.append((os.path.realpath(os.path.expanduser(f)), d["name"]))
     for f, name in ALIASES.items():
         roots.append((os.path.realpath(os.path.expanduser(f)), name))

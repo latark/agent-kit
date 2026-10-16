@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import unicodedata
 from datetime import datetime
 
 SCHEMA_VERSION = 1
@@ -707,10 +708,21 @@ DEFAULT_MARK = "⬜"
 MARK_OK = re.compile(r"[^\s:#\"'`\[\]{}|>&*!%@,]{1,4}")  # значок попадает в YAML-шапку карточки: коротко, без разметки
 
 
+def _mark_char_ok(c):
+    """Управляющие (Cc), суррогаты, форматирующие (Cf — кроме ZWJ: он склеивает составные эмодзи) и несимволы
+    Юникода ломают YAML-шапку или меняют порядок показа — не значок."""
+    o = ord(c)
+    if 0xFDD0 <= o <= 0xFDEF or (o & 0xFFFE) == 0xFFFE:
+        return False
+    cat = unicodedata.category(c)
+    return cat not in ("Cc", "Cs") and (cat != "Cf" or c == "\u200d")
+
+
 def project_mark(proj, marks=None):
     """Значок проекта: встроенный, затем из реестра (marks: проект → значок), иначе ⬜. Чужое значение — ⬜."""
     m = PROJECT_MARK.get(proj) or (marks or {}).get(proj)
-    return m if isinstance(m, str) and MARK_OK.fullmatch(m) else DEFAULT_MARK
+    ok = isinstance(m, str) and MARK_OK.fullmatch(m) and all(_mark_char_ok(c) for c in m)
+    return m if ok else DEFAULT_MARK
 STATUS_MARK = {"Входящие": "📥", HUMAN_WAIT: "🔴", "Очередь": "⚪", "В работе": "🟡", "Ждёт": "⏸",
                "На проверке": "🔵", "Готово": "🟢", "Отменено": "⚫"}
 PRIORITY_MARK = {0: "🔥🔥 срочно", 1: "🔥 высокий", 2: "обычный", 3: "▫️ низкий"}

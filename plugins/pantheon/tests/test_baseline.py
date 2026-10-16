@@ -38,7 +38,8 @@ home, pantheon, transcripts = tmp, os.path.join(tmp, "ai", "pantheon"), os.path.
 os.makedirs(pantheon)
 with open(os.path.join(pantheon, "directions.toml"), "w") as fh:
     fh.write('[[direction]]\nname = "alpha"\nproject = "Альфа"\nfolders = ["~/projects/alpha"]\n\n'
-             '[[direction]]\nname = "beta"\nproject = "Бета"\nfolders = ["~/projects/beta"]\n')
+             '[[direction]]\nname = "beta"\nproject = "Бета"\nfolders = ["~/projects/beta"]\n'
+             'old_folders = ["~/old/beta-before-move"]\n')
 ENV = {"PATH": os.environ["PATH"], "HOME": home, "PANTHEON_HOME": pantheon, "BASELINE_TRANSCRIPTS": transcripts,
        "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "TZ": "Europe/Moscow"}
 T0 = datetime(2026, 10, 8, 12, 0).timestamp()  # среда недели 07.10–13.10
@@ -124,6 +125,8 @@ transcript("conv3", beta, [you(c3, "почини"), bash(c3 + 30, "t4", f"cd {al
 commit(alpha, "a.txt", "2", "fix: заголовок", c3 + 31)
 # Коммит с «fix-labels» в середине — не исправление
 commit(alpha, "c.txt", "1", "docs: правила fix-labels для годов", c3 + 600)
+# Прежняя папка направления beta (old_folders): разговор без коммита относится к beta
+transcript("conv5", os.path.join(home, "old", "beta-before-move"), [you(T0 + 5 * 3600, "старый путь")])
 # Разговор без коммита
 transcript("conv4", beta, [you(T0 + 4 * 3600, "изучи вопрос"), you(T0 + 4 * 3600 + 60, "спасибо")])
 # Автоматический прогон: цена — в «Автоматике», в задачи не входит
@@ -144,7 +147,8 @@ for line in out.split("## По неделям")[0].splitlines():
 alpha_row, beta_row = rows.get("alpha (Альфа)"), rows.get("beta (Бета)")
 check("alpha: две доведённые задачи (разговор 1 и починка из разговора 3)", alpha_row and alpha_row[2] == "2")
 check("beta: задача по репозиторию коммита (git -C), хотя разговор открыт в alpha", beta_row and beta_row[2] == "1")
-check("beta: разговор без коммита — отдельной колонкой", beta_row and beta_row[5] == "1")
+check("beta: разговор без коммита — отдельной колонкой; из old_folders — тоже beta (2 разговора)",
+      beta_row and beta_row[5] == "2")
 check("ошибка git commit не делает задачу", alpha_row and alpha_row[1] == "3" and alpha_row[5] == "1")
 check("возврат: fix: в начале, те же файлы, другой разговор — 1 из 2", alpha_row and alpha_row[8] == "1 из 2")
 check("«fix-labels» в середине сообщения — не исправление (коммитов 4, возвратов 1)", alpha_row and alpha_row[10] == "4")
