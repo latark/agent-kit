@@ -1426,8 +1426,8 @@ GH_PR_WRITE = ["gh pr create *", "gh pr merge *"]
 GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
 COORDINATOR_COMPACT = 200000
 # Окну координатора направления — слияние PR без вопроса классификатора режима auto (metis-0050). Каждое слияние
-# по-прежнему проверяет guard (merge_problem): только главная сессия domain-coordinator, свои папки, без --admin и
-# --auto. Мастерской и штабу правила нет.
+# по-прежнему проверяет guard (merge_problem): главная сессия domain-coordinator или лид её направления (metis-0054),
+# свои папки, без --admin и --auto. Мастерской и штабу правила нет.
 COORDINATOR_ALLOW = ["Bash(gh pr merge *)"]
 # Исключения классификатора режима auto окнам координаторов направлений, Метиды в их числе (metis-0098; решения
 # владельца 15.10 «Б» и Зевса 16.10 «А»). Классификатор не видит журнал запора guard и считал слияние через запор
@@ -1468,7 +1468,11 @@ REVIEW_RECORD_RULE = (
     "from the hook event's agent type, not by the command; guard refuses a verdict from any other role, an "
     "«accept» without all three checklist fields and a test command that does nothing (`true`, `echo`, `sleep`). "
     "This exception does not cover editing the record file under `~/.local/state/pantheon/merge-gate/` or the "
-    "guard plugin.")
+    "guard plugin. This exception covers only the `pantheon review` recording wrapper itself: the command after "
+    "`--` must be the project's own test runner (`heavy …`, `pytest`, `pnpm test`, `python3 -I tests/…`) and is "
+    "judged by every other rule exactly as if it were run on its own. A merge, push, deploy, `gh` or network "
+    "command, a file-changing command, an `sh -c`/`python3 -c` one-liner, or anything that checks nothing after "
+    "`--` is never a test command and stays Self-Approval or CI Bypass where it fits.")
 
 
 def coordinator_auto_allow(repos):
@@ -1825,7 +1829,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
                   ["chiron"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
         one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
             [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, direction=True,
-            auto_allow=coordinator_auto_allow(merge_repos.get(name)))
+            # окну с доступом к личному правило слияния не выдаётся — его PR сливает владелец (metis-0156)
+            auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name)))
         built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски; список субагентов — вне P0-6
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)

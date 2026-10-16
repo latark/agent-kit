@@ -396,8 +396,18 @@ def main():
           "— без правила слияния (metis-0098)",
           all(a[:1] == ["$defaults"] for a in am.values()) and len(record) == 1
           and all(len(am[n]) == 3 and len(rule(n, "Pantheon Gated Merge:")) == 1 and rule(n, "Pantheon Review Record:")
-                  == record for n in ("athena-broker", "metis-pantheon", "mnemo-brain"))
+                  == record for n in ("athena-broker", "metis-pantheon"))
           and am["zz"] == ["$defaults"] + record)
+    check("окно с доступом к личному (mnemo-brain): \"$defaults\" и только Review Record — правила слияния нет даже "
+          "при [merge_repos], его PR сливает владелец (metis-0156)",
+          bool(record) and am["mnemo-brain"] == ["$defaults"] + record)
+    check("правило Review Record: оговорка — после `--` только тест-раннер проекта, его судят прочие правила; merge, "
+          "push, gh, sh -c/python3 -c — Self-Approval или CI Bypass (metis-0156)",
+          bool(record) and all(x in record[0] for x in (
+              "covers only the `pantheon review` recording wrapper itself", "the command after `--` must be the "
+              "project's own test runner", "judged by every other rule exactly as if it were run on its own",
+              "A merge, push, deploy, `gh` or network command", "`sh -c`/`python3 -c` one-liner",
+              "stays Self-Approval or CI Bypass")))
     gm = rule("metis-pantheon", "Pantheon Gated Merge:")
     texts = json.dumps(list(am.values()))
     check("правило слияния: репозитории — ровно [merge_repos] своего направления (owner/repo), имён владельца и "

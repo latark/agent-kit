@@ -38,9 +38,13 @@
   `gh pr merge <N> -R|--repo <owner/repo> --match-head-commit <sha>`, а последующие `gh pr view` или `git fetch`
   классификатор считает обычными. `--admin`, `--auto`, `gh api` и ядро защит (`plugins/guard/`,
   `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
-  из `policy.toml`; направлению без такой записи правила слияния нет. Имён владельца, направлений и репозиториев в
+  из `policy.toml`; направлению без такой записи правила слияния нет. Окну с доступом к личному (`[private]`
+  `coordinators`, сейчас mnemo-brain) правило слияния не выдаётся и при `[merge_repos]`: его PR сливает владелец
+  (metis-0156). Имён владельца, направлений и репозиториев в
   коде правил нет: у каждой установки правило собирается из её `policy.toml`. Review Record снимает с
-  `pantheon review test|accept|reject|talos|status` метки Self-Approval и CI Bypass. Штабу, мастерской и окнам задач
+  `pantheon review test|accept|reject|talos|status` метки Self-Approval и CI Bypass — только с самой обёртки: команду
+  после `--` (тест-раннер проекта) классификатор судит как отдельную, merge, push, `gh`, сеть, правка файлов и
+  `sh -c`/`python3 -c` там остаются Self-Approval или CI Bypass (metis-0156). Штабу, мастерской и окнам задач
   `autoMode` не дают. Классификатор читает `autoMode` из `--settings` окна, а из `.claude/settings.json` проекта — нет.
   Задачи расписания `claude -p --agent <роль>` идут в песочнице окна задачи `settings/job-<роль>.json` (metis-0063):
   роли — только из `JOB_ROLES` (clio, prometheus, iris; iris — с `--model sonnet`), тик сам добавляет `--settings`.
