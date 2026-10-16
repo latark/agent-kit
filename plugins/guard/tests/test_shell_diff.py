@@ -24,7 +24,7 @@ _ROOT = tempfile.mkdtemp(prefix="shell_diff-root-")
 tempfile.tempdir = _ROOT
 _os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
 SHELLS = [s for s in ("/bin/zsh", "/bin/bash") if os.path.exists(s)]
@@ -189,14 +189,25 @@ def check(cmd):
         shutil.rmtree(base, ignore_errors=True)
 
 
+def run_all(all_cases):
+    """Процессы, а в песочнице окна (ProcessPoolExecutor → os.sysconf("SC_SEM_NSEMS_MAX") → PermissionError) —
+    потоки: работа — подпроцессы оболочек и guard, так что результат тот же, меняется только способ раздачи."""
+    workers = max(2, (os.cpu_count() or 4) - 1)
+    try:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(check, all_cases, chunksize=8))
+    except (PermissionError, OSError):
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(check, all_cases))
+
+
 def main():
     verbose = "--verbose" in sys.argv
     if not SHELLS:
         print("нет /bin/zsh и /bin/bash — пропуск")
         return
     all_cases = cases()
-    with ProcessPoolExecutor(max_workers=max(2, (os.cpu_count() or 4) - 1)) as pool:
-        results = list(pool.map(check, all_cases, chunksize=8))
+    results = run_all(all_cases)
     bypass = [(r, c, ch[r]) for c, ch, v in results for r in ROLES if ch[r] and v[r] == "allow"]
     extra = [(r, c) for c, ch, v in results for r in ROLES if not ch[r] and v[r] == "deny"]
     if verbose:

@@ -46,7 +46,8 @@
           {
             "type": "command",
             "command": "f=\"${PANTHEON_STATE:-$HOME/.local/state/pantheon}/maintenance.json\"; [ -f \"$f\" ] || exit 0; exec python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" maint-pre",
-            "timeout": 10
+            "timeout": 10,
+            "onFailure": "block"
           }
         ]
       },
@@ -56,7 +57,8 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" qmd-query",
-            "timeout": 10
+            "timeout": 10,
+            "onFailure": "block"
           }
         ]
       }

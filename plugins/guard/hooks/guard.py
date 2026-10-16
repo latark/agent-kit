@@ -394,6 +394,26 @@ def check_tg_readd(event, tool, tool_input):
     return None
 
 
+def is_guard_plugin_file(real):
+    """Файл hooks/<имя>.py самого плагина guard в любой его копии: репозиторий agent-kit (клон, worktree, копия
+    маркетплейса — над plugins/ лежит .claude-plugin/marketplace.json с name agent-kit) или кэш плагина
+    ~/.claude/plugins/cache/agent-kit/guard/<версия>/hooks/. Не шире: глубже hooks/ и чужие деревья с таким же
+    хвостом пути (без маркетплейса agent-kit) не считаются (metis-0115 п.1)."""
+    parts = real.split(os.sep)
+    if len(parts) < 6 or not parts[-1].endswith(".py") or parts[-2] != "hooks":
+        return False
+    cache = os.path.realpath(os.path.join(HOME, ".claude", "plugins", "cache", "agent-kit"))
+    if parts[-4] == "guard" and os.sep.join(parts[:-4]) == cache:  # cache/agent-kit/guard/<версия>/hooks/<файл>.py
+        return True
+    if parts[-3] != "guard" or parts[-4] != "plugins":
+        return False
+    try:
+        with open(os.path.join(os.sep.join(parts[:-4]), ".claude-plugin", "marketplace.json"), encoding="utf-8") as fh:
+            return json.load(fh).get("name") == "agent-kit"
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def check_tg_secret_file(tool_input):
     path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
     if not path.endswith(TG_CODE_EXT) or os.path.realpath(path) == os.path.realpath(TG_SCRIPT):
@@ -402,7 +422,8 @@ def check_tg_secret_file(tool_input):
         return TG_SECRET_REASON
     real = os.path.realpath(path)
     # Тесты tg-read импортируют его по делу; этот файл описывает правило, его правку подтверждает пользователь
-    if real.startswith(os.path.realpath(TG_TESTS) + os.sep) or real == os.path.realpath(__file__):
+    if real.startswith(os.path.realpath(TG_TESTS) + os.sep) or real == os.path.realpath(__file__) \
+            or is_guard_plugin_file(real):
         return None
     if any(loads_tg_read(p) for p in tg_texts(tool_input)):
         return TG_IMPORT_REASON

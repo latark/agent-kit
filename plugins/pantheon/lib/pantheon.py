@@ -64,9 +64,13 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         для исполнителя: согласие, данное в окне Зевса
   pantheon review test -- <команда…>    тесты для запора слияния (guard 0.5.4): в чистом дереве git запустить
                                         команду (без оболочки); HEAD и дерево после неё те же — выход с её кодом
-                                        и SHA; запись в журнал делает хук guard (PostToolUse), сама команда не пишет
-  pantheon review accept|reject|talos <owner/repo> <PR> <SHA>   вердикт argus (accept, reject) или проверка talos на
-                                        этот SHA; проверяет формат, запись — хук guard и только по роли
+                                        и SHA; запись в журнал делает хук guard (PostToolUse), сама команда не пишет;
+                                        пустая программа (true, echo, heavy :…) записи не даёт (guard 0.5.6)
+  pantheon review accept <owner/repo> <PR> <SHA> --opened "<что открыл>" --ran "<что запустил>"
+                                        --unchecked "<что не проверял>"   «принять» argus с перечнем проверенного
+                                        (Б6, guard 0.5.6: без трёх полей запор не пускает); reject — те же флаги по
+                                        желанию; talos <owner/repo> <PR> <SHA> — проверка talos. Команда проверяет
+                                        формат, запись — хук guard и только по роли (accept, reject — argus)
   pantheon review status [<owner/repo> <PR>]   записи журнала ~/.local/state/pantheon/merge-gate/records.jsonl
   pantheon commit                       commit → pull без rebase → push ~/ai/pantheon
   pantheon install | uninstall          поставить или снять задачу launchd com.latark.pantheon-tick
@@ -3778,8 +3782,50 @@ def plugins_cmd(rest):
 REVIEW_SHA = re.compile(r"[0-9a-f]{40}")
 REVIEW_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REVIEW_PR = re.compile(r"[1-9][0-9]{0,8}")
-REVIEW_USAGE = ("pantheon review test -- <команда…> | accept|reject|talos <owner/repo> <PR> <SHA 40 знаков> | "
-                "status [<owner/repo> <PR>]")
+REVIEW_USAGE = ("pantheon review test -- <команда…> | accept <owner/repo> <PR> <SHA 40 знаков> --opened \"<что "
+                "открыл>\" --ran \"<что запустил>\" --unchecked \"<что не проверял>\" | reject <owner/repo> <PR> <SHA> "
+                "[те же флаги] | talos <owner/repo> <PR> <SHA> | status [<owner/repo> <PR>]")
+# перечень проверенного в «принять» (Б6, guard 0.5.6): у accept все три поля обязательны и непусты, у reject — по
+# желанию. Тот же разбор — в merge_gate.verdict_parse плагина guard (он и решает, будет ли запись)
+REVIEW_CHECKLIST = {"opened": "открыл", "ran": "запустил", "unchecked": "не проверял"}
+
+
+def _review_verdict(sub, args):
+    """accept|reject|talos: → (позиционные [repo, PR, SHA], перечень {поле: значение}, None) или (…, текст ошибки)."""
+    flags = sub in ("accept", "reject")
+    fmt = f"pantheon review {sub} <owner/repo> <номер PR> <SHA 40 знаков>" + (
+        ' --opened "<что открыл>" --ran "<что запустил>" --unchecked "<что не проверял>"' if sub == "accept"
+        else " [--opened … --ran … --unchecked …]" if flags else "")
+    pos, checklist, i = [], {}, 0
+    while i < len(args):
+        a = args[i]
+        if flags and a.startswith("--") and len(a) > 2:
+            name, eq, val = a[2:].partition("=")
+            if name not in REVIEW_CHECKLIST:
+                return pos, {}, f"неизвестный флаг --{name}. Формат: {fmt}"
+            if name in checklist:
+                return pos, {}, f"--{name} указан дважды. Формат: {fmt}"
+            if not eq:
+                if i + 1 >= len(args):
+                    return pos, {}, f"у --{name} нет значения. Формат: {fmt}"
+                i += 1
+                val = args[i]
+            if val.strip().startswith("--"):  # `--opened --ran …`: имя флага — не значение
+                return pos, {}, f"значение --{name} начинается с «--»: похоже, пропущено значение. Формат: {fmt}"
+            checklist[name] = val.strip()
+        else:
+            pos.append(a)
+        i += 1
+    if len(pos) != 3 or not REVIEW_REPO.fullmatch(pos[0]) or not REVIEW_PR.fullmatch(pos[1]) \
+            or not REVIEW_SHA.fullmatch(pos[2].lower()):
+        return pos, {}, f"аргументы не в формате {fmt} (SHA — полный: gh pr view N --json headRefOid)"
+    if sub == "accept":
+        missing = [f"--{k}" for k in REVIEW_CHECKLIST if not checklist.get(k)]
+        if missing:
+            return pos, {}, (f"«принять» без перечня проверенного (Б6): нет или пусто {', '.join(missing)}. Формат: "
+                             f"{fmt}. Запор guard пускает только «принять», где сказано, что открыто, что запущено "
+                             "и чего не проверял")
+    return pos, {k: v for k, v in checklist.items() if v}, None
 
 
 def _review_git(*args):
@@ -3851,15 +3897,15 @@ def review_cmd(rest):
                                                              " — тесты не прошли, записи не будет"))
         return rc
     if sub in ("accept", "reject", "talos"):
-        args = rest[1:]
-        if len(args) != 3 or not REVIEW_REPO.fullmatch(args[0]) or not REVIEW_PR.fullmatch(args[1]) \
-                or not REVIEW_SHA.fullmatch(args[2].lower()):
-            print(f"pantheon review {sub} <owner/repo> <номер PR> <SHA 40 знаков> — аргументы не в этом формате "
-                  "(SHA — полный: gh pr view N --json headRefOid)", file=sys.stderr)
+        args, checklist, why = _review_verdict(sub, rest[1:])
+        if why:
+            print(f"pantheon review {sub}: {why}", file=sys.stderr)
             return 2
         who = "argus" if sub != "talos" else "talos"
         print(f"pantheon review {sub}: {args[0].lower()}#{args[1]} @ {args[2].lower()} — записано хуком guard, "
               f"если роль подходит ({who})")
+        for k, v in checklist.items():
+            print(f"  {REVIEW_CHECKLIST[k]}: {v}")
         return 0
     if sub == "status":
         args = rest[1:]
@@ -3874,6 +3920,13 @@ def review_cmd(rest):
             pr = f"#{r['pr']}" if r.get("pr") else ""
             print(f"{r.get('time', '?')}  {r.get('kind', '?'):<6}  {','.join(map(str, r['repo']))}{pr}  "
                   f"{str(r.get('sha', ''))[:12]}  {by.get('agent_type') or '—'}")
+            cl = r.get("checklist") if isinstance(r.get("checklist"), dict) else {}
+            if r.get("kind") == "accept" and not all(isinstance(cl.get(k), str) and cl[k].strip()
+                                                     for k in REVIEW_CHECKLIST):
+                print("    без перечня проверенного (Б6) — запор такое «принять» не пускает")
+            for k, label in REVIEW_CHECKLIST.items():
+                if isinstance(cl.get(k), str) and cl[k].strip():
+                    print(f"    {label}: {cl[k]}")
         return 0
     print(f"pantheon review: {REVIEW_USAGE}", file=sys.stderr)
     return 2

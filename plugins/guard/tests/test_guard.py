@@ -39,10 +39,12 @@ NEEDS_POLICY = {"Метида правит карту решений", "promethe
 
 
 def setup(home):
+    # ai/knowledge/.git нужен: без него guard ищет репозиторий вверх по дереву (_git_top) и находит чужой .git над
+    # временной папкой (при сборке вне песочницы) — «mnemo-brain коммитит» тогда deny (metis-0090)
     for d in ("ai/pantheon/.git", "ai/pantheon/directions/athena-broker", "ai/pantheon/directions/hermes-alex/inbox",
               "ai/pantheon/scout", "ai/pantheon-view", ".local/state/pantheon/owner-log", ".claude/pantheon",
               "projects/brokerAssistantApp/app", "projects/alexbroker", "projects/agent-kit",
-              "projects/workshop/visa", "ai/knowledge", ".claude/agents", ".claude/skills/x", ".claude/.git",
+              "projects/workshop/visa", "ai/knowledge", "ai/knowledge/.git", ".claude/agents", ".claude/skills/x", ".claude/.git",
               "projects/brokerAssistantApp/.claude"):
         os.makedirs(os.path.join(home, d), exist_ok=True)
     os.makedirs(os.path.join(home, "ai/pantheon/directions/metis-pantheon/tasks"), exist_ok=True)
@@ -115,8 +117,11 @@ def gate_fixtures(home):
             fh.write(json.dumps({"v": 1, "kind": "tests", "repo": [repo], "pr": None, "sha": SHA_OK, "by": by}) + "\n")
             for pr in range(1, 13):
                 for kind in ("accept", "talos"):
-                    fh.write(json.dumps({"v": 1, "kind": kind, "repo": [repo], "pr": pr, "sha": SHA_OK,
-                                         "by": dict(by, agent_type="argus" if kind == "accept" else "talos")}) + "\n")
+                    r = {"v": 1, "kind": kind, "repo": [repo], "pr": pr, "sha": SHA_OK,
+                         "by": dict(by, agent_type="argus" if kind == "accept" else "talos")}
+                    if kind == "accept":  # Б6 (guard 0.5.6): запор пускает только «принять» с перечнем проверенного
+                        r["checklist"] = {"opened": "дифф PR", "ran": "тесты", "unchecked": "живой gh"}
+                    fh.write(json.dumps(r) + "\n")
     with open(os.path.join(home, "ai/pantheon/alerts.md"), "w") as fh:
         for repo in ("latark/brokerAssistantApp", "latark/broker-landing"):
             for pr in range(1, 13):
