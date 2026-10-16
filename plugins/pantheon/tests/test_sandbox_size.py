@@ -128,19 +128,19 @@ def main():
     check("tool-results: чужие закрыты правилом Read, свои — нет",
           all(rd_closed(os.path.join(projects, n, "s1", "tool-results", "x.txt")) for n in foreign)
           and not any(rd_closed(os.path.join(projects, n, "s1", "tool-results", "x.txt")) for n in mine))
-    # P0-1 (metis-0060): выгрузки Telegram legal-watch (cache, inbox) штабу закрыты — песочница и правило Read
-    tg = ("~/projects/legal-watch/cache", "~/projects/legal-watch/inbox")
-    check("окно штаба: legal-watch/cache и inbox — в denyRead песочницы и в правилах Read",
+    # P0-1 (metis-0060): выгрузки Telegram sample-watch (cache, inbox) штабу закрыты — песочница и правило Read
+    tg = ("~/projects/sample-watch/cache", "~/projects/sample-watch/inbox")
+    check("окно штаба: sample-watch/cache и inbox — в denyRead песочницы и в правилах Read",
           all(x in fs2["denyRead"] and f"Read({x}/**)" in hq2["permissions"]["deny"] for x in tg)
           and all(os.path.join(tmp, x[2:]) in fs2["denyRead"] for x in tg))
     deny_tg = [glob_re(os.path.join(tmp, x[len("Read(~/"):-1])) for x in hq2["permissions"]["deny"]
-               if x.startswith("Read(~/projects/legal-watch")]
-    check("окно штаба: файл выгрузки legal-watch/cache/telegram/… закрыт правилом Read, папка src/ — нет",
-          any(m.fullmatch(os.path.join(tmp, "projects/legal-watch/cache/telegram/ch.json")) for m in deny_tg)
-          and not any(m.fullmatch(os.path.join(tmp, "projects/legal-watch/src/a.py")) for m in deny_tg))
+               if x.startswith("Read(~/projects/sample-watch")]
+    check("окно штаба: файл выгрузки sample-watch/cache/telegram/… закрыт правилом Read, папка src/ — нет",
+          any(m.fullmatch(os.path.join(tmp, "projects/sample-watch/cache/telegram/ch.json")) for m in deny_tg)
+          and not any(m.fullmatch(os.path.join(tmp, "projects/sample-watch/src/a.py")) for m in deny_tg))
     sa = json.load(open(os.path.join(state, "settings", "athena-broker.json")))
-    check("окно направления: legal-watch штабу закрыт, координатору — нет",
-          not any("legal-watch" in x for x in sa["sandbox"]["filesystem"]["denyRead"]))
+    check("окно направления: sample-watch штабу закрыт, координатору — нет",
+          not any("sample-watch" in x for x in sa["sandbox"]["filesystem"]["denyRead"]))
     gm = [g["matcher"] for w in (hq2, sa) for g in w["hooks"]["PreToolUse"]
           if any("guard.py" in h.get("command", "") for h in g.get("hooks") or [])]  # без хука agents.py (P0-6)
     check("строгий guard окон штаба и направления: matcher с Agent|Task|Skill (hq-telegram, chiron)",

@@ -16,15 +16,15 @@
 
 Правила подсчёта (одни и те же для замера до запуска и после; меняются только вместе с решением в журнале):
   Разговор      — один основной транскрипт ~/.claude/projects/*/<id>.jsonl, начатый вами (entrypoint не sdk-*).
-                  sdk-py и sdk-cli — автоматические прогоны (legal-watch, бот, claude -p): в задачи не входят,
+                  sdk-py и sdk-cli — автоматические прогоны (бот, claude -p): в задачи не входят,
                   их цена — отдельной колонкой.
   Направление   — по папке запуска (cwd первой записи) против folders в directions.toml; старые пути до переезда
-                  14.10 (~/knowledge, ~/pantheon) и ~/projects/expert-corpus-data — к своим направлениям.
+                  14.10 (~/knowledge, ~/pantheon) и папка данных направления — к своим направлениям.
   Ваше сообщение — запись type=user с текстом от вас: не результат инструмента, не служебная вставка
                   (<command-…>, <local-command-…>, <task-notification>, «Caveat:», прерывание).
   Задача доведена до конца — разговор с хотя бы одним своим коммитом в репозитории направления; направление
-                  задачи — по репозиторию коммита, а не по папке запуска (разговор из alexbroker, закоммитивший
-                  в legal-watch, — задача themis-sources); неделя — по последнему коммиту.
+                  задачи — по репозиторию коммита, а не по папке запуска (разговор из папки направления, закоммитивший
+                  в репозиторий другого направления, — задача направления-владельца репозитория); неделя — по последнему коммиту.
   Коммит разговора — по вызову `git commit` в разговоре: папка из `git -C` или последнего `cd`, иначе папка
                   разговора; коммит этого репозитория с временем между вызовом и ответом (±5 с). Хеш из ответа
                   ([ветка abc1234]) тоже засчитывается.
@@ -92,8 +92,7 @@ from usage import cost, family  # noqa: E402  цены — одна таблиц
 HOME = os.path.expanduser("~")
 PANTHEON = os.environ.get("PANTHEON_HOME", os.path.join(HOME, "ai", "pantheon"))
 PROJECTS = os.environ.get("BASELINE_TRANSCRIPTS", os.path.join(HOME, ".claude", "projects"))
-ALIASES = {"~/knowledge": "mnemo-brain", "~/pantheon": "metis-pantheon",
-           "~/projects/expert-corpus-data": "themis-sources"}
+ALIASES = {"~/knowledge": "mnemo-brain", "~/pantheon": "metis-pantheon"}
 SERVICE = ("<command-", "<local-command-", "<task-notification", "Caveat:", "[Request interrupted",
            "<system-reminder>", "<bash-input>", "<bash-stdout>")
 COMMIT_OUT = re.compile(r"\[[\w./-]+(?: \(root-commit\))? ([0-9a-f]{7,40})\] ")

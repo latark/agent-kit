@@ -85,9 +85,9 @@ def main():
     agents_file, log = os.path.join(tmp, "agents.json"), os.path.join(tmp, "claude.log")
     open(agents_file, "w").write("[]")
     open(os.path.join(home, "directions.toml"), "w").write(
-        '[[direction]]\nname = "athena-broker"\nproject = "BrokerAssistant"\nfolders = ["~/projects/br"]\n'
+        '[[direction]]\nname = "athena-broker"\nproject = "ExampleApp"\nfolders = ["~/projects/br"]\n'
         'leads = ["hephaestus", "apollo"]\npnpm_store = "~/projects/br/.pnpm-store"\n'
-        '[[direction]]\nname = "hermes-alex"\nfolders = ["~/projects/alex"]\nleads = ["hephaestus"]\n'
+        '[[direction]]\nname = "hermes-site"\nfolders = ["~/projects/site"]\nleads = ["hephaestus"]\n'
         'pnpm_store = "~/elsewhere/.pnpm-store"\n')
     env = {"PATH": bindir + os.pathsep + os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home,
            "PANTHEON_STATE": state, "FAKE_AGENTS": agents_file, "FAKE_LOG": log, "PANTHEON_NO_NOTIFY": "1",
@@ -116,7 +116,7 @@ def main():
     open(os.path.join(agents_dir, "argus.tmpl"), "w").write("---\nname: argus\n---\n\nРевьюер.\n{{> report}}\n")
     open(os.path.join(agents_dir, "iris.tmpl"), "w").write("---\nname: iris\n---\n{{> nope}}\n")
     open(os.path.join(agents_dir, "tg-reader.md"), "w").write("---\nname: tg-reader\n---\nчужая\n")
-    open(os.path.join(agents_dir, "apollo-alex.md"), "w").write("---\nname: apollo-alex\n---\nсвоя роль\n")
+    open(os.path.join(agents_dir, "apollo-site.md"), "w").write("---\nname: apollo-site\n---\nсвоя роль\n")
     open(os.path.join(agents_dir, "hephaestus-old.md"), "w").write(
         "---\nname: hephaestus-old\n---\n<!-- собрано pantheon roles build из hephaestus.tmpl — руками не править -->\n")
     br = os.path.join(tmp, "projects", "br")
@@ -135,15 +135,15 @@ def main():
     check("domains build: pnpm_store внутри папок направления — npm_config_store_dir окна; вне папок — нет",
           win("athena-broker")["env"].get("npm_config_store_dir") == os.path.realpath(os.path.join(tmp, "projects", "br"))
           + "/.pnpm-store" and "npm_config_store_dir" not in win("workshop")["env"]
-          and "npm_config_store_dir" not in win("hermes-alex")["env"])
+          and "npm_config_store_dir" not in win("hermes-site")["env"])
     hb = os.path.join(agents_dir, "hephaestus-broker.md")
     text = open(hb).read() if os.path.exists(hb) else ""
     check("roles build: лид собран из шаблона по полю leads, метка после шапки, подстановки",
           r.returncode == 0 and text.startswith("---\nname: hephaestus-broker\n")
-          and "athena-broker (BrokerAssistant)" in text and "pantheon roles build" in text.split("---")[2]
-          and "~/projects/br" in text and os.path.exists(os.path.join(agents_dir, "hephaestus-alex.md")))
-    check("roles build: без шаблона apollo — чужой apollo-alex.md не тронут; устаревший собранный убран",
-          open(os.path.join(agents_dir, "apollo-alex.md")).read().endswith("своя роль\n")
+          and "athena-broker (ExampleApp)" in text and "pantheon roles build" in text.split("---")[2]
+          and "~/projects/br" in text and os.path.exists(os.path.join(agents_dir, "hephaestus-site.md")))
+    check("roles build: без шаблона apollo — чужой apollo-site.md не тронут; устаревший собранный убран",
+          open(os.path.join(agents_dir, "apollo-site.md")).read().endswith("своя роль\n")
           and not os.path.exists(os.path.join(agents_dir, "apollo-broker.md"))
           and not os.path.exists(os.path.join(agents_dir, "hephaestus-old.md")))
     argus = open(os.path.join(agents_dir, "argus.md")).read() if os.path.exists(os.path.join(agents_dir, "argus.md")) else ""
@@ -265,7 +265,7 @@ def main():
     check("start: без поручения — продолжать эпик, цель по чек-листу эпика в STATUS.md",
           r.returncode == 0 and "STATUS.md" in c[-1]["argv"][7] and "чек-листа эпика" in c[-1]["argv"][7])
     open(log, "w").close()
-    r = run("start", "hermes-alex")
+    r = run("start", "hermes-site")
     check("start: направление без папки на этом Mac — отказ", r.returncode == 2 and "нет папки" in r.stderr)
     r = run("start", "nope")
     check("start: нет такого направления — отказ", r.returncode == 2 and "нет направления" in r.stderr)
@@ -432,13 +432,13 @@ def main():
     # wake (ROLE-02)
     def task(tid, status, direction="athena-broker"):
         open(os.path.join(home, "directions", direction, "tasks", tid + ".md"), "w").write(
-            f"---\ntype: task\nid: {tid}\ntitle: t\nstatus: {status}\nproject: BrokerAssistant\ndirection: {direction}\n"
+            f"---\ntype: task\nid: {tid}\ntitle: t\nstatus: {status}\nproject: ExampleApp\ndirection: {direction}\n"
             + ("next: дальше\n" if status == "doing" else "") + "created: 2026-10-14\nupdated: 2026-10-14\n"
             "schema_version: 1\n---\n\n## Журнал\n")
     task("athena-0001", "doing")
     open(agents_file, "w").write(json.dumps([
         {"id": "a1", "name": "athena-broker", "state": "failed", "sessionId": "5a1a1a1a-0001", "cwd": tmp, "startedAt": 1},
-        {"id": "b1", "name": "hermes-alex", "state": "stopped", "sessionId": "s-b1", "cwd": tmp, "startedAt": 1},
+        {"id": "b1", "name": "hermes-site", "state": "stopped", "sessionId": "s-b1", "cwd": tmp, "startedAt": 1},
         {"id": "c1", "name": "random", "state": "failed", "sessionId": "s-c1", "cwd": tmp, "startedAt": 1},
         {"id": "d1", "name": "daedalus-site", "state": "failed", "sessionId": "s-d1", "cwd": tmp, "startedAt": 1}]))
     open(log, "w").close()
@@ -621,8 +621,8 @@ def main():
     # status: один экран, только читает
     open(agents_file, "w").write(json.dumps([
         {"id": "a1", "kind": "background", "state": "blocked", "name": "athena-broker", "waitingFor": "разрешение Bash"},
-        {"id": "a2", "kind": "background", "state": "working", "name": "hermes-alex"},
-        {"kind": "interactive", "state": None, "name": "artemk-1"}]))
+        {"id": "a2", "kind": "background", "state": "working", "name": "hermes-site"},
+        {"kind": "interactive", "state": None, "name": "user-1"}]))
     r = run("status")
     check("status: итог сверху, ждущая сессия названа, терминальные — отдельно, код 1 при проблемах",
           r.returncode == 1 and r.stdout.startswith("Пантеон · ") and "athena-broker — разрешение Bash" in r.stdout

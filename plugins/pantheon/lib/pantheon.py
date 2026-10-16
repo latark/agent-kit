@@ -1760,8 +1760,8 @@ def _real_dir(p, roots, strict=False, create=False):
 # закрытые штабу папки: индексы qmd, копии больших корпусов и сырые выгрузки (кэш, входящие) — чужой текст; штабу его
 # не читать (у штаба личное и действия наружу). Вопросы по ним — координатору направления поручением; коллекции qmd
 # штабу закрывает хук qmd-query
-HQ_CLOSED_DIRS = ["~/projects/expert-corpus", "~/.cache/expert-corpus", "~/.cache/qmd",  # trace-ok: 0182-core — снять в PR ядра 0182
-                  "~/.claude/projects/*expert-corpus*", "~/projects/legal-watch/cache", "~/projects/legal-watch/inbox"]  # trace-ok: 0182-core — снять в PR ядра 0182
+HQ_CLOSED_DIRS = ["~/projects/sample-corpus", "~/.cache/sample-corpus", "~/.cache/qmd",  # trace-ok: 0182-core — снять в PR ядра 0182
+                  "~/.claude/projects/*sample-corpus*", "~/projects/sample-watch/cache", "~/projects/sample-watch/inbox"]  # trace-ok: 0182-core — снять в PR ядра 0182
 
 
 # выводы фоновых задач и TMPDIR песочницы всех сессий Claude Code: /tmp/claude-<uid> (на macOS по умолчанию). Не из
@@ -2912,7 +2912,7 @@ def _wake(dry):
 # Mac их собирает тик вместе с domains.json, когда меняется шаблон, часть или реестр.
 #   {{> часть}}         — текст части (одна общая формулировка: отчёт, находка, внешние действия, доведение до конца);
 #   hephaestus, apollo  — роли лидов: по одной на направление с этим лидом в поле leads реестра,
-#                         hephaestus-<коротко> (athena-broker → broker), подстановки {{direction}} {{short}}
+#                         hephaestus-<коротко> (athena-shop → shop), подстановки {{direction}} {{short}}
 #                         {{project}} {{folders}}.
 # Свой файл узнаётся по строке-метке после шапки; файл без метки (свой ли, чужой ли) сборка не трогает, собранный файл
 # без шаблона — убирает. Ошибка в шаблоне (нет части, осталась {{…}}) — роль не пишется, старая версия остаётся.

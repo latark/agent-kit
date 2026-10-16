@@ -362,8 +362,8 @@ def main():
                                      "pantheon roles build", "pantheon stop *", "pantheon resume *", "pantheon pause *",
                                      "pantheon restart *", "pantheon saved *", "pantheon who", "pantheon agents"])
     check("окно штаба: корпус закрыт для чтения — песочница и правило Read (SEC-13, решение 15.10)",
-          all(x in hb["filesystem"]["denyRead"] for x in ("~/projects/expert-corpus", "~/.cache/qmd",
-                                                           "~/.cache/expert-corpus", "~/.claude/projects/*expert-corpus*"))
+          all(x in hb["filesystem"]["denyRead"] for x in ("~/projects/sample-corpus", "~/.cache/qmd",
+                                                           "~/.cache/sample-corpus", "~/.claude/projects/*sample-corpus*"))
           and "Read(~/.cache/qmd/**)" in hq["permissions"]["deny"]
           and any(x.endswith("pantheon-sandbox/workshop") for x in hb["filesystem"]["denyRead"])
           and not any(x.endswith("pantheon-sandbox/hq") for x in hb["filesystem"]["denyRead"])
@@ -373,8 +373,8 @@ def main():
     check("окно штаба: выводы чужих сессий закрыты (и в ~), свои и своих worktree — нет",
           f"Read(~/.claude/projects/{dash(tmp)}/**/tool-results/**)" in hq["permissions"]["deny"]
           and not any(dash(home) in x for x in hq["permissions"]["deny"])
-          and "Read(~/projects/expert-corpus/**)" in hq["permissions"]["deny"]
-          and any(x.startswith("Read(//") and x.endswith("/expert-corpus/**)") for x in hq["permissions"]["deny"]))
+          and "Read(~/projects/sample-corpus/**)" in hq["permissions"]["deny"]
+          and any(x.startswith("Read(//") and x.endswith("/sample-corpus/**)") for x in hq["permissions"]["deny"]))
     check("окна направлений: worktree от HEAD (эпик), у мастерской — нет; места heavy созданы",
           sa["worktree"] == {"baseRef": "head"} and sm["worktree"] == {"baseRef": "head"} and "worktree" not in sw
           and os.path.exists(os.path.join(state, "locks", "heavy-cmd-2.lock")))
@@ -430,7 +430,7 @@ def main():
           "направлений в тексте правил нет (metis-0098, решение 16.10)",
           bool(gated) and bool(gm) and "(`acme-co/br-app`)" in gated[0] and "acme-co/kit" not in gated[0]
           and "(`acme-co/kit`, `tools-org/sync`)" in gm[0] and "bad owner" not in gm[0] and "kit``" not in gm[0]
-          and not any(x in texts for x in ("latark", "BrokerAssistantApp", "MorphStream", "athena-broker",
+          and not any(x in texts for x in ("latark", "ExampleApp", "DemoStream", "athena-broker",
                                            "metis-pantheon", "mnemo-brain", "agent-kit")))
     check("правило Gated Merge: обе формы репозитория, перечень argus, ядро — кнопка владельца, --admin/--auto не "
           "разрешает (metis-0098)",

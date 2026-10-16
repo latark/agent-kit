@@ -92,7 +92,7 @@ def main():
         "--waiting-on", "human", "--next", "ждём ответ", "--question", "Где держать доску?", "--option", "В копии",
         "--option", "В knowledge", "--project", "Пантеон")
     run(env, "task", "new", "--direction", "athena-broker", "--title", "Налоги беты", "--due", "2026-10-10",
-        "--project", "BrokerAssistant")
+        "--project", "ExampleApp")
     run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Ждёт схему", "--status", "waiting",
         "--waiting-on", "metis-0001", "--next", "после схемы", "--project", "Пантеон")
     r = run(env, "check")
@@ -511,13 +511,13 @@ def main():
     open(nlog, "w").close()
     run(env, "task", "new", "--direction", "athena-broker", "--title", "Выбрать тариф", "--status", "waiting",
         "--waiting-on", "human", "--next", "ответ", "--question", "Какой тариф?", "--option", "A", "--option", "B",
-        "--project", "BrokerAssistant", t=day - 60)
+        "--project", "ExampleApp", t=day - 60)
     run(away, "board", t=day)
     lines = [l for l in open(nlog, encoding="utf-8").read().split("\n") if l]
     check("уведомление «❓ Вопрос к вам» ведёт в карточку", any("Вопрос к вам: Выбрать тариф" in l and "file=" in l and "%D0%92%D1%8B%D0%B1%D1%80" in l for l in lines))
     open(nlog, "w").close()
     run(env, "task", "new", "--direction", "athena-broker", "--title", "Ночной вопрос", "--status", "waiting",
-        "--waiting-on", "human", "--next", "ответ", "--project", "BrokerAssistant", t=day + 60)
+        "--waiting-on", "human", "--next", "ответ", "--project", "ExampleApp", t=day + 60)
     run(away, "board", t=day + 12 * 3600)  # 00:00
     check("ночью вопрос — без уведомления", not open(nlog, encoding="utf-8").read().strip())
 
@@ -834,7 +834,7 @@ def board_extra(tmp, home, state, view, env, src):
     # п. 2: отмечен вариант, которого нет в задаче, — конфликт в карточке; верный ответ его снимает
     qid = new_task(env, "--direction", "athena-broker", "--title", "Выбрать банк", "--status", "waiting",
                    "--waiting-on", "human", "--next", "ответ", "--question", "Какой банк?", "--option", "Первый банк",
-                   "--option", "Второй банк", "--project", "BrokerAssistant", t=t + 60)
+                   "--option", "Второй банк", "--project", "ExampleApp", t=t + 60)
     run(env, "board", t=t + 70)
     qc = card(view, "Выбрать банк")
     qtext = open(qc, encoding="utf-8").read()
@@ -881,7 +881,7 @@ def board_extra(tmp, home, state, view, env, src):
     check("task set owner= — отказ «owner не очищается»", r.returncode == 1 and "owner не очищается" in r.stderr)
     raw = os.path.join(home, "directions", "athena-broker", "tasks", "athena-0090.md")
     open(raw, "w", encoding="utf-8").write(
-        "---\ntype: task\nid: athena-0090\ntitle: Без исполнителя\nstatus: todo\nproject: BrokerAssistant\n"
+        "---\ntype: task\nid: athena-0090\ntitle: Без исполнителя\nstatus: todo\nproject: ExampleApp\n"
         "direction: athena-broker\ncreated: 2026-10-01\nupdated: 2026-10-01T10:00\nschema_version: 1\n---\n\n# Без исполнителя\n")
     r = run(env, "check", raw)
     run(env, "board", t=t + 190)
@@ -919,13 +919,13 @@ def board_extra(tmp, home, state, view, env, src):
     run(env, "board", t=t + 230)
     check("узлы: ушедшая роль — свой узел удалён, правленный владельцем остался",
           not os.path.exists(os.path.join(nd, "Гефест · pantheon.md")) and os.path.exists(os.path.join(nd, "dev-opus.md")))
-    roles = T.Roles(["metis-pantheon", "athena-brokerassistant", "daedalus-a", "daedalus-b"])
+    roles = T.Roles(["metis-pantheon", "athena-exampleapp", "daedalus-a", "daedalus-b"])
     check("узлы: имена по богам — координатор, лид с суффиксом, владелец, Зевс, два направления одного бога",
-          [roles.name(x) for x in ("athena-brokerassistant", "apollo-brokerassistant", "вы", "hq", "zeus", "argus",
+          [roles.name(x) for x in ("athena-exampleapp", "apollo-exampleapp", "вы", "hq", "zeus", "argus",
                                    "daedalus-a", "Странная Роль", "Bob", "зевс", "гефест · x")]
-          == ["Афина", "Аполлон · brokerassistant", "Владелец", "Зевс", "Зевс", "Аргус", "Дедал · a", "странная роль",
+          == ["Афина", "Аполлон · exampleapp", "Владелец", "Зевс", "Зевс", "Аргус", "Дедал · a", "странная роль",
               "bob", "Зевс", "Гефест · x"]
-          and roles.parent("apollo-brokerassistant") == "athena-brokerassistant" and roles.parent("hephaestus-x") == "zeus"
+          and roles.parent("apollo-exampleapp") == "athena-exampleapp" and roles.parent("hephaestus-x") == "zeus"
           and roles.parent("owner") is None and roles.parent("hq") == "owner")
 
     # п. 6: переход «Ждёт вас» → «Нужен ответ» — старая карточка со старым именем и старое состояние
@@ -934,7 +934,7 @@ def board_extra(tmp, home, state, view, env, src):
     day = 1791968400 + 3 * 3600  # 2026-10-14 15:00 по Москве — днём уведомления не глушатся
     wid = new_task(env, "--direction", "athena-broker", "--title", "Старый вопрос", "--status", "waiting",
                    "--waiting-on", "human", "--next", "ответ", "--question", "Как раньше?", "--option", "Так",
-                   "--option", "Иначе", "--project", "BrokerAssistant", t=day - 100)
+                   "--option", "Иначе", "--project", "ExampleApp", t=day - 100)
     run(env2, "board", t=day - 60)
     newc = card(view, "Старый вопрос")
     oldc = os.path.join(bd, "Старый вопрос.md")
