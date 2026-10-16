@@ -2001,12 +2001,16 @@ def private_conf(policy):
 # Образцы команд слияния в обход запора: правило allow, которому подходит любая из них, срабатывает раньше классификатора
 # режима auto, и формы --admin и --auto классификатор не судит (metis-0137)
 MERGE_SAMPLES = ("gh pr merge 12 --admin", "gh pr merge 12 --auto --merge")
+MERGE_CMD = "gh pr merge"
 PROJECT_SETTINGS_FILES = ("settings.json", "settings.local.json")
 
 
 def allow_rule_merges(rule):
-    """Пускает ли правило permissions.allow `gh pr merge`: "Bash", "Bash(*)", Bash(<шаблон>) — шаблон (звёздочка —
-    любые знаки, старая форма «:*» на конце — « *») подходит хотя бы к одному из MERGE_SAMPLES."""
+    """Пускает ли правило permissions.allow `gh pr merge`: "Bash", "Bash(*)", Bash(<шаблон>), где буквальное начало
+    шаблона до первой звёздочки — начало «gh pr merge» или само начинается с «gh pr merge» (флаги в любом порядке,
+    точная форма без звёздочки тоже), либо шаблон как glob подходит к одному из MERGE_SAMPLES. Пробелы схлопываются,
+    регистр не важен, ведущие VAR=значение снимаются; старая форма «:*» на конце — « *». Обёртки вроде `env *`,
+    `bash -c *` не ловятся: граница — песочница и guard (README)."""
     if not isinstance(rule, str):
         return False
     rule = rule.strip()
@@ -2017,7 +2021,14 @@ def allow_rule_merges(rule):
     inner = rule[5:-1].strip()
     if inner.endswith(":*"):
         inner = inner[:-2] + " *"
-    if inner == "":
+    inner = " ".join(inner.split()).lower()
+    while True:
+        m = re.match(r"[a-z_][a-z0-9_]*=\S* ", inner)
+        if not m:
+            break
+        inner = inner[m.end():]
+    head = inner.split("*", 1)[0]
+    if MERGE_CMD.startswith(head) or head.startswith(MERGE_CMD):
         return True
     rx = ".*".join(re.escape(x) for x in inner.split("*"))
     return any(re.fullmatch(rx, smp) for smp in MERGE_SAMPLES)
@@ -2146,11 +2157,11 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
         # chiron видит личное (me/) — только Зевсу (P0-2); главные роли и чужие лиды не нужны и лидам окна
         agents = (mine + COORDINATOR_AGENTS + COORDINATOR_EXTRA_AGENTS.get(name, []),
                   ["chiron"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
-        one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
-            [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, direction=True,
-            # окну с доступом к личному правило слияния не выдаётся — его PR сливает владелец (metis-0156)
-            auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name)))
-        built.append(name)
+        if one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
+               [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, direction=True,
+               # окну с доступом к личному правило слияния не выдаётся — его PR сливает владелец (metis-0156)
+               auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name))):
+            built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски; список субагентов — вне P0-6
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
     # местные порты мастерской закрыты: на macOS allowLocalBinding открывает все порты 127.0.0.1, в том числе демон CDP

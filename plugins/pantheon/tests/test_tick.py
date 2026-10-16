@@ -280,9 +280,19 @@ def main():
     r, built_a, built_t, *_ = allow_build("b", ["Bash(gh pr view *)", "Bash(gh pr checks *)", "Bash(git status)", "Read(*)"])
     check("allow Bash(gh pr view *) и прочие узкие — окно собирается", built_a and "окно не собрано" not in r.stderr)
     for rule in ("Bash", "Bash(*)", "Bash(gh:*)", "Bash(gh pr merge:*)", "Bash(gh pr *)", "Bash(gh pr merge*)",
-                 "Bash(gh pr merge 12 --admin)"):
+                 "Bash(gh pr merge 12 --admin)", "Bash(gh pr merge --admin *)", "Bash(gh pr merge --auto *)",
+                 "Bash(gh pr merge -R *)", "Bash(gh pr merge --squash *)", "Bash(gh pr merge)",
+                 "Bash(gh pr merge --admin)", "Bash(gh  pr merge *)", "Bash(GH_REPO=a/b gh pr merge *)",
+                 "Bash(GH pr Merge *)", "Bash(g*)", "Bash(gh p*)"):
         r, built_a, *_ = allow_build("c", [rule])
         check(f"allow {rule!r} — окно не собирается", not built_a and rule in r.stderr)
+    shown = [x.strip() for x in r.stdout.splitlines() if "окон ролей" in x]
+    check("несобранное окно не числится в списке собранных окон ролей",
+          bool(shown) and all("athena-broker" not in x for x in shown) and "themis-sources" in shown[0])
+    for rule in ("Bash(gh pr view *)", "Bash(gh pr checks *)", "Bash(gh pr diff *)", "Bash(gh run view *)",
+                 "Bash(git *)"):
+        r, built_a, *_ = allow_build("g", [rule])
+        check(f"allow {rule!r} — не слияние: окно собирается", built_a)
     r, built_a, *_ = allow_build("d", ["Bash(gh *)"], fname="settings.local.json")
     check("то же в settings.local.json — не собирается, файл назван", not built_a and "settings.local.json" in r.stderr)
     r, built_a, *_ = allow_build("e", ["Bash(gh *)"], second=["Bash(ls *)"])
