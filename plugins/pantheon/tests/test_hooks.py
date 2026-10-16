@@ -225,6 +225,18 @@ cr = subprocess.run([PY311, "-I", CLI, "consent", "athena-0041"], env=dict(BASE)
 check("скрытый текст Obsidian в вопросе карточки → не согласие", cr.returncode == 1, cr.stdout)
 cr = subprocess.run([PY311, "-I", CLI, "consent", "да"], env=dict(BASE), capture_output=True, text=True, timeout=30)
 check("id не по образцу — отказ, журнал не читается", cr.returncode == 2 and not cr.stdout, cr.stdout)
+# metis-0162: журнал не читается (папка вместо файла) — это не «ответа нет», а отдельный код и своя строка
+for jname in ("zeus.md", "board.jsonl"):
+    jp = os.path.join(LOG, jname)
+    os.rename(jp, jp + ".bak")
+    os.mkdir(jp)
+    cr = subprocess.run([PY311, "-I", CLI, "consent", "metis-0032"], env=dict(BASE), capture_output=True, text=True, timeout=30)
+    os.rmdir(jp)
+    os.rename(jp + ".bak", jp)
+    check("0162: %s не читается → код 3 и «ответ проверить нельзя», не «ответа нет»" % jname,
+          cr.returncode == 3 and "ответ проверить нельзя" in cr.stderr and not cr.stdout, cr.stdout + cr.stderr)
+cr = subprocess.run([PY311, "-I", CLI, "consent", "metis-0032"], env=dict(BASE), capture_output=True, text=True, timeout=30)
+check("0162: журнал на месте → по-прежнему ответ (код 0)", cr.returncode == 0, cr.stdout + cr.stderr)
 
 # пробы argus 15.10: машинный промпт не проходит за ваш ввод
 append(tr, queued("да", time.time()))

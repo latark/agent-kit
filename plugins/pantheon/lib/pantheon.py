@@ -3346,8 +3346,11 @@ def consent(rest):
     try:
         with open(path("owner-log", "zeus.md"), encoding="utf-8") as fh:
             text = fh.read()
-    except OSError:
+    except FileNotFoundError:
         text = ""
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"pantheon consent: журнал не читается ({e}) — ответ проверить нельзя", file=sys.stderr)
+        return 3
     word = re.compile(r"(?<![\w-])" + re.escape(qid) + r"(?![\w-])", re.I)
     # ответ — только выбор в окне вопросов (пометку «окно вопросов» ставит хук answer, ввод владельца её не получает)
     # на вопрос, который начинается с [<id>]; id в свободном тексте, цитате или заметке к чужому вопросу — не ответ
@@ -3367,9 +3370,13 @@ def consent(rest):
         elif word.search(body):
             mentions += 1
     try:
-        board_lines = open(path("owner-log", "board.jsonl"), encoding="utf-8").read().splitlines()
-    except OSError:
+        with open(path("owner-log", "board.jsonl"), encoding="utf-8") as fh:
+            board_lines = fh.read().splitlines()
+    except FileNotFoundError:
         board_lines = []
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"pantheon consent: журнал доски не читается ({e}) — ответ проверить нельзя", file=sys.stderr)
+        return 3
     for line in board_lines:
         try:
             rec = json.loads(line)
