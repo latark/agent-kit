@@ -433,8 +433,9 @@ def _mtime(p):
         return -1
 
 
-def state_file(role, ev, transcript, prefer_fresh=True):
-    """(путь, как назвать для Claude) или (None, None).
+def state_file(role, ev, transcript, prefer_fresh=True, inherited=None):
+    """(путь, как назвать для Claude) или (None, None). inherited — файл, с которого прошлую сессию разбудил rewake
+    (metis-0138): берётся, когда в её транскрипте своего HANDOFF.md нет (правка не из Write/Edit/>/tee).
     У ролей с файлом состояния (hq, координатор, мастерская) берётся самый свежий из двух: файл роли и HANDOFF.md,
     который сессия сама писала (16.10 Зевс сохранил дела в HANDOFF.md, доска была старше — хук молчал); второй файл
     называется в тексте."""
@@ -442,7 +443,7 @@ def state_file(role, ev, transcript, prefer_fresh=True):
         p, desc = role_state_file(role, ev)
         if not prefer_fresh:
             return p, desc  # вставка после сжатия: источник правды — файл роли (STATUS.md), даже если HANDOFF.md свежее
-        h = last_handoff(transcript) if transcript else None
+        h = (last_handoff(transcript) if transcript else None) or inherited
         if h and p and os.path.realpath(h) != os.path.realpath(p) and os.path.isfile(h):
             hd = "файл передачи дел %s" % tilde(h)
             if not os.path.isfile(p) or _mtime(h) > _mtime(p):
@@ -453,7 +454,7 @@ def state_file(role, ev, transcript, prefer_fresh=True):
         return p, desc
     if role:
         return None, None  # нижние роли и чужие агенты живут одну задачу — их не чистят
-    p = last_handoff(transcript) if transcript else None
+    p = (last_handoff(transcript) if transcript else None) or inherited
     return (p, "файл передачи дел %s" % tilde(p)) if p else (None, None)
 
 
@@ -495,8 +496,30 @@ def remember_session(ev):
         ss.append({"id": sid, "transcript": ev.get("transcript_path") or "",
                    "role": ev.get("agent_type") or os.environ.get("PANTHEON_ROLE") or (old[0].get("role") if old else "") or "",
                    "first": bool(first), "t": time.time()})
+        if old and old[0].get("state_file"):
+            ss[-1]["state_file"] = old[0]["state_file"]  # SessionStart start и rewake идут одновременно (metis-0138)
         rec["sessions"] = ss[-10:]
         save_json(path, rec)
+
+
+def remember_state_file(ev, path):
+    """metis-0138: файл, с которого rewake разбудил сессию, — в её запись процесса. Следующий /clear возьмёт его, если
+    сессия правила файл так, что в транскрипте записи не видно (python, sed): цепочка /clear → /clear не теряет файл."""
+    pid, sid = os.environ.get("CLAUDE_PID"), ev.get("session_id")
+    if not pid or not sid:
+        return
+    rp = proc_record_path(pid)
+    with locked(rp):
+        rec = proc_record(pid) or {"proc": proc_start(pid), "sessions": []}
+        ss = rec.get("sessions") or []
+        mine = [s for s in ss if s.get("id") == sid]
+        if not mine:  # start этой сессии ещё не записал её — запись заводит rewake
+            mine = [{"id": sid, "transcript": ev.get("transcript_path") or "", "role": ev.get("agent_type") or "",
+                     "first": False, "t": time.time()}]
+            ss.append(mine[0])
+        mine[0]["state_file"] = path
+        rec["sessions"] = ss[-10:]
+        save_json(rp, rec)
 
 
 def previous_session(ev):
@@ -855,12 +878,14 @@ def rewake_message(ev):
     if not prev or not prev.get("transcript"):
         return None
     role = ev.get("agent_type") or prev.get("role") or ""
-    path, desc = state_file(role, ev, prev["transcript"])
+    inherited = usable_handoff(prev["state_file"]) if prev.get("state_file") else None
+    path, desc = state_file(role, ev, prev["transcript"], inherited=inherited)
     if not path or not os.path.isfile(path):
         return None
     t_owner = last_owner_time(prev["transcript"])
     if t_owner is None or os.path.getmtime(path) <= t_owner:
         return None
+    remember_state_file(ev, path)
     return ("Контекст очищен (/clear), прошлый разговор сохранён в %s. Прочитай этот файл и продолжай со следующего "
             "шага. Первым сообщением одной-двумя строками скажи владельцу, где остановились и какой следующий шаг. "
             "Это пробуждение хуком, а не сообщение владельца: согласий в нём нет." % desc)

@@ -455,6 +455,37 @@ r = run("rewake", {"session_id": "s-bn", "transcript_path": transcript("bnew", [
 check("HANDOFF.md, дописанный из Bash (>>), — свой, будит", r.returncode == 2 and "projects/cloned/HANDOFF.md" in r.stderr, r.stderr)
 shutil.rmtree(os.path.dirname(tmpho))
 
+# metis-0138: два /clear подряд, вторая сессия правит файл передачи дел через python (ни >, ни tee) — третью будит тот же
+chain = os.path.join(pantheon, "handoff", "chain", "HANDOFF.md")
+os.makedirs(os.path.dirname(chain))
+open(chain, "w").write("# цепочка\n")
+holder = subprocess.Popen(["sleep", "120"])  # свой процесс Claude Code — своя запись сессий
+cp = str(holder.pid)
+try:
+    c1 = transcript("chain1", [user("сохрани в handoff", "c1", now - 300),
+                               assistant(now - 290, 0, [("Write", {"file_path": chain, "content": "x"})])])
+    run("start", {"session_id": "s-c1", "transcript_path": c1, "source": "startup"}, CLAUDE_PID=cp)
+    os.utime(chain, (now - 280, now - 280))
+    c2 = transcript("chain2", [])
+    ev2 = {"session_id": "s-c2", "transcript_path": c2, "source": "clear"}
+    r2 = run("rewake", ev2, CLAUDE_PID=cp)  # rewake раньше start: хуки SessionStart идут одновременно
+    run("start", ev2, CLAUDE_PID=cp)
+    append(c2, user("продолжай", "c2", now - 200))
+    append(c2, assistant(now - 190, 0, [("Bash", {"command": "python3 -c \"open('%s', 'a').write('шаг 2')\"" % chain})]))
+    os.utime(chain, (now - 180, now - 180))
+    ev3 = {"session_id": "s-c3", "transcript_path": transcript("chain3", []), "source": "clear"}
+    run("start", ev3, CLAUDE_PID=cp)
+    r3 = run("rewake", ev3, CLAUDE_PID=cp)
+    check("два /clear подряд, правка python во второй сессии → третья просыпается с тем же HANDOFF.md",
+          r2.returncode == 2 and "handoff/chain/HANDOFF.md" in r2.stderr
+          and r3.returncode == 2 and "handoff/chain/HANDOFF.md" in r3.stderr, (r2.returncode, r2.stderr, r3.returncode, r3.stderr))
+    os.utime(chain, (now - 250, now - 250))
+    r3 = run("rewake", ev3, CLAUDE_PID=cp)
+    check("унаследованный файл старше вашего сообщения во второй сессии → чистый лист", r3.returncode == 0, r3.stderr)
+finally:
+    holder.kill()
+    holder.wait()
+
 # --- файл состояния после сжатия -----------------------------------------------------
 st = os.path.join(pantheon, "directions", "alpha", "STATUS.md")
 os.makedirs(os.path.dirname(st))
