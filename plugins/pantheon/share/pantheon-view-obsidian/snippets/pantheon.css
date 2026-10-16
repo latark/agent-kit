@@ -1,0 +1,8 @@
+/* Пантеон: доска владельца. Служебное поле id прячем, «Заметку агенту» выделяем. */
+.metadata-property[data-property-key="id"] { display: none; }
+.metadata-property[data-property-key="Статус"] .metadata-property-value { font-weight: 600; }
+.metadata-property[data-property-key="Заметка агенту"] {
+  background: var(--background-modifier-hover);
+  border-radius: 6px;
+}
+.metadata-property[data-property-key="Заметка агенту"] .metadata-property-key { color: var(--text-accent); }

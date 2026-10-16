@@ -9,6 +9,8 @@ import json
 import os
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import PY311  # CLI pantheon — только на Python 3.11+
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
@@ -94,12 +96,12 @@ def main():
 
     def run(*args, stdin=None, extra=None, tty=False):
         if not tty:
-            return subprocess.run([sys.executable, "-I", LIB, *args], env=dict(env, **(extra or {})),
+            return subprocess.run([PY311, "-I", LIB, *args], env=dict(env, **(extra or {})),
                                   capture_output=True, text=True, timeout=60, input=stdin)
         # pantheon start zeus идёт только из терминала; псевдотерминалов в песочнице нет — stdin подменён на «терминал»
         boot = ("import runpy, sys\nclass T:\n    def isatty(self):\n        return True\n"
                 f"sys.stdin = T()\nsys.argv = [{LIB!r}] + {list(args)!r}\nrunpy.run_path({LIB!r}, run_name='__main__')\n")
-        return subprocess.run([sys.executable, "-I", "-c", boot], env=dict(env, **(extra or {})), capture_output=True,
+        return subprocess.run([PY311, "-I", "-c", boot], env=dict(env, **(extra or {})), capture_output=True,
                               text=True, timeout=60)
 
     def calls():
@@ -456,6 +458,48 @@ def main():
     r = run("wake")
     check("wake: задача «ждёт» — не будит", r.returncode == 0 and not calls() and "будить некого" in r.stdout)
 
+    # metis-0147 п. 2: контекст > 100 тыс. и простой > 60 мин — свежая сессия с файла состояния, иначе respawn
+    task("athena-0001", "doing")
+    tr_dir = os.path.join(tmp, ".claude", "projects", "".join(ch if ch.isalnum() else "-" for ch in tmp))
+    os.makedirs(tr_dir, exist_ok=True)
+    tr = os.path.join(tr_dir, "5a1a1a1a-0001.jsonl")
+
+    def transcript(tokens, idle_min):
+        with open(tr, "w") as fh:
+            fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "шаг"}}) + "\n")
+            fh.write(json.dumps({"type": "assistant", "isSidechain": False, "message": {"role": "assistant", "usage": {
+                "input_tokens": 10, "cache_read_input_tokens": tokens - 10, "cache_creation_input_tokens": 0}}}) + "\n")
+        t = time.time() - idle_min * 60
+        os.utime(tr, (t, t))
+
+    def wake_case(tokens, idle_min, *args):
+        transcript(tokens, idle_min)
+        open(agents_file, "w").write(json.dumps([{"id": "a1", "name": "athena-broker", "state": "stopped",
+                                                  "sessionId": "5a1a1a1a-0001", "cwd": tmp, "startedAt": 1}]))
+        open(log, "w").close()
+        return run("wake", *args), calls()
+
+    r, c = wake_case(120_000, 120)
+    bg = [x["argv"] for x in c if "--bg" in x["argv"]]
+    check("wake: контекст 120 тыс. и простой 2 ч — свежая сессия (claude --bg --agent --name --settings окно запуска, "
+          "«[Пантеон: пробуждение] … Прочитай STATUS.md»), не respawn",
+          r.returncode == 0 and not [x for x in c if x["argv"][:1] in (["respawn"], ["--resume"])] and len(bg) == 1
+          and bg[0][:6] == ["--bg", "--agent", "domain-coordinator", "--name", "athena-broker", "--settings"]
+          and bg[0][6] == os.path.join(state, "settings", "run", "athena-broker.json")
+          and "[Пантеон: пробуждение]" in bg[0][7] and "Прочитай ~/ai/pantheon/directions/athena-broker/STATUS.md" in bg[0][7]
+          and "свежей сессией (контекст 120 тыс., простой 120 мин)" in r.stdout)
+    r, c = wake_case(120_000, 10)
+    check("wake: контекст 120 тыс., простой 10 мин — как раньше: respawn", [x["argv"] for x in c] == [["respawn", "a1"]])
+    r, c = wake_case(90_000, 120)
+    check("wake: контекст 90 тыс., простой 2 ч — как раньше: respawn", [x["argv"] for x in c] == [["respawn", "a1"]])
+    r, c = wake_case(120_000, 120, "--dry-run")
+    check("wake --dry-run: говорит, что поднимет свежей сессией и какой файл прочитает, ничего не запускает",
+          r.returncode == 0 and not c and "будет поднята: athena-broker" in r.stdout
+          and "свежей сессией (контекст 120 тыс., простой 120 мин), прочитает "
+              "~/ai/pantheon/directions/athena-broker/STATUS.md" in r.stdout)
+    os.remove(tr)
+    open(agents_file, "w").write("[]")
+
     # approve (DONE-11)
     r = run("approve", "add", "--site", "avito.ru", "--allow", "поднимать объявления", "--limits", "не чаще раза в день")
     ap = os.path.join(tmp, ".claude", "pantheon", "approvals.toml")
@@ -469,16 +513,21 @@ def main():
 
     # heavy (MEM-03): два места, третья команда ждёт
     locks = os.path.join(state, "locks")
-    marks = os.path.join(tmp, "heavy-marks")
-    os.makedirs(marks)
-    script = f"python3 -c 'import time,os; open(os.path.join(\"{marks}\", str(time.time())), \"w\").close(); time.sleep(1.5)'"
+    journal = os.path.join(tmp, "heavy-journal")
+    # каждая команда дописывает в журнал «s» при старте и «e» перед выходом; порядок строк — порядок событий, а не время
+    script = (f"python3 -c 'import time; open(\"{journal}\", \"a\").write(\"s\\n\"); time.sleep(1.5); "
+              f"open(\"{journal}\", \"a\").write(\"e\\n\")'")
     ps = [subprocess.Popen([sys.executable, "-I", HEAVY, "/bin/sh", "-c", script], env=env,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(3)]
     codes = [p.wait(timeout=30) for p in ps]
-    starts = sorted(float(x) for x in os.listdir(marks))
-    check("heavy: места созданы сборкой; две команды сразу, третья — после освобождения места",
-          os.path.exists(os.path.join(locks, "heavy-cmd-1.lock")) and codes == [0, 0, 0] and len(starts) == 3
-          and starts[1] - starts[0] < 1.0 and starts[2] - starts[0] >= 1.4)
+    events = open(journal).read().split()
+    running, peak = 0, 0
+    for ev in events:
+        running += 1 if ev == "s" else -1
+        peak = max(peak, running)
+    check("heavy: места созданы сборкой; больше двух команд разом не идёт, третья стартует после первого выхода",
+          os.path.exists(os.path.join(locks, "heavy-cmd-1.lock")) and codes == [0, 0, 0] and sorted(events) == ["e"] * 3 + ["s"] * 3
+          and peak == 2 and events.index("e") < [i for i, x in enumerate(events) if x == "s"][2])
     r = subprocess.run([sys.executable, "-I", HEAVY, "/bin/sh", "-c", "exit 7"], env=env, capture_output=True)
     check("heavy: код выхода команды сохраняется", r.returncode == 7)
 

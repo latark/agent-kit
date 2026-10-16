@@ -18,6 +18,14 @@
   `plugins/guard/policy.example.toml`), правит только metis-pantheon.
 - `plugins/pantheon/lib/pantheon.py` — планировщик и команда; `pantheon help` — список команд.
   Задачи — `~/ai/pantheon/schedule.toml`, метки и журналы запусков — `~/.local/state/pantheon/` (свои у каждого Mac).
+- Требуется Python 3.11+ (`tomllib`). Системный `/usr/bin/python3` на macOS — 3.9, он не подходит; `bin/pantheon` и
+  `bin/pantheon-tick` сами ищут 3.11+ (`python3` из PATH, `python3.14`…`3.11`, Homebrew, python.org; общий поиск —
+  `lib/find-python.sh`). Не нашли — строка «нужен Python 3.11+» и код 1, у тика ещё строка в `alerts.md` не чаще раза в
+  сутки. Поставить: `brew install python@3.14`. Хуки guard идут на `python3` из PATH и работают на любом Python 3.9+.
+- Лёгкий тик: `pantheon` идёт модулем через `lib/run.py` (байт-код в `lib/__pycache__`, при read-only папке молча
+  без кэша), `--help` ~34 мс вместо ~62. Задачи `view --quiet`, `board`, `sync-answers`, `agents` тик пропускает, если
+  их входы (отпечаток stat, таблица входов — `TICK_SKIP` в `lib/pantheon.py`) не менялись с прошлого удачного прогона;
+  не реже раза в 15 минут они идут в любом случае, ручной вызов и `run-job` — всегда. Пропуски — `tick-skipped.json`.
 - Размер песочницы окна (с 0.11.17): Seatbelt не собирает профиль больше 64 КБ, и тогда Bash окна не запускается
   совсем. Поэтому `sandbox_build` считает байты путей песочницы окна. Выше предела — 48 КБ, переменная
   `PANTHEON_SANDBOX_LIMIT` — окно не пересобирается: остаётся прежний файл, приходит одна тревога «песочница окна …».
@@ -82,7 +90,9 @@
   запуском qmd и без ключа `update` (его qmd исполняет через bash). Сервер MCP — служба `qmd` на 127.0.0.1:8181;
   подключение на новом Mac — `npm install -g @tobilu/qmd`, затем `pantheon qmd install` (MCP уровня пользователя).
   Хук `ctx.py qmd-query` пропускает только поиск `vec`/`lex` в названных коллекциях с `rerank: false` (QMD-04).
-- `plugins/pantheon/lib/view-sync.sh` — копия `~/ai/pantheon` только для чтения для Obsidian.
+- `plugins/pantheon/lib/view-sync.sh` — копия `~/ai/pantheon` только для чтения для Obsidian. Если в копии нет
+  `.obsidian`, кладёт образец настроек из `plugins/pantheon/share/pantheon-view-obsidian/` (сниппеты, закладки, базовые
+  плагины; существующую папку не трогает). Тему и плагин Style Settings владелец ставит в Obsidian сам.
 - `plugins/pantheon/hooks/ctx.py` — хуки контекста и журнала ваших слов (шаг 1.1): `owner-log` (UserPromptSubmit,
   в фоне — строка только для ввода, который Claude Code сам пометил в транскрипте как ваш), `stop` (подсказка
   «пора очистить» на 150 тыс. и далее каждые +100 тыс.), `start` (после сжатия — файл состояния, штабу — новые

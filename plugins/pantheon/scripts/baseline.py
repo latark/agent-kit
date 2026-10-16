@@ -77,7 +77,10 @@ import os
 import re
 import subprocess
 import sys
-import tomllib
+try:
+    import tomllib
+except ImportError:  # системный python 3.9 на macOS
+    sys.exit("pantheon: нужен Python 3.11+ (нет tomllib)")
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from statistics import mean, median

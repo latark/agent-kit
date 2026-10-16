@@ -1113,6 +1113,31 @@ def checked_option(body):
     return m[0].strip() if len(m) == 1 else (None if not m else "?")
 
 
+# Сортировка колонок вида «Доска» (metis-0172). В Bases сортировка одна на вид, а колонки — значения «Статус», поэтому
+# ключи сортировки — формулы col_k1..col_k3, зависящие от статуса; все по возрастанию, убывание — минусом. Пустой «Срок»
+# и пустой «Вопрос задан» — в конец (due_n, qa_n — очень большое число). Закрыта/Создана — метка времени (cr_n, cl_n).
+# Ключи: u — urgency, p — prio_rank, due — Срок↑, cr — Создана↑, -cr — Создана↓, -cl — Закрыта↓, qa — Вопрос задан↑.
+COLUMN_KEYS = {
+    "Входящие": ("-cr", "p", "u"),
+    "Нужен ответ": ("u", "p", "qa"),
+    "Очередь": ("p", "due", "cr"),
+    "В работе": ("u", "p", "due"),
+    "Ждёт": ("u", "due", "cr"),
+    "На проверке": ("u", "p", "cr"),
+    "Готово": ("-cl", "p", "-cr"),
+    "Отменено": ("-cl", "-cr", "0"),
+}
+_KEY_EXPR = {"u": "formula.urgency", "p": "formula.prio_rank", "due": "formula.due_n", "cr": "formula.cr_n",
+             "-cr": "0 - formula.cr_n", "-cl": "0 - formula.cl_n", "qa": "formula.qa_n", "0": "0"}
+
+
+def _col_formula(i):
+    expr = "0"
+    for status in reversed(list(COLUMN_KEYS)):
+        expr = f'if(note["Статус"] == "{status}", {_KEY_EXPR[COLUMN_KEYS[status][i]]}, {expr})'
+    return expr
+
+
 BASE_FILE = """filters:
   and:
     - file.inFolder("Доска")
@@ -1123,6 +1148,13 @@ formulas:
   urgency: 'if(note["Внимание"], if(note["Внимание"].contains("конфликт"), 0, if(note["Внимание"].contains("подтвердите словом"), 0, if(note["Внимание"].contains("просрочено"), 1, if(note["Внимание"].contains("долго ждёт"), 1, if(note["Внимание"].contains("срок скоро"), 2, 3))))), 3)'
   prio_rank: 'if(note["Приоритет"].isEmpty(), 2, number(note["Приоритет"]))'
   age_key: 'if(note["Статус"] == "Готово", if(note["Закрыта"], 0 - number(note["Закрыта"]), 0), if(note["Создана"], number(note["Создана"]), 0))'
+  cr_n: 'if(note["Создана"], number(note["Создана"]), 0)'
+  cl_n: 'if(note["Закрыта"], number(note["Закрыта"]), 0)'
+  due_n: 'if(note["Срок"], number(note["Срок"]), 99999999999999)'
+  qa_n: 'if(note["Вопрос задан"], number(note["Вопрос задан"]), 99999999999999)'
+  col_k1: '{COLK1}'
+  col_k2: '{COLK2}'
+  col_k3: '{COLK3}'
   stage: 'if(note["Статус"] == "Нужен ответ", 0, if(note["Статус"] == "Входящие", 1, if(note["Статус"] == "На проверке", 2, if(note["Статус"] == "В работе", 3, if(note["Статус"] == "Ждёт", 4, if(note["Статус"] == "Очередь", 5, if(note["Статус"] == "Готово", 6, 7)))))))'
   status_view: 'if(note["Статус"] == "Нужен ответ", "🔴 Нужен ответ", if(note["Статус"] == "Входящие", "📥 Входящие", if(note["Статус"] == "В работе", "🟡 В работе", if(note["Статус"] == "На проверке", "🔵 На проверке", if(note["Статус"] == "Ждёт", "⏸ Ждёт", if(note["Статус"] == "Очередь", "⚪ Очередь", if(note["Статус"] == "Готово", "🟢 Готово", if(note["Статус"] == "Отменено", "⚫ Отменено", note["Статус"]))))))))'
   prio_view: 'if(note["Приоритет"].isEmpty(), "", if(number(note["Приоритет"]) == 0, "🔥🔥 0 срочно", if(number(note["Приоритет"]) == 1, "🔥 1 высокий", if(number(note["Приоритет"]) == 2, "2 обычный", "▫️ 3 низкий"))))'
@@ -1143,13 +1175,11 @@ views:
       direction: ASC
     groupOrder: [Входящие, Нужен ответ, Очередь, В работе, Ждёт, На проверке, Готово, Отменено]
     sort:
-      - property: formula.urgency
+      - property: formula.col_k1
         direction: ASC
-      - property: formula.prio_rank
+      - property: formula.col_k2
         direction: ASC
-      - property: note.Срок
-        direction: ASC
-      - property: formula.age_key
+      - property: formula.col_k3
         direction: ASC
     order: [file.name, note.Проект, note.Внимание, formula.prio_view, note.Срок, note.Кому]
   - type: table
@@ -1201,6 +1231,8 @@ views:
         direction: ASC
     order: [note.id, file.name, formula.status_view, formula.prio_view, note.Внимание, note.Кому, note.Срок, note.Дальше, note.Создана, note.Закрыта]
 """
+for _i in (1, 2, 3):
+    BASE_FILE = BASE_FILE.replace("{COLK%d}" % _i, _col_formula(_i - 1))
 BASE_VERSION = hashlib.sha256(BASE_FILE.encode("utf-8")).hexdigest()[:12]  # сменился шаблон — тик перепишет Доска.base
 # sha256[:16] шаблонов BASE_FILE до 0.9.28 (c616683 — 0.9.27, 7be0aa5 — раньше): тогда в состоянии не было base_hash,
 # и нетронутый старый файл иначе считался бы правкой владельца. Дальше то, что записал тик, помнит base_hash

@@ -13,6 +13,12 @@ SRC="${1:-$HOME/ai/pantheon}"; DST="${2:-$HOME/ai/pantheon-view}"; INBOX="${3:-$
 # копия её не трогает (ни перенос «лишнего», ни rsync --delete, ни снятие прав).
 BOARD="Доска"
 mkdir -p "$DST"
+# Образец настроек Obsidian (тема, сниппеты, закладки; без workspace.json): кладётся только если в копии нет .obsidian
+# совсем — на новом Mac или у нового пользователя; существующую папку не трогаем (metis-0131)
+SAMPLE="${4:-${0:A:h}/../share/pantheon-view-obsidian}"
+if [[ ! -e "$DST/.obsidian" && -d "$SAMPLE" ]]; then
+  cp -R "$SAMPLE" "$DST/.obsidian" && chmod -R u+w "$DST/.obsidian"
+fi
 stamp=$(date +%Y%m%d-%H%M%S)
 
 # открыть папки копии на время обновления (rsync и перенос лишнего пишут в них)

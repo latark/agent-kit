@@ -12,6 +12,8 @@ import os
 import re
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import PY311  # CLI pantheon — только на Python 3.11+
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
@@ -56,7 +58,7 @@ def make(schedule=""):
 
 def run(w, *args, t, idle=0, env=None):
     e = dict(w["env"], PANTHEON_NOW=str(t), PANTHEON_FAKE_IDLE=str(idle), **(env or {}))
-    return subprocess.run([sys.executable, "-I", CLI, *args], env=e, capture_output=True, text=True, timeout=60)
+    return subprocess.run([PY311, "-I", CLI, *args], env=e, capture_output=True, text=True, timeout=60)
 
 
 def board(w, t, idle=0):
@@ -448,7 +450,7 @@ def review_case():
     fd = os.open(os.path.join(w["state"], "locks", "notify.lock"), os.O_WRONLY | os.O_CREAT)
     fcntl.flock(fd, fcntl.LOCK_EX)
     t0 = _time.time()
-    r = subprocess.run([sys.executable, "-I", CLI, "alert", "прод упал", "--critical", "--from", "zeus"],
+    r = subprocess.run([PY311, "-I", CLI, "alert", "прод упал", "--critical", "--from", "zeus"],
                        env=dict(w["env"], PANTHEON_NOW=str(at(20, 12))), capture_output=True, text=True, timeout=60)
     took = _time.time() - t0
     fcntl.flock(fd, fcntl.LOCK_UN)

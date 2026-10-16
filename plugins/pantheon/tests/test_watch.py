@@ -11,6 +11,10 @@ import shutil
 import os
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import PY311  # CLI pantheon — только на Python 3.11+
+if sys.version_info < (3, 11):  # часть проверок импортирует pantheon.py в этом же процессе — ему нужен tomllib
+    os.execv(PY311, [PY311, "-I", os.path.abspath(__file__)])
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
@@ -34,12 +38,27 @@ log = os.environ["FAKE_CLAUDE_LOG"]
 open(log, "a").write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd()}) + "\n")
 a = sys.argv[1:]
 if a[:1] == ["agents"]:
-    print(open(os.environ["FAKE_AGENTS"]).read())
+    nxt = os.environ.get("FAKE_AGENTS_NEXT")       # первый вызов — FAKE_AGENTS, все следующие — этот файл
+    if nxt and os.path.exists(nxt + ".seen"):
+        print(open(nxt).read())
+    else:
+        if nxt:
+            open(nxt + ".seen", "w").close()
+        print(open(os.environ["FAKE_AGENTS"]).read())
 elif a[:1] == ["--version"]:
     print(os.environ.get("FAKE_CC", "2.1.292") + " (Claude Code)")
 elif a[:1] == ["respawn"] and os.environ.get("FAKE_RESPAWN_RC"):
     print("respawn: no such session", file=sys.stderr)
     sys.exit(int(os.environ["FAKE_RESPAWN_RC"]))
+elif a[:1] == ["stop"] and os.environ.get("FAKE_STOP_MARK"):
+    lst = json.load(open(os.environ["FAKE_AGENTS"]))
+    for x in lst:
+        if x.get("id") == a[1]:
+            x.update(state="stopped", pid=None)
+    json.dump(lst, open(os.environ["FAKE_AGENTS"], "w"))
+elif a[:1] == ["--bg"] and os.environ.get("FAKE_BG_SLEEP"):
+    import time
+    time.sleep(float(os.environ["FAKE_BG_SLEEP"]))
 elif "--resume" in a:
     print(os.environ.get("FAKE_RESUME_OUT", "backgrounded"))
 else:
@@ -125,7 +144,7 @@ class Env:
                "PANTHEON_FAKE_LIMIT": "10"}
         env.update(self.extra)
         env.update(extra or {})
-        return subprocess.run([sys.executable, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=60)
+        return subprocess.run([PY311, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=60)
 
     def calls(self):
         if not os.path.exists(self.log):
@@ -367,6 +386,28 @@ def test_autostart_backoff_and_give_up():
           f"снова встал через 3 дня при неснятой отметке — нет второй macOS: {st}")
 
 
+def test_autostart_start_timeout_0141():
+    """metis-0141 п. 1: pantheon start из самозапуска не уложился в срок — строка в тревогах и код 124, без трассировки;
+    срок по умолчанию покрывает шаги запуска (около 410 с) и меньше срока прохода дежурного (600 с)."""
+    if sys.version_info < (3, 11):  # pantheon.py сам требует 3.11 (tomllib): на 3.9 он отвечал бы отказом на всё
+        print("ok   пропуск: срок pantheon start требует Python 3.11+ (здесь %d.%d)" % sys.version_info[:2])
+        return
+    e = Env()
+    e.direction("pluto-x")
+    e.task("pluto-0001", "pluto-x")
+    e.run("watch", t=T0)
+    e.board("pluto-0001", T0 + 10)
+    r = e.run("watch", t=T0 + 60, extra={"PANTHEON_START_TIMEOUT": "2", "FAKE_BG_SLEEP": "20"})
+    check(r.returncode == 0 and "Traceback" not in r.stderr, f"проход упал на сроке запуска: {r.returncode} {r.stderr[-800:]}")
+    check("pantheon start не уложился в 2 с" in e.alerts() and "не вышло, код 124" in e.alerts(),
+          f"нет строки о сроке запуска: {e.alerts()[-600:]}")
+    st = json.load(open(e.st("autostart.json")))["pluto-x"]
+    check(st.get("fails") == 1, f"срок запуска не засчитан сбоем: {st}")
+    src = open(os.path.join(ROOT, "lib", "watch.py"), encoding="utf-8").read()
+    check("START_TIMEOUT = 420.0" in src and "timeout=300" not in src.split("def resume_or_start")[1].split("\ndef ")[0],
+          "срок pantheon start в resume_or_start не 420 с")
+
+
 def test_autostart_healthy_resets_and_limits():
     """Сессия проработала ≥ 30 мин — сбои забыты; два направления уже работают — третье ждёт места."""
     e = Env()
@@ -421,6 +462,240 @@ def test_holders_registry_and_live_copies():
     check(not os.path.exists(e.st("push", "dddddddd-2.txt")), "push-файл остался после неудачного respawn")
 
 
+def transcript(e, a, tokens, mtime):
+    """Транскрипт сессии a там, где его пишет Claude Code: ~/.claude/projects/<cwd с «-»>/<sessionId>.jsonl."""
+    d = os.path.join(e.home, ".claude", "projects", "".join(ch if ch.isalnum() else "-" for ch in a["cwd"]))
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, a["sessionId"] + ".jsonl")
+    with open(p, "w") as fh:
+        fh.write(json.dumps({"type": "user", "timestamp": "2026-10-16T10:00:00.000Z",
+                             "message": {"role": "user", "content": "шаг"}}) + "\n")
+        fh.write(json.dumps({"type": "assistant", "isSidechain": False, "message": {"role": "assistant", "usage": {
+            "input_tokens": 10, "cache_read_input_tokens": tokens - 10, "cache_creation_input_tokens": 0}}}) + "\n")
+    os.utime(p, (mtime, mtime))
+    return p
+
+
+QUICK = {"PANTHEON_STOP_WAIT": "1", "PANTHEON_STOP_POLL": "0.02", "PANTHEON_STOP_SETTLE": "0.05",
+         "PANTHEON_NAME_WAIT": "0.1"}
+
+
+def test_resume_or_start_fresh():
+    """metis-0147 п. 2 в дежурном (resume_or_start: pantheon wake <имя>, самозапуск, снятие паузы): контекст > 100 тыс.
+    и простой > 60 мин — свежая сессия с файла состояния; иначе — respawn, как раньше."""
+    e = Env()
+    e.direction("fr-dir")
+    a = bg("fr-dir", "stopped", "ffffffff-1")
+    e.agents([a])
+    transcript(e, a, 130_000, T0 - 7200)
+    r = e.run("wake", "fr-dir", t=T0, extra=QUICK)
+    c = e.calls()
+    new = [x for x in c if "--bg" in x]
+    check(not [x for x in c if x[:1] == ["respawn"] or "--resume" in x] and len(new) == 1
+          and new[0][:5] == ["--bg", "--agent", "domain-coordinator", "--name", "fr-dir"]
+          and os.path.realpath(new[0][6]) == os.path.realpath(e.st("settings", "run", "fr-dir.json"))
+          and "[Пантеон: свежий старт]" in new[0][-1] and "~/ai/pantheon/directions/fr-dir/STATUS.md" in new[0][-1]
+          and "Посмотри входящие" in new[0][-1], f"свежий старт в pantheon wake <имя>: {c} {r.stdout} {r.stderr}")
+    open(e.log, "w").close()
+    transcript(e, a, 130_000, T0 - 600)
+    e.run("wake", "fr-dir", t=T0, extra=QUICK)
+    check(["respawn", "ffffffff"] in e.calls() and not [x for x in e.calls() if "--bg" in x],
+          f"простой 10 мин — не respawn: {e.calls()}")
+
+
+def _iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t))
+
+
+ZEUS_SID = "2e057e05-0001"
+
+
+def zeus_env(tokens=160_000, state="blocked", extra_entries=(), saved=True):
+    """Зевс в claude agents и его транскрипт: ход начался T0-3000, ответ T0-2990 (почти 50 мин назад); доска и handoff
+    записаны T0-2900 (saved), T0-4000 (saved=False, до хода) или в момент saved (число)."""
+    e = Env()
+    json.dump({"env": {}}, open(e.st("settings", "hq.json"), "w"))
+    z = {"id": "2e057e05", "sessionId": ZEUS_SID, "name": "zeus", "state": state, "status": "waiting",
+         "waitingFor": "input needed", "pid": None, "kind": "background", "cwd": e.pantheon,
+         "startedAt": (T0 - 9000) * 1000}
+    e.agents([z])
+    d = os.path.join(e.home, ".claude", "projects", "".join(ch if ch.isalnum() else "-" for ch in e.pantheon))
+    os.makedirs(d, exist_ok=True)
+    rows = [{"type": "user", "timestamp": _iso(T0 - 3000), "message": {"role": "user", "content": "что на доске?"}},
+            _answer(T0 - 2990, tokens)]
+    rows += list(extra_entries)
+    e.zeus_transcript = os.path.join(d, ZEUS_SID + ".jsonl")
+    with open(e.zeus_transcript, "w") as fh:
+        fh.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+    hand = os.path.join(e.pantheon, "handoff", "zeus-2026-10-16")
+    os.makedirs(hand, exist_ok=True)
+    for f in (os.path.join(e.pantheon, "board.md"), os.path.join(hand, "HANDOFF.md")):
+        open(f, "w").write("состояние\n")
+        m = saved if not isinstance(saved, bool) else T0 - 2900 if saved else T0 - 4000
+        os.utime(f, (m, m))
+    return e
+
+
+def zeus_actions(e):
+    return [c for c in e.calls() if c[:1] in (["stop"], ["--bg"], ["respawn"]) or "--resume" in c]
+
+
+ZEUS_RUN = {**QUICK, "FAKE_STOP_MARK": "1"}
+
+
+def _tool(name, tid, inp, t):
+    return {"type": "assistant", "timestamp": _iso(t), "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": tid, "name": name, "input": inp}], "usage": {
+        "input_tokens": 10, "cache_read_input_tokens": 159_990, "cache_creation_input_tokens": 0}}}
+
+
+def _result(tid, t, text="ok", tur=None):
+    r = {"type": "user", "timestamp": _iso(t), "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": tid, "content": text}]}}
+    if tur is not None:
+        r["toolUseResult"] = tur
+    return r
+
+
+def _answer(t, tokens=160_000):
+    return {"type": "assistant", "timestamp": _iso(t), "message": {
+        "role": "assistant", "stop_reason": "end_turn", "content": [{"type": "text", "text": "жду"}],
+        "usage": {"input_tokens": 10, "cache_read_input_tokens": tokens - 10, "cache_creation_input_tokens": 0}}}
+
+
+def test_zeus_clean_0136():
+    """metis-0136: дежурный очищает Зевса только при всех шести условиях — свежий старт (claude stop + claude --bg
+    --agent hq --name zeus с окном штаба), одна строка «Зевс очищен в HH:MM, контекст N тыс.»; повторный проход —
+    ничего. Любое условие не выполнено — очистки нет; не выполнено только (5) — напоминание не чаще раза в час;
+    (6) — с конца хода меньше 20 мин: ни очистки, ни напоминания."""
+    # все условия выполнены — ровно одно действие и одна строка
+    e = zeus_env()
+    r = e.run("watch", t=T0, extra=ZEUS_RUN)
+    acts = zeus_actions(e)
+    starts = [c for c in acts if c[:1] == ["--bg"]]
+    check(acts[:1] == [["stop", "2e057e05"]] and len(starts) == 1 and len(acts) == 2,
+          f"очистка Зевса — не stop + один --bg: {acts} {r.stderr[-600:]}")
+    if starts:
+        s = starts[0]
+        check(s[s.index("--agent") + 1] == "hq" and s[s.index("--name") + 1] == "zeus"
+              and os.path.realpath(s[s.index("--settings") + 1]) == os.path.realpath(e.st("settings", "hq.json")),
+              f"свежий Зевс не с ролью, именем и окном штаба: {s}")
+        check(s[-1].startswith("[Пантеон: очистка]") and "~/ai/pantheon/board.md" in s[-1]
+              and "~/ai/pantheon/handoff/zeus-2026-10-16/HANDOFF.md" in s[-1] and "продолжай" in s[-1],
+              f"текст свежего Зевса: {s[-1]}")
+    hhmm = time.strftime("%H:%M", time.localtime(T0))
+    check(e.alerts().count("Зевс очищен") == 1 and f"Зевс очищен в {hhmm}, контекст 160 тыс." in e.alerts(),
+          f"нет одной строки об очистке: {e.alerts()[-500:]}")
+    check(os.path.exists(e.zeus_transcript), "транскрипт прошлого Зевса пропал")
+    n = len(e.calls())
+    e.run("watch", t=T0 + 300, extra=ZEUS_RUN)                     # Зевс уже остановлен — ничего
+    z = json.load(open(e.agents_file))
+    z[0].update(state="blocked")                                     # старый список: та же сессия снова «ждёт»
+    e.agents(z)
+    e.run("watch", t=T0 + 600, extra=ZEUS_RUN)
+    check(len(zeus_actions(e)) == 2 and e.alerts().count("Зевс очищен") == 1,
+          f"повторный проход снова чистит: {e.calls()[n:]}")
+
+    # каждое условие по отдельности не выполнено — очистки нет
+    ask = [_tool("AskUserQuestion", "toolu_ask1", {"questions": []}, T0 - 2980)]
+    bash_bg = [_tool("Bash", "toolu_bg1", {"command": "sleep 999", "run_in_background": True}, T0 - 2985),
+               _result("toolu_bg1", T0 - 2984, "Command running in background with ID: b1", {"backgroundTaskId": "b1"}),
+               _answer(T0 - 2983)]
+    agent_bg = [_tool("Agent", "toolu_ag1", {"prompt": "x"}, T0 - 2985),
+                _result("toolu_ag1", T0 - 2984, "Async agent launched successfully. agentId: a1",
+                        {"isAsync": True, "status": "async_launched", "agentId": "a1"}), _answer(T0 - 2983)]
+    cases = [("(1) контекст 140 тыс.", dict(tokens=140_000)),
+             ("(2) Зевс работает", dict(state="working")),
+             ("(2) ход идёт: ответа на ввод нет", dict(extra_entries=[
+                 {"type": "user", "timestamp": _iso(T0 - 2950), "message": {"role": "user", "content": "ещё"}}])),
+             ("(3) фоновая команда", dict(extra_entries=bash_bg)),
+             ("(3) фоновый субагент", dict(extra_entries=agent_bg)),
+             ("(4) открыт AskUserQuestion", dict(extra_entries=ask)),
+             ("(5) доска и handoff старше хода", dict(saved=False))]
+    for what, kw in cases:
+        e = zeus_env(**kw)
+        e.run("watch", t=T0, extra=ZEUS_RUN)
+        check(not zeus_actions(e) and "Зевс очищен" not in e.alerts(), f"{what}: очистка всё равно была: {e.calls()}")
+    # (6) только что ответил — владелец, скорее всего, читает: ни очистки, ни напоминания; через 20 мин — очистка
+    fresh_turn = [{"type": "user", "timestamp": _iso(T0 - 700), "message": {"role": "user", "content": "и что?"}},
+                  _answer(T0 - 600)]
+    e = zeus_env(extra_entries=fresh_turn, saved=T0 - 500)
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    check(not zeus_actions(e) and "Зевс очищен" not in e.alerts() and "сверь доску" not in e.alerts(),
+          f"(6) ответ 10 мин назад: Зевса тронули: {e.calls()} {e.alerts()[-300:]}")
+    e.run("watch", t=T0 + 700, extra=ZEUS_RUN)
+    check(e.alerts().count("Зевс очищен") == 1, f"(6) через 21 мин после ответа очистки нет: {e.alerts()[-300:]}")
+    # (3) снят: уведомление о конце фоновой задачи пришло — очистка идёт
+    done = {"type": "user", "timestamp": _iso(T0 - 2970), "origin": {"kind": "task-notification"}, "message": {
+        "role": "user", "content": "<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>toolu_ag1</tool-use-id>"
+        "\n<status>completed</status>\n</task-notification>"}}
+    e = zeus_env(extra_entries=agent_bg + [done, _answer(T0 - 2960)])
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    check(len([c for c in zeus_actions(e) if c[:1] == ["--bg"]]) == 1, f"субагент закончил — а очистки нет: {e.calls()}")
+
+    # защиты дежурного держат: остановлен вами, технический перезапуск, карантин ~/.claude
+    def stopped(e):
+        os.makedirs(e.st("stopped"), exist_ok=True)
+        open(e.st("stopped", "zeus"), "w").write("вы\n")
+
+    def maint(e):
+        json.dump({"reason": "обновление", "expires": T0 + 3600, "sessions": ["zeus"]}, open(e.st("maintenance.json"), "w"))
+
+    def held(e):
+        os.makedirs(os.path.join(e.home, ".claude"), exist_ok=True)
+        open(os.path.join(e.home, ".claude", ".sync-held"), "w").write("task=x\n")
+    for what, setup in [("остановлен вами", stopped), ("техперезапуск", maint), ("карантин", held)]:
+        e = zeus_env()
+        setup(e)
+        e.run("watch", t=T0, extra=ZEUS_RUN)
+        check(not zeus_actions(e), f"{what}: Зевса всё равно очистили: {e.calls()}")
+
+    # только (5): напоминание — строка в тревогах и сброс метки Stop-хука; не чаще раза в час и только после нового хода
+    e = zeus_env(saved=False)
+    mark = e.st("ctx", "marks", ZEUS_SID)
+    os.makedirs(os.path.dirname(mark), exist_ok=True)
+    open(mark, "w").write("160000")
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    check(e.alerts().count("сверь доску и handoff") == 1 and not os.path.exists(mark) and not zeus_actions(e),
+          f"нет напоминания при несохранённом: {e.alerts()[-400:]}")
+    e.run("watch", t=T0 + 600, extra=ZEUS_RUN)
+    e.run("watch", t=T0 + 3700, extra=ZEUS_RUN)                     # час прошёл, а нового хода не было
+    check(e.alerts().count("сверь доску и handoff") == 1, "напоминание повторилось без нового хода")
+    with open(e.zeus_transcript, "a") as fh:
+        fh.write(json.dumps({"type": "user", "timestamp": _iso(T0 + 3800), "message": {"role": "user", "content": "?"}})
+                 + "\n" + json.dumps(_answer(T0 + 3810)) + "\n")
+    e.run("watch", t=T0 + 3900, extra=ZEUS_RUN)                     # ответ 90 с назад — (6): напоминания нет
+    check(e.alerts().count("сверь доску и handoff") == 1, "напоминание, пока владелец читает ответ")
+    e.run("watch", t=T0 + 5100, extra=ZEUS_RUN)
+    check(e.alerts().count("сверь доску и handoff") == 2, "после нового хода и часа напоминания нет")
+    with open(e.zeus_transcript, "a") as fh:                        # новый ход, но час с напоминания не прошёл
+        fh.write(json.dumps({"type": "user", "timestamp": _iso(T0 + 5200), "message": {"role": "user", "content": "!"}})
+                 + "\n" + json.dumps(_answer(T0 + 5210)) + "\n")
+    e.run("watch", t=T0 + 6500, extra=ZEUS_RUN)
+    check(e.alerts().count("сверь доску и handoff") == 2, "напоминание чаще раза в час")
+
+    # повторная проверка под блокировкой: между проходом и claude stop Зевс взял работу — не трогать
+    e = zeus_env()
+    z = json.load(open(e.agents_file))
+    z[0].update(state="working", status="busy")
+    nxt = os.path.join(e.home, "agents-next.json")
+    json.dump(z, open(nxt, "w"))
+    e.run("watch", t=T0, extra={**ZEUS_RUN, "FAKE_AGENTS_NEXT": nxt})
+    check(not zeus_actions(e) and "Зевс очищен" not in e.alerts() and "не вышла" not in e.alerts(),
+          f"Зевс взял работу перед остановкой — а его остановили: {e.calls()} {e.alerts()[-300:]}")
+    e.run("watch", t=T0 + 60, extra=ZEUS_RUN)                       # снова ждёт — следующий проход чистит
+    check(e.alerts().count("Зевс очищен") == 1, f"после отказа проверки следующий проход не очистил: {e.calls()}")
+
+    # свежий старт не вышел: тревога одна, сессия не помечена очищенной, повтор — не раньше чем через час
+    e = zeus_env()
+    e.run("watch", t=T0, extra={**QUICK, "PANTHEON_STOP_WAIT": "0.1"})  # claude stop не останавливает
+    e.run("watch", t=T0 + 600, extra={**QUICK, "PANTHEON_STOP_WAIT": "0.1"})
+    check(e.alerts().count("очистка Зевса не вышла") == 1 and "Зевс очищен" not in e.alerts(),
+          f"неудачная очистка: нет одной тревоги или повтор раньше часа: {e.alerts()[-500:]}")
+    e.run("watch", t=T0 + 3700, extra=ZEUS_RUN)
+    check(e.alerts().count("Зевс очищен") == 1, f"через час после неудачи очистки нет: {e.alerts()[-400:]}")
+
+
 def test_resume_copy_note():
     """--resume сделал копию — строка в тревогах."""
     e = Env()
@@ -469,6 +744,30 @@ def test_stop_resume_all_precise():
     check(not os.path.exists(e.st("stopped", "s1-dir")) and os.path.exists(e.st("stopped", "s2-dir")),
           f"resume --all снял чужую метку: {out}")
     check(not os.path.exists(e.st("paused")), "пауза планировщика осталась")
+
+
+def test_stop_without_locks_write():
+    """metis-0078: окно Зевса не пишет в locks/ — pantheon stop работает без блокировки имени, с предупреждением."""
+    e = Env()
+    e.direction("nl-dir")
+    e.agents([bg("nl-dir", "working", "nlnlnlnl-1", pid=51)])
+    locks = e.st("locks")
+    os.makedirs(locks, exist_ok=True)
+    os.chmod(locks, 0o500)
+    try:
+        if os.access(locks, os.W_OK):  # root обходит права — проверять нечем
+            return
+        r = e.run("stop", "nl-dir", t=T0)
+        check(r.returncode == 0 and os.path.exists(e.st("stopped", "nl-dir")),
+              f"stop без записи в locks упал: {r.returncode} {r.stderr[-300:]}")
+        check(["stop", "nlnlnlnl"] in e.calls(), "stop без записи в locks не остановил сессию")
+        check("нет права записи" in r.stderr and "start-nl-dir" in r.stderr and "Traceback" not in r.stderr,
+              f"нет понятного предупреждения: {r.stderr[-300:]}")
+        # неблокирующий замок без файла по-прежнему отказ, а не молчаливое «взял»
+        r2 = e.run("start", "nl-dir", t=T0)
+        check("Traceback" in r2.stderr or r2.returncode != 0, f"start без locks прошёл молча: {r2.stdout} {r2.stderr[-200:]}")
+    finally:
+        os.chmod(locks, 0o700)
 
 
 def test_pauses():

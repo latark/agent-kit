@@ -62,16 +62,24 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon approve [list] | add --site S --allow "…" [--limits "…"] | remove N   заранее разрешённое (только вы)
   pantheon consent <id> [--days N]      ваш ответ Зевсу на вопрос <id> (журнал owner-log Зевса, по умолчанию 7 дней) —
                                         для исполнителя: согласие, данное в окне Зевса
-  pantheon review test -- <команда…>    тесты для запора слияния (guard 0.5.4): в чистом дереве git запустить
+  pantheon review test -- <команда…>    тесты для шлюза слияния (guard 0.5.9): в чистом дереве git запустить
                                         команду (без оболочки); HEAD и дерево после неё те же — выход с её кодом
                                         и SHA; запись в журнал делает хук guard (PostToolUse), сама команда не пишет;
-                                        пустая программа (true, echo, heavy :…) записи не даёт (guard 0.5.6)
+                                        пустая программа (true, echo, heavy :…) записи не даёт
   pantheon review accept <owner/repo> <PR> <SHA> --opened "<что открыл>" --ran "<что запустил>"
                                         --unchecked "<что не проверял>"   «принять» argus с перечнем проверенного
-                                        (Б6, guard 0.5.6: без трёх полей запор не пускает); reject — те же флаги по
-                                        желанию; talos <owner/repo> <PR> <SHA> — проверка talos. Команда проверяет
-                                        формат, запись — хук guard и только по роли (accept, reject — argus)
-  pantheon review status [<owner/repo> <PR>]   записи журнала ~/.local/state/pantheon/merge-gate/records.jsonl
+                                        (без трёх полей шлюз не пускает); reject — те же флаги по желанию;
+                                        talos <owner/repo> <PR> <SHA> — проверка talos. Команда проверяет формат,
+                                        запись — хук guard и только по роли (accept, reject — argus). Шлюз считает
+                                        последний вердикт каждого рецензента (сессия + агент) на (repo, PR, SHA) и
+                                        пускает, только если последний у каждого — «принять» с полным перечнем и ни
+                                        один рецензент не сливающий
+  pantheon review begin <owner/repo> <PR> <SHA 40 знаков>   метка «ревью идёт» (argus позван, вердикта нет), чтобы
+                                        второго argus не звали одновременно. Пишет только
+                                        STATE/review-pending/<owner>__<repo>__<PR>.json; это НЕ вердикт и НЕ согласие,
+                                        шлюз её не читает. Гаснет по вердикту (accept/reject) на этот PR и через 2 часа
+  pantheon review status [<owner/repo> <PR>]   записи журнала ~/.local/state/pantheon/merge-gate/records.jsonl и
+                                        метки «ревью идёт»
   pantheon commit                       commit → pull без rebase → push ~/ai/pantheon
   pantheon install | uninstall          поставить или снять задачу launchd com.latark.pantheon-tick
   pantheon tick                         один проход планировщика (его вызывает launchd)
@@ -85,6 +93,7 @@ PANTHEON_NO_NOTIFY — без уведомлений, PANTHEON_NOTIFY_LOG — у
 import collections
 import contextlib
 import fcntl
+import glob
 import hashlib
 import json
 import os
@@ -101,7 +110,7 @@ import time
 from datetime import datetime, timedelta
 
 if sys.version_info < (3, 11):
-    sys.exit("pantheon: нужен Python 3.11 или новее (tomllib)")
+    sys.exit("pantheon: нужен Python 3.11+ (здесь %d.%d, нет tomllib)" % sys.version_info[:2])
 import tomllib
 
 HOME = os.path.expanduser("~")
@@ -122,6 +131,11 @@ ALERTED = 76    # сбой, о котором задача уже сообщил
 PLIST = os.path.join(HOME, "Library", "LaunchAgents", LABEL + ".plist")
 LIMIT_SNAPSHOT = os.path.join(HOME, ".local", "state", "claude-statusline", "five-hour")
 DEFAULTS = {"heavy_gap_min": 2, "wake_quiet_min": 10, "idle_min": 10, "limit_max_pct": 70}
+# Подъём свежей сессией вместо продолжения (metis-0147 п. 2, «да» владельца 16.10): контекст больше FRESH_CTX и простой
+# с последнего хода дольше FRESH_IDLE_MIN — кэш подсказок давно остыл, и respawn/--resume перечитал бы весь контекст по
+# полной цене. Тогда — новая сессия с тем же именем и окном, которая читает файл состояния (fresh_start).
+FRESH_CTX = 100_000
+FRESH_IDLE_MIN = 60
 
 
 # --- общее --------------------------------------------------------------------
@@ -155,8 +169,21 @@ def path(*parts):
 @contextlib.contextmanager
 def lock(name, block=True):
     """flock на файле в ~/.local/state/pantheon/locks/. Отдаёт True, если блокировка взята."""
-    os.makedirs(path("locks"), exist_ok=True)
-    fh = open(path("locks", name + ".lock"), "a")
+    try:
+        os.makedirs(path("locks"), exist_ok=True)
+        fh = open(path("locks", name + ".lock"), "a")
+    except PermissionError as e:
+        # окно Зевса не пишет в locks/ (metis-0078): ждущую блокировку имени сессии pantheon stop берёт, чтобы подъём,
+        # начатый до метки «остановлено», не проскочил после неё. Без права записи метка stopped/<имя> всё равно
+        # ставится первой, а проскочить может только подъём, уже прошедший проверку метки в ту же секунду, — stop
+        # идёт без блокировки с предупреждением. Замок alerts — тоже: строка тревоги дописывается одним write в режиме
+        # append, она не рвётся. Неблокирующие замки (start, тик) и git без файла не берутся.
+        if not (block and (name.startswith("start-") or name == "alerts")):
+            raise
+        print(f"pantheon: нет права записи в {path('locks').replace(HOME, '~')} ({e.strerror}) — работаю без "
+              f"блокировки {name}: подъём этой же сессии в ту же секунду может проскочить", file=sys.stderr)
+        yield True
+        return
     try:
         fcntl.flock(fh, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
         got = True
@@ -236,6 +263,7 @@ def run_env():
     extra = [os.path.join(PLUGIN, "bin"), os.path.dirname(sys.executable), "/opt/homebrew/bin",
              os.path.join(HOME, ".local", "bin")]
     env["PATH"] = ":".join(extra + [env.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin"])
+    env["PANTHEON_PYTHON"] = sys.executable  # bin/pantheon дочерних задач берёт тот же интерпретатор (lib/find-python.sh)
     return env
 
 
@@ -501,6 +529,122 @@ def heavy_wait_reason(job, sched, t, overdue):
     return None
 
 
+# --- пропуск прогонов тика без изменений (metis-0149) ---------------------------------------------------
+# Четыре задачи тика идут каждую минуту, а почти всегда ничего не находят: каждая — запуск Python и обход папок. Тик
+# пропускает такую задачу, если её входы не менялись с прошлого удачного прогона. Только по отпечатку stat
+# (путь, размер, время изменения), содержимое не читается. Пропуск — только из тика: ручной `pantheon <команда>` и
+# `pantheon run-job` идут всегда. Раз в TICK_SKIP_MAX секунд задача идёт в любом случае — ловит то, чего отпечаток не
+# видит (время, внешние процессы). Задача вне таблицы или с другими аргументами идёт как раньше.
+#
+# Вход каждой команды (что она читает; свои же выходы в отпечаток не входят, иначе он менялся бы после каждого прогона):
+#   команда (аргументы)       вход                                                           не входит
+#   view --quiet              дерево PANTHEON без .git (размер, время) + «лишние» файлы      сама копия VIEW: rsync
+#                             копии VIEW вне оригинала, вне .obsidian и Доска/ (их разбирает  меняет её после прогона
+#                             view-sync.sh)
+#   board                     карточки VIEW/Доска/*.md; задачи (task_dirs: inbox/tasks,       board.json, журнал
+#                             directions/*/tasks); входящие directions/*/inbox; directions.toml, владельца и политика
+#                             schedule.toml (primary, уведомления)                            уведомлений — выходы
+#   sync-answers              HOME/.claude/.sync-held и .sync-incoming, owner-log/board.jsonl  —
+#   agents                    HOME/.claude/daemon/roster.json, sessions/*.json (имя, pid),     ответ `claude agents`
+#                             jobs/*/* — признаки, по которым демон Claude меняет список       (снимок нужен лишь как
+#                                                                                              запасной вариант)
+TICK_SKIP_MAX = 900
+
+
+def _stat_rec(rel, p):
+    try:
+        s = os.lstat(p)
+    except OSError:
+        return (rel, None, None)
+    return (rel, s.st_size, s.st_mtime_ns)
+
+
+def _fp_tree(root, skip_dirs=(".git",)):
+    out = []
+    for d, dirs, files in os.walk(root):
+        dirs[:] = sorted(x for x in dirs if x not in skip_dirs)
+        for f in sorted(files):
+            p = os.path.join(d, f)
+            out.append(_stat_rec(os.path.relpath(p, root), p))
+    return out
+
+
+def _fp_files(paths):
+    return [_stat_rec(p, p) for p in paths]
+
+
+def _fp_dir(d, depth=2):
+    """Список d и (при depth 2) файлов на уровень глубже; без обхода всего дерева."""
+    out = []
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return [(d, None, None)]
+    for n in names:
+        p = os.path.join(d, n)
+        out.append(_stat_rec(p, p))
+        if depth > 1 and os.path.isdir(p) and not os.path.islink(p):
+            out += _fp_dir(p, depth - 1)
+    return out
+
+
+def _fp_view_extras():
+    """Файлы копии VIEW, которых нет в оригинале (кроме .obsidian, Доска/ и служебных с точкой): view-sync.sh их
+    переносит или удаляет. После обычного прогона их нет, поэтому отпечаток от прогона не зависит."""
+    out = []
+    if not os.path.isdir(VIEW):
+        return [("view-missing", None, None)]
+    for d, dirs, files in os.walk(VIEW):
+        rel_d = os.path.relpath(d, VIEW)
+        dirs[:] = [x for x in dirs if not (rel_d == "." and x in (".obsidian", "Доска"))]
+        for f in files:
+            rel = os.path.normpath(os.path.join(rel_d, f))
+            if not f.startswith(".") and not os.path.exists(os.path.join(PANTHEON, rel)):
+                out.append(_stat_rec(rel, os.path.join(VIEW, rel)))
+    return out
+
+
+def _fp_board_inputs():
+    T = tasks_mod()
+    out = _fp_files(sorted(T.task_files(PANTHEON)))
+    out += _fp_files(sorted(glob.glob(os.path.join(PANTHEON, "directions", "*", "inbox", "*.md"))))
+    out += _fp_files(sorted(glob.glob(os.path.join(BOARD, "*.md"))))
+    out += _fp_files([os.path.join(PANTHEON, "directions.toml"), os.path.join(PANTHEON, "schedule.toml")])
+    return out
+
+
+TICK_SKIP = {
+    ("view", "--quiet"): lambda: _fp_tree(PANTHEON) + _fp_view_extras(),
+    ("board",): _fp_board_inputs,
+    ("sync-answers",): lambda: _fp_files([os.path.join(SYNC_DIR, ".sync-held"), os.path.join(SYNC_DIR, ".sync-incoming"),
+                                          os.path.join(STATE, "owner-log", "board.jsonl")]),
+    ("agents",): lambda: (_fp_files([os.path.join(HOME, ".claude", "daemon", "roster.json")])
+                          + _fp_files(sorted(glob.glob(os.path.join(HOME, ".claude", "sessions", "*.json"))))
+                          + _fp_dir(os.path.join(HOME, ".claude", "jobs"))),
+}
+
+
+def tick_fingerprint(job):
+    """Отпечаток входов задачи из TICK_SKIP или None (задачи нет в таблице — пропуску не подлежит)."""
+    argv = parse_command(job.get("command"))
+    if not argv or os.path.basename(argv[0]) != "pantheon":
+        return None
+    fn = TICK_SKIP.get(tuple(argv[1:]))
+    if fn is None:
+        return None
+    try:
+        return hashlib.sha1(repr(fn()).encode("utf-8", "replace")).hexdigest()
+    except Exception:  # любой сбой разбора — не пропускать, а запустить
+        return None
+
+
+def tick_skippable(job, st, t):
+    fp, at = st.get("skip_fp"), st.get("skip_at")
+    if not fp or at is None or not 0 <= t - float(at) < TICK_SKIP_MAX or st.get("last_rc") != 0:
+        return False
+    return tick_fingerprint(job) == fp
+
+
 def launch(name, t):
     """Запуск задачи отдельным процессом (или запись в журнал решений при PANTHEON_DRYRUN)."""
     if os.environ.get("PANTHEON_DRYRUN") == "1":
@@ -510,7 +654,8 @@ def launch(name, t):
         with open(path("dryrun.log"), "a") as fh:
             fh.write(f"{int(t)} {name}\n")
         return
-    subprocess.Popen([sys.executable, "-I", os.path.realpath(__file__), "run-job", name],
+    # загрузчик run.py (модуль, .pyc из lib/__pycache__), тот же интерпретатор, что у тика
+    subprocess.Popen([sys.executable, "-I", os.path.join(LIB, "run.py"), "run-job", name],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True, env=run_env(), cwd=HOME)
 
@@ -539,7 +684,7 @@ def tick():
         for bad in sched.get("bad_names") or []:
             alert_once("badname-" + re.sub(r"[^\w-]", "_", bad)[:40], bad, f"schedule.toml: задача или служба с именем не по образцу "
                        f"или повтором имени ({bad[:60]!r}; только a-z, 0-9, дефис, имена не повторяются) — пропущена", "pantheon-tick")
-        heavy = []
+        heavy, skipped = [], []
         for job in sched.get("job") or []:
             name = job["name"]
             st = job_state(name)
@@ -572,12 +717,16 @@ def tick():
             is_due, due_at = due(job, st, t)
             if not is_due or locked("job-" + name):
                 continue
+            if tick_skippable(job, st, t):  # входы не менялись с прошлого удачного прогона (metis-0149)
+                skipped.append(name)
+                continue
             if job.get("class", "light") == "heavy":
                 heavy.append((job, st, due_at))
             else:
                 launch(name, t)
         if heavy:
             tick_heavy(sched, heavy, t)
+        write_json(path("tick-skipped.json"), {"time": t, "skipped": skipped})
         try:
             services_sync(sched)
         except Exception as e:  # сбой служб не должен останавливать задачи тика
@@ -812,12 +961,14 @@ def run_job(name):
         with (lock("heavy-run", block=False) if heavy else contextlib.nullcontext(True)) as hgot:
             if not hgot:
                 return 0
+            fp0 = tick_fingerprint(job)  # до прогона: что изменилось за время работы, поймает следующий тик
             st = job_state(name)
             st.update(last_start=now())
             save_job_state(name, st)
             os.makedirs(path("logs"), exist_ok=True)
             log = path("logs", name + ".log")
             started = time.time()
+            started_at = now()
             timeout = float(job.get("timeout", 600))
             # Своя группа процессов: по таймауту гасится вся задача, а не только первый процесс.
             proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -843,6 +994,11 @@ def run_job(name):
             st = job_state(name)
             st.update(last_end=now(), last_rc=rc)
             st.pop("running", None)
+            if rc == 0 and fp0:
+                st.update(skip_fp=fp0, skip_at=started_at)
+            else:
+                st.pop("skip_fp", None)
+                st.pop("skip_at", None)
             if rc == TEMPFAIL:
                 st["waiting"] = "нет сети или GitHub недоступен"
             else:
@@ -1198,6 +1354,35 @@ def git(*args, check=True):
                           env=run_env())
 
 
+# push большого коммита по HTTPS упирается в буфер git (по умолчанию 1 МБ → «RPC failed; HTTP 400/413»): буфер 150 МБ
+# задаётся ключом -c на каждый push, ~/.gitconfig не правится (metis-0133)
+PUSH_POST_BUFFER = 157286400
+PUSH_FAIL_LIMIT = 3
+# отказ сервера, а не отсутствие сети: HTTP 4xx/5xx, RPC failed, обрыв при передаче пакета
+PUSH_SERVER_ERR = re.compile(r"returned error: [45]\d\d|\bHTTP/?[\d.]*\s*[45]\d\d|RPC failed|"
+                             r"remote end hung up|pack-objects died|send-pack: unexpected disconnect", re.I)
+
+
+def push_failed(stderr):
+    """Неудача push, не похожая на «нет сети», считается подряд: на 3-й — тревога (ошибка не исчезнет сама,
+    как исчезает отсутствие сети); без сети счётчик не растёт и не сбрасывается."""
+    if not PUSH_SERVER_ERR.search(stderr or ""):
+        return
+    f = path("push-fail.json")
+    n = int(read_json(f).get("n") or 0) + 1
+    write_json(f, {"n": n, "t": now()})
+    if n >= PUSH_FAIL_LIMIT:
+        alert_once("push-fail", PUSH_FAIL_LIMIT, f"~/ai/pantheon: push не проходит {n} раза подряд "
+                   f"({(stderr.strip().splitlines() or [''])[-1][:200]}) — это не обрыв сети, нужен разбор",
+                   "pantheon-commit", note="~/ai/pantheon: push не проходит несколько раз подряд")
+
+
+def clear_push_failures():
+    with contextlib.suppress(OSError):
+        os.remove(path("push-fail.json"))
+    clear_once("push-fail")
+
+
 def commit():
     """commit → pull без rebase → push, как Obsidian Git. Слияние шифрованных файлов — git-crypt-merge.sh
     (дописываемые файлы — объединением). Без сети — код TEMPFAIL и тишина; тревога, только если синхронизации
@@ -1234,9 +1419,11 @@ def commit():
         clear_once("merge-conflict")
         ahead = git("rev-list", "--count", "@{u}..HEAD", check=False).stdout.strip()
         if ahead and ahead != "0":
-            push = git("push", "-q", check=False)
+            push = git("-c", f"http.postBuffer={PUSH_POST_BUFFER}", "push", "-q", check=False)
             if push.returncode != 0:
+                push_failed(push.stderr)
                 return offline(push.stderr)
+            clear_push_failures()
         write_json(path("commit-ok.json"), {"t": now()})
         clear_once("commit-offline")
     return 0
@@ -2124,6 +2311,176 @@ def _resume_session(name, a, text, origin):
     return r.returncode, (m.group(1) if m else None)
 
 
+# --- свежий старт вместо продолжения (metis-0147 п. 2, metis-0136) ---------------------------------
+# `claude respawn` перезапускает процесс той же сессии с тем же разговором, `--resume` — тоже: контекст не уходит.
+# Очистить окно можно только новой сессией: старую остановить (разговор сохраняется — claude attach <id>), имя
+# дождаться свободным и поднять `claude --bg --agent <роль> --name <имя> --settings <окно роли>` с текстом
+# «[Пантеон: …] прочитай <файл состояния>, продолжай».
+
+_CTX = None
+
+
+def ctx_mod():
+    """hooks/ctx.py — замер контекста тот же, что у Stop-хука «пора очистить» (context_tokens, порог AT), и его метки."""
+    global _CTX
+    if _CTX is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_ctx", os.path.join(PLUGIN, "hooks", "ctx.py"))
+        _CTX = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_CTX)
+    return _CTX
+
+
+def transcript_path(a):
+    """Транскрипт сессии из claude agents: ~/.claude/projects/<папка, где не буквы и цифры — «-»>/<sessionId>.jsonl;
+    не нашёлся там (папку переименовали) — тот же файл в любой папке проектов. → путь или None."""
+    sid = str(a.get("sessionId") or "")
+    if not re.fullmatch(r"[0-9a-f-]{8,64}", sid):
+        return None
+    root = os.path.join(HOME, ".claude", "projects")
+    if a.get("cwd"):
+        p = os.path.join(root, re.sub(r"[^A-Za-z0-9]", "-", str(a["cwd"])), sid + ".jsonl")
+        if os.path.isfile(p):
+            return p
+    with contextlib.suppress(OSError):
+        for d in sorted(os.listdir(root)):
+            p = os.path.join(root, d, sid + ".jsonl")
+            if os.path.isfile(p):
+                return p
+    return None
+
+
+def session_context(a):
+    """(контекст в токенах по последнему ответу, время последней записи транскрипта) или (None, None)."""
+    p = transcript_path(a)
+    if not p:
+        return None, None
+    with contextlib.suppress(OSError):
+        return ctx_mod().context_tokens(p), os.path.getmtime(p)
+    return None, None
+
+
+def fresh_reason(a, t=None):
+    """Поднимать ли сессию свежей, а не продолжением: контекст > FRESH_CTX и простой > FRESH_IDLE_MIN. → текст или None."""
+    n, last = session_context(a)
+    if not n or last is None:
+        return None
+    idle = (now() if t is None else t) - last
+    if n > FRESH_CTX and idle > FRESH_IDLE_MIN * 60:
+        return f"контекст {n // 1000} тыс., простой {int(idle // 60)} мин"
+    return None
+
+
+def latest_zeus_handoff():
+    """Последний по времени ~/ai/pantheon/handoff/zeus-*/HANDOFF.md или None."""
+    best = None
+    with contextlib.suppress(OSError):
+        for d in os.listdir(os.path.join(PANTHEON, "handoff")):
+            p = os.path.join(PANTHEON, "handoff", d, "HANDOFF.md")
+            if d.startswith("zeus-") and os.path.isfile(p) and (best is None or os.path.getmtime(p) > os.path.getmtime(best)):
+                best = p
+    return best
+
+
+def state_files(name):
+    """Файлы состояния, с которых свежая сессия продолжает: направление — STATUS.md, мастерская — файл задачи,
+    Зевс — доска и последний handoff/zeus-*/HANDOFF.md."""
+    if name == "zeus":
+        return [os.path.join(PANTHEON, "board.md")] + [p for p in [latest_zeus_handoff()] if p]
+    if name.startswith("daedalus-"):
+        return [os.path.join(PANTHEON, "workshop", name[len("daedalus-"):] + ".md")]
+    return [os.path.join(PANTHEON, "directions", name, "STATUS.md")]
+
+
+def tilde(p):
+    for h in (HOME, os.path.realpath(HOME)):  # PANTHEON — настоящим путём, HOME — как в окружении
+        if p == h or p.startswith(h + "/"):
+            return "~" + p[len(h):]
+    return p
+
+
+def fresh_text(kind, name, old_id, tail=""):
+    """«[Пантеон: <kind>] … прочитай <файл состояния>, продолжай» — текст свежей сессии; tail — поручение вызывающего,
+    дословно со своей пометкой: толчок «[Пантеон: толчок от …]» должен остаться подписанным (ревью argus)."""
+    files = " и ".join(tilde(p) for p in state_files(name))
+    tail = str(tail or "").strip()
+    return (f"{START_MARK} {kind}] Ты — новая сессия {name} с чистым контекстом: прошлая ({old_id or '?'}) остановлена, "
+            f"её разговор сохранён (claude attach {old_id or '<id>'}). Прочитай {files}, продолжай со следующего шага. "
+            "Сверь «начато» без «сделано»: внешнее действие не повторяй, пока не проверишь, что оно не ушло. "
+            + (tail + " " if tail else "") + "Это не слова владельца и не согласие.")
+
+
+def fresh_target(name, origin):
+    """→ (роль, папка запуска, окно --settings) или текст ошибки."""
+    if name == "zeus":
+        win = path("settings", "hq.json")  # то же окно, что у pantheon start zeus
+        return ("hq", PANTHEON, win) if os.path.isfile(win) else "нет окна штаба — pantheon domains build"
+    target, rest = (("workshop", [name[len("daedalus-"):]]) if name.startswith("daedalus-") else (name, []))
+    got = start_target(target, rest)
+    if isinstance(got, str):
+        return got
+    _, role, folder, window, _ = got
+    return role, folder, run_settings(name, role, window, origin)
+
+
+def fresh_start(name, a, text, origin, recheck=None):
+    """Поднять имя свежей сессией (новый контекст, то же имя, окно роли) с текстом text. a — прежняя сессия из claude
+    agents (её id — в журнале и тексте). Та же блокировка имени и повторная проверка, что у resume_session. → код."""
+    with lock("start-" + name, block=False) as got_lock:
+        if not got_lock:
+            start_log(f"fresh-busy\t{name}\t{a.get('id')}\t{origin}")
+            return 1
+        why = recheck() if recheck else None
+        if why:
+            start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
+            return 1
+        return _fresh_start(name, a, text, origin)
+
+
+def _fresh_start(name, a, text, origin):
+    if os.environ.get("PANTHEON_DRYRUN") == "1":
+        print(f"[fresh] {name} {a.get('id')} {origin}")
+        return 0
+    got = fresh_target(name, origin)
+    if isinstance(got, str) or not got[2]:
+        alert(f"{name}: свежий старт невозможен — {got if isinstance(got, str) else 'нет окна роли'}", "pantheon")
+        return 2
+    role, folder, win = got
+    if not str(text).startswith(START_MARK):
+        text = f"{START_MARK} поручение от {origin}] {text}"
+    if role == "domain-coordinator":
+        text = "/goal " + text + " " + COORDINATOR_GOAL  # как у pantheon start: Stop-хук с целью эпика (DONE-02)
+    agents = agents_all() or []
+    live = live_copies(name, agents)
+    if any(not x.get("id") for x in live):
+        why = copies_message(name, live)
+        start_log(f"fresh-tab\t{name}\t{origin}")
+        alert(f"{name}: свежий старт не сделан — {why}", "pantheon")
+        return 1
+    stopped = list(live)
+    stop_copies(name, live, "stop-fresh")
+    for x in agents:  # закончившая ход с живым процессом держит имя (CTX-10)
+        if x.get("name") == name and x.get("state") == "done" and x.get("pid") and x.get("id") \
+                and x["id"] not in {s.get("id") for s in stopped}:
+            stop_copies(name, [x], "stop-fresh-done")
+            stopped.append(x)
+    why = wait_name_free(name, stopped) if stopped else None
+    if why:
+        alert(f"{name}: свежий старт не сделан — {why}", "pantheon")
+        return 1
+    before = {x.get("id") for x in agents_all() or [] if x.get("id")}
+    argv = [claude_bin(), "--bg", "--agent", role, "--name", name, "--settings", win, text]
+    r = subprocess.run(argv, cwd=folder, capture_output=True, text=True, timeout=180)
+    start_log(f"fresh\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}")
+    if r.returncode != 0:
+        return r.returncode
+    wrong = check_new_name(name, before)
+    if wrong:
+        alert(wrong, "pantheon")
+        return 1
+    return 0
+
+
 def copies_message(name, live):
     tab = [a for a in live if not a.get("id")]
     if tab:
@@ -2497,10 +2854,18 @@ def _wake(dry):
         tasks = open_tasks(name)
         if not tasks:
             continue
-        print(f"{'будет поднята' if dry else 'поднимаю'}: {name} ({a.get('id')}, {state}) — задачи {', '.join(tasks[:3])}")
+        fresh = fresh_reason(a)  # metis-0147 п. 2: большой контекст и остывший кэш — новая сессия с файла состояния
+        how = (f"; свежей сессией ({fresh}), прочитает {' и '.join(tilde(p) for p in state_files(name))}" if fresh
+               else "")
+        print(f"{'будет поднята' if dry else 'поднимаю'}: {name} ({a.get('id')}, {state}) — задачи {', '.join(tasks[:3])}"
+              + how)
         if dry:
             continue
-        rc, _ = resume_session(name, a, WAKE_TEXT, "wake", recheck=lambda n=name: wake_recheck(n))
+        if fresh:
+            rc = fresh_start(name, a, fresh_text("пробуждение", name, a.get("id")), "wake",
+                             recheck=lambda n=name: wake_recheck(n))
+        else:
+            rc, _ = resume_session(name, a, WAKE_TEXT, "wake", recheck=lambda n=name: wake_recheck(n))
         if rc:
             alert(f"pantheon wake: {name} не поднялась (код {rc})", "pantheon")
         done += 1
@@ -3208,8 +3573,11 @@ def consent(rest):
     try:
         with open(path("owner-log", "zeus.md"), encoding="utf-8") as fh:
             text = fh.read()
-    except OSError:
+    except FileNotFoundError:
         text = ""
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"pantheon consent: журнал не читается ({e}) — ответ проверить нельзя", file=sys.stderr)
+        return 3
     word = re.compile(r"(?<![\w-])" + re.escape(qid) + r"(?![\w-])", re.I)
     # ответ — только выбор в окне вопросов (пометку «окно вопросов» ставит хук answer, ввод владельца её не получает)
     # на вопрос, который начинается с [<id>]; id в свободном тексте, цитате или заметке к чужому вопросу — не ответ
@@ -3229,9 +3597,13 @@ def consent(rest):
         elif word.search(body):
             mentions += 1
     try:
-        board_lines = open(path("owner-log", "board.jsonl"), encoding="utf-8").read().splitlines()
-    except OSError:
+        with open(path("owner-log", "board.jsonl"), encoding="utf-8") as fh:
+            board_lines = fh.read().splitlines()
+    except FileNotFoundError:
         board_lines = []
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"pantheon consent: журнал доски не читается ({e}) — ответ проверить нельзя", file=sys.stderr)
+        return 3
     for line in board_lines:
         try:
             rec = json.loads(line)
@@ -3650,6 +4022,32 @@ def board():
     return 0
 
 
+STATE_FILE_LIMIT = 9000  # знаков: после сжатия хук кладёт первые ~9 800, хвост файла теряется (metis-0160)
+
+
+def _check_long_state(quiet):
+    """STATUS.md направлений и board.md штаба длиннее STATE_FILE_LIMIT знаков (символов, не байт): одна строка на
+    файл. Без --quiet — печать; с ним (тик) — alert_once на файл, не чаще раза на новый размер."""
+    files = sorted(glob.glob(os.path.join(PANTHEON, "directions", "*", "STATUS.md"))) + [os.path.join(PANTHEON, "board.md")]
+    for f in files:
+        try:
+            n = len(open(f, encoding="utf-8", errors="replace").read())
+        except OSError:
+            continue
+        key = "state-long-" + re.sub(r"[^\w-]", "_", os.path.relpath(f, PANTHEON))[:60]
+        if n <= STATE_FILE_LIMIT:
+            if quiet:
+                clear_once(key)
+            continue
+        shown = f.replace(HOME, "~", 1) if f.startswith(HOME + os.sep) else f
+        text = (f"{shown}: {n} знаков при пределе {STATE_FILE_LIMIT} — после сжатия контекста хук кладёт только "
+                f"первые ~9 800, хвост теряется: сократить, старое — в archive/")
+        if quiet:
+            alert_once(key, n, text, "check")
+        else:
+            print(f"предупреждение · {text}")
+
+
 def check(paths=None, quiet=False):
     T = tasks_mod()
     files = paths or list(T.task_files(PANTHEON))
@@ -3673,6 +4071,8 @@ def check(paths=None, quiet=False):
         if old != text:
             with open(pp, "w", encoding="utf-8") as fh:
                 fh.write(text)
+    if not paths:
+        _check_long_state(quiet)
     if not quiet or bad:
         print(f"задач: {n}, с ошибками: {len(bad)}, без шапки: {noheader}")
     if quiet:  # тик: одна тревога на набор проблем, а не сбой задачи каждые 5 минут
@@ -3925,6 +4325,21 @@ def _test_pythons():
     return out
 
 
+def _py_ge311(py):
+    try:
+        return subprocess.run([py, "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"],
+                              capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _pythons_for(name):
+    """Тесты плагина pantheon идут только интерпретаторами 3.11+ (tomllib); guard — на всех: его хуки идут на python3
+    из PATH, в том числе на системном 3.9."""
+    pythons = _test_pythons()
+    return [py for py in pythons if _py_ge311(py)] if name == "pantheon" else pythons
+
+
 def _tmp_re():
     """Пути во временных папках — до <tmp>: у новой версии и базы они разные, а падение одно."""
     global _TMP_RE
@@ -3955,6 +4370,19 @@ def _failure_signatures(fname, out, rc):
     if rc != 0:
         sigs.append(f"{fname}: код {rc}")
     return sigs
+
+
+def _fresh_failures(got_new, got_base):
+    """Новые падения = подписи новой версии минус подписи базы. Файл, который у базы кончился таймаутом или сроком
+    прогона, — не «чистый» и не «такой же сбой»: о нём ничего не известно, поэтому у новой версии в нём ничто не
+    гасится (в том числе её собственный таймаут) — падение остаётся падением. Отдаёт (Counter, {(python, файл)})."""
+    unknown = {(py, f) for (py, f, s) in got_base if s.endswith((": срок прогона", ": таймаут"))}
+    known_base = collections.Counter({k: n for k, n in got_base.items() if (k[0], k[1]) not in unknown})
+    fresh = got_new - known_base
+    for k, n in got_new.items():  # не успевшее у новой не гасится тем, что не успело и у базы
+        if k[2].endswith(": срок прогона"):
+            fresh[k] = n
+    return fresh, unknown
 
 
 def _test_files(pdir):
@@ -4063,15 +4491,16 @@ def _plugin_check(name, old, new, src, base, marks):
         if isinstance(base, str) and os.path.isdir(base):
             base_dir = os.path.join(tmp, "base", _plugins_safe(name))
             shutil.copytree(base, base_dir, symlinks=True, ignore=ign)
-        pythons = _test_pythons()
+        pythons = _pythons_for(name)
         with open(log, "w", encoding="utf-8") as fh:
             fh.write(f"{stamp()} {name}: новая {new} из {src} (хеш {digest}), база {old} из "
                      f"{base_dir and base or '—'}; python: {', '.join(pythons)}\n")
             got_new = _run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}", deadline)
-            fresh = got_new - _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline)
-            for k, n in got_new.items():  # не успевшее у новой не гасится тем, что не успело и у базы
-                if k[2].endswith(": срок прогона"):
-                    fresh[k] = n
+            got_base = _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline)
+            fresh, unknown = _fresh_failures(got_new, got_base)
+            for py, f in sorted(unknown):
+                fh.write(f"база не досчитана: {py} · {f} — файл базы не дошёл до конца (таймаут или срок прогона), "
+                         "падения новой версии в нём считаются новыми\n")
             if not _test_files(new_dir):  # без тестов зелёного нет, даже если их нет и у базы
                 fresh[("-", "-", NO_TESTS)] = 1
             fh.write(f"\n===== новых падений: {sum(fresh.values())} =====\n")
@@ -4172,7 +4601,7 @@ REVIEW_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REVIEW_PR = re.compile(r"[1-9][0-9]{0,8}")
 REVIEW_USAGE = ("pantheon review test -- <команда…> | accept <owner/repo> <PR> <SHA 40 знаков> --opened \"<что "
                 "открыл>\" --ran \"<что запустил>\" --unchecked \"<что не проверял>\" | reject <owner/repo> <PR> <SHA> "
-                "[те же флаги] | talos <owner/repo> <PR> <SHA> | status [<owner/repo> <PR>]")
+                "[те же флаги] | talos <owner/repo> <PR> <SHA> | begin <owner/repo> <PR> <SHA> | status [<owner/repo> <PR>]")
 # перечень проверенного в «принять» (Б6, guard 0.5.6): у accept все три поля обязательны и непусты, у reject — по
 # желанию. Тот же разбор — в merge_gate.verdict_parse плагина guard (он и решает, будет ли запись)
 REVIEW_CHECKLIST = {"opened": "открыл", "ran": "запустил", "unchecked": "не проверял"}
@@ -4256,8 +4685,49 @@ def review_records(repo=None, pr=None):
     return out
 
 
+REVIEW_PENDING_TTL = 2 * 3600  # метка «ревью идёт» устаревает через 2 часа
+
+
+def _review_pending_path(repo, pr):
+    return path("review-pending", f"{repo.lower().replace('/', '__')}__{pr}.json")
+
+
+def _record_epoch(rec):
+    try:
+        d = datetime.fromisoformat(str(rec.get("time")))
+        return d.timestamp()  # без пояса — местное время, как пишет хук guard
+    except ValueError:
+        return None
+
+
+def review_pending(repo, pr, recs=None):
+    """Метка «ревью идёт» для (repo, PR) или None: нет метки, старше 2 ч, или после неё есть вердикт на этот PR."""
+    d = read_json(_review_pending_path(repo, pr), None)
+    if not isinstance(d, dict) or not isinstance(d.get("t"), (int, float)):
+        return None
+    if not 0 <= now() - d["t"] < REVIEW_PENDING_TTL:
+        return None
+    for r in review_records(repo, int(pr)) if recs is None else recs:
+        if r.get("kind") in ("accept", "reject") and (_record_epoch(r) or 0) >= d["t"] - 1 \
+                and repo.lower() in [str(x).lower() for x in r.get("repo") or []]:
+            return None  # вердикт на тот же sha — ревью кончилось; на другой — head сменился, метка устарела
+    return d
+
+
 def review_cmd(rest):
     sub = rest[0] if rest else ""
+    if sub == "begin":
+        args, _, why = _review_verdict("talos", rest[1:])  # тот же разбор: repo, PR, SHA без флагов
+        if why:
+            print(f"pantheon review begin: {why.replace('review talos', 'review begin')}", file=sys.stderr)
+            return 2
+        repo, pr, sha = args[0].lower(), args[1], args[2].lower()
+        who = " ".join((os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "").split())[:40]
+        write_json(_review_pending_path(repo, pr), {"repo": repo, "pr": int(pr), "sha": sha, "t": now(),
+                                                    "time": stamp(), "by": who or None})
+        print(f"pantheon review begin: ревью {repo}#{pr} @ {sha[:8]} помечено «идёт» (не вердикт и не согласие; "
+              f"шлюз метку не читает)")
+        return 0
     if sub == "test":
         if len(rest) < 3 or rest[1] != "--":
             print(f"pantheon review: {REVIEW_USAGE}", file=sys.stderr)
@@ -4301,6 +4771,17 @@ def review_cmd(rest):
             print("pantheon review status [<owner/repo> <номер PR>]", file=sys.stderr)
             return 2
         recs = review_records(args[0] if args else None, int(args[1]) if args else None)
+        pend = []
+        if args:
+            pend = [review_pending(args[0], args[1])]
+        else:
+            for f in sorted(glob.glob(path("review-pending", "*.json"))):
+                d = read_json(f, None)
+                if isinstance(d, dict) and d.get("repo") and d.get("pr"):
+                    pend.append(review_pending(d["repo"], d["pr"]))
+        for d in (x for x in pend if x):
+            print(f"ревью идёт с {stamp(d['t'])[11:]} ({d['repo']}#{d['pr']}, head {str(d['sha'])[:8]}"
+                  + (f", {d['by']}" if d.get("by") else "") + ") — второго argus не звать")
         if not recs:
             print("pantheon review status: записей нет")
         for r in recs:

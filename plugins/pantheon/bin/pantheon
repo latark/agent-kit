@@ -1,4 +1,12 @@
 #!/bin/sh
-# Команда pantheon — пульт фоновых задач Пантеона, тревоги, архив, сборка domains.json. Код — ../lib/pantheon.py.
+# Команда pantheon — пульт фоновых задач Пантеона, тревоги, архив, сборка domains.json. Код — ../lib/pantheon.py,
+# запуск — загрузчиком ../lib/run.py (модуль кэшируется в .pyc). Нужен Python 3.11+: ищет сам (lib/find-python.sh).
 here=$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")" && pwd)
-exec python3 -I "$here/../lib/pantheon.py" "$@"
+. "$here/../lib/find-python.sh"
+py=$(find_python) || {
+    printf '%s\n' "$NO_PYTHON_MSG" >&2
+    exit 1
+}
+PANTHEON_PYTHON=$py
+export PANTHEON_PYTHON
+exec "$py" -I "$here/../lib/run.py" "$@"

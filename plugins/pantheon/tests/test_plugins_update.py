@@ -441,6 +441,36 @@ print(json.dumps({{
     check("подписи: ANSI вырезан, код при FAIL — всегда",
           got.get("ansi") == ["FAIL c", "t.py: код 1"] and got.get("killed") == ["FAIL d", "t.py: код -9"], got)
     check("версии: числа, равные, не разобрать", got.get("newer") == [True, False, True], got.get("newer"))
+    # База не досчитана: файл базы кончился таймаутом или сроком прогона — падение новой версии в нём остаётся
+    # падением; интерпретаторы: тесты pantheon только 3.11+, guard — на всех
+    probe2 = f"""
+import json, sys, collections
+sys.path.insert(0, {os.path.dirname(LIB)!r})
+import pantheon as p
+C = collections.Counter
+new = C({{("py", "t.py", "t.py: таймаут"): 1, ("py", "t.py", "FAIL x"): 1, ("py", "u.py", "FAIL old"): 1,
+         ("py", "v.py", "v.py: срок прогона"): 1}})
+base = C({{("py", "t.py", "t.py: срок прогона"): 1, ("py", "t.py", "FAIL x"): 1, ("py", "u.py", "FAIL old"): 1}})
+fresh, unk = p._fresh_failures(new, base)
+clean, unk2 = p._fresh_failures(C({{("py", "u.py", "FAIL old"): 1}}), C({{("py", "u.py", "FAIL old"): 1}}))
+p._test_pythons = lambda: [sys.executable, "/old/python3"]
+p._py_ge311 = lambda py: py == sys.executable
+print(json.dumps({{"fresh": sorted(k[1] + "|" + k[2] for k in fresh), "unk": sorted(unk), "clean": sorted(clean),
+                  "clean_unk": sorted(unk2), "pan": p._pythons_for("pantheon") == [sys.executable],
+                  "guard": p._pythons_for("guard") == [sys.executable, "/old/python3"]}}))
+"""
+    r = subprocess.run([PY, "-I", "-c", probe2], capture_output=True, text=True, timeout=60)
+    try:
+        g2 = json.loads(r.stdout)
+    except ValueError:
+        g2 = {}
+        print(r.stderr)
+    check("база не досчитана: таймаут новой и её FAIL в файле, где база не дошла до конца, остаются новыми падениями",
+          g2.get("fresh") == ["t.py|FAIL x", "t.py|t.py: таймаут", "v.py|v.py: срок прогона"]
+          and g2.get("unk") == [["py", "t.py"]], g2)
+    check("база дошла до конца: то же падение в обеих версиях — не новое", g2.get("clean") == [] and
+          g2.get("clean_unk") == [], g2)
+    check("интерпретаторы: pantheon — только 3.11+, guard — все", g2.get("pan") and g2.get("guard"), g2)
     r = subprocess.run([PY, "-I", LIB, "plugins", "foo"], capture_output=True, text=True, timeout=60)
     check("pantheon plugins foo — код 2", r.returncode == 2)
 

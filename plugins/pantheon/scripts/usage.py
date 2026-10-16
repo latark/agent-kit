@@ -1,6 +1,6 @@
 """Расход токенов Claude Code по локальным транскриптам: только поля usage, без текста переписки.
 Стоимость — в эквиваленте цен API (USD за 1M токенов, platform.claude.com/docs/en/about-claude/pricing, 12.10.2026)."""
-import glob, json, os, sys, time
+import glob, json, math, os, sys, time
 from collections import defaultdict
 
 # in, cache write 5m, cache write 1h, cache read, out
@@ -34,6 +34,34 @@ def cost(fam, u):
     return {k: v / 1e6 for k, v in parts.items()}, {'input': inp, 'write': w5 + w1, 'read': rd, 'output': out,
             'thinking': ((u.get('output_tokens_details') or {}).get('thinking_tokens', 0) or 0)}
 
+def session_of(f):
+    """Id сессии: основной транскрипт — его имя; субагент — папка перед /subagents/."""
+    if '/subagents/' in f:
+        return f.split('/subagents/')[0].rsplit('/', 1)[-1]
+    return os.path.basename(f)[:-len('.jsonl')]
+
+def main_role(f):
+    """Роль основной сессии — служебная запись agent-setting; нет записи — None. Текст переписки не читается."""
+    role = None
+    for line in open(f, errors='replace'):
+        if '"agent-setting"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get('type') == 'agent-setting' and d.get('agentSetting'):
+            role = d['agentSetting']
+    return role
+
+def sub_role(f):
+    """Роль субагента — agentType из agent-<id>.meta.json рядом с транскриптом; нет файла — None."""
+    try:
+        with open(f[:-len('.jsonl')] + '.meta.json') as fh:
+            return json.load(fh).get('agentType') or None
+    except (OSError, ValueError, AttributeError):
+        return None
+
 def main():
     DAYS = int(sys.argv[1]) if len(sys.argv) > 1 else 30
     since = time.time() - DAYS * 86400
@@ -43,11 +71,21 @@ def main():
     agg = defaultdict(lambda: defaultdict(float))       # (kind, model, effort) -> sums
     sess_ctx = defaultdict(list)                         # main session -> context sizes per request
     spawn_first = []                                     # first-request context of each subagent
+    by_role = defaultdict(lambda: defaultdict(float))   # роль -> requests, $
+    role_sess = defaultdict(set)                         # роль -> id сессий
+    sess_cost = defaultdict(float)                       # id сессии -> $ (основная + её субагенты)
+    sess_role = {}                                       # id сессии -> роль основной
     seen = set()
     unknown = defaultdict(int)
     for f in files:
         kind = 'subagent' if '/subagents/' in f else 'main'
         first = True
+        sid = session_of(f)
+        if kind == 'main':
+            role = main_role(f) or 'без роли'
+            sess_role[sid] = role
+        else:
+            role = sub_role(f) or 'субагент без типа'
         for line in open(f, errors='replace'):
             try:
                 d = json.loads(line)
@@ -74,6 +112,11 @@ def main():
             k = 'subagent' if (kind == 'subagent' or d.get('isSidechain')) else 'main'
             eff = d.get('effort') or '-'
             c, t = cost(fam, u)
+            tc = sum(c.values())
+            by_role[role]['requests'] += 1
+            by_role[role]['$'] += tc
+            role_sess[role].add(sid)
+            sess_cost[sid] += tc
             a = agg[(k, fam, eff)]
             a['requests'] += 1
             for kk, v in c.items():
@@ -94,6 +137,21 @@ def main():
     for (k, fam, eff), a in sorted(agg.items(), key=lambda x: -sum(v for kk, v in x[1].items() if kk.startswith('$'))):
         s = sum(v for kk, v in a.items() if kk.startswith('$'))
         print(f"{k:9} {fam:11} {eff:7} {a['requests']:6.0f} {s:8.0f} {s / tot:5.0%} | {a['read'] / 1e6:10.1f}M {a['write'] / 1e6:6.1f}M {a['output'] / 1e6:6.2f}M {a['thinking'] / 1e6:11.2f}M | {a['$read']:7.0f} {a['$write']:7.0f} {a['$output']:7.0f}")
+
+    print('\nПо ролям (основная сессия — по agent-setting, субагент — по agentType из meta):')
+    print(f"{'роль':26} {'запр.':>6} {'$':>8} {'доля':>5} {'сессий':>7}")
+    for r, a in sorted(by_role.items(), key=lambda x: -x[1]['$']):
+        print(f"{r[:26]:26} {a['requests']:6.0f} {a['$']:8.0f} {a['$'] / tot if tot else 0:5.0%} {len(role_sess[r]):7}")
+
+    if sess_cost:
+        ranked = sorted(sess_cost.items(), key=lambda x: -x[1])
+        n = max(1, math.ceil(len(ranked) * 0.10))
+        top = ranked[:n]
+        share = sum(v for _, v in top) / tot if tot else 0
+        print(f'\nТоп-10 % сессий (сессия = основной транскрипт вместе с его субагентами): {n} из {len(ranked)}, '
+              f'на них ${sum(v for _, v in top):,.0f} = {share:.0%} всех $')
+        for sid, v in top[:5]:
+            print(f"  {sid[:8]}  {sess_role.get(sid, 'без роли'):26} ${v:,.0f}")
 
     ctxs = sorted(x for v in sess_ctx.values() for x in v)
     if ctxs:
