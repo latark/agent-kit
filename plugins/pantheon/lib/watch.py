@@ -748,20 +748,23 @@ def pause(rest, who):
 # stop, ожидание имени, claude --bg --agent hq --name zeus с окном штаба), а не claude respawn: respawn поднимает ту же
 # сессию с тем же контекстом. Прошлый разговор остаётся (claude attach <id>). Не сохранено только (5) — напоминание
 # не чаще раза в ZEUS_REMIND_MIN: строка в тревогах (её Зевс увидит со следующим вводом) и сброс метки Stop-хука —
-# в конце следующего хода он снова скажет «сверь доску». Координаторов и СБ не трогает.
+# в конце следующего хода он снова скажет «сверь доску». Шестое условие: с конца последнего хода прошло не меньше
+# ZEUS_IDLE_MIN — иначе ни очистки, ни напоминания, ждём следующего прохода. Координаторов и СБ не трогает.
 
 ZEUS_REMIND_MIN = 60
+ZEUS_IDLE_MIN = 20          # с конца хода Зевса прошло меньше — владелец, скорее всего, читает ответ: не трогать
 ZEUS_BG_MAX_AGE = 86400     # фоновая задача без уведомления о конце старше суток — считается потерянной
 TASK_DONE = re.compile(r"<task-notification>.*?<tool-use-id>(toolu_[A-Za-z0-9_]+)</tool-use-id>", re.S)
 
 
 def zeus_turn(transcript):
     """Разбор хвоста транскрипта Зевса. → {"turn": начало последнего хода (с) или None, "mid": ход идёт или ждёт
-    разрешения, "ask": открытый AskUserQuestion, "bg": id запущенных и не закончившихся фоновых задач}."""
+    разрешения, "ask": открытый AskUserQuestion, "bg": id запущенных и не закончившихся фоновых задач, "answered":
+    время последней записи Зевса (с) или None}."""
     C = P.ctx_mod()
     lines = C.tail_lines(transcript, 4_000_000)
     used, results, launched, done = {}, set(), {}, set()
-    turn, last = None, None
+    turn, last, answered = None, None, None
     for raw in lines:  # уведомление о конце — во вводе, в очереди ввода или во вложении: ищем по сырой строке
         if b"task-notification" in raw:
             done.update(TASK_DONE.findall(raw.decode("utf-8", "replace")))
@@ -775,7 +778,7 @@ def zeus_turn(transcript):
             for x in items:
                 if isinstance(x, dict) and x.get("type") == "tool_use" and x.get("id"):
                     used[x["id"]] = x
-            last = "assistant"
+            last, answered = "assistant", t if t is not None else answered
             continue
         res = [x for x in items if isinstance(x, dict) and x.get("type") == "tool_result"]
         for x in res:
@@ -793,7 +796,7 @@ def zeus_turn(transcript):
             turn = t  # ввод владельца, уведомление о конце задачи, сообщение другой сессии — начало хода
     now = P.now()
     open_uses = [u for i, u in used.items() if i not in results]
-    return {"turn": turn,
+    return {"turn": turn, "answered": answered,
             "mid": last == "user" or any(u.get("name") != "AskUserQuestion" for u in open_uses),
             "ask": any(u.get("name") == "AskUserQuestion" for u in open_uses),
             "bg": sorted(i for i, at in launched.items() if i not in done and (at is None or now - at < ZEUS_BG_MAX_AGE))}
@@ -817,7 +820,7 @@ def zeus_hold():
 
 
 def zeus_clean_check(a, transcript):
-    """Пять условий очистки. → (что не выполнено: список номеров с текстом, контекст в токенах, разбор хода)."""
+    """Шесть условий очистки. → (что не выполнено: список номеров с текстом, контекст в токенах, разбор хода)."""
     C = P.ctx_mod()
     n = C.context_tokens(transcript)
     info = zeus_turn(transcript)
@@ -837,6 +840,8 @@ def zeus_clean_check(a, transcript):
     stale = [f for f in P.state_files("zeus") if turn is None or not os.path.isfile(f) or os.path.getmtime(f) <= turn]
     if stale:
         miss.append((5, "не сохранено после последнего хода: " + ", ".join(P.tilde(f) for f in stale)))
+    if info["answered"] is None or P.now() - info["answered"] < ZEUS_IDLE_MIN * 60:
+        miss.append((6, f"с конца хода меньше {ZEUS_IDLE_MIN} мин — владелец, возможно, читает ответ"))
     return miss, n, info
 
 
@@ -863,7 +868,7 @@ def zeus_clean(agents, t):
         k, held = n // 1000, []
 
         def again():
-            """Под блокировкой имени, перед claude stop: защиты и пять условий — по свежему claude agents (Зевс мог
+            """Под блокировкой имени, перед claude stop: защиты и шесть условий — по свежему claude agents (Зевс мог
             получить ввод между проверкой и остановкой)."""
             why = zeus_hold()
             if not why:
@@ -889,7 +894,7 @@ def zeus_clean(agents, t):
         P.alert(f"очистка Зевса не вышла, код {rc} — контекст {k} тыс.; журнал start.log", "watch")
         return
     if [m for m, _ in miss] != [5]:
-        return
+        return  # напоминание — только когда не хватает одного сохранения; (6) — тихо ждём следующего прохода
     r = st.get("remind") or {}
     if t - float(r.get("t") or 0) < ZEUS_REMIND_MIN * 60 or (r.get("sid") == a["sessionId"] and r.get("turn") == info["turn"]):
         return  # не чаще раза в час и не повторять, пока у Зевса не было нового хода (прошлое напоминание не дошло)

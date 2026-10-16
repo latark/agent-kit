@@ -511,8 +511,8 @@ ZEUS_SID = "2e057e05-0001"
 
 
 def zeus_env(tokens=160_000, state="blocked", extra_entries=(), saved=True):
-    """Зевс в claude agents и его транскрипт: ход начался T0-1000, ответ T0-990; доска и handoff записаны T0-900
-    (saved) или T0-2000 (до хода)."""
+    """Зевс в claude agents и его транскрипт: ход начался T0-3000, ответ T0-2990 (почти 50 мин назад); доска и handoff
+    записаны T0-2900 (saved), T0-4000 (saved=False, до хода) или в момент saved (число)."""
     e = Env()
     json.dump({"env": {}}, open(e.st("settings", "hq.json"), "w"))
     z = {"id": "2e057e05", "sessionId": ZEUS_SID, "name": "zeus", "state": state, "status": "waiting",
@@ -521,8 +521,8 @@ def zeus_env(tokens=160_000, state="blocked", extra_entries=(), saved=True):
     e.agents([z])
     d = os.path.join(e.home, ".claude", "projects", "".join(ch if ch.isalnum() else "-" for ch in e.pantheon))
     os.makedirs(d, exist_ok=True)
-    rows = [{"type": "user", "timestamp": _iso(T0 - 1000), "message": {"role": "user", "content": "что на доске?"}},
-            _answer(T0 - 990, tokens)]
+    rows = [{"type": "user", "timestamp": _iso(T0 - 3000), "message": {"role": "user", "content": "что на доске?"}},
+            _answer(T0 - 2990, tokens)]
     rows += list(extra_entries)
     e.zeus_transcript = os.path.join(d, ZEUS_SID + ".jsonl")
     with open(e.zeus_transcript, "w") as fh:
@@ -531,7 +531,7 @@ def zeus_env(tokens=160_000, state="blocked", extra_entries=(), saved=True):
     os.makedirs(hand, exist_ok=True)
     for f in (os.path.join(e.pantheon, "board.md"), os.path.join(hand, "HANDOFF.md")):
         open(f, "w").write("состояние\n")
-        m = T0 - 900 if saved else T0 - 2000
+        m = saved if not isinstance(saved, bool) else T0 - 2900 if saved else T0 - 4000
         os.utime(f, (m, m))
     return e
 
@@ -564,9 +564,10 @@ def _answer(t, tokens=160_000):
 
 
 def test_zeus_clean_0136():
-    """metis-0136: дежурный очищает Зевса только при всех пяти условиях — свежий старт (claude stop + claude --bg
+    """metis-0136: дежурный очищает Зевса только при всех шести условиях — свежий старт (claude stop + claude --bg
     --agent hq --name zeus с окном штаба), одна строка «Зевс очищен в HH:MM, контекст N тыс.»; повторный проход —
-    ничего. Любое условие не выполнено — очистки нет; не выполнено только (5) — напоминание не чаще раза в час."""
+    ничего. Любое условие не выполнено — очистки нет; не выполнено только (5) — напоминание не чаще раза в час;
+    (6) — с конца хода меньше 20 мин: ни очистки, ни напоминания."""
     # все условия выполнены — ровно одно действие и одна строка
     e = zeus_env()
     r = e.run("watch", t=T0, extra=ZEUS_RUN)
@@ -596,17 +597,17 @@ def test_zeus_clean_0136():
           f"повторный проход снова чистит: {e.calls()[n:]}")
 
     # каждое условие по отдельности не выполнено — очистки нет
-    ask = [_tool("AskUserQuestion", "toolu_ask1", {"questions": []}, T0 - 980)]
-    bash_bg = [_tool("Bash", "toolu_bg1", {"command": "sleep 999", "run_in_background": True}, T0 - 985),
-               _result("toolu_bg1", T0 - 984, "Command running in background with ID: b1", {"backgroundTaskId": "b1"}),
-               _answer(T0 - 983)]
-    agent_bg = [_tool("Agent", "toolu_ag1", {"prompt": "x"}, T0 - 985),
-                _result("toolu_ag1", T0 - 984, "Async agent launched successfully. agentId: a1",
-                        {"isAsync": True, "status": "async_launched", "agentId": "a1"}), _answer(T0 - 983)]
+    ask = [_tool("AskUserQuestion", "toolu_ask1", {"questions": []}, T0 - 2980)]
+    bash_bg = [_tool("Bash", "toolu_bg1", {"command": "sleep 999", "run_in_background": True}, T0 - 2985),
+               _result("toolu_bg1", T0 - 2984, "Command running in background with ID: b1", {"backgroundTaskId": "b1"}),
+               _answer(T0 - 2983)]
+    agent_bg = [_tool("Agent", "toolu_ag1", {"prompt": "x"}, T0 - 2985),
+                _result("toolu_ag1", T0 - 2984, "Async agent launched successfully. agentId: a1",
+                        {"isAsync": True, "status": "async_launched", "agentId": "a1"}), _answer(T0 - 2983)]
     cases = [("(1) контекст 140 тыс.", dict(tokens=140_000)),
              ("(2) Зевс работает", dict(state="working")),
              ("(2) ход идёт: ответа на ввод нет", dict(extra_entries=[
-                 {"type": "user", "timestamp": _iso(T0 - 950), "message": {"role": "user", "content": "ещё"}}])),
+                 {"type": "user", "timestamp": _iso(T0 - 2950), "message": {"role": "user", "content": "ещё"}}])),
              ("(3) фоновая команда", dict(extra_entries=bash_bg)),
              ("(3) фоновый субагент", dict(extra_entries=agent_bg)),
              ("(4) открыт AskUserQuestion", dict(extra_entries=ask)),
@@ -615,11 +616,20 @@ def test_zeus_clean_0136():
         e = zeus_env(**kw)
         e.run("watch", t=T0, extra=ZEUS_RUN)
         check(not zeus_actions(e) and "Зевс очищен" not in e.alerts(), f"{what}: очистка всё равно была: {e.calls()}")
+    # (6) только что ответил — владелец, скорее всего, читает: ни очистки, ни напоминания; через 20 мин — очистка
+    fresh_turn = [{"type": "user", "timestamp": _iso(T0 - 700), "message": {"role": "user", "content": "и что?"}},
+                  _answer(T0 - 600)]
+    e = zeus_env(extra_entries=fresh_turn, saved=T0 - 500)
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    check(not zeus_actions(e) and "Зевс очищен" not in e.alerts() and "сверь доску" not in e.alerts(),
+          f"(6) ответ 10 мин назад: Зевса тронули: {e.calls()} {e.alerts()[-300:]}")
+    e.run("watch", t=T0 + 700, extra=ZEUS_RUN)
+    check(e.alerts().count("Зевс очищен") == 1, f"(6) через 21 мин после ответа очистки нет: {e.alerts()[-300:]}")
     # (3) снят: уведомление о конце фоновой задачи пришло — очистка идёт
-    done = {"type": "user", "timestamp": _iso(T0 - 970), "origin": {"kind": "task-notification"}, "message": {
+    done = {"type": "user", "timestamp": _iso(T0 - 2970), "origin": {"kind": "task-notification"}, "message": {
         "role": "user", "content": "<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>toolu_ag1</tool-use-id>"
         "\n<status>completed</status>\n</task-notification>"}}
-    e = zeus_env(extra_entries=agent_bg + [done, _answer(T0 - 960)])
+    e = zeus_env(extra_entries=agent_bg + [done, _answer(T0 - 2960)])
     e.run("watch", t=T0, extra=ZEUS_RUN)
     check(len([c for c in zeus_actions(e) if c[:1] == ["--bg"]]) == 1, f"субагент закончил — а очистки нет: {e.calls()}")
 
@@ -654,12 +664,14 @@ def test_zeus_clean_0136():
     with open(e.zeus_transcript, "a") as fh:
         fh.write(json.dumps({"type": "user", "timestamp": _iso(T0 + 3800), "message": {"role": "user", "content": "?"}})
                  + "\n" + json.dumps(_answer(T0 + 3810)) + "\n")
-    e.run("watch", t=T0 + 3900, extra=ZEUS_RUN)
+    e.run("watch", t=T0 + 3900, extra=ZEUS_RUN)                     # ответ 90 с назад — (6): напоминания нет
+    check(e.alerts().count("сверь доску и handoff") == 1, "напоминание, пока владелец читает ответ")
+    e.run("watch", t=T0 + 5100, extra=ZEUS_RUN)
     check(e.alerts().count("сверь доску и handoff") == 2, "после нового хода и часа напоминания нет")
     with open(e.zeus_transcript, "a") as fh:                        # новый ход, но час с напоминания не прошёл
-        fh.write(json.dumps({"type": "user", "timestamp": _iso(T0 + 4000), "message": {"role": "user", "content": "!"}})
-                 + "\n" + json.dumps(_answer(T0 + 4010)) + "\n")
-    e.run("watch", t=T0 + 4100, extra=ZEUS_RUN)
+        fh.write(json.dumps({"type": "user", "timestamp": _iso(T0 + 5200), "message": {"role": "user", "content": "!"}})
+                 + "\n" + json.dumps(_answer(T0 + 5210)) + "\n")
+    e.run("watch", t=T0 + 6500, extra=ZEUS_RUN)
     check(e.alerts().count("сверь доску и handoff") == 2, "напоминание чаще раза в час")
 
     # повторная проверка под блокировкой: между проходом и claude stop Зевс взял работу — не трогать
