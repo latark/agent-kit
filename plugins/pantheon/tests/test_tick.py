@@ -282,9 +282,14 @@ def main():
           all(not any(x.startswith(("gh api", "gh issue")) or x == "gh pr *" for x in w["sandbox"]["excludedCommands"])
               for w in (sa, sm, sn, sz, sw))
           and all(all(r in w["sandbox"]["excludedCommands"] for r in reads) for w in (sa, sm, sn, sz, sw))
-          and all(x in sa["sandbox"]["excludedCommands"] for x in ("gh run *", "gh repo view *", "gh auth status",
+          and all(x in sa["sandbox"]["excludedCommands"] for x in ("gh repo view *", "gh auth status",
                                                                     "pantheon alert *", "pantheon consent *",
                                                                     "pantheon saved *")))
+    run_reads = ["gh run view", "gh run view *", "gh run list", "gh run list *", "gh run watch", "gh run watch *"]
+    check("gh run мимо песочницы — только чтение (view/list/watch, голые и со звёздочкой); cancel, rerun, delete и "
+          "«gh run *» падают в песочнице",
+          all(sorted(x for x in w["sandbox"]["excludedCommands"] if x.startswith("gh run")) == sorted(run_reads)
+              for w in (sa, sm, sn, sz, sw)))
     check("gh pr create/merge мимо песочницы — только в окнах направлений; у мастерской нет",
           all("gh pr create *" in w["sandbox"]["excludedCommands"] and "gh pr merge *" in w["sandbox"]["excludedCommands"]
               for w in (sa, sm, sn, sz))

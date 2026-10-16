@@ -27,8 +27,8 @@
 - Окна ролей (с 0.11.14, `sandbox_build`): окну координатора направления дано правило `Bash(gh pr merge *)` — слияние PR
   без вопроса классификатора auto (`COORDINATOR_ALLOW`); мастерской и штабу правила нет. Каждое слияние по-прежнему
   проверяет guard: только главная сессия domain-coordinator, свои папки, без `--admin` и `--auto`.
-  Мимо песочницы gh (в ней не работает) — только чтение: `gh pr view|checks|diff|list`, `gh run`, `gh repo view`,
-  `gh auth status`; `gh api` и `gh issue` в песочнице падают. `gh pr create|merge` и сетевой git (push, fetch, pull) —
+  Мимо песочницы gh (в ней не работает) — только чтение: `gh pr view|checks|diff|list`, `gh run view|list|watch`,
+  `gh repo view`, `gh auth status`; `gh api`, `gh issue` и `gh run cancel|rerun|delete` в песочнице падают. `gh pr create|merge` и сетевой git (push, fetch, pull) —
   у окна каждого направления; мастерской — только сетевой git и только при SSH-remote; у штаба ничего из этого нет
   (metis-0064).
   Задачи расписания `claude -p --agent <роль>` идут в песочнице окна задачи `settings/job-<роль>.json` (metis-0063):

@@ -1411,9 +1411,11 @@ SANDBOX_DOMAINS = ["registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "fi
                    "raw.githubusercontent.com"]
 # Мимо песочницы: gh (в ней не работает — TLS Go на macOS) — только эти подкоманды; дописать тревогу. Всё, что не
 # исключено, в песочнице просто падает — это и есть отказ (P0-4, metis-0064): `gh api` и `gh issue` (любые записи в
-# GitHub) не выпускаются; из `gh pr` — только чтение. Голые формы — отдельно: шаблон «… *» их не покрывает
+# GitHub) не выпускаются; из `gh pr` и `gh run` — только чтение (`gh run cancel|rerun|delete` падают). Голые формы —
+# отдельно: шаблон «… *» их не покрывает
 GH_PR_READ = [f"gh pr {c}{tail}" for c in ("view", "checks", "diff", "list") for tail in ("", " *")]
-SANDBOX_EXCLUDED = GH_PR_READ + ["gh run *", "gh repo view *", "gh auth status",
+GH_RUN_READ = [f"gh run {c}{tail}" for c in ("view", "list", "watch") for tail in ("", " *")]
+SANDBOX_EXCLUDED = GH_PR_READ + GH_RUN_READ + ["gh repo view *", "gh auth status",
                                  "pantheon alert *", "pantheon consent *", "pantheon saved *"]
 # PR создают лиды, сливает координатор или лид — только окна направлений; кто и что сливает, проверяет guard
 # (merge_problem). Мастерской и штабу — нет
