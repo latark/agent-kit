@@ -1949,11 +1949,11 @@ def name_alias(name):
 
 
 def live_copies(name, agents, registry=None):
-    """Живые сессии с этим именем и его копии. Живая — работает (working), ждёт (blocked), открыта во вкладке (нет
-    state) или закончила ход с живым процессом (done и pid — такую новый запуск останавливает сам, CTX-10, поэтому
-    здесь её нет). Остановленная (stopped, claude stop), упавшая (failed) и закрытая (done без процесса) имени не держат
-    (15.10: claude agents даёт после claude stop именно stopped, metis-0041). Плюс интерактивные вкладки из реестра
-    ~/.claude/sessions, которых нет в claude agents."""
+    """Живые сессии с этим именем и его копии: работает (working), ждёт (blocked), открыта во вкладке (нет state) —
+    плюс интерактивные вкладки из реестра ~/.claude/sessions, которых нет в claude agents. Сюда не входят остановленная
+    (stopped — так claude agents пишет после claude stop, 15.10, metis-0041), упавшая (failed) и закончившая ход (done:
+    с живым процессом её новый запуск останавливает сам, CTX-10). Имя держит не запись в claude agents, а живой процесс
+    в реестре: пока остановленная копия не вышла, имя ещё занято — это ждёт wait_name_free."""
     alias = name_alias(name)
     out = [a for a in agents or [] if alias.fullmatch(str(a.get("name") or ""))
            and a.get("state") not in ("done", "stopped", "failed")]
@@ -2076,10 +2076,126 @@ def copies_message(name, live):
             f"{live[0]['id']}; начать заново — тот же запуск с --restart")
 
 
-def stop_copies(name, live):
+def stop_copies(name, live, why="stop-restart"):
     for a in live:
         subprocess.run([claude_bin(), "stop", a["id"]], capture_output=True, text=True, timeout=60)
-        start_log(f"stop-restart\t{name}\t{a.get('name')}\t{a['id']}")
+        start_log(f"{why}\t{name}\t{a.get('name')}\t{a['id']}")
+
+
+DOWN_STATES = ("done", "stopped", "failed")
+
+
+def stop_wait_knobs():
+    """После claude stop: сколько ждать освобождения имени (с), как часто спрашивать claude agents и сколько имя
+    должно простоять свободным (15.10 остановленная Фемида ожила через 7 с). Подменяются в тестах."""
+    def num(var, default):
+        with contextlib.suppress(ValueError, TypeError):
+            v = float(os.environ.get(var) or default)
+            if v >= 0:
+                return v
+        return default
+    return num("PANTHEON_STOP_WAIT", 30.0), num("PANTHEON_STOP_POLL", 1.5), num("PANTHEON_STOP_SETTLE", 10.0)
+
+
+def name_holders(name, agents, registry):
+    """Кто держит имя: живые копии (live_copies) и любой живой процесс реестра ~/.claude/sessions с этим именем или
+    его копией — фоновый тоже. Реестр — источник правды об именах Claude Code (15.10): после claude stop claude
+    agents уже пишет stopped, а процесс ещё выходит и имя держит; новый запуск в эту секунду получит «имя-два-слова»."""
+    out = live_copies(name, agents, registry)
+    seen = {a.get("sessionId") for a in out if a.get("sessionId")}
+    alias = name_alias(name)
+    for r in registry:
+        if r.get("sessionId") not in seen and alias.fullmatch(str(r.get("name") or "")):
+            out.append({k: v for k, v in r.items() if k != "registry"})
+    return out
+
+
+def _holder_text(a):
+    who = a.get("id") or f"pid {a.get('pid')}"
+    return f"{a.get('name')} {who} ({a.get('state') or a.get('kind') or 'процесс'})"
+
+
+def wait_name_free(name, stopped):
+    """После claude stop: ждать, пока остановленные копии отпустят имя — в claude agents нет живых копий и в реестре
+    нет живого процесса с этим именем (name_holders), и так держится settle секунд. Ожившая копия (была
+    stopped/done/failed или пропала из списка, а снова working/blocked — 15.10 так оживала Фемида) — повторный claude
+    stop один раз, ожила снова — отказ. Новая живая копия, которую мы не останавливали (вкладка, чужой запуск), —
+    отказ с copies_message. → None (имя свободно) или текст отказа; запуск при отказе не делается."""
+    wait, poll, settle = stop_wait_knobs()
+    ids = {a["id"] for a in stopped if a.get("id")}
+    down, restopped, started, free_since = set(), set(), time.monotonic(), None
+    while True:
+        agents = agents_all()
+        registry = sessions_registry()
+        live = live_copies(name, agents, registry)
+        if agents is not None:
+            listed = {a.get("id"): a for a in agents}
+            down |= {i for i in ids if i not in listed or listed[i].get("state") in DOWN_STATES}
+        revived = [a for a in live if a.get("id") in down]
+        again = [a for a in revived if a["id"] in restopped]
+        if again:
+            start_log(f"stop-revived-again\t{name}\t{again[0]['id']}\t{again[0].get('state')}")
+            return (f"{name}: копия {again[0]['id']} ожила и после повторного claude stop (сейчас "
+                    f"{again[0].get('state')}) — новую не запускаю, иначе будет две. Закройте открытые окна просмотра "
+                    f"claude agents, остановите её (claude stop {again[0]['id']}) и повторите запуск с --restart")
+        if revived:
+            stop_copies(name, revived, "stop-revived")
+            restopped |= {a["id"] for a in revived}
+            down -= restopped
+        foreign = [a for a in live if a.get("id") not in ids]
+        if foreign:
+            start_log(f"stop-wait-foreign\t{name}\t{_holder_text(foreign[0])}")
+            return copies_message(name, foreign)
+        holders = name_holders(name, agents, registry) if agents is not None else None
+        t = time.monotonic()
+        spent = t - started
+        if holders == [] and not revived:
+            free_since = t if free_since is None else free_since
+            if t - free_since >= settle:
+                start_log(f"stop-wait-free\t{name}\t{spent:.1f}")
+                return None
+            time.sleep(poll)
+            continue
+        free_since = None
+        if spent >= wait:
+            held = "; ".join(_holder_text(a) for a in holders) if holders else "claude agents не ответил"
+            start_log(f"stop-wait-timeout\t{name}\t{wait:.0f}\t{held}")
+            return (f"{name}: за {wait:.0f} с остановленные копии не отпустили имя ({held}) — новую не запускаю: "
+                    f"Claude Code назвал бы её «{name}-два-слова», и сообщения на {name} до неё не дойдут. Проверьте "
+                    f"claude agents и повторите запуск с --restart")
+        time.sleep(poll)
+
+
+def check_new_name(name, before):
+    """После `claude --bg --name <имя>`: новая живая сессия (её id не было в списке до запуска) получила ровно это имя,
+    а не «имя-два-слова» или «имя (2)». → None или текст тревоги. Чужую копию не останавливает — решает Зевс. Не
+    появилась за PANTHEON_NAME_WAIT (10 с) — строка в start.log и None: claude --bg отработал, а «не появилась» дежурный
+    проверяет сам (autostart_check)."""
+    _, poll, _ = stop_wait_knobs()
+    wait = 10.0
+    with contextlib.suppress(ValueError, TypeError):
+        wait = max(0.0, float(os.environ.get("PANTHEON_NAME_WAIT") or wait))
+    alias, started = name_alias(name), time.monotonic()
+    while True:
+        new = [a for a in agents_all() or [] if a.get("id") and a.get("id") not in before
+               and a.get("state") not in DOWN_STATES and alias.fullmatch(str(a.get("name") or ""))]
+        wrong = [a for a in new if a.get("name") != name]
+        if wrong:
+            ids = ", ".join(f"{a['id']} «{a.get('name')}»" for a in wrong)
+            start_log(f"name-mismatch\t{name}\t{ids}")
+            return (f"{name}: новая сессия получила чужое имя — {ids}: имя «{name}» держала другая сессия, сообщения на "
+                    f"{name} до неё не дойдут. Что сделать: claude agents — найти, кто держит «{name}», лишнее "
+                    f"остановить и повторить запуск с --restart (он остановит и {wrong[0]['id']}); pantheon её не "
+                    "останавливал")
+        if new:
+            start_log(f"name-ok\t{name}\t{new[0]['id']}")
+            return None
+        if time.monotonic() - started >= wait:
+            start_log(f"name-unseen\t{name}")
+            print(f"pantheon start: новой сессии {name} за {wait:.0f} с нет в claude agents — имя не проверено",
+                  file=sys.stderr)
+            return None
+        time.sleep(poll)
 
 
 def start_log(line):
@@ -2156,6 +2272,12 @@ def start(rest):
                 print(f"pantheon start: {copies_message('zeus', live)}", file=sys.stderr)
                 return 1
             stop_copies("zeus", live)
+            # execv заменяет процесс — имя после запуска не проверить, поэтому до запуска ждём, пока старый Зевс
+            # отпустит имя (15.10 без ожидания новый стал zeus-sparkling-cat, metis-0041)
+            why = wait_name_free("zeus", live) if live else None
+            if why:
+                print(f"pantheon start: {why}", file=sys.stderr)
+                return 1
         start_log(f"zeus\t{origin}\t{PANTHEON}")
         os.chdir(PANTHEON)
         os.execv(argv[0], argv)
@@ -2189,14 +2311,22 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     if live and not dry and (not restart or any(not a.get("id") for a in live)):
         print(f"pantheon start: {copies_message(name, live)}", file=sys.stderr)
         return 1
+    stopped = []
     if live and not dry:
         stop_copies(name, live)
+        stopped += live
     # CTX-10: эпик закончен — сессия «done» ещё висит в списке; новый эпик — новая сессия с тем же именем, а старая
     # останавливается (переписка сохраняется: claude attach <id>), иначе Claude Code назовёт новую «имя (2)»
     for a in same:
         if a.get("state") == "done" and a.get("pid") and not dry:
             subprocess.run([claude_bin(), "stop", a.get("id")], capture_output=True, text=True, timeout=60)
             start_log(f"stop-done\t{name}\t{a.get('id')}")
+            stopped.append(a)
+    # остановленная копия отпускает имя не сразу и может ожить (metis-0041): запуск — только когда имя свободно
+    why = wait_name_free(name, stopped) if stopped else None
+    if why:
+        print(f"pantheon start: {why}", file=sys.stderr)
+        return 1
     run = path("settings", "run", name + ".json")
     task = " ".join(rest).strip() or default_task
     prompt = f"{START_MARK} поручение от {origin}] {task}"
@@ -2209,6 +2339,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
         print(shlex.join(argv), f"(папка {folder})")
         return 0
     run_settings(name, role, window, origin)
+    before = {a.get("id") for a in agents_all() or [] if a.get("id")}
     r = subprocess.run(argv, cwd=folder, capture_output=True, text=True, timeout=180)
     start_log(f"{name}\t{origin}\t{folder}\t{r.returncode}")
     if origin == "zeus" and r.returncode == 0 and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
@@ -2216,7 +2347,14 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
               "возможно, по сообщению другой сессии (лазейка на время доработки, decisions.md 15.10)", "pantheon-start")
     sys.stdout.write(r.stdout)
     sys.stderr.write(r.stderr)
-    return r.returncode
+    if r.returncode != 0:
+        return r.returncode
+    wrong = check_new_name(name, before)
+    if wrong:
+        alert(wrong, "pantheon-start")
+        print(f"pantheon start: {wrong}", file=sys.stderr)
+        return 1
+    return 0
 
 
 # Лазейка на время доработки (ваше решение 15.10): Зевс запускает направления и по сообщениям других сессий. Чтобы это
