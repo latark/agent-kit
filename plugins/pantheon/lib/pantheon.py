@@ -291,12 +291,43 @@ JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
                     "instructions", "agents", "usage", "qmd", "plugins"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
+# Окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` из schedule.toml идёт с песочницей
+# settings/job-<роль>.json (собирает sandbox_build), а не без неё. Роль вне таблицы тик не запускает. write — куда
+# пишет Bash роли (сверх памяти ролей и своей папки кэша); model — модель задачи вместо любой из команды: у iris в
+# шапке haiku, а задаче разведчика нужен sonnet.
+JOB_ROLES = {
+    "clio": {"write": [os.path.join(AI_HOME, "knowledge")]},
+    "prometheus": {"write": [os.path.join(AI_HOME, "knowledge")]},
+    "iris": {"write": [os.path.join(PANTHEON, "scout")], "model": "sonnet"},
+}
+JOB_EXCLUDED = ["pantheon alert *"]
+
+
+def job_window(role):
+    return path("settings", f"job-{role}.json")
+
+
+def job_window_problem(argv):
+    """Окно песочницы задачи `claude -p` (P0-3): None — обычный файл на месте или задача не claude; иначе причина."""
+    if not argv or argv[0] != "claude":
+        return None
+    if "--settings" not in argv[:-1]:
+        return "нет окна песочницы (--settings)"
+    p = argv[argv.index("--settings") + 1]
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return f"нет окна песочницы {p.replace(HOME, '~')}"
+    if not stat.S_ISREG(st.st_mode):
+        return f"окно песочницы {p.replace(HOME, '~')} — не обычный файл"
+    return None
 
 
 def parse_command(cmd):
     """Команда задачи из schedule.toml → argv без оболочки, или None (задача не идёт). Разрешено только:
       pantheon <view|commit|domains|watch|revisits|scout|board|sync-answers|…> [аргументы без спецсимволов];
-      claude -p --agent <роль> [--model M] [--max-turns N] [--name N] "<поручение>" — без флагов прав и настроек;
+      claude -p --agent <роль> [--model M] [--max-turns N] [--name N] "<поручение>" — без флагов прав и настроек,
+        роль — из JOB_ROLES; argv получает --settings <окно задачи роли> (и --model из таблицы, если он там есть);
       скрипт из bin/ или scripts/ самого плагина."""
     if not isinstance(cmd, str) or re.search(r"[;&|`$<>\n\\]", cmd):
         return None
@@ -326,7 +357,15 @@ def parse_command(cmd):
             j += 2
         if j != len(argv) - 1 or argv[-1].startswith("-") or not JOB_NAME.fullmatch(seen.get("--agent", "")):
             return None
-        return argv
+        conf = JOB_ROLES.get(seen["--agent"])
+        if conf is None:
+            return None  # роль без окна задачи — без песочницы не идёт (P0-3)
+        if conf.get("model"):
+            seen["--model"] = conf["model"]
+        out = ["claude", "-p", "--settings", job_window(seen["--agent"])]
+        for flag, value in seen.items():
+            out += [flag, value]
+        return out + [argv[-1]]
     real = os.path.realpath(os.path.expanduser(argv[0]))
     if any(real.startswith(os.path.join(PLUGIN, d) + os.sep) for d in ("bin", "scripts")):
         return [real] + argv[1:]
@@ -750,6 +789,19 @@ def run_job(name):
     with lock("job-" + name, block=False) as got:
         if not got:
             return 0
+        # задача на Claude — только в песочнице своего окна (P0-3): окна нет — не запускать, а не запускать без неё.
+        # Запуск считается сбоем: срок задачи сдвигается, тяжёлые задачи за ней не ждут каждый тик
+        bad = job_window_problem(argv)
+        if bad:
+            alert_once("job-window-" + name, bad, f"задача {name} не идёт: {bad}. Окна задач собирает `pantheon domains "
+                       "build`", "pantheon-tick",
+                       note=f"Задача {name} не идёт: нет окна песочницы")
+            st = job_state(name)
+            st.update(last_start=now(), last_end=now(), last_rc=ALERTED, fails=int(st.get("fails") or 0) + 1)
+            st.pop("waiting", None)
+            save_job_state(name, st)
+            return ALERTED
+        clear_once("job-window-" + name)
         with (lock("heavy-run", block=False) if heavy else contextlib.nullcontext(True)) as hgot:
             if not hgot:
                 return 0
@@ -851,6 +903,8 @@ def jobs_show():
             state = "идёт"
         elif parse_command(job.get("command")) is None:
             state = "команда не разрешена — пропускается"
+        elif job_window_problem(parse_command(job.get("command"))):
+            state = f"не идёт: {job_window_problem(parse_command(job.get('command')))} (pantheon domains build)"
         elif st.get("waiting"):
             state = f"ждёт: {st['waiting']}"
         elif st.get("last_rc") not in (None, 0):
@@ -931,6 +985,8 @@ def status():
             continue
         if parse_command(job.get("command")) is None:
             bad = "команда не разрешена"
+        elif job_window_problem(parse_command(job.get("command"))):
+            bad = job_window_problem(parse_command(job.get("command")))
         elif st.get("paused"):
             bad = "на паузе"
         elif st.get("last_rc") not in (None, 0):
@@ -1276,7 +1332,8 @@ def domains_build(if_changed=False):
         watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS,
                    CLAUDE_TMP)
         newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
-        if built >= newest:
+        # и пропавшее окно задачи расписания (P0-3): без него задача не идёт — в том числе сразу после обновления
+        if built >= newest and all(os.path.isfile(job_window(r)) for r in JOB_ROLES):
             return 0
     with open(reg_path, "rb") as fh:
         reg = tomllib.load(fh)
@@ -1713,6 +1770,27 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
     # местные порты мастерской закрыты: на macOS allowLocalBinding открывает все порты 127.0.0.1, в том числе демон CDP
     # с входами владельца; браузеры владельца — только у роли Харон (решение владельца 15.10, отмена metis-0053)
     built.append("workshop")
+    # окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` тика (parse_command добавляет --settings).
+    # Пишет только своё (JOB_ROLES), память ролей и свой кэш; личное закрыто на чтение и запись; сети Bash нет (веб у
+    # prometheus и iris — инструменты WebFetch/WebSearch, не Bash); мимо песочницы — только `pantheon alert`. Строгий
+    # guard — как у остальных окон. Кэш задачи в списке built — штаб его не читает (выдача из веба)
+    for role, conf in JOB_ROLES.items():
+        name = "job-" + role
+        own = []
+        for p in conf["write"]:
+            if os.path.isdir(p) and not os.path.islink(p):
+                own.append(os.path.realpath(p))
+            else:
+                print(f"песочница {name}: нет папки или ссылка — Bash туда не пишет: {p.replace(HOME, '~')}",
+                      file=sys.stderr)
+        cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
+        job = role_settings(own, None, memory, cache, False, private_paths, None, guard)
+        job["sandbox"]["excludedCommands"] = list(JOB_EXCLUDED)
+        job["sandbox"]["network"]["allowedDomains"] = []
+        job["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
+        job["env"]["PANTHEON_ROLE"] = role  # хукам: роль окна, как у штаба
+        write_window(out_dir, name, job)
+        built.append(name)
     # штаб (SEC-26, вариант А): Зевс пишет только в ~/ai/pantheon, кроме .git и alerts.md; сеть закрыта (в веб он не
     # ходит, SEC-13); мимо песочницы — только `pantheon start|wake|alert`: запуск сессий и тревоги. Личное ему открыто
     # (SEC-11), кроме ключей git-crypt.

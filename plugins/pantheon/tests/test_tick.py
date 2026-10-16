@@ -229,7 +229,7 @@ def main():
     os.makedirs(br)
     subprocess.run(["git", "init", "-q", br], check=True)
     subprocess.run(["git", "-C", br, "remote", "add", "origin", "git@github.com:x/y.git"], check=True)
-    for d in ("pantheon/directions/athena-broker", "projects/zz", "ai/knowledge", ".cache/metis", ".ssh",
+    for d in ("pantheon/directions/athena-broker", "projects/zz", "ai/knowledge", ".cache/metis", ".ssh", "pantheon/scout",
               ".claude/plugins/marketplaces/agent-kit/plugins/guard/hooks"):
         os.makedirs(os.path.join(tmp, d), exist_ok=True)
     open(os.path.join(tmp, ".claude/plugins/marketplaces/agent-kit/plugins/guard/hooks/guard.py"), "w").write("# guard\n")
@@ -400,6 +400,95 @@ def main():
           no_loop and json.load(open(os.path.join(state, "domains.json")))["built_ts"] > t0
           and mem_p in load("athena-broker")["sandbox"]["filesystem"]["allowWrite"]
           and mem_p in load("hq")["sandbox"]["filesystem"]["allowWrite"])
+
+    # окна задач расписания (P0-3, metis-0063): clio, prometheus, iris — своя песочница
+    jc, jp, ji = load("job-clio"), load("job-prometheus"), load("job-iris")
+    know, scout = real("ai/knowledge"), real("pantheon/scout")
+    caches = real("Library/Caches/pantheon-sandbox")
+    mems = [x for x in jc["sandbox"]["filesystem"]["allowWrite"] if "/agent-memory/" in x]
+    check("окно задачи: пишет только своё — clio и prometheus ~/ai/knowledge, iris scout/; память ролей и свой кэш",
+          jc["sandbox"]["filesystem"]["allowWrite"] == [know] + mems + [caches + "/job-clio"]
+          and jp["sandbox"]["filesystem"]["allowWrite"] == [know] + mems + [caches + "/job-prometheus"]
+          and ji["sandbox"]["filesystem"]["allowWrite"] == [scout] + mems + [caches + "/job-iris"]
+          and mem_p in mems and os.path.isdir(caches + "/job-iris"))
+    check("окно задачи: строгая песочница, сети Bash нет, мимо неё — только pantheon alert",
+          all(w["sandbox"]["enabled"] and w["sandbox"]["failIfUnavailable"] and w["sandbox"]["allowUnsandboxedCommands"] is False
+              and w["sandbox"]["network"]["allowedDomains"] == [] and w["sandbox"]["excludedCommands"] == ["pantheon alert *"]
+              for w in (jc, jp, ji)))
+    check("окно задачи: личное закрыто на чтение и на запись (оба вида пути), .git/config — на запись",
+          all(x in w["sandbox"]["filesystem"][k] for w in (jc, jp, ji) for k in ("denyRead", "denyWrite")
+              for x in ("~/ai/knowledge/me", real("ai/knowledge/me"), "~/ai/pantheon/.git/git-crypt"))
+          and know + "/.git/config" in jc["sandbox"]["filesystem"]["denyWrite"])
+    check("окно задачи: строгий guard-хук, роль окна в env, без координаторских правил",
+          all(w["hooks"]["PreToolUse"] == sa["hooks"]["PreToolUse"][:1] and w["env"]["PANTHEON_ROLE"] == r
+              and "permissions" not in w and "autoCompactWindow" not in w
+              for w, r in ((jc, "clio"), (jp, "prometheus"), (ji, "iris"))))
+    check("окно штаба: кэши задач (выдача из веба) закрыты для чтения",
+          any(x.endswith("pantheon-sandbox/job-prometheus") for x in load("hq")["sandbox"]["filesystem"]["denyRead"]))
+    os.remove(os.path.join(state, "settings", "job-iris.json"))
+    subprocess.run([sys.executable, "-I", LIB, "domains", "build", "--if-changed"], env=env, capture_output=True)
+    check("domains build --if-changed: пропавшее окно задачи пересобирается",
+          os.path.isfile(os.path.join(state, "settings", "job-iris.json")))
+
+    # разбор команды задачи: --settings окна роли, модель iris, роль вне таблицы
+    probe = f"""
+import json, sys
+sys.path.insert(0, {os.path.dirname(LIB)!r})
+import pantheon as p
+cmds = ['claude -p --agent clio "проход"', 'claude -p --agent iris --model haiku --max-turns 5 "x"',
+        'claude -p --agent iris "x"', 'claude -p --agent argus "x"', 'claude -p --agent clio --settings /tmp/a.json "x"',
+        'claude -p --agent prometheus --model opus "x"']
+print(json.dumps({{c: p.parse_command(c) for c in cmds}}))
+"""
+    got = json.loads(subprocess.run([sys.executable, "-I", "-c", probe], env=env, capture_output=True, text=True).stdout)
+    win = lambda r: os.path.join(os.path.realpath(state), "settings", f"job-{r}.json")  # noqa: E731
+    check("parse_command: claude -p получает --settings окна задачи роли, -p первым",
+          got['claude -p --agent clio "проход"'] == ["claude", "-p", "--settings", win("clio"), "--agent", "clio", "проход"]
+          and got['claude -p --agent prometheus --model opus "x"'] == ["claude", "-p", "--settings", win("prometheus"),
+                                                                       "--agent", "prometheus", "--model", "opus", "x"])
+    check("parse_command: iris — --model sonnet вместо любого из команды",
+          got['claude -p --agent iris --model haiku --max-turns 5 "x"'] == [
+              "claude", "-p", "--settings", win("iris"), "--agent", "iris", "--model", "sonnet", "--max-turns", "5", "x"]
+          and got['claude -p --agent iris "x"'] == ["claude", "-p", "--settings", win("iris"), "--agent", "iris",
+                                                    "--model", "sonnet", "x"])
+    check("parse_command: роль без окна задачи и --settings в команде — не разрешены",
+          got['claude -p --agent argus "x"'] is None and got['claude -p --agent clio --settings /tmp/a.json "x"'] is None)
+
+    # run-job: окна нет или это ссылка — задача не идёт (claude не вызван), одна тревога, код не 0; окно есть — идёт
+    fake = os.path.join(tmp, "fakebin")
+    os.makedirs(fake)
+    calls = os.path.join(tmp, "claude-calls.log")
+    open(os.path.join(fake, "claude"), "w").write(f'#!/bin/sh\necho "$@" >> {calls}\n')
+    os.chmod(os.path.join(fake, "claude"), 0o755)
+    open(os.path.join(home, "schedule.toml"), "w").write(
+        '[[job]]\nname = "clio-weekly"\ncommand = "claude -p --agent clio \\"проход\\""\nevery = 10080\nnotify = false\n')
+    jenv = {**env, "PATH": fake + os.pathsep + os.environ["PATH"], "PANTHEON_NO_NOTIFY": "1"}
+    os.remove(win("clio"))
+    al0 = open(os.path.join(home, "alerts.md")).read() if os.path.exists(os.path.join(home, "alerts.md")) else ""
+    rcs = [subprocess.run([sys.executable, "-I", LIB, "run-job", "clio-weekly"], env=jenv, capture_output=True).returncode
+           for _ in range(2)]
+    al = open(os.path.join(home, "alerts.md")).read()[len(al0):]
+    jobs = subprocess.run([sys.executable, "-I", LIB, "jobs"], env=jenv, capture_output=True, text=True)
+    check("run-job: окна задачи нет — claude не вызван, код не 0, тревога одна с «pantheon domains build»",
+          rcs[0] != 0 and rcs[1] != 0 and not os.path.exists(calls)
+          and al.count("задача clio-weekly не идёт") == 1 and "pantheon domains build" in al)
+    check("pantheon jobs: не падает и показывает причину", jobs.returncode == 0 and "нет окна песочницы" in jobs.stdout)
+    os.symlink(os.path.join(tmp, "pantheon", "schedule.toml"), win("clio"))
+    rc_link = subprocess.run([sys.executable, "-I", LIB, "run-job", "clio-weekly"], env=jenv, capture_output=True).returncode
+    check("run-job: окно задачи — ссылка, а не обычный файл — claude не вызван",
+          rc_link != 0 and not os.path.exists(calls))
+    os.remove(win("clio"))
+    subprocess.run([sys.executable, "-I", LIB, "domains", "build"], env=env, capture_output=True)
+    # run_env ставит /opt/homebrew/bin и папку python перед PATH: настоящий claude там перехватил бы подменный
+    shadow = [d for d in ("/opt/homebrew/bin", os.path.dirname(sys.executable)) if os.path.exists(os.path.join(d, "claude"))]
+    if shadow:
+        print(f"skip run-job с окном: настоящий claude в {shadow[0]} раньше подменного")
+    else:
+        rc_ok = subprocess.run([sys.executable, "-I", LIB, "run-job", "clio-weekly"], env=jenv,
+                               capture_output=True).returncode
+        called = open(calls).read() if os.path.exists(calls) else ""
+        check("run-job: окно на месте — claude -p идёт с --settings окна clio",
+              rc_ok == 0 and called.strip() == f"-p --settings {win('clio')} --agent clio проход")
 
     # архив (STATE-14)
     tmp = tempfile.mkdtemp(prefix="tick-test-")
