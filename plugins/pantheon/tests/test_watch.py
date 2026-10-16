@@ -44,6 +44,9 @@ elif a[:1] == ["--version"]:
 elif a[:1] == ["respawn"] and os.environ.get("FAKE_RESPAWN_RC"):
     print("respawn: no such session", file=sys.stderr)
     sys.exit(int(os.environ["FAKE_RESPAWN_RC"]))
+elif a[:1] == ["--bg"] and os.environ.get("FAKE_BG_SLEEP"):
+    import time
+    time.sleep(float(os.environ["FAKE_BG_SLEEP"]))
 elif "--resume" in a:
     print(os.environ.get("FAKE_RESUME_OUT", "backgrounded"))
 else:
@@ -369,6 +372,25 @@ def test_autostart_backoff_and_give_up():
             t = st["next"] + 10
     check(st.get("gave_up") and open(e.notify).read().count("Самозапуск hermes-x встал") == before + 1,
           f"снова встал через 3 дня при неснятой отметке — нет второй macOS: {st}")
+
+
+def test_autostart_start_timeout_0141():
+    """metis-0141 п. 1: pantheon start из самозапуска не уложился в срок — строка в тревогах и код 124, без трассировки;
+    срок по умолчанию покрывает шаги запуска (около 410 с) и меньше срока прохода дежурного (600 с)."""
+    e = Env()
+    e.direction("pluto-x")
+    e.task("pluto-0001", "pluto-x")
+    e.run("watch", t=T0)
+    e.board("pluto-0001", T0 + 10)
+    r = e.run("watch", t=T0 + 60, extra={"PANTHEON_START_TIMEOUT": "2", "FAKE_BG_SLEEP": "20"})
+    check(r.returncode == 0 and "Traceback" not in r.stderr, f"проход упал на сроке запуска: {r.returncode} {r.stderr[-800:]}")
+    check("pantheon start не уложился в 2 с" in e.alerts() and "не вышло, код 124" in e.alerts(),
+          f"нет строки о сроке запуска: {e.alerts()[-600:]}")
+    st = json.load(open(e.st("autostart.json")))["pluto-x"]
+    check(st.get("fails") == 1, f"срок запуска не засчитан сбоем: {st}")
+    src = open(os.path.join(ROOT, "lib", "watch.py"), encoding="utf-8").read()
+    check("START_TIMEOUT = 420.0" in src and "timeout=300" not in src.split("def resume_or_start")[1].split("\ndef ")[0],
+          "срок pantheon start в resume_or_start не 420 с")
 
 
 def test_autostart_healthy_resets_and_limits():

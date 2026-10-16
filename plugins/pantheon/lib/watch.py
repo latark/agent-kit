@@ -974,9 +974,31 @@ def resume_or_start(name, agents, text, origin, only_resume=False, auto=False):
     if dry():
         print(f"[start] {name} --from {origin}")
         return 0
-    r = subprocess.run([os.path.join(P.PLUGIN, "bin", "pantheon"), "start", name, "--from", origin, text],
-                       capture_output=True, text=True, timeout=300, env=P.run_env())
+    limit = start_timeout()
+    try:
+        r = subprocess.run([os.path.join(P.PLUGIN, "bin", "pantheon"), "start", name, "--from", origin, text],
+                           capture_output=True, text=True, timeout=limit, env=P.run_env())
+    except subprocess.TimeoutExpired:  # metis-0141 п. 1: без трассировки — строка в тревогах и код, как у задач тика
+        P.alert(f"запуск {name}: pantheon start не уложился в {limit:.0f} с и остановлен — сессия могла и подняться; "
+                "не появится — следующий проход засчитает сбой", "watch")
+        return 124
     return r.returncode
+
+
+# metis-0141 п. 1: срок pantheon start из дежурного. Шаги _start_session по их собственным срокам: claude agents 60 с,
+# claude stop копии «done» 60 с, ожидание имени PANTHEON_STOP_WAIT 30 с + устойчивость 10 с, ещё claude agents 60 с,
+# claude --bg 180 с, проверка имени 10 с — около 410 с; было 300 с. Срок поднят, а не ожидание имени урезано: ожидание
+# защищает от ожившей копии (15.10 Фемида ожила через 7 с, metis-0041) и большую часть срока не занимает. 420 с меньше
+# срока прохода дежурного (timeout = 600 в schedule.toml). PANTHEON_START_TIMEOUT — подмена для тестов.
+START_TIMEOUT = 420.0
+
+
+def start_timeout():
+    with contextlib.suppress(ValueError, TypeError):
+        v = float(os.environ.get("PANTHEON_START_TIMEOUT") or START_TIMEOUT)
+        if v > 0:
+            return v
+    return START_TIMEOUT
 
 
 # --- раз в сутки: журналы ваших слов (COMM-10, аудит 1.1 §7) ------------------------------------------------
