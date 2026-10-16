@@ -400,9 +400,10 @@ def main():
           not wide and not any("TMPDIR" in w["env"] for w in every))
 
     merge = "Bash(gh pr merge *)"
-    check("окно координатора направления: gh pr merge в permissions.allow; у мастерской и штаба правила нет (metis-0050)",
-          sa.get("permissions", {}).get("allow") == [merge] and sm.get("permissions", {}).get("allow") == [merge]
-          and merge not in json.dumps(sw.get("permissions", {})) and merge not in json.dumps(hq.get("permissions", {})))
+    check("окно координатора направления: gh pr merge НЕТ в permissions.allow (allow срабатывает раньше классификатора "
+          "и пускал бы --admin/--auto, metis-0137); у мастерской и штаба тоже",
+          all(merge not in json.dumps(w.get("permissions", {})) and not (w.get("permissions") or {}).get("allow")
+              for w in (sa, sm, sn, sw, hq)))
     am = {n: w.get("autoMode", {}).get("allow") or [] for n, w in
           (("athena-broker", sa), ("metis-pantheon", sm), ("mnemo-brain", sn), ("zz", sz))}
     rule = lambda n, head: [r for r in am[n] if r.startswith(head)]

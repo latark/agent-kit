@@ -1612,10 +1612,12 @@ GH_PR_WRITE = ["gh pr create *", "gh pr merge *"]
 # пускает guard (_PUSH_BAD)
 GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
 COORDINATOR_COMPACT = 200000
-# Окну координатора направления — слияние PR без вопроса классификатора режима auto (metis-0050). Каждое слияние
-# по-прежнему проверяет guard (merge_problem): главная сессия domain-coordinator или лид её направления (metis-0054),
-# свои папки, без --admin и --auto. Мастерской и штабу правила нет.
-COORDINATOR_ALLOW = ["Bash(gh pr merge *)"]
+# permissions.allow окон координаторов — пусто (metis-0137). Раньше здесь стояло Bash(gh pr merge *) (metis-0050), но
+# правило allow срабатывает раньше классификатора режима auto, а формы --admin и --auto классификатор не судит: слияние
+# в обход запора шло без проверки. Разрешённую форму слияния пропускает autoMode-правило GATED_MERGE_RULE
+# (coordinator_auto_allow), а каждое слияние по-прежнему проверяет guard (merge_problem): главная сессия
+# domain-coordinator или лид её направления (metis-0054), свои папки, без --admin и --auto. Мастерской и штабу правила нет.
+COORDINATOR_ALLOW = []
 # Исключения классификатора режима auto окнам координаторов направлений, Метиды в их числе (metis-0098; решения
 # владельца 15.10 «Б» и Зевса 16.10 «А»). Классификатор не видит журнал запора guard и считал слияние через запор
 # «Merge Without Review», а за ним — и gh pr view, git fetch той же сессии. Правило описывает ровно то, что пускает
