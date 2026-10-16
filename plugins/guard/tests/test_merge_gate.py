@@ -571,22 +571,72 @@ def t_checklist(h):
 
 
 EMPTY_TESTS = ("true", "heavy echo ok", ":", "/usr/bin/TRUE", "env A=1 -u B timeout -s KILL 60 sleep 1",
-               "nice -n 5 time -p printf x", "heavy --server yes", "heavy", "test -f x", "[ -f x ]")
+               "nice -n 5 time -p printf x", "heavy --server yes", "heavy", "test -f x", "[ -f x ]",
+               # metis-0157 (guard 0.5.8): python и оболочка, которые ничего не проверяют
+               "python3 -c pass", "python3 -c ''", "heavy python3 -I -c pass", "python3 -cpass", "/usr/bin/python3 -Ic 0",
+               "python3.14 -c 'print(\"ok\")'", "python3 -c 'exit(0)'", "python3", "python3 -W ignore -",
+               "sh -c ''", "bash -c 'true'", "sh -c true", "bash -ec 'exit 0'", "zsh -c ':'", "heavy sh -c 'echo ok'",
+               "sh -c 'bash -c true'", "bash", "exit 0", "sleep 1", "echo тесты прошли")
+REAL_TESTS = ("heavy python3 -I tests/test_x.py", "env CI=1 heavy pnpm test", "timeout 600 pytest -q", "heavy pnpm test",
+              "pytest", "pnpm test", "python3 -I tests/test_x.py", "python3 -m pytest -q", "python3 -W error tests/t.py",
+              "bash tests/run.sh", "sh -c pytest", "bash -c 'heavy pnpm test'", "python3 -c 'from t import main'")
 
 
 def t_empty_tests(h):
-    """Пустая команда тестов (true, echo… после обёрток) — отказ на PreToolUse и записи нет."""
+    """Пустая команда тестов (true, echo…, python3 -c pass, sh -c '' после обёрток) — отказ на PreToolUse и записи
+    нет; настоящий раннер — можно, запись есть."""
     for c in EMPTY_TESTS:
         d, why = h.pre(f"pantheon review test -- {c}", role="dev-opus", agent_id="d1")
         check(f"review test -- {c} — PreToolUse отказ", d == "deny" and "ничего не проверяет" in why, why)
         h.post(f"pantheon review test -- {c}", "dev-opus")
     check("пустая команда тестов — записи нет", h.read() == [], h.read())
-    for c in ("heavy python3 -I tests/test_x.py", "env CI=1 heavy pnpm test", "timeout 600 pytest -q", "sh -c true"):
+    for c in REAL_TESTS:
         d, why = h.pre(f"pantheon review test -- {c}", role="dev-opus", agent_id="d1")
-        check(f"review test -- {c} — можно" + (" (обход sh -c не ловим — README)" if "sh" in c else ""),
-              d == "allow", why)
-    h.post("pantheon review test -- heavy python3 -I tests/test_x.py", "dev-opus")
-    check("настоящая команда тестов — запись есть", [r["kind"] for r in h.read()] == ["tests"], h.read())
+        check(f"review test -- {c} — можно", d == "allow", why)
+    for c in ("heavy python3 -I tests/test_x.py", "pytest", "sh -c pytest"):
+        h.reset()
+        h.post(f"pantheon review test -- {c}", "dev-opus")
+        check(f"настоящая команда тестов `{c}` — запись есть", [r["kind"] for r in h.read()] == ["tests"], h.read())
+
+
+def t_wrapped_review_test(h):
+    """metis-0157: команда после -- в `pantheon review test` судится как голая — слияние, push, запись чужого."""
+    sha, kit = h.sha["agent-kit"], "projects/agent-kit"
+    merges = (f"gh pr merge 27 -R latark/agent-kit --admin --match-head-commit {sha}",
+              "gh pr merge 27 -R latark/agent-kit --admin")
+    for m in merges:
+        for wrap in ("pantheon review test -- ", "pantheon review test -- heavy ", "~/.local/bin/pantheon review test -- ",
+                     "python3 -I lib/pantheon.py review test -- ", "pantheon review test -- env CI=1 "):
+            merge_case(f"`{wrap}{m[:40]}…` — отказ", h.pre(wrap + m, pdir=kit), False, "без --admin")
+        merge_case(f"`review test -- sh -c '{m[:30]}…'` — отказ", h.pre(f"pantheon review test -- sh -c '{m}'", pdir=kit),
+                   False, "без --admin")
+    merge_case("обёрнутый merge без записей — отказ запора, как у голого",
+               h.pre(f"pantheon review test -- gh pr merge 27 -R latark/agent-kit --match-head-commit {sha}", pdir=kit),
+               False, "нет записи тестов")
+    for p in ("git push origin HEAD:main", "git push origin main", "heavy git push origin HEAD:refs/heads/main",
+              "git push --force origin metis-x"):
+        for role in ("domain-coordinator", "hephaestus-pantheon"):
+            d, why = h.pre(f"pantheon review test -- {p}", role=role, pdir=kit, agent_id="h1" if role != "domain-coordinator" else None)
+            check(f"`review test -- {p}` ({role}) — отказ", d == "deny" and "Правило push" in why, why)
+            bare = h.pre(p, role=role, pdir=kit, agent_id="h1" if role != "domain-coordinator" else None)
+            check(f"`{p}` ({role}) — голая тоже отказ", bare[0] == "deny" and "Правило push" in bare[1], bare)
+    d, why = h.pre("pantheon review test -- git push origin metis-x", role="dev-opus", pdir=kit, agent_id="d1")
+    check("dev-opus: обёрнутый push — отказ «не отправляет»", d == "deny" and "не отправляет" in why, why)
+    for c, rule in ((f"rm {h.j('.claude/settings.json')}", "protect-config"),
+                    (f"touch {h.records}", "pantheon-acl")):
+        bare = h.pre(c, role="dev-opus", pdir=kit, agent_id="d1")
+        d, why = h.pre(f"pantheon review test -- {c}", role="dev-opus", pdir=kit, agent_id="d1")
+        check(f"запись под правило {rule}: обёрнутая — тот же отказ, что голая",
+              bare[0] == "deny" and rule in bare[1] and (d, why) == bare, (bare, d, why))
+    d, why = h.pre("pantheon review test -- pantheon archive x", role="hephaestus-pantheon", pdir=kit, agent_id="h1")
+    bare = h.pre("pantheon archive x", role="hephaestus-pantheon", pdir=kit, agent_id="h1")
+    check("привилегированная подкоманда пульта: обёрнутая — то же решение, что голая",
+          (d, why) == bare, (bare, d, why))
+    for c in ("heavy python3 -I tests/test_merge_gate.py", "gh pr view 27 -R latark/agent-kit", "git status"):
+        d, why = h.pre(f"pantheon review test -- {c}", role="hephaestus-pantheon", pdir=kit, agent_id="h1")
+        check(f"`review test -- {c}` — можно", d == "allow", why)
+    d, why = h.pre("heavy pnpm test", role="dev-opus", pdir=kit, agent_id="d1")
+    check("голая `heavy pnpm test` — можно (heavy теперь обёртка разбора)", d == "allow", why)
 
 
 def t_core_marketplace(h):
@@ -679,7 +729,7 @@ def t_canary_b1(h):
 CASES = [t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
-         t_pre_not_simple, t_checklist, t_empty_tests, t_core_marketplace, t_canary_b1]
+         t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1]
 
 
 def main():
