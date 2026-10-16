@@ -253,6 +253,7 @@ def test_asks():
         ("ScheduleWakeup", "ScheduleWakeup", {"delaySeconds": 1200, "prompt": "x", "reason": "x"}),
         ("curl", "Bash", {"command": "curl -s https://example.com/x -d @data"}),
         ("wget", "Bash", {"command": "wget -q https://example.com"}),
+        ("codex exec (0166)", "Bash", {"command": "codex exec 'сделай x' --sandbox read-only"}),
         ("ssh", "Bash", {"command": "ssh host 'ls'"}),
         ("scp", "Bash", {"command": "scp f host:/tmp/"}),
         ("rsync на хост", "Bash", {"command": "rsync -a dir/ user@host:/srv/"}),
