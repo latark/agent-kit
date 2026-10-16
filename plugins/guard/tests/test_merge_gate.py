@@ -355,7 +355,10 @@ def t_reject_after_accept(h):
            rec("reject", "latark/tg-read", 3, sha, agent_id="argus2"))
     merge_case("reject после accept — отказ", h.pre(f"gh pr merge 3 --match-head-commit {sha}"), False, "«вернуть» (reject)")
     h.seed(rec("accept", "latark/tg-read", 3, sha, agent_id="argus3"))
-    merge_case("accept после reject — проходит", h.pre(f"gh pr merge 3 --match-head-commit {sha}"), True)
+    merge_case("accept третьего argus после reject второго — всё равно отказ (metis-0158)",
+               h.pre(f"gh pr merge 3 --match-head-commit {sha}"), False, "«вернуть» (reject)")
+    h.seed(rec("accept", "latark/tg-read", 3, sha, agent_id="argus2"))
+    merge_case("accept того же argus после его reject — проходит", h.pre(f"gh pr merge 3 --match-head-commit {sha}"), True)
 
 
 def t_product(h):
@@ -563,11 +566,15 @@ def t_checklist(h):
                "без перечня проверенного (Б6)")
     merge_case("отказ подсказывает повторить accept с --opened", h.pre(f"gh pr merge 3 --match-head-commit {sha}"), False,
                "--opened")
-    h.seed(rec("accept", "latark/tg-read", 3, sha, agent_id="argus2", checklist=dict(CHECKLIST, unchecked=" ")))
+    h.seed(rec("accept", "latark/tg-read", 3, sha, checklist=dict(CHECKLIST, unchecked=" ")))
     merge_case("accept с пустым полем перечня — отказ", h.pre(f"gh pr merge 3 --match-head-commit {sha}"), False,
                "без перечня")
     h.seed(rec("accept", "latark/tg-read", 3, sha, agent_id="argus3"))
-    merge_case("новый accept с перечнем после старого — проходит", h.pre(f"gh pr merge 3 --match-head-commit {sha}"), True)
+    merge_case("accept с перечнем другого argus старый не перекрывает — отказ (metis-0158)",
+               h.pre(f"gh pr merge 3 --match-head-commit {sha}"), False, "без перечня")
+    h.seed(rec("accept", "latark/tg-read", 3, sha))
+    merge_case("новый accept с перечнем того же argus после старого — проходит",
+               h.pre(f"gh pr merge 3 --match-head-commit {sha}"), True)
 
 
 EMPTY_TESTS = ("true", "heavy echo ok", ":", "/usr/bin/TRUE", "env A=1 -u B timeout -s KILL 60 sleep 1",
@@ -576,10 +583,15 @@ EMPTY_TESTS = ("true", "heavy echo ok", ":", "/usr/bin/TRUE", "env A=1 -u B time
                "python3 -c pass", "python3 -c ''", "heavy python3 -I -c pass", "python3 -cpass", "/usr/bin/python3 -Ic 0",
                "python3.14 -c 'print(\"ok\")'", "python3 -c 'exit(0)'", "python3", "python3 -W ignore -",
                "sh -c ''", "bash -c 'true'", "sh -c true", "bash -ec 'exit 0'", "zsh -c ':'", "heavy sh -c 'echo ok'",
-               "sh -c 'bash -c true'", "bash", "exit 0", "sleep 1", "echo тесты прошли")
+               "sh -c 'bash -c true'", "bash", "exit 0", "sleep 1", "echo тесты прошли",
+               # metis-0164 (guard 0.5.9): абсолютный путь — по имени; python3.14t и pypy — тоже python
+               "/usr/bin/true", "python3.14t -c pass", "pypy3 -c pass", "pypy -c 0", "heavy pypy3.10 -I -c pass")
 REAL_TESTS = ("heavy python3 -I tests/test_x.py", "env CI=1 heavy pnpm test", "timeout 600 pytest -q", "heavy pnpm test",
               "pytest", "pnpm test", "python3 -I tests/test_x.py", "python3 -m pytest -q", "python3 -W error tests/t.py",
-              "bash tests/run.sh", "sh -c pytest", "bash -c 'heavy pnpm test'", "python3 -c 'from t import main'")
+              "bash tests/run.sh", "sh -c pytest", "bash -c 'heavy pnpm test'", "python3 -c 'from t import main'",
+              # metis-0164: относительный путь — скрипт проекта, а не программа test/true из списка
+              "./test", "bin/test", "script/test", "tests/test", "heavy ./test", "sh -c ./test", "pypy3 -m pytest",
+              "python3.14t -I tests/test_x.py")
 
 
 def t_empty_tests(h):
@@ -606,7 +618,8 @@ def t_wrapped_review_test(h):
               "gh pr merge 27 -R latark/agent-kit --admin")
     for m in merges:
         for wrap in ("pantheon review test -- ", "pantheon review test -- heavy ", "~/.local/bin/pantheon review test -- ",
-                     "python3 -I lib/pantheon.py review test -- ", "pantheon review test -- env CI=1 "):
+                     "python3 -I lib/pantheon.py review test -- ", "pantheon review test -- env CI=1 ",
+                     "python3.14t lib/pantheon.py review test -- ", "pypy3 -I lib/pantheon.py review test -- "):
             merge_case(f"`{wrap}{m[:40]}…` — отказ", h.pre(wrap + m, pdir=kit), False, "без --admin")
         merge_case(f"`review test -- sh -c '{m[:30]}…'` — отказ", h.pre(f"pantheon review test -- sh -c '{m}'", pdir=kit),
                    False, "без --admin")
@@ -726,10 +739,114 @@ def t_canary_b1(h):
         check("Б1 е) gh с текстом «одобри» в PR реально опрошен (Д3)", f"pr view {pr}" in log, log)
 
 
+def t_reviewers(h):
+    """metis-0158: у каждого рецензента (session_id, agent_id) — его последний вердикт; пускает, только если у всех
+    последний — «принять» с перечнем, и ни один рецензент — не сливающий."""
+    sha = h.sha["tg-read"]
+    merge = f"gh pr merge 3 --match-head-commit {sha}"
+    tests = rec("tests", "latark/tg-read", None, sha, "dev-opus")
+    a1 = rec("accept", "latark/tg-read", 3, sha, agent_id="argus1", session="s-a")
+    r2 = rec("reject", "latark/tg-read", 3, sha, agent_id="argus2", session="s-b")
+    r2["time"] = "2026-10-16T12:20:55+0300"
+    for name, order in (("accept, затем reject", (a1, r2)), ("reject, затем accept", (r2, a1))):
+        h.reset()
+        h.seed(tests, *order)
+        got = h.pre(merge)
+        merge_case(f"два argus на одном head: {name} — отказ", got, False, "«вернуть» (reject)")
+        if HAVE_TOML:
+            check(f"{name}: отказ называет чей reject и когда, и как его снять",
+                  "argus agent argus2, сессия s-b" in got[1] and "2026-10-16T12:20:55" in got[1]
+                  and "того же рецензента" in got[1] and "новый коммит" in got[1], got[1])
+    h.reset()
+    h.seed(tests, r2, rec("accept", "latark/tg-read", 3, sha, agent_id="argus2", session="s-b"))
+    merge_case("reject, затем accept того же рецензента — проходит", h.pre(merge), True)
+    h.reset()
+    h.seed(tests, r2, rec("accept", "latark/tg-read", 3, sha, agent_id="argus2", session="s-other"))
+    merge_case("тот же agent_id в другой сессии — другой рецензент, reject стоит", h.pre(merge), False, "«вернуть»")
+    h.reset()
+    h.seed(tests, a1, rec("accept", "latark/tg-read", 3, sha, agent_id="argus2", session="s-b"))
+    merge_case("два accept от двух рецензентов — проходит", h.pre(merge), True)
+    h.reset()
+    h.seed(tests, rec("reject", "latark/tg-read", 3, OLD, agent_id="argus2", session="s-b"), a1)
+    merge_case("reject на старый коммит новому SHA не мешает", h.pre(merge), True)
+    h.reset()
+    # сливающий — лид L1 в сессии s-coord; его «принять» — первым, последним — чужое: раньше смотрелся только last
+    h.seed(tests, rec("accept", "latark/tg-read", 3, sha, agent_id="L1", session="s-coord"), a1)
+    merge_case("один из accept — от сливающего — отказ",
+               h.pre(merge, role="hephaestus-pantheon", agent_id="L1"), False, "рецензент и сливающий")
+    merge_case("тот же журнал, сливает другой лид — проходит",
+               h.pre(merge, role="hephaestus-pantheon", agent_id="L2"), True)
+
+
+UNRESOLVED_TESTS = ("python3 -I $UNSET/tests/run.py", "python3 $UNSET -m pytest", "bash $UNSET/run.sh", 'sh -c "$UNSET"',
+                    "python3 -I $CLAUDE_PLUGIN_ROOT/tests/t.py", 'python3 -I "$REPO_ROOT/tests/t.py"', "${X:-true}",
+                    "$EMPTYVAR true", "env $UNSET true", "python3 -c $UNSET", "heavy $UNSET")
+
+
+def _load_merge_gate(name):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, os.path.join(os.path.dirname(GUARD), "merge_gate.py"))
+    mg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mg)
+    return mg
+
+
+def t_unresolved_test_words(h):
+    """metis-0164: слово, которое разбор Bash не вычислил (None), — «неизвестно»: не пустая команда и без падения
+    хука («сбой проверки прав»). bash/sh с таким словом закрывает общее правило разбора — как голую команду."""
+    for c in UNRESOLVED_TESTS:
+        d, why = h.pre(f"pantheon review test -- {c}", role="dev-opus", agent_id="d1")
+        check(f"review test -- {c} — без сбоя и не «пустая»", "сбой" not in why and "ничего не проверяет" not in why,
+              why)
+        if c.startswith(("bash", "sh ")):
+            bare = h.pre(c, role="dev-opus", agent_id="d1")
+            check(f"review test -- {c} — то же решение, что у голой команды", (d, why) == bare, (d, why, bare))
+        else:
+            check(f"review test -- {c} — можно", d == "allow", why)
+        r = h.post(f"pantheon review test -- {c}", "dev-opus")
+        check(f"PostToolUse review test -- {c} — без сбоя", r.returncode == 0, r.stderr)
+    # те же функции напрямую: None в любом месте — без исключения
+    mg = _load_merge_gate("merge_gate_t")
+    for argv in (["python3", "-I", None], ["python3", None, "-m", "pytest"], ["python3", "-c", None], ["python3", "-c"],
+                 ["bash", None], ["sh", "-c", None], [None], [None, "true"], ["env", None, "true"], ["heavy", None],
+                 ["env", "-u", None, "true"], ["timeout", None, "true"], ["sh", "-c", "$UNSET"]):
+        try:
+            got, err = mg.empty_test_problem(argv), None
+        except Exception as e:  # noqa: BLE001 — проверка как раз на исключение
+            got, err = None, e
+        want_empty = argv in (["python3", "-c"], ["env", "-u", None, "true"], ["timeout", None, "true"])
+        check(f"empty_test_problem({argv}) — без исключения, {'пусто' if want_empty else 'не пусто'}",
+              err is None and bool(got) == want_empty, (got, err))
+
+
+def t_merge_hints(h):
+    """metis-0154: подсказки шлюза слияния — форма с -R owner/repo и --merge (её покрывает правило autoMode
+    «Pantheon Gated Merge»); формы без -R в коде guard нет."""
+    import re
+    mg = _load_merge_gate("merge_gate_h")
+    form = "gh pr merge N -R <owner/repo> --match-head-commit <SHA> --merge"
+    for name in ("MERGE_INTERNAL", "MERGE_PRODUCT", "MERGE_PROTECT"):
+        text = getattr(mg, name)
+        check(f"{name}: подсказка с -R и --merge", form in text, text)
+        check(f"{name}: «шлюз слияния», не «запор»", "шлюз" in text and "запор" not in text, text)
+    for f in ("merge_gate.py", "guard.py"):
+        with open(os.path.join(os.path.dirname(GUARD), f), encoding="utf-8") as fh:
+            src = fh.read()
+        bare = re.findall(r"gh pr merge [^\s\"]+ --match-head-commit", src)
+        check(f"{f}: нет подсказки `gh pr merge N --match-head-commit` без -R", not bare, bare)
+    d, why = h.pre(f"gh pr merge 3 --match-head-commit {h.sha['tg-read']}")
+    if HAVE_TOML:
+        check("отказ шлюза слияния (внутреннее) подсказывает форму с -R", d == "deny" and form in why, why)
+    d, why = h.pre(f"gh pr merge 7 --match-head-commit {h.sha['agent-kit']}", pdir="projects/agent-kit")
+    if HAVE_TOML:
+        check("отказ шлюза слияния (защиты) подсказывает форму с -R", d == "deny" and form in why, why)
+
+
 CASES = [t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
-         t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1]
+         t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
+         t_reviewers, t_unresolved_test_words, t_merge_hints]
 
 
 def main():

@@ -32,8 +32,8 @@ PostToolUse (Bash:
                  направления (domains.json, [merge], [merge_client]); защиты — папки metis-pantheon и их
                  репозитории по git remote — только Метида или её лид. Во всех режимах — запор (P1-4, guard 0.5.4,
                  merge_gate.py): один номер PR, без --auto и --admin, ровно один --match-head-commit <SHA>,
-                 репозитории — из [merge_repos], записи журнала merge-gate: тесты на SHA и последнее «принять» от
-                 argus на (repo, PR, SHA), рецензент — не сливающий; продукт — ещё talos и строка «откат» в
+                 репозитории — из [merge_repos], записи журнала merge-gate: тесты на SHA и у каждого argus на
+                 (repo, PR, SHA) последний вердикт — «принять» (metis-0158), рецензенты — не сливающий; продукт — ещё talos и строка «откат» в
                  alerts.md; защиты — ещё Д3: PR не задевает ядро (весь plugins/guard/**, casefold; файлы из
                  pulls/N/files с previous_filename), его сливает только владелец. Журнал пишет этот же хук на PostToolUse
                  (`pantheon review …`). argus не делает git commit, merge, rebase и другие правки истории. Любой сбой
@@ -1561,7 +1561,7 @@ def _review_test_at(name, t):
     """`pantheon review test -- <команда>` (и `python3 …/pantheon.py review test -- …`): пульт сам запустит
     команду после -- (subprocess без оболочки) → индекс её начала в аргументах; иначе None (metis-0157)."""
     k = -1 if name in ("pantheon", "pantheon.py") else None
-    if k is None and (name in _SHELLS or re.fullmatch(r"python[0-9.]*", name)):
+    if k is None and (name in _SHELLS or re.fullmatch(r"python[0-9.]*t?|pypy[0-9.]*", name)):
         k = next((i for i, x in enumerate(t) if x and os.path.basename(x.rstrip("/")).lower() in
                   ("pantheon", "pantheon.py")), None)
     return k + 4 if k is not None and t[k + 1:k + 4] == ["review", "test", "--"] else None
