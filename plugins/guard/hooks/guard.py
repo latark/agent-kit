@@ -1389,7 +1389,7 @@ _WRAPPERS = {"sudo", "doas", "env", "command", "builtin", "exec", "nohup", "time
              "xcrun", "watch", "noglob", "nocorrect", "-", "coproc", "npx", "bunx", "pnpx", "uv", "uvx", "poetry",
              "pipx", "bundle", "mise", "asdf", "direnv", "dotenv", "op", "pnpm", "npm", "yarn", "bun", "setsid",
              "su", "parallel", "entr", "chronic", "ifne", "fakeroot", "proxychains4", "torsocks", "script",
-             "hyperfine", "dtruss", "valgrind", "lldb", "repeat"}
+             "hyperfine", "dtruss", "valgrind", "lldb", "repeat", "heavy"}
 _ALL_ARGS = {"rm", "grm", "rmdir", "mkdir", "gmkdir", "touch", "gtouch", "truncate", "tee", "gtee", "shred", "srm",
              "unlink", "mkfifo", "mknod", "trash", "sponge", "mktemp", "xattr", "link", "ed", "ex", "vi", "vim",
              "nvim", "nano", "pico", "emacs"}
@@ -1557,7 +1557,20 @@ def _run(words, st, stdin, piped, depth):
         _dispatch(name, args, t, st, stdin, piped, depth)
 
 
+def _review_test_at(name, t):
+    """`pantheon review test -- <команда>` (и `python3 …/pantheon.py review test -- …`): пульт сам запустит
+    команду после -- (subprocess без оболочки) → индекс её начала в аргументах; иначе None (metis-0157)."""
+    k = -1 if name in ("pantheon", "pantheon.py") else None
+    if k is None and (name in _SHELLS or re.fullmatch(r"python[0-9.]*", name)):
+        k = next((i for i, x in enumerate(t) if x and os.path.basename(x.rstrip("/")).lower() in
+                  ("pantheon", "pantheon.py")), None)
+    return k + 4 if k is not None and t[k + 1:k + 4] == ["review", "test", "--"] else None
+
+
 def _dispatch(name, a, t, st, stdin, piped, depth):
+    k = _review_test_at(name, t)
+    if k is not None:
+        _run(a[k:], st, stdin, piped, depth + 1)  # команда после -- судится как голая: push, merge, запись
     opts, plain = _opts(t)
     if name in ("cd", "chdir", "pushd", "popd"):
         if name == "popd" or (name == "pushd" and not plain):

@@ -9,7 +9,8 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
 1. Журнал проверок STATE_DIR/merge-gate/records.jsonl. Пишет только хук guard на PostToolUse (record): команда
    Bash успешно завершилась, она простая (без ; | & && || $( ` и перенаправлений) и это `pantheon review <вид> …`.
      tests          — `pantheon review test -- <команда>`: SHA — HEAD папки cwd, дерево чистое; repo — её remote;
-                      программа после обёрток (heavy, env VAR=…, time, nice, timeout N) — не пустая (true, echo…);
+                      программа после обёрток (heavy, env VAR=…, time, nice, timeout N) — не пустая (true, echo…,
+                      python3 -c pass, sh -c ''); саму команду после -- guard судит как голую (guard.py, 0.5.8);
      accept, reject — `pantheon review accept|reject <owner/repo> <PR> <SHA> [--opened … --ran … --unchecked …]`,
                       только agent_type argus; у accept все три поля перечня (Б6) обязательны и непусты;
      talos          — `pantheon review talos <owner/repo> <PR> <SHA>`, только agent_type talos.
@@ -24,9 +25,11 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро: весь plugins/guard/**, casefold;
    файлы из pulls/N/files с previous_filename.
 Чего guard не проверяет: правдивость строки в сводке и перечня argus и то, что выбранная команда тестов — настоящие
-тесты: пустую программу (true, echo…) он ловит, а обёртку вроде `sh -c true` — нет (защита от ошибки, не от обхода).
+тесты: пустую программу (true, echo…, python3 -c pass, sh -c '') он ловит по короткому списку, а придуманную
+пустышку вроде `python3 -c "import os"` — нет (защита от ошибки, не от обхода).
 """
 
+import ast
 import json
 import os
 import re
@@ -67,8 +70,11 @@ NOT_SIMPLE = re.compile(r"[;|&<>`\n\r]|\$\(")
 # перечень проверенного в «принять» (Б6): что argus открыл, что запустил, чего не проверял — поля записи и флаги
 CHECKLIST = ("opened", "ran", "unchecked")
 CHECKLIST_HINT = '--opened "<что открыл>" --ran "<что запустил>" --unchecked "<что не проверял>"'
-# пустая команда тестов: программа, которая ничего не проверяет (защита от ошибки: `sh -c true` не ловится)
+# пустая команда тестов: программа, которая ничего не проверяет (защита от ошибки, список короткий и явный); ещё
+# python без скрипта или с пустым -c и оболочка без скрипта или с пустым -c (metis-0157, guard 0.5.8)
 EMPTY_TEST_PROGRAMS = {"true", ":", "echo", "printf", "exit", "test", "[", "sleep", "yes"}
+EMPTY_PYTHON = re.compile(r"python[0-9.]*")
+EMPTY_SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 # обёртки перед программой тестов: имя → флаги, за которыми идёт отдельное значение
 TEST_WRAPPERS = {"heavy": set(), "env": {"-u", "--unset", "-C", "--chdir"}, "time": set(),
                  "nice": {"-n", "--adjustment"}, "timeout": {"-s", "--signal", "-k", "--kill-after"}}
@@ -370,14 +376,25 @@ def checklist_ok(rec):
     return isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in CHECKLIST)
 
 
+def _prog(word):
+    """Имя программы в нижнем регистре (macOS не различает регистр: TRUE — это true)."""
+    return os.path.basename(word.rstrip("/")).lower()
+
+
 def test_program(argv):
-    """Программа команды тестов после обёрток heavy, env (VAR=…, флаги), time, nice, timeout N — в нижнем регистре
-    (macOS не различает регистр: TRUE — это true); None — после обёрток ничего нет."""
+    """Программа команды тестов после обёрток heavy, env (VAR=…, флаги), time, nice, timeout N — в нижнем регистре;
+    None — после обёрток ничего нет."""
+    i = _program_at(argv)
+    return _prog(argv[i]) or None if i is not None else None
+
+
+def _program_at(argv):
+    """Индекс программы после обёрток TEST_WRAPPERS; None — после обёрток ничего нет."""
     i = 0
     while i < len(argv):
-        name = os.path.basename(argv[i].rstrip("/")).lower()
+        name = _prog(argv[i])
         if name not in TEST_WRAPPERS:
-            return name or None
+            return i
         takes, i = TEST_WRAPPERS[name], i + 1
         while i < len(argv):
             a = argv[i]
@@ -395,12 +412,102 @@ def test_program(argv):
     return None
 
 
+def _py_code(args):
+    """Аргументы python → тело -c; "" — ни скрипта, ни -c, ни -m (читает stdin); None — скрипт или модуль (-m)."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return None if i + 1 < len(args) else ""
+        if not a.startswith("-"):
+            return None  # скрипт
+        if a == "-" or a.startswith("--"):
+            i += 1
+            continue
+        for j, c in enumerate(a[1:], 2):
+            if c in "cm":
+                if c == "m":
+                    return None
+                return a[j:] if a[j:] else (args[i + 1] if i + 1 < len(args) else "")
+            if c in "WX":  # флаг со значением: остаток токена или следующее слово
+                i += 0 if a[j:] else 1
+                break
+        i += 1
+    return ""
+
+
+def _py_empty(code):
+    """Тело python -c из pass, литералов и print/exit/quit с литералами — ничего не проверяет."""
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return False
+
+    def noop(n):
+        if isinstance(n, ast.Pass):
+            return True
+        if not isinstance(n, ast.Expr):
+            return False
+        v = n.value
+        if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id in ("print", "exit", "quit"):
+            return not v.keywords and all(isinstance(x, ast.Constant) for x in v.args)
+        return isinstance(v, ast.Constant)
+    return all(noop(n) for n in tree.body)
+
+
+def _sh_code(args):
+    """Аргументы sh/bash/zsh → тело -c; "" — ни -c, ни скрипта (читает stdin); None — скрипт из файла."""
+    i, want_c = 0, False
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            i += 1
+            break
+        if a in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
+            i += 2
+            continue
+        if a[:1] in "-+" and len(a) > 1:
+            want_c = want_c or (a[0] == "-" and not a.startswith("--") and "c" in a[1:])
+            i += 1
+            continue
+        break
+    if want_c:
+        return args[i] if i < len(args) else ""
+    return None if i < len(args) else ""
+
+
+def _empty_run(argv, depth=0):
+    """Команда ничего не проверяет → имя программы для текста отказа («нет» — пусто); иначе None. Пусто: программы
+    EMPTY_TEST_PROGRAMS, python без скрипта или с -c из pass/литералов/print/exit, оболочка без скрипта или с -c,
+    где каждая команда пустая (`sh -c ''`, `bash -c 'true'`)."""
+    i = _program_at(argv)
+    if i is None:
+        return "нет"
+    prog, rest = _prog(argv[i]), argv[i + 1:]
+    if not prog or prog in EMPTY_TEST_PROGRAMS:
+        return prog or "нет"
+    if EMPTY_PYTHON.fullmatch(prog):
+        code = _py_code(rest)
+        return f"{prog} без тестов" if code is not None and _py_empty(code) else None
+    if prog in EMPTY_SHELLS and depth < 3:
+        code = _sh_code(rest)
+        if code is None or re.search(r"[;|&`<>(\n]", code):
+            return None  # скрипт из файла или цепочка, конвейер, подстановка — не судим (review test их и так не пустит)
+        try:
+            words = shlex.split(code)
+        except ValueError:
+            return None
+        if not words or _empty_run(words, depth + 1):
+            return f"{prog} без тестов"
+    return None
+
+
 def empty_test_problem(argv):
-    """Команда тестов ничего не проверяет (true, echo ok, heavy :, env X=1 timeout 5 sleep 1) — текст отказа; иначе
-    None. Защита от ошибки, а не от обхода: `sh -c true`, `python3 -c pass` не ловятся."""
-    prog = test_program(argv)
-    if prog is None or prog in EMPTY_TEST_PROGRAMS:
-        return (f"команда тестов `{' '.join(argv) or 'пусто'}` ничего не проверяет (программа «{prog or 'нет'}»): "
+    """Команда тестов ничего не проверяет (true, echo ok, heavy :, env X=1 timeout 5 sleep 1, python3 -c pass,
+    sh -c '', bash -c 'true') — текст отказа; иначе None. Защита от ошибки, а не от обхода: список короткий и явный."""
+    prog = _empty_run(argv)
+    if prog:
+        return (f"команда тестов `{' '.join(argv) or 'пусто'}` ничего не проверяет (программа «{prog}»): "
                 "запор пишет тесты только для настоящей команды — например, `pantheon review test -- heavy python3 -I "
                 "tests/test_x.py` или `pantheon review test -- heavy pnpm test`")
     return None
