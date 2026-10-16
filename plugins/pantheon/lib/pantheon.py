@@ -855,7 +855,8 @@ def old_plists(pattern):
 
 
 def drop_old(pattern):
-    """bootout и удаление plist прежних меток. → число снятых. При PANTHEON_DRYRUN — строка `old-bootout` в dryrun.log."""
+    """bootout и удаление plist прежних меток. → число снятых (не снятая — загружена после неудачного bootout — не
+    считается, её plist остаётся). При PANTHEON_DRYRUN — строка `old-bootout` в dryrun.log."""
     n = 0
     for p in old_plists(pattern):
         label = os.path.basename(p)[:-len(".plist")]
@@ -863,7 +864,15 @@ def drop_old(pattern):
             with open(path("dryrun.log"), "a") as fh:
                 fh.write(f"{int(now())} old-bootout {label}\n")
         else:
-            subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"], capture_output=True, timeout=30)
+            target = f"gui/{os.getuid()}/{label}"
+            r = subprocess.run(["launchctl", "bootout", target], capture_output=True, timeout=30)
+            if r.returncode != 0 and subprocess.run(["launchctl", "print", target], capture_output=True,
+                                                    timeout=15).returncode == 0:
+                # bootout не снял, а задача загружена: plist оставляем — иначе службу никто не найдёт, а новая
+                # встанет рядом (две копии дерутся за порт)
+                print(f"pantheon: прежняя служба {label} не снимается (launchctl bootout, код {r.returncode}); "
+                      f"plist оставлен, снимите её вручную", file=sys.stderr)
+                continue
         with contextlib.suppress(FileNotFoundError):
             os.remove(p)
         n += 1
@@ -891,7 +900,8 @@ def services_sync(sched, only=None):
 def _services_sync(sched, only):
     uid = os.getuid()
     env_path = _svc_path()  # до снятия прежних plist: PATH берётся и из прежнего тика
-    drop_old(OLD_SVC_GLOB)  # прежние службы — до запуска новых: две копии одной службы дерутся за порт
+    # прежние службы — до запуска новых: две копии одной службы дерутся за порт; при only — только эта служба
+    drop_old(f"com.*.pantheon-svc.{glob.escape(only)}.plist" if only else OLD_SVC_GLOB)
     want = {}
     for svc in sched.get("service") or []:
         ok, _ = service_wanted(svc, sched)
