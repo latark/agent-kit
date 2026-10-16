@@ -458,6 +458,48 @@ def main():
     r = run("wake")
     check("wake: задача «ждёт» — не будит", r.returncode == 0 and not calls() and "будить некого" in r.stdout)
 
+    # metis-0147 п. 2: контекст > 100 тыс. и простой > 60 мин — свежая сессия с файла состояния, иначе respawn
+    task("athena-0001", "doing")
+    tr_dir = os.path.join(tmp, ".claude", "projects", "".join(ch if ch.isalnum() else "-" for ch in tmp))
+    os.makedirs(tr_dir, exist_ok=True)
+    tr = os.path.join(tr_dir, "5a1a1a1a-0001.jsonl")
+
+    def transcript(tokens, idle_min):
+        with open(tr, "w") as fh:
+            fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "шаг"}}) + "\n")
+            fh.write(json.dumps({"type": "assistant", "isSidechain": False, "message": {"role": "assistant", "usage": {
+                "input_tokens": 10, "cache_read_input_tokens": tokens - 10, "cache_creation_input_tokens": 0}}}) + "\n")
+        t = time.time() - idle_min * 60
+        os.utime(tr, (t, t))
+
+    def wake_case(tokens, idle_min, *args):
+        transcript(tokens, idle_min)
+        open(agents_file, "w").write(json.dumps([{"id": "a1", "name": "athena-broker", "state": "stopped",
+                                                  "sessionId": "5a1a1a1a-0001", "cwd": tmp, "startedAt": 1}]))
+        open(log, "w").close()
+        return run("wake", *args), calls()
+
+    r, c = wake_case(120_000, 120)
+    bg = [x["argv"] for x in c if "--bg" in x["argv"]]
+    check("wake: контекст 120 тыс. и простой 2 ч — свежая сессия (claude --bg --agent --name --settings окно запуска, "
+          "«[Пантеон: пробуждение] … Прочитай STATUS.md»), не respawn",
+          r.returncode == 0 and not [x for x in c if x["argv"][:1] in (["respawn"], ["--resume"])] and len(bg) == 1
+          and bg[0][:6] == ["--bg", "--agent", "domain-coordinator", "--name", "athena-broker", "--settings"]
+          and bg[0][6] == os.path.join(state, "settings", "run", "athena-broker.json")
+          and "[Пантеон: пробуждение]" in bg[0][7] and "Прочитай ~/ai/pantheon/directions/athena-broker/STATUS.md" in bg[0][7]
+          and "свежей сессией (контекст 120 тыс., простой 120 мин)" in r.stdout)
+    r, c = wake_case(120_000, 10)
+    check("wake: контекст 120 тыс., простой 10 мин — как раньше: respawn", [x["argv"] for x in c] == [["respawn", "a1"]])
+    r, c = wake_case(90_000, 120)
+    check("wake: контекст 90 тыс., простой 2 ч — как раньше: respawn", [x["argv"] for x in c] == [["respawn", "a1"]])
+    r, c = wake_case(120_000, 120, "--dry-run")
+    check("wake --dry-run: говорит, что поднимет свежей сессией и какой файл прочитает, ничего не запускает",
+          r.returncode == 0 and not c and "будет поднята: athena-broker" in r.stdout
+          and "свежей сессией (контекст 120 тыс., простой 120 мин), прочитает "
+              "~/ai/pantheon/directions/athena-broker/STATUS.md" in r.stdout)
+    os.remove(tr)
+    open(agents_file, "w").write("[]")
+
     # approve (DONE-11)
     r = run("approve", "add", "--site", "avito.ru", "--allow", "поднимать объявления", "--limits", "не чаще раза в день")
     ap = os.path.join(tmp, ".claude", "pantheon", "approvals.toml")

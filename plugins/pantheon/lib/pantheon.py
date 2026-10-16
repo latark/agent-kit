@@ -131,6 +131,11 @@ ALERTED = 76    # сбой, о котором задача уже сообщил
 PLIST = os.path.join(HOME, "Library", "LaunchAgents", LABEL + ".plist")
 LIMIT_SNAPSHOT = os.path.join(HOME, ".local", "state", "claude-statusline", "five-hour")
 DEFAULTS = {"heavy_gap_min": 2, "wake_quiet_min": 10, "idle_min": 10, "limit_max_pct": 70}
+# Подъём свежей сессией вместо продолжения (metis-0147 п. 2, «да» владельца 16.10): контекст больше FRESH_CTX и простой
+# с последнего хода дольше FRESH_IDLE_MIN — кэш подсказок давно остыл, и respawn/--resume перечитал бы весь контекст по
+# полной цене. Тогда — новая сессия с тем же именем и окном, которая читает файл состояния (fresh_start).
+FRESH_CTX = 100_000
+FRESH_IDLE_MIN = 60
 
 
 # --- общее --------------------------------------------------------------------
@@ -2306,6 +2311,176 @@ def _resume_session(name, a, text, origin):
     return r.returncode, (m.group(1) if m else None)
 
 
+# --- свежий старт вместо продолжения (metis-0147 п. 2, metis-0136) ---------------------------------
+# `claude respawn` перезапускает процесс той же сессии с тем же разговором, `--resume` — тоже: контекст не уходит.
+# Очистить окно можно только новой сессией: старую остановить (разговор сохраняется — claude attach <id>), имя
+# дождаться свободным и поднять `claude --bg --agent <роль> --name <имя> --settings <окно роли>` с текстом
+# «[Пантеон: …] прочитай <файл состояния>, продолжай».
+
+_CTX = None
+
+
+def ctx_mod():
+    """hooks/ctx.py — замер контекста тот же, что у Stop-хука «пора очистить» (context_tokens, порог AT), и его метки."""
+    global _CTX
+    if _CTX is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_ctx", os.path.join(PLUGIN, "hooks", "ctx.py"))
+        _CTX = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_CTX)
+    return _CTX
+
+
+def transcript_path(a):
+    """Транскрипт сессии из claude agents: ~/.claude/projects/<папка, где не буквы и цифры — «-»>/<sessionId>.jsonl;
+    не нашёлся там (папку переименовали) — тот же файл в любой папке проектов. → путь или None."""
+    sid = str(a.get("sessionId") or "")
+    if not re.fullmatch(r"[0-9a-f-]{8,64}", sid):
+        return None
+    root = os.path.join(HOME, ".claude", "projects")
+    if a.get("cwd"):
+        p = os.path.join(root, re.sub(r"[^A-Za-z0-9]", "-", str(a["cwd"])), sid + ".jsonl")
+        if os.path.isfile(p):
+            return p
+    with contextlib.suppress(OSError):
+        for d in sorted(os.listdir(root)):
+            p = os.path.join(root, d, sid + ".jsonl")
+            if os.path.isfile(p):
+                return p
+    return None
+
+
+def session_context(a):
+    """(контекст в токенах по последнему ответу, время последней записи транскрипта) или (None, None)."""
+    p = transcript_path(a)
+    if not p:
+        return None, None
+    with contextlib.suppress(OSError):
+        return ctx_mod().context_tokens(p), os.path.getmtime(p)
+    return None, None
+
+
+def fresh_reason(a, t=None):
+    """Поднимать ли сессию свежей, а не продолжением: контекст > FRESH_CTX и простой > FRESH_IDLE_MIN. → текст или None."""
+    n, last = session_context(a)
+    if not n or last is None:
+        return None
+    idle = (now() if t is None else t) - last
+    if n > FRESH_CTX and idle > FRESH_IDLE_MIN * 60:
+        return f"контекст {n // 1000} тыс., простой {int(idle // 60)} мин"
+    return None
+
+
+def latest_zeus_handoff():
+    """Последний по времени ~/ai/pantheon/handoff/zeus-*/HANDOFF.md или None."""
+    best = None
+    with contextlib.suppress(OSError):
+        for d in os.listdir(os.path.join(PANTHEON, "handoff")):
+            p = os.path.join(PANTHEON, "handoff", d, "HANDOFF.md")
+            if d.startswith("zeus-") and os.path.isfile(p) and (best is None or os.path.getmtime(p) > os.path.getmtime(best)):
+                best = p
+    return best
+
+
+def state_files(name):
+    """Файлы состояния, с которых свежая сессия продолжает: направление — STATUS.md, мастерская — файл задачи,
+    Зевс — доска и последний handoff/zeus-*/HANDOFF.md."""
+    if name == "zeus":
+        return [os.path.join(PANTHEON, "board.md")] + [p for p in [latest_zeus_handoff()] if p]
+    if name.startswith("daedalus-"):
+        return [os.path.join(PANTHEON, "workshop", name[len("daedalus-"):] + ".md")]
+    return [os.path.join(PANTHEON, "directions", name, "STATUS.md")]
+
+
+def tilde(p):
+    for h in (HOME, os.path.realpath(HOME)):  # PANTHEON — настоящим путём, HOME — как в окружении
+        if p == h or p.startswith(h + "/"):
+            return "~" + p[len(h):]
+    return p
+
+
+def fresh_text(kind, name, old_id, tail=""):
+    """«[Пантеон: <kind>] … прочитай <файл состояния>, продолжай» — текст свежей сессии; tail — поручение вызывающего,
+    дословно со своей пометкой: толчок «[Пантеон: толчок от …]» должен остаться подписанным (ревью argus)."""
+    files = " и ".join(tilde(p) for p in state_files(name))
+    tail = str(tail or "").strip()
+    return (f"{START_MARK} {kind}] Ты — новая сессия {name} с чистым контекстом: прошлая ({old_id or '?'}) остановлена, "
+            f"её разговор сохранён (claude attach {old_id or '<id>'}). Прочитай {files}, продолжай со следующего шага. "
+            "Сверь «начато» без «сделано»: внешнее действие не повторяй, пока не проверишь, что оно не ушло. "
+            + (tail + " " if tail else "") + "Это не слова владельца и не согласие.")
+
+
+def fresh_target(name, origin):
+    """→ (роль, папка запуска, окно --settings) или текст ошибки."""
+    if name == "zeus":
+        win = path("settings", "hq.json")  # то же окно, что у pantheon start zeus
+        return ("hq", PANTHEON, win) if os.path.isfile(win) else "нет окна штаба — pantheon domains build"
+    target, rest = (("workshop", [name[len("daedalus-"):]]) if name.startswith("daedalus-") else (name, []))
+    got = start_target(target, rest)
+    if isinstance(got, str):
+        return got
+    _, role, folder, window, _ = got
+    return role, folder, run_settings(name, role, window, origin)
+
+
+def fresh_start(name, a, text, origin, recheck=None):
+    """Поднять имя свежей сессией (новый контекст, то же имя, окно роли) с текстом text. a — прежняя сессия из claude
+    agents (её id — в журнале и тексте). Та же блокировка имени и повторная проверка, что у resume_session. → код."""
+    with lock("start-" + name, block=False) as got_lock:
+        if not got_lock:
+            start_log(f"fresh-busy\t{name}\t{a.get('id')}\t{origin}")
+            return 1
+        why = recheck() if recheck else None
+        if why:
+            start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
+            return 1
+        return _fresh_start(name, a, text, origin)
+
+
+def _fresh_start(name, a, text, origin):
+    if os.environ.get("PANTHEON_DRYRUN") == "1":
+        print(f"[fresh] {name} {a.get('id')} {origin}")
+        return 0
+    got = fresh_target(name, origin)
+    if isinstance(got, str) or not got[2]:
+        alert(f"{name}: свежий старт невозможен — {got if isinstance(got, str) else 'нет окна роли'}", "pantheon")
+        return 2
+    role, folder, win = got
+    if not str(text).startswith(START_MARK):
+        text = f"{START_MARK} поручение от {origin}] {text}"
+    if role == "domain-coordinator":
+        text = "/goal " + text + " " + COORDINATOR_GOAL  # как у pantheon start: Stop-хук с целью эпика (DONE-02)
+    agents = agents_all() or []
+    live = live_copies(name, agents)
+    if any(not x.get("id") for x in live):
+        why = copies_message(name, live)
+        start_log(f"fresh-tab\t{name}\t{origin}")
+        alert(f"{name}: свежий старт не сделан — {why}", "pantheon")
+        return 1
+    stopped = list(live)
+    stop_copies(name, live, "stop-fresh")
+    for x in agents:  # закончившая ход с живым процессом держит имя (CTX-10)
+        if x.get("name") == name and x.get("state") == "done" and x.get("pid") and x.get("id") \
+                and x["id"] not in {s.get("id") for s in stopped}:
+            stop_copies(name, [x], "stop-fresh-done")
+            stopped.append(x)
+    why = wait_name_free(name, stopped) if stopped else None
+    if why:
+        alert(f"{name}: свежий старт не сделан — {why}", "pantheon")
+        return 1
+    before = {x.get("id") for x in agents_all() or [] if x.get("id")}
+    argv = [claude_bin(), "--bg", "--agent", role, "--name", name, "--settings", win, text]
+    r = subprocess.run(argv, cwd=folder, capture_output=True, text=True, timeout=180)
+    start_log(f"fresh\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}")
+    if r.returncode != 0:
+        return r.returncode
+    wrong = check_new_name(name, before)
+    if wrong:
+        alert(wrong, "pantheon")
+        return 1
+    return 0
+
+
 def copies_message(name, live):
     tab = [a for a in live if not a.get("id")]
     if tab:
@@ -2679,10 +2854,18 @@ def _wake(dry):
         tasks = open_tasks(name)
         if not tasks:
             continue
-        print(f"{'будет поднята' if dry else 'поднимаю'}: {name} ({a.get('id')}, {state}) — задачи {', '.join(tasks[:3])}")
+        fresh = fresh_reason(a)  # metis-0147 п. 2: большой контекст и остывший кэш — новая сессия с файла состояния
+        how = (f"; свежей сессией ({fresh}), прочитает {' и '.join(tilde(p) for p in state_files(name))}" if fresh
+               else "")
+        print(f"{'будет поднята' if dry else 'поднимаю'}: {name} ({a.get('id')}, {state}) — задачи {', '.join(tasks[:3])}"
+              + how)
         if dry:
             continue
-        rc, _ = resume_session(name, a, WAKE_TEXT, "wake", recheck=lambda n=name: wake_recheck(n))
+        if fresh:
+            rc = fresh_start(name, a, fresh_text("пробуждение", name, a.get("id")), "wake",
+                             recheck=lambda n=name: wake_recheck(n))
+        else:
+            rc, _ = resume_session(name, a, WAKE_TEXT, "wake", recheck=lambda n=name: wake_recheck(n))
         if rc:
             alert(f"pantheon wake: {name} не поднялась (код {rc})", "pantheon")
         done += 1

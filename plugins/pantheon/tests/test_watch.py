@@ -425,6 +425,47 @@ def test_holders_registry_and_live_copies():
     check(not os.path.exists(e.st("push", "dddddddd-2.txt")), "push-файл остался после неудачного respawn")
 
 
+def transcript(e, a, tokens, mtime):
+    """Транскрипт сессии a там, где его пишет Claude Code: ~/.claude/projects/<cwd с «-»>/<sessionId>.jsonl."""
+    d = os.path.join(e.home, ".claude", "projects", "".join(ch if ch.isalnum() else "-" for ch in a["cwd"]))
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, a["sessionId"] + ".jsonl")
+    with open(p, "w") as fh:
+        fh.write(json.dumps({"type": "user", "timestamp": "2026-10-16T10:00:00.000Z",
+                             "message": {"role": "user", "content": "шаг"}}) + "\n")
+        fh.write(json.dumps({"type": "assistant", "isSidechain": False, "message": {"role": "assistant", "usage": {
+            "input_tokens": 10, "cache_read_input_tokens": tokens - 10, "cache_creation_input_tokens": 0}}}) + "\n")
+    os.utime(p, (mtime, mtime))
+    return p
+
+
+QUICK = {"PANTHEON_STOP_WAIT": "1", "PANTHEON_STOP_POLL": "0.02", "PANTHEON_STOP_SETTLE": "0.05",
+         "PANTHEON_NAME_WAIT": "0.1"}
+
+
+def test_resume_or_start_fresh():
+    """metis-0147 п. 2 в дежурном (resume_or_start: pantheon wake <имя>, самозапуск, снятие паузы): контекст > 100 тыс.
+    и простой > 60 мин — свежая сессия с файла состояния; иначе — respawn, как раньше."""
+    e = Env()
+    e.direction("fr-dir")
+    a = bg("fr-dir", "stopped", "ffffffff-1")
+    e.agents([a])
+    transcript(e, a, 130_000, T0 - 7200)
+    r = e.run("wake", "fr-dir", t=T0, extra=QUICK)
+    c = e.calls()
+    new = [x for x in c if "--bg" in x]
+    check(not [x for x in c if x[:1] == ["respawn"] or "--resume" in x] and len(new) == 1
+          and new[0][:5] == ["--bg", "--agent", "domain-coordinator", "--name", "fr-dir"]
+          and os.path.realpath(new[0][6]) == os.path.realpath(e.st("settings", "run", "fr-dir.json"))
+          and "[Пантеон: свежий старт]" in new[0][-1] and "~/ai/pantheon/directions/fr-dir/STATUS.md" in new[0][-1]
+          and "Посмотри входящие" in new[0][-1], f"свежий старт в pantheon wake <имя>: {c} {r.stdout} {r.stderr}")
+    open(e.log, "w").close()
+    transcript(e, a, 130_000, T0 - 600)
+    e.run("wake", "fr-dir", t=T0, extra=QUICK)
+    check(["respawn", "ffffffff"] in e.calls() and not [x for x in e.calls() if "--bg" in x],
+          f"простой 10 мин — не respawn: {e.calls()}")
+
+
 def test_resume_copy_note():
     """--resume сделал копию — строка в тревогах."""
     e = Env()

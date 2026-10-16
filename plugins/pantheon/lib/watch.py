@@ -965,6 +965,9 @@ def resume_or_start(name, agents, text, origin, only_resume=False, auto=False):
            and a.get("sessionId")]
     if old:
         a = max(old, key=lambda a: a.get("startedAt") or 0)
+        if P.fresh_reason(a):  # metis-0147 п. 2: контекст большой, кэш остыл — новая сессия с файла состояния
+            return P.fresh_start(name, a, P.fresh_text("свежий старт", name, a.get("id"), text), origin,
+                                 recheck=recheck(name, auto))
         return P.resume_session(name, a, text, origin, recheck=recheck(name, auto))[0]
     if only_resume:
         return 1
