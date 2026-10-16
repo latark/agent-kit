@@ -217,7 +217,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix="tick-test-")
     home, state = make(tmp, "")
     open(os.path.join(home, "directions.toml"), "w").write(
-        '[[direction]]\nname = "athena-broker"\nfolders = ["~/projects/br", "~/projects/agent-kit"]\n'
+        '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br", "~/projects/agent-kit"]\n'
         '[[direction]]\nname = "metis-pantheon"\nfolders = ["~/projects/agent-kit"]\n')
     os.makedirs(os.path.join(tmp, ".claude", "pantheon"))
     open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w").write('[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n')
@@ -225,14 +225,14 @@ def main():
     subprocess.run([PY311, "-I", LIB, "domains", "build"], env=env, capture_output=True)
     dj = json.load(open(os.path.join(state, "domains.json")))["domains"]
     check("реестр: папка Метиды у athena пропущена, у Метиды осталась",
-          dj["athena-broker"] == ["~/projects/br"] and dj["metis-pantheon"] == ["~/projects/agent-kit"])
+          dj["athena-shop"] == ["~/projects/br"] and dj["metis-pantheon"] == ["~/projects/agent-kit"])
 
     # зарезервированные имена окон: hq, workshop, job-* — не направления (metis-0163)
     rtmp = tempfile.mkdtemp(prefix="tick-test-")
     rhome, rstate = make(rtmp, "")
     open(os.path.join(rhome, "directions.toml"), "w").write(
         "".join(f'[[direction]]\nname = "{n}"\nfolders = ["~/projects/br"]\n'
-                for n in ("hq", "workshop", "job-iris", "job-x", "athena-broker")))
+                for n in ("hq", "workshop", "job-iris", "job-x", "athena-shop")))
     os.makedirs(os.path.join(rtmp, ".claude", "pantheon"))
     open(os.path.join(rtmp, ".claude", "pantheon", "policy.toml"), "w").write("")
     renv = {"PATH": os.environ["PATH"], "HOME": rtmp, "PANTHEON_HOME": rhome, "PANTHEON_STATE": rstate,
@@ -240,7 +240,7 @@ def main():
     rr = subprocess.run([PY311, "-I", LIB, "domains", "build"], env=renv, capture_output=True, text=True)
     rdj = json.load(open(os.path.join(rstate, "domains.json")))["domains"]
     check("реестр: направления hq, workshop, job-* пропущены с понятной ошибкой, обычное имя осталось",
-          list(rdj) == ["athena-broker"] and rr.stderr.count("зарезервировано под окна системы") == 4
+          list(rdj) == ["athena-shop"] and rr.stderr.count("зарезервировано под окна системы") == 4
           and "«job-iris»" in rr.stderr)
 
     # проектные allow папки запуска, пускающие gh pr merge: окно не собирается (metis-0137)
@@ -250,8 +250,8 @@ def main():
         os.makedirs(os.path.join(atmp, "projects", "br", ".claude"))
         os.makedirs(os.path.join(atmp, "projects", "ok"))
         open(os.path.join(ahome, "directions.toml"), "w").write(
-            '[[direction]]\nname = "athena-broker"\nfolders = ["~/projects/br"]\n'
-            '[[direction]]\nname = "themis-sources"\nfolders = ["~/projects/ok"]\n')
+            '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n'
+            '[[direction]]\nname = "themis-docs"\nfolders = ["~/projects/ok"]\n')
         os.makedirs(os.path.join(atmp, ".claude", "pantheon"))
         open(os.path.join(atmp, ".claude", "pantheon", "policy.toml"), "w").write("")
         aenv = {"PATH": os.environ["PATH"], "HOME": atmp, "PANTHEON_HOME": ahome, "PANTHEON_STATE": astate,
@@ -264,8 +264,8 @@ def main():
             cli("domains", "build")
         wr(rules)
         r = cli("domains", "build")
-        win = os.path.join(astate, "settings", "athena-broker.json")
-        return r, os.path.exists(win), os.path.exists(os.path.join(astate, "settings", "themis-sources.json")), cli, ahome
+        win = os.path.join(astate, "settings", "athena-shop.json")
+        return r, os.path.exists(win), os.path.exists(os.path.join(astate, "settings", "themis-docs.json")), cli, ahome
 
     r, built_a, built_t, cli, ahome = allow_build("a", ["Bash(gh *)", "Bash(ls *)"])
     check("allow Bash(gh *) в .claude/settings.json папки запуска — окно координатора не собирается; сообщение называет "
@@ -275,7 +275,7 @@ def main():
     alerts = open(os.path.join(ahome, "alerts.md")).read() if os.path.exists(os.path.join(ahome, "alerts.md")) else ""
     chk = cli("check")
     check("тревога по направлению; pantheon check показывает то же предупреждение",
-          "Bash(gh *)" in alerts and "предупреждение" in chk.stdout and "athena-broker" in chk.stdout
+          "Bash(gh *)" in alerts and "предупреждение" in chk.stdout and "athena-shop" in chk.stdout
           and "Bash(gh *)" in chk.stdout)
     r, built_a, built_t, *_ = allow_build("b", ["Bash(gh pr view *)", "Bash(gh pr checks *)", "Bash(git status)", "Read(*)"])
     check("allow Bash(gh pr view *) и прочие узкие — окно собирается", built_a and "окно не собрано" not in r.stderr)
@@ -288,7 +288,7 @@ def main():
         check(f"allow {rule!r} — окно не собирается", not built_a and rule in r.stderr)
     shown = [x.strip() for x in r.stdout.splitlines() if "окон ролей" in x]
     check("несобранное окно не числится в списке собранных окон ролей",
-          bool(shown) and all("athena-broker" not in x for x in shown) and "themis-sources" in shown[0])
+          bool(shown) and all("athena-shop" not in x for x in shown) and "themis-docs" in shown[0])
     for rule in ("Bash(gh pr view *)", "Bash(gh pr checks *)", "Bash(gh pr diff *)", "Bash(gh run view *)",
                  "Bash(git *)"):
         r, built_a, *_ = allow_build("g", [rule])
@@ -305,7 +305,7 @@ def main():
     os.makedirs(br)
     subprocess.run(["git", "init", "-q", br], check=True)
     subprocess.run(["git", "-C", br, "remote", "add", "origin", "git@github.com:x/y.git"], check=True)
-    for d in ("pantheon/directions/athena-broker", "projects/zz", "ai/knowledge", ".cache/metis", ".ssh", "pantheon/scout",
+    for d in ("pantheon/directions/athena-shop", "projects/zz", "ai/knowledge", ".cache/metis", ".ssh", "pantheon/scout",
               ".claude/plugins/marketplaces/agent-kit/plugins/guard/hooks"):
         os.makedirs(os.path.join(tmp, d), exist_ok=True)
     open(os.path.join(tmp, ".claude/plugins/marketplaces/agent-kit/plugins/guard/hooks/guard.py"), "w").write("# guard\n")
@@ -318,7 +318,7 @@ def main():
     with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "a") as fh:
         fh.write('[sandbox_write]\nmetis-pantheon = ["~/.cache/metis", "~/ai/pantheon", "~/.cache/../.ssh"]\n'
                  '[private]\ncoordinators = ["mnemo-brain"]\npaths = ["~/ai/knowledge/me", "~/ai/pantheon/.git/git-crypt"]\n'
-                 '[merge_repos]\nathena-broker = ["acme-co/br-app"]\n'
+                 '[merge_repos]\nathena-shop = ["acme-co/br-app"]\n'
                  'metis-pantheon = ["tools-org/sync", "acme-co/kit", "bad owner/x", "acme-co/kit`"]\n'
                  'mnemo-brain = ["acme-co/notes"]\n')
     os.makedirs(os.path.join(state, "settings"), exist_ok=True)
@@ -338,13 +338,13 @@ def main():
     os.symlink(os.path.join(tmp, "foreign-mem"), os.path.join(tmp, ".claude", "agent-memory", "linked"))
     subprocess.run([PY311, "-I", LIB, "domains", "build"], env=env, capture_output=True)
     load = lambda n: json.load(open(os.path.join(state, "settings", n + ".json")))
-    sa, sm, sw, sn, sz = load("athena-broker"), load("metis-pantheon"), load("workshop"), load("mnemo-brain"), load("zz")
+    sa, sm, sw, sn, sz = load("athena-shop"), load("metis-pantheon"), load("workshop"), load("mnemo-brain"), load("zz")
     real = lambda x: os.path.realpath(os.path.join(tmp, x))
     box = sa["sandbox"]
     aw = box["filesystem"]["allowWrite"]
     check("песочница: строгий вид, папки направления и своё directions/<имя>/ настоящими путями, окно сжатия",
           box["enabled"] and box["failIfUnavailable"] and box["allowUnsandboxedCommands"] is False
-          and real("projects/br") in aw and real("pantheon/directions/athena-broker") in aw
+          and real("projects/br") in aw and real("pantheon/directions/athena-shop") in aw
           and not any("~" in x or "agent-kit" in x for x in aw)
           and "~/**/.git/config" in box["filesystem"]["denyWrite"] and sa["autoCompactWindow"] == 200000)
     check("песочница: git push/fetch/pull мимо песочницы у каждого направления, и без SSH-remote (metis-0064)",
@@ -389,7 +389,7 @@ def main():
     check("песочница: `pantheon direction init *` мимо неё только в окне Метиды (metis-0042)",
           "pantheon direction init *" in sm["sandbox"]["excludedCommands"]
           and not any("direction" in x for w in (sa, sw, sn, sz) for x in w["sandbox"]["excludedCommands"]))
-    cache_a = real("Library/Caches/pantheon-sandbox/athena-broker")
+    cache_a = real("Library/Caches/pantheon-sandbox/athena-shop")
     check("песочница: кэши свои у направления (папка создана), общих в записи нет",
           sa["env"]["npm_config_cache"] == os.path.join(cache_a, "npm") and os.path.isdir(cache_a)
           and sa["env"]["XDG_CACHE_HOME"] != sm["env"]["XDG_CACHE_HOME"] and cache_a in aw
@@ -437,9 +437,10 @@ def main():
                                      "pantheon archive", "pantheon jobs *", "pantheon domains build",
                                      "pantheon roles build", "pantheon stop *", "pantheon resume *", "pantheon pause *",
                                      "pantheon restart *", "pantheon saved *", "pantheon who", "pantheon agents"])
+    corp = "expert-corpus"  # trace-ok: 0182-core — снять в PR ядра 0182 (папки — из policy.toml [hq])
     check("окно штаба: корпус закрыт для чтения — песочница и правило Read (SEC-13, решение 15.10)",
-          all(x in hb["filesystem"]["denyRead"] for x in ("~/projects/expert-corpus", "~/.cache/qmd",
-                                                           "~/.cache/expert-corpus", "~/.claude/projects/*expert-corpus*"))
+          all(x in hb["filesystem"]["denyRead"] for x in (f"~/projects/{corp}", "~/.cache/qmd",
+                                                           f"~/.cache/{corp}", f"~/.claude/projects/*{corp}*"))
           and "Read(~/.cache/qmd/**)" in hq["permissions"]["deny"]
           and any(x.endswith("pantheon-sandbox/workshop") for x in hb["filesystem"]["denyRead"])
           and not any(x.endswith("pantheon-sandbox/hq") for x in hb["filesystem"]["denyRead"])
@@ -449,8 +450,8 @@ def main():
     check("окно штаба: выводы чужих сессий закрыты (и в ~), свои и своих worktree — нет",
           f"Read(~/.claude/projects/{dash(tmp)}/**/tool-results/**)" in hq["permissions"]["deny"]
           and not any(dash(home) in x for x in hq["permissions"]["deny"])
-          and "Read(~/projects/expert-corpus/**)" in hq["permissions"]["deny"]
-          and any(x.startswith("Read(//") and x.endswith("/expert-corpus/**)") for x in hq["permissions"]["deny"]))
+          and f"Read(~/projects/{corp}/**)" in hq["permissions"]["deny"]
+          and any(x.startswith("Read(//") and x.endswith(f"/{corp}/**)") for x in hq["permissions"]["deny"]))
     check("окна направлений: worktree от HEAD (эпик), у мастерской — нет; места heavy созданы",
           sa["worktree"] == {"baseRef": "head"} and sm["worktree"] == {"baseRef": "head"} and "worktree" not in sw
           and os.path.exists(os.path.join(state, "locks", "heavy-cmd-2.lock")))
@@ -481,15 +482,15 @@ def main():
           all(merge not in json.dumps(w.get("permissions", {})) and not (w.get("permissions") or {}).get("allow")
               for w in (sa, sm, sn, sw, hq)))
     am = {n: w.get("autoMode", {}).get("allow") or [] for n, w in
-          (("athena-broker", sa), ("metis-pantheon", sm), ("mnemo-brain", sn), ("zz", sz))}
+          (("athena-shop", sa), ("metis-pantheon", sm), ("mnemo-brain", sn), ("zz", sz))}
     rule = lambda n, head: [r for r in am[n] if r.startswith(head)]
-    gated = rule("athena-broker", "Pantheon Gated Merge:")
-    record = rule("athena-broker", "Pantheon Review Record:")
+    gated = rule("athena-shop", "Pantheon Gated Merge:")
+    record = rule("athena-shop", "Pantheon Review Record:")
     check("окна координаторов и Метиды: autoMode.allow — \"$defaults\" первым и два правила запора; без [merge_repos] "
           "— без правила слияния (metis-0098)",
           all(a[:1] == ["$defaults"] for a in am.values()) and len(record) == 1
           and all(len(am[n]) == 3 and len(rule(n, "Pantheon Gated Merge:")) == 1 and rule(n, "Pantheon Review Record:")
-                  == record for n in ("athena-broker", "metis-pantheon"))
+                  == record for n in ("athena-shop", "metis-pantheon"))
           and am["zz"] == ["$defaults"] + record)
     check("окно с доступом к личному (mnemo-brain): \"$defaults\" и только Review Record — правила слияния нет даже "
           "при [merge_repos], его PR сливает владелец (metis-0156)",
@@ -507,8 +508,8 @@ def main():
           "направлений в тексте правил нет (metis-0098, решение 16.10)",
           bool(gated) and bool(gm) and "(`acme-co/br-app`)" in gated[0] and "acme-co/kit" not in gated[0]
           and "(`acme-co/kit`, `tools-org/sync`)" in gm[0] and "bad owner" not in gm[0] and "kit``" not in gm[0]
-          and not any(x in texts for x in ("latark", "BrokerAssistantApp", "MorphStream", "athena-broker",
-                                           "metis-pantheon", "mnemo-brain", "agent-kit")))
+          and not any(x in texts for x in ("athena-shop", "metis-pantheon", "mnemo-brain", "workshop",
+                                           "agent-kit", "projects/br", "ai/knowledge")))
     check("правило Gated Merge: обе формы репозитория, перечень argus, ядро — кнопка владельца, --admin/--auto не "
           "разрешает (metis-0098)",
           bool(gated) and all(x in gated[0] for x in ("`-R <owner/repo>`", "`--repo <owner/repo>`",
@@ -537,7 +538,7 @@ def main():
     mem_p = real(".claude/agent-memory/prometheus")
     check("каталог ролей: сборка его не трогает, новая роль с memory: — пересборка и её память в окнах",
           no_loop and json.load(open(os.path.join(state, "domains.json")))["built_ts"] > t0
-          and mem_p in load("athena-broker")["sandbox"]["filesystem"]["allowWrite"]
+          and mem_p in load("athena-shop")["sandbox"]["filesystem"]["allowWrite"]
           and mem_p in load("hq")["sandbox"]["filesystem"]["allowWrite"])
 
     # окна задач расписания (P0-3, metis-0063): clio, prometheus, iris — своя песочница

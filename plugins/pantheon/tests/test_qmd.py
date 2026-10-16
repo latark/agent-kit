@@ -85,7 +85,7 @@ def dry(state):
 
 
 def plist(home, name):
-    return os.path.join(home, "Library", "LaunchAgents", f"com.latark.pantheon-svc.{name}.plist")
+    return os.path.join(home, "Library", "LaunchAgents", f"pantheon.svc.{name}.plist")
 
 
 def test_services():
@@ -278,8 +278,9 @@ def test_hook():
     check("штаб (окно hq): query по legal — отказ", hook({**q, "collections": ["legal"]}, window="hq"))
     check("штаб: query по legal и pantheon — отказ", hook({**q, "collections": ["pantheon", " legal"]}, role="hq"))
     out = hook({**q, "collections": ["legal"]}, window="hq", raw=True)
-    check("штаб: отказ по legal — Фемиде (themis-sources) поручением", "themis-sources" in out and "Telegram" in out
-          and "Куклин" not in out, out)
+    check("штаб: отказ по legal — нейтральный текст: координатору направления поручением, без имён",
+          "координатору направления" in out and "поручением" in out and "legal" in out
+          and "themis" not in out and "Telegram" not in out, out)
     check("штаб (окно hq): query по pantheon — пропуск", not hook({**q, "collections": ["pantheon"]}, window="hq"))
     check("штаб: get qmd://legal/… — отказ", hook({"file": "qmd://legal/x.md"}, g, window="hq"))
     check("штаб: multi_get qmd://legal/… — отказ", hook({"pattern": "qmd://legal/2026-09*.md"}, m, "hq"))
@@ -306,9 +307,98 @@ def test_hook():
           not hook({"server": "qmd", "uri": "qmd://corpus/x.md"}, rr, "domain-coordinator"))
 
 
+def test_old_labels():
+    """Переезд меток launchd: прежние plist тика и служб (com.<кто-то>.pantheon-…) снимаются, встают новые."""
+    with tempfile.TemporaryDirectory() as tmp:
+        home, pan, state = setup(tmp)
+        agents = os.path.join(home, "Library", "LaunchAgents")
+        os.makedirs(agents)
+        old_tick = os.path.join(agents, "com.zorba.pantheon-tick.plist")
+        old_svc = os.path.join(agents, "com.zorba.pantheon-svc.qmd.plist")
+        stranger = os.path.join(agents, "com.zorba.other.plist")
+        for f in (old_tick, old_svc, stranger):
+            open(f, "w").write("<plist/>")
+        out = run(home, pan, state, "jobs").stdout
+        check("только старый тик: «старая метка — pantheon install», а не «не установлено»",
+              "старая метка" in out and "pantheon install" in out, out)
+        run(home, pan, state, "tick")
+        log = open(os.path.join(state, "dryrun.log")).read()
+        check("тик: старая служба снята (bootout, plist удалён), новая поднята",
+              "old-bootout com.zorba.pantheon-svc.qmd" in log and not os.path.exists(old_svc)
+              and os.path.exists(plist(home, "qmd")) and "svc-bootstrap qmd" in log, log)
+        check("тик: старая служба снята раньше, чем поднята новая",
+              log.index("old-bootout com.zorba.pantheon-svc.qmd") < log.index("svc-bootstrap qmd"), log)
+        check("тик: старый тик не трогает (его снимает install), чужой plist — тем более",
+              os.path.exists(old_tick) and os.path.exists(stranger))
+        r = run(home, pan, state, "install")
+        log = open(os.path.join(state, "dryrun.log")).read()
+        new_tick = os.path.join(agents, "pantheon.tick.plist")
+        check("install: старый тик снят (bootout, plist удалён), новый записан",
+              r.returncode == 0 and "old-bootout com.zorba.pantheon-tick" in log and not os.path.exists(old_tick)
+              and os.path.exists(new_tick) and "<string>pantheon.tick</string>" in open(new_tick).read()
+              and "install-bootstrap pantheon.tick" in log, f"{r.stderr} {log}")
+        check("install: чужой plist не тронут", os.path.exists(stranger))
+        open(old_svc, "w").write("<plist/>")
+        r = run(home, pan, state, "uninstall")
+        check("uninstall: снимает и старые, и новые",
+              r.returncode == 0 and not os.path.exists(old_svc) and not os.path.exists(new_tick)
+              and not os.path.exists(plist(home, "qmd")) and os.path.exists(stranger), r.stderr)
+
+
+def test_old_drop_bootout_fails():
+    """drop_old: bootout упал, а задача ещё загружена (print → 0) — plist остаётся и в счёт не идёт; «нет такой» (113) — удалён."""
+    for print_rc, loaded in ((0, True), (113, False)):
+        with tempfile.TemporaryDirectory() as tmp:
+            home, pan, state = setup(tmp)
+            agents = os.path.join(home, "Library", "LaunchAgents")
+            os.makedirs(agents)
+            old = os.path.join(agents, "com.zorba.pantheon-svc.qmd.plist")
+            open(old, "w").write("<plist/>")
+            bindir = os.path.join(tmp, "bin")
+            os.makedirs(bindir)
+            fake = os.path.join(bindir, "launchctl")
+            open(fake, "w").write(f'#!/bin/sh\nif [ "$1" = bootout ]; then exit 5; fi\n'
+                                  f'if [ "$1" = print ]; then exit {print_rc}; fi\nexit 0\n')
+            os.chmod(fake, 0o755)
+            env = {"PATH": bindir + ":" + os.environ["PATH"], "HOME": home, "PANTHEON_HOME": pan,
+                   "PANTHEON_STATE": state, "PANTHEON_NOW": str(T0), "TMPDIR": _ROOT}
+            code = ("import importlib.util,sys;s=importlib.util.spec_from_file_location('pan',sys.argv[1]);"
+                    "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);print(m.drop_old(m.OLD_SVC_GLOB))")
+            r = subprocess.run([PY311, "-I", "-c", code, LIB], env=env, capture_output=True, text=True, timeout=60)
+            tag = "служба ещё загружена" if loaded else "службы нет"
+            if loaded:
+                check(f"drop_old, {tag}: plist остался, в счёт не включён, предупреждение в stderr",
+                      os.path.exists(old) and r.stdout.strip() == "0" and "com.zorba.pantheon-svc.qmd" in r.stderr,
+                      f"{r.stdout} {r.stderr}")
+            else:
+                check(f"drop_old, {tag}: plist удалён и посчитан",
+                      not os.path.exists(old) and r.stdout.strip() == "1", f"{r.stdout} {r.stderr}")
+
+
+def test_pause_drops_only_own_old():
+    """Пульт снимает одну службу (jobs pause qmd): прежняя служба с другим именем остаётся, с этим — снята."""
+    with tempfile.TemporaryDirectory() as tmp:
+        home, pan, state = setup(tmp)
+        agents = os.path.join(home, "Library", "LaunchAgents")
+        os.makedirs(agents)
+        mine = os.path.join(agents, "com.zorba.pantheon-svc.qmd.plist")
+        other = os.path.join(agents, "com.zorba.pantheon-svc.only-b.plist")
+        wild = os.path.join(agents, "com.zorba.pantheon-svc.qmd2.plist")
+        for f in (mine, other, wild):
+            open(f, "w").write("<plist/>")
+        r = run(home, pan, state, "jobs", "pause", "qmd")
+        log = open(os.path.join(state, "dryrun.log")).read()
+        check("пульт: прежняя служба с этим именем снята, остальные прежние нетронуты",
+              r.returncode == 0 and not os.path.exists(mine) and os.path.exists(other) and os.path.exists(wild)
+              and "old-bootout com.zorba.pantheon-svc.qmd\n" in log and "only-b" not in log, f"{r.stderr} {log}")
+
+
 if __name__ == "__main__":
     test_services()
     test_qmd_config()
     test_hook()
+    test_old_labels()
+    test_old_drop_bootout_fails()
+    test_pause_drops_only_own_old()
     print(f"{len(OK)} из {len(OK) + len(FAIL)} прошли")
     sys.exit(1 if FAIL else 0)

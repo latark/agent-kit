@@ -95,7 +95,7 @@ def main():
         for d in ("projects/br", "ai/knowledge", "ai/knowledge/me", "projects/lone"):
             os.makedirs(os.path.join(tmp, d), exist_ok=True)
         with open(os.path.join(home, "directions.toml"), "w") as fh:
-            fh.write('[[direction]]\nname = "athena-broker"\nfolders = ["~/projects/br"]\n'
+            fh.write('[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n'
                      '[[direction]]\nname = "mnemo-brain"\nfolders = ["~/ai/knowledge"]\n')
         os.makedirs(os.path.join(tmp, ".claude", "pantheon"))
         with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w") as fh:
@@ -113,18 +113,18 @@ def main():
     me = lambda tmp: os.path.realpath(os.path.join(tmp, "ai/knowledge/me"))  # noqa: E731
 
     r, win, tmp = build("default", "")
-    check("без policy.toml-ключа: окно mnemo-brain личное читает, окно athena-broker — нет (умолчание guard)",
+    check("без policy.toml-ключа: окно mnemo-brain личное читает, окно athena-shop — нет (умолчание guard)",
           r.returncode == 0 and "~/ai/knowledge/me" not in reads(win("mnemo-brain"))
-          and "~/ai/knowledge/me" in reads(win("athena-broker")) and "~/ai/knowledge/me" in reads(win("workshop")))
+          and "~/ai/knowledge/me" in reads(win("athena-shop")) and "~/ai/knowledge/me" in reads(win("workshop")))
     r, win, tmp = build("empty", '[private]\ncoordinators = []\n')
     check("coordinators = [] — никого: и окно mnemo-brain личное не читает",
           "~/ai/knowledge/me" in reads(win("mnemo-brain")))
     r, win, tmp = build("garbage", '[private]\ncoordinators = "mnemo-brain"\npaths = 5\n')
     check("coordinators строкой, paths числом — умолчание (mnemo-brain читает, остальные нет)",
-          "~/ai/knowledge/me" not in reads(win("mnemo-brain")) and "~/ai/knowledge/me" in reads(win("athena-broker")))
-    r, win, tmp = build("custom", '[private]\ncoordinators = ["athena-broker"]\npaths = ["~/projects/lone", "no-tilde"]\n')
-    check("свои coordinators и paths: athena-broker читает, mnemo-brain и мастерская — нет; путь без ~/ пропущен",
-          "~/projects/lone" not in reads(win("athena-broker")) and "~/projects/lone" in reads(win("mnemo-brain"))
+          "~/ai/knowledge/me" not in reads(win("mnemo-brain")) and "~/ai/knowledge/me" in reads(win("athena-shop")))
+    r, win, tmp = build("custom", '[private]\ncoordinators = ["athena-shop"]\npaths = ["~/projects/lone", "no-tilde"]\n')
+    check("свои coordinators и paths: athena-shop читает, mnemo-brain и мастерская — нет; путь без ~/ пропущен",
+          "~/projects/lone" not in reads(win("athena-shop")) and "~/projects/lone" in reads(win("mnemo-brain"))
           and "~/projects/lone" in reads(win("workshop")) and "no-tilde" not in json.dumps(win("workshop")))
 
     # умолчание окна и умолчание guard не расходятся: guard.py только читаем (ast), не импортируем

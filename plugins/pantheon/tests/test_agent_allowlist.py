@@ -29,12 +29,12 @@ atexit.register(shutil.rmtree, ROOT, True)
 
 REGISTRY = """
 [[direction]]
-name = "athena-broker"
+name = "athena-shop"
 folders = ["~/projects/br"]
 leads = ["hephaestus", "apollo"]
 
 [[direction]]
-name = "themis-sources"
+name = "themis-docs"
 folders = ["~/projects/src"]
 leads = ["hephaestus"]
 
@@ -136,17 +136,17 @@ def main():
         print(r.stdout, r.stderr)
         return 1
     win = lambda n: json.load(open(os.path.join(state, "settings", n + ".json")))  # noqa: E731
-    hq, ab, ts, mb, ws = (win(n) for n in ("hq", "athena-broker", "themis-sources", "mnemo-brain", "workshop"))
+    hq, ab, ts, mb, ws = (win(n) for n in ("hq", "athena-shop", "themis-docs", "mnemo-brain", "workshop"))
 
     # --- окна ---------------------------------------------------------------------------------------------------------
     want = {
         "hq": (hq, ["prometheus", "clio", "chiron", "momus", "Explore"],
-               ["hephaestus-broker", "apollo-broker", "hephaestus-sources"] + MAIN),
-        "athena-broker": (ab, ["hephaestus-broker", "apollo-broker"] + COORD, ["chiron"] + MAIN + ["hephaestus-sources"]),
-        "themis-sources": (ts, ["hephaestus-sources"] + COORD,
-                           ["chiron"] + MAIN + ["hephaestus-broker", "apollo-broker"]),
+               ["hephaestus-shop", "apollo-shop", "hephaestus-docs"] + MAIN),
+        "athena-shop": (ab, ["hephaestus-shop", "apollo-shop"] + COORD, ["chiron"] + MAIN + ["hephaestus-docs"]),
+        "themis-docs": (ts, ["hephaestus-docs"] + COORD,
+                           ["chiron"] + MAIN + ["hephaestus-shop", "apollo-shop"]),
         "mnemo-brain": (mb, COORD + ["clio"],
-                        ["chiron"] + MAIN + ["hephaestus-broker", "apollo-broker", "hephaestus-sources"]),
+                        ["chiron"] + MAIN + ["hephaestus-shop", "apollo-shop", "hephaestus-docs"]),
     }
     for name, (data, allowed, deny) in want.items():
         got = agents_hook(data)
@@ -158,7 +158,7 @@ def main():
               len(agent_entries(data)) == 1 and "ctx.py" not in json.dumps(agent_entries(data)))
     check("mnemo-brain зовёт clio, другие координаторы — нет",
           "clio" in agents_hook(mb)[1] and "clio" not in agents_hook(ab)[1] and "clio" not in agents_hook(ts)[1])
-    check("themis-sources (в реестре только hephaestus): apollo-* в списке нет",
+    check("themis-docs (в реестре только hephaestus): apollo-* в списке нет",
           not any(x.startswith("apollo-") for x in agents_hook(ts)[1]))
     check("chiron закрыт координаторам и открыт штабу",
           all("chiron" in agent_rules(d) for d in (ab, ts, mb)) and "chiron" not in agent_rules(hq)
@@ -167,7 +167,7 @@ def main():
           "momus" in agents_hook(hq)[1] and all("momus" not in agents_hook(d)[1] for d in (ab, ts, mb))
           and "general-purpose" not in agents_hook(hq)[1] and "claude" not in agents_hook(hq)[1])
     check("чужие лиды — в deny у каждого координатора",
-          "hephaestus-sources" in agent_rules(ab) and {"hephaestus-broker", "apollo-broker"} <= set(agent_rules(ts)))
+          "hephaestus-docs" in agent_rules(ab) and {"hephaestus-shop", "apollo-shop"} <= set(agent_rules(ts)))
     reads = [x for x in hq["permissions"]["deny"] if not x.startswith("Agent(")]
     check("hq: правила Read на месте (агентские правила — дописаны, не вместо)",
           reads and all(x.startswith("Read(") for x in reads))
@@ -187,7 +187,7 @@ def main():
     # --- agents.py: Agent и Task ----------------------------------------------------------------------------------------
     cenv = dict(env)
     br = os.path.join(tmp, "projects", "br")
-    lst = ",".join(want["athena-broker"][1])
+    lst = ",".join(want["athena-shop"][1])
     agent = lambda **ti: {"session_id": "s", "hook_event_name": "PreToolUse", "tool_name": "Agent",  # noqa: E731
                           "cwd": br, "tool_input": dict(ti, prompt="x")}
     gp = agent(subagent_type="general-purpose")
@@ -196,12 +196,12 @@ def main():
           and "general-purpose" in res and "prometheus" in res and "P0-6" in res)
     check("без subagent_type (это general-purpose) — отказ", run_hook(cenv, lst, agent()).startswith("deny:"))
     check("пустой subagent_type — отказ", run_hook(cenv, lst, agent(subagent_type="")).startswith("deny:"))
-    check("свой лид — пропуск", run_hook(cenv, lst, agent(subagent_type="hephaestus-broker")) == "allow")
+    check("свой лид — пропуск", run_hook(cenv, lst, agent(subagent_type="hephaestus-shop")) == "allow")
     check("dev-haiku, dev-sonnet, dev-opus из окна координатора — пропуск",
           all(run_hook(cenv, lst, agent(subagent_type=t)) == "allow" for t in ("dev-haiku", "dev-sonnet", "dev-opus")))
     check("codex-dev, лид чужого направления и hq-агенты (zeus-*, chiron, clio, momus) — отказ",
           all(run_hook(cenv, lst, agent(subagent_type=t)).startswith("deny:")
-              for t in ("codex-dev", "hephaestus-sources", "zeus-hq", "zeus", "chiron", "clio", "momus", "dev-sonnet2")))
+              for t in ("codex-dev", "hephaestus-docs", "zeus-hq", "zeus", "chiron", "clio", "momus", "dev-sonnet2")))
     check("окно штаба dev-* не получает",
           not any(t.startswith("dev-") for t in agents_hook(hq)[1]))
     check("Explore — пропуск; explore (другой регистр) — отказ",
@@ -209,7 +209,7 @@ def main():
           and run_hook(cenv, lst, agent(subagent_type="explore")).startswith("deny:"))
     check("tool_name Task — та же проверка", run_hook(cenv, lst, dict(gp, tool_name="Task")).startswith("deny:"))
     check("general-purpose с agent_id (зовёт субагент окна) — пропуск",
-          run_hook(cenv, lst, dict(gp, agent_id="a1", agent_type="hephaestus-broker")) == "allow")
+          run_hook(cenv, lst, dict(gp, agent_id="a1", agent_type="hephaestus-shop")) == "allow")
     # сбой — код 2: на 2.1.292 onFailure: block не работает, код 1 и таймаут пропускают вызов
     check("тип не строка — код 2", run_hook(cenv, lst, agent(subagent_type=["argus"])).startswith("block:"))
     check("tool_input не объект — код 2", run_hook(cenv, lst, dict(gp, tool_input="argus")).startswith("block:"))

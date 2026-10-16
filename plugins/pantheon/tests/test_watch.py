@@ -1283,14 +1283,14 @@ def test_who_is_who_memo():
     pan, st, ag = (os.path.join(d, x) for x in ("pantheon", "state", "agents"))
     for x in (pan, st, ag):
         os.makedirs(x)
-    for r in ("argus", "momus", "hq", "workshop", "domain-coordinator", "hephaestus-pantheon", "apollo-alex"):
+    for r in ("argus", "momus", "hq", "workshop", "domain-coordinator", "hephaestus-pantheon", "apollo-site"):
         open(os.path.join(ag, r + ".md"), "w").write("---\nname: x\n---\n")
     os.makedirs(os.path.join(ag, "_parts"))
     open(os.path.join(ag, "argus.tmpl"), "w").write("шаблон")
     open(os.path.join(pan, "directions.toml"), "w").write(
-        '[[direction]]\nname = "metis-pantheon"\n[[direction]]\nname = "hermes-alex"\n')
+        '[[direction]]\nname = "metis-pantheon"\n[[direction]]\nname = "hermes-site"\n')
     memo = os.path.join(pan, "Кто есть кто.md")
-    full = ("`zeus` `daedalus-<задача>` `metis-pantheon` `hermes-alex` `argus` `momus` `hephaestus-<проект>` "
+    full = ("`zeus` `daedalus-<задача>` `metis-pantheon` `hermes-site` `argus` `momus` `hephaestus-<проект>` "
             "`apollo-<проект>` `claude agents` `pantheon tick` `~/.claude/agents/<роль>.md`\n")
     saved = {k: getattr(p, k) for k in ("PANTHEON", "STATE", "AGENTS")}
     alerts = os.path.join(pan, "alerts.md")
@@ -1313,10 +1313,10 @@ def test_who_is_who_memo():
         check(line == "памятку обновить: +momus" and "+momus" in read(), f"нет тревоги +momus: {line!r}")
         p.who_is_who_alert()
         check(read().count("+momus") == 1, "тревога +momus повторилась на том же состоянии")
-        # 3. направление пропало, лишнее есть: +hermes-alex / −janus-probe
-        put(full.replace("`hermes-alex` ", "") + "`janus-probe` `hephaestus-old`\n")
+        # 3. направление пропало, лишнее есть: +hermes-site / −janus-probe
+        put(full.replace("`hermes-site` ", "") + "`janus-probe` `hephaestus-old`\n")
         line = p.who_is_who_alert()
-        check(line == "памятку обновить: +hermes-alex / −hephaestus-old / −janus-probe", f"нет −janus-probe: {line!r}")
+        check(line == "памятку обновить: +hermes-site / −hephaestus-old / −janus-probe", f"нет −janus-probe: {line!r}")
         # 4. снова совпало: тревога снята — новый сбой пишется заново
         put(full)
         check(p.who_is_who_alert() == "", "совпало, а тревога осталась")

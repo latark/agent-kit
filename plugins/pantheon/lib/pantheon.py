@@ -81,7 +81,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon review status [<owner/repo> <PR>]   записи журнала ~/.local/state/pantheon/merge-gate/records.jsonl и
                                         метки «ревью идёт»
   pantheon commit                       commit → pull без rebase → push ~/ai/pantheon
-  pantheon install | uninstall          поставить или снять задачу launchd com.latark.pantheon-tick
+  pantheon install | uninstall          поставить или снять задачу launchd pantheon.tick
   pantheon tick                         один проход планировщика (его вызывает launchd)
 Уведомления (lib/notify.py): присутствие по простою, тихие часы, утренний дайджест, повтор и «долго ждёт», склейка
 по id решения, бюджет в день; пороги — таблица [notify] в schedule.toml, состояние и журнал — notify.json и
@@ -93,6 +93,7 @@ PANTHEON_NO_NOTIFY — без уведомлений, PANTHEON_NOTIFY_LOG — у
 import collections
 import contextlib
 import fcntl
+import fnmatch
 import glob
 import hashlib
 import json
@@ -121,7 +122,7 @@ VIEW = os.environ.get("PANTHEON_VIEW") or os.path.join(AI_HOME, "pantheon-view")
 VIEW_INBOX = os.environ.get("PANTHEON_VIEW_INBOX") or os.path.join(PANTHEON, "inbox-view")
 LIB = os.path.dirname(os.path.realpath(__file__))
 PLUGIN = os.path.dirname(LIB)
-LABEL = "com.latark.pantheon-tick"
+LABEL = "pantheon.tick"
 # Неизменный путь к плагину: на него смотрят задача launchd, команда ~/.local/bin/pantheon и обработчики слияния
 # в ~/ai/pantheon/.git/config. `pantheon install` перевешивает ссылку на ту копию плагина, из которой запущен
 # (до шага 0.4 — рабочая копия agent-kit, с 0.4 — клон маркетплейса), поэтому обновление плагина путей не ломает.
@@ -762,11 +763,15 @@ def tick_heavy(sched, heavy, t):
 
 # --- службы (SCHED-05) ------------------------------------------------------------------
 # [[service]] в schedule.toml — постоянный процесс (сервер qmd, позже бот одобрения, Pixel Agents, «Пульт»). Каждая —
-# своя задача launchd com.latark.pantheon-svc.<имя> с KeepAlive; запускает её `pantheon service-run <имя>`, который
+# своя задача launchd pantheon.svc.<имя> с KeepAlive; запускает её `pantheon service-run <имя>`, который
 # перечитывает schedule.toml и проверяет команду (только `pantheon …` или скрипт плагина). Тик сверяет launchd с
 # расписанием: нужна и не запущена — поднять, пауза, выключена, убрана из расписания или чужой Mac — снять.
 
-SVC_PREFIX = "com.latark.pantheon-svc."
+SVC_PREFIX = "pantheon.svc."
+# Прежние метки (com.<кто-то>.pantheon-tick и com.<кто-то>.pantheon-svc.<имя>) узнаём по маске файлов, без имён в коде:
+# тик и `pantheon install` снимают их и удаляют plist, пока не поднялись новые (иначе две копии службы дерутся за порт)
+OLD_TICK_GLOB = "com.*.pantheon-tick.plist"
+OLD_SVC_GLOB = "com.*.pantheon-svc.*.plist"
 SVC_TMPL = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -841,12 +846,45 @@ def _launchctl(verb, target, name):
     return r.returncode == 0, (r.stderr or r.stdout).strip()
 
 
+def old_plists(pattern):
+    """Файлы ~/Library/LaunchAgents по маске прежних меток (OLD_TICK_GLOB, OLD_SVC_GLOB)."""
+    agents = os.path.join(HOME, "Library", "LaunchAgents")
+    with contextlib.suppress(OSError):
+        return sorted(os.path.join(agents, f) for f in os.listdir(agents) if fnmatch.fnmatchcase(f, pattern))
+    return []
+
+
+def drop_old(pattern):
+    """bootout и удаление plist прежних меток. → число снятых (не снятая — загружена после неудачного bootout — не
+    считается, её plist остаётся). При PANTHEON_DRYRUN — строка `old-bootout` в dryrun.log."""
+    n = 0
+    for p in old_plists(pattern):
+        label = os.path.basename(p)[:-len(".plist")]
+        if os.environ.get("PANTHEON_DRYRUN") == "1":
+            with open(path("dryrun.log"), "a") as fh:
+                fh.write(f"{int(now())} old-bootout {label}\n")
+        else:
+            target = f"gui/{os.getuid()}/{label}"
+            r = subprocess.run(["launchctl", "bootout", target], capture_output=True, timeout=30)
+            if r.returncode != 0 and subprocess.run(["launchctl", "print", target], capture_output=True,
+                                                    timeout=15).returncode == 0:
+                # bootout не снял, а задача загружена: plist оставляем — иначе службу никто не найдёт, а новая
+                # встанет рядом (две копии дерутся за порт)
+                print(f"pantheon: прежняя служба {label} не снимается (launchctl bootout, код {r.returncode}); "
+                      f"plist оставлен, снимите её вручную", file=sys.stderr)
+                continue
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(p)
+        n += 1
+    return n
+
+
 def _svc_path():
     """PATH служб — тот же, что у задачи тика (python3 из него запускает pantheon): от того, каким python вызван
     `pantheon jobs`, plist не меняется и служба не перезапускается зря (ревью argus 15.10)."""
     import plistlib
     with contextlib.suppress(OSError, ValueError, KeyError, TypeError, plistlib.InvalidFileException):
-        with open(PLIST, "rb") as fh:
+        with open(next((p for p in [PLIST, *old_plists(OLD_TICK_GLOB)] if os.path.exists(p)), PLIST), "rb") as fh:
             return str(plistlib.load(fh)["EnvironmentVariables"]["PATH"])
     return ":".join([os.path.dirname(sys.executable), "/opt/homebrew/bin", os.path.join(HOME, ".local", "bin"),
                      "/usr/bin:/bin:/usr/sbin:/sbin"])
@@ -861,7 +899,9 @@ def services_sync(sched, only=None):
 
 def _services_sync(sched, only):
     uid = os.getuid()
-    env_path = _svc_path()
+    env_path = _svc_path()  # до снятия прежних plist: PATH берётся и из прежнего тика
+    # прежние службы — до запуска новых: две копии одной службы дерутся за порт; при only — только эта служба
+    drop_old(f"com.*.pantheon-svc.{glob.escape(only)}.plist" if only else OLD_SVC_GLOB)
     want = {}
     for svc in sched.get("service") or []:
         ok, _ = service_wanted(svc, sched)
@@ -1047,6 +1087,8 @@ def jobs_show():
     with contextlib.suppress(OSError, ValueError):
         lt = float(open(path("last-tick")).read())
     tick_line = f"тик: {ago(lt)}" if lt else "тик: ещё не шёл (pantheon install)"
+    if not os.path.exists(PLIST) and old_plists(OLD_TICK_GLOB):
+        tick_line += " — старая метка launchd: выполните `pantheon install`"
     if lt and now() - lt > 180:
         tick_line += " — ПЛАНИРОВЩИК СТОИТ"
     if os.path.exists(path("paused")):
@@ -1754,12 +1796,11 @@ def _real_dir(p, roots, strict=False, create=False):
     return None
 
 
-# корпус и его копии: индексы qmd и самого корпуса хранят полный текст, переписка сессий Фемиды — выдержки.
-# legal-watch/cache и inbox (P0-1, metis-0060): там выгрузки Telegram-каналов (cache/telegram) и входящие сырые
-# материалы — чужой текст, как корпус; штабу его не читать (у Зевса личное и действия наружу). Вопросы по праву и
-# каналам — Фемиде (themis-sources) поручением; коллекцию qmd legal штабу закрывает хук qmd-query
-HQ_CLOSED_DIRS = ["~/projects/expert-corpus", "~/.cache/expert-corpus", "~/.cache/qmd",
-                  "~/.claude/projects/*expert-corpus*", "~/projects/legal-watch/cache", "~/projects/legal-watch/inbox"]
+# закрытые штабу папки: индексы qmd, копии больших корпусов и сырые выгрузки (кэш, входящие) — чужой текст; штабу его
+# не читать (у штаба личное и действия наружу). Вопросы по ним — координатору направления поручением; коллекции qmd
+# штабу закрывает хук qmd-query
+HQ_CLOSED_DIRS = ["~/projects/expert-corpus", "~/.cache/expert-corpus", "~/.cache/qmd",  # trace-ok: 0182-core — снять в PR ядра 0182
+                  "~/.claude/projects/*expert-corpus*", "~/projects/legal-watch/cache", "~/projects/legal-watch/inbox"]  # trace-ok: 0182-core — снять в PR ядра 0182
 
 
 # выводы фоновых задач и TMPDIR песочницы всех сессий Claude Code: /tmp/claude-<uid> (на macOS по умолчанию). Не из
@@ -3078,7 +3119,7 @@ def _wake(dry):
 # Mac их собирает тик вместе с domains.json, когда меняется шаблон, часть или реестр.
 #   {{> часть}}         — текст части (одна общая формулировка: отчёт, находка, внешние действия, доведение до конца);
 #   hephaestus, apollo  — роли лидов: по одной на направление с этим лидом в поле leads реестра,
-#                         hephaestus-<коротко> (athena-broker → broker), подстановки {{direction}} {{short}}
+#                         hephaestus-<коротко> (athena-shop → shop), подстановки {{direction}} {{short}}
 #                         {{project}} {{folders}}.
 # Свой файл узнаётся по строке-метке после шапки; файл без метки (свой ли, чужой ли) сборка не трогает, собранный файл
 # без шаблона — убирает. Ошибка в шаблоне (нет части, осталась {{…}}) — роль не пишется, старая версия остаётся.
@@ -3933,8 +3974,14 @@ def install():
         git("config", "merge.gitcrypt-text.driver", f"{merge} %O %A %B")
         git("config", "merge.gitcrypt-union.name", "git-crypt union merge (дописываемые файлы)")
         git("config", "merge.gitcrypt-union.driver", f"{merge} --union %O %A %B")
-    build_app()
     uid = os.getuid()
+    drop_old(OLD_TICK_GLOB)  # тик под прежней меткой — снять, пока не встал новый
+    if os.environ.get("PANTHEON_DRYRUN") == "1":
+        with open(path("dryrun.log"), "a") as fh:
+            fh.write(f"{int(now())} install-bootstrap {LABEL}\n")
+        print(f"установлено (dryrun): {PLIST.replace(HOME, '~')}")
+        return 0
+    build_app()
     subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"], capture_output=True)
     r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", PLIST], capture_output=True, text=True)
     if r.returncode != 0:
@@ -3960,7 +4007,7 @@ def build_app():
         print(f"программа «Доска» не собрана: {r.stderr.strip()}", file=sys.stderr)
         return
     plist = os.path.join(APP, "Contents", "Info.plist")
-    subprocess.run(["plutil", "-replace", "CFBundleIdentifier", "-string", "com.latark.pantheon-board", plist],
+    subprocess.run(["plutil", "-replace", "CFBundleIdentifier", "-string", "pantheon.board", plist],
                    capture_output=True)
     if not _notifier():
         print("для уведомлений с переходом в карточку: brew install terminal-notifier", file=sys.stderr)
@@ -3968,12 +4015,20 @@ def build_app():
 
 
 def uninstall():
-    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
+    dry = os.environ.get("PANTHEON_DRYRUN") == "1"
+    if dry:
+        with open(path("dryrun.log"), "a") as fh:
+            fh.write(f"{int(now())} uninstall-bootout {LABEL}\n")
+    else:
+        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
+    drop_old(OLD_TICK_GLOB)
+    drop_old(OLD_SVC_GLOB)
     agents = os.path.dirname(PLIST)
     with contextlib.suppress(OSError):
         for f in os.listdir(agents):
             if f.startswith(SVC_PREFIX) and f.endswith(".plist"):
-                subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{f[:-6]}"], capture_output=True)
+                if not dry:
+                    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{f[:-6]}"], capture_output=True)
                 os.remove(os.path.join(agents, f))
     for p in (PLIST, os.path.join(HOME, ".local", "bin", "pantheon"), os.path.join(HOME, ".local", "bin", "heavy")):
         with contextlib.suppress(FileNotFoundError):
@@ -4201,16 +4256,21 @@ def board():
             return 0
         try:
             with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
-                projects = {d.get("name"): d.get("project") for d in tomllib.load(fh).get("direction") or []}
+                dirs = tomllib.load(fh).get("direction") or []
+            projects = {d.get("name"): d.get("project") for d in dirs}
+            marks = {}  # значок проекта — поле `mark` направления; ключ — project, иначе name
+            for d in dirs:
+                if isinstance(d.get("mark"), str):
+                    marks.setdefault(d.get("project") or d.get("name"), d["mark"])
         except (OSError, ValueError):
-            projects = {}
+            projects, marks = {}, {}
         # политика уведомлений — под своей блокировкой на весь проход: сбои из run-job ждут, а не теряются
         with lock("notify"):
             pol = notify_policy(sched)
             lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
                                  alert=lambda k, v, text, who="board", note=None: alert_once(k, v, text, who, note,
                                                                                             policy=pol),
-                                 primary=primary, projects=projects, policy=pol)
+                                 primary=primary, projects=projects, policy=pol, marks=marks)
             pol.save()
         once_dir = path("once")  # отметки «уже сообщали» старше 90 дней — убрать: папка не растёт без конца
         for f in os.listdir(once_dir) if os.path.isdir(once_dir) else []:
