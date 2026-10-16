@@ -22,9 +22,9 @@ SHA = "a" * 40
 results = []
 
 
-def check(name, cond):
+def check(name, cond, detail=""):
     results.append(bool(cond))
-    print(("ok   " if cond else "FAIL ") + name)
+    print(("ok   " if cond else "FAIL ") + name + ("" if cond or not detail else f"  [{detail}]"))
 
 
 def main():
@@ -130,6 +130,53 @@ def run_all(tmp):
           and "без перечня" not in r.stdout)
     r = pantheon("review", "status", "latark/other", "17")
     check("status — фильтр по репозиторию", r.returncode == 0 and "записей нет" in r.stdout)
+
+    # metis-0158: метка «ревью идёт»
+    import time as _time
+    import shutil as _sh
+
+    def at(t, *args):
+        return subprocess.run([sys.executable, "-I", LIB, *args], capture_output=True, text=True,
+                              env=dict(env, PANTHEON_NOW=str(t), PANTHEON_SESSION="hephaestus-x"), cwd=tmp)
+
+    T = 1_800_000_000
+    S2 = "b" * 40
+    gate = os.path.join(state, "merge-gate", "records.jsonl")
+    gate_before = open(gate, "rb").read()
+    r = at(T, "review", "begin", "latark/Agent-Kit", "30", SHA)
+    pf = os.path.join(state, "review-pending", "latark__agent-kit__30.json")
+    d = json.load(open(pf)) if os.path.exists(pf) else {}
+    check("begin: метка в review-pending (sha, время, кто), журнал guard не тронут",
+          r.returncode == 0 and d.get("sha") == SHA and d.get("by") == "hephaestus-x" and d.get("t") == T
+          and open(gate, "rb").read() == gate_before, (r.stdout, r.stderr, d))
+    check("begin: в справке — не вердикт и не согласие", "НЕ вердикт и НЕ согласие" in at(T, "help").stdout)
+    r = at(T + 600, "review", "status", "latark/agent-kit", "30")
+    hhmm = _time.strftime("%H:%M", _time.localtime(T))
+    check("status: «ревью идёт с HH:MM (head sha8)»", f"ревью идёт с {hhmm}" in r.stdout and SHA[:8] in r.stdout
+          and "второго argus не звать" in r.stdout, r.stdout)
+    r = at(T + 600, "review", "status")
+    check("status без аргументов тоже показывает метку", "ревью идёт" in r.stdout, r.stdout)
+    r = at(T + 7201, "review", "status", "latark/agent-kit", "30")
+    check("status: через 2 часа метка не показывается", "ревью идёт" not in r.stdout, r.stdout)
+    r = at(T + 600, "review", "status", "latark/agent-kit", "31")
+    check("status: на другой PR метки нет", "ревью идёт" not in r.stdout)
+    # вердикт на этот PR после метки гасит; до метки — нет
+    old = dict(rec, pr=30, time=_time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(T - 100)))
+    with open(gate, "a") as fh:
+        fh.write(json.dumps(old) + "\n")
+    check("старый вердикт (до метки) её не гасит",
+          "ревью идёт" in at(T + 600, "review", "status", "latark/agent-kit", "30").stdout)
+    new = dict(rec, pr=30, time=_time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(T + 300)))
+    with open(gate, "a") as fh:
+        fh.write(json.dumps(new) + "\n")
+    check("вердикт на тот же sha после метки гасит её",
+          "ревью идёт" not in at(T + 600, "review", "status", "latark/agent-kit", "30").stdout)
+    at(T + 700, "review", "begin", "latark/agent-kit", "30", S2)
+    r = at(T + 800, "review", "status", "latark/agent-kit", "30")
+    check("новая метка на новый sha перезаписывает и показывается",
+          "head " + S2[:8] in r.stdout and SHA[:8] not in r.stdout.split("\n")[0], r.stdout)
+    for bad in (["latark/agent-kit", "30"], ["latark/agent-kit", "30", "abc"], ["x", "30", SHA]):
+        check(f"begin {' '.join(bad)[:30]}: плохой формат — код 2", at(T, "review", "begin", *bad).returncode == 2)
 
 
 if __name__ == "__main__":

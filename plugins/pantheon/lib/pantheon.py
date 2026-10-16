@@ -62,16 +62,24 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon approve [list] | add --site S --allow "…" [--limits "…"] | remove N   заранее разрешённое (только вы)
   pantheon consent <id> [--days N]      ваш ответ Зевсу на вопрос <id> (журнал owner-log Зевса, по умолчанию 7 дней) —
                                         для исполнителя: согласие, данное в окне Зевса
-  pantheon review test -- <команда…>    тесты для запора слияния (guard 0.5.4): в чистом дереве git запустить
+  pantheon review test -- <команда…>    тесты для шлюза слияния (guard 0.5.9): в чистом дереве git запустить
                                         команду (без оболочки); HEAD и дерево после неё те же — выход с её кодом
                                         и SHA; запись в журнал делает хук guard (PostToolUse), сама команда не пишет;
-                                        пустая программа (true, echo, heavy :…) записи не даёт (guard 0.5.6)
+                                        пустая программа (true, echo, heavy :…) записи не даёт
   pantheon review accept <owner/repo> <PR> <SHA> --opened "<что открыл>" --ran "<что запустил>"
                                         --unchecked "<что не проверял>"   «принять» argus с перечнем проверенного
-                                        (Б6, guard 0.5.6: без трёх полей запор не пускает); reject — те же флаги по
-                                        желанию; talos <owner/repo> <PR> <SHA> — проверка talos. Команда проверяет
-                                        формат, запись — хук guard и только по роли (accept, reject — argus)
-  pantheon review status [<owner/repo> <PR>]   записи журнала ~/.local/state/pantheon/merge-gate/records.jsonl
+                                        (без трёх полей шлюз не пускает); reject — те же флаги по желанию;
+                                        talos <owner/repo> <PR> <SHA> — проверка talos. Команда проверяет формат,
+                                        запись — хук guard и только по роли (accept, reject — argus). Шлюз считает
+                                        последний вердикт каждого рецензента (сессия + агент) на (repo, PR, SHA) и
+                                        пускает, только если последний у каждого — «принять» с полным перечнем и ни
+                                        один рецензент не сливающий
+  pantheon review begin <owner/repo> <PR> <SHA 40 знаков>   метка «ревью идёт» (argus позван, вердикта нет), чтобы
+                                        второго argus не звали одновременно. Пишет только
+                                        STATE/review-pending/<owner>__<repo>__<PR>.json; это НЕ вердикт и НЕ согласие,
+                                        шлюз её не читает. Гаснет по вердикту (accept/reject) на этот PR и через 2 часа
+  pantheon review status [<owner/repo> <PR>]   записи журнала ~/.local/state/pantheon/merge-gate/records.jsonl и
+                                        метки «ревью идёт»
   pantheon commit                       commit → pull без rebase → push ~/ai/pantheon
   pantheon install | uninstall          поставить или снять задачу launchd com.latark.pantheon-tick
   pantheon tick                         один проход планировщика (его вызывает launchd)
@@ -4331,7 +4339,7 @@ REVIEW_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REVIEW_PR = re.compile(r"[1-9][0-9]{0,8}")
 REVIEW_USAGE = ("pantheon review test -- <команда…> | accept <owner/repo> <PR> <SHA 40 знаков> --opened \"<что "
                 "открыл>\" --ran \"<что запустил>\" --unchecked \"<что не проверял>\" | reject <owner/repo> <PR> <SHA> "
-                "[те же флаги] | talos <owner/repo> <PR> <SHA> | status [<owner/repo> <PR>]")
+                "[те же флаги] | talos <owner/repo> <PR> <SHA> | begin <owner/repo> <PR> <SHA> | status [<owner/repo> <PR>]")
 # перечень проверенного в «принять» (Б6, guard 0.5.6): у accept все три поля обязательны и непусты, у reject — по
 # желанию. Тот же разбор — в merge_gate.verdict_parse плагина guard (он и решает, будет ли запись)
 REVIEW_CHECKLIST = {"opened": "открыл", "ran": "запустил", "unchecked": "не проверял"}
@@ -4415,8 +4423,49 @@ def review_records(repo=None, pr=None):
     return out
 
 
+REVIEW_PENDING_TTL = 2 * 3600  # метка «ревью идёт» устаревает через 2 часа
+
+
+def _review_pending_path(repo, pr):
+    return path("review-pending", f"{repo.lower().replace('/', '__')}__{pr}.json")
+
+
+def _record_epoch(rec):
+    try:
+        d = datetime.fromisoformat(str(rec.get("time")))
+        return d.timestamp()  # без пояса — местное время, как пишет хук guard
+    except ValueError:
+        return None
+
+
+def review_pending(repo, pr, recs=None):
+    """Метка «ревью идёт» для (repo, PR) или None: нет метки, старше 2 ч, или после неё есть вердикт на этот PR."""
+    d = read_json(_review_pending_path(repo, pr), None)
+    if not isinstance(d, dict) or not isinstance(d.get("t"), (int, float)):
+        return None
+    if not 0 <= now() - d["t"] < REVIEW_PENDING_TTL:
+        return None
+    for r in review_records(repo, int(pr)) if recs is None else recs:
+        if r.get("kind") in ("accept", "reject") and (_record_epoch(r) or 0) >= d["t"] - 1 \
+                and repo.lower() in [str(x).lower() for x in r.get("repo") or []]:
+            return None  # вердикт на тот же sha — ревью кончилось; на другой — head сменился, метка устарела
+    return d
+
+
 def review_cmd(rest):
     sub = rest[0] if rest else ""
+    if sub == "begin":
+        args, _, why = _review_verdict("talos", rest[1:])  # тот же разбор: repo, PR, SHA без флагов
+        if why:
+            print(f"pantheon review begin: {why.replace('review talos', 'review begin')}", file=sys.stderr)
+            return 2
+        repo, pr, sha = args[0].lower(), args[1], args[2].lower()
+        who = " ".join((os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "").split())[:40]
+        write_json(_review_pending_path(repo, pr), {"repo": repo, "pr": int(pr), "sha": sha, "t": now(),
+                                                    "time": stamp(), "by": who or None})
+        print(f"pantheon review begin: ревью {repo}#{pr} @ {sha[:8]} помечено «идёт» (не вердикт и не согласие; "
+              f"шлюз метку не читает)")
+        return 0
     if sub == "test":
         if len(rest) < 3 or rest[1] != "--":
             print(f"pantheon review: {REVIEW_USAGE}", file=sys.stderr)
@@ -4460,6 +4509,17 @@ def review_cmd(rest):
             print("pantheon review status [<owner/repo> <номер PR>]", file=sys.stderr)
             return 2
         recs = review_records(args[0] if args else None, int(args[1]) if args else None)
+        pend = []
+        if args:
+            pend = [review_pending(args[0], args[1])]
+        else:
+            for f in sorted(glob.glob(path("review-pending", "*.json"))):
+                d = read_json(f, None)
+                if isinstance(d, dict) and d.get("repo") and d.get("pr"):
+                    pend.append(review_pending(d["repo"], d["pr"]))
+        for d in (x for x in pend if x):
+            print(f"ревью идёт с {stamp(d['t'])[11:]} ({d['repo']}#{d['pr']}, head {str(d['sha'])[:8]}"
+                  + (f", {d['by']}" if d.get("by") else "") + ") — второго argus не звать")
         if not recs:
             print("pantheon review status: записей нет")
         for r in recs:
