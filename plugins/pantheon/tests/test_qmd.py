@@ -85,7 +85,7 @@ def dry(state):
 
 
 def plist(home, name):
-    return os.path.join(home, "Library", "LaunchAgents", f"com.latark.pantheon-svc.{name}.plist")
+    return os.path.join(home, "Library", "LaunchAgents", f"pantheon.svc.{name}.plist")
 
 
 def test_services():
@@ -307,9 +307,48 @@ def test_hook():
           not hook({"server": "qmd", "uri": "qmd://corpus/x.md"}, rr, "domain-coordinator"))
 
 
+def test_old_labels():
+    """Переезд меток launchd: прежние plist тика и служб (com.<кто-то>.pantheon-…) снимаются, встают новые."""
+    with tempfile.TemporaryDirectory() as tmp:
+        home, pan, state = setup(tmp)
+        agents = os.path.join(home, "Library", "LaunchAgents")
+        os.makedirs(agents)
+        old_tick = os.path.join(agents, "com.zorba.pantheon-tick.plist")
+        old_svc = os.path.join(agents, "com.zorba.pantheon-svc.qmd.plist")
+        stranger = os.path.join(agents, "com.zorba.other.plist")
+        for f in (old_tick, old_svc, stranger):
+            open(f, "w").write("<plist/>")
+        out = run(home, pan, state, "jobs").stdout
+        check("только старый тик: «старая метка — pantheon install», а не «не установлено»",
+              "старая метка" in out and "pantheon install" in out, out)
+        run(home, pan, state, "tick")
+        log = open(os.path.join(state, "dryrun.log")).read()
+        check("тик: старая служба снята (bootout, plist удалён), новая поднята",
+              "old-bootout com.zorba.pantheon-svc.qmd" in log and not os.path.exists(old_svc)
+              and os.path.exists(plist(home, "qmd")) and "svc-bootstrap qmd" in log, log)
+        check("тик: старая служба снята раньше, чем поднята новая",
+              log.index("old-bootout com.zorba.pantheon-svc.qmd") < log.index("svc-bootstrap qmd"), log)
+        check("тик: старый тик не трогает (его снимает install), чужой plist — тем более",
+              os.path.exists(old_tick) and os.path.exists(stranger))
+        r = run(home, pan, state, "install")
+        log = open(os.path.join(state, "dryrun.log")).read()
+        new_tick = os.path.join(agents, "pantheon.tick.plist")
+        check("install: старый тик снят (bootout, plist удалён), новый записан",
+              r.returncode == 0 and "old-bootout com.zorba.pantheon-tick" in log and not os.path.exists(old_tick)
+              and os.path.exists(new_tick) and "<string>pantheon.tick</string>" in open(new_tick).read()
+              and "install-bootstrap pantheon.tick" in log, f"{r.stderr} {log}")
+        check("install: чужой plist не тронут", os.path.exists(stranger))
+        open(old_svc, "w").write("<plist/>")
+        r = run(home, pan, state, "uninstall")
+        check("uninstall: снимает и старые, и новые",
+              r.returncode == 0 and not os.path.exists(old_svc) and not os.path.exists(new_tick)
+              and not os.path.exists(plist(home, "qmd")) and os.path.exists(stranger), r.stderr)
+
+
 if __name__ == "__main__":
     test_services()
     test_qmd_config()
     test_hook()
+    test_old_labels()
     print(f"{len(OK)} из {len(OK) + len(FAIL)} прошли")
     sys.exit(1 if FAIL else 0)
