@@ -164,8 +164,21 @@ def path(*parts):
 @contextlib.contextmanager
 def lock(name, block=True):
     """flock на файле в ~/.local/state/pantheon/locks/. Отдаёт True, если блокировка взята."""
-    os.makedirs(path("locks"), exist_ok=True)
-    fh = open(path("locks", name + ".lock"), "a")
+    try:
+        os.makedirs(path("locks"), exist_ok=True)
+        fh = open(path("locks", name + ".lock"), "a")
+    except PermissionError as e:
+        # окно Зевса не пишет в locks/ (metis-0078): ждущую блокировку имени сессии pantheon stop берёт, чтобы подъём,
+        # начатый до метки «остановлено», не проскочил после неё. Без права записи метка stopped/<имя> всё равно
+        # ставится первой, а проскочить может только подъём, уже прошедший проверку метки в ту же секунду, — stop
+        # идёт без блокировки с предупреждением. Замок alerts — тоже: строка тревоги дописывается одним write в режиме
+        # append, она не рвётся. Неблокирующие замки (start, тик) и git без файла не берутся.
+        if not (block and (name.startswith("start-") or name == "alerts")):
+            raise
+        print(f"pantheon: нет права записи в {path('locks').replace(HOME, '~')} ({e.strerror}) — работаю без "
+              f"блокировки {name}: подъём этой же сессии в ту же секунду может проскочить", file=sys.stderr)
+        yield True
+        return
     try:
         fcntl.flock(fh, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
         got = True

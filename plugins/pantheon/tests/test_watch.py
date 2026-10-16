@@ -475,6 +475,30 @@ def test_stop_resume_all_precise():
     check(not os.path.exists(e.st("paused")), "пауза планировщика осталась")
 
 
+def test_stop_without_locks_write():
+    """metis-0078: окно Зевса не пишет в locks/ — pantheon stop работает без блокировки имени, с предупреждением."""
+    e = Env()
+    e.direction("nl-dir")
+    e.agents([bg("nl-dir", "working", "nlnlnlnl-1", pid=51)])
+    locks = e.st("locks")
+    os.makedirs(locks, exist_ok=True)
+    os.chmod(locks, 0o500)
+    try:
+        if os.access(locks, os.W_OK):  # root обходит права — проверять нечем
+            return
+        r = e.run("stop", "nl-dir", t=T0)
+        check(r.returncode == 0 and os.path.exists(e.st("stopped", "nl-dir")),
+              f"stop без записи в locks упал: {r.returncode} {r.stderr[-300:]}")
+        check(["stop", "nlnlnlnl"] in e.calls(), "stop без записи в locks не остановил сессию")
+        check("нет права записи" in r.stderr and "start-nl-dir" in r.stderr and "Traceback" not in r.stderr,
+              f"нет понятного предупреждения: {r.stderr[-300:]}")
+        # неблокирующий замок без файла по-прежнему отказ, а не молчаливое «взял»
+        r2 = e.run("start", "nl-dir", t=T0)
+        check("Traceback" in r2.stderr or r2.returncode != 0, f"start без locks прошёл молча: {r2.stdout} {r2.stderr[-200:]}")
+    finally:
+        os.chmod(locks, 0o700)
+
+
 def test_pauses():
     """Пауза по направлению: останавливает сессию; дежурный снимает только свою причину и продолжает сессию."""
     e = Env()
