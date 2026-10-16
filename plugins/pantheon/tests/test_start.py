@@ -92,7 +92,9 @@ def main():
     env = {"PATH": bindir + os.pathsep + os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home,
            "PANTHEON_STATE": state, "FAKE_AGENTS": agents_file, "FAKE_LOG": log, "PANTHEON_NO_NOTIFY": "1",
            "FAKE_SEQ": os.path.join(tmp, "agents-seq.json"), "PANTHEON_STOP_WAIT": "3", "PANTHEON_STOP_POLL": "0.02",
-           "PANTHEON_STOP_SETTLE": "0.5", "PANTHEON_NAME_WAIT": "1"}
+           "PANTHEON_STOP_SETTLE": "0.5", "PANTHEON_NAME_WAIT": "1",
+           # здесь проверяется личный слой ролей: общий слой плагина пуст (оба слоя вместе — test_roles.py)
+           "PANTHEON_PLUGIN_ROLES": os.path.join(tmp, "plugin-roles-empty")}
 
     def run(*args, stdin=None, extra=None, tty=False):
         if not tty:
