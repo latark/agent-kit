@@ -40,7 +40,15 @@ def save(p, data):
     with open(p + ".tmp", "w") as fh:
         json.dump(data, fh)
     os.replace(p + ".tmp", p)
+if os.environ.get("FAKE_ALL"):  # все вызовы за файл: в конце — ни одного --resume без --settings
+    with open(os.environ["FAKE_ALL"], "a") as fh:
+        fh.write(json.dumps(sys.argv[1:], ensure_ascii=False) + "\n")
 if sys.argv[1:3] == ["agents", "--json"]:
+    if os.environ.get("FAKE_RM"):  # окно пропадает между проверкой pantheon start и записью файла запуска
+        try:
+            os.remove(os.environ["FAKE_RM"])
+        except OSError:
+            pass
     steps = pending()  # сценарий по шагам: каждый вызов claude agents берёт следующий список, последний остаётся
     if steps:
         save(af, steps[0])
@@ -50,6 +58,8 @@ if sys.argv[1:3] == ["agents", "--json"]:
 with open(os.environ["FAKE_LOG"], "a") as fh:
     fh.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd()}, ensure_ascii=False) + "\n")
 args = sys.argv[1:]
+if args[:1] == ["respawn"] and os.environ.get("FAKE_RESPAWN_RC"):
+    sys.exit(int(os.environ["FAKE_RESPAWN_RC"]))
 if not pending():  # без сценария: stop делает сессию stopped, --bg --name добавляет новую (имя — FAKE_BG_NAME или своё)
     try:
         agents = json.load(open(af))
@@ -92,7 +102,7 @@ def main():
     env = {"PATH": bindir + os.pathsep + os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home,
            "PANTHEON_STATE": state, "FAKE_AGENTS": agents_file, "FAKE_LOG": log, "PANTHEON_NO_NOTIFY": "1",
            "FAKE_SEQ": os.path.join(tmp, "agents-seq.json"), "PANTHEON_STOP_WAIT": "3", "PANTHEON_STOP_POLL": "0.02",
-           "PANTHEON_STOP_SETTLE": "0.5", "PANTHEON_NAME_WAIT": "1"}
+           "PANTHEON_STOP_SETTLE": "0.5", "PANTHEON_NAME_WAIT": "1", "FAKE_ALL": os.path.join(tmp, "claude-all.log")}
 
     def run(*args, stdin=None, extra=None, tty=False):
         if not tty:
@@ -472,12 +482,12 @@ def main():
         t = time.time() - idle_min * 60
         os.utime(tr, (t, t))
 
-    def wake_case(tokens, idle_min, *args):
+    def wake_case(tokens, idle_min, *args, extra=None):
         transcript(tokens, idle_min)
         open(agents_file, "w").write(json.dumps([{"id": "a1", "name": "athena-broker", "state": "stopped",
                                                   "sessionId": "5a1a1a1a-0001", "cwd": tmp, "startedAt": 1}]))
         open(log, "w").close()
-        return run("wake", *args), calls()
+        return run("wake", *args, extra=extra), calls()
 
     r, c = wake_case(120_000, 120)
     bg = [x["argv"] for x in c if "--bg" in x["argv"]]
@@ -497,6 +507,88 @@ def main():
           r.returncode == 0 and not c and "будет поднята: athena-broker" in r.stdout
           and "свежей сессией (контекст 120 тыс., простой 120 мин), прочитает "
               "~/ai/pantheon/directions/athena-broker/STATUS.md" in r.stdout)
+    r, c = wake_case(90_000, 120, extra={"FAKE_RESPAWN_RC": "1"})
+    res = [x["argv"] for x in c if "--resume" in x["argv"]]
+    check("wake: respawn не вышел — --resume с --settings файла запуска окна",
+          [x["argv"] for x in c][:1] == [["respawn", "a1"]] and len(res) == 1
+          and res[0][res[0].index("--settings") + 1] == os.path.join(state, "settings", "run", "athena-broker.json"))
+
+    # ревью argus PR #32: окно не собрано из-за allow проекта (metis-0137) — сессию не поднимает ни wake (respawn
+    # взял бы прежние флаги с прежним файлом запуска, --resume ушёл бы без --settings), ни свежий старт
+    run_file = os.path.join(state, "settings", "run", "athena-broker.json")
+    win_file = os.path.join(state, "settings", "athena-broker.json")
+    bad_allow = os.path.join(br, ".claude", "settings.json")
+    os.makedirs(os.path.dirname(bad_allow), exist_ok=True)
+    open(run_file, "w").write(json.dumps(win("athena-broker")))  # как после прежнего pantheon start
+    open(bad_allow, "w").write(json.dumps({"permissions": {"allow": ["Bash(gh *)"]}}))
+    r = run("domains", "build")
+    check("domains build: allow проекта с gh pr merge — убраны и окно, и файл запуска settings/run/<имя>.json",
+          not os.path.exists(win_file) and not os.path.exists(run_file) and "окно не собрано" in r.stderr)
+    al0 = open(alerts_md).read() if os.path.exists(alerts_md) else ""
+    for tokens, idle, how in ((90_000, 10, "resume"), (90_000, 10, "resume"), (120_000, 120, "fresh")):
+        r, c = wake_case(tokens, idle, extra={"FAKE_RESPAWN_RC": "1"})
+        check(f"wake без окна ({how}): ни respawn, ни --resume, ни --bg, ни stop; файл запуска не появился; "
+              f"строка {how}-skip в start.log",
+              r.returncode == 0 and not c and not os.path.exists(run_file)
+              and f"{how}-skip\tathena-broker\twake\tнет окна: окно не собрано" in slog())
+    al1 = open(alerts_md).read()[len(al0):] if os.path.exists(alerts_md) else ""
+    check("wake без окна: одна тревога на причину — называет файл и правило; без тревоги «не поднялась (код …)»",
+          al1.count("athena-broker: не поднимаю (wake)") == 1 and "Bash(gh *)" in al1
+          and "без песочницы окна" in al1 and "не поднялась" not in al1)
+
+    # живое окно: Claude Code перечитывает настройки на ходу — allow, добавленный в работающем окне, уже действует.
+    # Тик останавливает живую сессию; ручная сборка — нет (её зовут и тесты с настоящим claude в PATH)
+    live_a1 = [{"id": "a1", "name": "athena-broker", "state": "working", "sessionId": "5a1a1a1a-0001", "cwd": tmp,
+                "startedAt": 1}]
+    stops = lambda: [x["argv"] for x in calls() if x["argv"][:1] == ["stop"]]  # noqa: E731
+    open(agents_file, "w").write(json.dumps(live_a1))
+    open(log, "w").close()
+    run("domains", "build")
+    check("ручной domains build с проблемой allow — живую сессию не останавливает", not stops())
+    future = time.time() + 30  # --if-changed пересобирает, когда проектные настройки новее прошлой сборки
+    os.utime(bad_allow, (future, future))
+    al0 = open(alerts_md).read() if os.path.exists(alerts_md) else ""
+    r = run("domains", "build", "--if-changed")
+    al1 = open(alerts_md).read()[len(al0):] if os.path.exists(alerts_md) else ""
+    check("тик (domains build --if-changed): живая сессия направления с проблемой allow остановлена claude stop, "
+          "тревога называет её и правило",
+          r.returncode == 0 and stops() == [["stop", "a1"]] and "stop-project-allow\tathena-broker" in slog()
+          and "athena-broker: остановлена работающая сессия (a1)" in al1 and "Bash(gh *)" in al1)
+    open(agents_file, "w").write(json.dumps(live_a1))
+    open(log, "w").close()
+    r = run("check", "--quiet")
+    check("тик (check --quiet): окно убрала ручная сборка, а сессия работает — остановлена", stops() == [["stop", "a1"]])
+    os.remove(bad_allow)
+    run("domains", "build")
+    open(agents_file, "w").write(json.dumps(live_a1))
+    open(log, "w").close()
+    run("check", "--quiet")
+    run("domains", "build", "--if-changed")
+    check("allow убран — окно и файл запуска снова собираются, живую сессию тик не трогает",
+          os.path.exists(win_file) and not stops())
+    r, c = wake_case(90_000, 10)
+    check("allow убран — wake снова поднимает respawn", [x["argv"] for x in c] == [["respawn", "a1"]])
+
+    # pantheon start: окно пропало между проверкой и записью файла запуска — прежний файл запуска не берётся
+    open(agents_file, "w").write("[]")
+    open(log, "w").close()
+    r = run("start", "athena-broker", "дальше", extra={"FAKE_RM": win_file})
+    check("start: окно пропало после проверки — не запускает, код 1", r.returncode == 1 and not bg_started("athena-broker")
+          and "нет окна" in r.stderr)
+    run("domains", "build")
+    # мастерская: та же защита — без workshop.json daedalus-* не поднимается (daedalus-site остановлена вами выше)
+    open(os.path.join(home, "directions", "athena-broker", "tasks", "athena-0002.md"), "w").write(
+        "---\ntype: task\nid: athena-0002\ntitle: t\nstatus: doing\nproject: BrokerAssistant\ndirection: athena-broker\n"
+        "owner: daedalus-shop\nnext: дальше\ncreated: 2026-10-14\nupdated: 2026-10-14\nschema_version: 1\n---\n\n## Журнал\n")
+    os.remove(os.path.join(state, "settings", "workshop.json"))
+    open(agents_file, "w").write(json.dumps([{"id": "d1", "name": "daedalus-shop", "state": "failed",
+                                              "sessionId": "5d1d1d1d-0001", "cwd": tmp, "startedAt": 1}]))
+    open(log, "w").close()
+    r = run("wake", extra={"FAKE_RESPAWN_RC": "1"})
+    check("wake мастерской без окна workshop.json: ни respawn, ни --resume; тревога «не поднимаю»",
+          r.returncode == 0 and not calls() and "daedalus-shop: не поднимаю (wake)" in open(alerts_md).read())
+    os.remove(os.path.join(home, "directions", "athena-broker", "tasks", "athena-0002.md"))
+    run("domains", "build")
     os.remove(tr)
     open(agents_file, "w").write("[]")
 
@@ -627,6 +719,10 @@ def main():
     check("status: итог сверху, ждущая сессия названа, терминальные — отдельно, код 1 при проблемах",
           r.returncode == 1 and r.stdout.startswith("Пантеон · ") and "athena-broker — разрешение Bash" in r.stdout
           and "открыты в терминале: 1" in r.stdout and "фоновые работают: 1" in r.stdout and "Тик" in r.stdout)
+
+    every = [json.loads(x) for x in open(env["FAKE_ALL"])] if os.path.exists(env["FAKE_ALL"]) else []
+    resumes = [a for a in every if "--resume" in a]
+    check("за весь файл: --resume был и ни разу без --settings", resumes and all("--settings" in a for a in resumes))
 
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)

@@ -1583,7 +1583,9 @@ def domains_build(if_changed=False):
     write_json(path("domains.json"), {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml. Руками не править.",
         "built": stamp(), "built_ts": now(), "domains": domains})
-    built = sandbox_build(domains, policy_path, stores, leads)
+    # живую сессию с проблемой проектных allow останавливает только путь тика (--if-changed): ручная сборка и тесты
+    # зовут её с настоящим claude в PATH — claude stop из них остановил бы ваши сессии
+    built = sandbox_build(domains, policy_path, stores, leads, stop_live=if_changed)
     os.makedirs(path("locks"), exist_ok=True)
     for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):  # места обёртки heavy: роль в песочнице сама их не создаст
         open(path("locks", slot + ".lock"), "a").close()
@@ -2075,9 +2077,31 @@ def project_allow_report(name, launch, quiet=True):
     return problems
 
 
-def sandbox_build(domains, policy_path, stores=None, leads=None):
+def project_allow_stop(name, problems):
+    """Тик нашёл у направления allow с gh pr merge: Claude Code перечитывает настройки на ходу, и в работающем окне
+    правило уже действует — живую сессию (и её копии «имя (2)») останавливаем claude stop, с тревогой. Окно уже
+    убрано, поэтому поднять её снова не даст никто (pantheon start, wake, дежурный). Вкладку терминала claude stop не
+    остановит — она в тревоге. → id остановленных."""
+    live = live_copies(name, agents_all() or [])
+    if not live:
+        clear_once("project-allow-stop-" + name)
+        return []
+    ids = [a for a in live if a.get("id")]
+    tabs = [a for a in live if not a.get("id")]
+    stop_copies(name, ids, "stop-project-allow")
+    text = (f"{name}: остановлена работающая сессия ({', '.join(a['id'] for a in ids) or '—'}) — "
+            + project_allow_text(name, problems)
+            + (f"; открыта во вкладке терминала (pid {', '.join(str(a.get('pid')) for a in tabs)}) — её закройте сами"
+               if tabs else "")
+            + ". Поднять снова — после правки и pantheon domains build")
+    alert_once("project-allow-stop-" + name, ",".join(str(a.get("id") or a.get("pid")) for a in live), text, "pantheon")
+    return [a["id"] for a in ids]
+
+
+def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False):
     """domains.json и policy.toml → ~/.local/state/pantheon/settings/<направление>.json и workshop.json.
-    leads — {направление: ["hephaestus-<коротко>", "apollo-<коротко>"]}: субагенты окна (P0-6)."""
+    leads — {направление: ["hephaestus-<коротко>", "apollo-<коротко>"]}: субагенты окна (P0-6). stop_live — путь тика
+    (domains build --if-changed): живую сессию направления с проблемой проектных allow остановить."""
     try:
         with open(policy_path, "rb") as fh:
             policy = tomllib.load(fh)
@@ -2105,15 +2129,17 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
 
     def one(name, folders, own, compact, deny, allow=None, agents=None, direction=False, auto_allow=None):
         if direction:
-            # проектные allow папки запуска с gh pr merge (metis-0137): окно не собирается, прежний файл убирается —
-            # без файла окна pantheon start не стартует
+            # проектные allow папки запуска с gh pr merge (metis-0137): окно не собирается, прежние файлы убираются —
+            # и окно, и файл запуска settings/run/<имя>.json: `claude respawn` берёт прежние флаги с путём к нему
+            # (ревью argus PR #32). Без файла окна не поднимают ни pantheon start, ни wake, ни дежурный
             problems = project_allow_report(name, launch_folder(folders))
             if problems:
                 print(f"песочница {name}: окно не собрано — {project_allow_text(name, problems)}", file=sys.stderr)
-                try:
-                    os.remove(os.path.join(out_dir, name + ".json"))
-                except OSError:
-                    pass
+                for f in (os.path.join(out_dir, name + ".json"), os.path.join(out_dir, "run", name + ".json")):
+                    with contextlib.suppress(OSError):
+                        os.remove(f)
+                if stop_live:
+                    project_allow_stop(name, problems)
                 return False
         real = [_real_dir(f, SANDBOX_ROOTS[:1], strict=True) or _real_dir(f, SANDBOX_ROOTS[1:]) for f in folders]
         skipped = [f for f, r in zip(folders, real) if not r]
@@ -2425,6 +2451,29 @@ def resume_session(name, a, text, origin, recheck=None):
         return _resume_session(name, a, text, origin)
 
 
+# Код отказа «нет окна»: сессию направления или мастерской без файла окна не поднимаем ни respawn, ни --resume, ни
+# свежим стартом — без --settings она ушла бы без песочницы окна (ревью argus PR #32). Тревога — одна на причину
+# (alert_once), поэтому wake и дежурный не повторяют свою тревогу о коде каждые 5 минут
+NO_WINDOW = 3
+
+
+def window_missing(name, origin, why, how):
+    """Отказ поднять name без окна: строка start.log «<how>-skip», тревога один раз на причину. → NO_WINDOW."""
+    start_log(f"{how}-skip\t{name}\t{origin}\tнет окна: {why}")
+    alert_once("no-window-" + name, why, f"{name}: не поднимаю ({origin}) — {why}. Без файла окна сессия ушла бы без "
+               "песочницы окна; поднимет следующий запуск после сборки окна", "pantheon")
+    return NO_WINDOW
+
+
+def no_window_reason(window):
+    """Почему нет окна window: allow проекта в папке запуска (metis-0137) или окно не собрано."""
+    folders = (read_json(path("domains.json"), {}).get("domains") or {}).get(window)
+    problems = project_allow_problems(launch_folder(folders)) if folders else []
+    if problems:
+        return "окно не собрано: " + project_allow_text(window, problems)
+    return f"нет окна {tilde(path('settings', window + '.json'))} — pantheon domains build"
+
+
 def _resume_session(name, a, text, origin):
     target, rest = (("workshop", [name[len("daedalus-"):]]) if name.startswith("daedalus-") else (name, []))
     got = start_target(target, rest)
@@ -2432,6 +2481,9 @@ def _resume_session(name, a, text, origin):
         print(f"[resume] {name} {a.get('id')} {origin}")
         return 0, None
     run = run_settings(name, got[1], got[3], origin) if not isinstance(got, str) else None
+    if not run:  # ни respawn (прежние флаги с прежним файлом запуска), ни --resume без --settings
+        return window_missing(name, origin, got if isinstance(got, str) else no_window_reason(got[3]), "resume"), None
+    clear_once("no-window-" + name)
     sid = a.get("sessionId")
     if not str(text).startswith(START_MARK):
         text = f"{START_MARK} поручение от {origin}] {text}"
@@ -2443,8 +2495,7 @@ def _resume_session(name, a, text, origin):
             return 0, None
         with contextlib.suppress(OSError):
             os.remove(pushed)
-    argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--name", name] + (["--settings", run] if run else []) \
-        + [text]
+    argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--name", name, "--settings", run, text]
     r = subprocess.run(argv, cwd=a.get("cwd") or HOME, capture_output=True, text=True, timeout=180)
     m = COPY_NOTE.search((r.stdout or "") + (r.stderr or ""))
     start_log(f"resume\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\tcopy {m.group(1)}" if m else ""))
@@ -2554,7 +2605,7 @@ def fresh_text(kind, name, old_id, tail=""):
 
 
 def fresh_target(name, origin):
-    """→ (роль, папка запуска, окно --settings) или текст ошибки."""
+    """→ (роль, папка запуска, окно --settings) или текст ошибки, в том числе «нет окна»."""
     if name == "zeus":
         win = path("settings", "hq.json")  # то же окно, что у pantheon start zeus
         return ("hq", PANTHEON, win) if os.path.isfile(win) else "нет окна штаба — pantheon domains build"
@@ -2563,7 +2614,8 @@ def fresh_target(name, origin):
     if isinstance(got, str):
         return got
     _, role, folder, window, _ = got
-    return role, folder, run_settings(name, role, window, origin)
+    run = run_settings(name, role, window, origin)
+    return (role, folder, run) if run else no_window_reason(window)
 
 
 def fresh_start(name, a, text, origin, recheck=None):
@@ -2585,9 +2637,9 @@ def _fresh_start(name, a, text, origin):
         print(f"[fresh] {name} {a.get('id')} {origin}")
         return 0
     got = fresh_target(name, origin)
-    if isinstance(got, str) or not got[2]:
-        alert(f"{name}: свежий старт невозможен — {got if isinstance(got, str) else 'нет окна роли'}", "pantheon")
-        return 2
+    if isinstance(got, str):  # старую копию не останавливаем: новую без окна всё равно не поднять
+        return window_missing(name, origin, got, "fresh")
+    clear_once("no-window-" + name)
     role, folder, win = got
     if not str(text).startswith(START_MARK):
         text = f"{START_MARK} поручение от {origin}] {text}"
@@ -2896,7 +2948,9 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     if dry:
         print(shlex.join(argv), f"(папка {folder})")
         return 0
-    run_settings(name, role, window, origin)
+    if run_settings(name, role, window, origin) != run:  # окно пропало после проверки — прежний файл запуска не берём
+        print(f"pantheon start: нет окна {win.replace(HOME, '~')} — pantheon domains build", file=sys.stderr)
+        return 1
     before = {a.get("id") for a in agents_all() or [] if a.get("id")}
     r = subprocess.run(argv, cwd=folder, capture_output=True, text=True, timeout=180)
     start_log(f"{name}\t{origin}\t{folder}\t{r.returncode}")
@@ -3009,7 +3063,7 @@ def _wake(dry):
                              recheck=lambda n=name: wake_recheck(n))
         else:
             rc, _ = resume_session(name, a, WAKE_TEXT, "wake", recheck=lambda n=name: wake_recheck(n))
-        if rc:
+        if rc and rc != NO_WINDOW:  # «нет окна» — своя тревога, одна на причину
             alert(f"pantheon wake: {name} не поднялась (код {rc})", "pantheon")
         done += 1
     if not done:
@@ -4220,7 +4274,9 @@ def check(paths=None, quiet=False):
     if not paths:
         _check_long_state(quiet)
         for dname, fs in sorted((read_json(path("domains.json"), {}).get("domains") or {}).items()):
-            project_allow_report(dname, launch_folder(fs), quiet)
+            problems = project_allow_report(dname, launch_folder(fs), quiet)
+            if problems and quiet:  # тик (check --quiet): окно могла убрать ручная сборка, а сессия ещё работает
+                project_allow_stop(dname, problems)
     if not quiet or bad:
         print(f"задач: {n}, с ошибками: {len(bad)}, без шапки: {noheader}")
     if quiet:  # тик: одна тревога на набор проблем, а не сбой задачи каждые 5 минут
