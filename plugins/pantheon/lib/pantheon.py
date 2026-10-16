@@ -1331,7 +1331,7 @@ def domains_build(if_changed=False):
 # папку. Общие кэши инструментов закрыты: ими пользуются ваши сессии без песочницы, поэтому кэши направления
 # (npm, pnpm, uv, pip, corepack, ~/.cache через XDG_CACHE_HOME) — свои, через переменные окружения. Сверх
 # этого — только [sandbox_write] из policy.toml (правит Метида), не из реестра: правкой реестра права не выдать.
-# .git/config и .git/hooks закрыты для записи: сетевой git у направлений с SSH-remote и gh идут мимо песочницы.
+# .git/config и .git/hooks закрыты для записи: сетевой git направлений (и мастерской с SSH-remote) и gh идут мимо песочницы.
 # Личное из [private] policy.toml закрыто для чтения всем, кроме координаторов с этой привилегией.
 # Сеть — через прокси песочницы: хосты вне списка проверяет классификатор режима auto.
 # Пути в файле — настоящие абсолютные (свои у каждого Mac): ссылка, подставленная позже, их не сдвинет.
@@ -1345,10 +1345,18 @@ SANDBOX_ROOTS = ["~/projects", "~/ai/knowledge"]   # папки направле
 SANDBOX_DOMAINS = ["registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "files.pythonhosted.org",
                    "github.com", "api.github.com", "codeload.github.com", "objects.githubusercontent.com",
                    "raw.githubusercontent.com"]
-# Мимо песочницы: gh (в ней не работает — TLS Go на macOS) — только эти подкоманды; дописать тревогу
-SANDBOX_EXCLUDED = ["gh pr *", "gh issue *", "gh run *", "gh repo view *", "gh api *", "gh auth status",
-                    "pantheon alert *", "pantheon consent *", "pantheon saved *"]
-# git по SSH в песочнице macOS не работает: у направлений с таким remote сетевые команды git — мимо неё
+# Мимо песочницы: gh (в ней не работает — TLS Go на macOS) — только эти подкоманды; дописать тревогу. Всё, что не
+# исключено, в песочнице просто падает — это и есть отказ (P0-4, metis-0064): `gh api` и `gh issue` (любые записи в
+# GitHub) не выпускаются; из `gh pr` — только чтение. Голые формы — отдельно: шаблон «… *» их не покрывает
+GH_PR_READ = [f"gh pr {c}{tail}" for c in ("view", "checks", "diff", "list") for tail in ("", " *")]
+SANDBOX_EXCLUDED = GH_PR_READ + ["gh run *", "gh repo view *", "gh auth status",
+                                 "pantheon alert *", "pantheon consent *", "pantheon saved *"]
+# PR создают лиды, сливает координатор или лид — только окна направлений; кто и что сливает, проверяет guard
+# (merge_problem). Мастерской и штабу — нет
+GH_PR_WRITE = ["gh pr create *", "gh pr merge *"]
+# git по SSH в песочнице macOS не работает, по HTTPS push упирается в помощник учётных данных: окну каждого направления
+# сетевые команды git — мимо неё; мастерской — только при SSH-remote. push в main/master, --force и --delete не
+# пускает guard (_PUSH_BAD)
 GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
 COORDINATOR_COMPACT = 200000
 # Окну координатора направления — слияние PR без вопроса классификатора режима auto (metis-0050). Каждое слияние
@@ -1656,7 +1664,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
 
     memory = memory_dirs()
 
-    def one(name, folders, own, compact, deny, allow=None, agents=None):
+    def one(name, folders, own, compact, deny, allow=None, agents=None, direction=False):
         real = [_real_dir(f, SANDBOX_ROOTS[:1], strict=True) or _real_dir(f, SANDBOX_ROOTS[1:]) for f in folders]
         skipped = [f for f, r in zip(folders, real) if not r]
         if skipped:
@@ -1666,7 +1674,11 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
         write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r] + memory
         cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
         ok = [r for r in real if r]
-        data = role_settings(ok, own_real, write, cache, any(ssh_remote(r) for r in ok), deny, compact, guard)
+        # сетевой git: окну направления — всегда, мастерской — при SSH-remote (P0-4, metis-0064)
+        data = role_settings(ok, own_real, write, cache, direction or any(ssh_remote(r) for r in ok), deny, compact,
+                             guard)
+        if direction:
+            data["sandbox"]["excludedCommands"] += GH_PR_WRITE
         if name == "metis-pantheon":
             # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> — вне папок окна
             # Метиды, в песочнице упал бы. Мимо неё — только эта подкоманда и только у Метиды; ворота у команды свои:
@@ -1694,7 +1706,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
         agents = (mine + COORDINATOR_AGENTS + COORDINATOR_EXTRA_AGENTS.get(name, []),
                   ["chiron"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
         one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
-            [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents)
+            [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, direction=True)
         built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски; список субагентов — вне P0-6
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)

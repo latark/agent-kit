@@ -268,8 +268,26 @@ def main():
           and real("projects/br") in aw and real("pantheon/directions/athena-broker") in aw
           and not any("~" in x or "agent-kit" in x for x in aw)
           and "~/**/.git/config" in box["filesystem"]["denyWrite"] and sa["autoCompactWindow"] == 200000)
-    check("песочница: SSH-remote → git push/fetch/pull мимо песочницы только у этого направления",
-          "git push *" in box["excludedCommands"] and "git push *" not in sm["sandbox"]["excludedCommands"])
+    check("песочница: git push/fetch/pull мимо песочницы у каждого направления, и без SSH-remote (metis-0064)",
+          all("git push *" in w["sandbox"]["excludedCommands"] and "git push" in w["sandbox"]["excludedCommands"]
+              for w in (sa, sm, sn, sz)))
+    # мастерская: тот же сетевой git — только при SSH-remote в ~/projects/workshop; здесь его нет
+    check("песочница: у мастерской без SSH-remote сетевого git мимо песочницы нет",
+          not any(x.startswith("git ") for x in sw["sandbox"]["excludedCommands"]))
+    reads = ["gh pr view", "gh pr view *", "gh pr checks", "gh pr checks *", "gh pr diff", "gh pr diff *",
+             "gh pr list", "gh pr list *"]
+    check("gh мимо песочницы (P0-4): нет gh api, gh issue и gh pr *; чтение PR (view/checks/diff/list) — у всех окон, "
+          "кроме штаба",
+          all(not any(x.startswith(("gh api", "gh issue")) or x == "gh pr *" for x in w["sandbox"]["excludedCommands"])
+              for w in (sa, sm, sn, sz, sw))
+          and all(all(r in w["sandbox"]["excludedCommands"] for r in reads) for w in (sa, sm, sn, sz, sw))
+          and all(x in sa["sandbox"]["excludedCommands"] for x in ("gh run *", "gh repo view *", "gh auth status",
+                                                                    "pantheon alert *", "pantheon consent *",
+                                                                    "pantheon saved *")))
+    check("gh pr create/merge мимо песочницы — только в окнах направлений; у мастерской нет",
+          all("gh pr create *" in w["sandbox"]["excludedCommands"] and "gh pr merge *" in w["sandbox"]["excludedCommands"]
+              for w in (sa, sm, sn, sz))
+          and not any(x.startswith(("gh pr create", "gh pr merge")) for x in sw["sandbox"]["excludedCommands"]))
     check("песочница: `pantheon direction init *` мимо неё только в окне Метиды (metis-0042)",
           "pantheon direction init *" in sm["sandbox"]["excludedCommands"]
           and not any("direction" in x for w in (sa, sw, sn, sz) for x in w["sandbox"]["excludedCommands"]))
@@ -313,6 +331,11 @@ def main():
           and "git push *" not in hb["excludedCommands"]
           and hq["hooks"]["PreToolUse"][0] == sa["hooks"]["PreToolUse"][0] and "worktree" not in hq
           and "~/ai/knowledge/me" not in hb["filesystem"]["denyRead"])
+    check("окно штаба: мимо песочницы — прежний список пульта, без gh и сетевого git (metis-0064)",
+          hb["excludedCommands"] == ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheon wake *",
+                                     "pantheon archive", "pantheon jobs *", "pantheon domains build",
+                                     "pantheon roles build", "pantheon stop *", "pantheon resume *", "pantheon pause *",
+                                     "pantheon restart *", "pantheon saved *", "pantheon who", "pantheon agents"])
     check("окно штаба: корпус закрыт для чтения — песочница и правило Read (SEC-13, решение 15.10)",
           all(x in hb["filesystem"]["denyRead"] for x in ("~/projects/expert-corpus", "~/.cache/qmd",
                                                            "~/.cache/expert-corpus", "~/.claude/projects/*expert-corpus*"))
