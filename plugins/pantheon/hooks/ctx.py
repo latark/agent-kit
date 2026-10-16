@@ -522,6 +522,21 @@ def remember_state_file(ev, path):
         save_json(rp, rec)
 
 
+def remembered_state_file(s):
+    """metis-0138: файл состояния из записи сессии (его запомнил rewake) — если он ещё годен, иначе None. Им пользуются
+    rewake (запись прошлой сессии) и подсказка «пора очистить» (запись этой): правка файла через python или sed в
+    транскрипте не видна, а цепочка /clear → /clear не должна его терять."""
+    return usable_handoff(s["state_file"]) if s and s.get("state_file") else None
+
+
+def this_session(ev):
+    sid = ev.get("session_id")
+    for s in proc_record(os.environ.get("CLAUDE_PID")).get("sessions") or []:
+        if sid and s.get("id") == sid:
+            return s
+    return None
+
+
 def previous_session(ev):
     rec = proc_record(os.environ.get("CLAUDE_PID"))
     prev = [s for s in rec.get("sessions") or [] if s.get("id") != ev.get("session_id")]
@@ -783,7 +798,7 @@ def cmd_stop(ev):
     with open(mark, "w") as f:
         f.write(str(n))
     k = n // 1000
-    path, desc = state_file(role, ev, transcript)
+    path, desc = state_file(role, ev, transcript, inherited=remembered_state_file(this_session(ev)))
     if path:
         what = "Сверь %s: задачи с состоянием, решения, что ждёт владельца, следующий шаг — допиши недостающее." % desc
         where = tilde(path)
@@ -878,8 +893,7 @@ def rewake_message(ev):
     if not prev or not prev.get("transcript"):
         return None
     role = ev.get("agent_type") or prev.get("role") or ""
-    inherited = usable_handoff(prev["state_file"]) if prev.get("state_file") else None
-    path, desc = state_file(role, ev, prev["transcript"], inherited=inherited)
+    path, desc = state_file(role, ev, prev["transcript"], inherited=remembered_state_file(prev))
     if not path or not os.path.isfile(path):
         return None
     t_owner = last_owner_time(prev["transcript"])

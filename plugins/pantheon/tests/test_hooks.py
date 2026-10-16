@@ -473,6 +473,10 @@ try:
     append(c2, user("продолжай", "c2", now - 200))
     append(c2, assistant(now - 190, 0, [("Bash", {"command": "python3 -c \"open('%s', 'a').write('шаг 2')\"" % chain})]))
     os.utime(chain, (now - 180, now - 180))
+    append(c2, assistant(now - 170, 160000))
+    out = run("stop", dict(ev2, hook_event_name="Stop", stop_hook_active=False), CLAUDE_PID=cp).stdout
+    check("подсказка «пора очистить» после /clear: файл из записи сессии, а не «заведи HANDOFF.md» (metis-0138)",
+          "handoff/chain/HANDOFF.md" in out and "заведи" not in out, out)
     ev3 = {"session_id": "s-c3", "transcript_path": transcript("chain3", []), "source": "clear"}
     run("start", ev3, CLAUDE_PID=cp)
     r3 = run("rewake", ev3, CLAUDE_PID=cp)
