@@ -1511,6 +1511,19 @@ def archive():
     return 0
 
 
+# Имена окон, которые не направления: sandbox_build пишет settings/hq.json, workshop.json и job-<роль>.json; направление
+# с таким именем записало бы свои настройки в чужой файл — а при сбое второй записи они там и остались бы (metis-0163)
+RESERVED_DIRECTIONS = ("hq", "workshop")
+
+
+def reserved_direction(name):
+    """Текст ошибки, если имя направления зарезервировано под окно hq, workshop или job-*; иначе None."""
+    if isinstance(name, str) and (name in RESERVED_DIRECTIONS or name.startswith("job-")):
+        return (f"имя «{name}» зарезервировано под окна системы (hq, workshop, job-*): настройки направления "
+                "записались бы в чужой файл окна — выберите другое имя")
+    return None
+
+
 def domains_build(if_changed=False):
     """Реестр направлений → domains.json для guard. Привилегий тут нет: они в ~/.claude/pantheon/policy.toml.
     Папку привилегированного координатора (из [coordinators] policy.toml) чужое направление получить не может:
@@ -1543,6 +1556,11 @@ def domains_build(if_changed=False):
         name = d.get("name", "")
         if not re.fullmatch(r"[a-z0-9-]+", name):
             print(f"пропущено направление с именем не по образцу: {name!r}", file=sys.stderr)
+            continue
+        bad = reserved_direction(name)
+        if bad:
+            print(f"пропущено направление: {bad}", file=sys.stderr)
+            alert_once(f"direction-reserved-{name}", "1", f"directions.toml: {bad}", "pantheon")
             continue
         folders = []
         for f in d.get("folders") or []:
@@ -1658,7 +1676,7 @@ REVIEW_RECORD_RULE = (
     "«accept» without all three checklist fields and a test command that does nothing (`true`, `echo`, `sleep`). "
     "This exception does not cover editing the record file under `~/.local/state/pantheon/merge-gate/` or the "
     "guard plugin. This exception covers only the `pantheon review` recording wrapper itself: the command after "
-    "`--` must be the project's own test runner (`heavy …`, `pytest`, `pnpm test`, `python3 -I tests/…`) and is "
+    "`--` must be the project's own test runner (`heavy <test runner>`, `pytest`, `pnpm test`, `python3 -I tests/…`) and is "
     "judged by every other rule exactly as if it were run on its own. A merge, push, deploy, `gh` or network "
     "command, a file-changing command, an `sh -c`/`python3 -c` one-liner, or anything that checks nothing after "
     "`--` is never a test command and stays Self-Approval or CI Bypass where it fits.")
@@ -3297,8 +3315,8 @@ def direction_gate(name):
     decisions.md, ваша галочка в журнале доски, запись в directions.toml. → ([(готово, что)], запись реестра)."""
     res = []
     add = lambda ok, text: res.append((bool(ok), text))
-    add(DIRECTION_NAME.fullmatch(name) and len(name) <= 40,
-        f"имя «{name}» по образцу <бог>-<проект>: латиница, цифры, дефис, до 40 знаков")
+    add(DIRECTION_NAME.fullmatch(name) and len(name) <= 40 and not reserved_direction(name),
+        reserved_direction(name) or f"имя «{name}» по образцу <бог>-<проект>: латиница, цифры, дефис, до 40 знаков")
     try:
         dec = open(os.path.join(PANTHEON, "decisions.md"), encoding="utf-8").read()
     except OSError:

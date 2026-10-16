@@ -227,6 +227,22 @@ def main():
     check("реестр: папка Метиды у athena пропущена, у Метиды осталась",
           dj["athena-broker"] == ["~/projects/br"] and dj["metis-pantheon"] == ["~/projects/agent-kit"])
 
+    # зарезервированные имена окон: hq, workshop, job-* — не направления (metis-0163)
+    rtmp = tempfile.mkdtemp(prefix="tick-test-")
+    rhome, rstate = make(rtmp, "")
+    open(os.path.join(rhome, "directions.toml"), "w").write(
+        "".join(f'[[direction]]\nname = "{n}"\nfolders = ["~/projects/br"]\n'
+                for n in ("hq", "workshop", "job-iris", "job-x", "athena-broker")))
+    os.makedirs(os.path.join(rtmp, ".claude", "pantheon"))
+    open(os.path.join(rtmp, ".claude", "pantheon", "policy.toml"), "w").write("")
+    renv = {"PATH": os.environ["PATH"], "HOME": rtmp, "PANTHEON_HOME": rhome, "PANTHEON_STATE": rstate,
+            "PANTHEON_NO_NOTIFY": "1"}
+    rr = subprocess.run([sys.executable, "-I", LIB, "domains", "build"], env=renv, capture_output=True, text=True)
+    rdj = json.load(open(os.path.join(rstate, "domains.json")))["domains"]
+    check("реестр: направления hq, workshop, job-* пропущены с понятной ошибкой, обычное имя осталось",
+          list(rdj) == ["athena-broker"] and rr.stderr.count("зарезервировано под окна системы") == 4
+          and "«job-iris»" in rr.stderr)
+
     # песочница окон ролей (SEC-19): строгий вид, папки направления, SSH-remote → сетевой git мимо песочницы
     br = os.path.join(tmp, "projects", "br", "app")
     os.makedirs(br)
