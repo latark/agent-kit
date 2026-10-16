@@ -879,6 +879,37 @@ def test_worktree_prune_unreadable_0118():
     check(ids3() == ["w-self"], f"после возврата доступа prune не убрал пропавшую: {ids3()}")
 
 
+def test_worktree_prune_alert_key_and_empty_gitdir_0118():
+    """Тревога prune — со своим ключом (не склеивается с «забытой копией»); пустой gitdir — препятствие для prune."""
+    # chmod 000 на копии старше WORKTREE_DAYS: второй проход не добавляет строк в alerts.md
+    e, folder, g = _wt_repo("g-dir")
+    wt = os.path.join(folder, ".claude", "worktrees", "w-old")
+    g("worktree", "add", "-q", "-b", "w-old", wt)
+    old = T0 - 10 * 86400
+    os.utime(wt, (old, old))
+    os.chmod(wt, 0o000)
+    try:
+        e.run("watch", t=T0)
+        n1 = len(e.alerts().splitlines())
+        check("prune отложен" in e.alerts(), "нет тревоги prune")
+        e.run("watch", t=T0)
+        n2 = len(e.alerts().splitlines())
+        check(n2 == n1, f"второй проход добавил строки в alerts.md: {n1} -> {n2}")
+    finally:
+        os.chmod(wt, 0o755)
+    # пустой gitdir + пропавшая запись: обе записи остаются, тревога есть
+    e2, folder2, g2 = _wt_repo("g-dir")
+    g2("worktree", "add", "-q", "-b", "w-empty", os.path.join(folder2, ".claude", "worktrees", "w-empty"))
+    gone = os.path.join(e2.tmp, "ak-gone4")
+    g2("worktree", "add", "-q", "-b", "o-gone4", gone)
+    shutil.rmtree(gone)
+    wd = os.path.join(folder2, ".git", "worktrees")
+    open(os.path.join(wd, "w-empty", "gitdir"), "w").close()
+    e2.run("watch", t=T0)
+    check(sorted(os.listdir(wd)) == ["ak-gone4", "w-empty"], f"prune сработал при пустом gitdir: {sorted(os.listdir(wd))}")
+    check("битая" in e2.alerts() and "prune отложен" in e2.alerts(), "нет тревоги о пустом gitdir")
+
+
 def test_tick_subcommands():
     sys.path.insert(0, os.path.join(ROOT, "lib"))
     import importlib

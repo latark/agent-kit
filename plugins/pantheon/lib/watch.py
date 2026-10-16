@@ -463,7 +463,7 @@ def _prune_state(root, live):
             block.append((d, ex.strerror or ex))
             continue
         if not target:
-            need = True
+            block.append((d, "битая"))  # пустой gitdir: как недоступный — prune откладываем
             continue
         target = os.path.join(d, target)
         copy = os.path.realpath(os.path.dirname(target))
@@ -563,7 +563,7 @@ def worktrees(agents, registry, doms, t):
                                  "сессии, не слита или не чистая) — координатору: слить или убрать", "watch")
             need_prune, blockers = _prune_state(root, live)
             for path, ex in blockers:
-                P.alert_once(f"watch-wt-{path}", "unreadable", f"запись копии {path.replace(P.HOME, '~')} "
+                P.alert_once(f"watch-prune-{path}", "unreadable", f"запись копии {path.replace(P.HOME, '~')} "
                              f"недоступна ({ex}) — prune отложен", "watch")
             if need_prune and not blockers:
                 # без --expire: git worktree prune по умолчанию убирает записи без папки сразу (срок
