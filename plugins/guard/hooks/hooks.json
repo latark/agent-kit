@@ -4,7 +4,13 @@
       {
         "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|Agent|Task|Skill",
         "hooks": [
-          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\"", "timeout": 10 }
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\"", "timeout": 10, "onFailure": "block" }
+        ]
+      },
+      {
+        "matcher": "WebFetch|WebSearch|Bash|Write|Edit|MultiEdit|NotebookEdit|SendMessage|CronCreate|ScheduleWakeup|mcp__.*",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/taint.py\"", "timeout": 10, "onFailure": "block" }
         ]
       }
     ],
@@ -13,6 +19,19 @@
         "matcher": "Bash",
         "hooks": [
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\"", "timeout": 10 }
+        ]
+      },
+      {
+        "matcher": "Bash|Read|Grep",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/taint.py\"", "timeout": 10 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/taint.py\"", "timeout": 10 }
         ]
       }
     ],

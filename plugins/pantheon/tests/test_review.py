@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""pantheon review (запор слияния guard 0.5.4): test — только в чистом дереве git, команда без оболочки, после неё
-HEAD и дерево те же, выход с её кодом и SHA; accept|reject|talos — проверка формата, код 0; status — журнал.
+"""pantheon review (запор слияния guard 0.5.4): test — только в чистом дереве git, без оболочки, после неё
+HEAD и дерево те же, выход с её кодом и SHA; accept|reject|talos — проверка формата, код 0, у accept — перечень
+проверенного Б6 (guard 0.5.6); status — журнал с перечнем.
 Сама команда в журнал не пишет. Временный HOME, PANTHEON_HOME и PANTHEON_STATE; всё убирается в конце."""
 import json
 import os
@@ -83,13 +84,33 @@ def run_all(tmp):
     r = pantheon("review", "test", "true", cwd=repo)
     check("test без -- : код 2", r.returncode == 2)
 
-    for kind in ("accept", "reject", "talos"):
-        r = pantheon("review", kind, "latark/agent-kit", "17", SHA)
+    cl = ["--opened", "merge_gate.py, README", "--ran", 'heavy python3 -I tests/x.py "84 из 84"', "--unchecked", "gh"]
+    for kind, extra in (("accept", cl), ("reject", []), ("talos", [])):
+        r = pantheon("review", kind, "latark/agent-kit", "17", SHA, *extra)
         check(f"{kind} — код 0 и «записано хуком guard»", r.returncode == 0 and "хуком guard" in r.stdout)
+    r = pantheon("review", "accept", "latark/agent-kit", "17", SHA, *cl)
+    check("accept — перечень напечатан, кавычки и пробелы в поле целы",
+          "открыл: merge_gate.py, README" in r.stdout and 'запустил: heavy python3 -I tests/x.py "84 из 84"' in r.stdout
+          and "не проверял: gh" in r.stdout)
+    r = pantheon("review", "accept", "--opened=a", "latark/agent-kit", "--ran=b c", "17", SHA, "--unchecked=d")
+    check("accept — форма --x=V и флаги в любом месте: код 0", r.returncode == 0 and "запустил: b c" in r.stdout)
+    for extra, why in (([], "без перечня"), (cl[:4], "пусто --unchecked"), (["--opened", "", *cl[2:]], "пусто --opened"),
+                       (["--opened", "  ", *cl[2:]], "пусто --opened"), ([*cl, "--foo", "x"], "неизвестный флаг"),
+                       ([*cl, "--opened", "b"], "дважды"), ([*cl[:5]], "нет значения"),
+                       (["--opened", "--ran", "--ran", "--unchecked", "--unchecked", "--opened"], "начинается с «--»"),
+                       (["--opened=--ran", *cl[2:]], "начинается с «--»")):
+        r = pantheon("review", "accept", "latark/agent-kit", "17", SHA, *extra)
+        check(f"accept {' '.join(extra)[:40] or '(без полей)'} — код 2, «{why}»",
+              r.returncode == 2 and why in r.stderr and "Б6" in r.stderr if why == "без перечня"
+              else r.returncode == 2 and why in r.stderr)
+    r = pantheon("review", "reject", "latark/agent-kit", "17", SHA, "--opened", "a.py")
+    check("reject — поля по желанию: код 0, поле напечатано", r.returncode == 0 and "открыл: a.py" in r.stdout)
+    r = pantheon("review", "talos", "latark/agent-kit", "17", SHA, "--opened", "a.py")
+    check("talos — флагов нет: код 2", r.returncode == 2)
     for bad in (["latark/agent-kit", "17", SHA[:39]], ["latark", "17", SHA], ["latark/agent-kit", "0", SHA],
                 ["latark/agent-kit", "x", SHA], ["latark/agent-kit", "17"], ["latark/agent-kit", "17", SHA, "x"]):
-        r = pantheon("review", "accept", *bad)
-        check(f"accept {' '.join(bad)[:40]} — плохой формат, код 2", r.returncode == 2)
+        r = pantheon("review", "accept", *bad, *cl)
+        check(f"accept {' '.join(bad)[:40]} — плохой формат, код 2", r.returncode == 2 and "формате" in r.stderr)
     check("неизвестный вид — код 2", pantheon("review", "approve", "x").returncode == 2)
     check("без вида — код 2", pantheon("review").returncode == 2)
     check("сама команда журнал не пишет", not os.path.exists(os.path.join(state, "merge-gate")))
@@ -97,10 +118,16 @@ def run_all(tmp):
     os.makedirs(os.path.join(state, "merge-gate"))
     rec = {"v": 1, "kind": "accept", "repo": ["latark/agent-kit"], "pr": 17, "sha": SHA,
            "by": {"agent_type": "argus", "agent_id": "x", "session_id": "s"}, "time": "2026-10-15T20:00:00"}
+    full = dict(rec, pr=18, checklist={"opened": "a.py, README", "ran": "heavy pytest", "unchecked": "живой gh"})
     with open(os.path.join(state, "merge-gate", "records.jsonl"), "w") as fh:
-        fh.write("битая строка\n" + json.dumps(rec) + "\n")
+        fh.write("битая строка\n" + json.dumps(rec) + "\n" + json.dumps(full) + "\n")
     r = pantheon("review", "status", "latark/agent-kit", "17")
     check("status — запись видна, битая строка пропущена", r.returncode == 0 and "accept" in r.stdout)
+    check("status — accept старого формата помечен «без перечня»", "без перечня проверенного (Б6)" in r.stdout)
+    r = pantheon("review", "status", "latark/agent-kit", "18")
+    check("status — перечень accept показан", r.returncode == 0 and "открыл: a.py, README" in r.stdout
+          and "запустил: heavy pytest" in r.stdout and "не проверял: живой gh" in r.stdout
+          and "без перечня" not in r.stdout)
     r = pantheon("review", "status", "latark/other", "17")
     check("status — фильтр по репозиторию", r.returncode == 0 and "записей нет" in r.stdout)
 
