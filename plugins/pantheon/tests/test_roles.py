@@ -49,10 +49,7 @@ REG = ('[[direction]]\nname = "iris-demo"\nproject = "demo"\nfolders = ["~/proje
 
 
 def main():
-    if sys.version_info < (3, 11):  # pantheon.py сам требует 3.11 (tomllib): на 3.9 он отвечал бы отказом на всё
-        print("ok   пропуск: pantheon roles build требует Python 3.11+ (здесь %d.%d)" % sys.version_info[:2])
-        return 0
-    tmp =os.path.realpath(tempfile.mkdtemp(prefix="roles-test-"))
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="roles-test-"))
     home, state = os.path.join(tmp, "ai", "pantheon"), os.path.join(tmp, "state")
     plugin = os.path.join(tmp, "plugin", "roles")
     agents = os.path.join(tmp, ".claude", "agents")
@@ -162,13 +159,23 @@ def main():
     check("person не таблица — роли с подстановками не собраны, остальные собраны",
           "не таблица" in r.stderr and not os.path.exists(os.path.join(out, "clio.md"))
           and not os.path.exists(os.path.join(out, "argus.md")) and os.path.exists(os.path.join(out, "talos.md")))
+    # подстановка [person] в шапке — ошибка при любом значении: хуки шапки идут вне песочницы, а образец значений
+    # пропускает кавычки, «;» и «#». Личный шаблон (его может править тот, кто правит реестр) и живая сборка
+    momus_t, momus = os.path.join(agents, "momus.tmpl"), os.path.join(agents, "momus.md")
     write(reg, REG)
-    write(os.path.join(plugin, "momus.tmpl"), "---\nname: momus\ndescription: ревизор {{browser}}\n---\n\nТело.\n")
-    out = os.path.join(tmp, "probe-head")
-    r = run("roles", "build", "--out", out)
-    check("пустая подстановка в строке шапки — шапка поменялась бы, роль не собрана",
-          "поменяла шапку" in r.stderr and not os.path.exists(os.path.join(out, "momus.md")))
-    os.remove(os.path.join(plugin, "momus.tmpl"))
+    write(momus_t, "---\nname: momus\nhooks:\n  Stop:\n    - command: echo ok\n---\n\nТело.\n")
+    run("roles", "build")
+    good_momus = read(momus)
+    write(momus_t, '---\nname: momus\nhooks:\n  Stop:\n    - command: echo "{{browser}}"\n---\n\nТело.\n')
+    for label, extra in (("непустое", "[person]\nbrowser = 'x\"; touch pwn; echo \"a: b #c'\n"), ("пустое", "")):
+        write(reg, REG + extra)
+        r = run("roles", "build")
+        check(f"[person] в строке шапки, значение {label} — роль не собрана, ошибка названа, прежний файл цел",
+              "echo ok" in good_momus and read(momus) == good_momus and "touch pwn" not in read(momus)
+              and "в шапке роли запрещена: {{browser}}" in r.stderr)
+    write(reg, REG)
+    os.remove(momus_t)
+    run("roles", "build")
 
     # roles_newest и пересборка domains build по правке в плагине
     future = time.time() + 10_000

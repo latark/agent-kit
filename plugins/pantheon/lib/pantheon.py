@@ -2991,7 +2991,15 @@ def person_values(reg):
 
 
 def _person_text(text, values, bad):
-    """Подстановки [person] построчно: строка с пустой подстановкой выпадает целиком; плохое значение — ValueError."""
+    """Подстановки [person] построчно: строка с пустой подстановкой выпадает целиком; плохое значение — ValueError.
+    В шапке YAML (между первыми ---) подстановка [person] запрещена целиком, и с пустым значением: в шапке живут
+    хуки роли, они идут вне песочницы, а образец значений пропускает кавычки и «;» — значение стало бы командой."""
+    end = text.find("\n---\n", 3) if text.startswith("---\n") else -1
+    head = text[:end + 5] if end > 0 else ""
+    in_head = [k for k in PERSON_KEYS if "{{" + k + "}}" in head]
+    if in_head:
+        raise ValueError("подстановка [person] в шапке роли запрещена: "
+                         + ", ".join("{{" + k + "}}" for k in in_head))
     lines = []
     for ln in text.splitlines(keepends=True):
         keys = [k for k in PERSON_KEYS if "{{" + k + "}}" in ln]
