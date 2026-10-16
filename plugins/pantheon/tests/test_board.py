@@ -104,7 +104,7 @@ def main():
 
     # metis-0160: длинные STATUS.md и board.md (символы, не байты)
     stp = os.path.join(home, "directions", "metis-pantheon", "STATUS.md")
-    okp = os.path.join(home, "directions", "athena-broker", "STATUS.md")
+    okp = os.path.join(home, "directions", "athena-shop", "STATUS.md")
     bdp = os.path.join(home, "board.md")
     open(stp, "w", encoding="utf-8").write("ж" * 9500)
     open(okp, "w", encoding="utf-8").write("ж" * 8800)  # 17 600 байт, но 8 800 знаков — в пределе
@@ -113,7 +113,7 @@ def main():
     check("0160: check без --quiet печатает по строке на длинный файл (знаки, не байты), код 0",
           r.returncode == 0 and r.stdout.count("знаков при пределе 9000") == 2
           and "directions/metis-pantheon/STATUS.md: 9500 знаков" in r.stdout and "board.md: 9001 знаков" in r.stdout
-          and "athena-broker/STATUS.md" not in r.stdout, r.stdout)
+          and "athena-shop/STATUS.md" not in r.stdout, r.stdout)
     alerts = os.path.join(home, "alerts.md")
     env = dict(env, PANTHEON_ALERTS_IN_DRYRUN="1")  # тревоги — в alerts.md, а не печатью
     r = run(env, "check", "--quiet")

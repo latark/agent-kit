@@ -474,7 +474,7 @@ def main():
 
     def wake_case(tokens, idle_min, *args):
         transcript(tokens, idle_min)
-        open(agents_file, "w").write(json.dumps([{"id": "a1", "name": "athena-broker", "state": "stopped",
+        open(agents_file, "w").write(json.dumps([{"id": "a1", "name": "athena-shop", "state": "stopped",
                                                   "sessionId": "5a1a1a1a-0001", "cwd": tmp, "startedAt": 1}]))
         open(log, "w").close()
         return run("wake", *args), calls()
@@ -484,9 +484,9 @@ def main():
     check("wake: контекст 120 тыс. и простой 2 ч — свежая сессия (claude --bg --agent --name --settings окно запуска, "
           "«[Пантеон: пробуждение] … Прочитай STATUS.md»), не respawn",
           r.returncode == 0 and not [x for x in c if x["argv"][:1] in (["respawn"], ["--resume"])] and len(bg) == 1
-          and bg[0][:6] == ["--bg", "--agent", "domain-coordinator", "--name", "athena-broker", "--settings"]
-          and bg[0][6] == os.path.join(state, "settings", "run", "athena-broker.json")
-          and "[Пантеон: пробуждение]" in bg[0][7] and "Прочитай ~/ai/pantheon/directions/athena-broker/STATUS.md" in bg[0][7]
+          and bg[0][:6] == ["--bg", "--agent", "domain-coordinator", "--name", "athena-shop", "--settings"]
+          and bg[0][6] == os.path.join(state, "settings", "run", "athena-shop.json")
+          and "[Пантеон: пробуждение]" in bg[0][7] and "Прочитай ~/ai/pantheon/directions/athena-shop/STATUS.md" in bg[0][7]
           and "свежей сессией (контекст 120 тыс., простой 120 мин)" in r.stdout)
     r, c = wake_case(120_000, 10)
     check("wake: контекст 120 тыс., простой 10 мин — как раньше: respawn", [x["argv"] for x in c] == [["respawn", "a1"]])
@@ -494,9 +494,9 @@ def main():
     check("wake: контекст 90 тыс., простой 2 ч — как раньше: respawn", [x["argv"] for x in c] == [["respawn", "a1"]])
     r, c = wake_case(120_000, 120, "--dry-run")
     check("wake --dry-run: говорит, что поднимет свежей сессией и какой файл прочитает, ничего не запускает",
-          r.returncode == 0 and not c and "будет поднята: athena-broker" in r.stdout
+          r.returncode == 0 and not c and "будет поднята: athena-shop" in r.stdout
           and "свежей сессией (контекст 120 тыс., простой 120 мин), прочитает "
-              "~/ai/pantheon/directions/athena-broker/STATUS.md" in r.stdout)
+              "~/ai/pantheon/directions/athena-shop/STATUS.md" in r.stdout)
     os.remove(tr)
     open(agents_file, "w").write("[]")
 
