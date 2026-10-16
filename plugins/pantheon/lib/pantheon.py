@@ -1362,13 +1362,16 @@ COORDINATOR_ALLOW = ["Bash(gh pr merge *)"]
 # gh api по-прежнему судит встроенное правило. "$defaults" — встроенные исключения остаются: список без него их
 # заменяет (проверено пробой metis-0071). Классификатор читает autoMode из --settings (документация Claude Code,
 # auto-mode-config: «--settings flag»), из .claude/settings.json проекта — нет. Штабу и мастерской правил нет.
-COORDINATOR_AUTO_ALLOW = [
-    "$defaults",
+# Репозитории в правиле слияния — только из [merge_repos] направления в policy.toml (решение владельца 16.10): в тексте
+# правил нет имён владельца, направлений и репозиториев, у другой установки правило собирается из её policy.toml.
+# Направлению без [merge_repos] правила слияния нет: запор guard его слияние и так не пустит.
+MERGE_REPO_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9._-]+")
+GATED_MERGE_RULE = (
     "Pantheon Gated Merge: In a Pantheon direction window (a coordinator main session or its lead subagent "
     "`hephaestus-*` or `apollo-*`), `gh pr merge <N> --match-head-commit <40-hex sha>` with the repository given "
     "explicitly as `-R <owner/repo>` or `--repo <owner/repo>` (also `-R=`/`--repo=`), optionally with `--merge`, "
-    "`--squash` or `--rebase`, `--delete-branch`, `--subject` and `--body`, on a `latark/*`, `BrokerAssistantApp/*` "
-    "or `MorphStream/*` repository, is NOT Merge Without Review. The owner replaced human approval with a local "
+    "`--squash` or `--rebase`, `--delete-branch`, `--subject` and `--body`, on one of this direction's repositories "
+    "({repos}), is NOT Merge Without Review. The owner replaced human approval with a local "
     "merge gate: the guard PreToolUse hook runs before this classifier and lets the command through only when a "
     "passing project test record exists for that exact head SHA, the independent reviewer role `argus` recorded "
     "«accept» on that exact repository, PR and head SHA with a full checklist of what it opened, what it ran and "
@@ -1377,11 +1380,12 @@ COORDINATOR_AUTO_ALLOW = [
     "itself rejects the merge if the PR head moved away from `--match-head-commit`. A merge the gate let through is "
     "a reviewed merge: the session's follow-up commands after it (`gh pr view`, `gh pr checks`, `git fetch`, "
     "`git pull`, `git log`) are routine, not a continuation of an unreviewed merge. PRs that touch the protection "
-    "core — any path under `plugins/guard/` or `.claude-plugin/marketplace.json` in latark/agent-kit — stay for "
+    "core — any path under `plugins/guard/` or `.claude-plugin/marketplace.json` — stay for "
     "the owner's button: guard refuses them, and this exception does not cover merging them any other way. It "
     "covers only the command shape above: `--admin`, `--auto`, a merge without `--match-head-commit` or without an "
     "explicit `-R`/`--repo`, a merge through `gh api`, `GH_REPO`/`GH_HOST` overrides, `cd` or chained commands, "
-    "or a repository outside these owners are still judged by Merge Without Review.",
+    "or a repository outside this list are still judged by Merge Without Review.")
+REVIEW_RECORD_RULE = (
     "Pantheon Review Record: `pantheon review test -- <test command>` (runs the project tests in a clean git tree "
     "and reports their exit code), `pantheon review accept|reject <owner/repo> <N> <sha> --opened \"…\" --ran "
     "\"…\" --unchecked \"…\"` run by the reviewer role `argus`, `pantheon review talos <owner/repo> <N> <sha>` run "
@@ -1390,8 +1394,15 @@ COORDINATOR_AUTO_ALLOW = [
     "from the hook event's agent type, not by the command; guard refuses a verdict from any other role, an "
     "«accept» without all three checklist fields and a test command that does nothing (`true`, `echo`, `sleep`). "
     "This exception does not cover editing the record file under `~/.local/state/pantheon/merge-gate/` or the "
-    "guard plugin.",
-]
+    "guard plugin.")
+
+
+def coordinator_auto_allow(repos):
+    """autoMode.allow окна координатора: "$defaults", правило слияния по репозиториям направления из [merge_repos]
+    (только вида owner/repo; нет таких — правила слияния нет) и правило записей проверок."""
+    ok = sorted({r for r in repos if isinstance(r, str) and MERGE_REPO_RE.fullmatch(r)}) if isinstance(repos, list) else []
+    gated = [GATED_MERGE_RULE.format(repos=", ".join(f"`{r}`" for r in ok))] if ok else []
+    return ["$defaults"] + gated + [REVIEW_RECORD_RULE]
 # Роли главных сессий: их память в песочницу не добавляется, даже если в шапке есть memory:
 MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
 # Субагенты главной сессии окна (P0-6; SEC-09, SEC-13, ROLE-32): штаб и координатор зовут только этих — general-purpose
@@ -1601,7 +1612,7 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
         data["autoCompactWindow"] = compact
         data["worktree"] = {"baseRef": "head"}
     if auto_allow:
-        # окна координаторов: исключения классификатора auto под запор слияния (COORDINATOR_AUTO_ALLOW, metis-0098)
+        # окна координаторов: исключения классификатора auto под запор слияния (coordinator_auto_allow, metis-0098)
         data["autoMode"] = {"allow": list(auto_allow)}
     return data
 
@@ -1728,6 +1739,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
                            "его папок, окно его не получит", "pantheon")
         write_window(out_dir, name, data)
 
+    merge_repos = policy.get("merge_repos") if isinstance(policy.get("merge_repos"), dict) else {}
     built = []
     for name, folders in domains.items():
         mine = leads.get(name, [])
@@ -1735,7 +1747,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
         agents = (mine + COORDINATOR_AGENTS + COORDINATOR_EXTRA_AGENTS.get(name, []),
                   ["chiron"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
         one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
-            [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, COORDINATOR_AUTO_ALLOW)
+            [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents,
+            coordinator_auto_allow(merge_repos.get(name)))
         built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски; список субагентов — вне P0-6
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)

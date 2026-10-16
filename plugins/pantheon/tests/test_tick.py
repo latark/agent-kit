@@ -241,7 +241,10 @@ def main():
                  '"~/projects/ln"]\n')
     with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "a") as fh:
         fh.write('[sandbox_write]\nmetis-pantheon = ["~/.cache/metis", "~/ai/pantheon", "~/.cache/../.ssh"]\n'
-                 '[private]\ncoordinators = ["mnemo-brain"]\npaths = ["~/ai/knowledge/me", "~/ai/pantheon/.git/git-crypt"]\n')
+                 '[private]\ncoordinators = ["mnemo-brain"]\npaths = ["~/ai/knowledge/me", "~/ai/pantheon/.git/git-crypt"]\n'
+                 '[merge_repos]\nathena-broker = ["acme-co/br-app"]\n'
+                 'metis-pantheon = ["tools-org/sync", "acme-co/kit", "bad owner/x", "acme-co/kit`"]\n'
+                 'mnemo-brain = ["acme-co/notes"]\n')
     os.makedirs(os.path.join(state, "settings"), exist_ok=True)
     open(os.path.join(state, "settings", "old-direction.json"), "w").write("{}")
     dash = lambda p: re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(p))
@@ -355,12 +358,25 @@ def main():
     check("окно координатора направления: gh pr merge в permissions.allow; у мастерской и штаба правила нет (metis-0050)",
           sa.get("permissions", {}).get("allow") == [merge] and sm.get("permissions", {}).get("allow") == [merge]
           and merge not in json.dumps(sw.get("permissions", {})) and merge not in json.dumps(hq.get("permissions", {})))
-    am_a, am_m = sa.get("autoMode", {}).get("allow") or [], sm.get("autoMode", {}).get("allow") or []
-    gated = [r for r in am_a if r.startswith("Pantheon Gated Merge:")]
-    check("окна координаторов и Метиды: autoMode.allow — \"$defaults\" первым и два правила запора (metis-0098)",
-          am_a == am_m and am_a[:1] == ["$defaults"] and len(am_a) == 3 and len(gated) == 1
-          and sum(r.startswith("Pantheon Review Record:") for r in am_a) == 1
-          and sz.get("autoMode") == sa.get("autoMode") and sn.get("autoMode") == sa.get("autoMode"))
+    am = {n: w.get("autoMode", {}).get("allow") or [] for n, w in
+          (("athena-broker", sa), ("metis-pantheon", sm), ("mnemo-brain", sn), ("zz", sz))}
+    rule = lambda n, head: [r for r in am[n] if r.startswith(head)]
+    gated = rule("athena-broker", "Pantheon Gated Merge:")
+    record = rule("athena-broker", "Pantheon Review Record:")
+    check("окна координаторов и Метиды: autoMode.allow — \"$defaults\" первым и два правила запора; без [merge_repos] "
+          "— без правила слияния (metis-0098)",
+          all(a[:1] == ["$defaults"] for a in am.values()) and len(record) == 1
+          and all(len(am[n]) == 3 and len(rule(n, "Pantheon Gated Merge:")) == 1 and rule(n, "Pantheon Review Record:")
+                  == record for n in ("athena-broker", "metis-pantheon", "mnemo-brain"))
+          and am["zz"] == ["$defaults"] + record)
+    gm = rule("metis-pantheon", "Pantheon Gated Merge:")
+    texts = json.dumps(list(am.values()))
+    check("правило слияния: репозитории — ровно [merge_repos] своего направления (owner/repo), имён владельца и "
+          "направлений в тексте правил нет (metis-0098, решение 16.10)",
+          bool(gated) and bool(gm) and "(`acme-co/br-app`)" in gated[0] and "acme-co/kit" not in gated[0]
+          and "(`acme-co/kit`, `tools-org/sync`)" in gm[0] and "bad owner" not in gm[0] and "kit``" not in gm[0]
+          and not any(x in texts for x in ("latark", "BrokerAssistantApp", "MorphStream", "athena-broker",
+                                           "metis-pantheon", "mnemo-brain", "agent-kit")))
     check("правило Gated Merge: обе формы репозитория, перечень argus, ядро — кнопка владельца, --admin/--auto не "
           "разрешает (metis-0098)",
           bool(gated) and all(x in gated[0] for x in ("`-R <owner/repo>`", "`--repo <owner/repo>`",
