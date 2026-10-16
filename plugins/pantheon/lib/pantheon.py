@@ -85,6 +85,7 @@ PANTHEON_NO_NOTIFY — без уведомлений, PANTHEON_NOTIFY_LOG — у
 import collections
 import contextlib
 import fcntl
+import glob
 import hashlib
 import json
 import os
@@ -502,6 +503,122 @@ def heavy_wait_reason(job, sched, t, overdue):
     return None
 
 
+# --- пропуск прогонов тика без изменений (metis-0149) ---------------------------------------------------
+# Четыре задачи тика идут каждую минуту, а почти всегда ничего не находят: каждая — запуск Python и обход папок. Тик
+# пропускает такую задачу, если её входы не менялись с прошлого удачного прогона. Только по отпечатку stat
+# (путь, размер, время изменения), содержимое не читается. Пропуск — только из тика: ручной `pantheon <команда>` и
+# `pantheon run-job` идут всегда. Раз в TICK_SKIP_MAX секунд задача идёт в любом случае — ловит то, чего отпечаток не
+# видит (время, внешние процессы). Задача вне таблицы или с другими аргументами идёт как раньше.
+#
+# Вход каждой команды (что она читает; свои же выходы в отпечаток не входят, иначе он менялся бы после каждого прогона):
+#   команда (аргументы)       вход                                                           не входит
+#   view --quiet              дерево PANTHEON без .git (размер, время) + «лишние» файлы      сама копия VIEW: rsync
+#                             копии VIEW вне оригинала, вне .obsidian и Доска/ (их разбирает  меняет её после прогона
+#                             view-sync.sh)
+#   board                     карточки VIEW/Доска/*.md; задачи (task_dirs: inbox/tasks,       board.json, журнал
+#                             directions/*/tasks); входящие directions/*/inbox; directions.toml, владельца и политика
+#                             schedule.toml (primary, уведомления)                            уведомлений — выходы
+#   sync-answers              HOME/.claude/.sync-held и .sync-incoming, owner-log/board.jsonl  —
+#   agents                    HOME/.claude/daemon/roster.json, sessions/*.json (имя, pid),     ответ `claude agents`
+#                             jobs/*/* — признаки, по которым демон Claude меняет список       (снимок нужен лишь как
+#                                                                                              запасной вариант)
+TICK_SKIP_MAX = 900
+
+
+def _stat_rec(rel, p):
+    try:
+        s = os.lstat(p)
+    except OSError:
+        return (rel, None, None)
+    return (rel, s.st_size, s.st_mtime_ns)
+
+
+def _fp_tree(root, skip_dirs=(".git",)):
+    out = []
+    for d, dirs, files in os.walk(root):
+        dirs[:] = sorted(x for x in dirs if x not in skip_dirs)
+        for f in sorted(files):
+            p = os.path.join(d, f)
+            out.append(_stat_rec(os.path.relpath(p, root), p))
+    return out
+
+
+def _fp_files(paths):
+    return [_stat_rec(p, p) for p in paths]
+
+
+def _fp_dir(d, depth=2):
+    """Список d и (при depth 2) файлов на уровень глубже; без обхода всего дерева."""
+    out = []
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return [(d, None, None)]
+    for n in names:
+        p = os.path.join(d, n)
+        out.append(_stat_rec(p, p))
+        if depth > 1 and os.path.isdir(p) and not os.path.islink(p):
+            out += _fp_dir(p, depth - 1)
+    return out
+
+
+def _fp_view_extras():
+    """Файлы копии VIEW, которых нет в оригинале (кроме .obsidian, Доска/ и служебных с точкой): view-sync.sh их
+    переносит или удаляет. После обычного прогона их нет, поэтому отпечаток от прогона не зависит."""
+    out = []
+    if not os.path.isdir(VIEW):
+        return [("view-missing", None, None)]
+    for d, dirs, files in os.walk(VIEW):
+        rel_d = os.path.relpath(d, VIEW)
+        dirs[:] = [x for x in dirs if not (rel_d == "." and x in (".obsidian", "Доска"))]
+        for f in files:
+            rel = os.path.normpath(os.path.join(rel_d, f))
+            if not f.startswith(".") and not os.path.exists(os.path.join(PANTHEON, rel)):
+                out.append(_stat_rec(rel, os.path.join(VIEW, rel)))
+    return out
+
+
+def _fp_board_inputs():
+    T = tasks_mod()
+    out = _fp_files(sorted(T.task_files(PANTHEON)))
+    out += _fp_files(sorted(glob.glob(os.path.join(PANTHEON, "directions", "*", "inbox", "*.md"))))
+    out += _fp_files(sorted(glob.glob(os.path.join(BOARD, "*.md"))))
+    out += _fp_files([os.path.join(PANTHEON, "directions.toml"), os.path.join(PANTHEON, "schedule.toml")])
+    return out
+
+
+TICK_SKIP = {
+    ("view", "--quiet"): lambda: _fp_tree(PANTHEON) + _fp_view_extras(),
+    ("board",): _fp_board_inputs,
+    ("sync-answers",): lambda: _fp_files([os.path.join(SYNC_DIR, ".sync-held"), os.path.join(SYNC_DIR, ".sync-incoming"),
+                                          os.path.join(STATE, "owner-log", "board.jsonl")]),
+    ("agents",): lambda: (_fp_files([os.path.join(HOME, ".claude", "daemon", "roster.json")])
+                          + _fp_files(sorted(glob.glob(os.path.join(HOME, ".claude", "sessions", "*.json"))))
+                          + _fp_dir(os.path.join(HOME, ".claude", "jobs"))),
+}
+
+
+def tick_fingerprint(job):
+    """Отпечаток входов задачи из TICK_SKIP или None (задачи нет в таблице — пропуску не подлежит)."""
+    argv = parse_command(job.get("command"))
+    if not argv or os.path.basename(argv[0]) != "pantheon":
+        return None
+    fn = TICK_SKIP.get(tuple(argv[1:]))
+    if fn is None:
+        return None
+    try:
+        return hashlib.sha1(repr(fn()).encode("utf-8", "replace")).hexdigest()
+    except Exception:  # любой сбой разбора — не пропускать, а запустить
+        return None
+
+
+def tick_skippable(job, st, t):
+    fp, at = st.get("skip_fp"), st.get("skip_at")
+    if not fp or at is None or not 0 <= t - float(at) < TICK_SKIP_MAX or st.get("last_rc") != 0:
+        return False
+    return tick_fingerprint(job) == fp
+
+
 def launch(name, t):
     """Запуск задачи отдельным процессом (или запись в журнал решений при PANTHEON_DRYRUN)."""
     if os.environ.get("PANTHEON_DRYRUN") == "1":
@@ -541,7 +658,7 @@ def tick():
         for bad in sched.get("bad_names") or []:
             alert_once("badname-" + re.sub(r"[^\w-]", "_", bad)[:40], bad, f"schedule.toml: задача или служба с именем не по образцу "
                        f"или повтором имени ({bad[:60]!r}; только a-z, 0-9, дефис, имена не повторяются) — пропущена", "pantheon-tick")
-        heavy = []
+        heavy, skipped = [], []
         for job in sched.get("job") or []:
             name = job["name"]
             st = job_state(name)
@@ -574,12 +691,16 @@ def tick():
             is_due, due_at = due(job, st, t)
             if not is_due or locked("job-" + name):
                 continue
+            if tick_skippable(job, st, t):  # входы не менялись с прошлого удачного прогона (metis-0149)
+                skipped.append(name)
+                continue
             if job.get("class", "light") == "heavy":
                 heavy.append((job, st, due_at))
             else:
                 launch(name, t)
         if heavy:
             tick_heavy(sched, heavy, t)
+        write_json(path("tick-skipped.json"), {"time": t, "skipped": skipped})
         try:
             services_sync(sched)
         except Exception as e:  # сбой служб не должен останавливать задачи тика
@@ -814,12 +935,14 @@ def run_job(name):
         with (lock("heavy-run", block=False) if heavy else contextlib.nullcontext(True)) as hgot:
             if not hgot:
                 return 0
+            fp0 = tick_fingerprint(job)  # до прогона: что изменилось за время работы, поймает следующий тик
             st = job_state(name)
             st.update(last_start=now())
             save_job_state(name, st)
             os.makedirs(path("logs"), exist_ok=True)
             log = path("logs", name + ".log")
             started = time.time()
+            started_at = now()
             timeout = float(job.get("timeout", 600))
             # Своя группа процессов: по таймауту гасится вся задача, а не только первый процесс.
             proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -845,6 +968,11 @@ def run_job(name):
             st = job_state(name)
             st.update(last_end=now(), last_rc=rc)
             st.pop("running", None)
+            if rc == 0 and fp0:
+                st.update(skip_fp=fp0, skip_at=started_at)
+            else:
+                st.pop("skip_fp", None)
+                st.pop("skip_at", None)
             if rc == TEMPFAIL:
                 st["waiting"] = "нет сети или GitHub недоступен"
             else:
