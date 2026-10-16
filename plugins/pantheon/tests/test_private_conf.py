@@ -7,6 +7,7 @@
 - окно (`pantheon domains build` на временном HOME): [private] coordinators = [] — окно mnemo-brain личное не открывает,
   умолчание — открывает; paths из policy.toml попадают в denyRead остальных окон, мусор в paths — умолчание.
 """
+import ast
 import atexit
 import json
 import os
@@ -125,6 +126,16 @@ def main():
     check("свои coordinators и paths: athena-broker читает, mnemo-brain и мастерская — нет; путь без ~/ пропущен",
           "~/projects/lone" not in reads(win("athena-broker")) and "~/projects/lone" in reads(win("mnemo-brain"))
           and "~/projects/lone" in reads(win("workshop")) and "no-tilde" not in json.dumps(win("workshop")))
+
+    # умолчание окна и умолчание guard не расходятся: guard.py только читаем (ast), не импортируем
+    guard_py = os.environ.get("GUARD_PY") or os.path.join(os.path.dirname(PLUGIN), "guard", "hooks", "guard.py")
+    gdef = None
+    with open(guard_py, encoding="utf-8") as fh:
+        for node in ast.parse(fh.read()).body:
+            if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "DEFAULT_PRIVATE" for t in node.targets):
+                gdef = ast.literal_eval(node.value)
+    check("DEFAULT_PRIVATE pantheon.py равен DEFAULT_PRIVATE guard.py (roles, coordinators, paths)",
+          gdef is not None and default == gdef)
 
     print(f"{sum(results)} из {len(results)} прошли")
     return 0 if all(results) else 1
