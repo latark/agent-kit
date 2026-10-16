@@ -28,16 +28,31 @@
   без вопроса классификатора auto (`COORDINATOR_ALLOW`); мастерской и штабу правила нет. Каждое слияние по-прежнему
   проверяет guard: главная сессия domain-coordinator или лид её направления (`hephaestus-*`, `apollo-*`; metis-0054),
   свои папки, без `--admin` и `--auto`.
+  Мимо песочницы gh (в ней не работает) — только чтение: `gh pr view|checks|diff|list`, `gh run view|list|watch`,
+  `gh repo view`, `gh auth status`; `gh api`, `gh issue` и `gh run cancel|rerun|delete` в песочнице падают.
+  `gh pr create|merge` и сетевой git (push, fetch, pull) — у окна каждого направления; мастерской — только сетевой
+  git и только при SSH-remote; у штаба ничего из этого нет (metis-0064).
   С 0.11.26 (metis-0098) окнам координаторов, Метиды в их числе, сборка кладёт и `autoMode.allow` — исключения
   классификатора auto: `"$defaults"` (встроенные исключения остаются), «Pantheon Gated Merge» и «Pantheon Review
   Record» (`coordinator_auto_allow`). Gated Merge описывает ровно форму, которую пускает запор guard:
   `gh pr merge <N> -R|--repo <owner/repo> --match-head-commit <sha>`, а последующие `gh pr view` или `git fetch`
   классификатор считает обычными. `--admin`, `--auto`, `gh api` и ядро защит (`plugins/guard/`,
   `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
-  из `policy.toml`; направлению без такой записи правила слияния нет. Имён владельца, направлений и репозиториев в
+  из `policy.toml`; направлению без такой записи правила слияния нет. Окну с доступом к личному (`[private]`
+  `coordinators`, сейчас mnemo-brain) правило слияния не выдаётся и при `[merge_repos]`: его PR сливает владелец
+  (metis-0156). Имён владельца, направлений и репозиториев в
   коде правил нет: у каждой установки правило собирается из её `policy.toml`. Review Record снимает с
-  `pantheon review test|accept|reject|talos|status` метки Self-Approval и CI Bypass. Штабу и мастерской `autoMode`
-  не дают. Классификатор читает `autoMode` из `--settings` окна, а из `.claude/settings.json` проекта — нет.
+  `pantheon review test|accept|reject|talos|status` метки Self-Approval и CI Bypass — только с самой обёртки: команду
+  после `--` (тест-раннер проекта) классификатор судит как отдельную, merge, push, `gh`, сеть, правка файлов и
+  `sh -c`/`python3 -c` там остаются Self-Approval или CI Bypass (metis-0156). Штабу, мастерской и окнам задач
+  `autoMode` не дают. Классификатор читает `autoMode` из `--settings` окна, а из `.claude/settings.json` проекта — нет.
+  Задачи расписания `claude -p --agent <роль>` идут в песочнице окна задачи `settings/job-<роль>.json` (metis-0063):
+  роли — только из `JOB_ROLES` (clio, prometheus, iris; iris — с `--model sonnet`), тик сам добавляет `--settings`.
+  Окно пишет только своё (clio и prometheus — `~/ai/knowledge`, iris — `~/ai/pantheon/scout`), память ролей и свой
+  кэш; личное закрыто на чтение и запись; сети у Bash нет; мимо песочницы — только `pantheon alert`. Нет файла окна
+  — задача не идёт, приходит одна тревога; `domains build --if-changed` пересобирает пропавшее окно. Субагентов
+  роль задачи зовёт только из `agents` своей строки `JOB_ROLES` (сейчас — никого): хук `agents.py` с заглушкой
+  «никого» и `deny Agent(…)` встроенным типам, ролям из `~/.claude/agents` и лидам; обычный навык идёт.
   Песочница всех окон (направления, мастерская, штаб) пускает запись в `~/.claude/agent-memory/<роль>` каждой
   роли-субагента, у которой в шапке `~/.claude/agents/<роль>.md` есть ключ `memory:` (роли главных сессий не берутся;
   папку сборка создаёт, ссылку вместо папки пропускает). Новый файл роли тик подхватывает сам. Риск: песочница пускает

@@ -205,6 +205,7 @@ def _watch(dry=False):
               ("swap", lambda: swap(agents, t)),
               ("worktree", lambda: worktrees(agents, reg, doms, t)),
               ("версия Claude Code", lambda: cc_version(t)),
+              ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
               ("паузы по нагрузке", lambda: pauses_clear(agents, reg, t)),
               ("самозапуск", lambda: autostart(agents, reg, doms, t)),
               ("журналы ваших слов", lambda: daily(t))]
@@ -971,7 +972,7 @@ def resume_or_start(name, agents, text, origin, only_resume=False, auto=False):
         print(f"[start] {name} --from {origin}")
         return 0
     r = subprocess.run([os.path.join(P.PLUGIN, "bin", "pantheon"), "start", name, "--from", origin, text],
-                       capture_output=True, text=True, timeout=240, env=P.run_env())
+                       capture_output=True, text=True, timeout=300, env=P.run_env())
     return r.returncode
 
 

@@ -291,12 +291,50 @@ JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
                     "instructions", "agents", "usage", "qmd", "plugins"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
+# Окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` из schedule.toml идёт с песочницей
+# settings/job-<роль>.json (собирает sandbox_build), а не без неё. Роль вне таблицы тик не запускает. write — куда
+# пишет Bash роли (сверх памяти ролей и своей папки кэша); model — модель задачи вместо любой из команды: у iris в
+# шапке haiku, а задаче разведчика нужен sonnet. agents — субагенты, которых роль задачи зовёт по своему шаблону
+# (хук agents.py, как у штаба и координаторов, P0-6): шаблоны clio, prometheus и iris субагентов не зовут — пусто.
+JOB_ROLES = {
+    "clio": {"write": [os.path.join(AI_HOME, "knowledge")], "agents": []},
+    "prometheus": {"write": [os.path.join(AI_HOME, "knowledge")], "agents": []},
+    "iris": {"write": [os.path.join(PANTHEON, "scout")], "model": "sonnet", "agents": []},
+}
+JOB_EXCLUDED = ["pantheon alert *"]
+# Пустой список agents.py считает сбоем и закрывает всё, и навыки без context: fork тоже (у clio — claude-md-improver).
+# Поэтому пустое окно задачи получает имя-заглушку: такого субагента нет, Agent любого типа и навык-fork — отказ, а
+# обычный навык идёт. Оно же — в тексте отказа («Этому окну можно: никого»)
+JOB_NO_AGENTS = "никого"
+# Встроенные типы Claude Code — в deny окна задачи вместе с ролями из ~/.claude/agents и лидами реестра
+BUILTIN_AGENTS = ["general-purpose", "claude", "Explore", "Plan", "statusline-setup", "claude-code-guide"]
+
+
+def job_window(role):
+    return path("settings", f"job-{role}.json")
+
+
+def job_window_problem(argv):
+    """Окно песочницы задачи `claude -p` (P0-3): None — обычный файл на месте или задача не claude; иначе причина."""
+    if not argv or argv[0] != "claude":
+        return None
+    if "--settings" not in argv[:-1]:
+        return "нет окна песочницы (--settings)"
+    p = argv[argv.index("--settings") + 1]
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return f"нет окна песочницы {p.replace(HOME, '~')}"
+    if not stat.S_ISREG(st.st_mode):
+        return f"окно песочницы {p.replace(HOME, '~')} — не обычный файл"
+    return None
 
 
 def parse_command(cmd):
     """Команда задачи из schedule.toml → argv без оболочки, или None (задача не идёт). Разрешено только:
       pantheon <view|commit|domains|watch|revisits|scout|board|sync-answers|…> [аргументы без спецсимволов];
-      claude -p --agent <роль> [--model M] [--max-turns N] [--name N] "<поручение>" — без флагов прав и настроек;
+      claude -p --agent <роль> [--model M] [--max-turns N] [--name N] "<поручение>" — без флагов прав и настроек,
+        роль — из JOB_ROLES; argv получает --settings <окно задачи роли> (и --model из таблицы, если он там есть);
       скрипт из bin/ или scripts/ самого плагина."""
     if not isinstance(cmd, str) or re.search(r"[;&|`$<>\n\\]", cmd):
         return None
@@ -326,7 +364,15 @@ def parse_command(cmd):
             j += 2
         if j != len(argv) - 1 or argv[-1].startswith("-") or not JOB_NAME.fullmatch(seen.get("--agent", "")):
             return None
-        return argv
+        conf = JOB_ROLES.get(seen["--agent"])
+        if conf is None:
+            return None  # роль без окна задачи — без песочницы не идёт (P0-3)
+        if conf.get("model"):
+            seen["--model"] = conf["model"]
+        out = ["claude", "-p", "--settings", job_window(seen["--agent"])]
+        for flag, value in seen.items():
+            out += [flag, value]
+        return out + [argv[-1]]
     real = os.path.realpath(os.path.expanduser(argv[0]))
     if any(real.startswith(os.path.join(PLUGIN, d) + os.sep) for d in ("bin", "scripts")):
         return [real] + argv[1:]
@@ -750,6 +796,19 @@ def run_job(name):
     with lock("job-" + name, block=False) as got:
         if not got:
             return 0
+        # задача на Claude — только в песочнице своего окна (P0-3): окна нет — не запускать, а не запускать без неё.
+        # Запуск считается сбоем: срок задачи сдвигается, тяжёлые задачи за ней не ждут каждый тик
+        bad = job_window_problem(argv)
+        if bad:
+            alert_once("job-window-" + name, bad, f"задача {name} не идёт: {bad}. Окна задач собирает `pantheon domains "
+                       "build`", "pantheon-tick",
+                       note=f"Задача {name} не идёт: нет окна песочницы")
+            st = job_state(name)
+            st.update(last_start=now(), last_end=now(), last_rc=ALERTED, fails=int(st.get("fails") or 0) + 1)
+            st.pop("waiting", None)
+            save_job_state(name, st)
+            return ALERTED
+        clear_once("job-window-" + name)
         with (lock("heavy-run", block=False) if heavy else contextlib.nullcontext(True)) as hgot:
             if not hgot:
                 return 0
@@ -851,6 +910,8 @@ def jobs_show():
             state = "идёт"
         elif parse_command(job.get("command")) is None:
             state = "команда не разрешена — пропускается"
+        elif job_window_problem(parse_command(job.get("command"))):
+            state = f"не идёт: {job_window_problem(parse_command(job.get('command')))} (pantheon domains build)"
         elif st.get("waiting"):
             state = f"ждёт: {st['waiting']}"
         elif st.get("last_rc") not in (None, 0):
@@ -931,6 +992,8 @@ def status():
             continue
         if parse_command(job.get("command")) is None:
             bad = "команда не разрешена"
+        elif job_window_problem(parse_command(job.get("command"))):
+            bad = job_window_problem(parse_command(job.get("command")))
         elif st.get("paused"):
             bad = "на паузе"
         elif st.get("last_rc") not in (None, 0):
@@ -1276,7 +1339,8 @@ def domains_build(if_changed=False):
         watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS,
                    CLAUDE_TMP)
         newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
-        if built >= newest:
+        # и пропавшее окно задачи расписания (P0-3): без него задача не идёт — в том числе сразу после обновления
+        if built >= newest and all(os.path.isfile(job_window(r)) for r in JOB_ROLES):
             return 0
     with open(reg_path, "rb") as fh:
         reg = tomllib.load(fh)
@@ -1331,7 +1395,7 @@ def domains_build(if_changed=False):
 # папку. Общие кэши инструментов закрыты: ими пользуются ваши сессии без песочницы, поэтому кэши направления
 # (npm, pnpm, uv, pip, corepack, ~/.cache через XDG_CACHE_HOME) — свои, через переменные окружения. Сверх
 # этого — только [sandbox_write] из policy.toml (правит Метида), не из реестра: правкой реестра права не выдать.
-# .git/config и .git/hooks закрыты для записи: сетевой git у направлений с SSH-remote и gh идут мимо песочницы.
+# .git/config и .git/hooks закрыты для записи: сетевой git направлений (и мастерской с SSH-remote) и gh идут мимо песочницы.
 # Личное из [private] policy.toml закрыто для чтения всем, кроме координаторов с этой привилегией.
 # Сеть — через прокси песочницы: хосты вне списка проверяет классификатор режима auto.
 # Пути в файле — настоящие абсолютные (свои у каждого Mac): ссылка, подставленная позже, их не сдвинет.
@@ -1345,15 +1409,25 @@ SANDBOX_ROOTS = ["~/projects", "~/ai/knowledge"]   # папки направле
 SANDBOX_DOMAINS = ["registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "files.pythonhosted.org",
                    "github.com", "api.github.com", "codeload.github.com", "objects.githubusercontent.com",
                    "raw.githubusercontent.com"]
-# Мимо песочницы: gh (в ней не работает — TLS Go на macOS) — только эти подкоманды; дописать тревогу
-SANDBOX_EXCLUDED = ["gh pr *", "gh issue *", "gh run *", "gh repo view *", "gh api *", "gh auth status",
-                    "pantheon alert *", "pantheon consent *", "pantheon saved *"]
-# git по SSH в песочнице macOS не работает: у направлений с таким remote сетевые команды git — мимо неё
+# Мимо песочницы: gh (в ней не работает — TLS Go на macOS) — только эти подкоманды; дописать тревогу. Всё, что не
+# исключено, в песочнице просто падает — это и есть отказ (P0-4, metis-0064): `gh api` и `gh issue` (любые записи в
+# GitHub) не выпускаются; из `gh pr` и `gh run` — только чтение (`gh run cancel|rerun|delete` падают). Голые формы —
+# отдельно: шаблон «… *» их не покрывает
+GH_PR_READ = [f"gh pr {c}{tail}" for c in ("view", "checks", "diff", "list") for tail in ("", " *")]
+GH_RUN_READ = [f"gh run {c}{tail}" for c in ("view", "list", "watch") for tail in ("", " *")]
+SANDBOX_EXCLUDED = GH_PR_READ + GH_RUN_READ + ["gh repo view *", "gh auth status",
+                                 "pantheon alert *", "pantheon consent *", "pantheon saved *"]
+# PR создают лиды, сливает координатор или лид — только окна направлений; кто и что сливает, проверяет guard
+# (merge_problem). Мастерской и штабу — нет
+GH_PR_WRITE = ["gh pr create *", "gh pr merge *"]
+# git по SSH в песочнице macOS не работает, по HTTPS push упирается в помощник учётных данных: окну каждого направления
+# сетевые команды git — мимо неё; мастерской — только при SSH-remote. push в main/master, --force и --delete не
+# пускает guard (_PUSH_BAD)
 GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
 COORDINATOR_COMPACT = 200000
 # Окну координатора направления — слияние PR без вопроса классификатора режима auto (metis-0050). Каждое слияние
-# по-прежнему проверяет guard (merge_problem): только главная сессия domain-coordinator, свои папки, без --admin и
-# --auto. Мастерской и штабу правила нет.
+# по-прежнему проверяет guard (merge_problem): главная сессия domain-coordinator или лид её направления (metis-0054),
+# свои папки, без --admin и --auto. Мастерской и штабу правила нет.
 COORDINATOR_ALLOW = ["Bash(gh pr merge *)"]
 # Исключения классификатора режима auto окнам координаторов направлений, Метиды в их числе (metis-0098; решения
 # владельца 15.10 «Б» и Зевса 16.10 «А»). Классификатор не видит журнал запора guard и считал слияние через запор
@@ -1394,7 +1468,11 @@ REVIEW_RECORD_RULE = (
     "from the hook event's agent type, not by the command; guard refuses a verdict from any other role, an "
     "«accept» without all three checklist fields and a test command that does nothing (`true`, `echo`, `sleep`). "
     "This exception does not cover editing the record file under `~/.local/state/pantheon/merge-gate/` or the "
-    "guard plugin.")
+    "guard plugin. This exception covers only the `pantheon review` recording wrapper itself: the command after "
+    "`--` must be the project's own test runner (`heavy …`, `pytest`, `pnpm test`, `python3 -I tests/…`) and is "
+    "judged by every other rule exactly as if it were run on its own. A merge, push, deploy, `gh` or network "
+    "command, a file-changing command, an `sh -c`/`python3 -c` one-liner, or anything that checks nothing after "
+    "`--` is never a test command and stays Self-Approval or CI Bypass where it fits.")
 
 
 def coordinator_auto_allow(repos):
@@ -1707,7 +1785,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
 
     memory = memory_dirs()
 
-    def one(name, folders, own, compact, deny, allow=None, agents=None, auto_allow=None):
+    def one(name, folders, own, compact, deny, allow=None, agents=None, direction=False, auto_allow=None):
         real = [_real_dir(f, SANDBOX_ROOTS[:1], strict=True) or _real_dir(f, SANDBOX_ROOTS[1:]) for f in folders]
         skipped = [f for f, r in zip(folders, real) if not r]
         if skipped:
@@ -1717,8 +1795,11 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
         write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r] + memory
         cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
         ok = [r for r in real if r]
-        data = role_settings(ok, own_real, write, cache, any(ssh_remote(r) for r in ok), deny, compact, guard,
-                             auto_allow)
+        # сетевой git: окну направления — всегда, мастерской — при SSH-remote (P0-4, metis-0064)
+        data = role_settings(ok, own_real, write, cache, direction or any(ssh_remote(r) for r in ok), deny, compact,
+                             guard, auto_allow)
+        if direction:
+            data["sandbox"]["excludedCommands"] += GH_PR_WRITE
         if name == "metis-pantheon":
             # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> — вне папок окна
             # Метиды, в песочнице упал бы. Мимо неё — только эта подкоманда и только у Метиды; ворота у команды свои:
@@ -1747,14 +1828,45 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
         agents = (mine + COORDINATOR_AGENTS + COORDINATOR_EXTRA_AGENTS.get(name, []),
                   ["chiron"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
         one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
-            [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents,
-            coordinator_auto_allow(merge_repos.get(name)))
+            [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, direction=True,
+            # окну с доступом к личному правило слияния не выдаётся — его PR сливает владелец (metis-0156)
+            auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name)))
         built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски; список субагентов — вне P0-6
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
     # местные порты мастерской закрыты: на macOS allowLocalBinding открывает все порты 127.0.0.1, в том числе демон CDP
     # с входами владельца; браузеры владельца — только у роли Харон (решение владельца 15.10, отмена metis-0053)
     built.append("workshop")
+    # окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` тика (parse_command добавляет --settings).
+    # Пишет только своё (JOB_ROLES), память ролей и свой кэш; личное закрыто на чтение и запись; сети Bash нет (веб у
+    # prometheus и iris — инструменты WebFetch/WebSearch, не Bash); мимо песочницы — только `pantheon alert`. Строгий
+    # guard — как у остальных окон. Кэш задачи в списке built — штаб его не читает (выдача из веба)
+    try:
+        known = sorted(f[:-3] for f in os.listdir(AGENTS) if f.endswith(".md") and ROLE_NAME.fullmatch(f[:-3]))
+    except OSError:
+        known = []
+    for role, conf in JOB_ROLES.items():
+        name = "job-" + role
+        own = []
+        for p in conf["write"]:
+            if os.path.isdir(p) and not os.path.islink(p):
+                own.append(os.path.realpath(p))
+            else:
+                print(f"песочница {name}: нет папки или ссылка — Bash туда не пишет: {p.replace(HOME, '~')}",
+                      file=sys.stderr)
+        cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
+        job = role_settings(own, None, memory, cache, False, private_paths, None, guard)
+        job["sandbox"]["excludedCommands"] = list(JOB_EXCLUDED)
+        job["sandbox"]["network"]["allowedDomains"] = []
+        job["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
+        job["env"]["PANTHEON_ROLE"] = role  # хукам: роль окна, как у штаба
+        # субагенты (P0-6): главная сессия задачи зовёт только своих (хук agents.py); deny — все известные типы,
+        # кроме своих: встроенные, роли из ~/.claude/agents, лиды реестра и главные роли
+        mine = list(conf.get("agents") or [])
+        agents_window(job, mine or [JOB_NO_AGENTS],
+                      [x for x in BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES) if x not in mine], agents_py)
+        write_window(out_dir, name, job)
+        built.append(name)
     # штаб (SEC-26, вариант А): Зевс пишет только в ~/ai/pantheon, кроме .git и alerts.md; сеть закрыта (в веб он не
     # ходит, SEC-13); мимо песочницы — только `pantheon start|wake|alert`: запуск сессий и тревоги. Личное ему открыто
     # (SEC-11), кроме ключей git-crypt.
@@ -1895,11 +2007,11 @@ def name_alias(name):
 
 
 def live_copies(name, agents, registry=None):
-    """Живые сессии с этим именем и его копии. Живая — работает (working), ждёт (blocked), открыта во вкладке (нет
-    state) или закончила ход с живым процессом (done и pid — такую новый запуск останавливает сам, CTX-10, поэтому
-    здесь её нет). Остановленная (stopped, claude stop), упавшая (failed) и закрытая (done без процесса) имени не держат
-    (15.10: claude agents даёт после claude stop именно stopped, metis-0041). Плюс интерактивные вкладки из реестра
-    ~/.claude/sessions, которых нет в claude agents."""
+    """Живые сессии с этим именем и его копии: работает (working), ждёт (blocked), открыта во вкладке (нет state) —
+    плюс интерактивные вкладки из реестра ~/.claude/sessions, которых нет в claude agents. Сюда не входят остановленная
+    (stopped — так claude agents пишет после claude stop, 15.10, metis-0041), упавшая (failed) и закончившая ход (done:
+    с живым процессом её новый запуск останавливает сам, CTX-10). Имя держит не запись в claude agents, а живой процесс
+    в реестре: пока остановленная копия не вышла, имя ещё занято — это ждёт wait_name_free."""
     alias = name_alias(name)
     out = [a for a in agents or [] if alias.fullmatch(str(a.get("name") or ""))
            and a.get("state") not in ("done", "stopped", "failed")]
@@ -2022,10 +2134,126 @@ def copies_message(name, live):
             f"{live[0]['id']}; начать заново — тот же запуск с --restart")
 
 
-def stop_copies(name, live):
+def stop_copies(name, live, why="stop-restart"):
     for a in live:
         subprocess.run([claude_bin(), "stop", a["id"]], capture_output=True, text=True, timeout=60)
-        start_log(f"stop-restart\t{name}\t{a.get('name')}\t{a['id']}")
+        start_log(f"{why}\t{name}\t{a.get('name')}\t{a['id']}")
+
+
+DOWN_STATES = ("done", "stopped", "failed")
+
+
+def stop_wait_knobs():
+    """После claude stop: сколько ждать освобождения имени (с), как часто спрашивать claude agents и сколько имя
+    должно простоять свободным (15.10 остановленная Фемида ожила через 7 с). Подменяются в тестах."""
+    def num(var, default):
+        with contextlib.suppress(ValueError, TypeError):
+            v = float(os.environ.get(var) or default)
+            if v >= 0:
+                return v
+        return default
+    return num("PANTHEON_STOP_WAIT", 30.0), num("PANTHEON_STOP_POLL", 1.5), num("PANTHEON_STOP_SETTLE", 10.0)
+
+
+def name_holders(name, agents, registry):
+    """Кто держит имя: живые копии (live_copies) и любой живой процесс реестра ~/.claude/sessions с этим именем или
+    его копией — фоновый тоже. Реестр — источник правды об именах Claude Code (15.10): после claude stop claude
+    agents уже пишет stopped, а процесс ещё выходит и имя держит; новый запуск в эту секунду получит «имя-два-слова»."""
+    out = live_copies(name, agents, registry)
+    seen = {a.get("sessionId") for a in out if a.get("sessionId")}
+    alias = name_alias(name)
+    for r in registry:
+        if r.get("sessionId") not in seen and alias.fullmatch(str(r.get("name") or "")):
+            out.append({k: v for k, v in r.items() if k != "registry"})
+    return out
+
+
+def _holder_text(a):
+    who = a.get("id") or f"pid {a.get('pid')}"
+    return f"{a.get('name')} {who} ({a.get('state') or a.get('kind') or 'процесс'})"
+
+
+def wait_name_free(name, stopped):
+    """После claude stop: ждать, пока остановленные копии отпустят имя — в claude agents нет живых копий и в реестре
+    нет живого процесса с этим именем (name_holders), и так держится settle секунд. Ожившая копия (была
+    stopped/done/failed или пропала из списка, а снова working/blocked — 15.10 так оживала Фемида) — повторный claude
+    stop один раз, ожила снова — отказ. Новая живая копия, которую мы не останавливали (вкладка, чужой запуск), —
+    отказ с copies_message. → None (имя свободно) или текст отказа; запуск при отказе не делается."""
+    wait, poll, settle = stop_wait_knobs()
+    ids = {a["id"] for a in stopped if a.get("id")}
+    down, restopped, started, free_since = set(), set(), time.monotonic(), None
+    while True:
+        agents = agents_all()
+        registry = sessions_registry()
+        live = live_copies(name, agents, registry)
+        if agents is not None:
+            listed = {a.get("id"): a for a in agents}
+            down |= {i for i in ids if i not in listed or listed[i].get("state") in DOWN_STATES}
+        revived = [a for a in live if a.get("id") in down]
+        again = [a for a in revived if a["id"] in restopped]
+        if again:
+            start_log(f"stop-revived-again\t{name}\t{again[0]['id']}\t{again[0].get('state')}")
+            return (f"{name}: копия {again[0]['id']} ожила и после повторного claude stop (сейчас "
+                    f"{again[0].get('state')}) — новую не запускаю, иначе будет две. Закройте открытые окна просмотра "
+                    f"claude agents, остановите её (claude stop {again[0]['id']}) и повторите запуск с --restart")
+        if revived:
+            stop_copies(name, revived, "stop-revived")
+            restopped |= {a["id"] for a in revived}
+            down -= restopped
+        foreign = [a for a in live if a.get("id") not in ids]
+        if foreign:
+            start_log(f"stop-wait-foreign\t{name}\t{_holder_text(foreign[0])}")
+            return copies_message(name, foreign)
+        holders = name_holders(name, agents, registry) if agents is not None else None
+        t = time.monotonic()
+        spent = t - started
+        if holders == [] and not revived:
+            free_since = t if free_since is None else free_since
+            if t - free_since >= settle:
+                start_log(f"stop-wait-free\t{name}\t{spent:.1f}")
+                return None
+            time.sleep(poll)
+            continue
+        free_since = None
+        if spent >= wait:
+            held = "; ".join(_holder_text(a) for a in holders) if holders else "claude agents не ответил"
+            start_log(f"stop-wait-timeout\t{name}\t{wait:.0f}\t{held}")
+            return (f"{name}: за {wait:.0f} с остановленные копии не отпустили имя ({held}) — новую не запускаю: "
+                    f"Claude Code назвал бы её «{name}-два-слова», и сообщения на {name} до неё не дойдут. Проверьте "
+                    f"claude agents и повторите запуск с --restart")
+        time.sleep(poll)
+
+
+def check_new_name(name, before):
+    """После `claude --bg --name <имя>`: новая живая сессия (её id не было в списке до запуска) получила ровно это имя,
+    а не «имя-два-слова» или «имя (2)». → None или текст тревоги. Чужую копию не останавливает — решает Зевс. Не
+    появилась за PANTHEON_NAME_WAIT (10 с) — строка в start.log и None: claude --bg отработал, а «не появилась» дежурный
+    проверяет сам (autostart_check)."""
+    _, poll, _ = stop_wait_knobs()
+    wait = 10.0
+    with contextlib.suppress(ValueError, TypeError):
+        wait = max(0.0, float(os.environ.get("PANTHEON_NAME_WAIT") or wait))
+    alias, started = name_alias(name), time.monotonic()
+    while True:
+        new = [a for a in agents_all() or [] if a.get("id") and a.get("id") not in before
+               and a.get("state") not in DOWN_STATES and alias.fullmatch(str(a.get("name") or ""))]
+        wrong = [a for a in new if a.get("name") != name]
+        if wrong:
+            ids = ", ".join(f"{a['id']} «{a.get('name')}»" for a in wrong)
+            start_log(f"name-mismatch\t{name}\t{ids}")
+            return (f"{name}: новая сессия получила чужое имя — {ids}: имя «{name}» держала другая сессия, сообщения на "
+                    f"{name} до неё не дойдут. Что сделать: claude agents — найти, кто держит «{name}», лишнее "
+                    f"остановить и повторить запуск с --restart (он остановит и {wrong[0]['id']}); pantheon её не "
+                    "останавливал")
+        if new:
+            start_log(f"name-ok\t{name}\t{new[0]['id']}")
+            return None
+        if time.monotonic() - started >= wait:
+            start_log(f"name-unseen\t{name}")
+            print(f"pantheon start: новой сессии {name} за {wait:.0f} с нет в claude agents — имя не проверено",
+                  file=sys.stderr)
+            return None
+        time.sleep(poll)
 
 
 def start_log(line):
@@ -2102,6 +2330,12 @@ def start(rest):
                 print(f"pantheon start: {copies_message('zeus', live)}", file=sys.stderr)
                 return 1
             stop_copies("zeus", live)
+            # execv заменяет процесс — имя после запуска не проверить, поэтому до запуска ждём, пока старый Зевс
+            # отпустит имя (15.10 без ожидания новый стал zeus-sparkling-cat, metis-0041)
+            why = wait_name_free("zeus", live) if live else None
+            if why:
+                print(f"pantheon start: {why}", file=sys.stderr)
+                return 1
         start_log(f"zeus\t{origin}\t{PANTHEON}")
         os.chdir(PANTHEON)
         os.execv(argv[0], argv)
@@ -2135,14 +2369,22 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     if live and not dry and (not restart or any(not a.get("id") for a in live)):
         print(f"pantheon start: {copies_message(name, live)}", file=sys.stderr)
         return 1
+    stopped = []
     if live and not dry:
         stop_copies(name, live)
+        stopped += live
     # CTX-10: эпик закончен — сессия «done» ещё висит в списке; новый эпик — новая сессия с тем же именем, а старая
     # останавливается (переписка сохраняется: claude attach <id>), иначе Claude Code назовёт новую «имя (2)»
     for a in same:
         if a.get("state") == "done" and a.get("pid") and not dry:
             subprocess.run([claude_bin(), "stop", a.get("id")], capture_output=True, text=True, timeout=60)
             start_log(f"stop-done\t{name}\t{a.get('id')}")
+            stopped.append(a)
+    # остановленная копия отпускает имя не сразу и может ожить (metis-0041): запуск — только когда имя свободно
+    why = wait_name_free(name, stopped) if stopped else None
+    if why:
+        print(f"pantheon start: {why}", file=sys.stderr)
+        return 1
     run = path("settings", "run", name + ".json")
     task = " ".join(rest).strip() or default_task
     prompt = f"{START_MARK} поручение от {origin}] {task}"
@@ -2155,6 +2397,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
         print(shlex.join(argv), f"(папка {folder})")
         return 0
     run_settings(name, role, window, origin)
+    before = {a.get("id") for a in agents_all() or [] if a.get("id")}
     r = subprocess.run(argv, cwd=folder, capture_output=True, text=True, timeout=180)
     start_log(f"{name}\t{origin}\t{folder}\t{r.returncode}")
     if origin == "zeus" and r.returncode == 0 and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
@@ -2162,7 +2405,14 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
               "возможно, по сообщению другой сессии (лазейка на время доработки, decisions.md 15.10)", "pantheon-start")
     sys.stdout.write(r.stdout)
     sys.stderr.write(r.stderr)
-    return r.returncode
+    if r.returncode != 0:
+        return r.returncode
+    wrong = check_new_name(name, before)
+    if wrong:
+        alert(wrong, "pantheon-start")
+        print(f"pantheon start: {wrong}", file=sys.stderr)
+        return 1
+    return 0
 
 
 # Лазейка на время доработки (ваше решение 15.10): Зевс запускает направления и по сообщениям других сессий. Чтобы это
@@ -2381,7 +2631,91 @@ def roles_build(src=None, out=None):
     if errors and not probe:
         alert_once("roles-build", "\n".join(errors), f"pantheon roles build: {errors[0]}"
                    + (f" (и ещё {len(errors) - 1})" if len(errors) > 1 else ""), "pantheon")
+    if not probe:
+        memo_line = who_is_who_alert()
+        if memo_line:
+            print(f"roles build: {memo_line}", file=sys.stderr)
     return made
+
+
+# --- сверка памятки «Кто есть кто.md» с ролями и реестром (metis-0120) ----------------------------
+WHO_MEMO = "Кто есть кто.md"
+# Роли окон названы по функции, а в памятке — именем бога: hq — `zeus`, workshop — `daedalus-<задача>`; роль
+# domain-coordinator — это все координаторы, отдельного имени у неё в памятке нет.
+WHO_ALIAS = {"hq": ("zeus",), "workshop": ("daedalus",)}
+WHO_ANY_DIRECTION = ("domain-coordinator",)
+# «Лишнее» ищем только среди имён, начинающихся с бога: такой код в обратных кавычках — имя роли или направления.
+# Остальной код (команды, пути, `claude agents`) под образец не подходит. Список — боги из карты имён и прошлых
+# направлений; нового бога дописать сюда (иначе его удалённая роль не будет найдена как лишняя).
+WHO_GODS = ("zeus", "athena", "hermes", "themis", "calliope", "mnemo", "proteus", "metis", "janus", "daedalus",
+            "apollo", "hephaestus", "argus", "chiron", "prometheus", "talos", "clio", "iris", "momus", "charon")
+WHO_TOKEN = re.compile(r"`([^`\n]+)`")
+
+
+def who_is_who_diff(memo_text, roles, directions):
+    """([нет в памятке], [лишнее в памятке]) — имена. roles — стебли файлов ролей, directions — имена направлений."""
+    tokens = set(WHO_TOKEN.findall(memo_text))
+
+    def prefix(pre):
+        return any(t == pre or t.startswith(pre + "-") for t in tokens)
+    missing = []
+    for r in sorted(roles):
+        if r in WHO_ANY_DIRECTION:
+            ok = bool(set(directions) & tokens)
+        elif r in WHO_ALIAS:
+            ok = r in tokens or any(prefix(a) for a in WHO_ALIAS[r])
+        elif r.split("-")[0] in LEAD_ROLES:
+            ok = prefix(r.split("-")[0])
+        else:
+            ok = r in tokens
+        if not ok:
+            missing.append(r)
+    missing += sorted(d for d in directions if d not in tokens)
+    known = set(roles) | set(directions) | {"zeus"}
+    lead_pre = {r.split("-")[0] for r in roles if r.split("-")[0] in LEAD_ROLES}
+    aliases = {a for al in WHO_ALIAS.values() for a in al}
+    extra = []
+    for t in sorted(tokens):
+        if not ROLE_NAME.fullmatch(t) or t.split("-")[0] not in WHO_GODS or t in known:
+            continue
+        if t in lead_pre or t in aliases or t.startswith("daedalus-"):
+            continue
+        extra.append(t)
+    return missing, extra
+
+
+def who_is_who_check(memo=None, agents=None, reg_path=None):
+    """Сверка памятки. Нет памятки, папки ролей или реестра — None (проверять нечего). Иначе (нет, лишнее)."""
+    memo = memo or os.path.join(PANTHEON, WHO_MEMO)
+    agents = agents or AGENTS
+    reg_path = reg_path or os.path.join(PANTHEON, "directions.toml")
+    if not (os.path.isfile(memo) and os.path.isdir(agents) and os.path.isfile(reg_path)):
+        return None
+    try:
+        with open(reg_path, "rb") as fh:
+            reg = tomllib.load(fh)
+        text = open(memo, encoding="utf-8").read()
+    except (OSError, ValueError):
+        return None
+    roles = [f[:-3] for f in os.listdir(agents)
+             if f.endswith(".md") and os.path.isfile(os.path.join(agents, f))]
+    dirs = [d.get("name") for d in reg.get("direction") or [] if isinstance(d.get("name"), str)]
+    return who_is_who_diff(text, roles, dirs)
+
+
+def who_is_who_alert(**kw):
+    """Сверка + тревога штабу «памятку обновить: +имя / −имя» один раз на состояние; совпало — тревога снята.
+    Возвращает строку расхождения или ""."""
+    got = who_is_who_check(**kw)
+    if got is None:
+        return ""
+    missing, extra = got
+    if not (missing or extra):
+        clear_once("who-is-who")
+        return ""
+    line = "памятку обновить: " + " / ".join([f"+{n}" for n in missing] + [f"−{n}" for n in extra])
+    alert_once("who-is-who", line, f"Кто есть кто.md: {line}", "pantheon")
+    return line
 
 
 def roles_newest():

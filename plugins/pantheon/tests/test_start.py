@@ -28,11 +28,40 @@ DEV_STOP = os.path.join(ROOT, "hooks", "dev-stop-verify.py")
 
 FAKE = r'''#!/usr/bin/env python3
 import json, os, sys
+af, seq = os.environ["FAKE_AGENTS"], os.environ.get("FAKE_SEQ") or ""
+def pending():
+    try:
+        return json.load(open(seq))
+    except (OSError, ValueError):
+        return []
+def save(p, data):
+    with open(p + ".tmp", "w") as fh:
+        json.dump(data, fh)
+    os.replace(p + ".tmp", p)
 if sys.argv[1:3] == ["agents", "--json"]:
-    print(open(os.environ["FAKE_AGENTS"]).read())
+    steps = pending()  # сценарий по шагам: каждый вызов claude agents берёт следующий список, последний остаётся
+    if steps:
+        save(af, steps[0])
+        save(seq, steps[1:])
+    print(open(af).read())
     sys.exit(0)
 with open(os.environ["FAKE_LOG"], "a") as fh:
     fh.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd()}, ensure_ascii=False) + "\n")
+args = sys.argv[1:]
+if not pending():  # без сценария: stop делает сессию stopped, --bg --name добавляет новую (имя — FAKE_BG_NAME или своё)
+    try:
+        agents = json.load(open(af))
+    except (OSError, ValueError):
+        agents = []
+    if isinstance(agents, list) and args[:1] == ["stop"]:
+        for a in agents:
+            if a.get("id") == args[1]:
+                a["state"] = "stopped"
+        save(af, agents)
+    elif isinstance(agents, list) and "--bg" in args and "--name" in args and not os.environ.get("FAKE_BG_SKIP"):
+        name = os.environ.get("FAKE_BG_NAME") or args[args.index("--name") + 1]
+        agents.append({"id": "n" + os.urandom(3).hex(), "name": name, "state": "working", "kind": "background"})
+        save(af, agents)
 '''
 
 
@@ -59,11 +88,19 @@ def main():
         '[[direction]]\nname = "hermes-alex"\nfolders = ["~/projects/alex"]\nleads = ["hephaestus"]\n'
         'pnpm_store = "~/elsewhere/.pnpm-store"\n')
     env = {"PATH": bindir + os.pathsep + os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home,
-           "PANTHEON_STATE": state, "FAKE_AGENTS": agents_file, "FAKE_LOG": log, "PANTHEON_NO_NOTIFY": "1"}
+           "PANTHEON_STATE": state, "FAKE_AGENTS": agents_file, "FAKE_LOG": log, "PANTHEON_NO_NOTIFY": "1",
+           "FAKE_SEQ": os.path.join(tmp, "agents-seq.json"), "PANTHEON_STOP_WAIT": "3", "PANTHEON_STOP_POLL": "0.02",
+           "PANTHEON_STOP_SETTLE": "0.5", "PANTHEON_NAME_WAIT": "1"}
 
-    def run(*args, stdin=None):
-        return subprocess.run([sys.executable, "-I", LIB, *args], env=env, capture_output=True, text=True,
-                              timeout=60, input=stdin)
+    def run(*args, stdin=None, extra=None, tty=False):
+        if not tty:
+            return subprocess.run([sys.executable, "-I", LIB, *args], env=dict(env, **(extra or {})),
+                                  capture_output=True, text=True, timeout=60, input=stdin)
+        # pantheon start zeus идёт только из терминала; псевдотерминалов в песочнице нет — stdin подменён на «терминал»
+        boot = ("import runpy, sys\nclass T:\n    def isatty(self):\n        return True\n"
+                f"sys.stdin = T()\nsys.argv = [{LIB!r}] + {list(args)!r}\nrunpy.run_path({LIB!r}, run_name='__main__')\n")
+        return subprocess.run([sys.executable, "-I", "-c", boot], env=dict(env, **(extra or {})), capture_output=True,
+                              text=True, timeout=60)
 
     def calls():
         return [json.loads(x) for x in open(log)] if os.path.exists(log) else []
@@ -250,6 +287,145 @@ def main():
           and "--bg" not in r.stdout)
     r = run("start", "zeus")
     check("start zeus: без терминала не запускается", r.returncode == 2)
+
+    # metis-0041: после claude stop имя освобождается не сразу, копия может ожить, новая — получить чужое имя
+    seq_file, start_log = env["FAKE_SEQ"], os.path.join(state, "logs", "start.log")
+
+    def scenario(*steps):  # каждый вызов claude agents берёт следующий шаг; последний остаётся
+        json.dump(list(steps), open(seq_file, "w"))
+
+    def slog():
+        return open(start_log).read() if os.path.exists(start_log) else ""
+
+    def argvs():
+        return [c["argv"] for c in calls()]
+
+    def bg_started(name):
+        return any(a[:1] == ["--bg"] and name in a for a in argvs())
+
+    def ab(state_, aid="a8", sid="s8", name="athena-broker"):
+        return {"id": aid, "name": name, "state": state_, "sessionId": sid, "cwd": "/x", "startedAt": 1}
+
+    open(log, "w").close()
+    scenario()
+    open(agents_file, "w").write(json.dumps([ab("stopped", "a1", "s1")]))
+    n0 = slog().count("name-ok")
+    r = run("start", "athena-broker", "дальше")
+    check("live_copies: state stopped (после claude stop) — не живая: обычный start без --restart запускает, "
+          "её не трогает; имя новой проверено",
+          r.returncode == 0 and ["stop", "a1"] not in argvs() and bg_started("athena-broker")
+          and slog().count("name-ok") == n0 + 1)
+
+    open(log, "w").close()
+    scenario([ab("working")], [ab("working")], [ab("working")], [ab("stopped")])
+    r = run("start", "athena-broker", "заново", "--restart")
+    a = argvs()
+    check("start --restart: после stop ждёт, пока копия отпустит имя (working → stopped), и только потом запускает",
+          r.returncode == 0 and a[0] == ["stop", "a8"] and len(a) == 2 and bg_started("athena-broker")
+          and "stop-wait-free\tathena-broker" in slog())
+
+    open(log, "w").close()
+    scenario([ab("working")], [ab("working")])
+    r = run("start", "athena-broker", "заново", "--restart", extra={"PANTHEON_STOP_WAIT": "0.5"})
+    check("start --restart: копия не отпустила имя за предел — отказ, код 1, новая не запущена, строка в start.log",
+          r.returncode == 1 and argvs() == [["stop", "a8"]] and "не отпустили имя" in r.stderr
+          and "athena-broker a8 (working)" in r.stderr and "stop-wait-timeout\tathena-broker" in slog())
+
+    # имя держит живой процесс реестра ~/.claude/sessions, хотя claude agents уже пишет stopped
+    sessions = os.path.join(tmp, ".claude", "sessions")
+    os.makedirs(sessions, exist_ok=True)
+    held = os.path.join(sessions, f"{os.getpid()}.json")
+    json.dump({"pid": os.getpid(), "sessionId": "s8", "name": "athena-broker", "kind": "bg"}, open(held, "w"))
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    json.dump({"pid": dead.pid, "sessionId": "s7", "name": "athena-broker", "kind": "bg"},
+              open(os.path.join(sessions, f"{dead.pid}.json"), "w"))
+    open(log, "w").close()
+    scenario()
+    open(agents_file, "w").write(json.dumps([ab("working")]))
+    r = run("start", "athena-broker", "заново", "--restart", extra={"PANTHEON_STOP_WAIT": "0.5"})
+    check("start --restart: claude agents пишет stopped, но процесс в реестре жив и держит имя — ждёт, отказ",
+          r.returncode == 1 and argvs() == [["stop", "a8"]] and f"pid {os.getpid()}" in r.stderr)
+    os.remove(held)
+    open(log, "w").close()
+    open(agents_file, "w").write(json.dumps([ab("working")]))
+    r = run("start", "athena-broker", "заново", "--restart")
+    check("start --restart: запись реестра с мёртвым процессом имени не держит — запуск",
+          r.returncode == 0 and argvs()[0] == ["stop", "a8"] and bg_started("athena-broker"))
+
+    open(log, "w").close()
+    scenario([ab("working")], [ab("stopped")], [ab("working")], [ab("working")], [ab("stopped")], [])
+    r = run("start", "athena-broker", "заново", "--restart")
+    a = argvs()
+    check("start --restart: копия ожила после stop (stopped → working) — повторный stop, дождался — запуск",
+          r.returncode == 0 and a[:2] == [["stop", "a8"], ["stop", "a8"]] and len(a) == 3 and bg_started("athena-broker")
+          and "stop-revived\tathena-broker" in slog())
+
+    open(log, "w").close()
+    scenario([ab("working")], [ab("stopped")], [ab("blocked")], [ab("stopped")], [ab("working")])
+    r = run("start", "athena-broker", "заново", "--restart")
+    check("start --restart: ожила и после повторного stop — отказ, код 1, новая не запущена",
+          r.returncode == 1 and argvs() == [["stop", "a8"], ["stop", "a8"]] and "ожила и после повторного" in r.stderr
+          and "claude stop a8" in r.stderr and "stop-revived-again\tathena-broker\ta8" in slog())
+
+    open(log, "w").close()
+    scenario([ab("working")], [ab("stopped"), {"id": "t1", "name": "athena-broker (2)", "kind": "interactive"}])
+    r = run("start", "athena-broker", "заново", "--restart")
+    check("start --restart: пока ждали, появилась чужая живая копия — отказ, её не трогает",
+          r.returncode == 1 and argvs() == [["stop", "a8"]] and "athena-broker (2) t1" in r.stderr)
+
+    open(log, "w").close()
+    scenario()
+    open(agents_file, "w").write("[]")
+    al0 = open(alerts_md).read() if os.path.exists(alerts_md) else ""
+    r = run("start", "athena-broker", "дальше", extra={"FAKE_BG_NAME": "athena-broker-sparkling-cat"})
+    al1 = open(alerts_md).read()[len(al0):] if os.path.exists(alerts_md) else ""
+    new_id = next((x["id"] for x in json.load(open(agents_file)) if x["name"] == "athena-broker-sparkling-cat"), "?")
+    check("start: новая сессия получила чужое имя («имя-два-слова») — тревога с id и что делать, код не 0, её не трогает",
+          r.returncode != 0 and "чужое имя" in al1 and new_id in al1 and "athena-broker-sparkling-cat" in al1
+          and "--restart" in al1 and ["stop", new_id] not in argvs() and "name-mismatch\tathena-broker" in slog())
+    open(log, "w").close()
+    open(agents_file, "w").write("[]")
+    r = run("start", "athena-broker", "дальше", extra={"FAKE_BG_NAME": "athena-broker (2)"})
+    check("start: новая сессия «имя (2)» — тоже тревога, код не 0", r.returncode != 0 and "«athena-broker (2)»" in r.stderr)
+    open(agents_file, "w").write("[]")
+    r = run("start", "athena-broker", "дальше")
+    check("start: новая сессия со своим именем — код 0, без тревоги", r.returncode == 0 and "чужое имя" not in r.stderr)
+    open(log, "w").close()
+    open(agents_file, "w").write("[]")
+    al0 = open(alerts_md).read() if os.path.exists(alerts_md) else ""
+    r = run("start", "athena-broker", "дальше", extra={"FAKE_BG_SKIP": "1", "PANTHEON_NAME_WAIT": "0.3"})
+    al1 = open(alerts_md).read()[len(al0):] if os.path.exists(alerts_md) else ""
+    open(log, "w").close()
+    scenario([], [], [ab("stopped", "x9", "s9", "athena-broker-old-cat"), ab("working", "n1", "s1")])
+    r = run("start", "athena-broker", "дальше")
+    check("start: остановленная копия с чужим именем, которой не было в списке до запуска, — не тревога, код 0",
+          r.returncode == 0 and "чужое имя" not in r.stderr and "name-ok\tathena-broker" in slog())
+    scenario()
+    check("start: новой сессии не видно в claude agents — код 0 (это ловит дежурный), строка в start.log, без тревоги",
+          r.returncode == 0 and bg_started("athena-broker") and "name-unseen\tathena-broker" in slog() and not al1)
+
+    # Зевс: execv — имя после запуска не проверить, ждать до
+    zeus = lambda s, aid="z1": {"id": aid, "name": "zeus", "state": s, "sessionId": "sz", "cwd": "/x", "startedAt": 1}
+    open(log, "w").close()
+    scenario([zeus("working")], [zeus("working")], [zeus("stopped")])
+    r = run("start", "zeus", "--restart", tty=True)
+    a = argvs()
+    check("start zeus --restart: stop, ждёт освобождения имени, затем execv claude --agent hq --name zeus",
+          r.returncode == 0 and a[0] == ["stop", "z1"] and len(a) == 2 and a[1][:4] == ["--agent", "hq", "--name", "zeus"]
+          and "stop-wait-free\tzeus" in slog())
+    open(log, "w").close()
+    scenario([zeus("working")], [zeus("working")])
+    r = run("start", "zeus", "--restart", tty=True, extra={"PANTHEON_STOP_WAIT": "0.5"})
+    check("start zeus --restart: старый Зевс не отпустил имя — отказ без execv, код 1",
+          r.returncode == 1 and argvs() == [["stop", "z1"]] and "не отпустили имя" in r.stderr)
+    open(log, "w").close()
+    scenario()
+    open(agents_file, "w").write(json.dumps([{"name": "zeus", "kind": "interactive", "pid": 77}]))
+    r = run("start", "zeus", "--restart", tty=True)
+    check("start zeus --restart: имя держит вкладка терминала — отказ с copies_message, ничего не останавливает",
+          r.returncode == 1 and not argvs() and "во вкладке" in r.stderr)
+    open(agents_file, "w").write("[]")
 
     # wake (ROLE-02)
     def task(tid, status, direction="athena-broker"):

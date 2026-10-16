@@ -975,6 +975,65 @@ def test_infra_check_managed_mode():
             setattr(p, k, v)
 
 
+def test_who_is_who_memo():
+    """Памятка «Кто есть кто.md» сверяется с ролями и реестром: +роль, −лишнее, совпало — тревога снята (metis-0120)."""
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    import importlib
+    p = importlib.import_module("pantheon")
+    d = tempfile.mkdtemp(prefix="who-")
+    pan, st, ag = (os.path.join(d, x) for x in ("pantheon", "state", "agents"))
+    for x in (pan, st, ag):
+        os.makedirs(x)
+    for r in ("argus", "momus", "hq", "workshop", "domain-coordinator", "hephaestus-pantheon", "apollo-alex"):
+        open(os.path.join(ag, r + ".md"), "w").write("---\nname: x\n---\n")
+    os.makedirs(os.path.join(ag, "_parts"))
+    open(os.path.join(ag, "argus.tmpl"), "w").write("шаблон")
+    open(os.path.join(pan, "directions.toml"), "w").write(
+        '[[direction]]\nname = "metis-pantheon"\n[[direction]]\nname = "hermes-alex"\n')
+    memo = os.path.join(pan, "Кто есть кто.md")
+    full = ("`zeus` `daedalus-<задача>` `metis-pantheon` `hermes-alex` `argus` `momus` `hephaestus-<проект>` "
+            "`apollo-<проект>` `claude agents` `pantheon tick` `~/.claude/agents/<роль>.md`\n")
+    saved = {k: getattr(p, k) for k in ("PANTHEON", "STATE", "AGENTS")}
+    alerts = os.path.join(pan, "alerts.md")
+
+    def read():
+        return open(alerts, encoding="utf-8").read() if os.path.exists(alerts) else ""
+
+    def put(text):
+        open(memo, "w", encoding="utf-8").write(text)
+    try:
+        p.PANTHEON, p.STATE, p.AGENTS = pan, st, ag
+        os.environ["PANTHEON_NO_NOTIFY"] = "1"
+        # 1. всё совпадает (чужой код в кавычках не мешает): тихо
+        put(full)
+        check(p.who_is_who_check() == ([], []), f"совпало, а сверка нашла {p.who_is_who_check()}")
+        check(p.who_is_who_alert() == "" and not read(), "совпало, а тревога есть")
+        # 2. роли нет в памятке: +momus, на том же состоянии строка одна
+        put(full.replace("`momus` ", ""))
+        line = p.who_is_who_alert()
+        check(line == "памятку обновить: +momus" and "+momus" in read(), f"нет тревоги +momus: {line!r}")
+        p.who_is_who_alert()
+        check(read().count("+momus") == 1, "тревога +momus повторилась на том же состоянии")
+        # 3. направление пропало, лишнее есть: +hermes-alex / −janus-probe
+        put(full.replace("`hermes-alex` ", "") + "`janus-probe` `hephaestus-old`\n")
+        line = p.who_is_who_alert()
+        check(line == "памятку обновить: +hermes-alex / −hephaestus-old / −janus-probe", f"нет −janus-probe: {line!r}")
+        # 4. снова совпало: тревога снята — новый сбой пишется заново
+        put(full)
+        check(p.who_is_who_alert() == "", "совпало, а тревога осталась")
+        put(full.replace("`momus` ", ""))
+        p.who_is_who_alert()
+        check(read().count("+momus") == 2, "после снятия тревога +momus не вернулась")
+        # 5. нет памятки: проверять нечего
+        os.remove(memo)
+        check(p.who_is_who_check() is None and p.who_is_who_alert() == "", "нет памятки, а сверка что-то нашла")
+    finally:
+        for k, v in saved.items():
+            setattr(p, k, v)
+        os.environ.pop("PANTHEON_NO_NOTIFY", None)
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
