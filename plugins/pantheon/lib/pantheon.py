@@ -294,13 +294,20 @@ CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 # Окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` из schedule.toml идёт с песочницей
 # settings/job-<роль>.json (собирает sandbox_build), а не без неё. Роль вне таблицы тик не запускает. write — куда
 # пишет Bash роли (сверх памяти ролей и своей папки кэша); model — модель задачи вместо любой из команды: у iris в
-# шапке haiku, а задаче разведчика нужен sonnet.
+# шапке haiku, а задаче разведчика нужен sonnet. agents — субагенты, которых роль задачи зовёт по своему шаблону
+# (хук agents.py, как у штаба и координаторов, P0-6): шаблоны clio, prometheus и iris субагентов не зовут — пусто.
 JOB_ROLES = {
-    "clio": {"write": [os.path.join(AI_HOME, "knowledge")]},
-    "prometheus": {"write": [os.path.join(AI_HOME, "knowledge")]},
-    "iris": {"write": [os.path.join(PANTHEON, "scout")], "model": "sonnet"},
+    "clio": {"write": [os.path.join(AI_HOME, "knowledge")], "agents": []},
+    "prometheus": {"write": [os.path.join(AI_HOME, "knowledge")], "agents": []},
+    "iris": {"write": [os.path.join(PANTHEON, "scout")], "model": "sonnet", "agents": []},
 }
 JOB_EXCLUDED = ["pantheon alert *"]
+# Пустой список agents.py считает сбоем и закрывает всё, и навыки без context: fork тоже (у clio — claude-md-improver).
+# Поэтому пустое окно задачи получает имя-заглушку: такого субагента нет, Agent любого типа и навык-fork — отказ, а
+# обычный навык идёт. Оно же — в тексте отказа («Этому окну можно: никого»)
+JOB_NO_AGENTS = "никого"
+# Встроенные типы Claude Code — в deny окна задачи вместе с ролями из ~/.claude/agents и лидами реестра
+BUILTIN_AGENTS = ["general-purpose", "claude", "Explore", "Plan", "statusline-setup", "claude-code-guide"]
 
 
 def job_window(role):
@@ -1774,6 +1781,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
     # Пишет только своё (JOB_ROLES), память ролей и свой кэш; личное закрыто на чтение и запись; сети Bash нет (веб у
     # prometheus и iris — инструменты WebFetch/WebSearch, не Bash); мимо песочницы — только `pantheon alert`. Строгий
     # guard — как у остальных окон. Кэш задачи в списке built — штаб его не читает (выдача из веба)
+    try:
+        known = sorted(f[:-3] for f in os.listdir(AGENTS) if f.endswith(".md") and ROLE_NAME.fullmatch(f[:-3]))
+    except OSError:
+        known = []
     for role, conf in JOB_ROLES.items():
         name = "job-" + role
         own = []
@@ -1789,6 +1800,11 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
         job["sandbox"]["network"]["allowedDomains"] = []
         job["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
         job["env"]["PANTHEON_ROLE"] = role  # хукам: роль окна, как у штаба
+        # субагенты (P0-6): главная сессия задачи зовёт только своих (хук agents.py); deny — все известные типы,
+        # кроме своих: встроенные, роли из ~/.claude/agents, лиды реестра и главные роли
+        mine = list(conf.get("agents") or [])
+        agents_window(job, mine or [JOB_NO_AGENTS],
+                      [x for x in BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES) if x not in mine], agents_py)
         write_window(out_dir, name, job)
         built.append(name)
     # штаб (SEC-26, вариант А): Зевс пишет только в ~/ai/pantheon, кроме .git и alerts.md; сеть закрыта (в веб он не

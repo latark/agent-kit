@@ -8,6 +8,7 @@
 import json
 import re
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -420,9 +421,27 @@ def main():
               for x in ("~/ai/knowledge/me", real("ai/knowledge/me"), "~/ai/pantheon/.git/git-crypt"))
           and know + "/.git/config" in jc["sandbox"]["filesystem"]["denyWrite"])
     check("окно задачи: строгий guard-хук, роль окна в env, без координаторских правил",
-          all(w["hooks"]["PreToolUse"] == sa["hooks"]["PreToolUse"][:1] and w["env"]["PANTHEON_ROLE"] == r
-              and "permissions" not in w and "autoCompactWindow" not in w
+          all(w["hooks"]["PreToolUse"][:1] == sa["hooks"]["PreToolUse"][:1] and w["env"]["PANTHEON_ROLE"] == r
+              and set(w.get("permissions", {})) == {"deny"} and "autoCompactWindow" not in w
               for w, r in ((jc, "clio"), (jp, "prometheus"), (ji, "iris"))))
+    # субагенты окна задачи (P0-6): хук agents.py с заглушкой «никого» и deny Agent(...) всем известным типам
+    agents_py = os.path.join(os.path.dirname(os.path.dirname(LIB)), "hooks", "agents.py")
+
+    def job_hook(w, ev):
+        hk = [h for g in w["hooks"]["PreToolUse"] if g["matcher"] == "Agent|Task|Skill" for h in g["hooks"]]
+        argv = shlex.split(hk[0]["command"]) if len(hk) == 1 else []
+        if len(argv) != 3 or not argv[1].endswith("/hooks/agents.py") or hk[0].get("onFailure") != "block":
+            return None
+        r = subprocess.run([sys.executable, "-I", agents_py, argv[2]], input=json.dumps(ev), capture_output=True, text=True)
+        return r.returncode, "deny" in r.stdout
+    ag = lambda t: {"tool_name": "Agent", "tool_input": {"subagent_type": t, "prompt": "x"}, "cwd": tmp}  # noqa: E731
+    skill = {"tool_name": "Skill", "tool_input": {"skill": "plain-skill"}, "cwd": tmp}
+    check("окно задачи: чужой субагент закрыт хуком — dev-opus, general-purpose, пустой тип, argus; обычный навык идёт",
+          all(job_hook(w, ag(t)) == (0, True) for w in (jc, jp, ji) for t in ("dev-opus", "general-purpose", "", "argus"))
+          and all(job_hook(w, skill) == (0, False) for w in (jc, jp, ji)))
+    check("окно задачи: deny Agent(...) — встроенные, роли из ~/.claude/agents, главные роли",
+          all(f"Agent({t})" in w["permissions"]["deny"] for w in (jc, jp, ji)
+              for t in ("general-purpose", "claude", "Explore", "argus", "dev-sonnet", "hq", "domain-coordinator")))
     check("окно штаба: кэши задач (выдача из веба) закрыты для чтения",
           any(x.endswith("pantheon-sandbox/job-prometheus") for x in load("hq")["sandbox"]["filesystem"]["denyRead"]))
     os.remove(os.path.join(state, "settings", "job-iris.json"))
