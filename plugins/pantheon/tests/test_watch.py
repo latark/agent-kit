@@ -726,6 +726,190 @@ def test_security_0100():
     check(r.returncode != 0 and not os.path.exists(e.st("maintenance", "../x.json")), "saved с путём в имени")
 
 
+def test_worktree_outward_links_0101():
+    """Дежурный не удаляет слитую чистую копию со ссылкой наружу (старый Claude Code сносил цель ссылки); ссылка
+    внутрь копии удалению не мешает."""
+    e = Env()
+    folder = e.direction("g-dir")
+    shutil.rmtree(os.path.join(folder, ".git"))
+    g = lambda *a, cwd=folder: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd,
+                                              capture_output=True, text=True, env=dict(os.environ, HOME=e.home))
+    g("init", "-q", "-b", "main")
+    g("commit", "-q", "--allow-empty", "-m", "x")
+    out_wt = os.path.join(folder, ".claude", "worktrees", "w-out")
+    in_wt = os.path.join(folder, ".claude", "worktrees", "w-in")
+    for n, w in (("w-out", out_wt), ("w-in", in_wt)):
+        g("worktree", "add", "-q", "-b", n, w)
+    target = os.path.join(e.tmp, "outside-data")
+    os.makedirs(target)
+    open(os.path.join(target, "keep.txt"), "w").write("x")
+    os.symlink(target, os.path.join(out_wt, "link-out"))
+    os.makedirs(os.path.join(in_wt, "sub"))
+    os.symlink(os.path.join(in_wt, "sub"), os.path.join(in_wt, "link-in"))
+    os.symlink("nowhere", os.path.join(in_wt, "link-broken"))
+    for w in (out_wt, in_wt):  # копия чистая для git status: ссылки и папка игнорируются
+        ex = subprocess.run(["git", "-C", w, "rev-parse", "--git-path", "info/exclude"], capture_output=True,
+                            text=True).stdout.strip()
+        ex = ex if os.path.isabs(ex) else os.path.join(w, ex)
+        os.makedirs(os.path.dirname(ex), exist_ok=True)
+        open(ex, "a").write("link-*\nsub\n")
+        check(g("status", "--porcelain", cwd=w).stdout.strip() == "", "копия не чистая для git")
+    old = T0 - 3 * 86400
+    for w in (out_wt, in_wt):
+        os.utime(w, (old, old))
+    e.run("watch", t=T0)
+    check(os.path.exists(out_wt) and os.path.exists(os.path.join(target, "keep.txt")),
+          "копия со ссылкой наружу убрана или цель тронута")
+    check("не убрана" in e.alerts() and "link-out" in e.alerts() and "w-out" in e.alerts(), "нет тревоги о ссылках")
+    check(not os.path.exists(in_wt), "копия со ссылкой внутрь не убрана")
+
+
+def test_outward_links_walk_limit_0101():
+    """Обход длиннее WALK_LIMIT — None (копия небезопасна); в пределах лимита — число ссылок наружу."""
+    import importlib
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    w = importlib.import_module("watch")
+    d = tempfile.mkdtemp(prefix="walk-", dir=os.environ.get("TMPDIR"))
+    saved = w.WALK_LIMIT
+    try:
+        for i in range(10):
+            open(os.path.join(d, f"f{i}"), "w").close()
+        w.WALK_LIMIT = 5
+        check(w.outward_links(d) is None, "обход длиннее лимита не признан небезопасным")
+        w.WALK_LIMIT = 50
+        check(w.outward_links(d) == (0, None), "обход в пределах лимита без ссылок не (0, None)")
+        os.symlink(tempfile.gettempdir(), os.path.join(d, "out"))
+        res = w.outward_links(d)
+        check(res and res[0] == 1 and res[1][0] == "out", "ссылка наружу не найдена")
+    finally:
+        w.WALK_LIMIT = saved
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_worktree_outside_and_prune_0118():
+    """Копии вне .claude/worktrees: тревога после WORKTREE_DAYS, никогда не удаляются; запись без папки чистится."""
+    e = Env()
+    folder = e.direction("g-dir")
+    shutil.rmtree(os.path.join(folder, ".git"))
+    g = lambda *a, cwd=folder: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd,
+                                              capture_output=True, text=True, env=dict(os.environ, HOME=e.home))
+    g("init", "-q", "-b", "main")
+    g("commit", "-q", "--allow-empty", "-m", "x")
+    outside = os.path.join(e.tmp, "ak-outside")
+    young = os.path.join(e.tmp, "ak-young")
+    gone = os.path.join(e.tmp, "ak-gone")
+    for n, w in (("o-old", outside), ("o-young", young), ("o-gone", gone)):
+        g("worktree", "add", "-q", "-b", n, w)
+    shutil.rmtree(gone)
+    old = T0 - 4 * 86400
+    os.utime(outside, (old, old))
+    os.utime(young, (T0, T0))
+    e.run("watch", t=T0)
+    check(os.path.isdir(outside), "копия вне штатной папки убрана")
+    a = e.alerts()
+    check("вне штатной папки" in a and "ak-outside" in a, "нет тревоги о копии вне штатной папки")
+    check("ak-young" not in a, "тревога о молодой копии вне папки")
+    lst = g("worktree", "list", "--porcelain").stdout
+    check("ak-gone" not in lst and "ak-outside" in lst and "ak-young" in lst, "запись без папки не вычищена")
+    check(g("rev-parse", "--verify", "-q", "o-old").returncode == 0, "ветка копии вне папки удалена")
+
+
+def _wt_repo(name):
+    e = Env()
+    folder = e.direction(name)
+    shutil.rmtree(os.path.join(folder, ".git"))
+    g = lambda *a, cwd=folder: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd,
+                                              capture_output=True, text=True, env=dict(os.environ, HOME=e.home))
+    g("init", "-q", "-b", "main")
+    g("commit", "-q", "--allow-empty", "-m", "x")
+    return e, folder, g
+
+
+def test_worktree_prune_unreadable_0118():
+    """Недоступная папка (EACCES) — не пропавшая: живая копия не теряет запись, prune откладывается и при другой
+    пропавшей записи; когда доступ вернулся, prune чистит только пропавшую."""
+    e, folder, g = _wt_repo("g-dir")
+    wts = os.path.join(folder, ".claude", "worktrees")
+    live_wt = os.path.join(wts, "w-live")
+    g("worktree", "add", "-q", "-b", "w-live", live_wt)
+    e.agents([{"id": "live0001", "sessionId": "live0001-x", "name": "w", "state": "working", "pid": os.getpid(),
+               "kind": "background", "cwd": live_wt, "startedAt": (T0 - 100) * 1000}])
+    ids = lambda: sorted(os.listdir(os.path.join(folder, ".git", "worktrees")))
+    os.chmod(wts, 0o000)
+    try:
+        e.run("watch", t=T0)
+        check("w-live" in ids(), "запись живой копии с недоступной папкой снята prune")
+        check("недоступна" in e.alerts() and "prune отложен" in e.alerts(), "нет тревоги о недоступной записи")
+    finally:
+        os.chmod(wts, 0o755)
+    check(os.path.exists(os.path.join(live_wt, ".git")), "копия повреждена")
+    # недоступная копия без сессии + реально пропавшая запись: prune не делается
+    e2, folder2, g2 = _wt_repo("g-dir")
+    wts2 = os.path.join(folder2, ".claude", "worktrees")
+    g2("worktree", "add", "-q", "-b", "w-noacc", os.path.join(wts2, "w-noacc"))
+    gone = os.path.join(e2.tmp, "ak-gone2")
+    g2("worktree", "add", "-q", "-b", "o-gone", gone)
+    shutil.rmtree(gone)
+    ids2 = lambda: sorted(os.listdir(os.path.join(folder2, ".git", "worktrees")))
+    os.chmod(wts2, 0o000)
+    try:
+        e2.run("watch", t=T0)
+        check(ids2() == ["ak-gone2", "w-noacc"], f"prune сработал при недоступной записи: {ids2()}")
+    finally:
+        os.chmod(wts2, 0o755)
+    e2.run("watch", t=T0)
+    check(ids2() == ["w-noacc"], f"после возврата доступа prune не убрал пропавшую: {ids2()}")
+    # chmod 000 на саму копию (родитель читается): git видит <копия>/.git как «нет файла» — prune снёс бы обе записи
+    e3, folder3, g3 = _wt_repo("g-dir")
+    self_wt = os.path.join(folder3, ".claude", "worktrees", "w-self")
+    g3("worktree", "add", "-q", "-b", "w-self", self_wt)
+    gone3 = os.path.join(e3.tmp, "ak-gone3")
+    g3("worktree", "add", "-q", "-b", "o-gone3", gone3)
+    shutil.rmtree(gone3)
+    ids3 = lambda: sorted(os.listdir(os.path.join(folder3, ".git", "worktrees")))
+    os.chmod(self_wt, 0o000)
+    try:
+        e3.run("watch", t=T0)
+        check(ids3() == ["ak-gone3", "w-self"], f"prune снял запись копии с chmod 000: {ids3()}")
+        check("недоступна" in e3.alerts(), "нет тревоги о недоступной копии")
+    finally:
+        os.chmod(self_wt, 0o755)
+    check(g3("status", "--porcelain", cwd=self_wt).returncode == 0, "копия сломана")
+    e3.run("watch", t=T0)
+    check(ids3() == ["w-self"], f"после возврата доступа prune не убрал пропавшую: {ids3()}")
+
+
+def test_worktree_prune_alert_key_and_empty_gitdir_0118():
+    """Тревога prune — со своим ключом (не склеивается с «забытой копией»); пустой gitdir — препятствие для prune."""
+    # chmod 000 на копии старше WORKTREE_DAYS: второй проход не добавляет строк в alerts.md
+    e, folder, g = _wt_repo("g-dir")
+    wt = os.path.join(folder, ".claude", "worktrees", "w-old")
+    g("worktree", "add", "-q", "-b", "w-old", wt)
+    old = T0 - 10 * 86400
+    os.utime(wt, (old, old))
+    os.chmod(wt, 0o000)
+    try:
+        e.run("watch", t=T0)
+        n1 = len(e.alerts().splitlines())
+        check("prune отложен" in e.alerts(), "нет тревоги prune")
+        e.run("watch", t=T0)
+        n2 = len(e.alerts().splitlines())
+        check(n2 == n1, f"второй проход добавил строки в alerts.md: {n1} -> {n2}")
+    finally:
+        os.chmod(wt, 0o755)
+    # пустой gitdir + пропавшая запись: обе записи остаются, тревога есть
+    e2, folder2, g2 = _wt_repo("g-dir")
+    g2("worktree", "add", "-q", "-b", "w-empty", os.path.join(folder2, ".claude", "worktrees", "w-empty"))
+    gone = os.path.join(e2.tmp, "ak-gone4")
+    g2("worktree", "add", "-q", "-b", "o-gone4", gone)
+    shutil.rmtree(gone)
+    wd = os.path.join(folder2, ".git", "worktrees")
+    open(os.path.join(wd, "w-empty", "gitdir"), "w").close()
+    e2.run("watch", t=T0)
+    check(sorted(os.listdir(wd)) == ["ak-gone4", "w-empty"], f"prune сработал при пустом gitdir: {sorted(os.listdir(wd))}")
+    check("битая" in e2.alerts() and "prune отложен" in e2.alerts(), "нет тревоги о пустом gitdir")
+
+
 def test_tick_subcommands():
     sys.path.insert(0, os.path.join(ROOT, "lib"))
     import importlib
