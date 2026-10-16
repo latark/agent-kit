@@ -10,7 +10,8 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    Bash успешно завершилась, она простая (без ; | & && || $( ` и перенаправлений) и это `pantheon review <вид> …`.
      tests          — `pantheon review test -- <команда>`: SHA — HEAD папки cwd, дерево чистое; repo — её remote;
                       программа после обёрток (heavy, env VAR=…, time, nice, timeout N) — не пустая (true, echo…,
-                      python3 -c pass, sh -c ''); саму команду после -- guard судит как голую (guard.py, 0.5.8);
+                      python3 -c pass, sh -c ''); неразобранное слово (`$UNSET/t.py`) и относительный путь (`./test`)
+                      пустыми не считаются; саму команду после -- guard судит как голую (guard.py, 0.5.8);
      accept, reject — `pantheon review accept|reject <owner/repo> <PR> <SHA> [--opened … --ran … --unchecked …]`,
                       только agent_type argus; у accept все три поля перечня (Б6) обязательны и непусты;
      talos          — `pantheon review talos <owner/repo> <PR> <SHA>`, только agent_type talos.
@@ -20,8 +21,11 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    пропускаются: битая запись может только не дать разрешения.
 2. merge_problem — правило gh pr merge: кто сливает (координатор или его лид), чьё направление, защиты, затем запор:
    один номер PR, без --auto и --admin, ровно один --match-head-commit <SHA> (его сверяет GitHub), все репозитории
-   команды — из [merge_repos] направления, запись tests на (repo, SHA), последний вердикт argus на (repo, PR, SHA) —
-   accept с полным перечнем проверенного (Б6), рецензент — не тот, кто сливает; продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
+   команды — из [merge_repos] направления, запись tests на (repo, SHA), вердикты argus на (repo, PR, SHA): рецензент —
+   пара (session_id, agent_id), у каждого считается его последний вердикт; пускает, только если рецензент есть,
+   последний вердикт каждого — accept с полным перечнем проверенного (Б6) и ни один рецензент не тот, кто сливает.
+   reject снимает только accept того же рецензента после него или новый коммит (metis-0158: два argus на одном
+   head — accept и reject в любом порядке дают отказ); продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
    owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро: весь plugins/guard/**, casefold;
    файлы из pulls/N/files с previous_filename.
 Чего guard не проверяет: правдивость строки в сводке и перечня argus и то, что выбранная команда тестов — настоящие
@@ -43,13 +47,15 @@ MERGE_CLOSED = ("слияние делает лид направления (heph
                 "координатора. Вместо него отправь свою ветку, открой PR (gh pr create) и в отчёте лиду напиши, что "
                 "проверено и что меняется.")
 MERGE_LEADS = ("hephaestus", "apollo")  # лиды: <база>-<направление после первого «-»>, как их собирает pantheon roles build
-MERGE_INTERNAL = ("Внутреннее сливай после записей запора: тесты (`pantheon review test -- <команда>`) и «принять» "
-                  "от argus на этот SHA, затем gh pr merge N --match-head-commit <SHA>.")
-MERGE_PRODUCT = ("Продукт для клиентов сливай после записей запора: тесты, «принять» от argus и проверка talos на этот "
-                 "SHA, строка в сводке «что ушло» со ссылкой owner/repo#N и откатом (`pantheon alert`), затем "
-                 "gh pr merge N --match-head-commit <SHA>.")
-MERGE_PROTECT = ("Защиты сливает только Метида или её лид через запор: тесты и «принять» от argus на этот SHA, "
-                 "gh pr merge N --match-head-commit <SHA>; PR, который задевает ядро защит (весь "
+# форма команды слияния в подсказках — с -R: правило autoMode «Pantheon Gated Merge» покрывает только её (metis-0154)
+MERGE_CMD = "gh pr merge N -R <owner/repo> --match-head-commit <SHA> --merge"
+MERGE_INTERNAL = ("Внутреннее сливай после записей шлюза слияния: тесты (`pantheon review test -- <команда>`) и "
+                  f"«принять» от argus на этот SHA, затем {MERGE_CMD}.")
+MERGE_PRODUCT = ("Продукт для клиентов сливай после записей шлюза слияния: тесты, «принять» от argus и проверка talos "
+                 "на этот SHA, строка в сводке «что ушло» со ссылкой owner/repo#N и откатом (`pantheon alert`), затем "
+                 f"{MERGE_CMD}.")
+MERGE_PROTECT = ("Защиты сливает только Метида или её лид через шлюз слияния: тесты и «принять» от argus на этот SHA, "
+                 f"{MERGE_CMD}; PR, который задевает ядро защит (весь "
                  "plugins/guard/ и .claude-plugin/marketplace.json), сливает только владелец кнопкой (Д3).")
 MERGE_OWNER = "Слияние делает владелец."
 MERGE_AMBIGUOUS = "\0два направления"
@@ -73,7 +79,7 @@ CHECKLIST_HINT = '--opened "<что открыл>" --ran "<что запусти
 # пустая команда тестов: программа, которая ничего не проверяет (защита от ошибки, список короткий и явный); ещё
 # python без скрипта или с пустым -c и оболочка без скрипта или с пустым -c (metis-0157, guard 0.5.8)
 EMPTY_TEST_PROGRAMS = {"true", ":", "echo", "printf", "exit", "test", "[", "sleep", "yes"}
-EMPTY_PYTHON = re.compile(r"python[0-9.]*")
+EMPTY_PYTHON = re.compile(r"python[0-9.]*t?|pypy[0-9.]*")  # и python3.14t (free-threaded), pypy3
 EMPTY_SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 # обёртки перед программой тестов: имя → флаги, за которыми идёт отдельное значение
 TEST_WRAPPERS = {"heavy": set(), "env": {"-u", "--unset", "-C", "--chdir"}, "time": set(),
@@ -377,15 +383,9 @@ def checklist_ok(rec):
 
 
 def _prog(word):
-    """Имя программы в нижнем регистре (macOS не различает регистр: TRUE — это true)."""
-    return os.path.basename(word.rstrip("/")).lower()
-
-
-def test_program(argv):
-    """Программа команды тестов после обёрток heavy, env (VAR=…, флаги), time, nice, timeout N — в нижнем регистре;
-    None — после обёрток ничего нет."""
-    i = _program_at(argv)
-    return _prog(argv[i]) or None if i is not None else None
+    """Имя программы в нижнем регистре (macOS не различает регистр: TRUE — это true); None — слово не разобрано
+    (разбор Bash отдаёт None для `$UNSET`, `${X:-y}`): неизвестно, что запустится (metis-0164)."""
+    return os.path.basename(word.rstrip("/")).lower() if isinstance(word, str) else None
 
 
 def _program_at(argv):
@@ -398,6 +398,8 @@ def _program_at(argv):
         takes, i = TEST_WRAPPERS[name], i + 1
         while i < len(argv):
             a = argv[i]
+            if not isinstance(a, str):
+                break  # неразобранное слово: дальше судить нечего, его и считаем программой (неизвестной)
             if a == "--":
                 i += 1
                 break
@@ -413,10 +415,13 @@ def _program_at(argv):
 
 
 def _py_code(args):
-    """Аргументы python → тело -c; "" — ни скрипта, ни -c, ни -m (читает stdin); None — скрипт или модуль (-m)."""
+    """Аргументы python → тело -c; "" — ни скрипта, ни -c, ни -m (читает stdin); None — скрипт, модуль (-m) или
+    неразобранное слово (`$UNSET/t.py`): что запустится, неизвестно, — не пусто."""
     i = 0
     while i < len(args):
         a = args[i]
+        if not isinstance(a, str):
+            return None
         if a == "--":
             return None if i + 1 < len(args) else ""
         if not a.startswith("-"):
@@ -428,7 +433,8 @@ def _py_code(args):
             if c in "cm":
                 if c == "m":
                     return None
-                return a[j:] if a[j:] else (args[i + 1] if i + 1 < len(args) else "")
+                body = a[j:] if a[j:] else (args[i + 1] if i + 1 < len(args) else "")
+                return body if isinstance(body, str) else None
             if c in "WX":  # флаг со значением: остаток токена или следующее слово
                 i += 0 if a[j:] else 1
                 break
@@ -456,10 +462,13 @@ def _py_empty(code):
 
 
 def _sh_code(args):
-    """Аргументы sh/bash/zsh → тело -c; "" — ни -c, ни скрипта (читает stdin); None — скрипт из файла."""
+    """Аргументы sh/bash/zsh → тело -c; "" — ни -c, ни скрипта (читает stdin); None — скрипт из файла или
+    неразобранное слово (`bash $UNSET/run.sh`, `sh -c "$UNSET"`): не пусто."""
     i, want_c = 0, False
     while i < len(args):
         a = args[i]
+        if not isinstance(a, str):
+            return None
         if a == "--":
             i += 1
             break
@@ -472,19 +481,28 @@ def _sh_code(args):
             continue
         break
     if want_c:
-        return args[i] if i < len(args) else ""
+        return (args[i] if isinstance(args[i], str) else None) if i < len(args) else ""
     return None if i < len(args) else ""
+
+
+def _relative(word):
+    """Путь со «/», но не абсолютный: `./test`, `script/test` — скрипт проекта. `/usr/bin/true` судится по имени."""
+    return "/" in word and not word.startswith("/")
 
 
 def _empty_run(argv, depth=0):
     """Команда ничего не проверяет → имя программы для текста отказа («нет» — пусто); иначе None. Пусто: программы
     EMPTY_TEST_PROGRAMS, python без скрипта или с -c из pass/литералов/print/exit, оболочка без скрипта или с -c,
-    где каждая команда пустая (`sh -c ''`, `bash -c 'true'`)."""
+    где каждая команда пустая (`sh -c ''`, `bash -c 'true'`). Неразобранное слово (None) — неизвестно, не пусто;
+    относительный путь (`./test`, `bin/test`) — скрипт проекта, а не программа из списка (metis-0164)."""
     i = _program_at(argv)
     if i is None:
         return "нет"
-    prog, rest = _prog(argv[i]), argv[i + 1:]
-    if not prog or prog in EMPTY_TEST_PROGRAMS:
+    word, rest = argv[i], argv[i + 1:]
+    prog = _prog(word)
+    if prog is None:
+        return None
+    if not prog or (prog in EMPTY_TEST_PROGRAMS and not _relative(word)):
         return prog or "нет"
     if EMPTY_PYTHON.fullmatch(prog):
         code = _py_code(rest)
@@ -507,10 +525,43 @@ def empty_test_problem(argv):
     sh -c '', bash -c 'true') — текст отказа; иначе None. Защита от ошибки, а не от обхода: список короткий и явный."""
     prog = _empty_run(argv)
     if prog:
-        return (f"команда тестов `{' '.join(argv) or 'пусто'}` ничего не проверяет (программа «{prog}»): "
+        shown = " ".join(w if isinstance(w, str) else "?" for w in argv)  # None — неразобранное слово
+        return (f"команда тестов `{shown or 'пусто'}` ничего не проверяет (программа «{prog}»): "
                 "запор пишет тесты только для настоящей команды — например, `pantheon review test -- heavy python3 -I "
                 "tests/test_x.py` или `pantheon review test -- heavy pnpm test`")
     return None
+
+
+BARE_VAR = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})")
+
+
+def vanishing_test_problem(cmd):
+    """`pantheon review test -- python3 -I $TESTFILE`: слово `$X`/`${X}` целиком и без кавычек при незаданной
+    переменной исчезает (окружение между вызовами Bash не сохраняется — частая ошибка агента). Команду судим так,
+    будто его нет: пустая → текст отказа; иначе None. Разбор Bash отдаёт None и для `$X`, и для `$X/t.py` — их
+    различает только исходный текст: токены с кавычками (posix=False) и сравнение с BARE_VAR (metis-0164)."""
+    try:
+        raw = shlex.split(cmd or "", posix=False)
+    except ValueError:
+        return None
+    k = next((i for i in range(len(raw) - 2) if raw[i:i + 3] == ["review", "test", "--"]), None)
+    if k is None:
+        return None
+    rest = raw[k + 3:]
+    gone = [t for t in rest if BARE_VAR.fullmatch(t)]
+    if not gone:
+        return None
+    try:
+        words = shlex.split(" ".join(t for t in rest if not BARE_VAR.fullmatch(t)))
+    except ValueError:
+        return None
+    prog = _empty_run(words)
+    if not prog:
+        return None
+    return (f"в команде тестов `{' '.join(rest)}` слово {', '.join(gone)} без кавычек при незаданной переменной "
+            f"исчезает, и остаётся `{' '.join(words) or 'пусто'}` — ничего не проверяет (программа «{prog}»). "
+            "Окружение между вызовами Bash не сохраняется — пиши путь буквально: `pantheon review test -- heavy "
+            "python3 -I tests/test_x.py`")
 
 
 def _is_pantheon(word):
@@ -557,7 +608,7 @@ def record(event):
     role = event.get("agent_type") or ""
     cwd = os.path.realpath(event.get("cwd") or "")
     if kind == "test":
-        if len(args) < 2 or args[0] != "--" or empty_test_problem(args[1:]):
+        if len(args) < 2 or args[0] != "--" or empty_test_problem(args[1:]) or vanishing_test_problem(cmd):
             return None
         sha = (_git(cwd, "rev-parse", "HEAD") or "").strip().lower()
         status = _git(cwd, "status", "--porcelain")
@@ -601,6 +652,7 @@ def review_problem(role, args, cmd="", background=False):
                 "обратных кавычек и переводов строки: иначе код выхода был бы не от тестов, и запись не сделается.")
     if kind == "test":
         why = empty_test_problem(args[3:]) if len(args) >= 4 and args[2] == "--" else None
+        why = why or vanishing_test_problem(cmd)
         return f"{why}. Записи не будет." if why else None
     need = REVIEW_KINDS[kind]
     if role != need:
@@ -686,6 +738,18 @@ def _core_problem(repo, pr, sha):
     return None
 
 
+def _reviewer(rec):
+    """Рецензент записи — пара (session_id, agent_id): два argus одной сессии — разные рецензенты (metis-0158)."""
+    return rec["by"].get("session_id") or "", rec["by"].get("agent_id") or ""
+
+
+def _who(rec):
+    """Чей вердикт — для текста отказа: роль, первые 8 знаков agent_id и session_id, время записи."""
+    sid, aid = _reviewer(rec)
+    return (f"{rec['by'].get('agent_type') or '?'} agent {aid[:8] or '—'}, сессия {sid[:8] or '—'}, "
+            f"запись {rec.get('time') if isinstance(rec.get('time'), str) else '?'}")
+
+
 def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advice, protect):
     """Запор (P1-4): то, что проверено, — ровно то, что сливается. Текст отказа или None."""
     if auto:
@@ -706,7 +770,7 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                 f"сливать можно только перечисленные там. Нужен — попроси Метиду добавить. {advice}")
     if len(tails) != 1:
         return (f"у папки несколько репозиториев ({', '.join(tails)}) — укажи нужный: gh pr merge {pr} -R "
-                f"<owner/repo> --match-head-commit {sha}. {advice}")
+                f"<owner/repo> --match-head-commit {sha} --merge. {advice}")
     repo = tails[0]
     records = read_records()
     if records is None:
@@ -715,7 +779,7 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     if not any(r["kind"] == "tests" and r["sha"] == sha and repo in [x.lower() for x in r["repo"]] for r in records):
         return (f"нет записи тестов на {repo}@{sha[:12]}: в чистом дереве на этом коммите запусти "
                 f"`pantheon review test -- <команда тестов>` (запишет хук guard). Тесты долгие: запускай "
-                "`pantheon review test` не в фоне, с timeout до 600000 мс (у Bash по умолчанию 120 с). {advice}")
+                f"`pantheon review test` не в фоне, с timeout до 600000 мс (у Bash по умолчанию 120 с). {advice}")
 
     def mine(r, kinds, who):
         return (r["kind"] in kinds and r["by"].get("agent_type") == who and r["pr"] == pr and r["sha"] == sha
@@ -725,16 +789,24 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     if not verdicts:
         return (f"нет «принять» от argus на {repo}#{pr}@{sha[:12]}: позови argus, он проверит и запишет "
                 f"`pantheon review accept {repo} {pr} {sha} {CHECKLIST_HINT}`. {advice}")
-    last = verdicts[-1]
-    if last["kind"] != "accept":
-        return (f"последний вердикт argus на {repo}#{pr}@{sha[:12]} — «вернуть» (reject): исправь, проверь заново "
-                f"и получи новое `pantheon review accept {repo} {pr} <новый SHA>`. {advice}")
-    if not checklist_ok(last):
-        return (f"«принять» argus на {repo}#{pr}@{sha[:12]} — без перечня проверенного (Б6): запись старого формата "
-                f"или неполная. argus, повтори `pantheon review accept {repo} {pr} {sha} {CHECKLIST_HINT}`. {advice}")
+    latest = {}  # рецензент (session_id, agent_id) → его последний вердикт; порядок — по первой записи рецензента
+    for r in verdicts:
+        latest[_reviewer(r)] = r
+    rejects = [r for r in latest.values() if r["kind"] != "accept"]
+    if rejects:
+        return (f"«вернуть» (reject) на {repo}#{pr}@{sha[:12]} от {'; '.join(_who(r) for r in rejects)}: его снимает "
+                "только «принять» того же рецензента, записанное после него (верни ему исправление), или новый коммит "
+                f"с новыми записями тестов и argus — `pantheon review accept {repo} {pr} <новый SHA>`. «Принять» "
+                f"другого argus «вернуть» не перекрывает. {advice}")
+    old = [r for r in latest.values() if not checklist_ok(r)]
+    if old:
+        return (f"«принять» на {repo}#{pr}@{sha[:12]} от {'; '.join(_who(r) for r in old)} — без перечня "
+                f"проверенного (Б6): запись старого формата или неполная. Тот же argus, повтори `pantheon review "
+                f"accept {repo} {pr} {sha} {CHECKLIST_HINT}`. {advice}")
     me = ((event or {}).get("session_id") or "", (event or {}).get("agent_id") or "")
-    if (last["by"].get("session_id") or "", last["by"].get("agent_id") or "") == me:
-        return f"рецензент и сливающий — одна и та же сессия: «принять» должен дать отдельный argus. {advice}"
+    if me in latest:
+        return (f"рецензент и сливающий — одна и та же сессия: «принять» должен дать отдельный argus, а среди "
+                f"рецензентов {repo}#{pr}@{sha[:12]} — и сливающий. {advice}")
     if advice == MERGE_PRODUCT:
         if not any(mine(r, ("talos",), "talos") for r in records):
             return (f"продукт — нет проверки talos на {repo}#{pr}@{sha[:12]}: позови talos, он проверит живое "
@@ -775,6 +847,13 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
     metis_roots = G._norm(metis)
     conf = G.private_conf(policy)
     ppaths, pcoords = _str_list(conf["paths"]), conf["coordinators"]
+    # guard читает [private] мягко (0163: неверное значение — умолчание), а шлюз слияния на неверном [private] закрыт:
+    # опечатка в списке coordinators не должна молча открыть слияние координатору с личным
+    raw = policy.get("private", {})
+    if not isinstance(raw, dict) or any(
+            k in raw and (_str_list(raw[k]) is None and not (k != "paths" and raw[k] == []))
+            for k in G.DEFAULT_PRIVATE):
+        ppaths = None
     if ppaths is None or not isinstance(pcoords, list) or not all(isinstance(c, str) for c in pcoords):
         return "[private] в policy.toml не разобрать, а без него неизвестно, у кого личное. " + MERGE_OWNER
     if any(G._inside(x, [pdir]) for x in G._norm(ppaths)) or any(G.privileged(policy, c, role, pdir) for c in pcoords):

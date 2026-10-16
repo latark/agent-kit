@@ -13,10 +13,12 @@ claude-config: коммит в обход sync.sh отправил бы прав
 Список расширен по проверке безопасности 14.10: всё, откуда код или инструкции запускаются сами — инструменты и
 глобальные правила ~/.claude, ссылка тика и команды в ~/.local, задачи launchd, профили оболочки, настройки git
 (hooksPath, алиасы с «!»), ~/.ssh (authorized_keys, ProxyCommand), ~/.claude.json (MCP-серверы запускают команды);
-в любом репозитории — .claude/settings*.json, .mcp.json, .git/hooks и .git/config.
+в любом репозитории — .claude/settings*.json, .claude/agents/, сама папка .claude как цель записи (cp -R x
+<репо>/.claude/, mv, tar -C, rsync: в неё можно положить settings.json и agents), .mcp.json, .git/hooks и .git/config.
 """
 
 import os
+import re
 
 G = None  # модуль guard.py: присваивает guard.py при загрузке
 
@@ -35,11 +37,16 @@ def protected():
             [os.path.realpath(os.path.join(home, x)) for x in HOME_ITEMS])
 
 
-def _settings_file(p):
+def _settings_file(p, mkdir_only=False):
     """Настройки, которые меняют разрешения, хуки или запускают код в любом репозитории: .claude/settings*.json,
-    .claude/agents/ (роли проекта), .mcp.json, .git/hooks/… и .git/config."""
+    .claude/agents/ (роли проекта), сама папка .claude (цель записи, чьё последнее звено — .claude), .mcp.json,
+    .git/hooks/… и .git/config. Внутри .claude остальное (worktrees/…) не защищено этим правилом."""
     key = G._key
     parent, base = os.path.split(p)
+    # tar -x -C, unzip -d, wget -P дают цель «новый файл в папке» (ANY_FILE): смотрим саму папку
+    last = os.path.basename(parent) if base == G.ANY_FILE else base
+    if key(last) == ".claude" and not mkdir_only:  # пустую папку mkdir ничего не запускает
+        return True  # сама папка <репо>/.claude как цель (cp -R x <репо>/.claude/, mv, tar -C, rsync): внутри settings и agents
     if key(base) in SETTINGS_NAMES and key(os.path.basename(parent)) == ".claude":
         return True
     if key(base) == ".mcp.json":
@@ -56,6 +63,11 @@ def _settings_file(p):
     return False
 
 
+# команда — одна простая mkdir без составных частей: создать пустую папку .claude можно (settings и agents в неё
+# кладут cp, mv, tar, rsync — они по-прежнему отказ)
+MKDIR_ONLY = re.compile(r"\s*mkdir\b[^;&|<>\n$`()]*\Z")
+
+
 def check_protect_config(event, tool, tool_input):
     role, sub, pdir = G.who(event)
     if not (G.is_pantheon_role(role) or sub):
@@ -66,11 +78,12 @@ def check_protect_config(event, tool, tool_input):
     if G.UNRESOLVED in targets:
         return G.UNRESOLVED_REASON
     prot = protected()
+    mk = tool == "Bash" and bool(MKDIR_ONLY.match(tool_input.get("command") or ""))
     bad = [p for p in targets
-           if G._inside(p, prot) or _settings_file(p) or any(G._inside(x, [p]) for x in prot)]
+           if G._inside(p, prot) or _settings_file(p, mk) or any(G._inside(x, [p]) for x in prot)]
     if not bad:
         return None
     return (f"Правило protect-config: роль «{role or 'субагент'}»{' (субагент)' if sub else ''} не правит защиты "
-            f"({', '.join(p.replace(G.HOME, '~') for p in bad[:3])}): хуки, роли (в том числе проекта: <репо>/.claude/agents), плагины, policy.toml, настройки, "
+            f"({', '.join(p.replace(G.HOME, '~') for p in bad[:3])}): хуки, роли (в том числе проекта: <репо>/.claude и .claude/agents), плагины, policy.toml, настройки, "
             "sync.sh и ~/.zshrc меняет только metis-pantheon в своей сессии после «да» владельца. "
             "Нужна правка — опиши её координатору metis-pantheon файлом в ~/ai/pantheon/directions/metis-pantheon/inbox/.")

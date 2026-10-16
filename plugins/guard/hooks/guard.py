@@ -32,8 +32,8 @@ PostToolUse (Bash:
                  направления (domains.json, [merge], [merge_client]); защиты — папки metis-pantheon и их
                  репозитории по git remote — только Метида или её лид. Во всех режимах — запор (P1-4, guard 0.5.4,
                  merge_gate.py): один номер PR, без --auto и --admin, ровно один --match-head-commit <SHA>,
-                 репозитории — из [merge_repos], записи журнала merge-gate: тесты на SHA и последнее «принять» от
-                 argus на (repo, PR, SHA), рецензент — не сливающий; продукт — ещё talos и строка «откат» в
+                 репозитории — из [merge_repos], записи журнала merge-gate: тесты на SHA и у каждого argus на
+                 (repo, PR, SHA) последний вердикт — «принять» (metis-0158), рецензенты — не сливающий; продукт — ещё talos и строка «откат» в
                  alerts.md; защиты — ещё Д3: PR не задевает ядро (весь plugins/guard/**, casefold; файлы из
                  pulls/N/files с previous_filename), его сливает только владелец. Журнал пишет этот же хук на PostToolUse
                  (`pantheon review …`). argus не делает git commit, merge, rebase и другие правки истории. Любой сбой
@@ -297,7 +297,7 @@ TG_IMPORT = re.compile(
 TG_FILE = re.compile(r"(?<![\w-])tg_read\.py\b")
 PY_LOADER = re.compile(
     r"\brunpy\b|\bimportlib\b|\bspec_from_file_location\b|\bSourceFileLoader\b|\bload_source\b"
-    r"|\bexec\s*\(|\bcompile\s*\(|\b__import__\b"
+    r"|(?:(?<![\w.])|(?<=builtins\.)|(?<=__builtins__\.))(?:exec|compile)\s*\(|\b__import__\b"
 )
 # Текст tg_read.py, поданный в Python: $(cat tg_read.py), cat tg_read.py | python3 -, python3 - < tg_read.py
 TG_SOURCE = re.compile(
@@ -578,6 +578,8 @@ TEMP_ROOTS = [os.path.realpath(p) for p in (os.environ.get("TMPDIR", ""), "/tmp"
 PANTHEON_ROLES = {"hq", "domain-coordinator", "workshop", "chiron", "argus", "talos", "prometheus", "clio",
                   "iris", "dev-opus", "dev-sonnet", "dev-haiku"}
 PANTHEON_ROLE_PREFIXES = ("hephaestus-", "apollo-")
+# ревизор: пишет только в agent_extra своей роли (policy.toml), свою память и временные папки — корней по cwd нет (0122)
+EXTRA_ONLY_ROLES = {"momus"}
 UNRESOLVED = "\0неразобранная-цель"
 # stop|resume|pause|restart — окна сессий (metis-0047); `pantheon jobs pause|resume` — другая команда (PANTHEON_JOB_ACTIONS)
 PANTHEON_PRIVILEGED = {"archive", "install", "uninstall", "commit", "start", "wake", "roles",
@@ -1561,7 +1563,7 @@ def _review_test_at(name, t):
     """`pantheon review test -- <команда>` (и `python3 …/pantheon.py review test -- …`): пульт сам запустит
     команду после -- (subprocess без оболочки) → индекс её начала в аргументах; иначе None (metis-0157)."""
     k = -1 if name in ("pantheon", "pantheon.py") else None
-    if k is None and (name in _SHELLS or re.fullmatch(r"python[0-9.]*", name)):
+    if k is None and (name in _SHELLS or re.fullmatch(r"python[0-9.]*t?|pypy[0-9.]*", name)):
         k = next((i for i, x in enumerate(t) if x and os.path.basename(x.rstrip("/")).lower() in
                   ("pantheon", "pantheon.py")), None)
     return k + 4 if k is not None and t[k + 1:k + 4] == ["review", "test", "--"] else None
@@ -2218,6 +2220,8 @@ def check_domain(event, tool, tool_input):
         return None
     if role == "workshop" and not sub:
         roots = [pdir]
+    elif role in EXTRA_ONLY_ROLES:
+        roots = []
     elif not pantheon_role:
         # встроенный или ваш собственный субагент: прежнее правило — направление по cwd, иначе git-репозиторий
         name, roots = direction_of(domains, cwd)
@@ -2293,10 +2297,11 @@ def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
         if hq:
             return True, ""
         own, _ = direction_of(domains, pdir)
-        if role == "domain-coordinator" or sub:
+        if (role == "domain-coordinator" or sub) and role not in EXTRA_ONLY_ROLES:  # ревизору вся ветка directions закрыта
             if own and target == _key(own):
                 return True, ""
-            if len(parts) > 3 and parts[2] == "inbox" and not exists and tool in ("Write", "Bash"):
+            if (len(parts) > 3 and parts[2] == "inbox" and not exists and tool in ("Write", "Bash")
+                    and role not in EXTRA_ONLY_ROLES):
                 return True, ""
         return False, ("в чужом направлении можно только создать новый файл в его inbox/; "
                        "свой STATUS.md и планы — в ~/ai/pantheon/directions/<своё направление>/")
@@ -2446,8 +2451,21 @@ def limited(event):
 
 
 def private_conf(policy):
-    p = policy.get("private") or {}
-    return {k: p.get(k) or v for k, v in DEFAULT_PRIVATE.items()}
+    """[private] из policy.toml (0163): не таблица — всё по умолчанию; ключа нет или значение не список — умолчание;
+    список — только его строки (strip, пустые убраны). roles и coordinators: пустой список — никого; paths: пустой —
+    умолчание."""
+    p = policy.get("private")
+    if not isinstance(p, dict):
+        p = {}
+    conf = {}
+    for k, v in DEFAULT_PRIVATE.items():
+        val = p.get(k)
+        if not isinstance(val, list):
+            conf[k] = v
+            continue
+        items = [x.strip() for x in val if isinstance(x, str) and x.strip()]
+        conf[k] = items if items or k != "paths" else v
+    return conf
 
 
 def window_role():
@@ -2845,14 +2863,14 @@ def check_push(event, tool, tool_input):
         if name and os.path.basename(name.rstrip("/")) == "pantheon":
             why = review_problem(role, texts, tool_input.get("command") or "", bool(tool_input.get("run_in_background")))
             if why:
-                return f"Правило push (запор слияния): {why}"
+                return f"Правило push (шлюз слияния): {why}"
             continue
         if name not in ("git", "?"):
             continue
         parsed = _git_sub(texts) if name == "git" else None
         if role == "argus" and parsed and parsed[1] in ARGUS_GIT_BAN:
             # рецензент не меняет то, что проверяет: вердикт argus — на чужой SHA (запор слияния, P1-4)
-            return (f"Правило push (запор слияния): argus не делает git {parsed[1]} — рецензент проверяет чужой "
+            return (f"Правило push (шлюз слияния): argus не делает git {parsed[1]} — рецензент проверяет чужой "
                     "коммит и не меняет его. Нашёл, что исправить, — верни «reject» и опиши в отчёте лиду.")
         if name == "?" and "push" not in texts:
             continue
