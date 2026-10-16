@@ -68,6 +68,11 @@ def main():
     r = run("--markers", markers, "--repo", ex)
     check("путь plugins/guard/ из EXCLUDE — пропуск, код 0", r.returncode == 0, r.stdout)
 
+    mk = make_repo({".claude-plugin/marketplace.json": '{"description": "ZorbaCorp"}\n',
+                    ".claude-plugin/other.json": '{"description": "чисто"}\n'})
+    r = run("--markers", markers, "--repo", mk)
+    check("marketplace.json из EXCLUDE — пропуск, код 0", r.returncode == 0, r.stdout)
+
     r = run("--markers", os.path.join(_ROOT, "нет.txt"), "--repo", dirty)
     check("нет файла маркеров — код 2 и предупреждение в stderr", r.returncode == 2 and "пропущена" in r.stderr, r.stderr)
     r = run("--repo", dirty)
