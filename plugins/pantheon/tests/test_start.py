@@ -471,16 +471,21 @@ def main():
 
     # heavy (MEM-03): два места, третья команда ждёт
     locks = os.path.join(state, "locks")
-    marks = os.path.join(tmp, "heavy-marks")
-    os.makedirs(marks)
-    script = f"python3 -c 'import time,os; open(os.path.join(\"{marks}\", str(time.time())), \"w\").close(); time.sleep(1.5)'"
+    journal = os.path.join(tmp, "heavy-journal")
+    # каждая команда дописывает в журнал «s» при старте и «e» перед выходом; порядок строк — порядок событий, а не время
+    script = (f"python3 -c 'import time; open(\"{journal}\", \"a\").write(\"s\\n\"); time.sleep(1.5); "
+              f"open(\"{journal}\", \"a\").write(\"e\\n\")'")
     ps = [subprocess.Popen([sys.executable, "-I", HEAVY, "/bin/sh", "-c", script], env=env,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(3)]
     codes = [p.wait(timeout=30) for p in ps]
-    starts = sorted(float(x) for x in os.listdir(marks))
-    check("heavy: места созданы сборкой; две команды сразу, третья — после освобождения места",
-          os.path.exists(os.path.join(locks, "heavy-cmd-1.lock")) and codes == [0, 0, 0] and len(starts) == 3
-          and starts[1] - starts[0] < 1.0 and starts[2] - starts[0] >= 1.4)
+    events = open(journal).read().split()
+    running, peak = 0, 0
+    for ev in events:
+        running += 1 if ev == "s" else -1
+        peak = max(peak, running)
+    check("heavy: места созданы сборкой; больше двух команд разом не идёт, третья стартует после первого выхода",
+          os.path.exists(os.path.join(locks, "heavy-cmd-1.lock")) and codes == [0, 0, 0] and sorted(events) == ["e"] * 3 + ["s"] * 3
+          and peak == 2 and events.index("e") < [i for i, x in enumerate(events) if x == "s"][2])
     r = subprocess.run([sys.executable, "-I", HEAVY, "/bin/sh", "-c", "exit 7"], env=env, capture_output=True)
     check("heavy: код выхода команды сохраняется", r.returncode == 7)
 

@@ -280,6 +280,20 @@ def main():
     # мастерская: тот же сетевой git — только при SSH-remote в ~/projects/workshop; здесь его нет
     check("песочница: у мастерской без SSH-remote сетевого git мимо песочницы нет",
           not any(x.startswith("git ") for x in sw["sandbox"]["excludedCommands"]))
+    # metis-0141 п. 3: репозиторий с SSH-remote в подпапке ~/projects/workshop → сетевой git мимо песочницы есть;
+    # убрали репозиторий — снова нет (сборка настоящая, окно workshop пересобирается)
+    wr = os.path.join(tmp, "projects", "workshop", "t1")
+    os.makedirs(wr, exist_ok=True)
+    subprocess.run(["git", "init", "-q", wr], check=True)
+    subprocess.run(["git", "-C", wr, "remote", "add", "origin", "git@github.com:x/w.git"], check=True)
+    subprocess.run([PY311, "-I", LIB, "domains", "build"], env=env, capture_output=True)
+    swx = load("workshop")["sandbox"]["excludedCommands"]
+    check("песочница: у мастерской при SSH-remote в ~/projects/workshop git push/fetch/pull мимо песочницы",
+          all(c in swx for c in ("git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *")))
+    _shutil.rmtree(wr)
+    subprocess.run([PY311, "-I", LIB, "domains", "build"], env=env, capture_output=True)
+    check("песочница: репозиторий с SSH-remote убран → у мастерской сетевого git снова нет",
+          not any(x.startswith("git ") for x in load("workshop")["sandbox"]["excludedCommands"]))
     reads = ["gh pr view", "gh pr view *", "gh pr checks", "gh pr checks *", "gh pr diff", "gh pr diff *",
              "gh pr list", "gh pr list *"]
     check("gh мимо песочницы (P0-4): нет gh api, gh issue и gh pr *; чтение PR (view/checks/diff/list) — у всех окон, "
