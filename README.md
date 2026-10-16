@@ -26,7 +26,18 @@
   песочницы, в нём временные файлы heredoc и mktemp и временные папки `mktemp -d` и `tempfile`.
 - Окна ролей (с 0.11.14, `sandbox_build`): окну координатора направления дано правило `Bash(gh pr merge *)` — слияние PR
   без вопроса классификатора auto (`COORDINATOR_ALLOW`); мастерской и штабу правила нет. Каждое слияние по-прежнему
-  проверяет guard: только главная сессия domain-coordinator, свои папки, без `--admin` и `--auto`.
+  проверяет guard: главная сессия domain-coordinator или лид её направления (`hephaestus-*`, `apollo-*`; metis-0054),
+  свои папки, без `--admin` и `--auto`.
+  С 0.11.26 (metis-0098) окнам координаторов, Метиды в их числе, сборка кладёт и `autoMode.allow` — исключения
+  классификатора auto: `"$defaults"` (встроенные исключения остаются), «Pantheon Gated Merge» и «Pantheon Review
+  Record» (`coordinator_auto_allow`). Gated Merge описывает ровно форму, которую пускает запор guard:
+  `gh pr merge <N> -R|--repo <owner/repo> --match-head-commit <sha>`, а последующие `gh pr view` или `git fetch`
+  классификатор считает обычными. `--admin`, `--auto`, `gh api` и ядро защит (`plugins/guard/`,
+  `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
+  из `policy.toml`; направлению без такой записи правила слияния нет. Имён владельца, направлений и репозиториев в
+  коде правил нет: у каждой установки правило собирается из её `policy.toml`. Review Record снимает с
+  `pantheon review test|accept|reject|talos|status` метки Self-Approval и CI Bypass. Штабу и мастерской `autoMode`
+  не дают. Классификатор читает `autoMode` из `--settings` окна, а из `.claude/settings.json` проекта — нет.
   Песочница всех окон (направления, мастерская, штаб) пускает запись в `~/.claude/agent-memory/<роль>` каждой
   роли-субагента, у которой в шапке `~/.claude/agents/<роль>.md` есть ключ `memory:` (роли главных сессий не берутся;
   папку сборка создаёт, ссылку вместо папки пропускает). Новый файл роли тик подхватывает сам. Риск: песочница пускает
