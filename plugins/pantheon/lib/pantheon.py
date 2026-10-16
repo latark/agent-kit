@@ -4001,16 +4001,21 @@ def board():
             return 0
         try:
             with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
-                projects = {d.get("name"): d.get("project") for d in tomllib.load(fh).get("direction") or []}
+                dirs = tomllib.load(fh).get("direction") or []
+            projects = {d.get("name"): d.get("project") for d in dirs}
+            marks = {}  # значок проекта — поле `mark` направления; ключ — project, иначе name
+            for d in dirs:
+                if isinstance(d.get("mark"), str):
+                    marks.setdefault(d.get("project") or d.get("name"), d["mark"])
         except (OSError, ValueError):
-            projects = {}
+            projects, marks = {}, {}
         # политика уведомлений — под своей блокировкой на весь проход: сбои из run-job ждут, а не теряются
         with lock("notify"):
             pol = notify_policy(sched)
             lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
                                  alert=lambda k, v, text, who="board", note=None: alert_once(k, v, text, who, note,
                                                                                             policy=pol),
-                                 primary=primary, projects=projects, policy=pol)
+                                 primary=primary, projects=projects, policy=pol, marks=marks)
             pol.save()
         once_dir = path("once")  # отметки «уже сообщали» старше 90 дней — убрать: папка не растёт без конца
         for f in os.listdir(once_dir) if os.path.isdir(once_dir) else []:

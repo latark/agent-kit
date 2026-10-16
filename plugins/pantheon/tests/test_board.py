@@ -658,6 +658,17 @@ def main():
           "note.id:\n    displayName: №" in bt and "🔴 Нужен ответ" in bt and "🔥 1 высокий" in bt
           and "order: [note.id, file.name, formula.status_view, formula.prio_view" in bt)
     sort_by_column_checks(check, _tasks)
+    # значки проектов — поле `mark` реестра; нет поля или значение с разметкой — ⬜
+    mk = {"zorba": "🟥", "bad1": "a\nb", "bad2": ": x", "bad3": "a b", "bad4": "#1", "bad5": "дольшечем"}
+    pm = lambda pr: _tasks.render_card({"id": "metis-0002", "type": "task", "title": "T", "status": "ready",
+                                        "project": pr}, "", "x.md", 0, marks=mk)[0]["Проект"]
+    check("значок проекта: свой из реестра; нет поля — ⬜; «входящие» — встроенный 📥",
+          pm("zorba") == "🟥 zorba" and pm("nomark") == "⬜ nomark" and pm("входящие") == "📥 входящие")
+    check("значок проекта: перевод строки, «: x», пробел, «#», длиннее 4 знаков — ⬜",
+          all(pm(k) == f"⬜ {k}" for k in ("bad1", "bad2", "bad3", "bad4", "bad5")))
+    ib = _tasks.render_inbox_card({"direction": "d", "file": "2026-10-15-x.md", "id": "i1", "text": "# t\ntext"},
+                                  "zorba", marks=mk)[0]["Проект"]
+    check("значок проекта: входящая карточка берёт значок из реестра", ib == "🟥 zorba")
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 

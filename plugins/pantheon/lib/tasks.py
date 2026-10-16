@@ -702,8 +702,15 @@ NOTES_HINT = ("<small>Пишите ниже своими словами: мыс�
 OWNER_NOTES = "## Заметки владельца"  # раздел файла задачи: сюда тик переносит текст из карточки
 QUIET = 30  # с: новую карточку берём, когда у неё есть название и её столько не меняли (ответ и заметка — сразу)
 UNTITLED = ("Без названия", "Untitled")
-PROJECT_MARK = {"Пантеон": "⬛", "BrokerAssistant": "🟦", "alexbroker": "🟧", "MorphStream": "🟪", "expert-corpus": "🟫",
-                "legal-watch": "🟫", "content-machine": "🟩", "second-brain": "🟨", "входящие": "📥"}
+PROJECT_MARK = {"входящие": "📥"}  # встроенный; остальные значки — поле `mark` направления в directions.toml
+DEFAULT_MARK = "⬜"
+MARK_OK = re.compile(r"[^\s:#\"'`\[\]{}|>&*!%@,]{1,4}")  # значок попадает в YAML-шапку карточки: коротко, без разметки
+
+
+def project_mark(proj, marks=None):
+    """Значок проекта: встроенный, затем из реестра (marks: проект → значок), иначе ⬜. Чужое значение — ⬜."""
+    m = PROJECT_MARK.get(proj) or (marks or {}).get(proj)
+    return m if isinstance(m, str) and MARK_OK.fullmatch(m) else DEFAULT_MARK
 STATUS_MARK = {"Входящие": "📥", HUMAN_WAIT: "🔴", "Очередь": "⚪", "В работе": "🟡", "Ждёт": "⏸",
                "На проверке": "🔵", "Готово": "🟢", "Отменено": "⚫"}
 PRIORITY_MARK = {0: "🔥🔥 срочно", 1: "🔥 высокий", 2: "обычный", 3: "▫️ низкий"}
@@ -882,7 +889,7 @@ def link_ids(text, names, own=None):
     return "\n".join(line(ln) for ln in text.split("\n"))
 
 
-def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, who=None, long_wait=False, names=None):
+def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, who=None, long_wait=False, names=None, marks=None):
     """who — имя узла «Кому» (board_sync считает его по реестру направлений); без него — по слагу без реестра.
     long_wait — «долго ждёт» во «Внимание» (решает политика уведомлений).
     names — id → имя карточки: номера задач в тексте станут ссылками (link_ids)."""
@@ -894,7 +901,7 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
     node = who or Roles(()).name(assignee(head))
     direction = head.get("direction") or "inbox"
     closed = head.get("status") in ("done", "dropped")
-    card = {"Статус": lab, "Проект": f"{PROJECT_MARK.get(proj, '▪️')} {proj}".strip(),
+    card = {"Статус": lab, "Проект": f"{project_mark(proj, marks)} {proj}".strip(),
             "Внимание": attention(head, t, conflict, long_wait),
             # «Срок» — свойство-дата Bases: только дата; время срока — в выноске карточки
             "Приоритет": prio if isinstance(prio, int) and not isinstance(prio, bool) else None,
@@ -1362,9 +1369,9 @@ def inbox_items(pantheon):
     return out
 
 
-def render_inbox_card(item, project, conflict=None, who=None):
+def render_inbox_card(item, project, conflict=None, who=None, marks=None):
     proj = project or item["direction"]
-    card = {"Статус": "Входящие", "Проект": f"{PROJECT_MARK.get(proj, '▪️')} {proj}".strip(),
+    card = {"Статус": "Входящие", "Проект": f"{project_mark(proj, marks)} {proj}".strip(),
             "Внимание": ["конфликт"] if conflict else None, "Кому": link(who or Roles(()).name(item["direction"])),
             "Дальше": "разобрать: в «Очередь» — станет задачей направления, в «Отменено» — в архив",
             "Создана": _date(item["file"][:10], 10),
@@ -1584,7 +1591,7 @@ def _sync_types(vault, alert):
 
 
 def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None, primary=True, projects=None,
-               policy=None):
+               policy=None, marks=None):
     """Один проход доски. → список строк «что сделано» (для журнала тика). policy — политика уведомлений
     (lib/notify.py, её передаёт pantheon.py): решает, что показать, что отложить в сводку. Без неё — без
     уведомлений; notify — прежний параметр, не используется."""
@@ -1813,7 +1820,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             st.pop("conflict_at", None)
         who = roles.name(slugs[cid])
         if h is None:
-            card, cbody = render_inbox_card(inbox[cid], projects.get(inbox[cid]["direction"]), st.get("conflict"), who)
+            card, cbody = render_inbox_card(inbox[cid], projects.get(inbox[cid]["direction"]), st.get("conflict"), who, marks)
         else:
             logged = logged_for(h, answers_by_id.get(cid))
             forged = answer_conflict(h, logged, answers_by_id.get(cid))
@@ -1821,7 +1828,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                 alert(f"answer-mismatch-{cid}", str(h.get("requested") if h.get("risky") is True else h.get("answer")),
                       f"конфликт ответа: {h.get('title')} ({cid}) — {forged}", "board")
             card, cbody = render_card(h, b, rel(src), t, " · ".join(x for x in (st.get("conflict"), forged) if x) or None,
-                                      notes_by_id.get(cid), logged, who, long_wait=cid in long_ids, names=names)
+                                      notes_by_id.get(cid), logged, who, long_wait=cid in long_ids, names=names, marks=marks)
         target = os.path.join(board, name + ".md")
         old = present.get(cid)
         if old and (digest(old[0]) != seen.get(cid) or cid in typing):
