@@ -1725,12 +1725,11 @@ def _real_dir(p, roots, strict=False, create=False):
     return None
 
 
-# корпус и его копии: индексы qmd и самого корпуса хранят полный текст, переписка сессий Фемиды — выдержки.
-# legal-watch/cache и inbox (P0-1, metis-0060): там выгрузки Telegram-каналов (cache/telegram) и входящие сырые
-# материалы — чужой текст, как корпус; штабу его не читать (у Зевса личное и действия наружу). Вопросы по праву и
-# каналам — Фемиде (themis-sources) поручением; коллекцию qmd legal штабу закрывает хук qmd-query
-HQ_CLOSED_DIRS = ["~/projects/expert-corpus", "~/.cache/expert-corpus", "~/.cache/qmd",
-                  "~/.claude/projects/*expert-corpus*", "~/projects/legal-watch/cache", "~/projects/legal-watch/inbox"]
+# закрытые штабу папки: индексы qmd, копии больших корпусов и сырые выгрузки (кэш, входящие) — чужой текст; штабу его
+# не читать (у штаба личное и действия наружу). Вопросы по ним — координатору направления поручением; коллекции qmd
+# штабу закрывает хук qmd-query
+HQ_CLOSED_DIRS = ["~/projects/expert-corpus", "~/.cache/expert-corpus", "~/.cache/qmd",  # trace-ok: 0182-core — снять в PR ядра 0182
+                  "~/.claude/projects/*expert-corpus*", "~/projects/legal-watch/cache", "~/projects/legal-watch/inbox"]  # trace-ok: 0182-core — снять в PR ядра 0182
 
 
 # выводы фоновых задач и TMPDIR песочницы всех сессий Claude Code: /tmp/claude-<uid> (на macOS по умолчанию). Не из

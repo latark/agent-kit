@@ -1136,15 +1136,10 @@ QMD_HOW = ("Ищи по смыслу в своей коллекции: searches=
 
 
 QMD_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,30}")
-# Штабу закрыты: corpus — корпус лекций (решение владельца 15.10, SEC-13; guard corpus-role — то же для Bash); legal —
-# право и выгрузки Telegram-каналов legal-watch (P0-1, metis-0060): у Зевса личное и действия наружу, чужой текст
-# каналов в его окне — путь внедрения. Вопросы по корпусу, праву и каналам — Фемиде (themis-sources) поручением.
-QMD_HQ_CLOSED = {"corpus", "legal"}
-QMD_HQ_CLOSED_WHY = {
-    "corpus": "штабу корпус закрыт (решение владельца 15.10) — просьбу «по Куклину» передай Фемиде или координатору",
-    "legal": "штабу коллекция legal закрыта (P0-1, metis-0060) — вопросы по праву и Telegram-каналам передай Фемиде "
-             "(themis-sources) через поручение",
-}
+# Штабу закрыты коллекции с чужим текстом и сырыми выгрузками: у штаба личное и действия наружу, чужой текст в его окне —
+# путь внедрения. Вопросы по ним — координатору направления поручением.
+QMD_HQ_CLOSED = {"corpus", "legal"}  # trace-ok: 0182-core — снять в PR ядра 0182
+QMD_HQ_CLOSED_WHY = "штабу коллекция %s закрыта — вопрос передай координатору направления поручением"
 
 
 def _qmd_hq_target_ok(item):
@@ -1162,7 +1157,7 @@ def cmd_qmd_query(ev):
     """PreToolUse mcp__qmd__query|get|multi_get. query: только поиск по смыслу или по словам в названных коллекциях,
     без доранжирования. Полный режим (query без searches — переформулировка моделью, rerank) держит в памяти сервера
     три модели (~2 ГБ против ~0,3) и в 50–100 раз медленнее; без collections большая коллекция legal вытесняет
-    остальные (QMD-04). Штабу (hq) коллекции corpus и legal закрыты во всех трёх инструментах."""
+    остальные (QMD-04). Штабу (hq) закрытые коллекции недоступны во всех трёх инструментах."""
     try:
         why = _qmd_why(ev)
     except Exception as e:  # отказ, а не пропуск: сбой разбора не должен открывать полный режим или корпус
@@ -1183,7 +1178,7 @@ def _qmd_why(ev):
     tool = ev.get("tool_name") or ""
     # окно штаба целиком, с помощниками Зевса (Explore, prometheus, clio, chiron; general-purpose штабу закрыт, P0-6):
     # у них свой agent_type, но то же окно с личным
-    # и действиями наружу — пересказ выдачи принёс бы чужой текст Зевсу. Поручение Фемиде или координатору — их окна
+    # и действиями наружу — пересказ выдачи принёс бы чужой текст Зевсу. Поручение координатору направления — его окно
     hq = session_role(ev) == "hq" or os.environ.get("PANTHEON_ROLE") == "hq"
     why = None
     if tool.endswith("__query"):
@@ -1198,19 +1193,18 @@ def _qmd_why(ev):
             why = "только type \"vec\" (по смыслу) или \"lex\" (номера и коды); hyde не используем"
         elif hq and any(not isinstance(c, str) or c.strip() in QMD_HQ_CLOSED for c in colls):
             bad = next((c.strip() for c in colls if isinstance(c, str) and c.strip() in QMD_HQ_CLOSED), "corpus")
-            why = QMD_HQ_CLOSED_WHY[bad]
+            why = QMD_HQ_CLOSED_WHY % bad
     elif hq and tool == "ReadMcpResourceTool":
         # ресурс qmd://… сервер ищет без схемы и по окончанию пути во всех коллекциях: «pantheon/x.md» найдёт и
         # corpus/my-pantheon/x.md (ревью argus 15.10) — штабу ресурсы qmd закрыты целиком, get даёт то же по точному адресу
         if str(ti.get("server") or "").strip().casefold() == "qmd":
-            why = "штабу ресурсы qmd закрыты (корпус и legal штабу закрыты, 15.10) — читай инструментом get"
+            why = "штабу ресурсы qmd закрыты — читай инструментом get"
     elif hq and (tool.endswith("__get") or tool.endswith("__multi_get")):
         raw = ti.get("file") if tool.endswith("__get") else ti.get("pattern")
         items = str(raw or "").split(",") if tool.endswith("__multi_get") else [str(raw or "")]
         if not all(_qmd_hq_target_ok(x) for x in items):
-            why = ("штабу — только адреса qmd://<коллекция>/<путь> из результатов поиска, без docid и коллекций corpus "
-                   "и legal (корпус закрыт решением владельца 15.10; право и Telegram-каналы — Фемиде (themis-sources) "
-                   "через поручение, metis-0060)")
+            why = ("штабу — только адреса qmd://<коллекция>/<путь> из результатов поиска, без docid и закрытых "
+                   "штабу коллекций (вопрос по ним — координатору направления поручением)")
     return why
 
 

@@ -278,8 +278,9 @@ def test_hook():
     check("штаб (окно hq): query по legal — отказ", hook({**q, "collections": ["legal"]}, window="hq"))
     check("штаб: query по legal и pantheon — отказ", hook({**q, "collections": ["pantheon", " legal"]}, role="hq"))
     out = hook({**q, "collections": ["legal"]}, window="hq", raw=True)
-    check("штаб: отказ по legal — Фемиде (themis-sources) поручением", "themis-sources" in out and "Telegram" in out
-          and "Куклин" not in out, out)
+    check("штаб: отказ по legal — нейтральный текст: координатору направления поручением, без имён",
+          "координатору направления" in out and "поручением" in out and "legal" in out
+          and "themis" not in out and "Telegram" not in out, out)
     check("штаб (окно hq): query по pantheon — пропуск", not hook({**q, "collections": ["pantheon"]}, window="hq"))
     check("штаб: get qmd://legal/… — отказ", hook({"file": "qmd://legal/x.md"}, g, window="hq"))
     check("штаб: multi_get qmd://legal/… — отказ", hook({"pattern": "qmd://legal/2026-09*.md"}, m, "hq"))
