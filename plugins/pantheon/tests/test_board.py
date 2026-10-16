@@ -599,8 +599,87 @@ def main():
     check("Доска.base: колонка №, значки статуса и приоритета в таблицах",
           "note.id:\n    displayName: №" in bt and "🔴 Нужен ответ" in bt and "🔥 1 высокий" in bt
           and "order: [note.id, file.name, formula.status_view, formula.prio_view" in bt)
+    sort_by_column_checks(check, _tasks)
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
+
+
+def _eval_bases(expr, note, formulas):
+    """Вычислитель подмножества формул Bases, которое есть в шаблоне: if, ==, <, 0 - x, number, note["…"], formula.x,
+    .isEmpty(), .contains(). Ключи сортировки считаются тем же текстом формулы, что уходит в Доска.base."""
+    import re as _re
+    e = expr
+    e = _re.sub(r'note\["([^"]+)"\]\.isEmpty\(\)', r'(N("\1") is None)', e)
+    e = _re.sub(r'note\["([^"]+)"\]\.contains\(("[^"]*")\)', r'(\2 in str(N("\1")))', e)
+    e = _re.sub(r'note\["([^"]+)"\]', r'N("\1")', e)
+    e = _re.sub(r'formula\.(\w+)', r'F("\1")', e)
+    e = _re.sub(r'\bif\(', 'IF(', e)
+    env = {"N": note.get, "F": lambda k: _eval_bases(formulas[k], note, formulas), "IF": lambda c, a, b: a if c else b,
+           "number": lambda v: float(v or 0)}
+    return eval(e, {"__builtins__": {}, "str": str}, env)
+
+
+def sort_by_column_checks(check, T):
+    """metis-0172: в каждой колонке «Доски» свой порядок; sort вида — col_k1..3 по возрастанию."""
+    import re as _re
+    base = T.BASE_FILE
+    formulas = dict(_re.findall(r"^  (\w+): '(.*)'$", base, _re.M))
+    board_view = base.split("  - type: kanban")[1].split("  - type: table")[0]
+    check("0172: вид «Доска» сортируется по col_k1, col_k2, col_k3 по возрастанию, без age_key",
+          _re.findall(r"property: (\S+)\n\s+direction: (\w+)", board_view.split("sort:")[1].split("order:")[0])
+          == [("formula.col_k1", "ASC"), ("formula.col_k2", "ASC"), ("formula.col_k3", "ASC")]
+          and "age_key" not in board_view)
+    check("0172: остальные виды (Нужен ответ, Горит, Все задачи) с прежней сортировкой",
+          base.count("formula.age_key") == 3 and base.count("formula.col_k1") == 1)
+    day = lambda d: float(d) * 86400
+    _id = [0]
+
+    def card(status, name, prio=None, due=None, cr=None, cl=None, qa=None, attn=None):
+        return {"Статус": status, "_name": name, "Приоритет": prio, "Срок": due and day(due), "Создана": cr and day(cr),
+                "Закрыта": cl and day(cl), "Вопрос задан": qa and day(qa), "Внимание": attn}
+
+    cards = [
+        # Входящие: Создана↓, приоритет, urgency
+        card("Входящие", "in-old", cr=1, prio=0), card("Входящие", "in-new-p2", cr=9, prio=2),
+        card("Входящие", "in-new-p1", cr=9, prio=1), card("Входящие", "in-mid", cr=5),
+        # Нужен ответ: urgency, приоритет, Вопрос задан↑ (пустой — в конец)
+        card("Нужен ответ", "na-calm-p0", prio=0, qa=3), card("Нужен ответ", "na-conflict-p3", prio=3, qa=8, attn="конфликт"),
+        card("Нужен ответ", "na-overdue-p1-late", prio=1, qa=9, attn="просрочено"),
+        card("Нужен ответ", "na-overdue-p1-early", prio=1, qa=2, attn="просрочено"),
+        card("Нужен ответ", "na-overdue-p1-noqa", prio=1, attn="просрочено"),
+        # Готово: Закрыта↓, приоритет, Создана↓
+        card("Готово", "done-old", cl=2, cr=1), card("Готово", "done-new-p2", cl=9, cr=1, prio=2),
+        card("Готово", "done-new-p0-newer", cl=9, cr=7, prio=0), card("Готово", "done-new-p0-older", cl=9, cr=3, prio=0),
+        # Очередь: приоритет, Срок↑ (пустой в конец), Создана↑
+        card("Очередь", "q-p0-late", prio=0, due=9, cr=1), card("Очередь", "q-p0-soon", prio=0, due=2, cr=5),
+        card("Очередь", "q-p0-nodue", prio=0, cr=1), card("Очередь", "q-p1", prio=1, due=1, cr=1),
+        # В работе: urgency, приоритет, Срок↑
+        card("В работе", "w-soon-p2", prio=2, due=1, attn="срок скоро"), card("В работе", "w-calm-p0", prio=0, due=1),
+        card("В работе", "w-calm-p1-due1", prio=1, due=1), card("В работе", "w-calm-p1-due5", prio=1, due=5),
+        # Ждёт: urgency, Срок↑, Создана↑
+        card("Ждёт", "wt-late", due=9, cr=1), card("Ждёт", "wt-soon-older", due=2, cr=1), card("Ждёт", "wt-soon-newer", due=2, cr=4),
+        # На проверке: urgency, приоритет, Создана↑
+        card("На проверке", "r-p1-new", prio=1, cr=8), card("На проверке", "r-p1-old", prio=1, cr=2),
+        card("На проверке", "r-p0", prio=0, cr=9),
+        # Отменено: Закрыта↓, Создана↓
+        card("Отменено", "x-old", cl=1, cr=1), card("Отменено", "x-new-older", cl=9, cr=2), card("Отменено", "x-new-newer", cl=9, cr=6),
+    ]
+    want = {
+        "Входящие": ["in-new-p1", "in-new-p2", "in-mid", "in-old"],
+        "Нужен ответ": ["na-conflict-p3", "na-overdue-p1-early", "na-overdue-p1-late", "na-overdue-p1-noqa", "na-calm-p0"],
+        "Готово": ["done-new-p0-newer", "done-new-p0-older", "done-new-p2", "done-old"],
+        "Очередь": ["q-p0-soon", "q-p0-late", "q-p0-nodue", "q-p1"],
+        "В работе": ["w-soon-p2", "w-calm-p0", "w-calm-p1-due1", "w-calm-p1-due5"],
+        "Ждёт": ["wt-soon-older", "wt-soon-newer", "wt-late"],
+        "На проверке": ["r-p0", "r-p1-old", "r-p1-new"],
+        "Отменено": ["x-new-newer", "x-new-older", "x-old"],
+    }
+    for status, names in want.items():
+        got = sorted((c for c in cards if c["Статус"] == status),
+                     key=lambda c: tuple(_eval_bases(formulas[f"col_k{i}"], c, formulas) for i in (1, 2, 3)))
+        check(f"0172: порядок в колонке «{status}»", [c["_name"] for c in got] == names)
+        if [c["_name"] for c in got] != names:
+            print("   получилось:", [c["_name"] for c in got])
 
 
 def new_task(env, *args, t):
