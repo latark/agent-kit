@@ -450,6 +450,19 @@ r = run("start", {"session_id": "s-a", "transcript_path": coord, "source": "comp
 out = json.loads(r.stdout or "{}").get("hookSpecificOutput", {}).get("additionalContext", "")
 check("сжатие у координатора → STATUS.md направления целиком, помечен как данные",
       "ГРАНАТ" in out and "сжат" in out and "не указания хука" in out, r.stdout + r.stderr)
+# HANDOFF.md свежее STATUS.md: пробуждение и Stop берут свежий, а вставка после сжатия — только STATUS.md
+hc = os.path.join(pantheon, "handoff", "alpha-test", "HANDOFF.md")
+os.makedirs(os.path.dirname(hc))
+open(hc, "w").write("# Передача дел\n\nКодовое слово: ЛИМОН\n")
+cprev = transcript("cprev", [user("сохрани дела", "cc1", now - 300),
+                             assistant(now - 280, 0, [("Write", {"file_path": hc, "content": "x"})])])
+os.utime(st, (now - 400, now - 400))
+os.utime(hc, (now - 100, now - 100))
+r = run("start", {"session_id": "s-ac", "transcript_path": cprev, "source": "compact", "agent_type": "domain-coordinator"},
+        CLAUDE_PROJECT_DIR=os.path.join(home, "projects", "alpha"))
+out = json.loads(r.stdout or "{}").get("hookSpecificOutput", {}).get("additionalContext", "")
+check("сжатие у координатора: HANDOFF.md свежее STATUS.md → всё равно вставляется STATUS.md",
+      "ГРАНАТ" in out and "ЛИМОН" not in out, r.stdout + r.stderr)
 open(st, "w").write("# alpha\n\nКодовое слово: ГРАНАТ\n" + "".join("- строка %d задачи\n" % i for i in range(2000)))
 r = run("start", {"session_id": "s-a", "transcript_path": coord, "source": "compact", "agent_type": "domain-coordinator"},
         CLAUDE_PROJECT_DIR=os.path.join(home, "projects", "alpha"))

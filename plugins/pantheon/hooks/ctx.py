@@ -433,13 +433,15 @@ def _mtime(p):
         return -1
 
 
-def state_file(role, ev, transcript):
+def state_file(role, ev, transcript, prefer_fresh=True):
     """(путь, как назвать для Claude) или (None, None).
     У ролей с файлом состояния (hq, координатор, мастерская) берётся самый свежий из двух: файл роли и HANDOFF.md,
     который сессия сама писала (16.10 Зевс сохранил дела в HANDOFF.md, доска была старше — хук молчал); второй файл
     называется в тексте."""
     if role in ("hq", "domain-coordinator", "workshop"):
         p, desc = role_state_file(role, ev)
+        if not prefer_fresh:
+            return p, desc  # вставка после сжатия: источник правды — файл роли (STATUS.md), даже если HANDOFF.md свежее
         h = last_handoff(transcript) if transcript else None
         if h and p and os.path.realpath(h) != os.path.realpath(p) and os.path.isfile(h):
             hd = "файл передачи дел %s" % tilde(h)
@@ -812,7 +814,7 @@ def cmd_start(ev):
             pass
     out = hq_news(commit=not automation()) if role == "hq" else []  # тревоги — первыми: короче и важнее доски
     if ev.get("source") == "compact" and not ctx_off():
-        path, desc = state_file(role, ev, ev.get("transcript_path") or "")
+        path, desc = state_file(role, ev, ev.get("transcript_path") or "", prefer_fresh=False)
         if path and os.path.isfile(path):
             block = file_for_context(path, desc, INJECT_MAX - sum(len(x) + 2 for x in out))
             if block:
