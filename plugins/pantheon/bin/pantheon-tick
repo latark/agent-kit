@@ -1,5 +1,5 @@
 #!/bin/sh
-# Задача launchd com.latark.pantheon-tick (раз в 60 с): один проход планировщика Пантеона.
+# Задача launchd pantheon.tick (раз в 60 с): один проход планировщика Пантеона.
 # Python 3.11+ ищет сам (lib/find-python.sh); не нашёл — строка в alerts.md не чаще раза в сутки и код 1.
 here=$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")" && pwd)
 . "$here/../lib/find-python.sh"

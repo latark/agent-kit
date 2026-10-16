@@ -238,7 +238,7 @@ def _prepare():
         return None, None
     missing = [c["name"] for c in cfg["collections"] if not os.path.isdir(c["path"])]
     if missing:
-        # папки нет на этом Mac (у сестры другой набор проектов) — коллекцию пропускаем, а не валим всё
+        # папки нет на этом Mac (на другой установке другой набор проектов) — коллекцию пропускаем, а не валим всё
         cfg["collections"] = [c for c in cfg["collections"] if c["name"] not in missing]
         print(f"нет папок на этом Mac, коллекции пропущены: {', '.join(missing)}")
     write_config(cfg)
