@@ -2297,7 +2297,7 @@ def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
         if hq:
             return True, ""
         own, _ = direction_of(domains, pdir)
-        if role == "domain-coordinator" or sub:
+        if (role == "domain-coordinator" or sub) and role not in EXTRA_ONLY_ROLES:  # ревизору вся ветка directions закрыта
             if own and target == _key(own):
                 return True, ""
             if (len(parts) > 3 and parts[2] == "inbox" and not exists and tool in ("Write", "Bash")
