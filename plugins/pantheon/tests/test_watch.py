@@ -389,6 +389,9 @@ def test_autostart_backoff_and_give_up():
 def test_autostart_start_timeout_0141():
     """metis-0141 п. 1: pantheon start из самозапуска не уложился в срок — строка в тревогах и код 124, без трассировки;
     срок по умолчанию покрывает шаги запуска (около 410 с) и меньше срока прохода дежурного (600 с)."""
+    if sys.version_info < (3, 11):  # pantheon.py сам требует 3.11 (tomllib): на 3.9 он отвечал бы отказом на всё
+        print("ok   пропуск: срок pantheon start требует Python 3.11+ (здесь %d.%d)" % sys.version_info[:2])
+        return
     e = Env()
     e.direction("pluto-x")
     e.task("pluto-0001", "pluto-x")
@@ -653,7 +656,10 @@ def test_zeus_clean_0136():
                  + "\n" + json.dumps(_answer(T0 + 3810)) + "\n")
     e.run("watch", t=T0 + 3900, extra=ZEUS_RUN)
     check(e.alerts().count("сверь доску и handoff") == 2, "после нового хода и часа напоминания нет")
-    e.run("watch", t=T0 + 4000, extra=ZEUS_RUN)
+    with open(e.zeus_transcript, "a") as fh:                        # новый ход, но час с напоминания не прошёл
+        fh.write(json.dumps({"type": "user", "timestamp": _iso(T0 + 4000), "message": {"role": "user", "content": "!"}})
+                 + "\n" + json.dumps(_answer(T0 + 4010)) + "\n")
+    e.run("watch", t=T0 + 4100, extra=ZEUS_RUN)
     check(e.alerts().count("сверь доску и handoff") == 2, "напоминание чаще раза в час")
 
     # повторная проверка под блокировкой: между проходом и claude stop Зевс взял работу — не трогать
