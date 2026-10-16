@@ -355,6 +355,20 @@ def main():
     check("окно координатора направления: gh pr merge в permissions.allow; у мастерской и штаба правила нет (metis-0050)",
           sa.get("permissions", {}).get("allow") == [merge] and sm.get("permissions", {}).get("allow") == [merge]
           and merge not in json.dumps(sw.get("permissions", {})) and merge not in json.dumps(hq.get("permissions", {})))
+    am_a, am_m = sa.get("autoMode", {}).get("allow") or [], sm.get("autoMode", {}).get("allow") or []
+    gated = [r for r in am_a if r.startswith("Pantheon Gated Merge:")]
+    check("окна координаторов и Метиды: autoMode.allow — \"$defaults\" первым и два правила запора (metis-0098)",
+          am_a == am_m and am_a[:1] == ["$defaults"] and len(am_a) == 3 and len(gated) == 1
+          and sum(r.startswith("Pantheon Review Record:") for r in am_a) == 1
+          and sz.get("autoMode") == sa.get("autoMode") and sn.get("autoMode") == sa.get("autoMode"))
+    check("правило Gated Merge: обе формы репозитория, перечень argus, ядро — кнопка владельца, --admin/--auto не "
+          "разрешает (metis-0098)",
+          bool(gated) and all(x in gated[0] for x in ("`-R <owner/repo>`", "`--repo <owner/repo>`",
+                                                      "--match-head-commit", "checklist", "plugins/guard/",
+                                                      "owner's button", "`--admin`, `--auto`", "`gh api`",
+                                                      "still judged by Merge Without Review")))
+    check("штаб и мастерская: autoMode в окне нет — классификатор у них со встроенными правилами (metis-0098)",
+          "autoMode" not in hq and "autoMode" not in sw)
     mem_a = real(".claude/agent-memory/argus")
     wins = (sa, sm, sw, hq)
     check("память субагентов в песочнице всех окон: роль с memory: настоящим путём, папка создана (metis-0051)",

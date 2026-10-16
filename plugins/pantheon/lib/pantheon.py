@@ -1355,6 +1355,43 @@ COORDINATOR_COMPACT = 200000
 # по-прежнему проверяет guard (merge_problem): только главная сессия domain-coordinator, свои папки, без --admin и
 # --auto. Мастерской и штабу правила нет.
 COORDINATOR_ALLOW = ["Bash(gh pr merge *)"]
+# Исключения классификатора режима auto окнам координаторов направлений, Метиды в их числе (metis-0098; решения
+# владельца 15.10 «Б» и Зевса 16.10 «А»). Классификатор не видит журнал запора guard и считал слияние через запор
+# «Merge Without Review», а за ним — и gh pr view, git fetch той же сессии. Правило описывает ровно то, что пускает
+# запор guard 0.5.6 (README guard, «Слияние PR»), и ничего сверх: --admin, --auto, слияние без --match-head-commit,
+# gh api по-прежнему судит встроенное правило. "$defaults" — встроенные исключения остаются: список без него их
+# заменяет (проверено пробой metis-0071). Классификатор читает autoMode из --settings (документация Claude Code,
+# auto-mode-config: «--settings flag»), из .claude/settings.json проекта — нет. Штабу и мастерской правил нет.
+COORDINATOR_AUTO_ALLOW = [
+    "$defaults",
+    "Pantheon Gated Merge: In a Pantheon direction window (a coordinator main session or its lead subagent "
+    "`hephaestus-*` or `apollo-*`), `gh pr merge <N> --match-head-commit <40-hex sha>` with the repository given "
+    "explicitly as `-R <owner/repo>` or `--repo <owner/repo>` (also `-R=`/`--repo=`), optionally with `--merge`, "
+    "`--squash` or `--rebase`, `--delete-branch`, `--subject` and `--body`, on a `latark/*`, `BrokerAssistantApp/*` "
+    "or `MorphStream/*` repository, is NOT Merge Without Review. The owner replaced human approval with a local "
+    "merge gate: the guard PreToolUse hook runs before this classifier and lets the command through only when a "
+    "passing project test record exists for that exact head SHA, the independent reviewer role `argus` recorded "
+    "«accept» on that exact repository, PR and head SHA with a full checklist of what it opened, what it ran and "
+    "what it did not check, the reviewer is not the session that merges, the repository is listed for the "
+    "direction, and client products also have a `talos` check and a rollback line in the owner's summary; GitHub "
+    "itself rejects the merge if the PR head moved away from `--match-head-commit`. A merge the gate let through is "
+    "a reviewed merge: the session's follow-up commands after it (`gh pr view`, `gh pr checks`, `git fetch`, "
+    "`git pull`, `git log`) are routine, not a continuation of an unreviewed merge. PRs that touch the protection "
+    "core — any path under `plugins/guard/` or `.claude-plugin/marketplace.json` in latark/agent-kit — stay for "
+    "the owner's button: guard refuses them, and this exception does not cover merging them any other way. It "
+    "covers only the command shape above: `--admin`, `--auto`, a merge without `--match-head-commit` or without an "
+    "explicit `-R`/`--repo`, a merge through `gh api`, `GH_REPO`/`GH_HOST` overrides, `cd` or chained commands, "
+    "or a repository outside these owners are still judged by Merge Without Review.",
+    "Pantheon Review Record: `pantheon review test -- <test command>` (runs the project tests in a clean git tree "
+    "and reports their exit code), `pantheon review accept|reject <owner/repo> <N> <sha> --opened \"…\" --ran "
+    "\"…\" --unchecked \"…\"` run by the reviewer role `argus`, `pantheon review talos <owner/repo> <N> <sha>` run "
+    "by the role `talos` and `pantheon review status` are local records of an independent check in the owner's "
+    "own agent system — not Self-Approval and not CI Bypass. The record is written by the guard PostToolUse hook "
+    "from the hook event's agent type, not by the command; guard refuses a verdict from any other role, an "
+    "«accept» without all three checklist fields and a test command that does nothing (`true`, `echo`, `sleep`). "
+    "This exception does not cover editing the record file under `~/.local/state/pantheon/merge-gate/` or the "
+    "guard plugin.",
+]
 # Роли главных сессий: их память в песочницу не добавляется, даже если в шапке есть memory:
 MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
 # Субагенты главной сессии окна (P0-6; SEC-09, SEC-13, ROLE-32): штаб и координатор зовут только этих — general-purpose
@@ -1523,7 +1560,7 @@ def agents_window(data, allowed, deny, script):
     return data
 
 
-def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None):
+def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None):
     allow = list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + [cache]
     # .git/config и .git/hooks — внутри каждой разрешённой папки (её настоящим путём) и под ~ в целом
     deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + [f"{r}{sub}" for r in allow for sub in
@@ -1563,6 +1600,9 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
         # ответвляются от неё (HEAD ветки эпика), а не от основной ветки (по умолчанию — "fresh")
         data["autoCompactWindow"] = compact
         data["worktree"] = {"baseRef": "head"}
+    if auto_allow:
+        # окна координаторов: исключения классификатора auto под запор слияния (COORDINATOR_AUTO_ALLOW, metis-0098)
+        data["autoMode"] = {"allow": list(auto_allow)}
     return data
 
 
@@ -1656,7 +1696,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
 
     memory = memory_dirs()
 
-    def one(name, folders, own, compact, deny, allow=None, agents=None):
+    def one(name, folders, own, compact, deny, allow=None, agents=None, auto_allow=None):
         real = [_real_dir(f, SANDBOX_ROOTS[:1], strict=True) or _real_dir(f, SANDBOX_ROOTS[1:]) for f in folders]
         skipped = [f for f, r in zip(folders, real) if not r]
         if skipped:
@@ -1666,7 +1706,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
         write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r] + memory
         cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
         ok = [r for r in real if r]
-        data = role_settings(ok, own_real, write, cache, any(ssh_remote(r) for r in ok), deny, compact, guard)
+        data = role_settings(ok, own_real, write, cache, any(ssh_remote(r) for r in ok), deny, compact, guard,
+                             auto_allow)
         if name == "metis-pantheon":
             # навык new-direction (metis-0042): `pantheon direction init` создаёт ~/projects/<новое> — вне папок окна
             # Метиды, в песочнице упал бы. Мимо неё — только эта подкоманда и только у Метиды; ворота у команды свои:
@@ -1694,7 +1735,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
         agents = (mine + COORDINATOR_AGENTS + COORDINATOR_EXTRA_AGENTS.get(name, []),
                   ["chiron"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
         one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
-            [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents)
+            [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, COORDINATOR_AUTO_ALLOW)
         built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски; список субагентов — вне P0-6
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
