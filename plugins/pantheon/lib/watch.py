@@ -205,6 +205,7 @@ def _watch(dry=False):
               ("swap", lambda: swap(agents, t)),
               ("worktree", lambda: worktrees(agents, reg, doms, t)),
               ("версия Claude Code", lambda: cc_version(t)),
+              ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
               ("паузы по нагрузке", lambda: pauses_clear(agents, reg, t)),
               ("самозапуск", lambda: autostart(agents, reg, doms, t)),
               ("журналы ваших слов", lambda: daily(t))]

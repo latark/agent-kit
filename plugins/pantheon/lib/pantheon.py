@@ -2435,7 +2435,91 @@ def roles_build(src=None, out=None):
     if errors and not probe:
         alert_once("roles-build", "\n".join(errors), f"pantheon roles build: {errors[0]}"
                    + (f" (и ещё {len(errors) - 1})" if len(errors) > 1 else ""), "pantheon")
+    if not probe:
+        memo_line = who_is_who_alert()
+        if memo_line:
+            print(f"roles build: {memo_line}", file=sys.stderr)
     return made
+
+
+# --- сверка памятки «Кто есть кто.md» с ролями и реестром (metis-0120) ----------------------------
+WHO_MEMO = "Кто есть кто.md"
+# Роли окон названы по функции, а в памятке — именем бога: hq — `zeus`, workshop — `daedalus-<задача>`; роль
+# domain-coordinator — это все координаторы, отдельного имени у неё в памятке нет.
+WHO_ALIAS = {"hq": ("zeus",), "workshop": ("daedalus",)}
+WHO_ANY_DIRECTION = ("domain-coordinator",)
+# «Лишнее» ищем только среди имён, начинающихся с бога: такой код в обратных кавычках — имя роли или направления.
+# Остальной код (команды, пути, `claude agents`) под образец не подходит. Список — боги из карты имён и прошлых
+# направлений; нового бога дописать сюда (иначе его удалённая роль не будет найдена как лишняя).
+WHO_GODS = ("zeus", "athena", "hermes", "themis", "calliope", "mnemo", "proteus", "metis", "janus", "daedalus",
+            "apollo", "hephaestus", "argus", "chiron", "prometheus", "talos", "clio", "iris", "momus", "charon")
+WHO_TOKEN = re.compile(r"`([^`\n]+)`")
+
+
+def who_is_who_diff(memo_text, roles, directions):
+    """([нет в памятке], [лишнее в памятке]) — имена. roles — стебли файлов ролей, directions — имена направлений."""
+    tokens = set(WHO_TOKEN.findall(memo_text))
+
+    def prefix(pre):
+        return any(t == pre or t.startswith(pre + "-") for t in tokens)
+    missing = []
+    for r in sorted(roles):
+        if r in WHO_ANY_DIRECTION:
+            ok = bool(set(directions) & tokens)
+        elif r in WHO_ALIAS:
+            ok = r in tokens or any(prefix(a) for a in WHO_ALIAS[r])
+        elif r.split("-")[0] in LEAD_ROLES:
+            ok = prefix(r.split("-")[0])
+        else:
+            ok = r in tokens
+        if not ok:
+            missing.append(r)
+    missing += sorted(d for d in directions if d not in tokens)
+    known = set(roles) | set(directions) | {"zeus"}
+    lead_pre = {r.split("-")[0] for r in roles if r.split("-")[0] in LEAD_ROLES}
+    aliases = {a for al in WHO_ALIAS.values() for a in al}
+    extra = []
+    for t in sorted(tokens):
+        if not ROLE_NAME.fullmatch(t) or t.split("-")[0] not in WHO_GODS or t in known:
+            continue
+        if t in lead_pre or t in aliases or t.startswith("daedalus-"):
+            continue
+        extra.append(t)
+    return missing, extra
+
+
+def who_is_who_check(memo=None, agents=None, reg_path=None):
+    """Сверка памятки. Нет памятки, папки ролей или реестра — None (проверять нечего). Иначе (нет, лишнее)."""
+    memo = memo or os.path.join(PANTHEON, WHO_MEMO)
+    agents = agents or AGENTS
+    reg_path = reg_path or os.path.join(PANTHEON, "directions.toml")
+    if not (os.path.isfile(memo) and os.path.isdir(agents) and os.path.isfile(reg_path)):
+        return None
+    try:
+        with open(reg_path, "rb") as fh:
+            reg = tomllib.load(fh)
+        text = open(memo, encoding="utf-8").read()
+    except (OSError, ValueError):
+        return None
+    roles = [f[:-3] for f in os.listdir(agents)
+             if f.endswith(".md") and os.path.isfile(os.path.join(agents, f))]
+    dirs = [d.get("name") for d in reg.get("direction") or [] if isinstance(d.get("name"), str)]
+    return who_is_who_diff(text, roles, dirs)
+
+
+def who_is_who_alert(**kw):
+    """Сверка + тревога штабу «памятку обновить: +имя / −имя» один раз на состояние; совпало — тревога снята.
+    Возвращает строку расхождения или ""."""
+    got = who_is_who_check(**kw)
+    if got is None:
+        return ""
+    missing, extra = got
+    if not (missing or extra):
+        clear_once("who-is-who")
+        return ""
+    line = "памятку обновить: " + " / ".join([f"+{n}" for n in missing] + [f"−{n}" for n in extra])
+    alert_once("who-is-who", line, f"Кто есть кто.md: {line}", "pantheon")
+    return line
 
 
 def roles_newest():
