@@ -1968,6 +1968,31 @@ def pnpm_store_check(name, folders, store):
                            ".git/info/exclude), затем CI=true pnpm install --frozen-lockfile", "pantheon")
 
 
+# [private] из policy.toml читается по правилу guard 0.5.9 (metis-0163): окно и guard не должны расходиться во мнении,
+# у кого личное. Умолчание — то же, что DEFAULT_PRIVATE у guard.
+DEFAULT_PRIVATE = {"roles": ["hq", "chiron"], "coordinators": ["mnemo-brain"],
+                   "paths": ["~/ai/knowledge/me", "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.git/git-crypt",
+                             "~/.local/state/pantheon/owner-log/zeus.md"]}
+
+
+def private_conf(policy):
+    """[private]: не таблица — всё по умолчанию; ключа нет или значение не список — умолчание; список — только его
+    строки (strip, пустые убраны). roles и coordinators: пустой список — никого; paths: пустой список или без строк —
+    умолчание."""
+    p = policy.get("private") if isinstance(policy, dict) else None
+    if not isinstance(p, dict):
+        p = {}
+    conf = {}
+    for k, v in DEFAULT_PRIVATE.items():
+        val = p.get(k)
+        if not isinstance(val, list):
+            conf[k] = list(v)
+            continue
+        items = [x.strip() for x in val if isinstance(x, str) and x.strip()]
+        conf[k] = items if items or k != "paths" else list(v)
+    return conf
+
+
 def sandbox_build(domains, policy_path, stores=None, leads=None):
     """domains.json и policy.toml → ~/.local/state/pantheon/settings/<направление>.json и workshop.json.
     leads — {направление: ["hephaestus-<коротко>", "apollo-<коротко>"]}: субагенты окна (P0-6)."""
@@ -1977,9 +2002,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
     except (OSError, ValueError):
         policy = {}
     extra = policy.get("sandbox_write") or {}
-    private = policy.get("private") or {}
-    private_paths = [p for p in private.get("paths") or [] if isinstance(p, str) and p.startswith("~/")]
-    private_dirs = set(private.get("coordinators") or [])
+    private = private_conf(policy)
+    private_paths = [p for p in private["paths"] if p.startswith("~/")]
+    private_dirs = set(private["coordinators"])
     caches = "~/Library/Caches/pantheon-sandbox"
     out_dir = path("settings")
     guard = guard_script()
