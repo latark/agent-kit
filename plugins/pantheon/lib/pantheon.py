@@ -1336,6 +1336,35 @@ def git(*args, check=True):
                           env=run_env())
 
 
+# push большого коммита по HTTPS упирается в буфер git (по умолчанию 1 МБ → «RPC failed; HTTP 400/413»): буфер 150 МБ
+# задаётся ключом -c на каждый push, ~/.gitconfig не правится (metis-0133)
+PUSH_POST_BUFFER = 157286400
+PUSH_FAIL_LIMIT = 3
+# отказ сервера, а не отсутствие сети: HTTP 4xx/5xx, RPC failed, обрыв при передаче пакета
+PUSH_SERVER_ERR = re.compile(r"returned error: [45]\d\d|\bHTTP/?[\d.]*\s*[45]\d\d|RPC failed|"
+                             r"remote end hung up|pack-objects died|send-pack: unexpected disconnect", re.I)
+
+
+def push_failed(stderr):
+    """Неудача push, не похожая на «нет сети», считается подряд: на 3-й — тревога (ошибка не исчезнет сама,
+    как исчезает отсутствие сети); без сети счётчик не растёт и не сбрасывается."""
+    if not PUSH_SERVER_ERR.search(stderr or ""):
+        return
+    f = path("push-fail.json")
+    n = int(read_json(f).get("n") or 0) + 1
+    write_json(f, {"n": n, "t": now()})
+    if n >= PUSH_FAIL_LIMIT:
+        alert_once("push-fail", PUSH_FAIL_LIMIT, f"~/ai/pantheon: push не проходит {n} раза подряд "
+                   f"({(stderr.strip().splitlines() or [''])[-1][:200]}) — это не обрыв сети, нужен разбор",
+                   "pantheon-commit", note="~/ai/pantheon: push не проходит несколько раз подряд")
+
+
+def clear_push_failures():
+    with contextlib.suppress(OSError):
+        os.remove(path("push-fail.json"))
+    clear_once("push-fail")
+
+
 def commit():
     """commit → pull без rebase → push, как Obsidian Git. Слияние шифрованных файлов — git-crypt-merge.sh
     (дописываемые файлы — объединением). Без сети — код TEMPFAIL и тишина; тревога, только если синхронизации
@@ -1372,9 +1401,11 @@ def commit():
         clear_once("merge-conflict")
         ahead = git("rev-list", "--count", "@{u}..HEAD", check=False).stdout.strip()
         if ahead and ahead != "0":
-            push = git("push", "-q", check=False)
+            push = git("-c", f"http.postBuffer={PUSH_POST_BUFFER}", "push", "-q", check=False)
             if push.returncode != 0:
+                push_failed(push.stderr)
                 return offline(push.stderr)
+            clear_push_failures()
         write_json(path("commit-ok.json"), {"t": now()})
         clear_once("commit-offline")
     return 0
