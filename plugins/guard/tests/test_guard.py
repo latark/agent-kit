@@ -400,8 +400,8 @@ def merge_security_checks(home, MERGE_OK, cases):
     check(f"защиты: другой координатор в agent-kit, субагенты Метиды, --auto, два номера, -R вне [merge_repos], cd и "
           f"GH_REPO — отказ: {got}", got == ("deny",) * 10)
     out = M(home, "gh pr merge 5 --auto", raw=True)
-    check("защиты: отказ не просит «да» владельца, а называет запор и Д3",
-          deny(out) and (("запор" in out and "(Д3)" in out and "окн" not in out and "--subject" not in out)
+    check("защиты: отказ не просит «да» владельца, а называет шлюз слияния и Д3",
+          deny(out) and (("шлюз слияния" in out and "(Д3)" in out and "окн" not in out and "--subject" not in out)
                          or not allow_ok))
 
     # metis-0054: лид Метиды (hephaestus-pantheon субагентом) — по тем же правилам, что Метида
@@ -1384,7 +1384,7 @@ def main():
     }
     if MERGE_OK == "allow":
         want = {"закрыто": ("gh pr create", "отчёте лиду"), "внутреннее": ("argus", "--admin"),
-                "продукт": ("talos", "откат", "--match-head-commit"), "защиты": ("запор", "argus", "(Д3)"),
+                "продукт": ("talos", "откат", "--match-head-commit"), "защиты": ("шлюз слияния", "argus", "(Д3)"),
                 "личное": ("личному",)}
         ok = all('"deny"' in texts[k] and all(w in texts[k] for w in ws) for k, ws in want.items()) \
             and "talos" not in texts["внутреннее"]
