@@ -35,7 +35,8 @@ except ImportError:
 # (тот же приём, что MERGE_OK ниже). Обвязка не ослабляет проверку: с tomllib ожидание прежнее — allow.
 NEEDS_POLICY = {"Метида правит карту решений", "prometheus пишет в ~/ai/knowledge (agent_extra)",
                 "prometheus сессией: ~/ai/knowledge по agent_extra", "protect-config: Метида правит роль",
-                "protect-config: Метида пишет policy.toml", "private: mnemo-brain пишет в me/"}
+                "protect-config: Метида пишет policy.toml", "private: mnemo-brain пишет в me/",
+                "momus пишет в ~/ai/knowledge/Inbox (agent_extra)"}
 
 
 def setup(home):
@@ -92,6 +93,7 @@ def setup(home):
     open(os.path.join(home, ".claude/pantheon/policy.toml"), "w").write(
         'always = ["~/.claude/agent-memory"]\n[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n'
         'mnemo-brain = ["~/ai/knowledge"]\n[agent_extra]\nprometheus = ["~/ai/knowledge"]\n'
+        'momus = ["~/ai/knowledge/Inbox"]\n'
         '[merge]\nthemis-sources = ["~/projects/expert-corpus", "~/projects/legal-watch"]\n'
         '[merge_repos]\nthemis-sources = ["latark/expert-corpus", "latark/legal-watch"]\n'
         'metis-pantheon = ["latark/tg-read", "latark/agent-kit"]\nhermes-alex = ["latark/alexbroker"]\n'
@@ -304,8 +306,8 @@ def merge_security_checks(home, MERGE_OK, cases):
              dict(policy_fn=lambda t: t.replace('metis-pantheon = ["~/projects/agent-kit"]', "metis-pantheon = []"))),
             ("metis-pantheon не из строк",
              dict(policy_fn=lambda t: t.replace('metis-pantheon = ["~/projects/agent-kit"]', "metis-pantheon = [1]"))),
-            ("[private].coordinators не из строк", dict(policy_fn=lambda t: t + "\n[private]\ncoordinators = [1]\n")),
-            ("[private].paths строкой", dict(policy_fn=lambda t: t + '\n[private]\npaths = "~/ai/knowledge/me"\n')),
+            # [private] с неверными значениями слияние больше не закрывает (0163, решение лида): значение не список —
+            # умолчание, список — только строки из него. Проверка умолчаний — test_misc.py
             ("domains.json битый", dict(domains_fn=lambda t: "{не json")),
             ("domains.json: папки строкой",
              dict(domains_fn=lambda t: json.dumps({"domains": {"themis-sources": "~/projects/expert-corpus"}}))),
@@ -1333,6 +1335,32 @@ def main():
          False, B("gh pr merge 5"), alex + "/fork"),
         ("gh-resolved: «base» — сам remote, своё слияние — можно", MERGE_OK, alex, "domain-coordinator", False,
          B("gh pr merge 5"), alex + "/base-clone"),
+        # --- 0122: momus (ревизор) — только agent_extra, своя память и временное; корней по cwd нет ---
+        ("momus с cwd в репозитории: запись в репозиторий — отказ", "deny", br, "momus", True, W(os.path.join(home, br, "app/x.ts"))),
+        ("momus с cwd в репозитории: Bash > в репозиторий — отказ", "deny", br, "momus", True, B("echo x > app/y.ts")),
+        ("momus пишет в ~/ai/knowledge/Inbox (agent_extra)", "allow", br, "momus", True, W(K("Inbox/x.md"))),
+        ("momus: ~/ai/knowledge вне Inbox — отказ", "deny", br, "momus", True, W(K("wiki/x.md"))),
+        ("momus: новый файл в чужом inbox/ направления — отказ", "deny", br, "momus", True, W(P("directions/hermes-alex/inbox/new.md"))),
+        ("momus: Bash в чужой inbox/ — отказ", "deny", br, "momus", True, B(f"echo x > {P('directions/hermes-alex/inbox/new.md')}")),
+        ("momus: своя память — можно", "allow", br, "momus", True, W(os.path.join(home, ".claude/agent-memory/momus/n.md"))),
+        ("momus: память чужой роли — отказ", "deny", br, "momus", True, W(os.path.join(home, ".claude/agent-memory/argus/n.md"))),
+        ("momus: временная папка — можно", "allow", br, "momus", True, W("/tmp/momus-x.md")),
+        # --- 0142: сама папка <репо>/.claude как цель записи (protect-config) ---
+        *[(f"0142 protect-config: {n} — отказ", "deny", br, "dev-sonnet", True, B(c)) for n, c in (
+            ("cp -R x .claude/ (относительный)", "cp -R x .claude/"),
+            ("cp -R x <репо>/.claude/ (абсолютный)", f"cp -R x {home}/{br}/.claude/"),
+            ("mv x .claude", "mv x .claude"),
+            ("mv x <репо>/.claude", f"mv x {home}/{br}/.claude"),
+            ("tar -xf a.tar -C .claude", "tar -xf a.tar -C .claude"),
+            ("tar -xf a.tar -C <репо>/.claude", f"tar -xf a.tar -C {home}/{br}/.claude"),
+            ("rsync -a x/ .claude/", "rsync -a x/ .claude/"),
+            ("rsync -a x/ <репо>/.claude/", f"rsync -a x/ {home}/{br}/.claude/"),
+        )],
+        ("0142: запись в .claude/worktrees/x/file.txt — не защита", "allow", br, "dev-sonnet", True,
+         W(os.path.join(home, br, ".claude/worktrees/x/file.txt"))),
+        ("0142: mkdir -p .claude/worktrees/x — не защита", "allow", br, "dev-sonnet", True, B("mkdir -p .claude/worktrees/x")),
+        ("0142: mkdir -p <репо>/.claude/worktrees/x — не защита", "allow", br, "dev-sonnet", True,
+         B(f"mkdir -p {home}/{br}/.claude/worktrees/x")),
         # --- dev-server: исключение для разработчика и talos в worktree (ROLE-23) ---
         ("dev-server: dev-sonnet в worktree — можно", "allow", br, "dev-sonnet", True, B("PORT=4123 pnpm dev"),
          br + "/.claude/worktrees/agent-1"),

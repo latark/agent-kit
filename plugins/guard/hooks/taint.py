@@ -78,7 +78,8 @@ MCP_WRITE_WORDS = {"create", "update", "send", "post", "write", "delete", "edit"
                    "push", "comment", "reply", "share", "append", "remove", "move", "archive", "merge", "submit",
                    "navigate", "fill", "click", "type", "set", "add", "put", "patch", "invite", "forward", "react"}
 NET_CMDS = {"curl", "wget", "ssh", "scp", "sftp", "nc", "ncat", "netcat", "socat", "telnet", "ftp", "gh", "mail",
-            "sendmail", "mutt", "aria2c", "xh", "http", "https", "lftp", "rclone", "websocat", "grpcurl"}
+            "sendmail", "mutt", "aria2c", "xh", "http", "https", "lftp", "rclone", "websocat", "grpcurl",
+            "codex"}
 SCRIPT_CMD_RX = r"^(?:python[\d.]*|node|deno|bun|ruby|perl|php|uv|uvx)$"
 SCRIPT_NET_RX = (r"(?i)urllib|requests|http\.client|httpx|aiohttp|socket|smtplib|ftplib|websocket|fetch\s*\(|"
                  r"axios|XMLHttpRequest|net/http|Net::HTTP|LWP|https?://")

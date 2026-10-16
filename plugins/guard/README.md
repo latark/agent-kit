@@ -19,6 +19,15 @@ guard ловит **ошибки агента**: запись не в своё н
 send-keys и т. п. — ввод от имени владельца), пополнение корпуса (corpus-role: `corpus add`, `channel`, `stage`,
 `krisp`, скрипты Krisp и Диска и их ключи в Связке — ни одной роли, только через посредника; штабу корпус закрыт целиком). dev-серверы субагентам dev-* и talos в своей worktree — можно.
 
+Узкие роли и защиты проекта:
+
+- **momus** (ревизор) пишет только в `agent_extra` своей роли из policy.toml, свою память и временные папки — корней по папке запуска
+  или git-репозиторию у неё нет (`EXTRA_ONLY_ROLES`), а новый файл в чужой `inbox/` направления ей закрыт; без policy.toml — только память и временное.
+- **protect-config** защищает и саму папку `<репо>/.claude` как цель записи (`cp -R x <репо>/.claude/`, `mv`, `tar -C`, `rsync`):
+  в неё можно положить settings.json и agents. Вложенное (`.claude/worktrees/…`) правилом не закрыто.
+- **`[private]` в policy.toml:** не таблица — всё по умолчанию; ключ без списка — умолчание; список — только его строки (без пробелов по краям,
+  пустые и не строки отброшены). `roles` и `coordinators` пустым списком — никого; пустой `paths` — умолчание.
+
 От **намеренного обхода и внедрённых инструкций** он не защищает: что пишет программа изнутри
 (`python script.py`, `node -e`, `make`), он не видит, а свой разбор Bash мы больше не наращиваем. Настоящая
 граница:
@@ -137,7 +146,7 @@ answer и тик, это скрипты, guard их не видит. Сесси�
 если просили это сами») на такие действия:
 
 - WebFetch, WebSearch, SendMessage, CronCreate, ScheduleWakeup;
-- Bash с сетью: `curl`, `wget`, `ssh`, `scp`, `sftp`, `nc`, `gh`, `git push`, `rsync` на хост, `python`/`node`/`uv`
+- Bash с сетью: `curl`, `wget`, `ssh`, `scp`, `sftp`, `nc`, `gh`, `codex` (`codex exec` — сторонний исполнитель), `git push`, `rsync` на хост, `python`/`node`/`uv`
   с `urllib`, `requests`, `httpx`, `fetch(`, `http(s)://` в аргументах или в heredoc;
 - MCP: имя со словами create, update, send, post, write, delete, edit, upload, publish, comment, navigate, click и т. п.;
   любые инструменты `claude-in-chrome` и `computer-use`;
@@ -348,6 +357,7 @@ remote, cwd не репозиторий или без remote, журнал пр�
     python3 -I tests/test_merge_gate.py   # запор слияния: журнал проверок, pantheon review, Д3 — по случаю на тест
     python3 -I tests/test_canaries.py     # канарейки ролей: скачать-и-выполнить, base64 в шелл, eval — deny; правила Read(.env*)
     python3 -I tests/test_hooks_json.py   # onFailure=block на PreToolUse guard и pantheon
+    python3 -I tests/test_misc.py         # PY_LOADER (`re.compile(` не загрузка модуля), умолчания [private]
     python3 -I tests/test_tg_self.py      # tg-secret не трогает файлы самого плагина guard в любой копии, но не шире
     python3 -I tests/test_taint.py        # tg-taint: флаг, ask по классам, снятие, сессии, deny важнее ask
     python3 -I tests/test_shell_diff.py   # живая сверка разбора Bash с настоящими zsh и bash (~1 мин)

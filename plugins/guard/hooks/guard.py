@@ -297,7 +297,7 @@ TG_IMPORT = re.compile(
 TG_FILE = re.compile(r"(?<![\w-])tg_read\.py\b")
 PY_LOADER = re.compile(
     r"\brunpy\b|\bimportlib\b|\bspec_from_file_location\b|\bSourceFileLoader\b|\bload_source\b"
-    r"|\bexec\s*\(|\bcompile\s*\(|\b__import__\b"
+    r"|(?<![\w.])exec\s*\(|(?<![\w.])compile\s*\(|\b__import__\b"
 )
 # Текст tg_read.py, поданный в Python: $(cat tg_read.py), cat tg_read.py | python3 -, python3 - < tg_read.py
 TG_SOURCE = re.compile(
@@ -578,6 +578,8 @@ TEMP_ROOTS = [os.path.realpath(p) for p in (os.environ.get("TMPDIR", ""), "/tmp"
 PANTHEON_ROLES = {"hq", "domain-coordinator", "workshop", "chiron", "argus", "talos", "prometheus", "clio",
                   "iris", "dev-opus", "dev-sonnet", "dev-haiku"}
 PANTHEON_ROLE_PREFIXES = ("hephaestus-", "apollo-")
+# ревизор: пишет только в agent_extra своей роли (policy.toml), свою память и временные папки — корней по cwd нет (0122)
+EXTRA_ONLY_ROLES = {"momus"}
 UNRESOLVED = "\0неразобранная-цель"
 # stop|resume|pause|restart — окна сессий (metis-0047); `pantheon jobs pause|resume` — другая команда (PANTHEON_JOB_ACTIONS)
 PANTHEON_PRIVILEGED = {"archive", "install", "uninstall", "commit", "start", "wake", "roles",
@@ -2218,6 +2220,8 @@ def check_domain(event, tool, tool_input):
         return None
     if role == "workshop" and not sub:
         roots = [pdir]
+    elif role in EXTRA_ONLY_ROLES:
+        roots = []
     elif not pantheon_role:
         # встроенный или ваш собственный субагент: прежнее правило — направление по cwd, иначе git-репозиторий
         name, roots = direction_of(domains, cwd)
@@ -2296,7 +2300,8 @@ def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
         if role == "domain-coordinator" or sub:
             if own and target == _key(own):
                 return True, ""
-            if len(parts) > 3 and parts[2] == "inbox" and not exists and tool in ("Write", "Bash"):
+            if (len(parts) > 3 and parts[2] == "inbox" and not exists and tool in ("Write", "Bash")
+                    and role not in EXTRA_ONLY_ROLES):
                 return True, ""
         return False, ("в чужом направлении можно только создать новый файл в его inbox/; "
                        "свой STATUS.md и планы — в ~/ai/pantheon/directions/<своё направление>/")
@@ -2446,8 +2451,21 @@ def limited(event):
 
 
 def private_conf(policy):
-    p = policy.get("private") or {}
-    return {k: p.get(k) or v for k, v in DEFAULT_PRIVATE.items()}
+    """[private] из policy.toml (0163): не таблица — всё по умолчанию; ключа нет или значение не список — умолчание;
+    список — только его строки (strip, пустые убраны). roles и coordinators: пустой список — никого; paths: пустой —
+    умолчание."""
+    p = policy.get("private")
+    if not isinstance(p, dict):
+        p = {}
+    conf = {}
+    for k, v in DEFAULT_PRIVATE.items():
+        val = p.get(k)
+        if not isinstance(val, list):
+            conf[k] = v
+            continue
+        items = [x.strip() for x in val if isinstance(x, str) and x.strip()]
+        conf[k] = items if items or k != "paths" else v
+    return conf
 
 
 def window_role():

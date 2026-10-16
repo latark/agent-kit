@@ -23,6 +23,10 @@ def check(name, ok, info=None):
 
 for plugin in ("guard", "pantheon"):
     path = os.path.join(ROOT, plugin, "hooks", "hooks.json")
+    if plugin != "guard" and not os.path.exists(path):
+        # автоустановка копирует во временную папку только guard: соседнего плагина нет — пропуск, не падение (0170)
+        print(f"skip {plugin}: нет {path} (рядом нет плагина)")
+        continue
     with open(path, encoding="utf-8") as f:
         hooks = json.load(f)["hooks"]
     pre = [h for g in hooks.get("PreToolUse", []) for h in g["hooks"]]
