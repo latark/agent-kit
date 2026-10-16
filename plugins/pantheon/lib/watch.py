@@ -972,7 +972,7 @@ def resume_or_start(name, agents, text, origin, only_resume=False, auto=False):
         print(f"[start] {name} --from {origin}")
         return 0
     r = subprocess.run([os.path.join(P.PLUGIN, "bin", "pantheon"), "start", name, "--from", origin, text],
-                       capture_output=True, text=True, timeout=240, env=P.run_env())
+                       capture_output=True, text=True, timeout=300, env=P.run_env())
     return r.returncode
 
 
