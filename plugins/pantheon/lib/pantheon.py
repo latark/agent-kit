@@ -1536,8 +1536,10 @@ def domains_build(if_changed=False):
         # попасть в hq.json
         # и каталог ролей: новая роль с memory: должна попасть в песочницу окон (metis-0051). Цикла нет: roles_build
         # пишет файл, только если текст изменился, — пересборка одна, следующий тик уже тихий
-        watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS,
-                   CLAUDE_TMP)
+        # и проектные настройки папок запуска направлений: allow с gh pr merge роняет окно (metis-0137)
+        launches = [launch_folder(fs) for fs in (read_json(path("domains.json")).get("domains") or {}).values()]
+        watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS, CLAUDE_TMP,
+                   *(os.path.join(l, ".claude", fn) for l in launches if l for fn in PROJECT_SETTINGS_FILES))
         newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
         # и пропавшее окно задачи расписания (P0-3): без него задача не идёт — в том числе сразу после обновления
         if built >= newest and all(os.path.isfile(job_window(r)) for r in JOB_ROLES):
@@ -1635,6 +1637,9 @@ COORDINATOR_COMPACT = 200000
 # в обход запора шло без проверки. Разрешённую форму слияния пропускает autoMode-правило GATED_MERGE_RULE
 # (coordinator_auto_allow), а каждое слияние по-прежнему проверяет guard (merge_problem): главная сессия
 # domain-coordinator или лид её направления (metis-0054), свои папки, без --admin и --auto. Мастерской и штабу правила нет.
+# Но .claude/settings.json проекта папки запуска сливается с --settings окна (флага --setting-sources нет), и allow
+# вроде Bash(gh *) в нём возвращает тот же обход: такое окно не собирается (project_allow_problems, sandbox_build),
+# `pantheon check` и `direction check` показывают то же предупреждение.
 COORDINATOR_ALLOW = []
 # Исключения классификатора режима auto окнам координаторов направлений, Метиды в их числе (metis-0098; решения
 # владельца 15.10 «Б» и Зевса 16.10 «А»). Классификатор не видит журнал запора guard и считал слияние через запор
@@ -1993,6 +1998,72 @@ def private_conf(policy):
     return conf
 
 
+# Образцы команд слияния в обход запора: правило allow, которому подходит любая из них, срабатывает раньше классификатора
+# режима auto, и формы --admin и --auto классификатор не судит (metis-0137)
+MERGE_SAMPLES = ("gh pr merge 12 --admin", "gh pr merge 12 --auto --merge")
+PROJECT_SETTINGS_FILES = ("settings.json", "settings.local.json")
+
+
+def allow_rule_merges(rule):
+    """Пускает ли правило permissions.allow `gh pr merge`: "Bash", "Bash(*)", Bash(<шаблон>) — шаблон (звёздочка —
+    любые знаки, старая форма «:*» на конце — « *») подходит хотя бы к одному из MERGE_SAMPLES."""
+    if not isinstance(rule, str):
+        return False
+    rule = rule.strip()
+    if rule == "Bash":
+        return True
+    if not (rule.startswith("Bash(") and rule.endswith(")")):
+        return False
+    inner = rule[5:-1].strip()
+    if inner.endswith(":*"):
+        inner = inner[:-2] + " *"
+    if inner == "":
+        return True
+    rx = ".*".join(re.escape(x) for x in inner.split("*"))
+    return any(re.fullmatch(rx, smp) for smp in MERGE_SAMPLES)
+
+
+def project_allow_problems(launch):
+    """[(файл, правило)] — allow в .claude/settings.json и settings.local.json папки запуска, пускающие `gh pr merge`."""
+    found = []
+    for fn in PROJECT_SETTINGS_FILES:
+        f = os.path.join(launch, ".claude", fn)
+        try:
+            with open(f, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        perms = data.get("permissions") if isinstance(data, dict) else None
+        allow = perms.get("allow") if isinstance(perms, dict) else None
+        for r in allow if isinstance(allow, list) else []:
+            if allow_rule_merges(r):
+                found.append((f, r))
+    return found
+
+
+def project_allow_text(name, problems):
+    shown = lambda f: f.replace(HOME, "~", 1) if f.startswith(HOME + os.sep) else f  # noqa: E731
+    return (f"направление {name}: " + "; ".join(f"{shown(f)} — allow «{r}» пускает gh pr merge" for f, r in problems)
+            + " — правило срабатывает раньше классификатора auto и открывает слияние --admin/--auto мимо запора: убрать "
+            "правило или сузить его до нужных команд gh (gh pr view *, gh pr checks *…)")
+
+
+def project_allow_report(name, launch, quiet=True):
+    """Проблемы папки запуска направления: тревога (quiet) или строка в stdout; без проблем тревога снимается.
+    → список проблем."""
+    problems = project_allow_problems(launch) if launch else []
+    key = "project-allow-" + name
+    if problems:
+        text = project_allow_text(name, problems)
+        if quiet:
+            alert_once(key, json.dumps(problems), text, "pantheon")
+        else:
+            print(f"предупреждение · {text}")
+    else:
+        clear_once(key)
+    return problems
+
+
 def sandbox_build(domains, policy_path, stores=None, leads=None):
     """domains.json и policy.toml → ~/.local/state/pantheon/settings/<направление>.json и workshop.json.
     leads — {направление: ["hephaestus-<коротко>", "apollo-<коротко>"]}: субагенты окна (P0-6)."""
@@ -2022,6 +2093,17 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
     memory = memory_dirs()
 
     def one(name, folders, own, compact, deny, allow=None, agents=None, direction=False, auto_allow=None):
+        if direction:
+            # проектные allow папки запуска с gh pr merge (metis-0137): окно не собирается, прежний файл убирается —
+            # без файла окна pantheon start не стартует
+            problems = project_allow_report(name, launch_folder(folders))
+            if problems:
+                print(f"песочница {name}: окно не собрано — {project_allow_text(name, problems)}", file=sys.stderr)
+                try:
+                    os.remove(os.path.join(out_dir, name + ".json"))
+                except OSError:
+                    pass
+                return False
         real = [_real_dir(f, SANDBOX_ROOTS[:1], strict=True) or _real_dir(f, SANDBOX_ROOTS[1:]) for f in folders]
         skipped = [f for f, r in zip(folders, real) if not r]
         if skipped:
@@ -2055,6 +2137,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
                 alert_once(f"pnpm-store-{name}", store, f"directions.toml: pnpm_store {store} направления {name} — вне "
                            "его папок, окно его не получит", "pantheon")
         write_window(out_dir, name, data)
+        return True
 
     merge_repos = policy.get("merge_repos") if isinstance(policy.get("merge_repos"), dict) else {}
     built = []
@@ -3378,6 +3461,9 @@ def direction_check(name):
     dom = (read_json(path("domains.json"), {}).get("domains") or {}).get(name)
     add(dom, "направление в domains.json (pantheon domains build) — guard его знает")
     add(os.path.isfile(path("settings", name + ".json")), "окно роли settings/" + name + ".json")
+    bad_allow = project_allow_problems(launch) if launch else []
+    add(not bad_allow, "проектные allow папки запуска не пускают gh pr merge (иначе окно не соберётся, metis-0137)"
+        + (": " + "; ".join(f"{os.path.basename(f)} «{r}»" for f, r in bad_allow) if bad_allow else ""))
     agents = os.path.join(launch, "AGENTS.md")
     claude_md = os.path.join(launch, "CLAUDE.md")
     cm = open(claude_md, encoding="utf-8").read(200) if os.path.isfile(claude_md) else None
@@ -4122,6 +4208,8 @@ def check(paths=None, quiet=False):
                 fh.write(text)
     if not paths:
         _check_long_state(quiet)
+        for dname, fs in sorted((read_json(path("domains.json"), {}).get("domains") or {}).items()):
+            project_allow_report(dname, launch_folder(fs), quiet)
     if not quiet or bad:
         print(f"задач: {n}, с ошибками: {len(bad)}, без шапки: {noheader}")
     if quiet:  # тик: одна тревога на набор проблем, а не сбой задачи каждые 5 минут

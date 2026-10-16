@@ -237,11 +237,58 @@ def main():
     open(os.path.join(rtmp, ".claude", "pantheon", "policy.toml"), "w").write("")
     renv = {"PATH": os.environ["PATH"], "HOME": rtmp, "PANTHEON_HOME": rhome, "PANTHEON_STATE": rstate,
             "PANTHEON_NO_NOTIFY": "1"}
-    rr = subprocess.run([sys.executable, "-I", LIB, "domains", "build"], env=renv, capture_output=True, text=True)
+    rr = subprocess.run([PY311, "-I", LIB, "domains", "build"], env=renv, capture_output=True, text=True)
     rdj = json.load(open(os.path.join(rstate, "domains.json")))["domains"]
     check("реестр: направления hq, workshop, job-* пропущены с понятной ошибкой, обычное имя осталось",
           list(rdj) == ["athena-broker"] and rr.stderr.count("зарезервировано под окна системы") == 4
           and "«job-iris»" in rr.stderr)
+
+    # проектные allow папки запуска, пускающие gh pr merge: окно не собирается (metis-0137)
+    def allow_build(tag, rules, fname="settings.json", second=None):
+        atmp = os.path.realpath(tempfile.mkdtemp(prefix="tick-test-"))
+        ahome, astate = make(atmp, "")
+        os.makedirs(os.path.join(atmp, "projects", "br", ".claude"))
+        os.makedirs(os.path.join(atmp, "projects", "ok"))
+        open(os.path.join(ahome, "directions.toml"), "w").write(
+            '[[direction]]\nname = "athena-broker"\nfolders = ["~/projects/br"]\n'
+            '[[direction]]\nname = "themis-sources"\nfolders = ["~/projects/ok"]\n')
+        os.makedirs(os.path.join(atmp, ".claude", "pantheon"))
+        open(os.path.join(atmp, ".claude", "pantheon", "policy.toml"), "w").write("")
+        aenv = {"PATH": os.environ["PATH"], "HOME": atmp, "PANTHEON_HOME": ahome, "PANTHEON_STATE": astate,
+                "PANTHEON_NO_NOTIFY": "1"}
+        cli = lambda *a: subprocess.run([PY311, "-I", LIB, *a], env=aenv, capture_output=True, text=True)  # noqa: E731
+        wr = lambda r: open(os.path.join(atmp, "projects", "br", ".claude", fname), "w").write(  # noqa: E731
+            json.dumps({"permissions": {"allow": r}}))
+        if second is not None:  # прежний файл окна от сборки без проблемы должен исчезнуть
+            wr(second)
+            cli("domains", "build")
+        wr(rules)
+        r = cli("domains", "build")
+        win = os.path.join(astate, "settings", "athena-broker.json")
+        return r, os.path.exists(win), os.path.exists(os.path.join(astate, "settings", "themis-sources.json")), cli, ahome
+
+    r, built_a, built_t, cli, ahome = allow_build("a", ["Bash(gh *)", "Bash(ls *)"])
+    check("allow Bash(gh *) в .claude/settings.json папки запуска — окно координатора не собирается; сообщение называет "
+          "файл и правило и что сделать; соседнее направление собрано",
+          not built_a and built_t and ".claude/settings.json" in r.stderr and "Bash(gh *)" in r.stderr
+          and "убрать правило или сузить" in r.stderr)
+    alerts = open(os.path.join(ahome, "alerts.md")).read() if os.path.exists(os.path.join(ahome, "alerts.md")) else ""
+    chk = cli("check")
+    check("тревога по направлению; pantheon check показывает то же предупреждение",
+          "Bash(gh *)" in alerts and "предупреждение" in chk.stdout and "athena-broker" in chk.stdout
+          and "Bash(gh *)" in chk.stdout)
+    r, built_a, built_t, *_ = allow_build("b", ["Bash(gh pr view *)", "Bash(gh pr checks *)", "Bash(git status)", "Read(*)"])
+    check("allow Bash(gh pr view *) и прочие узкие — окно собирается", built_a and "окно не собрано" not in r.stderr)
+    for rule in ("Bash", "Bash(*)", "Bash(gh:*)", "Bash(gh pr merge:*)", "Bash(gh pr *)", "Bash(gh pr merge*)",
+                 "Bash(gh pr merge 12 --admin)"):
+        r, built_a, *_ = allow_build("c", [rule])
+        check(f"allow {rule!r} — окно не собирается", not built_a and rule in r.stderr)
+    r, built_a, *_ = allow_build("d", ["Bash(gh *)"], fname="settings.local.json")
+    check("то же в settings.local.json — не собирается, файл назван", not built_a and "settings.local.json" in r.stderr)
+    r, built_a, *_ = allow_build("e", ["Bash(gh *)"], second=["Bash(ls *)"])
+    check("окно было собрано, правило появилось — прежний файл окна убран (pantheon start не стартует)", not built_a)
+    r, built_a, *_ = allow_build("f", ["Bash(gh:*)", "Bash(ghx)"][1:])
+    check("Bash(ghx) — не gh pr merge: окно собирается", built_a)
 
     # песочница окон ролей (SEC-19): строгий вид, папки направления, SSH-remote → сетевой git мимо песочницы
     br = os.path.join(tmp, "projects", "br", "app")
