@@ -207,6 +207,7 @@ def _watch(dry=False):
               ("версия Claude Code", lambda: cc_version(t)),
               ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
               ("паузы по нагрузке", lambda: pauses_clear(agents, reg, t)),
+              ("очистка Зевса", lambda: zeus_clean(agents, t)),
               ("самозапуск", lambda: autostart(agents, reg, doms, t)),
               ("журналы ваших слов", lambda: daily(t))]
     failed = []
@@ -736,6 +737,168 @@ def pause(rest, who):
             + (f"; остановлено сессий {len(was)}" if was else "") + f"; {off}", "pantheon-stop")
     print(f"пауза стоит: {who_txt}, причина {reason}; {off}")
     return 0
+
+
+
+# --- очистка Зевса (metis-0136) ---------------------------------------------------------------------------------
+# Большой контекст штаба дорог: каждый ход перечитывает его целиком. Дежурный очищает Зевса сам, только когда ничего
+# не теряется: контекст ≥ порога Stop-хука «пора очистить» (ctx.py AT, 150 тыс.); Зевс ждёт ввода, а не посреди хода;
+# нет запущенных им фоновых субагентов и команд; нет открытого вопроса AskUserQuestion; доска и последний
+# handoff/zeus-*/HANDOFF.md записаны после начала его последнего хода. Очистка — свежий старт (P.fresh_start: claude
+# stop, ожидание имени, claude --bg --agent hq --name zeus с окном штаба), а не claude respawn: respawn поднимает ту же
+# сессию с тем же контекстом. Прошлый разговор остаётся (claude attach <id>). Не сохранено только (5) — напоминание
+# не чаще раза в ZEUS_REMIND_MIN: строка в тревогах (её Зевс увидит со следующим вводом) и сброс метки Stop-хука —
+# в конце следующего хода он снова скажет «сверь доску». Координаторов и СБ не трогает.
+
+ZEUS_REMIND_MIN = 60
+ZEUS_BG_MAX_AGE = 86400     # фоновая задача без уведомления о конце старше суток — считается потерянной
+TASK_DONE = re.compile(r"<task-notification>.*?<tool-use-id>(toolu_[A-Za-z0-9_]+)</tool-use-id>", re.S)
+
+
+def zeus_turn(transcript):
+    """Разбор хвоста транскрипта Зевса. → {"turn": начало последнего хода (с) или None, "mid": ход идёт или ждёт
+    разрешения, "ask": открытый AskUserQuestion, "bg": id запущенных и не закончившихся фоновых задач}."""
+    C = P.ctx_mod()
+    lines = C.tail_lines(transcript, 4_000_000)
+    used, results, launched, done = {}, set(), {}, set()
+    turn, last = None, None
+    for raw in lines:  # уведомление о конце — во вводе, в очереди ввода или во вложении: ищем по сырой строке
+        if b"task-notification" in raw:
+            done.update(TASK_DONE.findall(raw.decode("utf-8", "replace")))
+    for d in C.entries(lines):
+        if d.get("isSidechain") or d.get("type") not in ("user", "assistant"):
+            continue
+        t = C.iso_ts(d.get("timestamp"))
+        content = (d.get("message") or {}).get("content")
+        items = content if isinstance(content, list) else []
+        if d.get("type") == "assistant":
+            for x in items:
+                if isinstance(x, dict) and x.get("type") == "tool_use" and x.get("id"):
+                    used[x["id"]] = x
+            last = "assistant"
+            continue
+        res = [x for x in items if isinstance(x, dict) and x.get("type") == "tool_result"]
+        for x in res:
+            tid = x.get("tool_use_id")
+            results.add(tid)
+            u, tur = used.get(tid) or {}, d.get("toolUseResult")
+            bash_bg = u.get("name") == "Bash" and (u.get("input") or {}).get("run_in_background") and not x.get("is_error")
+            agent_bg = isinstance(tur, dict) and (tur.get("isAsync") or tur.get("status") == "async_launched")
+            if tid and (bash_bg or agent_bg):
+                launched[tid] = t
+        if d.get("isMeta"):
+            continue
+        last = "user"
+        if not res:
+            turn = t  # ввод владельца, уведомление о конце задачи, сообщение другой сессии — начало хода
+    now = P.now()
+    open_uses = [u for i, u in used.items() if i not in results]
+    return {"turn": turn,
+            "mid": last == "user" or any(u.get("name") != "AskUserQuestion" for u in open_uses),
+            "ask": any(u.get("name") == "AskUserQuestion" for u in open_uses),
+            "bg": sorted(i for i, at in launched.items() if i not in done and (at is None or now - at < ZEUS_BG_MAX_AGE))}
+
+
+def zeus_hold():
+    """Почему Зевса сейчас не трогать независимо от его состояния, или None."""
+    if os.path.exists(P.path("stopped", "zeus")):
+        return "остановлен вами"
+    m = P.maintenance_active()
+    if m:
+        return f"идёт технический перезапуск ({m.get('reason')})"
+    if P.load_pause("zeus"):
+        return "пауза по нагрузке"
+    if os.path.exists(P.path("paused")):
+        return "весь планировщик на паузе"
+    for held in (".sync-held", ".sync-incoming"):  # карантин ~/.claude: ответ на доске применяет старт сессии
+        if os.path.exists(os.path.join(P.HOME, ".claude", held)):
+            return "карантин правок ~/.claude ждёт ответа"
+    return None
+
+
+def zeus_clean_check(a, transcript):
+    """Пять условий очистки. → (что не выполнено: список номеров с текстом, контекст в токенах, разбор хода)."""
+    C = P.ctx_mod()
+    n = C.context_tokens(transcript)
+    info = zeus_turn(transcript)
+    miss = []
+    if n < C.AT:
+        miss.append((1, f"контекст {n // 1000} тыс. < {C.AT // 1000} тыс."))
+    busy = (a.get("state") not in ("blocked", "done") or str(a.get("status") or "").lower() in ("busy", "working")
+            or "permission" in str(a.get("waitingFor") or "").lower())
+    if busy or info["mid"]:
+        miss.append((2, f"идёт ход ({a.get('state')}, {a.get('status')})"))
+    flight = a.get("inFlight") or a.get("subagents") or a.get("backgroundTasks")
+    if flight or info["bg"]:
+        miss.append((3, f"фоновые задачи: {', '.join(info['bg'][:3]) or 'есть'}"))
+    if info["ask"]:
+        miss.append((4, "открыт вопрос AskUserQuestion"))
+    turn = info["turn"]
+    stale = [f for f in P.state_files("zeus") if turn is None or not os.path.isfile(f) or os.path.getmtime(f) <= turn]
+    if stale:
+        miss.append((5, "не сохранено после последнего хода: " + ", ".join(P.tilde(f) for f in stale)))
+    return miss, n, info
+
+
+def zeus_clean(agents, t):
+    zs = [a for a in agents if a.get("name") == "zeus" and a.get("id") and a.get("sessionId")
+          and a.get("state") not in ("stopped", "failed")]
+    if len(zs) != 1 or zs[0].get("kind") not in (None, "background"):
+        return  # нет Зевса, копии или вкладка — решает человек
+    a = zs[0]
+    if zeus_hold():
+        return
+    tp = P.transcript_path(a)
+    if not tp:
+        return
+    stp = P.path("zeus-clean.json")
+    st = P.read_json(stp, {}) or {}
+    if a["sessionId"] in (st.get("cleared") or []):
+        return  # эту сессию уже очищали — новая ещё не появилась в claude agents
+    miss, n, info = zeus_clean_check(a, tp)
+    if not miss:
+        f = st.get("failed") or {}
+        if f.get("sid") == a["sessionId"] and t - float(f.get("t") or 0) < ZEUS_REMIND_MIN * 60:
+            return  # прошлая попытка с этой сессией не вышла — повтор не чаще раза в час
+        k, held = n // 1000, []
+
+        def again():
+            """Под блокировкой имени, перед claude stop: защиты и пять условий — по свежему claude agents (Зевс мог
+            получить ввод между проверкой и остановкой)."""
+            why = zeus_hold()
+            if not why:
+                now_a = [x for x in P.agents_all() or [] if x.get("sessionId") == a["sessionId"]]
+                why = "Зевса нет в claude agents" if not now_a else "; ".join(m for _, m in zeus_clean_check(now_a[0], tp)[0])
+            held.append(why)
+            return why or None
+        text = P.fresh_text("очистка", "zeus", a.get("id"), "Контекст был %d тыс.: дежурный очистил, когда всё было "
+                            "сохранено (metis-0136)." % k)
+        rc = P.fresh_start("zeus", a, text, "tick", recheck=again)
+        if rc == 0:
+            st["cleared"] = ((st.get("cleared") or []) + [a["sessionId"]])[-20:]
+            st.pop("failed", None)
+            P.write_json(stp, st)
+            P.alert(f"Зевс очищен в {P.stamp(t)[11:16]}, контекст {k} тыс. (прошлый разговор: claude attach {a.get('id')})",
+                    "watch")
+            event("zeus-clean", t, id=a.get("id"), tokens=n)
+            return
+        if not held or held[0]:
+            return  # имя занято другим запуском или перед остановкой условие перестало выполняться — проверит следующий проход
+        st["failed"] = {"sid": a["sessionId"], "t": t}
+        P.write_json(stp, st)
+        P.alert(f"очистка Зевса не вышла, код {rc} — контекст {k} тыс.; журнал start.log", "watch")
+        return
+    if [m for m, _ in miss] != [5]:
+        return
+    r = st.get("remind") or {}
+    if t - float(r.get("t") or 0) < ZEUS_REMIND_MIN * 60 or (r.get("sid") == a["sessionId"] and r.get("turn") == info["turn"]):
+        return  # не чаще раза в час и не повторять, пока у Зевса не было нового хода (прошлое напоминание не дошло)
+    with contextlib.suppress(OSError):
+        os.remove(P.ctx_mod().mark_path(a["sessionId"]))
+    P.alert(f"Зевс: контекст {n // 1000} тыс., дежурный очистил бы, но {miss[0][1]} — сверь доску и handoff, "
+            "тогда очистка пройдёт сама", "watch")
+    st["remind"] = {"t": t, "sid": a["sessionId"], "turn": info["turn"]}
+    P.write_json(stp, st)
 
 
 # --- самозапуск координаторов (SCHED-09, решение владельца 15.10) --------------------------------------
