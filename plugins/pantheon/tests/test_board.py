@@ -37,7 +37,7 @@ def check(name, ok, detail=""):
 def make():
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="board-test-"))
     home, state, view = (os.path.join(tmp, x) for x in ("pantheon", "state", "view"))
-    for d in ("directions/metis-pantheon/tasks", "directions/athena-broker/tasks", "inbox/tasks"):
+    for d in ("directions/metis-pantheon/tasks", "directions/athena-shop/tasks", "inbox/tasks"):
         os.makedirs(os.path.join(home, d))
     os.makedirs(view)
     open(os.path.join(home, "schedule.toml"), "w").write('primary_host = "mac-a"\n')
@@ -91,16 +91,16 @@ def main():
     run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Вопрос владельцу", "--status", "waiting",
         "--waiting-on", "human", "--next", "ждём ответ", "--question", "Где держать доску?", "--option", "В копии",
         "--option", "В knowledge", "--project", "Пантеон")
-    run(env, "task", "new", "--direction", "athena-broker", "--title", "Налоги беты", "--due", "2026-10-10",
+    run(env, "task", "new", "--direction", "athena-shop", "--title", "Налоги беты", "--due", "2026-10-10",
         "--project", "ExampleApp")
     run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Ждёт схему", "--status", "waiting",
         "--waiting-on", "metis-0001", "--next", "после схемы", "--project", "Пантеон")
     r = run(env, "check")
     check("check: 4 задачи без ошибок", r.returncode == 0 and "задач: 4, с ошибками: 0" in r.stdout)
-    open(src("athena-broker", "athena-0099"), "w").write("---\ntype: task\nid: athena-0099\nstatus: wip\n---\n")
+    open(src("athena-shop", "athena-0099"), "w").write("---\ntype: task\nid: athena-0099\nstatus: wip\n---\n")
     r = run(env, "check")
     check("check: битая шапка — ошибка с причиной", r.returncode == 1 and "athena-0099" in r.stdout and "wip" in r.stdout)
-    os.remove(src("athena-broker", "athena-0099"))
+    os.remove(src("athena-shop", "athena-0099"))
 
     # metis-0160: длинные STATUS.md и board.md (символы, не байты)
     stp = os.path.join(home, "directions", "metis-pantheon", "STATUS.md")
@@ -166,7 +166,7 @@ def main():
           and "Закрыта" not in t2)
     # п. 5: тег направления
     check("board: тег направление/<имя> на карточке задачи","\ntags: [направление/metis-pantheon]\n" in t2
-          and "\ntags: [направление/athena-broker]\n" in t3x)
+          and "\ntags: [направление/athena-shop]\n" in t3x)
     # сортировка: формулы Доска.base опираются на слова в карточках — слова должны совпадать
     base_txt = open(os.path.join(view, "Доска", "Доска.base"), encoding="utf-8").read()
     sys.path.insert(0, LIB)
@@ -281,12 +281,12 @@ def main():
     open(c3, "a", encoding="utf-8").write("\nУточнение: сначала НДФЛ, потом НДС\n- [x] Да\n## Журнал\nпункт два\n")
     os.utime(c3, (T0 + 365, T0 + 365))
     run(env, "board", t=T0 + 370)
-    _, t3 = head_of(src("athena-broker", "athena-0001"))
+    _, t3 = head_of(src("athena-shop", "athena-0001"))
     check("заметка, которую ещё пишут (моложе 30 с), не забрана, карточка не перерисована",
           "Уточнение" not in t3 and "пункт два" in open(c3, encoding="utf-8").read())
     os.utime(c3, (T0 + 330, T0 + 330))
     run(env, "board", t=T0 + 371)
-    _, t3 = head_of(src("athena-broker", "athena-0001"))
+    _, t3 = head_of(src("athena-shop", "athena-0001"))
     _, ct3 = head_of(c3)
     notes = t3.split("## Заметки владельца")[1].split("\n## ")[0] if "## Заметки владельца" in t3 else ""
     check("текст в теле карточки: в «Заметки владельца» задачи цитатой, в журнале строка, карточка перерисована",
@@ -431,7 +431,7 @@ def main():
     import concurrent.futures as cf
     with cf.ThreadPoolExecutor(8) as ex:
         list(ex.map(lambda i: run(env, "task", "set", "athena-0001", f"next=шаг {i}", "--note", f"правка {i}", t=T0 + 600 + i), range(8)))
-    _, text = head_of(src("athena-broker", "athena-0001"))
+    _, text = head_of(src("athena-shop", "athena-0001"))
     check("8 одновременных правок одной задачи — все 8 строк журнала на месте", all(f"правка {i}" in text for i in range(8)))
     run(env, "task", "set", "athena-0001", "status=todo", t=T0 + 620)
     with cf.ThreadPoolExecutor(6) as ex:
@@ -461,7 +461,7 @@ def main():
           and len(made) == 1 and "Сделать запрет импорта" in open(os.path.join(home, "directions", "metis-pantheon", "tasks", made[0]), encoding="utf-8").read())
 
     # ссылки вместо папок: тик их не принимает и ничего не переносит
-    ib2 = os.path.join(home, "directions", "athena-broker", "inbox")
+    ib2 = os.path.join(home, "directions", "athena-shop", "inbox")
     os.makedirs(ib2, exist_ok=True)
     open(os.path.join(ib2, "заявка.md"), "w", encoding="utf-8").write("# Заявка со ссылкой\n\nтекст\n")
     trap = os.path.join(tmp, "trap")
@@ -470,12 +470,12 @@ def main():
     run(env, "board", t=T0 + 720)
     sc = card(view, "Заявка со ссылкой")
     set_card(sc, "Статус", "Очередь")
-    n_before = len(os.listdir(os.path.join(home, "directions", "athena-broker", "tasks")))
+    n_before = len(os.listdir(os.path.join(home, "directions", "athena-shop", "tasks")))
     run(env, "board", t=T0 + 730)
     _, sct = head_of(sc)
     check("ссылка вместо inbox/done: задача не создана, заявка на месте, ничего не перенесено",
           not os.listdir(trap) and os.path.exists(os.path.join(ib2, "заявка.md")) and "ссылка" in sct
-          and len(os.listdir(os.path.join(home, "directions", "athena-broker", "tasks"))) == n_before)
+          and len(os.listdir(os.path.join(home, "directions", "athena-shop", "tasks"))) == n_before)
     os.remove(os.path.join(ib2, "done"))
     os.makedirs(os.path.join(home, "directions", "evil"))
     os.symlink(os.path.join(home, "directions", "metis-pantheon", "tasks"), os.path.join(home, "directions", "evil", "tasks"))
@@ -496,7 +496,7 @@ def main():
 
     # чужая роль держит блокировку: правка ждёт недолго и отказывает, тик не виснет
     import fcntl as _f
-    lk = os.open(os.path.join(home, "directions", "athena-broker", "tasks", ".lock"), os.O_WRONLY | os.O_CREAT)
+    lk = os.open(os.path.join(home, "directions", "athena-shop", "tasks", ".lock"), os.O_WRONLY | os.O_CREAT)
     _f.flock(lk, _f.LOCK_EX)
     r = run(dict(env, PANTHEON_LOCK_WAIT="0.5"), "task", "set", "athena-0001", "next=x")
     _f.flock(lk, _f.LOCK_UN)
@@ -509,14 +509,14 @@ def main():
     open(nlog, "w").close()
     run(away, "board", t=day - 600)  # прежние вопросы показаны раньше: в проходе ниже — только новый
     open(nlog, "w").close()
-    run(env, "task", "new", "--direction", "athena-broker", "--title", "Выбрать тариф", "--status", "waiting",
+    run(env, "task", "new", "--direction", "athena-shop", "--title", "Выбрать тариф", "--status", "waiting",
         "--waiting-on", "human", "--next", "ответ", "--question", "Какой тариф?", "--option", "A", "--option", "B",
         "--project", "ExampleApp", t=day - 60)
     run(away, "board", t=day)
     lines = [l for l in open(nlog, encoding="utf-8").read().split("\n") if l]
     check("уведомление «❓ Вопрос к вам» ведёт в карточку", any("Вопрос к вам: Выбрать тариф" in l and "file=" in l and "%D0%92%D1%8B%D0%B1%D1%80" in l for l in lines))
     open(nlog, "w").close()
-    run(env, "task", "new", "--direction", "athena-broker", "--title", "Ночной вопрос", "--status", "waiting",
+    run(env, "task", "new", "--direction", "athena-shop", "--title", "Ночной вопрос", "--status", "waiting",
         "--waiting-on", "human", "--next", "ответ", "--project", "ExampleApp", t=day + 60)
     run(away, "board", t=day + 12 * 3600)  # 00:00
     check("ночью вопрос — без уведомления", not open(nlog, encoding="utf-8").read().strip())
@@ -606,22 +606,22 @@ def main():
           and not re.search(r"^> \[!warning\]", sc, re.M))
     # metis-0037: варианты с запятыми и кавычками — повторяемым --option; options=… — отказ; файл не ломается
     opt1, opt2 = 'А и Б — вы сливаете PR #2 сейчас, «Метида» разрешает. Цена: "одна" правка', "Только А, без правок"
-    r0 = run(env, "task", "new", "--direction", "athena-broker", "--title", "Варианты с запятыми", t=T0 + 940)
+    r0 = run(env, "task", "new", "--direction", "athena-shop", "--title", "Варианты с запятыми", t=T0 + 940)
     t37 = r0.stdout.split()[0] if r0.returncode == 0 else "athena-0000"
     r = run(env, "task", "set", t37, "question=Кто сливает?", "--option", opt1, "--option", opt2)
     sys.path.insert(0, LIB)
     import tasks as T37
-    head37, _ = T37.read(src("athena-broker", t37))
+    head37, _ = T37.read(src("athena-shop", t37))
     check("task set --option: варианты с запятыми и кавычками записаны и читаются обратно",
           r.returncode == 0 and head37.get("options") == [opt1, opt2])
     r = run(env, "task", "set", t37, "options=", "--option", "Д, с запятой")
     check("task set options= --option …: варианты заменены, без падения",
-          r.returncode == 0 and T37.read(src("athena-broker", t37))[0].get("options") == ["Д, с запятой"])
+          r.returncode == 0 and T37.read(src("athena-shop", t37))[0].get("options") == ["Д, с запятой"])
     r = run(env, "task", "set", t37, "--option", opt1, "--option", opt2)
     r = run(env, "task", "set", t37, 'options=["А, б", "в"]')
-    head37b, _ = T37.read(src("athena-broker", t37))
+    head37b, _ = T37.read(src("athena-shop", t37))
     check("task set options=… — отказ с подсказкой, файл цел", r.returncode == 2 and "--option" in r.stderr
-          and T37.read(src("athena-broker", t37))[0].get("options") == [opt1, opt2])
+          and T37.read(src("athena-shop", t37))[0].get("options") == [opt1, opt2])
     check("шапка: \\\" внутри элемента списка читается (как пишет join)",
           T37._scalar('["a \\"b\\", c", "d"]') == ['a "b", c', "d"])
     xp = os.path.join(tmp, "x.md")
@@ -832,7 +832,7 @@ def board_extra(tmp, home, state, view, env, src):
     os.remove(tj)
 
     # п. 2: отмечен вариант, которого нет в задаче, — конфликт в карточке; верный ответ его снимает
-    qid = new_task(env, "--direction", "athena-broker", "--title", "Выбрать банк", "--status", "waiting",
+    qid = new_task(env, "--direction", "athena-shop", "--title", "Выбрать банк", "--status", "waiting",
                    "--waiting-on", "human", "--next", "ответ", "--question", "Какой банк?", "--option", "Первый банк",
                    "--option", "Второй банк", "--project", "ExampleApp", t=t + 60)
     run(env, "board", t=t + 70)
@@ -841,14 +841,14 @@ def board_extra(tmp, home, state, view, env, src):
     open(qc, "w", encoding="utf-8").write(qtext.replace("- [ ] Первый банк", "- [x] Третий банк"))
     run(env, "board", t=t + 80)
     qh, qct = head_of(qc)
-    sh, _ = head_of(src("athena-broker", qid))
+    sh, _ = head_of(src("athena-shop", qid))
     check("галочка на вариант не из задачи: не ответ, конфликт в карточке и во «Внимании»",
           not sh.get("answer") and "отмечен вариант, которого нет в задаче: «Третий банк»" in qct
           and "конфликт" in qh.get("Внимание", "") and "- [ ] Первый банк" in qct)
     open(qc, "w", encoding="utf-8").write(qct.replace("- [ ] Второй банк", "- [x] Второй банк"))
     run(env, "board", t=t + 90)
     qh, qct = head_of(qc)
-    sh, _ = head_of(src("athena-broker", qid))
+    sh, _ = head_of(src("athena-shop", qid))
     check("после верного ответа конфликт снят", sh.get("answer") == "Второй банк" and "отмечен вариант" not in qct
           and "конфликт" not in qh.get("Внимание", ""))
 
@@ -879,10 +879,10 @@ def board_extra(tmp, home, state, view, env, src):
     # п. 7: owner не очищается; задача без owner — предупреждение check, на карточке координатор
     r = run(env, "task", "set", did, "owner=", t=t + 180)
     check("task set owner= — отказ «owner не очищается»", r.returncode == 1 and "owner не очищается" in r.stderr)
-    raw = os.path.join(home, "directions", "athena-broker", "tasks", "athena-0090.md")
+    raw = os.path.join(home, "directions", "athena-shop", "tasks", "athena-0090.md")
     open(raw, "w", encoding="utf-8").write(
         "---\ntype: task\nid: athena-0090\ntitle: Без исполнителя\nstatus: todo\nproject: ExampleApp\n"
-        "direction: athena-broker\ncreated: 2026-10-01\nupdated: 2026-10-01T10:00\nschema_version: 1\n---\n\n# Без исполнителя\n")
+        "direction: athena-shop\ncreated: 2026-10-01\nupdated: 2026-10-01T10:00\nschema_version: 1\n---\n\n# Без исполнителя\n")
     r = run(env, "check", raw)
     run(env, "board", t=t + 190)
     nh, _ = head_of(card(view, "Без исполнителя"))
@@ -904,7 +904,7 @@ def board_extra(tmp, home, state, view, env, src):
     check("узлы: лид → координатор своего направления → Зевс → Владелец; тег направления; незнакомый слаг — как есть",
           gh.get("type") == "узел" and gh.get("parent") == "[[Метида]]" and gh.get("tags") == "[направление/metis-pantheon]"
           and mh.get("parent") == "[[Зевс]]" and zh.get("parent") == "[[Владелец]]" and "parent" not in vh
-          and ah.get("id") == "athena-broker" and dh2.get("parent") == "[[Зевс]]" and "Руководитель: [[Метида]]" in gt)
+          and ah.get("id") == "athena-shop" and dh2.get("parent") == "[[Зевс]]" and "Руководитель: [[Метида]]" in gt)
     lc = open(card(view, "Задача лида"), encoding="utf-8").read()
     check("узлы: в узле — только открытые задачи ссылками «id заголовок|id»; в карточке строка «Кому» для графа",
           f"[[{lid} Задача лида|{lid}]] · Задача лида · Очередь · срок 2026-12-01" in gt and "## Открытые задачи (1)" in gt
@@ -932,7 +932,7 @@ def board_extra(tmp, home, state, view, env, src):
     nlog = os.path.join(tmp, "notify2.log")
     env2 = dict(env, PANTHEON_NOTIFY_LOG=nlog)
     day = 1791968400 + 3 * 3600  # 2026-10-14 15:00 по Москве — днём уведомления не глушатся
-    wid = new_task(env, "--direction", "athena-broker", "--title", "Старый вопрос", "--status", "waiting",
+    wid = new_task(env, "--direction", "athena-shop", "--title", "Старый вопрос", "--status", "waiting",
                    "--waiting-on", "human", "--next", "ответ", "--question", "Как раньше?", "--option", "Так",
                    "--option", "Иначе", "--project", "ExampleApp", t=day - 100)
     run(env2, "board", t=day - 60)
@@ -948,7 +948,7 @@ def board_extra(tmp, home, state, view, env, src):
     nmoves = sum(1 for x in open(os.path.join(state, "owner-log", "board.jsonl")) if '"move"' in x)
     run(env2, "board", t=day)
     wh, _ = head_of(newc)
-    sh, _ = head_of(src("athena-broker", wid))
+    sh, _ = head_of(src("athena-shop", wid))
     check("переход «Ждёт вас»: старая карточка переименована в «<id> <заголовок>», колонка «Нужен ответ», "
           "без ложного уведомления и хода",
           not os.path.exists(oldc) and wh.get("Статус") == "Нужен ответ" and "Вопрос к вам" not in open(nlog).read()
@@ -959,7 +959,7 @@ def board_extra(tmp, home, state, view, env, src):
     open(newc, "w", encoding="utf-8").write(text)
     run(env2, "board", t=day + 5)
     wh, wt = head_of(newc)
-    sh, _ = head_of(src("athena-broker", wid))
+    sh, _ = head_of(src("athena-shop", wid))
     check("переход «Ждёт вас»: старое слово в карточке при новом в состоянии — ни хода, ни конфликта",
           sh.get("status") == "waiting" and wh.get("Статус") == "Нужен ответ" and "переносит агент" not in wt
           and "конфликт" not in wh.get("Внимание", "")
@@ -968,7 +968,7 @@ def board_extra(tmp, home, state, view, env, src):
     text = open(newc, encoding="utf-8").read().replace("Статус: Нужен ответ", "Статус: Ждёт вас")
     open(newc, "w", encoding="utf-8").write(text.replace("- [ ] Так", "- [x] Так"))
     run(env2, "board", t=day + 10)
-    sh, _ = head_of(src("athena-broker", wid))
+    sh, _ = head_of(src("athena-shop", wid))
     wh, wt = head_of(newc)
     check("переход «Ждёт вас»: старое слово в карточке = «Нужен ответ» — ответ применён, ни хода, ни конфликта",
           sh.get("answer") == "Так" and "переносит агент" not in wt and "конфликт" not in wh.get("Внимание", "")

@@ -1760,8 +1760,8 @@ def _real_dir(p, roots, strict=False, create=False):
 # закрытые штабу папки: индексы qmd, копии больших корпусов и сырые выгрузки (кэш, входящие) — чужой текст; штабу его
 # не читать (у штаба личное и действия наружу). Вопросы по ним — координатору направления поручением; коллекции qmd
 # штабу закрывает хук qmd-query
-HQ_CLOSED_DIRS = ["~/projects/sample-corpus", "~/.cache/sample-corpus", "~/.cache/qmd",  # trace-ok: 0182-core — снять в PR ядра 0182
-                  "~/.claude/projects/*sample-corpus*", "~/projects/sample-watch/cache", "~/projects/sample-watch/inbox"]  # trace-ok: 0182-core — снять в PR ядра 0182
+HQ_CLOSED_DIRS = ["~/projects/expert-corpus", "~/.cache/expert-corpus", "~/.cache/qmd",  # trace-ok: 0182-core — снять в PR ядра 0182
+                  "~/.claude/projects/*expert-corpus*", "~/projects/legal-watch/cache", "~/projects/legal-watch/inbox"]  # trace-ok: 0182-core — снять в PR ядра 0182
 
 
 # выводы фоновых задач и TMPDIR песочницы всех сессий Claude Code: /tmp/claude-<uid> (на macOS по умолчанию). Не из

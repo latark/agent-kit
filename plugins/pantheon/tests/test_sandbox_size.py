@@ -44,7 +44,7 @@ def setup(tmp):
     home, state = os.path.join(tmp, "pantheon"), os.path.join(tmp, "state")
     os.makedirs(home)
     open(os.path.join(home, "directions.toml"), "w").write(
-        '[[direction]]\nname = "athena-broker"\nfolders = ["~/projects/br"]\n')
+        '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n')
     os.makedirs(os.path.join(tmp, "projects", "br"))
     os.makedirs(os.path.join(tmp, ".claude", "pantheon"))
     open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w").write("")
@@ -128,19 +128,20 @@ def main():
     check("tool-results: чужие закрыты правилом Read, свои — нет",
           all(rd_closed(os.path.join(projects, n, "s1", "tool-results", "x.txt")) for n in foreign)
           and not any(rd_closed(os.path.join(projects, n, "s1", "tool-results", "x.txt")) for n in mine))
-    # P0-1 (metis-0060): выгрузки Telegram sample-watch (cache, inbox) штабу закрыты — песочница и правило Read
-    tg = ("~/projects/sample-watch/cache", "~/projects/sample-watch/inbox")
-    check("окно штаба: sample-watch/cache и inbox — в denyRead песочницы и в правилах Read",
+    # P0-1 (metis-0060): сырые выгрузки (cache, inbox) проекта из HQ_CLOSED_DIRS штабу закрыты — песочница и правило Read
+    raw = "projects/legal-watch"  # trace-ok: 0182-core — снять в PR ядра 0182 (папки — из policy.toml [hq])
+    tg = (f"~/{raw}/cache", f"~/{raw}/inbox")
+    check("окно штаба: сырые выгрузки cache и inbox — в denyRead песочницы и в правилах Read",
           all(x in fs2["denyRead"] and f"Read({x}/**)" in hq2["permissions"]["deny"] for x in tg)
           and all(os.path.join(tmp, x[2:]) in fs2["denyRead"] for x in tg))
     deny_tg = [glob_re(os.path.join(tmp, x[len("Read(~/"):-1])) for x in hq2["permissions"]["deny"]
-               if x.startswith("Read(~/projects/sample-watch")]
-    check("окно штаба: файл выгрузки sample-watch/cache/telegram/… закрыт правилом Read, папка src/ — нет",
-          any(m.fullmatch(os.path.join(tmp, "projects/sample-watch/cache/telegram/ch.json")) for m in deny_tg)
-          and not any(m.fullmatch(os.path.join(tmp, "projects/sample-watch/src/a.py")) for m in deny_tg))
-    sa = json.load(open(os.path.join(state, "settings", "athena-broker.json")))
-    check("окно направления: sample-watch штабу закрыт, координатору — нет",
-          not any("sample-watch" in x for x in sa["sandbox"]["filesystem"]["denyRead"]))
+               if x.startswith(f"Read(~/{raw}")]
+    check("окно штаба: файл выгрузки cache/telegram/… закрыт правилом Read, папка src/ — нет",
+          any(m.fullmatch(os.path.join(tmp, raw, "cache/telegram/ch.json")) for m in deny_tg)
+          and not any(m.fullmatch(os.path.join(tmp, raw, "src/a.py")) for m in deny_tg))
+    sa = json.load(open(os.path.join(state, "settings", "athena-shop.json")))
+    check("окно направления: сырые выгрузки штабу закрыты, координатору — нет",
+          not any(raw in x for x in sa["sandbox"]["filesystem"]["denyRead"]))
     gm = [g["matcher"] for w in (hq2, sa) for g in w["hooks"]["PreToolUse"]
           if any("guard.py" in h.get("command", "") for h in g.get("hooks") or [])]  # без хука agents.py (P0-6)
     check("строгий guard окон штаба и направления: matcher с Agent|Task|Skill (hq-telegram, chiron)",
@@ -153,20 +154,20 @@ def main():
     pol = os.path.join(tmp, ".claude", "pantheon", "policy.toml")
     big = ", ".join(f'"~/private/{"x" * 40}-{i}"' for i in range(1500))
     open(pol, "w").write(f"[private]\npaths = [{big}]\n")
-    before = open(os.path.join(state, "settings", "athena-broker.json")).read()
+    before = open(os.path.join(state, "settings", "athena-shop.json")).read()
     r1, r2 = build(env), build(env)
     alerts = open(os.path.join(home, "alerts.md")).read() if os.path.exists(os.path.join(home, "alerts.md")) else ""
-    after = open(os.path.join(state, "settings", "athena-broker.json")).read()
+    after = open(os.path.join(state, "settings", "athena-shop.json")).read()
     check("предохранитель: окно больше предела не пересобрано, прежний файл на месте, одна тревога",
-          after == before and alerts.count("песочница окна athena-broker") == 1 and "не пересобрано" in r1.stderr)
+          after == before and alerts.count("песочница окна athena-shop") == 1 and "не пересобрано" in r1.stderr)
     open(pol, "w").write('[private]\npaths = ["~/private/one"]\n')
     build(env)
-    sa = json.load(open(os.path.join(state, "settings", "athena-broker.json")))
+    sa = json.load(open(os.path.join(state, "settings", "athena-shop.json")))
     open(pol, "w").write(f"[private]\npaths = [{big}]\n")
     build(env)
     alerts = open(os.path.join(home, "alerts.md")).read()
     check("предохранитель: в пределе окно пересобрано; новый выход за предел — новая тревога",
-          "~/private/one" in sa["sandbox"]["filesystem"]["denyRead"] and alerts.count("песочница окна athena-broker") == 2)
+          "~/private/one" in sa["sandbox"]["filesystem"]["denyRead"] and alerts.count("песочница окна athena-shop") == 2)
 
     print(f"{sum(results)} из {len(results)} прошли")
     return 0 if all(results) else 1
