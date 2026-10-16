@@ -1,0 +1,12 @@
+/* Широкие таблицы во всех заметках — как класс table-max у Cupertino, без cssclasses в каждой. */
+body:not(.block-width-off) .markdown-preview-view,
+body:not(.block-width-off) .markdown-source-view {
+  --table-line-max-width: var(--block-width-max);
+  --table-line-width: var(--block-width-max);
+}
+body:not(.block-width-off) .markdown-preview-sizer > .el-table,
+body:not(.block-width-off) .cm-content > .cm-table-widget {
+  max-width: var(--table-line-max-width) !important;
+  width: var(--table-line-width) !important;
+  justify-self: center;
+}

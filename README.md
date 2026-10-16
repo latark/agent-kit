@@ -90,7 +90,9 @@
   запуском qmd и без ключа `update` (его qmd исполняет через bash). Сервер MCP — служба `qmd` на 127.0.0.1:8181;
   подключение на новом Mac — `npm install -g @tobilu/qmd`, затем `pantheon qmd install` (MCP уровня пользователя).
   Хук `ctx.py qmd-query` пропускает только поиск `vec`/`lex` в названных коллекциях с `rerank: false` (QMD-04).
-- `plugins/pantheon/lib/view-sync.sh` — копия `~/ai/pantheon` только для чтения для Obsidian.
+- `plugins/pantheon/lib/view-sync.sh` — копия `~/ai/pantheon` только для чтения для Obsidian. Если в копии нет
+  `.obsidian`, кладёт образец настроек из `plugins/pantheon/share/pantheon-view-obsidian/` (сниппеты, закладки, базовые
+  плагины; существующую папку не трогает). Тему и плагин Style Settings владелец ставит в Obsidian сам.
 - `plugins/pantheon/hooks/ctx.py` — хуки контекста и журнала ваших слов (шаг 1.1): `owner-log` (UserPromptSubmit,
   в фоне — строка только для ввода, который Claude Code сам пометил в транскрипте как ваш), `stop` (подсказка
   «пора очистить» на 150 тыс. и далее каждые +100 тыс.), `start` (после сжатия — файл состояния, штабу — новые

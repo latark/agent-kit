@@ -534,6 +534,33 @@ def main():
     ro = not os.access(os.path.join(dst, "board.md"), os.W_OK)
     check("копия: Доска цела и записываема, остальное — только чтение", kept and writable and ro)
 
+    # metis-0131: пустая копия без .obsidian получает образец; существующий .obsidian не меняется ни на байт
+    sample = os.path.join(os.path.dirname(LIB), "share", "pantheon-view-obsidian")
+    ob = os.path.join(dst, ".obsidian")
+    check("0131: образец лежит в плагине без workspace.json",
+          os.path.isfile(os.path.join(sample, "app.json")) and not os.path.exists(os.path.join(sample, "workspace.json")))
+    check("0131: образец без чужого кода — ни тем, ни плагинов, community-plugins пуст, cssTheme не задан",
+          not os.path.exists(os.path.join(sample, "themes")) and not os.path.exists(os.path.join(sample, "plugins"))
+          and json.load(open(os.path.join(sample, "community-plugins.json"))) == []
+          and "cssTheme" not in json.load(open(os.path.join(sample, "appearance.json"))))
+    check("0131: копия без .obsidian получила образец (сниппеты, закладки, настройки), записываемый",
+          os.path.isfile(os.path.join(ob, "app.json"))
+          and os.path.isfile(os.path.join(ob, "snippets", "pantheon.css"))
+          and os.path.isfile(os.path.join(ob, "bookmarks.json")) and os.access(os.path.join(ob, "app.json"), os.W_OK))
+    with open(os.path.join(ob, "app.json"), "w") as fh:
+        fh.write('{"свои": "настройки"}')
+    _shutil.rmtree(os.path.join(ob, "snippets"))
+    before = open(os.path.join(ob, "app.json"), "rb").read()
+    subprocess.run(["/bin/zsh", os.path.join(LIB, "view-sync.sh"), src_dir, dst, os.path.join(tmp, "inbox-view")],
+                   capture_output=True, timeout=30)
+    check("0131: существующий .obsidian не тронут — свои настройки целы, удалённое не возвращается",
+          open(os.path.join(ob, "app.json"), "rb").read() == before and not os.path.exists(os.path.join(ob, "snippets")))
+    empty = os.path.join(tmp, "dst-empty")
+    os.makedirs(os.path.join(empty, ".obsidian"))
+    subprocess.run(["/bin/zsh", os.path.join(LIB, "view-sync.sh"), src_dir, empty, os.path.join(tmp, "inbox-view")],
+                   capture_output=True, timeout=30)
+    check("0131: пустая папка .obsidian — тоже «есть», образец не подмешивается", os.listdir(os.path.join(empty, ".obsidian")) == [])
+
     r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Выбрать хранилище", "--status", "waiting",
             "--waiting-on", "human", "--next", "ответ", "--question", "Где хранить пакеты?",
             "--why", "Агенты не могут ставить зависимости.", "--option", "А — в папке проекта. Одна пересборка.",
