@@ -306,8 +306,9 @@ def merge_security_checks(home, MERGE_OK, cases):
              dict(policy_fn=lambda t: t.replace('metis-pantheon = ["~/projects/agent-kit"]', "metis-pantheon = []"))),
             ("metis-pantheon не из строк",
              dict(policy_fn=lambda t: t.replace('metis-pantheon = ["~/projects/agent-kit"]', "metis-pantheon = [1]"))),
-            # [private] с неверными значениями слияние больше не закрывает (0163, решение лида): значение не список —
-            # умолчание, список — только строки из него. Проверка умолчаний — test_misc.py
+            # guard читает [private] мягко (0163, проверка умолчаний — test_misc.py), а шлюз слияния на неверном — закрыт
+            ("[private].coordinators не из строк", dict(policy_fn=lambda t: t + "\n[private]\ncoordinators = [1]\n")),
+            ("[private].paths строкой", dict(policy_fn=lambda t: t + '\n[private]\npaths = "~/ai/knowledge/me"\n')),
             ("domains.json битый", dict(domains_fn=lambda t: "{не json")),
             ("domains.json: папки строкой",
              dict(domains_fn=lambda t: json.dumps({"domains": {"themis-sources": "~/projects/expert-corpus"}}))),
@@ -318,6 +319,13 @@ def merge_security_checks(home, MERGE_OK, cases):
     ):
         out = run(variant(**kw), ec, "domain-coordinator", "Bash", {"command": "gh pr merge 1"}, raw=True)
         check(f"сбой — отказ: {name}", deny(out) and "сбой проверки" not in out)
+    # 0163: отказ на неверном [private] — именно по [private]; пустой список coordinators — «никого», слияние как было
+    out = run(variant(policy_fn=lambda t: t + "\n[private]\ncoordinators = [1]\n"), ec, "domain-coordinator", "Bash",
+              {"command": "gh pr merge 1"}, raw=True)
+    check("[private].coordinators = [1] — отказ называет [private]",
+          deny(out) and ("[private] в policy.toml не разобрать" in out or not allow_ok))
+    got = M(variant(policy_fn=lambda t: t + "\n[private]\ncoordinators = []\nroles = []\n"), "gh pr merge 1", pdir=ec)
+    check(f"[private] с пустыми roles и coordinators — слияние как было: {got}", got == MERGE_OK)
     # -R latark/agent-kit в чужом [merge_repos] — это защиты, а не внутреннее
     h = variant(policy_fn=lambda t: t.replace('themis-sources = ["latark/expert-corpus", "latark/legal-watch"]',
                                               'themis-sources = ["latark/expert-corpus", "latark/agent-kit"]'))

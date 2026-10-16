@@ -814,6 +814,13 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
     metis_roots = G._norm(metis)
     conf = G.private_conf(policy)
     ppaths, pcoords = _str_list(conf["paths"]), conf["coordinators"]
+    # guard читает [private] мягко (0163: неверное значение — умолчание), а шлюз слияния на неверном [private] закрыт:
+    # опечатка в списке coordinators не должна молча открыть слияние координатору с личным
+    raw = policy.get("private", {})
+    if not isinstance(raw, dict) or any(
+            k in raw and (_str_list(raw[k]) is None and not (k != "paths" and raw[k] == []))
+            for k in G.DEFAULT_PRIVATE):
+        ppaths = None
     if ppaths is None or not isinstance(pcoords, list) or not all(isinstance(c, str) for c in pcoords):
         return "[private] в policy.toml не разобрать, а без него неизвестно, у кого личное. " + MERGE_OWNER
     if any(G._inside(x, [pdir]) for x in G._norm(ppaths)) or any(G.privileged(policy, c, role, pdir) for c in pcoords):
