@@ -780,7 +780,11 @@ def t_reviewers(h):
 
 UNRESOLVED_TESTS = ("python3 -I $UNSET/tests/run.py", "python3 $UNSET -m pytest", "bash $UNSET/run.sh", 'sh -c "$UNSET"',
                     "python3 -I $CLAUDE_PLUGIN_ROOT/tests/t.py", 'python3 -I "$REPO_ROOT/tests/t.py"', "${X:-true}",
-                    "$EMPTYVAR true", "env $UNSET true", "python3 -c $UNSET", "heavy $UNSET")
+                    "python3 -I ${UNSET}/t.py", 'python3 "$UNSET"', "heavy python3 -I $UNSET/t.py")
+# слово `$X`/`${X}` целиком и без кавычек при незаданной переменной исчезает: без него команда пустая — отказ
+VANISHING_TESTS = ("python3 -I $TESTFILE", "python3 $TESTFILE", "heavy python3 -I $TESTFILE", "bash $UNSET",
+                   "python3 -I ${TESTFILE}", "env CI=1 timeout 60 python3 -I $TESTFILE", "sh $UNSET", "heavy $UNSET",
+                   "$EMPTYVAR true", "env $UNSET true", "python3 -c $UNSET", "pypy3 -I $T")
 
 
 def _load_merge_gate(name):
@@ -805,6 +809,11 @@ def t_unresolved_test_words(h):
             check(f"review test -- {c} — можно", d == "allow", why)
         r = h.post(f"pantheon review test -- {c}", "dev-opus")
         check(f"PostToolUse review test -- {c} — без сбоя", r.returncode == 0, r.stderr)
+    h.reset()
+    for c in UNRESOLVED_TESTS[:2]:
+        h.post(f"pantheon review test -- {c}", "dev-opus")
+    check("`$UNSET/…` и `$UNSET -m pytest` — запись тестов есть", [r["kind"] for r in h.read()] == ["tests"] * 2,
+          h.read())
     # те же функции напрямую: None в любом месте — без исключения
     mg = _load_merge_gate("merge_gate_t")
     for argv in (["python3", "-I", None], ["python3", None, "-m", "pytest"], ["python3", "-c", None], ["python3", "-c"],
@@ -817,6 +826,28 @@ def t_unresolved_test_words(h):
         want_empty = argv in (["python3", "-c"], ["env", "-u", None, "true"], ["timeout", None, "true"])
         check(f"empty_test_problem({argv}) — без исключения, {'пусто' if want_empty else 'не пусто'}",
               err is None and bool(got) == want_empty, (got, err))
+
+
+def t_vanishing_test_words(h):
+    """metis-0164, возврат argus на bec03f7: `python3 -I $TESTFILE` при незаданной переменной — это `python3 -I`
+    (тесты не шли), а не скрипт: отказ с подсказкой и записи нет. `$UNSET/t.py` и `"$X"` — по-прежнему можно."""
+    h.reset()
+    for c in VANISHING_TESTS:
+        d, why = h.pre(f"pantheon review test -- {c}", role="dev-opus", agent_id="d1")
+        hint = c.startswith(("python3", "heavy python3", "env CI", "pypy3"))
+        check(f"review test -- {c} — отказ" + (" с подсказкой «окружение … не сохраняется»" if hint else ""),
+              d == "deny" and "сбой" not in why and (not hint or "не сохраняется" in why), why)
+        r = h.post(f"pantheon review test -- {c}", "dev-opus")
+        check(f"PostToolUse review test -- {c} — без сбоя", r.returncode == 0, r.stderr)
+    check("исчезающее слово — записи тестов нет", h.read() == [], h.read())
+    mg = _load_merge_gate("merge_gate_v")
+    for cmd, want in (("pantheon review test -- python3 -I $X", True), ("pantheon review test -- python3 -I $X/t.py", False),
+                      ('pantheon review test -- python3 -I "$X"', False), ("pantheon review test -- python3 -I \\$X", False),
+                      ("pantheon review test -- python3 -I $X t.py", False), ("pantheon review test -- $RUN", True),
+                      ("pantheon review test -- $PY -I tests/t.py", False), ("pantheon review test -- 'unbalanced", False),
+                      ("pantheon review status", False), ("", False)):
+        got = mg.vanishing_test_problem(cmd)
+        check(f"vanishing_test_problem({cmd!r}) — {'отказ' if want else 'нет'}", bool(got) == want, got)
 
 
 def t_merge_hints(h):
@@ -846,7 +877,7 @@ CASES = [t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_c
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
-         t_reviewers, t_unresolved_test_words, t_merge_hints]
+         t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints]
 
 
 def main():

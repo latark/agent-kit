@@ -532,6 +532,38 @@ def empty_test_problem(argv):
     return None
 
 
+BARE_VAR = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})")
+
+
+def vanishing_test_problem(cmd):
+    """`pantheon review test -- python3 -I $TESTFILE`: слово `$X`/`${X}` целиком и без кавычек при незаданной
+    переменной исчезает (окружение между вызовами Bash не сохраняется — частая ошибка агента). Команду судим так,
+    будто его нет: пустая → текст отказа; иначе None. Разбор Bash отдаёт None и для `$X`, и для `$X/t.py` — их
+    различает только исходный текст: токены с кавычками (posix=False) и сравнение с BARE_VAR (metis-0164)."""
+    try:
+        raw = shlex.split(cmd or "", posix=False)
+    except ValueError:
+        return None
+    k = next((i for i in range(len(raw) - 2) if raw[i:i + 3] == ["review", "test", "--"]), None)
+    if k is None:
+        return None
+    rest = raw[k + 3:]
+    gone = [t for t in rest if BARE_VAR.fullmatch(t)]
+    if not gone:
+        return None
+    try:
+        words = shlex.split(" ".join(t for t in rest if not BARE_VAR.fullmatch(t)))
+    except ValueError:
+        return None
+    prog = _empty_run(words)
+    if not prog:
+        return None
+    return (f"в команде тестов `{' '.join(rest)}` слово {', '.join(gone)} без кавычек при незаданной переменной "
+            f"исчезает, и остаётся `{' '.join(words) or 'пусто'}` — ничего не проверяет (программа «{prog}»). "
+            "Окружение между вызовами Bash не сохраняется — пиши путь буквально: `pantheon review test -- heavy "
+            "python3 -I tests/test_x.py`")
+
+
 def _is_pantheon(word):
     return isinstance(word, str) and os.path.basename(word.rstrip("/")) == "pantheon"
 
@@ -576,7 +608,7 @@ def record(event):
     role = event.get("agent_type") or ""
     cwd = os.path.realpath(event.get("cwd") or "")
     if kind == "test":
-        if len(args) < 2 or args[0] != "--" or empty_test_problem(args[1:]):
+        if len(args) < 2 or args[0] != "--" or empty_test_problem(args[1:]) or vanishing_test_problem(cmd):
             return None
         sha = (_git(cwd, "rev-parse", "HEAD") or "").strip().lower()
         status = _git(cwd, "status", "--porcelain")
@@ -620,6 +652,7 @@ def review_problem(role, args, cmd="", background=False):
                 "обратных кавычек и переводов строки: иначе код выхода был бы не от тестов, и запись не сделается.")
     if kind == "test":
         why = empty_test_problem(args[3:]) if len(args) >= 4 and args[2] == "--" else None
+        why = why or vanishing_test_problem(cmd)
         return f"{why}. Записи не будет." if why else None
     need = REVIEW_KINDS[kind]
     if role != need:
