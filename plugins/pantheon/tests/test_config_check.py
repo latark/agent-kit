@@ -9,6 +9,8 @@ import json
 import os
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import PY311  # CLI pantheon — только на Python 3.11+
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
@@ -58,7 +60,7 @@ def run(changes):
         else:
             open(p, "w", encoding="utf-8").write(text)
     subprocess.run(["git", "-C", d, "add", "-A"], check=True)
-    out = subprocess.run([sys.executable, "-I", CHECK, "--repo", d, "--staged"], capture_output=True, text=True)
+    out = subprocess.run([PY311, "-I", CHECK, "--repo", d, "--staged"], capture_output=True, text=True)
     return out.returncode, json.loads(out.stdout).get("flags", [])
 
 

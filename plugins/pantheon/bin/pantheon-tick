@@ -1,4 +1,20 @@
 #!/bin/sh
 # Задача launchd com.latark.pantheon-tick (раз в 60 с): один проход планировщика Пантеона.
+# Python 3.11+ ищет сам (lib/find-python.sh); не нашёл — строка в alerts.md не чаще раза в сутки и код 1.
 here=$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")" && pwd)
-exec python3 -I "$here/../lib/pantheon.py" tick
+. "$here/../lib/find-python.sh"
+py=$(find_python) || {
+    printf '%s\n' "$NO_PYTHON_MSG" >&2
+    state=${PANTHEON_STATE:-$HOME/.local/state/pantheon}
+    day=$(date +%Y-%m-%d)
+    if [ "$(cat "$state/no-python-alert" 2>/dev/null)" != "$day" ]; then
+        alerts=${PANTHEON_HOME:-$HOME/ai/pantheon}/alerts.md
+        mkdir -p "$state" "$(dirname "$alerts")" 2>/dev/null
+        printf '%s · pantheon-tick · тик не идёт: нужен Python 3.11+, не найден. Поставить: brew install python@3.14\n' \
+            "$(date '+%Y-%m-%d %H:%M')" >>"$alerts" 2>/dev/null && printf '%s' "$day" >"$state/no-python-alert"
+    fi
+    exit 1
+}
+PANTHEON_PYTHON=$py
+export PANTHEON_PYTHON
+exec "$py" -I "$here/../lib/run.py" tick

@@ -18,6 +18,10 @@
   `plugins/guard/policy.example.toml`), правит только metis-pantheon.
 - `plugins/pantheon/lib/pantheon.py` — планировщик и команда; `pantheon help` — список команд.
   Задачи — `~/ai/pantheon/schedule.toml`, метки и журналы запусков — `~/.local/state/pantheon/` (свои у каждого Mac).
+- Требуется Python 3.11+ (`tomllib`). Системный `/usr/bin/python3` на macOS — 3.9, он не подходит; `bin/pantheon` и
+  `bin/pantheon-tick` сами ищут 3.11+ (`python3` из PATH, `python3.14`…`3.11`, Homebrew, python.org; общий поиск —
+  `lib/find-python.sh`). Не нашли — строка «нужен Python 3.11+» и код 1, у тика ещё строка в `alerts.md` не чаще раза в
+  сутки. Поставить: `brew install python@3.14`. Хуки guard идут на `python3` из PATH и работают на любом Python 3.9+.
 - Размер песочницы окна (с 0.11.17): Seatbelt не собирает профиль больше 64 КБ, и тогда Bash окна не запускается
   совсем. Поэтому `sandbox_build` считает байты путей песочницы окна. Выше предела — 48 КБ, переменная
   `PANTHEON_SANDBOX_LIMIT` — окно не пересобирается: остаётся прежний файл, приходит одна тревога «песочница окна …».

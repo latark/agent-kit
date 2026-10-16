@@ -9,6 +9,8 @@ import os
 import re
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import PY311  # CLI pantheon — только на Python 3.11+
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
@@ -47,7 +49,7 @@ def make():
 
 def run(env, *args, t=T0):
     e = dict(env, PANTHEON_NOW=str(t))
-    return subprocess.run([sys.executable, "-I", CLI, *args], env=e, capture_output=True, text=True, timeout=60)
+    return subprocess.run([PY311, "-I", CLI, *args], env=e, capture_output=True, text=True, timeout=60)
 
 
 def head_of(path):

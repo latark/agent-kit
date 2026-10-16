@@ -10,6 +10,8 @@ import os
 import stat
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import PY311  # CLI pantheon — только на Python 3.11+
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
@@ -72,7 +74,7 @@ def run(home, pan, state, *args, extra=None, host="mac-a"):
            "PANTHEON_FAKE_WAKE": str(T0 - 7200), "PANTHEON_FAKE_AC": "1", "PANTHEON_FAKE_IDLE": "1200",
            "PANTHEON_ALERTS_IN_DRYRUN": "1"}
     env.update(extra or {})
-    return subprocess.run([sys.executable, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=60)
+    return subprocess.run([PY311, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=60)
 
 
 def dry(state):

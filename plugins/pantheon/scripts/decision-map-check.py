@@ -18,7 +18,10 @@
 import os
 import re
 import sys
-import tomllib
+try:
+    import tomllib
+except ImportError:  # системный python 3.9 на macOS
+    sys.exit("pantheon: нужен Python 3.11+ (нет tomllib)")
 from collections import Counter, defaultdict
 
 STATES = {"план", "есть", "частично", "вы", "не сейчас", "отклонено", "проверено"}

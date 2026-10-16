@@ -10,6 +10,8 @@ import os
 import shutil
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import PY311  # CLI pantheon — только на Python 3.11+
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
@@ -130,7 +132,7 @@ transcript("auto1", alpha, [you(T0 + 7200, "ежечасная проверка"
 # Разговор вне периода — не считается
 transcript("old", alpha, [you(T0 - 30 * 86400, "давно"), bash(T0 - 30 * 86400 + 5, "t6", "ls", "r6")])
 
-r = subprocess.run([sys.executable, "-I", SCRIPT, "--end", "2026-10-14", "--weeks", "1"], env=ENV,
+r = subprocess.run([PY311, "-I", SCRIPT, "--end", "2026-10-14", "--weeks", "1"], env=ENV,
                    capture_output=True, text=True, timeout=120)
 out = r.stdout
 check("скрипт отработал", r.returncode == 0 and "# Замер «как сейчас»: 07.10–13.10.2026" in out)
@@ -172,7 +174,7 @@ def table(text, head, stop="\n## "):
 
 
 def run(*flags):
-    p = subprocess.run([sys.executable, "-I", SCRIPT, "--end", "2026-10-14", "--weeks", "1", *flags], env=ENV,
+    p = subprocess.run([PY311, "-I", SCRIPT, "--end", "2026-10-14", "--weeks", "1", *flags], env=ENV,
                        capture_output=True, text=True, timeout=120)
     return p.returncode, p.stdout, p.stderr
 

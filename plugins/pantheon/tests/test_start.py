@@ -9,6 +9,8 @@ import json
 import os
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import PY311  # CLI pantheon — только на Python 3.11+
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
@@ -94,12 +96,12 @@ def main():
 
     def run(*args, stdin=None, extra=None, tty=False):
         if not tty:
-            return subprocess.run([sys.executable, "-I", LIB, *args], env=dict(env, **(extra or {})),
+            return subprocess.run([PY311, "-I", LIB, *args], env=dict(env, **(extra or {})),
                                   capture_output=True, text=True, timeout=60, input=stdin)
         # pantheon start zeus идёт только из терминала; псевдотерминалов в песочнице нет — stdin подменён на «терминал»
         boot = ("import runpy, sys\nclass T:\n    def isatty(self):\n        return True\n"
                 f"sys.stdin = T()\nsys.argv = [{LIB!r}] + {list(args)!r}\nrunpy.run_path({LIB!r}, run_name='__main__')\n")
-        return subprocess.run([sys.executable, "-I", "-c", boot], env=dict(env, **(extra or {})), capture_output=True,
+        return subprocess.run([PY311, "-I", "-c", boot], env=dict(env, **(extra or {})), capture_output=True,
                               text=True, timeout=60)
 
     def calls():

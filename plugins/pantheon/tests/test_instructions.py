@@ -5,6 +5,8 @@ import os
 import shutil
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import PY311  # CLI pantheon — только на Python 3.11+
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
@@ -47,7 +49,7 @@ def main():
     write(os.path.join(app, "node_modules", "pkg", "AGENTS.md"), "n\n" * 30000)  # не считается
     env = {"PATH": "/usr/bin:/bin", "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_NO_NOTIFY": "1", "CODEX_HOME": codex}
-    run = lambda *a: subprocess.run([sys.executable, "-I", LIB, *a], env=env, capture_output=True, text=True)
+    run = lambda *a: subprocess.run([PY311, "-I", LIB, *a], env=env, capture_output=True, text=True)
     alerts = lambda: open(os.path.join(home, "alerts.md"), encoding="utf-8").read() \
         if os.path.exists(os.path.join(home, "alerts.md")) else ""
 

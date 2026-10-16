@@ -11,6 +11,10 @@ import shutil
 import os
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import PY311  # CLI pantheon — только на Python 3.11+
+if sys.version_info < (3, 11):  # часть проверок импортирует pantheon.py в этом же процессе — ему нужен tomllib
+    os.execv(PY311, [PY311, "-I", os.path.abspath(__file__)])
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
@@ -125,7 +129,7 @@ class Env:
                "PANTHEON_FAKE_LIMIT": "10"}
         env.update(self.extra)
         env.update(extra or {})
-        return subprocess.run([sys.executable, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=60)
+        return subprocess.run([PY311, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=60)
 
     def calls(self):
         if not os.path.exists(self.log):

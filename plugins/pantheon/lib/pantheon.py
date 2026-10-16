@@ -101,7 +101,7 @@ import time
 from datetime import datetime, timedelta
 
 if sys.version_info < (3, 11):
-    sys.exit("pantheon: нужен Python 3.11 или новее (tomllib)")
+    sys.exit("pantheon: нужен Python 3.11+ (здесь %d.%d, нет tomllib)" % sys.version_info[:2])
 import tomllib
 
 HOME = os.path.expanduser("~")
@@ -236,6 +236,7 @@ def run_env():
     extra = [os.path.join(PLUGIN, "bin"), os.path.dirname(sys.executable), "/opt/homebrew/bin",
              os.path.join(HOME, ".local", "bin")]
     env["PATH"] = ":".join(extra + [env.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin"])
+    env["PANTHEON_PYTHON"] = sys.executable  # bin/pantheon дочерних задач берёт тот же интерпретатор (lib/find-python.sh)
     return env
 
 
@@ -510,7 +511,8 @@ def launch(name, t):
         with open(path("dryrun.log"), "a") as fh:
             fh.write(f"{int(t)} {name}\n")
         return
-    subprocess.Popen([sys.executable, "-I", os.path.realpath(__file__), "run-job", name],
+    # загрузчик run.py (модуль, .pyc из lib/__pycache__), тот же интерпретатор, что у тика
+    subprocess.Popen([sys.executable, "-I", os.path.join(LIB, "run.py"), "run-job", name],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True, env=run_env(), cwd=HOME)
 
@@ -3925,6 +3927,21 @@ def _test_pythons():
     return out
 
 
+def _py_ge311(py):
+    try:
+        return subprocess.run([py, "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"],
+                              capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _pythons_for(name):
+    """Тесты плагина pantheon идут только интерпретаторами 3.11+ (tomllib); guard — на всех: его хуки идут на python3
+    из PATH, в том числе на системном 3.9."""
+    pythons = _test_pythons()
+    return [py for py in pythons if _py_ge311(py)] if name == "pantheon" else pythons
+
+
 def _tmp_re():
     """Пути во временных папках — до <tmp>: у новой версии и базы они разные, а падение одно."""
     global _TMP_RE
@@ -3955,6 +3972,19 @@ def _failure_signatures(fname, out, rc):
     if rc != 0:
         sigs.append(f"{fname}: код {rc}")
     return sigs
+
+
+def _fresh_failures(got_new, got_base):
+    """Новые падения = подписи новой версии минус подписи базы. Файл, который у базы кончился таймаутом или сроком
+    прогона, — не «чистый» и не «такой же сбой»: о нём ничего не известно, поэтому у новой версии в нём ничто не
+    гасится (в том числе её собственный таймаут) — падение остаётся падением. Отдаёт (Counter, {(python, файл)})."""
+    unknown = {(py, f) for (py, f, s) in got_base if s.endswith((": срок прогона", ": таймаут"))}
+    known_base = collections.Counter({k: n for k, n in got_base.items() if (k[0], k[1]) not in unknown})
+    fresh = got_new - known_base
+    for k, n in got_new.items():  # не успевшее у новой не гасится тем, что не успело и у базы
+        if k[2].endswith(": срок прогона"):
+            fresh[k] = n
+    return fresh, unknown
 
 
 def _test_files(pdir):
@@ -4063,15 +4093,16 @@ def _plugin_check(name, old, new, src, base, marks):
         if isinstance(base, str) and os.path.isdir(base):
             base_dir = os.path.join(tmp, "base", _plugins_safe(name))
             shutil.copytree(base, base_dir, symlinks=True, ignore=ign)
-        pythons = _test_pythons()
+        pythons = _pythons_for(name)
         with open(log, "w", encoding="utf-8") as fh:
             fh.write(f"{stamp()} {name}: новая {new} из {src} (хеш {digest}), база {old} из "
                      f"{base_dir and base or '—'}; python: {', '.join(pythons)}\n")
             got_new = _run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}", deadline)
-            fresh = got_new - _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline)
-            for k, n in got_new.items():  # не успевшее у новой не гасится тем, что не успело и у базы
-                if k[2].endswith(": срок прогона"):
-                    fresh[k] = n
+            got_base = _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline)
+            fresh, unknown = _fresh_failures(got_new, got_base)
+            for py, f in sorted(unknown):
+                fh.write(f"база не досчитана: {py} · {f} — файл базы не дошёл до конца (таймаут или срок прогона), "
+                         "падения новой версии в нём считаются новыми\n")
             if not _test_files(new_dir):  # без тестов зелёного нет, даже если их нет и у базы
                 fresh[("-", "-", NO_TESTS)] = 1
             fh.write(f"\n===== новых падений: {sum(fresh.values())} =====\n")

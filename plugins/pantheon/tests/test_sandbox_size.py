@@ -14,6 +14,8 @@ import re
 import shutil
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import PY311  # CLI pantheon — только на Python 3.11+
 import tempfile
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "pantheon.py")
@@ -54,7 +56,7 @@ def setup(tmp):
 
 
 def build(env):
-    return subprocess.run([sys.executable, "-I", LIB, "domains", "build"], env=env, capture_output=True, text=True,
+    return subprocess.run([PY311, "-I", LIB, "domains", "build"], env=env, capture_output=True, text=True,
                           timeout=120)
 
 

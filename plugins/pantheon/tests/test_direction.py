@@ -5,6 +5,8 @@ import json
 import os
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import PY311  # CLI pantheon — только на Python 3.11+
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
@@ -56,7 +58,7 @@ def main():
     write(os.path.join(tmp, ".claude", "agents", "hephaestus-demo.md"), "x")
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_NO_NOTIFY": "1"}
-    run = lambda name: subprocess.run([sys.executable, "-I", LIB, "direction", "check", name], env=env,
+    run = lambda name: subprocess.run([PY311, "-I", LIB, "direction", "check", name], env=env,
                                       capture_output=True, text=True)
 
     r = run("iris-demo")
@@ -130,7 +132,7 @@ def test_init():
     write(os.path.join(tmp, ".gitconfig"), "[user]\n\tname = Test\n\temail = test@example.com\n")
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_NO_NOTIFY": "1"}
-    run = lambda *a: subprocess.run([sys.executable, "-I", LIB, "direction", *a], env=env,
+    run = lambda *a: subprocess.run([PY311, "-I", LIB, "direction", *a], env=env,
                                     capture_output=True, text=True)
     git = lambda p, *a: subprocess.run(["git", "-C", p, *a], env=env, capture_output=True, text=True).stdout.strip()
     reg = os.path.join(home, "directions.toml")
@@ -177,7 +179,7 @@ def test_init():
     os.makedirs(home2)
     os.symlink(os.path.join(tmp, "aside"), os.path.join(home2, "projects"))
     setreg(["~/projects/viaLink"])
-    r = subprocess.run([sys.executable, "-I", LIB, "direction", "init", "iris-new"], env=dict(env, HOME=home2),
+    r = subprocess.run([PY311, "-I", LIB, "direction", "init", "iris-new"], env=dict(env, HOME=home2),
                        capture_output=True, text=True)
     check("init: ~/projects — ссылка в сторону — код 1, ничего не создано",
           r.returncode == 1 and "вне ~/projects" in r.stdout and os.listdir(os.path.join(tmp, "aside")) == [])
@@ -279,7 +281,7 @@ def test_init():
     subprocess.run(["git", "init", "-q", outer], env=env, check=True)
     setreg(["~/projects/hooked"])
     env_hook = dict(env, GIT_DIR=os.path.join(outer, ".git"), GIT_WORK_TREE=outer)
-    r = subprocess.run([sys.executable, "-I", LIB, "direction", "init", "iris-new"], env=env_hook,
+    r = subprocess.run([PY311, "-I", LIB, "direction", "init", "iris-new"], env=env_hook,
                        capture_output=True, text=True)
     hooked = os.path.join(projects, "hooked")
     check("init: GIT_DIR/GIT_WORK_TREE из окружения не уводят git в чужой репозиторий",
