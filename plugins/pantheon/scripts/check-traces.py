@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 
-EXCLUDE = [":(exclude)plugins/guard/"]  # снять в guard 0.5.10 (0182)
+EXCLUDE = [":(exclude)plugins/guard/", ":(exclude).claude-plugin/marketplace.json"]  # снять в guard 0.5.10 (0182): оба пути — ядро защит
 SKIP_TAG = "trace-ok: 0182-core"
 
 
