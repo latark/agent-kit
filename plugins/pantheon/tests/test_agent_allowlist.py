@@ -44,7 +44,7 @@ folders = ["~/projects/kn"]
 leads = []
 """
 MAIN = ["hq", "domain-coordinator", "workshop"]
-COORD = ["argus", "talos", "prometheus", "Explore"]
+COORD = ["argus", "talos", "prometheus", "Explore", "dev-haiku", "dev-sonnet", "dev-opus"]
 
 
 def lib_python():
@@ -197,6 +197,13 @@ def main():
     check("без subagent_type (это general-purpose) — отказ", run_hook(cenv, lst, agent()).startswith("deny:"))
     check("пустой subagent_type — отказ", run_hook(cenv, lst, agent(subagent_type="")).startswith("deny:"))
     check("свой лид — пропуск", run_hook(cenv, lst, agent(subagent_type="hephaestus-broker")) == "allow")
+    check("dev-haiku, dev-sonnet, dev-opus из окна координатора — пропуск",
+          all(run_hook(cenv, lst, agent(subagent_type=t)) == "allow" for t in ("dev-haiku", "dev-sonnet", "dev-opus")))
+    check("codex-dev, лид чужого направления и hq-агенты (zeus-*, chiron, clio, momus) — отказ",
+          all(run_hook(cenv, lst, agent(subagent_type=t)).startswith("deny:")
+              for t in ("codex-dev", "hephaestus-sources", "zeus-hq", "zeus", "chiron", "clio", "momus", "dev-sonnet2")))
+    check("окно штаба dev-* не получает",
+          not any(t.startswith("dev-") for t in agents_hook(hq)[1]))
     check("Explore — пропуск; explore (другой регистр) — отказ",
           run_hook(cenv, lst, agent(subagent_type="Explore")) == "allow"
           and run_hook(cenv, lst, agent(subagent_type="explore")).startswith("deny:"))

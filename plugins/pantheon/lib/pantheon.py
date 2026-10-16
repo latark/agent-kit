@@ -1679,7 +1679,9 @@ MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
 # momus — ревизор навыка audit (metis-0095, решение владельца 15.10): только чтение и веб, пишет лишь свой отчёт в
 # ~/ai/knowledge/Inbox. Координаторам его нет — без отдельного слова владельца.
 HQ_AGENTS = ["prometheus", "clio", "chiron", "momus", "Explore"]
-COORDINATOR_AGENTS = ["argus", "talos", "prometheus", "Explore"]
+# dev-haiku, dev-sonnet, dev-opus — разработчики: координатор отдаёт им мелкие правки сам, не гоняя лида (эпик
+# «Альфа»); codex-dev сюда не входит — его зовёт только лид по правилу executor.
+COORDINATOR_AGENTS = ["argus", "talos", "prometheus", "Explore", "dev-haiku", "dev-sonnet", "dev-opus"]
 COORDINATOR_EXTRA_AGENTS = {"mnemo-brain": ["clio"]}
 # Skill — навык с context: fork идёт субагентом своего agent: мимо инструмента Agent (Claude Code 2.1.292)
 AGENT_MATCHER = "Agent|Task|Skill"
