@@ -377,6 +377,41 @@ hqnew = {"session_id": "s-hqn", "transcript_path": transcript("hqnew", []), "sou
 r = run("rewake", hqnew)
 check("штаб: доска обновлена → пробуждение с доской", r.returncode == 2 and "board.md" in r.stderr, r.stderr)
 
+# 16.10: штаб сохранил дела в HANDOFF.md, а доска старше сообщения владельца — хук молчал
+hz = os.path.join(pantheon, "handoff", "zeus-test", "HANDOFF.md")
+os.makedirs(os.path.dirname(hz))
+open(hz, "w").write("# Передача дел\n")
+hzprev = transcript("hzprev", [user("может clear сделаем?", "z1", now - 300),
+                               assistant(now - 280, 0, [("Write", {"file_path": hz, "content": "x"})])])
+run("start", {"session_id": "s-hzp", "transcript_path": hzprev, "source": "startup", "agent_type": "hq"})
+hznew = {"session_id": "s-hzn", "transcript_path": transcript("hznew", []), "source": "clear", "agent_type": "hq"}
+os.utime(board, (now - 400, now - 400))
+os.utime(hz, (now - 100, now - 100))
+r = run("rewake", hznew)
+check("штаб: HANDOFF.md свежее сообщения, доска старше → пробуждение, назван HANDOFF.md и второй файл (доска)",
+      r.returncode == 2 and "handoff/zeus-test/HANDOFF.md" in r.stderr and "board.md" in r.stderr
+      and "свежее" in r.stderr, (r.returncode, r.stderr))
+os.utime(hz, (now - 350, now - 350))
+r = run("rewake", hznew)
+check("штаб: HANDOFF.md и доска оба старше сообщения → тишина", r.returncode == 0 and not r.stderr.strip(), r.stderr)
+os.utime(board, (now - 50, now - 50))
+r = run("rewake", hznew)
+check("штаб: доска свежее HANDOFF.md → доска первой, HANDOFF.md назван вторым", r.returncode == 2
+      and r.stderr.index("board.md") < r.stderr.index("zeus-test/HANDOFF.md"), r.stderr)
+os.utime(board, (now - 10, now - 10))
+hqplain = transcript("hqplain", [user("запиши на доску", "h9", now - 300)])
+run("start", {"session_id": "s-hqpl", "transcript_path": hqplain, "source": "startup", "agent_type": "hq"})
+r = run("rewake", {"session_id": "s-hqpl2", "transcript_path": transcript("hqpl2", []), "source": "clear", "agent_type": "hq"})
+check("штаб без HANDOFF.md в транскрипте → как раньше: доска, второго файла нет", r.returncode == 2
+      and "board.md" in r.stderr and "HANDOFF" not in r.stderr, r.stderr)
+hzbig = transcript("hzbig", [user("продолжаем", "zb1", now - 100), assistant(now - 90, 160000, [("Write", {"file_path": hz, "content": "x"})])])
+os.utime(hz, (now - 5, now - 5))
+os.utime(board, (now - 400, now - 400))
+out = run("stop", {"session_id": "s-hzbig", "transcript_path": hzbig, "stop_hook_active": False, "agent_type": "hq"}).stdout
+check("Stop у штаба ведёт туда же, куда смотрит пробуждение: HANDOFF.md свежее доски", "zeus-test/HANDOFF.md" in out
+      and "board.md" in out, out)
+os.utime(board, (now - 10, now - 10))
+
 viewcopy = os.path.join(view, "handoff", "topic", "HANDOFF.md")
 os.makedirs(os.path.dirname(viewcopy))
 open(viewcopy, "w").write("копия")

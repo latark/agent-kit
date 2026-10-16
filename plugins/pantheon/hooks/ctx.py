@@ -406,8 +406,8 @@ def log_name(role, ev):
     return None
 
 
-def state_file(role, ev, transcript):
-    """(путь, как назвать для Claude) или (None, None)."""
+def role_state_file(role, ev):
+    """Собственный файл состояния роли: (путь, описание) или (None, None)."""
     if role == "hq":
         p = os.path.join(PANTHEON, "board.md")
         return p, "доску %s (раздел «Сейчас»)" % tilde(p)
@@ -423,6 +423,32 @@ def state_file(role, ev, transcript):
             return None, None
         p = os.path.join(PANTHEON, "workshop", task + ".md")
         return p, "файл задачи мастерской %s" % tilde(p)
+    return None, None
+
+
+def _mtime(p):
+    try:
+        return os.path.getmtime(p)
+    except OSError:
+        return -1
+
+
+def state_file(role, ev, transcript):
+    """(путь, как назвать для Claude) или (None, None).
+    У ролей с файлом состояния (hq, координатор, мастерская) берётся самый свежий из двух: файл роли и HANDOFF.md,
+    который сессия сама писала (16.10 Зевс сохранил дела в HANDOFF.md, доска была старше — хук молчал); второй файл
+    называется в тексте."""
+    if role in ("hq", "domain-coordinator", "workshop"):
+        p, desc = role_state_file(role, ev)
+        h = last_handoff(transcript) if transcript else None
+        if h and p and os.path.realpath(h) != os.path.realpath(p) and os.path.isfile(h):
+            hd = "файл передачи дел %s" % tilde(h)
+            if not os.path.isfile(p) or _mtime(h) > _mtime(p):
+                return h, "%s (свежее; второй файл состояния роли — %s)" % (hd, desc)
+            return p, "%s (свежее; второй файл — %s)" % (desc, hd)
+        if h and not p:
+            return h, "файл передачи дел %s" % tilde(h)
+        return p, desc
     if role:
         return None, None  # нижние роли и чужие агенты живут одну задачу — их не чистят
     p = last_handoff(transcript) if transcript else None
