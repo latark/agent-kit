@@ -3788,6 +3788,32 @@ def board():
     return 0
 
 
+STATE_FILE_LIMIT = 9000  # знаков: после сжатия хук кладёт первые ~9 800, хвост файла теряется (metis-0160)
+
+
+def _check_long_state(quiet):
+    """STATUS.md направлений и board.md штаба длиннее STATE_FILE_LIMIT знаков (символов, не байт): одна строка на
+    файл. Без --quiet — печать; с ним (тик) — alert_once на файл, не чаще раза на новый размер."""
+    files = sorted(glob.glob(os.path.join(PANTHEON, "directions", "*", "STATUS.md"))) + [os.path.join(PANTHEON, "board.md")]
+    for f in files:
+        try:
+            n = len(open(f, encoding="utf-8", errors="replace").read())
+        except OSError:
+            continue
+        key = "state-long-" + re.sub(r"[^\w-]", "_", os.path.relpath(f, PANTHEON))[:60]
+        if n <= STATE_FILE_LIMIT:
+            if quiet:
+                clear_once(key)
+            continue
+        shown = f.replace(HOME, "~", 1) if f.startswith(HOME + os.sep) else f
+        text = (f"{shown}: {n} знаков при пределе {STATE_FILE_LIMIT} — после сжатия контекста хук кладёт только "
+                f"первые ~9 800, хвост теряется: сократить, старое — в archive/")
+        if quiet:
+            alert_once(key, n, text, "check")
+        else:
+            print(f"предупреждение · {text}")
+
+
 def check(paths=None, quiet=False):
     T = tasks_mod()
     files = paths or list(T.task_files(PANTHEON))
@@ -3811,6 +3837,8 @@ def check(paths=None, quiet=False):
         if old != text:
             with open(pp, "w", encoding="utf-8") as fh:
                 fh.write(text)
+    if not paths:
+        _check_long_state(quiet)
     if not quiet or bad:
         print(f"задач: {n}, с ошибками: {len(bad)}, без шапки: {noheader}")
     if quiet:  # тик: одна тревога на набор проблем, а не сбой задачи каждые 5 минут

@@ -29,9 +29,9 @@ T0 = 1_792_000_000  # 2026-10-15
 results = []
 
 
-def check(name, ok):
+def check(name, ok, detail=""):
     results.append(bool(ok))
-    print(("ok  " if ok else "FAIL") + " " + name)
+    print(("ok  " if ok else "FAIL") + " " + name + ("" if ok or not detail else f"  [{detail}]"))
 
 
 def make():
@@ -101,6 +101,37 @@ def main():
     r = run(env, "check")
     check("check: битая шапка — ошибка с причиной", r.returncode == 1 and "athena-0099" in r.stdout and "wip" in r.stdout)
     os.remove(src("athena-broker", "athena-0099"))
+
+    # metis-0160: длинные STATUS.md и board.md (символы, не байты)
+    stp = os.path.join(home, "directions", "metis-pantheon", "STATUS.md")
+    okp = os.path.join(home, "directions", "athena-broker", "STATUS.md")
+    bdp = os.path.join(home, "board.md")
+    open(stp, "w", encoding="utf-8").write("ж" * 9500)
+    open(okp, "w", encoding="utf-8").write("ж" * 8800)  # 17 600 байт, но 8 800 знаков — в пределе
+    open(bdp, "w", encoding="utf-8").write("я" * 9001)
+    r = run(env, "check")
+    check("0160: check без --quiet печатает по строке на длинный файл (знаки, не байты), код 0",
+          r.returncode == 0 and r.stdout.count("знаков при пределе 9000") == 2
+          and "directions/metis-pantheon/STATUS.md: 9500 знаков" in r.stdout and "board.md: 9001 знаков" in r.stdout
+          and "athena-broker/STATUS.md" not in r.stdout, r.stdout)
+    alerts = os.path.join(home, "alerts.md")
+    env = dict(env, PANTHEON_ALERTS_IN_DRYRUN="1")  # тревоги — в alerts.md, а не печатью
+    r = run(env, "check", "--quiet")
+    a1 = open(alerts, encoding="utf-8").read() if os.path.exists(alerts) else ""
+    check("0160: --quiet — тревога на каждый длинный файл, ничего не печатает",
+          r.returncode == 0 and a1.count("знаков при пределе 9000") == 2 and "9500 знаков" in a1 and not r.stdout, a1)
+    run(env, "check", "--quiet")
+    a2 = open(alerts, encoding="utf-8").read()
+    check("0160: тот же размер — повторной тревоги нет", a2 == a1)
+    open(stp, "w", encoding="utf-8").write("ж" * 9600)
+    run(env, "check", "--quiet")
+    a3 = open(alerts, encoding="utf-8").read()
+    check("0160: размер сменился — новая тревога по этому файлу", a3.count("знаков при пределе 9000") == 3
+          and "9600 знаков" in a3, a3)
+    os.remove(stp)
+    os.remove(okp)
+    os.remove(bdp)
+    env.pop("PANTHEON_ALERTS_IN_DRYRUN")
 
     # доска: карточки
     r = run(env, "board")
