@@ -220,6 +220,21 @@ def main():
         check("--add codex на готовой установке: только этот шаг (Пантеон не отвергает)",
               "Codex" in r.stdout and "уже есть" not in r.stderr and "[ок] Python" not in r.stdout,
               (r.stdout, r.stderr))
+    else:
+        # модуль есть, codex на PATH нет: Codex — только дополнение, установка проходит (решение 175)
+        root, env, _ = new_root(with_uv=True)
+        r = setup(env, "нет\n", "--codex")
+        cfg_p = os.path.join(env["PANTHEON_STATE"], "config.toml")
+        cfg = open(cfg_p, encoding="utf-8").read() if os.path.exists(cfg_p) else ""
+        check("--codex, codex нет на PATH: «[пропуск] Codex», установка проходит с кодом 0",
+              r.returncode == 0 and "[пропуск] Codex: не добавлен" in r.stdout and "Не вышло" not in r.stdout,
+              r.stdout[-700:] + r.stderr[-300:])
+        check("--codex, codex нет на PATH: в наборе только claude, Codex выключен с причиной",
+              '"codex"' not in cfg.split("[codex]")[0] and 'reason = "нет на PATH"' in cfg, cfg)
+        r = setup(env, "", "--add", "codex")
+        check("--add codex на готовой установке без codex: только этот шаг, Пантеон не отвергает, код 1",
+              r.returncode == 1 and "Codex" in r.stdout and "уже есть" not in r.stderr
+              and "[ок] Python" not in r.stdout, (r.returncode, r.stdout[-500:], r.stderr[-300:]))
     root, env, _ = new_root(with_uv=True)
     r = setup(env, "нет\nнет\n")  # без флагов: вопрос про Codex, «нет»
     check("без флагов: вопрос про Codex, ответ «нет» — пропуск", "Подключить Codex" in r.stdout

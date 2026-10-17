@@ -201,7 +201,9 @@ def step_traces(root, markers):
         return
     rel = [os.path.relpath(os.path.join(p), root) for p in
            (os.path.join(PLUGIN, "bin", "pantheon-setup"), os.path.join(LIB, "setup.py"),
-            os.path.join(LIB, "platform_macos.py"))]
+            os.path.join(LIB, "platform_macos.py"), os.path.join(LIB, "pconfig.py"), os.path.join(LIB, "executors.py"),
+            os.path.join(PLUGIN, "scripts", "live-probe-codex-nested.sh"))
+           if os.path.exists(p)]
     bad = []
     r = run([sys.executable, "-I", script, "--markers", markers, "--repo", root, "--", *rel])
     if r.returncode != 0:
@@ -233,6 +235,10 @@ def step_codex():
         res = fn(interactive=True, live_probe=True)
     except Exception as e:  # noqa: BLE001 — чужой модуль: любая ошибка — строка итога, установка идёт дальше
         report("Codex", "не вышло", f"{type(e).__name__}: {e}")
+        return False
+    if res == getattr(mod, "UNAVAILABLE", 3) and not isinstance(res, bool):
+        # Codex — только дополнение (решение 175): недоступен — установка рабочая, задачи идут на Claude
+        report("Codex", "пропуск", "не добавлен (причина выше), задачи пойдут на Claude; позже: `pantheon-setup --add codex`")
         return False
     if res is False or (isinstance(res, int) and not isinstance(res, bool) and res != 0):
         report("Codex", "не вышло", "проверка окружения не прошла (подробности выше)")
@@ -308,6 +314,10 @@ def main(argv):
         print("Не вышло: " + ", ".join(failures) + ". Исправьте причину и запустите нужный шаг руками "
               "(повторный запуск установщика на готовом Пантеоне откажет).")
         return 1
+    bin_dir = os.path.join(HOME, ".local", "bin")
+    if bin_dir not in os.environ.get("PATH", "").split(os.pathsep):
+        print(f"Команда pantheon лежит в {bin_dir.replace(HOME, '~')}, а этой папки нет в PATH: добавьте в ~/.zprofile "
+              "строку `export PATH=\"$HOME/.local/bin:$PATH\"` и откройте новое окно терминала.")
     print("Готово: Пантеон установлен.")
     return 0
 
