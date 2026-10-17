@@ -28,7 +28,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
 SHELLS = [s for s in ("/bin/zsh", "/bin/bash") if os.path.exists(s)]
-PROJECT = "projects/brokerAssistantApp"
+PROJECT = "projects/shopKeeperApp"
 
 # Цели: разные записи одного и того же файла ~/ai/pantheon/alerts.md (и папки ~/ai/pantheon)
 TARGETS = [
@@ -92,14 +92,14 @@ EXTRA = [
 
 
 def build(home):
-    for d in ("ai/pantheon/directions/athena-broker", "ai/pantheon/directions/hermes-alex/inbox", "ai/pantheon/.git",
+    for d in ("ai/pantheon/directions/athena-shop", "ai/pantheon/directions/hermes-site/inbox", "ai/pantheon/.git",
               "ai/pantheon-view", ".local/state/pantheon", ".claude/pantheon", PROJECT + "/src", "tmp"):
         os.makedirs(os.path.join(home, d), exist_ok=True)
     for f in ("ai/pantheon/board.md", "ai/pantheon/alerts.md", "ai/pantheon/.git/HEAD", "ai/pantheon-view/board.md",
               PROJECT + "/src/a.ts", "tmp/z"):
         with open(os.path.join(home, f), "w") as fh:
             fh.write("line\n")
-    json.dump({"domains": {"athena-broker": ["~/" + PROJECT], "hermes-alex": ["~/projects/alexbroker"]}},
+    json.dump({"domains": {"athena-shop": ["~/" + PROJECT], "hermes-site": ["~/projects/sitebuilder"]}},
               open(os.path.join(home, ".local/state/pantheon/domains.json"), "w"))
     subprocess.run(["tar", "-cf", os.path.join(home, "tmp/a.tar"), "-C", os.path.join(home, "tmp"), "z"], check=True)
     subprocess.run(["zip", "-q", os.path.join(home, "tmp/a.zip"), "z"], cwd=os.path.join(home, "tmp"), check=True)

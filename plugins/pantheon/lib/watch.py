@@ -108,8 +108,8 @@ def holders(name, agents, registry):
 
 
 def primary_reason():
-    """Самозапуск и подъём после паузы — только на главном Mac (SCHED-14): состояние, журналы и claude agents у каждого
-    Mac свои, и два Mac подняли бы одно направление (ревью argus)."""
+    """Самозапуск и возобновление после паузы — только на главном Mac (SCHED-14): состояние, журналы и claude agents
+    у каждого Mac свои, и два Mac подняли бы одно направление (ревью argus)."""
     try:
         ph = P.load_schedule().get("primary_host")
     except (OSError, ValueError):
@@ -142,11 +142,16 @@ def wake_block(name, agents, registry, auto):
         pct, lim = P.limit_pct(), threshold("limit_max_pct", 70)
         if pct is not None and pct >= lim:
             return f"пятичасовой лимит {pct:.0f} % ≥ {lim:g} %"
+        # темп недели и ночь (metis-0127): любой автоматический подъём — как продолжение (днём только темп, ночью —
+        # открытая ночь с бюджетом); самозапуск по задаче сверх того проверяет autostart()
+        ok, why = P.night_mod().gate("respawn", P.now(), agents, registry)
+        if not ok:
+            return f"недельный лимит: {why}"
     return None
 
 
 WAIT_REASONS = ("идёт технический", "пауза по нагрузке", "весь планировщик", "не главный", "в schedule.toml нет",
-                "пятичасовой")
+                "пятичасовой", "недельный лимит")
 
 
 def recheck(name, auto):
@@ -208,7 +213,11 @@ def _watch(dry=False):
               ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
               ("паузы по нагрузке", lambda: pauses_clear(agents, reg, t)),
               ("очистка Зевса", lambda: zeus_clean(agents, t)),
+              ("ночь", lambda: P.night_mod().watch(agents, reg, doms, t)),
               ("самозапуск", lambda: autostart(agents, reg, doms, t)),
+              ("возобновление после недельного лимита", lambda: awake().limit_resume(agents, reg, doms, t)),
+              ("возобновление ждущих сессий", lambda: awake().wake_waiting(agents, reg, doms, t)),
+              ("запрет сна Mac", lambda: awake().keep_awake(agents, reg, doms, t)),
               ("журналы ваших слов", lambda: daily(t))]
     failed = []
     for name, fn in checks:
@@ -222,6 +231,11 @@ def _watch(dry=False):
                          "журнал pantheon jobs, задача watch", "watch")
     P.write_json(P.path("watch-last"), {"time": t, "failed": failed})
     return 0 if not failed else P.ALERTED
+
+
+def awake():
+    """lib/awake.py — ночной цикл: запрет сна Mac, возобновление после недельного лимита и ждущих сессий."""
+    return P.awake_mod()
 
 
 def gave_up_note(d, s):
@@ -1080,6 +1094,9 @@ def autostart(agents, registry, doms, t, dry=False):
             why = f"нет места: уже работают {', '.join(running)} (не больше {AUTOSTART_MAX} направлений)"
         if not why and len(running) + len(shop) >= SESSIONS_MAX:
             why = f"нет места: сессий Пантеона {len(running) + len(shop)} из {SESSIONS_MAX}"
+        if not why:  # новое дело: жёлтая зона днём, тяжёлые, ночь и её бюджет, утро после 04:00 (metis-0127)
+            ok, gw = P.night_mod().gate("autostart", t, agents, registry)
+            why = None if ok else f"недельный лимит: {gw}"
         nxt = float(s.get("next") or float(s.get("last") or 0) + AUTOSTART_BACKOFF)
         if not why and t < nxt:
             why = f"пауза между попытками до {P.stamp(nxt)[11:16]}"
@@ -1106,7 +1123,7 @@ def autostart(agents, registry, doms, t, dry=False):
                 P.alert_once(f"autostart-trust-{d}", got[2], f"самозапуск {d} невозможен: {why}", "watch")
                 P.notify_soon(f"autostart-trust-{d}", f"{d}: нужно ваше доверие к папке", group=f"autostart-{d}",
                               once=True)
-            elif not why.startswith(("пауза между", "одна сессия", "не главный Mac")):
+            elif not why.startswith(("пауза между", "одна сессия", "не главный Mac", "недельный лимит")):
                 P.alert_once(f"autostart-wait-{d}", f"{today(t)}-{why[:40]}", f"самозапуск {d} ждёт: {why} (задачи "
                              f"{', '.join(tids[:3])})", "watch")
             continue
@@ -1119,6 +1136,8 @@ def autostart(agents, registry, doms, t, dry=False):
                 "watch")
         if rc != 0:
             fail(d, s, t, f"код запуска {rc}")
+        else:  # список сессий этого прохода её ещё не видит — «запрет сна Mac» держится по этой метке
+            awake().RESUMED.append(d)
         running.append(d)
         started = True
     if not dry:
@@ -1851,6 +1870,13 @@ def _pconfig():
     return mod
 
 
+HQ_MISSING = "в policy.toml нет раздела [hq]: штабу ничего не закрыто"
+CORPUS_MISSING = "в policy.toml нет раздела [corpus]: правило corpus-role ничего не закрывает"
+HOOK_PYTHON = "python3"  # как в hooks.json guard; тесты подменяют
+HOOKS_NO_TOMLLIB = ("python3 хуков без tomllib (Python до 3.11): guard не читает policy.toml, правило corpus-role "
+                    "пусто — Метиде: python3 в PATH должен быть 3.11+")
+
+
 def infra_check():
     """Лёгкие проверки без модели: guard отказывает на запретном, хуки плагина на месте, claude agents отвечает,
     управляемые настройки совпадают с guard. Живые проверки (пробуждение после /clear, сообщение между сессиями,
@@ -1881,6 +1907,47 @@ def infra_check():
                         "managed-settings.json")
     with contextlib.suppress(OSError):
         add(open(P.MANAGED, "rb").read() == open(plug, "rb").read(), "управляемые настройки совпадают с guard")
+    pol = os.path.join(P.HOME, ".claude", "pantheon", "policy.toml")
+    # что закрыто штабу — [hq] policy.toml, в коде значений нет (metis-0182): без раздела штабу не закрыто ничего
+    try:
+        hq = P.ctx_mod().hq_policy(pol)
+    except ValueError as e:  # битый раздел: окно штаба не пересобирается, тревогу ставит pantheon domains build
+        add(False, f"раздел [hq] policy.toml разбирается ({e})")
+    else:
+        add(hq["present"], "в policy.toml есть раздел [hq] (что закрыто штабу)")
+        if hq["present"]:
+            P.clear_once("hq-policy-missing")
+        else:
+            P.alert_once("hq-policy-missing", "1", HQ_MISSING + " — Метиде: добавить раздел, образец — "
+                         "policy.example.toml плагина guard", "watch")
+    # [corpus] policy.toml — список правила corpus-role guard; без раздела оно не закрывает ничего (metis-0182)
+    corpus = None
+    try:
+        with open(pol, "rb") as fh:
+            corpus = "corpus" in tomllib.load(fh)  # битый раздел guard читает как «закрыто»
+    except FileNotFoundError:
+        corpus = False
+    except (OSError, ValueError):
+        pass  # файл не прочитать или не TOML — строка НЕТ уже есть у [hq]
+    if corpus is not None:
+        add(corpus, "в policy.toml есть раздел [corpus] (что закрывает правило corpus-role)")
+        if corpus:
+            P.clear_once("corpus-policy-missing")
+        else:
+            P.alert_once("corpus-policy-missing", "1", CORPUS_MISSING + " — Метиде: добавить раздел, образец — "
+                         "policy.example.toml плагина guard", "watch")
+    # guard читает policy.toml через tomllib (Python 3.11+). Хуки зовут python3 из PATH: без tomllib guard
+    # раздел [corpus] не видит и corpus-role молча пуст (metis-0182) — до перевода хуков на полный путь (0.5.11)
+    try:
+        ok = subprocess.run([HOOK_PYTHON, "-I", "-c", "import tomllib"], capture_output=True,
+                            timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        ok = False
+    add(ok, "python3 хуков читает policy.toml (tomllib, Python 3.11+)")
+    if ok:
+        P.clear_once("hooks-python-no-tomllib")
+    else:
+        P.alert_once("hooks-python-no-tomllib", "1", HOOKS_NO_TOMLLIB, "watch")
     add(*_setup_python_line())
     lines = [("готово  " if ok else "НЕТ     ") + text for ok, text in res]
     return all(ok for ok, _ in res), lines

@@ -15,8 +15,9 @@ PR в основную ветку сливают только через шлю�
 
 Отказ guard называет запись, которой не хватает: добавь её, а не обходи.
 
-Ядро защит — любой путь под `plugins/guard/` в agent-kit (там же шлюз слияния и protect-config),
-`.claude-plugin/marketplace.json` и любая правка правил autoMode или permissions окон в
+Ядро защит в agent-kit — любой путь под `plugins/guard/` (там же шлюз слияния и protect-config) и
+`plugins/pantheon/roles/` (общие роли), правила autoMode и permissions окон `plugins/pantheon/lib/window_rules.py` и
+`.claude-plugin/marketplace.json`: такой PR шлюз не сливает. Так же веди правку их сборки в
 `plugins/pantheon/lib/pantheon.py` (`sandbox_build` и всё, что он записывает). PR ядра проверяют два argus: второй ищет только обходы и отчёта первого не видит; принято,
 когда последний вердикт обоих — «принять». Сливает его только владелец: в текстах ему — «PR #N ждёт вашего слияния». Остальное, ночную работу тоже, после
 «принять» сливает лид или координатор через шлюз (решения 161 и 166).

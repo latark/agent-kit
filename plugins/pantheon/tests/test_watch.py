@@ -84,12 +84,21 @@ class Env:
             os.makedirs(d, exist_ok=True)
         open(os.path.join(self.bin, "claude"), "w").write(FAKE_CLAUDE)
         os.chmod(os.path.join(self.bin, "claude"), 0o755)
+        # caffeinate — заглушка: «запрет сна Mac» (lib/awake.py) в тестах настоящий Mac не держит
+        self.caff = os.path.join(self.tmp, "caffeinate.log")
+        open(os.path.join(self.bin, "caffeinate"), "w").write(f'#!/bin/sh\necho "$@" >> "{self.caff}"\n')
+        os.chmod(os.path.join(self.bin, "caffeinate"), 0o755)
         self.log = os.path.join(self.tmp, "claude.log")
         self.agents_file = os.path.join(self.tmp, "agents.json")
         self.notify = os.path.join(self.tmp, "notify.log")
         self.agents([])
-        open(os.path.join(self.pantheon, "schedule.toml"), "w").write('primary_host = "mac-a"\n[defaults]\nlimit_max_pct = 70\n')
+        # ночной цикл (lib/night.py) здесь выключен: вопрос в 00:00 и конец ночи в 00:00 — ночи нет, днём только темп
+        # недели; ночь и вопрос проверяет test_night.py
+        open(os.path.join(self.pantheon, "schedule.toml"), "w").write(
+            'primary_host = "mac-a"\n[defaults]\nlimit_max_pct = 70\n[night]\nask_at = "00:00"\n'
+            '[limits.night]\nstart = "00:00"\nend = "00:00"\n')
         self.doms = {}
+        self.week_pct, self.snap_age = 10.0, 0  # снимок недельного лимита в run(): зелёная зона, свежий
         # уведомления идут через политику (metis-0023): простой — явно, по умолчанию «вы у Mac»
         self.extra = {"PANTHEON_FAKE_IDLE": "0"}
 
@@ -137,11 +146,18 @@ class Env:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     def run(self, *args, t=T0, extra=None):
+        # свежий снимок лимита строки статуса (lib/night.py): без него самозапуск закрыт — «лимит неизвестен»
+        sl = os.path.join(self.home, ".local", "state", "claude-statusline")
+        os.makedirs(sl, exist_ok=True)
+        # неделя week_pct % при сбросе через 5 суток (линия ~28,6 %), снимок сделан snap_age с назад
+        obs = t - self.snap_age
+        open(os.path.join(sl, "five-hour"), "w").write(f"10 {t + 3600:.0f} {obs:.0f}\n")
+        open(os.path.join(sl, "seven-day"), "w").write(f"{self.week_pct:g} {t + 5 * 86400:.0f} {obs:.0f}\n")
         env = {"PATH": self.bin + ":" + os.environ["PATH"], "HOME": self.home, "PANTHEON_HOME": self.pantheon,
                "PANTHEON_STATE": self.state, "PANTHEON_NOW": str(t), "PANTHEON_HOST": "mac-a",
                "PANTHEON_NOTIFY_LOG": self.notify, "FAKE_CLAUDE_LOG": self.log, "FAKE_AGENTS": self.agents_file,
                "PANTHEON_FAKE_SWAP": "1.0", "PANTHEON_FAKE_PS": "", "PANTHEON_FAKE_CC": "2.1.292",
-               "PANTHEON_FAKE_LIMIT": "10"}
+               "PANTHEON_FAKE_LIMIT": "10", "PANTHEON_CAFFEINATE": os.path.join(self.bin, "caffeinate")}
         env.update(self.extra)
         env.update(extra or {})
         return subprocess.run([PY311, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=60)
@@ -185,6 +201,9 @@ def test_autostart_only_new_sanctions():
     starts = [c for c in e.calls() if c[:1] == ["--bg"]]
     check(len(starts) == 1 and "athena-x" in starts[0], f"самозапуск не пошёл: {e.calls()} {r.stderr}")
     check("самозапуск: athena-x" in e.alerts(), "строка самозапуска в тревогах")
+    aw = json.load(open(e.st("awake.json")))
+    check(aw.get("reason") == "поднята athena-x" and aw.get("pid"),
+          f"после самозапуска сон Mac не запрещён в том же проходе: {aw}")
     # без доверия — тревога и уведомление, запуска нет
     e2 = Env()
     e2.direction("athena-y", trusted=False)
@@ -796,6 +815,64 @@ def test_pauses():
     check(os.path.exists(e.st("pauses", "_all.json")) and not os.path.exists(e.st("load-pause")), "миграция load-pause")
 
 
+def _night_now(e):
+    """Ночь идёт в T0 и без ответа пропущена: вопрос за 2 ч, срок за 30 мин, ночь с T0 − 1 ч до T0 + 3 ч (по местному
+    времени машины, на которой идут тесты)."""
+    f = lambda s: time.strftime("%H:%M", time.localtime(T0 + s))  # noqa: E731
+    open(os.path.join(e.pantheon, "schedule.toml"), "w").write(
+        f'primary_host = "mac-a"\n[defaults]\nlimit_max_pct = 70\n[night]\nask_at = "{f(-7200)}"\nrepeat = []\n'
+        f'deadline = "{f(-1800)}"\n[limits.night]\nstart = "{f(-3600)}"\nend = "{f(3 * 3600)}"\n')
+
+
+def test_week_limit_blocks_autostart():
+    """Самозапуск по задаче зовёт gate недели (metis-0127): жёлтая днём, красная, снимок старше 30 мин — не поднимает,
+    причина «недельный лимит»; зелёная — поднимает."""
+    e = Env()
+    e.direction("athena-w")
+    e.task("athena-0009", "athena-w")
+    e.run("watch", t=T0)
+    e.board("athena-0009", T0 + 60)
+    cases = ((31.6, 0, "жёлтая зона днём"), (90.0, 0, "красная зона"), (10.0, 31 * 60, "лимит неизвестен (31 мин)"))
+    for i, (pct, age, why) in enumerate(cases):
+        e.week_pct, e.snap_age = pct, age
+        out = e.run("watch", "--dry-run", t=T0 + 120 + i).stdout
+        check(f"athena-w: ждёт — недельный лимит: {why}" in out, f"неделя {pct} %, снимок {age} с — dry-run: {out[-500:]}")
+        r = e.run("watch", t=T0 + 130 + i)
+        check(not [c for c in e.calls() if c[:1] == ["--bg"]], f"неделя {pct} %, снимок {age} с — самозапуск: "
+              f"{e.calls()} {r.stderr[-300:]}")
+    check("самозапуск athena-w ждёт" not in e.alerts(), "тревога autostart-wait по недельному лимиту")
+    e.week_pct, e.snap_age = 10.0, 0
+    e.run("watch", t=T0 + 200)
+    check(len([c for c in e.calls() if c[:1] == ["--bg"]]) == 1, f"зелёная — самозапуск не пошёл: {e.calls()}")
+
+
+def test_week_limit_blocks_wake_after_pause():
+    """Сессия, уснувшая по пятичасовому лимиту: лимит ушёл, но неделя красная или ночь закрыта — не будится, пауза
+    остаётся; неделя снова зелёная днём — продолжена."""
+    for night in (False, True):
+        e = Env()
+        if night:
+            _night_now(e)
+        e.direction("p9-dir")
+        e.agents([bg("p9-dir", "working", "p9p9p9p9-1", pid=43)])
+        e.run("pause", "p9-dir", "--reason", "limit", "лимит 80", t=T0)
+        e.agents([bg("p9-dir", "stopped", "p9p9p9p9-1")])
+        if not night:
+            e.week_pct = 90.0
+        e.run("watch", t=T0 + 60, extra={"PANTHEON_FAKE_LIMIT": "20"})
+        what = "ночь закрыта" if night else "неделя красная"
+        check(os.path.exists(e.st("pauses", "p9-dir.json")), f"{what} — пауза снята")
+        check(not any("p9p9p9p9-1" in c for c in e.calls() if "--resume" in c), f"{what} — сессия продолжена: {e.calls()}")
+        if night:
+            st = json.load(open(e.st("night", time.strftime("%Y-%m-%d", time.localtime(T0 - 7200)) + ".json")))
+            check(st.get("skipped"), f"ночь без ответа не пропущена: {st}")
+        else:
+            e.week_pct = 10.0
+            e.run("watch", t=T0 + 120, extra={"PANTHEON_FAKE_LIMIT": "20"})
+            check(not os.path.exists(e.st("pauses", "p9-dir.json")), "зелёная — пауза не снята")
+            check(any("p9p9p9p9-1" in c for c in e.calls() if "--resume" in c), "зелёная — сессия не продолжена")
+
+
 def test_isolation_and_watch_last():
     """Сбой одной проверки — тревога о ней, остальные идут; watch-last пишет время и упавшие."""
     e = Env()
@@ -1254,10 +1331,11 @@ def test_infra_check_managed_mode():
             "if mode == 'plugin' and active():\n"
             "    sys.exit(0)\n"
             "print(json.dumps({'hookSpecificOutput': {'permissionDecision': 'deny'}}))\n")
-    saved = {k: getattr(p, k) for k in ("MANAGED", "HOME", "guard_script", "agents_all")}
+    saved = {k: getattr(p, k) for k in ("MANAGED", "HOME", "guard_script", "agents_all", "alert_once", "clear_once")}
     want = "готово  guard отказывает на git push --force (роль dev-haiku)"
     try:
         p.MANAGED, p.HOME, p.guard_script, p.agents_all = managed, d, (lambda: fake), (lambda: [])
+        p.alert_once = p.clear_once = lambda *a, **k: None  # тревоги — не в настоящий alerts.md
         with open(managed, "w", encoding="utf-8") as fh:
             json.dump({"hooks": {"PreToolUse": [{"hooks": [
                 {"type": "command", "command": f'python3 "{fake}" --managed'}]}]}}, fh)
@@ -1294,6 +1372,147 @@ def test_infra_check_managed_mode():
                 os.environ.pop("PANTHEON_STATE", None)
             else:
                 os.environ["PANTHEON_STATE"] = old_state
+    finally:
+        for k, v in saved.items():
+            setattr(p, k, v)
+
+
+def test_infra_check_hq_section():
+    """infra-check: нет раздела [hq] в policy.toml — строка НЕТ и тревога «штабу ничего не закрыто»; пустой [hq] —
+    без тревоги, тревога снята; битый — строка НЕТ с причиной (metis-0182)."""
+    import importlib.util
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    import importlib
+    p = importlib.import_module("pantheon")
+    spec = importlib.util.spec_from_file_location("pantheon_watch_hq", os.path.join(ROOT, "lib", "watch.py"))
+    w = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(w)
+    w.set_core(p)
+    d = tempfile.mkdtemp(prefix="infra-hq-")
+    os.makedirs(os.path.join(d, ".claude", "pantheon"))
+    pol = os.path.join(d, ".claude", "pantheon", "policy.toml")
+    calls = []
+    saved = {k: getattr(p, k) for k in ("MANAGED", "HOME", "guard_script", "agents_all", "alert_once", "clear_once")}
+    try:
+        p.MANAGED, p.HOME, p.guard_script, p.agents_all = os.path.join(d, "none.json"), d, (lambda: ""), (lambda: [])
+        p.alert_once = lambda key, value, text, *a, **k: calls.append(("alert", key, text))
+        p.clear_once = lambda key: calls.append(("clear", key))
+        text = "в policy.toml нет раздела [hq]: штабу ничего не закрыто"
+        for name, body in (("нет policy.toml", None), ("нет раздела", '[private]\nroles = ["hq"]\n')):
+            calls.clear()
+            if body is not None:
+                open(pol, "w").write(body)
+            ok, lines = w.infra_check()
+            check(not ok and any(x.startswith("НЕТ") and "[hq]" in x for x in lines)
+                  and any(c[0] == "alert" and c[1] == "hq-policy-missing" and c[2].startswith(text) for c in calls),
+                  f"infra-check, {name}: нет строки НЕТ или тревоги про [hq] ({lines}, {calls})")
+        calls.clear()
+        open(pol, "w").write("[hq]\n")
+        _, lines = w.infra_check()
+        check(any(x.startswith("готово") and "[hq]" in x for x in lines)
+              and not any(c[0] == "alert" and c[1] == "hq-policy-missing" for c in calls)
+              and ("clear", "hq-policy-missing") in calls,
+              f"infra-check, пустой [hq]: тревога или строка НЕТ ({lines}, {calls})")
+        calls.clear()
+        open(pol, "w").write('[hq]\nclosed_dirs = "~/x"\n')
+        _, lines = w.infra_check()
+        check(any(x.startswith("НЕТ") and "[hq].closed_dirs" in x for x in lines),
+              f"infra-check, битый [hq]: нет строки НЕТ с причиной ({lines})")
+    finally:
+        for k, v in saved.items():
+            setattr(p, k, v)
+
+
+def test_infra_check_corpus_section():
+    """infra-check: нет раздела [corpus] в policy.toml — строка НЕТ и тревога «corpus-role ничего не закрывает»;
+    раздел есть (и пустой) — без тревоги, тревога снята; policy.toml не TOML — без второй строки (metis-0182)."""
+    import importlib.util
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    import importlib
+    p = importlib.import_module("pantheon")
+    spec = importlib.util.spec_from_file_location("pantheon_watch_corpus", os.path.join(ROOT, "lib", "watch.py"))
+    w = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(w)
+    w.set_core(p)
+    d = tempfile.mkdtemp(prefix="infra-corpus-")
+    os.makedirs(os.path.join(d, ".claude", "pantheon"))
+    pol = os.path.join(d, ".claude", "pantheon", "policy.toml")
+    calls = []
+    saved = {k: getattr(p, k) for k in ("MANAGED", "HOME", "guard_script", "agents_all", "alert_once", "clear_once")}
+    try:
+        p.MANAGED, p.HOME, p.guard_script, p.agents_all = os.path.join(d, "none.json"), d, (lambda: ""), (lambda: [])
+        p.alert_once = lambda key, value, text, *a, **k: calls.append(("alert", key, text))
+        p.clear_once = lambda key: calls.append(("clear", key))
+        text = "в policy.toml нет раздела [corpus]: правило corpus-role ничего не закрывает"
+        for name, body in (("нет policy.toml", None), ("нет раздела", "[hq]\n")):
+            calls.clear()
+            if body is not None:
+                open(pol, "w").write(body)
+            ok, lines = w.infra_check()
+            check(not ok and any(x.startswith("НЕТ") and "[corpus]" in x for x in lines)
+                  and any(c[0] == "alert" and c[1] == "corpus-policy-missing" and c[2].startswith(text) for c in calls),
+                  f"infra-check, {name}: нет строки НЕТ или тревоги про [corpus] ({lines}, {calls})")
+        for name, body in (("пустой [corpus]", "[hq]\n[corpus]\n"),
+                           ("[corpus] со списком", '[hq]\n[corpus]\ncommands = ["corpus-x"]\n')):
+            calls.clear()
+            open(pol, "w").write(body)
+            _, lines = w.infra_check()
+            check(any(x.startswith("готово") and "[corpus]" in x for x in lines)
+                  and not any(c[0] == "alert" and c[1] == "corpus-policy-missing" for c in calls)
+                  and ("clear", "corpus-policy-missing") in calls,
+                  f"infra-check, {name}: тревога или строка НЕТ ({lines}, {calls})")
+        calls.clear()
+        open(pol, "w").write("[hq\n")
+        _, lines = w.infra_check()
+        check(not any("[corpus]" in x for x in lines)
+              and not any(c[1] == "corpus-policy-missing" for c in calls),
+              f"infra-check, policy.toml не TOML: лишняя строка или тревога про [corpus] ({lines}, {calls})")
+    finally:
+        for k, v in saved.items():
+            setattr(p, k, v)
+
+
+def test_infra_check_hooks_tomllib():
+    """infra-check: python3 хуков без tomllib — строка НЕТ и тревога «guard не читает policy.toml»; с tomllib —
+    строка «готово» и тревога снята (metis-0182: иначе пустой corpus-role на Python до 3.11 молчит)."""
+    import importlib.util
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    import importlib
+    p = importlib.import_module("pantheon")
+    spec = importlib.util.spec_from_file_location("pantheon_watch_tomllib", os.path.join(ROOT, "lib", "watch.py"))
+    w = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(w)
+    w.set_core(p)
+    d = tempfile.mkdtemp(prefix="infra-toml-")
+    calls = []
+    saved = {k: getattr(p, k) for k in ("MANAGED", "HOME", "guard_script", "agents_all", "alert_once", "clear_once")}
+    try:
+        p.MANAGED, p.HOME, p.guard_script, p.agents_all = os.path.join(d, "none.json"), d, (lambda: ""), (lambda: [])
+        p.alert_once = lambda key, value, text, *a, **k: calls.append(("alert", key, text))
+        p.clear_once = lambda key: calls.append(("clear", key))
+        line = "python3 хуков читает policy.toml"
+        for rc, name in ((1, "без tomllib"), (0, "с tomllib")):
+            fake = os.path.join(d, f"py{rc}")
+            with open(fake, "w") as fh:
+                fh.write(f"#!/bin/sh\nexit {rc}\n")
+            os.chmod(fake, 0o755)
+            w.HOOK_PYTHON = fake
+            calls.clear()
+            _, lines = w.infra_check()
+            alerted = any(c[0] == "alert" and c[1] == "hooks-python-no-tomllib" and "policy.toml" in c[2]
+                          for c in calls)
+            if rc:
+                check(any(x.startswith("НЕТ") and line in x for x in lines) and alerted,
+                      f"infra-check, {name}: нет строки НЕТ или тревоги ({lines}, {calls})")
+            else:
+                check(any(x.startswith("готово") and line in x for x in lines) and not alerted
+                      and ("clear", "hooks-python-no-tomllib") in calls,
+                      f"infra-check, {name}: строка НЕТ, тревога или тревога не снята ({lines}, {calls})")
+        w.HOOK_PYTHON = os.path.join(d, "нет-такого")
+        calls.clear()
+        _, lines = w.infra_check()
+        check(any(x.startswith("НЕТ") and line in x for x in lines),
+              f"infra-check, python3 не найден: нет строки НЕТ ({lines})")
     finally:
         for k, v in saved.items():
             setattr(p, k, v)
