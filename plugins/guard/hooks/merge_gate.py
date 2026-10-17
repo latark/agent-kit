@@ -27,8 +27,11 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    последний вердикт каждого — accept с полным перечнем проверенного (Б6) и ни один рецензент не тот, кто сливает.
    reject снимает только accept того же рецензента после него или новый коммит (metis-0158: два argus на одном
    head — accept и reject в любом порядке дают отказ); продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
-   owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро: весь plugins/guard/**, casefold;
-   файлы из pulls/N/files с previous_filename.
+   owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES), casefold;
+   файлы из pulls/N/files с previous_filename. В защитах accept засчитывается, только если его ran начинается с
+   «модель: claude-opus» (metis-0176): accept другой модели — как будто его нет, reject любой модели в силе.
+   Незаменённый шаблон «<ID>» в ran — отказ ещё до записи.
+Правдивость поля ran (модель argus) guard не проверяет: это защита от ошибки шаблона и запуска не той модели.
 Чего guard не проверяет: правдивость строки в сводке и перечня argus и то, что выбранная команда тестов — настоящие
 тесты: пустую программу (true, echo…, python3 -c pass, sh -c '') он ловит по короткому списку, а придуманную
 пустышку вроде `python3 -c "import os"` — нет (защита от ошибки, не от обхода).
@@ -81,6 +84,12 @@ NOT_SIMPLE = re.compile(r"[;|&<>`\n\r]|\$\(")
 # перечень проверенного в «принять» (Б6): что argus открыл, что запустил, чего не проверял — поля записи и флаги
 CHECKLIST = ("opened", "ran", "unchecked")
 CHECKLIST_HINT = '--opened "<что открыл>" --ran "<что запустил>" --unchecked "<что не проверял>"'
+# защиты: «принять» засчитывается, только если argus проверял на Opus — поле ran начинается с «модель: claude-opus»
+# (metis-0176). Незаменённый шаблон «<ID>» в ran — ошибка шаблона роли, а не модель
+OPUS_RAN = re.compile(r"\s*модель:\s*claude-opus", re.I)
+UNFILLED_ID = re.compile(r"<\s*id\s*>", re.I)
+UNFILLED_ID_HINT = ("в --ran остался шаблон «<ID>»: подставь ID своей модели из системной подсказки — "
+                    "`--ran \"модель: claude-opus-…, что запустил\"`")
 # пустая команда тестов: программа, которая ничего не проверяет (защита от ошибки, список короткий и явный); ещё
 # python без скрипта или с пустым -c и оболочка без скрипта или с пустым -c (metis-0157, guard 0.5.8)
 EMPTY_TEST_PROGRAMS = {"true", ":", "echo", "printf", "exit", "test", "[", "sleep", "yes"}
@@ -391,6 +400,8 @@ def verdict_parse(kind, args):
             return None, None, (f"«принять» без перечня проверенного (Б6): нет или пусто {', '.join(missing)}. Формат: "
                                 f"{fmt}. Запор пускает только «принять», где сказано, что открыто, что запущено и "
                                 "чего argus не проверял")
+        if UNFILLED_ID.search(checklist.get("ran", "")):
+            return None, None, f"«принять» не записан: {UNFILLED_ID_HINT}"
     return parsed, {k: v for k, v in checklist.items() if v}, None
 
 
@@ -696,6 +707,8 @@ def review_problem(role, args, cmd="", background=False):
     if background:
         return (f"`pantheon review {kind}` в фоне (run_in_background) записи не даст: фоновую команду хук видит при "
                 "запуске, а не по итогу. Запусти без фона — запись делается по итогу команды.")
+    if kind == "accept" and UNFILLED_ID.search(cmd or ""):  # раньше NOT_SIMPLE: в «<ID>» есть < и >
+        return f"«принять» не записан: {UNFILLED_ID_HINT}. Записи не будет."
     if NOT_SIMPLE.search(cmd or ""):
         return (f"`pantheon review {kind}` — только отдельной простой командой, без `;`, `|`, `&`, `<`, `>`, `$(`, "
                 "обратных кавычек и переводов строки: иначе код выхода был бы не от тестов, и запись не сделается.")
@@ -835,6 +848,18 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                 and repo in [x.lower() for x in r["repo"]])
 
     verdicts = [r for r in records if mine(r, ("accept", "reject"), "argus")]
+    # защиты (metis-0176): «принять» не на Opus не засчитывается — как будто его нет; «вернуть» любой модели в силе,
+    # «принять» без перечня остаётся, чтобы отказ Б6 ниже сказал о перечне
+    weak = [r for r in verdicts if protect and r["kind"] == "accept" and checklist_ok(r)
+            and not OPUS_RAN.match(r["checklist"]["ran"])]
+    verdicts = [r for r in verdicts if not any(r is w for w in weak)]
+    if not verdicts and weak:
+        unfilled = any(UNFILLED_ID.search(r["checklist"]["ran"]) for r in weak)
+        return (f"«принять» на {repo}#{pr}@{sha[:12]} от {'; '.join(_who(r) for r in weak)} — не на Opus: в "
+                "репозитории защит шлюз засчитывает только проверку argus на модели claude-opus (--ran начинается с "
+                "«модель: claude-opus»). Проверку повторяет argus на Opus и записывает `pantheon review accept "
+                f"{repo} {pr} {sha} --ran \"модель: claude-opus-…, что запустил\" …`."
+                + (f" Кроме того, {UNFILLED_ID_HINT}." if unfilled else "") + f" {advice}")
     if not verdicts:
         return (f"нет «принять» от argus на {repo}#{pr}@{sha[:12]}: позови argus, он проверит и запишет "
                 f"`pantheon review accept {repo} {pr} {sha} {CHECKLIST_HINT}`. {advice}")

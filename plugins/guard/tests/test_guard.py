@@ -122,7 +122,9 @@ def gate_fixtures(home):
                     r = {"v": 1, "kind": kind, "repo": [repo], "pr": pr, "sha": SHA_OK,
                          "by": dict(by, agent_type="argus" if kind == "accept" else "talos")}
                     if kind == "accept":  # Б6 (guard 0.5.6): запор пускает только «принять» с перечнем проверенного
-                        r["checklist"] = {"opened": "дифф PR", "ran": "тесты", "unchecked": "живой gh"}
+                        # ran с моделью: в защитах шлюз засчитывает только argus на Opus (metis-0176)
+                        r["checklist"] = {"opened": "дифф PR", "ran": "модель: claude-opus-5-5, тесты",
+                                          "unchecked": "живой gh"}
                     fh.write(json.dumps(r) + "\n")
     with open(os.path.join(home, "ai/pantheon/alerts.md"), "w") as fh:
         for repo in ("latark/brokerAssistantApp", "latark/broker-landing"):
