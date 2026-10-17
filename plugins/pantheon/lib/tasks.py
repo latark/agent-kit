@@ -362,6 +362,26 @@ def digest(path):
 
 # --- проверка схемы -------------------------------------------------------------
 
+# Битый текст варианта (metis-0123): пустые скобки, обрезанная сумма («≈ )»; «$…» в athena-0005 съела оболочка).
+_OPT_EMPTY = re.compile(r"\(\s*\)")
+_OPT_CUT = re.compile(r"≈\s*[)\s]*(\)|$)|\$(?![\d])")
+_OPT_RISKY = re.compile(r"[₽$€]|\bруб|деньг|оплат|платеж|платёж|списан|необратим|удал|безвозврат", re.I)
+
+
+def option_warns(head):
+    """Предупреждения по тексту options: пустые скобки, обрезанная сумма, «(совет)» в варианте про деньги или необратимое
+    (совет — отдельным полем recommend, после вариантов). Не ошибка: задача пишется, автор видит строку."""
+    out = []
+    for o in head.get("options") or []:
+        o = str(o)
+        if _OPT_EMPTY.search(o) or _OPT_CUT.search(o):
+            out.append(f"вариант «{o[:60]}» с пустыми скобками или обрезанной суммой («()», «≈ )», «$…») — "
+                       "проверьте кавычки: оболочка съедает «$…», пишите сумму в одинарных кавычках")
+        if "(совет)" in o.lower() and _OPT_RISKY.search(o):
+            out.append(f"вариант «{o[:60]}» про деньги или необратимое помечен «(совет)» — совет пишите отдельно, "
+                       "в recommend, после вариантов")
+    return out
+
 def check_head(head):
     """→ (ошибки, предупреждения). Ошибка — файл выпадет из вида или собьёт агентов."""
     errs, warns = [], []
@@ -415,6 +435,7 @@ def check_head(head):
         short = [o for o in head.get("options") or [] if len(str(o).split()) < 4]
         if short:
             warns.append(f"варианты без объяснения ({', '.join(map(str, short))}) — «название. Что изменится. Цена»")
+        warns.extend(option_warns(head))
     if head.get("schema_version") not in (None, SCHEMA_VERSION):
         warns.append(f"schema_version {head.get('schema_version')} — текущая {SCHEMA_VERSION}")
     return errs, warns
@@ -703,11 +724,11 @@ def ready(pantheon, t, direction=None, owner=None):
 
 # --- доска владельца ------------------------------------------------------------
 
-CARD_ORDER = ["Статус", "Проект", "Внимание", "Приоритет", "Срок", "Кому", "Дальше", "Ждёт", "Создана", "Вопрос задан",
+CARD_ORDER = ["Статус", "Проект", "Внимание", "Вопрос", "Приоритет", "Срок", "Кому", "Дальше", "Ждёт", "Создана", "Вопрос задан",
               "Закрыта", "Волна", "Пачка", "Ночь", "Оценка", "Факт", "Приёмка", "Тип", "id", "tags"]
 # типы свойств карточек для Obsidian (.obsidian/types.json хранилища): тик ставит свои ключи, чужие не трогает
 PROP_TYPES = {"Внимание": "multitext", "Приоритет": "number", "Срок": "date", "Создана": "date",
-              "Вопрос задан": "datetime", "Закрыта": "date", "Кому": "text", "tags": "tags",
+              "Вопрос задан": "datetime", "Вопрос": "text", "Закрыта": "date", "Кому": "text", "tags": "tags",
               "Волна": "number", "Пачка": "text", "Ночь": "date", "Оценка": "text", "Факт": "text", "Приёмка": "text"}
 NODES_DIR = "Узлы"  # заметки-узлы ролей для графа — внутри Доска: копия view-sync.sh стирает всё вне Доска и .obsidian
 NOTE_KEY = "Заметка агенту"  # прежнее поле заметки: в карточку больше не рисуется, но со старых карточек ещё читается
@@ -936,6 +957,7 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
             "Ждёт": head.get("waiting_on") if head.get("waiting_on") not in (None, "human") else None,
             "Создана": _date(head.get("created"), 10),
             "Вопрос задан": _date(head.get("question_at"), 19) if head.get("question") else None,
+            "Вопрос": _plain(head["question"]) if head.get("question") and not closed else None,
             # закрытые до 0.9.28 даты закрытия не имеют — тогда последнее изменение задачи (из её шапки)
             "Закрыта": (_date(head.get("closed"), 10) or _date(head.get("updated"), 10)) if closed else None,
             # ночной цикл (metis-0129): волна — число, остальное — строки; пусто — None
@@ -1206,12 +1228,36 @@ properties:
   formula.prio_view:
     displayName: Приоритет
 views:
+  - type: table
+    name: Мне ответить
+    filters:
+      and:
+        - or:
+            - 'note["Статус"] == "Нужен ответ"'
+            - 'note["Кому"].toString().contains("Владелец")'
+        - 'note["Статус"] != "Готово"'
+        - 'note["Статус"] != "Отменено"'
+    sort:
+      - property: formula.urgency
+        direction: ASC
+      - property: formula.prio_rank
+        direction: ASC
+      - property: formula.qa_n
+        direction: ASC
+    order: [note.Вопрос, file.name, note.Проект, note.Внимание, formula.prio_view, note.Срок]
   - type: kanban
-    name: Доска
+    name: Система
+    filters:
+      and:
+        - 'note["Статус"] != "Отменено"'
+        - 'note["Статус"] != "Очередь"'
+        - or:
+            - 'note["Статус"] != "Готово"'
+            - 'note["Закрыта"] >= today() - "7d"'
     groupBy:
       property: note.Статус
       direction: ASC
-    groupOrder: [Входящие, Нужен ответ, Очередь, В работе, Ждёт, На проверке, Готово, Отменено]
+    groupOrder: [Входящие, Нужен ответ, В работе, Ждёт, На проверке, Готово]
     sort:
       - property: formula.col_k1
         direction: ASC
@@ -1220,6 +1266,19 @@ views:
       - property: formula.col_k3
         direction: ASC
     order: [file.name, note.Проект, note.Внимание, formula.prio_view, note.Срок, note.Кому]
+  - type: table
+    name: Очередь агентов
+    filters:
+      and:
+        - 'note["Статус"] == "Очередь"'
+    sort:
+      - property: formula.prio_rank
+        direction: ASC
+      - property: note.Срок
+        direction: ASC
+      - property: formula.cr_n
+        direction: ASC
+    order: [note.id, file.name, note.Проект, formula.prio_view, note.Срок, note.Кому, note.Создана]
   - type: table
     name: Нужен ответ
     filters:
@@ -1404,10 +1463,15 @@ def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None):
     if len(wait) > SUMMARY_WAIT_TOP:
         top.append(f"ещё {len(wait) - SUMMARY_WAIT_TOP} — колонка «{HUMAN_WAIT}» на доске")
     quiet = [f"{when} · {_plain(text)}" for when, _, _, text in (queue or [])]
-    return ("# Сводка\n\n" + sec(f"🔴 {HUMAN_WAIT}", top, len(wait)) + "\n"
+    counters = (f"🔴 Мне ответить {len(wait)} · ⏰ Просрочено {len(rows['overdue'])} · 📥 Входящие {len(rows['inbox'])}"
+                f" · 🟡 В работе {len(rows['doing'])} · 🟢 Готово за сутки {len(rows['done'])}")
+    done_fold = (f"> [!success]- 🟢 Готово за сутки ({len(rows['done'])})\n"
+                 + ("\n".join(f"> - {x}" for x in rows["done"]) if rows["done"] else "> —") + "\n")
+    return ("# Сводка\n\n" + counters + "\n\n## Мне ответить\n\n![[Доска.base#Мне ответить]]\n\n"
+            + sec(f"🔴 {HUMAN_WAIT}", top, len(wait)) + "\n"
             + sec("⏰ Просрочено", rows["overdue"]) + "\n"
             + sec("📥 Входящие заявки направлениям", rows["inbox"]) + "\n"
-            + sec("🟡 В работе", rows["doing"]) + "\n" + sec("🟢 Готово за сутки", rows["done"])
+            + sec("🟡 В работе", rows["doing"]) + "\n" + done_fold
             + ("\n" + sec("🔕 Без уведомления за сутки", quiet) if quiet else "")
             + "\n✍️ Написать агенту — текстом в раздел «Ваши заметки» внизу карточки. Перенести — перетащите карточку на доске. "
               "Готовые карточки уходят с доски через 7 дней.\n"), rows

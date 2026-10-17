@@ -207,8 +207,9 @@ def main():
     # п. 6: «Нужен ответ» — во всех местах .base, где слово сравнивается; «Отменено» — в порядке колонок
     go = re.search(r"groupOrder: \[(.*)\]", base_txt)
     cols = [x.strip() for x in go.group(1).split(",")] if go else []
-    check("board: Доска.base — колонки = COLUMNS (с «Нужен ответ» и «Отменено»), «Ждёт вас» нигде нет",
-          cols == _tasks.COLUMNS and "Ждёт вас" not in base_txt and 'note["Статус"] == "Нужен ответ"' in base_txt
+    # metis-0123: канбан «Система» скрывает «Очередь» (свой вид) и «Отменено»; остальные колонки — как в COLUMNS
+    check("board: Доска.base — колонки = COLUMNS без «Очереди» и «Отменено» (с «Нужен ответ»), «Ждёт вас» нигде нет",
+          cols == [c for c in _tasks.COLUMNS if c not in ("Очередь", "Отменено")] and "Ждёт вас" not in base_txt and 'note["Статус"] == "Нужен ответ"' in base_txt
           and "name: Нужен ответ" in base_txt and "note.Кому" in base_txt and "note.Кто" not in base_txt)
     check("board: узлы не на доске — фильтр по папке Доска", "'file.folder == \"Доска\"'" in base_txt)
     check("board: просрочка — одна тревога", "просрочена: Налоги беты" in r.stdout)
