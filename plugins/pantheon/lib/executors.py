@@ -250,16 +250,23 @@ def pick(head, kind=None, cfg=None):
 # --- запуск процесса с монитором тишины ------------------------------------------------------------------------
 
 def _kill_group(p, grace):
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(p.pid, sig)
-        except (ProcessLookupError, PermissionError):
-            return
-        try:
-            p.wait(timeout=grace)
-            return
-        except subprocess.TimeoutExpired:
-            continue
+    """SIGTERM всей группе Codex, через grace — SIGKILL тому, кто в группе остался (и дочерним после выхода главного)."""
+    try:
+        os.killpg(p.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        p.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        p.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def run_codex(argv, cwd, env, stdin_text, log, idle_s, total_s, grace=None):
@@ -268,16 +275,35 @@ def run_codex(argv, cwd, env, stdin_text, log, idle_s, total_s, grace=None):
     grace = _num("PANTHEON_CODEX_GRACE_S", 5) if grace is None else grace
     p = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, start_new_session=True)
-    try:
-        p.stdin.write(stdin_text.encode("utf-8"))
-        p.stdin.close()
-    except BrokenPipeError:
-        pass
     sel = selectors.DefaultSelector()
+    try:
+        try:
+            p.stdin.write(stdin_text.encode("utf-8"))
+            p.stdin.close()
+        except BrokenPipeError:
+            pass
+        sel.register(p.stdout, selectors.EVENT_READ, "out")
+        sel.register(p.stderr, selectors.EVENT_READ, "err")
+        return _pump(p, sel, log, idle_s, total_s, grace)
+    except Interrupted:  # обёртку остановили (SIGTERM/SIGHUP/SIGINT) — Codex не должен работать дальше без неё
+        _kill_group(p, grace)
+        raise
+    finally:
+        sel.close()
+        for f in (p.stdout, p.stderr):
+            try:
+                f.close()
+            except OSError:
+                pass
+
+
+class Interrupted(BaseException):  # как KeyboardInterrupt: широкие except Exception его не глотают
+    pass
+
+
+def _pump(p, sel, log, idle_s, total_s, grace):
     bufs = {"out": b"", "err": b""}
     lines = {"out": [], "err": []}
-    sel.register(p.stdout, selectors.EVENT_READ, "out")
-    sel.register(p.stderr, selectors.EVENT_READ, "err")
     start = last = time.monotonic()
     killed = None
     with open(log, "ab") as lo, open(log + ".stderr", "ab") as le:
@@ -304,14 +330,11 @@ def run_codex(argv, cwd, env, stdin_text, log, idle_s, total_s, grace=None):
     for k in bufs:
         if bufs[k]:
             lines[k].append(bufs[k].decode("utf-8", "replace"))
-    sel.close()
     try:
         rc = p.wait(timeout=grace + 5)
     except subprocess.TimeoutExpired:
         _kill_group(p, grace)
         rc = p.wait()
-    for f in (p.stdout, p.stderr):
-        f.close()
     return rc, lines["out"], lines["err"], killed
 
 
@@ -564,24 +587,37 @@ def snapshot(wt):
         if len(e) < 4:
             continue
         xy, p = e[:2], e[3:]
-        if xy[0] in "RC":
-            i += 1  # у переименования второй путь — старое имя
-        try:
-            st = os.lstat(os.path.join(wt, p))
-            sig = (st.st_size, st.st_mtime_ns)
-        except OSError:
-            sig = None
-        items[p] = (xy, sig)
+        names = [p]
+        if xy[0] in "RC" and i < len(parts):
+            names.append(parts[i])  # у переименования и копии второй путь — старое имя: считаются оба
+            i += 1
+        for n in names:
+            try:
+                st = os.lstat(os.path.join(wt, n))
+                sig = (st.st_size, st.st_mtime_ns)
+            except OSError:
+                sig = None
+            items[n] = (xy, sig)
     return head, items
 
 
+def _diff_names(wt, *revs):
+    """Имена путей диффа без склейки переименований: у git mv — и старое, и новое имя."""
+    r = _git(wt, "diff", "--name-only", "--no-renames", "-z", *revs)
+    return {x for x in r.stdout.split("\0") if x}
+
+
 def changed_paths(wt, before, after):
+    """Что изменилось за ход: сверка снимков статуса (вместе с неотслеживаемым и игнорируемым), свои коммиты Codex
+    (снимок..HEAD) и рабочее дерево против снимка HEAD — всё без склейки переименований. Путь, грязный уже до
+    запуска и с тем же видом после, — не изменение Codex."""
     head0, it0 = before
     head1, it1 = after
     paths = {p for p in set(it0) | set(it1) if it0.get(p) != it1.get(p)}
     if head0 and head1 and head0 != head1:
-        r = _git(wt, "diff", "--name-only", "-z", head0, head1)
-        paths |= {x for x in r.stdout.split("\0") if x}
+        paths |= _diff_names(wt, head0, head1)
+    if head0:
+        paths |= {p for p in _diff_names(wt, head0) if p not in it0 or it0.get(p) != it1.get(p)}
     return sorted(paths)
 
 
@@ -694,10 +730,40 @@ def exec_codex(worktree, brief_path, out=None, err=None):
     except Busy as e:
         err(f"Codex занят: другой запуск держит {e} — один процесс на CODEX_HOME роли")
         return BUSY
+    old = _trap_signals()
     try:
         return _exec_locked(wt, brief, out, err)
+    except Interrupted as e:
+        err(f"прервано ({e}): Codex остановлен, изменения не закоммичены — проверь worktree {wt}")
+        return 1
     finally:
-        lk.close()
+        _restore_signals(old)
+        lk.close()  # замок снимается и при прерывании
+
+
+STOP_SIGNALS = tuple(getattr(signal, n) for n in ("SIGTERM", "SIGHUP", "SIGINT") if hasattr(signal, n))
+
+
+def _trap_signals():
+    """SIGTERM/SIGHUP/SIGINT обёртке → исключение Interrupted: run_codex гасит группу Codex, замок снимается.
+    Повторный сигнал во время остановки не мешает: после первого обработчики игнорируют остальные."""
+    import threading
+    if threading.current_thread() is not threading.main_thread():
+        return None
+
+    def on_signal(signum, _frame):
+        for s in STOP_SIGNALS:
+            signal.signal(s, signal.SIG_IGN)
+        raise Interrupted(signal.Signals(signum).name)
+    old = {s: signal.getsignal(s) for s in STOP_SIGNALS}
+    for s in STOP_SIGNALS:
+        signal.signal(s, on_signal)
+    return old
+
+
+def _restore_signals(old):
+    for s, h in (old or {}).items():
+        signal.signal(s, h if h is not None else signal.SIG_DFL)
 
 
 def _exec_locked(wt, brief, out, err):

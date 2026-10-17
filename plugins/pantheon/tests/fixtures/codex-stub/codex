@@ -8,7 +8,7 @@
   {"version": "codex-cli 0.130.0", "login": 0, "device_auth": 0,
    "hello": <шаг>,                       — ответ на hello-пробу (stdin «Respond with hello.»)
    "exec": [<шаг>, <шаг>, …]}            — боевые запуски по порядку, последний повторяется
-Шаг: {"write": {"путь": "текст"}, "commit": "сообщение", "stdout": [строка или объект], "stderr": [строка],
+Шаг: {"write": {"путь": "текст"}, "mv": [["старое", "новое"]] — git mv, "commit": "сообщение", "stdout": [строка или объект], "stderr": [строка],
       "child": true — дочерний sleep в той же группе (pid — в stub-child.pid), "hang": секунд молчать,
       "drip": секунд между строками без конца, "rc": код выхода}
 Образцы событий — раздел 3 доклада prometheus 16.10 (тесты Paperclip codex_local).
@@ -69,6 +69,9 @@ for rel, text in (step.get("write") or {}).items():
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w", encoding="utf-8") as fh:
         fh.write(text)
+for old, new in step.get("mv") or []:
+    os.makedirs(os.path.dirname(os.path.join(os.getcwd(), new)) or ".", exist_ok=True)
+    subprocess.run(["git", "mv", old, new], check=True)
 if step.get("commit"):
     subprocess.run(["git", "add", "-A"], check=True)
     subprocess.run(["git", "-c", "user.name=codex", "-c", "user.email=codex@local", "commit", "-q", "-m",
@@ -76,6 +79,7 @@ if step.get("commit"):
 if step.get("child"):
     c = subprocess.Popen(["sleep", "300"])
     open(os.path.join(home, "stub-child.pid"), "w").write(str(c.pid))
+    open(os.path.join(home, "stub-self.pid"), "w").write(str(os.getpid()))
 for ln in step.get("stdout") or []:
     print(ln if isinstance(ln, str) else json.dumps(ln, ensure_ascii=False), flush=True)
 for ln in step.get("stderr") or []:

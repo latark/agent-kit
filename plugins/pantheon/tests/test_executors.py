@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -88,7 +89,7 @@ def scenario(data):
     os.makedirs(CH, exist_ok=True)
     with open(os.path.join(CH, "stub-scenario.json"), "w") as fh:
         json.dump(data, fh)
-    for f in ("stub-exec-n", "stub-calls.jsonl", "stub-child.pid"):
+    for f in ("stub-exec-n", "stub-calls.jsonl", "stub-child.pid", "stub-self.pid"):
         try:
             os.remove(os.path.join(CH, f))
         except FileNotFoundError:
@@ -142,6 +143,10 @@ with open(os.path.join(MAIN, ".gitignore"), "w") as fh:
 os.makedirs(os.path.join(MAIN, "plugins", "pantheon", "lib"))
 with open(os.path.join(MAIN, "plugins", "pantheon", "lib", "pantheon.py"), "w") as fh:
     fh.write("RULES = {}\n")
+os.makedirs(os.path.join(MAIN, "plugins", "guard"))
+for rel in ("AGENTS.md", "plugins/guard/guard.py"):  # защищённые пути в базе — для проб переименования
+    with open(os.path.join(MAIN, rel), "w") as fh:
+        fh.write("x\n" * 50)
 git(MAIN, "add", "-A")
 git(MAIN, "commit", "-q", "-m", "base")
 git(MAIN, "remote", "add", "origin", BARE)
@@ -443,6 +448,23 @@ def tests():
     wt = new_wt()
     r = exec_codex(wt)
     check("обычная правка pantheon.py без правил окон — коммит", r.returncode == 0, r.stderr)
+    # переименование защищённого: у git mv старое имя тоже изменение (замечание argus к PR #37)
+    for src, dst in (("AGENTS.md", "NOTES.md"), ("plugins/guard/guard.py", "plugins/other_guard.py")):
+        for own in (False, True):
+            scenario({"exec": [ok_step({}, mv=[[src, dst]], **({"commit": "codex: mv"} if own else {}))]})
+            wt = new_wt()
+            h0 = head(wt)
+            r = exec_codex(wt)
+            where = "собственным коммитом Codex" if own else "в индексе"
+            check(f"git mv {src} → {dst} {where} → отказ, старое имя в выводе, коммита обёртки нет",
+                  r.returncode == 1 and f"  {src}" in r.stderr and "Executor: codex" not in
+                  git(wt, "log", "-1", "--format=%B").stdout and (head(wt) == h0) != own, r.stdout + r.stderr)
+    scenario({"exec": [ok_step({}, mv=[["README.md", "docs/README.md"]])]})
+    wt = new_wt()
+    r = exec_codex(wt)
+    check("git mv обычного файла — коммит с обоими именами", r.returncode == 0 and
+          git(wt, "show", "--name-status", "--no-renames", "--format=", "HEAD").stdout.split() ==
+          ["D", "README.md", "A", "docs/README.md"], r.stdout + r.stderr)
 
     # --- сценарии ошибок (раздел 3 доклада) ------------------------------------------------------------------------
     def fail_case(name, step, want_rc, want_text, n_calls=1, env=None, extra=None):
@@ -552,6 +574,56 @@ def tests():
         r = exec_codex(wt)
     check("замок: другой запуск держит CODEX_HOME → «занят» без ожидания, Codex не запускался",
           r.returncode == 4 and "занят" in r.stderr and not calls("exec"), r.stderr)
+
+    # --- обёртку остановили сигналом: Codex не работает дальше без неё (замечание argus к PR #37) -------------------
+    def alive(pid):
+        try:
+            os.kill(pid, 0)  # ps в песочнице запрещён
+            return True
+        except ProcessLookupError:
+            return False
+
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        set_cfg(CODEX_ON)
+        scenario({"exec": [{"write": {"half.txt": "x"}, "stdout": [STARTED], "child": True, "hang": 120}]})
+        wt = new_wt()
+        h0 = head(wt)
+        e = {k: v for k, v in ENV.items() if v is not None}
+        p = subprocess.Popen([PY311, "-I", CLI, "exec", "codex", wt, BRIEF], env=e, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+        pidf, selff = os.path.join(CH, "stub-child.pid"), os.path.join(CH, "stub-self.pid")
+        for _ in range(200):
+            if os.path.exists(selff) and open(selff).read().strip():
+                break
+            time.sleep(0.05)
+        child, stub = int(open(pidf).read()), int(open(selff).read())
+        t = time.time()
+        p.send_signal(sig)
+        so, se = p.communicate(timeout=60)
+        dead = False
+        for _ in range(50):
+            if not alive(child) and not alive(stub):
+                dead = True
+                break
+            time.sleep(0.1)
+        if not dead:
+            for x in (child, stub):
+                try:
+                    os.kill(x, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        free = True
+        with open(os.path.join(STATE, "locks", "codex-dev.lock"), "a") as lk:
+            try:
+                fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                free = False
+        name = signal.Signals(sig).name
+        check(f"{name} обёртке → код 1, «прервано: Codex остановлен, изменения не закоммичены»",
+              p.returncode == 1 and "прервано" in se and "Codex остановлен, изменения не закоммичены" in se
+              and time.time() - t < 30, (p.returncode, so, se))
+        check(f"{name} обёртке → группа Codex мертва (заглушка и её дочерний), коммита нет, замок снят",
+              dead and head(wt) == h0 and free, (dead, head(wt) == h0, free))
 
     # --- вызов --------------------------------------------------------------------------------------------------------
     r = run("exec", "codex", TMP, BRIEF)
