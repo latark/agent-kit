@@ -221,7 +221,9 @@ def main():
         '[[direction]]\nname = "metis-pantheon"\nfolders = ["~/projects/agent-kit"]\n')
     os.makedirs(os.path.join(tmp, ".claude", "pantheon"))
     open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w").write('[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n')
-    env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state}
+    # общий слой ролей плагина пуст: здесь каталог ролей — только то, что тест кладёт сам (оба слоя — test_roles.py)
+    env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
+           "PANTHEON_PLUGIN_ROLES": os.path.join(tmp, "plugin-roles-empty")}
     subprocess.run([PY311, "-I", LIB, "domains", "build"], env=env, capture_output=True)
     dj = json.load(open(os.path.join(state, "domains.json")))["domains"]
     check("реестр: папка Метиды у athena пропущена, у Метиды осталась",
