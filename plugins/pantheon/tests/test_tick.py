@@ -436,11 +436,11 @@ def main():
           and "(`acme-co/kit`, `tools-org/sync`)" in gm[0] and "bad owner" not in gm[0] and "kit``" not in gm[0]
           and not any(x in texts for x in ("athena-shop", "metis-pantheon", "mnemo-brain", "workshop",
                                            "agent-kit", "projects/br", "ai/knowledge")))
-    check("правило Gated Merge: обе формы репозитория, перечень argus, ядро — кнопка владельца, --admin/--auto не "
+    check("правило Gated Merge: обе формы репозитория, перечень argus, ядро — сливает сам владелец, --admin/--auto не "
           "разрешает (metis-0098)",
           bool(gated) and all(x in gated[0] for x in ("`-R <owner/repo>`", "`--repo <owner/repo>`",
                                                       "--match-head-commit", "checklist", "plugins/guard/",
-                                                      "owner's button", "`--admin`, `--auto`", "`gh api`",
+                                                      "plugins/pantheon/roles/", "window_rules.py", "owner to merge them himself", "`--admin`, `--auto`", "`gh api`",
                                                       "still judged by Merge Without Review")))
     check("штаб и мастерская: autoMode в окне нет — классификатор у них со встроенными правилами (metis-0098)",
           "autoMode" not in hq and "autoMode" not in sw)

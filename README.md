@@ -45,7 +45,7 @@
   Record» (`coordinator_auto_allow`). Gated Merge описывает ровно форму, которую пускает запор guard:
   `gh pr merge <N> -R|--repo <owner/repo> --match-head-commit <sha>`, а последующие `gh pr view` или `git fetch`
   классификатор считает обычными. `--admin`, `--auto`, `gh api` и ядро защит (`plugins/guard/`,
-  `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
+  `plugins/pantheon/roles/`, `plugins/pantheon/lib/window_rules.py`, `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
   из `policy.toml`; направлению без такой записи правила слияния нет. Окну с доступом к личному (`[private]`
   `coordinators`, сейчас mnemo-brain) правило слияния не выдаётся и при `[merge_repos]`: его PR сливает владелец
   (metis-0156). Имён владельца, направлений и репозиториев в

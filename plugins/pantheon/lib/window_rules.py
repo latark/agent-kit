@@ -37,8 +37,8 @@ GATED_MERGE_RULE = (
     "itself rejects the merge if the PR head moved away from `--match-head-commit`. A merge the gate let through is "
     "a reviewed merge: the session's follow-up commands after it (`gh pr view`, `gh pr checks`, `git fetch`, "
     "`git pull`, `git log`) are routine, not a continuation of an unreviewed merge. PRs that touch the protection "
-    "core — any path under `plugins/guard/` or `.claude-plugin/marketplace.json` — stay for "
-    "the owner's button: guard refuses them, and this exception does not cover merging them any other way. It "
+    "core — any path under `plugins/guard/` or `plugins/pantheon/roles/`, `plugins/pantheon/lib/window_rules.py` "
+    "or `.claude-plugin/marketplace.json` — wait for the owner to merge them himself: guard refuses them, and this exception does not cover merging them any other way. It "
     "covers only the command shape above: `--admin`, `--auto`, a merge without `--match-head-commit` or without an "
     "explicit `-R`/`--repo`, a merge through `gh api`, `GH_REPO`/`GH_HOST` overrides, `cd` or chained commands, "
     "or a repository outside this list are still judged by Merge Without Review.")
