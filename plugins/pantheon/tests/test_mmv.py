@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -155,8 +156,12 @@ M.save(d, [R("2026-10-01", 1)])
 check(list(byd(d)) == ["2026-09-01", "2026-09-02", "2026-10-01"], "7г: прежние дни остались")
 
 # 8. line() для night report
-ln = M.line(s, 7, date(2026, 10, 16))
+T16 = time.mktime((2026, 10, 16, 12, 0, 0, 0, 0, -1))  # «сейчас» сводки, не настоящая дата
+ln = M.line(s, 7, T16)
 check("вчера 2,8" in ln, ln)
+check([M._entries(n) for n in (1, 2, 5, 11, 12, 21, 22, 25)] ==
+      ["1 вход", "2 входа", "5 входов", "11 входов", "12 входов", "21 вход", "22 входа", "25 входов"],
+      "склонение «вход»")
 
 # 9. CLI на 3.11+: pantheon mmv и night report (HOME и STATE — временные)
 if PY311:
@@ -164,7 +169,7 @@ if PY311:
     home = tempfile.mkdtemp(prefix="mmv-home-")
     TMPS.append(home)
     env = dict(os.environ, HOME=home, PANTHEON_HOME=os.path.join(home, "ai", "pantheon"), PANTHEON_STATE=s,
-               PANTHEON_HOST="mac-a")
+               PANTHEON_HOST="mac-a", PANTHEON_NOW=str(T16))
     cli = os.path.join(ROOT, "lib", "pantheon.py")
 
     def run(*a):
@@ -178,6 +183,7 @@ if PY311:
     check(run("mmv", "--days", "x").returncode == 2, "CLI mmv --days x → код 2")
     p = run("night", "report")
     check(p.returncode == 0 and "ММВ" in p.stdout, f"night report содержит ММВ: {p.stdout[-400:]} {p.stderr[-300:]}")
+    check("вчера 3,5 мин (2 входа)" in p.stdout, f"night report: «вчера» от PANTHEON_NOW: {p.stdout[-400:]}")
 else:
     print("CLI пропущен: нет Python 3.11+")
 
