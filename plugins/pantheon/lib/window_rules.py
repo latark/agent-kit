@@ -8,10 +8,15 @@ pantheon.py (`pantheon domains build`) по пути файла — python3 -I �
 
 import re
 
-# Окну координатора направления — слияние PR без вопроса классификатора режима auto (metis-0050). Каждое слияние
-# по-прежнему проверяет guard (merge_problem): главная сессия domain-coordinator или лид её направления (metis-0054),
-# свои папки, без --admin и --auto. Мастерской и штабу правила нет.
-COORDINATOR_ALLOW = ["Bash(gh pr merge *)"]
+# permissions.allow окон координаторов — пусто (metis-0137). Раньше здесь стояло Bash(gh pr merge *) (metis-0050), но
+# правило allow срабатывает раньше классификатора режима auto, а формы --admin и --auto классификатор не судит: слияние
+# в обход запора шло без проверки. Разрешённую форму слияния пропускает autoMode-правило GATED_MERGE_RULE
+# (coordinator_auto_allow), а каждое слияние по-прежнему проверяет guard (merge_problem): главная сессия
+# domain-coordinator или лид её направления (metis-0054), свои папки, без --admin и --auto. Мастерской и штабу правила нет.
+# Но .claude/settings.json проекта папки запуска сливается с --settings окна (флага --setting-sources нет), и allow
+# вроде Bash(gh *) в нём возвращает тот же обход: такое окно не собирается (project_allow_problems, sandbox_build),
+# `pantheon check` и `direction check` показывают то же предупреждение.
+COORDINATOR_ALLOW = []
 # Исключения классификатора режима auto окнам координаторов направлений, Метиды в их числе (metis-0098; решения
 # владельца 15.10 «Б» и Зевса 16.10 «А»). Классификатор не видит журнал запора guard и считал слияние через запор
 # «Merge Without Review», а за ним — и gh pr view, git fetch той же сессии. Правило описывает ровно то, что пускает
@@ -52,7 +57,7 @@ REVIEW_RECORD_RULE = (
     "«accept» without all three checklist fields and a test command that does nothing (`true`, `echo`, `sleep`). "
     "This exception does not cover editing the record file under `~/.local/state/pantheon/merge-gate/` or the "
     "guard plugin. This exception covers only the `pantheon review` recording wrapper itself: the command after "
-    "`--` must be the project's own test runner (`heavy …`, `pytest`, `pnpm test`, `python3 -I tests/…`) and is "
+    "`--` must be the project's own test runner (`heavy <test runner>`, `pytest`, `pnpm test`, `python3 -I tests/…`) and is "
     "judged by every other rule exactly as if it were run on its own. A merge, push, deploy, `gh` or network "
     "command, a file-changing command, an `sh -c`/`python3 -c` one-liner, or anything that checks nothing after "
     "`--` is never a test command and stays Self-Approval or CI Bypass where it fits.")

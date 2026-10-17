@@ -1553,6 +1553,19 @@ def archive():
     return 0
 
 
+# Имена окон, которые не направления: sandbox_build пишет settings/hq.json, workshop.json и job-<роль>.json; направление
+# с таким именем записало бы свои настройки в чужой файл — а при сбое второй записи они там и остались бы (metis-0163)
+RESERVED_DIRECTIONS = ("hq", "workshop")
+
+
+def reserved_direction(name):
+    """Текст ошибки, если имя направления зарезервировано под окно hq, workshop или job-*; иначе None."""
+    if isinstance(name, str) and (name in RESERVED_DIRECTIONS or name.startswith("job-")):
+        return (f"имя «{name}» зарезервировано под окна системы (hq, workshop, job-*): настройки направления "
+                "записались бы в чужой файл окна — выберите другое имя")
+    return None
+
+
 def domains_build(if_changed=False):
     """Реестр направлений → domains.json для guard. Привилегий тут нет: они в ~/.claude/pantheon/policy.toml.
     Папку привилегированного координатора (из [coordinators] policy.toml) чужое направление получить не может:
@@ -1565,8 +1578,10 @@ def domains_build(if_changed=False):
         # попасть в hq.json
         # и каталог ролей: новая роль с memory: должна попасть в песочницу окон (metis-0051). Цикла нет: roles_build
         # пишет файл, только если текст изменился, — пересборка одна, следующий тик уже тихий
-        watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS,
-                   CLAUDE_TMP)
+        # и проектные настройки папок запуска направлений: allow с gh pr merge роняет окно (metis-0137)
+        launches = [launch_folder(fs) for fs in (read_json(path("domains.json")).get("domains") or {}).values()]
+        watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS, CLAUDE_TMP,
+                   *(os.path.join(l, ".claude", fn) for l in launches if l for fn in PROJECT_SETTINGS_FILES))
         newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
         # и пропавшее окно задачи расписания (P0-3): без него задача не идёт — в том числе сразу после обновления
         if built >= newest and all(os.path.isfile(job_window(r)) for r in JOB_ROLES):
@@ -1585,6 +1600,11 @@ def domains_build(if_changed=False):
         name = d.get("name", "")
         if not re.fullmatch(r"[a-z0-9-]+", name):
             print(f"пропущено направление с именем не по образцу: {name!r}", file=sys.stderr)
+            continue
+        bad = reserved_direction(name)
+        if bad:
+            print(f"пропущено направление: {bad}", file=sys.stderr)
+            alert_once(f"direction-reserved-{name}", "1", f"directions.toml: {bad}", "pantheon")
             continue
         folders = []
         for f in d.get("folders") or []:
@@ -1605,7 +1625,9 @@ def domains_build(if_changed=False):
     write_json(path("domains.json"), {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml. Руками не править.",
         "built": stamp(), "built_ts": now(), "domains": domains})
-    built = sandbox_build(domains, policy_path, stores, leads)
+    # живую сессию с проблемой проектных allow останавливает только путь тика (--if-changed): ручная сборка и тесты
+    # зовут её с настоящим claude в PATH — claude stop из них остановил бы ваши сессии
+    built = sandbox_build(domains, policy_path, stores, leads, stop_live=if_changed)
     os.makedirs(path("locks"), exist_ok=True)
     for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):  # места обёртки heavy: роль в песочнице сама их не создаст
         open(path("locks", slot + ".lock"), "a").close()
@@ -1684,7 +1706,9 @@ MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
 # momus — ревизор навыка audit (metis-0095, решение владельца 15.10): только чтение и веб, пишет лишь свой отчёт в
 # ~/ai/knowledge/Inbox. Координаторам его нет — без отдельного слова владельца.
 HQ_AGENTS = ["prometheus", "clio", "chiron", "momus", "Explore"]
-COORDINATOR_AGENTS = ["argus", "talos", "prometheus", "Explore"]
+# dev-haiku, dev-sonnet, dev-opus — разработчики: координатор отдаёт им мелкие правки сам, не гоняя лида (эпик
+# «Альфа»); codex-dev сюда не входит — его зовёт только лид по правилу executor.
+COORDINATOR_AGENTS = ["argus", "talos", "prometheus", "Explore", "dev-haiku", "dev-sonnet", "dev-opus"]
 COORDINATOR_EXTRA_AGENTS = {"mnemo-brain": ["clio"]}
 # Skill — навык с context: fork идёт субагентом своего agent: мимо инструмента Agent (Claude Code 2.1.292)
 AGENT_MATCHER = "Agent|Task|Skill"
@@ -1841,8 +1865,10 @@ def agents_window(data, allowed, deny, script):
 def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None):
     allow = list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + [cache]
     # .git/config и .git/hooks — внутри каждой разрешённой папки (её настоящим путём) и под ~ в целом
-    deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + [f"{r}{sub}" for r in allow for sub in
-                                                             ("/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks")]
+    # .claude/agents — роли агентов репозитория: guard protect-config закрывает запись хуком (guard 0.5.6, #26), но
+    # Bash-запись мимо хука останавливает только песочница (metis-0140); и в worktree внутри репозитория тоже
+    deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + [f"{r}{sub}" for r in allow for sub in (
+        "/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks", "/.claude/agents", "/**/.claude/agents")]
     data = {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml и policy.toml (SEC-19). Руками не править.",
         "env": {
@@ -1946,18 +1972,214 @@ def pnpm_store_check(name, folders, store):
                            ".git/info/exclude), затем CI=true pnpm install --frozen-lockfile", "pantheon")
 
 
-def sandbox_build(domains, policy_path, stores=None, leads=None):
+# [private] из policy.toml читается по правилу guard 0.5.9 (metis-0163): окно и guard не должны расходиться во мнении,
+# у кого личное. Умолчание — то же, что DEFAULT_PRIVATE у guard.
+DEFAULT_PRIVATE = {"roles": ["hq", "chiron"], "coordinators": ["mnemo-brain"],
+                   "paths": ["~/ai/knowledge/me", "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.git/git-crypt",
+                             "~/.local/state/pantheon/owner-log/zeus.md"]}
+
+
+def private_conf(policy):
+    """[private]: не таблица — всё по умолчанию; ключа нет или значение не список — умолчание; список — только его
+    строки (strip, пустые убраны). roles и coordinators: пустой список — никого; paths: пустой список или без строк —
+    умолчание."""
+    p = policy.get("private") if isinstance(policy, dict) else None
+    if not isinstance(p, dict):
+        p = {}
+    conf = {}
+    for k, v in DEFAULT_PRIVATE.items():
+        val = p.get(k)
+        if not isinstance(val, list):
+            conf[k] = list(v)
+            continue
+        items = [x.strip() for x in val if isinstance(x, str) and x.strip()]
+        conf[k] = items if items or k != "paths" else list(v)
+    return conf
+
+
+# Образцы команд слияния в обход запора: правило allow, которому подходит любая из них, срабатывает раньше классификатора
+# режима auto, и формы --admin и --auto классификатор не судит (metis-0137)
+MERGE_SAMPLES = ("gh pr merge 12 --admin", "gh pr merge 12 --auto --merge")
+MERGE_CMD = "gh pr merge"
+PROJECT_SETTINGS_FILES = ("settings.json", "settings.local.json")
+
+
+# Обёртки, запускающие любую команду: правило `env *` пускает и `env gh pr merge 12 --admin`. У оболочек обёртка —
+# только `-c` (`bash ./run.sh *` — свой скрипт); флаги env с аргументом снимаются вместе с ним
+WRAP_SHELLS = ("bash", "sh", "zsh")
+ENV_ARG_FLAGS = ("-u", "-c", "-p")
+ASSIGN_RX = r"[a-z_][a-z0-9_]*=\S*"
+
+
+def unwrap_rule(inner):
+    """(остаток, была ли обёртка): снимает с начала шаблона VAR=значение, путь к программе (`/x/y/gh` → `gh`) и
+    обёртки env, command, xargs, eval, `bash|sh|zsh -c` с необязательной кавычкой. Остаток None — `command -v …`:
+    поиск программы, а не запуск."""
+    wrapped = False
+    while True:
+        words = inner.split(" ") if inner else []
+        while len(words) > 1 and re.fullmatch(ASSIGN_RX, words[0]):
+            words = words[1:]
+        if not words:
+            return "", wrapped
+        prefix, slash, base = words[0].rpartition("/")
+        if slash and base and not base.startswith("*") and "*" not in prefix:
+            words[0] = base
+        first, words = words[0], words[1:]
+        if first == "env":  # VAR= после флагов снимет следующий проход цикла
+            while words and words[0].startswith("-"):
+                words = words[2:] if words[0] in ENV_ARG_FLAGS else words[1:]
+        elif first in ("command", "xargs"):
+            while words and words[0].startswith("-"):
+                if first == "command" and "v" in words[0]:
+                    return None, True
+                words = words[1:]
+        elif first in WRAP_SHELLS:
+            short = lambda w: w.startswith("-") and not w.startswith("--")  # noqa: E731
+            while words and short(words[0]) and "c" not in words[0]:
+                words = words[1:]
+            if words and short(words[0]):
+                words = words[1:]
+            elif not (words and words[0].startswith("*")):  # не -c и не звёздочка на его месте — запуск скрипта
+                return " ".join([first, *words]), wrapped
+            if words and words[0][:1] in ("'", '"'):
+                q, words[0] = words[0][0], words[0][1:]
+                if words[-1].endswith(q):
+                    words[-1] = words[-1][:-1]
+                words = [w for w in words if w]
+        elif first != "eval":
+            return " ".join([first, *words]), wrapped
+        wrapped = True
+        inner = " ".join(words)
+
+
+def allow_rule_merges(rule):
+    """Пускает ли правило permissions.allow `gh pr merge`: "Bash", "Bash(*)", Bash(<шаблон>), где буквальное начало
+    шаблона до первой звёздочки — начало «gh pr merge» или само начинается с «gh pr merge» (флаги в любом порядке,
+    точная форма без звёздочки тоже), либо шаблон как glob подходит к одному из MERGE_SAMPLES. Пробелы схлопываются,
+    регистр не важен, «:*» на конце — « *». Перед проверкой unwrap_rule снимает ведущие VAR=значение, путь к
+    программе (`/opt/homebrew/bin/gh *` — это `gh *`) и обёртки, пускающие любую команду: env с флагами и VAR=,
+    command, xargs с флагами, eval, `bash|sh|zsh -c`. Поэтому `env *`, `bash -c *`, `command /x/gh *` ловятся, а
+    обёртка без звёздочки и без команды после неё (`env`, `command -v gh`) — нет. Не ловятся свои скрипты-обёртки
+    (`./run.sh *`), sudo, nohup, timeout, `exec gh *`, `time gh *`, `nice gh *` и подобное: граница — песочница и
+    guard (README)."""
+    if not isinstance(rule, str):
+        return False
+    rule = rule.strip()
+    if rule == "Bash":
+        return True
+    if not (rule.startswith("Bash(") and rule.endswith(")")):
+        return False
+    inner = rule[5:-1].strip()
+    if inner.endswith(":*"):
+        inner = inner[:-2] + " *"
+    inner = " ".join(inner.split()).lower()
+    inner, wrapped = unwrap_rule(inner)
+    if inner is None or (wrapped and not inner):
+        return False
+    head = inner.split("*", 1)[0]
+    if MERGE_CMD.startswith(head) or head.startswith(MERGE_CMD):
+        return True
+    rx = ".*".join(re.escape(x) for x in inner.split("*"))
+    return any(re.fullmatch(rx, smp) for smp in MERGE_SAMPLES)
+
+
+def project_allow_problems(launch):
+    """[(файл, правило)] — allow в .claude/settings.json и settings.local.json папки запуска, пускающие `gh pr merge`."""
+    found = []
+    for fn in PROJECT_SETTINGS_FILES:
+        f = os.path.join(launch, ".claude", fn)
+        try:
+            with open(f, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        perms = data.get("permissions") if isinstance(data, dict) else None
+        allow = perms.get("allow") if isinstance(perms, dict) else None
+        for r in allow if isinstance(allow, list) else []:
+            if allow_rule_merges(r):
+                found.append((f, r))
+    return found
+
+
+def project_allow_text(name, problems):
+    shown = lambda f: f.replace(HOME, "~", 1) if f.startswith(HOME + os.sep) else f  # noqa: E731
+    return (f"направление {name}: " + "; ".join(f"{shown(f)} — allow «{r}» пускает gh pr merge" for f, r in problems)
+            + " — правило срабатывает раньше классификатора auto и открывает слияние --admin/--auto мимо запора: убрать "
+            "правило или сузить его до нужных команд gh (gh pr view *, gh pr checks *…)")
+
+
+def drop_window(name):
+    """Убрать оба файла окна: settings/<имя>.json и файл запуска settings/run/<имя>.json — `claude respawn` берёт
+    прежние флаги с путём к нему (ревью argus PR #32). Без файла окна не поднимают ни pantheon start, ни wake, ни
+    дежурный."""
+    for f in (path("settings", name + ".json"), path("settings", "run", name + ".json")):
+        with contextlib.suppress(OSError):
+            os.remove(f)
+
+
+def allow_gate(name, folders=None):
+    """Проектные allow папки запуска направления name (metis-0137): есть правило с gh pr merge — оба файла окна
+    убираются. Зовут сборка, тик (check) и каждый подъём сессии: сборка по --if-changed сравнивает только mtime, а
+    файл со старым mtime (cp -p, rsync -a, tar) её не запускает (ревью argus PR #32). folders — папки из domains.json;
+    не направление (мастерская, штаб) — проверки нет. → список проблем."""
+    if folders is None:
+        folders = (read_json(path("domains.json"), {}).get("domains") or {}).get(name)
+    problems = project_allow_problems(launch_folder(folders)) if folders else []
+    if problems:
+        drop_window(name)
+    return problems
+
+
+def project_allow_report(name, problems, quiet=True):
+    """Проблемы папки запуска направления (allow_gate): тревога (quiet) или строка в stdout; без проблем тревога
+    снимается. → список проблем."""
+    key = "project-allow-" + name
+    if problems:
+        text = project_allow_text(name, problems)
+        if quiet:
+            alert_once(key, json.dumps(problems), text, "pantheon")
+        else:
+            print(f"предупреждение · {text}")
+    else:
+        clear_once(key)
+    return problems
+
+
+def project_allow_stop(name, problems):
+    """Тик нашёл у направления allow с gh pr merge: Claude Code перечитывает настройки на ходу, и в работающем окне
+    правило уже действует — живую сессию (и её копии «имя (2)») останавливаем claude stop, с тревогой. Окно уже
+    убрано, поэтому поднять её снова не даст никто (pantheon start, wake, дежурный). Вкладку терминала claude stop не
+    остановит — она в тревоге. → id остановленных."""
+    live = live_copies(name, agents_all() or [])
+    if not live:
+        clear_once("project-allow-stop-" + name)
+        return []
+    ids = [a for a in live if a.get("id")]
+    tabs = [a for a in live if not a.get("id")]
+    stop_copies(name, ids, "stop-project-allow")
+    text = (f"{name}: остановлена работающая сессия ({', '.join(a['id'] for a in ids) or '—'}) — "
+            + project_allow_text(name, problems)
+            + (f"; открыта во вкладке терминала (pid {', '.join(str(a.get('pid')) for a in tabs)}) — её закройте сами"
+               if tabs else "")
+            + ". Поднять снова — после правки и pantheon domains build")
+    alert_once("project-allow-stop-" + name, ",".join(str(a.get("id") or a.get("pid")) for a in live), text, "pantheon")
+    return [a["id"] for a in ids]
+
+
+def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False):
     """domains.json и policy.toml → ~/.local/state/pantheon/settings/<направление>.json и workshop.json.
-    leads — {направление: ["hephaestus-<коротко>", "apollo-<коротко>"]}: субагенты окна (P0-6)."""
+    leads — {направление: ["hephaestus-<коротко>", "apollo-<коротко>"]}: субагенты окна (P0-6). stop_live — путь тика
+    (domains build --if-changed): живую сессию направления с проблемой проектных allow остановить."""
     try:
         with open(policy_path, "rb") as fh:
             policy = tomllib.load(fh)
     except (OSError, ValueError):
         policy = {}
     extra = policy.get("sandbox_write") or {}
-    private = policy.get("private") or {}
-    private_paths = [p for p in private.get("paths") or [] if isinstance(p, str) and p.startswith("~/")]
-    private_dirs = set(private.get("coordinators") or [])
+    private = private_conf(policy)
+    private_paths = [p for p in private["paths"] if p.startswith("~/")]
+    private_dirs = set(private["coordinators"])
     caches = "~/Library/Caches/pantheon-sandbox"
     out_dir = path("settings")
     guard = guard_script()
@@ -1975,6 +2197,15 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
     memory = memory_dirs()
 
     def one(name, folders, own, compact, deny, allow=None, agents=None, direction=False, auto_allow=None):
+        if direction:
+            # проектные allow папки запуска с gh pr merge (metis-0137): окно не собирается, оба прежних файла окна
+            # убирает allow_gate
+            problems = project_allow_report(name, allow_gate(name, folders))
+            if problems:
+                print(f"песочница {name}: окно не собрано — {project_allow_text(name, problems)}", file=sys.stderr)
+                if stop_live:
+                    project_allow_stop(name, problems)
+                return False
         real = [_real_dir(f, SANDBOX_ROOTS[:1], strict=True) or _real_dir(f, SANDBOX_ROOTS[1:]) for f in folders]
         skipped = [f for f, r in zip(folders, real) if not r]
         if skipped:
@@ -2008,6 +2239,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
                 alert_once(f"pnpm-store-{name}", store, f"directions.toml: pnpm_store {store} направления {name} — вне "
                            "его папок, окно его не получит", "pantheon")
         write_window(out_dir, name, data)
+        return True
 
     merge_repos = policy.get("merge_repos") if isinstance(policy.get("merge_repos"), dict) else {}
     built = []
@@ -2016,11 +2248,11 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
         # chiron видит личное (me/) — только Зевсу (P0-2); главные роли и чужие лиды не нужны и лидам окна
         agents = (mine + COORDINATOR_AGENTS + COORDINATOR_EXTRA_AGENTS.get(name, []),
                   ["chiron"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
-        one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
-            [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, direction=True,
-            # окну с доступом к личному правило слияния не выдаётся — его PR сливает владелец (metis-0156)
-            auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name)))
-        built.append(name)
+        if one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
+               [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, direction=True,
+               # окну с доступом к личному правило слияния не выдаётся — его PR сливает владелец (metis-0156)
+               auto_allow=coordinator_auto_allow([] if name in private_dirs else merge_repos.get(name))):
+            built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски; список субагентов — вне P0-6
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
     # местные порты мастерской закрыты: на macOS allowLocalBinding открывает все порты 127.0.0.1, в том числе демон CDP
@@ -2297,13 +2529,61 @@ def resume_session(name, a, text, origin, recheck=None):
         return _resume_session(name, a, text, origin)
 
 
+# Код отказа «нет окна»: сессию направления или мастерской без файла окна не поднимаем ни respawn, ни --resume, ни
+# свежим стартом — без --settings она ушла бы без песочницы окна (ревью argus PR #32). Тревога — одна на причину
+# (alert_once), поэтому wake и дежурный не повторяют свою тревогу о коде каждые 5 минут
+NO_WINDOW = 3
+
+
+def window_missing(name, origin, why, how):
+    """Отказ поднять name без окна: строка start.log «<how>-skip», тревога один раз на причину. → NO_WINDOW."""
+    start_log(f"{how}-skip\t{name}\t{origin}\tнет окна: {why}")
+    alert_once("no-window-" + name, why, f"{name}: не поднимаю ({origin}) — {why}. Без файла окна сессия ушла бы без "
+               "песочницы окна; поднимет следующий запуск после сборки окна", "pantheon")
+    return NO_WINDOW
+
+
+def no_window_reason(window):
+    """Почему нет окна window: allow проекта в папке запуска (metis-0137) или окно не собрано."""
+    folders = (read_json(path("domains.json"), {}).get("domains") or {}).get(window)
+    problems = project_allow_problems(launch_folder(folders)) if folders else []
+    if problems:
+        return "окно не собрано: " + project_allow_text(window, problems)
+    return f"нет окна {tilde(path('settings', window + '.json'))} — pantheon domains build"
+
+
+def cwd_allow_problems(name, a, role, launch, origin):
+    """respawn и --resume поднимают сессию в её прежней папке (cwd из claude agents), а окно проверено по папке
+    запуска. Папка координатора другая и её allow пускает gh pr merge — не поднимаем: строка resume-skip, тревога одна
+    на причину. Окно не снимается: pantheon start и свежий старт идут из папки запуска. → NO_WINDOW или 0."""
+    cwd = os.path.realpath(a["cwd"]) if role == "domain-coordinator" and isinstance(a.get("cwd"), str) and a["cwd"] else ""
+    problems = project_allow_problems(cwd) if cwd and cwd != launch else []
+    key = "project-allow-cwd-" + name
+    if not problems:
+        clear_once(key)
+        return 0
+    text = project_allow_text(name, problems)
+    start_log(f"resume-skip\t{name}\t{origin}\tпапка сессии {tilde(cwd)}: allow пускает gh pr merge")
+    alert_once(key, json.dumps(problems), f"{name}: не поднимаю ({origin}) — сессия работала в {tilde(cwd)}, не в папке "
+               f"запуска: {text}. Свежий старт (pantheon start {name}) пойдёт из папки запуска", "pantheon")
+    return NO_WINDOW
+
+
 def _resume_session(name, a, text, origin):
     target, rest = (("workshop", [name[len("daedalus-"):]]) if name.startswith("daedalus-") else (name, []))
     got = start_target(target, rest)
     if os.environ.get("PANTHEON_DRYRUN") == "1":
         print(f"[resume] {name} {a.get('id')} {origin}")
         return 0, None
+    if not isinstance(got, str):
+        allow_gate(name)  # allow со старым mtime сборка не заметила — окно снимается здесь (ревью argus PR #32)
+        bad = cwd_allow_problems(name, a, got[1], got[2], origin)
+        if bad:
+            return bad, None
     run = run_settings(name, got[1], got[3], origin) if not isinstance(got, str) else None
+    if not run:  # ни respawn (прежние флаги с прежним файлом запуска), ни --resume без --settings
+        return window_missing(name, origin, got if isinstance(got, str) else no_window_reason(got[3]), "resume"), None
+    clear_once("no-window-" + name)
     sid = a.get("sessionId")
     if not str(text).startswith(START_MARK):
         text = f"{START_MARK} поручение от {origin}] {text}"
@@ -2315,8 +2595,7 @@ def _resume_session(name, a, text, origin):
             return 0, None
         with contextlib.suppress(OSError):
             os.remove(pushed)
-    argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--name", name] + (["--settings", run] if run else []) \
-        + [text]
+    argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--name", name, "--settings", run, text]
     r = subprocess.run(argv, cwd=a.get("cwd") or HOME, capture_output=True, text=True, timeout=180)
     m = COPY_NOTE.search((r.stdout or "") + (r.stderr or ""))
     start_log(f"resume\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\tcopy {m.group(1)}" if m else ""))
@@ -2426,7 +2705,7 @@ def fresh_text(kind, name, old_id, tail=""):
 
 
 def fresh_target(name, origin):
-    """→ (роль, папка запуска, окно --settings) или текст ошибки."""
+    """→ (роль, папка запуска, окно --settings) или текст ошибки, в том числе «нет окна»."""
     if name == "zeus":
         win = path("settings", "hq.json")  # то же окно, что у pantheon start zeus
         return ("hq", PANTHEON, win) if os.path.isfile(win) else "нет окна штаба — pantheon domains build"
@@ -2435,7 +2714,9 @@ def fresh_target(name, origin):
     if isinstance(got, str):
         return got
     _, role, folder, window, _ = got
-    return role, folder, run_settings(name, role, window, origin)
+    allow_gate(name)  # allow со старым mtime сборка не заметила — окно снимается здесь (ревью argus PR #32)
+    run = run_settings(name, role, window, origin)
+    return (role, folder, run) if run else no_window_reason(window)
 
 
 def fresh_start(name, a, text, origin, recheck=None):
@@ -2457,9 +2738,9 @@ def _fresh_start(name, a, text, origin):
         print(f"[fresh] {name} {a.get('id')} {origin}")
         return 0
     got = fresh_target(name, origin)
-    if isinstance(got, str) or not got[2]:
-        alert(f"{name}: свежий старт невозможен — {got if isinstance(got, str) else 'нет окна роли'}", "pantheon")
-        return 2
+    if isinstance(got, str):  # старую копию не останавливаем: новую без окна всё равно не поднять
+        return window_missing(name, origin, got, "fresh")
+    clear_once("no-window-" + name)
     role, folder, win = got
     if not str(text).startswith(START_MARK):
         text = f"{START_MARK} поручение от {origin}] {text}"
@@ -2719,6 +3000,10 @@ def start(rest):
     if target == "workshop":
         rest = rest[1:]
     win = path("settings", window + ".json")
+    problems = allow_gate(name)  # allow со старым mtime сборка не заметила (ревью argus PR #32)
+    if problems:
+        print(f"pantheon start: окно не собрано — {project_allow_text(name, problems)}", file=sys.stderr)
+        return 1
     if not os.path.isfile(win):
         print(f"pantheon start: нет окна {win.replace(HOME, '~')} — pantheon domains build", file=sys.stderr)
         return 1
@@ -2768,7 +3053,9 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     if dry:
         print(shlex.join(argv), f"(папка {folder})")
         return 0
-    run_settings(name, role, window, origin)
+    if run_settings(name, role, window, origin) != run:  # окно пропало после проверки — прежний файл запуска не берём
+        print(f"pantheon start: нет окна {win.replace(HOME, '~')} — pantheon domains build", file=sys.stderr)
+        return 1
     before = {a.get("id") for a in agents_all() or [] if a.get("id")}
     r = subprocess.run(argv, cwd=folder, capture_output=True, text=True, timeout=180)
     start_log(f"{name}\t{origin}\t{folder}\t{r.returncode}")
@@ -2881,7 +3168,7 @@ def _wake(dry):
                              recheck=lambda n=name: wake_recheck(n))
         else:
             rc, _ = resume_session(name, a, WAKE_TEXT, "wake", recheck=lambda n=name: wake_recheck(n))
-        if rc:
+        if rc and rc != NO_WINDOW:  # «нет окна» — своя тревога, одна на причину
             alert(f"pantheon wake: {name} не поднялась (код {rc})", "pantheon")
         done += 1
     if not done:
@@ -3306,8 +3593,8 @@ def direction_gate(name):
     decisions.md, ваша галочка в журнале доски, запись в directions.toml. → ([(готово, что)], запись реестра)."""
     res = []
     add = lambda ok, text: res.append((bool(ok), text))
-    add(DIRECTION_NAME.fullmatch(name) and len(name) <= 40,
-        f"имя «{name}» по образцу <бог>-<проект>: латиница, цифры, дефис, до 40 знаков")
+    add(DIRECTION_NAME.fullmatch(name) and len(name) <= 40 and not reserved_direction(name),
+        reserved_direction(name) or f"имя «{name}» по образцу <бог>-<проект>: латиница, цифры, дефис, до 40 знаков")
     try:
         dec = open(os.path.join(PANTHEON, "decisions.md"), encoding="utf-8").read()
     except OSError:
@@ -3344,6 +3631,9 @@ def direction_check(name):
     dom = (read_json(path("domains.json"), {}).get("domains") or {}).get(name)
     add(dom, "направление в domains.json (pantheon domains build) — guard его знает")
     add(os.path.isfile(path("settings", name + ".json")), "окно роли settings/" + name + ".json")
+    bad_allow = project_allow_problems(launch) if launch else []
+    add(not bad_allow, "проектные allow папки запуска не пускают gh pr merge (иначе окно не соберётся, metis-0137)"
+        + (": " + "; ".join(f"{os.path.basename(f)} «{r}»" for f, r in bad_allow) if bad_allow else ""))
     agents = os.path.join(launch, "AGENTS.md")
     claude_md = os.path.join(launch, "CLAUDE.md")
     cm = open(claude_md, encoding="utf-8").read(200) if os.path.isfile(claude_md) else None
@@ -4107,6 +4397,12 @@ def check(paths=None, quiet=False):
                 fh.write(text)
     if not paths:
         _check_long_state(quiet)
+        for dname, fs in sorted((read_json(path("domains.json"), {}).get("domains") or {}).items()):
+            # allow со старым mtime сборка по --if-changed не видит: check снимает окно сам, иначе следующий wake поднял
+            # бы сессию снова (ревью argus PR #32)
+            problems = project_allow_report(dname, allow_gate(dname, fs), quiet)
+            if problems and quiet:  # тик (check --quiet): окно могла убрать ручная сборка, а сессия ещё работает
+                project_allow_stop(dname, problems)
     if not quiet or bad:
         print(f"задач: {n}, с ошибками: {len(bad)}, без шапки: {noheader}")
     if quiet:  # тик: одна тревога на набор проблем, а не сбой задачи каждые 5 минут
