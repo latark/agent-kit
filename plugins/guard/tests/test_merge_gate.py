@@ -64,12 +64,12 @@ class Home:
         with open(j(".local/state/pantheon/domains.json"), "w") as fh:
             json.dump({"domains": {"metis-pantheon": ["~/projects/agent-kit", "~/projects/tg-read",
                                                       "~/projects/notlisted"],
-                                   "athena-broker": ["~/projects/broker"]}}, fh)
+                                   "athena-shop": ["~/projects/broker"]}}, fh)
         with open(j(".claude/pantheon/policy.toml"), "w") as fh:
             fh.write('[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n'
-                     '[merge_client]\nathena-broker = ["~/projects/broker"]\n'
+                     '[merge_client]\nathena-shop = ["~/projects/broker"]\n'
                      '[merge_repos]\nmetis-pantheon = ["latark/agent-kit", "latark/tg-read"]\n'
-                     'athena-broker = ["latark/broker"]\n')
+                     'athena-shop = ["latark/broker"]\n')
         # поддельный gh: pr view отдаёт $HOME/gh.json, с $HOME/gh.fail — сбой; вызовы — в $HOME/gh.log
         with open(j("bin/gh"), "w") as fh:
             fh.write('#!/bin/sh\necho "$@" >> "$HOME/gh.log"\n[ -f "$HOME/gh.fail" ] && exit 1\n'
@@ -327,7 +327,7 @@ def t_core(h):
     merge_case("защиты: gh не ответил — отказ", h.pre(cmd, pdir="projects/agent-kit"), False, "не ответил")
     os.remove(h.j("gh.fail"))
     merge_case("защиты: сливает не Метида — отказ", h.pre(cmd, pdir="projects/agent-kit", cwd="projects/agent-kit",
-                                                         role="hephaestus-broker", agent_id="L9"), False, "")
+                                                         role="hephaestus-shop", agent_id="L9"), False, "")
 
 
 def t_verdict_role(h):
@@ -365,16 +365,16 @@ def t_product(h):
     sha = h.sha["broker"]
     cmd = f"gh pr merge 5 --match-head-commit {sha}"
     h.seed(rec("tests", "latark/broker", None, sha, "dev-opus"), rec("accept", "latark/broker", 5, sha))
-    h.alert("2026-10-15 20:00 · athena-broker · latark/broker#5 ушло: налоги; откат: git revert abc")
+    h.alert("2026-10-15 20:00 · athena-shop · latark/broker#5 ушло: налоги; откат: git revert abc")
     merge_case("продукт без talos — отказ", h.pre(cmd, pdir="projects/broker"), False, "нет проверки talos")
     h.seed(rec("talos", "latark/broker", 5, sha, who="talos", agent_id="t1"))
     open(h.j("ai/pantheon/alerts.md"), "w").close()
-    h.alert("2026-10-15 20:00 · athena-broker · latark/broker#5 ушло: налоги")
-    h.alert("2026-10-15 20:00 · athena-broker · latark/broker#50 ушло; откат: git revert abc")
+    h.alert("2026-10-15 20:00 · athena-shop · latark/broker#5 ушло: налоги")
+    h.alert("2026-10-15 20:00 · athena-shop · latark/broker#50 ушло; откат: git revert abc")
     h.alert("latark/broker#5 ушло; откат: без даты")
     merge_case("продукт без строки «откат» в alerts.md — отказ", h.pre(cmd, pdir="projects/broker"), False,
                "нет строки «что ушло»")
-    h.alert("2026-10-15 20:01 · athena-broker · latark/broker#5 ушло: налоги; откат: git revert abc")
+    h.alert("2026-10-15 20:01 · athena-shop · latark/broker#5 ушло: налоги; откат: git revert abc")
     merge_case("продукт с talos и строкой alerts — проходит", h.pre(cmd, pdir="projects/broker"), True)
 
 
