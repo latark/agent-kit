@@ -1,0 +1,37 @@
+# Сторож личных следов (metis-0182): ищет в репозитории маркеры из секрета TRACE_MARKERS (по одному на строку).
+# Секрета нет — проверка красная: «зелёный» без маркеров ничего не значит. Значение секрета в журнал не печатается:
+# он идёт во временный файл раннера, а из вывода сторожа остаются только «путь:строка», без совпавшего маркера.
+name: check-traces
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  traces:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.14"
+      - name: Личных следов нет
+        env:
+          TRACE_MARKERS: ${{ secrets.TRACE_MARKERS }}
+        run: |
+          if [ -z "$TRACE_MARKERS" ]; then
+            echo "::error::секрет TRACE_MARKERS не задан"
+            exit 1
+          fi
+          markers="$RUNNER_TEMP/trace-markers.txt"
+          printf '%s\n' "$TRACE_MARKERS" > "$markers"
+          rc=0
+          python3 -I plugins/pantheon/scripts/check-traces.py --markers "$markers" > "$RUNNER_TEMP/traces.txt" || rc=$?
+          rm -f "$markers"
+          cut -d: -f1,2 "$RUNNER_TEMP/traces.txt"
+          exit "$rc"

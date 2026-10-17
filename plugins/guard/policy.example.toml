@@ -24,36 +24,62 @@ paths = ["~/ai/knowledge/me", "~/ai/knowledge/.git/git-crypt", "~/ai/pantheon/.g
 # Куда ещё пишут команды в песочнице окна направления (SEC-19): только кэши своих инструментов внутри
 # ~/.cache или ~/Library/Caches. Папки направления берутся из реестра, остальное закрыто.
 [sandbox_write]
-themis-sources = ["~/.cache/expert-corpus"]
+themis-library = ["~/.cache/lecture-notes"]
 
 # gh pr merge (правило push, metis-0038; запор — P1-4, guard 0.5.4): сливает главная сессия domain-coordinator в
 # папках своего направления из domains.json или её лид. Защиты — папки [coordinators] metis-pantheon и их
 # репозитории (git remote; клон agent-kit в другой папке — тоже защиты) — только Метида или её лид. Везде действует
 # запор: gh pr merge N --match-head-commit <SHA>, где на этот SHA есть запись тестов (pantheon review test) и
 # последнее «принять» от argus (pantheon review accept); для продукта — ещё talos и строка с откатом в alerts.md;
-# PR, который задевает ядро защит (Д3), сливает только владелец кнопкой. Поштучного «да» владельца нет, таблицу
+# PR, который задевает ядро защит (Д3), сливает только сам владелец. Поштучного «да» владельца нет, таблицу
 # [merge_protect] guard больше не читает. Без этого файла или без непустого списка metis-pantheon слияние закрыто
 # всем. Подробно — README guard, раздел «Слияние PR».
 #
 # Совместимость: свои папки теперь берутся из domains.json, [merge] больше не нужен. Его папки по-прежнему
 # добавляются к папкам направления (ключ — имя направления, значение — список).
 [merge]
-themis-sources = ["~/projects/expert-corpus", "~/projects/legal-watch"]
+themis-library = ["~/projects/lecture-notes", "~/projects/law-feed"]
 
 # Включение: новая схема слияния включается этой таблицей (даже пустой). Без неё — как в 0.4.7: свои папки сливают
 # только направления из [merge]; режим защит, запор и проверки сбоев действуют и без неё.
 # Продукт для клиентов: направление → папки. Сверх общего запор требует запись talos на этот PR и SHA и строку
 # в ~/ai/pantheon/alerts.md со ссылкой owner/repo#N и словом «откат» (pantheon alert).
 [merge_client]
-athena-brokerassistant = ["~/projects/brokerAssistantApp"]
-hermes-alex = ["~/projects/alexbroker"]
+athena-shop = ["~/projects/shopKeeperApp"]
+hermes-site = ["~/projects/sitebuilder"]
 
 # Репозитории, которые направление сливает (owner/repo на github.com) — и свои, и чужие через -R / --repo.
 # С guard 0.5.4 строка нужна каждому сливающему направлению: без неё запор закрывает слияние и без -R.
-# Сессия Фемиды стоит в legal-watch, а сливает и PR expert-corpus (themis-0015). -R на репозиторий защит — это
+# Пример: сессия направления стоит в law-feed, а сливает и PR lecture-notes. -R на репозиторий защит — это
 # слияние защит, даже если он есть в списке другого направления.
 [merge_repos]
-themis-sources = ["latark/expert-corpus", "latark/legal-watch"]
+themis-library = ["latark/lecture-notes", "latark/law-feed"]
 metis-pantheon = ["latark/agent-kit", "latark/tg-read"]
-athena-brokerassistant = ["latark/brokerAssistantApp"]
-hermes-alex = ["latark/alexbroker"]
+athena-shop = ["latark/shopKeeperApp"]
+hermes-site = ["latark/sitebuilder"]
+
+# Что закрыто окну штаба (PANTHEON_ROLE=hq) — у каждого своё, в коде значений нет (metis-0182). Раздел нужен всегда,
+# даже пустой: без него infra-check тревожит «в policy.toml нет раздела [hq]: штабу ничего не закрыто».
+#   closed_dirs — папки, которые песочница окна штаба закрывает на чтение (выгрузки чужого текста, кэши источников):
+#     пути с "~/" или абсолютные, например "~/projects/<репозиторий>/cache";
+#   closed_collections — коллекции qmd, по которым штабу искать нельзя (хук qmd-query), например "legal".
+# Битое значение (не список строк) — ошибка: окно штаба не пересобирается, qmd штабу закрыт, infra-check тревожит.
+[hq]
+closed_dirs = []
+closed_collections = []
+
+# Имена корпуса для правила corpus-role (metis-0021): роли не пополняют корпус и не читают его ключи. Раздела или
+# ключа нет — правило ничего не узнаёт. Битое значение (не список непустых строк) — ролям Bash закрыт с
+# предупреждением, пока раздел не исправят.
+#   commands — имя файла команды корпуса, без пути: сравнение по basename, так `corpus` закрывает и голый
+#     `corpus`, и `.venv/bin/corpus`; запись с путём (`.venv/bin/corpus`) не совпадёт ни с чем;
+#   modules — модули `python -m`, которые её запускают;
+#   write_subcommands — подкоманды пополнения (add, stage…); чтение (search, show) остаётся открытым;
+#   scripts — скрипты пополнения (*.py), их запуск закрыт;
+#   keychain_prefixes — приставки служб Связки с ключами корпуса.
+[corpus]
+commands = []
+modules = []
+write_subcommands = []
+scripts = []
+keychain_prefixes = []

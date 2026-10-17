@@ -4,7 +4,7 @@
 Запуск: check-traces.py [--markers ФАЙЛ] [--repo ПАПКА] [-- pathspec…]
 Маркеры — по одной строке; пустые и строки с «#» в начале пропускаются. Файл — аргументом или из переменной
 PANTHEON_TRACE_MARKERS. Сам список маркеров в репозиторий не кладём и в вывод не печатаем (только совпавший).
-Строка с `trace-ok: 0182-core` пропускается (след, который снимает другой PR).
+Исключений нет: ни путей, ни меток в строке — проверяется весь репозиторий (metis-0182, guard 0.5.10).
 Коды выхода: 0 — следов нет; 1 — найдены; 2 — файла маркеров нет, он пуст или не читается (пропуск, но не «зелёный»).
 Только стандартная библиотека, Python 3.9+.
 """
@@ -12,10 +12,6 @@ import os
 import subprocess
 import sys
 import tempfile
-
-EXCLUDE = [":(exclude)plugins/guard/", ":(exclude).claude-plugin/marketplace.json"]  # снять в guard 0.5.10 (0182): оба пути — ядро защит
-SKIP_TAG = "trace-ok: 0182-core"
-
 
 def load_markers(path):
     """Список маркеров из файла; None — файла нет, он не читается или в нём нет ни одного маркера."""
@@ -64,7 +60,7 @@ def main(argv):
         fh.write("\n".join(markers) + "\n")  # без пустых строк: пустой шаблон поиска совпал бы со всем
         tmp = fh.name
     try:
-        r = subprocess.run(["git", "-C", repo, "grep", "-n", "-I", "-F", "-f", tmp, "--", *(spec or ["."]), *EXCLUDE],
+        r = subprocess.run(["git", "-C", repo, "grep", "-n", "-I", "-F", "-f", tmp, "--", *(spec or ["."])],
                            capture_output=True)
     finally:
         os.remove(tmp)
@@ -75,7 +71,7 @@ def main(argv):
     found = []
     for raw in r.stdout.decode("utf-8", "replace").splitlines():
         parts = raw.split(":", 2)
-        if len(parts) < 3 or SKIP_TAG in parts[2]:
+        if len(parts) < 3:
             continue
         hit = next((m for m in markers if m in parts[2]), None)
         if hit:

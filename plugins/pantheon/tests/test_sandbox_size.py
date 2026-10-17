@@ -40,6 +40,11 @@ def glob_re(g, sandbox=False):
     return re.compile(out + "(/.*)?")
 
 
+# что закрыто штабу — только [hq] policy.toml (metis-0182); здесь выдуманный проект выгрузок law-feed
+HQ_SECTION = ('[hq]\nclosed_dirs = ["~/projects/law-feed/cache", "~/projects/law-feed/inbox"]\n'
+              'closed_collections = ["notes"]\n')
+
+
 def setup(tmp):
     home, state = os.path.join(tmp, "pantheon"), os.path.join(tmp, "state")
     os.makedirs(home)
@@ -47,7 +52,7 @@ def setup(tmp):
         '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n')
     os.makedirs(os.path.join(tmp, "projects", "br"))
     os.makedirs(os.path.join(tmp, ".claude", "pantheon"))
-    open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w").write("")
+    open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w").write(HQ_SECTION)
     tasks = os.path.join(tmp, "ctmp", f"claude-{os.getuid()}")
     os.makedirs(tasks)
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
@@ -128,8 +133,8 @@ def main():
     check("tool-results: чужие закрыты правилом Read, свои — нет",
           all(rd_closed(os.path.join(projects, n, "s1", "tool-results", "x.txt")) for n in foreign)
           and not any(rd_closed(os.path.join(projects, n, "s1", "tool-results", "x.txt")) for n in mine))
-    # P0-1 (metis-0060): сырые выгрузки (cache, inbox) проекта из HQ_CLOSED_DIRS штабу закрыты — песочница и правило Read
-    raw = "projects/legal-watch"  # trace-ok: 0182-core — снять в PR ядра 0182 (папки — из policy.toml [hq])
+    # P0-1 (metis-0060): сырые выгрузки (cache, inbox) из [hq].closed_dirs штабу закрыты — песочница и правило Read
+    raw = "projects/law-feed"
     tg = (f"~/{raw}/cache", f"~/{raw}/inbox")
     check("окно штаба: сырые выгрузки cache и inbox — в denyRead песочницы и в правилах Read",
           all(x in fs2["denyRead"] and f"Read({x}/**)" in hq2["permissions"]["deny"] for x in tg)
@@ -148,6 +153,39 @@ def main():
           len(gm) == 2 and all({"Agent", "Task", "Skill", "Bash", "Read"} <= set(m.split("|")) for m in gm))
     check("окно направления: allowRead нет, запретов чтения — единицы (координаторы не раздуваются)",
           "allowRead" not in sa["sandbox"]["filesystem"] and len(sa["sandbox"]["filesystem"]["denyRead"]) < 20)
+
+    # [hq] (metis-0182): без раздела — штабу из policy ничего не закрыто; битый раздел — окно штаба не пересобрано,
+    # прежний файл на месте, одна тревога; остальные окна собираются; исправили — пересобрано, тревога снята
+    pol = os.path.join(tmp, ".claude", "pantheon", "policy.toml")
+    hq_path = os.path.join(state, "settings", "hq.json")
+    open(pol, "w").write("")
+    r = build(env)
+    hq3 = json.load(open(hq_path))
+    check("[hq] нет — окно штаба собрано, папок из policy в запретах нет (в коде своих нет)",
+          r.returncode == 0 and not any("law-feed" in x for x in hq3["sandbox"]["filesystem"]["denyRead"])
+          and not any("law-feed" in x for x in hq3["permissions"]["deny"]))
+    open(pol, "w").write(HQ_SECTION)
+    build(env)
+    before = open(hq_path).read()
+    al = lambda: open(os.path.join(home, "alerts.md")).read() if os.path.exists(os.path.join(home, "alerts.md")) else ""  # noqa: E731
+    n0 = al().count("окно штаба не пересобрано")
+    for text in ('[hq]\nclosed_dirs = "~/projects/law-feed/cache"\n', '[hq]\nclosed_collections = ["a", 1]\n',
+                 '[hq]\nclosed_dirs = ["projects/law-feed"]\n', 'hq = 1\n', '[hq\n'):
+        open(pol, "w").write(text)
+        os.remove(os.path.join(state, "settings", "athena-shop.json"))
+        r = build(env)
+        check(f"[hq] битый ({text.splitlines()[-1][:30]}) — окно штаба прежнее, окно направления собрано",
+              r.returncode == 0 and open(hq_path).read() == before
+              and os.path.exists(os.path.join(state, "settings", "athena-shop.json")))
+    build(env)  # тот же битый — повтор молчит
+    check("[hq] битый: тревога на каждое новое состояние, повтор того же — без тревоги",
+          al().count("окно штаба не пересобрано") - n0 == 5)
+    open(pol, "w").write(HQ_SECTION.replace("inbox", "outbox"))
+    build(env)
+    hq4 = json.load(open(hq_path))
+    check("[hq] исправлен — окно штаба пересобрано по новому разделу",
+          "~/projects/law-feed/outbox" in hq4["sandbox"]["filesystem"]["denyRead"]
+          and "~/projects/law-feed/inbox" not in hq4["sandbox"]["filesystem"]["denyRead"])
 
     # предохранитель: песочница направления больше предела — файл не переписан, одна тревога; вернулась в предел —
     # пересобран и тревога снова возможна

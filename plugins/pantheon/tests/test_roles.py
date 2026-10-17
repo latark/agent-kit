@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""pantheon roles build в два слоя (metis-0182): общие шаблоны плагина и личный слой ~/.claude/agents.
+
+Запуск: python3 -I plugins/pantheon/tests/test_roles.py  (код выхода 0 — все прошли)
+Подменены HOME, PANTHEON_HOME, PANTHEON_STATE и папка ролей плагина (PANTHEON_PLUGIN_ROLES): настоящие
+~/.claude/agents и папка плагина не трогаются. Проверяет: роль только из плагина, личный шаблон и личная часть
+перекрывают общие, подстановки [person] (значение, пустое — строка выпала, не по образцу — ошибка и файл не записан),
+roles_newest и пересборку domains build по правке в плагине, direction check по действующей части имён.
+"""
+import json
+import os
+import subprocess
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _py311 import PY311  # CLI pantheon — только на Python 3.11+
+import tempfile
+import time
+# Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
+# TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
+import atexit as _atexit
+import os as _os
+import shutil as _shutil
+_ROOT = tempfile.mkdtemp(prefix="roles-root-")
+tempfile.tempdir = _ROOT
+_os.environ["TMPDIR"] = _ROOT
+_atexit.register(_shutil.rmtree, _ROOT, True)
+
+LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "pantheon.py")
+results = []
+
+
+def check(name, cond):
+    results.append(bool(cond))
+    print(("ok   " if cond else "FAIL ") + name)
+
+
+def write(p, text):
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def read(p):
+    return open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+
+
+REG = ('[[direction]]\nname = "iris-demo"\nproject = "demo"\nfolders = ["~/projects/demo"]\n'
+       'does = "Демо"\ndoes_not = "Чужое — соседям"\nexamples = ["раз", "два", "три"]\n')
+
+
+def main():
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="roles-test-"))
+    home, state = os.path.join(tmp, "ai", "pantheon"), os.path.join(tmp, "state")
+    plugin = os.path.join(tmp, "plugin", "roles")
+    agents = os.path.join(tmp, ".claude", "agents")
+    os.makedirs(os.path.join(tmp, "projects", "demo"))
+    env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
+           "PANTHEON_PLUGIN_ROLES": plugin, "PANTHEON_NO_NOTIFY": "1", "PANTHEON_CLAUDE_TMP": os.path.join(tmp, "ctmp")}
+    os.makedirs(env["PANTHEON_CLAUDE_TMP"])
+    reg = os.path.join(home, "directions.toml")
+    write(reg, REG)
+
+    def run(*args):
+        return subprocess.run([PY311, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=60)
+
+    def py(code):
+        """Код с модулем pantheon под именем m, в окружении теста (константы берутся из него при загрузке)."""
+        boot = ("import importlib.util\n"
+                f"spec = importlib.util.spec_from_file_location('pantheon_t', {LIB!r})\n"
+                "m = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(m)\n" + code)
+        return subprocess.run([PY311, "-I", "-c", boot], env=env, capture_output=True, text=True, timeout=60)
+
+    # общий слой (плагин)
+    write(os.path.join(plugin, "_parts", "report.part"), "## Отчёт\n\nОтчёт: общий\n")
+    write(os.path.join(plugin, "_parts", "finding.part"), "Находка: общая\n")
+    write(os.path.join(plugin, "_parts", "qmd.part"),
+          "Системные коллекции: knowledge, pantheon.\nКоллекции этого Пантеона: {{qmd_collections}}.\nКонец qmd.\n")
+    write(os.path.join(plugin, "_parts", "names.part"), "- он: Зевс (штаб, zeus)\n")
+    write(os.path.join(plugin, "argus.tmpl"), "---\nname: argus\n---\n\nРевьюер.\n{{> report}}\n{{> qmd}}\n")
+    write(os.path.join(plugin, "clio.tmpl"),
+          "---\nname: clio\n---\n\nБиблиотекарь. Браузер владельца тебе недоступен.\n"
+          "Браузер владельца: {{browser}}.\nДальше.\n{{> finding}}\n")
+    write(os.path.join(plugin, "talos.tmpl"), "---\nname: talos\n---\n\nОбщий talos.\n")
+    # личный слой
+    write(os.path.join(agents, "talos.tmpl"), "---\nname: talos\n---\n\nЛичный talos.\n{{> report}}\n")
+    write(os.path.join(agents, "_parts", "report.part"), "## Отчёт\n\nОтчёт: личный\n")
+    write(os.path.join(agents, "iris.tmpl"), "---\nname: iris\n---\n\nТолько личная.\n")
+
+    r = run("roles", "build")
+    clio, argus, talos = (read(os.path.join(agents, f + ".md")) for f in ("clio", "argus", "talos"))
+    check("роль только из плагина собрана: метка, часть плагина, нет {{",
+          r.returncode == 0 and clio.startswith("---\nname: clio\n---\n<!-- собрано pantheon roles build из clio.tmpl")
+          and "Находка: общая" in clio and "{{" not in clio)
+    check("личный шаблон перекрывает общий по имени", "Личный talos" in talos and "Общий talos" not in talos)
+    check("личная часть перекрывает общую — и в роли из плагина, и в личной",
+          "Отчёт: личный" in argus and "Отчёт: общий" not in argus and "Отчёт: личный" in talos)
+    check("роль только из личного слоя собрана", "Только личная" in read(os.path.join(agents, "iris.md")))
+    check("нет [person] — строки с {{browser}} и {{qmd_collections}} выпали целиком, соседние на месте",
+          "Браузер владельца:" not in clio and "Библиотекарь. Браузер владельца тебе недоступен.\nДальше.\n" in clio
+          and "Коллекции этого Пантеона" not in argus
+          and "Системные коллекции: knowledge, pantheon.\nКонец qmd." in argus and "{{" not in argus)
+
+    write(reg, REG + '[person]\nqmd_collections = ["legal", "corpus (лекции)"]\n'
+                     'browser = "Nova — демон CDP 127.0.0.1:9400"\n')
+    r = run("roles", "build")
+    clio, argus = read(os.path.join(agents, "clio.md")), read(os.path.join(agents, "argus.md"))
+    check("[person] подставлен: коллекции через запятую, браузер одной строкой",
+          r.returncode == 0 and "Коллекции этого Пантеона: legal, corpus (лекции).\n" in argus
+          and "Браузер владельца: Nova — демон CDP 127.0.0.1:9400.\nДальше." in clio)
+    write(reg, REG + '[person]\nqmd_collections = ["", " "]\nbrowser = "  "\n')
+    run("roles", "build")
+    check("[person] с пустыми значениями — строки выпали, как без раздела",
+          "Браузер владельца:" not in read(os.path.join(agents, "clio.md"))
+          and "Коллекции этого Пантеона" not in read(os.path.join(agents, "argus.md")))
+
+    # плохие значения: роль с этой подстановкой не собрана (проба — файла нет; живая — старая версия осталась)
+    write(reg, REG + '[person]\nbrowser = "Nova — демон"\n')
+    run("roles", "build")
+    good_clio = read(os.path.join(agents, "clio.md"))
+    bad = [('browser = "x\\nhooks: y"', "clio"), ('browser = "a {{b}}"', "clio"), ('browser = "a `rm` b"', "clio"),
+           ('browser = "a <script> b"', "clio"), ('browser = "a --- b"', "clio"), ('browser = "' + "a" * 300 + '"', "clio"),
+           ("browser = 5", "clio"), ('qmd_collections = ["ok", "x\\ny"]', "argus"),
+           ('qmd_collections = ["{{x}}"]', "argus"), ('qmd_collections = "legal"', "argus")]
+    for i, (line, role) in enumerate(bad):
+        write(reg, REG + "[person]\n" + line + "\n")
+        out = os.path.join(tmp, f"probe-{i}")
+        r = run("roles", "build", "--out", out)
+        other = "argus" if role == "clio" else "clio"
+        check(f"[person] {line[:40]!r} — ошибка, {role}.md не записан, {other}.md собран",
+              r.returncode == 0 and "не по образцу" in r.stderr and not os.path.exists(os.path.join(out, role + ".md"))
+              and os.path.exists(os.path.join(out, other + ".md")))
+    write(reg, REG + '[person]\nbrowser = "x\\ny"\n')
+    r = run("roles", "build")
+    check("плохое значение в живой сборке — старая версия роли осталась, тревога в stderr",
+          good_clio and read(os.path.join(agents, "clio.md")) == good_clio and "не по образцу" in r.stderr)
+    # лид: старая версия остаётся и при ошибке подстановки в шаблоне лида, и при плохом project направления
+    write(os.path.join(plugin, "hephaestus.tmpl"),
+          "---\nname: hephaestus-{{short}}\n---\n\nЛид {{direction}} ({{project}}).\nБраузер: {{browser}}.\nКонец.\n")
+    lead_reg = REG.replace('examples', 'leads = ["hephaestus"]\nexamples')
+    write(reg, lead_reg)
+    run("roles", "build")
+    lead = os.path.join(agents, "hephaestus-demo.md")
+    good_lead = read(lead)
+    write(reg, lead_reg + '[person]\nbrowser = "x\\ny"\n')
+    r = run("roles", "build")
+    check("лид: плохое значение [person] — старая версия лида осталась",
+          "Лид iris-demo (demo)" in good_lead and "Браузер:" not in good_lead and read(lead) == good_lead
+          and "не по образцу" in r.stderr)
+    write(reg, lead_reg.replace('project = "demo"', 'project = "x\\ny"'))
+    r = run("roles", "build")
+    check("лид: project не по образцу — старая версия лида осталась", read(lead) == good_lead and "не по образцу" in r.stderr)
+    os.remove(os.path.join(plugin, "hephaestus.tmpl"))
+    write(reg, REG)
+    run("roles", "build")
+    check("лид: шаблон убран — собранный лид убран", not os.path.exists(lead))
+    write(reg, 'person = "Nova"\n' + REG)
+    out = os.path.join(tmp, "probe-table")
+    r = run("roles", "build", "--out", out)
+    check("person не таблица — роли с подстановками не собраны, остальные собраны",
+          "не таблица" in r.stderr and not os.path.exists(os.path.join(out, "clio.md"))
+          and not os.path.exists(os.path.join(out, "argus.md")) and os.path.exists(os.path.join(out, "talos.md")))
+    # подстановка [person] в шапке — ошибка при любом значении: хуки шапки идут вне песочницы, а образец значений
+    # пропускает кавычки, «;» и «#». Личный шаблон (его может править тот, кто правит реестр) и живая сборка
+    momus_t, momus = os.path.join(agents, "momus.tmpl"), os.path.join(agents, "momus.md")
+    write(reg, REG)
+    write(momus_t, "---\nname: momus\nhooks:\n  Stop:\n    - command: echo ok\n---\n\nТело.\n")
+    run("roles", "build")
+    good_momus = read(momus)
+    write(momus_t, '---\nname: momus\nhooks:\n  Stop:\n    - command: echo "{{browser}}"\n---\n\nТело.\n')
+    for label, extra in (("непустое", "[person]\nbrowser = 'x\"; touch pwn; echo \"a: b #c'\n"), ("пустое", "")):
+        write(reg, REG + extra)
+        r = run("roles", "build")
+        check(f"[person] в строке шапки, значение {label} — роль не собрана, ошибка названа, прежний файл цел",
+              "echo ok" in good_momus and read(momus) == good_momus and "touch pwn" not in read(momus)
+              and "в шапке роли запрещена: {{browser}}" in r.stderr)
+    write(reg, REG)
+    os.remove(momus_t)
+    run("roles", "build")
+
+    # roles_newest и пересборка domains build по правке в плагине
+    future = time.time() + 10_000
+    for sub in ("_parts/finding.part", "clio.tmpl"):
+        p = os.path.join(plugin, sub)
+        os.utime(p, (future, future))
+        r = py("print(m.roles_newest())")
+        check(f"roles_newest видит правку в плагине: {sub}", r.returncode == 0 and abs(float(r.stdout) - future) < 1)
+        future += 10_000
+    r = run("domains", "build")
+    dj = os.path.join(state, "domains.json")
+    check("domains build собирает и роли из плагина", r.returncode == 0 and os.path.isfile(dj)
+          and "Находка: общая" in read(os.path.join(agents, "clio.md")))
+    d = json.load(open(dj))
+    d["built_ts"] = future + 10_000  # сборка «позже» всех правок
+    write(dj, json.dumps(d))
+    finding = os.path.join(plugin, "_parts", "finding.part")
+    write(finding, "Находка: новая\n")
+    os.utime(finding, (future, future))
+    py("m.domains_build(if_changed=True)")
+    check("domains build --if-changed: правка в плагине старше сборки — пересборки нет",
+          "Находка: общая" in read(os.path.join(agents, "clio.md")))
+    os.utime(finding, (future + 20_000, future + 20_000))
+    r = py("m.domains_build(if_changed=True)")
+    check("domains build --if-changed: часть плагина новее сборки — роли пересобраны",
+          r.returncode == 0 and "Находка: новая" in read(os.path.join(agents, "clio.md")))
+
+    # direction check: бог — в действующей части имён (личная, если есть, иначе плагина)
+    def god_line():
+        out = run("direction", "check", "iris-demo").stdout
+        return next((ln for ln in out.splitlines() if "бог направления" in ln), "")
+    os.remove(os.path.join(agents, "_parts", "report.part"))
+    write(os.path.join(plugin, "_parts", "names.part"), "- она: Ирида (iris-demo)\n")
+    check("direction check: личной части имён нет — бог найден в части плагина",
+          god_line().startswith("готово  бог направления"))
+    write(os.path.join(plugin, "_parts", "names.part"), "- он: Зевс (штаб, zeus)\n")
+    line = god_line()
+    check("direction check: ни в личной, ни в плагине — НЕТ и подсказка скопировать общую",
+          line.startswith("НЕТ     бог направления") and "скопировать общую" in line)
+    write(os.path.join(agents, "_parts", "names.part"), "- она: Ирида (iris-demo)\n")
+    check("direction check: личная часть имён есть — бог найден в ней", god_line().startswith("готово  бог направления"))
+    write(os.path.join(plugin, "_parts", "names.part"), "- она: Ирида (iris-demo)\n")
+    write(os.path.join(agents, "_parts", "names.part"), "- он: Зевс (штаб, zeus)\n")
+    check("direction check: личная перекрывает целиком — бог только в плагине не засчитан",
+          god_line().startswith("НЕТ     бог направления"))
+
+    # настоящие общие шаблоны плагина: личного слоя нет, сборка в --out. ROLES_PROBE_OUT — оставить итог для глаз
+    real = os.path.join(os.path.dirname(os.path.dirname(LIB)), "roles")
+    probe = os.environ.get("ROLES_PROBE_OUT") or os.path.join(tmp, "probe-real")
+    home2 = os.path.join(tmp, "home2")
+    os.makedirs(home2)
+    env.update({"HOME": home2, "PANTHEON_HOME": os.path.join(home2, "ai", "pantheon"), "PANTHEON_PLUGIN_ROLES": real})
+    reg2 = os.path.join(env["PANTHEON_HOME"], "directions.toml")
+    lead_reg = REG.replace('examples', 'leads = ["hephaestus", "apollo"]\nexamples')
+    tmpls = sorted(f[:-5] for f in os.listdir(real) if f.endswith(".tmpl"))
+    owner_lines = ("Браузер владельца у этого Пантеона:", "Браузер владельца и адрес демона:", "Коллекции направлений:")
+    for label, extra in (("без [person]", ""), ("с [person]", '[person]\nqmd_collections = ["legal", "docs (справка)"]\n'
+                                                             'browser = "Nova — демон CDP 127.0.0.1:9400"\n')):
+        write(reg2, lead_reg + extra)
+        out = os.path.join(probe, "plain" if not extra else "person")
+        r = run("roles", "build", "--out", out)
+        built = sorted(os.listdir(out)) if os.path.isdir(out) else []
+        texts = {f: read(os.path.join(out, f)) for f in built}
+        want = {t + ".md" for t in tmpls if t not in ("hephaestus", "apollo")} | {"hephaestus-demo.md", "apollo-demo.md"}
+        check(f"общие шаблоны плагина {label}: собраны все роли, без ошибок, нет {{{{",
+              r.returncode == 0 and not r.stderr.strip() and want <= set(built)
+              and not any("{{" in t for t in texts.values()))
+        has = {ln for t in texts.values() for ln in owner_lines if ln in t}
+        check(f"общие шаблоны плагина {label}: строки о браузере и коллекциях "
+              + ("выпали" if not extra else "подставлены"),
+              not has if not extra else (has == set(owner_lines)
+                                         and "Коллекции направлений: legal, docs (справка)." in texts["argus.md"]))
+    agents2 = os.path.join(home2, ".claude", "agents")
+    r = run("roles", "build")
+    check("новая машина: ~/.claude/agents ещё нет — живая сборка создаёт папку и кладёт общие роли",
+          r.returncode == 0 and os.path.isfile(os.path.join(agents2, "argus.md")))
+
+    print(f"\n{sum(results)}/{len(results)} прошли")
+    return 0 if all(results) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

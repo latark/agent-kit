@@ -55,10 +55,12 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском
   pantheon infra-check                  опоры системы после обновления Claude Code
   pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (тик раз в неделю)
-  pantheon roles build                  роли ~/.claude/agents/*.md из шаблонов *.tmpl и частей _parts/*.part
-  pantheon roles build --out <папка> [--src <папка шаблонов>]   проба: собрать роли из --src (по умолчанию
-                                        ~/.claude/agents) в --out, живые роли не трогает, сигналов нет; --out в
-                                        ~/.claude/agents или внутри — отказ (код 2)
+  pantheon roles build                  роли ~/.claude/agents/*.md из общих шаблонов плагина (roles/*.tmpl,
+                                        roles/_parts/*.part) и личного слоя ~/.claude/agents (*.tmpl, _parts/*.part
+                                        перекрывают общие по имени); подстановки — из [person] directions.toml
+  pantheon roles build --out <папка> [--src <папка шаблонов>]   проба: собрать роли в --out, личный слой — из
+                                        --src (по умолчанию ~/.claude/agents) поверх общего; живые роли не трогает,
+                                        сигналов нет; --out в ~/.claude/agents или внутри — отказ (код 2)
   pantheon approve [list] | add --site S --allow "…" [--limits "…"] | remove N   заранее разрешённое (только вы)
   pantheon consent <id> [--days N]      ваш ответ Зевсу на вопрос <id> (журнал owner-log Зевса, по умолчанию 7 дней) —
                                         для исполнителя: согласие, данное в окне Зевса
@@ -1676,67 +1678,25 @@ GH_PR_WRITE = ["gh pr create *", "gh pr merge *"]
 # пускает guard (_PUSH_BAD)
 GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
 COORDINATOR_COMPACT = 200000
-# permissions.allow окон координаторов — пусто (metis-0137). Раньше здесь стояло Bash(gh pr merge *) (metis-0050), но
-# правило allow срабатывает раньше классификатора режима auto, а формы --admin и --auto классификатор не судит: слияние
-# в обход запора шло без проверки. Разрешённую форму слияния пропускает autoMode-правило GATED_MERGE_RULE
-# (coordinator_auto_allow), а каждое слияние по-прежнему проверяет guard (merge_problem): главная сессия
-# domain-coordinator или лид её направления (metis-0054), свои папки, без --admin и --auto. Мастерской и штабу правила нет.
-# Но .claude/settings.json проекта папки запуска сливается с --settings окна (флага --setting-sources нет), и allow
-# вроде Bash(gh *) в нём возвращает тот же обход: такое окно не собирается (project_allow_problems, sandbox_build),
-# `pantheon check` и `direction check` показывают то же предупреждение.
-COORDINATOR_ALLOW = []
-# Исключения классификатора режима auto окнам координаторов направлений, Метиды в их числе (metis-0098; решения
-# владельца 15.10 «Б» и Зевса 16.10 «А»). Классификатор не видит журнал запора guard и считал слияние через запор
-# «Merge Without Review», а за ним — и gh pr view, git fetch той же сессии. Правило описывает ровно то, что пускает
-# запор guard 0.5.6 (README guard, «Слияние PR»), и ничего сверх: --admin, --auto, слияние без --match-head-commit,
-# gh api по-прежнему судит встроенное правило. "$defaults" — встроенные исключения остаются: список без него их
-# заменяет (проверено пробой metis-0071). Классификатор читает autoMode из --settings (документация Claude Code,
-# auto-mode-config: «--settings flag»), из .claude/settings.json проекта — нет. Штабу и мастерской правил нет.
-# Репозитории в правиле слияния — только из [merge_repos] направления в policy.toml (решение владельца 16.10): в тексте
-# правил нет имён владельца, направлений и репозиториев, у другой установки правило собирается из её policy.toml.
-# Направлению без [merge_repos] правила слияния нет: запор guard его слияние и так не пустит.
-MERGE_REPO_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9._-]+")
-GATED_MERGE_RULE = (
-    "Pantheon Gated Merge: In a Pantheon direction window (a coordinator main session or its lead subagent "
-    "`hephaestus-*` or `apollo-*`), `gh pr merge <N> --match-head-commit <40-hex sha>` with the repository given "
-    "explicitly as `-R <owner/repo>` or `--repo <owner/repo>` (also `-R=`/`--repo=`), optionally with `--merge`, "
-    "`--squash` or `--rebase`, `--delete-branch`, `--subject` and `--body`, on one of this direction's repositories "
-    "({repos}), is NOT Merge Without Review. The owner replaced human approval with a local "
-    "merge gate: the guard PreToolUse hook runs before this classifier and lets the command through only when a "
-    "passing project test record exists for that exact head SHA, the independent reviewer role `argus` recorded "
-    "«accept» on that exact repository, PR and head SHA with a full checklist of what it opened, what it ran and "
-    "what it did not check, the reviewer is not the session that merges, the repository is listed for the "
-    "direction, and client products also have a `talos` check and a rollback line in the owner's summary; GitHub "
-    "itself rejects the merge if the PR head moved away from `--match-head-commit`. A merge the gate let through is "
-    "a reviewed merge: the session's follow-up commands after it (`gh pr view`, `gh pr checks`, `git fetch`, "
-    "`git pull`, `git log`) are routine, not a continuation of an unreviewed merge. PRs that touch the protection "
-    "core — any path under `plugins/guard/` or `.claude-plugin/marketplace.json` — stay for "
-    "the owner's button: guard refuses them, and this exception does not cover merging them any other way. It "
-    "covers only the command shape above: `--admin`, `--auto`, a merge without `--match-head-commit` or without an "
-    "explicit `-R`/`--repo`, a merge through `gh api`, `GH_REPO`/`GH_HOST` overrides, `cd` or chained commands, "
-    "or a repository outside this list are still judged by Merge Without Review.")
-REVIEW_RECORD_RULE = (
-    "Pantheon Review Record: `pantheon review test -- <test command>` (runs the project tests in a clean git tree "
-    "and reports their exit code), `pantheon review accept|reject <owner/repo> <N> <sha> --opened \"…\" --ran "
-    "\"…\" --unchecked \"…\"` run by the reviewer role `argus`, `pantheon review talos <owner/repo> <N> <sha>` run "
-    "by the role `talos` and `pantheon review status` are local records of an independent check in the owner's "
-    "own agent system — not Self-Approval and not CI Bypass. The record is written by the guard PostToolUse hook "
-    "from the hook event's agent type, not by the command; guard refuses a verdict from any other role, an "
-    "«accept» without all three checklist fields and a test command that does nothing (`true`, `echo`, `sleep`). "
-    "This exception does not cover editing the record file under `~/.local/state/pantheon/merge-gate/` or the "
-    "guard plugin. This exception covers only the `pantheon review` recording wrapper itself: the command after "
-    "`--` must be the project's own test runner (`heavy <test runner>`, `pytest`, `pnpm test`, `python3 -I tests/…`) and is "
-    "judged by every other rule exactly as if it were run on its own. A merge, push, deploy, `gh` or network "
-    "command, a file-changing command, an `sh -c`/`python3 -c` one-liner, or anything that checks nothing after "
-    "`--` is never a test command and stays Self-Approval or CI Bypass where it fits.")
 
 
-def coordinator_auto_allow(repos):
-    """autoMode.allow окна координатора: "$defaults", правило слияния по репозиториям направления из [merge_repos]
-    (только вида owner/repo; нет таких — правила слияния нет) и правило записей проверок."""
-    ok = sorted({r for r in repos if isinstance(r, str) and MERGE_REPO_RE.fullmatch(r)}) if isinstance(repos, list) else []
-    gated = [GATED_MERGE_RULE.format(repos=", ".join(f"`{r}`" for r in ok))] if ok else []
-    return ["$defaults"] + gated + [REVIEW_RECORD_RULE]
+# Правила слияния через шлюз guard (permissions.allow и autoMode.allow окон координаторов) — в lib/window_rules.py:
+# он в ядре защит (metis-0174), его PR ждёт слияния владельцем. Имена здесь — для прежних вызовов и тестов
+def _window_rules():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_window_rules", os.path.join(LIB, "window_rules.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+WINDOW_RULES = _window_rules()
+COORDINATOR_ALLOW = WINDOW_RULES.COORDINATOR_ALLOW
+MERGE_REPO_RE = WINDOW_RULES.MERGE_REPO_RE
+GATED_MERGE_RULE = WINDOW_RULES.GATED_MERGE_RULE
+REVIEW_RECORD_RULE = WINDOW_RULES.REVIEW_RECORD_RULE
+coordinator_auto_allow = WINDOW_RULES.coordinator_auto_allow
+
 # Роли главных сессий: их память в песочницу не добавляется, даже если в шапке есть memory:
 MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
 # Субагенты главной сессии окна (P0-6; SEC-09, SEC-13, ROLE-32): штаб и координатор зовут только этих — general-purpose
@@ -1796,11 +1756,9 @@ def _real_dir(p, roots, strict=False, create=False):
     return None
 
 
-# закрытые штабу папки: индексы qmd, копии больших корпусов и сырые выгрузки (кэш, входящие) — чужой текст; штабу его
-# не читать (у штаба личное и действия наружу). Вопросы по ним — координатору направления поручением; коллекции qmd
-# штабу закрывает хук qmd-query
-HQ_CLOSED_DIRS = ["~/projects/expert-corpus", "~/.cache/expert-corpus", "~/.cache/qmd",  # trace-ok: 0182-core — снять в PR ядра 0182
-                  "~/.claude/projects/*expert-corpus*", "~/projects/legal-watch/cache", "~/projects/legal-watch/inbox"]  # trace-ok: 0182-core — снять в PR ядра 0182
+# закрытые штабу папки (индексы qmd, копии больших корпусов, сырые выгрузки — чужой текст; штабу его не читать: у
+# штаба личное и действия наружу) — [hq].closed_dirs policy.toml, в коде их нет (metis-0182, разбор — hq_policy в
+# hooks/ctx.py). Вопросы по ним — координатору направления поручением; коллекции qmd штабу закрывает хук qmd-query
 
 
 # выводы фоновых задач и TMPDIR песочницы всех сессий Claude Code: /tmp/claude-<uid> (на macOS по умолчанию). Не из
@@ -1950,7 +1908,7 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
         data["worktree"] = {"baseRef": "head"}
     if auto_allow:
         # окна координаторов: исключения классификатора auto под запор слияния (coordinator_auto_allow, metis-0098)
-        data["autoMode"] = {"allow": list(auto_allow)}
+        data["autoMode"] = WINDOW_RULES.auto_mode(auto_allow)
     return data
 
 
@@ -2332,6 +2290,19 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                       [x for x in BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES) if x not in mine], agents_py)
         write_window(out_dir, name, job)
         built.append(name)
+    # что закрыто штабу — [hq] policy.toml. Битый раздел — ошибка, а не «пусто»: окно штаба не пересобираем, остаётся
+    # прежнее (его файл не удаляется), и тревога — пока раздел не исправят
+    try:
+        hq_pol = ctx_mod().hq_policy(policy_path)
+    except ValueError as e:
+        alert_once("hq-policy-broken", str(e), f"policy.toml: {e} — окно штаба не пересобрано, действует прежнее; "
+                   "исправить раздел [hq] (Метида)", "pantheon")
+        built.append("hq")
+        for f in os.listdir(out_dir):
+            if f.endswith(".json") and f[:-5] not in built:
+                os.remove(os.path.join(out_dir, f))
+        return built
+    clear_once("hq-policy-broken")
     # штаб (SEC-26, вариант А): Зевс пишет только в ~/ai/pantheon, кроме .git и alerts.md; сеть закрыта (в веб он не
     # ходит, SEC-13); мимо песочницы — только `pantheon start|wake|alert`: запуск сессий и тревоги. Личное ему открыто
     # (SEC-11), кроме ключей git-crypt.
@@ -2350,7 +2321,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     cache_dirs = set(built)
     with contextlib.suppress(OSError):
         cache_dirs |= {n for n in os.listdir(os.path.expanduser(caches)) if n != "hq"}
-    closed = HQ_CLOSED_DIRS + [f"{caches}/{n}" for n in sorted(cache_dirs)]
+    closed = hq_pol["closed_dirs"] + [f"{caches}/{n}" for n in sorted(cache_dirs)]
     # переписка сессий (координаторы зовут corpus search — выдача оседает в *.jsonl), большие выводы (tool-results) и
     # выводы фоновых задач и TMPDIR (CLAUDE_TMP) всех сессий, кроме своих. Своё — папка штаба и его worktree (имя как
     # у Claude Code: всё, кроме букв и цифр, → «-»); открыты свои выводы, автопамять (memory/*.md) и задачи штаба.
@@ -3208,18 +3179,28 @@ def _wake(dry):
 
 
 # --- роли (ROLE-15, ROLE-16, ROLE-17) -------------------------------------------------------
-# Источник ролей — шаблоны ~/.claude/agents/<роль>.tmpl и общие части ~/.claude/agents/_parts/<часть>.part (их
-# синхронизирует claude-config; правит только metis-pantheon — guard protect-config). Сборка кладёт рядом <роль>.md —
-# то, что читает Claude Code; собранные файлы claude-config не синхронизирует (строки в ~/.claude/.gitignore): на каждом
-# Mac их собирает тик вместе с domains.json, когда меняется шаблон, часть или реестр.
+# Два слоя шаблонов (metis-0182). Общий — в плагине: PLUGIN/roles/<роль>.tmpl и PLUGIN/roles/_parts/<часть>.part, без
+# проектов, коллекций, браузера и имён владельца; приходит с выпуском плагина. Личный — ~/.claude/agents/ (у владельца
+# его синхронизирует claude-config; правит только metis-pantheon — guard protect-config): личный <роль>.tmpl перекрывает
+# общий по имени, личная _parts/<часть>.part — общую часть. Набор ролей — объединение слоёв. Сборка кладёт в
+# ~/.claude/agents <роль>.md — то, что читает Claude Code; собранные файлы claude-config не синхронизирует (строки в
+# ~/.claude/.gitignore): на каждом Mac их собирает тик вместе с domains.json, когда меняется шаблон, часть или реестр.
 #   {{> часть}}         — текст части (одна общая формулировка: отчёт, находка, внешние действия, доведение до конца);
+#   {{qmd_collections}} {{browser}} — во всех ролях, после вставки частей, из раздела [person] реестра (PERSON_*).
+#                         Пустое значение или нет раздела — строка шаблона с подстановкой выпадает целиком, вместе с
+#                         переводом строки. Поэтому в шаблонах такая подстановка стоит в своей строке-фразе, а текст
+#                         вокруг неё связен и без неё;
 #   hephaestus, apollo  — роли лидов: по одной на направление с этим лидом в поле leads реестра,
-#                         hephaestus-<коротко> (athena-shop → shop), подстановки {{direction}} {{short}}
+#                         hephaestus-<коротко> (example-site → site), подстановки {{direction}} {{short}}
 #                         {{project}} {{folders}}.
 # Свой файл узнаётся по строке-метке после шапки; файл без метки (свой ли, чужой ли) сборка не трогает, собранный файл
-# без шаблона — убирает. Ошибка в шаблоне (нет части, осталась {{…}}) — роль не пишется, старая версия остаётся.
+# без шаблона — убирает. Ошибка в шаблоне (нет части, осталась {{…}}, значение реестра не по образцу) — роль не
+# пишется, старая версия остаётся.
 AGENTS = os.path.join(HOME, ".claude", "agents")
 PARTS = os.path.join(AGENTS, "_parts")
+# общий слой; PANTHEON_PLUGIN_ROLES подменяет его в тестах
+PLUGIN_ROLES = os.path.realpath(os.environ.get("PANTHEON_PLUGIN_ROLES") or os.path.join(PLUGIN, "roles"))
+PLUGIN_PARTS = os.path.join(PLUGIN_ROLES, "_parts")
 LEAD_ROLES = ("hephaestus", "apollo")
 ROLE_MARK = "<!-- собрано pantheon roles build из {tmpl} — правят шаблон, а не этот файл -->"
 ROLE_NAME = re.compile(r"[a-z][a-z0-9-]{0,40}")
@@ -3228,6 +3209,15 @@ ROLE_NAME = re.compile(r"[a-z][a-z0-9-]{0,40}")
 # безопасности 15.10). Сверх образца — сверка ключей шапки до и после подстановки.
 ROLE_PROJECT = re.compile(r"[\w][\w .,()«»+-]{0,59}")
 ROLE_FOLDER = re.compile(r"~?/[\w.-]+(?:/[\w.-]+)*")
+# [person] реестра → текст всех ролей. Довод тот же, что у ROLE_PROJECT (реестр правит штаб из песочницы, а текст
+# попадает в роли всех): одна строка из букв, цифр, пробела и простой пунктуации — без {{ }}, обратных кавычек, < >,
+# перевода строки; «---» запрещён отдельно (граница шапки YAML).
+#   qmd_collections = ["имя" | "имя (что в ней)", …] — в роли через запятую;
+#   browser = "одна строка" — браузер владельца для сайтов со входом и, если нужно, адрес демона CDP.
+PERSON_ITEM = re.compile(r"[\w][\w .,:;()«»+/~—–-]{0,79}")
+PERSON_TEXT = re.compile(r"[\w][\w .,:;()«»\"'+/~!?%#№—–-]{0,199}")
+PERSON_KEYS = ("qmd_collections", "browser")
+PERSON_MAX_ITEMS = 20
 
 
 def _head_keys(text):
@@ -3236,12 +3226,66 @@ def _head_keys(text):
 
 
 def _role_text(tmpl_text, parts=None):
+    """Вставка частей {{> x}}: сначала <parts>/x.part (личный слой), потом общая часть плагина."""
     def part(m):
-        p = os.path.join(parts or PARTS, m.group(1) + ".part")
-        if not ROLE_NAME.fullmatch(m.group(1)) or not os.path.isfile(p):
-            raise ValueError(f"нет части {m.group(1)}")
-        return open(p, encoding="utf-8").read().rstrip("\n")
+        if ROLE_NAME.fullmatch(m.group(1)):
+            for d in (parts or PARTS, PLUGIN_PARTS):
+                p = os.path.join(d, m.group(1) + ".part")
+                if os.path.isfile(p):
+                    return open(p, encoding="utf-8").read().rstrip("\n")
+        raise ValueError(f"нет части {m.group(1)}")
     return re.sub(r"\{\{>\s*([\w-]+)\s*\}\}", part, tmpl_text)
+
+
+def person_values(reg):
+    """[person] реестра → ({ключ: текст или ""}, {ключ: ошибка}). Значение не по образцу — ошибка, а не пустота:
+    роль с этой подстановкой не собирается, её старая версия остаётся."""
+    person, values, bad = reg.get("person"), {k: "" for k in PERSON_KEYS}, {}
+    if person is None:
+        return values, bad
+    if not isinstance(person, dict):
+        return values, {k: "раздел [person] реестра — не таблица" for k in PERSON_KEYS}
+
+    def ok(v, rx):
+        return isinstance(v, str) and (not v.strip() or ("---" not in v and bool(rx.fullmatch(v.strip()))))
+    cols = person.get("qmd_collections", [])
+    if isinstance(cols, list) and len(cols) <= PERSON_MAX_ITEMS and all(ok(c, PERSON_ITEM) for c in cols):
+        values["qmd_collections"] = ", ".join(c.strip() for c in cols if c.strip())
+    else:
+        bad["qmd_collections"] = "[person] qmd_collections в реестре не по образцу"
+    browser = person.get("browser", "")
+    if ok(browser, PERSON_TEXT):
+        values["browser"] = browser.strip()
+    else:
+        bad["browser"] = "[person] browser в реестре не по образцу"
+    return values, bad
+
+
+def _person_text(text, values, bad):
+    """Подстановки [person] построчно: строка с пустой подстановкой выпадает целиком; плохое значение — ValueError.
+    В шапке YAML (между первыми ---) подстановка [person] запрещена целиком, и с пустым значением: в шапке живут
+    хуки роли, они идут вне песочницы, а образец значений пропускает кавычки и «;» — значение стало бы командой."""
+    end = text.find("\n---\n", 3) if text.startswith("---\n") else -1
+    head = text[:end + 5] if end > 0 else ""
+    in_head = [k for k in PERSON_KEYS if "{{" + k + "}}" in head]
+    if in_head:
+        raise ValueError("подстановка [person] в шапке роли запрещена: "
+                         + ", ".join("{{" + k + "}}" for k in in_head))
+    lines = []
+    for ln in text.splitlines(keepends=True):
+        keys = [k for k in PERSON_KEYS if "{{" + k + "}}" in ln]
+        for k in keys:
+            if k in bad:
+                raise ValueError(bad[k])
+        if any(not values[k] for k in keys):
+            continue
+        for k in keys:
+            ln = ln.replace("{{" + k + "}}", values[k])
+        lines.append(ln)
+    out = "".join(lines)
+    if _head_keys(out) != _head_keys(text):
+        raise ValueError("подстановка [person] поменяла шапку роли")
+    return out
 
 
 def _marked(text, tmpl):
@@ -3253,7 +3297,8 @@ def _marked(text, tmpl):
 
 
 def roles_build(src=None, out=None):
-    """Роли из шаблонов src (по умолчанию ~/.claude/agents) в папку out (по умолчанию она же). Режим с out — проба
+    """Роли из общих шаблонов плагина (PLUGIN_ROLES) и личного слоя src (по умолчанию ~/.claude/agents; перекрывает
+    общий по имени шаблона и части) в папку out (по умолчанию ~/.claude/agents). Режим с out — проба
     (metis-0097): пишет и чистит только в out, владельцу сигнал не шлёт; out в ~/.claude/agents или внутри — ValueError."""
     probe = out is not None
     src = src or AGENTS
@@ -3267,17 +3312,28 @@ def roles_build(src=None, out=None):
     parts = os.path.join(src, "_parts")
     with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
         reg = tomllib.load(fh)
+    person, person_bad = person_values(reg)
     want, errors = {}, []
-    tmpls = sorted(f for f in os.listdir(src) if f.endswith(".tmpl")) if os.path.isdir(src) else []
-    for f in tmpls:
+    # роли, чей шаблон или подстановка с ошибкой: старую собранную версию не убирать (имя или начало имени лида)
+    kept, kept_leads = set(), set()
+    layer = {}  # объединение слоёв: личный шаблон из src перекрывает общий из плагина по имени
+    for d in (PLUGIN_ROLES, src):
+        for f in os.listdir(d) if os.path.isdir(d) else []:
+            if f.endswith(".tmpl"):
+                layer[f] = os.path.join(d, f)
+    for f in sorted(layer):
         base = f[:-5]
         if not ROLE_NAME.fullmatch(base):
             errors.append(f"{f}: имя не по образцу")
             continue
         try:
-            text = _role_text(open(os.path.join(src, f), encoding="utf-8").read(), parts)
+            text = _person_text(_role_text(open(layer[f], encoding="utf-8").read(), parts), person, person_bad)
         except (OSError, ValueError) as e:
             errors.append(f"{f}: {e}")
+            if base in LEAD_ROLES:
+                kept_leads.add(base + "-")
+            else:
+                kept.add(base + ".md")
             continue
         if base not in LEAD_ROLES:
             want[base + ".md"] = (f, text)
@@ -3292,15 +3348,17 @@ def roles_build(src=None, out=None):
                     or not isinstance(folders, list) \
                     or not all(isinstance(x, str) and ROLE_FOLDER.fullmatch(x) for x in folders):
                 errors.append(f"{f} → {base}-{short}.md: project или folders направления {name} не по образцу")
+                kept.add(f"{base}-{short}.md")
                 continue
             out_text = (text.replace("{{direction}}", name).replace("{{short}}", short)
                         .replace("{{project}}", project).replace("{{folders}}", ", ".join(folders)))
             if _head_keys(out_text) != _head_keys(text):
                 errors.append(f"{f} → {base}-{short}.md: подстановка поменяла шапку роли")
+                kept.add(f"{base}-{short}.md")
                 continue
             want[f"{base}-{short}.md"] = (f, out_text)
     made = []
-    if probe:
+    if want:  # и на новой машине: ~/.claude/agents ещё нет, а общие роли плагина собрать надо
         os.makedirs(out, exist_ok=True)
     for fname, (tmpl, text) in sorted(want.items()):
         out_file = os.path.join(out, fname)
@@ -3320,6 +3378,8 @@ def roles_build(src=None, out=None):
             made.append(fname)
     for f in sorted(os.listdir(out)) if os.path.isdir(out) else []:
         p = os.path.join(out, f)
+        if f in kept or any(f.startswith(x) for x in kept_leads):
+            continue
         if f.endswith(".md") and f not in want and not os.path.islink(p) and os.path.isfile(p):
             if "pantheon roles build" in open(p, encoding="utf-8").read(2000):
                 os.remove(p)
@@ -3418,7 +3478,7 @@ def who_is_who_alert(**kw):
 
 def roles_newest():
     files = [os.path.join(PANTHEON, "directions.toml")]
-    for d in (AGENTS, PARTS):
+    for d in (AGENTS, PARTS, PLUGIN_ROLES, PLUGIN_PARTS):
         if os.path.isdir(d):
             files += [os.path.join(d, f) for f in os.listdir(d) if f.endswith((".tmpl", ".part"))]
     return max((os.path.getmtime(p) for p in files if os.path.exists(p)), default=0)
@@ -3696,11 +3756,15 @@ def direction_check(name):
         env = ""
     add(not remote or (owner and (owner.group(1) + "/") in env),
         "владелец remote в autoMode.environment (" + (remote or "remote нет") + ")")
+    # действующая часть имён — как в roles_build: личная перекрывает общую из плагина целиком
+    mine = os.path.join(PARTS, "names.part")
+    names_path = mine if os.path.isfile(mine) else os.path.join(PLUGIN_PARTS, "names.part")
     try:
-        names = open(os.path.join(PARTS, "names.part"), encoding="utf-8").read()
+        names = open(names_path, encoding="utf-8").read()
     except OSError:
         names = ""
-    add(f"({name})" in names, f"бог направления ({god}) и его род — в _parts/names.part")
+    add(f"({name})" in names, f"бог направления ({god}) и его род — в _parts/names.part"
+        + ("" if names_path == mine else " (личной нет: скопировать общую из плагина в ~/.claude/agents/_parts/ и дописать)"))
     for lead in d.get("leads") or []:
         short = name.split("-", 1)[-1]
         add(os.path.isfile(os.path.join(AGENTS, f"{lead}-{short}.md")), f"роль лида {lead}-{short} (pantheon roles build)")

@@ -1,0 +1,38 @@
+---
+name: dev-opus
+description: Разработчик Пантеона для сложного: архитектура, тонкая логика, трудные баги. Субагент лида, работает в своей worktree. Только по вызову лида или координатора Пантеона.
+model: opus
+effort: high
+disallowedTools: Agent, SendMessage, mcp__computer-use, mcp__claude-in-chrome, mcp__plugin_Notion_notion, mcp__claude_ai_Claude_Docs
+isolation: worktree
+color: green
+mcpServers:
+  - chrome-devtools:
+      type: stdio
+      command: npx
+      args: ["-y", "chrome-devtools-mcp@1.10.1", "--isolated", "--headless"]
+hooks:
+  Stop:
+    - hooks:
+        - type: command
+          command: python3 "$HOME/.local/share/pantheon/current/hooks/dev-stop-verify.py"
+          timeout: 900
+---
+
+{{> dev}}
+
+{{> finding}}
+
+{{> report}}
+
+{{> tmp}}
+
+{{> data}}
+
+{{> persist}}
+
+{{> names}}
+
+{{> qmd}}
+
+{{> writing}}

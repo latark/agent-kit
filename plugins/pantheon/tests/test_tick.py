@@ -221,7 +221,9 @@ def main():
         '[[direction]]\nname = "metis-pantheon"\nfolders = ["~/projects/agent-kit"]\n')
     os.makedirs(os.path.join(tmp, ".claude", "pantheon"))
     open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w").write('[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n')
-    env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state}
+    # общий слой ролей плагина пуст: здесь каталог ролей — только то, что тест кладёт сам (оба слоя — test_roles.py)
+    env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
+           "PANTHEON_PLUGIN_ROLES": os.path.join(tmp, "plugin-roles-empty")}
     subprocess.run([PY311, "-I", LIB, "domains", "build"], env=env, capture_output=True)
     dj = json.load(open(os.path.join(state, "domains.json")))["domains"]
     check("реестр: папка Метиды у athena пропущена, у Метиды осталась",
@@ -333,7 +335,10 @@ def main():
                  '[private]\ncoordinators = ["mnemo-brain"]\npaths = ["~/ai/knowledge/me", "~/ai/pantheon/.git/git-crypt"]\n'
                  '[merge_repos]\nathena-shop = ["acme-co/br-app"]\n'
                  'metis-pantheon = ["tools-org/sync", "acme-co/kit", "bad owner/x", "acme-co/kit`"]\n'
-                 'mnemo-brain = ["acme-co/notes"]\n')
+                 'mnemo-brain = ["acme-co/notes"]\n'
+                 # что закрыто штабу — только [hq] (metis-0182); выдуманный корпус lecture-notes
+                 '[hq]\nclosed_dirs = ["~/projects/lecture-notes", "~/.cache/qmd", "~/.cache/lecture-notes", '
+                 '"~/.claude/projects/*lecture-notes*"]\nclosed_collections = ["notes"]\n')
     os.makedirs(os.path.join(state, "settings"), exist_ok=True)
     open(os.path.join(state, "settings", "old-direction.json"), "w").write("{}")
     dash = lambda p: re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(p))
@@ -450,8 +455,8 @@ def main():
                                      "pantheon archive", "pantheon jobs *", "pantheon domains build",
                                      "pantheon roles build", "pantheon stop *", "pantheon resume *", "pantheon pause *",
                                      "pantheon restart *", "pantheon saved *", "pantheon who", "pantheon agents"])
-    corp = "expert-corpus"  # trace-ok: 0182-core — снять в PR ядра 0182 (папки — из policy.toml [hq])
-    check("окно штаба: корпус закрыт для чтения — песочница и правило Read (SEC-13, решение 15.10)",
+    corp = "lecture-notes"
+    check("окно штаба: корпус из [hq].closed_dirs закрыт для чтения — песочница и правило Read (SEC-13, решение 15.10)",
           all(x in hb["filesystem"]["denyRead"] for x in (f"~/projects/{corp}", "~/.cache/qmd",
                                                            f"~/.cache/{corp}", f"~/.claude/projects/*{corp}*"))
           and "Read(~/.cache/qmd/**)" in hq["permissions"]["deny"]
@@ -523,11 +528,11 @@ def main():
           and "(`acme-co/kit`, `tools-org/sync`)" in gm[0] and "bad owner" not in gm[0] and "kit``" not in gm[0]
           and not any(x in texts for x in ("athena-shop", "metis-pantheon", "mnemo-brain", "workshop",
                                            "agent-kit", "projects/br", "ai/knowledge")))
-    check("правило Gated Merge: обе формы репозитория, перечень argus, ядро — кнопка владельца, --admin/--auto не "
+    check("правило Gated Merge: обе формы репозитория, перечень argus, ядро — сливает сам владелец, --admin/--auto не "
           "разрешает (metis-0098)",
           bool(gated) and all(x in gated[0] for x in ("`-R <owner/repo>`", "`--repo <owner/repo>`",
                                                       "--match-head-commit", "checklist", "plugins/guard/",
-                                                      "owner's button", "`--admin`, `--auto`", "`gh api`",
+                                                      "plugins/pantheon/roles/", "window_rules.py", "owner to merge them himself", "`--admin`, `--auto`", "`gh api`",
                                                       "still judged by Merge Without Review")))
     check("штаб и мастерская: autoMode в окне нет — классификатор у них со встроенными правилами (metis-0098)",
           "autoMode" not in hq and "autoMode" not in sw)
