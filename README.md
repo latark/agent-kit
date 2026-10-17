@@ -90,6 +90,9 @@
   запуском qmd и без ключа `update` (его qmd исполняет через bash). Сервер MCP — служба `qmd` на 127.0.0.1:8181;
   подключение на новом Mac — `npm install -g @tobilu/qmd`, затем `pantheon qmd install` (MCP уровня пользователя).
   Хук `ctx.py qmd-query` пропускает только поиск `vec`/`lex` в названных коллекциях с `rerank: false` (QMD-04).
+- `plugins/pantheon/lib/window_rules.py` — правила окон координаторов для слияния через шлюз guard
+  (`permissions.allow` и `autoMode.allow`, metis-0174); их собирает `pantheon domains build`. Файл — в ядре защит:
+  PR, который его задевает, ждёт слияния владельцем.
 - `plugins/pantheon/lib/view-sync.sh` — копия `~/ai/pantheon` только для чтения для Obsidian. Если в копии нет
   `.obsidian`, кладёт образец настроек из `plugins/pantheon/share/pantheon-view-obsidian/` (сниппеты, закладки, базовые
   плагины; существующую папку не трогает). Тему и плагин Style Settings владелец ставит в Obsidian сам.

@@ -20,12 +20,14 @@ import uuid
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
 HAVE_TOML = sys.version_info >= (3, 11)
 OLD = "b" * 40
-CORE = "ядро защит — только кнопка владельца (Д3)"
+CORE = "ядро защит — PR ждёт слияния владельцем (Д3)"
 # перечень проверенного в «принять» (Б6, guard 0.5.6): кавычки и пробелы внутри поля, обе формы флага
-CL = (' --opened "merge_gate.py, README (раздел «запор»)" --ran=\'heavy python3 -I tests/test_merge_gate.py "84 из 84"\''
-      ' --unchecked "живой gh"')
+# ran начинается с модели: в репозиториях защит шлюз засчитывает только argus на Opus (metis-0176)
+CL = (' --opened "merge_gate.py, README (раздел «запор»)"'
+      ' --ran=\'модель: claude-opus-5-5, heavy python3 -I tests/test_merge_gate.py "84 из 84"\' --unchecked "живой gh"')
 CHECKLIST = {"opened": "merge_gate.py, README (раздел «запор»)",
-             "ran": 'heavy python3 -I tests/test_merge_gate.py "84 из 84"', "unchecked": "живой gh"}
+             "ran": 'модель: claude-opus-5-5, heavy python3 -I tests/test_merge_gate.py "84 из 84"',
+             "unchecked": "живой gh"}
 results = []
 
 
@@ -296,6 +298,19 @@ def t_core(h):
     h.gh(["plugins/pantheon/lib/pantheon.py", "plugins/guardian/x.py", "plugins/pantheon/tests/test_a.py"])
     merge_case("защиты: PR только в plugins/pantheon (и plugins/guardian) — проходит",
                h.pre(cmd, pdir="projects/agent-kit"), True)
+    # metis-0182 п. 4 и metis-0174: общие роли и правила autoMode окон — тоже ядро (даже если папки ещё нет на main)
+    for path in ("plugins/pantheon/roles/argus.md", "./Plugins/Pantheon/Roles/dev-opus.md", "plugins/pantheon/roles",
+                 "plugins/pantheon/lib/window_rules.py", "./plugins/pantheon/lib/Window_Rules.py"):
+        h.gh(["README.md", path])
+        merge_case(f"защиты: ядро pantheon — {path} — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
+                   CORE + ": PR задевает")
+    h.gh(["plugins/pantheon/rolesx/a.md", "plugins/pantheon/lib/window_rules_test.py", "plugins/pantheon/roles.md"])
+    merge_case("защиты: соседи ядра pantheon (rolesx/, window_rules_test.py, roles.md) — проходит",
+               h.pre(cmd, pdir="projects/agent-kit"), True)
+    h.gh([{"filename": "plugins/pantheon/agents/argus.md", "status": "renamed",
+           "previous_filename": "plugins/pantheon/roles/argus.md"}])
+    merge_case("защиты: вынос роли из plugins/pantheon/roles — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
+               CORE + ": PR задевает plugins/pantheon/roles/argus.md")
     h.gh([{"filename": "plugins/guard/hooks/merge_core.py", "status": "renamed",
            "previous_filename": "plugins/guard/hooks/merge_gate.py"}])
     merge_case("защиты: переименование ядра (previous_filename) — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
@@ -585,13 +600,21 @@ EMPTY_TESTS = ("true", "heavy echo ok", ":", "/usr/bin/TRUE", "env A=1 -u B time
                "sh -c ''", "bash -c 'true'", "sh -c true", "bash -ec 'exit 0'", "zsh -c ':'", "heavy sh -c 'echo ok'",
                "sh -c 'bash -c true'", "bash", "exit 0", "sleep 1", "echo тесты прошли",
                # metis-0164 (guard 0.5.9): абсолютный путь — по имени; python3.14t и pypy — тоже python
-               "/usr/bin/true", "python3.14t -c pass", "pypy3 -c pass", "pypy -c 0", "heavy pypy3.10 -I -c pass")
+               "/usr/bin/true", "python3.14t -c pass", "pypy3 -c pass", "pypy -c 0", "heavy pypy3.10 -I -c pass",
+               # metis-0177: присваивание перед программой, uv run python без скрипта, node без скрипта
+               "CI=1 true", "CI=1 FOO=x heavy echo ok", "CI=1", "CI=1 python3 -c pass", "heavy CI=1 true",
+               "uv run python", "uv run python -c pass", "uv run --with pytest python3", "uv --quiet run python",
+               "heavy uv run -p 3.14 python", "node", "node -", "heavy node", "node -e 0", "node -p 1",
+               "node -e 'process.exit(0)'", "nodejs --version", "CI=1 node")
 REAL_TESTS = ("heavy python3 -I tests/test_x.py", "env CI=1 heavy pnpm test", "timeout 600 pytest -q", "heavy pnpm test",
               "pytest", "pnpm test", "python3 -I tests/test_x.py", "python3 -m pytest -q", "python3 -W error tests/t.py",
               "bash tests/run.sh", "sh -c pytest", "bash -c 'heavy pnpm test'", "python3 -c 'from t import main'",
               # metis-0164: относительный путь — скрипт проекта, а не программа test/true из списка
               "./test", "bin/test", "script/test", "tests/test", "heavy ./test", "sh -c ./test", "pypy3 -m pytest",
-              "python3.14t -I tests/test_x.py")
+              "python3.14t -I tests/test_x.py",
+              # metis-0177: за присваиванием и uv run — настоящий раннер
+              "CI=1 pytest", "CI=1 heavy pnpm test", "uv run pytest", "uv run python -m pytest", "uv run --with x python t.py",
+              "heavy uv run --directory app pytest -q", "uv sync", "node tests/t.js", "node --test", "node -e 'require(\"./t\")'")
 
 
 def t_empty_tests(h):
@@ -653,7 +676,7 @@ def t_wrapped_review_test(h):
 
 
 def t_core_marketplace(h):
-    """0115 п.2: .claude-plugin/marketplace.json — ядро: PR, который его меняет, — только кнопка владельца."""
+    """0115 п.2: .claude-plugin/marketplace.json — ядро: PR, который его меняет, — ждёт слияния владельцем."""
     sha = h.sha["agent-kit"]
     h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"), rec("accept", "latark/agent-kit", 7, sha))
     cmd = f"gh pr merge 7 --match-head-commit {sha}"
@@ -784,7 +807,9 @@ UNRESOLVED_TESTS = ("python3 -I $UNSET/tests/run.py", "python3 $UNSET -m pytest"
 # слово `$X`/`${X}` целиком и без кавычек при незаданной переменной исчезает: без него команда пустая — отказ
 VANISHING_TESTS = ("python3 -I $TESTFILE", "python3 $TESTFILE", "heavy python3 -I $TESTFILE", "bash $UNSET",
                    "python3 -I ${TESTFILE}", "env CI=1 timeout 60 python3 -I $TESTFILE", "sh $UNSET", "heavy $UNSET",
-                   "$EMPTYVAR true", "env $UNSET true", "python3 -c $UNSET", "pypy3 -I $T")
+                   "$EMPTYVAR true", "env $UNSET true", "python3 -c $UNSET", "pypy3 -I $T",
+                   # metis-0177 (пробы V41, V21, V27): присваивание без env, uv run, node
+                   "CI=1 python3 -I $TESTFILE", "uv run python $X", "node $X")
 
 
 def _load_merge_gate(name):
@@ -873,11 +898,75 @@ def t_merge_hints(h):
         check("отказ шлюза слияния (защиты) подсказывает форму с -R", d == "deny" and form in why, why)
 
 
+def t_opus_protect(h):
+    """metis-0176: в репозитории защит «принять» засчитывается, только если ran начинается с «модель: claude-opus»;
+    в остальных репозиториях модель не проверяется. Незаменённый «<ID>» — отказ с подсказкой."""
+    kit, sha = "projects/agent-kit", h.sha["agent-kit"]
+    cmd = f"gh pr merge 7 --match-head-commit {sha}"
+    tests = rec("tests", "latark/agent-kit", None, sha, "dev-opus")
+    sonnet = dict(CHECKLIST, ran="модель: claude-sonnet-5, heavy python3 -I tests/test_merge_gate.py")
+    h.seed(tests, rec("accept", "latark/agent-kit", 7, sha, checklist=sonnet))
+    merge_case("защиты: «принять» argus на Sonnet — отказ", h.pre(cmd, pdir=kit), False, "не на Opus")
+    merge_case("отказ не на Opus подсказывает argus на Opus", h.pre(cmd, pdir=kit), False,
+               "Проверку повторяет argus на Opus")
+    for ran in ("heavy python3 -I tests/test_merge_gate.py", "тесты, модель: claude-opus-5-5",
+                "модель: claude-haiku-4-5, claude-opus в тексте"):
+        h.reset()
+        h.seed(tests, rec("accept", "latark/agent-kit", 7, sha, checklist=dict(CHECKLIST, ran=ran)))
+        merge_case(f"защиты: ran «{ran}» — отказ", h.pre(cmd, pdir=kit), False, "не на Opus")
+    for ran in ("модель: claude-opus-5-5, тесты", "  Модель:claude-opus-4-1 тесты", "МОДЕЛЬ: CLAUDE-OPUS-5-5"):
+        h.reset()
+        h.seed(tests, rec("accept", "latark/agent-kit", 7, sha, checklist=dict(CHECKLIST, ran=ran)))
+        merge_case(f"защиты: ran «{ran}» — проходит", h.pre(cmd, pdir=kit), True)
+    h.reset()
+    h.seed(tests, rec("accept", "latark/agent-kit", 7, sha, checklist=sonnet),
+           rec("accept", "latark/agent-kit", 7, sha, agent_id="argus2"))
+    merge_case("защиты: Sonnet и второй argus на Opus — проходит (Sonnet не засчитан, но и не мешает)",
+               h.pre(cmd, pdir=kit), True)
+    h.reset()
+    h.seed(tests, rec("reject", "latark/agent-kit", 7, sha, checklist=None),
+           rec("accept", "latark/agent-kit", 7, sha, checklist=sonnet))
+    merge_case("защиты: «вернуть», потом «принять» того же argus на Sonnet — «вернуть» в силе", h.pre(cmd, pdir=kit),
+               False, "«вернуть» (reject)")
+    h.reset()
+    h.seed(tests, rec("accept", "latark/agent-kit", 7, sha, checklist=dict(CHECKLIST, ran="модель: <ID>, тесты")))
+    merge_case("защиты: ran «модель: <ID>» в журнале — отказ", h.pre(cmd, pdir=kit), False, "не на Opus")
+    merge_case("отказ с «<ID>» подсказывает подставить ID", h.pre(cmd, pdir=kit), False, "остался шаблон «<ID>»")
+    h.reset()
+    h.seed(tests, rec("accept", "latark/agent-kit", 7, sha, checklist=None))
+    merge_case("защиты: «принять» без перечня — по-прежнему отказ Б6, а не «не на Opus»", h.pre(cmd, pdir=kit), False,
+               "без перечня проверенного (Б6)")
+    # не защиты — модель не проверяется
+    h.reset()
+    tsha = h.sha["tg-read"]
+    h.seed(rec("tests", "latark/tg-read", None, tsha, "dev-opus"),
+           rec("accept", "latark/tg-read", 3, tsha, checklist=sonnet))
+    merge_case("внутреннее: «принять» на Sonnet — проходит (модель проверяют только защиты)",
+               h.pre(f"gh pr merge 3 --match-head-commit {tsha}"), True)
+    # незаменённый «<ID>» в команде argus — отказ до записи, с подсказкой (раньше общего отказа за < и >)
+    base = f"pantheon review accept latark/agent-kit 7 {sha} --opened a --unchecked c"
+    for ran in ('"модель: <ID>, тесты"', '"модель: < id >"'):
+        d, why = h.pre(f"{base} --ran {ran}", role="argus", agent_id="a1")
+        check(f"accept --ran {ran} — отказ «<ID>»", d == "deny" and "остался шаблон «<ID>»" in why
+              and "Записи не будет" in why, why)
+    h.reset()
+    h.post(f"{base} --ran \"модель: <ID>, тесты\"", "argus")
+    check("accept с «<ID>» — записи нет", h.read() == [], h.read())
+    d, why = h.pre(f"{base} --ran \"модель: claude-opus-5-5, тесты\"", role="argus", agent_id="a1")
+    check("accept с моделью Opus — PreToolUse можно", d == "allow", why)
+    mg = _load_merge_gate("merge_gate_o")
+    _, _, why = mg.verdict_parse("accept", ["latark/agent-kit", "7", sha, "--opened", "a", "--ran", "модель: <ID>",
+                                            "--unchecked", "c"])
+    check("verdict_parse: «<ID>» в ran — ошибка", bool(why) and "<ID>" in why, why)
+    _, _, why = mg.verdict_parse("reject", ["latark/agent-kit", "7", sha, "--ran", "модель: <ID>"])
+    check("verdict_parse: «<ID>» в ran у reject — без ошибки (вердикт «вернуть» в силе любой)", why is None, why)
+
+
 CASES = [t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
-         t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints]
+         t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect]
 
 
 def main():

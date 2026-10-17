@@ -59,7 +59,7 @@ try:
     check("coordinators = [] — никого", coord({"coordinators": []}) == [])
     check("coordinators = строка — умолчание", coord({"coordinators": "mnemo-brain"}) == D["coordinators"])
     check('coordinators = [" a "] — strip', coord({"coordinators": [" a "]}) == ["a"])
-    check("paths = [] — умолчание", paths({"paths": []}) == D["paths"])
+    check("paths = [] — ничего, как у шлюза слияния (metis-0177)", paths({"paths": []}) == [])
     check("paths = [5] — после фильтра пусто: умолчание", paths({"paths": [5]}) == D["paths"])
     check("paths = строка — умолчание", paths({"paths": "~/ai/knowledge/me"}) == D["paths"])
     check('paths = ["~/x"] — только он', paths({"paths": ["~/x"]}) == ["~/x"])

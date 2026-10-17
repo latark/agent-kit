@@ -1,5 +1,6 @@
-"""Запор слияния guard (P1-4, Д2, Д3, guard 0.5.4) — часть ядра защит: ядро — весь plugins/guard/**, casefold;
-файлы из pulls/N/files с previous_filename. PR, задевающий ядро, агенты не сливают, только кнопка владельца (Д3).
+"""Запор слияния guard (P1-4, Д2, Д3, guard 0.5.4) — часть ядра защит: ядро — весь plugins/guard/**, общие роли
+plugins/pantheon/roles/** и правила окон plugins/pantheon/lib/window_rules.py, casefold; файлы из pulls/N/files с
+previous_filename. PR, задевающий ядро, агенты не сливают: он ждёт слияния владельцем (Д3).
 
 Модуль без своего состояния: общие помощники guard.py (load_policy, privileged, private_conf, _inside, _norm, _key,
 STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — его присваивает guard.py при загрузке
@@ -9,9 +10,9 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
 1. Журнал проверок STATE_DIR/merge-gate/records.jsonl. Пишет только хук guard на PostToolUse (record): команда
    Bash успешно завершилась, она простая (без ; | & && || $( ` и перенаправлений) и это `pantheon review <вид> …`.
      tests          — `pantheon review test -- <команда>`: SHA — HEAD папки cwd, дерево чистое; repo — её remote;
-                      программа после обёрток (heavy, env VAR=…, time, nice, timeout N) — не пустая (true, echo…,
-                      python3 -c pass, sh -c ''); неразобранное слово (`$UNSET/t.py`) и относительный путь (`./test`)
-                      пустыми не считаются; саму команду после -- guard судит как голую (guard.py, 0.5.8);
+                      программа после обёрток (heavy, env VAR=…, time, nice, timeout N, uv run) и присваиваний VAR=x — не
+                      пустая (true, echo…, python3 -c pass, sh -c '', node без скрипта); неразобранное слово
+                      (`$UNSET/t.py`) и относительный путь (`./test`) пустыми не считаются; саму команду после -- guard судит как голую (guard.py, 0.5.8);
      accept, reject — `pantheon review accept|reject <owner/repo> <PR> <SHA> [--opened … --ran … --unchecked …]`,
                       только agent_type argus; у accept все три поля перечня (Б6) обязательны и непусты;
      talos          — `pantheon review talos <owner/repo> <PR> <SHA>`, только agent_type talos.
@@ -26,8 +27,11 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    последний вердикт каждого — accept с полным перечнем проверенного (Б6) и ни один рецензент не тот, кто сливает.
    reject снимает только accept того же рецензента после него или новый коммит (metis-0158: два argus на одном
    head — accept и reject в любом порядке дают отказ); продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
-   owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро: весь plugins/guard/**, casefold;
-   файлы из pulls/N/files с previous_filename.
+   owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES), casefold;
+   файлы из pulls/N/files с previous_filename. В защитах accept засчитывается, только если его ran начинается с
+   «модель: claude-opus» (metis-0176): accept другой модели — как будто его нет, reject любой модели в силе.
+   Незаменённый шаблон «<ID>» в ran — отказ ещё до записи.
+Правдивость поля ran (модель argus) guard не проверяет: это защита от ошибки шаблона и запуска не той модели.
 Чего guard не проверяет: правдивость строки в сводке и перечня argus и то, что выбранная команда тестов — настоящие
 тесты: пустую программу (true, echo…, python3 -c pass, sh -c '') он ловит по короткому списку, а придуманную
 пустышку вроде `python3 -c "import os"` — нет (защита от ошибки, не от обхода).
@@ -55,16 +59,20 @@ MERGE_PRODUCT = ("Продукт для клиентов сливай после
                  "на этот SHA, строка в сводке «что ушло» со ссылкой owner/repo#N и откатом (`pantheon alert`), затем "
                  f"{MERGE_CMD}.")
 MERGE_PROTECT = ("Защиты сливает только Метида или её лид через шлюз слияния: тесты и «принять» от argus на этот SHA, "
-                 f"{MERGE_CMD}; PR, который задевает ядро защит (весь "
-                 "plugins/guard/ и .claude-plugin/marketplace.json), сливает только владелец кнопкой (Д3).")
+                 f"{MERGE_CMD}; PR, который задевает ядро защит (весь plugins/guard/, plugins/pantheon/roles/, "
+                 "plugins/pantheon/lib/window_rules.py и .claude-plugin/marketplace.json), ждёт слияния владельцем (Д3).")
 MERGE_OWNER = "Слияние делает владелец."
 MERGE_AMBIGUOUS = "\0два направления"
-MERGE_CORE = "ядро защит — только кнопка владельца (Д3)"
+MERGE_CORE = "ядро защит — PR ждёт слияния владельцем (Д3)"
 # ядро защит (Д3): эти файлы агенты не сливают — гарантия, что запор не ослабит сам себя
 CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_config.py",
               "plugins/guard/managed-settings.json",
+              # правила autoMode и permissions окон: разрешают слияние через шлюз и запись вердиктов (metis-0174)
+              "plugins/pantheon/lib/window_rules.py",
               ".claude-plugin/marketplace.json")  # откуда ставятся плагины: подмена источника guard (metis-0115)
-CORE_DIR = "plugins/guard"  # и весь плагин guard (metis-0092): код, тесты, README, настройки
+# и папки целиком: весь плагин guard (metis-0092) — код, тесты, README, настройки; общие роли Пантеона — в них
+# правила ролей, которые guard проверяет по agent_type (metis-0182). Папки может ещё не быть в main — путь всё равно ядро
+CORE_DIR = ("plugins/guard", "plugins/pantheon/roles")
 GH_TIMEOUT = 6
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 REPO_RE = re.compile(r"[a-z0-9_.-]+/[a-z0-9_.-]+")
@@ -76,6 +84,12 @@ NOT_SIMPLE = re.compile(r"[;|&<>`\n\r]|\$\(")
 # перечень проверенного в «принять» (Б6): что argus открыл, что запустил, чего не проверял — поля записи и флаги
 CHECKLIST = ("opened", "ran", "unchecked")
 CHECKLIST_HINT = '--opened "<что открыл>" --ran "<что запустил>" --unchecked "<что не проверял>"'
+# защиты: «принять» засчитывается, только если argus проверял на Opus — поле ran начинается с «модель: claude-opus»
+# (metis-0176). Незаменённый шаблон «<ID>» в ran — ошибка шаблона роли, а не модель
+OPUS_RAN = re.compile(r"\s*модель:\s*claude-opus", re.I)
+UNFILLED_ID = re.compile(r"<\s*id\s*>", re.I)
+UNFILLED_ID_HINT = ("в --ran остался шаблон «<ID>»: подставь ID своей модели из системной подсказки — "
+                    "`--ran \"модель: claude-opus-…, что запустил\"`")
 # пустая команда тестов: программа, которая ничего не проверяет (защита от ошибки, список короткий и явный); ещё
 # python без скрипта или с пустым -c и оболочка без скрипта или с пустым -c (metis-0157, guard 0.5.8)
 EMPTY_TEST_PROGRAMS = {"true", ":", "echo", "printf", "exit", "test", "[", "sleep", "yes"}
@@ -83,7 +97,20 @@ EMPTY_PYTHON = re.compile(r"python[0-9.]*t?|pypy[0-9.]*")  # и python3.14t (fre
 EMPTY_SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 # обёртки перед программой тестов: имя → флаги, за которыми идёт отдельное значение
 TEST_WRAPPERS = {"heavy": set(), "env": {"-u", "--unset", "-C", "--chdir"}, "time": set(),
-                 "nice": {"-n", "--adjustment"}, "timeout": {"-s", "--signal", "-k", "--kill-after"}}
+                 "nice": {"-n", "--adjustment"}, "timeout": {"-s", "--signal", "-k", "--kill-after"},
+                 # `uv run <программа>` (metis-0177): uv run python без скрипта — такой же пустой python
+                 "uv run": {"--with", "--with-editable", "--with-requirements", "-p", "--python", "--project",
+                            "--directory", "--package", "--extra", "--group", "--only-group", "--no-group",
+                            "--env-file", "--index", "--default-index", "-w"}}
+# присваивание перед программой (`CI=1 true`): оболочка его не запускает — судим программу за ним (metis-0177)
+ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# node без скрипта или с -e/-p из литералов, process.exit и console.log литерала — ничего не проверяет (metis-0177)
+EMPTY_NODE = {"node", "nodejs"}
+NODE_NOOP_ARGS = {"-", "-v", "--version", "-h", "--help"}
+NODE_EVAL = {"-e", "--eval", "-p", "--print"}
+_JS_LIT = r"""(?:-?\d+(?:\.\d+)?|true|false|null|undefined|'[^'\\]*'|"[^"\\]*")"""
+NODE_NOOP_CODE = re.compile(rf"\s*(?:(?:{_JS_LIT}|process\.exit\(\s*{_JS_LIT}?\s*\)|console\.log\(\s*{_JS_LIT}?\s*\))"
+                            r"\s*(?:;\s*)?)*")
 
 
 def _str_list(v):
@@ -112,7 +139,7 @@ def _remote_id(url):
 
 
 def _repo_tail(repo):
-    """owner/repo без хоста: псевдоним ssh (git@gh-work:latark/agent-kit) gh понимает как github.com, поэтому
+    """owner/repo без хоста: псевдоним ssh (git@gh-alias:org/repo) gh понимает как github.com, поэтому
     репозитории сравниваются по двум последним частям, а не по хосту."""
     return "/".join(repo.split("/")[-2:])
 
@@ -164,7 +191,7 @@ def _gh_resolved(d):
 def _merge_domains():
     """Реестр направлений для слияния: {имя: [корни]}; None — реестр пуст или битый (тогда слияние закрыто).
     Только domains.json, без отката на старый ~/.claude/hooks/domains.json, как у load_domains(): в старом реестре
-    направления шире, и с ним Гермес слил бы в legal-watch (ревью argus 210766a)."""
+    направления шире, и с ним координатор слил бы в чужой репозиторий (ревью argus 210766a)."""
     try:
         with open(G.DOMAINS_FILE, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -373,6 +400,8 @@ def verdict_parse(kind, args):
             return None, None, (f"«принять» без перечня проверенного (Б6): нет или пусто {', '.join(missing)}. Формат: "
                                 f"{fmt}. Запор пускает только «принять», где сказано, что открыто, что запущено и "
                                 "чего argus не проверял")
+        if UNFILLED_ID.search(checklist.get("ran", "")):
+            return None, None, f"«принять» не записан: {UNFILLED_ID_HINT}"
     return parsed, {k: v for k, v in checklist.items() if v}, None
 
 
@@ -389,11 +418,21 @@ def _prog(word):
 
 
 def _program_at(argv):
-    """Индекс программы после обёрток TEST_WRAPPERS; None — после обёрток ничего нет."""
+    """Индекс программы после обёрток TEST_WRAPPERS и присваиваний VAR=x; None — после них ничего нет."""
     i = 0
     while i < len(argv):
+        if isinstance(argv[i], str) and ASSIGNMENT.match(argv[i]):
+            i += 1
+            continue
         name = _prog(argv[i])
-        if name not in TEST_WRAPPERS:
+        if name == "uv":
+            j = i + 1
+            while j < len(argv) and isinstance(argv[j], str) and argv[j].startswith("-") and argv[j] != "--":
+                j += 1  # общие флаги uv (--quiet, --offline)
+            if j >= len(argv) or argv[j] != "run":
+                return i  # uv pip, uv sync … — сама программа uv
+            i, name = j, "uv run"
+        elif name not in TEST_WRAPPERS:
             return i
         takes, i = TEST_WRAPPERS[name], i + 1
         while i < len(argv):
@@ -490,6 +529,25 @@ def _relative(word):
     return "/" in word and not word.startswith("/")
 
 
+def _node_empty(args):
+    """Аргументы node без скрипта: только флаги из NODE_NOOP_ARGS и -e/-p с пустым кодом (`node -e 0`)."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if not isinstance(a, str):
+            return False
+        if a in NODE_EVAL:
+            code = args[i + 1] if i + 1 < len(args) else ""
+            if not isinstance(code, str) or not NODE_NOOP_CODE.fullmatch(code):
+                return False
+            i += 2
+        elif a in NODE_NOOP_ARGS:
+            i += 1
+        else:
+            return False  # скрипт, --test, --require … — что запустится, не судим
+    return True
+
+
 def _empty_run(argv, depth=0):
     """Команда ничего не проверяет → имя программы для текста отказа («нет» — пусто); иначе None. Пусто: программы
     EMPTY_TEST_PROGRAMS, python без скрипта или с -c из pass/литералов/print/exit, оболочка без скрипта или с -c,
@@ -504,6 +562,8 @@ def _empty_run(argv, depth=0):
         return None
     if not prog or (prog in EMPTY_TEST_PROGRAMS and not _relative(word)):
         return prog or "нет"
+    if prog in EMPTY_NODE and _node_empty(rest):
+        return f"{prog} без тестов"
     if EMPTY_PYTHON.fullmatch(prog):
         code = _py_code(rest)
         return f"{prog} без тестов" if code is not None and _py_empty(code) else None
@@ -647,6 +707,8 @@ def review_problem(role, args, cmd="", background=False):
     if background:
         return (f"`pantheon review {kind}` в фоне (run_in_background) записи не даст: фоновую команду хук видит при "
                 "запуске, а не по итогу. Запусти без фона — запись делается по итогу команды.")
+    if kind == "accept" and UNFILLED_ID.search(cmd or ""):  # раньше NOT_SIMPLE: в «<ID>» есть < и >
+        return f"«принять» не записан: {UNFILLED_ID_HINT}. Записи не будет."
     if NOT_SIMPLE.search(cmd or ""):
         return (f"`pantheon review {kind}` — только отдельной простой командой, без `;`, `|`, `&`, `<`, `>`, `$(`, "
                 "обратных кавычек и переводов строки: иначе код выхода был бы не от тестов, и запись не сделается.")
@@ -702,15 +764,15 @@ def _gh_json(args):
 
 
 def _is_core(path, core_files):
-    """Ядро (metis-0092, решение владельца 15.10): весь plugins/guard/ без учёта регистра и отдельные файлы вне него."""
+    """Ядро (metis-0092, решение владельца 15.10): папки CORE_DIR целиком без учёта регистра и отдельные файлы вне них."""
     p = path.strip("/").casefold()
     while p.startswith("./"):
         p = p[2:].lstrip("/")
-    return p in core_files or p == CORE_DIR or p.startswith(CORE_DIR + "/")
+    return p in core_files or any(p == d or p.startswith(d + "/") for d in CORE_DIR)
 
 
 def _core_problem(repo, pr, sha):
-    """Д3: PR защит, который задевает ядро, — только кнопка владельца. Файлы — из REST pulls/N/files (там есть
+    """Д3: PR защит, который задевает ядро, ждёт слияния владельцем. Файлы — из REST pulls/N/files (там есть
     status и previous_filename: переименование ядра не прячет старый путь). Ответа gh нет, список файлов неполон,
     PR на другом коммите — тоже отказ."""
     heads = _gh_json(["pr", "view", str(pr), "-R", repo, "--json", "headRefOid,changedFiles"])
@@ -786,6 +848,18 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                 and repo in [x.lower() for x in r["repo"]])
 
     verdicts = [r for r in records if mine(r, ("accept", "reject"), "argus")]
+    # защиты (metis-0176): «принять» не на Opus не засчитывается — как будто его нет; «вернуть» любой модели в силе,
+    # «принять» без перечня остаётся, чтобы отказ Б6 ниже сказал о перечне
+    weak = [r for r in verdicts if protect and r["kind"] == "accept" and checklist_ok(r)
+            and not OPUS_RAN.match(r["checklist"]["ran"])]
+    verdicts = [r for r in verdicts if not any(r is w for w in weak)]
+    if not verdicts and weak:
+        unfilled = any(UNFILLED_ID.search(r["checklist"]["ran"]) for r in weak)
+        return (f"«принять» на {repo}#{pr}@{sha[:12]} от {'; '.join(_who(r) for r in weak)} — не на Opus: в "
+                "репозитории защит шлюз засчитывает только проверку argus на модели claude-opus (--ran начинается с "
+                "«модель: claude-opus»). Проверку повторяет argus на Opus и записывает `pantheon review accept "
+                f"{repo} {pr} {sha} --ran \"модель: claude-opus-…, что запустил\" …`."
+                + (f" Кроме того, {UNFILLED_ID_HINT}." if unfilled else "") + f" {advice}")
     if not verdicts:
         return (f"нет «принять» от argus на {repo}#{pr}@{sha[:12]}: позови argus, он проверит и запишет "
                 f"`pantheon review accept {repo} {pr} {sha} {CHECKLIST_HINT}`. {advice}")
@@ -824,7 +898,7 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
 def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
     """gh pr merge (metis-0038, guard 0.5.0; запор P1-4, guard 0.5.4). Сливает главная сессия координатора
     направления или его лид (metis-0054): субагент hephaestus-<short> или apollo-<short>, где short — имя направления
-    папки запуска после первого «-» (hermes-alex → alex). Дальше лид проверяется как координатор: личное, Метида,
+    папки запуска после первого «-» (apollo-shop → shop). Дальше лид проверяется как координатор: личное, Метида,
     защиты — те же правила. Режим: защиты — cwd в папках [coordinators] metis-pantheon или репозиторий команды (-R или
     remote папки cwd) совпадает с remote этих папок: только Метида или её лид; продукт ([merge_client]) и внутреннее
     (своё направление по domains.json, для совместимости — [merge]). Затем во всех режимах — запор (gate_problem).
@@ -846,13 +920,13 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
                 + MERGE_OWNER)
     metis_roots = G._norm(metis)
     conf = G.private_conf(policy)
-    ppaths, pcoords = _str_list(conf["paths"]), conf["coordinators"]
+    ppaths, pcoords = conf["paths"] if conf["paths"] == [] else _str_list(conf["paths"]), conf["coordinators"]
     # guard читает [private] мягко (0163: неверное значение — умолчание), а шлюз слияния на неверном [private] закрыт:
-    # опечатка в списке coordinators не должна молча открыть слияние координатору с личным
+    # опечатка в списке coordinators не должна молча открыть слияние координатору с личным. Пустой список [] — никого
+    # и ничего, как у guard (metis-0177), в том числе paths
     raw = policy.get("private", {})
     if not isinstance(raw, dict) or any(
-            k in raw and (_str_list(raw[k]) is None and not (k != "paths" and raw[k] == []))
-            for k in G.DEFAULT_PRIVATE):
+            k in raw and _str_list(raw[k]) is None and raw[k] != [] for k in G.DEFAULT_PRIVATE):
         ppaths = None
     if ppaths is None or not isinstance(pcoords, list) or not all(isinstance(c, str) for c in pcoords):
         return "[private] в policy.toml не разобрать, а без него неизвестно, у кого личное. " + MERGE_OWNER
@@ -938,8 +1012,8 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
     if why:
         return f"{why}. {advice}"
     if repos:
-        # -R — только репозиторий из [merge_repos] направления: сессия Фемиды стоит в legal-watch, а сливает и
-        # PR expert-corpus (themis-0015, ответ владельца 15.10 «А и Б»). Сверка по точному owner/repo на github.com
+        # -R — только репозиторий из [merge_repos] направления: сессия координатора стоит в одном
+        # репозитории, а сливает и PR соседнего репозитория направления (решение владельца 15.10). Сверка по точному owner/repo на github.com
         allowed = policy.get("merge_repos")
         allowed = allowed.get(repo_name) if isinstance(allowed, dict) and repo_name else None
         allowed = {r.strip().lower() for r in allowed if isinstance(r, str)} if isinstance(allowed, list) else set()
