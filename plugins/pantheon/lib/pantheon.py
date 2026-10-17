@@ -32,6 +32,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon view [--quiet]               обновить копию ~/ai/pantheon-view для Obsidian
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
   pantheon status                       один экран для отладки: тик, сессии, вопросы к вам, тревоги, защиты, sync, места heavy, версии
+  pantheon night [status|report]        недельный лимит: неделя, линия, запас, зона, ночь, снимок; report — блок
+                                        «Лимит» для сводки (вечерний вопрос и ночь ведёт дежурный, lib/night.py)
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
   pantheon task new --direction D --title T [--status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ] --next X --owner O
@@ -1302,6 +1304,15 @@ def status():
             lines.append(what)
             warn.append("sync")
     section("Синхронизация ~/.claude", lines or ["в порядке"])
+
+    # недельный лимит и ночь (metis-0127, 0129)
+    try:
+        lines = night_mod().status_lines(t)
+    except Exception as e:  # noqa: BLE001 — сбой расчёта не ломает остальной экран
+        lines = [f"не посчитать: {type(e).__name__}: {str(e)[:120]}"]
+    if any(ln.startswith("лимит неизвестен") or "зона: красная" in ln or "зона: жёлтая" in ln for ln in lines):
+        warn.append("лимит")
+    section("Лимит и ночь", lines)
 
     # места heavy, память, версии
     lines = []
@@ -4014,6 +4025,21 @@ def qmd_mod():
     return m
 
 
+_NIGHT = None
+
+
+def night_mod():
+    """lib/night.py — темп недельного лимита и ночной цикл (metis-0127, 0128, 0129)."""
+    global _NIGHT
+    if _NIGHT is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_night", os.path.join(LIB, "night.py"))
+        _NIGHT = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_NIGHT)
+        _NIGHT.set_core(sys.modules[__name__])
+    return _NIGHT
+
+
 def tasks_mod():
     """lib/tasks.py — схема задач и доска владельца (python3 -I не кладёт папку скрипта в путь импорта)."""
     global _TASKS
@@ -4980,6 +5006,8 @@ def main(argv):
         return usage_report(rest)
     if cmd == "reboot-reminder":
         return awake_mod().reboot_reminder(rest)
+    if cmd == "night":
+        return night_mod().main(rest)
     if cmd == "qmd":
         return qmd_mod().main(rest)
     if cmd == "plugins":

@@ -88,7 +88,11 @@ class Env:
         self.agents_file = os.path.join(self.tmp, "agents.json")
         self.notify = os.path.join(self.tmp, "notify.log")
         self.agents([])
-        open(os.path.join(self.pantheon, "schedule.toml"), "w").write('primary_host = "mac-a"\n[defaults]\nlimit_max_pct = 70\n')
+        # ночной цикл (lib/night.py) здесь выключен: вопрос в 00:00 и конец ночи в 00:00 — ночи нет, днём только темп
+        # недели; ночь и вопрос проверяет test_night.py
+        open(os.path.join(self.pantheon, "schedule.toml"), "w").write(
+            'primary_host = "mac-a"\n[defaults]\nlimit_max_pct = 70\n[night]\nask_at = "00:00"\n'
+            '[limits.night]\nstart = "00:00"\nend = "00:00"\n')
         self.doms = {}
         # уведомления идут через политику (metis-0023): простой — явно, по умолчанию «вы у Mac»
         self.extra = {"PANTHEON_FAKE_IDLE": "0"}
@@ -137,6 +141,11 @@ class Env:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     def run(self, *args, t=T0, extra=None):
+        # свежий снимок лимита строки статуса (lib/night.py): без него самозапуск закрыт — «лимит неизвестен»
+        sl = os.path.join(self.home, ".local", "state", "claude-statusline")
+        os.makedirs(sl, exist_ok=True)
+        open(os.path.join(sl, "five-hour"), "w").write(f"10 {t + 3600:.0f} {t:.0f}\n")
+        open(os.path.join(sl, "seven-day"), "w").write(f"10 {t + 5 * 86400:.0f} {t:.0f}\n")
         env = {"PATH": self.bin + ":" + os.environ["PATH"], "HOME": self.home, "PANTHEON_HOME": self.pantheon,
                "PANTHEON_STATE": self.state, "PANTHEON_NOW": str(t), "PANTHEON_HOST": "mac-a",
                "PANTHEON_NOTIFY_LOG": self.notify, "FAKE_CLAUDE_LOG": self.log, "FAKE_AGENTS": self.agents_file,

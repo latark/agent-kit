@@ -142,11 +142,16 @@ def wake_block(name, agents, registry, auto):
         pct, lim = P.limit_pct(), threshold("limit_max_pct", 70)
         if pct is not None and pct >= lim:
             return f"пятичасовой лимит {pct:.0f} % ≥ {lim:g} %"
+        # темп недели и ночь (metis-0127): любой автоматический подъём — как продолжение (днём только темп, ночью —
+        # открытая ночь с бюджетом); самозапуск по задаче сверх того проверяет autostart()
+        ok, why = P.night_mod().gate("respawn", P.now(), agents, registry)
+        if not ok:
+            return f"недельный лимит: {why}"
     return None
 
 
 WAIT_REASONS = ("идёт технический", "пауза по нагрузке", "весь планировщик", "не главный", "в schedule.toml нет",
-                "пятичасовой")
+                "пятичасовой", "недельный лимит")
 
 
 def recheck(name, auto):
@@ -208,6 +213,7 @@ def _watch(dry=False):
               ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
               ("паузы по нагрузке", lambda: pauses_clear(agents, reg, t)),
               ("очистка Зевса", lambda: zeus_clean(agents, t)),
+              ("ночь", lambda: P.night_mod().watch(agents, reg, doms, t)),
               ("самозапуск", lambda: autostart(agents, reg, doms, t)),
               ("подъём после лимита", lambda: awake().limit_resume(agents, reg, doms, t)),
               ("будильник ждущих", lambda: awake().wake_waiting(agents, reg, doms, t)),
@@ -1088,6 +1094,9 @@ def autostart(agents, registry, doms, t, dry=False):
             why = f"нет места: уже работают {', '.join(running)} (не больше {AUTOSTART_MAX} направлений)"
         if not why and len(running) + len(shop) >= SESSIONS_MAX:
             why = f"нет места: сессий Пантеона {len(running) + len(shop)} из {SESSIONS_MAX}"
+        if not why:  # новое дело: жёлтая зона днём, тяжёлые, ночь и её бюджет, утро после 04:00 (metis-0127)
+            ok, gw = P.night_mod().gate("autostart", t, agents, registry)
+            why = None if ok else f"недельный лимит: {gw}"
         nxt = float(s.get("next") or float(s.get("last") or 0) + AUTOSTART_BACKOFF)
         if not why and t < nxt:
             why = f"пауза между попытками до {P.stamp(nxt)[11:16]}"
@@ -1114,7 +1123,7 @@ def autostart(agents, registry, doms, t, dry=False):
                 P.alert_once(f"autostart-trust-{d}", got[2], f"самозапуск {d} невозможен: {why}", "watch")
                 P.notify_soon(f"autostart-trust-{d}", f"{d}: нужно ваше доверие к папке", group=f"autostart-{d}",
                               once=True)
-            elif not why.startswith(("пауза между", "одна сессия", "не главный Mac")):
+            elif not why.startswith(("пауза между", "одна сессия", "не главный Mac", "недельный лимит")):
                 P.alert_once(f"autostart-wait-{d}", f"{today(t)}-{why[:40]}", f"самозапуск {d} ждёт: {why} (задачи "
                              f"{', '.join(tids[:3])})", "watch")
             continue

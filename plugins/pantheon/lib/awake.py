@@ -14,7 +14,6 @@
 Без sudo и pmset на запись: только `caffeinate`, `pmset -g batt`, `sysctl`, `ps`.
 """
 import contextlib
-import importlib.util
 import json
 import os
 import re
@@ -92,16 +91,15 @@ def parse_time(v):
 
 
 def night_mod():
-    """lib/night.py — запор ночного цикла (пишет другой разработчик). Файла нет — None: тогда запор — отказ."""
+    """lib/night.py — запор ночного цикла. Файла нет — None: тогда запор — отказ. Модуль берём у ядра (P.night_mod):
+    один экземпляр с set_core на всех, а не вторая копия без ядра."""
     global _NIGHT
     if _NIGHT is not _UNSET:
         return _NIGHT
     mod = None
     p = os.path.join(P.LIB, "night.py")
     if os.path.isfile(p):
-        spec = importlib.util.spec_from_file_location("pantheon_night", p)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        mod = P.night_mod()
     _NIGHT = mod
     return mod
 
