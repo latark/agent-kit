@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 from datetime import date, datetime, timedelta
 
@@ -99,23 +100,39 @@ def rows(state, days=None, today=None):
 
 
 def save(state, new):
-    """Дописать/обновить строки в STATE/mmv.jsonl по дате (дни без событий не затирают прежнее)."""
+    """Дописать/обновить строки в STATE/mmv.jsonl по дате.
+
+    Файл есть, но не читается или не декодируется — не переписываем (иначе потеряем все дни).
+    День заменяется, только если в новой записи событий не меньше прежних: пустой или неполный день
+    (например, не прочитан zeus.md) полный не затирает. Дни, которых нет в new, остаются как были.
+    """
     p = os.path.join(state, "mmv.jsonl")
     cur = {}
-    with contextlib.suppress(OSError):
-        for line in open(p, encoding="utf-8"):
-            with contextlib.suppress(ValueError, TypeError, KeyError):
-                r = json.loads(line)
-                cur[r["date"]] = r
+    try:
+        with open(p, encoding="utf-8") as fh:
+            for ln in fh:
+                with contextlib.suppress(ValueError, TypeError, KeyError):
+                    r = json.loads(ln)
+                    cur[r["date"]] = r
+    except FileNotFoundError:
+        pass
+    except (OSError, UnicodeError):
+        return
     for r in new:
-        if r["events"] or r["date"] not in cur:
+        old = cur.get(r["date"])
+        if old is None or r["events"] >= old.get("events", 0):
             cur[r["date"]] = r
     os.makedirs(state, exist_ok=True)
-    tmp = p + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        for k in sorted(cur):
-            fh.write(json.dumps(cur[k], ensure_ascii=False) + "\n")
-    os.replace(tmp, p)
+    fd, tmp = tempfile.mkstemp(dir=state, prefix="mmv.jsonl.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            for k in sorted(cur):
+                fh.write(json.dumps(cur[k], ensure_ascii=False) + "\n")
+        os.replace(tmp, p)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def fmt(m):

@@ -95,6 +95,65 @@ M.save(s, M.rows(s))
 lines = open(os.path.join(s, "mmv.jsonl"), encoding="utf-8").read().splitlines()
 check(len(lines) == 1 and json.loads(lines[0])["min"] == 2.75, f"mmv.jsonl: {lines}")
 
+# 7а-г. save(): не терять дни
+def jl(path):
+    return [json.loads(x) for x in open(path, encoding="utf-8")]
+
+
+def R(d, ev, mn=1.0):
+    return {"date": d, "min": mn, "entries": 1, "events": ev}
+
+
+def seed(rows, raw=None):
+    d = tempfile.mkdtemp(prefix="mmv-save-")
+    TMPS.append(d)
+    with open(os.path.join(d, "mmv.jsonl"), "wb") as fh:
+        fh.write(raw if raw is not None else "".join(json.dumps(r) + "\n" for r in rows).encode())
+    return d
+
+
+def byd(d):
+    return {r["date"]: r for r in jl(os.path.join(d, "mmv.jsonl"))}
+
+
+# а) файл есть, но не декодируется — не переписываем
+bad = b"\xff\xfe\x00garbage\n"
+d = seed(None, raw=bad)
+M.save(d, [R("2026-10-01", 3)])
+check(open(os.path.join(d, "mmv.jsonl"), "rb").read() == bad, "7а: нечитаемый mmv.jsonl не переписан")
+check(os.listdir(d) == ["mmv.jsonl"], f"7а: нет лишних файлов: {os.listdir(d)}")
+
+# б) пустой/неполный день не затирает полный; равный или больший — заменяет
+d = seed([R("2026-10-01", 5, 9.0), R("2026-10-02", 2, 1.0)])
+M.save(d, [R("2026-10-01", 0, 0.0), R("2026-10-02", 3, 2.0), R("2026-10-03", 0, 0.0)])
+got = byd(d)
+check(got["2026-10-01"]["min"] == 9.0, f"7б: пустой день не затёр полный: {got['2026-10-01']}")
+check(got["2026-10-02"]["min"] == 2.0, f"7б: больше событий заменяет: {got['2026-10-02']}")
+check("2026-10-03" in got, "7б: новый пустой день добавлен")
+M.save(d, [R("2026-10-02", 3, 7.0)])
+check(byd(d)["2026-10-02"]["min"] == 7.0, "7б: равное число событий заменяет")
+M.save(d, [R("2026-10-01", 4, 1.0)])
+check(byd(d)["2026-10-01"]["min"] == 9.0, "7б: неполный день (4<5) не затёр")
+
+# в) временный файл — уникальное имя в той же папке; после записи не остаётся
+seen = []
+_rep = os.replace
+os.replace = lambda a, b: (seen.append((a, b)), _rep(a, b))[1]
+try:
+    d = seed([R("2026-10-01", 1)])
+    M.save(d, [R("2026-10-02", 1)])
+    M.save(d, [R("2026-10-03", 1)])
+finally:
+    os.replace = _rep
+check(len(seen) == 2 and seen[0][0] != seen[1][0] and seen[0][0] != seen[0][1] + ".tmp"
+      and all(os.path.dirname(a) == d for a, _ in seen), f"7в: уникальные tmp в папке STATE: {seen}")
+check(os.listdir(d) == ["mmv.jsonl"], f"7в: tmp убран: {os.listdir(d)}")
+
+# г) дни, которых нет в new, не трогаются
+d = seed([R("2026-09-01", 4, 5.0), R("2026-09-02", 2, 3.0)])
+M.save(d, [R("2026-10-01", 1)])
+check(list(byd(d)) == ["2026-09-01", "2026-09-02", "2026-10-01"], "7г: прежние дни остались")
+
 # 8. line() для night report
 ln = M.line(s, 7, date(2026, 10, 16))
 check("вчера 2,8" in ln, ln)
