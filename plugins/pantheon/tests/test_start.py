@@ -569,6 +569,70 @@ def main():
     r, c = wake_case(90_000, 10)
     check("allow убран — wake снова поднимает respawn", [x["argv"] for x in c] == [["respawn", "a1"]])
 
+    # ревью argus PR #32 (c6eb7e1): allow со старым mtime (cp -p, rsync -a, tar) сборка --if-changed не видит —
+    # правило перепроверяют каждый подъём сессии и check --quiet
+    run("domains", "build")
+    open(run_file, "w").write(json.dumps(win("athena-shop")))  # как после прежнего pantheon start
+    open(bad_allow, "w").write(json.dumps({"permissions": {"allow": ["Bash(gh *)"]}}))
+    old = time.time() - 86400
+    os.utime(bad_allow, (old, old))
+    open(log, "w").close()
+    run("domains", "build", "--if-changed")
+    check("allow со старым mtime: domains build --if-changed окно не пересобирает — оба файла окна на месте",
+          os.path.exists(win_file) and os.path.exists(run_file) and not calls())
+    saved = {f: open(f).read() for f in (win_file, run_file)}
+
+    def restore():  # каждый путь подъёма — с собранным окном, как его оставила сборка
+        for f, body in saved.items():
+            open(f, "w").write(body)
+
+    al0 = open(alerts_md).read() if os.path.exists(alerts_md) else ""
+    for tokens, idle, rc_, how in ((90_000, 10, None, "resume"), (90_000, 10, "1", "resume"), (120_000, 120, None, "fresh")):
+        restore()
+        n0 = slog().count(f"{how}-skip\tathena-shop\twake\tнет окна: окно не собрано")
+        r, c = wake_case(tokens, idle, extra={"FAKE_RESPAWN_RC": rc_} if rc_ else None)
+        check(f"allow со старым mtime, wake ({how}{', respawn с ошибкой' if rc_ else ''}): ни respawn, ни --resume, "
+              f"ни --bg; оба файла окна убраны; строка {how}-skip",
+              r.returncode == 0 and not c and not os.path.exists(win_file) and not os.path.exists(run_file)
+              and slog().count(f"{how}-skip\tathena-shop\twake\tнет окна: окно не собрано") == n0 + 1)
+    al1 = open(alerts_md).read()[len(al0):] if os.path.exists(alerts_md) else ""
+    check("allow со старым mtime, wake: одна тревога «не поднимаю» с файлом и правилом",
+          al1.count("athena-shop: не поднимаю (wake)") == 1 and "Bash(gh *)" in al1 and "не поднялась" not in al1)
+    restore()
+    open(agents_file, "w").write("[]")
+    open(log, "w").close()
+    r = run("start", "athena-shop", "дальше")
+    check("allow со старым mtime: pantheon start — код 1, не запускает, оба файла окна убраны",
+          r.returncode == 1 and not calls() and "окно не собрано" in r.stderr and "Bash(gh *)" in r.stderr
+          and not os.path.exists(win_file) and not os.path.exists(run_file))
+    restore()
+    run("check", "--quiet")
+    check("allow со старым mtime: check --quiet убирает оба файла окна — следующий wake её не поднимет",
+          not os.path.exists(win_file) and not os.path.exists(run_file))
+    os.remove(bad_allow)
+    run("domains", "build")
+    # respawn и --resume поднимают сессию в её cwd из claude agents: папка не папка запуска и пускает gh pr merge —
+    # не поднимаем; окно остаётся (start и свежий старт идут из папки запуска)
+    sub = os.path.join(br, "wt-cwd")
+    os.makedirs(os.path.join(sub, ".claude"), exist_ok=True)
+    open(os.path.join(sub, ".claude", "settings.local.json"), "w").write(
+        json.dumps({"permissions": {"allow": ["Bash(gh pr *)"]}}))
+    transcript(90_000, 10)
+    open(agents_file, "w").write(json.dumps([{"id": "a1", "name": "athena-shop", "state": "stopped",
+                                              "sessionId": "5a1a1a1a-0001", "cwd": sub, "startedAt": 1}]))
+    open(log, "w").close()
+    al0 = open(alerts_md).read() if os.path.exists(alerts_md) else ""
+    r = run("wake", extra={"FAKE_RESPAWN_RC": "1"})
+    al1 = open(alerts_md).read()[len(al0):] if os.path.exists(alerts_md) else ""
+    check("wake: папка сессии (cwd) не папка запуска и её allow пускает gh pr merge — ни respawn, ни --resume; "
+          "resume-skip, тревога; окно цело",
+          r.returncode == 0 and not calls() and "resume-skip\tathena-shop\twake\tпапка сессии" in slog()
+          and "сессия работала в" in al1 and "Bash(gh pr *)" in al1 and "не поднялась" not in al1
+          and os.path.exists(win_file))
+    _shutil.rmtree(sub)
+    r, c = wake_case(90_000, 10)
+    check("allow убран отовсюду — wake снова поднимает respawn", [x["argv"] for x in c] == [["respawn", "a1"]])
+
     # pantheon start: окно пропало между проверкой и записью файла запуска — прежний файл запуска не берётся
     open(agents_file, "w").write("[]")
     open(log, "w").close()

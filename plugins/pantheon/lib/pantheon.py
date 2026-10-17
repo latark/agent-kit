@@ -2105,7 +2105,8 @@ def allow_rule_merges(rule):
     программе (`/opt/homebrew/bin/gh *` — это `gh *`) и обёртки, пускающие любую команду: env с флагами и VAR=,
     command, xargs с флагами, eval, `bash|sh|zsh -c`. Поэтому `env *`, `bash -c *`, `command /x/gh *` ловятся, а
     обёртка без звёздочки и без команды после неё (`env`, `command -v gh`) — нет. Не ловятся свои скрипты-обёртки
-    (`./run.sh *`), sudo, nohup, timeout и подобное: граница — песочница и guard (README)."""
+    (`./run.sh *`), sudo, nohup, timeout, `exec gh *`, `time gh *`, `nice gh *` и подобное: граница — песочница и
+    guard (README)."""
     if not isinstance(rule, str):
         return False
     rule = rule.strip()
@@ -2152,10 +2153,31 @@ def project_allow_text(name, problems):
             "правило или сузить его до нужных команд gh (gh pr view *, gh pr checks *…)")
 
 
-def project_allow_report(name, launch, quiet=True):
-    """Проблемы папки запуска направления: тревога (quiet) или строка в stdout; без проблем тревога снимается.
-    → список проблем."""
-    problems = project_allow_problems(launch) if launch else []
+def drop_window(name):
+    """Убрать оба файла окна: settings/<имя>.json и файл запуска settings/run/<имя>.json — `claude respawn` берёт
+    прежние флаги с путём к нему (ревью argus PR #32). Без файла окна не поднимают ни pantheon start, ни wake, ни
+    дежурный."""
+    for f in (path("settings", name + ".json"), path("settings", "run", name + ".json")):
+        with contextlib.suppress(OSError):
+            os.remove(f)
+
+
+def allow_gate(name, folders=None):
+    """Проектные allow папки запуска направления name (metis-0137): есть правило с gh pr merge — оба файла окна
+    убираются. Зовут сборка, тик (check) и каждый подъём сессии: сборка по --if-changed сравнивает только mtime, а
+    файл со старым mtime (cp -p, rsync -a, tar) её не запускает (ревью argus PR #32). folders — папки из domains.json;
+    не направление (мастерская, штаб) — проверки нет. → список проблем."""
+    if folders is None:
+        folders = (read_json(path("domains.json"), {}).get("domains") or {}).get(name)
+    problems = project_allow_problems(launch_folder(folders)) if folders else []
+    if problems:
+        drop_window(name)
+    return problems
+
+
+def project_allow_report(name, problems, quiet=True):
+    """Проблемы папки запуска направления (allow_gate): тревога (quiet) или строка в stdout; без проблем тревога
+    снимается. → список проблем."""
     key = "project-allow-" + name
     if problems:
         text = project_allow_text(name, problems)
@@ -2220,15 +2242,11 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
 
     def one(name, folders, own, compact, deny, allow=None, agents=None, direction=False, auto_allow=None):
         if direction:
-            # проектные allow папки запуска с gh pr merge (metis-0137): окно не собирается, прежние файлы убираются —
-            # и окно, и файл запуска settings/run/<имя>.json: `claude respawn` берёт прежние флаги с путём к нему
-            # (ревью argus PR #32). Без файла окна не поднимают ни pantheon start, ни wake, ни дежурный
-            problems = project_allow_report(name, launch_folder(folders))
+            # проектные allow папки запуска с gh pr merge (metis-0137): окно не собирается, оба прежних файла окна
+            # убирает allow_gate
+            problems = project_allow_report(name, allow_gate(name, folders))
             if problems:
                 print(f"песочница {name}: окно не собрано — {project_allow_text(name, problems)}", file=sys.stderr)
-                for f in (os.path.join(out_dir, name + ".json"), os.path.join(out_dir, "run", name + ".json")):
-                    with contextlib.suppress(OSError):
-                        os.remove(f)
                 if stop_live:
                     project_allow_stop(name, problems)
                 return False
@@ -2565,12 +2583,34 @@ def no_window_reason(window):
     return f"нет окна {tilde(path('settings', window + '.json'))} — pantheon domains build"
 
 
+def cwd_allow_problems(name, a, role, launch, origin):
+    """respawn и --resume поднимают сессию в её прежней папке (cwd из claude agents), а окно проверено по папке
+    запуска. Папка координатора другая и её allow пускает gh pr merge — не поднимаем: строка resume-skip, тревога одна
+    на причину. Окно не снимается: pantheon start и свежий старт идут из папки запуска. → NO_WINDOW или 0."""
+    cwd = os.path.realpath(a["cwd"]) if role == "domain-coordinator" and isinstance(a.get("cwd"), str) and a["cwd"] else ""
+    problems = project_allow_problems(cwd) if cwd and cwd != launch else []
+    key = "project-allow-cwd-" + name
+    if not problems:
+        clear_once(key)
+        return 0
+    text = project_allow_text(name, problems)
+    start_log(f"resume-skip\t{name}\t{origin}\tпапка сессии {tilde(cwd)}: allow пускает gh pr merge")
+    alert_once(key, json.dumps(problems), f"{name}: не поднимаю ({origin}) — сессия работала в {tilde(cwd)}, не в папке "
+               f"запуска: {text}. Свежий старт (pantheon start {name}) пойдёт из папки запуска", "pantheon")
+    return NO_WINDOW
+
+
 def _resume_session(name, a, text, origin):
     target, rest = (("workshop", [name[len("daedalus-"):]]) if name.startswith("daedalus-") else (name, []))
     got = start_target(target, rest)
     if os.environ.get("PANTHEON_DRYRUN") == "1":
         print(f"[resume] {name} {a.get('id')} {origin}")
         return 0, None
+    if not isinstance(got, str):
+        allow_gate(name)  # allow со старым mtime сборка не заметила — окно снимается здесь (ревью argus PR #32)
+        bad = cwd_allow_problems(name, a, got[1], got[2], origin)
+        if bad:
+            return bad, None
     run = run_settings(name, got[1], got[3], origin) if not isinstance(got, str) else None
     if not run:  # ни respawn (прежние флаги с прежним файлом запуска), ни --resume без --settings
         return window_missing(name, origin, got if isinstance(got, str) else no_window_reason(got[3]), "resume"), None
@@ -2705,6 +2745,7 @@ def fresh_target(name, origin):
     if isinstance(got, str):
         return got
     _, role, folder, window, _ = got
+    allow_gate(name)  # allow со старым mtime сборка не заметила — окно снимается здесь (ревью argus PR #32)
     run = run_settings(name, role, window, origin)
     return (role, folder, run) if run else no_window_reason(window)
 
@@ -2990,6 +3031,10 @@ def start(rest):
     if target == "workshop":
         rest = rest[1:]
     win = path("settings", window + ".json")
+    problems = allow_gate(name)  # allow со старым mtime сборка не заметила (ревью argus PR #32)
+    if problems:
+        print(f"pantheon start: окно не собрано — {project_allow_text(name, problems)}", file=sys.stderr)
+        return 1
     if not os.path.isfile(win):
         print(f"pantheon start: нет окна {win.replace(HOME, '~')} — pantheon domains build", file=sys.stderr)
         return 1
@@ -4384,7 +4429,9 @@ def check(paths=None, quiet=False):
     if not paths:
         _check_long_state(quiet)
         for dname, fs in sorted((read_json(path("domains.json"), {}).get("domains") or {}).items()):
-            problems = project_allow_report(dname, launch_folder(fs), quiet)
+            # allow со старым mtime сборка по --if-changed не видит: check снимает окно сам, иначе следующий wake поднял
+            # бы сессию снова (ревью argus PR #32)
+            problems = project_allow_report(dname, allow_gate(dname, fs), quiet)
             if problems and quiet:  # тик (check --quiet): окно могла убрать ручная сборка, а сессия ещё работает
                 project_allow_stop(dname, problems)
     if not quiet or bad:
