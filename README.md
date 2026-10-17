@@ -89,8 +89,15 @@
   `gh pr create|merge` и сетевой git (push, fetch, pull) — у окна каждого направления; мастерской — только сетевой
   git и только при SSH-remote; у штаба ничего из этого нет (metis-0064).
   С 0.11.26 (metis-0098) окнам координаторов, Метиды в их числе, сборка кладёт и `autoMode.allow` — исключения
-  классификатора auto: `"$defaults"` (встроенные исключения остаются), «Pantheon Gated Merge» и «Pantheon Review
-  Record» (`coordinator_auto_allow`). Gated Merge описывает ровно форму, которую пускает запор guard:
+  классификатора auto: `"$defaults"` (встроенные исключения остаются), «Pantheon Gated Merge», «Pantheon Lead
+  Delivery» и «Pantheon Review Record» (`coordinator_auto_allow`).
+  Lead Delivery (с 0.11.38, metis-0215) разрешает лиду сдать работу по поручению координатора без отказа Auto-Mode
+  Bypass: push рабочей ветки в `origin`, запуск ревьюера `argus`, `pantheon night report` и `gh pr create` для этой
+  ветки. Push не покрывает `main`, `master` и ветку по умолчанию, а также `--force`, `-f`, `--force-with-lease`,
+  `+refspec`, удаление ветки, другие remote, `cd` и цепочки команд. Репозитории — только из `[merge_repos]`
+  направления; без такой записи правила сдачи нет, как и правила слияния. Слияние это правило не покрывает: его
+  пускает только Gated Merge.
+  Gated Merge описывает ровно форму, которую пускает запор guard:
   `gh pr merge <N> -R|--repo <owner/repo> --match-head-commit <sha>`, а последующие `gh pr view` или `git fetch`
   классификатор считает обычными. `--admin`, `--auto`, `gh api` и ядро защит (`plugins/guard/`,
   `plugins/pantheon/roles/`, `plugins/pantheon/lib/window_rules.py`, `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
