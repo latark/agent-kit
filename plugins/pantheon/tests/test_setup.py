@@ -73,7 +73,7 @@ def uv_body(py):
             'if [ "$1 $2" = "python find" ]; then echo "' + py + '"; fi\nexit 0\n')
 
 
-def new_root(with_uv=False, with_claude=True):
+def new_root(with_uv=False, with_claude=True, with_notifier=False):
     """→ (корень, env, папка заглушек). Пантеона в корне ещё нет."""
     root = os.path.realpath(tempfile.mkdtemp(prefix="tmp-setup-"))
     roots.append(root)
@@ -105,7 +105,7 @@ def new_root(with_uv=False, with_claude=True):
     sh_file(os.path.join(stubs, "gh"),
             'echo "gh $*" >> "$STUB_LOG"\n'
             'if [ "$1 $2" = "auth status" ]; then [ "$GH_LOGGED" = "1" ]; exit $?; fi\nexit 0\n')
-    for n in ("brew", "terminal-notifier"):
+    for n in ("brew",) + (("terminal-notifier",) if with_notifier else ()):
         sh_file(os.path.join(stubs, n), f'echo "{n} $*" >> "$STUB_LOG"\nexit 0\n')
     env = {"PATH": stubs + ":/usr/bin:/bin", "HOME": home, "PANTHEON_HOME": os.path.join(home, "ai", "pantheon"),
            "PANTHEON_STATE": os.path.join(root, "state"), "PANTHEON_VIEW": os.path.join(root, "view"),
@@ -143,8 +143,9 @@ def main():
           os.listdir(pan) if os.path.isdir(pan) else "нет папки")
     agents = os.path.join(env["HOME"], ".claude", "agents")
     names = sorted(os.listdir(agents)) if os.path.isdir(agents) else []
-    check("роли собраны в HOME/.claude/agents (argus.md, hephaestus-*)",
-          "argus.md" in names and any(n.startswith("hephaestus-") for n in names), names)
+    # hephaestus-<направление> собирается по реестру направлений; в пустом Пантеоне направлений нет
+    check("роли собраны в HOME/.claude/agents (argus, dev-*, hq, workshop)",
+          all(n in names for n in ("argus.md", "dev-sonnet.md", "hq.md", "workshop.md", "domain-coordinator.md")), names)
     cfg = os.path.join(env["PANTHEON_STATE"], "config.toml")
     cfg_text = open(cfg, encoding="utf-8").read() if os.path.exists(cfg) else ""
     check("python записан в config.toml, исполнители = [claude]",
@@ -169,12 +170,15 @@ def main():
     check("повторный запуск: отказ, код ≠ 0, текст понятный",
           r2.returncode != 0 and "уже есть" in r2.stderr, (r2.returncode, r2.stderr))
     check("повторный запуск: файлы Пантеона не изменились", tree_hash(pan) == h1)
-    check("повторный запуск: ни claude, ни gh не вызывались", len(log_of(env)) == n_log, log_of(env)[n_log:])
+    new = [x for x in log_of(env)[n_log:] if x.split()[0] in ("claude", "gh", "brew", "terminal-notifier")]
+    check("повторный запуск: ни claude, ни gh, ни brew не вызывались", not new, new)
 
     # --- 3. uv уже есть, ответ «да» на вопрос gh → gh auth setup-git вызван; curl не нужен ---------------------
-    root, env, _ = new_root(with_uv=True)
+    root, env, _ = new_root(with_uv=True, with_notifier=True)
     r = setup(env, "да\n", "--no-codex")
     lg = log_of(env)
+    check("terminal-notifier уже стоит — brew не вызывался", not any(x.startswith("brew") for x in lg)
+          and "[ок] terminal-notifier: уже стоит" in r.stdout, lg)
     check("ответ «да»: gh auth setup-git вызван", r.returncode == 0 and "gh auth setup-git" in lg,
           (r.returncode, r.stdout[-800:] + r.stderr[-400:]))
     check("uv уже есть — curl не вызывался", not any(x.startswith("curl") for x in lg), lg)
