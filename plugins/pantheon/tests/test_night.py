@@ -498,6 +498,25 @@ def test_night_alerts_and_close():
               for ln in rep), f"сводка: {rep}")
 
 
+def test_fractional_budget():
+    """metis-0214: при budget_pct=1 тревоги 50/80 идут по дробному расходу (снимок недели с дробным процентом).
+    Порог 50 % от 1 — 0,5 п. п., поэтому 0,4 тревоги не даёт, 0,5 даёт 50, 0,85 — 50 и 80."""
+    e = Env('primary_host = "mac-a"\n[limits.night]\nbudget_pct = 1\ncheck_pct = 0.2\ncap_pct = 1\n')
+    open_night(e, hm("23:05"))
+    t0 = hm("23:06")
+    resets = e.resets
+    u0 = e.at_line(t0, 0)
+    e.watch(t0)
+    st = e.state_of()
+    check(st["budget_pct"] == 1, f"бюджет 1: {st}")
+    for x, d, want in (("00:30", 0.4, []), ("01:00", 0.5, [50]), ("01:30", 0.85, [50, 80])):
+        e.snap(hm(x), u0 + d, resets)
+        e.watch(hm(x))
+        st = e.state_of()
+        check(st["alerts"] == want and abs(st["spent"] - d) < 1e-6,
+              f"{x} расход {d}: тревоги {st['alerts']}, потрачено {st['spent']}, ждали {want}")
+
+
 def test_morning_five_hour():
     e = Env()
     open_night(e, hm("23:05"))

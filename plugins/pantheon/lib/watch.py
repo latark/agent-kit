@@ -107,6 +107,42 @@ def holders(name, agents, registry):
     return out
 
 
+def idle_holder(a):
+    """Простаивающий держатель имени (metis-0212): закончил ход с живым процессом (`state` done) или Claude Code сам
+    перезапустил фоновую сессию, и задания у неё нет (`state` working остался от прежнего процесса, `status` idle).
+    Работает — `status` busy, ждёт разрешения, живые субагенты и фоновые команды (`inFlight` из state.json, как у
+    запрета сна Mac) или назначено своё пробуждение (ScheduleWakeup, CronCreate, /loop): Claude Code 2.1.302 кладёт
+    его в `inFlight` (вид session_cron, поле `wake`) и ставит `selfWake` в state.json.
+    Вкладку и сессию из реестра не трогаем: там человек."""
+    if a.get("kind") not in (None, "background") or not a.get("id") or not a.get("sessionId"):
+        return False
+    status = str(a.get("status") or "").lower()
+    if not (a.get("state") == "done" or (a.get("state") == "working" and status == "idle")):
+        return False
+    if status in ("busy", "working") or "permission" in str(a.get("waitingFor") or "").lower():
+        return False
+    if a.get("subagents") or a.get("backgroundTasks"):
+        return False
+    js = awake().session_state(a)
+    if a.get("selfWake") or js.get("selfWake"):
+        return False
+    for fl in (a.get("inFlight"), js.get("inFlight")):
+        if isinstance(fl, dict) and (fl.get("tasks") or fl.get("queued") or fl.get("wake")
+                                     or "session_cron" in (fl.get("kinds") or ())):
+            return False
+        if fl and not isinstance(fl, dict):
+            return False
+    return True
+
+
+def nudge_target(hold):
+    """Кому передать задание вместо «уже работает»: все держатели имени простаивают → самый новый из них; хоть один
+    работает, ждёт вас или открыт во вкладке → None."""
+    if not hold or not all(idle_holder(a) for a in hold):
+        return None
+    return max(hold, key=lambda a: a.get("startedAt") or 0)
+
+
 def primary_reason():
     """Самозапуск и возобновление после паузы — только на главном Mac (SCHED-14): состояние, журналы и claude agents
     у каждого Mac свои, и два Mac подняли бы одно направление (ревью argus)."""
@@ -119,10 +155,11 @@ def primary_reason():
     return None if P.host() == ph else f"не главный Mac (главный — {ph})"
 
 
-def wake_block(name, agents, registry, auto):
+def wake_block(name, agents, registry, auto, nudge=False):
     """Почему сессию сейчас будить нельзя, или None. Одна проверка для всех, кто будит: самозапуск, снятие паузы,
     pantheon wake <имя> и общий pantheon wake (ревью argus). auto — будит программа, а не вы или Зевс по вашему слову:
-    тогда ещё общая пауза планировщика, главный Mac и пятичасовой лимит."""
+    тогда ещё общая пауза планировщика, главный Mac и пятичасовой лимит. nudge — передача задания живой простаивающей
+    сессии (metis-0212): держатели имени не мешают, пока все они простаивают (nudge_target)."""
     if os.path.exists(P.path("stopped", name)):
         return "остановлено вами"
     m = P.maintenance_active()
@@ -131,7 +168,8 @@ def wake_block(name, agents, registry, auto):
     p = P.load_pause(name)
     if p:
         return f"пауза по нагрузке ({p.get('reason')})"
-    if holders(name, agents, registry):
+    hold = holders(name, agents, registry)
+    if hold and not (nudge and nudge_target(hold)):
         return "уже работает"
     if auto:
         if os.path.exists(P.path("paused")):
@@ -154,9 +192,9 @@ WAIT_REASONS = ("идёт технический", "пауза по нагруз
                 "пятичасовой", "недельный лимит")
 
 
-def recheck(name, auto):
+def recheck(name, auto, nudge=False):
     """Та же проверка по свежему claude agents — под блокировкой имени перед самим подъёмом."""
-    return lambda: wake_block(name, P.agents_all() or [], P.sessions_registry(), auto)
+    return lambda: wake_block(name, P.agents_all() or [], P.sessions_registry(), auto, nudge)
 
 
 # --- снимок сессий (COMM-14) ---------------------------------------------------------
@@ -1007,9 +1045,21 @@ def autostart_check(agents, registry, st, t):
         if not s.get("pending"):
             continue
         last = float(s.get("last") or 0)
-        if holders(d, agents, registry):
+        hold = holders(d, agents, registry)
+        if hold and nudge_target(hold) and t - last >= 60:
+            # снова простаивает после запуска или передачи задания (metis-0212): успех, только если сдвинула STATUS.md;
+            # иначе сбой — бесполезная передача не повторяется каждый час, три подряд — самозапуск встаёт
+            moved = False
+            with contextlib.suppress(OSError):
+                moved = os.stat(os.path.join(P.PANTHEON, "directions", d, "STATUS.md")).st_mtime > last
+            if moved or t - last >= AUTOSTART_HEALTHY:
+                succeeded(s)
+            else:
+                fail(d, s, t, f"снова простаивает через {(t - last) / 60:.0f} мин, STATUS.md не менялся")
+            continue
+        if hold:
             if t - last >= AUTOSTART_HEALTHY:
-                s.update(pending=False, fails=0)
+                succeeded(s)
             continue
         mine = [a for a in agents if a.get("name") == d and (a.get("startedAt") or 0) / 1000 >= last - 60]
         newest = max(mine, key=lambda a: a.get("startedAt") or 0) if mine else None
@@ -1020,11 +1070,18 @@ def autostart_check(agents, registry, st, t):
             with contextlib.suppress(OSError):
                 moved = os.stat(os.path.join(P.PANTHEON, "directions", d, "STATUS.md")).st_mtime > last
             if moved or t - last >= AUTOSTART_HEALTHY:
-                s.update(pending=False, fails=0)
+                succeeded(s)
             else:
                 fail(d, s, t, f"закончила ход за {(t - last) / 60:.0f} мин, STATUS.md не менялся")
         elif t - last >= 300:
             fail(d, s, t, "сессия упала" if newest else "сессия не появилась в claude agents")
+
+
+def succeeded(s):
+    """Запуск или передача задания удались: сбои забыты, и пауза после сбоя (`next`) — тоже. Иначе прошедший `next`
+    пускал бы следующую попытку на первом же проходе, а не через час после этой (ревью argus: 6 перезапусков за 20 мин)."""
+    s.update(pending=False, fails=0)
+    s.pop("next", None)
 
 
 def fail(d, s, t, why):
@@ -1076,26 +1133,25 @@ def autostart(agents, registry, doms, t, dry=False):
     for d, tids in sorted(want.items()):
         s = st.setdefault(d, {})
         hold = holders(d, agents, registry)
-        if hold:
-            if any(a.get("state") == "done" for a in hold):
-                if dry:
-                    say(f"{d}: закончила ход — толкнуть сообщением")
-                else:
-                    P.alert_once(f"autostart-idle-{d}", ",".join(tids), f"{d} закончила ход, а задачи с вашим "
-                                 f"решением ждут ({', '.join(tids[:3])}) — Зевсу: толкнуть её сообщением (SendMessage "
-                                 f"{d})", "watch")
-            else:
-                say(f"{d}: уже работает")
+        # простаивающий держатель (metis-0212) — передать той же сессии то же задание, а не «уже работает»: Claude Code
+        # сам перезапустил фоновую сессию и задания у неё нет (working + idle) или закончила ход с живым процессом (done)
+        poke = nudge_target(hold)
+        if hold and not poke:
+            say(f"{d}: уже работает")
             continue
-        why = wake_block(d, agents, registry, auto=True)
+        what = (f"{d}: закончила ход, а задачи с вашим решением ждут" if poke and poke.get("state") == "done"
+                else f"{d}: Claude Code сам перезапустил фоновую сессию, задания у неё нет")
+        why = wake_block(d, agents, registry, auto=True, nudge=bool(poke))
         if not why and s.get("gave_up"):
             why = f"самозапуск встал после сбоев (pantheon resume {d})"
-        if not why and len(running) >= AUTOSTART_MAX:
+        if not why and not poke and len(running) >= AUTOSTART_MAX:  # передача места не занимает: сессия уже есть
             why = f"нет места: уже работают {', '.join(running)} (не больше {AUTOSTART_MAX} направлений)"
-        if not why and len(running) + len(shop) >= SESSIONS_MAX:
+        if not why and not poke and len(running) + len(shop) >= SESSIONS_MAX:
             why = f"нет места: сессий Пантеона {len(running) + len(shop)} из {SESSIONS_MAX}"
-        if not why:  # новое дело: жёлтая зона днём, тяжёлые, ночь и её бюджет, утро после 04:00 (metis-0127)
-            ok, gw = P.night_mod().gate("autostart", t, agents, registry)
+        # новое дело: жёлтая зона днём, тяжёлые, ночь и её бюджет, утро после 04:00 (metis-0127); передача задания —
+        # тоже новое дело, а простаивающий держатель тяжёлым не считается (его working остался от прежнего процесса)
+        if not why:
+            ok, gw = P.night_mod().gate("autostart", t, [a for a in agents if a not in hold], registry)
             why = None if ok else f"недельный лимит: {gw}"
         nxt = float(s.get("next") or float(s.get("last") or 0) + AUTOSTART_BACKOFF)
         if not why and t < nxt:
@@ -1110,7 +1166,11 @@ def autostart(agents, registry, doms, t, dry=False):
             elif not trusted(got[2]):
                 why = f"нет доверия к {got[2].replace(P.HOME, '~')} — одна интерактивная сессия claude там и «Да»"
         if dry:
-            say(f"{d}: " + (f"ждёт — {why}" if why else f"поднял бы сейчас (задачи {', '.join(tids[:5])})"))
+            if poke:
+                say(f"{what} — " + (f"передача задания ждёт: {why}" if why else
+                                    f"передал бы задание сейчас (задачи {', '.join(tids[:5])})"))
+            else:
+                say(f"{d}: " + (f"ждёт — {why}" if why else f"поднял бы сейчас (задачи {', '.join(tids[:5])})"))
             continue
         if not s.get("gave_up"):  # сбои сняты (resume, удачный запуск) — следующий «встал» снова macOS
             P.clear_fault(f"autostart-gaveup-{d}")
@@ -1131,14 +1191,20 @@ def autostart(agents, registry, doms, t, dry=False):
                 "задачи, продолжай с первой по приоритету; что ждёт владельца — Зевсу строкой.")
         s.update(last=t, pending=True)
         P.write_json(P.path("autostart.json"), st)  # до запуска: проход могут оборвать по таймауту
-        rc = resume_or_start(d, agents, task, origin="tick", auto=True)
-        P.alert(f"самозапуск: {d} по задачам {', '.join(tids[:5])} — " + ("запущен" if rc == 0 else f"не вышло, код {rc}"),
-                "watch")
+        if poke:  # тот же путь, что продолжение остановленной: claude respawn + текст для хука push (P.resume_session)
+            rc = P.resume_session(d, poke, task, "tick", recheck=recheck(d, True, nudge=True))[0]
+            P.alert(f"{what} — " + (f"передал задание (задачи {', '.join(tids[:5])})" if rc == 0 else
+                                    f"передать задание не вышло, код {rc}"), "watch")
+        else:
+            rc = resume_or_start(d, agents, task, origin="tick", auto=True)
+            P.alert(f"самозапуск: {d} по задачам {', '.join(tids[:5])} — " + ("запущен" if rc == 0 else
+                                                                               f"не вышло, код {rc}"), "watch")
         if rc != 0:
             fail(d, s, t, f"код запуска {rc}")
         else:  # список сессий этого прохода её ещё не видит — «запрет сна Mac» держится по этой метке
             awake().RESUMED.append(d)
-        running.append(d)
+        if not poke:
+            running.append(d)
         started = True
     if not dry:
         P.write_json(P.path("autostart.json"), st)
