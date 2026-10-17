@@ -221,11 +221,99 @@ def main():
         '[[direction]]\nname = "metis-pantheon"\nfolders = ["~/projects/agent-kit"]\n')
     os.makedirs(os.path.join(tmp, ".claude", "pantheon"))
     open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w").write('[coordinators]\nmetis-pantheon = ["~/projects/agent-kit"]\n')
-    env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state}
+    # общий слой ролей плагина пуст: здесь каталог ролей — только то, что тест кладёт сам (оба слоя — test_roles.py)
+    env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
+           "PANTHEON_PLUGIN_ROLES": os.path.join(tmp, "plugin-roles-empty")}
     subprocess.run([PY311, "-I", LIB, "domains", "build"], env=env, capture_output=True)
     dj = json.load(open(os.path.join(state, "domains.json")))["domains"]
     check("реестр: папка Метиды у athena пропущена, у Метиды осталась",
           dj["athena-shop"] == ["~/projects/br"] and dj["metis-pantheon"] == ["~/projects/agent-kit"])
+
+    # зарезервированные имена окон: hq, workshop, job-* — не направления (metis-0163)
+    rtmp = tempfile.mkdtemp(prefix="tick-test-")
+    rhome, rstate = make(rtmp, "")
+    open(os.path.join(rhome, "directions.toml"), "w").write(
+        "".join(f'[[direction]]\nname = "{n}"\nfolders = ["~/projects/br"]\n'
+                for n in ("hq", "workshop", "job-iris", "job-x", "athena-shop")))
+    os.makedirs(os.path.join(rtmp, ".claude", "pantheon"))
+    open(os.path.join(rtmp, ".claude", "pantheon", "policy.toml"), "w").write("")
+    renv = {"PATH": os.environ["PATH"], "HOME": rtmp, "PANTHEON_HOME": rhome, "PANTHEON_STATE": rstate,
+            "PANTHEON_NO_NOTIFY": "1"}
+    rr = subprocess.run([PY311, "-I", LIB, "domains", "build"], env=renv, capture_output=True, text=True)
+    rdj = json.load(open(os.path.join(rstate, "domains.json")))["domains"]
+    check("реестр: направления hq, workshop, job-* пропущены с понятной ошибкой, обычное имя осталось",
+          list(rdj) == ["athena-shop"] and rr.stderr.count("зарезервировано под окна системы") == 4
+          and "«job-iris»" in rr.stderr)
+
+    # проектные allow папки запуска, пускающие gh pr merge: окно не собирается (metis-0137)
+    def allow_build(tag, rules, fname="settings.json", second=None):
+        atmp = os.path.realpath(tempfile.mkdtemp(prefix="tick-test-"))
+        ahome, astate = make(atmp, "")
+        os.makedirs(os.path.join(atmp, "projects", "br", ".claude"))
+        os.makedirs(os.path.join(atmp, "projects", "ok"))
+        open(os.path.join(ahome, "directions.toml"), "w").write(
+            '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n'
+            '[[direction]]\nname = "themis-docs"\nfolders = ["~/projects/ok"]\n')
+        os.makedirs(os.path.join(atmp, ".claude", "pantheon"))
+        open(os.path.join(atmp, ".claude", "pantheon", "policy.toml"), "w").write("")
+        aenv = {"PATH": os.environ["PATH"], "HOME": atmp, "PANTHEON_HOME": ahome, "PANTHEON_STATE": astate,
+                "PANTHEON_NO_NOTIFY": "1"}
+        cli = lambda *a: subprocess.run([PY311, "-I", LIB, *a], env=aenv, capture_output=True, text=True)  # noqa: E731
+        wr = lambda r: open(os.path.join(atmp, "projects", "br", ".claude", fname), "w").write(  # noqa: E731
+            json.dumps({"permissions": {"allow": r}}))
+        if second is not None:  # прежний файл окна от сборки без проблемы должен исчезнуть
+            wr(second)
+            cli("domains", "build")
+        wr(rules)
+        r = cli("domains", "build")
+        win = os.path.join(astate, "settings", "athena-shop.json")
+        return r, os.path.exists(win), os.path.exists(os.path.join(astate, "settings", "themis-docs.json")), cli, ahome
+
+    r, built_a, built_t, cli, ahome = allow_build("a", ["Bash(gh *)", "Bash(ls *)"])
+    check("allow Bash(gh *) в .claude/settings.json папки запуска — окно координатора не собирается; сообщение называет "
+          "файл и правило и что сделать; соседнее направление собрано",
+          not built_a and built_t and ".claude/settings.json" in r.stderr and "Bash(gh *)" in r.stderr
+          and "убрать правило или сузить" in r.stderr)
+    alerts = open(os.path.join(ahome, "alerts.md")).read() if os.path.exists(os.path.join(ahome, "alerts.md")) else ""
+    chk = cli("check")
+    check("тревога по направлению; pantheon check показывает то же предупреждение",
+          "Bash(gh *)" in alerts and "предупреждение" in chk.stdout and "athena-shop" in chk.stdout
+          and "Bash(gh *)" in chk.stdout)
+    r, built_a, built_t, *_ = allow_build("b", ["Bash(gh pr view *)", "Bash(gh pr checks *)", "Bash(git status)", "Read(*)"])
+    check("allow Bash(gh pr view *) и прочие узкие — окно собирается", built_a and "окно не собрано" not in r.stderr)
+    for rule in ("Bash", "Bash(*)", "Bash(gh:*)", "Bash(gh pr merge:*)", "Bash(gh pr *)", "Bash(gh pr merge*)",
+                 "Bash(gh pr merge 12 --admin)", "Bash(gh pr merge --admin *)", "Bash(gh pr merge --auto *)",
+                 "Bash(gh pr merge -R *)", "Bash(gh pr merge --squash *)", "Bash(gh pr merge)",
+                 "Bash(gh pr merge --admin)", "Bash(gh  pr merge *)", "Bash(GH_REPO=a/b gh pr merge *)",
+                 "Bash(GH pr Merge *)", "Bash(g*)", "Bash(gh p*)",
+                 # абсолютный путь к gh — это gh
+                 "Bash(/opt/homebrew/bin/gh pr merge *)", "Bash(/usr/local/bin/gh *)", "Bash(/usr/bin/gh pr merge)",
+                 "Bash(/opt/homebrew/bin/gh:*)",
+                 # обёртки, пускающие любую команду
+                 "Bash(env *)", "Bash(bash -c *)", "Bash(sh -c *)", "Bash(zsh -c *)", "Bash(command *)",
+                 "Bash(xargs *)", "Bash(eval *)",
+                 # их вариации: путь, VAR=, флаги, «:*», регистр, обёртка вокруг gh, кавычка после -c
+                 "Bash(/usr/bin/env *)", "Bash(FOO=1 env *)", "Bash(env -i *)", "Bash(env FOO=1 *)", "Bash(env:*)",
+                 "Bash(ENV  *)", "Bash(env gh pr merge *)", "Bash(command /opt/homebrew/bin/gh *)",
+                 "Bash(bash -lc *)", "Bash(bash -c 'gh pr merge *')", "Bash(xargs -n1 gh pr merge *)",
+                 "Bash(env -u HOME gh pr merge *)", "Bash(bash *)", "Bash(eval gh pr merge 12 --admin)"):
+        r, built_a, *_ = allow_build("c", [rule])
+        check(f"allow {rule!r} — окно не собирается", not built_a and rule in r.stderr)
+    shown = [x.strip() for x in r.stdout.splitlines() if "окон ролей" in x]
+    check("несобранное окно не числится в списке собранных окон ролей",
+          bool(shown) and all("athena-shop" not in x for x in shown) and "themis-docs" in shown[0])
+    for rule in ("Bash(gh pr view *)", "Bash(gh pr checks *)", "Bash(gh pr diff *)", "Bash(gh run view *)",
+                 "Bash(git *)", "Bash(env)", "Bash(bash ./scripts/test.sh *)", "Bash(command -v gh)",
+                 "Bash(/opt/homebrew/bin/gh pr view *)", "Bash(env FOO=1)", "Bash(env gh pr view *)", "Bash(bash -c)",
+                 "Bash(./scripts/*)"):
+        r, built_a, *_ = allow_build("g", [rule])
+        check(f"allow {rule!r} — не слияние: окно собирается", built_a)
+    r, built_a, *_ = allow_build("d", ["Bash(gh *)"], fname="settings.local.json")
+    check("то же в settings.local.json — не собирается, файл назван", not built_a and "settings.local.json" in r.stderr)
+    r, built_a, *_ = allow_build("e", ["Bash(gh *)"], second=["Bash(ls *)"])
+    check("окно было собрано, правило появилось — прежний файл окна убран (pantheon start не стартует)", not built_a)
+    r, built_a, *_ = allow_build("f", ["Bash(gh:*)", "Bash(ghx)"][1:])
+    check("Bash(ghx) — не gh pr merge: окно собирается", built_a)
 
     # песочница окон ролей (SEC-19): строгий вид, папки направления, SSH-remote → сетевой git мимо песочницы
     br = os.path.join(tmp, "projects", "br", "app")
@@ -247,7 +335,10 @@ def main():
                  '[private]\ncoordinators = ["mnemo-brain"]\npaths = ["~/ai/knowledge/me", "~/ai/pantheon/.git/git-crypt"]\n'
                  '[merge_repos]\nathena-shop = ["acme-co/br-app"]\n'
                  'metis-pantheon = ["tools-org/sync", "acme-co/kit", "bad owner/x", "acme-co/kit`"]\n'
-                 'mnemo-brain = ["acme-co/notes"]\n')
+                 'mnemo-brain = ["acme-co/notes"]\n'
+                 # что закрыто штабу — только [hq] (metis-0182); выдуманный корпус lecture-notes
+                 '[hq]\nclosed_dirs = ["~/projects/lecture-notes", "~/.cache/qmd", "~/.cache/lecture-notes", '
+                 '"~/.claude/projects/*lecture-notes*"]\nclosed_collections = ["notes"]\n')
     os.makedirs(os.path.join(state, "settings"), exist_ok=True)
     open(os.path.join(state, "settings", "old-direction.json"), "w").write("{}")
     dash = lambda p: re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(p))
@@ -333,6 +424,9 @@ def main():
     check("песочница: запреты и настоящими путями — .git внутри каждой разрешённой папки, личное — оба вида",
           real("projects/br") + "/**/.git/config" in dw and real("projects/br") + "/.git/hooks" in dw
           and cache_a + "/**/.git/hooks" in dw and real("ai/knowledge/me") in dr and "~/ai/knowledge/me" in dr)
+    check("denyWrite: .claude/agents каждой папки (репозитория) окна, и в worktree внутри неё — как .git/config (metis-0140)",
+          real("projects/br") + "/.claude/agents" in dw and real("projects/br") + "/**/.claude/agents" in dw
+          and all(f + "/.claude/agents" in dw for f in box["filesystem"]["allowWrite"]))
     check("песочница: terminal-notifier ролям не прочитать и не запустить",
           "/opt/homebrew/Cellar/terminal-notifier" in box["filesystem"]["denyRead"]
           and "/opt/homebrew/Cellar/terminal-notifier" in sw["sandbox"]["filesystem"]["denyRead"])
@@ -361,8 +455,8 @@ def main():
                                      "pantheon archive", "pantheon jobs *", "pantheon domains build",
                                      "pantheon roles build", "pantheon stop *", "pantheon resume *", "pantheon pause *",
                                      "pantheon restart *", "pantheon saved *", "pantheon who", "pantheon agents"])
-    corp = "expert-corpus"  # trace-ok: 0182-core — снять в PR ядра 0182 (папки — из policy.toml [hq])
-    check("окно штаба: корпус закрыт для чтения — песочница и правило Read (SEC-13, решение 15.10)",
+    corp = "lecture-notes"
+    check("окно штаба: корпус из [hq].closed_dirs закрыт для чтения — песочница и правило Read (SEC-13, решение 15.10)",
           all(x in hb["filesystem"]["denyRead"] for x in (f"~/projects/{corp}", "~/.cache/qmd",
                                                            f"~/.cache/{corp}", f"~/.claude/projects/*{corp}*"))
           and "Read(~/.cache/qmd/**)" in hq["permissions"]["deny"]
@@ -401,9 +495,10 @@ def main():
           not wide and not any("TMPDIR" in w["env"] for w in every))
 
     merge = "Bash(gh pr merge *)"
-    check("окно координатора направления: gh pr merge в permissions.allow; у мастерской и штаба правила нет (metis-0050)",
-          sa.get("permissions", {}).get("allow") == [merge] and sm.get("permissions", {}).get("allow") == [merge]
-          and merge not in json.dumps(sw.get("permissions", {})) and merge not in json.dumps(hq.get("permissions", {})))
+    check("окно координатора направления: gh pr merge НЕТ в permissions.allow (allow срабатывает раньше классификатора "
+          "и пускал бы --admin/--auto, metis-0137); у мастерской и штаба тоже",
+          all(merge not in json.dumps(w.get("permissions", {})) and not (w.get("permissions") or {}).get("allow")
+              for w in (sa, sm, sn, sw, hq)))
     am = {n: w.get("autoMode", {}).get("allow") or [] for n, w in
           (("athena-shop", sa), ("metis-pantheon", sm), ("mnemo-brain", sn), ("zz", sz))}
     rule = lambda n, head: [r for r in am[n] if r.startswith(head)]
@@ -433,11 +528,11 @@ def main():
           and "(`acme-co/kit`, `tools-org/sync`)" in gm[0] and "bad owner" not in gm[0] and "kit``" not in gm[0]
           and not any(x in texts for x in ("athena-shop", "metis-pantheon", "mnemo-brain", "workshop",
                                            "agent-kit", "projects/br", "ai/knowledge")))
-    check("правило Gated Merge: обе формы репозитория, перечень argus, ядро — кнопка владельца, --admin/--auto не "
+    check("правило Gated Merge: обе формы репозитория, перечень argus, ядро — сливает сам владелец, --admin/--auto не "
           "разрешает (metis-0098)",
           bool(gated) and all(x in gated[0] for x in ("`-R <owner/repo>`", "`--repo <owner/repo>`",
                                                       "--match-head-commit", "checklist", "plugins/guard/",
-                                                      "owner's button", "`--admin`, `--auto`", "`gh api`",
+                                                      "plugins/pantheon/roles/", "window_rules.py", "owner to merge them himself", "`--admin`, `--auto`", "`gh api`",
                                                       "still judged by Merge Without Review")))
     check("штаб и мастерская: autoMode в окне нет — классификатор у них со встроенными правилами (metis-0098)",
           "autoMode" not in hq and "autoMode" not in sw)

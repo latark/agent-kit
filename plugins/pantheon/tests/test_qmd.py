@@ -237,11 +237,28 @@ def test_qmd_config():
                   r.stderr)
 
 
-def hook(ti, tool="mcp__qmd__query", role=None, window=None, raw=False):
+try:
+    import tomllib  # noqa: F401
+    HAS_TOMLLIB = True
+except ImportError:  # системный 3.9: хук не прочтёт [hq] — штабу qmd закрыт целиком (ошибка, а не «пусто»)
+    HAS_TOMLLIB = False
+# закрытые штабу коллекции — только из [hq] policy.toml (metis-0182); в домашней папке тестов — две
+HQ_HOME = tempfile.mkdtemp(prefix="qmd-hq-")
+os.makedirs(os.path.join(HQ_HOME, ".claude", "pantheon"))
+with open(os.path.join(HQ_HOME, ".claude", "pantheon", "policy.toml"), "w") as _fh:
+    _fh.write('[hq]\nclosed_dirs = []\nclosed_collections = ["corpus", "legal"]\n')
+
+
+def hq_open(denied):
+    """Штабу пропуск: на 3.11+ — нет отказа; на 3.9 [hq] не прочитать — отказ."""
+    return not denied if HAS_TOMLLIB else denied
+
+
+def hook(ti, tool="mcp__qmd__query", role=None, window=None, raw=False, home=None):
     ev = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": ti}
     if role:
         ev["agent_type"] = role
-    env = {"PATH": os.environ["PATH"], "HOME": tempfile.gettempdir()}
+    env = {"PATH": os.environ["PATH"], "HOME": home or HQ_HOME}
     if window:
         env["PANTHEON_ROLE"] = window
     r = subprocess.run([sys.executable, CTX, "qmd-query"], input=json.dumps(ev),
@@ -263,13 +280,13 @@ def test_hook():
     q = {"searches": vec, "collections": ["corpus"], "rerank": False}
     check("штабу корпус закрыт: query по corpus — отказ", hook(q, role="hq"))
     check("координатору корпус открыт", not hook(q, role="domain-coordinator"))
-    check("штабу другие коллекции открыты", not hook({**q, "collections": ["pantheon"]}, role="hq"))
+    check("штабу другие коллекции открыты", hq_open(hook({**q, "collections": ["pantheon"]}, role="hq")))
     g = "mcp__qmd__get"
     check("штаб: get qmd://corpus/… — отказ", hook({"file": "qmd://corpus/lec.md"}, g, "hq"))
     check("штаб: get по docid — отказ", hook({"file": "#abc123"}, g, "hq"))
     check("штаб: get с .. — отказ", hook({"file": "qmd://pantheon/../corpus/x.md"}, g, "hq"))
     check("штаб: get относительным путём — отказ", hook({"file": "data/lec.md"}, g, "hq"))
-    check("штаб: get qmd://pantheon/… — пропуск", not hook({"file": "qmd://pantheon/board.md:10"}, g, "hq"))
+    check("штаб: get qmd://pantheon/… — пропуск", hq_open(hook({"file": "qmd://pantheon/board.md:10"}, g, "hq")))
     m = "mcp__qmd__multi_get"
     check("штаб: multi_get со списком, где есть corpus — отказ",
           hook({"pattern": "qmd://pantheon/a.md,qmd://corpus/b.md"}, m, "hq"))
@@ -279,9 +296,10 @@ def test_hook():
     check("штаб: query по legal и pantheon — отказ", hook({**q, "collections": ["pantheon", " legal"]}, role="hq"))
     out = hook({**q, "collections": ["legal"]}, window="hq", raw=True)
     check("штаб: отказ по legal — нейтральный текст: координатору направления поручением, без имён",
-          "координатору направления" in out and "поручением" in out and "legal" in out
+          "координатору направления" in out and "поручением" in out and ("legal" in out or not HAS_TOMLLIB)
           and "themis" not in out and "Telegram" not in out, out)
-    check("штаб (окно hq): query по pantheon — пропуск", not hook({**q, "collections": ["pantheon"]}, window="hq"))
+    check("штаб (окно hq): query по pantheon — пропуск",
+          hq_open(hook({**q, "collections": ["pantheon"]}, window="hq")))
     check("штаб: get qmd://legal/… — отказ", hook({"file": "qmd://legal/x.md"}, g, window="hq"))
     check("штаб: multi_get qmd://legal/… — отказ", hook({"pattern": "qmd://legal/2026-09*.md"}, m, "hq"))
     check("координатор: query по legal — пропуск", not hook({**q, "collections": ["legal"]}, role="domain-coordinator",
@@ -305,6 +323,48 @@ def test_hook():
     check("штаб: ресурс другого сервера — пропуск", not hook({"server": "x", "uri": "qmd://corpus/a.md"}, rr, "hq"))
     check("координатор: ресурс qmd://corpus/… — пропуск",
           not hook({"server": "qmd", "uri": "qmd://corpus/x.md"}, rr, "domain-coordinator"))
+
+    test_hook_policy(vec)
+
+
+def test_hook_policy(vec):
+    """Закрытые штабу коллекции — только [hq].closed_collections (metis-0182): без раздела — пусто, свой список —
+    закрыт он, битое значение или битый TOML — штабу qmd закрыт целиком с причиной, остальным роли не мешает."""
+    def home_with(text):
+        h = tempfile.mkdtemp(prefix="qmd-pol-")
+        if text is not None:
+            os.makedirs(os.path.join(h, ".claude", "pantheon"))
+            with open(os.path.join(h, ".claude", "pantheon", "policy.toml"), "w") as fh:
+                fh.write(text)
+        return h
+    q = {"searches": vec, "rerank": False}
+    g, m = "mcp__qmd__get", "mcp__qmd__multi_get"
+    nofile = home_with(None)
+    check("[hq]: нет policy.toml — штабу ничего не закрыто (в коде своих коллекций нет)",
+          not hook({**q, "collections": ["corpus"]}, role="hq", home=nofile)
+          and not hook({**q, "collections": ["legal"]}, window="hq", home=nofile)
+          and not hook({"file": "qmd://corpus/x.md"}, g, "hq", home=nofile))
+    nosec = home_with('[private]\nroles = ["hq"]\n')
+    check("[hq]: нет раздела — штабу ничего не закрыто",
+          hq_open(hook({**q, "collections": ["corpus"]}, role="hq", home=nosec)))
+    own = home_with('[hq]\nclosed_collections = ["notes"]\n')
+    check("[hq]: свой список — закрыт он, прочее открыто",
+          hook({**q, "collections": ["notes"]}, role="hq", home=own)
+          and hook({"file": "qmd://notes/a.md"}, g, "hq", home=own)
+          and hq_open(hook({**q, "collections": ["corpus"]}, role="hq", home=own)))
+    for name, text in (("строка вместо списка", '[hq]\nclosed_collections = "notes"\n'),
+                       ("не строка в списке", '[hq]\nclosed_collections = ["notes", 1]\n'),
+                       ("пустая строка", '[hq]\nclosed_collections = [" "]\n'),
+                       ("папка не от ~/", '[hq]\nclosed_dirs = ["projects/x"]\n'),
+                       ("[hq] не таблица", 'hq = ["notes"]\n'),
+                       ("policy.toml не TOML", '[hq\nclosed_collections = []\n')):
+        h = home_with(text)
+        out = hook({**q, "collections": ["pantheon"]}, role="hq", home=h, raw=True)
+        ok = ('"deny"' in out and "[hq]" in out and "policy.toml" in out
+              and hook({"file": "qmd://pantheon/a.md"}, g, "hq", home=h)
+              and hook({"pattern": "qmd://pantheon/*.md"}, m, window="hq", home=h)
+              and not hook({**q, "collections": ["pantheon"]}, role="domain-coordinator", home=h))
+        check(f"[hq] битый ({name}) — штабу qmd закрыт целиком с причиной, координатору открыт", ok, out)
 
 
 def test_old_labels():

@@ -1137,12 +1137,66 @@ QMD_HOW = ("Ищи по смыслу в своей коллекции: searches=
 
 QMD_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,30}")
 # Штабу закрыты коллекции с чужим текстом и сырыми выгрузками: у штаба личное и действия наружу, чужой текст в его окне —
-# путь внедрения. Вопросы по ним — координатору направления поручением.
-QMD_HQ_CLOSED = {"corpus", "legal"}  # trace-ok: 0182-core — снять в PR ядра 0182
+# путь внедрения. Вопросы по ним — координатору направления поручением. Какие коллекции — [hq].closed_collections
+# policy.toml (hq_policy), в коде их нет.
 QMD_HQ_CLOSED_WHY = "штабу коллекция %s закрыта — вопрос передай координатору направления поручением"
 
 
-def _qmd_hq_target_ok(item):
+# --- [hq] policy.toml: что закрыто окну штаба (metis-0182) ---------------------------------------
+# Папки (closed_dirs — песочница окна штаба, pantheon domains build) и коллекции qmd (closed_collections — хук
+# qmd-query) у каждой установки свои, в коде значений нет (решение владельца 17.10). Раздела нет — пусто, а infra-check
+# тревожит; битое значение — ошибка, а не «пусто»: qmd штабу закрыт, окно штаба не пересобирается. Здесь, а не в
+# pantheon.py: хук qmd-query идёт на python3 из PATH, pantheon.py берёт это же через ctx_mod().
+POLICY = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
+HQ_KEYS = ("closed_dirs", "closed_collections")
+
+
+def hq_policy(path=None):
+    """[hq] policy.toml → {"closed_dirs": […], "closed_collections": […], "present": есть ли раздел}. Файла или раздела
+    нет — пустые списки. Файл не прочитать, не TOML, нет tomllib (Python 3.9), [hq] не таблица, ключ не список
+    непустых строк, папка не от «~/» или «/» — ValueError с тем, что не так."""
+    try:
+        fh = open(path or POLICY, "rb")
+    except FileNotFoundError:
+        return {"closed_dirs": [], "closed_collections": [], "present": False}
+    except OSError as e:
+        raise ValueError("policy.toml не прочитать (%s)" % type(e).__name__)
+    with fh:
+        try:
+            import tomllib
+        except ImportError:
+            raise ValueError("policy.toml не разобрать: нет tomllib (Python %d.%d)" % sys.version_info[:2])
+        try:
+            policy = tomllib.load(fh)
+        except (OSError, ValueError) as e:  # TOMLDecodeError и битый UTF-8 — ValueError
+            raise ValueError("policy.toml не разобрать (%s)" % type(e).__name__)
+    sec = policy.get("hq")
+    if sec is None:
+        return {"closed_dirs": [], "closed_collections": [], "present": False}
+    if not isinstance(sec, dict):
+        raise ValueError("[hq] — не таблица")
+    out = {"present": True}
+    for k in HQ_KEYS:
+        v = sec.get(k, [])
+        if not isinstance(v, list) or not all(isinstance(x, str) and x.strip() for x in v):
+            raise ValueError("[hq].%s — не список непустых строк" % k)
+        out[k] = [x.strip() for x in v]
+    bad = [x for x in out["closed_dirs"] if not (x.startswith("~/") or x.startswith("/"))]
+    if bad:
+        raise ValueError("[hq].closed_dirs — папка не от «~/» или «/»: %s" % bad[0][:80])
+    return out
+
+
+def _qmd_hq_closed():
+    """(закрытые штабу коллекции, None) или (None, что не так): [hq] не разобрать — штабу qmd закрыт целиком."""
+    try:
+        return set(hq_policy()["closed_collections"]), None
+    except ValueError as e:
+        hook_log("qmd-query", "[hq] policy.toml: %s" % e)
+        return None, str(e)
+
+
+def _qmd_hq_target_ok(item, closed):
     """Адрес документа для штаба: только qmd://<коллекция>/<путь> открытой ему коллекции, без «..». docid (#abc),
     относительный или абсолютный путь и глоб без коллекции могут указать на корпус — их штабу не даём."""
     item = item.strip()
@@ -1150,7 +1204,7 @@ def _qmd_hq_target_ok(item):
     if not item.startswith("qmd://") or ".." in item or "%" in item or "\\" in item or any(ord(c) < 32 for c in item):
         return False
     coll = item[len("qmd://"):].split("/", 1)[0]
-    return bool(QMD_NAME.fullmatch(coll)) and coll not in QMD_HQ_CLOSED
+    return bool(QMD_NAME.fullmatch(coll)) and coll not in closed
 
 
 def cmd_qmd_query(ev):
@@ -1181,6 +1235,12 @@ def _qmd_why(ev):
     # и действиями наружу — пересказ выдачи принёс бы чужой текст Зевсу. Поручение координатору направления — его окно
     hq = session_role(ev) == "hq" or os.environ.get("PANTHEON_ROLE") == "hq"
     why = None
+    closed = set()
+    if hq and (tool.endswith("__query") or tool.endswith("__get") or tool.endswith("__multi_get")):
+        closed, err = _qmd_hq_closed()
+        if closed is None:  # битый [hq] — не «пусто»: какие коллекции закрыты, не знаем, поэтому закрыто всё
+            return ("штабу qmd закрыт, пока не исправят раздел [hq] ~/.claude/pantheon/policy.toml (%s; правит "
+                    "metis-pantheon) — вопрос передай координатору направления поручением" % err)
     if tool.endswith("__query"):
         colls = ti.get("collections")
         if ti.get("query") or not ti.get("searches"):
@@ -1191,8 +1251,8 @@ def _qmd_why(ev):
             why = "назови коллекцию: collections=[…]"
         elif any(not isinstance(x, dict) or x.get("type") not in ("vec", "lex") for x in ti["searches"]):
             why = "только type \"vec\" (по смыслу) или \"lex\" (номера и коды); hyde не используем"
-        elif hq and any(not isinstance(c, str) or c.strip() in QMD_HQ_CLOSED for c in colls):
-            bad = next((c.strip() for c in colls if isinstance(c, str) and c.strip() in QMD_HQ_CLOSED), "corpus")
+        elif hq and any(not isinstance(c, str) or c.strip() in closed for c in colls):
+            bad = next((c.strip() for c in colls if isinstance(c, str) and c.strip() in closed), "(не строка)")
             why = QMD_HQ_CLOSED_WHY % bad
     elif hq and tool == "ReadMcpResourceTool":
         # ресурс qmd://… сервер ищет без схемы и по окончанию пути во всех коллекциях: «pantheon/x.md» найдёт и
@@ -1202,7 +1262,7 @@ def _qmd_why(ev):
     elif hq and (tool.endswith("__get") or tool.endswith("__multi_get")):
         raw = ti.get("file") if tool.endswith("__get") else ti.get("pattern")
         items = str(raw or "").split(",") if tool.endswith("__multi_get") else [str(raw or "")]
-        if not all(_qmd_hq_target_ok(x) for x in items):
+        if not all(_qmd_hq_target_ok(x, closed) for x in items):
             why = ("штабу — только адреса qmd://<коллекция>/<путь> из результатов поиска, без docid и закрытых "
                    "штабу коллекций (вопрос по ним — координатору направления поручением)")
     return why

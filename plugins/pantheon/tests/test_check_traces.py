@@ -60,18 +60,21 @@ def main():
     check("след — код 1, «путь:строка: маркер»", r.returncode == 1 and "lib/a.py:2: Квазимодо" in r.stdout, r.stdout)
     check("печатается только совпавший маркер, не весь список", "ZorbaCorp" not in r.stdout + r.stderr)
 
+    # исключений нет (metis-0182): ни метка в строке, ни папка guard, ни marketplace.json след не прячут
     ok = make_repo({"lib/a.py": "x = 'ZorbaCorp'  # trace-ok: 0182-core — снять в PR ядра\n"})
     r = run("--markers", markers, "--repo", ok)
-    check("строка с trace-ok: 0182-core — пропуск, код 0", r.returncode == 0, r.stdout)
+    check("метка trace-ok в строке след не прячет — код 1", r.returncode == 1 and "lib/a.py:1: ZorbaCorp" in r.stdout,
+          r.stdout)
 
     ex = make_repo({"plugins/guard/g.py": "# ZorbaCorp\n"})
     r = run("--markers", markers, "--repo", ex)
-    check("путь plugins/guard/ из EXCLUDE — пропуск, код 0", r.returncode == 0, r.stdout)
+    check("plugins/guard/ проверяется — код 1", r.returncode == 1 and "plugins/guard/g.py:1" in r.stdout, r.stdout)
 
     mk = make_repo({".claude-plugin/marketplace.json": '{"description": "ZorbaCorp"}\n',
                     ".claude-plugin/other.json": '{"description": "чисто"}\n'})
     r = run("--markers", markers, "--repo", mk)
-    check("marketplace.json из EXCLUDE — пропуск, код 0", r.returncode == 0, r.stdout)
+    check("marketplace.json проверяется — код 1", r.returncode == 1 and "marketplace.json:1" in r.stdout
+          and "other.json" not in r.stdout, r.stdout)
 
     r = run("--markers", os.path.join(_ROOT, "нет.txt"), "--repo", dirty)
     check("нет файла маркеров — код 2 и предупреждение в stderr", r.returncode == 2 and "пропущена" in r.stderr, r.stderr)

@@ -32,10 +32,36 @@
   Штаб закрывает чужие папки в `/tmp/claude-<uid>` и `~/.claude/projects` шаблонами по префиксам, а не перечислением,
   поэтому мусор тестов список не раздувает. Корень `/tmp/claude-<uid>` и папки в нём на `tmp` открыты: это `$TMPDIR`
   песочницы, в нём временные файлы heredoc и mktemp и временные папки `mktemp -d` и `tempfile`.
-- Окна ролей (с 0.11.14, `sandbox_build`): окну координатора направления дано правило `Bash(gh pr merge *)` — слияние PR
-  без вопроса классификатора auto (`COORDINATOR_ALLOW`); мастерской и штабу правила нет. Каждое слияние по-прежнему
-  проверяет guard: главная сессия domain-coordinator или лид её направления (`hephaestus-*`, `apollo-*`; metis-0054),
-  свои папки, без `--admin` и `--auto`.
+- Окна ролей (с 0.11.14, `sandbox_build`): мастерской и штабу правила слияния нет. Окну координатора направления
+  `allow` для `gh pr merge` не даётся совсем (`COORDINATOR_ALLOW` пуст, metis-0137): слияние без вопроса пускает только
+  правило autoMode «Pantheon Gated Merge» (шлюз слияния, ниже), а каждое слияние дополнительно проверяет guard: главная
+  сессия domain-coordinator или лид её направления (`hephaestus-*`, `apollo-*`; metis-0054), свои папки, без `--admin`
+  и `--auto`.
+  Проверка проектных allow (metis-0137): `.claude/settings.json` проекта сливается с `--settings` окна, а правило allow
+  срабатывает раньше классификатора auto. Поэтому `Bash(gh *)` в `.claude/settings.json` или `settings.local.json`
+  папки запуска возвращало бы слияние `--admin`/`--auto` мимо шлюза. `sandbox_build` проверяет оба файла: правило
+  `Bash`, `Bash(*)` или `Bash(<шаблон>)`, где начало шаблона до первой `*` — начало `gh pr merge` (`gh *`, `gh pr *`,
+  `g*`) или само начинается с `gh pr merge` (`gh pr merge --admin *`, точное `gh pr merge 32`), а также старая форма
+  `:*`. Пробелы схлопываются, регистр не важен, ведущие `VAR=значение` снимаются, путь к программе сводится к имени
+  (`/opt/homebrew/bin/gh *` — это `gh *`). Обёртки, пускающие любую команду, снимаются с начала шаблона, и остаток
+  проверяется так же: `env` с флагами и `VAR=`, `command`, `xargs` с флагами, `eval`, `bash|sh|zsh -c` с кавычкой.
+  Поэтому ловятся `env *`, `/usr/bin/env -i *`, `bash -c *`, `bash *`, `command /opt/homebrew/bin/gh *`. Обёртка без
+  `*` и без команды после неё безопасна: `env`, `command -v gh`; запуск своего скрипта `bash ./scripts/test.sh *` —
+  тоже. Не ловятся свои скрипты-обёртки (`./run.sh *`), `sudo`, `nohup`, `timeout`, `exec gh *`, `time gh *`,
+  `nice gh *`: граница — песочница и guard.
+  При таком правиле окно направления не собирается, прежние файлы
+  окна и запуска (`settings/run/<имя>.json`, его берёт `claude respawn`) убираются, в stderr строка с файлом и
+  правилом (убрать правило или сузить до `gh pr view *`, `gh pr checks *`), плюс тревога. `pantheon check` и
+  `pantheon direction check` показывают то же предупреждение по каждому направлению. Штаб и мастерская не проверяются.
+  Без файла окна сессию не поднимает никто: `pantheon start`, `wake`, дежурный и техперезапуск (respawn, `--resume`,
+  свежий старт) отказывают с тревогой — одной на причину; `--resume` без `--settings` не запускается никогда.
+  Правило перепроверяется и при каждом подъёме сессии, и в `check --quiet`, а не только при сборке: `--if-changed`
+  сравнивает время изменения файлов, и allow со старым mtime (`cp -p`, `rsync -a`, распаковка tar) сборку не запускает.
+  Нашлось правило — оба файла окна убираются и подъём идёт тем же путём «нет окна»; respawn и `--resume` к тому же
+  проверяют папку сессии (`cwd` из `claude agents`), если она не папка запуска.
+  Claude Code перечитывает настройки на ходу, поэтому живую сессию с таким правилом останавливает тик
+  (`domains build --if-changed` и `check --quiet`): `claude stop` и тревога. Ручной `domains build` её не трогает —
+  его зовут и тесты с настоящим `claude` в PATH.
   Мимо песочницы gh (в ней не работает) — только чтение: `gh pr view|checks|diff|list`, `gh run view|list|watch`,
   `gh repo view`, `gh auth status`; `gh api`, `gh issue` и `gh run cancel|rerun|delete` в песочнице падают.
   `gh pr create|merge` и сетевой git (push, fetch, pull) — у окна каждого направления; мастерской — только сетевой
@@ -45,7 +71,7 @@
   Record» (`coordinator_auto_allow`). Gated Merge описывает ровно форму, которую пускает запор guard:
   `gh pr merge <N> -R|--repo <owner/repo> --match-head-commit <sha>`, а последующие `gh pr view` или `git fetch`
   классификатор считает обычными. `--admin`, `--auto`, `gh api` и ядро защит (`plugins/guard/`,
-  `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
+  `plugins/pantheon/roles/`, `plugins/pantheon/lib/window_rules.py`, `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
   из `policy.toml`; направлению без такой записи правила слияния нет. Окну с доступом к личному (`[private]`
   `coordinators`, сейчас mnemo-brain) правило слияния не выдаётся и при `[merge_repos]`: его PR сливает владелец
   (metis-0156). Имён владельца, направлений и репозиториев в
@@ -54,6 +80,18 @@
   после `--` (тест-раннер проекта) классификатор судит как отдельную, merge, push, `gh`, сеть, правка файлов и
   `sh -c`/`python3 -c` там остаются Self-Approval или CI Bypass (metis-0156). Штабу, мастерской и окнам задач
   `autoMode` не дают. Классификатор читает `autoMode` из `--settings` окна, а из `.claude/settings.json` проекта — нет.
+  Запись в `.claude/agents` (metis-0140): песочница окна закрывает на запись `.claude/agents` в каждой разрешённой
+  папке и `**/.claude/agents` во вложенных (в том числе в worktree внутри репозитория); `guard` закрывает то же хуком.
+  Последствие для git: в репозиториях, где `.claude/agents` лежит в git,
+  `git pull`, `merge`, `checkout` и `worktree add`, которые меняют эти файлы, в окне упадут; подтягивает их владелец
+  у себя. Это намеренно: роли агентов репозитория окно менять не должно.
+  Зарезервированные имена (metis-0163): `hq`, `workshop` и всё вида `job-*` — имена окон системы
+  (`settings/hq.json`, `workshop.json`, `job-<роль>.json`); направлением в `directions.toml` их назвать нельзя —
+  `pantheon domains build` и `pantheon direction check` отказывают понятной строкой.
+  Раздел `[private]` в `policy.toml` (кто и какие пути считает личными) читается по правилу guard 0.5.9: умолчание
+  (roles `hq`, `chiron`; coordinators `mnemo-brain`; четыре личных пути) действует и без `policy.toml` вовсе, пустые
+  `roles` и `coordinators` означают «никого», пустой `paths` — умолчание. Тест `test_private_conf` сверяет умолчание
+  с `DEFAULT_PRIVATE` у guard.
   Задачи расписания `claude -p --agent <роль>` идут в песочнице окна задачи `settings/job-<роль>.json` (metis-0063):
   роли — только из `JOB_ROLES` (clio, prometheus, iris; iris — с `--model sonnet`), тик сам добавляет `--settings`.
   Окно пишет только своё (clio и prometheus — `~/ai/knowledge`, iris — `~/ai/pantheon/scout`), память ролей и свой
@@ -90,6 +128,9 @@
   запуском qmd и без ключа `update` (его qmd исполняет через bash). Сервер MCP — служба `qmd` на 127.0.0.1:8181;
   подключение на новом Mac — `npm install -g @tobilu/qmd`, затем `pantheon qmd install` (MCP уровня пользователя).
   Хук `ctx.py qmd-query` пропускает только поиск `vec`/`lex` в названных коллекциях с `rerank: false` (QMD-04).
+- `plugins/pantheon/lib/window_rules.py` — правила окон координаторов для слияния через шлюз guard
+  (`permissions.allow` и `autoMode.allow`, metis-0174); их собирает `pantheon domains build`. Файл — в ядре защит:
+  PR, который его задевает, ждёт слияния владельцем.
 - `plugins/pantheon/lib/view-sync.sh` — копия `~/ai/pantheon` только для чтения для Obsidian. Если в копии нет
   `.obsidian`, кладёт образец настроек из `plugins/pantheon/share/pantheon-view-obsidian/` (сниппеты, закладки, базовые
   плагины; существующую папку не трогает). Тему и плагин Style Settings владелец ставит в Obsidian сам.
@@ -106,8 +147,10 @@
   делает дежурный, хук только дописывает.
 - `plugins/pantheon/hooks/agents.py` (0.11.19, P0-6) — PreToolUse `Agent|Task|Skill` в окнах штаба и координаторов:
   главная сессия зовёт только субагентов из списка окна, навык с `context: fork` проверяется по своему `agent:`.
-  Субагенты окна (лиды с их dev-*, argus) не проверяются. Списки — в `pantheon.py`: `HQ_AGENTS`, `COORDINATOR_AGENTS`,
-  `COORDINATOR_EXTRA_AGENTS`, у координатора ещё свои лиды из реестра. В окна добавлены и правила `deny Agent(…)`:
+  Субагенты окна (лиды с их dev-*, argus) не проверяются. Списки — в `pantheon.py`: `HQ_AGENTS`, `COORDINATOR_AGENTS`
+  (argus, talos, prometheus, Explore и разработчики dev-haiku, dev-sonnet, dev-opus: координатор отдаёт им мелкие
+  правки сам; codex-dev не входит — его зовёт только лид), `COORDINATOR_EXTRA_AGENTS`, у координатора ещё свои лиды из
+  реестра. В окна добавлены и правила `deny Agent(…)`:
   штабу — все лиды и главные роли, направлению — chiron, главные роли и лиды других направлений. Любой сбой хука —
   код 2, то есть отказ. После выпуска нужны `pantheon domains build` и перезапуск окон. С 0.11.23 штабу открыт
   momus — ревизор навыка audit (`agent: momus`): только чтение и веб, пишет лишь свой отчёт в `~/ai/knowledge/Inbox`.
