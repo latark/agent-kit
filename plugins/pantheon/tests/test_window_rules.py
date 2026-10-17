@@ -57,6 +57,17 @@ def main():
     check("Lead Delivery: main/master только как исключение, строка (4) ограничена репозиториями направления",
           "not `main`, `master`" in lead and lead.count("master") == 1
           and "on one of this direction's repositories" in lead.split("(4)")[1])
+    # metis-0215, argus-42b: каждое исключение и сужение правила — отдельной подстрокой, чтобы удаление или
+    # расширение любого из них давало красный тест.
+    for part in ("`--force`, `-f`, `--force-with-lease`, a `+` refspec",
+                 "`--mirror`, `--all`, `--tags`, any other remote or URL, `cd` or chained commands",
+                 "not `main`, `master` or the repository's default branch",
+                 "to the `origin` remote of one of this direction's repositories (",
+                 "(a coordinator main session or its lead subagent `hephaestus-*` or `apollo-*`)"):
+        check(f"Lead Delivery: дословно «{part[:50]}…»", part in lead, part)
+    check("Lead Delivery: круг сессий не шире координатора и лидов — без «any subagent»",
+          "any subagent" not in lead and "any session" not in lead and "subagent" in lead.split("(1)")[0]
+          and lead.split("(1)")[0].count("`") == 4, lead.split("(1)")[0])
     check("auto_mode: раздел autoMode — копия списка",
           w.auto_mode(allow) == {"allow": allow} and w.auto_mode(allow)["allow"] is not allow)
 
