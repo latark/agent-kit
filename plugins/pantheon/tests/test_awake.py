@@ -614,12 +614,16 @@ def test_pantheon_wake_fresh_sees_limited():
         w = recheck() if recheck else None
         got.append(w)
         return 0 if not w else 1
+    saved = (P.fresh_reason, P.state_files, P.fresh_start)
     P.fresh_reason = lambda a, t=None: "контекст большой"
     P.state_files = lambda n: []
     P.fresh_start = fs
     buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        P._wake(False)
+    try:
+        with contextlib.redirect_stdout(buf):
+            P._wake(False)
+    finally:
+        P.fresh_reason, P.state_files, P.fresh_start = saved
     check(got == [None], f"recheck свежего старта на лимите: {got} {buf.getvalue()!r}")
     check("свежей сессией" in buf.getvalue(), f"нет свежего старта в выводе: {buf.getvalue()!r}")
 
