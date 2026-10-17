@@ -6,7 +6,7 @@
 Модули pantheon и awake грузятся в процесс теста, их папки (HOME, PANTHEON, STATE) подменены временными. Настоящий
 caffeinate не запускается: вместо него скрипт из временной папки, пишущий журнал запусков и спящий. `ps` подменён
 (в песочнице окна он закрыт, а проверять нужно «наш ли это процесс»). Подъём сессий — запись вызова
-resume_session, запор ночного модуля — подставленная функция.
+resume_session, шлюз запуска ночного модуля — подставленная функция.
 """
 import json
 import os
@@ -437,7 +437,7 @@ def test_limit_resume():
     AW.limit_resume(e.agents_list, [], DOMS, LIM + 11 * 60)
     check(e.calls == [("hermes-site", "[Пантеон: лимит сброшен] продолжай с файла состояния", "limit")],
           f"подъём: {e.calls}")
-    check(e.gate_calls == ["respawn"], f"запор respawn: {e.gate_calls}")
+    check(e.gate_calls == ["respawn"], f"шлюз запуска respawn: {e.gate_calls}")
     check(AW.RESUMED == ["hermes-site"], "проход не запомнил подъём")
     AW.limit_resume(e.agents_list, [], DOMS, LIM + 16 * 60)
     AW.limit_resume(e.agents_list, [], DOMS, LIM + 3600)
@@ -461,12 +461,12 @@ def test_limit_resume_gate_refused_then_retry():
     e.gate_ok = (False, "темп недели выше нормы")
     AW.limit_resume(e.agents_list, [], DOMS, LIM + 11 * 60)
     AW.limit_resume(e.agents_list, [], DOMS, LIM + 16 * 60)
-    check(not e.calls and e.gate_calls == ["respawn", "respawn"], f"запор отказал, а поднял: {e.calls} {e.gate_calls}")
+    check(not e.calls and e.gate_calls == ["respawn", "respawn"], f"шлюз запуска отказал, а поднял: {e.calls} {e.gate_calls}")
     log = open(os.path.join(e.state, "logs", "start.log")).read()
     check("limit-gate" in log and "темп недели" in log, f"отказ не в журнале: {log!r}")
     e.gate_ok = (True, None)
     AW.limit_resume(e.agents_list, [], DOMS, LIM + 21 * 60)
-    check(len(e.calls) == 1, f"после снятия запора не поднял: {e.calls}")
+    check(len(e.calls) == 1, f"после снятия шлюза запуска не поднял: {e.calls}")
 
 
 def alerts_text(e):
@@ -511,14 +511,14 @@ def test_limit_resume_no_night_module():
     AW.P.LIB = os.path.join(e.tmp, "nolib")   # night.py там нет
     try:
         ok, why = AW.gate("respawn", MON)
-        check(not ok and "не найден" in why, f"без night.py запор не отказал: {ok} {why}")
+        check(not ok and "не найден" in why, f"без night.py шлюз запуска не отказал: {ok} {why}")
         AW.limit_resume(e.agents_list, [], DOMS, at(2026, 10, 19, 9, 0))
         check(not e.calls, "поднял без ночного модуля")
     finally:
         AW.P.LIB = real
     AW._NIGHT = types.SimpleNamespace(gate=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("сбой")))
     ok, why = AW.gate("wake", MON)
-    check(not ok and "запор упал" in why, f"исключение запора: {ok} {why}")
+    check(not ok and "шлюз запуска упал" in why, f"исключение шлюза запуска: {ok} {why}")
 
 
 def test_limit_skips_stopped_and_paused():
@@ -567,7 +567,7 @@ def test_wake_waiting():
     AW.wake_waiting(e.agents_list, [], DOMS, MON)
     check(e.calls == [("hermes-site", f"[Пантеон: есть задача без блокера] возьми {tid} из очереди", "wake-waiting")],
           f"будильник: {e.calls}")
-    check(e.gate_calls == ["wake"], f"запор wake: {e.gate_calls}")
+    check(e.gate_calls == ["wake"], f"шлюз запуска wake: {e.gate_calls}")
     AW.wake_waiting(e.agents_list, [], DOMS, MON + 3599)
     check(len(e.calls) == 1, "будит чаще раза в час")
     AW.wake_waiting(e.agents_list, [], DOMS, MON + 3601)
@@ -674,11 +674,11 @@ def test_wake_waiting_gate_refused():
         e.task("hermes-site")
         e.gate_ok = (False, why)
         AW.wake_waiting(e.agents_list, [], DOMS, MON)
-        check(not e.calls and e.gate_calls == ["wake"], f"запор «{why}» отказал, а разбудил: {e.calls}")
-    # отказ не сжигает «раз в час»: после снятия запора будит сразу
+        check(not e.calls and e.gate_calls == ["wake"], f"шлюз запуска «{why}» отказал, а разбудил: {e.calls}")
+    # отказ не сжигает «раз в час»: после снятия шлюза запуска будит сразу
     e.gate_ok = (True, None)
     AW.wake_waiting(e.agents_list, [], DOMS, MON + 60)
-    check(len(e.calls) == 1, "после снятия запора не разбудил")
+    check(len(e.calls) == 1, "после снятия шлюза запуска не разбудил")
 
 
 def test_wake_waiting_skips_limited_and_stopped():
