@@ -145,7 +145,7 @@ class Env:
         with open(os.path.join(self.state, "owner-log", "board.jsonl"), "a") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-    def run(self, *args, t=T0, extra=None):
+    def run(self, *args, t=T0, extra=None, argv=None):
         # свежий снимок лимита строки статуса (lib/night.py): без него самозапуск закрыт — «лимит неизвестен»
         sl = os.path.join(self.home, ".local", "state", "claude-statusline")
         os.makedirs(sl, exist_ok=True)
@@ -160,7 +160,7 @@ class Env:
                "PANTHEON_FAKE_LIMIT": "10", "PANTHEON_CAFFEINATE": os.path.join(self.bin, "caffeinate")}
         env.update(self.extra)
         env.update(extra or {})
-        return subprocess.run([PY311, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=60)
+        return subprocess.run([*(argv or [PY311, "-I", LIB]), *args], env=env, capture_output=True, text=True, timeout=60)
 
     def calls(self):
         if not os.path.exists(self.log):
@@ -813,6 +813,57 @@ def test_fresh_on_all_resume_paths_0207():
     r = e.run("restart", "--go", t=T0 + 40, extra={"PANTHEON_DRYRUN": "1", "PANTHEON_ALERTS_IN_DRYRUN": "1"})
     check("[fresh] rg-dir" in r.stdout and "[resume] rg-dir" not in r.stdout,
           f"restart --go после долгого простоя — не свежий старт: {r.stdout[-500:]} {r.stderr[-300:]}")
+
+
+_DIRECT_RESUME = r"""
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("pantheon_lib", sys.argv[1])
+P = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(P)
+a = json.loads(sys.argv[2])
+def recheck():
+    os.makedirs(P.path("stopped"), exist_ok=True)       # метка stopped появилась, пока ждали блокировку
+    open(P.path("stopped", a["name"]), "w").write("вы\n")
+    return "остановлено вами"
+print(P.resume_session(a["name"], a, "продолжай", "wake-waiting", recheck=recheck))
+"""
+
+
+def test_fresh_path_recheck_0207():
+    """metis-0207 (argus PR #44): на пути свежего старта в resume_session recheck под блокировкой имени действует так
+    же, как на обычном пути: сессия с контекстом 130 тыс. и простоем 2 ч не останавливается и не пересоздаётся."""
+    # 1) recheck вернул причину (метка stopped появилась) — ни claude stop, ни --bg, строка resume-skip
+    e = Env()
+    e.direction("fr-dir")
+    a = bg("fr-dir", "blocked", "fcfcfcfc-1")
+    e.agents([a])
+    transcript(e, a, 130_000, T0 - 7200)
+    r = e.run(LIB, json.dumps(a), t=T0,
+              extra=QUICK, argv=[PY311, "-I", "-c", _DIRECT_RESUME])
+    c = e.calls()
+    check(r.stdout.strip() == "(1, None)" and not [x for x in c if x[:1] == ["stop"] or "--bg" in x]
+          and "\tresume-skip\tfr-dir\tfcfcfcfc\twake-waiting\tостановлено вами" in _start_log(e),
+          f"recheck на пути свежего старта не остановил подъём: {r.stdout!r} {c} {_start_log(e)!r} {r.stderr[-400:]}")
+
+
+def test_fresh_path_busy_0207():
+    """metis-0207 (argus PR #44): занятая блокировка имени на пути свежего старта — отказ, а не остановка сессии."""
+    import fcntl
+    # имя занято (блокировка start-<имя> взята) — ни claude stop, ни --bg, строка resume-busy
+    e = Env()
+    e.direction("fb-dir")
+    e.task("fb-0001", "fb-dir")
+    a = bg("fb-dir", "blocked", "fdfdfdfd-1")
+    e.agents([a])
+    transcript(e, a, 130_000, T0 - 7200)
+    os.makedirs(e.st("locks"), exist_ok=True)
+    with open(e.st("locks", "start-fb-dir.lock"), "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        e.run("watch", t=T0, extra=ZEUS_RUN)
+    c = e.calls()
+    check(not [x for x in c if x[:1] == ["stop"] or "--bg" in x or x[:1] == ["respawn"]]
+          and "\tresume-busy\tfb-dir\tfdfdfdfd\twake-waiting" in _start_log(e),
+          f"занятая блокировка имени на пути свежего старта проигнорирована: {c} {_start_log(e)!r}")
 
 
 def test_resume_copy_note():
