@@ -1826,6 +1826,9 @@ def _managed_guard_active():
 
 
 HQ_MISSING = "в policy.toml нет раздела [hq]: штабу ничего не закрыто"
+HOOK_PYTHON = "python3"  # как в hooks.json guard; тесты подменяют
+HOOKS_NO_TOMLLIB = ("python3 хуков без tomllib (Python до 3.11): guard не читает policy.toml, правило corpus-role "
+                    "пусто — Метиде: python3 в PATH должен быть 3.11+")
 
 
 def infra_check():
@@ -1870,7 +1873,19 @@ def infra_check():
         else:
             P.alert_once("hq-policy-missing", "1", HQ_MISSING + " — Метиде: добавить раздел, образец — "
                          "policy.example.toml плагина guard", "watch")
-    lines = [("готово  " if ok else "НЕТ     ") + text for ok, text in res]
+    # guard читает policy.toml через tomllib (Python 3.11+). Хуки зовут python3 из PATH: без tomllib guard
+    # раздел [corpus] не видит и corpus-role молча пуст (metis-0182) — до перевода хуков на полный путь (0.5.11)
+    try:
+        ok = subprocess.run([HOOK_PYTHON, "-I", "-c", "import tomllib"], capture_output=True,
+                            timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        ok = False
+    add(ok, "python3 хуков читает policy.toml (tomllib, Python 3.11+)")
+    if ok:
+        P.clear_once("hooks-python-no-tomllib")
+    else:
+        P.alert_once("hooks-python-no-tomllib", "1", HOOKS_NO_TOMLLIB, "watch")
+    lines =[("готово  " if ok else "НЕТ     ") + text for ok, text in res]
     return all(ok for ok, _ in res), lines
 
 

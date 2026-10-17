@@ -1307,7 +1307,8 @@ def test_infra_check_hq_section():
         calls.clear()
         open(pol, "w").write("[hq]\n")
         _, lines = w.infra_check()
-        check(any(x.startswith("готово") and "[hq]" in x for x in lines) and not any(c[0] == "alert" for c in calls)
+        check(any(x.startswith("готово") and "[hq]" in x for x in lines)
+              and not any(c[0] == "alert" and c[1] == "hq-policy-missing" for c in calls)
               and ("clear", "hq-policy-missing") in calls,
               f"infra-check, пустой [hq]: тревога или строка НЕТ ({lines}, {calls})")
         calls.clear()
@@ -1315,6 +1316,52 @@ def test_infra_check_hq_section():
         _, lines = w.infra_check()
         check(any(x.startswith("НЕТ") and "[hq].closed_dirs" in x for x in lines),
               f"infra-check, битый [hq]: нет строки НЕТ с причиной ({lines})")
+    finally:
+        for k, v in saved.items():
+            setattr(p, k, v)
+
+
+def test_infra_check_hooks_tomllib():
+    """infra-check: python3 хуков без tomllib — строка НЕТ и тревога «guard не читает policy.toml»; с tomllib —
+    строка «готово» и тревога снята (metis-0182: иначе пустой corpus-role на Python до 3.11 молчит)."""
+    import importlib.util
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    import importlib
+    p = importlib.import_module("pantheon")
+    spec = importlib.util.spec_from_file_location("pantheon_watch_tomllib", os.path.join(ROOT, "lib", "watch.py"))
+    w = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(w)
+    w.set_core(p)
+    d = tempfile.mkdtemp(prefix="infra-toml-")
+    calls = []
+    saved = {k: getattr(p, k) for k in ("MANAGED", "HOME", "guard_script", "agents_all", "alert_once", "clear_once")}
+    try:
+        p.MANAGED, p.HOME, p.guard_script, p.agents_all = os.path.join(d, "none.json"), d, (lambda: ""), (lambda: [])
+        p.alert_once = lambda key, value, text, *a, **k: calls.append(("alert", key, text))
+        p.clear_once = lambda key: calls.append(("clear", key))
+        line = "python3 хуков читает policy.toml"
+        for rc, name in ((1, "без tomllib"), (0, "с tomllib")):
+            fake = os.path.join(d, f"py{rc}")
+            with open(fake, "w") as fh:
+                fh.write(f"#!/bin/sh\nexit {rc}\n")
+            os.chmod(fake, 0o755)
+            w.HOOK_PYTHON = fake
+            calls.clear()
+            _, lines = w.infra_check()
+            alerted = any(c[0] == "alert" and c[1] == "hooks-python-no-tomllib" and "policy.toml" in c[2]
+                          for c in calls)
+            if rc:
+                check(any(x.startswith("НЕТ") and line in x for x in lines) and alerted,
+                      f"infra-check, {name}: нет строки НЕТ или тревоги ({lines}, {calls})")
+            else:
+                check(any(x.startswith("готово") and line in x for x in lines) and not alerted
+                      and ("clear", "hooks-python-no-tomllib") in calls,
+                      f"infra-check, {name}: строка НЕТ, тревога или тревога не снята ({lines}, {calls})")
+        w.HOOK_PYTHON = os.path.join(d, "нет-такого")
+        calls.clear()
+        _, lines = w.infra_check()
+        check(any(x.startswith("НЕТ") and line in x for x in lines),
+              f"infra-check, python3 не найден: нет строки НЕТ ({lines})")
     finally:
         for k, v in saved.items():
             setattr(p, k, v)
