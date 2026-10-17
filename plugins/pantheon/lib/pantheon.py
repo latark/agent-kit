@@ -37,6 +37,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
   pantheon task new --direction D --title T [--status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ] --next X --owner O
+                    --wave N --batch X --night ГГГГ-ММ-ДД --estimate X --actual X --acceptance принято|вернуть|к владельцу
                     --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
                     --recommend "А — потому что …" --if-no-answer "…" --depends-on ID]
                     без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ
@@ -4211,6 +4212,9 @@ def task_cmd(rest):
         if sub == "new":
             fields = {"status": opt("--status"), "priority": int(opt("--priority")) if opt("--priority") else None,
                       "due": opt("--due"), "next": opt("--next"), "owner": opt("--owner"),
+                      "wave": int(opt("--wave")) if opt("--wave") else None, "batch": opt("--batch"),
+                      "night": opt("--night"), "estimate": opt("--estimate"), "actual": opt("--actual"),
+                      "acceptance": opt("--acceptance"),
                       "waiting_on": opt("--waiting-on"), "question": opt("--question"), "why": opt("--why"),
                       "recommend": opt("--recommend"), "if_no_answer": opt("--if-no-answer"),
                       "options": opt("--option", True) or None, "depends_on": opt("--depends-on", True) or None,
@@ -4227,6 +4231,8 @@ def task_cmd(rest):
             print(f"{tid} {os.path.relpath(p, PANTHEON)}")
         elif sub == "set" and args:
             tid, changes, note, i = args[0], {}, None, 1
+            night_flags = {"--wave": "wave", "--batch": "batch", "--night": "night", "--estimate": "estimate",
+                           "--actual": "actual", "--acceptance": "acceptance"}  # ночной цикл: флаги как у --due
             while i < len(args):
                 if args[i] == "--note" and i + 1 < len(args):
                     note, i = args[i + 1], i + 2
@@ -4235,7 +4241,13 @@ def task_cmd(rest):
                     changes["options"] = (changes.get("options") or []) + [args[i + 1]]  # и после options= (argus)
                     i += 2
                     continue
-                k, eq, v = args[i].partition("=")
+                if args[i] in night_flags and i + 1 < len(args):
+                    k, v, eq, step = night_flags[args[i]], args[i + 1], "=", 2
+                    if k == "wave":
+                        v = str(int(v))  # не число — ошибка, как у priority=
+                else:
+                    k, eq, v = args[i].partition("=")
+                    step = 1
                 if not eq:
                     print(f"pantheon task set: «{args[i]}» — нужно поле=значение", file=sys.stderr)
                     return 2
@@ -4249,7 +4261,7 @@ def task_cmd(rest):
                 kind = T.FIELDS.get(k, ("str",))[0]
                 changes[k] = None if v in ("", "null") else int(v) if kind == "int" else (v == "true") if kind == "bool" else \
                     [x.strip() for x in v.split(",") if x.strip()] if kind == "list" else v
-                i += 1
+                i += step
             p, head = T.task_set(PANTHEON, now(), tid, changes, note=note)
             print(f"{tid}: {head.get('status')} · {os.path.relpath(p, PANTHEON)}")
         elif sub == "show" and args:

@@ -658,6 +658,7 @@ def main():
           "note.id:\n    displayName: №" in bt and "🔴 Нужен ответ" in bt and "🔥 1 высокий" in bt
           and "order: [note.id, file.name, formula.status_view, formula.prio_view" in bt)
     sort_by_column_checks(check, _tasks)
+    night_checks(check, _tasks, tmp, home, state, view, env)
     # значки проектов — поле `mark` реестра; нет поля или значение с разметкой — ⬜
     mk = {"zorba": "🟥", "bad1": "a\nb", "bad2": ": x", "bad3": "a b", "bad4": "#1", "bad5": "дольшечем"}
     pm = lambda pr: _tasks.render_card({"id": "metis-0002", "type": "task", "title": "T", "status": "ready",
@@ -693,6 +694,49 @@ def _eval_bases(expr, note, formulas):
     env = {"N": note.get, "F": lambda k: _eval_bases(formulas[k], note, formulas), "IF": lambda c, a, b: a if c else b,
            "number": lambda v: float(v or 0)}
     return eval(e, {"__builtins__": {}, "str": str}, env)
+
+
+def night_checks(check, T, tmp, home, state, view, env):
+    """Ночной цикл (metis-0129): поля волны и ночи, карточка, виды «Ночь», «Волны», «Утро»."""
+    good = {"type": "task", "id": "metis-0140", "title": "T", "status": "todo", "project": "metis-pantheon",
+            "direction": "metis-pantheon", "owner": "metis-pantheon", "created": "2026-10-17",
+            "updated": "2026-10-17T10:00", "schema_version": T.SCHEMA_VERSION, "wave": 2, "batch": "А",
+            "night": "2026-10-18", "estimate": "0,5 % недели", "actual": "0,4 % недели", "acceptance": "принято"}
+    check("ночные поля: задача со всеми полями проходит проверку шапки",
+          T.check_head(good)[0] == [], str(T.check_head(good)[0]))
+    check("ночные поля: wave=\"abc\" и night=\"завтра\" — ошибка шапки",
+          any("wave" in e for e in T.check_head(dict(good, wave="abc"))[0])
+          and any("night" in e for e in T.check_head(dict(good, night="завтра"))[0]))
+    check("ночные поля: acceptance вне перечня — ошибка, из перечня — нет",
+          T.check_head(dict(good, acceptance="ок"))[0] != [] and all(
+              T.check_head(dict(good, acceptance=a))[0] == [] for a in T.ACCEPTANCE))
+    cd = T.render_card(good, "", "x.md", 0)[0]
+    check("ночные поля: карточка содержит «Волна», «Ночь», «Приёмка»",
+          cd["Волна"] == 2 and cd["Ночь"] == "2026-10-18" and cd["Приёмка"] == "принято" and cd["Пачка"] == "А")
+    bare = {k: v for k, v in good.items() if k not in ("wave", "batch", "night", "estimate", "actual", "acceptance")}
+    bc = T.render_card(bare, "", "x.md", 0)[0]
+    check("ночные поля: пустые — None, как у «Срок»",
+          all(bc[k] is None for k in ("Волна", "Пачка", "Ночь", "Оценка", "Факт", "Приёмка")))
+    order = T.CARD_ORDER
+    check("ночные поля: в CARD_ORDER — сразу после «Закрыта»",
+          order[order.index("Закрыта") + 1: order.index("Закрыта") + 7] == ["Волна", "Пачка", "Ночь", "Оценка", "Факт", "Приёмка"])
+    views = {m for m in re.findall(r"^  - type: table\n    name: (.+)$", T.BASE_FILE, re.M)}
+    check("Доска.base: виды «Ночь», «Волны», «Утро» после «Все задачи»",
+          {"Ночь", "Волны", "Утро"} <= views and T.BASE_FILE.index("name: Все задачи") < T.BASE_FILE.index("name: Ночь"))
+    check("Доска.base: фильтр «Ночь» — не пусто и не Готово/Отменено",
+          "'!note[\"Ночь\"].isEmpty()'" in T.BASE_FILE and "'note[\"Статус\"] != \"Отменено\"'" in T.BASE_FILE)
+    r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Ночная", "--wave", "2",
+            "--night", "2026-10-18", "--batch", "А", "--estimate", "0,5 % недели", t=T0)
+    tid = r.stdout.split()[0] if r.returncode == 0 else ""
+    fields = head_of(os.path.join(home, r.stdout.split()[1])) [0] if tid else {}
+    check("task new --wave 2 --night 2026-10-18: поля записаны в файл",
+          tid and fields.get("wave") == "2" and fields.get("night") == "2026-10-18" and fields.get("batch") == "А",
+          r.stderr[-200:])
+    r2 = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Плохая", "--night", "завтра", t=T0)
+    check("task new --night завтра — отказ", r2.returncode != 0)
+    r3 = run(env, "task", "set", tid, "--wave", "3", "--acceptance", "вернуть", t=T0 + 30)
+    check("task set --wave 3 --acceptance вернуть: поля обновлены",
+          r3.returncode == 0 and head_of(os.path.join(home, r3.stdout.split()[-1]))[0].get("acceptance") == "вернуть")
 
 
 def sort_by_column_checks(check, T):
