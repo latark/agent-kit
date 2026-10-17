@@ -2048,12 +2048,64 @@ MERGE_CMD = "gh pr merge"
 PROJECT_SETTINGS_FILES = ("settings.json", "settings.local.json")
 
 
+# Обёртки, запускающие любую команду: правило `env *` пускает и `env gh pr merge 12 --admin`. У оболочек обёртка —
+# только `-c` (`bash ./run.sh *` — свой скрипт); флаги env с аргументом снимаются вместе с ним
+WRAP_SHELLS = ("bash", "sh", "zsh")
+ENV_ARG_FLAGS = ("-u", "-c", "-p")
+ASSIGN_RX = r"[a-z_][a-z0-9_]*=\S*"
+
+
+def unwrap_rule(inner):
+    """(остаток, была ли обёртка): снимает с начала шаблона VAR=значение, путь к программе (`/x/y/gh` → `gh`) и
+    обёртки env, command, xargs, eval, `bash|sh|zsh -c` с необязательной кавычкой. Остаток None — `command -v …`:
+    поиск программы, а не запуск."""
+    wrapped = False
+    while True:
+        words = inner.split(" ") if inner else []
+        while len(words) > 1 and re.fullmatch(ASSIGN_RX, words[0]):
+            words = words[1:]
+        if not words:
+            return "", wrapped
+        prefix, slash, base = words[0].rpartition("/")
+        if slash and base and not base.startswith("*") and "*" not in prefix:
+            words[0] = base
+        first, words = words[0], words[1:]
+        if first == "env":  # VAR= после флагов снимет следующий проход цикла
+            while words and words[0].startswith("-"):
+                words = words[2:] if words[0] in ENV_ARG_FLAGS else words[1:]
+        elif first in ("command", "xargs"):
+            while words and words[0].startswith("-"):
+                if first == "command" and "v" in words[0]:
+                    return None, True
+                words = words[1:]
+        elif first in WRAP_SHELLS:
+            short = lambda w: w.startswith("-") and not w.startswith("--")  # noqa: E731
+            while words and short(words[0]) and "c" not in words[0]:
+                words = words[1:]
+            if words and short(words[0]):
+                words = words[1:]
+            elif not (words and words[0].startswith("*")):  # не -c и не звёздочка на его месте — запуск скрипта
+                return " ".join([first, *words]), wrapped
+            if words and words[0][:1] in ("'", '"'):
+                q, words[0] = words[0][0], words[0][1:]
+                if words[-1].endswith(q):
+                    words[-1] = words[-1][:-1]
+                words = [w for w in words if w]
+        elif first != "eval":
+            return " ".join([first, *words]), wrapped
+        wrapped = True
+        inner = " ".join(words)
+
+
 def allow_rule_merges(rule):
     """Пускает ли правило permissions.allow `gh pr merge`: "Bash", "Bash(*)", Bash(<шаблон>), где буквальное начало
     шаблона до первой звёздочки — начало «gh pr merge» или само начинается с «gh pr merge» (флаги в любом порядке,
     точная форма без звёздочки тоже), либо шаблон как glob подходит к одному из MERGE_SAMPLES. Пробелы схлопываются,
-    регистр не важен, ведущие VAR=значение снимаются; старая форма «:*» на конце — « *». Обёртки вроде `env *`,
-    `bash -c *` не ловятся: граница — песочница и guard (README)."""
+    регистр не важен, «:*» на конце — « *». Перед проверкой unwrap_rule снимает ведущие VAR=значение, путь к
+    программе (`/opt/homebrew/bin/gh *` — это `gh *`) и обёртки, пускающие любую команду: env с флагами и VAR=,
+    command, xargs с флагами, eval, `bash|sh|zsh -c`. Поэтому `env *`, `bash -c *`, `command /x/gh *` ловятся, а
+    обёртка без звёздочки и без команды после неё (`env`, `command -v gh`) — нет. Не ловятся свои скрипты-обёртки
+    (`./run.sh *`), sudo, nohup, timeout и подобное: граница — песочница и guard (README)."""
     if not isinstance(rule, str):
         return False
     rule = rule.strip()
@@ -2065,11 +2117,9 @@ def allow_rule_merges(rule):
     if inner.endswith(":*"):
         inner = inner[:-2] + " *"
     inner = " ".join(inner.split()).lower()
-    while True:
-        m = re.match(r"[a-z_][a-z0-9_]*=\S* ", inner)
-        if not m:
-            break
-        inner = inner[m.end():]
+    inner, wrapped = unwrap_rule(inner)
+    if inner is None or (wrapped and not inner):
+        return False
     head = inner.split("*", 1)[0]
     if MERGE_CMD.startswith(head) or head.startswith(MERGE_CMD):
         return True

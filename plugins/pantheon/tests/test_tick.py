@@ -283,14 +283,27 @@ def main():
                  "Bash(gh pr merge 12 --admin)", "Bash(gh pr merge --admin *)", "Bash(gh pr merge --auto *)",
                  "Bash(gh pr merge -R *)", "Bash(gh pr merge --squash *)", "Bash(gh pr merge)",
                  "Bash(gh pr merge --admin)", "Bash(gh  pr merge *)", "Bash(GH_REPO=a/b gh pr merge *)",
-                 "Bash(GH pr Merge *)", "Bash(g*)", "Bash(gh p*)"):
+                 "Bash(GH pr Merge *)", "Bash(g*)", "Bash(gh p*)",
+                 # абсолютный путь к gh — это gh
+                 "Bash(/opt/homebrew/bin/gh pr merge *)", "Bash(/usr/local/bin/gh *)", "Bash(/usr/bin/gh pr merge)",
+                 "Bash(/opt/homebrew/bin/gh:*)",
+                 # обёртки, пускающие любую команду
+                 "Bash(env *)", "Bash(bash -c *)", "Bash(sh -c *)", "Bash(zsh -c *)", "Bash(command *)",
+                 "Bash(xargs *)", "Bash(eval *)",
+                 # их вариации: путь, VAR=, флаги, «:*», регистр, обёртка вокруг gh, кавычка после -c
+                 "Bash(/usr/bin/env *)", "Bash(FOO=1 env *)", "Bash(env -i *)", "Bash(env FOO=1 *)", "Bash(env:*)",
+                 "Bash(ENV  *)", "Bash(env gh pr merge *)", "Bash(command /opt/homebrew/bin/gh *)",
+                 "Bash(bash -lc *)", "Bash(bash -c 'gh pr merge *')", "Bash(xargs -n1 gh pr merge *)",
+                 "Bash(env -u HOME gh pr merge *)", "Bash(bash *)", "Bash(eval gh pr merge 12 --admin)"):
         r, built_a, *_ = allow_build("c", [rule])
         check(f"allow {rule!r} — окно не собирается", not built_a and rule in r.stderr)
     shown = [x.strip() for x in r.stdout.splitlines() if "окон ролей" in x]
     check("несобранное окно не числится в списке собранных окон ролей",
           bool(shown) and all("athena-shop" not in x for x in shown) and "themis-docs" in shown[0])
     for rule in ("Bash(gh pr view *)", "Bash(gh pr checks *)", "Bash(gh pr diff *)", "Bash(gh run view *)",
-                 "Bash(git *)"):
+                 "Bash(git *)", "Bash(env)", "Bash(bash ./scripts/test.sh *)", "Bash(command -v gh)",
+                 "Bash(/opt/homebrew/bin/gh pr view *)", "Bash(env FOO=1)", "Bash(env gh pr view *)", "Bash(bash -c)",
+                 "Bash(./scripts/*)"):
         r, built_a, *_ = allow_build("g", [rule])
         check(f"allow {rule!r} — не слияние: окно собирается", built_a)
     r, built_a, *_ = allow_build("d", ["Bash(gh *)"], fname="settings.local.json")
