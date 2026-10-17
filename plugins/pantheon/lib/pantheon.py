@@ -36,7 +36,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
   pantheon task new --direction D --title T [--status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ] --next X --owner O
                     --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
-                    --recommend "А — потому что …" --if-no-answer "…" --depends-on ID]
+                    --recommend "А — потому что …" --if-no-answer "…" --depends-on ID --executor auto|claude|codex]
                     без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ
   pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"]   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
@@ -4258,7 +4258,7 @@ def task_cmd(rest):
                       "waiting_on": opt("--waiting-on"), "question": opt("--question"), "why": opt("--why"),
                       "recommend": opt("--recommend"), "if_no_answer": opt("--if-no-answer"),
                       "options": opt("--option", True) or None, "depends_on": opt("--depends-on", True) or None,
-                      "risky": True if "--risky" in args else None}
+                      "risky": True if "--risky" in args else None, "executor": opt("--executor")}
             if not opt("--direction") or not opt("--title"):
                 print("pantheon task new: нужны --direction и --title", file=sys.stderr)
                 return 2

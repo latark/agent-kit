@@ -52,7 +52,10 @@ FIELDS = {
     # этап и проект
     "goal": ("str", False), "start": ("date", False), "exit_criteria": ("list", False), "repo_path": ("str", False),
     "health": ("str", False), "review_on": ("date", False),
+    # кто пишет код задачи (решение 175, metis-0166 вариант А): auto — правило лида по набору `pantheon executors`
+    "executor": ("str", False),
 }
+EXECUTORS = ("auto", "claude", "codex")
 # срок due — дата (срок — конец дня) или дата со временем «ГГГГ-ММ-ДДTЧЧ:ММ» (умные уведомления, metis-0023)
 ORDER = list(FIELDS)
 PRIORITY = {0: "срочно", 1: "высокий", 2: "обычный", 3: "низкий"}
@@ -387,6 +390,9 @@ def check_head(head):
             warns.append(f"при {st} нужно поле next — следующий шаг")
         if st == "waiting" and not head.get("waiting_on"):
             errs.append("при waiting нужно поле waiting_on (human, id задачи или кто/что)")
+        ex = head.get("executor")
+        if ex is not None and ex not in EXECUTORS:
+            errs.append(f"executor «{ex}» — не из {', '.join(EXECUTORS)}")
         p = head.get("priority")
         if isinstance(p, int) and p not in PRIORITY:
             errs.append("priority — 0 (срочно) … 3 (низкий)")
