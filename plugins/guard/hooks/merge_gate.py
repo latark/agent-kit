@@ -920,10 +920,10 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
                 + MERGE_OWNER)
     metis_roots = G._norm(metis)
     conf = G.private_conf(policy)
-    ppaths, pcoords = conf["paths"] if conf["paths"] == [] else _str_list(conf["paths"]), conf["coordinators"]
+    ppaths, pcoords = _str_list(conf["paths"]), conf["coordinators"]
     # guard читает [private] мягко (0163: неверное значение — умолчание), а шлюз слияния на неверном [private] закрыт:
-    # опечатка в списке coordinators не должна молча открыть слияние координатору с личным. Пустой список [] — никого
-    # и ничего, как у guard (metis-0177), в том числе paths
+    # опечатка в списке coordinators не должна молча открыть слияние координатору с личным. Пустой список [] — как у
+    # guard: roles и coordinators — никого, paths — умолчание (ревью PR #35)
     raw = policy.get("private", {})
     if not isinstance(raw, dict) or any(
             k in raw and _str_list(raw[k]) is None and raw[k] != [] for k in G.DEFAULT_PRIVATE):

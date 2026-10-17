@@ -1321,6 +1321,55 @@ def test_infra_check_hq_section():
             setattr(p, k, v)
 
 
+def test_infra_check_corpus_section():
+    """infra-check: нет раздела [corpus] в policy.toml — строка НЕТ и тревога «corpus-role ничего не закрывает»;
+    раздел есть (и пустой) — без тревоги, тревога снята; policy.toml не TOML — без второй строки (metis-0182)."""
+    import importlib.util
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    import importlib
+    p = importlib.import_module("pantheon")
+    spec = importlib.util.spec_from_file_location("pantheon_watch_corpus", os.path.join(ROOT, "lib", "watch.py"))
+    w = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(w)
+    w.set_core(p)
+    d = tempfile.mkdtemp(prefix="infra-corpus-")
+    os.makedirs(os.path.join(d, ".claude", "pantheon"))
+    pol = os.path.join(d, ".claude", "pantheon", "policy.toml")
+    calls = []
+    saved = {k: getattr(p, k) for k in ("MANAGED", "HOME", "guard_script", "agents_all", "alert_once", "clear_once")}
+    try:
+        p.MANAGED, p.HOME, p.guard_script, p.agents_all = os.path.join(d, "none.json"), d, (lambda: ""), (lambda: [])
+        p.alert_once = lambda key, value, text, *a, **k: calls.append(("alert", key, text))
+        p.clear_once = lambda key: calls.append(("clear", key))
+        text = "в policy.toml нет раздела [corpus]: правило corpus-role ничего не закрывает"
+        for name, body in (("нет policy.toml", None), ("нет раздела", "[hq]\n")):
+            calls.clear()
+            if body is not None:
+                open(pol, "w").write(body)
+            ok, lines = w.infra_check()
+            check(not ok and any(x.startswith("НЕТ") and "[corpus]" in x for x in lines)
+                  and any(c[0] == "alert" and c[1] == "corpus-policy-missing" and c[2].startswith(text) for c in calls),
+                  f"infra-check, {name}: нет строки НЕТ или тревоги про [corpus] ({lines}, {calls})")
+        for name, body in (("пустой [corpus]", "[hq]\n[corpus]\n"),
+                           ("[corpus] со списком", '[hq]\n[corpus]\ncommands = ["corpus-x"]\n')):
+            calls.clear()
+            open(pol, "w").write(body)
+            _, lines = w.infra_check()
+            check(any(x.startswith("готово") and "[corpus]" in x for x in lines)
+                  and not any(c[0] == "alert" and c[1] == "corpus-policy-missing" for c in calls)
+                  and ("clear", "corpus-policy-missing") in calls,
+                  f"infra-check, {name}: тревога или строка НЕТ ({lines}, {calls})")
+        calls.clear()
+        open(pol, "w").write("[hq\n")
+        _, lines = w.infra_check()
+        check(not any("[corpus]" in x for x in lines)
+              and not any(c[1] == "corpus-policy-missing" for c in calls),
+              f"infra-check, policy.toml не TOML: лишняя строка или тревога про [corpus] ({lines}, {calls})")
+    finally:
+        for k, v in saved.items():
+            setattr(p, k, v)
+
+
 def test_infra_check_hooks_tomllib():
     """infra-check: python3 хуков без tomllib — строка НЕТ и тревога «guard не читает policy.toml»; с tomllib —
     строка «готово» и тревога снята (metis-0182: иначе пустой corpus-role на Python до 3.11 молчит)."""

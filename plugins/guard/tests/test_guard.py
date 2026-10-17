@@ -388,9 +388,15 @@ def merge_security_checks(home, MERGE_OK, cases):
           deny(out) and ("[private] в policy.toml не разобрать" in out or not allow_ok))
     got = M(variant(policy_fn=lambda t: t + "\n[private]\ncoordinators = []\nroles = []\n"), "gh pr merge 1", pdir=ec)
     check(f"[private] с пустыми roles и coordinators — слияние как было: {got}", got == MERGE_OK)
-    # 0177: paths = [] — «ничего», как у guard (private_conf); раньше шлюз закрывался, а guard читал умолчание
-    got = M(variant(policy_fn=lambda t: t + "\n[private]\npaths = []\n"), "gh pr merge 1", pdir=ec)
+    # paths = [] — умолчание, как у guard (private_conf; ревью PR #35): шлюз не закрывается, личное не открывается
+    hp = variant(policy_fn=lambda t: t + "\n[private]\npaths = []\n")
+    got = M(hp, "gh pr merge 1", pdir=ec)
     check(f"[private] paths = [] — слияние как было: {got}", got == MERGE_OK)
+    me = os.path.join(hp, "ai/knowledge/me/finance.md")
+    got = (run(hp, "projects/shopKeeperApp", "dev-sonnet", "Read", {"file_path": me}, sub=True),
+           run(hp, ec, "domain-coordinator", "Bash", {"command": f"cat {me}"}))
+    check(f"[private] paths = [] — личное закрыто: Read субагента и cat координатора — отказ: {got}",
+          got == ("deny", "deny"))
     got = M(variant(policy_fn=lambda t: t + '\n[private]\npaths = [" "]\n'), "gh pr merge 1", pdir=ec)
     check(f'[private] paths = [" "] — отказ, как раньше: {got}', got == "deny")
     # -R latark/agent-kit в чужом [merge_repos] — это защиты, а не внутреннее
@@ -1472,6 +1478,28 @@ def main():
             ("cp -R x <репо>/.claude/commands/", f"cp -R x {home}/{br}/.claude/commands/"),
             ("cp -R x <репо>/.claude/hooks/", f"cp -R x {home}/{br}/.claude/hooks/"),
             ("cp hooks.sh <репо>/.claude/hooks/pre.sh", f"cp hooks.sh {home}/{br}/.claude/hooks/pre.sh"),
+            # предка закрывают распаковщики и копии дерева (ревью argus PR #35)
+            ("tar xzf a.tgz (без дефиса) в корне", "tar xzf a.tgz"),
+            ("tar --extract --directory=<репо>", f"tar --extract -f a.tar --directory={home}/{br}"),
+            ("unzip a.zip в корне", "unzip a.zip"),
+            ("unzip a.zip -d<репо> (слитно)", f"unzip a.zip -d{home}/{br}"),
+            ("ditto -x -k a.zip <репо>", f"ditto -x -k a.zip {home}/{br}"),
+            ("cd <репо> && tar -xf a.tar", f"cd {home}/{br} && tar -xf a.tar"),
+            ("rsync -a dir/ . в корне", "rsync -a dir/ ."),
+            ("rsync -r dir . в корне", "rsync -r dir ."),
+            ("rsync dir/ . (источник-папка) в корне", "rsync dir/ ."),
+            ("rsync --archive dir <репо>", f"rsync --archive dir {home}/{br}"),
+        )],
+        *[(f"0177 protect-config: {n} — не отказ (файл с известным именем)", "allow", br, "dev-sonnet", True, B(c))
+          for n, c in (
+            ("curl -sSLO в корне репозитория", "curl -sSLO https://example.com/data.json"),
+            ("curl -O --output-dir <репо>", f"curl -O --output-dir {home}/{br} https://example.com/data.json"),
+            ("wget в корне репозитория", "wget https://example.com/data.json"),
+            ("wget -P <репо>", f"wget -P {home}/{br} https://example.com/data.json"),
+            ("patch -p1 -i fix.diff в корне", "patch -p1 -i fix.diff"),
+            ("rsync a.txt . (один файл)", "rsync a.txt ."),
+            ("rsync -v a.txt b.txt <репо>/ (файлы)", f"rsync -v a.txt b.txt {home}/{br}/"),
+            ("tar -cf a.tar src в корне (упаковка)", "tar -cf a.tar src"),
         )],
         # папка над репозиториями: субагент без роли из HOME (domain пускает весь HOME — отказ даёт только protect-config)
         ("0177 protect-config: cp -R x ~/projects/ (над репозиториями) — отказ", "deny", ".", "", True,

@@ -1826,6 +1826,7 @@ def _managed_guard_active():
 
 
 HQ_MISSING = "в policy.toml нет раздела [hq]: штабу ничего не закрыто"
+CORPUS_MISSING = "в policy.toml нет раздела [corpus]: правило corpus-role ничего не закрывает"
 HOOK_PYTHON = "python3"  # как в hooks.json guard; тесты подменяют
 HOOKS_NO_TOMLLIB = ("python3 хуков без tomllib (Python до 3.11): guard не читает policy.toml, правило corpus-role "
                     "пусто — Метиде: python3 в PATH должен быть 3.11+")
@@ -1861,9 +1862,10 @@ def infra_check():
                         "managed-settings.json")
     with contextlib.suppress(OSError):
         add(open(P.MANAGED, "rb").read() == open(plug, "rb").read(), "управляемые настройки совпадают с guard")
+    pol = os.path.join(P.HOME, ".claude", "pantheon", "policy.toml")
     # что закрыто штабу — [hq] policy.toml, в коде значений нет (metis-0182): без раздела штабу не закрыто ничего
     try:
-        hq = P.ctx_mod().hq_policy(os.path.join(P.HOME, ".claude", "pantheon", "policy.toml"))
+        hq = P.ctx_mod().hq_policy(pol)
     except ValueError as e:  # битый раздел: окно штаба не пересобирается, тревогу ставит pantheon domains build
         add(False, f"раздел [hq] policy.toml разбирается ({e})")
     else:
@@ -1872,6 +1874,22 @@ def infra_check():
             P.clear_once("hq-policy-missing")
         else:
             P.alert_once("hq-policy-missing", "1", HQ_MISSING + " — Метиде: добавить раздел, образец — "
+                         "policy.example.toml плагина guard", "watch")
+    # [corpus] policy.toml — список правила corpus-role guard; без раздела оно не закрывает ничего (metis-0182)
+    corpus = None
+    try:
+        with open(pol, "rb") as fh:
+            corpus = "corpus" in tomllib.load(fh)  # битый раздел guard читает как «закрыто»
+    except FileNotFoundError:
+        corpus = False
+    except (OSError, ValueError):
+        pass  # файл не прочитать или не TOML — строка НЕТ уже есть у [hq]
+    if corpus is not None:
+        add(corpus, "в policy.toml есть раздел [corpus] (что закрывает правило corpus-role)")
+        if corpus:
+            P.clear_once("corpus-policy-missing")
+        else:
+            P.alert_once("corpus-policy-missing", "1", CORPUS_MISSING + " — Метиде: добавить раздел, образец — "
                          "policy.example.toml плагина guard", "watch")
     # guard читает policy.toml через tomllib (Python 3.11+). Хуки зовут python3 из PATH: без tomllib guard
     # раздел [corpus] не видит и corpus-role молча пуст (metis-0182) — до перевода хуков на полный путь (0.5.11)

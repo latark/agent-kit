@@ -16,7 +16,8 @@ claude-config: коммит в обход sync.sh отправил бы прав
 в любом репозитории — .claude/settings*.json, .claude/agents/, hooks/, skills/, commands/, сама папка .claude как цель
 записи (cp -R x <репо>/.claude/, mv, tar -C, rsync: в неё можно положить settings.json и agents), .mcp.json, .git/hooks
 и .git/config. Цель выше .claude тоже (metis-0177): дерево, распакованное или скопированное в сам репозиторий или в
-папку над репозиториями (tar -C, unzip -d, cp -R, ditto, rsync, scp -r), и git clone в <репо>/.claude.
+папку над репозиториями (tar -x, unzip, ditto, cp -R, rsync -r/-a или «папка/», scp -r), и git clone в <репо>/.claude.
+Файлы с известными именами (curl -O, wget, patch, rsync одного файла) в корне репозитория — можно.
 """
 
 import os
@@ -30,7 +31,9 @@ CLAUDE_ITEMS = ("hooks", "agents", "plugins", "pantheon", "settings.json", "sett
 HOME_ITEMS = (".zshrc", ".zprofile", ".zshenv", ".zlogin", ".bashrc", ".bash_profile", ".profile", ".gitconfig",
               ".config/git", ".ssh", ".claude.json", ".local/share/pantheon", ".local/bin", "Library/LaunchAgents")
 SETTINGS_NAMES = {"settings.json", "settings.local.json"}
-PROJECT_ITEMS = {"hooks", "skills", "commands"}  # <репо>/.claude/<x>: как agents (metis-0177)
+# <репо>/.claude/<x> в любом репозитории, кроме ~/.claude: как agents (metis-0177). У ~/.claude свой список
+# CLAUDE_ITEMS: hooks и commands в нём есть, skills нет — ~/.claude/skills это правило не закрывает
+PROJECT_ITEMS = {"hooks", "skills", "commands"}
 
 
 def protected():
@@ -57,7 +60,8 @@ def _settings_file(p, mkdir_only=False):
     parts = [key(x) for x in p.split("/")]
     # роли проекта: `<репо>/.claude/agents/<имя>.md` перекрывает пользовательскую роль (metis-0057), в том числе
     # в worktree `.claude/worktrees/<x>/.claude/agents/`; сама папка тоже (mkdir). Хуки, навыки и команды проекта
-    # запускаются или читаются как инструкции так же (metis-0177); у ~/.claude их судит список CLAUDE_ITEMS
+    # запускаются или читаются как инструкции так же (metis-0177); ~/.claude здесь пропускаем — его судит
+    # CLAUDE_ITEMS (hooks, commands; skills там нет)
     home_claude = key(os.path.realpath(os.path.join(G.HOME, ".claude")))
     for i, x in enumerate(parts[:-1]):
         if x == ".claude" and (parts[i + 1] == "agents" or parts[i + 1] in PROJECT_ITEMS
@@ -98,17 +102,26 @@ def _repo_or_above(t):
     return any(os.path.lexists(os.path.join(t, n, x)) for n in names for x in (".git", ".claude"))
 
 
+def _recursive(texts, flags):
+    """Есть флаг рекурсии: --recursive, --archive или короткий набор с одной из букв flags (-R, -a, -av)."""
+    return any(x and (x in ("--recursive", "--archive") or x[:1] == "-" and x[1:2] != "-" and set(x[1:]) & set(flags))
+               for x in texts)
+
+
+def _moved(cmds):
+    return any(n in ("cd", "chdir", "pushd", "popd") for n, _ in cmds)
+
+
 def _tree_dests(cmds, cwd, targets):
-    """Папки, в которые команда копирует дерево (cp -R, ditto, rsync, scp -r): последний операнд или -t. После cd
+    """Папки, в которые команда копирует дерево (cp -R, ditto, rsync -r/-a или источник «папка/», scp -r): последний
+    операнд или -t. rsync без рекурсии и без «/» в конце источника кладёт отдельные файлы — это не дерево. После cd
     относительный путь не вычислить — тогда все цели-папки."""
-    moved = any(n in ("cd", "chdir", "pushd", "popd") for n, _ in cmds)
+    moved = _moved(cmds)
     out = []
     for name, texts in cmds:
         base = os.path.basename((name or "").rstrip("/"))
         flags = TREE_COPY_FLAG.get(base)
-        if base not in TREE_COPY and not (flags and any(
-                x and (x in ("--recursive", "--archive") or x[:1] == "-" and x[1:2] != "-" and set(x[1:]) & set(flags))
-                for x in texts)):
+        if base not in TREE_COPY and not (flags and _recursive(texts, flags)):
             continue
         if any(x is None for x in texts):
             continue  # не разобрать — уже UNRESOLVED среди целей
@@ -119,6 +132,9 @@ def _tree_dests(cmds, cwd, targets):
             elif x.startswith("--target-directory="):
                 dest = x.split("=", 1)[1]
         ops = [x for x in texts if not x.startswith("-")]
+        if base == "rsync" and not _recursive(texts, "ra") and not any(
+                x.endswith("/") for x in (ops if dest else ops[:-1])):
+            continue  # rsync a.txt . — отдельный файл, а не дерево
         dest = dest or (ops[-1] if len(ops) > 1 else None)
         if not dest or re.match(r"[^/]*:", dest):
             continue  # нет цели или удалённая (host:path)
@@ -127,6 +143,54 @@ def _tree_dests(cmds, cwd, targets):
             out += [p for p in targets if os.path.isdir(p)]
         else:
             out.append(G._expand(w, cwd))
+    return out
+
+
+def _opt_dests(texts, short, long=()):
+    """Значения опции: «-C X», «-CX», «--directory X», «--directory=X»."""
+    out = []
+    for i, x in enumerate(texts):
+        if x in (short,) + tuple(long) and i + 1 < len(texts):
+            out.append(texts[i + 1])
+        elif x.startswith(short) and len(x) > len(short) and not x.startswith("--"):
+            out.append(x[len(short):])
+        else:
+            out += [x.split("=", 1)[1] for n in long if x.startswith(n + "=")]
+    return out
+
+
+def _unpack_dests(cmds, cwd, targets):
+    """Папки, в которые распаковщик кладёт дерево с любыми именами: tar -x (-C, --directory), unzip (-d), ditto -x
+    (последний операнд); без папки — cwd. Только они закрывают репозиторий и папку над ним целиком: curl -O, wget,
+    patch, rsync одного файла кладут файлы с известными именами, их судят обычные правила (metis-0177)."""
+    moved = _moved(cmds)
+    out = []
+    for name, texts in cmds:
+        base = os.path.basename((name or "").rstrip("/"))
+        if any(x is None for x in texts):
+            continue  # не разобрать — уже UNRESOLVED среди целей
+        if base in ("tar", "gtar", "bsdtar"):
+            first = texts[0] if texts else ""
+            modes = set(first) if first and not first.startswith("-") else set()
+            for x in texts:
+                if x.startswith("-") and not x.startswith("--"):
+                    modes |= set(x[1:])
+            if "x" not in modes and not {"--extract", "--get"} & set(texts):
+                continue
+            dests = _opt_dests(texts, "-C", ("--directory",)) or ["."]
+        elif base == "unzip":
+            dests = _opt_dests(texts, "-d") or ["."]
+        elif base == "ditto" and any(x[:1] == "-" and x[1:2] != "-" and "x" in x for x in texts):
+            ops = [x for x in texts if not x.startswith("-")]
+            dests = ops[-1:] if len(ops) > 1 else []
+        else:
+            continue
+        for d in dests:
+            w = d.replace("${HOME}", G.HOME).replace("$HOME", G.HOME)
+            if moved and not os.path.isabs(os.path.expanduser(w)):
+                out += [os.path.dirname(p) for p in targets if os.path.basename(p) == G.ANY_FILE]
+            else:
+                out.append(G._expand(w, cwd))
     return out
 
 
@@ -169,11 +233,11 @@ def check_protect_config(event, tool, tool_input):
     prot = protected()
     mk = tool == "Bash" and bool(MKDIR_ONLY.match(tool_input.get("command") or ""))
     bad = [p for p in targets
-           if G._inside(p, prot) or _settings_file(p, mk) or any(G._inside(x, [p]) for x in prot)
-           or os.path.basename(p) == G.ANY_FILE and _repo_or_above(os.path.dirname(p))]
+           if G._inside(p, prot) or _settings_file(p, mk) or any(G._inside(x, [p]) for x in prot)]
     if tool == "Bash":
         cmds = G.bash_analysis(tool_input.get("command") or "", cwd)[1]
-        bad += [p for p in _tree_dests(cmds, cwd, targets) if _repo_or_above(p) and p not in bad]
+        bad += [p for p in _tree_dests(cmds, cwd, targets) + _unpack_dests(cmds, cwd, targets)
+                if _repo_or_above(p) and p not in bad]
         bad += [p for p in _clone_dests(cmds, cwd) if p not in bad and (
             G._inside(p, prot) or _settings_file(p) or any(G._inside(x, [p]) for x in prot))]
     if not bad:

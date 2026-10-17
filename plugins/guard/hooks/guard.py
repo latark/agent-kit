@@ -2454,8 +2454,9 @@ def limited(event):
 
 def private_conf(policy):
     """[private] из policy.toml (0163): не таблица — всё по умолчанию; ключа нет или значение не список — умолчание;
-    список — только его строки (strip, пустые убраны). Пустой список [] — никого и ничего, для paths тоже (metis-0177:
-    так же читает шлюз слияния); paths из одних пустых строк — умолчание."""
+    список — только его строки (strip, пустые убраны). roles и coordinators пустым списком [] — никого. paths пустым
+    списком или из одних пустых строк — умолчание: опечатка не открывает личное (ревью PR #35; так же читает шлюз
+    слияния)."""
     p = policy.get("private")
     if not isinstance(p, dict):
         p = {}
@@ -2466,7 +2467,7 @@ def private_conf(policy):
             conf[k] = v
             continue
         items = [x.strip() for x in val if isinstance(x, str) and x.strip()]
-        conf[k] = items if items or k != "paths" or val == [] else v
+        conf[k] = items if items or k != "paths" else v
     return conf
 
 
@@ -2914,7 +2915,8 @@ def check_terminal(event, tool, tool_input):
 # ставит ссылку в очередь посредника, ключи — только у посредника (отчёт «Безопасный запуск пополнения корпуса
 # агентом»). Чтение корпуса (search, show, verify…) — можно; штабу (hq) команда корпуса закрыта целиком.
 # Имена корпуса — в разделе [corpus] ~/.claude/pantheon/policy.toml, в коде их нет (решение владельца 17.10, metis-0182):
-#   commands — имя команды (файл: corpus, .venv/bin/corpus); modules — модули `python -m`, которые её запускают;
+#   commands — имя файла команды без пути: сравнение по basename, `corpus` закрывает и `.venv/bin/corpus`, а запись
+#   с путём не совпадёт ни с чем; modules — модули `python -m`, которые её запускают;
 #   write_subcommands — подкоманды пополнения; scripts — скрипты пополнения (*.py); keychain_prefixes — приставки
 #   служб Связки с ключами корпуса.
 # Раздела или ключа нет — пусто: правило этого не узнаёт. Ключ — не список непустых строк, [corpus] не таблица или
