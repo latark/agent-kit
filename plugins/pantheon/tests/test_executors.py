@@ -415,6 +415,45 @@ def tests():
           r.returncode == 0 and git(wt, "rev-parse", "HEAD~1").stdout.strip() == h0 and "Executor: codex" in body
           and "codex: своё" in body and git(wt, "show", "HEAD:c.txt").stdout == "c", r.stdout + r.stderr + body)
 
+    # --- грязный worktree до запуска — отказ (чужие правки не уходят под трейлер Codex) ------------------------------
+    def lock_free():
+        with open(os.path.join(STATE, "locks", "codex-dev.lock"), "a") as lk:
+            try:
+                fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except OSError:
+                return False
+
+    def dirty_case(name, prep, want):
+        scenario({"exec": [ok_step({"src/codex.txt": "c"})]})
+        wt = new_wt()
+        prep(wt)
+        h0 = head(wt)
+        r = exec_codex(wt)
+        check(name, r.returncode == 2 and want in r.stderr and "закоммить или убери до запуска Codex" in r.stderr
+              and not calls() and head(wt) == h0 and lock_free()
+              and not os.path.exists(os.path.join(wt, "src", "codex.txt")), (r.returncode, r.stdout, r.stderr, calls()))
+
+    def write(wt, rel, text="x\n", mode="w"):
+        os.makedirs(os.path.dirname(os.path.join(wt, rel)) or wt, exist_ok=True)
+        with open(os.path.join(wt, rel), mode) as fh:
+            fh.write(text)
+    dirty_case("грязный отслеживаемый файл → код 2, Codex не запускался (ни одного вызова), коммита нет, замок снят",
+               lambda wt: write(wt, "README.md", "правка человека\n", "a"), "worktree не чистый: README.md")
+    dirty_case("отслеживаемый в индексе (git add) → код 2",
+               lambda wt: (write(wt, "README.md", "в индексе\n", "a"), git(wt, "add", "README.md")),
+               "worktree не чистый: README.md")
+    dirty_case("неотслеживаемый файл → код 2", lambda wt: write(wt, "notes/new.txt"), "worktree не чистый: notes/new.txt")
+    dirty_case("больше пяти путей → первые пять и «и ещё N»",
+               lambda wt: [write(wt, f"n{i}.txt") for i in range(7)], "n0.txt, n1.txt, n2.txt, n3.txt, n4.txt и ещё 2")
+    scenario({"exec": [ok_step()]})
+    wt = new_wt()
+    write(wt, "ignored/cache.bin", "кэш")
+    r = exec_codex(wt)
+    check("только игнорируемое (как node_modules) → запуск идёт, коммит без игнорируемого",
+          r.returncode == 0 and len(calls("exec")) == 1 and "ignored/cache.bin" not in
+          git(wt, "show", "--name-only", "--format=", "HEAD").stdout, r.stdout + r.stderr)
+
     # --- нет изменений --------------------------------------------------------------------------------------------
     scenario({"exec": [ok_step({})]})
     wt = new_wt()

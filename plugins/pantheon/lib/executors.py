@@ -609,16 +609,21 @@ def _diff_names(wt, *revs):
 
 def changed_paths(wt, before, after):
     """Что изменилось за ход: сверка снимков статуса (вместе с неотслеживаемым и игнорируемым), свои коммиты Codex
-    (снимок..HEAD) и рабочее дерево против снимка HEAD — всё без склейки переименований. Путь, грязный уже до
-    запуска и с тем же видом после, — не изменение Codex."""
+    (снимок..HEAD) и рабочее дерево против снимка HEAD — всё без склейки переименований. Запуск идёт только из
+    чистого дерева (dirty_paths), поэтому любой дифф против снимка HEAD — работа Codex."""
     head0, it0 = before
     head1, it1 = after
     paths = {p for p in set(it0) | set(it1) if it0.get(p) != it1.get(p)}
     if head0 and head1 and head0 != head1:
         paths |= _diff_names(wt, head0, head1)
     if head0:
-        paths |= {p for p in _diff_names(wt, head0) if p not in it0 or it0.get(p) != it1.get(p)}
+        paths |= _diff_names(wt, head0)
     return sorted(paths)
+
+
+def dirty_paths(snap):
+    """Изменённое в отслеживаемых и неотслеживаемое по снимку; игнорируемое («!!»: node_modules, .venv) — не грязь."""
+    return sorted(p for p, (xy, _sig) in snap[1].items() if xy != "!!")
 
 
 def protected_hit(p):
@@ -706,7 +711,7 @@ def _take_lock():
 
 def exec_codex(worktree, brief_path, out=None, err=None):
     """pantheon exec codex <worktree> <файл поручения>. Коды: 0 — коммит есть; 1 — отказ (ошибка хода, защищённые
-    пути, нет изменений); 2 — неверный вызов; 3 — Codex недоступен (задачу на dev-*); 4 — занят."""
+    пути, нет изменений); 2 — неверный вызов или worktree не чистый; 3 — Codex недоступен (задачу на dev-*); 4 — занят."""
     out = out or (lambda s: print(s, flush=True))
     err = err or (lambda s: print(s, file=sys.stderr, flush=True))
     ok, why = codex_status()
@@ -767,6 +772,12 @@ def _restore_signals(old):
 
 
 def _exec_locked(wt, brief, out, err):
+    before = snapshot(wt)  # снимок под замком, до любого вызова codex
+    dirty = dirty_paths(before)
+    if dirty:  # чужие правки не должны попасть в коммит под трейлером Executor: codex
+        more = f" и ещё {len(dirty) - 5}" if len(dirty) > 5 else ""
+        err(f"worktree не чистый: {', '.join(dirty[:5])}{more} — закоммить или убери до запуска Codex")
+        return 2
     ensure_home()
     env = role_env()
     exe = codex_bin()
@@ -774,7 +785,6 @@ def _exec_locked(wt, brief, out, err):
     d = _branch_dir(wt)
     tag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S")
     report = os.path.join(d, f"report-{tag}.md")
-    before = snapshot(wt)
     argv = [exe, *EXEC_FLAGS, "-"]
     idle, total = _num("PANTHEON_CODEX_IDLE_S", 1800), _num("PANTHEON_CODEX_TIMEOUT_S", 7200)
     logs, kind, text, parsed = [], "failed", "", None
