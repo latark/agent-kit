@@ -1825,6 +1825,9 @@ def _managed_guard_active():
     return False
 
 
+HQ_MISSING = "в policy.toml нет раздела [hq]: штабу ничего не закрыто"
+
+
 def infra_check():
     """Лёгкие проверки без модели: guard отказывает на запретном, хуки плагина на месте, claude agents отвечает,
     управляемые настройки совпадают с guard. Живые проверки (пробуждение после /clear, сообщение между сессиями,
@@ -1855,6 +1858,18 @@ def infra_check():
                         "managed-settings.json")
     with contextlib.suppress(OSError):
         add(open(P.MANAGED, "rb").read() == open(plug, "rb").read(), "управляемые настройки совпадают с guard")
+    # что закрыто штабу — [hq] policy.toml, в коде значений нет (metis-0182): без раздела штабу не закрыто ничего
+    try:
+        hq = P.ctx_mod().hq_policy(os.path.join(P.HOME, ".claude", "pantheon", "policy.toml"))
+    except ValueError as e:  # битый раздел: окно штаба не пересобирается, тревогу ставит pantheon domains build
+        add(False, f"раздел [hq] policy.toml разбирается ({e})")
+    else:
+        add(hq["present"], "в policy.toml есть раздел [hq] (что закрыто штабу)")
+        if hq["present"]:
+            P.clear_once("hq-policy-missing")
+        else:
+            P.alert_once("hq-policy-missing", "1", HQ_MISSING + " — Метиде: добавить раздел, образец — "
+                         "policy.example.toml плагина guard", "watch")
     lines = [("готово  " if ok else "НЕТ     ") + text for ok, text in res]
     return all(ok for ok, _ in res), lines
 

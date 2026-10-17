@@ -1767,11 +1767,9 @@ def _real_dir(p, roots, strict=False, create=False):
     return None
 
 
-# закрытые штабу папки: индексы qmd, копии больших корпусов и сырые выгрузки (кэш, входящие) — чужой текст; штабу его
-# не читать (у штаба личное и действия наружу). Вопросы по ним — координатору направления поручением; коллекции qmd
-# штабу закрывает хук qmd-query
-HQ_CLOSED_DIRS = ["~/projects/expert-corpus", "~/.cache/expert-corpus", "~/.cache/qmd",  # trace-ok: 0182-core — снять в PR ядра 0182
-                  "~/.claude/projects/*expert-corpus*", "~/projects/legal-watch/cache", "~/projects/legal-watch/inbox"]  # trace-ok: 0182-core — снять в PR ядра 0182
+# закрытые штабу папки (индексы qmd, копии больших корпусов, сырые выгрузки — чужой текст; штабу его не читать: у
+# штаба личное и действия наружу) — [hq].closed_dirs policy.toml, в коде их нет (metis-0182, разбор — hq_policy в
+# hooks/ctx.py). Вопросы по ним — координатору направления поручением; коллекции qmd штабу закрывает хук qmd-query
 
 
 # выводы фоновых задач и TMPDIR песочницы всех сессий Claude Code: /tmp/claude-<uid> (на macOS по умолчанию). Не из
@@ -2095,6 +2093,19 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
                       [x for x in BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES) if x not in mine], agents_py)
         write_window(out_dir, name, job)
         built.append(name)
+    # что закрыто штабу — [hq] policy.toml. Битый раздел — ошибка, а не «пусто»: окно штаба не пересобираем, остаётся
+    # прежнее (его файл не удаляется), и тревога — пока раздел не исправят
+    try:
+        hq_pol = ctx_mod().hq_policy(policy_path)
+    except ValueError as e:
+        alert_once("hq-policy-broken", str(e), f"policy.toml: {e} — окно штаба не пересобрано, действует прежнее; "
+                   "исправить раздел [hq] (Метида)", "pantheon")
+        built.append("hq")
+        for f in os.listdir(out_dir):
+            if f.endswith(".json") and f[:-5] not in built:
+                os.remove(os.path.join(out_dir, f))
+        return built
+    clear_once("hq-policy-broken")
     # штаб (SEC-26, вариант А): Зевс пишет только в ~/ai/pantheon, кроме .git и alerts.md; сеть закрыта (в веб он не
     # ходит, SEC-13); мимо песочницы — только `pantheon start|wake|alert`: запуск сессий и тревоги. Личное ему открыто
     # (SEC-11), кроме ключей git-crypt.
@@ -2113,7 +2124,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None):
     cache_dirs = set(built)
     with contextlib.suppress(OSError):
         cache_dirs |= {n for n in os.listdir(os.path.expanduser(caches)) if n != "hq"}
-    closed = HQ_CLOSED_DIRS + [f"{caches}/{n}" for n in sorted(cache_dirs)]
+    closed = hq_pol["closed_dirs"] + [f"{caches}/{n}" for n in sorted(cache_dirs)]
     # переписка сессий (координаторы зовут corpus search — выдача оседает в *.jsonl), большие выводы (tool-results) и
     # выводы фоновых задач и TMPDIR (CLAUDE_TMP) всех сессий, кроме своих. Своё — папка штаба и его worktree (имя как
     # у Claude Code: всё, кроме букв и цифр, → «-»); открыты свои выводы, автопамять (memory/*.md) и задачи штаба.

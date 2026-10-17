@@ -247,7 +247,10 @@ def main():
                  '[private]\ncoordinators = ["mnemo-brain"]\npaths = ["~/ai/knowledge/me", "~/ai/pantheon/.git/git-crypt"]\n'
                  '[merge_repos]\nathena-shop = ["acme-co/br-app"]\n'
                  'metis-pantheon = ["tools-org/sync", "acme-co/kit", "bad owner/x", "acme-co/kit`"]\n'
-                 'mnemo-brain = ["acme-co/notes"]\n')
+                 'mnemo-brain = ["acme-co/notes"]\n'
+                 # что закрыто штабу — только [hq] (metis-0182); выдуманный корпус lecture-notes
+                 '[hq]\nclosed_dirs = ["~/projects/lecture-notes", "~/.cache/qmd", "~/.cache/lecture-notes", '
+                 '"~/.claude/projects/*lecture-notes*"]\nclosed_collections = ["notes"]\n')
     os.makedirs(os.path.join(state, "settings"), exist_ok=True)
     open(os.path.join(state, "settings", "old-direction.json"), "w").write("{}")
     dash = lambda p: re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(p))
@@ -361,8 +364,8 @@ def main():
                                      "pantheon archive", "pantheon jobs *", "pantheon domains build",
                                      "pantheon roles build", "pantheon stop *", "pantheon resume *", "pantheon pause *",
                                      "pantheon restart *", "pantheon saved *", "pantheon who", "pantheon agents"])
-    corp = "expert-corpus"  # trace-ok: 0182-core — снять в PR ядра 0182 (папки — из policy.toml [hq])
-    check("окно штаба: корпус закрыт для чтения — песочница и правило Read (SEC-13, решение 15.10)",
+    corp = "lecture-notes"
+    check("окно штаба: корпус из [hq].closed_dirs закрыт для чтения — песочница и правило Read (SEC-13, решение 15.10)",
           all(x in hb["filesystem"]["denyRead"] for x in (f"~/projects/{corp}", "~/.cache/qmd",
                                                            f"~/.cache/{corp}", f"~/.claude/projects/*{corp}*"))
           and "Read(~/.cache/qmd/**)" in hq["permissions"]["deny"]

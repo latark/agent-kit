@@ -1254,10 +1254,11 @@ def test_infra_check_managed_mode():
             "if mode == 'plugin' and active():\n"
             "    sys.exit(0)\n"
             "print(json.dumps({'hookSpecificOutput': {'permissionDecision': 'deny'}}))\n")
-    saved = {k: getattr(p, k) for k in ("MANAGED", "HOME", "guard_script", "agents_all")}
+    saved = {k: getattr(p, k) for k in ("MANAGED", "HOME", "guard_script", "agents_all", "alert_once", "clear_once")}
     want = "готово  guard отказывает на git push --force (роль dev-haiku)"
     try:
         p.MANAGED, p.HOME, p.guard_script, p.agents_all = managed, d, (lambda: fake), (lambda: [])
+        p.alert_once = p.clear_once = lambda *a, **k: None  # тревоги — не в настоящий alerts.md
         with open(managed, "w", encoding="utf-8") as fh:
             json.dump({"hooks": {"PreToolUse": [{"hooks": [
                 {"type": "command", "command": f'python3 "{fake}" --managed'}]}]}}, fh)
@@ -1269,6 +1270,51 @@ def test_infra_check_managed_mode():
         _, lines = w.infra_check()
         check(want in lines, f"управляемых настроек нет: проба guard не отказала ({lines[:1]})")
         check("--managed" not in open(journal).read(), "управляемых настроек нет: проба с --managed")
+    finally:
+        for k, v in saved.items():
+            setattr(p, k, v)
+
+
+def test_infra_check_hq_section():
+    """infra-check: нет раздела [hq] в policy.toml — строка НЕТ и тревога «штабу ничего не закрыто»; пустой [hq] —
+    без тревоги, тревога снята; битый — строка НЕТ с причиной (metis-0182)."""
+    import importlib.util
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    import importlib
+    p = importlib.import_module("pantheon")
+    spec = importlib.util.spec_from_file_location("pantheon_watch_hq", os.path.join(ROOT, "lib", "watch.py"))
+    w = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(w)
+    w.set_core(p)
+    d = tempfile.mkdtemp(prefix="infra-hq-")
+    os.makedirs(os.path.join(d, ".claude", "pantheon"))
+    pol = os.path.join(d, ".claude", "pantheon", "policy.toml")
+    calls = []
+    saved = {k: getattr(p, k) for k in ("MANAGED", "HOME", "guard_script", "agents_all", "alert_once", "clear_once")}
+    try:
+        p.MANAGED, p.HOME, p.guard_script, p.agents_all = os.path.join(d, "none.json"), d, (lambda: ""), (lambda: [])
+        p.alert_once = lambda key, value, text, *a, **k: calls.append(("alert", key, text))
+        p.clear_once = lambda key: calls.append(("clear", key))
+        text = "в policy.toml нет раздела [hq]: штабу ничего не закрыто"
+        for name, body in (("нет policy.toml", None), ("нет раздела", '[private]\nroles = ["hq"]\n')):
+            calls.clear()
+            if body is not None:
+                open(pol, "w").write(body)
+            ok, lines = w.infra_check()
+            check(not ok and any(x.startswith("НЕТ") and "[hq]" in x for x in lines)
+                  and any(c[0] == "alert" and c[1] == "hq-policy-missing" and c[2].startswith(text) for c in calls),
+                  f"infra-check, {name}: нет строки НЕТ или тревоги про [hq] ({lines}, {calls})")
+        calls.clear()
+        open(pol, "w").write("[hq]\n")
+        _, lines = w.infra_check()
+        check(any(x.startswith("готово") and "[hq]" in x for x in lines) and not any(c[0] == "alert" for c in calls)
+              and ("clear", "hq-policy-missing") in calls,
+              f"infra-check, пустой [hq]: тревога или строка НЕТ ({lines}, {calls})")
+        calls.clear()
+        open(pol, "w").write('[hq]\nclosed_dirs = "~/x"\n')
+        _, lines = w.infra_check()
+        check(any(x.startswith("НЕТ") and "[hq].closed_dirs" in x for x in lines),
+              f"infra-check, битый [hq]: нет строки НЕТ с причиной ({lines})")
     finally:
         for k, v in saved.items():
             setattr(p, k, v)
