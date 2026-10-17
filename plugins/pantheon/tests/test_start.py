@@ -588,6 +588,10 @@ def main():
     transcript(("Bash", {"command": "heavy pnpm test"}, False), ("Bash", {"command": "sed -i '' s/a/b/ a.txt"}, False))
     r = stop("dev-3")
     check("dev-stop: правка через Bash после прогона — снова нужен прогон", r.returncode == 2)
+    transcript(("Bash", {"command": "heavy pnpm test"}, False),
+               ("Bash", {"command": f'pantheon exec codex {wt} "$TMPDIR/tmp-codex-b/brief.md"'}, False))
+    r = stop("dev-4")
+    check("dev-stop: запуск `pantheon exec codex` после прогона — правка, снова нужен прогон", r.returncode == 2)
 
     # heavy --server: один долгий процесс, второе место — сборкам
     srv = subprocess.Popen([sys.executable, "-I", HEAVY, "--server", "/bin/sh", "-c", "sleep 4"], env=env)
