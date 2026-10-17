@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Заглушка `codex` для контрактных тестов lib/executors.py (настоящий Codex в тестах не запускается).
+
+Обёртка срезает окружение до белого списка, поэтому сценарий приходит файлом в CODEX_HOME роли:
+  $CODEX_HOME/stub-scenario.json — что отвечать;
+  $CODEX_HOME/stub-calls.jsonl   — сюда пишется каждый вызов: argv, stdin, cwd, имена переменных env, OPENAI_API_KEY.
+Сценарий:
+  {"version": "codex-cli 0.130.0", "login": 0, "device_auth": 0,
+   "hello": <шаг>,                       — ответ на hello-пробу (stdin «Respond with hello.»)
+   "exec": [<шаг>, <шаг>, …]}            — боевые запуски по порядку, последний повторяется
+Шаг: {"write": {"путь": "текст"}, "mv": [["старое", "новое"]] — git mv, "commit": "сообщение", "stdout": [строка или объект], "stderr": [строка],
+      "child": true — дочерний sleep в той же группе (pid — в stub-child.pid), "hang": секунд молчать,
+      "ignore_term": true — заглушка и её дочерний не слушают SIGTERM (как trap '' TERM; гасит только SIGKILL),
+      "drip": секунд между строками без конца, "rc": код выхода}
+Образцы событий — раздел 3 доклада prometheus 16.10 (тесты Paperclip codex_local).
+"""
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+
+home = os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
+try:
+    scen = json.load(open(os.path.join(home, "stub-scenario.json"), encoding="utf-8"))
+except (OSError, ValueError):
+    scen = {}
+args = sys.argv[1:]
+stdin = sys.stdin.read() if args[:1] == ["exec"] else ""
+with open(os.path.join(home, "stub-calls.jsonl"), "a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"argv": args, "stdin": stdin, "cwd": os.getcwd(), "env": sorted(os.environ),
+                         "openai_api_key": os.environ.get("OPENAI_API_KEY"),
+                         "codex_api_key": os.environ.get("CODEX_API_KEY"), "codex_home": os.environ.get("CODEX_HOME")},
+                        ensure_ascii=False) + "\n")
+
+if args == ["--version"]:
+    print(scen.get("version", "codex-cli 0.130.0"))
+    sys.exit(0)
+if args[:2] == ["login", "status"]:
+    rc = int(scen.get("login", 0))
+    print("Logged in using ChatGPT" if rc == 0 else "Not logged in", file=sys.stdout if rc == 0 else sys.stderr)
+    sys.exit(rc)
+if args[:2] == ["login", "--device-auth"]:
+    rc = int(scen.get("device_auth", 0))
+    if rc == 0:
+        scen["login"] = 0
+        json.dump(scen, open(os.path.join(home, "stub-scenario.json"), "w", encoding="utf-8"))
+    sys.exit(rc)
+if args[:1] != ["exec"]:
+    print(f"stub: не знаю {args}", file=sys.stderr)
+    sys.exit(2)
+
+OK = [{"type": "thread.started", "thread_id": "codex-session-1"},
+      {"type": "item.completed", "item": {"type": "agent_message", "text": "hello"}},
+      {"type": "turn.completed", "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1}}]
+if stdin.strip() == "Respond with hello.":
+    step = scen.get("hello") or {"stdout": OK}
+else:
+    steps = scen.get("exec") or [{"stdout": OK}]
+    np = os.path.join(home, "stub-exec-n")
+    try:
+        n = int(open(np).read())
+    except (OSError, ValueError):
+        n = 0
+    open(np, "w").write(str(n + 1))
+    step = steps[min(n, len(steps) - 1)]
+
+for rel, text in (step.get("write") or {}).items():
+    p = os.path.join(os.getcwd(), rel)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write(text)
+for old, new in step.get("mv") or []:
+    os.makedirs(os.path.dirname(os.path.join(os.getcwd(), new)) or ".", exist_ok=True)
+    subprocess.run(["git", "mv", old, new], check=True)
+if step.get("commit"):
+    subprocess.run(["git", "add", "-A"], check=True)
+    subprocess.run(["git", "-c", "user.name=codex", "-c", "user.email=codex@local", "commit", "-q", "-m",
+                    step["commit"]], check=True)
+if step.get("ignore_term"):  # SIG_IGN наследует и дочерний sleep
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+if step.get("child"):
+    c = subprocess.Popen(["sleep", "300"])
+    open(os.path.join(home, "stub-child.pid"), "w").write(str(c.pid))
+    open(os.path.join(home, "stub-self.pid"), "w").write(str(os.getpid()))
+for ln in step.get("stdout") or []:
+    print(ln if isinstance(ln, str) else json.dumps(ln, ensure_ascii=False), flush=True)
+for ln in step.get("stderr") or []:
+    print(ln, file=sys.stderr, flush=True)
+if step.get("hang"):
+    time.sleep(float(step["hang"]))
+if step.get("drip"):
+    while True:
+        print(json.dumps({"type": "item.started", "item": {"type": "reasoning"}}), flush=True)
+        time.sleep(float(step["drip"]))
+sys.exit(int(step.get("rc", 0)))

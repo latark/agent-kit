@@ -1347,6 +1347,31 @@ def test_infra_check_managed_mode():
         _, lines = w.infra_check()
         check(want in lines, f"управляемых настроек нет: проба guard не отказала ({lines[:1]})")
         check("--managed" not in open(journal).read(), "управляемых настроек нет: проба с --managed")
+        # строка «Python установки» (metis-alpha): не записан — ок с пометкой; записан и работает — ок; сломан — НЕТ
+        st = os.path.join(d, "state")
+        old_state = os.environ.get("PANTHEON_STATE")
+        os.environ["PANTHEON_STATE"] = st
+        try:
+            ok, lines = w.infra_check()
+            line = [x for x in lines if "Python установки" in x]
+            check(line and "не записан (установка без pantheon-setup)" in line[0] and line[0].startswith("готово"),
+                  f"Python не записан: ок с пометкой ({line})")
+            os.makedirs(st)
+            open(os.path.join(st, "config.toml"), "w").write(f'python = "{sys.executable}"\n')
+            ok, lines = w.infra_check()
+            line = [x for x in lines if "Python установки" in x]
+            ver = "%d.%d.%d" % sys.version_info[:3]
+            check(line and line[0].startswith("готово") and ver in line[0], f"Python записан и работает ({line})")
+            open(os.path.join(st, "config.toml"), "w").write('python = "/nonexistent/python3.14"\n')
+            ok, lines = w.infra_check()
+            line = [x for x in lines if "Python установки" in x]
+            check(not ok and line and line[0].startswith("НЕТ") and "не запускается" in line[0],
+                  f"Python записан, но сломан: не ок ({line})")
+        finally:
+            if old_state is None:
+                os.environ.pop("PANTHEON_STATE", None)
+            else:
+                os.environ["PANTHEON_STATE"] = old_state
     finally:
         for k, v in saved.items():
             setattr(p, k, v)

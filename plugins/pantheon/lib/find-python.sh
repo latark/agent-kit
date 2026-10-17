@@ -1,6 +1,7 @@
 # Поиск Python 3.11+ для bin/pantheon и bin/pantheon-tick (подключается через `.`, сама ничего не запускает).
 # Системный /usr/bin/python3 на macOS — 3.9: у него нет tomllib, pantheon на нём падал трассой.
-# Порядок: PANTHEON_PYTHON (его ставит родитель — дочерние pantheon идут тем же интерпретатором), python3 из PATH,
+# Порядок: PANTHEON_PYTHON (его ставит родитель — дочерние pantheon идут тем же интерпретатором), python из
+# STATE/config.toml (его пишет pantheon-setup), python3 из PATH,
 # python3.14…3.11 из PATH, затем каталоги PANTHEON_PY_DIRS (по умолчанию Homebrew и python.org).
 _py_ok() {
     [ -n "$1" ] && [ -x "$1" ] && "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
@@ -9,6 +10,11 @@ _py_ok() {
 find_python() {
     if _py_ok "$PANTHEON_PYTHON"; then
         printf '%s\n' "$PANTHEON_PYTHON"
+        return 0
+    fi
+    p=$(sed -n 's/^python = "\(.*\)"[[:space:]]*$/\1/p' "${PANTHEON_STATE:-$HOME/.local/state/pantheon}/config.toml" 2>/dev/null | head -n 1)
+    if _py_ok "$p"; then
+        printf '%s\n' "$p"
         return 0
     fi
     p=$(command -v python3 2>/dev/null)

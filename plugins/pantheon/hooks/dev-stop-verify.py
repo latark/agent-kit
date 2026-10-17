@@ -32,7 +32,8 @@ EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 # Bash, после которого файлы могли поменяться (защита от ошибки, а не от обмана: проверку можно и не запускать)
 BASH_WRITES = re.compile(r"(?:^|[;&|]\s*)(?:sed\s+-i|perl\s+-[a-z]*i|mv|cp|rm|tee|touch|patch|truncate|"
                          r"git\s+(?:apply|am|checkout|switch|restore|merge|rebase|cherry-pick|reset|stash|pull|revert)|"
-                         r"\S*(?:pnpm|npm|yarn|npx)\s+(?:add|remove|install|i|up|update))\b"
+                         r"\S*(?:pnpm|npm|yarn|npx)\s+(?:add|remove|install|i|up|update)|"
+                         r"\S*pantheon\s+exec\s+codex)\b"  # Codex правит worktree за роль — это правка
                          r"|[^<>&0-9]>{1,2}\s*[^&\s]")
 
 

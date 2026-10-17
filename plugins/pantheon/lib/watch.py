@@ -1844,6 +1844,32 @@ def _managed_guard_active():
     return False
 
 
+def _setup_python_line():
+    """Строка infra-check «Python установки»: путь из config.toml (его пишет pantheon-setup) и его версия."""
+    try:
+        py = (_pconfig().load() or {}).get("python")
+    except (OSError, ValueError, RuntimeError):
+        py = None
+    if not py:
+        return True, "Python установки: не записан (установка без pantheon-setup)"
+    try:
+        r = subprocess.run([py, "-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])"],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 and r.stdout.strip():
+            return True, f"Python установки: {py} ({r.stdout.strip()})"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return False, f"Python установки: {py} записан, но не запускается"
+
+
+def _pconfig():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_pconfig", os.path.join(P.LIB, "pconfig.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 HQ_MISSING = "в policy.toml нет раздела [hq]: штабу ничего не закрыто"
 CORPUS_MISSING = "в policy.toml нет раздела [corpus]: правило corpus-role ничего не закрывает"
 HOOK_PYTHON = "python3"  # как в hooks.json guard; тесты подменяют
@@ -1922,7 +1948,8 @@ def infra_check():
         P.clear_once("hooks-python-no-tomllib")
     else:
         P.alert_once("hooks-python-no-tomllib", "1", HOOKS_NO_TOMLLIB, "watch")
-    lines =[("готово  " if ok else "НЕТ     ") + text for ok, text in res]
+    add(*_setup_python_line())
+    lines = [("готово  " if ok else "НЕТ     ") + text for ok, text in res]
     return all(ok for ok, _ in res), lines
 
 
