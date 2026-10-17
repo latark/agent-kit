@@ -11,9 +11,33 @@ if [ "$(uname -s)" != "Darwin" ]; then
 fi
 
 export PATH="$HOME/.local/bin:$PATH"
+
+# Отказы до любых изменений (те же, что в lib/setup.py): uv и Python ставятся только после них.
+add_codex=0
+prev=""
+for a in "$@"; do
+    [ "$prev" = "--add" ] && [ "$a" = "codex" ] && add_codex=1
+    prev=$a
+done
+if [ "$add_codex" = 0 ]; then
+    pan=${PANTHEON_HOME:-$HOME/ai/pantheon}
+    if [ -e "$pan" ] && { [ ! -d "$pan" ] || [ -n "$(ls -A "$pan" 2>/dev/null)" ]; }; then
+        echo "pantheon-setup: $pan уже есть и не пуст — установка ничего не меняет. Если Пантеон нужен заново, переименуйте или уберите эту папку сами. Добавить Codex к готовой установке: \`pantheon-setup --add codex\`." >&2
+        exit 1
+    fi
+    if ! command -v claude >/dev/null 2>&1; then
+        echo "pantheon-setup: сначала поставьте Claude Code (https://claude.com/claude-code) и запустите снова." >&2
+        exit 1
+    fi
+    if ! git -C "$plugin" rev-parse --show-toplevel >/dev/null 2>&1; then
+        echo "pantheon-setup: запускайте из клона agent-kit (git-репозитория)." >&2
+        exit 1
+    fi
+fi
+
 if ! command -v uv >/dev/null 2>&1; then
-    echo "pantheon-setup: ставлю uv (без прав администратора, в ~/.local/bin)"
-    if ! curl -LsSf https://astral.sh/uv/install.sh | sh; then
+    echo "pantheon-setup: ставлю uv (без прав администратора, в ~/.local/bin; профили оболочки не правлю)"
+    if ! curl -LsSf https://astral.sh/uv/install.sh | UV_NO_MODIFY_PATH=1 sh; then
         echo "pantheon-setup: не вышло поставить uv. Поставьте вручную (https://docs.astral.sh/uv/) и запустите снова." >&2
         exit 1
     fi

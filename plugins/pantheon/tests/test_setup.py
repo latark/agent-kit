@@ -90,6 +90,7 @@ def new_root(with_uv=False, with_claude=True, with_notifier=False):
     sh_file(os.path.join(stubs, "curl"),
             'echo "curl $*" >> "$STUB_LOG"\n'
             "cat <<'INSTALLER'\n"
+            'echo "uv-installer UV_NO_MODIFY_PATH=$UV_NO_MODIFY_PATH" >> "$STUB_LOG"\n'
             'mkdir -p "$HOME/.local/bin"\n'
             "cat > \"$HOME/.local/bin/uv\" <<'UV'\n#!/bin/sh\n" + uv_stub + "UV\n"
             'chmod +x "$HOME/.local/bin/uv"\nINSTALLER\n')
@@ -209,6 +210,23 @@ def main():
     check("нет claude: ничего не создано (Пантеон, config.toml, роли)",
           not os.path.exists(env["PANTHEON_HOME"]) and not os.path.exists(env["PANTHEON_STATE"])
           and not os.path.exists(os.path.join(env["HOME"], ".claude")), os.listdir(env["HOME"]))
+
+    # --- 5б. отказы раньше установки uv: нет uv + нет claude / непустой Пантеон → curl не звали, HOME пуст -------
+    root, env, _ = new_root(with_uv=False, with_claude=False)
+    r = setup(env, "", "--no-codex")
+    check("нет claude и нет uv: отказ, curl и uv не вызваны, HOME пуст",
+          r.returncode != 0 and "Claude Code" in r.stderr and log_of(env) == [] and os.listdir(env["HOME"]) == [],
+          (r.returncode, r.stderr, log_of(env), os.listdir(env["HOME"])))
+    root, env, _ = new_root(with_uv=False)
+    os.makedirs(env["PANTHEON_HOME"])
+    open(os.path.join(env["PANTHEON_HOME"], "x.md"), "w").write("моё")
+    r = setup(env, "", "--no-codex")
+    check("непустой Пантеон и нет uv: отказ, curl не вызван, нового в HOME нет",
+          r.returncode != 0 and "уже есть" in r.stderr and log_of(env) == [] and not os.path.exists(
+              os.path.join(env["HOME"], ".local")), (r.returncode, r.stderr, log_of(env)))
+    root, env, _ = new_root(with_uv=False)
+    r = setup(env, "нет\n", "--no-codex")
+    check("установщик uv зовётся с UV_NO_MODIFY_PATH=1", "uv-installer UV_NO_MODIFY_PATH=1" in log_of(env), log_of(env))
 
     # --- 6. Codex: модуля исполнителей нет — строка и установка идёт; при его наличии вопрос по умолчанию «нет» ---
     if not os.path.exists(os.path.join(LIB, "executors.py")):

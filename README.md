@@ -19,9 +19,30 @@
 - `plugins/pantheon/lib/pantheon.py` — планировщик и команда; `pantheon help` — список команд.
   Задачи — `~/ai/pantheon/schedule.toml`, метки и журналы запусков — `~/.local/state/pantheon/` (свои у каждого Mac).
 - Требуется Python 3.11+ (`tomllib`). Системный `/usr/bin/python3` на macOS — 3.9, он не подходит; `bin/pantheon` и
-  `bin/pantheon-tick` сами ищут 3.11+ (`python3` из PATH, `python3.14`…`3.11`, Homebrew, python.org; общий поиск —
-  `lib/find-python.sh`). Не нашли — строка «нужен Python 3.11+» и код 1, у тика ещё строка в `alerts.md` не чаще раза в
-  сутки. Поставить: `brew install python@3.14`. Хуки guard идут на `python3` из PATH и работают на любом Python 3.9+.
+  `bin/pantheon-tick` сами ищут 3.11+ (`lib/find-python.sh`): `PANTHEON_PYTHON`, затем `python = "…"` из
+  `STATE/config.toml` (его пишет `pantheon-setup`), затем `python3` из PATH, `python3.14`…`3.11`, Homebrew, python.org.
+  Не нашли — строка «нужен Python 3.11+» и код 1, у тика ещё строка в `alerts.md` не чаще раза в сутки. Новой установке
+  Python ставит `pantheon-setup` (uv, Python 3.14); вручную — `brew install python@3.14`. Хуки guard идут на `python3`
+  из PATH и работают на любом Python 3.9+. `pantheon infra-check` показывает строку «Python установки».
+- Установка для нового человека (macOS): `plugins/pantheon/bin/pantheon-setup` из клона agent-kit, одной командой.
+  Загрузчик на bash до всего проверяет, что это macOS, что `~/ai/pantheon` (`PANTHEON_HOME`) нет или он пуст, что `claude`
+  на PATH и клон — репозиторий; при отказе ничего не ставит. Дальше ставит uv (`UV_NO_MODIFY_PATH=1`, профили
+  оболочки не правит) и Python 3.14, уже стоящие Python не трогает, и передаёт дело `lib/setup.py`. Он идёт по шагам,
+  у каждого итог «ок / пропуск / не вышло»: путь Python в `config.toml`; маркетплейс и плагины guard, pantheon,
+  project-tools; пустой `~/ai/pantheon` из `plugins/pantheon/template/pantheon/` с `git init`; `pantheon install`;
+  `pantheon roles build`; вход git в GitHub через gh (`gh auth setup-git` — только после явного «да»);
+  terminal-notifier; сторож следов (`scripts/check-traces.py` по файлам установщика и собранным ролям, маркеры —
+  `--markers ФАЙЛ` или `PANTHEON_TRACE_MARKERS`, нет файла — пропуск); Codex (`--codex`, `--no-codex`, без флагов —
+  вопрос, по умолчанию нет). `pantheon-setup --add codex` — только шаг Codex на готовой установке. К системе
+  `setup.py` ходит через `lib/platform_macos.py` (Homebrew, launchd, sandbox-exec, Связка ключей, текст про
+  уведомления). Тест — `plugins/pantheon/tests/test_setup.py`, все внешние программы в нём — заглушки.
+- Настройки человека — `STATE/config.toml` (`~/.local/state/pantheon/`, свои у каждого Mac): `python`, таблица
+  `[executors] set` (Claude всегда, Codex — дополнение) и `[codex]` (состояние проверки). Читает и пишет только
+  `lib/pconfig.py` (`load`, `update`).
+- Исполнители (`lib/executors.py`): `pantheon executors` — набор и состояние, `check` — проверка Codex (на PATH, вход,
+  hello-проба), `--add codex`, `--remove codex`, `pick <id задачи>` — кто пишет задачу. `pantheon exec codex <папка
+  worktree> <файл поручения>` — запуск Codex в worktree; коды выхода: 0 — коммит есть, 1 — отказ (ошибка хода,
+  защищённые пути, нет изменений), 2 — неверный вызов, 3 — Codex недоступен (задачу на dev-*), 4 — занят.
 - Лёгкий тик: `pantheon` идёт модулем через `lib/run.py` (байт-код в `lib/__pycache__`, при read-only папке молча
   без кэша), `--help` ~34 мс вместо ~62. Задачи `view --quiet`, `board`, `sync-answers`, `agents` тик пропускает, если
   их входы (отпечаток stat, таблица входов — `TICK_SKIP` в `lib/pantheon.py`) не менялись с прошлого удачного прогона;
