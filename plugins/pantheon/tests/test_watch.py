@@ -1577,6 +1577,180 @@ def test_who_is_who_memo():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_autostart_nudges_idle_holder_0212():
+    """metis-0212: Claude Code сам перезапустил фоновую сессию, задания у неё нет (claude agents: `state` working,
+    `status` idle), а у направления задача с вашей отметкой — не «уже работает», а передача задания той же сессии
+    тем же текстом самозапуска (claude respawn + текст для хука push) и тревога «…задания у неё нет — передал
+    задание». Работает — `status` busy или живые субагенты: тогда не трогаем. Закончила ход (`state` done с живым
+    процессом) — тоже передача задания, а не только тревога Зевсу. Передача не помогла (снова простаивает,
+    STATUS.md не менялся) — сбой самозапуска, а не новая передача на каждом проходе."""
+    e = Env()
+    e.direction("fl-dir")
+    e.task("fl-0001", "fl-dir")
+    e.run("watch", t=T0)
+    e.board("fl-0001", T0 + 10)
+    a = bg("fl-dir", "working", "f1ee7001-1", pid=41)
+    a["status"] = "busy"
+    e.agents([a])
+    out = e.run("watch", "--dry-run", t=T0 + 60).stdout
+    check("fl-dir: уже работает" in out, f"0212: status busy — не «уже работает»: {out}")
+    a["status"] = "idle"
+    a["inFlight"] = {"tasks": 1, "queued": 0, "kinds": ["agent"]}
+    e.agents([a])
+    out = e.run("watch", "--dry-run", t=T0 + 60).stdout
+    check("fl-dir: уже работает" in out, f"0212: idle с живыми субагентами — не «уже работает»: {out}")
+    del a["inFlight"]
+    e.agents([a])
+    out = e.run("watch", "--dry-run", t=T0 + 60).stdout
+    check(f"fl-dir: {RESTARTED} — передал бы задание" in out, f"0212: dry-run не передаёт задание: {out}")
+    e.run("watch", t=T0 + 120)
+    check(["respawn", "f1ee7001"] in e.calls(), f"0212: перезапущенной сессии задание не передано: {e.calls()}")
+    check(not [c for c in e.calls() if c[:1] == ["--bg"]], f"0212: вместо передачи задания новая сессия: {e.calls()}")
+    pushed = e.st("push", "f1ee7001-1.txt")
+    text = open(pushed).read() if os.path.exists(pushed) else ""
+    check(text.startswith("[Пантеон: поручение от tick] Самозапуск дежурным") and "fl-0001" in text,
+          f"0212: текст задания не тот, что у самозапуска: {text!r}")
+    check(f"fl-dir: {RESTARTED} — передал задание" in e.alerts(), f"0212: нет тревоги: {e.alerts()}")
+    os.remove(pushed)  # хук push забрал текст при старте процесса
+    # следующий проход: сессия всё ещё простаивает — второй передачи нет (пауза между попытками)
+    e.run("watch", t=T0 + 420)
+    check(len([c for c in e.calls() if c[:1] == ["respawn"]]) == 1, f"0212: передача на каждом проходе: {e.calls()}")
+    check(json.load(open(e.st("autostart.json")))["fl-dir"].get("fails") == 1,
+          "0212: передача не помогла (снова простаивает, STATUS.md не менялся) — не засчитана сбоем")
+    # закончила ход с живым процессом — тоже передача задания
+    e2 = Env()
+    e2.direction("dn-dir")
+    e2.task("dn-0001", "dn-dir")
+    e2.run("watch", t=T0)
+    e2.board("dn-0001", T0 + 10)
+    e2.agents([bg("dn-dir", "done", "d0ee7001-1", pid=42)])
+    e2.run("watch", t=T0 + 120)
+    check(["respawn", "d0ee7001"] in e2.calls(), f"0212: done с процессом — задание не передано: {e2.calls()}")
+    check("dn-dir: закончила ход, а задачи с вашим решением ждут — передал задание" in e2.alerts(),
+          f"0212: нет тревоги о передаче задания done: {e2.alerts()}")
+    # вкладка (реестр) и status idle без отметки владельца не трогаются
+    e3 = Env()
+    e3.direction("nt-dir")
+    e3.task("nt-0001", "nt-dir")
+    b = bg("nt-dir", "working", "a0ee7001-1", pid=43)
+    b["status"] = "idle"
+    e3.agents([b])
+    e3.run("watch", t=T0)
+    e3.run("watch", t=T0 + 120)
+    check(not [c for c in e3.calls() if c[:1] == ["respawn"]], f"0212: передача без вашей отметки: {e3.calls()}")
+
+
+RESTARTED = "Claude Code сам перезапустил фоновую сессию, задания у неё нет"
+
+
+def idle_env(name, sid):
+    """Направление с задачей под вашей отметкой и простаивающей фоновой сессией (`state` working, `status` idle)."""
+    e = Env()
+    e.direction(name)
+    e.task(name[:2] + "-0001", name)
+    e.run("watch", t=T0)
+    e.board(name[:2] + "-0001", T0 + 10)
+    a = bg(name, "working", sid, pid=44)
+    a["status"] = "idle"
+    e.agents([a])
+    return e, a
+
+
+def job_state(e, sid, data):
+    """state.json фоновой сессии, как его пишет Claude Code: ~/.claude/jobs/<короткий id>/state.json."""
+    d = os.path.join(e.home, ".claude", "jobs", sid[:8])
+    os.makedirs(d, exist_ok=True)
+    json.dump(data, open(os.path.join(d, "state.json"), "w"))
+
+
+def respawns(e):
+    return [c for c in e.calls() if c[:1] == ["respawn"]]
+
+
+def test_autostart_nudge_backoff_after_success_0212():
+    """metis-0212, ревью argus: сбой → удачная передача задания → следующая не раньше чем через час после неё.
+    Успех стирает `next` (паузу после сбоя): иначе прошедший `next` пускал передачу на каждом проходе."""
+    e, _ = idle_env("bk-dir", "b0ee7001-1")
+    e.run("watch", t=T0 + 120)                              # передача 1
+    os.remove(e.st("push", "b0ee7001-1.txt"))
+    e.run("watch", t=T0 + 420)                              # снова простаивает, STATUS.md тот же — сбой 1
+    st = json.load(open(e.st("autostart.json")))["bk-dir"]
+    check(st.get("fails") == 1 and st.get("next"), f"0212: сбой не записан: {st}")
+    t2 = T0 + 420 + 4000                                    # после паузы сбоя (1 ч ±10 %)
+    e.run("watch", t=t2)                                    # передача 2
+    check(len(respawns(e)) == 2, f"0212: после паузы сбоя задание не передано: {e.calls()}")
+    os.remove(e.st("push", "b0ee7001-1.txt"))
+    status = os.path.join(e.pantheon, "directions", "bk-dir", "STATUS.md")
+    open(status, "w").write("сделано\n")
+    os.utime(status, (t2 + 100, t2 + 100))                  # сессия поработала и записала STATUS.md — успех
+    e.run("watch", t=t2 + 300)
+    e.run("watch", t=t2 + 600)
+    st = json.load(open(e.st("autostart.json")))["bk-dir"]
+    check(len(respawns(e)) == 2, f"0212: после успеха передача раньше часа (старый next): {respawns(e)}")
+    check(st.get("fails") == 0 and "next" not in st, f"0212: успех не сбросил fails и next: {st}")
+    e.run("watch", t=t2 + 3700)
+    check(len(respawns(e)) == 3, f"0212: через час после успеха задание не передано: {respawns(e)}")
+
+
+def test_autostart_nudge_guards_0212():
+    """metis-0212, ревью argus: задание не передаётся сессии, которая работает или ждёт — по state.json (`inFlight`),
+    по разрешению (`waitingFor`), по своему пробуждению (ScheduleWakeup: `inFlight.wake`, вид session_cron,
+    `selfWake`), — и направлению, которое вы остановили или поставили на паузу."""
+    e, a = idle_env("gd-dir", "c0ee7001-1")
+
+    def dry():
+        return e.run("watch", "--dry-run", t=T0 + 120).stdout
+
+    out = dry()
+    check(f"gd-dir: {RESTARTED} — передал бы задание" in out, f"0212: исходное состояние — не передача: {out}")
+    # живые субагенты видны только в state.json, а в claude agents их нет
+    job_state(e, "c0ee7001-1", {"state": "working", "inFlight": {"tasks": 2, "queued": 0, "kinds": ["local_agent"]}})
+    out = dry()
+    check("gd-dir: уже работает" in out, f"0212: inFlight из state.json не прочитан: {out}")
+    # закончила ход с ScheduleWakeup: Claude Code 2.1.302 кладёт пробуждение в inFlight и ставит selfWake
+    wake = {"at": T0 * 1000, "fires": 0}
+    for js in ({"inFlight": {"tasks": 1, "queued": 0, "kinds": ["session_cron"], "wake": wake}, "selfWake": True},
+               {"inFlight": {"tasks": 0, "queued": 0, "kinds": ["session_cron"]}},
+               {"inFlight": {"tasks": 0, "queued": 0, "kinds": [], "wake": wake}},
+               {"inFlight": {"tasks": 0, "queued": 0, "kinds": []}, "selfWake": True}):
+        job_state(e, "c0ee7001-1", dict(js, state="working"))
+        out = dry()
+        check("gd-dir: уже работает" in out, f"0212: назначенное пробуждение {js} — не «уже работает»: {out}")
+    job_state(e, "c0ee7001-1", {"state": "working", "inFlight": {"tasks": 0, "queued": 0, "kinds": []}})
+    check(f"gd-dir: {RESTARTED} — передал бы задание" in dry(), "0212: пустой inFlight в state.json мешает передаче")
+    # ждёт вашего разрешения
+    a["waitingFor"] = "permission"
+    e.agents([a])
+    out = dry()
+    check("gd-dir: уже работает" in out, f"0212: ждёт разрешения — не «уже работает»: {out}")
+    del a["waitingFor"]
+    e.agents([a])
+    # остановлено вами
+    os.makedirs(e.st("stopped"), exist_ok=True)
+    open(e.st("stopped", "gd-dir"), "w").write("вы\n")
+    out = dry()
+    check(f"gd-dir: {RESTARTED} — передача задания ждёт: остановлено вами" in out, f"0212: обход остановки: {out}")
+    e.run("watch", t=T0 + 120)
+    check(not respawns(e), f"0212: задание передано остановленному направлению: {e.calls()}")
+    os.remove(e.st("stopped", "gd-dir"))
+    # пауза по нагрузке этого направления и общая пауза планировщика
+    os.makedirs(e.st("pauses"), exist_ok=True)
+    json.dump({"reason": "manual", "time": "2026-10-15T07:00:00"}, open(e.st("pauses", "gd-dir.json"), "w"))
+    out = dry()
+    check("передача задания ждёт: пауза по нагрузке (manual)" in out, f"0212: обход паузы по нагрузке: {out}")
+    e.run("watch", t=T0 + 120)
+    check(not respawns(e), f"0212: задание передано на паузе по нагрузке: {e.calls()}")
+    os.remove(e.st("pauses", "gd-dir.json"))
+    open(e.st("paused"), "w").write("вы\n")
+    out = dry()
+    check(f"gd-dir: {RESTARTED} — передача задания ждёт:" in out, f"0212: обход общей паузы: {out}")
+    e.run("watch", t=T0 + 120)
+    check(not respawns(e), f"0212: задание передано на общей паузе: {e.calls()}")
+    os.remove(e.st("paused"))
+    e.run("watch", t=T0 + 120)
+    check(["respawn", "c0ee7001"] in e.calls(), f"0212: без помех задание не передано: {e.calls()}")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
