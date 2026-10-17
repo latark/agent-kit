@@ -98,6 +98,11 @@ def main():
     r = run("Iris_Demo")
     check("имя не по образцу — «НЕТ» на имени", r.returncode == 1 and "НЕТ     имя" in r.stdout)
 
+    for rsv in ("hq", "workshop", "job-iris"):
+        r = run(rsv)
+        check(f"имя {rsv} зарезервировано под окно системы — «НЕТ» и понятная причина",
+              r.returncode == 1 and "НЕТ     имя" in r.stdout and "зарезервировано" in r.stdout)
+
     write(os.path.join(repo, "CLAUDE.md"), "# свои правила\n")
     check("CLAUDE.md без @AGENTS.md — не готово", "НЕТ     AGENTS.md" in run("iris-demo").stdout)
     write(os.path.join(repo, "CLAUDE.md"), "@AGENTS.md\n\nТолько для Claude.\n")
