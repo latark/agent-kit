@@ -33,8 +33,8 @@ def main():
     src = open(os.path.join(LIB, "window_rules.py"), encoding="utf-8").read()
     imports = re.findall(r"^\s*(?:import|from)\s+(\S+)", src, re.M)
     check("window_rules.py: без ввода-вывода и чужих модулей — только re", imports == ["re"], imports)
-    check("правила на месте: COORDINATOR_ALLOW, GATED_MERGE_RULE, REVIEW_RECORD_RULE",
-          w.COORDINATOR_ALLOW == ["Bash(gh pr merge *)"] and w.GATED_MERGE_RULE.startswith("Pantheon Gated Merge:")
+    check("правила на месте: COORDINATOR_ALLOW пуст (metis-0137), GATED_MERGE_RULE, REVIEW_RECORD_RULE",
+          w.COORDINATOR_ALLOW == [] and w.GATED_MERGE_RULE.startswith("Pantheon Gated Merge:")
           and w.REVIEW_RECORD_RULE.startswith("Pantheon Review Record:"))
 
     allow = w.coordinator_auto_allow(["b-org/kit", "a-org/app", "bad owner", 5, "a-org/app", "-x/y"])
