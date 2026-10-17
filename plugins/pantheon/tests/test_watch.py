@@ -1751,6 +1751,25 @@ def test_autostart_nudge_guards_0212():
     check(["respawn", "c0ee7001"] in e.calls(), f"0212: без помех задание не передано: {e.calls()}")
 
 
+def test_autostart_nudge_week_limit_0212():
+    """metis-0212, ревью argus-43: передача задания простаивающей сессии — новое дело и ждёт недельный лимит, как
+    новый запуск (gate «autostart»): жёлтая зона днём, красная, снимок старше 30 мин — ни respawn, ни новой сессии,
+    в dry-run «передача задания ждёт: недельный лимит: …»; зелёная — задание передано. Жёлтую днём и старый снимок
+    gate продолжения («respawn» в wake_block) пропускает — их ловит только проверка самозапуска."""
+    e, _ = idle_env("wk-dir", "e0ee7001-1")
+    cases = ((31.6, 0, "жёлтая зона днём"), (90.0, 0, "красная зона"), (10.0, 31 * 60, "лимит неизвестен (31 мин)"))
+    for i, (pct, age, why) in enumerate(cases):
+        e.week_pct, e.snap_age = pct, age
+        out = e.run("watch", "--dry-run", t=T0 + 120 + i).stdout
+        check(f"wk-dir: {RESTARTED} — передача задания ждёт: недельный лимит: {why}" in out,
+              f"0212: неделя {pct} %, снимок {age} с — передача задания мимо недельного лимита: {out[-500:]}")
+        e.run("watch", t=T0 + 130 + i)
+        check(not respawns(e) and not [c for c in e.calls() if c[:1] == ["--bg"]],
+              f"0212: неделя {pct} %, снимок {age} с — задание передано: {e.calls()}")
+    e.week_pct, e.snap_age = 10.0, 0
+    e.run("watch", t=T0 + 200)
+    check(["respawn", "e0ee7001"] in e.calls(), f"0212: зелёная неделя — задание не передано: {e.calls()}")
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
