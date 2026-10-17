@@ -40,6 +40,12 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ
   pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"]   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
+  pantheon executors                    набор исполнителей кода (Claude всегда, Codex — дополнение) и включён ли Codex
+  pantheon executors check              проверить Codex: на PATH → вход (CODEX_HOME роли) → hello-проба
+  pantheon executors --add codex | --remove <имя>   добавить Codex (через проверку, без входа) | убрать (Claude — отказ)
+  pantheon executors pick <id задачи> [--kind mechanics|code|hard]   кто пишет задачу: dev-* или codex-dev
+  pantheon exec codex <worktree> <файл поручения>   запуск Codex для codex-dev: среда без секретов, монитор тишины,
+                                        защищённые пути, коммит с трейлером Executor: codex; push — никогда
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
   pantheon start zeus                   штаб: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
@@ -4084,6 +4090,20 @@ def qmd_mod():
     return m
 
 
+def executors_mod():
+    """lib/executors.py — исполнители кода (Claude, Codex) и обёртка pantheon exec codex."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_executors", os.path.join(LIB, "executors.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def _task_head(tid):
+    got = tasks_mod().load_tasks(PANTHEON).get(tid)
+    return got[1] if got else None
+
+
 def tasks_mod():
     """lib/tasks.py — схема задач и доска владельца (python3 -I не кладёт папку скрипта в путь импорта)."""
     global _TASKS
@@ -5014,6 +5034,10 @@ def main(argv):
         return check([a for a in rest if not a.startswith("-")] or None, quiet="--quiet" in rest)
     if cmd == "task":
         return task_cmd(rest)
+    if cmd == "executors":
+        return executors_mod().cli(rest, _task_head)
+    if cmd == "exec":
+        return executors_mod().exec_cli(rest)
     if cmd == "start":
         return start(rest)
     if cmd == "wake":
