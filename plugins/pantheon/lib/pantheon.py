@@ -34,7 +34,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon status                       один экран для отладки: тик, сессии, вопросы к вам, тревоги, защиты, sync, места heavy, версии
   pantheon night [status|report]        недельный лимит: неделя, линия, запас, зона, ночь, снимок; report — блок
                                         «Лимит» для сводки (вечерний вопрос и ночь ведёт дежурный, lib/night.py)
-  pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
+  pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
+  pantheon sync-answers               ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
   pantheon task new --direction D --title T [--status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ] --next X --owner O
                     --wave N --batch X --night ГГГГ-ММ-ДД --estimate X --actual X --acceptance принято|вернуть|к владельцу
@@ -4421,6 +4422,20 @@ def night_mod():
     return _NIGHT
 
 
+_MMV = None
+
+
+def mmv_mod():
+    """lib/mmv.py — замер минут владельца (metis-0169); самостоятельный модуль, STATE передаётся при вызове."""
+    global _MMV
+    if _MMV is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_mmv", os.path.join(LIB, "mmv.py"))
+        _MMV = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_MMV)
+    return _MMV
+
+
 def tasks_mod():
     """lib/tasks.py — схема задач и доска владельца (python3 -I не кладёт папку скрипта в путь импорта)."""
     global _TASKS
@@ -5410,6 +5425,8 @@ def main(argv):
         return awake_mod().reboot_reminder(rest)
     if cmd == "night":
         return night_mod().main(rest)
+    if cmd == "mmv":
+        return mmv_mod().main(rest, STATE)
     if cmd == "qmd":
         return qmd_mod().main(rest)
     if cmd == "plugins":
