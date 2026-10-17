@@ -84,7 +84,7 @@ class Env:
             os.makedirs(d, exist_ok=True)
         open(os.path.join(self.bin, "claude"), "w").write(FAKE_CLAUDE)
         os.chmod(os.path.join(self.bin, "claude"), 0o755)
-        # caffeinate — заглушка: «бодрость» (lib/awake.py) в тестах настоящий Mac не держит
+        # caffeinate — заглушка: «запрет сна Mac» (lib/awake.py) в тестах настоящий Mac не держит
         self.caff = os.path.join(self.tmp, "caffeinate.log")
         open(os.path.join(self.bin, "caffeinate"), "w").write(f'#!/bin/sh\necho "$@" >> "{self.caff}"\n')
         os.chmod(os.path.join(self.bin, "caffeinate"), 0o755)
@@ -203,7 +203,7 @@ def test_autostart_only_new_sanctions():
     check("самозапуск: athena-x" in e.alerts(), "строка самозапуска в тревогах")
     aw = json.load(open(e.st("awake.json")))
     check(aw.get("reason") == "поднята athena-x" and aw.get("pid"),
-          f"после самозапуска Mac не держится бодрым в том же проходе: {aw}")
+          f"после самозапуска сон Mac не запрещён в том же проходе: {aw}")
     # без доверия — тревога и уведомление, запуска нет
     e2 = Env()
     e2.direction("athena-y", trusted=False)

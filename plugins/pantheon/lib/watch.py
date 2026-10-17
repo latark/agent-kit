@@ -108,8 +108,8 @@ def holders(name, agents, registry):
 
 
 def primary_reason():
-    """Самозапуск и подъём после паузы — только на главном Mac (SCHED-14): состояние, журналы и claude agents у каждого
-    Mac свои, и два Mac подняли бы одно направление (ревью argus)."""
+    """Самозапуск и возобновление после паузы — только на главном Mac (SCHED-14): состояние, журналы и claude agents
+    у каждого Mac свои, и два Mac подняли бы одно направление (ревью argus)."""
     try:
         ph = P.load_schedule().get("primary_host")
     except (OSError, ValueError):
@@ -215,9 +215,9 @@ def _watch(dry=False):
               ("очистка Зевса", lambda: zeus_clean(agents, t)),
               ("ночь", lambda: P.night_mod().watch(agents, reg, doms, t)),
               ("самозапуск", lambda: autostart(agents, reg, doms, t)),
-              ("подъём после лимита", lambda: awake().limit_resume(agents, reg, doms, t)),
-              ("будильник ждущих", lambda: awake().wake_waiting(agents, reg, doms, t)),
-              ("бодрость", lambda: awake().keep_awake(agents, reg, doms, t)),
+              ("возобновление после недельного лимита", lambda: awake().limit_resume(agents, reg, doms, t)),
+              ("возобновление ждущих сессий", lambda: awake().wake_waiting(agents, reg, doms, t)),
+              ("запрет сна Mac", lambda: awake().keep_awake(agents, reg, doms, t)),
               ("журналы ваших слов", lambda: daily(t))]
     failed = []
     for name, fn in checks:
@@ -234,7 +234,7 @@ def _watch(dry=False):
 
 
 def awake():
-    """lib/awake.py — ночной цикл: бодрость Mac, подъём после недельного лимита, будильник ждущих."""
+    """lib/awake.py — ночной цикл: запрет сна Mac, возобновление после недельного лимита и ждущих сессий."""
     return P.awake_mod()
 
 
@@ -1136,7 +1136,7 @@ def autostart(agents, registry, doms, t, dry=False):
                 "watch")
         if rc != 0:
             fail(d, s, t, f"код запуска {rc}")
-        else:  # список сессий этого прохода её ещё не видит — «бодрость» держит Mac по этой метке
+        else:  # список сессий этого прохода её ещё не видит — «запрет сна Mac» держится по этой метке
             awake().RESUMED.append(d)
         running.append(d)
         started = True

@@ -1922,7 +1922,7 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
         data["autoCompactWindow"] = compact
         data["worktree"] = {"baseRef": "head"}
     if auto_allow:
-        # окна координаторов: исключения классификатора auto под запор слияния (coordinator_auto_allow, metis-0098)
+        # окна координаторов: исключения классификатора auto под шлюз слияния (coordinator_auto_allow, metis-0098)
         data["autoMode"] = WINDOW_RULES.auto_mode(auto_allow)
     return data
 
@@ -2014,8 +2014,8 @@ def private_conf(policy):
     return conf
 
 
-# Образцы команд слияния в обход запора: правило allow, которому подходит любая из них, срабатывает раньше классификатора
-# режима auto, и формы --admin и --auto классификатор не судит (metis-0137)
+# Образцы команд слияния в обход шлюза слияния: правило allow, которому подходит любая из них, срабатывает раньше
+# классификатора режима auto, и формы --admin и --auto классификатор не судит (metis-0137)
 MERGE_SAMPLES = ("gh pr merge 12 --admin", "gh pr merge 12 --auto --merge")
 MERGE_CMD = "gh pr merge"
 PROJECT_SETTINGS_FILES = ("settings.json", "settings.local.json")
@@ -2122,8 +2122,8 @@ def project_allow_problems(launch):
 def project_allow_text(name, problems):
     shown = lambda f: f.replace(HOME, "~", 1) if f.startswith(HOME + os.sep) else f  # noqa: E731
     return (f"направление {name}: " + "; ".join(f"{shown(f)} — allow «{r}» пускает gh pr merge" for f, r in problems)
-            + " — правило срабатывает раньше классификатора auto и открывает слияние --admin/--auto мимо запора: убрать "
-            "правило или сузить его до нужных команд gh (gh pr view *, gh pr checks *…)")
+            + " — правило срабатывает раньше классификатора auto и открывает слияние --admin/--auto мимо шлюза "
+            "слияния: убрать правило или сузить его до нужных команд gh (gh pr view *, gh pr checks *…)")
 
 
 def drop_window(name):
@@ -4237,7 +4237,8 @@ _AWAKE = None
 
 
 def awake_mod():
-    """lib/awake.py — бодрость Mac, подъём после лимита, будильник ждущих (ночной цикл, metis-0126/0127/0132)."""
+    """lib/awake.py — запрет сна Mac, возобновление после недельного лимита, возобновление ждущих сессий (ночной цикл,
+    metis-0126/0127/0132)."""
     global _AWAKE
     if _AWAKE is None:
         import importlib.util
@@ -5080,7 +5081,7 @@ def plugins_cmd(rest):
     return 2
 
 
-# --- review: записи для запора слияния guard (P1-4, guard 0.5.4) -------------------------------------------------
+# --- review: записи для шлюза слияния guard (P1-4, guard 0.5.4) -------------------------------------------------
 # Сама команда ничего не пишет: журнал STATE/merge-gate/records.jsonl пишет хук guard на PostToolUse по успешной
 # простой команде `pantheon review …` и по agent_type сессии (accept, reject — argus, talos — talos). Поэтому
 # запись нельзя сделать текстом команды от чужой роли, а сама команда только проверяет условия и формат.
@@ -5128,8 +5129,8 @@ def _review_verdict(sub, args):
         missing = [f"--{k}" for k in REVIEW_CHECKLIST if not checklist.get(k)]
         if missing:
             return pos, {}, (f"«принять» без перечня проверенного (Б6): нет или пусто {', '.join(missing)}. Формат: "
-                             f"{fmt}. Запор guard пускает только «принять», где сказано, что открыто, что запущено "
-                             "и чего не проверял")
+                             f"{fmt}. Шлюз слияния guard пускает только «принять», где сказано, что открыто, что "
+                             "запущено и чего не проверял")
     return pos, {k: v for k, v in checklist.items() if v}, None
 
 
@@ -5151,7 +5152,7 @@ def _review_state():
 
 
 def review_records(repo=None, pr=None):
-    """Записи журнала запора (битые строки пропускаются); файл — симлинк или не читается — пусто."""
+    """Записи журнала шлюза слияния (битые строки пропускаются); файл — симлинк или не читается — пусто."""
     try:
         fd = os.open(os.path.join(STATE, "merge-gate", "records.jsonl"), os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
@@ -5280,7 +5281,7 @@ def review_cmd(rest):
             cl = r.get("checklist") if isinstance(r.get("checklist"), dict) else {}
             if r.get("kind") == "accept" and not all(isinstance(cl.get(k), str) and cl[k].strip()
                                                      for k in REVIEW_CHECKLIST):
-                print("    без перечня проверенного (Б6) — запор такое «принять» не пускает")
+                print("    без перечня проверенного (Б6) — шлюз слияния такое «принять» не пускает")
             for k, label in REVIEW_CHECKLIST.items():
                 if isinstance(cl.get(k), str) and cl[k].strip():
                     print(f"    {label}: {cl[k]}")

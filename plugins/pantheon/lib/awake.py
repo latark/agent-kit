@@ -1,15 +1,19 @@
-"""Ночной цикл Пантеона: бодрость Mac, подъём после недельного лимита, будильник ждущих (metis-0126, 0127 п. 2, 0132).
+"""Ночной цикл Пантеона: запрет сна Mac, возобновление после недельного лимита, возобновление ждущих сессий
+(metis-0126, 0127 п. 2, 0132).
 
 Модуль зовёт дежурный (lib/watch.py, `pantheon watch` раз в 5 мин) тремя проверками, `pantheon status` — строкой
-«Mac бодр: …», `pantheon wake` — признаком «сессия спит на лимите». Подкоманда `pantheon reboot-reminder` — напоминание
-перезагрузить Mac раз в неделю (пятница, после 09:30).
+«Запрет сна Mac: …», `pantheon wake` — признаком «сессия спит на лимите». Подкоманда `pantheon reboot-reminder` —
+напоминание перезагрузить Mac раз в неделю (пятница, после 09:30).
 
-  бодрость          свой `caffeinate -i -t <интервал дежурного + 120 с>` отдельной группой процессов; pid и срок —
-                    STATE/awake.json. Держать, пока есть работа; тик умер — caffeinate истекает сам.
-  подъём после лимита   сессия Пантеона стоит «rate limited · resets <время>»: после сброса + 10 мин — один
-                    `claude respawn` с толчком; перед ним шлюз запуска ночного модуля (night.gate("respawn")).
-  будильник ждущих  сессия направления «ждёт вас», а в его очереди есть задача todo без блокера — разбудить
-                    (night.gate("wake")), не чаще раза в час на сессию.
+  запрет сна Mac
+      свой `caffeinate -i -t <интервал дежурного + 120 с>` отдельной группой процессов; pid и срок — STATE/awake.json.
+      Держать, пока есть работа; тик умер — caffeinate истекает сам.
+  возобновление после недельного лимита
+      сессия Пантеона стоит «rate limited · resets <время>»: после сброса + 10 мин — один `claude respawn` с толчком;
+      перед ним шлюз запуска ночного модуля (night.gate("respawn")).
+  возобновление ждущих сессий
+      сессия направления «ждёт вас», а в его очереди есть задача todo без блокера — разбудить (night.gate("wake")),
+      не чаще раза в час на сессию.
 
 Без sudo и pmset на запись: только `caffeinate`, `pmset -g batt`, `sysctl`, `ps`.
 """
@@ -36,7 +40,7 @@ WATCH_DEFAULT = 300      # интервал дежурного по умолча
 BATT_MIN = 30            # на батарее держим только при заряде выше
 LIMIT_GRACE = 600        # после сброса лимита ждём ещё (и держим Mac), с
 SOON = 1800              # «в ближайшие 30 мин» для задач расписания и самозапуска
-WAKE_REPEAT = 3600       # будильник ждущей — не чаще раза в час на сессию
+WAKE_REPEAT = 3600       # возобновление ждущей сессии — не чаще раза в час на сессию
 LIMIT_TRIES = 3          # попыток подъёма на один сброс (шлюз запуска отказал — не попытка)
 REBOOT_AT = (9, 30)      # пятница, после этого времени напоминание можно слать
 RESUME_LIMIT_TEXT = "[Пантеон: лимит сброшен] продолжай с файла состояния"
@@ -139,7 +143,7 @@ def scheduler_paused():
     return os.path.exists(P.path("paused")) or bool(P.load_pause("_all"))
 
 
-# --- бодрость (0126) -----------------------------------------------------------------
+# --- запрет сна Mac (0126) -----------------------------------------------------------------
 
 def watch_interval():
     with contextlib.suppress(Exception):
@@ -236,7 +240,7 @@ def autostart_soon(t):
 
 
 def hold_reason(agents, doms, t):
-    """Первая причина держать Mac бодрым или None; вторым значением — причина отказа, если держать нельзя."""
+    """Первая причина запретить сон Mac или None; вторым значением — причина отказа, если держать нельзя."""
     if scheduler_paused():
         return None, "планировщик на паузе"
     why = None
@@ -300,7 +304,7 @@ def kill_ours(pid):
 
 
 def keep_awake(agents, registry, doms, t):
-    """Одна проверка дежурного «бодрость»: держать Mac бодрым, если есть причина, иначе отпустить."""
+    """Одна проверка дежурного «запрет сна Mac»: запретить сон, если есть причина, иначе снять запрет."""
     path = P.path("awake.json")
     st = P.read_json(path, {})
     reason, nothing = hold_reason(agents, doms, t)
@@ -310,7 +314,7 @@ def keep_awake(agents, registry, doms, t):
         if pct is not None and pct <= BATT_MIN:
             low, reason, nothing = pct, None, f"батарея {pct:.0f} %"
     if low is not None:
-        P.notify_soon("awake-batt", f"Mac на батарее ({low:.0f} %): подключите зарядку — бодрость отпущена, "
+        P.notify_soon("awake-batt", f"Mac на батарее ({low:.0f} %): подключите зарядку — запрет сна снят, "
                       "ночная работа встанет", group="awake-batt", once=True)
     elif P.on_ac() or (batt_pct() or 100) > BATT_MIN:
         P.clear_fault("awake-batt")
@@ -337,7 +341,7 @@ def status_line(t=None):
     t = P.now() if t is None else t
     st = P.read_json(P.path("awake.json"), {})
     if st.get("pid") and float(st.get("until") or 0) > t and pid_is_ours(st["pid"]):
-        return f"Mac бодр: {st.get('reason') or 'есть работа'} (держим до {hhmm(float(st['until']))})"
+        return f"Запрет сна Mac: {st.get('reason') or 'есть работа'} (до {hhmm(float(st['until']))})"
     if st.get("low_batt") is not None:
         return f"Mac может спать: батарея {float(st['low_batt']):.0f} % — подключите зарядку"
     return "Mac может спать" + (f": {st['why']}" if st.get("why") else "")
@@ -402,7 +406,7 @@ def reboot_reminder(rest=(), t=None):
     return 0
 
 
-# --- подъём после недельного лимита (0132) -------------------------------------------------
+# --- возобновление после недельного лимита (0132) -------------------------------------------------
 
 def limit_resume(agents, registry, doms, t):
     """Сессия Пантеона стоит на лимите, сброс + 10 мин прошли — шлюз запуска respawn, один подъём на один сброс."""
@@ -437,12 +441,13 @@ def limit_resume(agents, registry, doms, t):
         if rc == 0:
             RESUMED.append(name)
         elif rc != P.NO_WINDOW:
-            P.alert(f"подъём после лимита: {name} не поднялась (код {rc}, попытка {mk['tries']} из {LIMIT_TRIES})", "watch")
+            P.alert(f"возобновление после недельного лимита: {name} не поднялась (код {rc}, попытка {mk['tries']} "
+                    f"из {LIMIT_TRIES})", "watch")
     if changed:
         P.write_json(marks_path(), marks)
 
 
-# --- будильник ждущих (0127 п. 2) --------------------------------------------------------
+# --- возобновление ждущих сессий (0127 п. 2) --------------------------------------------------------
 
 def owner_blockers(direction):
     """id задач, названных в STATUS.md направления строкой «владелец: <id> …»: их без владельца не берут."""
@@ -478,7 +483,7 @@ def wake_waiting(agents, registry, doms, t):
         name = a.get("name") or ""
         if name not in doms or a.get("state") != "blocked" or not a.get("sessionId"):
             continue
-        if limit_info(a) is not None:  # на лимите — это подъём после сброса, а не ждущая
+        if limit_info(a) is not None:  # на лимите — это возобновление после недельного лимита, а не ждущая
             continue
         if t - float(last.get(name) or 0) < WAKE_REPEAT:
             continue
@@ -496,6 +501,6 @@ def wake_waiting(agents, registry, doms, t):
         if rc == 0:
             RESUMED.append(name)
         elif rc != P.NO_WINDOW:
-            P.alert(f"будильник ждущих: {name} не поднялась (код {rc}), задача {tid}", "watch")
+            P.alert(f"возобновление ждущих сессий: {name} не поднялась (код {rc}), задача {tid}", "watch")
     if changed:
         P.write_json(marks_path(), marks)

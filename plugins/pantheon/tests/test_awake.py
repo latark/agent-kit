@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Тесты ночного цикла (lib/awake.py): бодрость Mac (metis-0126), напоминание о перезагрузке, подъём после недельного
-лимита (metis-0132), будильник ждущих (metis-0127 п. 2).
+"""Тесты ночного цикла (lib/awake.py): запрет сна Mac (metis-0126), напоминание о перезагрузке, возобновление после
+недельного лимита (metis-0132), возобновление ждущих сессий (metis-0127 п. 2).
 
 Запуск: python3 -I plugins/pantheon/tests/test_awake.py  (код выхода 0 — все прошли)
 Модули pantheon и awake грузятся в процесс теста, их папки (HOME, PANTHEON, STATE) подменены временными. Настоящий
@@ -211,7 +211,7 @@ def started(e, st):
     return st
 
 
-# --- бодрость ------------------------------------------------------------------------
+# --- запрет сна Mac ------------------------------------------------------------------------
 
 def test_hold_working_once_and_release():
     e = Env()
@@ -222,7 +222,7 @@ def test_hold_working_once_and_release():
     check("hermes-site работает" in st.get("reason", ""), f"причина: {st.get('reason')}")
     st2 = e.keep(MON + 250)
     check(e.starts() == ["-i -t 420"] and st2["pid"] == st["pid"], "повторный проход плодит второй caffeinate")
-    check(AW.status_line(MON + 250).startswith("Mac бодр: hermes-site работает"), AW.status_line(MON + 250))
+    check(AW.status_line(MON + 250).startswith("Запрет сна Mac: hermes-site работает"), AW.status_line(MON + 250))
     # до конца старого меньше 120 с — новый, старый убит
     time.sleep(0.1)
     st3 = started(e, e.keep(MON + 311))
@@ -425,7 +425,7 @@ def test_reboot_cli_registered():
     check("reboot-reminder" in (P.__doc__ or ""), "нет в справке")
 
 
-# --- подъём после лимита -----------------------------------------------------------------
+# --- возобновление после недельного лимита -----------------------------------------------------------------
 
 def test_limit_resume():
     e = Env()
@@ -558,7 +558,7 @@ def test_pantheon_wake_sees_limited():
     check(not e2.calls, f"wake поднял обычную ждущую: {e2.calls}")
 
 
-# --- будильник ждущих --------------------------------------------------------------------
+# --- возобновление ждущих сессий --------------------------------------------------------------------
 
 def test_wake_waiting():
     e = Env()
@@ -566,7 +566,7 @@ def test_wake_waiting():
     tid = e.task("hermes-site")
     AW.wake_waiting(e.agents_list, [], DOMS, MON)
     check(e.calls == [("hermes-site", f"[Пантеон: есть задача без блокера] возьми {tid} из очереди", "wake-waiting")],
-          f"будильник: {e.calls}")
+          f"возобновление ждущих: {e.calls}")
     check(e.gate_calls == ["wake"], f"шлюз запуска wake: {e.gate_calls}")
     AW.wake_waiting(e.agents_list, [], DOMS, MON + 3599)
     check(len(e.calls) == 1, "будит чаще раза в час")
@@ -598,7 +598,7 @@ def test_wake_waiting_no_window_no_alert():
     check(len(calls) == 1, "отметка раз в час не осталась")
     P.resume_session = lambda name, a, text, origin, recheck=None: (1, None)
     AW.wake_waiting(e.agents_list, [], DOMS, MON + 3601)
-    check("будильник ждущих: hermes-site не поднялась (код 1)" in alerts_text(e), f"код 1 без тревоги: {alerts_text(e)!r}")
+    check("возобновление ждущих сессий: hermes-site не поднялась (код 1)" in alerts_text(e), f"код 1 без тревоги: {alerts_text(e)!r}")
 
 
 def test_pantheon_wake_fresh_sees_limited():
@@ -700,10 +700,10 @@ def test_wake_waiting_skips_limited_and_stopped():
 
 def test_watch_hooks_wired():
     src = open(os.path.join(ROOT, "lib", "watch.py"), encoding="utf-8").read()
-    for name in ("бодрость", "подъём после лимита", "будильник ждущих"):
+    for name in ("запрет сна Mac", "возобновление после недельного лимита", "возобновление ждущих сессий"):
         check(f'("{name}"' in src, f"в _watch() нет проверки «{name}»")
     check("awake_mod().status_line()" in open(os.path.join(ROOT, "lib", "pantheon.py"), encoding="utf-8").read(),
-          "в status() нет строки Mac бодр")
+          "в status() нет строки «Запрет сна Mac»")
 
 
 if __name__ == "__main__":
