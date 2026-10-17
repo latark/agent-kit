@@ -1136,6 +1136,8 @@ def autostart(agents, registry, doms, t, dry=False):
                 "watch")
         if rc != 0:
             fail(d, s, t, f"код запуска {rc}")
+        else:  # список сессий этого прохода её ещё не видит — «бодрость» держит Mac по этой метке
+            awake().RESUMED.append(d)
         running.append(d)
         started = True
     if not dry:

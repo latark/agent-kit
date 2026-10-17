@@ -84,6 +84,10 @@ class Env:
             os.makedirs(d, exist_ok=True)
         open(os.path.join(self.bin, "claude"), "w").write(FAKE_CLAUDE)
         os.chmod(os.path.join(self.bin, "claude"), 0o755)
+        # caffeinate — заглушка: «бодрость» (lib/awake.py) в тестах настоящий Mac не держит
+        self.caff = os.path.join(self.tmp, "caffeinate.log")
+        open(os.path.join(self.bin, "caffeinate"), "w").write(f'#!/bin/sh\necho "$@" >> "{self.caff}"\n')
+        os.chmod(os.path.join(self.bin, "caffeinate"), 0o755)
         self.log = os.path.join(self.tmp, "claude.log")
         self.agents_file = os.path.join(self.tmp, "agents.json")
         self.notify = os.path.join(self.tmp, "notify.log")
@@ -150,7 +154,7 @@ class Env:
                "PANTHEON_STATE": self.state, "PANTHEON_NOW": str(t), "PANTHEON_HOST": "mac-a",
                "PANTHEON_NOTIFY_LOG": self.notify, "FAKE_CLAUDE_LOG": self.log, "FAKE_AGENTS": self.agents_file,
                "PANTHEON_FAKE_SWAP": "1.0", "PANTHEON_FAKE_PS": "", "PANTHEON_FAKE_CC": "2.1.292",
-               "PANTHEON_FAKE_LIMIT": "10"}
+               "PANTHEON_FAKE_LIMIT": "10", "PANTHEON_CAFFEINATE": os.path.join(self.bin, "caffeinate")}
         env.update(self.extra)
         env.update(extra or {})
         return subprocess.run([PY311, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=60)
@@ -194,6 +198,9 @@ def test_autostart_only_new_sanctions():
     starts = [c for c in e.calls() if c[:1] == ["--bg"]]
     check(len(starts) == 1 and "athena-x" in starts[0], f"самозапуск не пошёл: {e.calls()} {r.stderr}")
     check("самозапуск: athena-x" in e.alerts(), "строка самозапуска в тревогах")
+    aw = json.load(open(e.st("awake.json")))
+    check(aw.get("reason") == "поднята athena-x" and aw.get("pid"),
+          f"после самозапуска Mac не держится бодрым в том же проходе: {aw}")
     # без доверия — тревога и уведомление, запуска нет
     e2 = Env()
     e2.direction("athena-y", trusted=False)
