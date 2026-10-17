@@ -504,10 +504,11 @@ def main():
     rule = lambda n, head: [r for r in am[n] if r.startswith(head)]
     gated = rule("athena-shop", "Pantheon Gated Merge:")
     record = rule("athena-shop", "Pantheon Review Record:")
-    check("окна координаторов и Метиды: autoMode.allow — \"$defaults\" первым и два правила запора; без [merge_repos] "
+    check("окна координаторов и Метиды: autoMode.allow — \"$defaults\" первым, слияние, сдача лида (metis-0215) и Review Record; без [merge_repos] "
           "— без правила слияния (metis-0098)",
           all(a[:1] == ["$defaults"] for a in am.values()) and len(record) == 1
-          and all(len(am[n]) == 3 and len(rule(n, "Pantheon Gated Merge:")) == 1 and rule(n, "Pantheon Review Record:")
+          and all(len(am[n]) == 4 and len(rule(n, "Pantheon Gated Merge:")) == 1
+                  and len(rule(n, "Pantheon Lead Delivery:")) == 1 and rule(n, "Pantheon Review Record:")
                   == record for n in ("athena-shop", "metis-pantheon"))
           and am["zz"] == ["$defaults"] + record)
     check("окно с доступом к личному (mnemo-brain): \"$defaults\" и только Review Record — правила слияния нет даже "

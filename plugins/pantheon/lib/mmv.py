@@ -139,16 +139,32 @@ def fmt(m):
     return f"{m:.1f}".replace(".", ",")
 
 
-def line(state, days=7, today=None):
-    """Одна строка для `pantheon night report`: вчера и среднее за days дней (без записи в файл)."""
-    rs = rows(state, days + 1, today)
+def _today(t):
+    return date.fromtimestamp(t if t is not None else time.time())
+
+
+def _entries(n):
+    """«1 вход / 2 входа / 5 входов»."""
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} вход"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return f"{n} входа"
+    return f"{n} входов"
+
+
+def line(state, days=7, t=None):
+    """Одна строка для `pantheon night report`: вчера и среднее за days дней (без записи в файл).
+
+    t — время сводки (секунды), от него считается «сегодня»; без него — настоящее время.
+    """
+    rs = rows(state, days + 1, _today(t))
     yest, rest = rs[-2], rs[:-1]
     avg = sum(r["min"] for r in rest[-days:]) / max(1, len(rest[-days:]))
-    return (f"ММВ (минуты владельца): вчера {fmt(yest['min'])} мин ({yest['entries']} входов), "
+    return (f"ММВ (минуты владельца): вчера {fmt(yest['min'])} мин ({_entries(yest['entries'])}), "
             f"среднее за {days} дн. {fmt(avg)} мин")
 
 
-def main(rest, state):
+def main(rest, state, t=None):
     days = 7
     if rest[:1] == ["--days"]:
         try:
@@ -160,7 +176,7 @@ def main(rest, state):
     elif rest:
         print("pantheon mmv [--days N]", file=sys.stderr)
         return 2
-    rs = rows(state, days)
+    rs = rows(state, days, _today(t))
     save(state, rs)
     print("День         Минут  Входов  Событий")
     for r in rs:

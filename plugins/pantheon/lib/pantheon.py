@@ -35,7 +35,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon night [status|report]        недельный лимит: неделя, линия, запас, зона, ночь, снимок; report — блок
                                         «Лимит» для сводки (вечерний вопрос и ночь ведёт дежурный, lib/night.py)
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
-  pantheon sync-answers               ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
+  pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
   pantheon task new --direction D --title T [--status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ] --next X --owner O
                     --wave N --batch X --night ГГГГ-ММ-ДД --estimate X --actual X --acceptance принято|вернуть|к владельцу
@@ -1716,6 +1716,7 @@ WINDOW_RULES = _window_rules()
 COORDINATOR_ALLOW = WINDOW_RULES.COORDINATOR_ALLOW
 MERGE_REPO_RE = WINDOW_RULES.MERGE_REPO_RE
 GATED_MERGE_RULE = WINDOW_RULES.GATED_MERGE_RULE
+LEAD_DELIVERY_RULE = WINDOW_RULES.LEAD_DELIVERY_RULE
 REVIEW_RECORD_RULE = WINDOW_RULES.REVIEW_RECORD_RULE
 coordinator_auto_allow = WINDOW_RULES.coordinator_auto_allow
 
@@ -5430,7 +5431,7 @@ def main(argv):
     if cmd == "night":
         return night_mod().main(rest)
     if cmd == "mmv":
-        return mmv_mod().main(rest, STATE)
+        return mmv_mod().main(rest, STATE, now())
     if cmd == "qmd":
         return qmd_mod().main(rest)
     if cmd == "plugins":

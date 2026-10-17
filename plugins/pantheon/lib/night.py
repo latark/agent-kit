@@ -675,7 +675,7 @@ def report_lines(t=None):
     else:
         out.append("Сброс недели: неизвестен")
     with contextlib.suppress(Exception):  # замер ММВ не должен ронять сводку
-        out.append(P.mmv_mod().line(P.STATE))
+        out.append(P.mmv_mod().line(P.STATE, t=t))
     out.append(snap_line(m, cfg) + (" — снимок старше 3 ч, строка статуса не пишет?" if m["stale"] else ""))
     return out
 

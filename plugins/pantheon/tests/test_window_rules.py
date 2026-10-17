@@ -40,17 +40,39 @@ def main():
     allow = w.coordinator_auto_allow(["b-org/kit", "a-org/app", "bad owner", 5, "a-org/app", "-x/y"])
     check("coordinator_auto_allow: \"$defaults\" первым, слияние по owner/repo (сортировка, без дублей и мусора), "
           "Review Record последним",
-          allow[0] == "$defaults" and len(allow) == 3 and "(`a-org/app`, `b-org/kit`)" in allow[1]
-          and "bad owner" not in allow[1] and "-x/y" not in allow[1] and allow[2] == w.REVIEW_RECORD_RULE, allow)
+          allow[0] == "$defaults" and len(allow) == 4 and "(`a-org/app`, `b-org/kit`)" in allow[1]
+          and "bad owner" not in allow[1] and "-x/y" not in allow[1] and allow[3] == w.REVIEW_RECORD_RULE, allow)
     for repos in ([], None, "a-org/app", ["bad owner"]):
         got = w.coordinator_auto_allow(repos)
         check(f"coordinator_auto_allow({repos!r}): без правила слияния", got == ["$defaults", w.REVIEW_RECORD_RULE],
               got)
+        check(f"coordinator_auto_allow({repos!r}): без строки push и правила сдачи",
+              not any("Lead Delivery" in x or "git push" in x for x in got), got)
+    lead = allow[2]
+    check("Lead Delivery: сразу после Gated Merge, {repos} подставлен, фигурных скобок нет",
+          allow[1].startswith("Pantheon Gated Merge:") and lead.startswith("Pantheon Lead Delivery:")
+          and "(`a-org/app`, `b-org/kit`)" in lead and "{" not in lead and "}" not in lead, lead[:80])
+    check("Lead Delivery: «does not cover» с --force и :<branch>/--delete",
+          "does not cover `--force`" in lead and "`--delete`, `:<branch>`" in lead)
+    check("Lead Delivery: main/master только как исключение, строка (4) ограничена репозиториями направления",
+          "not `main`, `master`" in lead and lead.count("master") == 1
+          and "on one of this direction's repositories" in lead.split("(4)")[1])
+    # metis-0215, argus-42b: каждое исключение и сужение правила — отдельной подстрокой, чтобы удаление или
+    # расширение любого из них давало красный тест.
+    for part in ("`--force`, `-f`, `--force-with-lease`, a `+` refspec",
+                 "`--mirror`, `--all`, `--tags`, any other remote or URL, `cd` or chained commands",
+                 "not `main`, `master` or the repository's default branch",
+                 "to the `origin` remote of one of this direction's repositories (",
+                 "(a coordinator main session or its lead subagent `hephaestus-*` or `apollo-*`)"):
+        check(f"Lead Delivery: дословно «{part[:50]}…»", part in lead, part)
+    check("Lead Delivery: круг сессий не шире координатора и лидов — без «any subagent»",
+          "any subagent" not in lead and "any session" not in lead and "subagent" in lead.split("(1)")[0]
+          and lead.split("(1)")[0].count("`") == 4, lead.split("(1)")[0])
     check("auto_mode: раздел autoMode — копия списка",
           w.auto_mode(allow) == {"allow": allow} and w.auto_mode(allow)["allow"] is not allow)
 
     psrc = open(os.path.join(LIB, "pantheon.py"), encoding="utf-8").read()
-    own = [x for x in ("Pantheon Gated Merge:", "Pantheon Review Record:", "COORDINATOR_ALLOW = [",
+    own = [x for x in ("Pantheon Gated Merge:", "Pantheon Lead Delivery:", "Pantheon Review Record:", "COORDINATOR_ALLOW = [",
                        "def coordinator_auto_allow", "MERGE_REPO_RE = re.compile", '"autoMode"] = {')
            if x in psrc]
     check("pantheon.py сам правил не определяет — только берёт из window_rules.py", not own, own)
@@ -68,7 +90,7 @@ def main():
                   os.path.realpath(p.WINDOW_RULES.__file__)
                   == os.path.realpath(os.path.join(LIB, "window_rules.py"))
                   and all(getattr(p, n) is getattr(p.WINDOW_RULES, n) for n in (
-                      "COORDINATOR_ALLOW", "GATED_MERGE_RULE", "REVIEW_RECORD_RULE", "MERGE_REPO_RE",
+                      "COORDINATOR_ALLOW", "GATED_MERGE_RULE", "LEAD_DELIVERY_RULE", "REVIEW_RECORD_RULE", "MERGE_REPO_RE",
                       "coordinator_auto_allow")))
             rs = p.role_settings([], None, [], os.path.join(tmp, "cache"), False, [],
                                  auto_allow=p.coordinator_auto_allow(["a-org/app"]))
