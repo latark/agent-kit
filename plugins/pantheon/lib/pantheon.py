@@ -32,9 +32,12 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon view [--quiet]               обновить копию ~/ai/pantheon-view для Obsidian
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
   pantheon status                       один экран для отладки: тик, сессии, вопросы к вам, тревоги, защиты, sync, места heavy, версии
+  pantheon night [status|report]        недельный лимит: неделя, линия, запас, зона, ночь, снимок; report — блок
+                                        «Лимит» для сводки (вечерний вопрос и ночь ведёт дежурный, lib/night.py)
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
   pantheon task new --direction D --title T [--status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ] --next X --owner O
+                    --wave N --batch X --night ГГГГ-ММ-ДД --estimate X --actual X --acceptance принято|вернуть|к владельцу
                     --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
                     --recommend "А — потому что …" --if-no-answer "…" --depends-on ID]
                     без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ
@@ -46,6 +49,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
   pantheon watch [--dry-run]            дежурный (тик раз в 5 мин): сессии, STATUS.md, swap, worktree, версия Claude Code,
                                         паузы, самозапуск по вашим решениям; --dry-run — кого поднял бы и почему нет
+  pantheon reboot-reminder [--now]      пятница после 09:30: Mac не перезагружался с прошлой пятницы — карточка и уведомление
   pantheon agents | who                 снимок claude agents для строки статуса | таблица координаторов
   pantheon revisits                     пересмотры к сроку и по событиям (тик раз в сутки)
   pantheon wake <имя> ["толчок"]        поднять уснувшую сессию направления той же сессией
@@ -320,7 +324,7 @@ def clear_once(key):
 JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
-                    "instructions", "agents", "usage", "qmd", "plugins"}
+                    "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 # Окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` из schedule.toml идёт с песочницей
 # settings/job-<роль>.json (собирает sandbox_build), а не без неё. Роль вне таблицы тик не запускает. write — куда
@@ -1304,6 +1308,15 @@ def status():
             warn.append("sync")
     section("Синхронизация ~/.claude", lines or ["в порядке"])
 
+    # недельный лимит и ночь (metis-0127, 0129)
+    try:
+        lines = night_mod().status_lines(t)
+    except Exception as e:  # noqa: BLE001 — сбой расчёта не ломает остальной экран
+        lines = [f"не посчитать: {type(e).__name__}: {str(e)[:120]}"]
+    if any(ln.startswith("лимит неизвестен") or "зона: красная" in ln or "зона: жёлтая" in ln for ln in lines):
+        warn.append("лимит")
+    section("Лимит и ночь", lines)
+
     # места heavy, память, версии
     lines = []
     for name in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):
@@ -1329,6 +1342,8 @@ def status():
         lines.append(f"swap: {used / 1024:.1f} ГБ")
         if used > 4096:
             warn.append("swap")
+    with contextlib.suppress(Exception):
+        lines.append(awake_mod().status_line())
     lines.append(f"Claude Code {(_sh('claude', '--version').split() or ['?'])[0]} · guard {_plugin_version('guard')} · "
                  f"pantheon {_plugin_version('pantheon')}")
     section("Mac", lines)
@@ -1907,7 +1922,7 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
         data["autoCompactWindow"] = compact
         data["worktree"] = {"baseRef": "head"}
     if auto_allow:
-        # окна координаторов: исключения классификатора auto под запор слияния (coordinator_auto_allow, metis-0098)
+        # окна координаторов: исключения классификатора auto под шлюз слияния (coordinator_auto_allow, metis-0098)
         data["autoMode"] = WINDOW_RULES.auto_mode(auto_allow)
     return data
 
@@ -1999,8 +2014,8 @@ def private_conf(policy):
     return conf
 
 
-# Образцы команд слияния в обход запора: правило allow, которому подходит любая из них, срабатывает раньше классификатора
-# режима auto, и формы --admin и --auto классификатор не судит (metis-0137)
+# Образцы команд слияния в обход шлюза слияния: правило allow, которому подходит любая из них, срабатывает раньше
+# классификатора режима auto, и формы --admin и --auto классификатор не судит (metis-0137)
 MERGE_SAMPLES = ("gh pr merge 12 --admin", "gh pr merge 12 --auto --merge")
 MERGE_CMD = "gh pr merge"
 PROJECT_SETTINGS_FILES = ("settings.json", "settings.local.json")
@@ -2107,8 +2122,8 @@ def project_allow_problems(launch):
 def project_allow_text(name, problems):
     shown = lambda f: f.replace(HOME, "~", 1) if f.startswith(HOME + os.sep) else f  # noqa: E731
     return (f"направление {name}: " + "; ".join(f"{shown(f)} — allow «{r}» пускает gh pr merge" for f, r in problems)
-            + " — правило срабатывает раньше классификатора auto и открывает слияние --admin/--auto мимо запора: убрать "
-            "правило или сузить его до нужных команд gh (gh pr view *, gh pr checks *…)")
+            + " — правило срабатывает раньше классификатора auto и открывает слияние --admin/--auto мимо шлюза "
+            "слияния: убрать правило или сузить его до нужных команд gh (gh pr view *, gh pr checks *…)")
 
 
 def drop_window(name):
@@ -3111,8 +3126,11 @@ def open_tasks(name):
     return out
 
 
-def wake_recheck(name):
-    """Под блокировкой имени перед подъёмом: метка, пауза, техперезапуск, живая копия «имя (2)» (ревью argus)."""
+def wake_recheck(name, state=None):
+    """Под блокировкой имени перед подъёмом: метка, пауза, техперезапуск, живая копия «имя (2)» (ревью argus).
+    state == "blocked" — сессия на лимите: «живая» для claude agents, её и будим, копии не ищем."""
+    if state == "blocked":
+        return awake_mod().recheck(name)
     if os.path.exists(path("stopped", name)):
         return "остановлено вами"
     if load_pause(name):
@@ -3148,7 +3166,11 @@ def _wake(dry):
     done = 0
     for a in agents:
         name, state = a.get("name") or "", a.get("state")
-        if state not in ("failed", "stopped") or not (name in domains or name.startswith("daedalus-")):
+        asleep = state in ("failed", "stopped")
+        if not asleep and state == "blocked":  # стоит на недельном лимите, сброс прошёл (metis-0132) — тоже спит
+            with contextlib.suppress(Exception):
+                asleep = awake_mod().limit_sleeping(a) is not None
+        if not asleep or not (name in domains or name.startswith("daedalus-")):
             continue
         if os.path.exists(path("stopped", name)) or load_pause(name):
             continue
@@ -3167,9 +3189,9 @@ def _wake(dry):
             continue
         if fresh:
             rc = fresh_start(name, a, fresh_text("пробуждение", name, a.get("id")), "wake",
-                             recheck=lambda n=name: wake_recheck(n))
+                             recheck=lambda n=name, s=state: wake_recheck(n, s))
         else:
-            rc, _ = resume_session(name, a, WAKE_TEXT, "wake", recheck=lambda n=name: wake_recheck(n))
+            rc, _ = resume_session(name, a, WAKE_TEXT, "wake", recheck=lambda n=name, s=state: wake_recheck(n, s))
         if rc and rc != NO_WINDOW:  # «нет окна» — своя тревога, одна на причину
             alert(f"pantheon wake: {name} не поднялась (код {rc})", "pantheon")
         done += 1
@@ -4211,6 +4233,22 @@ def notify_mod():
     return _NOTIFY
 
 
+_AWAKE = None
+
+
+def awake_mod():
+    """lib/awake.py — запрет сна Mac, возобновление после недельного лимита, возобновление ждущих сессий (ночной цикл,
+    metis-0126/0127/0132)."""
+    global _AWAKE
+    if _AWAKE is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_awake", os.path.join(LIB, "awake.py"))
+        _AWAKE = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_AWAKE)
+        _AWAKE.set_core(sys.modules[__name__])
+    return _AWAKE
+
+
 def owner_acts():
     """→ (ответы, переносы в «Нужен ответ»), оба {id: [метка времени, …]}. Ответы — из журнала доски (answer и
     request с вариантом, move не в «Нужен ответ») и окна вопросов Зевса (вопрос «[id] …»); перенос карточки в «Нужен
@@ -4346,6 +4384,21 @@ def qmd_mod():
     spec.loader.exec_module(m)
     m.set_core(sys.modules[__name__])
     return m
+
+
+_NIGHT = None
+
+
+def night_mod():
+    """lib/night.py — темп недельного лимита и ночной цикл (metis-0127, 0128, 0129)."""
+    global _NIGHT
+    if _NIGHT is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_night", os.path.join(LIB, "night.py"))
+        _NIGHT = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_NIGHT)
+        _NIGHT.set_core(sys.modules[__name__])
+    return _NIGHT
 
 
 def tasks_mod():
@@ -4525,6 +4578,9 @@ def task_cmd(rest):
         if sub == "new":
             fields = {"status": opt("--status"), "priority": int(opt("--priority")) if opt("--priority") else None,
                       "due": opt("--due"), "next": opt("--next"), "owner": opt("--owner"),
+                      "wave": int(opt("--wave")) if opt("--wave") else None, "batch": opt("--batch"),
+                      "night": opt("--night"), "estimate": opt("--estimate"), "actual": opt("--actual"),
+                      "acceptance": opt("--acceptance"),
                       "waiting_on": opt("--waiting-on"), "question": opt("--question"), "why": opt("--why"),
                       "recommend": opt("--recommend"), "if_no_answer": opt("--if-no-answer"),
                       "options": opt("--option", True) or None, "depends_on": opt("--depends-on", True) or None,
@@ -4541,6 +4597,8 @@ def task_cmd(rest):
             print(f"{tid} {os.path.relpath(p, PANTHEON)}")
         elif sub == "set" and args:
             tid, changes, note, i = args[0], {}, None, 1
+            night_flags = {"--wave": "wave", "--batch": "batch", "--night": "night", "--estimate": "estimate",
+                           "--actual": "actual", "--acceptance": "acceptance"}  # ночной цикл: флаги как у --due
             while i < len(args):
                 if args[i] == "--note" and i + 1 < len(args):
                     note, i = args[i + 1], i + 2
@@ -4549,7 +4607,13 @@ def task_cmd(rest):
                     changes["options"] = (changes.get("options") or []) + [args[i + 1]]  # и после options= (argus)
                     i += 2
                     continue
-                k, eq, v = args[i].partition("=")
+                if args[i] in night_flags and i + 1 < len(args):
+                    k, v, eq, step = night_flags[args[i]], args[i + 1], "=", 2
+                    if k == "wave":
+                        v = str(int(v))  # не число — ошибка, как у priority=
+                else:
+                    k, eq, v = args[i].partition("=")
+                    step = 1
                 if not eq:
                     print(f"pantheon task set: «{args[i]}» — нужно поле=значение", file=sys.stderr)
                     return 2
@@ -4563,7 +4627,7 @@ def task_cmd(rest):
                 kind = T.FIELDS.get(k, ("str",))[0]
                 changes[k] = None if v in ("", "null") else int(v) if kind == "int" else (v == "true") if kind == "bool" else \
                     [x.strip() for x in v.split(",") if x.strip()] if kind == "list" else v
-                i += 1
+                i += step
             p, head = T.task_set(PANTHEON, now(), tid, changes, note=note)
             print(f"{tid}: {head.get('status')} · {os.path.relpath(p, PANTHEON)}")
         elif sub == "show" and args:
@@ -5017,7 +5081,7 @@ def plugins_cmd(rest):
     return 2
 
 
-# --- review: записи для запора слияния guard (P1-4, guard 0.5.4) -------------------------------------------------
+# --- review: записи для шлюза слияния guard (P1-4, guard 0.5.4) -------------------------------------------------
 # Сама команда ничего не пишет: журнал STATE/merge-gate/records.jsonl пишет хук guard на PostToolUse по успешной
 # простой команде `pantheon review …` и по agent_type сессии (accept, reject — argus, talos — talos). Поэтому
 # запись нельзя сделать текстом команды от чужой роли, а сама команда только проверяет условия и формат.
@@ -5065,8 +5129,8 @@ def _review_verdict(sub, args):
         missing = [f"--{k}" for k in REVIEW_CHECKLIST if not checklist.get(k)]
         if missing:
             return pos, {}, (f"«принять» без перечня проверенного (Б6): нет или пусто {', '.join(missing)}. Формат: "
-                             f"{fmt}. Запор guard пускает только «принять», где сказано, что открыто, что запущено "
-                             "и чего не проверял")
+                             f"{fmt}. Шлюз слияния guard пускает только «принять», где сказано, что открыто, что "
+                             "запущено и чего не проверял")
     return pos, {k: v for k, v in checklist.items() if v}, None
 
 
@@ -5088,7 +5152,7 @@ def _review_state():
 
 
 def review_records(repo=None, pr=None):
-    """Записи журнала запора (битые строки пропускаются); файл — симлинк или не читается — пусто."""
+    """Записи журнала шлюза слияния (битые строки пропускаются); файл — симлинк или не читается — пусто."""
     try:
         fd = os.open(os.path.join(STATE, "merge-gate", "records.jsonl"), os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
@@ -5217,7 +5281,7 @@ def review_cmd(rest):
             cl = r.get("checklist") if isinstance(r.get("checklist"), dict) else {}
             if r.get("kind") == "accept" and not all(isinstance(cl.get(k), str) and cl[k].strip()
                                                      for k in REVIEW_CHECKLIST):
-                print("    без перечня проверенного (Б6) — запор такое «принять» не пускает")
+                print("    без перечня проверенного (Б6) — шлюз слияния такое «принять» не пускает")
             for k, label in REVIEW_CHECKLIST.items():
                 if isinstance(cl.get(k), str) and cl[k].strip():
                     print(f"    {label}: {cl[k]}")
@@ -5318,6 +5382,10 @@ def main(argv):
         return watch_cmd(cmd, rest)
     if cmd == "usage":
         return usage_report(rest)
+    if cmd == "reboot-reminder":
+        return awake_mod().reboot_reminder(rest)
+    if cmd == "night":
+        return night_mod().main(rest)
     if cmd == "qmd":
         return qmd_mod().main(rest)
     if cmd == "plugins":

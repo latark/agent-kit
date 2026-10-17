@@ -1,0 +1,693 @@
+"""Темп недельного лимита и ночной цикл Пантеона (metis-0127 п. 1 и 3, metis-0128, metis-0129; решения владельца 16.10).
+
+  pantheon night [status]   неделя, линия, запас, зона; ночь; давность снимка лимита
+  pantheon night report     блок «Лимит» для ежедневной сводки: неделя, линия, запас, зона, ночь, тревоги, сброс
+
+Снимок лимита пишет строка статуса Claude Code в ~/.local/state/claude-statusline/ (путь — от HOME, как LIMIT_SNAPSHOT):
+`five-hour` — «pct resets_at now», `seven-day` — «pct resets_at now», `week-usage` — строки «now resets_at pct» (до 200).
+Неделя берётся из seven-day, без него — из последней строки week-usage. Время замера — наибольшее now этих файлов.
+Снимок старше snapshot_ok_min или его нет — лимит неизвестен, новое не запускается; старше snapshot_max_min — ещё и
+строка в тревогах (её Зевс несёт в сводку). Пробного запроса к модели нет. resets_at в прошлом или недели нет — новая
+неделя с неизвестным расходом: закрыто, пока строка статуса не запишет новый снимок.
+
+Линия L = 100 × (t − (resets_at − 7 д)) / 7 д — сколько процентов недели «положено» к этому моменту; запас over =
+used − L (п. п.). Зона: зелёная — over ≤ warn_pp; жёлтая — warn_pp < over ≤ stop_pp (днём новое не запускается,
+одно уведомление с числами на зону в день); красная — over > stop_pp или used ≥ hard_pct (новое не запускается,
+идущее не трогаем).
+
+Ночь — с start до end по местному времени (P.now(), учитывает PANTHEON_NOW); «вечер D» — ночь, что начинается в дату
+D. Бюджет ночи — budget_pct недели, из него check_pct — запас на проверки, на работу — budget_pct − check_pct. Перенос:
+если L − used > carry_after_pp, к бюджету прибавляется carry_share × (L − used − carry_after_pp), всего не больше
+cap_pct. Последняя ночь перед сбросом недели — сброс наступает в пределах 24 ч от начала ночи (раньше начала
+следующей ночи): бюджет до last_night_pct, но used + бюджет ≤ hard_pct; перенос и cap_pct тогда не применяются. В долг
+ночью не берём: бюджет считается один раз при открытии и не растёт, а занимать у будущих дней недели нельзя. Расход
+ночи — used сейчас − used при открытии (сбросилась неделя посреди ночи — расход прошлой недели до сброса плюс новой).
+Тревоги на 50, 80 и 100 % бюджета ночи — по одной на порог за ночь (P.alert_once); на 100 % ночь закрыта для нового.
+После morning_after новое запускается, только если пятичасовой лимит не выше morning_five_hour_max.
+
+Вечерний вопрос (только главный Mac): в ask_at — карточка «Запустить сегодня на ночь выполнение задач?» во входящих
+Зевса (колонка «Нужен ответ») и уведомление; повтор уведомления в каждое время repeat; нет ответа к deadline — ночь
+пропущена (строка в тревогах). Ответ «Да» после начала ночи открывает её с времени ответа, «Нет» — ночь пропущена.
+Ответ — только из журналов ваших слов (owner-log, их пишут хук и тик, не роли): галочка на карточке
+(board.jsonl, kind answer, сверка с вопросом и вариантами — tasks.logged_for) или выбор в окне вопросов Зевса
+(zeus.md, раздел «· окно вопросов», тело «вопрос: [<id>] …», строка «ответ: Да…|Нет…»). Поле answer в файле задачи
+ответом не считается. Состояние ночи — STATE/night/<дата вечера>.json: asked_at[], card_id, answer, opened_at,
+start_pct, budget_pct, skipped, alerts[] (и служебные: answer_at, spent, last_used, resets_at, closed, last_night).
+
+Метрики (STATE/metrics): новые строки week-usage дописываются в week-usage.log (только дописывание, без повторов —
+по последнему скопированному now); смена resets_at — строка в weeks.jsonl: итог прошлой недели и её ночи.
+
+Пороги — schedule.toml, без раздела или ключа — значения по умолчанию:
+
+  [limits]
+  warn_pp = 2              # запас выше — жёлтая зона
+  stop_pp = 5              # запас выше — красная зона
+  hard_pct = 85            # неделя на столько и выше — красная зона при любом запасе
+  snapshot_ok_min = 30     # снимок старше — лимит неизвестен, новое не запускается
+  snapshot_max_min = 180   # снимок старше — ещё и строка в тревогах
+  heavy_max = 2            # тяжёлых (сессии направлений в работе и тяжёлые задачи тика) столько — новое не запускается
+
+  [limits.night]
+  start = "23:00"          # ночь с …
+  end = "08:00"            # … до
+  budget_pct = 3           # бюджет ночи, % недели
+  check_pct = 1            # из него запас на проверки
+  cap_pct = 5              # бюджет с переносом — не больше
+  carry_share = 0.3        # доля переноса
+  carry_after_pp = 5       # перенос — с отставания от линии больше стольких п. п.
+  morning_after = "04:00"  # после — правило пятичасового лимита
+  morning_five_hour_max = 50
+  last_night_pct = 10      # последняя ночь перед сбросом недели
+
+  [night]
+  ask_at = "22:00"         # вопрос владельцу
+  repeat = ["23:00", "23:30"]
+  deadline = "00:00"       # без ответа к этому времени — ночь пропущена
+
+Время вечернего расписания — «ЧЧ:ММ»; раньше ask_at — это уже следующие сутки (00:00, 04:00, 08:00).
+Модуль работает на Python 3.9: без match и аннотаций X | Y (gate зовёт awake.py).
+"""
+import contextlib
+import fcntl
+import json
+import os
+import re
+from datetime import date, datetime, time as dtime, timedelta
+
+P = None  # модуль pantheon (lib/pantheon.py) — ставит set_core()
+
+
+def set_core(mod):
+    global P
+    P = mod
+
+
+WEEK = 7 * 86400
+KINDS = ("autostart", "wake", "respawn")
+LIMITS = {"warn_pp": 2.0, "stop_pp": 5.0, "hard_pct": 85.0, "snapshot_ok_min": 30.0, "snapshot_max_min": 180.0,
+          "heavy_max": 2.0}
+NIGHT = {"start": "23:00", "end": "08:00", "budget_pct": 3.0, "check_pct": 1.0, "cap_pct": 5.0, "carry_share": 0.3,
+         "carry_after_pp": 5.0, "morning_after": "04:00", "morning_five_hour_max": 50.0, "last_night_pct": 10.0}
+ASK = {"ask_at": "22:00", "repeat": ["23:00", "23:30"], "deadline": "00:00"}
+THRESHOLDS = (50, 80, 100)
+TITLE = "Запустить сегодня на ночь выполнение задач?"
+NO_OPTION = "Нет — ночь пропустить"
+HM = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
+DAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+ZONES = {"green": "зелёная", "yellow": "жёлтая", "red": "красная"}
+
+
+# --- настройки ---------------------------------------------------------------------------------------------------
+
+def config():
+    """(limits, night, ask) из schedule.toml поверх значений по умолчанию; кривое значение — по умолчанию."""
+    try:
+        sched = P.load_schedule()
+    except Exception:  # noqa: BLE001 — нет или битый schedule.toml: пороги по умолчанию, лимит всё равно считается
+        sched = {}
+    lim = sched.get("limits") if isinstance(sched.get("limits"), dict) else {}
+    nl = lim.get("night") if isinstance(lim.get("night"), dict) else {}
+    ask = sched.get("night") if isinstance(sched.get("night"), dict) else {}
+
+    def merge(base, got):
+        out = dict(base)
+        for k, v in base.items():
+            g = got.get(k)
+            if isinstance(v, float) and isinstance(g, (int, float)) and not isinstance(g, bool):
+                out[k] = float(g)
+            elif isinstance(v, str) and isinstance(g, str) and HM.fullmatch(g):
+                out[k] = g
+            elif isinstance(v, list) and isinstance(g, list) and all(isinstance(x, str) and HM.fullmatch(x) for x in g):
+                out[k] = list(g)
+        return out
+    return merge(LIMITS, lim), merge(NIGHT, nl), merge(ASK, ask)
+
+
+def primary():
+    """Вечерний вопрос и ночь — только на главном Mac (как самозапуск): два Mac задали бы два вопроса."""
+    try:
+        ph = P.load_schedule().get("primary_host")
+    except Exception:  # noqa: BLE001
+        ph = None
+    return bool(ph) and P.host() == ph
+
+
+# --- снимок лимита -----------------------------------------------------------------------------------------------
+
+def _text(p):
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return fh.read()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _nums(line):
+    parts = line.split()
+    try:
+        vals = [float(x) for x in parts[:3]]
+    except ValueError:
+        return None
+    return vals if len(vals) == 3 else None
+
+
+def statusline_dir():
+    return os.path.dirname(P.LIMIT_SNAPSHOT)
+
+
+def week_lines():
+    """Строки week-usage: [(now, resets_at, pct)] в порядке файла, кривые пропущены."""
+    out = []
+    for ln in _text(os.path.join(statusline_dir(), "week-usage")).splitlines():
+        v = _nums(ln)
+        if v:
+            out.append(tuple(v))
+    return out
+
+
+def snapshot():
+    """{"five": (pct, resets, at)|None, "week": (pct, resets, at)|None, "at": время замера|None}."""
+    five = _nums(_text(P.LIMIT_SNAPSHOT).strip())
+    sd = _nums(_text(os.path.join(statusline_dir(), "seven-day")).strip())
+    week = tuple(sd) if sd else None
+    if week is None:
+        wl = week_lines()
+        if wl:
+            now_, resets, pct = wl[-1]
+            week = (pct, resets, now_)
+    ats = [x[2] for x in (five, week) if x]
+    return {"five": tuple(five) if five else None, "week": week, "at": max(ats) if ats else None}
+
+
+def measure(t, cfg=None):
+    """Состояние недели на момент t: known (можно ли решать по снимку), why (почему нет), stale (строка в тревоги),
+    age_min, used, resets, line, over, zone."""
+    lim = (cfg or config())[0]
+    s = snapshot()
+    m = {"known": False, "stale": False, "age_min": None, "used": None, "resets": None, "line": None, "over": None,
+         "zone": None, "why": ""}
+    if s["at"] is None:
+        m.update(stale=True, why="лимит неизвестен (снимка нет)")
+        return m
+    age = max(0.0, (t - s["at"]) / 60)
+    m["age_min"] = age
+    m["stale"] = age > lim["snapshot_max_min"]
+    w = s["week"]
+    if w:
+        m["used"], m["resets"] = w[0], w[1]
+    if age > lim["snapshot_ok_min"]:
+        m["why"] = f"лимит неизвестен ({age:.0f} мин)"
+        return m
+    if not w or w[1] <= t:
+        m["used"], m["resets"] = None, None
+        m["why"] = "новая неделя, расход неизвестен"
+        return m
+    line = min(100.0, max(0.0, 100.0 * (t - (w[1] - WEEK)) / WEEK))
+    over = round(w[0] - line, 6)
+    if over > lim["stop_pp"] or w[0] >= lim["hard_pct"]:
+        zone = "red"
+    elif over > lim["warn_pp"]:
+        zone = "yellow"
+    else:
+        zone = "green"
+    m.update(known=True, line=line, over=over, zone=zone)
+    return m
+
+
+# --- календарь ночи ----------------------------------------------------------------------------------------------
+
+def _hm(s):
+    h, mi = HM.fullmatch(s).groups()
+    return int(h), int(mi)
+
+
+def at(d, hm, cfg):
+    """Время «ЧЧ:ММ» вечера d: раньше ask_at — уже следующие сутки."""
+    h, mi = _hm(hm)
+    dt = datetime.combine(d, dtime(h, mi))
+    if (h, mi) < _hm(cfg[2]["ask_at"]):
+        dt += timedelta(days=1)
+    return dt.timestamp()
+
+
+def evening(t, cfg):
+    """Дата вечера, если t — между вопросом (ask_at) и концом ночи (end), иначе None (день)."""
+    lt = datetime.fromtimestamp(t)
+    d = lt.date() if (lt.hour, lt.minute) >= _hm(cfg[2]["ask_at"]) else lt.date() - timedelta(days=1)
+    return d if at(d, cfg[2]["ask_at"], cfg) <= t < at(d, cfg[1]["end"], cfg) else None
+
+
+def night_of(t, cfg):
+    """Дата вечера, если t — в ночных часах (start ≤ t < end), иначе None."""
+    d = evening(t, cfg)
+    return d if d and at(d, cfg[1]["start"], cfg) <= t else None
+
+
+def last_evening(t, cfg):
+    """Ночь для сводки: идущая (вечер или ночь) или прошлая."""
+    return evening(t, cfg) or datetime.fromtimestamp(t).date() - timedelta(days=1)
+
+
+def state_path(d):
+    return P.path("night", f"{d.isoformat()}.json")
+
+
+def load(d):
+    st = P.read_json(state_path(d), {})
+    base = {"asked_at": [], "card_id": None, "answer": None, "opened_at": None, "start_pct": None,
+            "budget_pct": None, "skipped": None, "alerts": []}
+    return {**base, **st} if isinstance(st, dict) else base
+
+
+def budget(m, d, cfg):
+    """(бюджет ночи в % недели, последняя ли ночь) по замеру m в момент открытия."""
+    lim, nl = cfg[0], cfg[1]
+    if m["resets"] - at(d, nl["start"], cfg) <= 86400:
+        return round(max(0.0, min(nl["last_night_pct"], lim["hard_pct"] - m["used"])), 2), True
+    total = nl["budget_pct"]
+    gap = m["line"] - m["used"]
+    if gap > nl["carry_after_pp"]:
+        total += nl["carry_share"] * (gap - nl["carry_after_pp"])
+    return round(min(total, nl["cap_pct"]), 2), False
+
+
+def spent(st, m):
+    """Расход ночи в п. п. недели; неделя сбросилась посреди ночи — прошлая до сброса плюс новая."""
+    if not m["known"] or st.get("start_pct") is None:
+        return float(st.get("spent") or 0.0)
+    if st.get("resets_at") and abs(m["resets"] - float(st["resets_at"])) > 3600:
+        sp = float(st.get("last_used") or st["start_pct"]) - float(st["start_pct"]) + m["used"]
+    else:
+        sp = m["used"] - float(st["start_pct"])
+    return round(max(0.0, sp), 3)
+
+
+def night_open(st, m, cfg):
+    """(можно ли новое ночью, почему нет)."""
+    if st.get("skipped"):
+        return False, f"ночь пропущена ({st['skipped']})"
+    if not st.get("opened_at"):
+        return False, "ночь не открыта"
+    if st.get("closed") or 100 in (st.get("alerts") or []):
+        return False, "ночь закрыта: бюджет исчерпан"
+    b = float(st.get("budget_pct") or 0)
+    work = max(0.0, b - cfg[1]["check_pct"])
+    sp = spent(st, m)
+    if sp >= work:
+        return False, f"бюджет работы ночи исчерпан: {num(sp)} из {num(work)} %"
+    return True, ""
+
+
+# --- запреты (контракт с awake.py) -------------------------------------------------------------------------------
+
+def _held(name):
+    """Блокировка STATE/locks/<name>.lock занята (файл не создаём: окна без записи в locks/ тоже спрашивают)."""
+    try:
+        fd = os.open(P.path("locks", name + ".lock"), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def heavy_count(agents=None, registry=None):
+    """Тяжёлых сейчас: сессии направлений Пантеона в состоянии working (и их копии «имя (2)») плюс идущие задачи
+    тика класса heavy (их блокировка job-<имя> занята). registry — для совместимости контракта: у вкладок нет
+    состояния, работают ли они, не видно."""
+    if agents is None:
+        agents = P.agents_all() or []
+    doms = P.read_json(P.path("domains.json"), {}).get("domains") or {}
+    pats = [P.name_alias(d) for d in doms]
+    n = sum(1 for a in agents if a.get("state") == "working"
+            and any(p.fullmatch(str(a.get("name") or "")) for p in pats))
+    try:
+        jobs = P.load_schedule().get("job") or []
+    except Exception:  # noqa: BLE001
+        jobs = []
+    n += sum(1 for j in jobs if j.get("class") == "heavy" and _held("job-" + j["name"]))
+    return n
+
+
+def gate(kind, t, agents=None, registry=None, heavy=None):
+    """Можно ли сейчас начать новое: (ok, reason). kind — autostart (самозапуск), wake (подъём уснувшей), respawn
+    (продолжение прерванной). reason — короткая фраза, почему нельзя (или пустая)."""
+    if kind not in KINDS:
+        return False, f"неизвестный вид запуска {kind}"
+    cfg = config()
+    m = measure(t, cfg)
+    d = night_of(t, cfg)
+    if not m["known"]:
+        # днём продолжение прерванной снимка не ждёт: «лимит неизвестен — новое не запускать» (решение 16.10) — о
+        # новом; иначе без строки статуса за 30 мин встал бы любой автоподъём (решение лида 17.10)
+        if kind == "respawn" and d is None:
+            return True, ""
+        return False, m["why"]
+    if m["zone"] == "red":
+        return False, f"красная зона — неделя {num(m['used'])} % при линии {num(m['line'])} %"
+    if kind == "respawn":
+        if d is None:
+            return True, ""
+        ok, why = night_open(load(d), m, cfg)
+        if not ok:
+            return False, why
+        return morning(t, d, cfg)  # у правила утра исключения для продолжения нет (решение лида 17.10)
+    if d is None and m["zone"] == "yellow":
+        return False, f"жёлтая зона днём — неделя {num(m['used'])} % при линии {num(m['line'])} %"
+    if heavy is None:
+        heavy = heavy_count(agents, registry)
+    hmax = cfg[0]["heavy_max"]
+    if heavy >= hmax:
+        return False, f"тяжёлых уже {heavy} из {hmax:g}"
+    if d is not None:
+        ok, why = night_open(load(d), m, cfg)
+        if not ok:
+            return False, why
+        return morning(t, d, cfg)
+    return True, ""
+
+
+def morning(t, d, cfg):
+    """После morning_after ночи d — новое только при пятичасовом лимите не выше morning_five_hour_max."""
+    if t >= at(d, cfg[1]["morning_after"], cfg):
+        five, top = P.limit_pct(), cfg[1]["morning_five_hour_max"]
+        if five is None:
+            return False, f"после {cfg[1]['morning_after']} пятичасовой лимит неизвестен"
+        if five > top:
+            return False, f"после {cfg[1]['morning_after']} пятичасовой лимит {num(five)} % > {top:g} %"
+    return True, ""
+
+
+# --- проход дежурного ----------------------------------------------------------------------------------------------
+
+def watch(agents=None, registry=None, doms=None, t=None):
+    """Проверка «ночь» дежурного (раз в 5 мин): метрики, давность снимка, зона, вечерний вопрос и ночь."""
+    t = P.now() if t is None else t
+    cfg = config()
+    metrics(t)
+    if not primary():  # снимок и вопрос — у главного Mac; второй не шумит своим старым снимком
+        return
+    m = measure(t, cfg)
+    day = datetime.fromtimestamp(t).strftime("%Y-%m-%d")
+    if m["stale"]:
+        P.alert_once("limit-snapshot", day, "снимок недельного лимита "
+                     + (f"не обновлялся {m['age_min']:.0f} мин" if m["age_min"] is not None else "не найден")
+                     + " — новые запуски стоят; жива ли строка статуса (~/.local/state/claude-statusline)?", "night")
+    elif m["age_min"] is not None:
+        P.clear_once("limit-snapshot")
+    if m["known"] and m["zone"] in ("yellow", "red"):
+        what = ("днём новых запусков нет" if m["zone"] == "yellow" else "новых запусков нет, идущие работают")
+        text = (f"Недельный лимит: {num(m['used'])} % при линии {num(m['line'])} % (запас {signed(m['over'])} п.п.) — "
+                f"зона {ZONES[m['zone']]}: {what}")
+        P.alert_once(f"limit-zone-{m['zone']}", day, text, "night", note=text)
+    d = evening(t, cfg)
+    if d is not None:
+        evening_pass(d, m, t, cfg)
+
+
+def card_head(st):
+    """Вопрос и варианты карточки — из состояния ночи, а не из файла задачи (его может поправить агент)."""
+    return {"question": st.get("question") or TITLE, "options": st.get("options") or []}
+
+
+def find_answer(st, until=None):
+    """(«да»|«нет», время) — ваш последний ответ по карточке ночи из журналов owner-log в окне от карточки до until
+    (срок вопроса), или None: передумали — «Нет» после «Да» отменяет ночь."""
+    cid, since = st["card_id"], float(st.get("card_at") or 0) - 60
+    T = P.tasks_mod()
+    found = []
+    head = card_head(st)
+    for rec in T.owner_answers_all(P.path("owner-log", "board.jsonl")).get(cid) or []:
+        if rec.get("kind") != "answer" or not T.logged_for(head, [rec]).get("answer"):
+            continue
+        try:
+            ts = datetime.strptime(str(rec.get("time"))[:19], "%Y-%m-%dT%H:%M:%S").timestamp()
+        except ValueError:
+            continue
+        found.append((ts, rec["answer"]))
+    text = _text(P.path("owner-log", "zeus.md"))
+    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
+    own = re.compile(r"вопрос: \[" + re.escape(cid) + r"\]", re.I)
+    for i, mm in enumerate(heads):
+        if mm.group(2).strip() != "· окно вопросов":
+            continue
+        body = text[mm.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
+        a = re.search(r"^ответ: (.*)$", body, re.M)
+        if not own.match(body) or not a:
+            continue
+        with contextlib.suppress(ValueError):
+            found.append((datetime.strptime(mm.group(1), "%Y-%m-%d %H:%M:%S").timestamp(), a.group(1)))
+    last = None
+    for ts, ans in sorted(found):
+        if ts < since or (until is not None and ts >= until):
+            continue
+        w = ans.strip().split(" ")[0].lower()
+        if w in ("да", "нет"):
+            last = (w, ts)
+    return last
+
+
+def _close_card(st, t, status, result):
+    with contextlib.suppress(ValueError, OSError):
+        P.tasks_mod().task_set(P.PANTHEON, t, st["card_id"], {"status": status, "result": result},
+                               note=result, actor="тик")
+
+
+def _skip(st, d, t, why):
+    st["skipped"] = why
+    P.alert(f"ночь {d.strftime('%d.%m')} пропущена: {why}", "night")
+    if st.get("card_id"):
+        _close_card(st, t, "dropped", f"Ночь пропущена: {why}")
+
+
+def ask(st, d, m, t, cfg):
+    """Карточка вопроса во входящих Зевса (колонка «Нужен ответ») и первое уведомление."""
+    b = budget(m, d, cfg)[0] if m["known"] else cfg[1]["budget_pct"]
+    end = cfg[1]["end"]
+    yes = f"Да — открыть ночь: бюджет {num(b)} % недели, работа до {end}"
+    opts = [yes, NO_OPTION]
+    week = (f"Неделя {num(m['used'])} % при линии {num(m['line'])} %, зона {ZONES[m['zone']]}." if m["known"]
+            else f"Недельный лимит сейчас неизвестен ({m['why']}): пока снимка нет, ночь не начнёт новое.")
+    T = P.tasks_mod()
+    tid, _ = T.task_new(P.PANTHEON, t, "inbox", TITLE, owner="zeus", status="waiting", waiting_on="human",
+                        next="ответ владельца до " + cfg[2]["deadline"], question=TITLE,
+                        why=f"Ночью дежурный может поднимать направления по задачам с вашим решением. {week}",
+                        options=opts, recommend=yes if m["known"] and m["zone"] == "green" else NO_OPTION,
+                        if_no_answer=f"Без ответа к {cfg[2]['deadline']} ночь пропускается: новое ночью не "
+                                     "запускается, идущие сессии работают.", actor="тик")
+    st.update(card_id=tid, card_at=t, question=TITLE, options=opts)
+    remind(st, t, "Вопрос на ночь")
+
+
+def remind(st, t, title):
+    head = None
+    with contextlib.suppress(Exception):
+        head = P.tasks_mod().load_tasks(P.PANTHEON).get(st["card_id"], (None, None, None))[1]
+    target = P.board_url(P.tasks_mod().card_name(head) + ".md") if head else P.board_url()
+    P.notify(f"{TITLE} Ответ на карточке {st['card_id']} до {config()[2]['deadline']}", f"Пантеон · {title}",
+             target=target, group=st["card_id"])
+    st["asked_at"] = list(st.get("asked_at") or []) + [P.stamp(t)]
+
+
+def evening_pass(d, m, t, cfg):
+    st = load(d)
+    before = json.dumps(st, sort_keys=True)
+    ask_t, dl_t = at(d, cfg[2]["ask_at"], cfg), at(d, cfg[2]["deadline"], cfg)
+    start_t, end_t = at(d, cfg[1]["start"], cfg), at(d, cfg[1]["end"], cfg)
+    if not st["skipped"]:
+        if st["card_id"]:
+            # последний ответ до срока: «Нет» после «Да» (до 00:00) пропускает и уже открытую ночь
+            got = find_answer(st, dl_t)
+            if got and (st["answer"], st.get("answer_at")) != got:
+                st["answer"], st["answer_at"] = got
+                if got[0] == "нет":
+                    _skip(st, d, t, "ответ «Нет»")
+                else:
+                    _close_card(st, t, "done", f"Ночь разрешена: откроется с {P.stamp(max(got[1], start_t))[11:]}")
+        if st["answer"] is None and not st["skipped"] and t >= dl_t:
+            _skip(st, d, t, f"нет ответа к {cfg[2]['deadline']}")
+        if st["answer"] is None and not st["skipped"] and ask_t <= t < dl_t:
+            if not st["card_id"]:
+                ask(st, d, m, t, cfg)
+            else:
+                slots = [at(d, x, cfg) for x in [cfg[2]["ask_at"]] + cfg[2]["repeat"]]
+                slot = max(x for x in slots if x <= t)
+                last = max((datetime.strptime(x, "%Y-%m-%d %H:%M").timestamp() for x in st["asked_at"]), default=0)
+                if last < slot:
+                    remind(st, t, "повтор вопроса на ночь")
+    if st["answer"] == "да" and not st["skipped"] and not st["opened_at"] and start_t <= t < end_t and m["known"]:
+        b, last_night = budget(m, d, cfg)
+        if b <= 0:
+            _skip(st, d, t, "бюджета нет: неделя у порога")
+        else:
+            st.update(opened_at=max(float(st["answer_at"]), start_t), start_pct=m["used"], budget_pct=b,
+                      resets_at=m["resets"], last_used=m["used"], spent=0.0, last_night=last_night)
+            P.alert(f"ночь {d.strftime('%d.%m')} открыта с {P.stamp(st['opened_at'])[11:]}: бюджет {num(b)} % недели"
+                    + (" (последняя ночь перед сбросом)" if last_night else ""), "night")
+    if st["opened_at"] and not st["skipped"] and m["known"]:
+        st["spent"] = spent(st, m)
+        st["last_used"], st["resets_at"] = m["used"], m["resets"]
+        b = float(st["budget_pct"])
+        for th in THRESHOLDS:
+            if st["spent"] >= b * th / 100 - 1e-9 and th not in st["alerts"]:
+                st["alerts"].append(th)
+                text = (f"Ночь {d.strftime('%d.%m')}: потрачено {num(st['spent'])} из {num(b)} % недели ({th} %)"
+                        + (" — ночь закрыта для нового" if th == 100 else ""))
+                P.alert_once(f"night-{d.isoformat()}-{th}", d.isoformat(), text, "night", note=text)
+                if th == 100:
+                    st["closed"] = True
+    if json.dumps(st, sort_keys=True) != before:
+        P.write_json(state_path(d), st)
+
+
+# --- метрики -----------------------------------------------------------------------------------------------------
+
+def metrics(t):
+    """week-usage → STATE/metrics/week-usage.log (дописывание, по последнему now); смена недели → weeks.jsonl."""
+    log = P.path("metrics", "week-usage.log")
+    last = None
+    for ln in reversed(_text(log).splitlines()):
+        v = _nums(ln)
+        if v:
+            last = v[0]
+            break
+    new = [w for w in week_lines() if last is None or w[0] > last]
+    if new:
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        with open(log, "a", encoding="utf-8") as fh:
+            for w in new:
+                fh.write(f"{w[0]:.0f} {w[1]:.0f} {w[2]:g}\n")
+    w = snapshot()["week"]
+    if not w:
+        return
+    pct, resets, seen = w
+    cp = P.path("metrics", "week-current.json")
+    cur = P.read_json(cp, {})
+    if cur.get("resets_at") and resets - float(cur["resets_at"]) > 3600:
+        rec = {"week_end": P.stamp(float(cur["resets_at"])), "resets_at": float(cur["resets_at"]),
+               "final_pct": cur.get("pct"), "seen_at": P.stamp(float(cur.get("at") or 0)),
+               "nights": nights_between(float(cur["resets_at"]) - WEEK, float(cur["resets_at"]))}
+        with open(P.path("metrics", "weeks.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        cur = {}
+    if not cur or (seen > float(cur.get("at") or 0) and abs(resets - float(cur["resets_at"])) <= 3600):
+        P.write_json(cp, {"resets_at": resets, "pct": pct, "at": seen})
+
+
+def nights_between(a, b):
+    cfg = config()
+    out = []
+    with contextlib.suppress(OSError):
+        for f in sorted(os.listdir(P.path("night"))):
+            mm = re.fullmatch(r"(\d{4}-\d{2}-\d{2})\.json", f)
+            if not mm:
+                continue
+            d = date.fromisoformat(mm.group(1))
+            if a <= at(d, cfg[1]["start"], cfg) < b:
+                st = load(d)
+                out.append({"date": d.isoformat(), "opened": bool(st.get("opened_at")), "skipped": st.get("skipped"),
+                            "budget_pct": st.get("budget_pct"), "spent": st.get("spent"), "alerts": st.get("alerts")})
+    return out
+
+
+# --- вывод ---------------------------------------------------------------------------------------------------------
+
+def num(x):
+    """Число по-русски: 1,2 · 3 · −2."""
+    s = f"{float(x):.1f}".rstrip("0").rstrip(".").replace(".", ",")
+    return ("−" + s[1:] if s.startswith("-") else s) if s not in ("-0", "−0") else "0"
+
+
+def signed(x):
+    s = num(x)
+    return s if s.startswith("−") or s == "0" else "+" + s
+
+
+def when(ts):
+    lt = datetime.fromtimestamp(ts)
+    return f"{DAYS[lt.weekday()]} {lt.strftime('%H:%M')}"
+
+
+def week_line(m):
+    if m["known"]:
+        return (f"Неделя: {num(m['used'])} % · линия {num(m['line'])} % · запас {signed(m['over'])} п.п. · "
+                f"зона: {ZONES[m['zone']]} · сброс {when(m['resets'])}")
+    if m["used"] is not None and m["resets"]:
+        return f"Неделя: {num(m['used'])} % по старому снимку · зона неизвестна · сброс {when(m['resets'])}"
+    return "Неделя: расход неизвестен — новые запуски стоят"
+
+
+def night_line(st, d, t, cfg, now_night=True):
+    ask_hm, dl = cfg[2]["ask_at"], cfg[2]["deadline"]
+    if st.get("skipped"):
+        return f"пропущена ({st['skipped']})"
+    if st.get("opened_at"):
+        s = (f"открыта с {P.stamp(float(st['opened_at']))[11:]}, потрачено {num(st.get('spent') or 0)} из "
+             f"{num(st['budget_pct'])} %")
+        if st.get("closed"):
+            s += " — закрыта: бюджет исчерпан"
+        return s
+    if st.get("answer") == "да":
+        return f"ответ «Да» — откроется в {cfg[1]['start']}" if now_night else "ответ «Да», но не открылась"
+    if st.get("card_id"):
+        return f"вопрос задан ({st['card_id']}), ответа нет — без ответа к {dl} ночь пропускается"
+    return f"не открыта — вопрос в {ask_hm}"
+
+
+def status_lines(t=None):
+    t = P.now() if t is None else t
+    cfg = config()
+    m = measure(t, cfg)
+    d = evening(t, cfg)
+    night = night_line(load(d), d, t, cfg) if d else f"не открыта — вопрос в {cfg[2]['ask_at']}"
+    return [week_line(m), "Ночь: " + night, snap_line(m, cfg)]
+
+
+def snap_line(m, cfg):
+    if m["age_min"] is None:
+        return "лимит неизвестен (снимка нет)"
+    if m["age_min"] <= cfg[0]["snapshot_ok_min"]:
+        return f"Снимок лимита: {m['age_min']:.0f} мин назад"
+    return f"лимит неизвестен ({m['age_min']:.0f} мин)"
+
+
+def report_lines(t=None):
+    """Блок «Лимит» ежедневной сводки: неделя, линия, запас, зона; ночь (идущая или прошлая) — открыта или пропущена,
+    потрачено X из Y %, тревоги; сброс недели; давность снимка."""
+    t = P.now() if t is None else t
+    cfg = config()
+    m = measure(t, cfg)
+    d = last_evening(t, cfg)
+    st = load(d)
+    out = [week_line(m)]
+    nl = night_line(st, d, t, cfg, now_night=evening(t, cfg) is not None)
+    al = st.get("alerts") or []
+    out.append(f"Ночь {d.strftime('%d.%m')}: {nl}" + (f" · тревоги: {', '.join(f'{x} %' for x in al)}" if al else
+                                                       (" · тревог нет" if st.get("opened_at") else "")))
+    if m["resets"]:
+        hours = max(0.0, (m["resets"] - t) / 3600)
+        out.append(f"Сброс недели: {when(m['resets'])} (через {hours:.0f} ч)")
+    else:
+        out.append("Сброс недели: неизвестен")
+    out.append(snap_line(m, cfg) + (" — снимок старше 3 ч, строка статуса не пишет?" if m["stale"] else ""))
+    return out
+
+
+def main(rest):
+    sub = rest[0] if rest else "status"
+    if sub == "status":
+        for ln in status_lines():
+            print(ln)
+        return 0
+    if sub == "report":
+        print("Лимит")
+        for ln in report_lines():
+            print(f"  {ln}")
+        return 0
+    print("pantheon night [status|report]", file=P.sys.stderr)
+    return 2

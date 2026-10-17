@@ -52,7 +52,12 @@ FIELDS = {
     # этап и проект
     "goal": ("str", False), "start": ("date", False), "exit_criteria": ("list", False), "repo_path": ("str", False),
     "health": ("str", False), "review_on": ("date", False),
+    # ночной цикл (metis-0129): волна и пачка, на какую ночь запланирована, оценка и факт расхода, итог приёмки
+    "wave": ("int", False), "batch": ("str", False), "night": ("date", False), "estimate": ("str", False),
+    "actual": ("str", False), "acceptance": ("str", False),
 }
+# итог приёмки утром: как у приоритета — значение из перечня, иное — ошибка шапки
+ACCEPTANCE = ("принято", "вернуть", "к владельцу")
 # срок due — дата (срок — конец дня) или дата со временем «ГГГГ-ММ-ДДTЧЧ:ММ» (умные уведомления, metis-0023)
 ORDER = list(FIELDS)
 PRIORITY = {0: "срочно", 1: "высокий", 2: "обычный", 3: "низкий"}
@@ -378,6 +383,8 @@ def check_head(head):
     st = head.get("status")
     if st is not None and st not in STATUSES:
         errs.append(f"status «{st}» — не из {', '.join(STATUSES)}")
+    if head.get("acceptance") not in (None, *ACCEPTANCE):
+        errs.append(f"acceptance «{head.get('acceptance')}» — не из {', '.join(ACCEPTANCE)}")
     if head.get("id") and not ID_RE.fullmatch(str(head["id"])):
         errs.append(f"id «{head['id']}» — нужен вид «pan-0001»")
     if t == "task":
@@ -691,10 +698,11 @@ def ready(pantheon, t, direction=None, owner=None):
 # --- доска владельца ------------------------------------------------------------
 
 CARD_ORDER = ["Статус", "Проект", "Внимание", "Приоритет", "Срок", "Кому", "Дальше", "Ждёт", "Создана", "Вопрос задан",
-              "Закрыта", "Тип", "id", "tags"]
+              "Закрыта", "Волна", "Пачка", "Ночь", "Оценка", "Факт", "Приёмка", "Тип", "id", "tags"]
 # типы свойств карточек для Obsidian (.obsidian/types.json хранилища): тик ставит свои ключи, чужие не трогает
 PROP_TYPES = {"Внимание": "multitext", "Приоритет": "number", "Срок": "date", "Создана": "date",
-              "Вопрос задан": "datetime", "Закрыта": "date", "Кому": "text", "tags": "tags"}
+              "Вопрос задан": "datetime", "Закрыта": "date", "Кому": "text", "tags": "tags",
+              "Волна": "number", "Пачка": "text", "Ночь": "date", "Оценка": "text", "Факт": "text", "Приёмка": "text"}
 NODES_DIR = "Узлы"  # заметки-узлы ролей для графа — внутри Доска: копия view-sync.sh стирает всё вне Доска и .obsidian
 NOTE_KEY = "Заметка агенту"  # прежнее поле заметки: в карточку больше не рисуется, но со старых карточек ещё читается
 NOTES_HEAD = "## ✍️ Ваши заметки"
@@ -924,6 +932,11 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
             "Вопрос задан": _date(head.get("question_at"), 19) if head.get("question") else None,
             # закрытые до 0.9.28 даты закрытия не имеют — тогда последнее изменение задачи (из её шапки)
             "Закрыта": (_date(head.get("closed"), 10) or _date(head.get("updated"), 10)) if closed else None,
+            # ночной цикл (metis-0129): волна — число, остальное — строки; пусто — None
+            "Волна": head.get("wave") if isinstance(head.get("wave"), int) and not isinstance(head.get("wave"), bool)
+            else None,
+            "Пачка": head.get("batch"), "Ночь": _date(head.get("night"), 10), "Оценка": head.get("estimate"),
+            "Факт": head.get("actual"), "Приёмка": head.get("acceptance"),
             "Тип": "задача", "id": head.get("id"), "tags": [f"направление/{direction}"]}
     due = f" · 📅 {due_text(head['due'])}" if head.get("due") else ""
     who = f" · 👤 {head['owner']}" if head.get("owner") else ""
@@ -1249,6 +1262,49 @@ views:
       - property: formula.age_key
         direction: ASC
     order: [note.id, file.name, formula.status_view, formula.prio_view, note.Внимание, note.Кому, note.Срок, note.Дальше, note.Создана, note.Закрыта]
+  - type: table
+    name: Ночь
+    filters:
+      and:
+        - '!note["Ночь"].isEmpty()'
+        - 'note["Статус"] != "Готово"'
+        - 'note["Статус"] != "Отменено"'
+    sort:
+      - property: note.Ночь
+        direction: DESC
+      - property: note.Волна
+        direction: ASC
+      - property: note.Пачка
+        direction: ASC
+    order: [note.id, file.name, note.Проект, formula.status_view, note.Волна, note.Пачка, note.Оценка, note.Кому]
+  - type: table
+    name: Волны
+    filters:
+      and:
+        - '!note["Волна"].isEmpty()'
+    groupBy:
+      property: note.Волна
+      direction: ASC
+    sort:
+      - property: note.Пачка
+        direction: ASC
+      - property: formula.prio_rank
+        direction: ASC
+    order: [note.id, file.name, note.Проект, formula.status_view, note.Пачка, note.Ночь, note.Оценка, note.Факт]
+  - type: table
+    name: Утро
+    filters:
+      and:
+        - '!note["Ночь"].isEmpty()'
+        - or:
+            - 'note["Статус"] == "На проверке"'
+            - '!note["Приёмка"].isEmpty()'
+    sort:
+      - property: note.Ночь
+        direction: DESC
+      - property: note.Приёмка
+        direction: ASC
+    order: [note.id, file.name, note.Проект, formula.status_view, note.Приёмка, note.Оценка, note.Факт, note.Кому]
 """
 for _i in (1, 2, 3):
     BASE_FILE = BASE_FILE.replace("{COLK%d}" % _i, _col_formula(_i - 1))
