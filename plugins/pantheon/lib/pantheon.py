@@ -46,6 +46,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
   pantheon watch [--dry-run]            дежурный (тик раз в 5 мин): сессии, STATUS.md, swap, worktree, версия Claude Code,
                                         паузы, самозапуск по вашим решениям; --dry-run — кого поднял бы и почему нет
+  pantheon reboot-reminder [--now]      пятница после 09:30: Mac не перезагружался с прошлой пятницы — карточка и уведомление
   pantheon agents | who                 снимок claude agents для строки статуса | таблица координаторов
   pantheon revisits                     пересмотры к сроку и по событиям (тик раз в сутки)
   pantheon wake <имя> ["толчок"]        поднять уснувшую сессию направления той же сессией
@@ -318,7 +319,7 @@ def clear_once(key):
 JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
-                    "instructions", "agents", "usage", "qmd", "plugins"}
+                    "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 # Окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` из schedule.toml идёт с песочницей
 # settings/job-<роль>.json (собирает sandbox_build), а не без неё. Роль вне таблицы тик не запускает. write — куда
@@ -1327,6 +1328,8 @@ def status():
         lines.append(f"swap: {used / 1024:.1f} ГБ")
         if used > 4096:
             warn.append("swap")
+    with contextlib.suppress(Exception):
+        lines.append(awake_mod().status_line())
     lines.append(f"Claude Code {(_sh('claude', '--version').split() or ['?'])[0]} · guard {_plugin_version('guard')} · "
                  f"pantheon {_plugin_version('pantheon')}")
     section("Mac", lines)
@@ -2848,8 +2851,11 @@ def open_tasks(name):
     return out
 
 
-def wake_recheck(name):
-    """Под блокировкой имени перед подъёмом: метка, пауза, техперезапуск, живая копия «имя (2)» (ревью argus)."""
+def wake_recheck(name, state=None):
+    """Под блокировкой имени перед подъёмом: метка, пауза, техперезапуск, живая копия «имя (2)» (ревью argus).
+    state == "blocked" — сессия на лимите: «живая» для claude agents, её и будим, копии не ищем."""
+    if state == "blocked":
+        return awake_mod().recheck(name)
     if os.path.exists(path("stopped", name)):
         return "остановлено вами"
     if load_pause(name):
@@ -2885,7 +2891,11 @@ def _wake(dry):
     done = 0
     for a in agents:
         name, state = a.get("name") or "", a.get("state")
-        if state not in ("failed", "stopped") or not (name in domains or name.startswith("daedalus-")):
+        asleep = state in ("failed", "stopped")
+        if not asleep and state == "blocked":  # стоит на недельном лимите, сброс прошёл (metis-0132) — тоже спит
+            with contextlib.suppress(Exception):
+                asleep = awake_mod().limit_sleeping(a) is not None
+        if not asleep or not (name in domains or name.startswith("daedalus-")):
             continue
         if os.path.exists(path("stopped", name)) or load_pause(name):
             continue
@@ -2904,9 +2914,9 @@ def _wake(dry):
             continue
         if fresh:
             rc = fresh_start(name, a, fresh_text("пробуждение", name, a.get("id")), "wake",
-                             recheck=lambda n=name: wake_recheck(n))
+                             recheck=lambda n=name, s=state: wake_recheck(n, s))
         else:
-            rc, _ = resume_session(name, a, WAKE_TEXT, "wake", recheck=lambda n=name: wake_recheck(n))
+            rc, _ = resume_session(name, a, WAKE_TEXT, "wake", recheck=lambda n=name, s=state: wake_recheck(n, s))
         if rc:
             alert(f"pantheon wake: {name} не поднялась (код {rc})", "pantheon")
         done += 1
@@ -3850,6 +3860,21 @@ def notify_mod():
         _NOTIFY = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(_NOTIFY)
     return _NOTIFY
+
+
+_AWAKE = None
+
+
+def awake_mod():
+    """lib/awake.py — бодрость Mac, подъём после лимита, будильник ждущих (ночной цикл, metis-0126/0127/0132)."""
+    global _AWAKE
+    if _AWAKE is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_awake", os.path.join(LIB, "awake.py"))
+        _AWAKE = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_AWAKE)
+        _AWAKE.set_core(sys.modules[__name__])
+    return _AWAKE
 
 
 def owner_acts():
@@ -4953,6 +4978,8 @@ def main(argv):
         return watch_cmd(cmd, rest)
     if cmd == "usage":
         return usage_report(rest)
+    if cmd == "reboot-reminder":
+        return awake_mod().reboot_reminder(rest)
     if cmd == "qmd":
         return qmd_mod().main(rest)
     if cmd == "plugins":

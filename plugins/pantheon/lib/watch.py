@@ -209,6 +209,9 @@ def _watch(dry=False):
               ("паузы по нагрузке", lambda: pauses_clear(agents, reg, t)),
               ("очистка Зевса", lambda: zeus_clean(agents, t)),
               ("самозапуск", lambda: autostart(agents, reg, doms, t)),
+              ("подъём после лимита", lambda: awake().limit_resume(agents, reg, doms, t)),
+              ("будильник ждущих", lambda: awake().wake_waiting(agents, reg, doms, t)),
+              ("бодрость", lambda: awake().keep_awake(agents, reg, doms, t)),
               ("журналы ваших слов", lambda: daily(t))]
     failed = []
     for name, fn in checks:
@@ -222,6 +225,11 @@ def _watch(dry=False):
                          "журнал pantheon jobs, задача watch", "watch")
     P.write_json(P.path("watch-last"), {"time": t, "failed": failed})
     return 0 if not failed else P.ALERTED
+
+
+def awake():
+    """lib/awake.py — ночной цикл: бодрость Mac, подъём после недельного лимита, будильник ждущих."""
+    return P.awake_mod()
 
 
 def gave_up_note(d, s):
