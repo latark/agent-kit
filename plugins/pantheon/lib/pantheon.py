@@ -4630,6 +4630,8 @@ def task_cmd(rest):
             tid, p = T.task_new(PANTHEON, now(), opt("--direction"), opt("--title"), project=opt("--project"),
                                 text=opt("--text"), **fields)
             print(f"{tid} {os.path.relpath(p, PANTHEON)}")
+            for w in T.option_warns(fields):
+                print(f"предупреждение · {w}", file=sys.stderr)
         elif sub == "set" and args:
             tid, changes, note, i = args[0], {}, None, 1
             night_flags = {"--wave": "wave", "--batch": "batch", "--night": "night", "--estimate": "estimate",
@@ -4665,6 +4667,8 @@ def task_cmd(rest):
                 i += step
             p, head = T.task_set(PANTHEON, now(), tid, changes, note=note)
             print(f"{tid}: {head.get('status')} · {os.path.relpath(p, PANTHEON)}")
+            for w in T.option_warns({"options": changes.get("options")}):
+                print(f"предупреждение · {w}", file=sys.stderr)
         elif sub == "show" and args:
             tasks = T.load_tasks(PANTHEON)
             if args[0] not in tasks:
