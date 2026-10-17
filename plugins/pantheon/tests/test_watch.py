@@ -1577,6 +1577,68 @@ def test_who_is_who_memo():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_autostart_nudges_idle_holder_0212():
+    """metis-0212: окно, которое флот фоновых сессий Claude Code поднял без задания (claude agents: state=working,
+    status idle), при задаче с вашей отметкой — не «уже работает», а толчок тем же текстом самозапуска (claude respawn
+    + текст для хука push) и тревога «поднял флот Claude Code без задания — толкнул». Работает — status busy или живые
+    субагенты: тогда не трогаем. Закончила ход (done с живым процессом) — тоже толчок, а не только тревога Зевсу.
+    Толчок не помог (снова без дела, STATUS.md не менялся) — сбой самозапуска, а не новый толчок каждый проход."""
+    e = Env()
+    e.direction("fl-dir")
+    e.task("fl-0001", "fl-dir")
+    e.run("watch", t=T0)
+    e.board("fl-0001", T0 + 10)
+    a = bg("fl-dir", "working", "f1ee7001-1", pid=41)
+    a["status"] = "busy"
+    e.agents([a])
+    out = e.run("watch", "--dry-run", t=T0 + 60).stdout
+    check("fl-dir: уже работает" in out, f"0212: status busy — не «уже работает»: {out}")
+    a["status"] = "idle"
+    a["inFlight"] = {"tasks": 1, "queued": 0, "kinds": ["agent"]}
+    e.agents([a])
+    out = e.run("watch", "--dry-run", t=T0 + 60).stdout
+    check("fl-dir: уже работает" in out, f"0212: idle с живыми субагентами — не «уже работает»: {out}")
+    del a["inFlight"]
+    e.agents([a])
+    out = e.run("watch", "--dry-run", t=T0 + 60).stdout
+    check("fl-dir: поднял флот Claude Code без задания — толкнул бы" in out, f"0212: dry-run не толкает idle: {out}")
+    e.run("watch", t=T0 + 120)
+    check(["respawn", "f1ee7001"] in e.calls(), f"0212: idle-окно флота не толкнуто respawn: {e.calls()}")
+    check(not [c for c in e.calls() if c[:1] == ["--bg"]], f"0212: вместо толчка новая сессия: {e.calls()}")
+    pushed = e.st("push", "f1ee7001-1.txt")
+    text = open(pushed).read() if os.path.exists(pushed) else ""
+    check(text.startswith("[Пантеон: поручение от tick] Самозапуск дежурным") and "fl-0001" in text,
+          f"0212: текст толчка не тот, что у самозапуска: {text!r}")
+    check("fl-dir: поднял флот Claude Code без задания — толкнул" in e.alerts(), f"0212: нет тревоги: {e.alerts()}")
+    os.remove(pushed)  # хук push забрал текст при старте процесса
+    # следующий проход: окно всё ещё idle — второго толчка нет (пауза между попытками)
+    e.run("watch", t=T0 + 420)
+    check(len([c for c in e.calls() if c[:1] == ["respawn"]]) == 1, f"0212: толчок каждый проход: {e.calls()}")
+    check(json.load(open(e.st("autostart.json")))["fl-dir"].get("fails") == 1,
+          "0212: толчок не помог (снова без дела, STATUS.md не менялся) — не засчитан сбоем")
+    # закончила ход с живым процессом — тоже толчок
+    e2 = Env()
+    e2.direction("dn-dir")
+    e2.task("dn-0001", "dn-dir")
+    e2.run("watch", t=T0)
+    e2.board("dn-0001", T0 + 10)
+    e2.agents([bg("dn-dir", "done", "d0ee7001-1", pid=42)])
+    e2.run("watch", t=T0 + 120)
+    check(["respawn", "d0ee7001"] in e2.calls(), f"0212: done с процессом не толкнута: {e2.calls()}")
+    check("dn-dir: закончила ход, а задачи с вашим решением ждут — толкнул" in e2.alerts(),
+          f"0212: нет тревоги о толчке done: {e2.alerts()}")
+    # вкладка (реестр) и status idle без отметки владельца не трогаются
+    e3 = Env()
+    e3.direction("nt-dir")
+    e3.task("nt-0001", "nt-dir")
+    b = bg("nt-dir", "working", "a0ee7001-1", pid=43)
+    b["status"] = "idle"
+    e3.agents([b])
+    e3.run("watch", t=T0)
+    e3.run("watch", t=T0 + 120)
+    check(not [c for c in e3.calls() if c[:1] == ["respawn"]], f"0212: толчок без вашей отметки: {e3.calls()}")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
