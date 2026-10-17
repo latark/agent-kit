@@ -1,0 +1,31 @@
+#!/bin/bash
+# Установщик Пантеона для нового человека: `pantheon-setup` из клона agent-kit, до установки плагинов.
+# Ставит uv и Python 3.14 (уже стоящие Python не трогает) и передаёт дело lib/setup.py.
+set -u
+here=$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")" && pwd)
+plugin=$(cd "$here/.." && pwd)
+
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "pantheon-setup: пока только macOS (у вас $(uname -s))." >&2
+    exit 1
+fi
+
+export PATH="$HOME/.local/bin:$PATH"
+if ! command -v uv >/dev/null 2>&1; then
+    echo "pantheon-setup: ставлю uv (без прав администратора, в ~/.local/bin)"
+    if ! curl -LsSf https://astral.sh/uv/install.sh | sh; then
+        echo "pantheon-setup: не вышло поставить uv. Поставьте вручную (https://docs.astral.sh/uv/) и запустите снова." >&2
+        exit 1
+    fi
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "pantheon-setup: uv не появился в ~/.local/bin." >&2
+        exit 1
+    fi
+fi
+
+if ! uv python install 3.14 >&2; then
+    echo "pantheon-setup: не вышло поставить Python 3.14 через uv." >&2
+    exit 1
+fi
+py=$(uv python find 3.14) || { echo "pantheon-setup: uv не нашёл Python 3.14." >&2; exit 1; }
+exec "$py" -I "$plugin/lib/setup.py" --python "$py" "$@"

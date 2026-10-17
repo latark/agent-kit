@@ -68,6 +68,24 @@ r = run([os.path.join(BIN, "pantheon"), "help"], env_for(PANTHEON_PY_DIRS=os.pat
 check("нет в PATH — ищет в каталогах PANTHEON_PY_DIRS", r.returncode == 0 and "Пантеон" in r.stdout,
       (r.returncode, r.stderr[-200:]))
 
+# python из STATE/config.toml (его пишет pantheon-setup): после PANTHEON_PYTHON, раньше python3 из PATH
+cfg_state = os.path.join(tmp, "cfgstate")
+os.makedirs(cfg_state)
+script("python3", "echo OLD >&2; exit 1\n")
+cfg_py = os.path.join(tmp, "cfg-python")
+os.symlink(PY311, cfg_py)
+with open(os.path.join(cfg_state, "config.toml"), "w") as fh:
+    fh.write(f'python = "{cfg_py}"\n\n[executors]\nset = ["claude"]\n')
+probe = f'. "{os.path.join(LIB, "find-python.sh")}"; find_python'
+r = run(["sh", "-c", probe], env_for(PANTHEON_STATE=cfg_state))
+check("python из config.toml находится", r.stdout.strip() == cfg_py, (r.stdout, r.stderr))
+r = run(["sh", "-c", probe], env_for(PANTHEON_STATE=cfg_state, PANTHEON_PYTHON=PY311))
+check("PANTHEON_PYTHON важнее config.toml", r.stdout.strip() == PY311, r.stdout)
+os.remove(cfg_py)
+os.symlink("/usr/bin/false", cfg_py)  # записан, но не работает → прежний порядок (здесь — ничего)
+r = run(["sh", "-c", probe], env_for(PANTHEON_STATE=cfg_state))
+check("сломанный python из config.toml пропускается", r.returncode != 0 and r.stdout.strip() == "", (r.stdout, r.returncode))
+
 # ничего подходящего
 r = run([os.path.join(BIN, "pantheon"), "status"], env_for())
 check("нет Python 3.11+: понятная строка, код не 0, без трассы",

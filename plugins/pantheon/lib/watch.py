@@ -1825,6 +1825,32 @@ def _managed_guard_active():
     return False
 
 
+def _setup_python_line():
+    """Строка infra-check «Python установки»: путь из config.toml (его пишет pantheon-setup) и его версия."""
+    try:
+        py = (_pconfig().load() or {}).get("python")
+    except (OSError, ValueError, RuntimeError):
+        py = None
+    if not py:
+        return True, "Python установки: не записан (установка без pantheon-setup)"
+    try:
+        r = subprocess.run([py, "-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])"],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 and r.stdout.strip():
+            return True, f"Python установки: {py} ({r.stdout.strip()})"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return False, f"Python установки: {py} записан, но не запускается"
+
+
+def _pconfig():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_pconfig", os.path.join(P.LIB, "pconfig.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def infra_check():
     """Лёгкие проверки без модели: guard отказывает на запретном, хуки плагина на месте, claude agents отвечает,
     управляемые настройки совпадают с guard. Живые проверки (пробуждение после /clear, сообщение между сессиями,
@@ -1855,6 +1881,7 @@ def infra_check():
                         "managed-settings.json")
     with contextlib.suppress(OSError):
         add(open(P.MANAGED, "rb").read() == open(plug, "rb").read(), "управляемые настройки совпадают с guard")
+    add(*_setup_python_line())
     lines = [("готово  " if ok else "НЕТ     ") + text for ok, text in res]
     return all(ok for ok, _ in res), lines
 
