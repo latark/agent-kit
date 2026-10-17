@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Тесты сторожа следов scripts/check-traces.py: временный репозиторий, выдуманные маркеры.
+"""Тесты проверки личных следов scripts/check-traces.py: временный репозиторий, выдуманные маркеры.
 
 Запуск: python3 -I plugins/pantheon/tests/test_check_traces.py  (код выхода 0 — все прошли)
 """

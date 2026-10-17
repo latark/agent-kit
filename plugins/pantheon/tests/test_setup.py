@@ -161,7 +161,7 @@ def main():
           "[пропуск] Codex" in out and not any("codex" in x for x in lg), out[-600:])
     check("terminal-notifier: brew install и инструкция уведомлений",
           "brew install terminal-notifier" in lg and "Системные настройки" in out, lg)
-    check("сторож следов без файла маркеров — пропуск", "[пропуск] сторож следов: нет файла маркеров" in out, out[-800:])
+    check("проверка личных следов без файла маркеров — пропуск", "[пропуск] проверка личных следов: нет файла маркеров" in out, out[-800:])
     check("у каждого шага строка итога (нет «не вышло»)", "[не вышло]" not in out, out)
 
     # --- 2. повторный запуск на готовом Пантеоне: отказ, файлы не тронуты --------------------------------------
@@ -258,22 +258,22 @@ def main():
     check("без флагов: вопрос про Codex, ответ «нет» — пропуск", "Подключить Codex" in r.stdout
           and "[пропуск] Codex" in r.stdout and not any("codex" in x for x in log_of(env)), r.stdout[-600:])
 
-    # --- 7. сторож следов ---------------------------------------------------------------------------------------
+    # --- 7. проверка личных следов ---------------------------------------------------------------------------------------
     root, env, _ = new_root(with_uv=True)
     mk = os.path.join(root, "markers.txt")
     with open(mk, "w", encoding="utf-8") as fh:
         fh.write("# синтетические маркеры\nzzqq-такого-слова-нет\n/Users/\n")
     r = setup(env, "нет\n", "--no-codex", "--markers", mk)
-    check("сторож: синтетические маркеры → «следов нет», код 0",
-          r.returncode == 0 and "[ок] сторож следов: следов нет" in r.stdout, r.stdout[-700:] + r.stderr[-300:])
+    check("проверка следов: синтетические маркеры → «следов нет», код 0",
+          r.returncode == 0 and "[ок] проверка личных следов: следов нет" in r.stdout, r.stdout[-700:] + r.stderr[-300:])
     root, env, _ = new_root(with_uv=True)
     mk = os.path.join(root, "markers.txt")
     with open(mk, "w", encoding="utf-8") as fh:
-        fh.write("pantheon_pconfig\n")  # слово есть в setup.py → сторож обязан покраснеть
+        fh.write("pantheon_pconfig\n")  # слово есть в setup.py → проверка обязана покраснеть
     env["PANTHEON_TRACE_MARKERS"] = mk
     r = setup(env, "нет\n", "--no-codex")
-    check("сторож через PANTHEON_TRACE_MARKERS: маркер найден в файле установщика → «не вышло», код 1",
-          r.returncode == 1 and "[не вышло] сторож следов" in r.stdout and "setup.py" in r.stdout,
+    check("проверка личных следов через PANTHEON_TRACE_MARKERS: маркер найден в файле установщика → «не вышло», код 1",
+          r.returncode == 1 and "[не вышло] проверка личных следов" in r.stdout and "setup.py" in r.stdout,
           (r.returncode, r.stdout[-600:]))
 
     # --- 8. настоящие файлы владельца не тронуты ------------------------------------------------------------------

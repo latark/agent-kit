@@ -193,11 +193,11 @@ def step_notifier():
 def step_traces(root, markers):
     markers = markers or os.environ.get("PANTHEON_TRACE_MARKERS")
     if not markers or not os.path.isfile(markers):
-        report("сторож следов", "пропуск", "нет файла маркеров")
+        report("проверка личных следов", "пропуск", "нет файла маркеров")
         return
     script = os.path.join(PLUGIN, "scripts", "check-traces.py")
     if not os.path.isfile(script) or not root:
-        report("сторож следов", "не вышло", "нет scripts/check-traces.py или клон не в git")
+        report("проверка личных следов", "не вышло", "нет scripts/check-traces.py или клон не в git")
         return
     rel = [os.path.relpath(os.path.join(p), root) for p in
            (os.path.join(PLUGIN, "bin", "pantheon-setup"), os.path.join(LIB, "setup.py"),
@@ -218,9 +218,9 @@ def step_traces(root, markers):
             if r.returncode != 0:
                 bad.append(f"собранные роли: {last_line(r) if r.returncode == 2 else r.stdout.strip()}")
     if bad:
-        report("сторож следов", "не вышло", "; ".join(bad))
+        report("проверка личных следов", "не вышло", "; ".join(bad))
     else:
-        report("сторож следов", "ок", "следов нет")
+        report("проверка личных следов", "ок", "следов нет")
 
 
 def step_codex():

@@ -21,7 +21,7 @@
 - Требуется Python 3.11+ (`tomllib`). Системный `/usr/bin/python3` на macOS — 3.9, он не подходит; `bin/pantheon` и
   `bin/pantheon-tick` сами ищут 3.11+ (`lib/find-python.sh`): `PANTHEON_PYTHON`, затем `python = "…"` из
   `STATE/config.toml` (его пишет `pantheon-setup`), затем `python3` из PATH, `python3.14`…`3.11`, Homebrew, python.org.
-  Не нашли — строка «нужен Python 3.11+» и код 1, у тика ещё строка в `alerts.md` не чаще раза в сутки. Новой установке
+  Не нашли — строка «нужен Python 3.11+» и код 1, у планового прохода ещё строка в `alerts.md` не чаще раза в сутки. Новой установке
   Python ставит `pantheon-setup` (uv, Python 3.14); вручную — `brew install python@3.14`. Хуки guard идут на `python3`
   из PATH и работают на любом Python 3.9+. `pantheon infra-check` показывает строку «Python установки».
 - Установка для нового человека (macOS): `plugins/pantheon/bin/pantheon-setup` из клона agent-kit, одной командой.
@@ -31,7 +31,7 @@
   у каждого итог «ок / пропуск / не вышло»: путь Python в `config.toml`; маркетплейс и плагины guard, pantheon,
   project-tools; пустой `~/ai/pantheon` из `plugins/pantheon/template/pantheon/` с `git init`; `pantheon install`;
   `pantheon roles build`; вход git в GitHub через gh (`gh auth setup-git` — только после явного «да»);
-  terminal-notifier; сторож следов (`scripts/check-traces.py` по файлам установщика и собранным ролям, маркеры —
+  terminal-notifier; проверка личных следов (`scripts/check-traces.py` по файлам установщика и собранным ролям, маркеры —
   `--markers ФАЙЛ` или `PANTHEON_TRACE_MARKERS`, нет файла — пропуск); Codex (`--codex`, `--no-codex`, без флагов —
   вопрос, по умолчанию нет). `pantheon-setup --add codex` — только шаг Codex на готовой установке. К системе
   `setup.py` ходит через `lib/platform_macos.py` (Homebrew, launchd, sandbox-exec, Связка ключей, текст про
