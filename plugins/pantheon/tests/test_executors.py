@@ -622,12 +622,16 @@ def tests():
         except ProcessLookupError:
             return False
 
-    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+    # ignore_term: заглушка и её дочерний не слушают SIGTERM — гасит только добивающий SIGKILL группе (ревью argus)
+    for sig, ign in ((signal.SIGTERM, False), (signal.SIGHUP, False), (signal.SIGINT, False), (signal.SIGTERM, True)):
         set_cfg(CODEX_ON)
-        scenario({"exec": [{"write": {"half.txt": "x"}, "stdout": [STARTED], "child": True, "hang": 120}]})
+        scenario({"exec": [{"write": {"half.txt": "x"}, "stdout": [STARTED], "child": True, "hang": 120,
+                            "ignore_term": ign}]})
         wt = new_wt()
         h0 = head(wt)
         e = {k: v for k, v in ENV.items() if v is not None}
+        if ign:
+            e["PANTHEON_CODEX_GRACE_S"] = "1"
         p = subprocess.Popen([PY311, "-I", CLI, "exec", "codex", wt, BRIEF], env=e, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True)
         pidf, selff = os.path.join(CH, "stub-child.pid"), os.path.join(CH, "stub-self.pid")
@@ -657,7 +661,7 @@ def tests():
                 fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
                 free = False
-        name = signal.Signals(sig).name
+        name = signal.Signals(sig).name + (" (Codex не слушает SIGTERM — нужен SIGKILL)" if ign else "")
         check(f"{name} обёртке → код 1, «прервано: Codex остановлен, изменения не закоммичены»",
               p.returncode == 1 and "прервано" in se and "Codex остановлен, изменения не закоммичены" in se
               and time.time() - t < 30, (p.returncode, so, se))

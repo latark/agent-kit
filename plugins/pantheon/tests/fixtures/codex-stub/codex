@@ -10,11 +10,13 @@
    "exec": [<шаг>, <шаг>, …]}            — боевые запуски по порядку, последний повторяется
 Шаг: {"write": {"путь": "текст"}, "mv": [["старое", "новое"]] — git mv, "commit": "сообщение", "stdout": [строка или объект], "stderr": [строка],
       "child": true — дочерний sleep в той же группе (pid — в stub-child.pid), "hang": секунд молчать,
+      "ignore_term": true — заглушка и её дочерний не слушают SIGTERM (как trap '' TERM; гасит только SIGKILL),
       "drip": секунд между строками без конца, "rc": код выхода}
 Образцы событий — раздел 3 доклада prometheus 16.10 (тесты Paperclip codex_local).
 """
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -76,6 +78,8 @@ if step.get("commit"):
     subprocess.run(["git", "add", "-A"], check=True)
     subprocess.run(["git", "-c", "user.name=codex", "-c", "user.email=codex@local", "commit", "-q", "-m",
                     step["commit"]], check=True)
+if step.get("ignore_term"):  # SIG_IGN наследует и дочерний sleep
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 if step.get("child"):
     c = subprocess.Popen(["sleep", "300"])
     open(os.path.join(home, "stub-child.pid"), "w").write(str(c.pid))
