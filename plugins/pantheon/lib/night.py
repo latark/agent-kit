@@ -353,7 +353,10 @@ def gate(kind, t, agents=None, registry=None, heavy=None):
     if kind == "respawn":
         if d is None:
             return True, ""
-        return night_open(load(d), m, cfg)
+        ok, why = night_open(load(d), m, cfg)
+        if not ok:
+            return False, why
+        return morning(t, d, cfg)  # у правила утра исключения для продолжения нет (решение лида 17.10)
     if d is None and m["zone"] == "yellow":
         return False, f"жёлтая зона днём — неделя {num(m['used'])} % при линии {num(m['line'])} %"
     if heavy is None:
@@ -365,12 +368,18 @@ def gate(kind, t, agents=None, registry=None, heavy=None):
         ok, why = night_open(load(d), m, cfg)
         if not ok:
             return False, why
-        if t >= at(d, cfg[1]["morning_after"], cfg):
-            five, top = P.limit_pct(), cfg[1]["morning_five_hour_max"]
-            if five is None:
-                return False, f"после {cfg[1]['morning_after']} пятичасовой лимит неизвестен"
-            if five > top:
-                return False, f"после {cfg[1]['morning_after']} пятичасовой лимит {num(five)} % > {top:g} %"
+        return morning(t, d, cfg)
+    return True, ""
+
+
+def morning(t, d, cfg):
+    """После morning_after ночи d — новое только при пятичасовом лимите не выше morning_five_hour_max."""
+    if t >= at(d, cfg[1]["morning_after"], cfg):
+        five, top = P.limit_pct(), cfg[1]["morning_five_hour_max"]
+        if five is None:
+            return False, f"после {cfg[1]['morning_after']} пятичасовой лимит неизвестен"
+        if five > top:
+            return False, f"после {cfg[1]['morning_after']} пятичасовой лимит {num(five)} % > {top:g} %"
     return True, ""
 
 
@@ -406,8 +415,9 @@ def card_head(st):
     return {"question": st.get("question") or TITLE, "options": st.get("options") or []}
 
 
-def find_answer(st):
-    """(«да»|«нет», время) — ваш ответ по карточке ночи из журналов owner-log, или None."""
+def find_answer(st, until=None):
+    """(«да»|«нет», время) — ваш последний ответ по карточке ночи из журналов owner-log в окне от карточки до until
+    (срок вопроса), или None: передумали — «Нет» после «Да» отменяет ночь."""
     cid, since = st["card_id"], float(st.get("card_at") or 0) - 60
     T = P.tasks_mod()
     found = []
@@ -432,13 +442,14 @@ def find_answer(st):
             continue
         with contextlib.suppress(ValueError):
             found.append((datetime.strptime(mm.group(1), "%Y-%m-%d %H:%M:%S").timestamp(), a.group(1)))
+    last = None
     for ts, ans in sorted(found):
-        if ts < since:
+        if ts < since or (until is not None and ts >= until):
             continue
         w = ans.strip().split(" ")[0].lower()
         if w in ("да", "нет"):
-            return w, ts
-    return None
+            last = (w, ts)
+    return last
 
 
 def _close_card(st, t, status, result):
@@ -489,9 +500,10 @@ def evening_pass(d, m, t, cfg):
     ask_t, dl_t = at(d, cfg[2]["ask_at"], cfg), at(d, cfg[2]["deadline"], cfg)
     start_t, end_t = at(d, cfg[1]["start"], cfg), at(d, cfg[1]["end"], cfg)
     if not st["skipped"]:
-        if st["card_id"] and st["answer"] is None:
-            got = find_answer(st)
-            if got and got[1] < dl_t:
+        if st["card_id"]:
+            # последний ответ до срока: «Нет» после «Да» (до 00:00) пропускает и уже открытую ночь
+            got = find_answer(st, dl_t)
+            if got and (st["answer"], st.get("answer_at")) != got:
                 st["answer"], st["answer_at"] = got
                 if got[0] == "нет":
                     _skip(st, d, t, "ответ «Нет»")

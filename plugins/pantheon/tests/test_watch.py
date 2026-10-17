@@ -98,6 +98,7 @@ class Env:
             'primary_host = "mac-a"\n[defaults]\nlimit_max_pct = 70\n[night]\nask_at = "00:00"\n'
             '[limits.night]\nstart = "00:00"\nend = "00:00"\n')
         self.doms = {}
+        self.week_pct, self.snap_age = 10.0, 0  # снимок недельного лимита в run(): зелёная зона, свежий
         # уведомления идут через политику (metis-0023): простой — явно, по умолчанию «вы у Mac»
         self.extra = {"PANTHEON_FAKE_IDLE": "0"}
 
@@ -148,8 +149,10 @@ class Env:
         # свежий снимок лимита строки статуса (lib/night.py): без него самозапуск закрыт — «лимит неизвестен»
         sl = os.path.join(self.home, ".local", "state", "claude-statusline")
         os.makedirs(sl, exist_ok=True)
-        open(os.path.join(sl, "five-hour"), "w").write(f"10 {t + 3600:.0f} {t:.0f}\n")
-        open(os.path.join(sl, "seven-day"), "w").write(f"10 {t + 5 * 86400:.0f} {t:.0f}\n")
+        # неделя week_pct % при сбросе через 5 суток (линия ~28,6 %), снимок сделан snap_age с назад
+        obs = t - self.snap_age
+        open(os.path.join(sl, "five-hour"), "w").write(f"10 {t + 3600:.0f} {obs:.0f}\n")
+        open(os.path.join(sl, "seven-day"), "w").write(f"{self.week_pct:g} {t + 5 * 86400:.0f} {obs:.0f}\n")
         env = {"PATH": self.bin + ":" + os.environ["PATH"], "HOME": self.home, "PANTHEON_HOME": self.pantheon,
                "PANTHEON_STATE": self.state, "PANTHEON_NOW": str(t), "PANTHEON_HOST": "mac-a",
                "PANTHEON_NOTIFY_LOG": self.notify, "FAKE_CLAUDE_LOG": self.log, "FAKE_AGENTS": self.agents_file,
@@ -810,6 +813,64 @@ def test_pauses():
     open(e.st("load-pause"), "w").write("2026-10-15 старая")
     e.run("watch", t=T0 + 240, extra={"PANTHEON_FAKE_LIMIT": "90"})
     check(os.path.exists(e.st("pauses", "_all.json")) and not os.path.exists(e.st("load-pause")), "миграция load-pause")
+
+
+def _night_now(e):
+    """Ночь идёт в T0 и без ответа пропущена: вопрос за 2 ч, срок за 30 мин, ночь с T0 − 1 ч до T0 + 3 ч (по местному
+    времени машины, на которой идут тесты)."""
+    f = lambda s: time.strftime("%H:%M", time.localtime(T0 + s))  # noqa: E731
+    open(os.path.join(e.pantheon, "schedule.toml"), "w").write(
+        f'primary_host = "mac-a"\n[defaults]\nlimit_max_pct = 70\n[night]\nask_at = "{f(-7200)}"\nrepeat = []\n'
+        f'deadline = "{f(-1800)}"\n[limits.night]\nstart = "{f(-3600)}"\nend = "{f(3 * 3600)}"\n')
+
+
+def test_week_limit_blocks_autostart():
+    """Самозапуск по задаче зовёт gate недели (metis-0127): жёлтая днём, красная, снимок старше 30 мин — не поднимает,
+    причина «недельный лимит»; зелёная — поднимает."""
+    e = Env()
+    e.direction("athena-w")
+    e.task("athena-0009", "athena-w")
+    e.run("watch", t=T0)
+    e.board("athena-0009", T0 + 60)
+    cases = ((31.6, 0, "жёлтая зона днём"), (90.0, 0, "красная зона"), (10.0, 31 * 60, "лимит неизвестен (31 мин)"))
+    for i, (pct, age, why) in enumerate(cases):
+        e.week_pct, e.snap_age = pct, age
+        out = e.run("watch", "--dry-run", t=T0 + 120 + i).stdout
+        check(f"athena-w: ждёт — недельный лимит: {why}" in out, f"неделя {pct} %, снимок {age} с — dry-run: {out[-500:]}")
+        r = e.run("watch", t=T0 + 130 + i)
+        check(not [c for c in e.calls() if c[:1] == ["--bg"]], f"неделя {pct} %, снимок {age} с — самозапуск: "
+              f"{e.calls()} {r.stderr[-300:]}")
+    check("самозапуск athena-w ждёт" not in e.alerts(), "тревога autostart-wait по недельному лимиту")
+    e.week_pct, e.snap_age = 10.0, 0
+    e.run("watch", t=T0 + 200)
+    check(len([c for c in e.calls() if c[:1] == ["--bg"]]) == 1, f"зелёная — самозапуск не пошёл: {e.calls()}")
+
+
+def test_week_limit_blocks_wake_after_pause():
+    """Сессия, уснувшая по пятичасовому лимиту: лимит ушёл, но неделя красная или ночь закрыта — не будится, пауза
+    остаётся; неделя снова зелёная днём — продолжена."""
+    for night in (False, True):
+        e = Env()
+        if night:
+            _night_now(e)
+        e.direction("p9-dir")
+        e.agents([bg("p9-dir", "working", "p9p9p9p9-1", pid=43)])
+        e.run("pause", "p9-dir", "--reason", "limit", "лимит 80", t=T0)
+        e.agents([bg("p9-dir", "stopped", "p9p9p9p9-1")])
+        if not night:
+            e.week_pct = 90.0
+        e.run("watch", t=T0 + 60, extra={"PANTHEON_FAKE_LIMIT": "20"})
+        what = "ночь закрыта" if night else "неделя красная"
+        check(os.path.exists(e.st("pauses", "p9-dir.json")), f"{what} — пауза снята")
+        check(not any("p9p9p9p9-1" in c for c in e.calls() if "--resume" in c), f"{what} — сессия продолжена: {e.calls()}")
+        if night:
+            st = json.load(open(e.st("night", time.strftime("%Y-%m-%d", time.localtime(T0 - 7200)) + ".json")))
+            check(st.get("skipped"), f"ночь без ответа не пропущена: {st}")
+        else:
+            e.week_pct = 10.0
+            e.run("watch", t=T0 + 120, extra={"PANTHEON_FAKE_LIMIT": "20"})
+            check(not os.path.exists(e.st("pauses", "p9-dir.json")), "зелёная — пауза не снята")
+            check(any("p9p9p9p9-1" in c for c in e.calls() if "--resume" in c), "зелёная — сессия не продолжена")
 
 
 def test_isolation_and_watch_last():

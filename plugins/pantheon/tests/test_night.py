@@ -239,6 +239,15 @@ def test_day_rules_and_respawn():
     t2 = hm("22:30")
     e.at_line(t2, 3)
     check(not N.gate("autostart", t2, heavy=0)[0], "22:30 жёлтая — пустил")
+    # ночью, даже в открытой ночи, продолжение прерванной без свежего снимка не пускается
+    e2 = Env()
+    open_night(e2, hm("23:05"))
+    e2.at_line(hm("23:06"), 0)
+    e2.watch(hm("23:06"))
+    check(N.gate("respawn", hm("23:10")) == (True, ""), "respawn в открытой ночи со свежим снимком не пустил")
+    e2.at_line(hm("01:00") - 3600, 0)
+    ok, why = N.gate("respawn", hm("01:00"))
+    check(not ok and why.startswith("лимит неизвестен"), f"respawn ночью при неизвестном лимите: {ok} {why}")
 
 
 def test_evening_question():
@@ -379,6 +388,54 @@ def test_answer_no_and_file_only():
     check(e2.state_of()["skipped"], "без ответа из журнала ночь не пропущена")
 
 
+def test_answer_changed():
+    """Передумали: последний ответ до 00:00 решает — «Да» в 22:30, «Нет» в 22:50 — ночь пропущена."""
+    for both in (True, False):  # оба ответа к одному проходу или «Да» уже записан проходом 22:35
+        e = Env()
+        e.at_line(hm("22:00"), 0)
+        e.watch(hm("22:00"))
+        cid, h = next(iter(e.cards().items()))
+        e.board_answer(cid, h["options"][0], hm("22:30"))
+        if not both:
+            e.watch(hm("22:35"))
+            check(e.state_of()["answer"] == "да", f"«Да» в 22:30 не записан: {e.state_of()}")
+        e.board_answer(cid, h["options"][1], hm("22:50"))
+        e.watch(hm("22:55"))
+        e.at_line(hm("23:05"), 0)
+        e.watch(hm("23:05"))
+        st = e.state_of()
+        check(st["skipped"] == "ответ «Нет»" and st["answer"] == "нет" and not st.get("opened_at"),
+              f"«Да» 22:30, «Нет» 22:50 ({'один проход' if both else 'два прохода'}) — {st}")
+        check(not N.gate("autostart", hm("23:10"), heavy=0)[0], "после «Нет» gate пустил")
+        check(e.cards()[cid]["status"] == "dropped", f"карточка после «Нет»: {e.cards()[cid]['status']}")
+    # «Нет», потом «Да» — ночь уже пропущена и не открывается
+    e = Env()
+    e.at_line(hm("22:00"), 0)
+    e.watch(hm("22:00"))
+    cid, h = next(iter(e.cards().items()))
+    e.board_answer(cid, h["options"][1], hm("22:30"))
+    e.watch(hm("22:35"))
+    e.board_answer(cid, h["options"][0], hm("22:40"))
+    e.at_line(hm("23:05"), 0)
+    e.watch(hm("23:05"))
+    check(e.state_of()["skipped"] and not e.state_of().get("opened_at"), f"«Нет», затем «Да» — {e.state_of()}")
+
+
+def test_late_answer_first_pass():
+    """Ответ в журнале в 00:02, первый проход после него в 00:05 — ночь пропущена, не открыта."""
+    e = Env()
+    e.at_line(hm("22:00"), 0)
+    e.watch(hm("22:00"))
+    cid, h = next(iter(e.cards().items()))
+    e.board_answer(cid, h["options"][0], hm("00:02"))
+    e.at_line(hm("00:05"), 0)
+    e.watch(hm("00:05"))
+    st = e.state_of()
+    check(st["skipped"] == "нет ответа к 00:00" and st["answer"] is None and not st.get("opened_at"),
+          f"ответ в 00:02 — {st}")
+    check(not N.gate("autostart", hm("00:10"), heavy=0)[0], "ответ после 00:00 — gate пустил")
+
+
 def test_budget():
     e = Env()
     d = EVENING
@@ -455,6 +512,12 @@ def test_morning_five_hour():
     check(not ok and "пятичасовой лимит 51 % > 50 %" in why, f"после 04:00 пятичасовой 51 — gate: {ok} {why}")
     e.snap(t, u0 + 0.5, e.resets, five=50)
     check(N.gate("autostart", t, heavy=0)[0], "после 04:00 пятичасовой 50 — gate не пустил")
+    # правило утра — и для продолжения прерванной (решение лида 17.10)
+    e.snap(t, u0 + 0.5, e.resets, five=51)
+    ok, why = N.gate("respawn", t)
+    check(not ok and "пятичасовой лимит 51 % > 50 %" in why, f"после 04:00 пятичасовой 51 — respawn: {ok} {why}")
+    e.snap(t, u0 + 0.5, e.resets, five=50)
+    check(N.gate("respawn", t) == (True, ""), "после 04:00 пятичасовой 50 — respawn не пустил")
     t3 = hm("03:50")
     e.snap(t3, u0 + 0.5, e.resets, five=80)
     check(N.gate("autostart", t3, heavy=0)[0], "до 04:00 правило пятичасового лимита сработало")
