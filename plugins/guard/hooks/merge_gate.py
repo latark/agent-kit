@@ -139,7 +139,7 @@ def _remote_id(url):
 
 
 def _repo_tail(repo):
-    """owner/repo без хоста: псевдоним ssh (git@gh-work:latark/agent-kit) gh понимает как github.com, поэтому
+    """owner/repo без хоста: псевдоним ssh (git@gh-alias:org/repo) gh понимает как github.com, поэтому
     репозитории сравниваются по двум последним частям, а не по хосту."""
     return "/".join(repo.split("/")[-2:])
 
@@ -191,7 +191,7 @@ def _gh_resolved(d):
 def _merge_domains():
     """Реестр направлений для слияния: {имя: [корни]}; None — реестр пуст или битый (тогда слияние закрыто).
     Только domains.json, без отката на старый ~/.claude/hooks/domains.json, как у load_domains(): в старом реестре
-    направления шире, и с ним Гермес слил бы в legal-watch (ревью argus 210766a)."""
+    направления шире, и с ним координатор слил бы в чужой репозиторий (ревью argus 210766a)."""
     try:
         with open(G.DOMAINS_FILE, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -898,7 +898,7 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
 def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
     """gh pr merge (metis-0038, guard 0.5.0; запор P1-4, guard 0.5.4). Сливает главная сессия координатора
     направления или его лид (metis-0054): субагент hephaestus-<short> или apollo-<short>, где short — имя направления
-    папки запуска после первого «-» (hermes-alex → alex). Дальше лид проверяется как координатор: личное, Метида,
+    папки запуска после первого «-» (apollo-shop → shop). Дальше лид проверяется как координатор: личное, Метида,
     защиты — те же правила. Режим: защиты — cwd в папках [coordinators] metis-pantheon или репозиторий команды (-R или
     remote папки cwd) совпадает с remote этих папок: только Метида или её лид; продукт ([merge_client]) и внутреннее
     (своё направление по domains.json, для совместимости — [merge]). Затем во всех режимах — запор (gate_problem).
@@ -1012,8 +1012,8 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
     if why:
         return f"{why}. {advice}"
     if repos:
-        # -R — только репозиторий из [merge_repos] направления: сессия Фемиды стоит в legal-watch, а сливает и
-        # PR expert-corpus (themis-0015, ответ владельца 15.10 «А и Б»). Сверка по точному owner/repo на github.com
+        # -R — только репозиторий из [merge_repos] направления: сессия координатора стоит в одном
+        # репозитории, а сливает и PR соседнего репозитория направления (решение владельца 15.10). Сверка по точному owner/repo на github.com
         allowed = policy.get("merge_repos")
         allowed = allowed.get(repo_name) if isinstance(allowed, dict) and repo_name else None
         allowed = {r.strip().lower() for r in allowed if isinstance(r, str)} if isinstance(allowed, list) else set()
