@@ -691,7 +691,7 @@ def tests():
              "settings.local.json": True, ".github/workflows/ci.yml": True, "plugins/guard/hooks/guard.py": True,
              "plugins/x/hooks/a.py": True, "plugins/pantheon/roles/a.tmpl": True, ".pantheon-verify": True,
              "README.md": False, "docs/plugins/guard/x.md": False, "src/app.py": False, ".github/ISSUE.md": False,
-             "plugins/pantheon/lib/executors.py": False}
+             "plugins/pantheon/lib/executors.py": False, "plugins/pantheon/lib/window_rules.py": True}
     wrong = {p: v for p, v in cases.items() if m.protected_hit(p) != v}
     check("защищённые пути: глубина и шаблоны", not wrong, wrong)
     fresh = os.path.join(TMP, "fresh")

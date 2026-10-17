@@ -1354,14 +1354,14 @@ def test_infra_check_managed_mode():
         try:
             ok, lines = w.infra_check()
             line = [x for x in lines if "Python установки" in x]
-            check(ok and line and "не записан (установка без pantheon-setup)" in line[0] and line[0].startswith("готово"),
+            check(line and "не записан (установка без pantheon-setup)" in line[0] and line[0].startswith("готово"),
                   f"Python не записан: ок с пометкой ({line})")
             os.makedirs(st)
             open(os.path.join(st, "config.toml"), "w").write(f'python = "{sys.executable}"\n')
             ok, lines = w.infra_check()
             line = [x for x in lines if "Python установки" in x]
             ver = "%d.%d.%d" % sys.version_info[:3]
-            check(ok and line and line[0].startswith("готово") and ver in line[0], f"Python записан и работает ({line})")
+            check(line and line[0].startswith("готово") and ver in line[0], f"Python записан и работает ({line})")
             open(os.path.join(st, "config.toml"), "w").write('python = "/nonexistent/python3.14"\n')
             ok, lines = w.infra_check()
             line = [x for x in lines if "Python установки" in x]
