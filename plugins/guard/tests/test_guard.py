@@ -36,7 +36,7 @@ except ImportError:
 NEEDS_POLICY = {"Метида правит карту решений", "prometheus пишет в ~/ai/knowledge (agent_extra)",
                 "prometheus сессией: ~/ai/knowledge по agent_extra", "protect-config: Метида правит роль",
                 "protect-config: Метида пишет policy.toml", "private: mnemo-brain пишет в me/",
-                "momus пишет в ~/ai/knowledge/Inbox (agent_extra)"}
+                "momus пишет в ~/ai/knowledge/Inbox (agent_extra)", "0177 momus без agent_id пишет в ~/ai/knowledge/Inbox"}
 
 
 def setup(home):
@@ -326,6 +326,11 @@ def merge_security_checks(home, MERGE_OK, cases):
           deny(out) and ("[private] в policy.toml не разобрать" in out or not allow_ok))
     got = M(variant(policy_fn=lambda t: t + "\n[private]\ncoordinators = []\nroles = []\n"), "gh pr merge 1", pdir=ec)
     check(f"[private] с пустыми roles и coordinators — слияние как было: {got}", got == MERGE_OK)
+    # 0177: paths = [] — «ничего», как у guard (private_conf); раньше шлюз закрывался, а guard читал умолчание
+    got = M(variant(policy_fn=lambda t: t + "\n[private]\npaths = []\n"), "gh pr merge 1", pdir=ec)
+    check(f"[private] paths = [] — слияние как было: {got}", got == MERGE_OK)
+    got = M(variant(policy_fn=lambda t: t + '\n[private]\npaths = [" "]\n'), "gh pr merge 1", pdir=ec)
+    check(f'[private] paths = [" "] — отказ, как раньше: {got}', got == "deny")
     # -R latark/agent-kit в чужом [merge_repos] — это защиты, а не внутреннее
     h = variant(policy_fn=lambda t: t.replace('themis-sources = ["latark/expert-corpus", "latark/legal-watch"]',
                                               'themis-sources = ["latark/expert-corpus", "latark/agent-kit"]'))
@@ -1272,7 +1277,7 @@ def main():
         ("merge 0.5: mnemo-brain в ~/ai/knowledge — отказ", "deny", "ai/knowledge", "domain-coordinator", False,
          B("gh pr merge 1")),
         # защиты: только Метида и её лид, через запор (guard 0.5.4): поштучного «да» владельца больше нет, ядро защит
-        # (Д3) — только кнопкой владельца. Сам запор — test_merge_gate.py; здесь — кто, где и в каком репозитории
+        # (Д3) — PR ждёт слияния владельцем. Сам запор — test_merge_gate.py; здесь — кто, где и в каком репозитории
         ("защиты: Метида по записям запора — можно", MERGE_OK, ak, "domain-coordinator", False, B("gh pr merge 5 --squash")),
         ("защиты: Метида с --subject — можно (заголовок больше не нужен и не мешает)", MERGE_OK, ak, "domain-coordinator",
          False, B('gh pr merge 5 --squash --subject "guard 0.5.4"')),
@@ -1353,6 +1358,15 @@ def main():
         ("momus: своя память — можно", "allow", br, "momus", True, W(os.path.join(home, ".claude/agent-memory/momus/n.md"))),
         ("momus: память чужой роли — отказ", "deny", br, "momus", True, W(os.path.join(home, ".claude/agent-memory/argus/n.md"))),
         ("momus: временная папка — можно", "allow", br, "momus", True, W("/tmp/momus-x.md")),
+        # 0177: главная сессия `--agent momus` — agent_type есть, agent_id нет: те же границы, что у субагента
+        ("0177 momus без agent_id: запись в репозиторий — отказ", "deny", br, "momus", False,
+         W(os.path.join(home, br, "app/x.ts"))),
+        ("0177 momus без agent_id: чужой inbox/ — отказ", "deny", br, "momus", False,
+         W(P("directions/hermes-alex/inbox/new.md"))),
+        ("0177 momus без agent_id: роль ~/.claude/agents — отказ", "deny", br, "momus", False,
+         W(os.path.join(home, ".claude/agents/x.md"))),
+        ("0177 momus без agent_id пишет в ~/ai/knowledge/Inbox", "allow", br, "momus", False, W(K("Inbox/y.md"))),
+        ("0177 momus без agent_id: временная папка — можно", "allow", br, "momus", False, W("/tmp/momus-y.md")),
         # --- 0142: сама папка <репо>/.claude как цель записи (protect-config) ---
         *[(f"0142 protect-config: {n} — отказ", "deny", br, "dev-sonnet", True, B(c)) for n, c in (
             ("cp -R x .claude/ (относительный)", "cp -R x .claude/"),
@@ -1379,6 +1393,47 @@ def main():
         ("0142: mkdir -p .claude/worktrees/x — не защита", "allow", br, "dev-sonnet", True, B("mkdir -p .claude/worktrees/x")),
         ("0142: mkdir -p <репо>/.claude/worktrees/x — не защита", "allow", br, "dev-sonnet", True,
          B(f"mkdir -p {home}/{br}/.claude/worktrees/x")),
+        # --- 0177: цель выше .claude (дерево в репозиторий или над ним), git clone, hooks/skills/commands проекта ---
+        *[(f"0177 protect-config: {n} — отказ", "deny", br, "dev-sonnet", True, B(c)) for n, c in (
+            ("tar -xf a.tar -C <репо>", f"tar -xf a.tar -C {home}/{br}"),
+            ("tar -xf a.tar в корне репозитория", "tar -xf a.tar"),
+            ("cp -R src/.claude <репо>/", f"cp -R src/.claude {home}/{br}/"),
+            ("cp -a x <репо>", f"cp -a x {home}/{br}"),
+            ("rsync -a src/ <репо>/", f"rsync -a src/ {home}/{br}/"),
+            ("ditto src <репо>", f"ditto src {home}/{br}"),
+            ("unzip a.zip -d <репо>", f"unzip a.zip -d {home}/{br}"),
+            ("cd <репо> && cp -R x ./", f"cd {home}/{br} && cp -R x ./"),
+            ("git clone в <репо>/.claude", f"git clone https://github.com/x/y {home}/projects/alexbroker/.claude"),
+            ("git clone -b main в .claude", "git clone -b main https://github.com/x/y .claude"),
+            ("git clone x/.claude.git без папки", "git clone https://github.com/x/.claude.git"),
+            ("cp -R x <репо>/.claude/skills/", f"cp -R x {home}/{br}/.claude/skills/"),
+            ("cp -R x <репо>/.claude/commands/", f"cp -R x {home}/{br}/.claude/commands/"),
+            ("cp -R x <репо>/.claude/hooks/", f"cp -R x {home}/{br}/.claude/hooks/"),
+            ("cp hooks.sh <репо>/.claude/hooks/pre.sh", f"cp hooks.sh {home}/{br}/.claude/hooks/pre.sh"),
+        )],
+        # папка над репозиториями: субагент без роли из HOME (domain пускает весь HOME — отказ даёт только protect-config)
+        ("0177 protect-config: cp -R x ~/projects/ (над репозиториями) — отказ", "deny", ".", "", True,
+         B(f"cp -R x {home}/projects/")),
+        ("0177 protect-config: tar -xf a.tar -C ~/projects — отказ", "deny", ".", "", True,
+         B(f"tar -xf a.tar -C {home}/projects")),
+        ("0177 protect-config: tar -xf a.tar -C ~/projects/workshop (не репозиторий) — не отказ", "allow", ".", "", True,
+         B(f"tar -xf a.tar -C {home}/projects/workshop")),
+        ("0177 protect-config: Write в <репо>/.claude/skills/x/SKILL.md — отказ", "deny", br, "dev-sonnet", True,
+         W(os.path.join(home, br, ".claude/skills/x/SKILL.md"))),
+        ("0177 protect-config: Write в worktree .claude/worktrees/w/.claude/commands — отказ", "deny", br, "dev-sonnet",
+         True, W(os.path.join(home, br, ".claude/worktrees/w/.claude/commands/x.md"))),
+        *[(f"0177 protect-config: {n} — не отказ", "allow", br, "dev-sonnet", True, B(c)) for n, c in (
+            ("install -d <репо>/.claude", f"install -d {home}/{br}/.claude"),
+            ("install -d -m 755 .claude", "install -d -m 755 .claude"),
+            ("tar -xf a.tar -C <репо>/app (подпапка)", f"tar -xf a.tar -C {home}/{br}/app"),
+            ("cp -R x <репо>/app/", f"cp -R x {home}/{br}/app/"),
+            ("cp a.txt <репо>/ (файл, не дерево)", f"cp a.txt {home}/{br}/"),
+            ("git clone в подпапку", "git clone https://github.com/x/y app/y"),
+            ("git status", "git status"),
+            ("git commit в своём репозитории", "git commit -am x"),
+        )],
+        ("0177 protect-config: install -d .claude/agents — по-прежнему отказ", "deny", br, "dev-sonnet", True,
+         B("install -d .claude/agents")),
         # --- dev-server: исключение для разработчика и talos в worktree (ROLE-23) ---
         ("dev-server: dev-sonnet в worktree — можно", "allow", br, "dev-sonnet", True, B("PORT=4123 pnpm dev"),
          br + "/.claude/worktrees/agent-1"),

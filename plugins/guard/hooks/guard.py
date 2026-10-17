@@ -635,7 +635,9 @@ def load_policy():
 
 
 def is_pantheon_role(role):
-    return role in PANTHEON_ROLES or role.startswith(PANTHEON_ROLE_PREFIXES)
+    # ревизор тоже роль Пантеона: главная сессия `--agent momus` (agent_type есть, agent_id нет) иначе писала бы
+    # куда угодно — domain и protect-config судят только роли Пантеона и субагентов (metis-0177)
+    return role in PANTHEON_ROLES or role in EXTRA_ONLY_ROLES or role.startswith(PANTHEON_ROLE_PREFIXES)
 
 
 def who(event):
@@ -2411,8 +2413,8 @@ def check_pantheon(event, tool, tool_input):
 #            направления и остальные субагенты (dev-*, argus, talos…) — отказ. Защиты — cwd в папках [coordinators]
 #            metis-pantheon или репозиторий команды (-R, иначе git remote папки cwd) совпадает с remote этих папок:
 #            только Метида или её лид. Затем во всех режимах — запор слияния (P1-4, guard 0.5.4, merge_gate.py): что
-#            проверено тестами и argus, ровно то и сливается (--match-head-commit), а ядро защит — кнопкой владельца
-#            (Д3). Согласие владельца на PR (--subject, owner-log, merge-consent/, [merge_protect]) снято: его
+#            проверено тестами и argus, ровно то и сливается (--match-head-commit), а ядро защит — PR ждёт слияния
+#            владельцем (Д3). Согласие владельца на PR (--subject, owner-log, merge-consent/, [merge_protect]) снято: его
 #            заменили записи журнала merge-gate. Любой сбой (политика, реестр, git, журнал, gh) — отказ.
 #            Новая схема для своих папок включается строкой [merge_client] в policy.toml; без неё — как в 0.4.7
 #            (только направления из [merge]).
@@ -2452,8 +2454,8 @@ def limited(event):
 
 def private_conf(policy):
     """[private] из policy.toml (0163): не таблица — всё по умолчанию; ключа нет или значение не список — умолчание;
-    список — только его строки (strip, пустые убраны). roles и coordinators: пустой список — никого; paths: пустой —
-    умолчание."""
+    список — только его строки (strip, пустые убраны). Пустой список [] — никого и ничего, для paths тоже (metis-0177:
+    так же читает шлюз слияния); paths из одних пустых строк — умолчание."""
     p = policy.get("private")
     if not isinstance(p, dict):
         p = {}
@@ -2464,7 +2466,7 @@ def private_conf(policy):
             conf[k] = v
             continue
         items = [x.strip() for x in val if isinstance(x, str) and x.strip()]
-        conf[k] = items if items or k != "paths" else v
+        conf[k] = items if items or k != "paths" or val == [] else v
     return conf
 
 
