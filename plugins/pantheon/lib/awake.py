@@ -426,14 +426,17 @@ def limit_resume(agents, registry, doms, t):
         if not ok:
             P.start_log(f"limit-gate\t{name}\t{a.get('id')}\t{reason}")
             continue
-        mk = {"reset": li[0], "tries": int(mk.get("tries") or 0) + 1 if mk.get("reset") == li[0] else 1, "at": t}
+        prev = int(mk.get("tries") or 0) if mk.get("reset") == li[0] else 0
+        mk = {"reset": li[0], "tries": prev + 1, "at": t}
         rc, _ = P.resume_session(name, a, RESUME_LIMIT_TEXT, "limit", recheck=lambda n=name: recheck(n))
+        if rc == P.NO_WINDOW:  # окна нет: тревога о причине уже одна (window_missing), попытку не засчитываем
+            mk["tries"] = prev
         mk["done"] = rc == 0
         lim[sid] = mk
         changed = True
         if rc == 0:
             RESUMED.append(name)
-        else:
+        elif rc != P.NO_WINDOW:
             P.alert(f"подъём после лимита: {name} не поднялась (код {rc}, попытка {mk['tries']} из {LIMIT_TRIES})", "watch")
     if changed:
         P.write_json(marks_path(), marks)
@@ -492,7 +495,7 @@ def wake_waiting(agents, registry, doms, t):
                                  recheck=lambda n=name: recheck(n))
         if rc == 0:
             RESUMED.append(name)
-        else:
+        elif rc != P.NO_WINDOW:
             P.alert(f"будильник ждущих: {name} не поднялась (код {rc}), задача {tid}", "watch")
     if changed:
         P.write_json(marks_path(), marks)

@@ -469,6 +469,40 @@ def test_limit_resume_gate_refused_then_retry():
     check(len(e.calls) == 1, f"после снятия запора не поднял: {e.calls}")
 
 
+def alerts_text(e):
+    f = os.path.join(e.pantheon, "alerts.md")
+    return open(f, encoding="utf-8").read() if os.path.exists(f) else ""
+
+
+def test_limit_resume_no_window_no_alert_no_try():
+    # код «нет окна» — одна тревога от window_missing, а не вторая «не поднялась»; попытка не засчитана (metis-0132)
+    e = Env()
+    e.limited("hermes-site")
+    LIM = at(2026, 10, 19, 8, 0)
+    calls = []
+
+    def nw(name, a, text, origin, recheck=None):
+        calls.append(name)
+        return P.NO_WINDOW, None
+    P.resume_session = nw
+    for i in range(AW.LIMIT_TRIES + 3):
+        AW.limit_resume(e.agents_list, [], DOMS, LIM + (11 + 6 * i) * 60)
+    check("не поднялась" not in alerts_text(e), f"вторая тревога при «нет окна»: {alerts_text(e)!r}")
+    check(len(calls) == AW.LIMIT_TRIES + 3, f"попытки засчитаны и оборвались: {len(calls)}")
+    mk = AW.read_marks().get("limit", {})
+    check(all(m.get("tries") == 0 and m.get("done") is False for m in mk.values()), f"метки: {mk}")
+    # окно появилось — подъём проходит
+    P.resume_session = e.resume
+    AW.limit_resume(e.agents_list, [], DOMS, LIM + 3 * 3600)
+    check(len(e.calls) == 1, f"после появления окна не поднял: {e.calls}")
+    # другой код по-прежнему тревожит и засчитывается
+    e2 = Env()
+    e2.limited("hermes-site")
+    P.resume_session = lambda name, a, text, origin, recheck=None: (1, None)
+    AW.limit_resume(e2.agents_list, [], DOMS, LIM + 11 * 60)
+    check("не поднялась (код 1, попытка 1 из" in alerts_text(e2), f"код 1 без тревоги: {alerts_text(e2)!r}")
+
+
 def test_limit_resume_no_night_module():
     e = Env()
     e.limited("hermes-site")
@@ -546,6 +580,48 @@ def test_wake_waiting():
     e.task("athena-shop")
     AW.wake_waiting(e.agents_list, [], DOMS, MON)
     check(not e.calls, f"разбудил не ждущую: {e.calls}")
+
+
+def test_wake_waiting_no_window_no_alert():
+    e = Env()
+    e.agent("hermes-site", "blocked", needs="waiting for your answer")
+    e.task("hermes-site")
+    calls = []
+
+    def nw(name, a, text, origin, recheck=None):
+        calls.append(name)
+        return P.NO_WINDOW, None
+    P.resume_session = nw
+    AW.wake_waiting(e.agents_list, [], DOMS, MON)
+    check(len(calls) == 1 and "не поднялась" not in alerts_text(e), f"вторая тревога: {alerts_text(e)!r}")
+    AW.wake_waiting(e.agents_list, [], DOMS, MON + 600)
+    check(len(calls) == 1, "отметка раз в час не осталась")
+    P.resume_session = lambda name, a, text, origin, recheck=None: (1, None)
+    AW.wake_waiting(e.agents_list, [], DOMS, MON + 3601)
+    check("будильник ждущих: hermes-site не поднялась (код 1)" in alerts_text(e), f"код 1 без тревоги: {alerts_text(e)!r}")
+
+
+def test_pantheon_wake_fresh_sees_limited():
+    # ветвь fresh_start в _wake: recheck обязан знать state, иначе сессия на лимите «уже работает» (metis-0132)
+    e = Env()
+    e.task("hermes-site")
+    e.limited("hermes-site")
+    LIM = at(2026, 10, 19, 8, 0)
+    e.now(LIM + 60)
+    got = []
+
+    def fs(name, a, text, origin, recheck=None):
+        w = recheck() if recheck else None
+        got.append(w)
+        return 0 if not w else 1
+    P.fresh_reason = lambda a, t=None: "контекст большой"
+    P.state_files = lambda n: []
+    P.fresh_start = fs
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        P._wake(False)
+    check(got == [None], f"recheck свежего старта на лимите: {got} {buf.getvalue()!r}")
+    check("свежей сессией" in buf.getvalue(), f"нет свежего старта в выводе: {buf.getvalue()!r}")
 
 
 def test_wake_waiting_blockers():
