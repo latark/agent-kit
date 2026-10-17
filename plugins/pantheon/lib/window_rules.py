@@ -26,7 +26,8 @@ COORDINATOR_ALLOW = []
 # auto-mode-config: «--settings flag»), из .claude/settings.json проекта — нет. Штабу и мастерской правил нет.
 # Репозитории в правиле слияния — только из [merge_repos] направления в policy.toml (решение владельца 16.10): в тексте
 # правил нет имён владельца, направлений и репозиториев, у другой установки правило собирается из её policy.toml.
-# Направлению без [merge_repos] правила слияния нет: запор guard его слияние и так не пустит.
+# LEAD_DELIVERY_RULE (metis-0215) — сдача работы лидом без отказа классификатора; слияние остаётся за Gated Merge.
+# Направлению без [merge_repos] правил слияния и сдачи нет: запор guard его слияние и так не пустит.
 MERGE_REPO_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9._-]+")
 GATED_MERGE_RULE = (
     "Pantheon Gated Merge: In a Pantheon direction window (a coordinator main session or its lead subagent "
@@ -47,6 +48,20 @@ GATED_MERGE_RULE = (
     "covers only the command shape above: `--admin`, `--auto`, a merge without `--match-head-commit` or without an "
     "explicit `-R`/`--repo`, a merge through `gh api`, `GH_REPO`/`GH_HOST` overrides, `cd` or chained commands, "
     "or a repository outside this list are still judged by Merge Without Review.")
+LEAD_DELIVERY_RULE = (
+    "Pantheon Lead Delivery: In a Pantheon direction window (a coordinator main session or its lead subagent "
+    "`hephaestus-*` or `apollo-*`), the following steps of the coordinator's written assignment are the delegated "
+    "task itself, NOT Auto-Mode Bypass: (1) `git push origin <commit-or-branch>:refs/heads/<branch>` or `git push "
+    "origin <branch>` (optionally `-u`) to the `origin` remote of one of this direction's repositories ({repos}), "
+    "where <branch> is a work branch and not `main`, `master` or the repository's default branch. It does not "
+    "cover `--force`, `-f`, `--force-with-lease`, a `+` refspec, deleting a branch (`--delete`, `:<branch>`), "
+    "`--mirror`, `--all`, `--tags`, any other remote or URL, `cd` or chained commands. (2) launching the "
+    "independent reviewer subagent `argus` to review that branch or PR; its verdict is recorded only by the guard "
+    "hook (see Pantheon Review Record), and the session that launches it cannot record a verdict itself. (3) "
+    "`pantheon night report`: a read-only local report of the night budget and alerts; it changes nothing outside "
+    "the owner's own Pantheon state. (4) `gh pr create -R <owner/repo> --base <default branch> --head <branch> "
+    "--title … --body …` for a branch pushed under (1), on one of this direction's repositories. A merge is still "
+    "covered only by Pantheon Gated Merge; anything else is judged by the built-in rules.")
 REVIEW_RECORD_RULE = (
     "Pantheon Review Record: `pantheon review test -- <test command>` (runs the project tests in a clean git tree "
     "and reports their exit code), `pantheon review accept|reject <owner/repo> <N> <sha> --opened \"…\" --ran "
@@ -64,11 +79,14 @@ REVIEW_RECORD_RULE = (
 
 
 def coordinator_auto_allow(repos):
-    """autoMode.allow окна координатора: "$defaults", правило слияния по репозиториям направления из [merge_repos]
-    (только вида owner/repo; нет таких — правила слияния нет) и правило записей проверок."""
+    """autoMode.allow окна координатора: "$defaults", правило слияния и правило сдачи работы лида (push рабочей ветки,
+    argus, night report, gh pr create; metis-0215) по репозиториям направления из [merge_repos] (только вида
+    owner/repo; нет таких — обоих правил нет) и правило записей проверок."""
     ok = sorted({r for r in repos if isinstance(r, str) and MERGE_REPO_RE.fullmatch(r)}) if isinstance(repos, list) else []
-    gated = [GATED_MERGE_RULE.format(repos=", ".join(f"`{r}`" for r in ok))] if ok else []
-    return ["$defaults"] + gated + [REVIEW_RECORD_RULE]
+    names = ", ".join(f"`{r}`" for r in ok)
+    gated = [GATED_MERGE_RULE.format(repos=names)] if ok else []
+    lead = [LEAD_DELIVERY_RULE.format(repos=names)] if ok else []
+    return ["$defaults"] + gated + lead + [REVIEW_RECORD_RULE]
 
 
 def auto_mode(auto_allow):
