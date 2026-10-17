@@ -145,7 +145,7 @@ class Env:
         with open(os.path.join(self.state, "owner-log", "board.jsonl"), "a") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-    def run(self, *args, t=T0, extra=None):
+    def run(self, *args, t=T0, extra=None, argv=None):
         # свежий снимок лимита строки статуса (lib/night.py): без него самозапуск закрыт — «лимит неизвестен»
         sl = os.path.join(self.home, ".local", "state", "claude-statusline")
         os.makedirs(sl, exist_ok=True)
@@ -160,7 +160,7 @@ class Env:
                "PANTHEON_FAKE_LIMIT": "10", "PANTHEON_CAFFEINATE": os.path.join(self.bin, "caffeinate")}
         env.update(self.extra)
         env.update(extra or {})
-        return subprocess.run([PY311, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=60)
+        return subprocess.run([*(argv or [PY311, "-I", LIB]), *args], env=env, capture_output=True, text=True, timeout=60)
 
     def calls(self):
         if not os.path.exists(self.log):
@@ -713,6 +713,157 @@ def test_zeus_clean_0136():
           f"неудачная очистка: нет одной тревоги или повтор раньше часа: {e.alerts()[-500:]}")
     e.run("watch", t=T0 + 3700, extra=ZEUS_RUN)
     check(e.alerts().count("Зевс очищен") == 1, f"через час после неудачи очистки нет: {e.alerts()[-400:]}")
+
+
+def _start_log(e):
+    p = e.st("logs", "start.log")
+    return open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+
+
+def _zeus_last(e):
+    p = e.st("zeus-clean.json")
+    return (json.load(open(p)) if os.path.exists(p) else {}).get("last") or {}
+
+
+def test_zeus_clean_trace_0207():
+    """metis-0207: каждый исход очистки Зевса виден. Все шесть условий — zeus-clean.json (cleared, last) и строка
+    fresh-start в start.log; не выполнено (1), (3), (4), (5) или держит защита — fresh-skip с причиной, один раз, пока
+    причина не сменилась; (2) и (6) — только в zeus-clean.json. Держание ~/.claude без вопроса (solo) очистку не держит."""
+    e = zeus_env()
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    st = json.load(open(e.st("zeus-clean.json"))) if os.path.exists(e.st("zeus-clean.json")) else {}
+    check(ZEUS_SID in (st.get("cleared") or []) and (st.get("last") or {}).get("result") == "очищен",
+          f"очистка без следа в zeus-clean.json: {st}")
+    check("fresh-start\tzeus\t2e057e05\ttick\t0\tочистка Зевса, контекст 160 тыс." in _start_log(e),
+          f"нет строки fresh-start в start.log: {_start_log(e)!r}")
+
+    ask = [_tool("AskUserQuestion", "toolu_ask1", {"questions": []}, T0 - 2980)]
+    bash_bg = [_tool("Bash", "toolu_bg1", {"command": "sleep 999", "run_in_background": True}, T0 - 2985),
+               _result("toolu_bg1", T0 - 2984, "Command running in background with ID: b1", {"backgroundTaskId": "b1"}),
+               _answer(T0 - 2983)]
+
+    def held(text):
+        def setup(e):
+            os.makedirs(os.path.join(e.home, ".claude"), exist_ok=True)
+            open(os.path.join(e.home, ".claude", ".sync-held"), "w").write(text)
+        return setup
+
+    def stopped(e):
+        os.makedirs(e.st("stopped"), exist_ok=True)
+        open(e.st("stopped", "zeus"), "w").write("вы\n")
+    cases = [("(1) контекст 140 тыс. < 150 тыс.", dict(tokens=140_000), None),
+             ("(3) фоновые задачи: toolu_bg1", dict(extra_entries=bash_bg), None),
+             ("(4) открыт вопрос AskUserQuestion", dict(extra_entries=ask), None),
+             ("(5) не сохранено после последнего хода", dict(saved=False), None),
+             ("(0) карантин правок ~/.claude ждёт ответа на metis-0187", {}, held("hash=a\ntask=metis-0187\nfiles=1\n")),
+             ("(0) остановлен вами", {}, stopped)]
+    for why, kw, setup in cases:
+        e = zeus_env(**kw)
+        if setup:
+            setup(e)
+        e.run("watch", t=T0, extra=ZEUS_RUN)
+        e.run("watch", t=T0 + 300, extra=ZEUS_RUN)                   # причина та же — строка не повторяется
+        log = _start_log(e)
+        skips = [ln for ln in log.splitlines() if "\tfresh-skip\tzeus\t2e057e05\ttick\t" in ln]
+        check(not zeus_actions(e) and len(skips) == 1 and why in skips[0] and why in " ".join(_zeus_last(e).get("miss") or []),
+              f"{why}: нет одной строки fresh-skip с причиной или следа в zeus-clean.json: {log!r} {_zeus_last(e)}")
+    # (2) и (6) — обычное дело: причина в zeus-clean.json, журнал не засоряется
+    fresh_turn = [{"type": "user", "timestamp": _iso(T0 - 700), "message": {"role": "user", "content": "и что?"}},
+                  _answer(T0 - 600)]
+    for why, kw in [("(2) идёт ход", dict(state="working")), ("(6) с конца хода меньше 20 мин",
+                                                              dict(extra_entries=fresh_turn, saved=T0 - 500))]:
+        e = zeus_env(**kw)
+        e.run("watch", t=T0, extra=ZEUS_RUN)
+        last = _zeus_last(e)
+        check(not zeus_actions(e) and "fresh-skip" not in _start_log(e) and last.get("result") == "пропуск"
+              and any(m.startswith(why) for m in last.get("miss") or []), f"{why}: след не тот: {last} {_start_log(e)!r}")
+    # sync.sh держит правку без вопроса (solo=1, task пустой) — ответа не будет, очистка идёт
+    e = zeus_env()
+    held("hash=a6202ffbaa71\ntask=\nfiles=4\nsolo=1\n")(e)
+    e.run("watch", t=T0, extra=ZEUS_RUN)
+    check(len([c for c in zeus_actions(e) if c[:1] == ["--bg"]]) == 1 and "\tfresh-start\tzeus\t" in _start_log(e),
+          f"держание без вопроса блокирует очистку: {e.calls()} {_start_log(e)!r}")
+
+
+def test_fresh_on_all_resume_paths_0207():
+    """metis-0207: правило свежего старта (контекст > 100 тыс., простой > 60 мин) — на любом пути возобновления, а не
+    только в resume_or_start и pantheon wake: ждущая сессия с задачей (wake-waiting) и техперезапуск (restart --go)."""
+    e = Env()
+    e.direction("fw-dir")
+    e.task("fw-0001", "fw-dir")
+    a = bg("fw-dir", "blocked", "fafafafa-1")
+    e.agents([a])
+    transcript(e, a, 130_000, T0 - 7200)
+    r = e.run("watch", t=T0, extra=ZEUS_RUN)                      # claude stop в самом деле останавливает
+    c = e.calls()
+    new = [x for x in c if "--bg" in x]
+    check(not [x for x in c if x[:1] == ["respawn"] or "--resume" in x] and len(new) == 1
+          and new[0][:5] == ["--bg", "--agent", "domain-coordinator", "--name", "fw-dir"]
+          and "[Пантеон: свежий старт]" in new[0][-1] and "fw-0001" in new[0][-1]
+          and "\tfresh-start\tfw-dir\tfafafafa\twake-waiting\t0\t" in _start_log(e),
+          f"ждущая сессия после долгого простоя — не свежий старт: {c} {_start_log(e)!r} {r.stderr[-400:]}")
+
+    e = Env()
+    e.direction("rg-dir")
+    a = bg("rg-dir", "working", "dededede-1", pid=21)
+    e.agents([a])
+    transcript(e, a, 130_000, T0 - 7200)
+    e.run("restart", "--prepare", "обновление", t=T0)
+    e.run("saved", "--by", "rg-dir", "--state", "STATUS.md", t=T0 + 20)
+    r = e.run("restart", "--go", t=T0 + 40, extra={"PANTHEON_DRYRUN": "1", "PANTHEON_ALERTS_IN_DRYRUN": "1"})
+    check("[fresh] rg-dir" in r.stdout and "[resume] rg-dir" not in r.stdout,
+          f"restart --go после долгого простоя — не свежий старт: {r.stdout[-500:]} {r.stderr[-300:]}")
+
+
+_DIRECT_RESUME = r"""
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("pantheon_lib", sys.argv[1])
+P = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(P)
+a = json.loads(sys.argv[2])
+def recheck():
+    os.makedirs(P.path("stopped"), exist_ok=True)       # метка stopped появилась, пока ждали блокировку
+    open(P.path("stopped", a["name"]), "w").write("вы\n")
+    return "остановлено вами"
+print(P.resume_session(a["name"], a, "продолжай", "wake-waiting", recheck=recheck))
+"""
+
+
+def test_fresh_path_recheck_0207():
+    """metis-0207 (argus PR #44): на пути свежего старта в resume_session recheck под блокировкой имени действует так
+    же, как на обычном пути: сессия с контекстом 130 тыс. и простоем 2 ч не останавливается и не пересоздаётся."""
+    # 1) recheck вернул причину (метка stopped появилась) — ни claude stop, ни --bg, строка resume-skip
+    e = Env()
+    e.direction("fr-dir")
+    a = bg("fr-dir", "blocked", "fcfcfcfc-1")
+    e.agents([a])
+    transcript(e, a, 130_000, T0 - 7200)
+    r = e.run(LIB, json.dumps(a), t=T0,
+              extra=QUICK, argv=[PY311, "-I", "-c", _DIRECT_RESUME])
+    c = e.calls()
+    check(r.stdout.strip() == "(1, None)" and not [x for x in c if x[:1] == ["stop"] or "--bg" in x]
+          and "\tresume-skip\tfr-dir\tfcfcfcfc\twake-waiting\tостановлено вами" in _start_log(e),
+          f"recheck на пути свежего старта не остановил подъём: {r.stdout!r} {c} {_start_log(e)!r} {r.stderr[-400:]}")
+
+
+def test_fresh_path_busy_0207():
+    """metis-0207 (argus PR #44): занятая блокировка имени на пути свежего старта — отказ, а не остановка сессии."""
+    import fcntl
+    # имя занято (блокировка start-<имя> взята) — ни claude stop, ни --bg, строка resume-busy
+    e = Env()
+    e.direction("fb-dir")
+    e.task("fb-0001", "fb-dir")
+    a = bg("fb-dir", "blocked", "fdfdfdfd-1")
+    e.agents([a])
+    transcript(e, a, 130_000, T0 - 7200)
+    os.makedirs(e.st("locks"), exist_ok=True)
+    with open(e.st("locks", "start-fb-dir.lock"), "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        e.run("watch", t=T0, extra=ZEUS_RUN)
+    c = e.calls()
+    check(not [x for x in c if x[:1] == ["stop"] or "--bg" in x or x[:1] == ["respawn"]]
+          and "\tresume-busy\tfb-dir\tfdfdfdfd\twake-waiting" in _start_log(e),
+          f"занятая блокировка имени на пути свежего старта проигнорирована: {c} {_start_log(e)!r}")
 
 
 def test_resume_copy_note():

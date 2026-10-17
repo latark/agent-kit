@@ -866,9 +866,25 @@ def zeus_hold():
     if os.path.exists(P.path("paused")):
         return "весь планировщик на паузе"
     for held in (".sync-held", ".sync-incoming"):  # карантин ~/.claude: ответ на доске применяет старт сессии
-        if os.path.exists(os.path.join(P.HOME, ".claude", held)):
-            return "карантин правок ~/.claude ждёт ответа"
+        p = os.path.join(P.HOME, ".claude", held)
+        if not os.path.exists(p):
+            continue
+        task, solo = quarantine_mark(p)
+        if held == ".sync-held" and solo and not task:
+            continue  # sync.sh держит правку без вопроса (синхронизировать пока не с кем): ответа не будет — не ждём
+        return "карантин правок ~/.claude ждёт ответа" + (f" на {task}" if task else "")
     return None
+
+
+def quarantine_mark(p):
+    """Метка карантина sync.sh: (задача-вопрос владельцу из строки task=… или "", держание без вопроса — solo=1).
+    Метку не прочитать — ("", False): считаем, что ответа ждут."""
+    try:
+        text = open(p, encoding="utf-8").read()
+    except (OSError, UnicodeDecodeError):
+        return "", False
+    m = re.search(r"^task=(\S*)\s*$", text, re.M)
+    return (m.group(1) if m else ""), bool(re.search(r"^solo=1\s*$", text, re.M))
 
 
 def zeus_clean_check(a, transcript):
@@ -897,26 +913,50 @@ def zeus_clean_check(a, transcript):
     return miss, n, info
 
 
+ZEUS_SKIP_QUIET = (2, 6)  # идёт ход, только что ответил — обычное дело: только в zeus-clean.json, не в start.log
+
+
+def zeus_trace(st, stp, t, a, miss, n, result):
+    """metis-0207: след каждого прохода. zeus-clean.json["last"] — исход этого прохода (всегда); строка fresh-skip в
+    start.log — когда причина отказа сменилась (без «идёт ход» и «только что ответил», они бывают каждый день)."""
+    sid = a.get("sessionId")
+    st["last"] = {"t": t, "at": P.stamp(t), "sid": sid, "id": a.get("id"), "tokens": n, "result": result,
+                  "miss": [f"({m}) {s}" for m, s in miss]}
+    key = [sid] + [s if m == 0 else m for m, s in miss if m not in ZEUS_SKIP_QUIET]
+    if len(key) > 1 and key != st.get("skip"):
+        P.start_log(f"fresh-skip\tzeus\t{a.get('id')}\ttick\t" + "; ".join(st["last"]["miss"]))
+    st["skip"] = key if len(key) > 1 else None
+    P.write_json(stp, st)
+
+
 def zeus_clean(agents, t):
-    zs = [a for a in agents if a.get("name") == "zeus" and a.get("id") and a.get("sessionId")
-          and a.get("state") not in ("stopped", "failed")]
-    if len(zs) != 1 or zs[0].get("kind") not in (None, "background"):
-        return  # нет Зевса, копии или вкладка — решает человек
-    a = zs[0]
-    if zeus_hold():
-        return
-    tp = P.transcript_path(a)
-    if not tp:
-        return
     stp = P.path("zeus-clean.json")
     st = P.read_json(stp, {}) or {}
+    zs = [a for a in agents if a.get("name") == "zeus" and a.get("id") and a.get("sessionId")
+          and a.get("state") not in ("stopped", "failed")]
+    if not zs:
+        if (st.get("last") or {}).get("result") != "нет Зевса":
+            zeus_trace(st, stp, t, {}, [], 0, "нет Зевса")  # штаба нет или он остановлен — журнал не засоряем
+        return
+    if len(zs) != 1 or zs[0].get("kind") not in (None, "background"):  # копии или вкладка — решает человек
+        why = f"копий Зевса {len(zs)}" if len(zs) != 1 else f"Зевс открыт не фоном ({zs[0].get('kind')})"
+        return zeus_trace(st, stp, t, zs[0], [(0, why + " — решает человек")], 0, "пропуск")
+    a = zs[0]
     if a["sessionId"] in (st.get("cleared") or []):
-        return  # эту сессию уже очищали — новая ещё не появилась в claude agents
+        return  # эту сессию уже очищали — новая ещё не появилась в claude agents (след — в cleared)
+    tp = P.transcript_path(a)
+    if not tp:
+        return zeus_trace(st, stp, t, a, [(0, "нет транскрипта сессии")], 0, "пропуск")
     miss, n, info = zeus_clean_check(a, tp)
+    hold = zeus_hold()
+    if hold:  # защиты — раньше шести условий: ни очистки, ни напоминания
+        return zeus_trace(st, stp, t, a, [(0, hold)] + miss, n, "пропуск")
     if not miss:
         f = st.get("failed") or {}
         if f.get("sid") == a["sessionId"] and t - float(f.get("t") or 0) < ZEUS_REMIND_MIN * 60:
-            return  # прошлая попытка с этой сессией не вышла — повтор не чаще раза в час
+            # прошлая попытка с этой сессией не вышла — повтор не чаще раза в час
+            return zeus_trace(st, stp, t, a, [(7, f"прошлая попытка в {P.stamp(float(f['t']))[11:16]} не вышла — "
+                                                  f"повтор не чаще раза в {ZEUS_REMIND_MIN} мин")], n, "пропуск")
         k, held = n // 1000, []
 
         def again():
@@ -930,21 +970,27 @@ def zeus_clean(agents, t):
             return why or None
         text = P.fresh_text("очистка", "zeus", a.get("id"), "Контекст был %d тыс.: дежурный очистил, когда всё было "
                             "сохранено (metis-0136)." % k)
-        rc = P.fresh_start("zeus", a, text, "tick", recheck=again)
+        rc = P.fresh_start("zeus", a, text, "tick", recheck=again, reason=f"очистка Зевса, контекст {k} тыс.")
         if rc == 0:
             st["cleared"] = ((st.get("cleared") or []) + [a["sessionId"]])[-20:]
             st.pop("failed", None)
-            P.write_json(stp, st)
+            zeus_trace(st, stp, t, a, [], n, "очищен")
             P.alert(f"Зевс очищен в {P.stamp(t)[11:16]}, контекст {k} тыс. (прошлый разговор: claude attach {a.get('id')})",
                     "watch")
             event("zeus-clean", t, id=a.get("id"), tokens=n)
             return
         if not held or held[0]:
-            return  # имя занято другим запуском или перед остановкой условие перестало выполняться — проверит следующий проход
+            # имя занято другим запуском или перед остановкой условие перестало выполняться (строка fresh-busy или
+            # fresh-skip уже в start.log) — проверит следующий проход
+            st["last"] = {"t": t, "at": P.stamp(t), "sid": a["sessionId"], "id": a.get("id"), "tokens": n,
+                          "result": "отложено", "miss": [held[0] if held else "имя занято другим запуском"]}
+            P.write_json(stp, st)
+            return
         st["failed"] = {"sid": a["sessionId"], "t": t}
-        P.write_json(stp, st)
+        zeus_trace(st, stp, t, a, [], n, f"не вышла, код {rc}")
         P.alert(f"очистка Зевса не вышла, код {rc} — контекст {k} тыс.; журнал start.log", "watch")
         return
+    zeus_trace(st, stp, t, a, miss, n, "пропуск")
     if [m for m, _ in miss] != [5]:
         return  # напоминание — только когда не хватает одного сохранения; (6) — тихо ждём следующего прохода
     r = st.get("remind") or {}
@@ -1218,9 +1264,10 @@ def resume_or_start(name, agents, text, origin, only_resume=False, auto=False):
            and a.get("sessionId")]
     if old:
         a = max(old, key=lambda a: a.get("startedAt") or 0)
-        if P.fresh_reason(a):  # metis-0147 п. 2: контекст большой, кэш остыл — новая сессия с файла состояния
+        fresh = P.fresh_reason(a)  # metis-0147 п. 2: контекст большой, кэш остыл — новая сессия с файла состояния
+        if fresh:
             return P.fresh_start(name, a, P.fresh_text("свежий старт", name, a.get("id"), text), origin,
-                                 recheck=recheck(name, auto))
+                                 recheck=recheck(name, auto), reason=fresh)
         return P.resume_session(name, a, text, origin, recheck=recheck(name, auto))[0]
     if only_resume:
         return 1

@@ -610,7 +610,7 @@ def test_pantheon_wake_fresh_sees_limited():
     e.now(LIM + 60)
     got = []
 
-    def fs(name, a, text, origin, recheck=None):
+    def fs(name, a, text, origin, recheck=None, reason=None):
         w = recheck() if recheck else None
         got.append(w)
         return 0 if not w else 1

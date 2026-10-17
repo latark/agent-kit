@@ -2551,6 +2551,11 @@ def resume_session(name, a, text, origin, recheck=None):
         if why:
             start_log(f"resume-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
             return 1, None
+        # metis-0207: правило свежего старта (metis-0147 п. 2) действует на любом пути возобновления, а не только в
+        # resume_or_start и pantheon wake: ждущая сессия, после недельного лимита, техперезапуск, снятие паузы
+        fresh = fresh_reason(a)
+        if fresh:
+            return _fresh_start(name, a, fresh_text("свежий старт", name, a.get("id"), text), origin, fresh), None
         return _resume_session(name, a, text, origin)
 
 
@@ -2744,9 +2749,10 @@ def fresh_target(name, origin):
     return (role, folder, run) if run else no_window_reason(window)
 
 
-def fresh_start(name, a, text, origin, recheck=None):
+def fresh_start(name, a, text, origin, recheck=None, reason=None):
     """Поднять имя свежей сессией (новый контекст, то же имя, окно роли) с текстом text. a — прежняя сессия из claude
-    agents (её id — в журнале и тексте). Та же блокировка имени и повторная проверка, что у resume_session. → код."""
+    agents (её id — в журнале и тексте); reason — почему свежей, в строку fresh-start журнала start.log. Та же
+    блокировка имени и повторная проверка, что у resume_session. → код."""
     with lock("start-" + name, block=False) as got_lock:
         if not got_lock:
             start_log(f"fresh-busy\t{name}\t{a.get('id')}\t{origin}")
@@ -2755,10 +2761,10 @@ def fresh_start(name, a, text, origin, recheck=None):
         if why:
             start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
             return 1
-        return _fresh_start(name, a, text, origin)
+        return _fresh_start(name, a, text, origin, reason)
 
 
-def _fresh_start(name, a, text, origin):
+def _fresh_start(name, a, text, origin, reason=None):
     if os.environ.get("PANTHEON_DRYRUN") == "1":
         print(f"[fresh] {name} {a.get('id')} {origin}")
         return 0
@@ -2787,12 +2793,13 @@ def _fresh_start(name, a, text, origin):
             stopped.append(x)
     why = wait_name_free(name, stopped) if stopped else None
     if why:
+        start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\tимя не освободилось после claude stop")
         alert(f"{name}: свежий старт не сделан — {why}", "pantheon")
         return 1
     before = {x.get("id") for x in agents_all() or [] if x.get("id")}
     argv = [claude_bin(), "--bg", "--agent", role, "--name", name, "--settings", win, text]
     r = subprocess.run(argv, cwd=folder, capture_output=True, text=True, timeout=180)
-    start_log(f"fresh\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}")
+    start_log(f"fresh-start\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\t{reason}" if reason else ""))
     if r.returncode != 0:
         return r.returncode
     wrong = check_new_name(name, before)
@@ -3197,7 +3204,7 @@ def _wake(dry):
             continue
         if fresh:
             rc = fresh_start(name, a, fresh_text("пробуждение", name, a.get("id")), "wake",
-                             recheck=lambda n=name, s=state: wake_recheck(n, s))
+                             recheck=lambda n=name, s=state: wake_recheck(n, s), reason=fresh)
         else:
             rc, _ = resume_session(name, a, WAKE_TEXT, "wake", recheck=lambda n=name, s=state: wake_recheck(n, s))
         if rc and rc != NO_WINDOW:  # «нет окна» — своя тревога, одна на причину
