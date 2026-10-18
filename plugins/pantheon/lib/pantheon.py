@@ -2297,7 +2297,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                    "(строгий guard, SEC-29) — переустановить плагин guard", "pantheon")
     agents_py = agents_script()
     if not os.path.isfile(agents_py):
-        alert_once("agents-missing", agents_py, f"нет {agents_py.replace(HOME, '~')}: окна штаба и координаторов не позовут ни одного "
+        alert_once("agents-missing", agents_py, f"нет {agents_py.replace(HOME, '~')}: окна Пританея и координаторов не позовут ни одного "
                    "субагента (хук agents.py, P0-6) — переустановить плагин pantheon", "pantheon")
     leads = leads or {}
     all_leads = [x for n in leads for x in leads[n]]
@@ -2397,12 +2397,12 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                       [x for x in BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES) if x not in mine], agents_py)
         write_window(out_dir, name, job)
         built.append(name)
-    # что закрыто штабу — [hq] policy.toml. Битый раздел — ошибка, а не «пусто»: окно штаба не пересобираем, остаётся
+    # что закрыто штабу — [hq] policy.toml. Битый раздел — ошибка, а не «пусто»: окно Пританея не пересобираем, остаётся
     # прежнее (его файл не удаляется), и тревога — пока раздел не исправят
     try:
         hq_pol = ctx_mod().hq_policy(policy_path)
     except ValueError as e:
-        alert_once("hq-policy-broken", str(e), f"policy.toml: {e} — окно штаба не пересобрано, действует прежнее; "
+        alert_once("hq-policy-broken", str(e), f"policy.toml: {e} — окно Пританея не пересобрано, действует прежнее; "
                    "исправить раздел [hq] (Метида)", "pantheon")
         built.append("hq")
         for f in os.listdir(out_dir):

@@ -247,6 +247,33 @@ def main():
         check("[[allow]] гасит находку", [r for r, *_ in f] == ["skills/x/SKILL.md"] and u == [], str((f, u)))
         f, u = scan(fake, gloss, [{"file": "lib/a.py", "text": "нет такого", "reason": "x"}])
         check("allow без совпадений попадает в неиспользованные", u == [0], str(u))
+        # новые ветки сбора: роли, части ролей, шаблон ~/ai/pantheon, guard (README и литералы hooks), «подтолкни»
+        for d in (("roles",), ("roles", "_parts"), ("template", "pantheon")):
+            os.makedirs(os.path.join(fake, *d), exist_ok=True)
+        gdir = os.path.join(tmp, "plugins", "guard")
+        os.makedirs(os.path.join(gdir, "hooks"))
+        seeds = {
+            ("roles", "r.tmpl"): "чисто\nТы — штаб\n",
+            ("roles", "_parts", "p.part"): "чисто\nпишет штаб\n",
+            ("template", "pantheon", "t.md"): "чисто\nштаб решил\n",
+        }
+        for parts, text in seeds.items():
+            with open(os.path.join(fake, *parts), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        with open(os.path.join(gdir, "README.md"), "w", encoding="utf-8") as fh:
+            fh.write("чисто\nзакрыто штабу\n")
+        with open(os.path.join(gdir, "hooks", "h.py"), "w", encoding="utf-8") as fh:
+            fh.write('# штаб в комментарии не в счёт\nprint("отказ: штаб")\n')
+        f, u = scan(fake, gloss, [])
+        got = sorted((r, n) for r, n, *_ in f)
+        want = sorted([("lib/a.py", 3), ("skills/x/SKILL.md", 2), ("roles/r.tmpl", 2), ("roles/_parts/p.part", 2),
+                       ("template/pantheon/t.md", 2), ("guard/README.md", 2), ("guard/hooks/h.py", 2)])
+        check("находки в roles, _parts, template/pantheon и guard", got == want, str(got))
+        with open(os.path.join(fake, "lib", "b.py"), "w", encoding="utf-8") as fh:
+            fh.write('x = "подтолкни сессию"\ny = "вытолкнуть"\nz = "протолкнул"\nw = "толкаем"\n')
+        f, u = scan(fake, gloss, [])
+        got = sorted(n for r, n, *_ in f if r == "lib/b.py")
+        check("«подтолкни», «вытолкнуть», «протолкнул», «толкаем» — находки", got == [1, 2, 3, 4], str(got))
     finally:
         shutil.rmtree(tmp, True)
 
