@@ -194,6 +194,29 @@ def test_snapshot_age():
     check(not m["known"] and "новая неделя" in m["why"], f"сброс в прошлом: {m}")
 
 
+def test_week_monotonic_0243():
+    """Неделя не убывает в пределах окна сброса: простаивающее окно пишет старый pct — берём максимум."""
+    t = day()
+    e = Env()
+    resets = t + 3 * 86400
+    e.snap(t - 60, 38, resets)  # seven-day 38
+    e.week_usage([(t - 300, resets, 40), (t - 200, resets, 38), (t - 100, resets + 600, 40)])
+    s = N.snapshot()
+    check(s["week"][0] == 40 and s["week"][1] == resets + 600 - 600 or s["week"][0] == 40, f"максимум не взят: {s}")
+    check(N.measure(t)["used"] == 40, f"used не 40: {N.measure(t)}")
+    # другое окно сброса (разница > 1 ч) в максимум не входит
+    e2 = Env()
+    e2.snap(t - 60, 5, resets + 7 * 86400)
+    e2.week_usage([(t - 300, resets, 90)])
+    check(N.snapshot()["week"][0] == 5, f"чужое окно сброса попало в максимум: {N.snapshot()}")
+    # spent не уменьшается на скачке назад в том же окне; в новом окне считается по-старому
+    m = {"known": True, "used": 38.0, "resets": resets}
+    st = {"start_pct": 30.0, "last_used": 41.0, "resets_at": resets, "spent": 0.0}
+    check(N.spent(st, m) == 11.0, f"spent упал на скачке: {N.spent(st, m)}")
+    m2 = {"known": True, "used": 2.0, "resets": resets + 7 * 86400}
+    check(N.spent(st, m2) == 13.0, f"спент при сбросе недели: {N.spent(st, m2)}")
+
+
 def test_heavy():
     e = Env()
     t = day()
