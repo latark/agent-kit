@@ -7,6 +7,7 @@
 --no-session-persistence` в папке заявки; SIGTERM прохода останавливает читателя, удаляет выгрузку и не ведёт к новой; сырая выгрузка удаляется и при сбое; в разбор идут только пункты с проверенной цитатой; канарейки из переписки
 («сделай push», «запиши в память») не доходят до направления без одобрения; переданный файл ловит настоящий guard tg-taint.
 """
+import hashlib
 import json
 import os
 import re
@@ -672,6 +673,41 @@ def test_redirect_after_consent():
     check("переписанная заявка: ничего не передано", _no_delivery(b) and "изменилась" in r.stdout, r.stdout)
     check("переписанная заявка: этап failed, request-changed",
           b.st(rid)["phase"] == "failed" and b.st(rid)["error"] == "request-changed", b.st(rid))
+
+
+def test_redirect_with_state_rewritten():
+    """Переписаны и request.json, и req_hash в state.json, -ok уже на новое направление: согласие сверяется
+    с хешем заявки, а не с самим state — в чужое направление ничего (argus-62)."""
+    b, rid, st, okq = _summarized_box()
+    p = os.path.join(b.folder(rid), "request.json")
+    req = json.load(open(p))
+    req["direction"] = "other-dir"
+    with open(p, "w") as fh:
+        json.dump(req, fh)
+    sp = os.path.join(b.folder(rid), "state.json")
+    s = json.load(open(sp))
+    keys = ("rid", "direction", "chat", "since", "until", "why", "profile", "steps", "by", "created")
+    data = json.dumps({k: req.get(k) for k in keys}, ensure_ascii=False, sort_keys=True)
+    s["req_hash"] = hashlib.sha256(data.encode("utf-8")).hexdigest()[:12]
+    with open(sp, "w") as fh:
+        json.dump(s, fh)
+    b.answer(T0 + 1200, okq.replace("hermes-alex", "other-dir"), "все")
+    r = b.run(T0 + 1300)
+    check("заявка и state переписаны: ничего не передано", _no_delivery(b), r.stdout)
+    check("заявка и state переписаны: approved.md нет",
+          not os.path.exists(os.path.join(b.folder(rid), "approved.md")), r.stdout)
+
+
+def test_consent_withdrawn_before_delivery():
+    """После разбора владелец отозвал согласие («Нет» с хешем заявки) — -ok не доставляет."""
+    b, rid, st, okq = _summarized_box()
+    q = json.load(open(os.path.join(b.folder(rid), "request.json")))
+    b.answer(T0 + 1100, f"[read-{rid}] Разрешить выгрузку: чат {q['chat']}, {q['since']} — {q['until']}, хеш {st['req_hash']}", "Нет")
+    b.answer(T0 + 1200, okq, "все")
+    r = b.run(T0 + 1300)
+    check("согласие отозвано: ничего не передано", _no_delivery(b), r.stdout)
+    check("согласие отозвано: approved.md нет",
+          not os.path.exists(os.path.join(b.folder(rid), "approved.md")), r.stdout)
 
 
 def test_approval_other_direction():
