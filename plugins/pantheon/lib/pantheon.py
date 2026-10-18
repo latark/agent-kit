@@ -17,7 +17,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon qmd config|update|embed|serve|install|status   общий поиск qmd: index.yml из ~/ai/pantheon/qmd.toml,
                                         освежить индекс, сервер MCP (служба), подключить к Claude на этом Mac
   pantheon plugins update [--quiet]     новые версии плагинов agent-kit (тик раз в 10 мин): тесты новой и
-                                        установленной версии; нет новых падений — claude plugin update, есть — тревога
+                                        установленной версии; нет новых падений — claude plugin update, есть — тревога;
+                                        после установки тик перезапускает свободные окна (metis-0181)
   pantheon direction check <имя>        что готово у нового направления (навык new-direction): реестр, «да»,
                                         папки, STATUS.md, domains.json, AGENTS.md, доверие, autoMode
   pantheon direction init <имя>         папка ~/projects/<имя> по вашей галочке: git init, AGENTS.md, локальный
@@ -63,7 +64,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами») и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
   pantheon restart --prepare [причина]|--status|--go [--force]|--cancel   технический перезапуск всех сессий
-  pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском
+  pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском; без техперезапуска —
+                                        метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code
   pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (тик раз в неделю)
   pantheon roles build                  роли ~/.claude/agents/*.md из общих шаблонов плагина (roles/*.tmpl,

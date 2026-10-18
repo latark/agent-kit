@@ -1993,15 +1993,42 @@ def test_plugins_respawn_idle_free_0181():
     e.run("watch", t=T0 + 60)
     check(respawned(e, "b6b6b6b6"), f"0181: idle 15+ мин без субагентов и worktree — не перезапущено: {e.calls()}")
     check(not os.path.exists(e.st("plugins", "respawn.json")), "0181: отметка не снята после перезапуска")
-    # поднято после установки (startedAt > since) и Зевс — не трогаем, отметка снимается: кандидатов нет
+    # поднято после установки (startedAt > since) — не кандидат, отметка снимается: кандидатов нет
     e, a, tp = respawn_env("ra-dir", "c7c7c7c7-1", since=T0 - 200)
-    z = bg("zeus", "done", "d8d8d8d8-1", pid=52, started=T0 - 1000)   # Зевс поднят до установки
+    e.run("watch", t=T0)
+    check(not respawned(e, "c7c7c7c7") and not os.path.exists(e.st("plugins", "respawn.json")),
+          f"0181: перезапущено окно, поднятое после установки: {e.calls()}")
+    # Зевс поднят до установки, свободен и окно штаба есть — всё равно не трогаем (его перезапускаете вы)
+    e, a, tp = respawn_env("rz-dir", "c8c8c8c8-1", since=T0 - 200)
+    json.dump({"env": {}}, open(e.st("settings", "hq.json"), "w"))
+    e.direction("zeus")  # окно есть: без исключения Зевса тик дошёл бы до respawn, а не споткнулся о «нет окна»
+    z = bg("zeus", "done", "d8d8d8d8-1", pid=52, started=T0 - 1000)
     e.agents([a, z])
     transcript(e, z, 20_000, T0 - 3600)
     e.run("watch", t=T0)
-    check(not respawned(e, "c7c7c7c7") and not respawned(e, "d8d8d8d8")
-          and not os.path.exists(e.st("plugins", "respawn.json")),
-          f"0181: перезапущено окно, поднятое после установки, или Зевс: {e.calls()}")
+    check(not respawned(e, "d8d8d8d8") and not [c for c in e.calls() if "--resume" in c or c[:1] == ["stop"]]
+          and "\tzeus\td8d8d8d8\tplugins-respawn" not in _start_log(e),
+          f"0181: Зевс перезапущен тиком: {e.calls()} {_start_log(e)!r}")
+
+
+def test_plugins_respawn_empty_agents_0181():
+    """metis-0181, ревью argus: пустой claude agents ([]) — не «все перезапущены»: отметка respawn.json остаётся."""
+    e, a, tp = respawn_env("re-dir", "c9c9c9c9-1")
+    e.agents([])
+    e.run("watch", t=T0)
+    check(os.path.exists(e.st("plugins", "respawn.json")), "0181: пустой claude agents снял отметку перезапуска")
+
+
+def test_plugins_respawn_wait_alert_0181():
+    """metis-0181, ревью argus: окна, которые ждут, видны строкой в тревогах и без перезапусков — одна строка на набор
+    окон (не на каждом проходе); ожидание кончилось — следующий набор снова строкой."""
+    e, a, tp = respawn_env("rw-dir", "cacacaca-1")
+    subagent(tp, T0 - 300)
+    e.run("watch", t=T0)
+    e.run("watch", t=T0 + 60)
+    line = "перезапуск после обновления плагинов (pantheon) ждёт: rw-dir (субагент писал меньше 15 мин назад)"
+    check(e.alerts().count(line) == 1 and not respawned(e, "cacacaca"),
+          f"0181: нет строки «ждёт» или она на каждом проходе: {e.alerts()}")
 
 
 def test_plugins_respawn_ok_mark_0181():

@@ -12,7 +12,8 @@
   pantheon stop <имя>|--all, pantheon resume <имя>|--all                                      (SCHED-12)
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pantheon pause --off [<имя>|--all]   (COST-04)
   pantheon restart --prepare [причина]|--status|--go [--force]|--cancel, pantheon saved --by <имя> --state <путь>
-                            технический перезапуск всей системы (SCHED-15, слово владельца 15.10)
+                            технический перезапуск всей системы (SCHED-15, слово владельца 15.10); pantheon saved без
+                            техперезапуска — метка «можно» для перезапуска после обновления плагинов (metis-0181)
   pantheon who              координаторы: состояние, short из реестра, давность (COMM-14)
   pantheon wake <имя> ["толчок"]   поднять уснувшую сессию направления и сказать «посмотри входящие» (COMM-04)
   pantheon infra-check      лёгкая проверка опор системы после обновления Claude Code (SEC-16)
@@ -1738,6 +1739,8 @@ def plugins_respawn(agents, doms, t):
     m = P.read_json(p, {})
     if not isinstance(m, dict) or not m or P.maintenance_active():
         return  # техперезапуск перезапускает всех сам
+    if not agents:
+        return  # пустой claude agents (сбой или перезапуск Claude Code) — не «все перезапущены»: отметку не снимаем
     since = float(m.get("since") or 0)
     done, wait = [], []
     for a in respawn_candidates(agents, doms, m):
@@ -1763,7 +1766,14 @@ def plugins_respawn(agents, doms, t):
         P.alert(f"перезапуск после обновления плагинов ({', '.join(m.get('plugins') or [])}): перезапущены "
                 f"{', '.join(done)}" + (f"; ждут: {', '.join(wait)}" if wait else ""), "watch")
     if wait:
+        # ждущие видны и без перезапусков в этом проходе: одна строка на набор окон (причины меняются каждый проход,
+        # ключ — только имена), чтобы вечное ожидание (worktree больше WALK_LIMIT, вечный busy) не было тихим
+        names = ",".join(sorted({w.split(" (", 1)[0] for w in wait}))
+        P.alert_once("plugins-respawn-wait", names, f"перезапуск после обновления плагинов "
+                     f"({', '.join(m.get('plugins') or [])}) ждёт: {', '.join(wait)}. Окно, готовое раньше: pantheon "
+                     "saved --by <имя> --state <путь>", "watch")
         return
+    P.clear_once("plugins-respawn-wait")
     with P.lock("plugins-respawn"):
         cur = P.read_json(p, {})
         if isinstance(cur, dict) and cur.get("since") == m.get("since"):
