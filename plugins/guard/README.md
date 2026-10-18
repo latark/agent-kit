@@ -119,7 +119,9 @@ answer и плановый проход, это скрипты, guard их не 
 - **tg-role (metis-0267, guard 0.5.12).** В окне любой роли (`PANTHEON_ROLE` задан, вместе с её субагентами) отказ на
   Bash `tg_read.py history|search|unread|context|download` и на сокет `tg-readd.sock`: выгрузка личного чата — через
   `pantheon read request`. `posts`, `status`, `chats`, `folders`, `verify` и `split` можно. Процесс без `PANTHEON_ROLE`
-  (плановый проход, ваша сессия) правило не трогает.
+  (плановый проход, ваша сессия) правило не трогает. Команды — из общего разбора Bash, как у tg-readd: переменные
+  (`T=…; $T history`), перенос `\`, `--`, `sh -c`, `env`, `uv run`, `xargs`, имя без учёта регистра и шаблоном;
+  подкоманду не вычислить — отказ. `python -m`, сокет из своего кода и `env -u PANTHEON_ROLE` — граница песочницы.
 - **chiron (P0-2, metis-0061).** Коуч видит личное, только когда `PANTHEON_ROLE=hq`. Позвать его (Agent или Task с
   `subagent_type: chiron`) можно в окне Пританея и в вашей сессии без роли; из окна другой роли и из субагента вне окна
   Пританея — отказ.
