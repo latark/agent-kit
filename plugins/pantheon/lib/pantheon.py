@@ -4970,6 +4970,17 @@ def _plugins_mark(marks, name, mark):
     write_json(path("plugins", "marks.json"), marks)
 
 
+def _plugins_respawn_mark(name):
+    """metis-0181: отметка «нужен перезапуск» для тика (watch.plugins_respawn). since — время последней установки:
+    окна, поднятые раньше, тик перезапускает, когда они свободны; done — уже перезапущенные сессии, новая установка
+    его обнуляет (их версия этого плагина тоже старая)."""
+    with lock("plugins-respawn"):
+        cur = read_json(path("plugins", "respawn.json"), {})
+        cur = cur if isinstance(cur, dict) else {}
+        plugins = sorted({str(x) for x in cur.get("plugins") or []} | {name})
+        write_json(path("plugins", "respawn.json"), {"since": now(), "at": stamp(), "plugins": plugins, "done": []})
+
+
 def _plugin_install(name, old, new, log, marks, quiet, digest):
     """claude plugin update без -y (новая команда установки в каталоге должна требовать человека) и сверка того, что
     встало, с проверенной копией: версия и хеш дерева installPath."""
@@ -4985,7 +4996,9 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
     if got == new and _tree_hash(row.get("installPath")) == digest:
         _plugins_mark(marks, name, None)
         _plugins_journal(f"{name} {old} → {new}: обновлён")
-        alert(f"обновлён {name} {old} → {new}, сессии увидят после перезапуска", "plugins-update")
+        _plugins_respawn_mark(name)
+        alert(f"обновлён {name} {old} → {new}, тик перезапустит свободные окна (Зевса — вы сами: pantheon start zeus "
+              "--restart); окно, готовое раньше: pantheon saved --by <имя> --state <путь>", "plugins-update")
         if not quiet:
             print(f"{name}: обновлён {old} → {new}")
         return 0
