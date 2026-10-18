@@ -1437,6 +1437,58 @@ def test_worktree_prune_alert_key_and_empty_gitdir_0118():
     check("битая" in e2.alerts() and "prune отложен" in e2.alerts(), "нет тревоги о пустом gitdir")
 
 
+def test_worktree_keeps_unmerged_and_untracked_0184():
+    """metis-0184: уборка дежурным не удаляет копию с неслитым коммитом или неотслеживаемым файлом; контроль — слитая
+    и чистая копия убирается (тест умеет удалять)."""
+    e, folder, g = _wt_repo("g-dir")
+    wts = os.path.join(folder, ".claude", "worktrees")
+    path = {n: os.path.join(wts, n) for n in ("w-unpushed", "w-untracked", "w-clean")}
+    for n, wt in path.items():
+        g("worktree", "add", "-q", "-b", n, wt)
+    open(os.path.join(path["w-unpushed"], "work.txt"), "w").write("работа\n")
+    g("add", "work.txt", cwd=path["w-unpushed"])
+    g("commit", "-q", "-m", "неотправленное", cwd=path["w-unpushed"])
+    open(os.path.join(path["w-untracked"], "draft.txt"), "w").write("черновик\n")
+    old = T0 - 3 * 86400
+    for wt in path.values():
+        os.utime(wt, (old, old))
+    r = e.run("watch", t=T0)
+    check(r.returncode == 0, f"watch упал: {r.stderr[-300:]}")
+    check(not os.path.exists(path["w-clean"]), "контроль: слитая и чистая копия не убрана")
+    check(g("rev-parse", "--verify", "-q", "w-clean").returncode != 0, "контроль: ветка убранной копии осталась")
+    check(os.path.isfile(os.path.join(path["w-unpushed"], "work.txt")), "копия с неслитым коммитом удалена")
+    check(g("rev-parse", "--verify", "-q", "w-unpushed").returncode == 0, "ветка с неслитым коммитом удалена")
+    check(os.path.isfile(os.path.join(path["w-untracked"], "draft.txt")), "копия с неотслеживаемым файлом удалена")
+
+
+def test_watch_and_wake_second_instance_exits_0184():
+    """metis-0184: пока другой проход держит блокировку, второй watch и второй wake выходят без работы."""
+    import fcntl
+    e, folder, g = _wt_repo("g-dir")
+    wt = os.path.join(folder, ".claude", "worktrees", "w-held")
+    g("worktree", "add", "-q", "-b", "w-held", wt)
+    old = T0 - 3 * 86400
+    os.utime(wt, (old, old))
+    e.task("g-0001", "g-dir", status="todo")
+    e.agents([{"id": "dead0001", "sessionId": "dead0001-x", "name": "g-dir", "state": "failed", "kind": "background",
+               "cwd": folder, "startedAt": (T0 - 7200) * 1000}])
+    os.makedirs(e.st("locks"), exist_ok=True)
+    with open(e.st("locks", "watch.lock"), "a") as fw, open(e.st("locks", "wake.lock"), "a") as fk:
+        fcntl.flock(fw, fcntl.LOCK_EX)
+        fcntl.flock(fk, fcntl.LOCK_EX)
+        rw = e.run("watch", t=T0)
+        rk = e.run("wake", t=T0)
+    check(rw.returncode == 0 and "уже идёт другой проход" in rw.stdout, f"второй watch не вышел: {rw.stdout!r}")
+    check(os.path.isdir(wt), "второй watch убрал копию")
+    check(rk.returncode == 0 and "уже идёт в другом процессе" in rk.stdout, f"второй wake не вышел: {rk.stdout!r}")
+    check(not e.calls(), f"второй watch/wake вызвал claude: {e.calls()}")
+    check(not os.path.exists(e.st("start.log")) or "g-dir" not in open(e.st("start.log")).read(),
+          "второй wake поднял сессию")
+    # контроль: без чужой блокировки тот же watch работает и убирает копию
+    e.run("watch", t=T0)
+    check(not os.path.exists(wt), "контроль: свободный watch не убрал слитую копию")
+
+
 def test_tick_subcommands():
     sys.path.insert(0, os.path.join(ROOT, "lib"))
     import importlib

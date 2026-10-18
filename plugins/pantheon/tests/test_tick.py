@@ -712,6 +712,20 @@ print(json.dumps({{c: p.parse_command(c) for c in cmds}}))
     check("alert --critical: заголовок не называет отправителя — имя только «со слов»",
           "Пантеон · критично|прод упал (со слов: zeus)" in sent and "· zeus|" not in sent)
 
+    # metis-0184: второй параллельный тик выходит без работы, пока первый держит блокировку
+    import fcntl
+    tmp = tempfile.mkdtemp(prefix="tick-test-")
+    home, state = make(tmp, SCHED)
+    os.makedirs(os.path.join(state, "locks"), exist_ok=True)
+    with open(os.path.join(state, "locks", "tick.lock"), "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        rb = tick(home, state, T0)
+    check("0184: второй тик при занятой блокировке выходит с 0 без запусков и без метки last-tick",
+          rb.returncode == 0 and runs(state) == [] and not os.path.exists(os.path.join(state, "last-tick")))
+    tick(home, state, T0)
+    check("0184: контроль: тик без чужой блокировки работает", runs(state).count("view") == 1
+          and os.path.exists(os.path.join(state, "last-tick")))
+
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 
