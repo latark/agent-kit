@@ -168,7 +168,7 @@ def main():
     build(env)
     before = open(hq_path).read()
     al = lambda: open(os.path.join(home, "alerts.md")).read() if os.path.exists(os.path.join(home, "alerts.md")) else ""  # noqa: E731
-    n0 = al().count("окно штаба не пересобрано")
+    n0 = al().count("окно Пританея не пересобрано")
     for text in ('[hq]\nclosed_dirs = "~/projects/law-feed/cache"\n', '[hq]\nclosed_collections = ["a", 1]\n',
                  '[hq]\nclosed_dirs = ["projects/law-feed"]\n', 'hq = 1\n', '[hq\n'):
         open(pol, "w").write(text)
@@ -179,7 +179,7 @@ def main():
               and os.path.exists(os.path.join(state, "settings", "athena-shop.json")))
     build(env)  # тот же битый — повтор молчит
     check("[hq] битый: тревога на каждое новое состояние, повтор того же — без тревоги",
-          al().count("окно штаба не пересобрано") - n0 == 5)
+          al().count("окно Пританея не пересобрано") - n0 == 5)
     open(pol, "w").write(HQ_SECTION.replace("inbox", "outbox"))
     build(env)
     hq4 = json.load(open(hq_path))
