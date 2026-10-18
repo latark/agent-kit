@@ -65,6 +65,9 @@ if not pending():  # без сценария: stop делает сессию sto
         agents = json.load(open(af))
     except (OSError, ValueError):
         agents = []
+    if args[:1] == ["rm"] and os.environ.get("FAKE_RM_REFUSE"):
+        print("refusing: worktree has unpushed commits", file=sys.stderr)
+        sys.exit(1)
     if isinstance(agents, list) and args[:1] == ["stop"]:
         for a in agents:
             if a.get("id") == args[1]:
@@ -255,13 +258,23 @@ def main():
     c = calls()
     check("start --restart: живую копию останавливает и запускает новую; чужое имя «athena-shop-x» не трогает",
           r.returncode == 0 and c[-2]["argv"] == ["stop", "a8"] and c[-1]["argv"][4] == "athena-shop"
-          and ["stop", "z1"] not in [x["argv"] for x in c])
+          and ["stop", "z1"] not in [x["argv"] for x in c]
+          and not [x for x in c if x["argv"][:1] == ["rm"]])  # metis-0239: рестарт без rm, как на main
     open(agents_file, "w").write(json.dumps([{"id": "a1", "name": "athena-shop", "state": "done", "pid": 5,
                                               "sessionId": "s1", "cwd": "/x", "startedAt": 1}]))
     r = run("start", "athena-shop", "новый эпик")
     c = calls()
     check("start: прошлый эпик «done» — его сессия останавливается, новая запускается с тем же именем",
-          r.returncode == 0 and c[-2]["argv"] == ["stop", "a1"] and c[-1]["argv"][4] == "athena-shop")
+          r.returncode == 0 and c[-3]["argv"] == ["stop", "a1"] and c[-2]["argv"] == ["rm", "a1"]
+          and c[-1]["argv"][4] == "athena-shop" and "осталась во флоте" not in r.stderr)
+    open(agents_file, "w").write(json.dumps([{"id": "a1", "name": "athena-shop", "state": "done", "pid": 5,
+                                              "sessionId": "s1", "cwd": "/x", "startedAt": 1}]))
+    r = run("start", "athena-shop", "новый эпик", extra={"FAKE_RM_REFUSE": "1"})
+    al = open(os.path.join(home, "alerts.md")).read() if os.path.exists(os.path.join(home, "alerts.md")) else ""
+    check("start: stop-done — отказ rm виден в выводе, в start.log и в тревогах",
+          "осталась во флоте Claude Code" in r.stderr and "unpushed" in r.stderr
+          and "rm-refused\tathena-shop\ta1" in open(os.path.join(state, "logs", "start.log")).read()
+          and "прежняя сессия a1 осталась во флоте" in al)
     alerts_md = os.path.join(home, "alerts.md")
     said = lambda: open(alerts_md).read().count("без вашего слова") if os.path.exists(alerts_md) else 0
     check("start --from zeus без вашего слова в окне Зевса — тревога (лазейка видна)", said() == 1)

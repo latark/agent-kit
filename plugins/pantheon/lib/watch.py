@@ -1486,17 +1486,22 @@ def stop(rest, who):
         names = sorted({a.get("name") for a in agents if a.get("pid") and a.get("kind") != "interactive"
                         and is_pantheon(a.get("name") or "", doms) and not (a.get("name") or "").startswith("zeus")})
         marked = []
+        left_all = []
         for n in names:
             if not os.path.exists(P.path("stopped", n)):
                 marked.append(n)
-            _stop_one(n, agents, who)
+            left_all += [(n, i, r) for i, r in _stop_one(n, agents, who)[1]]
         prev = P.read_json(P.path("stopped-all.json"), {}).get("names") or []
         old = P.read_json(P.path("stopped-all.json"), {})
         P.write_json(P.path("stopped-all.json"), {"time": P.stamp(), "by": who, "names": sorted(set(prev) | set(marked)),
                                                   "paused": bool(old.get("paused")) or not had_pause})
+        if left_all:
+            P.alert("стоп всё: осталась во флоте Claude Code (rm отказал): "
+                    + "; ".join(f"{n} {i} — {r}" for n, i, r in left_all), "pantheon-stop")
         P.alert(f"стоп всё ({who}): планировщик на паузе, остановлены: {', '.join(names) or 'никого'}; вернуть — "
                 "pantheon resume --all", "pantheon-stop")
-        print(f"остановлены: {', '.join(names) or 'никого'}; планировщик на паузе. Вернуть: pantheon resume --all")
+        print(f"остановлены: {', '.join(names) or 'никого'}; планировщик на паузе. Вернуть: pantheon resume --all"
+              + "".join(f"\n{n}: осталась во флоте: {i}, причина: {r}" for n, i, r in left_all))
         return 0
     if not rest or not P.SESSION_NAME.fullmatch(rest[0]):
         print("pantheon stop <направление|daedalus-задача> | --all", file=P.sys.stderr)
@@ -1505,10 +1510,14 @@ def stop(rest, who):
     if not is_pantheon(name, doms) or name.startswith("zeus"):
         print(f"pantheon stop: {name} — не сессия направления или мастерской", file=P.sys.stderr)
         return 2
-    n = _stop_one(name, agents, who)
+    n, left = _stop_one(name, agents, who)
+    if left:
+        P.alert(f"{name}: осталась во флоте Claude Code (rm отказал): {'; '.join(i + ' — ' + r for i, r in left)}",
+                "pantheon-stop")
     P.alert(f"{name} остановлена ({who}): сессий {n}; дежурный и Зевс её не будят — вернуть: pantheon resume {name}",
             "pantheon-stop")
-    print(f"{name}: остановлено сессий {n}, метка «остановлено вами» стоит. Вернуть: pantheon resume {name}")
+    print(f"{name}: остановлено сессий {n}, метка «остановлено вами» стоит. Вернуть: pantheon resume {name}"
+          + _left_text(name, left))
     return 0
 
 
@@ -1522,13 +1531,21 @@ def _stop_locked(name, agents, who):
     os.makedirs(P.path("stopped"), exist_ok=True)
     P.write_atomic(P.path("stopped", name), f"{P.stamp()} {who}\n")
     n = 0
+    left = []
     for a in P.live_copies(name, agents, registry=[]) + [a for a in agents if a.get("name") == name
                                                           and a.get("state") == "done" and a.get("pid")]:
         if a.get("id"):
-            subprocess.run([P.claude_bin(), "stop", a["id"]], capture_output=True, text=True, timeout=60)
+            reason = P.stop_and_rm(name, a["id"])  # metis-0239: без rm флот Claude Code поднимает сессию снова
             P.start_log(f"stop\t{name}\t{a.get('name')}\t{a['id']}\t{who}")
+            if reason:
+                P.start_log(f"rm-refused\t{name}\t{a['id']}\t{reason}")
+                left.append((a["id"], reason))
             n += 1
-    return n
+    return n, left
+
+
+def _left_text(name, left):
+    return "".join(f"\n{name}: осталась во флоте: {i}, причина: {r}" for i, r in left)
 
 
 def _forget_autostart(name):
