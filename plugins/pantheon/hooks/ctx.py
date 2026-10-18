@@ -176,6 +176,40 @@ def tail_lines(path, nbytes):
     return lines
 
 
+def file_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def lines_since(path, start, needle=None):
+    """Строки транскрипта от смещения start до конца файла, с needle внутри (metis-0249). owner-log ждёт запись до
+    540 с, и за это время транскрипт растёт: окно «хвост N байт» теряло запись, когда после неё дописали больше N."""
+    out = []
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            if start > f.tell():
+                start = 0  # файл переписали короче: читаем целиком
+            f.seek(max(0, start - 1))
+            if start > 0 and f.read(1) != b"\n":
+                f.readline()  # первая строка обрезана
+            for raw in f:
+                if needle is None or needle in raw:
+                    out.append(raw)
+    except OSError:
+        return []
+    return out
+
+
+def window(path, nbytes, start=None, needle=None):
+    """Хвост nbytes или, если задано start, всё от start до конца (ожидание owner-log)."""
+    if start is not None:
+        return lines_since(path, start, needle)
+    return [x for x in tail_lines(path, nbytes) if needle is None or needle in x]
+
+
 def entries(lines):
     for raw in lines:
         if not raw.strip():
@@ -221,12 +255,12 @@ def last_owner_time(path):
     return best
 
 
-def prompt_entry(path, prompt_id):
+def prompt_entry(path, prompt_id, start=None):
     """Запись ввода в транскрипте по prompt_id (её пишет сам Claude Code)."""
     if not prompt_id:
         return None
     pid = prompt_id.encode()
-    for d in reversed(list(entries(x for x in tail_lines(path, 2000000) if pid in x))):
+    for d in reversed(list(entries(window(path, 2000000, start, pid)))):
         if d.get("type") == "user" and d.get("promptId") == prompt_id and not d.get("isSidechain") \
                 and ("origin" in d or "promptSource" in d):
             return d
@@ -260,12 +294,67 @@ def queued_mark(sid, key):
     return True
 
 
-def queued_entry(path, prompt, t, used=()):
+def record_key(d):
+    """Ключ записи ввода из очереди в queued-used.json — отдельно от ключей вложений."""
+    return "prompt:" + str(d.get("promptId") or d.get("uuid") or "")
+
+
+def queued_record(path, prompt, t, used=(), start=None):
+    """Путь А (metis-0249): ввод во время хода, который ход не забрал вложением. Ход кончился сам, и Claude Code
+    сделал из ввода новый ход — обычную запись user с promptSource = queued и НОВЫМ promptId, а хуку отдал promptId
+    хода, который шёл (сверено 18.10 на транскриптах Зевса). Проверки — как у обычной записи: ваша (origin.kind =
+    human), тот же текст, не старше ENTRY_MAX_AGE; одна запись засчитывается один раз. → (запись, время) или None."""
+    for d in reversed(list(entries(window(path, 4000000, start, b'"queued"')))):
+        if d.get("type") != "user" or d.get("promptSource") != "queued" or not is_owner_entry(d):
+            continue
+        if not d.get("promptId") and not d.get("uuid"):
+            continue
+        if not same_text(d, prompt) or record_key(d) in used:
+            continue
+        te = iso_ts(d.get("timestamp"))
+        if te is not None and abs(t - te) <= ENTRY_MAX_AGE:
+            return d, te
+    return None
+
+
+def prompt_chain(path, prompt_id, record, prompt, start=None):
+    """Путь Б (metis-0249): сверка цепочки promptId для записи из пути А. Ожидаемый порядок в транскрипте: запись
+    хода, чей promptId пришёл в событии, → queue-operation enqueue с тем же текстом → запись queued с другим
+    promptId. → ("ok" | "broken" | "unknown", пояснение).
+    broken — формат узнан, и он против записи: она раньше хода события, то есть это прошлый ввод с тем же текстом.
+    unknown — формат не узнан (нет записи хода события, нет enqueue между ними, тот же promptId): решает путь А,
+    Б только предупреждает в журнале хуков. Claude Code меняет формат транскрипта без объявления — отказ по
+    незнакомому формату терял бы ваши слова."""
+    if not prompt_id:
+        return "unknown", "в событии нет prompt_id"
+    if record.get("promptId") == prompt_id:
+        return "unknown", "у записи queued тот же promptId, что в событии"
+    turn, enq, rec = None, [], None
+    for i, d in enumerate(entries(window(path, 4000000, start))):
+        if d.get("type") == "user" and not d.get("isSidechain") and d.get("promptId") == prompt_id and turn is None:
+            turn = i
+        elif d.get("type") == "queue-operation" and d.get("operation") == "enqueue" \
+                and same_text({"message": {"content": d.get("content")}}, prompt):
+            enq.append(i)
+        elif d.get("type") == "user" and record_key(d) == record_key(record) and d.get("uuid") == record.get("uuid"):
+            rec = i
+    if rec is None:
+        return "unknown", "запись queued не найдена при сверке"
+    if turn is None:
+        return "unknown", "нет записи хода %s из события" % prompt_id
+    if rec < turn:
+        return "broken", "запись queued %s раньше хода %s из события" % (record.get("promptId"), prompt_id)
+    if not any(turn < i < rec for i in enq):
+        return "unknown", "нет enqueue с тем же текстом между ходом %s и записью queued" % prompt_id
+    return "ok", ""
+
+
+def queued_entry(path, prompt, t, used=(), start=None):
     """Ваш ввод во время хода агента (metis-0028): Claude Code пишет его не записью user с promptId, а вложением
     queued_command с origin.kind = human, когда ход его заберёт (проверено 15.10 на транскриптах Зевса). Сообщения
     других сессий там же — kind = peer, уведомления — task-notification. promptId у вложения нет: сверка по тексту и
     времени постановки в очередь. → (запись, время) или None."""
-    for d in reversed(list(entries(x for x in tail_lines(path, 4000000) if b"queued_command" in x))):
+    for d in reversed(list(entries(window(path, 4000000, start, b"queued_command")))):
         a = d.get("attachment") or {}
         if d.get("type") != "attachment" or d.get("isSidechain") or a.get("type") != "queued_command":
             continue
@@ -279,9 +368,9 @@ def queued_entry(path, prompt, t, used=()):
     return None
 
 
-def queued_pending(path, prompt, t):
+def queued_pending(path, prompt, t, start=None):
     """Ввод стоит в очереди хода (queue-operation enqueue с тем же текстом): ждать вложение дольше обычного."""
-    for d in reversed(list(entries(x for x in tail_lines(path, 4000000) if b'"enqueue"' in x))):
+    for d in reversed(list(entries(window(path, 4000000, start, b'"enqueue"')))):
         if d.get("type") == "queue-operation" and d.get("operation") == "enqueue" \
                 and same_text({"message": {"content": d.get("content")}}, prompt):
             te = iso_ts(d.get("timestamp"))
@@ -657,23 +746,43 @@ def cmd_owner_log(ev):
     tpath = ev.get("transcript_path") or ""
     sid = ev.get("session_id") or ""
     used = queued_used(sid)
-    entry, queued, extended = None, None, False
+    # читаем от места, где был конец транскрипта при вводе (минус запас), до конца: за время ожидания транскрипт
+    # растёт, и окно «хвост 2 МБ» теряло запись (metis-0249)
+    start = max(0, file_size(tpath) - 2000000) if tpath else None
+    entry, queued, extended, skipped = None, None, False, set()
     deadline = t + float(os.environ.get("PANTHEON_CONFIRM_WAIT") or CONFIRM_WAIT)
     while True:  # Claude Code пишет транскрипт сам и с задержкой: ждём запись этого ввода
-        entry = prompt_entry(tpath, ev.get("prompt_id"))
+        entry = prompt_entry(tpath, ev.get("prompt_id"), start)
+        if entry is not None and entry.get("promptSource") == "queued" and record_key(entry) in used:
+            entry = None  # эту запись очереди уже засчитал хук другого ввода
         if entry is not None and same_text(entry, prompt):
             if not is_owner_entry(entry):
                 return 0  # у этого ввода своя запись, и она не ваша — в очередь не смотрим
             break
-        queued = queued_entry(tpath, prompt, t, used)
+        queued = queued_entry(tpath, prompt, t, used, start)
         if queued is not None:
             break
+        rec = queued_record(tpath, prompt, t, used | skipped, start)  # путь А
+        if rec is not None:
+            verdict, why = prompt_chain(tpath, ev.get("prompt_id"), rec[0], prompt, start)  # путь Б
+            if verdict == "broken":
+                skipped.add(record_key(rec[0]))  # прошлый ввод с тем же текстом: ждём свою запись дальше
+                hook_log("owner-log", "цепочка promptId не сошлась (%s) — запись не взята" % why)
+            else:
+                if verdict == "unknown":
+                    hook_log("owner-log", "предупреждение: формат цепочки promptId не узнан (%s) — запись queued "
+                             "%s взята по проверкам пути А" % (why, rec[0].get("promptId")))
+                entry = rec[0]
+                break
         if time.time() >= deadline:
-            if extended or not queued_pending(tpath, prompt, t):
+            if extended or not queued_pending(tpath, prompt, t, start):
                 break
             extended = True  # ввод в очереди хода: вложение появится, когда ход его заберёт
             deadline = t + float(os.environ.get("PANTHEON_QUEUED_WAIT") or QUEUED_WAIT)
         time.sleep(0.3)
+    if skipped and queued is None and (entry is None or not same_text(entry, prompt)):
+        append_owner_line(name, t, prompt, "цепочка promptId не сошлась", folder=UNCONFIRMED)
+        return 0
     note = ""
     if queued is not None:
         if not queued_mark(sid, queued_key(queued[0])):
@@ -699,6 +808,9 @@ def cmd_owner_log(ev):
             return 0  # стартовое поручение от Зевса или тика
         if entry.get("promptSource") == "suggestion_accepted":
             note = "принята подсказка Claude"
+        if entry.get("promptSource") == "queued" and not queued_mark(sid, record_key(entry)):
+            append_owner_line(name, t, prompt, "запись очереди уже засчитана", folder=UNCONFIRMED)
+            return 0
         t = iso_ts(entry.get("timestamp")) or t
     append_owner_line(name, t, prompt, note)
     return 0
