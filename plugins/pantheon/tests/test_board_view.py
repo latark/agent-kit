@@ -33,6 +33,11 @@ def views():
     return [(re.search(r"^    name: (.+)$", p, re.M).group(1), p) for p in parts]
 
 
+def hides_closed(view_text):
+    """Вид исключает Готово и Отменено фильтрами статуса."""
+    return all(f'note["Статус"] != "{x}"' in view_text for x in ("Готово", "Отменено"))
+
+
 def base_checks():
     vs = views()
     names = [n for n, _ in vs]
@@ -55,9 +60,11 @@ def base_checks():
     check("«Очередь агентов»: только «Очередь»", 'note["Статус"] == "Очередь"' in queue)
     allv = dict(vs)["Все задачи"]
     check("«Все задачи» — без фильтров статуса (полностью)", "filters:" not in allv)
-    # сломать правило: без фильтра «Отменено» проверка краснеет
-    broken = sysv.replace('note["Статус"] != "Отменено"', "true")
-    check("проверка «Отменено скрыто» краснеет на сломанном виде", 'note["Статус"] != "Отменено"' not in broken)
+    check("«Мне ответить»: исключает «Готово» и «Отменено»", hides_closed(mine))
+    # сломать правило: проверка на вид без фильтра должна дать False
+    for x in ("Готово", "Отменено"):
+        broken = mine.replace(f'note["Статус"] != "{x}"', "true")
+        check(f"проверка «{x} скрыто» краснеет на сломанном виде", hides_closed(mine) and not hides_closed(broken))
 
 
 def card_checks():
@@ -82,6 +89,18 @@ def summary_checks():
           and "Готово за сутки 1" in lines[i_cnt], lines[:4])
     check("сводка: под счётчиками «Мне ответить» со встроенным видом",
           i_cnt < i_mine and "![[Доска.base#Мне ответить]]" in lines[i_mine + 2])
+    # Кому = Владелец: считается, без двойного счёта; Готово/Отменено — нет; чужой адресат — нет
+    def mk(i, **kw):
+        return (f"p{i}", {"type": "task", "id": f"metis-1{i:03d}", "title": f"З{i}", "status": "todo", "project": "demo",
+                          "direction": "demo", "created": "2026-10-17", **kw}, "")
+    cases = [mk(1, owner="Вы"), mk(2, owner="owner", status="done", updated=T.now_iso(T0 - 100)),
+             mk(3, owner="human", status="dropped"), mk(4, owner="hephaestus-demo"),
+             mk(5, owner="Владелец", status="waiting", waiting_on="human", question="Q?"), mk(6)]
+    t2 = {c[1]["id"]: c for c in cases}
+    text2, _ = T._summary(t2, T0)
+    cnt = next(ln for ln in text2.split("\n") if "Мне ответить" in ln and "Просрочено" in ln)
+    check("сводка: «Мне ответить» = Кому Владелец + ждут человека, без Готово/Отменено и двойного счёта",
+          "Мне ответить 2 ·" in cnt and "Нужен ответ (1)" in text2, cnt)
     check("сводка: «Готово за сутки» свёрнуто", "> [!success]- 🟢 Готово за сутки (1)" in text)
 
 
@@ -89,6 +108,9 @@ def warn_checks():
     bad = ["А ()", "Б ( )", "В ≈ )", "Г $…", "Д ≈ "]
     check("option_warns: «()», «( )», «≈ )», «$…» — предупреждение",
           all(T.option_warns({"options": [o]}) for o in bad), [o for o in bad if not T.option_warns({"options": [o]})])
+    good0 = ["А. Купить за 20$", "Б. Купить за 20 $", "В. 5 000 $ в месяц", "Г. $5"]
+    check("option_warns: «20$», «20 $» — тихо", not any(T.option_warns({"options": [o]}) for o in good0),
+          [o for o in good0 if T.option_warns({"options": [o]})])
     good = ["А. Купить за 5 000 ₽ (дороже). Цена: деньги", "Б. Подождать до пятницы. Цена: срок", "В. ≈ 5 дней"]
     check("option_warns: нормальные варианты — тихо", not any(T.option_warns({"options": [o]}) for o in good))
     check("option_warns: «(совет)» в варианте про деньги — предупреждение, без денег — нет",

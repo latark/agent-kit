@@ -364,7 +364,7 @@ def digest(path):
 
 # Битый текст варианта (metis-0123): пустые скобки, обрезанная сумма («≈ )»; «$…» в athena-0005 съела оболочка).
 _OPT_EMPTY = re.compile(r"\(\s*\)")
-_OPT_CUT = re.compile(r"≈\s*[)\s]*(\)|$)|\$(?![\d])")
+_OPT_CUT = re.compile(r"≈\s*[)\s]*(\)|$)|(?<!\d)(?<!\d\s)\$(?!\d)")  # «20$», «20 $» — валюта, не съеденная оболочкой
 _OPT_RISKY = re.compile(r"[₽$€]|\bруб|деньг|оплат|платеж|платёж|списан|необратим|удал|безвозврат", re.I)
 
 
@@ -1437,7 +1437,11 @@ def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None):
             "inbox": [f"[[Доска/{names.get(cid) or card_name({'title': it['title']})}|{_plain(it['title'])}]] · "
                       f"{it['direction']}" for cid, it in (inbox or {}).items()]}
     wait = []
+    mine = set()  # вид «Мне ответить»: ждут ответа или адресованы Владельцу; множество — без двойного счёта
     for tid, (p, h, _) in sorted(tasks.items()):
+        if (h.get("status") == "waiting" and h.get("waiting_on") == "human") or (
+                h.get("status") not in ("done", "dropped") and Roles(()).name(assignee(h)) == OWNER_NODE):
+            mine.add(tid)
         name = f"[[Доска/{names.get(tid) or card_name(h)}|{_plain(h.get('title'))}]] · {_plain(h.get('project'))}"
         if h.get("status") == "waiting" and h.get("waiting_on") == "human":
             rows["wait"].append(name)
@@ -1463,7 +1467,7 @@ def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None):
     if len(wait) > SUMMARY_WAIT_TOP:
         top.append(f"ещё {len(wait) - SUMMARY_WAIT_TOP} — колонка «{HUMAN_WAIT}» на доске")
     quiet = [f"{when} · {_plain(text)}" for when, _, _, text in (queue or [])]
-    counters = (f"🔴 Мне ответить {len(wait)} · ⏰ Просрочено {len(rows['overdue'])} · 📥 Входящие {len(rows['inbox'])}"
+    counters = (f"🔴 Мне ответить {len(mine)} · ⏰ Просрочено {len(rows['overdue'])} · 📥 Входящие {len(rows['inbox'])}"
                 f" · 🟡 В работе {len(rows['doing'])} · 🟢 Готово за сутки {len(rows['done'])}")
     done_fold = (f"> [!success]- 🟢 Готово за сутки ({len(rows['done'])})\n"
                  + ("\n".join(f"> - {x}" for x in rows["done"]) if rows["done"] else "> —") + "\n")
