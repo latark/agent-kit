@@ -1018,6 +1018,10 @@ def main():
          B("~/projects/other/tg-read/" + TGR.upper() + " history 1"), None, TL),
         ("tg-role: bash -c с history — отказ", "deny", lw, "domain-coordinator", False,
          B("bash -c '~/projects/other/tg-read/" + TGR + " search x'"), None, TL),
+        ("tg-role: status, затем history в одной команде — отказ", "deny", lw, "domain-coordinator", False,
+         B("~/projects/other/tg-read/" + TGR + " status; ~/projects/other/tg-read/" + TGR + " history 1"), None, TL),
+        ("tg-role: команду не разобрать (шаблон zsh с кодом), в ней скрипт — отказ", "deny", lw, "domain-coordinator",
+         False, B("~/projects/other/tg-read/" + TGR + " history *(e:true:)"), None, TL),
         ("tg-role: имя скрипта шаблоном tg_rea?.py — отказ", "deny", lw, "domain-coordinator", False,
          B("~/projects/other/tg-read/tg_rea?.py history 1"), None, TL),
         ("tg-role: сокет шаблоном tg-read/*.sock — отказ", "deny", lw, "domain-coordinator", False,
@@ -1608,6 +1612,13 @@ def main():
     failed += not ok
     cases.append(None)
     print(f"{'ok  ' if ok else 'FAIL'} tg-role: текст отказа — через pantheon read request")
+    # неразобранная команда со скриптом — отказ именно tg-role, а не только domain (ревью argus PR #61)
+    out = run(home, lw, "domain-coordinator", "Bash",
+              {"command": "~/projects/other/tg-read/" + TGR + " history *(e:true:)"}, raw=True, penv=TL)
+    ok = '"deny"' in out and "Правило tg-role" in out
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} tg-role: команду не разобрать, а в ней скрипт — отказ правилом tg-role")
     # [merge] со строкой вместо списка не открывает слияние всем (ревью argus 15.10)
     home2 = os.path.realpath(tempfile.mkdtemp(prefix="guard-test-"))
     setup(home2)
