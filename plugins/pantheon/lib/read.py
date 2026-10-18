@@ -27,13 +27,19 @@
      (таймаут задачи), SIGINT и SIGHUP останавливают группу процессов читателя или выгрузки, удаляют выгрузку и пишут
      failed. Весь проход — не дольше RUN_BUDGET.
   4. Проверка: каждый пункт ответа — отдельно `tg_read.py verify raw.md <пункт>`; пункт без #id, без цитаты или с
-     ненайденной цитатой выпадает. Сырая выгрузка, ответ читателя и пункты удаляются сразу после проверки — и при
+     ненайденной цитатой выпадает. В профиле с check_author_date пункт выпадает ещё до verify, если «#id, дата время,
+     автор» в нём не совпали со строкой этого сообщения в выгрузке. Сырая выгрузка, ответ читателя и пункты удаляются сразу после проверки — и при
      сбое тоже (finally); выгрузка, оставшаяся от оборванного прохода, удаляется в начале следующего.
   5. summary.md (0600) — проверенные пункты с новыми номерами между метками выгрузки, с той же шапкой, что у
-     approved.md (сессию, открывшую файл, помечает guard tg-taint); карточка «Прочитать разбор чата…» во входящих Зевса
+     approved.md (сессию, открывшую файл, помечает guard tg-taint). Рецепт точности (Прометей 18.10, минимум): под
+     каждым пунктом программа, а не модель, вырезает окно ±window сообщений вокруг процитированного; раздел «Горячие
+     без ссылки» — сообщения с числами, суммами, датами, «?» и «договорились», на которые не ссылается ни один пункт.
+     Окна и горячие в направление не уходят: deliver берёт только строки пунктов. Карточка «Прочитать разбор чата…» во входящих Зевса
      с путём, числами и хешем разбора, без текста переписки. Разбор удаляется через SUMMARY_TTL.
-  6. summarized → одобрение: ответ в окне вопросов Зевса на [read-<rid>-ok] с хешем разбора: «все», «пункты 1, 3»
-     или «ни одного». Одобренные пункты — файлом approved.md (0600) в папке заявки с шапкой выгрузки tg_read; в
+  6. summarized → одобрение: ответ в окне вопросов Зевса на [read-<rid>-ok] с хешем разбора и направлением заявки в
+     вопросе: «все», «пункты 1, 3» или «ни одного». Перед этим заново: хеш request.json равен хешу на момент согласия
+     и согласие на этот хеш в силе — иначе failed request-changed (переписанная заявка не уводит пункты в другое
+     направление, argus-62). Одобренные пункты — файлом approved.md (0600) в папке заявки с шапкой выгрузки tg_read; в
      ~/ai/pantheon/directions/<D>/inbox/ — только указатель: номер заявки, путь к approved.md и число пунктов, без
      текста (inbox индексирует qmd, его сохраняет репозиторий и показывает доска; поручение Метиды 18.10).
      approved.md удаляется вместе с разбором через SUMMARY_TTL. Шапка approved.md
@@ -86,6 +92,16 @@ TEMP_RC = (4, 5, 9)      # tg_read: пауза Telegram, другой запус
 MAX_ATTEMPTS = 5
 ITEMS_MAX = 50
 ITEM_MAX = 1500
+SECTIONS_MAX = 5          # разделы ответа читателя, из которых берутся пункты
+WINDOW_MAX = 5            # окно под пунктом — не больше ±5 сообщений
+WINDOW_CHARS = 300        # строка окна — столько знаков текста сообщения
+HOT_MAX = 100             # горячих без ссылки в разборе — не больше, дальше «и ещё K»
+HOT_CHARS = 80
+MSG_RE = re.compile(r"#(\d+) \[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})\] (.*)")   # строка сообщения в выгрузке tg_read
+TOPIC_RE = re.compile(r"\[тема «[^»]*»\] ")
+META_RE = re.compile(r"#(\d+),\s*(\d{4}-\d{2}-\d{2})(?:\s+(\d{1,2}:\d{2}))?,\s*([^|«»]+?)\s*(?=\||«|$)")
+HOT_RE = re.compile(r"\d|\?|₽|\$|€|руб|тыс|договор|завтра|понедельник|вторник|сред[ау]|четверг|пятниц|суббот|"
+                    r"воскресен", re.I)
 # Сроки (возврат argus-62b): весь проход укладывается в RUN_BUDGET — меньше timeout задачи read-run (2400 с) с запасом,
 # чтобы плановый проход не снимал его посреди шага. Разбор заявки начинается, только если до конца срока прохода
 # хватает на все три шага (NEED); иначе заявка ждёт следующего прохода.
@@ -297,6 +313,16 @@ def load_profile(name):
         v = schema.get(k, top)
         if not isinstance(v, int) or isinstance(v, bool) or not 1 <= v <= top:
             raise ValueError(f"профиль {name}: {k} — целое от 1 до {top}")
+    sec = schema.get("sections", [])
+    if (not isinstance(sec, list) or len(sec) > SECTIONS_MAX
+            or not all(isinstance(x, str) and 0 < len(x.strip()) <= 60 for x in sec)):
+        raise ValueError(f"профиль {name}: sections — список до {SECTIONS_MAX} названий разделов")
+    for k in ("check_author_date", "hot"):
+        if not isinstance(schema.get(k, False), bool):
+            raise ValueError(f"профиль {name}: {k} — true или false")
+    w = schema.get("window", 0)
+    if not isinstance(w, int) or isinstance(w, bool) or not 0 <= w <= WINDOW_MAX:
+        raise ValueError(f"профиль {name}: window — целое от 0 до {WINDOW_MAX}")
     return prompt, schema
 
 
@@ -416,12 +442,14 @@ def parse_approval(a, n):
     return nums
 
 
-def approval(rid, st):
+def approval(rid, req, st):
     """(одобренные номера, время ответа) — по последнему разобранному ответу на [read-<rid>-ok] с хешем разбора
-    после его готовности, или None."""
+    после его готовности и с направлением заявки в вопросе, или None."""
     last = None
     for t, q, a in owner_answers(f"read-{rid}-ok"):
         if t < int(st.get("summary_at") or 0) or not _has_hash(q, st.get("summary_hash")):
+            continue
+        if f" передать в {req['direction']}?" not in q:
             continue
         got = parse_approval(a, int(st.get("items_ok") or 0))
         if got is not None:
@@ -460,10 +488,13 @@ def left():
 
 
 def _stop(proc):
-    """Остановить группу процесса: SIGTERM, через STOP_GRACE — SIGKILL."""
+    """Остановить процесс и его группу: SIGTERM, через STOP_GRACE — SIGKILL. Ребёнок — в своей сессии (группа задачи
+    его не достаёт), поэтому гасим явно: группу по pid и сам pid."""
     for sig in (signal.SIGTERM, signal.SIGKILL):
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(proc.pid, sig)
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            proc.send_signal(sig)        # сам процесс, если он ушёл из своей группы; уже собранный — пропускает
         try:
             proc.wait(timeout=STOP_GRACE)
             return
@@ -531,9 +562,28 @@ def reader_prompt(req):
 
 
 def split_items(text, schema=None):
-    """Ответ читателя → пункты одной строкой (номер снят); строки с метками выгрузки выпадают."""
+    """Ответ читателя → пункты одной строкой (номер снят); строки с метками выгрузки выпадают.
+
+    sections в схеме — пункты берутся только из этих разделов («## Пункты», «## Дополнено по чек-листу»): заметки и
+    чек-лист читателя пунктами не становятся. Ни одного такого заголовка в ответе — весь ответ."""
+    schema = schema or {}
+    lines = text.splitlines()
+    want = [s.strip().casefold() for s in schema.get("sections") or []]
+    if want:
+        heads = [(i, re.match(r"\s*#{1,6}\s+(.*?)[\s:]*$", ln)) for i, ln in enumerate(lines)]
+        heads = [(i, m.group(1).casefold()) for i, m in heads if m]
+        if any(h.startswith(w) for _, h in heads for w in want):
+            keep, on = [], False
+            for i, ln in enumerate(lines):
+                h = next((h for j, h in heads if j == i), None)
+                if h is not None:
+                    on = any(h.startswith(w) for w in want)
+                    keep.append("")
+                elif on:
+                    keep.append(ln)
+            lines = keep
     items, cur = [], None
-    for line in text.splitlines():
+    for line in lines:
         m = re.match(r"\s*\d{1,3}[.)]\s+(.*\S)\s*$", line)
         if m:
             cur = [m.group(1)]
@@ -543,12 +593,86 @@ def split_items(text, schema=None):
         else:
             cur = None
     out = []
-    schema = schema or {}
     for parts in items[:schema.get("max_items", ITEMS_MAX)]:
         s = " ".join(" ".join(parts).split())[:schema.get("max_item_chars", ITEM_MAX)]
         if "<<<" not in s and ">>>" not in s:
             out.append(s)
     return out
+
+
+def parse_dump(raw):
+    """Выгрузка tg_read → сообщения [{id, date, time, author, text}] по порядку (между метками; меток нет — весь файл).
+    Строка «#id [ГГГГ-ММ-ДД ЧЧ:ММ] [тема «…»] Имя (@user): текст», продолжения — с отступом в 4 пробела; у служебных
+    («[служебное: …]») автора нет."""
+    lines = raw.split("\n")
+    s = next((i for i, ln in enumerate(lines) if re.fullmatch(r"<<<TG-[0-9a-f]+", ln)), None)
+    if s is not None:
+        end = next((i for i in range(len(lines) - 1, s, -1) if lines[i] == lines[s][3:] + ">>>"), len(lines))
+        lines = lines[s + 1:end]
+    msgs = []
+    for ln in lines:
+        m = MSG_RE.match(ln)
+        if m:
+            rest = TOPIC_RE.sub("", m.group(4), count=1)
+            author, text = None, rest
+            if not rest.startswith("[служебное"):
+                author, sep, text = rest.partition(": ")
+                if not sep:
+                    author, text = None, rest
+            msgs.append({"id": int(m.group(1)), "date": m.group(2), "time": m.group(3), "author": author,
+                         "text": text})
+        elif msgs and ln.startswith("    "):
+            msgs[-1]["text"] += " " + ln.strip()
+    return msgs
+
+
+def _norm_name(s):
+    return " ".join(s.casefold().replace("ё", "е").split())
+
+
+def item_meta(text, by_id):
+    """«#id, ГГГГ-ММ-ДД ЧЧ:ММ, автор» в пункте совпали с этим сообщением выгрузки → id, иначе None. Автор — имя,
+    @user или «Имя (@user)», как в строке выгрузки."""
+    m = META_RE.search(text)
+    msg = by_id.get(int(m.group(1))) if m else None
+    if msg is None or msg["author"] is None or m.group(2) != msg["date"]:
+        return None
+    if m.group(3) and m.group(3).zfill(5) != msg["time"]:
+        return None
+    full = _norm_name(msg["author"])
+    nm = re.fullmatch(r"(.*?)\s*\((@[^)]+)\)", full)
+    names = {full} | ({nm.group(1), nm.group(2), nm.group(2)[1:]} if nm else set())
+    return msg["id"] if _norm_name(m.group(4)) in names else None
+
+
+def _clip(text, n):
+    t = " ".join(text.split()).replace("<<<", "‹‹‹").replace(">>>", "›››")
+    return t if len(t) <= n else t[:n - 1] + "…"
+
+
+def _msg_line(msg, n):
+    who = f" {_clip(msg['author'], 60)}:" if msg["author"] else ""
+    return f"#{msg['id']} [{msg['date']} {msg['time']}]{who} {_clip(msg['text'], n)}"
+
+
+def window_lines(msgs, pos, w):
+    """Окно ±w сообщений вокруг сообщения с индексом pos — строки с отступом (▶ — процитированное)."""
+    return [f"    {'▶' if i == pos else '·'} {_msg_line(msgs[i], WINDOW_CHARS)}"
+            for i in range(max(0, pos - w), min(len(msgs), pos + w + 1))]
+
+
+def hot_lines(msgs, cited):
+    """Горячие без ссылки: числа, суммы, даты, «?», «договорились» — в сообщениях, на которые не ссылается ни один
+    проверенный пункт. Считает программа, не читатель."""
+    hot = []
+    for msg in msgs:
+        bare = re.sub(r"↪ #\d+|\[[^\]]*\]", " ", msg["text"])
+        if msg["id"] not in cited and msg["author"] is not None and HOT_RE.search(bare):
+            hot.append(msg)
+    lines = [f"- {_msg_line(x, HOT_CHARS)}" for x in hot[:HOT_MAX]]
+    if len(hot) > HOT_MAX:
+        lines.append(f"- и ещё {len(hot) - HOT_MAX}")
+    return len(hot), lines
 
 
 def fail(rid, st, error, event, **nums):
@@ -573,7 +697,8 @@ def summarize(rid, req, st):
         return f"нет определения читателя {AGENT} ({short(agent_path())}) — выгрузки не было"
     st.update(phase="exporting", attempts=int(st.get("attempts") or 0) + 1, export_started=int(P.now()))
     write_state(d, st)
-    msgs, items, ok = 0, [], []
+    msgs, items, ok, meta_bad, hot, extra = 0, [], [], 0, 0, {}
+    schema = load_profile(req["profile"])[1]
     try:
         rc = call(export_argv(req, raw), d, timeout=EXPORT_TIMEOUT)
         if rc != 0 or os.path.islink(raw) or not os.path.isfile(raw):
@@ -586,7 +711,10 @@ def summarize(rid, req, st):
             return f"выгрузка не удалась (код tg_read {rc})"
         os.chmod(raw, 0o600)
         with open(raw, encoding="utf-8", errors="replace") as fh:
-            msgs = sum(1 for ln in fh if re.match(r"#\d+ \[", ln))
+            dump = parse_dump(fh.read())
+        msgs = len(dump)
+        by_id = {x["id"]: x for x in dump}
+        pos = {x["id"]: i for i, x in enumerate(dump)}
         st.update(exported_at=int(P.now()), messages=msgs)
         fd = os.open(answer, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w") as fh:
@@ -595,14 +723,30 @@ def summarize(rid, req, st):
             fail(rid, st, f"reader-{rc}", "reader-failed", rc=rc, messages=msgs)
             return f"читатель не ответил (код {rc})"
         with open(answer, encoding="utf-8", errors="replace") as fh:
-            items = split_items(fh.read(), load_profile(req["profile"])[1])
+            items = split_items(fh.read(), schema)
         v_end = time.monotonic() + VERIFY_BUDGET
         for text in items:
+            anchor = None
+            if schema.get("check_author_date"):
+                anchor = item_meta(text, by_id)
+                if anchor is None:
+                    meta_bad += 1
+                    continue
             remove_file(item)
             write_new(item, text + "\n")
             t = min(VERIFY_TIMEOUT, v_end - time.monotonic())
             if t > 0 and call([tg_read_path(), "verify", raw, item], d, timeout=t) == 0:
-                ok.append(text)
+                if anchor is None:
+                    anchor = next((int(x) for x in re.findall(r"#(\d+)", text) if int(x) in pos), None)
+                ok.append((text, anchor))
+        w = schema.get("window", 0)
+        for text, anchor in ok:
+            extra[text] = window_lines(dump, pos[anchor], w) if w and anchor is not None else []
+        hot_list = []
+        if schema.get("hot"):
+            cited = {int(x) for text, _ in ok for x in re.findall(r"#(\d+)", text)}
+            hot, hot_list = hot_lines(dump, cited)
+        del dump, by_id
     except Interrupted:
         for p in (raw, answer, item):
             remove_file(p)
@@ -615,19 +759,31 @@ def summarize(rid, req, st):
     lines = [f"# Разбор чата {req['chat']} за {req['since']} — {req['until']} (заявка read-{rid})", "",
              f"Вопрос заявки: {req['why']}", "",
              f"Пункты проверены tg_read verify: осталось {len(ok)} из {len(items)} (без цитаты или с ненайденной "
-             f"цитатой — выпали). Сырая выгрузка удалена. Разбор удалится через {SUMMARY_TTL // 86400} дн.", "",
+             f"цитатой — выпали"
+             + (f"; с автором или датой не как в выгрузке — {meta_bad}, выпали до проверки" if
+                schema.get("check_author_date") else "") + "). "
+             + (f"Под пунктом — окно ±{schema['window']} сообщения из выгрузки (вырезала программа, не читатель); в "
+                f"направление уходят только строки пунктов. " if schema.get("window") else "")
+             + ("Раздел «Горячие без ссылки» — сообщения с числами, суммами, датами, вопросами и «договорились», на "
+                "которые не ссылается ни один пункт: просмотрите их сами. " if schema.get("hot") else "")
+             + f"Сырая выгрузка удалена. Разбор удалится через {SUMMARY_TTL // 86400} дн.", "",
              # шапка выгрузки, как у approved.md: её ловит guard tg-taint у сессии, открывшей файл
              DUMP_NOTE.format(tag=tag), "", f"<<<{tag}"]
-    lines += [f"{i}. {text}" for i, text in enumerate(ok, 1)] + [f"{tag}>>>"]
+    for i, (text, _) in enumerate(ok, 1):
+        lines += [f"{i}. {text}"] + extra[text] + ([""] if extra[text] else [])
+    if schema.get("hot"):
+        lines += ["", f"## Горячие без ссылки — {hot}"] + (hot_list or ["Нет."])
+    lines += [f"{tag}>>>"]
     summary = "\n".join(lines) + "\n"
     sp = os.path.join(d, SUMMARY)
     remove_file(sp)
     write_new(sp, summary)
     sh = hashlib.sha256(summary.encode("utf-8")).hexdigest()[:HASH_LEN]
-    st.update(phase="summarized", summary_at=int(P.now()), summary_hash=sh, items_total=len(items), items_ok=len(ok))
+    st.update(phase="summarized", summary_at=int(P.now()), summary_hash=sh, items_total=len(items), items_ok=len(ok),
+              items_meta_bad=meta_bad, hot=hot)
     st["card"] = card(rid, req, st)
     write_state(d, st)
-    log(rid, "summary", messages=msgs, items=len(items), ok=len(ok))
+    log(rid, "summary", messages=msgs, items=len(items), ok=len(ok), meta_bad=meta_bad, hot=hot)
     with contextlib.suppress(Exception):
         P.notify("Разбор чата по заявке готов — карточка во входящих Зевса", group=f"read-{rid}")
     return f"разбор готов: пунктов {len(ok)} из {len(items)}"
@@ -638,7 +794,9 @@ def card(rid, req, st):
     n, sh = int(st["items_ok"]), st["summary_hash"]
     text = (f"Разбор заявки read-{rid} готов: `{short(os.path.join(folder(rid), SUMMARY))}`. Откройте его сами: в нём "
             f"текст переписки, Зевсу и ролям файл не читать.\n\n"
-            f"Пунктов после проверки цитат: {n} из {st['items_total']}.\n\n"
+            f"Пунктов после проверки цитат: {n} из {st['items_total']}"
+            + (f", горячих сообщений без ссылки: {st['hot']}" if st.get("hot") else "") + ".\n\n"
+            "Окна сообщений под пунктами и горячие остаются в разборе: в направление уходят только строки пунктов.\n\n"
             f"Передать в {req['direction']} — ответ Зевсу в окне вопросов, вопрос дословно:\n"
             f"«{ok_question(rid, req, n, sh)}» — варианты «все», «ни одного» или свой ответ «пункты 1, 3».\n\n"
             f"Без ответа разбор удалится через {SUMMARY_TTL // 86400} дн.")
@@ -750,14 +908,18 @@ def process(rid):
             remove_request(rid)
             log(rid, "declined")
             return "владелец отказал — заявка удалена"
-        st["consent_seen"] = int(t)
+        st.update(consent_seen=int(t), req_hash=req_hash(req))
         return summarize(rid, req, st)
     if phase == "summarized":
         if t - int(st.get("summary_at") or 0) > SUMMARY_TTL:
             remove_request(rid)
             log(rid, "expired")
             return "разбор устарел — удалён"
-        got = approval(rid, st)
+        # request.json мог измениться после согласия (направление, чат): заново хеш и согласие на этот хеш
+        if st.get("req_hash") != req_hash(req) or consent(req) != "да":
+            fail(rid, st, "request-changed", "request-changed")
+            return "заявка изменилась после согласия или согласие снято — ничего не передано"
+        got = approval(rid, req, st)
         if got is None:
             return "разбор ждёт решения владельца"
         return deliver(rid, req, st, got[0], got[1])
