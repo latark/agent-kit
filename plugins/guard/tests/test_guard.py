@@ -607,7 +607,7 @@ def failure_checks(home, env, cases):
     # PostToolUse: сбой записи журнала запора — код 2 (команда уже выполнена, причина — агенту); без сбоя — 0
     post = {"tool_response": {"stdout": "", "stderr": "", "interrupted": False, "isImage": False}}
     r, _ = hook(None, name="PostToolUse", extra=post, penv={"GUARD_SHIM_BOOM": "merge_gate.record"})
-    check("PostToolUse, сбой merge_gate.record — код 2 и причина", blocked(r, "журнала запора"), r)
+    check("PostToolUse, сбой merge_gate.record — код 2 и причина", blocked(r, "журнала шлюза слияния"), r)
     r, _ = hook(None, name="PostToolUse", extra=post)
     check("PostToolUse без сбоя — код 0", r.returncode == 0 and r.stderr == "", r)
     # Stop: сбой — код 0 (код 2 не дал бы закончить ход), причина в stderr и строка в журнале

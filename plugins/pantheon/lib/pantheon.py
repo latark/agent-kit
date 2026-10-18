@@ -2,7 +2,7 @@
 """Пантеон: планировщик pantheon-tick и команда pantheon.
 
 Всё, что Пантеон делает сам по времени, идёт через одну задачу launchd `pantheon-tick` (раз в 60 с).
-Список задач — ~/ai/pantheon/schedule.toml (правит штаб); метки запусков — ~/.local/state/pantheon/
+Список задач — ~/ai/pantheon/schedule.toml (правит Пританей); метки запусков — ~/.local/state/pantheon/
 (свои у каждого Mac). Что пора запускать, плановый проход решает по меткам, а не по часам: пропуски за сон Mac
 сливаются в один запуск. Лёгкие задачи (копия, коммит, дежурный) идут сразу; тяжёлые — по одной,
 с паузой, не в первые минуты после пробуждения, от сети, а задачи на Claude — ещё при простое и
@@ -53,7 +53,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         защищённые пути, коммит с трейлером Executor: codex; push — никогда
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
-  pantheon start zeus                   штаб: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
+  pantheon start zeus                   Пританей: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
   pantheon watch [--dry-run]            дежурный (плановый проход раз в 5 мин): сессии, STATUS.md, swap, worktree, версия Claude Code,
                                         паузы, самозапуск по вашим решениям; --dry-run — кого поднял бы и почему нет
@@ -296,7 +296,7 @@ def alert(text, who="pantheon"):
         with open(p, "a", encoding="utf-8") as fh:
             if new:
                 fh.write("# Тревоги\n\nТолько дописывание: `pantheon alert`. Строка — время · кто · что. "
-                         "В «ждёт вас» на доске переносит штаб; старше 30 дней уносит `pantheon archive`.\n\n")
+                         "В «ждёт вас» на доске переносит Пританей; старше 30 дней уносит `pantheon archive`.\n\n")
             fh.write(f"{stamp()} · {who} · {text}\n")
 
 
@@ -2741,7 +2741,7 @@ def fresh_target(name, origin):
     """→ (роль, папка запуска, окно --settings) или текст ошибки, в том числе «нет окна»."""
     if name == "zeus":
         win = path("settings", "hq.json")  # то же окно, что у pantheon start zeus
-        return ("hq", PANTHEON, win) if os.path.isfile(win) else "нет окна штаба — pantheon domains build"
+        return ("hq", PANTHEON, win) if os.path.isfile(win) else "нет окна Пританея — pantheon domains build"
     target, rest = (("workshop", [name[len("daedalus-"):]]) if name.startswith("daedalus-") else (name, []))
     got = start_target(target, rest)
     if isinstance(got, str):
@@ -3029,10 +3029,10 @@ def start(rest):
             print(shlex.join(argv), f"(папка {PANTHEON})")
             return 0
         if not os.path.isfile(path("settings", "hq.json")):
-            print("нет окна штаба — сначала pantheon domains build", file=sys.stderr)
+            print("нет окна Пританея — сначала pantheon domains build", file=sys.stderr)
             return 1
         if not sys.stdin.isatty():
-            print("штаб запускается в вашем терминале: pantheon start zeus", file=sys.stderr)
+            print("Пританей запускается в вашем терминале: pantheon start zeus", file=sys.stderr)
             return 2
         # Зевс — одна сессия. Вкладка iTerm — только окно к фоновой сессии: закрыть вкладку или убить её процесс
         # мало, сессия живёт дальше, и новый запуск становится «zeus-<два слова>» (15.10 так появилось два Зевса)
@@ -3584,7 +3584,7 @@ def roles_newest():
 # вносятся — всегда отдельное «да».
 APPROVALS = os.path.join(HOME, ".claude", "pantheon", "approvals.toml")
 APPROVALS_HEAD = """# Заранее разрешённые действия мастерской на сайтах (DONE-11 карты решений).
-# Пишет только команда владельца `pantheon approve` (роли и штаб её запустить не могут — guard). Мастерская читает этот
+# Пишет только команда владельца `pantheon approve` (роли и Пританей её запустить не могут — guard). Мастерская читает этот
 # файл перед действием на сайте; деньги, новые публикации, сообщения людям, удаление и всё, чего тут нет, — отдельное «да».
 """
 

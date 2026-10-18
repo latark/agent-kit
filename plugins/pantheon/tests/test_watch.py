@@ -1665,7 +1665,7 @@ def test_infra_check_managed_mode():
 
 
 def test_infra_check_hq_section():
-    """infra-check: нет раздела [hq] в policy.toml — строка НЕТ и тревога «штабу ничего не закрыто»; пустой [hq] —
+    """infra-check: нет раздела [hq] в policy.toml — строка НЕТ и тревога «Пританею ничего не закрыто»; пустой [hq] —
     без тревоги, тревога снята; битый — строка НЕТ с причиной (metis-0182)."""
     import importlib.util
     sys.path.insert(0, os.path.join(ROOT, "lib"))
@@ -1684,7 +1684,7 @@ def test_infra_check_hq_section():
         p.MANAGED, p.HOME, p.guard_script, p.agents_all = os.path.join(d, "none.json"), d, (lambda: ""), (lambda: [])
         p.alert_once = lambda key, value, text, *a, **k: calls.append(("alert", key, text))
         p.clear_once = lambda key: calls.append(("clear", key))
-        text = "в policy.toml нет раздела [hq]: штабу ничего не закрыто"
+        text = "в policy.toml нет раздела [hq]: Пританею ничего не закрыто"
         for name, body in (("нет policy.toml", None), ("нет раздела", '[private]\nroles = ["hq"]\n')):
             calls.clear()
             if body is not None:
