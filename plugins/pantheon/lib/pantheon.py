@@ -3198,17 +3198,21 @@ def _wake(dry):
         fresh = fresh_reason(a)  # metis-0147 п. 2: большой контекст и остывший кэш — новая сессия с файла состояния
         how = (f"; свежей сессией ({fresh}), прочитает {' и '.join(tilde(p) for p in state_files(name))}" if fresh
                else "")
-        print(f"{'будет поднята' if dry else 'поднимаю'}: {name} ({a.get('id')}, {state}) — задачи {', '.join(tasks[:3])}"
-              + how)
+        line = f"{name} ({a.get('id')}, {state}) — задачи {', '.join(tasks[:3])}" + how
         if dry:
+            print(f"будет поднята: {line}")
             continue
         if fresh:
             rc = fresh_start(name, a, fresh_text("пробуждение", name, a.get("id")), "wake",
                              recheck=lambda n=name, s=state: wake_recheck(n, s), reason=fresh)
         else:
             rc, _ = resume_session(name, a, WAKE_TEXT, "wake", recheck=lambda n=name, s=state: wake_recheck(n, s))
-        if rc and rc != NO_WINDOW:  # «нет окна» — своя тревога, одна на причину
-            alert(f"pantheon wake: {name} не поднялась (код {rc})", "pantheon")
+        if rc == NO_WINDOW:  # «нет окна» — своя тревога, одна на причину; владельцу не говорим, что подняли (metis-0189)
+            print(f"не поднимаю: {name} ({a.get('id')}, {state}) — см. тревогу")
+        else:
+            print(f"поднимаю: {line}")
+            if rc:
+                alert(f"pantheon wake: {name} не поднялась (код {rc})", "pantheon")
         done += 1
     if not done:
         print("будить некого")
