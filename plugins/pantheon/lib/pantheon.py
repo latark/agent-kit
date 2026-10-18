@@ -5003,7 +5003,7 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
         _plugins_mark(marks, name, None)
         _plugins_journal(f"{name} {old} → {new}: обновлён")
         _plugins_respawn_mark(name)
-        alert(f"обновлён {name} {old} → {new}, тик перезапустит свободные окна (Зевса — вы сами: pantheon start zeus "
+        alert(f"обновлён {name} {old} → {new}, плановый проход перезапустит свободные окна (Зевса — вы сами: pantheon start zeus "
               "--restart); окно, готовое раньше: pantheon saved --by <имя> --state <путь>", "plugins-update")
         if not quiet:
             print(f"{name}: обновлён {old} → {new}")

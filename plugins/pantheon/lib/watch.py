@@ -1901,7 +1901,7 @@ def saved_cmd(rest, who):
     if not m:
         P.write_json(respawn_path("respawn-ok", name + ".json"), {"t": P.now(), "time": P.stamp(),
                                                                   "state": " ".join(state.split())[:300], "by": who})
-        print(f"{name}: отмечено «можно перезапускать». Тик перезапустит окно с новыми плагинами, когда оно закончит ход; "
+        print(f"{name}: отмечено «можно перезапускать». Плановый проход перезапустит окно с новыми плагинами, когда оно закончит ход; "
               "работающее окно не тронет")
         return 0
     if name not in (m.get("sessions") or []):
