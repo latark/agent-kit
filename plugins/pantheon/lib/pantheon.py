@@ -35,6 +35,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon status                       один экран для отладки: плановый проход, сессии, вопросы к вам, тревоги, защиты, sync, места heavy, версии
   pantheon night [status|report]        недельный лимит: неделя, линия, запас, зона, ночь, снимок; report — блок
                                         «Лимит» для сводки (вечерний вопрос и ночь ведёт дежурный, lib/night.py)
+  pantheon read request|run|status|cancel   чтение личного чата по заявке (metis-0267, lib/read.py): заявка → ваше
+                                        «да» на [read-<rid>] → выгрузка и разбор плановым проходом → вы одобряете пункты
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
@@ -334,7 +336,7 @@ def clear_once(key):
 JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
-                    "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder"}
+                    "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder", "read"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 # Окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` из schedule.toml идёт с песочницей
 # settings/job-<роль>.json (собирает sandbox_build), а не без неё. Роль вне таблицы тик не запускает. write — куда
@@ -396,6 +398,8 @@ def parse_command(cmd):
             return None  # install (claude mcp add уровня пользователя) и прочее — только руками
         if argv[1] == "plugins" and (argv[2:3] != ["update"] or any(a != "--quiet" for a in argv[3:])):
             return None
+        if argv[1] == "read" and argv[2:] != ["run"]:
+            return None  # заявку подаёт окно, а не задача прохода; проход — только `read run`
         return [os.path.join(PLUGIN, "bin", "pantheon")] + argv[1:]
     if argv[0] == "claude":
         if argv[1:2] != ["-p"]:
@@ -4567,6 +4571,21 @@ def night_mod():
     return _NIGHT
 
 
+_READ = None
+
+
+def read_mod():
+    """lib/read.py — чтение личного чата по заявке с согласием владельца (metis-0267)."""
+    global _READ
+    if _READ is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_read", os.path.join(LIB, "read.py"))
+        _READ = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_READ)
+        _READ.set_core(sys.modules[__name__])
+    return _READ
+
+
 _MMV = None
 
 
@@ -5589,6 +5608,8 @@ def main(argv):
         return awake_mod().reboot_reminder(rest)
     if cmd == "night":
         return night_mod().main(rest)
+    if cmd == "read":
+        return read_mod().main(rest)
     if cmd == "mmv":
         return mmv_mod().main(rest, STATE, now())
     if cmd == "qmd":
