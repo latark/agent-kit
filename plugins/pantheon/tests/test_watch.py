@@ -1973,6 +1973,163 @@ def test_autostart_nudge_week_limit_0212():
     e.run("watch", t=T0 + 200)
     check(["respawn", "e0ee7001"] in e.calls(), f"0212: зелёная неделя — задание не передано: {e.calls()}")
 
+
+def respawn_env(name, sid, since=T0 - 50, state="done", status=None):
+    """metis-0181: окно направления поднято до установки плагинов (startedAt T0-100 < since), отметка respawn.json стоит,
+    транскрипт старый (час назад) и маленький — свежего старта нет, только respawn."""
+    e = Env()
+    e.direction(name)
+    a = bg(name, state, sid, pid=51)
+    if status:
+        a["status"] = status
+    e.agents([a])
+    tp = transcript(e, a, 20_000, T0 - 3600)
+    os.makedirs(e.st("plugins"), exist_ok=True)
+    json.dump({"since": since, "plugins": ["pantheon"], "done": []}, open(e.st("plugins", "respawn.json"), "w"))
+    return e, a, tp
+
+
+def subagent(tp, mtime, n="a1"):
+    """Журнал субагента там, где его пишет Claude Code: <папка транскрипта>/<sessionId>/subagents/agent-*.jsonl."""
+    d = os.path.join(tp[:-len(".jsonl")], "subagents")
+    os.makedirs(d, exist_ok=True)
+    f = os.path.join(d, f"agent-{n}.jsonl")
+    open(f, "w").write("{}\n")
+    os.utime(f, (mtime, mtime))
+    return f
+
+
+def worktree(e, name, mtime):
+    """Копия лида под .claude/worktrees/ в папке направления: всё в ней (и сами папки) — со временем mtime."""
+    wt = os.path.join(e.doms[name][0], ".claude", "worktrees", "lead-a")
+    os.makedirs(os.path.join(wt, "src"), exist_ok=True)
+    open(os.path.join(wt, "src", "f.py"), "w").write("x = 1\n")
+    for p in (os.path.join(wt, "src", "f.py"), os.path.join(wt, "src"), wt):
+        os.utime(p, (mtime, mtime))
+    return wt
+
+
+def respawned(e, short):
+    return ["respawn", short] in e.calls()
+
+
+def test_plugins_respawn_live_subagent_0181():
+    """metis-0181: окно idle (закончило ход), а его субагент писал 5 мин назад — лид работает, окно не перезапускается,
+    отметка стоит; субагент затих 15+ мин назад — перезапуск, отметка снята, строка в тревогах."""
+    e, a, tp = respawn_env("rs-dir", "a5a5a5a5-1")
+    sub = subagent(tp, T0 - 300)
+    e.run("watch", t=T0)
+    check(not respawned(e, "a5a5a5a5") and os.path.exists(e.st("plugins", "respawn.json")),
+          f"0181: idle с субагентом, писавшим 5 мин назад, перезапущено: {e.calls()}")
+    os.utime(sub, (T0 - 1200, T0 - 1200))
+    r = e.run("watch", t=T0 + 60)
+    check(respawned(e, "a5a5a5a5"), f"0181: субагент затих 20 мин назад — не перезапущено: {e.calls()} {r.stderr[-300:]}")
+    pushed = e.st("push", "a5a5a5a5-1.txt")
+    check(os.path.exists(pushed) and "[Пантеон: перезапуск после обновления плагинов]" in open(pushed).read(),
+          "0181: перезапуску не передан текст «перезапуск после обновления плагинов»")
+    check(not os.path.exists(e.st("plugins", "respawn.json")), "0181: все перезапущены — отметка не снята")
+    check("перезапуск после обновления плагинов (pantheon): перезапущены rs-dir" in e.alerts(),
+          f"0181: нет строки в тревогах: {e.alerts()}")
+
+
+def test_plugins_respawn_idle_free_0181():
+    """metis-0181: idle, транскрипт и субагенты старше 15 мин, worktree нет — перезапуск. Свежая worktree лида в папке
+    направления держит окно; поднятое после установки и Зевс — не кандидаты."""
+    e, a, tp = respawn_env("rf-dir", "b6b6b6b6-1")
+    subagent(tp, T0 - 1800)
+    wt = worktree(e, "rf-dir", T0 - 300)
+    e.run("watch", t=T0)
+    check(not respawned(e, "b6b6b6b6"), f"0181: worktree лида менялась 5 мин назад — перезапущено: {e.calls()}")
+    shutil.rmtree(wt)
+    os.utime(os.path.dirname(wt), (T0 - 3600, T0 - 3600))
+    e.run("watch", t=T0 + 60)
+    check(respawned(e, "b6b6b6b6"), f"0181: idle 15+ мин без субагентов и worktree — не перезапущено: {e.calls()}")
+    check(not os.path.exists(e.st("plugins", "respawn.json")), "0181: отметка не снята после перезапуска")
+    # поднято после установки (startedAt > since) — не кандидат, отметка снимается: кандидатов нет
+    e, a, tp = respawn_env("ra-dir", "c7c7c7c7-1", since=T0 - 200)
+    e.run("watch", t=T0)
+    check(not respawned(e, "c7c7c7c7") and not os.path.exists(e.st("plugins", "respawn.json")),
+          f"0181: перезапущено окно, поднятое после установки: {e.calls()}")
+    # Зевс поднят до установки, свободен и окно штаба есть — всё равно не трогаем (его перезапускаете вы)
+    e, a, tp = respawn_env("rz-dir", "c8c8c8c8-1", since=T0 - 200)
+    json.dump({"env": {}}, open(e.st("settings", "hq.json"), "w"))
+    e.direction("zeus")  # окно есть: без исключения Зевса тик дошёл бы до respawn, а не споткнулся о «нет окна»
+    z = bg("zeus", "done", "d8d8d8d8-1", pid=52, started=T0 - 1000)
+    e.agents([a, z])
+    transcript(e, z, 20_000, T0 - 3600)
+    e.run("watch", t=T0)
+    check(not respawned(e, "d8d8d8d8") and not [c for c in e.calls() if "--resume" in c or c[:1] == ["stop"]]
+          and "\tzeus\td8d8d8d8\tplugins-respawn" not in _start_log(e),
+          f"0181: Зевс перезапущен тиком: {e.calls()} {_start_log(e)!r}")
+
+
+def test_plugins_respawn_empty_agents_0181():
+    """metis-0181, ревью argus: пустой claude agents ([]) — не «все перезапущены»: отметка respawn.json остаётся."""
+    e, a, tp = respawn_env("re-dir", "c9c9c9c9-1")
+    e.agents([])
+    e.run("watch", t=T0)
+    check(os.path.exists(e.st("plugins", "respawn.json")), "0181: пустой claude agents снял отметку перезапуска")
+
+
+def test_plugins_respawn_wait_alert_0181():
+    """metis-0181, ревью argus: окна, которые ждут, видны строкой в тревогах и без перезапусков — одна строка на набор
+    окон (не на каждом проходе); ожидание кончилось — следующий набор снова строкой."""
+    e, a, tp = respawn_env("rw-dir", "cacacaca-1")
+    subagent(tp, T0 - 300)
+    e.run("watch", t=T0)
+    e.run("watch", t=T0 + 60)
+    line = "перезапуск после обновления плагинов (pantheon) ждёт: rw-dir (субагент писал меньше 15 мин назад)"
+    check(e.alerts().count(line) == 1 and not respawned(e, "cacacaca"),
+          f"0181: нет строки «ждёт» или она на каждом проходе: {e.alerts()}")
+
+
+def test_plugins_respawn_ok_mark_0181():
+    """metis-0181: метка «можно» (pantheon saved без техперезапуска) — перезапуск сразу, хоть транскрипт и свежий;
+    busy — нет даже с меткой. Без отметки respawn.json pantheon saved отмечать нечего."""
+    e, a, tp = respawn_env("rk-dir", "e9e9e9e9-1", state="working", status="busy")
+    os.utime(tp, (T0 - 60, T0 - 60))
+    r = e.run("saved", "--by", "rk-dir", "--state", "STATUS.md", t=T0)
+    check(r.returncode == 0 and os.path.exists(e.st("plugins", "respawn-ok", "rk-dir.json")),
+          f"0181: pantheon saved не поставил метку «можно»: {r.returncode} {r.stdout} {r.stderr}")
+    check(not os.path.exists(e.st("maintenance", "rk-dir.json")), "0181: метка «можно» легла в maintenance/")
+    e.run("watch", t=T0 + 10)
+    check(not respawned(e, "e9e9e9e9") and os.path.exists(e.st("plugins", "respawn.json")),
+          f"0181: busy с меткой «можно» перезапущено: {e.calls()}")
+    a["status"] = "idle"
+    e.agents([a])
+    e.run("watch", t=T0 + 20)
+    check(respawned(e, "e9e9e9e9"), f"0181: idle с меткой «можно» не перезапущено: {e.calls()}")
+    check(not os.path.exists(e.st("plugins", "respawn.json"))
+          and not os.path.exists(e.st("plugins", "respawn-ok", "rk-dir.json")), "0181: отметка и метка не сняты")
+    # без метки тот же свежий транскрипт держит окно
+    e, a, tp = respawn_env("rn-dir", "f0f0f0f0-1")
+    os.utime(tp, (T0 - 60, T0 - 60))
+    e.run("watch", t=T0)
+    check(not respawned(e, "f0f0f0f0"), f"0181: транскрипт менялся минуту назад, метки нет — перезапущено: {e.calls()}")
+    # метка старше since (прошлого обновления) не считается
+    os.makedirs(e.st("plugins", "respawn-ok"), exist_ok=True)
+    json.dump({"t": T0 - 100}, open(e.st("plugins", "respawn-ok", "rn-dir.json"), "w"))
+    e.run("watch", t=T0 + 10)
+    check(not respawned(e, "f0f0f0f0"), f"0181: метка старше since сочтена «можно»: {e.calls()}")
+    e2 = Env()
+    r = e2.run("saved", "--by", "rk-dir", "--state", "STATUS.md", t=T0)
+    check(r.returncode == 1 and "отмечать нечего" in r.stdout, f"0181: saved без отметки: {r.returncode} {r.stdout}")
+
+
+
+def test_plugins_respawn_recheck_0181():
+    """metis-0181: под блокировкой имени перед перезапуском — свежий claude agents: окно, получившее ввод между проходом
+    и перезапуском (status busy), не перезапускается, строка resume-skip в start.log, отметка стоит."""
+    e, a, tp = respawn_env("rr-dir", "a1b2c3d4-1")
+    b = dict(a, state="working", status="busy")
+    nxt = os.path.join(e.tmp, "agents-next.json")
+    json.dump([b], open(nxt, "w"))
+    e.run("watch", t=T0, extra={"FAKE_AGENTS_NEXT": nxt})
+    check(not respawned(e, "a1b2c3d4") and "\tresume-skip\trr-dir\ta1b2c3d4\tplugins-respawn\tзанято" in _start_log(e)
+          and os.path.exists(e.st("plugins", "respawn.json")),
+          f"0181: окно, занятое к моменту перезапуска, перезапущено: {e.calls()} {_start_log(e)!r}")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
