@@ -644,6 +644,7 @@ def main():
     K = lambda rel: os.path.join(home, "ai", "knowledge", rel)
     A = lambda name: ("Agent", {"subagent_type": name, "description": "x", "prompt": "x"})
     HQ = {"PANTHEON_ROLE": "hq"}  # env окна штаба (pantheon start zeus), guard 0.5.5
+    TL = {"PANTHEON_ROLE": "themis-library"}  # env окна координатора (tg-role, metis-0267)
     TGR = "tg_read" + ".py"  # имя скрипта tg-read: так этот файл не задевает правило tg-secret живого хука
     br, ak, alex, ws = "projects/shopKeeperApp", "projects/agent-kit", "projects/sitebuilder", "projects/workshop/visa"
     ec, lw = "projects/lecture-notes", "projects/law-feed"
@@ -985,6 +986,68 @@ def main():
         ("hq-telegram: Skill telegram-read из окна координатора — можно", "allow", lw, "domain-coordinator", False,
          ("Skill", {"skill": "telegram-read"}), None, {"PANTHEON_ROLE": "themis-library"}),
         ("hq-telegram: Agent tg-reader из вашей сессии — можно", "allow", ".", "", False, A("tg-reader")),
+        # metis-0267: личную переписку выгружает только исполнитель pantheon read — окну любой роли отказ
+        ("tg-role: координатор history — отказ", "deny", lw, "domain-coordinator", False,
+         B("~/projects/other/tg-read/" + TGR + " history 12345 --days 3"), None, TL),
+        ("tg-role: главная сессия окна без agent_type, search — отказ", "deny", lw, "", False,
+         B("cd ~/projects/other/tg-read && ./" + TGR + " search 'договор'"), None, TL),
+        ("tg-role: координатор unread — отказ", "deny", lw, "domain-coordinator", False,
+         B("uv run --project ~/projects/other/tg-read ~/projects/other/tg-read/" + TGR + " unread"), None, TL),
+        ("tg-role: координатор context — отказ", "deny", lw, "domain-coordinator", False,
+         B('python3 "$HOME/projects/other/tg-read/' + TGR + '" context 12345 77'), None, TL),
+        ("tg-role: субагент tg-reader в окне роли, download — отказ", "deny", lw, "tg-reader", True,
+         B("~/projects/other/tg-read/" + TGR + " download 12345 --files-max 3"), None, TL),
+        ("tg-role: координатор к сокету tg-readd — отказ", "deny", lw, "domain-coordinator", False,
+         B('nc -U "$HOME/Library/Application Support/tg-read/tg-readd.sock"'), None, TL),
+        # ревью argus PR #61: форма из навыка telegram-read и обёртки — команды из bash_analysis
+        ("tg-role: T=…; $T history (форма навыка) — отказ", "deny", lw, "domain-coordinator", False,
+         B("T=~/projects/other/tg-read/" + TGR + "; $T history 12345 --days 7 -o x.md"), None, TL),
+        ("tg-role: T=… с новой строки, $T history — отказ", "deny", lw, "domain-coordinator", False,
+         B("T=~/projects/other/tg-read/" + TGR + '\n$T history "ЧАТ" --days 7'), None, TL),
+        ("tg-role: C=history; tg_read.py $C — отказ", "deny", lw, "domain-coordinator", False,
+         B("C=history; ~/projects/other/tg-read/" + TGR + " $C 1"), None, TL),
+        ("tg-role: перенос \\ перед подкомандой — отказ", "deny", lw, "domain-coordinator", False,
+         B("~/projects/other/tg-read/" + TGR + " \\\n  history 1"), None, TL),
+        ("tg-role: tg_read.py -- history — отказ", "deny", lw, "domain-coordinator", False,
+         B("~/projects/other/tg-read/" + TGR + " -- history 1"), None, TL),
+        ("tg-role: echo history | xargs tg_read.py — отказ", "deny", lw, "domain-coordinator", False,
+         B("echo history 1 | xargs ~/projects/other/tg-read/" + TGR), None, TL),
+        ("tg-role: подкоманда из $(…) — отказ", "deny", lw, "domain-coordinator", False,
+         B("~/projects/other/tg-read/" + TGR + " $(echo history) 1"), None, TL),
+        ("tg-role: имя скрипта другим регистром — отказ", "deny", lw, "domain-coordinator", False,
+         B("~/projects/other/tg-read/" + TGR.upper() + " history 1"), None, TL),
+        ("tg-role: bash -c с history — отказ", "deny", lw, "domain-coordinator", False,
+         B("bash -c '~/projects/other/tg-read/" + TGR + " search x'"), None, TL),
+        ("tg-role: status, затем history в одной команде — отказ", "deny", lw, "domain-coordinator", False,
+         B("~/projects/other/tg-read/" + TGR + " status; ~/projects/other/tg-read/" + TGR + " history 1"), None, TL),
+        ("tg-role: команду не разобрать (шаблон zsh с кодом), в ней скрипт — отказ", "deny", lw, "domain-coordinator",
+         False, B("~/projects/other/tg-read/" + TGR + " history *(e:true:)"), None, TL),
+        ("tg-role: имя скрипта шаблоном tg_rea?.py — отказ", "deny", lw, "domain-coordinator", False,
+         B("~/projects/other/tg-read/tg_rea?.py history 1"), None, TL),
+        ("tg-role: сокет шаблоном tg-read/*.sock — отказ", "deny", lw, "domain-coordinator", False,
+         B('nc -U "$HOME/Library/Application Support/tg-read/"*.sock'), None, TL),
+        ("tg-role: чужой шаблон /tmp/*.sock — можно", "allow", lw, "domain-coordinator", False,
+         B("ls /tmp/*.sock"), None, TL),
+        ("tg-role: T=…; $T posts — можно", "allow", lw, "domain-coordinator", False,
+         B("T=~/projects/other/tg-read/" + TGR + "; $T posts @lawfeed --days 2"), None, TL),
+        ("tg-role: python3 tg_read.py posts — можно", "allow", lw, "domain-coordinator", False,
+         B("python3 ~/projects/other/tg-read/" + TGR + " posts @lawfeed"), None, TL),
+        ("tg-role: grep history по tg_read.py — можно", "allow", lw, "domain-coordinator", False,
+         B("grep -n history ~/projects/other/tg-read/" + TGR), None, TL),
+        ("tg-role: координатор posts — можно", "allow", lw, "domain-coordinator", False,
+         B("~/projects/other/tg-read/" + TGR + " posts @lawfeed --days 2"), None, TL),
+        ("tg-role: координатор posts со словом history в аргументах — можно", "allow", lw, "domain-coordinator", False,
+         B("~/projects/other/tg-read/" + TGR + " posts @lawfeed --search history"), None, TL),
+        ("tg-role: координатор status, chats, folders — можно", "allow", lw, "domain-coordinator", False,
+         B("; ".join(
+             "~/projects/other/tg-read/" + TGR + " " + c for c in ("status", "chats", "folders"))), None, TL),
+        ("tg-role: координатор verify и split — можно", "allow", lw, "domain-coordinator", False,
+         B("~/projects/other/tg-read/" + TGR + " verify a.md b.txt && ~/projects/other/tg-read/" + TGR
+           + " split b.txt"), None, TL),
+        ("tg-role: без роли (плановый проход) history — можно", "allow", ".", "", False,
+         B("~/projects/other/tg-read/" + TGR + " history 12345 --days 3")),
+        ("tg-role: без роли к сокету tg-readd — можно", "allow", ".", "", False,
+         B('nc -U "$HOME/Library/Application Support/tg-read/tg-readd.sock"')),
         # metis-0047: пульт окон — только привилегированным
         ("координатор: pantheon stop --all — отказ", "deny", br, "domain-coordinator", False, B("pantheon stop --all")),
         ("координатор: pantheon resume — отказ", "deny", br, "domain-coordinator", False, B("pantheon resume athena-shop")),
@@ -1542,6 +1605,20 @@ def main():
         mark = "ok  " if got == want else "FAIL"
         failed += got != want
         print(f"{mark} {name}: {got}")
+    # tg-role (metis-0267): отказ называет путь — заявку pantheon read
+    out = run(home, lw, "domain-coordinator", "Bash", {"command": "~/projects/other/tg-read/" + TGR + " history 1"},
+              raw=True, penv=TL)
+    ok = '"deny"' in out and "tg-role" in out and "выгрузка личного чата — через pantheon read request" in out
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} tg-role: текст отказа — через pantheon read request")
+    # неразобранная команда со скриптом — отказ именно tg-role, а не только domain (ревью argus PR #61)
+    out = run(home, lw, "domain-coordinator", "Bash",
+              {"command": "~/projects/other/tg-read/" + TGR + " history *(e:true:)"}, raw=True, penv=TL)
+    ok = '"deny"' in out and "Правило tg-role" in out
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} tg-role: команду не разобрать, а в ней скрипт — отказ правилом tg-role")
     # [merge] со строкой вместо списка не открывает слияние всем (ревью argus 15.10)
     home2 = os.path.realpath(tempfile.mkdtemp(prefix="guard-test-"))
     setup(home2)
