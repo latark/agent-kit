@@ -533,8 +533,9 @@ def main():
               f"строка {how}-skip в start.log",
               r.returncode == 0 and not c and not os.path.exists(run_file)
               and f"{how}-skip\tathena-shop\twake\tнет окна: окно не собрано" in slog())
-        check(f"wake без окна ({how}): stdout «не поднимаю: … нет окна», без «поднимаю:» (metis-0189)",
-              "не поднимаю: athena-shop (a1, " in r.stdout and "нет окна" in r.stdout
+        check(f"wake без окна ({how}): stdout «не поднимаю: … — см. тревогу», без причины и без «поднимаю:» (metis-0189)",
+              "не поднимаю: athena-shop (a1, " in r.stdout and "— см. тревогу" in r.stdout
+              and "нет окна" not in r.stdout
               and "поднимаю: athena-shop" not in r.stdout.replace("не поднимаю: athena-shop", ""))
     al1 = open(alerts_md).read()[len(al0):] if os.path.exists(alerts_md) else ""
     check("wake без окна: одна тревога на причину — называет файл и правило; без тревоги «не поднялась (код …)»",
@@ -634,6 +635,9 @@ def main():
           r.returncode == 0 and not calls() and "resume-skip\tathena-shop\twake\tпапка сессии" in slog()
           and "сессия работала в" in al1 and "Bash(gh pr *)" in al1 and "не поднялась" not in al1
           and os.path.exists(win_file))
+    check("wake, путь cwd: stdout «не поднимаю: athena-shop», без «нет окна» (окно цело) и без «поднимаю:» (metis-0189)",
+          "не поднимаю: athena-shop" in r.stdout and "нет окна" not in r.stdout
+          and "поднимаю: athena-shop" not in r.stdout.replace("не поднимаю: athena-shop", ""))
     _shutil.rmtree(sub)
     r, c = wake_case(90_000, 10)
     check("allow убран отовсюду — wake снова поднимает respawn", [x["argv"] for x in c] == [["respawn", "a1"]])

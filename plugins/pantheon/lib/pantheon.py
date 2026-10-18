@@ -3208,7 +3208,7 @@ def _wake(dry):
         else:
             rc, _ = resume_session(name, a, WAKE_TEXT, "wake", recheck=lambda n=name, s=state: wake_recheck(n, s))
         if rc == NO_WINDOW:  # «нет окна» — своя тревога, одна на причину; владельцу не говорим, что подняли (metis-0189)
-            print(f"не поднимаю: {name} ({a.get('id')}, {state}) — нет окна, см. тревогу")
+            print(f"не поднимаю: {name} ({a.get('id')}, {state}) — см. тревогу")
         else:
             print(f"поднимаю: {line}")
             if rc:
