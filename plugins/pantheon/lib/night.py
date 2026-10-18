@@ -5,7 +5,8 @@
 
 Снимок лимита пишет строка статуса Claude Code в ~/.local/state/claude-statusline/ (путь — от HOME, как LIMIT_SNAPSHOT):
 `five-hour` — «pct resets_at now», `seven-day` — «pct resets_at now», `week-usage` — строки «now resets_at pct» (до 200).
-Неделя берётся из seven-day, без него — из последней строки week-usage. Время замера — наибольшее now этих файлов.
+Неделя — неубывающий снимок: наибольший pct по seven-day и строкам week-usage того же resets_at (допуск 1 ч), resets_at и
+время — от самого свежего замера; без seven-day — по week-usage. Время замера — наибольшее now этих файлов.
 Снимок старше snapshot_ok_min или его нет — лимит неизвестен, новое не запускается; старше snapshot_max_min — ещё и
 строка в тревогах (её Зевс несёт в сводку). Пробного запроса к модели нет. resets_at в прошлом или недели нет — новая
 неделя с неизвестным расходом: закрыто, пока строка статуса не запишет новый снимок.
@@ -166,15 +167,19 @@ def week_lines():
 
 
 def snapshot():
-    """{"five": (pct, resets, at)|None, "week": (pct, resets, at)|None, "at": время замера|None}."""
+    """{"five": (pct, resets, at)|None, "week": (pct, resets, at)|None, "at": время замера|None}.
+    Неделя не убывает в пределах окна сброса: pct — максимум по seven-day и строкам week-usage с тем же resets_at
+    (допуск 1 ч), resets и at — от самого свежего замера (простаивающее окно пишет старый pct позже других)."""
     five = _nums(_text(P.LIMIT_SNAPSHOT).strip())
     sd = _nums(_text(os.path.join(statusline_dir(), "seven-day")).strip())
-    week = tuple(sd) if sd else None
-    if week is None:
-        wl = week_lines()
-        if wl:
-            now_, resets, pct = wl[-1]
-            week = (pct, resets, now_)
+    rows = [(pct, resets, now_) for now_, resets, pct in week_lines()]
+    if sd:
+        rows.append(tuple(sd))
+    week = None
+    if rows:
+        last = max(rows, key=lambda r: r[2])
+        same = [r[0] for r in rows if abs(r[1] - last[1]) <= 3600]
+        week = (max(same), last[1], last[2])
     ats = [x[2] for x in (five, week) if x]
     return {"five": tuple(five) if five else None, "week": week, "at": max(ats) if ats else None}
 
@@ -271,6 +276,15 @@ def budget(m, d, cfg):
     return round(min(total, nl["cap_pct"]), 2), False
 
 
+def used_mono(st, m):
+    """Расход недели без скачков назад: в том же окне сброса не меньше st["last_used"]."""
+    u = m["used"]
+    if (u is not None and st.get("last_used") is not None and st.get("resets_at") and m.get("resets")
+            and abs(m["resets"] - float(st["resets_at"])) <= 3600):
+        return max(u, float(st["last_used"]))
+    return u
+
+
 def spent(st, m):
     """Расход ночи в п. п. недели; неделя сбросилась посреди ночи — прошлая до сброса плюс новая."""
     if not m["known"] or st.get("start_pct") is None:
@@ -278,7 +292,7 @@ def spent(st, m):
     if st.get("resets_at") and abs(m["resets"] - float(st["resets_at"])) > 3600:
         sp = float(st.get("last_used") or st["start_pct"]) - float(st["start_pct"]) + m["used"]
     else:
-        sp = m["used"] - float(st["start_pct"])
+        sp = used_mono(st, m) - float(st["start_pct"])
     return round(max(0.0, sp), 3)
 
 
@@ -531,7 +545,10 @@ def evening_pass(d, m, t, cfg):
                     + (" (последняя ночь перед сбросом)" if last_night else ""), "night")
     if st["opened_at"] and not st["skipped"] and m["known"]:
         st["spent"] = spent(st, m)
-        st["last_used"], st["resets_at"] = m["used"], m["resets"]
+        if st.get("resets_at") and abs(m["resets"] - float(st["resets_at"])) > 3600:
+            # неделя сбросилась посреди ночи: база переносится, чтобы следующие проходы считали used − start_pct
+            st["start_pct"] = float(st["start_pct"]) - float(st.get("last_used") or st["start_pct"])
+        st["last_used"], st["resets_at"] = used_mono(st, m), m["resets"]
         b = float(st["budget_pct"])
         for th in THRESHOLDS:
             if st["spent"] >= b * th / 100 - 1e-9 and th not in st["alerts"]:

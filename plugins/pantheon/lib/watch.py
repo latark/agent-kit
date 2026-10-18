@@ -1035,8 +1035,9 @@ def sanction_since(t, preview=False):
 
 
 def owner_marked(since):
-    """id задач, по которым есть ваше решение позже since: ход на доске или ответ Зевсу окном вопросов."""
-    ids = set()
+    """id задач, по которым есть ваше решение позже since: ход на доске или ответ Зевсу окном вопросов —
+    списком в порядке первой отметки (по времени)."""
+    first = {}  # id -> время первой отметки
     with contextlib.suppress(OSError):
         for line in open(P.path("owner-log", "board.jsonl"), encoding="utf-8"):
             try:
@@ -1048,21 +1049,25 @@ def owner_marked(since):
                 continue
             kind = rec.get("kind")
             if kind == "move" and rec.get("dst") in ("Очередь", "В работе") or kind in ("new", "answer", "request"):
-                ids.add(rec["id"])
+                first[rec["id"]] = min(ts, first.get(rec["id"], ts))
     with contextlib.suppress(OSError):
         text = open(P.path("owner-log", "zeus.md"), encoding="utf-8").read()
         heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
         for i, m in enumerate(heads):
             if m.group(2).strip() != "· окно вопросов":
                 continue
-            with contextlib.suppress(ValueError):
-                if datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp() < since:
-                    continue
+            try:
+                ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+            except ValueError:
+                ts = since
+            if ts < since:
+                continue
             body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
             q = re.match(r"вопрос: \[([a-z][a-z0-9]*-\d{4})\]", body, re.I)
             if q:
-                ids.add(q.group(1).lower())
-    return ids
+                qid = q.group(1).lower()
+                first[qid] = min(ts, first.get(qid, ts))
+    return [i for i, _ in sorted(first.items(), key=lambda kv: kv[1])]  # sorted устойчива: при равном времени — порядок вставки
 
 
 def trusted(folder):
@@ -1175,9 +1180,10 @@ def autostart(agents, registry, doms, t, dry=False):
     since = sanction_since(t, preview=dry)
     marked = owner_marked(since)
     want = {}
-    for tid, (_, h, _) in sorted(tasks.items()):
+    for tid in marked:  # порядок отметок владельца
+        h = (tasks.get(tid) or (None, {}, None))[1]
         d = h.get("direction")
-        if h.get("status") in ("todo", "doing") and tid in marked and d in doms:
+        if h.get("status") in ("todo", "doing") and d in doms:
             want.setdefault(d, []).append(tid)
     say(f"решения владельца учитываются с {P.stamp(since)}; задачи с ними: "
         + ("; ".join(f"{d}: {', '.join(v)}" for d, v in sorted(want.items())) or "нет"))
@@ -1242,7 +1248,7 @@ def autostart(agents, registry, doms, t, dry=False):
                 P.alert_once(f"autostart-wait-{d}", f"{today(t)}-{why[:40]}", f"самозапуск {d} ждёт: {why} (задачи "
                              f"{', '.join(tids[:3])})", "watch")
             continue
-        task = (f"Самозапуск дежурным по задачам с вашим решением: {', '.join(tids[:5])}. Прочитай STATUS.md и "
+        task = (f"Самозапуск дежурным по задачам с вашим решением (в порядке ваших отметок): {', '.join(tids)}. Прочитай STATUS.md и "
                 "задачи, продолжай с первой по приоритету; что ждёт владельца — Зевсу строкой.")
         s.update(last=t, pending=True)
         P.write_json(P.path("autostart.json"), st)  # до запуска: проход могут оборвать по таймауту

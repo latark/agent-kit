@@ -215,6 +215,44 @@ def test_autostart_only_new_sanctions():
     check("нет доверия" in e2.alerts(), "тревога о доверии")
 
 
+def test_autostart_batch_in_owner_order_0242():
+    """Пачка из 7 отметок владельца уходит в задание целиком и в порядке отметок, а не по алфавиту и не первыми пятью."""
+    e = Env()
+    e.direction("athena-x")
+    order = [7, 3, 5, 1, 6, 2, 4]
+    for n in range(1, 8):
+        e.task(f"athena-000{n}", "athena-x")
+    e.run("watch", t=T0)
+    for i, n in enumerate(order):
+        e.board(f"athena-000{n}", T0 + 100 + i * 10)
+    e.board("athena-0003", T0 + 400)  # повторная отметка порядок не меняет
+    e.run("watch", t=T0 + 500)
+    starts = [c for c in e.calls() if c[:1] == ["--bg"]]
+    check(len(starts) == 1, f"самозапуск не пошёл: {e.calls()}")
+    text = " ".join(starts[0])
+    want = ", ".join(f"athena-000{n}" for n in order)
+    check(want in text, f"в задании нет всей пачки в порядке отметок ({want}): {text[-500:]}")
+
+
+def test_autostart_order_board_vs_zeus_0242():
+    """Отметки из board.jsonl и ответ окном вопросов (zeus.md) идут одним списком по времени, а не «сначала board»."""
+    e = Env()
+    e.direction("athena-x")
+    for n in (1, 2, 3):
+        e.task(f"athena-000{n}", "athena-x")
+    e.run("watch", t=T0)
+    e.board("athena-0002", T0 + 100)
+    with open(e.st("owner-log", "zeus.md"), "w") as fh:
+        fh.write(f"## {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(T0 + 50))} · окно вопросов\n"
+                 "вопрос: [athena-0001] что-то\n\n")
+    e.board("athena-0003", T0 + 150)
+    e.run("watch", t=T0 + 500)
+    starts = [c for c in e.calls() if c[:1] == ["--bg"]]
+    check(len(starts) == 1, f"самозапуск не пошёл: {e.calls()}")
+    want = "athena-0001, athena-0002, athena-0003"
+    check(want in " ".join(starts[0]), f"порядок board/zeus.md нарушен ({want}): {' '.join(starts[0])[-400:]}")
+
+
 def _give_up(e):
     """Три сбоя самозапуска hermes-x подряд — самозапуск встаёт. → время последнего прохода."""
     e.direction("hermes-x")
