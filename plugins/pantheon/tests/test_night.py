@@ -202,7 +202,7 @@ def test_week_monotonic_0243():
     e.snap(t - 60, 38, resets)  # seven-day 38
     e.week_usage([(t - 300, resets, 40), (t - 200, resets, 38), (t - 100, resets + 600, 40)])
     s = N.snapshot()
-    check(s["week"][0] == 40 and s["week"][1] == resets + 600 - 600 or s["week"][0] == 40, f"максимум не взят: {s}")
+    check(s["week"] == (40, resets, t - 60), f"максимум не взят или сброс/время не от свежей строки: {s}")
     check(N.measure(t)["used"] == 40, f"used не 40: {N.measure(t)}")
     # другое окно сброса (разница > 1 ч) в максимум не входит
     e2 = Env()
@@ -519,6 +519,24 @@ def test_night_alerts_and_close():
     rep = N.report_lines(hm("09:00"))
     check(any(ln.startswith("Ночь 15.10: открыта с 23:05, потрачено 3 из 3 %") and "тревоги: 50 %, 80 %, 100 %" in ln
               for ln in rep), f"сводка: {rep}")
+
+
+def test_reset_mid_night_two_passes_0243():
+    """Сброс недели посреди ночи: расход ночи верен и на первом проходе после сброса, и на следующих."""
+    e = Env()
+    open_night(e, hm("23:05"))
+    t0 = hm("23:06")
+    u0 = e.at_line(t0, 0)
+    e.watch(t0)
+    e.snap(hm("23:30"), u0 + 1.0, e.resets)
+    e.watch(hm("23:30"))
+    check(e.state_of()["spent"] == 1.0, f"до сброса: {e.state_of()}")
+    new = e.resets + 7 * 86400
+    for x, used, want in (("00:30", 0.5, 1.5), ("01:00", 1.0, 2.0), ("01:30", 1.2, 2.2)):
+        e.snap(hm(x), used, new)
+        e.watch(hm(x))
+        got = e.state_of()["spent"]
+        check(abs(got - want) < 1e-6, f"{x} после сброса: spent {got}, ждали {want}: {e.state_of()}")
 
 
 def test_fractional_budget():

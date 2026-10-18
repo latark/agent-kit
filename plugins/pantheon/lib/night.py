@@ -5,7 +5,8 @@
 
 Снимок лимита пишет строка статуса Claude Code в ~/.local/state/claude-statusline/ (путь — от HOME, как LIMIT_SNAPSHOT):
 `five-hour` — «pct resets_at now», `seven-day` — «pct resets_at now», `week-usage` — строки «now resets_at pct» (до 200).
-Неделя берётся из seven-day, без него — из последней строки week-usage. Время замера — наибольшее now этих файлов.
+Неделя — неубывающий снимок: наибольший pct по seven-day и строкам week-usage того же resets_at (допуск 1 ч), resets_at и
+время — от самого свежего замера; без seven-day — по week-usage. Время замера — наибольшее now этих файлов.
 Снимок старше snapshot_ok_min или его нет — лимит неизвестен, новое не запускается; старше snapshot_max_min — ещё и
 строка в тревогах (её Зевс несёт в сводку). Пробного запроса к модели нет. resets_at в прошлом или недели нет — новая
 неделя с неизвестным расходом: закрыто, пока строка статуса не запишет новый снимок.
@@ -544,6 +545,9 @@ def evening_pass(d, m, t, cfg):
                     + (" (последняя ночь перед сбросом)" if last_night else ""), "night")
     if st["opened_at"] and not st["skipped"] and m["known"]:
         st["spent"] = spent(st, m)
+        if st.get("resets_at") and abs(m["resets"] - float(st["resets_at"])) > 3600:
+            # неделя сбросилась посреди ночи: база переносится, чтобы следующие проходы считали used − start_pct
+            st["start_pct"] = float(st["start_pct"]) - float(st.get("last_used") or st["start_pct"])
         st["last_used"], st["resets_at"] = used_mono(st, m), m["resets"]
         b = float(st["budget_pct"])
         for th in THRESHOLDS:
