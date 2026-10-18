@@ -470,21 +470,15 @@ def main():
     r = run("wake")
     check("wake: задача «ждёт» — не будит", r.returncode == 0 and not calls() and "будить некого" in r.stdout)
 
-    # wake hestia (metis-0217): служебная роль встаёт только с id существующей задачи
+    # wake hestia (metis-0217, шаг 1): без окна песочницы запуск всегда отказ, код 2, claude не зовётся
     task("athena-0001", "doing")
     open(log, "w").close()
     refusals = [run("wake", "hestia"), run("wake", "hestia", "--task"), run("wake", "hestia", "--task", "nonsense"),
-                run("wake", "hestia", "--task", "athena-9999"), run("wake", "hestia", "--task", "athena-0001", "x")]
-    check("wake hestia: без задачи, с кривым id, без карточки, с лишним словом — отказ «нет задачи», код ≠0, claude не звали",
-          all(x.returncode != 0 and "нет задачи" in x.stderr for x in refusals) and not calls())
-    r = run("wake", "hestia", "--task", "athena-0001")
-    c = calls()
-    check("wake hestia --task <id>: один `claude -p --agent hestia` с id задачи в поручении, папка — Пантеон",
-          r.returncode == 0 and len(c) == 1 and c[0]["argv"][:4] == ["-p", "--agent", "hestia", "--name"]
-          and "athena-0001" in c[0]["argv"][-1] and c[0]["cwd"] == os.path.realpath(home))
-    logs = os.listdir(os.path.join(state, "hestia")) if os.path.isdir(os.path.join(state, "hestia")) else []
-    check("wake hestia: вывод сессии лёг в журнал hestia/<задача>-<время>.log",
-          len(logs) == 1 and logs[0].startswith("athena-0001-"))
+                run("wake", "hestia", "--task", "athena-9999"), run("wake", "hestia", "--task", "athena-0001"),
+                run("wake", "hestia", "--task", "athena-0001", "x")]
+    check("wake hestia: с любой задачей и без — код 2, причина «нет окна песочницы», claude не звали, журнала нет",
+          all(x.returncode == 2 and "нет окна песочницы" in x.stderr for x in refusals) and not calls()
+          and not os.path.isdir(os.path.join(state, "hestia")))
     open(log, "w").close()
 
     # metis-0147 п. 2: контекст > 100 тыс. и простой > 60 мин — свежая сессия с файла состояния, иначе respawn

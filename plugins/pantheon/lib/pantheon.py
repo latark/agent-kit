@@ -61,6 +61,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon agents | who                 снимок claude agents для строки статуса | таблица координаторов
   pantheon revisits                     пересмотры к сроку и по событиям (плановый проход раз в сутки)
   pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией
+  pantheon wake hestia --task <id>      Гестия: пока всегда отказ (код 2) — нет окна песочницы, metis-0217 шаг 1б
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами») и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
   pantheon restart --prepare [причина]|--status|--go [--force]|--cancel   технический перезапуск всех сессий
@@ -3159,34 +3160,12 @@ def wake_recheck(name, state=None):
     return None
 
 
-HESTIA_TASK = re.compile(r"[a-z][a-z0-9]*-\d{4}")
-
-
 def wake_hestia(rest):
-    """pantheon wake hestia --task <id> (metis-0217): служебная роль Гестия спит и встаёт только с задачей — одна задача,
-    одна сессия `claude -p --agent hestia`. Без --task, с неверным id или без карточки — отказ «нет задачи», код 2.
-    Вывод сессии — в журнал STATE/hestia/<задача>-<время>.log. Окна песочницы у роли пока нет (ему нужен sandbox_build,
-    отдельный PR ядра): права держит шапка роли и guard."""
-    args = rest[1:]
-    tid = args[args.index("--task") + 1] if "--task" in args[:-1] else ""
-    if not HESTIA_TASK.fullmatch(tid) or args != ["--task", tid]:
-        print("pantheon wake hestia: нет задачи — pantheon wake hestia --task <id>", file=sys.stderr)
-        return 2
-    head = _task_head(tid)
-    if head is None:
-        print(f"pantheon wake hestia: нет задачи {tid}", file=sys.stderr)
-        return 2
-    text = f"{START_MARK} поручение от zeus] Задача {tid}: прочитай карточку (pantheon task show {tid}) и сделай её."
-    argv = [claude_bin(), "-p", "--agent", "hestia", "--name", "hestia", text]
-    r = subprocess.run(argv, cwd=PANTHEON, capture_output=True, text=True, timeout=1800)
-    logdir = path("hestia")
-    os.makedirs(logdir, exist_ok=True)
-    with open(os.path.join(logdir, f"{tid}-{int(now())}.log"), "w") as fh:
-        fh.write(f"{shlex.join(argv)}\nкод {r.returncode}\n\n{r.stdout}\n{r.stderr}")
-    start_log(f"hestia\t{tid}\t{r.returncode}")
-    sys.stdout.write(r.stdout)
-    sys.stderr.write(r.stderr)
-    return r.returncode
+    """pantheon wake hestia [--task <id>] (metis-0217, шаг 1): запуск Гестии отказывает всегда, код 2. Роль собирается, но
+    у неё нет окна песочницы (hestia не в guard PANTHEON_ROLES, `claude -p --agent hestia` шёл бы сессией владельца
+    без границы прав), поэтому claude не зовётся. Запуск откроет шаг 1б metis-0217 отдельным PR ядра после «да» владельца."""
+    print("pantheon wake hestia: отказ — нет окна песочницы (metis-0217 шаг 1б); claude не запускался", file=sys.stderr)
+    return 2
 
 
 def wake(rest):
