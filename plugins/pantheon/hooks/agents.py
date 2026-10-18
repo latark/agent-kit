@@ -37,7 +37,7 @@ def deny(why, allowed):
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse", "permissionDecision": "deny",
         "permissionDecisionReason": "P0-6: %s Этому окну можно: %s. Веб — через prometheus, код — через своего лида "
-                                    "(у штаба — поручение направлению)." % (why, ", ".join(allowed))}}))
+                                    "(у Пританея — поручение направлению)." % (why, ", ".join(allowed))}}))
     # ensure_ascii по умолчанию: у хука без LANG stdout бывает ascii, а \\u-escape — тот же JSON
 
 

@@ -48,7 +48,7 @@ for name, s in SC.items():
             elif t & WEB:
                 c = cost(r, rd * s['sub'], extra, 'sonnet-5-5') * s['k']; parts['исследователь Sonnet'] += c
             else:
-                c = opus; parts['штаб, координаторы: Opus high'] += c
+                c = opus; parts['Пританей, координаторы: Opus high'] += c
             c *= 1 + s['ov']
             new += c; hourly[int(r['ts']//3600)] += c
     hour_new[name] = hourly

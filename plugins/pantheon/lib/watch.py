@@ -2000,7 +2000,7 @@ def event_fired(ev, t):
                     if h.get("direction") == parts[1] and h.get("status") == "done")
             return n >= int(parts[2]), "done"
         return False, ""
-    return None, f"событие «{ev}» дежурный пока не видит — сверяет штаб"
+    return None, f"событие «{ev}» дежурный пока не видит — сверяет Пританей"
 
 
 def revisits():
@@ -2047,7 +2047,7 @@ def revisits():
             continue
         again = last.get("cfg") == cfg
         P.alert(f"{'снова: ' if again else ''}пора пересмотреть {rid} ({', '.join(why)}): {r.get('what', '')} — "
-                f"мерить: {r.get('measure', '—')}; итог готовит: {r.get('owner', 'штаб')}"
+                f"мерить: {r.get('measure', '—')}; итог готовит: {r.get('owner', 'Пританей')}"
                 + ("; закрыть строку или перенести срок в revisits.toml" if again else ""), "watch")
         sent[rid] = {"cfg": cfg, "t": t}
         fired += 1
@@ -2070,7 +2070,7 @@ def status_revisits(data):
                         continue
                     text = " ".join(m.group(1).split())[:200]
                     P.alert_once(f"revisit-new-{d}-{text}", "1", f"{d}: временное решение без строки в revisits.toml — "
-                                 f"«{text}» (штабу: строка пересмотра, ссылка R-… в STATUS.md)", "watch")
+                                 f"«{text}» (Пританею: строка пересмотра, ссылка R-… в STATUS.md)", "watch")
 
 
 # --- who и wake <имя> (COMM-14, COMM-04) ----------------------------------------------------------------
@@ -2186,7 +2186,7 @@ def _pconfig():
     return mod
 
 
-HQ_MISSING = "в policy.toml нет раздела [hq]: штабу ничего не закрыто"
+HQ_MISSING = "в policy.toml нет раздела [hq]: Пританею ничего не закрыто"
 CORPUS_MISSING = "в policy.toml нет раздела [corpus]: правило corpus-role ничего не закрывает"
 HOOK_PYTHON = "python3"  # как в hooks.json guard; тесты подменяют
 HOOKS_NO_TOMLLIB = ("python3 хуков без tomllib (Python до 3.11): guard не читает policy.toml, правило corpus-role "
@@ -2230,7 +2230,7 @@ def infra_check():
     except ValueError as e:  # битый раздел: окно штаба не пересобирается, тревогу ставит pantheon domains build
         add(False, f"раздел [hq] policy.toml разбирается ({e})")
     else:
-        add(hq["present"], "в policy.toml есть раздел [hq] (что закрыто штабу)")
+        add(hq["present"], "в policy.toml есть раздел [hq] (что закрыто Пританею)")
         if hq["present"]:
             P.clear_once("hq-policy-missing")
         else:

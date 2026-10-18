@@ -2264,7 +2264,7 @@ def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
     top = rel.split("/", 1)[0]
     hq = role == "hq" and not sub
     if rel in (".", "") or top in (".git", ".gitattributes", ".gitignore"):
-        return False, "git и служебные файлы ~/ai/pantheon роли не трогают: коммитит задача тика pantheon-commit"
+        return False, "git и служебные файлы ~/ai/pantheon роли не трогают: коммитит задача планового прохода pantheon-commit"
     parts = rel.split("/")
     # файлы задач (metis-0044): directions/<имя>/tasks/ и входящие владельца inbox/tasks/ — только `pantheon task`,
     # всем ролям и субагентам, штабу тоже. Можно создать ещё не существующую папку tasks/ и заглушку .gitkeep или
@@ -2274,7 +2274,7 @@ def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
         stub = len(parts) == tasks_at + 2 and parts[-1] in (".gitkeep", ".keep") and not exists
         if (len(parts) > tasks_at + 1 or exists) and not stub:
             return False, ("файлы задач меняет только команда `pantheon task` (new, set, claim): прямой правкой поле "
-                           "answer попало бы в задачу мимо журнала слов владельца. Ответ владельца пишет тик из его журнала")
+                           "answer попало бы в задачу мимо журнала слов владельца. Ответ владельца пишет плановый проход из его журнала")
     # запись в папку над tasks/ целиком (cp -R, rsync, tar -C, unzip -d в directions/<имя>, в directions или inbox)
     # положила бы в tasks/ что угодно: такой цели нет, назови точный файл. Новую папку направления создать можно
     if tasks_at and (len(parts) <= tasks_at and (exists or parts[-1] == ANY_FILE)
@@ -2288,12 +2288,12 @@ def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
     if top == "scout":
         return role == "iris", "scout/ ведёт iris"
     if top == "workshop":
-        return hq or role == "workshop", "workshop/ ведут сессии мастерской и штаб"
+        return hq or role == "workshop", "workshop/ ведут сессии мастерской и Пританей"
     if top == "decision-map.md":
         metis = privileged(policy, "metis-pantheon", role, pdir) and not sub
-        return hq or metis, "карту решений правят штаб и metis-pantheon"
+        return hq or metis, "карту решений правят Пританей и metis-pantheon"
     if top in HQ_ONLY:
-        return hq, f"{top} правит только штаб (hq)"
+        return hq, f"{top} правит только Пританей (hq)"
     if top == "directions":
         target = parts[1] if len(parts) > 1 else ""
         if hq:
@@ -2307,7 +2307,7 @@ def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
                 return True, ""
         return False, ("в чужом направлении можно только создать новый файл в его inbox/; "
                        "свой STATUS.md и планы — в ~/ai/pantheon/directions/<своё направление>/")
-    return hq, f"{rel} правит только штаб (hq)"
+    return hq, f"{rel} правит только Пританей (hq)"
 
 
 UNRESOLVED_REASON = ("Правило domain/pantheon-acl: цель записи не разобрать — подстановка $(…) или переменная, "
@@ -2319,7 +2319,7 @@ UNRESOLVED_REASON = ("Правило domain/pantheon-acl: цель записи 
 
 OWNER_RECORDS_REASON = ("Правило pantheon-acl: в доску ~/ai/pantheon-view (карточки, ваши галочки и заметки) и в "
                         "журналы ваших слов ~/.local/state/pantheon/owner-log не пишет ни одна сессия Claude, и без "
-                        "роли тоже: доску владелец правит в Obsidian, журналы пишут хук и тик. Иначе ответ на "
+                        "роли тоже: доску владелец правит в Obsidian, журналы пишут хук и плановый проход. Иначе ответ на "
                         "карточке можно подделать мимо журнала. Задачу меняй командой `pantheon task`; нужна правка "
                         "доски — попроси владельца сделать её в Obsidian.")
 
@@ -2347,12 +2347,12 @@ def check_pantheon(event, tool, tool_input):
                     "(в своём терминале или в окне Зевса после «!»). Предложи строку разрешения владельцу словами.")
     if tool == "Bash" and pantheon_role and not (role == "hq" and not sub):
         if cli:
-            return (f"Правило pantheon-acl: «{cli[0]}» — команда пульта, её запускают только штаб и ваши сессии. "
+            return (f"Правило pantheon-acl: «{cli[0]}» — команда пульта, её запускают только Пританей и ваши сессии. "
                     "Архив, коммит и пауза задач — через Зевса; дописать тревогу — `pantheon alert`.")
         names = {n for n, _ in bash_analysis(tool_input.get("command") or "", os.path.realpath(event.get("cwd") or os.getcwd()))[1]}
         if "terminal-notifier" in names or "?" in names and "terminal-notifier" in (tool_input.get("command") or ""):
             return ("Правило pantheon-acl: terminal-notifier ролям недоступен — по щелчку он выполняет команду от имени "
-                    "владельца. Уведомления Пантеона шлёт тик; нужно сообщить владельцу — `pantheon alert` или вопрос "
+                    "владельца. Уведомления Пантеона шлёт плановый проход; нужно сообщить владельцу — `pantheon alert` или вопрос "
                     "на доске (`pantheon task new … --waiting-on human --question …`).")
         dirs = task_targets(tool_input.get("command") or "", os.path.realpath(event.get("cwd") or os.getcwd()))
         if dirs:
@@ -2373,7 +2373,7 @@ def check_pantheon(event, tool, tool_input):
     domains = policy = None
     for p in targets:
         if _inside(p, [STATE_DIR]) or (pantheon_role and _inside(STATE_DIR, [p])):
-            return ("Правило pantheon-acl: ~/.local/state/pantheon (метки тика, журналы ваших слов owner-log, "
+            return ("Правило pantheon-acl: ~/.local/state/pantheon (метки планового прохода, журналы ваших слов owner-log, "
                     "domains.json) пишут только скрипты Пантеона и хуки, не роли.")
         if _inside(p, [PANTHEON_VIEW]) or (pantheon_role and _inside(PANTHEON_VIEW, [p])):
             return ("Правило pantheon-acl: ~/ai/pantheon-view — копия только для чтения для Obsidian. "
@@ -2389,7 +2389,7 @@ def check_pantheon(event, tool, tool_input):
         ok, why = pantheon_allowed(role, sub, pdir, rel, tool, os.path.exists(p), domains, policy)
         if not ok:
             return (f"Правило pantheon-acl: роль «{role or 'субагент'}»{' (субагент)' if sub else ''} не пишет в "
-                    f"~/ai/pantheon/{rel}: {why}. Нужна правка — опиши её Зевсу (штабу) или своему координатору.")
+                    f"~/ai/pantheon/{rel}: {why}. Нужна правка — опиши её Зевсу (Пританею) или своему координатору.")
     return None
 
 
@@ -2610,7 +2610,7 @@ def check_private(event, tool, tool_input):
         return (f"Правило private: ключ git-crypt ({hits[0].replace(HOME, '~')}) роли «{role}» закрыт — коммитит не "
                 "она. Поиск по папке выше (grep -r, Grep) можно: назови путь мимо .git/git-crypt.")
     return (f"Правило private: роль «{role or 'субагент'}»{' (субагент)' if sub else ''} не читает и не пишет личное "
-            f"({hits[0].replace(HOME, '~')}): me/, ключи git-crypt и журнал штаба — только hq, chiron (в окне штаба) и "
+            f"({hits[0].replace(HOME, '~')}): me/, ключи git-crypt и журнал Пританея — только hq, chiron (в окне Пританея) и "
             "mnemo-brain. Если путь задевает личную папку случайно (поиск по всей ~/ai/knowledge), сузь его: raw/, "
             "wiki/, inbox/.")
 
@@ -3024,7 +3024,7 @@ def check_corpus_role(event, tool, tool_input):
                 if target.split(".")[0] in conf["modules"]:
                     is_corpus, args = True, args[i + 1:]
         if is_corpus and role == "hq":
-            return ("Правило corpus-role: штабу корпус закрыт (решение владельца 15.10, SEC-13: у Зевса уже есть личное "
+            return ("Правило corpus-role: Пританею корпус закрыт (решение владельца 15.10, SEC-13: у Зевса уже есть личное "
                     "и действия наружу, выдача корпуса — чужой текст). Вопрос по корпусу передай поручением "
                     "координатору направления, которое его ведёт.")
         if is_corpus and _corpus_sub(args) in conf["write_subcommands"]:
@@ -3068,7 +3068,7 @@ def check_hq_telegram(event, tool, tool_input):
         if TG_FILE.search(cmd) or TG_DAEMON.search(cmd):
             hit = "скрипт tg-read или демон tg-readd"
     if hit:
-        return (f"Правило hq-telegram: штабу Telegram закрыт ({hit}; P0-1, metis-0060) — у Зевса личное и действия "
+        return (f"Правило hq-telegram: Пританею Telegram закрыт ({hit}; P0-1, metis-0060) — у Зевса личное и действия "
                 "наружу, а переписка и каналы — чужой текст. Вопросы по Telegram-каналам и праву — Фемиде "
                 "направления источников через поручение; свою переписку владелец разбирает в своей сессии.")
     return None
@@ -3082,7 +3082,7 @@ def check_chiron_call(event, tool, tool_input):
         return None
     ok, role, sub, _ = limited(event)
     if win or ok:
-        return (f"Правило chiron: коуч с личным — только у Зевса, в окне штаба (P0-2, metis-0061); здесь окно "
+        return (f"Правило chiron: коуч с личным — только у Зевса, в окне Пританея (P0-2, metis-0061); здесь окно "
                 f"«{win or role or 'субагент'}». Разговор о целях и личном — владельцу с Зевсом.")
     return None
 
@@ -3171,8 +3171,8 @@ def main():
                 merge_gate.record(event)
             except Exception as e:
                 log_failure("record", e)
-                raise HookFailure(f"guard: запись журнала запора слияния не сделана ({type(e).__name__}) — команда "
-                                  "выполнена, но её запись (тесты или вердикт) запор не увидит. Повтори команду или "
+                raise HookFailure(f"guard: запись журнала шлюза слияния не сделана ({type(e).__name__}) — команда "
+                                  "выполнена, но её запись (тесты или вердикт) шлюз слияния не увидит. Повтори команду или "
                                   "сообщи координатору.", logged=True) from e
         return
     tool = event.get("tool_name") if name == "PreToolUse" else None
