@@ -50,6 +50,9 @@ elif a[:1] == ["--version"]:
 elif a[:1] == ["respawn"] and os.environ.get("FAKE_RESPAWN_RC"):
     print("respawn: no such session", file=sys.stderr)
     sys.exit(int(os.environ["FAKE_RESPAWN_RC"]))
+elif a[:1] == ["stop"] and a[1:2] and a[1] in os.environ.get("FAKE_STOP_FAIL", "").split(","):
+    print("stop: no such session", file=sys.stderr)
+    sys.exit(1)
 elif a[:1] == ["stop"] and os.environ.get("FAKE_STOP_MARK"):
     lst = json.load(open(os.environ["FAKE_AGENTS"]))
     for x in lst:
@@ -938,6 +941,25 @@ def test_stop_removes_from_fleet():
           f"отказ rm не виден в выводе: {r.stdout!r}")
     log = open(e.st("logs", "start.log")).read()
     check("rm-refused\trk-dir\tr2r2r2r2" in log, f"отказ rm не в start.log: {log}")
+    check("rk-dir: осталась во флоте Claude Code (rm отказал)" in e.alerts() and "r2r2r2r2" in e.alerts(),
+          f"отказ rm без тревоги: {e.alerts()}")
+    # stop --all: отказ rm — в выводе, в start.log и в тревоге
+    e2 = Env()
+    e2.direction("ra-dir")
+    e2.agents([bg("ra-dir", "working", "r3r3r3r3-1", pid=63)])
+    r = e2.run("stop", "--all", t=T0, extra={"FAKE_RM_REFUSE": "r3r3r3r3"})
+    check(["rm", "r3r3r3r3"] in e2.calls() and "ra-dir: осталась во флоте: r3r3r3r3, причина:" in r.stdout,
+          f"stop --all: отказ rm не виден в выводе: {r.stdout!r}")
+    check("стоп всё: осталась во флоте Claude Code (rm отказал): ra-dir r3r3r3r3" in e2.alerts(),
+          f"stop --all: отказ rm без тревоги: {e2.alerts()}")
+    check("rm-refused\tra-dir\tr3r3r3r3" in open(e2.st("logs", "start.log")).read(), "stop --all: нет в start.log")
+    # stop вернул не 0 — rm не зовём, сессия остаётся во флоте
+    e3 = Env()
+    e3.direction("rs-dir")
+    e3.agents([bg("rs-dir", "working", "r4r4r4r4-1", pid=64)])
+    r = e3.run("stop", "rs-dir", t=T0, extra={"FAKE_STOP_FAIL": "r4r4r4r4"})
+    check(["stop", "r4r4r4r4"] in e3.calls() and ["rm", "r4r4r4r4"] not in e3.calls()
+          and "rs-dir: осталась во флоте: r4r4r4r4" in r.stdout, f"stop с кодом 1: rm не должен вызываться: {e3.calls()} {r.stdout!r}")
 
 
 def test_stop_without_locks_write():

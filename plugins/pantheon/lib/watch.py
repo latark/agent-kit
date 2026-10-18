@@ -1489,6 +1489,9 @@ def stop(rest, who):
         old = P.read_json(P.path("stopped-all.json"), {})
         P.write_json(P.path("stopped-all.json"), {"time": P.stamp(), "by": who, "names": sorted(set(prev) | set(marked)),
                                                   "paused": bool(old.get("paused")) or not had_pause})
+        if left_all:
+            P.alert("стоп всё: осталась во флоте Claude Code (rm отказал): "
+                    + "; ".join(f"{n} {i} — {r}" for n, i, r in left_all), "pantheon-stop")
         P.alert(f"стоп всё ({who}): планировщик на паузе, остановлены: {', '.join(names) or 'никого'}; вернуть — "
                 "pantheon resume --all", "pantheon-stop")
         print(f"остановлены: {', '.join(names) or 'никого'}; планировщик на паузе. Вернуть: pantheon resume --all"
