@@ -533,6 +533,9 @@ def main():
               f"строка {how}-skip в start.log",
               r.returncode == 0 and not c and not os.path.exists(run_file)
               and f"{how}-skip\tathena-shop\twake\tнет окна: окно не собрано" in slog())
+        check(f"wake без окна ({how}): stdout «не поднимаю: … нет окна», без «поднимаю:» (metis-0189)",
+              "не поднимаю: athena-shop (a1, " in r.stdout and "нет окна" in r.stdout
+              and "поднимаю: athena-shop" not in r.stdout.replace("не поднимаю: athena-shop", ""))
     al1 = open(alerts_md).read()[len(al0):] if os.path.exists(alerts_md) else ""
     check("wake без окна: одна тревога на причину — называет файл и правило; без тревоги «не поднялась (код …)»",
           al1.count("athena-shop: не поднимаю (wake)") == 1 and "Bash(gh *)" in al1
