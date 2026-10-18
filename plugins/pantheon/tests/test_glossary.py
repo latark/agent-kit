@@ -3,7 +3,7 @@
 
 Что проверяется (решение лида metis-0205): README.md репозитория и плагина, skills/**/*.md, описание plugin.json — все
 строки; *.py в lib/, hooks/, scripts/, bin/ — только строковые литералы (через ast), без комментариев и докстрингов
-(кроме печатаемых справкой: докстринг модуля pantheon.py и функций с `<имя>.__doc__`); *.sh — строки без «#» в начале.
+(кроме печатаемых справкой: докстринг модуля с `print(__doc__)` и функций с `<имя>.__doc__`); *.sh — строки без «#» в начале.
 Вне проверки: tests/, roles/, lib/window_rules.py и функция sandbox_build (ядро, отдельный PR).
 Исключения — [[allow]] в glossary.toml (файл + фрагмент строки + причина). Лишний [[allow]], который ничего не
 находит, — тоже провал: список не должен зарастать.
@@ -84,9 +84,12 @@ def load_glossary(path):
 # --- сбор текстов ---
 
 def helpful_docs(tree, rel):
-    """Докстринги, которые печатаются справкой: модуль pantheon.py и функции с `<имя>.__doc__`."""
+    """Докстринги, которые печатаются справкой: модуль с `print(__doc__)` (любой файл) и функции с `<имя>.__doc__`."""
     ids = set()
-    if rel == "lib/pantheon.py" and ast.get_docstring(tree, clean=False) is not None:
+    prints_module_doc = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "print"
+                            and any(isinstance(a, ast.Name) and a.id == "__doc__" for a in n.args)
+                            for n in ast.walk(tree))
+    if prints_module_doc and ast.get_docstring(tree, clean=False) is not None:
         ids.add(id(tree.body[0].value))
     printed = {n.value.id for n in ast.walk(tree)
                if isinstance(n, ast.Attribute) and n.attr == "__doc__" and isinstance(n.value, ast.Name)}

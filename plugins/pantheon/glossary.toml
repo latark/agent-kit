@@ -80,9 +80,9 @@ where = "описания PR, тексты для человека"
 [[allow]]
 file = 'lib/pantheon.py'
 text = 'Отправить на другие Mac'
-reason = 'SYNC_ACT: ответ владельца на карточку sync сверяется с этим текстом; тот же вариант выдаёт внешний sync.sh и config-check.py'
+reason = 'прежняя метка старых карточек sync: SYNC_ACT её принимает, ~/.claude/sync.sh принимает её же (стр. 121); новые карточки sync.sh выдаёт с вариантом «Отправить»'
 
 [[allow]]
 file = 'scripts/config-check.py'
 text = 'Отправить на другие Mac'
-reason = 'вариант ответа (option и recommend) = элемент SYNC_ACT в lib/pantheon.py; менять только вместе с SYNC_ACT и sync.sh'
+reason = 'прежняя метка старых карточек sync (option и recommend): SYNC_ACT в lib/pantheon.py и ~/.claude/sync.sh (стр. 121) принимают её; менять только вместе с ними'
