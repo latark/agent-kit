@@ -239,7 +239,7 @@ def main():
         r = run("roles", "build", "--out", out)
         built = sorted(os.listdir(out)) if os.path.isdir(out) else []
         texts = {f: read(os.path.join(out, f)) for f in built}
-        want = {t + ".md" for t in tmpls if t not in ("hephaestus", "apollo")} | {"hephaestus-demo.md", "apollo-demo.md"}
+        want = {t + ".md" for t in tmpls if t not in ("hephaestus", "apollo", "hestia")} | {"hephaestus-demo.md", "apollo-demo.md"}
         check(f"общие шаблоны плагина {label}: собраны все роли, без ошибок, нет {{{{",
               r.returncode == 0 and not r.stderr.strip() and want <= set(built)
               and not any("{{" in t for t in texts.values()))
@@ -248,6 +248,22 @@ def main():
               + ("выпали" if not extra else "подставлены"),
               not has if not extra else (has == set(owner_lines)
                                          and "Коллекции направлений: legal, docs (справка)." in texts["argus.md"]))
+    # Гестия (metis-0217, review-51-bypass): шаблон в плагине есть, но до metis-0245 build её не собирает
+    tmpl_h = read(os.path.join(real, "hestia.tmpl"))
+    head = tmpl_h.split("---")[1] if tmpl_h.count("---") >= 2 else ""
+    deny = next((ln for ln in head.splitlines() if ln.startswith("disallowedTools:")), "")
+    check("hestia: шаблон остаётся в плагине (запрещены Edit/Write, коммит, push, merge), но в --out роли нет",
+          all(t in deny for t in ("Edit", "Write", "Bash(git commit *)", "Bash(git push *)", "Bash(git merge *)",
+                                  "Bash(gh pr merge *)"))
+          and "hestia.md" not in texts and "Гестия (hestia" in texts.get("argus.md", ""))
+    old = os.path.join(tmp, "probe-old")
+    write(os.path.join(old, "hestia.md"),
+          "---\nname: hestia\n---\n<!-- собрано pantheon roles build из hestia.tmpl -->\nстарая\n")
+    write(os.path.join(old, "mine.md"), "---\nname: mine\n---\nнаписан руками\n")
+    r = run("roles", "build", "--out", old)
+    check("hestia: старый собранный hestia.md удалён, файл руками цел, остальные роли на месте",
+          r.returncode == 0 and not os.path.exists(os.path.join(old, "hestia.md"))
+          and os.path.exists(os.path.join(old, "mine.md")) and os.path.isfile(os.path.join(old, "argus.md")))
     agents2 = os.path.join(home2, ".claude", "agents")
     r = run("roles", "build")
     check("новая машина: ~/.claude/agents ещё нет — живая сборка создаёт папку и кладёт общие роли",

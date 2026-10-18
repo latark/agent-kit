@@ -483,6 +483,17 @@ def main():
     r = run("wake")
     check("wake: задача «ждёт» — не будит", r.returncode == 0 and not calls() and "будить некого" in r.stdout)
 
+    # wake hestia (metis-0217, шаг 1): без окна песочницы запуск всегда отказ, код 2, claude не зовётся
+    task("athena-0001", "doing")
+    open(log, "w").close()
+    refusals = [run("wake", "hestia"), run("wake", "hestia", "--task"), run("wake", "hestia", "--task", "nonsense"),
+                run("wake", "hestia", "--task", "athena-9999"), run("wake", "hestia", "--task", "athena-0001"),
+                run("wake", "hestia", "--task", "athena-0001", "x")]
+    check("wake hestia: с любой задачей и без — код 2, причина «нет окна песочницы», claude не звали, журнала нет",
+          all(x.returncode == 2 and "нет окна песочницы" in x.stderr for x in refusals) and not calls()
+          and not os.path.isdir(os.path.join(state, "hestia")))
+    open(log, "w").close()
+
     # metis-0147 п. 2: контекст > 100 тыс. и простой > 60 мин — свежая сессия с файла состояния, иначе respawn
     task("athena-0001", "doing")
     tr_dir = os.path.join(tmp, ".claude", "projects", "".join(ch if ch.isalnum() else "-" for ch in tmp))

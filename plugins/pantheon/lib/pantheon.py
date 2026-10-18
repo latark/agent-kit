@@ -61,6 +61,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon agents | who                 снимок claude agents для строки статуса | таблица координаторов
   pantheon revisits                     пересмотры к сроку и по событиям (плановый проход раз в сутки)
   pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией
+  pantheon wake hestia --task <id>      Гестия: всегда отказ (код 2) — окно песочницы появится в metis-0245
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами») и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
   pantheon restart --prepare [причина]|--status|--go [--force]|--cancel   технический перезапуск всех сессий
@@ -3192,6 +3193,14 @@ def wake_recheck(name, state=None):
     return None
 
 
+def wake_hestia(rest):
+    """pantheon wake hestia [--task <id>] (metis-0217, шаг 1): запуск Гестии отказывает всегда, код 2. Роль собирается, но
+    у неё нет окна песочницы (hestia не в guard PANTHEON_ROLES, `claude -p --agent hestia` шёл бы сессией владельца
+    без границы прав), поэтому claude не зовётся. Запуск откроет metis-0245 (окно песочницы) отдельным PR ядра после «да» владельца."""
+    print("pantheon wake hestia: отказ — нет окна песочницы (metis-0245); claude не запускался", file=sys.stderr)
+    return 2
+
+
 def wake(rest):
     """pantheon wake [--dry-run]: прерванные сессии Пантеона (failed, stopped) с открытой задачей — поднять и сказать
     «продолжай». Свои метки «остановлено вами» и чужие сессии (не направление и не daedalus-*) не трогает."""
@@ -3372,6 +3381,12 @@ def _marked(text, tmpl):
     return text[:end + 5] + ROLE_MARK.format(tmpl=tmpl) + "\n" + text[end + 5:]
 
 
+# Шаблоны, которые build пока не собирает (metis-0217, review-51-bypass): роль, которую нельзя звать до окна
+# песочницы, не должна лежать в ~/.claude/agents — иначе её поднимет субагент мимо отказа wake. Убрать строку —
+# когда слит metis-0245. Уже собранный файл с меткой build убирает как устаревшую роль.
+ROLES_DEFERRED = {"hestia": "metis-0245"}
+
+
 def roles_build(src=None, out=None):
     """Роли из общих шаблонов плагина (PLUGIN_ROLES) и личного слоя src (по умолчанию ~/.claude/agents; перекрывает
     общий по имени шаблона и части) в папку out (по умолчанию ~/.claude/agents). Режим с out — проба
@@ -3399,6 +3414,8 @@ def roles_build(src=None, out=None):
                 layer[f] = os.path.join(d, f)
     for f in sorted(layer):
         base = f[:-5]
+        if base in ROLES_DEFERRED:
+            continue
         if not ROLE_NAME.fullmatch(base):
             errors.append(f"{f}: имя не по образцу")
             continue
@@ -3482,7 +3499,7 @@ WHO_ANY_DIRECTION = ("domain-coordinator",)
 # Остальной код (команды, пути, `claude agents`) под образец не подходит. Список — боги из карты имён и прошлых
 # направлений; нового бога дописать сюда (иначе его удалённая роль не будет найдена как лишняя).
 WHO_GODS = ("zeus", "athena", "hermes", "themis", "calliope", "mnemo", "proteus", "metis", "janus", "daedalus",
-            "apollo", "hephaestus", "argus", "chiron", "prometheus", "talos", "clio", "iris", "momus", "charon")
+            "apollo", "hephaestus", "argus", "chiron", "prometheus", "talos", "clio", "iris", "momus", "charon", "hestia")
 WHO_TOKEN = re.compile(r"`([^`\n]+)`")
 
 
@@ -5454,6 +5471,8 @@ def main(argv):
     if cmd == "start":
         return start(rest)
     if cmd == "wake":
+        if rest[:1] == ["hestia"]:
+            return wake_hestia(rest)
         if rest and not rest[0].startswith("-"):
             return watch_cmd("wake", rest)
         return wake(rest)
