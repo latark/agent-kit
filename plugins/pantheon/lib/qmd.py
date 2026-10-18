@@ -297,7 +297,7 @@ def install():
             print(f"claude mcp add не прошёл: {(r.stderr or r.stdout).strip()}", file=sys.stderr)
             return r.returncode
         print(f"MCP qmd подключён для всех сессий Claude: {want}")
-    print("Сервер поднимет тик (служба qmd в schedule.toml); первый индекс: pantheon qmd update, затем pantheon qmd embed")
+    print("Сервер поднимет плановый проход (служба qmd в schedule.toml); первый индекс: pantheon qmd update, затем pantheon qmd embed")
     return 0
 
 

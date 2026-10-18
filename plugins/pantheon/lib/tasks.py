@@ -733,7 +733,7 @@ PROP_TYPES = {"Внимание": "multitext", "Приоритет": "number", "
 NODES_DIR = "Узлы"  # заметки-узлы ролей для графа — внутри Доска: копия view-sync.sh стирает всё вне Доска и .obsidian
 NOTE_KEY = "Заметка агенту"  # прежнее поле заметки: в карточку больше не рисуется, но со старых карточек ещё читается
 NOTES_HEAD = "## ✍️ Ваши заметки"
-NOTES_HINT = ("<small>Пишите ниже своими словами: мысли, задачи, правки. Через минуту после того, как закончите, тик "
+NOTES_HINT = ("<small>Пишите ниже своими словами: мысли, задачи, правки. Через минуту после того, как закончите, плановый проход "
               "передаст их исполнителю — он прочитает до начала работы и ответит в журнале.</small>")
 OWNER_NOTES = "## Заметки владельца"  # раздел файла задачи: сюда тик переносит текст из карточки
 QUIET = 30  # с: новую карточку берём, когда у неё есть название и её столько не меняли (ответ и заметка — сразу)
@@ -1619,7 +1619,7 @@ def node_texts(roles, tasks, names, slugs):
     for n, nd in nodes.items():
         head = {"type": "узел", "id": nd["id"], "parent": link(nd["parent"]) if nd["parent"] else None,
                 "tags": [f"направление/{nd['direction']}"] if nd["direction"] else None}
-        body = ("\n> Сгенерировано тиком. Не править.\n\n" + (f"Руководитель: {link(nd['parent'])}\n\n" if nd["parent"] else "")
+        body = ("\n> Сгенерировано плановым проходом. Не править.\n\n" + (f"Руководитель: {link(nd['parent'])}\n\n" if nd["parent"] else "")
                 + f"## Открытые задачи ({len(nd['tasks'])})\n\n" + ("\n".join(nd["tasks"]) or "—") + "\n")
         out[n] = join(head, body, ["type", "id", "parent", "tags"])
     return out
@@ -1908,7 +1908,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     for tid, (_, h, _) in (list(tasks.items()) if primary else []):
         w = h.get("waiting_on")
         if h.get("status") == "waiting" and w in tasks and tasks[w][1].get("status") == "done":
-            task_set(pantheon, t, tid, {"status": "todo"}, note=f"разблокирована: {w} готова", actor="тик")
+            task_set(pantheon, t, tid, {"status": "todo"}, note=f"разблокирована: {w} готова", actor="плановый проход")
             done_lines.append(f"{tid}: разблокирована ({w} готова)")
     tasks = load_tasks(pantheon)
 

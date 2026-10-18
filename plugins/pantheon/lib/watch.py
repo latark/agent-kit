@@ -13,7 +13,7 @@
   pantheon restart --prepare [причина]|--status|--go [--force]|--cancel, pantheon saved --by <имя> --state <путь>
                             технический перезапуск всей системы (SCHED-15, слово владельца 15.10)
   pantheon who              координаторы: состояние, short из реестра, давность (COMM-14)
-  pantheon wake <имя> ["толчок"]   поднять уснувшую сессию направления и сказать «посмотри входящие» (COMM-04)
+  pantheon wake <имя> ["задание"]   поднять уснувшую сессию направления и сказать «посмотри входящие» (COMM-04)
   pantheon infra-check      лёгкая проверка опор системы после обновления Claude Code (SEC-16)
 
 Всё, что дежурный находит, — строка в ~/ai/pantheon/alerts.md один раз на состояние (alert_once) и, где нужно вас,
@@ -58,7 +58,7 @@ MAINT_HOURS = 2              # метка технического переза�
 REVISIT_REPEAT_DAYS = 3      # открытый пересмотр напоминает снова через столько дней, пока его не закрыли или не перенесли
 OWNER_LOG_DAYS = 30          # журналы ваших слов (COMM-10)
 HOOK_LOG_MAX = 400_000       # журнал сбоев хуков ctx-hooks.log, байт
-WAKE_PUSH = ("[Пантеон: толчок] Посмотри входящие: inbox/ и задачи направления, STATUS.md. Продолжай со своего "
+WAKE_PUSH = ("[Пантеон: передача задания] Посмотри входящие: inbox/ и задачи направления, STATUS.md. Продолжай со своего "
              "следующего шага; что ждёт владельца — Зевсу строкой.")
 RESTART_TEXT = ("[Пантеон: технический перезапуск завершён] Сессия перезапущена с новыми версиями плагинов и ролей. "
                 "Прочитай свой файл состояния (STATUS.md направления или файл задачи мастерской) и продолжай со "
@@ -1906,7 +1906,7 @@ def who():
 def wake_one(rest, who="владелец"):
     name = rest[0]
     if not P.SESSION_NAME.fullmatch(name):
-        print("pantheon wake <имя> [\"толчок\"]", file=P.sys.stderr)
+        print("pantheon wake <имя> [\"задание\"]", file=P.sys.stderr)
         return 2
     agents = P.agents_all()
     if agents is None:
@@ -1914,7 +1914,7 @@ def wake_one(rest, who="владелец"):
         return 1
     why = wake_block(name, agents, P.sessions_registry(), auto=False)
     if why == "уже работает":
-        print(f"{name} не спит (есть процесс) — толчок сообщением: SendMessage, адрес {name}")
+        print(f"{name} не спит (есть процесс) — передать задание сообщением: SendMessage, адрес {name}")
         return 0
     if why:
         hint = {"остановлено вами": f" — сначала pantheon resume {name}"}.get(why, "")
@@ -1922,7 +1922,7 @@ def wake_one(rest, who="владелец"):
         return 1
     extra = " ".join(" ".join(rest[1:]).split())
     # чужой текст всегда под своей пометкой: под «[Пантеон: …]» без неё он выдал бы себя за системный (ревью argus)
-    text = f"[Пантеон: толчок от {who}] {extra}" if extra else WAKE_PUSH
+    text = f"[Пантеон: задание от {who}] {extra}" if extra else WAKE_PUSH
     alias = P.name_alias(name)
     if not any(alias.fullmatch(str(a.get("name") or "")) and a.get("state") in ("stopped", "failed") for a in agents):
         print(f"у {name} нет уснувшей сессии — новая: pantheon start {name}", file=P.sys.stderr)
@@ -1935,7 +1935,7 @@ def wake_one(rest, who="владелец"):
         return 1
     _forget_autostart(name)
     rc = resume_or_start(name, agents, text, origin="wake", only_resume=True)
-    print(f"{name}: " + ("поднята, толчок доставлен" if rc == 0 else f"не поднялась, код {rc}"))
+    print(f"{name}: " + ("поднята, задание передано" if rc == 0 else f"не поднялась, код {rc}"))
     return rc
 
 

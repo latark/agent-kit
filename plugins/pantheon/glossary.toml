@@ -1,0 +1,88 @@
+# Словарь терминов Пантеона (решение владельца [zeus-terminology] 17.10; metis-0205).
+# Правильное слово, запрещённые слова и regex-шаблоны (без учёта регистра) для tests/test_glossary.py.
+# patterns = [] — правило для ролей и описаний PR, тест по нему не ищет.
+# [[allow]]: file — путь от plugins/pantheon (или README.md репозитория), text — фрагмент строки, reason — почему можно.
+# Только строки в одинарных кавычках и списки на одной строке: тест читает этот файл и без tomllib (Python 3.9).
+
+[[term]]
+right = "шлюз слияния (шлюз запуска, gate(kind))"
+forbidden = ["запор", "гейт", "замок"]
+patterns = ['\bзапор', '\bгейт', '\bзам(ок|ка|ком|ке)\b']
+where = "README, отказы guard, pantheon review, ночной цикл, сводка, описания PR"
+
+[[term]]
+right = "запрет сна Mac"
+forbidden = ["бодрость Mac"]
+patterns = ['\bбодрост']
+where = "awake.py, сводка"
+
+[[term]]
+right = "возобновление ждущих сессий"
+forbidden = ["будильник ждущих"]
+patterns = ['\bбудильник']
+where = "awake.py, watch.py, тревоги"
+
+[[term]]
+right = "возобновление после недельного лимита"
+forbidden = ["подъём после лимита"]
+patterns = ['\bподъ[её]м после']
+where = "awake.py"
+
+[[term]]
+right = "проверка личных следов"
+forbidden = ["сторож личных следов"]
+patterns = ['\bсторож']
+where = "check-traces.py, CI"
+
+[[term]]
+right = "плановый проход"
+forbidden = ["тик"]
+patterns = ['\bтик(а|у|ом|е|и|ов|ами|ах)?\b']
+where = "сводка, доска"
+
+[[term]]
+right = "передать задание, передал задание"
+forbidden = ["толкать", "толчок", "толкнул"]
+patterns = ['толка', 'толчо?к', 'толчк', 'толкн']
+where = "watch.py, тревоги, описания PR"
+
+[[term]]
+right = "простаивающее окно"
+forbidden = ["окно без дела"]
+patterns = ['без дела']
+where = "watch.py, сводка, PR"
+
+[[term]]
+right = "Claude Code сам перезапустил фоновую сессию, задания у неё нет"
+forbidden = ["флот поднял без задания", "флот фоновых сессий"]
+patterns = ['флот']
+where = "watch.py, тревоги"
+
+[[term]]
+right = "на доске: галочка, выбор"
+forbidden = ["кнопка"]
+patterns = ['кнопк']
+where = "карточки, сообщения Зевса"
+
+[[term]]
+right = "синхронизировать пока не с кем"
+forbidden = ["второй Mac", "другие Mac"]
+patterns = ['втор(ой|ого|ом) Mac', 'други[ехм]и? Mac']
+where = "карточки и сводка sync.sh, config-check.py"
+
+[[term]]
+right = "имя только в `коде` и с пояснением по-русски рядом"
+forbidden = ["push-хук", "голые state=working", "status idle", "AUTOSTART_MAX"]
+patterns = []
+where = "описания PR, тексты для человека"
+
+# Значения, которые сверяет код или внешний sync.sh (~/.claude), — менять только вместе с ними, отдельной задачей.
+[[allow]]
+file = 'lib/pantheon.py'
+text = 'Отправить на другие Mac'
+reason = 'SYNC_ACT: ответ владельца на карточку sync сверяется с этим текстом; тот же вариант выдаёт внешний sync.sh и config-check.py'
+
+[[allow]]
+file = 'scripts/config-check.py'
+text = 'Отправить на другие Mac'
+reason = 'вариант ответа (option и recommend) = элемент SYNC_ACT в lib/pantheon.py; менять только вместе с SYNC_ACT и sync.sh'

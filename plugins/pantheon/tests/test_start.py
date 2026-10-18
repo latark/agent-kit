@@ -788,7 +788,7 @@ def main():
     r = run("status")
     check("status: итог сверху, ждущая сессия названа, терминальные — отдельно, код 1 при проблемах",
           r.returncode == 1 and r.stdout.startswith("Пантеон · ") and "athena-shop — разрешение Bash" in r.stdout
-          and "открыты в терминале: 1" in r.stdout and "фоновые работают: 1" in r.stdout and "Тик" in r.stdout)
+          and "открыты в терминале: 1" in r.stdout and "фоновые работают: 1" in r.stdout and "Плановый проход" in r.stdout)
 
     every = [json.loads(x) for x in open(env["FAKE_ALL"])] if os.path.exists(env["FAKE_ALL"]) else []
     resumes = [a for a in every if "--resume" in a]

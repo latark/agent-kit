@@ -455,7 +455,7 @@ def find_answer(st, until=None):
 def _close_card(st, t, status, result):
     with contextlib.suppress(ValueError, OSError):
         P.tasks_mod().task_set(P.PANTHEON, t, st["card_id"], {"status": status, "result": result},
-                               note=result, actor="тик")
+                               note=result, actor="плановый проход")
 
 
 def _skip(st, d, t, why):
@@ -479,7 +479,7 @@ def ask(st, d, m, t, cfg):
                         why=f"Ночью дежурный может поднимать направления по задачам с вашим решением. {week}",
                         options=opts, recommend=yes if m["known"] and m["zone"] == "green" else NO_OPTION,
                         if_no_answer=f"Без ответа к {cfg[2]['deadline']} ночь пропускается: новое ночью не "
-                                     "запускается, идущие сессии работают.", actor="тик")
+                                     "запускается, идущие сессии работают.", actor="плановый проход")
     st.update(card_id=tid, card_at=t, question=TITLE, options=opts)
     remind(st, t, "Вопрос на ночь")
 
