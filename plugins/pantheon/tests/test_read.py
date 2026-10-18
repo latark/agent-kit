@@ -157,7 +157,7 @@ class Box:
         self.pantheon = os.path.join(self.home, "ai", "pantheon")
         self.state = os.path.join(self.home, ".local", "state", "pantheon")
         self.rec = os.path.join(self.tmp, "rec")
-        for d in (os.path.join(self.pantheon, "directions", "hermes-alex"), os.path.join(self.pantheon, "inbox"),
+        for d in (os.path.join(self.pantheon, "directions", "demo-dir"), os.path.join(self.pantheon, "inbox"),
                   self.state, self.rec):
             os.makedirs(d)
         os.makedirs(os.path.join(self.tmp, "bin"))
@@ -184,7 +184,7 @@ class Box:
         return r
 
     def request(self, **kw):
-        a = {"direction": "hermes-alex", "chat": CHAT, "since": "2026-10-18", "until": "2026-10-18",
+        a = {"direction": "demo-dir", "chat": CHAT, "since": "2026-10-18", "until": "2026-10-18",
              "why": "о чём договорились по встрече"}
         a.update(kw)
         args = ["read", "request"]
@@ -229,7 +229,7 @@ class Box:
         return "\n".join(out)
 
     def inbox_files(self):
-        ib = os.path.join(self.pantheon, "directions", "hermes-alex", "inbox")
+        ib = os.path.join(self.pantheon, "directions", "demo-dir", "inbox")
         return sorted(os.path.join(ib, f) for f in os.listdir(ib)) if os.path.isdir(ib) else []
 
 
@@ -265,7 +265,7 @@ def test_request_refusals():
         check(f"request: отказ — {why}", r.returncode == 2 and rid is None, r.stdout + r.stderr)
     r = b.cli(["read", "request", "--chat", CHAT])
     check("request: без всех флагов — отказ", r.returncode == 2)
-    r = b.cli(["read", "request", "--direction", "hermes-alex", "--chat", CHAT, "--since", "2026-10-18", "--until",
+    r = b.cli(["read", "request", "--direction", "demo-dir", "--chat", CHAT, "--since", "2026-10-18", "--until",
                "2026-10-18", "--why", "x", "--files", "1"])
     check("request: лишний флаг (--files) — отказ", r.returncode == 2)
     for steps, word in (("reader,verify,reader2", "ещё не сделан"), ("reader,quotes,verify", "ещё не сделан"),
@@ -600,7 +600,7 @@ def test_no_approval_no_delivery():
     check("без одобрения: повторный проход ничего не передаёт", not b.inbox_files() and "ждёт решения" in r.stdout,
           r.stdout + b.inbox_files().__repr__())
     check("без одобрения: выгрузка не повторяется", len(b.exports()) == 1)
-    okq = f"[read-{rid}-ok] Какие пункты разбора передать в hermes-alex? Разбор: …, пунктов 4, хеш "
+    okq = f"[read-{rid}-ok] Какие пункты разбора передать в demo-dir? Разбор: …, пунктов 4, хеш "
     b.answer(T0 + 1000, okq + "000000000000", "все")
     b.answer(T0 + 1000, okq + st["summary_hash"], "пункты 9")       # нет такого пункта
     b.run(T0 + 1100)
@@ -649,7 +649,7 @@ def _summarized_box():
     b.answer(T0 + 60, q, "Да")
     b.run(T0 + 120)
     st = b.st(rid)
-    okq = (f"[read-{rid}-ok] Какие пункты разбора передать в hermes-alex? Разбор: …, пунктов 4, хеш "
+    okq = (f"[read-{rid}-ok] Какие пункты разбора передать в demo-dir? Разбор: …, пунктов 4, хеш "
            + st["summary_hash"])
     return b, rid, st, okq
 
@@ -668,7 +668,7 @@ def test_redirect_after_consent():
     with open(p, "w") as fh:
         json.dump(req, fh)
     b.answer(T0 + 1200, okq, "все")
-    b.answer(T0 + 1200, okq.replace("hermes-alex", "other-dir"), "все")
+    b.answer(T0 + 1200, okq.replace("demo-dir", "other-dir"), "все")
     r = b.run(T0 + 1300)
     check("переписанная заявка: ничего не передано", _no_delivery(b) and "изменилась" in r.stdout, r.stdout)
     check("переписанная заявка: этап failed, request-changed",
@@ -691,7 +691,7 @@ def test_redirect_with_state_rewritten():
     s["req_hash"] = hashlib.sha256(data.encode("utf-8")).hexdigest()[:12]
     with open(sp, "w") as fh:
         json.dump(s, fh)
-    b.answer(T0 + 1200, okq.replace("hermes-alex", "other-dir"), "все")
+    b.answer(T0 + 1200, okq.replace("demo-dir", "other-dir"), "все")
     r = b.run(T0 + 1300)
     check("заявка и state переписаны: ничего не передано", _no_delivery(b), r.stdout)
     check("заявка и state переписаны: approved.md нет",
@@ -713,7 +713,7 @@ def test_consent_withdrawn_before_delivery():
 def test_approval_other_direction():
     """Одобрение с верным хешем, но с другим направлением в вопросе -ok — не одобрение."""
     b, rid, st, okq = _summarized_box()
-    b.answer(T0 + 1200, okq.replace("hermes-alex", "other-dir"), "все")
+    b.answer(T0 + 1200, okq.replace("demo-dir", "other-dir"), "все")
     r = b.run(T0 + 1300)
     check("-ok с чужим направлением: ничего не передано", _no_delivery(b) and "ждёт решения" in r.stdout, r.stdout)
     b.answer(T0 + 1400, f"[read-{rid}] Разрешить выгрузку: …", "Нет")   # без хеша заявки — не в счёт
@@ -777,7 +777,7 @@ def test_custom_profile():
         fh.write("ПРОФИЛЬ-BRIEF. Вопрос: {why}. Не больше двух пунктов «N. вывод — #id «цитата»».\n")
     with open(os.path.join(lib, "read_prompts", "brief.schema.json"), "w") as fh:
         json.dump({"items": "numbered", "max_items": 2}, fh)
-    args = ["read", "request", "--direction", "hermes-alex", "--chat", CHAT, "--since", "2026-10-18", "--until",
+    args = ["read", "request", "--direction", "demo-dir", "--chat", CHAT, "--since", "2026-10-18", "--until",
             "2026-10-18", "--why", "коротко", "--profile", "brief"]
     run = lambda a, t, extra=None: subprocess.run([PY311, "-I", os.path.join(lib, "pantheon.py")] + a,
                                                   env=b.env(t, extra), capture_output=True, text=True, timeout=60)
