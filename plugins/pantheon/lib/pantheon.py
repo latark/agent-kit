@@ -2821,10 +2821,35 @@ def copies_message(name, live):
             f"{live[0]['id']}; начать заново — тот же запуск с --restart")
 
 
+def stop_and_rm(name, sid):
+    """claude stop, затем claude rm <id> (metis-0239): остановленную сессию флот Claude Code поднимает снова
+    (daemon.log: settled (killed) → claimed-spare (fleet)), пока она в его списке. rm убирает из списка фоновую сессию
+    (и её worktree, если он чистый); переписка остаётся, вернуть — pantheon start / resume. Без --discard-unpushed и
+    --force-remove-worktree: сессию с неотправленной работой не удаляем насильно. Возвращает None или причину отказа."""
+    subprocess.run([claude_bin(), "stop", sid], capture_output=True, text=True, timeout=60)
+    r = None
+    for attempt in range(2):  # stop возвращается раньше, чем процесс ушёл: rm на ещё живую сессию может отказать
+        try:
+            r = subprocess.run([claude_bin(), "rm", sid], capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as e:
+            return f"claude rm не выполнился: {e}"[:200]
+        if r.returncode == 0:
+            return None
+        if attempt == 0:
+            time.sleep(1)
+    reason = " ".join(((r.stderr or "") + " " + (r.stdout or "")).split())[:200] or f"код {r.returncode}"
+    return reason
+
+
 def stop_copies(name, live, why="stop-restart"):
+    left = []
     for a in live:
-        subprocess.run([claude_bin(), "stop", a["id"]], capture_output=True, text=True, timeout=60)
+        reason = stop_and_rm(name, a["id"])
         start_log(f"{why}\t{name}\t{a.get('name')}\t{a['id']}")
+        if reason:
+            start_log(f"rm-refused\t{name}\t{a['id']}\t{reason}")
+            left.append((a["id"], reason))
+    return left
 
 
 DOWN_STATES = ("done", "stopped", "failed")
@@ -3068,8 +3093,10 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     # останавливается (переписка сохраняется: claude attach <id>), иначе Claude Code назовёт новую «имя (2)»
     for a in same:
         if a.get("state") == "done" and a.get("pid") and not dry:
-            subprocess.run([claude_bin(), "stop", a.get("id")], capture_output=True, text=True, timeout=60)
+            reason = stop_and_rm(name, a.get("id"))
             start_log(f"stop-done\t{name}\t{a.get('id')}")
+            if reason:
+                start_log(f"rm-refused\t{name}\t{a.get('id')}\t{reason}")
             stopped.append(a)
     # остановленная копия отпускает имя не сразу и может ожить (metis-0041): запуск — только когда имя свободно
     why = wait_name_free(name, stopped) if stopped else None

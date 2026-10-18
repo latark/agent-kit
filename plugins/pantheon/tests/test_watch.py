@@ -56,6 +56,9 @@ elif a[:1] == ["stop"] and os.environ.get("FAKE_STOP_MARK"):
         if x.get("id") == a[1]:
             x.update(state="stopped", pid=None)
     json.dump(lst, open(os.environ["FAKE_AGENTS"], "w"))
+elif a[:1] == ["rm"] and a[1:2] and a[1] in os.environ.get("FAKE_RM_REFUSE", "").split(","):
+    print("refusing: worktree has unpushed commits (abc123@wt-1)", file=sys.stderr)
+    sys.exit(1)
 elif a[:1] == ["--bg"] and os.environ.get("FAKE_BG_SLEEP"):
     import time
     time.sleep(float(os.environ["FAKE_BG_SLEEP"]))
@@ -914,6 +917,27 @@ def test_stop_resume_all_precise():
     check(not os.path.exists(e.st("stopped", "s1-dir")) and os.path.exists(e.st("stopped", "s2-dir")),
           f"resume --all снял чужую метку: {out}")
     check(not os.path.exists(e.st("paused")), "пауза планировщика осталась")
+
+
+def test_stop_removes_from_fleet():
+    """metis-0239: после claude stop идёт claude rm <id>, иначе флот Claude Code поднимает сессию снова;
+    отказ rm (worktree с неотправленным) виден в выводе и в start.log, насильно не удаляем."""
+    e = Env()
+    e.direction("rm-dir")
+    e.direction("rk-dir")
+    e.agents([bg("rm-dir", "working", "r1r1r1r1-1", pid=61), bg("rk-dir", "working", "r2r2r2r2-1", pid=62)])
+    r = e.run("stop", "rm-dir", t=T0)
+    c = e.calls()
+    check(["stop", "r1r1r1r1"] in c and ["rm", "r1r1r1r1"] in c and c.index(["stop", "r1r1r1r1"]) < c.index(["rm", "r1r1r1r1"]),
+          f"stop не вызвал rm после stop: {c}")
+    check("осталась во флоте" not in r.stdout, f"ложная «осталась во флоте»: {r.stdout}")
+    r = e.run("stop", "rk-dir", t=T0 + 5, extra={"FAKE_RM_REFUSE": "r2r2r2r2"})
+    check(["rm", "r2r2r2r2"] in e.calls() and not [x for x in e.calls() if "--discard-unpushed" in x or "--force-remove-worktree" in x],
+          "rm вызван неверно или насильно")
+    check("rk-dir: осталась во флоте: r2r2r2r2, причина:" in r.stdout and "unpushed" in r.stdout and r.returncode == 0,
+          f"отказ rm не виден в выводе: {r.stdout!r}")
+    log = open(e.st("logs", "start.log")).read()
+    check("rm-refused\trk-dir\tr2r2r2r2" in log, f"отказ rm не в start.log: {log}")
 
 
 def test_stop_without_locks_write():
