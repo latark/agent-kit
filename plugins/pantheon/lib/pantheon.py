@@ -889,6 +889,16 @@ def svc_running(name):
     return int(m.group(1)) if m else 0
 
 
+def svc_last_exit(name):
+    """Последний код выхода службы по launchctl print («last exit code»); не выходила или не узнать — None."""
+    if os.environ.get("PANTHEON_DRYRUN") == "1":
+        return (read_json(path("svc-dry.json")).get("exit") or {}).get(name)
+    r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{SVC_PREFIX}{name}"], capture_output=True,
+                       text=True, timeout=15)
+    m = re.search(r"^\s*last exit code = (-?\d+)", r.stdout, re.M) if r.returncode == 0 else None
+    return int(m.group(1)) if m else None
+
+
 def _launchctl(verb, target, name):
     """launchctl bootstrap|bootout|kickstart; при PANTHEON_DRYRUN — строка в dryrun.log и мнимое состояние."""
     if os.environ.get("PANTHEON_DRYRUN") == "1":
@@ -1005,8 +1015,15 @@ def _services_sync(sched, only):
                 continue
             clear_once("svc-" + name)
         elif state == 0 and port is not None:
-            # служба по требованию ждёт соединения на сокете launchd — так и должно быть
-            clear_once("svc-down-" + name)
+            # служба по требованию ждёт соединения на сокете launchd — так и должно быть, если последний запуск
+            # кончился чисто (прокси выходит по простою с кодом 0); ненулевой код — служба падает при запуске
+            code = svc_last_exit(name)
+            if code:
+                alert_once("svc-down-" + name, f"exit-{code}", f"служба по требованию {name} падает при запуске: "
+                           f"последний код выхода {code}; журнал {path('logs', f'svc-{name}.log').replace(HOME, '~')}",
+                           "pantheon-tick", note=f"Служба {name} падает при запуске")
+            else:
+                clear_once("svc-down-" + name)
         elif state == 0:
             # загружена, но процесса нет (KeepAlive сдался после частых падений) — толкнуть, раз в тик
             _launchctl("kickstart", [f"gui/{uid}/{SVC_PREFIX}{name}"], name)

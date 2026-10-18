@@ -399,6 +399,61 @@ def test_proxy_inproc():
         t.join(15)
         check("в процессе: остановка гасит и прокси, и qmd", not t.is_alive() and res.get("b") == 0
               and bool(pids(pidfile)) and wait_dead(pids(pidfile)[-1]), f"{res} {pids(pidfile)}")
+        # keep-alive (ревью #57, п. 1): одно соединение, байты идут чаще простоя — простой считается по байтам
+        # пересылки (touch в _pipe), а не только по новым соединениям: прокси не рвёт клиента посреди работы
+
+        def echo(s):
+            try:
+                while True:
+                    d = s.recv(65536)
+                    if not d:
+                        break
+                    s.sendall(d)
+            except OSError:
+                pass
+            finally:
+                s.close()
+
+        def connect_echo(port):
+            live = [int(p) for p, q in (ln.split() for ln in open(pidfile) if ln.strip())
+                    if int(q) == port and alive(int(p))] if os.path.exists(pidfile) else []
+            if not live:
+                raise ConnectionRefusedError("qmd не слушает")
+            a, b = socket.socketpair()
+            threading.Thread(target=echo, args=(b,), daemon=True).start()
+            return a
+
+        def go_echo():
+            p = ondemand.Proxy([lst], start, IDLE, connect=connect_echo, new_port=lambda: next(ports))
+            res["k-proxy"] = p
+            res["k"] = p.run()
+        before = len(pids(pidfile))
+        t = threading.Thread(target=go_echo, daemon=True)
+        t.start()
+        k = lst.dial()
+        k.settimeout(10)
+        served, t0 = 0, time.monotonic()
+        try:
+            while time.monotonic() - t0 < IDLE * 3:
+                k.sendall(b"ping")
+                if k.recv(10) != b"ping":
+                    break
+                served += 1
+                time.sleep(IDLE / 4)
+        except OSError:
+            pass
+        want = int(IDLE * 3 / (IDLE / 4)) - 1
+        check("в процессе: keep-alive — байты одного соединения держат прокси дольше простоя",
+              served >= want and t.is_alive() and len(pids(pidfile)) == before + 1,
+              f"ответов {served} из ≥{want}, прокси жив: {t.is_alive()}, {pids(pidfile)}")
+        t.join(IDLE * 5)
+        try:
+            closed = k.recv(10) == b""
+        except OSError:
+            closed = True
+        k.close()
+        check("в процессе: keep-alive замолчал — после простоя прокси выходит и закрывает соединение",
+              not t.is_alive() and res.get("k") == 0 and closed and wait_dead(pids(pidfile)[-1]), f"{res} {closed}")
         log.close()
 
 
@@ -512,6 +567,22 @@ def test_tick():
               "svc-kickstart qmd" not in log and "служба qmd не работает" not in alerts, f"{log} {alerts}")
         check("загружена без процесса: обычная служба — kickstart и тревога, как раньше",
               "svc-kickstart keep" in log and "служба keep не работает" in alerts, f"{log} {alerts}")
+        # ревью #57, п. 2: по требованию, процесса нет, последний запуск упал (нет qmd → код 3) — тревога
+
+        def tick_exit(code):
+            with open(os.path.join(state, "svc-dry.json"), "w") as fh:
+                json.dump({"qmd": 0, "keep": 4242, "exit": {"qmd": code}}, fh)
+            run(env, "tick")
+            return open(alerts_p).read().count("служба по требованию qmd падает при запуске")
+        n3 = tick_exit(3)
+        check("по требованию, последний код выхода 3 — тревога с кодом, без kickstart",
+              n3 == 1 and "последний код выхода 3" in open(alerts_p).read()
+              and "svc-kickstart qmd" not in dry(state), f"{n3} {dry(state)}")
+        check("тот же код на следующем проходе — тревога не повторяется", tick_exit(3) == 1)
+        n0 = tick_exit(0)
+        check("код 0 (выход по простою) — новой тревоги нет, а следующий сбой снова виден",
+              n0 == 1 and tick_exit(3) == 2, str(n0))
+        tick_exit(0)
         with open(os.path.join(state, "svc-dry.json"), "w") as fh:
             json.dump({"qmd": 0, "keep": 4242}, fh)
         out = run(env, "jobs").stdout
