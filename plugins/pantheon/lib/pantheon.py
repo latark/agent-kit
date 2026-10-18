@@ -3348,6 +3348,12 @@ def _marked(text, tmpl):
     return text[:end + 5] + ROLE_MARK.format(tmpl=tmpl) + "\n" + text[end + 5:]
 
 
+# Шаблоны, которые build пока не собирает (metis-0217, review-51-bypass): роль, которую нельзя звать до окна
+# песочницы, не должна лежать в ~/.claude/agents — иначе её поднимет субагент мимо отказа wake. Убрать строку —
+# когда слит metis-0245. Уже собранный файл с меткой build убирает как устаревшую роль.
+ROLES_DEFERRED = {"hestia": "metis-0245"}
+
+
 def roles_build(src=None, out=None):
     """Роли из общих шаблонов плагина (PLUGIN_ROLES) и личного слоя src (по умолчанию ~/.claude/agents; перекрывает
     общий по имени шаблона и части) в папку out (по умолчанию ~/.claude/agents). Режим с out — проба
@@ -3375,6 +3381,8 @@ def roles_build(src=None, out=None):
                 layer[f] = os.path.join(d, f)
     for f in sorted(layer):
         base = f[:-5]
+        if base in ROLES_DEFERRED:
+            continue
         if not ROLE_NAME.fullmatch(base):
             errors.append(f"{f}: имя не по образцу")
             continue
