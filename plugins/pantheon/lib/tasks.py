@@ -804,7 +804,7 @@ def card_name(head, with_id=None):
 GODS = {"zeus": "Зевс", "hq": "Зевс", "athena": "Афина", "hermes": "Гермес", "proteus": "Протей", "themis": "Фемида",
         "calliope": "Каллиопа", "mnemo": "Мнемозина", "metis": "Метида", "janus": "Янус", "daedalus": "Дедал",
         "apollo": "Аполлон", "hephaestus": "Гефест", "argus": "Аргус", "chiron": "Хирон", "prometheus": "Прометей",
-        "talos": "Талос", "clio": "Клио", "iris": "Ирида"}
+        "talos": "Талос", "clio": "Клио", "iris": "Ирида", "hestia": "Гестия"}
 OWNER_SLUGS = ("вы", "владелец", "owner", "human")
 OWNER_NODE, HQ_NODE = "Владелец", "Зевс"
 LEAD_GODS = ("hephaestus", "apollo")  # лиды направлений: подчиняются координатору направления с тем же суффиксом

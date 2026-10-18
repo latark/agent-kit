@@ -248,6 +248,15 @@ def main():
               + ("выпали" if not extra else "подставлены"),
               not has if not extra else (has == set(owner_lines)
                                          and "Коллекции направлений: legal, docs (справка)." in texts["argus.md"]))
+    # Гестия (metis-0217): в собранной роли нет прав на commit/push/merge и записи в ~/.claude
+    hest = texts.get("hestia.md", "")
+    head = hest.split("---")[1] if hest.count("---") >= 2 else ""
+    deny = next((ln for ln in head.splitlines() if ln.startswith("disallowedTools:")), "")
+    check("hestia: роль собрана, запрещены Edit/Write и коммит/push/merge, слияние PR; в тексте — «чего нет»",
+          all(t in deny for t in ("Edit", "Write", "Bash(git commit *)", "Bash(git push *)", "Bash(git merge *)",
+                                  "Bash(gh pr merge *)"))
+          and "Не правишь `~/.claude/settings.json`" in hest and "нет задачи" in hest
+          and "Гестия (hestia" in hest and "Гестия (hestia" in texts.get("argus.md", ""))
     agents2 = os.path.join(home2, ".claude", "agents")
     r = run("roles", "build")
     check("новая машина: ~/.claude/agents ещё нет — живая сборка создаёт папку и кладёт общие роли",

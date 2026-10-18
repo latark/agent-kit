@@ -3159,6 +3159,36 @@ def wake_recheck(name, state=None):
     return None
 
 
+HESTIA_TASK = re.compile(r"[a-z][a-z0-9]*-\d{4}")
+
+
+def wake_hestia(rest):
+    """pantheon wake hestia --task <id> (metis-0217): служебная роль Гестия спит и встаёт только с задачей — одна задача,
+    одна сессия `claude -p --agent hestia`. Без --task, с неверным id или без карточки — отказ «нет задачи», код 2.
+    Вывод сессии — в журнал STATE/hestia/<задача>-<время>.log. Окна песочницы у роли пока нет (ему нужен sandbox_build,
+    отдельный PR ядра): права держит шапка роли и guard."""
+    args = rest[1:]
+    tid = args[args.index("--task") + 1] if "--task" in args[:-1] else ""
+    if not HESTIA_TASK.fullmatch(tid) or args != ["--task", tid]:
+        print("pantheon wake hestia: нет задачи — pantheon wake hestia --task <id>", file=sys.stderr)
+        return 2
+    head = _task_head(tid)
+    if head is None:
+        print(f"pantheon wake hestia: нет задачи {tid}", file=sys.stderr)
+        return 2
+    text = f"{START_MARK} поручение от zeus] Задача {tid}: прочитай карточку (pantheon task show {tid}) и сделай её."
+    argv = [claude_bin(), "-p", "--agent", "hestia", "--name", "hestia", text]
+    r = subprocess.run(argv, cwd=PANTHEON, capture_output=True, text=True, timeout=1800)
+    logdir = path("hestia")
+    os.makedirs(logdir, exist_ok=True)
+    with open(os.path.join(logdir, f"{tid}-{int(now())}.log"), "w") as fh:
+        fh.write(f"{shlex.join(argv)}\nкод {r.returncode}\n\n{r.stdout}\n{r.stderr}")
+    start_log(f"hestia\t{tid}\t{r.returncode}")
+    sys.stdout.write(r.stdout)
+    sys.stderr.write(r.stderr)
+    return r.returncode
+
+
 def wake(rest):
     """pantheon wake [--dry-run]: прерванные сессии Пантеона (failed, stopped) с открытой задачей — поднять и сказать
     «продолжай». Свои метки «остановлено вами» и чужие сессии (не направление и не daedalus-*) не трогает."""
@@ -3449,7 +3479,7 @@ WHO_ANY_DIRECTION = ("domain-coordinator",)
 # Остальной код (команды, пути, `claude agents`) под образец не подходит. Список — боги из карты имён и прошлых
 # направлений; нового бога дописать сюда (иначе его удалённая роль не будет найдена как лишняя).
 WHO_GODS = ("zeus", "athena", "hermes", "themis", "calliope", "mnemo", "proteus", "metis", "janus", "daedalus",
-            "apollo", "hephaestus", "argus", "chiron", "prometheus", "talos", "clio", "iris", "momus", "charon")
+            "apollo", "hephaestus", "argus", "chiron", "prometheus", "talos", "clio", "iris", "momus", "charon", "hestia")
 WHO_TOKEN = re.compile(r"`([^`\n]+)`")
 
 
@@ -5421,6 +5451,8 @@ def main(argv):
     if cmd == "start":
         return start(rest)
     if cmd == "wake":
+        if rest[:1] == ["hestia"]:
+            return wake_hestia(rest)
         if rest and not rest[0].startswith("-"):
             return watch_cmd("wake", rest)
         return wake(rest)
