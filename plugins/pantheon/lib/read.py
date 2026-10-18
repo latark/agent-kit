@@ -7,7 +7,8 @@
   pantheon read request --direction D --chat ID --since ГГГГ-ММ-ДД --until ГГГГ-ММ-ДД --why "вопрос"
                         [--profile default] [--steps reader,verify]
         заявка: папка STATE/read/<rid>/ (0700, вне git и коллекций qmd), request.json (0600) и хеш заявки;
-        печатает вопрос для Зевса «[read-<rid>] Разрешить выгрузку: чат …, даты, без вложений, …, хеш <12 знаков>»
+        печатает вопрос для Зевса «[read-<rid>] Разрешить выгрузку: чат …, даты, без вложений, …, вопрос читателю:
+        «<--why одной строкой, до 200 знаков>», хеш <12 знаков>»
   pantheon read run      проход по заявкам (задача планового прохода read-run; из окна Claude Code — отказ)
   pantheon read status   заявки: номер, направление, этап, числа — без текста
   pantheon read cancel <rid>   удалить заявку и всё, что по ней есть
@@ -19,12 +20,17 @@
      выгрузка, «Нет…» — заявка удаляется. Ответа нет за REQUEST_TTL — заявка удаляется.
   2. Выгрузка: `tg_read.py history --since S --until U -o <папка>/raw.md -- <чат>` — argv из заявки, без оболочки,
      без --files, --voice и --takeout; вывод tg_read никуда не идёт (в журнал — только код выхода).
-  3. Читатель: `claude -p --agent tg-reader --tools Read,Grep,Glob --no-session-persistence --strict-mcp-config
-     "<поручение>"` в папке заявки — сессия не сохраняется (транскрипта нет ни в sessync, ни в S3), MCP-серверов нет.
+  3. Читатель: `claude -p --restricted --agents '<tg-reader>' --agent tg-reader --tools Read,Grep,Glob
+     --no-session-persistence --strict-mcp-config "<поручение>"` в папке заявки — Read, Grep и Glob не выходят из
+     неё (--restricted), сессия не сохраняется (транскрипта нет ни в sessync, ни в S3), MCP-серверов нет.
+     Перед выгрузкой этап — exporting: оборванный проход кончается этапом failed, а не новой выгрузкой. SIGTERM
+     (таймаут задачи), SIGINT и SIGHUP останавливают группу процессов читателя или выгрузки, удаляют выгрузку и пишут
+     failed. Весь проход — не дольше RUN_BUDGET.
   4. Проверка: каждый пункт ответа — отдельно `tg_read.py verify raw.md <пункт>`; пункт без #id, без цитаты или с
      ненайденной цитатой выпадает. Сырая выгрузка, ответ читателя и пункты удаляются сразу после проверки — и при
      сбое тоже (finally); выгрузка, оставшаяся от оборванного прохода, удаляется в начале следующего.
-  5. summary.md (0600) — проверенные пункты с новыми номерами; карточка «Прочитать разбор чата…» во входящих Зевса
+  5. summary.md (0600) — проверенные пункты с новыми номерами между метками выгрузки, с той же шапкой, что у
+     approved.md (сессию, открывшую файл, помечает guard tg-taint); карточка «Прочитать разбор чата…» во входящих Зевса
      с путём, числами и хешем разбора, без текста переписки. Разбор удаляется через SUMMARY_TTL.
   6. summarized → одобрение: ответ в окне вопросов Зевса на [read-<rid>-ok] с хешем разбора: «все», «пункты 1, 3»
      или «ни одного». Одобренные пункты — файлом approved.md (0600) в папке заявки с шапкой выгрузки tg_read; в
@@ -55,6 +61,7 @@ import signal
 import stat
 import subprocess
 import sys
+import time
 from datetime import date, datetime
 
 P = None  # модуль pantheon (lib/pantheon.py) — ставит set_core()
@@ -79,12 +86,26 @@ TEMP_RC = (4, 5, 9)      # tg_read: пауза Telegram, другой запус
 MAX_ATTEMPTS = 5
 ITEMS_MAX = 50
 ITEM_MAX = 1500
-EXPORT_TIMEOUT = 900
-READER_TIMEOUT = 1500
-VERIFY_TIMEOUT = 120
-READER_ARGV = ["-p", "--agent", "tg-reader", "--tools", "Read,Grep,Glob", "--no-session-persistence",
-               "--strict-mcp-config"]
+# Сроки (возврат argus-62b): весь проход укладывается в RUN_BUDGET — меньше timeout задачи read-run (2400 с) с запасом,
+# чтобы плановый проход не снимал его посреди шага. Разбор заявки начинается, только если до конца срока прохода
+# хватает на все три шага (NEED); иначе заявка ждёт следующего прохода.
+EXPORT_TIMEOUT = 600
+READER_TIMEOUT = 1200
+VERIFY_TIMEOUT = 30       # один пункт
+VERIFY_BUDGET = 240       # все пункты вместе
+NEED = EXPORT_TIMEOUT + READER_TIMEOUT + VERIFY_BUDGET
+RUN_BUDGET = 2100
+JOB_TIMEOUT = 2400        # timeout задачи read-run в schedule.toml (его вносит Пританей)
+STOP_GRACE = 2            # после SIGTERM группе процесса — столько секунд до SIGKILL
+# Читатель (возврат argus-62b, живая проба 18.10 на claude 2.1.302): --restricted держит Read, Grep и Glob в папке
+# заявки (рабочая папка процесса) — путь вне неё инструмент отклоняет сам, что бы ни было в поручении или выгрузке.
+# С --restricted пользовательские агенты (~/.claude/agents) не грузятся, поэтому tg-reader передаётся в --agents
+# строкой JSON: текст поручения — из ~/.claude/agents/tg-reader.md, инструменты — только Read, Grep, Glob.
+AGENT = "tg-reader"
+READER_TOOLS = ["Read", "Grep", "Glob"]
+READER_FLAGS = ["--tools", ",".join(READER_TOOLS), "--no-session-persistence", "--strict-mcp-config"]
 RAW, ANSWER, ITEM, SUMMARY, APPROVED = "raw.md", "answer.md", "item.md", "summary.md", "approved.md"
+WHY_SHOWN = 200           # столько знаков вопроса заявки видит владелец в вопросе [read-<rid>]
 
 
 def set_core(mod):
@@ -185,10 +206,17 @@ def req_hash(req):
     return hashlib.sha256(data.encode("utf-8")).hexdigest()[:HASH_LEN]
 
 
+def why_shown(why):
+    """Вопрос заявки для владельца: одной строкой, не длиннее WHY_SHOWN (обрезанный — с «…»)."""
+    s = " ".join(str(why).split())
+    return s if len(s) <= WHY_SHOWN else s[:WHY_SHOWN - 1].rstrip() + "…"
+
+
 def question(req, h):
     return (f"[read-{req['rid']}] Разрешить выгрузку: чат {req['chat']}, {req['since']} — {req['until']}, без вложений, "
             f"разбор для {req['direction']}"
-            + (f", профиль {req['profile']}" if req.get("profile", "default") != "default" else "") + f", хеш {h}")
+            + (f", профиль {req['profile']}" if req.get("profile", "default") != "default" else "")
+            + f", вопрос читателю: «{why_shown(req['why'])}», хеш {h}")
 
 
 def ok_question(rid, req, n, sh):
@@ -419,8 +447,37 @@ def claude_path():
     return os.environ.get("PANTHEON_CLAUDE") or shutil.which("claude", path=child_env().get("PATH")) or "claude"
 
 
+class Interrupted(BaseException):
+    """Проход получил SIGTERM (таймаут задачи), SIGINT или SIGHUP. BaseException — чтобы его не проглотил
+    `except Exception` по заявке."""
+
+
+DEADLINE = None   # time.monotonic(), до которого должен закончиться проход; ставит cmd_run
+
+
+def left():
+    return float("inf") if DEADLINE is None else DEADLINE - time.monotonic()
+
+
+def _stop(proc):
+    """Остановить группу процесса: SIGTERM, через STOP_GRACE — SIGKILL."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, sig)
+        try:
+            proc.wait(timeout=STOP_GRACE)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def call(argv, cwd, out=None, timeout=600):
-    """Процесс без оболочки, своя группа; вывод — в файл out или в никуда. → код выхода (124 — таймаут, 127 — нет)."""
+    """Процесс без оболочки, своя группа; вывод — в файл out или в никуда. → код выхода (124 — таймаут или кончился
+    срок прохода, 127 — нет). Срок — меньшее из timeout и остатка срока прохода. Прерывание прохода (Interrupted)
+    останавливает группу процесса и идёт дальше."""
+    timeout = min(timeout, left())
+    if timeout <= 0:
+        return 124
     try:
         proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out or subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, env=child_env(), start_new_session=True)
@@ -429,19 +486,44 @@ def call(argv, cwd, out=None, timeout=600):
     try:
         return proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(proc.pid, sig)
-            try:
-                proc.wait(timeout=5)
-                break
-            except subprocess.TimeoutExpired:
-                pass
+        _stop(proc)
         return 124
+    except BaseException:
+        _stop(proc)
+        raise
 
 
 def export_argv(req, raw):
     return [tg_read_path(), "history", "--since", req["since"], "--until", req["until"], "-o", raw, "--", req["chat"]]
+
+
+def agent_path():
+    return os.path.join(P.HOME, ".claude", "agents", AGENT + ".md")
+
+
+def reader_agent():
+    """Определение tg-reader для --agents: поручение и модель — из ~/.claude/agents/tg-reader.md, инструменты — только
+    READER_TOOLS. ValueError — файла нет или он не по образцу."""
+    try:
+        with open(agent_path(), encoding="utf-8") as fh:
+            text = fh.read()
+    except (OSError, UnicodeDecodeError) as e:
+        raise ValueError(f"нет {short(agent_path())} ({type(e).__name__})")
+    m = re.match(r"---\n(.*?)\n---\n(.*)\Z", text, re.S)
+    if not m or not m.group(2).strip():
+        raise ValueError(f"{short(agent_path())}: нет шапки --- или текста поручения")
+    agent = {"description": "Читатель выгрузок Telegram (pantheon read)", "prompt": m.group(2).strip(),
+             "tools": list(READER_TOOLS)}
+    model = re.search(r"^model:\s*([A-Za-z0-9.\-\[\]]+)\s*$", m.group(1), re.M)
+    if model:
+        agent["model"] = model.group(1)
+    return {AGENT: agent}
+
+
+def reader_argv(req):
+    """claude -p --restricted --agents <tg-reader> --agent tg-reader --tools Read,Grep,Glob … "<поручение>"."""
+    return ([claude_path(), "-p", "--restricted", "--agents", json.dumps(reader_agent(), ensure_ascii=False),
+             "--agent", AGENT] + READER_FLAGS + [reader_prompt(req)])
 
 
 def reader_prompt(req):
@@ -469,21 +551,38 @@ def split_items(text, schema=None):
     return out
 
 
+def fail(rid, st, error, event, **nums):
+    st.update(phase="failed", failed_at=int(P.now()), error=error)
+    write_state(folder(rid), st)
+    log(rid, event, **nums)
+
+
 def summarize(rid, req, st):
-    """Выгрузка → читатель → проверка → summary.md. Сырая выгрузка и ответ читателя удаляются всегда. → событие."""
+    """Выгрузка → читатель → проверка → summary.md. Сырая выгрузка и ответ читателя удаляются всегда. → событие.
+
+    Перед выгрузкой этап — exporting и attempts+1: оборванный проход (SIGTERM — здесь же, SIGKILL — следующим
+    проходом) кончается этапом failed, а не новой выгрузкой по тому же «да»."""
     d = folder(rid)
     raw, answer, item = (os.path.join(d, x) for x in (RAW, ANSWER, ITEM))
+    if left() < NEED:
+        return "ждёт следующего прохода: до конца срока этого не хватит на выгрузку, читателя и проверку"
+    try:
+        argv = reader_argv(req)
+    except ValueError:
+        fail(rid, st, "reader-agent", "reader-agent")
+        return f"нет определения читателя {AGENT} ({short(agent_path())}) — выгрузки не было"
+    st.update(phase="exporting", attempts=int(st.get("attempts") or 0) + 1, export_started=int(P.now()))
+    write_state(d, st)
+    msgs, items, ok = 0, [], []
     try:
         rc = call(export_argv(req, raw), d, timeout=EXPORT_TIMEOUT)
         if rc != 0 or os.path.islink(raw) or not os.path.isfile(raw):
-            st["attempts"] = int(st.get("attempts") or 0) + 1
             if rc in TEMP_RC and st["attempts"] < MAX_ATTEMPTS:
+                st["phase"] = "requested"
                 write_state(d, st)
                 log(rid, "export-wait", rc=rc, attempts=st["attempts"])
                 return f"выгрузка ждёт (код tg_read {rc}, попытка {st['attempts']})"
-            st.update(phase="failed", failed_at=int(P.now()), error=f"export-{rc}")
-            write_state(d, st)
-            log(rid, "export-failed", rc=rc)
+            fail(rid, st, f"export-{rc}", "export-failed", rc=rc)
             return f"выгрузка не удалась (код tg_read {rc})"
         os.chmod(raw, 0o600)
         with open(raw, encoding="utf-8", errors="replace") as fh:
@@ -491,28 +590,35 @@ def summarize(rid, req, st):
         st.update(exported_at=int(P.now()), messages=msgs)
         fd = os.open(answer, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w") as fh:
-            rc = call([claude_path()] + READER_ARGV + [reader_prompt(req)], d, out=fh, timeout=READER_TIMEOUT)
+            rc = call(argv, d, out=fh, timeout=READER_TIMEOUT)
         if rc != 0:
-            st.update(phase="failed", failed_at=int(P.now()), error=f"reader-{rc}")
-            write_state(d, st)
-            log(rid, "reader-failed", rc=rc, messages=msgs)
+            fail(rid, st, f"reader-{rc}", "reader-failed", rc=rc, messages=msgs)
             return f"читатель не ответил (код {rc})"
         with open(answer, encoding="utf-8", errors="replace") as fh:
             items = split_items(fh.read(), load_profile(req["profile"])[1])
-        ok = []
+        v_end = time.monotonic() + VERIFY_BUDGET
         for text in items:
             remove_file(item)
             write_new(item, text + "\n")
-            if call([tg_read_path(), "verify", raw, item], d, timeout=VERIFY_TIMEOUT) == 0:
+            t = min(VERIFY_TIMEOUT, v_end - time.monotonic())
+            if t > 0 and call([tg_read_path(), "verify", raw, item], d, timeout=t) == 0:
                 ok.append(text)
+    except Interrupted:
+        for p in (raw, answer, item):
+            remove_file(p)
+        fail(rid, st, "interrupted", "interrupted", messages=msgs)
+        raise
     finally:
         for p in (raw, answer, item):
             remove_file(p)
+    tag = f"TG-{secrets.token_hex(6)}"
     lines = [f"# Разбор чата {req['chat']} за {req['since']} — {req['until']} (заявка read-{rid})", "",
-             f"Вопрос: {req['why']}", "",
+             f"Вопрос заявки: {req['why']}", "",
              f"Пункты проверены tg_read verify: осталось {len(ok)} из {len(items)} (без цитаты или с ненайденной "
-             f"цитатой — выпали). Сырая выгрузка удалена. Разбор удалится через {SUMMARY_TTL // 86400} дн.", ""]
-    lines += [f"{i}. {text}" for i, text in enumerate(ok, 1)]
+             f"цитатой — выпали). Сырая выгрузка удалена. Разбор удалится через {SUMMARY_TTL // 86400} дн.", "",
+             # шапка выгрузки, как у approved.md: её ловит guard tg-taint у сессии, открывшей файл
+             DUMP_NOTE.format(tag=tag), "", f"<<<{tag}"]
+    lines += [f"{i}. {text}" for i, text in enumerate(ok, 1)] + [f"{tag}>>>"]
     summary = "\n".join(lines) + "\n"
     sp = os.path.join(d, SUMMARY)
     remove_file(sp)
@@ -566,10 +672,15 @@ def deliver(rid, req, st, nums, t_ok):
         write_state(d, st)
         log(rid, "summary-changed")
         return "разбор изменился после проверки — ничего не передано"
-    items = {}
-    for line in summary.splitlines():
+    items, inside = {}, False
+    for line in summary.splitlines():   # пункты — только между метками выгрузки
+        if re.fullmatch(r"<<<TG-[0-9a-f]{12}", line):
+            inside = True
+            continue
+        if re.fullmatch(r"TG-[0-9a-f]{12}>>>", line):
+            break
         m = re.match(r"(\d{1,3})\. (.+)$", line)
-        if m:
+        if inside and m:
             items[int(m.group(1))] = m.group(2)
     chosen = [(k, items[k]) for k in sorted(nums) if k in items]
     out = None
@@ -624,6 +735,9 @@ def process(rid):
             return "заявка не по образцу — удалена"
         return f"заявка не по образцу ({bad or 'чужой номер'}) — не выгружаю"
     phase = st.get("phase")
+    if phase == "exporting":   # прошлый проход оборван посреди разбора (SIGKILL): без новой выгрузки по тому же «да»
+        fail(rid, st, "interrupted", "interrupted")
+        return "прошлый проход оборван посреди разбора — сбой, новой выгрузки нет"
     if phase == "requested":
         if t - req["created"] > REQUEST_TTL:
             remove_request(rid)
@@ -655,30 +769,54 @@ def process(rid):
     return {"done": "передано", "failed": "сбой: " + str(st.get("error") or "?")}.get(phase, "этап не по образцу")
 
 
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+
+
+def _on_signal(signum, frame):
+    for s in STOP_SIGNALS:   # второй сигнал не прерывает уборку после первого
+        signal.signal(s, signal.SIG_IGN)
+    raise Interrupted(signum)
+
+
 def cmd_run():
-    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_ENTRYPOINT"):
+    # переменная есть, пусть и пустая, — окно Claude Code (probe C argus-62b)
+    if "CLAUDECODE" in os.environ or "CLAUDE_CODE_ENTRYPOINT" in os.environ:
         err("pantheon read run: только плановый проход (задача read-run), не из окна Claude Code")
         return 2
     r = root()
     if not _real_dir(r):
         return 0
-    with P.lock("read", block=False) as got:
-        if not got:
-            print("pantheon read run: идёт другой проход")
-            return 0
-        os.chmod(r, 0o700)
-        rc = 0
-        for rid in sorted(os.listdir(r)):
-            if not RID_RE.fullmatch(rid):
-                continue
-            try:
-                print(f"read-{rid}: {process(rid)}")
-            except Exception as e:  # одна заявка не останавливает другие; текста в сообщении нет
-                rc = 1
-                with contextlib.suppress(Exception):
-                    log(rid, "error")
-                print(f"read-{rid}: сбой ({type(e).__name__})")
-    return rc
+    global DEADLINE
+    DEADLINE = time.monotonic() + RUN_BUDGET
+    old = {s: signal.signal(s, _on_signal) for s in STOP_SIGNALS}
+    rid = None
+    try:
+        with P.lock("read", block=False) as got:
+            if not got:
+                print("pantheon read run: идёт другой проход")
+                return 0
+            os.chmod(r, 0o700)
+            rc = 0
+            for rid in sorted(os.listdir(r)):
+                if not RID_RE.fullmatch(rid):
+                    continue
+                try:
+                    print(f"read-{rid}: {process(rid)}")
+                except Exception as e:  # одна заявка не останавливает другие; текста в сообщении нет
+                    rc = 1
+                    with contextlib.suppress(Exception):
+                        log(rid, "error")
+                    print(f"read-{rid}: сбой ({type(e).__name__})")
+            return rc
+    except Interrupted as e:   # выгрузка, ответ и пункты уже удалены, читатель остановлен, этап — failed
+        print(f"pantheon read run: прерван сигналом {e.args[0] if e.args else '?'}"
+              + (f" на заявке read-{rid}" if rid else ""))
+        sys.stdout.flush()
+        return 128 + int(e.args[0] if e.args else signal.SIGTERM)
+    finally:
+        DEADLINE = None
+        for s, h in old.items():
+            signal.signal(s, h)
 
 
 def cmd_status():
