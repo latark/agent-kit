@@ -254,14 +254,50 @@ def run(args, timeout=None):
     return r.returncode
 
 
+def ondemand_mod():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_ondemand", os.path.join(os.path.dirname(
+        os.path.realpath(__file__)), "ondemand.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
 def serve():
-    """Служба launchd: сервер MCP qmd на переднем плане (без --daemon — за перезапуск отвечает launchd)."""
+    """Служба launchd: сервер MCP qmd на переднем плане (без --daemon — за перезапуск отвечает launchd).
+
+    Служба по требованию (ключ socket в [[service]], metis-0151): порт слушает launchd, а здесь — прокси
+    lib/ondemand.py. Он поднимает qmd на свободном внутреннем порту петли по первому соединению и гасит его после
+    простоя (PANTHEON_SVC_IDLE секунд). Проверка Host у qmd смотрит только имя (127.0.0.1), а не порт, поэтому
+    запросы клиентов на 127.0.0.1:8181 qmd на внутреннем порту принимает."""
     binary, cfg = _prepare()
     if not binary:
         return 1
     os.chdir(workdir())
-    argv = [binary, *INDEX, "mcp", "--http", "--port", str(cfg["port"]), "--host", HOST]
-    os.execve(binary, argv, qmd_env(binary))
+
+    def argv(port):
+        return [binary, *INDEX, "mcp", "--http", "--port", str(port), "--host", HOST]
+
+    if os.environ.get("PANTHEON_SVC_SOCKET") or os.environ.get("PANTHEON_LISTEN_FDS"):
+        od = ondemand_mod()
+        try:
+            listeners = od.listen_sockets()
+        except (OSError, ValueError) as e:
+            print(f"qmd serve: нет сокета службы по требованию ({e}) — проверьте ключ socket в schedule.toml",
+                  file=sys.stderr)
+            return 1
+        ports = sorted({s.getsockname()[1] for s in listeners})
+        if ports != [cfg["port"]]:
+            print(f"qmd serve: сокет службы на порту {ports}, а в qmd.toml port = {cfg['port']} — MCP клиентов "
+                  f"смотрит на {url(cfg)}", file=sys.stderr)
+        env = qmd_env(binary)
+        try:
+            idle = float(os.environ.get("PANTHEON_SVC_IDLE") or 1800)
+        except ValueError:
+            idle = 1800.0
+        return od.Proxy(listeners, lambda port: subprocess.Popen(argv(port), env=env, stdin=subprocess.DEVNULL),
+                        idle).run()
+    os.execve(binary, argv(cfg["port"]), qmd_env(binary))
 
 
 def url(cfg=None):
