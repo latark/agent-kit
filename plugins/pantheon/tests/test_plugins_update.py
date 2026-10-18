@@ -197,7 +197,7 @@ def main():
           f"{r.returncode} {r.stderr!r} {e.argv()!r}")
     check("зелёные: без -y", " -y" not in e.argv())
     check("зелёные: «обновлён x 1.0.0 → 1.1.0» в alerts.md",
-          "plugins-update · обновлён x 1.0.0 → 1.1.0, тик перезапустит свободные окна" in e.alerts(), e.alerts())
+          "plugins-update · обновлён x 1.0.0 → 1.1.0, плановый проход перезапустит свободные окна" in e.alerts(), e.alerts())
     rsp = os.path.join(e.state, "plugins", "respawn.json")
     rj = json.load(open(rsp)) if os.path.exists(rsp) else {}
     check("зелёные: отметка «нужен перезапуск» respawn.json {since, plugins: [x], done: []} (metis-0181)",
