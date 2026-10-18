@@ -1130,7 +1130,7 @@ def test_tool04_limit_after_max_delay():
 def test_argus_wake_rules():
     """Ревью argus 15.10: снятие паузы не будит при техперезапуске и общей паузе; wake не будит под паузой; не на
     главном Mac самозапуска нет; быстрый «закончила ход» без STATUS.md — сбой; Зевс без вашего слова метку не снимает;
-    чужой текст толчка — под своей пометкой; saved — только себя."""
+    чужой текст задания — под своей пометкой; saved — только себя."""
     e = Env()
     e.direction("q-dir")
     e.agents([bg("q-dir", "working", "abcdef01-1", pid=61)])
@@ -1146,7 +1146,7 @@ def test_argus_wake_rules():
     e.run("pause", "--off", "--all", t=T0 + 80)
     r = e.run("wake", "q-dir", "сделай", "X", t=T0 + 90)
     pushed = open(e.st("push", "abcdef01-1.txt")).read()
-    check(pushed.startswith("[Пантеон: толчок от владелец] сделай X"), f"текст толчка без пометки: {pushed}")
+    check(pushed.startswith("[Пантеон: задание от владелец] сделай X"), f"текст задания без пометки: {pushed}")
     # не главный Mac
     e2 = Env()
     e2.direction("w-dir")

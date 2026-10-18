@@ -153,7 +153,7 @@ def check_settings(path, old, new):
         n = json.loads(new)
         o = json.loads(old) if old else {}
     except ValueError:
-        return [("settings", "битый JSON — на других Mac Claude Code не прочитает настройки")]
+        return [("settings", "битый JSON — на других компьютерах Claude Code не прочитает настройки")]
     if not isinstance(n, dict):
         return [("settings", "настройки — не объект JSON")]
     for cmd in sorted(hook_commands(n) - hook_commands(o)):
@@ -426,7 +426,7 @@ def explain(repo, flags, stats):
         advice = ("**Совет:** просили меня или Метиду менять эти файлы — «Отправить». Не просили — «Откатить».")
         recommend = "Отправить на другие Mac"
     n = len(files)
-    question = (f"Правки `~/.claude` на этом Mac ({n}) не ушли на другие Mac — ждут вашего решения."
+    question = (f"Правки `~/.claude` на этом Mac ({n}) не ушли на другие компьютеры — ждут вашего решения."
                 + (f" Кто: сессия Claude {common} — все правки." if common else "")
                 + "\n\n" + "\n".join(parts) + "\n\n" + advice
                 + "\n\nПосмотреть разницу: `cd ~/.claude && git diff -- " + " ".join(files) + "`")

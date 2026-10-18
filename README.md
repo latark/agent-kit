@@ -44,8 +44,8 @@
   worktree> <файл поручения>` — запуск Codex в worktree; коды выхода: 0 — коммит есть, 1 — отказ (ошибка хода,
   защищённые пути, нет изменений), 2 — неверный вызов или worktree не чистый (игнорируемое не в счёт), 3 — Codex
   недоступен (задачу на dev-*), 4 — занят.
-- Лёгкий тик: `pantheon` идёт модулем через `lib/run.py` (байт-код в `lib/__pycache__`, при read-only папке молча
-  без кэша), `--help` ~34 мс вместо ~62. Задачи `view --quiet`, `board`, `sync-answers`, `agents` тик пропускает, если
+- Лёгкий плановый проход: `pantheon` идёт модулем через `lib/run.py` (байт-код в `lib/__pycache__`, при read-only папке молча
+  без кэша), `--help` ~34 мс вместо ~62. Задачи `view --quiet`, `board`, `sync-answers`, `agents` плановый проход пропускает, если
   их входы (отпечаток stat, таблица входов — `TICK_SKIP` в `lib/pantheon.py`) не менялись с прошлого удачного прогона;
   не реже раза в 15 минут они идут в любом случае, ручной вызов и `run-job` — всегда. Пропуски — `tick-skipped.json`.
 - Размер песочницы окна (с 0.11.17): Seatbelt не собирает профиль больше 64 КБ, и тогда Bash окна не запускается
@@ -81,7 +81,7 @@
   сравнивает время изменения файлов, и allow со старым mtime (`cp -p`, `rsync -a`, распаковка tar) сборку не запускает.
   Нашлось правило — оба файла окна убираются и подъём идёт тем же путём «нет окна»; respawn и `--resume` к тому же
   проверяют папку сессии (`cwd` из `claude agents`), если она не папка запуска.
-  Claude Code перечитывает настройки на ходу, поэтому живую сессию с таким правилом останавливает тик
+  Claude Code перечитывает настройки на ходу, поэтому живую сессию с таким правилом останавливает плановый проход
   (`domains build --if-changed` и `check --quiet`): `claude stop` и тревога. Ручной `domains build` её не трогает —
   его зовут и тесты с настоящим `claude` в PATH.
   Мимо песочницы gh (в ней не работает) — только чтение: `gh pr view|checks|diff|list`, `gh run view|list|watch`,
@@ -97,7 +97,7 @@
   `+refspec`, удаление ветки, другие remote, `cd` и цепочки команд. Репозитории — только из `[merge_repos]`
   направления; без такой записи правила сдачи нет, как и правила слияния. Слияние это правило не покрывает: его
   пускает только Gated Merge.
-  Gated Merge описывает ровно форму, которую пускает запор guard:
+  Gated Merge описывает ровно форму, которую пускает шлюз слияния guard:
   `gh pr merge <N> -R|--repo <owner/repo> --match-head-commit <sha>`, а последующие `gh pr view` или `git fetch`
   классификатор считает обычными. `--admin`, `--auto`, `gh api` и ядро защит (`plugins/guard/`,
   `plugins/pantheon/roles/`, `plugins/pantheon/lib/window_rules.py`, `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
@@ -122,7 +122,7 @@
   `roles` и `coordinators` означают «никого», пустой `paths` — умолчание. Тест `test_private_conf` сверяет умолчание
   с `DEFAULT_PRIVATE` у guard.
   Задачи расписания `claude -p --agent <роль>` идут в песочнице окна задачи `settings/job-<роль>.json` (metis-0063):
-  роли — только из `JOB_ROLES` (clio, prometheus, iris; iris — с `--model sonnet`), тик сам добавляет `--settings`.
+  роли — только из `JOB_ROLES` (clio, prometheus, iris; iris — с `--model sonnet`), плановый проход сам добавляет `--settings`.
   Окно пишет только своё (clio и prometheus — `~/ai/knowledge`, iris — `~/ai/pantheon/scout`), память ролей и свой
   кэш; личное закрыто на чтение и запись; сети у Bash нет; мимо песочницы — только `pantheon alert`. Нет файла окна
   — задача не идёт, приходит одна тревога; `domains build --if-changed` пересобирает пропавшее окно. Субагентов
@@ -130,7 +130,7 @@
   «никого» и `deny Agent(…)` встроенным типам, ролям из `~/.claude/agents` и лидам; обычный навык идёт.
   Песочница всех окон (направления, мастерская, штаб) пускает запись в `~/.claude/agent-memory/<роль>` каждой
   роли-субагента, у которой в шапке `~/.claude/agents/<роль>.md` есть ключ `memory:` (роли главных сессий не берутся;
-  папку сборка создаёт, ссылку вместо папки пропускает). Новый файл роли тик подхватывает сам. Риск: песочница пускает
+  папку сборка создаёт, ссылку вместо папки пропускает). Новый файл роли плановый проход подхватывает сам. Риск: песочница пускает
   Bash-запись в память всех таких ролей, а guard (правило domain) — каждую роль только в её собственную папку, для
   Write/Edit и для тех записей Bash, которые он распознаёт. Запись в память чужой роли (например, argus) остаётся
   возможной только командой Bash, которую guard не разобрал (скрипт, интерпретатор). Исключение — главная сессия
@@ -142,10 +142,10 @@
   `restart --prepare|--status|--go|--cancel`, `saved`, `infra-check`. Подключает его `pantheon.py` (`watch_cmd`).
 - Службы (с 0.11.0, SCHED-05): `[[service]]` в `schedule.toml` — постоянный процесс, своя задача launchd
   `pantheon.svc.<имя>` с KeepAlive, запуск через `pantheon service-run <имя>` (команда — только `pantheon …`
-  или скрипт плагина). Тик сверяет launchd с расписанием; `pantheon jobs pause|resume|disable|enable <служба>` действует
+  или скрипт плагина). Плановый проход сверяет launchd с расписанием; `pantheon jobs pause|resume|disable|enable <служба>` действует
   сразу, `pantheon jobs` показывает pid. `pantheon jobs pause --all` и нечитаемый `schedule.toml` службы не трогают:
-  они идут как шли (тик выходит раньше сверки), пауза службы — только по её имени.
-- Обновления плагинов (с 0.11.8, metis-0052): `pantheon plugins update [--quiet]` — тик раз в 10 минут, вне песочницы.
+  они идут как шли (плановый проход выходит раньше сверки), пауза службы — только по её имени.
+- Обновления плагинов (с 0.11.8, metis-0052): `pantheon plugins update [--quiet]` — плановый проход раз в 10 минут, вне песочницы.
   Обновляет каталог agent-kit (не вышло — код 75), для установленных плагинов уровня пользователя с новой версией в
   каталоге гоняет `tests/test_*.py` новой и установленной версии во временной папке на `python3` и `/usr/bin/python3`.
   Новых падений нет — `claude plugin update <плагин>@agent-kit` без `-y` и тревога «обновлён X → Y»; есть — не ставит,
@@ -206,7 +206,7 @@
     python3 -I plugins/pantheon/tests/test_start.py   # start, wake, roles build, approve, heavy, Stop-хук разработчика
     python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры
     python3 -I plugins/pantheon/tests/test_tick.py    # планировщик: сон, пробуждение, питание, простой, лимит, главный Mac
-    python3 -I plugins/pantheon/tests/test_plugins_update.py   # обновления agent-kit тиком: тесты, база, метки, коды
+    python3 -I plugins/pantheon/tests/test_plugins_update.py   # обновления agent-kit плановым проходом: тесты, база, метки, коды
     python3 -I plugins/pantheon/tests/test_baseline.py   # замер «как сейчас»: задачи по git commit, сообщения, возвраты, цена
     python3 -I plugins/pantheon/tests/test_hooks.py   # хуки контекста и owner-log (и на системном: CTX_TEST_PYTHON=/usr/bin/python3)
     python3 -I plugins/project-tools/tests/test_project_tools.py   # карта стеков, apply, одобрения, Codex, подсказка

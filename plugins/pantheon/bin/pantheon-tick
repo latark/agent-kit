@@ -10,7 +10,7 @@ py=$(find_python) || {
     if [ "$(cat "$state/no-python-alert" 2>/dev/null)" != "$day" ]; then
         alerts=${PANTHEON_HOME:-$HOME/ai/pantheon}/alerts.md
         mkdir -p "$state" "$(dirname "$alerts")" 2>/dev/null
-        printf '%s · pantheon-tick · тик не идёт: нужен Python 3.11+, не найден. Поставить: brew install python@3.14\n' \
+        printf '%s · pantheon-tick · плановый проход не идёт: нужен Python 3.11+, не найден. Поставить: brew install python@3.14\n' \
             "$(date '+%Y-%m-%d %H:%M')" >>"$alerts" 2>/dev/null && printf '%s' "$day" >"$state/no-python-alert"
     fi
     exit 1
