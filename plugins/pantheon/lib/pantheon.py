@@ -61,7 +61,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon agents | who                 снимок claude agents для строки статуса | таблица координаторов
   pantheon revisits                     пересмотры к сроку и по событиям (плановый проход раз в сутки)
   pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией
-  pantheon wake hestia --task <id>      Гестия: пока всегда отказ (код 2) — нет окна песочницы, metis-0217 шаг 1б
+  pantheon wake hestia --task <id>      Гестия: всегда отказ (код 2) — окно песочницы появится в metis-0245
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами») и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
   pantheon restart --prepare [причина]|--status|--go [--force]|--cancel   технический перезапуск всех сессий
@@ -3163,8 +3163,8 @@ def wake_recheck(name, state=None):
 def wake_hestia(rest):
     """pantheon wake hestia [--task <id>] (metis-0217, шаг 1): запуск Гестии отказывает всегда, код 2. Роль собирается, но
     у неё нет окна песочницы (hestia не в guard PANTHEON_ROLES, `claude -p --agent hestia` шёл бы сессией владельца
-    без границы прав), поэтому claude не зовётся. Запуск откроет шаг 1б metis-0217 отдельным PR ядра после «да» владельца."""
-    print("pantheon wake hestia: отказ — нет окна песочницы (metis-0217 шаг 1б); claude не запускался", file=sys.stderr)
+    без границы прав), поэтому claude не зовётся. Запуск откроет metis-0245 (окно песочницы) отдельным PR ядра после «да» владельца."""
+    print("pantheon wake hestia: отказ — нет окна песочницы (metis-0245); claude не запускался", file=sys.stderr)
     return 2
 
 
