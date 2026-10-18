@@ -398,7 +398,7 @@ def verdict_parse(kind, args):
         missing = [f"--{k}" for k in CHECKLIST if not checklist.get(k)]
         if missing:
             return None, None, (f"«принять» без перечня проверенного (Б6): нет или пусто {', '.join(missing)}. Формат: "
-                                f"{fmt}. Запор пускает только «принять», где сказано, что открыто, что запущено и "
+                                f"{fmt}. Шлюз слияния пускает только «принять», где сказано, что открыто, что запущено и "
                                 "чего argus не проверял")
         if UNFILLED_ID.search(checklist.get("ran", "")):
             return None, None, f"«принять» не записан: {UNFILLED_ID_HINT}"
@@ -587,7 +587,7 @@ def empty_test_problem(argv):
     if prog:
         shown = " ".join(w if isinstance(w, str) else "?" for w in argv)  # None — неразобранное слово
         return (f"команда тестов `{shown or 'пусто'}` ничего не проверяет (программа «{prog}»): "
-                "запор пишет тесты только для настоящей команды — например, `pantheon review test -- heavy python3 -I "
+                "шлюз слияния пишет тесты только для настоящей команды — например, `pantheon review test -- heavy python3 -I "
                 "tests/test_x.py` или `pantheon review test -- heavy pnpm test`")
     return None
 
@@ -817,7 +817,7 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     if auto:
         return f"без --auto: сливается сейчас ровно проверенный PR, а не позже сам. {advice}"
     if len(numbers) != 1:
-        return f"ровно один номер PR: запор сверяет записи на этот PR. {advice}"
+        return f"ровно один номер PR: шлюз слияния сверяет записи на этот PR. {advice}"
     if len(heads) != 1 or not SHA_RE.fullmatch((heads[0] or "").lower()):
         return ("нужен ровно один --match-head-commit <SHA 40 знаков> — коммит, который проверили тесты и argus "
                 f"(GitHub сольёт, только если PR на нём). {advice}")

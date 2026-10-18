@@ -978,7 +978,7 @@ def cmd_dir_added(ev):
     skip = {"transcript_path", "cwd", "session_id", "hook_event_name", "agent_type", "agent_id", "permission_mode"}
     dirs = [str(v) for k, v in ev.items() if k not in skip and isinstance(v, str) and ("dir" in k or "path" in k)]
     what = dirs[0] if dirs else json.dumps({k: v for k, v in ev.items() if k not in skip}, ensure_ascii=False)[:200]
-    line = "%s · штаб · вы открыли Зевсу папку %s (/add-dir) — снять: /permissions или перезапуск штаба" % (
+    line = "%s · Пританей · вы открыли Зевсу папку %s (/add-dir) — снять: /permissions или перезапуск Пританея" % (
         datetime.now().strftime("%Y-%m-%d %H:%M"), " ".join(tilde(what).split()))
     os.makedirs(os.path.join(STATE, "locks"), exist_ok=True)
     with open(os.path.join(STATE, "locks", "alerts.lock"), "a") as lk:
@@ -1139,7 +1139,7 @@ QMD_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,30}")
 # Штабу закрыты коллекции с чужим текстом и сырыми выгрузками: у штаба личное и действия наружу, чужой текст в его окне —
 # путь внедрения. Вопросы по ним — координатору направления поручением. Какие коллекции — [hq].closed_collections
 # policy.toml (hq_policy), в коде их нет.
-QMD_HQ_CLOSED_WHY = "штабу коллекция %s закрыта — вопрос передай координатору направления поручением"
+QMD_HQ_CLOSED_WHY = "Пританею коллекция %s закрыта — вопрос передай координатору направления поручением"
 
 
 # --- [hq] policy.toml: что закрыто окну штаба (metis-0182) ---------------------------------------
@@ -1239,7 +1239,7 @@ def _qmd_why(ev):
     if hq and (tool.endswith("__query") or tool.endswith("__get") or tool.endswith("__multi_get")):
         closed, err = _qmd_hq_closed()
         if closed is None:  # битый [hq] — не «пусто»: какие коллекции закрыты, не знаем, поэтому закрыто всё
-            return ("штабу qmd закрыт, пока не исправят раздел [hq] ~/.claude/pantheon/policy.toml (%s; правит "
+            return ("Пританею qmd закрыт, пока не исправят раздел [hq] ~/.claude/pantheon/policy.toml (%s; правит "
                     "metis-pantheon) — вопрос передай координатору направления поручением" % err)
     if tool.endswith("__query"):
         colls = ti.get("collections")
@@ -1258,13 +1258,13 @@ def _qmd_why(ev):
         # ресурс qmd://… сервер ищет без схемы и по окончанию пути во всех коллекциях: «pantheon/x.md» найдёт и
         # corpus/my-pantheon/x.md (ревью argus 15.10) — штабу ресурсы qmd закрыты целиком, get даёт то же по точному адресу
         if str(ti.get("server") or "").strip().casefold() == "qmd":
-            why = "штабу ресурсы qmd закрыты — читай инструментом get"
+            why = "Пританею ресурсы qmd закрыты — читай инструментом get"
     elif hq and (tool.endswith("__get") or tool.endswith("__multi_get")):
         raw = ti.get("file") if tool.endswith("__get") else ti.get("pattern")
         items = str(raw or "").split(",") if tool.endswith("__multi_get") else [str(raw or "")]
         if not all(_qmd_hq_target_ok(x, closed) for x in items):
-            why = ("штабу — только адреса qmd://<коллекция>/<путь> из результатов поиска, без docid и закрытых "
-                   "штабу коллекций (вопрос по ним — координатору направления поручением)")
+            why = ("Пританею — только адреса qmd://<коллекция>/<путь> из результатов поиска, без docid и закрытых "
+                   "Пританею коллекций (вопрос по ним — координатору направления поручением)")
     return why
 
 

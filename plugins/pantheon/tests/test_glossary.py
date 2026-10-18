@@ -4,7 +4,9 @@
 Что проверяется (решение лида metis-0205): README.md репозитория и плагина, skills/**/*.md, описание plugin.json — все
 строки; *.py в lib/, hooks/, scripts/, bin/ — только строковые литералы (через ast), без комментариев и докстрингов
 (кроме печатаемых справкой: докстринг модуля с `print(__doc__)` и функций с `<имя>.__doc__`); *.sh — строки без «#» в начале.
-Вне проверки: tests/, roles/, lib/window_rules.py и функция sandbox_build (ядро, отдельный PR).
+Ещё все строки roles/*.tmpl, roles/_parts/*.part, template/pantheon/*, plugins/guard/README.md и policy.example.toml,
+строковые литералы plugins/guard/hooks/*.py (пути в находках и [[allow]] — «guard/…»).
+Вне проверки: tests/ и функция sandbox_build (ядро, отдельный PR).
 Исключения — [[allow]] в glossary.toml (файл + фрагмент строки + причина). Лишний [[allow]], который ничего не
 находит, — тоже провал: список не должен зарастать.
 
@@ -24,7 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN = os.path.dirname(HERE)
 OK, FAIL = [], []
 
-SKIP_FILES = {"lib/window_rules.py"}
+SKIP_FILES = set()
 SKIP_FUNCS = {("lib/pantheon.py", "sandbox_build")}
 
 
@@ -158,6 +160,11 @@ def collect(plugin):
         with open(pj, encoding="utf-8") as fh:
             desc = json.load(fh).get("description", "")
         items.append((".claude-plugin/plugin.json", 1, desc))
+    # роли, части ролей и шаблон ~/ai/pantheon читает человек (или они становятся его окном): все строки
+    for pattern in (("roles", "*.tmpl"), ("roles", "_parts", "*.part"), ("template", "pantheon", "*")):
+        for p in sorted(glob.glob(os.path.join(plugin, *pattern))):
+            if os.path.isfile(p):
+                items += [(os.path.relpath(p, plugin), n, t) for n, t in all_lines(p)]
     for sub in ("lib", "hooks", "scripts", "bin"):
         for p in sorted(glob.glob(os.path.join(plugin, sub, "*"))):
             rel = os.path.relpath(p, plugin)
@@ -167,6 +174,15 @@ def collect(plugin):
                 items += [(rel, n, t) for n, t in py_texts(p, rel)]
             else:
                 items += [(rel, n, t) for n, t in sh_texts(p)]
+    # guard: README и пример политики читает человек (все строки), тексты отказов — строковые литералы hooks/*.py
+    guard = os.path.join(repo, "plugins", "guard")
+    for name in ("README.md", "policy.example.toml"):
+        p = os.path.join(guard, name)
+        if os.path.isfile(p):
+            items += [("guard/" + name, n, t) for n, t in all_lines(p)]
+    for p in sorted(glob.glob(os.path.join(guard, "hooks", "*.py"))):
+        rel = "guard/hooks/" + os.path.basename(p)
+        items += [(rel, n, t) for n, t in py_texts(p, rel)]
     return items
 
 
