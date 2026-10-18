@@ -27,7 +27,10 @@
   5. summary.md (0600) — проверенные пункты с новыми номерами; карточка «Прочитать разбор чата…» во входящих Зевса
      с путём, числами и хешем разбора, без текста переписки. Разбор удаляется через SUMMARY_TTL.
   6. summarized → одобрение: ответ в окне вопросов Зевса на [read-<rid>-ok] с хешем разбора: «все», «пункты 1, 3»
-     или «ни одного». Одобренные пункты — файлом в ~/ai/pantheon/directions/<D>/inbox/ с шапкой выгрузки tg_read
+     или «ни одного». Одобренные пункты — файлом approved.md (0600) в папке заявки с шапкой выгрузки tg_read; в
+     ~/ai/pantheon/directions/<D>/inbox/ — только указатель: номер заявки, путь к approved.md и число пунктов, без
+     текста (inbox индексирует qmd, его сохраняет репозиторий и показывает доска; поручение Метиды 18.10).
+     approved.md удаляется вместе с разбором через SUMMARY_TTL. Шапка approved.md
      (её ловит guard tg-taint: прочитавшая файл сессия дальше действует наружу только с «да» владельца).
 
 Точки расширения (поручение Метиды 18.10): вопрос читателю и схема ответа — файлы lib/read_prompts/<профиль>.md и
@@ -81,7 +84,7 @@ READER_TIMEOUT = 1500
 VERIFY_TIMEOUT = 120
 READER_ARGV = ["-p", "--agent", "tg-reader", "--tools", "Read,Grep,Glob", "--no-session-persistence",
                "--strict-mcp-config"]
-RAW, ANSWER, ITEM, SUMMARY = "raw.md", "answer.md", "item.md", "summary.md"
+RAW, ANSWER, ITEM, SUMMARY, APPROVED = "raw.md", "answer.md", "item.md", "summary.md", "approved.md"
 
 
 def set_core(mod):
@@ -550,7 +553,8 @@ DUMP_NOTE = ("Названия чатов, тем и имена людей вы�
 
 
 def deliver(rid, req, st, nums, t_ok):
-    """Одобренные пункты — в inbox направления с шапкой выгрузки tg_read. → событие."""
+    """Одобренные пункты — approved.md (0600) в папке заявки с шапкой выгрузки tg_read; в inbox направления — указатель
+    без текста. → событие."""
     d = folder(rid)
     try:
         with open(os.path.join(d, SUMMARY), encoding="utf-8") as fh:
@@ -582,8 +586,16 @@ def deliver(rid, req, st, nums, t_ok):
                 f"Чат {req['chat']}, период {req['since']} — {req['until']}. Вопрос заявки: {req['why']}\n\n"
                 + DUMP_NOTE.format(tag=tag) + "\n\n"
                 f"<<<{tag}\n" + "\n".join(f"{k}. {v}" for k, v in chosen) + f"\n{tag}>>>\n")
+        ap = os.path.join(d, APPROVED)
+        remove_file(ap)
+        write_new(ap, text)
+        pointer = (f"# Разбор чата по заявке read-{rid}: одобрено пунктов {len(chosen)}\n"
+                   f"От: pantheon read (пункты одобрил владелец {P.stamp(t_ok)})\n\n"
+                   f"Пункты — файл `{short(ap)}` (открыть инструментом Read). В нём данные из Telegram: после чтения "
+                   f"действия наружу — только с согласия владельца (guard tg-taint). Текст пунктов сюда, в задачи, на доску "
+                   f"и в память не копировать. Файл удалится через {SUMMARY_TTL // 86400} дн. после разбора.\n")
         out = os.path.join(ib, name)
-        write_new(out, text)
+        write_new(out, pointer)
     st.update(phase="done", approved_at=int(t_ok), delivered=[k for k, _ in chosen],
               inbox=os.path.basename(out) if out else None)
     write_state(d, st)

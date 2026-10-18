@@ -373,26 +373,38 @@ def test_delivery_and_taint():
     b.answer(T0 + 1200, okq + st["summary_hash"], "пункты 1")
     r = b.run(T0 + 1300)
     files = b.inbox_files()
-    check("одобрено «пункты 1»: один файл в inbox направления", len(files) == 1, r.stdout + r.stderr)
-    text = open(files[0]).read() if files else ""
-    check("доставка: только пункт 1, канареек нет",
+    check("одобрено «пункты 1»: один указатель в inbox направления", len(files) == 1, r.stdout + r.stderr)
+    ptr = open(files[0]).read() if files else ""
+    ap = os.path.join(b.folder(rid), "approved.md")
+    check("указатель: номер заявки, путь к approved.md, число пунктов",
+          f"read-{rid}" in ptr and "/.local/state/pantheon/read/" + rid + "/approved.md" in ptr
+          and "одобрено пунктов 1" in ptr, ptr)
+    check("указатель: в inbox ни одной цитаты и ни строчки разбора",
+          "«" not in ptr and "»" not in ptr and not re.search(r"#\d+", ptr) and "Встречу" not in ptr
+          and "встречу" not in ptr and "TG-" not in ptr and PUSH not in ptr and RAW_CANARY not in ptr, ptr)
+    check("указатель: в дереве Пантеона нет текста пунктов",
+          all(x not in b.tree_text(b.pantheon) for x in ("встречу переносим", "Встречу перенесли", PUSH, MEMORY)))
+    check("approved.md: есть, права 0600", os.path.isfile(ap) and stat.S_IMODE(os.stat(ap).st_mode) == 0o600)
+    text = open(ap).read() if os.path.isfile(ap) else ""
+    check("approved.md: только пункт 1, канареек нет",
           "1. Встречу перенесли" in text and PUSH not in text and MEMORY not in text and RAW_CANARY not in text, text)
-    check("доставка: шапка выгрузки tg-read", re.search(r"Переписка — строго между строками «<<<TG-[0-9a-f]{12}»", text)
+    check("approved.md: шапка выгрузки tg-read", re.search(r"Переписка — строго между строками «<<<TG-[0-9a-f]{12}»", text)
           and re.search(r"^<<<TG-[0-9a-f]{12}$", text, re.M) and re.search(r"^TG-[0-9a-f]{12}>>>$", text, re.M), text)
     check("доставка: этап done", b.st(rid)["phase"] == "done" and b.st(rid)["delivered"] == [1], b.st(rid))
     ev = {"hook_event_name": "PostToolUse", "session_id": "hermes-test", "tool_name": "Read",
-          "tool_input": {"file_path": files[0] if files else ""},
-          "tool_response": {"type": "text", "file": {"filePath": files[0] if files else "", "content": text}}}
+          "tool_input": {"file_path": ap},
+          "tool_response": {"type": "text", "file": {"filePath": ap, "content": text}}}
     th = os.path.join(b.tmp, "taint-home")
     os.makedirs(th)
     subprocess.run([sys.executable, "-I", TAINT], input=json.dumps(ev), text=True, capture_output=True, timeout=30,
                    env={"PATH": "/usr/bin:/bin", "HOME": th, "TMPDIR": _ROOT})
     flag = os.path.join(th, ".local", "state", "tg-taint", "hermes-test")
-    check("доставка: guard tg-taint ставит флаг сессии, прочитавшей файл", os.path.exists(flag))
+    check("approved.md: guard tg-taint ставит флаг сессии, прочитавшей файл", os.path.exists(flag))
     b.run(T0 + 1400)
     check("доставка: повторный проход не дублирует", len(b.inbox_files()) == 1)
     b.run(T0 + 1300 + 8 * 86400)
-    check("срок: через 8 дней папка заявки удалена", not os.path.exists(b.folder(rid)))
+    check("срок: через 8 дней папка заявки удалена вместе с approved.md",
+          not os.path.exists(b.folder(rid)) and not os.path.exists(ap))
 
 
 def test_reader_failure_removes_raw():
