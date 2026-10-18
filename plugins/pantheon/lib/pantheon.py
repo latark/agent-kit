@@ -782,6 +782,9 @@ def tick_heavy(sched, heavy, t):
 # своя задача launchd pantheon.svc.<имя> с KeepAlive; запускает её `pantheon service-run <имя>`, который
 # перечитывает schedule.toml и проверяет команду (только `pantheon …` или скрипт плагина). Тик сверяет launchd с
 # расписанием: нужна и не запущена — поднять, пауза, выключена, убрана из расписания или чужой Mac — снять.
+# Служба по требованию (ключ `socket = <порт>`, metis-0151) — без KeepAlive: порт 127.0.0.1:<порт> слушает launchd
+# (ключ Sockets), первое соединение запускает службу, после простоя (`idle_min`, по умолчанию 30 мин) она выходит
+# сама. «Загружена, процесса нет» для неё — обычное ожидание запроса, а не сбой: тик её не толкает и не тревожит.
 
 SVC_PREFIX = "pantheon.svc."
 # Прежние метки (com.<кто-то>.pantheon-tick и com.<кто-то>.pantheon-svc.<имя>) узнаём по маске файлов, без имён в коде:
@@ -795,8 +798,7 @@ SVC_TMPL = """<?xml version="1.0" encoding="UTF-8"?>
   <key>Label</key><string>{label}</string>
   <key>ProgramArguments</key>
   <array><string>{bin}</string><string>service-run</string><string>{name}</string></array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+{launch}
   <key>ThrottleInterval</key><integer>30</integer>
   <key>ProcessType</key><string>Background</string>
   <key>EnvironmentVariables</key>
@@ -806,6 +808,42 @@ SVC_TMPL = """<?xml version="1.0" encoding="UTF-8"?>
 </dict>
 </plist>
 """
+
+
+SVC_KEEPALIVE = """  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>"""
+SVC_SOCKET = """  <key>Sockets</key>
+  <dict><key>Listeners</key><dict>
+    <key>SockNodeName</key><string>127.0.0.1</string>
+    <key>SockServiceName</key><string>{port}</string>
+    <key>SockType</key><string>stream</string>
+    <key>SockFamily</key><string>IPv4</string>
+  </dict></dict>"""
+SVC_IDLE_MIN = 30
+
+
+def svc_socket(svc):
+    """Порт службы по требованию (ключ socket) или None — обычная служба с KeepAlive. Плохое значение — ValueError."""
+    v = svc.get("socket")
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, int) or not 1024 <= v <= 65535:
+        raise ValueError(f"socket: нужен порт 1024–65535, а не {v!r}")
+    return v
+
+
+def svc_idle(svc):
+    """Простой службы по требованию до выхода, в секундах (ключ idle_min, минуты)."""
+    v = svc.get("idle_min", SVC_IDLE_MIN)
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v <= 24 * 60:
+        raise ValueError(f"idle_min: нужно число минут больше 0 и не больше суток, а не {v!r}")
+    return float(v) * 60
+
+
+def svc_on_demand(svc):
+    with contextlib.suppress(ValueError):
+        return svc_socket(svc) is not None
+    return False
 
 
 def parse_service_command(cmd):
@@ -827,6 +865,11 @@ def service_wanted(svc, sched, st=None):
         return False, "не этот Mac"
     if parse_service_command(svc.get("command")) is None:
         return False, "команда не разрешена"
+    try:
+        svc_socket(svc)
+        svc_idle(svc)
+    except ValueError as e:
+        return False, str(e)
     return True, ""
 
 
@@ -844,6 +887,16 @@ def svc_running(name):
         return None
     m = re.search(r"^\s*pid = (\d+)", r.stdout, re.M)
     return int(m.group(1)) if m else 0
+
+
+def svc_last_exit(name):
+    """Последний код выхода службы по launchctl print («last exit code»); не выходила или не узнать — None."""
+    if os.environ.get("PANTHEON_DRYRUN") == "1":
+        return (read_json(path("svc-dry.json")).get("exit") or {}).get(name)
+    r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{SVC_PREFIX}{name}"], capture_output=True,
+                       text=True, timeout=15)
+    m = re.search(r"^\s*last exit code = (-?\d+)", r.stdout, re.M) if r.returncode == 0 else None
+    return int(m.group(1)) if m else None
 
 
 def _launchctl(verb, target, name):
@@ -937,8 +990,10 @@ def _services_sync(sched, only):
             with contextlib.suppress(FileNotFoundError):
                 os.remove(plist)
             continue
+        port = svc_socket(want[name])
+        launch = SVC_KEEPALIVE if port is None else SVC_SOCKET.format(port=port)
         text = SVC_TMPL.format(label=SVC_PREFIX + name, bin=os.path.join(CURRENT, "bin", "pantheon"), name=name,
-                               path=env_path, log=path("logs", f"svc-{name}.log"))
+                               path=env_path, log=path("logs", f"svc-{name}.log"), launch=launch)
         try:
             same = open(plist).read() == text
         except OSError:
@@ -959,6 +1014,16 @@ def _services_sync(sched, only):
                            note=f"Служба {name} не запустилась")
                 continue
             clear_once("svc-" + name)
+        elif state == 0 and port is not None:
+            # служба по требованию ждёт соединения на сокете launchd — так и должно быть, если последний запуск
+            # кончился чисто (прокси выходит по простою с кодом 0); ненулевой код — служба падает при запуске
+            code = svc_last_exit(name)
+            if code:
+                alert_once("svc-down-" + name, f"exit-{code}", f"служба по требованию {name} падает при запуске: "
+                           f"последний код выхода {code}; журнал {path('logs', f'svc-{name}.log').replace(HOME, '~')}",
+                           "pantheon-tick", note=f"Служба {name} падает при запуске")
+            else:
+                clear_once("svc-down-" + name)
         elif state == 0:
             # загружена, но процесса нет (KeepAlive сдался после частых падений) — толкнуть, раз в тик
             _launchctl("kickstart", [f"gui/{uid}/{SVC_PREFIX}{name}"], name)
@@ -985,8 +1050,13 @@ def service_run(name):
         return 0
     argv = parse_service_command(svc.get("command"))
     print(f"{stamp()} служба {name}: {' '.join(argv)}", file=sys.stderr, flush=True)
+    env = run_env()
+    if svc_socket(svc) is not None:
+        # служба по требованию: сокет ждёт у launchd (запись Listeners в plist), простой — до выхода
+        env["PANTHEON_SVC_SOCKET"] = "Listeners"
+        env["PANTHEON_SVC_IDLE"] = str(int(svc_idle(svc)))
     os.chdir(HOME)
-    os.execve(argv[0], argv, run_env())
+    os.execve(argv[0], argv, env)
 
 
 def run_job(name):
@@ -1146,7 +1216,13 @@ def jobs_show():
         for svc in sched["service"]:
             ok, why = service_wanted(svc, sched)
             pid = svc_running(svc["name"])
-            state = (f"идёт, pid {pid}" if pid else "не идёт — плановый проход поднимет") if ok else why
+            if ok and svc_on_demand(svc):
+                where = f"127.0.0.1:{svc_socket(svc)}"
+                state = (f"идёт по запросу, pid {pid}; выйдет после простоя {int(svc_idle(svc) // 60)} мин" if pid
+                         else f"по требованию: ждёт запроса на {where}" if pid == 0
+                         else "не загружена — плановый проход поднимет")
+            else:
+                state = (f"идёт, pid {pid}" if pid else "не идёт — плановый проход поднимет") if ok else why
             if not ok and pid:
                 state += f" (ещё идёт, pid {pid}: плановый проход снимет)"
             rows.append((svc["name"], svc.get("hosts", "all"), state, str(svc.get("description", ""))[:70]))
@@ -1220,10 +1296,15 @@ def status():
         sched_s = load_schedule()
         for svc in sched_s.get("service") or []:
             ok, why = service_wanted(svc, sched_s)
-            if ok and not svc_running(svc["name"]):
+            if ok and svc_on_demand(svc):
+                if svc_running(svc["name"]) is None:
+                    lines.append(f"служба {svc['name']}: НЕ ЗАГРУЖЕНА (по требованию) — журнал "
+                                 f"~/.local/state/pantheon/logs/svc-{svc['name']}.log")
+                    warn.append(f"служба {svc['name']}")
+            elif ok and not svc_running(svc["name"]):
                 lines.append(f"служба {svc['name']}: НЕ ИДЁТ — журнал ~/.local/state/pantheon/logs/svc-{svc['name']}.log")
                 warn.append(f"служба {svc['name']}")
-            elif not ok and why in ("пауза", "команда не разрешена"):
+            elif not ok and (why in ("пауза", "команда не разрешена") or why.startswith(("socket:", "idle_min:"))):
                 lines.append(f"служба {svc['name']}: {why}")
     # дежурный (watch.py): время прохода и упавшие проверки; метка техперезапуска; паузы по нагрузке
     wl = read_json(path("watch-last"), None)
