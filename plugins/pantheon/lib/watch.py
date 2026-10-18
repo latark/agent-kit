@@ -4,16 +4,18 @@
                             `pantheon who` (COMM-14), ждущие и упавшие сессии Пантеона, давно не обновлённый и длинный
                             STATUS.md, swap и открытые подключения (COMM-13), копии worktree (QA-05), смена версии
                             Claude Code (SCOUT-05, SEC-16), паузы по нагрузке (COST-04), самозапуск координаторов,
-                            метка технического перезапуска; раз в сутки — журналы ваших слов (COMM-10).
+                            метка технического перезапуска, перезапуск свободных окон после обновления плагинов
+                            (metis-0181); раз в сутки — журналы ваших слов (COMM-10).
                             --dry-run — только показать, кого самозапуск поднял бы и почему нет, ничего не меняя
   pantheon agents           только снимок `claude agents` (задача тика на каждый проход: строка статуса)
   pantheon revisits         задача тика раз в сутки (SCHED-10, DOC-03): «пора пересмотреть …» в alerts.md
   pantheon stop <имя>|--all, pantheon resume <имя>|--all                                      (SCHED-12)
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pantheon pause --off [<имя>|--all]   (COST-04)
   pantheon restart --prepare [причина]|--status|--go [--force]|--cancel, pantheon saved --by <имя> --state <путь>
-                            технический перезапуск всей системы (SCHED-15, слово владельца 15.10)
+                            технический перезапуск всей системы (SCHED-15, слово владельца 15.10); pantheon saved без
+                            техперезапуска — метка «можно» для перезапуска после обновления плагинов (metis-0181)
   pantheon who              координаторы: состояние, short из реестра, давность (COMM-14)
-  pantheon wake <имя> ["толчок"]   поднять уснувшую сессию направления и сказать «посмотри входящие» (COMM-04)
+  pantheon wake <имя> ["задание"]   поднять уснувшую сессию направления и сказать «посмотри входящие» (COMM-04)
   pantheon infra-check      лёгкая проверка опор системы после обновления Claude Code (SEC-16)
 
 Всё, что дежурный находит, — строка в ~/ai/pantheon/alerts.md один раз на состояние (alert_once) и, где нужно вас,
@@ -58,11 +60,17 @@ MAINT_HOURS = 2              # метка технического переза�
 REVISIT_REPEAT_DAYS = 3      # открытый пересмотр напоминает снова через столько дней, пока его не закрыли или не перенесли
 OWNER_LOG_DAYS = 30          # журналы ваших слов (COMM-10)
 HOOK_LOG_MAX = 400_000       # журнал сбоев хуков ctx-hooks.log, байт
-WAKE_PUSH = ("[Пантеон: толчок] Посмотри входящие: inbox/ и задачи направления, STATUS.md. Продолжай со своего "
+WAKE_PUSH = ("[Пантеон: передача задания] Посмотри входящие: inbox/ и задачи направления, STATUS.md. Продолжай со своего "
              "следующего шага; что ждёт владельца — Зевсу строкой.")
 RESTART_TEXT = ("[Пантеон: технический перезапуск завершён] Сессия перезапущена с новыми версиями плагинов и ролей. "
                 "Прочитай свой файл состояния (STATUS.md направления или файл задачи мастерской) и продолжай со "
                 "следующего шага. Это не ответ владельца и не согласие.")
+RESPAWN_TEXT = ("[Пантеон: перезапуск после обновления плагинов] Сессия перезапущена с новыми версиями плагинов. "
+                "Прочитай свой файл состояния (STATUS.md направления или файл задачи мастерской) и продолжай со "
+                "следующего шага; если ждал(а) ответа или работы не было — закончи ход. Это не ответ владельца и не "
+                "согласие.")
+RESPAWN_IDLE_MIN = 15        # перезапуск после обновления плагинов: столько минут без записи транскрипта, субагентов
+                             # и worktree окна — окно свободно (лид может ждать тесты; metis-0181)
 UNPAUSE_TEXT = ("[Пантеон: пауза по нагрузке снята] Тебя останавливали из-за лимита или памяти. Прочитай STATUS.md и "
                 "продолжай со следующего шага. Это не ответ владельца и не согласие.")
 
@@ -251,6 +259,7 @@ def _watch(dry=False):
               ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
               ("паузы по нагрузке", lambda: pauses_clear(agents, reg, t)),
               ("очистка Зевса", lambda: zeus_clean(agents, t)),
+              ("перезапуск после обновления плагинов", lambda: plugins_respawn(agents, doms, t)),
               ("ночь", lambda: P.night_mod().watch(agents, reg, doms, t)),
               ("самозапуск", lambda: autostart(agents, reg, doms, t)),
               ("возобновление после недельного лимита", lambda: awake().limit_resume(agents, reg, doms, t)),
@@ -1614,6 +1623,168 @@ def maint_expire(t):
         P.notify_soon("restart", "Техперезапуск не завершён: метка снята по сроку")
 
 
+# --- перезапуск свободных окон после обновления плагинов (metis-0181) ----------------------------------------------
+# `pantheon plugins update` ставит plugins/respawn.json {"since", "plugins", "done"}; тик перезапускает окна Пантеона,
+# поднятые раньше since, — только свободные. «Простаивает» ≠ «свободно»: координатор idle, пока ждёт фоновых лидов, а
+# claude agents субагентов не показывает. Свободно = idle_holder и одно из: метка «можно» (pantheon saved) новее since
+# или RESPAWN_IDLE_MIN минут без записи транскрипта, журналов субагентов и worktree окна. Занятое ждёт следующего прохода.
+
+WT_SKIP = {".git", "node_modules", ".venv", "venv", "__pycache__", ".next", ".turbo", ".cache", "dist", "build"}
+
+
+def respawn_path(*parts):
+    return P.path("plugins", *parts)
+
+
+def _live(a):
+    """Сессия с живым процессом — та же мерка, что у holders: остановленная и упавшая новые плагины возьмут при старте."""
+    return a.get("state") in ("working", "blocked") or bool(a.get("pid") and a.get("state") not in ("stopped", "failed"))
+
+
+def respawn_candidates(agents, doms, m):
+    """Окна, которым нужен перезапуск: имя Пантеона, не Зевс (его перезапускаете вы), не остановлено вами, фоновая с id
+    и sessionId, живая, поднята раньше since и ещё не перезапущена после него."""
+    since, done = float(m.get("since") or 0), set(m.get("done") or [])
+    out = []
+    for a in agents:
+        name = str(a.get("name") or "")
+        if not is_pantheon(name, doms) or name.startswith("zeus") or not P.SESSION_NAME.fullmatch(name):
+            continue
+        if a.get("kind") not in (None, "background") or not a.get("id") or not a.get("sessionId"):
+            continue
+        if not _live(a) or a["sessionId"] in done or os.path.exists(P.path("stopped", name)):
+            continue
+        if float(a.get("startedAt") or 0) / 1000 >= since:
+            continue
+        out.append(a)
+    return out
+
+
+def _wt_recent(wt, lim):
+    """Менялось ли в копии что-то позже lim: обход без .git и зависимостей, до WALK_LIMIT записей. Не уложился — считаем,
+    что менялось: лучше подождать, чем убить лида."""
+    n, stack = 0, [wt]
+    with contextlib.suppress(OSError):
+        if os.stat(wt).st_mtime > lim:
+            return True
+    while stack:
+        try:
+            it = os.scandir(stack.pop())
+        except OSError:
+            continue
+        with it:
+            for e in it:
+                n += 1
+                if n > WALK_LIMIT:
+                    return True
+                try:
+                    if e.stat(follow_symlinks=False).st_mtime > lim:
+                        return True
+                    if e.is_dir(follow_symlinks=False) and e.name not in WT_SKIP:
+                        stack.append(e.path)
+                except OSError:
+                    continue
+    return False
+
+
+def respawn_busy(a, doms, since, t):
+    """Почему окно a сейчас нельзя перезапустить, или None — свободно."""
+    if not idle_holder(a):
+        return "занято"
+    ok = P.read_json(respawn_path("respawn-ok", str(a.get("name")) + ".json"), {})
+    if isinstance(ok, dict) and float(ok.get("t") or 0) > since:
+        return None
+    lim = t - RESPAWN_IDLE_MIN * 60
+    tp = P.transcript_path(a)
+    if not tp:
+        return "нет транскрипта — простой не проверить"
+    try:
+        if os.path.getmtime(tp) > lim:
+            return f"транскрипт менялся меньше {RESPAWN_IDLE_MIN} мин назад"
+    except OSError:
+        return "транскрипт не читается"
+    with contextlib.suppress(OSError), os.scandir(os.path.join(tp[:-len(".jsonl")], "subagents")) as it:
+        for e in it:
+            if e.name.startswith("agent-") and e.name.endswith(".jsonl"):
+                with contextlib.suppress(OSError):
+                    if e.stat().st_mtime > lim:
+                        return f"субагент писал меньше {RESPAWN_IDLE_MIN} мин назад"
+    folders = [f for f in (doms.get(a.get("name")) or []) if isinstance(f, str)]
+    if a.get("cwd"):
+        folders.append(str(a["cwd"]))
+    for f in dict.fromkeys(os.path.realpath(os.path.expanduser(x)) for x in folders):
+        with contextlib.suppress(OSError), os.scandir(os.path.join(f, ".claude", "worktrees")) as it:
+            for e in it:
+                if e.is_dir(follow_symlinks=False) and _wt_recent(e.path, lim):
+                    return f"worktree {P.tilde(e.path)} менялась меньше {RESPAWN_IDLE_MIN} мин назад"
+    return None
+
+
+def respawn_recheck(name, sid, doms, since):
+    """Под блокировкой имени перед самим перезапуском — по свежему claude agents: окно могло получить ввод."""
+    def again():
+        if os.path.exists(P.path("stopped", name)):
+            return "остановлено вами"
+        if P.maintenance_active():
+            return "идёт технический перезапуск"
+        now_a = [x for x in P.agents_all() or [] if x.get("sessionId") == sid]
+        if not now_a:
+            return "сессии нет в claude agents"
+        return respawn_busy(now_a[0], doms, since, P.now())
+    return again
+
+
+def plugins_respawn(agents, doms, t):
+    p = respawn_path("respawn.json")
+    m = P.read_json(p, {})
+    if not isinstance(m, dict) or not m or P.maintenance_active():
+        return  # техперезапуск перезапускает всех сам
+    if not agents:
+        return  # пустой claude agents (сбой или перезапуск Claude Code) — не «все перезапущены»: отметку не снимаем
+    since = float(m.get("since") or 0)
+    done, wait = [], []
+    for a in respawn_candidates(agents, doms, m):
+        name, sid = a["name"], a["sessionId"]
+        why = respawn_busy(a, doms, since, t)
+        if why:
+            wait.append(f"{name} ({why})")
+            continue
+        rc = P.resume_session(name, a, RESPAWN_TEXT, "plugins-respawn", recheck=respawn_recheck(name, sid, doms, since))[0]
+        if rc != 0:
+            wait.append(f"{name} (код {rc})")
+            continue
+        done.append(name)
+        with P.lock("plugins-respawn"):
+            cur = P.read_json(p, {})
+            if not isinstance(cur, dict) or cur.get("since") != m.get("since"):
+                break  # пока перезапускали, встала новая версия — отметку ведёт уже она
+            cur["done"] = list(cur.get("done") or []) + [sid]
+            P.write_json(p, cur)
+        with contextlib.suppress(OSError):
+            os.remove(respawn_path("respawn-ok", name + ".json"))
+    if done:
+        P.alert(f"перезапуск после обновления плагинов ({', '.join(m.get('plugins') or [])}): перезапущены "
+                f"{', '.join(done)}" + (f"; ждут: {', '.join(wait)}" if wait else ""), "watch")
+    if wait:
+        # ждущие видны и без перезапусков в этом проходе: одна строка на набор окон (причины меняются каждый проход,
+        # ключ — только имена), чтобы вечное ожидание (worktree больше WALK_LIMIT, вечный busy) не было тихим
+        names = ",".join(sorted({w.split(" (", 1)[0] for w in wait}))
+        P.alert_once("plugins-respawn-wait", names, f"перезапуск после обновления плагинов "
+                     f"({', '.join(m.get('plugins') or [])}) ждёт: {', '.join(wait)}. Окно, готовое раньше: pantheon "
+                     "saved --by <имя> --state <путь>", "watch")
+        return
+    P.clear_once("plugins-respawn-wait")
+    with P.lock("plugins-respawn"):
+        cur = P.read_json(p, {})
+        if isinstance(cur, dict) and cur.get("since") == m.get("since"):
+            with contextlib.suppress(OSError):
+                os.remove(p)
+            with contextlib.suppress(OSError):
+                for f in os.listdir(respawn_path("respawn-ok")):
+                    with contextlib.suppress(OSError):
+                        os.remove(respawn_path("respawn-ok", f))
+
+
 def restart(rest, who):
     m = P.read_json(maint_path(), None)
     if rest[:1] == ["--prepare"]:
@@ -1708,10 +1879,13 @@ def restart(rest, who):
 
 
 def saved_cmd(rest, who):
-    """pantheon saved --by <имя> --state <путь> — сессия сохранилась перед техническим перезапуском."""
+    """pantheon saved --by <имя> --state <путь> — сессия сохранилась перед техническим перезапуском. Техперезапуска нет, а
+    перезапуск после обновления плагинов ждёт (metis-0181) — метка «можно»: тик перезапустит окно, как только оно
+    закончит ход, не дожидаясь RESPAWN_IDLE_MIN минут простоя."""
     m = P.maintenance_active()
-    if not m:
-        print("технический перезапуск не готовится — отмечать нечего")
+    pend = None if m else P.read_json(respawn_path("respawn.json"), {})
+    if not m and not (isinstance(pend, dict) and pend):
+        print("технический перезапуск не готовится и перезапуска после обновления плагинов нет — отмечать нечего")
         return 1
 
     def opt(k):
@@ -1724,6 +1898,12 @@ def saved_cmd(rest, who):
     if own and name != own:
         print(f"pantheon saved: сессия {own} отмечает только себя, не {name}", file=P.sys.stderr)
         return 2
+    if not m:
+        P.write_json(respawn_path("respawn-ok", name + ".json"), {"t": P.now(), "time": P.stamp(),
+                                                                  "state": " ".join(state.split())[:300], "by": who})
+        print(f"{name}: отмечено «можно перезапускать». Плановый проход перезапустит окно с новыми плагинами, когда оно закончит ход; "
+              "работающее окно не тронет")
+        return 0
     if name not in (m.get("sessions") or []):
         print(f"pantheon saved: {name or '(без имени)'} нет в списке перезапуска: {', '.join(m.get('sessions') or [])}",
               file=P.sys.stderr)
@@ -1906,7 +2086,7 @@ def who():
 def wake_one(rest, who="владелец"):
     name = rest[0]
     if not P.SESSION_NAME.fullmatch(name):
-        print("pantheon wake <имя> [\"толчок\"]", file=P.sys.stderr)
+        print("pantheon wake <имя> [\"задание\"]", file=P.sys.stderr)
         return 2
     agents = P.agents_all()
     if agents is None:
@@ -1914,7 +2094,7 @@ def wake_one(rest, who="владелец"):
         return 1
     why = wake_block(name, agents, P.sessions_registry(), auto=False)
     if why == "уже работает":
-        print(f"{name} не спит (есть процесс) — толчок сообщением: SendMessage, адрес {name}")
+        print(f"{name} не спит (есть процесс) — передать задание сообщением: SendMessage, адрес {name}")
         return 0
     if why:
         hint = {"остановлено вами": f" — сначала pantheon resume {name}"}.get(why, "")
@@ -1922,7 +2102,7 @@ def wake_one(rest, who="владелец"):
         return 1
     extra = " ".join(" ".join(rest[1:]).split())
     # чужой текст всегда под своей пометкой: под «[Пантеон: …]» без неё он выдал бы себя за системный (ревью argus)
-    text = f"[Пантеон: толчок от {who}] {extra}" if extra else WAKE_PUSH
+    text = f"[Пантеон: задание от {who}] {extra}" if extra else WAKE_PUSH
     alias = P.name_alias(name)
     if not any(alias.fullmatch(str(a.get("name") or "")) and a.get("state") in ("stopped", "failed") for a in agents):
         print(f"у {name} нет уснувшей сессии — новая: pantheon start {name}", file=P.sys.stderr)
@@ -1935,7 +2115,7 @@ def wake_one(rest, who="владелец"):
         return 1
     _forget_autostart(name)
     rc = resume_or_start(name, agents, text, origin="wake", only_resume=True)
-    print(f"{name}: " + ("поднята, толчок доставлен" if rc == 0 else f"не поднялась, код {rc}"))
+    print(f"{name}: " + ("поднята, задание передано" if rc == 0 else f"не поднялась, код {rc}"))
     return rc
 
 

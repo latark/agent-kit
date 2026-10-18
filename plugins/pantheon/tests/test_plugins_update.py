@@ -197,7 +197,11 @@ def main():
           f"{r.returncode} {r.stderr!r} {e.argv()!r}")
     check("зелёные: без -y", " -y" not in e.argv())
     check("зелёные: «обновлён x 1.0.0 → 1.1.0» в alerts.md",
-          "plugins-update · обновлён x 1.0.0 → 1.1.0, сессии увидят после перезапуска" in e.alerts(), e.alerts())
+          "plugins-update · обновлён x 1.0.0 → 1.1.0, плановый проход перезапустит свободные окна" in e.alerts(), e.alerts())
+    rsp = os.path.join(e.state, "plugins", "respawn.json")
+    rj = json.load(open(rsp)) if os.path.exists(rsp) else {}
+    check("зелёные: отметка «нужен перезапуск» respawn.json {since, plugins: [x], done: []} (metis-0181)",
+          rj.get("plugins") == ["x"] and float(rj.get("since") or 0) > 0 and rj.get("done") == [], rj)
     check("зелёные: строка в журнале, метки нет", "x 1.0.0 → 1.1.0: обновлён" in e.journal() and "x" not in e.marks())
     log = os.path.join(e.state, "plugins", "x-1.1.0.log")
     check("зелёные: в логе обе версии, helper.py не гонялся",
@@ -366,6 +370,8 @@ def main():
     r = e.run(extra={"STUB_UPD_RC": "1"})
     check("update упал: код 76, метка green", r.returncode == 76 and e.marks().get("x", {}).get("result") == "green",
           f"{r.returncode} {e.marks()}")
+    check("update упал: отметки «нужен перезапуск» нет (metis-0181)",
+          not os.path.exists(os.path.join(e.state, "plugins", "respawn.json")))
     n = e.runs()
     r = e.run(extra={"STUB_UPD_RC": "1"})
     check("update упал повторно: тесты не гоняются, update пробуется, тревога одна",

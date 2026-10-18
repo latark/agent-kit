@@ -3,7 +3,7 @@
 
 Всё, что Пантеон делает сам по времени, идёт через одну задачу launchd `pantheon-tick` (раз в 60 с).
 Список задач — ~/ai/pantheon/schedule.toml (правит штаб); метки запусков — ~/.local/state/pantheon/
-(свои у каждого Mac). Что пора запускать, тик решает по меткам, а не по часам: пропуски за сон Mac
+(свои у каждого Mac). Что пора запускать, плановый проход решает по меткам, а не по часам: пропуски за сон Mac
 сливаются в один запуск. Лёгкие задачи (копия, коммит, дежурный) идут сразу; тяжёлые — по одной,
 с паузой, не в первые минуты после пробуждения, от сети, а задачи на Claude — ещё при простое и
 свободном пятичасовом лимите; предел ожидания max_delay снимает эти условия. Задачи с
@@ -16,8 +16,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         (службы [[service]] — те же pause|resume|disable|enable: launchd снимается сразу)
   pantheon qmd config|update|embed|serve|install|status   общий поиск qmd: index.yml из ~/ai/pantheon/qmd.toml,
                                         освежить индекс, сервер MCP (служба), подключить к Claude на этом Mac
-  pantheon plugins update [--quiet]     новые версии плагинов agent-kit (тик раз в 10 мин): тесты новой и
-                                        установленной версии; нет новых падений — claude plugin update, есть — тревога
+  pantheon plugins update [--quiet]     новые версии плагинов agent-kit (плановый проход раз в 10 мин): тесты новой и
+                                        установленной версии; нет новых падений — claude plugin update, есть — тревога;
+                                        после установки плановый проход перезапускает свободные окна (metis-0181)
   pantheon direction check <имя>        что готово у нового направления (навык new-direction): реестр, «да»,
                                         папки, STATUS.md, domains.json, AGENTS.md, доверие, autoMode
   pantheon direction init <имя>         папка ~/projects/<имя> по вашей галочке: git init, AGENTS.md, локальный
@@ -31,7 +32,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         и настройки окон ролей с песочницей …/settings/<направление>.json
   pantheon view [--quiet]               обновить копию ~/ai/pantheon-view для Obsidian
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
-  pantheon status                       один экран для отладки: тик, сессии, вопросы к вам, тревоги, защиты, sync, места heavy, версии
+  pantheon status                       один экран для отладки: плановый проход, сессии, вопросы к вам, тревоги, защиты, sync, места heavy, версии
   pantheon night [status|report]        недельный лимит: неделя, линия, запас, зона, ночь, снимок; report — блок
                                         «Лимит» для сводки (вечерний вопрос и ночь ведёт дежурный, lib/night.py)
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
@@ -54,18 +55,19 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
   pantheon start zeus                   штаб: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
-  pantheon watch [--dry-run]            дежурный (тик раз в 5 мин): сессии, STATUS.md, swap, worktree, версия Claude Code,
+  pantheon watch [--dry-run]            дежурный (плановый проход раз в 5 мин): сессии, STATUS.md, swap, worktree, версия Claude Code,
                                         паузы, самозапуск по вашим решениям; --dry-run — кого поднял бы и почему нет
   pantheon reboot-reminder [--now]      пятница после 09:30: Mac не перезагружался с прошлой пятницы — карточка и уведомление
   pantheon agents | who                 снимок claude agents для строки статуса | таблица координаторов
-  pantheon revisits                     пересмотры к сроку и по событиям (тик раз в сутки)
-  pantheon wake <имя> ["толчок"]        поднять уснувшую сессию направления той же сессией
+  pantheon revisits                     пересмотры к сроку и по событиям (плановый проход раз в сутки)
+  pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами») и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
   pantheon restart --prepare [причина]|--status|--go [--force]|--cancel   технический перезапуск всех сессий
-  pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском
+  pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском; без техперезапуска —
+                                        метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code
-  pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (тик раз в неделю)
+  pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (плановый проход раз в неделю)
   pantheon roles build                  роли ~/.claude/agents/*.md из общих шаблонов плагина (roles/*.tmpl,
                                         roles/_parts/*.part) и личного слоя ~/.claude/agents (*.tmpl, _parts/*.part
                                         перекрывают общие по имени); подстановки — из [person] directions.toml
@@ -1086,12 +1088,12 @@ def next_run(job, st, t):
     if st.get("waiting"):
         return "ждёт условий"
     if st.get("last_start") is None:
-        return "на ближайшем тике"
+        return "на ближайшем плановом проходе"
     if job.get("every", "tick") == "tick":
-        return "каждый тик"
+        return "каждый плановый проход"
     left = st["last_start"] + every_sec(job) - t
     if left <= 60:
-        return "на ближайшем тике"
+        return "на ближайшем плановом проходе"
     return f"через {int(left // 60)} мин" if left < 5400 else stamp(st["last_start"] + every_sec(job))
 
 
@@ -1099,7 +1101,7 @@ def jobs_show():
     lt = None
     with contextlib.suppress(OSError, ValueError):
         lt = float(open(path("last-tick")).read())
-    tick_line = f"тик: {ago(lt)}" if lt else "тик: ещё не шёл (pantheon install)"
+    tick_line = f"плановый проход: {ago(lt)}" if lt else "плановый проход: ещё не шёл (pantheon install)"
     if not os.path.exists(PLIST) and old_plists(OLD_TICK_GLOB):
         tick_line += " — старая метка launchd: выполните `pantheon install`"
     if lt and now() - lt > 180:
@@ -1112,7 +1114,7 @@ def jobs_show():
     t = now()
     for job in sched.get("job") or []:
         st = job_state(job["name"])
-        every = "каждый тик" if job.get("every", "tick") == "tick" else f"{job['every']} мин"
+        every = "каждый плановый проход" if job.get("every", "tick") == "tick" else f"{job['every']} мин"
         if job.get("enabled") is False or st.get("disabled"):
             state = "выключена"
         elif st.get("paused"):
@@ -1143,9 +1145,9 @@ def jobs_show():
         for svc in sched["service"]:
             ok, why = service_wanted(svc, sched)
             pid = svc_running(svc["name"])
-            state = (f"идёт, pid {pid}" if pid else "не идёт — тик поднимет") if ok else why
+            state = (f"идёт, pid {pid}" if pid else "не идёт — плановый проход поднимет") if ok else why
             if not ok and pid:
-                state += f" (ещё идёт, pid {pid}: тик снимет)"
+                state += f" (ещё идёт, pid {pid}: плановый проход снимет)"
             rows.append((svc["name"], svc.get("hosts", "all"), state, str(svc.get("description", ""))[:70]))
         widths = [max(len(r[i]) for r in rows) for i in range(3)]
         for r in rows:
@@ -1187,7 +1189,7 @@ def status():
         lt = float(open(path("last-tick")).read())
     lines = [f"последний проход: {ago(lt)}" if lt else "ещё не шёл (pantheon install)"]
     if not lt or t - lt > 180:
-        warn.append("тик стоит")
+        warn.append("плановый проход стоит")
         lines[0] += " — СТОИТ"
     if os.path.exists(path("paused")):
         lines.append("весь планировщик на паузе (pantheon jobs resume --all)")
@@ -1241,7 +1243,7 @@ def status():
         ps = sorted(f[:-5] for f in os.listdir(path("pauses")) if f.endswith(".json"))
         if ps:
             lines.append("пауза по нагрузке: " + ", ".join("все" if p == "_all" else p for p in ps))
-    section("Тик", lines)
+    section("Плановый проход", lines)
 
     # сессии
     data = agents_all()
@@ -1307,8 +1309,8 @@ def status():
 
     # синхронизация ~/.claude
     lines, cfg = [], os.path.join(HOME, ".claude")
-    marks = {".sync-held": "карантин правок — ответ на доске", ".sync-incoming": "правка с другого Mac — на доске",
-             ".sync-conflict": "конфликт с другим Mac", ".sync-error": "ошибка синхронизации"}
+    marks = {".sync-held": "карантин правок — ответ на доске", ".sync-incoming": "правка с другого компьютера — на доске",
+             ".sync-conflict": "конфликт с другим компьютером", ".sync-error": "ошибка синхронизации"}
     for f, what in marks.items():
         if os.path.exists(os.path.join(cfg, f)):
             lines.append(what)
@@ -1477,7 +1479,7 @@ def commit():
                 files = git("diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
                 theirs = git("rev-parse", "MERGE_HEAD", check=False).stdout.strip()
                 git("merge", "--abort", check=False)
-                alert_once("merge-conflict", theirs, f"~/ai/pantheon: конфликт слияния с другим Mac "
+                alert_once("merge-conflict", theirs, f"~/ai/pantheon: конфликт слияния с другим компьютером "
                            f"({', '.join(files) or 'файлы не названы'}); локальный коммит цел, слияние отменено — "
                            "разобрать вручную", "pantheon-commit", note="~/ai/pantheon: конфликт слияния, нужен разбор")
                 return ALERTED
@@ -2725,7 +2727,7 @@ def tilde(p):
 
 def fresh_text(kind, name, old_id, tail=""):
     """«[Пантеон: <kind>] … прочитай <файл состояния>, продолжай» — текст свежей сессии; tail — поручение вызывающего,
-    дословно со своей пометкой: толчок «[Пантеон: толчок от …]» должен остаться подписанным (ревью argus)."""
+    дословно со своей пометкой: задание «[Пантеон: задание от …]» должен остаться подписанным (ревью argus)."""
     files = " и ".join(tilde(p) for p in state_files(name))
     tail = str(tail or "").strip()
     return (f"{START_MARK} {kind}] Ты — новая сессия {name} с чистым контекстом: прошлая ({old_id or '?'}) остановлена, "
@@ -4066,7 +4068,7 @@ def consent(rest):
     if not found:
         print(f"ответа владельца на {qid} в окне вопросов Зевса и на доске за {days:g} дн. нет{hint}")
         return 1
-    print(f"Ответы владельца на {qid} (журналы пишут хук и тик, не роли; сверь, что ответ — на твой вопрос и твоё действие):")
+    print(f"Ответы владельца на {qid} (журналы пишут хук и плановый проход, не роли; сверь, что ответ — на твой вопрос и твоё действие):")
     for t, body in found:
         print(f"\n## {t}\n{body}")
     if hint:
@@ -4233,7 +4235,7 @@ def uninstall():
     for p in (PLIST, os.path.join(HOME, ".local", "bin", "pantheon"), os.path.join(HOME, ".local", "bin", "heavy")):
         with contextlib.suppress(FileNotFoundError):
             os.remove(p)
-    print("снято: задачи launchd (тик и службы) и команды pantheon и heavy (метки в ~/.local/state/pantheon остались)")
+    print("снято: задачи launchd (плановый проход и службы) и команды pantheon и heavy (метки в ~/.local/state/pantheon остались)")
     return 0
 
 
@@ -4974,6 +4976,17 @@ def _plugins_mark(marks, name, mark):
     write_json(path("plugins", "marks.json"), marks)
 
 
+def _plugins_respawn_mark(name):
+    """metis-0181: отметка «нужен перезапуск» для тика (watch.plugins_respawn). since — время последней установки:
+    окна, поднятые раньше, тик перезапускает, когда они свободны; done — уже перезапущенные сессии, новая установка
+    его обнуляет (их версия этого плагина тоже старая)."""
+    with lock("plugins-respawn"):
+        cur = read_json(path("plugins", "respawn.json"), {})
+        cur = cur if isinstance(cur, dict) else {}
+        plugins = sorted({str(x) for x in cur.get("plugins") or []} | {name})
+        write_json(path("plugins", "respawn.json"), {"since": now(), "at": stamp(), "plugins": plugins, "done": []})
+
+
 def _plugin_install(name, old, new, log, marks, quiet, digest):
     """claude plugin update без -y (новая команда установки в каталоге должна требовать человека) и сверка того, что
     встало, с проверенной копией: версия и хеш дерева installPath."""
@@ -4989,7 +5002,9 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
     if got == new and _tree_hash(row.get("installPath")) == digest:
         _plugins_mark(marks, name, None)
         _plugins_journal(f"{name} {old} → {new}: обновлён")
-        alert(f"обновлён {name} {old} → {new}, сессии увидят после перезапуска", "plugins-update")
+        _plugins_respawn_mark(name)
+        alert(f"обновлён {name} {old} → {new}, плановый проход перезапустит свободные окна (Зевса — вы сами: pantheon start zeus "
+              "--restart); окно, готовое раньше: pantheon saved --by <имя> --state <путь>", "plugins-update")
         if not quiet:
             print(f"{name}: обновлён {old} → {new}")
         return 0
