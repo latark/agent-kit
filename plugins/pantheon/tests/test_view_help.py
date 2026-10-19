@@ -36,7 +36,7 @@ def check(name, ok, detail=""):
 
 def unit_checks():
     names = T.base_views(T.BASE_FILE)
-    check("в шаблоне семь видов, имена не удлинены (до 14 знаков)", len(names) == 7 and all(len(n) <= 14 for n in names), names)
+    check("в шаблоне пять видов, имена не удлинены (до 14 знаков)", len(names) == 5 and all(len(n) <= 14 for n in names), names)
     check("у каждого вида шаблона есть непустая строка, лишних нет",
           list(T.VIEW_HELP) == names and all(v.strip() for v in T.VIEW_HELP.values()), (names, list(T.VIEW_HELP)))
     check("строки человеческие: «Что делать:» в каждой, без формул и полей",
@@ -44,9 +44,9 @@ def unit_checks():
     check("check_views: шаблон и строки сходятся — расхождений нет", T.check_views() == [], T.check_views())
     # вид без строки
     lines = dict(T.VIEW_HELP)
-    del lines["Очередь"]
+    del lines["Пачки"]
     bad = T.check_views(help_lines=lines)
-    check("вид без строки — расхождение с его именем", len(bad) == 1 and "«Очередь»" in bad[0], bad)
+    check("вид без строки — расхождение с его именем", len(bad) == 1 and "«Пачки»" in bad[0], bad)
     lines = dict(T.VIEW_HELP, **{"Лишний": "строка без вида"})
     bad = T.check_views(help_lines=lines)
     check("строка без вида — расхождение", len(bad) == 1 and "«Лишний»" in bad[0], bad)
@@ -91,7 +91,7 @@ def live_checks():
     r = run(env, "board", t=T0 + 10)
     check("тик: код 0", r.returncode == 0, r.stderr[-300:])
     sv = open(os.path.join(board, "Сводка.md"), encoding="utf-8").read()
-    check("Сводка.md: все семь встраиваний со строками",
+    check("Сводка.md: все пять встраиваний со строками",
           all(f"## {n}\n\n{line}\n\n![[Доска.base#{n}]]" in sv for n, line in T.VIEW_HELP.items()))
     hp = os.path.join(board, "Справка", "Виды доски.md")
     check("файл Справка/Виды доски.md записан", os.path.isfile(hp))
