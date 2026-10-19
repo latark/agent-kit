@@ -2908,7 +2908,7 @@ def copies_message(name, live):
 
 
 def stop_and_rm(name, sid):
-    """claude stop, затем claude rm <id> (metis-0239): остановленную сессию флот Claude Code поднимает снова
+    """claude stop, затем claude rm <id> (metis-0239): остановленную сессию Claude Code сам перезапускает
     (daemon.log: settled (killed) → claimed-spare (fleet)), пока она в его списке. rm убирает из списка фоновую сессию
     (и её worktree, если он чистый); переписка остаётся, вернуть — pantheon start / resume. Без --discard-unpushed и
     --force-remove-worktree: сессию с неотправленной работой не удаляем насильно. Возвращает None или причину отказа."""
@@ -3185,9 +3185,9 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
             start_log(f"stop-done\t{name}\t{a.get('id')}")
             if reason:
                 start_log(f"rm-refused\t{name}\t{a.get('id')}\t{reason}")
-                print(f"pantheon start: {name}: прежняя сессия {a.get('id')} осталась во флоте Claude Code, "
+                print(f"pantheon start: {name}: прежняя сессия {a.get('id')} осталась среди фоновых сессий Claude Code, "
                       f"причина: {reason}", file=sys.stderr)
-                alert(f"{name}: прежняя сессия {a.get('id')} осталась во флоте Claude Code (stop-done, rm отказал): "
+                alert(f"{name}: прежняя сессия {a.get('id')} осталась среди фоновых сессий Claude Code (stop-done, rm отказал): "
                       f"{reason}", "pantheon-stop")
             stopped.append(a)
     # остановленная копия отпускает имя не сразу и может ожить (metis-0041): запуск — только когда имя свободно

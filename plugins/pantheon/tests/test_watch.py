@@ -963,7 +963,7 @@ def test_stop_resume_all_precise():
 
 
 def test_stop_removes_from_fleet():
-    """metis-0239: после claude stop идёт claude rm <id>, иначе флот Claude Code поднимает сессию снова;
+    """metis-0239: после claude stop идёт claude rm <id>, иначе Claude Code сам перезапускает фоновую сессию;
     отказ rm (worktree с неотправленным) виден в выводе и в start.log, насильно не удаляем."""
     e = Env()
     e.direction("rm-dir")
@@ -973,33 +973,33 @@ def test_stop_removes_from_fleet():
     c = e.calls()
     check(["stop", "r1r1r1r1"] in c and ["rm", "r1r1r1r1"] in c and c.index(["stop", "r1r1r1r1"]) < c.index(["rm", "r1r1r1r1"]),
           f"stop не вызвал rm после stop: {c}")
-    check("осталась во флоте" not in r.stdout, f"ложная «осталась во флоте»: {r.stdout}")
+    check("осталась среди фоновых сессий Claude Code" not in r.stdout, f"ложная «осталась среди фоновых сессий Claude Code»: {r.stdout}")
     r = e.run("stop", "rk-dir", t=T0 + 5, extra={"FAKE_RM_REFUSE": "r2r2r2r2"})
     check(["rm", "r2r2r2r2"] in e.calls() and not [x for x in e.calls() if "--discard-unpushed" in x or "--force-remove-worktree" in x],
           "rm вызван неверно или насильно")
-    check("rk-dir: осталась во флоте: r2r2r2r2, причина:" in r.stdout and "unpushed" in r.stdout and r.returncode == 0,
+    check("rk-dir: осталась среди фоновых сессий Claude Code: r2r2r2r2, причина:" in r.stdout and "unpushed" in r.stdout and r.returncode == 0,
           f"отказ rm не виден в выводе: {r.stdout!r}")
     log = open(e.st("logs", "start.log")).read()
     check("rm-refused\trk-dir\tr2r2r2r2" in log, f"отказ rm не в start.log: {log}")
-    check("rk-dir: осталась во флоте Claude Code (rm отказал)" in e.alerts() and "r2r2r2r2" in e.alerts(),
+    check("rk-dir: осталась среди фоновых сессий Claude Code (rm отказал)" in e.alerts() and "r2r2r2r2" in e.alerts(),
           f"отказ rm без тревоги: {e.alerts()}")
     # stop --all: отказ rm — в выводе, в start.log и в тревоге
     e2 = Env()
     e2.direction("ra-dir")
     e2.agents([bg("ra-dir", "working", "r3r3r3r3-1", pid=63)])
     r = e2.run("stop", "--all", t=T0, extra={"FAKE_RM_REFUSE": "r3r3r3r3"})
-    check(["rm", "r3r3r3r3"] in e2.calls() and "ra-dir: осталась во флоте: r3r3r3r3, причина:" in r.stdout,
+    check(["rm", "r3r3r3r3"] in e2.calls() and "ra-dir: осталась среди фоновых сессий Claude Code: r3r3r3r3, причина:" in r.stdout,
           f"stop --all: отказ rm не виден в выводе: {r.stdout!r}")
-    check("стоп всё: осталась во флоте Claude Code (rm отказал): ra-dir r3r3r3r3" in e2.alerts(),
+    check("стоп всё: осталась среди фоновых сессий Claude Code (rm отказал): ra-dir r3r3r3r3" in e2.alerts(),
           f"stop --all: отказ rm без тревоги: {e2.alerts()}")
     check("rm-refused\tra-dir\tr3r3r3r3" in open(e2.st("logs", "start.log")).read(), "stop --all: нет в start.log")
-    # stop вернул не 0 — rm не зовём, сессия остаётся во флоте
+    # stop вернул не 0 — rm не зовём, сессия остаётся среди фоновых сессий Claude Code
     e3 = Env()
     e3.direction("rs-dir")
     e3.agents([bg("rs-dir", "working", "r4r4r4r4-1", pid=64)])
     r = e3.run("stop", "rs-dir", t=T0, extra={"FAKE_STOP_FAIL": "r4r4r4r4"})
     check(["stop", "r4r4r4r4"] in e3.calls() and ["rm", "r4r4r4r4"] not in e3.calls()
-          and "rs-dir: осталась во флоте: r4r4r4r4" in r.stdout, f"stop с кодом 1: rm не должен вызываться: {e3.calls()} {r.stdout!r}")
+          and "rs-dir: осталась среди фоновых сессий Claude Code: r4r4r4r4" in r.stdout, f"stop с кодом 1: rm не должен вызываться: {e3.calls()} {r.stdout!r}")
 
 
 def test_stop_without_locks_write():

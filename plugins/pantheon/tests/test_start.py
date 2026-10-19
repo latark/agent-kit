@@ -266,15 +266,15 @@ def main():
     c = calls()
     check("start: прошлый эпик «done» — его сессия останавливается, новая запускается с тем же именем",
           r.returncode == 0 and c[-3]["argv"] == ["stop", "a1"] and c[-2]["argv"] == ["rm", "a1"]
-          and c[-1]["argv"][4] == "athena-shop" and "осталась во флоте" not in r.stderr)
+          and c[-1]["argv"][4] == "athena-shop" and "осталась среди фоновых сессий Claude Code" not in r.stderr)
     open(agents_file, "w").write(json.dumps([{"id": "a1", "name": "athena-shop", "state": "done", "pid": 5,
                                               "sessionId": "s1", "cwd": "/x", "startedAt": 1}]))
     r = run("start", "athena-shop", "новый эпик", extra={"FAKE_RM_REFUSE": "1"})
     al = open(os.path.join(home, "alerts.md")).read() if os.path.exists(os.path.join(home, "alerts.md")) else ""
     check("start: stop-done — отказ rm виден в выводе, в start.log и в тревогах",
-          "осталась во флоте Claude Code" in r.stderr and "unpushed" in r.stderr
+          "осталась среди фоновых сессий Claude Code" in r.stderr and "unpushed" in r.stderr
           and "rm-refused\tathena-shop\ta1" in open(os.path.join(state, "logs", "start.log")).read()
-          and "прежняя сессия a1 осталась во флоте" in al)
+          and "прежняя сессия a1 осталась среди фоновых сессий Claude Code" in al)
     alerts_md = os.path.join(home, "alerts.md")
     said = lambda: open(alerts_md).read().count("без вашего слова") if os.path.exists(alerts_md) else 0
     check("start --from zeus без вашего слова в окне Зевса — тревога (лазейка видна)", said() == 1)
