@@ -142,6 +142,23 @@ class Env:
         args = args or ("plugins", "update", "--quiet")
         return subprocess.run([PY, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=300)
 
+    def py(self, code, *args):
+        """Код с `import pantheon as P` в этом HOME (как окно роли: только чтение реестра); stdout строками."""
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("PANTHEON_", "STUB_"))}
+        env.update({"HOME": self.home, "PANTHEON_HOME": self.pantheon, "PANTHEON_STATE": self.state,
+                    "PANTHEON_NO_NOTIFY": "1", "TMPDIR": self.tmpdir})
+        r = subprocess.run([PY, "-I", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import pantheon as P\n" + code,
+                            os.path.dirname(LIB), *args], env=env, capture_output=True, text=True, timeout=120)
+        return r.stdout.split("\n")[:-1] if r.returncode == 0 else ["ERR " + r.stderr[-300:]]
+
+    def verify(self, d):
+        """verified.json: дерево d проверено (как после успешной установки)."""
+        return self.py("P.verified_write(sys.argv[2], sys.argv[3], '?', 'test')", self.name, d)
+
+    def verified(self):
+        p = os.path.join(self.state, "plugins", "verified.json")
+        return json.load(open(p)) if os.path.exists(p) else {}
+
     def argv(self):
         p = os.path.join(self.stub, "argv.log")
         return open(p).read() if os.path.exists(p) else ""
@@ -232,6 +249,7 @@ def main():
         reg = lambda p: e.write(os.path.join(plugins, "installed_plugins.json"), json.dumps({"version": 2, "plugins": {
             "pantheon@agent-kit": [{"scope": "user", "installPath": p, "version": "1.0.0"}]}}))
         reg(old_cache)
+        e.verify(old_cache)
         e.run()
         check(f"pantheon, зелёные тесты, но встала другая {what}: current остаётся прежней, КРИТИЧНО в alerts.md",
               os.readlink(cur) == old_cache and "КРИТИЧНО" in e.alerts(), f"{os.readlink(cur)} {e.alerts()!r}")
@@ -241,6 +259,70 @@ def main():
         e.run()
         check(f"pantheon, встала другая {what}, второй проход: current всё ещё прежняя, тревога о непроверенном дереве",
               os.readlink(cur) == old_cache and "не проверено" in e.alerts(), f"{os.readlink(cur)} {e.alerts()!r}")
+        e.close()
+
+    # успешная установка пишет verified.json (хеш, путь), окна идут на это дерево
+    # (мутант: без verified_write в _plugin_install — agents.py окна не найден)
+    e = Env("1.0.0", "1.1.0", OK, OK, name="pantheon")
+    r = e.run()
+    v = e.verified().get("pantheon") or {}
+    reg_after = lambda: e.write(os.path.join(e.home, ".claude", "plugins", "installed_plugins.json"), json.dumps(
+        {"version": 2, "plugins": {"pantheon@agent-kit": [{"scope": "user", "installPath": e.after, "version": "1.1.0"}]}}))
+    reg_after()
+    got = e.py("print(P.installed_dir('pantheon'))")
+    check("успешная установка: verified.json — путь и хеш вставшего дерева, живой код и окна из него",
+          r.returncode == 0 and v.get("path") == os.path.realpath(e.after) and v.get("version") == "1.1.0"
+          and len(v.get("hash") or "") == 64 and got == [os.path.realpath(e.after)],
+          f"{r.stderr!r} {v} {got}")
+    e.close()
+
+    # ревью 90a и 90b, круг 3: после КРИТИЧНО (встало непроверенное, реестр уже ведёт туда) ни один путь не делает его
+    # живым — удалённая метка, третье дерево той же версии, служебные файлы, обычный проход, `pantheon install`; окна —
+    # из последнего проверенного, не из клона (мутанты: вернуть клон в _installed_hook; убрать запись verified.json)
+    for case in ("deleted", "third_tree", "dot_top", "pycache", "plain", "install", "no_verified", "broken_verified"):
+        e = Env("1.0.0", "1.1.0", OK, OK, name="pantheon")
+        cur = os.path.join(e.home, ".local", "share", "pantheon", "current")
+        old_cache = os.path.join(e.home, ".claude", "plugins", "cache", "agent-kit", "pantheon", "1.0.0")
+        clone_hook = os.path.join(e.src, "hooks", "agents.py")
+        e.write(os.path.join(old_cache, "hooks", "agents.py"), "# проверенный 1.0.0\n")
+        e.write(clone_hook, "# клон: голова main\n")
+        os.makedirs(os.path.dirname(cur))
+        os.symlink(old_cache, cur)
+        e.write(os.path.join(e.home, ".claude", "plugins", "installed_plugins.json"), json.dumps(
+            {"version": 2, "plugins": {"pantheon@agent-kit": [{"scope": "user", "installPath": old_cache}]}}))
+        e.verify(old_cache)
+        e.write(os.path.join(e.after, "hooks", "evil.py"), "print(1)\n")
+        e.write(os.path.join(e.after, "hooks", "agents.py"), "# непроверенный\n")
+        e.run()
+        reg_after = lambda: e.write(os.path.join(e.home, ".claude", "plugins", "installed_plugins.json"), json.dumps(
+            {"version": 2, "plugins": {"pantheon@agent-kit": [{"scope": "user", "installPath": e.after,
+                                                               "version": "1.1.0"}]}}))
+        reg_after()
+        e.run()
+        um = os.path.join(e.state, "plugins", "unchecked.json")
+        vj = os.path.join(e.state, "plugins", "verified.json")
+        if case == "deleted":
+            os.remove(um)
+        elif case == "third_tree":
+            e.write(os.path.join(e.after, "hooks", "evil2.py"), "print(2)\n")
+        elif case == "dot_top":
+            e.write(os.path.join(e.after, ".orphaned_at"), "123\n")
+        elif case == "pycache":
+            e.write(os.path.join(e.after, "lib", "__pycache__", "x.pyc"), "x\n")
+        elif case == "no_verified":
+            os.remove(vj)
+        elif case == "broken_verified":
+            e.write(vj, "{")
+        r = e.run("install", extra={"PANTHEON_DRYRUN": "1"}) if case == "install" else e.run()
+        hook = (e.py("print(P.agents_script())") or ["-"])[0]
+        live_ok = os.path.realpath(cur) == os.path.realpath(old_cache)
+        if case in ("no_verified", "broken_verified"):
+            want_hook = not os.path.exists(hook) and "marketplaces" not in hook
+        else:
+            want_hook = hook == os.path.realpath(os.path.join(old_cache, "hooks", "agents.py"))
+        check(f"после КРИТИЧНО, {case}: current на последнем проверенном, окна не из клона и не из непроверенного",
+              live_ok and want_hook and "не проверено" in e.alerts() + r.stdout,
+              f"rc={r.returncode} cur={os.path.realpath(cur)} hook={hook} {r.stdout[-200:]!r}")
         e.close()
 
     # ревью 90a, п.3: версию поставили руками (новее нет), а current отстала или повисла — перевешивается
@@ -259,8 +341,9 @@ def main():
         else:
             stale = os.path.join(plugins, "cache", "agent-kit", "pantheon", "0.8.0")  # папки нет
         os.symlink(stale, cur)
+        e.verify(cache)
         r = e.run()
-        check(f"pantheon, новее нет, current {what}: перевешена на установленную папку",
+        check(f"pantheon, новее нет, current {what}: перевешена на установленную проверенную папку",
               r.returncode == 0 and os.path.realpath(cur) == os.path.realpath(cache), f"{r.stderr!r} {os.readlink(cur)}")
         e.close()
     e = Env("1.0.0", "1.0.0", OK, OK, name="pantheon")
