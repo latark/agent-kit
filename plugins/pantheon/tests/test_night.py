@@ -564,6 +564,14 @@ def test_early_reset_idle_window_0246():
     e.snap(hm("23:50"), 1.0, new)
     e.watch(hm("23:50"))
     check(abs(e.state_of()["spent"] - 2.0) < 1e-6, f"после старой строки: spent {e.state_of()['spent']}, ждали 2")
+    # проба «вперёд»: строк новой недели в week-usage не осталось (файл усечён), в снимке только старая неделя
+    # (resets_at раньше сохранённого больше чем на час) — замер игнорируется, spent не берёт used старой недели
+    os.remove(os.path.join(e.sl, "week-usage"))
+    e.snap(hm("23:55"), u0 + 60.8, old)
+    e.watch(hm("23:55"))
+    st = e.state_of()
+    check(abs(st["spent"] - 2.0) < 1e-6 and st["resets_at"] == new,
+          f"замер со старым resets_at (назад) сдвинул ночь: {st}")
 
 
 def test_fractional_budget():
