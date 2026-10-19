@@ -25,7 +25,7 @@ PostToolUse (Bash:
                  в ключ или шаблон, который в него раскрывается, а не на обход папки выше (grep -r, metis-0084);
   hq-telegram  — окну штаба (PANTHEON_ROLE=hq) Telegram закрыт: субагент tg-reader, навык telegram-read, скрипт
                  tg-read и демон tg-readd в Bash (P0-1, metis-0060);
-  hq-gh        — окну штаба gh pr — только с -R из [merge_repos], PR номером, без GH_REPO/GH_HOST, без обсуждений
+  hq-gh        — окну штаба gh pr — только с -R из [merge_repos], PR номером, без GH_REPO/GH_HOST/GH_CONFIG_DIR, без обсуждений
                  (--comments, --json comments) и без личного в команде (metis-0247);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
@@ -1097,6 +1097,7 @@ class _State:
             if os.environ.get(name):
                 self.vars[name] = {os.environ[name]}
         self.out, self.cmds = [], []
+        self.reads = []      # цели входного перенаправления `<` и `$(< …)`: что команда читает из файла
         self.links = {}      # ln -s в этой команде: путь ссылки → куда ведёт
         self.opaque = False  # source/. — дальше переменные и папка неизвестны
         self.opts = False    # setopt/shopt/set -o — шаблоны могут значить другое
@@ -2070,6 +2071,7 @@ def _analyze(lex, st, depth):
                     stdin = False if x is None else x
                 elif t.op == "<":
                     stdin = ""  # скрипт из файла — как script.sh
+                    st.reads.extend(_targets(st, w))  # metis-0247: личное через `< файл` и `$(< файл)`
                 elif t.op == "<&" or (t.op == ">&" and re.fullmatch(r"\d+-?|-", w.lit) and w.bare()):
                     pass  # копия дескриптора: 2>&1, >&-
                 else:
@@ -2105,6 +2107,7 @@ def _analyze_string(text, st, depth):
 
 
 _ANALYSIS = {}
+_READS = {}
 
 
 def bash_analysis(cmd, cwd):
@@ -2128,10 +2131,18 @@ def bash_analysis(cmd, cwd):
         else:
             st.out.append(UNRESOLVED)
         res = sorted(set(st.out)), st.cmds
+        _READS[(cmd, cwd)] = sorted(set(st.reads))
     except (_ParseError, RecursionError, ValueError, OSError):
         res = [UNRESOLVED], []
+        _READS[(cmd, cwd)] = [UNRESOLVED]
     _ANALYSIS[(cmd, cwd)] = res
     return res
+
+
+def bash_reads(cmd, cwd):
+    """Файлы входного перенаправления (`cmd < файл`, `$(< файл)`); UNRESOLVED — путь не вычислить."""
+    bash_analysis(cmd, cwd)
+    return _READS.get((cmd, cwd), [UNRESOLVED])
 
 
 def bash_targets(cmd, cwd):
@@ -2578,6 +2589,9 @@ def _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches, values=F
                         or reaches(p):
                     hits.append(p)
     hits += [p for p in write_targets(event, "Bash", tool_input)[1] if p != UNRESOLVED and _inside(p, priv)]
+    # metis-0247: файл после `<` разбор не держит среди слов — без этого `gh pr edit --body-file - < личное`
+    # и `--body "$(< личное)"` проходили
+    hits += [p for p in bash_reads(cmd, cwd) if p != UNRESOLVED and (_inside(p, priv) or reaches(p))]
     return hits
 
 
@@ -3096,12 +3110,13 @@ def check_hq_telegram(event, tool, tool_input):
 # (gh pr edit -R чужой --body-file ~/ai/knowledge/me/…) и принёс бы в окно чужой текст из веба (gh pr view -R чужой
 # --comments, SEC-13). В окне штаба (PANTHEON_ROLE=hq или agent_type hq — главная сессия и субагенты) любой gh pr:
 #   - только с явным -R/--repo, и каждый — owner/repo из [merge_repos] политики (любого направления); без -R gh взял бы
-#     репозиторий папки, его здесь не проверить. GH_REPO и GH_HOST в команде или в окружении — отказ;
+#     репозиторий папки, его здесь не проверить. GH_REPO, GH_HOST и GH_CONFIG_DIR в команде или в окружении — отказ;
 #   - PR — номером: адрес PR в аргументе gh берёт вместо -R;
 #   - без обсуждений: --comments (-c) и --json с comments, reviews, latestReviews — чужой текст и в своём репозитории;
 #   - без личного в команде: те же пути, что правило private закрывает остальным ролям (--body-file, -F, $(cat …),
-#     перенаправление), и значение флага в том же слове (--body-file=<путь>).
+#     перенаправление в обе стороны: `< личное`, `$(< личное)`), и значение флага в том же слове (--body-file=<путь>).
 # Слияние штабу закрывает ещё и push (merge_problem). Координаторов и мастерскую правило не трогает.
+GH_REDIRECT_ENV = ("GH_REPO", "GH_HOST", "GH_CONFIG_DIR")  # уводят gh от -R: чужой репозиторий, хост, вход
 HQ_GH_VALUE = {"view": "Rqt", "checks": "Rqti", "edit": "RbFBmt", "merge": "RbFtA"}  # короткие флаги со значением
 HQ_GH_BOOL = {"view": "cw", "checks": "w", "merge": "dsmr"}
 HQ_GH_LONG_VALUE = {"--repo", "--body", "--body-file", "--title", "--json", "--jq", "--template", "--base",
@@ -3170,8 +3185,8 @@ def check_hq_gh(event, tool, tool_input):
         return None
     head = "Правило hq-gh: окну Пританея gh pr — только по своему репозиторию (metis-0247)"
     tail = (" Нужен чужой PR или его обсуждение — поручи координатору направления; личное в PR не уходит.")
-    if re.search(r"\bGH_(?:REPO|HOST)\b", cmd) or os.environ.get("GH_REPO") or os.environ.get("GH_HOST"):
-        return f"{head}: без GH_REPO и GH_HOST — репозиторий только через -R.{tail}"
+    if re.search(r"\bGH_(?:REPO|HOST|CONFIG_DIR)\b", cmd) or any(os.environ.get(v) for v in GH_REDIRECT_ENV):
+        return f"{head}: без GH_REPO, GH_HOST и GH_CONFIG_DIR — репозиторий только через -R.{tail}"
     policy = load_policy()
     mr = policy.get("merge_repos")
     allowed = {r.strip().lower() for v in (mr.values() if isinstance(mr, dict) else ()) if isinstance(v, list)

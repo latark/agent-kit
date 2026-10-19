@@ -127,8 +127,8 @@ answer и плановый проход, это скрипты, guard их не 
   Пританея — отказ.
 - **hq-gh (metis-0247, guard 0.5.13).** Окну Пританея gh pr view, checks, edit и merge выпущены мимо песочницы, а у
   Зевса личное. Поэтому в этом окне любой `gh pr` проходит только с явным `-R`/`--repo` из `[merge_repos]` policy.toml
-  и номером PR; без `-R`, с `GH_REPO` или `GH_HOST` (в команде или окружении), с `--comments`/`-c` и `--json comments`
-  — отказ. Личный путь в команде (`--body-file`, `-F`, `$(cat …)`) — отказ тем же разбором, что правило private у
+  и номером PR; без `-R`, с `GH_REPO`, `GH_HOST` или `GH_CONFIG_DIR` (в команде или окружении), с `--comments`/`-c` и `--json comments`
+  — отказ. Личный путь в команде (`--body-file`, `-F`, `$(cat …)`, `< файл`, `$(< файл)`) — отказ тем же разбором, что правило private у
   координаторов. Без tomllib (Python 3.9) `[merge_repos]` не прочитать — штабу закрыт любой `gh pr`.
 - **Agent, Task и Skill при управляемых настройках.** Управляемые настройки вызывают guard только для Bash, Write,
   Edit, MultiEdit, NotebookEdit, Read, Grep, Glob и WebFetch. Поэтому эти три инструмента хук плагина проверяет и тогда,
