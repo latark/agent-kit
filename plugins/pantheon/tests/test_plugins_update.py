@@ -211,6 +211,62 @@ def main():
     check("другой плагин (x): ссылку current не трогает", not os.path.lexists(cur))
     e.close()
 
+    # ревью 90a, п.2: тесты зелёные, а встала другая версия или другое дерево — current остаётся прежней
+    # (мутант: link_current до сверки got == new и хеша в _plugin_install)
+    for what in ("версия", "дерево"):
+        e = Env("1.0.0", "1.1.0", OK, OK, name="pantheon")
+        cur = os.path.join(e.home, ".local", "share", "pantheon", "current")
+        old_cache = os.path.join(e.home, ".claude", "plugins", "cache", "agent-kit", "pantheon", "1.0.0")
+        os.makedirs(os.path.dirname(cur))
+        os.symlink(old_cache, cur)
+        if what == "версия":
+            la = os.path.join(e.stub, "list-after.json")
+            rows = json.load(open(la))
+            for row in rows:
+                if row["id"] == "pantheon@agent-kit":
+                    row["version"] = "1.1.1"
+            e.write(la, json.dumps(rows))
+        else:
+            e.write(os.path.join(e.after, "hooks", "evil.py"), "print('не проверялось')\n")
+        e.run()
+        check(f"pantheon, зелёные тесты, но встала другая {what}: current остаётся прежней, КРИТИЧНО в alerts.md",
+              os.readlink(cur) == old_cache and "КРИТИЧНО" in e.alerts(), f"{os.readlink(cur)} {e.alerts()!r}")
+        e.close()
+
+    # ревью 90a, п.3: версию поставили руками (новее нет), а current отстала или повисла — перевешивается
+    # на installed_dir; плагин x ссылку не трогает
+    for what in ("отстала", "повисла"):
+        e = Env("1.0.0", "1.0.0", OK, OK, name="pantheon")
+        plugins = os.path.join(e.home, ".claude", "plugins")
+        cache = os.path.join(plugins, "cache", "agent-kit", "pantheon", "1.0.0")
+        e.write(os.path.join(plugins, "installed_plugins.json"), json.dumps({"version": 2, "plugins": {
+            "pantheon@agent-kit": [{"scope": "user", "installPath": cache, "version": "1.0.0"}]}}))
+        cur = os.path.join(e.home, ".local", "share", "pantheon", "current")
+        os.makedirs(os.path.dirname(cur))
+        if what == "отстала":
+            stale = os.path.join(plugins, "cache", "agent-kit", "pantheon", "0.9.0")
+            e.plugin(stale, "0.9.0", OK)
+        else:
+            stale = os.path.join(plugins, "cache", "agent-kit", "pantheon", "0.8.0")  # папки нет
+        os.symlink(stale, cur)
+        r = e.run()
+        check(f"pantheon, новее нет, current {what}: перевешена на установленную папку",
+              r.returncode == 0 and os.path.realpath(cur) == os.path.realpath(cache), f"{r.stderr!r} {os.readlink(cur)}")
+        e.close()
+    e = Env("1.0.0", "1.0.0", OK, OK, name="pantheon")
+    plugins = os.path.join(e.home, ".claude", "plugins")
+    cache = os.path.join(plugins, "cache", "agent-kit", "pantheon", "1.0.0")
+    e.write(os.path.join(plugins, "installed_plugins.json"), json.dumps({"version": 2, "plugins": {
+        "pantheon@agent-kit": [{"scope": "user", "installPath": cache, "version": "1.0.0"}]}}))
+    cur = os.path.join(e.home, ".local", "share", "pantheon", "current")
+    os.makedirs(os.path.dirname(cur))
+    os.symlink(cache, cur)
+    before = os.lstat(cur).st_ino
+    e.run()
+    check("pantheon, новее нет, current верна: ссылка не пересоздаётся",
+          os.readlink(cur) == cache and os.lstat(cur).st_ino == before)
+    e.close()
+
     # Каталог старее установленной — откат не ставим
     e = Env("1.0.0", "0.9.0", OK, OK)
     r = e.run()

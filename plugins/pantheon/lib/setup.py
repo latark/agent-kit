@@ -58,6 +58,14 @@ def ask(question):
     return ans in YES
 
 
+ROLE_ENV = ("PANTHEON_ROLE", "PANTHEON_SESSION", "CLAUDE_CODE_AGENT", "PANTHEON_ORIGIN")
+
+
+def claude_env():
+    """Окружение для claude без переменных роли окна (как pantheon.claude_env): общий daemon не унаследует роль."""
+    return {k: v for k, v in os.environ.items() if k not in ROLE_ENV}
+
+
 def run(argv, env=None, timeout=900, **kw):
     try:
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env, **kw)
@@ -112,19 +120,19 @@ def step_python(py):
 
 def step_plugins(root):
     name = market_name(root)
-    r = run(["claude", "plugin", "marketplace", "list"])
+    r = run(["claude", "plugin", "marketplace", "list"], env=claude_env())
     if r.returncode == 0 and name in (r.stdout or ""):
         report("маркетплейс", "пропуск", f"{name} уже подключён")
     else:
         o = run(["git", "-C", root, "remote", "get-url", "origin"])
         src = o.stdout.strip() if o.returncode == 0 and o.stdout.strip() else root
-        r = run(["claude", "plugin", "marketplace", "add", src])
+        r = run(["claude", "plugin", "marketplace", "add", src], env=claude_env())
         if r.returncode != 0:
             report("маркетплейс", "не вышло", last_line(r))
             return
         report("маркетплейс", "ок", f"{name} подключён")
     for p in PLUGINS:
-        r = run(["claude", "plugin", "install", f"{p}@{name}"])
+        r = run(["claude", "plugin", "install", f"{p}@{name}"], env=claude_env())
         if r.returncode == 0:
             report(f"плагин {p}", "ок")
         else:
