@@ -153,7 +153,7 @@ class Env:
 
     def verify(self, d):
         """verified.json: дерево d проверено (как после успешной установки)."""
-        return self.py("P.verified_write(sys.argv[2], sys.argv[3], '?', 'test')", self.name, d)
+        return self.py("P.verified_write(sys.argv[2], sys.argv[3], P._tree_hash(sys.argv[3]), '?', 'test')", self.name, d)
 
     def verified(self):
         p = os.path.join(self.state, "plugins", "verified.json")

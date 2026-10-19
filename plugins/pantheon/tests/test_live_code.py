@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 _ROOT = tempfile.mkdtemp(prefix="live_code-root-")
 tempfile.tempdir = _ROOT
@@ -109,7 +110,7 @@ def py(h, code, *args):
 
 def verify(h, name, d):
     """Запись verified.json, как после успешной установки plugins-update."""
-    return py(h, "P.verified_write(sys.argv[2], sys.argv[3], '1.0.0', 'test')", name, d)
+    return py(h, "P.verified_write(sys.argv[2], sys.argv[3], P._tree_hash(sys.argv[3]), '1.0.0', 'test')", name, d)
 
 
 def alerts(h):
@@ -229,6 +230,30 @@ got = py(h, "a = P._tree_hash_cached(sys.argv[2]); real = P._tree_hash; P._tree_
          "print(a == P._tree_hash_cached(sys.argv[2])); P._tree_hash = real\n"
          "open(sys.argv[2] + '/bin/pantheon', 'a').write('#x'); print(a != P._tree_hash_cached(sys.argv[2]))", cache)
 check("хеш дерева: повтор из кэша, правка вложенного файла — новый хеш", got == ["True", "True"], got)
+# ревью 90b, круг 4: подмена файла проверенного дерева с возвратом mtime (os.utime) — новый процесс с пустым кэшем
+# в памяти не верит hash-cache.json (мутант: отпечаток только из mtime)
+h, clone, cache = home()
+plugins = os.path.join(h, ".claude", "plugins")
+groot = os.path.join(plugins, "cache", "agent-kit", "guard", "0.1.0")
+gcache = os.path.join(groot, "hooks", "guard.py")
+write(gcache, "# guard: checked\n")
+write(os.path.join(groot, ".claude-plugin", "plugin.json"), "{}")
+data = json.load(open(os.path.join(plugins, "installed_plugins.json")))
+data["plugins"]["guard@agent-kit"] = [{"scope": "user", "installPath": groot}]
+write(os.path.join(plugins, "installed_plugins.json"), json.dumps(data))
+verify(h, "guard", groot)
+before = py(h, "print(P.guard_script())")  # кэш хеша записан на диск
+st = os.stat(gcache)
+time.sleep(0.05)
+with open(gcache, "w") as fh:
+    fh.write("# guard: EVIL!!!\n")  # тот же размер
+os.utime(gcache, ns=(st.st_atime_ns, st.st_mtime_ns))
+after = py(h, "print(P.guard_script())")
+check("кэш хеша: подмена файла + os.utime на старый mtime — новый процесс отказывает (guard не найден)",
+      before == [os.path.realpath(gcache)] and os.stat(gcache).st_mtime_ns == st.st_mtime_ns
+      and os.stat(gcache).st_size == st.st_size and after and not os.path.exists(after[0]), f"{before} {after}")
+got = py(h, "P.verified_write('x', sys.argv[2], 'digest-сверки', '1', 't'); print(P.verified_record('x')['hash'])", groot)
+check("verified_write пишет переданный хеш сверки, а не пересчитанный", got == ["digest-сверки"], got)
 
 
 # тест-страж: installed_dir без сверки (checked=False) — только в plugins_accept; current ведут только известные

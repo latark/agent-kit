@@ -5019,16 +5019,17 @@ _HASH_MEMO = {}
 
 
 def _tree_stamp(root):
-    """[число записей, самый поздний mtime_ns] по всему дереву — дёшево, без чтения файлов. Одного mtime корня мало:
-    правка вложенного файла меняет mtime только этого файла, новая или удалённая запись — число и mtime папки."""
-    n, newest = 0, 0
+    """Отпечаток дерева без чтения файлов: sha256 по каждой записи — путь, ctime_ns, размер, inode, mtime_ns. Одного
+    mtime мало (ревью 90b, круг 4): подмену файла с возвратом mtime через os.utime выдаёт ctime — его utime не вернуть;
+    замену файла другим — inode; новая или удалённая запись меняет список."""
+    rows = []
     for d, dirs, files in os.walk(root):
         dirs[:] = [x for x in dirs if x not in (".git", "__pycache__")]
         for x in [d] + [os.path.join(d, f) for f in files + dirs]:
             with contextlib.suppress(OSError):
-                newest = max(newest, os.lstat(x).st_mtime_ns)
-                n += 1
-    return [n, newest]
+                st = os.lstat(x)
+                rows.append((os.path.relpath(x, root), st.st_ctime_ns, st.st_size, st.st_ino, st.st_mtime_ns))
+    return hashlib.sha256(repr(sorted(rows)).encode()).hexdigest()
 
 
 def _tree_hash_cached(root):
@@ -5072,10 +5073,11 @@ def verified_record(name):
     return rec if isinstance(rec, dict) and isinstance(rec.get("hash"), str) and rec["hash"] else None
 
 
-def verified_write(name, root, version, by):
+def verified_write(name, root, digest, version, by):
+    """digest — хеш, с которым дерево сверили (а не пересчёт: между сверкой и записью дерево могли подменить)."""
     data = read_json(_verified_path(), {})
     data = data if isinstance(data, dict) else {}
-    data[name] = {"hash": _tree_hash(root), "path": os.path.realpath(root), "version": version, "at": stamp(), "by": by}
+    data[name] = {"hash": digest, "path": os.path.realpath(root), "version": version, "at": stamp(), "by": by}
     write_json(_verified_path(), data)
 
 
@@ -6241,7 +6243,7 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
     if got == new and _tree_hash(row.get("installPath")) == digest:
         _plugins_mark(marks, name, None)
         # разрешение: это дерево прошло тесты и сверку — живой код и окна идут только на него (metis-0321)
-        verified_write(name, row["installPath"], new, "plugins-update")
+        verified_write(name, row["installPath"], digest, new, "plugins-update")
         um = read_json(_unchecked_path(), {}) or {}
         if um.pop(name, None) is not None:
             write_json(_unchecked_path(), um)
@@ -6428,7 +6430,7 @@ def plugins_accept(names, new_only=False):
             rc = rc if new_only else 1
             continue
         version = (read_json(os.path.join(raw, ".claude-plugin", "plugin.json"), {}) or {}).get("version", "?")
-        verified_write(name, raw, version, "accept")
+        verified_write(name, raw, _tree_hash(raw), version, "accept")
         _plugins_journal(f"{name} {version}: принято руками (pantheon plugins accept) — {raw}")
         print(f"{name}: {version} принят — {raw.replace(HOME, '~')}")
         if name == "pantheon":
