@@ -63,6 +63,8 @@ FIELDS = {
     "actual": ("str", False), "acceptance": ("str", False),
     # режим работы и области (план metis-0248, шаг 1): mode — заявка координатора, touches — файлы или папки задачи
     "mode": ("str", False), "mode_why": ("str", False), "touches": ("list", False),
+    # место задачи в пачке (metis-0069, перенос batch): меньше — раньше; без него — по зависимостям и приоритету
+    "order": ("int", False),
 }
 # прежние ключи шапки → нынешние: читаются при разборе, при записи уходят под новым именем
 LEGACY_KEYS = {"wave": "release"}
@@ -821,13 +823,18 @@ def _prio(h):
     return p if isinstance(p, int) and not isinstance(p, bool) else 2
 
 
+def _ord(h):
+    o = h.get("order")
+    return o if isinstance(o, int) and not isinstance(o, bool) else 10 ** 9
+
+
 def story_order(sid, tasks):
     """Задачи пачки по порядку: сначала зависимости внутри пачки, при равенстве — приоритет, затем id.
     Цикл зависимостей порядок не роняет: оставшиеся идут по приоритету и id."""
     left, out = set(story_children(sid, tasks)), []
     while left:
         free = [i for i in left if not any(d in left for d in tasks[i][1].get("depends_on") or [])]
-        nxt = min(free or left, key=lambda i: (_prio(tasks[i][1]), i))
+        nxt = min(free or left, key=lambda i: (_ord(tasks[i][1]), _prio(tasks[i][1]), i))
         out.append(nxt)
         left.discard(nxt)
     return out
@@ -904,9 +911,49 @@ def task_detach(pantheon, t, tid, actor="агент"):
     sid = tasks[tid][1].get("parent")
     if not sid or sid not in tasks or tasks[sid][1].get("type") != "story":
         raise ValueError(f"{tid} не прикреплена ни к одной пачке — откреплять нечего")
-    task_set(pantheon, t, tid, {"parent": None}, note=f"откреплена от пачки {sid}", actor=actor)
+    task_set(pantheon, t, tid, {"parent": None, "order": None}, note=f"откреплена от пачки {sid}", actor=actor)
     task_set(pantheon, t, sid, {}, note=f"откреплена задача {tid}", actor=actor)
     return sid
+
+
+BATCH_RE = re.compile(r"^\s*(.+?)\s*·\s*(.+?)\s*$")
+
+
+def _place_key(place):
+    """Место в ночи: числа по возрастанию, потом прочее («запас») по тексту."""
+    return (0, int(place), "") if place.isdigit() else (1, 0, place)
+
+
+def migrate_batches(pantheon, t, dry_run=False, actor="агент"):
+    """Старое поле batch «<имя> · <место>» → story «<имя>» в том же направлении, задача прикреплена (parent), место —
+    в order (число места как есть, «запас» — после всех чисел), batch убран. Повтор ничего не меняет. → строки плана."""
+    tasks = load_tasks(pantheon, WORK_TYPES)
+    groups = {}
+    for tid, (_, h, _) in tasks.items():
+        m = BATCH_RE.match(h.get("batch") or "") if h.get("type") == "task" and not h.get("parent") else None
+        if m:
+            groups.setdefault((h.get("direction"), m.group(1)), []).append((m.group(2), tid))
+    plan = []
+    for (direction, name), items in sorted(groups.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])):
+        sid = next((i for i, (_, h, _) in sorted(tasks.items()) if h.get("type") == "story"
+                    and h.get("direction") == direction and h.get("title") == name), None)
+        plan.append(f"{direction}: пачка «{name}» — " + (f"есть {sid}" if sid else "создать"))
+        if sid is None and not dry_run:
+            sid = task_new(pantheon, t, direction, name, kind="story", actor=actor)[0]
+        spare = 0
+        for place, tid in sorted(items, key=lambda x: (_place_key(x[0]), x[1])):
+            # порядок берётся из самого места: повтор и догон дают тот же порядок; нечисловое («запас») — после всех чисел
+            if place.isdigit():
+                n = int(place)
+            else:
+                spare += 1
+                n = 10**6 + spare
+            plan.append(f"  {tid}: место {place} → порядок {n}")
+            if not dry_run:
+                task_attach(pantheon, t, tid, sid, actor=actor)
+                task_set(pantheon, t, tid, {"order": n, "batch": None}, note=f"batch «{name} · {place}» перенесён: порядок {n}",
+                         actor=actor)
+    return plan
 
 
 def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
@@ -1124,9 +1171,12 @@ formulas:
   waits: 'if(note["Зависит от"].isEmpty(), "", "⏳ ждёт " + note["Зависит от"].join(", "))'
   cross: 'if(note["Пересечения"].isEmpty(), "", "✂ " + note["Пересечения"].join(", "))'
   areas: 'if(note["Области"].isEmpty(), "❔ не указаны", note["Области"].join(", "))'
+  sum_budget: '[note["Сумма оценок"], note["Бюджет"]].filter(value.isTruthy()).join(" / ")'
 properties:
   file.name:
     displayName: Карточка
+  formula.sum_budget:
+    displayName: Сумма / бюджет
   note.id:
     displayName: №
   formula.mode_view:
@@ -1183,15 +1233,9 @@ views:
         direction: ASC
     order:
       - file.name
-      - note.Проект
-      - note.Когда
-      - note.Сумма оценок
-      - note.Бюджет
       - note.Закрыто
+      - formula.sum_budget
       - note.Цепочка
-      - note.Параллельно
-      - note.Пересечения
-      - note.Области не указаны
   - type: table
     name: Пачки проекта
     filters:
@@ -1231,6 +1275,60 @@ views:
       - formula.cross
       - note.Оценка
       - note.Факт
+  - type: table
+    name: Учёт недели
+    filters:
+      and:
+        - 'note["Тип"] == "учёт"'
+        - 'note["Период"] == "неделя"'
+    sort:
+      - property: note.Срез
+        direction: ASC
+      - property: note.Задач
+        direction: DESC
+    order:
+      - note.Срез
+      - note.Исполнитель
+      - note.Модель
+      - note.Effort
+      - note.Направление
+      - note.Задач
+      - note.Отменено
+      - note.С первого круга
+      - note.Кругов
+      - note.Токенов на задачу
+      - note.Долларов на задачу
+      - note.Возвратов
+      - note.После слияния
+      - note.Часов
+      - note.Из них оценка
+  - type: table
+    name: Учёт с начала
+    filters:
+      and:
+        - 'note["Тип"] == "учёт"'
+        - 'note["Период"] == "с начала"'
+    sort:
+      - property: note.Срез
+        direction: ASC
+      - property: note.Задач
+        direction: DESC
+    order:
+      - note.Срез
+      - note.Исполнитель
+      - note.Модель
+      - note.Effort
+      - note.Направление
+      - note.Задач
+      - note.Отменено
+      - note.С первого круга
+      - note.Кругов
+      - note.Токенов на задачу
+      - note.Долларов на задачу
+      - note.Возвратов
+      - note.После слияния
+      - note.Часов
+      - note.Из них оценка
 """
 PULT_VERSION = hashlib.sha256(PULT_FILE.encode("utf-8")).hexdigest()[:12]  # сменился шаблон — тик перепишет Пульт.base
 
@@ -1760,9 +1858,18 @@ formulas:
   waits: 'if(note["Зависит от"].isEmpty(), "", "⏳ ждёт " + note["Зависит от"].join(", "))'
   cross: 'if(note["Пересечения"].isEmpty(), "", "✂ " + note["Пересечения"].join(", "))'
   warn: 'if(note["Режим"] == "параллельно" && note["Области"].isEmpty(), "⚠ области не указаны", if(note["Режим"] == "параллельно" && !note["Пересечения"].isEmpty(), "⚠ параллельно при общей области", if(note["Режим"] == "параллельно" && !note["Зависит от"].isEmpty(), "⚠ параллельно, но ждёт", "")))'
+  attn: '[note["Внимание"], note["Срок"], formula.waits, formula.warn].filter(value.isTruthy()).join(" · ")'
+  accept_view: 'if(note["Приёмка"].isEmpty(), if(note["Статус"] == "На проверке", "⏳ ждёт приёмки", ""), note["Приёмка"])'
+  sum_budget: '[note["Сумма оценок"], note["Бюджет"]].filter(value.isTruthy()).join(" / ")'
 properties:
   file.name:
     displayName: Задача
+  formula.attn:
+    displayName: Внимание
+  formula.accept_view:
+    displayName: Приёмка
+  formula.sum_budget:
+    displayName: Сумма / бюджет
   note.id:
     displayName: №
   formula.status_view:
@@ -1796,40 +1903,22 @@ views:
       - property: formula.qa_n
         direction: ASC
     order: [note.Вопрос, file.name, note.Проект, note.Внимание, formula.prio_view, note.Срок]
-  - type: table
-    name: Срочно
-    filters:
-      and:
-        - 'note["Тип"] != "пачка"'
-        - or:
-            - 'formula.urgency < 3'
-            - 'formula.prio_rank == 0'
-        - 'note["Статус"] != "Готово"'
-        - 'note["Статус"] != "Отменено"'
-    sort:
-      - property: formula.urgency
-        direction: ASC
-      - property: note.Срок
-        direction: ASC
-      - property: formula.prio_rank
-        direction: ASC
-      - property: formula.age_key
-        direction: ASC
-    order: [note.id, file.name, note.Проект, formula.status_view, note.Внимание, formula.prio_view, note.Срок, note.Дальше]
   - type: kanban
     name: Доска
     filters:
       and:
         - 'note["Тип"] != "пачка"'
         - 'note["Статус"] != "Отменено"'
-        - 'note["Статус"] != "Очередь"'
+        - or:
+            - 'note["Тип"] != "заявка"'
+            - 'note["Кому"].toString().contains("Владелец")'
         - or:
             - 'note["Статус"] != "Готово"'
             - 'note["Закрыта"] >= today() - "7d"'
     groupBy:
       property: note.Статус
       direction: ASC
-    groupOrder: [Входящие, Нужен ответ, В работе, Ждёт, На проверке, Готово]
+    groupOrder: [Входящие, Нужен ответ, Очередь, В работе, Ждёт, На проверке, Готово]
     sort:
       - property: formula.col_k1
         direction: ASC
@@ -1837,21 +1926,7 @@ views:
         direction: ASC
       - property: formula.col_k3
         direction: ASC
-    order: [file.name, note.Проект, note.Внимание, formula.prio_view, note.Срок, note.Кому, formula.waits, formula.warn]
-  - type: table
-    name: Очередь
-    filters:
-      and:
-        - 'note["Тип"] != "пачка"'
-        - 'note["Статус"] == "Очередь"'
-    sort:
-      - property: formula.prio_rank
-        direction: ASC
-      - property: note.Срок
-        direction: ASC
-      - property: formula.cr_n
-        direction: ASC
-    order: [note.id, file.name, note.Проект, formula.prio_view, formula.mode_view, formula.waits, formula.cross, note.Пачка, note.Срок, note.Кому]
+    order: [file.name, note.Проект, note.Кому, formula.prio_view, formula.attn]
   - type: kanban
     name: Пачки
     filters:
@@ -1870,7 +1945,7 @@ views:
         direction: ASC
       - property: formula.prio_rank
         direction: ASC
-    order: [file.name, note.Проект, note.Когда, note.Сумма оценок, note.Бюджет, note.Закрыто, note.Цепочка, note.Параллельно, note.Пересечения, note.Области не указаны]
+    order: [file.name, note.Закрыто, formula.sum_budget, note.Цепочка]
   - type: table
     name: Итоги пачек
     filters:
@@ -1889,7 +1964,7 @@ views:
         direction: ASC
       - property: formula.cl_n
         direction: DESC
-    order: [note.id, file.name, formula.status_view, note.Приёмка, note.Оценка, note.Факт, formula.mode_view, note.Выпуск, note.Кому]
+    order: [note.id, file.name, formula.status_view, formula.accept_view, note.Оценка, note.Факт, formula.mode_view, note.Выпуск, note.Кому]
   - type: table
     name: Все задачи
     groupBy:
@@ -1907,6 +1982,8 @@ views:
       - property: formula.age_key
         direction: ASC
     order: [note.id, file.name, formula.status_view, formula.prio_view, note.Внимание, note.Кому, note.Срок, note.Дальше, note.Создана, note.Закрыта]
+    columnSize:
+      note.id: 150
 """
 for _i in (1, 2, 3):
     BASE_FILE = BASE_FILE.replace("{COLK%d}" % _i, _col_formula(_i - 1))
@@ -1914,6 +1991,61 @@ BASE_VERSION = hashlib.sha256(BASE_FILE.encode("utf-8")).hexdigest()[:12]  # с�
 # sha256[:16] шаблонов BASE_FILE до 0.9.28 (c616683 — 0.9.27, 7be0aa5 — раньше): тогда в состоянии не было base_hash,
 # и нетронутый старый файл иначе считался бы правкой владельца. Дальше то, что записал тик, помнит base_hash
 OLD_BASE_HASHES = {"917c6bef26511e65", "44467393293d25f4"}
+
+# У вида в .base своего поля описания нет (документация Obsidian Bases: у вида type, name, filters, sort, groupBy, order,
+# limit, summaries), поэтому «что здесь и что вам делать» живёт тут: из этого словаря тик пишет и Сводка.md (заголовок,
+# строка, встраивание вида), и Справка/Виды доски.md. pantheon check сверяет: у каждого вида BASE_FILE есть строка,
+# лишних строк нет (metis-0288). Имена видов — в BASE_FILE выше; строку правят вместе с фильтром вида.
+VIEW_HELP = {
+    "От меня нужно": "Ждут вашего ответа или приёмки, либо адресованы вам; срочные — вверху. Что делать: ответить или "
+                     "принять; готовые и отменённые не показываются.",
+    "Доска": "Задачи по статусам, готовые — за 7 дней; заявки ролей друг другу здесь не показаны (они в «Все задачи»). "
+             "Что делать: смотреть, что движется; сменить статус — перетащить карточку.",
+    "Пачки": "Пачки (наборы задач на ночь) по статусам, с суммой оценок против бюджета; готовые — 7 дней. Что делать: "
+             "следить за бюджетом и пересечениями по файлам.",
+    "Итоги пачек": "Задачи из пачек, которые дошли до проверки, готовы или ждут приёмки, по пачкам. Что делать: принять "
+                   "результат ночи.",
+    "Все задачи": "Вообще все задачи и пачки, включая готовые, по проектам. Что делать: искать то, чего нет в других видах.",
+}
+HELP_DIR = "Справка"
+HELP_NOTE = "Виды доски"
+
+
+def base_views(text):
+    """Имена видов .base в порядке меню."""
+    return re.findall(r"^  - type: \w+\n    name: (.+?)\s*$", text, re.M)
+
+
+def check_views(board=None, base_text=None, help_lines=None):
+    """Сверка строк справки с видами Доска.base → список расхождений: у вида нет строки; строка без вида. Шаблон тика
+    (BASE_FILE) и, если лежит в board, файл владельца: вид, добавленный вручную, тоже должен иметь строку."""
+    help_lines = VIEW_HELP if help_lines is None else help_lines
+    out = []
+    sources = [("шаблон Доска.base", BASE_FILE if base_text is None else base_text)]
+    if board and base_text is None:
+        try:
+            with open(os.path.join(board, "Доска.base"), encoding="utf-8") as fh:
+                sources.append(("Доска/Доска.base", fh.read()))
+        except (OSError, UnicodeDecodeError):
+            pass
+    for label, text in sources:
+        views = base_views(text)
+        out += [f"{label}: у вида «{v}» нет строки «что здесь» (VIEW_HELP)" for v in views
+                if not str(help_lines.get(v) or "").strip()]
+        if label.startswith("шаблон"):
+            out += [f"VIEW_HELP: строка «{k}» без вида в Доска.base" for k in help_lines if k not in views]
+    return out
+
+
+def render_views_section(level="##"):
+    return "".join(f"{level} {n}\n\n{line}\n\n![[Доска.base#{n}]]\n\n" for n, line in VIEW_HELP.items())
+
+
+def render_help_note():
+    body = ("\n> Заметку пишет плановый проход из `VIEW_HELP`. Не правьте её: строки сверяет `pantheon check`.\n\n"
+            "# Виды доски\n\nВиды меню в Доска.base — что в каждом и что вам делать. Те же виды со встроенной таблицей "
+            "лежат в сводке.\n\n" + "\n".join(f"- **{n}** — {line}" for n, line in VIEW_HELP.items()) + "\n")
+    return join({"Тип": "справка"}, body, ["Тип"])
 
 
 OWNER_ONLY_FIELDS = ("answer", "requested")  # ставит только доска: ответ владельца и выбор по рискованному
@@ -2009,7 +2141,7 @@ def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None):
                 f" · 🟡 В работе {len(rows['doing'])} · 🟢 Готово за сутки {len(rows['done'])}")
     done_fold = (f"> [!success]- 🟢 Готово за сутки ({len(rows['done'])})\n"
                  + ("\n".join(f"> - {x}" for x in rows["done"]) if rows["done"] else "> —") + "\n")
-    return ("# Сводка\n\n" + counters + "\n\n## От меня нужно\n\n![[Доска.base#От меня нужно]]\n\n"
+    return ("# Сводка\n\n" + counters + "\n\n" + render_views_section() + "\n"
             + "Проекты и пачки — [[Пульт.base|пульт]].\n\n"
             + sec(f"🔴 {HUMAN_WAIT}", top, len(wait)) + "\n"
             + sec("⏰ Просрочено", rows["overdue"]) + "\n"
@@ -2246,6 +2378,78 @@ def _sync_base(board, state, state_path, t, alert, fname="Доска.base", text
     if cur != new:
         _write_plain(bp, text)
     state[f"{key}_version"], state[f"{key}_hash"] = version, _sha(new)
+
+
+CSS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "share", "pantheon-view-obsidian",
+                        "snippets", "pantheon.css")
+OLD_CSS_HASHES = {"b07338ca44d6892d"}  # сниппет до 0.11.53 (metis-0306): нетронутый — не правка владельца
+
+
+def _sync_snippet(vault, state, state_path, t, alert, src=None, old_hashes=None):
+    """.obsidian/snippets/pantheon.css хранилища (metis-0306): view-sync.sh кладёт образец только в копию без .obsidian,
+    поэтому новый сниппет доставляем отдельно, по образцу _sync_base: версия сменилась — записать; владелец правил файл —
+    его версию сохранить в папку состояния и одна тревога. Нет .obsidian — не трогаем (образец положит view-sync.sh)."""
+    src = CSS_PATH if src is None else src
+    old_hashes = OLD_CSS_HASHES if old_hashes is None else old_hashes
+    if not os.path.isdir(os.path.join(vault, ".obsidian")):
+        return
+    try:
+        with open(src, encoding="utf-8") as fh:
+            text = fh.read()
+    except (OSError, UnicodeDecodeError):
+        return
+    version = _sha(text)
+    p = os.path.join(vault, ".obsidian", "snippets", "pantheon.css")
+    try:
+        with open(p, "rb") as fh:
+            cur = fh.read()
+    except FileNotFoundError:
+        cur = None
+    except OSError as e:
+        alert("board-css", type(e).__name__, f"доска: {p} не читается ({e}) — сниппет не обновлён", "board")
+        return
+    if cur is not None and state.get("css_version") == version:
+        return
+    new = text.encode("utf-8")
+    try:
+        if cur is not None and cur != new and _sha(cur) != state.get("css_hash") and _sha(cur) not in old_hashes:
+            keep = os.path.join(os.path.dirname(os.path.abspath(state_path)),
+                                f"board-css-{datetime.fromtimestamp(t).strftime('%Y%m%d-%H%M%S')}.css")
+            os.makedirs(os.path.dirname(keep), exist_ok=True)
+            with open(keep, "wb") as fh:
+                fh.write(cur)
+            alert(f"board-css-{version}", version, f"pantheon.css обновлён, ваша версия сохранена в {keep}", "board")
+        if cur != new:
+            _write_plain(p, text)
+    except OSError as e:
+        alert("board-css", type(e).__name__, f"доска: {p} не записать ({e}) — сниппет не обновлён", "board")
+        return
+    state["css_version"], state["css_hash"] = version, version
+
+
+def _sync_help(board, state, alert):
+    """Доска/Справка/Виды доски.md: свою (хеш в состоянии, Тип «справка») переписывает, чужой файл не трогает."""
+    path = os.path.join(board, HELP_DIR, HELP_NOTE + ".md")
+    text = render_help_note()
+    try:
+        cur = None
+        if os.path.lexists(path):
+            if os.path.islink(path) or not os.path.isfile(path):
+                raise ValueError("на месте заметки не обычный файл")
+            with open(path, encoding="utf-8") as fh:
+                cur = fh.read()
+        if cur is not None and cur != text and _sha(cur) != state.get("help"):
+            head, _ = split(cur)
+            if (head or {}).get("Тип") != "справка":
+                alert("board-help", _sha(cur), f"доска: в Доска/{HELP_DIR}/ лежит чужой файл «{HELP_NOTE}.md» — справка "
+                      "по видам не записана", "board")
+                return
+        if cur != text:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            _write_plain(path, text)
+        state["help"] = _sha(text)
+    except (OSError, ValueError, UnicodeError) as e:
+        alert("board-help", type(e).__name__, f"доска: справку по видам не записать ({e})", "board")
 
 
 def _sync_types(vault, alert):
@@ -2572,9 +2776,11 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         with open(sp, "w", encoding="utf-8") as fh:
             fh.write(text)
     _sync_base(board, state, state_path, t, alert)
+    _sync_help(board, state, alert)
     _sync_base(board, state, state_path, t, alert, "Пульт.base", PULT_FILE, PULT_VERSION, "pult", ())
     _sync_projects(board, state, tasks, t, registry, roles, alert)
     _sync_types(os.path.dirname(os.path.abspath(board)), alert)
+    _sync_snippet(os.path.dirname(os.path.abspath(board)), state, state_path, t, alert)
     new_state = json.dumps(state, ensure_ascii=False, indent=1)
     try:
         with open(state_path, encoding="utf-8") as fh:

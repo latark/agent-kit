@@ -84,10 +84,13 @@
   Claude Code перечитывает настройки на ходу, поэтому живую сессию с таким правилом останавливает плановый проход
   (`domains build --if-changed` и `check --quiet`): `claude stop` и тревога. Ручной `domains build` её не трогает —
   его зовут и тесты с настоящим `claude` в PATH.
-  Мимо песочницы gh (в ней не работает) — только чтение: `gh pr view|checks|diff|list`, `gh run view|list|watch`,
+  Мимо песочницы gh (в ней не работает) — чтение: `gh pr view|checks|diff|list`, `gh run view|list|watch`,
   `gh repo view`, `gh auth status`; `gh api`, `gh issue` и `gh run cancel|rerun|delete` в песочнице падают.
-  `gh pr create|merge` и сетевой git (push, fetch, pull) — у окна каждого направления; мастерской — только сетевой
-  git и только при SSH-remote; у Пританея ничего из этого нет (metis-0064).
+  Окна направлений мимо песочницы ещё пишут PR: `gh pr create|edit|merge` и сетевой git (push, fetch, pull); мастерской —
+  только сетевой git и только при SSH-remote. Пританей (metis-0247, решение [zeus-0247-yes]) мимо песочницы читает PR
+  (`gh pr view|checks`) и правит `gh pr edit`; `gh pr merge` мимо песочницы ему не выпущен, а слияние guard закрывает всегда:
+  правило hq-gh отказывает любому `gh pr merge` и `gh api` к `…/pulls/<N>/merge` и `…/merges` — и главной сессии
+  без agent_type, которую шлюз слияния (merge_problem) не видит. Прочий `gh pr *`, `gh api` и `gh issue` в песочнице падают.
   С 0.11.26 (metis-0098) окнам координаторов, Метиды в их числе, сборка кладёт и `autoMode.allow` — исключения
   классификатора auto: `"$defaults"` (встроенные исключения остаются), «Pantheon Gated Merge», «Pantheon Lead
   Delivery» и «Pantheon Review Record» (`coordinator_auto_allow`).
@@ -166,7 +169,7 @@
   PR, который его задевает, ждёт слияния владельцем.
 - `plugins/pantheon/lib/view-sync.sh` — копия `~/ai/pantheon` только для чтения для Obsidian. Если в копии нет
   `.obsidian`, кладёт образец настроек из `plugins/pantheon/share/pantheon-view-obsidian/` (сниппеты, закладки, базовые
-  плагины; существующую папку не трогает). Тему и плагин Style Settings владелец ставит в Obsidian сам.
+  плагины; существующую папку не трогает, кроме сниппета `snippets/pantheon.css`: его доставляет тик доски (`pantheon board`) по образцу `Доска.base` — нетронутый прежний заменяет молча, правку владельца сохраняет копией `board-css-*.css` в папке состояния с одной тревогой). Тему и плагин Style Settings владелец ставит в Obsidian сам.
 - `plugins/pantheon/hooks/ctx.py` — хуки контекста и журнала ваших слов (шаг 1.1): `owner-log` (UserPromptSubmit,
   в фоне — строка только для ввода, который Claude Code сам пометил в транскрипте как ваш), `stop` (подсказка
   «пора очистить» на 150 тыс. и далее каждые +100 тыс.), `start` (после сжатия — файл состояния, Пританею — новые
