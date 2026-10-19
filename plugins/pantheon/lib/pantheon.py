@@ -78,12 +78,13 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         --src (по умолчанию ~/.claude/agents) поверх общего; живые роли не трогает,
                                         сигналов нет; --out в ~/.claude/agents или внутри — отказ (код 2)
   pantheon role propose <имя> --direction D   заявка на личную роль (metis-0262): черновик ~/ai/pantheon/roles/
-                                        proposed/<имя>.tmpl → карточка «Применить роль <имя> [<sha12>]?» Да/Нет,
+                                        proposed/<имя>.tmpl → карточка «Применить роль <имя> [<sha256>]?» Да/Нет,
                                         статус proposed в ~/.local/state/pantheon/roles/status.jsonl
-  pantheon role apply <имя>             поставить роль по вашей галочке «Да» (журнал доски, ≤ 14 дней, тот же sha12
-                                        черновика): имя не общей роли и не лида, ≤ 5 КБ, без hooks/settings/mcpServers/
-                                        permissionMode в шапке → пробная сборка → <имя>.tmpl в ~/.claude/agents → roles
-                                        build; плановый проход делает это сам, «Нет» — статус rejected
+  pantheon role apply <имя>             поставить роль по вашей галочке «Да» (журнал доски, ≤ 14 дней, на карточке
+                                        заявки, тот же полный sha256 черновика): имя не общей роли и не лида, ≤ 5 КБ,
+                                        без hooks/settings/mcpServers/permissionMode и повторов ключей в шапке →
+                                        пробная сборка, шапка собранной роли сверяется так же → <имя>.tmpl в
+                                        ~/.claude/agents → roles build; плановый проход делает это сам, «Нет» — rejected
   pantheon role status [<имя>] | cancel <имя>   заявки на роли | отозвать открытую заявку
   pantheon approve [list] | add --site S --allow "…" [--limits "…"] | remove N   заранее разрешённое (только вы)
   pantheon consent <id> [--days N]      ваш ответ Зевсу на вопрос <id> (журнал owner-log Зевса, по умолчанию 7 дней) —
@@ -3598,11 +3599,12 @@ def roles_build(src=None, out=None, role_errors=None):
 
 # --- личная роль: заявка и установка по вашей галочке (metis-0262 PR 4, решения [zeus-role-apply], [zeus-role-board]) ---
 # Черновик роли готовит агент: ~/ai/pantheon/roles/proposed/<имя>.tmpl. `pantheon role propose <имя> --direction D`
-# заводит карточку «Применить роль <имя> [<sha12>]?» с вариантами Да/Нет и статус proposed в STATE/roles/status.jsonl
-# (вне ~/ai/pantheon; файл пишут только команды role и тик). sha12 — первые 12 знаков sha256 черновика: правка черновика
-# после галочки меняет хеш, и старая галочка его не ставит. Ваш ответ тик переносит в owner-log/board.jsonl (роли туда
-# не пишут); `role apply` и тик верят только ему. В ~/.claude/agents пишет только `role apply` (её зовёт и тик):
-# ворота → пробная сборка во временной папке → <имя>.tmpl в личный слой → `roles build`.
+# заводит карточку «Применить роль <имя> [<sha256>]?» с вариантами Да/Нет и статус proposed в STATE/roles/status.jsonl
+# (вне ~/ai/pantheon; файл пишут только команды role и тик). sha256 черновика — полный, все 64 знака: правка черновика
+# после галочки меняет хеш, и старая галочка его не ставит; урезанный хеш агент подобрал бы вторым черновиком
+# (argus-70b). Ваш ответ тик переносит в owner-log/board.jsonl (роли туда не пишут); `role apply` и тик верят только
+# ему и только на карточке из статуса заявки. В ~/.claude/agents пишет только `role apply` (её зовёт и тик):
+# ворота → пробная сборка во временной папке → сверка шапки собранной роли → <имя>.tmpl в личный слой → `roles build`.
 ROLE_PROPOSED = os.path.join(PANTHEON, "roles", "proposed")
 ROLE_STATUS = ("proposed", "applied", "rejected", "cancelled")
 ROLE_MAX_BYTES = 5 * 1024
@@ -3612,13 +3614,16 @@ ROLE_NEW_NAME = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
 # процессы, permissionMode снимает вопросы; settings — на будущее (сравнение без учёта регистра)
 ROLE_HEAD_DENY = ("hooks", "settings", "mcpservers", "permissionmode")
 # имена, которые знают guard и хуки (роли окон, системные субагенты, встроенные типы Claude Code) — личной роли не даём
+# (встроенные агенты Claude Code: general-purpose, Explore, Plan, statusline-setup, claude-code-guide, output-style-setup,
+# claude, fork; на будущие встроенные — весь claude-*)
 ROLE_RESERVED = {"hq", "zeus", "workshop", "domain-coordinator", "tg-reader", "general-purpose", "explore", "plan",
-                 "statusline-setup", "claude-code-guide", "output-style-setup"}
-ROLE_RESERVED_PREFIX = tuple(b + "-" for b in LEAD_ROLES) + ("dev-", "codex-", "daedalus-")
+                 "statusline-setup", "claude-code-guide", "output-style-setup", "claude", "fork"}
+ROLE_RESERVED_PREFIX = tuple(b + "-" for b in LEAD_ROLES) + ("dev-", "codex-", "daedalus-", "claude-")
 
 
 def role_sha(data):
-    return hashlib.sha256(data).hexdigest()[:12]
+    """Полный sha256 черновика (64 знака): по нему вопрос карточки, статус заявки и сверка галочки."""
+    return hashlib.sha256(data).hexdigest()
 
 
 def role_question(name, sha):
@@ -3661,7 +3666,8 @@ def role_name_problem(name):
     if os.path.isfile(os.path.join(PLUGIN_ROLES, name + ".tmpl")) or name in ROLES_DEFERRED or name in LEAD_ROLES:
         return f"«{name}» — общая роль Пантеона: личная роль с этим именем не ставится"
     if name in ROLE_RESERVED or name.startswith(ROLE_RESERVED_PREFIX):
-        return f"имя «{name}» занято системой (роли окон, лиды hephaestus-/apollo-, dev-*, codex-*, встроенные агенты)"
+        return (f"имя «{name}» занято системой (роли окон, лиды hephaestus-/apollo-, dev-*, codex-*, встроенные агенты "
+                f"Claude Code, claude-*)")
     return None
 
 
@@ -3670,12 +3676,14 @@ def _role_head_end(text):
 
 
 def role_head_problem(text):
-    """Шапка YAML роли: есть, в ней name и нет запрещённых ключей и строк не по образцу «ключ: значение». → текст или
-    None. Строки с отступом и «- » — продолжение значения ключа выше; ключ в кавычках, «<<:», «? » — отказ."""
+    """Шапка YAML роли: есть, в ней name и нет запрещённых ключей, повторов ключа и строк не по образцу «ключ:
+    значение». → текст или None. Строки с отступом и «- » — продолжение значения ключа выше; ключ в кавычках, «<<:»,
+    «? » — отказ. Повтор ключа — отказ: Claude Code разбирает шапку Bun.YAML.parse, где побеждает последний ключ, а
+    ворота сверяют первый (argus-70b: «name: foo» и ниже «name: argus» заняли бы имя общей роли)."""
     end = _role_head_end(text)
     if end < 0:
         return "нет шапки YAML (--- … ---) в начале"
-    has_name = False
+    seen = set()
     for ln in text[4:end].splitlines():
         if not ln.strip() or ln.lstrip().startswith("#") or ln[:1] in (" ", "\t") or ln.startswith("- "):
             continue
@@ -3685,8 +3693,27 @@ def role_head_problem(text):
         if m.group(1).lower() in ROLE_HEAD_DENY:
             return (f"в шапке запрещённый ключ {m.group(1)} (hooks, settings, mcpServers, permissionMode: работают "
                     f"вне песочницы или меняют права)")
-        has_name = has_name or m.group(1) == "name"
-    return None if has_name else "в шапке нет name:"
+        if m.group(1).lower() in seen:
+            return f"ключ {m.group(1)} в шапке повторён: Claude Code возьмёт последний, ворота — первый"
+        seen.add(m.group(1).lower())
+    return None if "name" in seen else "в шапке нет name:"
+
+
+def role_head_name(text):
+    """Значение name: из шапки роли (без кавычек и комментария) или «»."""
+    end = _role_head_end(text)
+    m = re.search(r"(?m)^name\s*:(.*)$", text[:end]) if end >= 0 else None
+    return re.sub(r"\s+#.*$", "", m.group(1)).strip().strip("'\"") if m else ""
+
+
+def role_head_check(text, name):
+    """Шапка без запрещённого и повторов, и name: в ней — ровно name. → текст ошибки или None. Зовут на черновик и на
+    собранную роль: часть ({{> …}}) или подстановка могут вставить в шапку то, чего в черновике не было."""
+    bad = role_head_problem(text)
+    if bad:
+        return bad
+    given = role_head_name(text)
+    return None if given == name else f"name: в шапке «{given}», а имя роли — «{name}»"
 
 
 def role_draft(name):
@@ -3707,7 +3734,7 @@ def role_draft(name):
 
 
 def role_static_gate(name):
-    """Ворота без вашей галочки: имя, черновик, размер, шапка, name: в шапке = имя. → (байты, sha12, [ошибки])."""
+    """Ворота без вашей галочки: имя, черновик, размер, шапка, name: в шапке = имя. → (байты, sha256, [ошибки])."""
     bad = role_name_problem(name)
     if bad:
         return None, None, [bad]
@@ -3718,24 +3745,28 @@ def role_static_gate(name):
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         return None, None, ["черновик не в UTF-8"]
-    bad = role_head_problem(text)
-    if bad:
-        return data, role_sha(data), [bad]
-    m = re.search(r"(?m)^name\s*:(.*)$", text[:_role_head_end(text)])
-    given = re.sub(r"\s+#.*$", "", m.group(1)).strip().strip("'\"") if m else ""
-    if given != name:
-        return data, role_sha(data), [f"name: в шапке «{given}», а имя роли — «{name}»"]
-    return data, role_sha(data), []
+    bad = role_head_check(text, name)
+    return data, role_sha(data), [bad] if bad else []
 
 
-def role_answers(name, days=ROLE_APPROVE_DAYS):
-    """Ваши ответы на карточки «Применить роль <имя> [<sha12>]?» из owner-log/board.jsonl (его пишет тик по вашей
-    галочке, роли туда не пишут), не старше days дней, по времени: [(время, sha12, «да»|«нет», запись)]. Вопрос —
-    ровно этот текст; скрытый текст Obsidian в нём (%%…%%, <!-- -->) — не ответ, как в owner_approved."""
-    ask = re.compile(rf"Применить роль {re.escape(name)} \[([0-9a-f]{{12}})\]\?")
+def role_answers(name, req, days=ROLE_APPROVE_DAYS):
+    """Ваши ответы на карточку заявки req (запись статуса proposed: card, time) «Применить роль <имя> [<sha256>]?» из
+    owner-log/board.jsonl (его пишет тик по вашей галочке, роли туда не пишут), не старше days дней и не раньше заявки,
+    по времени: [(время, sha256, «да»|«нет», запись)]. Засчитывается только ответ на карточке req["card"]: «Да» на
+    чужой карточке с тем же вопросом, на отозванной заявке или на прежней, после которой роль удалили руками, — не
+    галочка (argus-70a, argus-70b). Вопрос — ровно этот текст; скрытый текст Obsidian в нём (%%…%%, <!-- -->) — не
+    ответ, как в owner_approved."""
+    card = (req or {}).get("card")
+    try:
+        asked = time.mktime(time.strptime(str((req or {}).get("time") or "")[:19], "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return []
+    if not isinstance(card, str) or not card:
+        return []
+    ask = re.compile(rf"Применить роль {re.escape(name)} \[([0-9a-f]{{64}})\]\?")
     yes = re.compile(r"да(?![а-яёa-z0-9])", re.I)
     no = re.compile(r"нет(?![а-яёa-z0-9])", re.I)
-    since, out = now() - days * 86400, []
+    since, out = max(now() - days * 86400, asked), []
     try:
         lines = open(path("owner-log", "board.jsonl"), encoding="utf-8").read().splitlines()
     except OSError:
@@ -3747,7 +3778,8 @@ def role_answers(name, days=ROLE_APPROVE_DAYS):
         except (ValueError, TypeError, AttributeError):
             continue
         q, a = rec.get("question"), str(rec.get("answer") or "").strip()
-        if rec.get("kind") != "answer" or ts < since or not isinstance(q, str) or re.search(r"%%|<", q):
+        if rec.get("kind") != "answer" or rec.get("id") != card or ts < since or not isinstance(q, str) \
+                or re.search(r"%%|<", q):
             continue
         m = ask.fullmatch(q.strip())
         word = "да" if yes.match(a) else "нет" if no.match(a) else None
@@ -3783,15 +3815,15 @@ def _role_apply(name, by):
     if not last or last["status"] != "proposed":
         return 1, (f"нет открытой заявки на роль {name} (статус: {last['status'] if last else 'нет'}) — "
                    f"сначала pantheon role propose {name} --direction <направление>")
-    answers = role_answers(name)
+    answers = role_answers(name, last)
     mine = [a for a in answers if a[1] == sha]
     if not mine:
         other = [a for a in answers if a[2] == "да"]
         if other:
             return 1, (f"галочка «Да» стоит на другой версии черновика [{other[-1][1]}], сейчас [{sha}]: черновик "
                        f"правлен после галочки — новая заявка: pantheon role propose {name} --direction <направление>")
-        return 1, (f"нет вашей галочки «Да» на карточке «{role_question(name, sha)}» за {ROLE_APPROVE_DAYS} дней "
-                   f"(журнал доски owner-log/board.jsonl)")
+        return 1, (f"нет вашей галочки «Да» на карточке {last.get('card')} «{role_question(name, sha)}» за "
+                   f"{ROLE_APPROVE_DAYS} дней (журнал доски owner-log/board.jsonl)")
     _, _, word, rec = mine[-1]
     if word != "да":
         return 1, f"ваш последний ответ на «{role_question(name, sha)}» — «Нет»"
@@ -3821,7 +3853,7 @@ def _role_apply(name, by):
         built = os.path.join(out, name + ".md")
         if role_errs.get(name + ".tmpl") or not os.path.isfile(built):
             return 1, "пробная сборка: " + "; ".join(role_errs.get(name + ".tmpl") or ["роль не собралась"])
-        bad = role_head_problem(open(built, encoding="utf-8").read())
+        bad = role_head_check(open(built, encoding="utf-8").read(), name)
         if bad:
             return 1, f"пробная сборка (после вставки частей): {bad}"
     os.makedirs(AGENTS, exist_ok=True)
@@ -3830,8 +3862,15 @@ def _role_apply(name, by):
         fh.write(data)
     os.replace(part, tmpl)
     role_errs = {}
-    roles_build(role_errors=role_errs)
-    if role_errs.get(name + ".tmpl") or not os.path.isfile(md):
+    # живая сборка: ошибка по роли, нет .md, шапка .md не прошла сверку или исключение (диск, права) — откат шаблона
+    try:
+        roles_build(role_errors=role_errs)
+        why = role_errs.get(name + ".tmpl") or ([] if os.path.isfile(md) else ["роль не собралась"])
+        bad = None if why else role_head_check(open(md, encoding="utf-8").read(), name)
+        why = why or ([f"шапка собранной роли: {bad}"] if bad else [])
+    except Exception as e:  # noqa: BLE001 — любой сбой сборки оставлял бы непроверенный шаблон в личном слое
+        why = [f"сбой {type(e).__name__}: {e}"]
+    if why:
         if old is None:
             with contextlib.suppress(FileNotFoundError):
                 os.remove(tmpl)
@@ -3839,9 +3878,9 @@ def _role_apply(name, by):
             with open(part, "wb") as fh:
                 fh.write(old)
             os.replace(part, tmpl)
-        roles_build()
-        return 1, ("сборка в личном слое: " + "; ".join(role_errs.get(name + ".tmpl") or ["роль не собралась"])
-                   + " — шаблон возвращён как был")
+        with contextlib.suppress(Exception):
+            roles_build()
+        return 1, "сборка в личном слое: " + "; ".join(why) + " — шаблон возвращён как был"
     role_status_add(name, "applied", sha=sha, by=by, card=last.get("card"), answer_time=rec.get("time"),
                     answer_card=rec.get("id"))
     _role_card_close(last.get("card"), "done", f"Роль {name} [{sha}] поставлена в личный слой ~/.claude/agents")
@@ -3892,7 +3931,7 @@ def roles_tick():
         last = recs[-1]
         if last["status"] != "proposed" or role_name_problem(name):
             continue
-        answers = [a for a in role_answers(name) if a[1] == last.get("sha")]
+        answers = [a for a in role_answers(name, last) if a[1] == last.get("sha")]
         if not answers:
             continue
         _, sha, word, rec = answers[-1]
