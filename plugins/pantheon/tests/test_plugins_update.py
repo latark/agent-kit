@@ -228,9 +228,19 @@ def main():
             e.write(la, json.dumps(rows))
         else:
             e.write(os.path.join(e.after, "hooks", "evil.py"), "print('не проверялось')\n")
+        plugins = os.path.join(e.home, ".claude", "plugins")
+        reg = lambda p: e.write(os.path.join(plugins, "installed_plugins.json"), json.dumps({"version": 2, "plugins": {
+            "pantheon@agent-kit": [{"scope": "user", "installPath": p, "version": "1.0.0"}]}}))
+        reg(old_cache)
         e.run()
         check(f"pantheon, зелёные тесты, но встала другая {what}: current остаётся прежней, КРИТИЧНО в alerts.md",
               os.readlink(cur) == old_cache and "КРИТИЧНО" in e.alerts(), f"{os.readlink(cur)} {e.alerts()!r}")
+        # второй проход (Claude Code записал новую папку в реестр): «новее нет» не должно перевести current на
+        # непроверенное дерево (ревью 90b, круг 2; мутант: без метки unchecked.json)
+        reg(e.after)
+        e.run()
+        check(f"pantheon, встала другая {what}, второй проход: current всё ещё прежняя, тревога о непроверенном дереве",
+              os.readlink(cur) == old_cache and "не проверено" in e.alerts(), f"{os.readlink(cur)} {e.alerts()!r}")
         e.close()
 
     # ревью 90a, п.3: версию поставили руками (новее нет), а current отстала или повисла — перевешивается

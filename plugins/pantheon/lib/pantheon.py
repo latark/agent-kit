@@ -2036,7 +2036,7 @@ def _installed_hook(name, market_path):
     """Тот же файл хука из УСТАНОВЛЕННОЙ версии плагина (кэш ~/.claude/plugins/cache, metis-0321): клон маркетплейса
     plugins-update пересоздаёт головой main сразу после слияния, и строгий guard окон шёл бы непроверенным. Установки
     нет — клон, как раньше; обе папки внутри ~/.claude/plugins, ролям туда не записать."""
-    d = installed_dir(name)
+    d = installed_dir(name, checked=True)
     if d:
         rel = os.path.relpath(market_path, os.path.join(HOME, ".claude", "plugins", "marketplaces", MARKETPLACE,
                                                         "plugins", name))
@@ -5009,10 +5009,23 @@ PLIST_TMPL = """<?xml version="1.0" encoding="UTF-8"?>
 INSTALLED_PLUGINS = os.path.join(HOME, ".claude", "plugins", "installed_plugins.json")
 
 
-def installed_dir(name):
+def _unchecked_path():
+    return path("plugins", "unchecked.json")
+
+
+def unchecked_mark(name, root):
+    """Дерево root помечено «установка не проверена» (критическая ветка plugins-update): метка держится за хешем дерева,
+    а не за версией, — другое содержимое той же версии метку не наследует."""
+    h = _tree_hash(root)
+    m = (read_json(_unchecked_path(), {}) or {}).get(name)
+    return bool(h) and isinstance(m, dict) and m.get("hash") == h
+
+
+def installed_dir(name, checked=False):
     """Папка установленной версии плагина name@agent-kit уровня пользователя — installPath из installed_plugins.json,
     только внутри ~/.claude/plugins/cache и только существующая; иначе None. Без вызова claude: install и
-    plugins-update берут то, что Claude Code уже записал."""
+    plugins-update берут то, что Claude Code уже записал. checked=True — и только если дерево не помечено
+    «не проверена» (current и окна идут лишь на проверенное, metis-0321)."""
     data = read_json(INSTALLED_PLUGINS)
     rows = (data.get("plugins") if isinstance(data, dict) else None) or {}
     rows = rows.get(f"{name}@{MARKETPLACE}") if isinstance(rows, dict) else None
@@ -5021,6 +5034,8 @@ def installed_dir(name):
         p = row.get("installPath") if isinstance(row, dict) and row.get("scope") == "user" else None
         if isinstance(p, str) and os.path.realpath(p).startswith(cache) and os.path.isdir(p) \
                 and os.path.isfile(os.path.join(p, ".claude-plugin", "plugin.json")):
+            if checked and unchecked_mark(name, p):
+                return None
             return os.path.realpath(p)
     return None
 
@@ -6141,6 +6156,9 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
     got = row.get("version")
     if got == new and _tree_hash(row.get("installPath")) == digest:
         _plugins_mark(marks, name, None)
+        um = read_json(_unchecked_path(), {}) or {}
+        if um.pop(name, None) is not None:
+            write_json(_unchecked_path(), um)
         if name == "pantheon" and row.get("installPath"):
             # живой код тика и команды pantheon — только проверенная и вставшая версия (metis-0321)
             try:
@@ -6167,6 +6185,11 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
         return ALERTED
     # встало не то, что проверяли: другая версия или другое содержимое (update сам обновил каталог)
     _plugins_mark(marks, name, None)
+    bad = _tree_hash(row.get("installPath"))
+    if bad:  # метка переживает проход: следующий проход не должен принять это дерево за проверенное
+        um = read_json(_unchecked_path(), {}) or {}
+        um[name] = {"hash": bad, "version": got, "path": os.path.realpath(row.get("installPath")), "at": stamp()}
+        write_json(_unchecked_path(), um)
     seen = got or "неизвестна"
     _plugins_journal(f"{name} {old} → {seen}: встала непроверенная версия (проверялась {new}, хеш {digest})")
     text = f"встала непроверенная версия {name} {seen} (проверялась {new})"
@@ -6227,8 +6250,12 @@ def _plugins_red(marks, name, old, new, log, what):
 def _current_sync():
     """Новее нет (например, версию поставили руками `claude plugin update`): current должна вести в установленную папку.
     Отстала или повисла — перевесить на installed_dir (версия та же, что у поставленной); сбой — тревога."""
-    want = installed_dir("pantheon")
+    want = installed_dir("pantheon", checked=True)
     if not want:
+        if installed_dir("pantheon"):  # установлено, но помечено «не проверена»: current туда не идёт
+            alert_once("plugins-update-unchecked-pantheon", installed_dir("pantheon"),
+                       "pantheon: установленное дерево не проверено (встало другое, чем проверяли) — current остаётся "
+                       "на прежней, окна идут не из него. Разобрать руками", "plugins-update")
         return
     try:
         if os.path.realpath(CURRENT) == want and os.path.isdir(CURRENT):
