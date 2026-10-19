@@ -33,6 +33,8 @@ FAILS = []
 
 for k in ("PANTHEON_FAKE_LIMIT", "PANTHEON_DRYRUN", "PANTHEON_NO_NOTIFY"):
     os.environ.pop(k, None)
+# питание подменено (metis-0284): проверка 21:30–22:00 не читает настоящий pmset; test_power_0284 подставляет свой
+os.environ.update({"PANTHEON_FAKE_AC": "1", "PANTHEON_FAKE_BATT": "100"})
 os.environ.update({"PANTHEON_HOST": "mac-a", "PANTHEON_FAKE_IDLE": "0", "HOME": os.path.join(_ROOT, "home0"),
                    "PANTHEON_HOME": os.path.join(_ROOT, "home0", "ai", "pantheon"),
                    "PANTHEON_STATE": os.path.join(_ROOT, "state0")})
@@ -726,6 +728,202 @@ def test_status_format():
     check("pantheon night [status|report]" in run("help").stdout, "в справке нет pantheon night")
     r = run("status")
     check("Лимит и ночь" in r.stdout and "Неделя: 41 %" in r.stdout, f"pantheon status без раздела: {r.stdout[-800:]}")
+
+
+def _pack_env(start_line="- Старт — 04:00, но не раньше выпуска"):
+    """Направление metis-x с ночной пачкой на утро после вечера EVENING (как night-2026-10-19-pack.md у ночи 18→19)."""
+    e = Env()
+    folder = os.path.join(e.home, "projects", "metis-x")
+    os.makedirs(folder, exist_ok=True)
+    json.dump({"domains": {"metis-x": [folder]}}, open(os.path.join(e.state, "domains.json"), "w"))
+    d = os.path.join(e.pantheon, "directions", "metis-x")
+    os.makedirs(d, exist_ok=True)
+    e.pack = os.path.join(d, f"night-{(EVENING + timedelta(days=1)).isoformat()}-pack.md")
+    open(e.pack, "w", encoding="utf-8").write(
+        "# Ночная пачка metis-x\n\n| Порядок | Задача | Что |\n|---|---|---|\n| 1 | metis-0210 | тест |\n"
+        "| 2 | metis-0251 | ветка metis-night-1019 |\n\n## Стоп-условия\n\n" + start_line + "\n")
+    e.resets = hm("22:00") + 3 * 86400
+    return e
+
+
+def oneshots(e):
+    p = os.path.join(e.state, "oneshot.json")
+    return json.load(open(p))["items"] if os.path.exists(p) else []
+
+
+def test_pack_approved_0284():
+    """«Да» на вопрос ночи одобряет конкретную пачку: вопрос называет её, путь и sha256 — в состоянии ночи, после «Да» —
+    ровно один разовый запуск её координатора на старт пачки (04:00) со сроком до конца ночи; ночью — только пачки."""
+    e = _pack_env()
+    e.at_line(hm("22:00"), 0)
+    e.watch(hm("22:00"))
+    cid, h = next(iter(e.cards().items()))
+    rel = f"directions/metis-x/night-{(EVENING + timedelta(days=1)).isoformat()}-pack.md"
+    check("metis-x/night-" in h["options"][0] and h["options"][0].startswith("Да — открыть ночь с пачкой"),
+          f"вопрос не называет пачку: {h['options']}")
+    check("metis-0210" in h["why"] and "metis-0251" in h["why"] and "night-1019" not in h["why"].split("задачи")[-1],
+          f"задачи пачки в карточке: {h['why']}")
+    st = e.state_of()
+    check([p["path"] for p in st.get("packs") or []] == [rel] and st["packs"][0]["start"] == "04:00"
+          and len(st["packs"][0]["sha"]) == 64, f"пачка в состоянии: {st.get('packs')}")
+    check(not oneshots(e), "разовый запуск до ответа")
+    check(N.pack_night(hm("22:10")) == [], "пачка без «Да» — уже ночь пачек")
+    e.board_answer(cid, h["options"][0], hm("22:30"))
+    e.at_line(hm("22:35"), 0)
+    e.watch(hm("22:35"))
+    e.watch(hm("22:40"))
+    items = oneshots(e)
+    check(len(items) == 1, f"разовых запусков {len(items)}: {items}")
+    if items:
+        it = items[0]
+        check(it["target"] == "metis-x" and it["at"] == hm("04:00") and it["expires"] == hm("08:00")
+              and it["pack"] == rel and it["sha"] == st["packs"][0]["sha"] and not it["done_at"],
+              f"запись разового запуска: {it}")
+        check(rel in it["text"] and cid in it["text"] and "не согласие" in it["text"], f"задание: {it['text']}")
+    check(e.state_of().get("pack_jobs") == [x["id"] for x in items], f"pack_jobs: {e.state_of().get('pack_jobs')}")
+    check([p["path"] for p in N.pack_night(hm("23:30"))] == [rel], "ночь с одобренной пачкой — pack_night пуст")
+    check(N.oneshot_due(hm("03:59")) == [] and len(N.oneshot_due(hm("04:00"))) == 1, "время разового запуска")
+    check(any("Разовый запуск pack-" in x for x in N.status_lines(hm("23:00"))), "pantheon night не показывает запуск")
+    # без строки «Старт» — в начале ночи; следующей ночью эта пачка уже одобрена — не предлагается снова
+    e2 = _pack_env(start_line="")
+    e2.at_line(hm("22:00"), 0)
+    e2.watch(hm("22:00"))
+    cid2, h2 = next(iter(e2.cards().items()))
+    e2.board_answer(cid2, h2["options"][0], hm("22:05"))
+    e2.watch(hm("22:10"))
+    check([x["at"] for x in oneshots(e2)] == [hm("23:00")], f"без «Старт» — не в начале ночи: {oneshots(e2)}")
+    nxt = EVENING + timedelta(days=1)
+    open(e2.pack.replace(nxt.isoformat(), (nxt - timedelta(days=1)).isoformat()), "w").write("старая\n")
+    check(N.packs(nxt) == [] , f"одобренная прошлой ночью пачка предложена снова: {N.packs(nxt)}")
+    check([p["path"] for p in N.packs(EVENING)] == [p["path"] for p in e2.state_of()["packs"]], "пачка вечера")
+
+
+def test_pack_no_cancels_0284():
+    """«Нет» после «Да» до срока: ночь пропущена, разовый запуск пачки погашен без запуска."""
+    e = _pack_env()
+    e.at_line(hm("22:00"), 0)
+    e.watch(hm("22:00"))
+    cid, h = next(iter(e.cards().items()))
+    e.board_answer(cid, h["options"][0], hm("22:30"))
+    e.watch(hm("22:35"))
+    e.board_answer(cid, N.NO_OPTION, hm("23:10"))
+    e.watch(hm("23:15"))
+    items = oneshots(e)
+    check(len(items) == 1 and items[0]["done_at"] and "отменён" in (items[0]["result"] or ""),
+          f"«Нет» не погасил запуск пачки: {items}")
+    check(N.oneshot_due(hm("04:00")) == [] and N.pack_night(hm("23:30")) == [], "после «Нет» пачка ещё в ночи")
+
+
+def test_oneshot_id_by_source_0284():
+    """Ручной --at и пачка ночи на ту же минуту и цель — две записи (ревью argus, #78): у пачки свой номер pack-…, текст,
+    pack и sha; обратный порядок тоже. Своё повторное добавление по-прежнему не дублируется."""
+    e = Env()
+    t = day("14:00")
+    for order in ((("zeus", {}), ("night", {"pack": "metis-x/p.md", "sha": "ab" * 32})),
+                  (("night", {"pack": "metis-x/p.md", "sha": "ab" * 32}), ("zeus", {}))):
+        open(os.path.join(e.state, "oneshot.json"), "w").write("{}")
+        ids = [N.oneshot_add("metis-x", t + 600, f"текст {by}", by, t=t, **ex) for by, ex in order]
+        items = {x["id"]: x for x in oneshots(e)}
+        check(ids[0] != ids[1] and len(items) == 2, f"ручной и пачка слились: {ids} {items}")
+        pk = next((x for x in items.values() if x["by"] == "night"), {})
+        check(pk.get("id", "").startswith("pack-") and pk.get("text") == "текст night" and pk.get("sha") == "ab" * 32
+              and pk.get("pack") == "metis-x/p.md", f"запись пачки потеряла свои поля: {pk}")
+        hand = next((x for x in items.values() if x["by"] == "zeus"), {})
+        check(hand.get("id", "").startswith("at-") and hand.get("pack") is None, f"ручная запись: {hand}")
+    again = N.oneshot_add("metis-x", t + 600, "текст night", "night", t=t, pack="metis-x/p.md", sha="ab" * 32)
+    check(again.startswith("pack-") and len(oneshots(e)) == 2, "повтор пачки продублирован")
+
+
+def test_pack_text_home_prefix_0284():
+    """Путь пачки в задании: «~» только вместо приставки HOME, а не первого вхождения (ревью argus, п. 4)."""
+    e = Env()
+    saved = (P.HOME, P.PANTHEON)
+    try:
+        P.HOME, P.PANTHEON = "/h", "/x/h/pan"
+        txt = N.pack_text({"card_id": "c"}, EVENING, {"path": "d/n.md"})
+        check("/x/h/pan/d/n.md" in txt and "~" not in txt, f"путь искажён: {txt[:200]}")
+        P.HOME, P.PANTHEON = "/h", "/h/pan"
+        txt = N.pack_text({"card_id": "c"}, EVENING, {"path": "d/n.md"})
+        check("~/pan/d/n.md" in txt, f"приставка HOME не заменена: {txt[:200]}")
+    finally:
+        P.HOME, P.PANTHEON = saved
+
+
+def test_oneshot_store_0284():
+    """Запись разового запуска: тот же id второй раз не ставится, погашенная не гасится повторно, время «ЧЧ:ММ» —
+    ближайшее впереди."""
+    e = Env()
+    t = day("14:00")
+    a = N.oneshot_add("metis-x", t + 600, "задание", "zeus", t=t)
+    b = N.oneshot_add("metis-x", t + 600, "задание", "zeus", t=t)
+    check(a == b and len(oneshots(e)) == 1, f"дубль разового запуска: {oneshots(e)}")
+    check(oneshots(e)[0]["expires"] == t + 600 + N.ONESHOT_TTL, "срок по умолчанию")
+    check(N.oneshot_update(a, t, done_at=t, result="запущен") and not N.oneshot_update(a, t, done_at=t + 1),
+          "погашенный гасится второй раз")
+    check(N.parse_at("15:00", t) == day("15:00") and N.parse_at("13:00", t) == day("13:00") + 86400, "ЧЧ:ММ")
+    for bad in ("25:00", "2020-01-01 10:00", "завтра"):
+        try:
+            N.parse_at(bad, t)
+            check(False, f"parse_at принял {bad}")
+        except ValueError:
+            pass
+
+
+FAKE_PMSET = {"battery": "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1234)\t23%; discharging; 2:10 "
+                         "remaining present: true\n",
+              "high": "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1234)\t91%; discharging; 9:10 "
+                      "remaining present: true\n",
+              "ac": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=1234)\t23%; charging; 1:10 remaining "
+                    "present: true\n"}
+
+
+def test_power_0284():
+    """21:30–22:00 перед ночью: подставной `pmset -g batt` — на батарее 23 % тревога «подключите зарядку» и
+    уведомление, одна за вечер; на зарядке, при 91 %, до 21:30 и у пропущенной ночи — тихо."""
+    saved = {k: os.environ.pop(k, None) for k in ("PANTHEON_FAKE_AC", "PANTHEON_FAKE_BATT")}
+    path0 = os.environ["PATH"]
+    try:
+        def run(kind, x, e, pre=None):
+            b = os.path.join(e.tmp, "bin-" + kind)
+            os.makedirs(b, exist_ok=True)
+            open(os.path.join(b, "pmset"), "w").write("#!/bin/sh\ncat <<'X'\n" + FAKE_PMSET[kind] + "X\n")
+            os.chmod(os.path.join(b, "pmset"), 0o755)
+            os.environ["PATH"] = b + os.pathsep + path0
+            t = day(x)
+            e.at_line(t, 0)
+            e.watch(t)
+
+        def lines(e):
+            return [x for x in e.alerts().splitlines() if "подключите зарядку" in x]
+        e = Env()
+        run("battery", "21:20", e)
+        check(not lines(e), "до 21:30 — тревога о питании")
+        run("battery", "21:35", e)
+        got = lines(e)
+        check(len(got) == 1 and "23 %" in got[0], f"батарея 23 % в 21:35 — тревога: {got}")
+        notes = open(os.path.join(e.state, "notify.json"), encoding="utf-8").read() \
+            if os.path.exists(os.path.join(e.state, "notify.json")) else ""
+        check("подключите зарядку" in notes or any("подключите зарядку" in x for x in e.sent()),
+              "нет уведомления о питании")
+        run("battery", "21:50", e)
+        check(len(lines(e)) == 1, f"вторая тревога о питании за вечер: {lines(e)}")
+        e2 = Env()
+        run("ac", "21:40", e2)
+        run("high", "21:45", e2)
+        check(not lines(e2), f"на зарядке или 91 % — тревога: {lines(e2)}")
+        e3 = Env()
+        os.makedirs(os.path.join(e3.state, "night"), exist_ok=True)
+        json.dump({"skipped": "ответ «Нет»"}, open(os.path.join(e3.state, "night", EVENING.isoformat() + ".json"), "w"))
+        run("battery", "21:40", e3)
+        check(not lines(e3), "пропущенная ночь — тревога о питании")
+        e4 = Env()
+        run("battery", "21:40", e4)
+        check(N.power() == (23.0, False), f"разбор pmset: {N.power()}")
+    finally:
+        os.environ["PATH"] = path0
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
 
 
 def test_py39_compile():

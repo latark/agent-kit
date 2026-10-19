@@ -59,6 +59,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
   pantheon start zeus                   Пританей: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
+  pantheon start <направление> --at ЧЧ:ММ [поручение]   разовый запуск плановым проходом вместо sleep в сессии;
+                                        --at-list — записи, --at-cancel <id> — отменить (lib/night.py)
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
   pantheon watch [--dry-run]            дежурный (плановый проход раз в 5 мин): сессии, STATUS.md, swap, worktree, версия Claude Code,
                                         паузы, самозапуск по вашим решениям; --dry-run — кого поднял бы и почему нет
@@ -3279,8 +3281,56 @@ def start_target(target, rest):
             f"Прочитай ~/ai/pantheon/directions/{target}/STATUS.md и inbox/, затем продолжай текущий эпик по нему.")
 
 
+def start_at(rest, origin, dry):
+    """Разовый запуск плановым проходом вместо `sleep` в сессии (metis-0284): запись в STATE/oneshot.json, исполняет
+    дежурный один раз (lib/watch.py oneshots). Та же подкоманда start — те же права, что у запуска."""
+    N = night_mod()
+    t = now()
+    if rest == ["--at-list"]:
+        for ln in N.oneshot_lines(t) or ["разовых запусков нет"]:
+            print(ln)
+        return 0
+    if rest[:1] == ["--at-cancel"] and len(rest) == 2:
+        if N.oneshot_cancel(rest[1], t, f"pantheon start --at-cancel ({origin})"):
+            print(f"разовый запуск {rest[1]} отменён")
+            return 0
+        print(f"pantheon start: разового запуска {rest[1]} нет или он уже погашен", file=sys.stderr)
+        return 1
+    i = rest.index("--at") if "--at" in rest else -1
+    if i < 0 or i + 1 >= len(rest) or "--at-list" in rest or "--at-cancel" in rest:
+        print("pantheon start <направление> --at ЧЧ:ММ|\"ГГГГ-ММ-ДД ЧЧ:ММ\" [поручение] | --at-list | --at-cancel <id>",
+              file=sys.stderr)
+        return 2
+    when_s, rest = rest[i + 1], rest[:i] + rest[i + 2:]
+    if not rest:
+        print("pantheon start --at: кого запустить — направление", file=sys.stderr)
+        return 2
+    target, text = rest[0], " ".join(rest[1:]).strip()
+    domains = read_json(path("domains.json"), {}).get("domains") or {}
+    if target not in domains:
+        print(f"pantheon start --at: «{target}» — не направление из domains.json (разовый запуск — только направлений)",
+              file=sys.stderr)
+        return 2
+    try:
+        when = N.parse_at(when_s, t)
+    except ValueError as e:
+        print(f"pantheon start --at: {e}", file=sys.stderr)
+        return 2
+    got = start_target(target, [])
+    text = text or (got[4] if not isinstance(got, str) else "")
+    if dry:
+        print(f"[at] {target} в {stamp(when)} — {text}")
+        return 0
+    oid = N.oneshot_add(target, when, text, origin, t=t)
+    print(f"разовый запуск {oid}: {target} в {stamp(when)} — исполнит плановый проход (pantheon watch), срок "
+          f"{N.ONESHOT_TTL // 3600} ч; отмена — pantheon start --at-cancel {oid}")
+    return 0
+
+
 def start(rest):
-    """pantheon start <направление> [поручение] | workshop <задача> [поручение] | zeus [--restart]  [--from кто] [--dry-run]"""
+    """pantheon start <направление> [поручение] | workshop <задача> [поручение] | zeus [--restart]  [--from кто] [--dry-run]
+    pantheon start <направление> --at ЧЧ:ММ|"ГГГГ-ММ-ДД ЧЧ:ММ" [поручение] | --at-list | --at-cancel <id>   разовый запуск
+                                                                                    плановым проходом (вместо sleep)"""
     dry = "--dry-run" in rest
     restart = "--restart" in rest
     rest = [a for a in rest if a not in ("--dry-run", "--restart")]
@@ -3291,6 +3341,8 @@ def start(rest):
             print("pantheon start: --from zeus | tick | owner", file=sys.stderr)
             return 2
         origin, rest = rest[i + 1], rest[:i] + rest[i + 2:]
+    if any(a in ("--at", "--at-list", "--at-cancel") for a in rest):
+        return start_at(rest, origin, dry)
     if not rest:
         print(start.__doc__, file=sys.stderr)
         return 2
