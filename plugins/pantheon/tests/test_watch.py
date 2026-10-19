@@ -1112,6 +1112,124 @@ def test_week_limit_blocks_wake_after_pause():
             check(any("p9p9p9p9-1" in c for c in e.calls() if "--resume" in c), "зелёная — сессия не продолжена")
 
 
+NIGHT_TITLE = "Запустить сегодня на ночь выполнение задач?"
+
+
+def _bgs(e, who=None):
+    return [c for c in e.calls() if c[:1] == ["--bg"] and (who is None or any(who in x for x in c))]
+
+
+def _pack_night(e, name="athena-p"):
+    """Ночь как в _night_now (вопрос T0 − 2 ч, ночь с T0 − 1 ч) и ночная пачка направления name на утро после вечера."""
+    _night_now(e)
+    e.direction(name)
+    evening = time.strftime("%Y-%m-%d", time.localtime(T0 - 7200))
+    morning = time.strftime("%Y-%m-%d", time.localtime(T0 - 7200 + 86400))
+    e.pack_rel = f"directions/{name}/night-{morning}-pack.md"
+    e.pack = os.path.join(e.pantheon, e.pack_rel)
+    open(e.pack, "w", encoding="utf-8").write(f"# Ночная пачка {name}\n\n| # | Задача |\n|---|---|\n| 1 | athena-0300 |\n")
+    e.night_file = e.st("night", evening + ".json")
+
+
+def _say_yes(e, t):
+    st = json.load(open(e.night_file))
+    rec = {"time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t)), "kind": "answer", "id": st["card_id"],
+           "answer": st["options"][0], "question": NIGHT_TITLE}
+    with open(e.st("owner-log", "board.jsonl"), "a") as fh:
+        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return st
+
+
+def test_night_question_without_zeus_0284():
+    """Вопрос ночи задаёт плановый проход сам: Зевса нет (сессий нет вовсе) — в ask_at карточка во входящих и
+    уведомление владельцу, никого для этого не поднимают."""
+    e = Env()
+    _night_now(e)
+    e.agents([])
+    r = e.run("watch", t=T0 - 7200)
+    st = json.load(open(e.st("night", time.strftime("%Y-%m-%d", time.localtime(T0 - 7200)) + ".json")))
+    box = os.path.join(e.pantheon, "inbox", "tasks")
+    cards = [open(os.path.join(box, f), encoding="utf-8").read() for f in os.listdir(box)] if os.path.isdir(box) else []
+    check(st.get("card_id") and any(st["card_id"] in f and NIGHT_TITLE in f for f in cards),
+          f"без Зевса нет карточки: {st} {cards} {r.stderr[-300:]}")
+    check(NIGHT_TITLE in e.sent(), f"без Зевса нет уведомления: {e.sent()[-300:]}")
+    check(not _bgs(e), f"ради вопроса кого-то подняли: {e.calls()}")
+
+
+def test_night_pack_starts_once_0284():
+    """«Да» одобряет пачку: в начале ночи плановый проход поднимает её координатора с путём пачки в задании — один
+    раз; отметки владельца у других направлений ночью с пачкой никого не поднимают."""
+    e = Env()
+    _pack_night(e)
+    e.direction("athena-q")
+    e.task("athena-0301", "athena-q")
+    e.run("watch", t=T0 - 7200)                       # вопрос
+    st = _say_yes(e, T0 - 7100)
+    check(e.pack_rel in st["options"][0] or "athena-p/night-" in st["options"][0], f"вопрос без пачки: {st['options']}")
+    e.run("watch", t=T0 - 7000)                       # «Да» принят, разовый запуск пачки записан
+    e.run("watch", t=T0 - 3700)                       # до начала ночи
+    check(not _bgs(e), f"пачку подняли до ночи: {e.calls()}")
+    e.board("athena-0301", T0 - 3650)                 # владелец отметил задачу другого направления
+    r = e.run("watch", t=T0 - 3500)
+    got = _bgs(e, "athena-p")
+    check(len(got) == 1 and any(e.pack_rel in x or os.path.basename(e.pack) in x for x in got[0]),
+          f"пачку не подняли с её путём: {e.calls()} {r.stderr[-300:]}")
+    e.run("watch", t=T0 - 3400)
+    e.run("watch", t=T0 - 3000)
+    check(len(_bgs(e, "athena-p")) == 1, f"пачку подняли повторно: {_bgs(e)}")
+    check(not _bgs(e, "athena-q"), f"ночью с пачкой подняли по отметке: {_bgs(e)}")
+    out = e.run("watch", "--dry-run", t=T0 - 2900).stdout
+    check("ночью идут только одобренные пачки" in out, f"dry-run не объясняет ожидание: {out[-400:]}")
+    check("разовый запуск at-" in e.alerts() and "athena-p — запущен" in e.alerts(), f"тревоги: {e.alerts()[-400:]}")
+
+
+def test_night_pack_changed_not_started_0284():
+    """Пачка, изменённая после «Да», не запускается: запись гаснет, тревога и уведомление."""
+    e = Env()
+    _pack_night(e)
+    e.run("watch", t=T0 - 7200)
+    _say_yes(e, T0 - 7100)
+    e.run("watch", t=T0 - 7000)
+    open(e.pack, "a", encoding="utf-8").write("| 2 | athena-0399 | дописано после «Да» |\n")
+    e.run("watch", t=T0 - 3500)
+    e.run("watch", t=T0 - 3400)
+    check(not _bgs(e), f"изменённую пачку подняли: {e.calls()}")
+    check("изменилась после «Да»" in e.alerts(), f"нет тревоги об изменённой пачке: {e.alerts()[-400:]}")
+    check("не состоялся" in e.sent() or os.path.exists(e.st("notify.json")), "нет уведомления об изменённой пачке")
+
+
+def test_start_at_oneshot_0284():
+    """`pantheon start <направление> --at ЧЧ:ММ` — запись для планового прохода, не sleep: до времени не запускает,
+    после — ровно один запуск с заданием, повторный проход не повторяет; --at-cancel гасит, --at-list показывает."""
+    e = Env()
+    e.direction("athena-a")
+    hhmm = time.strftime("%H:%M", time.localtime(T0 + 600))
+    r = e.run("start", "athena-a", "--at", hhmm, "сделай", "проверку", "0284", t=T0)
+    check(r.returncode == 0 and "разовый запуск at-" in r.stdout, f"--at: {r.returncode} {r.stdout} {r.stderr}")
+    check(not _bgs(e), f"--at запустил сразу: {e.calls()}")
+    e.run("watch", t=T0 + 300)
+    check(not _bgs(e), f"запуск раньше времени: {e.calls()}")
+    e.run("watch", t=T0 + 660)
+    got = _bgs(e, "athena-a")
+    check(len(got) == 1 and any("сделай проверку 0284" in x for x in got[0]), f"разовый запуск не пошёл: {e.calls()}")
+    e.run("watch", t=T0 + 720)
+    e.run("watch", t=T0 + 1200)
+    check(len(_bgs(e, "athena-a")) == 1, f"разовый запуск повторён: {_bgs(e)}")
+    # отмена: второй запуск на +40 мин отменён — не идёт
+    hh2 = time.strftime("%H:%M", time.localtime(T0 + 2400))
+    r = e.run("start", "athena-a", "--at", hh2, "второй", t=T0 + 1300)
+    oid = r.stdout.split("разовый запуск ")[1].split(":")[0] if "разовый запуск " in r.stdout else "?"
+    lst = e.run("start", "--at-list", t=T0 + 1310).stdout
+    check(oid in lst, f"--at-list без записи {oid}: {lst}")
+    r = e.run("start", "--at-cancel", oid, t=T0 + 1320)
+    check(r.returncode == 0, f"--at-cancel: {r.stdout} {r.stderr}")
+    e.run("watch", t=T0 + 2500)
+    check(len(_bgs(e, "athena-a")) == 1, f"отменённый разовый запуск пошёл: {_bgs(e)}")
+    check(e.run("start", "--at-cancel", oid, t=T0 + 2600).returncode == 1, "повторная отмена не отказ")
+    check(e.run("start", "nope-dir", "--at", hh2, t=T0 + 2600).returncode == 2, "--at не направления принят")
+    check(e.run("start", "athena-a", "--at", "2020-01-01 10:00", t=T0 + 2600).returncode == 2, "--at в прошлом принят")
+
+
 def test_isolation_and_watch_last():
     """Сбой одной проверки — тревога о ней, остальные идут; watch-last пишет время и упавшие."""
     e = Env()
