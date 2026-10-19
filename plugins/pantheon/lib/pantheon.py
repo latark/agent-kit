@@ -2714,7 +2714,10 @@ def _resume_session(name, a, text, origin):
             return 0, None
         with contextlib.suppress(OSError):
             os.remove(pushed)
-    argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--name", name, "--settings", run, text]
+    # --resume не наследует роль (metis-0208): без --agent сессия поднялась бы голым Claude. Роль — та же, что у start и
+    # свежего старта; штаб (zeus) — hq, хотя сюда он сегодня не доходит (start_target не знает zeus — отказ выше)
+    role = "hq" if name == "zeus" else got[1]
+    argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--agent", role, "--name", name, "--settings", run, text]
     r = subprocess.run(argv, cwd=a.get("cwd") or HOME, capture_output=True, text=True, timeout=180)
     m = COPY_NOTE.search((r.stdout or "") + (r.stderr or ""))
     start_log(f"resume\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\tcopy {m.group(1)}" if m else ""))
