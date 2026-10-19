@@ -261,6 +261,7 @@ def _watch(dry=False):
               ("очистка Зевса", lambda: zeus_clean(agents, t)),
               ("перезапуск после обновления плагинов", lambda: plugins_respawn(agents, doms, t)),
               ("ночь", lambda: P.night_mod().watch(agents, reg, doms, t)),
+              ("разовые запуски", lambda: oneshots(agents, reg, doms, t)),
               ("самозапуск", lambda: autostart(agents, reg, doms, t)),
               ("возобновление после недельного лимита", lambda: awake().limit_resume(agents, reg, doms, t)),
               ("возобновление ждущих сессий", lambda: awake().wake_waiting(agents, reg, doms, t)),
@@ -1161,6 +1162,64 @@ def fail(d, s, t, why):
                 f"{P.stamp(s['next'])[11:16]}", "watch")
 
 
+ONESHOT_STARTED = []  # направления, поднятые разовым запуском в этом проходе: самозапуск их не трогает
+
+
+def oneshots(agents, registry, doms, t):
+    """Разовые запуски (metis-0284, STATE/oneshot.json — lib/night.py): пришло время — поднять направление один раз.
+    Запись гасится до запуска, повторный проход её не повторит. Пока нельзя (шлюз недели и ночи, сессия занята, одна
+    за проход) — ждёт до срока; после срока гаснет с тревогой. Пачка ночи, изменённая после «Да», не запускается."""
+    N = P.night_mod()
+    del ONESHOT_STARTED[:]
+    started = False
+    for it in N.oneshot_due(t):
+        oid, d = it["id"], it.get("target")
+        bad = None
+        if d not in doms:
+            bad = f"нет направления «{d}» в domains.json"
+        elif it.get("pack") and N._sha(os.path.join(P.PANTHEON, it["pack"])) != it.get("sha"):
+            bad = f"пачка {it['pack']} изменилась после «Да» — владелец одобрял другой текст"
+        elif it.get("night"):
+            st = N.load(date.fromisoformat(it["night"]))
+            if st.get("skipped"):
+                bad = f"ночь пропущена ({st['skipped']})"
+        if not bad and t >= float(it.get("expires") or 0):
+            bad = "срок вышел" + (f", ждал: {it['wait']}" if it.get("wait") else "")
+        if bad:
+            if N.oneshot_update(oid, t, done_at=t, result=f"не запущен: {bad}"):
+                P.alert(f"разовый запуск {oid} погашен без запуска: {bad}", "watch")
+                P.notify_soon(f"oneshot-{oid}", f"Разовый запуск {d} не состоялся: {bad}", group="oneshot")
+            continue
+        hold = holders(d, agents, registry)
+        poke = nudge_target(hold)
+        why = wake_block(d, agents, registry, auto=True, nudge=bool(poke))
+        if not why:
+            ok, gw = N.gate("autostart", t, [a for a in agents if a not in hold], registry)
+            why = None if ok else f"недельный лимит: {gw}"
+        if not why and started:
+            why = "одна сессия за проход — в следующий"
+        if why:
+            if why != it.get("wait"):
+                N.oneshot_update(oid, t, wait=why)
+                P.alert(f"разовый запуск {oid} ждёт: {why} (срок {P.stamp(float(it['expires']))[11:]})", "watch")
+            continue
+        if not N.oneshot_update(oid, t, done_at=t, result="запускается"):  # гасим до запуска: проход могут оборвать
+            continue
+        if poke:
+            rc = P.resume_session(d, poke, it["text"], "tick", recheck=recheck(d, True, nudge=True))[0]
+        else:
+            rc = resume_or_start(d, agents, it["text"], origin="tick", auto=True)
+        res = ("передано задание простаивающей сессии" if poke else "запущен") if rc == 0 else f"не вышло, код {rc}"
+        N.oneshot_update(oid, t, result=res)
+        P.alert(f"разовый запуск {oid}: {d} — {res}" + (f" (пачка {it['pack']})" if it.get("pack") else ""), "watch")
+        if rc != 0:
+            P.notify_soon(f"oneshot-{oid}", f"Разовый запуск {d} не вышел: код {rc}", group="oneshot")
+        else:
+            awake().RESUMED.append(d)
+        ONESHOT_STARTED.append(d)
+        started = True
+
+
 def autostart(agents, registry, doms, t, dry=False):
     say = print if dry else (lambda *_: None)
     st = {d: as_state(v) for d, v in P.read_json(P.path("autostart.json"), {}).items()}
@@ -1187,7 +1246,9 @@ def autostart(agents, registry, doms, t, dry=False):
             want.setdefault(d, []).append(tid)
     say(f"решения владельца учитываются с {P.stamp(since)}; задачи с ними: "
         + ("; ".join(f"{d}: {', '.join(v)}" for d, v in sorted(want.items())) or "нет"))
-    running = [d for d in doms if holders(d, agents, registry)]
+    running = [d for d in doms if holders(d, agents, registry) or d in ONESHOT_STARTED]
+    # ночь с одобренными пачками (metis-0284): ночью идут только пачки — их поднимают разовые запуски, а не отметки
+    packs = P.night_mod().pack_night(t)
     shop = sorted({a.get("name") for a in list(agents) + list(registry) if str(a.get("name") or "").startswith("daedalus-")
                    and holders(a["name"], agents, registry)})
     started = False
@@ -1203,6 +1264,10 @@ def autostart(agents, registry, doms, t, dry=False):
         what = (f"{d}: закончила ход, а задачи с вашим решением ждут" if poke and poke.get("state") == "done"
                 else f"{d}: Claude Code сам перезапустил фоновую сессию, задания у неё нет")
         why = wake_block(d, agents, registry, auto=True, nudge=bool(poke))
+        if not why and d in ONESHOT_STARTED:
+            why = "поднято разовым запуском в этом проходе"
+        if not why and packs:
+            why = "ночью идут только одобренные пачки (" + ", ".join(p["path"] for p in packs) + ")"
         if not why and s.get("gave_up"):
             why = f"самозапуск встал после сбоев (pantheon resume {d})"
         if not why and not poke and len(running) >= AUTOSTART_MAX:  # передача места не занимает: сессия уже есть
@@ -1244,7 +1309,8 @@ def autostart(agents, registry, doms, t, dry=False):
                 P.alert_once(f"autostart-trust-{d}", got[2], f"самозапуск {d} невозможен: {why}", "watch")
                 P.notify_soon(f"autostart-trust-{d}", f"{d}: нужно ваше доверие к папке", group=f"autostart-{d}",
                               once=True)
-            elif not why.startswith(("пауза между", "одна сессия", "не главный Mac", "недельный лимит")):
+            elif not why.startswith(("пауза между", "одна сессия", "не главный Mac", "недельный лимит", "ночью идут",
+                                     "поднято разовым")):
                 P.alert_once(f"autostart-wait-{d}", f"{today(t)}-{why[:40]}", f"самозапуск {d} ждёт: {why} (задачи "
                              f"{', '.join(tids[:3])})", "watch")
             continue
