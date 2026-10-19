@@ -1170,9 +1170,7 @@ def run_job(name):
                 rc, out = 124, f"таймаут {int(timeout)} с, группа процессов остановлена\n{out or ''}"
             with open(log, "a", encoding="utf-8") as fh:
                 fh.write(f"--- {stamp()} rc={rc} {time.time() - started:.1f} с\n{(out or '')[-4000:]}")
-            if os.path.getsize(log) > 400_000:
-                data = open(log, encoding="utf-8", errors="ignore").read()[-200_000:]
-                open(log, "w", encoding="utf-8").write(data)
+            trim_log(log)
             st = job_state(name)
             st.update(last_end=now(), last_rc=rc)
             st.pop("running", None)
@@ -5129,10 +5127,10 @@ def metrics_on_close(T, tid):
 def metrics_cmd(rest):
     M, T = metrics_mod(), tasks_mod()
     sub, args = (rest[0] if rest else ""), rest[1:]
-    tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
-    ctx = metrics_ctx()
     if sub == "run":
         return metrics_run()
+    tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+    ctx = metrics_ctx()
     if sub == "sync":
         rows = M.sync(ctx, tasks)
         M.publish(ctx, tasks)
@@ -5512,6 +5510,18 @@ def metrics_pass(T):
     M.publish(ctx, tasks)
 
 
+def trim_log(log_path, limit=400_000, keep=200_000):
+    """Журнал дописывается; выше предела остаётся хвост в keep символов."""
+    try:
+        if os.path.getsize(log_path) > limit:
+            with open(log_path, encoding="utf-8", errors="ignore") as fh:
+                data = fh.read()[-keep:]
+            with open(log_path, "w", encoding="utf-8") as fh:
+                fh.write(data)
+    except OSError:
+        pass
+
+
 def metrics_run():
     """pantheon metrics run — фоновый проход под блокировкой metrics; занята — тихо выходит."""
     with lock("metrics", block=False) as got:
@@ -5542,6 +5552,7 @@ def board_metrics(T):
         with open(stamp_p, "w") as fh:
             fh.write(stamp() + "\n")
         try:
+            trim_log(path("metrics-run.log"))
             log = open(path("metrics-run.log"), "a")
         except OSError:
             log = subprocess.DEVNULL

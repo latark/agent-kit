@@ -100,5 +100,27 @@ os.utime(stamp_p, (old, old))
 p, dt = board()
 check("отметка старше 30 минут: учёт запускается снова", wait_runs(3) == 3, runs())
 
+# metrics run при занятой блокировке metrics прохода не делает (защита, когда учёт идёт у двух процессов сразу)
+n0 = runs()
+fh = open(lock_p, "a")
+fcntl.flock(fh, fcntl.LOCK_EX)
+q = subprocess.run([PY311, "-I", CLI, "metrics", "run"], env=dict(ENV, PANTHEON_METRICS_TEST_SLEEP="0"),
+                   capture_output=True, text=True, timeout=60)
+fcntl.flock(fh, fcntl.LOCK_UN)
+fh.close()
+check("metrics run при занятой блокировке: проходов 0, код 0", q.returncode == 0 and runs() == n0,
+      (q.returncode, runs() - n0, q.stderr[-300:]))
+
+# metrics-run.log обрезается как журналы задач: выше 400 КБ остаётся хвост 200 КБ
+rlog = os.path.join(state, "metrics-run.log")
+with open(rlog, "w") as fh:
+    fh.write("x" * 450_000 + "ХВОСТ\n")
+os.remove(stamp_p)
+p, dt = board()
+sz = os.path.getsize(rlog)
+check("metrics-run.log выше 400 КБ обрезан до хвоста", p.returncode == 0 and sz <= 200_100, sz)
+check("в обрезанном логе остался конец", open(rlog, encoding="utf-8").read().endswith("ХВОСТ\n"))
+wait_runs(n0 + 1)
+
 print(f"{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)
