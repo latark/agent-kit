@@ -4,7 +4,7 @@
                             `pantheon who` (COMM-14), ждущие и упавшие сессии Пантеона, давно не обновлённый и длинный
                             STATUS.md, swap и открытые подключения (COMM-13), копии worktree (QA-05), смена версии
                             Claude Code (SCOUT-05, SEC-16), паузы по нагрузке (COST-04), самозапуск координаторов,
-                            метка технического перезапуска, перезапуск свободных окон после обновления плагинов
+                            метка технического перезапуска, передача «ждёт вас» Зевсу (metis-0277), перезапуск свободных окон после обновления плагинов
                             (metis-0181), уборка: claude rm сессий Пантеона, закончивших ход или остановленных
                             больше 2 ч назад (metis-0250); раз в сутки — журналы ваших слов (COMM-10).
                             --dry-run — только показать, кого самозапуск поднял бы и почему нет, ничего не меняя
@@ -22,7 +22,9 @@
   pantheon infra-check      лёгкая проверка опор системы после обновления Claude Code (SEC-16)
 
 Всё, что дежурный находит, — строка в ~/ai/pantheon/alerts.md один раз на состояние (alert_once) и, где нужно вас,
-уведомление; в «ждёт вас» на доске переносит штаб. Модель дежурный не зовёт. Каждая проверка идёт отдельно: сбой одной
+уведомление; в «ждёт вас» на доске переносит штаб. Модель дежурный зовёт только одним путём: «ждёт вас» (blocked) он передаёт живому
+простаивающему Зевсу — push + `claude respawn`, раз на пункт и не чаще раза в 15 мин на сессию, за проход одним
+сообщением, не при метке техперезапуска, паузе и лимитах, relay.json (metis-0277). Каждая проверка идёт отдельно: сбой одной
 — тревога «проверка X упала», остальные работают; время прохода — ~/.local/state/pantheon/watch-last (строка статуса и
 `pantheon status` показывают, что дежурный жив). Основания — исследование
 ~/ai/knowledge/inbox/research-2026-10-15-supervisor-watchdog.md и план ~/ai/pantheon/handoff/army-setup/step-1.4-plan.md.
@@ -297,7 +299,7 @@ def gave_up_note(d, s):
     return f"Самозапуск {d} встал: {s.get('fails')} сбоя подряд"
 
 
-RELAY_EVERY = 900  # metis-0277: «ждёт вас» уходит живому Зевсу не чаще раза в 15 мин на сессию
+RELAY_EVERY = 900  # metis-0277: «ждёт вас» уходит живому Зевсу не чаще раза в 15 мин на сессию и раз на пункт
 WHY_LIMIT = 120
 GENERIC_WHY = re.compile(r"(?:permission(?: prompt)?|input needed|waiting(?: for (?:input|permission))?|blocked)\W*",
                          re.I)
@@ -351,43 +353,107 @@ def blocked_why(a):
     return "причина неизвестна"
 
 
-def relay_zeus(agents, name, sid, why, t):
-    """Блокировка сразу в живую сессию Зевса тем же путём, что передача задания (push + claude respawn). Не чаще
-    RELAY_EVERY на сессию; Зевса нет, остановлен или он занят ходом — ничего (остаются тревога и уведомление)."""
-    if name.startswith("zeus") or os.path.exists(P.path("stopped", "zeus")) or os.environ.get("PANTHEON_DRYRUN") == "1":
-        return False
-    zs = [z for z in agents if z.get("name") == "zeus" and z.get("id") and z.get("sessionId")
-          and z.get("kind") in (None, "background")]
-    z = max(zs, key=lambda x: x.get("startedAt") or 0) if zs else None
-    if not z or not idle_holder(z):
+def relay_block(t):
+    """Почему «ждёт вас» сейчас нельзя передавать Зевсу, или None. Передача — ход Зевса, то есть расход модели, поэтому
+    те же запреты, что у автоматического подъёма (wake_block): техперезапуск (SCHED-15), пауза планировщика, пятичасовой
+    лимит, недельный (night.gate("respawn")) и потолок владельца на день ([limits.owner_cap], как у wake и autostart:
+    gate его для respawn не смотрит)."""
+    if os.environ.get("PANTHEON_DRYRUN") == "1" or dry():
+        return "пробный запуск"
+    if P.maintenance_active():
+        return "идёт технический перезапуск"
+    if os.path.exists(P.path("paused")):
+        return "весь планировщик на паузе"
+    pct, lim = P.limit_pct(), threshold("limit_max_pct", 70)
+    if pct is not None and pct >= lim:
+        return f"пятичасовой лимит {pct:.0f} % ≥ {lim:g} %"
+    N = P.night_mod()
+    ok, why = N.gate("respawn", t)
+    if not ok:
+        return f"недельный лимит: {why}"
+    cap = N.owner_cap(t)
+    if cap:
+        m = N.measure(t)
+        if m.get("known") and m.get("used") is not None and m["used"] >= cap[0]:
+            return f"потолок владельца {cap[0]:g} %"
+    return None
+
+
+def _relay_rec(v):
+    """Запись relay.json: {"t": когда, "item": пункт, "sent": дошло ли}; старая числовая — отправленная без пункта."""
+    if isinstance(v, dict) and isinstance(v.get("t"), (int, float)):
+        return {"t": v["t"], "item": str(v.get("item") or ""), "sent": bool(v.get("sent", True))}
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return {"t": v, "item": "", "sent": True}
+    return None
+
+
+def relay_zeus(agents, items, t):
+    """«Ждёт вас» сразу в живую сессию Зевса тем же путём, что передача задания (push + claude respawn). items — все
+    blocked-сессии прохода [(имя, sid, что ждёт)]: за проход не больше одной передачи, одним сообщением (второй respawn
+    оборвал бы ход, который первый только что начал). Один пункт — одна передача: тот же вопрос той же сессии повторно
+    не будит, новая — когда пункт сменился или сессия вышла из blocked и вернулась (запись в relay.json снимает
+    sessions()); и не чаще RELAY_EVERY на сессию. Зевса нет, остановлен или занят ходом, а также relay_block — ничего
+    (остаются тревога и уведомление). → True, если передано."""
+    items = [i for i in items if not i[0].startswith("zeus")]
+    if not items or os.path.exists(P.path("stopped", "zeus")) or relay_block(t):
         return False
     st = P.read_json(P.path("relay.json"), {})
     st = st if isinstance(st, dict) else {}
-    last = st.get(sid)
-    if isinstance(last, (int, float)) and t - last < RELAY_EVERY:
+    due = []
+    for name, sid, why in items:
+        rec = _relay_rec(st.get(sid))
+        if rec is None or (t - rec["t"] >= RELAY_EVERY and (not rec["sent"] or rec["item"] != why)):
+            due.append((name, sid, why))
+    if not due:
         return False
-    text = f"{P.START_MARK} {name} ({sid}) ждёт вас: {why} — claude attach {sid}"
-    pushed = P.push_text(z["sessionId"], text)
-    if not pushed:
+
+    def pick(ags):
+        zs = [z for z in ags if z.get("name") == "zeus" and z.get("id") and z.get("sessionId")
+              and z.get("kind") in (None, "background")]
+        z = max(zs, key=lambda x: x.get("startedAt") or 0) if zs else None
+        return z if z and idle_holder(z) else None
+    if not pick(agents):
         return False
-    r = subprocess.run([P.claude_bin(), "respawn", z["id"]], capture_output=True, text=True, timeout=180)
-    P.start_log(f"relay\tzeus\t{z['id']}\t{sid}\t{r.returncode}")
-    if r.returncode != 0:
-        with contextlib.suppress(OSError):
-            os.remove(pushed)
-        return False
-    st = {k: v for k, v in st.items() if isinstance(v, (int, float)) and t - v < 86400}
-    st[sid] = t
-    P.write_json(P.path("relay.json"), st)
-    return True
+    # та же блокировка, что у pantheon start zeus и resume_session: под ней свежий claude agents — Зевса могли поднять
+    # или он взял ход после снимка прохода
+    with P.lock("start-zeus", block=False) as got:
+        if not got:
+            return False
+        fresh = P.agents_all()
+        z = pick(fresh) if fresh else None
+        if not z:
+            return False
+        if len(due) == 1:
+            name, sid, why = due[0]
+            text = f"{P.START_MARK} {name} ({sid}) ждёт вас: {why} — claude attach {sid}"
+        else:
+            text = f"{P.START_MARK} ждут вас {len(due)} сессии: " + "; ".join(
+                f"{name} ({sid}): {why} — claude attach {sid}" for name, sid, why in due)
+        pushed = P.push_text(z["sessionId"], text)
+        if not pushed:
+            return False
+        r = subprocess.run([P.claude_bin(), "respawn", z["id"]], capture_output=True, text=True, timeout=180)
+        P.start_log(f"relay\tzeus\t{z['id']}\t{','.join(d[1] for d in due)}\t{r.returncode}")
+        ok = r.returncode == 0
+        if not ok:
+            with contextlib.suppress(OSError):
+                os.remove(pushed)
+        st = {k: v for k, v in st.items() if (_relay_rec(v) or {"t": 0})["t"] > t - 86400}
+        for _, sid, why in due:  # неудача тоже в запись: повтор не чаще RELAY_EVERY, а не каждый проход
+            st[sid] = {"t": t, "item": why, "sent": ok}
+        P.write_json(P.path("relay.json"), st)
+        return ok
 
 
 def sessions(agents, doms, t=None):
     """Ждёт вас (blocked) или упала (failed) — тревога один раз на состояние сессии; уведомление — сбой «скоро»
     каждый проход, пока состояние держится (политика решает: macOS, когда вас нет, не чаще раза в час на событие).
-    blocked дополнительно сразу уходит живому Зевсу (metis-0277), с инструментом и целью запроса."""
+    blocked дополнительно сразу уходит живому Зевсу (metis-0277): все ждущие прохода одним сообщением, с инструментом и
+    целью запроса."""
     t = P.now() if t is None else t
     word = {"blocked": "ждёт вас", "failed": "упала"}
+    waiting = []  # blocked этого прохода: [(имя, sid, что ждёт)] — Зевсу одним сообщением
     for a in agents:
         name, sid, state = a.get("name") or "", a.get("id") or a.get("sessionId") or "", a.get("state")
         if not sid or not is_pantheon(name, doms):
@@ -405,7 +471,14 @@ def sessions(agents, doms, t=None):
         P.notify_soon(f"watch-{state}-{sid}", f"{name} {word[state]}" + (f": {why[:80]}" if why else ""),
                       group=f"session-{name}", once=True)
         if state == "blocked":
-            relay_zeus(agents, name, sid, why, t)
+            waiting.append((name, sid, why))
+    relay_zeus(agents, waiting, t)
+    # вышла из blocked — запись снимаем: вернётся в blocked, будет новый пункт (передача раз на пункт)
+    st = P.read_json(P.path("relay.json"), {})
+    if isinstance(st, dict) and st:
+        keep = {k: v for k, v in st.items() if k in {w[1] for w in waiting}}
+        if keep != st:
+            P.write_json(P.path("relay.json"), keep)
 
 
 def _job_time(js):

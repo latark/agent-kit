@@ -2444,7 +2444,7 @@ def test_blocked_relay_to_zeus_0277():
     e.run("watch", t=T0 + 300)
     check(len(_relayed(e)) == 1, f"0277: через 5 мин второе сообщение: {e.calls()}")
     e.run("watch", t=T0 + 960)
-    check(len(_relayed(e)) == 2, f"0277: через 16 мин повтора нет: {e.calls()}")
+    check(len(_relayed(e)) == 1, f"0277: тот же пункт через 16 мин разбудил Зевса снова: {e.calls()}")
     # текст сессии — данные: длинная цель с переводами строк
     e = _blocked_env(("Bash", {"command": "echo a\n" + "x" * 300}))
     e.run("watch", t=T0)
@@ -2483,6 +2483,113 @@ def test_blocked_reason_fallbacks_0277():
     text = _pushed(e)
     check("ждёт вас: причина неизвестна — claude attach b10c0001" in text and "permission prompt" not in text,
           f"0277: нет «причина неизвестна»: {text!r}")
+
+
+def _two_blocked_env():
+    e = Env()
+    e.direction("coord-x")
+    e.direction("coord-y")
+    a = bg("coord-x", "blocked", BLK_SID, pid=31)
+    a["waitingFor"] = "Bash: one"
+    b = bg("coord-y", "blocked", "b10c0002-bbbb", pid=33)
+    b["waitingFor"] = "Bash: two"
+    e.agents([a, b, bg("zeus", "done", "2e057e05-1", pid=32)])
+    return e
+
+
+def test_relay_one_per_pass_0277():
+    """metis-0277 (ревью argus 1): две blocked за проход — один respawn Зевса, в тексте обе, в relay.json обе."""
+    e = _two_blocked_env()
+    e.run("watch", t=T0)
+    text = _pushed(e)
+    check(len(_relayed(e)) == 1, f"0277: две передачи за проход: {e.calls()}")
+    check("b10c0001" in text and "b10c0002" in text and "Bash: one" in text and "Bash: two" in text,
+          f"0277: в тексте не обе сессии: {text!r}")
+    st = json.load(open(e.st("relay.json")))
+    check(set(st) == {"b10c0001", "b10c0002"}, f"0277: в relay.json не обе: {st}")
+
+
+def test_relay_zeus_busy_on_fresh_agents_0277():
+    """metis-0277 (ревью argus 1): снимок прохода говорит «Зевс простаивает», а свежий claude agents под блокировкой
+    start-zeus — он взял ход: передачи нет."""
+    e = _two_blocked_env()
+    lst = json.load(open(e.agents_file))
+    for x in lst:
+        if x["name"] == "zeus":
+            x.update(state="working", status="busy")
+    nxt = os.path.join(e.home, "agents-next.json")
+    json.dump(lst, open(nxt, "w"))
+    e.run("watch", t=T0, extra={"FAKE_AGENTS_NEXT": nxt})
+    check(not _relayed(e) and not os.path.exists(e.st("push", "2e057e05-1.txt")),
+          f"0277: Зевс занят по свежему списку, а передача была: {e.calls()}")
+    check("ждёт вас" in e.alerts(), f"0277: пропала тревога: {e.alerts()}")
+
+
+def _relay_stops(setup, what, extra=None):
+    e = _two_blocked_env()
+    setup(e)
+    e.run("watch", t=T0, extra=extra)
+    check(not [c for c in e.calls() if c[:1] == ["respawn"]], f"0277: {what} — передача была: {e.calls()}")
+    check("ждёт вас" in e.alerts(), f"0277: {what} — пропала тревога: {e.alerts()}")
+    check(not os.path.exists(e.st("relay.json")), f"0277: {what} — запись в relay.json")
+
+
+def test_relay_maintenance_paused_0277():
+    """metis-0277 (ревью argus 2): метка техперезапуска и пауза планировщика — передачи нет, тревога остаётся."""
+    def maint(e):
+        os.makedirs(e.st(), exist_ok=True)
+        json.dump({"reason": "probe", "expires": T0 + 3600, "started": T0 - 60}, open(e.st("maintenance.json"), "w"))
+
+    def paused(e):
+        os.makedirs(e.st(), exist_ok=True)
+        open(e.st("paused"), "w").write("x")
+    _relay_stops(maint, "метка техперезапуска")
+    _relay_stops(paused, "пауза планировщика")
+
+
+def test_relay_limits_0277():
+    """metis-0277: пятичасовой, недельный лимит и потолок владельца — передачи нет; потолок выше расхода пускает."""
+    _relay_stops(lambda e: None, "пятичасовой лимит", extra={"PANTHEON_FAKE_LIMIT": "90"})
+
+    def week(e):
+        e.week_pct = 90.0
+    _relay_stops(week, "недельный лимит (красная зона)")
+
+    day = time.strftime("%Y-%m-%d", time.localtime(T0))
+
+    def cap(pct):
+        def f(e):
+            with open(os.path.join(e.pantheon, "schedule.toml"), "a") as fh:
+                fh.write(f'\n[limits.owner_cap]\ndate = "{day}"\npct = {pct}\ndecision = "t"\n')
+        return f
+    _relay_stops(cap(5), "потолок владельца")
+    e = _two_blocked_env()
+    cap(50)(e)
+    e.run("watch", t=T0)
+    check(len(_relayed(e)) == 1, f"0277: потолок выше расхода закрыл передачу: {e.calls()}")
+
+
+def test_relay_once_per_item_0277():
+    """metis-0277: один пункт — одна передача: тот же вопрос через 20 мин не будит; новый вопрос — будит; вышла из
+    blocked и вернулась — будит."""
+    e = _blocked_env(None, waiting="Bash: one")
+    e.run("watch", t=T0)
+    check(len(_relayed(e)) == 1, f"0277: нет первой передачи: {e.calls()}")
+    os.remove(e.st("push", "2e057e05-1.txt"))
+    e.run("watch", t=T0 + 1200)
+    check(len(_relayed(e)) == 1, f"0277: тот же пункт через 20 мин разбудил снова: {e.calls()}")
+    b = bg("coord-x", "blocked", BLK_SID, pid=31)
+    b["waitingFor"] = "Bash: other"
+    e.agents([b, bg("zeus", "done", "2e057e05-1", pid=32)])
+    e.run("watch", t=T0 + 1300)
+    check(len(_relayed(e)) == 2 and "Bash: other" in _pushed(e), f"0277: новый пункт не передан: {e.calls()}")
+    os.remove(e.st("push", "2e057e05-1.txt"))
+    e.agents([bg("coord-x", "working", BLK_SID, pid=31), bg("zeus", "done", "2e057e05-1", pid=32)])
+    e.run("watch", t=T0 + 1400)  # вышла из blocked
+    b["waitingFor"] = "Bash: other"
+    e.agents([b, bg("zeus", "done", "2e057e05-1", pid=32)])
+    e.run("watch", t=T0 + 1400 + 1000)
+    check(len(_relayed(e)) == 3, f"0277: вернулась в blocked — передачи нет: {e.calls()}")
 
 
 if __name__ == "__main__":
