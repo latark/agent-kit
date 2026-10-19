@@ -28,7 +28,9 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    reject снимает только accept того же рецензента после него или новый коммит (metis-0158: два argus на одном
    head — accept и reject в любом порядке дают отказ); продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
    owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES), casefold;
-   файлы из pulls/N/files с previous_filename. В защитах accept засчитывается, только если его ran начинается с
+   файлы из pulls/N/files с previous_filename; PR, задевающий ядро, проходит только со строкой
+   `<время> merge-approve <owner/repo>#<N> <sha>` для того же репозитория, PR и SHA в owner-log/merge-approve.log —
+   её пишет тик после Touch ID владельца (metis-0285, `pantheon merge`). В защитах accept засчитывается, только если его ran начинается с
    «модель: claude-opus» (metis-0176): accept другой модели — как будто его нет, reject любой модели в силе.
    Незаменённый шаблон «<ID>» в ran — отказ ещё до записи.
 Правдивость поля ran (модель argus) guard не проверяет: это защита от ошибки шаблона и запуска не той модели.
@@ -60,10 +62,15 @@ MERGE_PRODUCT = ("Продукт для клиентов сливай после
                  f"{MERGE_CMD}.")
 MERGE_PROTECT = ("Защиты сливает только Метида или её лид через шлюз слияния: тесты и «принять» от argus на этот SHA, "
                  f"{MERGE_CMD}; PR, который задевает ядро защит (весь plugins/guard/, plugins/pantheon/roles/, "
-                 "plugins/pantheon/lib/window_rules.py и .claude-plugin/marketplace.json), ждёт слияния владельцем (Д3).")
+                 "plugins/pantheon/lib/window_rules.py и .claude-plugin/marketplace.json), ждёт слияния владельцем (Д3): "
+                 "заявка `pantheon merge request N -R <owner/repo>`, сливает плановый проход после Touch ID владельца.")
 MERGE_OWNER = "Слияние делает владелец."
 MERGE_AMBIGUOUS = "\0два направления"
 MERGE_CORE = "ядро защит — PR ждёт слияния владельцем (Д3)"
+MERGE_CORE_HIT = MERGE_CORE + ": PR задевает "
+# согласие владельца на слияние ядра (metis-0285): строку пишет только тик после Touch ID, в owner-log роли не пишут
+APPROVE_FILE = "merge-approve.log"
+APPROVE_RE = re.compile(r"\S+ merge-approve ([a-z0-9_.-]+/[a-z0-9_.-]+)#([1-9][0-9]{0,8}) ([0-9a-f]{40})")
 # ядро защит (Д3): эти файлы агенты не сливают — гарантия, что запор не ослабит сам себя
 CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_config.py",
               "plugins/guard/managed-settings.json",
@@ -796,8 +803,32 @@ def _core_problem(repo, pr, sha):
     core = {c.casefold() for c in CORE_FILES}
     hit = [p for p in paths if _is_core(p, core)]
     if hit:
-        return f"{MERGE_CORE}: PR задевает {', '.join(hit)}"
+        return f"{MERGE_CORE_HIT}{', '.join(hit)}"
     return None
+
+
+def approve_file():
+    return os.path.join(G.STATE_DIR, "owner-log", APPROVE_FILE)
+
+
+def owner_approved(repo, pr, sha):
+    """Строка `<время> merge-approve <owner/repo>#<N> <sha>` в owner-log/merge-approve.log (metis-0285): её пишет
+    только тик после Touch ID владельца; роли в owner-log не пишут (песочница и pantheon-acl). Сверка — ровно этот
+    репозиторий, этот PR и этот SHA. Симлинк папки или файла, сбой чтения — нет согласия."""
+    d = os.path.join(G.STATE_DIR, "owner-log")
+    try:
+        if os.path.islink(d):
+            return False
+        fd = os.open(approve_file(), os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return False
+    for ln in lines:
+        m = APPROVE_RE.fullmatch(ln.strip())
+        if m and m.group(1).lower() == repo.lower() and int(m.group(2)) == int(pr) and m.group(3) == sha.lower():
+            return True
+    return False
 
 
 def _reviewer(rec):
@@ -890,7 +921,9 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                     f"«откат»: `pantheon alert \"{repo}#{pr}: что ушло; откат: <команда>\"`. {advice}")
     if protect:
         why = _core_problem(repo, pr, sha)
-        if why:
+        # Д3 через Touch ID (metis-0285): палец владельца на этот PR и этот SHA — строка тика в owner-log. Пускает
+        # только задетое ядро; сбой gh, неполный список файлов и другой head — отказ и со строкой
+        if why and not (why.startswith(MERGE_CORE_HIT) and owner_approved(repo, pr, sha)):
             return f"{why}. {MERGE_PROTECT}"
     return None
 

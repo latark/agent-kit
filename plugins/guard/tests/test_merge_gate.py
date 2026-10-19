@@ -89,6 +89,7 @@ class Home:
     def reset(self):
         """Перед каждым случаем: пустой журнал, пустая сводка, gh отвечает PR без ядра на текущем SHA agent-kit."""
         shutil.rmtree(self.j(".local/state/pantheon/merge-gate"), ignore_errors=True)
+        shutil.rmtree(self.j(".local/state/pantheon/owner-log"), ignore_errors=True)
         for f in ("gh.fail", "gh.log", "gh.api.fail"):
             if os.path.exists(self.j(f)):
                 os.remove(self.j(f))
@@ -110,6 +111,16 @@ class Home:
         with open(self.records, "a") as fh:
             for r in recs:
                 fh.write(json.dumps(r) + "\n")
+
+    @property
+    def approve_path(self):
+        return self.j(".local/state/pantheon/owner-log/merge-approve.log")
+
+    def approve(self, line, fresh=False):
+        """Строка согласия владельца (metis-0285) — как её пишет тик; fresh — файл заново."""
+        os.makedirs(os.path.dirname(self.approve_path), mode=0o700, exist_ok=True)
+        with open(self.approve_path, "w" if fresh else "a") as fh:
+            fh.write(line + "\n")
 
     def read(self):
         if not os.path.exists(self.records):
@@ -962,11 +973,47 @@ def t_opus_protect(h):
     check("verdict_parse: «<ID>» в ran у reject — без ошибки (вердикт «вернуть» в силе любой)", why is None, why)
 
 
+def t_core_touchid(h):
+    """metis-0285: PR ядра проходит шлюз только со строкой `merge-approve <repo>#<N> <sha>` в owner-log (её пишет
+    тик после Touch ID) — для того же репозитория, PR и SHA. Остальной шлюз (тесты, argus) в силе."""
+    kit, sha = "projects/agent-kit", h.sha["agent-kit"]
+    other = "0123456789abcdef0123456789abcdef01234567"
+    cmd = f"gh pr merge 7 --match-head-commit {sha}"
+    h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"), rec("accept", "latark/agent-kit", 7, sha))
+    h.gh(["README.md", "plugins/guard/hooks/merge_gate.py"])
+    merge_case("ядро: без строки merge-approve — отказ", h.pre(cmd, pdir=kit), False, CORE + ": PR задевает")
+    h.approve(f"2026-10-19T17:00:00+03:00 merge-approve latark/agent-kit#7 {other}")
+    merge_case("ядро: строка merge-approve для другого SHA — отказ", h.pre(cmd, pdir=kit), False, CORE + ": PR задевает")
+    for line in (f"2026-10-19T17:00:00+03:00 merge-approve latark/agent-kit#8 {sha}",
+                 f"2026-10-19T17:00:00+03:00 merge-approve latark/tg-read#7 {sha}",
+                 f"merge-approve latark/agent-kit#7 {sha}",
+                 f"2026-10-19T17:00:00+03:00 merge-approve latark/agent-kit#7 {sha} лишнее"):
+        h.approve(line, fresh=True)
+        merge_case(f"ядро: строка не та ({line[26:70]}…) — отказ", h.pre(cmd, pdir=kit), False, CORE + ": PR задевает")
+    h.approve(f"2026-10-19T17:00:00+03:00 merge-approve latark/agent-kit#7 {other}", fresh=True)
+    h.approve(f"2026-10-19T17:01:00+03:00 merge-approve latark/agent-kit#7 {sha}")
+    merge_case("ядро: строка merge-approve для этого SHA — проходит", h.pre(cmd, pdir=kit), True)
+    # строка не снимает остального шлюза: другой head у PR, нет «принять»
+    h.gh(["plugins/guard/hooks/merge_gate.py"], head=other)
+    merge_case("ядро: строка есть, но PR на другом коммите — отказ", h.pre(cmd, pdir=kit), False, "на другом коммите")
+    h.gh(["plugins/guard/hooks/merge_gate.py"])
+    shutil.rmtree(os.path.dirname(h.records))
+    h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"))
+    merge_case("ядро: строка есть, но нет «принять» argus — отказ", h.pre(cmd, pdir=kit), False, "нет «принять»")
+    # симлинк вместо файла — согласия нет
+    h.seed(rec("accept", "latark/agent-kit", 7, sha))
+    real = h.j("approve-real.log")
+    shutil.move(h.approve_path, real)
+    os.symlink(real, h.approve_path)
+    merge_case("ядро: merge-approve.log — симлинк — отказ", h.pre(cmd, pdir=kit), False, CORE + ": PR задевает")
+
+
 CASES = [t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
-         t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect]
+         t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect,
+         t_core_touchid]
 
 
 def main():

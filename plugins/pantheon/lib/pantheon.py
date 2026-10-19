@@ -37,6 +37,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         «Лимит» для сводки (вечерний вопрос и ночь ведёт дежурный, lib/night.py)
   pantheon read request|run|status|cancel   чтение личного чата по заявке (metis-0267, lib/read.py): заявка → ваше
                                         «да» на [read-<rid>] → выгрузка и разбор плановым проходом → вы одобряете пункты
+  pantheon merge request|run|status|cancel   слияние PR ядра по Touch ID (metis-0285, lib/merge.py): заявка роли →
+                                        плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
@@ -756,6 +758,7 @@ def tick():
         except Exception as e:  # сбой служб не должен останавливать задачи тика
             alert_once("svc-sync", type(e).__name__, f"службы: сверка с launchd упала ({type(e).__name__}: {e})",
                        "pantheon-tick")
+        merge_kick()
 
 
 def tick_heavy(sched, heavy, t):
@@ -2341,6 +2344,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             # Метиды, в песочнице упал бы. Мимо неё — только эта подкоманда и только у Метиды; ворота у команды свои:
             # галочка владельца в журнале доски owner-log, который пишет тик, — роли её не подделают.
             data["sandbox"]["excludedCommands"].append("pantheon direction init *")
+            # заявка на слияние ядра по Touch ID (metis-0285) пишет в STATE/merge-queue — вне песочницы окна. Сливает
+            # не она: `pantheon merge run` ролям закрыт guard, окно Touch ID показывает только плановый проход
+            data["sandbox"]["excludedCommands"] += MERGE_REQUEST_CMDS
         if name == "workshop":
             # Unix-сокеты офлайн-тестов (metis-0278, решение владельца «А» 19.10) — только в своём кэше окна: не
             # $TMPDIR (/tmp/claude-<uid> общий у всех сессий, там их сокеты); allowLocalBinding — нет, см. ниже
@@ -4375,6 +4381,7 @@ def install():
         print(f"установлено (dryrun): {PLIST.replace(HOME, '~')}")
         return 0
     build_app()
+    merge_mod().build_helper(quiet=False)  # окно Touch ID для слияния ядра (metis-0285); не собран — заявки ждут
     subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"], capture_output=True)
     r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", PLIST], capture_output=True, text=True)
     if r.returncode != 0:
@@ -4383,6 +4390,26 @@ def install():
     print(f"установлено: {PLIST.replace(HOME, '~')} и команда {link.replace(HOME, '~')} → "
           f"{CURRENT.replace(HOME, '~')} → {PLUGIN.replace(HOME, '~')}")
     return 0
+
+
+MERGE_REQUEST_CMDS = ["pantheon merge request *", "pantheon merge status", "pantheon merge cancel *"]
+
+
+def merge_kick():
+    """Заявки на слияние по Touch ID (metis-0285) — отдельным процессом: окно ждёт пальца до двух минут, тик не ждёт."""
+    try:
+        if not merge_mod().pending() or locked("merge-run"):
+            return
+        if os.environ.get("PANTHEON_DRYRUN") == "1":
+            with open(path("dryrun.log"), "a") as fh:
+                fh.write(f"{int(now())} merge-run\n")
+            return
+        subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "merge", "run"], env=run_env(),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception as e:  # сбой слияния не должен останавливать тик
+        alert_once("merge-kick", type(e).__name__, f"слияние по Touch ID: проход не запущен ({type(e).__name__}: {e})",
+                   "pantheon-tick")
 
 
 def build_app():
@@ -4640,6 +4667,21 @@ def read_mod():
         spec.loader.exec_module(_READ)
         _READ.set_core(sys.modules[__name__])
     return _READ
+
+
+_MERGE = None
+
+
+def merge_mod():
+    """lib/merge.py — слияние PR ядра по заявке и Touch ID владельца (metis-0285)."""
+    global _MERGE
+    if _MERGE is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_merge", os.path.join(LIB, "merge.py"))
+        _MERGE = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_MERGE)
+        _MERGE.set_core(sys.modules[__name__])
+    return _MERGE
 
 
 _MMV = None
@@ -5735,6 +5777,8 @@ def main(argv):
         return night_mod().main(rest)
     if cmd == "read":
         return read_mod().main(rest)
+    if cmd == "merge":
+        return merge_mod().main(rest)
     if cmd == "mmv":
         return mmv_mod().main(rest, STATE, now())
     if cmd == "qmd":

@@ -590,6 +590,9 @@ PANTHEON_PRIVILEGED = {"archive", "install", "uninstall", "commit", "start", "wa
                        "stop", "resume", "pause", "restart"}
 PANTHEON_OWNER_ONLY = {"approve"}  # заранее разрешённое (DONE-11) — только вы, не штаб: согласие не от имени владельца
 PANTHEON_JOB_ACTIONS = {"pause", "resume", "disable", "enable", "renew"}
+# слияние ядра по Touch ID (metis-0285): заявку ставит и снимает роль, исполняет (`pantheon merge run`) только тик и
+# владелец — никому из ролей, и штабу тоже
+PANTHEON_MERGE_ROLE = {"request", "status", "cancel"}
 IS_MAC = sys.platform == "darwin"
 
 
@@ -2171,6 +2174,8 @@ def pantheon_cli(cmd, cwd):
             found.append("pantheon <подкоманда не разобрана>")
         elif sub in PANTHEON_PRIVILEGED | PANTHEON_OWNER_ONLY or (sub == "jobs" and (act is None or act in PANTHEON_JOB_ACTIONS)):
             found.append(f"pantheon {sub} {act or ''}".strip())
+        elif sub == "merge" and act not in PANTHEON_MERGE_ROLE:
+            found.append(f"pantheon merge {act or '<действие не разобрано>'}")
     return found
 
 
@@ -2349,6 +2354,11 @@ def check_pantheon(event, tool, tool_input):
         if any(c.split()[1:2] and c.split()[1] in PANTHEON_OWNER_ONLY for c in cli):
             return ("Правило pantheon-acl: `pantheon approve` — согласие владельца заранее, его набирает только владелец "
                     "(в своём терминале или в окне Зевса после «!»). Предложи строку разрешения владельцу словами.")
+        merge = [c for c in cli if c.startswith("pantheon merge ")]
+        if merge:
+            return (f"Правило pantheon-acl: «{merge[0]}» — слияние по заявке исполняет только плановый проход после "
+                    "Touch ID владельца. Роли — `pantheon merge request N -R <owner/repo>`, `pantheon merge status`, "
+                    "`pantheon merge cancel N -R <owner/repo>`.")
     if tool == "Bash" and pantheon_role and not (role == "hq" and not sub):
         if cli:
             return (f"Правило pantheon-acl: «{cli[0]}» — команда пульта, её запускают только Пританей и ваши сессии. "

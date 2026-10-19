@@ -941,6 +941,18 @@ def main():
         ("hq: pantheon approve — отказ", "deny", "ai/pantheon", "hq", False, B("pantheon approve add --site a --allow b")),
         ("вы: pantheon approve", "allow", ".", "", False, B("pantheon approve add --site a --allow b")),
         ("мастерская: pantheon approve list — отказ", "deny", ws, "workshop", False, B("pantheon approve list")),
+        # metis-0285: заявку на слияние ядра ставит роль, исполняет только тик (и вы)
+        ("координатор: pantheon merge request", "allow", br, "domain-coordinator", False,
+         B("pantheon merge request 7 -R latark/agent-kit")),
+        ("координатор: pantheon merge status", "allow", br, "domain-coordinator", False, B("pantheon merge status")),
+        ("координатор: pantheon merge cancel", "allow", br, "domain-coordinator", False,
+         B("pantheon merge cancel 7 -R latark/agent-kit")),
+        ("координатор: pantheon merge run — отказ", "deny", br, "domain-coordinator", False, B("pantheon merge run")),
+        ("hq: pantheon merge run — отказ", "deny", "ai/pantheon", "hq", False, B("pantheon merge run --click")),
+        ("субагент: python3 lib/pantheon.py merge run — отказ", "deny", br, "dev-opus", True,
+         B("python3 ~/.local/bin/pantheon merge run")),
+        ("координатор: pantheon merge $X — отказ", "deny", br, "domain-coordinator", False, B("pantheon merge $X")),
+        ("вы: pantheon merge run", "allow", ".", "", False, B("pantheon merge run")),
         # --- шаг 1.2: private (SEC-11, SEC-21) ---
         ("private: argus читает me/ — отказ", "deny", br, "argus", True, R(K("me/finance.md"))),
         ("private: prometheus Grep по всей ~/ai/knowledge — отказ", "deny", br, "prometheus", True, G(K(""))),
