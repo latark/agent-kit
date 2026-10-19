@@ -166,6 +166,8 @@ class Env:
                "PANTHEON_NOTIFY_LOG": self.notify, "FAKE_CLAUDE_LOG": self.log, "FAKE_AGENTS": self.agents_file,
                "PANTHEON_FAKE_SWAP": "1.0", "PANTHEON_FAKE_PS": "", "PANTHEON_FAKE_CC": "2.1.292",
                "PANTHEON_FAKE_LIMIT": "10", "PANTHEON_CAFFEINATE": os.path.join(self.bin, "caffeinate")}
+        if "TZ" in os.environ:  # дочерний процесс в том же поясе, что и тест, который считает местное время (metis-0222)
+            env["TZ"] = os.environ["TZ"]
         env.update(self.extra)
         env.update(extra or {})
         return subprocess.run([*(argv or [PY311, "-I", LIB]), *args], env=env, capture_output=True, text=True, timeout=60)

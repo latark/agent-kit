@@ -705,6 +705,8 @@ def test_status_format():
     e.snap(t - 300, 41.0, resets)
     env = {"PATH": os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pantheon, "PANTHEON_STATE": e.state,
            "PANTHEON_NOW": str(t), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": _ROOT}
+    if "TZ" in os.environ:  # дочерний процесс в том же поясе, что и тест (metis-0222)
+        env["TZ"] = os.environ["TZ"]
     run = lambda *a: subprocess.run([PY311, "-I", os.path.join(LIB, "pantheon.py"), *a], env=env,  # noqa: E731
                                     capture_output=True, text=True, timeout=60)
     r = run("night")
