@@ -464,7 +464,7 @@ def tg_read_path():
 
 
 def child_env():
-    env = P.run_env()
+    env = P.claude_env()
     for k in list(env):
         if k == "CLAUDECODE" or k.startswith("CLAUDE_CODE_") or k in ("PANTHEON_SESSION", "PANTHEON_ROLE"):
             env.pop(k)

@@ -575,6 +575,16 @@ def main():
           and mem_p in load("athena-shop")["sandbox"]["filesystem"]["allowWrite"]
           and mem_p in load("hq")["sandbox"]["filesystem"]["allowWrite"])
 
+    # ревью 90a, п.4: обновили плагин (installed_plugins.json новее сборки) — окна пересобираются на новый путь guard
+    t1 = json.load(open(os.path.join(state, "domains.json")))["built_ts"]
+    inst = os.path.join(tmp, ".claude", "plugins", "installed_plugins.json")
+    os.makedirs(os.path.dirname(inst), exist_ok=True)
+    open(inst, "w").write("{}")
+    os.utime(inst, (t1 + 30, t1 + 30))
+    subprocess.run([PY311, "-I", LIB, "domains", "build", "--if-changed"], env=env, capture_output=True)
+    check("installed_plugins.json новее сборки: окна пересобраны (built_ts вырос)",
+          json.load(open(os.path.join(state, "domains.json")))["built_ts"] > t1)
+
     # окна задач расписания (P0-3, metis-0063): clio, prometheus, iris — своя песочница
     jc, jp, ji = load("job-clio"), load("job-prometheus"), load("job-iris")
     know, scout = real("ai/knowledge"), real("pantheon/scout")

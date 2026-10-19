@@ -314,7 +314,7 @@ def run_env():
 # Роль окна и её агент — переменные ОКНА, а не машины (metis-0321, находка СБ 20.10): `claude --bg`, `claude agents`,
 # respawn и прочие вызовы claude поднимают общий `claude daemon`, он наследует окружение первого позвавшего, а фоновые
 # окна идут из его запасных процессов. Запущенный из окна Пританея демон раздал бы PANTHEON_ROLE=hq всем фоновым окнам.
-ROLE_ENV = ("PANTHEON_ROLE", "PANTHEON_SESSION", "CLAUDE_CODE_AGENT")
+ROLE_ENV = ("PANTHEON_ROLE", "PANTHEON_SESSION", "CLAUDE_CODE_AGENT", "PANTHEON_ORIGIN")
 
 
 def claude_env():
@@ -1309,9 +1309,9 @@ def jobs_show():
 MANAGED = "/Library/Application Support/ClaudeCode/managed-settings.json"
 
 
-def _sh(*cmd, timeout=20):
+def _sh(*cmd, timeout=20, env=None):
     try:
-        r = subprocess.run(list(cmd), capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(list(cmd), capture_output=True, text=True, timeout=timeout, env=env)
         return r.stdout.strip() if r.returncode == 0 else ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -1513,7 +1513,7 @@ def status():
             warn.append("swap")
     with contextlib.suppress(Exception):
         lines.append(awake_mod().status_line())
-    lines.append(f"Claude Code {(_sh('claude', '--version').split() or ['?'])[0]} · guard {_plugin_version('guard')} · "
+    lines.append(f"Claude Code {(_sh('claude', '--version', env=claude_env()).split() or ['?'])[0]} · guard {_plugin_version('guard')} · "
                  f"pantheon {_plugin_version('pantheon')}")
     section("Mac", lines)
 
@@ -1766,7 +1766,9 @@ def domains_build(if_changed=False):
         # пишет файл, только если текст изменился, — пересборка одна, следующий тик уже тихий
         # и проектные настройки папок запуска направлений: allow с gh pr merge роняет окно (metis-0137)
         launches = [launch_folder(fs) for fs in (read_json(path("domains.json")).get("domains") or {}).values()]
-        watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS, CLAUDE_TMP,
+        # и реестр установленных плагинов: путь guard.py и agents.py окон берётся из него — обновили guard, окна
+        # пересобираются на новый путь (metis-0321, ревью 90a)
+        watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS, CLAUDE_TMP, INSTALLED_PLUGINS,
                    *(os.path.join(l, ".claude", fn) for l in launches if l for fn in PROJECT_SETTINGS_FILES))
         newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
         # и пропавшее окно задачи расписания (P0-3): без него задача не идёт — в том числе сразу после обновления
@@ -5004,11 +5006,14 @@ PLIST_TMPL = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
+INSTALLED_PLUGINS = os.path.join(HOME, ".claude", "plugins", "installed_plugins.json")
+
+
 def installed_dir(name):
     """Папка установленной версии плагина name@agent-kit уровня пользователя — installPath из installed_plugins.json,
     только внутри ~/.claude/plugins/cache и только существующая; иначе None. Без вызова claude: install и
     plugins-update берут то, что Claude Code уже записал."""
-    data = read_json(os.path.join(HOME, ".claude", "plugins", "installed_plugins.json"))
+    data = read_json(INSTALLED_PLUGINS)
     rows = (data.get("plugins") if isinstance(data, dict) else None) or {}
     rows = rows.get(f"{name}@{MARKETPLACE}") if isinstance(rows, dict) else None
     cache = os.path.realpath(os.path.join(HOME, ".claude", "plugins", "cache")) + os.sep
@@ -6138,7 +6143,10 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
         _plugins_mark(marks, name, None)
         if name == "pantheon" and row.get("installPath"):
             # живой код тика и команды pantheon — только проверенная и вставшая версия (metis-0321)
-            link_current(os.path.realpath(row["installPath"]))
+            try:
+                link_current(os.path.realpath(row["installPath"]))
+            except OSError as e:
+                alert(f"pantheon: current не перевесилась на {row['installPath']}: {type(e).__name__} {e}", "plugins-update")
         _plugins_journal(f"{name} {old} → {new}: обновлён")
         _plugins_respawn_mark(name)
         alert(f"обновлён {name} {old} → {new}, плановый проход перезапустит свободные окна (Зевса — вы сами: pantheon start zeus "
@@ -6216,6 +6224,21 @@ def _plugins_red(marks, name, old, new, log, what):
     return ALERTED
 
 
+def _current_sync():
+    """Новее нет (например, версию поставили руками `claude plugin update`): current должна вести в установленную папку.
+    Отстала или повисла — перевесить на installed_dir (версия та же, что у поставленной); сбой — тревога."""
+    want = installed_dir("pantheon")
+    if not want:
+        return
+    try:
+        if os.path.realpath(CURRENT) == want and os.path.isdir(CURRENT):
+            return
+        link_current(want)
+        _plugins_journal(f"pantheon: current перевешена на установленную {want}")
+    except OSError as e:
+        alert(f"pantheon: current не перевесилась на {want}: {type(e).__name__} {e}", "plugins-update")
+
+
 def _plugins_update(quiet):
     # остатки прогона, прерванного таймаутом задачи или сбоем (блокировка взята — чужого прогона нет)
     shutil.rmtree(path("plugins", "tmp"), ignore_errors=True)
@@ -6241,6 +6264,8 @@ def _plugins_update(quiet):
             continue
         old, (new, src) = installed[name]["version"], catalog[name]
         if not _version_newer(new, old):
+            if name == "pantheon":
+                _current_sync()
             if not quiet:
                 print(f"{name}: {old}, новее нет")
             continue

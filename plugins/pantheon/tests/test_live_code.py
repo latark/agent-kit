@@ -188,10 +188,56 @@ def claude_calls(path):
     return out
 
 
-for name in ("pantheon.py", "watch.py"):
-    calls = claude_calls(os.path.join(LIBDIR, name))
+def _is_claude(e):
+    """Первый элемент argv — claude: литерал "claude" или claude_bin()/claude_path()."""
+    if isinstance(e, ast.Constant):
+        return e.value == "claude"
+    return isinstance(e, ast.Call) and ast.unparse(e.func).split(".")[-1] in ("claude_bin", "claude_path")
+
+
+def all_claude_calls(path):
+    """[(строка, функция, есть ли env=…claude_env…)] — любой вызов subprocess.*, os.exec*, обёрток run/_sh, у которых
+    argv начинается с claude (литерал, claude_bin(), claude_path()) или идёт переменной argv из такого списка."""
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    out = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        claude_argv = any(isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "argv" for t in n.targets)
+                          and isinstance(n.value, ast.List) and n.value.elts and _is_claude(n.value.elts[0])
+                          for n in ast.walk(fn))
+        for n in ast.walk(fn):
+            if not isinstance(n, ast.Call) or not n.args:
+                continue
+            f = ast.unparse(n.func)
+            base = f.split(".")[-1]
+            if not (f.startswith(("subprocess.", "os.exec")) or base in ("run", "_sh")):
+                continue
+            first = n.args[1] if f.startswith("os.exec") and len(n.args) > 1 else n.args[0]
+            if base == "_sh":
+                hit = _is_claude(first)
+            else:
+                hit = (isinstance(first, ast.List) and first.elts and _is_claude(first.elts[0])) \
+                    or (isinstance(first, ast.Name) and first.id == "argv" and claude_argv)
+            if not hit:
+                continue
+            env = [k.value for k in n.keywords if k.arg == "env"] + (n.args[2:3] if f == "os.execve" else [])
+            out.append((n.lineno, fn.name, bool(env) and "claude_env" in ast.unparse(env[0])))
+    return out
+
+
+total = 0
+for name in sorted(os.listdir(LIBDIR)):
+    if not name.endswith(".py"):
+        continue
+    calls = all_claude_calls(os.path.join(LIBDIR, name))
+    total += len(calls)
     bad = [f"{name}:{ln} {fn}" for ln, fn, ok in calls if not ok]
-    check(f"{name}: все запуски claude ({len(calls)}) — с env=claude_env()", calls and not bad, bad)
+    check(f"{name}: все запуски claude ({len(calls)}) — с env=claude_env()", not bad, bad)
+check("lib: запусков claude найдено достаточно (pantheon, watch, qmd, setup — не пустой обход)", total >= 20, total)
+check("lib/read.py: child_env строится от claude_env()", "env = P.claude_env()" in open(os.path.join(LIBDIR, "read.py")).read())
+check("ROLE_ENV: PANTHEON_ORIGIN входит (её ставит run_settings, читает ctx)",
+      '"PANTHEON_ORIGIN"' in open(LIB, encoding="utf-8").read().split("ROLE_ENV = (", 1)[1].split(")", 1)[0])
 
 print(f"\n{sum(results)}/{len(results)} прошли")
 sys.exit(0 if all(results) else 1)
