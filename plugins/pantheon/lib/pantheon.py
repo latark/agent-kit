@@ -166,8 +166,11 @@ LIB = os.path.dirname(os.path.realpath(__file__))
 PLUGIN = os.path.dirname(LIB)
 LABEL = "pantheon.tick"
 # Неизменный путь к плагину: на него смотрят задача launchd, команда ~/.local/bin/pantheon и обработчики слияния
-# в ~/ai/pantheon/.git/config. `pantheon install` перевешивает ссылку на ту копию плагина, из которой запущен
-# (до шага 0.4 — рабочая копия agent-kit, с 0.4 — клон маркетплейса), поэтому обновление плагина путей не ломает.
+# в ~/ai/pantheon/.git/config. Ссылка ведёт на УСТАНОВЛЕННУЮ версию — папку кэша из installed_plugins.json
+# (metis-0321), а не на клон маркетплейса: клон `claude plugin marketplace update` в plugins-update пересоздаёт
+# головой main сразу после слияния, и непроверенный код ожил бы у тика и всех задач мимо шлюза выпуска. Перевешивают
+# её `pantheon install` и успешная установка в plugins-update (_plugin_install); установки нет — копия, из которой
+# запущен install (рабочая копия при разработке).
 CURRENT = os.path.join(HOME, ".local", "share", "pantheon", "current")
 TEMPFAIL = 75   # задача ждёт (нет сети): не сбой, тревоги нет
 ALERTED = 76    # сбой, о котором задача уже сообщила сама: вторую тревогу не давать
@@ -307,6 +310,20 @@ def run_env():
              os.path.join(HOME, ".local", "bin")]
     env["PATH"] = ":".join(extra + [env.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin"])
     env["PANTHEON_PYTHON"] = sys.executable  # bin/pantheon дочерних задач берёт тот же интерпретатор (lib/find-python.sh)
+    return env
+
+
+# Роль окна и её агент — переменные ОКНА, а не машины (metis-0321, находка СБ 20.10): `claude --bg`, `claude agents`,
+# respawn и прочие вызовы claude поднимают общий `claude daemon`, он наследует окружение первого позвавшего, а фоновые
+# окна идут из его запасных процессов. Запущенный из окна Пританея демон раздал бы PANTHEON_ROLE=hq всем фоновым окнам.
+ROLE_ENV = ("PANTHEON_ROLE", "PANTHEON_SESSION", "CLAUDE_CODE_AGENT")
+
+
+def claude_env():
+    """Окружение для любого запуска claude из pantheon: run_env без ROLE_ENV. Роль окну задаёт его --settings (env)."""
+    env = run_env()
+    for k in ROLE_ENV:
+        env.pop(k, None)
     return env
 
 
@@ -1157,7 +1174,8 @@ def run_job(name):
             timeout = float(job.get("timeout", 600))
             # Своя группа процессов: по таймауту гасится вся задача, а не только первый процесс.
             proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, env=run_env(), cwd=HOME, start_new_session=True)
+                                    text=True, env=claude_env() if os.path.basename(argv[0]) == "claude" else run_env(), cwd=HOME,
+                                    start_new_session=True)
             try:
                 out, _ = proc.communicate(timeout=timeout)
                 rc = proc.returncode
@@ -1303,8 +1321,9 @@ def _sh(*cmd, timeout=20):
 
 
 def _plugin_version(name):
-    d = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", name, ".claude-plugin",
-                     "plugin.json")
+    """Установленная версия (кэш), а не голова клона маркетплейса: клон опережает выпуск (metis-0321)."""
+    d = os.path.join(installed_dir(name) or os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit",
+                                                         "plugins", name), ".claude-plugin", "plugin.json")
     with contextlib.suppress(OSError, ValueError):
         return json.load(open(d)).get("version", "?")
     return "?"
@@ -2014,13 +2033,33 @@ GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Tas
 MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks", "guard.py")
 
 
+def _installed_hook(name, market_path):
+    """Тот же файл хука из УСТАНОВЛЕННОЙ версии плагина (кэш ~/.claude/plugins/cache, metis-0321): клон маркетплейса
+    plugins-update пересоздаёт головой main сразу после слияния, и строгий guard окон шёл бы непроверенным. Установки
+    нет — клон, как раньше; обе папки внутри ~/.claude/plugins, ролям туда не записать."""
+    d = installed_dir(name)
+    if d:
+        rel = os.path.relpath(market_path, os.path.join(HOME, ".claude", "plugins", "marketplaces", MARKETPLACE,
+                                                        "plugins", name))
+        p = os.path.join(d, rel)
+        if os.path.isfile(p) and not os.path.islink(p):
+            return os.path.realpath(p)
+    return market_path
+
+
 def guard_script():
+    hook = _installed_hook("guard", MARKET_GUARD)
+    if hook != MARKET_GUARD:
+        return hook
     if os.path.isfile(MARKET_GUARD) and not os.path.islink(MARKET_GUARD):
         return os.path.realpath(MARKET_GUARD)
     return MARKET_GUARD  # файла нет — окно роли не пустит ни одной записи (отказ при сбое), тревога в sandbox_build
 
 
 def agents_script():
+    hook = _installed_hook("pantheon", MARKET_AGENTS)
+    if hook != MARKET_AGENTS:
+        return hook
     if os.path.isfile(MARKET_AGENTS) and not os.path.islink(MARKET_AGENTS):
         return os.path.realpath(MARKET_AGENTS)
     return MARKET_AGENTS  # файла нет — python выйдет с кодом 2, окно не позовёт никого; тревога в sandbox_build
@@ -2584,7 +2623,7 @@ def claude_bin():
 
 
 def agents_all():
-    r = subprocess.run([claude_bin(), "agents", "--json", "--all"], capture_output=True, text=True, timeout=60)
+    r = subprocess.run([claude_bin(), "agents", "--json", "--all"], env=claude_env(), capture_output=True, text=True, timeout=60)
     try:
         data = json.loads(r.stdout or "[]")
     except ValueError:
@@ -2837,7 +2876,7 @@ def _resume_session(name, a, text, origin):
         text = f"{START_MARK} поручение от {origin}] {text}"
     pushed = push_text(sid, text) if a.get("id") else None
     if pushed:  # без текста respawn поднял бы сессию молча — тогда сразу запасной путь, он текст передаёт
-        r = subprocess.run([claude_bin(), "respawn", a["id"]], capture_output=True, text=True, timeout=180)
+        r = subprocess.run([claude_bin(), "respawn", a["id"]], env=claude_env(), capture_output=True, text=True, timeout=180)
         start_log(f"respawn\t{name}\t{a['id']}\t{origin}\t{r.returncode}")
         if r.returncode == 0:
             rm_previous(name, "respawn", keep={a["id"]}, wait=True)
@@ -2849,7 +2888,7 @@ def _resume_session(name, a, text, origin):
     role = "hq" if name == "zeus" else got[1]
     argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--agent", role, "--name", name, "--settings", run, text]
     before = {x.get("id") for x in agents_all() or [] if x.get("id")}
-    r = subprocess.run(argv, cwd=a.get("cwd") or HOME, capture_output=True, text=True, timeout=180)
+    r = subprocess.run(argv, cwd=a.get("cwd") or HOME, env=claude_env(), capture_output=True, text=True, timeout=180)
     m = COPY_NOTE.search((r.stdout or "") + (r.stderr or ""))
     start_log(f"resume\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\tcopy {m.group(1)}" if m else ""))
     if m:
@@ -3023,7 +3062,7 @@ def _fresh_start(name, a, text, origin, reason=None):
         return 1
     before = {x.get("id") for x in agents_all() or [] if x.get("id")}
     argv = [claude_bin(), "--bg", "--agent", role, "--name", name, "--settings", win, text]
-    r = subprocess.run(argv, cwd=folder, capture_output=True, text=True, timeout=180)
+    r = subprocess.run(argv, cwd=folder, env=claude_env(), capture_output=True, text=True, timeout=180)
     start_log(f"fresh-start\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\t{reason}" if reason else ""))
     if r.returncode != 0:
         return r.returncode
@@ -3051,7 +3090,7 @@ def stop_and_rm(name, sid):
     (и её worktree, если он чистый); переписка остаётся, вернуть — pantheon start / resume. Без --discard-unpushed и
     --force-remove-worktree: сессию с неотправленной работой не удаляем насильно. Возвращает None или причину отказа."""
     try:
-        st = subprocess.run([claude_bin(), "stop", sid], capture_output=True, text=True, timeout=60)
+        st = subprocess.run([claude_bin(), "stop", sid], env=claude_env(), capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError) as e:
         return f"claude stop не выполнился: {e}"[:200]
     if st.returncode != 0:  # не остановилась — rm не зовём (rm сносит сессию, а она ещё может работать)
@@ -3066,7 +3105,7 @@ def rm_session(sid, tries=2):
     r = None
     for attempt in range(tries):  # stop возвращается раньше, чем процесс ушёл: rm на ещё живую сессию может отказать
         try:
-            r = subprocess.run([claude_bin(), "rm", sid], capture_output=True, text=True, timeout=60)
+            r = subprocess.run([claude_bin(), "rm", sid], env=claude_env(), capture_output=True, text=True, timeout=60)
         except (OSError, subprocess.SubprocessError) as e:
             return f"claude rm не выполнился: {e}"[:200]
         if r.returncode == 0:
@@ -3135,7 +3174,7 @@ def rm_previous(name, how, before=None, keep=(), loud=False, wait=False):
 def stop_copies(name, live, why="stop-restart"):
     # без rm (metis-0239): здесь сессию поднимают снова или оставляют для claude attach — rm её бы удалил
     for a in live:
-        subprocess.run([claude_bin(), "stop", a["id"]], capture_output=True, text=True, timeout=60)
+        subprocess.run([claude_bin(), "stop", a["id"]], env=claude_env(), capture_output=True, text=True, timeout=60)
         start_log(f"{why}\t{name}\t{a.get('name')}\t{a['id']}")
 
 
@@ -3387,7 +3426,7 @@ def start(rest):
                 return 1
         start_log(f"zeus\t{origin}\t{PANTHEON}")
         os.chdir(PANTHEON)
-        os.execv(argv[0], argv)
+        os.execve(argv[0], argv, claude_env())
     got = start_target(target, rest)
     if isinstance(got, str):
         print(f"pantheon start: {got}", file=sys.stderr)
@@ -3454,7 +3493,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
         print(f"pantheon start: нет окна {win.replace(HOME, '~')} — pantheon domains build", file=sys.stderr)
         return 1
     before = {a.get("id") for a in agents_all() or [] if a.get("id")}
-    r = subprocess.run(argv, cwd=folder, capture_output=True, text=True, timeout=180)
+    r = subprocess.run(argv, cwd=folder, env=claude_env(), capture_output=True, text=True, timeout=180)
     start_log(f"{name}\t{origin}\t{folder}\t{r.returncode}")
     if origin == "zeus" and r.returncode == 0 and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
         alert(f"запуск {name} по поручению Зевса без вашего слова в его окне за {OWNER_WORD_WINDOW // 60} мин — "
@@ -4971,14 +5010,42 @@ PLIST_TMPL = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
+def installed_dir(name):
+    """Папка установленной версии плагина name@agent-kit уровня пользователя — installPath из installed_plugins.json,
+    только внутри ~/.claude/plugins/cache и только существующая; иначе None. Без вызова claude: install и
+    plugins-update берут то, что Claude Code уже записал."""
+    data = read_json(os.path.join(HOME, ".claude", "plugins", "installed_plugins.json"))
+    rows = (data.get("plugins") if isinstance(data, dict) else None) or {}
+    rows = rows.get(f"{name}@{MARKETPLACE}") if isinstance(rows, dict) else None
+    cache = os.path.realpath(os.path.join(HOME, ".claude", "plugins", "cache")) + os.sep
+    for row in rows if isinstance(rows, list) else []:
+        p = row.get("installPath") if isinstance(row, dict) and row.get("scope") == "user" else None
+        if isinstance(p, str) and os.path.realpath(p).startswith(cache) and os.path.isdir(p) \
+                and os.path.isfile(os.path.join(p, ".claude-plugin", "plugin.json")):
+            return os.path.realpath(p)
+    return None
+
+
+def link_current(target):
+    """CURRENT → target одной заменой (ссылка рядом и os.replace): тик, запущенный в эту секунду, не застанет дыры."""
+    os.makedirs(os.path.dirname(CURRENT), exist_ok=True)
+    if os.path.islink(CURRENT) and os.readlink(CURRENT) == target:
+        return target
+    tmp = f"{CURRENT}.new-{os.getpid()}"
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(tmp)
+    os.symlink(target, tmp)
+    if os.path.isdir(CURRENT) and not os.path.islink(CURRENT):
+        shutil.rmtree(CURRENT)  # не ссылка, а папка (ручная правка): os.replace на папку не встанет
+    os.replace(tmp, CURRENT)
+    return target
+
+
 def install():
     """Задача launchd, команда pantheon и обработчики слияния ~/ai/pantheon — через неизменную ссылку CURRENT."""
     os.makedirs(path("logs"), exist_ok=True)
     os.makedirs(os.path.dirname(PLIST), exist_ok=True)
-    os.makedirs(os.path.dirname(CURRENT), exist_ok=True)
-    if os.path.islink(CURRENT) or os.path.exists(CURRENT):
-        os.remove(CURRENT)
-    os.symlink(PLUGIN, CURRENT)
+    target = link_current(installed_dir("pantheon") or PLUGIN)
     tick_bin = os.path.join(CURRENT, "bin", "pantheon-tick")
     env_path = ":".join([os.path.dirname(sys.executable), "/opt/homebrew/bin",
                          os.path.join(HOME, ".local", "bin"), "/usr/bin:/bin:/usr/sbin:/sbin"])
@@ -5015,7 +5082,7 @@ def install():
         print(r.stderr.strip(), file=sys.stderr)
         return r.returncode
     print(f"установлено: {PLIST.replace(HOME, '~')} и команда {link.replace(HOME, '~')} → "
-          f"{CURRENT.replace(HOME, '~')} → {PLUGIN.replace(HOME, '~')}")
+          f"{CURRENT.replace(HOME, '~')} → {target.replace(HOME, '~')}")
     return 0
 
 
@@ -5892,7 +5959,7 @@ def _version_newer(new, old):
 def _plugins_installed():
     """{имя: {version, installPath}} — плагины agent-kit уровня пользователя по `claude plugin list --json`; None — сбой."""
     try:
-        r = subprocess.run([claude_bin(), "plugin", "list", "--json"], capture_output=True, text=True, timeout=120)
+        r = subprocess.run([claude_bin(), "plugin", "list", "--json"], env=claude_env(), capture_output=True, text=True, timeout=120)
         data = json.loads(r.stdout or "null")
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
@@ -6102,7 +6169,7 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
     встало, с проверенной копией: версия и хеш дерева installPath."""
     try:
         r = subprocess.run([claude_bin(), "plugin", "update", f"{name}@{MARKETPLACE}", "-s", "user"],
-                           capture_output=True, text=True, timeout=600)
+                           env=claude_env(), capture_output=True, text=True, timeout=600)
         ok = r.returncode == 0
         why = f"код {r.returncode}: {' '.join((r.stderr or r.stdout or '').split())[:200]}"
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -6111,6 +6178,9 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
     got = row.get("version")
     if got == new and _tree_hash(row.get("installPath")) == digest:
         _plugins_mark(marks, name, None)
+        if name == "pantheon" and row.get("installPath"):
+            # живой код тика и команды pantheon — только проверенная и вставшая версия (metis-0321)
+            link_current(os.path.realpath(row["installPath"]))
         _plugins_journal(f"{name} {old} → {new}: обновлён")
         _plugins_respawn_mark(name)
         alert(f"обновлён {name} {old} → {new}, плановый проход перезапустит свободные окна (Зевса — вы сами: pantheon start zeus "
@@ -6194,7 +6264,7 @@ def _plugins_update(quiet):
     os.makedirs(path("plugins", "tmp"), exist_ok=True)
     try:
         ok = subprocess.run([claude_bin(), "plugin", "marketplace", "update", MARKETPLACE],
-                            capture_output=True, text=True, timeout=300).returncode == 0
+                            env=claude_env(), capture_output=True, text=True, timeout=300).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         ok = False
     if not ok:  # нет сети или каталог недоступен — подождём следующего раза, без тревоги
