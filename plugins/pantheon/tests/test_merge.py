@@ -8,6 +8,7 @@ head перед окном (новый «вернуть», нет тестов) 
 позже; окно не показать → уведомление с `merge run --click`, щелчок сливает; из окна Claude Code — отказ; строку
 согласия принимает шлюз guard (настоящий merge_gate.owner_approved); тик запускает проход, только когда есть заявки.
 """
+import hashlib
 import json
 import os
 import re
@@ -49,8 +50,16 @@ if sys.argv[1:3] == ["pr", "view"]:
 if sys.argv[1:3] == ["pr", "merge"]:
     p = os.path.join(rec, "gh-merge-rc")
     sys.exit(int(open(p).read()) if os.path.exists(p) else 0)
+if sys.argv[1] == "api" and "/pulls/" in sys.argv[2] and sys.argv[2].split("?")[0].endswith("/files"):
+    p = os.path.join(rec, "gh-files.jsonl")
+    if not os.path.exists(p):
+        sys.exit(1)
+    print(open(p).read(), end="")
+    sys.exit(0)
 sys.exit(2)
 '''
+CORE_FILE = "plugins/guard/hooks/merge_gate.py"
+FILES = ["README.md", CORE_FILE]
 
 # помощник окна: код — из rec/touchid-rc (по умолчанию 0); argv — в rec/touchid-argv.jsonl
 FAKE_TOUCHID = r'''
@@ -94,7 +103,12 @@ class Box:
         for d in (self.pantheon, self.state, self.rec, self.bin, os.path.join(self.home, ".claude", "pantheon")):
             os.makedirs(d, exist_ok=True)
         script(os.path.join(self.bin, "gh"), FAKE_GH)
-        self.touchid = script(os.path.join(self.tmp, "pantheon-touchid"), FAKE_TOUCHID)
+        # поддельный помощник окна — только там, где его берёт проход: STATE/bin с отметкой sha256 исходника
+        sbin = os.path.join(self.state, "bin")
+        os.makedirs(sbin, mode=0o700)
+        self.touchid = script(os.path.join(sbin, "pantheon-touchid"), FAKE_TOUCHID)
+        with open(os.path.join(sbin, "pantheon-touchid.sha256"), "w") as fh:
+            fh.write(hashlib.sha256(open(os.path.join(LIBDIR, "touchid.swift"), "rb").read()).hexdigest() + "\n")
         self.notify_log = os.path.join(self.rec, "notify.log")
         with open(os.path.join(self.home, ".claude", "pantheon", "policy.toml"), "w") as fh:
             fh.write("[merge_repos]\n\"metis-pantheon\" = [%s]\n\"athena-shop\" = [\"latark/shop\"]\n"
@@ -107,7 +121,7 @@ class Box:
     def env(self, t, extra=None):
         env = {"PATH": self.bin + ":/usr/bin:/bin", "HOME": self.home, "PANTHEON_HOME": self.pantheon,
                "PANTHEON_STATE": self.state, "PANTHEON_NOW": str(t), "PANTHEON_HOST": "mac-a",
-               "PANTHEON_NOTIFY_LOG": self.notify_log, "PANTHEON_TOUCHID": self.touchid, "PANTHEON_FAKE_IDLE": "5",
+               "PANTHEON_NOTIFY_LOG": self.notify_log, "PANTHEON_FAKE_IDLE": "5",
                "FAKE_REC": self.rec, "TMPDIR": _ROOT, "GH_REPO": "evil/repo", "GH_HOST": "evil.example"}
         env.update(extra or {})
         return {k: v for k, v in env.items() if v is not None}
@@ -124,10 +138,17 @@ class Box:
     def run(self, t=T0, click=False, extra=None):
         return self.cli(["merge", "run"] + (["--click"] if click else []), t=t, extra=extra)
 
-    def view(self, sha, state="OPEN", draft=False, checks=None, title=TITLE):
+    def view(self, sha, state="OPEN", draft=False, checks=None, title=TITLE, files=None, count=None):
+        """Ответ gh pr view и REST pulls/N/files: files — имена или словари; count — changedFiles (по умолчанию
+        len(files))."""
+        files = FILES if files is None else files
+        recs = [f if isinstance(f, dict) else {"filename": f, "status": "modified"} for f in files]
         with open(os.path.join(self.rec, "gh-view.json"), "w") as fh:
             json.dump({"headRefOid": sha, "state": state, "isDraft": draft, "title": title,
-                       "statusCheckRollup": ci("SUCCESS", "SKIPPED") if checks is None else checks}, fh)
+                       "statusCheckRollup": ci("SUCCESS", "SKIPPED") if checks is None else checks,
+                       "changedFiles": len(recs) if count is None else count}, fh)
+        with open(os.path.join(self.rec, "gh-files.jsonl"), "w") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in recs))
 
     def set(self, name, value):
         with open(os.path.join(self.rec, name), "w") as fh:
@@ -180,10 +201,10 @@ class Box:
         return [json.loads(ln)["event"] for ln in open(p)] if os.path.exists(p) else []
 
 
-def guard_approves(b, repo, pr, sha):
-    """Настоящий шлюз guard: принимает ли строку согласия из owner-log этой коробки."""
-    code = ("import sys; sys.path.insert(0, %r); import guard; import merge_gate as m; print(m.owner_approved(%r, %d, %r))"
-            % (GUARD_HOOKS, repo, pr, sha))
+def guard_approves(b, repo, pr, sha, now=T0):
+    """Настоящий шлюз guard: принимает ли строку согласия из owner-log этой коробки (часы шлюза — now)."""
+    code = ("import sys; sys.path.insert(0, %r); import guard; import merge_gate as m; "
+            "print(m.owner_approved(%r, %d, %r, now=%r))" % (GUARD_HOOKS, repo, pr, sha, now))
     r = subprocess.run([sys.executable, "-I", "-c", code], env={"HOME": b.home, "PATH": "/usr/bin:/bin"},
                        capture_output=True, text=True, timeout=60)
     return r.stdout.strip() == "True", r.stdout + r.stderr
@@ -202,8 +223,9 @@ def test_finger_merges_exact_sha():
     check("заявка: окна и слияния нет — только плановый проход", not b.windows() and not b.merges(), b.calls("gh"))
     r = b.run()
     w = b.windows()
-    check("палец: одно окно с текстом «Слить repo#N (sha7): заголовок. argus ×2 ✓ … CI ✓»",
-          len(w) == 1 and w[0][0] == f"Слить {REPO}#{PR} ({SHA[:7]}): {TITLE}. argus ×2 ✓, CI ✓" and w[0][1] == "120", w)
+    check("палец: одно окно «Слить repo#N (sha7), файлов N, ядро: <файлы>. argus ×2 ✓, CI ✓. Заголовок: «…»»",
+          len(w) == 1 and w[0][0] == f"Слить {REPO}#{PR} ({SHA[:7]}), файлов 2, ядро: {CORE_FILE}. argus ×2 ✓, "
+          f"CI ✓. Заголовок: «{TITLE}»" and w[0][1] == "120", w)
     check("палец: gh pr merge N -R repo --match-head-commit <sha> --merge — ровно один раз",
           b.merges() == [["pr", "merge", str(PR), "-R", REPO, "--match-head-commit", SHA, "--merge"]], b.merges())
     check("gh: GH_REPO и GH_HOST из окружения убраны",
@@ -309,6 +331,14 @@ def test_request_refusals():
     check("заявка: «принять» не на Opus не засчитан → отказ", r.returncode != 0 and b.req() is None, r.stderr)
     b = Box()
     b.records = []
+    b.add("tests")
+    b.add("accept", sid="s1", aid="a1")
+    b.add("accept", sid="s2", aid="a2", pr=PR + 1)   # тот же SHA, но вердикт на другой PR
+    r = b.request()
+    check("заявка: «принять» на другой PR тем же SHA не засчитан → отказ", r.returncode != 0 and b.req() is None
+          and "1 из 2" in r.stderr, r.stderr)
+    b = Box()
+    b.records = []
     b.add("accept", sid="s1", aid="a1")
     b.add("accept", sid="s2", aid="a2")
     r = b.request()
@@ -405,9 +435,206 @@ def test_refused_from_claude_window():
 def test_no_helper():
     b = Box()
     b.request()
-    b.run(extra={"PANTHEON_TOUCHID": os.path.join(b.tmp, "нет")})
-    check("помощника окна нет → слияния нет, заявка ждёт, тревога", not b.merges() and b.req() is not None
-          and "помощник" in b.alerts(), b.alerts())
+    # STATE/bin — ссылка на папку с исправным помощником: его не берут (и swiftc не зовут — папка не та)
+    sbin = os.path.join(b.state, "bin")
+    os.rename(sbin, os.path.join(b.tmp, "bin-real"))
+    os.symlink(os.path.join(b.tmp, "bin-real"), sbin)
+    b.run()
+    check("помощника окна нет (STATE/bin — ссылка) → окна и слияния нет, заявка ждёт, тревога",
+          not b.windows() and not b.merges() and b.req() is not None and "помощник" in b.alerts(), b.alerts())
+
+
+EVIL = r'''
+import os, sys
+open(os.path.join(os.environ["FAKE_REC"], "evil"), "a").write("x\n")
+sys.exit(0)
+'''
+
+
+def test_helper_not_from_env():
+    """argus-b 1: помощник окна из переменной окружения (launchctl setenv) не берётся — только STATE/bin."""
+    b = Box()
+    b.request()
+    evil = script(os.path.join(b.tmp, "evil-touchid"), EVIL)
+    b.set("touchid-rc", 1)   # настоящий (поддельный в STATE/bin) — «Не сливать»
+    b.run(extra={"PANTHEON_TOUCHID": evil})
+    check("PANTHEON_TOUCHID в окружении прохода не подменяет помощника: окно из STATE/bin, слияния нет",
+          len(b.windows()) == 1 and not b.merges() and not os.path.exists(os.path.join(b.rec, "evil"))
+          and not b.approve_lines(), (b.outs[-1], b.windows()))
+
+
+def test_helper_mark_and_swiftc():
+    """Помощник с отметкой не того исходника не берётся — пересборка /usr/bin/swiftc с чистым окружением. swiftc в
+    тесте подменён в процессе (subprocess.run), настоящий компилятор и окно не запускаются."""
+    b = Box()
+    with open(os.path.join(b.state, "bin", "pantheon-touchid.sha256"), "w") as fh:
+        fh.write("0" * 64 + "\n")
+    script(os.path.join(b.bin, "swiftc"), "import sys; sys.exit(1)\n")   # swiftc из PATH прохода — не берётся
+    code = ("import sys, json, types; sys.path.insert(0, %r); import pantheon as p; m = p.merge_mod(); calls = []\n"
+            "def fake(argv, **kw):\n"
+            "    calls.append([argv[0], sorted((kw.get('env') or {}).keys())])\n"
+            "    return types.SimpleNamespace(returncode=1, stdout='', stderr='сборка в тесте')\n"
+            "m.subprocess.run = fake\n"
+            "print(json.dumps([m.helper(), calls]))" % LIBDIR)
+    r = subprocess.run([PY311, "-I", "-c", code], env=b.env(T0, {"DEVELOPER_DIR": b.tmp, "SDKROOT": b.tmp}),
+                       capture_output=True, text=True, timeout=60)
+    try:
+        got, calls = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        got, calls = "?", None
+    want = [["/usr/bin/swiftc", ["HOME", "PATH"]]] if os.access("/usr/bin/swiftc", os.X_OK) else []
+    check("отметка sha256 не та → помощник не берётся, пересборка /usr/bin/swiftc без DEVELOPER_DIR/SDKROOT",
+          got is None and calls == want, r.stdout + r.stderr)
+
+
+def window_script(body, rc):
+    """Поддельный помощник: делает body (то, что случилось, пока окно открыто), пишет argv и выходит с кодом rc."""
+    return ("import json, os, sys\nrec = os.environ['FAKE_REC']\nstate = os.environ['PANTHEON_STATE']\n"
+            "open(os.path.join(rec, 'touchid-argv.jsonl'), 'a').write(json.dumps({'argv': sys.argv[1:]}) + '\\n')\n"
+            + body + "\nsys.exit(%d)\n" % rc)
+
+
+CANCEL_BODY = ("q = os.path.join(state, 'merge-queue')\n"
+               "[os.remove(os.path.join(q, f)) for f in os.listdir(q) if f.endswith('.json')]")
+
+
+def test_cancel_during_window():
+    """argus-a 1, argus-b 2: заявку сняли, пока окно открыто, — ни согласия, ни слияния, ни записи обратно."""
+    for rc in (0, 3, 2):
+        b = Box()
+        b.request()
+        script(b.touchid, window_script(CANCEL_BODY, rc))
+        b.run()
+        check(f"отмена во время окна, код {rc}: слияния и строки согласия нет, заявка не ожила, журнал gone",
+              not b.merges() and not b.approve_lines() and b.req() is None and b.log()[-1] == "gone"
+              and not os.path.exists(b.notify_log), (b.outs[-1], b.log()))
+        script(b.touchid, FAKE_TOUCHID)
+        b.run(t=T0 + 601)
+        check(f"отмена во время окна, код {rc}: через 10 минут окна нет", len(b.windows()) == 1, b.windows())
+
+
+def test_replaced_during_window():
+    """Во время окна роль поставила заявку заново (новое время): проход старую не сливает и новую не удаляет."""
+    body = ("p = os.path.join(state, 'merge-queue', 'latark__agent-kit__7.json')\nd = json.load(open(p))\n"
+            "d['created'] += 5\njson.dump(d, open(p, 'w'))")
+    for rc in (0, 1, 3):
+        b = Box()
+        b.request()
+        script(b.touchid, window_script(body, rc))
+        b.run()
+        req = b.req()
+        check(f"заявку заменили во время окна, код {rc}: слияния нет, новая заявка цела и без отметок",
+              not b.merges() and not b.approve_lines() and req is not None and req["created"] == T0 + 5
+              and "wait_until" not in req, (b.outs[-1], req))
+
+
+def test_reject_during_window():
+    """argus-a 1, argus-b 2: новый «вернуть» argus, пока окно открыто, — после пальца не сливать."""
+    rej = {"v": 1, "kind": "reject", "repo": [REPO], "pr": PR, "sha": SHA,
+           "by": {"agent_type": "argus", "agent_id": "a9", "session_id": "s9"},
+           "checklist": {"opened": "x", "ran": "y", "unchecked": "z"}}
+    body = "open(os.path.join(state, 'merge-gate', 'records.jsonl'), 'a').write(%r)" % (json.dumps(rej) + "\n")
+    b = Box()
+    b.request()
+    script(b.touchid, window_script(body, 0))
+    b.run()
+    check("«вернуть» во время окна: палец есть, но слияния и строки согласия нет, заявка снята с тревогой",
+          len(b.windows()) == 1 and not b.merges() and not b.approve_lines() and b.req() is None
+          and "после пальца" in b.alerts() and "вернуть" in b.alerts(), (b.outs[-1], b.alerts()))
+    body = ("v = json.load(open(os.path.join(rec, 'gh-view.json'))); v['headRefOid'] = '1234567' + 'f' * 33\n"
+            "json.dump(v, open(os.path.join(rec, 'gh-view.json'), 'w'))")
+    b = Box()
+    b.request()
+    script(b.touchid, window_script(body, 0))
+    b.run()
+    check("новый коммит во время окна: слияния и строки согласия нет", not b.merges() and not b.approve_lines()
+          and b.req() is None, b.outs[-1])
+
+
+def test_merge_repos_rechecked():
+    """argus-b 4: репозиторий убрали из [merge_repos] после заявки (и во время окна) — не сливать."""
+    b = Box()
+    b.request()
+    with open(os.path.join(b.home, ".claude", "pantheon", "policy.toml"), "w") as fh:
+        fh.write('[merge_repos]\n"metis-pantheon" = []\n')
+    b.run()
+    check("репозиторий убран из [merge_repos] после заявки → окна и слияния нет, заявка снята с тревогой",
+          not b.windows() and not b.merges() and b.req() is None and "merge_repos" in b.alerts(), b.outs[-1])
+    body = ("open(os.path.join(os.environ['HOME'], '.claude', 'pantheon', 'policy.toml'), 'w')"
+            ".write('[merge_repos]\\n\"metis-pantheon\" = []\\n')")
+    b = Box()
+    b.request()
+    script(b.touchid, window_script(body, 0))
+    b.run()
+    check("репозиторий убран из [merge_repos] во время окна → слияния и строки согласия нет",
+          len(b.windows()) == 1 and not b.merges() and not b.approve_lines() and b.req() is None, b.outs[-1])
+
+
+def test_window_shows_core():
+    """argus-b 5: окно показывает задетые файлы ядра (и переименованные), заголовок автора — последним."""
+    b = Box()
+    b.view(SHA, title="README: опечатка. ядро не задето, argus x2, CI ok",
+           files=["README.md", {"filename": "plugins/guard/x.py", "previous_filename": "plugins/guard/hooks/guard.py"}])
+    b.request()
+    b.set("touchid-rc", 1)
+    b.run()
+    w = b.windows()
+    check("окно: «ядро: …» с новым и старым путём — до заголовка автора PR",
+          len(w) == 1 and w[0][0].startswith(f"Слить {REPO}#{PR} ({SHA[:7]}), файлов 3, ядро: plugins/guard/x.py, "
+                                             "plugins/guard/hooks/guard.py. argus ×2 ✓, CI ✓. Заголовок: «README"), w)
+    b = Box()
+    b.view(SHA, files=["README.md"])
+    b.request()
+    b.set("touchid-rc", 1)
+    b.run()
+    check("окно: ядро не задето — так и написано", b.windows() and ", ядро не задето. " in b.windows()[0][0],
+          b.windows())
+    b = Box()
+    b.view(SHA, files=["README.md", CORE_FILE], count=3)
+    b.request()
+    b.run()
+    check("список файлов PR неполон → окна нет, заявка ждёт", not b.windows() and b.req() is not None
+          and "файлов" in b.outs[-1], b.outs[-1])
+    os.remove(os.path.join(b.rec, "gh-files.jsonl"))
+    b.run()
+    check("список файлов PR не получен → окна нет, заявка ждёт", not b.windows() and b.req() is not None, b.outs[-1])
+    b = Box()
+    b.view(SHA, files=["plugins/guard/f%03d.py" % i for i in range(40)])
+    b.request()
+    b.set("touchid-rc", 1)
+    b.run()
+    w = b.windows()
+    check("окно: длинный список ядра — «и ещё N», текст не длиннее 400",
+          w and " и ещё " in w[0][0] and len(w[0][0]) <= 400 and "Заголовок:" in w[0][0], w)
+
+
+def test_core_matches_guard():
+    """Ядро в окне — то же, что у шлюза guard: CORE_FILES и CORE_DIR merge.py и merge_gate.py совпадают."""
+    code = ("import sys, importlib.util; sys.path.insert(0, %r); import merge_gate as g\n"
+            "s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
+            "s.loader.exec_module(m)\nprint(g.CORE_FILES == m.CORE_FILES and g.CORE_DIR == m.CORE_DIR)"
+            % (GUARD_HOOKS, os.path.join(LIBDIR, "merge.py")))
+    r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    check("ядро merge.py == ядро merge_gate.py", r.stdout.strip() == "True", r.stdout + r.stderr)
+
+
+def test_approve_expires():
+    """argus-b 3: строка согласия в силе сутки; старая, из будущего и без разборного времени — нет."""
+    b = Box()
+    b.request()
+    b.run()
+    check("строка согласия записана", len(b.approve_lines()) == 1, b.approve_lines())
+    for dt, want in ((0, True), (23 * 3600, True), (24 * 3600 + 60, False), (-3600, False)):
+        ok, out = guard_approves(b, REPO, PR, SHA, now=T0 + dt)
+        check(f"шлюз guard: строка через {dt // 60} мин — {'в силе' if want else 'не в силе'}", ok == want, out)
+    d = os.path.join(b.state, "owner-log", "merge-approve.log")
+    for line in (f"2020-01-01T00:00:00+03:00 merge-approve {REPO}#{PR} {SHA}",
+                 f"x merge-approve {REPO}#{PR} {SHA}",
+                 f"2026-10-14T00:00:00 merge-approve {REPO}#{PR} {SHA}"):
+        with open(d, "w") as fh:
+            fh.write(line + "\n")
+        ok, out = guard_approves(b, REPO, PR, SHA)
+        check(f"шлюз guard: строка «{line[:25]}…» — не в силе", not ok, out)
 
 
 def test_status_cancel_and_bad_files():

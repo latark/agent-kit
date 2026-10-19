@@ -30,7 +30,7 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES), casefold;
    файлы из pulls/N/files с previous_filename; PR, задевающий ядро, проходит только со строкой
    `<время> merge-approve <owner/repo>#<N> <sha>` для того же репозитория, PR и SHA в owner-log/merge-approve.log —
-   её пишет тик после Touch ID владельца (metis-0285, `pantheon merge`). В защитах accept засчитывается, только если его ran начинается с
+   её пишет тик после Touch ID владельца (metis-0285, `pantheon merge`), не старше суток. В защитах accept засчитывается, только если его ran начинается с
    «модель: claude-opus» (metis-0176): accept другой модели — как будто его нет, reject любой модели в силе.
    Незаменённый шаблон «<ID>» в ran — отказ ещё до записи.
 Правдивость поля ran (модель argus) guard не проверяет: это защита от ошибки шаблона и запуска не той модели.
@@ -46,6 +46,7 @@ import re
 import shlex
 import subprocess
 import time
+from datetime import datetime
 
 G = None  # модуль guard.py: присваивает guard.py при загрузке
 
@@ -70,7 +71,10 @@ MERGE_CORE = "ядро защит — PR ждёт слияния владель�
 MERGE_CORE_HIT = MERGE_CORE + ": PR задевает "
 # согласие владельца на слияние ядра (metis-0285): строку пишет только тик после Touch ID, в owner-log роли не пишут
 APPROVE_FILE = "merge-approve.log"
-APPROVE_RE = re.compile(r"\S+ merge-approve ([a-z0-9_.-]+/[a-z0-9_.-]+)#([1-9][0-9]{0,8}) ([0-9a-f]{40})")
+APPROVE_RE = re.compile(r"(\S+) merge-approve ([a-z0-9_.-]+/[a-z0-9_.-]+)#([1-9][0-9]{0,8}) ([0-9a-f]{40})")
+# срок строки согласия: старше суток или из будущего (дальше пяти минут) — не в силе; время без пояса — не в силе
+APPROVE_TTL = 24 * 3600
+APPROVE_SKEW = 300
 # ядро защит (Д3): эти файлы агенты не сливают — гарантия, что запор не ослабит сам себя
 CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_config.py",
               "plugins/guard/managed-settings.json",
@@ -811,10 +815,21 @@ def approve_file():
     return os.path.join(G.STATE_DIR, "owner-log", APPROVE_FILE)
 
 
-def owner_approved(repo, pr, sha):
+def _approve_time(token):
+    """Время строки согласия (ISO 8601 с поясом, как пишет тик) → секунды эпохи; не разобрать или без пояса — None."""
+    try:
+        t = datetime.fromisoformat(token)
+    except ValueError:
+        return None
+    return t.timestamp() if t.tzinfo is not None else None
+
+
+def owner_approved(repo, pr, sha, now=None):
     """Строка `<время> merge-approve <owner/repo>#<N> <sha>` в owner-log/merge-approve.log (metis-0285): её пишет
     только тик после Touch ID владельца; роли в owner-log не пишут (песочница и pantheon-acl). Сверка — ровно этот
-    репозиторий, этот PR и этот SHA. Симлинк папки или файла, сбой чтения — нет согласия."""
+    репозиторий, этот PR и этот SHA, и строка не старше APPROVE_TTL (не из будущего дальше APPROVE_SKEW). Симлинк
+    папки или файла, сбой чтения — нет согласия. now — только для тестов."""
+    t_now = time.time() if now is None else now
     d = os.path.join(G.STATE_DIR, "owner-log")
     try:
         if os.path.islink(d):
@@ -826,8 +841,10 @@ def owner_approved(repo, pr, sha):
         return False
     for ln in lines:
         m = APPROVE_RE.fullmatch(ln.strip())
-        if m and m.group(1).lower() == repo.lower() and int(m.group(2)) == int(pr) and m.group(3) == sha.lower():
-            return True
+        if m and m.group(2).lower() == repo.lower() and int(m.group(3)) == int(pr) and m.group(4) == sha.lower():
+            t = _approve_time(m.group(1))
+            if t is not None and -APPROVE_SKEW <= t_now - t <= APPROVE_TTL:
+                return True
     return False
 
 

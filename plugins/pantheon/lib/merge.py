@@ -15,18 +15,23 @@ PR ядра защит (Д3) агенты не сливают: его слива
 Проход по каждой заявке (одна заявка — одно применение):
   1. Старше REQUEST_TTL (24 ч) — снята.
   2. PR сейчас (gh pr view): не OPEN, черновик или head не тот SHA, что в заявке, — снята (новый коммит — новая заявка).
-  3. Шлюз заново на тот же head: запись тестов шлюза на SHA; у каждого рецензента argus последний вердикт — «принять»
-     с полным перечнем и на Opus, рецензентов-«принять» не меньше двух, «вернуть» нет; проверки GitHub (CI) — все
-     SUCCESS/NEUTRAL/SKIPPED. CI ещё идёт или проверок пока нет — заявка ждёт; иначе снята с тревогой.
+  3. Репозиторий всё ещё в [merge_repos] metis-pantheon. Шлюз заново на тот же head: запись тестов шлюза на SHA; у
+     каждого рецензента argus последний вердикт — «принять» с полным перечнем и на Opus, рецензентов-«принять» не
+     меньше двух, «вернуть» нет; проверки GitHub (CI) — все SUCCESS/NEUTRAL/SKIPPED. CI ещё идёт или проверок пока
+     нет — заявка ждёт; иначе снята с тревогой. Список файлов PR (REST pulls/N/files) полон — иначе ждёт: окно
+     показывает задетые файлы ядра, без списка их не показать.
   4. Владелец у Mac (простой меньше PRESENT_SEC) — окно Touch ID: помощник pantheon-touchid (lib/touchid.swift,
-     LocalAuthentication). Палец → строка `<время> merge-approve <owner/repo>#<N> <sha>` в
-     owner-log/merge-approve.log (её сверяет шлюз guard: PR ядра проходит только с ней), затем
-     `gh pr merge <N> -R <repo> --match-head-commit <sha> --merge`, заявка снята. «Не сливать» — снята. Окно закрыто
-     без ответа — ждёт RETRY_SEC. Окно не показать (код 2: процесс launchd не в сессии владельца) — запасной путь:
-     уведомление один раз, щелчок по нему запускает `pantheon merge run --click` от имени владельца, и окно Touch ID
-     показывается уже оттуда.
-Журнал — STATE/logs/merge.jsonl (репозиторий, номер, SHA, событие). Пути для тестов: PANTHEON_TOUCHID — помощник
-(иначе STATE/bin/pantheon-touchid, его собирает swiftc из lib/touchid.swift), gh — из PATH.
+     LocalAuthentication), в тексте — задетые файлы ядра, заголовок PR последним. После пальца, под замком
+     merge-queue: заявка в очереди та же (не снята и не заменена), репозиторий в [merge_repos], шлюз заново — только
+     тогда строка `<время> merge-approve <owner/repo>#<N> <sha>` в owner-log/merge-approve.log (её сверяет шлюз guard:
+     PR ядра проходит только с ней, не старше суток), заявка снята, `gh pr merge <N> -R <repo> --match-head-commit
+     <sha> --merge`. «Не сливать» — снята. Окно закрыто без ответа — ждёт RETRY_SEC. Окно не показать (код 2: процесс
+     launchd не в сессии владельца) — запасной путь: уведомление один раз, щелчок по нему запускает
+     `pantheon merge run --click` от имени владельца, и окно Touch ID показывается уже оттуда. Заявку сняли или
+     заменили, пока окно открыто, — проход её не трогает: ни согласия, ни слияния, ни записи обратно.
+Журнал — STATE/logs/merge.jsonl (репозиторий, номер, SHA, событие). Помощник — только STATE/bin/pantheon-touchid с
+отметкой sha256 исходника lib/touchid.swift рядом (иначе его пересобирает /usr/bin/swiftc с чистым окружением):
+окружение прохода (launchctl setenv) помощника не подменяет. gh — из PATH.
 """
 import contextlib
 import hashlib
@@ -59,6 +64,12 @@ CHECKLIST = ("opened", "ran", "unchecked")
 OPUS_RAN = re.compile(r"\s*модель:\s*claude-opus", re.I)   # как в шлюзе guard (metis-0176)
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
+SWIFTC = "/usr/bin/swiftc"           # абсолютный путь: PATH прохода подменяем (launchctl setenv)
+# ядро защит (Д3) — как CORE_FILES и CORE_DIR шлюза guard (merge_gate.py); совпадение сверяет test_merge
+CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_config.py",
+              "plugins/guard/managed-settings.json", "plugins/pantheon/lib/window_rules.py",
+              ".claude-plugin/marketplace.json")
+CORE_DIR = ("plugins/guard", "plugins/pantheon/roles")
 USAGE = "pantheon merge request|cancel <N> -R <owner/repo> | run [--click] | status"
 
 
@@ -128,9 +139,35 @@ def write_req(req):
     os.replace(tmp, p)
 
 
+def same_req(req):
+    """Заявка в очереди всё ещё эта: тот же SHA и то же время постановки. Звать под замком merge-queue."""
+    p = req_file(req["repo"], req["pr"])
+    cur = read_req(p) if os.path.lexists(p) else None
+    return bool(cur) and cur["sha"] == req["sha"] and cur["created"] == req["created"]
+
+
+def gone(req, rc=None):
+    """Заявку сняли (cancel) или заменили новой, пока шёл проход: её не трогаем — ни согласия, ни записи обратно."""
+    log(req, "gone", rc=rc)
+    return "заявку сняли или заменили во время прохода — не трогаю"
+
+
+def keep(req):
+    """Отметку (wait_until, notified) — обратно в очередь, только если там та же заявка."""
+    with P.lock("merge-queue"):
+        if not same_req(req):
+            return False
+        write_req(req)
+    return True
+
+
 def drop(req, event, why=None, warn=False):
-    with contextlib.suppress(FileNotFoundError):
-        os.remove(req_file(req["repo"], req["pr"]))
+    """Снять заявку — только если в очереди та же: новую, поставленную во время прохода, не трогает."""
+    with P.lock("merge-queue"):
+        if not same_req(req):
+            return gone(req)
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(req_file(req["repo"], req["pr"]))
     log(req, event)
     if warn:
         P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) по Touch ID: заявка снята — {why}", "pantheon-merge")
@@ -168,15 +205,47 @@ def gh_path():
 
 
 def pr_view(repo, pr):
-    """{headRefOid, state, isDraft, title, statusCheckRollup} или None — gh не ответил."""
+    """{headRefOid, state, isDraft, title, statusCheckRollup, changedFiles} или None — gh не ответил."""
     try:
         r = subprocess.run([gh_path(), "pr", "view", str(pr), "-R", repo, "--json",
-                            "headRefOid,state,isDraft,title,statusCheckRollup"],
+                            "headRefOid,state,isDraft,title,statusCheckRollup,changedFiles"],
                            capture_output=True, text=True, timeout=GH_TIMEOUT, env=gh_env())
         data = json.loads(r.stdout) if r.returncode == 0 else None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def pr_files(repo, pr, view):
+    """Пути файлов PR (и previous_filename, как у шлюза guard) из REST pulls/N/files или None — gh не ответил или
+    список неполон (не равен changedFiles)."""
+    count = view.get("changedFiles") if isinstance(view, dict) else None
+    if not isinstance(count, int) or isinstance(count, bool):
+        return None
+    try:
+        r = subprocess.run([gh_path(), "api", f"repos/{repo}/pulls/{pr}/files?per_page=100", "--paginate", "--jq",
+                            ".[]"], capture_output=True, text=True, timeout=GH_TIMEOUT, env=gh_env())
+        files = [json.loads(ln) for ln in r.stdout.splitlines() if ln.strip()] if r.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if not isinstance(files, list) or len(files) != count or not all(isinstance(f, dict) for f in files):
+        return None
+    paths = []
+    for f in files:
+        for k in ("filename", "previous_filename"):
+            if f.get(k) is not None:
+                if not isinstance(f[k], str):
+                    return None
+                paths.append(f[k])
+    return paths
+
+
+def is_core(path):
+    """Ядро — как _is_core шлюза guard: папки CORE_DIR целиком и файлы CORE_FILES, без учёта регистра."""
+    p = path.strip("/").casefold()
+    while p.startswith("./"):
+        p = p[2:].lstrip("/")
+    return p in {c.casefold() for c in CORE_FILES} or any(p == d or p.startswith(d + "/") for d in CORE_DIR)
 
 
 def ci_state(rollup):
@@ -250,11 +319,9 @@ def gate(repo, pr, sha, view):
 # --- помощник Touch ID ----------------------------------------------------------------------------------------------
 
 def helper():
-    """Путь к помощнику окна или None. Свой бинарник — STATE/bin/pantheon-touchid, пересобирается, когда меняется
-    lib/touchid.swift (хеш исходника рядом)."""
-    if os.environ.get("PANTHEON_TOUCHID"):
-        h = os.environ["PANTHEON_TOUCHID"]
-        return h if os.access(h, os.X_OK) else None
+    """Путь к помощнику окна или None. Только свой бинарник — STATE/bin/pantheon-touchid с отметкой sha256 исходника
+    lib/touchid.swift рядом; отметка не та — пересборка. Переменной окружения на подмену нет (metis-0285, argus):
+    окружение прохода задаёт launchd, а его меняет любой процесс владельца (launchctl setenv)."""
     return build_helper()
 
 
@@ -268,12 +335,12 @@ def build_helper(quiet=True):
         with contextlib.suppress(OSError):
             if open(mark).read().strip() == want and os.access(out, os.X_OK) and not os.path.islink(out):
                 return out
-        swiftc = shutil.which("swiftc", path=os.environ.get("PATH", "") + ":/usr/bin")
-        if not swiftc:
+        if not os.access(SWIFTC, os.X_OK):
             raise OSError("нет swiftc (Xcode Command Line Tools)")
         tmp, cache = out + f".new.{os.getpid()}", os.path.join(d, ".swift-cache")
-        r = subprocess.run([swiftc, "-O", "-module-cache-path", cache, "-o", tmp, src], capture_output=True,
-                           text=True, timeout=300)
+        # окружение чистое: DEVELOPER_DIR, SDKROOT, TOOLCHAINS из launchctl setenv подменили бы компилятор
+        r = subprocess.run([SWIFTC, "-O", "-module-cache-path", cache, "-o", tmp, src], capture_output=True,
+                           text=True, timeout=300, env={"PATH": "/usr/bin:/bin", "HOME": P.HOME})
         if r.returncode != 0:
             raise OSError((r.stderr or r.stdout).strip().splitlines()[-1:] or ["swiftc упал"])
         os.chmod(tmp, 0o700)
@@ -281,15 +348,27 @@ def build_helper(quiet=True):
         with open(mark, "w") as fh:
             fh.write(want + "\n")
         return out
-    except (OSError, subprocess.SubprocessError) as e:
+    except (OSError, ValueError, subprocess.SubprocessError) as e:   # ValueError: STATE/bin — ссылка или не папка
         if not quiet:
             err(f"помощник Touch ID не собран: {e}")
         return None
 
 
-def window_text(req, view, why):
-    title = " ".join(str(view.get("title") or "").split())[:80]
-    return f"Слить {req['repo']}#{req['pr']} ({req['sha'][:7]}): {title}. {why}"[:400]
+def window_text(req, view, why, paths):
+    """Текст окна: сначала задетые файлы ядра (их владелец и подтверждает), заголовок автора PR — последним, в
+    кавычках и коротко: он не перекроет список."""
+    core = [p for p in dict.fromkeys(paths) if is_core(p)]
+    shown, size = [], 0
+    for p in core:
+        if shown and size + len(p) > 200:
+            break
+        shown.append(p)
+        size += len(p) + 2
+    more = f" и ещё {len(core) - len(shown)}" if len(core) > len(shown) else ""
+    hit = f"ядро: {', '.join(shown)}{more}" if core else "ядро не задето"
+    title = " ".join(str(view.get("title") or "").split())[:60]
+    return (f"Слить {req['repo']}#{req['pr']} ({req['sha'][:7]}), файлов {len(set(paths))}, {hit}. {why}. "
+            f"Заголовок: «{title}»")[:400]
 
 
 def ask(text):
@@ -326,12 +405,12 @@ def gh_merge(req):
         return 1, type(e).__name__
 
 
-def fallback_notify(req, view):
-    """Запасной путь: уведомление, щелчок по которому запускает `pantheon merge run --click` от имени владельца."""
+def fallback_notify(req, window):
+    """Запасной путь: уведомление, щелчок по которому запускает `pantheon merge run --click` от имени владельца.
+    window — текст окна (задетое ядро, заголовок PR)."""
     base = P.CURRENT if os.path.isdir(P.CURRENT) else P.PLUGIN
     cmd = f"{shlex.quote(os.path.join(base, 'bin', 'pantheon'))} merge run --click"
-    title = " ".join(str(view.get("title") or "").split())[:80]
-    text = f"Слить {req['repo']}#{req['pr']} ({req['sha'][:7]}): {title}. Щёлкните — откроется окно Touch ID"
+    text = f"{window[:300]}. Щёлкните — откроется окно Touch ID"
     if os.environ.get("PANTHEON_NOTIFY_LOG"):
         with open(os.environ["PANTHEON_NOTIFY_LOG"], "a", encoding="utf-8") as fh:
             fh.write(f"Слияние ядра|{text}|execute:{cmd}|merge\n")
@@ -379,19 +458,34 @@ def cmd_request(args):
     if state == "fail":
         err(f"pantheon merge request: шлюз не пройден — {why}. Заявки нет")
         return 1
-    old = read_req(req_file(repo, pr)) if os.path.lexists(req_file(repo, pr)) else None
-    if old and old["sha"] == sha:
-        print(f"заявка {repo}#{pr} ({sha[:7]}) уже стоит")
-        return 0
     who = " ".join((os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "владелец").split())[:40]
     req = {"repo": repo, "pr": pr, "sha": sha, "by": who, "created": int(P.now())}
     with P.lock("merge-queue"):
+        old = read_req(req_file(repo, pr)) if os.path.lexists(req_file(repo, pr)) else None
+        if old and old["sha"] == sha:
+            print(f"заявка {repo}#{pr} ({sha[:7]}) уже стоит")
+            return 0
         write_req(req)
     log(req, "request")
     print(f"Заявка {repo}#{pr} ({sha[:7]}) поставлена. Окно Touch ID покажет плановый проход, когда вы у Mac"
           + ("" if state == "ok" else f" и {why.lower()} закончатся") + f"; без ответа за {REQUEST_TTL // 3600} ч "
           "заявка гаснет.")
     return 0
+
+
+def check_all(req):
+    """Все условия заново: (ok|wait|fail, текст, view, пути файлов). Репозиторий — из [merge_repos] сейчас, шлюз — на
+    тот же head, список файлов PR полон (окно показывает задетое ядро)."""
+    if req["repo"] not in allowed_repos():
+        return "fail", f"{req['repo']} больше не в [merge_repos] {MERGE_DIRECTION}", None, None
+    view = pr_view(req["repo"], req["pr"])
+    state, why = gate(req["repo"], req["pr"], req["sha"], view)
+    if state != "ok":
+        return state, why, view, None
+    paths = pr_files(req["repo"], req["pr"], view)
+    if paths is None:
+        return "wait", "список файлов PR не получен или неполон", view, None
+    return "ok", why, view, paths
 
 
 def process(req, click):
@@ -402,41 +496,62 @@ def process(req, click):
         return "ждёт: окно закрыто без ответа, повтор позже"
     if not click and req.get("notified"):
         return "ждёт щелчка по уведомлению"
-    view = pr_view(req["repo"], req["pr"])
-    state, why = gate(req["repo"], req["pr"], req["sha"], view)  # заново, на тот же head (Решено, бриф 0285)
+    state, why, view, paths = check_all(req)  # заново, на тот же head (Решено, бриф 0285)
     if state == "fail":
         return drop(req, "gate", why, warn=True)
     if state == "wait":
         return f"ждёт: {why}"
     if not click and P.idle_sec() > PRESENT_SEC:
         return "ждёт: вас нет у Mac"
-    rc = ask(window_text(req, view, why))
+    text = window_text(req, view, why, paths)
+    rc = ask(text)
     if rc is None:
         P.alert_once("merge-helper", "1", "слияние по Touch ID: помощник окна не собран (swiftc) — заявки ждут; "
                      "собрать: pantheon install", "pantheon-merge")
         return "ждёт: помощника окна нет"
     log(req, "window", rc=rc, click=click)
     if rc == 0:
-        approve(req)
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(req_file(req["repo"], req["pr"]))   # одно применение — до слияния, сбой gh её не вернёт
+        # окно было открыто до двух минут: отмена, новый «вернуть», новый коммит или правка [merge_repos] за это
+        # время — не сливать. Сверка и снятие заявки — под замком merge-queue, как у request и cancel
+        with P.lock("merge-queue"):
+            if not same_req(req):
+                return gone(req, rc)
+            state, why, _, _ = check_all(req)
+            if state != "ok":
+                os.remove(req_file(req["repo"], req["pr"]))
+                bad = f"после пальца условия изменились — {why}"
+            else:
+                bad = None
+                approve(req)
+                os.remove(req_file(req["repo"], req["pr"]))   # одно применение — до слияния, сбой gh её не вернёт
+        if bad:
+            log(req, "gate-after")
+            P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) по Touch ID: не слито, заявка снята — {bad}",
+                    "pantheon-merge")
+            return f"снята: {bad}"
         code, out = gh_merge(req)
         log(req, "merged" if code == 0 else "merge-failed", rc=code)
         if code != 0:
             P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) после Touch ID не прошло: {out}. Согласие "
-                    "записано — шлюз guard пустит слияние этого SHA", "pantheon-merge")
+                    "записано — шлюз guard пустит слияние этого SHA в течение суток", "pantheon-merge")
             return f"палец есть, gh pr merge упал ({code})"
         return "слит"
     if rc == 1:
         return drop(req, "refused", "вы отказали")
     if rc == 3:
         req["wait_until"] = int(t + RETRY_SEC)
-        write_req(req)
+        if not keep(req):
+            return gone(req, rc)
         return "окно закрыто без ответа — повтор позже"
     if rc == 2 and not click:
-        if fallback_notify(req, view or {}):
+        with P.lock("merge-queue"):
+            still = same_req(req)
+        if not still:   # сняли, пока помощник пробовал окно, — и уведомления нет
+            return gone(req, rc)
+        if fallback_notify(req, text):
             req["notified"] = int(t)
-            write_req(req)
+            if not keep(req):
+                return gone(req, rc)
             log(req, "notified")
             return "окно из прохода не показать — уведомление, ждёт щелчка"
         return drop(req, "no-window", "окно Touch ID не показать и уведомление не ушло", warn=True)
@@ -460,10 +575,12 @@ def cmd_run(click=False):
             p = os.path.join(r, f)
             if not FILE_RE.fullmatch(f):
                 continue
-            req = read_req(p)
+            with P.lock("merge-queue"):
+                req = read_req(p)
+                if req is None:
+                    with contextlib.suppress(OSError):
+                        os.remove(p)
             if req is None:
-                with contextlib.suppress(OSError):
-                    os.remove(p)
                 print(f"{f}: битая заявка — удалена")
                 continue
             try:
