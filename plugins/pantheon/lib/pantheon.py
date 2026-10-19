@@ -2540,7 +2540,7 @@ def daemon_workers():
     return {str(k): w.get("pid") for k, w in d["workers"].items() if isinstance(w, dict)}
 
 
-def job_state(short):
+def claude_job_state(short):
     """state.json задания ~/.claude/jobs/<короткий id>/state.json (его пишет Claude Code, мы только читаем)."""
     if not re.fullmatch(r"[0-9a-zA-Z-]{4,64}", str(short or "")):
         return {}
@@ -2561,7 +2561,7 @@ def reconcile_agents(data, workers=None):
     for a in data:
         if not isinstance(a, dict) or a.get("kind") not in (None, "background") or not a.get("id"):
             continue
-        js = job_state(a["id"])
+        js = claude_job_state(a["id"])
         wpid = (workers or {}).get(str(a["id"]))
         alive = bool(wpid) and pid_alive(wpid)
         if alive and not a.get("pid"):

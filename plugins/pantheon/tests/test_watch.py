@@ -2362,9 +2362,8 @@ def test_auto_rm_done_stopped_0250():
               bg("ar-dir", "done", "a4a4a4a4-1", pid=os.getpid()),    # процесс жив — держит имя (CTX-10)
               bg("чужая", "done", "a5a5a5a5-1"),                     # не Пантеон
               bg("ap-dir", "stopped", "a6a6a6a6-1"),                 # пауза по нагрузке — её снятие продолжит
-              bg("ar-dir", "working", "a7a7a7a7-1", pid=os.getpid()),
+              bg("ad-dir", "working", "a7a7a7a7-1", pid=os.getpid()),  # живая новая того же имени —
               bg("ar-dir", "done", "a8a8a8a8-1"),                     # worktree с неотправленным — rm откажет
-              bg("ad-dir", "working", "a9a9a9a9-1"),                  # живая новая того же имени —
               bg("ad-dir", "done", "b1b1b1b1-1"), bg("ad-dir", "stopped", "b2b2b2b2-1")])  # прежние убрать сразу
     for sid in ("a1a1a1a1", "a2a2a2a2", "a4a4a4a4", "a5a5a5a5", "a6a6a6a6", "a7a7a7a7", "a8a8a8a8"):
         _job(e, sid, state="done", updatedAt=_iso(old), lastTerminalAt=_iso(old))
@@ -2380,7 +2379,7 @@ def test_auto_rm_done_stopped_0250():
     e.run("watch", t=T0 + 10, extra={"FAKE_RM_REFUSE": "a8a8a8a8"})
     rms = [c[1] for c in e.calls() if c[:1] == ["rm"]]
     check(sorted(rms) == ["a1a1a1a1", "a2a2a2a2", "a8a8a8a8", "b1b1b1b1", "b2b2b2b2"], f"уборка не те сессии: {rms}")
-    check(not [c for c in e.calls() if c[1:2] == ["a9a9a9a9"]], "уборка тронула живую новую сессию имени")
+    check(not [c for c in e.calls() if c[1:2] == ["a7a7a7a7"]], "уборка тронула живую новую сессию имени")
     check(not [c for c in e.calls() if "--discard-unpushed" in c or "--force-remove-worktree" in c], "rm насильно")
     check(not [c for c in e.calls() if c[:1] == ["stop"] and c[1] in ("a1a1a1a1", "a2a2a2a2")], "уборка зовёт stop")
     log = open(e.st("logs", "start.log")).read()

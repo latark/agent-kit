@@ -353,7 +353,7 @@ def auto_rm(agents, doms, t):
                 or not re.fullmatch(r"[0-9a-zA-Z-]{4,64}", sid) or not is_pantheon(name, doms) or sid in tried
                 or P.load_pause(name)):
             continue
-        since = _job_time(P.job_state(sid))
+        since = _job_time(P.claude_job_state(sid))
         if name not in live and (since is None or t - since < AUTO_RM_AFTER):
             continue  # у имени есть живая сессия — эта лишняя строка, убираем сразу (start/wake не добили)
         reason = P.rm_session(sid, tries=1)
