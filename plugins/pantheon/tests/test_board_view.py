@@ -94,12 +94,31 @@ def base_checks():
     check("«Доска»: в порядке колонок есть «Очередь», нет «Отменено»", "Отменено" not in go and "Очередь" in go, go)
     check("«Доска»: «Готово» — за 7 дней по «Закрыта»",
           'note["Статус"] != "Готово"' in board and 'note["Закрыта"] >= today() - "7d"' in board)
-    check("«Доска»: на карточке «ждёт» и предупреждение режима", "formula.waits" in board and "formula.warn" in board)
+    attn = re.search(r"^  attn: (.+)$", T.BASE_FILE, re.M).group(1)
+    card = [x.strip() for x in re.search(r"^    order: \[(.*)\]", board, re.M).group(1).split(",")]
+    check("«Доска»: «ждёт» и предупреждение режима — внутри одной строки formula.attn на карточке",
+          "formula.waits" in attn and "formula.warn" in attn and 'note["Срок"]' in attn and "formula.attn" in card)
+    check("metis-0306: карточка «Доски» — не больше 5 свойств", 0 < len(card) <= 5, str(card))
+    check("metis-0306: заявки ролей (Тип «заявка», Кому без «Владелец») вне «Доски»",
+          "- 'note[\"Тип\"] != \"заявка\"'" in board and "- 'note[\"Кому\"].toString().contains(\"Владелец\")'" in board)
+    check("metis-0306: в «Все задачи» заявки остаются — фильтра заявок там нет", "заявка" not in dict(vs)["Все задачи"])
+    check("metis-0306: справка «Доска» — не длиннее двух предложений, без «Пачки здесь не видны»",
+          "Пачки здесь не видны" not in T.VIEW_HELP["Доска"] and len(re.findall(r"[.]\s", T.VIEW_HELP["Доска"] + " ")) <= 2)
     mine_sort = mine.split("sort:")[1].split("order:")[0]
     check("«От меня нужно»: срочные вверху — сортировка начинается с urgency", mine_sort.strip().startswith("- property: formula.urgency"))
     packs = dict(vs)["Пачки"]
     check("«Пачки» — канбан карточек пачек с суммой оценок и бюджетом", packs.startswith("kanban")
-          and 'note["Тип"] == "пачка"' in packs and "note.Сумма оценок" in packs and "note.Бюджет" in packs)
+          and 'note["Тип"] == "пачка"' in packs and "note.Закрыто" in packs and "note.Цепочка" in packs
+          and "formula.sum_budget" in packs and "Бюджет" in re.search(r"^  sum_budget: (.+)$", T.BASE_FILE, re.M).group(1)
+          and len(re.search(r"^    order: \[(.*)\]", packs, re.M).group(1).split(",")) <= 5)
+    css = open(os.path.join(os.path.dirname(LIB), "share", "pantheon-view-obsidian", "snippets", "pantheon.css"),
+               encoding="utf-8").read()
+    check("metis-0306: CSS — подписи карточки скрыты, встраивания и kanban ограничены по высоте окна (классы Obsidian)",
+          ".bases-kanban-card-property .bases-kanban-card-label { display: none; }" in css
+          and re.search(r"\.bases-embed \.bases-view[^{]*\{[^}]*max-height: calc\(100vh", css)
+          and re.search(r"\.bases-embed \.bases-kanban-container[^{]*\{[^}]*max-height: calc\(100vh", css))
+    check("metis-0306: «Итоги пачек» — Приёмка из formula.accept_view, «Все задачи» — колонка № шире",
+          "formula.accept_view" in dict(vs)["Итоги пачек"] and re.search(r"columnSize:\n      note\.id: \d{3}", dict(vs)["Все задачи"]))
     res = dict(vs)["Итоги пачек"]
     check("«Итоги пачек»: задачи пачек, группы по пачке, по порядку", 'note["Тип"] != "пачка"' in res
           and "property: note.Пачка" in res and "property: note.Порядок" in res)
@@ -136,6 +155,16 @@ def base_checks():
           "file.hasLink(this.file)" in pd["Пачки проекта"] and "file.hasLink(this.file)" in pd["Задачи пачки"]
           and "property: note.Порядок" in pd["Задачи пачки"])
     check("Пульт.base: узлы ролей не попадают", "'!file.inFolder(\"Доска/Узлы\")'" in T.PULT_FILE)
+    # metis-0306 (ревью, M10): компактная карточка «Пачки» и в Пульте — не длиннее 5 свойств, как в «Доске»
+    ppacks = pd["Пачки"]
+    porder = [x.strip() for x in re.search(r"^    order:\n((?:      - .+\n?)+)", ppacks, re.M).group(1).replace("      - ", "").split("\n") if x.strip()]
+    check("metis-0306: Пульт.base, «Пачки» — карточка не больше 5 свойств: имя, Закрыто, сумма/бюджет, цепочка",
+          porder == ["file.name", "note.Закрыто", "formula.sum_budget", "note.Цепочка"], str(porder))
+    # metis-0306 (ревью, M12): формула accept_view даёт «ждёт приёмки» только для «На проверке» с пустой Приёмкой
+    acc = re.search(r"^  accept_view: (.+)$", T.BASE_FILE, re.M).group(1)
+    check("metis-0306: accept_view — пустая Приёмка у «На проверке» даёт «ждёт приёмки», заполненная выводится как есть, прочее пусто",
+          acc.startswith("'if(note[\"Приёмка\"].isEmpty()") and "ждёт приёмки" in acc and 'note["Статус"] == "На проверке"' in acc
+          and acc.rstrip("'").endswith(', note["Приёмка"])') and acc.count('""') == 1, acc)
 
 
 def card_checks():
@@ -212,11 +241,63 @@ def warn_checks():
         shutil.rmtree(tmp, True)
 
 
+def snippet_checks():
+    """metis-0306 (ревью): новый pantheon.css доходит до копии, у которой .obsidian уже есть (view-sync.sh кладёт образец
+    только в пустую копию) — по образцу _sync_base: нетронутый прежний — молча, правка владельца — копия и одна тревога."""
+    tmp = tempfile.mkdtemp(dir=os.environ.get("TMPDIR"))
+    try:
+        vault = os.path.join(tmp, "view")
+        snip = os.path.join(vault, ".obsidian", "snippets", "pantheon.css")
+        state = os.path.join(tmp, "state", "board.json")
+        new = open(T.CSS_PATH, encoding="utf-8").read()
+        alerts = []
+        al = lambda *a, **k: alerts.append(a)
+        keeps = lambda: sorted(f for f in os.listdir(os.path.dirname(state)) if f.startswith("board-css-")) \
+            if os.path.isdir(os.path.dirname(state)) else []
+        st = {}
+        T._sync_snippet(vault, st, state, T0, al)
+        check("сниппет: нет .obsidian — ничего не создаём (образец положит view-sync.sh)",
+              not os.path.exists(os.path.join(vault, ".obsidian")) and not st and not alerts)
+        os.makedirs(os.path.dirname(snip))
+        # у владельца: .obsidian есть, сниппет прежний (нетронутый шаблон до 0.11.53)
+        old = "/* прежний */\n"
+        open(snip, "w", encoding="utf-8").write(old)
+        T._sync_snippet(vault, st, state, T0, al, old_hashes={T._sha(old)})
+        check("сниппет: у копии уже есть .obsidian, прежний нетронутый — обновлён без тревоги и копии",
+              open(snip, encoding="utf-8").read() == new and not alerts and not keeps() and st["css_version"] == T._sha(new))
+        # правка владельца при новой версии шаблона: копия + одна тревога
+        st["css_version"] = "старая"
+        open(snip, "w", encoding="utf-8").write("/* моё */\n")
+        T._sync_snippet(vault, st, state, T0 + 5, al)
+        k = keeps()
+        check("сниппет: правка владельца — файл обновлён, его версия сохранена, одна тревога",
+              open(snip, encoding="utf-8").read() == new and len(k) == 1 and len(alerts) == 1
+              and open(os.path.join(os.path.dirname(state), k[0]), encoding="utf-8").read() == "/* моё */\n")
+        # та же версия — правка владельца живёт
+        open(snip, "w", encoding="utf-8").write("/* ещё моё */\n")
+        T._sync_snippet(vault, st, state, T0 + 9, al)
+        check("сниппет: версия та же — правка владельца не тронута",
+              open(snip, encoding="utf-8").read() == "/* ещё моё */\n" and len(alerts) == 1)
+        # настоящий прежний сниппет (main, sha b07338ca…) — в OLD_CSS_HASHES
+        check("сниппет: хеш прежнего сниппета main в OLD_CSS_HASHES", "b07338ca44d6892d" in T.OLD_CSS_HASHES)
+        # через тик: board_sync зовёт доставку
+        os.remove(snip)
+        pan = os.path.join(tmp, "pan")
+        os.makedirs(pan)
+        board = os.path.join(vault, "Доска")
+        T.board_sync(pan, board, state, os.path.join(tmp, "log"), T0 + 20, alert=al)
+        check("сниппет: тик доски (board_sync) возвращает удалённый сниппет",
+              os.path.exists(snip) and open(snip, encoding="utf-8").read() == new)
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def main():
     base_checks()
     card_checks()
     summary_checks()
     warn_checks()
+    snippet_checks()
     print(f"{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 

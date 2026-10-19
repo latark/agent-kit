@@ -1171,9 +1171,12 @@ formulas:
   waits: 'if(note["Зависит от"].isEmpty(), "", "⏳ ждёт " + note["Зависит от"].join(", "))'
   cross: 'if(note["Пересечения"].isEmpty(), "", "✂ " + note["Пересечения"].join(", "))'
   areas: 'if(note["Области"].isEmpty(), "❔ не указаны", note["Области"].join(", "))'
+  sum_budget: '[note["Сумма оценок"], note["Бюджет"]].filter(value.isTruthy()).join(" / ")'
 properties:
   file.name:
     displayName: Карточка
+  formula.sum_budget:
+    displayName: Сумма / бюджет
   note.id:
     displayName: №
   formula.mode_view:
@@ -1230,15 +1233,9 @@ views:
         direction: ASC
     order:
       - file.name
-      - note.Проект
-      - note.Когда
-      - note.Сумма оценок
-      - note.Бюджет
       - note.Закрыто
+      - formula.sum_budget
       - note.Цепочка
-      - note.Параллельно
-      - note.Пересечения
-      - note.Области не указаны
   - type: table
     name: Пачки проекта
     filters:
@@ -1807,9 +1804,18 @@ formulas:
   waits: 'if(note["Зависит от"].isEmpty(), "", "⏳ ждёт " + note["Зависит от"].join(", "))'
   cross: 'if(note["Пересечения"].isEmpty(), "", "✂ " + note["Пересечения"].join(", "))'
   warn: 'if(note["Режим"] == "параллельно" && note["Области"].isEmpty(), "⚠ области не указаны", if(note["Режим"] == "параллельно" && !note["Пересечения"].isEmpty(), "⚠ параллельно при общей области", if(note["Режим"] == "параллельно" && !note["Зависит от"].isEmpty(), "⚠ параллельно, но ждёт", "")))'
+  attn: '[note["Внимание"], note["Срок"], formula.waits, formula.warn].filter(value.isTruthy()).join(" · ")'
+  accept_view: 'if(note["Приёмка"].isEmpty(), if(note["Статус"] == "На проверке", "⏳ ждёт приёмки", ""), note["Приёмка"])'
+  sum_budget: '[note["Сумма оценок"], note["Бюджет"]].filter(value.isTruthy()).join(" / ")'
 properties:
   file.name:
     displayName: Задача
+  formula.attn:
+    displayName: Внимание
+  formula.accept_view:
+    displayName: Приёмка
+  formula.sum_budget:
+    displayName: Сумма / бюджет
   note.id:
     displayName: №
   formula.status_view:
@@ -1850,6 +1856,9 @@ views:
         - 'note["Тип"] != "пачка"'
         - 'note["Статус"] != "Отменено"'
         - or:
+            - 'note["Тип"] != "заявка"'
+            - 'note["Кому"].toString().contains("Владелец")'
+        - or:
             - 'note["Статус"] != "Готово"'
             - 'note["Закрыта"] >= today() - "7d"'
     groupBy:
@@ -1863,7 +1872,7 @@ views:
         direction: ASC
       - property: formula.col_k3
         direction: ASC
-    order: [file.name, note.Проект, note.Внимание, formula.prio_view, note.Срок, note.Кому, formula.waits, formula.warn]
+    order: [file.name, note.Проект, note.Кому, formula.prio_view, formula.attn]
   - type: kanban
     name: Пачки
     filters:
@@ -1882,7 +1891,7 @@ views:
         direction: ASC
       - property: formula.prio_rank
         direction: ASC
-    order: [file.name, note.Проект, note.Когда, note.Сумма оценок, note.Бюджет, note.Закрыто, note.Цепочка, note.Параллельно, note.Пересечения, note.Области не указаны]
+    order: [file.name, note.Закрыто, formula.sum_budget, note.Цепочка]
   - type: table
     name: Итоги пачек
     filters:
@@ -1901,7 +1910,7 @@ views:
         direction: ASC
       - property: formula.cl_n
         direction: DESC
-    order: [note.id, file.name, formula.status_view, note.Приёмка, note.Оценка, note.Факт, formula.mode_view, note.Выпуск, note.Кому]
+    order: [note.id, file.name, formula.status_view, formula.accept_view, note.Оценка, note.Факт, formula.mode_view, note.Выпуск, note.Кому]
   - type: table
     name: Все задачи
     groupBy:
@@ -1919,6 +1928,8 @@ views:
       - property: formula.age_key
         direction: ASC
     order: [note.id, file.name, formula.status_view, formula.prio_view, note.Внимание, note.Кому, note.Срок, note.Дальше, note.Создана, note.Закрыта]
+    columnSize:
+      note.id: 150
 """
 for _i in (1, 2, 3):
     BASE_FILE = BASE_FILE.replace("{COLK%d}" % _i, _col_formula(_i - 1))
@@ -1934,8 +1945,8 @@ OLD_BASE_HASHES = {"917c6bef26511e65", "44467393293d25f4"}
 VIEW_HELP = {
     "От меня нужно": "Ждут вашего ответа или приёмки, либо адресованы вам; срочные — вверху. Что делать: ответить или "
                      "принять; готовые и отменённые не показываются.",
-    "Доска": "Задачи по статусам: Входящие, Нужен ответ, Очередь, В работе, Ждёт, На проверке и готовые за 7 дней. Что "
-             "делать: смотреть, что движется; сменить статус — перетащить карточку. Пачки здесь не видны.",
+    "Доска": "Задачи по статусам, готовые — за 7 дней; заявки ролей друг другу здесь не показаны (они в «Все задачи»). "
+             "Что делать: смотреть, что движется; сменить статус — перетащить карточку.",
     "Пачки": "Пачки (наборы задач на ночь) по статусам, с суммой оценок против бюджета; готовые — 7 дней. Что делать: "
              "следить за бюджетом и пересечениями по файлам.",
     "Итоги пачек": "Задачи из пачек, которые дошли до проверки, готовы или ждут приёмки, по пачкам. Что делать: принять "
@@ -2315,6 +2326,53 @@ def _sync_base(board, state, state_path, t, alert, fname="Доска.base", text
     state[f"{key}_version"], state[f"{key}_hash"] = version, _sha(new)
 
 
+CSS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "share", "pantheon-view-obsidian",
+                        "snippets", "pantheon.css")
+OLD_CSS_HASHES = {"b07338ca44d6892d"}  # сниппет до 0.11.53 (metis-0306): нетронутый — не правка владельца
+
+
+def _sync_snippet(vault, state, state_path, t, alert, src=None, old_hashes=None):
+    """.obsidian/snippets/pantheon.css хранилища (metis-0306): view-sync.sh кладёт образец только в копию без .obsidian,
+    поэтому новый сниппет доставляем отдельно, по образцу _sync_base: версия сменилась — записать; владелец правил файл —
+    его версию сохранить в папку состояния и одна тревога. Нет .obsidian — не трогаем (образец положит view-sync.sh)."""
+    src = CSS_PATH if src is None else src
+    old_hashes = OLD_CSS_HASHES if old_hashes is None else old_hashes
+    if not os.path.isdir(os.path.join(vault, ".obsidian")):
+        return
+    try:
+        with open(src, encoding="utf-8") as fh:
+            text = fh.read()
+    except (OSError, UnicodeDecodeError):
+        return
+    version = _sha(text)
+    p = os.path.join(vault, ".obsidian", "snippets", "pantheon.css")
+    try:
+        with open(p, "rb") as fh:
+            cur = fh.read()
+    except FileNotFoundError:
+        cur = None
+    except OSError as e:
+        alert("board-css", type(e).__name__, f"доска: {p} не читается ({e}) — сниппет не обновлён", "board")
+        return
+    if cur is not None and state.get("css_version") == version:
+        return
+    new = text.encode("utf-8")
+    try:
+        if cur is not None and cur != new and _sha(cur) != state.get("css_hash") and _sha(cur) not in old_hashes:
+            keep = os.path.join(os.path.dirname(os.path.abspath(state_path)),
+                                f"board-css-{datetime.fromtimestamp(t).strftime('%Y%m%d-%H%M%S')}.css")
+            os.makedirs(os.path.dirname(keep), exist_ok=True)
+            with open(keep, "wb") as fh:
+                fh.write(cur)
+            alert(f"board-css-{version}", version, f"pantheon.css обновлён, ваша версия сохранена в {keep}", "board")
+        if cur != new:
+            _write_plain(p, text)
+    except OSError as e:
+        alert("board-css", type(e).__name__, f"доска: {p} не записать ({e}) — сниппет не обновлён", "board")
+        return
+    state["css_version"], state["css_hash"] = version, version
+
+
 def _sync_help(board, state, alert):
     """Доска/Справка/Виды доски.md: свою (хеш в состоянии, Тип «справка») переписывает, чужой файл не трогает."""
     path = os.path.join(board, HELP_DIR, HELP_NOTE + ".md")
@@ -2668,6 +2726,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     _sync_base(board, state, state_path, t, alert, "Пульт.base", PULT_FILE, PULT_VERSION, "pult", ())
     _sync_projects(board, state, tasks, t, registry, roles, alert)
     _sync_types(os.path.dirname(os.path.abspath(board)), alert)
+    _sync_snippet(os.path.dirname(os.path.abspath(board)), state, state_path, t, alert)
     new_state = json.dumps(state, ensure_ascii=False, indent=1)
     try:
         with open(state_path, encoding="utf-8") as fh:
