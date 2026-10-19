@@ -91,6 +91,15 @@
             "timeout": 600
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" clock",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "Stop": [
