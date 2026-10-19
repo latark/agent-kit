@@ -25,6 +25,8 @@ PostToolUse (Bash:
                  в ключ или шаблон, который в него раскрывается, а не на обход папки выше (grep -r, metis-0084);
   hq-telegram  — окну штаба (PANTHEON_ROLE=hq) Telegram закрыт: субагент tg-reader, навык telegram-read, скрипт
                  tg-read и демон tg-readd в Bash (P0-1, metis-0060);
+  hq-gh        — окну штаба gh pr — только с -R из [merge_repos], PR номером, без GH_REPO/GH_HOST, без обсуждений
+                 (--comments, --json comments) и без личного в команде (metis-0247);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
                  status, chats, folders, verify, split — можно; без PANTHEON_ROLE (плановый проход) — можно (metis-0267);
@@ -65,7 +67,7 @@ PostToolUse (Bash:
   --strict      — хук окна роли с onFailure: "block" (собирает `pantheon domains build`, SEC-29).
 При сбое (SEC-10, metis-0094) — во всех трёх режимах одинаково, обёртка run_hook: событие не JSON или не объект,
 исключение в проверке прав (domain, pantheon-acl, protect-config, private, cdp-role, push, terminal, hq-telegram,
-tg-role, chiron) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
+hq-gh, tg-role, chiron) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
 stderr: Claude Code блокирует вызов на любой версии, и в вашей сессии тоже. PostToolUse (журнал запора слияния):
 код 2 только показывает причину агенту — команда уже выполнена. Исключения: правила-подсказки (dev-server,
 attribution, cdp, nextjs) при сбое пропускают к остальным проверкам; сбой на Stop — выход 0 (код 2 не дал бы
@@ -2554,6 +2556,31 @@ def read_paths(event, tool, tool_input):
     return []
 
 
+def _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches, values=False):
+    """Личные пути, которые задевает команда Bash: явные пути в словах, обход папки выше (ancestor), шаблоны, цели
+    записи. values — ещё значение флага в том же слове (--body-file=<путь>, -F<путь>): для gh штаба (hq-gh)."""
+    cmd = tool_input.get("command") or ""
+    _, cmds = bash_analysis(cmd, cwd)
+    # относительные пути — от папки события и от каждой папки, куда команда делает cd
+    cwds = [cwd] + [_expand(t[0], cwd) for n, t in cmds if n in ("cd", "chdir", "pushd") and t and t[0]]
+    hits = [d for d in cwds if _inside(d, priv) and cmds]
+    for name, texts in cmds:
+        words = [name] + [x for x in texts if x]
+        if values:
+            words += [w.split("=", 1)[1] if "=" in w else w[2:] for w in words
+                      if w.startswith("-") and ("=" in w or (len(w) > 2 and w[1] != "-"))]
+        for w in words:
+            if not _pathlike(w):
+                continue
+            for d in (cwds if not w.startswith(("/", "~", "$")) else [cwd]):
+                p = _expand(w, d)
+                if _inside(p, priv) or (ancestor and name in RECURSIVE and any(_inside(x, [p]) for x in priv)) \
+                        or reaches(p):
+                    hits.append(p)
+    hits += [p for p in write_targets(event, "Bash", tool_input)[1] if p != UNRESOLVED and _inside(p, priv)]
+    return hits
+
+
 def check_private(event, tool, tool_input):
     ok, role, sub, pdir = limited(event)
     if not ok:
@@ -2580,21 +2607,7 @@ def check_private(event, tool, tool_input):
     reaches = (lambda p: _glob_reaches(p, priv, whole=True)) if keys_only else (lambda p: _glob_reaches(p, priv))
     hits = []
     if tool == "Bash":
-        cmd = tool_input.get("command") or ""
-        _, cmds = bash_analysis(cmd, cwd)
-        # относительные пути — от папки события и от каждой папки, куда команда делает cd
-        cwds = [cwd] + [_expand(t[0], cwd) for n, t in cmds if n in ("cd", "chdir", "pushd") and t and t[0]]
-        hits += [d for d in cwds if _inside(d, priv) and cmds]
-        for name, texts in cmds:
-            for w in [name] + [x for x in texts if x]:
-                if not _pathlike(w):
-                    continue
-                for d in (cwds if not w.startswith(("/", "~", "$")) else [cwd]):
-                    p = _expand(w, d)
-                    if _inside(p, priv) or (ancestor and name in RECURSIVE and any(_inside(x, [p]) for x in priv)) \
-                            or reaches(p):
-                        hits.append(p)
-        hits += [p for p in write_targets(event, tool, tool_input)[1] if p != UNRESOLVED and _inside(p, priv)]
+        hits = _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches)
     elif tool in EDIT_TOOLS:
         hits = [p for p in write_targets(event, tool, tool_input)[1] if p != UNRESOLVED and _inside(p, priv)]
     else:
@@ -3078,6 +3091,113 @@ def check_hq_telegram(event, tool, tool_input):
     return None
 
 
+# hq-gh (metis-0247, ревью argus-69b, решение Метиды и Зевса 19.10). Окну штаба gh pr view/checks/edit/merge выпущены
+# мимо песочницы (pantheon HQ_GH), а у Зевса личное: без сужения он вынес бы личное в описание PR любого репозитория
+# (gh pr edit -R чужой --body-file ~/ai/knowledge/me/…) и принёс бы в окно чужой текст из веба (gh pr view -R чужой
+# --comments, SEC-13). В окне штаба (PANTHEON_ROLE=hq или agent_type hq — главная сессия и субагенты) любой gh pr:
+#   - только с явным -R/--repo, и каждый — owner/repo из [merge_repos] политики (любого направления); без -R gh взял бы
+#     репозиторий папки, его здесь не проверить. GH_REPO и GH_HOST в команде или в окружении — отказ;
+#   - PR — номером: адрес PR в аргументе gh берёт вместо -R;
+#   - без обсуждений: --comments (-c) и --json с comments, reviews, latestReviews — чужой текст и в своём репозитории;
+#   - без личного в команде: те же пути, что правило private закрывает остальным ролям (--body-file, -F, $(cat …),
+#     перенаправление), и значение флага в том же слове (--body-file=<путь>).
+# Слияние штабу закрывает ещё и push (merge_problem). Координаторов и мастерскую правило не трогает.
+HQ_GH_VALUE = {"view": "Rqt", "checks": "Rqti", "edit": "RbFBmt", "merge": "RbFtA"}  # короткие флаги со значением
+HQ_GH_BOOL = {"view": "cw", "checks": "w", "merge": "dsmr"}
+HQ_GH_LONG_VALUE = {"--repo", "--body", "--body-file", "--title", "--json", "--jq", "--template", "--base",
+                    "--milestone", "--subject", "--author-email", "--match-head-commit", "--interval"}
+HQ_GH_DISCUSSION = re.compile(r"\b(?:comments|reviews|latestReviews)\b")
+
+
+def _hq_gh_args(sub, args):
+    """Разбор gh pr <sub> штаба → (ошибка, [значения -R]). Короткие флаги склеиваются (pflag): -cR<репо>."""
+    value, flags = HQ_GH_VALUE.get(sub, "RqtbFBA"), HQ_GH_BOOL.get(sub, "")
+    repos, nxt = [], None  # nxt: "repo", "json" или "skip" — чьё значение следующее слово
+    for a in args:
+        if nxt:
+            if nxt == "repo":
+                repos.append(a)
+            elif nxt == "json" and HQ_GH_DISCUSSION.search(a or ""):
+                return "без обсуждений (--json comments, reviews)", repos
+            nxt = None
+            continue
+        if not a:
+            return "слово команды не вычислить (переменная, $(…))", repos
+        flag, eq, val = a.partition("=")
+        if a == "--comments" or flag == "--comments":
+            return "без обсуждений (--comments)", repos
+        if flag == "--repo":
+            if eq:
+                repos.append(val)
+            nxt = None if eq else "repo"
+        elif flag == "--json":
+            if eq and HQ_GH_DISCUSSION.search(val):
+                return "без обсуждений (--json comments, reviews)", repos
+            nxt = None if eq else "json"
+        elif a.startswith("--"):
+            if not eq and (flag in HQ_GH_LONG_VALUE or flag.startswith(("--add-", "--remove-"))):
+                nxt = "skip"
+        elif a.startswith("-") and len(a) > 1:
+            for i, c in enumerate(a[1:]):
+                rest = a[2 + i:]
+                if sub == "view" and c == "c":
+                    return "без обсуждений (-c, --comments)", repos
+                if c in value:
+                    if c == "R":
+                        rest = rest[1:] if rest.startswith("=") else rest
+                        if rest:
+                            repos.append(rest)
+                    if not rest:
+                        nxt = "repo" if c == "R" else "skip"
+                    break
+                if c not in flags:
+                    return f"флаг -{c} не разобрать", repos
+        elif not re.fullmatch(r"#?\d+", a):
+            return "PR указывай номером (адрес PR gh берёт вместо -R)", repos
+    if nxt == "repo":
+        return "-R без репозитория", repos
+    return None, repos
+
+
+def check_hq_gh(event, tool, tool_input):
+    if tool != "Bash" or not (window_role() == "hq" or event.get("agent_type") == "hq"):
+        return None
+    cmd = tool_input.get("command") or ""
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    _, cmds = bash_analysis(cmd, cwd)
+    calls = [t for n, t in cmds if n and os.path.basename(n.rstrip("/")) == "gh" and t[:1] == ["pr"]]
+    if not calls:
+        return None
+    head = "Правило hq-gh: окну Пританея gh pr — только по своему репозиторию (metis-0247)"
+    tail = (" Нужен чужой PR или его обсуждение — поручи координатору направления; личное в PR не уходит.")
+    if re.search(r"\bGH_(?:REPO|HOST)\b", cmd) or os.environ.get("GH_REPO") or os.environ.get("GH_HOST"):
+        return f"{head}: без GH_REPO и GH_HOST — репозиторий только через -R.{tail}"
+    policy = load_policy()
+    mr = policy.get("merge_repos")
+    allowed = {r.strip().lower() for v in (mr.values() if isinstance(mr, dict) else ()) if isinstance(v, list)
+               for r in v if isinstance(r, str) and r.strip()}
+    for texts in calls:
+        i = _gh_pr_sub(texts)
+        if i is None:
+            return f"{head}: подкоманду gh pr не разобрать.{tail}"
+        why, repos = _hq_gh_args(texts[i], texts[1:i] + texts[i + 1:])
+        if why:
+            return f"{head}: {why}.{tail}"
+        if not repos:
+            return (f"{head}: укажи репозиторий явно — gh pr {texts[i]} N -R <owner/repo> из [merge_repos] "
+                    f"policy.toml; без -R gh взял бы репозиторий папки, а его не проверить.{tail}")
+        bad = [r for r in repos if not _merge_repo_ok(r, allowed)]
+        if bad:
+            known = "" if allowed else " (список [merge_repos] пуст или policy.toml не прочиталась)"
+            return f"{head}: -R {bad[0] or '<не вычислить>'} нет в [merge_repos] policy.toml{known}.{tail}"
+    priv = _norm(private_conf(policy)["paths"])
+    hits = _bash_private_hits(event, tool_input, cwd, priv, True, lambda p: _glob_reaches(p, priv), values=True)
+    if hits:
+        return (f"{head}: личное ({hits[0].replace(HOME, '~')}) в команде с gh pr — то же правило private, что у "
+                f"координаторов: в PR (--body, --body-file, -F) личное не уходит.{tail}")
+    return None
+
+
 # tg-role (metis-0267): личную переписку выгружает только исполнитель заявок `pantheon read` — процесс без
 # PANTHEON_ROLE, — а не окно роли. Отказ любому окну с PANTHEON_ROLE (главной сессии и её субагентам, tg-reader тоже)
 # на Bash, где tg_read.py получает подкоманду выгрузки личного чата, или где есть сокет демона tg-readd. Публичные
@@ -3164,7 +3284,7 @@ def check_chiron_call(event, tool, tool_input):
 
 
 def check_window(event, tool, tool_input):
-    for rule, check in (("hq-telegram", check_hq_telegram), ("tg-role", check_tg_role),
+    for rule, check in (("hq-telegram", check_hq_telegram), ("hq-gh", check_hq_gh), ("tg-role", check_tg_role),
                         ("chiron", check_chiron_call)):
         if rule not in OFF:
             reason = check(event, tool, tool_input)
