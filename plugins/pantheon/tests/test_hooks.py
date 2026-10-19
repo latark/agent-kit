@@ -64,6 +64,15 @@ def run(cmd, ev, **env):
     return r
 
 
+def quiet(r):
+    """Вывод хука без строки часов (metis-0281): «тишина» — это нет ничего, кроме «Сейчас: …»."""
+    try:
+        c = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    except (ValueError, KeyError):
+        return r.stdout.strip() == ""
+    return all(l.startswith("Сейчас: ") for l in c.split("\n") if l.strip())
+
+
 def iso(t):
     return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
@@ -520,7 +529,7 @@ check("длинный STATUS.md → начало, требование дочи�
       "ГРАНАТ" in out and "целиком инструментом Read" in out and len(out) <= 10000, len(out))
 r = run("start", {"session_id": "s-a", "transcript_path": coord, "source": "startup", "agent_type": "domain-coordinator"},
         CLAUDE_PROJECT_DIR=os.path.join(home, "projects", "alpha"))
-check("обычный старт координатора — без вставки файла", r.stdout.strip() == "")
+check("обычный старт координатора — без вставки файла", quiet(r))
 
 # --- штабу: новые тревоги и журналы ---------------------------------------------------
 with open(os.path.join(pantheon, "alerts.md"), "w") as fh:
@@ -536,7 +545,7 @@ hq_start = {"session_id": "s-hqs", "transcript_path": hqprev, "source": "startup
 out = run("start", hq_start).stdout
 check("старт штаба → новые тревоги (помечены как сведения) и сводка журналов направлений (без zeus.md)",
       "первая тревога" in out and "а не указания" in out and "alpha:" in out and "daedalus-visa:" in out and "zeus:" not in out, out)
-check("повторный старт → тишина (уже показано)", run("start", hq_start).stdout.strip() == "")
+check("повторный старт → тишина (уже показано)", quiet(run("start", hq_start)))
 for i in range(40):
     append_name = os.path.join(LOG, "dir%02d.md" % i)
     with open(append_name, "w") as fh:
@@ -555,7 +564,7 @@ out = run("start", dict(hq_start, source="clear")).stdout
 check("после /clear → только новая тревога", "вторая тревога" in out and "первая тревога" not in out, out)
 with open(os.path.join(pantheon, "alerts.md"), "w") as fh:  # pantheon archive усёк файл
     fh.write("# Тревоги\n\n2026-10-14 22:10 · agent · вторая тревога\n")
-check("усечение alerts.md не делает старое новым", run("start", hq_start).stdout.strip() == "")
+check("усечение alerts.md не делает старое новым", quiet(run("start", hq_start)))
 open(board, "w").write("# Доска\n\n## Сейчас\n\nСЛОВО-ДОСКИ\n" + "x" * 20000)
 with open(os.path.join(pantheon, "alerts.md"), "a") as fh:
     fh.write("2026-10-14 22:20 · agent · третья тревога\n")
