@@ -4855,6 +4855,9 @@ def check(paths=None, quiet=False):
         drift = T.check_projects(BOARD, T.load_tasks(PANTHEON, T.WORK_TYPES), now(), board_registry(T)[2])
         for d in drift:
             print(f"ОШИБКА · Доска/{d}")
+    view_drift = T.check_views(BOARD) if not paths else []  # у каждого вида Доска.base — строка «что здесь» (metis-0288)
+    for d in view_drift:
+        print(f"ОШИБКА · {d}")
     if not quiet or bad:
         print(f"задач: {n}, с ошибками: {len(bad)}, без шапки: {noheader}")
     if quiet:  # тик: одна тревога на набор проблем, а не сбой задачи каждые 5 минут
@@ -4868,8 +4871,12 @@ def check(paths=None, quiet=False):
                        + (f" и ещё {len(drift) - 1}" if len(drift) > 1 else ""), "check")
         else:
             clear_once("check-projects")
+        if view_drift:
+            alert_once("check-views", "|".join(view_drift), f"доска: {view_drift[0]}", "check")
+        else:
+            clear_once("check-views")
         return 0
-    return 1 if bad or drift else 0
+    return 1 if bad or drift or view_drift else 0
 
 
 def task_cmd(rest):

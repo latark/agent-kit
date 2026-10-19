@@ -1962,6 +1962,65 @@ BASE_VERSION = hashlib.sha256(BASE_FILE.encode("utf-8")).hexdigest()[:12]  # с�
 # и нетронутый старый файл иначе считался бы правкой владельца. Дальше то, что записал тик, помнит base_hash
 OLD_BASE_HASHES = {"917c6bef26511e65", "44467393293d25f4"}
 
+# У вида в .base своего поля описания нет (документация Obsidian Bases: у вида type, name, filters, sort, groupBy, order,
+# limit, summaries), поэтому «что здесь и что вам делать» живёт тут: из этого словаря тик пишет и Сводка.md (заголовок,
+# строка, встраивание вида), и Справка/Виды доски.md. pantheon check сверяет: у каждого вида BASE_FILE есть строка,
+# лишних строк нет (metis-0288). Имена видов — в BASE_FILE выше; строку правят вместе с фильтром вида.
+VIEW_HELP = {
+    "От меня нужно": "Ждут вашего ответа или приёмки, либо адресованы вам. Что делать: ответить или принять; готовые "
+                     "и отменённые не показываются.",
+    "Срочно": "Просрочено, долго ждёт ответа, скоро срок, есть конфликт или приоритет 0 (пачки не считаются). Что делать: "
+              "разбирать сверху вниз; готовые и отменённые не показываются.",
+    "Доска": "Задачи по статусам: Входящие, Нужен ответ, В работе, Ждёт, На проверке и готовые за 7 дней. Что делать: "
+             "смотреть, что движется; сменить статус — перетащить карточку. Очередь и пачки здесь не видны.",
+    "Очередь": "Задачи со статусом «Очередь» — ждут своего часа, по приоритету и сроку. Что делать: решить, что возьмут "
+               "в работу следующим; пачки здесь не видны.",
+    "Пачки": "Пачки (наборы задач на ночь) по статусам, с суммой оценок против бюджета; готовые — 7 дней. Что делать: "
+             "следить за бюджетом и пересечениями по файлам.",
+    "Итоги пачек": "Задачи из пачек, которые дошли до проверки, готовы или ждут приёмки, по пачкам. Что делать: принять "
+                   "результат ночи.",
+    "Все задачи": "Вообще все задачи и пачки, включая готовые, по проектам. Что делать: искать то, чего нет в других видах.",
+}
+HELP_DIR = "Справка"
+HELP_NOTE = "Виды доски"
+
+
+def base_views(text):
+    """Имена видов .base в порядке меню."""
+    return re.findall(r"^  - type: \w+\n    name: (.+?)\s*$", text, re.M)
+
+
+def check_views(board=None, base_text=None, help_lines=None):
+    """Сверка строк справки с видами Доска.base → список расхождений: у вида нет строки; строка без вида. Шаблон тика
+    (BASE_FILE) и, если лежит в board, файл владельца: вид, добавленный вручную, тоже должен иметь строку."""
+    help_lines = VIEW_HELP if help_lines is None else help_lines
+    out = []
+    sources = [("шаблон Доска.base", BASE_FILE if base_text is None else base_text)]
+    if board and base_text is None:
+        try:
+            with open(os.path.join(board, "Доска.base"), encoding="utf-8") as fh:
+                sources.append(("Доска/Доска.base", fh.read()))
+        except (OSError, UnicodeDecodeError):
+            pass
+    for label, text in sources:
+        views = base_views(text)
+        out += [f"{label}: у вида «{v}» нет строки «что здесь» (VIEW_HELP)" for v in views
+                if not str(help_lines.get(v) or "").strip()]
+        if label.startswith("шаблон"):
+            out += [f"VIEW_HELP: строка «{k}» без вида в Доска.base" for k in help_lines if k not in views]
+    return out
+
+
+def render_views_section(level="##"):
+    return "".join(f"{level} {n}\n\n{line}\n\n![[Доска.base#{n}]]\n\n" for n, line in VIEW_HELP.items())
+
+
+def render_help_note():
+    body = ("\n> Заметку пишет плановый проход из `VIEW_HELP`. Не правьте её: строки сверяет `pantheon check`.\n\n"
+            "# Виды доски\n\nВиды меню в Доска.base — что в каждом и что вам делать. Те же виды со встроенной таблицей "
+            "лежат в сводке.\n\n" + "\n".join(f"- **{n}** — {line}" for n, line in VIEW_HELP.items()) + "\n")
+    return join({"Тип": "справка"}, body, ["Тип"])
+
 
 OWNER_ONLY_FIELDS = ("answer", "requested")  # ставит только доска: ответ владельца и выбор по рискованному
 
@@ -2056,7 +2115,7 @@ def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None):
                 f" · 🟡 В работе {len(rows['doing'])} · 🟢 Готово за сутки {len(rows['done'])}")
     done_fold = (f"> [!success]- 🟢 Готово за сутки ({len(rows['done'])})\n"
                  + ("\n".join(f"> - {x}" for x in rows["done"]) if rows["done"] else "> —") + "\n")
-    return ("# Сводка\n\n" + counters + "\n\n## От меня нужно\n\n![[Доска.base#От меня нужно]]\n\n"
+    return ("# Сводка\n\n" + counters + "\n\n" + render_views_section() + "\n"
             + "Проекты и пачки — [[Пульт.base|пульт]].\n\n"
             + sec(f"🔴 {HUMAN_WAIT}", top, len(wait)) + "\n"
             + sec("⏰ Просрочено", rows["overdue"]) + "\n"
@@ -2293,6 +2352,31 @@ def _sync_base(board, state, state_path, t, alert, fname="Доска.base", text
     if cur != new:
         _write_plain(bp, text)
     state[f"{key}_version"], state[f"{key}_hash"] = version, _sha(new)
+
+
+def _sync_help(board, state, alert):
+    """Доска/Справка/Виды доски.md: свою (хеш в состоянии, Тип «справка») переписывает, чужой файл не трогает."""
+    path = os.path.join(board, HELP_DIR, HELP_NOTE + ".md")
+    text = render_help_note()
+    try:
+        cur = None
+        if os.path.lexists(path):
+            if os.path.islink(path) or not os.path.isfile(path):
+                raise ValueError("на месте заметки не обычный файл")
+            with open(path, encoding="utf-8") as fh:
+                cur = fh.read()
+        if cur is not None and cur != text and _sha(cur) != state.get("help"):
+            head, _ = split(cur)
+            if (head or {}).get("Тип") != "справка":
+                alert("board-help", _sha(cur), f"доска: в Доска/{HELP_DIR}/ лежит чужой файл «{HELP_NOTE}.md» — справка "
+                      "по видам не записана", "board")
+                return
+        if cur != text:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            _write_plain(path, text)
+        state["help"] = _sha(text)
+    except (OSError, ValueError, UnicodeError) as e:
+        alert("board-help", type(e).__name__, f"доска: справку по видам не записать ({e})", "board")
 
 
 def _sync_types(vault, alert):
@@ -2619,6 +2703,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         with open(sp, "w", encoding="utf-8") as fh:
             fh.write(text)
     _sync_base(board, state, state_path, t, alert)
+    _sync_help(board, state, alert)
     _sync_base(board, state, state_path, t, alert, "Пульт.base", PULT_FILE, PULT_VERSION, "pult", ())
     _sync_projects(board, state, tasks, t, registry, roles, alert)
     _sync_types(os.path.dirname(os.path.abspath(board)), alert)

@@ -163,7 +163,7 @@ def summary_checks():
     check("сводка: сверху строка счётчиков (сразу после заголовка)", lines[0] == "# Сводка" and i_cnt == 2
           and "Готово за сутки 1" in lines[i_cnt], lines[:4])
     check("сводка: под счётчиками «От меня нужно» со встроенным видом",
-          i_cnt < i_mine and "![[Доска.base#От меня нужно]]" in lines[i_mine + 2])
+          i_cnt < i_mine and "![[Доска.base#От меня нужно]]" in lines[i_mine + 4])
     # Кому = Владелец: считается, без двойного счёта; Готово/Отменено — нет; чужой адресат — нет
     def mk(i, **kw):
         return (f"p{i}", {"type": "task", "id": f"metis-1{i:03d}", "title": f"З{i}", "status": "todo", "project": "demo",
