@@ -250,6 +250,10 @@ def main():
                                          and "Коллекции направлений: legal, docs (справка)." in texts["argus.md"]))
     check("координатор: в приёмке ночи есть шаг pantheon task set <id> --acceptance принято|вернуть|к владельцу",
           "pantheon task set <id> --acceptance принято|вернуть|к владельцу" in texts.get("domain-coordinator.md", ""))
+    check("координатор: acceptance с --note-вердиктом и для своих/ядра/спорных только после «принять» Зевса",
+          all(x in texts.get("domain-coordinator.md", "") for x in (
+              '--note "<вердикт: файл ревью, запись шлюза или ответ Зевса>"',
+              "поле им ставь только после «принять» Зевса, до этого оставь пустым")))
     # Гестия (metis-0217, review-51-bypass): шаблон в плагине есть, но до metis-0245 build её не собирает
     tmpl_h = read(os.path.join(real, "hestia.tmpl"))
     head = tmpl_h.split("---")[1] if tmpl_h.count("---") >= 2 else ""
