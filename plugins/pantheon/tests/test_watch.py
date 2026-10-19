@@ -1002,6 +1002,9 @@ def test_stop_removes_from_fleet():
     r = e3.run("stop", "rs-dir", t=T0, extra={"FAKE_STOP_FAIL": "r4r4r4r4"})
     check(["stop", "r4r4r4r4"] in e3.calls() and ["rm", "r4r4r4r4"] not in e3.calls()
           and "rs-dir: осталась среди фоновых сессий Claude Code: r4r4r4r4" in r.stdout, f"stop с кодом 1: rm не должен вызываться: {e3.calls()} {r.stdout!r}")
+    # ревью argus к #53 (metis-0250 п. 5): тревога называет того, кто отказал, — stop, а не rm
+    check("rs-dir: осталась среди фоновых сессий Claude Code (stop отказал): r4r4r4r4 — claude stop: " in e3.alerts()
+          and "rm отказал" not in e3.alerts(), f"stop с кодом 1 — тревога «rm отказал»: {e3.alerts()}")
 
 
 def test_stop_without_locks_write():
@@ -2257,6 +2260,145 @@ def test_plugins_respawn_recheck_0181():
     check(not respawned(e, "a1b2c3d4") and "\tresume-skip\trr-dir\ta1b2c3d4\tplugins-respawn\tзанято" in _start_log(e)
           and os.path.exists(e.st("plugins", "respawn.json")),
           f"0181: окно, занятое к моменту перезапуска, перезапущено: {e.calls()} {_start_log(e)!r}")
+
+
+# --- metis-0250: честные состояния сессий и уборка -------------------------------------------------------------
+
+def _job(e, short, **st):
+    """state.json задания Claude Code в подменённом HOME."""
+    d = os.path.join(e.home, ".claude", "jobs", short)
+    os.makedirs(d, exist_ok=True)
+    json.dump(st, open(os.path.join(d, "state.json"), "w"))
+
+
+def _roster(e, workers):
+    """Реестр демона Claude Code: короткий id → pid процесса."""
+    d = os.path.join(e.home, ".claude", "daemon")
+    os.makedirs(d, exist_ok=True)
+    json.dump({"proto": 1, "workers": {k: {"pid": v, "rvAuth": "секрет"} for k, v in workers.items()}},
+              open(os.path.join(d, "roster.json"), "w"))
+
+
+def _dead_pid():
+    p = subprocess.Popen(["true"])
+    p.wait()
+    return p.pid
+
+
+def _iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t))
+
+
+def test_status_live_not_failed_0250():
+    """п. 1: из окна с песочницей claude agents пишет живую сессию failed без pid (19.10 zeus, metis-pantheon), а
+    задание working и процесс в реестре демона жив — сводка и дежурный не зовут её «упала»; настоящая упавшая
+    (процесса нет) — «упали» с причиной из state.json."""
+    e = Env()
+    e.direction("lv-dir")
+    alive = os.getpid()
+    e.agents([bg("zeus", "failed", "zzzzzzzz-1"), bg("lv-dir", "failed", "lvlvlvlv-1"),
+              bg("lv-dir", "failed", "dddddddd-1")])
+    _job(e, "zzzzzzzz", state="working", detail="пишет итог")
+    _job(e, "lvlvlvlv", state="blocked", needs="выбрать: А или Б")
+    _job(e, "dddddddd", state="working", detail="API Error: overloaded")    # процесса нет — правда упала
+    _roster(e, {"zzzzzzzz": alive, "lvlvlvlv": alive, "dddddddd": _dead_pid()})
+    out = e.run("status", t=T0).stdout
+    check("упали: zeus" not in out and "фоновые работают: 1" in out, f"живой zeus «упал»: {out}")
+    check("ждут вас: lv-dir — выбрать: А или Б" in out, f"живая ждущая — не «ждут вас» с вопросом: {out}")
+    check("упали: lv-dir — API Error: overloaded" in out and "упали: 1" in out, f"настоящая упавшая не видна: {out}")
+    e.run("watch", t=T0)
+    al = e.alerts()
+    check("zeus (zzzzzzzz) упала" not in al and "lv-dir (dddddddd) упала: API Error" in al,
+          f"дежурный: живая «упала» или упавшая без тревоги: {al}")
+    snap = json.load(open(e.st("agents.json")))["agents"]
+    check({a["id"]: a.get("pid") for a in snap}.get("zzzzzzzz") == alive, f"pid из реестра демона не в снимке: {snap}")
+    check("секрет" not in json.dumps(snap), "жетон реестра демона попал в снимок")
+
+
+def test_status_blocked_without_process_0250():
+    """п. 2: «ждёт вас» без процесса и без вопроса (18.10 themis-sources 748d6686) — не «ждут вас» и без тревоги
+    дежурного; с вопросом владельцу — ждёт вас; реестра демона нет — ничего не утверждаем, как раньше."""
+    e = Env()
+    e.direction("th-dir")
+    e.direction("hm-dir")
+    e.agents([bg("th-dir", "blocked", "thththth-1"), bg("hm-dir", "blocked", "hmhmhmhm-1")])
+    _job(e, "thththth", state="blocked", detail="ждёт разрешения")
+    _job(e, "hmhmhmhm", state="blocked", needs="выбрать: А — разрешить")
+    _roster(e, {})
+    out = e.run("status", t=T0).stdout
+    check("ждут вас: th-dir" not in out and "без процесса: th-dir — ждать нечего" in out and "claude rm thththth" in out,
+          f"снятая сессия висит «ждёт вас»: {out}")
+    check("ждут вас: hm-dir — выбрать: А — разрешить" in out, f"сессия с вопросом пропала из «ждут вас»: {out}")
+    e.run("watch", t=T0)
+    check("th-dir (thththth) ждёт вас" not in e.alerts() and "hm-dir (hmhmhmhm) ждёт вас" in e.alerts(),
+          f"дежурный: тревога «ждёт вас» по снятой сессии: {e.alerts()}")
+    os.remove(os.path.join(e.home, ".claude", "daemon", "roster.json"))
+    out = e.run("status", t=T0 + 60).stdout
+    check("ждут вас: th-dir" in out, f"без реестра демона сессия объявлена снятой: {out}")
+
+
+def test_status_no_dash_without_reason_0250():
+    """п. 4: причины нет ни в claude agents, ни в state.json — строка без висячего тире."""
+    e = Env()
+    e.direction("nd-dir")
+    e.agents([bg("nd-dir", "failed", "ndndndnd-1"), bg("zeus", "blocked", "nznznznz-1")])
+    out = e.run("status", t=T0).stdout
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip().startswith(("упали:", "ждут вас:"))]
+    check("упали: nd-dir" in lines and "ждут вас: zeus" in lines and not [ln for ln in lines if ln.endswith("—")],
+          f"висячее тире: {lines}")
+
+
+def test_auto_rm_done_stopped_0250():
+    """п. 3: дежурный убирает (claude rm) сессии Пантеона в done/stopped без процесса дольше 2 ч; не трогает: свежие,
+    с процессом, чужие, на паузе по нагрузке, при паузе планировщика; отказ rm (неотправленное в worktree) — тревога
+    один раз и повтор через сутки, без --discard-unpushed. Есть живая сессия того же имени — прежние (done/stopped без
+    процесса) убираются сразу, без 2 ч и без state.json: в claude agents у имени одна строка."""
+    e = Env()
+    for d in ("ar-dir", "ap-dir", "aq-dir", "ad-dir"):
+        e.direction(d)
+    old, fresh = T0 - 3 * 3600, T0 - 600
+    e.agents([bg("ar-dir", "done", "a1a1a1a1-1"), bg("ar-dir", "stopped", "a2a2a2a2-1"),
+              bg("aq-dir", "done", "a3a3a3a3-1"),                     # свежая — 10 мин
+              bg("ar-dir", "done", "a4a4a4a4-1", pid=os.getpid()),    # процесс жив — держит имя (CTX-10)
+              bg("чужая", "done", "a5a5a5a5-1"),                     # не Пантеон
+              bg("ap-dir", "stopped", "a6a6a6a6-1"),                 # пауза по нагрузке — её снятие продолжит
+              bg("ar-dir", "working", "a7a7a7a7-1", pid=os.getpid()),
+              bg("ar-dir", "done", "a8a8a8a8-1"),                     # worktree с неотправленным — rm откажет
+              bg("ad-dir", "working", "a9a9a9a9-1"),                  # живая новая того же имени —
+              bg("ad-dir", "done", "b1b1b1b1-1"), bg("ad-dir", "stopped", "b2b2b2b2-1")])  # прежние убрать сразу
+    for sid in ("a1a1a1a1", "a2a2a2a2", "a4a4a4a4", "a5a5a5a5", "a6a6a6a6", "a7a7a7a7", "a8a8a8a8"):
+        _job(e, sid, state="done", updatedAt=_iso(old), lastTerminalAt=_iso(old))
+    for sid in ("a3a3a3a3", "b1b1b1b1"):
+        _job(e, sid, state="done", updatedAt=_iso(fresh), lastTerminalAt=_iso(fresh))
+    e.extra["PANTHEON_FAKE_SWAP"] = "50"    # swap высокий — пауза по нагрузке держится весь тест
+    e.run("pause", "ap-dir", "--reason", "swap", "проба", t=T0 - 100)
+    # пауза планировщика — уборки нет совсем
+    open(e.st("paused"), "w").write("x")
+    e.run("watch", t=T0)
+    check(not [c for c in e.calls() if c[:1] == ["rm"]], f"уборка при паузе планировщика: {e.calls()}")
+    os.remove(e.st("paused"))
+    e.run("watch", t=T0 + 10, extra={"FAKE_RM_REFUSE": "a8a8a8a8"})
+    rms = [c[1] for c in e.calls() if c[:1] == ["rm"]]
+    check(sorted(rms) == ["a1a1a1a1", "a2a2a2a2", "a8a8a8a8", "b1b1b1b1", "b2b2b2b2"], f"уборка не те сессии: {rms}")
+    check(not [c for c in e.calls() if c[1:2] == ["a9a9a9a9"]], "уборка тронула живую новую сессию имени")
+    check(not [c for c in e.calls() if "--discard-unpushed" in c or "--force-remove-worktree" in c], "rm насильно")
+    check(not [c for c in e.calls() if c[:1] == ["stop"] and c[1] in ("a1a1a1a1", "a2a2a2a2")], "уборка зовёт stop")
+    log = open(e.st("logs", "start.log")).read()
+    check("auto-rm\tar-dir\ta1a1a1a1\tdone" in log and "rm-refused\tar-dir\ta8a8a8a8" in log, f"start.log: {log}")
+    al = e.alerts()
+    check("уборка: убраны из фоновых сессий Claude Code" in al and "ar-dir a1a1a1a1" in al and "ar-dir a2a2a2a2" in al,
+          f"нет строки уборки: {al}")
+    check("ar-dir: прежняя сессия a8a8a8a8 осталась среди фоновых сессий Claude Code (уборка, rm отказал): " in al
+          and "unpushed" in al, f"отказ rm без тревоги: {al}")
+    # следующий проход: отказавшую не дёргаем до суток, тревога не повторяется
+    n = len(rms)
+    e.run("watch", t=T0 + 400, extra={"FAKE_RM_REFUSE": "a8a8a8a8"})
+    again = [c[1] for c in e.calls() if c[:1] == ["rm"]][n:]
+    check("a8a8a8a8" not in again, f"отказавшую дёрнули снова через 5 мин: {again}")
+    check(e.alerts().count("a8a8a8a8 осталась") == 1, "тревога об отказе повторилась")
+    e.run("watch", t=T0 + 10 + 86400 + 60, extra={"FAKE_RM_REFUSE": "a8a8a8a8"})
+    check("a8a8a8a8" in [c[1] for c in e.calls() if c[:1] == ["rm"]][n + len(again):], "через сутки повтора нет")
+    check(e.alerts().count("a8a8a8a8 осталась") == 1, "тот же отказ — вторая тревога")
 
 
 if __name__ == "__main__":
