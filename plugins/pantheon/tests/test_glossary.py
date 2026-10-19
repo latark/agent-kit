@@ -6,7 +6,7 @@
 (кроме печатаемых справкой: докстринг модуля с `print(__doc__)` и функций с `<имя>.__doc__`); *.sh — строки без «#» в начале.
 Ещё все строки roles/*.tmpl, roles/_parts/*.part, template/pantheon/*, plugins/guard/README.md и policy.example.toml,
 строковые литералы plugins/guard/hooks/*.py (пути в находках и [[allow]] — «guard/…»).
-Вне проверки: tests/ и функция sandbox_build (ядро, отдельный PR).
+Вне проверки: tests/.
 Исключения — [[allow]] в glossary.toml (файл + фрагмент строки + причина). Лишний [[allow]], который ничего не
 находит, — тоже провал: список не должен зарастать.
 
@@ -27,7 +27,7 @@ PLUGIN = os.path.dirname(HERE)
 OK, FAIL = [], []
 
 SKIP_FILES = set()
-SKIP_FUNCS = {("lib/pantheon.py", "sandbox_build")}
+SKIP_FUNCS = set()
 
 
 def check(name, cond, detail=""):
@@ -274,6 +274,20 @@ def main():
         f, u = scan(fake, gloss, [])
         got = sorted(n for r, n, *_ in f if r == "lib/b.py")
         check("«подтолкни», «вытолкнуть», «протолкнул», «толкаем» — находки", got == [1, 2, 3, 4], str(got))
+        # metis-0251: «подталкивать», «выталкивать» — находки
+        with open(os.path.join(fake, "lib", "c.py"), "w", encoding="utf-8") as fh:
+            fh.write('x = "подталкивать сессию"\ny = "выталкивать"\n')
+        f, u = scan(fake, gloss, [])
+        got = sorted(n for r, n, *_ in f if r == "lib/c.py")
+        check("«подталкивать», «выталкивать» — находки", got == [1, 2], str(got))
+        # metis-0251, [zeus-term-core]: «ядро Пантеона» и «правка ядра» проходят, «ядро окон» и похожее — находка
+        with open(os.path.join(fake, "lib", "d.py"), "w", encoding="utf-8") as fh:
+            fh.write('a = "ядро Пантеона"\nb = "правка ядра Пантеона"\nc = "PR: правка ядра"\nd = "права окна"\n'
+                     'e = "ядро окон"\nf = "ядро окна"\ng = "Ядро окнами"\nh = "ядро защит"\n')
+        f, u = scan(fake, gloss, [])
+        got = sorted(n for r, n, *_ in f if r == "lib/d.py")
+        check("«ядро Пантеона», «правка ядра», «права окна», «ядро защит» проходят; «ядро окон/окна» — находка",
+              got == [5, 6], str(got))
     finally:
         shutil.rmtree(tmp, True)
 

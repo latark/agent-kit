@@ -539,6 +539,41 @@ def test_reset_mid_night_two_passes_0243():
         check(abs(got - want) < 1e-6, f"{x} после сброса: spent {got}, ждали {want}: {e.state_of()}")
 
 
+def test_early_reset_idle_window_0246():
+    """metis-0246: неделю сбросили досрочно (новый resets_at), а простаивающее окно ещё пишет строку со старым
+    resets_at позже новой. База недели переносится только вперёд: расход ночи 2, а не скачок (было 60)."""
+    e = Env()
+    open_night(e, hm("23:05"))
+    t0 = hm("23:06")
+    u0 = e.at_line(t0, 0)
+    e.watch(t0)
+    old, new = e.resets, e.resets + 2 * 86400
+    e.snap(hm("23:30"), u0 + 1.0, old)
+    e.watch(hm("23:30"))
+    check(e.state_of()["spent"] == 1.0, f"до сброса: {e.state_of()}")
+    e.week_usage([(hm("23:40"), new, 0.5)])
+    e.snap(hm("23:40"), 0.5, new)
+    e.watch(hm("23:40"))
+    check(abs(e.state_of()["spent"] - 1.5) < 1e-6, f"после раннего сброса: {e.state_of()}")
+    # простаивающее окно пишет старый сброс позже новой строки
+    e.week_usage([(hm("23:45"), old, u0 + 1.0)])
+    e.snap(hm("23:45"), u0 + 1.0, old)
+    e.watch(hm("23:45"))
+    check(abs(e.state_of()["spent"] - 1.5) < 1e-6, f"старая строка простаивающего окна сдвинула расход: {e.state_of()}")
+    e.week_usage([(hm("23:50"), new, 1.0)])
+    e.snap(hm("23:50"), 1.0, new)
+    e.watch(hm("23:50"))
+    check(abs(e.state_of()["spent"] - 2.0) < 1e-6, f"после старой строки: spent {e.state_of()['spent']}, ждали 2")
+    # проба «вперёд»: строк новой недели в week-usage не осталось (файл усечён), в снимке только старая неделя
+    # (resets_at раньше сохранённого больше чем на час) — замер игнорируется, spent не берёт used старой недели
+    os.remove(os.path.join(e.sl, "week-usage"))
+    e.snap(hm("23:55"), u0 + 60.8, old)
+    e.watch(hm("23:55"))
+    st = e.state_of()
+    check(abs(st["spent"] - 2.0) < 1e-6 and st["resets_at"] == new,
+          f"замер со старым resets_at (назад) сдвинул ночь: {st}")
+
+
 def test_fractional_budget():
     """metis-0214: при budget_pct=1 тревоги 50/80 идут по дробному расходу (снимок недели с дробным процентом).
     Порог 50 % от 1 — 0,5 п. п., поэтому 0,4 тревоги не даёт, 0,5 даёт 50, 0,85 — 50 и 80."""
@@ -678,6 +713,8 @@ def test_status_format():
     e.snap(t - 300, 41.0, resets)
     env = {"PATH": os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pantheon, "PANTHEON_STATE": e.state,
            "PANTHEON_NOW": str(t), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": _ROOT}
+    if "TZ" in os.environ:  # дочерний процесс в том же поясе, что и тест (metis-0222)
+        env["TZ"] = os.environ["TZ"]
     run = lambda *a: subprocess.run([PY311, "-I", os.path.join(LIB, "pantheon.py"), *a], env=env,  # noqa: E731
                                     capture_output=True, text=True, timeout=60)
     r = run("night")

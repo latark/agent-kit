@@ -1496,12 +1496,12 @@ def stop(rest, who):
         P.write_json(P.path("stopped-all.json"), {"time": P.stamp(), "by": who, "names": sorted(set(prev) | set(marked)),
                                                   "paused": bool(old.get("paused")) or not had_pause})
         if left_all:
-            P.alert("стоп всё: осталась во флоте Claude Code (rm отказал): "
+            P.alert("стоп всё: осталась среди фоновых сессий Claude Code (rm отказал): "
                     + "; ".join(f"{n} {i} — {r}" for n, i, r in left_all), "pantheon-stop")
         P.alert(f"стоп всё ({who}): планировщик на паузе, остановлены: {', '.join(names) or 'никого'}; вернуть — "
                 "pantheon resume --all", "pantheon-stop")
         print(f"остановлены: {', '.join(names) or 'никого'}; планировщик на паузе. Вернуть: pantheon resume --all"
-              + "".join(f"\n{n}: осталась во флоте: {i}, причина: {r}" for n, i, r in left_all))
+              + "".join(f"\n{n}: осталась среди фоновых сессий Claude Code: {i}, причина: {r}" for n, i, r in left_all))
         return 0
     if not rest or not P.SESSION_NAME.fullmatch(rest[0]):
         print("pantheon stop <направление|daedalus-задача> | --all", file=P.sys.stderr)
@@ -1512,7 +1512,7 @@ def stop(rest, who):
         return 2
     n, left = _stop_one(name, agents, who)
     if left:
-        P.alert(f"{name}: осталась во флоте Claude Code (rm отказал): {'; '.join(i + ' — ' + r for i, r in left)}",
+        P.alert(f"{name}: осталась среди фоновых сессий Claude Code (rm отказал): {'; '.join(i + ' — ' + r for i, r in left)}",
                 "pantheon-stop")
     P.alert(f"{name} остановлена ({who}): сессий {n}; дежурный и Зевс её не будят — вернуть: pantheon resume {name}",
             "pantheon-stop")
@@ -1535,7 +1535,7 @@ def _stop_locked(name, agents, who):
     for a in P.live_copies(name, agents, registry=[]) + [a for a in agents if a.get("name") == name
                                                           and a.get("state") == "done" and a.get("pid")]:
         if a.get("id"):
-            reason = P.stop_and_rm(name, a["id"])  # metis-0239: без rm флот Claude Code поднимает сессию снова
+            reason = P.stop_and_rm(name, a["id"])  # metis-0239: без rm Claude Code сам перезапускает фоновую сессию
             P.start_log(f"stop\t{name}\t{a.get('name')}\t{a['id']}\t{who}")
             if reason:
                 P.start_log(f"rm-refused\t{name}\t{a['id']}\t{reason}")
@@ -1545,7 +1545,7 @@ def _stop_locked(name, agents, who):
 
 
 def _left_text(name, left):
-    return "".join(f"\n{name}: осталась во флоте: {i}, причина: {r}" for i, r in left)
+    return "".join(f"\n{name}: осталась среди фоновых сессий Claude Code: {i}, причина: {r}" for i, r in left)
 
 
 def _forget_autostart(name):
@@ -2193,6 +2193,15 @@ HOOKS_NO_TOMLLIB = ("python3 хуков без tomllib (Python до 3.11): guard
                     "пусто — Метиде: python3 в PATH должен быть 3.11+")
 
 
+def _corpus_declared(hq):
+    """Объявлен ли корпус: в [hq] closed_dirs есть папка корпуса (составляющая пути `corpus`, `corpus-…` или
+    `…-corpus`, например ~/projects/x-corpus) или в closed_collections — коллекция `corpus`."""
+    for d in hq.get("closed_dirs") or []:
+        if any(re.search(r"(?:^|-)corpus(?:-|$)", part.lower()) for part in d.split("/")):
+            return True
+    return any(c.lower() == "corpus" for c in hq.get("closed_collections") or [])
+
+
 def infra_check():
     """Лёгкие проверки без модели: guard отказывает на запретном, хуки плагина на месте, claude agents отвечает,
     управляемые настройки совпадают с guard. Живые проверки (пробуждение после /clear, сообщение между сессиями,
@@ -2245,7 +2254,14 @@ def infra_check():
         corpus = False
     except (OSError, ValueError):
         pass  # файл не прочитать или не TOML — строка НЕТ уже есть у [hq]
-    if corpus is not None:
+    # тревога — только если корпус объявлен: в [hq] закрыта папка или коллекция корпуса (metis-0253, шаг 1);
+    # чистая policy без корпуса ничего не теряет и не тревожит
+    declared = False
+    with contextlib.suppress(ValueError):
+        declared = _corpus_declared(P.ctx_mod().hq_policy(pol))
+    if corpus is not None and not (declared or corpus):
+        P.clear_once("corpus-policy-missing")
+    elif corpus is not None:
         add(corpus, "в policy.toml есть раздел [corpus] (что закрывает правило corpus-role)")
         if corpus:
             P.clear_once("corpus-policy-missing")

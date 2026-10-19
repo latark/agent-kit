@@ -565,7 +565,7 @@ def heavy_wait_reason(job, sched, t, overdue):
 #   board                     карточки VIEW/Доска/*.md; задачи (task_dirs: inbox/tasks,       board.json, журнал
 #                             directions/*/tasks); входящие directions/*/inbox; directions.toml, владельца и политика
 #                             schedule.toml (primary, уведомления)                            уведомлений — выходы
-#   sync-answers              HOME/.claude/.sync-held и .sync-incoming, owner-log/board.jsonl  —
+#   sync-answers              HOME/.claude/.sync-held и .sync-incoming, owner-log/board.jsonl и zeus.md  —
 #   agents                    HOME/.claude/daemon/roster.json, sessions/*.json (имя, pid),     ответ `claude agents`
 #                             jobs/*/* — признаки, по которым демон Claude меняет список       (снимок нужен лишь как
 #                                                                                              запасной вариант)
@@ -638,7 +638,8 @@ TICK_SKIP = {
     ("view", "--quiet"): lambda: _fp_tree(PANTHEON) + _fp_view_extras(),
     ("board",): _fp_board_inputs,
     ("sync-answers",): lambda: _fp_files([os.path.join(SYNC_DIR, ".sync-held"), os.path.join(SYNC_DIR, ".sync-incoming"),
-                                          os.path.join(STATE, "owner-log", "board.jsonl")]),
+                                          os.path.join(STATE, "owner-log", "board.jsonl"),
+                                          os.path.join(STATE, "owner-log", "zeus.md")]),
     ("agents",): lambda: (_fp_files([os.path.join(HOME, ".claude", "daemon", "roster.json")])
                           + _fp_files(sorted(glob.glob(os.path.join(HOME, ".claude", "sessions", "*.json"))))
                           + _fp_dir(os.path.join(HOME, ".claude", "jobs"))),
@@ -2908,7 +2909,7 @@ def copies_message(name, live):
 
 
 def stop_and_rm(name, sid):
-    """claude stop, затем claude rm <id> (metis-0239): остановленную сессию флот Claude Code поднимает снова
+    """claude stop, затем claude rm <id> (metis-0239): остановленную сессию Claude Code сам перезапускает
     (daemon.log: settled (killed) → claimed-spare (fleet)), пока она в его списке. rm убирает из списка фоновую сессию
     (и её worktree, если он чистый); переписка остаётся, вернуть — pantheon start / resume. Без --discard-unpushed и
     --force-remove-worktree: сессию с неотправленной работой не удаляем насильно. Возвращает None или причину отказа."""
@@ -3185,9 +3186,9 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
             start_log(f"stop-done\t{name}\t{a.get('id')}")
             if reason:
                 start_log(f"rm-refused\t{name}\t{a.get('id')}\t{reason}")
-                print(f"pantheon start: {name}: прежняя сессия {a.get('id')} осталась во флоте Claude Code, "
+                print(f"pantheon start: {name}: прежняя сессия {a.get('id')} осталась среди фоновых сессий Claude Code, "
                       f"причина: {reason}", file=sys.stderr)
-                alert(f"{name}: прежняя сессия {a.get('id')} осталась во флоте Claude Code (stop-done, rm отказал): "
+                alert(f"{name}: прежняя сессия {a.get('id')} осталась среди фоновых сессий Claude Code (stop-done, rm отказал): "
                       f"{reason}", "pantheon-stop")
             stopped.append(a)
     # остановленная копия отпускает имя не сразу и может ожить (metis-0041): запуск — только когда имя свободно
@@ -3586,6 +3587,32 @@ WHO_ANY_DIRECTION = ("domain-coordinator",)
 WHO_GODS = ("zeus", "athena", "hermes", "themis", "calliope", "mnemo", "proteus", "metis", "janus", "daedalus",
             "apollo", "hephaestus", "argus", "chiron", "prometheus", "talos", "clio", "iris", "momus", "charon", "hestia")
 WHO_TOKEN = re.compile(r"`([^`\n]+)`")
+WHO_WORD = re.compile(r"[a-z][a-z0-9-]*")
+# Ещё места, где роли названы (metis-0252): холст «Кто есть кто.canvas» — по-русски (имя бога или слово), system.md —
+# именем роли. Роль без строки здесь — «+имя (файл)» в той же тревоге. Новую роль без бога в холсте искать по её имени.
+WHO_CANVAS_RU = {"hq": "Зевс", "workshop": "Дедал", "argus": "Аргус", "momus": "Мом", "prometheus": "Прометей",
+                 "chiron": "Хирон", "clio": "Клио", "iris": "Ирида", "talos": "Талос", "hestia": "Гестия",
+                 "hephaestus": "Гефест", "apollo": "Аполлон", "dev": "Разработчик", "codex-dev": "Codex",
+                 "tg-reader": "Telegram", "domain-coordinator": "координатор"}
+
+
+def who_is_who_names(text, roles, canvas=False):
+    """Имена ролей, которых нет в тексте холста (canvas=True) или system.md. Лидам хватает приставки роли."""
+    low = text.lower()
+    words = {w.strip("-") for w in WHO_WORD.findall(low)}
+    out = []
+    for r in sorted(roles):
+        keys = [r, r.split("-")[0]] if r.split("-")[0] in LEAD_ROLES or r.startswith("dev-") else [r]
+        if canvas:
+            ru = [WHO_CANVAS_RU[k].lower() for k in keys if k in WHO_CANVAS_RU] or ([] if r in WHO_CANVAS_RU else [r])
+            def has(x):  # граница слева, справа — падежное окончание: «мом» в «Момент» — не роль (metis-0252)
+                return re.search(r"(?<!\w)" + re.escape(x) + r"(?:а|у|е|ом|ы|и|ов|ам|ами|ах)?(?!\w)", low) is not None
+            ok = any(has(x) for x in ru) or (r.startswith("dev-") and has("разработчик"))
+        else:
+            ok = any(k in words for k in keys)
+        if not ok:
+            out.append(r)
+    return out
 
 
 def who_is_who_diff(memo_text, roles, directions):
@@ -3633,10 +3660,25 @@ def who_is_who_check(memo=None, agents=None, reg_path=None):
         text = open(memo, encoding="utf-8").read()
     except (OSError, ValueError):
         return None
-    roles = [f[:-3] for f in os.listdir(agents)
-             if f.endswith(".md") and os.path.isfile(os.path.join(agents, f))]
+    roles = {f[:-3] for f in os.listdir(agents)
+             if f.endswith(".md") and os.path.isfile(os.path.join(agents, f))}
+    # роли из общих шаблонов плагина, ещё не собранные в agents (новая роль сразу после слияния), минус отложенные
+    if os.path.isdir(PLUGIN_ROLES):
+        roles |= {f[:-5] for f in os.listdir(PLUGIN_ROLES)
+                  if f.endswith(".tmpl") and f[:-5] not in ROLES_DEFERRED
+                  and os.path.isfile(os.path.join(PLUGIN_ROLES, f))}
+    roles = sorted(roles)
     dirs = [d.get("name") for d in reg.get("direction") or [] if isinstance(d.get("name"), str)]
-    return who_is_who_diff(text, roles, dirs)
+    missing, extra = who_is_who_diff(text, roles, dirs)
+    base = os.path.dirname(memo)
+    for fname, canvas in (("Кто есть кто.canvas", True), ("system.md", False)):
+        try:
+            other = open(os.path.join(base, fname), encoding="utf-8").read()
+        except OSError:
+            continue  # файла нет — не проверяем
+        missing += [f"{n} ({fname.rsplit('.', 1)[-1] if canvas else fname})"
+                    for n in who_is_who_names(other, roles, canvas)]
+    return missing, extra
 
 
 def who_is_who_alert(**kw):
@@ -3649,7 +3691,12 @@ def who_is_who_alert(**kw):
     if not (missing or extra):
         clear_once("who-is-who")
         return ""
-    line = "памятку обновить: " + " / ".join([f"+{n}" for n in missing] + [f"−{n}" for n in extra])
+    sysm = [n for n in missing if n.endswith("(system.md)")]
+    rest = [f"+{n}" for n in missing if n not in sysm] + [f"−{n}" for n in extra]
+    parts = (["памятку обновить: " + " / ".join(rest)] if rest else [])
+    if sysm:  # system.md — не памятка: в тексте тревоги называем его самим именем (metis-0252)
+        parts.append("system.md обновить: " + " / ".join("+" + n[:-len(" (system.md)")] for n in sysm))
+    line = "; ".join(parts)
     alert_once("who-is-who", line, f"Кто есть кто.md: {line}", "pantheon")
     return line
 
@@ -4621,11 +4668,12 @@ BOARD = os.path.join(VIEW, "Доска")
 # «отправить» или «откатить»; тогда запускает sync.sh сам. Решает по-прежнему sync.sh по тому же журналу; здесь —
 # только «пора». Без ответа или «пока держать» — ничего не запускает.
 SYNC_DIR = os.path.join(HOME, ".claude")
-SYNC_ACT = {"Отправить на другие Mac", "Откатить правку", "Всё в порядке — правка наша", "Откатить на всех Mac"}
+SYNC_ACT = {"Отправить на другие Mac", "Отправить", "Откатить правку", "Всё в порядке — правка наша", "Откатить на всех Mac"}
 
 
 def sync_answers():
     owner_log = os.path.join(STATE, "owner-log", "board.jsonl")
+    ask_log = os.path.join(STATE, "owner-log", "zeus.md")
     waiting = []
     for held in (".sync-held", ".sync-incoming"):
         try:
@@ -4635,16 +4683,46 @@ def sync_answers():
         m = re.search(r"^task=(\S+)$", text, re.M)
         if m:
             waiting.append(m.group(1))
-    if not waiting or not os.path.exists(owner_log):
+    if not waiting or not (os.path.exists(owner_log) or os.path.exists(ask_log)):
         return 0
-    last = {}
-    for line in open(owner_log, encoding="utf-8"):
+    # как owner_answer в sync.sh (metis-0125): ответ — галочка на доске (board.jsonl) или выбор в окне вопросов Зевса
+    # (zeus.md: пометка «· окно вопросов», вопрос начинается с [<id>], не старше 7 дней); из двух берётся более поздний
+    found = {t: [] for t in waiting}
+    lines = []
+    try:
+        lines = open(owner_log, encoding="utf-8").read().splitlines()
+    except OSError:
+        pass
+    for n, line in enumerate(lines):
         try:
             d = json.loads(line)
         except ValueError:
             continue
-        if d.get("kind") == "answer" and d.get("id") in waiting:
-            last[d["id"]] = d.get("answer") or ""
+        if isinstance(d, dict) and d.get("kind") == "answer" and d.get("id") in found:
+            try:
+                t = time.mktime(time.strptime(str(d.get("time", ""))[:19], "%Y-%m-%dT%H:%M:%S"))
+            except ValueError:
+                t = 0.0
+            found[d["id"]].append((t, n, d.get("answer") if isinstance(d.get("answer"), str) else ""))
+    try:
+        text = open(ask_log, encoding="utf-8").read()
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
+    for i, m in enumerate(heads):
+        if m.group(2).strip() != "· окно вопросов":
+            continue
+        body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
+        q, a = re.match(r"вопрос: \[([^\]\s]{1,40})\]", body, re.I), re.search(r"^ответ: (.*)$", body, re.M)
+        if not q or not a or q.group(1) not in found:
+            continue
+        try:
+            t = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+        except ValueError:
+            continue
+        if t >= now() - 7 * 86400:
+            found[q.group(1)].append((t, len(lines) + i, a.group(1)))
+    last = {t: re.sub(r"\s*\((?:Recommended|рекомендую)\)$", "", max(v)[2].strip()) for t, v in found.items() if v}
     if not any(last.get(t) in SYNC_ACT for t in waiting):
         return 0
     script = os.path.join(SYNC_DIR, "sync.sh")

@@ -106,7 +106,9 @@ class Env:
         self.doms = {}
         self.week_pct, self.snap_age = 10.0, 0  # снимок недельного лимита в run(): зелёная зона, свежий
         # уведомления идут через политику (metis-0023): простой — явно, по умолчанию «вы у Mac»
-        self.extra = {"PANTHEON_FAKE_IDLE": "0"}
+        # батарея и розетка подменены (metis-0210): иначе lib/awake.py читает настоящий pmset, и тест краснеет
+        # на Mac с низким зарядом; тесты, которым нужна батарея, переопределяют через extra
+        self.extra = {"PANTHEON_FAKE_IDLE": "0", "PANTHEON_FAKE_BATT": "100", "PANTHEON_FAKE_AC": "1"}
 
     def notify_mode(self, idle, quiet=None):
         """Простой (с) и тихие часы для политики уведомлений: quiet=None — без тихих часов (как днём),
@@ -164,6 +166,8 @@ class Env:
                "PANTHEON_NOTIFY_LOG": self.notify, "FAKE_CLAUDE_LOG": self.log, "FAKE_AGENTS": self.agents_file,
                "PANTHEON_FAKE_SWAP": "1.0", "PANTHEON_FAKE_PS": "", "PANTHEON_FAKE_CC": "2.1.292",
                "PANTHEON_FAKE_LIMIT": "10", "PANTHEON_CAFFEINATE": os.path.join(self.bin, "caffeinate")}
+        if "TZ" in os.environ:  # дочерний процесс в том же поясе, что и тест, который считает местное время (metis-0222)
+            env["TZ"] = os.environ["TZ"]
         env.update(self.extra)
         env.update(extra or {})
         return subprocess.run([*(argv or [PY311, "-I", LIB]), *args], env=env, capture_output=True, text=True, timeout=60)
@@ -961,7 +965,7 @@ def test_stop_resume_all_precise():
 
 
 def test_stop_removes_from_fleet():
-    """metis-0239: после claude stop идёт claude rm <id>, иначе флот Claude Code поднимает сессию снова;
+    """metis-0239: после claude stop идёт claude rm <id>, иначе Claude Code сам перезапускает фоновую сессию;
     отказ rm (worktree с неотправленным) виден в выводе и в start.log, насильно не удаляем."""
     e = Env()
     e.direction("rm-dir")
@@ -971,33 +975,33 @@ def test_stop_removes_from_fleet():
     c = e.calls()
     check(["stop", "r1r1r1r1"] in c and ["rm", "r1r1r1r1"] in c and c.index(["stop", "r1r1r1r1"]) < c.index(["rm", "r1r1r1r1"]),
           f"stop не вызвал rm после stop: {c}")
-    check("осталась во флоте" not in r.stdout, f"ложная «осталась во флоте»: {r.stdout}")
+    check("осталась среди фоновых сессий Claude Code" not in r.stdout, f"ложная «осталась среди фоновых сессий Claude Code»: {r.stdout}")
     r = e.run("stop", "rk-dir", t=T0 + 5, extra={"FAKE_RM_REFUSE": "r2r2r2r2"})
     check(["rm", "r2r2r2r2"] in e.calls() and not [x for x in e.calls() if "--discard-unpushed" in x or "--force-remove-worktree" in x],
           "rm вызван неверно или насильно")
-    check("rk-dir: осталась во флоте: r2r2r2r2, причина:" in r.stdout and "unpushed" in r.stdout and r.returncode == 0,
+    check("rk-dir: осталась среди фоновых сессий Claude Code: r2r2r2r2, причина:" in r.stdout and "unpushed" in r.stdout and r.returncode == 0,
           f"отказ rm не виден в выводе: {r.stdout!r}")
     log = open(e.st("logs", "start.log")).read()
     check("rm-refused\trk-dir\tr2r2r2r2" in log, f"отказ rm не в start.log: {log}")
-    check("rk-dir: осталась во флоте Claude Code (rm отказал)" in e.alerts() and "r2r2r2r2" in e.alerts(),
+    check("rk-dir: осталась среди фоновых сессий Claude Code (rm отказал)" in e.alerts() and "r2r2r2r2" in e.alerts(),
           f"отказ rm без тревоги: {e.alerts()}")
     # stop --all: отказ rm — в выводе, в start.log и в тревоге
     e2 = Env()
     e2.direction("ra-dir")
     e2.agents([bg("ra-dir", "working", "r3r3r3r3-1", pid=63)])
     r = e2.run("stop", "--all", t=T0, extra={"FAKE_RM_REFUSE": "r3r3r3r3"})
-    check(["rm", "r3r3r3r3"] in e2.calls() and "ra-dir: осталась во флоте: r3r3r3r3, причина:" in r.stdout,
+    check(["rm", "r3r3r3r3"] in e2.calls() and "ra-dir: осталась среди фоновых сессий Claude Code: r3r3r3r3, причина:" in r.stdout,
           f"stop --all: отказ rm не виден в выводе: {r.stdout!r}")
-    check("стоп всё: осталась во флоте Claude Code (rm отказал): ra-dir r3r3r3r3" in e2.alerts(),
+    check("стоп всё: осталась среди фоновых сессий Claude Code (rm отказал): ra-dir r3r3r3r3" in e2.alerts(),
           f"stop --all: отказ rm без тревоги: {e2.alerts()}")
     check("rm-refused\tra-dir\tr3r3r3r3" in open(e2.st("logs", "start.log")).read(), "stop --all: нет в start.log")
-    # stop вернул не 0 — rm не зовём, сессия остаётся во флоте
+    # stop вернул не 0 — rm не зовём, сессия остаётся среди фоновых сессий Claude Code
     e3 = Env()
     e3.direction("rs-dir")
     e3.agents([bg("rs-dir", "working", "r4r4r4r4-1", pid=64)])
     r = e3.run("stop", "rs-dir", t=T0, extra={"FAKE_STOP_FAIL": "r4r4r4r4"})
     check(["stop", "r4r4r4r4"] in e3.calls() and ["rm", "r4r4r4r4"] not in e3.calls()
-          and "rs-dir: осталась во флоте: r4r4r4r4" in r.stdout, f"stop с кодом 1: rm не должен вызываться: {e3.calls()} {r.stdout!r}")
+          and "rs-dir: осталась среди фоновых сессий Claude Code: r4r4r4r4" in r.stdout, f"stop с кодом 1: rm не должен вызываться: {e3.calls()} {r.stdout!r}")
 
 
 def test_stop_without_locks_write():
@@ -1731,14 +1735,28 @@ def test_infra_check_corpus_section():
         p.alert_once = lambda key, value, text, *a, **k: calls.append(("alert", key, text))
         p.clear_once = lambda key: calls.append(("clear", key))
         text = "в policy.toml нет раздела [corpus]: правило corpus-role ничего не закрывает"
-        for name, body in (("нет policy.toml", None), ("нет раздела", "[hq]\n")):
+        decl = '[hq]\nclosed_dirs = ["~/ai/corpus"]\n'
+        for name, body in (("корпус в closed_dirs, нет раздела", decl),
+                           ("папка x-corpus в closed_dirs, нет раздела", '[hq]\nclosed_dirs = ["~/projects/x-corpus"]\n'),
+                           ("корпус в closed_collections, нет раздела", '[hq]\nclosed_collections = ["corpus"]\n')):
             calls.clear()
-            if body is not None:
-                open(pol, "w").write(body)
+            open(pol, "w").write(body)
             ok, lines = w.infra_check()
             check(not ok and any(x.startswith("НЕТ") and "[corpus]" in x for x in lines)
                   and any(c[0] == "alert" and c[1] == "corpus-policy-missing" and c[2].startswith(text) for c in calls),
                   f"infra-check, {name}: нет строки НЕТ или тревоги про [corpus] ({lines}, {calls})")
+        # metis-0253: чистая policy без [corpus] и без корпуса — тревоги нет, строки про [corpus] нет, старая снята
+        for name, body in (("нет policy.toml", None), ("нет раздела и корпуса", '[hq]\nclosed_dirs = ["~/ai/me"]\n')):
+            calls.clear()
+            if body is None:
+                os.remove(pol)
+            else:
+                open(pol, "w").write(body)
+            _, lines = w.infra_check()
+            check(not any("[corpus]" in x for x in lines)
+                  and not any(c[0] == "alert" and c[1] == "corpus-policy-missing" for c in calls)
+                  and ("clear", "corpus-policy-missing") in calls,
+                  f"infra-check, {name}: лишняя тревога или строка про [corpus] ({lines}, {calls})")
         for name, body in (("пустой [corpus]", "[hq]\n[corpus]\n"),
                            ("[corpus] со списком", '[hq]\n[corpus]\ncommands = ["corpus-x"]\n')):
             calls.clear()
@@ -1823,8 +1841,10 @@ def test_who_is_who_memo():
     memo = os.path.join(pan, "Кто есть кто.md")
     full = ("`zeus` `daedalus-<задача>` `metis-pantheon` `hermes-site` `argus` `momus` `hephaestus-<проект>` "
             "`apollo-<проект>` `claude agents` `pantheon tick` `~/.claude/agents/<роль>.md`\n")
-    saved = {k: getattr(p, k) for k in ("PANTHEON", "STATE", "AGENTS")}
+    saved = {k: getattr(p, k) for k in ("PANTHEON", "STATE", "AGENTS", "PLUGIN_ROLES")}
     alerts = os.path.join(pan, "alerts.md")
+    plug = os.path.join(d, "plugin-roles")  # общие шаблоны плагина (metis-0252): сначала пусто
+    os.makedirs(plug)
 
     def read():
         return open(alerts, encoding="utf-8").read() if os.path.exists(alerts) else ""
@@ -1832,7 +1852,7 @@ def test_who_is_who_memo():
     def put(text):
         open(memo, "w", encoding="utf-8").write(text)
     try:
-        p.PANTHEON, p.STATE, p.AGENTS = pan, st, ag
+        p.PANTHEON, p.STATE, p.AGENTS, p.PLUGIN_ROLES = pan, st, ag, plug
         os.environ["PANTHEON_NO_NOTIFY"] = "1"
         # 1. всё совпадает (чужой код в кавычках не мешает): тихо
         put(full)
@@ -1857,6 +1877,31 @@ def test_who_is_who_memo():
         # 5. нет памятки: проверять нечего
         os.remove(memo)
         check(p.who_is_who_check() is None and p.who_is_who_alert() == "", "нет памятки, а сверка что-то нашла")
+        # 6. metis-0252: новая роль есть только шаблоном в плагине (не собрана), в памятке её нет: +имя
+        put(full)
+        open(os.path.join(plug, "newgod.tmpl"), "w").write("шаблон")
+        open(os.path.join(plug, "hestia.tmpl"), "w").write("отложена")  # ROLES_DEFERRED: не роль
+        check(p.who_is_who_check() == (["newgod"], []), f"шаблон плагина не виден сверке: {p.who_is_who_check()}")
+        put(full + "`newgod`\n")
+        check(p.who_is_who_check() == ([], []), f"роль в памятке, а сверка нашла {p.who_is_who_check()}")
+        # 7. .canvas и system.md: везде есть — тихо; нет в .canvas или system.md — «+имя (файл)» в той же строке
+        cv, sy = (os.path.join(pan, x) for x in ("Кто есть кто.canvas", "system.md"))
+        all_roles = "argus momus hq workshop domain-coordinator hephaestus-<проект> apollo-<проект> newgod"
+        canvas_ok = '{"nodes":[{"text":"**Аргус** **Мом** **Зевс** **Дедал** координатор **Гефест** **Аполлон**%s"}]}'
+        open(cv, "w", encoding="utf-8").write(canvas_ok % " newgod")
+        open(sy, "w", encoding="utf-8").write(all_roles)
+        check(p.who_is_who_check() == ([], []), f"везде есть, а сверка нашла {p.who_is_who_check()}")
+        open(cv, "w", encoding="utf-8").write(canvas_ok % "")
+        check(p.who_is_who_check() == (["newgod (canvas)"], []), f"нет в .canvas: {p.who_is_who_check()}")
+        open(sy, "w", encoding="utf-8").write(all_roles.replace(" newgod", ""))
+        line = p.who_is_who_alert()
+        check(line == "памятку обновить: +newgod (canvas); system.md обновить: +newgod", f"нет в system.md: {line!r}")
+        # целым словом (metis-0252): «мом» в «Момент истины» — не Мом
+        open(cv, "w", encoding="utf-8").write(canvas_ok.replace("**Мом**", "Момент истины") % " newgod")
+        check([x for x in p.who_is_who_check()[0] if "canvas" in x] == ["momus (canvas)"], f"подстрока в холсте сошла за роль: {p.who_is_who_check()}")
+        # падежные формы (metis-0252, повтор): «Разработчики», «координатора» засчитываются
+        open(cv, "w", encoding="utf-8").write(canvas_ok.replace(" координатор ", " координатора Разработчики ") % " newgod")
+        check([x for x in p.who_is_who_check()[0] if "canvas" in x] == [], f"падежные формы не засчитаны: {p.who_is_who_check()}")
     finally:
         for k, v in saved.items():
             setattr(p, k, v)

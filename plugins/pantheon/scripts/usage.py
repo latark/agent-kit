@@ -65,8 +65,16 @@ def sub_role(f):
 def main():
     DAYS = int(sys.argv[1]) if len(sys.argv) > 1 else 30
     since = time.time() - DAYS * 86400
-    files = [f for f in glob.glob(os.path.expanduser('~/.claude/projects/**/*.jsonl'), recursive=True)
-             if os.path.getmtime(f) >= since]
+    files, skipped = [], 0
+    for f in glob.glob(os.path.expanduser('~/.claude/projects/**/*.jsonl'), recursive=True):
+        try:
+            if os.path.getmtime(f) < since:
+                continue
+            open(f, 'rb').close()  # metis-0208: недоступный транскрипт (PermissionError) пропускаем, а не падаем
+        except OSError:
+            skipped += 1
+            continue
+        files.append(f)
 
     agg = defaultdict(lambda: defaultdict(float))       # (kind, model, effort) -> sums
     sess_ctx = defaultdict(list)                         # main session -> context sizes per request
@@ -132,6 +140,8 @@ def main():
 
     tot = sum(sum(v for kk, v in a.items() if kk.startswith('$')) for a in agg.values())
     print(f'Период: {DAYS} дн., файлов: {len(files)}, запросов: {len(seen)}, неизвестные модели: {dict(unknown)}')
+    if skipped:
+        print(f'Пропущено недоступных транскриптов: {skipped}')
     print(f'Итого в ценах API: ${tot:,.0f}\n')
     print(f"{'кто':9} {'модель':11} {'effort':7} {'запр.':>6} {'$':>8} {'доля':>5} | {'чтение кэша':>11} {'запись':>7} {'вывод':>7} {'из них мысли':>12} | {'$чтение':>7} {'$запись':>7} {'$вывод':>7}")
     for (k, fam, eff), a in sorted(agg.items(), key=lambda x: -sum(v for kk, v in x[1].items() if kk.startswith('$'))):
