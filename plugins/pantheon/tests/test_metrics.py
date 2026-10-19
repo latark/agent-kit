@@ -95,6 +95,8 @@ def setup():
                                        req("opus-5-5", 100_000, "high", rid="q1")])
     # argus по metis-0901: 1 $ — рецензент, в исполнители не идёт, считается в review_usd
     sub(proj, "s1", "a1", "argus", [prompt("Ревью PR #77 (metis-0901)"), req("sonnet-5-5", 100_000, "high")])
+    # argus по metis-0907, исполнителя в транскриптах нет: argus в исполнители не идёт и тогда
+    sub(proj, "s1", "a2", "argus", [prompt("Ревью metis-0907"), req("sonnet-5-5", 100_000, "high")])
     # dev-sonnet на две задачи сразу: 2 $ пополам — по 1 $ на metis-0902 и metis-0903
     sub(proj, "s1", "d2", "dev-sonnet", [prompt("Задачи metis-0902 и metis-0903, ещё zzz-0001 (не задача)"),
                                          req("sonnet-5-5", 200_000, "medium")])
@@ -216,6 +218,10 @@ def unit():
     check("без транскриптов и с executor=codex — исполнитель codex, модель codex, расход 0",
           (r4.get("executor"), r4.get("model"), r4.get("usd"), r4.get("link")) == ("codex", "codex", 0.0, ["нет"]),
           (r4.get("executor"), r4.get("model"), r4.get("usd"), r4.get("link")))
+    r7 = rows.get("metis-0907", {})
+    check("только argus в транскриптах — исполнитель не argus, а владелец задачи; 1 $ — в review_usd",
+          (r7.get("executor"), r7.get("model"), r7.get("review_usd")) == ("metis-pantheon", "—", 1.0),
+          (r7.get("executor"), r7.get("model"), r7.get("review_usd")))
     check("закрыта до начала учёта (18.10 < since 19.10) — плановый проход ставит «оценка»",
           rows.get("metis-0905", {}).get("estimate") is True and r2.get("estimate") is False)
     check("второй плановый проход ничего не дописывает", M.sync(ctx, tasks) == [])
@@ -223,11 +229,11 @@ def unit():
     dry = M.backfill(ctx, tasks, "2026-10-01", "2026-10-19", dry=True)
     n_before = len(M.read_rows(rows_path))
     check("задним числом --dry-run: одна строка (0908), файл не тронут",
-          [r["id"] for r in dry] == ["metis-0908"] and n_before == 7, ([r["id"] for r in dry], n_before))
+          [r["id"] for r in dry] == ["metis-0908"] and n_before == 6, ([r["id"] for r in dry], n_before))
     bf = M.backfill(ctx, tasks, "2026-10-01", "2026-10-19")
     check("задним числом: строка 0908 с пометкой «оценка», существующие строки не тронуты",
           [(r["id"], r["estimate"]) for r in bf] == [("metis-0908", True)]
-          and len(M.read_rows(rows_path)) == 8)
+          and len(M.read_rows(rows_path)) == 7)
     check("задним числом повторно — ничего", M.backfill(ctx, tasks, "2026-10-01", "2026-10-19") == [])
 
     s = M.summary(M.read_rows(rows_path), T0, M.post_merge_index(tasks))
@@ -236,8 +242,8 @@ def unit():
     g = wk["by_executor"].get(("dev-opus", "opus-5-5", "high"), {})
     check("неделя × исполнитель×модель×effort: dev-opus/opus-5-5/high — 1 задача, 0 из 1 с первого круга, 5 $",
           (g.get("tasks"), g.get("first_pass"), g.get("first_known"), g.get("usd_per_task")) == (1, 0, 1, 5.0), g)
-    check("неделя: отменённая 18.10 и давняя 0908 — не в неделе; с начала — все 8",
-          wk["total"]["tasks"] + wk["total"]["dropped"] == 5 and al["total"]["tasks"] + al["total"]["dropped"] == 8,
+    check("неделя: отменённая 18.10 и давняя 0908 — не в неделе; с начала — все 7",
+          wk["total"]["tasks"] + wk["total"]["dropped"] == 5 and al["total"]["tasks"] + al["total"]["dropped"] == 7,
           (wk["total"], al["total"]))
     check("с начала: отменено 1, оценок 2 (0905, 0908)", (al["total"]["dropped"], al["total"]["estimate"]) == (1, 2),
           al["total"])
