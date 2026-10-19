@@ -1737,6 +1737,7 @@ def test_infra_check_corpus_section():
         text = "в policy.toml нет раздела [corpus]: правило corpus-role ничего не закрывает"
         decl = '[hq]\nclosed_dirs = ["~/ai/corpus"]\n'
         for name, body in (("корпус в closed_dirs, нет раздела", decl),
+                           ("папка expert-corpus в closed_dirs, нет раздела", '[hq]\nclosed_dirs = ["~/projects/expert-corpus"]\n'),
                            ("корпус в closed_collections, нет раздела", '[hq]\nclosed_collections = ["corpus"]\n')):
             calls.clear()
             open(pol, "w").write(body)
