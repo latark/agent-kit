@@ -821,7 +821,7 @@ def test_env_python():
     except (ValueError, IndexError):
         env, exe = {}, None
     check("тик → проход: окружение — HOME, постоянный PATH и PANTHEON_PYTHON тика, ничего из launchd",
-          isinstance(env, dict) and sorted(env) == ["HOME", "PATH", "PANTHEON_PYTHON"] and env["PANTHEON_PYTHON"] == exe
+          isinstance(env, dict) and sorted(env) == ["HOME", "PANTHEON_PYTHON", "PATH"] and env["PANTHEON_PYTHON"] == exe
           and env["PATH"].startswith("/usr/bin:/bin") and b.bin not in env["PATH"], r.stdout + r.stderr)
 
 

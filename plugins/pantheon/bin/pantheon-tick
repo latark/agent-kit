@@ -3,7 +3,9 @@
 # Python 3.11+ ищет сам (lib/find-python.sh); не нашёл — строка в alerts.md не чаще раза в сутки и код 1.
 here=$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")" && pwd)
 . "$here/../lib/find-python.sh"
-py=$(find_python) || {
+# PANTHEON_PYTHON и config.toml из PANTHEON_STATE тик не берёт (metis-0303): его окружение задаёт launchd, а его меняет
+# любой процесс владельца (launchctl setenv) — чужой интерпретатор вёл бы тик и проход слияния ядра без Touch ID
+py=$(unset PANTHEON_PYTHON PANTHEON_STATE; find_python) || {
     printf '%s\n' "$NO_PYTHON_MSG" >&2
     state=${PANTHEON_STATE:-$HOME/.local/state/pantheon}
     day=$(date +%Y-%m-%d)

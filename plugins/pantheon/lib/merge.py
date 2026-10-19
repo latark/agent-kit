@@ -30,8 +30,17 @@ PR ядра защит (Д3) агенты не сливают: его слива
      `pantheon merge run --click` от имени владельца, и окно Touch ID показывается уже оттуда. Заявку сняли или
      заменили, пока окно открыто, — проход её не трогает: ни согласия, ни слияния, ни записи обратно.
 Журнал — STATE/logs/merge.jsonl (репозиторий, номер, SHA, событие). Помощник — только STATE/bin/pantheon-touchid с
-отметкой sha256 исходника lib/touchid.swift рядом (иначе его пересобирает /usr/bin/swiftc с чистым окружением):
-окружение прохода (launchctl setenv) помощника не подменяет. gh — из PATH.
+отметкой sha256 исходника lib/touchid.swift рядом (иначе его пересобирает /usr/bin/swiftc с чистым окружением).
+
+Окружение прохода (metis-0303). Его задаёт launchd, а launchd-окружение меняет любой процесс владельца (launchctl
+setenv). Поэтому проход строит окружение с нуля (clean_env): HOME — только если это домашняя папка учётной записи,
+PATH — постоянный SAFE_PATH (gh — из него), STATE и папка Пантеона — от HOME. PANTHEON_STATE, PANTHEON_HOME,
+PANTHEON_NOTIFY_LOG, PANTHEON_FAKE_*, PANTHEON_NOW, GH_* (GH_CONFIG_DIR, GH_TOKEN), XDG_* и всё прочее он не берёт.
+Интерпретатор: тик не берёт PANTHEON_PYTHON и config.toml из PANTHEON_STATE (bin/pantheon-tick), проход тик
+запускает с окружением pass_env (PANTHEON_PYTHON — свой интерпретатор), щелчок — через /usr/bin/env -i с ним же.
+Тестовые подмены — только атрибутом TEST, его ставит тестовая обвязка в своём процессе; из окружения он не
+включается. Остальной тик PANTHEON_STATE ещё берёт, а DYLD_* и прочее launchd-окружение доходит до интерпретатора
+тика: целиком это закрывает только запрет ролям launchctl setenv (metis-0298).
 """
 import contextlib
 import hashlib
@@ -65,6 +74,11 @@ OPUS_RAN = re.compile(r"\s*модель:\s*claude-opus", re.I)   # как в ш�
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
 SWIFTC = "/usr/bin/swiftc"           # абсолютный путь: PATH прохода подменяем (launchctl setenv)
+SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"   # PATH прохода, не из окружения
+# Тестовые подмены прохода: {"env": {имя: значение}} — переменные, которые проход берёт поверх чистого окружения, и
+# HOME без сверки с учётной записью. Ставит только тестовая обвязка в своём процессе (tests/test_merge.py, HARNESS);
+# из окружения launchd не включается. В бою — None
+TEST = None
 # ядро защит (Д3) — как CORE_FILES и CORE_DIR шлюза guard (merge_gate.py); совпадение сверяет test_merge
 CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_config.py",
               "plugins/guard/managed-settings.json", "plugins/pantheon/lib/window_rules.py",
@@ -80,6 +94,36 @@ def set_core(mod):
 
 def err(text):
     print(text, file=sys.stderr)
+
+
+# --- окружение прохода (metis-0303) -------------------------------------------------------------------------------
+
+def clean_env():
+    """Окружение прохода с нуля: HOME и SAFE_PATH, STATE и папка Пантеона — от HOME. Окружение задаёт launchd, а его
+    меняет любой процесс владельца (launchctl setenv): из него проход не берёт ничего. → None или причина отказа."""
+    home = P.HOME
+    if TEST is None:
+        import pwd
+        try:
+            owner = pwd.getpwuid(os.getuid()).pw_dir
+        except (KeyError, OSError):
+            owner = None
+        if not owner or os.path.realpath(owner) != os.path.realpath(home):
+            return f"HOME ({home}) — не домашняя папка учётной записи"
+    env = {"HOME": home, "PATH": SAFE_PATH}
+    if TEST is not None:
+        env.update(TEST.get("env") or {})
+    os.environ.clear()
+    os.environ.update(env)
+    P.STATE = os.path.realpath(os.path.join(home, ".local", "state", "pantheon"))
+    P.PANTHEON = os.path.realpath(os.path.join(P.AI_HOME, "pantheon"))
+    return None
+
+
+def pass_env():
+    """Окружение, с которым тик запускает проход, а щелчок по уведомлению — `merge run --click`: HOME, SAFE_PATH и
+    свой интерпретатор (bin/pantheon берёт PANTHEON_PYTHON), без launchd-окружения."""
+    return {"HOME": P.HOME, "PATH": SAFE_PATH, "PANTHEON_PYTHON": sys.executable}
 
 
 # --- пути и файлы -------------------------------------------------------------------------------------------------
@@ -320,8 +364,9 @@ def gate(repo, pr, sha, view):
 
 def helper():
     """Путь к помощнику окна или None. Только свой бинарник — STATE/bin/pantheon-touchid с отметкой sha256 исходника
-    lib/touchid.swift рядом; отметка не та — пересборка. Переменной окружения на подмену нет (metis-0285, argus):
-    окружение прохода задаёт launchd, а его меняет любой процесс владельца (launchctl setenv)."""
+    lib/touchid.swift рядом; отметка не та — пересборка. Переменной на подмену помощника нет (metis-0285, argus), а
+    STATE проход берёт от HOME, не из PANTHEON_STATE (clean_env, metis-0303): окружение прохода задаёт launchd, а его
+    меняет любой процесс владельца (launchctl setenv)."""
     return build_helper()
 
 
@@ -409,15 +454,22 @@ def fallback_notify(req, window):
     """Запасной путь: уведомление, щелчок по которому запускает `pantheon merge run --click` от имени владельца.
     window — текст окна (задетое ядро, заголовок PR)."""
     base = P.CURRENT if os.path.isdir(P.CURRENT) else P.PLUGIN
-    cmd = f"{shlex.quote(os.path.join(base, 'bin', 'pantheon'))} merge run --click"
+    # щелчок запускает команду в окружении уведомления (launchd): окружение и интерпретатор — свои, через env -i
+    env = " ".join(shlex.quote(f"{k}={v}") for k, v in pass_env().items())
+    cmd = f"/usr/bin/env -i {env} {shlex.quote(os.path.join(base, 'bin', 'pantheon'))} merge run --click"
     text = f"{window[:300]}. Щёлкните — откроется окно Touch ID"
-    if os.environ.get("PANTHEON_NOTIFY_LOG"):
+    line = f"Слияние ядра|{text}|execute:{cmd}|merge\n"
+    if os.environ.get("PANTHEON_NOTIFY_LOG"):   # только из TEST: clean_env окружение launchd сняла
         with open(os.environ["PANTHEON_NOTIFY_LOG"], "a", encoding="utf-8") as fh:
-            fh.write(f"Слияние ядра|{text}|execute:{cmd}|merge\n")
+            fh.write(line)
         return True
     tn = P._notifier()
     if not tn or os.environ.get("PANTHEON_NO_NOTIFY"):
         return False
+    if P.notify_offscreen():   # STATE не настоящая (тест, проба) — на экран владельца не показывать
+        with open(P.path("notify-test.log"), "a", encoding="utf-8") as fh:
+            fh.write(line)
+        return True
     r = subprocess.run([tn, "-title", "Слияние ядра", "-message", text, "-execute", cmd, "-group", "pantheon-merge"],
                        capture_output=True, timeout=15)
     return r.returncode == 0
@@ -562,6 +614,10 @@ def cmd_run(click=False):
     # переменная есть, пусть и пустая, — окно Claude Code: сливает только проход или щелчок владельца
     if "CLAUDECODE" in os.environ or "CLAUDE_CODE_ENTRYPOINT" in os.environ:
         err("pantheon merge run: только плановый проход или щелчок по уведомлению, не из окна Claude Code")
+        return 2
+    why = clean_env()
+    if why:
+        err(f"pantheon merge run: {why} — окружение прохода подменено (launchctl setenv?), прохода нет")
         return 2
     r = root()
     if not _real_dir(r):
