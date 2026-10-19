@@ -2855,19 +2855,85 @@ PROTECTED = protect_config.protected()
 ARGUS_GIT_BAN = {"commit", "merge", "rebase", "cherry-pick", "am", "revert", "pull", "commit-tree"}
 
 
-def _gh_pr_sub(texts):
-    """Индекс подкоманды `gh pr <sub>`: первое слово после pr, не флаг; значение -R/--repo пропускается."""
-    if texts[:1] != ["pr"]:
-        return None
-    skip = False
-    for i, a in enumerate(texts[1:], 1):
-        if skip:
-            skip = False
-        elif a in ("-R", "--repo"):
-            skip = True
-        elif not a or not a.startswith("-"):
-            return i if a else None
+# Флаги gh до подкоманды (metis-0247, решение Зевса 19.10): `gh -R o/r pr merge`, `gh --repo=o/r pr merge`,
+# `gh --hostname h pr merge` — тоже слияние. Трактовок две, и проверяются обе: cobra (stripFlags) считает, что флаг
+# без «=» (--имя, -X) съедает следующее слово, а строгая — что только -R, --repo и --hostname. Где хоть одна находит
+# merge (или api), там merge (или api): guard не должен счесть подкомандой не то слово, что gh.
+GH_FLAG_VALUE = ("-R", "--repo", "--hostname")
+GH_FLAG_BOOL = ("-h", "--help", "--version")
+
+
+def _gh_word(texts, start, greedy):
+    """Индекс первого не-флага в texts[start:] (len(texts) — его нет); None — слово не вычислить или «--»."""
+    i = start
+    while i < len(texts):
+        a = texts[i]
+        if not a or a == "--":
+            return None
+        if not a.startswith("-"):
+            return i
+        eats = "=" not in a and a not in GH_FLAG_BOOL and (
+            a in GH_FLAG_VALUE or (greedy and (a.startswith("--") or len(a) == 2)))
+        i += 2 if eats else 1
+    return len(texts)
+
+
+def _gh_parse(texts):
+    """gh [флаги] <подкоманда> [флаги] [<sub>] … → (не разобрать, [(индекс подкоманды, индекс sub у pr или None)]).
+    Список — все трактовки флагов, строгая первой; «не разобрать» — слово до подкоманды не вычислить ($X, $(…))."""
+    out = []
+    for g1 in (False, True):
+        q = _gh_word(texts, 0, g1)
+        if q is None:
+            return True, []
+        if q >= len(texts):
+            continue
+        if texts[q] != "pr":
+            out.append((q, None))
+            continue
+        for g2 in (False, True):
+            i = _gh_word(texts, q + 1, g2)
+            if i is None:
+                return True, []
+            out.append((q, i if i < len(texts) else None))
+    return False, list(dict.fromkeys(out))
+
+
+def _gh_pre_extra(pre):
+    """Первое слово перед pr, кроме -R/--repo с их значением (-R x, -Rx, -R=x, --repo x, --repo=x); None — таких нет."""
+    k = 0
+    while k < len(pre):
+        a = pre[k]
+        if a in ("-R", "--repo") and k + 1 < len(pre):
+            k += 2
+        elif a and a.startswith(("-R", "--repo=")) and a != "-R":
+            k += 1
+        else:
+            return a or "<не вычислить>"
     return None
+
+
+def _gh_merge(texts):
+    """(индекс pr, слова gh pr merge без «pr» и «merge»: флаги до pr — тоже его, `gh -R x pr merge`,
+    `gh pr -R x merge`) или None — не слияние ни в одной трактовке."""
+    _, cands = _gh_parse(texts)
+    for q, i in cands:
+        if texts[q] == "pr" and i is not None and texts[i] == "merge":
+            return q, [a for j, a in enumerate(texts) if j not in (q, i)]
+    return None
+
+
+def _gh_api(texts):
+    """Аргументы gh api (без слова api) или None — подкоманда не api ни в одной трактовке."""
+    _, cands = _gh_parse(texts)
+    q = next((q for q, _ in cands if texts[q] == "api"), None)
+    return None if q is None else texts[q + 1:]
+
+
+def _gh_pr_sub(texts):
+    """(индекс pr, индекс <sub>) у `gh [флаги] pr [флаги] <sub>` в строгой трактовке; None — не gh pr или sub нет."""
+    _, cands = _gh_parse(texts)
+    return next(((q, i) for q, i in cands if texts[q] == "pr" and i is not None), None)
 
 
 def check_push(event, tool, tool_input):
@@ -2885,14 +2951,23 @@ def check_push(event, tool, tool_input):
         if any(_inside(x, [pdir]) for x in _norm(private_conf(load_policy())["paths"])):
             can_push = False
     for name, texts in cmds:
-        if name == "gh" and texts[:1] == ["api"] and _gh_api_writes(texts[1:]):
+        if name == "gh" and _gh_parse(texts)[0]:
+            return ("Правило push: gh — слово до подкоманды не вычислить (переменная, $(…)), а без него не понять, "
+                    "слияние это или нет. Пиши подкоманду gh и флаги перед ней словами.")
+        api = _gh_api(texts) if name == "gh" else None
+        if api is not None and _gh_api_writes(api):
             return ("Правило push: gh api с записью (POST, PUT, PATCH, DELETE) ролям закрыто — слияние, ветки и файлы "
                     "репозитория меняют git push в свою ветку и gh pr create; остальное — владелец.")
-        i = _gh_pr_sub(texts) if name == "gh" else None
-        if i is not None and texts[i] == "merge":
-            # `gh pr -R x merge` — флаги до merge тоже его флаги (ревью argus 15.10)
-            why = merge_problem(role, sub, pdir, cwd, moved, texts[1:i] + texts[i + 1:], tool_input.get("command") or "",
-                               event)
+        found = _gh_merge(texts) if name == "gh" else None
+        if found is not None:
+            # `gh pr -R x merge` и `gh -R x pr merge` — флаги до merge тоже его флаги (ревью argus 15.10, metis-0247);
+            # до pr gh понимает только -R/--repo — остальное там отказ, а не молча пропущенное слово
+            q, args = found
+            extra = _gh_pre_extra(texts[:q])
+            if extra:
+                return (f"Правило push: gh pr merge — флаг {extra} перед pr: до pr — только -R/--repo. Форма: "
+                        f"{merge_gate.MERGE_CMD}.")
+            why = merge_problem(role, sub, pdir, cwd, moved, args, tool_input.get("command") or "", event)
             if why:
                 return f"Правило push: gh pr merge — {why}"
             continue
@@ -3118,13 +3193,13 @@ def check_hq_telegram(event, tool, tool_input):
 #   - без личного в команде: те же пути, что правило private закрывает остальным ролям (--body-file, -F, $(cat …),
 #     перенаправление в обе стороны: `< личное`, `$(< личное)`), и значение флага в том же слове (--body-file=<путь>).
 # Слияние окну штаба закрыто всегда (ревью 69m-b, решение Метиды и Зевса 19.10): gh pr merge — с -R из [merge_repos]
-# и без, и слияние через API — gh api к …/pulls/<N>/merge, …/merges и мутации mergePullRequest,
+# и без, с флагами gh до pr (`gh -R o/r pr merge`, `gh --hostname h pr merge`, metis-0247 r4), и слияние через API — gh api к …/pulls/<N>/merge, …/merges и мутации mergePullRequest,
 # enablePullRequestAutoMerge (любой метод). Шлюз слияния push (merge_problem) роль берёт из agent_type, а у
 # главной сессии окна его нет — без этого отказа она для check_push владелец и слияние прошло бы мимо шлюза.
 # Координаторов и мастерскую правило не трогает.
 GH_REDIRECT_ENV = ("GH_REPO", "GH_HOST", "GH_CONFIG_DIR")  # уводят gh от -R: чужой репозиторий, хост, вход
-HQ_GH_VALUE = {"view": "Rqt", "checks": "Rqti", "edit": "RbFBmt", "merge": "RbFtA"}  # короткие флаги со значением
-HQ_GH_BOOL = {"view": "cw", "checks": "w", "merge": "dsmr"}
+HQ_GH_VALUE = {"view": "Rqt", "checks": "Rqti", "edit": "RbFBmt"}  # короткие флаги со значением
+HQ_GH_BOOL = {"view": "cw", "checks": "w"}
 HQ_GH_LONG_VALUE = {"--repo", "--body", "--body-file", "--title", "--json", "--jq", "--template", "--base",
                     "--milestone", "--subject", "--author-email", "--match-head-commit", "--interval"}
 HQ_GH_DISCUSSION = re.compile(r"\b(?:comments|reviews|latestReviews)\b")
@@ -3194,26 +3269,33 @@ def check_hq_gh(event, tool, tool_input):
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     _, cmds = bash_analysis(cmd, cwd)
     gh = [t for n, t in cmds if n and os.path.basename(n.rstrip("/")) == "gh"]
-    if any(t[:1] == ["api"] and any(HQ_GH_API_MERGE.search(a or "") for a in t[1:]) for t in gh):
-        return HQ_GH_MERGE_REASON
-    calls = [t for t in gh if t[:1] == ["pr"]]
-    if not calls:
-        return None
-    if any(texts[i] == "merge" for texts in calls for i in [_gh_pr_sub(texts)] if i is not None):
-        return HQ_GH_MERGE_REASON
     head = "Правило hq-gh: окну Пританея gh pr — только по своему репозиторию (metis-0247)"
     tail = (" Нужен чужой PR или его обсуждение — поручи координатору направления; личное в PR не уходит.")
-    if re.search(r"\bGH_(?:REPO|HOST|CONFIG_DIR)\b", cmd) or any(os.environ.get(v) for v in GH_REDIRECT_ENV):
-        return f"{head}: без GH_REPO, GH_HOST и GH_CONFIG_DIR — репозиторий только через -R.{tail}"
+    # флаги до подкоманды (`gh -R o/r pr merge`, `gh --hostname h pr merge`) — тоже слияние; слово до подкоманды
+    # не вычислить — не понять, слияние ли это (metis-0247, решение Зевса 19.10)
+    if any(_gh_parse(t)[0] for t in gh):
+        return f"{head}: слово до подкоманды gh не вычислить (переменная, $(…)) — не понять, слияние ли это.{tail}"
+    if any(_gh_merge(t) is not None or (_gh_api(t) is not None and any(HQ_GH_API_MERGE.search(a or "") for a in t))
+           for t in gh):
+        return HQ_GH_MERGE_REASON
+    calls = [t for t in gh if any(t[q] == "pr" for q, _ in _gh_parse(t)[1])]
+    if not calls:
+        return None
+    if re.search(r"\bGH_[A-Z0-9_]+", cmd) or any(os.environ.get(v) for v in GH_REDIRECT_ENV):
+        return f"{head}: без GH_REPO, GH_HOST, GH_CONFIG_DIR и других GH_* — репозиторий только через -R.{tail}"
     policy = load_policy()
     mr = policy.get("merge_repos")
     allowed = {r.strip().lower() for v in (mr.values() if isinstance(mr, dict) else ()) if isinstance(v, list)
                for r in v if isinstance(r, str) and r.strip()}
     for texts in calls:
-        i = _gh_pr_sub(texts)
-        if i is None:
+        p = _gh_pr_sub(texts)
+        if p is None:
             return f"{head}: подкоманду gh pr не разобрать.{tail}"
-        why, repos = _hq_gh_args(texts[i], texts[1:i] + texts[i + 1:])
+        q, i = p
+        pre = texts[:q]
+        if _gh_pre_extra(pre):
+            return f"{head}: до pr — только -R/--repo (флаги gh перед pr: {' '.join(pre)}).{tail}"
+        why, repos = _hq_gh_args(texts[i], pre + texts[q + 1:i] + texts[i + 1:])
         if why:
             return f"{head}: {why}.{tail}"
         if not repos:

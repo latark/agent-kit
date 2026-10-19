@@ -457,17 +457,17 @@ def main():
           and "git push *" not in hb["excludedCommands"]
           and hq["hooks"]["PreToolUse"][0] == sa["hooks"]["PreToolUse"][0] and "worktree" not in hq
           and "~/ai/knowledge/me" not in hb["filesystem"]["denyRead"])
-    check("окно штаба: мимо песочницы — прежний список пульта и gh PR (view/checks/edit/merge), без сетевого git "
+    check("окно штаба: мимо песочницы — прежний список пульта и gh PR (view/checks/edit), без сетевого git "
           "(metis-0064, metis-0247)",
           hb["excludedCommands"] == ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheon wake *",
                                      "pantheon archive", "pantheon jobs *", "pantheon domains build",
                                      "pantheon roles build", "pantheon stop *", "pantheon resume *", "pantheon pause *",
                                      "pantheon restart *", "pantheon saved *", "pantheon who", "pantheon agents",
-                                     "gh pr view", "gh pr view *", "gh pr checks", "gh pr checks *", "gh pr edit *",
-                                     "gh pr merge *"])
-    check("окно штаба: gh api, gh issue, gh run, gh repo, gh pr create/close/comment, «gh *» и «gh pr *» — в песочнице "
-          "(metis-0247)",
-          not any(x.startswith(("gh api", "gh issue", "gh run", "gh repo", "gh pr create", "gh pr close",
+                                     "gh pr view", "gh pr view *", "gh pr checks", "gh pr checks *", "gh pr edit *"])
+    check("окно штаба: gh api, gh issue, gh run, gh repo, gh pr create/close/comment/merge, gh с флагами до "
+          "подкоманды, «gh *» и «gh pr *» — в песочнице (metis-0247)",
+          not any(x.startswith(("gh api", "gh issue", "gh run", "gh repo", "gh pr create", "gh pr close", "gh pr merge",
+                                "gh -",
                                 "gh pr comment", "gh pr review", "gh pr diff", "gh pr list"))
                   or x in ("gh", "gh *", "gh pr", "gh pr *") for x in hb["excludedCommands"]))
     corp = "lecture-notes"

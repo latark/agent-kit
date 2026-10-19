@@ -1807,9 +1807,10 @@ SANDBOX_EXCLUDED = GH_PR_READ + GH_RUN_READ + ["gh repo view *", "gh auth status
 # только окна направлений; кто и что сливает, проверяет guard (merge_problem). Мастерской — нет
 GH_PR_WRITE = ["gh pr create *", "gh pr edit *", "gh pr merge *"]
 # штаб (metis-0247, «да» владельца 19.10 [zeus-0247-yes]): сети у окна нет, а gh в песочнице всё равно падает (TLS Go,
-# x509 -26276) — мимо неё только чтение PR, правка и слияние. Слияние Зевса не пускает guard (merge_problem: только
-# domain-coordinator и его лиды), gh api, gh issue и прочий gh в песочнице падают, как раньше
-HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks") for tail in ("", " *")] + ["gh pr edit *", "gh pr merge *"]
+# x509 -26276) — мимо неё только чтение PR и правка. Слияния здесь нет (решение Зевса 19.10, metis-0247 r4): gh pr
+# merge, gh api и прочий gh остаются в песочнице без сети и падают; guard (hq-gh) вдобавок отказывает слиянию в любой
+# форме — `gh -R o/r pr merge`, GH_REPO=…, gh api …/merge
+HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks") for tail in ("", " *")] + ["gh pr edit *"]
 # git по SSH в песочнице macOS не работает, по HTTPS push упирается в помощник учётных данных: окну каждого направления
 # сетевые команды git — мимо неё; мастерской — только при SSH-remote. push в main/master, --force и --delete не
 # пускает guard (_PUSH_BAD)

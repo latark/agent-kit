@@ -258,6 +258,40 @@ def t_admin_auto(h):
     merge_case("--auto — отказ", h.pre(f"gh pr merge 3 --auto --match-head-commit {sha}"), False, "без --auto")
     merge_case("без номера PR — отказ", h.pre(f"gh pr merge --match-head-commit {sha}"), False, "один номер PR")
     merge_case("два номера PR — отказ", h.pre(f"gh pr merge 3 4 --match-head-commit {sha}"), False, "один номер PR")
+    # флаги gh до pr (metis-0247 r4, решение Зевса 19.10): шлюз узнаёт форму `gh -R o/r pr merge` и судит её как
+    # обычную; мутация «без разбора флагов до подкоманды» краснеет здесь
+    def gate(name, cmd, why):
+        d, r = h.pre(cmd)
+        check(name, d == "deny" and "Правило push: gh pr merge" in r and (why in r or not HAVE_TOML), r)
+    gate("gh -R o/r pr merge 1 — шлюз: без --match-head-commit — отказ", "gh -R latark/tg-read pr merge 3",
+         "нужен ровно один --match-head-commit")
+    gate("gh --repo=o/r pr merge 1 --admin — отказ", f"gh --repo=latark/tg-read pr merge 3 --admin --match-head-commit {sha}",
+         "без --admin")
+    gate("gh -Ro/r pr merge --auto — отказ", f"gh -Rlatark/tg-read pr merge 3 --auto --match-head-commit {sha}",
+         "без --auto")
+    gate("gh -R o/r --admin pr merge — отказ", f"gh -R latark/tg-read --admin pr merge 3 --match-head-commit {sha}",
+         "--admin")
+    gate("GH_REPO=o/r gh pr merge 1 — отказ", f"GH_REPO=latark/tg-read gh pr merge 3 --match-head-commit {sha}",
+         "GH_REPO")
+    gate("GH_CONFIG_DIR=… gh pr merge — отказ", f"GH_CONFIG_DIR=/tmp/x gh pr merge 3 --match-head-commit {sha}",
+         "GH_")
+    gate("gh --hostname github.com pr merge 1 — отказ", f"gh --hostname github.com pr merge 3 --match-head-commit {sha}",
+         "--hostname")
+    gate("gh --hostname=github.com pr merge 1 — отказ", f"gh --hostname=github.com pr merge 3 --match-head-commit {sha}",
+         "--hostname")
+    gate("gh -R o/r pr merge 1 -R чужой — отказ", f"gh -R latark/tg-read pr merge 3 -R latark/other --match-head-commit {sha}",
+         "[merge_repos]")
+    gate("gh -R чужой pr merge — отказ", f"gh -R latark/other pr merge 3 --match-head-commit {sha}", "[merge_repos]")
+    gate("gh --foo x pr merge (флаг съедает слово по cobra) — отказ", f"gh --foo x pr merge 3 --match-head-commit {sha}",
+         "--foo")
+    d, r = h.pre(f"gh $SUB merge 3 --match-head-commit {sha}")
+    check("gh $SUB merge — подкоманду не вычислить — отказ", d == "deny" and "не вычислить" in r, r)
+    d, r = h.pre("gh -R latark/tg-read api -X PUT repos/latark/tg-read/pulls/3/merge")
+    check("gh -R o/r api -X PUT …/merge — отказ правилом записи gh api", d == "deny" and "gh api с записью" in r, r)
+    merge_case("gh -R o/r pr merge 3 --match-head-commit <SHA> — проходит, как обычная форма",
+               h.pre(f"gh -R latark/tg-read pr merge 3 --match-head-commit {sha}"), True)
+    merge_case("gh --repo=o/r pr merge 3 --match-head-commit <SHA> — проходит",
+               h.pre(f"gh --repo=latark/tg-read pr merge 3 --match-head-commit {sha}"), True)
 
 
 def t_no_head(h):
@@ -1079,6 +1113,28 @@ def t_hq_gh(h):
                 "gh api repos/latark/agent-kit/merges-report"):
         d, r = hq(cmd, role=None)
         check(f"hq: главная сессия окна: {cmd} — правило слияния не задевает", merge_why not in r, r)
+    # флаги gh до pr и GH_* перед командой (metis-0247 r4, решение Зевса 19.10) — тот же отказ, что gh pr merge;
+    # мутация «без разбора флагов до подкоманды» краснеет здесь
+    for cmd in ("gh -R o/r pr merge 1", "gh --repo=o/r pr merge 1 --admin", "GH_REPO=o/r gh pr merge 1",
+                "gh --hostname github.com pr merge 1", "gh -Ro/r pr merge 1", "gh --repo o/r pr merge 1 --auto",
+                "gh -R=o/r pr merge 1", "gh --hostname=github.com -R o/r pr merge 1", "env GH_REPO=o/r gh pr merge 1",
+                "gh --foo x pr merge 1", "gh --foo pr merge 1", "gh -R o/r pr -R o/r merge 1",
+                "gh -R o/r api -X PUT repos/o/r/pulls/1/merge", "gh --hostname github.com api repos/o/r/merges",
+                "/opt/homebrew/bin/gh -R o/r pr merge 1 --squash"):
+        for who, kw in (("главная сессия окна без agent_type", dict(role=None)),
+                        ("субагент окна", dict(role="general-purpose", agent_id="sub1"))):
+            d, r = hq(cmd, **kw)
+            check(f"hq: {who}: {cmd} — отказ", d == "deny" and merge_why in r, r)
+    d, r = hq("gh $SUB merge 1", role=None)
+    check("hq: gh $SUB merge 1 — слово до подкоманды не вычислить — отказ", d == "deny" and "не вычислить" in r, r)
+    case("hq: gh -R свой pr view N — можно (флаг до pr тоже виден)", hq("gh -R latark/agent-kit pr view 5", role=None), True)
+    case("hq: gh -R чужой pr view N — отказ", hq("gh -R torvalds/linux pr view 5", role=None), False,
+         "нет в [merge_repos]" if HAVE_TOML else "hq-gh")
+    case("hq: gh --hostname h pr view N -R свой — отказ (до pr только -R)",
+         hq("gh --hostname evil.example pr view 5 -R latark/agent-kit", role=None), False, "hq-gh")
+    case("hq: gh pr checks N -R свой — можно", hq("gh pr checks 5 -R latark/agent-kit", role=None), True)
+    case("hq: gh pr edit N --repo=свой --title — можно",
+         hq("gh pr edit 5 --repo=latark/agent-kit --title x", role=None), True)
     case("hq: главная сессия окна без agent_type: gh pr view -R свой — можно",
          hq("gh pr view 5 -R latark/agent-kit", role=None), True)
     # вне окна штаба поведение прежнее: правило hq-gh слияние не задевает
