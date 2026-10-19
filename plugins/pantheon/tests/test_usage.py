@@ -57,6 +57,12 @@ write(f"{proj}/{sid2}/subagents/agent-y1.jsonl", [req(100_000)])
 for i in range(3, 11):
     write(f"{proj}/cccccc{i:02d}-0000-0000-0000-000000000000.jsonl", [req(100_000)])
 
+# metis-0208: недоступный транскрипт (в окне агента так было с чужими) пропускается, остальное считается
+locked = f"{proj}/dddddddd-0000-0000-0000-000000000000.jsonl"
+write(locked, [req(100_000)])
+os.chmod(locked, 0)
+can_lock = not os.access(locked, os.R_OK)  # под root chmod 0 не закрывает файл
+
 env = {"PATH": os.environ["PATH"], "HOME": home}
 p = subprocess.run([sys.executable, "-I", SCRIPT, "7"], env=env, capture_output=True, text=True)
 out = p.stdout
@@ -82,6 +88,9 @@ check("топ-10 %: 1 из 10 сессий, 16 $ = 62 % всех $", "1 из 10,
 check("самая дорогая сессия: id из 8 знаков и роль, без пути", "  aaaaaaaa  hq" in out and home not in out
       and sid1 not in out)
 check("шапка объясняет, что такое сессия", "основной транскрипт вместе с его субагентами" in out)
+check("недоступный .jsonl пропущен: сводка есть, в ней строка о пропуске",
+      not can_lock or "Пропущено недоступных транскриптов: 1" in out)
+os.chmod(locked, 0o600)
 shutil.rmtree(home, True)
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)
