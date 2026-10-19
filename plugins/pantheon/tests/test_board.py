@@ -76,6 +76,59 @@ def set_card(path, key, value):
     open(path, "w", encoding="utf-8").write(text)
 
 
+def state_len_hook():
+    """Хук state-len (metis-0274): превышение предела сообщает модели, остальное — тишина, любой вход — код 0."""
+    hook = os.path.join(os.path.dirname(LIB), "hooks", "ctx.py")
+    root = os.path.realpath(tempfile.mkdtemp(prefix="statelen-"))
+    pan = os.path.join(root, "pantheon")
+    os.makedirs(os.path.join(pan, "directions", "d1"))
+    os.makedirs(os.path.join(root, "outside"))
+    e = {k: v for k, v in os.environ.items() if not k.startswith("PANTHEON_")}
+    e.update(HOME=root, PANTHEON_HOME=pan, PANTHEON_STATE=os.path.join(root, "state"))
+
+    def hk(payload, raw=False):
+        return subprocess.run([sys.executable, "-I", hook, "state-len"], env=e, capture_output=True, text=True,
+                              input=payload if raw else json.dumps(payload), timeout=30)
+
+    def mk(path, n):
+        open(path, "w", encoding="utf-8").write("ж" * n)  # кириллица: знаки, не байты
+        return path
+
+    board = mk(os.path.join(pan, "board.md"), 9001)
+    r = hk({"tool_name": "Edit", "tool_input": {"file_path": board}})
+    out = json.loads(r.stdout) if r.stdout.strip() else {}
+    ctx = (out.get("hookSpecificOutput") or {}).get("additionalContext", "")
+    check("хук длины: board.md 9001 знак → additionalContext с размером, пределом и archive/",
+          r.returncode == 0 and "9001 знаков при пределе 9000" in ctx and "board.md" in ctx and "archive/" in ctx
+          and out["hookSpecificOutput"]["hookEventName"] == "PostToolUse", r.stdout + r.stderr)
+    st = mk(os.path.join(pan, "directions", "d1", "STATUS.md"), 9500)
+    r = hk({"tool_name": "Write", "tool_input": {"file_path": st}})
+    check("хук длины: STATUS.md направления 9500 → сообщение", r.returncode == 0 and "9500 знаков" in r.stdout, r.stdout)
+    mk(board, 9000)
+    r = hk({"tool_name": "Edit", "tool_input": {"file_path": board}})
+    check("хук длины: ровно 9000 знаков → тишина", r.returncode == 0 and r.stdout == "", r.stdout)
+    other = mk(os.path.join(pan, "directions", "d1", "notes.md"), 20000)
+    r = hk({"tool_name": "Write", "tool_input": {"file_path": other}})
+    check("хук длины: не файл состояния (notes.md в Пританее) → тишина", r.returncode == 0 and r.stdout == "", r.stdout)
+    r = hk({"tool_name": "Write", "tool_input": {"file_path": mk(os.path.join(pan, "directions", "d1", "board.md"), 20000)}})
+    check("хук длины: board.md не в корне Пританея → тишина", r.returncode == 0 and r.stdout == "", r.stdout)
+    out_board = mk(os.path.join(root, "outside", "board.md"), 20000)
+    r = hk({"tool_name": "Write", "tool_input": {"file_path": out_board}})
+    check("хук длины: board.md вне Пританея → тишина", r.returncode == 0 and r.stdout == "", r.stdout)
+    mk(board, 9001)
+    for name, pl, raw in (("битый JSON", "{not json", True), ("пустой ввод", "", True), ("не объект", "[1]", True),
+                          ("нет file_path", {"tool_input": {}}, False), ("tool_input не объект", {"tool_input": 5}, False),
+                          ("file_path не строка", {"tool_input": {"file_path": 7}}, False),
+                          ("файла нет", {"tool_input": {"file_path": os.path.join(pan, "directions", "d2", "STATUS.md")}}, False)):
+        r = hk(pl, raw)
+        check("хук длины: %s → код 0, тишина" % name, r.returncode == 0 and r.stdout == "", r.stdout + r.stderr)
+    h = json.load(open(os.path.join(os.path.dirname(LIB), "hooks", "hooks.json"), encoding="utf-8"))
+    ifs = sorted(x.get("if") for g in h["hooks"]["PostToolUse"] for x in g["hooks"] if "state-len" in x.get("command", ""))
+    check("хук длины: в hooks.json синхронно (без async) на Write, Edit, MultiEdit по ~/ai/pantheon/**",
+          ifs == ["Edit(~/ai/pantheon/**)", "MultiEdit(~/ai/pantheon/**)", "Write(~/ai/pantheon/**)"]
+          and not any(x.get("async") for g in h["hooks"]["PostToolUse"] for x in g["hooks"] if "state-len" in x.get("command", "")))
+
+
 def main():
     tmp, home, state, view, env = make()
     src = lambda d, i: os.path.join(home, "directions", d, "tasks", i + ".md")
@@ -678,6 +731,7 @@ def main():
     ib = _tasks.render_inbox_card({"direction": "d", "file": "2026-10-15-x.md", "id": "i1", "text": "# t\ntext"},
                                   "zorba", marks=mk)[0]["Проект"]
     check("значок проекта: входящая карточка берёт значок из реестра", ib == "🟥 zorba")
+    state_len_hook()
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 
