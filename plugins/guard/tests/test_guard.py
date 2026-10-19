@@ -1173,6 +1173,23 @@ def main():
         ("tg-readd: сессия владельца logout — можно", "allow", ".", "", False, B("tg-readd logout")),
         ("tg-readd: владелец bootout — можно", "allow", ".", "", False,
          B("launchctl bootout gui/501/local.tg-read.daemon")),
+        # launchd-env (metis-0298): окружение launchd наследует тик pantheon — роли его не меняют
+        *[(f"launchd-env: {c!r} — отказ", "deny", br, "dev-opus", True, B(c)) for c in (
+            "launchctl setenv PANTHEON_TOUCHID /tmp/x", "launchctl unsetenv PATH",
+            "/bin/launchctl setenv PATH /tmp/bin", "env X=1 launchctl setenv PATH /tmp/bin",
+            "sudo launchctl setenv PATH /tmp/bin", "sh -c 'launchctl unsetenv PATH'",
+            "A=setenv; launchctl $A PATH /tmp/bin", "launchctl config user path /tmp/bin")],
+        ("launchd-env: координатор launchctl setenv — отказ", "deny", br, "domain-coordinator", False,
+         B("launchctl setenv PANTHEON_TOUCHID /tmp/x")),
+        *[(f"launchd-env: {c!r} — можно", "allow", br, "dev-opus", True, B(c)) for c in (
+            "launchctl list", "launchctl print gui/501/pantheon.tick", "launchctl getenv PATH")],
+        ("launchd-env: владелец launchctl setenv — можно", "allow", ".", "", False, B("launchctl setenv X 1")),
+        *[(f"launchd-env: {c!r} — отказ", "deny", br, "dev-opus", True, B(c)) for c in (
+            "swiftc x.swift", "/opt/homebrew/bin/swiftc x.swift", "xcrun swiftc x.swift", "S=swiftc; $S x.swift",
+            "/usr/bin/swiftc a.swift; swiftc b.swift")],
+        *[(f"launchd-env: {c!r} — можно", "allow", br, "dev-opus", True, B(c)) for c in (
+            "/usr/bin/swiftc x.swift", "env A=1 /usr/bin/swiftc -o out x.swift", "grep -n swiftc merge.py")],
+        ("launchd-env: владелец swiftc — можно", "allow", ".", "", False, B("swiftc x.swift")),
         ("cdp: мастерская мимо демона на 9222 — отказ", "deny", ws, "workshop", False, B("curl -s 127.0.0.1:9222/json/version")),
         ("cdp: prometheus читает DevToolsActivePort — отказ", "deny", br, "prometheus", True,
          B("cat ~/Library/Application\\ Support/Chromium/DevToolsActivePort")),
