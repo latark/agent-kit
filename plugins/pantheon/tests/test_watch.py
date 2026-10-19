@@ -889,7 +889,7 @@ def test_fresh_path_recheck_0207():
     r = e.run(LIB, json.dumps(a), t=T0,
               extra=QUICK, argv=[PY311, "-I", "-c", _DIRECT_RESUME])
     c = e.calls()
-    check(r.stdout.strip() == "(1, None)" and not [x for x in c if x[:1] == ["stop"] or "--bg" in x]
+    check(r.stdout.strip() == "(4, None)" and not [x for x in c if x[:1] == ["stop"] or "--bg" in x]
           and "\tresume-skip\tfr-dir\tfcfcfcfc\twake-waiting\tостановлено вами" in _start_log(e),
           f"recheck на пути свежего старта не остановил подъём: {r.stdout!r} {c} {_start_log(e)!r} {r.stderr[-400:]}")
 
@@ -934,7 +934,8 @@ def test_maintenance():
     m = json.load(open(e.st("maintenance.json")))
     check(m["sessions"] == ["mm-dir", "nn-dir"] and m["expires"] == T0 + 7200, f"метка: {m} {r.stderr}")
     out = e.run("wake", "mm-dir", t=T0 + 10)
-    check(out.returncode == 1 and "технический перезапуск" in out.stderr, "wake при метке")
+    check(out.returncode == 0 and "пропуск: mm-dir — " in out.stdout and "технический перезапуск" in out.stdout
+          and "поднимаю" not in out.stdout, f"wake при метке: {out.stdout!r} {out.stderr!r}")
     r = e.run("saved", "--by", "mm-dir", "--state", "STATUS.md", t=T0 + 20)
     check(r.returncode == 0 and os.path.exists(e.st("maintenance", "mm-dir.json")), f"saved: {r.stderr}")
     check(e.run("restart", "--status", t=T0 + 30).returncode == 1, "status при несохранившейся")
@@ -1233,7 +1234,7 @@ def test_argus_wake_rules():
     check(len([c for c in e.calls() if c[:1] == ["respawn"]]) == n0, "снятие паузы подняло сессию под общей паузой")
     check(os.path.exists(e.st("pauses", "q-dir.json")), "своя пауза снята, хотя будить нельзя")
     r = e.run("wake", "q-dir", t=T0 + 70)
-    check(r.returncode == 1 and "пауза по нагрузке" in r.stderr, f"wake под паузой: {r.stdout} {r.stderr}")
+    check(r.returncode == 0 and "пропуск: q-dir — пауза по нагрузке" in r.stdout and "поднимаю" not in r.stdout, f"wake под паузой: {r.stdout} {r.stderr}")
     e.run("pause", "--off", "--all", t=T0 + 80)
     r = e.run("wake", "q-dir", "сделай", "X", t=T0 + 90)
     pushed = open(e.st("push", "abcdef01-1.txt")).read()
