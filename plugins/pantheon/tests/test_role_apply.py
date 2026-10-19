@@ -131,10 +131,14 @@ def main():
     check("apply без галочки — код ≠0, в ~/.claude/agents ничего не появилось",
           r.returncode != 0 and "нет вашей галочки" in r.stderr and personal() == [])
     answer("scribe", sha1, question=f"Применить роль scribe [{sha1}]? %%скрыто%%")
+    answer("scribe", sha1, question=f"Применить роль scribe [{sha1}]? И ещё одну")
+    r = run("role", "apply", "scribe")
+    check("apply: «Да» на вопрос со скрытым или лишним текстом — не галочка, отказ",
+          r.returncode != 0 and "нет вашей галочки" in r.stderr and personal() == [])
     answer("scribe", sha1, days_ago=15)
     r = run("role", "apply", "scribe")
-    check("apply: «Да» со скрытым текстом в вопросе и «Да» старше 14 дней — не галочка, отказ",
-          r.returncode != 0 and personal() == [])
+    check("apply: «Да» старше 14 дней — не галочка, отказ",
+          r.returncode != 0 and "нет вашей галочки" in r.stderr and personal() == [])
 
     # --- галочка на другой версии черновика ---
     answer("scribe", sha1, card=card)
