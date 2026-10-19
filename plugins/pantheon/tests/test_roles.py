@@ -248,6 +248,8 @@ def main():
               + ("выпали" if not extra else "подставлены"),
               not has if not extra else (has == set(owner_lines)
                                          and "Коллекции направлений: legal, docs (справка)." in texts["argus.md"]))
+    check("координатор: в приёмке ночи есть шаг pantheon task set <id> --acceptance принято|вернуть|к владельцу",
+          "pantheon task set <id> --acceptance принято|вернуть|к владельцу" in texts.get("domain-coordinator.md", ""))
     # Гестия (metis-0217, review-51-bypass): шаблон в плагине есть, но до metis-0245 build её не собирает
     tmpl_h = read(os.path.join(real, "hestia.tmpl"))
     head = tmpl_h.split("---")[1] if tmpl_h.count("---") >= 2 else ""
