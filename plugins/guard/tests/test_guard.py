@@ -1185,6 +1185,59 @@ def main():
         ("tg-readd: сессия владельца logout — можно", "allow", ".", "", False, B("tg-readd logout")),
         ("tg-readd: владелец bootout — можно", "allow", ".", "", False,
          B("launchctl bootout gui/501/local.tg-read.daemon")),
+        # launchd-env (metis-0298): окружение launchd наследует тик pantheon — роли его не меняют
+        *[(f"launchd-env: {c!r} — отказ", "deny", br, "dev-opus", True, B(c)) for c in (
+            "launchctl setenv PANTHEON_TOUCHID /tmp/x", "launchctl unsetenv PATH",
+            "launchctl setenv PANTHEON_STATE /tmp/st", "launchctl setenv PATH /tmp/bin:/usr/bin",
+            "/bin/launchctl setenv PATH /tmp/bin", "env X=1 launchctl setenv PATH /tmp/bin",
+            "sudo launchctl setenv PATH /tmp/bin", "sh -c 'launchctl unsetenv PATH'",
+            "A=setenv; launchctl $A PATH /tmp/bin", "launchctl config user path /tmp/bin")],
+        ("launchd-env: координатор launchctl setenv — отказ", "deny", br, "domain-coordinator", False,
+         B("launchctl setenv PANTHEON_TOUCHID /tmp/x")),
+        # белый список (ревью 84b): всё, кроме чтения, — отказ; asuser/bsexec — обёртки; без подкоманды — ввод из stdin
+        *[(f"launchd-env: {c!r} — отказ (84b)", "deny", br, "dev-opus", True, B(c)) for c in (
+            "launchctl asuser 501 launchctl setenv PATH /tmp/bin", "launchctl asuser 501 /bin/sh -c 'launchctl setenv X 1'",
+            "launchctl bsexec 1 launchctl print gui/501", "l\\aunchctl setenv PATH /x",
+            "launchctl SETENV PANTHEON_STATE /x", "launchctl Setenv PANTHEON_STATE /x",
+            "launchctl submit -l evil -- /bin/sh -c 'id'", "launchctl bootout gui/501/pantheon.tick",
+            "launchctl bootstrap gui/501 ./p.plist", "launchctl load -w ./p.plist",
+            "launchctl unload ~/Library/LaunchAgents/pantheon.tick.plist", "launchctl kickstart -k gui/501/pantheon.tick",
+            "launchctl kickstart -k -s gui/501/pantheon.tick", "launchctl enable gui/501/x",
+            "launchctl disable gui/501/pantheon.tick", "printf 'setenv PATH /x' | launchctl", "launchctl < cmds.txt",
+            "launchctl remove pantheon.tick", "$(which launchctl) setenv PATH /x", "launchctl frobnicate")],
+        # ревью 84d п. 1: имя собрано кавычками, регистром, переменной, переносом — раннего выхода по подстроке нет;
+        # п. 2: невычисленная подкоманда ($(…), `…`, $X, $1, файл) — отказ
+        *[(f"launchd-env: {c!r} — отказ (84d)", "deny", br, "dev-opus", True, B(c)) for c in (
+            "LAUNCHCTL setenv PANTHEON_STATE /tmp/x", "/BIN/LaunchCtl setenv PATH /x",
+            "LaunchCtl bootout gui/501/pantheon.tick", "launch''ctl setenv PATH /x", 'launch""ctl setenv PATH /x',
+            '"launch"ctl setenv PATH /x', "$'launch'ctl setenv PATH /x", "$'\\x6caunchctl' setenv PATH /x",
+            "L=launch; ${L}ctl setenv PATH /x", 'L=launch; "$L"ctl setenv PATH /x', "launch\\\nctl setenv PATH /x",
+            "launchctl $(echo setenv PANTHEON_TOUCHID) list", "launchctl `echo setenv PATH` list",
+            "S=$(echo setenv PATH); launchctl $S list", "set -- setenv PATH; launchctl $1 $2 list",
+            "launchctl $(echo bootout gui/501/pantheon.tick) help", "launchctl $(cat $TMPDIR/a) version",
+            "launchctl $(< $TMPDIR/args) version", 'launchctl "$UNKNOWNVAR" list',
+            "launchctl \"$(printf 'submit\\n-l\\nevil\\n--\\n/bin/sh')\" help", 'launchctl "" $(echo setenv) list',
+            "swift''c x.swift", "SWIFTC x.swift")],
+        *[(f"launchd-env: {c!r} — можно", "allow", br, "dev-opus", True, B(c)) for c in (
+            'launchctl "" list', "launchctl print gui/501 $(id -u)", "echo hi")],
+        *[(f"launchd-env: {c!r} — можно", "allow", br, "dev-opus", True, B(c)) for c in (
+            "launchctl list", "launchctl print gui/501/pantheon.tick", "launchctl getenv PATH",
+            "launchctl print-disabled gui/501", "launchctl blame gui/501/pantheon.tick", "launchctl version",
+            "launchctl help", "launchctl managerpid", "$(which launchctl) list",
+            "tg-readd kickstart", "tg-readd status",
+            "grep -rn launchctl plugins/")],
+        ("launchd-env: владелец launchctl setenv — можно", "allow", ".", "", False, B("launchctl setenv X 1")),
+        # ревью 84f п. 1: главная сессия фонового окна — agent_type в событии нет, роль только из PANTHEON_ROLE
+        *[(f"launchd-env: окно {w['PANTHEON_ROLE']} без agent_type, {c!r} — отказ", "deny", br, "", False, B(c), None,
+           w) for w in (HQ, TL) for c in ("launchctl setenv PANTHEON_TOUCHID 0", "swiftc x.swift")],
+        *[(f"launchd-env: окно {w['PANTHEON_ROLE']} без agent_type, {c!r} — можно", "allow", br, "", False, B(c), None,
+           w) for w in (HQ, TL) for c in ("launchctl print gui/501/pantheon.tick", "/usr/bin/swiftc x.swift")],
+        *[(f"launchd-env: {c!r} — отказ", "deny", br, "dev-opus", True, B(c)) for c in (
+            "swiftc x.swift", "/opt/homebrew/bin/swiftc x.swift", "xcrun swiftc x.swift", "S=swiftc; $S x.swift",
+            "/usr/bin/swiftc a.swift; swiftc b.swift")],
+        *[(f"launchd-env: {c!r} — можно", "allow", br, "dev-opus", True, B(c)) for c in (
+            "/usr/bin/swiftc x.swift", "env A=1 /usr/bin/swiftc -o out x.swift", "grep -n swiftc merge.py")],
+        ("launchd-env: владелец swiftc — можно", "allow", ".", "", False, B("swiftc x.swift")),
         ("cdp: мастерская мимо демона на 9222 — отказ", "deny", ws, "workshop", False, B("curl -s 127.0.0.1:9222/json/version")),
         ("cdp: prometheus читает DevToolsActivePort — отказ", "deny", br, "prometheus", True,
          B("cat ~/Library/Application\\ Support/Chromium/DevToolsActivePort")),

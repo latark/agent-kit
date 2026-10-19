@@ -191,9 +191,10 @@ def file_size(path):
         return 0
 
 
-def lines_since(path, start, needle=None):
+def lines_since(path, start, needle=None, with_pos=False):
     """Строки транскрипта от смещения start до конца файла, с needle внутри (metis-0249). owner-log ждёт запись до
-    540 с, и за это время транскрипт растёт: окно «хвост N байт» теряло запись, когда после неё дописали больше N."""
+    540 с, и за это время транскрипт растёт: окно «хвост N байт» теряло запись, когда после неё дописали больше N.
+    with_pos — пары (смещение начала строки, строка)."""
     out = []
     try:
         with open(path, "rb") as f:
@@ -203,9 +204,11 @@ def lines_since(path, start, needle=None):
             f.seek(max(0, start - 1))
             if start > 0 and f.read(1) != b"\n":
                 f.readline()  # первая строка обрезана
+            pos = f.tell()
             for raw in f:
                 if needle is None or needle in raw:
-                    out.append(raw)
+                    out.append((pos, raw) if with_pos else raw)
+                pos += len(raw)
     except OSError:
         return []
     return out
@@ -241,8 +244,10 @@ def context_tokens(path):
 
 
 def is_owner_entry(d):
+    """Ваш ввод с клавиатуры окна. Пересланное из Slack (verifiedSlackHumanTurn) — не ваше: Claude Code 2.1.303 сам
+    не считает его человеком (функция YC в бинаре), хотя origin.kind = human."""
     return d.get("type") == "user" and not d.get("isSidechain") and not d.get("isMeta") and \
-        (d.get("origin") or {}).get("kind") == "human"
+        (d.get("origin") or {}).get("kind") == "human" and not d.get("verifiedSlackHumanTurn")
 
 
 def last_owner_time(path):
@@ -357,23 +362,66 @@ def prompt_chain(path, prompt_id, record, prompt, start=None):
     return "ok", ""
 
 
-def queued_entry(path, prompt, t, used=(), start=None):
+def queued_entry(path, prompt, t, used=(), start=None, mark=None):
     """Ваш ввод во время хода агента (metis-0028): Claude Code пишет его не записью user с promptId, а вложением
     queued_command с origin.kind = human, когда ход его заберёт (проверено 15.10 на транскриптах Зевса). Сообщения
     других сессий там же — kind = peer, уведомления — task-notification. promptId у вложения нет: сверка по тексту и
-    времени постановки в очередь. → (запись, время) или None."""
-    for d in reversed(list(entries(window(path, 4000000, start, b"queued_command")))):
-        a = d.get("attachment") or {}
-        if d.get("type") != "attachment" or d.get("isSidechain") or a.get("type") != "queued_command":
+    времени. → (запись, время постановки в очередь) или None.
+
+    Свежесть (metis-0289) — по месту в файле, а не по времени: Claude Code дописывает вложение, когда ход забирает
+    очередь, а оба времени в нём (attachment.timestamp и timestamp записи) — время постановки. Между постановкой и
+    забором может идти долгий инструмент или субагент (в 300 живых транскриптах — до 2158 с). Вложение годится, если
+    его строка начинается не раньше mark — размера транскрипта, когда сработал хук. Запасной путь — время постановки
+    не дальше ENTRY_MAX_AGE: вложение успели дописать раньше, чем хук прочёл размер файла."""
+    for pos, d in reversed(queued_lines(path, start)):
+        a = queued_attachment(d, prompt)
+        if a is None or (a.get("origin") or {}).get("kind") != "human" or d.get("isMeta") or a.get("isMeta"):
             continue
-        if (a.get("origin") or {}).get("kind") != "human" or a.get("commandMode") != "prompt":
-            continue
-        if not same_text({"message": {"content": a.get("prompt")}}, prompt):
-            continue
-        te = iso_ts(a.get("timestamp") or d.get("timestamp"))
-        if te is not None and abs(t - te) <= ENTRY_MAX_AGE and queued_key(d) and queued_key(d) not in used:
-            return d, te
+        if queued_fresh(d, pos, t, mark) and queued_key(d) and queued_key(d) not in used:
+            te = iso_ts(a.get("timestamp") or d.get("timestamp"))
+            return d, te if te is not None else t
     return None
+
+
+def queued_lines(path, start):
+    """(смещение строки или None, запись) для строк с вложением очереди: от start до конца, без start — хвост."""
+    if start is None:
+        return [(None, d) for d in entries(window(path, 4000000, None, b"queued_command"))]
+    return [(pos, d) for pos, raw in lines_since(path, start, b"queued_command", with_pos=True)
+            for d in entries([raw])]
+
+
+def queued_attachment(d, prompt):
+    """Вложение queued_command главной ветки, режим prompt, тот же текст → attachment или None."""
+    a = d.get("attachment") or {}
+    if d.get("type") != "attachment" or d.get("isSidechain") or a.get("type") != "queued_command":
+        return None
+    if a.get("verifiedSlackHumanTurn") or d.get("verifiedSlackHumanTurn"):
+        return None  # пересылка из Slack: не ваш ввод с клавиатуры (как YC в Claude Code 2.1.303)
+    if a.get("commandMode") != "prompt" or not same_text({"message": {"content": a.get("prompt")}}, prompt):
+        return None
+    return a
+
+
+def queued_fresh(d, pos, t, mark):
+    """Вложение очереди относится к этому вводу: строка дописана после mark (размер транскрипта при срабатывании
+    хука), или время постановки не дальше ENTRY_MAX_AGE от ввода."""
+    if pos is not None and mark is not None and pos >= mark:
+        return True
+    te = iso_ts((d.get("attachment") or {}).get("timestamp") or d.get("timestamp"))
+    return te is not None and abs(t - te) <= ENTRY_MAX_AGE
+
+
+def queued_not_owner(path, prompt, t, start=None, mark=None):
+    """Тот же текст пришёл в очередь хода не от вас: другая сессия, уведомление задачи, хук (origin не human или
+    isMeta). Такой ввод не пишется никуда, даже в unconfirmed/. Старое вложение с тем же текстом («да» час назад)
+    ввод не гасит: свежесть та же, что у queued_entry."""
+    for pos, d in queued_lines(path, start):
+        a = queued_attachment(d, prompt)
+        if a is not None and queued_fresh(d, pos, t, mark) and \
+                ((a.get("origin") or {}).get("kind") != "human" or a.get("isMeta") or d.get("isMeta")):
+            return True
+    return False
 
 
 def queued_pending(path, prompt, t, start=None):
@@ -756,7 +804,10 @@ def cmd_owner_log(ev):
     used = queued_used(sid)
     # читаем от места, где был конец транскрипта при вводе (минус запас), до конца: за время ожидания транскрипт
     # растёт, и окно «хвост 2 МБ» теряло запись (metis-0249)
-    start = max(0, file_size(tpath) - 2000000) if tpath else None
+    # что дописано после mark — пришло после срабатывания хука (metis-0289). Файла ещё нет — места нет, только время:
+    # иначе mark = 0 и годилось бы любое вложение файла, появившегося позже (--fork-session с историей)
+    mark = file_size(tpath) if tpath and os.path.isfile(tpath) else None
+    start = max(0, mark - 2000000) if mark is not None else (0 if tpath else None)
     entry, queued, extended, skipped = None, None, False, set()
     deadline = t + float(os.environ.get("PANTHEON_CONFIRM_WAIT") or CONFIRM_WAIT)
     while True:  # Claude Code пишет транскрипт сам и с задержкой: ждём запись этого ввода
@@ -767,7 +818,7 @@ def cmd_owner_log(ev):
             if not is_owner_entry(entry):
                 return 0  # у этого ввода своя запись, и она не ваша — в очередь не смотрим
             break
-        queued = queued_entry(tpath, prompt, t, used, start)
+        queued = queued_entry(tpath, prompt, t, used, start, mark)
         if queued is not None:
             break
         rec = queued_record(tpath, prompt, t, used | skipped, start)  # путь А
@@ -805,7 +856,15 @@ def cmd_owner_log(ev):
         return 0
     else:
         if not is_owner_entry(entry):
-            return 0  # расписание, другая сессия, субагент, пробуждение хуком
+            # чужая запись с тем же текстом сюда не доходит: цикл выше уже вернул 0
+            if queued_not_owner(tpath, prompt, t, start, mark):
+                return 0  # другая сессия, уведомление, хук прислали тот же текст в очередь хода
+            # metis-0289: запись хода не ваша и текст другой — это вставка посреди чужого хода (ход начат сообщением
+            # другой сессии или уведомлением), а вашего вложения очереди не нашлось. Раньше ввод пропадал молча.
+            append_owner_line(name, t, prompt, "вставка посреди хода: вложения очереди нет", folder=UNCONFIRMED)
+            hook_log("owner-log", "ввод посреди хода %s без вложения очереди — строка в unconfirmed/%s.md"
+                     % (ev.get("prompt_id"), name))
+            return 0
         te = iso_ts(entry.get("timestamp"))
         if not same_text(entry, prompt) or te is None or abs(t - te) > ENTRY_MAX_AGE:
             append_owner_line(name, t, prompt, "запись транскрипта не совпала с вводом", folder=UNCONFIRMED)

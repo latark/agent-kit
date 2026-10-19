@@ -400,10 +400,17 @@ def main():
           "«gh run *» падают в песочнице",
           all(sorted(x for x in w["sandbox"]["excludedCommands"] if x.startswith("gh run")) == sorted(run_reads)
               for w in (sa, sm, sn, sz, sw)))
-    check("gh pr create/merge мимо песочницы — только в окнах направлений; у мастерской нет",
-          all("gh pr create *" in w["sandbox"]["excludedCommands"] and "gh pr merge *" in w["sandbox"]["excludedCommands"]
+    check("gh pr create/edit/merge мимо песочницы — только в окнах направлений; у мастерской нет (metis-0247)",
+          all(all(c in w["sandbox"]["excludedCommands"] for c in ("gh pr create *", "gh pr edit *", "gh pr merge *"))
               for w in (sa, sm, sn, sz))
-          and not any(x.startswith(("gh pr create", "gh pr merge")) for x in sw["sandbox"]["excludedCommands"]))
+          and not any(x.startswith(("gh pr create", "gh pr edit", "gh pr merge")) for x in sw["sandbox"]["excludedCommands"]))
+    # metis-0247: весь gh мимо песочницы окна направления — ровно этот список. gh api, gh issue, gh pr close|comment|
+    # review|ready, gh run cancel, «gh *» и «gh pr *» в него не попадают и в песочнице падают (TLS Go, x509 -26276)
+    coord_gh = sorted(reads + run_reads + ["gh repo view *", "gh auth status", "gh pr create *", "gh pr edit *",
+                                           "gh pr merge *"])
+    check("окно координатора: gh мимо песочницы — ровно чтение, create/edit/merge; gh api и прочий gh — нет (metis-0247)",
+          all(sorted(x for x in w["sandbox"]["excludedCommands"] if x.split()[0] == "gh") == coord_gh
+              for w in (sa, sm, sn, sz)))
     check("песочница: `pantheon direction init *` мимо неё только в окне Метиды (metis-0042)",
           "pantheon direction init *" in sm["sandbox"]["excludedCommands"]
           and not any("direction" in x for w in (sa, sw, sn, sz) for x in w["sandbox"]["excludedCommands"]))
@@ -457,11 +464,19 @@ def main():
           and "git push *" not in hb["excludedCommands"]
           and hq["hooks"]["PreToolUse"][0] == sa["hooks"]["PreToolUse"][0] and "worktree" not in hq
           and "~/ai/knowledge/me" not in hb["filesystem"]["denyRead"])
-    check("окно штаба: мимо песочницы — прежний список пульта, без gh и сетевого git (metis-0064)",
+    check("окно штаба: мимо песочницы — прежний список пульта и gh PR (view/checks/edit), без сетевого git "
+          "(metis-0064, metis-0247)",
           hb["excludedCommands"] == ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheon wake *",
                                      "pantheon archive", "pantheon jobs *", "pantheon domains build",
                                      "pantheon roles build", "pantheon stop *", "pantheon resume *", "pantheon pause *",
-                                     "pantheon restart *", "pantheon saved *", "pantheon who", "pantheon agents"])
+                                     "pantheon restart *", "pantheon saved *", "pantheon who", "pantheon agents",
+                                     "gh pr view", "gh pr view *", "gh pr checks", "gh pr checks *", "gh pr edit *"])
+    check("окно штаба: gh api, gh issue, gh run, gh repo, gh pr create/close/comment/merge, gh с флагами до "
+          "подкоманды, «gh *» и «gh pr *» — в песочнице (metis-0247)",
+          not any(x.startswith(("gh api", "gh issue", "gh run", "gh repo", "gh pr create", "gh pr close", "gh pr merge",
+                                "gh -",
+                                "gh pr comment", "gh pr review", "gh pr diff", "gh pr list"))
+                  or x in ("gh", "gh *", "gh pr", "gh pr *") for x in hb["excludedCommands"]))
     corp = "lecture-notes"
     check("окно штаба: корпус из [hq].closed_dirs закрыт для чтения — песочница и правило Read (SEC-13, решение 15.10)",
           all(x in hb["filesystem"]["denyRead"] for x in (f"~/projects/{corp}", "~/.cache/qmd",
