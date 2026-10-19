@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""metis-0123: доска начинается с «Мне ответить». Виды Доска.base, сводка со счётчиками, предупреждения по options.
+"""metis-0123, metis-0069: доска начинается с «От меня нужно». Семь видов Доска.base, сводка со счётчиками,
+предупреждения по options.
 
 Запуск: python3 -I plugins/pantheon/tests/test_board_view.py  (код выхода 0 — все прошли)
 """
@@ -38,33 +39,71 @@ def hides_closed(view_text):
     return all(f'note["Статус"] != "{x}"' in view_text for x in ("Готово", "Отменено"))
 
 
+VIEWS7 = ["От меня нужно", "Срочно", "Доска", "Очередь", "Пачки", "Итоги пачек", "Все задачи"]
+
+
 def base_checks():
     vs = views()
     names = [n for n, _ in vs]
-    check("Доска.base: первый вид «Мне ответить», второй «Система»", names[:2] == ["Мне ответить", "Система"], names)
-    check("Доска.base: есть «Очередь агентов» и «Все задачи»", {"Очередь агентов", "Все задачи"} <= set(names))
-    mine = dict(vs)["Мне ответить"]
-    check("«Мне ответить»: Статус «Нужен ответ» или Кому = Владелец",
+    check("Доска.base: ровно семь видов по порядку (metis-0069)", names == VIEWS7, names)
+    check("Доска.base: старых видов нет", not {"Мне ответить", "Система", "Очередь агентов", "Нужен ответ", "Горит",
+                                               "Ночь", "Волны", "Утро"} & set(names), names)
+    mine = dict(vs)["От меня нужно"]
+    check("«От меня нужно»: Нужен ответ, Кому = Владелец или приёмка «к владельцу»",
           'note["Статус"] == "Нужен ответ"' in mine and 'note["Кому"].toString().contains("Владелец")' in mine
-          and "- or:" in mine)
+          and 'note["Приёмка"] == "к владельцу"' in mine and "- or:" in mine)
     cols = re.search(r"order: \[(.*)\]", mine).group(1).split(", ")
-    check("«Мне ответить»: 5–6 колонок, первая — «Вопрос»", cols[0] == "note.Вопрос" and 5 <= len(cols) <= 6, cols)
-    sysv = dict(vs)["Система"]
-    check("«Система» — канбан, «Отменено» и «Очередь» скрыты", sysv.startswith("kanban")
-          and 'note["Статус"] != "Отменено"' in sysv and 'note["Статус"] != "Очередь"' in sysv)
-    go = re.search(r"groupOrder: \[(.*)\]", sysv).group(1)
-    check("«Система»: в порядке колонок нет «Отменено» и «Очередь»", "Отменено" not in go and "Очередь" not in go, go)
-    check("«Система»: «Готово» — за 7 дней по «Закрыта»",
-          'note["Статус"] != "Готово"' in sysv and 'note["Закрыта"] >= today() - "7d"' in sysv)
-    queue = dict(vs)["Очередь агентов"]
-    check("«Очередь агентов»: только «Очередь»", 'note["Статус"] == "Очередь"' in queue)
+    check("«От меня нужно»: 5–6 колонок, первая — «Вопрос»", cols[0] == "note.Вопрос" and 5 <= len(cols) <= 6, cols)
+    board = dict(vs)["Доска"]
+    check("«Доска» — канбан, «Отменено» и «Очередь» скрыты, пачек нет", board.startswith("kanban")
+          and 'note["Статус"] != "Отменено"' in board and 'note["Статус"] != "Очередь"' in board
+          and 'note["Тип"] != "пачка"' in board)
+    go = re.search(r"groupOrder: \[(.*)\]", board).group(1)
+    check("«Доска»: в порядке колонок нет «Отменено» и «Очередь»", "Отменено" not in go and "Очередь" not in go, go)
+    check("«Доска»: «Готово» — за 7 дней по «Закрыта»",
+          'note["Статус"] != "Готово"' in board and 'note["Закрыта"] >= today() - "7d"' in board)
+    check("«Доска»: на карточке «ждёт» и предупреждение режима", "formula.waits" in board and "formula.warn" in board)
+    queue = dict(vs)["Очередь"]
+    check("«Очередь»: только «Очередь», с режимом, «ждёт» и пересечениями",
+          'note["Статус"] == "Очередь"' in queue and all(f"formula.{x}" in queue for x in ("mode_view", "waits", "cross")))
+    urgent = dict(vs)["Срочно"]
+    check("«Срочно»: внимание или приоритет 0, без закрытых", "formula.urgency < 3" in urgent
+          and "formula.prio_rank == 0" in urgent and hides_closed(urgent))
+    packs = dict(vs)["Пачки"]
+    check("«Пачки» — канбан карточек пачек с суммой оценок и бюджетом", packs.startswith("kanban")
+          and 'note["Тип"] == "пачка"' in packs and "note.Сумма оценок" in packs and "note.Бюджет" in packs)
+    res = dict(vs)["Итоги пачек"]
+    check("«Итоги пачек»: задачи пачек, группы по пачке, по порядку", 'note["Тип"] != "пачка"' in res
+          and "property: note.Пачка" in res and "property: note.Порядок" in res)
     allv = dict(vs)["Все задачи"]
     check("«Все задачи» — без фильтров статуса (полностью)", "filters:" not in allv)
-    check("«Мне ответить»: исключает «Готово» и «Отменено»", hides_closed(mine))
+    check("«От меня нужно»: исключает «Готово» и «Отменено»", hides_closed(mine))
     # сломать правило: проверка на вид без фильтра должна дать False
     for x in ("Готово", "Отменено"):
         broken = mine.replace(f'note["Статус"] != "{x}"', "true")
         check(f"проверка «{x} скрыто» краснеет на сломанном виде", hides_closed(mine) and not hides_closed(broken))
+    # «На проверке» попадает в «От меня нужно» только адресованная Владельцу (по фильтру вида)
+    def passes(card):
+        st, who, acc = card.get("Статус"), card.get("Кому") or "", card.get("Приёмка")
+        return (st == "Нужен ответ" or "Владелец" in who or acc == "к владельцу") and st not in ("Готово", "Отменено")
+    review = {"id": "t-2", "title": "Проверить", "status": "review", "project": "demo", "direction": "demo"}
+    to_owner = T.render_card(dict(review, owner="Владелец"), "", "x.md", T0)[0]
+    to_agent = T.render_card(dict(review, owner="argus"), "", "x.md", T0)[0]
+    check("«На проверке» с Кому = Владелец — в «От меня нужно», с Кому = агент — нет",
+          passes(to_owner) and not passes(to_agent), (to_owner.get("Кому"), to_agent.get("Кому")))
+    # Пульт.base: вариант В — карточки проектов с цветом здоровья, пачки канбаном, пачки проекта и задачи пачки
+    pult = T.PULT_FILE.split("\nviews:\n", 1)[1]
+    pv = [(re.search(r"^    name: (.+)$", x, re.M).group(1), x) for x in re.split(r"^  - type: ", pult, flags=re.M)[1:]]
+    check("Пульт.base: виды Пульт, Пачки, Пачки проекта, Задачи пачки",
+          [n for n, _ in pv] == ["Пульт", "Пачки", "Пачки проекта", "Задачи пачки"], [n for n, _ in pv])
+    pd = dict(pv)
+    check("Пульт.base: «Пульт» — карточки проектов, картинка — цвет здоровья", pd["Пульт"].startswith("cards")
+          and 'note["Тип"] == "проект"' in pd["Пульт"] and "image: note.Цвет" in pd["Пульт"]
+          and all(f"note.{k}" in pd["Пульт"] for k in T.COUNTERS))
+    check("Пульт.base: «Пачки проекта» и «Задачи пачки» — по ссылке на открытую заметку",
+          "file.hasLink(this.file)" in pd["Пачки проекта"] and "file.hasLink(this.file)" in pd["Задачи пачки"]
+          and "property: note.Порядок" in pd["Задачи пачки"])
+    check("Пульт.base: узлы ролей не попадают", "'!file.inFolder(\"Доска/Узлы\")'" in T.PULT_FILE)
 
 
 def card_checks():
@@ -83,12 +122,12 @@ def summary_checks():
     tasks = {"metis-0001": ("p1", h, ""), "metis-0002": ("p2", h2, "")}
     text, _ = T._summary(tasks, T0)
     lines = text.split("\n")
-    i_cnt = next((i for i, ln in enumerate(lines) if "Мне ответить 1" in ln), -1)
-    i_mine = next((i for i, ln in enumerate(lines) if ln == "## Мне ответить"), -1)
+    i_cnt = next((i for i, ln in enumerate(lines) if "От меня нужно 1" in ln), -1)
+    i_mine = next((i for i, ln in enumerate(lines) if ln == "## От меня нужно"), -1)
     check("сводка: сверху строка счётчиков (сразу после заголовка)", lines[0] == "# Сводка" and i_cnt == 2
           and "Готово за сутки 1" in lines[i_cnt], lines[:4])
-    check("сводка: под счётчиками «Мне ответить» со встроенным видом",
-          i_cnt < i_mine and "![[Доска.base#Мне ответить]]" in lines[i_mine + 2])
+    check("сводка: под счётчиками «От меня нужно» со встроенным видом",
+          i_cnt < i_mine and "![[Доска.base#От меня нужно]]" in lines[i_mine + 2])
     # Кому = Владелец: считается, без двойного счёта; Готово/Отменено — нет; чужой адресат — нет
     def mk(i, **kw):
         return (f"p{i}", {"type": "task", "id": f"metis-1{i:03d}", "title": f"З{i}", "status": "todo", "project": "demo",
@@ -98,9 +137,12 @@ def summary_checks():
              mk(5, owner="Владелец", status="waiting", waiting_on="human", question="Q?"), mk(6)]
     t2 = {c[1]["id"]: c for c in cases}
     text2, _ = T._summary(t2, T0)
-    cnt = next(ln for ln in text2.split("\n") if "Мне ответить" in ln and "Просрочено" in ln)
-    check("сводка: «Мне ответить» = Кому Владелец + ждут человека, без Готово/Отменено и двойного счёта",
-          "Мне ответить 2 ·" in cnt and "Нужен ответ (1)" in text2, cnt)
+    cnt = next(ln for ln in text2.split("\n") if "От меня нужно" in ln and "Просрочено" in ln)
+    check("сводка: «От меня нужно» = Кому Владелец + ждут человека, без Готово/Отменено и двойного счёта",
+          "От меня нужно 2 ·" in cnt and "Нужен ответ (1)" in text2, cnt)
+    t3 = dict(t2, **{"metis-1007": mk(7, owner="argus", status="review", acceptance="к владельцу")})
+    cnt3 = next(ln for ln in T._summary(t3, T0)[0].split("\n") if "От меня нужно" in ln and "Просрочено" in ln)
+    check("сводка: приёмка «к владельцу» тоже в «От меня нужно», как в виде", "От меня нужно 3 ·" in cnt3, cnt3)
     check("сводка: «Готово за сутки» свёрнуто", "> [!success]- 🟢 Готово за сутки (1)" in text)
 
 
