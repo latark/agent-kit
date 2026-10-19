@@ -101,6 +101,10 @@ e.window("Откатить на всех Mac")
 check("окно вопросов: «откатить на всех Mac» по .sync-incoming — запускает", e.run()[1])
 
 e = Env()
+e.window("Отправить")
+check("окно вопросов: короткое «Отправить» (SYNC_ACT) — запускает", e.run()[1])
+
+e = Env()
 e.window("Откатить правку (Recommended)")
 check("окно вопросов: «(Recommended)» в конце не мешает", e.run()[1])
 
