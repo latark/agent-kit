@@ -25,8 +25,9 @@ PostToolUse (Bash:
                  в ключ или шаблон, который в него раскрывается, а не на обход папки выше (grep -r, metis-0084);
   hq-telegram  — окну штаба (PANTHEON_ROLE=hq) Telegram закрыт: субагент tg-reader, навык telegram-read, скрипт
                  tg-read и демон tg-readd в Bash (P0-1, metis-0060);
-  hq-gh        — окну штаба gh pr — только с -R из [merge_repos], PR номером, без GH_REPO/GH_HOST/GH_CONFIG_DIR, без обсуждений
-                 (--comments, --json comments) и без личного в команде (metis-0247);
+  hq-gh        — окну штаба gh pr — только с -R из [merge_repos], PR номером, без GH_* в команде и GH_REPO/GH_HOST/
+                 GH_CONFIG_DIR в окружении, без обсуждений (--comments, --json comments) и без личного в команде;
+                 слияние (gh pr merge, gh api …/merge) — отказ всегда (metis-0247);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
                  status, chats, folders, verify, split — можно; без PANTHEON_ROLE (плановый проход) — можно (metis-0267);
@@ -2924,10 +2925,11 @@ def _gh_merge(texts):
 
 
 def _gh_api(texts):
-    """Аргументы gh api (без слова api) или None — подкоманда не api ни в одной трактовке."""
+    """Слова gh api без слова api — флаги до api тоже его (`gh -X PUT api …`: gh применяет их к api, ревью argus
+    69r-a) — или None: подкоманда не api ни в одной трактовке."""
     _, cands = _gh_parse(texts)
     q = next((q for q, _ in cands if texts[q] == "api"), None)
-    return None if q is None else texts[q + 1:]
+    return None if q is None else texts[:q] + texts[q + 1:]
 
 
 def _gh_pr_sub(texts):
@@ -3182,12 +3184,12 @@ def check_hq_telegram(event, tool, tool_input):
     return None
 
 
-# hq-gh (metis-0247, ревью argus-69b, решение Метиды и Зевса 19.10). Окну штаба gh pr view/checks/edit/merge выпущены
+# hq-gh (metis-0247, ревью argus-69b, решение Метиды и Зевса 19.10). Окну штаба gh pr view/checks/edit выпущены
 # мимо песочницы (pantheon HQ_GH), а у Зевса личное: без сужения он вынес бы личное в описание PR любого репозитория
 # (gh pr edit -R чужой --body-file ~/ai/knowledge/me/…) и принёс бы в окно чужой текст из веба (gh pr view -R чужой
 # --comments, SEC-13). В окне штаба (PANTHEON_ROLE=hq или agent_type hq — главная сессия и субагенты) любой gh pr:
 #   - только с явным -R/--repo, и каждый — owner/repo из [merge_repos] политики (любого направления); без -R gh взял бы
-#     репозиторий папки, его здесь не проверить. GH_REPO, GH_HOST и GH_CONFIG_DIR в команде или в окружении — отказ;
+#     репозиторий папки, его здесь не проверить. Любое GH_* в команде и GH_REPO, GH_HOST, GH_CONFIG_DIR в окружении — отказ;
 #   - PR — номером: адрес PR в аргументе gh берёт вместо -R;
 #   - без обсуждений: --comments (-c) и --json с comments, reviews, latestReviews — чужой текст и в своём репозитории;
 #   - без личного в команде: те же пути, что правило private закрывает остальным ролям (--body-file, -F, $(cat …),

@@ -288,6 +288,17 @@ def t_admin_auto(h):
     check("gh $SUB merge — подкоманду не вычислить — отказ", d == "deny" and "не вычислить" in r, r)
     d, r = h.pre("gh -R latark/tg-read api -X PUT repos/latark/tg-read/pulls/3/merge")
     check("gh -R o/r api -X PUT …/merge — отказ правилом записи gh api", d == "deny" and "gh api с записью" in r, r)
+    # флаги записи до api (ревью argus 69r-a): gh применяет их к api, правило записи видит слова и до api
+    for pre in ("-X PUT", "-XPUT", "--method PUT", "--method=PUT", "-f merge_method=squash", "-F merge_method=squash",
+                "--input /tmp/body.json", "--input=/tmp/body.json", "--field merge_method=squash"):
+        d, r = h.pre(f"gh {pre} api repos/latark/tg-read/pulls/3/merge")
+        check(f"gh {pre} api …/merge — отказ правилом записи gh api", d == "deny" and "gh api с записью" in r, r)
+    d, r = h.pre("gh -f query='mutation{mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}' api graphql")
+    check("gh -f query='mutation{mergePullRequest…}' api graphql — отказ правилом записи gh api",
+          d == "deny" and "gh api с записью" in r, r)
+    for pre in ("-X GET", "--method=GET", "-R latark/tg-read"):
+        d, r = h.pre(f"gh {pre} api repos/latark/tg-read/pulls/3")
+        check(f"gh {pre} api …/pulls/3 (чтение) — правило записи не задевает", "gh api с записью" not in (r or ""), r)
     merge_case("gh -R o/r pr merge 3 --match-head-commit <SHA> — проходит, как обычная форма",
                h.pre(f"gh -R latark/tg-read pr merge 3 --match-head-commit {sha}"), True)
     merge_case("gh --repo=o/r pr merge 3 --match-head-commit <SHA> — проходит",
