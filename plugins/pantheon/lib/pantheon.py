@@ -2574,7 +2574,7 @@ def reconcile_agents(data, workers=None):
     «failed» без pid (19.10: zeus и metis-pantheon «упали», а state.json — working). Процесс из реестра демона жив,
     задание working/blocked — берём состояние задания, pid — из реестра; прежнее состояние — в listedState.
     (2) Обратный случай: «blocked» без процесса и без вопроса (needs в state.json) — сессию снял Claude Code, ждать
-    ей нечего (18.10 themis-sources 748d6686 весь день «ждёт вас»): noProcess. С вопросом — по-прежнему ждёт вас:
+    ей нечего (18.10, координатор без процесса весь день «ждёт вас»): noProcess. С вопросом — по-прежнему ждёт вас:
     ответ дойдёт через claude attach, он поднимет процесс.
     (3) Причина для сводки: нет waitingFor — needs задания (blocked) или detail (failed)."""
     workers = daemon_workers() if workers is None else workers
