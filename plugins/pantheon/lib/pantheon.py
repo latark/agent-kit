@@ -66,7 +66,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon revisits                     пересмотры к сроку и по событиям (плановый проход раз в сутки)
   pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией
   pantheon wake hestia --task <id>      Гестия: всегда отказ (код 2) — окно песочницы появится в metis-0245
-  pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами») и вернуть
+  pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
+                                        сессия уходит из фоновых сессий Claude Code) и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
   pantheon restart --prepare [причина]|--status|--go [--force]|--cancel   технический перезапуск всех сессий
   pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском; без техперезапуска —
@@ -1346,17 +1347,22 @@ def status():
             if a.get("kind") == "interactive":
                 by.setdefault("interactive", []).append(a)
                 continue
-            by.setdefault(a.get("state") or "?", []).append(a)
-        order = ("interactive", "working", "blocked", "failed", "done", "stopped")
+            # metis-0250: «ждёт вас» без процесса и без вопроса — не ждёт, а снята Claude Code (reconcile_agents)
+            by.setdefault("gone" if a.get("noProcess") else a.get("state") or "?", []).append(a)
+        order = ("interactive", "working", "blocked", "failed", "gone", "done", "stopped")
         word = {"interactive": "открыты в терминале", "working": "фоновые работают", "blocked": "ждут вас",
-                "failed": "упали", "done": "закончили ход", "stopped": "остановлены"}
+                "failed": "упали", "gone": "без процесса", "done": "закончили ход", "stopped": "остановлены"}
         lines.append(" · ".join(f"{word.get(k, k)}: {len(by[k])}" for k in sorted(by, key=lambda k: (
             order.index(k) if k in order else 9))) or "фоновых сессий нет")
-        for k in ("blocked", "failed"):
+        for k in ("blocked", "failed", "gone"):
             for a in by.get(k, []):
-                why = a.get("waitingFor") or a.get("status") or ""
-                lines.append(f"{word[k]}: {a.get('name') or a.get('id')} — {str(why)[:80]}")
-                warn.append(f"сессия {a.get('name') or a.get('id')}")
+                # пустая причина — без тире (metis-0250 п. 4); у «без процесса» — что сделать
+                why = " ".join(str(a.get("waitingFor") or a.get("status") or "").split())[:80]
+                if k == "gone":
+                    why = f"ждать нечего, процесс снял Claude Code — убрать: claude rm {a.get('id')}"
+                lines.append(f"{word[k]}: {a.get('name') or a.get('id')}" + (f" — {why}" if why else ""))
+                if k != "gone":
+                    warn.append(f"сессия {a.get('name') or a.get('id')}")
     section("Сессии", lines)
 
     # вопросы к владельцу на доске
@@ -2526,7 +2532,56 @@ def agents_all():
         data = json.loads(r.stdout or "[]")
     except ValueError:
         return None
-    return data if isinstance(data, list) else data.get("agents") if isinstance(data, dict) else None
+    data = data if isinstance(data, list) else data.get("agents") if isinstance(data, dict) else None
+    return reconcile_agents(data) if isinstance(data, list) else data
+
+
+def daemon_workers():
+    """Процессы фоновых сессий из реестра демона Claude Code ~/.claude/daemon/roster.json: короткий id → pid. Читаем
+    только pid (в записи есть и жетоны — их не берём). None — реестра нет или он не читается: тогда о процессах
+    ничего не утверждаем."""
+    d = read_json(os.path.join(HOME, ".claude", "daemon", "roster.json"), None)
+    if not isinstance(d, dict) or not isinstance(d.get("workers"), dict):
+        return None
+    return {str(k): w.get("pid") for k, w in d["workers"].items() if isinstance(w, dict)}
+
+
+def claude_job_state(short):
+    """state.json задания ~/.claude/jobs/<короткий id>/state.json (его пишет Claude Code, мы только читаем)."""
+    if not re.fullmatch(r"[0-9a-zA-Z-]{4,64}", str(short or "")):
+        return {}
+    d = read_json(os.path.join(HOME, ".claude", "jobs", str(short), "state.json"), {})
+    return d if isinstance(d, dict) else {}
+
+
+def reconcile_agents(data, workers=None):
+    """Сверка `claude agents --json --all` с заданием (jobs/<id>/state.json) и процессом (реестр демона), metis-0250.
+    (1) Из окна с песочницей `claude agents` не видит живой процесс (kill(pid, 0) там — EPERM) и пишет живую сессию
+    «failed» без pid (19.10: zeus и metis-pantheon «упали», а state.json — working). Процесс из реестра демона жив,
+    задание working/blocked — берём состояние задания, pid — из реестра; прежнее состояние — в listedState.
+    (2) Обратный случай: «blocked» без процесса и без вопроса (needs в state.json) — сессию снял Claude Code, ждать
+    ей нечего (18.10 themis-sources 748d6686 весь день «ждёт вас»): noProcess. С вопросом — по-прежнему ждёт вас:
+    ответ дойдёт через claude attach, он поднимет процесс.
+    (3) Причина для сводки: нет waitingFor — needs задания (blocked) или detail (failed)."""
+    workers = daemon_workers() if workers is None else workers
+    for a in data:
+        if not isinstance(a, dict) or a.get("kind") not in (None, "background") or not a.get("id"):
+            continue
+        js = claude_job_state(a["id"])
+        wpid = (workers or {}).get(str(a["id"]))
+        alive = bool(wpid) and pid_alive(wpid)
+        if alive and not a.get("pid"):
+            a["pid"] = wpid
+        if a.get("state") == "failed" and alive and js.get("state") in ("working", "blocked"):
+            a["listedState"], a["state"] = "failed", js["state"]
+        if (a.get("state") == "blocked" and workers is not None and not alive and not a.get("pid")
+                and js and not js.get("needs")):
+            a["noProcess"] = True
+        if not a.get("waitingFor"):
+            why = js.get("needs") if a.get("state") == "blocked" else js.get("detail") if a.get("state") == "failed" else None
+            if why:
+                a["waitingFor"] = " ".join(str(why).split())[:200]
+    return data
 
 
 def pid_alive(pid):
@@ -2717,6 +2772,7 @@ def _resume_session(name, a, text, origin):
         r = subprocess.run([claude_bin(), "respawn", a["id"]], capture_output=True, text=True, timeout=180)
         start_log(f"respawn\t{name}\t{a['id']}\t{origin}\t{r.returncode}")
         if r.returncode == 0:
+            rm_previous(name, "respawn", keep={a["id"]}, wait=True)
             return 0, None
         with contextlib.suppress(OSError):
             os.remove(pushed)
@@ -2724,12 +2780,15 @@ def _resume_session(name, a, text, origin):
     # свежего старта; штаб (zeus) — hq, хотя сюда он сегодня не доходит (start_target не знает zeus — отказ выше)
     role = "hq" if name == "zeus" else got[1]
     argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--agent", role, "--name", name, "--settings", run, text]
+    before = {x.get("id") for x in agents_all() or [] if x.get("id")}
     r = subprocess.run(argv, cwd=a.get("cwd") or HOME, capture_output=True, text=True, timeout=180)
     m = COPY_NOTE.search((r.stdout or "") + (r.stderr or ""))
     start_log(f"resume\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\tcopy {m.group(1)}" if m else ""))
     if m:
         alert(f"{name}: --resume сделал копию {m.group(1)} — исходная сессия {a.get('id')} ещё числится живой; проверить "
               f"claude agents, лишнюю остановить", "pantheon")
+    elif r.returncode == 0:  # копию (исходная ещё живая) не разбираем сами — тревога выше, решает Зевс
+        rm_previous(name, "--resume", before=before, keep={a.get("id")}, wait=True)
     return r.returncode, (m.group(1) if m else None)
 
 
@@ -2904,6 +2963,7 @@ def _fresh_start(name, a, text, origin, reason=None):
     if wrong:
         alert(wrong, "pantheon")
         return 1
+    rm_previous(name, "свежий старт", before=before)
     return 0
 
 
@@ -2927,20 +2987,81 @@ def stop_and_rm(name, sid):
     except (OSError, subprocess.SubprocessError) as e:
         return f"claude stop не выполнился: {e}"[:200]
     if st.returncode != 0:  # не остановилась — rm не зовём (rm сносит сессию, а она ещё может работать)
-        return (" ".join(((st.stderr or "") + " " + (st.stdout or "")).split())[:200]
-                or f"claude stop: код {st.returncode}")
+        return ("claude stop: " + (" ".join(((st.stderr or "") + " " + (st.stdout or "")).split())
+                                   or f"код {st.returncode}"))[:200]
+    return rm_session(sid)
+
+
+def rm_session(sid, tries=2):
+    """claude rm <id> без --discard-unpushed и --force-remove-worktree (metis-0239; уборка дежурного metis-0250):
+    сессию с неотправленной работой в worktree Claude Code не удаляет, и мы не настаиваем. → None или причина отказа."""
     r = None
-    for attempt in range(2):  # stop возвращается раньше, чем процесс ушёл: rm на ещё живую сессию может отказать
+    for attempt in range(tries):  # stop возвращается раньше, чем процесс ушёл: rm на ещё живую сессию может отказать
         try:
             r = subprocess.run([claude_bin(), "rm", sid], capture_output=True, text=True, timeout=60)
         except (OSError, subprocess.SubprocessError) as e:
             return f"claude rm не выполнился: {e}"[:200]
         if r.returncode == 0:
             return None
-        if attempt == 0:
+        if attempt + 1 < tries:
             time.sleep(1)
-    reason = " ".join(((r.stderr or "") + " " + (r.stdout or "")).split())[:200] or f"код {r.returncode}"
-    return reason
+    return " ".join(((r.stderr or "") + " " + (r.stdout or "")).split())[:200] or f"код {r.returncode}"
+
+
+def refused_by(reason):
+    """Кто отказал в stop_and_rm — для тревоги: «stop отказал» (сессия не остановилась, rm не звали) или «rm отказал»
+    (ревью argus к #53: при коде stop ≠ 0 тревога писала «rm отказал»)."""
+    return "stop отказал" if str(reason or "").startswith("claude stop") else "rm отказал"
+
+
+def rm_previous(name, how, before=None, keep=(), loud=False, wait=False):
+    """После успешного старта под именем name (pantheon start, свежий старт, продолжение wake/техперезапуска/дежурного):
+    прежние фоновые сессии этого имени — `claude rm` (процесса нет) или claude stop + rm (процесс есть), чтобы в
+    claude agents у имени осталась одна строка (metis-0250, слово владельца 19.10 через Зевса). Новая не трогается:
+    новая — id, которого не было в before (снимок id до запуска; None — все нынешние старые), и id из keep (продолженная respawn/--resume сессия), если
+    она живая. Пока живой новой с этим именем нет, ничего не удаляем (старт не подтвердился — прежние добьёт уборка
+    дежурного); wait — подождать её появления PANTHEON_NAME_WAIT (10 с). Отказ rm (неотправленное в worktree) —
+    start.log, тревога и, при loud, строка в stderr. → список (id, причина) отказов."""
+    keep = set(keep)
+    limit = 0.0
+    if wait:
+        limit = 10.0
+        with contextlib.suppress(ValueError, TypeError):
+            limit = max(0.0, float(os.environ.get("PANTHEON_NAME_WAIT") or limit))
+    _, poll, _ = stop_wait_knobs()
+    started = time.monotonic()
+    while True:
+        agents = agents_all()
+        if agents is None:
+            return []
+        same = [a for a in agents if a.get("name") == name and a.get("id") and a.get("kind") in (None, "background")]
+        old = {a["id"] for a in same} if before is None else before  # без снимка — нового нет, только keep
+        kept = {a["id"] for a in same if a["id"] not in old
+                or (a["id"] in keep and a.get("state") not in DOWN_STATES)}
+        if not any(a["id"] not in kept for a in same):
+            return []  # убирать нечего — и ждать нечего
+        if any(a.get("state") not in DOWN_STATES for a in same if a["id"] in kept):
+            break
+        if time.monotonic() - started >= limit:
+            start_log(f"rm-previous-skip\t{name}\t{how}\tновая сессия не видна живой")
+            return []
+        time.sleep(poll)
+    left = []
+    for a in same:
+        if a["id"] in kept:
+            continue
+        has_process = a.get("state") in ("working", "blocked") or (a.get("pid") and a.get("state") not in ("stopped", "failed"))
+        reason = stop_and_rm(name, a["id"]) if has_process else rm_session(a["id"])
+        start_log(f"rm-previous\t{name}\t{a['id']}\t{a.get('state')}\t{how}")
+        if reason:
+            start_log(f"rm-refused\t{name}\t{a['id']}\t{reason}")
+            alert(f"{name}: прежняя сессия {a['id']} осталась среди фоновых сессий Claude Code ({how}, "
+                  f"{refused_by(reason)}): {reason}", "pantheon-stop")
+            if loud:
+                print(f"pantheon start: {name}: прежняя сессия {a['id']} осталась среди фоновых сессий Claude Code, "
+                      f"причина: {reason}", file=sys.stderr)
+            left.append((a["id"], reason))
+    return left
 
 
 def stop_copies(name, live, why="stop-restart"):
@@ -3188,17 +3309,12 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
         stop_copies(name, live)
         stopped += live
     # CTX-10: эпик закончен — сессия «done» ещё висит в списке; новый эпик — новая сессия с тем же именем, а старая
-    # останавливается (переписка сохраняется: claude attach <id>), иначе Claude Code назовёт новую «имя (2)»
+    # останавливается и убирается из списка (claude rm, metis-0239; переписка остаётся: claude --resume <сессия>),
+    # иначе Claude Code назовёт новую «имя (2)»
+    # (claude rm прежних — только после успешного старта новой, rm_previous, metis-0250)
     for a in same:
-        if a.get("state") == "done" and a.get("pid") and not dry:
-            reason = stop_and_rm(name, a.get("id"))
-            start_log(f"stop-done\t{name}\t{a.get('id')}")
-            if reason:
-                start_log(f"rm-refused\t{name}\t{a.get('id')}\t{reason}")
-                print(f"pantheon start: {name}: прежняя сессия {a.get('id')} осталась среди фоновых сессий Claude Code, "
-                      f"причина: {reason}", file=sys.stderr)
-                alert(f"{name}: прежняя сессия {a.get('id')} осталась среди фоновых сессий Claude Code (stop-done, rm отказал): "
-                      f"{reason}", "pantheon-stop")
+        if a.get("state") == "done" and a.get("pid") and a.get("id") and not dry:
+            stop_copies(name, [a], "stop-done")
             stopped.append(a)
     # остановленная копия отпускает имя не сразу и может ожить (metis-0041): запуск — только когда имя свободно
     why = wait_name_free(name, stopped) if stopped else None
@@ -3234,6 +3350,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
         alert(wrong, "pantheon-start")
         print(f"pantheon start: {wrong}", file=sys.stderr)
         return 1
+    rm_previous(name, "start", before=before, loud=True)
     return 0
 
 
