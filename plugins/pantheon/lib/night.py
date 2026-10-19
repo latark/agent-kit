@@ -177,7 +177,9 @@ def snapshot():
         rows.append(tuple(sd))
     week = None
     if rows:
-        last = max(rows, key=lambda r: r[2])
+        # сброс с наибольшим resets_at: простаивающее окно после досрочного сброса пишет старый resets_at позже
+        # новых строк, и перенос базы недели не должен идти назад (metis-0246)
+        last = max(rows, key=lambda r: (round(r[1] / 3600), r[2]))
         same = [r[0] for r in rows if abs(r[1] - last[1]) <= 3600]
         week = (max(same), last[1], last[2])
     ats = [x[2] for x in (five, week) if x]
@@ -289,7 +291,7 @@ def spent(st, m):
     """Расход ночи в п. п. недели; неделя сбросилась посреди ночи — прошлая до сброса плюс новая."""
     if not m["known"] or st.get("start_pct") is None:
         return float(st.get("spent") or 0.0)
-    if st.get("resets_at") and abs(m["resets"] - float(st["resets_at"])) > 3600:
+    if st.get("resets_at") and m["resets"] - float(st["resets_at"]) > 3600:
         sp = float(st.get("last_used") or st["start_pct"]) - float(st["start_pct"]) + m["used"]
     else:
         sp = used_mono(st, m) - float(st["start_pct"])
@@ -545,7 +547,7 @@ def evening_pass(d, m, t, cfg):
                     + (" (последняя ночь перед сбросом)" if last_night else ""), "night")
     if st["opened_at"] and not st["skipped"] and m["known"]:
         st["spent"] = spent(st, m)
-        if st.get("resets_at") and abs(m["resets"] - float(st["resets_at"])) > 3600:
+        if st.get("resets_at") and m["resets"] - float(st["resets_at"]) > 3600:  # только вперёд (metis-0246)
             # неделя сбросилась посреди ночи: база переносится, чтобы следующие проходы считали used − start_pct
             st["start_pct"] = float(st["start_pct"]) - float(st.get("last_used") or st["start_pct"])
         st["last_used"], st["resets_at"] = used_mono(st, m), m["resets"]

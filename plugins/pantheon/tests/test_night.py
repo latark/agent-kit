@@ -539,6 +539,33 @@ def test_reset_mid_night_two_passes_0243():
         check(abs(got - want) < 1e-6, f"{x} после сброса: spent {got}, ждали {want}: {e.state_of()}")
 
 
+def test_early_reset_idle_window_0246():
+    """metis-0246: неделю сбросили досрочно (новый resets_at), а простаивающее окно ещё пишет строку со старым
+    resets_at позже новой. База недели переносится только вперёд: расход ночи 2, а не скачок (было 60)."""
+    e = Env()
+    open_night(e, hm("23:05"))
+    t0 = hm("23:06")
+    u0 = e.at_line(t0, 0)
+    e.watch(t0)
+    old, new = e.resets, e.resets + 2 * 86400
+    e.snap(hm("23:30"), u0 + 1.0, old)
+    e.watch(hm("23:30"))
+    check(e.state_of()["spent"] == 1.0, f"до сброса: {e.state_of()}")
+    e.week_usage([(hm("23:40"), new, 0.5)])
+    e.snap(hm("23:40"), 0.5, new)
+    e.watch(hm("23:40"))
+    check(abs(e.state_of()["spent"] - 1.5) < 1e-6, f"после раннего сброса: {e.state_of()}")
+    # простаивающее окно пишет старый сброс позже новой строки
+    e.week_usage([(hm("23:45"), old, u0 + 1.0)])
+    e.snap(hm("23:45"), u0 + 1.0, old)
+    e.watch(hm("23:45"))
+    check(abs(e.state_of()["spent"] - 1.5) < 1e-6, f"старая строка простаивающего окна сдвинула расход: {e.state_of()}")
+    e.week_usage([(hm("23:50"), new, 1.0)])
+    e.snap(hm("23:50"), 1.0, new)
+    e.watch(hm("23:50"))
+    check(abs(e.state_of()["spent"] - 2.0) < 1e-6, f"после старой строки: spent {e.state_of()['spent']}, ждали 2")
+
+
 def test_fractional_budget():
     """metis-0214: при budget_pct=1 тревоги 50/80 идут по дробному расходу (снимок недели с дробным процентом).
     Порог 50 % от 1 — 0,5 п. п., поэтому 0,4 тревоги не даёт, 0,5 даёт 50, 0,85 — 50 и 80."""
