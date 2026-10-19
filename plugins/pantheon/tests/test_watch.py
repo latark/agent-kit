@@ -1894,7 +1894,10 @@ def test_who_is_who_memo():
         check(p.who_is_who_check() == (["newgod (canvas)"], []), f"нет в .canvas: {p.who_is_who_check()}")
         open(sy, "w", encoding="utf-8").write(all_roles.replace(" newgod", ""))
         line = p.who_is_who_alert()
-        check(line == "памятку обновить: +newgod (canvas) / +newgod (system.md)", f"нет в system.md: {line!r}")
+        check(line == "памятку обновить: +newgod (canvas); system.md обновить: +newgod", f"нет в system.md: {line!r}")
+        # целым словом (metis-0252): «мом» в «Момент истины» — не Мом
+        open(cv, "w", encoding="utf-8").write(canvas_ok.replace("**Мом**", "Момент истины") % " newgod")
+        check([x for x in p.who_is_who_check()[0] if "canvas" in x] == ["momus (canvas)"], f"подстрока в холсте сошла за роль: {p.who_is_who_check()}")
     finally:
         for k, v in saved.items():
             setattr(p, k, v)

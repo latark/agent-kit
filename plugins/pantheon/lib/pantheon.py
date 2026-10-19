@@ -3605,7 +3605,9 @@ def who_is_who_names(text, roles, canvas=False):
         keys = [r, r.split("-")[0]] if r.split("-")[0] in LEAD_ROLES or r.startswith("dev-") else [r]
         if canvas:
             ru = [WHO_CANVAS_RU[k].lower() for k in keys if k in WHO_CANVAS_RU] or ([] if r in WHO_CANVAS_RU else [r])
-            ok = any(x in low for x in ru) or (r.startswith("dev-") and "разработчик" in low)
+            def has(x):  # целым словом: «мом» в «Момент истины» — не роль (metis-0252)
+                return re.search(r"(?<!\w)" + re.escape(x) + r"(?!\w)", low) is not None
+            ok = any(has(x) for x in ru) or (r.startswith("dev-") and has("разработчик"))
         else:
             ok = any(k in words for k in keys)
         if not ok:
@@ -3689,7 +3691,12 @@ def who_is_who_alert(**kw):
     if not (missing or extra):
         clear_once("who-is-who")
         return ""
-    line = "памятку обновить: " + " / ".join([f"+{n}" for n in missing] + [f"−{n}" for n in extra])
+    sysm = [n for n in missing if n.endswith("(system.md)")]
+    rest = [f"+{n}" for n in missing if n not in sysm] + [f"−{n}" for n in extra]
+    parts = (["памятку обновить: " + " / ".join(rest)] if rest else [])
+    if sysm:  # system.md — не памятка: в тексте тревоги называем его самим именем (metis-0252)
+        parts.append("system.md обновить: " + " / ".join("+" + n[:-len(" (system.md)")] for n in sysm))
+    line = "; ".join(parts)
     alert_once("who-is-who", line, f"Кто есть кто.md: {line}", "pantheon")
     return line
 
