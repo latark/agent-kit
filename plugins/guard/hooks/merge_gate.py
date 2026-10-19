@@ -951,8 +951,8 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
     is_metis = metis_ok or name == "metis-pantheon"
     if moved:
         return "только из папки своего репозитория, без cd в команде. " + (MERGE_PROTECT if is_metis else MERGE_INTERNAL)
-    if re.search(r"\bGH_(?:REPO|HOST)\b", cmd):
-        return "без чужого репозитория (GH_REPO, GH_HOST). " + (MERGE_PROTECT if is_metis else MERGE_INTERNAL)
+    if re.search(r"\bGH_[A-Z0-9_]+", cmd):  # GH_REPO, GH_HOST, GH_CONFIG_DIR, GH_TOKEN — уводят gh от проверенного
+        return "без переменных GH_* в команде (GH_REPO, GH_HOST и другие). " + (MERGE_PROTECT if is_metis else MERGE_INTERNAL)
     why, repos, numbers, auto, heads = _merge_args(args)
     # репозитории защит — remote папок metis-pantheon: gh сливает в репозиторий из remote папки, а не в папку, и клон
     # agent-kit в своей папке иначе слился бы как внутреннее

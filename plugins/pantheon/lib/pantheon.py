@@ -60,6 +60,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
   pantheon start zeus                   Пританей: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
+  pantheon start <направление> --at ЧЧ:ММ [поручение]   разовый запуск плановым проходом вместо sleep в сессии;
+                                        --at-list — записи, --at-cancel <id> — отменить (lib/night.py)
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
   pantheon watch [--dry-run]            дежурный (плановый проход раз в 5 мин): сессии, STATUS.md, swap, worktree, версия Claude Code,
                                         паузы, самозапуск по вашим решениям; --dry-run — кого поднял бы и почему нет
@@ -76,7 +78,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code
   pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (плановый проход раз в неделю)
-  pantheon metrics sync|summary         учёт по задачам: строки закрытых задач в ~/ai/pantheon/metrics/tasks.jsonl
+  pantheon metrics sync|summary|run     учёт по задачам: строки закрытых задач в ~/ai/pantheon/metrics/tasks.jsonl
                                         (пишет и `task set status=done|dropped`), свод недели — week-<неделя>.md
                                         и заметки Пульта; summary — свод в окно
   pantheon metrics backfill --from ГГГГ-ММ-ДД [--to ГГГГ-ММ-ДД] [--dry-run]   задним числом: строки закрытых за
@@ -1175,9 +1177,7 @@ def run_job(name):
                 rc, out = 124, f"таймаут {int(timeout)} с, группа процессов остановлена\n{out or ''}"
             with open(log, "a", encoding="utf-8") as fh:
                 fh.write(f"--- {stamp()} rc={rc} {time.time() - started:.1f} с\n{(out or '')[-4000:]}")
-            if os.path.getsize(log) > 400_000:
-                data = open(log, encoding="utf-8", errors="ignore").read()[-200_000:]
-                open(log, "w", encoding="utf-8").write(data)
+            trim_log(log)
             st = job_state(name)
             st.update(last_end=now(), last_rc=rc)
             st.pop("running", None)
@@ -1842,9 +1842,14 @@ GH_PR_READ = [f"gh pr {c}{tail}" for c in ("view", "checks", "diff", "list") for
 GH_RUN_READ = [f"gh run {c}{tail}" for c in ("view", "list", "watch") for tail in ("", " *")]
 SANDBOX_EXCLUDED = GH_PR_READ + GH_RUN_READ + ["gh repo view *", "gh auth status",
                                  "pantheon alert *", "pantheon consent *", "pantheon saved *"]
-# PR создают лиды, сливает координатор или лид — только окна направлений; кто и что сливает, проверяет guard
-# (merge_problem). Мастерской и штабу — нет
-GH_PR_WRITE = ["gh pr create *", "gh pr merge *"]
+# PR создают и правят (заголовок, описание, метки — `gh pr edit`, metis-0247) лиды, сливает координатор или лид —
+# только окна направлений; кто и что сливает, проверяет guard (merge_problem). Мастерской — нет
+GH_PR_WRITE = ["gh pr create *", "gh pr edit *", "gh pr merge *"]
+# штаб (metis-0247, «да» владельца 19.10 [zeus-0247-yes]): сети у окна нет, а gh в песочнице всё равно падает (TLS Go,
+# x509 -26276) — мимо неё только чтение PR и правка. Слияния здесь нет (решение Зевса 19.10, metis-0247 r4): gh pr
+# merge, gh api и прочий gh остаются в песочнице без сети и падают; guard (hq-gh) вдобавок отказывает слиянию в любой
+# форме — `gh -R o/r pr merge`, GH_REPO=…, gh api …/merge
+HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks") for tail in ("", " *")] + ["gh pr edit *"]
 # git по SSH в песочнице macOS не работает, по HTTPS push упирается в помощник учётных данных: окну каждого направления
 # сетевые команды git — мимо неё; мастерской — только при SSH-remote. push в main/master, --force и --delete не
 # пускает guard (_PUSH_BAD)
@@ -2481,13 +2486,13 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         return built
     clear_once("hq-policy-broken")
     # штаб (SEC-26, вариант А): Зевс пишет только в ~/ai/pantheon, кроме .git и alerts.md; сеть закрыта (в веб он не
-    # ходит, SEC-13); мимо песочницы — только `pantheon start|wake|alert`: запуск сессий и тревоги. Личное ему открыто
-    # (SEC-11), кроме ключей git-crypt.
+    # ходит, SEC-13); мимо песочницы — только `pantheon start|wake|alert`: запуск сессий и тревоги, и gh PR (HQ_GH).
+    # Личное ему открыто (SEC-11), кроме ключей git-crypt.
     hq_cache = _real_dir(f"{caches}/hq", [caches], strict=True, create=True)
     root = os.path.realpath(PANTHEON)
     keys = [p for p in private_paths if "/.git/git-crypt" in p + "/"]  # ключи — не штабу: ~/ai/pantheon коммитит тик
     hq = role_settings([root], None, memory, hq_cache, False, keys, None, guard)
-    hq["sandbox"]["excludedCommands"] = list(HQ_EXCLUDED)
+    hq["sandbox"]["excludedCommands"] = list(HQ_EXCLUDED) + HQ_GH
     hq["sandbox"]["filesystem"]["denyWrite"] += [os.path.join(root, ".git"), os.path.join(root, "alerts.md")]
     hq["sandbox"]["network"]["allowedDomains"] = []
     # корпус лекций — чужой контент (SEC-13, metis-0025): у Зевса уже есть личное и действия наружу, поэтому корпус ему
@@ -3286,8 +3291,56 @@ def start_target(target, rest):
             f"Прочитай ~/ai/pantheon/directions/{target}/STATUS.md и inbox/, затем продолжай текущий эпик по нему.")
 
 
+def start_at(rest, origin, dry):
+    """Разовый запуск плановым проходом вместо `sleep` в сессии (metis-0284): запись в STATE/oneshot.json, исполняет
+    дежурный один раз (lib/watch.py oneshots). Та же подкоманда start — те же права, что у запуска."""
+    N = night_mod()
+    t = now()
+    if rest == ["--at-list"]:
+        for ln in N.oneshot_lines(t) or ["разовых запусков нет"]:
+            print(ln)
+        return 0
+    if rest[:1] == ["--at-cancel"] and len(rest) == 2:
+        if N.oneshot_cancel(rest[1], t, f"pantheon start --at-cancel ({origin})"):
+            print(f"разовый запуск {rest[1]} отменён")
+            return 0
+        print(f"pantheon start: разового запуска {rest[1]} нет или он уже погашен", file=sys.stderr)
+        return 1
+    i = rest.index("--at") if "--at" in rest else -1
+    if i < 0 or i + 1 >= len(rest) or "--at-list" in rest or "--at-cancel" in rest:
+        print("pantheon start <направление> --at ЧЧ:ММ|\"ГГГГ-ММ-ДД ЧЧ:ММ\" [поручение] | --at-list | --at-cancel <id>",
+              file=sys.stderr)
+        return 2
+    when_s, rest = rest[i + 1], rest[:i] + rest[i + 2:]
+    if not rest:
+        print("pantheon start --at: кого запустить — направление", file=sys.stderr)
+        return 2
+    target, text = rest[0], " ".join(rest[1:]).strip()
+    domains = read_json(path("domains.json"), {}).get("domains") or {}
+    if target not in domains:
+        print(f"pantheon start --at: «{target}» — не направление из domains.json (разовый запуск — только направлений)",
+              file=sys.stderr)
+        return 2
+    try:
+        when = N.parse_at(when_s, t)
+    except ValueError as e:
+        print(f"pantheon start --at: {e}", file=sys.stderr)
+        return 2
+    got = start_target(target, [])
+    text = text or (got[4] if not isinstance(got, str) else "")
+    if dry:
+        print(f"[at] {target} в {stamp(when)} — {text}")
+        return 0
+    oid = N.oneshot_add(target, when, text, origin, t=t)
+    print(f"разовый запуск {oid}: {target} в {stamp(when)} — исполнит плановый проход (pantheon watch), срок "
+          f"{N.ONESHOT_TTL // 3600} ч; отмена — pantheon start --at-cancel {oid}")
+    return 0
+
+
 def start(rest):
-    """pantheon start <направление> [поручение] | workshop <задача> [поручение] | zeus [--restart]  [--from кто] [--dry-run]"""
+    """pantheon start <направление> [поручение] | workshop <задача> [поручение] | zeus [--restart]  [--from кто] [--dry-run]
+    pantheon start <направление> --at ЧЧ:ММ|"ГГГГ-ММ-ДД ЧЧ:ММ" [поручение] | --at-list | --at-cancel <id>   разовый запуск
+                                                                                    плановым проходом (вместо sleep)"""
     dry = "--dry-run" in rest
     restart = "--restart" in rest
     rest = [a for a in rest if a not in ("--dry-run", "--restart")]
@@ -3298,6 +3351,8 @@ def start(rest):
             print("pantheon start: --from zeus | tick | owner", file=sys.stderr)
             return 2
         origin, rest = rest[i + 1], rest[:i] + rest[i + 2:]
+    if any(a in ("--at", "--at-list", "--at-cancel") for a in rest):
+        return start_at(rest, origin, dry)
     if not rest:
         print(start.__doc__, file=sys.stderr)
         return 2
@@ -5079,6 +5134,8 @@ def metrics_on_close(T, tid):
 def metrics_cmd(rest):
     M, T = metrics_mod(), tasks_mod()
     sub, args = (rest[0] if rest else ""), rest[1:]
+    if sub == "run":
+        return metrics_run()
     tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
     ctx = metrics_ctx()
     if sub == "sync":
@@ -5111,7 +5168,7 @@ def metrics_cmd(rest):
         if not dry:
             M.publish(ctx, tasks)
         return 0
-    print("pantheon metrics sync | summary | backfill --from ГГГГ-ММ-ДД [--to ГГГГ-ММ-ДД] [--dry-run]", file=sys.stderr)
+    print("pantheon metrics sync | summary | run | backfill --from ГГГГ-ММ-ДД [--to ГГГГ-ММ-ДД] [--dry-run]", file=sys.stderr)
     return 2
 
 
@@ -5488,20 +5545,73 @@ def autoclose_tick(t):
             clear_once(key)
 
 
-def board_metrics(T):
-    """Учёт по задачам после прохода доски: строки закрытий, которые роль из песочницы записать не смогла, и свод
-    недели на Пульт. Своя блокировка: первый проход после выпуска читает транскрипты дольше минуты."""
+METRICS_EVERY = 30 * 60  # не чаще раза в 30 минут: учёт читает транскрипты за неделю (metis-0320)
+
+
+def metrics_pass(T):
+    """Один проход учёта: строки закрытий, которые роль из песочницы записать не смогла, и свод недели на Пульт.
+    Первый проход после выпуска читает гигабайты транскриптов — дольше минуты, поэтому только из фонового процесса."""
+    if os.environ.get("PANTHEON_METRICS_TEST_SLEEP"):  # проба в тестах: учёт, который долго работает
+        time.sleep(float(os.environ["PANTHEON_METRICS_TEST_SLEEP"]))
+    if os.environ.get("PANTHEON_METRICS_TEST_LOG"):
+        with open(os.environ["PANTHEON_METRICS_TEST_LOG"], "a") as fh:
+            fh.write(f"{os.getpid()}\n")
+    M, tasks = metrics_mod(), T.load_tasks(PANTHEON, T.WORK_TYPES)
+    ctx = metrics_ctx()
+    M.sync(ctx, tasks)
+    M.publish(ctx, tasks)
+
+
+def trim_log(log_path, limit=400_000, keep=200_000):
+    """Журнал дописывается; выше предела остаётся хвост в keep символов."""
+    try:
+        if os.path.getsize(log_path) > limit:
+            with open(log_path, encoding="utf-8", errors="ignore") as fh:
+                data = fh.read()[-keep:]
+            with open(log_path, "w", encoding="utf-8") as fh:
+                fh.write(data)
+    except OSError:
+        pass
+
+
+def metrics_run():
+    """pantheon metrics run — фоновый проход под блокировкой metrics; занята — тихо выходит."""
     with lock("metrics", block=False) as got:
         if not got:
-            return
+            return 0
         try:
-            M, tasks = metrics_mod(), T.load_tasks(PANTHEON, T.WORK_TYPES)
-            ctx = metrics_ctx()
-            M.sync(ctx, tasks)
-            M.publish(ctx, tasks)
-        except Exception as e:  # noqa: BLE001 — сбой учёта не ломает доску
+            metrics_pass(tasks_mod())
+        except Exception as e:  # noqa: BLE001 — сбой учёта не ломает ничего, кроме самого учёта
             alert_once("metrics", type(e).__name__, f"учёт по задачам: проход упал ({type(e).__name__}: {e})",
                        "board")
+    return 0
+
+
+def board_metrics(T):
+    """Учёт по задачам после прохода доски — отдельным процессом: проход доски (таймаут 60 с) не ждёт транскрипты
+    (metis-0320). Не чаще раза в 30 минут (отметка metrics-spawn) и не при занятой блокировке metrics. stdin/stdout/
+    stderr — не pipe: процесс-сирота держал бы полный pipe."""
+    stamp_p = path("metrics-spawn")
+    try:
+        if now() - os.path.getmtime(stamp_p) < METRICS_EVERY:
+            return
+    except OSError:
+        pass
+    if locked("metrics"):
+        return
+    try:
+        os.makedirs(os.path.dirname(stamp_p), exist_ok=True)
+        with open(stamp_p, "w") as fh:
+            fh.write(stamp() + "\n")
+        try:
+            trim_log(path("metrics-run.log"))
+            log = open(path("metrics-run.log"), "a")
+        except OSError:
+            log = subprocess.DEVNULL
+        subprocess.Popen([sys.executable, "-I", os.path.abspath(__file__), "metrics", "run"], stdin=subprocess.DEVNULL,
+                         stdout=log, stderr=log, start_new_session=True, close_fds=True)
+    except Exception as e:  # noqa: BLE001 — сбой запуска учёта не ломает доску
+        alert_once("metrics", type(e).__name__, f"учёт по задачам: не запустился ({type(e).__name__}: {e})", "board")
 
 
 def statelen_mod():

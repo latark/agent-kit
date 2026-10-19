@@ -38,7 +38,7 @@ def check(name, ok, got=None):
 
 T0 = datetime(2026, 10, 19, 15, 0).timestamp()  # понедельник: неделя 2026-W43 начинается в этот день
 KIT, OTHER = "latark/agent-kit", "latark/other-app"
-REPOS = {"metis-pantheon": [KIT], "hermes-alex": [OTHER]}  # [merge_repos] policy.toml: «PR #N» в журнале metis — PR agent-kit
+REPOS = {"metis-pantheon": [KIT], "hermes-demo": [OTHER]}  # [merge_repos] policy.toml: «PR #N» в журнале metis — PR agent-kit
 SECRET = "текст-поручения-не-сохранять"
 SEQ = [0]
 
@@ -386,7 +386,7 @@ def cli():
     policy = os.path.join(tmp, ".claude", "pantheon", "policy.toml")
     os.makedirs(os.path.dirname(policy), exist_ok=True)
     with open(policy, "w", encoding="utf-8") as fh:
-        fh.write(f'[merge_repos]\nmetis-pantheon = ["{KIT}"]\nhermes-alex = ["{OTHER}"]\n')
+        fh.write(f'[merge_repos]\nmetis-pantheon = ["{KIT}"]\nhermes-demo = ["{OTHER}"]\n')
     p = run("task", "set", "metis-0906", "status=done")
     rows = M.read_rows(rows_path)
     check("CLI task set status=done: строка учёта записана", p.returncode == 0 and [r["id"] for r in rows]
@@ -430,6 +430,11 @@ def cli():
     p = run("task", "set", "metis-0906", "status=done", t=T0 + 3600)
     os.remove(rows_path)
     p = run("board")
+    for _ in range(100):  # учёт идёт фоновым процессом (metis-0320): board не ждёт его
+        if M.read_rows(rows_path) and os.path.isdir(os.path.join(view, "Доска", M.DIR_NAME)):
+            break
+        time.sleep(0.2)
+    time.sleep(1)
     rows = M.read_rows(rows_path)
     udir = os.path.join(view, "Доска", M.DIR_NAME)
     check("pantheon board: плановый проход дописал строки закрытий и заметки Пульта",

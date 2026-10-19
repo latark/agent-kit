@@ -84,10 +84,13 @@
   Claude Code перечитывает настройки на ходу, поэтому живую сессию с таким правилом останавливает плановый проход
   (`domains build --if-changed` и `check --quiet`): `claude stop` и тревога. Ручной `domains build` её не трогает —
   его зовут и тесты с настоящим `claude` в PATH.
-  Мимо песочницы gh (в ней не работает) — только чтение: `gh pr view|checks|diff|list`, `gh run view|list|watch`,
+  Мимо песочницы gh (в ней не работает) — чтение: `gh pr view|checks|diff|list`, `gh run view|list|watch`,
   `gh repo view`, `gh auth status`; `gh api`, `gh issue` и `gh run cancel|rerun|delete` в песочнице падают.
-  `gh pr create|merge` и сетевой git (push, fetch, pull) — у окна каждого направления; мастерской — только сетевой
-  git и только при SSH-remote; у Пританея ничего из этого нет (metis-0064).
+  Окна направлений мимо песочницы ещё пишут PR: `gh pr create|edit|merge` и сетевой git (push, fetch, pull); мастерской —
+  только сетевой git и только при SSH-remote. Пританей (metis-0247, решение [zeus-0247-yes]) мимо песочницы читает PR
+  (`gh pr view|checks`) и правит `gh pr edit`; `gh pr merge` мимо песочницы ему не выпущен, а слияние guard закрывает всегда:
+  правило hq-gh отказывает любому `gh pr merge` и `gh api` к `…/pulls/<N>/merge` и `…/merges` — и главной сессии
+  без agent_type, которую шлюз слияния (merge_problem) не видит. Прочий `gh pr *`, `gh api` и `gh issue` в песочнице падают.
   С 0.11.26 (metis-0098) окнам координаторов, Метиды в их числе, сборка кладёт и `autoMode.allow` — исключения
   классификатора auto: `"$defaults"` (встроенные исключения остаются), «Pantheon Gated Merge», «Pantheon Lead
   Delivery» и «Pantheon Review Record» (`coordinator_auto_allow`).
