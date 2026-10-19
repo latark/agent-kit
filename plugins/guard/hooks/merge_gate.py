@@ -31,6 +31,8 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    файлы из pulls/N/files с previous_filename. В защитах accept засчитывается, только если его ran начинается с
    «модель: claude-opus» (metis-0176): accept другой модели — как будто его нет, reject любой модели в силе.
    Незаменённый шаблон «<ID>» в ran — отказ ещё до записи.
+   Последним во всех режимах — проверки GitHub (metis-0297): PR на этом SHA (headRefOid), statusCheckRollup зелёный;
+   красная или идущая проверка, нет ответа gh — отказ; проверок нет — пропуск, только если на SHA нет .github/workflows.
 Правдивость поля ran (модель argus) guard не проверяет: это защита от ошибки шаблона и запуска не той модели.
 Чего guard не проверяет: правдивость строки в сводке и перечня argus и то, что выбранная команда тестов — настоящие
 тесты: пустую программу (true, echo…, python3 -c pass, sh -c '') он ловит по короткому списку, а придуманную
@@ -800,6 +802,82 @@ def _core_problem(repo, pr, sha):
     return None
 
 
+# проверки GitHub на head PR (metis-0297): разбор rollup — как ci_state в pantheon/lib/merge.py (PR #79, metis-0285)
+CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
+CI_NONE = "проверки GitHub не получены"
+
+
+def _ci_rollup(rollup):
+    """(ok|wait|fail|empty, текст) по statusCheckRollup: CheckRun — по status и conclusion, StatusContext — по state."""
+    if not isinstance(rollup, list):
+        return "fail", CI_NONE
+    if not rollup:
+        return "empty", ""
+    waiting = []
+    for c in rollup:
+        if not isinstance(c, dict):
+            return "fail", f"{CI_NONE}: проверка не разобрана"
+        name = str(c.get("name") or c.get("context") or "?")[:60]
+        if "conclusion" in c or "status" in c and "state" not in c:   # CheckRun
+            status, concl = str(c.get("status") or "").upper(), str(c.get("conclusion") or "").upper()
+            if status != "COMPLETED":
+                waiting.append(name)
+            elif concl not in CI_OK:
+                return "fail", f"проверка GitHub {name} красная: {concl or 'нет итога'}"
+        else:                                                            # StatusContext
+            st = str(c.get("state") or "").upper()
+            if st in CI_WAIT:
+                waiting.append(name)
+            elif st not in CI_OK:
+                return "fail", f"проверка GitHub {name} красная: {st}"
+    if waiting:
+        return "wait", "проверки GitHub ещё идут: " + ", ".join(waiting)
+    return "ok", ""
+
+
+def _has_workflows(repo, sha):
+    """Есть ли на коммите папка .github/workflows: True, False (ответ 404) или None (сбой gh или сети)."""
+    env = {k: v for k, v in os.environ.items() if k not in ("GH_REPO", "GH_HOST")}
+    try:
+        r = subprocess.run(["gh", "api", f"repos/{repo}/contents/.github/workflows?ref={sha}"], capture_output=True,
+                           text=True, timeout=GH_TIMEOUT, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode == 0:
+        try:
+            return bool(json.loads(r.stdout))
+        except ValueError:
+            return None
+    return False if "(HTTP 404)" in (r.stderr or "") else None
+
+
+def _ci_problem(repo, pr, sha):
+    """Проверки GitHub на head PR зелёные — иначе текст отказа (metis-0297: 19.10 дважды ушёл PR с красной
+    check-traces). PR на другом коммите, красная или идущая проверка, нет ответа gh — отказ. Проверок нет: без
+    .github/workflows на этом коммите — пропуск, с ними — отказ (ещё не встали)."""
+    got = _gh_json(["pr", "view", str(pr), "-R", repo, "--json", "headRefOid,statusCheckRollup"])
+    data = got[0] if isinstance(got, list) and len(got) == 1 else None
+    if not isinstance(data, dict):
+        return f"{CI_NONE}: gh pr view {pr} -R {repo} не ответил — без них не сливаем, повтори позже"
+    head = data.get("headRefOid")
+    if not isinstance(head, str) or head.lower() != sha:
+        return f"PR сейчас на другом коммите ({head}), а не на {sha} — проверки GitHub сверяются на проверенном SHA"
+    state, text = _ci_rollup(data.get("statusCheckRollup"))
+    if state == "fail":
+        return f"{text} на {repo}#{pr}@{sha[:12]} — почини и сделай новый коммит с новыми записями"
+    if state == "wait":
+        return f"{text} на {repo}#{pr}@{sha[:12]} — дождись итога и повтори слияние"
+    if state == "empty":
+        wf = _has_workflows(repo, sha)
+        if wf is None:
+            return f"{CI_NONE}: проверок на {repo}#{pr} нет, а gh api не ответил, есть ли .github/workflows"
+        if wf:
+            return (f"проверки GitHub ещё не встали на {repo}#{pr}@{sha[:12]} (в .github/workflows они есть) — "
+                    "дождись и повтори слияние")
+    return None
+
+
 def _reviewer(rec):
     """Рецензент записи — пара (session_id, agent_id): два argus одной сессии — разные рецензенты (metis-0158)."""
     return rec["by"].get("session_id") or "", rec["by"].get("agent_id") or ""
@@ -892,6 +970,9 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
         why = _core_problem(repo, pr, sha)
         if why:
             return f"{why}. {MERGE_PROTECT}"
+    why = _ci_problem(repo, pr, sha)
+    if why:
+        return f"{why}. {advice}"
     return None
 
 

@@ -143,7 +143,8 @@ def gate_fixtures(home):
     os.makedirs(os.path.join(home, "fake-bin"), exist_ok=True)
     with open(os.path.join(home, "fake-bin/gh"), "w") as fh:
         fh.write("#!/bin/sh\n[ \"$1\" = api ] && { echo '" + json.dumps({"filename": "README.md", "status": "modified"})
-                 + "'; exit 0; }\necho '" + json.dumps({"changedFiles": 1, "headRefOid": SHA_OK}) + "'\n")
+                 + "'; exit 0; }\necho '" + json.dumps({"changedFiles": 1, "headRefOid": SHA_OK, "statusCheckRollup": [
+                     {"name": "check-traces", "status": "COMPLETED", "conclusion": "SUCCESS"}]}) + "'\n")
     os.chmod(os.path.join(home, "fake-bin/gh"), 0o755)
 
 

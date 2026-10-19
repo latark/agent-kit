@@ -29,6 +29,9 @@ CHECKLIST = {"opened": "merge_gate.py, README (раздел «запор»)",
              "ran": 'модель: claude-opus-5-5, heavy python3 -I tests/test_merge_gate.py "84 из 84"',
              "unchecked": "живой gh"}
 results = []
+# statusCheckRollup: CheckRun (status, conclusion) и StatusContext (state)
+RUN_OK = {"__typename": "CheckRun", "name": "check-traces", "status": "COMPLETED", "conclusion": "SUCCESS"}
+GREEN = [RUN_OK, {"__typename": "StatusContext", "context": "ci/legacy", "state": "SUCCESS"}]
 
 
 def check(name, cond, detail=""):
@@ -72,9 +75,18 @@ class Home:
                      '[merge_client]\nathena-shop = ["~/projects/broker"]\n'
                      '[merge_repos]\nmetis-pantheon = ["latark/agent-kit", "latark/tg-read"]\n'
                      'athena-shop = ["latark/broker"]\n')
-        # поддельный gh: pr view отдаёт $HOME/gh.json, с $HOME/gh.fail — сбой; вызовы — в $HOME/gh.log
+        # поддельный gh: pr view отдаёт $HOME/gh.json, с $HOME/gh.fail — сбой; вызовы — в $HOME/gh.log.
+        # Проверки GitHub (metis-0297): pr view … statusCheckRollup — $HOME/gh.ci.<repo> (pr view N -R owner/repo, $5),
+        # с gh.ci.fail — сбой; api …/contents/.github/workflows — без gh.wf ответ 404, с gh.wf — его текст, с gh.wf.fail — 502
         with open(j("bin/gh"), "w") as fh:
             fh.write('#!/bin/sh\necho "$@" >> "$HOME/gh.log"\n[ -f "$HOME/gh.fail" ] && exit 1\n'
+                     'case "$*" in\n'
+                     '*statusCheckRollup*) [ -f "$HOME/gh.ci.fail" ] && exit 1; cat "$HOME/gh.ci.$(basename "$5")"; '
+                     'exit 0;;\n'
+                     '*contents/.github/workflows*) [ -f "$HOME/gh.wf.fail" ] && { echo "gh: Bad Gateway (HTTP 502)" >&2; '
+                     'exit 1; }; [ -f "$HOME/gh.wf" ] && { cat "$HOME/gh.wf"; exit 0; }; '
+                     'echo \'{"message":"Not Found","status":"404"}\'; echo "gh: Not Found (HTTP 404)" >&2; exit 1;;\n'
+                     'esac\n'
                      'if [ "$1" = api ]; then [ -f "$HOME/gh.api.fail" ] && exit 1; cat "$HOME/gh.files"; exit 0; fi\n'
                      'cat "$HOME/gh.json"\n')
         os.chmod(j("bin/gh"), 0o755)
@@ -89,11 +101,19 @@ class Home:
     def reset(self):
         """Перед каждым случаем: пустой журнал, пустая сводка, gh отвечает PR без ядра на текущем SHA agent-kit."""
         shutil.rmtree(self.j(".local/state/pantheon/merge-gate"), ignore_errors=True)
-        for f in ("gh.fail", "gh.log", "gh.api.fail"):
+        for f in ("gh.fail", "gh.log", "gh.api.fail", "gh.ci.fail", "gh.wf", "gh.wf.fail"):
             if os.path.exists(self.j(f)):
                 os.remove(self.j(f))
         open(self.j("ai/pantheon/alerts.md"), "w").close()
         self.gh(["README.md", "plugins/pantheon/lib/pantheon.py"])
+        for name in self.sha:
+            self.ci(GREEN, name=name)
+
+    def ci(self, rollup, name="tg-read", head=None, raw=None):
+        """Ответ gh pr view … --json headRefOid,statusCheckRollup для репозитория latark/<name>."""
+        with open(self.j("gh.ci." + name), "w") as fh:
+            fh.write(raw if raw is not None else
+                     json.dumps({"headRefOid": head or self.sha[name], "statusCheckRollup": rollup}))
 
     def gh(self, files, count=None, head=None, raw=None, extra=None):
         """files — имена или словари REST (filename, status, previous_filename); raw — сырой вывод gh api;
@@ -962,11 +982,122 @@ def t_opus_protect(h):
     check("verdict_parse: «<ID>» в ran у reject — без ошибки (вердикт «вернуть» в силе любой)", why is None, why)
 
 
+def t_ci(h):
+    """metis-0297: шлюз пускает gh pr merge только при зелёных проверках GitHub на head PR (statusCheckRollup)."""
+    sha = h.sha["tg-read"]
+    h.seed(rec("tests", "latark/tg-read", None, sha, "dev-opus"), rec("accept", "latark/tg-read", 3, sha))
+    cmd = f"gh pr merge 3 --match-head-commit {sha}"
+    merge_case("CI: зелёные проверки — проходит", h.pre(cmd), True)
+    if HAVE_TOML:
+        log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+        check("CI: gh pr view зовётся с -R, номером и statusCheckRollup",
+              "pr view 3 -R latark/tg-read --json headRefOid,statusCheckRollup" in log, log)
+    red = dict(RUN_OK, conclusion="FAILURE")
+    h.ci([GREEN[1], red])
+    merge_case("CI: красная CheckRun — отказ с именем проверки", h.pre(cmd), False, "check-traces красная: FAILURE")
+    for concl in ("CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", None):
+        h.ci([dict(RUN_OK, conclusion=concl)])
+        merge_case(f"CI: CheckRun с итогом {concl} — отказ", h.pre(cmd), False, "красная")
+    h.ci([RUN_OK, {"context": "ci/legacy", "state": "FAILURE"}])
+    merge_case("CI: красный StatusContext — отказ с именем", h.pre(cmd), False, "ci/legacy красная: FAILURE")
+    h.ci([RUN_OK, {"context": "ci/legacy", "state": "ERROR"}])
+    merge_case("CI: StatusContext ERROR — отказ", h.pre(cmd), False, "ci/legacy красная: ERROR")
+    for status in ("IN_PROGRESS", "QUEUED", "PENDING", "WAITING"):
+        h.ci([dict(RUN_OK, status=status, conclusion="")])
+        merge_case(f"CI: CheckRun {status} — отказ «дождись»", h.pre(cmd), False, "дождись")
+    h.ci([RUN_OK, {"context": "ci/legacy", "state": "PENDING"}])
+    merge_case("CI: StatusContext PENDING — отказ «дождись»", h.pre(cmd), False, "ещё идут: ci/legacy")
+    h.ci([dict(RUN_OK, conclusion="SKIPPED"), dict(RUN_OK, name="lint", conclusion="NEUTRAL")])
+    merge_case("CI: SKIPPED и NEUTRAL — проходит", h.pre(cmd), True)
+    open(h.j("gh.ci.fail"), "w").close()
+    merge_case("CI: gh не ответил (нет сети) — отказ с текстом", h.pre(cmd), False, "проверки GitHub не получены")
+    os.remove(h.j("gh.ci.fail"))
+    h.ci(None, raw="не json")
+    merge_case("CI: неразборный ответ gh — отказ", h.pre(cmd), False, "проверки GitHub не получены")
+    h.ci(None, raw=json.dumps({"headRefOid": sha}))
+    merge_case("CI: нет statusCheckRollup в ответе — отказ", h.pre(cmd), False, "проверки GitHub не получены")
+    h.ci(["x"])
+    merge_case("CI: проверка не словарь — отказ", h.pre(cmd), False, "проверки GitHub не получены")
+    h.ci(GREEN, head=OLD)
+    merge_case("CI: чужой headRefOid — отказ", h.pre(cmd), False, f"на другом коммите ({OLD})")
+    h.ci(GREEN, head=sha.upper())
+    merge_case("CI: headRefOid в верхнем регистре — тот же SHA, проходит", h.pre(cmd), True)
+    h.ci([])
+    merge_case("CI: проверок нет и .github/workflows нет (404) — проходит", h.pre(cmd), True)
+    if HAVE_TOML:
+        log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+        check("CI: при пустом rollup спрашивает .github/workflows на этом SHA",
+              f"api repos/latark/tg-read/contents/.github/workflows?ref={sha}" in log, log)
+    with open(h.j("gh.wf"), "w") as fh:
+        fh.write('[{"name": "check-traces.yml", "type": "file"}]')
+    merge_case("CI: проверок нет, а .github/workflows есть — отказ «не встали»", h.pre(cmd), False, "ещё не встали")
+    os.remove(h.j("gh.wf"))
+    open(h.j("gh.wf.fail"), "w").close()
+    merge_case("CI: проверок нет, gh api упал не на 404 — отказ", h.pre(cmd), False, "проверки GitHub не получены")
+    os.remove(h.j("gh.wf.fail"))
+    # защиты: проверки после Д3, отказ с советом защит
+    h.reset()
+    kit = h.sha["agent-kit"]
+    h.seed(rec("tests", "latark/agent-kit", None, kit, "dev-opus"), rec("accept", "latark/agent-kit", 7, kit))
+    h.ci([dict(RUN_OK, conclusion="FAILURE")], name="agent-kit")
+    merge_case("CI: защиты, PR без ядра, красная проверка — отказ", h.pre(f"gh pr merge 7 --match-head-commit {kit}",
+               pdir="projects/agent-kit"), False, "check-traces красная")
+    # без политики (Python 3.9) шлюз до проверок не доходит — сами проверки здесь, на любом Python
+    mg = _load_merge_gate("merge_gate_ci")
+    check("_ci_rollup: зелёный", mg._ci_rollup(GREEN)[0] == "ok")
+    check("_ci_rollup: FAILURE — fail", mg._ci_rollup([dict(RUN_OK, conclusion="FAILURE")])[0] == "fail")
+    check("_ci_rollup: StatusContext FAILURE — fail", mg._ci_rollup([{"context": "c", "state": "FAILURE"}])[0] == "fail")
+    check("_ci_rollup: идёт — wait", mg._ci_rollup([dict(RUN_OK, status="QUEUED", conclusion=None)])[0] == "wait")
+    check("_ci_rollup: пусто — empty", mg._ci_rollup([])[0] == "empty")
+    check("_ci_rollup: None — fail", mg._ci_rollup(None)[0] == "fail")
+    calls = []
+
+    def answer(view, wf=True):
+        mg._gh_json = lambda args: calls.append(args) or view
+        mg._has_workflows = lambda repo, s: wf
+        return mg._ci_problem("latark/tg-read", 3, sha)
+
+    check("_ci_problem: зелёный — None", answer([{"headRefOid": sha, "statusCheckRollup": GREEN}]) is None)
+    check("_ci_problem: один вызов gh pr view с headRefOid,statusCheckRollup",
+          calls == [["pr", "view", "3", "-R", "latark/tg-read", "--json", "headRefOid,statusCheckRollup"]], calls)
+    why = answer([{"headRefOid": sha, "statusCheckRollup": [dict(RUN_OK, conclusion="FAILURE")]}])
+    check("_ci_problem: красный — отказ с именем", why and "check-traces" in why, why)
+    why = answer([{"headRefOid": sha, "statusCheckRollup": [dict(RUN_OK, status="PENDING")]}])
+    check("_ci_problem: идёт — отказ «дождись»", why and "дождись" in why, why)
+    why = answer(None)
+    check("_ci_problem: gh не ответил — «проверки GitHub не получены»", why and "проверки GitHub не получены" in why, why)
+    check("_ci_problem: пусто без workflows — None", answer([{"headRefOid": sha, "statusCheckRollup": []}], False) is None)
+    why = answer([{"headRefOid": sha, "statusCheckRollup": []}], True)
+    check("_ci_problem: пусто с workflows — отказ", why and "ещё не встали" in why, why)
+    why = answer([{"headRefOid": sha, "statusCheckRollup": []}], None)
+    check("_ci_problem: пусто, api упал — отказ", why and "не получены" in why, why)
+    why = answer([{"headRefOid": OLD, "statusCheckRollup": GREEN}])
+    check("_ci_problem: чужой headRefOid — отказ", why and "другом коммите" in why, why)
+    # _has_workflows — через поддельный gh: 404 → False, список → True, 502 → None
+    mg = _load_merge_gate("merge_gate_wf")
+    saved = {k: os.environ.get(k) for k in ("HOME", "PATH")}
+    os.environ.update(HOME=h.root, PATH=h.j("bin") + os.pathsep + os.environ["PATH"])
+    try:
+        got = [mg._has_workflows("latark/tg-read", sha)]
+        with open(h.j("gh.wf"), "w") as fh:
+            fh.write('[{"name": "ci.yml"}]')
+        got.append(mg._has_workflows("latark/tg-read", sha))
+        open(h.j("gh.wf.fail"), "w").close()
+        got.append(mg._has_workflows("latark/tg-read", sha))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    check("_has_workflows: 404 → False, список → True, 502 → None", got == [False, True, None], got)
+
+
 CASES = [t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
-         t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect]
+         t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_ci]
 
 
 def main():
