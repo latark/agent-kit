@@ -2339,6 +2339,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             # Метиды, в песочнице упал бы. Мимо неё — только эта подкоманда и только у Метиды; ворота у команды свои:
             # галочка владельца в журнале доски owner-log, который пишет тик, — роли её не подделают.
             data["sandbox"]["excludedCommands"].append("pantheon direction init *")
+        if name == "workshop":
+            # Unix-сокеты офлайн-тестов (metis-0278, решение владельца «А» 19.10) — только в своём кэше окна: не
+            # $TMPDIR (/tmp/claude-<uid> общий у всех сессий, там их сокеты); allowLocalBinding — нет, см. ниже
+            data["sandbox"]["network"]["allowUnixSockets"] = [cache]
         if allow:
             data.setdefault("permissions", {}).setdefault("allow", []).extend(allow)
         if agents:
