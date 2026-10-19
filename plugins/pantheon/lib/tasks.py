@@ -21,7 +21,9 @@ import unicodedata
 from datetime import datetime
 
 SCHEMA_VERSION = 1
-TYPES = ("task", "stage", "project")
+TYPES = ("task", "stage", "project", "story")
+# что идёт на доску и меняется командой pantheon task: задачи и пачки (story, metis-0069)
+WORK_TYPES = ("task", "story")
 STATUSES = ("inbox", "todo", "doing", "waiting", "review", "done", "dropped")
 LABELS = {"inbox": "Входящие", "todo": "Очередь", "doing": "В работе", "waiting": "Ждёт", "review": "На проверке",
           "done": "Готово", "dropped": "Отменено"}
@@ -54,10 +56,18 @@ FIELDS = {
     "health": ("str", False), "review_on": ("date", False),
     # кто пишет код задачи (решение 175, metis-0166 вариант А): auto — правило лида по набору `pantheon executors`
     "executor": ("str", False),
-    # ночной цикл (metis-0129): волна и пачка, на какую ночь запланирована, оценка и факт расхода, итог приёмки
-    "wave": ("int", False), "batch": ("str", False), "night": ("date", False), "estimate": ("str", False),
+    # ночной цикл (metis-0129): пачка, на какую ночь запланирована, оценка и факт расхода, итог приёмки.
+    # release — выпуск, с которым изменение поставлено («pantheon 0.11.37»), пишет служебная роль при установке
+    # (metis-0069: вместо прежнего числа wave; старое wave читается как release — LEGACY_KEYS)
+    "release": ("str", False), "batch": ("str", False), "night": ("date", False), "estimate": ("str", False),
     "actual": ("str", False), "acceptance": ("str", False),
+    # режим работы и области (план metis-0248, шаг 1): mode — заявка координатора, touches — файлы или папки задачи
+    "mode": ("str", False), "mode_why": ("str", False), "touches": ("list", False),
 }
+# прежние ключи шапки → нынешние: читаются при разборе, при записи уходят под новым именем
+LEGACY_KEYS = {"wave": "release"}
+# режим: сам координатор, один исполнитель на цепочку, параллельно; пусто — как single
+MODES = {"self": "сам", "single": "один исполнитель", "parallel": "параллельно"}
 EXECUTORS = ("auto", "claude", "codex")
 # итог приёмки утром: как у приоритета — значение из перечня, иное — ошибка шапки
 ACCEPTANCE = ("принято", "вернуть", "к владельцу")
@@ -153,6 +163,11 @@ def split(text):
     for k, v in list(head.items()):
         if v == [] and FIELDS.get(k, ("list",))[0] != "list":
             head[k] = None
+    for k, to in LEGACY_KEYS.items():
+        if k in head:
+            v = head.pop(k)
+            if head.get(to) is None and v is not None:
+                head[to] = str(v)
     return head, body
 
 
@@ -410,6 +425,10 @@ def check_head(head):
         errs.append(f"acceptance «{head.get('acceptance')}» — не из {', '.join(ACCEPTANCE)}")
     if head.get("id") and not ID_RE.fullmatch(str(head["id"])):
         errs.append(f"id «{head['id']}» — нужен вид «pan-0001»")
+    if head.get("mode") is not None and head.get("mode") not in MODES:
+        errs.append(f"mode «{head.get('mode')}» — не из {', '.join(MODES)}")
+    if head.get("mode") == "parallel" and not head.get("touches"):
+        warns.append("mode parallel без touches — области неизвестны, параллельно самозапуск её не отдаст")
     if t == "task":
         if not head.get("owner"):  # не ошибка: старые задачи без owner выпали бы с доски
             warns.append("нет owner (кому) — на доске будет координатор направления")
@@ -469,15 +488,15 @@ def task_files(pantheon):
                 yield os.path.join(d, f)
 
 
-def load_tasks(pantheon):
-    """id → (путь, шапка, тело) — только исправные задачи."""
+def load_tasks(pantheon, types=("task",)):
+    """id → (путь, шапка, тело) — только исправные задачи; types — какие типы брать (пачки — WORK_TYPES)."""
     out = {}
     for p in task_files(pantheon):
         try:
             head, body = read(p)
         except (HeaderError, OSError, UnicodeDecodeError):
             continue
-        if head and head.get("type") == "task" and head.get("id") and not check_head(head)[0]:
+        if head and head.get("type") in types and head.get("id") and not check_head(head)[0]:
             out[head["id"]] = (p, head, body)
     return out
 
@@ -556,7 +575,10 @@ def _file_for(pantheon, direction, tid):
     return os.path.join(base, tid + ".md")
 
 
-def task_new(pantheon, t, direction, title, project=None, actor="агент", text=None, **fields):
+def task_new(pantheon, t, direction, title, project=None, actor="агент", text=None, kind="task", **fields):
+    """kind — task или story (пачка, metis-0069)."""
+    if kind not in WORK_TYPES:
+        raise ValueError(f"тип {kind!r} — только {', '.join(WORK_TYPES)}")
     if not DIRECTION_RE.fullmatch(str(direction)):
         raise ValueError(f"направление не по образцу: {direction!r}")
     if direction != "inbox" and not os.path.isdir(os.path.join(pantheon, "directions", direction)):
@@ -571,7 +593,7 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
             pre, num = tid.rsplit("-", 1)
             tid = f"{pre}-{int(num) + 1:04d}"
             path = _file_for(pantheon, direction, tid)
-    head = {"type": "task", "id": tid, "title": title.strip(), "status": fields.pop("status", None) or "todo",
+    head = {"type": kind, "id": tid, "title": title.strip(), "status": fields.pop("status", None) or "todo",
             "project": project or direction, "direction": direction, "created": now_iso(t)[:10],
             "updated": now_iso(t), "schema_version": SCHEMA_VERSION}
     head.update({k: v for k, v in fields.items() if v is not None})
@@ -629,7 +651,7 @@ def dir_lock(d, wait=10.0):
 
 
 def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None):
-    tasks = load_tasks(pantheon)
+    tasks = load_tasks(pantheon, WORK_TYPES)
     if tid not in tasks:
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
     with dir_lock(os.path.dirname(tasks[tid][0])):
@@ -638,7 +660,7 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
 
 def task_note(pantheon, t, tid, note):
     """Заметка владельца с доски: текст — в «Заметки владельца» задачи, в журнал — строка, что она пришла."""
-    tasks = load_tasks(pantheon)
+    tasks = load_tasks(pantheon, WORK_TYPES)
     if tid not in tasks:
         raise ValueError(f"нет задачи {tid}")
     path = tasks[tid][0]
@@ -722,14 +744,514 @@ def ready(pantheon, t, direction=None, owner=None):
     return [x[2:] for x in sorted(out, key=lambda x: (x[0], x[1], x[2]))]
 
 
+# --- режим, зависимости и пересечения (план metis-0248) ------------------------------
+
+def _area(p):
+    p = str(p).strip().replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    return p.rstrip("/")
+
+
+def paths_cross(a, b):
+    """Две области пересекаются, если одна — та же или вложена в другую: `plugins/pantheon/` и
+    `plugins/pantheon/lib/watch.py` — да, соседние папки и `plugins/pan` с `plugins/pantheon` — нет."""
+    a, b = _area(a), _area(b)
+    if not a or not b:
+        return False
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def crossings(tasks, live=None):
+    """id → отсортированный список других живых задач, у которых область пересекается с её областями.
+    live(h) — что считать живой (по умолчанию — не done и не dropped); задачи без touches ни с кем не пересекаются."""
+    live = live or (lambda h: h.get("status") not in ("done", "dropped"))
+    items = [(tid, h.get("touches") or []) for tid, (_, h, _) in sorted(tasks.items())
+             if h.get("type", "task") == "task" and live(h) and h.get("touches")]
+    out = {}
+    for i, (a, ta) in enumerate(items):
+        for b, tb in items[i + 1:]:
+            if any(paths_cross(x, y) for x in ta for y in tb):
+                out.setdefault(a, []).append(b)
+                out.setdefault(b, []).append(a)
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def open_deps(head, tasks):
+    """Незакрытые зависимости задачи: id из depends_on, которые не done и не dropped (нет такой задачи — тоже ждёт)."""
+    return [d for d in head.get("depends_on") or []
+            if d not in tasks or tasks[d][1].get("status") not in ("done", "dropped")]
+
+
+def card_ctx(tid, head, tasks, names, cross):
+    """Что карточке задачи нужно знать о других: незакрытые зависимости, пересечения, пачка и место в ней."""
+    ctx = {"waits": open_deps(head, tasks), "cross": cross.get(tid) or []}
+    sid = head.get("parent")
+    if sid in tasks and tasks[sid][1].get("type") == "story":
+        ctx["story"] = names.get(sid) or card_name(tasks[sid][1])
+        ids = story_order(sid, tasks)
+        ctx["order"] = ids.index(tid) + 1 if tid in ids else None
+    return ctx
+
+
+# --- пачка (story, metis-0069) ------------------------------------------------------
+# Story — карточка type story: название, ночь или день (night, due), бюджет (estimate). Задачи прикрепляются полем
+# parent (pantheon task attach/detach); сумма их оценок считается, а не вводится руками.
+
+PCT_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
+
+
+def pct(v):
+    """Оценка «0,5 % недели» → 0.5; без числа — None."""
+    m = PCT_RE.search(str(v or ""))
+    return float(m.group(0).replace(",", ".")) if m else None
+
+
+def pct_text(x):
+    """0.9 → «0,9 %»."""
+    return ("%.2f" % x).rstrip("0").rstrip(".").replace(".", ",") + " %"
+
+
+def story_children(sid, tasks):
+    return [tid for tid, (_, h, _) in tasks.items() if h.get("parent") == sid and h.get("type") == "task"]
+
+
+def _prio(h):
+    p = h.get("priority")
+    return p if isinstance(p, int) and not isinstance(p, bool) else 2
+
+
+def story_order(sid, tasks):
+    """Задачи пачки по порядку: сначала зависимости внутри пачки, при равенстве — приоритет, затем id.
+    Цикл зависимостей порядок не роняет: оставшиеся идут по приоритету и id."""
+    left, out = set(story_children(sid, tasks)), []
+    while left:
+        free = [i for i in left if not any(d in left for d in tasks[i][1].get("depends_on") or [])]
+        nxt = min(free or left, key=lambda i: (_prio(tasks[i][1]), i))
+        out.append(nxt)
+        left.discard(nxt)
+    return out
+
+
+def story_info(sid, tasks):
+    """Состав пачки: порядок, сумма оценок против бюджета, закрыто, цепочка (одному исполнителю по порядку),
+    параллельно, пересечения внутри пачки, задачи без областей."""
+    ids = story_order(sid, tasks)
+    heads = {i: tasks[i][1] for i in ids}
+    ests = [pct(heads[i].get("estimate")) for i in ids]
+    par = [i for i in ids if heads[i].get("mode") == "parallel"]
+    cross = []
+    for n, a in enumerate(ids):
+        for b in ids[n + 1:]:
+            common = sorted({_area(x) if len(_area(x)) <= len(_area(y)) else _area(y)
+                             for x in heads[a].get("touches") or [] for y in heads[b].get("touches") or []
+                             if paths_cross(x, y)})
+            if common:
+                cross.append(f"{a} и {b}: {', '.join(common)}")
+    return {"ids": ids, "sum": sum(e for e in ests if e is not None),
+            "no_estimate": [i for i, e in zip(ids, ests) if e is None],
+            "budget": pct(tasks[sid][1].get("estimate")) if sid in tasks else None,
+            "closed": [i for i in ids if heads[i].get("status") in ("done", "dropped")],
+            "chain": [i for i in ids if i not in par], "parallel": par, "cross": cross,
+            "unknown": [i for i in ids if not heads[i].get("touches")]}
+
+
+def over_budget(inf):
+    return inf["budget"] is not None and inf["sum"] > inf["budget"] + 1e-9
+
+
+def story_text(sid, tasks):
+    """Состав пачки строками — для pantheon task show."""
+    inf = story_info(sid, tasks)
+    lines = [f"Пачка {sid}: задач {len(inf['ids'])}, закрыто {len(inf['closed'])}"]
+    for n, i in enumerate(inf["ids"], 1):
+        h = tasks[i][1]
+        lines.append(f"{n}. {i} · {label_of(h)} · {h.get('estimate') or 'без оценки'} · "
+                     f"{MODES.get(h.get('mode')) or 'режим не задан'} · {one_line(h.get('title'))}")
+    lines.append(f"сумма {pct_text(inf['sum'])}"
+                 + (f" из бюджета {pct_text(inf['budget'])}" if inf["budget"] is not None else " (бюджет не задан)")
+                 + (" — больше бюджета" if over_budget(inf) else "")
+                 + (f"; без оценки: {', '.join(inf['no_estimate'])}" if inf["no_estimate"] else ""))
+    if inf["cross"]:
+        lines.append("пересечения: " + "; ".join(inf["cross"]))
+    return "\n".join(lines)
+
+
+def task_attach(pantheon, t, tid, sid, actor="агент"):
+    """Прикрепить задачу к пачке: parent у задачи и строка в журнал обеих. Была в другой пачке — переносится,
+    строка и в журнал прежней. → прежняя пачка или None."""
+    tasks = load_tasks(pantheon, WORK_TYPES)
+    if tid not in tasks or tasks[tid][1].get("type") != "task":
+        raise ValueError(f"нет задачи {tid}")
+    if sid not in tasks or tasks[sid][1].get("type") != "story":
+        raise ValueError(f"{sid} — не пачка: прикреплять можно только к карточке type story")
+    old = tasks[tid][1].get("parent")
+    if old == sid:
+        raise ValueError(f"{tid} уже в пачке {sid}")
+    was = f" (была в {old})" if old else ""
+    task_set(pantheon, t, tid, {"parent": sid}, note=f"прикреплена к пачке {sid}{was}", actor=actor)
+    task_set(pantheon, t, sid, {}, note=f"прикреплена задача {tid}{was}", actor=actor)
+    if old in tasks and tasks[old][1].get("type") == "story":
+        task_set(pantheon, t, old, {}, note=f"задача {tid} перенесена в {sid}", actor=actor)
+    return old
+
+
+def task_detach(pantheon, t, tid, actor="агент"):
+    """Открепить задачу от пачки: parent снят, строка в журнал обеих. Не в пачке — понятная ошибка. → пачка."""
+    tasks = load_tasks(pantheon, WORK_TYPES)
+    if tid not in tasks or tasks[tid][1].get("type") != "task":
+        raise ValueError(f"нет задачи {tid}")
+    sid = tasks[tid][1].get("parent")
+    if not sid or sid not in tasks or tasks[sid][1].get("type") != "story":
+        raise ValueError(f"{tid} не прикреплена ни к одной пачке — откреплять нечего")
+    task_set(pantheon, t, tid, {"parent": None}, note=f"откреплена от пачки {sid}", actor=actor)
+    task_set(pantheon, t, sid, {}, note=f"откреплена задача {tid}", actor=actor)
+    return sid
+
+
+def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
+    """Карточка пачки: та же, что у задачи (вопрос, ответ, заметки работают так же), плюс состав, сумма оценок против
+    бюджета, цепочка, параллельно, пересечения. project — имя заметки проекта на пульте: ссылка на неё нужна виду
+    «Пачки проекта»."""
+    names = kw.get("names") or {}
+    card, text = render_card(head, body, src_rel, t, **kw)
+    inf = story_info(head.get("id"), tasks)
+    over = over_budget(inf)
+    for k in ("Пачка", "Порядок", "Режим", "Режим почему", "Зависит от", "Области", "Пересечения"):
+        card.pop(k, None)
+    card.update({"Пульт": link(f"{PROJECTS_DIR}/{project}|{project}") if project else None,
+                 "Когда": _date(head.get("night"), 10) or _date(head.get("due"), 10),
+                 "Бюджет": head.get("estimate"),
+                 "Сумма оценок": pct_text(inf["sum"]) + (" ⚠ больше бюджета" if over else ""),
+                 "Закрыто": f"{len(inf['closed'])} из {len(inf['ids'])}",
+                 "Цепочка": " → ".join(inf["chain"]) or None, "Параллельно": inf["parallel"] or None,
+                 "Пересечения": inf["cross"] or None, "Области не указаны": inf["unknown"] or None, "Тип": "пачка"})
+    summary = (f"> **Пачка:** сумма оценок {pct_text(inf['sum'])}"
+               + (f" из бюджета {pct_text(inf['budget'])}" if inf["budget"] is not None else " · бюджет не задан")
+               + (" · ⚠ больше бюджета" if over else "") + f" · закрыто {card['Закрыто']}"
+               + (f"\n> **Цепочка одному исполнителю:** {' → '.join(inf['chain'])}" if inf["chain"] else "")
+               + (f"\n> **Параллельно:** {', '.join(inf['parallel'])}" if inf["parallel"] else "")
+               + (f"\n> **Пересечения по файлам:** {'; '.join(inf['cross'])}" if inf["cross"] else "")
+               + (f"\n> **Области не указаны:** {', '.join(inf['unknown'])}" if inf["unknown"] else ""))
+    rows = []
+    for n, i in enumerate(inf["ids"], 1):
+        h = tasks[i][1]
+        ref = f"[[{names[i]}\\|{i}]]" if names.get(i) else i
+        rows.append(f"| {n} | {ref} | {_plain(one_line(h.get('title'))).replace('|', '/')} | {label_of(h)} | "
+                    f"{_plain(h.get('estimate') or '—').replace('|', '/')} | {MODES.get(h.get('mode')) or '—'} | "
+                    f"{', '.join(open_deps(h, tasks)) or '—'} |")
+    table = ("## Состав\n\n| № | Задача | Название | Статус | Оценка | Режим | Ждёт |\n|---|---|---|---|---|---|---|\n"
+             + ("\n".join(rows) if rows else "| — | задач пока нет | | | | | |"))
+    first, sep, rest = text[1:].partition("\n\n")
+    return card, "\n" + first + "\n" + summary + "\n\n" + table + (sep + rest if sep else "\n")
+
+
+# --- пульт проектов (вариант В, metis-0234) ---------------------------------------------
+# Заметка проекта — Доска/Проекты/<проект>.md: справочник из directions.toml и счётчики по задачам. Bases не суммирует
+# по связям, поэтому счётчики пишет тик — это вторая копия данных; pantheon check сверяет её с задачами (check_projects).
+
+PROJECTS_DIR = "Проекты"
+COUNTERS = ("Открыто", "В работе", "Ждёт вас", "Просрочено", "Пересечений", "Пачек")
+HEALTH = {"red": ("🔴 плохо", "#d64545"), "yellow": ("🟡 риск", "#e0a800"), "green": ("🟢 норма", "#2f9e44"),
+          "quiet": ("⚪ тихо", "#9e9e9e")}
+PROJECT_ORDER = ["Тип", "Направление", "Значок", "Статус проекта", "Ранг", "Координатор", "Цель", "Здоровье", "Цвет",
+                 "Обновлено", "Бюджет недели", *COUNTERS]
+
+
+def project_counts(tasks, t, directions):
+    """Счётчики проекта по задачам его направлений. Один расчёт и для тика, и для pantheon check."""
+    cross = crossings(tasks)
+    c = dict.fromkeys(COUNTERS, 0)
+    for tid, (_, h, _) in tasks.items():
+        if h.get("direction") not in directions or h.get("status") in ("done", "dropped"):
+            continue
+        if h.get("type") == "story":
+            c["Пачек"] += 1
+            continue
+        if h.get("type") != "task":
+            continue
+        c["Открыто"] += 1
+        c["В работе"] += h.get("status") == "doing"
+        c["Ждёт вас"] += h.get("status") == "waiting" and h.get("waiting_on") == "human"
+        c["Просрочено"] += overdue(h, t)
+        c["Пересечений"] += tid in cross
+    return {k: int(v) for k, v in c.items()}
+
+
+def project_health(c):
+    """Здоровье по счётчикам: просрочено или три и больше вопросов к вам — 🔴; вопрос или пересечение — 🟡."""
+    if not c["Открыто"] and not c["Пачек"]:
+        return "quiet"
+    if c["Просрочено"] or c["Ждёт вас"] >= 3:
+        return "red"
+    if c["Ждёт вас"] or c["Пересечений"]:
+        return "yellow"
+    return "green"
+
+
+def project_registry(dirs):
+    """Записи [[direction]] реестра → {проект: {directions, mark, rank, goal, budget, status, coordinator}}.
+    Проект — поле project, иначе имя направления; ранг — поле rank, иначе порядок в реестре."""
+    out = {}
+    for n, d in enumerate(dirs or [], 1):
+        if not isinstance(d, dict) or not isinstance(d.get("name"), str) or not d["name"] or d["name"] == "inbox":
+            continue
+        p = one_line(d.get("project") or d["name"])
+        rank = d.get("rank") if isinstance(d.get("rank"), int) and not isinstance(d.get("rank"), bool) else n
+        e = out.setdefault(p, {"directions": [], "mark": d.get("mark"), "rank": rank, "goal": d.get("goal"),
+                               "budget": d.get("budget"), "status": d.get("status") or "активный",
+                               "coordinator": d["name"]})
+        e["directions"].append(d["name"])
+    return out
+
+
+def project_note_name(p):
+    return card_name({"title": p}, with_id=False)
+
+
+def render_project_note(p, reg, tasks, t, roles=None):
+    """Заметка проекта для пульта. Обновлено — последняя правка задач проекта, а не время прохода: иначе тик
+    переписывал бы заметку каждую минуту."""
+    c = project_counts(tasks, t, reg["directions"])
+    hl, color = HEALTH[project_health(c)]
+    upd = max((str(h.get("updated") or "")[:10] for _, h, _ in tasks.values() if h.get("direction") in reg["directions"]),
+              default=None)
+    node = (roles or Roles(reg["directions"])).name(reg["coordinator"])
+    mark = project_mark(p, {p: reg.get("mark")} if reg.get("mark") else None)
+    budget = reg.get("budget")
+    head = {"Тип": "проект", "Направление": ", ".join(reg["directions"]), "Значок": mark,
+            "Статус проекта": one_line(reg.get("status")), "Ранг": reg["rank"], "Координатор": link(node),
+            "Цель": one_line(reg.get("goal")) or None, "Здоровье": hl, "Цвет": color, "Обновлено": upd or None,
+            "Бюджет недели": one_line(budget) if budget not in (None, "") else None, **c}
+    body = (f"\n> Заметку пишет плановый проход по `directions.toml` и задачам. Не правьте её: счётчики сверяет "
+            f"`pantheon check`.\n\n# {mark} {p}\n\n**Здоровье:** {hl} · **Координатор:** {link(node)}"
+            + (f" · **Цель:** {head['Цель']}" if head["Цель"] else "")
+            + f"\n\nОткрыто {c['Открыто']} · в работе {c['В работе']} · ждёт вас {c['Ждёт вас']} · просрочено "
+              f"{c['Просрочено']} · с пересечениями {c['Пересечений']} · пачек {c['Пачек']}\n\n"
+              f"## Пачки проекта\n\n![[Пульт.base#Пачки проекта]]\n")
+    return join(head, body, PROJECT_ORDER)
+
+
+def check_projects(board, tasks, t, registry):
+    """Сверка счётчиков заметок проектов с задачами → список расхождений. Заметка старше последней правки задач —
+    тик её ещё не перерисовал, не ошибка. Просрочка зависит от времени, поэтому счётчик сверяется и на «сейчас»,
+    и на время записи заметки."""
+    d = os.path.join(board, PROJECTS_DIR)
+    if not os.path.isdir(d):
+        return []
+    out = []
+    newest = max((os.path.getmtime(p) for p, _, _ in tasks.values() if os.path.exists(p)), default=0)
+    for f in sorted(os.listdir(d)):
+        p = os.path.join(d, f)
+        if not f.endswith(".md") or not os.path.isfile(p) or os.path.islink(p):
+            continue
+        try:
+            with open(p, encoding="utf-8") as fh:
+                head, _ = split(fh.read())
+        except (HeaderError, OSError, UnicodeDecodeError) as e:
+            out.append(f"{PROJECTS_DIR}/{f}: не читается ({e})")
+            continue
+        if (head or {}).get("Тип") != "проект":
+            continue
+        reg = next((r for pn, r in registry.items() if project_note_name(pn) == f[:-3]), None)
+        if reg is None:
+            continue  # проект убран из реестра — заметку уберёт тик
+        mt = os.path.getmtime(p)
+        if mt < newest:
+            continue  # задачи менялись после записи — сверит следующий проход
+        want = [project_counts(tasks, x, reg["directions"]) for x in (t, mt)]
+        bad = [f"счётчик «{k}» {head.get(k)}, по задачам {want[0][k]}" for k in COUNTERS
+               if all(head.get(k) != w[k] for w in want)]
+        if bad:
+            out.append(f"{PROJECTS_DIR}/{f}: " + "; ".join(bad))
+    return out
+
+
+def _sync_projects(board, state, tasks, t, registry, roles, alert):
+    """Заметки проектов в Доска/Проекты/: свои (хеш в состоянии) переписывает и удаляет, чужой файл не трогает."""
+    d = os.path.join(board, PROJECTS_DIR)
+    old = state.get("projects") or {}
+    mine = {}
+    newest = max((os.path.getmtime(p) for p, _, _ in tasks.values() if os.path.exists(p)), default=0)
+    for p, reg in sorted(registry.items()):
+        n = project_note_name(p)
+        path = os.path.join(d, n + ".md")
+        text = render_project_note(p, reg, tasks, t, roles)
+        try:
+            cur = None
+            if os.path.lexists(path):
+                if os.path.islink(path) or not os.path.isfile(path):
+                    raise ValueError("на месте заметки не обычный файл")
+                with open(path, encoding="utf-8") as fh:
+                    cur = fh.read()
+            if cur is not None and cur != text and _sha(cur) != old.get(n):
+                head, _ = split(cur)
+                if (head or {}).get("Тип") != "проект":
+                    alert(f"board-project-{_sha(n)}", _sha(cur),
+                          f"доска: в Доска/{PROJECTS_DIR}/ лежит чужой файл «{n}.md» — заметка проекта не записана",
+                          "board")
+                    continue
+            if cur != text:
+                os.makedirs(d, exist_ok=True)
+                _write_plain(path, text)
+            elif os.path.getmtime(path) < newest:
+                os.utime(path)  # счётчики те же, но сверены после правки задач — иначе check считал бы заметку старой
+            mine[n] = _sha(text)
+        except (OSError, ValueError, UnicodeError) as e:
+            alert(f"board-project-{_sha(n)}", type(e).__name__, f"доска: заметку проекта «{n[:60]}» не записать ({e})",
+                  "board")
+    for n, h in old.items():
+        if n in mine:
+            continue
+        path = os.path.join(d, n + ".md")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                if _sha(fh.read()) == h:
+                    os.remove(path)
+        except (OSError, UnicodeDecodeError):
+            continue
+    if mine or "projects" in state:
+        state["projects"] = mine
+
+
+PULT_FILE = """filters:
+  and:
+    - file.inFolder("Доска")
+    - '!file.inFolder("Доска/Узлы")'
+formulas:
+  prio_rank: 'if(note["Приоритет"].isEmpty(), 2, number(note["Приоритет"]))'
+  mode_view: 'if(note["Режим"].isEmpty(), "", if(note["Режим"] == "параллельно", "⇉ параллельно", if(note["Режим"] == "сам", "● сам", "→ один исполнитель")))'
+  waits: 'if(note["Зависит от"].isEmpty(), "", "⏳ ждёт " + note["Зависит от"].join(", "))'
+  cross: 'if(note["Пересечения"].isEmpty(), "", "✂ " + note["Пересечения"].join(", "))'
+  areas: 'if(note["Области"].isEmpty(), "❔ не указаны", note["Области"].join(", "))'
+properties:
+  file.name:
+    displayName: Карточка
+  note.id:
+    displayName: №
+  formula.mode_view:
+    displayName: Режим
+  formula.waits:
+    displayName: Ждёт задачу
+  formula.cross:
+    displayName: Пересечения
+  formula.areas:
+    displayName: Области
+views:
+  - type: cards
+    name: Пульт
+    filters:
+      and:
+        - 'note["Тип"] == "проект"'
+    sort:
+      - property: note.Ранг
+        direction: ASC
+    image: note.Цвет
+    order:
+      - file.name
+      - note.Здоровье
+      - note.Цель
+      - note.Открыто
+      - note.В работе
+      - note.Ждёт вас
+      - note.Просрочено
+      - note.Пересечений
+      - note.Пачек
+      - note.Бюджет недели
+      - note.Обновлено
+  - type: kanban
+    name: Пачки
+    filters:
+      and:
+        - 'note["Тип"] == "пачка"'
+        - 'note["Статус"] != "Отменено"'
+    groupBy:
+      property: note.Статус
+      direction: ASC
+    groupOrder:
+      - Входящие
+      - Нужен ответ
+      - Очередь
+      - В работе
+      - Ждёт
+      - На проверке
+      - Готово
+    sort:
+      - property: note.Когда
+        direction: ASC
+      - property: formula.prio_rank
+        direction: ASC
+    order:
+      - file.name
+      - note.Проект
+      - note.Когда
+      - note.Сумма оценок
+      - note.Бюджет
+      - note.Закрыто
+      - note.Цепочка
+      - note.Параллельно
+      - note.Пересечения
+      - note.Области не указаны
+  - type: table
+    name: Пачки проекта
+    filters:
+      and:
+        - 'note["Тип"] == "пачка"'
+        - file.hasLink(this.file)
+    sort:
+      - property: note.Когда
+        direction: DESC
+    order:
+      - file.name
+      - note.Статус
+      - note.Когда
+      - note.Сумма оценок
+      - note.Бюджет
+      - note.Закрыто
+      - note.Цепочка
+      - note.Параллельно
+      - note.Пересечения
+  - type: table
+    name: Задачи пачки
+    filters:
+      and:
+        - 'note["Тип"] == "задача"'
+        - file.hasLink(this.file)
+    sort:
+      - property: note.Порядок
+        direction: ASC
+    order:
+      - note.Порядок
+      - note.id
+      - file.name
+      - note.Статус
+      - formula.mode_view
+      - formula.waits
+      - formula.areas
+      - formula.cross
+      - note.Оценка
+      - note.Факт
+"""
+PULT_VERSION = hashlib.sha256(PULT_FILE.encode("utf-8")).hexdigest()[:12]  # сменился шаблон — тик перепишет Пульт.base
+
+
 # --- доска владельца ------------------------------------------------------------
 
 CARD_ORDER = ["Статус", "Проект", "Внимание", "Вопрос", "Приоритет", "Срок", "Кому", "Дальше", "Ждёт", "Создана", "Вопрос задан",
-              "Закрыта", "Волна", "Пачка", "Ночь", "Оценка", "Факт", "Приёмка", "Тип", "id", "tags"]
+              "Закрыта", "Выпуск", "Пачка", "Пульт", "Ночь", "Оценка", "Факт", "Приёмка", "Порядок", "Режим", "Режим почему",
+              "Зависит от", "Области", "Пересечения",
+              # карточка пачки (story) и заметка проекта (пульт)
+              "Когда", "Бюджет", "Сумма оценок", "Закрыто", "Цепочка", "Параллельно", "Области не указаны",
+              "Тип", "id", "tags"]
 # типы свойств карточек для Obsidian (.obsidian/types.json хранилища): тик ставит свои ключи, чужие не трогает
 PROP_TYPES = {"Внимание": "multitext", "Приоритет": "number", "Срок": "date", "Создана": "date",
               "Вопрос задан": "datetime", "Вопрос": "text", "Закрыта": "date", "Кому": "text", "tags": "tags",
-              "Волна": "number", "Пачка": "text", "Ночь": "date", "Оценка": "text", "Факт": "text", "Приёмка": "text"}
+              "Выпуск": "text", "Пачка": "text", "Ночь": "date", "Оценка": "text", "Факт": "text", "Приёмка": "text",
+              "Порядок": "number", "Режим": "text", "Зависит от": "multitext", "Области": "multitext",
+              "Пересечения": "multitext", "Параллельно": "multitext", "Области не указаны": "multitext",
+              # заметка проекта на пульте
+              "Ранг": "number", "Обновлено": "date", "Открыто": "number", "В работе": "number", "Ждёт вас": "number",
+              "Просрочено": "number", "Пересечений": "number", "Пачек": "number"}
 NODES_DIR = "Узлы"  # заметки-узлы ролей для графа — внутри Доска: копия view-sync.sh стирает всё вне Доска и .obsidian
 NOTE_KEY = "Заметка агенту"  # прежнее поле заметки: в карточку больше не рисуется, но со старых карточек ещё читается
 NOTES_HEAD = "## ✍️ Ваши заметки"
@@ -788,7 +1310,7 @@ def one_line(s):
 
 def card_name(head, with_id=None):
     """Имя файла карточки: у задачи «<id> <заголовок>», у заявки направлению и узла — без id."""
-    with_id = bool(head.get("type") == "task" and head.get("id")) if with_id is None else with_id
+    with_id = bool(head.get("type") in WORK_TYPES and head.get("id")) if with_id is None else with_id
     title = one_line(head.get("title") or head.get("id"))
     if with_id and title != one_line(head.get("id")):
         title = f"{one_line(head['id'])} {title}"
@@ -936,10 +1458,14 @@ def link_ids(text, names, own=None):
     return "\n".join(line(ln) for ln in text.split("\n"))
 
 
-def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, who=None, long_wait=False, names=None, marks=None):
+def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, who=None, long_wait=False, names=None, marks=None,
+                ctx=None):
     """who — имя узла «Кому» (board_sync считает его по реестру направлений); без него — по слагу без реестра.
     long_wait — «долго ждёт» во «Внимание» (решает политика уведомлений).
-    names — id → имя карточки: номера задач в тексте станут ссылками (link_ids)."""
+    names — id → имя карточки: номера задач в тексте станут ссылками (link_ids).
+    ctx — что считает тик по всем задачам: waits (незакрытые depends_on), cross (пересечения областей),
+    story (имя карточки пачки) и order (место в ней)."""
+    ctx = ctx or {}
     head = {k: (_one(v) if isinstance(v, str) else [_one(x) for x in v] if isinstance(v, list) else v)
             for k, v in head.items()}
     lab = label_of(head)
@@ -960,11 +1486,17 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
             "Вопрос": _plain(head["question"]) if head.get("question") and not closed else None,
             # закрытые до 0.9.28 даты закрытия не имеют — тогда последнее изменение задачи (из её шапки)
             "Закрыта": (_date(head.get("closed"), 10) or _date(head.get("updated"), 10)) if closed else None,
-            # ночной цикл (metis-0129): волна — число, остальное — строки; пусто — None
-            "Волна": head.get("wave") if isinstance(head.get("wave"), int) and not isinstance(head.get("wave"), bool)
-            else None,
-            "Пачка": head.get("batch"), "Ночь": _date(head.get("night"), 10), "Оценка": head.get("estimate"),
+            # ночной цикл (metis-0129) и выпуск (metis-0069): строки; пусто — None
+            "Выпуск": head.get("release"),
+            # пачка: ссылка на карточку story, к которой задача прикреплена (parent), иначе прежнее поле batch
+            "Пачка": link(ctx["story"]) if ctx.get("story") else head.get("batch"), "Порядок": ctx.get("order"),
+            "Ночь": _date(head.get("night"), 10), "Оценка": head.get("estimate"),
             "Факт": head.get("actual"), "Приёмка": head.get("acceptance"),
+            # режим и зависимости (план metis-0248): «Зависит от» — только незакрытые depends_on, «Пересечения» —
+            # живые задачи с общей областью (считает тик, overlaps)
+            "Режим": MODES.get(head.get("mode")), "Режим почему": head.get("mode_why"),
+            "Зависит от": ctx.get("waits") or None, "Области": head.get("touches") or None,
+            "Пересечения": ctx.get("cross") or None,
             "Тип": "задача", "id": head.get("id"), "tags": [f"направление/{direction}"]}
     due = f" · 📅 {due_text(head['due'])}" if head.get("due") else ""
     who = f" · 👤 {head['owner']}" if head.get("owner") else ""
@@ -979,6 +1511,12 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
         parts[-1] += f"\n> **Дальше:** {head['next']}"
     if head.get("waiting_on") not in (None, "human"):
         parts[-1] += f"\n> **Ждёт:** {head['waiting_on']}"
+    if not closed and card["Режим"]:
+        parts[-1] += f"\n> **Режим:** {card['Режим']}" + (f" — {head['mode_why']}" if head.get("mode_why") else "")
+    if not closed and card["Зависит от"]:
+        parts[-1] += f"\n> **Ждёт задачу:** {', '.join(card['Зависит от'])}"
+    if not closed and card["Пересечения"]:
+        parts[-1] += f"\n> **Пересечения по файлам:** {', '.join(card['Пересечения'])}"
     if conflict:
         parts.append(f"> [!warning] {conflict}")
     desc = description(body)
@@ -1218,6 +1756,10 @@ formulas:
   stage: 'if(note["Статус"] == "Нужен ответ", 0, if(note["Статус"] == "Входящие", 1, if(note["Статус"] == "На проверке", 2, if(note["Статус"] == "В работе", 3, if(note["Статус"] == "Ждёт", 4, if(note["Статус"] == "Очередь", 5, if(note["Статус"] == "Готово", 6, 7)))))))'
   status_view: 'if(note["Статус"] == "Нужен ответ", "🔴 Нужен ответ", if(note["Статус"] == "Входящие", "📥 Входящие", if(note["Статус"] == "В работе", "🟡 В работе", if(note["Статус"] == "На проверке", "🔵 На проверке", if(note["Статус"] == "Ждёт", "⏸ Ждёт", if(note["Статус"] == "Очередь", "⚪ Очередь", if(note["Статус"] == "Готово", "🟢 Готово", if(note["Статус"] == "Отменено", "⚫ Отменено", note["Статус"]))))))))'
   prio_view: 'if(note["Приоритет"].isEmpty(), "", if(number(note["Приоритет"]) == 0, "🔥🔥 0 срочно", if(number(note["Приоритет"]) == 1, "🔥 1 высокий", if(number(note["Приоритет"]) == 2, "2 обычный", "▫️ 3 низкий"))))'
+  mode_view: 'if(note["Режим"].isEmpty(), "", if(note["Режим"] == "параллельно", "⇉ параллельно", if(note["Режим"] == "сам", "● сам", "→ один исполнитель")))'
+  waits: 'if(note["Зависит от"].isEmpty(), "", "⏳ ждёт " + note["Зависит от"].join(", "))'
+  cross: 'if(note["Пересечения"].isEmpty(), "", "✂ " + note["Пересечения"].join(", "))'
+  warn: 'if(note["Режим"] == "параллельно" && note["Области"].isEmpty(), "⚠ области не указаны", if(note["Режим"] == "параллельно" && !note["Пересечения"].isEmpty(), "⚠ параллельно при общей области", if(note["Режим"] == "параллельно" && !note["Зависит от"].isEmpty(), "⚠ параллельно, но ждёт", "")))'
 properties:
   file.name:
     displayName: Задача
@@ -1227,14 +1769,23 @@ properties:
     displayName: Статус
   formula.prio_view:
     displayName: Приоритет
+  formula.mode_view:
+    displayName: Режим
+  formula.waits:
+    displayName: Ждёт задачу
+  formula.cross:
+    displayName: Пересечения
+  formula.warn:
+    displayName: Внимание к режиму
 views:
   - type: table
-    name: Мне ответить
+    name: От меня нужно
     filters:
       and:
         - or:
             - 'note["Статус"] == "Нужен ответ"'
             - 'note["Кому"].toString().contains("Владелец")'
+            - 'note["Приёмка"] == "к владельцу"'
         - 'note["Статус"] != "Готово"'
         - 'note["Статус"] != "Отменено"'
     sort:
@@ -1245,10 +1796,31 @@ views:
       - property: formula.qa_n
         direction: ASC
     order: [note.Вопрос, file.name, note.Проект, note.Внимание, formula.prio_view, note.Срок]
-  - type: kanban
-    name: Система
+  - type: table
+    name: Срочно
     filters:
       and:
+        - 'note["Тип"] != "пачка"'
+        - or:
+            - 'formula.urgency < 3'
+            - 'formula.prio_rank == 0'
+        - 'note["Статус"] != "Готово"'
+        - 'note["Статус"] != "Отменено"'
+    sort:
+      - property: formula.urgency
+        direction: ASC
+      - property: note.Срок
+        direction: ASC
+      - property: formula.prio_rank
+        direction: ASC
+      - property: formula.age_key
+        direction: ASC
+    order: [note.id, file.name, note.Проект, formula.status_view, note.Внимание, formula.prio_view, note.Срок, note.Дальше]
+  - type: kanban
+    name: Доска
+    filters:
+      and:
+        - 'note["Тип"] != "пачка"'
         - 'note["Статус"] != "Отменено"'
         - 'note["Статус"] != "Очередь"'
         - or:
@@ -1265,11 +1837,12 @@ views:
         direction: ASC
       - property: formula.col_k3
         direction: ASC
-    order: [file.name, note.Проект, note.Внимание, formula.prio_view, note.Срок, note.Кому]
+    order: [file.name, note.Проект, note.Внимание, formula.prio_view, note.Срок, note.Кому, formula.waits, formula.warn]
   - type: table
-    name: Очередь агентов
+    name: Очередь
     filters:
       and:
+        - 'note["Тип"] != "пачка"'
         - 'note["Статус"] == "Очередь"'
     sort:
       - property: formula.prio_rank
@@ -1278,38 +1851,45 @@ views:
         direction: ASC
       - property: formula.cr_n
         direction: ASC
-    order: [note.id, file.name, note.Проект, formula.prio_view, note.Срок, note.Кому, note.Создана]
-  - type: table
-    name: Нужен ответ
+    order: [note.id, file.name, note.Проект, formula.prio_view, formula.mode_view, formula.waits, formula.cross, note.Пачка, note.Срок, note.Кому]
+  - type: kanban
+    name: Пачки
     filters:
       and:
-        - 'note["Статус"] == "Нужен ответ"'
+        - 'note["Тип"] == "пачка"'
+        - or:
+            - 'note["Статус"] != "Готово"'
+            - 'note["Закрыта"] >= today() - "7d"'
+        - 'note["Статус"] != "Отменено"'
+    groupBy:
+      property: note.Статус
+      direction: ASC
+    groupOrder: [Нужен ответ, Очередь, В работе, Ждёт, На проверке, Готово]
     sort:
-      - property: formula.urgency
+      - property: note.Когда
         direction: ASC
       - property: formula.prio_rank
         direction: ASC
-      - property: note.Срок
-        direction: ASC
-      - property: formula.age_key
-        direction: ASC
-    order: [note.id, file.name, note.Проект, note.Внимание, formula.prio_view, note.Дальше, note.Срок, note.Вопрос задан]
+    order: [file.name, note.Проект, note.Когда, note.Сумма оценок, note.Бюджет, note.Закрыто, note.Цепочка, note.Параллельно, note.Пересечения, note.Области не указаны]
   - type: table
-    name: Горит
+    name: Итоги пачек
     filters:
       and:
-        - 'formula.urgency < 3'
-        - 'note["Статус"] != "Готово"'
+        - 'note["Тип"] != "пачка"'
+        - '!note["Пачка"].isEmpty()'
+        - or:
+            - 'note["Статус"] == "На проверке"'
+            - 'note["Статус"] == "Готово"'
+            - '!note["Приёмка"].isEmpty()'
+    groupBy:
+      property: note.Пачка
+      direction: ASC
     sort:
-      - property: formula.urgency
+      - property: note.Порядок
         direction: ASC
-      - property: note.Срок
-        direction: ASC
-      - property: formula.prio_rank
-        direction: ASC
-      - property: formula.age_key
-        direction: ASC
-    order: [note.id, file.name, note.Проект, formula.status_view, note.Внимание, formula.prio_view, note.Срок, note.Дальше]
+      - property: formula.cl_n
+        direction: DESC
+    order: [note.id, file.name, formula.status_view, note.Приёмка, note.Оценка, note.Факт, formula.mode_view, note.Выпуск, note.Кому]
   - type: table
     name: Все задачи
     groupBy:
@@ -1327,49 +1907,6 @@ views:
       - property: formula.age_key
         direction: ASC
     order: [note.id, file.name, formula.status_view, formula.prio_view, note.Внимание, note.Кому, note.Срок, note.Дальше, note.Создана, note.Закрыта]
-  - type: table
-    name: Ночь
-    filters:
-      and:
-        - '!note["Ночь"].isEmpty()'
-        - 'note["Статус"] != "Готово"'
-        - 'note["Статус"] != "Отменено"'
-    sort:
-      - property: note.Ночь
-        direction: DESC
-      - property: note.Волна
-        direction: ASC
-      - property: note.Пачка
-        direction: ASC
-    order: [note.id, file.name, note.Проект, formula.status_view, note.Волна, note.Пачка, note.Оценка, note.Кому]
-  - type: table
-    name: Волны
-    filters:
-      and:
-        - '!note["Волна"].isEmpty()'
-    groupBy:
-      property: note.Волна
-      direction: ASC
-    sort:
-      - property: note.Пачка
-        direction: ASC
-      - property: formula.prio_rank
-        direction: ASC
-    order: [note.id, file.name, note.Проект, formula.status_view, note.Пачка, note.Ночь, note.Оценка, note.Факт]
-  - type: table
-    name: Утро
-    filters:
-      and:
-        - '!note["Ночь"].isEmpty()'
-        - or:
-            - 'note["Статус"] == "На проверке"'
-            - '!note["Приёмка"].isEmpty()'
-    sort:
-      - property: note.Ночь
-        direction: DESC
-      - property: note.Приёмка
-        direction: ASC
-    order: [note.id, file.name, note.Проект, formula.status_view, note.Приёмка, note.Оценка, note.Факт, note.Кому]
 """
 for _i in (1, 2, 3):
     BASE_FILE = BASE_FILE.replace("{COLK%d}" % _i, _col_formula(_i - 1))
@@ -1437,10 +1974,11 @@ def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None):
             "inbox": [f"[[Доска/{names.get(cid) or card_name({'title': it['title']})}|{_plain(it['title'])}]] · "
                       f"{it['direction']}" for cid, it in (inbox or {}).items()]}
     wait = []
-    mine = set()  # вид «Мне ответить»: ждут ответа или адресованы Владельцу; множество — без двойного счёта
+    mine = set()  # вид «От меня нужно»: ждут ответа, адресованы Владельцу или приёмка «к владельцу»; без двойного счёта
     for tid, (p, h, _) in sorted(tasks.items()):
         if (h.get("status") == "waiting" and h.get("waiting_on") == "human") or (
-                h.get("status") not in ("done", "dropped") and Roles(()).name(assignee(h)) == OWNER_NODE):
+                h.get("status") not in ("done", "dropped")
+                and (Roles(()).name(assignee(h)) == OWNER_NODE or h.get("acceptance") == "к владельцу")):
             mine.add(tid)
         name = f"[[Доска/{names.get(tid) or card_name(h)}|{_plain(h.get('title'))}]] · {_plain(h.get('project'))}"
         if h.get("status") == "waiting" and h.get("waiting_on") == "human":
@@ -1467,11 +2005,12 @@ def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None):
     if len(wait) > SUMMARY_WAIT_TOP:
         top.append(f"ещё {len(wait) - SUMMARY_WAIT_TOP} — колонка «{HUMAN_WAIT}» на доске")
     quiet = [f"{when} · {_plain(text)}" for when, _, _, text in (queue or [])]
-    counters = (f"🔴 Мне ответить {len(mine)} · ⏰ Просрочено {len(rows['overdue'])} · 📥 Входящие {len(rows['inbox'])}"
+    counters = (f"🔴 От меня нужно {len(mine)} · ⏰ Просрочено {len(rows['overdue'])} · 📥 Входящие {len(rows['inbox'])}"
                 f" · 🟡 В работе {len(rows['doing'])} · 🟢 Готово за сутки {len(rows['done'])}")
     done_fold = (f"> [!success]- 🟢 Готово за сутки ({len(rows['done'])})\n"
                  + ("\n".join(f"> - {x}" for x in rows["done"]) if rows["done"] else "> —") + "\n")
-    return ("# Сводка\n\n" + counters + "\n\n## Мне ответить\n\n![[Доска.base#Мне ответить]]\n\n"
+    return ("# Сводка\n\n" + counters + "\n\n## От меня нужно\n\n![[Доска.base#От меня нужно]]\n\n"
+            + "Проекты и пачки — [[Пульт.base|пульт]].\n\n"
             + sec(f"🔴 {HUMAN_WAIT}", top, len(wait)) + "\n"
             + sec("⏰ Просрочено", rows["overdue"]) + "\n"
             + sec("📥 Входящие заявки направлениям", rows["inbox"]) + "\n"
@@ -1679,29 +2218,34 @@ def _sync_nodes(board, state, roles, tasks, names, slugs, alert):
         state["nodes"] = mine
 
 
-def _sync_base(board, state, state_path, t, alert):
-    """Доска.base: нет файла или сменилась версия шаблона — записать; владелец правил файл — его версию сохранить
-    в папку состояния и одна тревога. Та же версия — не трогать: настройки вида владельца живут."""
-    bp = os.path.join(board, "Доска.base")
+def _sync_base(board, state, state_path, t, alert, fname="Доска.base", text=None, version=None, key="base",
+               old_hashes=None):
+    """Доска.base (и Пульт.base — fname, text, version, key): нет файла или сменилась версия шаблона — записать;
+    владелец правил файл — его версию сохранить в папку состояния и одна тревога. Та же версия — не трогать:
+    настройки вида владельца живут."""
+    text = BASE_FILE if text is None else text
+    version = BASE_VERSION if version is None else version
+    old_hashes = OLD_BASE_HASHES if old_hashes is None else old_hashes
+    bp = os.path.join(board, fname)
     try:
         with open(bp, "rb") as fh:
             cur = fh.read()
     except FileNotFoundError:
         cur = None
-    if cur is not None and state.get("base_version") == BASE_VERSION:
+    if cur is not None and state.get(f"{key}_version") == version:
         return
-    new = BASE_FILE.encode("utf-8")
+    new = text.encode("utf-8")
     # нетронутый прежний шаблон (у 0.9.27 и раньше в состоянии нет base_hash) — не правка владельца
-    if cur is not None and cur != new and _sha(cur) != state.get("base_hash") and _sha(cur) not in OLD_BASE_HASHES:
+    if cur is not None and cur != new and _sha(cur) != state.get(f"{key}_hash") and _sha(cur) not in old_hashes:
         keep = os.path.join(os.path.dirname(os.path.abspath(state_path)),
-                            f"board-base-{datetime.fromtimestamp(t).strftime('%Y%m%d-%H%M%S')}.base")
+                            f"board-{key}-{datetime.fromtimestamp(t).strftime('%Y%m%d-%H%M%S')}.base")
         os.makedirs(os.path.dirname(keep), exist_ok=True)
         with open(keep, "wb") as fh:
             fh.write(cur)
-        alert(f"board-base-{BASE_VERSION}", BASE_VERSION, f"Доска.base обновлён, ваша версия сохранена в {keep}", "board")
+        alert(f"board-{key}-{version}", version, f"{fname} обновлён, ваша версия сохранена в {keep}", "board")
     if cur != new:
-        _write_plain(bp, BASE_FILE)
-    state["base_version"], state["base_hash"] = BASE_VERSION, _sha(new)
+        _write_plain(bp, text)
+    state[f"{key}_version"], state[f"{key}_hash"] = version, _sha(new)
 
 
 def _sync_types(vault, alert):
@@ -1733,12 +2277,15 @@ def _sync_types(vault, alert):
 
 
 def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None, primary=True, projects=None,
-               policy=None, marks=None):
+               policy=None, marks=None, registry=None):
     """Один проход доски. → список строк «что сделано» (для журнала тика). policy — политика уведомлений
     (lib/notify.py, её передаёт pantheon.py): решает, что показать, что отложить в сводку. Без неё — без
-    уведомлений; notify — прежний параметр, не используется."""
+    уведомлений; notify — прежний параметр, не используется. registry — проекты для пульта (project_registry);
+    без него — из projects и marks."""
     alert = alert or (lambda *a, **k: None)
     projects = projects or {}
+    if registry is None:
+        registry = project_registry([{"name": d, "project": p, "mark": (marks or {}).get(p)} for d, p in projects.items()])
     vault = os.path.basename(os.path.dirname(os.path.abspath(board)))
     done_lines, moved_by_owner = [], set()
     os.makedirs(board, exist_ok=True)
@@ -1748,7 +2295,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     except (OSError, ValueError):
         state = {}
     cards = state.setdefault("cards", {})
-    tasks = load_tasks(pantheon)
+    tasks = load_tasks(pantheon, WORK_TYPES)
     inbox = inbox_items(pantheon)
     for cid, it in inbox.items():
         it["id"] = cid
@@ -1795,7 +2342,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         _owner_log(log_path, t, kind="new", id=tid, title=title)
         os.remove(p)
         done_lines.append(f"новая задача {tid} из карточки «{name}»")
-        tasks = load_tasks(pantheon)
+        tasks = load_tasks(pantheon, WORK_TYPES)
 
     # 3. ходы владельца на известных карточках (перенос — сразу: он делается одним движением;
     #    заметку Obsidian сохраняет по Enter или уходу из поля, галочку — щелчком: берём сразу)
@@ -1906,7 +2453,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         elif answer == "?":
             st["conflict_at"] = t
             st["conflict"] = "отмечено несколько вариантов — оставьте один"
-        tasks = load_tasks(pantheon)
+        tasks = load_tasks(pantheon, WORK_TYPES)
 
     # 4. авторазблокировка: ждала задачу, та готова → в очередь (только главный Mac: правит источники)
     for tid, (_, h, _) in (list(tasks.items()) if primary else []):
@@ -1914,7 +2461,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         if h.get("status") == "waiting" and w in tasks and tasks[w][1].get("status") == "done":
             task_set(pantheon, t, tid, {"status": "todo"}, note=f"разблокирована: {w} готова", actor="плановый проход")
             done_lines.append(f"{tid}: разблокирована ({w} готова)")
-    tasks = load_tasks(pantheon)
+    tasks = load_tasks(pantheon, WORK_TYPES)
 
     # 5. застрявшие и просроченные — одна тревога на задачу (вам — в утренней сводке)
     for tid, (_, h, _) in (tasks.items() if primary else []):
@@ -1954,6 +2501,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         if name.casefold() in {x.casefold() for x in names.values()}:  # Mac: «Bob.md» и «bob.md» — один файл
             name = f"{name} ({cid})"
         names[cid] = name
+    cross = crossings(tasks)
     for cid, _, src, h, b in items:
         name = names[cid]
         st = cards.setdefault(cid, {})
@@ -1969,8 +2517,15 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             if forged:
                 alert(f"answer-mismatch-{cid}", str(h.get("requested") if h.get("risky") is True else h.get("answer")),
                       f"конфликт ответа: {h.get('title')} ({cid}) — {forged}", "board")
-            card, cbody = render_card(h, b, rel(src), t, " · ".join(x for x in (st.get("conflict"), forged) if x) or None,
-                                      notes_by_id.get(cid), logged, who, long_wait=cid in long_ids, names=names, marks=marks)
+            kw = dict(conflict=" · ".join(x for x in (st.get("conflict"), forged) if x) or None,
+                      notes=notes_by_id.get(cid), logged=logged, who=who, long_wait=cid in long_ids, names=names,
+                      marks=marks)
+            if h.get("type") == "story":
+                pn = next((project_note_name(pr) for pr, r in registry.items() if h.get("direction") in r["directions"]),
+                          None)
+                card, cbody = render_story_card(h, b, rel(src), t, tasks, project=pn, **kw)
+            else:
+                card, cbody = render_card(h, b, rel(src), t, ctx=card_ctx(cid, h, tasks, names, cross), **kw)
         target = os.path.join(board, name + ".md")
         old = present.get(cid)
         if old and (digest(old[0]) != seen.get(cid) or cid in typing):
@@ -2017,6 +2572,8 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
         with open(sp, "w", encoding="utf-8") as fh:
             fh.write(text)
     _sync_base(board, state, state_path, t, alert)
+    _sync_base(board, state, state_path, t, alert, "Пульт.base", PULT_FILE, PULT_VERSION, "pult", ())
+    _sync_projects(board, state, tasks, t, registry, roles, alert)
     _sync_types(os.path.dirname(os.path.abspath(board)), alert)
     new_state = json.dumps(state, ensure_ascii=False, indent=1)
     try:
