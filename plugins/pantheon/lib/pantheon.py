@@ -2714,7 +2714,10 @@ def _resume_session(name, a, text, origin):
             return 0, None
         with contextlib.suppress(OSError):
             os.remove(pushed)
-    argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--name", name, "--settings", run, text]
+    # --resume не наследует роль (metis-0208): без --agent сессия поднялась бы голым Claude. Роль — та же, что у start и
+    # свежего старта; штаб (zeus) — hq, хотя сюда он сегодня не доходит (start_target не знает zeus — отказ выше)
+    role = "hq" if name == "zeus" else got[1]
+    argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--agent", role, "--name", name, "--settings", run, text]
     r = subprocess.run(argv, cwd=a.get("cwd") or HOME, capture_output=True, text=True, timeout=180)
     m = COPY_NOTE.search((r.stdout or "") + (r.stderr or ""))
     start_log(f"resume\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\tcopy {m.group(1)}" if m else ""))
@@ -4771,17 +4774,25 @@ def board():
     return 0
 
 
-STATE_FILE_LIMIT = 9000  # знаков: после сжатия хук кладёт первые ~9 800, хвост файла теряется (metis-0160)
+def statelen_mod():
+    """lib/statelen.py — длина файлов состояния, общая с хуком (hooks/ctx.py state-len)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_statelen", os.path.join(LIB, "statelen.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+STATE_FILE_LIMIT = statelen_mod().STATE_FILE_LIMIT
 
 
 def _check_long_state(quiet):
     """STATUS.md направлений и board.md штаба длиннее STATE_FILE_LIMIT знаков (символов, не байт): одна строка на
     файл. Без --quiet — печать; с ним (тик) — alert_once на файл, не чаще раза на новый размер."""
-    files = sorted(glob.glob(os.path.join(PANTHEON, "directions", "*", "STATUS.md"))) + [os.path.join(PANTHEON, "board.md")]
-    for f in files:
-        try:
-            n = len(open(f, encoding="utf-8", errors="replace").read())
-        except OSError:
+    sl = statelen_mod()
+    for f in sl.state_files(PANTHEON):
+        n = sl.length(f)
+        if n is None:
             continue
         key = "state-long-" + re.sub(r"[^\w-]", "_", os.path.relpath(f, PANTHEON))[:60]
         if n <= STATE_FILE_LIMIT:
