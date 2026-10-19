@@ -3587,6 +3587,30 @@ WHO_ANY_DIRECTION = ("domain-coordinator",)
 WHO_GODS = ("zeus", "athena", "hermes", "themis", "calliope", "mnemo", "proteus", "metis", "janus", "daedalus",
             "apollo", "hephaestus", "argus", "chiron", "prometheus", "talos", "clio", "iris", "momus", "charon", "hestia")
 WHO_TOKEN = re.compile(r"`([^`\n]+)`")
+WHO_WORD = re.compile(r"[a-z][a-z0-9-]*")
+# Ещё места, где роли названы (metis-0252): холст «Кто есть кто.canvas» — по-русски (имя бога или слово), system.md —
+# именем роли. Роль без строки здесь — «+имя (файл)» в той же тревоге. Новую роль без бога в холсте искать по её имени.
+WHO_CANVAS_RU = {"hq": "Зевс", "workshop": "Дедал", "argus": "Аргус", "momus": "Мом", "prometheus": "Прометей",
+                 "chiron": "Хирон", "clio": "Клио", "iris": "Ирида", "talos": "Талос", "hestia": "Гестия",
+                 "hephaestus": "Гефест", "apollo": "Аполлон", "dev": "Разработчик", "codex-dev": "Codex",
+                 "tg-reader": "Telegram", "domain-coordinator": "координатор"}
+
+
+def who_is_who_names(text, roles, canvas=False):
+    """Имена ролей, которых нет в тексте холста (canvas=True) или system.md. Лидам хватает приставки роли."""
+    low = text.lower()
+    words = {w.strip("-") for w in WHO_WORD.findall(low)}
+    out = []
+    for r in sorted(roles):
+        keys = [r, r.split("-")[0]] if r.split("-")[0] in LEAD_ROLES or r.startswith("dev-") else [r]
+        if canvas:
+            ru = [WHO_CANVAS_RU[k].lower() for k in keys if k in WHO_CANVAS_RU] or ([] if r in WHO_CANVAS_RU else [r])
+            ok = any(x in low for x in ru) or (r.startswith("dev-") and "разработчик" in low)
+        else:
+            ok = any(k in words for k in keys)
+        if not ok:
+            out.append(r)
+    return out
 
 
 def who_is_who_diff(memo_text, roles, directions):
@@ -3634,10 +3658,25 @@ def who_is_who_check(memo=None, agents=None, reg_path=None):
         text = open(memo, encoding="utf-8").read()
     except (OSError, ValueError):
         return None
-    roles = [f[:-3] for f in os.listdir(agents)
-             if f.endswith(".md") and os.path.isfile(os.path.join(agents, f))]
+    roles = {f[:-3] for f in os.listdir(agents)
+             if f.endswith(".md") and os.path.isfile(os.path.join(agents, f))}
+    # роли из общих шаблонов плагина, ещё не собранные в agents (новая роль сразу после слияния), минус отложенные
+    if os.path.isdir(PLUGIN_ROLES):
+        roles |= {f[:-5] for f in os.listdir(PLUGIN_ROLES)
+                  if f.endswith(".tmpl") and f[:-5] not in ROLES_DEFERRED
+                  and os.path.isfile(os.path.join(PLUGIN_ROLES, f))}
+    roles = sorted(roles)
     dirs = [d.get("name") for d in reg.get("direction") or [] if isinstance(d.get("name"), str)]
-    return who_is_who_diff(text, roles, dirs)
+    missing, extra = who_is_who_diff(text, roles, dirs)
+    base = os.path.dirname(memo)
+    for fname, canvas in (("Кто есть кто.canvas", True), ("system.md", False)):
+        try:
+            other = open(os.path.join(base, fname), encoding="utf-8").read()
+        except OSError:
+            continue  # файла нет — не проверяем
+        missing += [f"{n} ({fname.rsplit('.', 1)[-1] if canvas else fname})"
+                    for n in who_is_who_names(other, roles, canvas)]
+    return missing, extra
 
 
 def who_is_who_alert(**kw):

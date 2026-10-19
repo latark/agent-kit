@@ -1825,8 +1825,10 @@ def test_who_is_who_memo():
     memo = os.path.join(pan, "Кто есть кто.md")
     full = ("`zeus` `daedalus-<задача>` `metis-pantheon` `hermes-site` `argus` `momus` `hephaestus-<проект>` "
             "`apollo-<проект>` `claude agents` `pantheon tick` `~/.claude/agents/<роль>.md`\n")
-    saved = {k: getattr(p, k) for k in ("PANTHEON", "STATE", "AGENTS")}
+    saved = {k: getattr(p, k) for k in ("PANTHEON", "STATE", "AGENTS", "PLUGIN_ROLES")}
     alerts = os.path.join(pan, "alerts.md")
+    plug = os.path.join(d, "plugin-roles")  # общие шаблоны плагина (metis-0252): сначала пусто
+    os.makedirs(plug)
 
     def read():
         return open(alerts, encoding="utf-8").read() if os.path.exists(alerts) else ""
@@ -1834,7 +1836,7 @@ def test_who_is_who_memo():
     def put(text):
         open(memo, "w", encoding="utf-8").write(text)
     try:
-        p.PANTHEON, p.STATE, p.AGENTS = pan, st, ag
+        p.PANTHEON, p.STATE, p.AGENTS, p.PLUGIN_ROLES = pan, st, ag, plug
         os.environ["PANTHEON_NO_NOTIFY"] = "1"
         # 1. всё совпадает (чужой код в кавычках не мешает): тихо
         put(full)
@@ -1859,6 +1861,25 @@ def test_who_is_who_memo():
         # 5. нет памятки: проверять нечего
         os.remove(memo)
         check(p.who_is_who_check() is None and p.who_is_who_alert() == "", "нет памятки, а сверка что-то нашла")
+        # 6. metis-0252: новая роль есть только шаблоном в плагине (не собрана), в памятке её нет: +имя
+        put(full)
+        open(os.path.join(plug, "newgod.tmpl"), "w").write("шаблон")
+        open(os.path.join(plug, "hestia.tmpl"), "w").write("отложена")  # ROLES_DEFERRED: не роль
+        check(p.who_is_who_check() == (["newgod"], []), f"шаблон плагина не виден сверке: {p.who_is_who_check()}")
+        put(full + "`newgod`\n")
+        check(p.who_is_who_check() == ([], []), f"роль в памятке, а сверка нашла {p.who_is_who_check()}")
+        # 7. .canvas и system.md: везде есть — тихо; нет в .canvas или system.md — «+имя (файл)» в той же строке
+        cv, sy = (os.path.join(pan, x) for x in ("Кто есть кто.canvas", "system.md"))
+        all_roles = "argus momus hq workshop domain-coordinator hephaestus-<проект> apollo-<проект> newgod"
+        canvas_ok = '{"nodes":[{"text":"**Аргус** **Мом** **Зевс** **Дедал** координатор **Гефест** **Аполлон**%s"}]}'
+        open(cv, "w", encoding="utf-8").write(canvas_ok % " newgod")
+        open(sy, "w", encoding="utf-8").write(all_roles)
+        check(p.who_is_who_check() == ([], []), f"везде есть, а сверка нашла {p.who_is_who_check()}")
+        open(cv, "w", encoding="utf-8").write(canvas_ok % "")
+        check(p.who_is_who_check() == (["newgod (canvas)"], []), f"нет в .canvas: {p.who_is_who_check()}")
+        open(sy, "w", encoding="utf-8").write(all_roles.replace(" newgod", ""))
+        line = p.who_is_who_alert()
+        check(line == "памятку обновить: +newgod (canvas) / +newgod (system.md)", f"нет в system.md: {line!r}")
     finally:
         for k, v in saved.items():
             setattr(p, k, v)
