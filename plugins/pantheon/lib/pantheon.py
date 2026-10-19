@@ -40,13 +40,15 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
-  pantheon task new --direction D --title T [--status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ] --next X --owner O
-                    --wave N --batch X --night ГГГГ-ММ-ДД --estimate X --actual X --acceptance принято|вернуть|к владельцу
+  pantheon task new --direction D --title T [--type task|story --status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ]
+                    --next X --owner O --release R --batch X --night ГГГГ-ММ-ДД --estimate X --actual X
+                    --acceptance принято|вернуть|к владельцу --mode self|single|parallel --mode-why X --touches ПУТЬ …
                     --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
                     --recommend "А — потому что …" --if-no-answer "…" --depends-on ID --executor auto|claude|codex]
                     без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ
   pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"]   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
+  pantheon task attach ID ПАЧКА | detach ID   задача в пачку (story) и обратно; show ПАЧКА — состав и сумма оценок
   pantheon executors                    набор исполнителей кода (Claude всегда, Codex — дополнение) и включён ли Codex
   pantheon executors check              проверить Codex: на PATH → вход (CODEX_HOME роли) → hello-проба
   pantheon executors --add codex | --remove <имя>   добавить Codex (через проверку, без входа) | убрать (Claude — отказ)
@@ -4738,6 +4740,22 @@ def sync_answers():
     return 0
 
 
+def board_registry(T):
+    """directions.toml → (направление → проект, проект → значок, проекты пульта). Один разбор для тика и check:
+    счётчики заметок проектов сверяются по тому же реестру, по которому их писали."""
+    try:
+        with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
+            dirs = tomllib.load(fh).get("direction") or []
+    except (OSError, ValueError):
+        return {}, {}, {}
+    projects = {d.get("name"): d.get("project") for d in dirs}
+    marks = {}  # значок проекта — поле `mark` направления; ключ — project, иначе name
+    for d in dirs:
+        if isinstance(d.get("mark"), str):
+            marks.setdefault(d.get("project") or d.get("name"), d["mark"])
+    return projects, marks, T.project_registry(dirs)
+
+
 def board():
     """Доска владельца: ходы → задачи и журнал владельца, карточки ← задачи. Только на этом Mac, под блокировкой."""
     T = tasks_mod()
@@ -4746,23 +4764,14 @@ def board():
     with lock("board", block=False) as got:
         if not got:
             return 0
-        try:
-            with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
-                dirs = tomllib.load(fh).get("direction") or []
-            projects = {d.get("name"): d.get("project") for d in dirs}
-            marks = {}  # значок проекта — поле `mark` направления; ключ — project, иначе name
-            for d in dirs:
-                if isinstance(d.get("mark"), str):
-                    marks.setdefault(d.get("project") or d.get("name"), d["mark"])
-        except (OSError, ValueError):
-            projects, marks = {}, {}
+        projects, marks, registry = board_registry(T)
         # политика уведомлений — под своей блокировкой на весь проход: сбои из run-job ждут, а не теряются
         with lock("notify"):
             pol = notify_policy(sched)
             lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
                                  alert=lambda k, v, text, who="board", note=None: alert_once(k, v, text, who, note,
                                                                                             policy=pol),
-                                 primary=primary, projects=projects, policy=pol, marks=marks)
+                                 primary=primary, projects=projects, policy=pol, marks=marks, registry=registry)
             pol.save()
         once_dir = path("once")  # отметки «уже сообщали» старше 90 дней — убрать: папка не растёт без конца
         for f in os.listdir(once_dir) if os.path.isdir(once_dir) else []:
@@ -4839,6 +4848,12 @@ def check(paths=None, quiet=False):
             problems = project_allow_report(dname, allow_gate(dname, fs), quiet)
             if problems and quiet:  # тик (check --quiet): окно могла убрать ручная сборка, а сессия ещё работает
                 project_allow_stop(dname, problems)
+    # счётчики на пульте пишет тик — вторая копия данных: расхождение с задачами — ошибка (metis-0069)
+    drift = []
+    if not paths and os.path.isdir(BOARD):
+        drift = T.check_projects(BOARD, T.load_tasks(PANTHEON, T.WORK_TYPES), now(), board_registry(T)[2])
+        for d in drift:
+            print(f"ОШИБКА · Доска/{d}")
     if not quiet or bad:
         print(f"задач: {n}, с ошибками: {len(bad)}, без шапки: {noheader}")
     if quiet:  # тик: одна тревога на набор проблем, а не сбой задачи каждые 5 минут
@@ -4847,8 +4862,13 @@ def check(paths=None, quiet=False):
                        f"задачи с битой шапкой: {len(bad)} — список в Доска/Проблемы.md", "check")
         else:
             clear_once("check-problems")
+        if drift:
+            alert_once("check-projects", "|".join(drift), f"пульт: счётчики проекта расходятся с задачами — {drift[0]}"
+                       + (f" и ещё {len(drift) - 1}" if len(drift) > 1 else ""), "check")
+        else:
+            clear_once("check-projects")
         return 0
-    return 1 if bad else 0
+    return 1 if bad or drift else 0
 
 
 def task_cmd(rest):
@@ -4866,7 +4886,8 @@ def task_cmd(rest):
         if sub == "new":
             fields = {"status": opt("--status"), "priority": int(opt("--priority")) if opt("--priority") else None,
                       "due": opt("--due"), "next": opt("--next"), "owner": opt("--owner"),
-                      "wave": int(opt("--wave")) if opt("--wave") else None, "batch": opt("--batch"),
+                      "release": opt("--release") or opt("--wave"), "batch": opt("--batch"),
+                      "mode": opt("--mode"), "mode_why": opt("--mode-why"), "touches": opt("--touches", True) or None,
                       "night": opt("--night"), "estimate": opt("--estimate"), "actual": opt("--actual"),
                       "acceptance": opt("--acceptance"),
                       "waiting_on": opt("--waiting-on"), "question": opt("--question"), "why": opt("--why"),
@@ -4880,14 +4901,18 @@ def task_cmd(rest):
                 print("pantheon task new: входящие создаёт только доска владельца; Зевс заводит задачу сразу в направлении",
                       file=sys.stderr)
                 return 2
+            if (opt("--type") or "task") not in T.WORK_TYPES:
+                print(f"pantheon task new: --type {opt('--type')} — только {' или '.join(T.WORK_TYPES)}", file=sys.stderr)
+                return 2
             tid, p = T.task_new(PANTHEON, now(), opt("--direction"), opt("--title"), project=opt("--project"),
-                                text=opt("--text"), **fields)
+                                text=opt("--text"), kind=opt("--type") or "task", **fields)
             print(f"{tid} {os.path.relpath(p, PANTHEON)}")
             for w in T.option_warns(fields):
                 print(f"предупреждение · {w}", file=sys.stderr)
         elif sub == "set" and args:
             tid, changes, note, i = args[0], {}, None, 1
-            night_flags = {"--wave": "wave", "--batch": "batch", "--night": "night", "--estimate": "estimate",
+            # --wave — прежнее имя --release (metis-0069): выпуск строкой «pantheon 0.11.50»
+            night_flags = {"--release": "release", "--wave": "release", "--batch": "batch", "--night": "night", "--estimate": "estimate",
                            "--actual": "actual", "--acceptance": "acceptance"}  # ночной цикл: флаги как у --due
             while i < len(args):
                 if args[i] == "--note" and i + 1 < len(args):
@@ -4899,10 +4924,9 @@ def task_cmd(rest):
                     continue
                 if args[i] in night_flags and i + 1 < len(args):
                     k, v, eq, step = night_flags[args[i]], args[i + 1], "=", 2
-                    if k == "wave":
-                        v = str(int(v))  # не число — ошибка, как у priority=
                 else:
                     k, eq, v = args[i].partition("=")
+                    k = T.LEGACY_KEYS.get(k, k)
                     step = 1
                 if not eq:
                     print(f"pantheon task set: «{args[i]}» — нужно поле=значение", file=sys.stderr)
@@ -4923,16 +4947,24 @@ def task_cmd(rest):
             for w in T.option_warns({"options": changes.get("options")}):
                 print(f"предупреждение · {w}", file=sys.stderr)
         elif sub == "show" and args:
-            tasks = T.load_tasks(PANTHEON)
+            tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
             if args[0] not in tasks:
                 print(f"нет задачи {args[0]}", file=sys.stderr)
                 return 1
             print(open(tasks[args[0]][0], encoding="utf-8").read())
+            if tasks[args[0]][1].get("type") == "story":
+                print("## Состав пачки\n\n" + T.story_text(args[0], tasks) + "\n")
             words = T.owner_words(path("owner-log", "board.jsonl"), args[0])
             print("## Слова владельца (журнал владельца — только это подтверждает его решение)\n")
             for w in words or [{"time": "—", "kind": "нет записей"}]:
                 print(f"- {w.get('time', '')[:16].replace('T', ' ')} · {w.get('kind')} · "
                       f"{w.get('dst') or w.get('answer') or w.get('text') or w.get('title') or ''}")
+        elif sub == "attach" and len(args) == 2:
+            old = T.task_attach(PANTHEON, now(), args[0], args[1])
+            print(f"{args[0]} → пачка {args[1]}" + (f" (была в {old})" if old else ""))
+        elif sub == "detach" and len(args) == 1:
+            sid = T.task_detach(PANTHEON, now(), args[0])
+            print(f"{args[0]}: откреплена от пачки {sid}")
         elif sub == "ready":
             for tid, h in T.ready(PANTHEON, now(), opt("--direction"), opt("--owner")):
                 print(f"{tid}\t{T.PRIORITY.get(h.get('priority', 2), '')}\t{h.get('due') or '—'}\t{h.get('title')}")
