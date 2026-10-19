@@ -3605,8 +3605,8 @@ def who_is_who_names(text, roles, canvas=False):
         keys = [r, r.split("-")[0]] if r.split("-")[0] in LEAD_ROLES or r.startswith("dev-") else [r]
         if canvas:
             ru = [WHO_CANVAS_RU[k].lower() for k in keys if k in WHO_CANVAS_RU] or ([] if r in WHO_CANVAS_RU else [r])
-            def has(x):  # целым словом: «мом» в «Момент истины» — не роль (metis-0252)
-                return re.search(r"(?<!\w)" + re.escape(x) + r"(?!\w)", low) is not None
+            def has(x):  # граница слева, справа — падежное окончание: «мом» в «Момент» — не роль (metis-0252)
+                return re.search(r"(?<!\w)" + re.escape(x) + r"(?:а|у|е|ом|ы|и|ов|ам|ами|ах)?(?!\w)", low) is not None
             ok = any(has(x) for x in ru) or (r.startswith("dev-") and has("разработчик"))
         else:
             ok = any(k in words for k in keys)

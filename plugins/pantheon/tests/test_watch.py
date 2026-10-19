@@ -1899,6 +1899,9 @@ def test_who_is_who_memo():
         # целым словом (metis-0252): «мом» в «Момент истины» — не Мом
         open(cv, "w", encoding="utf-8").write(canvas_ok.replace("**Мом**", "Момент истины") % " newgod")
         check([x for x in p.who_is_who_check()[0] if "canvas" in x] == ["momus (canvas)"], f"подстрока в холсте сошла за роль: {p.who_is_who_check()}")
+        # падежные формы (metis-0252, повтор): «Разработчики», «координатора» засчитываются
+        open(cv, "w", encoding="utf-8").write(canvas_ok.replace(" координатор ", " координатора Разработчики ") % " newgod")
+        check([x for x in p.who_is_who_check()[0] if "canvas" in x] == [], f"падежные формы не засчитаны: {p.who_is_who_check()}")
     finally:
         for k, v in saved.items():
             setattr(p, k, v)
