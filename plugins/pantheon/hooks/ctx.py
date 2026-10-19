@@ -361,19 +361,46 @@ def queued_entry(path, prompt, t, used=(), start=None):
     """Ваш ввод во время хода агента (metis-0028): Claude Code пишет его не записью user с promptId, а вложением
     queued_command с origin.kind = human, когда ход его заберёт (проверено 15.10 на транскриптах Зевса). Сообщения
     других сессий там же — kind = peer, уведомления — task-notification. promptId у вложения нет: сверка по тексту и
-    времени постановки в очередь. → (запись, время) или None."""
+    времени. → (запись, время постановки в очередь) или None.
+
+    Время (metis-0289): хук UserPromptSubmit такого ввода срабатывает, когда ход забирает очередь (проба 19.10,
+    Claude Code 2.1.303: тот же prompt_id, что у идущего хода), а attachment.timestamp — время постановки. Между ними
+    может идти долгий инструмент или субагент, поэтому годится любое из двух: постановка или запись вложения."""
     for d in reversed(list(entries(window(path, 4000000, start, b"queued_command")))):
-        a = d.get("attachment") or {}
-        if d.get("type") != "attachment" or d.get("isSidechain") or a.get("type") != "queued_command":
-            continue
-        if (a.get("origin") or {}).get("kind") != "human" or a.get("commandMode") != "prompt":
-            continue
-        if not same_text({"message": {"content": a.get("prompt")}}, prompt):
+        a = queued_attachment(d, prompt)
+        if a is None or (a.get("origin") or {}).get("kind") != "human" or d.get("isMeta") or a.get("isMeta"):
             continue
         te = iso_ts(a.get("timestamp") or d.get("timestamp"))
-        if te is not None and abs(t - te) <= ENTRY_MAX_AGE and queued_key(d) and queued_key(d) not in used:
-            return d, te
+        if queued_fresh(d, t) and queued_key(d) and queued_key(d) not in used:
+            return d, te if te is not None else t
     return None
+
+
+def queued_attachment(d, prompt):
+    """Вложение queued_command главной ветки, режим prompt, тот же текст → attachment или None."""
+    a = d.get("attachment") or {}
+    if d.get("type") != "attachment" or d.get("isSidechain") or a.get("type") != "queued_command":
+        return None
+    if a.get("commandMode") != "prompt" or not same_text({"message": {"content": a.get("prompt")}}, prompt):
+        return None
+    return a
+
+
+def queued_fresh(d, t):
+    """Вложение очереди поставлено или записано не дальше ENTRY_MAX_AGE от ввода."""
+    times = (iso_ts((d.get("attachment") or {}).get("timestamp")), iso_ts(d.get("timestamp")))
+    return any(x is not None and abs(t - x) <= ENTRY_MAX_AGE for x in times)
+
+
+def queued_not_owner(path, prompt, t, start=None):
+    """Тот же текст пришёл в очередь хода не от вас: другая сессия, уведомление задачи, хук (origin не human или
+    isMeta). Такой ввод не пишется никуда, даже в unconfirmed/."""
+    for d in entries(window(path, 4000000, start, b"queued_command")):
+        a = queued_attachment(d, prompt)
+        if a is not None and queued_fresh(d, t) and \
+                ((a.get("origin") or {}).get("kind") != "human" or a.get("isMeta") or d.get("isMeta")):
+            return True
+    return False
 
 
 def queued_pending(path, prompt, t, start=None):
@@ -805,7 +832,14 @@ def cmd_owner_log(ev):
         return 0
     else:
         if not is_owner_entry(entry):
-            return 0  # расписание, другая сессия, субагент, пробуждение хуком
+            if same_text(entry, prompt) or queued_not_owner(tpath, prompt, t, start):
+                return 0  # расписание, другая сессия, субагент, пробуждение хуком
+            # metis-0289: запись хода не ваша и текст другой — это вставка посреди чужого хода (ход начат сообщением
+            # другой сессии или уведомлением), а вашего вложения очереди не нашлось. Раньше ввод пропадал молча.
+            append_owner_line(name, t, prompt, "вставка посреди хода: вложения очереди нет", folder=UNCONFIRMED)
+            hook_log("owner-log", "ввод посреди хода %s без вложения очереди — строка в unconfirmed/%s.md"
+                     % (ev.get("prompt_id"), name))
+            return 0
         te = iso_ts(entry.get("timestamp"))
         if not same_text(entry, prompt) or te is None or abs(t - te) > ENTRY_MAX_AGE:
             append_owner_line(name, t, prompt, "запись транскрипта не совпала с вводом", folder=UNCONFIRMED)
