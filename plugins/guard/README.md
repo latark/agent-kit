@@ -268,13 +268,16 @@ SDK (`sdk`) флаг не снимают — так же журнал owner-log 
    загрузку правил окон, идёт обычным шлюзом, и её видит ревью. PR, который задевает ядро, сливает только сам владелец. gh не ответил, список
    файлов неполон или PR уже на другом коммите — тоже отказ.
 8. Проверки GitHub зелёные (guard 0.5.13, metis-0297) — последним шагом во всех режимах. 19.10 дважды ушёл PR с
-   красной check-traces: проверки сверяла память сессии, а не шлюз. Теперь шлюз зовёт
-   `gh pr view N -R <repo> --json headRefOid,statusCheckRollup`. PR не на этом SHA — отказ. CheckRun судится по
-   `status` и `conclusion`, StatusContext — по `state`; зелёные итоги — SUCCESS, NEUTRAL, SKIPPED. Красная
-   проверка — отказ с её именем, идущая (QUEUED, IN_PROGRESS, PENDING) — отказ «дождись», gh не ответил — отказ
-   «проверки GitHub не получены». Проверок нет: если на этом коммите нет `.github/workflows`
-   (`gh api repos/<repo>/contents/.github/workflows?ref=<SHA>` → 404), шлюз пропускает; папка есть — отказ
-   «проверки ещё не встали»; другой сбой api — отказ. Разбор rollup повторяет `ci_state` из
+   красной check-traces: проверки сверяла память сессии, а не шлюз. Теперь шлюз один раз зовёт
+   `gh pr view N -R <repo> --json headRefOid,baseRefOid,changedFiles,statusCheckRollup` — этот же ответ берёт и
+   проверка ядра из п. 7, так что вызовов gh меньше при таймауте хука 10 с. PR не на этом SHA — отказ. CheckRun
+   судится по `status` и `conclusion`, StatusContext — по `state`; зелёные итоги — SUCCESS, NEUTRAL, SKIPPED.
+   Красная проверка — отказ с её именем, идущая (QUEUED, IN_PROGRESS, PENDING) — отказ «дождись», gh не ответил —
+   отказ «проверки GitHub не получены». Проверок нет: шлюз спрашивает `.github/workflows` на head PR, а если там
+   404 — и на base PR (`gh api repos/<repo>/contents/.github/workflows?ref=<SHA>`). Пропуск — только когда папки
+   нет ни там, ни там: PR, который удаляет или переименовывает workflows, проверок не получает, а на base они есть
+   (ревью argus 0297b). Папка есть — отказ «проверки ещё не встали»; любой другой ответ api, в том числе код 0 с
+   не-JSON, — отказ. Разбор rollup повторяет `ci_state` из
    `plugins/pantheon/lib/merge.py` (PR #79, metis-0285, Touch ID): при слиянии обоих разбор держать одинаковым.
 
 **Как появляются записи.** Журнал пишет только хук guard на PostToolUse, после успешной простой команды

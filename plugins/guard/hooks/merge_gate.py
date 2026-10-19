@@ -31,8 +31,9 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    файлы из pulls/N/files с previous_filename. В защитах accept засчитывается, только если его ran начинается с
    «модель: claude-opus» (metis-0176): accept другой модели — как будто его нет, reject любой модели в силе.
    Незаменённый шаблон «<ID>» в ran — отказ ещё до записи.
-   Последним во всех режимах — проверки GitHub (metis-0297): PR на этом SHA (headRefOid), statusCheckRollup зелёный;
-   красная или идущая проверка, нет ответа gh — отказ; проверок нет — пропуск, только если на SHA нет .github/workflows.
+   Последним во всех режимах — проверки GitHub (metis-0297), один gh pr view на Д3 и проверки: PR на этом SHA, rollup зелёный;
+   красная или идущая проверка, нет ответа gh — отказ; проверок нет — пропуск, только если .github/workflows нет ни на
+   head, ни на base PR.
 Правдивость поля ran (модель argus) guard не проверяет: это защита от ошибки шаблона и запуска не той модели.
 Чего guard не проверяет: правдивость строки в сводке и перечня argus и то, что выбранная команда тестов — настоящие
 тесты: пустую программу (true, echo…, python3 -c pass, sh -c '') он ловит по короткому списку, а придуманную
@@ -773,14 +774,20 @@ def _is_core(path, core_files):
     return p in core_files or any(p == d or p.startswith(d + "/") for d in CORE_DIR)
 
 
-def _core_problem(repo, pr, sha):
-    """Д3: PR защит, который задевает ядро, ждёт слияния владельцем. Файлы — из REST pulls/N/files (там есть
-    status и previous_filename: переименование ядра не прячет старый путь). Ответа gh нет, список файлов неполон,
-    PR на другом коммите — тоже отказ."""
-    heads = _gh_json(["pr", "view", str(pr), "-R", repo, "--json", "headRefOid,changedFiles"])
-    data = heads[0] if isinstance(heads, list) and len(heads) == 1 else None
-    if not isinstance(data, dict):
-        return f"{MERGE_CORE}: gh pr view {pr} -R {repo} не ответил, а без списка файлов PR ядро не проверить"
+PR_VIEW_FIELDS = "headRefOid,baseRefOid,changedFiles,statusCheckRollup"
+
+
+def _pr_view(repo, pr):
+    """Один gh pr view на шлюз — и для Д3, и для проверок GitHub (таймаут хука 10 с): словарь или None (сбой)."""
+    got = _gh_json(["pr", "view", str(pr), "-R", repo, "--json", PR_VIEW_FIELDS])
+    data = got[0] if isinstance(got, list) and len(got) == 1 else None
+    return data if isinstance(data, dict) else None
+
+
+def _core_problem(repo, pr, sha, data):
+    """Д3: PR защит, который задевает ядро, ждёт слияния владельцем. data — ответ _pr_view. Файлы — из REST
+    pulls/N/files (там есть status и previous_filename: переименование ядра не прячет старый путь). Список файлов
+    неполон, PR на другом коммите — тоже отказ."""
     count, head = data.get("changedFiles"), data.get("headRefOid")
     files = _gh_json(["api", f"repos/{repo}/pulls/{pr}/files?per_page=100", "--paginate", "--jq", ".[]"])
     paths = None
@@ -852,14 +859,12 @@ def _has_workflows(repo, sha):
     return False if "(HTTP 404)" in (r.stderr or "") else None
 
 
-def _ci_problem(repo, pr, sha):
+def _ci_problem(repo, pr, sha, data):
     """Проверки GitHub на head PR зелёные — иначе текст отказа (metis-0297: 19.10 дважды ушёл PR с красной
-    check-traces). PR на другом коммите, красная или идущая проверка, нет ответа gh — отказ. Проверок нет: без
-    .github/workflows на этом коммите — пропуск, с ними — отказ (ещё не встали)."""
-    got = _gh_json(["pr", "view", str(pr), "-R", repo, "--json", "headRefOid,statusCheckRollup"])
-    data = got[0] if isinstance(got, list) and len(got) == 1 else None
-    if not isinstance(data, dict):
-        return f"{CI_NONE}: gh pr view {pr} -R {repo} не ответил — без них не сливаем, повтори позже"
+    check-traces). data — ответ _pr_view. PR на другом коммите, красная или идущая проверка — отказ. Проверок нет:
+    пропуск, только если .github/workflows нет ни на head, ни на base PR (ответ 404 на оба): PR, который удаляет или
+    переименовывает папку workflows, проверок не получает, а на base она есть (ревью argus 0297b). Сбой любого
+    запроса — отказ; base спрашивается, только когда rollup пуст и на head папки нет."""
     head = data.get("headRefOid")
     if not isinstance(head, str) or head.lower() != sha:
         return f"PR сейчас на другом коммите ({head}), а не на {sha} — проверки GitHub сверяются на проверенном SHA"
@@ -869,12 +874,18 @@ def _ci_problem(repo, pr, sha):
     if state == "wait":
         return f"{text} на {repo}#{pr}@{sha[:12]} — дождись итога и повтори слияние"
     if state == "empty":
-        wf = _has_workflows(repo, sha)
-        if wf is None:
-            return f"{CI_NONE}: проверок на {repo}#{pr} нет, а gh api не ответил, есть ли .github/workflows"
-        if wf:
-            return (f"проверки GitHub ещё не встали на {repo}#{pr}@{sha[:12]} (в .github/workflows они есть) — "
-                    "дождись и повтори слияние")
+        base = data.get("baseRefOid")
+        if not isinstance(base, str) or not SHA_RE.fullmatch(base.lower()):
+            return f"{CI_NONE}: проверок на {repo}#{pr} нет, а коммит base PR ({base}) не получен"
+        for ref, where in ((sha, "head PR"), (base.lower(), "base PR")):
+            wf = _has_workflows(repo, ref)
+            if wf is None:
+                return (f"{CI_NONE}: проверок на {repo}#{pr} нет, а gh api не ответил, есть ли .github/workflows "
+                        f"на {where} ({ref[:12]})")
+            if wf:
+                return (f"проверки GitHub ещё не встали на {repo}#{pr}@{sha[:12]}: на {where} ({ref[:12]}) "
+                        ".github/workflows есть, а проверок нет — дождись и повтори слияние; PR, который убирает "
+                        "workflows, сливает владелец")
     return None
 
 
@@ -966,11 +977,15 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
         if not _alert_ok(repo, pr):
             return (f"продукт — нет строки «что ушло» в ~/ai/pantheon/alerts.md со ссылкой {repo}#{pr} и словом "
                     f"«откат»: `pantheon alert \"{repo}#{pr}: что ушло; откат: <команда>\"`. {advice}")
+    view = _pr_view(repo, pr)
+    if view is None:
+        return (f"{CI_NONE}: gh pr view {pr} -R {repo} не ответил — без него не сверить ни проверки GitHub, ни "
+                f"файлы PR (ядро), повтори позже. {advice}")
     if protect:
-        why = _core_problem(repo, pr, sha)
+        why = _core_problem(repo, pr, sha, view)
         if why:
             return f"{why}. {MERGE_PROTECT}"
-    why = _ci_problem(repo, pr, sha)
+    why = _ci_problem(repo, pr, sha, view)
     if why:
         return f"{why}. {advice}"
     return None
