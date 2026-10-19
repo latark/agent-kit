@@ -429,6 +429,9 @@ def record(ctx, tasks, tid):
         return None
     if (tid, v[1].get("closed")) in _have(read_rows(ctx.rows_path)):
         return None
+    # писать некуда (песочница роли) — понять до чтения транскриптов, а не после
+    os.makedirs(os.path.dirname(ctx.rows_path), exist_ok=True)
+    os.close(os.open(ctx.rows_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o644))
     rows = make_rows(ctx, tasks, [tid], estimate=str(v[1]["closed"]) < since(ctx))
     append_rows(ctx.rows_path, rows)
     return rows[0]
