@@ -256,7 +256,7 @@ def _watch(dry=False):
     doms = domains()
     checks = [("снимок", lambda: snapshot(agents, t)),
               ("метка перезапуска", lambda: maint_expire(t)),
-              ("сессии", lambda: sessions(agents, doms)),
+              ("сессии", lambda: sessions(agents, doms, t)),
               ("STATUS.md", lambda: status_files(doms, t)),
               ("swap", lambda: swap(agents, t)),
               ("worktree", lambda: worktrees(agents, reg, doms, t)),
@@ -297,9 +297,96 @@ def gave_up_note(d, s):
     return f"Самозапуск {d} встал: {s.get('fails')} сбоя подряд"
 
 
-def sessions(agents, doms):
+RELAY_EVERY = 900  # metis-0277: «ждёт вас» уходит живому Зевсу не чаще раза в 15 мин на сессию
+WHY_LIMIT = 120
+GENERIC_WHY = re.compile(r"(?:permission(?: prompt)?|input needed|waiting(?: for (?:input|permission))?|blocked)\W*",
+                         re.I)
+TARGET_KEYS = ("file_path", "path", "command", "url", "cwd", "name", "pattern", "query", "description")
+
+
+def clean_why(v):
+    """Текст сессии — данные (SEC-13): без переводов строк и лишних пробелов, не длиннее WHY_LIMIT."""
+    return " ".join(str(v or "").split())[:WHY_LIMIT]
+
+
+def pending_tool(a):
+    """Чего ждёт сессия по её журналу: последний tool_use без tool_result → «Инструмент → цель» или None."""
+    tp = P.transcript_path(a)
+    if not tp:
+        return None
+    try:
+        C = P.ctx_mod()
+        used, results, order = {}, set(), []
+        for d in C.entries(C.tail_lines(tp, 1_000_000)):
+            items = (d.get("message") or {}).get("content")
+            for x in items if isinstance(items, list) else []:
+                if not isinstance(x, dict):
+                    continue
+                if x.get("type") == "tool_use" and x.get("id"):
+                    used[x["id"]] = x
+                    order.append(x["id"])
+                elif x.get("type") == "tool_result":
+                    results.add(x.get("tool_use_id"))
+        open_ids = [i for i in order if i not in results]
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    if not open_ids:
+        return None
+    u = used[open_ids[-1]]
+    inp = u.get("input") if isinstance(u.get("input"), dict) else {}
+    target = next((str(inp[k]) for k in TARGET_KEYS if inp.get(k)), "")
+    name = clean_why(u.get("name"))
+    return clean_why(f"{name} → {target}" if target else name) or None
+
+
+def blocked_why(a):
+    """Что ждёт сессия, одной строкой: инструмент и цель из журнала, иначе waitingFor из claude agents, если это не
+    общее «permission prompt»; иначе «причина неизвестна»."""
+    tool = pending_tool(a)
+    if tool:
+        return tool
+    wf = clean_why(a.get("waitingFor"))
+    if wf and not GENERIC_WHY.fullmatch(wf):
+        return wf
+    return "причина неизвестна"
+
+
+def relay_zeus(agents, name, sid, why, t):
+    """Блокировка сразу в живую сессию Зевса тем же путём, что передача задания (push + claude respawn). Не чаще
+    RELAY_EVERY на сессию; Зевса нет, остановлен или он занят ходом — ничего (остаются тревога и уведомление)."""
+    if name.startswith("zeus") or os.path.exists(P.path("stopped", "zeus")) or os.environ.get("PANTHEON_DRYRUN") == "1":
+        return False
+    zs = [z for z in agents if z.get("name") == "zeus" and z.get("id") and z.get("sessionId")
+          and z.get("kind") in (None, "background")]
+    z = max(zs, key=lambda x: x.get("startedAt") or 0) if zs else None
+    if not z or not idle_holder(z):
+        return False
+    st = P.read_json(P.path("relay.json"), {})
+    st = st if isinstance(st, dict) else {}
+    last = st.get(sid)
+    if isinstance(last, (int, float)) and t - last < RELAY_EVERY:
+        return False
+    text = f"{P.START_MARK} {name} ({sid}) ждёт вас: {why} — claude attach {sid}"
+    pushed = P.push_text(z["sessionId"], text)
+    if not pushed:
+        return False
+    r = subprocess.run([P.claude_bin(), "respawn", z["id"]], capture_output=True, text=True, timeout=180)
+    P.start_log(f"relay\tzeus\t{z['id']}\t{sid}\t{r.returncode}")
+    if r.returncode != 0:
+        with contextlib.suppress(OSError):
+            os.remove(pushed)
+        return False
+    st = {k: v for k, v in st.items() if isinstance(v, (int, float)) and t - v < 86400}
+    st[sid] = t
+    P.write_json(P.path("relay.json"), st)
+    return True
+
+
+def sessions(agents, doms, t=None):
     """Ждёт вас (blocked) или упала (failed) — тревога один раз на состояние сессии; уведомление — сбой «скоро»
-    каждый проход, пока состояние держится (политика решает: macOS, когда вас нет, не чаще раза в час на событие)."""
+    каждый проход, пока состояние держится (политика решает: macOS, когда вас нет, не чаще раза в час на событие).
+    blocked дополнительно сразу уходит живому Зевсу (metis-0277), с инструментом и целью запроса."""
+    t = P.now() if t is None else t
     word = {"blocked": "ждёт вас", "failed": "упала"}
     for a in agents:
         name, sid, state = a.get("name") or "", a.get("id") or a.get("sessionId") or "", a.get("state")
@@ -311,12 +398,14 @@ def sessions(agents, doms):
             P.clear_fault(*(f"watch-{s}-{sid}" for s in word))  # состояние снялось — следующее снова macOS
             continue
         P.clear_fault(*(f"watch-{s}-{sid}" for s in word if s != state))
-        why = " ".join(str(a.get("waitingFor") or "").split())[:120]
+        why = blocked_why(a) if state == "blocked" else clean_why(a.get("waitingFor"))
         P.alert_once(key, state, f"{name} ({sid}) {word[state]}" + (f": {why}" if why else "")
                      + f" — claude attach {sid}", "watch")
         # ключ события — сессия и состояние: «упала» после «ждёт вас» — своё уведомление, вид — один на сессию
         P.notify_soon(f"watch-{state}-{sid}", f"{name} {word[state]}" + (f": {why[:80]}" if why else ""),
                       group=f"session-{name}", once=True)
+        if state == "blocked":
+            relay_zeus(agents, name, sid, why, t)
 
 
 def _job_time(js):

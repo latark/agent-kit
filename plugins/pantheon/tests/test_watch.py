@@ -2400,6 +2400,91 @@ def test_auto_rm_done_stopped_0250():
     check(e.alerts().count("a8a8a8a8 осталась") == 1, "тот же отказ — вторая тревога")
 
 
+BLK_SID = "b10c0001-aaaa"
+
+
+def _blocked_env(tool=None, waiting="permission prompt"):
+    """Фоновая сессия coord-x стоит на запросе разрешения; живой Зевс закончил ход (state done, процесс есть)."""
+    e = Env()
+    e.direction("coord-x")
+    b = bg("coord-x", "blocked", BLK_SID, pid=31)
+    if waiting:
+        b["waitingFor"] = waiting
+    z = bg("zeus", "done", "2e057e05-1", pid=32)
+    e.agents([b, z])
+    if tool:
+        d = os.path.join(e.home, ".claude", "projects", "-tmp")
+        os.makedirs(d, exist_ok=True)
+        rows = [_tool(tool[0], "tu1", tool[1], T0 - 30)]
+        with open(os.path.join(d, BLK_SID + ".jsonl"), "w") as fh:
+            fh.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+    return e
+
+
+def _relayed(e):
+    return [c for c in e.calls() if c[:1] == ["respawn"] and c[1] == "2e057e05"]
+
+
+def _pushed(e):
+    p = e.st("push", "2e057e05-1.txt")
+    return open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+
+
+def test_blocked_relay_to_zeus_0277():
+    """metis-0277: blocked уходит живому Зевсу (push + respawn) с инструментом и целью; повтор не чаще раза в 15 мин
+    на сессию; текст сессии — данные: обрезан до 120 знаков, без переводов строк."""
+    e = _blocked_env(("EnterWorktree", {"path": "/Users/x/tgdaemon/wt"}))
+    e.run("watch", t=T0)
+    text = _pushed(e)
+    check(len(_relayed(e)) == 1, f"0277: Зевсу не передано: {e.calls()}")
+    check("EnterWorktree → /Users/x/tgdaemon/wt" in text and "permission prompt" not in text
+          and "b10c0001" in text and text.startswith("[Пантеон:"), f"0277: нет инструмента и цели: {text!r}")
+    check("EnterWorktree → /Users/x/tgdaemon/wt" in e.alerts(), f"0277: в тревоге нет цели: {e.alerts()}")
+    os.remove(e.st("push", "2e057e05-1.txt"))                     # хук push забрал текст
+    e.run("watch", t=T0 + 300)
+    check(len(_relayed(e)) == 1, f"0277: через 5 мин второе сообщение: {e.calls()}")
+    e.run("watch", t=T0 + 960)
+    check(len(_relayed(e)) == 2, f"0277: через 16 мин повтора нет: {e.calls()}")
+    # текст сессии — данные: длинная цель с переводами строк
+    e = _blocked_env(("Bash", {"command": "echo a\n" + "x" * 300}))
+    e.run("watch", t=T0)
+    text = _pushed(e)
+    check("\n" not in text and "x" * 121 not in text and "echo a x" in text, f"0277: текст не обрезан: {text!r}")
+
+
+def test_blocked_no_zeus_only_alert_0277():
+    """metis-0277: Зевса нет, остановлен или он занят ходом — сообщения нет, остаются тревога и уведомление."""
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    e.agents([bg("coord-x", "blocked", BLK_SID, pid=31)])
+    e.run("watch", t=T0)
+    check(not _relayed(e) and not [c for c in e.calls() if c[:1] == ["respawn"]], f"0277: без Зевса — передача: {e.calls()}")
+    check("coord-x (b10c0001) ждёт вас" in e.alerts(), f"0277: без Зевса нет тревоги: {e.alerts()}")
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    os.makedirs(e.st("stopped"), exist_ok=True)
+    open(e.st("stopped", "zeus"), "w").write("x")
+    e.run("watch", t=T0)
+    check(not _relayed(e) and "ждёт вас" in e.alerts(), f"0277: остановленному Зевсу передано: {e.calls()}")
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    busy = bg("zeus", "working", "2e057e05-1", pid=32)
+    busy["status"] = "busy"
+    e.agents([bg("coord-x", "blocked", BLK_SID, pid=31), busy])
+    e.run("watch", t=T0)
+    check(not _relayed(e), f"0277: занятому ходом Зевсу передано (respawn оборвал бы ход): {e.calls()}")
+
+
+def test_blocked_reason_fallbacks_0277():
+    """metis-0277 п. 2: нет журнала — waitingFor, если он не общий «permission prompt»; нет и его — «причина
+    неизвестна — claude attach <id>» без пустого места после тире."""
+    e = _blocked_env(None, waiting="Bash: rm -rf build")
+    e.run("watch", t=T0)
+    check("Bash: rm -rf build" in _pushed(e), f"0277: waitingFor не взят: {_pushed(e)!r}")
+    e = _blocked_env(None, waiting="permission prompt")
+    e.run("watch", t=T0)
+    text = _pushed(e)
+    check("ждёт вас: причина неизвестна — claude attach b10c0001" in text and "permission prompt" not in text,
+          f"0277: нет «причина неизвестна»: {text!r}")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
