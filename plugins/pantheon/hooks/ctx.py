@@ -244,8 +244,10 @@ def context_tokens(path):
 
 
 def is_owner_entry(d):
+    """Ваш ввод с клавиатуры окна. Пересланное из Slack (verifiedSlackHumanTurn) — не ваше: Claude Code 2.1.303 сам
+    не считает его человеком (функция YC в бинаре), хотя origin.kind = human."""
     return d.get("type") == "user" and not d.get("isSidechain") and not d.get("isMeta") and \
-        (d.get("origin") or {}).get("kind") == "human"
+        (d.get("origin") or {}).get("kind") == "human" and not d.get("verifiedSlackHumanTurn")
 
 
 def last_owner_time(path):
@@ -394,6 +396,8 @@ def queued_attachment(d, prompt):
     a = d.get("attachment") or {}
     if d.get("type") != "attachment" or d.get("isSidechain") or a.get("type") != "queued_command":
         return None
+    if a.get("verifiedSlackHumanTurn") or d.get("verifiedSlackHumanTurn"):
+        return None  # пересылка из Slack: не ваш ввод с клавиатуры (как YC в Claude Code 2.1.303)
     if a.get("commandMode") != "prompt" or not same_text({"message": {"content": a.get("prompt")}}, prompt):
         return None
     return a
@@ -800,7 +804,9 @@ def cmd_owner_log(ev):
     used = queued_used(sid)
     # читаем от места, где был конец транскрипта при вводе (минус запас), до конца: за время ожидания транскрипт
     # растёт, и окно «хвост 2 МБ» теряло запись (metis-0249)
-    mark = file_size(tpath) if tpath else None  # что дописано после — пришло после срабатывания хука (metis-0289)
+    # что дописано после mark — пришло после срабатывания хука (metis-0289). Файла ещё нет — места нет, только время:
+    # иначе mark = 0 и годилось бы любое вложение файла, появившегося позже (--fork-session с историей)
+    mark = file_size(tpath) if tpath and os.path.isfile(tpath) else None
     start = max(0, mark - 2000000) if tpath else None
     entry, queued, extended, skipped = None, None, False, set()
     deadline = t + float(os.environ.get("PANTHEON_CONFIRM_WAIT") or CONFIRM_WAIT)

@@ -27,6 +27,7 @@
 меткой human, вложение в ветке субагента. 9 — старое вложение, записанное до хука, не берётся; ввод уходит в
 unconfirmed/. 10 — вложения нет. 11 — одно вложение засчитывается один раз. 12 — вложение дописано до хука, но
 поставлено только что. 13 — старое «да» другой сессии не гасит ваш ввод. 14 — окно владельца: хук при наборе.
+15–17 — пересылка из Slack (verifiedSlackHumanTurn) не ваша. 18 — транскрипта нет на старте хука: только время.
 
 Запуск: python3 -I plugins/pantheon/tests/test_owner_log_midturn.py  (0 — прошли; проверяется и на /usr/bin/python3).
 CTX_TEST_HOOK — путь к другому ctx.py (проверка мутантов).
@@ -255,6 +256,59 @@ check("старое вложение другой сессии с тем же т
 CLI = "да, переводи на новую версию"
 midturn("cli", CLI, age=0)
 check("cli: хук при наборе, вложение дописано позже → в подлиннике", CLI in zeus() and CLI not in unc())
+
+# 15–16. Пересылка из Slack: origin.kind = human, но verifiedSlackHumanTurn — Claude Code сам не считает её человеком.
+SL = "да, сливай из слака"
+
+
+def slack_att(now):
+    d = queued(SL, now - 5)
+    d["attachment"]["verifiedSlackHumanTurn"] = True
+    return d
+
+
+midturn("slack-att", SL, att=slack_att)
+check("вложение из Slack (verifiedSlackHumanTurn во вложении) → не в подлиннике", SL not in zeus(), zeus()[-200:])
+SL2 = "да, и это из слака"
+
+
+def slack_rec(now):
+    d = queued(SL2, now - 5)
+    d["verifiedSlackHumanTurn"] = True
+    return d
+
+
+midturn("slack-rec", SL2, att=slack_rec)
+check("вложение из Slack (флаг на записи) → не в подлиннике", SL2 not in zeus(), zeus()[-200:])
+
+# 17. Запись хода из Slack с тем же текстом и prompt_id события — не ваша (is_owner_entry).
+SL3 = "да, сноси прод"
+tr = os.path.join(home, "tr", "slack-turn.jsonl")
+d = user(SL3, "p-slack-turn", time.time() - 1)
+d["verifiedSlackHumanTurn"] = True
+append(tr, d)
+run({"session_id": "s-slack-turn", "transcript_path": tr, "hook_event_name": "UserPromptSubmit", "agent_type": "hq",
+     "prompt": SL3, "prompt_id": "p-slack-turn", "cwd": home, "permission_mode": "default"})
+check("запись хода из Slack (verifiedSlackHumanTurn) → не в подлиннике", SL3 not in zeus(), zeus()[-200:])
+
+# 18. Транскрипта нет, когда сработал хук; потом появился файл со старым вложением (история --fork-session).
+# Места в файле нет — только время: вложение часовой давности не берётся.
+NOFILE = "да, удаляй всё"
+tr = os.path.join(home, "tr", "nofile.jsonl")
+holder = {}
+th = threading.Thread(target=lambda: holder.update(r=run({
+    "session_id": "s-nofile", "transcript_path": tr, "hook_event_name": "UserPromptSubmit", "agent_type": "hq",
+    "prompt": NOFILE, "prompt_id": "p-nofile", "cwd": home, "permission_mode": "default"})))
+th.start()
+time.sleep(0.5)  # хук стартовал без файла; ждёт он дольше (enqueue ниже продлевает ожидание до QUEUED_WAIT)
+now = time.time()
+append(tr, user("<cross-session-message from=\"metis\">задача</cross-session-message>", "p-nofile", now - 3700,
+                kind="peer"))
+append(tr, queued(NOFILE, now - 3600))
+append(tr, {"type": "queue-operation", "operation": "enqueue", "timestamp": iso(now), "content": NOFILE})
+th.join(40)
+check("транскрипта не было на старте хука, потом старое вложение → не в подлиннике", NOFILE not in zeus(),
+      zeus()[-200:])
 
 print("%d/%d" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
