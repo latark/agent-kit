@@ -74,6 +74,11 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code
   pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (плановый проход раз в неделю)
+  pantheon metrics sync|summary         учёт по задачам: строки закрытых задач в ~/ai/pantheon/metrics/tasks.jsonl
+                                        (пишет и `task set status=done|dropped`), свод недели — week-<неделя>.md
+                                        и заметки Пульта; summary — свод в окно
+  pantheon metrics backfill --from ГГГГ-ММ-ДД [--to ГГГГ-ММ-ДД] [--dry-run]   задним числом: строки закрытых за
+                                        эти дни задач с пометкой «оценка» (у кого строки нет)
   pantheon roles build                  роли ~/.claude/agents/*.md из общих шаблонов плагина (roles/*.tmpl,
                                         roles/_parts/*.part) и личного слоя ~/.claude/agents (*.tmpl, _parts/*.part
                                         перекрывают общие по имени); подстановки — из [person] directions.toml
@@ -4983,6 +4988,75 @@ def awake_mod():
     return _AWAKE
 
 
+_METRICS = None
+
+
+def metrics_mod():
+    """lib/metrics.py — учёт по задачам: исполнитель, модель, расход, круги argus (metis-0294)."""
+    global _METRICS
+    if _METRICS is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_metrics", os.path.join(LIB, "metrics.py"))
+        _METRICS = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_METRICS)
+    return _METRICS
+
+
+def metrics_ctx():
+    return metrics_mod().Ctx(PANTHEON, STATE, HOME, now(), BOARD)
+
+
+def metrics_on_close(T, tid):
+    """Строка учёта при закрытии задачи. Не вышло (песочница роли не пускает в metrics/) — смена статуса остаётся,
+    строку допишет плановый проход доски."""
+    if os.environ.get("PANTHEON_METRICS") == "0":
+        return
+    try:
+        metrics_mod().record(metrics_ctx(), T.load_tasks(PANTHEON, T.WORK_TYPES), tid)
+    except Exception as e:  # noqa: BLE001 — учёт не должен ломать закрытие задачи
+        print(f"предупреждение · учёт {tid} не записан ({type(e).__name__}): допишет плановый проход доски",
+              file=sys.stderr)
+
+
+def metrics_cmd(rest):
+    M, T = metrics_mod(), tasks_mod()
+    sub, args = (rest[0] if rest else ""), rest[1:]
+    tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+    ctx = metrics_ctx()
+    if sub == "sync":
+        rows = M.sync(ctx, tasks)
+        M.publish(ctx, tasks)
+        print(f"учёт: строк дописано {len(rows)}; свод — {tilde(os.path.dirname(ctx.rows_path))}")
+        return 0
+    if sub == "summary":
+        print(M.week_md(M.summary(M.read_rows(ctx.rows_path), ctx.t, M.post_merge_index(tasks)), ctx.t))
+        return 0
+    if sub == "backfill":
+        opts, dry, i = {}, False, 0
+        while i < len(args):
+            if args[i] == "--dry-run":
+                dry, i = True, i + 1
+            elif args[i] in ("--from", "--to") and i + 1 < len(args) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", args[i + 1]):
+                opts[args[i][2:]], i = args[i + 1], i + 2
+            else:
+                print(f"pantheon metrics backfill: непонятно «{args[i]}» — нужно --from ГГГГ-ММ-ДД [--to ГГГГ-ММ-ДД] "
+                      "[--dry-run]", file=sys.stderr)
+                return 2
+        if "from" not in opts:
+            print("pantheon metrics backfill: нужно --from ГГГГ-ММ-ДД", file=sys.stderr)
+            return 2
+        rows = M.backfill(ctx, tasks, opts["from"], opts.get("to"), dry=dry)
+        for r in rows:
+            print(f"{r['id']}\t{r['closed']}\t{r['executor']}\t{r['model']}\t{r['effort']}\t${r['usd']:.2f}\t"
+                  f"кругов {r['argus_rounds']}\tоценка")
+        print(f"задним числом: {len(rows)} строк" + (" (проба, не записано)" if dry else f" → {tilde(ctx.rows_path)}"))
+        if not dry:
+            M.publish(ctx, tasks)
+        return 0
+    print("pantheon metrics sync | summary | backfill --from ГГГГ-ММ-ДД [--to ГГГГ-ММ-ДД] [--dry-run]", file=sys.stderr)
+    return 2
+
+
 def owner_acts():
     """→ (ответы, переносы в «Нужен ответ»), оба {id: [метка времени, …]}. Ответы — из журнала доски (answer и
     request с вариантом, move не в «Нужен ответ») и окна вопросов Зевса (вопрос «[id] …»); перенос карточки в «Нужен
@@ -5306,7 +5380,25 @@ def board():
                 os.remove(fp)
     for ln in lines:
         print(ln)
+    if primary and os.environ.get("PANTHEON_METRICS") != "0":
+        board_metrics(T)
     return 0
+
+
+def board_metrics(T):
+    """Учёт по задачам после прохода доски: строки закрытий, которые роль из песочницы записать не смогла, и свод
+    недели на Пульт. Своя блокировка: первый проход после выпуска читает транскрипты дольше минуты."""
+    with lock("metrics", block=False) as got:
+        if not got:
+            return
+        try:
+            M, tasks = metrics_mod(), T.load_tasks(PANTHEON, T.WORK_TYPES)
+            ctx = metrics_ctx()
+            M.sync(ctx, tasks)
+            M.publish(ctx, tasks)
+        except Exception as e:  # noqa: BLE001 — сбой учёта не ломает доску
+            alert_once("metrics", type(e).__name__, f"учёт по задачам: проход упал ({type(e).__name__}: {e})",
+                       "board")
 
 
 def statelen_mod():
@@ -5470,6 +5562,8 @@ def task_cmd(rest):
                 i += step
             p, head = T.task_set(PANTHEON, now(), tid, changes, note=note)
             print(f"{tid}: {head.get('status')} · {os.path.relpath(p, PANTHEON)}")
+            if changes.get("status") in ("done", "dropped"):
+                metrics_on_close(T, tid)
             for w in T.option_warns({"options": changes.get("options")}):
                 print(f"предупреждение · {w}", file=sys.stderr)
         elif sub == "show" and args:
@@ -6253,6 +6347,8 @@ def main(argv):
         return watch_cmd(cmd, rest)
     if cmd == "usage":
         return usage_report(rest)
+    if cmd == "metrics":
+        return metrics_cmd(rest)
     if cmd == "reboot-reminder":
         return awake_mod().reboot_reminder(rest)
     if cmd == "night":

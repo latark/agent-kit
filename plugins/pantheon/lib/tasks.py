@@ -1231,6 +1231,60 @@ views:
       - formula.cross
       - note.Оценка
       - note.Факт
+  - type: table
+    name: Учёт недели
+    filters:
+      and:
+        - 'note["Тип"] == "учёт"'
+        - 'note["Период"] == "неделя"'
+    sort:
+      - property: note.Срез
+        direction: ASC
+      - property: note.Задач
+        direction: DESC
+    order:
+      - note.Срез
+      - note.Исполнитель
+      - note.Модель
+      - note.Effort
+      - note.Направление
+      - note.Задач
+      - note.Отменено
+      - note.С первого круга
+      - note.Кругов
+      - note.Токенов на задачу
+      - note.Долларов на задачу
+      - note.Возвратов
+      - note.После слияния
+      - note.Часов
+      - note.Из них оценка
+  - type: table
+    name: Учёт с начала
+    filters:
+      and:
+        - 'note["Тип"] == "учёт"'
+        - 'note["Период"] == "с начала"'
+    sort:
+      - property: note.Срез
+        direction: ASC
+      - property: note.Задач
+        direction: DESC
+    order:
+      - note.Срез
+      - note.Исполнитель
+      - note.Модель
+      - note.Effort
+      - note.Направление
+      - note.Задач
+      - note.Отменено
+      - note.С первого круга
+      - note.Кругов
+      - note.Токенов на задачу
+      - note.Долларов на задачу
+      - note.Возвратов
+      - note.После слияния
+      - note.Часов
+      - note.Из них оценка
 """
 PULT_VERSION = hashlib.sha256(PULT_FILE.encode("utf-8")).hexdigest()[:12]  # сменился шаблон — тик перепишет Пульт.base
 
