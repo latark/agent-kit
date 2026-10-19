@@ -120,6 +120,8 @@ notify-log.jsonl в ~/.local/state/pantheon/.
 Для синтетических тестов: PANTHEON_HOME, PANTHEON_STATE, PANTHEON_NOW — «сейчас», PANTHEON_HOST,
 PANTHEON_FAKE_WAKE, PANTHEON_FAKE_AC, PANTHEON_FAKE_IDLE — простой в секундах, PANTHEON_FAKE_LIMIT, PANTHEON_DRYRUN,
 PANTHEON_NO_NOTIFY — без уведомлений, PANTHEON_NOTIFY_LOG — уведомления строкой «заголовок|текст|ссылка|группа» в файл.
+Тест или проба (PANTHEON_TEST или папка состояния не настоящая) на экран уведомлений не шлёт: они идут строкой
+в STATE/notify-test.log (metis-0307).
 """
 import collections
 import contextlib
@@ -456,6 +458,24 @@ def _notifier():
     return None
 
 
+def notify_offscreen():
+    """Уведомление не для экрана: признак теста PANTHEON_TEST или папка состояния — не настоящая (временный
+    PANTHEON_STATE или временный HOME). Настоящая — ~/.local/state/pantheon домашней папки владельца из учётной
+    записи, а не из HOME: тесты подменяют HOME. Так тест, забывший PANTHEON_NOTIFY_LOG, не покажет владельцу
+    ложную тревогу (metis-0307: «push не проходит» и «давно не синхронизируется» из test_commit_push)."""
+    if os.environ.get("PANTHEON_TEST"):
+        return True
+    import pwd
+    try:
+        owner_home = pwd.getpwuid(os.getuid()).pw_dir
+    except (KeyError, OSError):
+        return True
+    real = os.path.realpath(os.path.join(owner_home, ".local", "state", "pantheon"))
+    cur = os.path.realpath(os.environ.get("PANTHEON_STATE") or
+                           os.path.join(os.path.expanduser("~"), ".local", "state", "pantheon"))
+    return STATE != real or cur != real
+
+
 def notify(text, title="Пантеон", target=None, group=None):
     """Уведомление macOS. Через terminal-notifier 3 (UserNotifications): щелчок открывает target — карточку или доску,
     group заменяет прежнее уведомление о том же. Без него — обычное уведомление без перехода."""
@@ -466,6 +486,12 @@ def notify(text, title="Пантеон", target=None, group=None):
     if os.environ.get("PANTHEON_NO_NOTIFY") or os.environ.get("PANTHEON_DRYRUN") == "1":
         return
     text = " ".join(str(text).split())
+    if notify_offscreen():  # тест или проба: на экран владельца — никогда, только в файл (metis-0307)
+        with contextlib.suppress(OSError):
+            os.makedirs(STATE, exist_ok=True)
+            with open(os.path.join(STATE, "notify-test.log"), "a", encoding="utf-8") as fh:
+                fh.write(f"{title}|{text}|{target or ''}|{group or ''}\n")
+        return
     tn = _notifier()
     if tn:
         args = [tn, "-title", title, "-message", text, "-open", target or board_url()]

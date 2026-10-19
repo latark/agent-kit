@@ -57,7 +57,7 @@ print(json.dumps({{"codes": codes, "pushes": pushes, "alerts": alerts,
 
 def run(script):
     env = {"PATH": os.environ["PATH"], "HOME": home, "PANTHEON_HOME": pan, "PANTHEON_STATE": state,
-           "PUSH_SCRIPT": json.dumps(script)}
+           "PUSH_SCRIPT": json.dumps(script), "PANTHEON_NOTIFY_LOG": os.path.join(ROOT, "notify.log")}
     r = subprocess.run([PY311, "-I", "-c", PROBE], env=env, capture_output=True, text=True, timeout=60)
     try:
         return json.loads(r.stdout.strip().splitlines()[-1])
