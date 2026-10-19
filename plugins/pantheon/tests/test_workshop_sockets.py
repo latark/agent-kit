@@ -9,9 +9,11 @@
   AF_UNIX в кэше проходит, во второй папке рядом — EPERM. Внутри чужой песочницы (sandbox_apply: EPERM) — skip.
 """
 import atexit
+import contextlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -48,36 +50,60 @@ def py311():
     sys.exit("нет Python 3.11+ для pantheon.py")
 
 
-BIND = """
+CHILD = """
 import os, socket, sys
+mode, path = sys.argv[1], sys.argv[2]
 s = socket.socket(socket.AF_UNIX)
 try:
-    s.bind(os.path.join(sys.argv[1], "probe.sock"))
-    s.listen(1)
-    c = socket.socket(socket.AF_UNIX)
-    c.connect(os.path.join(sys.argv[1], "probe.sock"))
+    if mode == "bind":
+        s.bind(path)
+        s.listen(1)
+        c = socket.socket(socket.AF_UNIX)
+        c.connect(path)
+    else:
+        s.connect(path)
     print("ok")
 except OSError as e:
     print("errno", e.errno)
 """
 
 
-def seatbelt_probe(allowed, outside):
-    """bind+connect под профилем: сеть закрыта, Unix-сокеты — только subpath из allowUnixSockets (как в Claude Code)."""
+def seatbelt_probe(cache, outside):
+    """Четыре прогона под профилем «сеть закрыта, Unix-сокеты — только subpath кэша» (как ставит Claude Code):
+    [bind+connect в кэше, bind снаружи, connect к сокету снаружи напрямую, connect к нему через симлинк в кэше].
+    None — проба не исполнима (не macOS или уже внутри песочницы)."""
     sb = shutil.which("sandbox-exec") or "/usr/bin/sandbox-exec"
     if sys.platform != "darwin" or not os.path.exists(sb):
         return None
-    rules = "".join(f'(allow network-bind (local unix-socket (subpath "{p}")))'
-                    f'(allow network-outbound (remote unix-socket (subpath "{p}")))' for p in allowed)
-    profile = ("(version 1)(allow default)(deny network*)(allow system-socket (socket-domain AF_UNIX))" + rules)
-    out = []
-    for d in (allowed[0], outside):
-        r = subprocess.run([sb, "-p", profile, "/usr/bin/python3", "-I", "-c", BIND, d], capture_output=True,
-                           text=True, timeout=60)
+    rules = (f'(allow network-bind (local unix-socket (subpath "{cache}")))'
+             f'(allow network-outbound (remote unix-socket (subpath "{cache}")))')
+    profile = "(version 1)(allow default)(deny network*)(allow system-socket (socket-domain AF_UNIX))" + rules
+
+    def run(mode, path):
+        r = subprocess.run([sb, "-p", profile, "/usr/bin/python3", "-I", "-c", CHILD, mode, path],
+                           capture_output=True, text=True, timeout=60)
         if "sandbox_apply" in r.stderr:
             return None  # уже внутри песочницы: вложенный seatbelt macOS не даёт
-        out.append(r.stdout.strip() or r.stderr.strip())
-    return out
+        return r.stdout.strip() or r.stderr.strip()
+
+    inside = run("bind", os.path.join(cache, "probe.sock"))
+    if inside is None:
+        return None
+    with contextlib.suppress(OSError):
+        os.unlink(os.path.join(cache, "probe.sock"))
+    target = os.path.join(outside, "real.sock")
+    srv = socket.socket(socket.AF_UNIX)  # слушает родитель, вне профиля
+    srv.bind(target)
+    srv.listen(5)
+    link = os.path.join(cache, "link.sock")
+    try:
+        os.symlink(target, link)
+        res = [inside, run("bind", os.path.join(outside, "x.sock")), run("connect", target), run("connect", link)]
+    finally:
+        srv.close()
+        with contextlib.suppress(OSError):
+            os.unlink(link)
+    return res
 
 
 def main():
@@ -89,6 +115,10 @@ def main():
     with open(os.path.join(home, "directions.toml"), "w") as fh:
         fh.write('[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n'
                  '[[direction]]\nname = "mnemo-brain"\nfolders = ["~/ai/knowledge"]\n')
+    # Library — симлинк (как на машине с кэшами на другом томе): в настройки должен идти настоящий путь, не раскрытый ~
+    real_lib = os.path.join(ROOT, "reallib")
+    os.makedirs(real_lib)
+    os.symlink(real_lib, os.path.join(tmp, "Library"))
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_NO_NOTIFY": "1"}
     r = subprocess.run([py311(), "-I", LIB, "domains", "build"], env=env, capture_output=True, text=True, timeout=120)
@@ -101,6 +131,9 @@ def main():
     cache = os.path.realpath(os.path.join(tmp, "Library", "Caches", "pantheon-sandbox", "workshop"))
     net = win("workshop")["sandbox"]["network"]
     check("workshop: allowUnixSockets — ровно настоящий путь кэша окна", net.get("allowUnixSockets") == [cache])
+    check("workshop: кэш через симлинк Library записан настоящим путём (realpath, не expanduser)",
+          cache != os.path.join(tmp, "Library", "Caches", "pantheon-sandbox", "workshop")
+          and net.get("allowUnixSockets") == [cache])
     check("workshop: кэш окна существует (Claude Code ставит subpath на настоящий путь)", os.path.isdir(cache))
     check("workshop: allowLocalBinding и allowAllUnixSockets нет",
           "allowLocalBinding" not in net and "allowAllUnixSockets" not in net)
@@ -114,12 +147,16 @@ def main():
 
     outside = os.path.join(ROOT, "outside")
     os.makedirs(outside)
-    got = seatbelt_probe([cache], outside)
+    got = seatbelt_probe(cache, outside)
     if got is None:
-        print("skip проба seatbelt: вложенный sandbox-exec недоступен (запуск внутри песочницы) или не macOS")
+        print("skip проба seatbelt: вложенный sandbox-exec недоступен (запуск внутри песочницы) или не macOS.\n"
+              "     Прогнать снаружи песочницы (терминал владельца, не окно роли) и вложить вывод в PR:\n"
+              f"     /usr/bin/python3 -I {os.path.abspath(__file__)}   (и тем же python3.14 -I)")
     else:
         check(f"seatbelt: bind+connect в кэше окна проходит ({got[0]})", got[0] == "ok")
-        check(f"seatbelt: bind в папке рядом — EPERM ({got[1]})", got[1] == "errno 1")
+        check(f"seatbelt: bind вне кэша — EPERM ({got[1]})", got[1] == "errno 1")
+        check(f"seatbelt: connect к сокету вне кэша напрямую — EPERM ({got[2]})", got[2] == "errno 1")
+        check(f"seatbelt: connect через симлинк в кэше на сокет вне кэша — EPERM ({got[3]})", got[3] == "errno 1")
 
 
 if __name__ == "__main__":
