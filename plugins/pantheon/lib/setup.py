@@ -155,6 +155,11 @@ def step_empty_pantheon():
 
 def step_pantheon_install(py):
     script = pantheon_script()
+    # живой код и окна ролей идут только на проверенные деревья (verified.json, metis-0321): плагины, которые вы
+    # поставили этим же запуском, принимаются как проверенные; уже записанные не трогаются (--new)
+    a = run([py, "-I", script, "plugins", "accept", "--new"], env=child_env(py))
+    report("проверенные деревья плагинов", "ок" if a.returncode == 0 else "не вышло",
+           "" if a.returncode == 0 else last_line(a))
     r = run([py, "-I", script, "install"], env=child_env(py))
     report("pantheon install", "ок" if r.returncode == 0 else "не вышло",
            "" if r.returncode == 0 else last_line(r))
