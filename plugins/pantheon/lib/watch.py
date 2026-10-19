@@ -2195,7 +2195,7 @@ HOOKS_NO_TOMLLIB = ("python3 хуков без tomllib (Python до 3.11): guard
 
 def _corpus_declared(hq):
     """Объявлен ли корпус: в [hq] closed_dirs есть папка корпуса (составляющая пути `corpus`, `corpus-…` или
-    `…-corpus`, например ~/projects/expert-corpus) или в closed_collections — коллекция `corpus`."""
+    `…-corpus`, например ~/projects/x-corpus) или в closed_collections — коллекция `corpus`."""
     for d in hq.get("closed_dirs") or []:
         if any(re.search(r"(?:^|-)corpus(?:-|$)", part.lower()) for part in d.split("/")):
             return True
