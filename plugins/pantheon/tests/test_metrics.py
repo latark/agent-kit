@@ -38,7 +38,7 @@ def check(name, ok, got=None):
 
 T0 = datetime(2026, 10, 19, 15, 0).timestamp()  # понедельник: неделя 2026-W43 начинается в этот день
 KIT, OTHER = "latark/agent-kit", "latark/other-app"
-REPOS = {"metis-pantheon": [KIT], "hermes-alex": [OTHER]}  # [merge_repos] policy.toml: «PR #N» в журнале metis — PR agent-kit
+REPOS = {"metis-pantheon": [KIT], "hermes-demo": [OTHER]}  # [merge_repos] policy.toml: «PR #N» в журнале metis — PR agent-kit
 SECRET = "текст-поручения-не-сохранять"
 SEQ = [0]
 
@@ -386,7 +386,7 @@ def cli():
     policy = os.path.join(tmp, ".claude", "pantheon", "policy.toml")
     os.makedirs(os.path.dirname(policy), exist_ok=True)
     with open(policy, "w", encoding="utf-8") as fh:
-        fh.write(f'[merge_repos]\nmetis-pantheon = ["{KIT}"]\nhermes-alex = ["{OTHER}"]\n')
+        fh.write(f'[merge_repos]\nmetis-pantheon = ["{KIT}"]\nhermes-demo = ["{OTHER}"]\n')
     p = run("task", "set", "metis-0906", "status=done")
     rows = M.read_rows(rows_path)
     check("CLI task set status=done: строка учёта записана", p.returncode == 0 and [r["id"] for r in rows]
