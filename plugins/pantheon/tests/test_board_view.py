@@ -39,6 +39,38 @@ def hides_closed(view_text):
     return all(f'note["Статус"] != "{x}"' in view_text for x in ("Готово", "Отменено"))
 
 
+def base_filter(view_text):
+    """Фильтр вида из текста .base (yaml без библиотеки): and/or-списки и три вида условий → функция карточки."""
+    lines = [ln for ln in view_text.split("    filters:\n", 1)[1].split("\n    sort:", 1)[0].split("\n") if ln.strip()]
+
+    def parse(i, indent):
+        """Разбирает элементы списка с отступом indent, возвращает (список условий, следующая строка)."""
+        items = []
+        while i < len(lines) and len(lines[i]) - len(lines[i].lstrip()) == indent and lines[i].lstrip().startswith("-"):
+            body = lines[i].lstrip()[1:].strip()
+            if body in ("or:", "and:"):
+                sub, i = parse(i + 1, indent + 4)
+                items.append((body[:-1], sub))
+            else:
+                items.append(body.strip("'"))
+                i += 1
+        return items, i
+
+    assert lines[0].strip() in ("and:", "or:"), lines[0]
+    tree = (lines[0].strip()[:-1], parse(1, 8)[0])
+
+    def ev(node, card):
+        if isinstance(node, tuple):
+            f = all if node[0] == "and" else any
+            return f(ev(n, card) for n in node[1])
+        m = re.fullmatch(r'note\["(.+?)"\](\.toString\(\)\.contains\(|\s*==\s*|\s*!=\s*)"(.*?)"\)?', node)
+        assert m, node
+        val, op, arg = str(card.get(m.group(1)) or ""), m.group(2), m.group(3)
+        return arg in val if "contains" in op else (val == arg) == ("==" in op)
+
+    return lambda card: ev(tree, card)
+
+
 VIEWS7 = ["От меня нужно", "Срочно", "Доска", "Очередь", "Пачки", "Итоги пачек", "Все задачи"]
 
 
@@ -83,14 +115,18 @@ def base_checks():
         broken = mine.replace(f'note["Статус"] != "{x}"', "true")
         check(f"проверка «{x} скрыто» краснеет на сломанном виде", hides_closed(mine) and not hides_closed(broken))
     # «На проверке» попадает в «От меня нужно» только адресованная Владельцу (по фильтру вида)
-    def passes(card):
-        st, who, acc = card.get("Статус"), card.get("Кому") or "", card.get("Приёмка")
-        return (st == "Нужен ответ" or "Владелец" in who or acc == "к владельцу") and st not in ("Готово", "Отменено")
+    passes = base_filter(mine)
     review = {"id": "t-2", "title": "Проверить", "status": "review", "project": "demo", "direction": "demo"}
     to_owner = T.render_card(dict(review, owner="Владелец"), "", "x.md", T0)[0]
     to_agent = T.render_card(dict(review, owner="argus"), "", "x.md", T0)[0]
     check("«На проверке» с Кому = Владелец — в «От меня нужно», с Кому = агент — нет",
           passes(to_owner) and not passes(to_agent), (to_owner.get("Кому"), to_agent.get("Кому")))
+    broken_f = base_filter(mine.replace("        - 'note[\"Статус\"] != \"Отменено\"'",
+                                        "        - 'note[\"Статус\"] != \"Отменено\"'\n        - 'note[\"Статус\"] == \"На проверке\"'"))
+    check("фильтр из .base с дописанным Статус == «На проверке» краснеет: «Нужен ответ» не проходит",
+          passes({"Статус": "Нужен ответ"}) and not broken_f({"Статус": "Нужен ответ"}))
+    check("фильтр из .base: Готово не проходит даже при Кому = Владелец",
+          not passes({"Статус": "Готово", "Кому": "Владелец"}))
     # Пульт.base: вариант В — карточки проектов с цветом здоровья, пачки канбаном, пачки проекта и задачи пачки
     pult = T.PULT_FILE.split("\nviews:\n", 1)[1]
     pv = [(re.search(r"^    name: (.+)$", x, re.M).group(1), x) for x in re.split(r"^  - type: ", pult, flags=re.M)[1:]]

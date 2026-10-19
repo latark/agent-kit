@@ -125,6 +125,11 @@ def unit_checks():
         ("t-5", "todo", []))}
     check("crossings: только живые задачи с пересекающимися областями",
           T.crossings(tasks) == {"t-1": ["t-2"], "t-2": ["t-1"]}, T.crossings(tasks))
+    wt = {i: ("", {"type": "task", "status": "waiting", "waiting_on": w, "direction": "d"}, "") for i, w in (
+        ("w-1", "human"), ("w-2", "agent"), ("w-3", "dependency"))}
+    cnt = T.project_counts(wt, T0, {"d"})
+    check("project_counts: «Ждёт вас» — только waiting_on = human, ждущие не человека не считаются",
+          cnt["Ждёт вас"] == 1 and cnt["Открыто"] == 3, cnt)
     base = {"type": "task", "id": "metis-0001", "title": "x", "status": "todo", "project": "p", "direction": "p",
             "owner": "p", "created": "2026-10-17", "updated": "2026-10-17T10:00", "schema_version": T.SCHEMA_VERSION}
     text = T.join(dict(base, wave=3), "\n# x\n")
