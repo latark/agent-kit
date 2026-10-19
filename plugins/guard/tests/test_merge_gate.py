@@ -431,8 +431,9 @@ def t_core(h):
     merge_case("защиты: файлов больше, чем changedFiles — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
                "неполон")
     h.gh(["README.md"], head=OLD)
-    merge_case("защиты: PR на другом коммите — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
-               "на другом коммите")
+    # отказ даёт сама Д3 (текст ядра), а не только проверки GitHub на том же ответе gh pr view (argus 0297a, круг 2)
+    merge_case("защиты: PR на другом коммите — отказ Д3", h.pre(cmd, pdir="projects/agent-kit"), False,
+               CORE + ": PR сейчас на другом коммите")
     h.gh(["README.md"])
     open(h.j("gh.fail"), "w").close()
     merge_case("защиты: gh не ответил — отказ", h.pre(cmd, pdir="projects/agent-kit"), False, "не ответил")
@@ -1197,6 +1198,14 @@ def t_ci(h):
     for got in (None, [], [["x"]], [{"a": 1}, {"b": 2}]):
         mg._gh_json = lambda args: got
         check(f"_pr_view: ответ {got!r} — None", mg._pr_view("latark/tg-read", 3) is None)
+    # Д3 сверяет headRefOid сама, не полагаясь на _ci_problem (argus 0297a, круг 2, п. 3)
+    mg._gh_json = lambda args: [{"filename": "README.md", "status": "modified"}]
+    view = {"headRefOid": sha, "changedFiles": 1}
+    check("_core_problem: тот же SHA, без ядра — None", mg._core_problem("latark/agent-kit", 7, sha, view) is None)
+    for head in (OLD, None, 7):
+        why = mg._core_problem("latark/agent-kit", 7, sha, dict(view, headRefOid=head))
+        check(f"_core_problem: headRefOid {head!r} — отказ «на другом коммите»", why and "на другом коммите" in why,
+              why)
     # _has_workflows — через поддельный gh: 404 → False, список → True, 502 → None
     mg = _load_merge_gate("merge_gate_wf")
     saved = {k: os.environ.get(k) for k in ("HOME", "PATH")}
