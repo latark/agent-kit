@@ -807,7 +807,7 @@ def cmd_owner_log(ev):
     # что дописано после mark — пришло после срабатывания хука (metis-0289). Файла ещё нет — места нет, только время:
     # иначе mark = 0 и годилось бы любое вложение файла, появившегося позже (--fork-session с историей)
     mark = file_size(tpath) if tpath and os.path.isfile(tpath) else None
-    start = max(0, mark - 2000000) if tpath else None
+    start = max(0, mark - 2000000) if mark is not None else (0 if tpath else None)
     entry, queued, extended, skipped = None, None, False, set()
     deadline = t + float(os.environ.get("PANTHEON_CONFIRM_WAIT") or CONFIRM_WAIT)
     while True:  # Claude Code пишет транскрипт сам и с задержкой: ждём запись этого ввода

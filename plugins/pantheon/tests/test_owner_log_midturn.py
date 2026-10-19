@@ -309,6 +309,10 @@ append(tr, {"type": "queue-operation", "operation": "enqueue", "timestamp": iso(
 th.join(40)
 check("транскрипта не было на старте хука, потом старое вложение → не в подлиннике", NOFILE not in zeus(),
       zeus()[-200:])
+r18 = holder.get("r")
+check("транскрипта не было на старте хука → хук дошёл до конца (rc 0, без трассировки), ввод в unconfirmed",
+      r18 is not None and r18.returncode == 0 and "Traceback" not in r18.stderr and NOFILE in unc(),
+      "rc=%r stderr=%r unc=%r" % (r18 and r18.returncode, r18 and r18.stderr[-300:], unc()[-200:]))
 
 print("%d/%d" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
