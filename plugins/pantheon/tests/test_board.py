@@ -236,7 +236,7 @@ def main():
     # на виду — только формулы-значки: статус, приоритет, режим, «ждёт», пересечения, предупреждение режима (metis-0069);
     # служебные — для сортировки
     shown = {"formula.status_view", "formula.prio_view", "formula.mode_view", "formula.waits", "formula.cross",
-             "formula.warn"}
+             "formula.warn", "formula.attn", "formula.accept_view", "formula.sum_budget"}
     hidden_ok = bool(views_) and not any(p.startswith("formula.") and p not in shown
                                          for v in views_ for p in v.get("order", []))
     check("board: Доска.base — сортировка в каждом представлении, формулы не на карточке",

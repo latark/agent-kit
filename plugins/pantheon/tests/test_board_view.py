@@ -94,12 +94,31 @@ def base_checks():
     check("«Доска»: в порядке колонок есть «Очередь», нет «Отменено»", "Отменено" not in go and "Очередь" in go, go)
     check("«Доска»: «Готово» — за 7 дней по «Закрыта»",
           'note["Статус"] != "Готово"' in board and 'note["Закрыта"] >= today() - "7d"' in board)
-    check("«Доска»: на карточке «ждёт» и предупреждение режима", "formula.waits" in board and "formula.warn" in board)
+    attn = re.search(r"^  attn: (.+)$", T.BASE_FILE, re.M).group(1)
+    card = [x.strip() for x in re.search(r"^    order: \[(.*)\]", board, re.M).group(1).split(",")]
+    check("«Доска»: «ждёт» и предупреждение режима — внутри одной строки formula.attn на карточке",
+          "formula.waits" in attn and "formula.warn" in attn and 'note["Срок"]' in attn and "formula.attn" in card)
+    check("metis-0306: карточка «Доски» — не больше 5 свойств", 0 < len(card) <= 5, str(card))
+    check("metis-0306: заявки ролей (Тип «заявка», Кому без «Владелец») вне «Доски»",
+          "- 'note[\"Тип\"] != \"заявка\"'" in board and "- 'note[\"Кому\"].toString().contains(\"Владелец\")'" in board)
+    check("metis-0306: в «Все задачи» заявки остаются — фильтра заявок там нет", "заявка" not in dict(vs)["Все задачи"])
+    check("metis-0306: справка «Доска» — не длиннее двух предложений, без «Пачки здесь не видны»",
+          "Пачки здесь не видны" not in T.VIEW_HELP["Доска"] and len(re.findall(r"[.]\s", T.VIEW_HELP["Доска"] + " ")) <= 2)
     mine_sort = mine.split("sort:")[1].split("order:")[0]
     check("«От меня нужно»: срочные вверху — сортировка начинается с urgency", mine_sort.strip().startswith("- property: formula.urgency"))
     packs = dict(vs)["Пачки"]
     check("«Пачки» — канбан карточек пачек с суммой оценок и бюджетом", packs.startswith("kanban")
-          and 'note["Тип"] == "пачка"' in packs and "note.Сумма оценок" in packs and "note.Бюджет" in packs)
+          and 'note["Тип"] == "пачка"' in packs and "note.Закрыто" in packs and "note.Цепочка" in packs
+          and "formula.sum_budget" in packs and "Бюджет" in re.search(r"^  sum_budget: (.+)$", T.BASE_FILE, re.M).group(1)
+          and len(re.search(r"^    order: \[(.*)\]", packs, re.M).group(1).split(",")) <= 5)
+    css = open(os.path.join(os.path.dirname(LIB), "share", "pantheon-view-obsidian", "snippets", "pantheon.css"),
+               encoding="utf-8").read()
+    check("metis-0306: CSS — подписи карточки скрыты, встраивания и kanban ограничены по высоте окна (классы Obsidian)",
+          ".bases-kanban-card-property .bases-kanban-card-label { display: none; }" in css
+          and re.search(r"\.bases-embed \.bases-view[^{]*\{[^}]*max-height: calc\(100vh", css)
+          and re.search(r"\.bases-embed \.bases-kanban-container[^{]*\{[^}]*max-height: calc\(100vh", css))
+    check("metis-0306: «Итоги пачек» — Приёмка из formula.accept_view, «Все задачи» — колонка № шире",
+          "formula.accept_view" in dict(vs)["Итоги пачек"] and re.search(r"columnSize:\n      note\.id: \d{3}", dict(vs)["Все задачи"]))
     res = dict(vs)["Итоги пачек"]
     check("«Итоги пачек»: задачи пачек, группы по пачке, по порядку", 'note["Тип"] != "пачка"' in res
           and "property: note.Пачка" in res and "property: note.Порядок" in res)
