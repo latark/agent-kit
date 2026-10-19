@@ -1072,6 +1072,7 @@ def _sync_projects(board, state, tasks, t, registry, roles, alert):
     d = os.path.join(board, PROJECTS_DIR)
     old = state.get("projects") or {}
     mine = {}
+    newest = max((os.path.getmtime(p) for p, _, _ in tasks.values() if os.path.exists(p)), default=0)
     for p, reg in sorted(registry.items()):
         n = project_note_name(p)
         path = os.path.join(d, n + ".md")
@@ -1093,6 +1094,8 @@ def _sync_projects(board, state, tasks, t, registry, roles, alert):
             if cur != text:
                 os.makedirs(d, exist_ok=True)
                 _write_plain(path, text)
+            elif os.path.getmtime(path) < newest:
+                os.utime(path)  # счётчики те же, но сверены после правки задач — иначе check считал бы заметку старой
             mine[n] = _sha(text)
         except (OSError, ValueError, UnicodeError) as e:
             alert(f"board-project-{_sha(n)}", type(e).__name__, f"доска: заметку проекта «{n[:60]}» не записать ({e})",
