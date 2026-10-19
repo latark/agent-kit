@@ -6,3 +6,18 @@
   border-radius: 6px;
 }
 .metadata-property[data-property-key="Заметка агенту"] .metadata-property-key { color: var(--text-accent); }
+
+/* metis-0306: виды Bases во встраиваниях (Сводка, Пульт, проекты) не растут на весь экран. Классы — из app.css/app.js
+   Obsidian: .bases-embed / .block-language-base (встраивание), .bases-view (прокручиваемый корень вида), у таблицы
+   .bases-thead уже sticky, у kanban — .bases-kanban-container, колонка прокручивается в .bases-kanban-column-content. */
+.bases-embed .bases-view,
+.block-language-base .bases-view { max-height: calc(100vh - 160px); overflow: auto; }
+/* высота контейнера kanban во встраивании задана скриптом в style (по самой длинной колонке) — max-height её режет */
+.bases-embed .bases-kanban-container,
+.block-language-base .bases-kanban-container { max-height: calc(100vh - 200px); }
+/* kanban: компактная карточка — подписи свойств скрыты (заголовок и так подписан в настройках вида), строка мельче */
+body { --bases-kanban-line-height: 20px; }
+.bases-kanban-card-property .bases-kanban-card-label { display: none; }
+.bases-kanban-card-property:not(.mod-title) .bases-kanban-card-line { font-size: var(--font-ui-smaller); }
+.bases-kanban-card-line:empty:before,
+.bases-kanban-card-line .value-list-container:empty:before { content: none; }

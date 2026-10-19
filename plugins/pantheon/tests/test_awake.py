@@ -582,6 +582,25 @@ def test_wake_waiting():
     check(not e.calls, f"разбудил не ждущую: {e.calls}")
 
 
+def test_skipped_no_alert():
+    # metis-0291: код «пропуск» (SKIPPED) — не сбой: ни тревоги, ни засчитанной попытки (limit_resume и wake_waiting)
+    e = Env()
+    e.limited("hermes-site")
+    LIM = at(2026, 10, 19, 8, 0)
+    P.resume_session = lambda name, a, text, origin, recheck=None: (P.SKIPPED, None)
+    AW.limit_resume(e.agents_list, [], DOMS, LIM + 11 * 60)
+    check("не поднялась" not in alerts_text(e), f"тревога на пропуск (лимит): {alerts_text(e)!r}")
+    mk = AW.read_marks().get("limit", {})
+    check(all(m.get("tries") == 0 and m.get("done") is False for m in mk.values()), f"метки: {mk}")
+    e2 = Env()
+    e2.agent("hermes-site", "blocked", needs="waiting for your answer")
+    e2.task("hermes-site")
+    P.resume_session = lambda name, a, text, origin, recheck=None: (P.SKIPPED, None)  # Env() подменяет на свой
+    AW.wake_waiting(e2.agents_list, [], DOMS, MON)
+    check("не поднялась" not in alerts_text(e2), f"тревога на пропуск (ждущая): {alerts_text(e2)!r}")
+    check("hermes-site" not in AW.RESUMED, f"пропуск записан как подъём: {AW.RESUMED}")
+
+
 def test_wake_waiting_no_window_no_alert():
     e = Env()
     e.agent("hermes-site", "blocked", needs="waiting for your answer")

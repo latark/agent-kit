@@ -48,6 +48,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ
   pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"]   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
+  pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту
   pantheon task attach ID ПАЧКА | detach ID   задача в пачку (story) и обратно; show ПАЧКА — состав и сумма оценок
   pantheon executors                    набор исполнителей кода (Claude всегда, Codex — дополнение) и включён ли Codex
   pantheon executors check              проверить Codex: на PATH → вход (CODEX_HOME роли) → hello-проба
@@ -76,6 +77,11 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code
   pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (плановый проход раз в неделю)
+  pantheon metrics sync|summary         учёт по задачам: строки закрытых задач в ~/ai/pantheon/metrics/tasks.jsonl
+                                        (пишет и `task set status=done|dropped`), свод недели — week-<неделя>.md
+                                        и заметки Пульта; summary — свод в окно
+  pantheon metrics backfill --from ГГГГ-ММ-ДД [--to ГГГГ-ММ-ДД] [--dry-run]   задним числом: строки закрытых за
+                                        эти дни задач с пометкой «оценка» (у кого строки нет)
   pantheon roles build                  роли ~/.claude/agents/*.md из общих шаблонов плагина (roles/*.tmpl,
                                         roles/_parts/*.part) и личного слоя ~/.claude/agents (*.tmpl, _parts/*.part
                                         перекрывают общие по имени); подстановки — из [person] directions.toml
@@ -121,6 +127,8 @@ notify-log.jsonl в ~/.local/state/pantheon/.
 Для синтетических тестов: PANTHEON_HOME, PANTHEON_STATE, PANTHEON_NOW — «сейчас», PANTHEON_HOST,
 PANTHEON_FAKE_WAKE, PANTHEON_FAKE_AC, PANTHEON_FAKE_IDLE — простой в секундах, PANTHEON_FAKE_LIMIT, PANTHEON_DRYRUN,
 PANTHEON_NO_NOTIFY — без уведомлений, PANTHEON_NOTIFY_LOG — уведомления строкой «заголовок|текст|ссылка|группа» в файл.
+Тест или проба (PANTHEON_TEST или папка состояния не настоящая) на экран уведомлений не шлёт: они идут строкой
+в STATE/notify-test.log (metis-0307).
 """
 import collections
 import contextlib
@@ -457,6 +465,24 @@ def _notifier():
     return None
 
 
+def notify_offscreen():
+    """Уведомление не для экрана: признак теста PANTHEON_TEST или папка состояния — не настоящая (временный
+    PANTHEON_STATE или временный HOME). Настоящая — ~/.local/state/pantheon домашней папки владельца из учётной
+    записи, а не из HOME: тесты подменяют HOME. Так тест, забывший PANTHEON_NOTIFY_LOG, не покажет владельцу
+    ложную тревогу (metis-0307: «push не проходит» и «давно не синхронизируется» из test_commit_push)."""
+    if os.environ.get("PANTHEON_TEST"):
+        return True
+    import pwd
+    try:
+        owner_home = pwd.getpwuid(os.getuid()).pw_dir
+    except (KeyError, OSError):
+        return True
+    real = os.path.realpath(os.path.join(owner_home, ".local", "state", "pantheon"))
+    cur = os.path.realpath(os.environ.get("PANTHEON_STATE") or
+                           os.path.join(os.path.expanduser("~"), ".local", "state", "pantheon"))
+    return STATE != real or cur != real
+
+
 def notify(text, title="Пантеон", target=None, group=None):
     """Уведомление macOS. Через terminal-notifier 3 (UserNotifications): щелчок открывает target — карточку или доску,
     group заменяет прежнее уведомление о том же. Без него — обычное уведомление без перехода."""
@@ -467,6 +493,12 @@ def notify(text, title="Пантеон", target=None, group=None):
     if os.environ.get("PANTHEON_NO_NOTIFY") or os.environ.get("PANTHEON_DRYRUN") == "1":
         return
     text = " ".join(str(text).split())
+    if notify_offscreen():  # тест или проба: на экран владельца — никогда, только в файл (metis-0307)
+        with contextlib.suppress(OSError):
+            os.makedirs(STATE, exist_ok=True)
+            with open(os.path.join(STATE, "notify-test.log"), "a", encoding="utf-8") as fh:
+                fh.write(f"{title}|{text}|{target or ''}|{group or ''}\n")
+        return
     tn = _notifier()
     if tn:
         args = [tn, "-title", title, "-message", text, "-open", target or board_url()]
@@ -2712,11 +2744,11 @@ def resume_session(name, a, text, origin, recheck=None):
     with lock("start-" + name, block=False) as got_lock:
         if not got_lock:
             start_log(f"resume-busy\t{name}\t{a.get('id')}\t{origin}")
-            return 1, None
+            return skipped("другой процесс уже поднимает"), None
         why = recheck() if recheck else None
         if why:
             start_log(f"resume-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
-            return 1, None
+            return skipped(why), None
         # metis-0207: правило свежего старта (metis-0147 п. 2) действует на любом пути возобновления, а не только в
         # resume_or_start и pantheon wake: ждущая сессия, после недельного лимита, техперезапуск, снятие паузы
         fresh = fresh_reason(a)
@@ -2729,6 +2761,17 @@ def resume_session(name, a, text, origin, recheck=None):
 # свежим стартом — без --settings она ушла бы без песочницы окна (ревью argus PR #32). Тревога — одна на причину
 # (alert_once), поэтому wake и дежурный не повторяют свою тревогу о коде каждые 5 минут
 NO_WINDOW = 3
+# Код «пропуск» (metis-0291): под блокировкой имени выяснилось, что будить не нужно или нельзя по обычной причине (уже
+# работает, остановлено вами, пауза, технический перезапуск, имя занято другим подъёмом). Не сбой: wake печатает
+# «пропуск: <имя> — <причина>», выходит с 0, без тревоги. Причина — в SKIP_WHY (последний пропуск процесса)
+SKIPPED = 4
+SKIP_WHY = ""
+
+
+def skipped(why):
+    global SKIP_WHY
+    SKIP_WHY = str(why)
+    return SKIPPED
 
 
 def window_missing(name, origin, why, how):
@@ -2929,11 +2972,11 @@ def fresh_start(name, a, text, origin, recheck=None, reason=None):
     with lock("start-" + name, block=False) as got_lock:
         if not got_lock:
             start_log(f"fresh-busy\t{name}\t{a.get('id')}\t{origin}")
-            return 1
+            return skipped("другой процесс уже поднимает")
         why = recheck() if recheck else None
         if why:
             start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
-            return 1
+            return skipped(why)
         return _fresh_start(name, a, text, origin, reason)
 
 
@@ -3500,7 +3543,7 @@ def _wake(dry):
         print("pantheon wake: claude agents --json не ответил", file=sys.stderr)
         return 1
     domains = read_json(path("domains.json"), {}).get("domains") or {}
-    done = 0
+    done = failed = 0
     for a in agents:
         name, state = a.get("name") or "", a.get("state")
         asleep = state in ("failed", "stopped")
@@ -3529,16 +3572,23 @@ def _wake(dry):
                              recheck=lambda n=name, s=state: wake_recheck(n, s), reason=fresh)
         else:
             rc, _ = resume_session(name, a, WAKE_TEXT, "wake", recheck=lambda n=name, s=state: wake_recheck(n, s))
+        if rc == SKIPPED:  # metis-0291: пропуск — не сбой, ни «поднимаю», ни тревоги
+            print(f"пропуск: {name} — {SKIP_WHY}")
+            done += 1
+            continue
+        done += 1
         if rc == NO_WINDOW:  # «нет окна» — своя тревога, одна на причину; владельцу не говорим, что подняли (metis-0189)
             print(f"не поднимаю: {name} ({a.get('id')}, {state}) — см. тревогу")
+            failed += 1
+        elif rc:  # настоящий сбой подъёма: тревога и код 1 (metis-0291)
+            print(f"не поднялась: {name} ({a.get('id')}, {state}) — код {rc}", file=sys.stderr)
+            alert(f"pantheon wake: {name} не поднялась (код {rc})", "pantheon")
+            failed += 1
         else:
             print(f"поднимаю: {line}")
-            if rc:
-                alert(f"pantheon wake: {name} не поднялась (код {rc})", "pantheon")
-        done += 1
     if not done:
         print("будить некого")
-    return 0
+    return 1 if failed else 0
 
 
 # --- роли (ROLE-15, ROLE-16, ROLE-17) -------------------------------------------------------
@@ -5035,6 +5085,81 @@ def awake_mod():
     return _AWAKE
 
 
+_METRICS = None
+
+
+def metrics_mod():
+    """lib/metrics.py — учёт по задачам: исполнитель, модель, расход, круги argus (metis-0294)."""
+    global _METRICS
+    if _METRICS is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_metrics", os.path.join(LIB, "metrics.py"))
+        _METRICS = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_METRICS)
+    return _METRICS
+
+
+def metrics_ctx():
+    """Ctx учёта; repos — [merge_repos] из policy.toml: чей PR, названный в журнале задачи просто номером."""
+    try:
+        with open(os.path.join(HOME, ".claude", "pantheon", "policy.toml"), "rb") as fh:
+            repos = tomllib.load(fh).get("merge_repos")
+    except (OSError, ValueError, tomllib.TOMLDecodeError):  # ValueError — в том числе UnicodeDecodeError
+        repos = None
+    return metrics_mod().Ctx(PANTHEON, STATE, HOME, now(), BOARD, repos if isinstance(repos, dict) else None)
+
+
+def metrics_on_close(T, tid):
+    """Строка учёта при закрытии задачи. Не вышло (песочница роли не пускает в metrics/) — смена статуса остаётся,
+    строку допишет плановый проход доски."""
+    if os.environ.get("PANTHEON_METRICS") == "0":
+        return
+    try:
+        metrics_mod().record(metrics_ctx(), T.load_tasks(PANTHEON, T.WORK_TYPES), tid)
+    except Exception as e:  # noqa: BLE001 — учёт не должен ломать закрытие задачи
+        print(f"предупреждение · учёт {tid} не записан ({type(e).__name__}): допишет плановый проход доски",
+              file=sys.stderr)
+
+
+def metrics_cmd(rest):
+    M, T = metrics_mod(), tasks_mod()
+    sub, args = (rest[0] if rest else ""), rest[1:]
+    tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+    ctx = metrics_ctx()
+    if sub == "sync":
+        rows = M.sync(ctx, tasks)
+        M.publish(ctx, tasks)
+        print(f"учёт: строк дописано {len(rows)}; свод — {tilde(os.path.dirname(ctx.rows_path))}")
+        return 0
+    if sub == "summary":
+        print(M.week_md(M.summary(M.read_rows(ctx.rows_path), ctx.t, M.post_merge_index(tasks)), ctx.t))
+        return 0
+    if sub == "backfill":
+        opts, dry, i = {}, False, 0
+        while i < len(args):
+            if args[i] == "--dry-run":
+                dry, i = True, i + 1
+            elif args[i] in ("--from", "--to") and i + 1 < len(args) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", args[i + 1]):
+                opts[args[i][2:]], i = args[i + 1], i + 2
+            else:
+                print(f"pantheon metrics backfill: непонятно «{args[i]}» — нужно --from ГГГГ-ММ-ДД [--to ГГГГ-ММ-ДД] "
+                      "[--dry-run]", file=sys.stderr)
+                return 2
+        if "from" not in opts:
+            print("pantheon metrics backfill: нужно --from ГГГГ-ММ-ДД", file=sys.stderr)
+            return 2
+        rows = M.backfill(ctx, tasks, opts["from"], opts.get("to"), dry=dry)
+        for r in rows:
+            print(f"{r['id']}\t{r['closed']}\t{r['executor']}\t{r['model']}\t{r['effort']}\t${r['usd']:.2f}\t"
+                  f"кругов {r['argus_rounds']}\tоценка")
+        print(f"задним числом: {len(rows)} строк" + (" (проба, не записано)" if dry else f" → {tilde(ctx.rows_path)}"))
+        if not dry:
+            M.publish(ctx, tasks)
+        return 0
+    print("pantheon metrics sync | summary | backfill --from ГГГГ-ММ-ДД [--to ГГГГ-ММ-ДД] [--dry-run]", file=sys.stderr)
+    return 2
+
+
 def owner_acts():
     """→ (ответы, переносы в «Нужен ответ»), оба {id: [метка времени, …]}. Ответы — из журнала доски (answer и
     request с вариантом, move не в «Нужен ответ») и окна вопросов Зевса (вопрос «[id] …»); перенос карточки в «Нужен
@@ -5358,7 +5483,25 @@ def board():
                 os.remove(fp)
     for ln in lines:
         print(ln)
+    if primary and os.environ.get("PANTHEON_METRICS") != "0":
+        board_metrics(T)
     return 0
+
+
+def board_metrics(T):
+    """Учёт по задачам после прохода доски: строки закрытий, которые роль из песочницы записать не смогла, и свод
+    недели на Пульт. Своя блокировка: первый проход после выпуска читает транскрипты дольше минуты."""
+    with lock("metrics", block=False) as got:
+        if not got:
+            return
+        try:
+            M, tasks = metrics_mod(), T.load_tasks(PANTHEON, T.WORK_TYPES)
+            ctx = metrics_ctx()
+            M.sync(ctx, tasks)
+            M.publish(ctx, tasks)
+        except Exception as e:  # noqa: BLE001 — сбой учёта не ломает доску
+            alert_once("metrics", type(e).__name__, f"учёт по задачам: проход упал ({type(e).__name__}: {e})",
+                       "board")
 
 
 def statelen_mod():
@@ -5432,6 +5575,9 @@ def check(paths=None, quiet=False):
         drift = T.check_projects(BOARD, T.load_tasks(PANTHEON, T.WORK_TYPES), now(), board_registry(T)[2])
         for d in drift:
             print(f"ОШИБКА · Доска/{d}")
+    view_drift = T.check_views(BOARD) if not paths else []  # у каждого вида Доска.base — строка «что здесь» (metis-0288)
+    for d in view_drift:
+        print(f"ОШИБКА · {d}")
     if not quiet or bad:
         print(f"задач: {n}, с ошибками: {len(bad)}, без шапки: {noheader}")
     if quiet:  # тик: одна тревога на набор проблем, а не сбой задачи каждые 5 минут
@@ -5445,8 +5591,12 @@ def check(paths=None, quiet=False):
                        + (f" и ещё {len(drift) - 1}" if len(drift) > 1 else ""), "check")
         else:
             clear_once("check-projects")
+        if view_drift:
+            alert_once("check-views", "|".join(view_drift), f"доска: {view_drift[0]}", "check")
+        else:
+            clear_once("check-views")
         return 0
-    return 1 if bad or drift else 0
+    return 1 if bad or drift or view_drift else 0
 
 
 def task_cmd(rest):
@@ -5522,6 +5672,8 @@ def task_cmd(rest):
                 i += step
             p, head = T.task_set(PANTHEON, now(), tid, changes, note=note)
             print(f"{tid}: {head.get('status')} · {os.path.relpath(p, PANTHEON)}")
+            if changes.get("status") in ("done", "dropped"):
+                metrics_on_close(T, tid)
             for w in T.option_warns({"options": changes.get("options")}):
                 print(f"предупреждение · {w}", file=sys.stderr)
         elif sub == "show" and args:
@@ -5540,6 +5692,15 @@ def task_cmd(rest):
         elif sub == "attach" and len(args) == 2:
             old = T.task_attach(PANTHEON, now(), args[0], args[1])
             print(f"{args[0]} → пачка {args[1]}" + (f" (была в {old})" if old else ""))
+        elif sub == "migrate-batches":
+            if any(a != "--dry-run" for a in args):
+                print(f"pantheon task migrate-batches: не понял «{' '.join(args)}» — допустим только --dry-run", file=sys.stderr)
+                return 2
+            dry = "--dry-run" in args
+            plan = T.migrate_batches(PANTHEON, now(), dry_run=dry)
+            print("\n".join(plan) if plan else "переносить нечего")
+            if dry and plan:
+                print("(--dry-run: ничего не записано)")
         elif sub == "detach" and len(args) == 1:
             sid = T.task_detach(PANTHEON, now(), args[0])
             print(f"{args[0]}: откреплена от пачки {sid}")
@@ -6305,6 +6466,8 @@ def main(argv):
         return watch_cmd(cmd, rest)
     if cmd == "usage":
         return usage_report(rest)
+    if cmd == "metrics":
+        return metrics_cmd(rest)
     if cmd == "reboot-reminder":
         return awake_mod().reboot_reminder(rest)
     if cmd == "night":
