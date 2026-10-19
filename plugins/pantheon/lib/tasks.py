@@ -63,6 +63,8 @@ FIELDS = {
     "actual": ("str", False), "acceptance": ("str", False),
     # режим работы и области (план metis-0248, шаг 1): mode — заявка координатора, touches — файлы или папки задачи
     "mode": ("str", False), "mode_why": ("str", False), "touches": ("list", False),
+    # место задачи в пачке (metis-0069, перенос batch): меньше — раньше; без него — по зависимостям и приоритету
+    "order": ("int", False),
 }
 # прежние ключи шапки → нынешние: читаются при разборе, при записи уходят под новым именем
 LEGACY_KEYS = {"wave": "release"}
@@ -821,13 +823,18 @@ def _prio(h):
     return p if isinstance(p, int) and not isinstance(p, bool) else 2
 
 
+def _ord(h):
+    o = h.get("order")
+    return o if isinstance(o, int) and not isinstance(o, bool) else 10 ** 9
+
+
 def story_order(sid, tasks):
     """Задачи пачки по порядку: сначала зависимости внутри пачки, при равенстве — приоритет, затем id.
     Цикл зависимостей порядок не роняет: оставшиеся идут по приоритету и id."""
     left, out = set(story_children(sid, tasks)), []
     while left:
         free = [i for i in left if not any(d in left for d in tasks[i][1].get("depends_on") or [])]
-        nxt = min(free or left, key=lambda i: (_prio(tasks[i][1]), i))
+        nxt = min(free or left, key=lambda i: (_ord(tasks[i][1]), _prio(tasks[i][1]), i))
         out.append(nxt)
         left.discard(nxt)
     return out
@@ -907,6 +914,39 @@ def task_detach(pantheon, t, tid, actor="агент"):
     task_set(pantheon, t, tid, {"parent": None}, note=f"откреплена от пачки {sid}", actor=actor)
     task_set(pantheon, t, sid, {}, note=f"откреплена задача {tid}", actor=actor)
     return sid
+
+
+BATCH_RE = re.compile(r"^\s*(.+?)\s*·\s*(.+?)\s*$")
+
+
+def _place_key(place):
+    """Место в ночи: числа по возрастанию, потом прочее («запас») по тексту."""
+    return (0, int(place), "") if place.isdigit() else (1, 0, place)
+
+
+def migrate_batches(pantheon, t, dry_run=False, actor="агент"):
+    """Старое поле batch «<имя> · <место>» → story «<имя>» в том же направлении, задача прикреплена (parent), место —
+    в order (по возрастанию места), batch убран. Повтор ничего не меняет. → строки плана."""
+    tasks = load_tasks(pantheon, WORK_TYPES)
+    groups = {}
+    for tid, (_, h, _) in tasks.items():
+        m = BATCH_RE.match(h.get("batch") or "") if h.get("type") == "task" and not h.get("parent") else None
+        if m:
+            groups.setdefault((h.get("direction"), m.group(1)), []).append((m.group(2), tid))
+    plan = []
+    for (direction, name), items in sorted(groups.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])):
+        sid = next((i for i, (_, h, _) in sorted(tasks.items()) if h.get("type") == "story"
+                    and h.get("direction") == direction and h.get("title") == name), None)
+        plan.append(f"{direction}: пачка «{name}» — " + (f"есть {sid}" if sid else "создать"))
+        if sid is None and not dry_run:
+            sid = task_new(pantheon, t, direction, name, kind="story", actor=actor)[0]
+        for n, (place, tid) in enumerate(sorted(items, key=lambda x: (_place_key(x[0]), x[1])), 1):
+            plan.append(f"  {tid}: место {place} → порядок {n}")
+            if not dry_run:
+                task_attach(pantheon, t, tid, sid, actor=actor)
+                task_set(pantheon, t, tid, {"order": n, "batch": None}, note=f"batch «{name} · {place}» перенесён: порядок {n}",
+                         actor=actor)
+    return plan
 
 
 def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):

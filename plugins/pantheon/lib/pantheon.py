@@ -48,6 +48,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ
   pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"]   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
+  pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту
   pantheon task attach ID ПАЧКА | detach ID   задача в пачку (story) и обратно; show ПАЧКА — состав и сумма оценок
   pantheon executors                    набор исполнителей кода (Claude всегда, Codex — дополнение) и включён ли Codex
   pantheon executors check              проверить Codex: на PATH → вход (CODEX_HOME роли) → hello-проба
@@ -4962,6 +4963,12 @@ def task_cmd(rest):
         elif sub == "attach" and len(args) == 2:
             old = T.task_attach(PANTHEON, now(), args[0], args[1])
             print(f"{args[0]} → пачка {args[1]}" + (f" (была в {old})" if old else ""))
+        elif sub == "migrate-batches":
+            dry = "--dry-run" in rest
+            plan = T.migrate_batches(PANTHEON, now(), dry_run=dry)
+            print("\n".join(plan) if plan else "переносить нечего")
+            if dry and plan:
+                print("(--dry-run: ничего не записано)")
         elif sub == "detach" and len(args) == 1:
             sid = T.task_detach(PANTHEON, now(), args[0])
             print(f"{args[0]}: откреплена от пачки {sid}")
