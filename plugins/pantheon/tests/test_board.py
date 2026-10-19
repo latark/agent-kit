@@ -784,7 +784,7 @@ def night_checks(check, T, tmp, home, state, view, env):
     check("Доска.base: видов «Ночь», «Волны», «Утро» нет — их заменили «Пачки» и «Итоги пачек»",
           not {"Ночь", "Волны", "Утро"} & set(names) and {"Пачки", "Итоги пачек"} <= set(names), names)
     r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Ночная", "--release", "pantheon 0.11.50",
-            "--night", "2026-10-18", "--batch", "А", "--estimate", "0,5 % недели", t=T0)
+            "--night", "2026-10-18", "--batch", "А", "--mode", "single", "--estimate", "0,5 % недели", t=T0)
     tid = r.stdout.split()[0] if r.returncode == 0 else ""
     fields = head_of(os.path.join(home, r.stdout.split()[1])) [0] if tid else {}
     check("task new --release «pantheon 0.11.50» --night 2026-10-18: поля записаны в файл",
