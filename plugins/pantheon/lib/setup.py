@@ -91,7 +91,8 @@ def child_env(py):
 
 
 def pantheon_script():
-    """pantheon.py из клона маркетплейса (чтобы ссылка current смотрела туда); нет — из этого клона."""
+    """pantheon.py из клона маркетплейса; нет — из этого клона. Куда смотрит ссылка current, решает сам install:
+    на установленную версию из кэша плагинов, а не на клон (metis-0321)."""
     name = market_name(clone_root() or PLUGIN)
     p = os.path.join(HOME, ".claude", "plugins", "marketplaces", name, "plugins", "pantheon", "lib", "pantheon.py")
     return p if os.path.isfile(p) else os.path.join(LIB, "pantheon.py")

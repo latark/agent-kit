@@ -77,7 +77,8 @@ PY = pantheon_python()
 class Env:
     """Временный HOME: каталог agent-kit, кэш установленной версии плагина x, заглушка claude."""
 
-    def __init__(self, installed, catalog, base_test, new_test, known=True):
+    def __init__(self, installed, catalog, base_test, new_test, known=True, name="x"):
+        self.name = name
         self.tmp = tempfile.mkdtemp(prefix="plugins-update-test-")
         t = self.tmp
         self.home, self.stub = os.path.join(t, "home"), os.path.join(t, "stub")
@@ -89,23 +90,23 @@ class Env:
             os.makedirs(d)
         plugins = os.path.join(self.home, ".claude", "plugins")
         mkt = os.path.join(plugins, "marketplaces", "agent-kit")
-        cache = os.path.join(plugins, "cache", "agent-kit", "x", installed)
-        self.src = os.path.join(mkt, "plugins", "x")
+        cache = os.path.join(plugins, "cache", "agent-kit", name, installed)
+        self.src = os.path.join(mkt, "plugins", name)
         self.plugin(self.src, catalog, new_test)
         self.plugin(cache, installed, base_test)
         # что поставит `claude plugin update`: копия каталога в кэше плюс служебный .in_use
-        self.after = os.path.join(plugins, "cache", "agent-kit", "x", catalog + "-new")
+        self.after = os.path.join(plugins, "cache", "agent-kit", name, catalog + "-new")
         shutil.copytree(self.src, self.after, symlinks=True)
         self.write(os.path.join(self.after, ".in_use"), "1")
         self.write(os.path.join(mkt, ".claude-plugin", "marketplace.json"),
-                   json.dumps({"name": "agent-kit", "plugins": [{"name": "x", "source": "./plugins/x"},
+                   json.dumps({"name": "agent-kit", "plugins": [{"name": name, "source": "./plugins/" + name},
                                                                {"name": "far", "source": "../../elsewhere"}]}))
         if known:
             self.write(os.path.join(plugins, "known_marketplaces.json"),
                        json.dumps({"agent-kit": {"installLocation": mkt}}))
         other = [{"id": "x@other", "version": "0.1", "scope": "user", "installPath": "/nowhere"},
                  {"id": "x@agent-kit", "version": "0.0.1", "scope": "project", "installPath": "/nowhere"}]
-        row = {"id": "x@agent-kit", "version": installed, "scope": "user", "installPath": cache}
+        row = {"id": name + "@agent-kit", "version": installed, "scope": "user", "installPath": cache}
         self.write(os.path.join(self.stub, "list.json"), json.dumps(other + [row]))
         self.write(os.path.join(self.stub, "list-after.json"),
                    json.dumps(other + [{**row, "version": catalog, "installPath": self.after}]))
@@ -118,7 +119,7 @@ class Env:
             fh.write(text)
 
     def plugin(self, d, version, body):
-        self.write(os.path.join(d, ".claude-plugin", "plugin.json"), json.dumps({"name": "x", "version": version}))
+        self.write(os.path.join(d, ".claude-plugin", "plugin.json"), json.dumps({"name": self.name, "version": version}))
         if body is not None:  # None — у версии нет tests/test_*.py
             self.write(os.path.join(d, "tests", "test_a.py"),
                        f"with open({self.counter!r}, 'a') as fh:\n    fh.write('run\\n')\n" + body)
@@ -181,6 +182,33 @@ def main():
           "plugin marketplace update agent-kit" in e.argv())
     r = e.run("plugins", "update")
     check("без --quiet: строка на плагин", r.returncode == 0 and "x: 1.0.0, новее нет" in r.stdout, r.stdout)
+    e.close()
+
+    # metis-0321: ссылка ~/.local/share/pantheon/current — на установленную версию. Зелёные тесты и вставшая версия —
+    # ссылка переезжает на новую папку кэша; красные — остаётся на старой, клон маркетплейса живым не становится
+    e = Env("1.0.0", "1.1.0", OK, OK, name="pantheon")
+    cur = os.path.join(e.home, ".local", "share", "pantheon", "current")
+    old_cache = os.path.join(e.home, ".claude", "plugins", "cache", "agent-kit", "pantheon", "1.0.0")
+    os.makedirs(os.path.dirname(cur))
+    os.symlink(old_cache, cur)
+    r = e.run()
+    check("pantheon зелёный: current → новая установленная версия, не клон",
+          r.returncode == 0 and os.path.islink(cur) and os.path.realpath(cur) == os.path.realpath(e.after),
+          f"{r.returncode} {r.stderr!r} {os.path.realpath(cur)}")
+    e.close()
+    e = Env("1.0.0", "1.1.0", OK, NEW_FAIL, name="pantheon")
+    cur = os.path.join(e.home, ".local", "share", "pantheon", "current")
+    old_cache = os.path.join(e.home, ".claude", "plugins", "cache", "agent-kit", "pantheon", "1.0.0")
+    os.makedirs(os.path.dirname(cur))
+    os.symlink(old_cache, cur)
+    r = e.run()
+    check("pantheon красный: current остаётся на установленной, клон и новая папка не живые",
+          "plugin update" not in e.argv() and os.readlink(cur) == old_cache, f"{e.argv()!r} {os.readlink(cur)}")
+    e.close()
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    cur = os.path.join(e.home, ".local", "share", "pantheon", "current")
+    e.run()
+    check("другой плагин (x): ссылку current не трогает", not os.path.lexists(cur))
     e.close()
 
     # Каталог старее установленной — откат не ставим
