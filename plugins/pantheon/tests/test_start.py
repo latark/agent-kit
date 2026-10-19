@@ -575,6 +575,15 @@ def main():
     check("wake: --resume поднял новую сессию — прежняя a1 убрана claude rm после запуска, новая не тронута",
           [x["argv"] for x in c][-1:] == [["rm", "a1"]] and not [x for x in c if x["argv"][1:2] and
                                                                   str(x["argv"][1]).startswith("n")])
+    check("wake: запасной --resume передаёт --agent <роль> (metis-0208: без него сессия — голый Claude)",
+          len(res) == 1 and "--agent" in res[0] and res[0][res[0].index("--agent") + 1] == "domain-coordinator")
+    # metis-0208: каждая сборка команды подъёма сессии в pantheon.py (--bg или --resume) несёт --agent; штаб — hq.
+    # start zeus и fresh_start zeus проверены выше и в test_watch.py; здесь — защита от нового пути без роли
+    src = open(LIB, encoding="utf-8").read()
+    spawns = [ln for ln in src.splitlines() if "claude_bin()," in ln and ('"--bg"' in ln or '"--resume"' in ln)]
+    check("pantheon.py: все команды подъёма сессии (--bg/--resume) содержат --agent (найдено %d)" % len(spawns),
+          len(spawns) >= 3 and all('"--agent"' in ln for ln in spawns))
+    check("pantheon.py: путь штаба в _resume_session даёт роль hq для zeus", 'role = "hq" if name == "zeus"' in src)
 
     # ревью argus PR #32: окно не собрано из-за allow проекта (metis-0137) — сессию не поднимает ни wake (respawn
     # взял бы прежние флаги с прежним файлом запуска, --resume ушёл бы без --settings), ни свежий старт

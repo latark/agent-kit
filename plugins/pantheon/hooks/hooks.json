@@ -17,6 +17,24 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" view --quiet",
             "async": true,
             "timeout": 60
+          },
+          {
+            "type": "command",
+            "if": "Write(~/ai/pantheon/**)",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" state-len",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "if": "Edit(~/ai/pantheon/**)",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" state-len",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "if": "MultiEdit(~/ai/pantheon/**)",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" state-len",
+            "timeout": 10
           }
         ]
       },

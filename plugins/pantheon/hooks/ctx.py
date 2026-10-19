@@ -19,6 +19,10 @@
   ctx.py start       SessionStart: запоминает сессию процесса (CLAUDE_PID не меняется при /clear); после сжатия
                      кладёт файл состояния; штабу — новые строки alerts.md и сводку новых строк журналов.
   ctx.py dir-added   DirectoryAdded: штабу открыли папку через /add-dir — строка в alerts.md (SEC-26).
+  ctx.py state-len   PostToolUse Write|Edit|MultiEdit по ~/ai/pantheon/** (metis-0274): правленый файл состояния
+                     (board.md, STATUS.md направления) длиннее STATE_FILE_LIMIT знаков → модели additionalContext
+                     «сократи, старое — в archive/». Запись не блокирует, владельцу не сообщает; в пределе и
+                     для прочих файлов — тишина; сбой — выход 0. Проверка общая с `pantheon check` (lib/statelen.py).
   ctx.py maint-post  PostToolUse, пока стоит метка технического перезапуска (SCHED-15, <STATE>/maintenance.json):
                      сессии из её списка, которая ещё не сохранилась, — один раз указание сохраниться и
                      выполнить `pantheon saved`. Без метки python не запускается (проверка оболочкой в hooks.json).
@@ -1380,13 +1384,41 @@ def _qmd_why(ev):
     return why
 
 
+def cmd_state_len(ev):
+    ti = ev.get("tool_input") if isinstance(ev, dict) else None
+    fp = ti.get("file_path") if isinstance(ti, dict) else None
+    if not isinstance(fp, str) or not fp:
+        return 0
+    fp = os.path.expanduser(fp)
+    if not os.path.isabs(fp):
+        cwd = ev.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            return 0
+        fp = os.path.join(cwd, fp)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "pantheon_statelen", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "statelen.py"))
+    sl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sl)
+    if not sl.is_state_file(fp, PANTHEON):
+        return 0
+    n = sl.length(fp)
+    if n is None or n <= sl.STATE_FILE_LIMIT:
+        return 0
+    text = "%s: %d знаков при пределе %d — сократи, старое перенеси в archive/" % (tilde(fp), n, sl.STATE_FILE_LIMIT)
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}},
+                     ensure_ascii=False))
+    return 0
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     fn = {"owner-log": cmd_owner_log, "answer": cmd_answer, "stop": cmd_stop, "start": cmd_start,
           "rewake": cmd_rewake, "dir-added": cmd_dir_added, "maint-post": cmd_maint_post,
-          "maint-pre": cmd_maint_pre, "push": cmd_push, "qmd-query": cmd_qmd_query}.get(cmd)
+          "maint-pre": cmd_maint_pre, "push": cmd_push, "qmd-query": cmd_qmd_query,
+          "state-len": cmd_state_len}.get(cmd)
     if not fn:
-        print("ctx.py: owner-log | answer | stop | start | rewake | dir-added | maint-post | maint-pre | push | qmd-query",
+        print("ctx.py: owner-log | answer | stop | start | rewake | dir-added | maint-post | maint-pre | push | qmd-query | state-len",
               file=sys.stderr)
         return 0
     try:
