@@ -2326,6 +2326,53 @@ def _sync_base(board, state, state_path, t, alert, fname="Доска.base", text
     state[f"{key}_version"], state[f"{key}_hash"] = version, _sha(new)
 
 
+CSS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "share", "pantheon-view-obsidian",
+                        "snippets", "pantheon.css")
+OLD_CSS_HASHES = {"b07338ca44d6892d"}  # сниппет до 0.11.53 (metis-0306): нетронутый — не правка владельца
+
+
+def _sync_snippet(vault, state, state_path, t, alert, src=None, old_hashes=None):
+    """.obsidian/snippets/pantheon.css хранилища (metis-0306): view-sync.sh кладёт образец только в копию без .obsidian,
+    поэтому новый сниппет доставляем отдельно, по образцу _sync_base: версия сменилась — записать; владелец правил файл —
+    его версию сохранить в папку состояния и одна тревога. Нет .obsidian — не трогаем (образец положит view-sync.sh)."""
+    src = CSS_PATH if src is None else src
+    old_hashes = OLD_CSS_HASHES if old_hashes is None else old_hashes
+    if not os.path.isdir(os.path.join(vault, ".obsidian")):
+        return
+    try:
+        with open(src, encoding="utf-8") as fh:
+            text = fh.read()
+    except (OSError, UnicodeDecodeError):
+        return
+    version = _sha(text)
+    p = os.path.join(vault, ".obsidian", "snippets", "pantheon.css")
+    try:
+        with open(p, "rb") as fh:
+            cur = fh.read()
+    except FileNotFoundError:
+        cur = None
+    except OSError as e:
+        alert("board-css", type(e).__name__, f"доска: {p} не читается ({e}) — сниппет не обновлён", "board")
+        return
+    if cur is not None and state.get("css_version") == version:
+        return
+    new = text.encode("utf-8")
+    try:
+        if cur is not None and cur != new and _sha(cur) != state.get("css_hash") and _sha(cur) not in old_hashes:
+            keep = os.path.join(os.path.dirname(os.path.abspath(state_path)),
+                                f"board-css-{datetime.fromtimestamp(t).strftime('%Y%m%d-%H%M%S')}.css")
+            os.makedirs(os.path.dirname(keep), exist_ok=True)
+            with open(keep, "wb") as fh:
+                fh.write(cur)
+            alert(f"board-css-{version}", version, f"pantheon.css обновлён, ваша версия сохранена в {keep}", "board")
+        if cur != new:
+            _write_plain(p, text)
+    except OSError as e:
+        alert("board-css", type(e).__name__, f"доска: {p} не записать ({e}) — сниппет не обновлён", "board")
+        return
+    state["css_version"], state["css_hash"] = version, version
+
+
 def _sync_help(board, state, alert):
     """Доска/Справка/Виды доски.md: свою (хеш в состоянии, Тип «справка») переписывает, чужой файл не трогает."""
     path = os.path.join(board, HELP_DIR, HELP_NOTE + ".md")
@@ -2679,6 +2726,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     _sync_base(board, state, state_path, t, alert, "Пульт.base", PULT_FILE, PULT_VERSION, "pult", ())
     _sync_projects(board, state, tasks, t, registry, roles, alert)
     _sync_types(os.path.dirname(os.path.abspath(board)), alert)
+    _sync_snippet(os.path.dirname(os.path.abspath(board)), state, state_path, t, alert)
     new_state = json.dumps(state, ensure_ascii=False, indent=1)
     try:
         with open(state_path, encoding="utf-8") as fh:
