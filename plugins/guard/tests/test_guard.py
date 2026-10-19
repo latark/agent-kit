@@ -1182,8 +1182,23 @@ def main():
             "A=setenv; launchctl $A PATH /tmp/bin", "launchctl config user path /tmp/bin")],
         ("launchd-env: координатор launchctl setenv — отказ", "deny", br, "domain-coordinator", False,
          B("launchctl setenv PANTHEON_TOUCHID /tmp/x")),
+        # белый список (ревью 84b): всё, кроме чтения, — отказ; asuser/bsexec — обёртки; без подкоманды — ввод из stdin
+        *[(f"launchd-env: {c!r} — отказ (84b)", "deny", br, "dev-opus", True, B(c)) for c in (
+            "launchctl asuser 501 launchctl setenv PATH /tmp/bin", "launchctl asuser 501 /bin/sh -c 'launchctl setenv X 1'",
+            "launchctl bsexec 1 launchctl print gui/501", "l\\aunchctl setenv PATH /x",
+            "launchctl SETENV PANTHEON_STATE /x", "launchctl Setenv PANTHEON_STATE /x",
+            "launchctl submit -l evil -- /bin/sh -c 'id'", "launchctl bootout gui/501/pantheon.tick",
+            "launchctl bootstrap gui/501 ./p.plist", "launchctl load -w ./p.plist",
+            "launchctl unload ~/Library/LaunchAgents/pantheon.tick.plist", "launchctl kickstart -k gui/501/pantheon.tick",
+            "launchctl kickstart -k -s gui/501/pantheon.tick", "launchctl enable gui/501/x",
+            "launchctl disable gui/501/pantheon.tick", "printf 'setenv PATH /x' | launchctl", "launchctl < cmds.txt",
+            "launchctl remove pantheon.tick", "$(which launchctl) setenv PATH /x", "launchctl frobnicate")],
         *[(f"launchd-env: {c!r} — можно", "allow", br, "dev-opus", True, B(c)) for c in (
-            "launchctl list", "launchctl print gui/501/pantheon.tick", "launchctl getenv PATH")],
+            "launchctl list", "launchctl print gui/501/pantheon.tick", "launchctl getenv PATH",
+            "launchctl print-disabled gui/501", "launchctl blame gui/501/pantheon.tick", "launchctl version",
+            "launchctl help", "launchctl managerpid", "$(which launchctl) list",
+            "tg-readd kickstart", "tg-readd status",
+            "grep -rn launchctl plugins/")],
         ("launchd-env: владелец launchctl setenv — можно", "allow", ".", "", False, B("launchctl setenv X 1")),
         *[(f"launchd-env: {c!r} — отказ", "deny", br, "dev-opus", True, B(c)) for c in (
             "swiftc x.swift", "/opt/homebrew/bin/swiftc x.swift", "xcrun swiftc x.swift", "S=swiftc; $S x.swift",
