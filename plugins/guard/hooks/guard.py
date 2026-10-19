@@ -405,7 +405,8 @@ def check_tg_readd(event, tool, tool_input):
 # pantheon (PATH, PANTHEON_STATE, PANTHEON_TOUCHID) — роли launchd не меняют. Белый список: launchctl только для
 # чтения; asuser и bsexec — обёртки, отказ всегда; без подкоманды (ввод из stdin) и неизвестное — отказ. swiftc — только
 # /usr/bin/swiftc: голое имя ищется по PATH, а его можно подменить. Разбор — общий bash_analysis (env, sudo, sh -c,
-# переменные), новых разборов нет; python3 -c, perl -e и скрипты — ниже модели угроз (README).
+# переменные), новых разборов нет; python3 -c, perl -e и скрипты — ниже модели угроз (README), как и имя из глоба
+# или подстановки по частям ($(echo launch)ctl, /bin/launchc?l — ревью 84f пп. 2–3, решение 19.10).
 LAUNCHCTL_READ = {"list", "print", "print-cache", "print-disabled", "getenv", "blame", "version", "help", "procinfo",
                   "hostinfo", "managerpid", "manageruid", "managername"}
 LAUNCHD_ENV_REASON = (
@@ -425,7 +426,9 @@ SWIFTC_REASON = (
 
 
 def check_launchd_env(event, tool, tool_input):
-    ok = limited(event)[0]
+    # Роль — agent_type или роль окна (ревью 84f п. 1): в событиях главной сессии фонового окна (hq, координаторы,
+    # `claude --bg --agent`) agent_type нет, а сливают ядро как раз они — без window_role() setenv у них проходил.
+    ok = limited(event)[0] or window_role()
     if not ok or tool != "Bash":
         return None
     cmd = tool_input.get("command") or ""

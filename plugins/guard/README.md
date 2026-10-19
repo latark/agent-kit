@@ -17,7 +17,7 @@ guard ловит **ошибки агента**: запись не в своё н
 числе `+ветка` — и удаления; `gh api` с записью — нет; `gh pr merge` — только главная сессия координатора или его лид в папках своего направления, защиты — только Метида или её лид; везде — через шлюз слияния: тесты, «принять» от argus и `--match-head-commit` на один SHA, подробно — раздел «Слияние PR»; координатор с личным в папке — mnemo-brain —
 не отправляет и не сливает сам; отправляют только свой репозиторий — папки своего направления), печать в терминал (terminal: osascript, tmux
 send-keys и т. п. — ввод от имени владельца), пополнение корпуса (corpus-role: подкоманды, скрипты и ключи в Связке — по списку из раздела `[corpus]` policy.toml,
-образец — в `policy.example.toml`; ни одной роли, только через посредника; Пританею корпус закрыт целиком; раздела нет — правило ничего не узнаёт, битый раздел — ролям Bash закрыт), launchd (launchd-env, metis-0298: ролям и субагентам `launchctl` — только белый список для чтения: list, print, print-cache, print-disabled, getenv, blame, version, help, procinfo, hostinfo, managerpid, manageruid, managername; остальное — setenv, unsetenv, config, bootstrap, bootout, load, unload, submit, remove, kickstart, enable, disable, обёртки asuser и bsexec, вызов без подкоманды и неизвестное — отказ: окружение и службы launchd берёт тик Пантеона; имя переменной и метка не важны; `swiftc` — только абсолютным `/usr/bin/swiftc`; launchctl внутри `python3 -c`, `perl -e` и скриптов — ниже модели угроз, guard его не видит, как и launchctl внутри `pantheon` и `tg-readd`). dev-серверы субагентам dev-* и talos в своей worktree — можно.
+образец — в `policy.example.toml`; ни одной роли, только через посредника; Пританею корпус закрыт целиком; раздела нет — правило ничего не узнаёт, битый раздел — ролям Bash закрыт), launchd (launchd-env, metis-0298: ролям, субагентам и главной сессии окна роли (`PANTHEON_ROLE` задан, agent_type в событии нет) `launchctl` — только белый список для чтения: list, print, print-cache, print-disabled, getenv, blame, version, help, procinfo, hostinfo, managerpid, manageruid, managername; остальное — setenv, unsetenv, config, bootstrap, bootout, load, unload, submit, remove, kickstart, enable, disable, обёртки asuser и bsexec, вызов без подкоманды и неизвестное — отказ: окружение и службы launchd берёт тик Пантеона; имя переменной и метка не важны; `swiftc` — только абсолютным `/usr/bin/swiftc`; launchctl внутри `python3 -c`, `perl -e` и скриптов — ниже модели угроз, guard его не видит, как и launchctl внутри `pantheon` и `tg-readd`). dev-серверы субагентам dev-* и talos в своей worktree — можно.
 
 Узкие роли и защиты проекта:
 
@@ -50,7 +50,9 @@ send-keys и т. п. — ввод от имени владельца), попо�
 Границы песочницы, а не guard: `python3 -c "…os.system(base64.b64decode(…))"` guard не ловит (что делает программа
 изнутри, он не видит); так же намеренный обход launchd-env — копия `/bin/launchctl` под другим именем
 (`cp /bin/launchctl ./lc && ./lc setenv …`) и код из stdin или подстановки (`. /dev/stdin <<< '…'`, `source <(…)`),
-ревью 84d пп. 3–4; «прочитай .env» держат правила `Read(.env)`, `Read(.env.local)`, `Read(.env.*.local)`,
+ревью 84d пп. 3–4, а также имя, собранное глобом (`/bin/launchc?l`, `/bin/l*ctl`) или подстановкой по частям
+(`$(echo launch)ctl`, `read L <<< launch; ${L}ctl`, `${L:l}ctl`) — ревью 84f пп. 2–3: разбор Bash ради них не
+наращиваем (решение 19.10). Имя из переменной, которую разбор вычисляет (`L=launch; ${L}ctl`), guard ловит; «прочитай .env» держат правила `Read(.env)`, `Read(.env.local)`, `Read(.env.*.local)`,
 `Read(secrets/**)` в managed-settings.json, которые Claude Code вливает в denyRead песочницы (тест — `test_canaries.py`).
 Grep Пританея по `.git` держит только песочница, guard — нет.
 

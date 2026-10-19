@@ -1215,6 +1215,11 @@ def main():
             "tg-readd kickstart", "tg-readd status",
             "grep -rn launchctl plugins/")],
         ("launchd-env: владелец launchctl setenv — можно", "allow", ".", "", False, B("launchctl setenv X 1")),
+        # ревью 84f п. 1: главная сессия фонового окна — agent_type в событии нет, роль только из PANTHEON_ROLE
+        *[(f"launchd-env: окно {w['PANTHEON_ROLE']} без agent_type, {c!r} — отказ", "deny", br, "", False, B(c), None,
+           w) for w in (HQ, TL) for c in ("launchctl setenv PANTHEON_TOUCHID 0", "swiftc x.swift")],
+        *[(f"launchd-env: окно {w['PANTHEON_ROLE']} без agent_type, {c!r} — можно", "allow", br, "", False, B(c), None,
+           w) for w in (HQ, TL) for c in ("launchctl print gui/501/pantheon.tick", "/usr/bin/swiftc x.swift")],
         *[(f"launchd-env: {c!r} — отказ", "deny", br, "dev-opus", True, B(c)) for c in (
             "swiftc x.swift", "/opt/homebrew/bin/swiftc x.swift", "xcrun swiftc x.swift", "S=swiftc; $S x.swift",
             "/usr/bin/swiftc a.swift; swiftc b.swift")],
