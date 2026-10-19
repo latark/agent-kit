@@ -71,15 +71,15 @@ def base_filter(view_text):
     return lambda card: ev(tree, card)
 
 
-VIEWS7 = ["От меня нужно", "Срочно", "Доска", "Очередь", "Пачки", "Итоги пачек", "Все задачи"]
+VIEWS5 = ["От меня нужно", "Доска", "Пачки", "Итоги пачек", "Все задачи"]
 
 
 def base_checks():
     vs = views()
     names = [n for n, _ in vs]
-    check("Доска.base: ровно семь видов по порядку (metis-0069)", names == VIEWS7, names)
+    check("Доска.base: ровно пять видов по порядку (metis-0069)", names == VIEWS5, names)
     check("Доска.base: старых видов нет", not {"Мне ответить", "Система", "Очередь агентов", "Нужен ответ", "Горит",
-                                               "Ночь", "Волны", "Утро"} & set(names), names)
+                                               "Ночь", "Волны", "Утро", "Срочно"} & set(names), names)
     mine = dict(vs)["От меня нужно"]
     check("«От меня нужно»: Нужен ответ, Кому = Владелец или приёмка «к владельцу»",
           'note["Статус"] == "Нужен ответ"' in mine and 'note["Кому"].toString().contains("Владелец")' in mine
@@ -87,20 +87,16 @@ def base_checks():
     cols = re.search(r"order: \[(.*)\]", mine).group(1).split(", ")
     check("«От меня нужно»: 5–6 колонок, первая — «Вопрос»", cols[0] == "note.Вопрос" and 5 <= len(cols) <= 6, cols)
     board = dict(vs)["Доска"]
-    check("«Доска» — канбан, «Отменено» и «Очередь» скрыты, пачек нет", board.startswith("kanban")
-          and 'note["Статус"] != "Отменено"' in board and 'note["Статус"] != "Очередь"' in board
+    check("«Доска» — канбан, «Отменено» скрыто, «Очередь» видна, пачек нет", board.startswith("kanban")
+          and 'note["Статус"] != "Отменено"' in board and 'note["Статус"] != "Очередь"' not in board
           and 'note["Тип"] != "пачка"' in board)
     go = re.search(r"groupOrder: \[(.*)\]", board).group(1)
-    check("«Доска»: в порядке колонок нет «Отменено» и «Очередь»", "Отменено" not in go and "Очередь" not in go, go)
+    check("«Доска»: в порядке колонок есть «Очередь», нет «Отменено»", "Отменено" not in go and "Очередь" in go, go)
     check("«Доска»: «Готово» — за 7 дней по «Закрыта»",
           'note["Статус"] != "Готово"' in board and 'note["Закрыта"] >= today() - "7d"' in board)
     check("«Доска»: на карточке «ждёт» и предупреждение режима", "formula.waits" in board and "formula.warn" in board)
-    queue = dict(vs)["Очередь"]
-    check("«Очередь»: только «Очередь», с режимом, «ждёт» и пересечениями",
-          'note["Статус"] == "Очередь"' in queue and all(f"formula.{x}" in queue for x in ("mode_view", "waits", "cross")))
-    urgent = dict(vs)["Срочно"]
-    check("«Срочно»: внимание или приоритет 0, без закрытых", "formula.urgency < 3" in urgent
-          and "formula.prio_rank == 0" in urgent and hides_closed(urgent))
+    mine_sort = mine.split("sort:")[1].split("order:")[0]
+    check("«От меня нужно»: срочные вверху — сортировка начинается с urgency", mine_sort.strip().startswith("- property: formula.urgency"))
     packs = dict(vs)["Пачки"]
     check("«Пачки» — канбан карточек пачек с суммой оценок и бюджетом", packs.startswith("kanban")
           and 'note["Тип"] == "пачка"' in packs and "note.Сумма оценок" in packs and "note.Бюджет" in packs)
@@ -163,7 +159,7 @@ def summary_checks():
     check("сводка: сверху строка счётчиков (сразу после заголовка)", lines[0] == "# Сводка" and i_cnt == 2
           and "Готово за сутки 1" in lines[i_cnt], lines[:4])
     check("сводка: под счётчиками «От меня нужно» со встроенным видом",
-          i_cnt < i_mine and "![[Доска.base#От меня нужно]]" in lines[i_mine + 2])
+          i_cnt < i_mine and "![[Доска.base#От меня нужно]]" in lines[i_mine + 4])
     # Кому = Владелец: считается, без двойного счёта; Готово/Отменено — нет; чужой адресат — нет
     def mk(i, **kw):
         return (f"p{i}", {"type": "task", "id": f"metis-1{i:03d}", "title": f"З{i}", "status": "todo", "project": "demo",
