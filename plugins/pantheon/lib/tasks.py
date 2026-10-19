@@ -911,7 +911,7 @@ def task_detach(pantheon, t, tid, actor="агент"):
     sid = tasks[tid][1].get("parent")
     if not sid or sid not in tasks or tasks[sid][1].get("type") != "story":
         raise ValueError(f"{tid} не прикреплена ни к одной пачке — откреплять нечего")
-    task_set(pantheon, t, tid, {"parent": None}, note=f"откреплена от пачки {sid}", actor=actor)
+    task_set(pantheon, t, tid, {"parent": None, "order": None}, note=f"откреплена от пачки {sid}", actor=actor)
     task_set(pantheon, t, sid, {}, note=f"откреплена задача {tid}", actor=actor)
     return sid
 
@@ -926,7 +926,7 @@ def _place_key(place):
 
 def migrate_batches(pantheon, t, dry_run=False, actor="агент"):
     """Старое поле batch «<имя> · <место>» → story «<имя>» в том же направлении, задача прикреплена (parent), место —
-    в order (по возрастанию места), batch убран. Повтор ничего не меняет. → строки плана."""
+    в order (число места как есть, «запас» — после всех чисел), batch убран. Повтор ничего не меняет. → строки плана."""
     tasks = load_tasks(pantheon, WORK_TYPES)
     groups = {}
     for tid, (_, h, _) in tasks.items():
@@ -940,7 +940,14 @@ def migrate_batches(pantheon, t, dry_run=False, actor="агент"):
         plan.append(f"{direction}: пачка «{name}» — " + (f"есть {sid}" if sid else "создать"))
         if sid is None and not dry_run:
             sid = task_new(pantheon, t, direction, name, kind="story", actor=actor)[0]
-        for n, (place, tid) in enumerate(sorted(items, key=lambda x: (_place_key(x[0]), x[1])), 1):
+        spare = 0
+        for place, tid in sorted(items, key=lambda x: (_place_key(x[0]), x[1])):
+            # порядок берётся из самого места: повтор и догон дают тот же порядок; нечисловое («запас») — после всех чисел
+            if place.isdigit():
+                n = int(place)
+            else:
+                spare += 1
+                n = 10**6 + spare
             plan.append(f"  {tid}: место {place} → порядок {n}")
             if not dry_run:
                 task_attach(pantheon, t, tid, sid, actor=actor)

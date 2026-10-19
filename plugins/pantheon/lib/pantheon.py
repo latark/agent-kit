@@ -4964,7 +4964,10 @@ def task_cmd(rest):
             old = T.task_attach(PANTHEON, now(), args[0], args[1])
             print(f"{args[0]} → пачка {args[1]}" + (f" (была в {old})" if old else ""))
         elif sub == "migrate-batches":
-            dry = "--dry-run" in rest
+            if any(a != "--dry-run" for a in args):
+                print(f"pantheon task migrate-batches: не понял «{' '.join(args)}» — допустим только --dry-run", file=sys.stderr)
+                return 2
+            dry = "--dry-run" in args
             plan = T.migrate_batches(PANTHEON, now(), dry_run=dry)
             print("\n".join(plan) if plan else "переносить нечего")
             if dry and plan:
