@@ -430,6 +430,11 @@ def cli():
     p = run("task", "set", "metis-0906", "status=done", t=T0 + 3600)
     os.remove(rows_path)
     p = run("board")
+    for _ in range(100):  # учёт идёт фоновым процессом (metis-0320): board не ждёт его
+        if M.read_rows(rows_path) and os.path.isdir(os.path.join(view, "Доска", M.DIR_NAME)):
+            break
+        time.sleep(0.2)
+    time.sleep(1)
     rows = M.read_rows(rows_path)
     udir = os.path.join(view, "Доска", M.DIR_NAME)
     check("pantheon board: плановый проход дописал строки закрытий и заметки Пульта",

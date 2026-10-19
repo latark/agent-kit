@@ -77,7 +77,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code
   pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (плановый проход раз в неделю)
-  pantheon metrics sync|summary         учёт по задачам: строки закрытых задач в ~/ai/pantheon/metrics/tasks.jsonl
+  pantheon metrics sync|summary|run     учёт по задачам: строки закрытых задач в ~/ai/pantheon/metrics/tasks.jsonl
                                         (пишет и `task set status=done|dropped`), свод недели — week-<неделя>.md
                                         и заметки Пульта; summary — свод в окно
   pantheon metrics backfill --from ГГГГ-ММ-ДД [--to ГГГГ-ММ-ДД] [--dry-run]   задним числом: строки закрытых за
@@ -5131,6 +5131,8 @@ def metrics_cmd(rest):
     sub, args = (rest[0] if rest else ""), rest[1:]
     tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
     ctx = metrics_ctx()
+    if sub == "run":
+        return metrics_run()
     if sub == "sync":
         rows = M.sync(ctx, tasks)
         M.publish(ctx, tasks)
@@ -5161,7 +5163,7 @@ def metrics_cmd(rest):
         if not dry:
             M.publish(ctx, tasks)
         return 0
-    print("pantheon metrics sync | summary | backfill --from ГГГГ-ММ-ДД [--to ГГГГ-ММ-ДД] [--dry-run]", file=sys.stderr)
+    print("pantheon metrics sync | summary | run | backfill --from ГГГГ-ММ-ДД [--to ГГГГ-ММ-ДД] [--dry-run]", file=sys.stderr)
     return 2
 
 
@@ -5493,20 +5495,60 @@ def board():
     return 0
 
 
-def board_metrics(T):
-    """Учёт по задачам после прохода доски: строки закрытий, которые роль из песочницы записать не смогла, и свод
-    недели на Пульт. Своя блокировка: первый проход после выпуска читает транскрипты дольше минуты."""
+METRICS_EVERY = 30 * 60  # не чаще раза в 30 минут: учёт читает транскрипты за неделю (metis-0320)
+
+
+def metrics_pass(T):
+    """Один проход учёта: строки закрытий, которые роль из песочницы записать не смогла, и свод недели на Пульт.
+    Первый проход после выпуска читает гигабайты транскриптов — дольше минуты, поэтому только из фонового процесса."""
+    if os.environ.get("PANTHEON_METRICS_TEST_SLEEP"):  # проба в тестах: учёт, который долго работает
+        time.sleep(float(os.environ["PANTHEON_METRICS_TEST_SLEEP"]))
+    if os.environ.get("PANTHEON_METRICS_TEST_LOG"):
+        with open(os.environ["PANTHEON_METRICS_TEST_LOG"], "a") as fh:
+            fh.write(f"{os.getpid()}\n")
+    M, tasks = metrics_mod(), T.load_tasks(PANTHEON, T.WORK_TYPES)
+    ctx = metrics_ctx()
+    M.sync(ctx, tasks)
+    M.publish(ctx, tasks)
+
+
+def metrics_run():
+    """pantheon metrics run — фоновый проход под блокировкой metrics; занята — тихо выходит."""
     with lock("metrics", block=False) as got:
         if not got:
-            return
+            return 0
         try:
-            M, tasks = metrics_mod(), T.load_tasks(PANTHEON, T.WORK_TYPES)
-            ctx = metrics_ctx()
-            M.sync(ctx, tasks)
-            M.publish(ctx, tasks)
-        except Exception as e:  # noqa: BLE001 — сбой учёта не ломает доску
+            metrics_pass(tasks_mod())
+        except Exception as e:  # noqa: BLE001 — сбой учёта не ломает ничего, кроме самого учёта
             alert_once("metrics", type(e).__name__, f"учёт по задачам: проход упал ({type(e).__name__}: {e})",
                        "board")
+    return 0
+
+
+def board_metrics(T):
+    """Учёт по задачам после прохода доски — отдельным процессом: проход доски (таймаут 60 с) не ждёт транскрипты
+    (metis-0320). Не чаще раза в 30 минут (отметка metrics-spawn) и не при занятой блокировке metrics. stdin/stdout/
+    stderr — не pipe: процесс-сирота держал бы полный pipe."""
+    stamp_p = path("metrics-spawn")
+    try:
+        if now() - os.path.getmtime(stamp_p) < METRICS_EVERY:
+            return
+    except OSError:
+        pass
+    if locked("metrics"):
+        return
+    try:
+        os.makedirs(os.path.dirname(stamp_p), exist_ok=True)
+        with open(stamp_p, "w") as fh:
+            fh.write(stamp() + "\n")
+        try:
+            log = open(path("metrics-run.log"), "a")
+        except OSError:
+            log = subprocess.DEVNULL
+        subprocess.Popen([sys.executable, "-I", os.path.abspath(__file__), "metrics", "run"], stdin=subprocess.DEVNULL,
+                         stdout=log, stderr=log, start_new_session=True, close_fds=True)
+    except Exception as e:  # noqa: BLE001 — сбой запуска учёта не ломает доску
+        alert_once("metrics", type(e).__name__, f"учёт по задачам: не запустился ({type(e).__name__}: {e})", "board")
 
 
 def statelen_mod():
