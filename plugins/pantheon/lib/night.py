@@ -58,15 +58,16 @@ start_pct, budget_pct, skipped, alerts[] (и служебные: answer_at, spen
   carry_after_pp = 5       # перенос — с отставания от линии больше стольких п. п.
   morning_after = "04:00"  # после — правило пятичасового лимита
   morning_five_hour_max = 50
+  last_night_pct = 10      # последняя ночь перед сбросом недели
 
 Потолок дня владельца (его пишет Зевс по [id] решения владельца; без раздела или с кривым — как без потолка):
 
   [limits.owner_cap]
   date = "2026-10-19"      # день, на который потолок действует (прошедшая дата — не действует)
   pct = 58                 # днём (вне ночи) при неделе ниже стольких % жёлтая и красная зона не закрывают wake и
-                           # autostart; heavy_max, hard_pct, respawn и ночь не меняются; неделя ≥ pct — закрыто, тревога
+                           # autostart; heavy_max, hard_pct, respawn и ночь не меняются; неделя ≥ pct — закрыто и тревога в любой
+                           # дневной зоне, зелёной тоже
   decision = "18.10 13:47" # id или время решения владельца
-  last_night_pct = 10      # последняя ночь перед сбросом недели
 
   [night]
   ask_at = "22:00"         # вопрос владельцу
@@ -79,6 +80,7 @@ start_pct, budget_pct, skipped, alerts[] (и служебные: answer_at, spen
 import contextlib
 import fcntl
 import json
+import math
 import os
 import re
 from datetime import date, datetime, time as dtime, timedelta
@@ -145,7 +147,7 @@ def owner_cap(t):
             d = d.date()
         elif isinstance(d, str):
             d = datetime.strptime(d, "%Y-%m-%d").date()
-        if not isinstance(d, date) or isinstance(pct, bool) or not isinstance(pct, (int, float)) or pct <= 0:
+        if not isinstance(d, date) or isinstance(pct, bool) or not isinstance(pct, (int, float)) or not math.isfinite(pct) or pct <= 0:
             return None
         if d != datetime.fromtimestamp(t).date():
             return None
@@ -394,11 +396,11 @@ def gate(kind, t, agents=None, registry=None, heavy=None):
         if kind == "respawn" and d is None:
             return True, ""
         return False, m["why"]
-    cap = (owner_cap(t) if kind != "respawn" and d is None and m["zone"] in ("yellow", "red")
+    cap = (owner_cap(t) if kind != "respawn" and d is None
            and m["used"] < cfg[0]["hard_pct"] else None)  # hard_pct потолок не отменяет
     if cap and m["used"] >= cap[0]:
         why = f"потолок владельца {num(cap[0])} % на {datetime.fromtimestamp(t).strftime('%d.%m')} достигнут"
-        P.alert_once("owner-cap", f"{datetime.fromtimestamp(t).date()}-{int(t // 3600)}",
+        P.alert_once("owner-cap", f"{datetime.fromtimestamp(t).date()}-{num(cap[0])}",
                      f"{why}: неделя {num(m['used'])} %" + (f" (решение {cap[1]})" if cap[1] else ""), "night")
         return False, why
     if cap is None and m["zone"] == "red":  # с потолком выше расхода зона не закрывает; heavy_max — ниже

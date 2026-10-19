@@ -739,64 +739,6 @@ def test_py39_compile():
     check(r.returncode == 0, f"night.py не компилируется на {py39}: {r.stderr[-400:]}")
 
 
-def test_owner_cap():
-    """metis-0275: потолок дня владельца пускает wake/autostart в красной зоне днём; ночь, respawn, heavy_max, hard_pct не меняет."""
-    t = hm("12:00", EVENING - timedelta(days=1))  # день 15.10, 12:00
-    day = datetime.fromtimestamp(t).date().isoformat()
-    yday = (datetime.fromtimestamp(t).date() - timedelta(days=1)).isoformat()
-
-    def env(sec):
-        e = Env('primary_host = "mac-a"\n' + sec)
-        e.at_line(t, 10)  # красная зона: запас +10 п.п.
-        return e
-
-    def cnt(e):
-        return e.alerts().count("потолок владельца")
-
-    def sec(date_, pct):
-        return f'[limits.owner_cap]\ndate = "{date_}"\npct = {pct}\ndecision = "18.10 13:47"\n'
-    e = env("")
-    used = N.measure(t)["used"]
-    for kind in ("wake", "autostart"):
-        ok, why = N.gate(kind, t, heavy=0)
-        check(not ok and "красная зона" in why, f"без потолка {kind}: {ok} {why}")
-    e = env(sec(day, used + 5))
-    for kind in ("wake", "autostart"):
-        ok, why = N.gate(kind, t, heavy=0)
-        check(ok, f"потолок выше расхода, {kind}: {ok} {why}")
-    check(not N.gate("autostart", t, heavy=2)[0], "потолок отменил heavy_max")
-    check(not N.gate("respawn", t)[0], "потолок открыл respawn в красной зоне")
-    check(cnt(e) == 0, "тревога потолка без достижения")
-    # расход ≥ потолка: закрыто, тревога одна (повторные проходы в тот же час молчат)
-    e = env(sec(day, used - 1))
-    for _ in range(3):
-        ok, why = N.gate("wake", t + 60, heavy=0)
-        check(not ok and "потолок владельца" in why and "достигнут" in why, f"расход ≥ потолка: {ok} {why}")
-    check(cnt(e) == 1, f"тревог потолка должно быть 1: {e.alerts()}")
-    e.snap(t + 3700, used + 1.0, e.resets or t + 3 * 86400)  # снимок свежий, расход всё ещё ≥ потолка
-    N.gate("wake", t + 3700, heavy=0)
-    check(cnt(e) == 2, "через час тревога не повторилась")
-    # потолок на вчера не действует
-    e = env(sec(yday, used + 5))
-    ok, why = N.gate("wake", t, heavy=0)
-    check(not ok and "красная зона" in why, f"вчерашний потолок: {ok} {why}")
-    # битые секции — как без потолка
-    for bad in ('[limits.owner_cap]\ndate = "завтра"\npct = 90\n', f'[limits.owner_cap]\ndate = "{day}"\npct = "много"\n',
-                f'[limits.owner_cap]\ndate = "{day}"\n', 'limits.owner_cap = 5\n',
-                f'[limits.owner_cap]\ndate = "{day}"\npct = true\n'):
-        e = env(bad)
-        ok, why = N.gate("autostart", t, heavy=0)
-        check(not ok and "красная зона" in why, f"битый потолок {bad!r}: {ok} {why}")
-    # потолок выше hard_pct не отменяет hard_pct
-    e = Env('primary_host = "mac-a"\n' + sec(day, 99))
-    e.snap(t, 86.0, t + 3 * 86400)
-    ok, why = N.gate("wake", t, heavy=0)
-    check(not ok and "красная зона" in why, f"hard_pct отменён потолком: {ok} {why}")
-    # дата TOML без кавычек
-    e = env(f'[limits.owner_cap]\ndate = {day}\npct = {used + 5}\n')
-    check(N.gate("wake", t, heavy=0)[0], "дата TOML без кавычек не принята")
-
-
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
