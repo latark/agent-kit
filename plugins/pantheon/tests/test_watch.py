@@ -106,7 +106,9 @@ class Env:
         self.doms = {}
         self.week_pct, self.snap_age = 10.0, 0  # снимок недельного лимита в run(): зелёная зона, свежий
         # уведомления идут через политику (metis-0023): простой — явно, по умолчанию «вы у Mac»
-        self.extra = {"PANTHEON_FAKE_IDLE": "0"}
+        # батарея и розетка подменены (metis-0210): иначе lib/awake.py читает настоящий pmset, и тест краснеет
+        # на Mac с низким зарядом; тесты, которым нужна батарея, переопределяют через extra
+        self.extra = {"PANTHEON_FAKE_IDLE": "0", "PANTHEON_FAKE_BATT": "100", "PANTHEON_FAKE_AC": "1"}
 
     def notify_mode(self, idle, quiet=None):
         """Простой (с) и тихие часы для политики уведомлений: quiet=None — без тихих часов (как днём),
