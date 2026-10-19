@@ -526,7 +526,8 @@ r = run("start", {"session_id": "s-a", "transcript_path": coord, "source": "comp
         CLAUDE_PROJECT_DIR=os.path.join(home, "projects", "alpha"))
 out = json.loads(r.stdout or "{}").get("hookSpecificOutput", {}).get("additionalContext", "")
 check("длинный STATUS.md → начало, требование дочитать, не больше 10 000 знаков",
-      "ГРАНАТ" in out and "целиком инструментом Read" in out and len(out) <= 10000, len(out))
+      "ГРАНАТ" in out and "целиком инструментом Read" in out and len(out) <= 10000
+      and out.rstrip().endswith("(часы Mac)"), len(out))
 r = run("start", {"session_id": "s-a", "transcript_path": coord, "source": "startup", "agent_type": "domain-coordinator"},
         CLAUDE_PROJECT_DIR=os.path.join(home, "projects", "alpha"))
 check("обычный старт координатора — без вставки файла", quiet(r))
@@ -570,7 +571,8 @@ with open(os.path.join(pantheon, "alerts.md"), "a") as fh:
     fh.write("2026-10-14 22:20 · agent · третья тревога\n")
 out = json.loads(run("start", dict(hq_start, source="compact")).stdout or "{}")["hookSpecificOutput"]["additionalContext"]
 check("сжатие у штаба: тревоги первыми, затем начало доски, в пределе 10 000",
-      out.index("третья тревога") < out.index("СЛОВО-ДОСКИ") and len(out) <= 10000, len(out))
+      out.index("третья тревога") < out.index("СЛОВО-ДОСКИ") and len(out) <= 10000
+      and out.rstrip().endswith("(часы Mac)"), len(out))
 
 # --- /add-dir у штаба (SEC-26) ------------------------------------------------------
 r = run("dir-added", {"hook_event_name": "DirectoryAdded", "agent_type": "hq", "directory": home + "/projects/alpha",
