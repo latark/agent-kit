@@ -889,7 +889,7 @@ def test_fresh_path_recheck_0207():
     r = e.run(LIB, json.dumps(a), t=T0,
               extra=QUICK, argv=[PY311, "-I", "-c", _DIRECT_RESUME])
     c = e.calls()
-    check(r.stdout.strip() == "(1, None)" and not [x for x in c if x[:1] == ["stop"] or "--bg" in x]
+    check(r.stdout.strip() == "(4, None)" and not [x for x in c if x[:1] == ["stop"] or "--bg" in x]
           and "\tresume-skip\tfr-dir\tfcfcfcfc\twake-waiting\tостановлено вами" in _start_log(e),
           f"recheck на пути свежего старта не остановил подъём: {r.stdout!r} {c} {_start_log(e)!r} {r.stderr[-400:]}")
 
@@ -934,7 +934,8 @@ def test_maintenance():
     m = json.load(open(e.st("maintenance.json")))
     check(m["sessions"] == ["mm-dir", "nn-dir"] and m["expires"] == T0 + 7200, f"метка: {m} {r.stderr}")
     out = e.run("wake", "mm-dir", t=T0 + 10)
-    check(out.returncode == 1 and "технический перезапуск" in out.stderr, "wake при метке")
+    check(out.returncode == 0 and "пропуск: mm-dir — " in out.stdout and "технический перезапуск" in out.stdout
+          and "поднимаю" not in out.stdout, f"wake при метке: {out.stdout!r} {out.stderr!r}")
     r = e.run("saved", "--by", "mm-dir", "--state", "STATUS.md", t=T0 + 20)
     check(r.returncode == 0 and os.path.exists(e.st("maintenance", "mm-dir.json")), f"saved: {r.stderr}")
     check(e.run("restart", "--status", t=T0 + 30).returncode == 1, "status при несохранившейся")
@@ -1233,7 +1234,7 @@ def test_argus_wake_rules():
     check(len([c for c in e.calls() if c[:1] == ["respawn"]]) == n0, "снятие паузы подняло сессию под общей паузой")
     check(os.path.exists(e.st("pauses", "q-dir.json")), "своя пауза снята, хотя будить нельзя")
     r = e.run("wake", "q-dir", t=T0 + 70)
-    check(r.returncode == 1 and "пауза по нагрузке" in r.stderr, f"wake под паузой: {r.stdout} {r.stderr}")
+    check(r.returncode == 0 and "пропуск: q-dir — пауза по нагрузке" in r.stdout and "поднимаю" not in r.stdout, f"wake под паузой: {r.stdout} {r.stderr}")
     e.run("pause", "--off", "--all", t=T0 + 80)
     r = e.run("wake", "q-dir", "сделай", "X", t=T0 + 90)
     pushed = open(e.st("push", "abcdef01-1.txt")).read()
@@ -2316,7 +2317,7 @@ def test_status_live_not_failed_0250():
 
 
 def test_status_blocked_without_process_0250():
-    """п. 2: «ждёт вас» без процесса и без вопроса (18.10 themis-sources 748d6686) — не «ждут вас» и без тревоги
+    """п. 2: «ждёт вас» без процесса и без вопроса (18.10, координатор без процесса) — не «ждут вас» и без тревоги
     дежурного; с вопросом владельцу — ждёт вас; реестра демона нет — ничего не утверждаем, как раньше."""
     e = Env()
     e.direction("th-dir")
@@ -2398,6 +2399,198 @@ def test_auto_rm_done_stopped_0250():
     e.run("watch", t=T0 + 10 + 86400 + 60, extra={"FAKE_RM_REFUSE": "a8a8a8a8"})
     check("a8a8a8a8" in [c[1] for c in e.calls() if c[:1] == ["rm"]][n + len(again):], "через сутки повтора нет")
     check(e.alerts().count("a8a8a8a8 осталась") == 1, "тот же отказ — вторая тревога")
+
+
+BLK_SID = "b10c0001-aaaa"
+
+
+def _blocked_env(tool=None, waiting="permission prompt"):
+    """Фоновая сессия coord-x стоит на запросе разрешения; живой Зевс закончил ход (state done, процесс есть)."""
+    e = Env()
+    e.direction("coord-x")
+    b = bg("coord-x", "blocked", BLK_SID, pid=31)
+    if waiting:
+        b["waitingFor"] = waiting
+    z = bg("zeus", "done", "2e057e05-1", pid=32)
+    e.agents([b, z])
+    if tool:
+        d = os.path.join(e.home, ".claude", "projects", "-tmp")
+        os.makedirs(d, exist_ok=True)
+        rows = [_tool(tool[0], "tu1", tool[1], T0 - 30)]
+        with open(os.path.join(d, BLK_SID + ".jsonl"), "w") as fh:
+            fh.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+    return e
+
+
+def _relayed(e):
+    return [c for c in e.calls() if c[:1] == ["respawn"] and c[1] == "2e057e05"]
+
+
+def _pushed(e):
+    p = e.st("push", "2e057e05-1.txt")
+    return open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+
+
+def test_blocked_relay_to_zeus_0277():
+    """metis-0277: blocked уходит живому Зевсу (push + respawn) с инструментом и целью; повтор не чаще раза в 15 мин
+    на сессию; текст сессии — данные: обрезан до 120 знаков, без переводов строк."""
+    e = _blocked_env(("EnterWorktree", {"path": "/Users/x/tgdaemon/wt"}))
+    e.run("watch", t=T0)
+    text = _pushed(e)
+    check(len(_relayed(e)) == 1, f"0277: Зевсу не передано: {e.calls()}")
+    check("EnterWorktree → /Users/x/tgdaemon/wt" in text and "permission prompt" not in text
+          and "b10c0001" in text and text.startswith("[Пантеон:"), f"0277: нет инструмента и цели: {text!r}")
+    check("EnterWorktree → /Users/x/tgdaemon/wt" in e.alerts(), f"0277: в тревоге нет цели: {e.alerts()}")
+    os.remove(e.st("push", "2e057e05-1.txt"))                     # хук push забрал текст
+    e.run("watch", t=T0 + 300)
+    check(len(_relayed(e)) == 1, f"0277: через 5 мин второе сообщение: {e.calls()}")
+    e.run("watch", t=T0 + 960)
+    check(len(_relayed(e)) == 1, f"0277: тот же пункт через 16 мин разбудил Зевса снова: {e.calls()}")
+    # текст сессии — данные: длинная цель с переводами строк
+    e = _blocked_env(("Bash", {"command": "echo a\n" + "x" * 300}))
+    e.run("watch", t=T0)
+    text = _pushed(e)
+    check("\n" not in text and "x" * 121 not in text and "echo a x" in text, f"0277: текст не обрезан: {text!r}")
+
+
+def test_blocked_no_zeus_only_alert_0277():
+    """metis-0277: Зевса нет, остановлен или он занят ходом — сообщения нет, остаются тревога и уведомление."""
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    e.agents([bg("coord-x", "blocked", BLK_SID, pid=31)])
+    e.run("watch", t=T0)
+    check(not _relayed(e) and not [c for c in e.calls() if c[:1] == ["respawn"]], f"0277: без Зевса — передача: {e.calls()}")
+    check("coord-x (b10c0001) ждёт вас" in e.alerts(), f"0277: без Зевса нет тревоги: {e.alerts()}")
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    os.makedirs(e.st("stopped"), exist_ok=True)
+    open(e.st("stopped", "zeus"), "w").write("x")
+    e.run("watch", t=T0)
+    check(not _relayed(e) and "ждёт вас" in e.alerts(), f"0277: остановленному Зевсу передано: {e.calls()}")
+    e = _blocked_env(("EnterWorktree", {"path": "/w/wt"}))
+    busy = bg("zeus", "working", "2e057e05-1", pid=32)
+    busy["status"] = "busy"
+    e.agents([bg("coord-x", "blocked", BLK_SID, pid=31), busy])
+    e.run("watch", t=T0)
+    check(not _relayed(e), f"0277: занятому ходом Зевсу передано (respawn оборвал бы ход): {e.calls()}")
+
+
+def test_blocked_reason_fallbacks_0277():
+    """metis-0277 п. 2: нет журнала — waitingFor, если он не общий «permission prompt»; нет и его — «причина
+    неизвестна — claude attach <id>» без пустого места после тире."""
+    e = _blocked_env(None, waiting="Bash: rm -rf build")
+    e.run("watch", t=T0)
+    check("Bash: rm -rf build" in _pushed(e), f"0277: waitingFor не взят: {_pushed(e)!r}")
+    e = _blocked_env(None, waiting="permission prompt")
+    e.run("watch", t=T0)
+    text = _pushed(e)
+    check("ждёт вас: причина неизвестна — claude attach b10c0001" in text and "permission prompt" not in text,
+          f"0277: нет «причина неизвестна»: {text!r}")
+
+
+def _two_blocked_env():
+    e = Env()
+    e.direction("coord-x")
+    e.direction("coord-y")
+    a = bg("coord-x", "blocked", BLK_SID, pid=31)
+    a["waitingFor"] = "Bash: one"
+    b = bg("coord-y", "blocked", "b10c0002-bbbb", pid=33)
+    b["waitingFor"] = "Bash: two"
+    e.agents([a, b, bg("zeus", "done", "2e057e05-1", pid=32)])
+    return e
+
+
+def test_relay_one_per_pass_0277():
+    """metis-0277 (ревью argus 1): две blocked за проход — один respawn Зевса, в тексте обе, в relay.json обе."""
+    e = _two_blocked_env()
+    e.run("watch", t=T0)
+    text = _pushed(e)
+    check(len(_relayed(e)) == 1, f"0277: две передачи за проход: {e.calls()}")
+    check("b10c0001" in text and "b10c0002" in text and "Bash: one" in text and "Bash: two" in text,
+          f"0277: в тексте не обе сессии: {text!r}")
+    st = json.load(open(e.st("relay.json")))
+    check(set(st) == {"b10c0001", "b10c0002"}, f"0277: в relay.json не обе: {st}")
+
+
+def test_relay_zeus_busy_on_fresh_agents_0277():
+    """metis-0277 (ревью argus 1): снимок прохода говорит «Зевс простаивает», а свежий claude agents под блокировкой
+    start-zeus — он взял ход: передачи нет."""
+    e = _two_blocked_env()
+    lst = json.load(open(e.agents_file))
+    for x in lst:
+        if x["name"] == "zeus":
+            x.update(state="working", status="busy")
+    nxt = os.path.join(e.home, "agents-next.json")
+    json.dump(lst, open(nxt, "w"))
+    e.run("watch", t=T0, extra={"FAKE_AGENTS_NEXT": nxt})
+    check(not _relayed(e) and not os.path.exists(e.st("push", "2e057e05-1.txt")),
+          f"0277: Зевс занят по свежему списку, а передача была: {e.calls()}")
+    check("ждёт вас" in e.alerts(), f"0277: пропала тревога: {e.alerts()}")
+
+
+def _relay_stops(setup, what, extra=None):
+    e = _two_blocked_env()
+    setup(e)
+    e.run("watch", t=T0, extra=extra)
+    check(not [c for c in e.calls() if c[:1] == ["respawn"]], f"0277: {what} — передача была: {e.calls()}")
+    check("ждёт вас" in e.alerts(), f"0277: {what} — пропала тревога: {e.alerts()}")
+    check(not os.path.exists(e.st("relay.json")), f"0277: {what} — запись в relay.json")
+
+
+def test_relay_maintenance_paused_0277():
+    """metis-0277 (ревью argus 2): метка техперезапуска и пауза планировщика — передачи нет, тревога остаётся."""
+    def maint(e):
+        os.makedirs(e.st(), exist_ok=True)
+        json.dump({"reason": "probe", "expires": T0 + 3600, "started": T0 - 60}, open(e.st("maintenance.json"), "w"))
+
+    def paused(e):
+        os.makedirs(e.st(), exist_ok=True)
+        open(e.st("paused"), "w").write("x")
+    _relay_stops(maint, "метка техперезапуска")
+    _relay_stops(paused, "пауза планировщика")
+
+
+def test_relay_limits_0277():
+    """metis-0277: пятичасовой, недельный лимит и потолок владельца — передачи нет; потолок выше расхода пускает."""
+    _relay_stops(lambda e: None, "пятичасовой лимит", extra={"PANTHEON_FAKE_LIMIT": "90"})
+
+    def week(e):
+        e.week_pct = 90.0
+    _relay_stops(week, "недельный лимит (красная зона)")
+
+    day = time.strftime("%Y-%m-%d", time.localtime(T0))
+
+    def cap(pct):
+        def f(e):
+            with open(os.path.join(e.pantheon, "schedule.toml"), "a") as fh:
+                fh.write(f'\n[limits.owner_cap]\ndate = "{day}"\npct = {pct}\ndecision = "t"\n')
+        return f
+    _relay_stops(cap(5), "потолок владельца")
+    e = _two_blocked_env()
+    cap(50)(e)
+    e.run("watch", t=T0)
+    check(len(_relayed(e)) == 1, f"0277: потолок выше расхода закрыл передачу: {e.calls()}")
+
+
+def test_relay_once_per_item_0277():
+    """metis-0277: один пункт — одна передача: тот же вопрос через 20 мин не будит; новый вопрос — будит; вышла из
+    blocked и вернулась — будит."""
+    e = _blocked_env(None, waiting="Bash: one")
+    e.run("watch", t=T0)
+    check(len(_relayed(e)) == 1, f"0277: нет первой передачи: {e.calls()}")
+    os.remove(e.st("push", "2e057e05-1.txt"))
+    e.run("watch", t=T0 + 1200)
+    check(len(_relayed(e)) == 1, f"0277: тот же пункт через 20 мин разбудил снова: {e.calls()}")
+    b = bg("coord-x", "blocked", BLK_SID, pid=31)
+    b["waitingFor"] = "Bash: other"
+    e.agents([b, bg("zeus", "done", "2e057e05-1", pid=32)])
+    e.run("watch", t=T0 + 1300)
+    check(len(_relayed(e)) == 2 and "Bash: other" in _pushed(e), f"0277: новый пункт не передан: {e.calls()}")
+    os.remove(e.st("push", "2e057e05-1.txt"))
+    e.agents([bg("coord-x", "working", BLK_SID, pid=31), bg("zeus", "done", "2e057e05-1", pid=32)])
+    e.run("watch", t=T0 + 1400)  # вышла из blocked
+    b["waitingFor"] = "Bash: other"
+    e.agents([b, bg("zeus", "done", "2e057e05-1", pid=32)])
+    e.run("watch", t=T0 + 1400 + 1000)
+    check(len(_relayed(e)) == 3, f"0277: вернулась в blocked — передачи нет: {e.calls()}")
 
 
 if __name__ == "__main__":
