@@ -88,8 +88,9 @@
   `gh repo view`, `gh auth status`; `gh api`, `gh issue` и `gh run cancel|rerun|delete` в песочнице падают.
   Окна направлений мимо песочницы ещё пишут PR: `gh pr create|edit|merge` и сетевой git (push, fetch, pull); мастерской —
   только сетевой git и только при SSH-remote. Пританей (metis-0247, решение [zeus-0247-yes]) мимо песочницы читает PR
-  (`gh pr view|checks`), правит `gh pr edit` и сливает `gh pr merge`; слияние Зевса всё равно закрывает guard
-  (merge_problem пускает только координатора направления и его лидов). Прочий `gh pr *`, `gh api` и `gh issue` в песочнице падают.
+  (`gh pr view|checks`), правит `gh pr edit` и сливает `gh pr merge`, но слияние окну Пританея guard закрывает всегда:
+  правило hq-gh отказывает любому `gh pr merge` и `gh api` к `…/pulls/<N>/merge` и `…/merges` — и главной сессии
+  без agent_type, которую шлюз слияния (merge_problem) не видит. Прочий `gh pr *`, `gh api` и `gh issue` в песочнице падают.
   С 0.11.26 (metis-0098) окнам координаторов, Метиды в их числе, сборка кладёт и `autoMode.allow` — исключения
   классификатора auto: `"$defaults"` (встроенные исключения остаются), «Pantheon Gated Merge», «Pantheon Lead
   Delivery» и «Pantheon Review Record» (`coordinator_auto_allow`).

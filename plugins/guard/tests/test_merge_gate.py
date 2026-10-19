@@ -135,6 +135,8 @@ class Home:
         event = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": cmd},
                  "cwd": self.j(cwd or pdir), "session_id": session, "tool_use_id": "toolu_" + uuid.uuid4().hex,
                  "agent_type": role}
+        if role is None:
+            del event["agent_type"]  # главная сессия окна: agent_type в её событиях нет
         if agent_id:
             event["agent_id"] = agent_id
         return decision(self.hook(event, pdir, extra_env=extra_env))
@@ -1044,8 +1046,48 @@ def t_hq_gh(h):
     case("hq: gh pr edit -R https://github.com/<свой> — можно",
          hq("gh pr edit 5 -R https://github.com/latark/agent-kit --add-label ready"), True)
     d, r = hq(f"gh pr merge 5 -R latark/agent-kit --match-head-commit {OLD} --merge")
-    check("hq: gh pr merge -R свой — отказ, как раньше (push, merge_problem)",
-          d == "deny" and ("Правило push" in r or not HAVE_TOML), r)
+    check("hq: gh pr merge -R свой (agent_type hq) — отказ", d == "deny" and ("hq-gh" in r or "Правило push" in r), r)
+    # ревью 69m-b: главная сессия окна штаба без agent_type для push — владелец, merge_problem не зовётся; слияние
+    # окну штаба закрыто всегда (и без tomllib). Мутация «проверка слияния в check_hq_gh убрана» краснеет здесь
+    merge_why = "слияние PR закрыто"
+    for cmd in ("gh pr merge 5 -R latark/agent-kit", "gh pr merge 5 -R latark/agent-kit --squash",
+                "gh pr merge 5 -R latark/agent-kit --auto --squash", "gh pr merge 5 --repo latark/agent-kit --merge",
+                f"gh pr merge 5 -R latark/agent-kit --match-head-commit {OLD} --merge", "gh pr merge 5",
+                "gh pr merge 5 --squash", "gh  pr  merge  5  -R  latark/agent-kit", "gh pr -R latark/agent-kit merge 5",
+                "/opt/homebrew/bin/gh pr merge 5 -R latark/agent-kit --squash",
+                "cd /tmp && gh pr merge 5 -R latark/agent-kit"):
+        for who, kw in (("главная сессия окна без agent_type", dict(role=None)),
+                        ("субагент окна", dict(role="general-purpose", agent_id="sub1"))):
+            d, r = hq(cmd, **kw)
+            check(f"hq: {who}: {cmd} — отказ", d == "deny" and merge_why in r, r)
+    # слияние через API — любой метод, путь с ведущим / и без, {owner}/{repo}, GraphQL
+    for cmd in ("gh api -X PUT repos/latark/agent-kit/pulls/5/merge",
+                "gh api --method PUT /repos/latark/agent-kit/pulls/5/merge -f merge_method=squash",
+                "gh api --method=PUT repos/latark/agent-kit/pulls/5/merge",
+                "gh api repos/latark/agent-kit/pulls/5/merge",
+                "gh api -X PUT 'repos/{owner}/{repo}/pulls/5/merge'",
+                "gh api -X POST repos/latark/agent-kit/merges -f base=main -f head=feature",
+                "gh api /repos/latark/agent-kit/merges -f base=main -f head=feature",
+                "/opt/homebrew/bin/gh  api  -X PUT  /repos/latark/agent-kit/pulls/5/merge",
+                "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'",
+                "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: \"x\"}) "
+                "{ clientMutationId } }'"):
+        d, r = hq(cmd, role=None)
+        check(f"hq: главная сессия окна без agent_type: {cmd} — отказ", d == "deny" and merge_why in r, r)
+    # не слияние — правило слияния не задевает
+    for cmd in ("gh api repos/latark/agent-kit/pulls/5", "gh api repos/latark/agent-kit/pulls/5/files",
+                "gh api repos/latark/agent-kit/merges-report"):
+        d, r = hq(cmd, role=None)
+        check(f"hq: главная сессия окна: {cmd} — правило слияния не задевает", merge_why not in r, r)
+    case("hq: главная сессия окна без agent_type: gh pr view -R свой — можно",
+         hq("gh pr view 5 -R latark/agent-kit", role=None), True)
+    # вне окна штаба поведение прежнее: правило hq-gh слияние не задевает
+    d, r = h.pre("gh pr merge 5 --squash")
+    check("координатор: gh pr merge — правило hq-gh не задевает", "hq-gh" not in r, r)
+    d, r = h.pre("gh pr merge 5 --squash", role=None)
+    check("вне окна штаба, без agent_type: gh pr merge — правило hq-gh не задевает", "hq-gh" not in r, r)
+    d, r = h.pre("gh api -X PUT repos/latark/agent-kit/pulls/5/merge", role=None)
+    check("вне окна штаба, без agent_type: gh api …/merge — правило hq-gh не задевает", "hq-gh" not in r, r)
     # координаторов правило не трогает
     d, r = h.pre("gh pr view 5 --comments")
     check("координатор: gh pr view --comments без -R — можно, как раньше", d == "allow", r)

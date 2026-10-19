@@ -3117,13 +3117,22 @@ def check_hq_telegram(event, tool, tool_input):
 #   - без обсуждений: --comments (-c) и --json с comments, reviews, latestReviews — чужой текст и в своём репозитории;
 #   - без личного в команде: те же пути, что правило private закрывает остальным ролям (--body-file, -F, $(cat …),
 #     перенаправление в обе стороны: `< личное`, `$(< личное)`), и значение флага в том же слове (--body-file=<путь>).
-# Слияние штабу закрывает ещё и push (merge_problem). Координаторов и мастерскую правило не трогает.
+# Слияние окну штаба закрыто всегда (ревью 69m-b, решение Метиды и Зевса 19.10): gh pr merge — с -R из [merge_repos]
+# и без, и слияние через API — gh api к …/pulls/<N>/merge, …/merges и мутации mergePullRequest,
+# enablePullRequestAutoMerge (любой метод). Шлюз слияния push (merge_problem) роль берёт из agent_type, а у
+# главной сессии окна его нет — без этого отказа она для check_push владелец и слияние прошло бы мимо шлюза.
+# Координаторов и мастерскую правило не трогает.
 GH_REDIRECT_ENV = ("GH_REPO", "GH_HOST", "GH_CONFIG_DIR")  # уводят gh от -R: чужой репозиторий, хост, вход
 HQ_GH_VALUE = {"view": "Rqt", "checks": "Rqti", "edit": "RbFBmt", "merge": "RbFtA"}  # короткие флаги со значением
 HQ_GH_BOOL = {"view": "cw", "checks": "w", "merge": "dsmr"}
 HQ_GH_LONG_VALUE = {"--repo", "--body", "--body-file", "--title", "--json", "--jq", "--template", "--base",
                     "--milestone", "--subject", "--author-email", "--match-head-commit", "--interval"}
 HQ_GH_DISCUSSION = re.compile(r"\b(?:comments|reviews|latestReviews)\b")
+HQ_GH_API_MERGE = re.compile(r"(?:^|/)repos/[^/\s]+/[^/\s]+/(?:pulls/[^/\s]+/merge|merges)(?![\w-])"
+                             r"|\b(?:mergePullRequest|enablePullRequestAutoMerge)\b", re.IGNORECASE)
+HQ_GH_MERGE_REASON = ("Правило hq-gh: окну Пританея слияние PR закрыто всегда (metis-0247) — ни gh pr merge (с -R и "
+                      "без), ни gh api к …/pulls/<N>/merge и …/merges. Сливает координатор направления через шлюз "
+                      "слияния или владелец: поручи слияние координатору направления.")
 
 
 def _hq_gh_args(sub, args):
@@ -3184,9 +3193,14 @@ def check_hq_gh(event, tool, tool_input):
     cmd = tool_input.get("command") or ""
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     _, cmds = bash_analysis(cmd, cwd)
-    calls = [t for n, t in cmds if n and os.path.basename(n.rstrip("/")) == "gh" and t[:1] == ["pr"]]
+    gh = [t for n, t in cmds if n and os.path.basename(n.rstrip("/")) == "gh"]
+    if any(t[:1] == ["api"] and any(HQ_GH_API_MERGE.search(a or "") for a in t[1:]) for t in gh):
+        return HQ_GH_MERGE_REASON
+    calls = [t for t in gh if t[:1] == ["pr"]]
     if not calls:
         return None
+    if any(texts[i] == "merge" for texts in calls for i in [_gh_pr_sub(texts)] if i is not None):
+        return HQ_GH_MERGE_REASON
     head = "Правило hq-gh: окну Пританея gh pr — только по своему репозиторию (metis-0247)"
     tail = (" Нужен чужой PR или его обсуждение — поручи координатору направления; личное в PR не уходит.")
     if re.search(r"\bGH_(?:REPO|HOST|CONFIG_DIR)\b", cmd) or any(os.environ.get(v) for v in GH_REDIRECT_ENV):
