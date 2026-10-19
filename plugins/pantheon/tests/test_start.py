@@ -68,10 +68,10 @@ if not pending():  # без сценария: stop делает сессию sto
     if args[:1] == ["rm"] and os.environ.get("FAKE_RM_REFUSE"):
         print("refusing: worktree has unpushed commits", file=sys.stderr)
         sys.exit(1)
-    if isinstance(agents, list) and args[:1] == ["stop"]:
+    if isinstance(agents, list) and args[:1] in (["stop"], ["respawn"]):
         for a in agents:
             if a.get("id") == args[1]:
-                a["state"] = "stopped"
+                a["state"] = "stopped" if args[0] == "stop" else "working"
         save(af, agents)
     elif isinstance(agents, list) and "--bg" in args and "--name" in args and not os.environ.get("FAKE_BG_SKIP"):
         name = os.environ.get("FAKE_BG_NAME") or args[args.index("--name") + 1]
@@ -256,17 +256,40 @@ def main():
                                              {"id": "z1", "name": "athena-shop-x", "state": "working"}]))
     r = run("start", "athena-shop", "заново", "--restart")
     c = calls()
-    check("start --restart: живую копию останавливает и запускает новую; чужое имя «athena-shop-x» не трогает",
-          r.returncode == 0 and c[-2]["argv"] == ["stop", "a8"] and c[-1]["argv"][4] == "athena-shop"
-          and ["stop", "z1"] not in [x["argv"] for x in c]
-          and not [x for x in c if x["argv"][:1] == ["rm"]])  # metis-0239: рестарт без rm, как на main
+    check("start --restart: живую копию останавливает, запускает новую и только потом claude rm прежней (metis-0250); "
+          "чужое имя «athena-shop-x» не трогает",
+          r.returncode == 0 and c[-3]["argv"] == ["stop", "a8"] and c[-2]["argv"][4] == "athena-shop"
+          and c[-1]["argv"] == ["rm", "a8"] and not [x for x in c if x["argv"][1:2] == ["z1"]])
     open(agents_file, "w").write(json.dumps([{"id": "a1", "name": "athena-shop", "state": "done", "pid": 5,
                                               "sessionId": "s1", "cwd": "/x", "startedAt": 1}]))
     r = run("start", "athena-shop", "новый эпик")
     c = calls()
-    check("start: прошлый эпик «done» — его сессия останавливается, новая запускается с тем же именем",
-          r.returncode == 0 and c[-3]["argv"] == ["stop", "a1"] and c[-2]["argv"] == ["rm", "a1"]
-          and c[-1]["argv"][4] == "athena-shop" and "осталась среди фоновых сессий Claude Code" not in r.stderr)
+    check("start: прошлый эпик «done» с процессом — stop до запуска, claude rm только после старта новой (metis-0250)",
+          r.returncode == 0 and c[-3]["argv"] == ["stop", "a1"] and c[-2]["argv"][4] == "athena-shop"
+          and c[-1]["argv"] == ["rm", "a1"] and "осталась среди фоновых сессий Claude Code" not in r.stderr)
+    left = json.load(open(agents_file))
+    check("start: новая сессия не тронута — ни stop, ни rm по её id",
+          [a["id"] for a in left if a["id"].startswith("n")]
+          and not [x for x in c[-3:] if x["argv"][:1] in (["stop"], ["rm"]) and x["argv"][1].startswith("n")])
+    open(log, "w").close()
+    open(agents_file, "w").write(json.dumps([
+        {"id": "a1", "name": "athena-shop", "state": "done", "sessionId": "s1", "cwd": "/x", "startedAt": 1},
+        {"id": "a2", "name": "athena-shop", "state": "stopped", "sessionId": "s2", "cwd": "/x", "startedAt": 2},
+        {"id": "z1", "name": "athena-shop-x", "state": "done", "sessionId": "s3", "cwd": "/x", "startedAt": 3}]))
+    r = run("start", "athena-shop", "новый эпик")
+    c = [x["argv"] for x in calls()]
+    check("start: прежние того же имени без процесса — сразу rm без stop, после запуска; чужое имя не трогает",
+          r.returncode == 0 and c[0][4] == "athena-shop" and sorted(c[1:]) == [["rm", "a1"], ["rm", "a2"]]
+          and "rm-previous\tathena-shop\ta2\tstopped\tstart" in open(os.path.join(state, "logs", "start.log")).read())
+    open(log, "w").close()
+    open(agents_file, "w").write(json.dumps([
+        {"id": "a1", "name": "athena-shop", "state": "done", "pid": 5, "sessionId": "s1", "cwd": "/x", "startedAt": 1},
+        {"id": "a2", "name": "athena-shop", "state": "done", "sessionId": "s2", "cwd": "/x", "startedAt": 2}]))
+    r = run("start", "athena-shop", "новый эпик", extra={"FAKE_BG_SKIP": "1", "PANTHEON_NAME_WAIT": "0.3"})
+    c = [x["argv"] for x in calls()]
+    check("start: новая не поднялась — прежние не удаляются (rm только после успешного старта)",
+          not [x for x in c if x[:1] == ["rm"]] and ["stop", "a1"] in c
+          and "rm-previous-skip\tathena-shop" in open(os.path.join(state, "logs", "start.log")).read())
     open(agents_file, "w").write(json.dumps([{"id": "a1", "name": "athena-shop", "state": "done", "pid": 5,
                                               "sessionId": "s1", "cwd": "/x", "startedAt": 1}]))
     r = run("start", "athena-shop", "новый эпик", extra={"FAKE_RM_REFUSE": "1"})
@@ -348,7 +371,7 @@ def main():
     r = run("start", "athena-shop", "заново", "--restart")
     a = argvs()
     check("start --restart: после stop ждёт, пока копия отпустит имя (working → stopped), и только потом запускает",
-          r.returncode == 0 and a[0] == ["stop", "a8"] and len(a) == 2 and bg_started("athena-shop")
+          r.returncode == 0 and a[0] == ["stop", "a8"] and a[2:] == [["rm", "a8"]] and bg_started("athena-shop")
           and "stop-wait-free\tathena-shop" in slog())
 
     open(log, "w").close()
@@ -524,8 +547,19 @@ def main():
           and bg[0][6] == os.path.join(state, "settings", "run", "athena-shop.json")
           and "[Пантеон: пробуждение]" in bg[0][7] and "Прочитай ~/ai/pantheon/directions/athena-shop/STATUS.md" in bg[0][7]
           and "свежей сессией (контекст 120 тыс., простой 120 мин)" in r.stdout)
+    check("wake: свежий старт — прежняя сессия a1 (без процесса) убрана claude rm после запуска новой (metis-0250)",
+          [x["argv"] for x in c][-1:] == [["rm", "a1"]] and [x["argv"] for x in c].index(["rm", "a1"])
+          > [x["argv"] for x in c].index(bg[0]) and ["stop", "a1"] not in [x["argv"] for x in c])
     r, c = wake_case(120_000, 10)
     check("wake: контекст 120 тыс., простой 10 мин — как раньше: respawn", [x["argv"] for x in c] == [["respawn", "a1"]])
+    transcript(120_000, 10)
+    open(agents_file, "w").write(json.dumps([
+        {"id": "a1", "name": "athena-shop", "state": "stopped", "sessionId": "5a1a1a1a-0001", "cwd": tmp, "startedAt": 2},
+        {"id": "a0", "name": "athena-shop", "state": "done", "sessionId": "5a1a1a1a-0000", "cwd": tmp, "startedAt": 1}]))
+    open(log, "w").close()
+    r = run("wake")
+    check("wake: respawn — продолженную a1 не трогает, прежнюю a0 того же имени убирает claude rm",
+          [x["argv"] for x in calls()] == [["respawn", "a1"], ["rm", "a0"]])
     r, c = wake_case(90_000, 120)
     check("wake: контекст 90 тыс., простой 2 ч — как раньше: respawn", [x["argv"] for x in c] == [["respawn", "a1"]])
     r, c = wake_case(120_000, 120, "--dry-run")
@@ -538,6 +572,9 @@ def main():
     check("wake: respawn не вышел — --resume с --settings файла запуска окна",
           [x["argv"] for x in c][:1] == [["respawn", "a1"]] and len(res) == 1
           and res[0][res[0].index("--settings") + 1] == os.path.join(state, "settings", "run", "athena-shop.json"))
+    check("wake: --resume поднял новую сессию — прежняя a1 убрана claude rm после запуска, новая не тронута",
+          [x["argv"] for x in c][-1:] == [["rm", "a1"]] and not [x for x in c if x["argv"][1:2] and
+                                                                  str(x["argv"][1]).startswith("n")])
     check("wake: запасной --resume передаёт --agent <роль> (metis-0208: без него сессия — голый Claude)",
           len(res) == 1 and "--agent" in res[0] and res[0][res[0].index("--agent") + 1] == "domain-coordinator")
     # metis-0208: каждая сборка команды подъёма сессии в pantheon.py (--bg или --resume) несёт --agent; штаб — hq.
