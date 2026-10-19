@@ -58,6 +58,14 @@ start_pct, budget_pct, skipped, alerts[] (и служебные: answer_at, spen
   carry_after_pp = 5       # перенос — с отставания от линии больше стольких п. п.
   morning_after = "04:00"  # после — правило пятичасового лимита
   morning_five_hour_max = 50
+
+Потолок дня владельца (его пишет Зевс по [id] решения владельца; без раздела или с кривым — как без потолка):
+
+  [limits.owner_cap]
+  date = "2026-10-19"      # день, на который потолок действует (прошедшая дата — не действует)
+  pct = 58                 # днём (вне ночи) при неделе ниже стольких % жёлтая и красная зона не закрывают wake и
+                           # autostart; heavy_max, hard_pct, respawn и ночь не меняются; неделя ≥ pct — закрыто, тревога
+  decision = "18.10 13:47" # id или время решения владельца
   last_night_pct = 10      # последняя ночь перед сбросом недели
 
   [night]
@@ -122,6 +130,28 @@ def config():
                 out[k] = list(g)
         return out
     return merge(LIMITS, lim), merge(NIGHT, nl), merge(ASK, ask)
+
+
+def owner_cap(t):
+    """(pct, decision) потолка владельца на день t из [limits.owner_cap] или None: нет раздела, кривые поля или дата
+    не сегодня (прошедшая и будущая не действуют)."""
+    try:
+        lim = P.load_schedule().get("limits")
+        c = lim.get("owner_cap") if isinstance(lim, dict) else None
+        if not isinstance(c, dict):
+            return None
+        d, pct = c.get("date"), c.get("pct")
+        if isinstance(d, datetime):
+            d = d.date()
+        elif isinstance(d, str):
+            d = datetime.strptime(d, "%Y-%m-%d").date()
+        if not isinstance(d, date) or isinstance(pct, bool) or not isinstance(pct, (int, float)) or pct <= 0:
+            return None
+        if d != datetime.fromtimestamp(t).date():
+            return None
+        return float(pct), str(c.get("decision") or "")
+    except Exception:  # noqa: BLE001 — битая секция: как без потолка
+        return None
 
 
 def primary():
@@ -364,7 +394,14 @@ def gate(kind, t, agents=None, registry=None, heavy=None):
         if kind == "respawn" and d is None:
             return True, ""
         return False, m["why"]
-    if m["zone"] == "red":
+    cap = (owner_cap(t) if kind != "respawn" and d is None and m["zone"] in ("yellow", "red")
+           and m["used"] < cfg[0]["hard_pct"] else None)  # hard_pct потолок не отменяет
+    if cap and m["used"] >= cap[0]:
+        why = f"потолок владельца {num(cap[0])} % на {datetime.fromtimestamp(t).strftime('%d.%m')} достигнут"
+        P.alert_once("owner-cap", f"{datetime.fromtimestamp(t).date()}-{int(t // 3600)}",
+                     f"{why}: неделя {num(m['used'])} %" + (f" (решение {cap[1]})" if cap[1] else ""), "night")
+        return False, why
+    if cap is None and m["zone"] == "red":  # с потолком выше расхода зона не закрывает; heavy_max — ниже
         return False, f"красная зона — неделя {num(m['used'])} % при линии {num(m['line'])} %"
     if kind == "respawn":
         if d is None:
@@ -373,7 +410,7 @@ def gate(kind, t, agents=None, registry=None, heavy=None):
         if not ok:
             return False, why
         return morning(t, d, cfg)  # у правила утра исключения для продолжения нет (решение лида 17.10)
-    if d is None and m["zone"] == "yellow":
+    if d is None and m["zone"] == "yellow" and cap is None:
         return False, f"жёлтая зона днём — неделя {num(m['used'])} % при линии {num(m['line'])} %"
     if heavy is None:
         heavy = heavy_count(agents, registry)
