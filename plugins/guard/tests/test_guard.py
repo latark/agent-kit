@@ -1176,6 +1176,7 @@ def main():
         # launchd-env (metis-0298): окружение launchd наследует тик pantheon — роли его не меняют
         *[(f"launchd-env: {c!r} — отказ", "deny", br, "dev-opus", True, B(c)) for c in (
             "launchctl setenv PANTHEON_TOUCHID /tmp/x", "launchctl unsetenv PATH",
+            "launchctl setenv PANTHEON_STATE /tmp/st", "launchctl setenv PATH /tmp/bin:/usr/bin",
             "/bin/launchctl setenv PATH /tmp/bin", "env X=1 launchctl setenv PATH /tmp/bin",
             "sudo launchctl setenv PATH /tmp/bin", "sh -c 'launchctl unsetenv PATH'",
             "A=setenv; launchctl $A PATH /tmp/bin", "launchctl config user path /tmp/bin")],
