@@ -60,6 +60,8 @@ with open(os.environ["FAKE_LOG"], "a") as fh:
 args = sys.argv[1:]
 if args[:1] == ["respawn"] and os.environ.get("FAKE_RESPAWN_RC"):
     sys.exit(int(os.environ["FAKE_RESPAWN_RC"]))
+if args[:1] == ["--resume"] and os.environ.get("FAKE_RESUME_RC"):
+    sys.exit(int(os.environ["FAKE_RESUME_RC"]))
 if not pending():  # без сценария: stop делает сессию stopped, --bg --name добавляет новую (имя — FAKE_BG_NAME или своё)
     try:
         agents = json.load(open(af))
@@ -506,6 +508,46 @@ def main():
     r = run("wake")
     check("wake: задача «ждёт» — не будит", r.returncode == 0 and not calls() and "будить некого" in r.stdout)
 
+    # metis-0291: пропуск — не сбой (код 0, «пропуск: имя — причина», ни «поднимаю», ни тревоги); сбой подъёма — тревога, код 1
+    task("athena-0001", "doing")
+    sleeper = {"id": "a1", "name": "athena-shop", "state": "stopped", "sessionId": "5a1a1a1a-0001", "cwd": tmp,
+               "startedAt": 1}
+    seq_path = os.path.join(tmp, "agents-seq.json")
+    al_skip0 = open(alerts_md).read() if os.path.exists(alerts_md) else ""
+    # первый claude agents (список _wake) — спит; второй (повторная проверка под блокировкой) — имя уже занято живой копией
+    open(agents_file, "w").write(json.dumps([sleeper]))
+    open(seq_path, "w").write(json.dumps([[sleeper], [sleeper, dict(sleeper, id="a2", state="working", startedAt=2)]]))
+    open(log, "w").close()
+    r = run("wake")
+    al_skip = open(alerts_md).read()[len(al_skip0):] if os.path.exists(alerts_md) else ""
+    check("wake: recheck сказал «уже работает» — код 0, одна строка «пропуск: athena-shop — уже работает», "
+          "без «поднимаю», без тревоги, claude не звали",
+          r.returncode == 0 and "пропуск: athena-shop — уже работает" in r.stdout and "поднимаю" not in r.stdout
+          and r.stdout.count("\n") == 1 and not al_skip and not r.stderr and not calls())
+    open(seq_path, "w").write("[]")
+    open(agents_file, "w").write(json.dumps([sleeper]))
+    open(log, "w").close()
+    al_fail0 = open(alerts_md).read() if os.path.exists(alerts_md) else ""
+    r = run("wake", extra={"FAKE_RESPAWN_RC": "1", "FAKE_RESUME_RC": "1"})
+    al_fail = open(alerts_md).read()[len(al_fail0):] if os.path.exists(alerts_md) else ""
+    check("wake: respawn и --resume упали — тревога «не поднялась (код 1)» и код 1, «поднимаю» не печатается",
+          r.returncode == 1 and "athena-shop не поднялась (код 1)" in al_fail and "поднимаю" not in r.stdout.replace(
+              "не поднимаю", "") and "пропуск" not in r.stdout)
+    open(agents_file, "w").write(json.dumps([sleeper]))
+    open(log, "w").close()
+    r = run("wake")
+    check("wake: подъём удался — код 0, «поднимаю: athena-shop», без «пропуск»",
+          r.returncode == 0 and "поднимаю: athena-shop" in r.stdout and "пропуск" not in r.stdout)
+    open(log, "w").close()
+    open(agents_file, "w").write(json.dumps([sleeper]))
+    os.makedirs(os.path.join(state, "stopped"), exist_ok=True)
+    open(os.path.join(state, "stopped", "athena-shop"), "w").close()
+    r = run("wake", "athena-shop")
+    os.remove(os.path.join(state, "stopped", "athena-shop"))
+    check("wake <имя>: остановлено вами — код 0, «пропуск: athena-shop — остановлено вами», claude не звали",
+          r.returncode == 0 and "пропуск: athena-shop — остановлено вами" in r.stdout and not calls())
+    open(log, "w").close()
+
     # wake hestia (metis-0217, шаг 1): без окна песочницы запуск всегда отказ, код 2, claude не зовётся
     task("athena-0001", "doing")
     open(log, "w").close()
@@ -601,7 +643,7 @@ def main():
         r, c = wake_case(tokens, idle, extra={"FAKE_RESPAWN_RC": "1"})
         check(f"wake без окна ({how}): ни respawn, ни --resume, ни --bg, ни stop; файл запуска не появился; "
               f"строка {how}-skip в start.log",
-              r.returncode == 0 and not c and not os.path.exists(run_file)
+              r.returncode == 1 and not c and not os.path.exists(run_file)
               and f"{how}-skip\tathena-shop\twake\tнет окна: окно не собрано" in slog())
         check(f"wake без окна ({how}): stdout «не поднимаю: … — см. тревогу», без причины и без «поднимаю:» (metis-0189)",
               "не поднимаю: athena-shop (a1, " in r.stdout and "— см. тревогу" in r.stdout
@@ -669,7 +711,7 @@ def main():
         r, c = wake_case(tokens, idle, extra={"FAKE_RESPAWN_RC": rc_} if rc_ else None)
         check(f"allow со старым mtime, wake ({how}{', respawn с ошибкой' if rc_ else ''}): ни respawn, ни --resume, "
               f"ни --bg; оба файла окна убраны; строка {how}-skip",
-              r.returncode == 0 and not c and not os.path.exists(win_file) and not os.path.exists(run_file)
+              r.returncode == 1 and not c and not os.path.exists(win_file) and not os.path.exists(run_file)
               and slog().count(f"{how}-skip\tathena-shop\twake\tнет окна: окно не собрано") == n0 + 1)
     al1 = open(alerts_md).read()[len(al0):] if os.path.exists(alerts_md) else ""
     check("allow со старым mtime, wake: одна тревога «не поднимаю» с файлом и правилом",
@@ -702,7 +744,7 @@ def main():
     al1 = open(alerts_md).read()[len(al0):] if os.path.exists(alerts_md) else ""
     check("wake: папка сессии (cwd) не папка запуска и её allow пускает gh pr merge — ни respawn, ни --resume; "
           "resume-skip, тревога; окно цело",
-          r.returncode == 0 and not calls() and "resume-skip\tathena-shop\twake\tпапка сессии" in slog()
+          r.returncode == 1 and not calls() and "resume-skip\tathena-shop\twake\tпапка сессии" in slog()
           and "сессия работала в" in al1 and "Bash(gh pr *)" in al1 and "не поднялась" not in al1
           and os.path.exists(win_file))
     check("wake, путь cwd: stdout «не поднимаю: athena-shop», без «нет окна» (окно цело) и без «поднимаю:» (metis-0189)",
@@ -729,7 +771,7 @@ def main():
     open(log, "w").close()
     r = run("wake", extra={"FAKE_RESPAWN_RC": "1"})
     check("wake мастерской без окна workshop.json: ни respawn, ни --resume; тревога «не поднимаю»",
-          r.returncode == 0 and not calls() and "daedalus-shop: не поднимаю (wake)" in open(alerts_md).read())
+          r.returncode == 1 and not calls() and "daedalus-shop: не поднимаю (wake)" in open(alerts_md).read())
     os.remove(os.path.join(home, "directions", "athena-shop", "tasks", "athena-0002.md"))
     run("domains", "build")
     os.remove(tr)

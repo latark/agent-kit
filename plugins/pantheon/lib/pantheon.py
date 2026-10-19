@@ -2710,11 +2710,11 @@ def resume_session(name, a, text, origin, recheck=None):
     with lock("start-" + name, block=False) as got_lock:
         if not got_lock:
             start_log(f"resume-busy\t{name}\t{a.get('id')}\t{origin}")
-            return 1, None
+            return skipped("другой процесс уже поднимает"), None
         why = recheck() if recheck else None
         if why:
             start_log(f"resume-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
-            return 1, None
+            return skipped(why), None
         # metis-0207: правило свежего старта (metis-0147 п. 2) действует на любом пути возобновления, а не только в
         # resume_or_start и pantheon wake: ждущая сессия, после недельного лимита, техперезапуск, снятие паузы
         fresh = fresh_reason(a)
@@ -2727,6 +2727,17 @@ def resume_session(name, a, text, origin, recheck=None):
 # свежим стартом — без --settings она ушла бы без песочницы окна (ревью argus PR #32). Тревога — одна на причину
 # (alert_once), поэтому wake и дежурный не повторяют свою тревогу о коде каждые 5 минут
 NO_WINDOW = 3
+# Код «пропуск» (metis-0291): под блокировкой имени выяснилось, что будить не нужно или нельзя по обычной причине (уже
+# работает, остановлено вами, пауза, технический перезапуск, имя занято другим подъёмом). Не сбой: wake печатает
+# «пропуск: <имя> — <причина>», выходит с 0, без тревоги. Причина — в SKIP_WHY (последний пропуск процесса)
+SKIPPED = 4
+SKIP_WHY = ""
+
+
+def skipped(why):
+    global SKIP_WHY
+    SKIP_WHY = str(why)
+    return SKIPPED
 
 
 def window_missing(name, origin, why, how):
@@ -2927,11 +2938,11 @@ def fresh_start(name, a, text, origin, recheck=None, reason=None):
     with lock("start-" + name, block=False) as got_lock:
         if not got_lock:
             start_log(f"fresh-busy\t{name}\t{a.get('id')}\t{origin}")
-            return 1
+            return skipped("другой процесс уже поднимает")
         why = recheck() if recheck else None
         if why:
             start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
-            return 1
+            return skipped(why)
         return _fresh_start(name, a, text, origin, reason)
 
 
@@ -3448,7 +3459,7 @@ def _wake(dry):
         print("pantheon wake: claude agents --json не ответил", file=sys.stderr)
         return 1
     domains = read_json(path("domains.json"), {}).get("domains") or {}
-    done = 0
+    done = failed = 0
     for a in agents:
         name, state = a.get("name") or "", a.get("state")
         asleep = state in ("failed", "stopped")
@@ -3477,16 +3488,23 @@ def _wake(dry):
                              recheck=lambda n=name, s=state: wake_recheck(n, s), reason=fresh)
         else:
             rc, _ = resume_session(name, a, WAKE_TEXT, "wake", recheck=lambda n=name, s=state: wake_recheck(n, s))
+        if rc == SKIPPED:  # metis-0291: пропуск — не сбой, ни «поднимаю», ни тревоги
+            print(f"пропуск: {name} — {SKIP_WHY}")
+            done += 1
+            continue
+        done += 1
         if rc == NO_WINDOW:  # «нет окна» — своя тревога, одна на причину; владельцу не говорим, что подняли (metis-0189)
             print(f"не поднимаю: {name} ({a.get('id')}, {state}) — см. тревогу")
+            failed += 1
+        elif rc:  # настоящий сбой подъёма: тревога и код 1 (metis-0291)
+            print(f"не поднялась: {name} ({a.get('id')}, {state}) — код {rc}", file=sys.stderr)
+            alert(f"pantheon wake: {name} не поднялась (код {rc})", "pantheon")
+            failed += 1
         else:
             print(f"поднимаю: {line}")
-            if rc:
-                alert(f"pantheon wake: {name} не поднялась (код {rc})", "pantheon")
-        done += 1
     if not done:
         print("будить некого")
-    return 0
+    return 1 if failed else 0
 
 
 # --- роли (ROLE-15, ROLE-16, ROLE-17) -------------------------------------------------------
