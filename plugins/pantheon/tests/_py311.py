@@ -33,4 +33,8 @@ def find():
     sys.exit(0)
 
 
+# Признак теста для всех тестов pantheon и их подпроцессов, унаследовавших окружение: notify пишет в
+# STATE/notify-test.log, а не на экран владельца (metis-0307). Тест со своим окружением с нуля защищает сам
+# notify: временный PANTHEON_STATE или HOME тоже уводят уведомление в файл.
+os.environ["PANTHEON_TEST"] = "1"
 PY311 = find()
