@@ -1837,9 +1837,14 @@ GH_PR_READ = [f"gh pr {c}{tail}" for c in ("view", "checks", "diff", "list") for
 GH_RUN_READ = [f"gh run {c}{tail}" for c in ("view", "list", "watch") for tail in ("", " *")]
 SANDBOX_EXCLUDED = GH_PR_READ + GH_RUN_READ + ["gh repo view *", "gh auth status",
                                  "pantheon alert *", "pantheon consent *", "pantheon saved *"]
-# PR создают лиды, сливает координатор или лид — только окна направлений; кто и что сливает, проверяет guard
-# (merge_problem). Мастерской и штабу — нет
-GH_PR_WRITE = ["gh pr create *", "gh pr merge *"]
+# PR создают и правят (заголовок, описание, метки — `gh pr edit`, metis-0247) лиды, сливает координатор или лид —
+# только окна направлений; кто и что сливает, проверяет guard (merge_problem). Мастерской — нет
+GH_PR_WRITE = ["gh pr create *", "gh pr edit *", "gh pr merge *"]
+# штаб (metis-0247, «да» владельца 19.10 [zeus-0247-yes]): сети у окна нет, а gh в песочнице всё равно падает (TLS Go,
+# x509 -26276) — мимо неё только чтение PR и правка. Слияния здесь нет (решение Зевса 19.10, metis-0247 r4): gh pr
+# merge, gh api и прочий gh остаются в песочнице без сети и падают; guard (hq-gh) вдобавок отказывает слиянию в любой
+# форме — `gh -R o/r pr merge`, GH_REPO=…, gh api …/merge
+HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks") for tail in ("", " *")] + ["gh pr edit *"]
 # git по SSH в песочнице macOS не работает, по HTTPS push упирается в помощник учётных данных: окну каждого направления
 # сетевые команды git — мимо неё; мастерской — только при SSH-remote. push в main/master, --force и --delete не
 # пускает guard (_PUSH_BAD)
@@ -2476,13 +2481,13 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         return built
     clear_once("hq-policy-broken")
     # штаб (SEC-26, вариант А): Зевс пишет только в ~/ai/pantheon, кроме .git и alerts.md; сеть закрыта (в веб он не
-    # ходит, SEC-13); мимо песочницы — только `pantheon start|wake|alert`: запуск сессий и тревоги. Личное ему открыто
-    # (SEC-11), кроме ключей git-crypt.
+    # ходит, SEC-13); мимо песочницы — только `pantheon start|wake|alert`: запуск сессий и тревоги, и gh PR (HQ_GH).
+    # Личное ему открыто (SEC-11), кроме ключей git-crypt.
     hq_cache = _real_dir(f"{caches}/hq", [caches], strict=True, create=True)
     root = os.path.realpath(PANTHEON)
     keys = [p for p in private_paths if "/.git/git-crypt" in p + "/"]  # ключи — не штабу: ~/ai/pantheon коммитит тик
     hq = role_settings([root], None, memory, hq_cache, False, keys, None, guard)
-    hq["sandbox"]["excludedCommands"] = list(HQ_EXCLUDED)
+    hq["sandbox"]["excludedCommands"] = list(HQ_EXCLUDED) + HQ_GH
     hq["sandbox"]["filesystem"]["denyWrite"] += [os.path.join(root, ".git"), os.path.join(root, "alerts.md")]
     hq["sandbox"]["network"]["allowedDomains"] = []
     # корпус лекций — чужой контент (SEC-13, metis-0025): у Зевса уже есть личное и действия наружу, поэтому корпус ему
