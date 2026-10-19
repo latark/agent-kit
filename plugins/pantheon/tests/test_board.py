@@ -76,6 +76,59 @@ def set_card(path, key, value):
     open(path, "w", encoding="utf-8").write(text)
 
 
+def state_len_hook():
+    """Хук state-len (metis-0274): превышение предела сообщает модели, остальное — тишина, любой вход — код 0."""
+    hook = os.path.join(os.path.dirname(LIB), "hooks", "ctx.py")
+    root = os.path.realpath(tempfile.mkdtemp(prefix="statelen-"))
+    pan = os.path.join(root, "pantheon")
+    os.makedirs(os.path.join(pan, "directions", "d1"))
+    os.makedirs(os.path.join(root, "outside"))
+    e = {k: v for k, v in os.environ.items() if not k.startswith("PANTHEON_")}
+    e.update(HOME=root, PANTHEON_HOME=pan, PANTHEON_STATE=os.path.join(root, "state"))
+
+    def hk(payload, raw=False):
+        return subprocess.run([sys.executable, "-I", hook, "state-len"], env=e, capture_output=True, text=True,
+                              input=payload if raw else json.dumps(payload), timeout=30)
+
+    def mk(path, n):
+        open(path, "w", encoding="utf-8").write("ж" * n)  # кириллица: знаки, не байты
+        return path
+
+    board = mk(os.path.join(pan, "board.md"), 9001)
+    r = hk({"tool_name": "Edit", "tool_input": {"file_path": board}})
+    out = json.loads(r.stdout) if r.stdout.strip() else {}
+    ctx = (out.get("hookSpecificOutput") or {}).get("additionalContext", "")
+    check("хук длины: board.md 9001 знак → additionalContext с размером, пределом и archive/",
+          r.returncode == 0 and "9001 знаков при пределе 9000" in ctx and "board.md" in ctx and "archive/" in ctx
+          and out["hookSpecificOutput"]["hookEventName"] == "PostToolUse", r.stdout + r.stderr)
+    st = mk(os.path.join(pan, "directions", "d1", "STATUS.md"), 9500)
+    r = hk({"tool_name": "Write", "tool_input": {"file_path": st}})
+    check("хук длины: STATUS.md направления 9500 → сообщение", r.returncode == 0 and "9500 знаков" in r.stdout, r.stdout)
+    mk(board, 9000)
+    r = hk({"tool_name": "Edit", "tool_input": {"file_path": board}})
+    check("хук длины: ровно 9000 знаков → тишина", r.returncode == 0 and r.stdout == "", r.stdout)
+    other = mk(os.path.join(pan, "directions", "d1", "notes.md"), 20000)
+    r = hk({"tool_name": "Write", "tool_input": {"file_path": other}})
+    check("хук длины: не файл состояния (notes.md в Пританее) → тишина", r.returncode == 0 and r.stdout == "", r.stdout)
+    r = hk({"tool_name": "Write", "tool_input": {"file_path": mk(os.path.join(pan, "directions", "d1", "board.md"), 20000)}})
+    check("хук длины: board.md не в корне Пританея → тишина", r.returncode == 0 and r.stdout == "", r.stdout)
+    out_board = mk(os.path.join(root, "outside", "board.md"), 20000)
+    r = hk({"tool_name": "Write", "tool_input": {"file_path": out_board}})
+    check("хук длины: board.md вне Пританея → тишина", r.returncode == 0 and r.stdout == "", r.stdout)
+    mk(board, 9001)
+    for name, pl, raw in (("битый JSON", "{not json", True), ("пустой ввод", "", True), ("не объект", "[1]", True),
+                          ("нет file_path", {"tool_input": {}}, False), ("tool_input не объект", {"tool_input": 5}, False),
+                          ("file_path не строка", {"tool_input": {"file_path": 7}}, False),
+                          ("файла нет", {"tool_input": {"file_path": os.path.join(pan, "directions", "d2", "STATUS.md")}}, False)):
+        r = hk(pl, raw)
+        check("хук длины: %s → код 0, тишина" % name, r.returncode == 0 and r.stdout == "", r.stdout + r.stderr)
+    h = json.load(open(os.path.join(os.path.dirname(LIB), "hooks", "hooks.json"), encoding="utf-8"))
+    ifs = sorted(x.get("if") for g in h["hooks"]["PostToolUse"] for x in g["hooks"] if "state-len" in x.get("command", ""))
+    check("хук длины: в hooks.json синхронно (без async) на Write, Edit, MultiEdit по ~/ai/pantheon/**",
+          ifs == ["Edit(~/ai/pantheon/**)", "MultiEdit(~/ai/pantheon/**)", "Write(~/ai/pantheon/**)"]
+          and not any(x.get("async") for g in h["hooks"]["PostToolUse"] for x in g["hooks"] if "state-len" in x.get("command", "")))
+
+
 def main():
     tmp, home, state, view, env = make()
     src = lambda d, i: os.path.join(home, "directions", d, "tasks", i + ".md")
@@ -180,8 +233,10 @@ def main():
     known = {"formula." + k for k in (base or {}).get("formulas", {})}
     sorts_ok = bool(views_) and all(v.get("sort") for v in views_) and all(
         x["property"] in known or x["property"].startswith("note.") for v in views_ for x in v["sort"])
-    # на виду — только формулы-значки статуса и приоритета (status_view, prio_view), служебные — для сортировки
-    shown = {"formula.status_view", "formula.prio_view"}
+    # на виду — только формулы-значки: статус, приоритет, режим, «ждёт», пересечения, предупреждение режима (metis-0069);
+    # служебные — для сортировки
+    shown = {"formula.status_view", "formula.prio_view", "formula.mode_view", "formula.waits", "formula.cross",
+             "formula.warn"}
     hidden_ok = bool(views_) and not any(p.startswith("formula.") and p not in shown
                                          for v in views_ for p in v.get("order", []))
     check("board: Доска.base — сортировка в каждом представлении, формулы не на карточке",
@@ -207,10 +262,10 @@ def main():
     # п. 6: «Нужен ответ» — во всех местах .base, где слово сравнивается; «Отменено» — в порядке колонок
     go = re.search(r"groupOrder: \[(.*)\]", base_txt)
     cols = [x.strip() for x in go.group(1).split(",")] if go else []
-    # metis-0123: канбан «Система» скрывает «Очередь» (свой вид) и «Отменено»; остальные колонки — как в COLUMNS
+    # metis-0123, metis-0069: канбан «Доска» скрывает «Очередь» (свой вид) и «Отменено»; остальные колонки — как в COLUMNS
     check("board: Доска.base — колонки = COLUMNS без «Очереди» и «Отменено» (с «Нужен ответ»), «Ждёт вас» нигде нет",
           cols == [c for c in _tasks.COLUMNS if c not in ("Очередь", "Отменено")] and "Ждёт вас" not in base_txt and 'note["Статус"] == "Нужен ответ"' in base_txt
-          and "name: Нужен ответ" in base_txt and "note.Кому" in base_txt and "note.Кто" not in base_txt)
+          and "name: От меня нужно" in base_txt and "note.Кому" in base_txt and "note.Кто" not in base_txt)
     check("board: узлы не на доске — фильтр по папке Доска", "'file.folder == \"Доска\"'" in base_txt)
     check("board: просрочка — одна тревога", "просрочена: Налоги беты" in r.stdout)
     def stamps():
@@ -678,6 +733,7 @@ def main():
     ib = _tasks.render_inbox_card({"direction": "d", "file": "2026-10-15-x.md", "id": "i1", "text": "# t\ntext"},
                                   "zorba", marks=mk)[0]["Проект"]
     check("значок проекта: входящая карточка берёт значок из реестра", ib == "🟥 zorba")
+    state_len_hook()
     print(f"\n{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 
@@ -698,46 +754,53 @@ def _eval_bases(expr, note, formulas):
 
 
 def night_checks(check, T, tmp, home, state, view, env):
-    """Ночной цикл (metis-0129): поля волны и ночи, карточка, виды «Ночь», «Волны», «Утро»."""
+    """Ночной цикл (metis-0129) и выпуск (metis-0069): поля выпуска, пачки и ночи, карточка, виды пачек."""
     good = {"type": "task", "id": "metis-0140", "title": "T", "status": "todo", "project": "metis-pantheon",
             "direction": "metis-pantheon", "owner": "metis-pantheon", "created": "2026-10-17",
-            "updated": "2026-10-17T10:00", "schema_version": T.SCHEMA_VERSION, "wave": 2, "batch": "А",
-            "night": "2026-10-18", "estimate": "0,5 % недели", "actual": "0,4 % недели", "acceptance": "принято"}
+            "updated": "2026-10-17T10:00", "schema_version": T.SCHEMA_VERSION, "release": "pantheon 0.11.50",
+            "batch": "А", "night": "2026-10-18", "estimate": "0,5 % недели", "actual": "0,4 % недели",
+            "acceptance": "принято"}
     check("ночные поля: задача со всеми полями проходит проверку шапки",
           T.check_head(good)[0] == [], str(T.check_head(good)[0]))
-    check("ночные поля: wave=\"abc\" и night=\"завтра\" — ошибка шапки",
-          any("wave" in e for e in T.check_head(dict(good, wave="abc"))[0])
+    check("ночные поля: release=2 (число) и night=\"завтра\" — ошибка шапки",
+          any("release" in e for e in T.check_head(dict(good, release=2))[0])
           and any("night" in e for e in T.check_head(dict(good, night="завтра"))[0]))
     check("ночные поля: acceptance вне перечня — ошибка, из перечня — нет",
           T.check_head(dict(good, acceptance="ок"))[0] != [] and all(
               T.check_head(dict(good, acceptance=a))[0] == [] for a in T.ACCEPTANCE))
     cd = T.render_card(good, "", "x.md", 0)[0]
-    check("ночные поля: карточка содержит «Волна», «Ночь», «Приёмка»",
-          cd["Волна"] == 2 and cd["Ночь"] == "2026-10-18" and cd["Приёмка"] == "принято" and cd["Пачка"] == "А")
-    bare = {k: v for k, v in good.items() if k not in ("wave", "batch", "night", "estimate", "actual", "acceptance")}
+    check("ночные поля: карточка содержит «Выпуск», «Ночь», «Приёмка», «Пачка», а «Волны» нет",
+          cd["Выпуск"] == "pantheon 0.11.50" and cd["Ночь"] == "2026-10-18" and cd["Приёмка"] == "принято"
+          and cd["Пачка"] == "А" and "Волна" not in cd)
+    bare = {k: v for k, v in good.items() if k not in ("release", "batch", "night", "estimate", "actual", "acceptance")}
     bc = T.render_card(bare, "", "x.md", 0)[0]
     check("ночные поля: пустые — None, как у «Срок»",
-          all(bc[k] is None for k in ("Волна", "Пачка", "Ночь", "Оценка", "Факт", "Приёмка")))
+          all(bc[k] is None for k in ("Выпуск", "Пачка", "Ночь", "Оценка", "Факт", "Приёмка")))
     order = T.CARD_ORDER
-    check("ночные поля: в CARD_ORDER — сразу после «Закрыта»",
-          order[order.index("Закрыта") + 1: order.index("Закрыта") + 7] == ["Волна", "Пачка", "Ночь", "Оценка", "Факт", "Приёмка"])
-    views = {m for m in re.findall(r"^  - type: table\n    name: (.+)$", T.BASE_FILE, re.M)}
-    check("Доска.base: виды «Ночь», «Волны», «Утро» после «Все задачи»",
-          {"Ночь", "Волны", "Утро"} <= views and T.BASE_FILE.index("name: Все задачи") < T.BASE_FILE.index("name: Ночь"))
-    check("Доска.base: фильтр «Ночь» — не пусто и не Готово/Отменено",
-          "'!note[\"Ночь\"].isEmpty()'" in T.BASE_FILE and "'note[\"Статус\"] != \"Отменено\"'" in T.BASE_FILE)
-    r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Ночная", "--wave", "2",
+    check("ночные поля: в CARD_ORDER — сразу после «Закрыта», «Волны» нет",
+          order[order.index("Закрыта") + 1: order.index("Закрыта") + 8]
+          == ["Выпуск", "Пачка", "Пульт", "Ночь", "Оценка", "Факт", "Приёмка"] and "Волна" not in order)
+    names = re.findall(r"^    name: (.+)$", T.BASE_FILE, re.M)
+    check("Доска.base: видов «Ночь», «Волны», «Утро» нет — их заменили «Пачки» и «Итоги пачек»",
+          not {"Ночь", "Волны", "Утро"} & set(names) and {"Пачки", "Итоги пачек"} <= set(names), names)
+    r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Ночная", "--release", "pantheon 0.11.50",
             "--night", "2026-10-18", "--batch", "А", "--estimate", "0,5 % недели", t=T0)
     tid = r.stdout.split()[0] if r.returncode == 0 else ""
     fields = head_of(os.path.join(home, r.stdout.split()[1])) [0] if tid else {}
-    check("task new --wave 2 --night 2026-10-18: поля записаны в файл",
-          tid and fields.get("wave") == "2" and fields.get("night") == "2026-10-18" and fields.get("batch") == "А",
-          r.stderr[-200:])
+    check("task new --release «pantheon 0.11.50» --night 2026-10-18: поля записаны в файл",
+          tid and fields.get("release") == "pantheon 0.11.50" and fields.get("night") == "2026-10-18"
+          and fields.get("batch") == "А" and "wave" not in fields, r.stderr[-200:])
     r2 = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Плохая", "--night", "завтра", t=T0)
     check("task new --night завтра — отказ", r2.returncode != 0)
     r3 = run(env, "task", "set", tid, "--wave", "3", "--acceptance", "вернуть", t=T0 + 30)
-    check("task set --wave 3 --acceptance вернуть: поля обновлены",
-          r3.returncode == 0 and head_of(os.path.join(home, r3.stdout.split()[-1]))[0].get("acceptance") == "вернуть")
+    h3 = head_of(os.path.join(home, r3.stdout.split()[-1]))[0] if r3.returncode == 0 else {}
+    check("task set --wave 3 (прежнее имя) --acceptance вернуть: пишется release, поля обновлены",
+          r3.returncode == 0 and h3.get("acceptance") == "вернуть" and h3.get("release") == "3" and "wave" not in h3,
+          r3.stderr[-200:])
+    r4 = run(env, "task", "set", tid, "wave=4", t=T0 + 40)
+    h4 = head_of(os.path.join(home, r4.stdout.split()[-1]))[0] if r4.returncode == 0 else {}
+    check("task set wave=4 (прежний ключ) — пишется release", r4.returncode == 0 and h4.get("release") == "4",
+          r4.stderr[-200:])
 
 
 def sort_by_column_checks(check, T):
@@ -750,8 +813,8 @@ def sort_by_column_checks(check, T):
           _re.findall(r"property: (\S+)\n\s+direction: (\w+)", board_view.split("sort:")[1].split("order:")[0])
           == [("formula.col_k1", "ASC"), ("formula.col_k2", "ASC"), ("formula.col_k3", "ASC")]
           and "age_key" not in board_view)
-    check("0172: остальные виды (Нужен ответ, Горит, Все задачи) с прежней сортировкой",
-          base.count("formula.age_key") == 3 and base.count("formula.col_k1") == 1)
+    check("0172: остальные виды (Срочно, Все задачи) с прежней сортировкой",
+          base.count("formula.age_key") == 2 and base.count("formula.col_k1") == 1)
     day = lambda d: float(d) * 86400
     _id = [0]
 
