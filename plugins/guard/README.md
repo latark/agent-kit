@@ -48,7 +48,9 @@ send-keys и т. п. — ввод от имени владельца), попо�
   главные запреты и хук guard, которые не перебить настройками проекта и модами.
 
 Границы песочницы, а не guard: `python3 -c "…os.system(base64.b64decode(…))"` guard не ловит (что делает программа
-изнутри, он не видит); «прочитай .env» держат правила `Read(.env)`, `Read(.env.local)`, `Read(.env.*.local)`,
+изнутри, он не видит); так же намеренный обход launchd-env — копия `/bin/launchctl` под другим именем
+(`cp /bin/launchctl ./lc && ./lc setenv …`) и код из stdin или подстановки (`. /dev/stdin <<< '…'`, `source <(…)`),
+ревью 84d пп. 3–4; «прочитай .env» держат правила `Read(.env)`, `Read(.env.local)`, `Read(.env.*.local)`,
 `Read(secrets/**)` в managed-settings.json, которые Claude Code вливает в denyRead песочницы (тест — `test_canaries.py`).
 Grep Пританея по `.git` держит только песочница, guard — нет.
 

@@ -429,19 +429,24 @@ def check_launchd_env(event, tool, tool_input):
     if not ok or tool != "Bash":
         return None
     cmd = tool_input.get("command") or ""
-    plain = cmd.replace("\\", "")  # l\aunchctl — тот же launchctl
-    if "launchctl" not in plain and "swiftc" not in plain:
-        return None
+    # Раннего выхода по подстроке нет (ревью 84d п. 1): имя собирают кавычками, регистром, переменной и переносом
+    # (launch''ctl, LaunchCtl, ${L}ctl) — решает разбор, он нормализует имя; bash_analysis кэширован. Сырой текст —
+    # только догадка там, где имени нет («?» или команду не разобрать): без кавычек, \ и регистра.
+    plain = re.sub(r"[\\'\"]", "", cmd).lower()
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     targets, cmds = bash_analysis(cmd, cwd)
-    if not cmds and targets == [UNRESOLVED]:
-        return LAUNCHD_ENV_REASON if "launchctl" in plain else SWIFTC_REASON  # команду не разобрать
-    for name, args in cmds:
-        args = [a for a in args if a]
-        if (name == "launchctl" or (name == "?" and "launchctl" in plain)) \
-                and (not args or args[0] not in LAUNCHCTL_READ):
+    if not cmds and targets == [UNRESOLVED]:  # команду не разобрать
+        if "launchctl" in plain:
             return LAUNCHD_ENV_REASON
-        if name == "swiftc" or (name == "?" and "swiftc" in cmd):
+        return SWIFTC_REASON if "swiftc" in plain else None
+    for name, args in cmds:
+        # Пустое слово ("") launchctl не получает; невычисленное (None: $(…), $X, файл) — подкоманда неизвестна, отказ
+        # (ревью 84d п. 2: `launchctl $(echo setenv PATH) list` выполнит setenv).
+        args = [a for a in args if a != ""]
+        if (name == "launchctl" or (name == "?" and "launchctl" in plain)) \
+                and (not args or args[0] is None or args[0] not in LAUNCHCTL_READ):
+            return LAUNCHD_ENV_REASON
+        if name == "swiftc" or (name == "?" and "swiftc" in plain):
             found = SWIFTC_TOKEN.findall(cmd)
             if not found or any(t != SWIFTC_PATH for t in found):
                 return SWIFTC_REASON
@@ -1268,8 +1273,12 @@ def _params(st, lit, mask, assign=False):
                 k = lit.index("}", i)
                 name, j = lit[i + 2:k], k + 1
             else:
-                t = _IDENT.match(lit, i + 1)
-                name, j = (t.group(0), t.end()) if t and mask[i + 1:t.end()] == m * (t.end() - i - 1) else ("", i + 1)
+                # Имя переменной кончается там, где кончаются кавычки: "$L"ctl — это $L и ctl (ревью 84d п. 1)
+                e = i + 1
+                while e < n and mask[e] == m:
+                    e += 1
+                t = _IDENT.match(lit[:e], i + 1)
+                name, j = (t.group(0), t.end()) if t else ("", i + 1)
             if not name:
                 put("$", "q")
                 i += 1

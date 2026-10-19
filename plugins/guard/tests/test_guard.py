@@ -1193,6 +1193,21 @@ def main():
             "launchctl kickstart -k -s gui/501/pantheon.tick", "launchctl enable gui/501/x",
             "launchctl disable gui/501/pantheon.tick", "printf 'setenv PATH /x' | launchctl", "launchctl < cmds.txt",
             "launchctl remove pantheon.tick", "$(which launchctl) setenv PATH /x", "launchctl frobnicate")],
+        # ревью 84d п. 1: имя собрано кавычками, регистром, переменной, переносом — раннего выхода по подстроке нет;
+        # п. 2: невычисленная подкоманда ($(…), `…`, $X, $1, файл) — отказ
+        *[(f"launchd-env: {c!r} — отказ (84d)", "deny", br, "dev-opus", True, B(c)) for c in (
+            "LAUNCHCTL setenv PANTHEON_STATE /tmp/x", "/BIN/LaunchCtl setenv PATH /x",
+            "LaunchCtl bootout gui/501/pantheon.tick", "launch''ctl setenv PATH /x", 'launch""ctl setenv PATH /x',
+            '"launch"ctl setenv PATH /x', "$'launch'ctl setenv PATH /x", "$'\\x6caunchctl' setenv PATH /x",
+            "L=launch; ${L}ctl setenv PATH /x", 'L=launch; "$L"ctl setenv PATH /x', "launch\\\nctl setenv PATH /x",
+            "launchctl $(echo setenv PANTHEON_TOUCHID) list", "launchctl `echo setenv PATH` list",
+            "S=$(echo setenv PATH); launchctl $S list", "set -- setenv PATH; launchctl $1 $2 list",
+            "launchctl $(echo bootout gui/501/pantheon.tick) help", "launchctl $(cat $TMPDIR/a) version",
+            "launchctl $(< $TMPDIR/args) version", 'launchctl "$UNKNOWNVAR" list',
+            "launchctl \"$(printf 'submit\\n-l\\nevil\\n--\\n/bin/sh')\" help", 'launchctl "" $(echo setenv) list',
+            "swift''c x.swift", "SWIFTC x.swift")],
+        *[(f"launchd-env: {c!r} — можно", "allow", br, "dev-opus", True, B(c)) for c in (
+            'launchctl "" list', "launchctl print gui/501 $(id -u)", "echo hi")],
         *[(f"launchd-env: {c!r} — можно", "allow", br, "dev-opus", True, B(c)) for c in (
             "launchctl list", "launchctl print gui/501/pantheon.tick", "launchctl getenv PATH",
             "launchctl print-disabled gui/501", "launchctl blame gui/501/pantheon.tick", "launchctl version",
