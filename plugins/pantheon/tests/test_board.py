@@ -236,7 +236,7 @@ def main():
     # на виду — только формулы-значки: статус, приоритет, режим, «ждёт», пересечения, предупреждение режима (metis-0069);
     # служебные — для сортировки
     shown = {"formula.status_view", "formula.prio_view", "formula.mode_view", "formula.waits", "formula.cross",
-             "formula.warn"}
+             "formula.warn", "formula.attn", "formula.accept_view", "formula.sum_budget"}
     hidden_ok = bool(views_) and not any(p.startswith("formula.") and p not in shown
                                          for v in views_ for p in v.get("order", []))
     check("board: Доска.base — сортировка в каждом представлении, формулы не на карточке",
@@ -262,9 +262,9 @@ def main():
     # п. 6: «Нужен ответ» — во всех местах .base, где слово сравнивается; «Отменено» — в порядке колонок
     go = re.search(r"groupOrder: \[(.*)\]", base_txt)
     cols = [x.strip() for x in go.group(1).split(",")] if go else []
-    # metis-0123, metis-0069: канбан «Доска» скрывает «Очередь» (свой вид) и «Отменено»; остальные колонки — как в COLUMNS
-    check("board: Доска.base — колонки = COLUMNS без «Очереди» и «Отменено» (с «Нужен ответ»), «Ждёт вас» нигде нет",
-          cols == [c for c in _tasks.COLUMNS if c not in ("Очередь", "Отменено")] and "Ждёт вас" not in base_txt and 'note["Статус"] == "Нужен ответ"' in base_txt
+    # metis-0123, metis-0069: канбан «Доска» показывает «Очередь» (вид влит в «Доску») и скрывает «Отменено»; остальные колонки — как в COLUMNS
+    check("board: Доска.base — колонки = COLUMNS без «Отменено» (с «Нужен ответ»), «Ждёт вас» нигде нет",
+          cols == [c for c in _tasks.COLUMNS if c != "Отменено"] and "Ждёт вас" not in base_txt and 'note["Статус"] == "Нужен ответ"' in base_txt
           and "name: От меня нужно" in base_txt and "note.Кому" in base_txt and "note.Кто" not in base_txt)
     check("board: узлы не на доске — фильтр по папке Доска", "'file.folder == \"Доска\"'" in base_txt)
     check("board: просрочка — одна тревога", "просрочена: Налоги беты" in r.stdout)
@@ -813,8 +813,8 @@ def sort_by_column_checks(check, T):
           _re.findall(r"property: (\S+)\n\s+direction: (\w+)", board_view.split("sort:")[1].split("order:")[0])
           == [("formula.col_k1", "ASC"), ("formula.col_k2", "ASC"), ("formula.col_k3", "ASC")]
           and "age_key" not in board_view)
-    check("0172: остальные виды (Срочно, Все задачи) с прежней сортировкой",
-          base.count("formula.age_key") == 2 and base.count("formula.col_k1") == 1)
+    check("0172: остальные виды (Все задачи) с прежней сортировкой",
+          base.count("formula.age_key") == 1 and base.count("formula.col_k1") == 1)
     day = lambda d: float(d) * 86400
     _id = [0]
 

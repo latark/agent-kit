@@ -433,14 +433,14 @@ def limit_resume(agents, registry, doms, t):
         prev = int(mk.get("tries") or 0) if mk.get("reset") == li[0] else 0
         mk = {"reset": li[0], "tries": prev + 1, "at": t}
         rc, _ = P.resume_session(name, a, RESUME_LIMIT_TEXT, "limit", recheck=lambda n=name: recheck(n))
-        if rc == P.NO_WINDOW:  # окна нет: тревога о причине уже одна (window_missing), попытку не засчитываем
+        if rc in (P.NO_WINDOW, P.SKIPPED):  # SKIPPED (metis-0291) — пропуск, не попытка; окна нет: тревога о причине уже одна (window_missing), попытку не засчитываем
             mk["tries"] = prev
         mk["done"] = rc == 0
         lim[sid] = mk
         changed = True
         if rc == 0:
             RESUMED.append(name)
-        elif rc != P.NO_WINDOW:
+        elif rc not in (P.NO_WINDOW, P.SKIPPED):
             P.alert(f"возобновление после недельного лимита: {name} не поднялась (код {rc}, попытка {mk['tries']} "
                     f"из {LIMIT_TRIES})", "watch")
     if changed:
@@ -500,7 +500,7 @@ def wake_waiting(agents, registry, doms, t):
                                  recheck=lambda n=name: recheck(n))
         if rc == 0:
             RESUMED.append(name)
-        elif rc != P.NO_WINDOW:
+        elif rc not in (P.NO_WINDOW, P.SKIPPED):
             P.alert(f"возобновление ждущих сессий: {name} не поднялась (код {rc}), задача {tid}", "watch")
     if changed:
         P.write_json(marks_path(), marks)
