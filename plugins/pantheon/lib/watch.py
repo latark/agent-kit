@@ -5,11 +5,14 @@
                             STATUS.md, swap и открытые подключения (COMM-13), копии worktree (QA-05), смена версии
                             Claude Code (SCOUT-05, SEC-16), паузы по нагрузке (COST-04), самозапуск координаторов,
                             метка технического перезапуска, перезапуск свободных окон после обновления плагинов
-                            (metis-0181); раз в сутки — журналы ваших слов (COMM-10).
+                            (metis-0181), уборка: claude rm сессий Пантеона, закончивших ход или остановленных
+                            больше 2 ч назад (metis-0250); раз в сутки — журналы ваших слов (COMM-10).
                             --dry-run — только показать, кого самозапуск поднял бы и почему нет, ничего не меняя
   pantheon agents           только снимок `claude agents` (задача тика на каждый проход: строка статуса)
   pantheon revisits         задача тика раз в сутки (SCHED-10, DOC-03): «пора пересмотреть …» в alerts.md
   pantheon stop <имя>|--all, pantheon resume <имя>|--all                                      (SCHED-12)
+                            stop — метка «остановлено вами», claude stop и claude rm: сессия уходит из фоновых
+                            сессий Claude Code (metis-0239), переписка остаётся
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pantheon pause --off [<имя>|--all]   (COST-04)
   pantheon restart --prepare [причина]|--status|--go [--force]|--cancel, pantheon saved --by <имя> --state <путь>
                             технический перезапуск всей системы (SCHED-15, слово владельца 15.10); pantheon saved без
@@ -45,6 +48,8 @@ def set_core(mod):
 
 # Пороги (выбрано при сборке 15.10; поменять — здесь или в [defaults] schedule.toml)
 STALE_STATUS_DAYS = 2        # STATUS.md направления с задачей «В работе» не обновлялся дольше — тревога
+AUTO_RM_AFTER = 2 * 3600     # уборка (metis-0250): закончила ход или остановлена дольше — claude rm
+AUTO_RM_RETRY = 86400        # rm отказал (неотправленная работа в worktree) — следующая попытка через сутки
 STATUS_MAX_LINES = 200       # STATUS.md длиннее — тревога (STATE-14)
 SWAP_ALERT_GB = 4.0          # swap выше — тревога с открытыми подключениями (COMM-13); `pantheon status` — тот же порог
 SWAP_KEEP_DAYS = 15          # замеры swap: R-two-directions смотрит «две недели ниже порога»
@@ -266,7 +271,9 @@ def _watch(dry=False):
               ("возобновление после недельного лимита", lambda: awake().limit_resume(agents, reg, doms, t)),
               ("возобновление ждущих сессий", lambda: awake().wake_waiting(agents, reg, doms, t)),
               ("запрет сна Mac", lambda: awake().keep_awake(agents, reg, doms, t)),
-              ("журналы ваших слов", lambda: daily(t))]
+              ("журналы ваших слов", lambda: daily(t)),
+              # последней: сессии, которые она уберёт, в этом проходе ещё в списке — подъём выше их уже не тронет
+              ("уборка сессий", lambda: auto_rm(agents, doms, t))]
     failed = []
     for name, fn in checks:
         try:
@@ -300,7 +307,7 @@ def sessions(agents, doms):
         if not sid or not is_pantheon(name, doms):
             continue
         key = f"watch-state-{sid}"
-        if state not in word:
+        if state not in word or a.get("noProcess"):  # metis-0250: снятая Claude Code без вопроса — не «ждёт вас»
             P.clear_once(key)
             P.clear_fault(*(f"watch-{s}-{sid}" for s in word))  # состояние снялось — следующее снова macOS
             continue
@@ -311,6 +318,59 @@ def sessions(agents, doms):
         # ключ события — сессия и состояние: «упала» после «ждёт вас» — своё уведомление, вид — один на сессию
         P.notify_soon(f"watch-{state}-{sid}", f"{name} {word[state]}" + (f": {why[:80]}" if why else ""),
                       group=f"session-{name}", once=True)
+
+
+def _job_time(js):
+    """Когда задание перешло в нынешнее состояние: lastTerminalAt, иначе updatedAt state.json (ISO с Z) → с или None."""
+    for k in ("lastTerminalAt", "updatedAt"):
+        v = js.get(k)
+        if isinstance(v, (int, float)):
+            return float(v) / 1000 if v > 1e11 else float(v)
+        if isinstance(v, str) and v:
+            with contextlib.suppress(ValueError):
+                return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+    return None
+
+
+def auto_rm(agents, doms, t):
+    """Уборка (metis-0250, поручение Зевса 18.10): фоновая сессия Пантеона закончила ход или остановлена (done/stopped),
+    процесса нет и в этом состоянии она дольше AUTO_RM_AFTER — `claude rm <id>` (P.rm_session, как у pantheon stop).
+    Переписка остаётся (claude --resume). Неотправленные коммиты в worktree: rm без --discard-unpushed откажет сам — тогда
+    тревога один раз и новая попытка через сутки. Не трогаем: при техперезапуске, паузе планировщика и паузе по нагрузке
+    (их снятие продолжает остановленную сессию той же), без state.json (время неизвестно), вкладки и чужие сессии.
+    Есть живая сессия того же имени — прежнюю убираем сразу, без 2 ч: в claude agents у имени одна строка (добивает то,
+    что не убрали start/wake/restart, P.rm_previous)."""
+    if dry() or P.maintenance_active() or os.path.exists(P.path("paused")):
+        return
+    tried = P.read_json(P.path("auto-rm.json"), {})
+    tried = {k: v for k, v in tried.items() if isinstance(v, (int, float)) and t - v < AUTO_RM_RETRY} \
+        if isinstance(tried, dict) else {}
+    gone = []
+    live = {a.get("name") for a in agents if a.get("kind") in (None, "background")
+            and a.get("state") in ("working", "blocked") and not a.get("noProcess")}
+    for a in agents:
+        name, sid = a.get("name") or "", str(a.get("id") or "")
+        if (a.get("kind") not in (None, "background") or a.get("state") not in ("done", "stopped") or a.get("pid")
+                or not re.fullmatch(r"[0-9a-zA-Z-]{4,64}", sid) or not is_pantheon(name, doms) or sid in tried
+                or P.load_pause(name)):
+            continue
+        since = _job_time(P.claude_job_state(sid))
+        if name not in live and (since is None or t - since < AUTO_RM_AFTER):
+            continue  # у имени есть живая сессия — эта лишняя строка, убираем сразу (start/wake не добили)
+        reason = P.rm_session(sid, tries=1)
+        if reason is None:
+            P.start_log(f"auto-rm\t{name}\t{sid}\t{a.get('state')}")
+            gone.append(f"{name} {sid}")
+            continue
+        tried[sid] = t
+        P.start_log(f"rm-refused\t{name}\t{sid}\t{reason}")
+        P.alert_once(f"auto-rm-{sid}", reason[:80], f"{name}: прежняя сессия {sid} осталась среди фоновых сессий Claude "
+                     f"Code (уборка, {P.refused_by(reason)}): {reason}", "watch")
+    P.write_json(P.path("auto-rm.json"), tried)
+    if gone:
+        P.alert(f"уборка: убраны из фоновых сессий Claude Code (закончили ход или остановлены больше "
+                f"{AUTO_RM_AFTER // 3600} ч назад, или у имени уже есть живая): {', '.join(gone)}; переписка осталась — "
+                "claude --resume", "watch")
 
 
 def status_files(doms, t):
@@ -1562,7 +1622,8 @@ def stop(rest, who):
         P.write_json(P.path("stopped-all.json"), {"time": P.stamp(), "by": who, "names": sorted(set(prev) | set(marked)),
                                                   "paused": bool(old.get("paused")) or not had_pause})
         if left_all:
-            P.alert("стоп всё: осталась среди фоновых сессий Claude Code (rm отказал): "
+            P.alert("стоп всё: осталась среди фоновых сессий Claude Code ("
+                    + ", ".join(sorted({P.refused_by(r) for _, _, r in left_all})) + "): "
                     + "; ".join(f"{n} {i} — {r}" for n, i, r in left_all), "pantheon-stop")
         P.alert(f"стоп всё ({who}): планировщик на паузе, остановлены: {', '.join(names) or 'никого'}; вернуть — "
                 "pantheon resume --all", "pantheon-stop")
@@ -1578,7 +1639,8 @@ def stop(rest, who):
         return 2
     n, left = _stop_one(name, agents, who)
     if left:
-        P.alert(f"{name}: осталась среди фоновых сессий Claude Code (rm отказал): {'; '.join(i + ' — ' + r for i, r in left)}",
+        P.alert(f"{name}: осталась среди фоновых сессий Claude Code ({', '.join(sorted({P.refused_by(r) for _, r in left}))}): "
+                f"{'; '.join(i + ' — ' + r for i, r in left)}",
                 "pantheon-stop")
     P.alert(f"{name} остановлена ({who}): сессий {n}; дежурный и Зевс её не будят — вернуть: pantheon resume {name}",
             "pantheon-stop")

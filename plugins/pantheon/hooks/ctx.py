@@ -17,7 +17,11 @@
   ctx.py stop        Stop: контекст 150 тыс., дальше каждые +100 тыс. → Claude сверяет файл состояния, дописывает
                      недостающее и одной строкой говорит «Пора очистить: …» (штаб и сессии без роли; не claude -p).
   ctx.py start       SessionStart: запоминает сессию процесса (CLAUDE_PID не меняется при /clear); после сжатия
-                     кладёт файл состояния; штабу — новые строки alerts.md и сводку новых строк журналов.
+                     кладёт файл состояния; штабу — новые строки alerts.md и сводку новых строк журналов; ролям Пантеона
+                     последней строкой — «Сейчас: ДД.ММ ЧЧ:ММ (часы Mac)» (metis-0281).
+  ctx.py clock       UserPromptSubmit (в том числе сообщения других сессий): та же строка часов в контекст ролей
+                     Пантеона (hq, domain-coordinator, workshop; не субагентам и не вне окон ролей). Модель
+                     оценивает время на глаз и ошибается на час; PANTHEON_NOW подменяет часы для тестов.
   ctx.py dir-added   DirectoryAdded: штабу открыли папку через /add-dir — строка в alerts.md (SEC-26).
   ctx.py state-len   PostToolUse Write|Edit|MultiEdit по ~/ai/pantheon/** (metis-0274): правленый файл состояния
                      (board.md, STATUS.md направления) длиннее STATE_FILE_LIMIT знаков → модели additionalContext
@@ -955,6 +959,27 @@ def file_for_context(path, desc, budget):
     return "%s Начало файла:\n\n%s%s" % (head, cut, tail)
 
 
+def clock_line(ev):
+    """Строка с часами Mac для окон ролей Пантеона (metis-0281): модель оценивает время на глаз и ошибается на час.
+    PANTHEON_NOW — подмена часов для тестов (секунды с эпохи). Вне окон ролей — None."""
+    if ev.get("agent_id") or session_role(ev) not in ROLES_WITH_LOG:
+        return None
+    try:
+        t = float(os.environ.get("PANTHEON_NOW") or time.time())
+    except ValueError:
+        t = time.time()
+    return "Сейчас: %s (часы Mac)" % datetime.fromtimestamp(t).strftime("%d.%m %H:%M")
+
+
+def cmd_clock(ev):
+    """UserPromptSubmit (в том числе сообщения других сессий): часы в контекст."""
+    line = clock_line(ev)
+    if line:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": line}},
+                         ensure_ascii=False))
+    return 0
+
+
 def cmd_start(ev):
     remember_session(ev)
     prune_records()
@@ -967,12 +992,16 @@ def cmd_start(ev):
         except OSError:
             pass
     out = hq_news(commit=not automation()) if role == "hq" else []  # тревоги — первыми: короче и важнее доски
+    clock = clock_line(ev)
+    reserve = len(clock) + 2 if clock else 0  # строка часов идёт последней и в предел не режется
     if ev.get("source") == "compact" and not ctx_off():
         path, desc = state_file(role, ev, ev.get("transcript_path") or "", prefer_fresh=False)
         if path and os.path.isfile(path):
-            block = file_for_context(path, desc, INJECT_MAX - sum(len(x) + 2 for x in out))
+            block = file_for_context(path, desc, INJECT_MAX - reserve - sum(len(x) + 2 for x in out))
             if block:
                 out.append(block)
+    if clock:
+        out.append(clock)
     if out:
         text = "\n\n".join(out)
         if len(text) > INJECT_MAX:
@@ -1413,12 +1442,12 @@ def cmd_state_len(ev):
 
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
-    fn = {"owner-log": cmd_owner_log, "answer": cmd_answer, "stop": cmd_stop, "start": cmd_start,
+    fn = {"owner-log": cmd_owner_log, "answer": cmd_answer, "stop": cmd_stop, "start": cmd_start, "clock": cmd_clock,
           "rewake": cmd_rewake, "dir-added": cmd_dir_added, "maint-post": cmd_maint_post,
           "maint-pre": cmd_maint_pre, "push": cmd_push, "qmd-query": cmd_qmd_query,
           "state-len": cmd_state_len}.get(cmd)
     if not fn:
-        print("ctx.py: owner-log | answer | stop | start | rewake | dir-added | maint-post | maint-pre | push | qmd-query | state-len",
+        print("ctx.py: owner-log | answer | stop | start | clock | rewake | dir-added | maint-post | maint-pre | push | qmd-query | state-len",
               file=sys.stderr)
         return 0
     try:

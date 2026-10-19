@@ -68,7 +68,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon revisits                     пересмотры к сроку и по событиям (плановый проход раз в сутки)
   pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией
   pantheon wake hestia --task <id>      Гестия: всегда отказ (код 2) — окно песочницы появится в metis-0245
-  pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами») и вернуть
+  pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
+                                        сессия уходит из фоновых сессий Claude Code) и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
   pantheon restart --prepare [причина]|--status|--go [--force]|--cancel   технический перезапуск всех сессий
   pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском; без техперезапуска —
@@ -81,6 +82,15 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon roles build --out <папка> [--src <папка шаблонов>]   проба: собрать роли в --out, личный слой — из
                                         --src (по умолчанию ~/.claude/agents) поверх общего; живые роли не трогает,
                                         сигналов нет; --out в ~/.claude/agents или внутри — отказ (код 2)
+  pantheon role propose <имя> --direction D   заявка на личную роль (metis-0262): черновик ~/ai/pantheon/roles/
+                                        proposed/<имя>.tmpl → карточка «Применить роль <имя> [<sha256>]?» Да/Нет,
+                                        статус proposed в ~/.local/state/pantheon/roles/status.jsonl
+  pantheon role apply <имя>             поставить роль по вашей галочке «Да» (журнал доски, ≤ 14 дней, на карточке
+                                        заявки, тот же полный sha256 черновика): имя не общей роли и не лида, ≤ 5 КБ,
+                                        без hooks/settings/mcpServers/permissionMode и повторов ключей в шапке →
+                                        пробная сборка, шапка собранной роли сверяется так же → <имя>.tmpl в
+                                        ~/.claude/agents → roles build; плановый проход делает это сам, «Нет» — rejected
+  pantheon role status [<имя>] | cancel <имя>   заявки на роли | отозвать открытую заявку
   pantheon approve [list] | add --site S --allow "…" [--limits "…"] | remove N   заранее разрешённое (только вы)
   pantheon consent <id> [--days N]      ваш ответ Зевсу на вопрос <id> (журнал owner-log Зевса, по умолчанию 7 дней) —
                                         для исполнителя: согласие, данное в окне Зевса
@@ -758,6 +768,11 @@ def tick():
         except Exception as e:  # сбой служб не должен останавливать задачи тика
             alert_once("svc-sync", type(e).__name__, f"службы: сверка с launchd упала ({type(e).__name__}: {e})",
                        "pantheon-tick")
+        try:
+            roles_tick()  # личные роли по вашей галочке на доске (metis-0262 PR 4)
+        except Exception as e:  # сбой ролей не должен останавливать тик
+            alert_once("roles-tick", type(e).__name__, f"личные роли: проход упал ({type(e).__name__}: {e})",
+                       "pantheon-tick")
 
 
 def tick_heavy(sched, heavy, t):
@@ -1348,17 +1363,22 @@ def status():
             if a.get("kind") == "interactive":
                 by.setdefault("interactive", []).append(a)
                 continue
-            by.setdefault(a.get("state") or "?", []).append(a)
-        order = ("interactive", "working", "blocked", "failed", "done", "stopped")
+            # metis-0250: «ждёт вас» без процесса и без вопроса — не ждёт, а снята Claude Code (reconcile_agents)
+            by.setdefault("gone" if a.get("noProcess") else a.get("state") or "?", []).append(a)
+        order = ("interactive", "working", "blocked", "failed", "gone", "done", "stopped")
         word = {"interactive": "открыты в терминале", "working": "фоновые работают", "blocked": "ждут вас",
-                "failed": "упали", "done": "закончили ход", "stopped": "остановлены"}
+                "failed": "упали", "gone": "без процесса", "done": "закончили ход", "stopped": "остановлены"}
         lines.append(" · ".join(f"{word.get(k, k)}: {len(by[k])}" for k in sorted(by, key=lambda k: (
             order.index(k) if k in order else 9))) or "фоновых сессий нет")
-        for k in ("blocked", "failed"):
+        for k in ("blocked", "failed", "gone"):
             for a in by.get(k, []):
-                why = a.get("waitingFor") or a.get("status") or ""
-                lines.append(f"{word[k]}: {a.get('name') or a.get('id')} — {str(why)[:80]}")
-                warn.append(f"сессия {a.get('name') or a.get('id')}")
+                # пустая причина — без тире (metis-0250 п. 4); у «без процесса» — что сделать
+                why = " ".join(str(a.get("waitingFor") or a.get("status") or "").split())[:80]
+                if k == "gone":
+                    why = f"ждать нечего, процесс снял Claude Code — убрать: claude rm {a.get('id')}"
+                lines.append(f"{word[k]}: {a.get('name') or a.get('id')}" + (f" — {why}" if why else ""))
+                if k != "gone":
+                    warn.append(f"сессия {a.get('name') or a.get('id')}")
     section("Сессии", lines)
 
     # вопросы к владельцу на доске
@@ -2343,6 +2363,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             # Метиды, в песочнице упал бы. Мимо неё — только эта подкоманда и только у Метиды; ворота у команды свои:
             # галочка владельца в журнале доски owner-log, который пишет тик, — роли её не подделают.
             data["sandbox"]["excludedCommands"].append("pantheon direction init *")
+        if name == "workshop":
+            # Unix-сокеты офлайн-тестов (metis-0278, решение владельца «А» 19.10) — только в своём кэше окна: не
+            # $TMPDIR (/tmp/claude-<uid> общий у всех сессий, там их сокеты); allowLocalBinding — нет, см. ниже
+            data["sandbox"]["network"]["allowUnixSockets"] = [cache]
         if allow:
             data.setdefault("permissions", {}).setdefault("allow", []).extend(allow)
         if agents:
@@ -2524,7 +2548,56 @@ def agents_all():
         data = json.loads(r.stdout or "[]")
     except ValueError:
         return None
-    return data if isinstance(data, list) else data.get("agents") if isinstance(data, dict) else None
+    data = data if isinstance(data, list) else data.get("agents") if isinstance(data, dict) else None
+    return reconcile_agents(data) if isinstance(data, list) else data
+
+
+def daemon_workers():
+    """Процессы фоновых сессий из реестра демона Claude Code ~/.claude/daemon/roster.json: короткий id → pid. Читаем
+    только pid (в записи есть и жетоны — их не берём). None — реестра нет или он не читается: тогда о процессах
+    ничего не утверждаем."""
+    d = read_json(os.path.join(HOME, ".claude", "daemon", "roster.json"), None)
+    if not isinstance(d, dict) or not isinstance(d.get("workers"), dict):
+        return None
+    return {str(k): w.get("pid") for k, w in d["workers"].items() if isinstance(w, dict)}
+
+
+def claude_job_state(short):
+    """state.json задания ~/.claude/jobs/<короткий id>/state.json (его пишет Claude Code, мы только читаем)."""
+    if not re.fullmatch(r"[0-9a-zA-Z-]{4,64}", str(short or "")):
+        return {}
+    d = read_json(os.path.join(HOME, ".claude", "jobs", str(short), "state.json"), {})
+    return d if isinstance(d, dict) else {}
+
+
+def reconcile_agents(data, workers=None):
+    """Сверка `claude agents --json --all` с заданием (jobs/<id>/state.json) и процессом (реестр демона), metis-0250.
+    (1) Из окна с песочницей `claude agents` не видит живой процесс (kill(pid, 0) там — EPERM) и пишет живую сессию
+    «failed» без pid (19.10: zeus и metis-pantheon «упали», а state.json — working). Процесс из реестра демона жив,
+    задание working/blocked — берём состояние задания, pid — из реестра; прежнее состояние — в listedState.
+    (2) Обратный случай: «blocked» без процесса и без вопроса (needs в state.json) — сессию снял Claude Code, ждать
+    ей нечего (18.10, координатор без процесса весь день «ждёт вас»): noProcess. С вопросом — по-прежнему ждёт вас:
+    ответ дойдёт через claude attach, он поднимет процесс.
+    (3) Причина для сводки: нет waitingFor — needs задания (blocked) или detail (failed)."""
+    workers = daemon_workers() if workers is None else workers
+    for a in data:
+        if not isinstance(a, dict) or a.get("kind") not in (None, "background") or not a.get("id"):
+            continue
+        js = claude_job_state(a["id"])
+        wpid = (workers or {}).get(str(a["id"]))
+        alive = bool(wpid) and pid_alive(wpid)
+        if alive and not a.get("pid"):
+            a["pid"] = wpid
+        if a.get("state") == "failed" and alive and js.get("state") in ("working", "blocked"):
+            a["listedState"], a["state"] = "failed", js["state"]
+        if (a.get("state") == "blocked" and workers is not None and not alive and not a.get("pid")
+                and js and not js.get("needs")):
+            a["noProcess"] = True
+        if not a.get("waitingFor"):
+            why = js.get("needs") if a.get("state") == "blocked" else js.get("detail") if a.get("state") == "failed" else None
+            if why:
+                a["waitingFor"] = " ".join(str(why).split())[:200]
+    return data
 
 
 def pid_alive(pid):
@@ -2715,6 +2788,7 @@ def _resume_session(name, a, text, origin):
         r = subprocess.run([claude_bin(), "respawn", a["id"]], capture_output=True, text=True, timeout=180)
         start_log(f"respawn\t{name}\t{a['id']}\t{origin}\t{r.returncode}")
         if r.returncode == 0:
+            rm_previous(name, "respawn", keep={a["id"]}, wait=True)
             return 0, None
         with contextlib.suppress(OSError):
             os.remove(pushed)
@@ -2722,12 +2796,15 @@ def _resume_session(name, a, text, origin):
     # свежего старта; штаб (zeus) — hq, хотя сюда он сегодня не доходит (start_target не знает zeus — отказ выше)
     role = "hq" if name == "zeus" else got[1]
     argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--agent", role, "--name", name, "--settings", run, text]
+    before = {x.get("id") for x in agents_all() or [] if x.get("id")}
     r = subprocess.run(argv, cwd=a.get("cwd") or HOME, capture_output=True, text=True, timeout=180)
     m = COPY_NOTE.search((r.stdout or "") + (r.stderr or ""))
     start_log(f"resume\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\tcopy {m.group(1)}" if m else ""))
     if m:
         alert(f"{name}: --resume сделал копию {m.group(1)} — исходная сессия {a.get('id')} ещё числится живой; проверить "
               f"claude agents, лишнюю остановить", "pantheon")
+    elif r.returncode == 0:  # копию (исходная ещё живая) не разбираем сами — тревога выше, решает Зевс
+        rm_previous(name, "--resume", before=before, keep={a.get("id")}, wait=True)
     return r.returncode, (m.group(1) if m else None)
 
 
@@ -2902,6 +2979,7 @@ def _fresh_start(name, a, text, origin, reason=None):
     if wrong:
         alert(wrong, "pantheon")
         return 1
+    rm_previous(name, "свежий старт", before=before)
     return 0
 
 
@@ -2925,20 +3003,81 @@ def stop_and_rm(name, sid):
     except (OSError, subprocess.SubprocessError) as e:
         return f"claude stop не выполнился: {e}"[:200]
     if st.returncode != 0:  # не остановилась — rm не зовём (rm сносит сессию, а она ещё может работать)
-        return (" ".join(((st.stderr or "") + " " + (st.stdout or "")).split())[:200]
-                or f"claude stop: код {st.returncode}")
+        return ("claude stop: " + (" ".join(((st.stderr or "") + " " + (st.stdout or "")).split())
+                                   or f"код {st.returncode}"))[:200]
+    return rm_session(sid)
+
+
+def rm_session(sid, tries=2):
+    """claude rm <id> без --discard-unpushed и --force-remove-worktree (metis-0239; уборка дежурного metis-0250):
+    сессию с неотправленной работой в worktree Claude Code не удаляет, и мы не настаиваем. → None или причина отказа."""
     r = None
-    for attempt in range(2):  # stop возвращается раньше, чем процесс ушёл: rm на ещё живую сессию может отказать
+    for attempt in range(tries):  # stop возвращается раньше, чем процесс ушёл: rm на ещё живую сессию может отказать
         try:
             r = subprocess.run([claude_bin(), "rm", sid], capture_output=True, text=True, timeout=60)
         except (OSError, subprocess.SubprocessError) as e:
             return f"claude rm не выполнился: {e}"[:200]
         if r.returncode == 0:
             return None
-        if attempt == 0:
+        if attempt + 1 < tries:
             time.sleep(1)
-    reason = " ".join(((r.stderr or "") + " " + (r.stdout or "")).split())[:200] or f"код {r.returncode}"
-    return reason
+    return " ".join(((r.stderr or "") + " " + (r.stdout or "")).split())[:200] or f"код {r.returncode}"
+
+
+def refused_by(reason):
+    """Кто отказал в stop_and_rm — для тревоги: «stop отказал» (сессия не остановилась, rm не звали) или «rm отказал»
+    (ревью argus к #53: при коде stop ≠ 0 тревога писала «rm отказал»)."""
+    return "stop отказал" if str(reason or "").startswith("claude stop") else "rm отказал"
+
+
+def rm_previous(name, how, before=None, keep=(), loud=False, wait=False):
+    """После успешного старта под именем name (pantheon start, свежий старт, продолжение wake/техперезапуска/дежурного):
+    прежние фоновые сессии этого имени — `claude rm` (процесса нет) или claude stop + rm (процесс есть), чтобы в
+    claude agents у имени осталась одна строка (metis-0250, слово владельца 19.10 через Зевса). Новая не трогается:
+    новая — id, которого не было в before (снимок id до запуска; None — все нынешние старые), и id из keep (продолженная respawn/--resume сессия), если
+    она живая. Пока живой новой с этим именем нет, ничего не удаляем (старт не подтвердился — прежние добьёт уборка
+    дежурного); wait — подождать её появления PANTHEON_NAME_WAIT (10 с). Отказ rm (неотправленное в worktree) —
+    start.log, тревога и, при loud, строка в stderr. → список (id, причина) отказов."""
+    keep = set(keep)
+    limit = 0.0
+    if wait:
+        limit = 10.0
+        with contextlib.suppress(ValueError, TypeError):
+            limit = max(0.0, float(os.environ.get("PANTHEON_NAME_WAIT") or limit))
+    _, poll, _ = stop_wait_knobs()
+    started = time.monotonic()
+    while True:
+        agents = agents_all()
+        if agents is None:
+            return []
+        same = [a for a in agents if a.get("name") == name and a.get("id") and a.get("kind") in (None, "background")]
+        old = {a["id"] for a in same} if before is None else before  # без снимка — нового нет, только keep
+        kept = {a["id"] for a in same if a["id"] not in old
+                or (a["id"] in keep and a.get("state") not in DOWN_STATES)}
+        if not any(a["id"] not in kept for a in same):
+            return []  # убирать нечего — и ждать нечего
+        if any(a.get("state") not in DOWN_STATES for a in same if a["id"] in kept):
+            break
+        if time.monotonic() - started >= limit:
+            start_log(f"rm-previous-skip\t{name}\t{how}\tновая сессия не видна живой")
+            return []
+        time.sleep(poll)
+    left = []
+    for a in same:
+        if a["id"] in kept:
+            continue
+        has_process = a.get("state") in ("working", "blocked") or (a.get("pid") and a.get("state") not in ("stopped", "failed"))
+        reason = stop_and_rm(name, a["id"]) if has_process else rm_session(a["id"])
+        start_log(f"rm-previous\t{name}\t{a['id']}\t{a.get('state')}\t{how}")
+        if reason:
+            start_log(f"rm-refused\t{name}\t{a['id']}\t{reason}")
+            alert(f"{name}: прежняя сессия {a['id']} осталась среди фоновых сессий Claude Code ({how}, "
+                  f"{refused_by(reason)}): {reason}", "pantheon-stop")
+            if loud:
+                print(f"pantheon start: {name}: прежняя сессия {a['id']} осталась среди фоновых сессий Claude Code, "
+                      f"причина: {reason}", file=sys.stderr)
+            left.append((a["id"], reason))
+    return left
 
 
 def stop_copies(name, live, why="stop-restart"):
@@ -3236,17 +3375,12 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
         stop_copies(name, live)
         stopped += live
     # CTX-10: эпик закончен — сессия «done» ещё висит в списке; новый эпик — новая сессия с тем же именем, а старая
-    # останавливается (переписка сохраняется: claude attach <id>), иначе Claude Code назовёт новую «имя (2)»
+    # останавливается и убирается из списка (claude rm, metis-0239; переписка остаётся: claude --resume <сессия>),
+    # иначе Claude Code назовёт новую «имя (2)»
+    # (claude rm прежних — только после успешного старта новой, rm_previous, metis-0250)
     for a in same:
-        if a.get("state") == "done" and a.get("pid") and not dry:
-            reason = stop_and_rm(name, a.get("id"))
-            start_log(f"stop-done\t{name}\t{a.get('id')}")
-            if reason:
-                start_log(f"rm-refused\t{name}\t{a.get('id')}\t{reason}")
-                print(f"pantheon start: {name}: прежняя сессия {a.get('id')} осталась среди фоновых сессий Claude Code, "
-                      f"причина: {reason}", file=sys.stderr)
-                alert(f"{name}: прежняя сессия {a.get('id')} осталась среди фоновых сессий Claude Code (stop-done, rm отказал): "
-                      f"{reason}", "pantheon-stop")
+        if a.get("state") == "done" and a.get("pid") and a.get("id") and not dry:
+            stop_copies(name, [a], "stop-done")
             stopped.append(a)
     # остановленная копия отпускает имя не сразу и может ожить (metis-0041): запуск — только когда имя свободно
     why = wait_name_free(name, stopped) if stopped else None
@@ -3282,6 +3416,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
         alert(wrong, "pantheon-start")
         print(f"pantheon start: {wrong}", file=sys.stderr)
         return 1
+    rm_previous(name, "start", before=before, loud=True)
     return 0
 
 
@@ -3530,10 +3665,12 @@ def _marked(text, tmpl):
 ROLES_DEFERRED = {"hestia": "metis-0245"}
 
 
-def roles_build(src=None, out=None):
+def roles_build(src=None, out=None, role_errors=None):
     """Роли из общих шаблонов плагина (PLUGIN_ROLES) и личного слоя src (по умолчанию ~/.claude/agents; перекрывает
     общий по имени шаблона и части) в папку out (по умолчанию ~/.claude/agents). Режим с out — проба
-    (metis-0097): пишет и чистит только в out, владельцу сигнал не шлёт; out в ~/.claude/agents или внутри — ValueError."""
+    (metis-0097): пишет и чистит только в out, владельцу сигнал не шлёт; out в ~/.claude/agents или внутри — ValueError.
+    role_errors — словарь {шаблон.tmpl: [ошибки]}: сюда же ошибки по ролям (role apply сверяет свою роль); печать в
+    stderr и тревога — как без него, возвращается по-прежнему список изменённых файлов."""
     probe = out is not None
     src = src or AGENTS
     if probe:
@@ -3548,6 +3685,12 @@ def roles_build(src=None, out=None):
         reg = tomllib.load(fh)
     person, person_bad = person_values(reg)
     want, errors = {}, []
+
+    def err(tmpl, text):
+        errors.append(text)
+        if role_errors is not None:
+            role_errors.setdefault(tmpl, []).append(text)
+
     # роли, чей шаблон или подстановка с ошибкой: старую собранную версию не убирать (имя или начало имени лида)
     kept, kept_leads = set(), set()
     layer = {}  # объединение слоёв: личный шаблон из src перекрывает общий из плагина по имени
@@ -3560,12 +3703,12 @@ def roles_build(src=None, out=None):
         if base in ROLES_DEFERRED:
             continue
         if not ROLE_NAME.fullmatch(base):
-            errors.append(f"{f}: имя не по образцу")
+            err(f, f"{f}: имя не по образцу")
             continue
         try:
             text = _person_text(_role_text(open(layer[f], encoding="utf-8").read(), parts), person, person_bad)
         except (OSError, ValueError) as e:
-            errors.append(f"{f}: {e}")
+            err(f, f"{f}: {e}")
             if base in LEAD_ROLES:
                 kept_leads.add(base + "-")
             else:
@@ -3583,13 +3726,13 @@ def roles_build(src=None, out=None):
             if not (isinstance(project, str) and (not project or ROLE_PROJECT.fullmatch(project))) \
                     or not isinstance(folders, list) \
                     or not all(isinstance(x, str) and ROLE_FOLDER.fullmatch(x) for x in folders):
-                errors.append(f"{f} → {base}-{short}.md: project или folders направления {name} не по образцу")
+                err(f, f"{f} → {base}-{short}.md: project или folders направления {name} не по образцу")
                 kept.add(f"{base}-{short}.md")
                 continue
             out_text = (text.replace("{{direction}}", name).replace("{{short}}", short)
                         .replace("{{project}}", project).replace("{{folders}}", ", ".join(folders)))
             if _head_keys(out_text) != _head_keys(text):
-                errors.append(f"{f} → {base}-{short}.md: подстановка поменяла шапку роли")
+                err(f, f"{f} → {base}-{short}.md: подстановка поменяла шапку роли")
                 kept.add(f"{base}-{short}.md")
                 continue
             want[f"{base}-{short}.md"] = (f, out_text)
@@ -3603,11 +3746,11 @@ def roles_build(src=None, out=None):
                 raise ValueError("осталась подстановка {{…}}")
             text = _marked(text, tmpl)
         except ValueError as e:
-            errors.append(f"{tmpl} → {fname}: {e}")
+            err(tmpl, f"{tmpl} → {fname}: {e}")
             continue
         old = open(out_file, encoding="utf-8").read() if os.path.exists(out_file) else None
         if old is not None and "pantheon roles build" not in old[:2000]:
-            errors.append(f"{fname} есть и написан не сборкой — не трогаю (убрать его или шаблон {tmpl})")
+            err(tmpl, f"{fname} есть и написан не сборкой — не трогаю (убрать его или шаблон {tmpl})")
             continue
         if old != text:
             write_atomic(out_file, text)
@@ -3630,6 +3773,389 @@ def roles_build(src=None, out=None):
         if memo_line:
             print(f"roles build: {memo_line}", file=sys.stderr)
     return made
+
+
+# --- личная роль: заявка и установка по вашей галочке (metis-0262 PR 4, решения [zeus-role-apply], [zeus-role-board]) ---
+# Черновик роли готовит агент: ~/ai/pantheon/roles/proposed/<имя>.tmpl. `pantheon role propose <имя> --direction D`
+# заводит карточку «Применить роль <имя> [<sha256>]?» с вариантами Да/Нет и статус proposed в STATE/roles/status.jsonl
+# (вне ~/ai/pantheon; файл пишут только команды role и тик). sha256 черновика — полный, все 64 знака: правка черновика
+# после галочки меняет хеш, и старая галочка его не ставит; урезанный хеш агент подобрал бы вторым черновиком
+# (argus-70b). Ваш ответ тик переносит в owner-log/board.jsonl (роли туда не пишут); `role apply` и тик верят только
+# ему и только на карточке из статуса заявки. В ~/.claude/agents пишет только `role apply` (её зовёт и тик):
+# ворота → пробная сборка во временной папке → сверка шапки собранной роли → <имя>.tmpl в личный слой → `roles build`.
+ROLE_PROPOSED = os.path.join(PANTHEON, "roles", "proposed")
+ROLE_STATUS = ("proposed", "applied", "rejected", "cancelled")
+ROLE_MAX_BYTES = 5 * 1024
+ROLE_APPROVE_DAYS = 14
+ROLE_NEW_NAME = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
+# ключи шапки, с которыми роль выходит из песочницы или меняет права окна: хуки идут вне песочницы, mcpServers поднимают
+# процессы, permissionMode снимает вопросы; settings — на будущее (сравнение без учёта регистра)
+ROLE_HEAD_DENY = ("hooks", "settings", "mcpservers", "permissionmode")
+# имена, которые знают guard и хуки (роли окон, системные субагенты, встроенные типы Claude Code) — личной роли не даём
+# (встроенные агенты Claude Code: general-purpose, Explore, Plan, statusline-setup, claude-code-guide, output-style-setup,
+# claude, fork; на будущие встроенные — весь claude-*)
+ROLE_RESERVED = {"hq", "zeus", "workshop", "domain-coordinator", "tg-reader", "general-purpose", "explore", "plan",
+                 "statusline-setup", "claude-code-guide", "output-style-setup", "claude", "fork"}
+ROLE_RESERVED_PREFIX = tuple(b + "-" for b in LEAD_ROLES) + ("dev-", "codex-", "daedalus-", "claude-")
+
+
+def role_sha(data):
+    """Полный sha256 черновика (64 знака): по нему вопрос карточки, статус заявки и сверка галочки."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def role_question(name, sha):
+    return f"Применить роль {name} [{sha}]?"
+
+
+def role_status_all():
+    """STATE/roles/status.jsonl → {имя: [запись, …]} по порядку; действующий статус — последняя запись."""
+    out = {}
+    try:
+        with open(path("roles", "status.jsonl"), encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and isinstance(rec.get("name"), str) and rec.get("status") in ROLE_STATUS:
+                    out.setdefault(rec["name"], []).append(rec)
+    except OSError:
+        pass
+    return out
+
+
+def role_last(name):
+    return (role_status_all().get(name) or [None])[-1]
+
+
+def role_status_add(name, status, **rec):
+    os.makedirs(path("roles"), exist_ok=True)
+    rec = {"time": datetime.fromtimestamp(now()).strftime("%Y-%m-%dT%H:%M:%S"), "name": name, "status": status, **rec}
+    fd = os.open(path("roles", "status.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def role_name_problem(name):
+    """Почему имя не годится для личной роли, или None."""
+    if not (isinstance(name, str) and ROLE_NEW_NAME.fullmatch(name) and 2 <= len(name) <= 40):
+        return f"имя «{name}» не по образцу: латиница в нижнем регистре, цифры, дефис между словами, 2–40 знаков"
+    if os.path.isfile(os.path.join(PLUGIN_ROLES, name + ".tmpl")) or name in ROLES_DEFERRED or name in LEAD_ROLES:
+        return f"«{name}» — общая роль Пантеона: личная роль с этим именем не ставится"
+    if name in ROLE_RESERVED or name.startswith(ROLE_RESERVED_PREFIX):
+        return (f"имя «{name}» занято системой (роли окон, лиды hephaestus-/apollo-, dev-*, codex-*, встроенные агенты "
+                f"Claude Code, claude-*)")
+    return None
+
+
+def _role_head_end(text):
+    return text.find("\n---\n", 3) if text.startswith("---\n") else -1
+
+
+def role_head_problem(text):
+    """Шапка YAML роли: есть, в ней name и нет запрещённых ключей, повторов ключа и строк не по образцу «ключ:
+    значение». → текст или None. Строки с отступом и «- » — продолжение значения ключа выше; ключ в кавычках, «<<:»,
+    «? » — отказ. Повтор ключа — отказ: Claude Code разбирает шапку Bun.YAML.parse, где побеждает последний ключ, а
+    ворота сверяют первый (argus-70b: «name: foo» и ниже «name: argus» заняли бы имя общей роли)."""
+    end = _role_head_end(text)
+    if end < 0:
+        return "нет шапки YAML (--- … ---) в начале"
+    seen = set()
+    for ln in text[4:end].splitlines():
+        if not ln.strip() or ln.lstrip().startswith("#") or ln[:1] in (" ", "\t") or ln.startswith("- "):
+            continue
+        m = re.match(r"([A-Za-z][\w-]*)\s*:(?:\s|$)", ln)
+        if not m:
+            return f"строка шапки не по образцу «ключ: значение»: {ln[:60]!r}"
+        if m.group(1).lower() in ROLE_HEAD_DENY:
+            return (f"в шапке запрещённый ключ {m.group(1)} (hooks, settings, mcpServers, permissionMode: работают "
+                    f"вне песочницы или меняют права)")
+        if m.group(1).lower() in seen:
+            return f"ключ {m.group(1)} в шапке повторён: Claude Code возьмёт последний, ворота — первый"
+        seen.add(m.group(1).lower())
+    return None if "name" in seen else "в шапке нет name:"
+
+
+def role_head_name(text):
+    """Значение name: из шапки роли (без кавычек и комментария) или «»."""
+    end = _role_head_end(text)
+    m = re.search(r"(?m)^name\s*:(.*)$", text[:end]) if end >= 0 else None
+    return re.sub(r"\s+#.*$", "", m.group(1)).strip().strip("'\"") if m else ""
+
+
+def role_head_check(text, name):
+    """Шапка без запрещённого и повторов, и name: в ней — ровно name. → текст ошибки или None. Зовут на черновик и на
+    собранную роль: часть ({{> …}}) или подстановка могут вставить в шапку то, чего в черновике не было."""
+    bad = role_head_problem(text)
+    if bad:
+        return bad
+    given = role_head_name(text)
+    return None if given == name else f"name: в шапке «{given}», а имя роли — «{name}»"
+
+
+def role_draft(name):
+    """Черновик роли → (байты, ошибка). Обычный файл, не ссылка, не больше ROLE_MAX_BYTES."""
+    p = os.path.join(ROLE_PROPOSED, name + ".tmpl")
+    shown = p.replace(HOME, "~")
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return None, f"нет черновика {shown}"
+    if not stat.S_ISREG(st.st_mode):
+        return None, f"черновик {shown} — не обычный файл (ссылка?)"
+    with open(p, "rb") as fh:
+        data = fh.read(ROLE_MAX_BYTES + 1)
+    if len(data) > ROLE_MAX_BYTES:
+        return None, f"черновик больше {ROLE_MAX_BYTES // 1024} КБ ({st.st_size} байт)"
+    return data, None
+
+
+def role_static_gate(name):
+    """Ворота без вашей галочки: имя, черновик, размер, шапка, name: в шапке = имя. → (байты, sha256, [ошибки])."""
+    bad = role_name_problem(name)
+    if bad:
+        return None, None, [bad]
+    data, bad = role_draft(name)
+    if bad:
+        return None, None, [bad]
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, None, ["черновик не в UTF-8"]
+    bad = role_head_check(text, name)
+    return data, role_sha(data), [bad] if bad else []
+
+
+def role_answers(name, req, days=ROLE_APPROVE_DAYS):
+    """Ваши ответы на карточку заявки req (запись статуса proposed: card, time) «Применить роль <имя> [<sha256>]?» из
+    owner-log/board.jsonl (его пишет тик по вашей галочке, роли туда не пишут), не старше days дней и не раньше заявки,
+    по времени: [(время, sha256, «да»|«нет», запись)]. Засчитывается только ответ на карточке req["card"]: «Да» на
+    чужой карточке с тем же вопросом, на отозванной заявке или на прежней, после которой роль удалили руками, — не
+    галочка (argus-70a, argus-70b). Вопрос — ровно этот текст; скрытый текст Obsidian в нём (%%…%%, <!-- -->) — не
+    ответ, как в owner_approved."""
+    card = (req or {}).get("card")
+    try:
+        asked = time.mktime(time.strptime(str((req or {}).get("time") or "")[:19], "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return []
+    if not isinstance(card, str) or not card:
+        return []
+    ask = re.compile(rf"Применить роль {re.escape(name)} \[([0-9a-f]{{64}})\]\?")
+    yes = re.compile(r"да(?![а-яёa-z0-9])", re.I)
+    no = re.compile(r"нет(?![а-яёa-z0-9])", re.I)
+    since, out = max(now() - days * 86400, asked), []
+    try:
+        lines = open(path("owner-log", "board.jsonl"), encoding="utf-8").read().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        try:
+            rec = json.loads(line)
+            ts = time.mktime(time.strptime(rec.get("time", "")[:19], "%Y-%m-%dT%H:%M:%S"))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        q, a = rec.get("question"), str(rec.get("answer") or "").strip()
+        if rec.get("kind") != "answer" or rec.get("id") != card or ts < since or not isinstance(q, str) \
+                or re.search(r"%%|<", q):
+            continue
+        m = ask.fullmatch(q.strip())
+        word = "да" if yes.match(a) else "нет" if no.match(a) else None
+        if m and word:
+            out.append((ts, m.group(1), word, rec))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _role_card_close(card, status, result):
+    """Карточку заявки — в «Готово» или «Отменено» с итогом; сбой (карточку убрали, шапка битая) не мешает делу."""
+    if not card:
+        return
+    with contextlib.suppress(Exception):
+        tasks_mod().task_set(PANTHEON, now(), card, {"status": status, "result": result}, actor="pantheon role")
+
+
+def role_apply(name, by="pantheon role apply"):
+    """Поставить личную роль по вашей галочке. → (код, текст): 0 — поставлена или уже стоит, 1 — отказ."""
+    with lock("roles"):
+        return _role_apply(name, by)
+
+
+def _role_apply(name, by):
+    data, sha, errs = role_static_gate(name)
+    if errs:
+        return 1, "; ".join(errs)
+    last = role_last(name)
+    tmpl, md = os.path.join(AGENTS, name + ".tmpl"), os.path.join(AGENTS, name + ".md")
+    if last and last["status"] == "applied" and last.get("sha") == sha and os.path.isfile(md) \
+            and os.path.isfile(tmpl) and open(tmpl, "rb").read() == data:
+        return 0, f"роль {name} [{sha}] уже стоит"
+    if not last or last["status"] != "proposed":
+        return 1, (f"нет открытой заявки на роль {name} (статус: {last['status'] if last else 'нет'}) — "
+                   f"сначала pantheon role propose {name} --direction <направление>")
+    answers = role_answers(name, last)
+    mine = [a for a in answers if a[1] == sha]
+    if not mine:
+        other = [a for a in answers if a[2] == "да"]
+        if other:
+            return 1, (f"галочка «Да» стоит на другой версии черновика [{other[-1][1]}], сейчас [{sha}]: черновик "
+                       f"правлен после галочки — новая заявка: pantheon role propose {name} --direction <направление>")
+        return 1, (f"нет вашей галочки «Да» на карточке {last.get('card')} «{role_question(name, sha)}» за "
+                   f"{ROLE_APPROVE_DAYS} дней (журнал доски owner-log/board.jsonl)")
+    _, _, word, rec = mine[-1]
+    if word != "да":
+        return 1, f"ваш последний ответ на «{role_question(name, sha)}» — «Нет»"
+    if os.path.lexists(md) and (os.path.islink(md) or "pantheon roles build" not in
+                                open(md, encoding="utf-8", errors="replace").read(2000)):
+        return 1, f"{md.replace(HOME, '~')} есть и написан не сборкой — не трогаю"
+    old = None
+    if os.path.lexists(tmpl):
+        old = None if os.path.islink(tmpl) else open(tmpl, "rb").read()
+        ours = any(r["status"] == "applied" for r in role_status_all().get(name) or [])
+        if old is None or (old != data and not ours):
+            return 1, f"в личном слое уже есть свой {tmpl.replace(HOME, '~')} — не перекрываю"
+    # пробная сборка: личный слой как есть + черновик, во временной папке; живые роли она не трогает
+    with tempfile.TemporaryDirectory(prefix="role-apply-") as tmp:
+        src, out = os.path.join(tmp, "src"), os.path.join(tmp, "out")
+        os.makedirs(os.path.join(src, "_parts"))
+        for d, dst, ext in ((AGENTS, src, ".tmpl"), (PARTS, os.path.join(src, "_parts"), ".part")):
+            for f in os.listdir(d) if os.path.isdir(d) else []:
+                p = os.path.join(d, f)
+                if f.endswith(ext) and os.path.isfile(p) and not os.path.islink(p):
+                    shutil.copyfile(p, os.path.join(dst, f))
+        with open(os.path.join(src, name + ".tmpl"), "wb") as fh:
+            fh.write(data)
+        role_errs = {}
+        with open(os.devnull, "w") as null, contextlib.redirect_stderr(null):
+            roles_build(src, out, role_errors=role_errs)
+        built = os.path.join(out, name + ".md")
+        if role_errs.get(name + ".tmpl") or not os.path.isfile(built):
+            return 1, "пробная сборка: " + "; ".join(role_errs.get(name + ".tmpl") or ["роль не собралась"])
+        bad = role_head_check(open(built, encoding="utf-8").read(), name)
+        if bad:
+            return 1, f"пробная сборка (после вставки частей): {bad}"
+    os.makedirs(AGENTS, exist_ok=True)
+    part = f"{tmpl}.{os.getpid()}.tmp"
+    with open(part, "wb") as fh:
+        fh.write(data)
+    os.replace(part, tmpl)
+    role_errs = {}
+    # живая сборка: ошибка по роли, нет .md, шапка .md не прошла сверку или исключение (диск, права) — откат шаблона
+    try:
+        roles_build(role_errors=role_errs)
+        why = role_errs.get(name + ".tmpl") or ([] if os.path.isfile(md) else ["роль не собралась"])
+        bad = None if why else role_head_check(open(md, encoding="utf-8").read(), name)
+        why = why or ([f"шапка собранной роли: {bad}"] if bad else [])
+    except Exception as e:  # noqa: BLE001 — любой сбой сборки оставлял бы непроверенный шаблон в личном слое
+        why = [f"сбой {type(e).__name__}: {e}"]
+    if why:
+        if old is None:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(tmpl)
+        else:
+            with open(part, "wb") as fh:
+                fh.write(old)
+            os.replace(part, tmpl)
+        with contextlib.suppress(Exception):
+            roles_build()
+        return 1, "сборка в личном слое: " + "; ".join(why) + " — шаблон возвращён как был"
+    role_status_add(name, "applied", sha=sha, by=by, card=last.get("card"), answer_time=rec.get("time"),
+                    answer_card=rec.get("id"))
+    _role_card_close(last.get("card"), "done", f"Роль {name} [{sha}] поставлена в личный слой ~/.claude/agents")
+    return 0, (f"роль {name} [{sha}] поставлена: ~/.claude/agents/{name}.tmpl → {name}.md "
+               f"(ваша галочка {str(rec.get('time') or '')[:16].replace('T', ' ')})")
+
+
+def role_propose(name, direction):
+    """Заявка: ворота без галочки, карточка с вопросом и статус proposed. Повтор с тем же черновиком — та же карточка;
+    с правленым — новая, прежняя уходит в «Отменено». → (код, текст)."""
+    with lock("roles"):
+        data, sha, errs = role_static_gate(name)
+        if errs:
+            return 1, "; ".join(errs)
+        last = role_last(name)
+        if last and last["status"] == "proposed" and last.get("sha") == sha:
+            return 0, f"заявка на роль {name} [{sha}] уже есть: карточка {last.get('card')}"
+        q = role_question(name, sha)
+        tid, _ = tasks_mod().task_new(
+            PANTHEON, now(), direction, f"Применить личную роль {name}", actor="pantheon role", status="waiting",
+            waiting_on="human", question=q,
+            why=f"Черновик роли готов: roles/proposed/{name}.tmpl, {len(data)} байт. Галочка «Да» ставит его в ваш "
+                f"личный слой ~/.claude/agents; правка черновика после галочки её отменяет.",
+            options=[f"Да — поставить роль {name} в личный слой", "Нет — отклонить заявку"],
+            recommend="Да — если черновик прочитан и роль нужна", if_no_answer="Роль не ставится, заявка ждёт.",
+            text=f"Черновик: `~/ai/pantheon/roles/proposed/{name}.tmpl`, хеш {sha}.\n"
+                 f"Поставить из терминала: `pantheon role apply {name}` — тоже только по галочке «Да».")
+        if last and last["status"] == "proposed":
+            _role_card_close(last.get("card"), "dropped", f"Заменена заявкой {tid}: черновик правлен")
+        role_status_add(name, "proposed", sha=sha, card=tid, direction=direction)
+        return 0, f"заявка на роль {name} [{sha}]: карточка {tid} «{q}»"
+
+
+def role_cancel(name):
+    with lock("roles"):
+        last = role_last(name)
+        if not last or last["status"] != "proposed":
+            return 1, f"у роли {name} нет открытой заявки (статус: {last['status'] if last else 'нет'})"
+        role_status_add(name, "cancelled", sha=last.get("sha"), card=last.get("card"))
+        _role_card_close(last.get("card"), "dropped", f"Заявка на роль {name} отозвана")
+        return 0, f"заявка на роль {name} отозвана"
+
+
+def roles_tick():
+    """Плановый проход: заявка proposed с вашим ответом на её черновик — «Да» ставит роль (role apply), «Нет» — статус
+    rejected. Отказ apply — тревога (раз на причину), заявка остаётся до ответа или отзыва."""
+    for name, recs in sorted(role_status_all().items()):
+        last = recs[-1]
+        if last["status"] != "proposed" or role_name_problem(name):
+            continue
+        answers = [a for a in role_answers(name, last) if a[1] == last.get("sha")]
+        if not answers:
+            continue
+        _, sha, word, rec = answers[-1]
+        if word == "нет":
+            with lock("roles"):
+                if (role_last(name) or {}).get("status") == "proposed":
+                    role_status_add(name, "rejected", sha=sha, by="tick", card=last.get("card"),
+                                    answer_time=rec.get("time"))
+                    _role_card_close(last.get("card"), "dropped", f"Роль {name} отклонена вашим ответом «Нет»")
+            continue
+        code, text = role_apply(name, by="tick")
+        if code:
+            alert_once("role-apply-" + name, text, f"pantheon role apply {name}: {text}", "pantheon-tick")
+        else:
+            clear_once("role-apply-" + name)
+
+
+def role_cmd(rest):
+    usage = "pantheon role propose <имя> --direction D | apply <имя> | status [<имя>] | cancel <имя>"
+    sub, args = (rest[0], rest[1:]) if rest else ("", [])
+    if sub == "status" and len(args) <= 1:
+        allst = role_status_all()
+        names = args or sorted(allst)
+        if not names:
+            print("заявок на роли нет")
+        for n in names:
+            last = (allst.get(n) or [None])[-1]
+            print(f"{n}: {last['status']} [{last.get('sha') or ''}] {str(last.get('time') or '')[:16].replace('T', ' ')}"
+                  + (f" · карточка {last['card']}" if last.get("card") else "") if last else f"{n}: заявки нет")
+        return 0
+    ok = (sub == "propose" and len(args) == 3 and args[1] == "--direction") \
+        or (sub in ("apply", "cancel") and len(args) == 1)
+    if not ok or args[0].startswith("-"):
+        print(usage, file=sys.stderr)
+        return 2
+    name = args[0]
+    try:
+        code, text = (role_propose(name, args[2]) if sub == "propose" else role_apply(name) if sub == "apply"
+                      else role_cancel(name))
+    except (OSError, ValueError) as e:
+        code, text = 1, str(e)
+    if code:
+        print(f"role {sub}: отказ — {text}", file=sys.stderr)
+    else:
+        print(text)
+    return code
 
 
 # --- сверка памятки «Кто есть кто.md» с ролями и реестром (metis-0120) ----------------------------
@@ -5765,6 +6291,8 @@ def main(argv):
             return 2
         print(f"роли: {', '.join(made) if made else 'без изменений'}")
         return 0
+    if cmd == "role":
+        return role_cmd(rest)
     if cmd == "direction":
         return direction(rest)
     if cmd == "instructions":
