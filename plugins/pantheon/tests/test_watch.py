@@ -1733,14 +1733,27 @@ def test_infra_check_corpus_section():
         p.alert_once = lambda key, value, text, *a, **k: calls.append(("alert", key, text))
         p.clear_once = lambda key: calls.append(("clear", key))
         text = "в policy.toml нет раздела [corpus]: правило corpus-role ничего не закрывает"
-        for name, body in (("нет policy.toml", None), ("нет раздела", "[hq]\n")):
+        decl = '[hq]\nclosed_dirs = ["~/ai/corpus"]\n'
+        for name, body in (("корпус в closed_dirs, нет раздела", decl),
+                           ("корпус в closed_collections, нет раздела", '[hq]\nclosed_collections = ["corpus"]\n')):
             calls.clear()
-            if body is not None:
-                open(pol, "w").write(body)
+            open(pol, "w").write(body)
             ok, lines = w.infra_check()
             check(not ok and any(x.startswith("НЕТ") and "[corpus]" in x for x in lines)
                   and any(c[0] == "alert" and c[1] == "corpus-policy-missing" and c[2].startswith(text) for c in calls),
                   f"infra-check, {name}: нет строки НЕТ или тревоги про [corpus] ({lines}, {calls})")
+        # metis-0253: чистая policy без [corpus] и без корпуса — тревоги нет, строки про [corpus] нет, старая снята
+        for name, body in (("нет policy.toml", None), ("нет раздела и корпуса", '[hq]\nclosed_dirs = ["~/ai/me"]\n')):
+            calls.clear()
+            if body is None:
+                os.remove(pol)
+            else:
+                open(pol, "w").write(body)
+            _, lines = w.infra_check()
+            check(not any("[corpus]" in x for x in lines)
+                  and not any(c[0] == "alert" and c[1] == "corpus-policy-missing" for c in calls)
+                  and ("clear", "corpus-policy-missing") in calls,
+                  f"infra-check, {name}: лишняя тревога или строка про [corpus] ({lines}, {calls})")
         for name, body in (("пустой [corpus]", "[hq]\n[corpus]\n"),
                            ("[corpus] со списком", '[hq]\n[corpus]\ncommands = ["corpus-x"]\n')):
             calls.clear()

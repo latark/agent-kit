@@ -2193,6 +2193,15 @@ HOOKS_NO_TOMLLIB = ("python3 хуков без tomllib (Python до 3.11): guard
                     "пусто — Метиде: python3 в PATH должен быть 3.11+")
 
 
+def _corpus_declared(hq):
+    """Объявлен ли корпус: в [hq] closed_dirs есть папка корпуса (составляющая пути `corpus` или `corpus-…`) или
+    в closed_collections — коллекция `corpus`."""
+    for d in hq.get("closed_dirs") or []:
+        if any(part.lower() == "corpus" or part.lower().startswith("corpus-") for part in d.split("/")):
+            return True
+    return any(c.lower() == "corpus" for c in hq.get("closed_collections") or [])
+
+
 def infra_check():
     """Лёгкие проверки без модели: guard отказывает на запретном, хуки плагина на месте, claude agents отвечает,
     управляемые настройки совпадают с guard. Живые проверки (пробуждение после /clear, сообщение между сессиями,
@@ -2245,7 +2254,14 @@ def infra_check():
         corpus = False
     except (OSError, ValueError):
         pass  # файл не прочитать или не TOML — строка НЕТ уже есть у [hq]
-    if corpus is not None:
+    # тревога — только если корпус объявлен: в [hq] закрыта папка или коллекция корпуса (metis-0253, шаг 1);
+    # чистая policy без корпуса ничего не теряет и не тревожит
+    declared = False
+    with contextlib.suppress(ValueError):
+        declared = _corpus_declared(P.ctx_mod().hq_policy(pol))
+    if corpus is not None and not (declared or corpus):
+        P.clear_once("corpus-policy-missing")
+    elif corpus is not None:
         add(corpus, "в policy.toml есть раздел [corpus] (что закрывает правило corpus-role)")
         if corpus:
             P.clear_once("corpus-policy-missing")
