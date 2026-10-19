@@ -38,7 +38,9 @@ CLOSED = ("done", "dropped")
 ID_RE = re.compile(r"(?<![\w-])[a-z][a-z0-9]{1,11}-\d{3,}(?![\w])")
 ID_BRE = re.compile(rb"(?<![\w-])[a-z][a-z0-9]{1,11}-\d{3,}(?![\w])")
 JOURNAL_RE = re.compile(r"^- (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}) — ")
-PR_RE = re.compile(r"(?:\bPR\s*#?|/pull/|[\w.-]/[\w.-]+#)(\d{1,6})\b")
+# ссылка на PR: owner/repo#N, github.com/owner/repo/pull/N (repo известен) или «PR #N», /pull/N (repo — направления)
+PR_RE = re.compile(r"(?<![\w./-])([\w.-]+/[\w.-]+)#(\d{1,6})\b|github\.com/([\w.-]+/[\w.-]+)/pull/(\d{1,6})\b"
+                   r"|(?:\bPR\s*#?|/pull/)(\d{1,6})\b")
 VERDICT_RE = re.compile(r"Вердикт:?\**:?\s*\**\s*(принять|вернуть)", re.I)
 REVERT_RE = re.compile(r"\brevert(?:ed)?\b|hotfix|хотфикс|откатил|откатили|возврат после слияния|сломал[аио]? после слияния",
                        re.I)
@@ -51,10 +53,12 @@ NOTE_TYPE = "учёт"
 
 class Ctx:
     """Где что лежит: pantheon — ~/ai/pantheon, state — ~/.local/state/pantheon, home — HOME (транскрипты
-    home/.claude/projects), board — ~/ai/pantheon-view/Доска (None — без заметок), t — «сейчас» (epoch)."""
+    home/.claude/projects), board — ~/ai/pantheon-view/Доска (None — без заметок), t — «сейчас» (epoch),
+    repos — {направление: [owner/repo]} из [merge_repos] policy.toml: чей PR назван в журнале просто номером."""
 
-    def __init__(self, pantheon, state, home, t, board=None):
+    def __init__(self, pantheon, state, home, t, board=None, repos=None):
         self.pantheon, self.state, self.home, self.t, self.board = pantheon, state, home, t, board
+        self.repos = {k: [str(r).lower() for r in v] for k, v in (repos or {}).items() if isinstance(v, list)}
 
     @property
     def rows_path(self):
@@ -287,16 +291,32 @@ def review_files(pantheon):
     return sorted(out)
 
 
-def argus_info(tid, body, gate, reviews):
-    """→ {rounds, first_pass, rejects}: вердикты шлюза по PR из журнала задачи и review-*.md с id в заголовке.
-    Нет ни того ни другого — rounds 0, first_pass None (неизвестно)."""
-    prs = {int(x) for x in PR_RE.findall(body or "")}
+def pr_refs(body, repos=None):
+    """PR из журнала задачи → {(owner/repo, N)}. owner/repo#N и ссылка github.com — свой repo; «PR #N» и /pull/N без
+    repo — repo направления (repos), а не определить его — PR не считается: номера у разных репозиториев совпадают."""
+    out = set()
+    for full, n1, url, n2, n3 in PR_RE.findall(body or ""):
+        if full or url:
+            out.add(((full or url).lower(), int(n1 or n2)))
+        else:
+            out.update((r, int(n3)) for r in repos or [])
+    return out
+
+
+def argus_info(tid, body, gate, reviews, repos=None):
+    """→ {rounds, first_pass, rejects}: вердикты шлюза по PR из журнала задачи (repo и номер, pr_refs) и review-*.md
+    с id в заголовке. Нет ни того ни другого — rounds 0, first_pass None (неизвестно)."""
+    refs = pr_refs(body, repos)
     # круг — один проверенный head: вердикты на тот же SHA (повтор «принять» с перечнем) — один круг, итог — последний.
     # PR в журнале бывает несколько (упомянуты чужие) — берём тот, где кругов больше всего
     per = defaultdict(dict)
-    for r in sorted((r for r in gate if r.get("kind") in ("accept", "reject") and r.get("pr") in prs),
+    for r in sorted((r for r in gate if r.get("kind") in ("accept", "reject")),
                     key=lambda r: epoch(str(r.get("time"))) or 0):
-        per[r["pr"]][str(r.get("sha"))] = "принять" if r["kind"] == "accept" else "вернуть"
+        rr = r.get("repo")
+        for repo in ([rr] if isinstance(rr, str) else rr if isinstance(rr, list) else []):
+            key = (str(repo).lower(), r.get("pr"))
+            if key in refs:
+                per[key][str(r.get("sha"))] = "принять" if r["kind"] == "accept" else "вернуть"
     kinds = max((list(v.values()) for v in per.values()), key=len, default=[])
     rv = [v for _, title, v in reviews if v and re.search(rf"(?<![\w-]){re.escape(tid)}(?!\d)", title)]
     seq = kinds if len(kinds) >= len(rv) else rv
@@ -344,7 +364,7 @@ def build_row(ctx, tid, path, head, body, use, gate, reviews, owner_log, post, e
                                                                        or head.get("direction"))
         model = "codex" if executor == "codex" else None
         effort = None
-    ar = argus_info(tid, body, gate, reviews)
+    ar = argus_info(tid, body, gate, reviews, ctx.repos.get(head.get("direction")))
     ow = owner_info(tid, owner_log)
     tok = {k: int(v) for k, v in use["tokens"].items()}
     return {
@@ -371,17 +391,28 @@ def read_rows(path):
 
 
 def append_rows(path, rows):
-    """Дописать строки под блокировкой файла (несколько проходов разом строк не перемешают)."""
+    """Дописать строки под блокировкой файла (несколько проходов разом строк не перемешают). Ключи (id, closed)
+    перечитываются под той же блокировкой: закрытие и плановый проход проверяют «строки нет» до долгого чтения
+    транскриптов, и строку, которую другой успел записать за это время, второй раз не пишем. → дописанные строки."""
     if not rows:
-        return
+        return []
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        data = "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in rows)
-        os.write(fd, data.encode("utf-8"))
+        have = _have(read_rows(path))
+        new = []
+        for r in rows:
+            k = (r.get("id"), r.get("closed"))
+            if k not in have:
+                have.add(k)
+                new.append(r)
+        if new:
+            data = "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in new)
+            os.write(fd, data.encode("utf-8"))
     finally:
         os.close(fd)
+    return new
 
 
 def _closed_tasks(tasks):
@@ -432,9 +463,8 @@ def record(ctx, tasks, tid):
     # писать некуда (песочница роли) — понять до чтения транскриптов, а не после
     os.makedirs(os.path.dirname(ctx.rows_path), exist_ok=True)
     os.close(os.open(ctx.rows_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o644))
-    rows = make_rows(ctx, tasks, [tid], estimate=str(v[1]["closed"]) < since(ctx))
-    append_rows(ctx.rows_path, rows)
-    return rows[0]
+    rows = append_rows(ctx.rows_path, make_rows(ctx, tasks, [tid], estimate=str(v[1]["closed"]) < since(ctx)))
+    return rows[0] if rows else None
 
 
 def sync(ctx, tasks, days=SYNC_DAYS):
@@ -449,8 +479,7 @@ def sync(ctx, tasks, days=SYNC_DAYS):
     start = since(ctx)
     old = [t for t in tids if str(tasks[t][1]["closed"]) < start]
     rows = make_rows(ctx, tasks, [t for t in tids if t not in old]) + make_rows(ctx, tasks, old, estimate=True)
-    append_rows(ctx.rows_path, rows)
-    return rows
+    return append_rows(ctx.rows_path, rows)
 
 
 def backfill(ctx, tasks, frm, to=None, dry=False, out=None):

@@ -37,6 +37,8 @@ def check(name, ok, got=None):
 
 
 T0 = datetime(2026, 10, 19, 15, 0).timestamp()  # понедельник: неделя 2026-W43 начинается в этот день
+KIT, OTHER = "latark/agent-kit", "latark/other-app"
+REPOS = {"metis-pantheon": [KIT]}  # [merge_repos] policy.toml: «PR #N» в журнале metis — PR agent-kit
 SECRET = "текст-поручения-не-сохранять"
 SEQ = [0]
 
@@ -143,12 +145,15 @@ def setup():
         tasks[tid] = (p, h, body)
     # шлюз: PR 77 — «вернуть» дважды на один SHA (один круг), затем «принять» на новый; PR 78 — «принять» сразу;
     # PR 99 упомянут в журнале 0901 мимоходом — у него один вердикт, кругов 0901 он не сбивает
-    gate = [{"kind": "reject", "pr": 77, "sha": "a1", "time": "2026-10-19T10:30:00"},
-            {"kind": "reject", "pr": 77, "sha": "a1", "time": "2026-10-19T10:40:00"},
-            {"kind": "tests", "pr": 77, "sha": "b2", "time": "2026-10-19T10:50:00"},
-            {"kind": "accept", "pr": 77, "sha": "b2", "time": "2026-10-19T11:00:00"},
-            {"kind": "accept", "pr": 78, "sha": "c3", "time": "2026-10-19T13:00:00"},
-            {"kind": "accept", "pr": 99, "sha": "d4", "time": "2026-10-19T13:00:00"}]
+    # PR 77 другого репозитория — три «вернуть» и «принять»: кругов 0901 они не добавляют (номер тот же, repo чужой)
+    gate = [{"kind": "reject", "repo": [KIT], "pr": 77, "sha": "a1", "time": "2026-10-19T10:30:00"},
+            {"kind": "reject", "repo": [KIT], "pr": 77, "sha": "a1", "time": "2026-10-19T10:40:00"},
+            {"kind": "tests", "repo": [KIT], "pr": 77, "sha": "b2", "time": "2026-10-19T10:50:00"},
+            {"kind": "accept", "repo": [KIT], "pr": 77, "sha": "b2", "time": "2026-10-19T11:00:00"},
+            {"kind": "accept", "repo": [KIT], "pr": 78, "sha": "c3", "time": "2026-10-19T13:00:00"},
+            {"kind": "accept", "repo": [KIT], "pr": 99, "sha": "d4", "time": "2026-10-19T13:00:00"}]
+    gate += [{"kind": "reject", "repo": [OTHER], "pr": 77, "sha": x, "time": "2026-10-18T10:00:00"} for x in "xyz"]
+    gate += [{"kind": "accept", "repo": [OTHER], "pr": 77, "sha": "w", "time": "2026-10-18T11:00:00"}]
     write_jsonl(os.path.join(state, "merge-gate", "records.jsonl"), gate)
     write_jsonl(os.path.join(state, "owner-log", "board.jsonl"), [
         {"kind": "move", "id": "metis-0901", "src": "На проверке", "dst": "В работе", "time": "2026-10-19T11:10:00"},
@@ -162,7 +167,7 @@ def setup():
 def unit():
     tmp, pantheon, state, view, tasks = setup()
     board = os.path.join(view, "Доска")
-    ctx = M.Ctx(pantheon, state, tmp, T0, board)
+    ctx = M.Ctx(pantheon, state, tmp, T0, board, REPOS)
     os.makedirs(os.path.join(pantheon, "metrics"))
     with open(os.path.join(pantheon, "metrics", "since"), "w") as fh:
         fh.write("2026-10-19\n")
@@ -195,13 +200,22 @@ def unit():
           (r1.get("hours"), r1.get("start_source")) == (2.0, "claim"), (r1.get("hours"), r1.get("start_source")))
     check("закрытие после начала учёта — не оценка", r1.get("estimate") is False)
     raw = open(rows_path, encoding="utf-8").read()
-    check("текст поручения в строку учёта не попал", SECRET not in raw and "обсуждаем" not in raw)
+    check("текст поручения и заметки владельца («поправь») в строку учёта не попал",
+          SECRET not in raw and "обсуждаем" not in raw and "поправь" not in raw)
 
     check("повторное закрытие той же задачи строку не дублирует",
           M.record(ctx, tasks, "metis-0901") is None and len(M.read_rows(rows_path)) == 1)
     check("незакрытая задача строку не пишет", M.record(ctx, tasks, "metis-0906") is None)
 
-    rows = {r["id"]: r for r in M.sync(ctx, tasks)}
+    asked, orig = [], M.usage_for
+    M.usage_for = lambda projects, tids, *a, **k: asked.append(sorted(tids)) or orig(projects, tids, *a, **k)
+    try:
+        rows = {r["id"]: r for r in M.sync(ctx, tasks)}
+        again = M.sync(ctx, tasks)
+    finally:
+        M.usage_for = orig
+    check("плановый проход не читает транскрипты задач, у которых строка уже есть (0901), второй — ничьих",
+          asked and all("metis-0901" not in x for x in asked) and len(asked) <= 2, asked)
     check("плановый проход: дописаны закрытые за 3 дня без строки, без 0901 и без давней 0908",
           sorted(rows) == ["athena-0904", "metis-0902", "metis-0903", "metis-0905", "metis-0907"], sorted(rows))
     r2, r3 = rows.get("metis-0902", {}), rows.get("metis-0903", {})
@@ -224,7 +238,7 @@ def unit():
           (r7.get("executor"), r7.get("model"), r7.get("review_usd")))
     check("закрыта до начала учёта (18.10 < since 19.10) — плановый проход ставит «оценка»",
           rows.get("metis-0905", {}).get("estimate") is True and r2.get("estimate") is False)
-    check("второй плановый проход ничего не дописывает", M.sync(ctx, tasks) == [])
+    check("второй плановый проход ничего не дописывает", again == [])
 
     dry = M.backfill(ctx, tasks, "2026-10-01", "2026-10-19", dry=True)
     n_before = len(M.read_rows(rows_path))
@@ -281,6 +295,59 @@ def unit():
     time.sleep(0.05)
     M.publish(ctx, tasks)
     check("повторный publish без изменений файл не переписывает", os.path.getmtime(week_file) == mt)
+
+
+def argus_repo():
+    """Вердикты шлюза — по repo и номеру PR: одинаковые номера разных репозиториев не смешиваются (ревью #83, п. 1)."""
+    gate = [{"kind": "accept", "repo": [KIT], "pr": 83, "sha": "a", "time": "2026-10-19T11:00:00"}]
+    gate += [{"kind": "reject", "repo": [OTHER], "pr": 83, "sha": x, "time": "2026-10-18T10:00:00"} for x in "bcd"]
+    want = {"rounds": 1, "first_pass": True, "rejects": 0}
+    full = "- 2026-10-19 11:00 — metis: PR latark/agent-kit#83 argus принять\n"
+    got = M.argus_info("metis-0294", full, gate, [], None)
+    check("owner/repo#N: круги только своего repo, три «вернуть» чужого #83 не в счёт", got == want, got)
+    url = "- 2026-10-19 11:00 — metis: https://github.com/Latark/Agent-Kit/pull/83 слит\n"
+    got = M.argus_info("metis-0294", url, gate, [], None)
+    check("ссылка github.com/…/pull/N: repo из ссылки (без учёта регистра)", got == want, got)
+    bare = "- 2026-10-19 11:00 — metis: PR #83 argus принять\n"
+    got = M.argus_info("metis-0294", bare, gate, [], [KIT])
+    check("«PR #N» без repo — repo направления из [merge_repos]", got == want, got)
+    got = M.argus_info("metis-0294", bare, gate, [], [OTHER])
+    check("«PR #N» у направления с другим repo — круги того repo",
+          got == {"rounds": 3, "first_pass": False, "rejects": 3}, got)
+    got = M.argus_info("metis-0294", bare, gate, [], None)
+    check("«PR #N», repo направления не определить — не считается",
+          got == {"rounds": 0, "first_pass": None, "rejects": 0}, got)
+
+
+def race():
+    """Закрытие и плановый проход одной задачи разом (ревью #83, п. 2): пока закрытие читает транскрипты, проход
+    успевает записать строку — закрытие её не дублирует. Без потоков: проход запускается изнутри чтения транскриптов."""
+    tmp, pantheon, state, view, tasks = setup()
+    ctx = M.Ctx(pantheon, state, tmp, T0, None, REPOS)
+    os.makedirs(os.path.join(pantheon, "metrics"))
+    with open(os.path.join(pantheon, "metrics", "since"), "w") as fh:
+        fh.write("2026-10-19\n")
+    orig, busy, synced = M.usage_for, [False], []
+
+    def slow(projects, tids, *a, **k):
+        if not busy[0]:
+            busy[0] = True
+            synced.extend(r["id"] for r in M.sync(ctx, tasks))  # плановый проход посреди чтения при закрытии
+        return orig(projects, tids, *a, **k)
+
+    M.usage_for = slow
+    try:
+        got = M.record(ctx, tasks, "metis-0901")
+    finally:
+        M.usage_for = orig
+    ids = [r["id"] for r in M.read_rows(ctx.rows_path)]
+    check("гонка: проход записал 0901 раньше закрытия — в файле одна строка 0901, закрытие вернуло None",
+          "metis-0901" in synced and ids.count("metis-0901") == 1 and got is None, (synced, ids, got))
+    added = M.append_rows(ctx.rows_path, [{"id": "metis-0901", "closed": "2026-10-19"},
+                                          {"id": "metis-0901", "closed": "2026-10-20"}])
+    check("append_rows: строка с тем же (id, closed) второй раз не пишется, новая — пишется",
+          added == [{"id": "metis-0901", "closed": "2026-10-20"}] and len(M.read_rows(ctx.rows_path)) == len(ids) + 1,
+          added)
 
 
 def cli():
@@ -346,6 +413,8 @@ def cli():
 
 
 unit()
+argus_repo()
+race()
 cli()
 print(f"{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)

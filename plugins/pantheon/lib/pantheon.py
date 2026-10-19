@@ -5003,7 +5003,13 @@ def metrics_mod():
 
 
 def metrics_ctx():
-    return metrics_mod().Ctx(PANTHEON, STATE, HOME, now(), BOARD)
+    """Ctx учёта; repos — [merge_repos] из policy.toml: чей PR, названный в журнале задачи просто номером."""
+    try:
+        with open(os.path.join(HOME, ".claude", "pantheon", "policy.toml"), "rb") as fh:
+            repos = tomllib.load(fh).get("merge_repos")
+    except (OSError, tomllib.TOMLDecodeError):
+        repos = None
+    return metrics_mod().Ctx(PANTHEON, STATE, HOME, now(), BOARD, repos if isinstance(repos, dict) else None)
 
 
 def metrics_on_close(T, tid):
