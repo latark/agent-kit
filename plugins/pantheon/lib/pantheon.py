@@ -5007,7 +5007,7 @@ def metrics_ctx():
     try:
         with open(os.path.join(HOME, ".claude", "pantheon", "policy.toml"), "rb") as fh:
             repos = tomllib.load(fh).get("merge_repos")
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, ValueError, tomllib.TOMLDecodeError):  # ValueError — в том числе UnicodeDecodeError
         repos = None
     return metrics_mod().Ctx(PANTHEON, STATE, HOME, now(), BOARD, repos if isinstance(repos, dict) else None)
 

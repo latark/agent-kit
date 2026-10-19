@@ -291,30 +291,42 @@ def review_files(pantheon):
     return sorted(out)
 
 
-def pr_refs(body, repos=None):
-    """PR из журнала задачи → {(owner/repo, N)}. owner/repo#N и ссылка github.com — свой repo; «PR #N» и /pull/N без
-    repo — repo направления (repos), а не определить его — PR не считается: номера у разных репозиториев совпадают."""
-    out = set()
+def pr_refs(body):
+    """PR из журнала задачи → ({(owner/repo, N)} с названным repo, {N} без repo). owner/repo#N и ссылка github.com —
+    свой repo; «PR #N» и /pull/N без repo — голый номер: чей он, решает argus_info по вердикты шлюза."""
+    named, bare = set(), set()
     for full, n1, url, n2, n3 in PR_RE.findall(body or ""):
         if full or url:
-            out.add(((full or url).lower(), int(n1 or n2)))
+            named.add(((full or url).lower(), int(n1 or n2)))
         else:
-            out.update((r, int(n3)) for r in repos or [])
-    return out
+            bare.add(int(n3))
+    return named, bare
 
 
 def argus_info(tid, body, gate, reviews, repos=None):
     """→ {rounds, first_pass, rejects}: вердикты шлюза по PR из журнала задачи (repo и номер, pr_refs) и review-*.md
-    с id в заголовке. Нет ни того ни другого — rounds 0, first_pass None (неизвестно)."""
-    refs = pr_refs(body, repos)
+    с id в заголовке. Нет ни того ни другого — rounds 0, first_pass None (неизвестно). Голый «PR #N» относим к repo
+    направления (repos), только если вердикты на номер N есть ровно у одного из них: номера у разных репозиториев
+    совпадают, и при двух кандидатах чужие круги не считаем."""
+    named, bare = pr_refs(body)
+    verdicts = [r for r in gate if r.get("kind") in ("accept", "reject")]
+
+    def repos_of(r):
+        rr = r.get("repo")
+        return [str(x).lower() for x in ([rr] if isinstance(rr, str) else rr if isinstance(rr, list) else [])]
+
+    mine = {str(x).lower() for x in repos or []}
+    refs = set(named)
+    for n in bare:
+        with_gate = {x for r in verdicts if r.get("pr") == n for x in repos_of(r) if x in mine}
+        if len(with_gate) == 1:
+            refs.add((next(iter(with_gate)), n))
     # круг — один проверенный head: вердикты на тот же SHA (повтор «принять» с перечнем) — один круг, итог — последний.
     # PR в журнале бывает несколько (упомянуты чужие) — берём тот, где кругов больше всего
     per = defaultdict(dict)
-    for r in sorted((r for r in gate if r.get("kind") in ("accept", "reject")),
-                    key=lambda r: epoch(str(r.get("time"))) or 0):
-        rr = r.get("repo")
-        for repo in ([rr] if isinstance(rr, str) else rr if isinstance(rr, list) else []):
-            key = (str(repo).lower(), r.get("pr"))
+    for r in sorted(verdicts, key=lambda r: epoch(str(r.get("time"))) or 0):
+        for repo in repos_of(r):
+            key = (repo, r.get("pr"))
             if key in refs:
                 per[key][str(r.get("sha"))] = "принять" if r["kind"] == "accept" else "вернуть"
     kinds = max((list(v.values()) for v in per.values()), key=len, default=[])

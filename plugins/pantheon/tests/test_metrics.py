@@ -38,7 +38,7 @@ def check(name, ok, got=None):
 
 T0 = datetime(2026, 10, 19, 15, 0).timestamp()  # понедельник: неделя 2026-W43 начинается в этот день
 KIT, OTHER = "latark/agent-kit", "latark/other-app"
-REPOS = {"metis-pantheon": [KIT]}  # [merge_repos] policy.toml: «PR #N» в журнале metis — PR agent-kit
+REPOS = {"metis-pantheon": [KIT], "hermes-alex": [OTHER]}  # [merge_repos] policy.toml: «PR #N» в журнале metis — PR agent-kit
 SECRET = "текст-поручения-не-сохранять"
 SEQ = [0]
 
@@ -319,6 +319,25 @@ def argus_repo():
           got == {"rounds": 0, "first_pass": None, "rejects": 0}, got)
 
 
+def argus_multi():
+    """Направление с двумя repo (ревью #83, замечание 1): «PR #N» — только если вердикты на N у одного repo."""
+    two = [KIT, OTHER]
+    bare = "- 2026-10-19 11:00 — metis: PR #5 argus принять\n"
+    gate = [{"kind": "accept", "repo": [KIT], "pr": 5, "sha": "a", "time": "2026-10-19T11:00:00"}]
+    gate += [{"kind": "reject", "repo": [OTHER], "pr": 6, "sha": "q", "time": "2026-10-18T10:00:00"}]
+    got = M.argus_info("metis-0294", bare, gate, [], two)
+    check("два repo, вердикты на #5 только у одного — круги этого repo",
+          got == {"rounds": 1, "first_pass": True, "rejects": 0}, got)
+    gate += [{"kind": "reject", "repo": [OTHER], "pr": 5, "sha": x, "time": "2026-10-18T10:00:00"} for x in "bcd"]
+    got = M.argus_info("metis-0294", bare, gate, [], two)
+    check("два repo, вердикты на #5 у обоих — не считается",
+          got == {"rounds": 0, "first_pass": None, "rejects": 0}, got)
+    full = "- 2026-10-19 11:00 — metis: PR latark/agent-kit#5 argus принять\n"
+    got = M.argus_info("metis-0294", full, gate, [], two)
+    check("два repo, repo назван явно — круги названного",
+          got == {"rounds": 1, "first_pass": True, "rejects": 0}, got)
+
+
 def race():
     """Закрытие и плановый проход одной задачи разом (ревью #83, п. 2): пока закрытие читает транскрипты, проход
     успевает записать строку — закрытие её не дублирует. Без потоков: проход запускается изнутри чтения транскриптов."""
@@ -364,6 +383,10 @@ def cli():
                               capture_output=True, text=True, timeout=120)
 
     rows_path = os.path.join(pantheon, "metrics", "tasks.jsonl")
+    policy = os.path.join(tmp, ".claude", "pantheon", "policy.toml")
+    os.makedirs(os.path.dirname(policy), exist_ok=True)
+    with open(policy, "w", encoding="utf-8") as fh:
+        fh.write(f'[merge_repos]\nmetis-pantheon = ["{KIT}"]\nhermes-alex = ["{OTHER}"]\n')
     p = run("task", "set", "metis-0906", "status=done")
     rows = M.read_rows(rows_path)
     check("CLI task set status=done: строка учёта записана", p.returncode == 0 and [r["id"] for r in rows]
@@ -395,6 +418,10 @@ def cli():
     check("CLI backfill --from 2026-10-15: закрытые с 15.10 без строки — с пометкой «оценка», 0908 (10.10) — нет",
           p.returncode == 0 and est == ["athena-0904", "metis-0901", "metis-0902", "metis-0903", "metis-0905",
                                         "metis-0907"], (p.returncode, est, p.stderr[-300:]))
+    r77 = next((r for r in rows if r["id"] == "metis-0901"), {})
+    check("CLI: [merge_repos] из policy.toml — «PR #77» в журнале metis-0901 считается по repo направления",
+          (r77.get("argus_rounds"), r77.get("argus_first_pass")) == (2, False),
+          (r77.get("argus_rounds"), r77.get("argus_first_pass")))
     check("CLI backfill: свод недели записан", os.path.isfile(os.path.join(pantheon, "metrics", "week-2026-W43.md")))
     p = run("metrics", "backfill", "--from", "15.10")
     check("CLI backfill: дата не ГГГГ-ММ-ДД — код 2", p.returncode == 2)
@@ -410,10 +437,16 @@ def cli():
           (p.returncode, len(rows), p.stderr[-300:]))
     p = run("metrics", "summary")
     check("CLI metrics summary: свод в окно", p.returncode == 0 and "По исполнителю × модели × effort" in p.stdout)
+    with open(policy, "wb") as fh:
+        fh.write(b'[merge_repos]\nx = ["\xff"]\n')
+    p = run("metrics", "summary")
+    check("policy.toml не в UTF-8: metrics без трассы, код 0",
+          p.returncode == 0 and "Traceback" not in p.stderr, (p.returncode, p.stderr[-300:]))
 
 
 unit()
 argus_repo()
+argus_multi()
 race()
 cli()
 print(f"{sum(results)} из {len(results)} прошли")
