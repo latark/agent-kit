@@ -2183,15 +2183,15 @@ def wake_one(rest, who="владелец"):
         return 0
     if why:
         hint = {"остановлено вами": f" — сначала pantheon resume {name}"}.get(why, "")
-        print(f"{name}: будить нельзя — {why}{hint}", file=P.sys.stderr)
-        return 1
+        print(f"пропуск: {name} — {why}{hint}")  # metis-0291: обычная причина не будить — не сбой
+        return 0
     extra = " ".join(" ".join(rest[1:]).split())
     # чужой текст всегда под своей пометкой: под «[Пантеон: …]» без неё он выдал бы себя за системный (ревью argus)
     text = f"[Пантеон: задание от {who}] {extra}" if extra else WAKE_PUSH
     alias = P.name_alias(name)
     if not any(alias.fullmatch(str(a.get("name") or "")) and a.get("state") in ("stopped", "failed") for a in agents):
-        print(f"у {name} нет уснувшей сессии — новая: pantheon start {name}", file=P.sys.stderr)
-        return 1
+        print(f"пропуск: {name} — нет уснувшей сессии (новая: pantheon start {name})")
+        return 0
     got = P.start_target(("workshop" if name.startswith("daedalus-") else name),
                          [name[len("daedalus-"):]] if name.startswith("daedalus-") else [])
     if not isinstance(got, str) and not trusted(got[2]):
@@ -2200,6 +2200,9 @@ def wake_one(rest, who="владелец"):
         return 1
     _forget_autostart(name)
     rc = resume_or_start(name, agents, text, origin="wake", only_resume=True)
+    if rc == P.SKIPPED:  # recheck под блокировкой имени сказал «не надо»
+        print(f"пропуск: {name} — {P.SKIP_WHY}")
+        return 0
     print(f"{name}: " + ("поднята, задание передано" if rc == 0 else f"не поднялась, код {rc}"))
     return rc
 
