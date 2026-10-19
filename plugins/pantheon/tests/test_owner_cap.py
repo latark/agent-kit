@@ -100,6 +100,13 @@ def test_owner_cap_night_yellow_green():
     for kind in ("wake", "autostart"):
         ok, why = N.gate(kind, t, heavy=0)
         check(ok, f"жёлтая с потолком, {kind}: {ok} {why}")
+    # жёлтая зона, расход ≥ потолка: wake и autostart закрыты именно потолком, тревога одна (мутант m3: жёлтая пропускает потолок)
+    e = env(3, sec(used - 1))
+    check(N.measure(t)["zone"] == "yellow", "зона не жёлтая (расход ≥ потолка)")
+    for kind in ("wake", "autostart"):
+        ok, why = N.gate(kind, t, heavy=0)
+        check(not ok and "потолок владельца" in why and "достигнут" in why, f"жёлтая, расход ≥ потолка, {kind}: {ok} {why}")
+    check(e.alerts().count("потолок владельца") == 1, f"тревога в жёлтой зоне должна быть одна: {e.alerts()!r}")
     # ночь: потолок красную зону не открывает (мутант m1). Дата потолка — день ночи, ночь начинается в 23:00
     tn = hm("23:30", EVENING - timedelta(days=1))
     dn = datetime.fromtimestamp(tn).date().isoformat()
