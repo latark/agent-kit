@@ -1059,6 +1059,26 @@ def t_hq_gh(h):
               d == "deny" and "private" in r, r)
     d, r = h.pre("cat < notes.md")
     check("координатор: cat < <не личное> — можно", d == "allow", r)
+    # argus-69b3: значение флага в том же слове — check_private с values=True и у координатора; мутация
+    # «values=False в check_private» краснеет здесь (через пробел ловилось и раньше — рядом, для сравнения)
+    for path in (me, "$HOME/ai/knowledge/me/x.md", f"{h.root}/ai/knowledge/me/x.md"):
+        for base in ("gh pr create -R other-org/public --title t", "gh pr edit 5 -R other-org/public",
+                     "gh issue create -R other-org/public --title t", "gh issue edit 5 -R other-org/public"):
+            for form in (f"--body-file={path}", f"-F{path}", f"--body-file {path}"):
+                d, r = h.pre(f"{base} {form}")
+                check(f"координатор: личное в значении флага — отказ правилом private ({base} {form})",
+                      d == "deny" and "private" in r, r)
+    for base in ("gh pr create -R other-org/public --title t", "gh pr edit 5 -R other-org/public",
+                 "gh issue create -R other-org/public --title t", "gh issue edit 5 -R other-org/public"):
+        for form in ("--body-file=notes.md", "-Fnotes.md", "--body-file notes.md"):
+            d, r = h.pre(f"{base} {form}")
+            check(f"координатор: обычный путь в значении флага — можно ({base} {form})", d == "allow", r)
+    # --remove-milestone булев: следующий --repo=чужой виден hq-gh (argus-69b3, п. 2)
+    case("hq: --remove-milestone не съедает следующий --repo=чужой — отказ",
+         hq("gh pr edit 5 -R latark/agent-kit --remove-milestone --repo=torvalds/linux --title x"), False,
+         "нет в [merge_repos]" if HAVE_TOML else "hq-gh")
+    case("hq: --remove-milestone — можно", hq("gh pr edit 5 -R latark/agent-kit --remove-milestone --title x"), True)
+    case("hq: --remove-label X — значение, можно", hq("gh pr edit 5 -R latark/agent-kit --remove-label ready"), True)
 
 
 CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,

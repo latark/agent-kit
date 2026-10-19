@@ -2569,7 +2569,7 @@ def read_paths(event, tool, tool_input):
 
 def _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches, values=False):
     """Личные пути, которые задевает команда Bash: явные пути в словах, обход папки выше (ancestor), шаблоны, цели
-    записи. values — ещё значение флага в том же слове (--body-file=<путь>, -F<путь>): для gh штаба (hq-gh)."""
+    записи. values — ещё значение флага в том же слове (--body-file=<путь>, -F<путь>): check_private и hq-gh."""
     cmd = tool_input.get("command") or ""
     _, cmds = bash_analysis(cmd, cwd)
     # относительные пути — от папки события и от каждой папки, куда команда делает cd
@@ -2621,7 +2621,9 @@ def check_private(event, tool, tool_input):
     reaches = (lambda p: _glob_reaches(p, priv, whole=True)) if keys_only else (lambda p: _glob_reaches(p, priv))
     hits = []
     if tool == "Bash":
-        hits = _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches)
+        # metis-0247 (argus-69b3): значение флага в том же слове (--body-file=<путь>, -F<путь>) — у всех ролей, не
+        # только у штаба: иначе координатор отдавал личное в gh через склейку
+        hits = _bash_private_hits(event, tool_input, cwd, priv, ancestor, reaches, values=True)
     elif tool in EDIT_TOOLS:
         hits = [p for p in write_targets(event, tool, tool_input)[1] if p != UNRESOLVED and _inside(p, priv)]
     else:
@@ -3150,7 +3152,9 @@ def _hq_gh_args(sub, args):
                 return "без обсуждений (--json comments, reviews)", repos
             nxt = None if eq else "json"
         elif a.startswith("--"):
-            if not eq and (flag in HQ_GH_LONG_VALUE or flag.startswith(("--add-", "--remove-"))):
+            # --remove-milestone — булев, следующее слово не съедает (argus-69b3)
+            if not eq and (flag in HQ_GH_LONG_VALUE
+                           or (flag.startswith(("--add-", "--remove-")) and flag != "--remove-milestone")):
                 nxt = "skip"
         elif a.startswith("-") and len(a) > 1:
             for i, c in enumerate(a[1:]):
