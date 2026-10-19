@@ -587,7 +587,10 @@ def pack_word(pk):
 
 def pack_text(st, d, pk):
     """Задание координатору: одобренная пачка. Согласие владельца — его ответ в журнале owner-log, а не этот текст."""
-    full = os.path.join(P.PANTHEON, pk["path"]).replace(P.HOME, "~", 1)
+    full = os.path.join(P.PANTHEON, pk["path"])
+    home = P.HOME.rstrip(os.sep) + os.sep
+    if full.startswith(home):  # только приставка: HOME в середине пути не трогаем
+        full = "~/" + full[len(home):]
     return (f"[Пантеон: ночная пачка] Ночь {d.strftime('%d.%m')}: владелец ответил «Да» на вопрос ночи (карточка "
             f"{st.get('card_id')}), в вопросе была пачка {full}. Прочитай её целиком и работай только по ней: состав, "
             "порядок, исполнители, стоп-условия; другие задачи ночью не бери. Ответ владельца — в журнале его слов "
@@ -641,7 +644,9 @@ def _oneshot_save(items, t):
 def oneshot_add(target, when, text, by, expires=None, t=None, **extra):
     """Записать разовый запуск; тот же id ещё не погашен — вернуть его, второй не ставить. → id."""
     t = P.now() if t is None else t
-    oid = f"at-{datetime.fromtimestamp(when).strftime('%Y%m%d-%H%M')}-{target}"
+    # номер зависит от источника: пачка ночи (by=night) — «pack-…», ручной --at — «at-…»; иначе ручной запуск на ту же
+    # минуту и цель молча съедал бы пачку (ревью argus, #78): запись возвращалась чужая, без pack и sha
+    oid = f"{'pack' if by == 'night' else 'at'}-{datetime.fromtimestamp(when).strftime('%Y%m%d-%H%M')}-{target}"
     with P.lock("oneshot"):
         items = oneshot_items()
         if any(x["id"] == oid and not x.get("done_at") for x in items):

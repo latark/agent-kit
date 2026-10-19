@@ -6,6 +6,7 @@
 COST-04, TOOL-04 на временных папках. Claude Code подменён скриптом `claude` в PATH: `agents --json --all` отдаёт
 список из файла, остальные вызовы пишутся в журнал (запуски не настоящие).
 """
+import hashlib
 import json
 import shutil
 import os
@@ -1183,7 +1184,7 @@ def test_night_pack_starts_once_0284():
     check(not _bgs(e, "athena-q"), f"ночью с пачкой подняли по отметке: {_bgs(e)}")
     out = e.run("watch", "--dry-run", t=T0 - 2900).stdout
     check("ночью идут только одобренные пачки" in out, f"dry-run не объясняет ожидание: {out[-400:]}")
-    check("разовый запуск at-" in e.alerts() and "athena-p — запущен" in e.alerts(), f"тревоги: {e.alerts()[-400:]}")
+    check("разовый запуск pack-" in e.alerts() and "athena-p — запущен" in e.alerts(), f"тревоги: {e.alerts()[-400:]}")
 
 
 def test_night_pack_changed_not_started_0284():
@@ -1231,6 +1232,75 @@ def test_start_at_oneshot_0284():
     check(e.run("start", "--at-cancel", oid, t=T0 + 2600).returncode == 1, "повторная отмена не отказ")
     check(e.run("start", "nope-dir", "--at", hh2, t=T0 + 2600).returncode == 2, "--at не направления принят")
     check(e.run("start", "athena-a", "--at", "2020-01-01 10:00", t=T0 + 2600).returncode == 2, "--at в прошлом принят")
+
+
+def _oneshot_env():
+    """Env с направлением athena-a и разовой записью на T0 + 10 мин; → (e, id)."""
+    e = Env()
+    e.direction("athena-a")
+    hhmm = time.strftime("%H:%M", time.localtime(T0 + 600))
+    r = e.run("start", "athena-a", "--at", hhmm, "задание", t=T0)
+    return e, r.stdout.split("разовый запуск ")[1].split(":")[0]
+
+
+def _oneshot_rec(e, oid):
+    return next(x for x in json.load(open(e.st("oneshot.json")))["items"] if x["id"] == oid)
+
+
+def test_oneshot_expires_0284():
+    """Разовая запись после срока (expires) не запускается: гасится с результатом «срок вышел» и тревогой (ревью
+    argus M9, #78)."""
+    e, oid = _oneshot_env()
+    e.run("watch", t=_oneshot_rec(e, oid)["expires"] + 60)
+    check(not _bgs(e), f"запись с вышедшим сроком запущена: {e.calls()}")
+    rec = _oneshot_rec(e, oid)
+    check(rec["done_at"] and "срок вышел" in (rec["result"] or "") and rec["result"].startswith("не запущен"),
+          f"запись не погашена по сроку: {rec}")
+    check(f"разовый запуск {oid} погашен без запуска" in e.alerts(), f"нет тревоги: {e.alerts()[-300:]}")
+
+
+def test_oneshot_week_gate_0284():
+    """Закрытый недельный запор (жёлтая зона днём) не пускает разовый запуск: запуска нет, запись не погашена и ждёт
+    с причиной «недельный лимит»; запор открылся до срока — запуск идёт (ревью argus M11, #78)."""
+    e, oid = _oneshot_env()
+    e.week_pct = 31.6
+    e.run("watch", t=T0 + 660)
+    e.run("watch", t=T0 + 720)
+    check(not _bgs(e), f"запуск при закрытом запоре: {e.calls()}")
+    rec = _oneshot_rec(e, oid)
+    check(not rec["done_at"] and "недельный лимит" in (rec["wait"] or ""), f"запись не ждёт запора: {rec}")
+    e.week_pct = 10.0
+    e.run("watch", t=T0 + 780)
+    check(len(_bgs(e, "athena-a")) == 1, f"запор открылся, запуска нет: {e.calls()}")
+    check(_oneshot_rec(e, oid)["done_at"], "запущенная запись не погашена")
+
+
+def test_oneshot_pack_and_hand_same_minute_0284():
+    """Ручной --at и пачка ночи на ту же минуту и цель — обе записи живут; пачка идёт со своим текстом и сверкой sha:
+    изменённая пачка не стартует, а ручная запись при этом запускается (ревью argus п. 1, #78)."""
+    e = Env()
+    e.direction("athena-a")
+    pk = os.path.join(e.pantheon, "directions", "athena-a", "night-pack.md")
+    open(pk, "w").write("пачка\n")
+    when = T0 + 600
+    hm_ = time.strftime("%H:%M", time.localtime(when))
+    e.run("start", "athena-a", "--at", hm_, "ручное", t=T0)
+    pid = "pack-" + time.strftime("%Y%m%d-%H%M", time.localtime(when)) + "-athena-a"
+    store = json.load(open(e.st("oneshot.json")))
+    store["items"].append({"id": pid, "target": "athena-a", "at": float(when), "expires": float(when + 3600),
+                           "text": "текст пачки", "by": "night", "created": "", "done_at": None, "result": None,
+                           "wait": None, "pack": "directions/athena-a/night-pack.md",
+                           "sha": hashlib.sha256(open(pk, "rb").read()).hexdigest()})
+    json.dump(store, open(e.st("oneshot.json"), "w"))
+    items = json.load(open(e.st("oneshot.json")))["items"]
+    check(len(items) == 2 and pid.startswith("pack-"), f"записей {len(items)}: {items}")
+    open(pk, "a").write("дописано\n")
+    e.run("watch", t=T0 + 660)
+    rec = _oneshot_rec(e, pid)
+    check(rec["done_at"] and "изменилась после «Да»" in rec["result"], f"sha пачки не сверена: {rec}")
+    got = _bgs(e, "athena-a")
+    check(len(got) == 1 and any("ручное" in x for x in got[0]) and not any("текст пачки" in x for x in got[0]),
+          f"ручная запись не ушла или ушла пачка: {e.calls()}")
 
 
 def test_isolation_and_watch_last():

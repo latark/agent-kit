@@ -783,7 +783,7 @@ def test_pack_approved_0284():
     check(e.state_of().get("pack_jobs") == [x["id"] for x in items], f"pack_jobs: {e.state_of().get('pack_jobs')}")
     check([p["path"] for p in N.pack_night(hm("23:30"))] == [rel], "ночь с одобренной пачкой — pack_night пуст")
     check(N.oneshot_due(hm("03:59")) == [] and len(N.oneshot_due(hm("04:00"))) == 1, "время разового запуска")
-    check(any("Разовый запуск at-" in x for x in N.status_lines(hm("23:00"))), "pantheon night не показывает запуск")
+    check(any("Разовый запуск pack-" in x for x in N.status_lines(hm("23:00"))), "pantheon night не показывает запуск")
     # без строки «Старт» — в начале ночи; следующей ночью эта пачка уже одобрена — не предлагается снова
     e2 = _pack_env(start_line="")
     e2.at_line(hm("22:00"), 0)
@@ -812,6 +812,41 @@ def test_pack_no_cancels_0284():
     check(len(items) == 1 and items[0]["done_at"] and "отменён" in (items[0]["result"] or ""),
           f"«Нет» не погасил запуск пачки: {items}")
     check(N.oneshot_due(hm("04:00")) == [] and N.pack_night(hm("23:30")) == [], "после «Нет» пачка ещё в ночи")
+
+
+def test_oneshot_id_by_source_0284():
+    """Ручной --at и пачка ночи на ту же минуту и цель — две записи (ревью argus, #78): у пачки свой номер pack-…, текст,
+    pack и sha; обратный порядок тоже. Своё повторное добавление по-прежнему не дублируется."""
+    e = Env()
+    t = day("14:00")
+    for order in ((("zeus", {}), ("night", {"pack": "metis-x/p.md", "sha": "ab" * 32})),
+                  (("night", {"pack": "metis-x/p.md", "sha": "ab" * 32}), ("zeus", {}))):
+        open(os.path.join(e.state, "oneshot.json"), "w").write("{}")
+        ids = [N.oneshot_add("metis-x", t + 600, f"текст {by}", by, t=t, **ex) for by, ex in order]
+        items = {x["id"]: x for x in oneshots(e)}
+        check(ids[0] != ids[1] and len(items) == 2, f"ручной и пачка слились: {ids} {items}")
+        pk = next((x for x in items.values() if x["by"] == "night"), {})
+        check(pk.get("id", "").startswith("pack-") and pk.get("text") == "текст night" and pk.get("sha") == "ab" * 32
+              and pk.get("pack") == "metis-x/p.md", f"запись пачки потеряла свои поля: {pk}")
+        hand = next((x for x in items.values() if x["by"] == "zeus"), {})
+        check(hand.get("id", "").startswith("at-") and hand.get("pack") is None, f"ручная запись: {hand}")
+    again = N.oneshot_add("metis-x", t + 600, "текст night", "night", t=t, pack="metis-x/p.md", sha="ab" * 32)
+    check(again.startswith("pack-") and len(oneshots(e)) == 2, "повтор пачки продублирован")
+
+
+def test_pack_text_home_prefix_0284():
+    """Путь пачки в задании: «~» только вместо приставки HOME, а не первого вхождения (ревью argus, п. 4)."""
+    e = Env()
+    saved = (P.HOME, P.PANTHEON)
+    try:
+        P.HOME, P.PANTHEON = "/h", "/x/h/pan"
+        txt = N.pack_text({"card_id": "c"}, EVENING, {"path": "d/n.md"})
+        check("/x/h/pan/d/n.md" in txt and "~" not in txt, f"путь искажён: {txt[:200]}")
+        P.HOME, P.PANTHEON = "/h", "/h/pan"
+        txt = N.pack_text({"card_id": "c"}, EVENING, {"path": "d/n.md"})
+        check("~/pan/d/n.md" in txt, f"приставка HOME не заменена: {txt[:200]}")
+    finally:
+        P.HOME, P.PANTHEON = saved
 
 
 def test_oneshot_store_0284():
