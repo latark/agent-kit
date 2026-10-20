@@ -5724,6 +5724,8 @@ def sync_answers():
     print(f"sync-answers: ответ по {', '.join(waiting)} применён (sync.sh, код {r.returncode})")
     # metis-0226: вопрос отвечен — снять его с карточки, иначе она висит в «Ждёт вас», если sync.sh задачу не закрыл
     # (его `pantheon task set` молчит при сбое); закрытие статуса остаётся за sync.sh
+    if r.returncode != 0:  # sync.sh не отработал — вопрос остаётся в «Ждёт вас»
+        return 0
     T = tasks_mod()
     for tid in waiting:
         if last.get(tid) not in SYNC_ACT:

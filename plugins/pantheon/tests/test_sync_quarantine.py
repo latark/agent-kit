@@ -187,5 +187,34 @@ e.run()
 check("карточка: ответ галочкой на доске — вопрос снят", card_question(e, e.task) is None)
 
 
+# два держания: «Отправить» по .sync-held снимает вопрос, «Пока держать» по .sync-incoming — нет
+e = with_card()
+first = e.task
+r2 = subprocess.run([PY311, "-I", LIB, "task", "new", "--direction", "metis-pantheon", "--project", "Пантеон",
+                     "--title", "Чужие правки", "--status", "waiting", "--waiting-on", "human", "--priority", "1",
+                     "--next", "выбрать", "--question", "Откатить?", "--option", "Пока держать"],
+                    env={"PATH": os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pan, "PANTHEON_STATE": e.state,
+                         "PANTHEON_NOW": str(T0), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": ROOT},
+                    capture_output=True, text=True, timeout=60)
+import re as _re
+second = _re.search(r"[a-z]+-\d{4}", r2.stdout).group(0)
+with open(os.path.join(e.claude, ".sync-incoming"), "w") as fh:
+    fh.write(f"task={second}\nfrom=a\nto=b\n")
+e.window("Отправить", tid=first)
+e.window("Пока держать", tid=second)
+e.run()
+check("два держания: «Отправить» — вопрос снят", card_question(e, first) is None, card_question(e, first))
+check("два держания: «Пока держать» — вопрос остался", card_question(e, second) not in (None, "нет файла"),
+      card_question(e, second))
+
+# sync.sh вернул не 0 — вопрос не снимается
+e = with_card()
+with open(os.path.join(e.claude, "sync.sh"), "w") as fh:
+    fh.write(f'#!/bin/sh\necho x >> "{e.mark}"\nexit 3\n')
+e.window("Отправить")
+r, ran = e.run()
+check("sync.sh код 3 — вопрос остаётся", ran and card_question(e, e.task) not in (None, "нет файла"), r.stdout + r.stderr)
+
+
 print(f"\n{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)
