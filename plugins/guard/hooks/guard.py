@@ -421,7 +421,6 @@ LAUNCHD_ENV_REASON = (
     "сообщи владельцу."
 )
 SWIFTC_PATH = "/usr/bin/swiftc"
-SWIFTC_TOKEN = re.compile(r"(?:^|(?<=[\s;&|()`'\"=]))((?:[^\s;&|()`'\"=]*/)?swiftc)(?=[\s;&|()`'\"]|$)")
 SWIFTC_REASON = (
     "Правило launchd-env: swiftc вызывай только абсолютным путём `/usr/bin/swiftc` — голое имя ищется по PATH, "
     "а PATH можно подменить."
@@ -452,10 +451,10 @@ def check_launchd_env(event, tool, tool_input):
         if (name == "launchctl" or (name == "?" and "launchctl" in plain)) \
                 and (not args or args[0] is None or args[0] not in LAUNCHCTL_READ):
             return LAUNCHD_ENV_REASON
-        if name == "swiftc" or (name == "?" and "swiftc" in plain):
-            found = SWIFTC_TOKEN.findall(cmd)
-            if not found or any(t != SWIFTC_PATH for t in found):
-                return SWIFTC_REASON
+        # swiftc: путь сверяет _run у слова каждой команды ("swiftc-path" — путь не /usr/bin/swiftc); имя не вычислить —
+        # отказ, если в тексте есть swiftc (metis-0314: буквальный /usr/bin/swiftc в другой команде не прикрывает).
+        if name == "swiftc-path" or (name == "?" and "swiftc" in plain):
+            return SWIFTC_REASON
     return None
 
 
@@ -1642,6 +1641,8 @@ def _run(words, st, stdin, piped, depth):
         if name.startswith("=") and len(name) > 1:
             name = name[1:]  # zsh: =cmd
         st.cmds.append((name, t))
+        if name == "swiftc" and name_text != SWIFTC_PATH:  # путь — у слова самой команды (metis-0314)
+            st.cmds.append(("swiftc-path", [name_text]))
         _dispatch(name, args, t, st, stdin, piped, depth)
 
 

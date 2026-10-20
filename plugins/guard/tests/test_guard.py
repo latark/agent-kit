@@ -1247,7 +1247,11 @@ def main():
            w) for w in (HQ, TL) for c in ("launchctl print gui/501/pantheon.tick", "/usr/bin/swiftc x.swift")],
         *[(f"launchd-env: {c!r} — отказ", "deny", br, "dev-opus", True, B(c)) for c in (
             "swiftc x.swift", "/opt/homebrew/bin/swiftc x.swift", "xcrun swiftc x.swift", "S=swiftc; $S x.swift",
-            "/usr/bin/swiftc a.swift; swiftc b.swift")],
+            "/usr/bin/swiftc a.swift; swiftc b.swift",
+            "echo /usr/bin/swiftc; swift''c x.swift", "/usr/bin/swiftc -v; swift\"\"c x.swift",
+            "/usr/bin/swiftc -v && swi\\ftc x.swift", "/usr/bin/swiftc -v; Swiftc x.swift",
+            "/usr/bin/swiftc -v; S=swift; $S\"\"c x.swift", "/usr/bin/swiftc a.swift && SWIFTC b.swift",
+            "/usr/bin/swiftc a; \"swift\"c b", "/usr/bin/swiftc a; S=swift; ${S}c b")],
         *[(f"launchd-env: {c!r} — можно", "allow", br, "dev-opus", True, B(c)) for c in (
             "/usr/bin/swiftc x.swift", "env A=1 /usr/bin/swiftc -o out x.swift", "grep -n swiftc merge.py")],
         ("launchd-env: владелец swiftc — можно", "allow", ".", "", False, B("swiftc x.swift")),
