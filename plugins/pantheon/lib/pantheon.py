@@ -397,7 +397,7 @@ def alert(text, who="pantheon"):
             if new:
                 fh.write("# Тревоги\n\nТолько дописывание: `pantheon alert`. Строка — время · кто · что. "
                          "В «ждёт вас» на доске переносит Пританей; старше 30 дней уносит `pantheon archive`.\n\n")
-            if _alert_dup(p, who, text):  # metis-0230: та же строка за последние сутки — не дублируем
+            if "ждёт вас" in text and _alert_dup(p, who, text):  # metis-0230: та же «ждёт вас» за сутки — одна
                 return
             fh.write(f"{stamp()} · {who} · {text}\n")
 

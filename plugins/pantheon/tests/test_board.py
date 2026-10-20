@@ -193,7 +193,7 @@ def main():
     check("0230: две одинаковые строки «ждёт вас» — одна", a5.count("agent ждёт вас: claude attach x") == 1, a5)
     subprocess.run([PY311, "-I", CLI, "alert", "agent ждёт вас: claude attach y", "--from", "watch"], env=env,
                    capture_output=True, text=True)
-    check("0230: другая строка не сливается", open(alerts, encoding="utf-8").read().count("ждёт вас") == 2)
+    check("0230: другая строка не сливается", open(alerts, encoding="utf-8").read().count("claude attach") == 2)
     os.remove(stp)
     os.remove(okp)
     os.remove(bdp)
