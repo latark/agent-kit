@@ -19,6 +19,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon plugins update [--quiet]     новые версии плагинов agent-kit (плановый проход раз в 10 мин): тесты новой и
                                         установленной версии; нет новых падений — claude plugin update, есть — тревога;
                                         после установки плановый проход перезапускает свободные окна (metis-0181)
+  pantheon plugins accept [--new] [guard] [pantheon]   принять установленное дерево как проверенное (verified.json):
+                                        живой код и окна ролей идут только на проверенное (metis-0321); только руками
   pantheon direction check <имя>        что готово у нового направления (навык new-direction): реестр, «да»,
                                         папки, STATUS.md, domains.json, AGENTS.md, доверие, autoMode
   pantheon direction init <имя>         папка ~/projects/<имя> по вашей галочке: git init, AGENTS.md, локальный
@@ -1322,10 +1324,11 @@ def _sh(*cmd, timeout=20, env=None):
 
 def _plugin_version(name):
     """Установленная версия (кэш), а не голова клона маркетплейса: клон опережает выпуск (metis-0321)."""
-    d = os.path.join(installed_dir(name) or os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit",
-                                                         "plugins", name), ".claude-plugin", "plugin.json")
+    d = installed_dir(name)  # живая — проверенная (verified.json), а не голова клона и не непроверенная установка
+    if not d:
+        return "нет проверенной"
     with contextlib.suppress(OSError, ValueError):
-        return json.load(open(d)).get("version", "?")
+        return json.load(open(os.path.join(d, ".claude-plugin", "plugin.json"))).get("version", "?")
     return "?"
 
 
@@ -1772,6 +1775,7 @@ def domains_build(if_changed=False):
         # и реестр установленных плагинов: путь guard.py и agents.py окон берётся из него — обновили guard, окна
         # пересобираются на новый путь (metis-0321, ревью 90a)
         watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS, CLAUDE_TMP, INSTALLED_PLUGINS,
+                   _verified_path(),
                    *(os.path.join(l, ".claude", fn) for l in launches if l for fn in PROJECT_SETTINGS_FILES))
         newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
         # и пропавшее окно задачи расписания (P0-3): без него задача не идёт — в том числе сразу после обновления
@@ -2036,35 +2040,26 @@ MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-k
 
 
 def _installed_hook(name, market_path):
-    """Тот же файл хука из УСТАНОВЛЕННОЙ версии плагина (кэш ~/.claude/plugins/cache, metis-0321): клон маркетплейса
-    plugins-update пересоздаёт головой main сразу после слияния, и строгий guard окон шёл бы непроверенным. Установки
-    нет — клон, как раньше; обе папки внутри ~/.claude/plugins, ролям туда не записать."""
+    """Тот же файл хука из ПРОВЕРЕННОГО дерева плагина (installed_dir: хеш совпал с verified.json, metis-0321). Клон
+    маркетплейса — никогда: plugins-update пересоздаёт его головой main сразу после слияния. Проверенного нет —
+    несуществующий путь внутри кэша (ролям туда не записать): строгий guard окна с onFailure block не пропустит ни
+    одного действия, sandbox_build поднимет тревогу guard-missing."""
+    rel = os.path.relpath(market_path, os.path.join(HOME, ".claude", "plugins", "marketplaces", MARKETPLACE,
+                                                    "plugins", name))
     d = installed_dir(name)
     if d:
-        rel = os.path.relpath(market_path, os.path.join(HOME, ".claude", "plugins", "marketplaces", MARKETPLACE,
-                                                        "plugins", name))
         p = os.path.join(d, rel)
         if os.path.isfile(p) and not os.path.islink(p):
             return os.path.realpath(p)
-    return market_path
+    return os.path.join(HOME, ".claude", "plugins", "cache", MARKETPLACE, name, "нет-проверенного", rel)
 
 
 def guard_script():
-    hook = _installed_hook("guard", MARKET_GUARD)
-    if hook != MARKET_GUARD:
-        return hook
-    if os.path.isfile(MARKET_GUARD) and not os.path.islink(MARKET_GUARD):
-        return os.path.realpath(MARKET_GUARD)
-    return MARKET_GUARD  # файла нет — окно роли не пустит ни одной записи (отказ при сбое), тревога в sandbox_build
+    return _installed_hook("guard", MARKET_GUARD)
 
 
 def agents_script():
-    hook = _installed_hook("pantheon", MARKET_AGENTS)
-    if hook != MARKET_AGENTS:
-        return hook
-    if os.path.isfile(MARKET_AGENTS) and not os.path.islink(MARKET_AGENTS):
-        return os.path.realpath(MARKET_AGENTS)
-    return MARKET_AGENTS  # файла нет — python выйдет с кодом 2, окно не позовёт никого; тревога в sandbox_build
+    return _installed_hook("pantheon", MARKET_AGENTS)
 
 
 def agents_window(data, allowed, deny, script):
@@ -2402,7 +2397,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     guard = guard_script()
     if not os.path.isfile(guard):
         alert_once("guard-missing", guard, f"нет {guard.replace(HOME, '~')}: окна ролей не пропустят ни одной записи "
-                   "(строгий guard, SEC-29) — переустановить плагин guard", "pantheon")
+                   "(строгий guard, SEC-29) — нет проверенного дерева guard или файла в нём: pantheon plugins accept guard "
+                   "(README agent-kit, «Живой код»)", "pantheon")
     agents_py = agents_script()
     if not os.path.isfile(agents_py):
         alert_once("agents-missing", agents_py, f"нет {agents_py.replace(HOME, '~')}: окна Пританея и координаторов не позовут ни одного "
@@ -5015,20 +5011,121 @@ PLIST_TMPL = """<?xml version="1.0" encoding="UTF-8"?>
 INSTALLED_PLUGINS = os.path.join(HOME, ".claude", "plugins", "installed_plugins.json")
 
 
-def installed_dir(name):
-    """Папка установленной версии плагина name@agent-kit уровня пользователя — installPath из installed_plugins.json,
-    только внутри ~/.claude/plugins/cache и только существующая; иначе None. Без вызова claude: install и
-    plugins-update берут то, что Claude Code уже записал."""
+def _unchecked_path():
+    """Запись критической ветки plugins-update: что встало непроверенным (для разбора). Решений по ней не принимают —
+    решает только verified.json."""
+    return path("plugins", "unchecked.json")
+
+
+def _verified_path():
+    return path("plugins", "verified.json")
+
+
+_HASH_MEMO = {}
+
+
+def _tree_stamp(root):
+    """Отпечаток дерева без чтения файлов: sha256 по каждой записи — путь, ctime_ns, размер, inode, mtime_ns. Одного
+    mtime мало (ревью 90b, круг 4): подмену файла с возвратом mtime через os.utime выдаёт ctime — его utime не вернуть;
+    замену файла другим — inode; новая или удалённая запись меняет список."""
+    rows = []
+    for d, dirs, files in os.walk(root):
+        dirs[:] = [x for x in dirs if x not in (".git", "__pycache__")]
+        for x in [d] + [os.path.join(d, f) for f in files + dirs]:
+            with contextlib.suppress(OSError):
+                st = os.lstat(x)
+                rows.append((os.path.relpath(x, root), st.st_ctime_ns, st.st_size, st.st_ino, st.st_mtime_ns))
+    return hashlib.sha256(repr(sorted(rows)).encode()).hexdigest()
+
+
+def _tree_hash_cached(root):
+    """_tree_hash с кэшем по (путь, отпечаток mtime дерева): сборка окон и проход тика не перечитывают кэш плагина
+    каждый раз. Кэш — в памяти и в состоянии тика; записать не вышло (окно роли) — только в памяти."""
+    if not isinstance(root, str) or not os.path.isdir(root):
+        return None
+    real = os.path.realpath(root)
+    stamp_ = _tree_stamp(real)
+    memo = _HASH_MEMO.get(real)
+    if memo and memo[0] == stamp_:
+        return memo[1]
+    cache_p = path("plugins", "hash-cache.json")
+    disk = read_json(cache_p, {})
+    disk = disk if isinstance(disk, dict) else {}
+    row = disk.get(real)
+    if isinstance(row, dict) and row.get("stamp") == stamp_ and isinstance(row.get("hash"), str):
+        _HASH_MEMO[real] = (stamp_, row["hash"])
+        return row["hash"]
+    h = _tree_hash(real)
+    _HASH_MEMO[real] = (stamp_, h)
+    disk[real] = {"stamp": stamp_, "hash": h}
+    with contextlib.suppress(OSError):
+        write_json(cache_p, {k: v for k, v in disk.items() if os.path.isdir(k)})
+    return h
+
+
+def _cache_tree(p):
+    """realpath папки p, если это дерево плагина внутри ~/.claude/plugins/cache (есть .claude-plugin/plugin.json)."""
+    cache = os.path.realpath(os.path.join(HOME, ".claude", "plugins", "cache")) + os.sep
+    if isinstance(p, str) and os.path.realpath(p).startswith(cache) and os.path.isdir(p) \
+            and os.path.isfile(os.path.join(p, ".claude-plugin", "plugin.json")):
+        return os.path.realpath(p)
+    return None
+
+
+def verified_record(name):
+    """Запись verified.json о плагине name: {hash, path, version, at, by}; нет, битая или без хеша — None."""
+    data = read_json(_verified_path(), {})
+    rec = data.get(name) if isinstance(data, dict) else None
+    return rec if isinstance(rec, dict) and isinstance(rec.get("hash"), str) and rec["hash"] else None
+
+
+def verified_write(name, root, digest, version, by):
+    """digest — хеш, с которым дерево сверили (а не пересчёт: между сверкой и записью дерево могли подменить)."""
+    data = read_json(_verified_path(), {})
+    data = data if isinstance(data, dict) else {}
+    data[name] = {"hash": digest, "path": os.path.realpath(root), "version": version, "at": stamp(), "by": by}
+    write_json(_verified_path(), data)
+
+
+def installed_dir(name, checked=True):
+    """Дерево плагина name@agent-kit, с которым работает живой код: current, `pantheon install`, хуки окон ролей,
+    версия в status (metis-0321). Разрешение, а не запрет: годится только дерево, чей хеш совпал с verified.json (его
+    пишет успешная установка plugins-update — тесты и сверка — или ваша команда `pantheon plugins accept`).
+    1. installPath из installed_plugins.json (уровень пользователя, внутри ~/.claude/plugins/cache) с хешем из записи.
+    2. Иначе — последнее проверенное дерево по пути из записи, если оно цело (хеш тот же), и тревога.
+    3. Иначе None и тревога: проверенного нет. Клон маркетплейса — никогда.
+    checked=False — сырой installPath без сверки: только для записи в verified.json (accept). Тест-страж
+    test_live_code не пускает checked=False за пределы plugins_accept."""
     data = read_json(INSTALLED_PLUGINS)
     rows = (data.get("plugins") if isinstance(data, dict) else None) or {}
     rows = rows.get(f"{name}@{MARKETPLACE}") if isinstance(rows, dict) else None
-    cache = os.path.realpath(os.path.join(HOME, ".claude", "plugins", "cache")) + os.sep
+    raw = None
     for row in rows if isinstance(rows, list) else []:
-        p = row.get("installPath") if isinstance(row, dict) and row.get("scope") == "user" else None
-        if isinstance(p, str) and os.path.realpath(p).startswith(cache) and os.path.isdir(p) \
-                and os.path.isfile(os.path.join(p, ".claude-plugin", "plugin.json")):
-            return os.path.realpath(p)
+        raw = _cache_tree(row.get("installPath") if isinstance(row, dict) and row.get("scope") == "user" else None)
+        if raw:
+            break
+    if not checked:
+        return raw
+    rec = verified_record(name)
+    if rec and raw and _tree_hash_cached(raw) == rec["hash"]:
+        return raw
+    last = _cache_tree(rec.get("path")) if rec else None
+    if last and _tree_hash_cached(last) == rec["hash"]:
+        if raw != last:
+            _unverified_alert(name, raw or "—", f"живой код и окна остаются на последнем проверенном "
+                              f"{last.replace(HOME, '~')}")
+        return last
+    _unverified_alert(name, raw or "—", "проверенного дерева нет: current не перевешивается, окна ролей закрыты "
+                      "(строгий guard не найден)")
     return None
+
+
+def _unverified_alert(name, where, what):
+    with contextlib.suppress(Exception):  # окно роли не пишет в состояние — сборку и status это не роняет
+        alert_once(f"plugins-unverified-{name}", f"{where} {what[:60]}",
+                   f"{name}: установленное дерево {where.replace(HOME, '~')} не проверено (нет в verified.json) — {what}. "
+                   f"Что делать — README agent-kit, «Живой код»; принять руками — pantheon plugins accept {name}",
+                   "plugins-update")
 
 
 def link_current(target):
@@ -5050,7 +5147,11 @@ def install():
     """Задача launchd, команда pantheon и обработчики слияния ~/ai/pantheon — через неизменную ссылку CURRENT."""
     os.makedirs(path("logs"), exist_ok=True)
     os.makedirs(os.path.dirname(PLIST), exist_ok=True)
-    target = link_current(installed_dir("pantheon") or PLUGIN)
+    want = installed_dir("pantheon")  # только проверенное дерево (verified.json); клон и рабочая копия — никогда
+    target = link_current(want) if want else (os.path.realpath(CURRENT) if os.path.lexists(CURRENT) else "—")
+    if not want:
+        print("pantheon install: проверенного дерева pantheon нет (verified.json) — current не тронута. "
+              "Принять установленное: pantheon plugins accept", file=sys.stderr)
     tick_bin = os.path.join(CURRENT, "bin", "pantheon-tick")
     env_path = ":".join([os.path.dirname(sys.executable), "/opt/homebrew/bin",
                          os.path.join(HOME, ".local", "bin"), "/usr/bin:/bin:/usr/sbin:/sbin"])
@@ -6184,6 +6285,11 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
     got = row.get("version")
     if got == new and _tree_hash(row.get("installPath")) == digest:
         _plugins_mark(marks, name, None)
+        # разрешение: это дерево прошло тесты и сверку — живой код и окна идут только на него (metis-0321)
+        verified_write(name, row["installPath"], digest, new, "plugins-update")
+        um = read_json(_unchecked_path(), {}) or {}
+        if um.pop(name, None) is not None:
+            write_json(_unchecked_path(), um)
         if name == "pantheon" and row.get("installPath"):
             # живой код тика и команды pantheon — только проверенная и вставшая версия (metis-0321)
             try:
@@ -6210,9 +6316,15 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
         return ALERTED
     # встало не то, что проверяли: другая версия или другое содержимое (update сам обновил каталог)
     _plugins_mark(marks, name, None)
+    bad = _tree_hash(row.get("installPath"))
+    if bad:  # запись для разбора; живой код его и так не возьмёт — хеша нет в verified.json
+        um = read_json(_unchecked_path(), {}) or {}
+        um[name] = {"hash": bad, "version": got, "path": os.path.realpath(row.get("installPath")), "at": stamp()}
+        write_json(_unchecked_path(), um)
     seen = got or "неизвестна"
     _plugins_journal(f"{name} {old} → {seen}: встала непроверенная версия (проверялась {new}, хеш {digest})")
-    text = f"встала непроверенная версия {name} {seen} (проверялась {new})"
+    text = (f"встала непроверенная версия {name} {seen} (проверялась {new}) — живой код и окна остаются на последнем "
+            "проверенном дереве; что делать — README agent-kit, «Живой код»")
     alert("КРИТИЧНО: " + text, "plugins-update")
     notify(text, title="Пантеон · критично", group="critical")
     if not quiet:
@@ -6270,7 +6382,7 @@ def _plugins_red(marks, name, old, new, log, what):
 def _current_sync():
     """Новее нет (например, версию поставили руками `claude plugin update`): current должна вести в установленную папку.
     Отстала или повисла — перевесить на installed_dir (версия та же, что у поставленной); сбой — тревога."""
-    want = installed_dir("pantheon")
+    want = installed_dir("pantheon")  # проверенное дерево или последнее проверенное; тревогу даёт installed_dir
     if not want:
         return
     try:
@@ -6346,10 +6458,35 @@ def _plugins_update(quiet):
     return rc
 
 
+def plugins_accept(names, new_only=False):
+    """Ваше «да» установленному дереву без прохода тестов (новая машина, первый выпуск с verified.json, ручная
+    переустановка): его хеш и путь — в verified.json. Только руками: задача тика эту команду не запускает, окна ролей
+    в состояние не пишут. new_only (--new, pantheon-setup) — только плагины, о которых записи ещё нет."""
+    rc = 0
+    for name in names or ["guard", "pantheon"]:
+        if new_only and verified_record(name):
+            continue
+        raw = installed_dir(name, checked=False)
+        if not raw:
+            # --new (pantheon-setup): неустановленный плагин — не ошибка этого шага, установку проверяет свой шаг
+            print(f"pantheon plugins accept: {name}@{MARKETPLACE} не установлен в ~/.claude/plugins/cache", file=sys.stderr)
+            rc = rc if new_only else 1
+            continue
+        version = (read_json(os.path.join(raw, ".claude-plugin", "plugin.json"), {}) or {}).get("version", "?")
+        verified_write(name, raw, _tree_hash(raw), version, "accept")
+        _plugins_journal(f"{name} {version}: принято руками (pantheon plugins accept) — {raw}")
+        print(f"{name}: {version} принят — {raw.replace(HOME, '~')}")
+        if name == "pantheon":
+            link_current(raw)
+    return rc
+
+
 def plugins_cmd(rest):
     if rest[:1] == ["update"] and all(a == "--quiet" for a in rest[1:]):
         return plugins_update(quiet="--quiet" in rest)
-    print("pantheon plugins: есть только update [--quiet]", file=sys.stderr)
+    if rest[:1] == ["accept"] and all(a in ("guard", "pantheon", "--new") for a in rest[1:]):
+        return plugins_accept([a for a in rest[1:] if a != "--new"], new_only="--new" in rest)
+    print("pantheon plugins: update [--quiet] | accept [--new] [guard] [pantheon]", file=sys.stderr)
     return 2
 
 
