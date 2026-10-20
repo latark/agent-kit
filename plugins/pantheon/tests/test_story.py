@@ -77,10 +77,10 @@ def story_checks(env, home):
     sid, srel = new(env, "--type", "story", "--title", "Пачка вечера", "--estimate", "1 % недели",
                     "--night", "2026-10-19")
     check("task new --type story: карточка type story", head(home, srel).get("type") == "story", head(home, srel))
-    a, arel = new(env, "--title", "Первая", "--estimate", "0,2 % недели", "--touches", "plugins/pantheon/lib/")
+    a, arel = new(env, "--title", "Первая", "--estimate", "0,2 % недели", "--touches", "plugins/pantheon/lib/", "--mode", "self")
     b, brel = new(env, "--title", "Вторая", "--estimate", "0,2 % недели", "--touches",
                   "plugins/pantheon/lib/tasks.py", "--mode", "parallel")
-    c, crel = new(env, "--title", "Третья", "--estimate", "0,5 % недели")
+    c, crel = new(env, "--title", "Третья", "--estimate", "0,5 % недели", "--mode", "single")
     for x in (a, b, c):
         r = run(env, "task", "attach", x, sid, t=T0 + 10)
         check(f"attach {x} → пачка", r.returncode == 0 and head(home, arel if x == a else brel if x == b else crel)

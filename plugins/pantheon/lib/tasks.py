@@ -69,6 +69,8 @@ FIELDS = {
 # прежние ключи шапки → нынешние: читаются при разборе, при записи уходят под новым именем
 LEGACY_KEYS = {"wave": "release"}
 # режим: сам координатор, один исполнитель на цепочку, параллельно; пусто — как single
+NO_MODE_BATCH = ("в пачку без режима нельзя: поставьте --mode self|single|parallel (и --mode-why — почему), "
+                 "режим нужен «Итогам пачек» и порядку запуска")
 MODES = {"self": "сам", "single": "один исполнитель", "parallel": "параллельно"}
 EXECUTORS = ("auto", "claude", "codex")
 # итог приёмки утром: как у приоритета — значение из перечня, иное — ошибка шапки
@@ -604,6 +606,11 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
     if head.get("question"):
         head["question_at"] = now_iso(t)
     errs, _ = check_head(head)
+    if head.get("batch") and not head.get("mode"):
+        errs.append(NO_MODE_BATCH)
+    par = head.get("parent")
+    if par and not head.get("mode") and load_tasks(pantheon, WORK_TYPES).get(par, ("", {}))[1].get("type") == "story":
+        errs.append(NO_MODE_BATCH)
     if errs:
         remove(path)
         raise ValueError("; ".join(errs))
@@ -656,6 +663,9 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
     tasks = load_tasks(pantheon, WORK_TYPES)
     if tid not in tasks:
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
+    par = changes.get("parent")
+    if par and tasks.get(par, ("", {}))[1].get("type") == "story" and not (changes.get("mode") or tasks[tid][1].get("mode")):
+        raise ValueError(f"{tid}: {NO_MODE_BATCH}")
     with dir_lock(os.path.dirname(tasks[tid][0])):
         return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck)
 
@@ -708,7 +718,7 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck):
         head["waiting_on"] = None
     if head.get("status") in ("done", "dropped"):
         head["question"], head["options"], head["requested"] = None, None, None
-        if not was_closed:
+        if not was_closed and not changes.get("closed"):  # дату слияния PR тик ставит сам (metis-0308)
             head["closed"] = now_iso(t)[:10]
     elif was_closed:
         head["closed"] = None
@@ -716,6 +726,8 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck):
         head["question_at"] = None
     elif head.get("question") != old_q:
         head["question_at"] = now_iso(t)
+    if changes.get("batch") and not head.get("mode"):
+        raise ValueError(NO_MODE_BATCH)
     head["updated"] = now_iso(t)
     errs, _ = check_head(head)
     if errs:
@@ -724,6 +736,91 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck):
         body = append_log(body, f"{now_iso(t)[:16].replace('T', ' ')} — {actor}: {' '.join(str(note).split())}")
     write_task(path, head, body)
     return path, head
+
+
+
+# --- закрытие по слиянию и поля «Итогов пачек» (metis-0308) ---------------------------------------------------------
+# Тик закрывает задачу при слиянии её PR (lib/autoclose.py) и пишет в журнал строку с CLOSED_BY_MERGE: по ней check
+# знает, что release и actual обязаны быть. Остальное считается здесь, по всем задачам, без участия ролей.
+
+CLOSED_BY_MERGE = "закрыта по слиянию"
+NO_PR_HOURS = 24
+PR_REF_RE = re.compile(r"#\d{1,6}\b|/pull/\d{1,6}\b|\bPR\s*\d{1,6}\b")
+NO_PR = "review без PR"
+NO_ACCEPT = "нет приёмки"
+
+
+def in_pack(head, tasks=None):
+    """Задача входит в пачку: прикреплена к карточке story (parent) или старое поле batch."""
+    if head.get("type") != "task":
+        return False
+    sid = head.get("parent")
+    if sid and tasks is not None:
+        return sid in tasks and tasks[sid][1].get("type") == "story"
+    return bool(sid or head.get("batch"))
+
+
+def night_end_ts(head, tasks, night_end="08:00"):
+    """Конец ночи задачи: дата вечера из night (своего, иначе пачки) → следующее утро в night_end. Нет даты — None."""
+    d = head.get("night")
+    if not d and head.get("parent") in (tasks or {}):
+        d = tasks[head["parent"]][1].get("night")
+    base = ts_of(d[:10]) if isinstance(d, str) else None
+    m = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", night_end or "")
+    if base is None or not m:
+        return None
+    return datetime.fromtimestamp(base + 86400 + 3600).replace(hour=int(m.group(1)), minute=int(m.group(2)),
+                                                                 second=0, microsecond=0).timestamp()
+
+
+def extra_attention(head, body, tasks, t, night_end="08:00", open_prs=None):
+    """Слова «внимания» по задаче, которые видны только в целом: review больше суток без PR (open_prs — id задач с
+    открытым PR из прохода автозакрытия; None — не знаем, тогда смотрим только ссылки на PR в тексте задачи) и задача
+    пачки, готовая после конца своей ночи без приёмки."""
+    out = []
+    tid = head.get("id")
+    if head.get("type") == "task" and head.get("status") == "review":
+        upd = ts_of(head.get("updated"))
+        if (upd is not None and t - upd > NO_PR_HOURS * 3600 and not PR_REF_RE.search(body or "")
+                and not (open_prs and tid in open_prs)):
+            out.append(NO_PR)
+    if head.get("status") == "done" and not head.get("acceptance") and in_pack(head, tasks):
+        end = night_end_ts(head, tasks, night_end)
+        if end is not None and t >= end:
+            out.append(NO_ACCEPT)
+    return out
+
+
+def board_problems(tasks, t, night_end="08:00", open_prs=None):
+    """Сверка по всем задачам → (ошибки, предупреждения), каждое — (id, текст). Ошибки: задача пачки без mode;
+    done без closed; закрытая по слиянию без release или actual. Предупреждения — слова extra_attention."""
+    errs, warns = [], []
+    for tid, (_, h, b) in sorted(tasks.items()):
+        if h.get("type") == "task" and in_pack(h, tasks) and not h.get("mode"):
+            errs.append((tid, "задача пачки без mode (self|single|parallel) — поле нужно «Итогам пачек»"))
+        if h.get("status") == "done" and not h.get("closed"):
+            errs.append((tid, "status done без closed — дата закрытия берётся из updated"))
+        if h.get("status") == "done" and CLOSED_BY_MERGE in (b or ""):
+            for k in ("release", "actual"):
+                if not h.get(k):
+                    errs.append((tid, f"закрыта по слиянию, а поле {k} пусто — его пишет плановый проход, «Итоги пачек» без него неполны"))
+        warns += [(tid, w) for w in extra_attention(h, b, tasks, t, night_end, open_prs)]
+    return errs, warns
+
+
+def fix_closed(pantheon, t, tasks=None):
+    """done без closed → closed из updated (дата), строка в журнал. → id починенных."""
+    tasks = tasks if tasks is not None else load_tasks(pantheon, WORK_TYPES)
+    fixed = []
+    for tid, (_, h, _) in sorted(tasks.items()):
+        if h.get("status") == "done" and not h.get("closed"):
+            day = str(h.get("updated") or "")[:10]
+            if not DATE_RE.fullmatch(day):
+                day = now_iso(t)[:10]
+            task_set(pantheon, t, tid, {"closed": day}, note=f"closed {day} проставлен из updated (check: done без closed)",
+                     actor="check")
+            fixed.append(tid)
+    return fixed
 
 
 def ready(pantheon, t, direction=None, owner=None):
@@ -785,9 +882,12 @@ def open_deps(head, tasks):
             if d not in tasks or tasks[d][1].get("status") not in ("done", "dropped")]
 
 
-def card_ctx(tid, head, tasks, names, cross):
-    """Что карточке задачи нужно знать о других: незакрытые зависимости, пересечения, пачка и место в ней."""
+def card_ctx(tid, head, tasks, names, cross, t=None, night_end="08:00", open_prs=None):
+    """Что карточке задачи нужно знать о других: незакрытые зависимости, пересечения, пачка и место в ней, слова
+    «внимания» по всему (review без PR, готово без приёмки)."""
     ctx = {"waits": open_deps(head, tasks), "cross": cross.get(tid) or []}
+    if t is not None:
+        ctx["flags"] = extra_attention(head, tasks[tid][2] if tid in tasks else "", tasks, t, night_end, open_prs)
     sid = head.get("parent")
     if sid in tasks and tasks[sid][1].get("type") == "story":
         ctx["story"] = names.get(sid) or card_name(tasks[sid][1])
@@ -895,6 +995,8 @@ def task_attach(pantheon, t, tid, sid, actor="агент"):
     old = tasks[tid][1].get("parent")
     if old == sid:
         raise ValueError(f"{tid} уже в пачке {sid}")
+    if not tasks[tid][1].get("mode"):
+        raise ValueError(f"{tid}: {NO_MODE_BATCH}")
     was = f" (была в {old})" if old else ""
     task_set(pantheon, t, tid, {"parent": sid}, note=f"прикреплена к пачке {sid}{was}", actor=actor)
     task_set(pantheon, t, sid, {}, note=f"прикреплена задача {tid}{was}", actor=actor)
@@ -1498,7 +1600,8 @@ def link(name):
     return f"[[{name}]]"
 
 
-ATTENTION_WORDS = ("конфликт", "подтвердите словом", "вопрос к вам", "долго ждёт", "просрочено", "срок скоро")
+ATTENTION_WORDS = ("конфликт", "подтвердите словом", "вопрос к вам", "долго ждёт", "просрочено", "срок скоро",
+                   NO_PR, NO_ACCEPT)
 
 
 def attention(head, t, conflict=None, long_wait=False):
@@ -1573,7 +1676,7 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
     direction = head.get("direction") or "inbox"
     closed = head.get("status") in ("done", "dropped")
     card = {"Статус": lab, "Проект": f"{project_mark(proj, marks)} {proj}".strip(),
-            "Внимание": attention(head, t, conflict, long_wait),
+            "Внимание": (attention(head, t, conflict, long_wait) or []) + list(ctx.get("flags") or []) or None,
             # «Срок» — свойство-дата Bases: только дата; время срока — в выноске карточки
             "Приоритет": prio if isinstance(prio, int) and not isinstance(prio, bool) else None,
             "Срок": _date(head.get("due"), 10),
@@ -2481,7 +2584,7 @@ def _sync_types(vault, alert):
 
 
 def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None, primary=True, projects=None,
-               policy=None, marks=None, registry=None):
+               policy=None, marks=None, registry=None, night_end="08:00", open_prs=None):
     """Один проход доски. → список строк «что сделано» (для журнала тика). policy — политика уведомлений
     (lib/notify.py, её передаёт pantheon.py): решает, что показать, что отложить в сводку. Без неё — без
     уведомлений; notify — прежний параметр, не используется. registry — проекты для пульта (project_registry);
@@ -2729,7 +2832,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
                           None)
                 card, cbody = render_story_card(h, b, rel(src), t, tasks, project=pn, **kw)
             else:
-                card, cbody = render_card(h, b, rel(src), t, ctx=card_ctx(cid, h, tasks, names, cross), **kw)
+                card, cbody = render_card(h, b, rel(src), t, ctx=card_ctx(cid, h, tasks, names, cross, t, night_end, open_prs), **kw)
         target = os.path.join(board, name + ".md")
         old = present.get(cid)
         if old and (digest(old[0]) != seen.get(cid) or cid in typing):
