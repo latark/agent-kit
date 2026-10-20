@@ -5722,6 +5722,19 @@ def sync_answers():
         print(f"sync-answers: sync.sh не отработал: {e}", file=sys.stderr)
         return 1
     print(f"sync-answers: ответ по {', '.join(waiting)} применён (sync.sh, код {r.returncode})")
+    # metis-0226: вопрос отвечен — снять его с карточки, иначе она висит в «Ждёт вас», если sync.sh задачу не закрыл
+    # (его `pantheon task set` молчит при сбое); закрытие статуса остаётся за sync.sh
+    T = tasks_mod()
+    for tid in waiting:
+        if last.get(tid) not in SYNC_ACT:
+            continue
+        try:
+            head = T.load_tasks(PANTHEON, T.WORK_TYPES).get(tid, (None, {}, None))[1]
+            if head.get("question") or head.get("options"):
+                T.task_set(PANTHEON, now(), tid, {"question": None, "options": None},
+                           note="ответ владельца получен — вопрос снят", actor="плановый проход")
+        except (OSError, ValueError) as e:
+            print(f"sync-answers: вопрос {tid} не снят: {e}", file=sys.stderr)
     return 0
 
 
