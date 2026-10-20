@@ -58,6 +58,14 @@ def ask(question):
     return ans in YES
 
 
+ROLE_ENV = ("PANTHEON_ROLE", "PANTHEON_SESSION", "CLAUDE_CODE_AGENT", "PANTHEON_ORIGIN")
+
+
+def claude_env():
+    """Окружение для claude без переменных роли окна (как pantheon.claude_env): общий daemon не унаследует роль."""
+    return {k: v for k, v in os.environ.items() if k not in ROLE_ENV}
+
+
 def run(argv, env=None, timeout=900, **kw):
     try:
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env, **kw)
@@ -91,7 +99,8 @@ def child_env(py):
 
 
 def pantheon_script():
-    """pantheon.py из клона маркетплейса (чтобы ссылка current смотрела туда); нет — из этого клона."""
+    """pantheon.py из клона маркетплейса; нет — из этого клона. Куда смотрит ссылка current, решает сам install:
+    на установленную версию из кэша плагинов, а не на клон (metis-0321)."""
     name = market_name(clone_root() or PLUGIN)
     p = os.path.join(HOME, ".claude", "plugins", "marketplaces", name, "plugins", "pantheon", "lib", "pantheon.py")
     return p if os.path.isfile(p) else os.path.join(LIB, "pantheon.py")
@@ -111,19 +120,19 @@ def step_python(py):
 
 def step_plugins(root):
     name = market_name(root)
-    r = run(["claude", "plugin", "marketplace", "list"])
+    r = run(["claude", "plugin", "marketplace", "list"], env=claude_env())
     if r.returncode == 0 and name in (r.stdout or ""):
         report("маркетплейс", "пропуск", f"{name} уже подключён")
     else:
         o = run(["git", "-C", root, "remote", "get-url", "origin"])
         src = o.stdout.strip() if o.returncode == 0 and o.stdout.strip() else root
-        r = run(["claude", "plugin", "marketplace", "add", src])
+        r = run(["claude", "plugin", "marketplace", "add", src], env=claude_env())
         if r.returncode != 0:
             report("маркетплейс", "не вышло", last_line(r))
             return
         report("маркетплейс", "ок", f"{name} подключён")
     for p in PLUGINS:
-        r = run(["claude", "plugin", "install", f"{p}@{name}"])
+        r = run(["claude", "plugin", "install", f"{p}@{name}"], env=claude_env())
         if r.returncode == 0:
             report(f"плагин {p}", "ок")
         else:
@@ -146,6 +155,11 @@ def step_empty_pantheon():
 
 def step_pantheon_install(py):
     script = pantheon_script()
+    # живой код и окна ролей идут только на проверенные деревья (verified.json, metis-0321): плагины, которые вы
+    # поставили этим же запуском, принимаются как проверенные; уже записанные не трогаются (--new)
+    a = run([py, "-I", script, "plugins", "accept", "--new"], env=child_env(py))
+    report("проверенные деревья плагинов", "ок" if a.returncode == 0 else "не вышло",
+           "" if a.returncode == 0 else last_line(a))
     r = run([py, "-I", script, "install"], env=child_env(py))
     report("pantheon install", "ок" if r.returncode == 0 else "не вышло",
            "" if r.returncode == 0 else last_line(r))

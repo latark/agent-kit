@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
@@ -29,6 +30,10 @@ CHECKLIST = {"opened": "merge_gate.py, README (раздел «запор»)",
              "ran": 'модель: claude-opus-5-5, heavy python3 -I tests/test_merge_gate.py "84 из 84"',
              "unchecked": "живой gh"}
 results = []
+# statusCheckRollup: CheckRun (status, conclusion) и StatusContext (state)
+RUN_OK = {"__typename": "CheckRun", "name": "check-traces", "status": "COMPLETED", "conclusion": "SUCCESS"}
+GREEN = [RUN_OK, {"__typename": "StatusContext", "context": "ci/legacy", "state": "SUCCESS"}]
+BASE = "c" * 40  # baseRefOid в ответе gh pr view
 
 
 def check(name, cond, detail=""):
@@ -72,11 +77,21 @@ class Home:
                      '[merge_client]\nathena-shop = ["~/projects/broker"]\n'
                      '[merge_repos]\nmetis-pantheon = ["latark/agent-kit", "latark/tg-read"]\n'
                      'athena-shop = ["latark/broker"]\n')
-        # поддельный gh: pr view отдаёт $HOME/gh.json, с $HOME/gh.fail — сбой; вызовы — в $HOME/gh.log
+        # поддельный gh: вызовы — в $HOME/gh.log, с $HOME/gh.fail — сбой любого вызова.
+        # pr view N -R owner/repo … — $HOME/gh.view.<repo> ($5), с gh.ci.fail — сбой; один вызов на шлюз (metis-0297).
+        # api …/contents/.github/workflows?ref=<sha> — с gh.wf.fail.<sha> 502, с gh.wf.<sha> его текст (код 0), иначе 404;
+        # api …/pulls/N/files — $HOME/gh.files, с gh.api.fail — сбой
         with open(j("bin/gh"), "w") as fh:
             fh.write('#!/bin/sh\necho "$@" >> "$HOME/gh.log"\n[ -f "$HOME/gh.fail" ] && exit 1\n'
+                     'case "$*" in\n'
+                     '"pr view "*) [ -f "$HOME/gh.ci.fail" ] && exit 1; cat "$HOME/gh.view.$(basename "$5")"; exit 0;;\n'
+                     '*contents/.github/workflows*) ref="${2##*ref=}"; '
+                     '[ -f "$HOME/gh.wf.fail.$ref" ] && { echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1; }; '
+                     '[ -f "$HOME/gh.wf.$ref" ] && { cat "$HOME/gh.wf.$ref"; exit 0; }; '
+                     'echo \'{"message":"Not Found","status":"404"}\'; echo "gh: Not Found (HTTP 404)" >&2; exit 1;;\n'
+                     'esac\n'
                      'if [ "$1" = api ]; then [ -f "$HOME/gh.api.fail" ] && exit 1; cat "$HOME/gh.files"; exit 0; fi\n'
-                     'cat "$HOME/gh.json"\n')
+                     'exit 1\n')
         os.chmod(j("bin/gh"), 0o755)
 
     def j(self, rel):
@@ -87,20 +102,54 @@ class Home:
         return self.j(".local/state/pantheon/merge-gate/records.jsonl")
 
     def reset(self):
-        """Перед каждым случаем: пустой журнал, пустая сводка, gh отвечает PR без ядра на текущем SHA agent-kit."""
+        """Перед каждым случаем: пустой журнал, пустая сводка, gh отвечает PR без ядра на текущем SHA, проверки зелёные."""
         shutil.rmtree(self.j(".local/state/pantheon/merge-gate"), ignore_errors=True)
-        for f in ("gh.fail", "gh.log", "gh.api.fail"):
-            if os.path.exists(self.j(f)):
+        shutil.rmtree(self.j(".local/state/pantheon/owner-log"), ignore_errors=True)
+        for f in os.listdir(self.root):
+            if f.startswith(("gh.fail", "gh.log", "gh.api.fail", "gh.ci.fail", "gh.wf.", "gh.view.")):
                 os.remove(self.j(f))
         open(self.j("ai/pantheon/alerts.md"), "w").close()
+        self.view = {name: {"headRefOid": self.sha[name], "baseRefOid": BASE, "changedFiles": 0,
+                            "statusCheckRollup": GREEN} for name in self.sha}
+        for name in self.sha:
+            self.write_view(name)
         self.gh(["README.md", "plugins/pantheon/lib/pantheon.py"])
 
+    def reset_log(self):
+        if os.path.exists(self.j("gh.log")):
+            os.remove(self.j("gh.log"))
+
+    def reset_wf(self):
+        for f in os.listdir(self.root):
+            if f.startswith("gh.wf."):
+                os.remove(self.j(f))
+
+    def write_view(self, name, raw=None):
+        with open(self.j("gh.view." + name), "w") as fh:
+            fh.write(raw if raw is not None else json.dumps(self.view[name]))
+
+    def ci(self, rollup, name="tg-read", head=None, raw=None, **fields):
+        """Проверки GitHub (statusCheckRollup) и head в ответе gh pr view для latark/<name>; raw — сырой ответ;
+        fields — другие поля (значение None убирает поле)."""
+        v = self.view[name]
+        v.update(statusCheckRollup=rollup, headRefOid=head or self.sha[name], **fields)
+        for k in [k for k, x in fields.items() if x is None]:
+            del v[k]
+        self.write_view(name, raw)
+
+    def wf(self, ref, text=None, fail=False):
+        """Ответ gh api …/contents/.github/workflows?ref=<ref>: text — код 0 с этим текстом, fail — 502, иначе 404."""
+        with open(self.j(("gh.wf.fail." if fail else "gh.wf.") + ref), "w") as fh:
+            fh.write(text or "")
+
     def gh(self, files, count=None, head=None, raw=None, extra=None):
-        """files — имена или словари REST (filename, status, previous_filename); raw — сырой вывод gh api;
-        extra — ещё поля ответа gh pr view (тело PR, коммиты)."""
-        with open(self.j("gh.json"), "w") as fh:
-            json.dump(dict({"changedFiles": len(files) if count is None else count,
-                            "headRefOid": head or self.sha["agent-kit"]}, **(extra or {})), fh)
+        """Д3 для latark/agent-kit: files — имена или словари REST (filename, status, previous_filename); raw — сырой
+        вывод gh api; extra — ещё поля ответа gh pr view (тело PR, коммиты)."""
+        old = self.view["agent-kit"]
+        self.view["agent-kit"] = dict({"changedFiles": len(files) if count is None else count,
+                                       "headRefOid": head or self.sha["agent-kit"], "baseRefOid": old.get("baseRefOid", BASE),
+                                       "statusCheckRollup": old["statusCheckRollup"]}, **(extra or {}))
+        self.write_view("agent-kit")
         recs = [f if isinstance(f, dict) else {"filename": f, "status": "modified"} for f in files]
         with open(self.j("gh.files"), "w") as fh:
             fh.write(raw if raw is not None else "".join(json.dumps(x) + "\n" for x in recs))
@@ -110,6 +159,16 @@ class Home:
         with open(self.records, "a") as fh:
             for r in recs:
                 fh.write(json.dumps(r) + "\n")
+
+    @property
+    def approve_path(self):
+        return self.j(".local/state/pantheon/owner-log/merge-approve.log")
+
+    def approve(self, line, fresh=False):
+        """Строка согласия владельца (metis-0285) — как её пишет тик; fresh — файл заново."""
+        os.makedirs(os.path.dirname(self.approve_path), mode=0o700, exist_ok=True)
+        with open(self.approve_path, "w" if fresh else "a") as fh:
+            fh.write(line + "\n")
 
     def read(self):
         if not os.path.exists(self.records):
@@ -332,8 +391,9 @@ def t_core(h):
     merge_case("защиты: PR не задевает ядро — проходит", h.pre(cmd, pdir="projects/agent-kit"), True)
     if HAVE_TOML:
         log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
-        check("gh pr view зовётся с -R и номером", "pr view 7 -R latark/agent-kit --json headRefOid,changedFiles"
+        check("gh pr view зовётся с -R и номером", "pr view 7 -R latark/agent-kit --json headRefOid,baseRefOid,changedFiles,statusCheckRollup"
               in log and "api repos/latark/agent-kit/pulls/7/files" in log and "--paginate" in log, log)
+        check("защиты: один gh pr view на Д3 и проверки GitHub (таймаут хука 10 с)", log.count("pr view") == 1, log)
     h.gh(["README.md", "plugins/guard/hooks/merge_gate.py"])
     merge_case("защиты: PR задевает ядро (merge_gate.py) — отказ", h.pre(cmd, pdir="projects/agent-kit"), False, CORE + ": PR задевает")
     for path in ("plugins/guard/tests/x.py", "plugins/guard/README.md", "PLUGINS/Guard/x.py", "plugins/guard/hooks/guard.py"):
@@ -383,8 +443,9 @@ def t_core(h):
     merge_case("защиты: файлов больше, чем changedFiles — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
                "неполон")
     h.gh(["README.md"], head=OLD)
-    merge_case("защиты: PR на другом коммите — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
-               "на другом коммите")
+    # отказ даёт сама Д3 (текст ядра), а не только проверки GitHub на том же ответе gh pr view (argus 0297a, круг 2)
+    merge_case("защиты: PR на другом коммите — отказ Д3", h.pre(cmd, pdir="projects/agent-kit"), False,
+               CORE + ": PR сейчас на другом коммите")
     h.gh(["README.md"])
     open(h.j("gh.fail"), "w").close()
     merge_case("защиты: gh не ответил — отказ", h.pre(cmd, pdir="projects/agent-kit"), False, "не ответил")
@@ -1010,6 +1071,232 @@ def t_opus_protect(h):
     check("verdict_parse: «<ID>» в ran у reject — без ошибки (вердикт «вернуть» в силе любой)", why is None, why)
 
 
+def t_ci(h):
+    """metis-0297: шлюз пускает gh pr merge только при зелёных проверках GitHub на head PR (statusCheckRollup)."""
+    sha = h.sha["tg-read"]
+    h.seed(rec("tests", "latark/tg-read", None, sha, "dev-opus"), rec("accept", "latark/tg-read", 3, sha))
+    cmd = f"gh pr merge 3 --match-head-commit {sha}"
+    merge_case("CI: зелёные проверки — проходит", h.pre(cmd), True)
+    if HAVE_TOML:
+        log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+        check("CI: gh pr view зовётся с -R, номером и statusCheckRollup",
+              "pr view 3 -R latark/tg-read --json headRefOid,baseRefOid,changedFiles,statusCheckRollup" in log, log)
+        check("CI: зелёные — один вызов gh, workflows не спрашивает", log.count("\n") == 1, log)
+    red = dict(RUN_OK, conclusion="FAILURE")
+    h.ci([GREEN[1], red])
+    merge_case("CI: красная CheckRun — отказ с именем проверки", h.pre(cmd), False, "check-traces красная: FAILURE")
+    for concl in ("CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", None):
+        h.ci([dict(RUN_OK, conclusion=concl)])
+        merge_case(f"CI: CheckRun с итогом {concl} — отказ", h.pre(cmd), False, "красная")
+    h.ci([RUN_OK, {"context": "ci/legacy", "state": "FAILURE"}])
+    merge_case("CI: красный StatusContext — отказ с именем", h.pre(cmd), False, "ci/legacy красная: FAILURE")
+    h.ci([RUN_OK, {"context": "ci/legacy", "state": "ERROR"}])
+    merge_case("CI: StatusContext ERROR — отказ", h.pre(cmd), False, "ci/legacy красная: ERROR")
+    for status in ("IN_PROGRESS", "QUEUED", "PENDING", "WAITING"):
+        h.ci([dict(RUN_OK, status=status, conclusion="")])
+        merge_case(f"CI: CheckRun {status} — отказ «дождись»", h.pre(cmd), False, "дождись")
+    h.ci([RUN_OK, {"context": "ci/legacy", "state": "PENDING"}])
+    merge_case("CI: StatusContext PENDING — отказ «дождись»", h.pre(cmd), False, "ещё идут: ci/legacy")
+    h.ci([dict(RUN_OK, conclusion="SKIPPED"), dict(RUN_OK, name="lint", conclusion="NEUTRAL")])
+    merge_case("CI: SKIPPED и NEUTRAL — проходит", h.pre(cmd), True)
+    open(h.j("gh.ci.fail"), "w").close()
+    merge_case("CI: gh не ответил (нет сети) — отказ с текстом", h.pre(cmd), False, "проверки GitHub не получены")
+    os.remove(h.j("gh.ci.fail"))
+    h.ci(None, raw="не json")
+    merge_case("CI: неразборный ответ gh — отказ", h.pre(cmd), False, "проверки GitHub не получены")
+    h.ci(None, raw=json.dumps({"headRefOid": sha, "baseRefOid": BASE}))
+    merge_case("CI: нет statusCheckRollup в ответе — отказ", h.pre(cmd), False, "проверки GitHub не получены")
+    h.ci(["x"])
+    merge_case("CI: проверка не словарь — отказ", h.pre(cmd), False, "проверки GitHub не получены")
+    h.ci(GREEN, head=OLD)
+    merge_case("CI: чужой headRefOid — отказ", h.pre(cmd), False, f"на другом коммите ({OLD})")
+    h.ci(GREEN, head=sha.upper())
+    merge_case("CI: headRefOid в верхнем регистре — тот же SHA, проходит", h.pre(cmd), True)
+    h.ci([])
+    merge_case("CI: проверок нет и .github/workflows нет (404) ни на head, ни на base — проходит", h.pre(cmd), True)
+    if HAVE_TOML:
+        log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+        check("CI: при пустом rollup спрашивает .github/workflows на head и на base PR",
+              f"api repos/latark/tg-read/contents/.github/workflows?ref={sha}" in log
+              and f"api repos/latark/tg-read/contents/.github/workflows?ref={BASE}" in log, log)
+    h.wf(sha, '[{"name": "check-traces.yml", "type": "file"}]')
+    h.reset_log()
+    merge_case("CI: проверок нет, а .github/workflows на head есть — отказ «не встали»", h.pre(cmd), False,
+               "ещё не встали")
+    if HAVE_TOML:
+        log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+        check("CI: workflows на head есть — base не спрашивает", f"ref={BASE}" not in log, log)
+    h.reset_wf()
+    h.wf(BASE, '[{"name": "check-traces.yml", "type": "file"}]')
+    merge_case("CI: head 404, а на base PR .github/workflows есть (PR убирает workflows) — отказ", h.pre(cmd), False,
+               f"на base PR ({BASE[:12]}) .github/workflows есть")
+    h.reset_wf()
+    h.wf(sha, fail=True)
+    merge_case("CI: проверок нет, gh api на head упал не на 404 — отказ", h.pre(cmd), False,
+               "проверки GitHub не получены")
+    h.reset_wf()
+    h.wf(BASE, fail=True)
+    merge_case("CI: head 404, gh api на base упал — отказ", h.pre(cmd), False, "проверки GitHub не получены")
+    h.reset_wf()
+    h.wf(sha, "не json")
+    merge_case("CI: gh api workflows с кодом 0 и не-JSON — отказ, а не 404", h.pre(cmd), False,
+               "проверки GitHub не получены")
+    h.reset_wf()
+    h.wf(BASE, "не json")
+    merge_case("CI: head 404, base — код 0 и не-JSON — отказ", h.pre(cmd), False, "проверки GitHub не получены")
+    h.reset_wf()
+    h.ci([], baseRefOid=None)
+    merge_case("CI: пусто и нет baseRefOid — отказ", h.pre(cmd), False, "коммит base PR (None) не получен")
+    h.ci([], baseRefOid="main")
+    merge_case("CI: пусто и baseRefOid не SHA — отказ", h.pre(cmd), False, "проверки GitHub не получены")
+    h.ci(GREEN, baseRefOid=None)
+    merge_case("CI: зелёные, baseRefOid не нужен — проходит", h.pre(cmd), True)
+    # защиты: проверки после Д3, отказ с советом защит
+    h.reset()
+    kit = h.sha["agent-kit"]
+    h.seed(rec("tests", "latark/agent-kit", None, kit, "dev-opus"), rec("accept", "latark/agent-kit", 7, kit))
+    h.ci([dict(RUN_OK, conclusion="FAILURE")], name="agent-kit")
+    merge_case("CI: защиты, PR без ядра, красная проверка — отказ", h.pre(f"gh pr merge 7 --match-head-commit {kit}",
+               pdir="projects/agent-kit"), False, "check-traces красная")
+    # без политики (Python 3.9) шлюз до проверок не доходит — сами проверки здесь, на любом Python
+    mg = _load_merge_gate("merge_gate_ci")
+    check("_ci_rollup: зелёный", mg._ci_rollup(GREEN)[0] == "ok")
+    check("_ci_rollup: FAILURE — fail", mg._ci_rollup([dict(RUN_OK, conclusion="FAILURE")])[0] == "fail")
+    check("_ci_rollup: StatusContext FAILURE — fail", mg._ci_rollup([{"context": "c", "state": "FAILURE"}])[0] == "fail")
+    check("_ci_rollup: идёт — wait", mg._ci_rollup([dict(RUN_OK, status="QUEUED", conclusion=None)])[0] == "wait")
+    check("_ci_rollup: пусто — empty", mg._ci_rollup([])[0] == "empty")
+    check("_ci_rollup: None — fail", mg._ci_rollup(None)[0] == "fail")
+    asked = []
+
+    def answer(view, wf=None):
+        """wf — {ref: True | False | None} ответов _has_workflows; по умолчанию 404 везде."""
+        asked.clear()
+        mg._has_workflows = lambda repo, ref: asked.append(ref) or (wf or {}).get(ref, False)
+        return mg._ci_problem("latark/tg-read", 3, sha, dict({"baseRefOid": BASE}, **view))
+
+    check("_ci_problem: зелёный — None", answer({"headRefOid": sha, "statusCheckRollup": GREEN}) is None)
+    check("_ci_problem: зелёный — workflows не спрашивает", asked == [], asked)
+    why = answer({"headRefOid": sha, "statusCheckRollup": [dict(RUN_OK, conclusion="FAILURE")]})
+    check("_ci_problem: красный — отказ с именем", why and "check-traces" in why, why)
+    why = answer({"headRefOid": sha, "statusCheckRollup": [dict(RUN_OK, status="PENDING")]})
+    check("_ci_problem: идёт — отказ «дождись»", why and "дождись" in why, why)
+    why = answer({"headRefOid": sha})
+    check("_ci_problem: нет rollup — «проверки GitHub не получены»", why and "проверки GitHub не получены" in why, why)
+    empty = {"headRefOid": sha, "statusCheckRollup": []}
+    check("_ci_problem: пусто, 404 на head и base — None", answer(empty) is None)
+    check("_ci_problem: пусто — спрашивает head, затем base", asked == [sha, BASE], asked)
+    why = answer(empty, {sha: True})
+    check("_ci_problem: пусто, workflows на head — отказ", why and "ещё не встали" in why and "head PR" in why, why)
+    check("_ci_problem: workflows на head — base не спрашивает", asked == [sha], asked)
+    why = answer(empty, {BASE: True})
+    check("_ci_problem: пусто, head 404, workflows на base — отказ", why and "ещё не встали" in why
+          and "base PR" in why, why)
+    why = answer(empty, {sha: None})
+    check("_ci_problem: пусто, api на head упал — отказ", why and "не получены" in why, why)
+    why = answer(empty, {BASE: None})
+    check("_ci_problem: пусто, api на base упал — отказ", why and "не получены" in why and "base PR" in why, why)
+    why = answer(dict(empty, baseRefOid=None))
+    check("_ci_problem: пусто, нет baseRefOid — отказ без запросов", why and "не получены" in why and asked == [],
+          (why, asked))
+    why = answer({"headRefOid": OLD, "statusCheckRollup": GREEN})
+    check("_ci_problem: чужой headRefOid — отказ", why and "другом коммите" in why, why)
+    # _pr_view — один вызов gh pr view со всеми полями; сбой и не-объект — None
+    calls = []
+    mg._gh_json = lambda args: calls.append(args) or [{"headRefOid": sha}]
+    check("_pr_view: объект ответа", mg._pr_view("latark/tg-read", 3) == {"headRefOid": sha})
+    check("_pr_view: один вызов gh pr view с headRefOid,baseRefOid,changedFiles,statusCheckRollup",
+          calls == [["pr", "view", "3", "-R", "latark/tg-read", "--json",
+                     "headRefOid,baseRefOid,changedFiles,statusCheckRollup"]], calls)
+    for got in (None, [], [["x"]], [{"a": 1}, {"b": 2}]):
+        mg._gh_json = lambda args: got
+        check(f"_pr_view: ответ {got!r} — None", mg._pr_view("latark/tg-read", 3) is None)
+    # Д3 сверяет headRefOid сама, не полагаясь на _ci_problem (argus 0297a, круг 2, п. 3)
+    mg._gh_json = lambda args: [{"filename": "README.md", "status": "modified"}]
+    view = {"headRefOid": sha, "changedFiles": 1}
+    check("_core_problem: тот же SHA, без ядра — None", mg._core_problem("latark/agent-kit", 7, sha, view) is None)
+    for head in (OLD, None, 7):
+        why = mg._core_problem("latark/agent-kit", 7, sha, dict(view, headRefOid=head))
+        check(f"_core_problem: headRefOid {head!r} — отказ «на другом коммите»", why and "на другом коммите" in why,
+              why)
+    # _has_workflows — через поддельный gh: 404 → False, список → True, 502 → None
+    mg = _load_merge_gate("merge_gate_wf")
+    saved = {k: os.environ.get(k) for k in ("HOME", "PATH")}
+    os.environ.update(HOME=h.root, PATH=h.j("bin") + os.pathsep + os.environ["PATH"])
+    try:
+        got = [mg._has_workflows("latark/tg-read", sha)]
+        h.wf(sha, '[{"name": "ci.yml"}]')
+        got.append(mg._has_workflows("latark/tg-read", sha))
+        h.wf(sha, "не json")
+        got.append(mg._has_workflows("latark/tg-read", sha))
+        h.reset_wf()
+        h.wf(sha, fail=True)
+        got.append(mg._has_workflows("latark/tg-read", sha))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    check("_has_workflows: 404 → False, список → True, код 0 и не-JSON → None, 502 → None",
+          got == [False, True, None, None], got)
+
+
+def ts(shift=0):
+    """Время строки согласия, как её пишет тик: ISO 8601 с поясом, сейчас + shift секунд."""
+    import datetime
+    return datetime.datetime.fromtimestamp(time.time() + shift).astimezone().isoformat(timespec="seconds")
+
+
+def t_core_touchid(h):
+    """metis-0285: PR ядра проходит шлюз только со строкой `merge-approve <repo>#<N> <sha>` в owner-log (её пишет
+    тик после Touch ID) — для того же репозитория, PR и SHA. Остальной шлюз (тесты, argus) в силе."""
+    kit, sha = "projects/agent-kit", h.sha["agent-kit"]
+    other = "0123456789abcdef0123456789abcdef01234567"
+    cmd = f"gh pr merge 7 --match-head-commit {sha}"
+    h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"), rec("accept", "latark/agent-kit", 7, sha))
+    h.gh(["README.md", "plugins/guard/hooks/merge_gate.py"])
+    merge_case("ядро: без строки merge-approve — отказ", h.pre(cmd, pdir=kit), False, CORE + ": PR задевает")
+    h.approve(f"{ts()} merge-approve latark/agent-kit#7 {other}")
+    merge_case("ядро: строка merge-approve для другого SHA — отказ", h.pre(cmd, pdir=kit), False, CORE + ": PR задевает")
+    for line in (f"{ts()} merge-approve latark/agent-kit#8 {sha}",
+                 f"{ts()} merge-approve latark/tg-read#7 {sha}",
+                 f"merge-approve latark/agent-kit#7 {sha}",
+                 f"{ts()} merge-approve latark/agent-kit#7 {sha} лишнее"):
+        h.approve(line, fresh=True)
+        merge_case(f"ядро: строка не та ({line[26:70]}…) — отказ", h.pre(cmd, pdir=kit), False, CORE + ": PR задевает")
+    h.approve(f"{ts()} merge-approve latark/agent-kit#7 {other}", fresh=True)
+    h.approve(f"{ts()} merge-approve latark/agent-kit#7 {sha}")
+    merge_case("ядро: строка merge-approve для этого SHA — проходит", h.pre(cmd, pdir=kit), True)
+    # срок строки (argus-b, 19.10): сутки; из будущего (дальше 5 минут), без пояса и с неразборным временем — не в силе
+    h.approve(f"{ts(-23 * 3600)} merge-approve latark/agent-kit#7 {sha}", fresh=True)
+    merge_case("ядро: строка 23 ч назад — проходит", h.pre(cmd, pdir=kit), True)
+    for name, t in (("25 ч назад", ts(-25 * 3600)), ("2020 год", "2020-01-01T00:00:00+03:00"),
+                    ("через час", ts(3600)), ("без пояса", ts()[:19]), ("время «x»", "x")):
+        h.approve(f"{t} merge-approve latark/agent-kit#7 {sha}", fresh=True)
+        merge_case(f"ядро: строка «{name}» — отказ", h.pre(cmd, pdir=kit), False, CORE + ": PR задевает")
+    h.approve(f"{ts()} merge-approve latark/agent-kit#7 {sha}", fresh=True)
+    # строка не снимает остального шлюза: другой head у PR, нет «принять»
+    h.gh(["plugins/guard/hooks/merge_gate.py"], head=other)
+    merge_case("ядро: строка есть, но PR на другом коммите — отказ", h.pre(cmd, pdir=kit), False, "на другом коммите")
+    h.gh(["plugins/guard/hooks/merge_gate.py"])
+    shutil.rmtree(os.path.dirname(h.records))
+    h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"))
+    merge_case("ядро: строка есть, но нет «принять» argus — отказ", h.pre(cmd, pdir=kit), False, "нет «принять»")
+    # симлинк вместо файла — согласия нет
+    h.seed(rec("accept", "latark/agent-kit", 7, sha))
+    real = h.j("approve-real.log")
+    shutil.move(h.approve_path, real)
+    os.symlink(real, h.approve_path)
+    merge_case("ядро: merge-approve.log — симлинк — отказ", h.pre(cmd, pdir=kit), False, CORE + ": PR задевает")
+    # Touch ID снимает только Д3, а не проверки GitHub (слияние #79 и #88)
+    os.remove(h.approve_path)
+    shutil.move(real, h.approve_path)
+    merge_case("ядро: строка merge-approve есть — снова проходит", h.pre(cmd, pdir=kit), True)
+    h.ci([dict(RUN_OK, conclusion="FAILURE")], name="agent-kit")
+    merge_case("ядро: строка merge-approve есть, но проверка GitHub красная — отказ", h.pre(cmd, pdir=kit), False,
+               "check-traces красная")
+
+
 def t_hq_gh(h):
     """hq-gh (metis-0247, ревью argus-69b): окну штаба gh pr — только с -R из [merge_repos], без обсуждений и без
     личного. Без tomllib (3.9) [merge_repos] не прочитать — штабу закрыт любой gh pr."""
@@ -1194,7 +1481,8 @@ CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, 
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
-         t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect]
+         t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_ci,
+         t_core_touchid]
 
 
 def main():

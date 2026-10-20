@@ -19,6 +19,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon plugins update [--quiet]     новые версии плагинов agent-kit (плановый проход раз в 10 мин): тесты новой и
                                         установленной версии; нет новых падений — claude plugin update, есть — тревога;
                                         после установки плановый проход перезапускает свободные окна (metis-0181)
+  pantheon plugins accept [--new] [guard] [pantheon]   принять установленное дерево как проверенное (verified.json):
+                                        живой код и окна ролей идут только на проверенное (metis-0321); только руками
   pantheon direction check <имя>        что готово у нового направления (навык new-direction): реестр, «да»,
                                         папки, STATUS.md, domains.json, AGENTS.md, доверие, autoMode
   pantheon direction init <имя>         папка ~/projects/<имя> по вашей галочке: git init, AGENTS.md, локальный
@@ -37,6 +39,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         «Лимит» для сводки (вечерний вопрос и ночь ведёт дежурный, lib/night.py)
   pantheon read request|run|status|cancel   чтение личного чата по заявке (metis-0267, lib/read.py): заявка → ваше
                                         «да» на [read-<rid>] → выгрузка и разбор плановым проходом → вы одобряете пункты
+  pantheon merge request|run|status|cancel   слияние PR ядра по Touch ID (metis-0285, lib/merge.py): заявка роли →
+                                        плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…] [--quiet]      проверить шапки задач по схеме v1 (schema.md) и правила metis-0308: задача пачки без mode,
@@ -169,8 +173,11 @@ LIB = os.path.dirname(os.path.realpath(__file__))
 PLUGIN = os.path.dirname(LIB)
 LABEL = "pantheon.tick"
 # Неизменный путь к плагину: на него смотрят задача launchd, команда ~/.local/bin/pantheon и обработчики слияния
-# в ~/ai/pantheon/.git/config. `pantheon install` перевешивает ссылку на ту копию плагина, из которой запущен
-# (до шага 0.4 — рабочая копия agent-kit, с 0.4 — клон маркетплейса), поэтому обновление плагина путей не ломает.
+# в ~/ai/pantheon/.git/config. Ссылка ведёт на УСТАНОВЛЕННУЮ версию — папку кэша из installed_plugins.json
+# (metis-0321), а не на клон маркетплейса: клон `claude plugin marketplace update` в plugins-update пересоздаёт
+# головой main сразу после слияния, и непроверенный код ожил бы у тика и всех задач мимо шлюза выпуска. Перевешивают
+# её `pantheon install` и успешная установка в plugins-update (_plugin_install); установки нет — копия, из которой
+# запущен install (рабочая копия при разработке).
 CURRENT = os.path.join(HOME, ".local", "share", "pantheon", "current")
 TEMPFAIL = 75   # задача ждёт (нет сети): не сбой, тревоги нет
 ALERTED = 76    # сбой, о котором задача уже сообщила сама: вторую тревогу не давать
@@ -310,6 +317,20 @@ def run_env():
              os.path.join(HOME, ".local", "bin")]
     env["PATH"] = ":".join(extra + [env.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin"])
     env["PANTHEON_PYTHON"] = sys.executable  # bin/pantheon дочерних задач берёт тот же интерпретатор (lib/find-python.sh)
+    return env
+
+
+# Роль окна и её агент — переменные ОКНА, а не машины (metis-0321, находка СБ 20.10): `claude --bg`, `claude agents`,
+# respawn и прочие вызовы claude поднимают общий `claude daemon`, он наследует окружение первого позвавшего, а фоновые
+# окна идут из его запасных процессов. Запущенный из окна Пританея демон раздал бы PANTHEON_ROLE=hq всем фоновым окнам.
+ROLE_ENV = ("PANTHEON_ROLE", "PANTHEON_SESSION", "CLAUDE_CODE_AGENT", "PANTHEON_ORIGIN")
+
+
+def claude_env():
+    """Окружение для любого запуска claude из pantheon: run_env без ROLE_ENV. Роль окну задаёт его --settings (env)."""
+    env = run_env()
+    for k in ROLE_ENV:
+        env.pop(k, None)
     return env
 
 
@@ -805,6 +826,7 @@ def tick():
         except Exception as e:  # сбой служб не должен останавливать задачи тика
             alert_once("svc-sync", type(e).__name__, f"службы: сверка с launchd упала ({type(e).__name__}: {e})",
                        "pantheon-tick")
+        merge_kick()
         try:
             roles_tick()  # личные роли по вашей галочке на доске (metis-0262 PR 4)
         except Exception as e:  # сбой ролей не должен останавливать тик
@@ -1165,7 +1187,8 @@ def run_job(name):
             timeout = float(job.get("timeout", 600))
             # Своя группа процессов: по таймауту гасится вся задача, а не только первый процесс.
             proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, env=run_env(), cwd=HOME, start_new_session=True)
+                                    text=True, env=claude_env() if os.path.basename(argv[0]) == "claude" else run_env(), cwd=HOME,
+                                    start_new_session=True)
             try:
                 out, _ = proc.communicate(timeout=timeout)
                 rc = proc.returncode
@@ -1302,19 +1325,21 @@ def jobs_show():
 MANAGED = "/Library/Application Support/ClaudeCode/managed-settings.json"
 
 
-def _sh(*cmd, timeout=20):
+def _sh(*cmd, timeout=20, env=None):
     try:
-        r = subprocess.run(list(cmd), capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(list(cmd), capture_output=True, text=True, timeout=timeout, env=env)
         return r.stdout.strip() if r.returncode == 0 else ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
 
 def _plugin_version(name):
-    d = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", name, ".claude-plugin",
-                     "plugin.json")
+    """Установленная версия (кэш), а не голова клона маркетплейса: клон опережает выпуск (metis-0321)."""
+    d = installed_dir(name)  # живая — проверенная (verified.json), а не голова клона и не непроверенная установка
+    if not d:
+        return "нет проверенной"
     with contextlib.suppress(OSError, ValueError):
-        return json.load(open(d)).get("version", "?")
+        return json.load(open(os.path.join(d, ".claude-plugin", "plugin.json"))).get("version", "?")
     return "?"
 
 
@@ -1505,7 +1530,7 @@ def status():
             warn.append("swap")
     with contextlib.suppress(Exception):
         lines.append(awake_mod().status_line())
-    lines.append(f"Claude Code {(_sh('claude', '--version').split() or ['?'])[0]} · guard {_plugin_version('guard')} · "
+    lines.append(f"Claude Code {(_sh('claude', '--version', env=claude_env()).split() or ['?'])[0]} · guard {_plugin_version('guard')} · "
                  f"pantheon {_plugin_version('pantheon')}")
     section("Mac", lines)
 
@@ -1758,7 +1783,10 @@ def domains_build(if_changed=False):
         # пишет файл, только если текст изменился, — пересборка одна, следующий тик уже тихий
         # и проектные настройки папок запуска направлений: allow с gh pr merge роняет окно (metis-0137)
         launches = [launch_folder(fs) for fs in (read_json(path("domains.json")).get("domains") or {}).values()]
-        watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS, CLAUDE_TMP,
+        # и реестр установленных плагинов: путь guard.py и agents.py окон берётся из него — обновили guard, окна
+        # пересобираются на новый путь (metis-0321, ревью 90a)
+        watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS, CLAUDE_TMP, INSTALLED_PLUGINS,
+                   _verified_path(),
                    *(os.path.join(l, ".claude", fn) for l in launches if l for fn in PROJECT_SETTINGS_FILES))
         newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
         # и пропавшее окно задачи расписания (P0-3): без него задача не идёт — в том числе сразу после обновления
@@ -2022,16 +2050,27 @@ GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Tas
 MARKET_GUARD = os.path.join(HOME, ".claude", "plugins", "marketplaces", "agent-kit", "plugins", "guard", "hooks", "guard.py")
 
 
+def _installed_hook(name, market_path):
+    """Тот же файл хука из ПРОВЕРЕННОГО дерева плагина (installed_dir: хеш совпал с verified.json, metis-0321). Клон
+    маркетплейса — никогда: plugins-update пересоздаёт его головой main сразу после слияния. Проверенного нет —
+    несуществующий путь внутри кэша (ролям туда не записать): строгий guard окна с onFailure block не пропустит ни
+    одного действия, sandbox_build поднимет тревогу guard-missing."""
+    rel = os.path.relpath(market_path, os.path.join(HOME, ".claude", "plugins", "marketplaces", MARKETPLACE,
+                                                    "plugins", name))
+    d = installed_dir(name)
+    if d:
+        p = os.path.join(d, rel)
+        if os.path.isfile(p) and not os.path.islink(p):
+            return os.path.realpath(p)
+    return os.path.join(HOME, ".claude", "plugins", "cache", MARKETPLACE, name, "нет-проверенного", rel)
+
+
 def guard_script():
-    if os.path.isfile(MARKET_GUARD) and not os.path.islink(MARKET_GUARD):
-        return os.path.realpath(MARKET_GUARD)
-    return MARKET_GUARD  # файла нет — окно роли не пустит ни одной записи (отказ при сбое), тревога в sandbox_build
+    return _installed_hook("guard", MARKET_GUARD)
 
 
 def agents_script():
-    if os.path.isfile(MARKET_AGENTS) and not os.path.islink(MARKET_AGENTS):
-        return os.path.realpath(MARKET_AGENTS)
-    return MARKET_AGENTS  # файла нет — python выйдет с кодом 2, окно не позовёт никого; тревога в sandbox_build
+    return _installed_hook("pantheon", MARKET_AGENTS)
 
 
 def agents_window(data, allowed, deny, script):
@@ -2369,7 +2408,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     guard = guard_script()
     if not os.path.isfile(guard):
         alert_once("guard-missing", guard, f"нет {guard.replace(HOME, '~')}: окна ролей не пропустят ни одной записи "
-                   "(строгий guard, SEC-29) — переустановить плагин guard", "pantheon")
+                   "(строгий guard, SEC-29) — нет проверенного дерева guard или файла в нём: pantheon plugins accept guard "
+                   "(README agent-kit, «Живой код»)", "pantheon")
     agents_py = agents_script()
     if not os.path.isfile(agents_py):
         alert_once("agents-missing", agents_py, f"нет {agents_py.replace(HOME, '~')}: окна Пританея и координаторов не позовут ни одного "
@@ -2409,6 +2449,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             # Метиды, в песочнице упал бы. Мимо неё — только эта подкоманда и только у Метиды; ворота у команды свои:
             # галочка владельца в журнале доски owner-log, который пишет тик, — роли её не подделают.
             data["sandbox"]["excludedCommands"].append("pantheon direction init *")
+            # заявка на слияние ядра по Touch ID (metis-0285) пишет в STATE/merge-queue — вне песочницы окна. Сливает
+            # не она: `pantheon merge run` ролям закрыт guard, окно Touch ID показывает только плановый проход
+            data["sandbox"]["excludedCommands"] += MERGE_REQUEST_CMDS
         if name == "workshop":
             # Unix-сокеты офлайн-тестов (metis-0278, решение владельца «А» 19.10) — только в своём кэше окна: не
             # $TMPDIR (/tmp/claude-<uid> общий у всех сессий, там их сокеты); allowLocalBinding — нет, см. ниже
@@ -2589,7 +2632,7 @@ def claude_bin():
 
 
 def agents_all():
-    r = subprocess.run([claude_bin(), "agents", "--json", "--all"], capture_output=True, text=True, timeout=60)
+    r = subprocess.run([claude_bin(), "agents", "--json", "--all"], env=claude_env(), capture_output=True, text=True, timeout=60)
     try:
         data = json.loads(r.stdout or "[]")
     except ValueError:
@@ -2842,7 +2885,7 @@ def _resume_session(name, a, text, origin):
         text = f"{START_MARK} поручение от {origin}] {text}"
     pushed = push_text(sid, text) if a.get("id") else None
     if pushed:  # без текста respawn поднял бы сессию молча — тогда сразу запасной путь, он текст передаёт
-        r = subprocess.run([claude_bin(), "respawn", a["id"]], capture_output=True, text=True, timeout=180)
+        r = subprocess.run([claude_bin(), "respawn", a["id"]], env=claude_env(), capture_output=True, text=True, timeout=180)
         start_log(f"respawn\t{name}\t{a['id']}\t{origin}\t{r.returncode}")
         if r.returncode == 0:
             rm_previous(name, "respawn", keep={a["id"]}, wait=True)
@@ -2854,7 +2897,7 @@ def _resume_session(name, a, text, origin):
     role = "hq" if name == "zeus" else got[1]
     argv = [claude_bin(), "--resume", sid or a.get("id"), "--bg", "--agent", role, "--name", name, "--settings", run, text]
     before = {x.get("id") for x in agents_all() or [] if x.get("id")}
-    r = subprocess.run(argv, cwd=a.get("cwd") or HOME, capture_output=True, text=True, timeout=180)
+    r = subprocess.run(argv, cwd=a.get("cwd") or HOME, env=claude_env(), capture_output=True, text=True, timeout=180)
     m = COPY_NOTE.search((r.stdout or "") + (r.stderr or ""))
     start_log(f"resume\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\tcopy {m.group(1)}" if m else ""))
     if m:
@@ -3028,7 +3071,7 @@ def _fresh_start(name, a, text, origin, reason=None):
         return 1
     before = {x.get("id") for x in agents_all() or [] if x.get("id")}
     argv = [claude_bin(), "--bg", "--agent", role, "--name", name, "--settings", win, text]
-    r = subprocess.run(argv, cwd=folder, capture_output=True, text=True, timeout=180)
+    r = subprocess.run(argv, cwd=folder, env=claude_env(), capture_output=True, text=True, timeout=180)
     start_log(f"fresh-start\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\t{reason}" if reason else ""))
     if r.returncode != 0:
         return r.returncode
@@ -3056,7 +3099,7 @@ def stop_and_rm(name, sid):
     (и её worktree, если он чистый); переписка остаётся, вернуть — pantheon start / resume. Без --discard-unpushed и
     --force-remove-worktree: сессию с неотправленной работой не удаляем насильно. Возвращает None или причину отказа."""
     try:
-        st = subprocess.run([claude_bin(), "stop", sid], capture_output=True, text=True, timeout=60)
+        st = subprocess.run([claude_bin(), "stop", sid], env=claude_env(), capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError) as e:
         return f"claude stop не выполнился: {e}"[:200]
     if st.returncode != 0:  # не остановилась — rm не зовём (rm сносит сессию, а она ещё может работать)
@@ -3071,7 +3114,7 @@ def rm_session(sid, tries=2):
     r = None
     for attempt in range(tries):  # stop возвращается раньше, чем процесс ушёл: rm на ещё живую сессию может отказать
         try:
-            r = subprocess.run([claude_bin(), "rm", sid], capture_output=True, text=True, timeout=60)
+            r = subprocess.run([claude_bin(), "rm", sid], env=claude_env(), capture_output=True, text=True, timeout=60)
         except (OSError, subprocess.SubprocessError) as e:
             return f"claude rm не выполнился: {e}"[:200]
         if r.returncode == 0:
@@ -3140,7 +3183,7 @@ def rm_previous(name, how, before=None, keep=(), loud=False, wait=False):
 def stop_copies(name, live, why="stop-restart"):
     # без rm (metis-0239): здесь сессию поднимают снова или оставляют для claude attach — rm её бы удалил
     for a in live:
-        subprocess.run([claude_bin(), "stop", a["id"]], capture_output=True, text=True, timeout=60)
+        subprocess.run([claude_bin(), "stop", a["id"]], env=claude_env(), capture_output=True, text=True, timeout=60)
         start_log(f"{why}\t{name}\t{a.get('name')}\t{a['id']}")
 
 
@@ -3392,7 +3435,7 @@ def start(rest):
                 return 1
         start_log(f"zeus\t{origin}\t{PANTHEON}")
         os.chdir(PANTHEON)
-        os.execv(argv[0], argv)
+        os.execve(argv[0], argv, claude_env())
     got = start_target(target, rest)
     if isinstance(got, str):
         print(f"pantheon start: {got}", file=sys.stderr)
@@ -3459,7 +3502,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
         print(f"pantheon start: нет окна {win.replace(HOME, '~')} — pantheon domains build", file=sys.stderr)
         return 1
     before = {a.get("id") for a in agents_all() or [] if a.get("id")}
-    r = subprocess.run(argv, cwd=folder, capture_output=True, text=True, timeout=180)
+    r = subprocess.run(argv, cwd=folder, env=claude_env(), capture_output=True, text=True, timeout=180)
     start_log(f"{name}\t{origin}\t{folder}\t{r.returncode}")
     if origin == "zeus" and r.returncode == 0 and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
         alert(f"запуск {name} по поручению Зевса без вашего слова в его окне за {OWNER_WORD_WINDOW // 60} мин — "
@@ -4976,14 +5019,150 @@ PLIST_TMPL = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
+INSTALLED_PLUGINS = os.path.join(HOME, ".claude", "plugins", "installed_plugins.json")
+
+
+def _unchecked_path():
+    """Запись критической ветки plugins-update: что встало непроверенным (для разбора). Решений по ней не принимают —
+    решает только verified.json."""
+    return path("plugins", "unchecked.json")
+
+
+def _verified_path():
+    return path("plugins", "verified.json")
+
+
+_HASH_MEMO = {}
+
+
+def _tree_stamp(root):
+    """Отпечаток дерева без чтения файлов: sha256 по каждой записи — путь, ctime_ns, размер, inode, mtime_ns. Одного
+    mtime мало (ревью 90b, круг 4): подмену файла с возвратом mtime через os.utime выдаёт ctime — его utime не вернуть;
+    замену файла другим — inode; новая или удалённая запись меняет список."""
+    rows = []
+    for d, dirs, files in os.walk(root):
+        dirs[:] = [x for x in dirs if x not in (".git", "__pycache__")]
+        for x in [d] + [os.path.join(d, f) for f in files + dirs]:
+            with contextlib.suppress(OSError):
+                st = os.lstat(x)
+                rows.append((os.path.relpath(x, root), st.st_ctime_ns, st.st_size, st.st_ino, st.st_mtime_ns))
+    return hashlib.sha256(repr(sorted(rows)).encode()).hexdigest()
+
+
+def _tree_hash_cached(root):
+    """_tree_hash с кэшем по (путь, отпечаток mtime дерева): сборка окон и проход тика не перечитывают кэш плагина
+    каждый раз. Кэш — в памяти и в состоянии тика; записать не вышло (окно роли) — только в памяти."""
+    if not isinstance(root, str) or not os.path.isdir(root):
+        return None
+    real = os.path.realpath(root)
+    stamp_ = _tree_stamp(real)
+    memo = _HASH_MEMO.get(real)
+    if memo and memo[0] == stamp_:
+        return memo[1]
+    cache_p = path("plugins", "hash-cache.json")
+    disk = read_json(cache_p, {})
+    disk = disk if isinstance(disk, dict) else {}
+    row = disk.get(real)
+    if isinstance(row, dict) and row.get("stamp") == stamp_ and isinstance(row.get("hash"), str):
+        _HASH_MEMO[real] = (stamp_, row["hash"])
+        return row["hash"]
+    h = _tree_hash(real)
+    _HASH_MEMO[real] = (stamp_, h)
+    disk[real] = {"stamp": stamp_, "hash": h}
+    with contextlib.suppress(OSError):
+        write_json(cache_p, {k: v for k, v in disk.items() if os.path.isdir(k)})
+    return h
+
+
+def _cache_tree(p):
+    """realpath папки p, если это дерево плагина внутри ~/.claude/plugins/cache (есть .claude-plugin/plugin.json)."""
+    cache = os.path.realpath(os.path.join(HOME, ".claude", "plugins", "cache")) + os.sep
+    if isinstance(p, str) and os.path.realpath(p).startswith(cache) and os.path.isdir(p) \
+            and os.path.isfile(os.path.join(p, ".claude-plugin", "plugin.json")):
+        return os.path.realpath(p)
+    return None
+
+
+def verified_record(name):
+    """Запись verified.json о плагине name: {hash, path, version, at, by}; нет, битая или без хеша — None."""
+    data = read_json(_verified_path(), {})
+    rec = data.get(name) if isinstance(data, dict) else None
+    return rec if isinstance(rec, dict) and isinstance(rec.get("hash"), str) and rec["hash"] else None
+
+
+def verified_write(name, root, digest, version, by):
+    """digest — хеш, с которым дерево сверили (а не пересчёт: между сверкой и записью дерево могли подменить)."""
+    data = read_json(_verified_path(), {})
+    data = data if isinstance(data, dict) else {}
+    data[name] = {"hash": digest, "path": os.path.realpath(root), "version": version, "at": stamp(), "by": by}
+    write_json(_verified_path(), data)
+
+
+def installed_dir(name, checked=True):
+    """Дерево плагина name@agent-kit, с которым работает живой код: current, `pantheon install`, хуки окон ролей,
+    версия в status (metis-0321). Разрешение, а не запрет: годится только дерево, чей хеш совпал с verified.json (его
+    пишет успешная установка plugins-update — тесты и сверка — или ваша команда `pantheon plugins accept`).
+    1. installPath из installed_plugins.json (уровень пользователя, внутри ~/.claude/plugins/cache) с хешем из записи.
+    2. Иначе — последнее проверенное дерево по пути из записи, если оно цело (хеш тот же), и тревога.
+    3. Иначе None и тревога: проверенного нет. Клон маркетплейса — никогда.
+    checked=False — сырой installPath без сверки: только для записи в verified.json (accept). Тест-страж
+    test_live_code не пускает checked=False за пределы plugins_accept."""
+    data = read_json(INSTALLED_PLUGINS)
+    rows = (data.get("plugins") if isinstance(data, dict) else None) or {}
+    rows = rows.get(f"{name}@{MARKETPLACE}") if isinstance(rows, dict) else None
+    raw = None
+    for row in rows if isinstance(rows, list) else []:
+        raw = _cache_tree(row.get("installPath") if isinstance(row, dict) and row.get("scope") == "user" else None)
+        if raw:
+            break
+    if not checked:
+        return raw
+    rec = verified_record(name)
+    if rec and raw and _tree_hash_cached(raw) == rec["hash"]:
+        return raw
+    last = _cache_tree(rec.get("path")) if rec else None
+    if last and _tree_hash_cached(last) == rec["hash"]:
+        if raw != last:
+            _unverified_alert(name, raw or "—", f"живой код и окна остаются на последнем проверенном "
+                              f"{last.replace(HOME, '~')}")
+        return last
+    _unverified_alert(name, raw or "—", "проверенного дерева нет: current не перевешивается, окна ролей закрыты "
+                      "(строгий guard не найден)")
+    return None
+
+
+def _unverified_alert(name, where, what):
+    with contextlib.suppress(Exception):  # окно роли не пишет в состояние — сборку и status это не роняет
+        alert_once(f"plugins-unverified-{name}", f"{where} {what[:60]}",
+                   f"{name}: установленное дерево {where.replace(HOME, '~')} не проверено (нет в verified.json) — {what}. "
+                   f"Что делать — README agent-kit, «Живой код»; принять руками — pantheon plugins accept {name}",
+                   "plugins-update")
+
+
+def link_current(target):
+    """CURRENT → target одной заменой (ссылка рядом и os.replace): тик, запущенный в эту секунду, не застанет дыры."""
+    os.makedirs(os.path.dirname(CURRENT), exist_ok=True)
+    if os.path.islink(CURRENT) and os.readlink(CURRENT) == target:
+        return target
+    tmp = f"{CURRENT}.new-{os.getpid()}"
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(tmp)
+    os.symlink(target, tmp)
+    if os.path.isdir(CURRENT) and not os.path.islink(CURRENT):
+        shutil.rmtree(CURRENT)  # не ссылка, а папка (ручная правка): os.replace на папку не встанет
+    os.replace(tmp, CURRENT)
+    return target
+
+
 def install():
     """Задача launchd, команда pantheon и обработчики слияния ~/ai/pantheon — через неизменную ссылку CURRENT."""
     os.makedirs(path("logs"), exist_ok=True)
     os.makedirs(os.path.dirname(PLIST), exist_ok=True)
-    os.makedirs(os.path.dirname(CURRENT), exist_ok=True)
-    if os.path.islink(CURRENT) or os.path.exists(CURRENT):
-        os.remove(CURRENT)
-    os.symlink(PLUGIN, CURRENT)
+    want = installed_dir("pantheon")  # только проверенное дерево (verified.json); клон и рабочая копия — никогда
+    target = link_current(want) if want else (os.path.realpath(CURRENT) if os.path.lexists(CURRENT) else "—")
+    if not want:
+        print("pantheon install: проверенного дерева pantheon нет (verified.json) — current не тронута. "
+              "Принять установленное: pantheon plugins accept", file=sys.stderr)
     tick_bin = os.path.join(CURRENT, "bin", "pantheon-tick")
     env_path = ":".join([os.path.dirname(sys.executable), "/opt/homebrew/bin",
                          os.path.join(HOME, ".local", "bin"), "/usr/bin:/bin:/usr/sbin:/sbin"])
@@ -5013,14 +5192,35 @@ def install():
         print(f"установлено (dryrun): {PLIST.replace(HOME, '~')}")
         return 0
     build_app()
+    merge_mod().build_helper(quiet=False)  # окно Touch ID для слияния ядра (metis-0285); не собран — заявки ждут
     subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"], capture_output=True)
     r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", PLIST], capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stderr.strip(), file=sys.stderr)
         return r.returncode
     print(f"установлено: {PLIST.replace(HOME, '~')} и команда {link.replace(HOME, '~')} → "
-          f"{CURRENT.replace(HOME, '~')} → {PLUGIN.replace(HOME, '~')}")
+          f"{CURRENT.replace(HOME, '~')} → {target.replace(HOME, '~')}")
     return 0
+
+
+MERGE_REQUEST_CMDS = ["pantheon merge request *", "pantheon merge status", "pantheon merge cancel *"]
+
+
+def merge_kick():
+    """Заявки на слияние по Touch ID (metis-0285) — отдельным процессом: окно ждёт пальца до двух минут, тик не ждёт."""
+    try:
+        if not merge_mod().pending() or locked("merge-run"):
+            return
+        if os.environ.get("PANTHEON_DRYRUN") == "1":
+            with open(path("dryrun.log"), "a") as fh:
+                fh.write(f"{int(now())} merge-run\n")
+            return
+        subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "merge", "run"], env=run_env(),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception as e:  # сбой слияния не должен останавливать тик
+        alert_once("merge-kick", type(e).__name__, f"слияние по Touch ID: проход не запущен ({type(e).__name__}: {e})",
+                   "pantheon-tick")
 
 
 def build_app():
@@ -5355,6 +5555,21 @@ def read_mod():
         spec.loader.exec_module(_READ)
         _READ.set_core(sys.modules[__name__])
     return _READ
+
+
+_MERGE = None
+
+
+def merge_mod():
+    """lib/merge.py — слияние PR ядра по заявке и Touch ID владельца (metis-0285)."""
+    global _MERGE
+    if _MERGE is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_merge", os.path.join(LIB, "merge.py"))
+        _MERGE = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_MERGE)
+        _MERGE.set_core(sys.modules[__name__])
+    return _MERGE
 
 
 _MMV = None
@@ -5959,7 +6174,7 @@ def _version_newer(new, old):
 def _plugins_installed():
     """{имя: {version, installPath}} — плагины agent-kit уровня пользователя по `claude plugin list --json`; None — сбой."""
     try:
-        r = subprocess.run([claude_bin(), "plugin", "list", "--json"], capture_output=True, text=True, timeout=120)
+        r = subprocess.run([claude_bin(), "plugin", "list", "--json"], env=claude_env(), capture_output=True, text=True, timeout=120)
         data = json.loads(r.stdout or "null")
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
@@ -6169,7 +6384,7 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
     встало, с проверенной копией: версия и хеш дерева installPath."""
     try:
         r = subprocess.run([claude_bin(), "plugin", "update", f"{name}@{MARKETPLACE}", "-s", "user"],
-                           capture_output=True, text=True, timeout=600)
+                           env=claude_env(), capture_output=True, text=True, timeout=600)
         ok = r.returncode == 0
         why = f"код {r.returncode}: {' '.join((r.stderr or r.stdout or '').split())[:200]}"
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -6178,6 +6393,17 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
     got = row.get("version")
     if got == new and _tree_hash(row.get("installPath")) == digest:
         _plugins_mark(marks, name, None)
+        # разрешение: это дерево прошло тесты и сверку — живой код и окна идут только на него (metis-0321)
+        verified_write(name, row["installPath"], digest, new, "plugins-update")
+        um = read_json(_unchecked_path(), {}) or {}
+        if um.pop(name, None) is not None:
+            write_json(_unchecked_path(), um)
+        if name == "pantheon" and row.get("installPath"):
+            # живой код тика и команды pantheon — только проверенная и вставшая версия (metis-0321)
+            try:
+                link_current(os.path.realpath(row["installPath"]))
+            except OSError as e:
+                alert(f"pantheon: current не перевесилась на {row['installPath']}: {type(e).__name__} {e}", "plugins-update")
         _plugins_journal(f"{name} {old} → {new}: обновлён")
         _plugins_respawn_mark(name)
         alert(f"обновлён {name} {old} → {new}, плановый проход перезапустит свободные окна (Зевса — вы сами: pantheon start zeus "
@@ -6198,9 +6424,15 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
         return ALERTED
     # встало не то, что проверяли: другая версия или другое содержимое (update сам обновил каталог)
     _plugins_mark(marks, name, None)
+    bad = _tree_hash(row.get("installPath"))
+    if bad:  # запись для разбора; живой код его и так не возьмёт — хеша нет в verified.json
+        um = read_json(_unchecked_path(), {}) or {}
+        um[name] = {"hash": bad, "version": got, "path": os.path.realpath(row.get("installPath")), "at": stamp()}
+        write_json(_unchecked_path(), um)
     seen = got or "неизвестна"
     _plugins_journal(f"{name} {old} → {seen}: встала непроверенная версия (проверялась {new}, хеш {digest})")
-    text = f"встала непроверенная версия {name} {seen} (проверялась {new})"
+    text = (f"встала непроверенная версия {name} {seen} (проверялась {new}) — живой код и окна остаются на последнем "
+            "проверенном дереве; что делать — README agent-kit, «Живой код»")
     alert("КРИТИЧНО: " + text, "plugins-update")
     notify(text, title="Пантеон · критично", group="critical")
     if not quiet:
@@ -6255,13 +6487,28 @@ def _plugins_red(marks, name, old, new, log, what):
     return ALERTED
 
 
+def _current_sync():
+    """Новее нет (например, версию поставили руками `claude plugin update`): current должна вести в установленную папку.
+    Отстала или повисла — перевесить на installed_dir (версия та же, что у поставленной); сбой — тревога."""
+    want = installed_dir("pantheon")  # проверенное дерево или последнее проверенное; тревогу даёт installed_dir
+    if not want:
+        return
+    try:
+        if os.path.realpath(CURRENT) == want and os.path.isdir(CURRENT):
+            return
+        link_current(want)
+        _plugins_journal(f"pantheon: current перевешена на установленную {want}")
+    except OSError as e:
+        alert(f"pantheon: current не перевесилась на {want}: {type(e).__name__} {e}", "plugins-update")
+
+
 def _plugins_update(quiet):
     # остатки прогона, прерванного таймаутом задачи или сбоем (блокировка взята — чужого прогона нет)
     shutil.rmtree(path("plugins", "tmp"), ignore_errors=True)
     os.makedirs(path("plugins", "tmp"), exist_ok=True)
     try:
         ok = subprocess.run([claude_bin(), "plugin", "marketplace", "update", MARKETPLACE],
-                            capture_output=True, text=True, timeout=300).returncode == 0
+                            env=claude_env(), capture_output=True, text=True, timeout=300).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         ok = False
     if not ok:  # нет сети или каталог недоступен — подождём следующего раза, без тревоги
@@ -6280,6 +6527,8 @@ def _plugins_update(quiet):
             continue
         old, (new, src) = installed[name]["version"], catalog[name]
         if not _version_newer(new, old):
+            if name == "pantheon":
+                _current_sync()
             if not quiet:
                 print(f"{name}: {old}, новее нет")
             continue
@@ -6317,10 +6566,35 @@ def _plugins_update(quiet):
     return rc
 
 
+def plugins_accept(names, new_only=False):
+    """Ваше «да» установленному дереву без прохода тестов (новая машина, первый выпуск с verified.json, ручная
+    переустановка): его хеш и путь — в verified.json. Только руками: задача тика эту команду не запускает, окна ролей
+    в состояние не пишут. new_only (--new, pantheon-setup) — только плагины, о которых записи ещё нет."""
+    rc = 0
+    for name in names or ["guard", "pantheon"]:
+        if new_only and verified_record(name):
+            continue
+        raw = installed_dir(name, checked=False)
+        if not raw:
+            # --new (pantheon-setup): неустановленный плагин — не ошибка этого шага, установку проверяет свой шаг
+            print(f"pantheon plugins accept: {name}@{MARKETPLACE} не установлен в ~/.claude/plugins/cache", file=sys.stderr)
+            rc = rc if new_only else 1
+            continue
+        version = (read_json(os.path.join(raw, ".claude-plugin", "plugin.json"), {}) or {}).get("version", "?")
+        verified_write(name, raw, _tree_hash(raw), version, "accept")
+        _plugins_journal(f"{name} {version}: принято руками (pantheon plugins accept) — {raw}")
+        print(f"{name}: {version} принят — {raw.replace(HOME, '~')}")
+        if name == "pantheon":
+            link_current(raw)
+    return rc
+
+
 def plugins_cmd(rest):
     if rest[:1] == ["update"] and all(a == "--quiet" for a in rest[1:]):
         return plugins_update(quiet="--quiet" in rest)
-    print("pantheon plugins: есть только update [--quiet]", file=sys.stderr)
+    if rest[:1] == ["accept"] and all(a in ("guard", "pantheon", "--new") for a in rest[1:]):
+        return plugins_accept([a for a in rest[1:] if a != "--new"], new_only="--new" in rest)
+    print("pantheon plugins: update [--quiet] | accept [--new] [guard] [pantheon]", file=sys.stderr)
     return 2
 
 
@@ -6643,6 +6917,8 @@ def main(argv):
         return night_mod().main(rest)
     if cmd == "read":
         return read_mod().main(rest)
+    if cmd == "merge":
+        return merge_mod().main(rest)
     if cmd == "mmv":
         return mmv_mod().main(rest, STATE, now())
     if cmd == "qmd":

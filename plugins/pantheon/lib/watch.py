@@ -434,7 +434,7 @@ def relay_zeus(agents, items, t):
         pushed = P.push_text(z["sessionId"], text)
         if not pushed:
             return False
-        r = subprocess.run([P.claude_bin(), "respawn", z["id"]], capture_output=True, text=True, timeout=180)
+        r = subprocess.run([P.claude_bin(), "respawn", z["id"]], env=P.claude_env(), capture_output=True, text=True, timeout=180)
         P.start_log(f"relay\tzeus\t{z['id']}\t{','.join(d[1] for d in due)}\t{r.returncode}")
         ok = r.returncode == 0
         if not ok:
@@ -862,7 +862,7 @@ def cc_version(t):
     (SEC-16); не в порядке — уведомление и поручение Метиде через тревогу."""
     v = os.environ.get("PANTHEON_FAKE_CC")
     if v is None:
-        r = subprocess.run([P.claude_bin(), "--version"], capture_output=True, text=True, timeout=60)
+        r = subprocess.run([P.claude_bin(), "--version"], env=P.claude_env(), capture_output=True, text=True, timeout=60)
         v = (r.stdout.split() or [""])[0]
     if not re.fullmatch(r"\d+(?:\.\d+)+", v or ""):
         return
@@ -1009,7 +1009,7 @@ def pause(rest, who):
         agents = P.agents_all() or []
         for a in P.live_copies(name, agents, registry=[]):
             if a.get("id"):
-                subprocess.run([P.claude_bin(), "stop", a["id"]], capture_output=True, text=True, timeout=60)
+                subprocess.run([P.claude_bin(), "stop", a["id"]], env=P.claude_env(), capture_output=True, text=True, timeout=60)
                 P.start_log(f"pause-stop\t{name}\t{a['id']}\t{who}\t{reason}")
                 was.append(a["id"])
     P.write_json(P.path("pauses", name + ".json"), {"reason": reason, "why": why[:200], "time": P.stamp(), "by": who,

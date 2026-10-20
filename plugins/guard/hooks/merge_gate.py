@@ -28,9 +28,14 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    reject снимает только accept того же рецензента после него или новый коммит (metis-0158: два argus на одном
    head — accept и reject в любом порядке дают отказ); продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
    owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES), casefold;
-   файлы из pulls/N/files с previous_filename. В защитах accept засчитывается, только если его ran начинается с
+   файлы из pulls/N/files с previous_filename; PR, задевающий ядро, проходит только со строкой
+   `<время> merge-approve <owner/repo>#<N> <sha>` для того же репозитория, PR и SHA в owner-log/merge-approve.log —
+   её пишет тик после Touch ID владельца (metis-0285, `pantheon merge`), не старше суток. В защитах accept засчитывается, только если его ran начинается с
    «модель: claude-opus» (metis-0176): accept другой модели — как будто его нет, reject любой модели в силе.
    Незаменённый шаблон «<ID>» в ran — отказ ещё до записи.
+   Последним во всех режимах — проверки GitHub (metis-0297), один gh pr view на Д3 и проверки: PR на этом SHA, rollup зелёный;
+   красная или идущая проверка, нет ответа gh — отказ; проверок нет — пропуск, только если .github/workflows нет ни на
+   head, ни на base PR.
 Правдивость поля ran (модель argus) guard не проверяет: это защита от ошибки шаблона и запуска не той модели.
 Чего guard не проверяет: правдивость строки в сводке и перечня argus и то, что выбранная команда тестов — настоящие
 тесты: пустую программу (true, echo…, python3 -c pass, sh -c '') он ловит по короткому списку, а придуманную
@@ -44,6 +49,7 @@ import re
 import shlex
 import subprocess
 import time
+from datetime import datetime
 
 G = None  # модуль guard.py: присваивает guard.py при загрузке
 
@@ -60,10 +66,18 @@ MERGE_PRODUCT = ("Продукт для клиентов сливай после
                  f"{MERGE_CMD}.")
 MERGE_PROTECT = ("Защиты сливает только Метида или её лид через шлюз слияния: тесты и «принять» от argus на этот SHA, "
                  f"{MERGE_CMD}; PR, который задевает ядро защит (весь plugins/guard/, plugins/pantheon/roles/, "
-                 "plugins/pantheon/lib/window_rules.py и .claude-plugin/marketplace.json), ждёт слияния владельцем (Д3).")
+                 "plugins/pantheon/lib/window_rules.py и .claude-plugin/marketplace.json), ждёт слияния владельцем (Д3): "
+                 "заявка `pantheon merge request N -R <owner/repo>`, сливает плановый проход после Touch ID владельца.")
 MERGE_OWNER = "Слияние делает владелец."
 MERGE_AMBIGUOUS = "\0два направления"
 MERGE_CORE = "ядро защит — PR ждёт слияния владельцем (Д3)"
+MERGE_CORE_HIT = MERGE_CORE + ": PR задевает "
+# согласие владельца на слияние ядра (metis-0285): строку пишет только тик после Touch ID, в owner-log роли не пишут
+APPROVE_FILE = "merge-approve.log"
+APPROVE_RE = re.compile(r"(\S+) merge-approve ([a-z0-9_.-]+/[a-z0-9_.-]+)#([1-9][0-9]{0,8}) ([0-9a-f]{40})")
+# срок строки согласия: старше суток или из будущего (дальше пяти минут) — не в силе; время без пояса — не в силе
+APPROVE_TTL = 24 * 3600
+APPROVE_SKEW = 300
 # ядро защит (Д3): эти файлы агенты не сливают — гарантия, что запор не ослабит сам себя
 CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_config.py",
               "plugins/guard/managed-settings.json",
@@ -771,14 +785,20 @@ def _is_core(path, core_files):
     return p in core_files or any(p == d or p.startswith(d + "/") for d in CORE_DIR)
 
 
-def _core_problem(repo, pr, sha):
-    """Д3: PR защит, который задевает ядро, ждёт слияния владельцем. Файлы — из REST pulls/N/files (там есть
-    status и previous_filename: переименование ядра не прячет старый путь). Ответа gh нет, список файлов неполон,
-    PR на другом коммите — тоже отказ."""
-    heads = _gh_json(["pr", "view", str(pr), "-R", repo, "--json", "headRefOid,changedFiles"])
-    data = heads[0] if isinstance(heads, list) and len(heads) == 1 else None
-    if not isinstance(data, dict):
-        return f"{MERGE_CORE}: gh pr view {pr} -R {repo} не ответил, а без списка файлов PR ядро не проверить"
+PR_VIEW_FIELDS = "headRefOid,baseRefOid,changedFiles,statusCheckRollup"
+
+
+def _pr_view(repo, pr):
+    """Один gh pr view на шлюз — и для Д3, и для проверок GitHub (таймаут хука 10 с): словарь или None (сбой)."""
+    got = _gh_json(["pr", "view", str(pr), "-R", repo, "--json", PR_VIEW_FIELDS])
+    data = got[0] if isinstance(got, list) and len(got) == 1 else None
+    return data if isinstance(data, dict) else None
+
+
+def _core_problem(repo, pr, sha, data):
+    """Д3: PR защит, который задевает ядро, ждёт слияния владельцем. data — ответ _pr_view. Файлы — из REST
+    pulls/N/files (там есть status и previous_filename: переименование ядра не прячет старый путь). Список файлов
+    неполон, PR на другом коммите — тоже отказ."""
     count, head = data.get("changedFiles"), data.get("headRefOid")
     files = _gh_json(["api", f"repos/{repo}/pulls/{pr}/files?per_page=100", "--paginate", "--jq", ".[]"])
     paths = None
@@ -796,8 +816,125 @@ def _core_problem(repo, pr, sha):
     core = {c.casefold() for c in CORE_FILES}
     hit = [p for p in paths if _is_core(p, core)]
     if hit:
-        return f"{MERGE_CORE}: PR задевает {', '.join(hit)}"
+        return f"{MERGE_CORE_HIT}{', '.join(hit)}"
     return None
+
+
+# проверки GitHub на head PR (metis-0297): разбор rollup — как ci_state в pantheon/lib/merge.py (PR #79, metis-0285)
+CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
+CI_NONE = "проверки GitHub не получены"
+
+
+def _ci_rollup(rollup):
+    """(ok|wait|fail|empty, текст) по statusCheckRollup: CheckRun — по status и conclusion, StatusContext — по state."""
+    if not isinstance(rollup, list):
+        return "fail", CI_NONE
+    if not rollup:
+        return "empty", ""
+    waiting = []
+    for c in rollup:
+        if not isinstance(c, dict):
+            return "fail", f"{CI_NONE}: проверка не разобрана"
+        name = str(c.get("name") or c.get("context") or "?")[:60]
+        if "conclusion" in c or "status" in c and "state" not in c:   # CheckRun
+            status, concl = str(c.get("status") or "").upper(), str(c.get("conclusion") or "").upper()
+            if status != "COMPLETED":
+                waiting.append(name)
+            elif concl not in CI_OK:
+                return "fail", f"проверка GitHub {name} красная: {concl or 'нет итога'}"
+        else:                                                            # StatusContext
+            st = str(c.get("state") or "").upper()
+            if st in CI_WAIT:
+                waiting.append(name)
+            elif st not in CI_OK:
+                return "fail", f"проверка GitHub {name} красная: {st}"
+    if waiting:
+        return "wait", "проверки GitHub ещё идут: " + ", ".join(waiting)
+    return "ok", ""
+
+
+def _has_workflows(repo, sha):
+    """Есть ли на коммите папка .github/workflows: True, False (ответ 404) или None (сбой gh или сети)."""
+    env = {k: v for k, v in os.environ.items() if k not in ("GH_REPO", "GH_HOST")}
+    try:
+        r = subprocess.run(["gh", "api", f"repos/{repo}/contents/.github/workflows?ref={sha}"], capture_output=True,
+                           text=True, timeout=GH_TIMEOUT, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode == 0:
+        try:
+            return bool(json.loads(r.stdout))
+        except ValueError:
+            return None
+    return False if "(HTTP 404)" in (r.stderr or "") else None
+
+
+def _ci_problem(repo, pr, sha, data):
+    """Проверки GitHub на head PR зелёные — иначе текст отказа (metis-0297: 19.10 дважды ушёл PR с красной
+    check-traces). data — ответ _pr_view. PR на другом коммите, красная или идущая проверка — отказ. Проверок нет:
+    пропуск, только если .github/workflows нет ни на head, ни на base PR (ответ 404 на оба): PR, который удаляет или
+    переименовывает папку workflows, проверок не получает, а на base она есть (ревью argus 0297b). Сбой любого
+    запроса — отказ; base спрашивается, только когда rollup пуст и на head папки нет."""
+    head = data.get("headRefOid")
+    if not isinstance(head, str) or head.lower() != sha:
+        return f"PR сейчас на другом коммите ({head}), а не на {sha} — проверки GitHub сверяются на проверенном SHA"
+    state, text = _ci_rollup(data.get("statusCheckRollup"))
+    if state == "fail":
+        return f"{text} на {repo}#{pr}@{sha[:12]} — почини и сделай новый коммит с новыми записями"
+    if state == "wait":
+        return f"{text} на {repo}#{pr}@{sha[:12]} — дождись итога и повтори слияние"
+    if state == "empty":
+        base = data.get("baseRefOid")
+        if not isinstance(base, str) or not SHA_RE.fullmatch(base.lower()):
+            return f"{CI_NONE}: проверок на {repo}#{pr} нет, а коммит base PR ({base}) не получен"
+        for ref, where in ((sha, "head PR"), (base.lower(), "base PR")):
+            wf = _has_workflows(repo, ref)
+            if wf is None:
+                return (f"{CI_NONE}: проверок на {repo}#{pr} нет, а gh api не ответил, есть ли .github/workflows "
+                        f"на {where} ({ref[:12]})")
+            if wf:
+                return (f"проверки GitHub ещё не встали на {repo}#{pr}@{sha[:12]}: на {where} ({ref[:12]}) "
+                        ".github/workflows есть, а проверок нет — дождись и повтори слияние; PR, который убирает "
+                        "workflows, сливает владелец")
+    return None
+
+
+def approve_file():
+    return os.path.join(G.STATE_DIR, "owner-log", APPROVE_FILE)
+
+
+def _approve_time(token):
+    """Время строки согласия (ISO 8601 с поясом, как пишет тик) → секунды эпохи; не разобрать или без пояса — None."""
+    try:
+        t = datetime.fromisoformat(token)
+    except ValueError:
+        return None
+    return t.timestamp() if t.tzinfo is not None else None
+
+
+def owner_approved(repo, pr, sha, now=None):
+    """Строка `<время> merge-approve <owner/repo>#<N> <sha>` в owner-log/merge-approve.log (metis-0285): её пишет
+    только тик после Touch ID владельца; роли в owner-log не пишут (песочница и pantheon-acl). Сверка — ровно этот
+    репозиторий, этот PR и этот SHA, и строка не старше APPROVE_TTL (не из будущего дальше APPROVE_SKEW). Симлинк
+    папки или файла, сбой чтения — нет согласия. now — только для тестов."""
+    t_now = time.time() if now is None else now
+    d = os.path.join(G.STATE_DIR, "owner-log")
+    try:
+        if os.path.islink(d):
+            return False
+        fd = os.open(approve_file(), os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return False
+    for ln in lines:
+        m = APPROVE_RE.fullmatch(ln.strip())
+        if m and m.group(2).lower() == repo.lower() and int(m.group(3)) == int(pr) and m.group(4) == sha.lower():
+            t = _approve_time(m.group(1))
+            if t is not None and -APPROVE_SKEW <= t_now - t <= APPROVE_TTL:
+                return True
+    return False
 
 
 def _reviewer(rec):
@@ -888,10 +1025,19 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
         if not _alert_ok(repo, pr):
             return (f"продукт — нет строки «что ушло» в ~/ai/pantheon/alerts.md со ссылкой {repo}#{pr} и словом "
                     f"«откат»: `pantheon alert \"{repo}#{pr}: что ушло; откат: <команда>\"`. {advice}")
+    view = _pr_view(repo, pr)
+    if view is None:
+        return (f"{CI_NONE}: gh pr view {pr} -R {repo} не ответил — без него не сверить ни проверки GitHub, ни "
+                f"файлы PR (ядро), повтори позже. {advice}")
     if protect:
-        why = _core_problem(repo, pr, sha)
-        if why:
+        why = _core_problem(repo, pr, sha, view)
+        # Д3 через Touch ID (metis-0285): палец владельца на этот PR и этот SHA — строка тика в owner-log. Пускает
+        # только задетое ядро; сбой gh, неполный список файлов и другой head — отказ и со строкой
+        if why and not (why.startswith(MERGE_CORE_HIT) and owner_approved(repo, pr, sha)):
             return f"{why}. {MERGE_PROTECT}"
+    why = _ci_problem(repo, pr, sha, view)
+    if why:
+        return f"{why}. {advice}"
     return None
 
 
