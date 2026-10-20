@@ -311,8 +311,43 @@ def load_schedule():
     return sched
 
 
+CACHE_BIN = re.compile(r"(?:^|/)plugins/cache/[^/]+/(?P<plugin>[^/]+)/(?P<ver>[^/]+)/bin/?$")
+
+
+def _vkey(v):
+    return tuple(int(x) if x.isdigit() else 0 for x in re.split(r"[.\-]", v))
+
+
+def clean_path(path_value, plugin_dir=None):
+    """PATH без bin старых версий плагинов из кэша (metis-0342). Окно, запущенное из сессии на прежней версии, наследует
+    её plugins/cache/<рынок>/<плагин>/<версия>/bin на первых местах, и `pantheon` идёт из старого кода. Свой плагин:
+    остаётся только bin текущей версии (plugin_dir). Чужой плагин: убирается bin версии, если рядом в кэше есть новее.
+    Прочие пути и их порядок не меняются."""
+    plugin_dir = os.path.realpath(plugin_dir or PLUGIN)
+    cur_ver, cur_plugin = os.path.basename(plugin_dir), os.path.basename(os.path.dirname(plugin_dir))
+    out = []
+    for d in (path_value or "").split(":"):
+        m = CACHE_BIN.search(d)
+        if m and d:
+            parent = os.path.dirname(os.path.dirname(d.rstrip("/")))
+            if m["plugin"] == cur_plugin:
+                if m["ver"] != cur_ver:
+                    continue
+            else:
+                try:
+                    newer = [v for v in os.listdir(parent) if _vkey(v) > _vkey(m["ver"])]
+                except OSError:
+                    newer = []
+                if newer:
+                    continue
+        out.append(d)
+    return ":".join(out)
+
+
 def run_env():
     env = dict(os.environ)
+    if env.get("PATH"):
+        env["PATH"] = clean_path(env["PATH"])
     extra = [os.path.join(PLUGIN, "bin"), os.path.dirname(sys.executable), "/opt/homebrew/bin",
              os.path.join(HOME, ".local", "bin")]
     env["PATH"] = ":".join(extra + [env.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin"])
