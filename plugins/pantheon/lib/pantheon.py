@@ -47,7 +47,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         закрытая по слиянию без release/actual, review больше суток без PR, нет приёмки; done
                                         без closed — исправляет сам (closed из updated)
   pantheon autoclose fetch              сетевой проход (задача расписания): gh про слитые и открытые PR из [merge_repos] →
-                                        кэш; лёгкий тик по кэшу закрывает задачи, чей номер в ветке или после «Closes» в теле PR
+                                        кэш; лёгкий плановый проход по кэшу закрывает задачи, чей номер в ветке или после «Closes» в теле PR
   pantheon task new --direction D --title T [--type task|story --status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ]
                     --next X --owner O --release R --batch X --night ГГГГ-ММ-ДД --estimate X --actual X
                     --acceptance принято|вернуть|к владельцу --parent ПАЧКА --mode self|single|parallel --mode-why X --touches ПУТЬ …
