@@ -5765,12 +5765,32 @@ def autoclose_alerts(repos, errors):
             clear_once(key)
 
 
+AUTOCLOSE_STALE = 3600
+
+
+def autoclose_off_reason(t, repo_dirs=None):
+    """Автозакрытие молча не работает: репозитории заданы, а кэша fetch нет или он старше часа → текст, иначе None."""
+    if not (autoclose_repo_dirs() if repo_dirs is None else repo_dirs):
+        return None
+    fetched = autoclose_mod().load_state(path("autoclose-prs.json")).get("fetched")
+    if not isinstance(fetched, (int, float)):
+        return "автозакрытие выключено: нет строки autoclose-fetch в schedule.toml"
+    if t - fetched > AUTOCLOSE_STALE:
+        return "автозакрытие выключено: кэш старше часа (задача autoclose-fetch в schedule.toml не идёт)"
+    return None
+
+
 def autoclose_tick(t):
     """Лёгкий тик: слитые PR из кэша прохода `pantheon autoclose fetch` → закрытие задач. В сеть не ходит."""
     A, T = autoclose_mod(), tasks_mod()
     repo_dirs = autoclose_repo_dirs()
     if not repo_dirs:
         return
+    off = autoclose_off_reason(t, repo_dirs)
+    if off:
+        alert_once("autoclose-off", off, off, "pantheon-tick")
+    else:
+        clear_once("autoclose-off")
     log, errors = A.run(PANTHEON, path("autoclose.json"), path("autoclose-prs.json"), t, repo_dirs, T,
                         actual_for=lambda tid: autoclose_actual(T, tid))
     for ln in log:
@@ -5951,6 +5971,10 @@ def check(paths=None, quiet=False):
         for tid, text in field_warns:
             if not quiet:
                 print(f"внимание · {tid}: {text}")
+    if not paths and not quiet:
+        off = autoclose_off_reason(now())
+        if off:
+            print(f"предупреждение · {off}")
     view_drift = T.check_views(BOARD) if not paths else []  # у каждого вида Доска.base — строка «что здесь» (metis-0288)
     for d in view_drift:
         print(f"ОШИБКА · {d}")

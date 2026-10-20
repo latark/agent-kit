@@ -44,12 +44,15 @@ def find_ids(*texts):
 
 CLOSE_RE = re.compile(r"(?<!\w)(?i:close[sd]?|fix(?:es|ed)?|resolve[sd]?|закрыва(?:ет|ю)|закры(?:л|ла|ли|то)|исправля(?:ет|ю)|исправил[аи]?)"
                       r"\s*[:\-]?\s+(" + ID_RE.pattern + ")")
+# перед глаголом отрицание («не закрывает», «пока не закрываю», «doesn't fix», «not closing») — PR задачу не закрывает
+NEG_BEFORE_RE = re.compile(r"(?:(?<!\w)(?:не|нет|not|never|no)|n['’]t)\s+(?:\w+\s+)?$", re.I)
 
 
 def closing_ids(branch, body):
     """Номера задач, которые PR закрывает: id в имени ветки или «Closes/Fixes <id>» в теле. Простое упоминание
     («См. также», «зависит от», «часть») — нет."""
-    return find_ids(branch, *[m.group(1) for m in CLOSE_RE.finditer(body or "")])
+    body = body or ""
+    return find_ids(branch, *[m.group(1) for m in CLOSE_RE.finditer(body) if not NEG_BEFORE_RE.search(body[:m.start()])])
 
 
 def is_part(body):

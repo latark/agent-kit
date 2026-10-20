@@ -128,6 +128,12 @@ def pr(n, branch, body, t, oid="abcdef0123456789", files=None):
 def test_unit():
     check("closing_ids: ветка и «Closes/Fixes»; «См. также», «Дальше», «часть» — нет",
           A.closing_ids("metis-0001-x", "См. также metis-0002. Closes metis-0003, часть metis-0004") == ["metis-0001", "metis-0003"])
+    for neg in ("Не закрывает metis-0002: остаётся п. 2b", "пока не закрываю metis-0002", "doesn't fix metis-0002",
+                "not closing metis-0002", "This PR does not close metis-0002", "Не исправляет metis-0002"):
+        check(f"closing_ids: отрицание не закрывает — «{neg}»", A.closing_ids("x", neg) == [], str(A.closing_ids("x", neg)))
+    check("closing_ids: отрицание у одной фразы не гасит другую", A.closing_ids("x", "Не закрывает metis-0002. Closes metis-0003") == ["metis-0003"])
+    check("closing_ids: «Закрывает id» после «не» в другом предложении — закрывает",
+          A.closing_ids("x", "Это не мелочь. Закрывает metis-0004") == ["metis-0004"])
     check("find_ids: ветка и тело, без повторов, порядок",
           A.find_ids("metis-0001-fix", "Закрывает metis-0001 и demo-0002") == ["metis-0001", "demo-0002"])
     check("is_part: слово «часть» — да, «участь» и «частью» — нет",
@@ -349,15 +355,34 @@ def test_old_and_errors():
     try:
         old = T0 - 10 * 86400
         a, pa, _ = new(env, home, T0 - 7200, "metis-pantheon", "Старое упоминание", "--status", "doing", "--next", "x")
-        write_gh(gh, "latark/agent-kit", "merged", [pr(5, "x", "см. " + a, old)])
+        write_gh(gh, "latark/agent-kit", "merged", [pr(5, a + "-x", "", old)])
         pan(env, T0, "autoclose", "fetch")
         pan(env, T0, "tick")
-        check("PR старше 48 ч при первом проходе не трогает задачи (упоминание в тексте)", T.read(pa)[0].get("status") == "doing")
+        check("PR старше 48 ч при первом проходе не трогает задачи (номер в ветке, слияние 10 дней назад)", T.read(pa)[0].get("status") == "doing")
         # gh сломан: тик жив, задача цела
         os.remove(os.path.join(gh, "gh"))
         r = pan(env, T0 + 2000, "autoclose", "fetch")
         r2 = pan(env, T0 + 2000, "tick")
         check("нет gh в PATH: fetch и тик не падают", r.returncode == 0 and r2.returncode == 0, r.stderr[-300:] + r2.stderr[-300:])
+    finally:
+        shutil.rmtree(tmp, True)
+
+
+def test_off_warning():
+    tmp, home, state, gh, env = make()
+    try:
+        r = pan(env, T0, "tick")
+        c = run_check(env, T0)
+        check("нет кэша: тик жив, check предупреждает «нет строки autoclose-fetch»",
+              r.returncode == 0 and c.returncode == 0 and "автозакрытие выключено: нет строки autoclose-fetch в schedule.toml" in c.stdout,
+              r.stderr[-300:] + c.stdout)
+        pan(env, T0, "autoclose", "fetch")
+        c = run_check(env, T0 + 600)
+        check("свежий кэш: предупреждения нет", "автозакрытие выключено" not in c.stdout, c.stdout)
+        r = pan(env, T0 + 7200, "tick")
+        c = run_check(env, T0 + 7200)
+        check("кэш старше часа: тик жив, check предупреждает «кэш старше часа»",
+              r.returncode == 0 and c.returncode == 0 and "автозакрытие выключено: кэш старше часа" in c.stdout, r.stderr[-300:] + c.stdout)
     finally:
         shutil.rmtree(tmp, True)
 
@@ -478,6 +503,7 @@ def main():
         test_mutants()
         test_fetch_budget()
         test_batch_needs_mode()
+        test_off_warning()
         test_check()
     print(f"{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
