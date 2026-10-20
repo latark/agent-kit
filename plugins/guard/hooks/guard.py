@@ -787,6 +787,14 @@ class _Lexer:
         self.mask.append(m * len(text))
         self.started = True
 
+    def cut_var(self):
+        """Кавычка обрывает имя переменной: $L""ctl, $L''ctl, $L$''ctl и "$L""ctl" — это $L и ctl, а не $Lctl.
+        Пустая пара и соседние "…""…" не меняют mask, поэтому имя закрывается скобками: $L → ${L} (argus-79f-b)."""
+        if self.lit and self.lit[-1][:1] == "$" and self.mask[-1][:1] in ("u", "d") \
+                and _IDENT.fullmatch(self.lit[-1], 1):
+            self.lit[-1] = "${" + self.lit[-1][1:] + "}"
+            self.mask[-1] = self.mask[-1][0] * len(self.lit[-1])
+
     def end_word(self):
         if not self.started:
             return
@@ -858,6 +866,7 @@ class _Lexer:
                 self.add(s[i + 1] if i + 1 < n else "\\", "q")
                 i += 2
             elif c == "'":
+                self.cut_var()
                 j = self.skip_quoted(i)
                 self.add(s[i + 1:j - 1], "q")
                 i = j
@@ -952,6 +961,7 @@ class _Lexer:
 
     def dquote(self, i):
         s, n = self.s, self.n
+        self.cut_var()
         self.started = True
         while i < n:
             c = s[i]
@@ -1048,6 +1058,7 @@ class _Lexer:
 
     def ansi(self, i):
         """$'…' — строка с экранированием; i — после открывающей кавычки."""
+        self.cut_var()
         s, n, out = self.s, self.n, []
         while i < n and s[i] != "'":
             if s[i] != "\\" or i + 1 >= n:
