@@ -3,8 +3,9 @@
 # Порядок: PANTHEON_PYTHON (его ставит родитель — дочерние pantheon идут тем же интерпретатором), python из
 # STATE/config.toml (его пишет pantheon-setup), python3 из PATH,
 # python3.14…3.11 из PATH, затем каталоги PANTHEON_PY_DIRS (по умолчанию Homebrew и python.org).
+# Кандидата проверяет с -I: sitecustomize из PYTHONPATH (окружение тика задаёт launchd) иначе исполнился бы при проверке
 _py_ok() {
-    [ -n "$1" ] && [ -x "$1" ] && "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
+    [ -n "$1" ] && [ -x "$1" ] && "$1" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
 }
 
 find_python() {
@@ -50,6 +51,30 @@ find_python() {
     set +f
     IFS=$old_ifs
     return 1
+}
+
+# Домашняя папка учётной записи (pw_dir через ~имя) как есть, не из HOME. Не определилась — код 1
+_account_dir() {
+    _u=$(/usr/bin/id -un 2>/dev/null)
+    case $_u in
+        '' | -* | *[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    eval "_h=~$_u"
+    case $_h in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "$_h"
+}
+
+# Её realpath: HOME тика задаёт launchd (metis-0303), а pw_dir может быть ссылкой. Не определилась — пусто, код 1
+account_home() {
+    _h=$(_account_dir) || return 1
+    case $_h in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    (cd "$_h" 2>/dev/null && pwd -P)
 }
 
 NO_PYTHON_MSG="pantheon: нужен Python 3.11+ (его нет в PATH и в стандартных местах). Поставить: brew install python@3.14 или python.org/downloads; системный /usr/bin/python3 на macOS — 3.9, он не подходит."

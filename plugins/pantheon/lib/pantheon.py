@@ -5215,7 +5215,8 @@ def merge_kick():
             with open(path("dryrun.log"), "a") as fh:
                 fh.write(f"{int(now())} merge-run\n")
             return
-        subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "merge", "run"], env=run_env(),
+        # окружение — с нуля (metis-0303): окружение тика задаёт launchd, а его меняет launchctl setenv
+        subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "merge", "run"], env=merge_mod().pass_env(),
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
     except Exception as e:  # сбой слияния не должен останавливать тик

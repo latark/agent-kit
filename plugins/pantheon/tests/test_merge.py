@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -40,7 +41,8 @@ FAKE_GH = r'''
 import json, os, sys
 rec = os.environ["FAKE_REC"]
 with open(os.path.join(rec, "gh-argv.jsonl"), "a") as fh:
-    fh.write(json.dumps({"argv": sys.argv[1:], "env": sorted(k for k in os.environ if k.startswith("GH_"))}) + "\n")
+    fh.write(json.dumps({"argv": sys.argv[1:], "env": sorted(k for k in os.environ if k.startswith("GH_")),
+                         "keys": sorted(os.environ)}) + "\n")
 if sys.argv[1:3] == ["pr", "view"]:
     p = os.path.join(rec, "gh-view.json")
     if not os.path.exists(p):
@@ -70,6 +72,11 @@ with open(os.path.join(rec, "touchid-argv.jsonl"), "a") as fh:
 p = os.path.join(rec, "touchid-rc")
 sys.exit(int(open(p).read()) if os.path.exists(p) else 0)
 '''
+
+# Тестовая обвязка прохода: подмены — атрибутом merge.TEST в её процессе (из окружения launchd его не включить),
+# переменные для прохода — из MERGE_TEST, который читает только обвязка
+HARNESS = ("import json, os, sys; sys.path.insert(0, %r); import pantheon as p; m = p.merge_mod(); "
+           "m.TEST = json.loads(os.environ.pop('MERGE_TEST')); sys.exit(p.main(sys.argv[1:]))" % LIBDIR)
 
 FAILS = []
 
@@ -126,17 +133,25 @@ class Box:
         env.update(extra or {})
         return {k: v for k, v in env.items() if v is not None}
 
-    def cli(self, args, t=T0, extra=None):
-        r = subprocess.run([PY311, "-I", LIB] + args, env=self.env(t, extra), capture_output=True, text=True,
-                           timeout=60)
+    def cli(self, args, t=T0, extra=None, evil=None):
+        env = self.env(t, extra)
+        if args[:2] == ["merge", "run"]:
+            # проход — через обвязку HARNESS: подмены (поддельный gh в PATH, часы, простой, журнал уведомлений) —
+            # только атрибутом merge.TEST в её процессе (metis-0303). evil — то, что дописало бы в окружение
+            # прохода launchd (launchctl setenv): проход его не берёт
+            cmd = [PY311, "-I", "-c", HARNESS] + args
+            env = dict(env, **(evil or {}), MERGE_TEST=json.dumps({"env": env}))
+        else:
+            cmd = [PY311, "-I", LIB] + args
+        r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=60)
         self.outs.append(r.stdout + r.stderr)
         return r
 
     def request(self, pr=PR, repo=REPO, t=T0):
         return self.cli(["merge", "request", str(pr), "-R", repo], t=t)
 
-    def run(self, t=T0, click=False, extra=None):
-        return self.cli(["merge", "run"] + (["--click"] if click else []), t=t, extra=extra)
+    def run(self, t=T0, click=False, extra=None, evil=None):
+        return self.cli(["merge", "run"] + (["--click"] if click else []), t=t, extra=extra, evil=evil)
 
     def view(self, sha, state="OPEN", draft=False, checks=None, title=TITLE, files=None, count=None):
         """Ответ gh pr view и REST pulls/N/files: files — имена или словари; count — changedFiles (по умолчанию
@@ -691,6 +706,264 @@ def test_parse_command_not_tick():
     check("pantheon merge run — не подкоманда тика по расписанию (её запускает только сам тик)",
           r.stdout.strip() == "True", r.stdout + r.stderr)
 
+
+
+# --- окружение прохода из launchd (metis-0303, review-79d-argus проба A) -----------------------------------------------
+# Окружение тика и щелчка задаёт launchd, а его меняет любой процесс владельца (launchctl setenv). Проход берёт
+# окружение с нуля: HOME (это домашняя папка учётной записи) и постоянный PATH; STATE и папка Пантеона — от HOME.
+
+def test_env_state_probe_a():
+    """Проба A: чужой STATE с поддельным помощником «палец есть», записями шлюза и заявкой — слияния нет."""
+    b = Box()   # своя очередь пуста
+    evil = os.path.join(b.tmp, "evil-state")
+    os.makedirs(os.path.join(evil, "bin"), mode=0o700)
+    script(os.path.join(evil, "bin", "pantheon-touchid"), EVIL)
+    with open(os.path.join(evil, "bin", "pantheon-touchid.sha256"), "w") as fh:
+        fh.write(hashlib.sha256(open(os.path.join(LIBDIR, "touchid.swift"), "rb").read()).hexdigest() + "\n")
+    _shutil.copytree(os.path.join(b.state, "merge-gate"), os.path.join(evil, "merge-gate"))
+    os.makedirs(os.path.join(evil, "merge-queue"), mode=0o700)
+    with open(os.path.join(evil, "merge-queue", "latark__agent-kit__7.json"), "w") as fh:
+        json.dump({"repo": REPO, "pr": PR, "sha": SHA, "by": "роль", "created": T0}, fh)
+    b.run(evil={"PANTHEON_STATE": evil})
+    check("PANTHEON_STATE из launchd: заявка, помощник и шлюз чужого STATE не берутся — окна, согласия и слияния нет",
+          not b.merges() and not os.path.exists(os.path.join(b.rec, "evil"))
+          and not os.path.exists(os.path.join(evil, "owner-log", "merge-approve.log")), (b.outs[-1], b.merges()))
+
+
+def test_env_notify_log():
+    b = Box()
+    b.request()
+    b.set("touchid-rc", 2)
+    evil = os.path.join(b.tmp, "evil-notify.log")
+    b.run(extra={"PANTHEON_NOTIFY_LOG": None, "PANTHEON_NO_NOTIFY": "1"}, evil={"PANTHEON_NOTIFY_LOG": evil})
+    check("PANTHEON_NOTIFY_LOG из launchd: строку с заголовком PR в чужой файл проход не пишет",
+          not os.path.exists(evil) and not os.path.exists(b.notify_log), b.outs[-1])
+
+
+def test_env_fake():
+    b = Box()
+    b.request()
+    fakes = {"PANTHEON_FAKE_IDLE": "5", "PANTHEON_FAKE_AC": "1", "PANTHEON_FAKE_WAKE": "1", "PANTHEON_FAKE_LIMIT": "1"}
+    b.run(extra={"PANTHEON_FAKE_IDLE": "99999"}, evil=fakes)
+    check("PANTHEON_FAKE_IDLE из launchd: простой не подменён — владельца нет, окна нет, заявка ждёт",
+          not b.windows() and b.req() is not None, (b.outs[-1], b.windows()))
+    leaked = sorted({k for c in b.calls("gh") for k in c.get("keys", []) if k in fakes and k != "PANTHEON_FAKE_IDLE"})
+    check("PANTHEON_FAKE_* из launchd до gh не доходят", b.calls("gh") and not leaked, leaked)
+
+
+def test_env_path():
+    b = Box()
+    b.request()
+    ebin = os.path.join(b.tmp, "evil-bin")
+    os.makedirs(ebin)
+    script(os.path.join(ebin, "gh"), EVIL)
+    b.run(evil={"PATH": ebin + ":/usr/bin:/bin"})
+    check("PATH из launchd: gh не из него — поддельный gh не запускался, слит своим",
+          not os.path.exists(os.path.join(b.rec, "evil")) and len(b.merges()) == 1, (b.outs[-1], b.merges()))
+
+
+def test_env_gh_config():
+    b = Box()
+    b.request()
+    bad = {"GH_CONFIG_DIR": os.path.join(b.tmp, "evil-gh"), "GH_TOKEN": "x", "GITHUB_TOKEN": "x",
+           "GH_ENTERPRISE_TOKEN": "x", "XDG_CONFIG_HOME": os.path.join(b.tmp, "evil-xdg")}
+    b.run(evil=bad)
+    leaked = sorted({k for c in b.calls("gh") for k in c.get("keys", []) if k in bad})
+    check("GH_CONFIG_DIR, токены и XDG_CONFIG_HOME из launchd до gh не доходят",
+          len(b.merges()) == 1 and not leaked, leaked)
+
+
+def test_env_python():
+    """PANTHEON_PYTHON: тик не берёт его (и config.toml из PANTHEON_STATE), проход и щелчок — интерпретатор тика.
+    PYTHONEXECUTABLE (на macOS задаёт sys.executable даже при -I) интерпретатор прохода не подменяет (argus-b 0303c)."""
+    b = Box()
+    b.request()
+    b.set("touchid-rc", 2)
+    # проход: PANTHEON_PYTHON ему ставит bin/pantheon из pass_env тика; sys.executable подменён PYTHONEXECUTABLE
+    b.run(extra={"PANTHEON_PYTHON": PY311}, evil={"PYTHONEXECUTABLE": os.path.join(b.tmp, "evil-python")})
+    note = open(b.notify_log).read() if os.path.exists(b.notify_log) else ""
+    cmd = note.rstrip().split("|execute:", 1)[-1].rsplit("|", 1)[0] if "|execute:" in note else ""
+    words = shlex.split(cmd) if cmd else []
+    py = [w[len("PANTHEON_PYTHON="):] for w in words if w.startswith("PANTHEON_PYTHON=")]
+    check("щелчок: /usr/bin/env -i, HOME, постоянный PATH и PANTHEON_PYTHON прохода, а не окружение уведомления",
+          words[:2] == ["/usr/bin/env", "-i"] and f"HOME={os.path.realpath(b.home)}" in words
+          and any(w.startswith("PATH=/usr/bin:/bin") for w in words) and len(py) == 1
+          and os.path.realpath(py[0]) == os.path.realpath(PY311) and words[-2:] == ["run", "--click"], cmd)
+
+    # тик: интерпретатор из PANTHEON_PYTHON, из config.toml чужого PANTHEON_STATE и из config.toml от HOME (HOME тоже
+    # задаёт launchd; argus-b 0303, п. 1) не запускается. Тик — копия с заглушкой lib/run.py: config.toml он читает
+    # от настоящей домашней папки учётной записи, и найденный там интерпретатор запустит только заглушку, а не тик.
+    # PATH — только нужные утилиты, без python
+    tools = os.path.join(b.tmp, "tools")
+    os.makedirs(tools)
+    for u in ("dirname", "readlink", "sed", "head", "date", "cat", "mkdir"):
+        os.symlink(_shutil.which(u, path="/usr/bin:/bin"), os.path.join(tools, u))
+    evil_py = script(os.path.join(b.tmp, "evil-python"), EVIL)
+    evil_state = os.path.join(b.tmp, "evil-state")
+    os.makedirs(evil_state)
+    for d in (evil_state, b.state):   # b.state = HOME/.local/state/pantheon
+        with open(os.path.join(d, "config.toml"), "w") as fh:
+            fh.write(f'python = "{evil_py}"\n')
+    plug = os.path.join(b.tmp, "plugin")
+    os.makedirs(os.path.join(plug, "bin"))
+    os.makedirs(os.path.join(plug, "lib"))
+    tick = os.path.join(plug, "bin", "pantheon-tick")
+    _shutil.copy2(os.path.join(os.path.dirname(HERE), "bin", "pantheon-tick"), tick)
+    _shutil.copy2(os.path.join(LIBDIR, "find-python.sh"), os.path.join(plug, "lib", "find-python.sh"))
+    with open(os.path.join(plug, "lib", "run.py"), "w") as fh:
+        fh.write("import json, os, sys\nopen(os.path.join(os.environ['FAKE_REC'], 'tick-ran'), 'a').write(json.dumps("
+                 "[sys.executable, os.environ.get('PANTHEON_PYTHON'), os.environ.get('PYTHONEXECUTABLE')]) + '\\n')\n")
+    for name, extra in (("PANTHEON_PYTHON", {"PANTHEON_PYTHON": evil_py}),
+                        ("config.toml из PANTHEON_STATE", {"PANTHEON_STATE": evil_state}),
+                        ("config.toml от HOME", {})):
+        env = {"PATH": tools, "HOME": b.home, "PANTHEON_HOME": b.pantheon, "FAKE_REC": b.rec, "TMPDIR": _ROOT,
+               "PANTHEON_PY_DIRS": os.path.join(b.tmp, "nowhere")}
+        env.update(extra)
+        r = subprocess.run(["/bin/sh", tick], env=env, capture_output=True, text=True, timeout=60)
+        check(f"тик: {name} из launchd — интерпретатор не запускается",
+              not os.path.exists(os.path.join(b.rec, "evil")), (r.returncode, r.stderr[-300:]))
+    os.unlink(os.path.join(b.state, "config.toml"))
+    # тик снимает PYTHONEXECUTABLE до запуска python: иначе sys.executable тика (и pass_env, run_env его задач) —
+    # заглушка из launchd. PANTHEON_PY_DIRS тик не берёт: кандидата оттуда он даже не проверяет (проверка его запускает)
+    pydir = os.path.join(b.tmp, "pydir")
+    os.makedirs(pydir)
+    os.symlink(PY311, os.path.join(pydir, "python3"))
+    ran = os.path.join(b.rec, "tick-ran")
+    if os.path.exists(ran):
+        os.unlink(ran)
+    env = {"PATH": tools + ":" + pydir, "HOME": b.home, "PANTHEON_HOME": b.pantheon, "FAKE_REC": b.rec,
+           "TMPDIR": _ROOT, "PYTHONEXECUTABLE": evil_py}
+    r = subprocess.run(["/bin/sh", tick], env=env, capture_output=True, text=True, timeout=60)
+    rows = [json.loads(x) for x in open(ran).read().splitlines()] if os.path.exists(ran) else []
+    check("тик: PYTHONEXECUTABLE из launchd снят — sys.executable тика = PANTHEON_PYTHON тика, не заглушка",
+          len(rows) == 1 and rows[0][1]
+          and os.path.realpath(rows[0][0]) == os.path.realpath(rows[0][1]) != os.path.realpath(evil_py)
+          and rows[0][2] is None
+          and not os.path.exists(os.path.join(b.rec, "evil")), (rows, r.returncode, r.stderr[-300:]))
+    evil_dir = os.path.join(b.tmp, "evil-dir")
+    os.makedirs(evil_dir)
+    for v in ("3.14", "3.13", "3.12", "3.11"):
+        script(os.path.join(evil_dir, "python" + v), EVIL)
+    env = {"PATH": tools, "HOME": b.home, "PANTHEON_HOME": b.pantheon, "FAKE_REC": b.rec, "TMPDIR": _ROOT,
+           "PANTHEON_PY_DIRS": evil_dir}
+    r = subprocess.run(["/bin/sh", tick], env=env, capture_output=True, text=True, timeout=60)
+    check("тик: PANTHEON_PY_DIRS из launchd — кандидат оттуда не запускается",
+          not os.path.exists(os.path.join(b.rec, "evil")), (r.returncode, r.stderr[-300:]))
+    # домашняя папка учётной записи не определилась: config.toml тик ищет в /nonexistent, а не от HOME из launchd
+    plug2 = os.path.join(b.tmp, "plugin2")
+    os.makedirs(os.path.join(plug2, "lib"))
+    _shutil.copytree(os.path.join(plug, "bin"), os.path.join(plug2, "bin"))
+    _shutil.copy2(os.path.join(plug, "lib", "run.py"), os.path.join(plug2, "lib", "run.py"))
+    with open(os.path.join(plug2, "lib", "find-python.sh"), "w") as fh:
+        fh.write(f'. "{os.path.join(LIBDIR, "find-python.sh")}"\naccount_home() {{ return 1; }}\n')
+    with open(os.path.join(b.state, "config.toml"), "w") as fh:
+        fh.write(f'python = "{evil_py}"\n')
+    env = {"PATH": tools, "HOME": b.home, "PANTHEON_HOME": b.pantheon, "FAKE_REC": b.rec, "TMPDIR": _ROOT}
+    r = subprocess.run(["/bin/sh", os.path.join(plug2, "bin", "pantheon-tick")], env=env, capture_output=True,
+                       text=True, timeout=60)
+    check("тик: account_home не сработал — config.toml от HOME из launchd не читается",
+          not os.path.exists(os.path.join(b.rec, "evil")), (r.returncode, r.stderr[-300:]))
+    os.unlink(os.path.join(b.state, "config.toml"))
+    # а config.toml тик берёт от домашней папки учётной записи (account_home): её realpath, не HOME и не CDPATH
+    import pwd
+    r = subprocess.run(["/bin/sh", "-c", '. "$1"; account_home', "sh", os.path.join(LIBDIR, "find-python.sh")],
+                       env={"PATH": tools, "HOME": b.home, "CDPATH": b.tmp}, capture_output=True, text=True, timeout=30)
+    check("тик: домашняя папка для config.toml — realpath pw_dir учётной записи, не HOME из launchd",
+          r.stdout.strip() == os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir), (r.stdout, r.stderr))
+    # pw_dir — ссылка: account_home отдаёт её realpath (pwd -P); pw_dir не определился — пусто и код не 0
+    acct_link = os.path.join(b.tmp, "acct-link")
+    os.symlink(b.home, acct_link)
+    fp = os.path.join(LIBDIR, "find-python.sh")
+    r = subprocess.run(["/bin/sh", "-c", '. "$1"; L=$2; _account_dir() { printf "%s\\n" "$L"; }; account_home', "sh", fp,
+                        acct_link], env={"PATH": tools, "HOME": b.tmp}, capture_output=True, text=True, timeout=30)
+    check("account_home: pw_dir-ссылка — её realpath", r.stdout.strip() == os.path.realpath(b.home), (r.stdout, r.stderr))
+    r = subprocess.run(["/bin/sh", "-c", '. "$1"; _account_dir() { return 1; }; account_home', "sh", fp],
+                       env={"PATH": tools, "HOME": b.home}, capture_output=True, text=True, timeout=30)
+    check("account_home: pw_dir не определился — пусто и код не 0", r.returncode != 0 and r.stdout == "",
+          (r.returncode, r.stdout))
+
+    # тик → проход: окружение с нуля, PANTHEON_PYTHON — интерпретатор, который нашёл тик (он ставит PANTHEON_PYTHON
+    # сам), а не sys.executable: его подменяет PYTHONEXECUTABLE из launchd
+    code = ("import json, sys; sys.path.insert(0, %r); import pantheon as p; got = []\n"
+            "p.subprocess.Popen = lambda argv, **kw: got.append(kw.get('env'))\n"
+            "p.merge_kick(); print(json.dumps([got, %r]))" % (LIBDIR, PY311))
+    bad = {"PANTHEON_FAKE_IDLE": "5", "PANTHEON_NOTIFY_LOG": "/x", "GH_CONFIG_DIR": "/x", "PANTHEON_PYTHON": PY311,
+           "PYTHONEXECUTABLE": evil_py}
+    r = subprocess.run([PY311, "-I", "-c", code], env=b.env(T0, bad), capture_output=True, text=True, timeout=60)
+    try:
+        got, exe = json.loads(r.stdout.strip().splitlines()[-1])
+        env = got[0] if len(got) == 1 else {}
+    except (ValueError, IndexError):
+        env, exe = {}, None
+    check("тик → проход: окружение — HOME, постоянный PATH и PANTHEON_PYTHON тика, ничего из launchd",
+          isinstance(env, dict) and sorted(env) == ["HOME", "PANTHEON_PYTHON", "PATH"] and env["PANTHEON_PYTHON"] == exe
+          and env["PATH"].startswith("/usr/bin:/bin") and b.bin not in env["PATH"], r.stdout + r.stderr)
+
+
+def test_env_home():
+    """HOME не домашняя папка учётной записи (launchctl setenv HOME) — проход не идёт. Без обвязки: как у тика."""
+    b = Box()
+    b.request()
+    r = subprocess.run([PY311, "-I", LIB, "merge", "run"], env=b.env(T0), capture_output=True, text=True, timeout=60)
+    check("HOME из launchd не домашняя папка учётной записи → отказ (код 2), окна и слияния нет, заявка цела",
+          r.returncode == 2 and not b.windows() and not b.merges() and b.req() is not None, r.stdout + r.stderr)
+
+
+def test_env_clean():
+    """Окружение прохода с нуля: всё, что не HOME и не постоянный PATH, снято; STATE и Пантеон — от HOME."""
+    b = Box()
+    code = ("import json, os, sys; sys.path.insert(0, %r); import pantheon as p; m = p.merge_mod(); m.TEST = {}\n"
+            "why = m.clean_env(); print(json.dumps([why, dict(os.environ), p.STATE, p.PANTHEON, m.SAFE_PATH]))" % LIBDIR)
+    env = b.env(T0, {"PANTHEON_STATE": os.path.join(b.tmp, "x"), "PANTHEON_HOME": os.path.join(b.tmp, "y"),
+                     "DEVELOPER_DIR": b.tmp, "GH_CONFIG_DIR": b.tmp, "PANTHEON_TEST": "1"})
+    r = subprocess.run([PY311, "-I", "-c", code], env=env, capture_output=True, text=True, timeout=60)
+    try:
+        why, got, state, pan, safe = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        why, got, state, pan, safe = "?", {}, None, None, None
+    check("clean_env: окружение = HOME и постоянный PATH, STATE и Пантеон — от HOME",
+          why is None and got == {"HOME": os.path.realpath(b.home), "PATH": safe}
+          and state == os.path.realpath(b.state) and pan == os.path.realpath(b.pantheon), r.stdout + r.stderr)
+
+
+def test_env_home_link():
+    """argus-b 0303, п. 2: HOME — ссылка на домашнюю папку учётной записи. Сверка проходит, но дальше — realpath:
+    в окружение, gh, P.CURRENT и команду щелчка путь через ссылку не идёт (её можно перевесить после сверки)."""
+    b = Box()
+    real = os.path.realpath(b.home)
+    ver = os.path.join(real, ".local", "share", "pantheon", "versions", "1")
+    os.makedirs(os.path.join(ver, "bin"))
+    os.symlink(ver, os.path.join(real, ".local", "share", "pantheon", "current"))
+    link = os.path.join(b.tmp, "home-link")
+    os.symlink(b.home, link)
+    log = os.path.join(b.tmp, "notify.log")
+    # без обвязки TEST: сверка с учётной записью идёт, pw_dir учётной записи — та же ссылка
+    code = ("import json, os, sys, types; sys.path.insert(0, %r); import pwd\n"
+            "pwd.getpwuid = lambda uid: types.SimpleNamespace(pw_dir=%r)\n"
+            "import pantheon as p; m = p.merge_mod(); why = m.clean_env(); env = dict(os.environ)\n"
+            "os.environ['PANTHEON_NOTIFY_LOG'] = %r; m.fallback_notify({}, 'окно')\n"
+            "print(json.dumps([why, env, p.HOME, p.AI_HOME, p.CURRENT, p.STATE, m.pass_env()]))"
+            % (LIBDIR, link, log))
+    # PANTHEON_PYTHON прохода ставит bin/pantheon из pass_env тика: clean_env его оставляет, а щелчок берёт его, не
+    # sys.executable (его подменяет PYTHONEXECUTABLE)
+    env = dict(b.env(T0), HOME=link, PANTHEON_PYTHON=PY311, PYTHONEXECUTABLE=os.path.join(b.tmp, "evil-python"))
+    r = subprocess.run([PY311, "-I", "-c", code], env=env, capture_output=True, text=True, timeout=60)
+    try:
+        why, got, home, ai, cur, state, passed = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        why, got, home, ai, cur, state, passed = "?", {}, None, None, None, None, {}
+    check("HOME-ссылка: сверка проходит, в окружение, P.HOME, AI_HOME, CURRENT, STATE и pass_env — realpath",
+          why is None and got.get("HOME") == real and home == real and ai == os.path.join(real, "ai")
+          and cur.startswith(real + os.sep) and state == os.path.realpath(b.state) and passed.get("HOME") == real,
+          r.stdout + r.stderr)
+    check("проход без обвязки: clean_env оставляет PANTHEON_PYTHON, pass_env — он, а не sys.executable",
+          got.get("PANTHEON_PYTHON") == PY311 and passed.get("PANTHEON_PYTHON") == PY311, (got, passed))
+    note = open(log).read() if os.path.exists(log) else ""
+    cmd = note.rstrip().split("|execute:", 1)[-1].rsplit("|", 1)[0] if "|execute:" in note else ""
+    words = shlex.split(cmd) if cmd else []
+    check("HOME-ссылка: в команде щелчка HOME и bin/pantheon — realpath (current разрешён), не через ссылку",
+          f"HOME={real}" in words and os.path.join(ver, "bin", "pantheon") in words and f"PANTHEON_PYTHON={PY311}" in words
+          and not any(link in w for w in words), cmd or r.stderr)
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):

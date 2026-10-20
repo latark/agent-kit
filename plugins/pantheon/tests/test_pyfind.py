@@ -86,24 +86,43 @@ os.symlink("/usr/bin/false", cfg_py)  # записан, но не работае
 r = run(["sh", "-c", probe], env_for(PANTHEON_STATE=cfg_state))
 check("сломанный python из config.toml пропускается", r.returncode != 0 and r.stdout.strip() == "", (r.stdout, r.returncode))
 
+# _py_ok проверяет кандидата с -I: sitecustomize из PYTHONPATH (окружение тика задаёт launchd) не исполняется
+pp = os.path.join(tmp, "pp")
+os.makedirs(pp)
+site_mark = os.path.join(tmp, "site.mark")
+with open(os.path.join(pp, "sitecustomize.py"), "w") as fh:
+    fh.write(f"open({site_mark!r}, 'a').write('x')\n")
+r = run(["sh", "-c", f'. "{os.path.join(LIB, "find-python.sh")}"; _py_ok "$1"', "sh", PY311], env_for(PYTHONPATH=pp))
+check("_py_ok: кандидат с -I — sitecustomize из PYTHONPATH не исполняется, 3.11+ принят",
+      r.returncode == 0 and not os.path.exists(site_mark), (r.returncode, os.path.exists(site_mark)))
+
 # ничего подходящего
 r = run([os.path.join(BIN, "pantheon"), "status"], env_for())
 check("нет Python 3.11+: понятная строка, код не 0, без трассы",
       r.returncode != 0 and "нужен Python 3.11+" in r.stderr and "Traceback" not in r.stderr + r.stdout
       and "brew install" in r.stderr, (r.returncode, r.stderr[-200:]))
 
+# тик PANTHEON_PY_DIRS не берёт (argus 0303c) и нашёл бы настоящий python в стандартных каталогах: «нет Python» —
+# копия тика с заглушкой find_python, которая ничего не находит
+tick_plug = os.path.join(tmp, "tick-plug")
+os.makedirs(os.path.join(tick_plug, "bin"))
+os.makedirs(os.path.join(tick_plug, "lib"))
+TICK = os.path.join(tick_plug, "bin", "pantheon-tick")
+shutil.copy2(os.path.join(BIN, "pantheon-tick"), TICK)
+with open(os.path.join(tick_plug, "lib", "find-python.sh"), "w") as fh:
+    fh.write(f'. "{os.path.join(LIB, "find-python.sh")}"\nfind_python() {{ return 1; }}\n')
 alerts = os.path.join(tmp, "pantheon", "alerts.md")
 mark = os.path.join(tmp, "state", "no-python-alert")
-r = run([os.path.join(BIN, "pantheon-tick")], env_for())
+r = run([TICK], env_for())
 lines = [x for x in open(alerts, encoding="utf-8").read().splitlines() if "нужен Python 3.11+" in x] \
     if os.path.exists(alerts) else []
 check("тик без Python 3.11+: код не 0, строка в alerts.md", r.returncode != 0 and len(lines) == 1, (r.returncode, lines))
-run([os.path.join(BIN, "pantheon-tick")], env_for())
+run([TICK], env_for())
 lines = [x for x in open(alerts, encoding="utf-8").read().splitlines() if "нужен Python 3.11+" in x]
 check("второй тик в те же сутки строку не добавляет", len(lines) == 1, lines)
 with open(mark, "w") as fh:
     fh.write("2000-01-01")
-run([os.path.join(BIN, "pantheon-tick")], env_for())
+run([TICK], env_for())
 lines = [x for x in open(alerts, encoding="utf-8").read().splitlines() if "нужен Python 3.11+" in x]
 check("на следующие сутки — снова строка", len(lines) == 2, lines)
 check("в alerts.md нет абсолютного пути пользователя", "/Users/" not in open(alerts, encoding="utf-8").read())
