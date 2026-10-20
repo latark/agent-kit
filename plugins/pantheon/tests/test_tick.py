@@ -324,6 +324,15 @@ def main():
               ".claude/plugins/marketplaces/agent-kit/plugins/guard/hooks"):
         os.makedirs(os.path.join(tmp, d), exist_ok=True)
     open(os.path.join(tmp, ".claude/plugins/marketplaces/agent-kit/plugins/guard/hooks/guard.py"), "w").write("# guard\n")
+    # metis-0321: окна берут guard только из проверенного дерева кэша (verified.json), клон — никогда
+    groot = os.path.join(tmp, ".claude/plugins/cache/agent-kit/guard/0.1.0")
+    os.makedirs(os.path.join(groot, "hooks"))
+    os.makedirs(os.path.join(groot, ".claude-plugin"))
+    open(os.path.join(groot, "hooks", "guard.py"), "w").write("# guard из кэша\n")
+    open(os.path.join(groot, ".claude-plugin", "plugin.json"), "w").write('{"name": "guard", "version": "0.1.0"}')
+    open(os.path.join(tmp, ".claude/plugins/installed_plugins.json"), "w").write(json.dumps(
+        {"version": 2, "plugins": {"guard@agent-kit": [{"scope": "user", "installPath": groot}]}}))
+    subprocess.run([PY311, "-I", LIB, "plugins", "accept", "guard"], env=env, capture_output=True, check=True)
     os.symlink(os.path.join(tmp, "pantheon"), os.path.join(tmp, "projects", "ln"))
     with open(os.path.join(home, "directions.toml"), "a") as fh:
         fh.write('sandbox_write = ["~/.ssh"]\n'
@@ -414,6 +423,13 @@ def main():
     check("песочница: `pantheon direction init *` мимо неё только в окне Метиды (metis-0042)",
           "pantheon direction init *" in sm["sandbox"]["excludedCommands"]
           and not any("direction" in x for w in (sa, sw, sn, sz) for x in w["sandbox"]["excludedCommands"]))
+    merge_ex = ["pantheon merge request *", "pantheon merge status", "pantheon merge cancel *"]
+    check("песочница: заявка на слияние по Touch ID мимо неё только в окне Метиды, `pantheon merge run` — нигде "
+          "(metis-0285)",
+          all(x in sm["sandbox"]["excludedCommands"] for x in merge_ex)
+          and not any("merge run" in x or x == "pantheon merge *" for w in (sa, sm, sw, sn, sz)
+                      for x in w["sandbox"]["excludedCommands"])
+          and not any(x.startswith("pantheon merge") for w in (sa, sw, sn, sz) for x in w["sandbox"]["excludedCommands"]))
     cache_a = real("Library/Caches/pantheon-sandbox/athena-shop")
     check("песочница: кэши свои у направления (папка создана), общих в записи нет",
           sa["env"]["npm_config_cache"] == os.path.join(cache_a, "npm") and os.path.isdir(cache_a)
@@ -443,8 +459,8 @@ def main():
           and not os.path.exists(os.path.join(state, "settings", "old-direction.json")))
     # вторая запись PreToolUse у координаторов и штаба — хук субагентов окна (P0-6, test_agent_allowlist.py)
     hk = [h for g in sa.get("hooks", {}).get("PreToolUse", []) if g["matcher"] != "Agent|Task|Skill" for h in g["hooks"]]
-    gpath = os.path.realpath(os.path.join(tmp, ".claude/plugins/marketplaces/agent-kit/plugins/guard/hooks/guard.py"))
-    check("строгий guard в окне роли (SEC-29): --strict, onFailure block, только клон маркетплейса, у мастерской тоже",
+    gpath = os.path.realpath(os.path.join(groot, "hooks", "guard.py"))
+    check("строгий guard в окне роли (SEC-29): --strict, onFailure block, только проверенный кэш, у мастерской тоже",
           len(hk) == 1 and hk[0]["onFailure"] == "block" and hk[0]["command"] == f"python3 {gpath} --strict"
           and "projects" not in hk[0]["command"] and sw["hooks"]["PreToolUse"] == sa["hooks"]["PreToolUse"][:1]
           and sa["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill")
@@ -574,6 +590,16 @@ def main():
           no_loop and json.load(open(os.path.join(state, "domains.json")))["built_ts"] > t0
           and mem_p in load("athena-shop")["sandbox"]["filesystem"]["allowWrite"]
           and mem_p in load("hq")["sandbox"]["filesystem"]["allowWrite"])
+
+    # ревью 90a, п.4: обновили плагин (installed_plugins.json новее сборки) — окна пересобираются на новый путь guard
+    t1 = json.load(open(os.path.join(state, "domains.json")))["built_ts"]
+    inst = os.path.join(tmp, ".claude", "plugins", "installed_plugins.json")
+    os.makedirs(os.path.dirname(inst), exist_ok=True)
+    open(inst, "w").write("{}")
+    os.utime(inst, (t1 + 30, t1 + 30))
+    subprocess.run([PY311, "-I", LIB, "domains", "build", "--if-changed"], env=env, capture_output=True)
+    check("installed_plugins.json новее сборки: окна пересобраны (built_ts вырос)",
+          json.load(open(os.path.join(state, "domains.json")))["built_ts"] > t1)
 
     # окна задач расписания (P0-3, metis-0063): clio, prometheus, iris — своя песочница
     jc, jp, ji = load("job-clio"), load("job-prometheus"), load("job-iris")
