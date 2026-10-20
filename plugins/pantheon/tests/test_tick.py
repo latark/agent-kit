@@ -423,6 +423,13 @@ def main():
     check("песочница: `pantheon direction init *` мимо неё только в окне Метиды (metis-0042)",
           "pantheon direction init *" in sm["sandbox"]["excludedCommands"]
           and not any("direction" in x for w in (sa, sw, sn, sz) for x in w["sandbox"]["excludedCommands"]))
+    merge_ex = ["pantheon merge request *", "pantheon merge status", "pantheon merge cancel *"]
+    check("песочница: заявка на слияние по Touch ID мимо неё только в окне Метиды, `pantheon merge run` — нигде "
+          "(metis-0285)",
+          all(x in sm["sandbox"]["excludedCommands"] for x in merge_ex)
+          and not any("merge run" in x or x == "pantheon merge *" for w in (sa, sm, sw, sn, sz)
+                      for x in w["sandbox"]["excludedCommands"])
+          and not any(x.startswith("pantheon merge") for w in (sa, sw, sn, sz) for x in w["sandbox"]["excludedCommands"]))
     cache_a = real("Library/Caches/pantheon-sandbox/athena-shop")
     check("песочница: кэши свои у направления (папка создана), общих в записи нет",
           sa["env"]["npm_config_cache"] == os.path.join(cache_a, "npm") and os.path.isdir(cache_a)
