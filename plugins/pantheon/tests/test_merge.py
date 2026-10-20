@@ -774,11 +774,13 @@ def test_env_gh_config():
 
 
 def test_env_python():
-    """PANTHEON_PYTHON: тик не берёт его (и config.toml из PANTHEON_STATE), проход и щелчок — интерпретатор тика."""
+    """PANTHEON_PYTHON: тик не берёт его (и config.toml из PANTHEON_STATE), проход и щелчок — интерпретатор тика.
+    PYTHONEXECUTABLE (на macOS задаёт sys.executable даже при -I) интерпретатор прохода не подменяет (argus-b 0303c)."""
     b = Box()
     b.request()
     b.set("touchid-rc", 2)
-    b.run(evil={"PANTHEON_PYTHON": os.path.join(b.tmp, "evil-python")})
+    # проход: PANTHEON_PYTHON ему ставит bin/pantheon из pass_env тика; sys.executable подменён PYTHONEXECUTABLE
+    b.run(extra={"PANTHEON_PYTHON": PY311}, evil={"PYTHONEXECUTABLE": os.path.join(b.tmp, "evil-python")})
     note = open(b.notify_log).read() if os.path.exists(b.notify_log) else ""
     cmd = note.rstrip().split("|execute:", 1)[-1].rsplit("|", 1)[0] if "|execute:" in note else ""
     words = shlex.split(cmd) if cmd else []
@@ -809,8 +811,8 @@ def test_env_python():
     _shutil.copy2(os.path.join(os.path.dirname(HERE), "bin", "pantheon-tick"), tick)
     _shutil.copy2(os.path.join(LIBDIR, "find-python.sh"), os.path.join(plug, "lib", "find-python.sh"))
     with open(os.path.join(plug, "lib", "run.py"), "w") as fh:
-        fh.write("import os, sys\nopen(os.path.join(os.environ['FAKE_REC'], 'tick-ran'), 'a')"
-                 ".write(sys.executable + '\\n')\n")
+        fh.write("import json, os, sys\nopen(os.path.join(os.environ['FAKE_REC'], 'tick-ran'), 'a').write(json.dumps("
+                 "[sys.executable, os.environ.get('PANTHEON_PYTHON'), os.environ.get('PYTHONEXECUTABLE')]) + '\\n')\n")
     for name, extra in (("PANTHEON_PYTHON", {"PANTHEON_PYTHON": evil_py}),
                         ("config.toml из PANTHEON_STATE", {"PANTHEON_STATE": evil_state}),
                         ("config.toml от HOME", {})):
@@ -821,6 +823,32 @@ def test_env_python():
         check(f"тик: {name} из launchd — интерпретатор не запускается",
               not os.path.exists(os.path.join(b.rec, "evil")), (r.returncode, r.stderr[-300:]))
     os.unlink(os.path.join(b.state, "config.toml"))
+    # тик снимает PYTHONEXECUTABLE до запуска python: иначе sys.executable тика (и pass_env, run_env его задач) —
+    # заглушка из launchd. PANTHEON_PY_DIRS тик не берёт: кандидата оттуда он даже не проверяет (проверка его запускает)
+    pydir = os.path.join(b.tmp, "pydir")
+    os.makedirs(pydir)
+    os.symlink(PY311, os.path.join(pydir, "python3"))
+    ran = os.path.join(b.rec, "tick-ran")
+    if os.path.exists(ran):
+        os.unlink(ran)
+    env = {"PATH": tools + ":" + pydir, "HOME": b.home, "PANTHEON_HOME": b.pantheon, "FAKE_REC": b.rec,
+           "TMPDIR": _ROOT, "PYTHONEXECUTABLE": evil_py}
+    r = subprocess.run(["/bin/sh", tick], env=env, capture_output=True, text=True, timeout=60)
+    rows = [json.loads(x) for x in open(ran).read().splitlines()] if os.path.exists(ran) else []
+    check("тик: PYTHONEXECUTABLE из launchd снят — sys.executable тика = PANTHEON_PYTHON тика, не заглушка",
+          len(rows) == 1 and rows[0][1]
+          and os.path.realpath(rows[0][0]) == os.path.realpath(rows[0][1]) != os.path.realpath(evil_py)
+          and rows[0][2] is None
+          and not os.path.exists(os.path.join(b.rec, "evil")), (rows, r.returncode, r.stderr[-300:]))
+    evil_dir = os.path.join(b.tmp, "evil-dir")
+    os.makedirs(evil_dir)
+    for v in ("3.14", "3.13", "3.12", "3.11"):
+        script(os.path.join(evil_dir, "python" + v), EVIL)
+    env = {"PATH": tools, "HOME": b.home, "PANTHEON_HOME": b.pantheon, "FAKE_REC": b.rec, "TMPDIR": _ROOT,
+           "PANTHEON_PY_DIRS": evil_dir}
+    r = subprocess.run(["/bin/sh", tick], env=env, capture_output=True, text=True, timeout=60)
+    check("тик: PANTHEON_PY_DIRS из launchd — кандидат оттуда не запускается",
+          not os.path.exists(os.path.join(b.rec, "evil")), (r.returncode, r.stderr[-300:]))
     # а config.toml тик берёт от домашней папки учётной записи (account_home): её realpath, не HOME и не CDPATH
     import pwd
     r = subprocess.run(["/bin/sh", "-c", '. "$1"; account_home', "sh", os.path.join(LIBDIR, "find-python.sh")],
@@ -828,11 +856,13 @@ def test_env_python():
     check("тик: домашняя папка для config.toml — realpath pw_dir учётной записи, не HOME из launchd",
           r.stdout.strip() == os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir), (r.stdout, r.stderr))
 
-    # тик → проход: окружение с нуля, PANTHEON_PYTHON — интерпретатор тика
+    # тик → проход: окружение с нуля, PANTHEON_PYTHON — интерпретатор, который нашёл тик (он ставит PANTHEON_PYTHON
+    # сам), а не sys.executable: его подменяет PYTHONEXECUTABLE из launchd
     code = ("import json, sys; sys.path.insert(0, %r); import pantheon as p; got = []\n"
             "p.subprocess.Popen = lambda argv, **kw: got.append(kw.get('env'))\n"
-            "p.merge_kick(); print(json.dumps([got, sys.executable]))" % LIBDIR)
-    bad = {"PANTHEON_FAKE_IDLE": "5", "PANTHEON_NOTIFY_LOG": "/x", "GH_CONFIG_DIR": "/x", "PANTHEON_PYTHON": evil_py}
+            "p.merge_kick(); print(json.dumps([got, %r]))" % (LIBDIR, PY311))
+    bad = {"PANTHEON_FAKE_IDLE": "5", "PANTHEON_NOTIFY_LOG": "/x", "GH_CONFIG_DIR": "/x", "PANTHEON_PYTHON": PY311,
+           "PYTHONEXECUTABLE": evil_py}
     r = subprocess.run([PY311, "-I", "-c", code], env=b.env(T0, bad), capture_output=True, text=True, timeout=60)
     try:
         got, exe = json.loads(r.stdout.strip().splitlines()[-1])

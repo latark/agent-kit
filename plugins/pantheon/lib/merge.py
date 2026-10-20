@@ -37,9 +37,9 @@ setenv). Поэтому проход строит окружение с нуля
 HOME окружения не она — отказ), PATH — постоянный SAFE_PATH (gh — из него), STATE, папка Пантеона и current — от HOME.
 PANTHEON_STATE, PANTHEON_HOME, PANTHEON_NOTIFY_LOG, PANTHEON_FAKE_*, PANTHEON_NOW, GH_* (GH_CONFIG_DIR, GH_TOKEN),
 XDG_* и всё прочее он не берёт.
-Интерпретатор: тик не берёт PANTHEON_PYTHON, а config.toml читает от домашней папки учётной записи, не от HOME и не
-из PANTHEON_STATE (bin/pantheon-tick); проход тик
-запускает с окружением pass_env (PANTHEON_PYTHON — свой интерпретатор), щелчок — через /usr/bin/env -i с ним же.
+Интерпретатор: тик не берёт PANTHEON_PYTHON, PANTHEON_PY_DIRS и PYTHONEXECUTABLE, а config.toml читает от домашней
+папки учётной записи, не от HOME и не из PANTHEON_STATE (bin/pantheon-tick); проход тик запускает с окружением
+pass_env (PANTHEON_PYTHON — найденный тиком интерпретатор, не sys.executable), щелчок — через /usr/bin/env -i с ним же.
 Тестовые подмены — только атрибутом TEST, его ставит тестовая обвязка в своём процессе; из окружения он не
 включается. Остальной тик PANTHEON_STATE ещё берёт, а DYLD_* и прочее launchd-окружение доходит до интерпретатора
 тика: целиком это закрывает только запрет ролям launchctl setenv (metis-0298).
@@ -102,7 +102,8 @@ def err(text):
 
 def clean_env():
     """Окружение прохода с нуля: HOME и SAFE_PATH, STATE и папка Пантеона — от HOME. Окружение задаёт launchd, а его
-    меняет любой процесс владельца (launchctl setenv): из него проход не берёт ничего. HOME — домашняя папка учётной
+    меняет любой процесс владельца (launchctl setenv): из него проход не берёт ничего, кроме PANTHEON_PYTHON — его
+    ставит bin/pantheon прохода из pass_env тика (own_python). HOME — домашняя папка учётной
     записи (pw_dir), HOME окружения только сверяется с ней: не она — отказ. Дальше идёт realpath, а не путь как есть:
     ссылку можно перевесить после сверки (argus-b 0303, п. 2) — так в окружение, gh, P.CURRENT и команду щелчка.
     → None или причина отказа."""
@@ -118,6 +119,9 @@ def clean_env():
     else:
         home = os.path.realpath(P.HOME)
     env = {"HOME": home, "PATH": SAFE_PATH}
+    py = own_python()
+    if py:   # интерпретатор прохода — для команды щелчка (pass_env); его поставил bin/pantheon из pass_env тика
+        env["PANTHEON_PYTHON"] = py
     if TEST is not None:
         env.update(TEST.get("env") or {})
     os.environ.clear()
@@ -130,10 +134,23 @@ def clean_env():
     return None
 
 
+def own_python():
+    """Интерпретатор прохода — PANTHEON_PYTHON: в тике его ставит bin/pantheon-tick после find_python, в проходе —
+    bin/pantheon из pass_env тика. Не sys.executable: на macOS его задаёт PYTHONEXECUTABLE даже при -I, а окружение
+    тика — launchd (argus-b 0303c, п. 1). Не абсолютный путь — None."""
+    py = os.environ.get("PANTHEON_PYTHON", "")
+    return py if os.path.isabs(py) else None
+
+
 def pass_env():
     """Окружение, с которым тик запускает проход, а щелчок по уведомлению — `merge run --click`: HOME, SAFE_PATH и
-    свой интерпретатор (bin/pantheon берёт PANTHEON_PYTHON), без launchd-окружения."""
-    return {"HOME": P.HOME, "PATH": SAFE_PATH, "PANTHEON_PYTHON": sys.executable}
+    свой интерпретатор (own_python; bin/pantheon берёт PANTHEON_PYTHON), без launchd-окружения. Интерпретатора
+    нет — без PANTHEON_PYTHON: bin/pantheon найдёт его сам в чистом окружении."""
+    env = {"HOME": P.HOME, "PATH": SAFE_PATH}
+    py = own_python()
+    if py:
+        env["PANTHEON_PYTHON"] = py
+    return env
 
 
 # --- пути и файлы -------------------------------------------------------------------------------------------------

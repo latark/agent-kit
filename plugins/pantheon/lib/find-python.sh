@@ -3,8 +3,9 @@
 # Порядок: PANTHEON_PYTHON (его ставит родитель — дочерние pantheon идут тем же интерпретатором), python из
 # STATE/config.toml (его пишет pantheon-setup), python3 из PATH,
 # python3.14…3.11 из PATH, затем каталоги PANTHEON_PY_DIRS (по умолчанию Homebrew и python.org).
+# Кандидата проверяет с -I: sitecustomize из PYTHONPATH (окружение тика задаёт launchd) иначе исполнился бы при проверке
 _py_ok() {
-    [ -n "$1" ] && [ -x "$1" ] && "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
+    [ -n "$1" ] && [ -x "$1" ] && "$1" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
 }
 
 find_python() {
