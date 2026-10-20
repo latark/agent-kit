@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Автозакрытие задач при слиянии PR и поля «Итогов пачек» (metis-0308): тик по `gh pr list --state merged` закрывает
-задачу один раз (в том числе чужого направления), «часть» не закрывает, release и actual пишет сам; `--batch` без
+"""Автозакрытие задач при слиянии PR и поля «Итогов пачек» (metis-0308): проход `pantheon autoclose fetch` кладёт слитые PR
+в кэш, лёгкий тик по кэшу (без gh) закрывает задачу один раз и только PR из репозитория её направления, по номеру в ветке или
+после «Closes/Fixes»; «См. также» не закрывает; «часть» не закрывает, release и actual пишет сам; `--batch` без
 `--mode` — отказ; check: задача пачки без mode, пустой release у закрытой по слиянию, done без closed (чинит),
 review больше суток без PR, готово без приёмки после ночи. gh подделан скриптом в PATH.
 
@@ -47,6 +48,8 @@ def iso_utc(t):
 
 FAKE_GH = """#!/bin/sh
 d="$FAKE_GH_DIR"; repo=""; state=""; prev=""
+echo "$@" >> "$d/calls.log"
+[ -f "$d/sleep" ] && sleep "$(cat "$d/sleep")"
 for a in "$@"; do
   case "$prev" in --repo) repo="$a";; --state) state="$a";; esac
   prev="$a"
@@ -123,6 +126,8 @@ def pr(n, branch, body, t, oid="abcdef0123456789", files=None):
 
 
 def test_unit():
+    check("closing_ids: ветка и «Closes/Fixes»; «См. также», «Дальше», «часть» — нет",
+          A.closing_ids("metis-0001-x", "См. также metis-0002. Closes metis-0003, часть metis-0004") == ["metis-0001", "metis-0003"])
     check("find_ids: ветка и тело, без повторов, порядок",
           A.find_ids("metis-0001-fix", "Закрывает metis-0001 и demo-0002") == ["metis-0001", "demo-0002"])
     check("is_part: слово «часть» — да, «участь» и «частью» — нет",
@@ -150,13 +155,20 @@ def test_tick():
             fh.write(json.dumps({"v": 1, "id": a, "closed": day(merged_at), "usd": 1.5, "tokens_total": 450000, "hours": 2.1}) + "\n")
         write_gh(gh, "latark/agent-kit", "merged", [
             pr(7, "metis-0001-autoclose", "Закрывает задачу", merged_at),
-            pr(8, "feature-x", "Только часть 1 из 2 для metis-0002", merged_at),
+            pr(8, "feature-x", "Closes metis-0002, но только часть 1 из 2", merged_at),
             pr(10, "metis-0003-v", "версия", merged_at, oid="1234567fffffff", files=["plugins/pantheon/.claude-plugin/plugin.json"])])
         write_gh(gh, "acme/site", "merged", [pr(3, "demo-0001-site", "", merged_at, oid="9999999aaaaaaa")])
         with open(os.path.join(gh, "diff.txt"), "w") as fh:
             fh.write('diff --git a/plugins/pantheon/.claude-plugin/plugin.json b/plugins/pantheon/.claude-plugin/plugin.json\n'
                      '-  "version": "0.11.49",\n+  "version": "0.11.50",\n')
+        rf = pan(env, T0, "autoclose", "fetch")
+        check("fetch: код 0, gh спрошен, кэш записан", rf.returncode == 0 and os.path.exists(os.path.join(gh, "calls.log"))
+              and os.path.exists(os.path.join(state, "autoclose-prs.json")), rf.stdout + rf.stderr)
+        check("fetch ничего не закрывает", T.read(pa)[0].get("status") == "doing")
+        os.remove(os.path.join(gh, "calls.log"))
         r = pan(env, T0, "tick")
+        check("лёгкий тик не зовёт gh", not os.path.exists(os.path.join(gh, "calls.log")), text(os.path.join(gh, "calls.log"))
+              if os.path.exists(os.path.join(gh, "calls.log")) else "")
         ha = T.read(pa)[0]
         check("тик: слитый PR с metis-0001 в ветке закрывает задачу", ha.get("status") == "done" and r.returncode == 0,
               r.stdout + r.stderr + text(pa)[:400])
@@ -171,12 +183,13 @@ def test_tick():
               str(hc.get("release")))
         check("нет метрики — actual «нет замера»", hc.get("actual") == "нет замера", str(hc.get("actual")))
         hd = T.read(pd)[0]
-        check("задача другого направления (demo) закрыта тоже", hd.get("status") == "done" and hd.get("release") == "PR #3 → 9999999"
+        check("задача направления demo закрыта PR из репозитория demo", hd.get("status") == "done" and hd.get("release") == "PR #3 → 9999999"
               and hd.get("closed") == day(merged_at), str(hd))
         before = {p: text(p) for p in (pa, pb, pc, pd)}
         # владелец вернул задачу в работу; второй тик (после порога) её не трогает и ничего не дописывает
         pan(env, T0 + 100, "task", "set", a, "status=doing")
         before[pa] = text(pa)
+        pan(env, T0 + 1400, "autoclose", "fetch")
         r = pan(env, T0 + 1500, "tick")
         after = {p: text(p) for p in (pa, pb, pc, pd)}
         check("второй тик: ни одна задача не изменилась (один раз на PR)", after == before and r.returncode == 0,
@@ -188,18 +201,163 @@ def test_tick():
         shutil.rmtree(tmp, True)
 
 
+class FailOnce:
+    """Прокси tasks.py: task_set падает ValueError на указанной задаче, пока fail не пуст."""
+    def __init__(self, fail):
+        self.fail = set(fail)
+
+    def __getattr__(self, name):
+        return getattr(T, name)
+
+    def task_set(self, pantheon, t, tid, changes, **kw):
+        if tid in self.fail:
+            raise ValueError("шапка не прошла проверку (проба)")
+        return T.task_set(pantheon, t, tid, changes, **kw)
+
+
+def run_cache(home, state, t, prs_by_repo, T_mod=None, repo_dirs=None, opened=None):
+    """Кэш fetch руками и один проход run. → (log, errors)."""
+    cache = os.path.join(state, "autoclose-prs.json")
+    os.makedirs(state, exist_ok=True)
+    A.save_state(cache, {"fetched": t, "merged": prs_by_repo, "open": opened or {}, "errors": {}})
+    return A.run(home, os.path.join(state, "autoclose.json"), cache, t, repo_dirs or {"latark/agent-kit": {"metis-pantheon"}},
+                 T_mod or T)
+
+
+def cpr(n, branch, body, t):
+    return {"number": n, "headRefName": branch, "body": body, "mergedAt": iso_utc(t), "oid": "abcdef0123456789"}
+
+
+def test_rules():
+    tmp, home, state, gh, env = make()
+    try:
+        t_old = T0 - 3600
+        put(home, "metis-pantheon", "metis-0001", status="doing")
+        put(home, "metis-pantheon", "metis-0002", status="doing")
+        put(home, "metis-pantheon", "metis-0003", status="doing")
+        put(home, "demo", "demo-0001", status="doing")
+        st = lambda i: T.read(os.path.join(home, "directions", i.split("-")[0].replace("metis", "metis-pantheon"), "tasks", i + ".md"))[0].get("status")
+        # чужой репозиторий: PR acme/site (направление demo) с id задачи metis-pantheon в ветке
+        log, errs = run_cache(home, state, T0, {"acme/site": [cpr(3, "metis-0001-x", "", t_old)]}, repo_dirs={"acme/site": {"demo"}})
+        check("PR чужого репозитория не закрывает задачу другого направления", st("metis-0001") == "doing" and not log, str(log))
+        # «См. также» и «Дальше» — упоминание, не закрытие
+        log, errs = run_cache(home, state, T0 + 1, {"latark/agent-kit": [
+            cpr(9, "metis-0999-x", "См. также metis-0002. Дальше — metis-0003 (не в этом PR)", t_old)]})
+        check("«См. также» и «Дальше» в теле не закрывают", st("metis-0002") == "doing" and st("metis-0003") == "doing" and not log, str(log))
+        # Closes — закрывает
+        log, errs = run_cache(home, state, T0 + 2, {"latark/agent-kit": [cpr(10, "feature", "Closes metis-0002\nfixes: metis-0003", t_old)]})
+        check("«Closes id» и «fixes: id» в теле закрывают", st("metis-0002") == "done" and st("metis-0003") == "done", str(log) + str(errs))
+        # PR своего репозитория закрывает только задачи своего направления
+        log, errs = run_cache(home, state, T0 + 3, {"latark/agent-kit": [cpr(11, "demo-0001-x", "", t_old)]})
+        check("PR репозитория metis-pantheon не закрывает задачу demo", st("demo-0001") == "doing" and not log, str(log))
+    finally:
+        shutil.rmtree(tmp, True)
+
+
+def test_reopen_and_eviction():
+    tmp, home, state, gh, env = make()
+    try:
+        pa = put(home, "metis-pantheon", "metis-0001", status="doing")
+        prs = [cpr(1, "metis-0001-x", "", T0 - 3600)]
+        log, _ = run_cache(home, state, T0, {"latark/agent-kit": prs})
+        check("закрыта по слиянию", T.read(pa)[0].get("status") == "done" and len(log) == 1)
+        # владелец вернул, отметки обработанных PR вытеснены — второй раз не закрываем (смотрим журнал задачи)
+        T.task_set(home, T0 + 10, "metis-0001", {"status": "doing"}, actor="владелец")
+        st = A.load_state(os.path.join(state, "autoclose.json"))
+        st["done"] = {}
+        A.save_state(os.path.join(state, "autoclose.json"), st)
+        log, _ = run_cache(home, state, T0 + 1200, {"latark/agent-kit": prs})
+        check("переоткрытую задачу тем же PR второй раз не закрывает",
+              T.read(pa)[0].get("status") == "doing" and text(pa).count("закрыта по слиянию PR #1") == 1 and not log, text(pa)[-400:])
+        # «часть» не задваивается после вытеснения
+        pb = put(home, "metis-pantheon", "metis-0002", status="doing")
+        part = [cpr(2, "metis-0002-x", "часть 1", T0 - 3600)]
+        run_cache(home, state, T0 + 1300, {"latark/agent-kit": part})
+        st = A.load_state(os.path.join(state, "autoclose.json"))
+        st["done"] = {}
+        A.save_state(os.path.join(state, "autoclose.json"), st)
+        run_cache(home, state, T0 + 1400, {"latark/agent-kit": part})
+        check("строка «часть» в журнале не задваивается", text(pb).count("в теле «часть»") == 1, text(pb)[-400:])
+    finally:
+        shutil.rmtree(tmp, True)
+
+
+def test_mutants():
+    tmp, home, state, gh, env = make()
+    try:
+        # сбой посреди прохода: на одной задаче PR task_set падает — PR не отмечен, следующий проход дозакрывает
+        pa = put(home, "metis-pantheon", "metis-0001", status="doing")
+        pb = put(home, "metis-pantheon", "metis-0002", status="doing")
+        prs = [cpr(5, "metis-0001-x", "Closes metis-0002", T0 - 3600)]
+        log, errs = run_cache(home, state, T0, {"latark/agent-kit": prs}, T_mod=FailOnce(["metis-0002"]))
+        d = A.load_state(os.path.join(state, "autoclose.json")).get("done") or {}
+        check("сбой на одной задаче PR: PR не отмечен обработанным, ошибка названа",
+              "latark/agent-kit#5" not in d and "metis-0002" in str(errs) and T.read(pa)[0].get("status") == "done"
+              and T.read(pb)[0].get("status") == "doing", str(d) + str(errs))
+        A.save_state(os.path.join(state, "autoclose-prs.json"), {})
+        log, errs = run_cache(home, state, T0 + 60, {"latark/agent-kit": prs})
+        d = A.load_state(os.path.join(state, "autoclose.json")).get("done") or {}
+        check("следующий проход дозакрывает, первая задача не задвоена",
+              T.read(pb)[0].get("status") == "done" and "latark/agent-kit#5" in d and text(pa).count("закрыта по слиянию PR #5") == 1, text(pa)[-300:])
+        # сбой не ValueError (OSError) посреди прохода: тот же кэш прочитается заново, задача дозакроется
+        pf = put(home, "metis-pantheon", "metis-0006", status="doing")
+
+        class Boom(FailOnce):
+            def task_set(self, *a, **kw):
+                raise OSError("диск (проба)")
+        prs2 = [cpr(8, "metis-0006-x", "", T0 - 3600)]
+        try:
+            run_cache(home, state, T0 + 90, {"latark/agent-kit": prs2}, T_mod=Boom([]))
+        except OSError:
+            pass
+        run_cache(home, state, T0 + 90, {"latark/agent-kit": prs2})  # тот же кэш (то же время fetch)
+        check("сбой OSError посреди прохода: следующий проход по тому же кэшу закрывает", T.read(pf)[0].get("status") == "done"
+              and text(pf).count("закрыта по слиянию PR #8") == 1, text(pf)[-300:])
+        # слияние за сутки до тика: closed — день слияния, а не день тика
+        pc = put(home, "metis-pantheon", "metis-0003", status="doing")
+        merged = T0 - 30 * 3600
+        run_cache(home, state, T0 + 120, {"latark/agent-kit": [cpr(6, "metis-0003-x", "", merged)]})
+        check("closed — день слияния, не день тика", day(merged) != day(T0) and T.read(pc)[0].get("closed") == day(merged),
+              str(T.read(pc)[0].get("closed")))
+        # dropped и done не воскрешаются
+        pd = put(home, "metis-pantheon", "metis-0004", status="dropped", closed="2026-10-05")
+        pe = put(home, "metis-pantheon", "metis-0005", status="done", closed="2026-10-05")
+        before = (text(pd), text(pe))
+        run_cache(home, state, T0 + 180, {"latark/agent-kit": [cpr(7, "metis-0004-x", "Closes metis-0005", T0 - 3600)]})
+        check("задачи dropped и done слитым PR не меняются", (text(pd), text(pe)) == before and
+              T.read(pd)[0].get("status") == "dropped", "")
+    finally:
+        shutil.rmtree(tmp, True)
+
+
+def test_fetch_budget():
+    tmp, home, state, gh, env = make()
+    try:
+        open(os.path.join(gh, "sleep"), "w").write("5")
+        t0 = time.monotonic()
+        errs = A.fetch(os.path.join(state, "p.json"), os.path.join(state, "s.json"), T0, ["a/b", "c/d", "e/f"],
+                       env=dict(env), budget=2.5)
+        el = time.monotonic() - t0
+        check("fetch: предел времени на весь проход, остаток репозиториев — ошибка", el < 4.5 and len(errs) == 3, f"{el:.1f} c {errs}")
+        check("fetch: кэш записан даже при сбое", A.load_state(os.path.join(state, "p.json")).get("errors") == errs)
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def test_old_and_errors():
     tmp, home, state, gh, env = make()
     try:
         old = T0 - 10 * 86400
         a, pa, _ = new(env, home, T0 - 7200, "metis-pantheon", "Старое упоминание", "--status", "doing", "--next", "x")
         write_gh(gh, "latark/agent-kit", "merged", [pr(5, "x", "см. " + a, old)])
+        pan(env, T0, "autoclose", "fetch")
         pan(env, T0, "tick")
         check("PR старше 48 ч при первом проходе не трогает задачи (упоминание в тексте)", T.read(pa)[0].get("status") == "doing")
         # gh сломан: тик жив, задача цела
         os.remove(os.path.join(gh, "gh"))
-        r = pan(env, T0 + 2000, "tick")
-        check("нет gh в PATH: тик не падает", r.returncode == 0, r.stderr[-300:])
+        r = pan(env, T0 + 2000, "autoclose", "fetch")
+        r2 = pan(env, T0 + 2000, "tick")
+        check("нет gh в PATH: fetch и тик не падают", r.returncode == 0 and r2.returncode == 0, r.stderr[-300:] + r2.stderr[-300:])
     finally:
         shutil.rmtree(tmp, True)
 
@@ -227,6 +385,17 @@ def test_batch_needs_mode():
         pan(env, T0, "task", "set", y, "mode=parallel")
         r = pan(env, T0, "task", "attach", y, s)
         check("task attach задачи с mode — принят", r.returncode == 0, r.stderr)
+        z, pz, _ = new(env, home, T0, "demo", "Без режима")
+        r = pan(env, T0, "task", "set", z, f"parent={s}")
+        check("task set parent=<пачка> без mode — отказ", r.returncode != 0 and "mode" in r.stderr and "parent" not in text(pz), r.stderr)
+        r = pan(env, T0, "task", "set", z, f"parent={s}", "mode=self")
+        check("task set parent=<пачка> вместе с mode — принят", r.returncode == 0 and "parent" in text(pz), r.stderr)
+        n_before = len(os.listdir(os.path.join(home, "directions", "demo", "tasks")))
+        r = pan(env, T0, "task", "new", "--direction", "demo", "--title", "Новая в пачку", "--parent", s)
+        check("task new --parent <пачка> без mode — отказ", r.returncode != 0 and "mode" in r.stderr
+              and len(os.listdir(os.path.join(home, "directions", "demo", "tasks"))) == n_before, r.stdout + r.stderr)
+        r = pan(env, T0, "task", "new", "--direction", "demo", "--title", "Новая в пачку", "--parent", s, "--mode", "self")
+        check("task new --parent <пачка> с mode — принят", r.returncode == 0, r.stderr)
     finally:
         shutil.rmtree(tmp, True)
 
@@ -304,6 +473,10 @@ def main():
     else:
         test_tick()
         test_old_and_errors()
+        test_rules()
+        test_reopen_and_eviction()
+        test_mutants()
+        test_fetch_budget()
         test_batch_needs_mode()
         test_check()
     print(f"{sum(results)} из {len(results)} прошли")

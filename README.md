@@ -167,6 +167,12 @@
 - `plugins/pantheon/lib/window_rules.py` — правила окон координаторов для слияния через шлюз guard
   (`permissions.allow` и `autoMode.allow`, metis-0174); их собирает `pantheon domains build`. Файл — в ядре защит:
   PR, который его задевает, ждёт слияния владельцем.
+- `plugins/pantheon/lib/autoclose.py` — автозакрытие задач при слиянии PR (metis-0308). Два прохода: `pantheon autoclose fetch`
+  (отдельная задача расписания, предел 240 с на весь проход) спрашивает gh про слитые и открытые PR из `[merge_repos]` и пишет
+  кэш `autoclose-prs.json`; лёгкий тик читает только кэш и в сеть не ходит. Задачу закрывает PR из репозитория её направления,
+  если номер в имени ветки или после «Closes/Fixes» в теле; «См. также» и «часть» не закрывают; уже закрытую этим PR
+  (по журналу) второй раз не трогает. Строка для `schedule.toml`: `name = "autoclose-fetch"`,
+  `command = "pantheon autoclose fetch"`, `every = 10`, `class = "light"`, `hosts = "primary"`, `timeout = 300`.
 - `plugins/pantheon/lib/view-sync.sh` — копия `~/ai/pantheon` только для чтения для Obsidian. Если в копии нет
   `.obsidian`, кладёт образец настроек из `plugins/pantheon/share/pantheon-view-obsidian/` (сниппеты, закладки, базовые
   плагины; существующую папку не трогает, кроме сниппета `snippets/pantheon.css`: его доставляет тик доски (`pantheon board`) по образцу `Доска.base` — нетронутый прежний заменяет молча, правку владельца сохраняет копией `board-css-*.css` в папке состояния с одной тревогой). Тему и плагин Style Settings владелец ставит в Obsidian сам.

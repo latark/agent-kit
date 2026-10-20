@@ -608,6 +608,9 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
     errs, _ = check_head(head)
     if head.get("batch") and not head.get("mode"):
         errs.append(NO_MODE_BATCH)
+    par = head.get("parent")
+    if par and not head.get("mode") and load_tasks(pantheon, WORK_TYPES).get(par, ("", {}))[1].get("type") == "story":
+        errs.append(NO_MODE_BATCH)
     if errs:
         remove(path)
         raise ValueError("; ".join(errs))
@@ -660,6 +663,9 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
     tasks = load_tasks(pantheon, WORK_TYPES)
     if tid not in tasks:
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
+    par = changes.get("parent")
+    if par and tasks.get(par, ("", {}))[1].get("type") == "story" and not (changes.get("mode") or tasks[tid][1].get("mode")):
+        raise ValueError(f"{tid}: {NO_MODE_BATCH}")
     with dir_lock(os.path.dirname(tasks[tid][0])):
         return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck)
 

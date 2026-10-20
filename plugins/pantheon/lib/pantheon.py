@@ -39,10 +39,14 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         «да» на [read-<rid>] → выгрузка и разбор плановым проходом → вы одобряете пункты
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
-  pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
+  pantheon check [файл…] [--quiet]      проверить шапки задач по схеме v1 (schema.md) и правила metis-0308: задача пачки без mode,
+                                        закрытая по слиянию без release/actual, review больше суток без PR, нет приёмки; done
+                                        без closed — исправляет сам (closed из updated)
+  pantheon autoclose fetch              сетевой проход (задача расписания): gh про слитые и открытые PR из [merge_repos] →
+                                        кэш; лёгкий тик по кэшу закрывает задачи, чей номер в ветке или после «Closes» в теле PR
   pantheon task new --direction D --title T [--type task|story --status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ]
                     --next X --owner O --release R --batch X --night ГГГГ-ММ-ДД --estimate X --actual X
-                    --acceptance принято|вернуть|к владельцу --mode self|single|parallel --mode-why X --touches ПУТЬ …
+                    --acceptance принято|вернуть|к владельцу --parent ПАЧКА --mode self|single|parallel --mode-why X --touches ПУТЬ …
                     --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
                     --recommend "А — потому что …" --if-no-answer "…" --depends-on ID --executor auto|claude|codex]
                     без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ;
@@ -359,7 +363,7 @@ def clear_once(key):
 JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
-                    "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder", "read"}
+                    "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder", "read", "autoclose"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 # Окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` из schedule.toml идёт с песочницей
 # settings/job-<роль>.json (собирает sandbox_build), а не без неё. Роль вне таблицы тик не запускает. write — куда
@@ -5525,16 +5529,17 @@ def autoclose_actual(T, tid):
     return A.actual_text(rows[-1]) if rows else None
 
 
-def autoclose_tick(t):
-    """Слитые PR из [merge_repos] → закрытие задач; ошибки gh — одна тревога на репозиторий, пока не починится."""
-    A, T = autoclose_mod(), tasks_mod()
-    repos = sorted({r for v in metrics_ctx().repos.values() for r in v})
-    if not repos:
-        return
-    log, errors = A.run(PANTHEON, path("autoclose.json"), t, repos, T, env=run_env(),
-                        actual_for=lambda tid: autoclose_actual(T, tid))
-    for ln in log:
-        print(f"автозакрытие · {ln}")
+def autoclose_repo_dirs():
+    """{репозиторий: {направления}} из [merge_repos]: задачу закрывает только PR из репозитория её направления."""
+    out = {}
+    for d, repos in metrics_ctx().repos.items():
+        for r in repos if isinstance(repos, list) else []:
+            out.setdefault(r, set()).add(d)
+    return out
+
+
+def autoclose_alerts(repos, errors):
+    """Ошибки gh и закрытия — одна тревога на репозиторий, пока не починится."""
     for repo in repos:
         key = "autoclose-" + re.sub(r"[^\w-]", "_", repo)[:50]
         bad = {k: v for k, v in errors.items() if k == repo or k.startswith(repo + "#")}
@@ -5543,6 +5548,36 @@ def autoclose_tick(t):
                        "pantheon-tick")
         else:
             clear_once(key)
+
+
+def autoclose_tick(t):
+    """Лёгкий тик: слитые PR из кэша прохода `pantheon autoclose fetch` → закрытие задач. В сеть не ходит."""
+    A, T = autoclose_mod(), tasks_mod()
+    repo_dirs = autoclose_repo_dirs()
+    if not repo_dirs:
+        return
+    log, errors = A.run(PANTHEON, path("autoclose.json"), path("autoclose-prs.json"), t, repo_dirs, T,
+                        actual_for=lambda tid: autoclose_actual(T, tid))
+    for ln in log:
+        print(f"автозакрытие · {ln}")
+    if log or errors:
+        autoclose_alerts(sorted(repo_dirs), errors)
+
+
+def autoclose_cmd(rest):
+    """pantheon autoclose fetch — сетевой проход: gh про слитые и открытые PR → кэш для лёгкого тика. Задача расписания."""
+    if rest != ["fetch"]:
+        print("использование: pantheon autoclose fetch", file=sys.stderr)
+        return 2
+    repo_dirs = autoclose_repo_dirs()
+    if not repo_dirs:
+        return 0
+    A = autoclose_mod()
+    errors = A.fetch(path("autoclose-prs.json"), path("autoclose.json"), now(), sorted(repo_dirs), env=run_env())
+    autoclose_alerts(sorted(repo_dirs), errors)
+    for k, v in sorted(errors.items()):
+        print(f"автозакрытие · {k}: {v}", file=sys.stderr)
+    return 0
 
 
 METRICS_EVERY = 30 * 60  # не чаще раза в 30 минут: учёт читает транскрипты за неделю (metis-0320)
@@ -5753,7 +5788,7 @@ def task_cmd(rest):
                       "waiting_on": opt("--waiting-on"), "question": opt("--question"), "why": opt("--why"),
                       "recommend": opt("--recommend"), "if_no_answer": opt("--if-no-answer"),
                       "options": opt("--option", True) or None, "depends_on": opt("--depends-on", True) or None,
-                      "risky": True if "--risky" in args else None, "executor": opt("--executor")}
+                      "risky": True if "--risky" in args else None, "executor": opt("--executor"), "parent": opt("--parent")}
             if not opt("--direction") or not opt("--title"):
                 print("pantheon task new: нужны --direction и --title", file=sys.stderr)
                 return 2
@@ -6550,6 +6585,8 @@ def main(argv):
         return board()
     if cmd == "sync-answers":
         return sync_answers()
+    if cmd == "autoclose":
+        return autoclose_cmd(rest)
     if cmd == "status":
         return status()
     if cmd == "check":
