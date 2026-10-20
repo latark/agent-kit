@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
@@ -103,6 +104,7 @@ class Home:
     def reset(self):
         """Перед каждым случаем: пустой журнал, пустая сводка, gh отвечает PR без ядра на текущем SHA, проверки зелёные."""
         shutil.rmtree(self.j(".local/state/pantheon/merge-gate"), ignore_errors=True)
+        shutil.rmtree(self.j(".local/state/pantheon/owner-log"), ignore_errors=True)
         for f in os.listdir(self.root):
             if f.startswith(("gh.fail", "gh.log", "gh.api.fail", "gh.ci.fail", "gh.wf.", "gh.view.")):
                 os.remove(self.j(f))
@@ -157,6 +159,16 @@ class Home:
         with open(self.records, "a") as fh:
             for r in recs:
                 fh.write(json.dumps(r) + "\n")
+
+    @property
+    def approve_path(self):
+        return self.j(".local/state/pantheon/owner-log/merge-approve.log")
+
+    def approve(self, line, fresh=False):
+        """Строка согласия владельца (metis-0285) — как её пишет тик; fresh — файл заново."""
+        os.makedirs(os.path.dirname(self.approve_path), mode=0o700, exist_ok=True)
+        with open(self.approve_path, "w" if fresh else "a") as fh:
+            fh.write(line + "\n")
 
     def read(self):
         if not os.path.exists(self.records):
@@ -1229,6 +1241,62 @@ def t_ci(h):
           got == [False, True, None, None], got)
 
 
+def ts(shift=0):
+    """Время строки согласия, как её пишет тик: ISO 8601 с поясом, сейчас + shift секунд."""
+    import datetime
+    return datetime.datetime.fromtimestamp(time.time() + shift).astimezone().isoformat(timespec="seconds")
+
+
+def t_core_touchid(h):
+    """metis-0285: PR ядра проходит шлюз только со строкой `merge-approve <repo>#<N> <sha>` в owner-log (её пишет
+    тик после Touch ID) — для того же репозитория, PR и SHA. Остальной шлюз (тесты, argus) в силе."""
+    kit, sha = "projects/agent-kit", h.sha["agent-kit"]
+    other = "0123456789abcdef0123456789abcdef01234567"
+    cmd = f"gh pr merge 7 --match-head-commit {sha}"
+    h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"), rec("accept", "latark/agent-kit", 7, sha))
+    h.gh(["README.md", "plugins/guard/hooks/merge_gate.py"])
+    merge_case("ядро: без строки merge-approve — отказ", h.pre(cmd, pdir=kit), False, CORE + ": PR задевает")
+    h.approve(f"{ts()} merge-approve latark/agent-kit#7 {other}")
+    merge_case("ядро: строка merge-approve для другого SHA — отказ", h.pre(cmd, pdir=kit), False, CORE + ": PR задевает")
+    for line in (f"{ts()} merge-approve latark/agent-kit#8 {sha}",
+                 f"{ts()} merge-approve latark/tg-read#7 {sha}",
+                 f"merge-approve latark/agent-kit#7 {sha}",
+                 f"{ts()} merge-approve latark/agent-kit#7 {sha} лишнее"):
+        h.approve(line, fresh=True)
+        merge_case(f"ядро: строка не та ({line[26:70]}…) — отказ", h.pre(cmd, pdir=kit), False, CORE + ": PR задевает")
+    h.approve(f"{ts()} merge-approve latark/agent-kit#7 {other}", fresh=True)
+    h.approve(f"{ts()} merge-approve latark/agent-kit#7 {sha}")
+    merge_case("ядро: строка merge-approve для этого SHA — проходит", h.pre(cmd, pdir=kit), True)
+    # срок строки (argus-b, 19.10): сутки; из будущего (дальше 5 минут), без пояса и с неразборным временем — не в силе
+    h.approve(f"{ts(-23 * 3600)} merge-approve latark/agent-kit#7 {sha}", fresh=True)
+    merge_case("ядро: строка 23 ч назад — проходит", h.pre(cmd, pdir=kit), True)
+    for name, t in (("25 ч назад", ts(-25 * 3600)), ("2020 год", "2020-01-01T00:00:00+03:00"),
+                    ("через час", ts(3600)), ("без пояса", ts()[:19]), ("время «x»", "x")):
+        h.approve(f"{t} merge-approve latark/agent-kit#7 {sha}", fresh=True)
+        merge_case(f"ядро: строка «{name}» — отказ", h.pre(cmd, pdir=kit), False, CORE + ": PR задевает")
+    h.approve(f"{ts()} merge-approve latark/agent-kit#7 {sha}", fresh=True)
+    # строка не снимает остального шлюза: другой head у PR, нет «принять»
+    h.gh(["plugins/guard/hooks/merge_gate.py"], head=other)
+    merge_case("ядро: строка есть, но PR на другом коммите — отказ", h.pre(cmd, pdir=kit), False, "на другом коммите")
+    h.gh(["plugins/guard/hooks/merge_gate.py"])
+    shutil.rmtree(os.path.dirname(h.records))
+    h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"))
+    merge_case("ядро: строка есть, но нет «принять» argus — отказ", h.pre(cmd, pdir=kit), False, "нет «принять»")
+    # симлинк вместо файла — согласия нет
+    h.seed(rec("accept", "latark/agent-kit", 7, sha))
+    real = h.j("approve-real.log")
+    shutil.move(h.approve_path, real)
+    os.symlink(real, h.approve_path)
+    merge_case("ядро: merge-approve.log — симлинк — отказ", h.pre(cmd, pdir=kit), False, CORE + ": PR задевает")
+    # Touch ID снимает только Д3, а не проверки GitHub (слияние #79 и #88)
+    os.remove(h.approve_path)
+    shutil.move(real, h.approve_path)
+    merge_case("ядро: строка merge-approve есть — снова проходит", h.pre(cmd, pdir=kit), True)
+    h.ci([dict(RUN_OK, conclusion="FAILURE")], name="agent-kit")
+    merge_case("ядро: строка merge-approve есть, но проверка GitHub красная — отказ", h.pre(cmd, pdir=kit), False,
+               "check-traces красная")
+
+
 def t_hq_gh(h):
     """hq-gh (metis-0247, ревью argus-69b): окну штаба gh pr — только с -R из [merge_repos], без обсуждений и без
     личного. Без tomllib (3.9) [merge_repos] не прочитать — штабу закрыт любой gh pr."""
@@ -1413,7 +1481,8 @@ CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, 
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
-         t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_ci]
+         t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_ci,
+         t_core_touchid]
 
 
 def main():
