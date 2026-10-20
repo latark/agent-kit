@@ -309,7 +309,7 @@ def url(cfg=None):
 
 
 def mcp_registered():
-    r = subprocess.run(["claude", "mcp", "get", "qmd"], capture_output=True, text=True, env=P.run_env(), cwd=P.HOME,
+    r = subprocess.run(["claude", "mcp", "get", "qmd"], capture_output=True, text=True, env=P.claude_env(), cwd=P.HOME,
                        timeout=60)
     return r.returncode == 0, r.stdout
 
@@ -326,9 +326,9 @@ def install():
     else:
         if ok:
             subprocess.run(["claude", "mcp", "remove", "--scope", "user", "qmd"], capture_output=True,
-                           env=P.run_env(), cwd=P.HOME, timeout=60)
+                           env=P.claude_env(), cwd=P.HOME, timeout=60)
         r = subprocess.run(["claude", "mcp", "add", "--scope", "user", "--transport", "http", "qmd", want],
-                           capture_output=True, text=True, env=P.run_env(), cwd=P.HOME, timeout=60)
+                           capture_output=True, text=True, env=P.claude_env(), cwd=P.HOME, timeout=60)
         if r.returncode != 0:
             print(f"claude mcp add не прошёл: {(r.stderr or r.stdout).strip()}", file=sys.stderr)
             return r.returncode
