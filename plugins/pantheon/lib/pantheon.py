@@ -43,13 +43,18 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
-  pantheon check [файл…]                проверить шапки задач по схеме v1 (schema.md)
+  pantheon check [файл…] [--quiet]      проверить шапки задач по схеме v1 (schema.md) и правила metis-0308: задача пачки без mode,
+                                        закрытая по слиянию без release/actual, review больше суток без PR, нет приёмки; done
+                                        без closed — исправляет сам (closed из updated)
+  pantheon autoclose fetch              сетевой проход (задача расписания): gh про слитые и открытые PR из [merge_repos] →
+                                        кэш; лёгкий плановый проход по кэшу закрывает задачи, чей номер в ветке или после «Closes» в теле PR
   pantheon task new --direction D --title T [--type task|story --status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ]
                     --next X --owner O --release R --batch X --night ГГГГ-ММ-ДД --estimate X --actual X
-                    --acceptance принято|вернуть|к владельцу --mode self|single|parallel --mode-why X --touches ПУТЬ …
+                    --acceptance принято|вернуть|к владельцу --parent ПАЧКА --mode self|single|parallel --mode-why X --touches ПУТЬ …
                     --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
                     --recommend "А — потому что …" --if-no-answer "…" --depends-on ID --executor auto|claude|codex]
-                    без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ
+                    без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ;
+                    --batch без --mode (и без mode в шапке) — отказ: режим обязателен при сборке пачки (metis-0308)
   pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"]   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
   pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту
@@ -379,7 +384,7 @@ def clear_once(key):
 JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
-                    "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder", "read"}
+                    "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder", "read", "autoclose"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 # Окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` из schedule.toml идёт с песочницей
 # settings/job-<роль>.json (собирает sandbox_build), а не без неё. Роль вне таблицы тик не запускает. write — куда
@@ -827,6 +832,12 @@ def tick():
         except Exception as e:  # сбой ролей не должен останавливать тик
             alert_once("roles-tick", type(e).__name__, f"личные роли: проход упал ({type(e).__name__}: {e})",
                        "pantheon-tick")
+        if not primary or me == primary:  # общий результат (задачи, gh) — на одном Mac
+            try:
+                autoclose_tick(t)
+            except Exception as e:  # сбой автозакрытия не должен останавливать тик
+                alert_once("autoclose-tick", type(e).__name__, f"автозакрытие задач: проход упал ({type(e).__name__}: {e})",
+                           "pantheon-tick")
 
 
 def tick_heavy(sched, heavy, t):
@@ -5691,7 +5702,11 @@ def board():
         # политика уведомлений — под своей блокировкой на весь проход: сбои из run-job ждут, а не теряются
         with lock("notify"):
             pol = notify_policy(sched)
+            night_end = "08:00"
+            with contextlib.suppress(Exception):
+                night_end = night_mod().config()[1]["end"]
             lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
+                                 night_end=night_end, open_prs=autoclose_mod().open_pr_tasks(path("autoclose.json")),
                                  alert=lambda k, v, text, who="board", note=None: alert_once(k, v, text, who, note,
                                                                                             policy=pol),
                                  primary=primary, projects=projects, policy=pol, marks=marks, registry=registry)
@@ -5705,6 +5720,98 @@ def board():
         print(ln)
     if primary and os.environ.get("PANTHEON_METRICS") != "0":
         board_metrics(T)
+    return 0
+
+
+def autoclose_mod():
+    """lib/autoclose.py — закрытие задач при слиянии их PR (metis-0308)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_autoclose", os.path.join(LIB, "autoclose.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def autoclose_actual(T, tid):
+    """Расход по закрытой задаче из учёта (metrics/tasks.jsonl, metis-0294) → строка actual; нет замера — None."""
+    if os.environ.get("PANTHEON_METRICS") == "0":
+        return None
+    M, A = metrics_mod(), autoclose_mod()
+    ctx = metrics_ctx()
+    with contextlib.suppress(Exception):  # строки закрытия допишет плановый проход доски
+        M.record(ctx, T.load_tasks(PANTHEON, T.WORK_TYPES), tid)
+    rows = [r for r in M.read_rows(ctx.rows_path) if r.get("id") == tid]
+    return A.actual_text(rows[-1]) if rows else None
+
+
+def autoclose_repo_dirs():
+    """{репозиторий: {направления}} из [merge_repos]: задачу закрывает только PR из репозитория её направления."""
+    out = {}
+    for d, repos in metrics_ctx().repos.items():
+        for r in repos if isinstance(repos, list) else []:
+            out.setdefault(r, set()).add(d)
+    return out
+
+
+def autoclose_alerts(repos, errors):
+    """Ошибки gh и закрытия — одна тревога на репозиторий, пока не починится."""
+    for repo in repos:
+        key = "autoclose-" + re.sub(r"[^\w-]", "_", repo)[:50]
+        bad = {k: v for k, v in errors.items() if k == repo or k.startswith(repo + "#")}
+        if bad:
+            alert_once(key, "|".join(sorted(bad)), "автозакрытие задач: " + "; ".join(f"{k}: {v}" for k, v in sorted(bad.items()))[:300],
+                       "pantheon-tick")
+        else:
+            clear_once(key)
+
+
+AUTOCLOSE_STALE = 3600
+
+
+def autoclose_off_reason(t, repo_dirs=None):
+    """Автозакрытие молча не работает: репозитории заданы, а кэша fetch нет или он старше часа → текст, иначе None."""
+    if not (autoclose_repo_dirs() if repo_dirs is None else repo_dirs):
+        return None
+    fetched = autoclose_mod().load_state(path("autoclose-prs.json")).get("fetched")
+    if not isinstance(fetched, (int, float)):
+        return "автозакрытие выключено: нет строки autoclose-fetch в schedule.toml"
+    if t - fetched > AUTOCLOSE_STALE:
+        return "автозакрытие выключено: кэш старше часа (задача autoclose-fetch в schedule.toml не идёт)"
+    return None
+
+
+def autoclose_tick(t):
+    """Лёгкий тик: слитые PR из кэша прохода `pantheon autoclose fetch` → закрытие задач. В сеть не ходит."""
+    A, T = autoclose_mod(), tasks_mod()
+    repo_dirs = autoclose_repo_dirs()
+    if not repo_dirs:
+        return
+    off = autoclose_off_reason(t, repo_dirs)
+    if off:
+        alert_once("autoclose-off", off, off, "pantheon-tick")
+    else:
+        clear_once("autoclose-off")
+    log, errors = A.run(PANTHEON, path("autoclose.json"), path("autoclose-prs.json"), t, repo_dirs, T,
+                        actual_for=lambda tid: autoclose_actual(T, tid))
+    for ln in log:
+        print(f"автозакрытие · {ln}")
+    if log or errors:
+        autoclose_alerts(sorted(repo_dirs), errors)
+
+
+def autoclose_cmd(rest):
+    """pantheon autoclose fetch — сетевой проход: gh про слитые и открытые PR → кэш для лёгкого тика. Задача расписания."""
+    if rest != ["fetch"]:
+        print("использование: pantheon autoclose fetch", file=sys.stderr)
+        return 2
+    repo_dirs = autoclose_repo_dirs()
+    if not repo_dirs:
+        return 0
+    A = autoclose_mod()
+    errors = A.fetch(path("autoclose-prs.json"), path("autoclose.json"), now(), sorted(repo_dirs), env=run_env())
+    autoclose_alerts(sorted(repo_dirs), errors)
+    for k, v in sorted(errors.items()):
+        print(f"автозакрытие · {k}: {v}", file=sys.stderr)
     return 0
 
 
@@ -5848,6 +5955,26 @@ def check(paths=None, quiet=False):
         drift = T.check_projects(BOARD, T.load_tasks(PANTHEON, T.WORK_TYPES), now(), board_registry(T)[2])
         for d in drift:
             print(f"ОШИБКА · Доска/{d}")
+    field_errs, field_warns = [], []
+    if not paths:  # поля «Итогов пачек» и ожидание PR/приёмки (metis-0308)
+        night_end = "08:00"
+        with contextlib.suppress(Exception):
+            night_end = night_mod().config()[1]["end"]
+        tasks_now = T.load_tasks(PANTHEON, T.WORK_TYPES)
+        fixed = T.fix_closed(PANTHEON, now(), tasks_now)
+        if fixed:
+            tasks_now = T.load_tasks(PANTHEON, T.WORK_TYPES)
+        field_errs, field_warns = T.board_problems(tasks_now, now(), night_end, autoclose_mod().open_pr_tasks(path("autoclose.json")))
+        field_errs = [(i, f"status done без closed — проставлен из updated") for i in fixed] + field_errs
+        for tid, text in field_errs:
+            print(f"ОШИБКА · {tid}: {text}")
+        for tid, text in field_warns:
+            if not quiet:
+                print(f"внимание · {tid}: {text}")
+    if not paths and not quiet:
+        off = autoclose_off_reason(now())
+        if off:
+            print(f"предупреждение · {off}")
     view_drift = T.check_views(BOARD) if not paths else []  # у каждого вида Доска.base — строка «что здесь» (metis-0288)
     for d in view_drift:
         print(f"ОШИБКА · {d}")
@@ -5868,8 +5995,14 @@ def check(paths=None, quiet=False):
             alert_once("check-views", "|".join(view_drift), f"доска: {view_drift[0]}", "check")
         else:
             clear_once("check-views")
+        if field_errs:
+            alert_once("check-fields", "|".join(i for i, _ in field_errs),
+                       f"задачи с пустыми полями «Итогов пачек» или done без closed: {', '.join(sorted({i for i, _ in field_errs}))[:200]}",
+                       "check")
+        else:
+            clear_once("check-fields")
         return 0
-    return 1 if bad or drift or view_drift else 0
+    return 1 if bad or drift or view_drift or field_errs else 0
 
 
 def task_cmd(rest):
@@ -5894,7 +6027,7 @@ def task_cmd(rest):
                       "waiting_on": opt("--waiting-on"), "question": opt("--question"), "why": opt("--why"),
                       "recommend": opt("--recommend"), "if_no_answer": opt("--if-no-answer"),
                       "options": opt("--option", True) or None, "depends_on": opt("--depends-on", True) or None,
-                      "risky": True if "--risky" in args else None, "executor": opt("--executor")}
+                      "risky": True if "--risky" in args else None, "executor": opt("--executor"), "parent": opt("--parent")}
             if not opt("--direction") or not opt("--title"):
                 print("pantheon task new: нужны --direction и --title", file=sys.stderr)
                 return 2
@@ -5914,7 +6047,7 @@ def task_cmd(rest):
             tid, changes, note, i = args[0], {}, None, 1
             # --wave — прежнее имя --release (metis-0069): выпуск строкой «pantheon 0.11.50»
             night_flags = {"--release": "release", "--wave": "release", "--batch": "batch", "--night": "night", "--estimate": "estimate",
-                           "--actual": "actual", "--acceptance": "acceptance"}  # ночной цикл: флаги как у --due
+                           "--actual": "actual", "--acceptance": "acceptance", "--mode": "mode", "--mode-why": "mode_why"}  # ночной цикл: флаги как у --due
             while i < len(args):
                 if args[i] == "--note" and i + 1 < len(args):
                     note, i = args[i + 1], i + 2
@@ -6750,6 +6883,8 @@ def main(argv):
         return board()
     if cmd == "sync-answers":
         return sync_answers()
+    if cmd == "autoclose":
+        return autoclose_cmd(rest)
     if cmd == "status":
         return status()
     if cmd == "check":

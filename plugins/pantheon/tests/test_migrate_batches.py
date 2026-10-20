@@ -87,11 +87,11 @@ def main():
     places = ["запас", "10", "6", "2", "5", "3"]  # нарочно вперемешку
     ids = {}
     for pl in places:
-        ids[pl] = new(env, "metis-pantheon", "--title", f"Задача {pl}", "--batch", f"ночь-18.10 · {pl}")
+        ids[pl] = new(env, "metis-pantheon", "--title", f"Задача {pl}", "--batch", f"ночь-18.10 · {pl}", "--mode", "single")
     foreign, _ = new(env, "athena-shop", "--type", "story", "--title", "ночь-18.10")  # то же имя в чужом направлении
-    other = new(env, "athena-shop", "--title", "Чужая", "--batch", "ночь-18.10 · 2")
-    plain = new(env, "metis-pantheon", "--title", "Без места", "--batch", "просто так")
-    pre = new(env, "metis-pantheon", "--title", "Уже в пачке", "--batch", "ночь-18.10 · 9")
+    other = new(env, "athena-shop", "--title", "Чужая", "--batch", "ночь-18.10 · 2", "--mode", "single")
+    plain = new(env, "metis-pantheon", "--title", "Без места", "--batch", "просто так", "--mode", "single")
+    pre = new(env, "metis-pantheon", "--title", "Уже в пачке", "--batch", "ночь-18.10 · 9", "--mode", "single")
     st, _ = new(env, "metis-pantheon", "--type", "story", "--title", "Своя")
     assert run(env, "task", "attach", pre[0], st).returncode == 0
 
@@ -128,7 +128,7 @@ def main():
     after = snapshot(home)
     r = run(env, "task", "migrate-batches", t=T0 + 200)
     check("повтор: переносить нечего, 0 изменений", r.returncode == 0 and "переносить нечего" in r.stdout and snapshot(home) == after, r.stdout)
-    late = new(env, "metis-pantheon", "--title", "Догон", "--batch", "ночь-18.10 · 1")
+    late = new(env, "metis-pantheon", "--title", "Догон", "--batch", "ночь-18.10 · 1", "--mode", "single")
     r = run(env, "task", "migrate-batches", t=T0 + 250)
     tasks = T.load_tasks(home, T.WORK_TYPES)
     check("догон «· 1» после «· 2»: встал первым, остальные не сдвинулись",
