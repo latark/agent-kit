@@ -849,12 +849,38 @@ def test_env_python():
     r = subprocess.run(["/bin/sh", tick], env=env, capture_output=True, text=True, timeout=60)
     check("тик: PANTHEON_PY_DIRS из launchd — кандидат оттуда не запускается",
           not os.path.exists(os.path.join(b.rec, "evil")), (r.returncode, r.stderr[-300:]))
+    # домашняя папка учётной записи не определилась: config.toml тик ищет в /nonexistent, а не от HOME из launchd
+    plug2 = os.path.join(b.tmp, "plugin2")
+    os.makedirs(os.path.join(plug2, "lib"))
+    _shutil.copytree(os.path.join(plug, "bin"), os.path.join(plug2, "bin"))
+    _shutil.copy2(os.path.join(plug, "lib", "run.py"), os.path.join(plug2, "lib", "run.py"))
+    with open(os.path.join(plug2, "lib", "find-python.sh"), "w") as fh:
+        fh.write(f'. "{os.path.join(LIBDIR, "find-python.sh")}"\naccount_home() {{ return 1; }}\n')
+    with open(os.path.join(b.state, "config.toml"), "w") as fh:
+        fh.write(f'python = "{evil_py}"\n')
+    env = {"PATH": tools, "HOME": b.home, "PANTHEON_HOME": b.pantheon, "FAKE_REC": b.rec, "TMPDIR": _ROOT}
+    r = subprocess.run(["/bin/sh", os.path.join(plug2, "bin", "pantheon-tick")], env=env, capture_output=True,
+                       text=True, timeout=60)
+    check("тик: account_home не сработал — config.toml от HOME из launchd не читается",
+          not os.path.exists(os.path.join(b.rec, "evil")), (r.returncode, r.stderr[-300:]))
+    os.unlink(os.path.join(b.state, "config.toml"))
     # а config.toml тик берёт от домашней папки учётной записи (account_home): её realpath, не HOME и не CDPATH
     import pwd
     r = subprocess.run(["/bin/sh", "-c", '. "$1"; account_home', "sh", os.path.join(LIBDIR, "find-python.sh")],
                        env={"PATH": tools, "HOME": b.home, "CDPATH": b.tmp}, capture_output=True, text=True, timeout=30)
     check("тик: домашняя папка для config.toml — realpath pw_dir учётной записи, не HOME из launchd",
           r.stdout.strip() == os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir), (r.stdout, r.stderr))
+    # pw_dir — ссылка: account_home отдаёт её realpath (pwd -P); pw_dir не определился — пусто и код не 0
+    acct_link = os.path.join(b.tmp, "acct-link")
+    os.symlink(b.home, acct_link)
+    fp = os.path.join(LIBDIR, "find-python.sh")
+    r = subprocess.run(["/bin/sh", "-c", '. "$1"; L=$2; _account_dir() { printf "%s\\n" "$L"; }; account_home', "sh", fp,
+                        acct_link], env={"PATH": tools, "HOME": b.tmp}, capture_output=True, text=True, timeout=30)
+    check("account_home: pw_dir-ссылка — её realpath", r.stdout.strip() == os.path.realpath(b.home), (r.stdout, r.stderr))
+    r = subprocess.run(["/bin/sh", "-c", '. "$1"; _account_dir() { return 1; }; account_home', "sh", fp],
+                       env={"PATH": tools, "HOME": b.home}, capture_output=True, text=True, timeout=30)
+    check("account_home: pw_dir не определился — пусто и код не 0", r.returncode != 0 and r.stdout == "",
+          (r.returncode, r.stdout))
 
     # тик → проход: окружение с нуля, PANTHEON_PYTHON — интерпретатор, который нашёл тик (он ставит PANTHEON_PYTHON
     # сам), а не sys.executable: его подменяет PYTHONEXECUTABLE из launchd
@@ -918,7 +944,9 @@ def test_env_home_link():
             "os.environ['PANTHEON_NOTIFY_LOG'] = %r; m.fallback_notify({}, 'окно')\n"
             "print(json.dumps([why, env, p.HOME, p.AI_HOME, p.CURRENT, p.STATE, m.pass_env()]))"
             % (LIBDIR, link, log))
-    env = dict(b.env(T0), HOME=link)
+    # PANTHEON_PYTHON прохода ставит bin/pantheon из pass_env тика: clean_env его оставляет, а щелчок берёт его, не
+    # sys.executable (его подменяет PYTHONEXECUTABLE)
+    env = dict(b.env(T0), HOME=link, PANTHEON_PYTHON=PY311, PYTHONEXECUTABLE=os.path.join(b.tmp, "evil-python"))
     r = subprocess.run([PY311, "-I", "-c", code], env=env, capture_output=True, text=True, timeout=60)
     try:
         why, got, home, ai, cur, state, passed = json.loads(r.stdout.strip().splitlines()[-1])
@@ -928,11 +956,13 @@ def test_env_home_link():
           why is None and got.get("HOME") == real and home == real and ai == os.path.join(real, "ai")
           and cur.startswith(real + os.sep) and state == os.path.realpath(b.state) and passed.get("HOME") == real,
           r.stdout + r.stderr)
+    check("проход без обвязки: clean_env оставляет PANTHEON_PYTHON, pass_env — он, а не sys.executable",
+          got.get("PANTHEON_PYTHON") == PY311 and passed.get("PANTHEON_PYTHON") == PY311, (got, passed))
     note = open(log).read() if os.path.exists(log) else ""
     cmd = note.rstrip().split("|execute:", 1)[-1].rsplit("|", 1)[0] if "|execute:" in note else ""
     words = shlex.split(cmd) if cmd else []
     check("HOME-ссылка: в команде щелчка HOME и bin/pantheon — realpath (current разрешён), не через ссылку",
-          f"HOME={real}" in words and os.path.join(ver, "bin", "pantheon") in words
+          f"HOME={real}" in words and os.path.join(ver, "bin", "pantheon") in words and f"PANTHEON_PYTHON={PY311}" in words
           and not any(link in w for w in words), cmd or r.stderr)
 
 if __name__ == "__main__":

@@ -53,14 +53,23 @@ find_python() {
     return 1
 }
 
-# Домашняя папка учётной записи (pw_dir через ~имя), её realpath — не из HOME: HOME тика задаёт launchd (metis-0303).
-# Не определилась — пусто
-account_home() {
+# Домашняя папка учётной записи (pw_dir через ~имя) как есть, не из HOME. Не определилась — код 1
+_account_dir() {
     _u=$(/usr/bin/id -un 2>/dev/null)
     case $_u in
         '' | -* | *[!A-Za-z0-9._-]*) return 1 ;;
     esac
     eval "_h=~$_u"
+    case $_h in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "$_h"
+}
+
+# Её realpath: HOME тика задаёт launchd (metis-0303), а pw_dir может быть ссылкой. Не определилась — пусто, код 1
+account_home() {
+    _h=$(_account_dir) || return 1
     case $_h in
         /*) ;;
         *) return 1 ;;
