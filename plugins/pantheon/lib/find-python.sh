@@ -52,4 +52,19 @@ find_python() {
     return 1
 }
 
+# Домашняя папка учётной записи (pw_dir через ~имя), её realpath — не из HOME: HOME тика задаёт launchd (metis-0303).
+# Не определилась — пусто
+account_home() {
+    _u=$(/usr/bin/id -un 2>/dev/null)
+    case $_u in
+        '' | -* | *[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    eval "_h=~$_u"
+    case $_h in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    (cd "$_h" 2>/dev/null && pwd -P)
+}
+
 NO_PYTHON_MSG="pantheon: нужен Python 3.11+ (его нет в PATH и в стандартных местах). Поставить: brew install python@3.14 или python.org/downloads; системный /usr/bin/python3 на macOS — 3.9, он не подходит."

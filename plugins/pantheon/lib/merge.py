@@ -33,10 +33,12 @@ PR ядра защит (Д3) агенты не сливают: его слива
 отметкой sha256 исходника lib/touchid.swift рядом (иначе его пересобирает /usr/bin/swiftc с чистым окружением).
 
 Окружение прохода (metis-0303). Его задаёт launchd, а launchd-окружение меняет любой процесс владельца (launchctl
-setenv). Поэтому проход строит окружение с нуля (clean_env): HOME — только если это домашняя папка учётной записи,
-PATH — постоянный SAFE_PATH (gh — из него), STATE и папка Пантеона — от HOME. PANTHEON_STATE, PANTHEON_HOME,
-PANTHEON_NOTIFY_LOG, PANTHEON_FAKE_*, PANTHEON_NOW, GH_* (GH_CONFIG_DIR, GH_TOKEN), XDG_* и всё прочее он не берёт.
-Интерпретатор: тик не берёт PANTHEON_PYTHON и config.toml из PANTHEON_STATE (bin/pantheon-tick), проход тик
+setenv). Поэтому проход строит окружение с нуля (clean_env): HOME — realpath домашней папки учётной записи (pw_dir;
+HOME окружения не она — отказ), PATH — постоянный SAFE_PATH (gh — из него), STATE, папка Пантеона и current — от HOME.
+PANTHEON_STATE, PANTHEON_HOME, PANTHEON_NOTIFY_LOG, PANTHEON_FAKE_*, PANTHEON_NOW, GH_* (GH_CONFIG_DIR, GH_TOKEN),
+XDG_* и всё прочее он не берёт.
+Интерпретатор: тик не берёт PANTHEON_PYTHON, а config.toml читает от домашней папки учётной записи, не от HOME и не
+из PANTHEON_STATE (bin/pantheon-tick); проход тик
 запускает с окружением pass_env (PANTHEON_PYTHON — свой интерпретатор), щелчок — через /usr/bin/env -i с ним же.
 Тестовые подмены — только атрибутом TEST, его ставит тестовая обвязка в своём процессе; из окружения он не
 включается. Остальной тик PANTHEON_STATE ещё берёт, а DYLD_* и прочее launchd-окружение доходит до интерпретатора
@@ -100,21 +102,29 @@ def err(text):
 
 def clean_env():
     """Окружение прохода с нуля: HOME и SAFE_PATH, STATE и папка Пантеона — от HOME. Окружение задаёт launchd, а его
-    меняет любой процесс владельца (launchctl setenv): из него проход не берёт ничего. → None или причина отказа."""
-    home = P.HOME
+    меняет любой процесс владельца (launchctl setenv): из него проход не берёт ничего. HOME — домашняя папка учётной
+    записи (pw_dir), HOME окружения только сверяется с ней: не она — отказ. Дальше идёт realpath, а не путь как есть:
+    ссылку можно перевесить после сверки (argus-b 0303, п. 2) — так в окружение, gh, P.CURRENT и команду щелчка.
+    → None или причина отказа."""
     if TEST is None:
         import pwd
         try:
             owner = pwd.getpwuid(os.getuid()).pw_dir
         except (KeyError, OSError):
             owner = None
-        if not owner or os.path.realpath(owner) != os.path.realpath(home):
-            return f"HOME ({home}) — не домашняя папка учётной записи"
+        if not owner or os.path.realpath(owner) != os.path.realpath(P.HOME):
+            return f"HOME ({P.HOME}) — не домашняя папка учётной записи"
+        home = os.path.realpath(owner)
+    else:
+        home = os.path.realpath(P.HOME)
     env = {"HOME": home, "PATH": SAFE_PATH}
     if TEST is not None:
         env.update(TEST.get("env") or {})
     os.environ.clear()
     os.environ.update(env)
+    P.HOME = home
+    P.AI_HOME = os.path.join(home, "ai")
+    P.CURRENT = os.path.join(home, ".local", "share", "pantheon", "current")
     P.STATE = os.path.realpath(os.path.join(home, ".local", "state", "pantheon"))
     P.PANTHEON = os.path.realpath(os.path.join(P.AI_HOME, "pantheon"))
     return None
@@ -453,7 +463,8 @@ def gh_merge(req):
 def fallback_notify(req, window):
     """Запасной путь: уведомление, щелчок по которому запускает `pantheon merge run --click` от имени владельца.
     window — текст окна (задетое ядро, заголовок PR)."""
-    base = P.CURRENT if os.path.isdir(P.CURRENT) else P.PLUGIN
+    # путь программы — realpath: ссылку current после проверки не перевесить (argus-b 0303, п. 2)
+    base = os.path.realpath(P.CURRENT if os.path.isdir(P.CURRENT) else P.PLUGIN)
     # щелчок запускает команду в окружении уведомления (launchd): окружение и интерпретатор — свои, через env -i
     env = " ".join(shlex.quote(f"{k}={v}") for k, v in pass_env().items())
     cmd = f"/usr/bin/env -i {env} {shlex.quote(os.path.join(base, 'bin', 'pantheon'))} merge run --click"

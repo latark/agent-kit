@@ -784,12 +784,14 @@ def test_env_python():
     words = shlex.split(cmd) if cmd else []
     py = [w[len("PANTHEON_PYTHON="):] for w in words if w.startswith("PANTHEON_PYTHON=")]
     check("щелчок: /usr/bin/env -i, HOME, постоянный PATH и PANTHEON_PYTHON прохода, а не окружение уведомления",
-          words[:2] == ["/usr/bin/env", "-i"] and f"HOME={b.home}" in words
+          words[:2] == ["/usr/bin/env", "-i"] and f"HOME={os.path.realpath(b.home)}" in words
           and any(w.startswith("PATH=/usr/bin:/bin") for w in words) and len(py) == 1
           and os.path.realpath(py[0]) == os.path.realpath(PY311) and words[-2:] == ["run", "--click"], cmd)
 
-    # тик: интерпретатор из PANTHEON_PYTHON и из config.toml чужого PANTHEON_STATE не запускается. PATH — только
-    # нужные утилиты, без python: подходящего нет — тик выходит, настоящий проход не идёт
+    # тик: интерпретатор из PANTHEON_PYTHON, из config.toml чужого PANTHEON_STATE и из config.toml от HOME (HOME тоже
+    # задаёт launchd; argus-b 0303, п. 1) не запускается. Тик — копия с заглушкой lib/run.py: config.toml он читает
+    # от настоящей домашней папки учётной записи, и найденный там интерпретатор запустит только заглушку, а не тик.
+    # PATH — только нужные утилиты, без python
     tools = os.path.join(b.tmp, "tools")
     os.makedirs(tools)
     for u in ("dirname", "readlink", "sed", "head", "date", "cat", "mkdir"):
@@ -797,17 +799,34 @@ def test_env_python():
     evil_py = script(os.path.join(b.tmp, "evil-python"), EVIL)
     evil_state = os.path.join(b.tmp, "evil-state")
     os.makedirs(evil_state)
-    with open(os.path.join(evil_state, "config.toml"), "w") as fh:
-        fh.write(f'python = "{evil_py}"\n')
-    tick = os.path.join(os.path.dirname(HERE), "bin", "pantheon-tick")
+    for d in (evil_state, b.state):   # b.state = HOME/.local/state/pantheon
+        with open(os.path.join(d, "config.toml"), "w") as fh:
+            fh.write(f'python = "{evil_py}"\n')
+    plug = os.path.join(b.tmp, "plugin")
+    os.makedirs(os.path.join(plug, "bin"))
+    os.makedirs(os.path.join(plug, "lib"))
+    tick = os.path.join(plug, "bin", "pantheon-tick")
+    _shutil.copy2(os.path.join(os.path.dirname(HERE), "bin", "pantheon-tick"), tick)
+    _shutil.copy2(os.path.join(LIBDIR, "find-python.sh"), os.path.join(plug, "lib", "find-python.sh"))
+    with open(os.path.join(plug, "lib", "run.py"), "w") as fh:
+        fh.write("import os, sys\nopen(os.path.join(os.environ['FAKE_REC'], 'tick-ran'), 'a')"
+                 ".write(sys.executable + '\\n')\n")
     for name, extra in (("PANTHEON_PYTHON", {"PANTHEON_PYTHON": evil_py}),
-                        ("config.toml из PANTHEON_STATE", {"PANTHEON_STATE": evil_state})):
+                        ("config.toml из PANTHEON_STATE", {"PANTHEON_STATE": evil_state}),
+                        ("config.toml от HOME", {})):
         env = {"PATH": tools, "HOME": b.home, "PANTHEON_HOME": b.pantheon, "FAKE_REC": b.rec, "TMPDIR": _ROOT,
                "PANTHEON_PY_DIRS": os.path.join(b.tmp, "nowhere")}
         env.update(extra)
         r = subprocess.run(["/bin/sh", tick], env=env, capture_output=True, text=True, timeout=60)
         check(f"тик: {name} из launchd — интерпретатор не запускается",
-              not os.path.exists(os.path.join(b.rec, "evil")) and r.returncode != 0, (r.returncode, r.stderr[-300:]))
+              not os.path.exists(os.path.join(b.rec, "evil")), (r.returncode, r.stderr[-300:]))
+    os.unlink(os.path.join(b.state, "config.toml"))
+    # а config.toml тик берёт от домашней папки учётной записи (account_home): её realpath, не HOME и не CDPATH
+    import pwd
+    r = subprocess.run(["/bin/sh", "-c", '. "$1"; account_home', "sh", os.path.join(LIBDIR, "find-python.sh")],
+                       env={"PATH": tools, "HOME": b.home, "CDPATH": b.tmp}, capture_output=True, text=True, timeout=30)
+    check("тик: домашняя папка для config.toml — realpath pw_dir учётной записи, не HOME из launchd",
+          r.stdout.strip() == os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir), (r.stdout, r.stderr))
 
     # тик → проход: окружение с нуля, PANTHEON_PYTHON — интерпретатор тика
     code = ("import json, sys; sys.path.insert(0, %r); import pantheon as p; got = []\n"
@@ -847,8 +866,44 @@ def test_env_clean():
     except (ValueError, IndexError):
         why, got, state, pan, safe = "?", {}, None, None, None
     check("clean_env: окружение = HOME и постоянный PATH, STATE и Пантеон — от HOME",
-          why is None and got == {"HOME": b.home, "PATH": safe} and state == os.path.realpath(b.state)
-          and pan == os.path.realpath(b.pantheon), r.stdout + r.stderr)
+          why is None and got == {"HOME": os.path.realpath(b.home), "PATH": safe}
+          and state == os.path.realpath(b.state) and pan == os.path.realpath(b.pantheon), r.stdout + r.stderr)
+
+
+def test_env_home_link():
+    """argus-b 0303, п. 2: HOME — ссылка на домашнюю папку учётной записи. Сверка проходит, но дальше — realpath:
+    в окружение, gh, P.CURRENT и команду щелчка путь через ссылку не идёт (её можно перевесить после сверки)."""
+    b = Box()
+    real = os.path.realpath(b.home)
+    ver = os.path.join(real, ".local", "share", "pantheon", "versions", "1")
+    os.makedirs(os.path.join(ver, "bin"))
+    os.symlink(ver, os.path.join(real, ".local", "share", "pantheon", "current"))
+    link = os.path.join(b.tmp, "home-link")
+    os.symlink(b.home, link)
+    log = os.path.join(b.tmp, "notify.log")
+    # без обвязки TEST: сверка с учётной записью идёт, pw_dir учётной записи — та же ссылка
+    code = ("import json, os, sys, types; sys.path.insert(0, %r); import pwd\n"
+            "pwd.getpwuid = lambda uid: types.SimpleNamespace(pw_dir=%r)\n"
+            "import pantheon as p; m = p.merge_mod(); why = m.clean_env(); env = dict(os.environ)\n"
+            "os.environ['PANTHEON_NOTIFY_LOG'] = %r; m.fallback_notify({}, 'окно')\n"
+            "print(json.dumps([why, env, p.HOME, p.AI_HOME, p.CURRENT, p.STATE, m.pass_env()]))"
+            % (LIBDIR, link, log))
+    env = dict(b.env(T0), HOME=link)
+    r = subprocess.run([PY311, "-I", "-c", code], env=env, capture_output=True, text=True, timeout=60)
+    try:
+        why, got, home, ai, cur, state, passed = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        why, got, home, ai, cur, state, passed = "?", {}, None, None, None, None, {}
+    check("HOME-ссылка: сверка проходит, в окружение, P.HOME, AI_HOME, CURRENT, STATE и pass_env — realpath",
+          why is None and got.get("HOME") == real and home == real and ai == os.path.join(real, "ai")
+          and cur.startswith(real + os.sep) and state == os.path.realpath(b.state) and passed.get("HOME") == real,
+          r.stdout + r.stderr)
+    note = open(log).read() if os.path.exists(log) else ""
+    cmd = note.rstrip().split("|execute:", 1)[-1].rsplit("|", 1)[0] if "|execute:" in note else ""
+    words = shlex.split(cmd) if cmd else []
+    check("HOME-ссылка: в команде щелчка HOME и bin/pantheon — realpath (current разрешён), не через ссылку",
+          f"HOME={real}" in words and os.path.join(ver, "bin", "pantheon") in words
+          and not any(link in w for w in words), cmd or r.stderr)
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
