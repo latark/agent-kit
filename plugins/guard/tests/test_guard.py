@@ -1227,6 +1227,18 @@ def main():
             "tg-readd kickstart", "tg-readd status",
             "grep -rn launchctl plugins/")],
         ("launchd-env: владелец launchctl setenv — можно", "allow", ".", "", False, B("launchctl setenv X 1")),
+        # argus-79f-b: кавычка обрывает имя переменной — $L""ctl это $L и ctl (launchctl), а не $Lctl;
+        # у субагента и у главной сессии окна роли. Безобидные пустые кавычки отказа не дают.
+        *[(f"launchd-env: {who} {c!r} — отказ (79f-b)", "deny", br, a, sub, B(c), None, w)
+          for who, a, sub, w in (("dev-opus", "dev-opus", True, None), ("окно hq", "", False, HQ),
+                                 ("окно metis-pantheon", "", False, {"PANTHEON_ROLE": "metis-pantheon"}))
+          for c in ('L=launch; $L""ctl setenv PANTHEON_STATE /tmp/x',
+                    'L=launch; "$L""ctl" bootstrap gui/501 /tmp/x.plist', 'L=launch; $L""ctl kickstart -k gui/501/x',
+                    "L=launch; $L''ctl setenv PANTHEON_STATE /tmp/x", "L=launch; $L$''ctl setenv PANTHEON_STATE /tmp/x")],
+        *[(f"launchd-env: {who} {c!r} — можно (79f-b)", "allow", br, a, sub, B(c), None, w)
+          for who, a, sub, w in (("dev-opus", "dev-opus", True, None), ("окно hq", "", False, HQ),
+                                 ("окно metis-pantheon", "", False, {"PANTHEON_ROLE": "metis-pantheon"}))
+          for c in ('echo ""', 'x=""; echo $x""y', "git commit -m ''")],
         # ревью 84f п. 1: главная сессия фонового окна — agent_type в событии нет, роль только из PANTHEON_ROLE
         *[(f"launchd-env: окно {w['PANTHEON_ROLE']} без agent_type, {c!r} — отказ", "deny", br, "", False, B(c), None,
            w) for w in (HQ, TL) for c in ("launchctl setenv PANTHEON_TOUCHID 0", "swiftc x.swift")],
