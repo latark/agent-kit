@@ -6262,10 +6262,17 @@ def usage_report(rest):
         print(r.stderr[-2000:], file=sys.stderr)
         return r.returncode
     out = os.path.join(PANTHEON, "metrics", "usage", stamp()[:10] + ".txt")
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    write_atomic(out, r.stdout)
     total = next((ln for ln in r.stdout.splitlines() if ln.startswith("Итого")), "").strip()
-    alert(f"отчёт расхода за {days} дн.: {total or 'готов'} — {out.replace(HOME, '~')}", "usage")
+    try:
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        write_atomic(out, r.stdout)
+        alert(f"отчёт расхода за {days} дн.: {total or 'готов'} — {out.replace(HOME, '~')}", "usage")
+    except OSError as e:
+        # metis-0354: в песочнице окна роли metrics/usage и alerts.md закрыты на запись, а расход недели нужен —
+        # отчёт печатается целиком, отказ записи — одной строкой в stderr, код 0.
+        sys.stdout.write(r.stdout)
+        print(f"отчёт не сохранён: {e.strerror or e}", file=sys.stderr)
+        return 0
     print(out)
     return 0
 
