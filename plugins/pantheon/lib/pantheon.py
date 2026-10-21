@@ -85,7 +85,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском; без техперезапуска —
                                         метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code
-  pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (плановый проход раз в неделю)
+  pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (плановый проход раз в неделю);
+                                        запись закрыта (окно роли) — отчёт в stdout, причина в stderr, код 1
   pantheon metrics sync|summary|run     учёт по задачам: строки закрытых задач в ~/ai/pantheon/metrics/tasks.jsonl
                                         (пишет и `task set status=done|dropped`), свод недели — week-<неделя>.md
                                         и заметки Пульта; summary — свод в окно
@@ -6254,7 +6255,9 @@ def watch_cmd(cmd, rest):
 
 def usage_report(rest):
     """pantheon usage [дней] — отчёт расхода (scripts/usage.py) в ~/ai/pantheon/metrics/usage/<дата>.txt, строка в
-    тревогах (SCHED-11: раз в неделю)."""
+    тревогах (SCHED-11: раз в неделю). Две записи независимы: файл не записан — отчёт целиком в stdout и «отчёт не
+    сохранён: …» в stderr; тревога не записана — «тревога не записана: …» в stderr; хоть одна не удалась — код 1
+    (плановый проход поднимет тревогу), отчёт при этом напечатан."""
     days = rest[0] if rest and rest[0].isdigit() else "7"
     r = subprocess.run([sys.executable, "-I", os.path.join(PLUGIN, "scripts", "usage.py"), days], capture_output=True,
                        text=True, timeout=600)
@@ -6262,12 +6265,32 @@ def usage_report(rest):
         print(r.stderr[-2000:], file=sys.stderr)
         return r.returncode
     out = os.path.join(PANTHEON, "metrics", "usage", stamp()[:10] + ".txt")
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    write_atomic(out, r.stdout)
     total = next((ln for ln in r.stdout.splitlines() if ln.startswith("Итого")), "").strip()
-    alert(f"отчёт расхода за {days} дн.: {total or 'готов'} — {out.replace(HOME, '~')}", "usage")
-    print(out)
-    return 0
+    code = 0
+    saved = False
+    try:
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        write_atomic(out, r.stdout)
+        saved = True
+    except OSError as e:
+        # metis-0354: в песочнице окна роли metrics/usage закрыт на запись, а расход недели нужен — отчёт целиком
+        # в stdout, причина в stderr, код 1 (плановый проход поднимет тревогу, сбой не теряется).
+        # stdout буферизован в трубе run_job и выходит при завершении, поэтому flush до stderr: причина остаётся
+        # последней строкой вывода — в тревоге «упала» и в хвосте журнала.
+        sys.stdout.write(r.stdout)
+        sys.stdout.flush()
+        print(f"отчёт не сохранён: {e.strerror or e}", file=sys.stderr)
+        sys.stderr.flush()
+        code = 1
+    if saved:  # тревога со ссылкой на файл — только если файл есть; иначе сбой поднимет тик по коду 1
+        try:
+            alert(f"отчёт расхода за {days} дн.: {total or 'готов'} — {out.replace(HOME, '~')}", "usage")
+        except OSError as e:
+            print(f"тревога не записана: {e.strerror or e}", file=sys.stderr)
+            code = 1
+    if saved:
+        print(out)
+    return code
 
 
 # --- обновления плагинов agent-kit (metis-0052) ----------------------------------------------------------------
