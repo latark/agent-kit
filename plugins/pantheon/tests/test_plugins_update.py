@@ -381,9 +381,10 @@ def main():
           rj.get("plugins") == ["x"] and float(rj.get("since") or 0) > 0 and rj.get("done") == [], rj)
     check("зелёные: строка в журнале, метки нет", "x 1.0.0 → 1.1.0: обновлён" in e.journal() and "x" not in e.marks())
     log = os.path.join(e.state, "plugins", "x-1.1.0.log")
-    check("зелёные: в логе обе версии, helper.py не гонялся",
-          os.path.exists(log) and "новая 1.1.0" in open(log).read() and "база 1.0.0" in open(log).read()
-          and "helper.py" not in open(log).read())
+    ltxt = open(log).read() if os.path.exists(log) else ""
+    check("зелёные: в логе прогон новой версии и строка «база 1.0.0 … не гоняются» (базу не гоняли), helper.py не гонялся",
+          "===== новая 1.1.0 · " in ltxt and "===== база 1.0.0 · " not in ltxt
+          and "база 1.0.0: " in ltxt and "не гоняются" in ltxt and "helper.py" not in ltxt, ltxt[-300:])
     check("зелёные: временные копии убраны (своя TMPDIR и STATE/plugins/tmp пусты)", e.leftovers() == [],
           e.leftovers())
     check("зелёные: без критической тревоги (хеш кэша с .in_use совпал с проверенной копией)",
