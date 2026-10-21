@@ -300,6 +300,39 @@ def main():
           "осталась среди фоновых сессий Claude Code" in r.stderr and "unpushed" in r.stderr
           and "rm-refused\tathena-shop\ta1" in open(os.path.join(state, "logs", "start.log")).read()
           and "прежняя сессия a1 осталась среди фоновых сессий Claude Code" in al)
+    # metis-0348: «blocked» без процесса и без вопроса (needs) — сессию снял Claude Code (noProcess, metis-0250); её
+    # pantheon start считает мёртвой: запускает новую без --restart и потом claude rm прежней. С needs — ждёт вас.
+    dead_id = "a7dead"  # id задания — не короче 4 знаков (claude_job_state)
+    daemon_dir, jobs_dead = os.path.join(tmp, ".claude", "daemon"), os.path.join(tmp, ".claude", "jobs", dead_id)
+    os.makedirs(daemon_dir, exist_ok=True)
+    os.makedirs(jobs_dead, exist_ok=True)
+
+    def put(p, data):
+        with open(p, "w") as fh:
+            json.dump(data, fh, ensure_ascii=False)
+
+    put(os.path.join(daemon_dir, "roster.json"), {"workers": {"other": {"pid": 999999}}})
+    blocked_dead = [{"id": dead_id, "name": "athena-shop", "state": "blocked", "sessionId": "s7", "cwd": "/x",
+                     "startedAt": 1, "kind": "background"}]
+    open(log, "w").close()
+    put(os.path.join(jobs_dead, "state.json"), {"state": "blocked"})
+    put(agents_file, blocked_dead)
+    r = run("start", "athena-shop", "дальше")
+    c = [x["argv"] for x in calls()]
+    check("start: blocked без процесса и без needs (noProcess) — мёртвая: без --restart запускает новую, затем "
+          "stop + claude rm прежней (metis-0348)",
+          r.returncode == 0 and c and c[0][:1] == ["--bg"] and "athena-shop" in c[0]
+          and c[1:] == [["stop", dead_id], ["rm", dead_id]]
+          and f"dead-blocked\tathena-shop\t{dead_id}" in open(os.path.join(state, "logs", "start.log")).read())
+    open(log, "w").close()
+    put(os.path.join(jobs_dead, "state.json"), {"state": "blocked", "needs": "какой вариант выбрать?"})
+    put(agents_file, blocked_dead)
+    r = run("start", "athena-shop", "дальше")
+    check("start: blocked без процесса, но с вопросом (needs) — ждёт вас: отказ как раньше, ничего не запускает и "
+          "не удаляет (metis-0348)",
+          r.returncode == 1 and "уже работает" in r.stderr and calls() == [])
+    os.remove(os.path.join(daemon_dir, "roster.json"))
+    _shutil.rmtree(os.path.join(tmp, ".claude", "jobs"))
     alerts_md = os.path.join(home, "alerts.md")
     said = lambda: open(alerts_md).read().count("без вашего слова") if os.path.exists(alerts_md) else 0
     check("start --from zeus без вашего слова в окне Зевса — тревога (лазейка видна)", said() == 1)

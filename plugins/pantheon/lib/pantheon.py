@@ -3517,6 +3517,15 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     agents = agents_all()
     same = [a for a in agents or [] if a.get("name") == name]
     live = live_copies(name, agents)
+    # metis-0348: «blocked» без процесса и без вопроса (noProcess, reconcile_agents) — сессию снял Claude Code, ждать
+    # ей нечего: она мёртвая и запуску не мешает, --restart и владелец не нужны. Её `claude rm` — rm_previous после
+    # успешного старта новой. С вопросом (needs) noProcess не ставится — такая по-прежнему ждёт вас (отказ ниже).
+    dead = [a for a in live if a.get("noProcess") and a.get("id")]
+    if dead:
+        live = [a for a in live if a not in dead]
+        if not dry:
+            for a in dead:
+                start_log(f"dead-blocked\t{name}\t{a['id']}\tнет процесса и вопроса — заменяется новой")
     if live and not dry and (not restart or any(not a.get("id") for a in live)):
         print(f"pantheon start: {copies_message(name, live)}", file=sys.stderr)
         return 1
