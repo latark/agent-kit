@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """pantheon usage в песочнице окна роли (metis-0354): PANTHEON и состояние недоступны для записи — отчёт печатается
-целиком в stdout, в stderr строка «отчёт не сохранён: …», код 0. Запись доступна — поведение прежнее (путь файла).
+целиком в stdout, в stderr «отчёт не сохранён: …», код 1 (плановый проход поднимет тревогу). Закрыт только alerts.md —
+файл сохранён, путь в stdout, в stderr «тревога не записана», код 1. Запись доступна — поведение прежнее (путь файла).
 
 usage.py подменён заглушкой в временной копии PLUGIN. pantheon.py идёт в этом же процессе (3.11+; на 3.9 — перезапуск).
 Запуск: python3 -I plugins/pantheon/tests/test_usage_ro.py  (код выхода 0 — все прошли)
@@ -89,10 +90,33 @@ if os.access(PAN, os.W_OK):
     print("пропуск: запись в read-only папку не закрывается (root?)")
 else:
     code, out, err = run()
-    check("read-only: код 0", code == 0, code)
+    check("read-only: код 1", code == 1, code)
     check("read-only: отчёт целиком в stdout", out == REPORT, out)
     check("read-only: строка «отчёт не сохранён: …» в stderr", "отчёт не сохранён: " in err, err)
     check("read-only: ничего не создано", not os.path.exists(os.path.join(PAN, "metrics")))
+for d in (PAN, STATE):
+    os.chmod(d, 0o755)
+
+# 3. закрыт только alerts.md (окно штаба): файл сохранён, путь в stdout, «не сохранён» нет, код 1
+shutil.rmtree(os.path.join(PAN, "metrics"), True)
+AL = os.path.join(PAN, "alerts.md")
+if os.path.lexists(AL):
+    os.remove(AL)
+os.mkdir(AL)  # alert() не может писать в папку — как отказ на alerts.md
+code, out, err = run()
+check("только alerts: код 1", code == 1, code)
+check("только alerts: файл сохранён, путь в stdout", out.strip() == f and open(f).read() == REPORT, out)
+check("только alerts: «тревога не записана» в stderr, «не сохранён» нет",
+      "тревога не записана: " in err and "не сохранён" not in err, err)
+os.rmdir(AL)
+
+# 4. закрыто всё ещё раз: код 1 и отчёт в stdout (плановый проход по коду видит сбой)
+shutil.rmtree(os.path.join(PAN, "metrics"), True)
+for d in (PAN, STATE):
+    os.chmod(d, stat.S_IRUSR | stat.S_IXUSR)
+if not os.access(PAN, os.W_OK):
+    code, out, err = run()
+    check("всё закрыто: код 1, отчёт в stdout", code == 1 and out == REPORT, (code, out))
 for d in (PAN, STATE):
     os.chmod(d, 0o755)
 
