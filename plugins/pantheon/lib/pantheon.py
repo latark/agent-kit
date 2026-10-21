@@ -397,7 +397,41 @@ def alert(text, who="pantheon"):
             if new:
                 fh.write("# Тревоги\n\nТолько дописывание: `pantheon alert`. Строка — время · кто · что. "
                          "В «ждёт вас» на доске переносит Пританей; старше 30 дней уносит `pantheon archive`.\n\n")
+            if "ждёт вас" in text and _alert_dup(p, who, text):  # metis-0230: та же «ждёт вас» за сутки — одна
+                return
             fh.write(f"{stamp()} · {who} · {text}\n")
+
+
+ALERT_WINDOW = 86400  # metis-0230: окно слияния одинаковых строк и тревог о файле
+
+
+def _alert_dup(p, who, text):
+    """Такая же строка «кто · что» уже есть в alerts.md моложе ALERT_WINDOW (читается хвост файла)."""
+    tail = f" · {who} · {text}"
+    since = stamp(now() - ALERT_WINDOW)
+    with contextlib.suppress(OSError):
+        with open(p, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 65536))
+            for ln in fh.read().decode("utf-8", "replace").splitlines():
+                if ln[:16] >= since and ln[16:] == tail and re.match(r"\d{4}-\d\d-\d\d \d\d:\d\d$", ln[:16]):
+                    return True
+    return False
+
+
+def alert_daily(key, text, who="pantheon", window=ALERT_WINDOW):
+    """Тревога о файле или состоянии не чаще раза в window секунд на ключ, как бы ни менялся текст (metis-0230)."""
+    mark = once_path("daily-" + key)
+    t = now()
+    try:
+        last = float(open(mark).read())
+        if last <= t < last + window:  # замер из будущего (часы назад) окно не продлевает
+            return
+    except (OSError, ValueError):
+        pass
+    alert(text, who)
+    os.makedirs(path("once"), exist_ok=True)
+    open(mark, "w").write(str(t))
 
 
 def alert_once(key, value, text, who="pantheon", note=None, group=None, policy=None, critical=False):
@@ -5958,7 +5992,7 @@ STATE_FILE_LIMIT = statelen_mod().STATE_FILE_LIMIT
 
 def _check_long_state(quiet):
     """STATUS.md направлений и board.md штаба длиннее STATE_FILE_LIMIT знаков (символов, не байт): одна строка на
-    файл. Без --quiet — печать; с ним (тик) — alert_once на файл, не чаще раза на новый размер."""
+    файл. Без --quiet — печать; с ним (тик) — alert_daily: не чаще раза в сутки на файл, размер не в счёт."""
     sl = statelen_mod()
     for f in sl.state_files(PANTHEON):
         n = sl.length(f)
@@ -5966,14 +6000,12 @@ def _check_long_state(quiet):
             continue
         key = "state-long-" + re.sub(r"[^\w-]", "_", os.path.relpath(f, PANTHEON))[:60]
         if n <= STATE_FILE_LIMIT:
-            if quiet:
-                clear_once(key)
             continue
         shown = f.replace(HOME, "~", 1) if f.startswith(HOME + os.sep) else f
         text = (f"{shown}: {n} знаков при пределе {STATE_FILE_LIMIT} — после сжатия контекста хук кладёт только "
                 f"первые ~9 800, хвост теряется: сократить, старое — в archive/")
         if quiet:
-            alert_once(key, n, text, "check")
+            alert_daily(key, text, "check")
         else:
             print(f"предупреждение · {text}")
 

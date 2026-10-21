@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _py311 import PY311  # CLI pantheon — только на Python 3.11+
 import tempfile
@@ -177,10 +178,22 @@ def main():
     a2 = open(alerts, encoding="utf-8").read()
     check("0160: тот же размер — повторной тревоги нет", a2 == a1)
     open(stp, "w", encoding="utf-8").write("ж" * 9600)
-    run(env, "check", "--quiet")
+    run(env, "check", "--quiet", t=T0 + 3600)
     a3 = open(alerts, encoding="utf-8").read()
-    check("0160: размер сменился — новая тревога по этому файлу", a3.count("знаков при пределе 9000") == 3
-          and "9600 знаков" in a3, a3)
+    check("0230: два прогона за сутки, размер вырос — по файлу всё ещё одна строка", a3 == a1, a3)
+    run(env, "check", "--quiet", t=T0 + 86400 + 7200)
+    a4 = open(alerts, encoding="utf-8").read()
+    check("0230: через >24 ч — вторая строка по каждому файлу, с новым размером",
+          a4.count("знаков при пределе 9000") == 4 and "9600 знаков" in a4, a4)
+    subprocess.run([PY311, "-I", CLI, "alert", "agent ждёт вас: claude attach x", "--from", "watch"], env=env,
+                       capture_output=True, text=True)
+    subprocess.run([PY311, "-I", CLI, "alert", "agent ждёт вас: claude attach x", "--from", "watch"], env=env,
+                   capture_output=True, text=True)
+    a5 = open(alerts, encoding="utf-8").read()
+    check("0230: две одинаковые строки «ждёт вас» — одна", a5.count("agent ждёт вас: claude attach x") == 1, a5)
+    subprocess.run([PY311, "-I", CLI, "alert", "agent ждёт вас: claude attach y", "--from", "watch"], env=env,
+                   capture_output=True, text=True)
+    check("0230: другая строка не сливается", open(alerts, encoding="utf-8").read().count("claude attach") == 2)
     os.remove(stp)
     os.remove(okp)
     os.remove(bdp)
