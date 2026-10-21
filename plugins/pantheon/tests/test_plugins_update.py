@@ -391,7 +391,8 @@ def main():
     e.close()
 
     # Подпроцесс тестов получает TMPDIR внутри временной папки прогона (STATE/plugins/tmp), а не общий
-    e = Env("1.0.0", "1.1.0", REC_TMPDIR, REC_TMPDIR)
+    # падение у обеих версий одинаковое: база гоняется (metis-0358) и тоже пишет свой TMPDIR
+    e = Env("1.0.0", "1.1.0", REC_TMPDIR + OLD_FAIL_RC, REC_TMPDIR + OLD_FAIL_RC)
     rec = os.path.join(e.tmp, "rec")
     r = e.run(extra={"REC_FILE": rec})
     seen = open(rec + ".t").read().split() if os.path.exists(rec + ".t") else []
@@ -527,6 +528,58 @@ def main():
     r = e.run()
     check("старое падение и у базы: update вызван, код 0",
           r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), f"{r.returncode} {e.alerts()!r}")
+    log = os.path.join(e.state, "plugins", "x-1.1.0.log")
+    text = open(log, encoding="utf-8").read() if os.path.exists(log) else ""
+    check("старое падение и у базы: база гонялась по упавшему файлу на каждом python (прогонов базы столько же)",
+          e.runs() >= 2 and text.count("===== база 1.0.0 · ") == text.count("===== новая 1.1.0 · ") == e.runs() // 2,
+          f"{e.runs()} {text[-400:]!r}")
+    e.close()
+
+    # metis-0358: новая чиста — база не гоняется (раньше шла по всем файлам и не успевала в срок прогона)
+    e = Env("1.0.0", "1.1.0", OLD_FAIL, OK)
+    r = e.run()
+    log = os.path.join(e.state, "plugins", "x-1.1.0.log")
+    text = open(log, encoding="utf-8").read() if os.path.exists(log) else ""
+    check("новая чиста: база не гоняется ни на одном python, update вызван, в логе — сколько файлов базы пропущено",
+          r.returncode == 0 and e.runs() == text.count("===== новая 1.1.0 · ") > 0
+          and "===== база 1.0.0 · " not in text and "plugin update x@agent-kit" in e.argv()
+          and f"база 1.0.0: {e.runs()} файл(ов) не гоняются" in text,
+          f"{r.returncode} {e.runs()} {text[-400:]!r}")
+    e.close()
+
+    # metis-0358: два файла, у новой упал один; база — только по нему, а срок базы — остаток после новой версии.
+    # Подпроцесс подменён: новая «тратит» 1700 из 1800 с, базе остаётся 100 с, одинаковое падение гасится.
+    e = Env("1.0.0", "1.1.0", OLD_FAIL_RC, OLD_FAIL_RC)
+    base = os.path.join(e.home, ".claude", "plugins", "cache", "agent-kit", "x", "1.0.0")
+    for d in (e.src, base):
+        e.write(os.path.join(d, "tests", "test_b.py"), OK)
+    got = e.py("""import json, os, subprocess, time
+clock = [1000.0]
+P.time.monotonic = lambda: clock[0]
+P._pythons_for = lambda name: ["py"]
+seen = []
+def fake(cmd, cwd=None, timeout=None, **kw):
+    who = "new" if "/new/" in cwd else "base"
+    f = cmd[-1].split("/")[-1]
+    seen.append([who, f, round(timeout)])
+    if who == "new" and f == "test_a.py":
+        clock[0] += 1700
+    if f == "test_a.py":
+        return subprocess.CompletedProcess(cmd, 1, stdout=b"FAIL old\\n")
+    return subprocess.CompletedProcess(cmd, 0, stdout=b"ok\\n")
+P.subprocess.run = fake
+os.makedirs(P.path("plugins", "tmp"), exist_ok=True)
+log, digest, fresh = P._plugin_check("x", "1.0.0", "1.1.0", sys.argv[2], sys.argv[3], {})
+print(json.dumps({"seen": seen, "fresh": sorted(k[2] for k in fresh)}))""", e.src, base)
+    try:
+        g = json.loads(got[-1])
+    except (ValueError, IndexError):
+        g = {}
+    check("база только по упавшему у новой файлу: test_b (чистый у новой) у базы не гоняется",
+          [x[:2] for x in g.get("seen", [])] == [["new", "test_a.py"], ["new", "test_b.py"], ["base", "test_a.py"]],
+          got)
+    check("срок базы — остаток после новой: 1800 − 1700 = 100 с, одинаковое падение базой погашено",
+          g.get("seen", [[0, 0, 0]] * 3)[-1][2] == 100 and g.get("fresh") == [], got)
     e.close()
 
     # Нет папки установленной версии — база пустая, старое падение уже красное
@@ -636,10 +689,12 @@ new = C({{("py", "t.py", "t.py: таймаут"): 1, ("py", "t.py", "FAIL x"): 1
 base = C({{("py", "t.py", "t.py: срок прогона"): 1, ("py", "t.py", "FAIL x"): 1, ("py", "u.py", "FAIL old"): 1}})
 fresh, unk = p._fresh_failures(new, base)
 clean, unk2 = p._fresh_failures(C({{("py", "u.py", "FAIL old"): 1}}), C({{("py", "u.py", "FAIL old"): 1}}))
+tg = p._base_targets(C({{("py", "a.py", "FAIL x"): 1, ("py", "t.py", "t.py: таймаут"): 1, ("py", "t.py", "FAIL y"): 1,
+                         ("py", "v.py", "v.py: срок прогона"): 1, ("py2", "a.py", "a.py: код 1"): 1}}))
 p._test_pythons = lambda: [sys.executable, "/old/python3"]
 p._py_ge311 = lambda py: py == sys.executable
 print(json.dumps({{"fresh": sorted(k[1] + "|" + k[2] for k in fresh), "unk": sorted(unk), "clean": sorted(clean),
-                  "clean_unk": sorted(unk2), "pan": p._pythons_for("pantheon") == [sys.executable],
+                  "clean_unk": sorted(unk2), "targets": sorted(tg), "pan": p._pythons_for("pantheon") == [sys.executable],
                   "guard": p._pythons_for("guard") == [sys.executable, "/old/python3"]}}))
 """
     r = subprocess.run([PY, "-I", "-c", probe2], capture_output=True, text=True, timeout=60)
@@ -653,6 +708,8 @@ print(json.dumps({{"fresh": sorted(k[1] + "|" + k[2] for k in fresh), "unk": sor
           and g2.get("unk") == [["py", "t.py"]], g2)
     check("база дошла до конца: то же падение в обеих версиях — не новое", g2.get("clean") == [] and
           g2.get("clean_unk") == [], g2)
+    check("цели базы: только (python, файл) с падениями новой, без таймаута и срока прогона (metis-0358)",
+          g2.get("targets") == [["py", "a.py"], ["py2", "a.py"]], g2.get("targets"))
     check("интерпретаторы: pantheon — только 3.11+, guard — все", g2.get("pan") and g2.get("guard"), g2)
     r = subprocess.run([PY, "-I", LIB, "plugins", "foo"], capture_output=True, text=True, timeout=60)
     check("pantheon plugins foo — код 2", r.returncode == 2)
