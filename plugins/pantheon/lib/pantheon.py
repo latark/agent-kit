@@ -6275,14 +6275,19 @@ def usage_report(rest):
     except OSError as e:
         # metis-0354: в песочнице окна роли metrics/usage закрыт на запись, а расход недели нужен — отчёт целиком
         # в stdout, причина в stderr, код 1 (плановый проход поднимет тревогу, сбой не теряется).
+        # stdout буферизован в трубе run_job и выходит при завершении, поэтому flush до stderr: причина остаётся
+        # последней строкой вывода — в тревоге «упала» и в хвосте журнала.
         sys.stdout.write(r.stdout)
+        sys.stdout.flush()
         print(f"отчёт не сохранён: {e.strerror or e}", file=sys.stderr)
+        sys.stderr.flush()
         code = 1
-    try:
-        alert(f"отчёт расхода за {days} дн.: {total or 'готов'} — {out.replace(HOME, '~')}", "usage")
-    except OSError as e:
-        print(f"тревога не записана: {e.strerror or e}", file=sys.stderr)
-        code = 1
+    if saved:  # тревога со ссылкой на файл — только если файл есть; иначе сбой поднимет тик по коду 1
+        try:
+            alert(f"отчёт расхода за {days} дн.: {total or 'готов'} — {out.replace(HOME, '~')}", "usage")
+        except OSError as e:
+            print(f"тревога не записана: {e.strerror or e}", file=sys.stderr)
+            code = 1
     if saved:
         print(out)
     return code

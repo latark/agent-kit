@@ -120,5 +120,33 @@ if not os.access(PAN, os.W_OK):
 for d in (PAN, STATE):
     os.chmod(d, 0o755)
 
+# 5. metrics закрыт (путь занят файлом), alerts.md открыт — плановый проход usage-weekly: код 1 из ветки файла,
+# в alerts.md нет строки с путём к несуществующему файлу
+shutil.rmtree(os.path.join(PAN, "metrics"), True)
+if os.path.lexists(AL):
+    os.remove(AL)
+with open(os.path.join(PAN, "metrics"), "w") as fh:
+    fh.write("занято")
+code, out, err = run()
+check("metrics закрыт, alerts открыт: код 1, отчёт в stdout", code == 1 and out == REPORT, (code, out))
+al_text = open(AL).read() if os.path.exists(AL) else ""
+check("metrics закрыт, alerts открыт: в alerts.md нет строки с путём", "отчёт расхода" not in al_text and "metrics" not in al_text, al_text)
+
+# 6. вывод через трубу (stdout и stderr в одну, как в run_job): причина — последняя строка, не теряется за отчётом
+import subprocess  # noqa: E402
+DRV = os.path.join(ROOT, "drv.py")
+with open(DRV, "w") as fh:
+    fh.write("import importlib.util, sys\n"
+             f"s = importlib.util.spec_from_file_location('pp', {os.path.join(LIB, 'pantheon.py')!r})\n"
+             "P = importlib.util.module_from_spec(s); sys.modules['pp'] = P; s.loader.exec_module(P)\n"
+             f"P.PLUGIN = {FAKE!r}\n"
+             "sys.exit(P.usage_report([]))\n")
+pr = subprocess.run([sys.executable, "-I", DRV], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=os.environ)
+lines = pr.stdout.strip().splitlines()
+check("труба: код 1", pr.returncode == 1, pr.returncode)
+check("труба: последняя строка — «отчёт не сохранён: …», отчёт целиком перед ней",
+      bool(lines) and lines[-1].startswith("отчёт не сохранён: ") and pr.stdout.startswith(REPORT), pr.stdout)
+os.remove(os.path.join(PAN, "metrics"))
+
 print(f"{sum(results)}/{len(results)}")
 sys.exit(0 if results and all(results) else 1)
