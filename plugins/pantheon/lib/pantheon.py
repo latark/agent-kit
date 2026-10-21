@@ -5699,7 +5699,8 @@ BOARD = os.path.join(VIEW, "Доска")
 # sync.sh читает ответ с доски только при своём запуске — на старте сессии. Тик после board проверяет: есть
 # держание (.sync-held или .sync-incoming), а в журнале ваших слов (owner-log/board.jsonl) по его задаче — ответ
 # «отправить» или «откатить»; тогда запускает sync.sh сам. Решает по-прежнему sync.sh по тому же журналу; здесь —
-# только «пора». Без ответа или «пока держать» — ничего не запускает.
+# только «пора». Без ответа или «пока держать» — ничего не запускает. После sync.sh с кодом 0 функция сама снимает вопрос
+# с карточки, если ответ есть в SYNC_ACT; при коде не 0 и при «Пока держать» вопрос остаётся.
 SYNC_DIR = os.path.join(HOME, ".claude")
 SYNC_ACT = {"Отправить на другие Mac", "Отправить", "Откатить правку", "Всё в порядке — правка наша", "Откатить на всех Mac"}
 
@@ -5765,6 +5766,21 @@ def sync_answers():
         print(f"sync-answers: sync.sh не отработал: {e}", file=sys.stderr)
         return 1
     print(f"sync-answers: ответ по {', '.join(waiting)} применён (sync.sh, код {r.returncode})")
+    # metis-0226: вопрос отвечен — снять его с карточки, иначе она висит в «Ждёт вас», если sync.sh задачу не закрыл
+    # (его `pantheon task set` молчит при сбое); закрытие статуса остаётся за sync.sh
+    if r.returncode != 0:  # sync.sh не отработал — вопрос остаётся в «Ждёт вас»
+        return 0
+    T = tasks_mod()
+    for tid in waiting:
+        if last.get(tid) not in SYNC_ACT:
+            continue
+        try:
+            head = T.load_tasks(PANTHEON, T.WORK_TYPES).get(tid, (None, {}, None))[1]
+            if head.get("question") or head.get("options"):
+                T.task_set(PANTHEON, now(), tid, {"question": None, "options": None},
+                           note="ответ владельца получен — вопрос снят", actor="плановый проход")
+        except (OSError, ValueError) as e:
+            print(f"sync-answers: вопрос {tid} не снят: {e}", file=sys.stderr)
     return 0
 
 
