@@ -23,9 +23,11 @@ M = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(M)
 FAILS = []
 TMPS = []
+CHECKS = [0]  # итог называет число проверок: plugins update сравнивает его с базой (ревью 0359, круг 3)
 
 
 def check(cond, what):
+    CHECKS[0] += 1
     if not cond:
         FAILS.append(what)
         print("НЕ ПРОШЛО:", what)
@@ -189,5 +191,5 @@ else:
 
 for t in TMPS:
     shutil.rmtree(t, True)
-print("FAIL" if FAILS else "OK", len(FAILS))
+print(f"тестов: {CHECKS[0]}, не прошло: {len(FAILS)}")
 sys.exit(1 if FAILS else 0)

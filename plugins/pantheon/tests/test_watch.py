@@ -110,6 +110,11 @@ class Env:
         # батарея и розетка подменены (metis-0210): иначе lib/awake.py читает настоящий pmset, и тест краснеет
         # на Mac с низким зарядом; тесты, которым нужна батарея, переопределяют через extra
         self.extra = {"PANTHEON_FAKE_IDLE": "0", "PANTHEON_FAKE_BATT": "100", "PANTHEON_FAKE_AC": "1"}
+        # metis-0359: короткие ожидания имени и остановки — во всех проходах, а не только где передан QUICK. Без них
+        # каждый самозапуск ждал появления сессии PANTHEON_NAME_WAIT по умолчанию (10 с, заглушка claude её не
+        # показывает): ~37 таких проходов — 430 с файла из 435, а в фоне тика (ProcessType Background) — за 600 с.
+        # Тест, которому нужно настоящее ожидание, передаёт своё значение в extra.
+        self.extra.update(QUICK)
 
     def notify_mode(self, idle, quiet=None):
         """Простой (с) и тихие часы для политики уведомлений: quiet=None — без тихих часов (как днём),
@@ -184,6 +189,22 @@ class Env:
 
     def st(self, *parts):
         return os.path.join(self.state, *parts)
+
+
+def test_harness_quick_waits_0359():
+    """metis-0359: Env по умолчанию — с короткими ожиданиями (QUICK); иначе файл не укладывается в 600 с тика."""
+    e = Env()
+    check(all(e.extra.get(k) == v for k, v in QUICK.items()), f"0359: Env без QUICK по умолчанию: {e.extra}")
+    # самозапуск: до правки проход ждал имени новой сессии 10 с (заглушка её не показывает) — не меньше 10 с
+    e.direction("athena-q")
+    e.task("athena-0009", "athena-q")
+    e.run("watch", t=T0)
+    e.board("athena-0009", T0 + 120)
+    t = time.monotonic()
+    e.run("watch", t=T0 + 240)
+    took = time.monotonic() - t
+    starts = [c for c in e.calls() if c[:1] == ["--bg"]]
+    check(len(starts) == 1 and took < 8, f"0359: самозапуск {took:.1f} с (ждёт имени по умолчанию?): {starts}")
 
 
 def bg(name, state, sid, pid=None, started=T0 - 100):
