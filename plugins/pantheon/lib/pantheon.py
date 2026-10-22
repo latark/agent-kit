@@ -6444,7 +6444,8 @@ def _pythons_for(name):
 
 
 def _tmp_re():
-    """Пути во временных папках — до <tmp>: у новой версии и базы они разные, а падение одно."""
+    """Корни временных папок (группа 1 — путь под корнем): у новой версии и базы они разные, а падение одно; разбор
+    пути — _tmp_sub."""
     global _TMP_RE
     if _TMP_RE is None:
         pre = {"/private/tmp/", "/tmp/", "/private/var/folders/", "/var/folders/"}
@@ -6452,22 +6453,101 @@ def _tmp_re():
             for v in (t, os.path.realpath(t)):
                 pre.add(v.rstrip("/") + "/")
         alts = "|".join(re.escape(p) for p in sorted(pre, key=len, reverse=True))
-        _TMP_RE = re.compile(rf"(?:{alts})[^\s'\"(),:;]*")
+        _TMP_RE = re.compile(rf"(?:{alts})([^\s'\"(),:;]*)")
     return _TMP_RE
 
 
+# Случайная часть пути во временной папке — имя от mkdtemp/mkstemp: приставка («tmp», «home-», «guard-») и 8 знаков
+_RAND_SEG = re.compile(r"(?:tmp|[\w.+]*[-_])[a-z0-9_]{8}")
+
+
+def _tmp_sub(s):
+    """Временные пути в строке подписи: корень временной папки — <tmp>, случайные имена папок — «…», корень копии
+    (new/ или base/ после случайной папки прогона) — <copy>; остальной путь и имя файла остаются (ревью 0359,
+    второй argus, п.1): иначе FileNotFoundError на разных файлах в tmp давал одну подпись и база гасила чужое."""
+    def one(m):
+        out = []
+        for seg in m.group(1).split("/"):
+            if _RAND_SEG.fullmatch(seg):
+                seg = "…"
+            elif seg in ("new", "base") and out and out[-1] == "…":
+                seg = "<copy>"
+            if not (seg == "…" and out and out[-1] == "…"):
+                out.append(seg)
+        rest = "/".join(out)
+        return "<tmp>/" + rest if rest else "<tmp>"
+    return _tmp_re().sub(one, s)
+
+
+# Итог файла — только последняя непустая строка вывода (ревью 0359, второй argus, п.4): «2/3» или «N из M» из вывода
+# ребёнка в детали FAIL не прячет обрыв. Число проверок в итоге — для файлов без строк ok (п.3).
+_SUMMARY_TOTAL = (
+    (re.compile(r"тестов:\s*(\d+)\s+прошло,\s*(\d+)\s+не\s+прошло"), lambda m: int(m[1]) + int(m[2])),
+    (re.compile(r"\d+\s*из\s+(\d+)"), lambda m: int(m[1])),
+    (re.compile(r"\d+\s*/\s*(\d+)"), lambda m: int(m[1])),
+    (re.compile(r"тестов:\s*(\d+)"), lambda m: int(m[1])),
+    (re.compile(r"(\d+)\s*команд\b"), lambda m: int(m[1])),
+)
+# Строки провала: FAIL и «НЕ ПРОШЛО» / «НЕ ПРОШЁЛ» / «ОШИБКА:» файлов без строк ok (test_watch, test_night,
+# test_awake, test_mmv, test_svc_ondemand и др., ревью 0359, первый argus)
+FAIL_PREFIXES = ("FAIL", "НЕ ПРОШЛО", "НЕ ПРОШЁЛ", "ОШИБКА:")
+
+
+def _ok_lines(lines):
+    return sum(1 for ln in lines if re.match(r"\s*ok\b", ln))
+
+
+def _summary_of(lines):
+    """Итоговая строка файла — последняя непустая, если она похожа на итог (TEST_SUMMARY): (есть ли итог, число
+    проверок в нём или None). Итог с числом прошедших («N из M», «N/M») у файла со строками ok верен, только если N —
+    их число: «2/3» из вывода ребёнка последней строкой перед молчаливым обрывом за итог не считается (ревью 0359,
+    п.4, проба G)."""
+    last = next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
+    nok = _ok_lines(lines)
+    passed = re.match(r"(\d+)\s*(?:из\s|/)", last)
+    if not TEST_SUMMARY.match(last) or (nok and passed and int(passed[1]) != nok):
+        return False, None
+    return True, _summary_total(last)
+
+
+def _summary_total(line):
+    """Число проверок из итоговой строки («N из M» → M, «N/M» → M, «тестов: N» → N, «тестов: N прошло, K не прошло»
+    → N+K, «N команд» → N); итога без числа проверок («OK 0» — это число провалов, «ПРОВАЛ: …») — None."""
+    for rx, total in _SUMMARY_TOTAL:
+        m = rx.match(line)
+        if m:
+            return total(m)
+    return None
+
+
 def _ok_count(out):
-    """Число пройденных проверок файла — строк `ok …` (metis-0360): у новой меньше, чем у базы, — проверки пропущены."""
-    return sum(1 for ln in ANSI.sub("", out).splitlines() if re.match(r"\s*ok\b", ln))
+    """Сколько проверок прошёл файл — пара (строк `ok …`, число проверок из итоговой строки или None) (metis-0360;
+    ревью 0359, п.3: десять файлов строк ok не печатают, их число видно только в итоге). Меньше, чем у базы, по любой
+    из двух мер — проверки пропущены (_fresh_failures)."""
+    lines = ANSI.sub("", out).splitlines()
+    return _ok_lines(lines), _summary_of(lines)[1]
+
+
+def _fewer_checks(new, base):
+    """Причина «проверок меньше» или None: строк ok меньше, чем у базы, или итог называет меньше проверок (обе меры
+    известны). Число вместо пары — только строки ok (старые вызовы)."""
+    (n, nt), (m, mt) = ((v if isinstance(v, tuple) else (v or 0, None)) for v in (new, base))
+    if n < m:
+        return f"{n} < {m}"
+    if nt is not None and mt is not None and nt < mt:
+        return f"по итогу {nt} < {mt}"
+    return None
 
 
 def _failure_signatures(fname, out, rc):
     """Подписи падений одного файла тестов: строки FAIL, исключение в конце вывода с текстом сообщения, ненулевой код
     (всегда — иначе гибель по сигналу прячется за старой строкой FAIL); rc None — таймаут, rc "срок" — не успел в
     срок прогона. metis-0360: ненулевой код без итоговой строки (TEST_SUMMARY) — «нет итоговой строки» (файл
-    оборвался, проверки после обрыва не прошли); код 0 без единой проверки и итога — NO_CHECKS, её база не гасит."""
+    оборвался, проверки после обрыва не прошли); код 0 без единой проверки и итога — NO_CHECKS, её база не гасит.
+    Ревью 0359: итог — только последняя непустая строка; итог с нулём проверок («0 из 0», «тестов: 0») — тоже
+    NO_CHECKS; строки провала — FAIL_PREFIXES."""
     out = ANSI.sub("", out)
-    sigs = [_tmp_re().sub("<tmp>", ln.strip()) for ln in out.splitlines() if ln.lstrip().startswith("FAIL")]
+    sigs = [_tmp_sub(ln.strip()) for ln in out.splitlines() if ln.lstrip().startswith(FAIL_PREFIXES)]
     if rc is None:
         return sigs + [f"{fname}: таймаут"]
     if rc == "срок":
@@ -6477,14 +6557,14 @@ def _failure_signatures(fname, out, rc):
         m = re.match(r"([A-Za-z_][\w.]*)(?::|$)", lines[-1])
         if m:
             # с текстом: FileNotFoundError окружения у базы не гасит другой FileNotFoundError новой версии
-            msg = _HEX_RE.sub("0x…", _tmp_re().sub("<tmp>", lines[-1][m.end():].strip()))[:200]
+            msg = _HEX_RE.sub("0x…", _tmp_sub(lines[-1][m.end():].strip()))[:200]
             sigs.append(f"{fname}: исключение {m.group(1)}" + (f": {msg}" if msg else ""))
-    summary = any(TEST_SUMMARY.match(ln.strip()) for ln in lines)
+    summary, total = _summary_of(lines)
     if rc != 0:
         sigs.append(f"{fname}: код {rc}")
         if not summary:
             sigs.append(f"{fname}: нет итоговой строки")
-    elif not summary and not sigs and not _ok_count(out):
+    elif not sigs and not _ok_lines(lines) and (not summary or total == 0):
         sigs.append(f"{fname}: {NO_CHECKS}")
     return sigs
 
@@ -6493,8 +6573,9 @@ def _fresh_failures(got_new, got_base, ok_new=None, ok_base=None):
     """Новые падения = подписи новой версии минус подписи базы. Файл, который у базы кончился таймаутом или сроком
     прогона, — не «чистый» и не «такой же сбой»: о нём ничего не известно, поэтому у новой версии в нём ничто не
     гасится (в том числе её собственный таймаут) — падение остаётся падением. Отдаёт (Counter, {(python, файл)}).
-    metis-0360: ok_new/ok_base — {(python, файл): число строк ok} досчитанных файлов (_run_plugin_tests). Новая прошла
-    меньше проверок, чем база, в том же файле — подпись «проверок меньше, чем у базы»: оборвалась молча раньше, и
+    metis-0360: ok_new/ok_base — {(python, файл): _ok_count} досчитанных файлов (_run_plugin_tests). Новая прошла
+    меньше проверок, чем база, в том же файле (строк ok или по итогу, _fewer_checks) — подпись «проверок меньше, чем у
+    базы»: оборвалась молча раньше, и
     общие с базой подписи не должны прятать непроверенный остаток. NO_CHECKS база не гасит."""
     unknown = {(py, f) for (py, f, s) in got_base if s.endswith((": срок прогона", ": таймаут"))}
     known_base = collections.Counter({k: n for k, n in got_base.items() if (k[0], k[1]) not in unknown})
@@ -6503,9 +6584,9 @@ def _fresh_failures(got_new, got_base, ok_new=None, ok_base=None):
         if k[2].endswith((": срок прогона", f": {NO_CHECKS}")):
             fresh[k] = n
     for (py, f), m in (ok_base or {}).items():
-        n = (ok_new or {}).get((py, f), 0)
-        if (py, f) not in unknown and n < m:
-            fresh[(py, f, f"{f}: проверок меньше, чем у базы ({n} < {m})")] = 1
+        why = _fewer_checks((ok_new or {}).get((py, f), 0), m)
+        if (py, f) not in unknown and why:
+            fresh[(py, f, f"{f}: проверок меньше, чем у базы ({why})")] = 1
     return fresh, unknown
 
 
@@ -6528,7 +6609,7 @@ def _base_targets(got_new):
 def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=None):
     """tests/test_*.py папки pdir по одному на каждом python → Counter подписей (python, файл, подпись). only —
     множество (python, файл): гонять только их (база, metis-0358); None — все. Срок — общий deadline прогона:
-    базе достаётся то, что осталось после новой версии. oks — словарь, куда пишется {(python, файл): число строк ok}
+    базе достаётся то, что осталось после новой версии. oks — словарь, куда пишется {(python, файл): _ok_count}
     файлов, дошедших до выхода (не таймаут и не срок) — для сравнения с базой (metis-0360)."""
     sigs = collections.Counter()
     env0 = {k: v for k, v in os.environ.items()
