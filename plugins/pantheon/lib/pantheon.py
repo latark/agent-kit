@@ -6300,12 +6300,15 @@ def usage_report(rest):
 # Тик раз в 10 минут, вне песочницы: каталог agent-kit → новые версии установленных плагинов → тесты новой версии и
 # установленной (база) на одних и тех же python → есть новые падения — не ставим, тревога; нет — claude plugin update.
 # База нужна, чтобы падения от места запуска (временная папка, python 3.9) не держали обновление вечно.
-# Подпись падения (metis-0360): строка FAIL или «НЕ ПРОШЛО» / «НЕ ПРОШЁЛ» / «ОШИБКА:» (у них числа — N), исключение
-# в конце вывода вместе с текстом (адреса 0x… — 0x…), «код N», «нет итоговой строки» (последняя непустая строка — не
-# итог: упал до него), таймаут, срок прогона. Временный путь: корень — <tmp>, случайные папки — «…», корень копии —
+# Подпись падения (metis-0360): строка FAIL или «НЕ ПРОШЛО» / «НЕ ПРОШЁЛ» / «ОШИБКА:» (в них изменчивое — время,
+# pid, порты, списки чисел [..], числа от 4 знаков — N; номер и значение проверки остаются), исключение в конце вывода вместе с текстом
+# (адреса 0x… — 0x…), «код N», «нет итоговой строки» (последняя непустая строка — не итог: упал до него), таймаут,
+# срок прогона. Временный путь: корень — <tmp>, случайные папки цепочки от корня и tmpXXXXXXXX — «…», корень копии —
 # <copy>, путь внутри и имя файла остаются. База гасит только совпавшие подписи той же пары (python, файл). Не гасит:
-# «ни одной проверки» (код 0 без ok и итога или итог «0 из 0» — база по такому файлу не гоняется) и «проверок меньше,
-# чем у базы» (строк ok у новой меньше или итог называет меньше проверок — тесты молча пропали).
+# «ни одной проверки» (код 0 без ok и без числа проверок в итоге: нет итога, «0 из 0», «OK 0» — база по такому файлу
+# не гоняется) и «проверок меньше, чем у базы» (строк ok у новой меньше или итог называет меньше проверок).
+# Цена строгости (ревью 0359, круг 3): тот же флак с другим счётчиком в строке провала («ответов 9» против «10» у
+# keep-alive test_svc_ondemand) базой не гасится — красное, а не склейка соседних проверок цикла.
 # Одинаковая строка FAIL с другой причиной гасится: деталь — в самой строке, а строже — нестабильно на окружении.
 # Хеш дерева проверенной копии сверяется с тем, что встало: update сам обновляет каталог и может поставить версию
 # новее проверенной. Метка testing ловит прерванный прогон (таймаут задачи тика, сбой): такая версия — красная.
@@ -6459,8 +6462,11 @@ def _tmp_re():
     return _TMP_RE
 
 
-# Случайная часть пути во временной папке — имя от mkdtemp/mkstemp: приставка («tmp», «home-», «guard-») и 8 знаков
-_RAND_SEG = re.compile(r"(?:tmp|[\w.+-]*[-_])[a-z0-9_]{8}")
+# Случайная часть пути во временной папке — имя от mkdtemp/mkstemp: приставка («tmp», «home-», «guard-») и 8 знаков.
+# С дефисом — только в цепочке от корня временной папки (ревью 0359, второй argus круг 2, п.3): ниже настоящей папки
+# «metis-pantheon» и «hephaestus-pantheon» — имена, а не случай; «tmp» и 8 знаков — случай везде
+_RAND_TMP = re.compile(r"tmp[a-z0-9_]{8}")
+_RAND_SEG = re.compile(r"[\w.+-]*[-_][a-z0-9_]{8}")
 
 
 def _tmp_sub(s):
@@ -6469,11 +6475,14 @@ def _tmp_sub(s):
     второй argus, п.1): иначе FileNotFoundError на разных файлах в tmp давал одну подпись и база гасила чужое."""
     def one(m):
         out = []
+        chain = True  # все папки до этой — случайные
         for seg in m.group(1).split("/"):
-            if _RAND_SEG.fullmatch(seg):
+            if _RAND_TMP.fullmatch(seg) or (chain and _RAND_SEG.fullmatch(seg)):
                 seg = "…"
             elif seg in ("new", "base") and out and out[-1] == "…":
                 seg = "<copy>"
+            else:
+                chain = False
             if not (seg == "…" and out and out[-1] == "…"):
                 out.append(seg)
         rest = "/".join(out)
@@ -6492,10 +6501,27 @@ _SUMMARY_TOTAL = (
 )
 # Строки провала: FAIL и «НЕ ПРОШЛО» / «НЕ ПРОШЁЛ» / «ОШИБКА:» файлов без строк ok (test_watch, test_night,
 # test_awake, test_mmv, test_svc_ondemand и др., ревью 0359, первый argus). У вторых деталь проверки — в той же
-# строке (pid, счётчики ответов), поэтому числа в них — N: тот же провал окружения у базы и новой гасится, другой — нет
+# строке, поэтому изменчивое в ней — N (_VOLATILE): время, pid и их списки, порты, эпоха, байты. Номер и значение проверки
+# («запас +4», «сбой 3», «ответ в 23:10», «неделя 31.6 %») остаются: числа целиком в N склеивали соседние проверки
+# цикла, и провал базы в одной гасил провал новой в другой (ревью 0359, второй argus круг 2, п.1)
 FAIL_PREFIXES = ("FAIL",)
 FAIL_PREFIXES_N = ("НЕ ПРОШЛО", "НЕ ПРОШЁЛ", "ОШИБКА:")
 _DIGITS = re.compile(r"\d+")
+_VOLATILE = (
+    (_HEX_RE, "0x…"),
+    (re.compile(r"\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d(?:[.,]\d+)?(?:Z|[+-]\d\d:?\d\d)?"
+                r"|(?<![\d:])\d\d?:\d\d:\d\d(?:[.,]\d+)?"), "<время>"),       # время с секундами; «23:10» — нет
+    (re.compile(r"(?i)\b(pid|port|порт)([\s=:]*)\d+"), r"\1\2N"),
+    (re.compile(r"\[\d+(?:,\s*\d+)*\]"), lambda m: _DIGITS.sub("N", m[0])),  # список pid: [308, 567]
+    (re.compile(r"(?<![\w.])\d{4,}(?:\.\d+)?(?![\w.-])"), "N"),               # pid, порт, эпоха, байты, мс
+    (re.compile(r"(?<![\w.])\d+\.\d{3,}(?![\w.])"), "N"),                     # замер с долями: 0.5321 с
+)
+
+
+def _volatile_sub(s):
+    for rx, to in _VOLATILE:
+        s = rx.sub(to, s)
+    return s
 
 
 def _ok_lines(lines):
@@ -6512,7 +6538,12 @@ def _summary_of(lines):
     passed = re.match(r"(\d+)\s*(?:из\s|/)", last)
     if not TEST_SUMMARY.match(last) or (nok and passed and int(passed[1]) != nok):
         return False, None
-    return True, _summary_total(last)
+    total = _summary_total(last)
+    # «все прошли» («39/39», «39 из 39») при строке провала выше — не итог, а строка из детали (п.4, проба S1)
+    if passed and total == int(passed[1]) and any(ln.strip().startswith(FAIL_PREFIXES + FAIL_PREFIXES_N)
+                                                 for ln in lines):
+        return False, None
+    return True, total
 
 
 def _summary_total(line):
@@ -6550,7 +6581,8 @@ def _failure_signatures(fname, out, rc):
     срок прогона. metis-0360: ненулевой код без итоговой строки (TEST_SUMMARY) — «нет итоговой строки» (файл
     оборвался, проверки после обрыва не прошли); код 0 без единой проверки и итога — NO_CHECKS, её база не гасит.
     Ревью 0359: итог — только последняя непустая строка; итог с нулём проверок («0 из 0», «тестов: 0») — тоже
-    NO_CHECKS; строки провала — FAIL_PREFIXES и FAIL_PREFIXES_N (числа в них — N)."""
+    NO_CHECKS; строки провала — FAIL_PREFIXES и FAIL_PREFIXES_N (изменчивое в них — N, _VOLATILE). Круг 3: код 0
+    без строк ok и без числа проверок в итоге («OK 0» test_mmv) — тоже NO_CHECKS."""
     out = ANSI.sub("", out)
     sigs = []
     for ln in out.splitlines():
@@ -6558,7 +6590,7 @@ def _failure_signatures(fname, out, rc):
         if ln.startswith(FAIL_PREFIXES):
             sigs.append(_tmp_sub(ln))
         elif ln.startswith(FAIL_PREFIXES_N):
-            sigs.append(_DIGITS.sub("N", _HEX_RE.sub("0x…", _tmp_sub(ln))))
+            sigs.append(_volatile_sub(_tmp_sub(ln)))
     if rc is None:
         return sigs + [f"{fname}: таймаут"]
     if rc == "срок":
@@ -6575,7 +6607,7 @@ def _failure_signatures(fname, out, rc):
         sigs.append(f"{fname}: код {rc}")
         if not summary:
             sigs.append(f"{fname}: нет итоговой строки")
-    elif not sigs and not _ok_lines(lines) and (not summary or total == 0):
+    elif not sigs and not _ok_lines(lines) and not total:  # нет итога, «0 из 0» или итог без числа проверок
         sigs.append(f"{fname}: {NO_CHECKS}")
     return sigs
 

@@ -715,13 +715,63 @@ print(json.dumps({"seen": seen, "fresh": sorted(k[2] for k in fresh)}))""", e.sr
         check(f"0359b: строка «{line.split(':')[0]}» — подпись провала, база с другим провалом её не гасит",
               r.returncode == 76 and line in fr and "НЕ ПРОШЛО: env" not in fr, f"{r.returncode} {fr!r}")
         e.close()
-    # деталь в той же строке (pid, счётчики) — числа в подписи N: тот же провал окружения с другими числами у базы
-    # гасится (мутант: без N — тик держал бы обновление на каждом флаке keep-alive test_svc_ondemand)
-    KA = 'print("НЕ ПРОШЁЛ: keep-alive ответов {} из ≥11, [{}, {}]")\nprint("38 из 39 прошли")\nraise SystemExit(1)\n'
-    e = Env("1.0.0", "1.1.0", KA.format(10, 40600, 40601), KA.format(9, 8061, 8063))
+    # деталь в той же строке: изменчивое (pid, порты, время) в подписи — N, тот же провал окружения с другими pid
+    # и временем у базы гасится (мутант: без _VOLATILE — тик держал бы обновление на каждом флаке keep-alive)
+    KA = ('print("НЕ ПРОШЁЛ: keep-alive ответов 10 из ≥11, [{}, {}] pid {} в {} 127.0.0.1:{}")\n'
+          'print("38 из 39 прошли")\nraise SystemExit(1)\n')
+    e = Env("1.0.0", "1.1.0", KA.format(40600, 40601, 812, "12:01:02.5", 52311),
+            KA.format(308, 567, 97, "2026-10-22T13:45:12+03:00", 60001))
     r = e.run()
-    check("0359b: «НЕ ПРОШЁЛ» с другими числами в детали — тот же провал, база гасит",
+    check("0359b: «НЕ ПРОШЁЛ» с другими pid, портом и временем — тот же провал, база гасит",
           r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), f"{r.returncode} {fresh_of(e)!r}")
+    e.close()
+    # Круг 3, п.1: номер и значение проверки не N — соседние проверки цикла test_night/test_watch («запас +0» и
+    # «запас +4», «ответ в 23:10» и «в 22:30», «сбой 1» и «сбой 3») — разные подписи: провал базы в одной не гасит
+    # провал новой в другой (мутант: все числа — N). Счётчик в детали тоже остаётся: флак с другим счётчиком — красное
+    SUMN = 'print("тестов: 40, не прошло: 1")\nraise SystemExit(1)\n'
+    for was, now in (("запас +0: бюджет 2.5, ждали 3", "запас +4: бюджет 2.5, ждали 3"),
+                     ("ответ в 23:10 — opened_at None", "ответ в 22:30 — opened_at None"),
+                     ("сбой 1 не засчитан: {'fails': 0}", "сбой 3 не засчитан: {'fails': 0}"),
+                     ("keep-alive ответов 10 из ≥11", "keep-alive ответов 9 из ≥11")):
+        e = Env("1.0.0", "1.1.0", f"print('НЕ ПРОШЛО:', {was!r})\n" + SUMN, f"print('НЕ ПРОШЛО:', {now!r})\n" + SUMN)
+        r = e.run()
+        fr = fresh_of(e)
+        check(f"0359 круг 3 п.1: «{was}» у базы не гасит «{now}» у новой",
+              r.returncode == 76 and f"НЕ ПРОШЛО: {now}" in fr and was not in fr, f"{r.returncode} {fr!r}")
+        e.close()
+
+    # Круг 3, п.2: итог без числа проверок («OK 0», старый test_mmv) при коде 0 и без строк ok — «ни одной проверки»
+    # (мутант: только итог с нулём); test_mmv печатает «тестов: N, не прошло: K» — число проверок видно, пропуск
+    # проверок при том же провале окружения — «проверок меньше по итогу»
+    e = Env("1.0.0", "1.1.0", 'print("OK", 0)\n', 'print("OK", 0)\n')
+    r = e.run()
+    fr = fresh_of(e)
+    check("0359 круг 3 п.2: код 0, «OK 0», ни строки ok — красное «ни одной проверки»",
+          r.returncode == 76 and "test_a.py: ни одной проверки" in fr, f"{r.returncode} {fr!r}")
+    e.close()
+    MMV = 'print("НЕ ПРОШЛО: CLI mmv: 1")\nprint("тестов: {}, не прошло: 1")\nraise SystemExit(1)\n'
+    e = Env("1.0.0", "1.1.0", MMV.format(27), MMV.format(2))
+    r = e.run()
+    fr = fresh_of(e)
+    check("0359 круг 3 п.2: итог «тестов: 2» против «тестов: 27» у базы — красное «проверок меньше по итогу»",
+          r.returncode == 76 and "test_a.py: проверок меньше, чем у базы (по итогу 2 < 27)" in fr, f"{r.returncode} {fr!r}")
+    e.close()
+    r = subprocess.run([PY, "-I", os.path.join(ROOT, "tests", "test_mmv.py")], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
+    mmv = subprocess.run([PY, "-I", "-c", f"import sys; sys.path.insert(0, {os.path.dirname(LIB)!r}); import pantheon as p;"
+                          "print(p._ok_count(sys.stdin.read())[1])"], input=r.stdout, capture_output=True, text=True,
+                         timeout=60).stdout.strip()
+    check("0359 круг 3 п.2: настоящий test_mmv.py — итог с числом проверок",
+          r.returncode == 0 and mmv.isdigit() and int(mmv) > 20, f"{r.returncode} {mmv!r} {r.stdout[-300:]}")
+
+    # Круг 3, п.4: файл без строк ok, деталь «НЕ ПРОШЁЛ» несёт «39/39» последней строкой, затем молчаливый обрыв —
+    # «все прошли» при строке провала не итог: «нет итоговой строки» (мутант: без этой сверки — зелёное)
+    e = Env("1.0.0", "1.1.0", 'print("НЕ ПРОШЁЛ: keep-alive x")\nprint("38 из 39 прошли")\nraise SystemExit(1)\n',
+            'print("НЕ ПРОШЁЛ: keep-alive x\\n39/39", flush=True)\nimport os\nos._exit(1)\n')
+    r = e.run()
+    fr = fresh_of(e)
+    check("0359 круг 3 п.4: «39/39» из детали провала последней строкой — красное «нет итоговой строки»",
+          r.returncode == 76 and "test_a.py: нет итоговой строки" in fr, f"{r.returncode} {fr!r}")
     e.close()
 
     # Нет папки установленной версии — база пустая, старое падение уже красное
@@ -794,6 +844,8 @@ print(json.dumps({{
   "rand": [p._tmp_sub("x " + p.tempfile.gettempdir() + "/guard-ab12cd34/" + w + "/guard/tmpq1w2e3r4/README.md")
            for w in ("new", "base")]
           + [p._tmp_sub("'" + p.tempfile.gettempdir() + "/board-root-1az784c9/board-test-ef6u2lif/state/x.json'")],
+  "names": [p._tmp_sub(p.tempfile.gettempdir() + "/home-q1w2e3r4/ai/pantheon/directions/" + d + "/STATUS.md")
+            for d in ("metis-pantheon", "hephaestus-pantheon")],
   "code": sig("t.py", "что-то\\n", 2), "ok": sig("t.py", "ok\\n", 0), "timeout": sig("t.py", "", None),
   "exc": sig("t.py", "FAIL a\\nTraceback (most recent call last):\\n  File \\"t.py\\", line 1\\nValueError: b\\n", 1),
   "ansi": sig("t.py", "\\x1b[31mFAIL c\\x1b[0m\\n", 1), "killed": sig("t.py", "FAIL d\\n", -9),
@@ -817,6 +869,9 @@ print(json.dumps({{
           got.get("tmp") == ["FAIL x <tmp>/abc/new/x/f.py", "FAIL y <tmp>/q/z", "t.py: код 1", NS], got.get("tmp"))
     check("подписи: случайные папки mkdtemp → «…», корень копии new/ и base/ → <copy>, имя файла остаётся",
           got.get("rand") == ["x <tmp>/…/<copy>/guard/…/README.md"] * 2 + ["'<tmp>/…/state/x.json'"], got.get("rand"))
+    check("подписи: имя с дефисом и 8 знаками ниже настоящей папки — не «…» (ревью 0359, круг 3, п.3)",
+          got.get("names") == [f"<tmp>/…/ai/pantheon/directions/{d}/STATUS.md"
+                               for d in ("metis-pantheon", "hephaestus-pantheon")], got.get("names"))
     check("подписи: код без FAIL, зелёный файл, таймаут",
           got.get("code") == ["t.py: код 2", NS] and got.get("ok") == [] and got.get("timeout") == ["t.py: таймаут"],
           got)
