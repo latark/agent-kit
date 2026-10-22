@@ -18,6 +18,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         освежить индекс, сервер MCP (служба), подключить к Claude на этом Mac
   pantheon plugins update [--quiet]     новые версии плагинов agent-kit (плановый проход раз в 10 мин): тесты новой и
                                         установленной версии; нет новых падений — claude plugin update, есть — тревога;
+                                        установленная гоняется лишь по (python, файл), где новая упала; таймауты и срок
+                                        прогона не гоняются, базе достаётся остаток срока;
                                         после установки плановый проход перезапускает свободные окна (metis-0181)
   pantheon plugins accept [--new] [guard] [pantheon]   принять установленное дерево как проверенное (verified.json):
                                         живой код и окна ролей идут только на проверенное (metis-0321); только руками
@@ -6480,14 +6482,27 @@ def _test_files(pdir):
         if tests_dir and os.path.isdir(tests_dir) else []
 
 
-def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline):
-    """tests/test_*.py папки pdir по одному на каждом python → Counter подписей (python, файл, подпись)."""
+def _base_targets(got_new):
+    """metis-0358: (python, файл), которые стоит гонять у базы, — только где у новой версии есть подписи падений:
+    базу нужно лишь вычитать из них. Файл, где новая кончилась таймаутом или сроком прогона, база погасить не может
+    (_fresh_failures), поэтому и его не гоняем. Чистые файлы новой — тоже: раньше база шла по всем и не успевала в
+    PLUGIN_RUN_LIMIT, а недосчитанная база превращала прежние падения окружения в новые."""
+    stuck = {(py, f) for (py, f, s) in got_new if s.endswith((": срок прогона", ": таймаут"))}
+    return {(py, f) for (py, f, _s) in got_new} - stuck
+
+
+def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None):
+    """tests/test_*.py папки pdir по одному на каждом python → Counter подписей (python, файл, подпись). only —
+    множество (python, файл): гонять только их (база, metis-0358); None — все. Срок — общий deadline прогона:
+    базе достаётся то, что осталось после новой версии."""
     sigs = collections.Counter()
     env0 = {k: v for k, v in os.environ.items()
             if not k.startswith("PANTHEON_") and k not in ("FORCE_COLOR", "CLICOLOR_FORCE")}
     env0.update({"NO_COLOR": "1", "PYTHON_COLORS": "0"})
     for py in pythons:
         for f in _test_files(pdir):
+            if only is not None and (py, f) not in only:
+                continue
             left = deadline - time.monotonic()
             if left <= 0:
                 out, rc = "", "срок"
@@ -6615,7 +6630,12 @@ def _plugin_check(name, old, new, src, base, marks):
             fh.write(f"{stamp()} {name}: новая {new} из {src} (хеш {digest}), база {old} из "
                      f"{base_dir and base or '—'}; python: {', '.join(pythons)}\n")
             got_new = _run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}", deadline)
-            got_base = _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline)
+            want = _base_targets(got_new)
+            skipped = sum(1 for py in pythons for f in _test_files(base_dir) if (py, f) not in want)
+            if base_dir and skipped:
+                fh.write(f"\n===== база {old}: {skipped} файл(ов) не гоняются — у новой версии в них нет падений, "
+                         "либо таймаут или срок прогона (их база не гасит) =====\n")
+            got_base = _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline, only=want)
             fresh, unknown = _fresh_failures(got_new, got_base)
             for py, f in sorted(unknown):
                 fh.write(f"база не досчитана: {py} · {f} — файл базы не дошёл до конца (таймаут или срок прогона), "
