@@ -55,7 +55,7 @@ REC_TMPDIR = 'import os\nopen(os.environ["REC_FILE"] + ".t", "a").write(os.envir
 # тесты идут без цвета: FORCE_COLOR снят, NO_COLOR=1, PYTHON_COLORS=0
 COLORLESS = ('import os\nif os.environ.get("FORCE_COLOR") or os.environ.get("CLICOLOR_FORCE") '
              'or os.environ.get("NO_COLOR") != "1" or os.environ.get("PYTHON_COLORS") != "0":\n'
-             '    print("FAIL цвет включён")\n    raise SystemExit(1)\n')
+             '    print("FAIL цвет включён")\n    raise SystemExit(1)\nprint("ok   цвет выключен")\n')
 
 
 def pantheon_python():
@@ -583,6 +583,197 @@ print(json.dumps({"seen": seen, "fresh": sorted(k[2] for k in fresh)}))""", e.sr
           g.get("seen", [[0, 0, 0]] * 3)[-1][2] == 100 and g.get("fresh") == [], got)
     e.close()
 
+    # metis-0360: подписи не гасят настоящие поломки (ревью 0358, второй argus). fresh_of — новые падения из лога.
+    def log_of(e, ver="1.1.0"):
+        p = os.path.join(e.state, "plugins", f"x-{ver}.log")
+        return open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+
+    def fresh_of(e, ver="1.1.0"):
+        text = log_of(e, ver)
+        return text.split("===== новых падений:")[-1] if "===== новых падений:" in text else ""
+
+    # п.1: база красная (FAIL окружения, код 1, есть итог), новая молча обрывается кодом 1 после первой проверки —
+    # общие с базой «FAIL env» и «код 1» не прячут оборванный остаток: «нет итоговой строки»; с итогом, но проверок
+    # меньше, чем у базы, — «проверок меньше»; та же картина у обеих — по-прежнему гасится (мутант: без сравнения)
+    BASE_RED = 'print("ok   a")\nprint("FAIL env — нет соседа")\nprint("ok   b")\nprint("2 из 3 прошли")\nraise SystemExit(1)\n'
+    NEW_CUT = 'print("ok   a")\nprint("FAIL env — нет соседа", flush=True)\nimport sys\nsys.exit(1)\n'
+    NEW_FEWER = 'print("ok   a")\nprint("FAIL env — нет соседа")\nprint("1 из 2 прошли")\nraise SystemExit(1)\n'
+    for what, body, want in (("обрыв без итога", NEW_CUT, "test_a.py: нет итоговой строки"),
+                             ("итог есть, проверок меньше", NEW_FEWER, "test_a.py: проверок меньше, чем у базы (1 < 2)"),
+                             ("как у базы", BASE_RED, None)):
+        e = Env("1.0.0", "1.1.0", BASE_RED, body)
+        r = e.run()
+        fr = fresh_of(e)
+        if want:
+            check(f"0360 п.1, {what}: база красная в том же файле — новая всё равно красная",
+                  r.returncode == 76 and "plugin update" not in e.argv() and want in fr and "FAIL env" not in fr,
+                  f"{r.returncode} {fr!r}")
+        else:
+            check(f"0360 п.1, {what}: то же падение, те же проверки — база гасит, update вызван",
+                  r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), f"{r.returncode} {fr!r}")
+        e.close()
+
+    # п.2: исключение сравнивается с текстом сообщения — FileNotFoundError окружения у базы не гасит другой
+    # FileNotFoundError новой; тот же текст с другим временным путём — гасит (мутант: подпись только по типу)
+    BASE_FNF = 'import os\nraise FileNotFoundError("нет соседнего guard: " + os.path.abspath(__file__))\n'
+    NEW_FNF = 'import os\nopen(os.path.join(os.path.dirname(os.path.abspath(__file__)), "нет-файла.json"))\n'
+    e = Env("1.0.0", "1.1.0", BASE_FNF, NEW_FNF)
+    r = e.run()
+    fr = fresh_of(e)
+    check("0360 п.2: другой FileNotFoundError у новой — не гасится FileNotFoundError базы",
+          r.returncode == 76 and "исключение FileNotFoundError: [Errno 2] No such file or directory: "
+          "'<tmp>/…/<copy>/x/tests/нет-файла.json'" in fr, f"{r.returncode} {fr!r}")
+    e.close()
+    e = Env("1.0.0", "1.1.0", BASE_FNF, BASE_FNF)
+    r = e.run()
+    check("0360 п.2: то же исключение с тем же текстом (пути во временной папке разные) — база гасит",
+          r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), f"{r.returncode} {fresh_of(e)!r}")
+    e.close()
+
+    # п.4: файл тестов ничего не проверил (код 0, ни ok, ни FAIL, ни итога) — красное, и база это не гасит, даже
+    # пустая так же; базу ради такого файла не гоняем (мутант: без NO_CHECKS)
+    e = Env("1.0.0", "1.1.0", "", "")
+    r = e.run()
+    fr = fresh_of(e)
+    check("0360 п.4: пустой файл тестов — красное «ни одной проверки», база его не гасит и не гоняется",
+          r.returncode == 76 and "test_a.py: ни одной проверки" in fr and "===== база 1.0.0 ·" not in log_of(e),
+          f"{r.returncode} {fr!r}")
+    e.close()
+
+    # Ревью 0359 (второй argus). п.1: FileNotFoundError на разных файлах во временной папке — разные подписи: путь
+    # внутри копии и имя файла остаются, корень копии (new/ и base/) и случайные папки — нет (мутант: путь целиком
+    # в <tmp>); тот же файл у обеих — гасится (выше, BASE_FNF)
+    def open_in_copy(rel):
+        return ("import os\nhere = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\n"
+                f"open(os.path.join(here, {rel!r}))\n")
+    e = Env("1.0.0", "1.1.0", open_in_copy("README.md"), open_in_copy("lib/rules.toml"))
+    r = e.run()
+    fr = fresh_of(e)
+    check("0359b п.1: FileNotFoundError на другом файле в tmp — не гасится базой, путь внутри копии в подписи",
+          r.returncode == 76 and "No such file or directory: '<tmp>/…/<copy>/x/lib/rules.toml'" in fr
+          and "README.md" not in fr, f"{r.returncode} {fr!r}")
+    e.close()
+    e = Env("1.0.0", "1.1.0", open_in_copy("README.md"), open_in_copy("README.md"))
+    r = e.run()
+    check("0359b п.1: тот же отсутствующий файл в своей копии у обеих — база гасит",
+          r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), f"{r.returncode} {fresh_of(e)!r}")
+    e.close()
+
+    # п.2: итог с нулём проверок («0 из 0 прошли», «тестов: 0, …») при коде 0 — тоже «ни одной проверки»
+    # (мутант: итог с нулём считается итогом)
+    for body in ('print("0 из 0 прошли")\n', 'print("тестов: 0, не прошло: 0")\n'):
+        e = Env("1.0.0", "1.1.0", body, body)
+        r = e.run()
+        fr = fresh_of(e)
+        check(f"0359b п.2: итог «{body[7:-3]}» без проверок — красное «ни одной проверки»",
+              r.returncode == 76 and "test_a.py: ни одной проверки" in fr, f"{r.returncode} {fr!r}")
+        e.close()
+
+    # п.3: файл без строк ok (как test_svc_ondemand) — число проверок из итога: база красная «38 из 39», новая
+    # с той же строкой провала и «12 из 13» — «проверок меньше по итогу» (мутант: сравнение только строк ok)
+    NOOK_BASE = 'print("НЕ ПРОШЁЛ: env")\nprint("38 из 39 прошли")\nraise SystemExit(1)\n'
+    NOOK_NEW = 'print("НЕ ПРОШЁЛ: env")\nprint("12 из 13 прошли")\nraise SystemExit(1)\n'
+    e = Env("1.0.0", "1.1.0", NOOK_BASE, NOOK_NEW)
+    r = e.run()
+    fr = fresh_of(e)
+    check("0359b п.3: без строк ok, итог 13 < 39 у базы — красное «проверок меньше по итогу»",
+          r.returncode == 76 and "test_a.py: проверок меньше, чем у базы (по итогу 13 < 39)" in fr
+          and "НЕ ПРОШЁЛ" not in fr, f"{r.returncode} {fr!r}")
+    e.close()
+    e = Env("1.0.0", "1.1.0", NOOK_BASE, NOOK_BASE)
+    r = e.run()
+    check("0359b п.3: без строк ok, итог как у базы — база гасит",
+          r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), f"{r.returncode} {fresh_of(e)!r}")
+    e.close()
+
+    # п.4: итог — только последняя строка. Новая дописала проверки, деталь FAIL несёт «2/3» из вывода ребёнка, затем
+    # молчаливый обрыв: «2/3» в середине (мутант: итог в любой строке) или последней строкой при 6 строках ok
+    # (мутант: без сверки N итога с числом ok) — «нет итоговой строки»
+    G_BASE = ('print("ok   a")\nprint("FAIL env — вывод:\\n2/3")\nfor i in range(5): print(f"ok   x{i}")\n'
+              'print("6 из 7 прошли")\nraise SystemExit(1)\n')
+    for what, tail in (("в середине", 'print("ok   b", flush=True)\n'), ("последней строкой", "")):
+        body = ('for i in range(4): print(f"ok   n{i}")\nprint("ok   a")\nprint("FAIL env — вывод:\\n2/3")\n'
+                + tail + 'import sys\nsys.stdout.flush()\nimport os\nos._exit(1)\n')
+        if not tail:
+            body = 'print("ok   n4")\n' + body
+        e = Env("1.0.0", "1.1.0", G_BASE, body)
+        r = e.run()
+        fr = fresh_of(e)
+        check(f"0359b п.4: «2/3» из детали FAIL {what}, обрыв, строк ok столько же — красное «нет итоговой строки»",
+              r.returncode == 76 and "test_a.py: нет итоговой строки" in fr and "проверок меньше" not in fr,
+              f"{r.returncode} {fr!r}")
+        e.close()
+
+    # Ревью 0359 (первый argus): «НЕ ПРОШЛО» / «НЕ ПРОШЁЛ» / «ОШИБКА:» — строки провала, как FAIL: база с провалом
+    # окружения в том же файле не гасит новый провал (мутант: только FAIL)
+    NP_BASE = 'print("НЕ ПРОШЛО: env")\nprint("тестов: 5, не прошло: 1")\nraise SystemExit(1)\n'
+    for line in ("НЕ ПРОШЛО: новое", "НЕ ПРОШЁЛ: новое", "ОШИБКА: test_x KeyError 'k'"):
+        e = Env("1.0.0", "1.1.0", NP_BASE,
+                f'print("НЕ ПРОШЛО: env")\nprint({line!r})\nprint("тестов: 5, не прошло: 2")\nraise SystemExit(1)\n')
+        r = e.run()
+        fr = fresh_of(e)
+        check(f"0359b: строка «{line.split(':')[0]}» — подпись провала, база с другим провалом её не гасит",
+              r.returncode == 76 and line in fr and "НЕ ПРОШЛО: env" not in fr, f"{r.returncode} {fr!r}")
+        e.close()
+    # деталь в той же строке: изменчивое (pid, порты, время) в подписи — N, тот же провал окружения с другими pid
+    # и временем у базы гасится (мутант: без _VOLATILE — тик держал бы обновление на каждом флаке keep-alive)
+    KA = ('print("НЕ ПРОШЁЛ: keep-alive ответов 10 из ≥11, [{}, {}] pid {} в {} 127.0.0.1:{}")\n'
+          'print("38 из 39 прошли")\nraise SystemExit(1)\n')
+    e = Env("1.0.0", "1.1.0", KA.format(40600, 40601, 812, "12:01:02.5", 52311),
+            KA.format(308, 567, 97, "2026-10-22T13:45:12+03:00", 60001))
+    r = e.run()
+    check("0359b: «НЕ ПРОШЁЛ» с другими pid, портом и временем — тот же провал, база гасит",
+          r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), f"{r.returncode} {fresh_of(e)!r}")
+    e.close()
+    # Круг 3, п.1: номер и значение проверки не N — соседние проверки цикла test_night/test_watch («запас +0» и
+    # «запас +4», «ответ в 23:10» и «в 22:30», «сбой 1» и «сбой 3») — разные подписи: провал базы в одной не гасит
+    # провал новой в другой (мутант: все числа — N). Счётчик в детали тоже остаётся: флак с другим счётчиком — красное
+    SUMN = 'print("тестов: 40, не прошло: 1")\nraise SystemExit(1)\n'
+    for was, now in (("запас +0: бюджет 2.5, ждали 3", "запас +4: бюджет 2.5, ждали 3"),
+                     ("ответ в 23:10 — opened_at None", "ответ в 22:30 — opened_at None"),
+                     ("сбой 1 не засчитан: {'fails': 0}", "сбой 3 не засчитан: {'fails': 0}"),
+                     ("keep-alive ответов 10 из ≥11", "keep-alive ответов 9 из ≥11")):
+        e = Env("1.0.0", "1.1.0", f"print('НЕ ПРОШЛО:', {was!r})\n" + SUMN, f"print('НЕ ПРОШЛО:', {now!r})\n" + SUMN)
+        r = e.run()
+        fr = fresh_of(e)
+        check(f"0359 круг 3 п.1: «{was}» у базы не гасит «{now}» у новой",
+              r.returncode == 76 and f"НЕ ПРОШЛО: {now}" in fr and was not in fr, f"{r.returncode} {fr!r}")
+        e.close()
+
+    # Круг 3, п.2: итог без числа проверок («OK 0», старый test_mmv) при коде 0 и без строк ok — «ни одной проверки»
+    # (мутант: только итог с нулём); test_mmv печатает «тестов: N, не прошло: K» — число проверок видно, пропуск
+    # проверок при том же провале окружения — «проверок меньше по итогу»
+    e = Env("1.0.0", "1.1.0", 'print("OK", 0)\n', 'print("OK", 0)\n')
+    r = e.run()
+    fr = fresh_of(e)
+    check("0359 круг 3 п.2: код 0, «OK 0», ни строки ok — красное «ни одной проверки»",
+          r.returncode == 76 and "test_a.py: ни одной проверки" in fr, f"{r.returncode} {fr!r}")
+    e.close()
+    MMV = 'print("НЕ ПРОШЛО: CLI mmv: 1")\nprint("тестов: {}, не прошло: 1")\nraise SystemExit(1)\n'
+    e = Env("1.0.0", "1.1.0", MMV.format(27), MMV.format(2))
+    r = e.run()
+    fr = fresh_of(e)
+    check("0359 круг 3 п.2: итог «тестов: 2» против «тестов: 27» у базы — красное «проверок меньше по итогу»",
+          r.returncode == 76 and "test_a.py: проверок меньше, чем у базы (по итогу 2 < 27)" in fr, f"{r.returncode} {fr!r}")
+    e.close()
+    r = subprocess.run([PY, "-I", os.path.join(ROOT, "tests", "test_mmv.py")], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
+    mmv = subprocess.run([PY, "-I", "-c", f"import sys; sys.path.insert(0, {os.path.dirname(LIB)!r}); import pantheon as p;"
+                          "print(p._ok_count(sys.stdin.read())[1])"], input=r.stdout, capture_output=True, text=True,
+                         timeout=60).stdout.strip()
+    check("0359 круг 3 п.2: настоящий test_mmv.py — итог с числом проверок",
+          r.returncode == 0 and mmv.isdigit() and int(mmv) > 20, f"{r.returncode} {mmv!r} {r.stdout[-300:]}")
+
+    # Круг 3, п.4: файл без строк ok, деталь «НЕ ПРОШЁЛ» несёт «39/39» последней строкой, затем молчаливый обрыв —
+    # «все прошли» при строке провала не итог: «нет итоговой строки» (мутант: без этой сверки — зелёное)
+    e = Env("1.0.0", "1.1.0", 'print("НЕ ПРОШЁЛ: keep-alive x")\nprint("38 из 39 прошли")\nraise SystemExit(1)\n',
+            'print("НЕ ПРОШЁЛ: keep-alive x\\n39/39", flush=True)\nimport os\nos._exit(1)\n')
+    r = e.run()
+    fr = fresh_of(e)
+    check("0359 круг 3 п.4: «39/39» из детали провала последней строкой — красное «нет итоговой строки»",
+          r.returncode == 76 and "test_a.py: нет итоговой строки" in fr, f"{r.returncode} {fr!r}")
+    e.close()
+
     # Нет папки установленной версии — база пустая, старое падение уже красное
     e = Env("1.0.0", "1.1.0", OLD_FAIL, OLD_FAIL)
     shutil.rmtree(os.path.join(e.home, ".claude", "plugins", "cache"))
@@ -650,6 +841,11 @@ sig = p._failure_signatures
 print(json.dumps({{
   "cmds": {{c: p.parse_command(c) is not None for c in cmds}},
   "tmp": sig("t.py", "FAIL x " + p.tempfile.gettempdir() + "/abc/new/x/f.py\\n  FAIL y /private/tmp/q/z\\n", 1),
+  "rand": [p._tmp_sub("x " + p.tempfile.gettempdir() + "/guard-ab12cd34/" + w + "/guard/tmpq1w2e3r4/README.md")
+           for w in ("new", "base")]
+          + [p._tmp_sub("'" + p.tempfile.gettempdir() + "/board-root-1az784c9/board-test-ef6u2lif/state/x.json'")],
+  "names": [p._tmp_sub(p.tempfile.gettempdir() + "/home-q1w2e3r4/ai/pantheon/directions/" + d + "/STATUS.md")
+            for d in ("metis-pantheon", "hephaestus-pantheon")],
   "code": sig("t.py", "что-то\\n", 2), "ok": sig("t.py", "ok\\n", 0), "timeout": sig("t.py", "", None),
   "exc": sig("t.py", "FAIL a\\nTraceback (most recent call last):\\n  File \\"t.py\\", line 1\\nValueError: b\\n", 1),
   "ansi": sig("t.py", "\\x1b[31mFAIL c\\x1b[0m\\n", 1), "killed": sig("t.py", "FAIL d\\n", -9),
@@ -668,15 +864,21 @@ print(json.dumps({{
     check("parse_command не пропускает plugins foo, plugins, update с другим флагом",
           cmds and not any(cmds[c] for c in ("pantheon plugins foo", "pantheon plugins update --force",
                                               "pantheon plugins")), cmds)
-    check("подписи: временные пути → <tmp>", got.get("tmp") == ["FAIL x <tmp>", "FAIL y <tmp>", "t.py: код 1"],
-          got.get("tmp"))
+    NS = "t.py: нет итоговой строки"
+    check("подписи: корень временной папки → <tmp>, путь внутри остаётся (ревью 0359, п.1)",
+          got.get("tmp") == ["FAIL x <tmp>/abc/new/x/f.py", "FAIL y <tmp>/q/z", "t.py: код 1", NS], got.get("tmp"))
+    check("подписи: случайные папки mkdtemp → «…», корень копии new/ и base/ → <copy>, имя файла остаётся",
+          got.get("rand") == ["x <tmp>/…/<copy>/guard/…/README.md"] * 2 + ["'<tmp>/…/state/x.json'"], got.get("rand"))
+    check("подписи: имя с дефисом и 8 знаками ниже настоящей папки — не «…» (ревью 0359, круг 3, п.3)",
+          got.get("names") == [f"<tmp>/…/ai/pantheon/directions/{d}/STATUS.md"
+                               for d in ("metis-pantheon", "hephaestus-pantheon")], got.get("names"))
     check("подписи: код без FAIL, зелёный файл, таймаут",
-          got.get("code") == ["t.py: код 2"] and got.get("ok") == [] and got.get("timeout") == ["t.py: таймаут"],
+          got.get("code") == ["t.py: код 2", NS] and got.get("ok") == [] and got.get("timeout") == ["t.py: таймаут"],
           got)
-    check("подписи: FAIL, исключение в конце и код", got.get("exc") == ["FAIL a", "t.py: исключение ValueError",
-                                                                        "t.py: код 1"], got.get("exc"))
+    check("подписи: FAIL, исключение в конце с текстом и код",
+          got.get("exc") == ["FAIL a", "t.py: исключение ValueError: b", "t.py: код 1", NS], got.get("exc"))
     check("подписи: ANSI вырезан, код при FAIL — всегда",
-          got.get("ansi") == ["FAIL c", "t.py: код 1"] and got.get("killed") == ["FAIL d", "t.py: код -9"], got)
+          got.get("ansi") == ["FAIL c", "t.py: код 1", NS] and got.get("killed") == ["FAIL d", "t.py: код -9", NS], got)
     check("версии: числа, равные, не разобрать", got.get("newer") == [True, False, True], got.get("newer"))
     # База не досчитана: файл базы кончился таймаутом или сроком прогона — падение новой версии в нём остаётся
     # падением; интерпретаторы: тесты pantheon только 3.11+, guard — на всех
