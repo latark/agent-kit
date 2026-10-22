@@ -715,6 +715,14 @@ print(json.dumps({"seen": seen, "fresh": sorted(k[2] for k in fresh)}))""", e.sr
         check(f"0359b: строка «{line.split(':')[0]}» — подпись провала, база с другим провалом её не гасит",
               r.returncode == 76 and line in fr and "НЕ ПРОШЛО: env" not in fr, f"{r.returncode} {fr!r}")
         e.close()
+    # деталь в той же строке (pid, счётчики) — числа в подписи N: тот же провал окружения с другими числами у базы
+    # гасится (мутант: без N — тик держал бы обновление на каждом флаке keep-alive test_svc_ondemand)
+    KA = 'print("НЕ ПРОШЁЛ: keep-alive ответов {} из ≥11, [{}, {}]")\nprint("38 из 39 прошли")\nraise SystemExit(1)\n'
+    e = Env("1.0.0", "1.1.0", KA.format(10, 40600, 40601), KA.format(9, 8061, 8063))
+    r = e.run()
+    check("0359b: «НЕ ПРОШЁЛ» с другими числами в детали — тот же провал, база гасит",
+          r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), f"{r.returncode} {fresh_of(e)!r}")
+    e.close()
 
     # Нет папки установленной версии — база пустая, старое падение уже красное
     e = Env("1.0.0", "1.1.0", OLD_FAIL, OLD_FAIL)
@@ -784,7 +792,8 @@ print(json.dumps({{
   "cmds": {{c: p.parse_command(c) is not None for c in cmds}},
   "tmp": sig("t.py", "FAIL x " + p.tempfile.gettempdir() + "/abc/new/x/f.py\\n  FAIL y /private/tmp/q/z\\n", 1),
   "rand": [p._tmp_sub("x " + p.tempfile.gettempdir() + "/guard-ab12cd34/" + w + "/guard/tmpq1w2e3r4/README.md")
-           for w in ("new", "base")],
+           for w in ("new", "base")]
+          + [p._tmp_sub("'" + p.tempfile.gettempdir() + "/board-root-1az784c9/board-test-ef6u2lif/state/x.json'")],
   "code": sig("t.py", "что-то\\n", 2), "ok": sig("t.py", "ok\\n", 0), "timeout": sig("t.py", "", None),
   "exc": sig("t.py", "FAIL a\\nTraceback (most recent call last):\\n  File \\"t.py\\", line 1\\nValueError: b\\n", 1),
   "ansi": sig("t.py", "\\x1b[31mFAIL c\\x1b[0m\\n", 1), "killed": sig("t.py", "FAIL d\\n", -9),
@@ -807,7 +816,7 @@ print(json.dumps({{
     check("подписи: корень временной папки → <tmp>, путь внутри остаётся (ревью 0359, п.1)",
           got.get("tmp") == ["FAIL x <tmp>/abc/new/x/f.py", "FAIL y <tmp>/q/z", "t.py: код 1", NS], got.get("tmp"))
     check("подписи: случайные папки mkdtemp → «…», корень копии new/ и base/ → <copy>, имя файла остаётся",
-          got.get("rand") == ["x <tmp>/…/<copy>/guard/…/README.md"] * 2, got.get("rand"))
+          got.get("rand") == ["x <tmp>/…/<copy>/guard/…/README.md"] * 2 + ["'<tmp>/…/state/x.json'"], got.get("rand"))
     check("подписи: код без FAIL, зелёный файл, таймаут",
           got.get("code") == ["t.py: код 2", NS] and got.get("ok") == [] and got.get("timeout") == ["t.py: таймаут"],
           got)
