@@ -121,6 +121,21 @@ def queued(text, t_enq, kind="human", meta=False, sidechain=False, uid=None):
             "attachment": a}
 
 
+HLOG = os.path.join(state, "logs", "ctx-hooks.log")
+NO_SOURCE = "в событии нет поля source"  # owner-log пишет её в журнал хуков прямо перед тем, как прочесть размер транскрипта
+
+
+def wait_hook_mark(th, n0, limit=30):
+    """metis-0365: дождаться, пока хук прочтёт размер транскрипта (mark), а не спать секунду. Под нагрузкой
+    автоустановки запуск python и импорт хука шли дольше секунды: вложение дописывалось раньше mark, хук считал его
+    пришедшим до ввода — ваш ввод уходил в unconfirmed/ (20/21 в логах 0.11.60 и 0.11.64). Признак — новая строка
+    NO_SOURCE в журнале хуков; от неё до mark — одно чтение файла, запас 0,3 с. Хук вышел раньше (подагент) — не ждём."""
+    end = time.time() + limit
+    while time.time() < end and th.is_alive() and read(HLOG).count(NO_SOURCE) <= n0:
+        time.sleep(0.05)
+    time.sleep(0.3)
+
+
 def midturn(name, text, turn_kind="peer", att=None, age=AGE, ev_extra=None, tr=None, pre=()):
     """Ход p-<name> начат записью turn_kind и идёт давно; владелец набрал text за age с до того, как ход забрал
     очередь. Хук срабатывает при заборе с prompt_id идущего хода; вложение att (или ваше) дописывается после того,
@@ -141,9 +156,10 @@ def midturn(name, text, turn_kind="peer", att=None, age=AGE, ev_extra=None, tr=N
     for d in pre(time.time()) if pre else ():
         append(tr, d)
     holder = {}
+    n0 = read(HLOG).count(NO_SOURCE)
     th = threading.Thread(target=lambda: holder.update(r=run(ev)))
     th.start()
-    time.sleep(1.0)  # хук успел прочесть размер транскрипта (ждёт он дольше: PANTHEON_CONFIRM_WAIT + QUEUED_WAIT)
+    wait_hook_mark(th, n0)  # хук прочёл размер транскрипта (ждёт он дольше: PANTHEON_CONFIRM_WAIT + QUEUED_WAIT)
     now = time.time()
     append(tr, queued(text, now - age) if att is None else att(now))
     th.join(40)
@@ -296,11 +312,12 @@ check("запись хода из Slack (verifiedSlackHumanTurn) → не в п�
 NOFILE = "да, удаляй всё"
 tr = os.path.join(home, "tr", "nofile.jsonl")
 holder = {}
+n0 = read(HLOG).count(NO_SOURCE)
 th = threading.Thread(target=lambda: holder.update(r=run({
     "session_id": "s-nofile", "transcript_path": tr, "hook_event_name": "UserPromptSubmit", "agent_type": "hq",
     "prompt": NOFILE, "prompt_id": "p-nofile", "cwd": home, "permission_mode": "default"})))
 th.start()
-time.sleep(0.5)  # хук стартовал без файла; ждёт он дольше (enqueue ниже продлевает ожидание до QUEUED_WAIT)
+wait_hook_mark(th, n0)  # хук стартовал без файла; ждёт он дольше (enqueue ниже продлевает ожидание до QUEUED_WAIT)
 now = time.time()
 append(tr, user("<cross-session-message from=\"metis\">задача</cross-session-message>", "p-nofile", now - 3700,
                 kind="peer"))
