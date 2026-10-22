@@ -432,20 +432,34 @@ def test_proxy_inproc():
         t.start()
         k = lst.dial()
         k.settimeout(10)
-        served, t0 = 0, time.monotonic()
+        # metis-0365: мерило — сколько секунд соединение прожило без обрыва, а не сколько ответов уложилось в 3 простоя.
+        # Счёт ответов краснел без поломки (8–10 из ≥11 в 10 логах автоустановки и 10 из 10 под QoS background):
+        # запуск qmd первым обменом и опоздание sleep при слиянии таймеров в фоне съедают интервалы. Первый обмен
+        # поднимает qmd — отсчёт с его ответа; пауза IDLE/8 — запас 7/8 простоя на опоздание; худшая пауза — в детали.
+        served, why, worst = 0, "", 0.0
         try:
-            while time.monotonic() - t0 < IDLE * 3:
+            k.sendall(b"ping")
+            why = "" if k.recv(10) == b"ping" else "первый обмен без ответа"
+        except OSError as e:
+            why = f"первый обмен: {e}"
+        t0 = last = time.monotonic()
+        while not why and time.monotonic() - t0 < IDLE * 3:
+            time.sleep(IDLE / 8)
+            worst = max(worst, time.monotonic() - last)
+            try:
                 k.sendall(b"ping")
                 if k.recv(10) != b"ping":
+                    why = "соединение закрыто"
                     break
-                served += 1
-                time.sleep(IDLE / 4)
-        except OSError:
-            pass
-        want = int(IDLE * 3 / (IDLE / 4)) - 1
+            except OSError as e:
+                why = str(e)
+                break
+            served, last = served + 1, time.monotonic()
+        held = last - t0
         check("в процессе: keep-alive — байты одного соединения держат прокси дольше простоя",
-              served >= want and t.is_alive() and len(pids(pidfile)) == before + 1,
-              f"ответов {served} из ≥{want}, прокси жив: {t.is_alive()}, {pids(pidfile)}")
+              not why and held >= IDLE * 3 - IDLE / 8 and t.is_alive() and len(pids(pidfile)) == before + 1,
+              f"оборвалось: {why or 'нет'}; соединение жило {held:.2f} с из {IDLE * 3} (простой {IDLE}), ответов "
+              f"{served}, худшая пауза {worst:.2f} с, прокси жив: {t.is_alive()}, {pids(pidfile)}")
         t.join(IDLE * 5)
         try:
             closed = k.recv(10) == b""
