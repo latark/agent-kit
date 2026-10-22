@@ -559,7 +559,10 @@ clock = [1000.0]
 P.time.monotonic = lambda: clock[0]
 P._pythons_for = lambda name: ["py"]
 seen = []
+real = subprocess.run
 def fake(cmd, cwd=None, timeout=None, **kw):
+    if cmd[0] == "git":  # git init/add/commit копии-клона (metis-0368) — настоящий, это не прогон тестов
+        return real(cmd, cwd=cwd, timeout=timeout, **kw)
     who = "new" if "/new/" in cwd else "base"
     f = cmd[-1].split("/")[-1]
     seen.append([who, f, round(timeout)])
@@ -581,6 +584,50 @@ print(json.dumps({"seen": seen, "fresh": sorted(k[2] for k in fresh)}))""", e.sr
           got)
     check("срок базы — остаток после новой: 1800 − 1700 = 100 с, одинаковое падение базой погашено",
           g.get("seen", [[0, 0, 0]] * 3)[-1][2] == 100 and g.get("fresh") == [], got)
+    e.close()
+
+    # metis-0368: копия — как клон agent-kit: рядом соседний guard (у новой — из каталога, у базы — установленный),
+    # .claude-plugin/marketplace.json в корне, корень — git-репозиторий с коммитом (всё закоммичено). Тест в копии
+    # пишет, что видит; обе версии падают одинаково, чтобы база тоже гонялась. Хеш — только дерево x: update встал
+    SEE_PEERS = (
+        'import json, os, subprocess\n'
+        'here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\n'
+        'root = os.path.dirname(os.path.dirname(here))\n'
+        'g = os.path.join(here, "..", "guard", "marker.txt")\n'
+        'git = lambda *a: subprocess.run(["git", "-C", here, *a], capture_output=True, text=True)\n'
+        'top = git("rev-parse", "--show-toplevel").stdout.strip()\n'
+        'rec = {"who": os.path.basename(root), "guard": open(g).read() if os.path.exists(g) else None,\n'
+        '       "top": bool(top) and os.path.realpath(top) == os.path.realpath(root),\n'
+        '       "commit": git("log", "--oneline").stdout.count("\\n") == 1,\n'
+        '       "clean": git("status", "--porcelain").returncode == 0 and git("status", "--porcelain").stdout == "",\n'
+        '       "mkt": os.path.isfile(os.path.join(root, ".claude-plugin", "marketplace.json"))}\n'
+        'open(os.environ["REC_FILE"], "a").write(json.dumps(rec, sort_keys=True) + "\\n")\n'
+        'print("FAIL окружение копии")\nraise SystemExit(1)\n')
+    e = Env("1.0.0", "1.1.0", SEE_PEERS, SEE_PEERS)
+    mkt = os.path.dirname(os.path.dirname(e.src))
+    gcat = os.path.join(mkt, "plugins", "guard")
+    gcache = os.path.join(e.home, ".claude", "plugins", "cache", "agent-kit", "guard", "3.0.0")
+    for d, mark in ((gcat, "каталог"), (gcache, "установлен")):
+        e.write(os.path.join(d, ".claude-plugin", "plugin.json"), json.dumps({"name": "guard", "version": "3.0.0"}))
+        e.write(os.path.join(d, "marker.txt"), mark)
+    e.write(os.path.join(mkt, ".claude-plugin", "marketplace.json"),
+            json.dumps({"name": "agent-kit", "plugins": [{"name": "x", "source": "./plugins/x"},
+                                                        {"name": "guard", "source": "./plugins/guard"}]}))
+    grow = {"id": "guard@agent-kit", "version": "3.0.0", "scope": "user", "installPath": gcache}
+    for f in ("list.json", "list-after.json"):
+        p = os.path.join(e.stub, f)
+        e.write(p, json.dumps(json.load(open(p)) + [grow]))
+    rec = os.path.join(e.tmp, "peers.rec")
+    r = e.run(extra={"REC_FILE": rec})
+    seen = [json.loads(ln) for ln in open(rec, encoding="utf-8")] if os.path.exists(rec) else []
+    want = {"new": "каталог", "base": "установлен"}
+    check("0368: копия с соседом — у новой guard из каталога, у базы установленный",
+          sorted({(s["who"], s["guard"]) for s in seen}) == sorted(want.items()), seen)
+    check("0368: копия — git-репозиторий с одним коммитом, всё закоммичено, marketplace.json в корне",
+          len(seen) >= 2 and all(s["top"] and s["commit"] and s["clean"] and s["mkt"] for s in seen), seen)
+    check("0368: хеш — только дерево x: одинаковое падение обеих погашено, update встал на проверенное",
+          r.returncode == 0 and "plugin update x@agent-kit" in e.argv() and "plugin update guard" not in e.argv()
+          and "обновлён x 1.0.0 → 1.1.0" in e.alerts(), f"{r.returncode} {e.alerts()[-300:]!r}")
     e.close()
 
     # metis-0360: подписи не гасят настоящие поломки (ревью 0358, второй argus). fresh_of — новые падения из лога.
@@ -622,7 +669,7 @@ print(json.dumps({"seen": seen, "fresh": sorted(k[2] for k in fresh)}))""", e.sr
     fr = fresh_of(e)
     check("0360 п.2: другой FileNotFoundError у новой — не гасится FileNotFoundError базы",
           r.returncode == 76 and "исключение FileNotFoundError: [Errno 2] No such file or directory: "
-          "'<tmp>/…/<copy>/x/tests/нет-файла.json'" in fr, f"{r.returncode} {fr!r}")
+          "'<tmp>/…/<copy>/plugins/x/tests/нет-файла.json'" in fr, f"{r.returncode} {fr!r}")
     e.close()
     e = Env("1.0.0", "1.1.0", BASE_FNF, BASE_FNF)
     r = e.run()
@@ -650,7 +697,7 @@ print(json.dumps({"seen": seen, "fresh": sorted(k[2] for k in fresh)}))""", e.sr
     r = e.run()
     fr = fresh_of(e)
     check("0359b п.1: FileNotFoundError на другом файле в tmp — не гасится базой, путь внутри копии в подписи",
-          r.returncode == 76 and "No such file or directory: '<tmp>/…/<copy>/x/lib/rules.toml'" in fr
+          r.returncode == 76 and "No such file or directory: '<tmp>/…/<copy>/plugins/x/lib/rules.toml'" in fr
           and "README.md" not in fr, f"{r.returncode} {fr!r}")
     e.close()
     e = Env("1.0.0", "1.1.0", open_in_copy("README.md"), open_in_copy("README.md"))

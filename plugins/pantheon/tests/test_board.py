@@ -27,6 +27,11 @@ from datetime import datetime
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
 CLI = os.path.join(LIB, "pantheon.py")
 T0 = 1_792_000_000  # 2026-10-15
+# Таймаут одного вызова — страховка от зависания, а не проверка скорости: ни одна проверка файла время не меряет.
+# 60 с не хватило под нагрузкой (metis-0368: прогон автоустановки при load avg 13,5 — `task new --direction ../..`,
+# мгновенный отказ, не уложился в 60 с и оборвал файл исключением). Зависший вызов всё равно ловится: 300 с здесь и
+# PLUGIN_TEST_TIMEOUT (600 с) на файл у автоустановки
+RUN_TIMEOUT = 300
 results = []
 
 
@@ -50,7 +55,7 @@ def make():
 
 def run(env, *args, t=T0):
     e = dict(env, PANTHEON_NOW=str(t))
-    return subprocess.run([PY311, "-I", CLI, *args], env=e, capture_output=True, text=True, timeout=60)
+    return subprocess.run([PY311, "-I", CLI, *args], env=e, capture_output=True, text=True, timeout=RUN_TIMEOUT)
 
 
 def head_of(path):
@@ -89,7 +94,7 @@ def state_len_hook():
 
     def hk(payload, raw=False):
         return subprocess.run([sys.executable, "-I", hook, "state-len"], env=e, capture_output=True, text=True,
-                              input=payload if raw else json.dumps(payload), timeout=30)
+                              input=payload if raw else json.dumps(payload), timeout=RUN_TIMEOUT)
 
     def mk(path, n):
         open(path, "w", encoding="utf-8").write("ж" * n)  # кириллица: знаки, не байты
@@ -597,7 +602,7 @@ def main():
     os.makedirs(os.path.join(dst, "Доска"))
     open(os.path.join(dst, "Доска", "Карточка.md"), "w").write("---\nСтатус: Очередь\n---\n")
     subprocess.run(["/bin/zsh", os.path.join(LIB, "view-sync.sh"), src_dir, dst, os.path.join(tmp, "inbox-view")],
-                   capture_output=True, timeout=30)
+                   capture_output=True, timeout=RUN_TIMEOUT)
     kept = os.path.exists(os.path.join(dst, "Доска", "Карточка.md"))
     writable = os.access(os.path.join(dst, "Доска", "Карточка.md"), os.W_OK)
     ro = not os.access(os.path.join(dst, "board.md"), os.W_OK)
@@ -621,13 +626,13 @@ def main():
     _shutil.rmtree(os.path.join(ob, "snippets"))
     before = open(os.path.join(ob, "app.json"), "rb").read()
     subprocess.run(["/bin/zsh", os.path.join(LIB, "view-sync.sh"), src_dir, dst, os.path.join(tmp, "inbox-view")],
-                   capture_output=True, timeout=30)
+                   capture_output=True, timeout=RUN_TIMEOUT)
     check("0131: существующий .obsidian не тронут — свои настройки целы, удалённое не возвращается",
           open(os.path.join(ob, "app.json"), "rb").read() == before and not os.path.exists(os.path.join(ob, "snippets")))
     empty = os.path.join(tmp, "dst-empty")
     os.makedirs(os.path.join(empty, ".obsidian"))
     subprocess.run(["/bin/zsh", os.path.join(LIB, "view-sync.sh"), src_dir, empty, os.path.join(tmp, "inbox-view")],
-                   capture_output=True, timeout=30)
+                   capture_output=True, timeout=RUN_TIMEOUT)
     check("0131: пустая папка .obsidian — тоже «есть», образец не подмешивается", os.listdir(os.path.join(empty, ".obsidian")) == [])
 
     r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Выбрать хранилище", "--status", "waiting",

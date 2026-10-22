@@ -290,16 +290,20 @@ th.join()
 check("транскрипт записан с задержкой → хук дождался и записал", "запоздалый ввод" in log_text("zeus")
       and "запоздалый ввод · " not in log_text("zeus"))
 
-coord = transcript("alpha1", [user("athena, сдвинь срок на пятницу", "c1", now)])
+# metis-0368: время записей ввода — свежее, а не `now` начала файла. Хук берёт запись не старше ENTRY_MAX_AGE (180 с),
+# а под нагрузкой (load avg 13,5 на прогоне автоустановки) файл шёл сюда дольше трёх минут: записи уходили в
+# unconfirmed/, журналы alpha и daedalus не появлялись, и ниже падал os.remove(hq-seen.json)
+t_ol = time.time()
+coord = transcript("alpha1", [user("athena, сдвинь срок на пятницу", "c1", t_ol)])
 run("owner-log", {"session_id": "s-a", "transcript_path": coord, "agent_type": "domain-coordinator",
                   "prompt": "athena, сдвинь срок на пятницу", "prompt_id": "c1"},
     CLAUDE_PROJECT_DIR=os.path.join(home, "projects", "alpha", "src"))
 check("координатор → журнал по направлению папки запуска (alpha.md)", "сдвинь срок" in log_text("alpha"))
-ws = transcript("ws1", [user("купи билет", "w1", now)])
+ws = transcript("ws1", [user("купи билет", "w1", t_ol)])
 run("owner-log", {"session_id": "s-w", "transcript_path": ws, "agent_type": "workshop", "session_title": "daedalus-visa",
                   "prompt": "купи билет", "prompt_id": "w1"})
 check("мастерская → daedalus-<задача>.md", "купи билет" in log_text("daedalus-visa"))
-plain = transcript("plain1", [user("обычная сессия", "n1", now)])
+plain = transcript("plain1", [user("обычная сессия", "n1", t_ol)])
 run("owner-log", {"session_id": "s-n", "transcript_path": plain, "prompt": "обычная сессия", "prompt_id": "n1"})
 run("owner-log", {"session_id": "s-n", "transcript_path": plain, "prompt": "обычная сессия", "prompt_id": "n1",
                   "agent_type": "argus"})
@@ -307,7 +311,7 @@ check("сессия без роли и нижняя роль — журнала 
       == ["alpha.md", "daedalus-visa.md", "zeus.md"], os.listdir(LOG))
 
 # стартовое поручение сессии, запущенной Зевсом (PANTHEON_ORIGIN)
-orig = transcript("orig1", [user("поручение: да, публикуй", "o1", now, index=1), user("ваш ответ позже", "o2", now + 1, index=2)])
+orig = transcript("orig1", [user("поручение: да, публикуй", "o1", t_ol, index=1), user("ваш ответ позже", "o2", t_ol + 1, index=2)])
 ev_o = {"session_id": "s-orig", "transcript_path": orig, "agent_type": "domain-coordinator", "source": "startup",
         "hook_event_name": "SessionStart"}
 pid_orig = str(os.getppid())  # другой процесс — своя запись сессий
@@ -319,7 +323,7 @@ check("PANTHEON_ORIGIN: стартовое поручение → строки �
 run("owner-log", dict(ev_o, prompt="ваш ответ позже", prompt_id="o2", source="user"), PANTHEON_ORIGIN="zeus", CLAUDE_PID=pid_orig,
     CLAUDE_PROJECT_DIR=os.path.join(home, "projects", "alpha"))
 check("PANTHEON_ORIGIN: ваш следующий ввод → строка есть", "ваш ответ позже" in log_text("alpha"))
-orig2 = transcript("orig2", [user("после /clear первое слово", "o3", now + 5, index=1)])
+orig2 = transcript("orig2", [user("после /clear первое слово", "o3", t_ol + 5, index=1)])
 ev_o2 = dict(ev_o, session_id="s-orig2", transcript_path=orig2, source="clear")
 run("start", ev_o2, CLAUDE_PID=pid_orig, CLAUDE_PROJECT_DIR=os.path.join(home, "projects", "alpha"))
 run("owner-log", dict(ev_o2, prompt="после /clear первое слово", prompt_id="o3", source="user"), PANTHEON_ORIGIN="zeus",
@@ -535,7 +539,11 @@ check("обычный старт координатора — без встав�
 # --- штабу: новые тревоги и журналы ---------------------------------------------------
 with open(os.path.join(pantheon, "alerts.md"), "w") as fh:
     fh.write("# Тревоги\n\nТолько дописывание.\n\n2026-10-14 17:56 · board · первая тревога\n")
-os.remove(os.path.join(state, "ctx", "hq-seen.json"))  # штаб уже видел журналы в разделе пробуждения
+seen0 = os.path.join(state, "ctx", "hq-seen.json")
+# штаб уже видел журналы в разделе пробуждения; нет файла — проверкой, а не обрывом файла (остальное досчитается)
+check("штаб уже пометил журналы показанными (hq-seen.json есть)", os.path.exists(seen0), seen0)
+if os.path.exists(seen0):
+    os.remove(seen0)
 with open(os.path.join(pantheon, "alerts.md"), "w") as fh:
     fh.write("# Тревоги\n\nТолько дописывание.\n\n2026-10-14 17:56 · board · первая тревога\n")
 r = run("start", {"session_id": "s-tick", "transcript_path": hqprev, "source": "startup", "agent_type": "hq"},

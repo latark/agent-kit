@@ -6380,14 +6380,19 @@ def _plugins_installed():
     return out
 
 
-def _plugins_catalog():
-    """{имя: (версия, папка плагина)} из клона каталога agent-kit."""
+def _catalog_root():
+    """Корень клона каталога agent-kit (installLocation из known_marketplaces.json, иначе папка по умолчанию)."""
     known = read_json(os.path.join(HOME, ".claude", "plugins", "known_marketplaces.json"))
     entry = known.get(MARKETPLACE) if isinstance(known, dict) else None
     loc = entry.get("installLocation") if isinstance(entry, dict) else None
     if not isinstance(loc, str) or not os.path.isdir(loc):
         loc = os.path.join(HOME, ".claude", "plugins", "marketplaces", MARKETPLACE)
-    root = os.path.realpath(loc)
+    return os.path.realpath(loc)
+
+
+def _plugins_catalog():
+    """{имя: (версия, папка плагина)} из клона каталога agent-kit."""
+    root = _catalog_root()
     mkt = read_json(os.path.join(root, ".claude-plugin", "marketplace.json"))
     out = {}
     for p in (mkt.get("plugins") or []) if isinstance(mkt, dict) else []:
@@ -6785,25 +6790,71 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
     return ALERTED
 
 
-def _plugin_check(name, old, new, src, base, marks):
-    """Тесты новой версии против установленной. Отдаёт (лог, хеш проверенной копии, новые подписи)."""
+_COPY_IGNORE = shutil.ignore_patterns(".git", "__pycache__")
+# git в копии — без настроек владельца и системы (хуки, подпись коммитов, шаблоны): только то, что нужно клону
+_COPY_GIT = ["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "init.templateDir=",
+             "-c", "user.name=pantheon", "-c", "user.email=pantheon@localhost"]
+
+
+def _copy_clone(root, name, src, peers, mkt_json):
+    """metis-0368: копия для прогона тестов — как клон agent-kit, а не одна папка плагина. Тесты ходят к соседям
+    (`../guard/hooks` в test_merge и test_read) и к git (test_setup: `git rev-parse --show-toplevel` и путь
+    <клон>/plugins/pantheon в клоне маркетплейса). Поэтому root/plugins/<имя> — проверяемый плагин,
+    root/plugins/<сосед> — соседи из peers {имя: папка}, root/.claude-plugin/marketplace.json — из каталога, root —
+    git-репозиторий с одним коммитом. Отдаёт (папка плагина, строки для лога о том, чего не вышло): без соседа или
+    git тесты упадут сами, и это красное, а не тихий пропуск."""
+    plugins = os.path.join(root, "plugins")
+    pdir = os.path.join(plugins, _plugins_safe(name))
+    shutil.copytree(src, pdir, symlinks=True, ignore=_COPY_IGNORE)
+    notes = []
+    for peer, d in sorted((peers or {}).items()):
+        if peer == name:
+            continue
+        if not isinstance(d, str) or not os.path.isdir(d):
+            notes.append(f"сосед {peer}: нет папки {d}")
+            continue
+        shutil.copytree(d, os.path.join(plugins, _plugins_safe(peer)), symlinks=True, ignore=_COPY_IGNORE)
+    if isinstance(mkt_json, str) and os.path.isfile(mkt_json):
+        os.makedirs(os.path.join(root, ".claude-plugin"), exist_ok=True)
+        shutil.copy2(mkt_json, os.path.join(root, ".claude-plugin", "marketplace.json"))
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"})
+    for argv in (["init", "-q"], ["add", "-A"], ["commit", "-q", "--no-verify", "-m", "копия для тестов"]):
+        try:
+            r = subprocess.run(_COPY_GIT + argv, cwd=root, env=env, stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=120)
+            why = None if r.returncode == 0 else f"код {r.returncode}: {' '.join((r.stderr or '').split())[:200]}"
+        except (OSError, subprocess.TimeoutExpired) as e:
+            why = type(e).__name__
+        if why:
+            notes.append(f"git {argv[0]}: {why}")
+            break
+    return pdir, notes
+
+
+def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=None, mkt_json=None):
+    """Тесты новой версии против установленной. Отдаёт (лог, хеш проверенной копии, новые подписи). metis-0368:
+    копии новой и базы — клоны с соседями (_copy_clone): у новой соседи из того же каталога (peers_new), у базы —
+    установленные версии (peers_base), не установленного соседа база берёт из каталога. Хеш — только дерево
+    проверяемого плагина."""
     log = path("plugins", f"{_plugins_safe(name)}-{_plugins_safe(new)}.log")
     tmp = tempfile.mkdtemp(prefix=f"{_plugins_safe(name)}-", dir=path("plugins", "tmp"))
     deadline = time.monotonic() + PLUGIN_RUN_LIMIT
     try:
-        ign = shutil.ignore_patterns(".git", "__pycache__")
-        new_dir = os.path.join(tmp, "new", _plugins_safe(name))
-        shutil.copytree(src, new_dir, symlinks=True, ignore=ign)
+        new_dir, notes_new = _copy_clone(os.path.join(tmp, "new"), name, src, peers_new, mkt_json)
         digest = _tree_hash(new_dir)
         _plugins_mark(marks, name, {"version": new, "result": "testing", "log": log, "hash": digest})
-        base_dir = None
+        base_dir, notes_base = None, []
         if isinstance(base, str) and os.path.isdir(base):
-            base_dir = os.path.join(tmp, "base", _plugins_safe(name))
-            shutil.copytree(base, base_dir, symlinks=True, ignore=ign)
+            peers = {**(peers_new or {}), **{k: v for k, v in (peers_base or {}).items() if v}}
+            base_dir, notes_base = _copy_clone(os.path.join(tmp, "base"), name, base, peers, mkt_json)
         pythons = _pythons_for(name)
         with open(log, "w", encoding="utf-8") as fh:
             fh.write(f"{stamp()} {name}: новая {new} из {src} (хеш {digest}), база {old} из "
                      f"{base_dir and base or '—'}; python: {', '.join(pythons)}\n")
+            for who, notes in (("новая", notes_new), ("база", notes_base)):
+                for n in notes:
+                    fh.write(f"копия ({who}): {n}\n")
             ok_new, ok_base = {}, {}
             got_new = _run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}", deadline, oks=ok_new)
             want = _base_targets(got_new)
@@ -6903,7 +6954,11 @@ def _plugins_update(quiet):
                 print(f"{name}: {new} — проверю на следующем запуске")
             continue
         tested = True
-        log, digest, fresh = _plugin_check(name, old, new, src, installed[name].get("installPath"), marks)
+        log, digest, fresh = _plugin_check(
+            name, old, new, src, installed[name].get("installPath"), marks,
+            peers_new={k: d for k, (_v, d) in catalog.items() if k != name},
+            peers_base={k: row.get("installPath") for k, row in installed.items() if k != name},
+            mkt_json=os.path.join(_catalog_root(), ".claude-plugin", "marketplace.json"))
         if not fresh:
             rc = max(rc, _plugin_install(name, old, new, log, marks, quiet, digest))
             continue
