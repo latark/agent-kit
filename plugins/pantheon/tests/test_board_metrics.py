@@ -66,10 +66,14 @@ def wait_runs(n, limit=15):
     return runs()
 
 
+# metis-0365: «не ждёт учёта» — по записи учёта сразу после выхода board, а не по секундомеру: «быстрее секунды»
+# краснело под нагрузкой автоустановки (5,4 с на запуск CLI), хотя учёт ещё спал. Board, ждущий учёт (3 с), выходит
+# уже с его записью — красное при любой нагрузке.
 p, dt = board()
-check("board с учётом на 3 с возвращается быстрее секунды", p.returncode == 0 and dt < 1.0,
-      (p.returncode, dt, p.stderr[-300:]))
-check("учёт запущен отдельным процессом: board вернулся, а учёт ещё спит", runs() == 0, runs())
+r0 = runs()
+check("board с учётом на 3 с возвращается, не дожидаясь учёта", p.returncode == 0 and r0 == 0,
+      (p.returncode, r0, round(dt, 1), p.stderr[-300:]))
+check("учёт запущен отдельным процессом: board вернулся, а учёт ещё спит", r0 == 0, r0)
 check("отметка запуска записана", os.path.exists(stamp_p))
 check("фоновый учёт дошёл до конца (одна запись)", wait_runs(1) == 1, runs())
 
@@ -92,7 +96,8 @@ time.sleep(4.5)
 check("PANTHEON_METRICS=0: учёт не запускается", runs() == 1 and not os.path.exists(stamp_p), runs())
 
 p, dt = board()
-check("блокировка свободна, отметки нет: board снова быстрый", dt < 1.0, dt)
+r0 = runs()
+check("блокировка свободна, отметки нет: board снова не ждёт учёта", p.returncode == 0 and r0 == 1, (r0, round(dt, 1)))
 check("и учёт запущен второй раз", wait_runs(2) == 2, runs())
 
 old = time.time() - 31 * 60
