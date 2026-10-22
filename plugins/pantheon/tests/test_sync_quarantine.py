@@ -41,7 +41,7 @@ def stamp(t):
 class Env:
     n = 0
 
-    def __init__(self, task="metis-0099", held=".sync-held"):
+    def __init__(self, task="metis-0099", held=".sync-held", applies=True):
         Env.n += 1
         base = os.path.join(ROOT, f"e{Env.n}")
         self.home = os.path.join(base, "home")
@@ -54,7 +54,9 @@ class Env:
             os.makedirs(d)
         sh = os.path.join(self.claude, "sync.sh")
         with open(sh, "w") as fh:
-            fh.write(f'#!/bin/sh\necho x >> "{self.mark}"\n')
+            # applies: заглушка снимает держание, как настоящий sync.sh; иначе выходит с 0, ничего не сняв
+            rm = f'rm -f "{self.claude}/.sync-held" "{self.claude}/.sync-incoming"\n' if applies else ""
+            fh.write(f'#!/bin/sh\necho x >> "{self.mark}"\n{rm}')
         os.chmod(sh, 0o755)
         with open(os.path.join(self.claude, held), "w") as fh:
             fh.write(f"hash=abc\ntask={task}\nfiles=1\n")
@@ -151,8 +153,8 @@ def card_question(e, tid):
     return "нет файла"
 
 
-def with_card(held=".sync-held"):
-    e = Env(held=held)
+def with_card(held=".sync-held", applies=True):
+    e = Env(held=held, applies=applies)
     os.makedirs(os.path.join(e.pan, "directions", "metis-pantheon", "tasks"))
     env = {"PATH": os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pan, "PANTHEON_STATE": e.state,
            "PANTHEON_NOW": str(T0), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": ROOT}
@@ -215,6 +217,19 @@ e.window("Отправить")
 r, ran = e.run()
 check("sync.sh код 3 — вопрос остаётся", ran and card_question(e, e.task) not in (None, "нет файла"), r.stdout + r.stderr)
 
+# sync.sh код 0, но держание осталось (лок занят, нет папки, нет репозитория) — вопрос остаётся
+for held in (".sync-held", ".sync-incoming"):
+    e = with_card(held=held, applies=False)
+    e.window("Отправить")
+    r, ran = e.run()
+    check(f"sync.sh код 0, {held} осталось — вопрос остаётся, строка в stdout",
+          ran and card_question(e, e.task) not in (None, "нет файла")
+          and f"sync-answers: {e.task} — sync.sh не применил, вопрос остаётся" in r.stdout, r.stdout + r.stderr)
+# sync.sh код 0 и держание снято — вопрос снят
+e = with_card(applies=True)
+e.window("Отправить")
+r, ran = e.run()
+check("sync.sh код 0, держание снято — вопрос снят", ran and card_question(e, e.task) is None, r.stdout + r.stderr)
 
 print(f"\n{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)
