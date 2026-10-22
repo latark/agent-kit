@@ -353,8 +353,15 @@ os.chmod(os.path.join(ro, ".claude"), 0o755)
 check("сбой записи посередине: код 2 и список уже записанного",
       r.returncode == 2 and "уже записано" in r.stderr and ".mcp.json" in r.stderr and "Ничего не записано" not in r.stderr)
 old_py = "/usr/bin/python3"
-if os.path.exists(old_py) and subprocess.run([old_py, "-c", "import sys; sys.exit(sys.version_info >= (3, 11))"]).returncode == 0:
-    r = subprocess.run([old_py, "-I", CLI, "hint"], input="{}", capture_output=True, text=True, env=env_for(home))
+# /usr/bin/python3 — заглушка xcrun: в песочнице она пишет в stderr про кэш; берём настоящий интерпретатор
+real_py = None
+if os.path.exists(old_py):
+    q = subprocess.run([old_py, "-c", "import sys; print(sys.executable)"], capture_output=True, text=True)
+    cand = q.stdout.strip()
+    if q.returncode == 0 and cand and os.path.exists(cand):
+        real_py = cand
+if real_py and subprocess.run([real_py, "-c", "import sys; sys.exit(sys.version_info >= (3, 11))"]).returncode == 0:
+    r = subprocess.run([real_py, "-I", CLI, "hint"], input="{}", capture_output=True, text=True, env=env_for(home))
     check("Python старше 3.11: подсказка молчит, код 0", r.returncode == 0 and r.stdout == "" and r.stderr == "")
 
 # 10. Карта: у каждого инструмента сервер или плагин, стеки ссылаются на существующие инструменты
