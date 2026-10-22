@@ -5704,7 +5704,9 @@ BOARD = os.path.join(VIEW, "Доска")
 # держание (.sync-held или .sync-incoming), а в журнале ваших слов (owner-log/board.jsonl) по его задаче — ответ
 # «отправить» или «откатить»; тогда запускает sync.sh сам. Решает по-прежнему sync.sh по тому же журналу; здесь —
 # только «пора». Без ответа или «пока держать» — ничего не запускает. После sync.sh с кодом 0 функция сама снимает вопрос
-# с карточки, если ответ есть в SYNC_ACT; при коде не 0 и при «Пока держать» вопрос остаётся.
+# с карточки, если ответ есть в SYNC_ACT и держание задачи снято (sync.sh с кодом 0 мог ничего не применить: занят
+# лок, нет папки, нет репозитория — тогда держание осталось, и вопрос остаётся). Код не 0, таймаут (240 с) и сбой
+# запуска (код 1) и «Пока держать» — вопрос тоже остаётся.
 SYNC_DIR = os.path.join(HOME, ".claude")
 SYNC_ACT = {"Отправить на другие Mac", "Отправить", "Откатить правку", "Всё в порядке — правка наша", "Откатить на всех Mac"}
 
@@ -5775,8 +5777,19 @@ def sync_answers():
     if r.returncode != 0:  # sync.sh не отработал — вопрос остаётся в «Ждёт вас»
         return 0
     T = tasks_mod()
+    still = set()  # держание, которое sync.sh не снял, — значит, не применил
+    for held in (".sync-held", ".sync-incoming"):
+        try:
+            m = re.search(r"^task=(\S+)$", open(os.path.join(SYNC_DIR, held), encoding="utf-8").read(), re.M)
+        except OSError:
+            continue
+        if m:
+            still.add(m.group(1))
     for tid in waiting:
         if last.get(tid) not in SYNC_ACT:
+            continue
+        if tid in still:
+            print(f"sync-answers: {tid} — sync.sh не применил, вопрос остаётся")
             continue
         try:
             head = T.load_tasks(PANTHEON, T.WORK_TYPES).get(tid, (None, {}, None))[1]
