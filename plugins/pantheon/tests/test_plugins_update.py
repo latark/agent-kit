@@ -55,7 +55,7 @@ REC_TMPDIR = 'import os\nopen(os.environ["REC_FILE"] + ".t", "a").write(os.envir
 # тесты идут без цвета: FORCE_COLOR снят, NO_COLOR=1, PYTHON_COLORS=0
 COLORLESS = ('import os\nif os.environ.get("FORCE_COLOR") or os.environ.get("CLICOLOR_FORCE") '
              'or os.environ.get("NO_COLOR") != "1" or os.environ.get("PYTHON_COLORS") != "0":\n'
-             '    print("FAIL цвет включён")\n    raise SystemExit(1)\n')
+             '    print("FAIL цвет включён")\n    raise SystemExit(1)\nprint("ok   цвет выключен")\n')
 
 
 def pantheon_python():
@@ -583,6 +583,63 @@ print(json.dumps({"seen": seen, "fresh": sorted(k[2] for k in fresh)}))""", e.sr
           g.get("seen", [[0, 0, 0]] * 3)[-1][2] == 100 and g.get("fresh") == [], got)
     e.close()
 
+    # metis-0360: подписи не гасят настоящие поломки (ревью 0358, второй argus). fresh_of — новые падения из лога.
+    def log_of(e, ver="1.1.0"):
+        p = os.path.join(e.state, "plugins", f"x-{ver}.log")
+        return open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+
+    def fresh_of(e, ver="1.1.0"):
+        text = log_of(e, ver)
+        return text.split("===== новых падений:")[-1] if "===== новых падений:" in text else ""
+
+    # п.1: база красная (FAIL окружения, код 1, есть итог), новая молча обрывается кодом 1 после первой проверки —
+    # общие с базой «FAIL env» и «код 1» не прячут оборванный остаток: «нет итоговой строки»; с итогом, но проверок
+    # меньше, чем у базы, — «проверок меньше»; та же картина у обеих — по-прежнему гасится (мутант: без сравнения)
+    BASE_RED = 'print("ok   a")\nprint("FAIL env — нет соседа")\nprint("ok   b")\nprint("2 из 3 прошли")\nraise SystemExit(1)\n'
+    NEW_CUT = 'print("ok   a")\nprint("FAIL env — нет соседа", flush=True)\nimport sys\nsys.exit(1)\n'
+    NEW_FEWER = 'print("ok   a")\nprint("FAIL env — нет соседа")\nprint("1 из 2 прошли")\nraise SystemExit(1)\n'
+    for what, body, want in (("обрыв без итога", NEW_CUT, "test_a.py: нет итоговой строки"),
+                             ("итог есть, проверок меньше", NEW_FEWER, "test_a.py: проверок меньше, чем у базы (1 < 2)"),
+                             ("как у базы", BASE_RED, None)):
+        e = Env("1.0.0", "1.1.0", BASE_RED, body)
+        r = e.run()
+        fr = fresh_of(e)
+        if want:
+            check(f"0360 п.1, {what}: база красная в том же файле — новая всё равно красная",
+                  r.returncode == 76 and "plugin update" not in e.argv() and want in fr and "FAIL env" not in fr,
+                  f"{r.returncode} {fr!r}")
+        else:
+            check(f"0360 п.1, {what}: то же падение, те же проверки — база гасит, update вызван",
+                  r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), f"{r.returncode} {fr!r}")
+        e.close()
+
+    # п.2: исключение сравнивается с текстом сообщения — FileNotFoundError окружения у базы не гасит другой
+    # FileNotFoundError новой; тот же текст с другим временным путём — гасит (мутант: подпись только по типу)
+    BASE_FNF = 'import os\nraise FileNotFoundError("нет соседнего guard: " + os.path.abspath(__file__))\n'
+    NEW_FNF = 'import os\nopen(os.path.join(os.path.dirname(os.path.abspath(__file__)), "нет-файла.json"))\n'
+    e = Env("1.0.0", "1.1.0", BASE_FNF, NEW_FNF)
+    r = e.run()
+    fr = fresh_of(e)
+    check("0360 п.2: другой FileNotFoundError у новой — не гасится FileNotFoundError базы",
+          r.returncode == 76 and "исключение FileNotFoundError: [Errno 2] No such file or directory: '<tmp>'" in fr,
+          f"{r.returncode} {fr!r}")
+    e.close()
+    e = Env("1.0.0", "1.1.0", BASE_FNF, BASE_FNF)
+    r = e.run()
+    check("0360 п.2: то же исключение с тем же текстом (пути во временной папке разные) — база гасит",
+          r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), f"{r.returncode} {fresh_of(e)!r}")
+    e.close()
+
+    # п.4: файл тестов ничего не проверил (код 0, ни ok, ни FAIL, ни итога) — красное, и база это не гасит, даже
+    # пустая так же; базу ради такого файла не гоняем (мутант: без NO_CHECKS)
+    e = Env("1.0.0", "1.1.0", "", "")
+    r = e.run()
+    fr = fresh_of(e)
+    check("0360 п.4: пустой файл тестов — красное «ни одной проверки», база его не гасит и не гоняется",
+          r.returncode == 76 and "test_a.py: ни одной проверки" in fr and "===== база 1.0.0 ·" not in log_of(e),
+          f"{r.returncode} {fr!r}")
+    e.close()
+
     # Нет папки установленной версии — база пустая, старое падение уже красное
     e = Env("1.0.0", "1.1.0", OLD_FAIL, OLD_FAIL)
     shutil.rmtree(os.path.join(e.home, ".claude", "plugins", "cache"))
@@ -668,15 +725,16 @@ print(json.dumps({{
     check("parse_command не пропускает plugins foo, plugins, update с другим флагом",
           cmds and not any(cmds[c] for c in ("pantheon plugins foo", "pantheon plugins update --force",
                                               "pantheon plugins")), cmds)
-    check("подписи: временные пути → <tmp>", got.get("tmp") == ["FAIL x <tmp>", "FAIL y <tmp>", "t.py: код 1"],
+    NS = "t.py: нет итоговой строки"
+    check("подписи: временные пути → <tmp>", got.get("tmp") == ["FAIL x <tmp>", "FAIL y <tmp>", "t.py: код 1", NS],
           got.get("tmp"))
     check("подписи: код без FAIL, зелёный файл, таймаут",
-          got.get("code") == ["t.py: код 2"] and got.get("ok") == [] and got.get("timeout") == ["t.py: таймаут"],
+          got.get("code") == ["t.py: код 2", NS] and got.get("ok") == [] and got.get("timeout") == ["t.py: таймаут"],
           got)
-    check("подписи: FAIL, исключение в конце и код", got.get("exc") == ["FAIL a", "t.py: исключение ValueError",
-                                                                        "t.py: код 1"], got.get("exc"))
+    check("подписи: FAIL, исключение в конце с текстом и код",
+          got.get("exc") == ["FAIL a", "t.py: исключение ValueError: b", "t.py: код 1", NS], got.get("exc"))
     check("подписи: ANSI вырезан, код при FAIL — всегда",
-          got.get("ansi") == ["FAIL c", "t.py: код 1"] and got.get("killed") == ["FAIL d", "t.py: код -9"], got)
+          got.get("ansi") == ["FAIL c", "t.py: код 1", NS] and got.get("killed") == ["FAIL d", "t.py: код -9", NS], got)
     check("версии: числа, равные, не разобрать", got.get("newer") == [True, False, True], got.get("newer"))
     # База не досчитана: файл базы кончился таймаутом или сроком прогона — падение новой версии в нём остаётся
     # падением; интерпретаторы: тесты pantheon только 3.11+, guard — на всех

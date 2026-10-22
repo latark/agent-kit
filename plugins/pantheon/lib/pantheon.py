@@ -6306,6 +6306,12 @@ MARKETPLACE = "agent-kit"
 PLUGIN_TEST_TIMEOUT = 600    # один файл тестов
 PLUGIN_RUN_LIMIT = 1800      # весь прогон плагина (новая + база, все python) — меньше timeout задачи в schedule.toml
 NO_TESTS = "нет тестов"
+NO_CHECKS = "ни одной проверки"  # код 0, ни строки ok, ни FAIL, ни итога — файл ничего не проверил (metis-0360)
+# Итоговая строка файла тестов agent-kit: «N из M прошли», «N/M», «тестов: N …», «OK N» / «FAIL N», «ПРОВАЛ: …»,
+# «N команд × …» (guard test_shell_diff). Есть у файлов, дошедших до конца; файл без своего итога (кончается строкой
+# ok) при падении получает «нет итоговой строки» и у новой, и у базы — она вычитается, как любая общая подпись.
+TEST_SUMMARY = re.compile(r"(?:\d+\s*(?:из\s+\d+|/\s*\d+|команд\b)|тестов:\s*\d+|(?:OK|FAIL)\s+\d+$|ПРОВАЛ\b)")
+_HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
 _TMP_RE = None
 ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])")
 
@@ -6444,9 +6450,16 @@ def _tmp_re():
     return _TMP_RE
 
 
+def _ok_count(out):
+    """Число пройденных проверок файла — строк `ok …` (metis-0360): у новой меньше, чем у базы, — проверки пропущены."""
+    return sum(1 for ln in ANSI.sub("", out).splitlines() if re.match(r"\s*ok\b", ln))
+
+
 def _failure_signatures(fname, out, rc):
-    """Подписи падений одного файла тестов: строки FAIL, исключение в конце вывода, ненулевой код (всегда — иначе
-    гибель по сигналу прячется за старой строкой FAIL); rc None — таймаут, rc "срок" — не успел в срок прогона."""
+    """Подписи падений одного файла тестов: строки FAIL, исключение в конце вывода с текстом сообщения, ненулевой код
+    (всегда — иначе гибель по сигналу прячется за старой строкой FAIL); rc None — таймаут, rc "срок" — не успел в
+    срок прогона. metis-0360: ненулевой код без итоговой строки (TEST_SUMMARY) — «нет итоговой строки» (файл
+    оборвался, проверки после обрыва не прошли); код 0 без единой проверки и итога — NO_CHECKS, её база не гасит."""
     out = ANSI.sub("", out)
     sigs = [_tmp_re().sub("<tmp>", ln.strip()) for ln in out.splitlines() if ln.lstrip().startswith("FAIL")]
     if rc is None:
@@ -6457,22 +6470,36 @@ def _failure_signatures(fname, out, rc):
     if "Traceback (most recent call last):" in out and lines and not lines[-1][:1].isspace():
         m = re.match(r"([A-Za-z_][\w.]*)(?::|$)", lines[-1])
         if m:
-            sigs.append(f"{fname}: исключение {m.group(1)}")
+            # с текстом: FileNotFoundError окружения у базы не гасит другой FileNotFoundError новой версии
+            msg = _HEX_RE.sub("0x…", _tmp_re().sub("<tmp>", lines[-1][m.end():].strip()))[:200]
+            sigs.append(f"{fname}: исключение {m.group(1)}" + (f": {msg}" if msg else ""))
+    summary = any(TEST_SUMMARY.match(ln.strip()) for ln in lines)
     if rc != 0:
         sigs.append(f"{fname}: код {rc}")
+        if not summary:
+            sigs.append(f"{fname}: нет итоговой строки")
+    elif not summary and not sigs and not _ok_count(out):
+        sigs.append(f"{fname}: {NO_CHECKS}")
     return sigs
 
 
-def _fresh_failures(got_new, got_base):
+def _fresh_failures(got_new, got_base, ok_new=None, ok_base=None):
     """Новые падения = подписи новой версии минус подписи базы. Файл, который у базы кончился таймаутом или сроком
     прогона, — не «чистый» и не «такой же сбой»: о нём ничего не известно, поэтому у новой версии в нём ничто не
-    гасится (в том числе её собственный таймаут) — падение остаётся падением. Отдаёт (Counter, {(python, файл)})."""
+    гасится (в том числе её собственный таймаут) — падение остаётся падением. Отдаёт (Counter, {(python, файл)}).
+    metis-0360: ok_new/ok_base — {(python, файл): число строк ok} досчитанных файлов (_run_plugin_tests). Новая прошла
+    меньше проверок, чем база, в том же файле — подпись «проверок меньше, чем у базы»: оборвалась молча раньше, и
+    общие с базой подписи не должны прятать непроверенный остаток. NO_CHECKS база не гасит."""
     unknown = {(py, f) for (py, f, s) in got_base if s.endswith((": срок прогона", ": таймаут"))}
     known_base = collections.Counter({k: n for k, n in got_base.items() if (k[0], k[1]) not in unknown})
     fresh = got_new - known_base
     for k, n in got_new.items():  # не успевшее у новой не гасится тем, что не успело и у базы
-        if k[2].endswith(": срок прогона"):
+        if k[2].endswith((": срок прогона", f": {NO_CHECKS}")):
             fresh[k] = n
+    for (py, f), m in (ok_base or {}).items():
+        n = (ok_new or {}).get((py, f), 0)
+        if (py, f) not in unknown and n < m:
+            fresh[(py, f, f"{f}: проверок меньше, чем у базы ({n} < {m})")] = 1
     return fresh, unknown
 
 
@@ -6486,15 +6513,17 @@ def _base_targets(got_new):
     """metis-0358: (python, файл), которые стоит гонять у базы, — только где у новой версии есть подписи падений:
     базу нужно лишь вычитать из них. Файл, где новая кончилась таймаутом или сроком прогона, база погасить не может
     (_fresh_failures), поэтому и его не гоняем. Чистые файлы новой — тоже: раньше база шла по всем и не успевала в
-    PLUGIN_RUN_LIMIT, а недосчитанная база превращала прежние падения окружения в новые."""
-    stuck = {(py, f) for (py, f, s) in got_new if s.endswith((": срок прогона", ": таймаут"))}
+    PLUGIN_RUN_LIMIT, а недосчитанная база превращала прежние падения окружения в новые. Файл без единой проверки
+    (NO_CHECKS) — тоже: база его не гасит (metis-0360)."""
+    stuck = {(py, f) for (py, f, s) in got_new if s.endswith((": срок прогона", ": таймаут", f": {NO_CHECKS}"))}
     return {(py, f) for (py, f, _s) in got_new} - stuck
 
 
-def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None):
+def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=None):
     """tests/test_*.py папки pdir по одному на каждом python → Counter подписей (python, файл, подпись). only —
     множество (python, файл): гонять только их (база, metis-0358); None — все. Срок — общий deadline прогона:
-    базе достаётся то, что осталось после новой версии."""
+    базе достаётся то, что осталось после новой версии. oks — словарь, куда пишется {(python, файл): число строк ok}
+    файлов, дошедших до выхода (не таймаут и не срок) — для сравнения с базой (metis-0360)."""
     sigs = collections.Counter()
     env0 = {k: v for k, v in os.environ.items()
             if not k.startswith("PANTHEON_") and k not in ("FORCE_COLOR", "CLICOLOR_FORCE")}
@@ -6524,6 +6553,8 @@ def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None):
             state = {None: "таймаут", "срок": "срок прогона"}.get(rc, f"код {rc}")
             log.write(f"\n===== {label} · {py} · {f} · {state} =====\n{out}")
             log.flush()
+            if oks is not None and rc not in (None, "срок"):
+                oks[(py, f)] = _ok_count(out)
             for s in _failure_signatures(f, out, rc):
                 sigs[(py, f, s)] += 1
     return sigs
@@ -6629,14 +6660,15 @@ def _plugin_check(name, old, new, src, base, marks):
         with open(log, "w", encoding="utf-8") as fh:
             fh.write(f"{stamp()} {name}: новая {new} из {src} (хеш {digest}), база {old} из "
                      f"{base_dir and base or '—'}; python: {', '.join(pythons)}\n")
-            got_new = _run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}", deadline)
+            ok_new, ok_base = {}, {}
+            got_new = _run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}", deadline, oks=ok_new)
             want = _base_targets(got_new)
             skipped = sum(1 for py in pythons for f in _test_files(base_dir) if (py, f) not in want)
             if base_dir and skipped:
                 fh.write(f"\n===== база {old}: {skipped} файл(ов) не гоняются — у новой версии в них нет падений, "
-                         "либо таймаут или срок прогона (их база не гасит) =====\n")
-            got_base = _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline, only=want)
-            fresh, unknown = _fresh_failures(got_new, got_base)
+                         "либо таймаут, срок прогона или ни одной проверки (их база не гасит) =====\n")
+            got_base = _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline, only=want, oks=ok_base)
+            fresh, unknown = _fresh_failures(got_new, got_base, ok_new, ok_base)
             for py, f in sorted(unknown):
                 fh.write(f"база не досчитана: {py} · {f} — файл базы не дошёл до конца (таймаут или срок прогона), "
                          "падения новой версии в нём считаются новыми\n")
