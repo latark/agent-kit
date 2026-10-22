@@ -356,7 +356,7 @@ old_py = "/usr/bin/python3"
 # /usr/bin/python3 — заглушка xcrun: в песочнице она пишет в stderr про кэш; берём настоящий интерпретатор
 real_py = None
 if os.path.exists(old_py):
-    q = subprocess.run([old_py, "-c", "import sys; print(sys.executable)"], capture_output=True, text=True)
+    q = subprocess.run([old_py, "-c", "import sys; print(sys.executable)"], capture_output=True, text=True, env=env_for(home))
     cand = q.stdout.strip()
     if q.returncode == 0 and cand and os.path.exists(cand):
         real_py = cand
