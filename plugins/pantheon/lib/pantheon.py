@@ -57,7 +57,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
                     --recommend "А — потому что …" --if-no-answer "…" --depends-on ID --executor auto|claude|codex]
                     без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ;
-                    --batch без --mode (и без mode в шапке) — отказ: режим обязателен при сборке пачки (metis-0308)
+                    --batch без --mode (и без mode в шапке) — отказ: режим обязателен при сборке пачки (metis-0308);
+                    --depends-on / depends_on= с несуществующим id, самой собой или циклом — отказ при записи (metis-0248)
   pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"]   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
   pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту
@@ -6881,8 +6882,9 @@ def _copy_clone(root, name, src, peers, mkt_json):
     (`../guard/hooks` в test_merge и test_read) и к git (test_setup: `git rev-parse --show-toplevel` и путь
     <клон>/plugins/pantheon в клоне маркетплейса). Поэтому root/plugins/<имя> — проверяемый плагин,
     root/plugins/<сосед> — соседи из peers {имя: папка}, root/.claude-plugin/marketplace.json — из каталога, root —
-    git-репозиторий с одним коммитом. Отдаёт (папка плагина, строки для лога о том, чего не вышло): без соседа или
-    git тесты упадут сами, и это красное, а не тихий пропуск."""
+    git-репозиторий с одним коммитом. Отдаёт (папка плагина, строки для лога о том, чего не вышло). Строки не
+    молчат: _plugin_check пишет их в лог, а для НОВОЙ версии любая такая строка — красное без вычитания базой
+    (metis-0369): сбой окружения копии нельзя списать на то, что он же и у базы."""
     plugins = os.path.join(root, "plugins")
     pdir = os.path.join(plugins, _plugins_safe(name))
     shutil.copytree(src, pdir, symlinks=True, ignore=_COPY_IGNORE)
@@ -6926,7 +6928,9 @@ def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=N
         _plugins_mark(marks, name, {"version": new, "result": "testing", "log": log, "hash": digest})
         base_dir, notes_base = None, []
         if isinstance(base, str) and os.path.isdir(base):
-            peers = {**(peers_new or {}), **{k: v for k, v in (peers_base or {}).items() if v}}
+            # установленный сосед, чьей папки нет на диске (metis-0369), берётся из каталога, как неустановленный
+            peers = {**(peers_new or {}), **{k: v for k, v in (peers_base or {}).items()
+                                             if isinstance(v, str) and os.path.isdir(v)}}
             base_dir, notes_base = _copy_clone(os.path.join(tmp, "base"), name, base, peers, mkt_json)
         pythons = _pythons_for(name)
         with open(log, "w", encoding="utf-8") as fh:
@@ -6947,6 +6951,8 @@ def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=N
             for py, f in sorted(unknown):
                 fh.write(f"база не досчитана: {py} · {f} — файл базы не дошёл до конца (таймаут или срок прогона), "
                          "падения новой версии в нём считаются новыми\n")
+            if notes_new:  # копия новой версии не собралась — красное, база его не гасит (metis-0369)
+                fresh[("-", "-", "копия новой версии не собралась: " + "; ".join(notes_new))] = 1
             if not _test_files(new_dir):  # без тестов зелёного нет, даже если их нет и у базы
                 fresh[("-", "-", NO_TESTS)] = 1
             fh.write(f"\n===== новых падений: {sum(fresh.values())} =====\n")
