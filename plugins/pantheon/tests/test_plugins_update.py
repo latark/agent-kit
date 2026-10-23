@@ -923,6 +923,15 @@ print(json.dumps(sorted(k[2] for k in fresh), ensure_ascii=False))""", e.src, os
               r.returncode == 76 and "test_a.py: " + BARE + " (у базы файл упал)" in fr
               and "plugin update" not in e.argv(), f"{r.returncode} {fr!r}")
         e.close()
+    # Ревью 115 круг 2, P1d: база кончилась кодом 0, но в выводе есть строка FAIL — подпись провала есть, значит
+    # это не «тот же стиль без итога»: красное «у базы файл упал» (мутант R4: bare без `not fsigs` — зелёное)
+    e = Env("1.0.0", "1.1.0", OK2 + 'print("FAIL env")\n', OK4)
+    r = e.run()
+    fr = fresh_of(e)
+    check("115 P1d: база с кодом 0 и строкой FAIL, новая без итога — красное «у базы файл упал»",
+          r.returncode == 76 and "test_a.py: " + BARE + " (у базы файл упал)" in fr
+          and "plugin update" not in e.argv(), f"{r.returncode} {fr!r}")
+    e.close()
     # Ревью 115, M10: последняя строка базы «2/3» при трёх строках ok — деталь, а не итог; «нет итога» базы с пояснением
     # не гасит молчаливый обрыв новой (мутант: _summary_of отдаёт why=None в этой ветке — зелёное)
     e = Env("1.0.0", "1.1.0", 'print("ok   a")\nprint("ok   b")\nprint("ok   c")\nprint("2/3")\nraise SystemExit(1)\n',
