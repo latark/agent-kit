@@ -231,5 +231,84 @@ e.window("Отправить")
 r, ran = e.run()
 check("sync.sh код 0, держание снято — вопрос снят", ran and card_question(e, e.task) is None, r.stdout + r.stderr)
 
+# metis-0364: держание не прочитано или без task= — остаётся; «применён» печатается только после проверки
+def mixed(after):
+    """.sync-held (задача A) sync.sh снимает, .sync-incoming (задача B) после него — по сценарию after."""
+    e = with_card()
+    a = e.task
+    env = {"PATH": os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pan, "PANTHEON_STATE": e.state,
+           "PANTHEON_NOW": str(T0), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": ROOT}
+    r2 = subprocess.run([PY311, "-I", LIB, "task", "new", "--direction", "metis-pantheon", "--project", "Пантеон",
+                         "--title", "Чужие правки", "--status", "waiting", "--waiting-on", "human", "--priority", "1",
+                         "--next", "выбрать", "--question", "Откатить?", "--option", "Откатить правку"],
+                        env=env, capture_output=True, text=True, timeout=60)
+    b = _re.search(r"[a-z]+-\d{4}", r2.stdout).group(0)
+    inc = os.path.join(e.claude, ".sync-incoming")
+    with open(inc, "w") as fh:
+        fh.write(f"task={b}\nfrom=a\nto=b\n")
+    with open(os.path.join(e.claude, "sync.sh"), "w") as fh:
+        fh.write(f'#!/bin/sh\necho x >> "{e.mark}"\nrm -f "{e.claude}/.sync-held" "{inc}"\n{after.format(inc=inc)}\n')
+    e.window("Отправить", tid=a)
+    e.window("Откатить правку", tid=b)
+    r, ran = e.run()
+    return e, a, b, r, ran
+
+
+for label, after, why in (("нечитаемое (каталог)", 'mkdir "{inc}"', ".sync-incoming не прочитан"),
+                          ("без task=", 'printf "from=a\\nto=b\\n" > "{inc}"', ".sync-incoming без task=")):
+    e, a, b, r, ran = mixed(after)
+    out = r.stdout + r.stderr
+    check(f"два держания, второе {label}: первое применено, вопрос снят", ran and card_question(e, a) is None, out)
+    check(f"два держания, второе {label}: вопрос второго остаётся, причина в выводе",
+          card_question(e, b) not in (None, "нет файла") and f"sync-answers: {b} — sync.sh не применил" in r.stdout
+          and why in r.stdout, out)
+    check(f"два держания, второе {label}: «применён» только по первому",
+          f"ответ по {a} применён" in r.stdout and f"ответ по {b} применён" not in r.stdout, out)
+
+# одно держание, после sync.sh файл без task= — «применён» не печатается, вопрос остаётся
+e = with_card(applies=False)
+with open(os.path.join(e.claude, "sync.sh"), "w") as fh:
+    fh.write(f'#!/bin/sh\necho x >> "{e.mark}"\nprintf "hash=abc\\n" > "{e.claude}/.sync-held"\n')
+e.window("Отправить")
+r, ran = e.run()
+check("одно держание, после sync.sh без task= — не «применён», вопрос остаётся, причина в выводе",
+      ran and "применён" not in r.stdout and card_question(e, e.task) not in (None, "нет файла")
+      and ".sync-held без task=" in r.stdout, r.stdout + r.stderr)
+
+# metis-0364 круг 2: sync.sh заменил держание задачи A держанием задачи C — по A нет «применён», вопрос остаётся
+e = with_card(applies=False)
+with open(os.path.join(e.claude, "sync.sh"), "w") as fh:
+    fh.write(f'#!/bin/sh\necho x >> "{e.mark}"\n'
+             f'printf "hash=def\\ntask=metis-0777\\nfiles=1\\n" > "{e.claude}/.sync-held"\n')
+e.window("Отправить")
+r, ran = e.run()
+check("держание A заменено держанием C — не «применён», вопрос A остаётся, причина в выводе",
+      ran and f"ответ по {e.task} применён" not in r.stdout and card_question(e, e.task) not in (None, "нет файла")
+      and f"{e.task} — sync.sh не применил" in r.stdout and "держание заменено (task=metis-0777)" in r.stdout,
+      r.stdout + r.stderr)
+
+# metis-0364 круг 3: у .sync-incoming смена task= — ответ по прежней задаче применён (sync.sh удалил файл, incoming_check
+# в том же запуске записал новый вопрос D); «заменено» — правило только для .sync-held
+e = with_card(held=".sync-incoming", applies=False)
+with open(os.path.join(e.claude, "sync.sh"), "w") as fh:
+    fh.write(f'#!/bin/sh\necho x >> "{e.mark}"\nrm -f "{e.claude}/.sync-incoming"\n'
+             f'printf "task=metis-0778\\nfrom=a\\nto=b\\n" > "{e.claude}/.sync-incoming"\n')
+e.window("Отправить")
+r, ran = e.run()
+check("incoming B заменён incoming D — «применён», вопрос B снят, «заменено» не печатается",
+      ran and f"ответ по {e.task} применён" in r.stdout and card_question(e, e.task) is None
+      and "заменено" not in r.stdout + r.stderr, r.stdout + r.stderr)
+
+# владелец неизвестен: .sync-incoming появился во время sync.sh без task=, .sync-held задачи A снят — держание за всеми
+e = with_card(applies=False)
+with open(os.path.join(e.claude, "sync.sh"), "w") as fh:
+    fh.write(f'#!/bin/sh\necho x >> "{e.mark}"\nrm -f "{e.claude}/.sync-held"\n'
+             f'printf "from=a\\nto=b\\n" > "{e.claude}/.sync-incoming"\n')
+e.window("Отправить")
+r, ran = e.run()
+check("владелец держания неизвестен (.sync-incoming без task= появился во время sync.sh) — не «применён», вопрос A остаётся",
+      ran and f"ответ по {e.task} применён" not in r.stdout and card_question(e, e.task) not in (None, "нет файла")
+      and ".sync-incoming без task=" in r.stdout, r.stdout + r.stderr)
+
 print(f"\n{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)
