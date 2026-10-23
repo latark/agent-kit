@@ -1433,6 +1433,12 @@ def oneshots(agents, registry, doms, t):
             rc = P.resume_session(d, poke, it["text"], "tick", recheck=recheck(d, True, nudge=True))[0]
         else:
             rc = resume_or_start(d, agents, it["text"], origin="tick", auto=True)
+        if rc == P.START_DEFERRED and not poke:  # память Mac красная (metis-0261): не сбой, запись остаётся в очереди
+            why = "память Mac в красной зоне — pantheon start отложил запуск"
+            N.oneshot_update(oid, t, done_at=None, result=None, wait=why)
+            P.alert_once(f"oneshot-red-{oid}", today(t), f"разовый запуск {oid} ждёт: {why} (срок "
+                         f"{P.stamp(float(it['expires']))[11:]})", "watch")
+            continue
         res = ("передано задание простаивающей сессии" if poke else "запущен") if rc == 0 else f"не вышло, код {rc}"
         N.oneshot_update(oid, t, result=res)
         P.alert(f"разовый запуск {oid}: {d} — {res}" + (f" (пачка {it['pack']})" if it.get("pack") else ""), "watch")
@@ -1540,6 +1546,7 @@ def autostart(agents, registry, doms, t, dry=False):
             continue
         task = (f"Самозапуск дежурным по задачам с вашим решением (в порядке ваших отметок): {', '.join(tids)}. Прочитай STATUS.md и "
                 "задачи, продолжай с первой по приоритету; что ждёт владельца — Зевсу строкой.")
+        prev = {k: s.get(k) for k in ("last", "pending")}
         s.update(last=t, pending=True)
         P.write_json(P.path("autostart.json"), st)  # до запуска: проход могут оборвать по таймауту
         if poke:  # тот же путь, что продолжение остановленной: claude respawn + текст для хука push (P.resume_session)
@@ -1548,8 +1555,17 @@ def autostart(agents, registry, doms, t, dry=False):
                                     f"передать задание не вышло, код {rc}"), "watch")
         else:
             rc = resume_or_start(d, agents, task, origin="tick", auto=True)
-            P.alert(f"самозапуск: {d} по задачам {', '.join(tids[:5])} — " + ("запущен" if rc == 0 else
-                                                                               f"не вышло, код {rc}"), "watch")
+            if rc != P.START_DEFERRED:
+                P.alert(f"самозапуск: {d} по задачам {', '.join(tids[:5])} — " + ("запущен" if rc == 0 else
+                                                                                   f"не вышло, код {rc}"), "watch")
+        if rc == P.START_DEFERRED and not poke:  # память Mac красная (metis-0261): не сбой, без счёта и паузы — тик повторит
+            s.update(prev)
+            if prev["last"] is None:
+                s.pop("last", None)
+            P.alert_once(f"autostart-red-{d}", today(t), f"самозапуск {d} ждёт: память Mac в красной зоне (pantheon "
+                         "start отложил запуск)", "watch")
+            P.write_json(P.path("autostart.json"), st)
+            continue
         if rc != 0:
             fail(d, s, t, f"код запуска {rc}")
         else:  # список сессий этого прохода её ещё не видит — «запрет сна Mac» держится по этой метке

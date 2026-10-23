@@ -1297,6 +1297,58 @@ def test_oneshot_week_gate_0284():
     check(_oneshot_rec(e, oid)["done_at"], "запущенная запись не погашена")
 
 
+def test_red_memory_defers_oneshot_0261():
+    """metis-0261 А: красный замер памяти (pantheon start → код 5) — не сбой разового запуска: запись остаётся в очереди
+    с причиной, не гасится, уведомления «не вышел» нет; память пришла в норму — запуск идёт."""
+    e, oid = _oneshot_env()
+    e.run("watch", t=T0 + 660, extra={"PANTHEON_FAKE_SWAP": "9"})
+    check(not _bgs(e), f"запуск при красной памяти: {e.calls()}")
+    rec = _oneshot_rec(e, oid)
+    check(not rec["done_at"] and "красной зоне" in (rec["wait"] or "") and not rec["result"], f"запись не ждёт: {rec}")
+    check("не вышло" not in e.alerts() and "не вышел" not in (open(e.notify).read() if os.path.exists(e.notify) else ""),
+          f"красная память засчитана сбоем: {e.alerts()[-300:]}")
+    e.run("watch", t=T0 + 720)
+    check(len(_bgs(e, "athena-a")) == 1, f"память в норме, запуска нет: {e.calls()}")
+    check(_oneshot_rec(e, oid)["done_at"], "запущенная запись не погашена")
+
+
+def test_red_memory_defers_zeus_oneshot_0261():
+    """metis-0261 А (ревью argus-b): запись, поставленная `--at --from zeus` со словом владельца, при исполнении тиком
+    красной памяти не обходит: слово проверено при постановке, а запуск ждёт нормы (код 5, запись не гасится)."""
+    e = Env()
+    e.direction("athena-a")
+    with open(e.st("owner-log", "zeus.md"), "w") as fh:
+        fh.write(f"## {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(T0 - 30))} · окно вопросов\nда\n\n")
+    hhmm = time.strftime("%H:%M", time.localtime(T0 + 600))
+    r = e.run("start", "athena-a", "--at", hhmm, "--from", "zeus", "задание", t=T0)
+    check(r.returncode == 0, f"постановка со словом отказана: {r.stdout} {r.stderr}")
+    oid = r.stdout.split("разовый запуск ")[1].split(":")[0]
+    check(_oneshot_rec(e, oid)["by"] == "zeus", f"origin не сохранён: {_oneshot_rec(e, oid)}")
+    e.run("watch", t=T0 + 660, extra={"PANTHEON_FAKE_SWAP": "9"})
+    check(not _bgs(e) and not _oneshot_rec(e, oid)["done_at"], f"красная память обойдена словом при постановке: {e.calls()}")
+    e.run("watch", t=T0 + 720)
+    check(len(_bgs(e, "athena-a")) == 1, f"память в норме, запуска нет: {e.calls()}")
+
+
+def test_red_memory_defers_autostart_0261():
+    """metis-0261 А: красный замер (код 5 от pantheon start) — самозапуск не считает сбоем: fails нет, паузы-backoff нет,
+    gave_up нет, повтор на следующем проходе сразу, как память пришла в норму."""
+    e = Env()
+    e.direction("hermes-x")
+    e.task("hermes-0001", "hermes-x")
+    e.run("watch", t=T0)
+    e.board("hermes-0001", T0 + 10)
+    for i in range(4):  # больше AUTOSTART_FAILS_MAX: сбоями это не считается
+        e.run("watch", t=T0 + 60 + 120 * i, extra={"PANTHEON_FAKE_SWAP": "9"})
+    st = json.load(open(e.st("autostart.json"))).get("hermes-x") or {}
+    check(not _bgs(e), f"запуск при красной памяти: {e.calls()}")
+    check(not st.get("fails") and not st.get("gave_up") and not st.get("next") and not st.get("pending"),
+          f"красная память засчитана сбоем или паузой: {st}")
+    check("сбой" not in e.alerts() and "остановлен" not in e.alerts(), f"тревога о сбое: {e.alerts()[-300:]}")
+    e.run("watch", t=T0 + 60 + 120 * 4)
+    check(len(_bgs(e, "hermes-x")) == 1, f"память в норме, запуска нет: {e.calls()}")
+
+
 def test_oneshot_pack_and_hand_same_minute_0284():
     """Ручной --at и пачка ночи на ту же минуту и цель — обе записи живут; пачка идёт со своим текстом и сверкой sha:
     изменённая пачка не стартует, а ручная запись при этом запускается (ревью argus п. 1, #78)."""

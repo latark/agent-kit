@@ -71,7 +71,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
   pantheon start zeus                   Пританей: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
-                                        любой start пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2)
+                                        start, дошедший до запуска сессии, пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2); красный замер или «нет сигнала» без слова — код 5 (отложено); в окне роли origin берётся из PANTHEON_ROLE, --from owner там нельзя; wake пишет только строку замера
   pantheon start <направление> --at ЧЧ:ММ [поручение]   разовый запуск плановым проходом вместо sleep в сессии;
                                         --at-list — записи, --at-cancel <id> — отменить (lib/night.py)
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
@@ -3467,6 +3467,11 @@ def start_at(rest, origin, dry):
     if dry:
         print(f"[at] {target} в {stamp(when)} — {text}")
         return 0
+    if origin == "zeus" and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):  # слово — при постановке, не при запуске
+        print(f"pantheon start --at: отказ — {NO_WORD_WHY}", file=sys.stderr)
+        capacity_log({"t": round(now(), 1), "at": stamp(), "target": target, "origin": origin, "result": "refused",
+                      "kind": "at"})
+        return START_REFUSED
     oid = N.oneshot_add(target, when, text, origin, t=t)
     print(f"разовый запуск {oid}: {target} в {stamp(when)} — исполнит плановый проход (pantheon watch), срок "
           f"{N.ONESHOT_TTL // 3600} ч; отмена — pantheon start --at-cancel {oid}")
@@ -3477,17 +3482,26 @@ def start(rest):
     """pantheon start <направление> [поручение] | workshop <задача> [поручение] | zeus [--restart]  [--from кто] [--dry-run]
     pantheon start <направление> --at ЧЧ:ММ|"ГГГГ-ММ-ДД ЧЧ:ММ" [поручение] | --at-list | --at-cancel <id>   разовый запуск
                                                                                     плановым проходом (вместо sleep)
-    Любой запуск пишет замер в STATE/capacity.jsonl (сессий, давление памяти, свободно %, своп). Отказ, код 2: --from zeus
-    без вашего слова в owner-log/zeus.md за 15 мин; красный замер (своп выше порога дежурного, давление не «норма») —
-    без слова владельца (--from owner — он сам) (metis-0261 А)."""
+    Запуск сессии пишет замер в STATE/capacity.jsonl (сессий Пантеона, давление памяти, свободно %, своп). Откуда запуск:
+    --from, а без него по окну — PANTHEON_ROLE=hq это zeus, другая роль tick, без роли owner; в окне роли --from owner
+    не принимается (код 2). Отказ, код 2: zeus без вашего слова в owner-log/zeus.md за 15 мин (и у --at при постановке);
+    красный замер (своп выше порога дежурного, давление не «норма») или «нет сигнала» (своп и давление не прочитаны) —
+    код 5 «отложено» (не сбой: самозапуск и разовый запуск повторяются), слово только у owner и zeus со словом."""
     dry = "--dry-run" in rest
     restart = "--restart" in rest
     rest = [a for a in rest if a not in ("--dry-run", "--restart")]
-    origin = "owner"
+    # откуда запуск, по окну вызова (metis-0261 А, ревью argus): в окне роли PANTHEON_ROLE задан, и владелец там не
+    # говорит — окно Пританея (hq) считается Зевсом, остальные роли — тиком; без роли — терминал владельца
+    role = os.environ.get("PANTHEON_ROLE") or ""
+    origin = "zeus" if role == "hq" else "tick" if role else "owner"
     if "--from" in rest:
         i = rest.index("--from")
         if i + 1 >= len(rest) or rest[i + 1] not in ("zeus", "tick", "owner"):
             print("pantheon start: --from zeus | tick | owner", file=sys.stderr)
+            return 2
+        if role and rest[i + 1] == "owner":
+            print(f"pantheon start: --from owner не принимается в окне роли ({role}) — слово владельца там проверяется "
+                  "по owner-log (--from zeus)", file=sys.stderr)
             return 2
         origin, rest = rest[i + 1], rest[:i] + rest[i + 2:]
     if any(a in ("--at", "--at-list", "--at-cancel") for a in rest):
@@ -3498,10 +3512,10 @@ def start(rest):
     target, rest = rest[0], rest[1:]
     if target == "zeus":
         if not dry:  # сессии не считаем: лишний claude agents ломает сценарии ожидания имени; слово и память — да
-            why = start_gate(target, origin, None)
+            code, why = start_gate(target, origin, None)
             if why:
-                print(f"pantheon start: отказ — {why}", file=sys.stderr)
-                return 2
+                print(f"pantheon start: {'отказ' if code == 2 else 'отложено'} — {why}", file=sys.stderr)
+                return code
         # штаб — ваша интерактивная сессия в iTerm: команда заменяет себя на claude в ~/ai/pantheon
         argv = [claude_bin(), "--agent", "hq", "--name", "zeus", "--settings", path("settings", "hq.json")]
         if dry:
@@ -3563,10 +3577,10 @@ def start(rest):
 def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win):
     agents = agents_all()
     if not dry:  # metis-0261 А: слово владельца и замер — до любых действий; список сессий тот же, что ниже
-        why = start_gate(name, origin, agents)
+        code, why = start_gate(name, origin, agents)
         if why:
-            print(f"pantheon start: отказ — {why}", file=sys.stderr)
-            return 2
+            print(f"pantheon start: {'отказ' if code == 2 else 'отложено'} — {why}", file=sys.stderr)
+            return code
     same = [a for a in agents or [] if a.get("name") == name]
     live = live_copies(name, agents)
     # metis-0348: «blocked» без процесса и без вопроса (noProcess, reconcile_agents) — сессию снял Claude Code, ждать
@@ -3662,7 +3676,9 @@ def capacity_probe(agents):
     w = watch_mod()
     out = {"sessions": None, "pressure": None, "free_pct": None, "swap_gb": None}
     if agents is not None:
-        out["sessions"] = sum(1 for a in agents if a.get("state") not in CAPACITY_SESSIONS_DONE)
+        doms = w.domains()
+        out["sessions"] = sum(1 for a in agents if a.get("state") not in CAPACITY_SESSIONS_DONE
+                              and w.is_pantheon(a.get("name"), doms))
     with contextlib.suppress(Exception):
         out["swap_gb"] = w.swap_gb()
     with contextlib.suppress(Exception):
@@ -3682,6 +3698,7 @@ def capacity_probe(agents):
     if out["pressure"] is not None and out["pressure"] >= 2:
         reasons.append(f"давление памяти {'критичное' if out['pressure'] >= 4 else 'предупреждение'}")
     out["red"] = reasons
+    out["unknown"] = out["swap_gb"] is None and out["pressure"] is None  # нет ни одного сигнала памяти
     return out
 
 
@@ -3696,22 +3713,33 @@ def capacity_log(row):
             os.close(fd)
 
 
-def start_gate(target, origin, agents):
-    """pantheon start, перед запуском (metis-0261 А): замер в capacity.jsonl и отказы. None — можно, иначе причина отказа.
-    Слово владельца: --from zeus — его запись в owner-log/zeus.md за OWNER_WORD_WINDOW; --from owner (по умолчанию) —
-    он сам; tick слова не имеет. Zeus без слова — отказ всегда; красный замер — отказ без слова."""
-    m = capacity_probe(agents)
-    word = origin == "owner" or owner_spoke_recently("zeus", OWNER_WORD_WINDOW)
-    why = None
-    if origin == "zeus" and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
-        why = (f"запуск от Зевса без вашего слова в его окне за {OWNER_WORD_WINDOW // 60} мин "
+NO_WORD_WHY = (f"запуск от Зевса без вашего слова в его окне за {OWNER_WORD_WINDOW // 60} мин "
                "(сообщение другой сессии согласием не считается)")
-    elif m["red"] and not word:
-        why = "память Mac в красной зоне (" + "; ".join(m["red"]) + ") — запуск только со словом владельца"
+START_REFUSED = 2   # отказ: нет слова владельца (--from zeus) — повтор бесполезен
+START_DEFERRED = 5  # отложено: красный замер памяти без слова владельца — дежурный повторит на следующем тике, не сбой
+# (3 и 4 заняты: NO_WINDOW и SKIPPED у resume_session, те же числа дошли бы до дежурного как коды запуска)
+
+
+def start_gate(target, origin, agents):
+    """pantheon start, перед запуском сессии (metis-0261 А): замер в capacity.jsonl (строка — у каждого не-dry start,
+    дошедшего до этого шага; ранние выходы — «остановлено вами», «нет окна», занятое имя — и продолжение через
+    resume_session строки не пишут). → (код, причина); (0, None) — можно.
+    Слово владельца: --from owner (по умолчанию) — он сам; --from zeus — его свежая запись в owner-log/zeus.md (без неё
+    отказ, код 2, всегда); tick слова не имеет и в красной зоне получает код 5 (отложено) при любом zeus.md."""
+    m = capacity_probe(agents)
+    word = origin == "owner" or (origin == "zeus" and owner_spoke_recently("zeus", OWNER_WORD_WINDOW))
+    code, why = 0, None
+    if origin == "zeus" and not word:
+        code, why = START_REFUSED, NO_WORD_WHY
+    elif (m["red"] or m["unknown"]) and not word:
+        reasons = "; ".join(m["red"]) if m["red"] else "нет сигнала: своп и давление памяти не прочитаны"
+        code, why = START_DEFERRED, (f"память Mac в красной зоне ({reasons}) — запуск только со словом владельца, "
+                                     "самозапуск повторит позже")
     capacity_log({"t": round(now(), 1), "at": stamp(), "target": target, "origin": origin, "sessions": m["sessions"],
                   "pressure": m["pressure"], "free_pct": m["free_pct"], "swap_gb": None if m["swap_gb"] is None
-                  else round(m["swap_gb"], 2), "red": bool(m["red"]), "result": "refused" if why else "allowed"})
-    return why
+                  else round(m["swap_gb"], 2), "red": bool(m["red"]),
+                  "unknown": m["unknown"], "result": {0: "allowed", START_REFUSED: "refused", START_DEFERRED: "deferred"}[code]})
+    return code, why
 
 
 _WATCH = None
@@ -3775,6 +3803,14 @@ def wake(rest):
         return _wake(dry)
 
 
+def capacity_note(target, origin, agents):
+    """Только строка замера в capacity.jsonl, без отказа (pantheon wake: подъём прерванной сессии не откладываем)."""
+    m = capacity_probe(agents)
+    capacity_log({"t": round(now(), 1), "at": stamp(), "target": target, "origin": origin, "sessions": m["sessions"],
+                  "pressure": m["pressure"], "free_pct": m["free_pct"], "swap_gb": None if m["swap_gb"] is None
+                  else round(m["swap_gb"], 2), "red": bool(m["red"]), "unknown": m["unknown"], "result": "allowed"})
+
+
 def _wake(dry):
     m = maintenance_active()
     if m:
@@ -3809,6 +3845,7 @@ def _wake(dry):
         if dry:
             print(f"будет поднята: {line}")
             continue
+        capacity_note(name, "wake", agents)
         if fresh:
             rc = fresh_start(name, a, fresh_text("пробуждение", name, a.get("id")), "wake",
                              recheck=lambda n=name, s=state: wake_recheck(n, s), reason=fresh)
