@@ -1597,7 +1597,8 @@ def autostart(agents, registry, doms, t, dry=False):
             if rc != P.START_DEFERRED:
                 P.alert(f"самозапуск: {d} по задачам {', '.join(tids[:5])} — " + ("запущен" if rc == 0 else
                                                                                    f"не вышло, код {rc}"), "watch")
-        if rc == P.START_DEFERRED and not poke:  # память Mac красная (metis-0261): не сбой, без счёта и паузы — тик повторит
+        # память Mac красная (metis-0261): не сбой, без счёта и паузы — повторит плановый проход
+        if rc == P.START_DEFERRED and not poke:
             s.update(prev)
             if prev["last"] is None:
                 s.pop("last", None)
