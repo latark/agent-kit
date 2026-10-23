@@ -58,14 +58,20 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
                     --recommend "А — потому что …" --if-no-answer "…" --depends-on ID --executor auto|claude|codex
                     --text|--body "текст" | --body-file ПУТЬ]
-                    текст задачи (цель, «готово, когда») обязателен: без --text/--body/--body-file (и без --question) —
-                    отказ, код 2; неизвестный флаг — отказ с его именем, код 2, файл не создан (metis-0402);
-                    новая задача → файл-уведомление в directions/<направление>/inbox/ координатору (не находка)
+                    текст задачи (цель, «готово, когда») обязателен: без --text/--body/--body-file — отказ, код 2;
+                    без текста можно только вопрос владельцу: --question, --why и не меньше двух --option, иначе код 2;
+                    неизвестный флаг (и «--флаг=значение») — отказ с его именем, код 2, файл не создан (metis-0402);
+                    новая задача → файл-уведомление «…-task-ID.md» в directions/<направление>/inbox/ координатору
+                    (не находка; «От:» — PANTHEON_SESSION, PANTHEON_ROLE или «агент»)
                     без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ;
                     --batch без --mode (и без mode в шапке) — отказ: режим обязателен при сборке пачки (metis-0308);
                     --depends-on / depends_on= с несуществующим id, самой собой или циклом — отказ при записи (metis-0248)
   pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"] [--body "текст" | --body-file ПУТЬ]
-                    --body[-file] заменяет текст задачи между «# заголовок» и «## Журнал»; неизвестный флаг — отказ, код 2
+                    --body[-file] заменяет текст задачи между «# заголовок» и «## Журнал» («Заметки владельца» остаются),
+                    в журнал — «текст задачи заменён (было N знаков…)»; неизвестный флаг — отказ, код 2
+                    плановый проход (check --quiet): открытая задача без текста дольше часа — тревога; слово владельца с [id]
+                    (decisions.md, окно вопросов) дольше 30 мин без задачи — тревога один раз на id: связь — [id] в
+                    тексте задачи до «## Журнал» (любой статус) или строка «не задача: [id] — причина» в decisions.md
   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
   pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту
@@ -6407,15 +6413,36 @@ def check(paths=None, quiet=False):
                        "дописать цель и «готово, когда» (pantheon task set ID --body-file …) или закрыть", "check")
         else:
             clear_once("check-nobody")
-        if unlinked:
-            alert_once("check-unlinked", "|".join(unlinked),
-                       f"слова владельца с [id] без задачи дольше {T.UNLINKED_MIN} мин: "
-                       f"{', '.join(unlinked[:12])}{f' и ещё {len(unlinked) - 12}' if len(unlinked) > 12 else ''} — "
-                       "завести задачу (pantheon task new) или дописать в decisions.md «[id] … не задача»", "check")
-        else:
-            clear_once("check-unlinked")
+        unlinked_alert(T, unlinked)
         return 0
     return 1 if bad or drift or view_drift or field_errs else 0
+
+
+def unlinked_alert(T, unlinked):
+    """Тревога «слово владельца с [id] без задачи» (metis-0402 г): один раз на id и только о новых. Показанные id — в
+    STATE/unlinked-seen.json (id → когда впервые). Первый проход (файла нет или он испорчен) только запоминает то, что
+    уже есть, без тревоги: старые вопросы окна Зевса задачи не имеют, и весь их набор стал бы шумом (argus a)."""
+    p = path("unlinked-seen.json")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            seen = json.load(fh)
+        if not isinstance(seen, dict):
+            raise ValueError("не словарь")
+    except (OSError, ValueError):
+        seen = None
+    t = now()
+    fresh = [i for i in unlinked if i not in seen] if seen is not None else []
+    if fresh:
+        alert(f"слова владельца с [id] без задачи дольше {T.UNLINKED_MIN} мин: "
+              f"{', '.join(fresh[:12])}{f' и ещё {len(fresh) - 12}' if len(fresh) > 12 else ''} — завести задачу "
+              "(pantheon task new, [id] в тексте) или дописать в decisions.md отдельной строкой «не задача: [id] — причина»",
+              "check")
+    keep = {i: v for i, v in (seen or {}).items()
+            if isinstance(v, (int, float)) and t - v <= (T.UNLINKED_DAYS + 1) * 86400}
+    keep.update({i: t for i in unlinked if i not in keep})
+    if keep != seen:
+        os.makedirs(STATE, exist_ok=True)
+        write_atomic(p, json.dumps(keep, ensure_ascii=False, sort_keys=True))
 
 
 # Флаги `task new` (metis-0402): неизвестный флаг — отказ с его именем, а не молчаливо потерянное поле.
@@ -6438,6 +6465,8 @@ def task_flag_error(sub, args, value_flags, bool_flags=()):
             if i + 1 >= len(args):
                 return f"pantheon task {sub}: у флага {a} нет значения"
             i += 2
+        elif a.split("=", 1)[0] in value_flags | set(bool_flags):
+            return f"pantheon task {sub}: пишите «{a.split('=', 1)[0]} значение» через пробел, не «{a[:40]}» — ничего не записано"
         elif a.startswith("--"):
             return f"pantheon task {sub}: неизвестный флаг {a.split('=', 1)[0]} — ничего не записано"
         else:
@@ -6475,7 +6504,8 @@ def task_new_notify(T, tid, direction, title, text):
         return
     ib = os.path.join(PANTHEON, "directions", direction, "inbox")
     fname = f"{stamp()[:10]}-{stamp()[11:13]}{stamp()[14:16]}-task-{tid}.md"
-    who = os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "владелец"
+    # без переменных роли — «агент»: «владелец» подписывает только owner-log, а не тот, кто вызвал команду (argus b)
+    who = os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "агент"
     try:
         os.makedirs(ib, exist_ok=True)
         write_atomic(os.path.join(ib, fname),
@@ -6508,9 +6538,14 @@ def task_cmd(rest):
             if err:
                 print(err, file=sys.stderr)
                 return 2
+            if body_text is None and opt("--question") and (not opt("--why") or len(opt("--option", True)) < 2):
+                # metis-0402, argus a: без текста суть карточки вопроса — в её полях, поэтому они должны быть полными
+                print("pantheon task new: вопрос без текста задачи — нужны --why и не меньше двух --option "
+                      "(или текст --text/--body/--body-file); ничего не записано", file=sys.stderr)
+                return 2
             if body_text is None and not opt("--question"):
                 print("pantheon task new: нужен текст задачи — --text, --body или --body-file <путь> (цель и «готово, когда»); "
-                      "задача без описания не создаётся (вопрос владельцу — с --question)", file=sys.stderr)
+                      "задача без описания не создаётся (вопрос владельцу — с --question, --why и вариантами)", file=sys.stderr)
                 return 2
             fields = {"status": opt("--status"), "priority": int(opt("--priority")) if opt("--priority") else None,
                       "due": opt("--due"), "next": opt("--next"), "owner": opt("--owner"),
@@ -6560,9 +6595,10 @@ def task_cmd(rest):
                     continue
                 if args[i].startswith("--") and not (args[i] in night_flags and i + 1 < len(args)):
                     # metis-0402: неизвестный флаг или флаг без значения — отказ с его именем, не «поле=значение»
-                    known = {"--note", "--option", "--body", "--body-file", *night_flags}
+                    known, name = {"--note", "--option", "--body", "--body-file", *night_flags}, args[i].split("=", 1)[0]
                     print("pantheon task set: " + (f"у флага {args[i]} нет значения" if args[i] in known
-                          else f"неизвестный флаг {args[i].split('=', 1)[0]}") + " — ничего не записано", file=sys.stderr)
+                          else f"пишите «{name} значение» через пробел, не «{args[i][:40]}»" if name in known
+                          else f"неизвестный флаг {name}") + " — ничего не записано", file=sys.stderr)
                     return 2
                 if args[i] in night_flags and i + 1 < len(args):
                     k, v, eq, step = night_flags[args[i]], args[i + 1], "=", 2

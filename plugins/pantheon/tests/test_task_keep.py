@@ -2,7 +2,8 @@
 """metis-0402 п. 7: задача не теряется молча. `task new|set` — неизвестный флаг отказ с именем (код 2, файл не создан),
 --body/--body-file кладут текст до «## Журнал», new без текста — отказ; новая задача — файл-уведомление координатору в
 directions/<направление>/inbox/; тик (check --quiet) — две тревоги: открытая задача без описания старше часа и слово
-владельца с [id] старше 30 минут без задачи и без записи «не задача».
+владельца с [id] старше 30 минут без задачи и без строки «не задача: [id] — причина» (один раз на id, первый проход
+только запоминает). Уведомление узнаётся по точной форме; task set --body заменяет текст до «## Журнал».
 
 Запуск: python3 -I plugins/pantheon/tests/test_task_keep.py  (код выхода 0 — все прошли)
 """
@@ -120,7 +121,18 @@ def main():
     t3 = read(os.path.join(home, "directions", "metis-pantheon", "tasks", "metis-0003.md"))
     check("task new --text и --body вместе — оба в теле", r.returncode == 0 and "старый флаг\n\nновый" in t3, t3)
     r = new(env, "--question", "Выбрать?", "--why", "потому", "--option", "А — да. Цена: нет", "--waiting-on", "human")
-    check("task new --question без текста — разрешён (суть в полях вопроса)", r.returncode == 0, r.stderr)
+    check("task new --question без текста и с одним --option — отказ, код 2, файла нет",
+          r.returncode == 2 and "--option" in r.stderr and len(tasks_of(home)) == 3, (r.returncode, r.stderr))
+    r = new(env, "--question", "Выбрать?", "--option", "А — да", "--option", "Б — нет", "--waiting-on", "human")
+    check("task new --question без текста и без --why — отказ, код 2, файла нет",
+          r.returncode == 2 and "--why" in r.stderr and len(tasks_of(home)) == 3, (r.returncode, r.stderr))
+    r = new(env, "--question", "Выбрать?", "--why", "потому", "--option", "А — да. Цена: нет", "--option", "Б — нет",
+            "--waiting-on", "human")
+    check("task new --question, --why и два --option без текста — разрешён (суть в полях вопроса)", r.returncode == 0,
+          r.stderr)
+    r = new(env, "--title=Другое", "--text", "тело")
+    check("task new --title=X — отказ с подсказкой «через пробел», а не «неизвестный флаг»",
+          r.returncode == 2 and "через пробел" in r.stderr and "неизвестный" not in r.stderr, r.stderr)
 
     # (в) уведомление координатору
     notes = sorted(os.listdir(inbox)) if os.path.isdir(inbox) else []
@@ -129,23 +141,47 @@ def main():
     check("task new → файл-уведомление в directions/<направление>/inbox/ с id, названием и пометкой «не находка»",
           len(one) == 1 and "metis-0001" in body and "Проба" in body and "Уведомление, а не находка" in body, notes)
     check("уведомление есть на каждую заведённую задачу", len(notes) == 4, notes)
+    check("уведомление без PANTHEON_SESSION и PANTHEON_ROLE подписано «От: агент», не «владелец»",
+          "\nОт: агент\n" in body and "владелец" not in body, body)
     sys.path.insert(0, LIB)
     import tasks as T
     check("уведомление не становится карточкой «входящих» на доске владельца", T.inbox_items(home) == {}, T.inbox_items(home))
+    # находка, которая только цитирует пометку уведомления, остаётся находкой (argus b): точная форма — имя, первая
+    # строка и существующая задача
+    fake = {"2026-10-24-1200-finding.md": f"# Находка: про уведомления\n\nОт: argus\n\nЦитата: «{T.NOTICE_MARK} …»\n",
+            "2026-10-24-1201-task-metis-0001.md": f"# Находка про metis-0001\n\n{T.NOTICE_MARK} цитата\n",
+            "2026-10-24-1202-task-metis-0999.md": f"# Новая задача metis-0999: нет такой\n\n{T.NOTICE_MARK} x\n",
+            "2026-10-24-1203-note-metis-0001.md": f"# Новая задача metis-0001: Проба\n\n{T.NOTICE_MARK} x\n",
+            "2026-10-24-1204-task-metis-0001.md": "# Новая задача metis-0001: Проба\n\nбез пометки — находка\n"}
+    for f, s in fake.items():
+        open(os.path.join(inbox, f), "w", encoding="utf-8").write(s)
+    files = sorted(x["file"] for x in T.inbox_items(home).values())
+    check("находка с цитатой пометки, чужое имя, первая строка не «# Новая задача <id>:», задачи <id> нет — карточки есть",
+          files == sorted(fake), files)
+    for f in fake:
+        os.remove(os.path.join(inbox, f))
+    r = run(dict(env, PANTHEON_ROLE="argus"), "task", "new", "--direction", "metis-pantheon", "--title", "От роли",
+            "--text", "тело")
+    one = [n for n in os.listdir(inbox) if n.endswith("-task-" + r.stdout.split()[0] + ".md")] if r.returncode == 0 else []
+    check("уведомление от роли подписано её именем", one and "\nОт: argus\n" in read(os.path.join(inbox, one[0])), one)
     r = run(dict(env, PANTHEON_SESSION="metis-pantheon"), "task", "new", "--direction", "metis-pantheon", "--title", "Своя",
             "--text", "сам завёл")
     check("координатор, заведший задачу сам, уведомления себе не получает",
-          r.returncode == 0 and not [n for n in os.listdir(inbox) if n.endswith("task-metis-0005.md")], os.listdir(inbox))
+          r.returncode == 0 and not [n for n in os.listdir(inbox) if n.endswith("task-metis-0006.md")], os.listdir(inbox))
     os.chmod(os.path.join(home, "directions", "athena-shop"), 0o555)  # inbox создать нельзя: задача уже есть, тревога
     r = run(env, "task", "new", "--direction", "athena-shop", "--title", "Чужая", "--text", "тело")
     os.chmod(os.path.join(home, "directions", "athena-shop"), 0o755)
-    check("уведомление не записалось — задача создана, предупреждение в stderr и тревога",
-          r.returncode == 0 and "уведомление" in r.stderr and "athena-0001" in r.stdout + alerts_of(home)
-          or r.returncode == 0 and "уведомление" in r.stderr, (r.returncode, r.stderr, r.stdout))
+    a = alerts_of(home)
+    check("уведомление не записалось — задача создана, предупреждение в stderr и тревога с id в alerts.md",
+          r.returncode == 0 and r.stdout.startswith("athena-0001 ") and "уведомление" in r.stderr
+          and re.search(r"task-new · новая задача athena-0001 \(athena-shop\): уведомление в inbox не записано", a),
+          (r.returncode, r.stderr, r.stdout, a))
 
     # (а) task set
     r = run(env, "task", "set", "metis-0001", "--bogus", "x")
     check("task set --bogus x: код 2, имя флага", r.returncode == 2 and "неизвестный флаг --bogus" in r.stderr, r.stderr)
+    r = run(env, "task", "set", "metis-0001", "--note=x")
+    check("task set --note=x: код 2, подсказка «через пробел»", r.returncode == 2 and "через пробел" in r.stderr, r.stderr)
     r = run(env, "task", "set", "metis-0001", "--note")
     check("task set --note без значения: код 2, имя флага", r.returncode == 2 and "у флага --note нет значения" in r.stderr, r.stderr)
     before = read(p1)
@@ -155,10 +191,23 @@ def main():
     t = read(p1)
     check("task set --body: тело заменено до журнала, журнал и поле сохранены", r.returncode == 0
           and "# Проба\n\nНовое тело\n\n## Журнал" in t and "Цель: X" not in t and "переписал" in t and "создана" in t
-          and 'next: шаг' in t, (r.stderr, t))
+          and 'next: шаг' in t and re.search(r"— агент: текст задачи заменён \(было \d+ знаков, стало 10\)", t), (r.stderr, t))
     open(bf, "w", encoding="utf-8").write("Из файла set.")
     r = run(env, "task", "set", "metis-0001", "--body-file", bf)
     check("task set --body-file", r.returncode == 0 and "# Проба\n\nИз файла set.\n\n## Журнал" in read(p1), r.stderr)
+    # разделы до журнала (argus a): «## Что сделать» заменяется вместе с текстом, «## Заметки владельца» остаётся
+    old_desc = "Цель старая.\n\n## Что сделать\n\n1. старый шаг"
+    s1 = read(p1).replace("# Проба\n\nИз файла set.\n\n", "# Проба\n\n" + old_desc + "\n\n"
+                          "## Заметки владельца\n\n- 2026-10-24 11:00\n  > мысль владельца\n\n", 1)
+    open(p1, "w", encoding="utf-8").write(s1)
+    r = run(env, "task", "set", "metis-0001", "--body", "Новое описание целиком", "--text", "не флаг set")
+    check("task set --text — неизвестный для set флаг, отказ", r.returncode == 2 and "--text" in r.stderr, r.stderr)
+    r = run(env, "task", "set", "metis-0001", "--body", "Новое описание целиком")
+    t = read(p1)
+    check("task set --body: «## Что сделать» до журнала заменён, «Заметки владельца» и журнал на месте",
+          r.returncode == 0 and "старый шаг" not in t and "Цель старая" not in t and "## Что сделать" not in t
+          and "# Проба\n\nНовое описание целиком\n\n## Заметки владельца\n\n- 2026-10-24 11:00\n  > мысль владельца\n\n## Журнал" in t
+          and f"текст задачи заменён (было {len(old_desc)} знаков" in t, (r.stderr, t))
 
     # (г) тик: задача без описания
     tmp2, home2, state2, env2 = make()
@@ -182,41 +231,94 @@ def main():
     check("тик: описание дописали / задача закрыта — новой тревоги нет", alerts_of(home2).count("без описания") == 1,
           alerts_of(home2))
 
+    # вопрос владельцу без текста: полный (why и два варианта) не в счёт, неполный (только question) — тревога
+    r = new(env2, "--question", "Выбрать?", "--why", "потому", "--option", "А — да", "--option", "Б — нет",
+            "--waiting-on", "human", t=T0 + 9100)
+    new(env2, "--body", "y", t=T0 + 9100)
+    strip_body(os.path.join(home2, "directions", "metis-pantheon", "tasks", "metis-0004.md"), "y")
+    r2 = run(env2, "task", "set", "metis-0004", "question=Что?", "--option", "А — да", "--option", "Б — нет", t=T0 + 9150)
+    new(env2, "--body", "z", t=T0 + 9100)
+    strip_body(os.path.join(home2, "directions", "metis-pantheon", "tasks", "metis-0005.md"), "z")
+    r3 = run(env2, "task", "set", "metis-0005", "question=Что?", "why=потому", "--option", "А — один", t=T0 + 9150)
+    run(env2, "check", "--quiet", t=T0 + 9100 + 3700)
+    last = [ln for ln in alerts_of(home2).splitlines() if "без описания" in ln][-1]
+    check("тик: полный вопрос без текста (metis-0003) — не тревога; вопрос с вариантами без why (0004) и с why и одним вариантом (0005) — тревога",
+          r.returncode == 0 and r2.returncode == 0 and r3.returncode == 0 and "metis-0004" in last and "metis-0005" in last
+          and "metis-0003" not in last, (r.stderr, r2.stderr, r3.stderr, last))
+
     # (г) тик: слово владельца с [id] без задачи
     tmp3, home3, state3, env3 = make()
     dec = os.path.join(home3, "decisions.md")
-    open(dec, "w", encoding="utf-8").write(
-        "# Решения\n\n- 24.10 11:00 — владелец: «сделайте так» [zeus-foo-bar]\n"
+    seen_p = os.path.join(state3, "unlinked-seen.json")
+    open(dec, "w", encoding="utf-8").write("# Решения\n\n- 24.10 09:00 — владелец: давнее [zeus-old-one]\n")
+    r = run(env3, "check", "--quiet")
+    check("тик, первый проход: что уже есть — запомнено без тревоги (argus a: 122 старых id не шумят)",
+          r.returncode == 0 and "без задачи" not in alerts_of(home3) and "zeus-old-one" in read(seen_p)
+          if os.path.exists(seen_p) else False, alerts_of(home3))
+    open(dec, "a", encoding="utf-8").write(
+        "- 24.10 11:00 — владелец: «сделайте так» [zeus-foo-bar]\n"
         "- 24.10 11:55 — владелец: свежее [zeus-fresh-one]\n"
         "- 24.10 10:00 — владелец: про [zeus-with-task]\n"
-        "- 24.10 10:10 — владелец: про [zeus-not-task] — не задача, решение без работы\n"
+        "- 24.10 10:10 — владелец: про [zeus-not-task]\n"
+        "не задача: [zeus-not-task] — решение без работы\n"
+        "- 24.10 10:11 — владелец: про [zeus-bullet-nt]\n"
+        "- не задача: [zeus-bullet-nt] — уже сделано\n"
+        "- 24.10 10:15 — владелец: [zeus-owner-says] это не задача на сегодня, но сделать до пятницы\n"
+        "- 24.10 10:16 — владелец: [zeus-wordform] это шаги, а не задачами отдельными\n"
+        "- 24.10 10:17 — владелец: [zeus-quoted] посмотрим\n"
+        "> не задача: [zeus-quoted] — цитата, а не пометка\n"
+        "- 24.10 10:18 — владелец: [zeus-in-journal] сделать\n"
+        "- 24.10 10:19 — владелец: [zeus-dropped] передумал\n"
         "- 24.10 10:20 — владелец: про [metis-0001] id самой задачи\n"
         "- 24.10 10:30 — [ссылка](http://x) и [просто-слово] не id\n")
     new(env3, "--body", "делаем [zeus-with-task]", t=T0 - 86400)
-    r = run(env3, "check", "--quiet")
-    a = alerts_of(home3)
-    check("тик: [id] из decisions.md старше 30 мин без задачи — тревога", "zeus-foo-bar" in a and "без задачи" in a, a)
-    check("тик: моложе 30 мин, с упоминанием в задаче, с «не задача», id самой задачи, не-id — молчит",
-          not any(x in a for x in ("zeus-fresh-one", "zeus-with-task", "zeus-not-task", "metis-0001", "просто-слово")), a)
+    new(env3, "--body", "работа", t=T0 - 86400)
+    run(env3, "task", "set", "metis-0002", "--note", "про [zeus-in-journal]", t=T0 - 86000)
+    new(env3, "--body", "мусор, решено [zeus-dropped]", t=T0 - 86400)
+    run(env3, "task", "set", "metis-0003", "status=dropped", t=T0 - 86000)
+    run(env3, "check", "--quiet", t=T0 + 60)
+    lines = [ln for ln in alerts_of(home3).splitlines() if "без задачи" in ln]
+    a = lines[-1] if lines else ""
+    check("тик: новые [id] старше 30 мин без задачи — одна строка; «не задача» внутри слова владельца, словоформа, "
+          "цитата пометки, упоминание только в журнале — пометкой не считаются",
+          len(lines) == 1 and all(x in a for x in ("zeus-foo-bar", "zeus-owner-says", "zeus-wordform", "zeus-quoted",
+                                                   "zeus-in-journal")), lines)
+    check("тик: прежнее, моложе 30 мин, [id] в теле задачи (и dropped), строка «не задача: [id] — причина», id задачи, "
+          "не-id — молчит",
+          not any(x in a for x in ("zeus-old-one", "zeus-fresh-one", "zeus-with-task", "zeus-not-task", "zeus-bullet-nt",
+                                   "zeus-dropped", "metis-0001", "просто-слово")), a)
     zl = os.path.join(state3, "owner-log")
     os.makedirs(zl)
     open(os.path.join(zl, "zeus.md"), "w", encoding="utf-8").write(
         "## 2026-10-24 10:00:00 · окно вопросов\nвопрос: [zeus-from-log] выбрать?\nответ: да\n\n"
         "## 2026-10-24 10:05:00\nпросто текст про [zeus-chat-only]\n")
-    run(env3, "check", "--quiet", t=T0 + 60)
-    a = alerts_of(home3)
-    check("тик: вопрос окна вопросов из owner-log без задачи — тревога; обычная реплика с [id] — нет",
-          "zeus-from-log" in a and "zeus-chat-only" not in a, a)
-    open(dec, "a", encoding="utf-8").write("- 24.10 12:01 — [zeus-foo-bar] завели задачу? нет — не задача\n")
     run(env3, "check", "--quiet", t=T0 + 120)
-    n_alerts = alerts_of(home3).count("без задачи")
+    lines = [ln for ln in alerts_of(home3).splitlines() if "без задачи" in ln]
+    check("тик: вопрос окна вопросов без задачи — новая строка только о нём (ключ — id, а не набор); реплика с [id] — нет",
+          len(lines) == 2 and "zeus-from-log" in lines[-1] and "zeus-foo-bar" not in lines[-1]
+          and "zeus-chat-only" not in alerts_of(home3), lines)
     run(env3, "check", "--quiet", t=T0 + 180)
-    check("тик: тот же набор — повтор молчит", alerts_of(home3).count("без задачи") == n_alerts)
-    check("тик: запись «не задача» гасит тревогу (набор изменился — одна новая строка без foo-bar)",
-          alerts_of(home3).splitlines()[-1].count("zeus-foo-bar") == 0, alerts_of(home3).splitlines()[-1])
+    check("тик: тот же набор — повтор молчит", alerts_of(home3).count("без задачи") == 2, alerts_of(home3))
+    run(env3, "check", "--quiet", t=T0 + 3600)
+    lines = [ln for ln in alerts_of(home3).splitlines() if "без задачи" in ln]
+    check("тик: [id] перешёл порог 30 мин — строка только о нём", len(lines) == 3 and "zeus-fresh-one" in lines[-1]
+          and "zeus-foo-bar" not in lines[-1], lines)
+    # испорченный файл показанных — как первый проход: запомнить без тревоги; записи старше 8 дней вычищаются
+    open(seen_p, "w", encoding="utf-8").write("не json")
+    open(dec, "a", encoding="utf-8").write("- 24.10 11:20 — владелец: [zeus-after-break] сделать\n")
+    run(env3, "check", "--quiet", t=T0 + 3700)
+    check("тик: испорченный unlinked-seen.json — запомнено заново без тревоги",
+          alerts_of(home3).count("без задачи") == 3 and "zeus-after-break" in read(seen_p), read(seen_p))
+    import json as _json
+    sd = _json.loads(read(seen_p))
+    sd["zeus-gone-long"] = T0 - 10 * 86400
+    open(seen_p, "w", encoding="utf-8").write(_json.dumps(sd))
+    run(env3, "check", "--quiet", t=T0 + 3800)
+    check("тик: запись показанных старше 8 дней удалена из unlinked-seen.json", "zeus-gone-long" not in read(seen_p)
+          and "zeus-foo-bar" in read(seen_p), read(seen_p))
     # слишком старое (>7 дней) разбирает ревизия, а не тик
     open(dec, "a", encoding="utf-8").write("- 10.10 09:00 — старое [zeus-ancient-id]\n")
-    run(env3, "check", "--quiet", t=T0 + 240)
+    run(env3, "check", "--quiet", t=T0 + 3900)
     check("тик: слово старше 7 дней тревоги не даёт", "zeus-ancient-id" not in alerts_of(home3))
 
     # чистые функции (одно и то же на 3.9 и 3.14)
