@@ -72,7 +72,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
   pantheon start zeus                   Пританей: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
-                                        start, дошедший до запуска сессии, пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2); красный замер или «нет сигнала» без слова — код 5 (отложено); в окне роли origin берётся из PANTHEON_ROLE, явный --from там только свой (hq → zeus, иная роль → tick); wake пишет только строку замера
+                                        start, дошедший до запуска сессии, пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2); красный замер или «нет сигнала» без слова — код 5 (отложено); в окне роли origin берётся из PANTHEON_ROLE, явный --from там только свой (hq → zeus, иная роль → tick); wake пишет строку замера и не откладывает, wake <имя> "задание" из окна роли без слова владельца — отказ (код 2)
   pantheon start <направление> --at ЧЧ:ММ [поручение]   разовый запуск плановым проходом вместо sleep в сессии;
                                         --at-list — записи, --at-cancel <id> — отменить (lib/night.py)
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
@@ -81,7 +81,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon reboot-reminder [--now]      пятница после 09:30: Mac не перезагружался с прошлой пятницы — карточка и уведомление
   pantheon agents | who                 снимок claude agents для строки статуса | таблица координаторов
   pantheon revisits                     пересмотры к сроку и по событиям (плановый проход раз в сутки)
-  pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией
+  pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией; задание из окна роли
+                                        — только по слову владельца в окне Зевса за 15 мин, иначе код 2
   pantheon wake hestia --task <id>      Гестия: всегда отказ (код 2) — окно песочницы появится в metis-0245
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
                                         сессия уходит из фоновых сессий Claude Code) и вернуть
@@ -3649,7 +3650,8 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
 
 
 # metis-0261 (А): лазейка 15.10 закрыта. Запуск «от Зевса» (--from zeus) без вашей строки в его журнале owner-log за
-# последние минуты — отказ, код 2 (раньше только тревога). Ваше слово — запись в owner-log/zeus.md, её пишет хук.
+# последние минуты — отказ, код 2 (раньше только тревога). Соседний путь `wake <имя> "задание"` из окна роли —
+# тот же отказ (watch.py wake_one, owner_word_ok; круг 4). Ваше слово — запись в owner-log/zeus.md, её пишет хук.
 OWNER_WORD_WINDOW = 15 * 60
 OWNER_HEAD = re.compile(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", re.M)
 
@@ -3809,12 +3811,13 @@ def wake(rest):
         return _wake(dry)
 
 
-def capacity_note(target, origin, agents):
-    """Только строка замера в capacity.jsonl, без отказа (pantheon wake: подъём прерванной сессии не откладываем)."""
+def capacity_note(target, origin, agents, result="allowed"):
+    """Только строка замера в capacity.jsonl, без отказа (pantheon wake: подъём прерванной сессии не откладываем).
+    result — что решил вызвавший: "allowed" или "refused" (wake <имя> с заданием без слова владельца, metis-0261 А)."""
     m = capacity_probe(agents)
     capacity_log({"t": round(now(), 1), "at": stamp(), "target": target, "origin": origin, "sessions": m["sessions"],
                   "pressure": m["pressure"], "free_pct": m["free_pct"], "swap_gb": None if m["swap_gb"] is None
-                  else round(m["swap_gb"], 2), "red": bool(m["red"]), "unknown": m["unknown"], "result": "allowed"})
+                  else round(m["swap_gb"], 2), "red": bool(m["red"]), "unknown": m["unknown"], "result": result})
 
 
 def _wake(dry):

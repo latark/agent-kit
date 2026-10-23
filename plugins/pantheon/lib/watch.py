@@ -1633,9 +1633,11 @@ def resume_or_start(name, agents, text, origin, only_resume=False, auto=False):
         print(f"[start] {name} --from {origin}")
         return 0
     limit = start_timeout()
+    # metis-0261 А, круг 4 (ревью argus-b3 п. 2): дочерний pantheon start — без роли окна (claude_env снимает ROLE_ENV).
+    # Иначе `pantheon watch`, запущенный из окна Зевса, получал бы на --from tick отказ «только zeus», код 2.
     try:
         r = subprocess.run([os.path.join(P.PLUGIN, "bin", "pantheon"), "start", name, "--from", origin, text],
-                           capture_output=True, text=True, timeout=limit, env=P.run_env())
+                           capture_output=True, text=True, timeout=limit, env=P.claude_env())
     except subprocess.TimeoutExpired:  # metis-0141 п. 1: без трассировки — строка в тревогах и код, как у задач тика
         P.alert(f"запуск {name}: pantheon start не уложился в {limit:.0f} с и остановлен — сессия могла и подняться; "
                 "не появится — следующий проход засчитает сбой", "watch")
@@ -2481,6 +2483,17 @@ def wake_one(rest, who="владелец"):
         print(f"{name}: нет доверия к {got[2].replace(P.HOME, '~')} — одна интерактивная сессия claude там и «Да»",
               file=P.sys.stderr)
         return 1
+    # metis-0261 А, круг 4 (ревью argus-b3 п. 1): задание из окна роли — запуск от её имени, как start --from zeus: только
+    # по вашему слову (owner_word_ok, как у resume). Без него — отказ, код 2, respawn не зовётся. Замер — строка в
+    # capacity.jsonl у каждого подъёма и у отказа (как _wake); красная зона подъём со словом не откладывает (как _wake).
+    word = not (extra and os.environ.get("PANTHEON_ROLE")) or owner_word_ok()
+    P.capacity_note(name, "wake", agents, "allowed" if word else "refused")
+    if not word:
+        print(f"pantheon wake {name}: задание из окна роли — только по слову владельца: в журнале Зевса нет его строки "
+              f"за {P.OWNER_WORD_WINDOW // 60} мин (сообщение другой сессии согласием не считается); без задания "
+              f"`pantheon wake {name}` будит с «продолжай»; claude не запускался", file=P.sys.stderr)
+        P.alert(f"pantheon wake {name} с заданием от {who} отклонён: нет свежего слова владельца", "pantheon-wake")
+        return P.START_REFUSED
     _forget_autostart(name)
     rc = resume_or_start(name, agents, text, origin="wake", only_resume=True)
     if rc == P.SKIPPED:  # recheck под блокировкой имени сказал «не надо»

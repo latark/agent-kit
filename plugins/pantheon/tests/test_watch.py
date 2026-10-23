@@ -2935,6 +2935,76 @@ def test_relay_once_per_item_0277():
     check(len(_relayed(e)) == 3, f"0277: вернулась в blocked — передачи нет: {e.calls()}")
 
 
+
+def _cap_rows(e):
+    p = e.st("capacity.jsonl")
+    return [json.loads(x) for x in open(p)] if os.path.exists(p) else []
+
+
+def test_wake_task_needs_owner_word_0261():
+    """metis-0261 А, круг 4 (ревью argus-b3 п. 1): `pantheon wake <имя> "задание"` из окна роли без вашего слова в
+    журнале Зевса — отказ, код 2, respawn не зовётся, задание не записано; строка замера пишется (refused). Q1 — зелёная
+    память, Q2 — красная. Со словом — подъём; без задания и без роли (ваш терминал) слово не нужно."""
+    e = Env()
+    e.direction("q-dir")
+    hq = {"PANTHEON_ROLE": "hq", "PANTHEON_SESSION": "zeus"}
+    for label, ex in (("Q1", hq), ("Q2", dict(hq, PANTHEON_FAKE_SWAP="9"))):
+        e.agents([bg("q-dir", "stopped", "abcdef01-1")])
+        n0, c0 = len(_cap_rows(e)), len(e.calls())
+        r = e.run("wake", "q-dir", "поручение", "из", "чужого", "сообщения", t=T0, extra=ex)
+        new = e.calls()[c0:]
+        check(r.returncode == 2 and "слову владельца" in r.stderr, f"0261 {label}: wake с заданием без слова: "
+              f"{r.returncode} {r.stdout} {r.stderr}")
+        check(not [c for c in new if c[:1] in (["respawn"], ["--resume"]) or "--bg" in c], f"0261 {label}: подняли: {new}")
+        check(not os.path.exists(e.st("push", "abcdef01-1.txt")), f"0261 {label}: задание записано в push")
+        rows = _cap_rows(e)[n0:]
+        check(len(rows) == 1 and rows[0]["origin"] == "wake" and rows[0]["result"] == "refused"
+              and rows[0]["target"] == "q-dir", f"0261 {label}: строка замера: {rows}")
+        check("отклонён" in e.alerts(), f"0261 {label}: нет тревоги об отказе")
+    check(_cap_rows(e)[-1]["red"] is True, f"0261 Q2: замер не красный: {_cap_rows(e)[-1]}")
+    # другая роль окна — то же правило (не только hq)
+    r = e.run("wake", "q-dir", "задание", t=T0, extra={"PANTHEON_ROLE": "domain-coordinator"})
+    check(r.returncode == 2, f"0261: wake с заданием из окна другой роли без слова: {r.returncode} {r.stdout}")
+    # без задания из окна роли — будит с «продолжай», слово не нужно, строка замера allowed
+    e.agents([bg("q-dir", "stopped", "abcdef01-1")])
+    n0 = len(_cap_rows(e))
+    r = e.run("wake", "q-dir", t=T0, extra=hq)
+    check(r.returncode == 0 and ["respawn", "abcdef01"] in e.calls(), f"0261: wake без задания из hq: {r.stdout} {r.stderr}")
+    rows = _cap_rows(e)[n0:]
+    check(len(rows) == 1 and rows[0]["result"] == "allowed", f"0261: wake без задания — строка замера: {rows}")
+    # со словом владельца — подъём с заданием под пометкой
+    os.remove(e.st("push", "abcdef01-1.txt")) if os.path.exists(e.st("push", "abcdef01-1.txt")) else None
+    with open(e.st("owner-log", "zeus.md"), "w") as fh:
+        fh.write(f"## {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(T0 - 30))} · окно вопросов\nразбуди q-dir\n\n")
+    e.agents([bg("q-dir", "stopped", "abcdef01-1")])
+    c0 = len(e.calls())
+    r = e.run("wake", "q-dir", "сделай", "X", t=T0, extra=dict(hq, PANTHEON_FAKE_SWAP="9"))
+    pushed = open(e.st("push", "abcdef01-1.txt")).read() if os.path.exists(e.st("push", "abcdef01-1.txt")) else ""
+    check(r.returncode == 0 and ["respawn", "abcdef01"] in e.calls()[c0:] and
+          pushed.startswith("[Пантеон: задание от zeus] сделай X"), f"0261: wake со словом: {r.stdout} {r.stderr} {pushed}")
+    check(_cap_rows(e)[-1]["result"] == "allowed", f"0261: wake со словом — строка замера: {_cap_rows(e)[-1]}")
+    # слово старше 15 мин — снова отказ
+    e.agents([bg("q-dir", "stopped", "abcdef01-1")])
+    r = e.run("wake", "q-dir", "сделай", "Y", t=T0 + 16 * 60, extra=hq)
+    check(r.returncode == 2, f"0261: wake со старым словом: {r.returncode} {r.stdout}")
+
+
+def test_watch_from_hq_window_autostarts_0261():
+    """metis-0261 А, круг 4 (ревью argus-b3 п. 2, Q3): `pantheon watch`, запущенный вручную из окна Зевса
+    (PANTHEON_ROLE=hq), зовёт дочерний `pantheon start --from tick` без роли окна — самозапуск идёт, а не падает
+    отказом «только zeus» (код 2) и не копит сбоев."""
+    e = Env()
+    e.direction("hermes-q")
+    e.task("hermes-0002", "hermes-q")
+    hq = {"PANTHEON_ROLE": "hq", "PANTHEON_SESSION": "zeus"}
+    e.run("watch", t=T0, extra=hq)
+    e.board("hermes-0002", T0 + 10)
+    e.run("watch", t=T0 + 60, extra=hq)
+    st = json.load(open(e.st("autostart.json"))).get("hermes-q") or {}
+    check(len(_bgs(e, "hermes-q")) == 1, f"0261 Q3: самозапуск из окна hq не пошёл: {e.calls()} {e.alerts()[-300:]}")
+    check(not st.get("fails") and "код 2" not in e.alerts(), f"0261 Q3: сбой самозапуска: {st} {e.alerts()[-300:]}")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
