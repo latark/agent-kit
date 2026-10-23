@@ -474,7 +474,8 @@ def clear_once(key):
 JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
-                    "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder", "read", "autoclose"}
+                    "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder", "read", "autoclose",
+                    "archive"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 # Окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` из schedule.toml идёт с песочницей
 # settings/job-<роль>.json (собирает sandbox_build), а не без неё. Роль вне таблицы тик не запускает. write — куда
@@ -793,15 +794,17 @@ def _fp_board_inputs():
     out += _fp_files(sorted(glob.glob(os.path.join(PANTHEON, "directions", "*", "inbox", "*.md"))))
     out += _fp_files(sorted(glob.glob(os.path.join(BOARD, "*.md"))))
     out += _fp_files([os.path.join(PANTHEON, "directions.toml"), os.path.join(PANTHEON, "schedule.toml")])
-    # автоблок board.md (metis-0397): ревью, STATUS.md, журнал владельца, сам board.md, открытые PR и неделя —
-    # содержимое кэша и целые проценты, а не время файлов: fetch и строка статуса пишут их каждые несколько минут
-    B = boardtext_mod()
-    out += _fp_files(B.review_files(PANTHEON) + B.status_files(PANTHEON)
-                     + [os.path.join(PANTHEON, "board.md"), os.path.join(STATE, "owner-log", "zeus.md"),
-                        os.path.join(STATE, "owner-log", "board.jsonl")])
-    out.append(("open_prs", B.open_prs(path("autoclose-prs.json"))))
-    out.append(("week", board_week()))
+    out += _fp_files([os.path.join(PANTHEON, "board.md")])  # строка встраивания ![[board-auto]] (metis-0397)
+    out += _fp_board_auto()
     return out
+
+
+def _fp_board_auto():
+    """Входы автоблока board-auto.md (metis-0397): ревью, STATUS.md, decisions.md, журнал владельца — размер и время
+    правки; открытые PR и неделя — по содержимому кэша и целым процентам (fetch и строка статуса пишут их часто)."""
+    B = boardtext_mod()
+    return _fp_files(B.watch_files(PANTHEON, STATE)) + [("open_prs", B.open_prs(path("autoclose-prs.json"))),
+                                                        ("week", board_week())]
 
 
 TICK_SKIP = {
@@ -931,6 +934,11 @@ def tick():
             alert_once("roles-tick", type(e).__name__, f"личные роли: проход упал ({type(e).__name__}: {e})",
                        "pantheon-tick")
         if not primary or me == primary:  # общий результат (задачи, gh) — на одном Mac
+            try:
+                board_auto_watch(t, sched)
+            except Exception as e:  # сбой проверки не должен останавливать тик
+                alert_once("board-auto-watch", type(e).__name__, f"board-auto.md: проверка свежести упала "
+                           f"({type(e).__name__}: {e})", "pantheon-tick")
             try:
                 autoclose_tick(t)
             except Exception as e:  # сбой автозакрытия не должен останавливать тик
@@ -1798,8 +1806,10 @@ def write_atomic(p, text):
 
 
 def archive():
-    """Раздел «Сделано» доски старше 7 дней и строки alerts.md старше 30 дней — в ~/ai/pantheon/archive/.
-    Запускает Зевс при утренней сводке, поэтому у доски остаётся один писатель."""
+    """Раздел «Сделано» доски старше 7 дней и строки alerts.md старше 30 дней — в ~/ai/pantheon/archive/; STATUS.md
+    длиннее предела 9 000 знаков — разделы с датой старше суток в archive/ направления (archive_status). Файл
+    состояния и после этого длиннее предела — тревога: строки без даты архив не режет (metis-0397). Запуск — задача
+    `pantheon archive` в schedule.toml раз в сутки или руками."""
     t = now()
     today = datetime.fromtimestamp(t)
     moved = {"board": 0, "alerts": 0}
@@ -1849,9 +1859,60 @@ def archive():
                 append(f"alerts-{key}.md", items)
             if moved["alerts"]:
                 write_atomic(alerts, "".join(out))
+    sl = statelen_mod()
+    moved["status"] = 0
+    for f in sl.state_files(PANTHEON):
+        if not os.path.isfile(f):
+            continue
+        if os.path.basename(f) == "STATUS.md":
+            moved["status"] += archive_status(f, t, today, sl.STATE_FILE_LIMIT)
+        n, rel = sl.length(f) or 0, os.path.relpath(f, PANTHEON)
+        key = "trim-" + re.sub(r"[^\w-]", "_", rel)[:60]
+        if n > sl.STATE_FILE_LIMIT:
+            alert_once(key, "1", f"{rel}: {n} знаков при пределе {sl.STATE_FILE_LIMIT} — архив переносит только "
+                       "строки и разделы с датой старше срока, строки без даты не режет: подрезать вручную",
+                       "pantheon-archive")
+        else:
+            clear_once(key)
     lk.__exit__(None, None, None)
-    print(f"в архив: доска — {moved['board']} строк, тревоги — {moved['alerts']} строк")
+    print(f"в архив: доска — {moved['board']} строк, тревоги — {moved['alerts']} строк, "
+          f"STATUS.md — {moved['status']} разделов")
     return 0
+
+
+def archive_status(f, t, today, limit):
+    """STATUS.md длиннее limit: разделы «## …» с датой в заголовке старше суток, кроме первого (текущего), — в
+    directions/<d>/archive/STATUS-ГГГГ-ММ.md, старые первыми, пока файл не уложится в предел. Разделы без даты, первый
+    раздел и строки до первого заголовка не трогает. Файл правили во время прохода — ничего не переносит (следующий
+    проход). → сколько разделов перенесено."""
+    text = open(f, encoding="utf-8").read()
+    if len(text) <= limit:
+        return 0
+    lines = text.splitlines(keepends=True)
+    starts = [i for i, ln in enumerate(lines) if ln.startswith("## ")]
+    secs = []
+    for k in range(1, len(starts)):
+        i, end = starts[k], starts[k + 1] if k + 1 < len(starts) else len(lines)
+        d = line_date(lines[i], t)
+        if d and (today - d).days >= 1:
+            secs.append((d, i, end))
+    drop, size, moved = set(), len(text), {}
+    for d, i, end in sorted(secs):
+        if size <= limit:
+            break
+        chunk = "".join(lines[i:end])
+        size -= len(chunk)
+        drop.update(range(i, end))
+        moved.setdefault(d.strftime("%Y-%m"), []).append(chunk)
+    if not drop or open(f, encoding="utf-8").read() != text:
+        return 0
+    adir = os.path.join(os.path.dirname(f), "archive")
+    os.makedirs(adir, exist_ok=True)
+    for key, chunks in sorted(moved.items()):
+        with open(os.path.join(adir, f"STATUS-{key}.md"), "a", encoding="utf-8") as fh:
+            fh.writelines(chunks)
+    write_atomic(f, "".join(ln for j, ln in enumerate(lines) if j not in drop))
+    return sum(len(c) for c in moved.values())
 
 
 # Имена окон, которые не направления: sandbox_build пишет settings/hq.json, workshop.json и job-<роль>.json; направление
@@ -5879,7 +5940,7 @@ def board():
             if now() - os.path.getmtime(fp) > 90 * 86400:
                 os.remove(fp)
         if primary:
-            board_text_sync(T)
+            board_auto_sync(T)
     for ln in lines:
         print(ln)
     if primary and os.environ.get("PANTHEON_METRICS") != "0":
@@ -5888,7 +5949,7 @@ def board():
 
 
 def boardtext_mod():
-    """lib/boardtext.py — автоблок board.md и напоминание на Stop (metis-0397), общий с хуком hooks/ctx.py."""
+    """lib/boardtext.py — автоблок доски board-auto.md (metis-0397), общий с хуком hooks/ctx.py."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("pantheon_boardtext", os.path.join(LIB, "boardtext.py"))
     m = importlib.util.module_from_spec(spec)
@@ -5905,24 +5966,65 @@ def board_week():
     return None
 
 
-def board_text_sync(T):
-    """Автоблок «Сводка прохода» в board.md между маркерами (metis-0397): PR, пачки, STATUS.md, решения владельца.
-    Строки Зевса вне маркеров не трогает; сломанные маркеры — тревога, файл не пишется. Сбой не ломает доску."""
-    board_md = os.path.join(PANTHEON, "board.md")
-    if not os.path.exists(board_md):
-        return
+def board_auto_fp():
+    return hashlib.sha1(repr(_fp_board_auto()).encode("utf-8", "replace")).hexdigest()
+
+
+def board_auto_sync(T):
+    """Автоблок доски — отдельный файл board-auto.md (metis-0397): PR, пачки, неделя, STATUS.md, ответы владельца.
+    board.md не пишет: только сверяет строку встраивания ![[board-auto]] вверху (нет — тревога). Удачная сборка
+    записывает отпечаток входов в board-auto.json (по нему board_auto_watch видит, что сборка отстала). Сбой — тревога,
+    проход доски идёт дальше."""
     try:
         B = boardtext_mod()
-        data = B.collect(PANTHEON, STATE, T.load_tasks(PANTHEON, T.WORK_TYPES), now(), board_week())
-        res, why = B.sync(board_md, B.build(data))
+        fp, t = board_auto_fp(), now()
+        data = B.collect(PANTHEON, STATE, T.load_tasks(PANTHEON, T.WORK_TYPES), t, board_week())
+        res = B.sync(os.path.join(PANTHEON, B.AUTO_NAME), B.render(data, t))
+        write_json(path("board-auto.json"), {"fp": fp, "built": t})
     except Exception as e:  # noqa: BLE001 — сбой автоблока не ломает проход доски
-        res, why = "skip", f"проход упал ({type(e).__name__}: {e})"
-    if res == "skip" and why:
-        alert_once("board-text", why, f"board.md: {why}", "board")
+        alert_once("board-auto", type(e).__name__, f"board-auto.md: сборка упала ({type(e).__name__}: {e})", "board")
+        return
+    clear_once("board-auto")
+    if data["broken"]:
+        alert_once("board-auto-input", ",".join(data["broken"]), "board-auto.md: не читается вход "
+                   f"{', '.join(data['broken'])} — сводка собрана без него", "board")
     else:
-        clear_once("board-text")
+        clear_once("board-auto-input")
+    if B.embed_ok(os.path.join(PANTHEON, "board.md")) is False:
+        alert_once("board-auto-embed", "1", f"board.md: вверху нет строки {B.EMBED} — сводка прохода (board-auto.md) "
+                   "не видна в доске; поставить её одной строкой в начало файла", "board")
+    else:
+        clear_once("board-auto-embed")
     if res == "written":
-        print("board.md: автоблок обновлён")
+        print("board-auto.md: сводка прохода обновлена")
+
+
+def board_auto_watch(t, sched):
+    """Тик (primary): входы автоблока менялись, а удачной сборки после этого нет WATCH_GAP и больше — тревога без
+    модели (молчаливый отказ генератора, исследование 24.10 разд. 7.8). Сборка прошла — отметка снимается. Задачи
+    `pantheon board` в расписании нет или она выключена — не сверяет: сборки и не ждут."""
+    if not any((parse_command(j.get("command")) or [""])[1:] == ["board"] and j.get("enabled") is not False
+               for j in sched.get("job") or []):
+        return
+    B = boardtext_mod()
+    st = read_json(path("board-auto.json"), {}) or {}
+    cur = board_auto_fp()
+    if st.get("fp") == cur:
+        if st.get("seen_fp"):
+            st.pop("seen_fp", None), st.pop("seen_at", None)
+            write_json(path("board-auto.json"), st)
+        clear_once("board-auto-stale")
+        return
+    if st.get("seen_fp") != cur:
+        st.update(seen_fp=cur, seen_at=t)
+        write_json(path("board-auto.json"), st)
+        return
+    seen = float(st.get("seen_at") or t)
+    if t - seen >= B.WATCH_GAP:
+        built = st.get("built")
+        alert_once("board-auto-stale", cur, f"board-auto.md: входы менялись в {B.hm(seen)}, а сборки нет "
+                   f"{int((t - seen) // 60)} мин (последняя — {B.hm(float(built)) if built else 'не было'}); "
+                   "смотреть задачу board: pantheon jobs, alerts.md", "pantheon-tick")
 
 
 def autoclose_mod():

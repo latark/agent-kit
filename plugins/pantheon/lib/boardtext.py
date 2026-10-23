@@ -1,30 +1,34 @@
-"""Автоблок текстовой доски board.md (metis-0397): PR, пачки, свежие STATUS.md и решения владельца — без ручной
-правки Зевса. Собирает плановый проход доски (`pantheon board`, задача тика) тем же путём, что виды доски
-(metis-0234, 0069, 0248); модель не зовёт, в сеть не ходит. Входы не менялись — тик пропускает проход (metis-0149),
-блок не изменился — файл не пишется.
+"""Автоблок доски — отдельный файл ~/ai/pantheon/board-auto.md (metis-0397, исследование 24.10 разд. 5, решение Зевса
+«вариант Б»): открытые PR и вердикты argus, пачки, неделя, свежие STATUS.md и ответы владельца — без ручной правки
+Зевса. Собирает плановый проход доски (`pantheon board`, задача тика) тем же путём, что виды доски (metis-0234, 0069,
+0248); модель не зовёт, в сеть не ходит. Входы не менялись — тик пропускает проход (metis-0149); текст не изменился —
+файл не пишется.
 
-Блок стоит между строками-маркерами BEGIN и END в разделе «## Сейчас». Всё вне маркеров — строки Зевса: код их не
-меняет ни при каком входе. Маркеров нет — блок вставляется под заголовок «## Сейчас» (строки Зевса остаются как были,
-ниже блока). Маркеры сломаны (один без пары, повтор, конец раньше начала), раздела нет или файла нет — файл не
-пишется, причина в ответе (тревога у тика).
+У файла один писатель — этот проход: board.md код не пишет вовсе, поэтому строки Зевса целы при любом входе и гонки с
+его правкой нет. В board.md вверху одна строка `![[board-auto]]` (её ставит Зевс): Obsidian показывает блок внутри
+доски, а хук после сжатия и /clear кладёт файл в контекст Зевса (hooks/ctx.py, file_for_context). Строки встраивания
+вверху board.md нет — тревога у тика (embed_ok).
+
+В блок идут только числа, SHA, перечисления, [id] и буква варианта (SEC-13): свободного текста из STATUS.md, ревью,
+задач и журнала владельца в нём нет — ни заголовков пачек, ни последних строк STATUS, ни слов ответа. Каждое значение
+проходит свой шаблон, а строка — чистку от управляющих и bidi-знаков (clean). Весь файл — до BLOCK_MAX знаков: не
+вошедшие строки сводятся в «…не вошло строк: N». Штамп «собрано ДД.ММ ЧЧ:ММ из N файлов» — время сборки, давшей этот
+текст; одна смена штампа файл не переписывает. Запись — уникальный временный файл рядом и rename.
 
 Входы — только файлы:
-- открытые PR — кэш `pantheon autoclose fetch` (STATE/autoclose-prs.json, ключ open_prs: номер, head, задачи, ядро);
-  ядро — сливает владелец, не ядро — «принять» Зевса;
-- вердикты argus — directions/*/review-<N>-argus*.md: строка «Вердикт: …» и head из первых строк; у каждой дорожки
-  (a, b, без буквы) — самый свежий файл; вердикт на другом head помечен «старый head»;
-- пачки — карточки type story не done/dropped, у которых есть задачи в doing, review или waiting;
+- открытые PR — кэш `pantheon autoclose fetch` (STATE/autoclose-prs.json, ключ open_prs из `gh pr list --state open`:
+  номер, head, задачи, задето ли ядро); ядро — сливает владелец, не ядро — «принять» Зевса;
+- вердикты argus — directions/*/review-<N>-argus*.md: «Вердикт: …» и head из начала файла; у каждой дорожки (a, b, без
+  буквы) — самый свежий файл; вердикт на другом head помечен «старый head»;
+- пачки — карточки type story не done/dropped с задачами в doing, review или waiting (только id и счёт);
 - неделя — целые проценты снимка лимита (их даёт вызывающий);
-- STATUS.md направлений, правленные за сутки, — время правки и последняя строка;
-- решения владельца — журнал owner-log: выбор в окне вопросов на вопрос «[id] …» (zeus.md, пометку ставит хук) и
-  ответ галочкой на карточке (board.jsonl), за сутки. Текст файлов и задач решением не считается. Блок — сводка для
-  глаз, а не согласие: согласие проверяет только `pantheon consent <id>`.
+- STATUS.md направлений, правленные за сутки, — только имя направления и время правки;
+- ответы владельца — журнал owner-log: выбор в окне вопросов на вопрос «[id] …» (zeus.md, пометку ставит хук) и ответ
+  галочкой на карточке (board.jsonl), за сутки — [id], время и буква варианта (или да/нет). Блок — сводка для глаз, а не
+  согласие: согласие проверяет только `pantheon consent <id>`.
 
-Размер блока ограничен (строк каждого вида и знаков в строке), поэтому он не раздувает файл. Подрезку ручных строк
-сверх 9 000 знаков код не делает: строки Зевса вне маркеров не трогаются (решение по metis-0397).
-
-stale_reminder — проверка для хука Stop у Зевса: ручные строки «Сейчас» (вне блока) старше правки STATUS.md Метиды на
-STALE_GAP и больше → текст напоминания; это не отказ.
+Свежесть: watch_files — файлы, по которым тик сверяет, что сборка прошла после изменения входов (тревога, если входы
+менялись, а сборки нет 10 мин и больше — pantheon.py board_auto_watch).
 
 Только стандартная библиотека и Python 3.9: модуль грузит и хук (hooks/ctx.py).
 """
@@ -32,34 +36,47 @@ import glob
 import json
 import os
 import re
+import tempfile
 import time
+import unicodedata
 from datetime import datetime
 
-BEGIN = "<!-- pantheon:auto — блок собирает плановый проход (pantheon board); правки внутри затрутся -->"
-END = "<!-- /pantheon:auto -->"
-BEGIN_MARK, END_MARK = "<!-- pantheon:auto", "<!-- /pantheon:auto"
-NOW_HEAD = re.compile(r"## Сейчас[ \t]*\r?\n?")
+AUTO_NAME = "board-auto.md"
+EMBED = "![[board-auto]]"
+EMBED_LINES = 30             # строка встраивания — среди первых строк board.md («вверху»)
 DAY = 86400
-STALE_GAP = 30 * 60          # «Сейчас» старше правки STATUS.md Метиды на столько — напоминание на Stop
-STALE_SOURCE = "metis-pantheon"  # направление, чей STATUS.md сверяется на Stop (там PR и пачки)
-MAX_PR, MAX_BATCH, MAX_STATUS, MAX_DECISION, LINE_MAX = 8, 3, 4, 5, 220
+WATCH_GAP = 10 * 60          # входы менялись, а сборки нет столько — тревога
+BLOCK_MAX = 1200             # знаков во всём файле
+MAX_PR, MAX_BATCH, MAX_STATUS, MAX_DECISION, MAX_IDS = 8, 3, 6, 5, 3
 REVIEW_RE = re.compile(r"review-([1-9]\d{0,5})-argus(?:-?([a-z]?)(\d*))?\.md")
 VERDICT_RE = re.compile(r"Вердикт\**\s*:\s*\**\s*([А-Яа-яЁё]+)")
+VERDICTS = ("принять", "вернуть", "частично", "отклонить")
 HEAD_RE = re.compile(r"\bHead\b\**:?\**\s*`?([0-9a-f]{7,40})\b")
 REPO_RE = re.compile(r"([\w.-]+/[\w.-]+)#(\d+)")
+ID_RE = re.compile(r"[a-z][a-z0-9]{0,30}(?:-[a-z0-9]{1,30}){0,4}")
+SHA_RE = re.compile(r"[0-9a-f]{4,40}")
+NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}")
+VARIANT_RE = re.compile(r"\s*([А-ЯЁA-Z]\d?)\s*(?:$|[.,;:!)—–-])")  # «А», «Б1 — …»; не «В пятницу»
+YESNO_RE = re.compile(r"\s*(да|нет)\s*(?:$|[.,;:!—–-])", re.I)
 WORK = ("doing", "review", "waiting")
 STATUS_RU = {"doing": "в работе", "review": "на проверке", "waiting": "ждёт"}
 OWN_Q = re.compile(r"вопрос: \[([a-z0-9][a-z0-9-]{0,40})\]", re.I)
-STAMP_RE = re.compile(r"(?<!\d)(\d{2})\.(\d{2})(?:\.\d{2,4})?,?\s+(\d{1,2}):(\d{2})(?!\d)")
-
-
-def one_line(s, n=LINE_MAX):
-    s = re.sub(r"\s+", " ", str(s or "")).strip()
-    return s if len(s) <= n else s[:n - 1].rstrip() + "…"
+HEAD_LINE = "<!-- файл собирает плановый проход (pantheon board, metis-0397); руками не править — перезапишется -->"
+STAMP_RE = re.compile(r" · собрано \d\d\.\d\d \d\d:\d\d из \d+ файл\w*")
 
 
 def hm(t):
     return datetime.fromtimestamp(t).strftime("%d.%m %H:%M")
+
+
+def clean(s):
+    """Строка без управляющих, bidi и прочих невидимых знаков (категории C*), пробелы схлопнуты."""
+    s = "".join(ch if unicodedata.category(ch)[0] != "C" else " " for ch in str(s))
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _ok(rx, s):
+    return isinstance(s, str) and rx.fullmatch(s) is not None
 
 
 def _read(p, n=None):
@@ -80,7 +97,8 @@ def _mtime(p):
 # --- входы ------------------------------------------------------------------------------------------------------
 
 def open_prs(cache_path):
-    """Открытые PR из кэша autoclose fetch: [{repo, number, head, ids, core}] по репозиторию и номеру; нет данных — None."""
+    """Открытые PR из кэша autoclose fetch: [{repo, number, head, ids, core}] по репозиторию и номеру; нет данных — None.
+    Значения не по шаблону (имя репозитория, head, id задачи) отбрасываются."""
     try:
         with open(cache_path, encoding="utf-8") as fh:
             st = json.load(fh)
@@ -92,10 +110,23 @@ def open_prs(cache_path):
     out = []
     for repo, prs in sorted(by_repo.items()):
         for p in prs if isinstance(prs, list) else []:
-            if isinstance(p, dict) and isinstance(p.get("number"), int):
-                out.append({"repo": str(repo), "number": p["number"], "head": str(p.get("head") or ""),
-                            "ids": [str(i) for i in p.get("ids") or [] if isinstance(i, str)], "core": bool(p.get("core"))})
+            if isinstance(p, dict) and isinstance(p.get("number"), int) and not isinstance(p.get("number"), bool):
+                head = p.get("head") if _ok(SHA_RE, p.get("head")) else ""
+                out.append({"repo": str(repo), "number": p["number"], "head": head,
+                            "ids": [i for i in p.get("ids") or [] if _ok(ID_RE, i)], "core": p.get("core") is True})
     return sorted(out, key=lambda p: (p["repo"], p["number"]))
+
+
+def cache_broken(cache_path):
+    """Кэш PR есть, но не JSON-объект (оборван, испорчен) — сломанный вход: тревога у тика. Нет файла или нет ключа
+    open_prs (fetch ещё не прошёл после выпуска) — не сбой."""
+    try:
+        with open(cache_path, encoding="utf-8") as fh:
+            return not isinstance(json.load(fh), dict)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
 
 
 def review_files(pantheon):
@@ -103,7 +134,8 @@ def review_files(pantheon):
 
 
 def reviews(pantheon):
-    """{номер PR: {дорожка: {verdict, head, repo, mtime}}} — у дорожки самый свежий файл ревью."""
+    """{номер PR: {дорожка: {verdict, head, repo, mtime}}} — у дорожки самый свежий файл ревью. Вердикт вне VERDICTS —
+    «иное»: слово из файла в блок не идёт."""
     out = {}
     for p in review_files(pantheon):
         m = REVIEW_RE.fullmatch(os.path.basename(p))
@@ -115,7 +147,8 @@ def reviews(pantheon):
         v = VERDICT_RE.search(text)
         h = HEAD_RE.search(text)
         r = REPO_RE.search(text.split("\n", 1)[0])
-        rec = {"verdict": v.group(1).lower() if v else "", "head": h.group(1) if h else "",
+        verdict = (v.group(1).lower() if v.group(1).lower() in VERDICTS else "иное") if v else ""
+        rec = {"verdict": verdict, "head": h.group(1) if h else "",
                "repo": r.group(1) if r and r.group(2) == m.group(1) else "", "mtime": mt}
         cur = out.setdefault(int(m.group(1)), {}).get(lane)
         if cur is None or mt > cur["mtime"]:
@@ -124,7 +157,8 @@ def reviews(pantheon):
 
 
 def batches(tasks):
-    """Пачки в работе: [(id, заголовок, [(id задачи, статус)], закрыто, всего)]. tasks — load_tasks: id → (путь, шапка, …)."""
+    """Пачки в работе: [(id, [(id задачи, статус)], закрыто, всего)]. tasks — load_tasks: id → (путь, шапка, …).
+    Заголовок пачки — свободный текст, в блок не идёт."""
     kids = {}
     for tid, rec in tasks.items():
         h = rec[1]
@@ -133,12 +167,12 @@ def batches(tasks):
     out = []
     for sid, rec in tasks.items():
         h = rec[1]
-        if h.get("type") != "story" or h.get("status") in ("done", "dropped"):
+        if h.get("type") != "story" or h.get("status") in ("done", "dropped") or not _ok(ID_RE, sid):
             continue
         ks = sorted(kids.get(sid) or [])
-        work = [(i, s) for i, s in ks if s in WORK]
+        work = [(i, s) for i, s in ks if s in WORK and _ok(ID_RE, i)]
         if work:
-            out.append((h.get("priority", 2) if isinstance(h.get("priority"), int) else 2, sid, h.get("title") or "",
+            out.append((h.get("priority", 2) if isinstance(h.get("priority"), int) else 2, sid,
                         work, sum(1 for _, s in ks if s in ("done", "dropped")), len(ks)))
     out.sort()
     return [x[1:] for x in out[:MAX_BATCH]]
@@ -149,20 +183,28 @@ def status_files(pantheon):
 
 
 def statuses(pantheon, t):
-    """STATUS.md, правленные за сутки: [(направление, время правки, последняя строка)] — свежие первыми."""
+    """STATUS.md, правленные за сутки: [(направление, время правки)] — свежие первыми. Текст файла в блок не идёт."""
     out = []
     for p in status_files(pantheon):
         mt = _mtime(p)
-        if mt is None or t - mt > DAY:
+        name = os.path.basename(os.path.dirname(p))
+        if mt is None or t - mt > DAY or not _ok(NAME_RE, name):
             continue
-        lines = [ln for ln in (_read(p) or "").splitlines() if ln.strip()]
-        out.append((os.path.basename(os.path.dirname(p)), mt, lines[-1] if lines else ""))
+        out.append((name, mt))
     out.sort(key=lambda x: -x[1])
     return out[:MAX_STATUS]
 
 
+def variant(answer):
+    """Буква варианта («А», «Б1») или да/нет из начала ответа; иначе "" — слова ответа в блок не идут."""
+    if not isinstance(answer, str):
+        return ""
+    m = VARIANT_RE.match(answer) or YESNO_RE.match(answer)
+    return m.group(1).lower() if m and m.re is YESNO_RE else (m.group(1) if m else "")
+
+
 def decisions(zeus_md, board_jsonl, t):
-    """Решения владельца за сутки: [(время, id, ответ, откуда)] — свежие первыми. Только журнал owner-log: выбор в
+    """Ответы владельца за сутки: [(время, id, вариант, откуда)] — свежие первыми. Только журнал owner-log: выбор в
     окне вопросов на вопрос «[id] …» и ответ галочкой на карточке (как у `pantheon consent`)."""
     out = []
     text = _read(zeus_md) or ""
@@ -178,7 +220,7 @@ def decisions(zeus_md, board_jsonl, t):
             continue
         a = re.search(r"^ответ: (.*)$", body, re.M)
         if a and 0 <= t - ts <= DAY:
-            out.append((ts, q.group(1).lower(), a.group(1), "окно вопросов"))
+            out.append((ts, q.group(1).lower(), variant(a.group(1)), "окно вопросов"))
     for line in (_read(board_jsonl) or "").splitlines():
         try:
             rec = json.loads(line)
@@ -186,27 +228,36 @@ def decisions(zeus_md, board_jsonl, t):
         except (ValueError, TypeError, AttributeError):
             continue
         q, a = rec.get("question"), rec.get("answer")
-        if rec.get("kind") != "answer" or not isinstance(rec.get("id"), str) or not isinstance(q, str) \
+        if rec.get("kind") != "answer" or not _ok(ID_RE, rec.get("id")) or not isinstance(q, str) \
                 or not isinstance(a, str) or re.search(r"%%|<", q) or not 0 <= t - ts <= DAY:
             continue
-        out.append((ts, rec["id"], a, "доска"))
+        out.append((ts, rec["id"], variant(a), "доска"))
     out.sort(key=lambda x: -x[0])
     return out[:MAX_DECISION]
 
 
+def owner_log(state):
+    return [os.path.join(state, "owner-log", "zeus.md"), os.path.join(state, "owner-log", "board.jsonl")]
+
+
+def watch_files(pantheon, state):
+    """Файлы входов для отпечатка свежести (без задач и кэша PR — их отпечаток по содержимому даёт вызывающий):
+    ревью, STATUS.md, decisions.md, журнал владельца (у него — только размер и время правки)."""
+    return review_files(pantheon) + status_files(pantheon) + [os.path.join(pantheon, "decisions.md")] + owner_log(state)
+
+
 def collect(pantheon, state, tasks, t, week=None):
-    """Все входы блока одним словарём (его же пишет отпечаток тика)."""
-    return {"prs": open_prs(os.path.join(state, "autoclose-prs.json")), "reviews": reviews(pantheon),
-            "batches": batches(tasks), "week": week, "statuses": statuses(pantheon, t),
-            "decisions": decisions(os.path.join(state, "owner-log", "zeus.md"),
-                                   os.path.join(state, "owner-log", "board.jsonl"), t)}
+    """Все входы блока одним словарём; files — сколько файлов прочитано (для штампа)."""
+    cache = os.path.join(state, "autoclose-prs.json")
+    zeus_md, board_jsonl = owner_log(state)
+    files = len(review_files(pantheon)) + len(status_files(pantheon)) + len(tasks) \
+        + sum(1 for p in (cache, zeus_md, board_jsonl) if os.path.isfile(p))
+    return {"prs": open_prs(cache), "reviews": reviews(pantheon), "batches": batches(tasks), "week": week,
+            "statuses": statuses(pantheon, t), "decisions": decisions(zeus_md, board_jsonl, t), "files": files,
+            "broken": ["autoclose-prs.json"] if cache_broken(cache) else []}
 
 
 # --- блок -------------------------------------------------------------------------------------------------------
-
-def _q(s, n=120):
-    return "«" + one_line(re.sub(r"[«»]", '"', str(s)), n) + "»"
-
 
 def pr_line(p, revs):
     lanes = revs.get(p["number"]) or {}
@@ -215,22 +266,25 @@ def pr_line(p, revs):
     for lane in sorted(lanes):
         r = lanes[lane]
         old = p["head"] and r["head"] and not p["head"].startswith(r["head"]) and not r["head"].startswith(p["head"])
-        parts.append((lane + " " if lane else "") + (_q(r["verdict"]) if r["verdict"] else "без вердикта")
+        parts.append((lane + " " if lane else "") + (r["verdict"] or "без вердикта")
                      + (f" на старом head {r['head'][:7]}" if old else ""))
     who = "ядро → сливает владелец" if p["core"] else "не ядро → «принять» Зевса"
-    ids = f" ({', '.join(p['ids'][:3])})" if p["ids"] else ""
-    return one_line(f"- PR #{p['number']} {p['repo'].rsplit('/', 1)[-1]}{ids} · head {p['head'][:7] or '?'} · argus: "
-                    + (", ".join(parts) if parts else "ревью нет") + f" · {who}")
+    ids = f" ({', '.join(p['ids'][:MAX_IDS])})" if p["ids"] else ""
+    repo = p["repo"].rsplit("/", 1)[-1]
+    repo = repo if _ok(NAME_RE, repo) else "?"
+    return (f"- PR #{p['number']} {repo}{ids} · head {p['head'][:7] or '?'} · argus: "
+            + (", ".join(parts) if parts else "ревью нет") + f" · {who}")
 
 
-def build(data):
-    """Текст блока с маркерами. Каждая строка внутри начинается с «- » или «**»: вход не может подделать маркер."""
-    out = [BEGIN, "**Сводка прохода** — собирает код из кэша PR, ревью, задач и журнала владельца. Согласие владельца "
-           "проверяет только `pantheon consent <id>`.", ""]
+def lines(data):
+    """Строки блока без штампа (в порядке важности: неделя, PR, пачки, STATUS, ответы владельца)."""
+    out = []
     w = data.get("week")
-    out.append(f"- Неделя: {w} %." if isinstance(w, int) else "- Неделя: расход неизвестен.")
+    out.append(f"- Неделя: {w} %." if isinstance(w, int) and not isinstance(w, bool) else "- Неделя: расход неизвестен.")
     prs = data.get("prs")
-    if prs is None:
+    if prs is None and "autoclose-prs.json" in (data.get("broken") or []):
+        out.append("- PR: кэш открытых PR не читается — список PR неизвестен.")
+    elif prs is None:
         out.append("- PR: кэша открытых PR нет — задача autoclose-fetch ещё не прошла.")
     elif not prs:
         out.append("- Открытых PR нет.")
@@ -238,118 +292,55 @@ def build(data):
         out += [pr_line(p, data.get("reviews") or {}) for p in prs[:MAX_PR]]
         if len(prs) > MAX_PR:
             out.append(f"- …и ещё PR: {len(prs) - MAX_PR}.")
-    for sid, title, work, closed, total in data.get("batches") or []:
-        out.append(one_line(f"- Пачка {sid} {_q(title, 60)}: "
-                            + ", ".join(f"{i} ({STATUS_RU.get(s, s)})" for i, s in work) + f"; закрыто {closed} из {total}."))
-    for name, mt, last in data.get("statuses") or []:
-        out.append(one_line(f"- STATUS {name}, правка {hm(mt)}: {_q(last, 160)}"))
-    for ts, qid, ans, src in data.get("decisions") or []:
-        out.append(one_line(f"- Решение владельца {hm(ts)} [{qid}] ({src}): {_q(ans)}"))
-    out.append(END)
-    return "\n".join(out) + "\n"
+    for sid, work, closed, total in data.get("batches") or []:
+        out.append(f"- Пачка {sid}: " + ", ".join(f"{i} ({STATUS_RU.get(s, s)})" for i, s in work)
+                   + f"; закрыто {closed} из {total}.")
+    st = data.get("statuses") or []
+    if st:
+        out.append("- STATUS правлены: " + ", ".join(f"{n} {hm(mt)}" for n, mt in st) + ".")
+    for ts, qid, var, src in data.get("decisions") or []:
+        out.append(f"- Ответ владельца [{qid}] {hm(ts)} ({src}): " + (var or "ответ дан") + ".")
+    return [clean(x) for x in out]
 
 
-# --- запись -----------------------------------------------------------------------------------------------------
-
-def markers(lines):
-    b = [i for i, ln in enumerate(lines) if ln.startswith(BEGIN_MARK)]
-    e = [i for i, ln in enumerate(lines) if ln.startswith(END_MARK)]
-    return b, e
-
-
-def splice(text, block):
-    """Новый текст файла: блок между маркерами (или под «## Сейчас»), остальное — байт в байт как было.
-    → (текст, "") или (None, причина)."""
-    lines = text.splitlines(True)
-    b, e = markers(lines)
-    if len(b) == 1 and len(e) == 1 and b[0] < e[0]:
-        tail = lines[e[0]][len(lines[e[0]].rstrip("\r\n")):] or ("\n" if e[0] + 1 < len(lines) else "")
-        return "".join(lines[:b[0]]) + block.rstrip("\n") + tail + "".join(lines[e[0] + 1:]), ""
-    if b or e:
-        return None, (f"маркеры автоблока сломаны (начало: {len(b)}, конец: {len(e)}) — блок не записан; поправить "
-                      f"руками: одна строка «{BEGIN_MARK} …» и после неё одна «{END}»")
-    h = [i for i, ln in enumerate(lines) if NOW_HEAD.fullmatch(ln)]
-    if len(h) != 1:
-        return None, "в board.md нет одного раздела «## Сейчас» — блок не записан"
-    i = h[0]
-    head = lines[i] if lines[i].endswith("\n") else lines[i] + "\n"
-    return "".join(lines[:i]) + head + "\n" + block + ("\n" if i + 1 < len(lines) else "") + "".join(lines[i + 1:]), ""
+def render(data, t):
+    """Текст файла: строка-пометка, штамп, строки блока; длиннее BLOCK_MAX — хвост строк сводится в «…не вошло»."""
+    head = [HEAD_LINE, f"**Сводка прохода · собрано {hm(t)} из {int(data.get('files') or 0)} файлов**", ""]
+    body = lines(data)
+    text = "\n".join(head + body) + "\n"
+    while len(text) > BLOCK_MAX and body:
+        body = body[:-1]
+        more = f"- …не вошло строк: {len(lines(data)) - len(body)}."
+        text = "\n".join(head + body + [more]) + "\n"
+    return text
 
 
-def sync(board_md, block):
-    """Записать блок в board.md, если он изменился. → ("written"|"same", "") или ("skip", причина).
-    Перед заменой файл перечитывается: Зевс правил его во время прохода — пропуск, следующий проход допишет."""
-    old = _read(board_md)
-    if old is None:
-        return "skip", "board.md не прочитать — блок не записан"
-    new, why = splice(old, block)
-    if new is None:
-        return "skip", why
-    if new == old:
-        return "same", ""
-    tmp = f"{board_md}.auto.{os.getpid()}"
+def same(a, b):
+    """Тексты равны без штампа времени и числа файлов."""
+    return a is not None and b is not None and STAMP_RE.sub("", a) == STAMP_RE.sub("", b)
+
+
+def sync(auto_md, text):
+    """Записать файл автоблока, если текст (без штампа) изменился. → "written" | "same".
+    Запись — уникальный временный файл в той же папке и rename: читатель видит либо старый файл, либо новый."""
+    if same(_read(auto_md), text):
+        return "same"
+    d = os.path.dirname(auto_md) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".board-auto.", suffix=".tmp", dir=d)
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(new)
-        try:
-            os.chmod(tmp, os.stat(board_md).st_mode & 0o7777)
-        except OSError:
-            pass
-        if _read(board_md) != old:
-            return "skip", "board.md правили во время прохода — блок запишет следующий проход"
-        os.replace(tmp, board_md)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, auto_md)
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
-    return "written", ""
+    return "written"
 
 
-# --- напоминание на Stop ----------------------------------------------------------------------------------------
-
-def manual_now(text):
-    """Раздел «## Сейчас» без автоблока — только строки Зевса."""
-    lines = text.splitlines(True)
-    b, e = markers(lines)
-    if len(b) == 1 and len(e) == 1 and b[0] < e[0]:
-        lines = lines[:b[0]] + lines[e[0] + 1:]
-    out, inside = [], False
-    for ln in lines:
-        if ln.startswith("## "):
-            inside = bool(NOW_HEAD.fullmatch(ln))
-            continue
-        if inside:
-            out.append(ln)
-    return "".join(out)
-
-
-def newest_stamp(text, ref):
-    """Самое позднее «ДД.ММ ЧЧ:ММ» в тексте; год — от ref (дата позже ref больше чем на 2 дня — прошлый год)."""
-    best = None
-    year = datetime.fromtimestamp(ref).year
-    for m in STAMP_RE.finditer(text):
-        d, mo, h, mi = (int(x) for x in m.groups())
-        for y in (year, year - 1):
-            try:
-                ts = datetime(y, mo, d, h, mi).timestamp()
-            except ValueError:
-                break
-            if ts <= ref + 2 * DAY:
-                best = ts if best is None or ts > best else best
-                break
-    return best
-
-
-def stale_reminder(board_md, status_md, gap=STALE_GAP):
-    """«Сейчас» (строки Зевса) старше правки STATUS.md на gap и больше → (текст, время правки STATUS), иначе None.
-    Нет файла или в «Сейчас» нет ни одного «ДД.ММ ЧЧ:ММ» — None: сравнивать не с чем."""
-    st = _mtime(status_md)
+def embed_ok(board_md):
+    """Строка `![[board-auto]]` среди первых EMBED_LINES строк board.md. → True/False; board.md нет — None."""
     text = _read(board_md)
-    if st is None or text is None:
+    if text is None:
         return None
-    last = newest_stamp(manual_now(text), st)
-    if last is None or st - last < gap:
-        return None
-    return (f"board.md: раздел «Сейчас» отстал — последняя ваша строка там за {hm(last)}, а STATUS.md "
-            f"{os.path.basename(os.path.dirname(status_md))} правлен в {hm(st)} (на {int((st - last) // 60)} мин позже). "
-            "Перенеси в «Сейчас» строки после этого времени; PR, пачки и решения владельца блок между маркерами "
-            "пишет сам. Это напоминание хука, а не владельца.", st)
+    return any(ln.strip() == EMBED for ln in text.splitlines()[:EMBED_LINES])
