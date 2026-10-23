@@ -177,10 +177,11 @@ def open_pr_tasks(state_file):
     return set(st["open"]) if isinstance(st.get("open"), list) else None
 
 
-def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET):
+def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=None):
     """Сетевой проход: gh по репозиториям → кэш cache_file. Только он зовёт gh; лёгкий тик (run) читает кэш.
     budget — секунд на весь проход: на каждый вызов gh остаётся не больше, чем осталось; не успел — ошибка по репозиторию.
-    → ошибки по репозиториям {repo: текст}."""
+    core — путь → ядро ли (merge.is_core): открытые PR в кэше (open_prs) несут пометку «задето ядро» для автоблока
+    board.md (metis-0397). → ошибки по репозиториям {repo: текст}."""
     end = time.monotonic() + budget
 
     def left():
@@ -188,7 +189,7 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET):
 
     done = load_state(state_file).get("done")
     done = done if isinstance(done, dict) else {}
-    merged, opened, errors = {}, {}, {}
+    merged, opened, open_prs, errors = {}, {}, {}, {}
     for repo in sorted(set(repos)):
         if left() <= 1:
             errors[repo] = "не хватило времени прохода"
@@ -215,10 +216,15 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET):
         merged[repo] = rows
         if left() > 1:
             o, _ = gh_json(["pr", "list", "--repo", repo, "--state", "open", "--limit", str(LIMIT), "--json",
-                            "number,headRefName,body"], env, timeout=min(90, left()))
+                            "number,headRefName,headRefOid,body,files"], env, timeout=min(90, left()))
             if isinstance(o, list):
                 opened[repo] = sorted({i for p in o if isinstance(p, dict) for i in find_ids(p.get("headRefName"), p.get("body"))})
-    save_state(cache_file, {"fetched": t, "merged": merged, "open": opened, "errors": errors})
+                open_prs[repo] = [{"number": p.get("number"), "head": str(p.get("headRefOid") or "")[:40],
+                                   "ids": find_ids(p.get("headRefName"), p.get("body")),
+                                   "core": bool(core) and any(core(f.get("path") or "") for f in p.get("files") or []
+                                                              if isinstance(f, dict))}
+                                  for p in o if isinstance(p, dict) and isinstance(p.get("number"), int)]
+    save_state(cache_file, {"fetched": t, "merged": merged, "open": opened, "open_prs": open_prs, "errors": errors})
     return errors
 
 

@@ -793,6 +793,14 @@ def _fp_board_inputs():
     out += _fp_files(sorted(glob.glob(os.path.join(PANTHEON, "directions", "*", "inbox", "*.md"))))
     out += _fp_files(sorted(glob.glob(os.path.join(BOARD, "*.md"))))
     out += _fp_files([os.path.join(PANTHEON, "directions.toml"), os.path.join(PANTHEON, "schedule.toml")])
+    # автоблок board.md (metis-0397): ревью, STATUS.md, журнал владельца, сам board.md, открытые PR и неделя —
+    # содержимое кэша и целые проценты, а не время файлов: fetch и строка статуса пишут их каждые несколько минут
+    B = boardtext_mod()
+    out += _fp_files(B.review_files(PANTHEON) + B.status_files(PANTHEON)
+                     + [os.path.join(PANTHEON, "board.md"), os.path.join(STATE, "owner-log", "zeus.md"),
+                        os.path.join(STATE, "owner-log", "board.jsonl")])
+    out.append(("open_prs", B.open_prs(path("autoclose-prs.json"))))
+    out.append(("week", board_week()))
     return out
 
 
@@ -5870,11 +5878,51 @@ def board():
             fp = os.path.join(once_dir, f)
             if now() - os.path.getmtime(fp) > 90 * 86400:
                 os.remove(fp)
+        if primary:
+            board_text_sync(T)
     for ln in lines:
         print(ln)
     if primary and os.environ.get("PANTHEON_METRICS") != "0":
         board_metrics(T)
     return 0
+
+
+def boardtext_mod():
+    """lib/boardtext.py — автоблок board.md и напоминание на Stop (metis-0397), общий с хуком hooks/ctx.py."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_boardtext", os.path.join(LIB, "boardtext.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def board_week():
+    """Неделя лимита целыми процентами по снимку строки статуса; снимка нет или неделя сброшена — None."""
+    with contextlib.suppress(Exception):
+        w = night_mod().snapshot()["week"]
+        if w and w[1] > now():
+            return int(round(w[0]))
+    return None
+
+
+def board_text_sync(T):
+    """Автоблок «Сводка прохода» в board.md между маркерами (metis-0397): PR, пачки, STATUS.md, решения владельца.
+    Строки Зевса вне маркеров не трогает; сломанные маркеры — тревога, файл не пишется. Сбой не ломает доску."""
+    board_md = os.path.join(PANTHEON, "board.md")
+    if not os.path.exists(board_md):
+        return
+    try:
+        B = boardtext_mod()
+        data = B.collect(PANTHEON, STATE, T.load_tasks(PANTHEON, T.WORK_TYPES), now(), board_week())
+        res, why = B.sync(board_md, B.build(data))
+    except Exception as e:  # noqa: BLE001 — сбой автоблока не ломает проход доски
+        res, why = "skip", f"проход упал ({type(e).__name__}: {e})"
+    if res == "skip" and why:
+        alert_once("board-text", why, f"board.md: {why}", "board")
+    else:
+        clear_once("board-text")
+    if res == "written":
+        print("board.md: автоблок обновлён")
 
 
 def autoclose_mod():
@@ -5962,7 +6010,8 @@ def autoclose_cmd(rest):
     if not repo_dirs:
         return 0
     A = autoclose_mod()
-    errors = A.fetch(path("autoclose-prs.json"), path("autoclose.json"), now(), sorted(repo_dirs), env=run_env())
+    errors = A.fetch(path("autoclose-prs.json"), path("autoclose.json"), now(), sorted(repo_dirs), env=run_env(),
+                     core=merge_mod().is_core)
     autoclose_alerts(sorted(repo_dirs), errors)
     for k, v in sorted(errors.items()):
         print(f"автозакрытие · {k}: {v}", file=sys.stderr)

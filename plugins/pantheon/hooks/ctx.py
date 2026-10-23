@@ -16,6 +16,9 @@
                      (afkTimeoutMs) и частичное (followUp) — не пишется; свой текст в окне — строка без статуса ответа.
   ctx.py stop        Stop: контекст 150 тыс., дальше каждые +100 тыс. → Claude сверяет файл состояния, дописывает
                      недостающее и одной строкой говорит «Пора очистить: …» (штаб и сессии без роли; не claude -p).
+                     У Зевса (hq) ещё напоминание: ваши строки «Сейчас» в board.md (вне автоблока) старше правки
+                     STATUS.md Метиды на 30 мин и больше — перенести (metis-0397, lib/boardtext.py); один раз на
+                     правку STATUS.md, ход не останавливает, модель не зовёт.
   ctx.py start       SessionStart: запоминает сессию процесса (CLAUDE_PID не меняется при /clear); после сжатия
                      кладёт файл состояния; штабу — новые строки alerts.md и сводку новых строк журналов; ролям Пантеона
                      последней строкой — «Сейчас: ДД.ММ ЧЧ:ММ (часы Mac)» (metis-0281).
@@ -951,6 +954,38 @@ def mark_path(sid):
     return os.path.join(CTX, "marks", re.sub(r"[^\w-]", "", sid or ""))
 
 
+def boardtext():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "pantheon_boardtext", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "boardtext.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def board_stale(ev, sid):
+    """Зевс (hq): «Сейчас» в board.md отстал от правки STATUS.md Метиды на 30 мин и больше → текст напоминания (metis-0397).
+    Один раз на правку STATUS.md (метка в ctx/board-stale/); модель не зовёт, ход не останавливает."""
+    if session_role(ev) != "hq":
+        return ""
+    B = boardtext()
+    res = B.stale_reminder(os.path.join(PANTHEON, "board.md"),
+                           os.path.join(PANTHEON, "directions", B.STALE_SOURCE, "STATUS.md"))
+    if not res:
+        return ""
+    text, st = res
+    mark = os.path.join(CTX, "board-stale", re.sub(r"[^\w-]", "", sid))
+    try:
+        if open(mark).read().strip() == str(int(st)):
+            return ""
+    except OSError:
+        pass
+    private_dir(os.path.dirname(mark))
+    with open(mark, "w") as f:
+        f.write(str(int(st)))
+    return text
+
+
 def cmd_stop(ev):
     role = ev.get("agent_type") or ""
     if ctx_off() or automation() or ev.get("agent_id") or ev.get("stop_hook_active") or role not in ("", "hq"):
@@ -959,9 +994,23 @@ def cmd_stop(ev):
     if not sid or not transcript:
         return 0
     remember_session(ev)
+    try:
+        stale = board_stale(ev, sid)
+    except Exception as e:  # сбой напоминания не мешает подсказке о контексте
+        hook_log("stop", "board-stale %s: %r" % (type(e).__name__, e))
+        stale = ""
+    msg = ctx_hint(ev, role, sid, transcript)
+    msg = " ".join(x for x in (stale, msg) if x)
+    if msg:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": msg}}, ensure_ascii=False))
+    return 0
+
+
+def ctx_hint(ev, role, sid, transcript):
+    """Подсказка «пора очистить» на порогах контекста или пустая строка."""
     n = context_tokens(transcript)
     if n == 0:
-        return 0  # в хвосте транскрипта нет ответа (огромный вывод инструмента) — ничего не решаем
+        return ""  # в хвосте транскрипта нет ответа (огромный вывод инструмента) — ничего не решаем
     mark = mark_path(sid)
     try:
         last = int(open(mark).read().strip() or 0)
@@ -972,7 +1021,7 @@ def cmd_stop(ev):
     if n < AT or (last and n < last + STEP):
         if last == 0 and os.path.exists(mark):
             os.remove(mark)
-        return 0
+        return ""
     private_dir(os.path.dirname(mark))
     with open(mark, "w") as f:
         f.write(str(n))
@@ -987,11 +1036,9 @@ def cmd_stop(ev):
                 "решения, что ждёт владельца и следующий шаг — после /clear хук найдёт его по этой записи."
                 % tilde(os.path.join(PANTHEON, "handoff")))
         where = "HANDOFF.md"
-    msg = ("Контекст сессии — %d тыс. токенов. %s Затем одной строкой скажи владельцу: «Пора очистить: контекст %d тыс., "
-           "всё сохранено в %s → /clear» — или назови, что ещё не закрыто. Это сообщение хука, а не владельца."
-           % (k, what, k, where))
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": msg}}, ensure_ascii=False))
-    return 0
+    return ("Контекст сессии — %d тыс. токенов. %s Затем одной строкой скажи владельцу: «Пора очистить: контекст %d тыс., "
+            "всё сохранено в %s → /clear» — или назови, что ещё не закрыто. Это сообщение хука, а не владельца."
+            % (k, what, k, where))
 
 
 # --- старт сессии и сжатие (CTX-03, STATE-02) ---------------------------------
