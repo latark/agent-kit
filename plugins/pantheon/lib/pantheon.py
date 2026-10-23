@@ -138,7 +138,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         STATE/review-pending/<owner>__<repo>__<PR>.json; это НЕ вердикт и НЕ согласие,
                                         шлюз её не читает. Гаснет по вердикту (accept/reject) на этот PR и через 2 часа
   pantheon review status [<owner/repo> <PR>]   записи журнала ~/.local/state/pantheon/merge-gate/records.jsonl и
-                                        метки «ревью идёт»
+                                        метки «ревью идёт»; у вердикта — рецензент (agent_id/сессия, по 8 знаков),
+                                        с PR — строка «итог на <head>: принять N, вернуть M» по последнему вердикту
+                                        каждого argus, как считает шлюз (по ней решают об узком повторе, metis-0393)
   pantheon commit                       commit → pull без rebase → push ~/ai/pantheon
   pantheon install | uninstall          поставить или снять задачу launchd pantheon.tick
   pantheon tick                         один проход планировщика (его вызывает launchd)
@@ -7406,6 +7408,20 @@ def review_records(repo=None, pr=None):
     return out
 
 
+def review_tally(recs, pr):
+    """Итог argus по head PR (metis-0393): {sha: (принять, вернуть)} по последнему вердикту каждого рецензента.
+    Рецензент — пара (session_id, agent_id), как у шлюза слияния guard: «вернуть» снимает только «принять» того же
+    вызова. По итогу прошлого head лид и argus решают, допустим ли узкий повтор, — не по отчётам и словам лида."""
+    last = {}
+    for r in recs:
+        by = r.get("by")
+        if (r.get("kind") in ("accept", "reject") and r.get("pr") == pr and isinstance(by, dict)
+                and by.get("agent_type") == "argus" and isinstance(r.get("sha"), str)):
+            last.setdefault(r["sha"].lower(), {})[(by.get("session_id") or "", by.get("agent_id") or "")] = r["kind"]
+    return {sha: (sum(k == "accept" for k in v.values()), sum(k == "reject" for k in v.values()))
+            for sha, v in last.items()}
+
+
 REVIEW_PENDING_TTL = 2 * 3600  # метка «ревью идёт» устаревает через 2 часа
 
 
@@ -7508,8 +7524,11 @@ def review_cmd(rest):
         for r in recs:
             by = r.get("by") if isinstance(r.get("by"), dict) else {}
             pr = f"#{r['pr']}" if r.get("pr") else ""
+            who = by.get("agent_type") or "—"
+            if r.get("kind") in ("accept", "reject"):
+                who += f" {str(by.get('agent_id') or '—')[:8]}/{str(by.get('session_id') or '—')[:8]}"
             print(f"{r.get('time', '?')}  {r.get('kind', '?'):<6}  {','.join(map(str, r['repo']))}{pr}  "
-                  f"{str(r.get('sha', ''))[:12]}  {by.get('agent_type') or '—'}")
+                  f"{str(r.get('sha', ''))[:12]}  {who}")
             cl = r.get("checklist") if isinstance(r.get("checklist"), dict) else {}
             if r.get("kind") == "accept" and not all(isinstance(cl.get(k), str) and cl[k].strip()
                                                      for k in REVIEW_CHECKLIST):
@@ -7517,6 +7536,9 @@ def review_cmd(rest):
             for k, label in REVIEW_CHECKLIST.items():
                 if isinstance(cl.get(k), str) and cl[k].strip():
                     print(f"    {label}: {cl[k]}")
+        if args:
+            for sha, (acc, rej) in review_tally(recs, int(args[1])).items():
+                print(f"итог на {sha[:12]}: принять {acc}, вернуть {rej} — последний вердикт каждого argus")
         return 0
     print(f"pantheon review: {REVIEW_USAGE}", file=sys.stderr)
     return 2
