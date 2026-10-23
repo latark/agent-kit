@@ -6575,9 +6575,9 @@ def _summary_of(lines):
     # «все прошли» («39/39», «39 из 39») при строке провала выше — не итог, а строка из детали (п.4, проба S1)
     if passed and total == int(passed[1]) and failed:
         return False, None, WHY_DETAIL
-    # голое «N/M» при строке провала у файла без строк ok — деталь («38/39» из вывода ребёнка, S1b, metis-0362):
+    # голое «N/M» у файла без строк ok — деталь («38/39» из вывода ребёнка, S1b, metis-0362):
     # настоящие итоги таких файлов — «N из M прошли» и «тестов: N, …», голое N/M печатают только файлы со строками ok
-    if failed and not nok and re.fullmatch(r"\d+\s*/\s*\d+", last):
+    if not nok and re.fullmatch(r"\d+\s*/\s*\d+", last):
         return False, None, WHY_DETAIL
     return True, total, None
 
@@ -6649,7 +6649,7 @@ def _failure_signatures(fname, out, rc):
     return sigs
 
 
-def _fresh_failures(got_new, got_base, ok_new=None, ok_base=None, bare=()):
+def _fresh_failures(got_new, got_base, ok_new=None, ok_base=None, bare=(), bare_base=None):
     """Новые падения = подписи новой версии минус подписи базы. Файл, который у базы кончился таймаутом или сроком
     прогона, — не «чистый» и не «такой же сбой»: о нём ничего не известно, поэтому у новой версии в нём ничто не
     гасится (в том числе её собственный таймаут) — падение остаётся падением. Отдаёт (Counter, {(python, файл)}).
@@ -6660,7 +6660,9 @@ def _fresh_failures(got_new, got_base, ok_new=None, ok_base=None, bare=()):
     metis-0361: bare — {(python, файл)} с кодом 0, строками ok и без итоговой строки (_run_plugin_tests). Пять
     файлов agent-kit так заканчиваются законно, поэтому их сверяют с базой: у базы нет этого файла или итог у неё
     был, а у новой пропал — «оборвался без итога»; у базы тот же стиль без итога — строки ok сравнивает _fewer_checks
-    (новая оборвалась раньше — «проверок меньше»)."""
+    (новая оборвалась раньше — «проверок меньше»). «Тот же стиль» — только если и база сама в bare_base (код 0, строки
+    ok, без итога и без подписей): база, которая упала (код не 0, FAIL, Traceback), — красное «у базы файл упал»
+    (ревью 115, п.1); bare_base None — старые вызовы, база считается упавшей."""
     unknown = {(py, f) for (py, f, s) in got_base if s.endswith((": срок прогона", ": таймаут"))}
     known_base = collections.Counter({k: n for k, n in got_base.items() if (k[0], k[1]) not in unknown})
     fresh = got_new - known_base
@@ -6679,6 +6681,8 @@ def _fresh_failures(got_new, got_base, ok_new=None, ok_base=None, bare=()):
             reason = "у базы такого файла нет"
         elif len(b) > 2 and b[2]:
             reason = "у базы итог был"
+        elif (py, f) not in (bare_base or ()):
+            reason = "у базы файл упал"
         else:
             continue
         fresh[(py, f, f"{f}: {BARE_END} ({reason})")] = 1
@@ -6896,15 +6900,16 @@ def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=N
             for who, notes in (("новая", notes_new), ("база", notes_base)):
                 for n in notes:
                     fh.write(f"копия ({who}): {n}\n")
-            ok_new, ok_base, bare = {}, {}, set()
+            ok_new, ok_base, bare, bare_base = {}, {}, set(), set()
             got_new = _run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}", deadline, oks=ok_new, bare=bare)
             want = _base_targets(got_new, bare)
             skipped = sum(1 for py in pythons for f in _test_files(base_dir) if (py, f) not in want)
             if base_dir and skipped:
                 fh.write(f"\n===== база {old}: {skipped} файл(ов) не гоняются — у новой версии в них нет падений, "
                          "либо таймаут, срок прогона или ни одной проверки (их база не гасит) =====\n")
-            got_base = _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline, only=want, oks=ok_base)
-            fresh, unknown = _fresh_failures(got_new, got_base, ok_new, ok_base, bare)
+            got_base = _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline, only=want, oks=ok_base,
+                                        bare=bare_base)
+            fresh, unknown = _fresh_failures(got_new, got_base, ok_new, ok_base, bare, bare_base)
             for py, f in sorted(unknown):
                 fh.write(f"база не досчитана: {py} · {f} — файл базы не дошёл до конца (таймаут или срок прогона), "
                          "падения новой версии в нём считаются новыми\n")

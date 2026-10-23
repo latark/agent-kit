@@ -909,6 +909,38 @@ print(json.dumps(sorted(k[2] for k in fresh), ensure_ascii=False))""", e.src, os
           f"{r.returncode} {fresh_of(e)!r}")
     e.close()
 
+    # Ревью 115, п.1: «тот же стиль без итога» — только если и база кончилась кодом 0. База, которая упала (код не 0,
+    # FAIL, Traceback), — красное «у базы файл упал» (мутант: упавшая база = тот же стиль — зелёное)
+    OK2 = "".join(f'print("ok   n{i}")\n' for i in range(2))
+    OK4 = "".join(f'print("ok   n{i}")\n' for i in range(4))
+    for name, base in (("P1 os._exit(1)", OK2 + 'import os, sys\nsys.stdout.flush()\nos._exit(1)\n'),
+                       ("P1b FAIL и код 1", OK2 + 'print("FAIL env")\nraise SystemExit(1)\n'),
+                       ("P1c Traceback", OK2 + 'raise KeyError("env")\n')):
+        e = Env("1.0.0", "1.1.0", base, OK4 + 'import sys\nsys.exit(0)\n')
+        r = e.run()
+        fr = fresh_of(e)
+        check(f"115 {name}: база упала, новая без итога с большим числом ok — красное «у базы файл упал»",
+              r.returncode == 76 and "test_a.py: " + BARE + " (у базы файл упал)" in fr
+              and "plugin update" not in e.argv(), f"{r.returncode} {fr!r}")
+        e.close()
+    # Ревью 115, M10: последняя строка базы «2/3» при трёх строках ok — деталь, а не итог; «нет итога» базы с пояснением
+    # не гасит молчаливый обрыв новой (мутант: _summary_of отдаёт why=None в этой ветке — зелёное)
+    e = Env("1.0.0", "1.1.0", 'print("ok   a")\nprint("ok   b")\nprint("ok   c")\nprint("2/3")\nraise SystemExit(1)\n',
+            'print("ok   a")\nprint("ok   b")\nprint("ok   c", flush=True)\nimport os\nos._exit(1)\n')
+    r = e.run()
+    fr = fresh_of(e)
+    check("115 M10: у базы «2/3» при трёх ok — не итог, обрыв новой — красное «нет итоговой строки»",
+          r.returncode == 76 and "test_a.py: нет итоговой строки" in fr, f"{r.returncode} {fr!r}")
+    e.close()
+    # Ревью 115, п.3: голое «N/M» у файла без строк ok и без строки провала — не итог (P11: деталь «38/39» ребёнка при
+    # коде 0; мутант: правило снова требует строку провала — зелёное)
+    e = Env("1.0.0", "1.1.0", 'print("тестов: 40, не прошло: 0")\n', 'print("ребёнок:")\nprint("38/39")\n')
+    r = e.run()
+    fr = fresh_of(e)
+    check("115 P11: без строк ok деталь «38/39» при коде 0 — не итог, красное «ни одной проверки»",
+          r.returncode == 76 and "test_a.py: ни одной проверки" in fr, f"{r.returncode} {fr!r}")
+    e.close()
+
     # metis-0362, R1: «M/M» после строки провала у базы — не итог; её «нет итоговой строки» не должна гасить молчаливый
     # обрыв новой с теми же ok (мутант: подпись без пояснения — зелёное)
     e = Env("1.0.0", "1.1.0",
