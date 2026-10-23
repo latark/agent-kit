@@ -1524,14 +1524,20 @@ def carry_history(p):
     readme = "r1\nr2\nr3\nr4\nr5\nr6\n"
     branch("t-base", "main")
     s["B"] = put({PJ: _manifest("pantheon", "0.11.84"), GJ: _manifest("guard", "0.5.17"), "README.md": readme,
-                  "code.py": "x = 1\n", ".claude-plugin/marketplace.json": "{}\n"}, "B")
+                  "code.py": "x = 1\n", ".claude-plugin/marketplace.json": "{}\n", "gone.py": "g = 1\n"}, "B")
     branch("t-main", s["B"])
     s["M"] = put({PJ: _manifest("pantheon", "0.11.85"), "README.md": readme.replace("r6", "r6m"),
                   "other.py": "y = 1\n"}, "main: соседний PR и выпуск")
     branch("t-pr", s["B"])
     s["P"] = put({"code.py": "x = 2\n", "README.md": readme.replace("r1", "r1p")}, "PR")
-    s["ver"] = put({PJ: _manifest("pantheon", "0.11.85"), GJ: _manifest("guard", "0.5.18")}, "выпуск")
+    s["ver"] = put({PJ: _manifest("pantheon", "0.11.86"), GJ: _manifest("guard", "0.5.18")}, "выпуск")
     s["out"] = put({"code.py": "x = 3\n"}, "правка вне version")
+    branch("t-eq", s["P"])
+    s["ver_eq"] = put({PJ: _manifest("pantheon", "0.11.85")}, "выпуск с номером, который уже на main")
+    branch("t-low", s["P"])
+    s["ver_low"] = put({PJ: _manifest("pantheon", "0.0.1")}, "понижение номера")
+    branch("t-int", s["P"])
+    s["ver_int"] = put({PJ: _manifest("pantheon", 86)}, "version числом, а не строкой")
     branch("t-pr2", s["P"])
     s["field"] = put({PJ: _manifest("pantheon", "0.11.85", description="другое")}, "version и description")
     branch("t-pr3", s["P"])
@@ -1560,6 +1566,19 @@ def carry_history(p):
     s["Pf"] = put({"code.py": "x = 2\n", PJ: _manifest("pantheon", "0.11.84", keywords=["k"])}, "PR: keywords")
     merge(s["M"], extra={PJ: _manifest("pantheon", "0.11.85", keywords=["k"])})
     s["own_ver"] = put({PJ: _manifest("pantheon", "0.11.86", keywords=["k"])}, "выпуск после main")
+    # гонка выпусков: соседний PR выпущен от того же M и слит раньше (M2 — с его 0.11.86); повтор release.py — 0.11.87
+    branch("t-main2", s["M"])
+    s["M2"] = put({PJ: _manifest("pantheon", "0.11.86"), "nb.py": "n = 1\n"}, "main: соседний PR с тем же номером")
+    branch("t-pr10", s["merged_ver"])
+    merge(s["M2"])
+    s["rerelease"] = put({PJ: _manifest("pantheon", "0.11.87")}, "повтор выпуска после соседа")
+    # modify/delete: main удалил gone.py, PR его менял; конфликт решён в пользу PR — файл, который main удалил, вернулся
+    branch("t-dmain", s["M"])
+    s["Md"] = put({"gone.py": None}, "main: удалён gone.py")
+    branch("t-del", s["B"])
+    s["Pd"] = put({"code.py": "x = 2\n", "gone.py": "g = 2\n"}, "PR меняет gone.py")
+    merge(s["Md"])
+    s["moddel"] = put({PJ: _manifest("pantheon", "0.11.86")}, "выпуск после main")
     git(p, "checkout", "-q", "main")
     return s
 
@@ -1577,7 +1596,10 @@ BAD_CARRY = (("out", "P", "правка вне version", "меняет code.py")
              ("rebased", "P", "история переписана (rebase)", "не предок"),
              ("market", "P", "marketplace.json — не номер версии", "меняет .claude-plugin/marketplace.json"),
              ("P", "ver", "назад: прошлый head не предок", "не предок"),
-             ("newpj", "P", "новый plugin.json только с version", "добавляет plugins/x/"))
+             ("newpj", "P", "новый plugin.json только с version", "добавляет plugins/x/"),
+             ("ver_eq", "P", "version равна version на базе PR", "не больше, чем на базе PR (0.11.85)"),
+             ("ver_low", "P", "version ниже, чем на базе PR", "0.0.1 не больше"),
+             ("ver_int", "P", "version числом, а не строкой", "не разобрать как plugin.json"))
 
 
 def t_carry_unit(h):
@@ -1598,6 +1620,21 @@ def t_carry_unit(h):
     check("перенос: базы PR нет в git папки — не переходят", why and "git fetch" in why, why)
     why = mg.same_change(kit, s["P"], s["merged"], side_base(kit))
     check("перенос: подтянутое — не из базы PR (база старше) — не переходят", why and "меняет" in why, why)
+    why = mg.same_change(kit, s["P"], s["merged_ver"], s["M2"])
+    check("перенос: гонка — сосед слит раньше с тем же номером, на базе PR уже 0.11.86 — не переходят",
+          why and "не больше, чем на базе PR (0.11.86)" in why and "release.py" in why, why)
+    why = mg.same_change(kit, s["P"], s["rerelease"], s["M2"])
+    check("перенос: гонка — повтор release.py (0.11.87 и подтянутый M2) — переходят", why is None, why)
+    why = mg.same_change(kit, s["Pd"], s["moddel"], s["Md"])
+    check("перенос: modify/delete в пользу PR — файл, удалённый main, вернулся — не переходят",
+          why and "меняет gone.py" in why, why)
+    git(kit, "replace", s["out"], s["ver"])
+    try:
+        why = mg.same_change(kit, s["P"], s["out"], s["M"])
+    finally:
+        git(kit, "replace", "-d", s["out"])
+    check("перенос: git replace подменил коммит с правкой кода — шлюз сверяет настоящий, не переходят",
+          why and "меняет code.py" in why, why)
     recs = [rec("tests", "latark/agent-kit", None, s["P"], "dev-opus"), rec("accept", "latark/agent-kit", 7, s["P"]),
             rec("accept", "latark/agent-kit", 7, s["field"]), rec("accept", "latark/agent-kit", 8, s["merged"]),
             rec("accept", "latark/agent-kit", 7, s["merged"], who="talos")]
@@ -1613,6 +1650,11 @@ def t_carry_unit(h):
     same, whys = mg.carried(kit, "latark/agent-kit", 9, s["merged_ver"], recs, view)
     check("carried: вердиктов на этот PR нет — gh pr view не зовётся", same == set() and not whys and not calls,
           (same, whys, calls))
+    many = [rec("accept", "latark/agent-kit", 7, c * 40) for c in "0123456789a"] + \
+        [rec("accept", "latark/agent-kit", 7, s["P"])]
+    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], many, view)
+    check(f"carried: кандидатов больше {mg.CARRY_MAX} — сверяются последние, P (самый новый) переходит",
+          same == {s["P"]} and len(whys) == mg.CARRY_MAX - 1, (same, len(whys)))
     same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], recs, lambda: None)
     check("carried: gh pr view не ответил — не переходят", same == set() and whys and "baseRefOid" in whys[0], whys)
     same, whys = mg.carried("", "latark/agent-kit", 7, s["merged_ver"], recs, view)
@@ -1661,12 +1703,29 @@ def t_carry_gate(h):
     merge_case("шлюз: подтянутое не из базы PR по gh — отказ", merge_at("merged"), False, "не перенесены")
 
 
+def t_carry_product(h):
+    """metis-0384: продукт — tests и «принять» с P переходят на «P + main + version», а проверка talos — нет: подтянутая
+    база меняет живое приложение, talos проверяет новый head заново."""
+    kit = h.j("projects/broker")
+    s = carry_history(kit)
+    h.ci(GREEN, name="broker", head=s["merged_ver"], baseRefOid=s["M"])
+    h.alert("2026-10-15 20:01 · athena-shop · latark/broker#5 ушло: налоги; откат: git revert abc")
+    h.seed(rec("tests", "latark/broker", None, s["P"], "dev-opus"), rec("accept", "latark/broker", 5, s["P"]),
+           rec("talos", "latark/broker", 5, s["P"], who="talos", agent_id="t1"))
+    cmd = f"gh pr merge 5 --match-head-commit {s['merged_ver']}"
+    merge_case("продукт: talos только на P, head «P + main + version» — отказ «нет проверки talos»",
+               h.pre(cmd, pdir="projects/broker"), False, "нет проверки talos")
+    h.seed(rec("talos", "latark/broker", 5, s["merged_ver"], who="talos", agent_id="t1"))
+    merge_case("продукт: talos на новом head, tests и «принять» с P — проходит", h.pre(cmd, pdir="projects/broker"),
+               True)
+
+
 CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_ci,
-         t_core_touchid, t_carry_unit, t_carry_gate]
+         t_core_touchid, t_carry_unit, t_carry_gate, t_carry_product]
 
 
 def main():

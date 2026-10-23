@@ -35,8 +35,8 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    Незаменённый шаблон «<ID>» в ran — отказ ещё до записи.
    Перенос (metis-0384, carried/same_change): записи tests и вердикты argus с прошлого head этого PR засчитываются на
    новом, если разница — только поле version в plugins/*/.claude-plugin/plugin.json и подтянутая база PR (baseRefOid):
-   дерево нового head = git merge-tree прошлого head с базой, plugin.json сверяется по полям без version. Иначе —
-   не переносятся, причина в отказе. talos не переносится; reject переносится, как и accept.
+   дерево нового head = git merge-tree прошлого head с базой, plugin.json сверяется по полям без version, а version
+   изменённого plugin.json на новом head — больше, чем на базе PR. Иначе — не переносятся, причина в отказе. talos не переносится; reject переносится, как и accept.
    Последним во всех режимах — проверки GitHub (metis-0297), один gh pr view на Д3 и проверки: PR на этом SHA, rollup зелёный;
    красная или идущая проверка, нет ответа gh — отказ; проверок нет — пропуск, только если .github/workflows нет ни на
    head, ни на base PR.
@@ -163,8 +163,11 @@ def _repo_tail(repo):
 
 
 def _git_env():
-    """Окружение без GIT_*: GIT_DIR подменил бы репозиторий."""
-    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    """Окружение без GIT_*: GIT_DIR подменил бы репозиторий. GIT_NO_REPLACE_OBJECTS: git replace в общей .git не
+    подменяет коммит, который сверяет перенос записей (metis-0384)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return env
 
 
 def _git(d, *args):
@@ -957,9 +960,11 @@ def _who(rec):
 # Номер версии плагина поднимает выпуск при слиянии (plugins/pantheon/scripts/release.py), а не каждый PR: иначе
 # соседние PR конфликтуют в plugin.json, и после каждого слияния у них новый head и новый круг ревью. Записи tests и
 # вердикты argus (accept и reject) с прошлого head PR действуют и на новом, если новый head — прошлый плюс только
-# номер версии в plugins/<плагин>/.claude-plugin/plugin.json и подтянутая база PR без своих правок. Сверка — по
-# объектам git папки сливающего (SHA сверяет сам git: подменить содержимое коммита нельзя), база — baseRefOid из
-# gh pr view, а не ветка из локальных ссылок. Запись talos не переносится: подтянутая база меняет живое приложение.
+# номер версии в plugins/<плагин>/.claude-plugin/plugin.json и подтянутая база PR без своих правок, а version на
+# новом head больше, чем на базе PR (иначе соседний PR, слитый раньше с тем же номером, оставил бы на main код без
+# нового номера — claude plugin update его не поставит). Сверка — по объектам git папки сливающего (SHA сверяет сам
+# git, подмены git replace выключены — _git_env), база — baseRefOid из gh pr view, а не ветка из локальных ссылок.
+# Запись talos не переносится: подтянутая база меняет живое приложение.
 VERSION_FILE = re.compile(r"plugins/[^/]+/\.claude-plugin/plugin\.json")
 CARRY_MAX = 10  # сколько прошлых head PR сверять: на каждый — десяток вызовов git
 _ABSENT = object()
@@ -1044,7 +1049,22 @@ def same_change(d, prev, sha, base):
         merged = _merge3(*want)
         if merged is None or {k: v for k, v in new.items() if k != "version"} != merged:
             return f"в {path} изменено не только поле version"
+        at_base = _json_at(d, base, path)
+        if not at_base or not isinstance(at_base.get("version"), str):
+            return f"{path} на базе PR не разобрать как plugin.json"
+        nv, bv = _vkey(new["version"]), _vkey(at_base["version"])
+        if nv is None or bv is None:
+            return f"в {path} version не разобрать ({new['version']!r}, на базе {at_base['version']!r})"
+        if nv <= bv:
+            return (f"в {path} version {new['version']} не больше, чем на базе PR ({at_base['version']}): соседний "
+                    "PR слит с тем же номером — повтори release.py")
     return None
+
+
+def _vkey(v):
+    """version → кортеж чисел для сравнения; None — не «числа через точку»."""
+    parts = v.split(".")
+    return tuple(int(x) for x in parts) if all(re.fullmatch(r"[0-9]+", x) for x in parts) else None
 
 
 def carried(d, repo, pr, sha, records, pr_view):

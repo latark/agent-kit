@@ -40,8 +40,27 @@ def put(d, rel, text):
         fh.write(text)
 
 
-def manifest(name, ver, extra=""):
-    return '{\n  "name": "%s",\n  "version": "%s",%s\n  "description": "d"\n}\n' % (name, ver, extra)
+def manifest(name, ver, extra="", desc="d"):
+    return '{\n  "name": "%s",\n  "version": "%s",%s\n  "description": "%s"\n}\n' % (name, ver, extra, desc)
+
+
+def _merge_gate():
+    """Шлюз guard (merge_gate.same_change) — чтобы сверить: после release.py записи с прошлого head переносятся."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "guard",
+                        "hooks", "merge_gate.py")
+    spec = importlib.util.spec_from_file_location("merge_gate_release", path)
+    mg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mg)
+    return mg
+
+
+MG = _merge_gate()
+
+
+def carry_why(work, prev):
+    """same_change шлюза: прошлый head prev → текущий HEAD, база PR — origin/main. None — записи переходят."""
+    return MG.same_change(work, prev, g(work, "rev-parse", "HEAD"), g(work, "rev-parse", "origin/main"))
 
 
 def version(d, name):
@@ -121,6 +140,10 @@ def t_pull_base():
     commit(w, "plugins/guard/hooks/a.py", "a = 2\n")
     advance_main(w, PJ.format("guard"), manifest("guard", "0.5.18"))
     advance_main(w, "README.md", "r2\n")
+    advance_main(w, "plugins/pantheon/lib/b.py", "b = 2\n")
+    rc, out = run(w, "--dry-run")
+    check("pull dry: правка pantheon на main — не правка ветки", rc == 0 and "guard → 0.5.19" in out
+          and "pantheon →" not in out, out)
     rc, out = run(w)
     check("pull: код 0", rc == 0, out)
     check("pull: main в ветке", subprocess.run(["git", "-C", w, "merge-base", "--is-ancestor", "origin/main", "HEAD"],
@@ -132,16 +155,89 @@ def t_pull_base():
 
 
 def t_old_style_conflict():
-    """PR старого порядка сам поднял version, main тоже — конфликт только в plugin.json решается в пользу базы."""
+    """PR старого порядка сам поднял version, main тоже — конфликт в plugin.json: version = max(main, PR) + 1."""
+    for mine, main_v, want in (("0.5.18", "0.5.20", "0.5.21"), ("0.5.30", "0.5.20", "0.5.31")):
+        w = repo()
+        commit(w, "plugins/guard/hooks/a.py", "a = 2\n")
+        commit(w, PJ.format("guard"), manifest("guard", mine))
+        prev = g(w, "rev-parse", "HEAD")
+        advance_main(w, PJ.format("guard"), manifest("guard", main_v))
+        rc, out = run(w)
+        tag = f"old {mine}/{main_v}"
+        check(f"{tag}: код 0", rc == 0, out)
+        check(f"{tag}: конфликт решён по полям", "решён по полям" in out, out)
+        check(f"{tag}: версия {want}", version(w, "guard") == want, out)
+        check(f"{tag}: дерево чистое", g(w, "status", "--porcelain") == "", out)
+        check(f"{tag}: шлюз переносит записи с прошлого head", carry_why(w, prev) is None, carry_why(w, prev))
+
+
+def t_pr_field_kept():
+    """argus-117a/b: PR меняет код и description guard, main выпустил guard 0.5.18 — конфликт в plugin.json; правка PR
+    цела, version 0.5.19, и шлюз переносит записи с прошлого head."""
     w = repo()
     commit(w, "plugins/guard/hooks/a.py", "a = 2\n")
-    commit(w, PJ.format("guard"), manifest("guard", "0.5.18"))
-    advance_main(w, PJ.format("guard"), manifest("guard", "0.5.20"))
+    commit(w, PJ.format("guard"), manifest("guard", "0.5.17", desc="dp"))
+    prev = g(w, "rev-parse", "HEAD")
+    advance_main(w, PJ.format("guard"), manifest("guard", "0.5.18"))
     rc, out = run(w)
-    check("old: код 0", rc == 0, out)
-    check("old: конфликт решён в пользу базы", "в пользу базы" in out, out)
-    check("old: версия 0.5.21", version(w, "guard") == "0.5.21", out)
-    check("old: дерево чистое", g(w, "status", "--porcelain") == "", out)
+    check("field: код 0", rc == 0, out)
+    check("field: был конфликт и решён по полям", "решён по полям" in out, out)
+    with open(os.path.join(w, PJ.format("guard")), encoding="utf-8") as fh:
+        text = fh.read()
+    check("field: description из PR цел, version 0.5.19", json.loads(text) == {"name": "guard", "version": "0.5.19",
+                                                                              "description": "dp"}, text)
+    check("field: форма файла PR сохранена", text == manifest("guard", "0.5.19", desc="dp"), text)
+    check("field: шлюз переносит записи", carry_why(w, prev) is None, carry_why(w, prev))
+
+
+def t_both_sides_fields():
+    """PR добавил keywords, main поменял description и выпустил 0.5.18 — в plugin.json оба поля и 0.5.19."""
+    w = repo()
+    commit(w, "plugins/guard/hooks/a.py", "a = 2\n")
+    commit(w, PJ.format("guard"), manifest("guard", "0.5.17", '\n  "keywords": ["k"],'))
+    prev = g(w, "rev-parse", "HEAD")
+    advance_main(w, PJ.format("guard"), manifest("guard", "0.5.18", desc="dm"))
+    rc, out = run(w)
+    with open(os.path.join(w, PJ.format("guard")), encoding="utf-8") as fh:
+        data = json.load(fh)
+    check("both: код 0 и решён по полям", rc == 0 and "решён по полям" in out, out)
+    check("both: keywords из PR, description из main, 0.5.19",
+          data == {"name": "guard", "version": "0.5.19", "keywords": ["k"], "description": "dm"}, data)
+    check("both: шлюз переносит записи", carry_why(w, prev) is None, carry_why(w, prev))
+
+
+def t_field_conflict():
+    """Одно поле plugin.json изменено и в PR, и в main по-разному — слияние отменено, код 1, имя файла в причине."""
+    w = repo()
+    commit(w, "plugins/guard/hooks/a.py", "a = 2\n")
+    commit(w, PJ.format("guard"), manifest("guard", "0.5.17", desc="dp"))
+    advance_main(w, PJ.format("guard"), manifest("guard", "0.5.18", desc="dm"))
+    before = g(w, "rev-parse", "HEAD")
+    rc, out = run(w)
+    check("fconf: код 1", rc == 1, out)
+    check("fconf: имя файла в последней строке", PJ.format("guard") in out.strip().splitlines()[-1], out)
+    check("fconf: слияние отменено", g(w, "rev-parse", "HEAD") == before and g(w, "status", "--porcelain") == ""
+          and not os.path.exists(os.path.join(w, ".git", "MERGE_HEAD")), out)
+
+
+def t_nested_version():
+    """Верхнего version в ветке нет, есть вложенный — замена строки задела бы чужое поле: отказ, код 1."""
+    w = repo()
+    commit(w, "plugins/guard/hooks/a.py", "a = 2\n")
+    commit(w, PJ.format("guard"), '{\n  "name": "guard",\n  "author": {"version": "0.5.17"},\n  "description": "d"\n}\n')
+    before = g(w, "rev-parse", "HEAD")
+    rc, out = run(w)
+    check("nested: код 1, «не только version», без коммита", rc == 1 and "не только version" in out
+          and g(w, "rev-parse", "HEAD") == before, out)
+
+
+def t_description_only():
+    """argus-117a: PR меняет только description плагина — это правка плагина, version поднимается."""
+    w = repo()
+    commit(w, PJ.format("guard"), manifest("guard", "0.5.17", desc="dp"))
+    rc, out = run(w)
+    check("desc: код 0 и guard 0.5.18", rc == 0 and version(w, "guard") == "0.5.18", out)
+    check("desc: pantheon не тронут", version(w, "pantheon") == "0.11.84", out)
 
 
 def t_real_conflict():
@@ -202,7 +298,8 @@ def t_version_only_not_plugin_change():
 
 
 CASES = [t_version_only_not_plugin_change, t_bump_changed_only, t_pull_base, t_old_style_conflict, t_real_conflict, t_refusals,
-         t_only_version_and_new_plugin]
+         t_only_version_and_new_plugin, t_pr_field_kept, t_both_sides_fields, t_field_conflict, t_description_only,
+         t_nested_version]
 
 if __name__ == "__main__":
     for case in CASES:
