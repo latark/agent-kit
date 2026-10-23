@@ -16,7 +16,8 @@ PR ядра защит (Д3) агенты не сливают: его слива
   1. Старше REQUEST_TTL (24 ч) — снята.
   2. PR сейчас (gh pr view): не OPEN, черновик или head не тот SHA, что в заявке, — снята (новый коммит — новая заявка).
   3. Репозиторий всё ещё в [merge_repos] metis-pantheon. Шлюз заново на тот же head: запись тестов шлюза на SHA; у
-     каждого рецензента argus последний вердикт — «принять» с полным перечнем и на Opus, рецензентов-«принять» не
+     каждого рецензента argus последний вердикт — «принять» с полным перечнем и на Opus (по ran и, если хук guard
+     записал их, по моделям транскрипта argus — metis-0176), рецензентов-«принять» не
      меньше двух, «вернуть» нет; проверки GitHub (CI) — все SUCCESS/NEUTRAL/SKIPPED. CI ещё идёт или проверок пока
      нет — заявка ждёт; иначе снята с тревогой. Список файлов PR (REST pulls/N/files) полон — иначе ждёт: окно
      показывает задетые файлы ядра, без списка их не показать.
@@ -73,6 +74,7 @@ MERGE_TIMEOUT = 120
 APPROVE_FILE = "merge-approve.log"
 CHECKLIST = ("opened", "ran", "unchecked")
 OPUS_RAN = re.compile(r"\s*модель:\s*claude-opus", re.I)   # как в шлюзе guard (metis-0176)
+RAN_MODEL = re.compile(r"\s*модель:\s*(claude-[a-z0-9.-]*[a-z0-9])", re.I)  # ID модели из ran, как в шлюзе guard
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
 SWIFTC = "/usr/bin/swiftc"           # абсолютный путь: PATH прохода подменяем (launchctl setenv)
@@ -354,6 +356,23 @@ def _full_checklist(r):
     return isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in CHECKLIST)
 
 
+def _on_opus(r):
+    """«Принять» на Opus — как opus_problem шлюза guard (metis-0176): ran начинается с «модель: claude-opus», а если
+    хук записал модели из транскрипта argus (поле models) — все они claude-opus и среди них модель из ran (тот же ID
+    или он с датой). Поля models нет (транскрипта не было, запись старше) — судим по ran."""
+    ran = r["checklist"]["ran"]
+    if not OPUS_RAN.match(ran):
+        return False
+    if "models" not in r:
+        return True
+    seen = r["models"]
+    if not isinstance(seen, list) or not all(isinstance(m, str) and m.startswith("claude-opus") for m in seen):
+        return False   # пустой список отсеет any() ниже
+    said = RAN_MODEL.match(ran)
+    said = said.group(1).lower() if said else ""
+    return any(re.fullmatch(re.escape(said) + r"(-\d{8})?", m) for m in seen)
+
+
 def gate(repo, pr, sha, view):
     """Шлюз на этот head заново: (ok|wait|fail, текст). Записи шлюза пишет только хук guard (роли их не подделают)."""
     if not isinstance(view, dict):
@@ -374,7 +393,7 @@ def gate(repo, pr, sha, view):
         if r.get("kind") in ("accept", "reject") and by.get("agent_type") == "argus" and r.get("pr") == pr \
                 and r.get("sha") == sha:
             # «принять» не на Opus не засчитывается — как будто его нет; «вернуть» любой модели в силе
-            if r["kind"] == "accept" and not (_full_checklist(r) and OPUS_RAN.match(r["checklist"]["ran"])):
+            if r["kind"] == "accept" and not (_full_checklist(r) and _on_opus(r)):
                 continue
             latest[(by.get("session_id") or "", by.get("agent_id") or "")] = r
     if any(r["kind"] != "accept" for r in latest.values()):
