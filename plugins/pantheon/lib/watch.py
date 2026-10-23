@@ -1496,6 +1496,11 @@ def autostart(agents, registry, doms, t, dry=False):
                     busy[i] = h.get("direction")
             plan = T.plan_batch(tasks, tids, t, busy={k: v for k, v in busy.items() if v != d})
             if not dry:
+                if plan["wait"]:
+                    bits = "; ".join(f"{x} — {v}" for x, v in sorted(plan["wait"].items()))
+                    P.alert_once(f"autostart-dwait-{d}", f"{today(t)}-{bits[:60]}", f"самозапуск {d}: {bits}", "watch")
+                else:
+                    P.clear_once(f"autostart-dwait-{d}")
                 for key, msg in (("cycle", lambda x, v: f"{x} в цикле зависимостей ({' → '.join(v)}), не запущена"),
                                  ("stuck", lambda x, v: f"{x} ждёт зависший {v}, не отдана")):
                     if plan[key]:

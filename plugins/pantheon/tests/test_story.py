@@ -157,7 +157,7 @@ def unit_checks():
     pl = T.plan_batch(mk({"a": {"touches": ["x/y.py"]}, "o": {"status": "doing", "touches": ["x"]}}), ["a"], now, busy={"o": "d2"})
     check("0248 plan: общий touches с идущей у другого → wait", "a" in pl["wait"] and not pl["go"], pl)
     pl = T.plan_batch(mk({"a": {}, "o": {"status": "doing"}}), ["a"], now, busy={"o": "d2"})
-    check("0248 plan: пустой touches у обеих → не параллельно", "a" in pl["wait"], pl)
+    check("0248 plan: пустой touches соседа другого направления не глушит", pl["go"] == ["a"] and not pl["wait"], pl)
     pl = T.plan_batch(mk({"a": {"touches": ["x"]}, "o": {"status": "doing", "touches": ["z"]}}), ["a"], now, busy={"o": "d2"})
     check("0248 plan: разные области → идёт", pl["go"] == ["a"], pl)
     busy3 = {f"o{n}": f"d{n}" for n in range(3)}
@@ -181,6 +181,20 @@ def unit_checks():
         check("0248 check_depends: сама на себя отказ", False)
     except ValueError:
         check("0248 check_depends: сама на себя отказ", True)
+    # п.2 ревью: новый цикл виден, даже если обход раньше упирается в старый (probe3)
+    old = mk({"x": {}, "x2": {"depends_on": ["x"]}, "p": {"depends_on": ["q"]}, "q": {"depends_on": ["p"]}})
+    for deps in (["p", "x2"], ["x2", "p"]):
+        try:
+            T.check_depends(old, "x", deps)
+            check(f"0248 check_depends {deps} при старом цикле: отказ", False)
+        except ValueError as ex:
+            check(f"0248 check_depends {deps} при старом цикле: отказ", "цикл" in str(ex) and "x2" in str(ex), str(ex))
+    # п.3: зависимость от пачки отклоняется
+    try:
+        T.check_depends(mk({"s": {"type": "story"}, "a": {}}), "a", ["s"])
+        check("0248 check_depends: зависимость от пачки отказ", False)
+    except ValueError as ex:
+        check("0248 check_depends: зависимость от пачки отказ", "пачка" in str(ex), str(ex))
     check("0248 check_depends: верная зависимость принята", T.check_depends(base, "b", ["a"]) is None)
     wt = {i: ("", {"type": "task", "status": "waiting", "waiting_on": w, "direction": "d"}, "") for i, w in (
         ("w-1", "human"), ("w-2", "agent"), ("w-3", "dependency"))}

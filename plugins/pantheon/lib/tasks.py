@@ -914,13 +914,32 @@ def deps_cycle(tasks, tid, extra=None):
 
 
 def check_depends(tasks, tid, deps):
-    """Отказ при записи (поправка 1): --depends-on с несуществующим id, самой собой или циклом — ValueError."""
+    """Отказ при записи (поправка 1): --depends-on с несуществующим id, пачкой (зависеть можно от задачи), самой
+    собой или циклом — ValueError. Цикл — если tid достижим из новых зависимостей (старый цикл в стороне не мешает)."""
     bad = [d for d in deps or [] if d not in tasks]
     if bad:
         raise ValueError(f"depends_on: нет задачи {', '.join(bad)}")
-    cyc = deps_cycle(tasks, tid, {tid: list(deps or [])}) if tid else []
-    if cyc and tid in cyc:
-        raise ValueError("depends_on замыкается в цикл: " + " → ".join(cyc))
+    story = [d for d in deps or [] if tasks[d][1].get("type", "task") != "task"]
+    if story:
+        raise ValueError(f"depends_on: {', '.join(story)} — не задача (пачка); зависеть можно от задач")
+    if not tid:
+        return
+    prev, stack = {}, list(deps or [])
+    for d in stack:
+        prev[d] = tid
+    while stack:
+        cur = stack.pop()
+        if cur == tid:
+            path = [tid]
+            while path[-1] != tid or len(path) == 1:
+                path.append(prev[path[-1]])
+                if len(path) > len(prev) + 2:
+                    break
+            raise ValueError("depends_on замыкается в цикл: " + " → ".join(reversed(path)))
+        for d in tasks[cur][1].get("depends_on") or [] if cur in tasks else []:
+            if d not in prev:
+                prev[d] = cur
+                stack.append(d)
 
 
 def plan_batch(tasks, tids, t, busy=None, stale_h=STALE_HOURS):
@@ -929,8 +948,9 @@ def plan_batch(tasks, tids, t, busy=None, stale_h=STALE_HOURS):
     Порядок: сначала зависимости, при равенстве — порядок отметок. Не отдаётся (и не стоит в go):
       cycle  {id: круг}      — задача в цикле depends_on или зависит от него: тревога, без запуска;
       stuck  {id: pred}      — предшественник waiting/dropped/удалён или (вне пачки) без изменений > stale_h: тревога;
-      wait   {id: причина}   — предшественник не в пачке, общие файлы с идущей у другого задачей (пустой touches у
-                               обеих — «неизвестно», тоже не параллельно), потолок PARALLEL_MAX исполнителей.
+      wait   {id: причина}   — предшественник не в пачке, явное пересечение непустых touches с идущей у другого
+                               направления задачей (пустой touches соседа не глушит: у разных направлений разные
+                               репозитории; внутри направления всё идёт одной сессией), потолок PARALLEL_MAX исполнителей.
     go — id в порядке выдачи; цепочка (зависимые) уходит этому же исполнителю целиком."""
     busy = busy or {}
     out = {"go": [], "cycle": {}, "stuck": {}, "wait": {}}
@@ -974,9 +994,7 @@ def plan_batch(tasks, tids, t, busy=None, stale_h=STALE_HOURS):
         if not why:
             for b in sorted(busy):
                 bh = tasks[b][1] if b in tasks else {}
-                if not h.get("touches") and not bh.get("touches"):
-                    why = f"ждёт {b}: области не указаны у обеих"
-                elif any(paths_cross(x, y) for x in h.get("touches") or [] for y in bh.get("touches") or []):
+                if any(paths_cross(x, y) for x in h.get("touches") or [] for y in bh.get("touches") or []):
                     why = f"ждёт {b}: общие файлы"
                 if why:
                     break

@@ -306,12 +306,13 @@ def test_autostart_deps_order_0248():
 
 def test_autostart_stuck_pred_alert_0248():
     """Предшественник waiting → «ждёт зависший», тревога, запуска нет; без изменений > 24 ч (вне пачки) — то же."""
-    for kw, name in (({"status": "waiting"}, "waiting"), ({"status": "doing", "updated": time.strftime(
+    for kw, name in (({"status": "waiting", "extra": "waiting_on: human\n"}, "waiting"), ({"status": "doing", "updated": time.strftime(
             "%Y-%m-%dT%H:%M:%S", time.localtime(T0 - 30 * 3600))}, "старше 24 ч")):
         e = Env()
         e.direction("athena-x")
         e.task("athena-0001", "athena-x", extra="depends_on: [athena-0002]\n")
         e.task("athena-0002", "athena-x", **kw)
+        check(os.path.exists(os.path.join(e.pantheon, "directions", "athena-x", "tasks", "athena-0002.md")), "задача записана")
         e.run("watch", t=T0)
         e.board("athena-0001", T0 + 100)
         e.run("watch", t=T0 + 500)
@@ -325,7 +326,8 @@ def test_autostart_stuck_pred_alert_0248():
     e.run("watch", t=T0)
     e.board("athena-0001", T0 + 100)
     e.run("watch", t=T0 + 500)
-    check(not _bg_text(e)[0] and "зависший" not in e.alerts(), f"0248: свежий предшественник: {e.alerts()[-300:]}")
+    check(not _bg_text(e)[0] and "зависший" not in e.alerts() and "athena-0001 — ждёт athena-0002" in e.alerts(),
+          f"0248: свежий предшественник — ожидание с тревогой «ждёт id», не зависший: {e.alerts()[-300:]}")
 
 
 def test_autostart_cycle_alert_0248():
@@ -346,7 +348,7 @@ def test_autostart_shared_touches_other_direction_0248():
     """Общие файлы с идущей у другого направления задачей (и «неизвестно» у обеих) → вторая не стартует; соседние
     папки — стартует."""
     for mine, theirs, goes in ((["plugins/pantheon/lib/watch.py"], ["plugins/pantheon/"], False),
-                               ([], [], False), (["plugins/pantheon/"], ["plugins/guard/"], True)):
+                               ([], [], True), (["plugins/pantheon/"], ["plugins/guard/"], True)):
         e = Env()
         e.direction("athena-x")
         e.direction("hermes-y")
@@ -360,6 +362,8 @@ def test_autostart_shared_touches_other_direction_0248():
         e.run("watch", t=T0 + 500)
         starts = [c for c in e.calls() if c[:1] == ["--bg"] and "athena-x" in " ".join(c)]
         check(bool(starts) == goes, f"0248: touches {mine} vs {theirs}: ждали запуск={goes}, {e.calls()}")
+        if not goes:
+            check("athena-0001 — ждёт hermes-0001: общие файлы" in e.alerts(), f"0248: ожидание без тревоги: {e.alerts()[-300:]}")
 
 
 def _give_up(e):
