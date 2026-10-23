@@ -432,7 +432,7 @@ def check_head(head):
     if head.get("mode") is not None and head.get("mode") not in MODES:
         errs.append(f"mode «{head.get('mode')}» — не из {', '.join(MODES)}")
     if head.get("mode") == "parallel" and not head.get("touches"):
-        warns.append("mode parallel без touches — области неизвестны, параллельно самозапуск её не отдаст")
+        warns.append("mode parallel без touches — области неизвестны, самозапуск не проверит пересечение файлов с идущими задачами")
     if t == "task":
         if not head.get("owner"):  # не ошибка: старые задачи без owner выпали бы с доски
             warns.append("нет owner (кому) — на доске будет координатор направления")
@@ -587,6 +587,8 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
         raise ValueError(f"направление не по образцу: {direction!r}")
     if direction != "inbox" and not os.path.isdir(os.path.join(pantheon, "directions", direction)):
         raise ValueError(f"нет направления {direction}")
+    if fields.get("depends_on"):
+        check_depends(load_tasks(pantheon, WORK_TYPES), None, fields["depends_on"])  # новая задача в цикл не входит
     tid = new_id(pantheon, direction)
     path = _file_for(pantheon, direction, tid)
     while True:
@@ -663,6 +665,8 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
     tasks = load_tasks(pantheon, WORK_TYPES)
     if tid not in tasks:
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
+    if changes.get("depends_on"):
+        check_depends(tasks, tid, changes["depends_on"])
     par = changes.get("parent")
     if par and tasks.get(par, ("", {}))[1].get("type") == "story" and not (changes.get("mode") or tasks[tid][1].get("mode")):
         raise ValueError(f"{tid}: {NO_MODE_BATCH}")
@@ -880,6 +884,125 @@ def open_deps(head, tasks):
     """Незакрытые зависимости задачи: id из depends_on, которые не done и не dropped (нет такой задачи — тоже ждёт)."""
     return [d for d in head.get("depends_on") or []
             if d not in tasks or tasks[d][1].get("status") not in ("done", "dropped")]
+
+
+PARALLEL_MAX = 3      # потолок параллельных исполнителей за ночь (metis-0248, поправка 6); AUTOSTART_MAX в watch.py — жёстче
+STALE_HOURS = 24      # предшественник без изменений дольше — «зависший» (допущение плана, поправим по замеру)
+
+
+def deps_cycle(tasks, tid, extra=None):
+    """Цикл по depends_on, достижимый из tid: список id по кругу (первый повторён в конце) или []. extra —
+    {id: [зависимости]} поверх записанных (проверка до записи)."""
+    extra = extra or {}
+    deps = lambda i: extra[i] if i in extra else (tasks[i][1].get("depends_on") or [] if i in tasks else [])  # noqa: E731
+    state, path = {}, []
+
+    def walk(i):
+        state[i] = 1
+        path.append(i)
+        for d in deps(i):
+            if state.get(d) == 1:
+                return path[path.index(d):] + [d]
+            if d not in state:
+                got = walk(d)
+                if got:
+                    return got
+        state[i] = 2
+        path.pop()
+        return []
+    return walk(tid)
+
+
+def check_depends(tasks, tid, deps):
+    """Отказ при записи (поправка 1): --depends-on с несуществующим id, пачкой (зависеть можно от задачи), самой
+    собой или циклом — ValueError. Цикл — если tid достижим из новых зависимостей (старый цикл в стороне не мешает)."""
+    bad = [d for d in deps or [] if d not in tasks]
+    if bad:
+        raise ValueError(f"depends_on: нет задачи {', '.join(bad)}")
+    story = [d for d in deps or [] if tasks[d][1].get("type", "task") != "task"]
+    if story:
+        raise ValueError(f"depends_on: {', '.join(story)} — не задача (пачка); зависеть можно от задач")
+    if not tid:
+        return
+    prev, stack = {}, list(deps or [])
+    for d in stack:
+        prev[d] = tid
+    while stack:
+        cur = stack.pop()
+        if cur == tid:
+            path = [tid]
+            while path[-1] != tid or len(path) == 1:
+                path.append(prev[path[-1]])
+                if len(path) > len(prev) + 2:
+                    break
+            raise ValueError("depends_on замыкается в цикл: " + " → ".join(reversed(path)))
+        for d in tasks[cur][1].get("depends_on") or [] if cur in tasks else []:
+            if d not in prev:
+                prev[d] = cur
+                stack.append(d)
+
+
+def plan_batch(tasks, tids, t, busy=None, stale_h=STALE_HOURS):
+    """Что из отметок владельца (tids, по порядку отметок) можно отдать одному исполнителю сейчас (metis-0248, шаг 2).
+    busy — {id: направление} задач, которые идут у других исполнителей (параллельно с этой цепочкой).
+    Порядок: сначала зависимости, при равенстве — порядок отметок. Не отдаётся (и не стоит в go):
+      cycle  {id: круг}      — задача в цикле depends_on или зависит от него: тревога, без запуска;
+      stuck  {id: pred}      — предшественник waiting/dropped/удалён или (вне пачки) без изменений > stale_h: тревога;
+      wait   {id: причина}   — предшественник не в пачке, явное пересечение непустых touches с идущей у другого
+                               направления задачей (пустой touches соседа не глушит: у разных направлений разные
+                               репозитории; внутри направления всё идёт одной сессией), потолок PARALLEL_MAX исполнителей.
+    go — id в порядке выдачи; цепочка (зависимые) уходит этому же исполнителю целиком."""
+    busy = busy or {}
+    out = {"go": [], "cycle": {}, "stuck": {}, "wait": {}}
+    pos = {tid: n for n, tid in enumerate(tids)}
+    ok = [i for i in tids if i in tasks]
+    for i in ok:
+        cyc = deps_cycle(tasks, i)
+        if cyc:
+            out["cycle"][i] = cyc
+    left = {i for i in ok if i not in out["cycle"]}
+    inb = set(left)
+    dep_of = lambda i: tasks[i][1].get("depends_on") or []  # noqa: E731
+    order = []
+    while left:
+        free = [i for i in left if not any(d in left for d in dep_of(i))]
+        nxt = min(free or left, key=lambda i: pos[i])
+        order.append(nxt)
+        left.discard(nxt)
+    if len(set(busy.values())) >= PARALLEL_MAX:
+        for i in order:
+            out["wait"][i] = f"уже идут {PARALLEL_MAX} исполнителя (потолок)"
+        return out
+    for i in order:
+        h, why = tasks[i][1], None
+        for d in dep_of(i):
+            if d in out["go"]:
+                continue
+            dh = tasks[d][1] if d in tasks else None
+            if dh is not None and dh.get("status") == "done":
+                continue
+            if dh is None or dh.get("status") in ("waiting", "dropped") or d in out["stuck"]:
+                out["stuck"][i] = out["stuck"].get(d, d)
+                break
+            ts = ts_of(dh.get("updated"))
+            if d not in inb and ts is not None and t - ts > stale_h * 3600:
+                out["stuck"][i] = d
+                break
+            why = why or f"ждёт {d}"
+        if i in out["stuck"]:
+            continue
+        if not why:
+            for b in sorted(busy):
+                bh = tasks[b][1] if b in tasks else {}
+                if any(paths_cross(x, y) for x in h.get("touches") or [] for y in bh.get("touches") or []):
+                    why = f"ждёт {b}: общие файлы"
+                if why:
+                    break
+        if why:
+            out["wait"][i] = why
+        else:
+            out["go"].append(i)
+    return out
 
 
 def card_ctx(tid, head, tasks, names, cross, t=None, night_end="08:00", open_prs=None):

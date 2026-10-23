@@ -58,7 +58,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
                     --recommend "А — потому что …" --if-no-answer "…" --depends-on ID --executor auto|claude|codex]
                     без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ;
-                    --batch без --mode (и без mode в шапке) — отказ: режим обязателен при сборке пачки (metis-0308)
+                    --batch без --mode (и без mode в шапке) — отказ: режим обязателен при сборке пачки (metis-0308);
+                    --depends-on / depends_on= с несуществующим id, самой собой или циклом — отказ при записи (metis-0248)
   pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"]   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
   pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту
