@@ -82,7 +82,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon agents | who                 снимок claude agents для строки статуса | таблица координаторов
   pantheon revisits                     пересмотры к сроку и по событиям (плановый проход раз в сутки)
   pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией
-  pantheon wake hestia --task <id>      Гестия: всегда отказ (код 2) — окно песочницы появится в metis-0245
+  pantheon wake hestia --task <id> [--dry-run]   Гестия в своём окне песочницы (settings/hestia.json) с открытой
+                                        задачей; без задачи или с закрытой — отказ «нет задачи» (код 2)
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
                                         сессия уходит из фоновых сессий Claude Code) и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
@@ -493,6 +494,13 @@ JOB_EXCLUDED = ["pantheon alert *"]
 JOB_NO_AGENTS = "никого"
 # Встроенные типы Claude Code — в deny окна задачи вместе с ролями из ~/.claude/agents и лидами реестра
 BUILTIN_AGENTS = ["general-purpose", "claude", "Explore", "Plan", "statusline-setup", "claude-code-guide"]
+# Окно Гестии (metis-0245): мимо песочницы — только выпуск плагинов (`pantheon plugins update`: тесты, установка,
+# сверка хеша, проверенное дерево — голый `claude plugin update` оставил бы непроверенное и закрыл окна ролей),
+# сборка окон и ролей, технический перезапуск окон и тревога. Остальные подкоманды pantheon — в песочнице, а какие ей
+# вообще можно, решает guard (правило hestia). Файловых правок, веба и субагентов у окна нет
+HESTIA_EXCLUDED = ["pantheon plugins update", "pantheon plugins update *", "pantheon domains build",
+                   "pantheon restart *", "pantheon alert *"]
+HESTIA_DENY_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Agent"]
 
 
 def job_window(role):
@@ -1846,15 +1854,16 @@ def archive():
     return 0
 
 
-# Имена окон, которые не направления: sandbox_build пишет settings/hq.json, workshop.json и job-<роль>.json; направление
-# с таким именем записало бы свои настройки в чужой файл — а при сбое второй записи они там и остались бы (metis-0163)
-RESERVED_DIRECTIONS = ("hq", "workshop")
+# Имена окон, которые не направления: sandbox_build пишет settings/hq.json, workshop.json, hestia.json (metis-0245) и
+# job-<роль>.json; направление с таким именем записало бы свои настройки в чужой файл — а при сбое второй записи они
+# там и остались бы (metis-0163)
+RESERVED_DIRECTIONS = ("hq", "workshop", "hestia")
 
 
 def reserved_direction(name):
-    """Текст ошибки, если имя направления зарезервировано под окно hq, workshop или job-*; иначе None."""
+    """Текст ошибки, если имя направления зарезервировано под окно hq, workshop, hestia или job-*; иначе None."""
     if isinstance(name, str) and (name in RESERVED_DIRECTIONS or name.startswith("job-")):
-        return (f"имя «{name}» зарезервировано под окна системы (hq, workshop, job-*): настройки направления "
+        return (f"имя «{name}» зарезервировано под окна системы (hq, workshop, hestia, job-*): настройки направления "
                 "записались бы в чужой файл окна — выберите другое имя")
     return None
 
@@ -2567,8 +2576,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     for name, folders in domains.items():
         mine = leads.get(name, [])
         # chiron видит личное (me/) — только Зевсу (P0-2); главные роли и чужие лиды не нужны и лидам окна
+        # hestia — только своим окном (`pantheon wake hestia --task`), не субагентом (metis-0245)
         agents = (mine + COORDINATOR_AGENTS + COORDINATOR_EXTRA_AGENTS.get(name, []),
-                  ["chiron"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
+                  ["chiron", "hestia"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
         if one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
                [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, direction=True,
                # окну с доступом к личному правило слияния не выдаётся — его PR сливает владелец (metis-0156)
@@ -2609,6 +2619,26 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                       [x for x in BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES) if x not in mine], agents_py)
         write_window(out_dir, name, job)
         built.append(name)
+    # окно Гестии (metis-0245, решение владельца «А» 18.10): служебная роль ставит слитые выпуски и пересобирает и
+    # перезапускает окна. Bash пишет только в TMPDIR (кэш — папка запуска, запись в него guard не пускает); ни одной папки проекта, памяти
+    # ролей и ~/.claude — запись туда только командами пульта мимо песочницы (HESTIA_EXCLUDED), а не руками. Личное
+    # закрыто на чтение (Bash — песочницей, Read и Grep — правилами deny); сети у Bash нет (выпуск качает `pantheon plugins update` вне песочницы); файловых правок и веба
+    # нет. Субагентов не зовёт. Что ей можно в Bash сверх этого, решает guard по PANTHEON_ROLE=hestia (правило hestia)
+    hs_cache = _real_dir(f"{caches}/hestia", [caches], strict=True, create=True)
+    hs = role_settings([], None, [], hs_cache, False, private_paths, None, guard)
+    hs["sandbox"]["excludedCommands"] = list(HESTIA_EXCLUDED)
+    hs["sandbox"]["network"]["allowedDomains"] = []
+    hs["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
+    hs.setdefault("permissions", {}).setdefault("deny", []).extend(HESTIA_DENY_TOOLS)
+    # denyRead песочницы держит только Bash; Read и Grep её не проходят, а главная сессия окна приходит без agent_type
+    # и guard личное не судит — поэтому те же личные пути закрываются правилами Read(...) и Grep(...) (как у hq)
+    hs_rule = lambda tool, x: f"{tool}({x})" if x.startswith("~") else f"{tool}(/{x})"  # noqa: E731
+    hs["permissions"]["deny"].extend(hs_rule(t, x + "/**") for t in ("Read", "Grep") for x in _deny_forms(private_paths))
+    hs["permissions"]["deny"].extend(hs_rule(t, x) for t in ("Read", "Grep") for x in _deny_forms(private_paths))
+    hs["env"]["PANTHEON_ROLE"] = "hestia"
+    agents_window(hs, [JOB_NO_AGENTS], BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES), agents_py)
+    write_window(out_dir, "hestia", hs)
+    built.append("hestia")
     # что закрыто штабу — [hq] policy.toml. Битый раздел — ошибка, а не «пусто»: окно Пританея не пересобираем, остаётся
     # прежнее (его файл не удаляется), и тревога — пока раздел не исправят
     try:
@@ -2676,8 +2706,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     rule = lambda x: f"Read({x})" if x.startswith("~") else f"Read(/{x})"  # noqa: E731 — «//» — абсолютный путь
     hq.setdefault("permissions", {}).setdefault("deny", []).extend(
         [rule(x + "/**") for x in _deny_forms(closed)] + [rule(x) for x in _deny_forms(files)])
-    # P0-6: код — поручение направлению, а не лид в окне штаба
-    agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES), agents_py)
+    # P0-6: код — поручение направлению, а не лид в окне штаба; Гестия — своим окном (`pantheon wake hestia --task`)
+    agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES) + ["hestia"], agents_py)
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
     write_window(out_dir, "hq", hq)
     built.append("hq")
@@ -3671,11 +3701,47 @@ def wake_recheck(name, state=None):
 
 
 def wake_hestia(rest):
-    """pantheon wake hestia [--task <id>] (metis-0217, шаг 1): запуск Гестии отказывает всегда, код 2. Роль собирается, но
-    у неё нет окна песочницы (hestia не в guard PANTHEON_ROLES, `claude -p --agent hestia` шёл бы сессией владельца
-    без границы прав), поэтому claude не зовётся. Запуск откроет metis-0245 (окно песочницы) отдельным PR ядра после «да» владельца."""
-    print("pantheon wake hestia: отказ — нет окна песочницы (metis-0245); claude не запускался", file=sys.stderr)
-    return 2
+    """pantheon wake hestia --task <id> [--dry-run] (metis-0217, metis-0245): Гестия — фоновой сессией `hestia` в своём
+    окне песочницы (settings/hestia.json, собирает sandbox_build; PANTHEON_ROLE=hestia — правило guard hestia), папка
+    запуска — её кэш. Одна задача — одна сессия: без задачи, с id не по образцу, несуществующей или не открытой задачей
+    — отказ «нет задачи», код 2, claude не зовётся. Нет окна, кэша или роли (~/.claude/agents/hestia.md) — код 1 с
+    командой сборки. Метка «остановлено вами», технический перезапуск и живая копия — отказ, как у start."""
+    dry = "--dry-run" in rest
+    args = [a for a in rest[1:] if a != "--dry-run"]
+    tid = args[1] if len(args) == 2 and args[0] == "--task" else None
+    head = None
+    if tid and tasks_mod().ID_RE.fullmatch(tid):
+        head = (tasks_mod().load_tasks(PANTHEON).get(tid) or (None, None, None))[1]
+    if not head or head.get("status") not in OPEN_STATUSES:
+        why = ("укажи --task <id> открытой задачи (todo, doing, review)" if head is None
+               else f"задача {tid} не открыта ({head.get('status')})")
+        print(f"pantheon wake hestia: отказ — нет задачи: {why}; claude не запускался", file=sys.stderr)
+        return 2
+    win = path("settings", "hestia.json")
+    folder = _real_dir("~/Library/Caches/pantheon-sandbox/hestia", ["~/Library/Caches/pantheon-sandbox"], strict=True)
+    if not os.path.isfile(win) or not folder:
+        print(f"pantheon wake hestia: нет окна {win.replace(HOME, '~')} или его папки — pantheon domains build",
+              file=sys.stderr)
+        return 1
+    if not os.path.isfile(os.path.join(AGENTS, "hestia.md")):
+        print("pantheon wake hestia: нет роли ~/.claude/agents/hestia.md — pantheon roles build", file=sys.stderr)
+        return 1
+    if os.path.exists(path("stopped", "hestia")):
+        print("pantheon wake hestia: hestia остановлена вами (pantheon resume hestia)", file=sys.stderr)
+        return 1
+    m = maintenance_active()
+    if m and not dry:
+        print(f"pantheon wake hestia: идёт технический перезапуск ({m.get('reason')}) — после pantheon restart --go",
+              file=sys.stderr)
+        return 1
+    origin = "zeus" if os.environ.get("PANTHEON_ROLE") == "hq" else "owner"
+    task = (f"Задача {tid}: прочитай её карточку (pantheon task show {tid}) и сделай ровно то, что в ней. Отчёт — по "
+            "формату роли, каждое действие — строкой журнала в нём.")
+    with lock("start-hestia", block=False) as got:
+        if not got:
+            print("pantheon wake hestia: hestia уже запускается другой командой", file=sys.stderr)
+            return 1
+        return _start_session("hestia", "hestia", folder, "hestia", task, [], origin, dry, False, win)
 
 
 def wake(rest):
@@ -3866,9 +3932,18 @@ def _marked(text, tmpl):
 
 
 # Шаблоны, которые build пока не собирает (metis-0217, review-51-bypass): роль, которую нельзя звать до окна
-# песочницы, не должна лежать в ~/.claude/agents — иначе её поднимет субагент мимо отказа wake. Убрать строку —
-# когда слит metis-0245. Уже собранный файл с меткой build убирает как устаревшую роль.
-ROLES_DEFERRED = {"hestia": "metis-0245"}
+# песочницы, не должна лежать в ~/.claude/agents — иначе её поднимет субагент мимо отказа wake. Строка — имя шаблона и
+# задача, которая его откроет; уже собранный файл с меткой build убирает как устаревшую роль. Пусто с metis-0245:
+# у hestia своё окно (sandbox_build) и правило guard «hestia».
+ROLES_DEFERRED = {}
+
+
+def _head_names(text):
+    """Значения полей name: шапки роли без кавычек, по порядку; [] — шапки или поля нет, два и больше — повтор."""
+    end = text.find("\n---\n", 3) if text.startswith("---\n") else -1
+    if end < 0:
+        return []
+    return [ln.split(":", 1)[1].strip().strip("\"'") for ln in text[4:end].splitlines() if re.match(r"name\s*:", ln)]
 
 
 def roles_build(src=None, out=None, role_errors=None):
@@ -3942,6 +4017,16 @@ def roles_build(src=None, out=None, role_errors=None):
                 kept.add(f"{base}-{short}.md")
                 continue
             want[f"{base}-{short}.md"] = (f, out_text)
+    # Claude Code зовёт роль по полю name:, а не по имени файла (argus-51d): личный hearth.tmpl с `name: hestia` дал бы
+    # вторую hestia мимо её окна и правил. Несовпадение — роль не собирается, а прежний собранный файл убирается ниже
+    for fname in sorted(want):
+        got = _head_names(want[fname][1])
+        if got != [fname[:-3]]:
+            tmpl = want.pop(fname)[0]
+            what = ("нет" if not got else f"«{got[0]}»" if len(got) == 1
+                    else "повторён (" + ", ".join(f"«{g}»" for g in got) + ")")
+            err(tmpl, f"{tmpl} → {fname}: поле name: в шапке {what} — не совпадает с именем роли «{fname[:-3]}», "
+                f"роль не собрана")
     made = []
     if want:  # и на новой машине: ~/.claude/agents ещё нет, а общие роли плагина собрать надо
         os.makedirs(out, exist_ok=True)

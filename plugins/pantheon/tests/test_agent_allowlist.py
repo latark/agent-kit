@@ -141,12 +141,13 @@ def main():
     # --- окна ---------------------------------------------------------------------------------------------------------
     want = {
         "hq": (hq, ["prometheus", "clio", "chiron", "momus", "Explore"],
-               ["hephaestus-shop", "apollo-shop", "hephaestus-docs"] + MAIN),
-        "athena-shop": (ab, ["hephaestus-shop", "apollo-shop"] + COORD, ["chiron"] + MAIN + ["hephaestus-docs"]),
+               ["hephaestus-shop", "apollo-shop", "hephaestus-docs"] + MAIN + ["hestia"]),
+        "athena-shop": (ab, ["hephaestus-shop", "apollo-shop"] + COORD,
+                        ["chiron", "hestia"] + MAIN + ["hephaestus-docs"]),
         "themis-docs": (ts, ["hephaestus-docs"] + COORD,
-                           ["chiron"] + MAIN + ["hephaestus-shop", "apollo-shop"]),
+                           ["chiron", "hestia"] + MAIN + ["hephaestus-shop", "apollo-shop"]),
         "mnemo-brain": (mb, COORD + ["clio"],
-                        ["chiron"] + MAIN + ["hephaestus-shop", "apollo-shop", "hephaestus-docs"]),
+                        ["chiron", "hestia"] + MAIN + ["hephaestus-shop", "apollo-shop", "hephaestus-docs"]),
     }
     for name, (data, allowed, deny) in want.items():
         got = agents_hook(data)
@@ -166,6 +167,8 @@ def main():
     check("momus (ревизор навыка audit, metis-0095) — у штаба есть, у координаторов нет; general-purpose у штаба нет",
           "momus" in agents_hook(hq)[1] and all("momus" not in agents_hook(d)[1] for d in (ab, ts, mb))
           and "general-purpose" not in agents_hook(hq)[1] and "claude" not in agents_hook(hq)[1])
+    check("hestia (metis-0245) — в deny у штаба и каждого координатора: только своим окном, не субагентом",
+          all("hestia" in agent_rules(d) and "hestia" not in agents_hook(d)[1] for d in (hq, ab, ts, mb)))
     check("чужие лиды — в deny у каждого координатора",
           "hephaestus-docs" in agent_rules(ab) and {"hephaestus-shop", "apollo-shop"} <= set(agent_rules(ts)))
     reads = [x for x in hq["permissions"]["deny"] if not x.startswith("Agent(")]
