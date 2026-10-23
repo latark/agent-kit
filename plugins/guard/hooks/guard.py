@@ -35,6 +35,11 @@ PostToolUse (Bash:
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
                  status, chats, folders, verify, split — можно; без PANTHEON_ROLE (плановый проход) — можно (metis-0267);
   chiron      — субагента chiron зовут только в окне штаба и в вашей сессии без роли (P0-2, metis-0061);
+  hestia      — служебную роль Гестию не зовут субагентом нигде; роль hestia вне своего окна (PANTHEON_ROLE=hestia) —
+                отказ любому инструменту; в окне — без файловых правок, Bash пишет только во временные папки, git —
+                только чтение в любой форме (`git -c … commit` тоже отказ), gh без слияния и записи, claude — plugin
+                list и agents, pantheon — выпуск (plugins update), сборка окон, restart без --force, alert и чтение
+                (metis-0245);
   cdp-role     — демон браузера с вашими входами — только мастерская, /close — никому (SEC-13);
   push         — git push: координатор, лиды и мастерская, не в main и master; gh pr merge — главная сессия
                  координатора или его лид (hephaestus-/apollo-<направление> субагентом, metis-0054) в папках своего
@@ -71,7 +76,7 @@ PostToolUse (Bash:
   --strict      — хук окна роли с onFailure: "block" (собирает `pantheon domains build`, SEC-29).
 При сбое (SEC-10, metis-0094) — во всех трёх режимах одинаково, обёртка run_hook: событие не JSON или не объект,
 исключение в проверке прав (domain, pantheon-acl, protect-config, private, cdp-role, push, terminal, hq-telegram,
-hq-gh, tg-role, chiron) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
+hq-gh, tg-role, chiron, hestia) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
 stderr: Claude Code блокирует вызов на любой версии, и в вашей сессии тоже. PostToolUse (журнал запора слияния):
 код 2 только показывает причину агенту — команда уже выполнена. Исключения: правила-подсказки (dev-server,
 attribution, cdp, nextjs) при сбое пропускают к остальным проверкам; сбой на Stop — выход 0 (код 2 не дал бы
@@ -640,7 +645,7 @@ PANTHEON = os.path.realpath(os.path.join(AI_HOME, "pantheon"))
 PANTHEON_VIEW = os.path.realpath(os.path.join(AI_HOME, "pantheon-view"))
 TEMP_ROOTS = [os.path.realpath(p) for p in (os.environ.get("TMPDIR", ""), "/tmp", "/private/tmp", "/dev/null") if p]
 PANTHEON_ROLES = {"hq", "domain-coordinator", "workshop", "chiron", "argus", "talos", "prometheus", "clio",
-                  "iris", "dev-opus", "dev-sonnet", "dev-haiku"}
+                  "iris", "dev-opus", "dev-sonnet", "dev-haiku", "hestia"}
 PANTHEON_ROLE_PREFIXES = ("hephaestus-", "apollo-")
 # ревизор: пишет только в agent_extra своей роли (policy.toml), свою память и временные папки — корней по cwd нет (0122)
 EXTRA_ONLY_ROLES = {"momus"}
@@ -2448,6 +2453,9 @@ def check_pantheon(event, tool, tool_input):
                     "Touch ID владельца. Роли — `pantheon merge request N -R <owner/repo>`, `pantheon merge status`, "
                     "`pantheon merge cancel N -R <owner/repo>`.")
     if tool == "Bash" and pantheon_role and not (role == "hq" and not sub):
+        if role == "hestia" and not sub and window_role() == "hestia":
+            # Гестия в своём окне: её команды пульта уже сверило правило hestia (белый список, restart без --force)
+            cli = [c for c in cli if c.split()[1:2] != ["restart"]]
         if cli:
             return (f"Правило pantheon-acl: «{cli[0]}» — команда пульта, её запускают только Пританей и ваши сессии. "
                     "Архив, коммит и пауза задач — через Зевса; дописать тревогу — `pantheon alert`.")
@@ -3485,9 +3493,101 @@ def check_chiron_call(event, tool, tool_input):
     return None
 
 
+# hestia (metis-0245, review-51-bypass, решение владельца «А» 18.10): служебная роль ставит выпуски и перезапускает окна
+# командами пульта, но не пишет код, не меняет git и ~/.claude. Её граница — своё окно (settings/hestia.json, песочница
+# и PANTHEON_ROLE=hestia), поэтому субагентом её не зовут нигде, и вашей сессии тоже: субагент шёл бы с правами
+# позвавшего. Роль hestia вне своего окна (`claude --agent hestia` без окна) — отказ любому инструменту. В окне главная
+# сессия фоновая и agent_type в событии у неё нет, поэтому правила — по окну, а не по роли события.
+HESTIA_GIT_READ = {"status", "log", "show", "diff", "rev-parse", "describe", "ls-files", "ls-tree", "cat-file",
+                   "blame", "shortlog", "rev-list", "for-each-ref", "show-ref", "merge-base", "name-rev", "grep",
+                   "version", "help"}
+HESTIA_GH_READ = {("pr", "view"), ("pr", "list"), ("pr", "diff"), ("pr", "checks"), ("pr", "status"),
+                  ("--version", None), ("version", None)}
+HESTIA_CLAUDE = (("plugin", "list"), ("plugins", "list"), ("agents",), ("--version",), ("-v",))
+HESTIA_PANTHEON = {("plugins", "update"), ("domains", "build"), ("restart",), ("alert",), ("task", "show"),
+                   ("status",), ("who",), ("agents",), ("help",)}
+HESTIA_REASON = ("Правило hestia (metis-0245): {what}. Гестии можно: `pantheon plugins update`, `pantheon domains "
+                 "build`, `pantheon restart` без --force, `pantheon alert`, чтение (`pantheon task show|status|who`, "
+                 "логи, git только для чтения, `claude plugin list|agents`); писать — только во временные папки. "
+                 "Остальное — в отчёт Зевсу.")
+
+
+def check_hestia_call(event, tool, tool_input):
+    if tool in AGENT_TOOLS and _named(tool_input.get("subagent_type"), "hestia"):
+        return ("Правило hestia: Гестию субагентом не зовут (metis-0245) — у субагента права позвавшего, а не её окно. "
+                "Её поднимает Зевс: `pantheon wake hestia --task <id>`.")
+    if who(event)[0] == "hestia" and window_role() != "hestia":
+        return ("Правило hestia: роль hestia — только в своём окне песочницы (`pantheon wake hestia --task <id>`), "
+                f"здесь окно «{window_role() or 'нет'}» — инструменты закрыты.")
+    return None
+
+
+def _pantheon_words(name, texts):
+    """Слова после пульта pantheon или None — не пульт. Пульт — по имени (pantheon, …/lib/pantheon.py) и через
+    оболочку или python (`sh ~/.local/bin/pantheon …`); путь у других команд (`ls ~/.local/state/pantheon`) — не пульт."""
+    base = os.path.basename((name or "").rstrip("/")).lower()
+    if base in ("pantheon", "pantheon.py"):
+        return list(texts)
+    if base not in _SHELLS and not re.fullmatch(r"python[0-9.]*t?|pypy[0-9.]*", base):
+        return None
+    k = next((i for i, x in enumerate(texts) if x and os.path.basename(x.rstrip("/")).lower() in
+              ("pantheon", "pantheon.py") and _key(os.path.realpath(os.path.expanduser(x))) != _key(PANTHEON)), None)
+    return None if k is None else list(texts[k + 1:])
+
+
+def check_hestia(event, tool, tool_input):
+    if window_role() != "hestia":
+        return check_hestia_call(event, tool, tool_input)
+    if tool in EDIT_TOOLS:
+        return HESTIA_REASON.format(what=f"{tool} — файловых правок у окна нет")
+    if tool != "Bash":
+        return None
+    cmd = tool_input.get("command") or ""
+    targets, cmds = bash_analysis(cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
+    bad = [p for p in targets if p == UNRESOLVED or not _inside(p, TEMP_ROOTS)]
+    if bad:
+        return HESTIA_REASON.format(what="запись " + ("в путь, который не разобрать" if bad[0] == UNRESOLVED
+                                                     else f"в {bad[0].replace(HOME, '~')}") + " — вне временных папок")
+    for name, texts in cmds:
+        if name == "?" or name is None:
+            return HESTIA_REASON.format(what="имя команды не вычислить (переменная, $(…))")
+        base = os.path.basename(name.rstrip("/")).lower()
+        if base == "git":
+            parsed = _git_sub(texts)
+            if parsed is None or (parsed[1] is not None and parsed[1] not in HESTIA_GIT_READ):
+                return HESTIA_REASON.format(what=f"git {parsed[1] if parsed else '<не разобрать>'} — git только для "
+                                                 "чтения, коммиты, отправку и слияние делают направления")
+            continue
+        if base == "gh":
+            dyn, cands = _gh_parse(texts)
+            api = _gh_api(texts)
+            subs = {(texts[q], texts[i] if i is not None else None) for q, i in cands}
+            if dyn or not cands or (api is not None and _gh_api_writes(api)) or \
+                    any(s != "api" and (s, a) not in HESTIA_GH_READ for s, a in subs):
+                return HESTIA_REASON.format(what="gh — только чтение (`gh pr view|list|diff|checks|status`, "
+                                                 "`gh api` без записи)")
+            continue
+        if base == "claude":
+            if not any(tuple(texts[:len(w)]) == w for w in HESTIA_CLAUDE):
+                return HESTIA_REASON.format(what=f"claude {' '.join(str(x) for x in texts[:2])} — выпуск ставит "
+                                                 "`pantheon plugins update`, не голый claude")
+            continue
+        words = _pantheon_words(name, texts)
+        if words is None:
+            continue
+        if any(w is None for w in words[:2]) or not any(tuple(words[:len(w)]) == w for w in HESTIA_PANTHEON):
+            return HESTIA_REASON.format(what=f"pantheon {' '.join(str(x) for x in words[:2]) or '<без подкоманды>'}"
+                                             " — эта команда пульта окну не выдана")
+        if words[:1] == ["restart"] and any(w is None or w == "--force" or str(w).startswith("--force")
+                                            for w in words[1:]):
+            return HESTIA_REASON.format(what="pantheon restart --force — занятое окно перезапускают только после "
+                                             "`pantheon saved` самой сессии")
+    return None
+
+
 def check_window(event, tool, tool_input):
     for rule, check in (("hq-telegram", check_hq_telegram), ("hq-gh", check_hq_gh), ("tg-role", check_tg_role),
-                        ("chiron", check_chiron_call)):
+                        ("chiron", check_chiron_call), ("hestia", check_hestia_call)):
         if rule not in OFF:
             reason = check(event, tool, tool_input)
             if reason:
@@ -3508,7 +3608,7 @@ def strict_window(check, event, tool, tool_input):
 def check_roles(event, tool, tool_input):
     for rule, check in (("private", check_private), ("cdp-role", check_cdp_role), ("push", check_push),
                         ("terminal", check_terminal), ("corpus-role", check_corpus_role),
-                        ("tg-secret", check_tg_readd), ("launchd-env", check_launchd_env)):
+                        ("tg-secret", check_tg_readd), ("launchd-env", check_launchd_env), ("hestia", check_hestia)):
         if rule not in OFF:
             reason = check(event, tool, tool_input)
             if reason:

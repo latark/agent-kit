@@ -10,7 +10,7 @@ guard ловит **ошибки агента**: запись не в своё н
 мимо `pantheon task` и доски или журнала ваших слов любой сессией Claude (pantheon-acl), правку защит не той ролью (protect-config), команду пульта не той ролью, чтение ключей
 (tg-secret; ролям из демона tg-readd — только `status` и `kickstart`), пометки об авторстве Claude, свой dev-сервер; с шага 1.2 — по ролям Пантеона: личное (private: `me/`,
 ключи git-crypt, журнал Пританея — только hq, chiron в окне Пританея и mnemo-brain; ключи — никому из ролей), Telegram
-и коуча chiron вне своего окна, gh pr окна Пританея не по своему репозиторию (hq-telegram, chiron, hq-gh — раздел «Окно Пританея»), выгрузку личного чата Telegram в окне любой роли (tg-role), браузер владельца
+и коуча chiron вне своего окна, Гестию субагентом и вне её окна, gh pr окна Пританея не по своему репозиторию (hq-telegram, chiron, hestia, hq-gh — раздел «Окно Пританея»), выгрузку личного чата Telegram в окне любой роли (tg-role), браузер владельца
 (cdp-role: демон — только мастерская; прямой отладочный порт и WebFetch на локальные адреса —
 никому; ловит по номеру порта, а не по записи адреса; у WebFetch — ещё имена вроде localtest.me и nip.io, а при прокси с подменой
 адресов имена разрешаются в 198.18/15 и настоящий адрес не виден — это предел правила), push (только в свою ветку, не в main/master, без force — в том
@@ -69,7 +69,7 @@ Grep Пританея по `.git` держит только песочница, 
 
 **Любой сбой — выход 2 с причиной в stderr, во всех трёх режимах и в вашей сессии тоже** (metis-0094, guard 0.5.5).
 Сбой — событие не JSON или не объект, исключение в проверке прав (domain, pantheon-acl, protect-config, private,
-cdp-role, push, terminal, hq-telegram, tg-role, chiron) или tg-secret, сбой всего скрипта, свой срок 8 с (таймаут хука —
+cdp-role, push, terminal, hq-telegram, tg-role, chiron, hestia) или tg-secret, сбой всего скрипта, свой срок 8 с (таймаут хука —
 10 с, а таймаут Claude Code вызов пропускает). Код 2 Claude Code понимает как блок на любой версии. Второй слой
 (guard 0.5.6, metis-0094) — `"onFailure": "block"` у обработчиков PreToolUse guard и pantheon в hooks.json (Claude
 Code 2.1.295+): таймаут, выход не 0 и не 2 или незапуск хука тоже блокируют вызов (проверено вживую на 2.1.301). У
@@ -129,6 +129,17 @@ answer и плановый проход, это скрипты, guard их не 
 - **chiron (P0-2, metis-0061).** Коуч видит личное, только когда `PANTHEON_ROLE=hq`. Позвать его (Agent или Task с
   `subagent_type: chiron`) можно в окне Пританея и в вашей сессии без роли; из окна другой роли и из субагента вне окна
   Пританея — отказ.
+- **hestia (metis-0245, guard 0.5.18).** Гестия ставит выпуски и перезапускает окна командами пульта, поэтому её
+  граница — своё окно песочницы (`settings/hestia.json`, `PANTHEON_ROLE=hestia`; поднимает `pantheon wake hestia --task
+  <id>`). Субагентом (Agent или Task с `subagent_type: hestia`) её не зовут нигде, и в вашей сессии тоже: субагент шёл бы
+  с правами позвавшего. Роль hestia вне своего окна — отказ любому инструменту. В окне главная сессия фоновая и
+  agent_type у неё нет, поэтому правило смотрит на окно. В нём Edit, Write, MultiEdit и NotebookEdit — отказ; Bash пишет
+  только во временные папки (TMPDIR, /tmp); git — только чтение по белому списку (`status`, `log`, `show`, `diff` и
+  т. п.), любая запись в любой форме (`git -c … commit`, `git -C … push`, `tag`, `reset`) — отказ; `gh` — только `pr
+  view|list|diff|checks|status` и `gh api` без записи; `claude` — только `plugin list`, `agents`, `--version` (выпуск
+  ставит `pantheon plugins update`, голый `claude plugin update` — отказ); пульт — только `plugins update`, `domains
+  build`, `restart` без `--force`, `alert`, `task show`, `status`, `who`, `agents`, и через оболочку или python по пути
+  тоже. Имя команды или подкоманду не вычислить (`$X`, `$(…)`) — отказ.
 - **hq-gh (metis-0247, guard 0.5.13).** Окну Пританея gh pr view, checks и edit выпущены мимо песочницы, а у
   Зевса личное. Поэтому в этом окне любой `gh pr` проходит только с явным `-R`/`--repo` из `[merge_repos]` policy.toml
   и номером PR; без `-R`, с любой `GH_*` в команде или с `GH_REPO`, `GH_HOST`, `GH_CONFIG_DIR` в окружении, с `--comments`/`-c` и `--json comments`

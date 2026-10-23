@@ -239,7 +239,7 @@ def main():
         r = run("roles", "build", "--out", out)
         built = sorted(os.listdir(out)) if os.path.isdir(out) else []
         texts = {f: read(os.path.join(out, f)) for f in built}
-        want = {t + ".md" for t in tmpls if t not in ("hephaestus", "apollo", "hestia")} | {"hephaestus-demo.md", "apollo-demo.md"}
+        want = {t + ".md" for t in tmpls if t not in ("hephaestus", "apollo")} | {"hephaestus-demo.md", "apollo-demo.md"}
         check(f"общие шаблоны плагина {label}: собраны все роли, без ошибок, нет {{{{",
               r.returncode == 0 and not r.stderr.strip() and want <= set(built)
               and not any("{{" in t for t in texts.values()))
@@ -303,22 +303,39 @@ def main():
           all("Самопроверка: разработчику — «в отчёте строка по шести пунктам самопроверки роли: сделано "
               "(доказательство), не применимо (почему) или по отчёту Codex: путь»" in texts.get(f, "")
               for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md", "hq.md")))
-    # Гестия (metis-0217, review-51-bypass): шаблон в плагине есть, но до metis-0245 build её не собирает
+    # Гестия (metis-0245): окно песочницы есть — роль собирается; запреты шаблона на месте
     tmpl_h = read(os.path.join(real, "hestia.tmpl"))
     head = tmpl_h.split("---")[1] if tmpl_h.count("---") >= 2 else ""
     deny = next((ln for ln in head.splitlines() if ln.startswith("disallowedTools:")), "")
-    check("hestia: шаблон остаётся в плагине (запрещены Edit/Write, коммит, push, merge), но в --out роли нет",
-          all(t in deny for t in ("Edit", "Write", "Bash(git commit *)", "Bash(git push *)", "Bash(git merge *)",
-                                  "Bash(gh pr merge *)"))
-          and "hestia.md" not in texts and "Гестия (hestia" in texts.get("argus.md", ""))
+    built_h = texts.get("hestia.md", "")
+    check("hestia: роль собрана (name: hestia), запрещены Edit/Write, Agent, коммит, push, merge; выпуск — "
+          "pantheon plugins update, окно — wake hestia --task",
+          all(t in deny for t in ("Edit", "Write", "Agent", "Bash(git commit *)", "Bash(git push *)",
+                                  "Bash(git merge *)", "Bash(gh pr merge *)"))
+          and built_h.startswith("---\nname: hestia\n") and "pantheon plugins update" in built_h
+          and "pantheon wake hestia --task" in built_h and "Гестия (hestia" in texts.get("argus.md", ""))
+    # поле name: в шапке — имя роли для Claude Code (argus-51d): личный шаблон с чужим name: не собирается, а его
+    # прежняя сборка убрана; повтор поля name: — тоже
+    mine_dir = os.path.join(home2, ".claude", "agents")
     old = os.path.join(tmp, "probe-old")
-    write(os.path.join(old, "hestia.md"),
-          "---\nname: hestia\n---\n<!-- собрано pantheon roles build из hestia.tmpl -->\nстарая\n")
+    write(os.path.join(mine_dir, "hearth.tmpl"), "---\nname: hestia\ndescription: x\n---\nтело\n")
+    write(os.path.join(mine_dir, "twin.tmpl"), "---\nname: twin\nname: twin\ndescription: x\n---\nтело\n")
+    write(os.path.join(mine_dir, "fine.tmpl"), "---\nname: fine\ndescription: x\n---\nтело\n")
+    write(os.path.join(old, "hearth.md"),
+          "---\nname: hestia\n---\n<!-- собрано pantheon roles build из hearth.tmpl -->\nстарая\n")
     write(os.path.join(old, "mine.md"), "---\nname: mine\n---\nнаписан руками\n")
     r = run("roles", "build", "--out", old)
-    check("hestia: старый собранный hestia.md удалён, файл руками цел, остальные роли на месте",
-          r.returncode == 0 and not os.path.exists(os.path.join(old, "hestia.md"))
-          and os.path.exists(os.path.join(old, "mine.md")) and os.path.isfile(os.path.join(old, "argus.md")))
+    hs = read(os.path.join(old, "hestia.md")) if os.path.exists(os.path.join(old, "hestia.md")) else ""
+    check("name: hearth.tmpl с «name: hestia» — не собран, прежний hearth.md убран, ошибка в stderr; hestia.md — "
+          "из hestia.tmpl",
+          not os.path.exists(os.path.join(old, "hearth.md")) and "hearth.tmpl → hearth.md: поле name:" in r.stderr
+          and "«hestia»" in r.stderr and "из hestia.tmpl" in hs and "тело" not in hs)
+    check("name: повтор name: в шапке — роль не собрана, ошибка; верная личная роль собрана, файл руками цел",
+          not os.path.exists(os.path.join(old, "twin.md")) and "twin.tmpl → twin.md: поле name: в шапке повторён" in r.stderr
+          and os.path.isfile(os.path.join(old, "fine.md")) and os.path.exists(os.path.join(old, "mine.md"))
+          and os.path.isfile(os.path.join(old, "argus.md")))
+    for f in ("hearth.tmpl", "twin.tmpl", "fine.tmpl"):
+        os.remove(os.path.join(mine_dir, f))
     agents2 = os.path.join(home2, ".claude", "agents")
     r = run("roles", "build")
     check("новая машина: ~/.claude/agents ещё нет — живая сборка создаёт папку и кладёт общие роли",

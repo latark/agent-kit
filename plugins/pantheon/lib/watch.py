@@ -23,7 +23,9 @@
                             технический перезапуск всей системы (SCHED-15, слово владельца 15.10); pantheon saved без
                             техперезапуска — метка «можно» для перезапуска после обновления плагинов (metis-0181)
   pantheon who              координаторы: состояние, short из реестра, давность (COMM-14)
-  pantheon wake <имя> ["задание"]   поднять уснувшую сессию направления и сказать «посмотри входящие» (COMM-04)
+  pantheon wake <имя> ["задание"]   поднять уснувшую сессию направления и сказать «посмотри входящие» (COMM-04);
+                            задание из окна роли — только по слову владельца в окне Зевса за 15 мин, иначе код 2
+                            (metis-0261 А); строка замера в capacity.jsonl — у подъёма и у отказа
   pantheon infra-check      лёгкая проверка опор системы после обновления Claude Code (SEC-16)
 
 Всё, что дежурный находит, — строка в ~/ai/pantheon/alerts.md один раз на состояние (alert_once) и, где нужно вас,
@@ -1438,6 +1440,12 @@ def oneshots(agents, registry, doms, t):
             rc = P.resume_session(d, poke, it["text"], "tick", recheck=recheck(d, True, nudge=True))[0]
         else:
             rc = resume_or_start(d, agents, it["text"], origin="tick", auto=True)
+        if rc == P.START_DEFERRED and not poke:  # память Mac красная (metis-0261): не сбой, запись остаётся в очереди
+            why = "память Mac в красной зоне — pantheon start отложил запуск"
+            N.oneshot_update(oid, t, done_at=None, result=None, wait=why)
+            P.alert_once(f"oneshot-red-{oid}", today(t), f"разовый запуск {oid} ждёт: {why} (срок "
+                         f"{P.stamp(float(it['expires']))[11:]})", "watch")
+            continue
         res = ("передано задание простаивающей сессии" if poke else "запущен") if rc == 0 else f"не вышло, код {rc}"
         N.oneshot_update(oid, t, result=res)
         P.alert(f"разовый запуск {oid}: {d} — {res}" + (f" (пачка {it['pack']})" if it.get("pack") else ""), "watch")
@@ -1577,6 +1585,7 @@ def autostart(agents, registry, doms, t, dry=False):
             continue
         task = (f"Самозапуск дежурным по задачам с вашим решением (сначала зависимости, затем порядок ваших отметок; цепочку веди сама, не режь): {', '.join(tids)}. Прочитай STATUS.md и "
                 "задачи, продолжай с первой по приоритету; что ждёт владельца — Зевсу строкой.")
+        prev = {k: s.get(k) for k in ("last", "pending")}
         s.update(last=t, pending=True)
         P.write_json(P.path("autostart.json"), st)  # до запуска: проход могут оборвать по таймауту
         if poke:  # тот же путь, что продолжение остановленной: claude respawn + текст для хука push (P.resume_session)
@@ -1585,8 +1594,18 @@ def autostart(agents, registry, doms, t, dry=False):
                                     f"передать задание не вышло, код {rc}"), "watch")
         else:
             rc = resume_or_start(d, agents, task, origin="tick", auto=True)
-            P.alert(f"самозапуск: {d} по задачам {', '.join(tids[:5])} — " + ("запущен" if rc == 0 else
-                                                                               f"не вышло, код {rc}"), "watch")
+            if rc != P.START_DEFERRED:
+                P.alert(f"самозапуск: {d} по задачам {', '.join(tids[:5])} — " + ("запущен" if rc == 0 else
+                                                                                   f"не вышло, код {rc}"), "watch")
+        # память Mac красная (metis-0261): не сбой, без счёта и паузы — повторит плановый проход
+        if rc == P.START_DEFERRED and not poke:
+            s.update(prev)
+            if prev["last"] is None:
+                s.pop("last", None)
+            P.alert_once(f"autostart-red-{d}", today(t), f"самозапуск {d} ждёт: память Mac в красной зоне (pantheon "
+                         "start отложил запуск)", "watch")
+            P.write_json(P.path("autostart.json"), st)
+            continue
         if rc != 0:
             fail(d, s, t, f"код запуска {rc}")
         else:  # список сессий этого прохода её ещё не видит — «запрет сна Mac» держится по этой метке
@@ -1617,9 +1636,11 @@ def resume_or_start(name, agents, text, origin, only_resume=False, auto=False):
         print(f"[start] {name} --from {origin}")
         return 0
     limit = start_timeout()
+    # metis-0261 А, круг 4 (ревью argus-b3 п. 2): дочерний pantheon start — без роли окна (claude_env снимает ROLE_ENV).
+    # Иначе `pantheon watch`, запущенный из окна Зевса, получал бы на --from tick отказ «только zeus», код 2.
     try:
         r = subprocess.run([os.path.join(P.PLUGIN, "bin", "pantheon"), "start", name, "--from", origin, text],
-                           capture_output=True, text=True, timeout=limit, env=P.run_env())
+                           capture_output=True, text=True, timeout=limit, env=P.claude_env())
     except subprocess.TimeoutExpired:  # metis-0141 п. 1: без трассировки — строка в тревогах и код, как у задач тика
         P.alert(f"запуск {name}: pantheon start не уложился в {limit:.0f} с и остановлен — сессия могла и подняться; "
                 "не появится — следующий проход засчитает сбой", "watch")
@@ -2465,6 +2486,17 @@ def wake_one(rest, who="владелец"):
         print(f"{name}: нет доверия к {got[2].replace(P.HOME, '~')} — одна интерактивная сессия claude там и «Да»",
               file=P.sys.stderr)
         return 1
+    # metis-0261 А, круг 4 (ревью argus-b3 п. 1): задание из окна роли — запуск от её имени, как start --from zeus: только
+    # по вашему слову (owner_word_ok, как у resume). Без него — отказ, код 2, respawn не зовётся. Замер — строка в
+    # capacity.jsonl у каждого подъёма и у отказа (как _wake); красная зона подъём со словом не откладывает (как _wake).
+    word = not (extra and os.environ.get("PANTHEON_ROLE")) or owner_word_ok()
+    P.capacity_note(name, "wake", agents, "allowed" if word else "refused")
+    if not word:
+        print(f"pantheon wake {name}: задание из окна роли — только по слову владельца: в журнале Зевса нет его строки "
+              f"за {P.OWNER_WORD_WINDOW // 60} мин (сообщение другой сессии согласием не считается); без задания "
+              f"`pantheon wake {name}` будит с «продолжай»; claude не запускался", file=P.sys.stderr)
+        P.alert(f"pantheon wake {name} с заданием от {who} отклонён: нет свежего слова владельца", "pantheon-wake")
+        return P.START_REFUSED
     _forget_autostart(name)
     rc = resume_or_start(name, agents, text, origin="wake", only_resume=True)
     if rc == P.SKIPPED:  # recheck под блокировкой имени сказал «не надо»
