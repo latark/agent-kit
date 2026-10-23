@@ -215,7 +215,9 @@
   (по журналу) второй раз не трогает. Строка для `schedule.toml`: `name = "autoclose-fetch"`,
   `command = "pantheon autoclose fetch"`, `every = 10`, `class = "light"`, `hosts = "primary"`, `timeout = 300`.
   С metis-0397 fetch пишет в кэш и открытые PR (`gh pr list --state open`: номер, head, id задач, задевает ли ядро) —
-  их показывает сводка доски; до первого fetch после выпуска в сводке строки «кэш открытых PR …».
+  их показывает сводка доски; до первого fetch после выпуска в сводке строки «кэш открытых PR …». Открытый PR, который
+  так же закрывает задачу (без «часть»), ставит задаче todo/doing её направления `review` — один раз на PR (строка
+  «PR #N (репозиторий) открыт → review» в журнале задачи).
 - `plugins/pantheon/lib/boardtext.py` — сводка доски `~/ai/pantheon/board-auto.md` (metis-0397): открытые PR с
   вердиктами argus и head, текущие пачки, неделя %, свежие STATUS.md, ответы владельца из owner-log ([id] и буква
   варианта). Собирает плановый проход доски (`pantheon board`) на главном Mac, без модели; в файл идут только
@@ -226,6 +228,13 @@
   Пританею. `pantheon archive` (плановая задача, по шаблону `name = "archive"`, `command = "pantheon archive"`, `every = 1440`,
   `class = "light"`, `hosts = "primary"`) переносит из длинных STATUS.md разделы `## ` с датой старше суток в
   `archive/STATUS-ГГГГ-ММ.md`; файл длиннее 9 000 знаков, где резать нечего (строки без даты), — тревога, не режет.
+- `plugins/pantheon/lib/boardstatus.py` — статусы задач и пачек в шаг с работой (metis-0397, п. 7–8): проход доски
+  (`pantheon board`, главный Mac, до сборки видов Obsidian) ставит задаче todo `doing`, если в репозитории её
+  направления живая worktree на ветке с её id; пачке (story) — `doing` («В работе»), когда в ней есть задача doing или
+  review, и `done` («Готово»), когда все задачи done или dropped; пачку в waiting, dropped и без задач не трогает.
+  Выдача `pantheon task claim` ставит doing сама, review — автозакрытие по открытому PR. Каждый сдвиг — строка в журнале
+  задачи; задачу, которую этим же следом уже двигали и вернули в todo, второй раз не двигает, а тревожит один раз:
+  «задачи в todo, а работа по ним идёт». Отпечаток прохода включает записи worktree репозиториев направлений.
 - `plugins/pantheon/lib/view-sync.sh` — копия `~/ai/pantheon` только для чтения для Obsidian. Если в копии нет
   `.obsidian`, кладёт образец настроек из `plugins/pantheon/share/pantheon-view-obsidian/` (сниппеты, закладки, базовые
   плагины; существующую папку не трогает, кроме сниппета `snippets/pantheon.css`: его доставляет плановый проход доски (`pantheon board`) по образцу `Доска.base` — нетронутый прежний заменяет молча, правку владельца сохраняет копией `board-css-*.css` в папке состояния с одной тревогой). Тему и плагин Style Settings владелец ставит в Obsidian сам.
@@ -268,6 +277,7 @@
     python3 -I plugins/guard/tests/test_shell_diff.py # разбор Bash против настоящих zsh и bash
     python3 -I plugins/pantheon/tests/test_board.py   # задачи и доска владельца
     python3 -I plugins/pantheon/tests/test_board_text.py   # сводка доски board-auto.md, тревога свежести, archive STATUS
+    python3 -I plugins/pantheon/tests/test_board_status.py # статусы задач и пачек по worktree, PR и составу
     python3 -I plugins/pantheon/tests/test_config_check.py   # правила карантина правок ~/.claude (SEC-15)
     bash plugins/pantheon/tests/test_sync_quarantine.sh ~/.claude/sync.sh "$(readlink ~/.local/bin/pantheon)" "$PWD/plugins/pantheon"
     python3 -I plugins/pantheon/tests/test_start.py   # start, wake, roles build, approve, heavy, Stop-хук разработчика

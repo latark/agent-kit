@@ -8,6 +8,8 @@ run (лёгкий тик) читает только кэш, в сеть не х�
 день слияния, release — «PR #N → коммит» (версия плагина, если PR поднял plugin.json), actual — из учёта по задачам
 (metrics/tasks.jsonl, metis-0294), нет замера — «нет замера»; в журнал задачи — строка с CLOSED_BY_MERGE.
 В теле PR слово «часть» — PR закрывает только часть задачи: задача не закрывается.
+Открытый PR, который так же закрывает задачу (без «часть»), ставит задаче todo/doing её направления review — один раз
+на PR (строка REVIEW_MARK в журнале).
 Обработанные PR отмечены в STATE/autoclose.json; задачу, уже закрытую этим PR (строка в журнале), второй раз не трогаем. Заодно проход запоминает, у каких
 задач есть открытый PR: без него «review больше суток» на доске — повод для внимания.
 
@@ -28,6 +30,7 @@ FIRST_LOOKBACK = 48 * 3600  # первый проход (нет состояни
 KEEP = 500             # отметок обработанных PR в состоянии
 LIMIT = 100
 NO_METRIC = "нет замера"
+REVIEW_MARK = "открыт → review"  # строка журнала задачи, которой открытый PR поставил review (тот же текст в boardstatus.py)
 VERSION_RE = re.compile(r'^\+\s*"version"\s*:\s*"([^"]+)"')
 DIFF_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)")
 
@@ -221,6 +224,8 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
                 opened[repo] = sorted({i for p in o if isinstance(p, dict) for i in find_ids(p.get("headRefName"), p.get("body"))})
                 open_prs[repo] = [{"number": p.get("number"), "head": str(p.get("headRefOid") or "")[:40],
                                    "ids": find_ids(p.get("headRefName"), p.get("body")),
+                                   "closes": closing_ids(p.get("headRefName"), p.get("body")),
+                                   "part": is_part(p.get("body")),
                                    "core": bool(core) and any(core(f.get("path") or "") for f in p.get("files") or []
                                                               if isinstance(f, dict))}
                                   for p in o if isinstance(p, dict) and isinstance(p.get("number"), int)]
@@ -255,6 +260,10 @@ def run(pantheon, state_file, cache_file, t, repo_dirs, T, actual_for=None):
                 if close_pr(pantheon, t, repo, pr, repo_dirs[repo], T, actual_for, log, errors):
                     done[key] = T.now_iso(t)
             open_ids.update((cache.get("open") or {}).get(repo) or [])
+        for repo in sorted(repo_dirs):
+            for pr in (cache.get("open_prs") or {}).get(repo) or []:
+                if isinstance(pr, dict):
+                    review_pr(pantheon, t, repo, pr, repo_dirs[repo], T, log, errors)
         finished = True
     finally:  # сбой посреди прохода (не только ValueError): отметки уже обработанных PR не теряем, кэш прочтём заново
         keep = dict(sorted(done.items(), key=lambda kv: kv[1])[-KEEP:])
@@ -263,6 +272,28 @@ def run(pantheon, state_file, cache_file, t, repo_dirs, T, actual_for=None):
             st["seen"] = cache.get("fetched")
         save_state(state_file, st)
     return log, errors
+
+
+def review_pr(pantheon, t, repo, pr, dirs, T, log, errors):
+    """Открытый PR, который закрывает задачу (id в ветке или «Closes» в теле, без «часть»), → задача todo/doing его
+    направления в review (metis-0397, п. 7). Строка REVIEW_MARK в журнале: этим PR уже ставили — второй раз не трогаем
+    (владелец вернул задачу — тревога у прохода доски, lib/boardstatus.py)."""
+    n = pr.get("number")
+    if not isinstance(n, int) or pr.get("part") or not isinstance(pr.get("closes"), list):
+        return
+    tasks = T.load_tasks(pantheon, T.WORK_TYPES)
+    note = f"PR #{n} ({repo}) {REVIEW_MARK}"
+    for tid in pr["closes"]:
+        path, head, _ = tasks.get(tid, ("", {}, ""))
+        if head.get("type") != "task" or head.get("direction") not in dirs or head.get("status") not in ("todo", "doing"):
+            continue
+        if journal_has(path, T, note):
+            continue
+        try:
+            T.task_set(pantheon, t, tid, {"status": "review"}, actor="плановый проход", note=note)
+            log.append(f"{tid}: review — открыт PR #{n} ({repo})")
+        except ValueError as e:
+            errors[f"{repo}#{n}"] = f"{tid}: {e}"
 
 
 def close_pr(pantheon, t, repo, pr, dirs, T, actual_for, log, errors):

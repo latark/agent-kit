@@ -796,6 +796,17 @@ def _fp_board_inputs():
     out += _fp_files([os.path.join(PANTHEON, "directions.toml"), os.path.join(PANTHEON, "schedule.toml")])
     out += _fp_files([os.path.join(PANTHEON, "board.md")])  # строка встраивания ![[board-auto]] (metis-0397)
     out += _fp_board_auto()
+    try:  # следы работы для статусов (metis-0397, п. 7): записи worktree и живые копии, PR, закрывающие задачи
+        S = boardstatus_mod()
+        roots = sorted({r for rs in S.roots(board_domains()).values() for r in rs})
+        out += [_stat_rec(p, p) for root in roots for p in S.wt_heads(root)]
+        out += [("worktrees", root, S.live_worktrees(root)) for root in roots]
+        ops = read_json(path("autoclose-prs.json"), {}).get("open_prs")
+        out.append(("open_closing", sorted((r, str(p.get("number")), repr(p.get("closes")), bool(p.get("part")))
+                                           for r, ps in (ops if isinstance(ops, dict) else {}).items()
+                                           if isinstance(ps, list) for p in ps if isinstance(p, dict))))
+    except Exception as e:  # noqa: BLE001 — сломанный вход: отпечаток другой, проход не пропускается
+        out.append(("board-status-inputs", repr(e), now()))
     return out
 
 
@@ -5922,6 +5933,7 @@ def board():
         if not got:
             return 0
         projects, marks, registry = board_registry(T)
+        status_lines = board_status_sync(T) if primary else []
         # политика уведомлений — под своей блокировкой на весь проход: сбои из run-job ждут, а не теряются
         with lock("notify"):
             pol = notify_policy(sched)
@@ -5941,11 +5953,65 @@ def board():
                 os.remove(fp)
         if primary:
             board_auto_sync(T)
-    for ln in lines:
+    for ln in status_lines + lines:
         print(ln)
     if primary and os.environ.get("PANTHEON_METRICS") != "0":
         board_metrics(T)
     return 0
+
+
+def boardstatus_mod():
+    """lib/boardstatus.py — статусы задач и пачек по следам работы (metis-0397, расширение)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_boardstatus", os.path.join(LIB, "boardstatus.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def board_domains():
+    d = read_json(path("domains.json"), {}).get("domains")
+    return d if isinstance(d, dict) else {}
+
+
+def board_status_sync(T):
+    """Статусы в шаг с работой (metis-0397, п. 7–8): задача todo с живой worktree на ветке с её id → doing, пачка — по
+    составу. До сборки видов доски: виды Obsidian сразу видят новые статусы. Задача, которую вернули в todo, а работа
+    идёт, — тревога один раз на набор задач. Сбой — тревога, проход доски идёт дальше. → строки для вывода."""
+    out = []
+    try:
+        S = boardstatus_mod()
+        tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+        open_closing = {}
+        cache = read_json(path("autoclose-prs.json"), {})
+        for repo, prs in sorted((cache.get("open_prs") if isinstance(cache.get("open_prs"), dict) else {}).items()):
+            for pr in prs if isinstance(prs, list) else []:
+                if isinstance(pr, dict) and isinstance(pr.get("number"), int) and not pr.get("part"):
+                    for tid in pr.get("closes") or []:
+                        open_closing.setdefault(tid, []).append((repo, pr["number"]))
+        moves, stale = S.plan(tasks, board_domains(), open_closing)
+        for tid, ch, note in moves:
+            old = tasks[tid][1].get("status")
+
+            def same(h, old=old, tid=tid):
+                if h.get("status") != old:
+                    raise ValueError(f"{tid}: статус уже {h.get('status')}")
+            try:
+                T.task_set(PANTHEON, now(), tid, ch, note=note, actor="плановый проход", precheck=same)
+                out.append(f"статус · {tid}: {old} → {ch['status']}")
+            except ValueError as e:  # задачу правят прямо сейчас — следующий проход посмотрит заново
+                out.append(f"статус · {tid}: не сдвинут ({e})")
+    except Exception as e:  # noqa: BLE001 — сбой сверки статусов не ломает проход доски
+        alert_once("board-status", type(e).__name__, f"доска: сверка статусов упала ({type(e).__name__}: {e})", "board")
+        return out
+    clear_once("board-status")
+    if stale:
+        alert_once("board-todo-live", ",".join(sorted(stale)), "доска: задачи в todo, а работа по ним идёт — "
+                   + "; ".join(f"{tid} ({why})" for tid, why in sorted(stale.items()))
+                   + ". Взять в работу — pantheon task claim ID --by КТО, или закрыть след (worktree, PR)", "board")
+    else:
+        clear_once("board-todo-live")
+    return out
 
 
 def boardtext_mod():
