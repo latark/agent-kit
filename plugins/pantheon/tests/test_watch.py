@@ -2187,7 +2187,7 @@ def test_who_is_who_memo():
     memo = os.path.join(pan, "Кто есть кто.md")
     full = ("`zeus` `daedalus-<задача>` `metis-pantheon` `hermes-site` `argus` `momus` `hephaestus-<проект>` "
             "`apollo-<проект>` `claude agents` `pantheon tick` `~/.claude/agents/<роль>.md`\n")
-    saved = {k: getattr(p, k) for k in ("PANTHEON", "STATE", "AGENTS", "PLUGIN_ROLES")}
+    saved = {k: getattr(p, k) for k in ("PANTHEON", "STATE", "AGENTS", "PLUGIN_ROLES", "ROLES_DEFERRED")}
     alerts = os.path.join(pan, "alerts.md")
     plug = os.path.join(d, "plugin-roles")  # общие шаблоны плагина (metis-0252): сначала пусто
     os.makedirs(plug)
@@ -2226,7 +2226,8 @@ def test_who_is_who_memo():
         # 6. metis-0252: новая роль есть только шаблоном в плагине (не собрана), в памятке её нет: +имя
         put(full)
         open(os.path.join(plug, "newgod.tmpl"), "w").write("шаблон")
-        open(os.path.join(plug, "hestia.tmpl"), "w").write("отложена")  # ROLES_DEFERRED: не роль
+        p.ROLES_DEFERRED = {"hearth": "проба"}  # отложенная роль (сейчас таких нет, механизм остаётся): не роль
+        open(os.path.join(plug, "hearth.tmpl"), "w").write("отложена")
         check(p.who_is_who_check() == (["newgod"], []), f"шаблон плагина не виден сверке: {p.who_is_who_check()}")
         put(full + "`newgod`\n")
         check(p.who_is_who_check() == ([], []), f"роль в памятке, а сверка нашла {p.who_is_who_check()}")

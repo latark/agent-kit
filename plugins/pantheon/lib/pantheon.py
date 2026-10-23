@@ -18,9 +18,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         освежить индекс, сервер MCP (служба), подключить к Claude на этом Mac
   pantheon plugins update [--quiet]     новые версии плагинов agent-kit (плановый проход раз в 10 мин): тесты новой и
                                         установленной версии; нет новых падений — claude plugin update, есть — тревога;
-                                        установленная гоняется лишь по (python, файл), где новая упала; таймауты и срок
-                                        прогона не гоняются, базе достаётся остаток срока; база не гасит
-                                        «ни одной проверки» и «проверок меньше, чем у базы» (metis-0360);
+                                        установленная гоняется лишь по (python, файл), где новая упала или кончилась кодом 0
+                                        со строками ok, но без итога; таймауты и срок прогона не гоняются, базе достаётся
+                                        остаток срока; база не гасит «ни одной проверки» и «проверок меньше, чем у базы»
+                                        (metis-0360); код 0 без итога красный, если у базы итог был или файла нет (metis-0361);
                                         после установки плановый проход перезапускает свободные окна (metis-0181)
   pantheon plugins accept [--new] [guard] [pantheon]   принять установленное дерево как проверенное (verified.json):
                                         живой код и окна ролей идут только на проверенное (metis-0321); только руками
@@ -83,7 +84,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon revisits                     пересмотры к сроку и по событиям (плановый проход раз в сутки)
   pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией; задание из окна роли
                                         — только по слову владельца в окне Зевса за 15 мин, иначе код 2
-  pantheon wake hestia --task <id>      Гестия: всегда отказ (код 2) — окно песочницы появится в metis-0245
+  pantheon wake hestia --task <id> [--dry-run]   Гестия в своём окне песочницы (settings/hestia.json) с открытой
+                                        задачей; без задачи или с закрытой — отказ «нет задачи» (код 2)
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
                                         сессия уходит из фоновых сессий Claude Code) и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
@@ -494,6 +496,13 @@ JOB_EXCLUDED = ["pantheon alert *"]
 JOB_NO_AGENTS = "никого"
 # Встроенные типы Claude Code — в deny окна задачи вместе с ролями из ~/.claude/agents и лидами реестра
 BUILTIN_AGENTS = ["general-purpose", "claude", "Explore", "Plan", "statusline-setup", "claude-code-guide"]
+# Окно Гестии (metis-0245): мимо песочницы — только выпуск плагинов (`pantheon plugins update`: тесты, установка,
+# сверка хеша, проверенное дерево — голый `claude plugin update` оставил бы непроверенное и закрыл окна ролей),
+# сборка окон и ролей, технический перезапуск окон и тревога. Остальные подкоманды pantheon — в песочнице, а какие ей
+# вообще можно, решает guard (правило hestia). Файловых правок, веба и субагентов у окна нет
+HESTIA_EXCLUDED = ["pantheon plugins update", "pantheon plugins update *", "pantheon domains build",
+                   "pantheon restart *", "pantheon alert *"]
+HESTIA_DENY_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Agent"]
 
 
 def job_window(role):
@@ -1847,15 +1856,16 @@ def archive():
     return 0
 
 
-# Имена окон, которые не направления: sandbox_build пишет settings/hq.json, workshop.json и job-<роль>.json; направление
-# с таким именем записало бы свои настройки в чужой файл — а при сбое второй записи они там и остались бы (metis-0163)
-RESERVED_DIRECTIONS = ("hq", "workshop")
+# Имена окон, которые не направления: sandbox_build пишет settings/hq.json, workshop.json, hestia.json (metis-0245) и
+# job-<роль>.json; направление с таким именем записало бы свои настройки в чужой файл — а при сбое второй записи они
+# там и остались бы (metis-0163)
+RESERVED_DIRECTIONS = ("hq", "workshop", "hestia")
 
 
 def reserved_direction(name):
-    """Текст ошибки, если имя направления зарезервировано под окно hq, workshop или job-*; иначе None."""
+    """Текст ошибки, если имя направления зарезервировано под окно hq, workshop, hestia или job-*; иначе None."""
     if isinstance(name, str) and (name in RESERVED_DIRECTIONS or name.startswith("job-")):
-        return (f"имя «{name}» зарезервировано под окна системы (hq, workshop, job-*): настройки направления "
+        return (f"имя «{name}» зарезервировано под окна системы (hq, workshop, hestia, job-*): настройки направления "
                 "записались бы в чужой файл окна — выберите другое имя")
     return None
 
@@ -2568,8 +2578,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     for name, folders in domains.items():
         mine = leads.get(name, [])
         # chiron видит личное (me/) — только Зевсу (P0-2); главные роли и чужие лиды не нужны и лидам окна
+        # hestia — только своим окном (`pantheon wake hestia --task`), не субагентом (metis-0245)
         agents = (mine + COORDINATOR_AGENTS + COORDINATOR_EXTRA_AGENTS.get(name, []),
-                  ["chiron"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
+                  ["chiron", "hestia"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
         if one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
                [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, direction=True,
                # окну с доступом к личному правило слияния не выдаётся — его PR сливает владелец (metis-0156)
@@ -2610,6 +2621,26 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                       [x for x in BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES) if x not in mine], agents_py)
         write_window(out_dir, name, job)
         built.append(name)
+    # окно Гестии (metis-0245, решение владельца «А» 18.10): служебная роль ставит слитые выпуски и пересобирает и
+    # перезапускает окна. Bash пишет только в TMPDIR (кэш — папка запуска, запись в него guard не пускает); ни одной папки проекта, памяти
+    # ролей и ~/.claude — запись туда только командами пульта мимо песочницы (HESTIA_EXCLUDED), а не руками. Личное
+    # закрыто на чтение (Bash — песочницей, Read и Grep — правилами deny); сети у Bash нет (выпуск качает `pantheon plugins update` вне песочницы); файловых правок и веба
+    # нет. Субагентов не зовёт. Что ей можно в Bash сверх этого, решает guard по PANTHEON_ROLE=hestia (правило hestia)
+    hs_cache = _real_dir(f"{caches}/hestia", [caches], strict=True, create=True)
+    hs = role_settings([], None, [], hs_cache, False, private_paths, None, guard)
+    hs["sandbox"]["excludedCommands"] = list(HESTIA_EXCLUDED)
+    hs["sandbox"]["network"]["allowedDomains"] = []
+    hs["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
+    hs.setdefault("permissions", {}).setdefault("deny", []).extend(HESTIA_DENY_TOOLS)
+    # denyRead песочницы держит только Bash; Read и Grep её не проходят, а главная сессия окна приходит без agent_type
+    # и guard личное не судит — поэтому те же личные пути закрываются правилами Read(...) и Grep(...) (как у hq)
+    hs_rule = lambda tool, x: f"{tool}({x})" if x.startswith("~") else f"{tool}(/{x})"  # noqa: E731
+    hs["permissions"]["deny"].extend(hs_rule(t, x + "/**") for t in ("Read", "Grep") for x in _deny_forms(private_paths))
+    hs["permissions"]["deny"].extend(hs_rule(t, x) for t in ("Read", "Grep") for x in _deny_forms(private_paths))
+    hs["env"]["PANTHEON_ROLE"] = "hestia"
+    agents_window(hs, [JOB_NO_AGENTS], BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES), agents_py)
+    write_window(out_dir, "hestia", hs)
+    built.append("hestia")
     # что закрыто штабу — [hq] policy.toml. Битый раздел — ошибка, а не «пусто»: окно Пританея не пересобираем, остаётся
     # прежнее (его файл не удаляется), и тревога — пока раздел не исправят
     try:
@@ -2677,8 +2708,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     rule = lambda x: f"Read({x})" if x.startswith("~") else f"Read(/{x})"  # noqa: E731 — «//» — абсолютный путь
     hq.setdefault("permissions", {}).setdefault("deny", []).extend(
         [rule(x + "/**") for x in _deny_forms(closed)] + [rule(x) for x in _deny_forms(files)])
-    # P0-6: код — поручение направлению, а не лид в окне штаба
-    agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES), agents_py)
+    # P0-6: код — поручение направлению, а не лид в окне штаба; Гестия — своим окном (`pantheon wake hestia --task`)
+    agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES) + ["hestia"], agents_py)
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
     write_window(out_dir, "hq", hq)
     built.append("hq")
@@ -3793,11 +3824,47 @@ def wake_recheck(name, state=None):
 
 
 def wake_hestia(rest):
-    """pantheon wake hestia [--task <id>] (metis-0217, шаг 1): запуск Гестии отказывает всегда, код 2. Роль собирается, но
-    у неё нет окна песочницы (hestia не в guard PANTHEON_ROLES, `claude -p --agent hestia` шёл бы сессией владельца
-    без границы прав), поэтому claude не зовётся. Запуск откроет metis-0245 (окно песочницы) отдельным PR ядра после «да» владельца."""
-    print("pantheon wake hestia: отказ — нет окна песочницы (metis-0245); claude не запускался", file=sys.stderr)
-    return 2
+    """pantheon wake hestia --task <id> [--dry-run] (metis-0217, metis-0245): Гестия — фоновой сессией `hestia` в своём
+    окне песочницы (settings/hestia.json, собирает sandbox_build; PANTHEON_ROLE=hestia — правило guard hestia), папка
+    запуска — её кэш. Одна задача — одна сессия: без задачи, с id не по образцу, несуществующей или не открытой задачей
+    — отказ «нет задачи», код 2, claude не зовётся. Нет окна, кэша или роли (~/.claude/agents/hestia.md) — код 1 с
+    командой сборки. Метка «остановлено вами», технический перезапуск и живая копия — отказ, как у start."""
+    dry = "--dry-run" in rest
+    args = [a for a in rest[1:] if a != "--dry-run"]
+    tid = args[1] if len(args) == 2 and args[0] == "--task" else None
+    head = None
+    if tid and tasks_mod().ID_RE.fullmatch(tid):
+        head = (tasks_mod().load_tasks(PANTHEON).get(tid) or (None, None, None))[1]
+    if not head or head.get("status") not in OPEN_STATUSES:
+        why = ("укажи --task <id> открытой задачи (todo, doing, review)" if head is None
+               else f"задача {tid} не открыта ({head.get('status')})")
+        print(f"pantheon wake hestia: отказ — нет задачи: {why}; claude не запускался", file=sys.stderr)
+        return 2
+    win = path("settings", "hestia.json")
+    folder = _real_dir("~/Library/Caches/pantheon-sandbox/hestia", ["~/Library/Caches/pantheon-sandbox"], strict=True)
+    if not os.path.isfile(win) or not folder:
+        print(f"pantheon wake hestia: нет окна {win.replace(HOME, '~')} или его папки — pantheon domains build",
+              file=sys.stderr)
+        return 1
+    if not os.path.isfile(os.path.join(AGENTS, "hestia.md")):
+        print("pantheon wake hestia: нет роли ~/.claude/agents/hestia.md — pantheon roles build", file=sys.stderr)
+        return 1
+    if os.path.exists(path("stopped", "hestia")):
+        print("pantheon wake hestia: hestia остановлена вами (pantheon resume hestia)", file=sys.stderr)
+        return 1
+    m = maintenance_active()
+    if m and not dry:
+        print(f"pantheon wake hestia: идёт технический перезапуск ({m.get('reason')}) — после pantheon restart --go",
+              file=sys.stderr)
+        return 1
+    origin = "zeus" if os.environ.get("PANTHEON_ROLE") == "hq" else "owner"
+    task = (f"Задача {tid}: прочитай её карточку (pantheon task show {tid}) и сделай ровно то, что в ней. Отчёт — по "
+            "формату роли, каждое действие — строкой журнала в нём.")
+    with lock("start-hestia", block=False) as got:
+        if not got:
+            print("pantheon wake hestia: hestia уже запускается другой командой", file=sys.stderr)
+            return 1
+        return _start_session("hestia", "hestia", folder, "hestia", task, [], origin, dry, False, win)
 
 
 def wake(rest):
@@ -3998,9 +4065,18 @@ def _marked(text, tmpl):
 
 
 # Шаблоны, которые build пока не собирает (metis-0217, review-51-bypass): роль, которую нельзя звать до окна
-# песочницы, не должна лежать в ~/.claude/agents — иначе её поднимет субагент мимо отказа wake. Убрать строку —
-# когда слит metis-0245. Уже собранный файл с меткой build убирает как устаревшую роль.
-ROLES_DEFERRED = {"hestia": "metis-0245"}
+# песочницы, не должна лежать в ~/.claude/agents — иначе её поднимет субагент мимо отказа wake. Строка — имя шаблона и
+# задача, которая его откроет; уже собранный файл с меткой build убирает как устаревшую роль. Пусто с metis-0245:
+# у hestia своё окно (sandbox_build) и правило guard «hestia».
+ROLES_DEFERRED = {}
+
+
+def _head_names(text):
+    """Значения полей name: шапки роли без кавычек, по порядку; [] — шапки или поля нет, два и больше — повтор."""
+    end = text.find("\n---\n", 3) if text.startswith("---\n") else -1
+    if end < 0:
+        return []
+    return [ln.split(":", 1)[1].strip().strip("\"'") for ln in text[4:end].splitlines() if re.match(r"name\s*:", ln)]
 
 
 def roles_build(src=None, out=None, role_errors=None):
@@ -4074,6 +4150,16 @@ def roles_build(src=None, out=None, role_errors=None):
                 kept.add(f"{base}-{short}.md")
                 continue
             want[f"{base}-{short}.md"] = (f, out_text)
+    # Claude Code зовёт роль по полю name:, а не по имени файла (argus-51d): личный hearth.tmpl с `name: hestia` дал бы
+    # вторую hestia мимо её окна и правил. Несовпадение — роль не собирается, а прежний собранный файл убирается ниже
+    for fname in sorted(want):
+        got = _head_names(want[fname][1])
+        if got != [fname[:-3]]:
+            tmpl = want.pop(fname)[0]
+            what = ("нет" if not got else f"«{got[0]}»" if len(got) == 1
+                    else "повторён (" + ", ".join(f"«{g}»" for g in got) + ")")
+            err(tmpl, f"{tmpl} → {fname}: поле name: в шапке {what} — не совпадает с именем роли «{fname[:-3]}», "
+                f"роль не собрана")
     made = []
     if want:  # и на новой машине: ~/.claude/agents ещё нет, а общие роли плагина собрать надо
         os.makedirs(out, exist_ok=True)
@@ -6473,12 +6559,17 @@ def usage_report(rest):
 # установленной (база) на одних и тех же python → есть новые падения — не ставим, тревога; нет — claude plugin update.
 # База нужна, чтобы падения от места запуска (временная папка, python 3.9) не держали обновление вечно.
 # Подпись падения (metis-0360): строка FAIL или «НЕ ПРОШЛО» / «НЕ ПРОШЁЛ» / «ОШИБКА:» (в них изменчивое — время,
-# pid, порты, списки чисел [..], числа от 4 знаков — N; номер и значение проверки остаются), исключение в конце вывода вместе с текстом
-# (адреса 0x… — 0x…), «код N», «нет итоговой строки» (последняя непустая строка — не итог: упал до него), таймаут,
+# pid, порты, списки чисел [..], числа от 4 знаков и замеры с тремя и более знаками после точки — N; номер и значение
+# проверки короче («запас +4», «сбой 3», «ответ в 23:10») остаются; значение из 4+ знаков склеивается — имя проверки
+# с таким значением новому тесту не давать), исключение в конце вывода вместе с текстом
+# (адреса 0x… — 0x…), «код N», «нет итоговой строки» (последняя непустая строка — не итог: упал до него; деталь,
+# похожая на итог, — «нет итоговой строки (последняя строка — деталь провала, не итог)», её «нет итога» базы не гасит), таймаут,
 # срок прогона. Временный путь: корень — <tmp>, случайные папки цепочки от корня и tmpXXXXXXXX — «…», корень копии —
 # <copy>, путь внутри и имя файла остаются. База гасит только совпавшие подписи той же пары (python, файл). Не гасит:
 # «ни одной проверки» (код 0 без ok и без числа проверок в итоге: нет итога, «0 из 0», «OK 0» — база по такому файлу
 # не гоняется) и «проверок меньше, чем у базы» (строк ok у новой меньше или итог называет меньше проверок).
+# Код 0, строки ok и ни строки итога (metis-0361): пять файлов agent-kit так кончаются законно, поэтому базу по ним гоняем
+# и сверяем: у базы файла нет или итог был — красное «оборвался без итога»; у базы тот же стиль — решает число строк ok.
 # Цена строгости (ревью 0359, круг 3): тот же флак с другим счётчиком в строке провала («ответов 9» против «10» у
 # keep-alive test_svc_ondemand) базой не гасится — красное, а не склейка соседних проверок цикла. Флак чинится в
 # самом тесте, а не подписью: keep-alive с metis-0365 меряет время жизни соединения, а не число ответов.
@@ -6490,6 +6581,8 @@ MARKETPLACE = "agent-kit"
 PLUGIN_TEST_TIMEOUT = 600    # один файл тестов
 PLUGIN_RUN_LIMIT = 1800      # весь прогон плагина (новая + база, все python) — меньше timeout задачи в schedule.toml
 NO_TESTS = "нет тестов"
+WHY_DETAIL = "последняя строка — деталь провала, не итог"
+BARE_END = "код 0, строки ok и ни строки итога — оборвался без итога"  # metis-0361
 NO_CHECKS = "ни одной проверки"  # код 0, ни строки ok, ни FAIL, ни итога — файл ничего не проверил (metis-0360)
 # Итоговая строка файла тестов agent-kit: «N из M прошли», «N/M», «тестов: N …», «OK N» / «FAIL N», «ПРОВАЛ: …»,
 # «N команд × …» (guard test_shell_diff). Есть у файлов, дошедших до конца; файл без своего итога (кончается строкой
@@ -6679,7 +6772,7 @@ _SUMMARY_TOTAL = (
 )
 # Строки провала: FAIL и «НЕ ПРОШЛО» / «НЕ ПРОШЁЛ» / «ОШИБКА:» файлов без строк ok (test_watch, test_night,
 # test_awake, test_mmv, test_svc_ondemand и др., ревью 0359, первый argus). У вторых деталь проверки — в той же
-# строке, поэтому изменчивое в ней — N (_VOLATILE): время, pid и их списки, порты, эпоха, байты. Номер и значение проверки
+# строке, поэтому изменчивое в ней — N (_VOLATILE): время, pid и их списки, порты, эпоха, байты (числа от 4 знаков). Номер и значение проверки короче 4 знаков
 # («запас +4», «сбой 3», «ответ в 23:10», «неделя 31.6 %») остаются: числа целиком в N склеивали соседние проверки
 # цикла, и провал базы в одной гасил провал новой в другой (ревью 0359, второй argus круг 2, п.1)
 FAIL_PREFIXES = ("FAIL",)
@@ -6708,20 +6801,28 @@ def _ok_lines(lines):
 
 def _summary_of(lines):
     """Итоговая строка файла — последняя непустая, если она похожа на итог (TEST_SUMMARY): (есть ли итог, число
-    проверок в нём или None). Итог с числом прошедших («N из M», «N/M») у файла со строками ok верен, только если N —
-    их число: «2/3» из вывода ребёнка последней строкой перед молчаливым обрывом за итог не считается (ревью 0359,
-    п.4, проба G)."""
+    проверок в нём или None, why). why — не None, когда последняя строка выглядит как итог, но им не считается
+    (деталь провала, не итог): «нет итоговой строки» у такого файла получает отдельную подпись (metis-0362, R1), и
+    «нет итога» базы не гасит настоящий обрыв новой. Итог с числом прошедших («N из M», «N/M») у файла со строками
+    ok верен, только если N — их число: «2/3» из вывода ребёнка последней строкой перед молчаливым обрывом за итог
+    не считается (ревью 0359, п.4, проба G)."""
     last = next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
     nok = _ok_lines(lines)
     passed = re.match(r"(\d+)\s*(?:из\s|/)", last)
-    if not TEST_SUMMARY.match(last) or (nok and passed and int(passed[1]) != nok):
-        return False, None
+    if not TEST_SUMMARY.match(last):
+        return False, None, None
+    if nok and passed and int(passed[1]) != nok:
+        return False, None, WHY_DETAIL
+    failed = any(ln.strip().startswith(FAIL_PREFIXES + FAIL_PREFIXES_N) for ln in lines)
     total = _summary_total(last)
     # «все прошли» («39/39», «39 из 39») при строке провала выше — не итог, а строка из детали (п.4, проба S1)
-    if passed and total == int(passed[1]) and any(ln.strip().startswith(FAIL_PREFIXES + FAIL_PREFIXES_N)
-                                                 for ln in lines):
-        return False, None
-    return True, total
+    if passed and total == int(passed[1]) and failed:
+        return False, None, WHY_DETAIL
+    # голое «N/M» у файла без строк ok — деталь («38/39» из вывода ребёнка, S1b, metis-0362):
+    # настоящие итоги таких файлов — «N из M прошли» и «тестов: N, …», голое N/M печатают только файлы со строками ok
+    if not nok and re.fullmatch(r"\d+\s*/\s*\d+", last):
+        return False, None, WHY_DETAIL
+    return True, total, None
 
 
 def _summary_total(line):
@@ -6739,13 +6840,14 @@ def _ok_count(out):
     ревью 0359, п.3: десять файлов строк ok не печатают, их число видно только в итоге). Меньше, чем у базы, по любой
     из двух мер — проверки пропущены (_fresh_failures)."""
     lines = ANSI.sub("", out).splitlines()
-    return _ok_lines(lines), _summary_of(lines)[1]
+    summary, total, _why = _summary_of(lines)
+    return _ok_lines(lines), total, summary
 
 
 def _fewer_checks(new, base):
     """Причина «проверок меньше» или None: строк ok меньше, чем у базы, или итог называет меньше проверок (обе меры
     известны). Число вместо пары — только строки ok (старые вызовы)."""
-    (n, nt), (m, mt) = ((v if isinstance(v, tuple) else (v or 0, None)) for v in (new, base))
+    (n, nt), (m, mt) = ((tuple(v[:2]) if isinstance(v, tuple) else (v or 0, None)) for v in (new, base))
     if n < m:
         return f"{n} < {m}"
     if nt is not None and mt is not None and nt < mt:
@@ -6780,24 +6882,30 @@ def _failure_signatures(fname, out, rc):
             # с текстом: FileNotFoundError окружения у базы не гасит другой FileNotFoundError новой версии
             msg = _HEX_RE.sub("0x…", _tmp_sub(lines[-1][m.end():].strip()))[:200]
             sigs.append(f"{fname}: исключение {m.group(1)}" + (f": {msg}" if msg else ""))
-    summary, total = _summary_of(lines)
+    summary, total, why = _summary_of(lines)
     if rc != 0:
         sigs.append(f"{fname}: код {rc}")
-        if not summary:
-            sigs.append(f"{fname}: нет итоговой строки")
+        if not summary:  # деталь, похожая на итог, — своя подпись: «нет итога» базы не гасит обрыв новой (R1)
+            sigs.append(f"{fname}: нет итоговой строки" + (f" ({why})" if why else ""))
     elif not sigs and not _ok_lines(lines) and not total:  # нет итога, «0 из 0» или итог без числа проверок
         sigs.append(f"{fname}: {NO_CHECKS}")
     return sigs
 
 
-def _fresh_failures(got_new, got_base, ok_new=None, ok_base=None):
+def _fresh_failures(got_new, got_base, ok_new=None, ok_base=None, bare=(), bare_base=None):
     """Новые падения = подписи новой версии минус подписи базы. Файл, который у базы кончился таймаутом или сроком
     прогона, — не «чистый» и не «такой же сбой»: о нём ничего не известно, поэтому у новой версии в нём ничто не
     гасится (в том числе её собственный таймаут) — падение остаётся падением. Отдаёт (Counter, {(python, файл)}).
     metis-0360: ok_new/ok_base — {(python, файл): _ok_count} досчитанных файлов (_run_plugin_tests). Новая прошла
     меньше проверок, чем база, в том же файле (строк ok или по итогу, _fewer_checks) — подпись «проверок меньше, чем у
     базы»: оборвалась молча раньше, и
-    общие с базой подписи не должны прятать непроверенный остаток. NO_CHECKS база не гасит."""
+    общие с базой подписи не должны прятать непроверенный остаток. NO_CHECKS база не гасит.
+    metis-0361: bare — {(python, файл)} с кодом 0, строками ok и без итоговой строки (_run_plugin_tests). Пять
+    файлов agent-kit так заканчиваются законно, поэтому их сверяют с базой: у базы нет этого файла или итог у неё
+    был, а у новой пропал — «оборвался без итога»; у базы тот же стиль без итога — строки ok сравнивает _fewer_checks
+    (новая оборвалась раньше — «проверок меньше»). «Тот же стиль» — только если и база сама в bare_base (код 0, строки
+    ok, без итога и без подписей): база, которая упала (код не 0, FAIL, Traceback), — красное «у базы файл упал»
+    (ревью 115, п.1); bare_base None — старые вызовы, база считается упавшей."""
     unknown = {(py, f) for (py, f, s) in got_base if s.endswith((": срок прогона", ": таймаут"))}
     known_base = collections.Counter({k: n for k, n in got_base.items() if (k[0], k[1]) not in unknown})
     fresh = got_new - known_base
@@ -6808,6 +6916,19 @@ def _fresh_failures(got_new, got_base, ok_new=None, ok_base=None):
         why = _fewer_checks((ok_new or {}).get((py, f), 0), m)
         if (py, f) not in unknown and why:
             fresh[(py, f, f"{f}: проверок меньше, чем у базы ({why})")] = 1
+    for py, f in bare:
+        b = (ok_base or {}).get((py, f))
+        if (py, f) in unknown:
+            reason = "база не досчитана"
+        elif b is None:
+            reason = "у базы такого файла нет"
+        elif len(b) > 2 and b[2]:
+            reason = "у базы итог был"
+        elif (py, f) not in (bare_base or ()):
+            reason = "у базы файл упал"
+        else:
+            continue
+        fresh[(py, f, f"{f}: {BARE_END} ({reason})")] = 1
     return fresh, unknown
 
 
@@ -6817,20 +6938,21 @@ def _test_files(pdir):
         if tests_dir and os.path.isdir(tests_dir) else []
 
 
-def _base_targets(got_new):
+def _base_targets(got_new, bare=()):
     """metis-0358: (python, файл), которые стоит гонять у базы, — только где у новой версии есть подписи падений:
     базу нужно лишь вычитать из них. Файл, где новая кончилась таймаутом или сроком прогона, база погасить не может
     (_fresh_failures), поэтому и его не гоняем. Чистые файлы новой — тоже: раньше база шла по всем и не успевала в
     PLUGIN_RUN_LIMIT, а недосчитанная база превращала прежние падения окружения в новые. Файл без единой проверки
-    (NO_CHECKS) — тоже: база его не гасит (metis-0360)."""
+    (NO_CHECKS) — тоже: база его не гасит (metis-0360). Исключение — bare (код 0, строки ok, без итога, metis-0361):
+    базу гоняем, чтобы сверить число строк ok и наличие итога."""
     stuck = {(py, f) for (py, f, s) in got_new if s.endswith((": срок прогона", ": таймаут", f": {NO_CHECKS}"))}
-    return {(py, f) for (py, f, _s) in got_new} - stuck
+    return ({(py, f) for (py, f, _s) in got_new} - stuck) | set(bare)
 
 
-def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=None):
+def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=None, bare=None):
     """tests/test_*.py папки pdir по одному на каждом python → Counter подписей (python, файл, подпись). only —
     множество (python, файл): гонять только их (база, metis-0358); None — все. Срок — общий deadline прогона:
-    базе достаётся то, что осталось после новой версии. oks — словарь, куда пишется {(python, файл): _ok_count}
+    базе достаётся то, что осталось после новой версии. bare — множество, куда попадают (python, файл) с кодом 0, строками ok и без итога (metis-0361). oks — словарь, куда пишется {(python, файл): _ok_count}
     файлов, дошедших до выхода (не таймаут и не срок) — для сравнения с базой (metis-0360)."""
     sigs = collections.Counter()
     env0 = {k: v for k, v in os.environ.items()
@@ -6863,8 +6985,12 @@ def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=N
             log.flush()
             if oks is not None and rc not in (None, "срок"):
                 oks[(py, f)] = _ok_count(out)
-            for s in _failure_signatures(f, out, rc):
+            fsigs = _failure_signatures(f, out, rc)
+            for s in fsigs:
                 sigs[(py, f, s)] += 1
+            if bare is not None and rc == 0 and not fsigs and oks is not None and (py, f) in oks \
+                    and oks[(py, f)][0] and not oks[(py, f)][2]:
+                bare.add((py, f))
     return sigs
 
 
@@ -7017,15 +7143,16 @@ def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=N
             for who, notes in (("новая", notes_new), ("база", notes_base)):
                 for n in notes:
                     fh.write(f"копия ({who}): {n}\n")
-            ok_new, ok_base = {}, {}
-            got_new = _run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}", deadline, oks=ok_new)
-            want = _base_targets(got_new)
+            ok_new, ok_base, bare, bare_base = {}, {}, set(), set()
+            got_new = _run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}", deadline, oks=ok_new, bare=bare)
+            want = _base_targets(got_new, bare)
             skipped = sum(1 for py in pythons for f in _test_files(base_dir) if (py, f) not in want)
             if base_dir and skipped:
                 fh.write(f"\n===== база {old}: {skipped} файл(ов) не гоняются — у новой версии в них нет падений, "
                          "либо таймаут, срок прогона или ни одной проверки (их база не гасит) =====\n")
-            got_base = _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline, only=want, oks=ok_base)
-            fresh, unknown = _fresh_failures(got_new, got_base, ok_new, ok_base)
+            got_base = _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline, only=want, oks=ok_base,
+                                        bare=bare_base)
+            fresh, unknown = _fresh_failures(got_new, got_base, ok_new, ok_base, bare, bare_base)
             for py, f in sorted(unknown):
                 fh.write(f"база не досчитана: {py} · {f} — файл базы не дошёл до конца (таймаут или срок прогона), "
                          "падения новой версии в нём считаются новыми\n")
