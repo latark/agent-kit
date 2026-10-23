@@ -148,11 +148,11 @@ class Env:
         json.dump(data, open(cj, "w"))
         return folder
 
-    def task(self, tid, direction, status="todo"):
+    def task(self, tid, direction, status="todo", extra="", updated="2026-10-15T07:00:00"):
         p = os.path.join(self.pantheon, "directions", direction, "tasks", tid + ".md")
         open(p, "w").write(f"---\ntype: task\nid: {tid}\ntitle: проба\nstatus: {status}\nproject: {direction}\n"
-                           f"direction: {direction}\ncreated: 2026-10-15\nupdated: 2026-10-15T07:00:00\n"
-                           "schema_version: 1\npriority: 2\n---\n\nтекст\n")
+                           f"direction: {direction}\ncreated: 2026-10-15\nupdated: {updated}\n"
+                           f"schema_version: 1\npriority: 2\n{extra}---\n\nтекст\n")
 
     def board(self, tid, t, kind="move", dst="Очередь"):
         rec = {"time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t)), "kind": kind, "id": tid, "dst": dst}
@@ -283,6 +283,87 @@ def test_autostart_order_board_vs_zeus_0242():
     check(len(starts) == 1, f"самозапуск не пошёл: {e.calls()}")
     want = "athena-0001, athena-0002, athena-0003"
     check(want in " ".join(starts[0]), f"порядок board/zeus.md нарушен ({want}): {' '.join(starts[0])[-400:]}")
+
+
+def _bg_text(e):
+    starts = [c for c in e.calls() if c[:1] == ["--bg"]]
+    return starts, " ".join(starts[0]) if starts else ""
+
+
+def test_autostart_deps_order_0248():
+    """metis-0248: A зависит от B, отметки A, B → в задании B, A (зависимости раньше отметок); цепочка — одна сессия."""
+    e = Env()
+    e.direction("athena-x")
+    e.task("athena-0001", "athena-x", extra="depends_on: [athena-0002]\n")
+    e.task("athena-0002", "athena-x")
+    e.run("watch", t=T0)
+    e.board("athena-0001", T0 + 100)
+    e.board("athena-0002", T0 + 110)
+    e.run("watch", t=T0 + 500)
+    starts, text = _bg_text(e)
+    check(len(starts) == 1 and "athena-0002, athena-0001" in text, f"0248: порядок B, A: {text[-400:]}")
+
+
+def test_autostart_stuck_pred_alert_0248():
+    """Предшественник waiting → «ждёт зависший», тревога, запуска нет; без изменений > 24 ч (вне пачки) — то же."""
+    for kw, name in (({"status": "waiting", "extra": "waiting_on: human\n"}, "waiting"), ({"status": "doing", "updated": time.strftime(
+            "%Y-%m-%dT%H:%M:%S", time.localtime(T0 - 30 * 3600))}, "старше 24 ч")):
+        e = Env()
+        e.direction("athena-x")
+        e.task("athena-0001", "athena-x", extra="depends_on: [athena-0002]\n")
+        e.task("athena-0002", "athena-x", **kw)
+        check(os.path.exists(os.path.join(e.pantheon, "directions", "athena-x", "tasks", "athena-0002.md")), "задача записана")
+        e.run("watch", t=T0)
+        e.board("athena-0001", T0 + 100)
+        e.run("watch", t=T0 + 500)
+        check(not _bg_text(e)[0], f"0248: запуск при зависшем ({name})")
+        check("ждёт зависший athena-0002" in e.alerts(), f"0248: нет тревоги ({name}): {e.alerts()[-300:]}")
+    # свежий doing — просто ждёт, тревоги нет
+    e = Env()
+    e.direction("athena-x")
+    e.task("athena-0001", "athena-x", extra="depends_on: [athena-0002]\n")
+    e.task("athena-0002", "athena-x", status="doing", updated=time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(T0 - 3600)))
+    e.run("watch", t=T0)
+    e.board("athena-0001", T0 + 100)
+    e.run("watch", t=T0 + 500)
+    check(not _bg_text(e)[0] and "зависший" not in e.alerts() and "athena-0001 — ждёт athena-0002" in e.alerts(),
+          f"0248: свежий предшественник — ожидание с тревогой «ждёт id», не зависший: {e.alerts()[-300:]}")
+
+
+def test_autostart_cycle_alert_0248():
+    """Цикл depends_on → тревога, без запуска."""
+    e = Env()
+    e.direction("athena-x")
+    e.task("athena-0001", "athena-x", extra="depends_on: [athena-0002]\n")
+    e.task("athena-0002", "athena-x", extra="depends_on: [athena-0001]\n")
+    e.run("watch", t=T0)
+    e.board("athena-0001", T0 + 100)
+    e.board("athena-0002", T0 + 110)
+    e.run("watch", t=T0 + 500)
+    check(not _bg_text(e)[0], "0248: запуск при цикле")
+    check("в цикле зависимостей" in e.alerts(), f"0248: нет тревоги о цикле: {e.alerts()[-300:]}")
+
+
+def test_autostart_shared_touches_other_direction_0248():
+    """Общие файлы с идущей у другого направления задачей → вторая не стартует (пустой touches не блокирует); соседние
+    папки — стартует."""
+    for mine, theirs, goes in ((["plugins/pantheon/lib/watch.py"], ["plugins/pantheon/"], False),
+                               ([], [], True), (["plugins/pantheon/"], ["plugins/guard/"], True)):
+        e = Env()
+        e.direction("athena-x")
+        e.direction("hermes-y")
+        fm = lambda v: ("touches: [" + ", ".join(v) + "]\n") if v else ""  # noqa: E731
+        e.task("athena-0001", "athena-x", extra=fm(mine))
+        e.task("hermes-0001", "hermes-y", status="doing", extra=fm(theirs),
+               updated=time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(T0 - 600)))
+        e.agents([bg("hermes-y", "working", "11111111-aaaa", pid=os.getpid())])
+        e.run("watch", t=T0)
+        e.board("athena-0001", T0 + 100)
+        e.run("watch", t=T0 + 500)
+        starts = [c for c in e.calls() if c[:1] == ["--bg"] and "athena-x" in " ".join(c)]
+        check(bool(starts) == goes, f"0248: touches {mine} vs {theirs}: ждали запуск={goes}, {e.calls()}")
+        if not goes:
+            check("athena-0001 — ждёт hermes-0001: общие файлы" in e.alerts(), f"0248: ожидание без тревоги: {e.alerts()[-300:]}")
 
 
 def _give_up(e):

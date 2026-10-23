@@ -125,6 +125,77 @@ def unit_checks():
         ("t-5", "todo", []))}
     check("crossings: только живые задачи с пересекающимися областями",
           T.crossings(tasks) == {"t-1": ["t-2"], "t-2": ["t-1"]}, T.crossings(tasks))
+    # --- metis-0248, шаг 2: plan_batch и отказ --depends-on
+    def mk(rows):
+        return {i: ("", dict({"type": "task", "status": "todo", "updated": "2026-10-23T12:00:00"}, **h), "")
+                for i, h in rows.items()}
+    now = T.ts_of("2026-10-23T13:00:00")
+    pl = T.plan_batch(mk({"a": {"depends_on": ["b"]}, "b": {}}), ["a", "b"], now)
+    check("0248 plan: A зависит от B, отметки A, B → B, A", pl["go"] == ["b", "a"], pl)
+    pl = T.plan_batch(mk({"a": {}, "b": {}, "c": {"depends_on": ["a"]}}), ["c", "b", "a"], now)
+    check("0248 plan: при равенстве — отметки, зависимость раньше", pl["go"] == ["b", "a", "c"], pl)
+    pl = T.plan_batch(mk({"a": {"depends_on": ["b"]}, "b": {"depends_on": ["a"]}, "c": {"depends_on": ["a"]}, "d": {}}),
+                      ["a", "b", "c", "d"], now)
+    check("0248 plan: цикл и зависящий от него — cycle, остальное идёт", set(pl["cycle"]) == {"a", "b", "c"}
+          and pl["go"] == ["d"], pl)
+    pl = T.plan_batch(mk({"a": {"depends_on": ["b"]}, "b": {"status": "waiting"}}), ["a"], now)
+    check("0248 plan: предшественник waiting → stuck", pl["stuck"] == {"a": "b"} and not pl["go"], pl)
+    pl = T.plan_batch(mk({"a": {"depends_on": ["b"]}, "b": {"status": "dropped"}}), ["a"], now)
+    check("0248 plan: предшественник dropped → stuck", pl["stuck"] == {"a": "b"}, pl)
+    pl = T.plan_batch(mk({"a": {"depends_on": ["b"]}, "b": {"status": "doing", "updated": "2026-10-22T12:00:00"}}), ["a"], now)
+    check("0248 plan: без изменений > 24 ч вне пачки → stuck", pl["stuck"] == {"a": "b"}, pl)
+    pl = T.plan_batch(mk({"a": {"depends_on": ["b"]}, "b": {"status": "doing"}}), ["a"], now)
+    check("0248 plan: свежий предшественник вне пачки → wait, не stuck", pl["wait"] == {"a": "ждёт b"} and not pl["stuck"], pl)
+    pl = T.plan_batch(mk({"a": {"depends_on": ["b"]}, "b": {"updated": "2026-10-01T12:00:00"}}), ["a", "b"], now)
+    check("0248 plan: давняя todo в той же пачке — не зависшая", pl["go"] == ["b", "a"], pl)
+    pl = T.plan_batch(mk({"a": {"depends_on": ["b"]}, "b": {"updated": "2026-10-01T12:00:00", "touches": ["x"]},
+                          "o": {"status": "doing", "touches": ["x"]}}), ["a", "b"], now, busy={"o": "d2"})
+    check("0248 plan: давняя b в пачке, но сама ждёт файлы → a ждёт, не зависший", "b" in pl["wait"] and "a" in pl["wait"]
+          and not pl["stuck"], pl)
+    pl = T.plan_batch(mk({"a": {"depends_on": ["b"]}, "b": {"status": "done"}}), ["a"], now)
+    check("0248 plan: закрытый предшественник не мешает", pl["go"] == ["a"], pl)
+    pl = T.plan_batch(mk({"a": {"touches": ["x/y.py"]}, "o": {"status": "doing", "touches": ["x"]}}), ["a"], now, busy={"o": "d2"})
+    check("0248 plan: общий touches с идущей у другого → wait", "a" in pl["wait"] and not pl["go"], pl)
+    pl = T.plan_batch(mk({"a": {}, "o": {"status": "doing"}}), ["a"], now, busy={"o": "d2"})
+    check("0248 plan: пустой touches соседа другого направления не глушит", pl["go"] == ["a"] and not pl["wait"], pl)
+    pl = T.plan_batch(mk({"a": {"touches": ["x"]}, "o": {"status": "doing", "touches": ["z"]}}), ["a"], now, busy={"o": "d2"})
+    check("0248 plan: разные области → идёт", pl["go"] == ["a"], pl)
+    busy3 = {f"o{n}": f"d{n}" for n in range(3)}
+    pl = T.plan_batch(mk(dict({"a": {"touches": ["x"]}}, **{k: {"status": "doing", "touches": [k]} for k in busy3})),
+                      ["a"], now, busy=busy3)
+    check("0248 plan: потолок 3 исполнителей", "a" in pl["wait"] and not pl["go"], pl)
+    base = mk({"a": {}, "b": {"depends_on": ["a"]}})
+    for deps, why in ((["zz"], "нет задачи"), (["a", "zz"], "нет задачи")):
+        try:
+            T.check_depends(base, "a", deps)
+            check(f"0248 check_depends {deps} отказ", False)
+        except ValueError as ex:
+            check(f"0248 check_depends {deps} отказ: {why}", why in str(ex), str(ex))
+    try:
+        T.check_depends(base, "a", ["b"])
+        check("0248 check_depends: цикл a→b→a отказ", False)
+    except ValueError as ex:
+        check("0248 check_depends: цикл a→b→a отказ", "цикл" in str(ex), str(ex))
+    try:
+        T.check_depends(base, "a", ["a"])
+        check("0248 check_depends: сама на себя отказ", False)
+    except ValueError:
+        check("0248 check_depends: сама на себя отказ", True)
+    # п.2 ревью: новый цикл виден, даже если обход раньше упирается в старый (probe3)
+    old = mk({"x": {}, "x2": {"depends_on": ["x"]}, "p": {"depends_on": ["q"]}, "q": {"depends_on": ["p"]}})
+    for deps in (["p", "x2"], ["x2", "p"]):
+        try:
+            T.check_depends(old, "x", deps)
+            check(f"0248 check_depends {deps} при старом цикле: отказ", False)
+        except ValueError as ex:
+            check(f"0248 check_depends {deps} при старом цикле: отказ", "цикл" in str(ex) and "x2" in str(ex), str(ex))
+    # п.3: зависимость от пачки отклоняется
+    try:
+        T.check_depends(mk({"s": {"type": "story"}, "a": {}}), "a", ["s"])
+        check("0248 check_depends: зависимость от пачки отказ", False)
+    except ValueError as ex:
+        check("0248 check_depends: зависимость от пачки отказ", "пачка" in str(ex), str(ex))
+    check("0248 check_depends: верная зависимость принята", T.check_depends(base, "b", ["a"]) is None)
     wt = {i: ("", {"type": "task", "status": "waiting", "waiting_on": w, "direction": "d"}, "") for i, w in (
         ("w-1", "human"), ("w-2", "agent"), ("w-3", "dependency"))}
     cnt = T.project_counts(wt, T0, {"d"})
@@ -193,11 +264,28 @@ def pult_checks(env, home, view, sid):
     check("чужая заметка без «Тип: проект» в Проекты/ — не ошибка", r.returncode == 0, r.stdout[-300:])
 
 
+def depends_cli_checks(env, home):
+    """metis-0248, поправка 1: --depends-on с несуществующим id или циклом отклоняется при записи."""
+    ok_id, _ = new(env, "--title", "предшественник")
+    r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "x", "--depends-on", "metis-9999")
+    check("0248 task new --depends-on несуществующий id → отказ, код не 0", r.returncode != 0 and "нет задачи" in r.stderr, r.stderr)
+    r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "зависимая", "--depends-on", ok_id)
+    check("0248 task new --depends-on существующий → принят", r.returncode == 0, r.stderr)
+    dep = r.stdout.split()[0]
+    r = run(env, "task", "set", ok_id, f"depends_on={dep}")
+    check("0248 task set depends_on замыкает цикл → отказ, код не 0", r.returncode != 0 and "цикл" in r.stderr, r.stderr)
+    r = run(env, "task", "set", ok_id, "depends_on=metis-9999")
+    check("0248 task set depends_on несуществующий → отказ", r.returncode != 0 and "нет задачи" in r.stderr, r.stderr)
+    r = run(env, "task", "set", dep, "depends_on=")
+    check("0248 task set depends_on= (очистка) принято", r.returncode == 0, r.stderr)
+
+
 def main():
     unit_checks()
     tmp, home, state, view, env = make()
     sid, a, b, c = story_checks(env, home)
     pult_checks(env, home, view, sid)
+    depends_cli_checks(env, home)
     print(f"\n{sum(results)} из {len(results)} прошли")
     return 0 if all(results) else 1
 
