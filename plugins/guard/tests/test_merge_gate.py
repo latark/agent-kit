@@ -1579,6 +1579,21 @@ def carry_history(p):
     s["Pd"] = put({"code.py": "x = 2\n", "gone.py": "g = 2\n"}, "PR меняет gone.py")
     merge(s["Md"])
     s["moddel"] = put({PJ: _manifest("pantheon", "0.11.86")}, "выпуск после main")
+    # argus-117b2: PR с кодом плагина выпущен release.py от B (0.11.85), сосед слит раньше с тем же 0.11.85 (M);
+    # затем PR подтянул main простым merge без повтора release.py — plugin.json с обеих сторон один, его нет в разнице
+    branch("t-plug", s["B"])
+    s["Pp"] = put({"plugins/pantheon/lib/x.py": "x = 1\n"}, "PR: код плагина pantheon")
+    s["rel_same"] = put({PJ: _manifest("pantheon", "0.11.85")}, "выпуск от B")
+    s["pulled_same"] = merge(s["M"])
+    s["pulled_rel"] = put({PJ: _manifest("pantheon", "0.11.86")}, "повтор выпуска после main")
+    # 0.11.9 → 0.11.10: число знаков в последней части растёт — сравнение по числам, а не по строкам (argus-117a2)
+    branch("t-main9", s["B"])
+    s["M9"] = put({PJ: _manifest("pantheon", "0.11.9")}, "main: pantheon 0.11.9")
+    branch("t-ten", s["Pp"])
+    s["Pp9"] = merge(s["M9"])
+    s["ten"] = put({PJ: _manifest("pantheon", "0.11.10")}, "выпуск 0.11.10")
+    branch("t-drop", s["P"])
+    s["drop"] = put({GJ: None}, "PR удалил плагин guard")
     git(p, "checkout", "-q", "main")
     return s
 
@@ -1599,7 +1614,10 @@ BAD_CARRY = (("out", "P", "правка вне version", "меняет code.py")
              ("newpj", "P", "новый plugin.json только с version", "добавляет plugins/x/"),
              ("ver_eq", "P", "version равна version на базе PR", "не больше, чем на базе PR (0.11.85)"),
              ("ver_low", "P", "version ниже, чем на базе PR", "0.0.1 не больше"),
-             ("ver_int", "P", "version числом, а не строкой", "не разобрать как plugin.json"))
+             ("ver_int", "P", "version числом, а не строкой", "не разобрать как plugin.json"),
+             ("pulled_same", "rel_same", "выпущенный head подтянул main с тем же номером, plugin.json нет в разнице",
+              "0.11.85 не больше, чем на базе PR (0.11.85), а в PR есть правки плагина pantheon"),
+             ("pulled_same", "Pp", "код плагина и подтянутый main с тем же номером", "не больше, чем на базе PR"))
 
 
 def t_carry_unit(h):
@@ -1653,8 +1671,52 @@ def t_carry_unit(h):
     many = [rec("accept", "latark/agent-kit", 7, c * 40) for c in "0123456789a"] + \
         [rec("accept", "latark/agent-kit", 7, s["P"])]
     same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], many, view)
-    check(f"carried: кандидатов больше {mg.CARRY_MAX} — сверяются последние, P (самый новый) переходит",
-          same == {s["P"]} and len(whys) == mg.CARRY_MAX - 1, (same, len(whys)))
+    check(f"carried: кандидатов больше {mg.CARRY_MAX} — не переносится ничего, причина в отказе",
+          same == set() and len(whys) == 1 and f"больше {mg.CARRY_MAX}" in whys[0], (same, whys))
+    # argus-117b2: «вернуть» на старом head не теряется обрезкой — reject a2 на P, accept a3 на merged, 9 других head
+    many = [rec("accept", "latark/agent-kit", 7, s["P"]), rec("reject", "latark/agent-kit", 7, s["P"], agent_id="a2"),
+            rec("accept", "latark/agent-kit", 7, s["merged"], agent_id="a3")] + \
+        [rec("accept", "latark/agent-kit", 7, c * 40) for c in "123456789"]
+    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], many, view)
+    check("carried: 12 кандидатов, «вернуть» на старом head — не переходит ни один (и head с «принять»)",
+          same == set(), (same, whys))
+    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], many[:3], view)
+    check("carried: 3 кандидата — P с «вернуть» и merged переходят оба", same == {s["P"], s["merged"]}, (same, whys))
+    check("_merge3: поле null — значение, а не конфликт (argus-117a2)",
+          mg._merge3({"a": 1}, {"a": 1, "homepage": None}, {"a": 1}) == {"a": 1, "homepage": None}
+          and mg._merge3({"a": 1}, {"a": 2}, {"a": 3}) is None)
+    # номер версии у каждого плагина с правками — при любом слиянии (version_problem)
+    vp = mg.version_problem
+    why = vp(kit, s["rel_same"], s["M"])
+    check("версия: выпущенный head без подтянутого main, сосед слит с тем же номером — отказ",
+          why and "0.11.85 не больше, чем на базе PR (0.11.85)" in why and "release.py" in why, why)
+    check("версия: подтянутый main и повтор release.py — можно", vp(kit, s["pulled_rel"], s["M"]) is None,
+          vp(kit, s["pulled_rel"], s["M"]))
+    why = vp(kit, s["Pp"], s["B"])
+    check("версия: код плагина без нового номера — отказ", why and "0.11.84 не больше" in why, why)
+    check("версия: правок в plugins/ нет — можно", vp(kit, s["P"], s["M"]) is None, vp(kit, s["P"], s["M"]))
+    check("версия: новый плагин, на базе его нет — можно", vp(kit, s["newpj"], s["M"]) is None,
+          vp(kit, s["newpj"], s["M"]))
+    why = vp(kit, s["ten"], s["M9"])
+    check("версия: 0.11.10 после 0.11.9 — больше по числам, можно", why is None, why)
+    why = mg.same_change(kit, s["Pp"], s["ten"], s["M9"])
+    check("перенос: 0.11.10 после 0.11.9 — записи переходят", why is None, why)
+    why = vp(kit, s["rel_same"], None)
+    check("версия: baseRefOid нет — отказ", why and "baseRefOid" in why, why)
+    check("версия: папки нет — не сверяется", vp("", s["rel_same"], s["M"]) is None)
+    check("версия: коммита нет, в папке нет plugins/ — не сверяется", vp(kit, "d" * 40, s["M"]) is None,
+          vp(kit, "d" * 40, s["M"]))
+    git(kit, "checkout", "-q", "t-base")
+    try:
+        why = vp(kit, "d" * 40, s["M"])
+    finally:
+        git(kit, "checkout", "-q", "main")
+    check("версия: коммита нет, в папке есть plugins/ — отказ, подсказка git fetch",
+          why and "коммита dddddddddddd нет" in why and "git fetch" in why, why)
+    check("версия: PR удалил плагин целиком — его номер не сверяется", vp(kit, s["drop"], s["M"]) is None,
+          vp(kit, s["drop"], s["M"]))
+    why = vp(kit, s["rel_same"], "e" * 40)
+    check("версия: базы PR нет в git — отказ, подсказка git fetch", why and "git fetch" in why, why)
     same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], recs, lambda: None)
     check("carried: gh pr view не ответил — не переходят", same == set() and whys and "baseRefOid" in whys[0], whys)
     same, whys = mg.carried("", "latark/agent-kit", 7, s["merged_ver"], recs, view)
@@ -1701,6 +1763,19 @@ def t_carry_gate(h):
     h.view["agent-kit"]["baseRefOid"] = side_base(kit)
     h.seed(rec("tests", "latark/agent-kit", None, s["P"], "dev-opus"), rec("accept", "latark/agent-kit", 7, s["P"]))
     merge_case("шлюз: подтянутое не из базы PR по gh — отказ", merge_at("merged"), False, "не перенесены")
+    # argus-117b2: номер версии — при любом слиянии, и когда записи стоят прямо на head (без переноса)
+    h.reset()
+    h.view["agent-kit"]["baseRefOid"] = s["M"]
+    h.seed(rec("tests", "latark/agent-kit", None, s["rel_same"], "dev-opus"),
+           rec("accept", "latark/agent-kit", 7, s["rel_same"]),
+           rec("tests", "latark/agent-kit", None, s["pulled_same"], "dev-opus"),
+           rec("accept", "latark/agent-kit", 7, s["pulled_same"], agent_id="argus2"))
+    merge_case("шлюз: записи на выпущенном head, сосед слит с тем же номером — отказ «не больше»",
+               merge_at("rel_same"), False, "не больше, чем на базе PR (0.11.85)")
+    merge_case("шлюз: записи на head «выпуск + подтянутый main» с тем же номером — отказ «не больше»",
+               merge_at("pulled_same"), False, "не больше, чем на базе PR (0.11.85)")
+    merge_case("шлюз: «выпуск + main + повтор release.py», записи переходят — проходит", merge_at("pulled_rel"),
+               True)
 
 
 def t_carry_product(h):

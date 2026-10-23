@@ -156,7 +156,9 @@ def t_pull_base():
 
 def t_old_style_conflict():
     """PR старого порядка сам поднял version, main тоже — конфликт в plugin.json: version = max(main, PR) + 1."""
-    for mine, main_v, want in (("0.5.18", "0.5.20", "0.5.21"), ("0.5.30", "0.5.20", "0.5.31")):
+    # 0.5.9/0.5.10 — число знаков в последней части разное: max по числам, а не по строкам (argus-117a2)
+    for mine, main_v, want in (("0.5.18", "0.5.20", "0.5.21"), ("0.5.30", "0.5.20", "0.5.31"),
+                               ("0.5.10", "0.5.9", "0.5.11"), ("0.5.9", "0.5.10", "0.5.11")):
         w = repo()
         commit(w, "plugins/guard/hooks/a.py", "a = 2\n")
         commit(w, PJ.format("guard"), manifest("guard", mine))
@@ -297,9 +299,61 @@ def t_version_only_not_plugin_change():
     check("veronly: pantheon не тронут", version(w, "pantheon") == "0.11.90" and version(w, "guard") == "0.5.18", out)
 
 
+def t_duplicate_key_after_merge():
+    """argus-117b2: main добавил keywords вверху и выпустил 0.11.85, PR — keywords внизу. git сливает чисто, в файле два
+    ключа keywords (json.loads взял бы ветку) — слияние отменено, код 1, имя файла в последней строке."""
+    w = repo()
+    lines = ['{', '  "name": "pantheon",', '  "version": "0.11.84",', '  "description": "d",'] + \
+        [f'  "f{i}": {i},' for i in range(12)] + ['  "last": 1', '}']
+    commit(w, PJ.format("pantheon"), "\n".join(lines) + "\n", "base: длинный plugin.json")
+    g(w, "push", "-q", "origin", "pr:main")
+    g(w, "fetch", "-q", "origin")
+    mine = list(lines)
+    mine.insert(16, '  "keywords": ["pr"],')
+    put(w, "plugins/pantheon/lib/b.py", "b = 2\n")
+    commit(w, PJ.format("pantheon"), "\n".join(mine) + "\n", "PR: keywords снизу")
+    theirs = list(lines)
+    theirs[2] = '  "version": "0.11.85",'
+    theirs.insert(4, '  "keywords": ["main"],')
+    advance_main(w, PJ.format("pantheon"), "\n".join(theirs) + "\n", "main: keywords сверху и выпуск")
+    before = g(w, "rev-parse", "HEAD")
+    rc, out = run(w)
+    check("dup: код 1", rc == 1, out)
+    check("dup: имя файла и «повторный ключ» в последней строке",
+          PJ.format("pantheon") in out.strip().splitlines()[-1] and "повторный ключ keywords" in out, out)
+    check("dup: слияние отменено", g(w, "rev-parse", "HEAD") == before and g(w, "status", "--porcelain") == ""
+          and not os.path.exists(os.path.join(w, ".git", "MERGE_HEAD")), out)
+
+
+def t_duplicate_key_in_branch():
+    """Повторный ключ в plugin.json самой ветки, база не двигалась — код 1 и имя файла, без коммита."""
+    w = repo()
+    commit(w, PJ.format("guard"), manifest("guard", "0.5.17", '\n  "author": {"n": 1, "n": 2},'))
+    commit(w, "plugins/guard/hooks/a.py", "a = 2\n")
+    before = g(w, "rev-parse", "HEAD")
+    rc, out = run(w)
+    check("dupb: код 1, имя файла, повторный ключ n", rc == 1 and PJ.format("guard") in out.strip().splitlines()[-1]
+          and "повторный ключ n" in out and g(w, "rev-parse", "HEAD") == before, out)
+
+
+def t_null_field():
+    """argus-117a2 (P8): PR добавил "homepage": null, main выпустил 0.5.18 — null не конфликт: поле PR цело, 0.5.19."""
+    w = repo()
+    commit(w, "plugins/guard/hooks/a.py", "a = 2\n")
+    commit(w, PJ.format("guard"), manifest("guard", "0.5.17", '\n  "homepage": null,'))
+    prev = g(w, "rev-parse", "HEAD")
+    advance_main(w, PJ.format("guard"), manifest("guard", "0.5.18"))
+    rc, out = run(w)
+    with open(os.path.join(w, PJ.format("guard")), encoding="utf-8") as fh:
+        data = json.load(fh)
+    check("null: код 0, homepage null из PR, 0.5.19", rc == 0 and "homepage" in data and data["homepage"] is None
+          and data["version"] == "0.5.19", (out, data))
+    check("null: шлюз переносит записи", carry_why(w, prev) is None, carry_why(w, prev))
+
+
 CASES = [t_version_only_not_plugin_change, t_bump_changed_only, t_pull_base, t_old_style_conflict, t_real_conflict, t_refusals,
          t_only_version_and_new_plugin, t_pr_field_kept, t_both_sides_fields, t_field_conflict, t_description_only,
-         t_nested_version]
+         t_nested_version, t_duplicate_key_after_merge, t_duplicate_key_in_branch, t_null_field]
 
 if __name__ == "__main__":
     for case in CASES:

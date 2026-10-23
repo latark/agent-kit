@@ -9,15 +9,19 @@
 1. База (по умолчанию origin/main — сначала git fetch) не в ветке — git merge базы без своих правок. Конфликт только
    в plugin.json (PR старого порядка сам поднял version) решается по полям: version = max(база, PR) + 1, остальные
    поля сливаются трёхсторонне — правка PR в description, hooks и других полях сохраняется. Поле, изменённое с обеих
-   сторон по-разному, или конфликт в другом файле — слияние отменяется, код 1 и имя файла.
+   сторон по-разному, или конфликт в другом файле — слияние отменяется, код 1 и имя файла. После слияния (и без
+   него) каждый plugins/*/.claude-plugin/plugin.json — JSON-объект без повторных ключей: git сливает файл как текст,
+   и чистое слияние может дать два ключа "keywords" (json.loads молча взял бы последний). Иначе — слияние
+   отменяется, код 1 и имя файла.
 2. Плагины — названные, иначе те, у которых в ветке свои правки относительно базы (git diff база...HEAD; plugin.json
    считается правкой, если в нём изменено что-то кроме version).
 3. version каждого = version на базе + 1 в последней части (0.11.84 → 0.11.85); уже больше базы (после конфликта
    или поднят руками) — остаётся. В файле меняется только эта строка.
 4. Коммит «<плагин> <версия>[, …]: выпуск». Дальше git push и слияние как обычно: шлюз guard переносит записи tests и
    вердикты argus с проверенного head на новый (merge_gate.carried), потому что разница — только номер версии и
-   подтянутая база, а version на новом head больше, чем на базе PR. Соседний PR слит раньше с тем же номером —
-   шлюз откажет, повтори release.py. Сливает PR ядра владелец (pantheon merge): там записи пока не переносятся
+   подтянутая база. При любом слиянии шлюз сверяет: у каждого плагина с правками в PR version на head больше, чем
+   на базе PR (merge_gate.version_problem). Соседний PR слит раньше с тем же номером — шлюз откажет, повтори
+   release.py. Сливает PR ядра владелец (pantheon merge): там записи пока не переносятся
    (пересмотр — metis-0396) — выпуск до последнего круга ревью (AGENTS.md, «Выпуск»).
 
 Коды: 0 — готово или поднимать нечего; 1 — отказ (дерево не чистое, базы нет, конфликт, плагин не найден, version
@@ -33,6 +37,7 @@ VERSION_FILE = re.compile(r"plugins/([^/]+)/\.claude-plugin/plugin\.json")
 VERSION_LINE = re.compile(r'("version"\s*:\s*")([^"\\]*)(")')
 USAGE = "release.py [--base <ref>] [--dry-run] [плагин…]"
 ABSENT = object()
+CONFLICT = object()  # конфликт поля в merge_fields: None — обычное значение поля (null в JSON)
 
 
 def git(root, *args, check=True):
@@ -79,8 +84,8 @@ def merge_fields(base, ours, theirs):
         if k == "version":
             continue
         b, o, t = base.get(k, ABSENT), ours.get(k, ABSENT), theirs.get(k, ABSENT)
-        v = t if o == b else o if t == b or o == t else None
-        if v is None:
+        v = t if o == b else o if t == b or o == t else CONFLICT
+        if v is CONFLICT:
             return None
         if v is not ABSENT:
             out[k] = v
@@ -143,27 +148,62 @@ def pull_base(root, base, dry):
     if dry:
         print(f"release: база {base} не в ветке — будет git merge {base}")
         return True
-    r = git(root, "merge", "--no-edit", "--no-ff", base, check=False)
-    if r.returncode == 0:
-        return True
-    conflicted = [p for p in git(root, "diff", "--name-only", "--diff-filter=U").stdout.splitlines() if p]
-    if not conflicted or not all(VERSION_FILE.fullmatch(p) for p in conflicted):
-        git(root, "merge", "--abort", check=False)
-        raise SystemExit(f"release: слияние базы {base} с конфликтом не только в plugin.json "
-                         f"({', '.join(conflicted) or r.stderr.strip()}) — слияние отменено; реши конфликт сам, "
-                         "это уже правка PR и новый круг ревью")
+    r = git(root, "merge", "--no-edit", "--no-ff", "--no-commit", base, check=False)
     done = []
-    for p in conflicted:
-        new, why = resolve_manifest(root, p)
-        if why:
+    if r.returncode != 0:
+        conflicted = [p for p in git(root, "diff", "--name-only", "--diff-filter=U").stdout.splitlines() if p]
+        if not conflicted or not all(VERSION_FILE.fullmatch(p) for p in conflicted):
             git(root, "merge", "--abort", check=False)
-            raise SystemExit(f"release: конфликт в {p} не слить по полям: {why} — слияние базы {base} отменено; "
-                             "реши сам, это уже правка PR и новый круг ревью")
-        done.append(f"{p} (version {new})")
-    git(root, "add", "--", *conflicted)
+            raise SystemExit(f"release: слияние базы {base} с конфликтом не только в plugin.json "
+                             f"({', '.join(conflicted) or r.stderr.strip()}) — слияние отменено; реши конфликт сам, "
+                             "это уже правка PR и новый круг ревью")
+        for p in conflicted:
+            new, why = resolve_manifest(root, p)
+            if why:
+                git(root, "merge", "--abort", check=False)
+                raise SystemExit(f"release: конфликт в {p} не слить по полям: {why} — слияние базы {base} отменено; "
+                                 "реши сам, это уже правка PR и новый круг ревью")
+            done.append(f"{p} (version {new})")
+        git(root, "add", "--", *conflicted)
+    bad = bad_manifest(root)  # git сливает plugin.json как текст: чистое слияние может дать повторный ключ
+    if bad:
+        git(root, "merge", "--abort", check=False)
+        raise SystemExit(f"release: после слияния базы {base} {bad[0]} — {bad[1]} — слияние отменено; реши сам, это "
+                         "уже правка PR и новый круг ревью")
     git(root, "commit", "--no-edit")
-    print(f"release: конфликт в {', '.join(done)} решён по полям — правки ветки и базы сохранены")
+    if done:
+        print(f"release: конфликт в {', '.join(done)} решён по полям — правки ветки и базы сохранены")
     return True
+
+
+def strict_json(text):
+    """JSON-объект без повторных ключей на любом уровне; иначе ValueError (json.loads молча берёт последний ключ)."""
+    def pairs(items):
+        keys = [k for k, _v in items]
+        dup = sorted({k for k in keys if keys.count(k) > 1})
+        if dup:
+            raise ValueError(f"повторный ключ {', '.join(dup)}")
+        return dict(items)
+    data = json.loads(text, object_pairs_hook=pairs)
+    if not isinstance(data, dict):
+        raise ValueError("не JSON-объект")
+    return data
+
+
+def bad_manifest(root):
+    """Первый plugins/*/.claude-plugin/plugin.json рабочего дерева, который не JSON-объект или с повторным ключом:
+    (путь, причина); None — все целы."""
+    top = os.path.join(root, "plugins")
+    for name in sorted(os.listdir(top)) if os.path.isdir(top) else []:
+        path = os.path.join(top, name, ".claude-plugin", "plugin.json")
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                strict_json(fh.read())
+        except (OSError, ValueError) as e:  # UnicodeDecodeError и JSONDecodeError — тоже ValueError
+            return manifest(name), str(e)
+    return None
 
 
 def manifest_rest(root, rev, path):
@@ -223,6 +263,10 @@ def main(argv):
             print(f"release: нет {manifest(n)}", file=sys.stderr)
             return 1
     merged = pull_base(root, base, dry)
+    bad = bad_manifest(root)
+    if bad:
+        print(f"release: {bad[0]} — {bad[1]}: правь руками", file=sys.stderr)
+        return 1
     names = names or changed_plugins(root, base)
     plan = []
     for n in names:
