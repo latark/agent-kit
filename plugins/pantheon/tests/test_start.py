@@ -375,6 +375,7 @@ def main():
     r = run("start", "athena-shop", "красный", "--from", "tick", extra={"FAKE_SWAP_MB": "5000.00"})
     check("start --from tick при своп 5 ГБ (> порога) — отложено, код 5 (не 2), claude не звали, red в замере",
           r.returncode == 5 and "красной зоне" in r.stderr and "своп" in r.stderr and len(calls()) == c0
+          and "самозапуск повторит позже" in r.stderr
           and caprows()[-1]["red"] is True and caprows()[-1]["result"] == "deferred" and len(caprows()) == n0 + 1)
     word()  # свежее слово владельца в окне Зевса tick в красной зоне не пропускает (ревью argus #110)
     r = run("start", "athena-shop", "красный", "--from", "tick", extra={"FAKE_SWAP_MB": "5000.00"})
@@ -794,7 +795,8 @@ def main():
     r = run("wake", "hestia", "--task", "athena-0001", extra=red_env)
     check("wake hestia из окна направления со словом, но в красной зоне — код 5 «отложено» (tick слова не имеет), "
           "claude не звали", r.returncode == 5 and "pantheon wake hestia: отложено — память Mac" in r.stderr
-          and not calls() and caprows()[-1]["result"] == "deferred" and caprows()[-1]["origin"] == "tick")
+          and not calls() and caprows()[-1]["result"] == "deferred" and caprows()[-1]["origin"] == "tick"
+          and "самозапуск" not in r.stderr and "повторите после нормы памяти" in r.stderr)
     r = run("wake", "hestia", "--task", "athena-0001", extra=shop_env)
     hrun = json.load(open(hrun_path)) if os.path.exists(hrun_path) else {}
     check("wake hestia из окна направления со словом — запуск, в окне запуска PANTHEON_ORIGIN=tick",

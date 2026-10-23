@@ -86,7 +86,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         — только по слову владельца в окне Зевса за 15 мин, иначе код 2
   pantheon wake hestia --task <id> [--dry-run]   Гестия в своём окне песочницы (settings/hestia.json) с открытой
                                         задачей; без задачи или с закрытой — отказ «нет задачи» (код 2); из окна
-                                        роли — только по слову владельца в окне Зевса за 15 мин, иначе код 2
+                                        роли — только по слову владельца в окне Зевса за 15 мин, иначе код 2;
+                                        со словом, но в красной зоне памяти — код 5 «отложено» (повторите сами)
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
                                         сессия уходит из фоновых сессий Claude Code) и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
@@ -3780,8 +3781,10 @@ def start_gate(target, origin, agents, need_word=False):
                                     f"за {OWNER_WORD_WINDOW // 60} мин (сообщение другой сессии согласием не считается)")
     elif (m["red"] or m["unknown"]) and not word:
         reasons = "; ".join(m["red"]) if m["red"] else "нет сигнала: своп и давление памяти не прочитаны"
+        # wake hestia (need_word) никто не повторяет — не обещать самозапуск (ревью #110, круг 6)
+        again = "повторите после нормы памяти" if need_word else "самозапуск повторит позже"
         code, why = START_DEFERRED, (f"память Mac в красной зоне ({reasons}) — запуск только со словом владельца, "
-                                     "самозапуск повторит позже")
+                                     f"{again}")
     capacity_log({"t": round(now(), 1), "at": stamp(), "target": target, "origin": origin, "sessions": m["sessions"],
                   "pressure": m["pressure"], "free_pct": m["free_pct"], "swap_gb": None if m["swap_gb"] is None
                   else round(m["swap_gb"], 2), "red": bool(m["red"]),
