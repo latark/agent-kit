@@ -61,6 +61,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     текст задачи (цель, «готово, когда») обязателен: без --text/--body/--body-file — отказ, код 2;
                     без текста можно только вопрос владельцу: --question, --why и не меньше двух --option, иначе код 2;
                     неизвестный флаг (и «--флаг=значение») — отказ с его именем, код 2, файл не создан (metis-0402);
+                    повторяются только --option, --touches, --depends-on; другой флаг дважды (два --body) — отказ, код 2;
                     новая задача → файл-уведомление «…-task-ID.md» в directions/<направление>/inbox/ координатору
                     (не находка; «От:» — PANTHEON_SESSION, PANTHEON_ROLE или «агент»)
                     без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ;
@@ -68,10 +69,12 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --depends-on / depends_on= с несуществующим id, самой собой или циклом — отказ при записи (metis-0248)
   pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"] [--body "текст" | --body-file ПУТЬ]
                     --body[-file] заменяет текст задачи между «# заголовок» и «## Журнал» («Заметки владельца» остаются),
-                    в журнал — «текст задачи заменён (было N знаков…)»; неизвестный флаг — отказ, код 2
+                    в журнал — «текст задачи заменён (было N знаков…)»; неизвестный флаг и повтор флага, кроме --option, —
+                    отказ, код 2
                     плановый проход (check --quiet): открытая задача без текста дольше часа — тревога; слово владельца с [id]
                     (decisions.md, окно вопросов) дольше 30 мин без задачи — тревога один раз на id: связь — [id] в
-                    тексте задачи до «## Журнал» (любой статус) или строка «не задача: [id] — причина» в decisions.md
+                    тексте задачи до «## Журнал» (любой статус) или строка «не задача: [id] — причина» в decisions.md;
+                    тревога называет до 12 новых id, остальные — следующим проходом
   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
   pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту
@@ -6418,9 +6421,12 @@ def check(paths=None, quiet=False):
     return 1 if bad or drift or view_drift or field_errs else 0
 
 
+UNLINKED_SHOWN = 12  # сколько новых id называет одна тревога «без задачи»; остальные — следующим проходом
+
+
 def unlinked_alert(T, unlinked):
     """Тревога «слово владельца с [id] без задачи» (metis-0402 г): один раз на id и только о новых. Показанные id — в
-    STATE/unlinked-seen.json (id → когда впервые). Первый проход (файла нет или он испорчен) только запоминает то, что
+    STATE/unlinked-seen.json (id → когда впервые); показанным считается только названный в тревоге. Первый проход (файла нет или он испорчен) только запоминает то, что
     уже есть, без тревоги: старые вопросы окна Зевса задачи не имеют, и весь их набор стал бы шумом (argus a)."""
     p = path("unlinked-seen.json")
     try:
@@ -6432,14 +6438,18 @@ def unlinked_alert(T, unlinked):
         seen = None
     t = now()
     fresh = [i for i in unlinked if i not in seen] if seen is not None else []
-    if fresh:
-        alert(f"слова владельца с [id] без задачи дольше {T.UNLINKED_MIN} мин: "
-              f"{', '.join(fresh[:12])}{f' и ещё {len(fresh) - 12}' if len(fresh) > 12 else ''} — завести задачу "
+    shown = fresh[:UNLINKED_SHOWN]
+    if shown:
+        more = len(fresh) - len(shown)
+        alert(f"слова владельца с [id] без задачи дольше {T.UNLINKED_MIN} мин: {', '.join(shown)}"
+              f"{f' и ещё {more} (назову следующим проходом)' if more else ''} — завести задачу "
               "(pantheon task new, [id] в тексте) или дописать в decisions.md отдельной строкой «не задача: [id] — причина»",
               "check")
     keep = {i: v for i, v in (seen or {}).items()
             if isinstance(v, (int, float)) and t - v <= (T.UNLINKED_DAYS + 1) * 86400}
-    keep.update({i: t for i in unlinked if i not in keep})
+    # показанными отмечаются только названные в тревоге (argus b, круг 2): иначе id с 13-го не появились бы нигде.
+    # Первый проход запоминает всё; уже показанные, но вычищенные по сроку, — продлеваются, а не становятся новыми
+    keep.update({i: t for i in unlinked if i not in keep and (seen is None or i in seen or i in shown)})
     if keep != seen:
         os.makedirs(STATE, exist_ok=True)
         write_atomic(p, json.dumps(keep, ensure_ascii=False, sort_keys=True))
@@ -6452,18 +6462,42 @@ TASK_NEW_VALUE_FLAGS = {"--direction", "--title", "--project", "--text", "--body
                         "--why", "--recommend", "--if-no-answer", "--option", "--depends-on", "--executor", "--parent"}
 TASK_NEW_BOOL_FLAGS = {"--risky"}
 TASK_SET_VALUE_FLAGS = {"--note", "--option", "--body", "--body-file"}
+# Повторяемые флаги — списки; любой другой повторённый флаг — отказ (argus b, круг 2): `opt()` берёт последнее
+# значение, и `--body "Цель" --body "Готово, когда"` молча терял бы первую часть. --wave — прежнее имя --release.
+TASK_REPEATABLE_FLAGS = {"--option", "--touches", "--depends-on"}
+TASK_FLAG_ALIASES = {"--wave": "--release"}
+
+
+def task_repeat_error(sub, a, seen):
+    """Отказ, если одиночный флаг `a` уже был (seen пополняется), иначе None."""
+    key = TASK_FLAG_ALIASES.get(a, a)
+    if key in TASK_REPEATABLE_FLAGS:
+        return None
+    if key in seen:
+        return (f"pantheon task {sub}: флаг {a} повторён — он одиночный, значения не склеиваются; весь текст — одним "
+                f"флагом (длинный — --body-file <путь>), повторяются только {', '.join(sorted(TASK_REPEATABLE_FLAGS))}"
+                " — ничего не записано")
+    seen.add(key)
+    return None
 
 
 def task_flag_error(sub, args, value_flags, bool_flags=()):
-    """Первая ошибка во флагах `--…` (неизвестный, без значения, лишнее слово) или None. Значение флага пропускается."""
-    i = 0
+    """Первая ошибка во флагах `--…` (неизвестный, без значения, повтор одиночного, лишнее слово) или None. Значение
+    флага пропускается."""
+    i, seen = 0, set()
     while i < len(args):
         a = args[i]
         if a in bool_flags:
+            err = task_repeat_error(sub, a, seen)
+            if err:
+                return err
             i += 1
         elif a in value_flags:
             if i + 1 >= len(args):
                 return f"pantheon task {sub}: у флага {a} нет значения"
+            err = task_repeat_error(sub, a, seen)
+            if err:
+                return err
             i += 2
         elif a.split("=", 1)[0] in value_flags | set(bool_flags):
             return f"pantheon task {sub}: пишите «{a.split('=', 1)[0]} значение» через пробел, не «{a[:40]}» — ничего не записано"
@@ -6574,14 +6608,24 @@ def task_cmd(rest):
             for w in T.option_warns(fields):
                 print(f"предупреждение · {w}", file=sys.stderr)
         elif sub == "set" and args:
-            tid, changes, note, i = args[0], {}, None, 1
+            tid, changes, note, i, seen = args[0], {}, None, 1, set()
+            # --wave — прежнее имя --release (metis-0069): выпуск строкой «pantheon 0.11.50»
+            night_flags = {"--release": "release", "--wave": "release", "--batch": "batch", "--night": "night", "--estimate": "estimate",
+                           "--actual": "actual", "--acceptance": "acceptance", "--mode": "mode", "--mode-why": "mode_why"}  # ночной цикл: флаги как у --due
+            j = 1  # повтор одиночного флага — отказ до чтения --body-file и до записи; шаг — как в разборе ниже
+            while j < len(args):
+                if args[j] in TASK_SET_VALUE_FLAGS | set(night_flags) and j + 1 < len(args):
+                    err = task_repeat_error("set", args[j], seen)
+                    if err:
+                        print(err, file=sys.stderr)
+                        return 2
+                    j += 2
+                else:
+                    j += 1
             new_body, err = task_body_arg("set", opt)
             if err:
                 print(err, file=sys.stderr)
                 return 2
-            # --wave — прежнее имя --release (metis-0069): выпуск строкой «pantheon 0.11.50»
-            night_flags = {"--release": "release", "--wave": "release", "--batch": "batch", "--night": "night", "--estimate": "estimate",
-                           "--actual": "actual", "--acceptance": "acceptance", "--mode": "mode", "--mode-why": "mode_why"}  # ночной цикл: флаги как у --due
             while i < len(args):
                 if args[i] in ("--body", "--body-file") and i + 1 < len(args):  # тело уже взято task_body_arg
                     i += 2

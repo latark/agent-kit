@@ -209,6 +209,33 @@ def main():
           and "# Проба\n\nНовое описание целиком\n\n## Заметки владельца\n\n- 2026-10-24 11:00\n  > мысль владельца\n\n## Журнал" in t
           and f"текст задачи заменён (было {len(old_desc)} знаков" in t, (r.stderr, t))
 
+    # (а) повтор одиночного флага — отказ (argus b, круг 2): opt() берёт последнее значение и молча терял бы первое
+    tmpr, homer, stater, envr = make()
+    for flags in (("--body", "Цель: ПЕРВАЯ", "--body", "Готово, когда: ВТОРАЯ"), ("--text", "A", "--text", "B"),
+                  ("--body-file", bf, "--body-file", bf), ("--body", "x", "--release", "R1", "--wave", "R2"),
+                  ("--body", "x", "--risky", "--risky"), ("--body", "x", "--title", "Другое")):
+        r = new(envr, *flags)
+        name = "--wave" if "--wave" in flags else "--title" if flags[-2] == "--title" else flags[-2] \
+            if flags[-2].startswith("--") else flags[-1]
+        check(f"task new {' '.join(flags[::2] if '--risky' not in flags else flags[2:])}: повтор — код 2, имя флага, файла нет",
+              r.returncode == 2 and f"флаг {name} повторён" in r.stderr and tasks_of(homer) == [], (r.returncode, r.stderr))
+    r = new(envr, "--body", "x", "--touches", "a.py", "--touches", "b.py", "--note-x", "y")
+    check("task new: повтор --touches не считается повтором (отказ только за неизвестный --note-x)",
+          r.returncode == 2 and "неизвестный флаг --note-x" in r.stderr, r.stderr)
+    r = new(envr, "--body", "x", "--touches", "a.py", "--touches", "b.py", "--option", "А", "--option", "Б")
+    pr = os.path.join(homer, "directions", "metis-pantheon", "tasks", "metis-0001.md")
+    check("task new: --touches и --option повторяются — оба значения в шапке", r.returncode == 0
+          and "a.py" in read(pr) and "b.py" in read(pr) and "Б" in read(pr), r.stderr)
+    before = read(pr)
+    for flags in (("--body", "A", "--body", "B"), ("--note", "n1", "--note", "n2"), ("--body-file", bf, "--body-file", bf),
+                  ("--release", "R1", "--wave", "R2")):
+        r = run(envr, "task", "set", "metis-0001", *flags)
+        check(f"task set {flags[0]} … {flags[2]}: повтор — код 2, имя флага, файл не тронут",
+              r.returncode == 2 and f"флаг {flags[2]} повторён" in r.stderr and read(pr) == before, (r.returncode, r.stderr))
+    r = run(envr, "task", "set", "metis-0001", "--note", "--body", "--body", "Тело после", "--option", "В", "--option", "Г")
+    check("task set: «--body» как значение --note — не повтор; --option повторяется", r.returncode == 0
+          and "# Проба\n\nТело после\n\n## Журнал" in read(pr), r.stderr)
+
     # (г) тик: задача без описания
     tmp2, home2, state2, env2 = make()
     p = os.path.join(home2, "directions", "metis-pantheon", "tasks", "metis-0001.md")
@@ -320,6 +347,20 @@ def main():
     open(dec, "a", encoding="utf-8").write("- 10.10 09:00 — старое [zeus-ancient-id]\n")
     run(env3, "check", "--quiet", t=T0 + 3900)
     check("тик: слово старше 7 дней тревоги не даёт", "zeus-ancient-id" not in alerts_of(home3))
+    # больше 12 новых за проход (argus b, круг 2): показанными отмечаются только названные, остальные — следующим проходом
+    many = [f"zeus-many-{n:02d}" for n in range(15)]
+    open(dec, "a", encoding="utf-8").write("".join(f"- 24.10 11:00 — владелец: сделать [{i}]\n" for i in many))
+    before = alerts_of(home3).count("без задачи")
+    run(env3, "check", "--quiet", t=T0 + 4000)
+    first = [ln for ln in alerts_of(home3).splitlines() if "без задачи" in ln][before:]
+    check("тик: 15 новых id — первая тревога называет 12 и «и ещё 3», неназванные не отмечены показанными",
+          len(first) == 1 and all(i in first[0] for i in many[:12]) and "и ещё 3" in first[0]
+          and not any(i in first[0] or i in read(seen_p) for i in many[12:]), (first, read(seen_p)))
+    run(env3, "check", "--quiet", t=T0 + 4100)
+    run(env3, "check", "--quiet", t=T0 + 4200)
+    lines = [ln for ln in alerts_of(home3).splitlines() if "без задачи" in ln][before:]
+    check("тик: следующий проход называет оставшиеся 3, третий молчит — каждый из 15 id назван в alerts.md ровно раз",
+          len(lines) == 2 and all(sum(i in ln for ln in lines) == 1 for i in many) and "и ещё" not in lines[1], lines)
 
     # чистые функции (одно и то же на 3.9 и 3.14)
     desc = T.has_description
