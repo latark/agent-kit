@@ -234,15 +234,16 @@ def main():
     rhome, rstate = make(rtmp, "")
     open(os.path.join(rhome, "directions.toml"), "w").write(
         "".join(f'[[direction]]\nname = "{n}"\nfolders = ["~/projects/br"]\n'
-                for n in ("hq", "workshop", "job-iris", "job-x", "athena-shop")))
+                for n in ("hq", "workshop", "hestia", "job-iris", "job-x", "athena-shop")))
     os.makedirs(os.path.join(rtmp, ".claude", "pantheon"))
     open(os.path.join(rtmp, ".claude", "pantheon", "policy.toml"), "w").write("")
     renv = {"PATH": os.environ["PATH"], "HOME": rtmp, "PANTHEON_HOME": rhome, "PANTHEON_STATE": rstate,
             "PANTHEON_NO_NOTIFY": "1"}
     rr = subprocess.run([PY311, "-I", LIB, "domains", "build"], env=renv, capture_output=True, text=True)
     rdj = json.load(open(os.path.join(rstate, "domains.json")))["domains"]
-    check("реестр: направления hq, workshop, job-* пропущены с понятной ошибкой, обычное имя осталось",
-          list(rdj) == ["athena-shop"] and rr.stderr.count("зарезервировано под окна системы") == 4
+    check("реестр: направления hq, workshop, hestia, job-* пропущены с понятной ошибкой, обычное имя осталось",
+          list(rdj) == ["athena-shop"] and rr.stderr.count("зарезервировано под окна системы") == 5
+          and "«hestia»" in rr.stderr
           and "«job-iris»" in rr.stderr)
 
     # проектные allow папки запуска, пускающие gh pr merge: окно не собирается (metis-0137)

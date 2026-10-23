@@ -73,6 +73,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
   pantheon start zeus                   Пританей: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
+                                        start, дошедший до запуска сессии, пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2); красный замер или «нет сигнала» без слова — код 5 (отложено); в окне роли origin берётся из PANTHEON_ROLE, явный --from там только свой (hq → zeus, иная роль → tick); wake пишет строку замера и не откладывает, wake <имя> "задание" из окна роли без слова владельца — отказ (код 2)
   pantheon start <направление> --at ЧЧ:ММ [поручение]   разовый запуск плановым проходом вместо sleep в сессии;
                                         --at-list — записи, --at-cancel <id> — отменить (lib/night.py)
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
@@ -81,8 +82,13 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon reboot-reminder [--now]      пятница после 09:30: Mac не перезагружался с прошлой пятницы — карточка и уведомление
   pantheon agents | who                 снимок claude agents для строки статуса | таблица координаторов
   pantheon revisits                     пересмотры к сроку и по событиям (плановый проход раз в сутки)
-  pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией
-  pantheon wake hestia --task <id>      Гестия: всегда отказ (код 2) — окно песочницы появится в metis-0245
+  pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией; задание из окна роли
+                                        — только по слову владельца в окне Зевса за 15 мин, иначе код 2
+  pantheon wake hestia --task <id> [--dry-run]   Гестия в своём окне песочницы (settings/hestia.json) с открытой
+                                        задачей; без задачи или с закрытой — отказ «нет задачи» (код 2); из окна
+                                        роли — только по слову владельца в окне Зевса за 15 мин, иначе код 2;
+                                        из окна роли, кроме hq, со словом в красной зоне — код 5 «отложено» (повторите сами);
+                                        из окна hq — как start --from zeus
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
                                         сессия уходит из фоновых сессий Claude Code) и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
@@ -494,6 +500,13 @@ JOB_EXCLUDED = ["pantheon alert *"]
 JOB_NO_AGENTS = "никого"
 # Встроенные типы Claude Code — в deny окна задачи вместе с ролями из ~/.claude/agents и лидами реестра
 BUILTIN_AGENTS = ["general-purpose", "claude", "Explore", "Plan", "statusline-setup", "claude-code-guide"]
+# Окно Гестии (metis-0245): мимо песочницы — только выпуск плагинов (`pantheon plugins update`: тесты, установка,
+# сверка хеша, проверенное дерево — голый `claude plugin update` оставил бы непроверенное и закрыл окна ролей),
+# сборка окон и ролей, технический перезапуск окон и тревога. Остальные подкоманды pantheon — в песочнице, а какие ей
+# вообще можно, решает guard (правило hestia). Файловых правок, веба и субагентов у окна нет
+HESTIA_EXCLUDED = ["pantheon plugins update", "pantheon plugins update *", "pantheon domains build",
+                   "pantheon restart *", "pantheon alert *"]
+HESTIA_DENY_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Agent"]
 
 
 def job_window(role):
@@ -1926,15 +1939,16 @@ def archive_status(f, t, today, limit):
     return sum(len(c) for c in moved.values())
 
 
-# Имена окон, которые не направления: sandbox_build пишет settings/hq.json, workshop.json и job-<роль>.json; направление
-# с таким именем записало бы свои настройки в чужой файл — а при сбое второй записи они там и остались бы (metis-0163)
-RESERVED_DIRECTIONS = ("hq", "workshop")
+# Имена окон, которые не направления: sandbox_build пишет settings/hq.json, workshop.json, hestia.json (metis-0245) и
+# job-<роль>.json; направление с таким именем записало бы свои настройки в чужой файл — а при сбое второй записи они
+# там и остались бы (metis-0163)
+RESERVED_DIRECTIONS = ("hq", "workshop", "hestia")
 
 
 def reserved_direction(name):
-    """Текст ошибки, если имя направления зарезервировано под окно hq, workshop или job-*; иначе None."""
+    """Текст ошибки, если имя направления зарезервировано под окно hq, workshop, hestia или job-*; иначе None."""
     if isinstance(name, str) and (name in RESERVED_DIRECTIONS or name.startswith("job-")):
-        return (f"имя «{name}» зарезервировано под окна системы (hq, workshop, job-*): настройки направления "
+        return (f"имя «{name}» зарезервировано под окна системы (hq, workshop, hestia, job-*): настройки направления "
                 "записались бы в чужой файл окна — выберите другое имя")
     return None
 
@@ -2647,8 +2661,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     for name, folders in domains.items():
         mine = leads.get(name, [])
         # chiron видит личное (me/) — только Зевсу (P0-2); главные роли и чужие лиды не нужны и лидам окна
+        # hestia — только своим окном (`pantheon wake hestia --task`), не субагентом (metis-0245)
         agents = (mine + COORDINATOR_AGENTS + COORDINATOR_EXTRA_AGENTS.get(name, []),
-                  ["chiron"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
+                  ["chiron", "hestia"] + list(MAIN_ROLES) + [x for x in all_leads if x not in mine])
         if one(name, folders, os.path.join(PANTHEON, "directions", name), COORDINATOR_COMPACT,
                [] if name in private_dirs else private_paths, COORDINATOR_ALLOW, agents, direction=True,
                # окну с доступом к личному правило слияния не выдаётся — его PR сливает владелец (metis-0156)
@@ -2689,6 +2704,26 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                       [x for x in BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES) if x not in mine], agents_py)
         write_window(out_dir, name, job)
         built.append(name)
+    # окно Гестии (metis-0245, решение владельца «А» 18.10): служебная роль ставит слитые выпуски и пересобирает и
+    # перезапускает окна. Bash пишет только в TMPDIR (кэш — папка запуска, запись в него guard не пускает); ни одной папки проекта, памяти
+    # ролей и ~/.claude — запись туда только командами пульта мимо песочницы (HESTIA_EXCLUDED), а не руками. Личное
+    # закрыто на чтение (Bash — песочницей, Read и Grep — правилами deny); сети у Bash нет (выпуск качает `pantheon plugins update` вне песочницы); файловых правок и веба
+    # нет. Субагентов не зовёт. Что ей можно в Bash сверх этого, решает guard по PANTHEON_ROLE=hestia (правило hestia)
+    hs_cache = _real_dir(f"{caches}/hestia", [caches], strict=True, create=True)
+    hs = role_settings([], None, [], hs_cache, False, private_paths, None, guard)
+    hs["sandbox"]["excludedCommands"] = list(HESTIA_EXCLUDED)
+    hs["sandbox"]["network"]["allowedDomains"] = []
+    hs["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
+    hs.setdefault("permissions", {}).setdefault("deny", []).extend(HESTIA_DENY_TOOLS)
+    # denyRead песочницы держит только Bash; Read и Grep её не проходят, а главная сессия окна приходит без agent_type
+    # и guard личное не судит — поэтому те же личные пути закрываются правилами Read(...) и Grep(...) (как у hq)
+    hs_rule = lambda tool, x: f"{tool}({x})" if x.startswith("~") else f"{tool}(/{x})"  # noqa: E731
+    hs["permissions"]["deny"].extend(hs_rule(t, x + "/**") for t in ("Read", "Grep") for x in _deny_forms(private_paths))
+    hs["permissions"]["deny"].extend(hs_rule(t, x) for t in ("Read", "Grep") for x in _deny_forms(private_paths))
+    hs["env"]["PANTHEON_ROLE"] = "hestia"
+    agents_window(hs, [JOB_NO_AGENTS], BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES), agents_py)
+    write_window(out_dir, "hestia", hs)
+    built.append("hestia")
     # что закрыто штабу — [hq] policy.toml. Битый раздел — ошибка, а не «пусто»: окно Пританея не пересобираем, остаётся
     # прежнее (его файл не удаляется), и тревога — пока раздел не исправят
     try:
@@ -2756,8 +2791,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     rule = lambda x: f"Read({x})" if x.startswith("~") else f"Read(/{x})"  # noqa: E731 — «//» — абсолютный путь
     hq.setdefault("permissions", {}).setdefault("deny", []).extend(
         [rule(x + "/**") for x in _deny_forms(closed)] + [rule(x) for x in _deny_forms(files)])
-    # P0-6: код — поручение направлению, а не лид в окне штаба
-    agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES), agents_py)
+    # P0-6: код — поручение направлению, а не лид в окне штаба; Гестия — своим окном (`pantheon wake hestia --task`)
+    agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES) + ["hestia"], agents_py)
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
     write_window(out_dir, "hq", hq)
     built.append("hq")
@@ -3548,6 +3583,11 @@ def start_at(rest, origin, dry):
     if dry:
         print(f"[at] {target} в {stamp(when)} — {text}")
         return 0
+    if origin == "zeus" and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):  # слово — при постановке, не при запуске
+        print(f"pantheon start --at: отказ — {NO_WORD_WHY}", file=sys.stderr)
+        capacity_log({"t": round(now(), 1), "at": stamp(), "target": target, "origin": origin, "result": "refused",
+                      "kind": "at"})
+        return START_REFUSED
     oid = N.oneshot_add(target, when, text, origin, t=t)
     print(f"разовый запуск {oid}: {target} в {stamp(when)} — исполнит плановый проход (pantheon watch), срок "
           f"{N.ONESHOT_TTL // 3600} ч; отмена — pantheon start --at-cancel {oid}")
@@ -3557,15 +3597,33 @@ def start_at(rest, origin, dry):
 def start(rest):
     """pantheon start <направление> [поручение] | workshop <задача> [поручение] | zeus [--restart]  [--from кто] [--dry-run]
     pantheon start <направление> --at ЧЧ:ММ|"ГГГГ-ММ-ДД ЧЧ:ММ" [поручение] | --at-list | --at-cancel <id>   разовый запуск
-                                                                                    плановым проходом (вместо sleep)"""
+                                                                                    плановым проходом (вместо sleep)
+    Запуск сессии пишет замер в STATE/capacity.jsonl (сессий Пантеона, давление памяти, свободно %, своп). Откуда запуск:
+    --from, а без него по окну — PANTHEON_ROLE=hq это zeus, другая роль tick, без роли owner; в окне роли --from owner
+    и любой --from, не совпадающий с origin окна (hq → zeus, иная роль → tick), не принимаются (код 2). Отказ, код 2: zeus без вашего слова в owner-log/zeus.md за 15 мин (и у --at при постановке);
+    красный замер (своп выше порога дежурного, давление не «норма») или «нет сигнала» (своп и давление не прочитаны) —
+    код 5 «отложено» (не сбой: самозапуск и разовый запуск повторяются), слово только у owner и zeus со словом.
+    Разовый запуск (--at) исполняется по правилам планового прохода: в красной зоне ждёт, слово при постановке
+    не переносится."""
     dry = "--dry-run" in rest
     restart = "--restart" in rest
     rest = [a for a in rest if a not in ("--dry-run", "--restart")]
-    origin = "owner"
+    # откуда запуск, по окну вызова (metis-0261 А, ревью argus): в окне роли PANTHEON_ROLE задан, и владелец там не
+    # говорит — окно Пританея (hq) считается Зевсом, остальные — плановым проходом (tick); без роли — терминал владельца
+    role = os.environ.get("PANTHEON_ROLE") or ""
+    origin = "zeus" if role == "hq" else "tick" if role else "owner"
     if "--from" in rest:
         i = rest.index("--from")
         if i + 1 >= len(rest) or rest[i + 1] not in ("zeus", "tick", "owner"):
             print("pantheon start: --from zeus | tick | owner", file=sys.stderr)
+            return 2
+        if role and rest[i + 1] == "owner":
+            print(f"pantheon start: --from owner не принимается в окне роли ({role}) — слово владельца там проверяется "
+                  "по owner-log (--from zeus)", file=sys.stderr)
+            return 2
+        if role and rest[i + 1] != origin:  # круг 3: явный --from в окне роли — только свой origin (hq → zeus, роль → tick)
+            print(f"pantheon start: в окне роли ({role}) --from только {origin} (окно задаёт происхождение), "
+                  f"не {rest[i + 1]}", file=sys.stderr)
             return 2
         origin, rest = rest[i + 1], rest[:i] + rest[i + 2:]
     if any(a in ("--at", "--at-list", "--at-cancel") for a in rest):
@@ -3575,6 +3633,11 @@ def start(rest):
         return 2
     target, rest = rest[0], rest[1:]
     if target == "zeus":
+        if not dry:  # сессии не считаем: лишний claude agents ломает сценарии ожидания имени; слово и память — да
+            code, why = start_gate(target, origin, None)
+            if why:
+                print(f"pantheon start: {'отказ' if code == 2 else 'отложено'} — {why}", file=sys.stderr)
+                return code
         # штаб — ваша интерактивная сессия в iTerm: команда заменяет себя на claude в ~/ai/pantheon
         argv = [claude_bin(), "--agent", "hq", "--name", "zeus", "--settings", path("settings", "hq.json")]
         if dry:
@@ -3633,8 +3696,14 @@ def start(rest):
         return _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win)
 
 
-def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win):
+def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win, need_word=False,
+                   cmd="pantheon start"):
     agents = agents_all()
+    if not dry:  # metis-0261 А: слово владельца и замер — до любых действий; список сессий тот же, что ниже
+        code, why = start_gate(name, origin, agents, need_word)
+        if why:
+            print(f"{cmd}: {'отказ' if code == 2 else 'отложено'} — {why}", file=sys.stderr)
+            return code
     same = [a for a in agents or [] if a.get("name") == name]
     live = live_copies(name, agents)
     # metis-0348: «blocked» без процесса и без вопроса (noProcess, reconcile_agents) — сессию снял Claude Code, ждать
@@ -3683,9 +3752,6 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     before = {a.get("id") for a in agents_all() or [] if a.get("id")}
     r = subprocess.run(argv, cwd=folder, env=claude_env(), capture_output=True, text=True, timeout=180)
     start_log(f"{name}\t{origin}\t{folder}\t{r.returncode}")
-    if origin == "zeus" and r.returncode == 0 and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
-        alert(f"запуск {name} по поручению Зевса без вашего слова в его окне за {OWNER_WORD_WINDOW // 60} мин — "
-              "возможно, по сообщению другой сессии (лазейка на время доработки, decisions.md 15.10)", "pantheon-start")
     sys.stdout.write(r.stdout)
     sys.stderr.write(r.stderr)
     if r.returncode != 0:
@@ -3699,8 +3765,9 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     return 0
 
 
-# Лазейка на время доработки (ваше решение 15.10): Зевс запускает направления и по сообщениям других сессий. Чтобы это
-# было видно, запуск «от Зевса» без вашей строки в его журнале owner-log за последние минуты — строка в тревогах.
+# metis-0261 (А): лазейка 15.10 закрыта. Запуск «от Зевса» (--from zeus) без вашей строки в его журнале owner-log за
+# последние минуты — отказ, код 2 (раньше только тревога). Соседний путь `wake <имя> "задание"` из окна роли —
+# тот же отказ (watch.py wake_one, owner_word_ok; круг 4). Ваше слово — запись в owner-log/zeus.md, её пишет хук.
 OWNER_WORD_WINDOW = 15 * 60
 OWNER_HEAD = re.compile(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", re.M)
 
@@ -3721,6 +3788,104 @@ def owner_spoke_recently(session, window):
     except ValueError:
         return False
     return now() - last <= window
+
+
+CAPACITY_SESSIONS_DONE = ("stopped", "failed", "done")
+
+
+def capacity_probe(agents):
+    """Замер загрузки Mac для pantheon start (metis-0261 А): agents — список claude agents (или None); сессий Пантеона, давление памяти (kern.memorystatus_vm_pressure_level:
+    1 норма, 2 предупреждение, 4 критично), свободно % (memory_pressure), своп ГБ. Чего не удалось прочитать — None.
+    Красный (red): своп выше SWAP_ALERT_GB (порог дежурного, watch.py) или давление не «норма» — новых чисел нет."""
+    w = watch_mod()
+    out = {"sessions": None, "pressure": None, "free_pct": None, "swap_gb": None}
+    if agents is not None:
+        doms = w.domains()
+        out["sessions"] = sum(1 for a in agents if a.get("state") not in CAPACITY_SESSIONS_DONE
+                              and w.is_pantheon(a.get("name"), doms))
+    with contextlib.suppress(Exception):
+        out["swap_gb"] = w.swap_gb()
+    with contextlib.suppress(Exception):
+        r = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True, text=True,
+                           timeout=10)
+        if r.returncode == 0 and r.stdout.strip().isdigit():
+            out["pressure"] = int(r.stdout.strip())
+    with contextlib.suppress(Exception):
+        r = subprocess.run(["memory_pressure"], capture_output=True, text=True, timeout=10)
+        m = re.search(r"free percentage:\s*(\d+)%", r.stdout)
+        if m:
+            out["free_pct"] = int(m.group(1))
+    limit = w.threshold("swap_alert_gb", w.SWAP_ALERT_GB)
+    reasons = []
+    if out["swap_gb"] is not None and out["swap_gb"] > limit:
+        reasons.append(f"своп {out['swap_gb']:.1f} ГБ > {limit:g} ГБ")
+    if out["pressure"] is not None and out["pressure"] >= 2:
+        reasons.append(f"давление памяти {'критичное' if out['pressure'] >= 4 else 'предупреждение'}")
+    out["red"] = reasons
+    out["unknown"] = out["swap_gb"] is None and out["pressure"] is None  # нет ни одного сигнала памяти
+    return out
+
+
+def capacity_log(row):
+    """Строка замера в STATE/capacity.jsonl; запись не должна ронять запуск."""
+    with contextlib.suppress(OSError):
+        os.makedirs(STATE, exist_ok=True)
+        fd = os.open(path("capacity.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, (json.dumps(row, ensure_ascii=False) + "\n").encode())
+        finally:
+            os.close(fd)
+
+
+NO_WORD_WHY = (f"запуск от Зевса без вашего слова в его окне за {OWNER_WORD_WINDOW // 60} мин "
+               "(сообщение другой сессии согласием не считается)")
+START_REFUSED = 2   # отказ: нет слова владельца (--from zeus) — повтор бесполезен
+START_DEFERRED = 5  # отложено: красный замер памяти без слова владельца — повторит следующий плановый проход, не сбой
+# (3 и 4 заняты: NO_WINDOW и SKIPPED у resume_session, те же числа дошли бы до дежурного как коды запуска)
+
+
+def start_gate(target, origin, agents, need_word=False):
+    """pantheon start, перед запуском сессии (metis-0261 А): замер в capacity.jsonl (строка — у каждого не-dry start,
+    дошедшего до этого шага; ранние выходы — «остановлено вами», «нет окна», занятое имя — и продолжение через
+    resume_session строки не пишут). → (код, причина); (0, None) — можно.
+    Слово владельца: --from owner (по умолчанию) — он сам; --from zeus — его свежая запись в owner-log/zeus.md (без неё
+    отказ, код 2, всегда); tick слова не имеет и в красной зоне получает код 5 (отложено) при любом zeus.md.
+    need_word (wake hestia из окна роли, не hq): запуск с поручением из окна роли — только по свежей записи в zeus.md,
+    без неё отказ, код 2, в любой зоне (как wake <имя> "задание"); со словом tick по-прежнему откладывается в красной."""
+    m = capacity_probe(agents)
+    word = origin == "owner" or (origin == "zeus" and owner_spoke_recently("zeus", OWNER_WORD_WINDOW))
+    code, why = 0, None
+    if origin == "zeus" and not word:
+        code, why = START_REFUSED, NO_WORD_WHY
+    elif need_word and origin != "owner" and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
+        code, why = START_REFUSED, (f"поручение из окна роли — только по вашему слову: в журнале Зевса нет вашей строки "
+                                    f"за {OWNER_WORD_WINDOW // 60} мин (сообщение другой сессии согласием не считается)")
+    elif (m["red"] or m["unknown"]) and not word:
+        reasons = "; ".join(m["red"]) if m["red"] else "нет сигнала: своп и давление памяти не прочитаны"
+        # wake hestia (need_word) никто не повторяет — не обещать самозапуск (ревью #110, круг 6)
+        again = "слово в окне Зевса из окна роли красную зону не снимает; повторите после нормы памяти" if need_word else "самозапуск повторит позже"
+        code, why = START_DEFERRED, (f"память Mac в красной зоне ({reasons}) — запуск только со словом владельца, "
+                                     f"{again}")
+    capacity_log({"t": round(now(), 1), "at": stamp(), "target": target, "origin": origin, "sessions": m["sessions"],
+                  "pressure": m["pressure"], "free_pct": m["free_pct"], "swap_gb": None if m["swap_gb"] is None
+                  else round(m["swap_gb"], 2), "red": bool(m["red"]),
+                  "unknown": m["unknown"], "result": {0: "allowed", START_REFUSED: "refused", START_DEFERRED: "deferred"}[code]})
+    return code, why
+
+
+_WATCH = None
+
+
+def watch_mod():
+    """lib/watch.py одним экземпляром на процесс (пороги дежурного и чтение свопа — одно место)."""
+    global _WATCH
+    if _WATCH is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_watch", os.path.join(LIB, "watch.py"))
+        _WATCH = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_WATCH)
+        _WATCH.set_core(sys.modules[__name__])
+    return _WATCH
 
 
 def open_tasks(name):
@@ -3751,11 +3916,53 @@ def wake_recheck(name, state=None):
 
 
 def wake_hestia(rest):
-    """pantheon wake hestia [--task <id>] (metis-0217, шаг 1): запуск Гестии отказывает всегда, код 2. Роль собирается, но
-    у неё нет окна песочницы (hestia не в guard PANTHEON_ROLES, `claude -p --agent hestia` шёл бы сессией владельца
-    без границы прав), поэтому claude не зовётся. Запуск откроет metis-0245 (окно песочницы) отдельным PR ядра после «да» владельца."""
-    print("pantheon wake hestia: отказ — нет окна песочницы (metis-0245); claude не запускался", file=sys.stderr)
-    return 2
+    """pantheon wake hestia --task <id> [--dry-run] (metis-0217, metis-0245): Гестия — фоновой сессией `hestia` в своём
+    окне песочницы (settings/hestia.json, собирает sandbox_build; PANTHEON_ROLE=hestia — правило guard hestia), папка
+    запуска — её кэш. Одна задача — одна сессия: без задачи, с id не по образцу, несуществующей или не открытой задачей
+    — отказ «нет задачи», код 2, claude не зовётся. Нет окна, кэша или роли (~/.claude/agents/hestia.md) — код 1 с
+    командой сборки. Метка «остановлено вами», технический перезапуск и живая копия — отказ, как у start.
+    Откуда — как у start: hq → zeus, иная роль → tick, без роли → owner; из окна роли без вашего слова в
+    owner-log/zeus.md за 15 мин — отказ, код 2, строка refused в capacity.jsonl, claude не зовётся."""
+    dry = "--dry-run" in rest
+    args = [a for a in rest[1:] if a != "--dry-run"]
+    tid = args[1] if len(args) == 2 and args[0] == "--task" else None
+    head = None
+    if tid and tasks_mod().ID_RE.fullmatch(tid):
+        head = (tasks_mod().load_tasks(PANTHEON).get(tid) or (None, None, None))[1]
+    if not head or head.get("status") not in OPEN_STATUSES:
+        why = ("укажи --task <id> открытой задачи (todo, doing, review)" if head is None
+               else f"задача {tid} не открыта ({head.get('status')})")
+        print(f"pantheon wake hestia: отказ — нет задачи: {why}; claude не запускался", file=sys.stderr)
+        return 2
+    win = path("settings", "hestia.json")
+    folder = _real_dir("~/Library/Caches/pantheon-sandbox/hestia", ["~/Library/Caches/pantheon-sandbox"], strict=True)
+    if not os.path.isfile(win) or not folder:
+        print(f"pantheon wake hestia: нет окна {win.replace(HOME, '~')} или его папки — pantheon domains build",
+              file=sys.stderr)
+        return 1
+    if not os.path.isfile(os.path.join(AGENTS, "hestia.md")):
+        print("pantheon wake hestia: нет роли ~/.claude/agents/hestia.md — pantheon roles build", file=sys.stderr)
+        return 1
+    if os.path.exists(path("stopped", "hestia")):
+        print("pantheon wake hestia: hestia остановлена вами (pantheon resume hestia)", file=sys.stderr)
+        return 1
+    m = maintenance_active()
+    if m and not dry:
+        print(f"pantheon wake hestia: идёт технический перезапуск ({m.get('reason')}) — после pantheon restart --go",
+              file=sys.stderr)
+        return 1
+    # откуда запуск — как в start() (metis-0261 А, ревью argus-b5): hq → zeus, иная роль → tick, без роли → owner.
+    # Поручение Гестии из окна роли — только по вашему слову в owner-log/zeus.md (как wake <имя> "задание"), иначе код 2
+    role = os.environ.get("PANTHEON_ROLE") or ""
+    origin = "zeus" if role == "hq" else "tick" if role else "owner"
+    task = (f"Задача {tid}: прочитай её карточку (pantheon task show {tid}) и сделай ровно то, что в ней. Отчёт — по "
+            "формату роли, каждое действие — строкой журнала в нём.")
+    with lock("start-hestia", block=False) as got:
+        if not got:
+            print("pantheon wake hestia: hestia уже запускается другой командой", file=sys.stderr)
+            return 1
+        return _start_session("hestia", "hestia", folder, "hestia", task, [], origin, dry, False, win,
+                              need_word=bool(role), cmd="pantheon wake hestia")
 
 
 def wake(rest):
@@ -3767,6 +3974,15 @@ def wake(rest):
             print("pantheon wake: уже идёт в другом процессе")
             return 0
         return _wake(dry)
+
+
+def capacity_note(target, origin, agents, result="allowed"):
+    """Только строка замера в capacity.jsonl, без отказа (pantheon wake: подъём прерванной сессии не откладываем).
+    result — что решил вызвавший: "allowed" или "refused" (wake <имя> с заданием без слова владельца, metis-0261 А)."""
+    m = capacity_probe(agents)
+    capacity_log({"t": round(now(), 1), "at": stamp(), "target": target, "origin": origin, "sessions": m["sessions"],
+                  "pressure": m["pressure"], "free_pct": m["free_pct"], "swap_gb": None if m["swap_gb"] is None
+                  else round(m["swap_gb"], 2), "red": bool(m["red"]), "unknown": m["unknown"], "result": result})
 
 
 def _wake(dry):
@@ -3803,6 +4019,7 @@ def _wake(dry):
         if dry:
             print(f"будет поднята: {line}")
             continue
+        capacity_note(name, "wake", agents)
         if fresh:
             rc = fresh_start(name, a, fresh_text("пробуждение", name, a.get("id")), "wake",
                              recheck=lambda n=name, s=state: wake_recheck(n, s), reason=fresh)
@@ -3946,9 +4163,18 @@ def _marked(text, tmpl):
 
 
 # Шаблоны, которые build пока не собирает (metis-0217, review-51-bypass): роль, которую нельзя звать до окна
-# песочницы, не должна лежать в ~/.claude/agents — иначе её поднимет субагент мимо отказа wake. Убрать строку —
-# когда слит metis-0245. Уже собранный файл с меткой build убирает как устаревшую роль.
-ROLES_DEFERRED = {"hestia": "metis-0245"}
+# песочницы, не должна лежать в ~/.claude/agents — иначе её поднимет субагент мимо отказа wake. Строка — имя шаблона и
+# задача, которая его откроет; уже собранный файл с меткой build убирает как устаревшую роль. Пусто с metis-0245:
+# у hestia своё окно (sandbox_build) и правило guard «hestia».
+ROLES_DEFERRED = {}
+
+
+def _head_names(text):
+    """Значения полей name: шапки роли без кавычек, по порядку; [] — шапки или поля нет, два и больше — повтор."""
+    end = text.find("\n---\n", 3) if text.startswith("---\n") else -1
+    if end < 0:
+        return []
+    return [ln.split(":", 1)[1].strip().strip("\"'") for ln in text[4:end].splitlines() if re.match(r"name\s*:", ln)]
 
 
 def roles_build(src=None, out=None, role_errors=None):
@@ -4022,6 +4248,16 @@ def roles_build(src=None, out=None, role_errors=None):
                 kept.add(f"{base}-{short}.md")
                 continue
             want[f"{base}-{short}.md"] = (f, out_text)
+    # Claude Code зовёт роль по полю name:, а не по имени файла (argus-51d): личный hearth.tmpl с `name: hestia` дал бы
+    # вторую hestia мимо её окна и правил. Несовпадение — роль не собирается, а прежний собранный файл убирается ниже
+    for fname in sorted(want):
+        got = _head_names(want[fname][1])
+        if got != [fname[:-3]]:
+            tmpl = want.pop(fname)[0]
+            what = ("нет" if not got else f"«{got[0]}»" if len(got) == 1
+                    else "повторён (" + ", ".join(f"«{g}»" for g in got) + ")")
+            err(tmpl, f"{tmpl} → {fname}: поле name: в шапке {what} — не совпадает с именем роли «{fname[:-3]}», "
+                f"роль не собрана")
     made = []
     if want:  # и на новой машине: ~/.claude/agents ещё нет, а общие роли плагина собрать надо
         os.makedirs(out, exist_ok=True)
