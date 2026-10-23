@@ -41,7 +41,7 @@ esac
 exit 0
 """
 
-OK = 'print("ok")\n'
+OK = 'print("ok")\nprint("1 из 1 прошли")\n'  # с итогом: файл без итога (код 0, ok) база сверяет (metis-0361)
 OLD_FAIL = 'import os\nprint("FAIL старое падение в " + os.path.abspath(__file__))\nraise SystemExit(1)\n'
 NEW_FAIL = 'print("FAIL новая ошибка")\nraise SystemExit(1)\n'
 NEW_EXC = 'raise KeyError("x")\n'
@@ -55,7 +55,7 @@ REC_TMPDIR = 'import os\nopen(os.environ["REC_FILE"] + ".t", "a").write(os.envir
 # тесты идут без цвета: FORCE_COLOR снят, NO_COLOR=1, PYTHON_COLORS=0
 COLORLESS = ('import os\nif os.environ.get("FORCE_COLOR") or os.environ.get("CLICOLOR_FORCE") '
              'or os.environ.get("NO_COLOR") != "1" or os.environ.get("PYTHON_COLORS") != "0":\n'
-             '    print("FAIL цвет включён")\n    raise SystemExit(1)\nprint("ok   цвет выключен")\n')
+             '    print("FAIL цвет включён")\n    raise SystemExit(1)\nprint("ok   цвет выключен")\nprint("1 из 1 прошли")\n')
 
 
 def pantheon_python():
@@ -570,7 +570,7 @@ def fake(cmd, cwd=None, timeout=None, **kw):
         clock[0] += 1700
     if f == "test_a.py":
         return subprocess.CompletedProcess(cmd, 1, stdout=b"FAIL old\\n")
-    return subprocess.CompletedProcess(cmd, 0, stdout=b"ok\\n")
+    return subprocess.CompletedProcess(cmd, 0, stdout="ok\\n1 из 1 прошли\\n".encode())
 P.subprocess.run = fake
 os.makedirs(P.path("plugins", "tmp"), exist_ok=True)
 log, digest, fresh = P._plugin_check("x", "1.0.0", "1.1.0", sys.argv[2], sys.argv[3], {})
@@ -631,25 +631,29 @@ print(json.dumps({"seen": seen, "fresh": sorted(k[2] for k in fresh)}))""", e.sr
     e.close()
 
     # metis-0369 п.2: установленный сосед с installPath, папки которого нет, берётся из каталога (как неустановленный)
-    e = Env("1.0.0", "1.1.0", SEE_PEERS, SEE_PEERS)
-    mkt = os.path.dirname(os.path.dirname(e.src))
-    gcat = os.path.join(mkt, "plugins", "guard")
-    e.write(os.path.join(gcat, ".claude-plugin", "plugin.json"), json.dumps({"name": "guard", "version": "3.0.0"}))
-    e.write(os.path.join(gcat, "marker.txt"), "каталог")
-    e.write(os.path.join(mkt, ".claude-plugin", "marketplace.json"),
-            json.dumps({"name": "agent-kit", "plugins": [{"name": "x", "source": "./plugins/x"},
-                                                        {"name": "guard", "source": "./plugins/guard"}]}))
-    ghost = os.path.join(e.home, ".claude", "plugins", "cache", "agent-kit", "guard", "ghost")  # папки нет
-    grow = {"id": "guard@agent-kit", "version": "3.0.0", "scope": "user", "installPath": ghost}
-    for f in ("list.json", "list-after.json"):
-        p = os.path.join(e.stub, f)
-        e.write(p, json.dumps(json.load(open(p)) + [grow]))
-    rec = os.path.join(e.tmp, "peers.rec")
-    e.run(extra={"REC_FILE": rec})
-    seen = [json.loads(ln) for ln in open(rec, encoding="utf-8")] if os.path.exists(rec) else []
-    check("0369 п.2: сосед базы с несуществующим installPath — у базы guard из каталога",
-          sorted({(s["who"], s["guard"]) for s in seen}) == [("base", "каталог"), ("new", "каталог")], seen)
-    e.close()
+    # metis-0362 (ревью 112, M7): installPath, указывающий на файл, а не на папку, — то же, что отсутствующая папка
+    for what in ("нет папки", "файл вместо папки"):
+        e = Env("1.0.0", "1.1.0", SEE_PEERS, SEE_PEERS)
+        mkt = os.path.dirname(os.path.dirname(e.src))
+        gcat = os.path.join(mkt, "plugins", "guard")
+        e.write(os.path.join(gcat, ".claude-plugin", "plugin.json"), json.dumps({"name": "guard", "version": "3.0.0"}))
+        e.write(os.path.join(gcat, "marker.txt"), "каталог")
+        e.write(os.path.join(mkt, ".claude-plugin", "marketplace.json"),
+                json.dumps({"name": "agent-kit", "plugins": [{"name": "x", "source": "./plugins/x"},
+                                                            {"name": "guard", "source": "./plugins/guard"}]}))
+        ghost = os.path.join(e.home, ".claude", "plugins", "cache", "agent-kit", "guard", "ghost")  # папки нет
+        if what == "файл вместо папки":
+            e.write(ghost, "не папка")
+        grow = {"id": "guard@agent-kit", "version": "3.0.0", "scope": "user", "installPath": ghost}
+        for f in ("list.json", "list-after.json"):
+            p = os.path.join(e.stub, f)
+            e.write(p, json.dumps(json.load(open(p)) + [grow]))
+        rec = os.path.join(e.tmp, "peers.rec")
+        e.run(extra={"REC_FILE": rec})
+        seen = [json.loads(ln) for ln in open(rec, encoding="utf-8")] if os.path.exists(rec) else []
+        check(f"0369 п.2 ({what}): сосед базы с таким installPath — у базы guard из каталога",
+              sorted({(s["who"], s["guard"]) for s in seen}) == [("base", "каталог"), ("new", "каталог")], seen)
+        e.close()
 
     # metis-0369 п.1: git не работает в копиях (заглушка в PATH падает) и тесты падают одинаково у обеих версий —
     # база это не гасит: красное «копия новой версии не собралась» с причиной в логе и в тревоге, update не вызван
@@ -867,6 +871,120 @@ print(json.dumps(sorted(k[2] for k in fresh), ensure_ascii=False))""", e.src, os
     check("0359 круг 3 п.4: «39/39» из детали провала последней строкой — красное «нет итоговой строки»",
           r.returncode == 76 and "test_a.py: нет итоговой строки" in fr, f"{r.returncode} {fr!r}")
     e.close()
+
+    # metis-0361: код 0, несколько ok и ни строки итога. Пять файлов agent-kit так кончаются законно, поэтому базу
+    # по такому файлу гоняем и сверяем. Проба D: новая оборвалась (sys.exit(0) в проверяемом коде) раньше базы —
+    # красное «проверок меньше» (мутант: файл без итога не идёт к базе); итог у базы был, у новой пропал — «оборвался
+    # без итога»; у базы файла нет — то же; тот же стиль без итога и столько же ok — зелёное, причина — в логе
+    BARE = "код 0, строки ok и ни строки итога — оборвался без итога"
+    OK5 = "".join(f'print("ok   n{i}")\n' for i in range(5))
+    e = Env("1.0.0", "1.1.0", OK5, 'print("ok   n0")\nprint("ok   n1")\nprint("ok   n2", flush=True)\nimport sys\nsys.exit(0)\n')
+    r = e.run()
+    fr = fresh_of(e)
+    check("0361 проба D: код 0, три ok из пяти у базы, обрыв без итога — красное «проверок меньше», причина в логе",
+          r.returncode == 76 and "test_a.py: проверок меньше, чем у базы (3 < 5)" in fr
+          and "проверок меньше, чем у базы (3 < 5)" in log_of(e), f"{r.returncode} {fr!r}")
+    e.close()
+    e = Env("1.0.0", "1.1.0", OK5 + 'print("5 из 5 прошли")\n', OK5)
+    r = e.run()
+    fr = fresh_of(e)
+    check("0361: итог у базы был, у новой нет (код 0, ok столько же) — красное «оборвался без итога», причина в логе",
+          r.returncode == 76 and "test_a.py: " + BARE + " (у базы итог был)" in fr
+          and "оборвался без итога (у базы итог был)" in log_of(e), f"{r.returncode} {fr!r}")
+    e.close()
+    e = Env("1.0.0", "1.1.0", None, OK5)
+    r = e.run()
+    fr = fresh_of(e)
+    check("0361: у базы такого файла нет — красное «оборвался без итога (у базы такого файла нет)»",
+          r.returncode == 76 and "test_a.py: " + BARE + " (у базы такого файла нет)" in fr, f"{r.returncode} {fr!r}")
+    e.close()
+    e = Env("1.0.0", "1.1.0", OK5, OK5)
+    r = e.run()
+    check("0361: тот же стиль без итога, столько же ok — зелёное, update вызван",
+          r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), f"{r.returncode} {fresh_of(e)!r}")
+    e.close()
+    e = Env("1.0.0", "1.1.0", OK5, OK5 + 'print("5 из 5 прошли")\n')
+    r = e.run()
+    check("0361: у новой итог есть — зелёное", r.returncode == 0 and "plugin update x@agent-kit" in e.argv(),
+          f"{r.returncode} {fresh_of(e)!r}")
+    e.close()
+
+    # Ревью 115, п.1: «тот же стиль без итога» — только если и база кончилась кодом 0. База, которая упала (код не 0,
+    # FAIL, Traceback), — красное «у базы файл упал» (мутант: упавшая база = тот же стиль — зелёное)
+    OK2 = "".join(f'print("ok   n{i}")\n' for i in range(2))
+    OK4 = "".join(f'print("ok   n{i}")\n' for i in range(4))
+    for name, base in (("P1 os._exit(1)", OK2 + 'import os, sys\nsys.stdout.flush()\nos._exit(1)\n'),
+                       ("P1b FAIL и код 1", OK2 + 'print("FAIL env")\nraise SystemExit(1)\n'),
+                       ("P1c Traceback", OK2 + 'raise KeyError("env")\n')):
+        e = Env("1.0.0", "1.1.0", base, OK4 + 'import sys\nsys.exit(0)\n')
+        r = e.run()
+        fr = fresh_of(e)
+        check(f"115 {name}: база упала, новая без итога с большим числом ok — красное «у базы файл упал»",
+              r.returncode == 76 and "test_a.py: " + BARE + " (у базы файл упал)" in fr
+              and "plugin update" not in e.argv(), f"{r.returncode} {fr!r}")
+        e.close()
+    # Ревью 115 круг 2, P1d: база кончилась кодом 0, но в выводе есть строка FAIL — подпись провала есть, значит
+    # это не «тот же стиль без итога»: красное «у базы файл упал» (мутант R4: bare без `not fsigs` — зелёное)
+    e = Env("1.0.0", "1.1.0", OK2 + 'print("FAIL env")\n', OK4)
+    r = e.run()
+    fr = fresh_of(e)
+    check("115 P1d: база с кодом 0 и строкой FAIL, новая без итога — красное «у базы файл упал»",
+          r.returncode == 76 and "test_a.py: " + BARE + " (у базы файл упал)" in fr
+          and "plugin update" not in e.argv(), f"{r.returncode} {fr!r}")
+    e.close()
+    # Ревью 115, M10: последняя строка базы «2/3» при трёх строках ok — деталь, а не итог; «нет итога» базы с пояснением
+    # не гасит молчаливый обрыв новой (мутант: _summary_of отдаёт why=None в этой ветке — зелёное)
+    e = Env("1.0.0", "1.1.0", 'print("ok   a")\nprint("ok   b")\nprint("ok   c")\nprint("2/3")\nraise SystemExit(1)\n',
+            'print("ok   a")\nprint("ok   b")\nprint("ok   c", flush=True)\nimport os\nos._exit(1)\n')
+    r = e.run()
+    fr = fresh_of(e)
+    check("115 M10: у базы «2/3» при трёх ok — не итог, обрыв новой — красное «нет итоговой строки»",
+          r.returncode == 76 and "test_a.py: нет итоговой строки" in fr, f"{r.returncode} {fr!r}")
+    e.close()
+    # Ревью 115, п.3: голое «N/M» у файла без строк ok и без строки провала — не итог (P11: деталь «38/39» ребёнка при
+    # коде 0; мутант: правило снова требует строку провала — зелёное)
+    e = Env("1.0.0", "1.1.0", 'print("тестов: 40, не прошло: 0")\n', 'print("ребёнок:")\nprint("38/39")\n')
+    r = e.run()
+    fr = fresh_of(e)
+    check("115 P11: без строк ok деталь «38/39» при коде 0 — не итог, красное «ни одной проверки»",
+          r.returncode == 76 and "test_a.py: ни одной проверки" in fr, f"{r.returncode} {fr!r}")
+    e.close()
+
+    # metis-0362, R1: «M/M» после строки провала у базы — не итог; её «нет итоговой строки» не должна гасить молчаливый
+    # обрыв новой с теми же ok (мутант: подпись без пояснения — зелёное)
+    e = Env("1.0.0", "1.1.0",
+            'print("ok   a")\nprint("НЕ ПРОШЛО: лимит 3600")\nprint("ok   b")\nprint("2/2")\nraise SystemExit(1)\n',
+            'print("ok   a")\nprint("ok   b", flush=True)\nimport os\nos._exit(1)\n')
+    r = e.run()
+    fr = fresh_of(e)
+    check("0362 R1: «нет итога» у базы (2/2 после провала) не гасит обрыв новой — красное «нет итоговой строки»",
+          r.returncode == 76 and "test_a.py: нет итоговой строки" in fr and "деталь провала" not in fr,
+          f"{r.returncode} {fr!r}")
+    e.close()
+    # «38/39» из детали — не итог, даже если у базы настоящий итог «38 из 39 прошли» (S1b; мутант: без правила
+    # голого N/M — зелёное); настоящий итог «N из M прошли» без строк ok по-прежнему итог
+    e = Env("1.0.0", "1.1.0", 'print("НЕ ПРОШЁЛ: x")\nprint("38 из 39 прошли")\nraise SystemExit(1)\n',
+            'print("НЕ ПРОШЁЛ: x\\n38/39", flush=True)\nimport os\nos._exit(1)\n')
+    r = e.run()
+    fr = fresh_of(e)
+    check("0362 S1b: «38/39» из детали последней строкой при итоге «38 из 39» у базы — красное «нет итоговой строки»",
+          r.returncode == 76 and "test_a.py: нет итоговой строки (последняя строка — деталь провала, не итог)" in fr,
+          f"{r.returncode} {fr!r}")
+    e.close()
+    e = Env("1.0.0", "1.1.0", 'print("НЕ ПРОШЁЛ: x")\nprint("38 из 39 прошли")\nraise SystemExit(1)\n',
+            'print("НЕ ПРОШЁЛ: x")\nprint("38 из 39 прошли")\nraise SystemExit(1)\n')
+    r = e.run()
+    check("0362 S1b: настоящий итог «38 из 39 прошли» у обеих — база гасит",
+          r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), f"{r.returncode} {fresh_of(e)!r}")
+    e.close()
+    # шапка: числа от 4 знаков в строке провала — N (склеиваются), короче — нет (мутант: порог 3 знака или 5)
+    SUM = 'print("тестов: 40, не прошло: 1")\nraise SystemExit(1)\n'
+    for was, now, same in (("размер 4096", "размер 8192", True), ("размер 999", "размер 998", False)):
+        e = Env("1.0.0", "1.1.0", f"print('НЕ ПРОШЛО:', {was!r})\n" + SUM, f"print('НЕ ПРОШЛО:', {now!r})\n" + SUM)
+        r = e.run()
+        check(f"0362 шапка: «{was}» против «{now}» — " + ("склеиваются (число от 4 знаков — N)" if same else "разные"),
+              (r.returncode == 0) == same, f"{r.returncode} {fresh_of(e)!r}")
+        e.close()
 
     # Нет папки установленной версии — база пустая, старое падение уже красное
     e = Env("1.0.0", "1.1.0", OLD_FAIL, OLD_FAIL)
