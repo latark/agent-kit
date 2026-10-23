@@ -231,5 +231,49 @@ e.window("Отправить")
 r, ran = e.run()
 check("sync.sh код 0, держание снято — вопрос снят", ran and card_question(e, e.task) is None, r.stdout + r.stderr)
 
+# metis-0364: держание не прочитано или без task= — остаётся; «применён» печатается только после проверки
+def mixed(after):
+    """.sync-held (задача A) sync.sh снимает, .sync-incoming (задача B) после него — по сценарию after."""
+    e = with_card()
+    a = e.task
+    env = {"PATH": os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pan, "PANTHEON_STATE": e.state,
+           "PANTHEON_NOW": str(T0), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": ROOT}
+    r2 = subprocess.run([PY311, "-I", LIB, "task", "new", "--direction", "metis-pantheon", "--project", "Пантеон",
+                         "--title", "Чужие правки", "--status", "waiting", "--waiting-on", "human", "--priority", "1",
+                         "--next", "выбрать", "--question", "Откатить?", "--option", "Откатить правку"],
+                        env=env, capture_output=True, text=True, timeout=60)
+    b = _re.search(r"[a-z]+-\d{4}", r2.stdout).group(0)
+    inc = os.path.join(e.claude, ".sync-incoming")
+    with open(inc, "w") as fh:
+        fh.write(f"task={b}\nfrom=a\nto=b\n")
+    with open(os.path.join(e.claude, "sync.sh"), "w") as fh:
+        fh.write(f'#!/bin/sh\necho x >> "{e.mark}"\nrm -f "{e.claude}/.sync-held" "{inc}"\n{after.format(inc=inc)}\n')
+    e.window("Отправить", tid=a)
+    e.window("Откатить правку", tid=b)
+    r, ran = e.run()
+    return e, a, b, r, ran
+
+
+for label, after, why in (("нечитаемое (каталог)", 'mkdir "{inc}"', ".sync-incoming не прочитан"),
+                          ("без task=", 'printf "from=a\\nto=b\\n" > "{inc}"', ".sync-incoming без task=")):
+    e, a, b, r, ran = mixed(after)
+    out = r.stdout + r.stderr
+    check(f"два держания, второе {label}: первое применено, вопрос снят", ran and card_question(e, a) is None, out)
+    check(f"два держания, второе {label}: вопрос второго остаётся, причина в выводе",
+          card_question(e, b) not in (None, "нет файла") and f"sync-answers: {b} — sync.sh не применил" in r.stdout
+          and why in r.stdout, out)
+    check(f"два держания, второе {label}: «применён» только по первому",
+          f"ответ по {a} применён" in r.stdout and f"ответ по {b} применён" not in r.stdout, out)
+
+# одно держание, после sync.sh файл без task= — «применён» не печатается, вопрос остаётся
+e = with_card(applies=False)
+with open(os.path.join(e.claude, "sync.sh"), "w") as fh:
+    fh.write(f'#!/bin/sh\necho x >> "{e.mark}"\nprintf "hash=abc\\n" > "{e.claude}/.sync-held"\n')
+e.window("Отправить")
+r, ran = e.run()
+check("одно держание, после sync.sh без task= — не «применён», вопрос остаётся, причина в выводе",
+      ran and "применён" not in r.stdout and card_question(e, e.task) not in (None, "нет файла")
+      and ".sync-held без task=" in r.stdout, r.stdout + r.stderr)
+
 print(f"\n{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)
