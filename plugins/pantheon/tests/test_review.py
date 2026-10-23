@@ -140,12 +140,14 @@ def run_all(tmp):
              v("reject", SHA, "bbbbbbbb22"),                                   # вернул, не снял
              v("accept", SHA, "bbbbbbbb22", sid="s2"),                         # тот же agent_id, другая сессия
              v("accept", SHA, "cccccccc33", pr=41), v("talos", SHA, "dddddddd44", who="talos"),
+             v("accept", SHA, "eeeeeeee55", pr=None),            # без PR: review_records его пропускает, шлюз — нет
+             v("accept", SHA, "ffffffff66", who="dev-opus"),     # «принять» не от argus шлюз не считает
              v("accept", S2, "aaaaaaaa11"), v("accept", S2, "bbbbbbbb22")]
     with open(os.path.join(state, "merge-gate", "records.jsonl"), "w") as fh:
         fh.write("".join(json.dumps(x) + "\n" for x in tally))
     r = pantheon("review", "status", "latark/agent-kit", "40")
     out = r.stdout.splitlines()
-    check("status: итог на head — «вернуть» снимает только тот же рецензент, другой PR и talos не в счёт",
+    check("status: итог на head — «вернуть» снимает только тот же рецензент; другой PR, без PR и не argus не в счёт",
           f"итог на {SHA[:12]}: принять 2, вернуть 1 — последний вердикт каждого argus" in out, r.stdout)
     check("status: итог на другом head — свой", f"итог на {S2[:12]}: принять 2, вернуть 0 — последний вердикт "
           "каждого argus" in out, r.stdout)
