@@ -87,7 +87,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon wake hestia --task <id> [--dry-run]   Гестия в своём окне песочницы (settings/hestia.json) с открытой
                                         задачей; без задачи или с закрытой — отказ «нет задачи» (код 2); из окна
                                         роли — только по слову владельца в окне Зевса за 15 мин, иначе код 2;
-                                        со словом, но в красной зоне памяти — код 5 «отложено» (повторите сами)
+                                        из окна роли, кроме hq, со словом в красной зоне — код 5 «отложено» (повторите сами);
+                                        из окна hq — как start --from zeus
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
                                         сессия уходит из фоновых сессий Claude Code) и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
@@ -3782,7 +3783,7 @@ def start_gate(target, origin, agents, need_word=False):
     elif (m["red"] or m["unknown"]) and not word:
         reasons = "; ".join(m["red"]) if m["red"] else "нет сигнала: своп и давление памяти не прочитаны"
         # wake hestia (need_word) никто не повторяет — не обещать самозапуск (ревью #110, круг 6)
-        again = "повторите после нормы памяти" if need_word else "самозапуск повторит позже"
+        again = "слово в окне Зевса из окна роли красную зону не снимает; повторите после нормы памяти" if need_word else "самозапуск повторит позже"
         code, why = START_DEFERRED, (f"память Mac в красной зоне ({reasons}) — запуск только со словом владельца, "
                                      f"{again}")
     capacity_log({"t": round(now(), 1), "at": stamp(), "target": target, "origin": origin, "sessions": m["sessions"],

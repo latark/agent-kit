@@ -796,7 +796,7 @@ def main():
     check("wake hestia из окна направления со словом, но в красной зоне — код 5 «отложено» (tick слова не имеет), "
           "claude не звали", r.returncode == 5 and "pantheon wake hestia: отложено — память Mac" in r.stderr
           and not calls() and caprows()[-1]["result"] == "deferred" and caprows()[-1]["origin"] == "tick"
-          and "самозапуск" not in r.stderr and "повторите после нормы памяти" in r.stderr)
+          and "самозапуск" not in r.stderr and "слово в окне Зевса из окна роли красную зону не снимает; повторите после нормы памяти" in r.stderr)
     r = run("wake", "hestia", "--task", "athena-0001", extra=shop_env)
     hrun = json.load(open(hrun_path)) if os.path.exists(hrun_path) else {}
     check("wake hestia из окна направления со словом — запуск, в окне запуска PANTHEON_ORIGIN=tick",
