@@ -5795,6 +5795,12 @@ def sync_answers():
             m = re.search(r"^task=(\S+)$", text, re.M)
             if m:
                 still.add(m.group(1))
+                prev = by_file.get(held)
+                if prev and prev != m.group(1):
+                    # sync.sh снял прежнее держание и поставил другое (ветка «правка изменилась» в quarantine()):
+                    # ответ по прежней задаче не применён, её вопрос остаётся
+                    still.add(prev)
+                    reasons[prev] = f"держание заменено (task={m.group(1)}), ответ не применён"
                 continue
             why = f"{held} без task="
         # проверить нельзя: держание остаётся за своей задачей (известна по первому чтению), а без неё — за всеми

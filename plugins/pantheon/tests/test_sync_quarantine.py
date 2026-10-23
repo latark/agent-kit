@@ -275,5 +275,28 @@ check("одно держание, после sync.sh без task= — не «п�
       ran and "применён" not in r.stdout and card_question(e, e.task) not in (None, "нет файла")
       and ".sync-held без task=" in r.stdout, r.stdout + r.stderr)
 
+# metis-0364 круг 2: sync.sh заменил держание задачи A держанием задачи C — по A нет «применён», вопрос остаётся
+e = with_card(applies=False)
+with open(os.path.join(e.claude, "sync.sh"), "w") as fh:
+    fh.write(f'#!/bin/sh\necho x >> "{e.mark}"\n'
+             f'printf "hash=def\\ntask=metis-0777\\nfiles=1\\n" > "{e.claude}/.sync-held"\n')
+e.window("Отправить")
+r, ran = e.run()
+check("держание A заменено держанием C — не «применён», вопрос A остаётся, причина в выводе",
+      ran and f"ответ по {e.task} применён" not in r.stdout and card_question(e, e.task) not in (None, "нет файла")
+      and f"{e.task} — sync.sh не применил" in r.stdout and "держание заменено (task=metis-0777)" in r.stdout,
+      r.stdout + r.stderr)
+
+# владелец неизвестен: .sync-incoming появился во время sync.sh без task=, .sync-held задачи A снят — держание за всеми
+e = with_card(applies=False)
+with open(os.path.join(e.claude, "sync.sh"), "w") as fh:
+    fh.write(f'#!/bin/sh\necho x >> "{e.mark}"\nrm -f "{e.claude}/.sync-held"\n'
+             f'printf "from=a\\nto=b\\n" > "{e.claude}/.sync-incoming"\n')
+e.window("Отправить")
+r, ran = e.run()
+check("владелец держания неизвестен (.sync-incoming без task= появился во время sync.sh) — не «применён», вопрос A остаётся",
+      ran and f"ответ по {e.task} применён" not in r.stdout and card_question(e, e.task) not in (None, "нет файла")
+      and ".sync-incoming без task=" in r.stdout, r.stdout + r.stderr)
+
 print(f"\n{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)
