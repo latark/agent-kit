@@ -5708,7 +5708,9 @@ BOARD = os.path.join(VIEW, "Доска")
 # только «пора». Без ответа или «пока держать» — ничего не запускает. После sync.sh с кодом 0 функция сама снимает вопрос
 # с карточки, если ответ есть в SYNC_ACT и держание задачи снято (sync.sh с кодом 0 мог ничего не применить: занят
 # лок, нет папки, нет репозитория — тогда держание осталось, и вопрос остаётся). Код не 0, таймаут (240 с) и сбой
-# запуска (код 1) и «Пока держать» — вопрос тоже остаётся.
+# запуска (код 1) и «Пока держать» — вопрос тоже остаётся. Держание после sync.sh, которое не удалось прочитать
+# (не FileNotFoundError) или в котором нет task=, считается не снятым: вопрос остаётся, причина — в выводе;
+# «применён» печатается по задаче только после этой проверки (metis-0364).
 SYNC_DIR = os.path.join(HOME, ".claude")
 SYNC_ACT = {"Отправить на другие Mac", "Отправить", "Откатить правку", "Всё в порядке — правка наша", "Откатить на всех Mac"}
 
@@ -5717,14 +5719,16 @@ def sync_answers():
     owner_log = os.path.join(STATE, "owner-log", "board.jsonl")
     ask_log = os.path.join(STATE, "owner-log", "zeus.md")
     waiting = []
+    by_file = {}  # файл держания -> его задача (по первому чтению)
     for held in (".sync-held", ".sync-incoming"):
         try:
             text = open(os.path.join(SYNC_DIR, held), encoding="utf-8").read()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         m = re.search(r"^task=(\S+)$", text, re.M)
         if m:
             waiting.append(m.group(1))
+            by_file[held] = m.group(1)
     if not waiting or not (os.path.exists(owner_log) or os.path.exists(ask_log)):
         return 0
     # как owner_answer в sync.sh (metis-0125): ответ — галочка на доске (board.jsonl) или выбор в окне вопросов Зевса
@@ -5773,26 +5777,47 @@ def sync_answers():
     except (OSError, subprocess.TimeoutExpired) as e:
         print(f"sync-answers: sync.sh не отработал: {e}", file=sys.stderr)
         return 1
-    print(f"sync-answers: ответ по {', '.join(waiting)} применён (sync.sh, код {r.returncode})")
     # metis-0226: вопрос отвечен — снять его с карточки, иначе она висит в «Ждёт вас», если sync.sh задачу не закрыл
     # (его `pantheon task set` молчит при сбое); закрытие статуса остаётся за sync.sh
+    # metis-0364: «применён» — только после проверки держаний; файл не прочитан или без task= — держание остаётся
     if r.returncode != 0:  # sync.sh не отработал — вопрос остаётся в «Ждёт вас»
+        print(f"sync-answers: sync.sh завершился с кодом {r.returncode} — ответ по {', '.join(waiting)} ждёт")
         return 0
     T = tasks_mod()
-    still = set()  # держание, которое sync.sh не снял, — значит, не применил
+    still = set()  # держание, которое sync.sh не снял (или которое не удалось проверить), — значит, не применил
+    reasons = {}
     for held in (".sync-held", ".sync-incoming"):
         try:
-            m = re.search(r"^task=(\S+)$", open(os.path.join(SYNC_DIR, held), encoding="utf-8").read(), re.M)
-        except OSError:
-            continue
-        if m:
-            still.add(m.group(1))
+            text = open(os.path.join(SYNC_DIR, held), encoding="utf-8").read()
+        except FileNotFoundError:
+            continue  # файла нет — держание снято
+        except (OSError, UnicodeDecodeError) as e:
+            why = f"{held} не прочитан: {e.__class__.__name__}"
+        else:
+            m = re.search(r"^task=(\S+)$", text, re.M)
+            if m:
+                still.add(m.group(1))
+                prev = by_file.get(held)
+                if held == ".sync-held" and prev and prev != m.group(1):
+                    # sync.sh снял прежнее держание и поставил другое (ветка «правка изменилась» в quarantine()):
+                    # ответ по прежней задаче не применён, её вопрос остаётся. У .sync-incoming иначе: файл
+                    # удаляет incoming_answer после ответа, а новый пишет incoming_check — смена task= значит «применён»
+                    still.add(prev)
+                    reasons[prev] = f"держание заменено (task={m.group(1)}), ответ не применён"
+                continue
+            why = f"{held} без task="
+        # проверить нельзя: держание остаётся за своей задачей (известна по первому чтению), а без неё — за всеми
+        owner = by_file.get(held)
+        still.update([owner] if owner else waiting)
+        reasons[owner or "*"] = why
     for tid in waiting:
         if last.get(tid) not in SYNC_ACT:
             continue
         if tid in still:
-            print(f"sync-answers: {tid} — sync.sh не применил, вопрос остаётся")
+            why = reasons.get(tid) or reasons.get("*")
+            print(f"sync-answers: {tid} — sync.sh не применил, вопрос остаётся" + (f" ({why})" if why else ""))
             continue
+        print(f"sync-answers: ответ по {tid} применён (sync.sh, код 0)")
         try:
             head = T.load_tasks(PANTHEON, T.WORK_TYPES).get(tid, (None, {}, None))[1]
             if head.get("question") or head.get("options"):
