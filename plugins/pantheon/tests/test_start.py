@@ -23,6 +23,7 @@ _os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
 import time
 
+OWNER_WINDOW = 15 * 60
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, "lib", "pantheon.py")
 HEAVY = os.path.join(ROOT, "bin", "heavy")
@@ -95,6 +96,15 @@ def main():
     for d in (home, bindir, os.path.join(tmp, "projects", "br"), os.path.join(tmp, ".claude", "agents"),
               os.path.join(home, "directions", "athena-shop", "tasks")):
         os.makedirs(d, exist_ok=True)
+    # sysctl и memory_pressure подменены: значения из окружения запуска (по умолчанию — зелёный замер)
+    open(os.path.join(bindir, "sysctl"), "w").write(
+        '#!/bin/sh\n[ -n "$FAKE_NOSIGNAL" ] && exit 1\ncase "$*" in\n *vm.swapusage*) echo "vm.swapusage: total = 4096.00M  used = ${FAKE_SWAP_MB:-100.00}M'
+        '  free = 3000.00M  (encrypted)";;\n *pressure_level*) echo "${FAKE_PRESSURE:-1}";;\n *) exit 1;;\nesac\n')
+    open(os.path.join(bindir, "memory_pressure"), "w").write(
+        '#!/bin/sh\necho "The system has 17179869184 (1048576 pages with a page size of 16384)."\n'
+        'echo "System-wide memory free percentage: ${FAKE_FREE_PCT:-60}%"\n')
+    for fk in ("sysctl", "memory_pressure"):
+        os.chmod(os.path.join(bindir, fk), 0o755)
     open(os.path.join(bindir, "claude"), "w").write(FAKE)
     os.chmod(os.path.join(bindir, "claude"), 0o755)
     agents_file, log = os.path.join(tmp, "agents.json"), os.path.join(tmp, "claude.log")
@@ -225,6 +235,10 @@ def main():
     check("roles build --src без --out — код 2", r.returncode == 2 and snap(agents_dir) == before)
 
     # start: координатор направления
+    zlog = os.path.join(state, "owner-log", "zeus.md")
+    word = lambda ago=0: (os.makedirs(os.path.dirname(zlog), exist_ok=True), open(zlog, "w").write(
+        time.strftime("## %Y-%m-%d %H:%M:%S\nзапусти athena\n\n", time.localtime(time.time() - ago))))
+    word()  # слово владельца в окне Зевса: без него start --from zeus отказывает (metis-0261 А)
     r = run("start", "athena-shop", "закрой", "эпик", "--from", "zeus")
     c = calls()
     run_file = os.path.join(state, "settings", "run", "athena-shop.json")
@@ -334,14 +348,144 @@ def main():
     os.remove(os.path.join(daemon_dir, "roster.json"))
     _shutil.rmtree(os.path.join(tmp, ".claude", "jobs"))
     alerts_md = os.path.join(home, "alerts.md")
-    said = lambda: open(alerts_md).read().count("без вашего слова") if os.path.exists(alerts_md) else 0
-    check("start --from zeus без вашего слова в окне Зевса — тревога (лазейка видна)", said() == 1)
-    os.makedirs(os.path.join(state, "owner-log"), exist_ok=True)
-    with open(os.path.join(state, "owner-log", "zeus.md"), "w") as fh:
-        fh.write(time.strftime("## %Y-%m-%d %H:%M:%S\nзапусти athena\n\n"))
     open(agents_file, "w").write("[]")
-    run("start", "athena-shop", "проверка", "--from", "zeus")
-    check("start --from zeus сразу после вашего слова — без тревоги", said() == 1)
+    cap = os.path.join(state, "capacity.jsonl")
+    caprows = lambda: [json.loads(x) for x in open(cap)] if os.path.exists(cap) else []
+    n0, c0 = len(caprows()), len(calls())
+    word(ago=OWNER_WINDOW + 60)
+    r = run("start", "athena-shop", "проверка", "--from", "zeus")
+    check("start --from zeus без вашего слова за 15 мин — отказ, код 2, claude не звали (metis-0261 А)",
+          r.returncode == 2 and "без вашего слова" in r.stderr and len(calls()) == c0)
+    os.remove(zlog)
+    r = run("start", "athena-shop", "проверка", "--from", "zeus")
+    check("start --from zeus при пустом журнале владельца — отказ, код 2", r.returncode == 2 and len(calls()) == c0)
+    check("start: отказ тоже пишет замер в capacity.jsonl (result refused)",
+          len(caprows()) == n0 + 2 and caprows()[-1]["result"] == "refused" and caprows()[-1]["origin"] == "zeus")
+    word()
+    r = run("start", "athena-shop", "проверка", "--from", "zeus")
+    row = caprows()[-1]
+    check("start --from zeus сразу после вашего слова — запуск; строка замера: сессий, давление, свободно %, своп",
+          r.returncode == 0 and len(calls()) == c0 + 1 and row["result"] == "allowed" and row["origin"] == "zeus"
+          and row["target"] == "athena-shop" and row["sessions"] == 0 and row["pressure"] == 1
+          and row["free_pct"] == 60 and abs(row["swap_gb"] - 100 / 1024) < 0.01 and row["red"] is False)
+    # красный замер: своп выше порога дежурного (4 ГБ) или давление не «норма»
+    os.remove(zlog)
+    open(agents_file, "w").write("[]")
+    n0, c0 = len(caprows()), len(calls())
+    r = run("start", "athena-shop", "красный", "--from", "tick", extra={"FAKE_SWAP_MB": "5000.00"})
+    check("start --from tick при своп 5 ГБ (> порога) — отложено, код 5 (не 2), claude не звали, red в замере",
+          r.returncode == 5 and "красной зоне" in r.stderr and "своп" in r.stderr and len(calls()) == c0
+          and "самозапуск повторит позже" in r.stderr
+          and caprows()[-1]["red"] is True and caprows()[-1]["result"] == "deferred" and len(caprows()) == n0 + 1)
+    word()  # свежее слово владельца в окне Зевса tick в красной зоне не пропускает (ревью argus #110)
+    r = run("start", "athena-shop", "красный", "--from", "tick", extra={"FAKE_SWAP_MB": "5000.00"})
+    check("start --from tick в красной зоне при свежем zeus.md — по-прежнему код 5, claude не звали",
+          r.returncode == 5 and len(calls()) == c0 and caprows()[-1]["result"] == "deferred")
+    os.remove(zlog)
+    r = run("start", "athena-shop", "красный", "--from", "tick", extra={"FAKE_PRESSURE": "2"})
+    check("start --from tick при давлении «предупреждение» — отложено, код 5",
+          r.returncode == 5 and "давление" in r.stderr and len(calls()) == c0)
+    r = run("start", "athena-shop", "красный", "--from", "tick", extra={"FAKE_SWAP_MB": "3000.00"})
+    check("start --from tick при своп 3 ГБ (ниже порога) — запуск", r.returncode == 0 and len(calls()) == c0 + 1)
+    open(agents_file, "w").write("[]")
+    r = run("start", "athena-shop", "красный", "--from", "owner", extra={"FAKE_SWAP_MB": "5000.00", "FAKE_PRESSURE": "4"})
+    check("start --from owner в красной зоне — запуск (слово владельца — он сам), red True в замере",
+          r.returncode == 0 and caprows()[-1]["red"] is True and caprows()[-1]["result"] == "allowed")
+    open(agents_file, "w").write("[]")
+    word()
+    r = run("start", "athena-shop", "красный", "--from", "zeus", extra={"FAKE_SWAP_MB": "5000.00"})
+    check("start --from zeus в красной зоне, но со словом владельца в окне Зевса — запуск",
+          r.returncode == 0 and caprows()[-1]["red"] is True and caprows()[-1]["result"] == "allowed")
+    os.remove(zlog)
+    r = run("start", "zeus", "--from", "zeus", tty=True)
+    check("start zeus --from zeus без слова владельца — отказ, код 2, замер записан",
+          r.returncode == 2 and "без вашего слова" in r.stderr and caprows()[-1]["target"] == "zeus"
+          and caprows()[-1]["result"] == "refused")
+    open(agents_file, "w").write(json.dumps([{"id": "w1", "name": "daedalus-foo", "state": "working"},
+                                             {"id": "w3", "name": "чужая-сессия", "state": "working"},
+                                             {"id": "w2", "name": "daedalus-bar", "state": "stopped"}]))
+    word()
+    run("start", "athena-shop", "счёт", "--from", "zeus")
+    check("замер: сессий Пантеона — без stopped/failed/done и без чужих имён", caprows()[-1]["sessions"] == 1)
+    n0 = len(caprows())
+    run("start", "athena-shop", "x", "--from", "zeus", "--dry-run")
+    check("start --dry-run — замера в capacity.jsonl нет", len(caprows()) == n0)
+    # origin по окну вызова (ревью argus-b #110): PANTHEON_ROLE=hq — zeus, другая роль — tick, без роли — owner
+    open(agents_file, "w").write("[]")
+    red = {"FAKE_SWAP_MB": "5000.00"}
+    if os.path.exists(zlog):
+        os.remove(zlog)
+    c0, n0 = len(calls()), len(caprows())
+    r = run("start", "athena-shop", "роль", extra=dict(red, PANTHEON_ROLE="hq"))
+    check("PANTHEON_ROLE=hq без --from при красном замере и без слова — отказ, код 2 (не запуск от owner)",
+          r.returncode == 2 and "без вашего слова" in r.stderr and len(calls()) == c0
+          and caprows()[-1]["origin"] == "zeus" and caprows()[-1]["result"] == "refused")
+    r = run("start", "athena-shop", "роль", "--from", "owner", extra=dict(red, PANTHEON_ROLE="hq"))
+    check("PANTHEON_ROLE=hq, --from owner — не принимается, код 2, claude не звали, замера нет",
+          r.returncode == 2 and "не принимается" in r.stderr and len(calls()) == c0 and len(caprows()) == n0 + 1)
+    r = run("start", "athena-shop", "роль", "--from", "owner", extra=dict(red, PANTHEON_ROLE="domain-coordinator"))
+    check("--from owner не принимается и в окне другой роли", r.returncode == 2 and len(calls()) == c0)
+    r = run("start", "athena-shop", "роль", extra=dict(red, PANTHEON_ROLE="domain-coordinator"))
+    check("другая роль без --from при красном замере — как tick: отложено, код 5",
+          r.returncode == 5 and len(calls()) == c0 and caprows()[-1]["origin"] == "tick")
+    r = run("start", "athena-shop", "роль", "--from", "tick", extra=dict(red, PANTHEON_ROLE="hq"))
+    check("PANTHEON_ROLE=hq, --from tick в красной зоне — отказ, код 2 (не origin окна)",
+          r.returncode == 2 and "только zeus" in r.stderr and len(calls()) == c0)
+    # круг 3 (argus-b P7/P8): зелёная память, слова нет — hq + --from tick не должен обходить проверку слова
+    green = {"PANTHEON_ROLE": "hq"}
+    oq = os.path.join(state, "oneshot.json")
+    q0 = lambda: (lambda d: d.get("items") if isinstance(d, dict) else d)(
+        json.load(open(oq)) if os.path.exists(oq) else [])
+    n1 = len(q0() or [])
+    r = run("start", "athena-shop", "обход", "--from", "tick", extra=green)
+    check("hq + --from tick на зелёной памяти без слова — код 2, claude не звали",
+          r.returncode == 2 and "только zeus" in r.stderr and len(calls()) == c0)
+    r = run("start", "athena-shop", "--at", "23:59", "--from", "tick", "обход", extra=green)
+    check("hq + --at --from tick на зелёной памяти — код 2, очередь oneshot не выросла",
+          r.returncode == 2 and "только zeus" in r.stderr and len(q0() or []) == n1)
+    r = run("start", "athena-shop", "обход", "--from", "zeus", extra=green)
+    check("hq + --from zeus без слова — отказ по слову (код 2), не по совпадению",
+          r.returncode == 2 and "без вашего слова" in r.stderr and len(calls()) == c0)
+    r = run("start", "athena-shop", "обход", "--from", "zeus", extra={"PANTHEON_ROLE": "domain-coordinator"})
+    check("другая роль + --from zeus — код 2, claude не звали",
+          r.returncode == 2 and "только tick" in r.stderr and len(calls()) == c0)
+    r = run("start", "athena-shop", "--at", "23:59", "--from", "zeus", "обход", extra={"PANTHEON_ROLE": "domain-coordinator"})
+    check("другая роль + --at --from zeus — код 2, очередь не выросла",
+          r.returncode == 2 and len(q0() or []) == n1)
+    word()
+    r = run("start", "athena-shop", "роль", extra=dict(red, PANTHEON_ROLE="hq"))
+    check("PANTHEON_ROLE=hq без --from со словом владельца — запуск от zeus даже в красной зоне",
+          r.returncode == 0 and len(calls()) == c0 + 1 and caprows()[-1]["origin"] == "zeus"
+          and caprows()[-1]["unknown"] is False)
+    os.remove(zlog)
+    open(agents_file, "w").write("[]")
+    # --at --from zeus: слово при постановке, не при запуске (ревью argus-b #110)
+    oneshot = os.path.join(state, "oneshot.json")
+    queue = lambda: (lambda d: d.get("items") if isinstance(d, dict) else d)(
+        json.load(open(oneshot)) if os.path.exists(oneshot) else [])
+    r = run("start", "athena-shop", "--at", "23:59", "--from", "zeus", "позже")
+    check("start --at --from zeus без слова — отказ при постановке, код 2, в очереди ничего нет",
+          r.returncode == 2 and "без вашего слова" in r.stderr and not queue() and caprows()[-1]["result"] == "refused")
+    word()
+    r = run("start", "athena-shop", "--at", "23:59", "--from", "zeus", "позже")
+    items = queue()
+    check("start --at --from zeus со словом — разовый запуск поставлен, origin zeus сохранён",
+          r.returncode == 0 and len(items) == 1 and items[0]["by"] == "zeus" and items[0]["target"] == "athena-shop")
+    os.remove(zlog)
+    r = run("start", "athena-shop", "--at", "23:58", "--from", "tick", "позже")
+    check("start --at --from tick слова при постановке не требует", r.returncode == 0 and len(queue()) == 2)
+    # нет сигнала: ни свопа, ни давления не прочитать
+    open(agents_file, "w").write("[]")
+    c0 = len(calls())
+    r = run("start", "athena-shop", "тишина", "--from", "tick", extra={"FAKE_NOSIGNAL": "1"})
+    check("своп и давление не прочитаны — tick: отложено, код 5, «нет сигнала»",
+          r.returncode == 5 and "нет сигнала" in r.stderr and len(calls()) == c0 and caprows()[-1]["unknown"] is True)
+    word()
+    r = run("start", "athena-shop", "тишина", "--from", "zeus", extra={"FAKE_NOSIGNAL": "1"})
+    check("своп и давление не прочитаны — zeus со словом: запуск, в замере unknown",
+          r.returncode == 0 and len(calls()) == c0 + 1 and caprows()[-1]["unknown"] is True
+          and caprows()[-1]["swap_gb"] is None and caprows()[-1]["result"] == "allowed")
+    os.remove(zlog)
     open(agents_file, "w").write("[]")
     r = run("start", "athena-shop")
     c = calls()
@@ -623,9 +767,48 @@ def main():
           r.returncode == 1 and "pantheon roles build" in r.stderr and not calls())
     open(os.path.join(agents_dir, "hestia.md"), "w").write("---\nname: hestia\n---\nГестия\n")
     open(agents_file, "w").write("[]")
+    hrun_path = os.path.join(state, "settings", "run", "hestia.json")
+    # metis-0261 А, ревью argus-b5: из окна роли, кроме hq, — origin tick, как у start; поручение Гестии — только по
+    # слову владельца в owner-log/zeus.md (как wake <имя> "задание"): без него отказ, код 2, в любой зоне памяти
+    if os.path.exists(zlog):
+        os.remove(zlog)
+    open(log, "w").close()
+    n0 = len(caprows())
+    shop_env, red_env = {"PANTHEON_ROLE": "athena-shop"}, {"PANTHEON_ROLE": "athena-shop", "FAKE_SWAP_MB": "5000.00"}
+    hx = [run("wake", "hestia", "--task", "athena-0001", extra=shop_env),
+          run("wake", "hestia", "--task", "athena-0001", extra=red_env),
+          run("wake", "hestia", "--task", "athena-0001", extra={"PANTHEON_ROLE": "hq"})]
+    word(ago=OWNER_WINDOW + 60)
+    hx.append(run("wake", "hestia", "--task", "athena-0001", extra=shop_env))
+    rows = caprows()[n0:]
+    check("wake hestia из окна направления без вашего слова (нет zeus.md, красная зона, слово старше 15 мин) — отказ, "
+          "код 2 «pantheon wake hestia: отказ», claude не звали, в замере refused с origin tick",
+          all(x.returncode == 2 and x.stderr.strip().splitlines()[-1].startswith("pantheon wake hestia: отказ — ")
+              and "без вашего слова" not in x.stderr for x in hx[:2] + hx[3:])
+          and "только по вашему слову" in hx[0].stderr and not calls() and not os.path.exists(hrun_path)
+          and [(x["target"], x["origin"], x["result"]) for x in rows]
+          == [("hestia", "tick", "refused")] * 2 + [("hestia", "zeus", "refused"), ("hestia", "tick", "refused")]
+          and rows[1]["red"] is True)
+    check("wake hestia из hq без вашего слова — отказ, код 2 «без вашего слова», claude не звали (как start --from zeus)",
+          hx[2].returncode == 2 and "pantheon wake hestia: отказ — запуск от Зевса без вашего слова" in hx[2].stderr)
+    word()
+    r = run("wake", "hestia", "--task", "athena-0001", extra=red_env)
+    check("wake hestia из окна направления со словом, но в красной зоне — код 5 «отложено» (tick слова не имеет), "
+          "claude не звали", r.returncode == 5 and "pantheon wake hestia: отложено — память Mac" in r.stderr
+          and not calls() and caprows()[-1]["result"] == "deferred" and caprows()[-1]["origin"] == "tick"
+          and "самозапуск" not in r.stderr and "слово в окне Зевса из окна роли красную зону не снимает; повторите после нормы памяти" in r.stderr)
+    r = run("wake", "hestia", "--task", "athena-0001", extra=shop_env)
+    hrun = json.load(open(hrun_path)) if os.path.exists(hrun_path) else {}
+    check("wake hestia из окна направления со словом — запуск, в окне запуска PANTHEON_ORIGIN=tick",
+          r.returncode == 0 and len([x for x in calls() if "--bg" in x["argv"]]) == 1
+          and "[Пантеон: поручение от tick]" in calls()[-1]["argv"][-1]
+          and hrun.get("env", {}).get("PANTHEON_ORIGIN") == "tick" and caprows()[-1]["result"] == "allowed")
+    open(agents_file, "w").write("[]")
+    open(log, "w").close()
+    os.remove(hrun_path)
+    word()  # слово владельца в окне Зевса: origin zeus без него отказ (metis-0261 А, после слияния с #116)
     r = run("wake", "hestia", "--task", "athena-0001", extra={"PANTHEON_ROLE": "hq"})
     c = calls()
-    hrun_path = os.path.join(state, "settings", "run", "hestia.json")
     hrun = json.load(open(hrun_path)) if os.path.exists(hrun_path) else {}
     bg = [x for x in c if "--bg" in x["argv"]]
     check("wake hestia --task: claude --bg --agent hestia --name hestia --settings окно запуска, папка — кэш, "
@@ -777,10 +960,22 @@ def main():
           os.path.exists(win_file) and not stops())
     r, c = wake_case(90_000, 10)
     check("allow убран — wake снова поднимает respawn", [x["argv"] for x in c] == [["respawn", "a1"]])
+    n0 = len(caprows())
+    r, c = wake_case(90_000, 10, extra={"FAKE_SWAP_MB": "5000.00"})
+    check("wake в красной зоне — только строка замера (origin wake, red), подъём не отказан (metis-0261 А)",
+          [x["argv"] for x in c] == [["respawn", "a1"]] and len(caprows()) == n0 + 1
+          and caprows()[-1]["origin"] == "wake" and caprows()[-1]["red"] is True
+          and caprows()[-1]["result"] == "allowed" and caprows()[-1]["target"] == "athena-shop")
 
     # ревью argus PR #32 (c6eb7e1): allow со старым mtime (cp -p, rsync -a, tar) сборка --if-changed не видит —
     # правило перепроверяют каждый подъём сессии и check --quiet
     run("domains", "build")
+    # --if-changed сверяет mtime файлов с built_ts: файлы, записанные в ту же секунду под нагрузкой, ломали сверку
+    # (FileNotFoundError на чтении окна). Без sleep: built_ts ставим явно в будущее — «собрано позже всех файлов»
+    dj = os.path.join(state, "domains.json")
+    dd = json.load(open(dj))
+    dd["built_ts"] = time.time() + 3600
+    open(dj, "w").write(json.dumps(dd))
     open(run_file, "w").write(json.dumps(win("athena-shop")))  # как после прежнего pantheon start
     open(bad_allow, "w").write(json.dumps({"permissions": {"allow": ["Bash(gh *)"]}}))
     old = time.time() - 86400
