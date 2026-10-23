@@ -428,7 +428,29 @@ def main():
     check("другая роль без --from при красном замере — как tick: отложено, код 5",
           r.returncode == 5 and len(calls()) == c0 and caprows()[-1]["origin"] == "tick")
     r = run("start", "athena-shop", "роль", "--from", "tick", extra=dict(red, PANTHEON_ROLE="hq"))
-    check("PANTHEON_ROLE=hq, --from tick в красной зоне — код 5", r.returncode == 5 and len(calls()) == c0)
+    check("PANTHEON_ROLE=hq, --from tick в красной зоне — отказ, код 2 (не origin окна)",
+          r.returncode == 2 and "только zeus" in r.stderr and len(calls()) == c0)
+    # круг 3 (argus-b P7/P8): зелёная память, слова нет — hq + --from tick не должен обходить проверку слова
+    green = {"PANTHEON_ROLE": "hq"}
+    oq = os.path.join(state, "oneshot.json")
+    q0 = lambda: (lambda d: d.get("items") if isinstance(d, dict) else d)(
+        json.load(open(oq)) if os.path.exists(oq) else [])
+    n1 = len(q0() or [])
+    r = run("start", "athena-shop", "обход", "--from", "tick", extra=green)
+    check("hq + --from tick на зелёной памяти без слова — код 2, claude не звали",
+          r.returncode == 2 and "только zeus" in r.stderr and len(calls()) == c0)
+    r = run("start", "athena-shop", "--at", "23:59", "--from", "tick", "обход", extra=green)
+    check("hq + --at --from tick на зелёной памяти — код 2, очередь oneshot не выросла",
+          r.returncode == 2 and "только zeus" in r.stderr and len(q0() or []) == n1)
+    r = run("start", "athena-shop", "обход", "--from", "zeus", extra=green)
+    check("hq + --from zeus без слова — отказ по слову (код 2), не по совпадению",
+          r.returncode == 2 and "без вашего слова" in r.stderr and len(calls()) == c0)
+    r = run("start", "athena-shop", "обход", "--from", "zeus", extra={"PANTHEON_ROLE": "domain-coordinator"})
+    check("другая роль + --from zeus — код 2, claude не звали",
+          r.returncode == 2 and "только tick" in r.stderr and len(calls()) == c0)
+    r = run("start", "athena-shop", "--at", "23:59", "--from", "zeus", "обход", extra={"PANTHEON_ROLE": "domain-coordinator"})
+    check("другая роль + --at --from zeus — код 2, очередь не выросла",
+          r.returncode == 2 and len(q0() or []) == n1)
     word()
     r = run("start", "athena-shop", "роль", extra=dict(red, PANTHEON_ROLE="hq"))
     check("PANTHEON_ROLE=hq без --from со словом владельца — запуск от zeus даже в красной зоне",
@@ -849,8 +871,13 @@ def main():
 
     # ревью argus PR #32 (c6eb7e1): allow со старым mtime (cp -p, rsync -a, tar) сборка --if-changed не видит —
     # правило перепроверяют каждый подъём сессии и check --quiet
-    time.sleep(1.1)  # --if-changed сверяет mtime с built_ts: файлы, записанные в ту же секунду под нагрузкой, ломали сверку
     run("domains", "build")
+    # --if-changed сверяет mtime файлов с built_ts: файлы, записанные в ту же секунду под нагрузкой, ломали сверку
+    # (FileNotFoundError на чтении окна). Без sleep: built_ts ставим явно в будущее — «собрано позже всех файлов»
+    dj = os.path.join(state, "domains.json")
+    dd = json.load(open(dj))
+    dd["built_ts"] = time.time() + 3600
+    open(dj, "w").write(json.dumps(dd))
     open(run_file, "w").write(json.dumps(win("athena-shop")))  # как после прежнего pantheon start
     open(bad_allow, "w").write(json.dumps({"permissions": {"allow": ["Bash(gh *)"]}}))
     old = time.time() - 86400

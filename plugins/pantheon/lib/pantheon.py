@@ -71,7 +71,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
   pantheon start zeus                   Пританей: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
-                                        start, дошедший до запуска сессии, пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2); красный замер или «нет сигнала» без слова — код 5 (отложено); в окне роли origin берётся из PANTHEON_ROLE, --from owner там нельзя; wake пишет только строку замера
+                                        start, дошедший до запуска сессии, пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2); красный замер или «нет сигнала» без слова — код 5 (отложено); в окне роли origin берётся из PANTHEON_ROLE, явный --from там только свой (hq → zeus, иная роль → tick); wake пишет только строку замера
   pantheon start <направление> --at ЧЧ:ММ [поручение]   разовый запуск плановым проходом вместо sleep в сессии;
                                         --at-list — записи, --at-cancel <id> — отменить (lib/night.py)
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
@@ -3484,9 +3484,10 @@ def start(rest):
                                                                                     плановым проходом (вместо sleep)
     Запуск сессии пишет замер в STATE/capacity.jsonl (сессий Пантеона, давление памяти, свободно %, своп). Откуда запуск:
     --from, а без него по окну — PANTHEON_ROLE=hq это zeus, другая роль tick, без роли owner; в окне роли --from owner
-    не принимается (код 2). Отказ, код 2: zeus без вашего слова в owner-log/zeus.md за 15 мин (и у --at при постановке);
+    и любой --from, не совпадающий с origin окна (hq → zeus, иная роль → tick), не принимаются (код 2). Отказ, код 2: zeus без вашего слова в owner-log/zeus.md за 15 мин (и у --at при постановке);
     красный замер (своп выше порога дежурного, давление не «норма») или «нет сигнала» (своп и давление не прочитаны) —
-    код 5 «отложено» (не сбой: самозапуск и разовый запуск повторяются), слово только у owner и zeus со словом."""
+    код 5 «отложено» (не сбой: самозапуск и разовый запуск повторяются), слово только у owner и zeus со словом.
+    Разовый запуск (--at) исполняется по правилам тика: в красной зоне ждёт, слово при постановке не переносится."""
     dry = "--dry-run" in rest
     restart = "--restart" in rest
     rest = [a for a in rest if a not in ("--dry-run", "--restart")]
@@ -3502,6 +3503,10 @@ def start(rest):
         if role and rest[i + 1] == "owner":
             print(f"pantheon start: --from owner не принимается в окне роли ({role}) — слово владельца там проверяется "
                   "по owner-log (--from zeus)", file=sys.stderr)
+            return 2
+        if role and rest[i + 1] != origin:  # круг 3: явный --from в окне роли — только свой origin (hq → zeus, роль → tick)
+            print(f"pantheon start: в окне роли ({role}) --from только {origin} (окно задаёт происхождение), "
+                  f"не {rest[i + 1]}", file=sys.stderr)
             return 2
         origin, rest = rest[i + 1], rest[:i] + rest[i + 2:]
     if any(a in ("--at", "--at-list", "--at-cancel") for a in rest):
