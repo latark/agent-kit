@@ -122,8 +122,8 @@
   нельзя — `pantheon domains build` и `pantheon direction check` отказывают понятной строкой.
   Окно Гестии `settings/hestia.json` (metis-0245): служебная роль hestia ставит выпуски и перезапускает окна. Поднимает
   её только `pantheon wake hestia --task <id>` с открытой задачей (без задачи — отказ «нет задачи», код 2) фоновой
-  сессией `hestia`, папка запуска — её кэш. `PANTHEON_ROLE=hestia`; Bash пишет только в кэш и TMPDIR, сети нет, личное
-  закрыто; мимо песочницы — `pantheon plugins update`, `domains build`, `restart`, `alert`; Edit, Write, WebFetch,
+  сессией `hestia`, папка запуска — её кэш. `PANTHEON_ROLE=hestia`; Bash пишет только в TMPDIR (в кэш окна guard запись не пускает), сети нет, личное
+  закрыто для Bash, Read и Grep; мимо песочницы — `pantheon plugins update`, `domains build`, `restart`, `alert`; Edit, Write, WebFetch,
   WebSearch и Agent закрыты. Остальное решает правило guard hestia (git только для чтения, `restart` без `--force`).
   Субагент hestia запрещён в окнах направлений, Пританея и задач. Перезапуска планового прохода (launchctl) у окна нет.
   Раздел `[private]` в `policy.toml` (кто и какие пути считает личными) читается по правилу guard 0.5.9: умолчание

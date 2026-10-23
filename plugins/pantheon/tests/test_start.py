@@ -610,6 +610,11 @@ def main():
           and hwin["sandbox"]["network"]["allowedDomains"] == []
           and all(t in hdeny for t in ("Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"))
           and "Agent" in hdeny and os.path.isdir(hcache))
+    # argus круг 2: Read и Grep песочница не держит — личное закрыто правилами deny окна
+    priv = [x for x in hwin.get("sandbox", {}).get("filesystem", {}).get("denyRead", []) if "/knowledge/me" in x]
+    check("окно hestia: личное (knowledge/me) закрыто не только песочницей — в deny есть Read(...) и Grep(...)",
+          bool(priv) and all(f"{t}({x if x.startswith('~') else '/' + x}{sfx})" in hdeny
+                             for t in ("Read", "Grep") for x in priv for sfx in ("/**", "")))
     check("окна направления и штаба: субагент hestia запрещён (Agent(hestia) в deny)",
           "Agent(hestia)" in shop.get("permissions", {}).get("deny", [])
           and "Agent(hestia)" in hq_win.get("permissions", {}).get("deny", []))

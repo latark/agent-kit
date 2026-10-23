@@ -2619,9 +2619,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         write_window(out_dir, name, job)
         built.append(name)
     # окно Гестии (metis-0245, решение владельца «А» 18.10): служебная роль ставит слитые выпуски и пересобирает и
-    # перезапускает окна. Bash пишет только в свой кэш (он же папка запуска) и TMPDIR; ни одной папки проекта, памяти
+    # перезапускает окна. Bash пишет только в TMPDIR (кэш — папка запуска, запись в него guard не пускает); ни одной папки проекта, памяти
     # ролей и ~/.claude — запись туда только командами пульта мимо песочницы (HESTIA_EXCLUDED), а не руками. Личное
-    # закрыто на чтение; сети у Bash нет (выпуск качает `pantheon plugins update` вне песочницы); файловых правок и веба
+    # закрыто на чтение (Bash — песочницей, Read и Grep — правилами deny); сети у Bash нет (выпуск качает `pantheon plugins update` вне песочницы); файловых правок и веба
     # нет. Субагентов не зовёт. Что ей можно в Bash сверх этого, решает guard по PANTHEON_ROLE=hestia (правило hestia)
     hs_cache = _real_dir(f"{caches}/hestia", [caches], strict=True, create=True)
     hs = role_settings([], None, [], hs_cache, False, private_paths, None, guard)
@@ -2629,6 +2629,11 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hs["sandbox"]["network"]["allowedDomains"] = []
     hs["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
     hs.setdefault("permissions", {}).setdefault("deny", []).extend(HESTIA_DENY_TOOLS)
+    # denyRead песочницы держит только Bash; Read и Grep её не проходят, а главная сессия окна приходит без agent_type
+    # и guard личное не судит — поэтому те же личные пути закрываются правилами Read(...) и Grep(...) (как у hq)
+    hs_rule = lambda tool, x: f"{tool}({x})" if x.startswith("~") else f"{tool}(/{x})"  # noqa: E731
+    hs["permissions"]["deny"].extend(hs_rule(t, x + "/**") for t in ("Read", "Grep") for x in _deny_forms(private_paths))
+    hs["permissions"]["deny"].extend(hs_rule(t, x) for t in ("Read", "Grep") for x in _deny_forms(private_paths))
     hs["env"]["PANTHEON_ROLE"] = "hestia"
     agents_window(hs, [JOB_NO_AGENTS], BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES), agents_py)
     write_window(out_dir, "hestia", hs)
