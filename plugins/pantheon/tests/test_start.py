@@ -581,15 +581,68 @@ def main():
           r.returncode == 0 and "пропуск: athena-shop — остановлено вами" in r.stdout and not calls())
     open(log, "w").close()
 
-    # wake hestia (metis-0217, шаг 1): без окна песочницы запуск всегда отказ, код 2, claude не зовётся
+    # wake hestia (metis-0245): без открытой задачи — отказ «нет задачи», код 2, claude не зовётся
     task("athena-0001", "doing")
+    task("athena-0002", "done")
     open(log, "w").close()
     refusals = [run("wake", "hestia"), run("wake", "hestia", "--task"), run("wake", "hestia", "--task", "nonsense"),
-                run("wake", "hestia", "--task", "athena-9999"), run("wake", "hestia", "--task", "athena-0001"),
-                run("wake", "hestia", "--task", "athena-0001", "x")]
-    check("wake hestia: с любой задачей и без — код 2, причина «нет окна песочницы», claude не звали, журнала нет",
-          all(x.returncode == 2 and "нет окна песочницы" in x.stderr for x in refusals) and not calls()
-          and not os.path.isdir(os.path.join(state, "hestia")))
+                run("wake", "hestia", "--task", "athena-9999"), run("wake", "hestia", "--task", "athena-0002"),
+                run("wake", "hestia", "--task", "athena-0001", "x"), run("wake", "hestia", "athena-0001")]
+    check("wake hestia: без задачи, с id не по образцу, несуществующей, закрытой — код 2, «нет задачи», claude не звали",
+          all(x.returncode == 2 and "отказ — нет задачи" in x.stderr
+              and x.stderr.strip().splitlines()[-1].endswith("claude не запускался") for x in refusals)
+          and "задача athena-0002 не открыта (done)" in refusals[4].stderr and not calls()
+          and not os.path.exists(os.path.join(state, "settings", "run", "hestia.json")))
+    # окно Гестии собирает domains build: своя роль окна, команды пульта мимо песочницы, без сети, правка закрыта;
+    # в окнах направлений и штаба субагент hestia запрещён
+    hwin_path = os.path.join(state, "settings", "hestia.json")
+    hwin = json.load(open(hwin_path)) if os.path.exists(hwin_path) else {}
+    shop = json.load(open(os.path.join(state, "settings", "athena-shop.json")))
+    hq_win = json.load(open(os.path.join(state, "settings", "hq.json")))
+    hcache = os.path.join(tmp, "Library", "Caches", "pantheon-sandbox", "hestia")
+    hdeny = hwin.get("permissions", {}).get("deny", [])
+    check("окно hestia: PANTHEON_ROLE=hestia, мимо песочницы — только plugins update, domains build, restart, alert; "
+          "сети нет, Edit/Write/WebFetch закрыты, Agent закрыт, кэш создан",
+          hwin.get("env", {}).get("PANTHEON_ROLE") == "hestia" and hwin["sandbox"]["enabled"]
+          and hwin["sandbox"]["excludedCommands"] == ["pantheon plugins update", "pantheon plugins update *",
+                                                      "pantheon domains build", "pantheon restart *",
+                                                      "pantheon alert *"]
+          and hwin["sandbox"]["network"]["allowedDomains"] == []
+          and all(t in hdeny for t in ("Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"))
+          and "Agent" in hdeny and os.path.isdir(hcache))
+    check("окна направления и штаба: субагент hestia запрещён (Agent(hestia) в deny)",
+          "Agent(hestia)" in shop.get("permissions", {}).get("deny", [])
+          and "Agent(hestia)" in hq_win.get("permissions", {}).get("deny", []))
+    r = run("wake", "hestia", "--task", "athena-0001")
+    check("wake hestia: окно есть, роли ~/.claude/agents/hestia.md нет — код 1 «pantheon roles build», claude не звали",
+          r.returncode == 1 and "pantheon roles build" in r.stderr and not calls())
+    open(os.path.join(agents_dir, "hestia.md"), "w").write("---\nname: hestia\n---\nГестия\n")
+    open(agents_file, "w").write("[]")
+    r = run("wake", "hestia", "--task", "athena-0001", extra={"PANTHEON_ROLE": "hq"})
+    c = calls()
+    hrun_path = os.path.join(state, "settings", "run", "hestia.json")
+    hrun = json.load(open(hrun_path)) if os.path.exists(hrun_path) else {}
+    bg = [x for x in c if "--bg" in x["argv"]]
+    check("wake hestia --task: claude --bg --agent hestia --name hestia --settings окно запуска, папка — кэш, "
+          "поручение с id задачи; в окне запуска PANTHEON_ROLE=hestia и PANTHEON_ORIGIN=zeus",
+          r.returncode == 0 and len(bg) == 1
+          and bg[0]["argv"][:6] == ["--bg", "--agent", "hestia", "--name", "hestia", "--settings"]
+          and bg[0]["argv"][6] == hrun_path and "Задача athena-0001" in bg[0]["argv"][7]
+          and "pantheon task show athena-0001" in bg[0]["argv"][7] and bg[0]["cwd"] == hcache
+          and hrun.get("env", {}).get("PANTHEON_ROLE") == "hestia"
+          and hrun["env"].get("PANTHEON_ORIGIN") == "zeus" and hrun["env"].get("PANTHEON_SESSION") == "hestia"
+          and hrun["sandbox"]["excludedCommands"] == hwin["sandbox"]["excludedCommands"])
+    os.remove(hwin_path)
+    open(log, "w").close()
+    r = run("wake", "hestia", "--task", "athena-0001")
+    check("wake hestia: окна settings/hestia.json нет — код 1 «pantheon domains build», claude не звали",
+          r.returncode == 1 and "pantheon domains build" in r.stderr and not calls())
+    os.remove(os.path.join(agents_dir, "hestia.md"))
+    if os.path.exists(hrun_path):
+        os.remove(hrun_path)
+    run("domains", "build")  # окно Гестии — как его оставила сборка
+    os.remove(os.path.join(home, "directions", "athena-shop", "tasks", "athena-0002.md"))
+    open(agents_file, "w").write("[]")
     open(log, "w").close()
 
     # metis-0147 п. 2: контекст > 100 тыс. и простой > 60 мин — свежая сессия с файла состояния, иначе respawn

@@ -117,9 +117,15 @@
   Последствие для git: в репозиториях, где `.claude/agents` лежит в git,
   `git pull`, `merge`, `checkout` и `worktree add`, которые меняют эти файлы, в окне упадут; подтягивает их владелец
   у себя. Это намеренно: роли агентов репозитория окно менять не должно.
-  Зарезервированные имена (metis-0163): `hq`, `workshop` и всё вида `job-*` — имена окон системы
-  (`settings/hq.json`, `workshop.json`, `job-<роль>.json`); направлением в `directions.toml` их назвать нельзя —
-  `pantheon domains build` и `pantheon direction check` отказывают понятной строкой.
+  Зарезервированные имена (metis-0163): `hq`, `workshop`, `hestia` и всё вида `job-*` — имена окон системы
+  (`settings/hq.json`, `workshop.json`, `hestia.json`, `job-<роль>.json`); направлением в `directions.toml` их назвать
+  нельзя — `pantheon domains build` и `pantheon direction check` отказывают понятной строкой.
+  Окно Гестии `settings/hestia.json` (metis-0245): служебная роль hestia ставит выпуски и перезапускает окна. Поднимает
+  её только `pantheon wake hestia --task <id>` с открытой задачей (без задачи — отказ «нет задачи», код 2) фоновой
+  сессией `hestia`, папка запуска — её кэш. `PANTHEON_ROLE=hestia`; Bash пишет только в кэш и TMPDIR, сети нет, личное
+  закрыто; мимо песочницы — `pantheon plugins update`, `domains build`, `restart`, `alert`; Edit, Write, WebFetch,
+  WebSearch и Agent закрыты. Остальное решает правило guard hestia (git только для чтения, `restart` без `--force`).
+  Субагент hestia запрещён в окнах направлений, Пританея и задач. Перезапуска планового прохода (launchctl) у окна нет.
   Раздел `[private]` в `policy.toml` (кто и какие пути считает личными) читается по правилу guard 0.5.9: умолчание
   (roles `hq`, `chiron`; coordinators `mnemo-brain`; четыре личных пути) действует и без `policy.toml` вовсе, пустые
   `roles` и `coordinators` означают «никого», пустой `paths` — умолчание. Тест `test_private_conf` сверяет умолчание

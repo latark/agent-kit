@@ -98,7 +98,7 @@ def main():
     r = run("Iris_Demo")
     check("имя не по образцу — «НЕТ» на имени", r.returncode == 1 and "НЕТ     имя" in r.stdout)
 
-    for rsv in ("hq", "workshop", "job-iris"):
+    for rsv in ("hq", "workshop", "hestia", "job-iris"):
         r = run(rsv)
         check(f"имя {rsv} зарезервировано под окно системы — «НЕТ» и понятная причина",
               r.returncode == 1 and "НЕТ     имя" in r.stdout and "зарезервировано" in r.stdout)
