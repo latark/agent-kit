@@ -5797,9 +5797,10 @@ def sync_answers():
             if m:
                 still.add(m.group(1))
                 prev = by_file.get(held)
-                if prev and prev != m.group(1):
+                if held == ".sync-held" and prev and prev != m.group(1):
                     # sync.sh снял прежнее держание и поставил другое (ветка «правка изменилась» в quarantine()):
-                    # ответ по прежней задаче не применён, её вопрос остаётся
+                    # ответ по прежней задаче не применён, её вопрос остаётся. У .sync-incoming иначе: файл
+                    # удаляет incoming_answer после ответа, а новый пишет incoming_check — смена task= значит «применён»
                     still.add(prev)
                     reasons[prev] = f"держание заменено (task={m.group(1)}), ответ не применён"
                 continue

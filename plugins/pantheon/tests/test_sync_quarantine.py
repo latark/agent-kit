@@ -287,6 +287,18 @@ check("держание A заменено держанием C — не «пр�
       and f"{e.task} — sync.sh не применил" in r.stdout and "держание заменено (task=metis-0777)" in r.stdout,
       r.stdout + r.stderr)
 
+# metis-0364 круг 3: у .sync-incoming смена task= — ответ по прежней задаче применён (sync.sh удалил файл, incoming_check
+# в том же запуске записал новый вопрос D); «заменено» — правило только для .sync-held
+e = with_card(held=".sync-incoming", applies=False)
+with open(os.path.join(e.claude, "sync.sh"), "w") as fh:
+    fh.write(f'#!/bin/sh\necho x >> "{e.mark}"\nrm -f "{e.claude}/.sync-incoming"\n'
+             f'printf "task=metis-0778\\nfrom=a\\nto=b\\n" > "{e.claude}/.sync-incoming"\n')
+e.window("Отправить")
+r, ran = e.run()
+check("incoming B заменён incoming D — «применён», вопрос B снят, «заменено» не печатается",
+      ran and f"ответ по {e.task} применён" in r.stdout and card_question(e, e.task) is None
+      and "заменено" not in r.stdout + r.stderr, r.stdout + r.stderr)
+
 # владелец неизвестен: .sync-incoming появился во время sync.sh без task=, .sync-held задачи A снят — держание за всеми
 e = with_card(applies=False)
 with open(os.path.join(e.claude, "sync.sh"), "w") as fh:
