@@ -1477,12 +1477,196 @@ def t_hq_gh(h):
     case("hq: --remove-label X — значение, можно", hq("gh pr edit 5 -R latark/agent-kit --remove-label ready"), True)
 
 
+PJ = "plugins/pantheon/.claude-plugin/plugin.json"
+GJ = "plugins/guard/.claude-plugin/plugin.json"
+
+
+def _manifest(name, version, **extra):
+    return json.dumps(dict({"name": name, "version": version, "description": "d"}, **extra), indent=2) + "\n"
+
+
+def carry_history(p):
+    """История для переноса записей (metis-0384) в репозитории p, на своих ветках; main и рабочее дерево — как были.
+    B — общая база; M — main после соседнего выпуска (README, новый файл, version 0.11.85); P — проверенный head PR
+    (код и README в другом месте). Хорошие head: P + номер версии, P + подтянутый main (+ номер версии), старый PR со
+    своим номером версии + main с конфликтом в plugin.json. Плохие: правка вне version, другое поле plugin.json, правка
+    внутри слияния, слияние не из базы, откат правки main при слиянии, переписанная история, marketplace.json."""
+    def put(files, msg):
+        for rel, text in files.items():
+            f = os.path.join(p, rel)
+            if text is None:
+                os.remove(f)
+                continue
+            os.makedirs(os.path.dirname(f), exist_ok=True)
+            with open(f, "w") as fh:
+                fh.write(text)
+        git(p, "add", "-A")
+        git(p, "commit", "-q", "-m", msg)
+        return git(p, "rev-parse", "HEAD")
+
+    def branch(name, start):
+        git(p, "checkout", "-q", "-B", name, start)
+
+    def merge(other, resolve=None, extra=None):
+        r = subprocess.run(["git", "-C", p, "-c", "user.name=t", "-c", "user.email=t@example.com", "merge", "-q",
+                            "--no-edit", "--no-ff", other], capture_output=True, text=True)
+        if r.returncode != 0 or resolve or extra:
+            if resolve:
+                git(p, "checkout", resolve, "--", PJ)
+            for rel, text in (extra or {}).items():
+                with open(os.path.join(p, rel), "w") as fh:
+                    fh.write(text)
+            git(p, "add", "-A")
+            git(p, "commit", "-q", "--no-edit", *(["--amend"] if r.returncode == 0 else []))
+        return git(p, "rev-parse", "HEAD")
+
+    s = {}
+    readme = "r1\nr2\nr3\nr4\nr5\nr6\n"
+    branch("t-base", "main")
+    s["B"] = put({PJ: _manifest("pantheon", "0.11.84"), GJ: _manifest("guard", "0.5.17"), "README.md": readme,
+                  "code.py": "x = 1\n", ".claude-plugin/marketplace.json": "{}\n"}, "B")
+    branch("t-main", s["B"])
+    s["M"] = put({PJ: _manifest("pantheon", "0.11.85"), "README.md": readme.replace("r6", "r6m"),
+                  "other.py": "y = 1\n"}, "main: соседний PR и выпуск")
+    branch("t-pr", s["B"])
+    s["P"] = put({"code.py": "x = 2\n", "README.md": readme.replace("r1", "r1p")}, "PR")
+    s["ver"] = put({PJ: _manifest("pantheon", "0.11.85"), GJ: _manifest("guard", "0.5.18")}, "выпуск")
+    s["out"] = put({"code.py": "x = 3\n"}, "правка вне version")
+    branch("t-pr2", s["P"])
+    s["field"] = put({PJ: _manifest("pantheon", "0.11.85", description="другое")}, "version и description")
+    branch("t-pr3", s["P"])
+    s["merged"] = merge(s["M"])
+    s["merged_ver"] = put({PJ: _manifest("pantheon", "0.11.86")}, "выпуск после main")
+    branch("t-pr4", s["P"])
+    s["evil"] = merge(s["M"], extra={"code.py": "x = 9\n"})  # правка внутри коммита слияния
+    branch("t-side", s["B"])
+    side = put({"evil.py": "z = 1\n"}, "не из базы")
+    branch("t-pr5", s["P"])
+    s["side"] = merge(side)
+    branch("t-pr6", s["P"])
+    s["revert"] = merge(s["M"], extra={"README.md": readme.replace("r1", "r1p")})  # правка main при слиянии убрана
+    branch("t-pr7", s["B"])
+    put({"code.py": "x = 2\n", "README.md": readme.replace("r1", "r1p")}, "PR заново (rebase)")
+    s["rebased"] = put({PJ: _manifest("pantheon", "0.11.85")}, "выпуск")
+    branch("t-pr8", s["P"])
+    s["market"] = put({".claude-plugin/marketplace.json": "{\"x\": 1}\n"}, "marketplace")
+    branch("t-pr9", s["P"])
+    s["newpj"] = put({"plugins/x/.claude-plugin/plugin.json": "{\"version\": \"1\"}\n"}, "новый plugin.json")
+    branch("t-old", s["B"])  # PR старого порядка: сам поднял version, main поднял его же — конфликт в plugin.json
+    s["Pv"] = put({"code.py": "x = 2\n", PJ: _manifest("pantheon", "0.11.90")}, "PR со своим номером версии")
+    merge(s["M"], resolve="--theirs")
+    s["conflict_ver"] = put({PJ: _manifest("pantheon", "0.11.86")}, "выпуск после main")
+    branch("t-own", s["B"])  # PR сам меняет поле plugin.json (проверено ревью), затем main и выпуск
+    s["Pf"] = put({"code.py": "x = 2\n", PJ: _manifest("pantheon", "0.11.84", keywords=["k"])}, "PR: keywords")
+    merge(s["M"], extra={PJ: _manifest("pantheon", "0.11.85", keywords=["k"])})
+    s["own_ver"] = put({PJ: _manifest("pantheon", "0.11.86", keywords=["k"])}, "выпуск после main")
+    git(p, "checkout", "-q", "main")
+    return s
+
+
+GOOD_CARRY = (("ver", "P", "номер версии двух плагинов"), ("merged", "P", "подтянутый main без своих правок"),
+              ("merged_ver", "P", "подтянутый main и номер версии"),
+              ("merged_ver", "merged", "номер версии после уже подтянутого main"),
+              ("conflict_ver", "Pv", "старый PR со своим номером версии: конфликт plugin.json решён в пользу main"),
+              ("own_ver", "Pf", "своё поле plugin.json из PR сохранено, main и номер версии"))
+BAD_CARRY = (("out", "P", "правка вне version", "меняет code.py"),
+             ("field", "P", "в plugin.json изменено ещё поле description", "не только поле version"),
+             ("evil", "P", "правка внутри коммита слияния", "меняет code.py"),
+             ("side", "P", "слита ветка не из базы PR", "меняет evil.py"),
+             ("revert", "P", "при слиянии убрана правка main", "меняет README.md"),
+             ("rebased", "P", "история переписана (rebase)", "не предок"),
+             ("market", "P", "marketplace.json — не номер версии", "меняет .claude-plugin/marketplace.json"),
+             ("P", "ver", "назад: прошлый head не предок", "не предок"),
+             ("newpj", "P", "новый plugin.json только с version", "добавляет plugins/x/"))
+
+
+def t_carry_unit(h):
+    """metis-0384: same_change и carried напрямую (и на Python 3.9): записи переходят на новый head, только если он —
+    прошлый head плюс номер версии и подтянутая база без своих правок."""
+    kit = h.j("projects/agent-kit")
+    s = carry_history(kit)
+    mg = _load_merge_gate("merge_gate_carry")
+    for new, old, what in GOOD_CARRY:
+        why = mg.same_change(kit, s[old], s[new], s["M"])
+        check(f"перенос: {what} — записи переходят", why is None, why)
+    for new, old, what, want in BAD_CARRY:
+        why = mg.same_change(kit, s[old], s[new], s["M"])
+        check(f"перенос: {what} — не переходят ({want})", isinstance(why, str) and want in why, why)
+    why = mg.same_change(kit, s["P"], "d" * 40, s["M"])
+    check("перенос: коммита нет в git папки — не переходят, подсказка git fetch", why and "git fetch" in why, why)
+    why = mg.same_change(kit, s["P"], s["merged"], "d" * 40)
+    check("перенос: базы PR нет в git папки — не переходят", why and "git fetch" in why, why)
+    why = mg.same_change(kit, s["P"], s["merged"], side_base(kit))
+    check("перенос: подтянутое — не из базы PR (база старше) — не переходят", why and "меняет" in why, why)
+    recs = [rec("tests", "latark/agent-kit", None, s["P"], "dev-opus"), rec("accept", "latark/agent-kit", 7, s["P"]),
+            rec("accept", "latark/agent-kit", 7, s["field"]), rec("accept", "latark/agent-kit", 8, s["merged"]),
+            rec("accept", "latark/agent-kit", 7, s["merged"], who="talos")]
+    calls = []
+
+    def view(base=s["M"]):
+        calls.append(1)
+        return {"baseRefOid": base}
+    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], recs, view)
+    check("carried: P переходит, field — нет; чужой PR и не argus — не кандидаты",
+          same == {s["P"]} and len(whys) == 1 and whys[0].startswith(s["field"][:12]), (same, whys))
+    calls.clear()
+    same, whys = mg.carried(kit, "latark/agent-kit", 9, s["merged_ver"], recs, view)
+    check("carried: вердиктов на этот PR нет — gh pr view не зовётся", same == set() and not whys and not calls,
+          (same, whys, calls))
+    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], recs, lambda: None)
+    check("carried: gh pr view не ответил — не переходят", same == set() and whys and "baseRefOid" in whys[0], whys)
+    same, whys = mg.carried("", "latark/agent-kit", 7, s["merged_ver"], recs, view)
+    check("carried: папки нет — не переходят", same == set(), (same, whys))
+
+
+def side_base(kit):
+    """База PR, которая не содержит M: коммит B (база старше подтянутого)."""
+    return git(kit, "rev-parse", "t-base")
+
+
+def t_carry_gate(h):
+    """metis-0384: шлюз слияния (хук) пускает новый head с записями прошлого, если разница — только номер версии и
+    подтянутый main; правка вне version — отказ «нет записи тестов» с причиной; «вернуть» тоже переходит."""
+    kit, cwd = h.j("projects/agent-kit"), "projects/agent-kit"
+    s = carry_history(kit)
+    h.view["agent-kit"]["baseRefOid"] = s["M"]
+
+    def merge_at(new):
+        h.gh(["README.md", "plugins/pantheon/lib/pantheon.py", PJ], head=s[new])
+        return h.pre(f"gh pr merge 7 --match-head-commit {s[new]}", pdir=cwd)
+
+    h.seed(rec("tests", "latark/agent-kit", None, s["P"], "dev-opus"), rec("accept", "latark/agent-kit", 7, s["P"]))
+    for new, _old, what in GOOD_CARRY[:3]:
+        merge_case(f"шлюз: записи с P на head «{what}» — проходит", merge_at(new), True)
+    for new, _old, what, want in BAD_CARRY[:5]:
+        got = merge_at(new)
+        merge_case(f"шлюз: {what} — отказ «нет записи тестов»", got, False, "нет записи тестов")
+        merge_case(f"шлюз: {what} — в отказе причина ({want})", got, False, "не перенесены")
+    h.reset()
+    h.view["agent-kit"]["baseRefOid"] = s["M"]
+    h.seed(rec("tests", "latark/agent-kit", None, s["merged_ver"], "dev-opus"),
+           rec("tests", "latark/agent-kit", None, s["out"], "dev-opus"), rec("accept", "latark/agent-kit", 7, s["P"]))
+    merge_case("шлюз: тесты на новом head, «принять» с P — проходит", merge_at("merged_ver"), True)
+    merge_case("шлюз: тесты на новом head, «принять» с P, правка вне version — отказ «нет «принять»»",
+               merge_at("out"), False, "нет «принять» от argus")
+    h.reset()
+    h.view["agent-kit"]["baseRefOid"] = s["M"]
+    h.seed(rec("tests", "latark/agent-kit", None, s["P"], "dev-opus"), rec("accept", "latark/agent-kit", 7, s["P"]),
+           rec("reject", "latark/agent-kit", 7, s["P"], agent_id="argus2"))
+    merge_case("шлюз: «вернуть» с P тоже переходит — номер версии его не снимает", merge_at("merged_ver"), False,
+               "«вернуть» (reject)")
+    h.reset()
+    h.view["agent-kit"]["baseRefOid"] = side_base(kit)
+    h.seed(rec("tests", "latark/agent-kit", None, s["P"], "dev-opus"), rec("accept", "latark/agent-kit", 7, s["P"]))
+    merge_case("шлюз: подтянутое не из базы PR по gh — отказ", merge_at("merged"), False, "не перенесены")
+
+
 CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_ci,
-         t_core_touchid]
+         t_core_touchid, t_carry_unit, t_carry_gate]
 
 
 def main():
