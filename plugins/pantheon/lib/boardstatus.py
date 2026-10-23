@@ -8,8 +8,11 @@
   - задача todo с открытым PR, который её закрывает (номер в ветке или «Closes» в теле), — review ставит автозакрытие
     (lib/autoclose.py, run); не вышло (PR из репозитория чужого направления) — та же тревога;
   - пачка (story) — по составу: есть задача doing или review → doing («В работе»; из inbox, todo и done), все задачи
-    done или dropped → done («Готово»; из inbox, todo, doing, review). Пачку в waiting (ждёт человека) и dropped,
-    пачку без задач и смешанный состав без работы — не трогаем.
+    done или dropped → done («Готово»; из inbox, todo, doing). Пачку в waiting (ждёт человека), review (приёмка — её
+    закрывает человек, а не состав) и dropped, пачку без задач и смешанный состав без работы — не трогаем. Пачку с
+    открытым вопросом владельцу (question, options, requested) не двигаем вовсе — done стёр бы вопрос (tasks.task_set),
+    — а тревожим. Сдвиг пачки — строка в её журнал; проход уже ставил этот статус, а пачку вернули руками (закрыли,
+    открыли) — второй раз не двигаем, а тревожим, как у задач.
 Выдача исполнителю командой `pantheon task claim` ставит doing сама (tasks.task_claim).
 
 Только стандартная библиотека, Python 3.9+: тесты зовут модуль напрямую, проход — из pantheon.py.
@@ -20,9 +23,18 @@ import re
 
 ID_RE = re.compile(r"(?<![\w-])[a-z][a-z0-9]{1,11}-\d{3,}(?![\w])")  # как в autoclose.find_ids
 STORY_DOING_FROM = ("inbox", "todo", "done")
-STORY_DONE_FROM = ("inbox", "todo", "doing", "review")
+STORY_DONE_FROM = ("inbox", "todo", "doing")  # review — приёмка человеком, не состав
 WT_MARK = "worktree на ветке"   # строка журнала задачи: по ней проход второй раз задачу не двигает
 REVIEW_MARK = "открыт → review"  # то же — у автозакрытия (autoclose.REVIEW_MARK)
+STORY_MARK = "пачка по составу:"  # строка журнала пачки при сдвиге проходом: «… → <статус>»
+STORY_HOLD = ("question", "options", "requested")  # открытое решение владельца: пачку с ним проход не двигает
+STORY_MOVE_RE = re.compile(r"— плановый проход: " + re.escape(STORY_MARK) + r"[^\n]*→ (\w+)")
+
+
+def last_story_move(body):
+    """Статус, который проход ставил пачке последним (по строкам её журнала), или None."""
+    found = STORY_MOVE_RE.findall(body or "")
+    return found[-1] if found else None
 
 
 def story_target(sid, tasks):
@@ -96,7 +108,8 @@ def plan(tasks, domains, open_closing=None):
     """Что сделать по следам работы → (moves, stale).
     moves — [(tid, changes, note)] для task_set; stale — {tid: причина} задач в todo, по которым идёт работа, но
     двигать проход не стал: их уже двигали этим же следом, а их вернули в todo (или worktree — в репозитории не их
-    направления). open_closing — {id задачи: [(repo, номер)]} открытых PR, которые её закрывают (кэш autoclose)."""
+    направления); и пачек, которым состав требует другой статус, а проход не двигает: открыт вопрос владельцу или
+    этот статус проход уже ставил, а пачку вернули руками. open_closing — {id задачи: [(repo, номер)]} открытых PR, которые её закрывают (кэш autoclose)."""
     moves, stale = [], {}
     dirs_of = {}
     for d, rs in roots(domains).items():
@@ -128,10 +141,18 @@ def plan(tasks, domains, open_closing=None):
     for tid, ch, _ in moves:
         pth, h, body = view[tid]
         view[tid] = (pth, dict(h, **ch), body)
-    for sid, (_, h, _) in sorted(tasks.items()):
-        if h.get("type") == "story":
-            want = story_target(sid, view)
-            if want and want != h.get("status"):
-                why = "есть задача в работе или на проверке" if want == "doing" else "все задачи закрыты"
-                moves.append((sid, {"status": want}, f"пачка по составу: {why} → {want}"))
+    for sid, (_, h, body) in sorted(tasks.items()):
+        if h.get("type") != "story":
+            continue
+        want = story_target(sid, view)
+        if not want or want == h.get("status"):
+            continue
+        held = [f for f in STORY_HOLD if h.get(f)]
+        if held:  # done стёр бы вопрос и выбор владельца (tasks.task_set), doing — увёл бы пачку из «Нужен ответ»
+            stale[sid] = f"пачка ждёт ответа владельца ({', '.join(held)}), по составу — {want}"
+        elif last_story_move(body) == want:  # проход уже ставил этот статус, а пачку вернули руками
+            stale[sid] = f"пачку вернули руками в {h.get('status')} после сдвига проходом в {want}"
+        else:
+            why = "есть задача в работе или на проверке" if want == "doing" else "все задачи закрыты"
+            moves.append((sid, {"status": want}, f"{STORY_MARK} {why} → {want}"))
     return moves, stale

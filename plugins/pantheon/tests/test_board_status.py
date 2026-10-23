@@ -2,7 +2,8 @@
 """Статусы задач и пачек в шаг с работой (metis-0397, расширение «вся доска», lib/boardstatus.py): выдача исполнителю
 (`pantheon task claim`, живая worktree на ветке с id задачи) → doing; открытый PR, который закрывает задачу, → review
 (автозакрытие); пачка с задачей doing или review → doing («В работе»), все задачи done или dropped → done («Готово»);
-задачу вернули в todo, а работа идёт — тревога, второй раз проход её не двигает.
+задачу вернули в todo, а работа идёт — тревога, второй раз проход её не двигает; пачку на приёмке (review) и пачку
+с вопросом владельцу проход не закрывает и вопрос не стирает; пачку, закрытую руками, снова не открывает.
 
 Запуск: python3 -I plugins/pantheon/tests/test_board_status.py  (код выхода 0 — все прошли; разбор — на любом
 python3, сквозные проверки CLI pantheon — на Python 3.11+)
@@ -90,6 +91,37 @@ check("1. пачка ждёт человека (waiting) или снята (drop
 check("1. уже в нужном статусе — plan не пишет", S.plan(story("doing", "doing"), {})[0] == [])
 check("1. задача другой пачки и пачка-заметка (type stage) состав не меняют",
       S.story_target("metis-0500", dict(story("todo", "todo"), **dict([task("metis-0599", "doing", parent="metis-0600")]))) is None)
+
+
+def story_with(st, extra=None, body="", *kids):
+    """Пачка с полями головы extra и журналом body."""
+    out = story(st, *kids)
+    pth, h, _ = out["metis-0500"]
+    out["metis-0500"] = (pth, dict(h, **(extra or {})), body)
+    return out
+
+
+check("1. пачка на проверке (review), все задачи done → не закрываем: приёмка за человеком",
+      S.story_target("metis-0500", story("review", "done", "done")) is None and S.plan(story("review", "done"), {})[0] == [])
+for fld, val in (("question", "Принять итоги ночи?"), ("options", ["А — принять", "Б — вернуть"]), ("requested", "А")):
+    for st in ("inbox", "todo", "doing", "review", "done"):
+        for kid in ("doing", "done"):
+            mv, hold = S.plan(story_with(st, {fld: val}, "", kid), {})
+            if S.story_target("metis-0500", story(st, kid)) in (None, st):
+                continue
+            check(f"1. пачка {st} с открытым {fld}, задача {kid} → не двигаем, а тревожим",
+                  not any(m[0] == "metis-0500" for m in mv) and "ждёт ответа владельца" in hold.get("metis-0500", ""),
+                  (mv, hold))
+moved_note = "- 2026-10-24 02:00 — плановый проход: пачка по составу: есть задача в работе или на проверке → doing"
+mv, hold = S.plan(story_with("done", None, moved_note, "doing"), {})
+check("1. пачку сдвинули проходом в doing, а закрыли руками (done) → не открываем заново, тревога",
+      mv == [] and "вернули руками в done" in hold.get("metis-0500", ""), (mv, hold))
+mv, hold = S.plan(story_with("done", None, "- 2026-10-24 02:00 — плановый проход: пачка по составу: все задачи "
+                                           "закрыты → done", "doing"), {})
+check("1. проход последним ставил done, а задачу вернули в работу → снова doing",
+      [m[0] for m in mv] == ["metis-0500"] and mv[0][1] == {"status": "doing"} and hold == {}, (mv, hold))
+mv, hold = S.plan(story_with("done", None, "в описании: пачка по составу: … → doing", "doing"), {})
+check("1. похожий текст не в журнале прохода отметкой не считается", [m[0] for m in mv] == ["metis-0500"], (mv, hold))
 
 # --- 2. worktree на ветке с id задачи → doing; вернули в todo — тревога ----------------------------------------------
 repo = os.path.join(ROOT, "u", "agent-kit")
@@ -180,6 +212,15 @@ s2, sp2 = new("Пачка готова", "--type", "story")
 t4, p4 = new("Последняя задача", "--parent", s2, "--mode", "single", "--status", "done")
 t5, p5 = new("PR частью", "--mode", "single")
 t6, p6 = new("Чужое направление", "--mode", "single", direction="hermes-alex")
+s3, sp3 = new("Пачка на приёмке с вопросом", "--type", "story")
+t7, p7 = new("Готовая задача приёмки", "--parent", s3, "--mode", "single", "--status", "done")
+s4, sp4 = new("Пачка в очереди с вопросом", "--type", "story")
+t8, p8 = new("Готовая задача очереди", "--parent", s4, "--mode", "single", "--status", "done")
+ASK = ('question: "Принять итоги ночи?"\noptions: ["А — принять итоги, все проверки зелёные", '
+       '"Б — вернуть на доработку, нужен ещё круг"]\nrecommend: "А — проверки зелёные"\n')
+for sp_, st_ in ((sp3, "review"), (sp4, "todo")):
+    txt = read(sp_).replace("status: todo\n", f"status: {st_}\n" + ASK, 1)
+    write(sp_, txt)
 r = cli(["task", "claim", t1, "--by", "dev-opus"])
 check("4. выдача исполнителю (pantheon task claim) → doing", r.returncode == 0 and head(p1).get("status") == "doing",
       r.stdout + r.stderr)
@@ -200,6 +241,20 @@ check("4. пачка с задачей doing → doing («В работе»)", h
 check("4. пачка, где все задачи done, → done («Готово»)", head(sp2).get("status") == "done", r.stdout + r.stderr)
 check("4. проход печатает, что сдвинул", f"статус · {t2}: todo → doing" in r.stdout and f"статус · {sid}: todo → doing" in r.stdout,
       r.stdout)
+for sp_, st_ in ((sp3, "review"), (sp4, "todo")):
+    hd = head(sp_)
+    check(f"4. пачка {st_} с вопросом владельцу, все задачи done → статус, question и options на месте",
+          hd.get("status") == st_ and "Принять итоги ночи?" in hd.get("question", "")
+          and "А — принять итоги" in hd.get("options", ""), read(sp_))
+check("4. … и тревога «статус пачки не поставлен» с id пачки", "статус пачки по составу не поставлен" in r.stdout
+      and s4 in r.stdout and "ждёт ответа владельца" in r.stdout, r.stdout)
+hand = []
+for rnd in range(2):  # пачку закрыли руками — проход не открывает её снова
+    cli(["task", "set", sid, "status=done"], T0 + 130 + rnd * 20)
+    rr = cli(["board"], T0 + 140 + rnd * 20)
+    hand.append((head(sp).get("status"), rr.stdout))
+check("4. пачку, которую проход ставил в doing, закрыли руками — два прохода подряд статус done",
+      [h for h, _ in hand] == ["done", "done"] and f"вернули руками в done" in hand[0][1], hand)
 cli(["task", "set", t2, "status=todo"], T0 + 180)
 r = cli(["board"], T0 + 240)
 check("4. задачу вернули в todo при живой worktree → проход не двигает, тревога «в очереди, а работа идёт»",

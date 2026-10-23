@@ -260,6 +260,19 @@ cli(["tick"], T0 + 1110)
 r = cli(["tick"], T0 + 2000)
 check("4. задачи board в расписании нет → тревоги нет", "входы менялись" not in r.stdout, r.stdout)
 write(os.path.join(home, "schedule.toml"), SCHED)
+cli(["board"], T0 + 2100)
+churn = []
+for k in range(1, 6):  # входы меняются каждые 5 мин, сборки нет 20 мин
+    write(status, f"правка {k}\n", T0 + 2100 + k * 300)
+    churn.append(cli(["tick"], T0 + 2110 + k * 300).stdout)
+check("4. входы меняются каждые 5 мин, сборки нет: через 10 мин от первой правки — тревога (счёт не сбрасывается)",
+      not any("входы менялись" in c for c in churn[:2]) and "входы менялись в 24.10 02:40" in churn[2]
+      and "сборки нет 10 мин" in churn[2], churn)
+check("4. … и одна тревога на расхождение: следующие правки её не повторяют",
+      not any("входы менялись" in c for c in churn[3:]) and len(stale_marks()) == 1, churn + stale_marks())
+cli(["board"], T0 + 3700)
+cli(["tick"], T0 + 3710)
+check("4. сборка после такого расхождения снимает отметку", stale_marks() == [], stale_marks())
 
 # --- 5. хук SessionStart Зевса: файл в контексте после сжатия и /clear --------------------------------------------
 tr = write(os.path.join(tmp, "tr", "t.jsonl"), "")

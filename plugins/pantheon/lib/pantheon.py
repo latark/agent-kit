@@ -6242,12 +6242,20 @@ def board_status_sync(T):
         alert_once("board-status", type(e).__name__, f"доска: сверка статусов упала ({type(e).__name__}: {e})", "board")
         return out
     clear_once("board-status")
+    held = {k: v for k, v in stale.items() if tasks.get(k, ("", {}, ""))[1].get("type") == "story"}
+    stale = {k: v for k, v in stale.items() if k not in held}
     if stale:
         alert_once("board-todo-live", ",".join(sorted(stale)), "доска: задачи в todo, а работа по ним идёт — "
                    + "; ".join(f"{tid} ({why})" for tid, why in sorted(stale.items()))
                    + ". Взять в работу — pantheon task claim ID --by КТО, или закрыть след (worktree, PR)", "board")
     else:
         clear_once("board-todo-live")
+    if held:  # пачку проход не двигает: решение за человеком (вопрос владельцу, ручной статус)
+        alert_once("board-story-hold", ",".join(sorted(held)), "доска: статус пачки по составу не поставлен — "
+                   + "; ".join(f"{sid} ({why})" for sid, why in sorted(held.items()))
+                   + ". Решить руками — pantheon task set ID status=…", "board")
+    else:
+        clear_once("board-story-hold")
     return out
 
 
@@ -6305,7 +6313,9 @@ def board_auto_sync(T):
 
 def board_auto_watch(t, sched):
     """Тик (primary): входы автоблока менялись, а удачной сборки после этого нет WATCH_GAP и больше — тревога без
-    модели (молчаливый отказ генератора, исследование 24.10 разд. 7.8). Сборка прошла — отметка снимается. Задачи
+    модели (молчаливый отказ генератора, исследование 24.10 разд. 7.8). Счёт — от первого расхождения после удачной
+    сборки: входы, которые меняются чаще WATCH_GAP, его не сбрасывают. Одна тревога на расхождение. Сборка прошла
+    (она пишет board-auto.json заново) — отметка снимается. Задачи
     `pantheon board` в расписании нет или она выключена — не сверяет: сборки и не ждут."""
     if not any((parse_command(j.get("command")) or [""])[1:] == ["board"] and j.get("enabled") is not False
                for j in sched.get("job") or []):
@@ -6314,19 +6324,22 @@ def board_auto_watch(t, sched):
     st = read_json(path("board-auto.json"), {}) or {}
     cur = board_auto_fp()
     if st.get("fp") == cur:
-        if st.get("seen_fp"):
+        if st.get("seen_fp") or st.get("seen_at"):
             st.pop("seen_fp", None), st.pop("seen_at", None)
             write_json(path("board-auto.json"), st)
         clear_once("board-auto-stale")
         return
-    if st.get("seen_fp") != cur:
+    if not st.get("seen_at"):  # первое расхождение после удачной сборки — отсюда и счёт; новые правки его не сбрасывают
         st.update(seen_fp=cur, seen_at=t)
         write_json(path("board-auto.json"), st)
         return
-    seen = float(st.get("seen_at") or t)
+    if st.get("seen_fp") != cur:
+        st["seen_fp"] = cur
+        write_json(path("board-auto.json"), st)
+    seen = float(st["seen_at"])
     if t - seen >= B.WATCH_GAP:
         built = st.get("built")
-        alert_once("board-auto-stale", cur, f"board-auto.md: входы менялись в {B.hm(seen)}, а сборки нет "
+        alert_once("board-auto-stale", repr(seen), f"board-auto.md: входы менялись в {B.hm(seen)}, а сборки нет "
                    f"{int((t - seen) // 60)} мин (последняя — {B.hm(float(built)) if built else 'не было'}); "
                    "смотреть задачу board: pantheon jobs, alerts.md", "pantheon-tick")
 
