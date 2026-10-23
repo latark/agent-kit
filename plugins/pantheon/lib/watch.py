@@ -8,6 +8,11 @@
                             (metis-0181), уборка: claude rm сессий Пантеона, закончивших ход или остановленных
                             больше 2 ч назад (metis-0250); раз в сутки — журналы ваших слов (COMM-10).
                             --dry-run — только показать, кого самозапуск поднял бы и почему нет, ничего не меняя
+                            Самозапуск по отметкам отдаёт задачи сначала по depends_on, при равенстве — по порядку отметок
+                            (tasks.plan_batch, metis-0248). Не отдаёт: с незакрытым предшественником вне пачки; с зависшим
+                            (waiting/dropped/удалён или без изменений > 24 ч) — тревога «ждёт зависший»; в цикле — тревога,
+                            без запуска; с пересечением непустых touches с идущей в другом направлении (пустой touches
+                            ничего не блокирует); любое ожидание — тревога «<id> — ждёт <id>…». Потолок — 3 параллельных исполнителя (AUTOSTART_MAX жёстче)
   pantheon agents           только снимок `claude agents` (задача тика на каждый проход: строка статуса)
   pantheon revisits         задача тика раз в сутки (SCHED-10, DOC-03): «пора пересмотреть …» в alerts.md
   pantheon stop <имя>|--all, pantheon resume <имя>|--all                                      (SCHED-12)
@@ -1476,9 +1481,39 @@ def autostart(agents, registry, doms, t, dry=False):
     shop = sorted({a.get("name") for a in list(agents) + list(registry) if str(a.get("name") or "").startswith("daedalus-")
                    and holders(a["name"], agents, registry)})
     started = False
+    chosen = {}  # id → направление: задачи, которые этим проходом пошли (или пошли бы) параллельно (metis-0248)
     for d, tids in sorted(want.items()):
         s = st.setdefault(d, {})
         hold = holders(d, agents, registry)
+        # порядок и ожидание по depends_on/touches (metis-0248, шаг 2): сначала зависимости, при равенстве — отметки;
+        # не отдаём ту, что ждёт незакрытую, зависшую, общие файлы с идущей у другого или стоит в цикле
+        if tasks:
+            T = P.tasks_mod()
+            busy = dict(chosen)
+            for i, (_, h, _) in tasks.items():
+                if h.get("status") == "doing" and h.get("type", "task") == "task" and h.get("direction") != d \
+                        and h.get("direction") in running:
+                    busy[i] = h.get("direction")
+            plan = T.plan_batch(tasks, tids, t, busy={k: v for k, v in busy.items() if v != d})
+            if not dry:
+                if plan["wait"]:
+                    bits = "; ".join(f"{x} — {v}" for x, v in sorted(plan["wait"].items()))
+                    P.alert_once(f"autostart-dwait-{d}", f"{today(t)}-{bits[:60]}", f"самозапуск {d}: {bits}", "watch")
+                else:
+                    P.clear_once(f"autostart-dwait-{d}")
+                for key, msg in (("cycle", lambda x, v: f"{x} в цикле зависимостей ({' → '.join(v)}), не запущена"),
+                                 ("stuck", lambda x, v: f"{x} ждёт зависший {v}, не отдана")):
+                    if plan[key]:
+                        bits = "; ".join(msg(x, v) for x, v in sorted(plan[key].items()))
+                        P.alert_once(f"autostart-{key}-{d}", f"{today(t)}-{bits[:60]}", f"самозапуск {d}: {bits}", "watch")
+                    else:
+                        P.clear_once(f"autostart-{key}-{d}")
+            for x, v in sorted({**plan["wait"], **{k: "ждёт зависший " + w for k, w in plan["stuck"].items()},
+                                **{k: "цикл " + " → ".join(c) for k, c in plan["cycle"].items()}}.items()):
+                say(f"{d}: не отдаю {x} — {v}")
+            tids = plan["go"]
+            if not tids:
+                continue
         # простаивающий держатель (metis-0212) — передать той же сессии то же задание, а не «уже работает»: Claude Code
         # сам перезапустил фоновую сессию и задания у неё нет (working + idle) или закончила ход с живым процессом (done)
         poke = nudge_target(hold)
@@ -1515,6 +1550,8 @@ def autostart(agents, registry, doms, t, dry=False):
                 why = got
             elif not trusted(got[2]):
                 why = f"нет доверия к {got[2].replace(P.HOME, '~')} — одна интерактивная сессия claude там и «Да»"
+        if not why:
+            chosen.update({i: d for i in tids})
         if dry:
             if poke:
                 say(f"{what} — " + (f"передача задания ждёт: {why}" if why else
@@ -1538,7 +1575,7 @@ def autostart(agents, registry, doms, t, dry=False):
                 P.alert_once(f"autostart-wait-{d}", f"{today(t)}-{why[:40]}", f"самозапуск {d} ждёт: {why} (задачи "
                              f"{', '.join(tids[:3])})", "watch")
             continue
-        task = (f"Самозапуск дежурным по задачам с вашим решением (в порядке ваших отметок): {', '.join(tids)}. Прочитай STATUS.md и "
+        task = (f"Самозапуск дежурным по задачам с вашим решением (сначала зависимости, затем порядок ваших отметок; цепочку веди сама, не режь): {', '.join(tids)}. Прочитай STATUS.md и "
                 "задачи, продолжай с первой по приоритету; что ждёт владельца — Зевсу строкой.")
         s.update(last=t, pending=True)
         P.write_json(P.path("autostart.json"), st)  # до запуска: проход могут оборвать по таймауту
