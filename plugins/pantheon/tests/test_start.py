@@ -766,10 +766,47 @@ def main():
           r.returncode == 1 and "pantheon roles build" in r.stderr and not calls())
     open(os.path.join(agents_dir, "hestia.md"), "w").write("---\nname: hestia\n---\nГестия\n")
     open(agents_file, "w").write("[]")
+    hrun_path = os.path.join(state, "settings", "run", "hestia.json")
+    # metis-0261 А, ревью argus-b5: из окна роли, кроме hq, — origin tick, как у start; поручение Гестии — только по
+    # слову владельца в owner-log/zeus.md (как wake <имя> "задание"): без него отказ, код 2, в любой зоне памяти
+    if os.path.exists(zlog):
+        os.remove(zlog)
+    open(log, "w").close()
+    n0 = len(caprows())
+    shop_env, red_env = {"PANTHEON_ROLE": "athena-shop"}, {"PANTHEON_ROLE": "athena-shop", "FAKE_SWAP_MB": "5000.00"}
+    hx = [run("wake", "hestia", "--task", "athena-0001", extra=shop_env),
+          run("wake", "hestia", "--task", "athena-0001", extra=red_env),
+          run("wake", "hestia", "--task", "athena-0001", extra={"PANTHEON_ROLE": "hq"})]
+    word(ago=OWNER_WINDOW + 60)
+    hx.append(run("wake", "hestia", "--task", "athena-0001", extra=shop_env))
+    rows = caprows()[n0:]
+    check("wake hestia из окна направления без вашего слова (нет zeus.md, красная зона, слово старше 15 мин) — отказ, "
+          "код 2 «pantheon wake hestia: отказ», claude не звали, в замере refused с origin tick",
+          all(x.returncode == 2 and x.stderr.strip().splitlines()[-1].startswith("pantheon wake hestia: отказ — ")
+              and "без вашего слова" not in x.stderr for x in hx[:2] + hx[3:])
+          and "только по вашему слову" in hx[0].stderr and not calls() and not os.path.exists(hrun_path)
+          and [(x["target"], x["origin"], x["result"]) for x in rows]
+          == [("hestia", "tick", "refused")] * 2 + [("hestia", "zeus", "refused"), ("hestia", "tick", "refused")]
+          and rows[1]["red"] is True)
+    check("wake hestia из hq без вашего слова — отказ, код 2 «без вашего слова», claude не звали (как start --from zeus)",
+          hx[2].returncode == 2 and "pantheon wake hestia: отказ — запуск от Зевса без вашего слова" in hx[2].stderr)
+    word()
+    r = run("wake", "hestia", "--task", "athena-0001", extra=red_env)
+    check("wake hestia из окна направления со словом, но в красной зоне — код 5 «отложено» (tick слова не имеет), "
+          "claude не звали", r.returncode == 5 and "pantheon wake hestia: отложено — память Mac" in r.stderr
+          and not calls() and caprows()[-1]["result"] == "deferred" and caprows()[-1]["origin"] == "tick")
+    r = run("wake", "hestia", "--task", "athena-0001", extra=shop_env)
+    hrun = json.load(open(hrun_path)) if os.path.exists(hrun_path) else {}
+    check("wake hestia из окна направления со словом — запуск, в окне запуска PANTHEON_ORIGIN=tick",
+          r.returncode == 0 and len([x for x in calls() if "--bg" in x["argv"]]) == 1
+          and "[Пантеон: поручение от tick]" in calls()[-1]["argv"][-1]
+          and hrun.get("env", {}).get("PANTHEON_ORIGIN") == "tick" and caprows()[-1]["result"] == "allowed")
+    open(agents_file, "w").write("[]")
+    open(log, "w").close()
+    os.remove(hrun_path)
     word()  # слово владельца в окне Зевса: origin zeus без него отказ (metis-0261 А, после слияния с #116)
     r = run("wake", "hestia", "--task", "athena-0001", extra={"PANTHEON_ROLE": "hq"})
     c = calls()
-    hrun_path = os.path.join(state, "settings", "run", "hestia.json")
     hrun = json.load(open(hrun_path)) if os.path.exists(hrun_path) else {}
     bg = [x for x in c if "--bg" in x["argv"]]
     check("wake hestia --task: claude --bg --agent hestia --name hestia --settings окно запуска, папка — кэш, "

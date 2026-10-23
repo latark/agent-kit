@@ -85,7 +85,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией; задание из окна роли
                                         — только по слову владельца в окне Зевса за 15 мин, иначе код 2
   pantheon wake hestia --task <id> [--dry-run]   Гестия в своём окне песочницы (settings/hestia.json) с открытой
-                                        задачей; без задачи или с закрытой — отказ «нет задачи» (код 2)
+                                        задачей; без задачи или с закрытой — отказ «нет задачи» (код 2); из окна
+                                        роли — только по слову владельца в окне Зевса за 15 мин, иначе код 2
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
                                         сессия уходит из фоновых сессий Claude Code) и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
@@ -3612,12 +3613,13 @@ def start(rest):
         return _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win)
 
 
-def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win):
+def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win, need_word=False,
+                   cmd="pantheon start"):
     agents = agents_all()
     if not dry:  # metis-0261 А: слово владельца и замер — до любых действий; список сессий тот же, что ниже
-        code, why = start_gate(name, origin, agents)
+        code, why = start_gate(name, origin, agents, need_word)
         if why:
-            print(f"pantheon start: {'отказ' if code == 2 else 'отложено'} — {why}", file=sys.stderr)
+            print(f"{cmd}: {'отказ' if code == 2 else 'отложено'} — {why}", file=sys.stderr)
             return code
     same = [a for a in agents or [] if a.get("name") == name]
     live = live_copies(name, agents)
@@ -3759,17 +3761,22 @@ START_DEFERRED = 5  # отложено: красный замер памяти �
 # (3 и 4 заняты: NO_WINDOW и SKIPPED у resume_session, те же числа дошли бы до дежурного как коды запуска)
 
 
-def start_gate(target, origin, agents):
+def start_gate(target, origin, agents, need_word=False):
     """pantheon start, перед запуском сессии (metis-0261 А): замер в capacity.jsonl (строка — у каждого не-dry start,
     дошедшего до этого шага; ранние выходы — «остановлено вами», «нет окна», занятое имя — и продолжение через
     resume_session строки не пишут). → (код, причина); (0, None) — можно.
     Слово владельца: --from owner (по умолчанию) — он сам; --from zeus — его свежая запись в owner-log/zeus.md (без неё
-    отказ, код 2, всегда); tick слова не имеет и в красной зоне получает код 5 (отложено) при любом zeus.md."""
+    отказ, код 2, всегда); tick слова не имеет и в красной зоне получает код 5 (отложено) при любом zeus.md.
+    need_word (wake hestia из окна роли, не hq): запуск с поручением из окна роли — только по свежей записи в zeus.md,
+    без неё отказ, код 2, в любой зоне (как wake <имя> "задание"); со словом tick по-прежнему откладывается в красной."""
     m = capacity_probe(agents)
     word = origin == "owner" or (origin == "zeus" and owner_spoke_recently("zeus", OWNER_WORD_WINDOW))
     code, why = 0, None
     if origin == "zeus" and not word:
         code, why = START_REFUSED, NO_WORD_WHY
+    elif need_word and origin != "owner" and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
+        code, why = START_REFUSED, (f"поручение из окна роли — только по вашему слову: в журнале Зевса нет вашей строки "
+                                    f"за {OWNER_WORD_WINDOW // 60} мин (сообщение другой сессии согласием не считается)")
     elif (m["red"] or m["unknown"]) and not word:
         reasons = "; ".join(m["red"]) if m["red"] else "нет сигнала: своп и давление памяти не прочитаны"
         code, why = START_DEFERRED, (f"память Mac в красной зоне ({reasons}) — запуск только со словом владельца, "
@@ -3828,7 +3835,9 @@ def wake_hestia(rest):
     окне песочницы (settings/hestia.json, собирает sandbox_build; PANTHEON_ROLE=hestia — правило guard hestia), папка
     запуска — её кэш. Одна задача — одна сессия: без задачи, с id не по образцу, несуществующей или не открытой задачей
     — отказ «нет задачи», код 2, claude не зовётся. Нет окна, кэша или роли (~/.claude/agents/hestia.md) — код 1 с
-    командой сборки. Метка «остановлено вами», технический перезапуск и живая копия — отказ, как у start."""
+    командой сборки. Метка «остановлено вами», технический перезапуск и живая копия — отказ, как у start.
+    Откуда — как у start: hq → zeus, иная роль → tick, без роли → owner; из окна роли без вашего слова в
+    owner-log/zeus.md за 15 мин — отказ, код 2, строка refused в capacity.jsonl, claude не зовётся."""
     dry = "--dry-run" in rest
     args = [a for a in rest[1:] if a != "--dry-run"]
     tid = args[1] if len(args) == 2 and args[0] == "--task" else None
@@ -3857,14 +3866,18 @@ def wake_hestia(rest):
         print(f"pantheon wake hestia: идёт технический перезапуск ({m.get('reason')}) — после pantheon restart --go",
               file=sys.stderr)
         return 1
-    origin = "zeus" if os.environ.get("PANTHEON_ROLE") == "hq" else "owner"
+    # откуда запуск — как в start() (metis-0261 А, ревью argus-b5): hq → zeus, иная роль → tick, без роли → owner.
+    # Поручение Гестии из окна роли — только по вашему слову в owner-log/zeus.md (как wake <имя> "задание"), иначе код 2
+    role = os.environ.get("PANTHEON_ROLE") or ""
+    origin = "zeus" if role == "hq" else "tick" if role else "owner"
     task = (f"Задача {tid}: прочитай её карточку (pantheon task show {tid}) и сделай ровно то, что в ней. Отчёт — по "
             "формату роли, каждое действие — строкой журнала в нём.")
     with lock("start-hestia", block=False) as got:
         if not got:
             print("pantheon wake hestia: hestia уже запускается другой командой", file=sys.stderr)
             return 1
-        return _start_session("hestia", "hestia", folder, "hestia", task, [], origin, dry, False, win)
+        return _start_session("hestia", "hestia", folder, "hestia", task, [], origin, dry, False, win,
+                              need_word=bool(role), cmd="pantheon wake hestia")
 
 
 def wake(rest):
