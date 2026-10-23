@@ -71,6 +71,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
   pantheon start zeus                   Пританей: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
+                                        любой start пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2)
   pantheon start <направление> --at ЧЧ:ММ [поручение]   разовый запуск плановым проходом вместо sleep в сессии;
                                         --at-list — записи, --at-cancel <id> — отменить (lib/night.py)
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
@@ -3475,7 +3476,10 @@ def start_at(rest, origin, dry):
 def start(rest):
     """pantheon start <направление> [поручение] | workshop <задача> [поручение] | zeus [--restart]  [--from кто] [--dry-run]
     pantheon start <направление> --at ЧЧ:ММ|"ГГГГ-ММ-ДД ЧЧ:ММ" [поручение] | --at-list | --at-cancel <id>   разовый запуск
-                                                                                    плановым проходом (вместо sleep)"""
+                                                                                    плановым проходом (вместо sleep)
+    Любой запуск пишет замер в STATE/capacity.jsonl (сессий, давление памяти, свободно %, своп). Отказ, код 2: --from zeus
+    без вашего слова в owner-log/zeus.md за 15 мин; красный замер (своп выше порога дежурного, давление не «норма») —
+    без слова владельца (--from owner — он сам) (metis-0261 А)."""
     dry = "--dry-run" in rest
     restart = "--restart" in rest
     rest = [a for a in rest if a not in ("--dry-run", "--restart")]
@@ -3493,6 +3497,11 @@ def start(rest):
         return 2
     target, rest = rest[0], rest[1:]
     if target == "zeus":
+        if not dry:  # сессии не считаем: лишний claude agents ломает сценарии ожидания имени; слово и память — да
+            why = start_gate(target, origin, None)
+            if why:
+                print(f"pantheon start: отказ — {why}", file=sys.stderr)
+                return 2
         # штаб — ваша интерактивная сессия в iTerm: команда заменяет себя на claude в ~/ai/pantheon
         argv = [claude_bin(), "--agent", "hq", "--name", "zeus", "--settings", path("settings", "hq.json")]
         if dry:
@@ -3553,6 +3562,11 @@ def start(rest):
 
 def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win):
     agents = agents_all()
+    if not dry:  # metis-0261 А: слово владельца и замер — до любых действий; список сессий тот же, что ниже
+        why = start_gate(name, origin, agents)
+        if why:
+            print(f"pantheon start: отказ — {why}", file=sys.stderr)
+            return 2
     same = [a for a in agents or [] if a.get("name") == name]
     live = live_copies(name, agents)
     # metis-0348: «blocked» без процесса и без вопроса (noProcess, reconcile_agents) — сессию снял Claude Code, ждать
@@ -3601,9 +3615,6 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     before = {a.get("id") for a in agents_all() or [] if a.get("id")}
     r = subprocess.run(argv, cwd=folder, env=claude_env(), capture_output=True, text=True, timeout=180)
     start_log(f"{name}\t{origin}\t{folder}\t{r.returncode}")
-    if origin == "zeus" and r.returncode == 0 and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
-        alert(f"запуск {name} по поручению Зевса без вашего слова в его окне за {OWNER_WORD_WINDOW // 60} мин — "
-              "возможно, по сообщению другой сессии (лазейка на время доработки, decisions.md 15.10)", "pantheon-start")
     sys.stdout.write(r.stdout)
     sys.stderr.write(r.stderr)
     if r.returncode != 0:
@@ -3617,8 +3628,8 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     return 0
 
 
-# Лазейка на время доработки (ваше решение 15.10): Зевс запускает направления и по сообщениям других сессий. Чтобы это
-# было видно, запуск «от Зевса» без вашей строки в его журнале owner-log за последние минуты — строка в тревогах.
+# metis-0261 (А): лазейка 15.10 закрыта. Запуск «от Зевса» (--from zeus) без вашей строки в его журнале owner-log за
+# последние минуты — отказ, код 2 (раньше только тревога). Ваше слово — запись в owner-log/zeus.md, её пишет хук.
 OWNER_WORD_WINDOW = 15 * 60
 OWNER_HEAD = re.compile(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", re.M)
 
@@ -3639,6 +3650,83 @@ def owner_spoke_recently(session, window):
     except ValueError:
         return False
     return now() - last <= window
+
+
+CAPACITY_SESSIONS_DONE = ("stopped", "failed", "done")
+
+
+def capacity_probe(agents):
+    """Замер загрузки Mac для pantheon start (metis-0261 А): agents — список claude agents (или None); сессий Пантеона, давление памяти (kern.memorystatus_vm_pressure_level:
+    1 норма, 2 предупреждение, 4 критично), свободно % (memory_pressure), своп ГБ. Чего не удалось прочитать — None.
+    Красный (red): своп выше SWAP_ALERT_GB (порог дежурного, watch.py) или давление не «норма» — новых чисел нет."""
+    w = watch_mod()
+    out = {"sessions": None, "pressure": None, "free_pct": None, "swap_gb": None}
+    if agents is not None:
+        out["sessions"] = sum(1 for a in agents if a.get("state") not in CAPACITY_SESSIONS_DONE)
+    with contextlib.suppress(Exception):
+        out["swap_gb"] = w.swap_gb()
+    with contextlib.suppress(Exception):
+        r = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True, text=True,
+                           timeout=10)
+        if r.returncode == 0 and r.stdout.strip().isdigit():
+            out["pressure"] = int(r.stdout.strip())
+    with contextlib.suppress(Exception):
+        r = subprocess.run(["memory_pressure"], capture_output=True, text=True, timeout=10)
+        m = re.search(r"free percentage:\s*(\d+)%", r.stdout)
+        if m:
+            out["free_pct"] = int(m.group(1))
+    limit = w.threshold("swap_alert_gb", w.SWAP_ALERT_GB)
+    reasons = []
+    if out["swap_gb"] is not None and out["swap_gb"] > limit:
+        reasons.append(f"своп {out['swap_gb']:.1f} ГБ > {limit:g} ГБ")
+    if out["pressure"] is not None and out["pressure"] >= 2:
+        reasons.append(f"давление памяти {'критичное' if out['pressure'] >= 4 else 'предупреждение'}")
+    out["red"] = reasons
+    return out
+
+
+def capacity_log(row):
+    """Строка замера в STATE/capacity.jsonl; запись не должна ронять запуск."""
+    with contextlib.suppress(OSError):
+        os.makedirs(STATE, exist_ok=True)
+        fd = os.open(path("capacity.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, (json.dumps(row, ensure_ascii=False) + "\n").encode())
+        finally:
+            os.close(fd)
+
+
+def start_gate(target, origin, agents):
+    """pantheon start, перед запуском (metis-0261 А): замер в capacity.jsonl и отказы. None — можно, иначе причина отказа.
+    Слово владельца: --from zeus — его запись в owner-log/zeus.md за OWNER_WORD_WINDOW; --from owner (по умолчанию) —
+    он сам; tick слова не имеет. Zeus без слова — отказ всегда; красный замер — отказ без слова."""
+    m = capacity_probe(agents)
+    word = origin == "owner" or owner_spoke_recently("zeus", OWNER_WORD_WINDOW)
+    why = None
+    if origin == "zeus" and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
+        why = (f"запуск от Зевса без вашего слова в его окне за {OWNER_WORD_WINDOW // 60} мин "
+               "(сообщение другой сессии согласием не считается)")
+    elif m["red"] and not word:
+        why = "память Mac в красной зоне (" + "; ".join(m["red"]) + ") — запуск только со словом владельца"
+    capacity_log({"t": round(now(), 1), "at": stamp(), "target": target, "origin": origin, "sessions": m["sessions"],
+                  "pressure": m["pressure"], "free_pct": m["free_pct"], "swap_gb": None if m["swap_gb"] is None
+                  else round(m["swap_gb"], 2), "red": bool(m["red"]), "result": "refused" if why else "allowed"})
+    return why
+
+
+_WATCH = None
+
+
+def watch_mod():
+    """lib/watch.py одним экземпляром на процесс (пороги дежурного и чтение свопа — одно место)."""
+    global _WATCH
+    if _WATCH is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_watch", os.path.join(LIB, "watch.py"))
+        _WATCH = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_WATCH)
+        _WATCH.set_core(sys.modules[__name__])
+    return _WATCH
 
 
 def open_tasks(name):

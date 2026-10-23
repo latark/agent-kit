@@ -23,6 +23,7 @@ _os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
 import time
 
+OWNER_WINDOW = 15 * 60
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, "lib", "pantheon.py")
 HEAVY = os.path.join(ROOT, "bin", "heavy")
@@ -95,6 +96,15 @@ def main():
     for d in (home, bindir, os.path.join(tmp, "projects", "br"), os.path.join(tmp, ".claude", "agents"),
               os.path.join(home, "directions", "athena-shop", "tasks")):
         os.makedirs(d, exist_ok=True)
+    # sysctl и memory_pressure подменены: значения из окружения запуска (по умолчанию — зелёный замер)
+    open(os.path.join(bindir, "sysctl"), "w").write(
+        '#!/bin/sh\ncase "$*" in\n *vm.swapusage*) echo "vm.swapusage: total = 4096.00M  used = ${FAKE_SWAP_MB:-100.00}M'
+        '  free = 3000.00M  (encrypted)";;\n *pressure_level*) echo "${FAKE_PRESSURE:-1}";;\n *) exit 1;;\nesac\n')
+    open(os.path.join(bindir, "memory_pressure"), "w").write(
+        '#!/bin/sh\necho "The system has 17179869184 (1048576 pages with a page size of 16384)."\n'
+        'echo "System-wide memory free percentage: ${FAKE_FREE_PCT:-60}%"\n')
+    for fk in ("sysctl", "memory_pressure"):
+        os.chmod(os.path.join(bindir, fk), 0o755)
     open(os.path.join(bindir, "claude"), "w").write(FAKE)
     os.chmod(os.path.join(bindir, "claude"), 0o755)
     agents_file, log = os.path.join(tmp, "agents.json"), os.path.join(tmp, "claude.log")
@@ -225,6 +235,10 @@ def main():
     check("roles build --src без --out — код 2", r.returncode == 2 and snap(agents_dir) == before)
 
     # start: координатор направления
+    zlog = os.path.join(state, "owner-log", "zeus.md")
+    word = lambda ago=0: (os.makedirs(os.path.dirname(zlog), exist_ok=True), open(zlog, "w").write(
+        time.strftime("## %Y-%m-%d %H:%M:%S\nзапусти athena\n\n", time.localtime(time.time() - ago))))
+    word()  # слово владельца в окне Зевса: без него start --from zeus отказывает (metis-0261 А)
     r = run("start", "athena-shop", "закрой", "эпик", "--from", "zeus")
     c = calls()
     run_file = os.path.join(state, "settings", "run", "athena-shop.json")
@@ -334,14 +348,61 @@ def main():
     os.remove(os.path.join(daemon_dir, "roster.json"))
     _shutil.rmtree(os.path.join(tmp, ".claude", "jobs"))
     alerts_md = os.path.join(home, "alerts.md")
-    said = lambda: open(alerts_md).read().count("без вашего слова") if os.path.exists(alerts_md) else 0
-    check("start --from zeus без вашего слова в окне Зевса — тревога (лазейка видна)", said() == 1)
-    os.makedirs(os.path.join(state, "owner-log"), exist_ok=True)
-    with open(os.path.join(state, "owner-log", "zeus.md"), "w") as fh:
-        fh.write(time.strftime("## %Y-%m-%d %H:%M:%S\nзапусти athena\n\n"))
     open(agents_file, "w").write("[]")
-    run("start", "athena-shop", "проверка", "--from", "zeus")
-    check("start --from zeus сразу после вашего слова — без тревоги", said() == 1)
+    cap = os.path.join(state, "capacity.jsonl")
+    caprows = lambda: [json.loads(x) for x in open(cap)] if os.path.exists(cap) else []
+    n0, c0 = len(caprows()), len(calls())
+    word(ago=OWNER_WINDOW + 60)
+    r = run("start", "athena-shop", "проверка", "--from", "zeus")
+    check("start --from zeus без вашего слова за 15 мин — отказ, код 2, claude не звали (metis-0261 А)",
+          r.returncode == 2 and "без вашего слова" in r.stderr and len(calls()) == c0)
+    os.remove(zlog)
+    r = run("start", "athena-shop", "проверка", "--from", "zeus")
+    check("start --from zeus при пустом журнале владельца — отказ, код 2", r.returncode == 2 and len(calls()) == c0)
+    check("start: отказ тоже пишет замер в capacity.jsonl (result refused)",
+          len(caprows()) == n0 + 2 and caprows()[-1]["result"] == "refused" and caprows()[-1]["origin"] == "zeus")
+    word()
+    r = run("start", "athena-shop", "проверка", "--from", "zeus")
+    row = caprows()[-1]
+    check("start --from zeus сразу после вашего слова — запуск; строка замера: сессий, давление, свободно %, своп",
+          r.returncode == 0 and len(calls()) == c0 + 1 and row["result"] == "allowed" and row["origin"] == "zeus"
+          and row["target"] == "athena-shop" and row["sessions"] == 0 and row["pressure"] == 1
+          and row["free_pct"] == 60 and abs(row["swap_gb"] - 100 / 1024) < 0.01 and row["red"] is False)
+    # красный замер: своп выше порога дежурного (4 ГБ) или давление не «норма»
+    os.remove(zlog)
+    open(agents_file, "w").write("[]")
+    n0, c0 = len(caprows()), len(calls())
+    r = run("start", "athena-shop", "красный", "--from", "tick", extra={"FAKE_SWAP_MB": "5000.00"})
+    check("start --from tick при своп 5 ГБ (> порога) — отказ, код 2, claude не звали, red в замере",
+          r.returncode == 2 and "красной зоне" in r.stderr and "своп" in r.stderr and len(calls()) == c0
+          and caprows()[-1]["red"] is True and caprows()[-1]["result"] == "refused" and len(caprows()) == n0 + 1)
+    r = run("start", "athena-shop", "красный", "--from", "tick", extra={"FAKE_PRESSURE": "2"})
+    check("start --from tick при давлении «предупреждение» — отказ, код 2",
+          r.returncode == 2 and "давление" in r.stderr and len(calls()) == c0)
+    r = run("start", "athena-shop", "красный", "--from", "tick", extra={"FAKE_SWAP_MB": "3000.00"})
+    check("start --from tick при своп 3 ГБ (ниже порога) — запуск", r.returncode == 0 and len(calls()) == c0 + 1)
+    open(agents_file, "w").write("[]")
+    r = run("start", "athena-shop", "красный", "--from", "owner", extra={"FAKE_SWAP_MB": "5000.00", "FAKE_PRESSURE": "4"})
+    check("start --from owner в красной зоне — запуск (слово владельца — он сам), red True в замере",
+          r.returncode == 0 and caprows()[-1]["red"] is True and caprows()[-1]["result"] == "allowed")
+    open(agents_file, "w").write("[]")
+    word()
+    r = run("start", "athena-shop", "красный", "--from", "zeus", extra={"FAKE_SWAP_MB": "5000.00"})
+    check("start --from zeus в красной зоне, но со словом владельца в окне Зевса — запуск",
+          r.returncode == 0 and caprows()[-1]["red"] is True and caprows()[-1]["result"] == "allowed")
+    os.remove(zlog)
+    r = run("start", "zeus", "--from", "zeus", tty=True)
+    check("start zeus --from zeus без слова владельца — отказ, код 2, замер записан",
+          r.returncode == 2 and "без вашего слова" in r.stderr and caprows()[-1]["target"] == "zeus"
+          and caprows()[-1]["result"] == "refused")
+    open(agents_file, "w").write(json.dumps([{"id": "w1", "name": "x", "state": "working"},
+                                             {"id": "w2", "name": "y", "state": "stopped"}]))
+    word()
+    run("start", "athena-shop", "счёт", "--from", "zeus")
+    check("замер: сессий считает без stopped/failed/done", caprows()[-1]["sessions"] == 1)
+    n0 = len(caprows())
+    run("start", "athena-shop", "x", "--from", "zeus", "--dry-run")
+    check("start --dry-run — замера в capacity.jsonl нет", len(caprows()) == n0)
     open(agents_file, "w").write("[]")
     r = run("start", "athena-shop")
     c = calls()
