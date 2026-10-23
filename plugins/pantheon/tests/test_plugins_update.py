@@ -630,6 +630,53 @@ print(json.dumps({"seen": seen, "fresh": sorted(k[2] for k in fresh)}))""", e.sr
           and "обновлён x 1.0.0 → 1.1.0" in e.alerts(), f"{r.returncode} {e.alerts()[-300:]!r}")
     e.close()
 
+    # metis-0369 п.2: установленный сосед с installPath, папки которого нет, берётся из каталога (как неустановленный)
+    e = Env("1.0.0", "1.1.0", SEE_PEERS, SEE_PEERS)
+    mkt = os.path.dirname(os.path.dirname(e.src))
+    gcat = os.path.join(mkt, "plugins", "guard")
+    e.write(os.path.join(gcat, ".claude-plugin", "plugin.json"), json.dumps({"name": "guard", "version": "3.0.0"}))
+    e.write(os.path.join(gcat, "marker.txt"), "каталог")
+    e.write(os.path.join(mkt, ".claude-plugin", "marketplace.json"),
+            json.dumps({"name": "agent-kit", "plugins": [{"name": "x", "source": "./plugins/x"},
+                                                        {"name": "guard", "source": "./plugins/guard"}]}))
+    ghost = os.path.join(e.home, ".claude", "plugins", "cache", "agent-kit", "guard", "ghost")  # папки нет
+    grow = {"id": "guard@agent-kit", "version": "3.0.0", "scope": "user", "installPath": ghost}
+    for f in ("list.json", "list-after.json"):
+        p = os.path.join(e.stub, f)
+        e.write(p, json.dumps(json.load(open(p)) + [grow]))
+    rec = os.path.join(e.tmp, "peers.rec")
+    e.run(extra={"REC_FILE": rec})
+    seen = [json.loads(ln) for ln in open(rec, encoding="utf-8")] if os.path.exists(rec) else []
+    check("0369 п.2: сосед базы с несуществующим installPath — у базы guard из каталога",
+          sorted({(s["who"], s["guard"]) for s in seen}) == [("base", "каталог"), ("new", "каталог")], seen)
+    e.close()
+
+    # metis-0369 п.1: git не работает в копиях (заглушка в PATH падает) и тесты падают одинаково у обеих версий —
+    # база это не гасит: красное «копия новой версии не собралась» с причиной в логе и в тревоге, update не вызван
+    e = Env("1.0.0", "1.1.0", 'print("FAIL env")\nraise SystemExit(1)\n', 'print("FAIL env")\nraise SystemExit(1)\n')
+    e.write(os.path.join(e.stub, "git"), '#!/bin/sh\necho "fatal: git сломан в копии" >&2\nexit 128\n')
+    os.chmod(os.path.join(e.stub, "git"), 0o755)
+    r = e.run()
+    lg = open(os.path.join(e.state, "plugins", "x-1.1.0.log"), encoding="utf-8").read()
+    check("0369 п.1: git упал в обеих копиях — красное без вычитания базой, update не вызван",
+          r.returncode == 76 and "plugin update" not in e.argv(), f"{r.returncode} {lg[-400:]!r}")
+    check("0369 п.1: причина в логе (копия новой, git init, текст ошибки) и в тревоге",
+          "копия новой версии не собралась: git init: код 128" in lg and "git сломан в копии" in lg
+          and "копия новой версии не собралась" in e.alerts(), f"{lg[-400:]!r} {e.alerts()[-300:]!r}")
+    e.close()
+    # сосед новой версии не собрался (папки нет) — тоже красное: _plugin_check напрямую
+    e = Env("1.0.0", "1.1.0", 'print("ok a")\nprint("1 из 1 прошли")\n', 'print("ok a")\nprint("1 из 1 прошли")\n')
+    got = e.py("""
+import json, os
+P._pythons_for = lambda name: [sys.executable]
+os.makedirs(P.path("plugins", "tmp"), exist_ok=True)
+log, digest, fresh = P._plugin_check("x", "1.0.0", "1.1.0", sys.argv[2], sys.argv[3], {},
+                                     peers_new={"guard": "/нет/такой/папки"})
+print(json.dumps(sorted(k[2] for k in fresh), ensure_ascii=False))""", e.src, os.path.dirname(e.after) + "/1.0.0")
+    check("0369 п.1: сосед новой версии без папки — красное «копия новой версии не собралась: сосед guard»",
+          bool(got) and "копия новой версии не собралась: сосед guard: нет папки" in got[-1], got)
+    e.close()
+
     # metis-0360: подписи не гасят настоящие поломки (ревью 0358, второй argus). fresh_of — новые падения из лога.
     def log_of(e, ver="1.1.0"):
         p = os.path.join(e.state, "plugins", f"x-{ver}.log")
