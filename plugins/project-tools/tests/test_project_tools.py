@@ -368,23 +368,37 @@ os.chmod(os.path.join(ro, ".claude"), 0o755)
 check("сбой записи посередине: код 2 и список уже записанного",
       r.returncode == 2 and "уже записано" in r.stderr and ".mcp.json" in r.stderr and "Ничего не записано" not in r.stderr)
 old_py = "/usr/bin/python3"
-# /usr/bin/python3 — заглушка xcrun: в песочнице она пишет в stderr про кэш; берём настоящий интерпретатор
-real_py = None
-if os.path.exists(old_py):
-    q = subprocess.run([old_py, "-c", "import sys; print(sys.executable)"], capture_output=True, text=True, env=env_for(home))
-    cand = q.stdout.strip()
-    if q.returncode == 0 and cand and os.path.exists(cand):
-        real_py = cand
-old_ran = 0
-if real_py and subprocess.run([real_py, "-c", "import sys; sys.exit(sys.version_info >= (3, 11))"],
-                              env=env_for(home)).returncode == 0:
-    old_ran += 1
-    r = subprocess.run([real_py, "-I", CLI, "hint"], input="{}", capture_output=True, text=True, env=env_for(home))
-    check("Python старше 3.11: подсказка молчит, код 0", r.returncode == 0 and r.stdout == "" and r.stderr == "")
-# на машине с Xcode/CLT проверка обязана выполниться: счёт 0 — не «пройдено», а сбой (PYTHONHOME/PYTHONINSPECT
-# из окружения раньше тихо отключали её)
-if os.path.exists(old_py):
-    check("проверка старого Python выполнилась (счёт > 0)", old_ran > 0)
+# ловушки окружения: PYTHONINSPECT и PYTHONHOME на время блока старого Python. env_for их убирает; вызов без env
+# унаследует их и не выполнит проверку (счёт 0 → FAIL)
+TRAPS = {"PYTHONINSPECT": "1", "PYTHONHOME": os.path.join(home, "no-such-python-home")}
+_saved_env = {k: os.environ.get(k) for k in TRAPS}
+os.environ.update(TRAPS)
+try:
+    check("env_for убирает PYTHONINSPECT и PYTHONHOME", not set(TRAPS) & set(env_for(home)))
+    # /usr/bin/python3 — заглушка xcrun: в песочнице она пишет в stderr про кэш; берём настоящий интерпретатор
+    real_py = None
+    if os.path.exists(old_py):
+        q = subprocess.run([old_py, "-c", "import sys; print(sys.executable)"], capture_output=True, text=True,
+                           env=env_for(home))
+        cand = q.stdout.strip()
+        if q.returncode == 0 and cand and os.path.exists(cand):
+            real_py = cand
+    old_ran = 0
+    if real_py and subprocess.run([real_py, "-c", "import sys; sys.exit(sys.version_info >= (3, 11))"],
+                                  env=env_for(home)).returncode == 0:
+        old_ran += 1
+        r = subprocess.run([real_py, "-I", CLI, "hint"], input="{}", capture_output=True, text=True,
+                           env=env_for(home))
+        check("Python старше 3.11: подсказка молчит, код 0", r.returncode == 0 and r.stdout == "" and r.stderr == "")
+    # на машине с Xcode/CLT проверка обязана выполниться: счёт 0 — не «пройдено», а сбой
+    if os.path.exists(old_py):
+        check("проверка старого Python выполнилась (счёт > 0)", old_ran > 0)
+finally:
+    for k, v in _saved_env.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
 # 10. Карта: у каждого инструмента сервер или плагин, стеки ссылаются на существующие инструменты
 check("карта: стеки ссылаются на инструменты из tools",
