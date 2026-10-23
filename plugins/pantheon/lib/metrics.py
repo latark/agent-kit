@@ -16,7 +16,8 @@
 
 Круги argus — вердикты шлюза слияния (STATE/merge-gate/records.jsonl) по PR, названным в журнале задачи, и файлы
 review-*.md направления с id в заголовке (строка «модель: …» перед заголовком пропускается). Круг — один head (SHA):
-два argus и повторные вердикты на тот же SHA — один круг; «с первого круга» — итог первого SHA (metis-0393).
+два argus и повторные вердикты на тот же SHA — один круг; «с первого круга» — итог первого SHA (metis-0393). SHA файла —
+из «Head: <sha>» шапки; «прошлый head <sha>» из поручения узкого повтора за него не считается.
 Возвраты — круги с итогом «вернуть» и переносы карточки владельцем назад (owner-log/board.jsonl); правки владельца —
 его заметки, ответы и переносы; возврат после слияния — другие задачи со словами revert, hotfix, «откатили» в одной
 строке с id.
@@ -50,6 +51,7 @@ SHA_TOKEN = r"(?=[0-9a-f]*\d)([0-9a-f]{7,40})(?![0-9a-z])"
 HEAD_RES = (re.compile(r"\bhead\b[^\n0-9a-f]{0,30}?" + SHA_TOKEN, re.I), re.compile(r"\.\." + SHA_TOKEN, re.I))
 TITLE_SHA_RE = re.compile(r"(?<![0-9a-z])" + SHA_TOKEN, re.I)
 MODEL_LINE_RE = re.compile(r"^\W*модель\s*:", re.I)
+PREV_HEAD_RE = re.compile(r"\b(?:прошл|предыдущ|previous|prev|old)\w*\W{0,3}$", re.I)
 REVERT_RE = re.compile(r"\brevert(?:ed)?\b|hotfix|хотфикс|откатил|откатили|возврат после слияния|сломал[аио]? после слияния",
                        re.I)
 BACK_SRC = ("На проверке", "Готово")
@@ -297,9 +299,10 @@ def review_sha(text, title):
     """SHA проверенного head из шапки файла ревью (первые 7 знаков, нижний регистр) или None."""
     top = text[:2000]
     for rx in HEAD_RES:
-        m = rx.search(top)
-        if m:
-            return m.group(1)[:7].lower()
+        for m in rx.finditer(top):
+            # «прошлый head <sha>» из поручения узкого повтора — не проверенный head: берём следующее совпадение
+            if not PREV_HEAD_RE.search(top[max(0, m.start() - 16):m.start()]):
+                return m.group(1)[:7].lower()
     m = TITLE_SHA_RE.search(title)
     return m.group(1)[:7].lower() if m else None
 

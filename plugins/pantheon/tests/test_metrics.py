@@ -358,7 +358,12 @@ def argus_sha():
              ("review-122-b.md", "# Ревью metis-0952 — argus b «вернуть» на 3eb43c1\n\nВердикт: вернуть\n"),
              ("review-123-a.md", "# Ревью metis-0953 — argus a\nHead: 5c5c5c5\nВердикт: вернуть\n"),
              ("review-123-b.md", "# Ревью metis-0953 — argus b, обходы\nHead: 5c5c5c5\nВердикт: вернуть\n"),
-             ("review-123-a2.md", "# Ревью metis-0953 — argus a, круг 2\nHead: 6d6d6d6\nВердикт: принять\n")]
+             ("review-123-a2.md", "# Ревью metis-0953 — argus a, круг 2\nHead: 6d6d6d6\nВердикт: принять\n"),
+             # узкий повтор (ревью #118 b, п. 3): «прошлый head» из поручения стоит раньше проверенного «Head:»
+             ("review-124-a.md", "# Ревью metis-0954 — argus a\nHead: aaaaaa1\nВердикт: вернуть\n"),
+             ("review-124-a2.md", "# Ревью metis-0954 — argus a, узкий\nУзкий повтор: прошлый head aaaaaa1. "
+                                  "Head: bbbbbb2\nВердикт: вернуть\n"),
+             ("review-124-a3.md", "# Ревью metis-0954 — argus a, круг 3\nHead: ccccc3c\nВердикт: принять\n")]
     for i, (name, text) in enumerate(files):
         f = os.path.join(d, name)
         with open(f, "w", encoding="utf-8") as fh:
@@ -367,8 +372,12 @@ def argus_sha():
     reviews = M.review_files(tmp)
     got_shas = sorted(((tuple(x) + (None,))[3] or "-") for x in reviews)  # до metis-0393 SHA в записи не было
     check("SHA из шапки: Head: <sha>, Head <sha>, конец дельты A..<sha>, «на <sha>» в заголовке; без SHA — None",
-          got_shas == sorted([h1[:7], h1[:7], h2, "0f0e0d0", "-", "3eb43c1", "5c5c5c5", "5c5c5c5", "6d6d6d6"]),
+          got_shas == sorted([h1[:7], h1[:7], h2, "0f0e0d0", "-", "3eb43c1", "5c5c5c5", "5c5c5c5", "6d6d6d6",
+                              "aaaaaa1", "bbbbbb2", "ccccc3c"]),
           got_shas)
+    got = M.argus_info("metis-0954", "", [], reviews, None)
+    check("узкий повтор: «прошлый head <sha>» из поручения — не SHA круга, берётся «Head:» после него — 3 круга",
+          got == {"rounds": 3, "first_pass": False, "rejects": 2}, got)
     got = M.argus_info("metis-0953", "", [], reviews, None)
     check("два argus на один head, оба «вернуть», затем «принять» на новом — 2 круга, а не 3 файла",
           got == {"rounds": 2, "first_pass": False, "rejects": 1}, got)
