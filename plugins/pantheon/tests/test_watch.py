@@ -345,7 +345,7 @@ def test_autostart_cycle_alert_0248():
 
 
 def test_autostart_shared_touches_other_direction_0248():
-    """Общие файлы с идущей у другого направления задачей (и «неизвестно» у обеих) → вторая не стартует; соседние
+    """Общие файлы с идущей у другого направления задачей → вторая не стартует (пустой touches не блокирует); соседние
     папки — стартует."""
     for mine, theirs, goes in ((["plugins/pantheon/lib/watch.py"], ["plugins/pantheon/"], False),
                                ([], [], True), (["plugins/pantheon/"], ["plugins/guard/"], True)):

@@ -432,7 +432,7 @@ def check_head(head):
     if head.get("mode") is not None and head.get("mode") not in MODES:
         errs.append(f"mode «{head.get('mode')}» — не из {', '.join(MODES)}")
     if head.get("mode") == "parallel" and not head.get("touches"):
-        warns.append("mode parallel без touches — области неизвестны, параллельно самозапуск её не отдаст")
+        warns.append("mode parallel без touches — области неизвестны, самозапуск не проверит пересечение файлов с идущими задачами")
     if t == "task":
         if not head.get("owner"):  # не ошибка: старые задачи без owner выпали бы с доски
             warns.append("нет owner (кому) — на доске будет координатор направления")
