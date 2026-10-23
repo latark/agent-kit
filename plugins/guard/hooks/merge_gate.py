@@ -35,12 +35,16 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    Незаменённый шаблон «<ID>» в ran — отказ ещё до записи.
    Перенос (metis-0384, carried/same_change): записи tests и вердикты argus с прошлого head этого PR засчитываются на
    новом, если разница — только поле version в plugins/*/.claude-plugin/plugin.json и подтянутая база PR (baseRefOid):
-   дерево нового head = git merge-tree прошлого head с базой, plugin.json сверяется по полям без version. Прошлых head
-   с вердиктами больше CARRY_MAX — не переносится ничего. Иначе — не переносятся, причина в отказе. talos не
-   переносится; reject переносится, как и accept.
-   Номер версии (metis-0384, version_problem) — при любом слиянии, с переносом и без: у каждого плагина с правками в
-   git diff merge-base(head, baseRefOid)..head (любой файл plugins/<имя>/) version на head больше, чем на базе PR,
-   кортежем чисел; коммита нет в git папки, где есть plugins/ — отказ «сделай git fetch».
+   дерево нового head = git merge-tree прошлого head с базой, plugin.json сверяется по полям без version. Только вне
+   ядра: PR задевает CORE_DIR или CORE_FILES — не переносится ничего (решение владельца 24.10). Перенос — по цепочке
+   от последнего head с вердиктом: кандидат переходит, если до нового head или до уже перенесённого кандидата — только
+   номер версии и подтянутая база. Прошлых head с вердиктами больше CARRY_MAX — не переносится ничего. Иначе — не
+   переносятся, причина в отказе. talos не переносится; reject переносится, как и accept.
+   Номер версии (metis-0384, version_problem) — при каждом слиянии через шлюз, с переносом и без, по репозиторию PR,
+   а не по git папки сливающего: файлы PR — gh api pulls/N/files, plugin.json на head и на baseRefOid — gh api graphql.
+   У каждого плагина с правками (любой файл plugins/<имя>/) version на head больше, чем на базе PR, кортежем чисел.
+   Правок plugins/ нет (репозиторий не agent-kit), gh не ответил или нет доступа — проверка пропускается, причина —
+   в stderr хука. pantheon merge (PR ядра) номер версии пока не сверяет — metis-0396.
    Последним во всех режимах — проверки GitHub (metis-0297), один gh pr view на Д3 и проверки: PR на этом SHA, rollup зелёный;
    красная или идущая проверка, нет ответа gh — отказ; проверок нет — пропуск, только если .github/workflows нет ни на
    head, ни на base PR.
@@ -56,6 +60,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import time
 from datetime import datetime
 
@@ -806,10 +811,9 @@ def _pr_view(repo, pr):
     return data if isinstance(data, dict) else None
 
 
-def _core_problem(repo, pr, sha, data):
-    """Д3: PR защит, который задевает ядро, ждёт слияния владельцем. data — ответ _pr_view. Файлы — из REST
-    pulls/N/files (там есть status и previous_filename: переименование ядра не прячет старый путь). Список файлов
-    неполон, PR на другом коммите — тоже отказ."""
+def _pr_files(repo, pr, sha, data):
+    """Файлы PR из REST pulls/N/files (там есть status и previous_filename: переименование не прячет старый путь):
+    (пути, None) или (None, причина). data — ответ _pr_view. Список неполон или PR на другом коммите — причина."""
     count, head = data.get("changedFiles"), data.get("headRefOid")
     files = _gh_json(["api", f"repos/{repo}/pulls/{pr}/files?per_page=100", "--paginate", "--jq", ".[]"])
     paths = None
@@ -821,11 +825,28 @@ def _core_problem(repo, pr, sha, data):
                 paths.append(f.get("previous_filename"))
     if paths is None or not all(isinstance(p, str) for p in paths) or not isinstance(count, int) \
             or isinstance(count, bool) or len(files) != count:
-        return f"{MERGE_CORE}: список файлов PR не получен или неполон, ядро не проверить"
+        return None, FILES_NONE
     if not isinstance(head, str) or head.lower() != sha:
-        return f"{MERGE_CORE}: PR сейчас на другом коммите ({head}), а не на {sha}"
+        return None, f"PR сейчас на другом коммите ({head}), а не на {sha}"
+    return paths, None
+
+
+FILES_NONE = "список файлов PR не получен или неполон"
+
+
+def _core_hit(paths):
+    """Пути ядра среди путей PR (CORE_DIR и CORE_FILES, casefold)."""
     core = {c.casefold() for c in CORE_FILES}
-    hit = [p for p in paths if _is_core(p, core)]
+    return [p for p in paths if _is_core(p, core)]
+
+
+def _core_problem(repo, pr, sha, data, files=None):
+    """Д3: PR защит, который задевает ядро, ждёт слияния владельцем. data — ответ _pr_view, files — готовый ответ
+    _pr_files (иначе он зовётся здесь). Список файлов неполон, PR на другом коммите — тоже отказ."""
+    paths, why = files if files is not None else _pr_files(repo, pr, sha, data)
+    if why:
+        return f"{MERGE_CORE}: {why}" + (", ядро не проверить" if why == FILES_NONE else "")
+    hit = _core_hit(paths)
     if hit:
         return f"{MERGE_CORE_HIT}{', '.join(hit)}"
     return None
@@ -964,11 +985,12 @@ def _who(rec):
 # Номер версии плагина поднимает выпуск при слиянии (plugins/pantheon/scripts/release.py), а не каждый PR: иначе
 # соседние PR конфликтуют в plugin.json, и после каждого слияния у них новый head и новый круг ревью. Записи tests и
 # вердикты argus (accept и reject) с прошлого head PR действуют и на новом, если новый head — прошлый плюс только
-# номер версии в plugins/<плагин>/.claude-plugin/plugin.json и подтянутая база PR без своих правок. Отдельно и при
-# любом слиянии (version_problem): у каждого плагина с правками в PR version на head больше, чем на базе PR (иначе
-# соседний PR, слитый раньше с тем же номером, оставил бы на main код без нового номера — claude plugin update его
-# не поставит). Сверка — по объектам git папки сливающего (SHA сверяет сам
-# git, подмены git replace выключены — _git_env), база — baseRefOid из gh pr view, а не ветка из локальных ссылок.
+# номер версии в plugins/<плагин>/.claude-plugin/plugin.json и подтянутая база PR без своих правок, и PR не задевает
+# ядро. Сверка переноса — по объектам git папки сливающего (SHA сверяет сам git, подмены git replace выключены —
+# _git_env), база — baseRefOid из gh pr view, а не ветка из локальных ссылок. Отдельно, при каждом слиянии через шлюз
+# (version_problem): у каждого плагина с правками в PR version на head больше, чем на базе PR (иначе соседний PR,
+# слитый раньше с тем же номером, оставил бы на main код без нового номера — claude plugin update его не поставит).
+# Её сверка — по репозиторию PR через gh, а не по git папки: из папки agent-kit сливают и PR соседних репозиториев.
 # Запись talos не переносится: подтянутая база меняет живое приложение.
 VERSION_FILE = re.compile(r"plugins/[^/]+/\.claude-plugin/plugin\.json")
 CARRY_MAX = 10  # сколько прошлых head PR сверять (на каждый — десяток вызовов git); больше — не переносится ничего
@@ -1024,6 +1046,7 @@ def same_change(d, prev, sha, base):
     """Новый head sha — прошлый head prev плюс только номер версии и подтянутая база PR без своих правок? None — да,
     иначе текст, почему нет. Ожидаемое дерево — слияние prev с mi = merge-base(sha, base), последним подтянутым
     коммитом базы (git merge-tree); от него новый head может отличаться только полем version в VERSION_FILE.
+    Само значение version здесь не сверяется: это делает version_problem при каждом слиянии.
     Сторонний merge-драйвер в настройках git папки ниже модели угроз: guard ловит ошибку агента, а не обход."""
     got = _git_rc(d, "merge-base", "--is-ancestor", prev, sha)
     if got is None or got[0] not in (0, 1):
@@ -1055,7 +1078,7 @@ def same_change(d, prev, sha, base):
         merged = _merge3(*want)
         if merged is None or {k: v for k, v in new.items() if k != "version"} != merged:
             return f"в {path} изменено не только поле version"
-    return version_problem(d, sha, base)  # номер версии — у каждого плагина с правками, не только из этой разницы
+    return None  # номер версии сверяет version_problem в gate_problem — по репозиторию PR, при каждом слиянии шлюзом
 
 
 def _vkey(v):
@@ -1065,68 +1088,99 @@ def _vkey(v):
 
 
 PLUGIN_DIR = re.compile(r"plugins/([^/]+)/")
-MANIFEST_IN = re.compile(r"[^/]+/\.claude-plugin/plugin\.json")  # путь внутри папки plugins
+_BAD = object()  # ответ _gh_blobs: по пути не файл или текст не полностью
 
 
-def _plugins_at(d, rev):
-    """Имена плагинов с plugins/<имя>/.claude-plugin/plugin.json на коммите rev (пусто — папки plugins нет или rev не
-    коммит); None — git не ответил вовремя."""
-    got = _git_rc(d, "ls-tree", "-r", "--name-only", "-z", f"{rev}:plugins")
-    if got is None:
+def _gh_blobs(repo, sha, base, paths):
+    """Тексты файлов paths на коммитах sha и base репозитория repo одним запросом gh api graphql (переменные — полями
+    -f, без подстановки в текст запроса): {(rev, path): текст | None — файла нет | _BAD}; None — сбой gh, нет доступа
+    к репозиторию или коммита sha или base на GitHub нет (object по несуществующему коммиту тоже null)."""
+    owner, _, name = repo.partition("/")
+    decl, fields = ["$o: String!", "$n: String!", "$hc: String!", "$bc: String!"], \
+        ["hc: object(expression: $hc) { oid }", "bc: object(expression: $bc) { oid }"]
+    args = ["api", "graphql", "-f", f"o={owner}", "-f", f"n={name}", "-f", f"hc={sha}", "-f", f"bc={base}"]
+    keys = [(rev, path) for path in paths for rev in (sha, base)]
+    for i, (rev, path) in enumerate(keys):
+        decl.append(f"$e{i}: String!")
+        fields.append(f"f{i}: object(expression: $e{i}) {{ ... on Blob {{ text isTruncated }} }}")
+        args += ["-f", f"e{i}={rev}:{path}"]
+    query = f"query({', '.join(decl)}) {{ repository(owner: $o, name: $n) {{ {' '.join(fields)} }} }}"
+    got = _gh_json(args + ["-f", f"query={query}"])
+    data = got[0].get("data") if isinstance(got, list) and len(got) == 1 and isinstance(got[0], dict) else None
+    data = data.get("repository") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
         return None
-    return {p.split("/")[0] for p in got[1].split("\0") if MANIFEST_IN.fullmatch(p)} if got[0] == 0 else set()
+    for alias, rev in (("hc", sha), ("bc", base)):
+        obj = data.get(alias)
+        if not isinstance(obj, dict) or not isinstance(obj.get("oid"), str) or obj["oid"].lower() != rev:
+            return None
+    out = {}
+    for i, key in enumerate(keys):
+        obj = data.get(f"f{i}", _BAD)
+        out[key] = None if obj is None else obj["text"] if isinstance(obj, dict) and isinstance(obj.get("text"), str) \
+            and obj.get("isTruncated") is False else _BAD
+    return out
 
 
-def version_problem(d, sha, base):
-    """Новый код плагинов уходит в базу PR с новым номером версии? None — да или плагинов с правками нет; иначе причина.
-    Плагины с правками — любой файл plugins/<имя>/ в git diff merge-base(sha, base)..sha (ровно это слияние приносит в
-    базу; plugin.json, где изменён только version, — тоже правка), у которых plugin.json есть на sha. У каждого version
-    на sha больше, чем на базе PR, — кортежем чисел (0.11.10 > 0.11.9); плагина нет на базе — номер ставит сам PR.
-    Сверка не ограничена plugin.json из разницы с прошлым head: выпущенный head, подтянувший main с тем же номером
+def version_problem(repo, sha, base, files, blobs=None):
+    """Номер версии плагинов с правками в PR — по репозиторию PR (gh), а не по git папки сливающего: (отказ, пропуск).
+    Отказ — текст или None; пропуск — почему номер не сверен (без отказа), или None. files — ответ _pr_files
+    (pulls/N/files: ровно то, что слияние приносит в базу, с previous_filename). Плагины с правками — любой путь
+    plugins/<имя>/ из files; у каждого, чей plugin.json есть на sha, version на sha больше, чем на базе PR (baseRefOid),
+    кортежем чисел (0.11.10 > 0.11.9); плагина нет на базе — номер ставит сам PR (release.py так же), нет на sha —
+    плагин удалён. Сверка не ограничена plugin.json из разницы: выпущенный head, подтянувший main с тем же номером
     без повтора release.py, оставил бы на main свой код со старым номером — claude plugin update его не поставит.
-    Коммита sha нет в git папки — отказ, только если в её HEAD есть плагины: репозитории без plugins/ не задеты."""
-    if not d:
-        return None
-    top = (_git(d, "rev-parse", "--show-toplevel") or "").strip()
-    if not top:
-        return None  # папка не в git: плагинов, чей номер сверять, у неё нет
-    known = _git_rc(top, "cat-file", "-e", f"{sha}^{{commit}}")
-    here = _plugins_at(top, sha if known is not None and known[0] == 0 else "HEAD") if known is not None else None
-    if here is None:
-        return "git не ответил — номер версии плагинов не сверить"
-    if not here:
-        return None
-    if known[0] != 0:
-        return f"коммита {sha[:12]} нет в git этой папки — номер версии плагинов не сверить, сделай git fetch"
+    Пропуск (решение владельца 24.10, metis-0384): в PR нет plugins/<имя>/ (репозиторий не agent-kit), список файлов
+    или база PR от gh не получены, gh api graphql не ответил (нет доступа, коммита нет на GitHub). blobs — для тестов."""
+    paths, why = files
+    if why:
+        return None, f"{why} — номер версии плагинов не сверен"
+    names = sorted({m.group(1) for m in (PLUGIN_DIR.match(p) for p in paths) if m})
+    if not names:
+        return None, "в PR нет правок plugins/<имя>/ (репозиторий не agent-kit) — номер версии не сверяется"
     if not isinstance(base, str) or not SHA_RE.fullmatch(base.lower()):
-        return "база PR (baseRefOid) от gh не получена — номер версии плагинов не сверить"
+        return None, "база PR (baseRefOid) от gh не получена — номер версии плагинов не сверен"
     base = base.lower()
-    mb = (_git(top, "merge-base", sha, base) or "").strip()
-    if not SHA_RE.fullmatch(mb):
-        return "база PR не найдена в git этой папки — сделай git fetch"
-    out = _git(top, "diff-tree", "-r", "--name-only", "--no-renames", "-z", mb, sha)
-    if out is None:
-        return "git diff-tree не ответил"
-    for name in sorted({m.group(1) for m in (PLUGIN_DIR.match(p) for p in out.split("\0")) if m} & here):
-        path = f"plugins/{name}/.claude-plugin/plugin.json"
-        new, old = _json_at(top, sha, path), _json_at(top, base, path)
-        if old == {}:
-            continue  # нового плагина нет на базе PR: номер ставит сам PR (release.py так же)
-        if not new or old is None or not isinstance(new.get("version"), str) \
+    manifests = [f"plugins/{name}/.claude-plugin/plugin.json" for name in names]
+    texts = (blobs or _gh_blobs)(repo, sha, base, manifests)
+    if texts is None:
+        return None, f"gh api graphql по {repo} не ответил — номер версии плагинов не сверен"
+    for name, path in zip(names, manifests):
+        raw_new, raw_old = texts.get((sha, path), _BAD), texts.get((base, path), _BAD)
+        if raw_new is None or (raw_old is None and raw_new is not _BAD):
+            continue  # плагина нет на head (удалён, или в plugins/<имя>/ нет plugin.json) или нет на базе (новый)
+        new, old = (_json_obj(x) for x in (raw_new, raw_old))
+        if new is None or old is None or not isinstance(new.get("version"), str) \
                 or not isinstance(old.get("version"), str):
-            return f"{path} не разобрать как plugin.json (на новом head или на базе PR)"
+            return f"{path} не разобрать как plugin.json (на новом head или на базе PR)", None
         nv, bv = _vkey(new["version"]), _vkey(old["version"])
         if nv is None or bv is None:
-            return f"в {path} version не разобрать ({new['version']!r}, на базе PR {old['version']!r})"
+            return f"в {path} version не разобрать ({new['version']!r}, на базе PR {old['version']!r})", None
         if nv <= bv:
             return (f"в {path} version {new['version']} не больше, чем на базе PR ({old['version']}), а в PR есть "
-                    f"правки плагина {name}: соседний PR слит с тем же номером — повтори release.py")
-    return None
+                    f"правки плагина {name}: соседний PR слит с тем же номером — повтори release.py"), None
+    return None, None
 
 
-def carried(d, repo, pr, sha, records, pr_view):
-    """Прошлые head PR, чьи записи переходят на sha (same_change), и причины отказа для остальных. Кандидаты — SHA с
-    вердиктами argus на этот PR; pr_view() — ответ gh pr view (для базы PR), зовётся, только если кандидаты есть."""
+def _json_obj(raw):
+    """Текст plugin.json → словарь; None — не JSON-объект или _BAD."""
+    if not isinstance(raw, str):
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def carried(d, repo, pr, sha, records, pr_view, pr_files):
+    """Прошлые head PR, чьи записи переходят на sha, и причины отказа для остальных. Кандидаты — SHA с вердиктами argus
+    на этот PR; pr_view() и pr_files() — ответы gh pr view и _pr_files, зовутся, только если кандидаты есть.
+    Только вне ядра (решение владельца 24.10): PR задевает CORE_DIR или CORE_FILES — не переносится ничего.
+    Перенос — от последнего head с вердиктом: кандидаты-предки sha по числу коммитов, от нового к старому; кандидат
+    переходит, если от него до sha (same_change) или до последнего перенесённого кандидата — только номер версии и
+    подтянутая база. Так «вернуть» с R не теряется, когда R → A и A → sha чистые, а R → sha — нет (merge-tree по
+    переименованному в базе файлу, проба p6 argus-117b3)."""
     prevs = []
     for r in records:
         if r["kind"] in ("accept", "reject") and r["by"].get("agent_type") == "argus" and r["pr"] == pr \
@@ -1141,13 +1195,33 @@ def carried(d, repo, pr, sha, records, pr_view):
     base = view.get("baseRefOid") if isinstance(view, dict) else None
     if not isinstance(base, str) or not SHA_RE.fullmatch(base.lower()):
         return set(), ["база PR (baseRefOid) от gh не получена"]
-    same, whys = set(), []
+    paths, why = pr_files()
+    if why:
+        return set(), [f"{why} — ядро не проверить, записи не переносятся"]
+    hit = _core_hit(paths)
+    if hit:
+        return set(), [f"PR задевает ядро ({', '.join(hit)}) — на ядре записи не переносятся, нужны записи на этом "
+                       "head"]
+    whys, order = [], []
     for p in prevs:
+        got = _git_rc(d, "merge-base", "--is-ancestor", p, sha)
+        count = _git(d, "rev-list", "--count", p) if got is not None and got[0] == 0 else None
+        if got is not None and got[0] == 1:
+            whys.append(f"{p[:12]} — прошлый head не предок нового (история переписана)")
+        elif count is None or not count.strip().isdigit():
+            whys.append(f"{p[:12]} — коммитов нет в git этой папки — сделай git fetch")
+        else:
+            order.append((-int(count.strip()), p))
+    same, last = set(), None
+    for _n, p in sorted(order):  # от нового head к старому: потомок длиннее предка по числу коммитов
         why = same_change(d, p, sha, base.lower())
+        if why and last is not None and same_change(d, p, last, base.lower()) is None:
+            why = None  # p → last → … → sha: только номер версии и подтянутая база по цепочке
         if why:
             whys.append(f"{p[:12]} — {why}")
         else:
             same.add(p)
+            last = p
     return same, whys
 
 
@@ -1185,7 +1259,16 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
             view_box.append(_pr_view(repo, pr))
         return view_box[0]
 
-    same, carry_why = carried(cwd, repo, pr, sha, records, pr_view)
+    files_box = []
+
+    def pr_files():  # один список файлов PR на шлюз: для переноса (ядро), номера версии и Д3
+        if not files_box:
+            view = pr_view()
+            files_box.append(_pr_files(repo, pr, sha, view) if view is not None
+                             else (None, f"gh pr view {pr} -R {repo} не ответил"))
+        return files_box[0]
+
+    same, carry_why = carried(cwd, repo, pr, sha, records, pr_view, pr_files)
     shas = {sha} | same  # head и прошлые head PR, чьи записи на него переходят (metis-0384)
     carry_note = (f" Записи с прошлых коммитов PR не перенесены (перенос — только когда новый коммит добавляет "
                   f"номер версии или подтянутую базу без своих правок): {'; '.join(carry_why)}."
@@ -1245,15 +1328,19 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     if view is None:
         return (f"{CI_NONE}: gh pr view {pr} -R {repo} не ответил — без него не сверить ни проверки GitHub, ни "
                 f"файлы PR (ядро), повтори позже. {advice}")
-    why = version_problem(cwd, sha, view.get("baseRefOid"))  # при любом слиянии, а не только при переносе записей
-    if why:
-        return f"{why}. {advice}"
     if protect:
-        why = _core_problem(repo, pr, sha, view)
+        why = _core_problem(repo, pr, sha, view, pr_files())
         # Д3 через Touch ID (metis-0285): палец владельца на этот PR и этот SHA — строка тика в owner-log. Пускает
         # только задетое ядро; сбой gh, неполный список файлов и другой head — отказ и со строкой
         if why and not (why.startswith(MERGE_CORE_HIT) and owner_approved(repo, pr, sha)):
             return f"{why}. {MERGE_PROTECT}"
+    # номер версии — при каждом слиянии через шлюз, по репозиторию PR из gh (а не по git папки сливающего); pantheon
+    # merge (PR ядра) его пока не сверяет — metis-0396
+    why, skipped = version_problem(repo, sha, view.get("baseRefOid"), pr_files())
+    if why:
+        return f"{why}. {advice}"
+    if skipped:
+        sys.stderr.write(f"guard: шлюз слияния {repo}#{pr}: {skipped}\n")
     why = _ci_problem(repo, pr, sha, view)
     if why:
         return f"{why}. {advice}"

@@ -36,6 +36,34 @@ GREEN = [RUN_OK, {"__typename": "StatusContext", "context": "ci/legacy", "state"
 BASE = "c" * 40  # baseRefOid в ответе gh pr view
 
 
+# поддельный gh api graphql (metis-0384): переменные из -f, поля `<alias>: object(expression: $<var>) { oid }` и
+# `{ ... on Blob { text isTruncated } }` — по git папки $HOME/projects/<n>; коммита или файла нет — null, как у GitHub
+GH_GRAPHQL = r"""import json, os, re, subprocess, sys
+a, v = sys.argv[3:], {}
+for i in range(0, len(a) - 1, 2):
+    if a[i] == "-f":
+        k, _, val = a[i + 1].partition("=")
+        v[k] = val
+repo = os.path.join(os.environ["HOME"], "projects", v.get("n", ""))
+if not v.get("n") or not os.path.isdir(repo):
+    print(json.dumps({"data": {"repository": None}, "errors": [{"type": "NOT_FOUND"}]}))
+    sys.exit(1)
+def git(*args):
+    r = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
+    return r.stdout if r.returncode == 0 else None
+out = {}
+for alias, var, kind in re.findall(r"(\w+): object\(expression: \$(\w+)\) \{ (oid|\.\.\. on Blob)", v["query"]):
+    expr = v[var]
+    if kind == "oid":
+        oid = git("rev-parse", "--verify", "-q", expr + "^{commit}")
+        out[alias] = {"oid": oid.strip()} if oid else None
+    else:
+        t = (git("cat-file", "-t", expr) or "").strip()
+        out[alias] = None if not t else {"text": git("cat-file", "-p", expr), "isTruncated": False} if t == "blob" else {}
+print(json.dumps({"data": {"repository": out}}))
+"""
+
+
 def check(name, cond, detail=""):
     results.append(bool(cond))
     print(("ok   " if cond else "FAIL ") + name + ("" if cond else f"  [{detail}]"))
@@ -80,10 +108,19 @@ class Home:
         # поддельный gh: вызовы — в $HOME/gh.log, с $HOME/gh.fail — сбой любого вызова.
         # pr view N -R owner/repo … — $HOME/gh.view.<repo> ($5), с gh.ci.fail — сбой; один вызов на шлюз (metis-0297).
         # api …/contents/.github/workflows?ref=<sha> — с gh.wf.fail.<sha> 502, с gh.wf.<sha> его текст (код 0), иначе 404;
-        # api …/pulls/N/files — $HOME/gh.files, с gh.api.fail — сбой
+        # api …/pulls/N/files — для agent-kit $HOME/gh.files, для другого репозитория $HOME/gh.files.<repo> (нет —
+        # файлов нет), с gh.api.fail — сбой; api graphql — номер версии (metis-0384): gh_graphql.py отвечает по git
+        # папки projects/<repo>, с gh.gql.fail — сбой
+        with open(j("bin/gh_graphql.py"), "w") as fh:
+            fh.write(GH_GRAPHQL)
         with open(j("bin/gh"), "w") as fh:
             fh.write('#!/bin/sh\necho "$@" >> "$HOME/gh.log"\n[ -f "$HOME/gh.fail" ] && exit 1\n'
                      'case "$*" in\n'
+                     '"api graphql "*) [ -f "$HOME/gh.gql.fail" ] && exit 1; '
+                     'exec python3 -I "$HOME/bin/gh_graphql.py" "$@";;\n'
+                     '"api repos/"*"/pulls/"*) [ -f "$HOME/gh.api.fail" ] && exit 1; r="${2#repos/*/}"; r="${r%%/*}"; '
+                     '[ "$r" = agent-kit ] && { cat "$HOME/gh.files"; exit 0; }; '
+                     '[ -f "$HOME/gh.files.$r" ] && cat "$HOME/gh.files.$r"; exit 0;;\n'
                      '"pr view "*) [ -f "$HOME/gh.ci.fail" ] && exit 1; cat "$HOME/gh.view.$(basename "$5")"; exit 0;;\n'
                      '*contents/.github/workflows*) ref="${2##*ref=}"; '
                      '[ -f "$HOME/gh.wf.fail.$ref" ] && { echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1; }; '
@@ -106,7 +143,8 @@ class Home:
         shutil.rmtree(self.j(".local/state/pantheon/merge-gate"), ignore_errors=True)
         shutil.rmtree(self.j(".local/state/pantheon/owner-log"), ignore_errors=True)
         for f in os.listdir(self.root):
-            if f.startswith(("gh.fail", "gh.log", "gh.api.fail", "gh.ci.fail", "gh.wf.", "gh.view.")):
+            if f.startswith(("gh.fail", "gh.log", "gh.api.fail", "gh.ci.fail", "gh.wf.", "gh.view.", "gh.gql.",
+                             "gh.files.")):
                 os.remove(self.j(f))
         open(self.j("ai/pantheon/alerts.md"), "w").close()
         self.view = {name: {"headRefOid": self.sha[name], "baseRefOid": BASE, "changedFiles": 0,
@@ -1081,7 +1119,8 @@ def t_ci(h):
         log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
         check("CI: gh pr view зовётся с -R, номером и statusCheckRollup",
               "pr view 3 -R latark/tg-read --json headRefOid,baseRefOid,changedFiles,statusCheckRollup" in log, log)
-        check("CI: зелёные — один вызов gh, workflows не спрашивает", log.count("\n") == 1, log)
+        check("CI: зелёные — один gh pr view, workflows не спрашивает",
+              log.count("pr view") == 1 and "workflows" not in log, log)
     red = dict(RUN_OK, conclusion="FAILURE")
     h.ci([GREEN[1], red])
     merge_case("CI: красная CheckRun — отказ с именем проверки", h.pre(cmd), False, "check-traces красная: FAILURE")
@@ -1612,12 +1651,31 @@ BAD_CARRY = (("out", "P", "правка вне version", "меняет code.py")
              ("market", "P", "marketplace.json — не номер версии", "меняет .claude-plugin/marketplace.json"),
              ("P", "ver", "назад: прошлый head не предок", "не предок"),
              ("newpj", "P", "новый plugin.json только с version", "добавляет plugins/x/"),
-             ("ver_eq", "P", "version равна version на базе PR", "не больше, чем на базе PR (0.11.85)"),
-             ("ver_low", "P", "version ниже, чем на базе PR", "0.0.1 не больше"),
-             ("ver_int", "P", "version числом, а не строкой", "не разобрать как plugin.json"),
-             ("pulled_same", "rel_same", "выпущенный head подтянул main с тем же номером, plugin.json нет в разнице",
-              "0.11.85 не больше, чем на базе PR (0.11.85), а в PR есть правки плагина pantheon"),
-             ("pulled_same", "Pp", "код плагина и подтянутый main с тем же номером", "не больше, чем на базе PR"))
+             ("ver_int", "P", "version числом, а не строкой", "не разобрать как plugin.json"))
+# перенос по дереву проходит (same_change), а номер версии — отказ (version_problem в шлюзе, по репозиторию PR)
+VERSION_BAD = (("ver_eq", "P", "version равна version на базе PR", "не больше, чем на базе PR (0.11.85)"),
+               ("ver_low", "P", "version ниже, чем на базе PR", "0.0.1 не больше"),
+               ("pulled_same", "rel_same", "выпущенный head подтянул main с тем же номером, plugin.json нет в разнице",
+                "0.11.85 не больше, чем на базе PR (0.11.85), а в PR есть правки плагина pantheon"),
+               ("pulled_same", "Pp", "код плагина и подтянутый main с тем же номером", "не больше, чем на базе PR"))
+
+
+def git_blobs(kit):
+    """_gh_blobs по git папки kit: {(rev, path): текст или None}."""
+    def blobs(repo, sha, base, paths):
+        out = {}
+        for path in paths:
+            for rev in (sha, base):
+                r = subprocess.run(["git", "-C", kit, "show", f"{rev}:{path}"], capture_output=True, text=True)
+                out[(rev, path)] = r.stdout if r.returncode == 0 else None
+        return out
+    return blobs
+
+
+def pr_paths(kit, sha, base):
+    """Файлы PR, как их даёт pulls/N/files: трёхточечная разница base...sha (с переименованием — оба пути)."""
+    out = git(kit, "diff", "--name-status", "-M", f"{base}...{sha}")
+    return [x for ln in out.splitlines() for x in ln.split("\t")[1:]]
 
 
 def t_carry_unit(h):
@@ -1632,15 +1690,25 @@ def t_carry_unit(h):
     for new, old, what, want in BAD_CARRY:
         why = mg.same_change(kit, s[old], s[new], s["M"])
         check(f"перенос: {what} — не переходят ({want})", isinstance(why, str) and want in why, why)
+    vp = mg.version_problem
+
+    def vpk(sha, base, files=None):
+        return vp("latark/agent-kit", sha, base, (pr_paths(kit, sha, base) if files is None and base else files or [], None),
+                  git_blobs(kit))
+    for new, old, what, want in VERSION_BAD:
+        why = mg.same_change(kit, s[old], s[new], s["M"])
+        got = vpk(s[new], s["M"])
+        check(f"перенос: {what} — дерево переходит, номер версии — отказ ({want})",
+              why is None and got[0] and want in got[0] and got[1] is None, (why, got))
     why = mg.same_change(kit, s["P"], "d" * 40, s["M"])
     check("перенос: коммита нет в git папки — не переходят, подсказка git fetch", why and "git fetch" in why, why)
     why = mg.same_change(kit, s["P"], s["merged"], "d" * 40)
     check("перенос: базы PR нет в git папки — не переходят", why and "git fetch" in why, why)
     why = mg.same_change(kit, s["P"], s["merged"], side_base(kit))
     check("перенос: подтянутое — не из базы PR (база старше) — не переходят", why and "меняет" in why, why)
-    why = mg.same_change(kit, s["P"], s["merged_ver"], s["M2"])
-    check("перенос: гонка — сосед слит раньше с тем же номером, на базе PR уже 0.11.86 — не переходят",
-          why and "не больше, чем на базе PR (0.11.86)" in why and "release.py" in why, why)
+    got = vpk(s["merged_ver"], s["M2"])
+    check("версия: гонка — сосед слит раньше с тем же номером, на базе PR уже 0.11.86 — отказ",
+          got[0] and "не больше, чем на базе PR (0.11.86)" in got[0] and "release.py" in got[0], got)
     why = mg.same_change(kit, s["P"], s["rerelease"], s["M2"])
     check("перенос: гонка — повтор release.py (0.11.87 и подтянутый M2) — переходят", why is None, why)
     why = mg.same_change(kit, s["Pd"], s["moddel"], s["Md"])
@@ -1661,65 +1729,80 @@ def t_carry_unit(h):
     def view(base=s["M"]):
         calls.append(1)
         return {"baseRefOid": base}
-    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], recs, view)
+
+    def files():
+        return ["README.md", "code.py", PJ], None
+    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], recs, view, files)
     check("carried: P переходит, field — нет; чужой PR и не argus — не кандидаты",
           same == {s["P"]} and len(whys) == 1 and whys[0].startswith(s["field"][:12]), (same, whys))
     calls.clear()
-    same, whys = mg.carried(kit, "latark/agent-kit", 9, s["merged_ver"], recs, view)
+    same, whys = mg.carried(kit, "latark/agent-kit", 9, s["merged_ver"], recs, view, files)
     check("carried: вердиктов на этот PR нет — gh pr view не зовётся", same == set() and not whys and not calls,
           (same, whys, calls))
     many = [rec("accept", "latark/agent-kit", 7, c * 40) for c in "0123456789a"] + \
         [rec("accept", "latark/agent-kit", 7, s["P"])]
-    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], many, view)
+    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], many, view, files)
     check(f"carried: кандидатов больше {mg.CARRY_MAX} — не переносится ничего, причина в отказе",
           same == set() and len(whys) == 1 and f"больше {mg.CARRY_MAX}" in whys[0], (same, whys))
     # argus-117b2: «вернуть» на старом head не теряется обрезкой — reject a2 на P, accept a3 на merged, 9 других head
     many = [rec("accept", "latark/agent-kit", 7, s["P"]), rec("reject", "latark/agent-kit", 7, s["P"], agent_id="a2"),
             rec("accept", "latark/agent-kit", 7, s["merged"], agent_id="a3")] + \
         [rec("accept", "latark/agent-kit", 7, c * 40) for c in "123456789"]
-    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], many, view)
+    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], many, view, files)
     check("carried: 12 кандидатов, «вернуть» на старом head — не переходит ни один (и head с «принять»)",
           same == set(), (same, whys))
-    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], many[:3], view)
+    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], many[:3], view, files)
     check("carried: 3 кандидата — P с «вернуть» и merged переходят оба", same == {s["P"], s["merged"]}, (same, whys))
     check("_merge3: поле null — значение, а не конфликт (argus-117a2)",
           mg._merge3({"a": 1}, {"a": 1, "homepage": None}, {"a": 1}) == {"a": 1, "homepage": None}
           and mg._merge3({"a": 1}, {"a": 2}, {"a": 3}) is None)
-    # номер версии у каждого плагина с правками — при любом слиянии (version_problem)
-    vp = mg.version_problem
-    why = vp(kit, s["rel_same"], s["M"])
+    # номер версии у каждого плагина с правками — по репозиторию PR (gh), при каждом слиянии шлюзом (version_problem)
+    why, skip = vpk(s["rel_same"], s["M"])
     check("версия: выпущенный head без подтянутого main, сосед слит с тем же номером — отказ",
           why and "0.11.85 не больше, чем на базе PR (0.11.85)" in why and "release.py" in why, why)
-    check("версия: подтянутый main и повтор release.py — можно", vp(kit, s["pulled_rel"], s["M"]) is None,
-          vp(kit, s["pulled_rel"], s["M"]))
-    why = vp(kit, s["Pp"], s["B"])
+    check("версия: подтянутый main и повтор release.py — можно", vpk(s["pulled_rel"], s["M"]) == (None, None),
+          vpk(s["pulled_rel"], s["M"]))
+    why, skip = vpk(s["Pp"], s["B"])
     check("версия: код плагина без нового номера — отказ", why and "0.11.84 не больше" in why, why)
-    check("версия: правок в plugins/ нет — можно", vp(kit, s["P"], s["M"]) is None, vp(kit, s["P"], s["M"]))
-    check("версия: новый плагин, на базе его нет — можно", vp(kit, s["newpj"], s["M"]) is None,
-          vp(kit, s["newpj"], s["M"]))
-    why = vp(kit, s["ten"], s["M9"])
-    check("версия: 0.11.10 после 0.11.9 — больше по числам, можно", why is None, why)
+    why, skip = vpk(s["P"], s["M"])
+    check("версия: правок в plugins/ нет (репозиторий не agent-kit) — пропуск с причиной, без отказа",
+          why is None and skip and "не agent-kit" in skip, (why, skip))
+    check("версия: новый плагин, на базе его нет — можно", vpk(s["newpj"], s["M"]) == (None, None),
+          vpk(s["newpj"], s["M"]))
+    check("версия: 0.11.10 после 0.11.9 — больше по числам, можно", vpk(s["ten"], s["M9"]) == (None, None),
+          vpk(s["ten"], s["M9"]))
     why = mg.same_change(kit, s["Pp"], s["ten"], s["M9"])
     check("перенос: 0.11.10 после 0.11.9 — записи переходят", why is None, why)
-    why = vp(kit, s["rel_same"], None)
-    check("версия: baseRefOid нет — отказ", why and "baseRefOid" in why, why)
-    check("версия: папки нет — не сверяется", vp("", s["rel_same"], s["M"]) is None)
-    check("версия: коммита нет, в папке нет plugins/ — не сверяется", vp(kit, "d" * 40, s["M"]) is None,
-          vp(kit, "d" * 40, s["M"]))
-    git(kit, "checkout", "-q", "t-base")
-    try:
-        why = vp(kit, "d" * 40, s["M"])
-    finally:
-        git(kit, "checkout", "-q", "main")
-    check("версия: коммита нет, в папке есть plugins/ — отказ, подсказка git fetch",
-          why and "коммита dddddddddddd нет" in why and "git fetch" in why, why)
-    check("версия: PR удалил плагин целиком — его номер не сверяется", vp(kit, s["drop"], s["M"]) is None,
-          vp(kit, s["drop"], s["M"]))
-    why = vp(kit, s["rel_same"], "e" * 40)
-    check("версия: базы PR нет в git — отказ, подсказка git fetch", why and "git fetch" in why, why)
-    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], recs, lambda: None)
+    why, skip = vpk(s["rel_same"], None, [PJ])
+    check("версия: baseRefOid нет — пропуск с причиной", why is None and skip and "baseRefOid" in skip, (why, skip))
+    why, skip = vp("latark/agent-kit", s["rel_same"], s["M"], (None, mg.FILES_NONE), git_blobs(kit))
+    check("версия: список файлов PR от gh не получен — пропуск с причиной",
+          why is None and skip and mg.FILES_NONE in skip, (why, skip))
+    why, skip = vp("latark/agent-kit", s["rel_same"], s["M"], ([PJ], None), lambda *a: None)
+    check("версия: gh api graphql не ответил (нет доступа) — пропуск с причиной",
+          why is None and skip and "graphql" in skip, (why, skip))
+    check("версия: PR удалил плагин целиком — его номер не сверяется", vpk(s["drop"], s["M"]) == (None, None),
+          vpk(s["drop"], s["M"]))
+    bad = git_blobs(kit)
+
+    def bad_base(repo, sha, base, paths):
+        out = bad(repo, sha, base, paths)
+        out[(base, paths[0])] = "{не json"
+        return out
+    why, skip = vp("latark/agent-kit", s["Pp"], s["B"], ([PJ], None), bad_base)
+    check("версия: plugin.json на базе PR не JSON — отказ, а не пропуск (argus-117a3 №4)",
+          why and "не разобрать как plugin.json" in why, (why, skip))
+
+    def bad_kind(repo, sha, base, paths):
+        out = bad(repo, sha, base, paths)
+        out[(sha, paths[0])] = mg._BAD
+        return out
+    why, skip = vp("latark/agent-kit", s["Pp"], s["B"], ([PJ], None), bad_kind)
+    check("версия: по пути plugin.json на head не файл или текст обрезан — отказ", why and "не разобрать" in why,
+          (why, skip))
+    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], recs, lambda: None, files)
     check("carried: gh pr view не ответил — не переходят", same == set() and whys and "baseRefOid" in whys[0], whys)
-    same, whys = mg.carried("", "latark/agent-kit", 7, s["merged_ver"], recs, view)
+    same, whys = mg.carried("", "latark/agent-kit", 7, s["merged_ver"], recs, view, files)
     check("carried: папки нет — не переходят", same == set(), (same, whys))
 
 
@@ -1736,12 +1819,18 @@ def t_carry_gate(h):
     h.view["agent-kit"]["baseRefOid"] = s["M"]
 
     def merge_at(new):
-        h.gh(["README.md", "plugins/pantheon/lib/pantheon.py", PJ], head=s[new])
+        # файлы PR — как у GitHub: трёхточечная разница с базой PR
+        h.gh(pr_paths(kit, s[new], h.view["agent-kit"]["baseRefOid"]) or ["README.md"], head=s[new])
         return h.pre(f"gh pr merge 7 --match-head-commit {s[new]}", pdir=cwd)
 
     h.seed(rec("tests", "latark/agent-kit", None, s["P"], "dev-opus"), rec("accept", "latark/agent-kit", 7, s["P"]))
-    for new, _old, what in GOOD_CARRY[:3]:
+    for new, _old, what in GOOD_CARRY[1:3]:
         merge_case(f"шлюз: записи с P на head «{what}» — проходит", merge_at(new), True)
+    # решение владельца 24.10 п.2: на ядре перенос не делается — выпуск поднял и guard (plugins/guard/ — ядро)
+    got = merge_at("ver")
+    merge_case("шлюз: номер версии guard (ядро) — записи с P не переходят, отказ «нет записи тестов»", got, False,
+               "нет записи тестов")
+    merge_case("шлюз: на ядре — причина «на ядре записи не переносятся»", got, False, "на ядре записи не переносятся")
     for new, _old, what, want in BAD_CARRY[:5]:
         got = merge_at(new)
         merge_case(f"шлюз: {what} — отказ «нет записи тестов»", got, False, "нет записи тестов")
@@ -1763,7 +1852,7 @@ def t_carry_gate(h):
     h.view["agent-kit"]["baseRefOid"] = side_base(kit)
     h.seed(rec("tests", "latark/agent-kit", None, s["P"], "dev-opus"), rec("accept", "latark/agent-kit", 7, s["P"]))
     merge_case("шлюз: подтянутое не из базы PR по gh — отказ", merge_at("merged"), False, "не перенесены")
-    # argus-117b2: номер версии — при любом слиянии, и когда записи стоят прямо на head (без переноса)
+    # argus-117b2: номер версии — при каждом слиянии шлюзом, и когда записи стоят прямо на head (без переноса)
     h.reset()
     h.view["agent-kit"]["baseRefOid"] = s["M"]
     h.seed(rec("tests", "latark/agent-kit", None, s["rel_same"], "dev-opus"),
@@ -1795,12 +1884,131 @@ def t_carry_product(h):
                True)
 
 
+def chain_history(p):
+    """Проба p6 argus-117b3: R правит строку 1 plugins/pantheon/lib/g.py; main_old переименовал g.py в h.py, PR подтянул
+    его чисто (A); main_new переписал конец h.py и дописал много строк (сходство с g.py базы меньше 50 %), PR подтянул и
+    выпустил 0.11.85 (N). R → A и A → N — только подтянутая база (и номер версии), а R → N — нет: merge-tree(R, main_new)
+    не видит переименования и даёт конфликт modify/delete."""
+    def put(files, msg):
+        for rel, text in files.items():
+            f = os.path.join(p, rel)
+            if text is None:
+                os.remove(f)
+                continue
+            os.makedirs(os.path.dirname(f), exist_ok=True)
+            with open(f, "w") as fh:
+                fh.write(text)
+        git(p, "add", "-A")
+        git(p, "commit", "-q", "-m", msg)
+        return git(p, "rev-parse", "HEAD")
+
+    g, h_ = "plugins/pantheon/lib/g.py", "plugins/pantheon/lib/h.py"
+    lines = [f"l{i} = {i}\n" for i in range(1, 11)]
+    s = {}
+    git(p, "checkout", "-q", "-B", "c-base", "main")
+    s["B"] = put({PJ: _manifest("pantheon", "0.11.84"), g: "".join(lines)}, "B")
+    git(p, "checkout", "-q", "-B", "c-old", s["B"])
+    s["main_old"] = put({g: None, h_: "".join(lines)}, "main: g.py → h.py")
+    s["main_new"] = put({h_: "".join(lines[:4]) + "".join(f"m{i} = {i} * 7  # переписано\n" for i in range(40))},
+                        "main: h.py переписан")
+    git(p, "checkout", "-q", "-B", "c-pr", s["B"])
+    s["R"] = put({g: "l1 = 100\n" + "".join(lines[1:])}, "PR: строка 1 g.py")
+    git(p, "merge", "-q", "--no-edit", "--no-ff", s["main_old"])
+    s["A"] = git(p, "rev-parse", "HEAD")
+    git(p, "merge", "-q", "--no-edit", "--no-ff", s["main_new"])
+    s["N"] = put({PJ: _manifest("pantheon", "0.11.85")}, "выпуск")
+    git(p, "checkout", "-q", "main")
+    return s
+
+
+def t_carry_chain(h):
+    """metis-0384, решение владельца 24.10 п.3: перенос — от последнего head с вердиктом по цепочке; «вернуть» с R
+    не теряется, когда R → A и A → N — только подтянутая база, а R → N напрямую не сверяется (проба p6 argus-117b3)."""
+    kit, cwd = h.j("projects/agent-kit"), "projects/agent-kit"
+    s = chain_history(kit)
+    mg = _load_merge_gate("merge_gate_chain")
+    why = mg.same_change(kit, s["R"], s["N"], s["main_new"])
+    check("цепочка: R → N напрямую не сверяется (условие пробы p6)", isinstance(why, str), why)
+    check("цепочка: R → A и A → N — только подтянутая база",
+          mg.same_change(kit, s["R"], s["A"], s["main_new"]) is None
+          and mg.same_change(kit, s["A"], s["N"], s["main_new"]) is None)
+    recs = [rec("tests", "latark/agent-kit", None, s["R"], "dev-opus"), rec("accept", "latark/agent-kit", 7, s["R"]),
+            rec("reject", "latark/agent-kit", 7, s["R"], agent_id="argus2"),
+            rec("tests", "latark/agent-kit", None, s["A"], "dev-opus"),
+            rec("accept", "latark/agent-kit", 7, s["A"], agent_id="argus3")]
+    for r in recs:
+        r["repo"] = [x.lower() for x in r["repo"]]
+    files = pr_paths(kit, s["N"], s["main_new"])
+    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["N"], recs, lambda: {"baseRefOid": s["main_new"]},
+                            lambda: (files, None))
+    check("цепочка: на N переходят записи A и R", same == {s["A"], s["R"]}, (same, whys))
+    h.view["agent-kit"]["baseRefOid"] = s["main_new"]
+    h.gh(files, head=s["N"])
+    h.seed(*recs)
+    merge_case("цепочка: «вернуть» второго argus на R в силе на N — отказ",
+               h.pre(f"gh pr merge 7 --match-head-commit {s['N']}", pdir=cwd), False, "«вернуть» (reject)")
+
+
+def t_version_repo(h):
+    """metis-0384, решение владельца 24.10 п.1: номер версии сверяется по репозиторию PR (gh api), а не по git папки
+    сливающего (argus-117a3 №1–2)."""
+    sha = h.sha["tg-read"]
+    h.seed(rec("tests", "latark/tg-read", None, sha, "dev-opus"), rec("accept", "latark/tg-read", 3, sha))
+    h.view["tg-read"]["changedFiles"] = 1
+    h.write_view("tg-read")
+    with open(h.j("gh.files.tg-read"), "w") as fh:
+        fh.write(json.dumps({"filename": "plugins/x/a.py", "status": "modified"}) + "\n")
+    merge_case("версия: PR другого репозитория (tg-read) из папки agent-kit — проходит",
+               h.pre(f"gh pr merge 3 -R latark/tg-read --match-head-commit {sha}", pdir="projects/agent-kit"), True)
+    merge_case("версия: PR tg-read из папки tg-read — проходит",
+               h.pre(f"gh pr merge 3 --match-head-commit {sha}"), True)
+    # свой плагин в другом репозитории сверяется по нему, а не по репозиторию папки (agent-kit)
+    tg = h.j("projects/tg-read")
+    git(tg, "checkout", "-q", "-B", "v-base", "main")
+    os.makedirs(os.path.join(tg, "plugins/x/.claude-plugin"))
+    for rel, text in (("plugins/x/.claude-plugin/plugin.json", _manifest("x", "1.0.0")), ("plugins/x/a.py", "a = 1\n")):
+        with open(os.path.join(tg, rel), "w") as fh:
+            fh.write(text)
+    git(tg, "add", "-A")
+    git(tg, "commit", "-q", "-m", "x 1.0.0")
+    tb = git(tg, "rev-parse", "HEAD")
+    with open(os.path.join(tg, "plugins/x/a.py"), "w") as fh:
+        fh.write("a = 2\n")
+    git(tg, "commit", "-q", "-am", "x: код без номера")
+    th = git(tg, "rev-parse", "HEAD")
+    git(tg, "checkout", "-q", "main")
+    h.ci(GREEN, name="tg-read", head=th, baseRefOid=tb)
+    h.seed(rec("tests", "latark/tg-read", None, th, "dev-opus"), rec("accept", "latark/tg-read", 3, th))
+    merge_case("версия: PR tg-read с плагином без нового номера из папки agent-kit — отказ по tg-read",
+               h.pre(f"gh pr merge 3 -R latark/tg-read --match-head-commit {th}", pdir="projects/agent-kit"), False,
+               "version 1.0.0 не больше, чем на базе PR (1.0.0)")
+    h.reset()
+    kit = h.j("projects/agent-kit")
+    s = carry_history(kit)
+    h.view["agent-kit"]["baseRefOid"] = s["M"]
+    h.gh(pr_paths(kit, s["rel_same"], s["M"]), head=s["rel_same"])
+    h.seed(rec("tests", "latark/agent-kit", None, s["rel_same"], "dev-opus"),
+           rec("accept", "latark/agent-kit", 7, s["rel_same"]))
+    cmd = f"gh pr merge 7 -R latark/agent-kit --match-head-commit {s['rel_same']}"
+    for where in ("projects/tg-read", "projects/agent-kit/.git", "projects/agent-kit"):
+        merge_case(f"версия: PR agent-kit с номером, равным базе, сливают из {where} — отказ «не больше»",
+                   h.pre(cmd, pdir="projects/agent-kit", cwd=where), False, "не больше, чем на базе PR (0.11.85)")
+    open(h.j("gh.gql.fail"), "w").close()
+    event = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": cmd},
+             "cwd": h.j("projects/agent-kit"), "session_id": "s-coord", "tool_use_id": "toolu_" + uuid.uuid4().hex,
+             "agent_type": "domain-coordinator"}
+    r = h.hook(event, "projects/agent-kit")
+    merge_case("версия: gh api graphql не ответил (нет доступа) — пропуск без ложного отказа", decision(r), True)
+    if HAVE_TOML:  # без tomllib шлюз закрыт раньше, до сверки номера
+        check("версия: причина пропуска — в stderr хука", "graphql" in r.stderr and "не сверен" in r.stderr, r.stderr)
+
+
 CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_ci,
-         t_core_touchid, t_carry_unit, t_carry_gate, t_carry_product]
+         t_core_touchid, t_carry_unit, t_carry_gate, t_carry_product, t_carry_chain, t_version_repo]
 
 
 def main():
