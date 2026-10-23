@@ -226,6 +226,20 @@ r = cli(["board"], T0 + 480)
 check("4. работа взята — тревога снята; снова в todo — та же тревога звучит заново",
       quiet and "в todo, а работа по ним идёт" in r.stdout, r.stdout)
 
+write(os.path.join(state, "autoclose-prs.json"), json.dumps({"fetched": T0 + 490, "merged": {}, "open": {}, "open_prs": {
+    "latark/agent-kit": [{"number": 143, "head": "abcdef4", "ids": [], "closes": [["x"], 5, None], "part": False},
+                         {"number": 144, "head": "abcdef5", "ids": [], "closes": "metis-0001", "part": False}]}}))
+r = cli(["tick"], T0 + 492)
+rb = cli(["board"], T0 + 494)
+check("4. кривые closes в кэше (список в списке, число, строка вместо списка) — ни тик, ни проход доски не падают",
+      r.returncode == 0 and "Traceback" not in r.stdout + r.stderr and rb.returncode == 0
+      and "сверка статусов упала" not in rb.stdout and "autoclose" not in "".join(ln for ln in r.stdout.splitlines()
+                                                                                 if "упал" in ln),
+      r.stdout + r.stderr + rb.stdout + rb.stderr)
+ac = json.load(open(os.path.join(state, "autoclose.json"), encoding="utf-8")) if os.path.exists(
+    os.path.join(state, "autoclose.json")) else {}
+check("4. autoclose с кривыми closes доходит до конца прохода (seen = fetched кэша)", ac.get("seen") == T0 + 490, repr(ac))
+
 # --- 5. задачу правят между чтением и записью: проход не перетирает чужую правку ---------------------------------------
 cli(["task", "claim", t2, "--by", "dev-opus"], T0 + 500)
 probe = f"""

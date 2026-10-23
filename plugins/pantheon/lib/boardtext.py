@@ -22,6 +22,9 @@
   буквы) — самый свежий файл; вердикт на другом head помечен «старый head»;
 - пачки — карточки type story не done/dropped с задачами в doing, review или waiting (только id и счёт);
 - неделя — целые проценты снимка лимита (их даёт вызывающий);
+- «Ждёт вас» и «Руками» (metis-0402 п. 4) — карточки задач с «Кому» = Владелец, не закрытые: с вопросом (question или
+  ждёт человека) — «Ждёт вас», остальные — «Руками»; только id. Текстовые строки этих разделов в board.md блок не
+  читает: пункт без карточки сюда не попадёт — заведите карточку (`pantheon task new --owner owner`);
 - STATUS.md направлений, правленные за сутки, — только имя направления и время правки;
 - ответы владельца — журнал owner-log: выбор в окне вопросов на вопрос «[id] …» (zeus.md, пометку ставит хук) и ответ
   галочкой на карточке (board.jsonl), за сутки — [id], время и буква варианта (или да/нет). Блок — сводка для глаз, а не
@@ -48,6 +51,7 @@ DAY = 86400
 WATCH_GAP = 10 * 60          # входы менялись, а сборки нет столько — тревога
 BLOCK_MAX = 1200             # знаков во всём файле
 MAX_PR, MAX_BATCH, MAX_STATUS, MAX_DECISION, MAX_IDS = 8, 3, 6, 5, 3
+MAX_OWNER = 10  # id карточек владельца в строке «Ждёт вас» / «Руками»
 REVIEW_RE = re.compile(r"review-([1-9]\d{0,5})-argus(?:-?([a-z]?)(\d*))?\.md")
 VERDICT_RE = re.compile(r"Вердикт\**\s*:\s*\**\s*([А-Яа-яЁё]+)")
 VERDICTS = ("принять", "вернуть", "частично", "отклонить")
@@ -178,6 +182,23 @@ def batches(tasks):
     return [x[1:] for x in out[:MAX_BATCH]]
 
 
+def owner_cards(tasks, is_owner):
+    """Карточки на владельце (Кому = Владелец, не закрыты; metis-0402 п. 4): {"ask": [id], "do": [id]} — вопрос (есть
+    question или ждёт человека) идёт в «Ждёт вас», остальное — в «Руками». Только id: заголовок — свободный текст."""
+    out = {"ask": [], "do": []}
+    rows = []
+    for tid, rec in tasks.items():
+        h = rec[1]
+        if h.get("status") in ("done", "dropped") or not _ok(ID_RE, tid) or not is_owner(h):
+            continue
+        ask = bool(h.get("question")) or (h.get("status") == "waiting" and h.get("waiting_on") == "human")
+        prio = h.get("priority") if isinstance(h.get("priority"), int) and not isinstance(h.get("priority"), bool) else 2
+        rows.append((prio, tid, "ask" if ask else "do"))
+    for _, tid, kind in sorted(rows):
+        out[kind].append(tid)
+    return out
+
+
 def status_files(pantheon):
     return sorted(glob.glob(os.path.join(pantheon, "directions", "*", "STATUS.md")))
 
@@ -246,15 +267,17 @@ def watch_files(pantheon, state):
     return review_files(pantheon) + status_files(pantheon) + [os.path.join(pantheon, "decisions.md")] + owner_log(state)
 
 
-def collect(pantheon, state, tasks, t, week=None):
-    """Все входы блока одним словарём; files — сколько файлов прочитано (для штампа)."""
+def collect(pantheon, state, tasks, t, week=None, owner=None):
+    """Все входы блока одним словарём; files — сколько файлов прочитано (для штампа). owner — шапка → на владельце
+    ли карточка (tasks.Roles и assignee у вызывающего); без него разделов «Ждёт вас» и «Руками» нет."""
     cache = os.path.join(state, "autoclose-prs.json")
     zeus_md, board_jsonl = owner_log(state)
     files = len(review_files(pantheon)) + len(status_files(pantheon)) + len(tasks) \
         + sum(1 for p in (cache, zeus_md, board_jsonl) if os.path.isfile(p))
     return {"prs": open_prs(cache), "reviews": reviews(pantheon), "batches": batches(tasks), "week": week,
             "statuses": statuses(pantheon, t), "decisions": decisions(zeus_md, board_jsonl, t), "files": files,
-            "broken": ["autoclose-prs.json"] if cache_broken(cache) else []}
+            "broken": ["autoclose-prs.json"] if cache_broken(cache) else [],
+            "owner": owner_cards(tasks, owner) if owner else None}
 
 
 # --- блок -------------------------------------------------------------------------------------------------------
@@ -281,6 +304,12 @@ def lines(data):
     out = []
     w = data.get("week")
     out.append(f"- Неделя: {w} %." if isinstance(w, int) and not isinstance(w, bool) else "- Неделя: расход неизвестен.")
+    own = data.get("owner")
+    if isinstance(own, dict):
+        for kind, label in (("ask", "Ждёт вас"), ("do", "Руками")):
+            ids = [i for i in own.get(kind) or [] if _ok(ID_RE, i)]
+            more = f" и ещё {len(ids) - MAX_OWNER}" if len(ids) > MAX_OWNER else ""
+            out.append(f"- **{label}** ({len(ids)}): " + (", ".join(ids[:MAX_OWNER]) + more if ids else "карточек нет") + ".")
     prs = data.get("prs")
     if prs is None and "autoclose-prs.json" in (data.get("broken") or []):
         out.append("- PR: кэш открытых PR не читается — список PR неизвестен.")

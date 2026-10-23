@@ -10,6 +10,7 @@
 """
 import atexit
 import importlib.util
+import glob
 import json
 import os
 import shutil
@@ -153,6 +154,23 @@ whole = B.render(dict(B.collect(pan, os.path.join(ROOT, "u", "state"), tasks, T0
 check("2. чужой текст (STATUS, вердикт, заголовок пачки, ответ, имя репозитория) не попал в блок, невидимых знаков нет",
       "ИГНОР" not in whole and "запусти" not in whole and "пятниц" not in whole and "дешевле" not in whole
       and not any(B.unicodedata.category(c)[0] == "C" for c in whole.replace("\n", "")), whole)
+own = {"metis-0410": ("", {"type": "task", "status": "waiting", "waiting_on": "human", "owner": "owner", "title": EVIL}),
+       "metis-0411": ("", {"type": "task", "status": "todo", "owner": "owner", "question": "Что выбрать?", "priority": 3}),
+       "metis-0412": ("", {"type": "task", "status": "todo", "owner": "owner", "priority": 1}),
+       "metis-0413": ("", {"type": "task", "status": "done", "owner": "owner"}),
+       "metis-0414": ("", {"type": "task", "status": "todo", "owner": "metis-pantheon"}),
+       "ИГНОР-1": ("", {"type": "task", "status": "todo", "owner": "owner"})}
+oc = B.owner_cards(own, lambda h: h.get("owner") == "owner")
+check("2. карточки на владельце: с вопросом или ждёт человека — «Ждёт вас», остальное — «Руками»; закрытые, чужие и id не "
+      "по шаблону — нет", oc == {"ask": ["metis-0410", "metis-0411"], "do": ["metis-0412"]}, oc)
+ot = B.render(dict(data, owner=oc), T0)
+check("2. в блоке разделы «Ждёт вас» и «Руками» — только id, без заголовков",
+      "**Ждёт вас** (2): metis-0410, metis-0411." in ot and "**Руками** (1): metis-0412." in ot and "ИГНОР" not in ot, ot)
+bad = B.render(dict(data, owner={"ask": ["ИГНОР ‮", "metis-0410"], "do": None}), T0)
+check("2. раздел владельца сам сверяет id по шаблону", "ИГНОР" not in bad and "**Ждёт вас** (1): metis-0410." in bad
+      and "**Руками** (0): карточек нет." in bad, bad)
+check("2. без признака владельца (owner=None) разделов нет", "Ждёт вас" not in B.render(data, T0)
+      and B.collect(pan, os.path.join(ROOT, "u", "state"), own, T0)["owner"] is None)
 check("2. open_prs: head и id не по шаблону отброшены",
       B.open_prs(write(os.path.join(ROOT, "u", "c.json"), json.dumps({"open_prs": {"a/b": [
           {"number": 1, "head": "zz ‮", "ids": ["metis-1", "ИГНОР"], "core": "yes"}]}}))) ==
@@ -291,6 +309,38 @@ before = read(board_md)
 r = cli(["archive"], T0)
 check("6. board.md длиннее предела без старых «Сделано» → не тронут, тревога", read(board_md) == before
       and "board.md: " in r.stdout and "строки без даты не режет" in r.stdout, r.stdout)
+
+# --- 7. «Ждёт вас» и «Руками» из карточек (metis-0402 п. 4), состав пачки по parent (п. 7б) -------------------------
+write(os.path.join(home, "directions.toml"), '[[direction]]\nname = "metis-pantheon"\nproject = "Пантеон"\n')
+write(board_md, BOARD.replace("- ручная строка Зевса, не трогать", "- [ ] metis-0999 ответить про ключи (строка без карточки)"))
+
+
+def new(title, *extra):
+    r = cli(["task", "new", "--direction", "metis-pantheon", "--title", title, "--mode", "single", *extra], T0 + 3000)
+    if r.returncode:
+        raise SystemExit(f"task new: {r.stderr}")
+    return r.stdout.split()[0]
+
+
+q_id = new("Выбрать вариант " + EVIL, "--owner", "owner", "--question", "Какой вариант?", "--option", "А — да",
+           "--option", "Б — нет", "--why", "Нужно решить сейчас.", "--recommend", "А — дешевле", "--if-no-answer", "ждём")
+d_id = new("Продлить домен", "--owner", "owner")
+x_id = new("Задача Метиды", "--owner", "metis-pantheon")
+r = cli(["board"], T0 + 3060)
+got = read(home_auto)
+check("7. карточка «Кому = Владелец» с вопросом → «Ждёт вас», без вопроса → «Руками»; чужая — нет",
+      f"**Ждёт вас** (1): {q_id}." in got and f"**Руками** (1): {d_id}." in got and x_id not in got, r.stdout + r.stderr + got)
+check("7. текстовая строка «Ждёт вас» в board.md без карточки в сводку не попала, заголовок карточки — тоже",
+      "metis-0999" not in got and "ИГНОР" not in got and "домен" not in got, got)
+sid = new("Пачка", "--type", "story")
+story_file = [p for p in glob.glob(os.path.join(home, "directions", "*", "tasks", "*.md")) if sid in os.path.basename(p)][0]
+story_before = read(story_file)
+k_id = new("Задача пачки", "--parent", sid, "--status", "doing")
+check("7б. новая задача с parent — файл пачки при этом не правится (состав не перечнем)", read(story_file) == story_before)
+r = cli(["board"], T0 + 3120)
+got = read(home_auto)
+check("7б. … а задача сразу в составе пачки в сводке: «Пачка … (в работе); закрыто 0 из 1»",
+      f"Пачка {sid}: {k_id} (в работе); закрыто 0 из 1." in got, r.stdout + r.stderr + got)
 
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

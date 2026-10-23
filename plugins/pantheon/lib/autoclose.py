@@ -284,6 +284,8 @@ def review_pr(pantheon, t, repo, pr, dirs, T, log, errors):
     tasks = T.load_tasks(pantheon, T.WORK_TYPES)
     note = f"PR #{n} ({repo}) {REVIEW_MARK}"
     for tid in pr["closes"]:
+        if not isinstance(tid, str):
+            continue
         path, head, _ = tasks.get(tid, ("", {}, ""))
         if head.get("type") != "task" or head.get("direction") not in dirs or head.get("status") not in ("todo", "doing"):
             continue

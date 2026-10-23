@@ -6223,8 +6223,9 @@ def board_status_sync(T):
         for repo, prs in sorted((cache.get("open_prs") if isinstance(cache.get("open_prs"), dict) else {}).items()):
             for pr in prs if isinstance(prs, list) else []:
                 if isinstance(pr, dict) and isinstance(pr.get("number"), int) and not pr.get("part"):
-                    for tid in pr.get("closes") or []:
-                        open_closing.setdefault(tid, []).append((repo, pr["number"]))
+                    for tid in pr.get("closes") if isinstance(pr.get("closes"), list) else []:
+                        if isinstance(tid, str):
+                            open_closing.setdefault(tid, []).append((repo, pr["number"]))
         moves, stale = S.plan(tasks, board_domains(), open_closing)
         for tid, ch, note in moves:
             old = tasks[tid][1].get("status")
@@ -6280,7 +6281,8 @@ def board_auto_sync(T):
     try:
         B = boardtext_mod()
         fp, t = board_auto_fp(), now()
-        data = B.collect(PANTHEON, STATE, T.load_tasks(PANTHEON, T.WORK_TYPES), t, board_week())
+        data = B.collect(PANTHEON, STATE, T.load_tasks(PANTHEON, T.WORK_TYPES), t, board_week(),
+                         owner=lambda h: T.Roles(()).name(T.assignee(h)) == T.OWNER_NODE)
         res = B.sync(os.path.join(PANTHEON, B.AUTO_NAME), B.render(data, t))
         write_json(path("board-auto.json"), {"fp": fp, "built": t})
     except Exception as e:  # noqa: BLE001 — сбой автоблока не ломает проход доски
