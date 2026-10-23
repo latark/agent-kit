@@ -56,11 +56,17 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --next X --owner O --release R --batch X --night ГГГГ-ММ-ДД --estimate X --actual X
                     --acceptance принято|вернуть|к владельцу --parent ПАЧКА --mode self|single|parallel --mode-why X --touches ПУТЬ …
                     --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
-                    --recommend "А — потому что …" --if-no-answer "…" --depends-on ID --executor auto|claude|codex]
+                    --recommend "А — потому что …" --if-no-answer "…" --depends-on ID --executor auto|claude|codex
+                    --text|--body "текст" | --body-file ПУТЬ]
+                    текст задачи (цель, «готово, когда») обязателен: без --text/--body/--body-file (и без --question) —
+                    отказ, код 2; неизвестный флаг — отказ с его именем, код 2, файл не создан (metis-0402);
+                    новая задача → файл-уведомление в directions/<направление>/inbox/ координатору (не находка)
                     без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ;
                     --batch без --mode (и без mode в шапке) — отказ: режим обязателен при сборке пачки (metis-0308);
                     --depends-on / depends_on= с несуществующим id, самой собой или циклом — отказ при записи (metis-0248)
-  pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"]   pantheon task show ID
+  pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"] [--body "текст" | --body-file ПУТЬ]
+                    --body[-file] заменяет текст задачи между «# заголовок» и «## Журнал»; неизвестный флаг — отказ, код 2
+  pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
   pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту
   pantheon task attach ID ПАЧКА | detach ID   задача в пачку (story) и обратно; show ПАЧКА — состав и сумма оценок
@@ -6344,6 +6350,7 @@ def check(paths=None, quiet=False):
         for d in drift:
             print(f"ОШИБКА · Доска/{d}")
     field_errs, field_warns = [], []
+    nobody, unlinked = [], []
     if not paths:  # поля «Итогов пачек» и ожидание PR/приёмки (metis-0308)
         night_end = "08:00"
         with contextlib.suppress(Exception):
@@ -6352,6 +6359,10 @@ def check(paths=None, quiet=False):
         fixed = T.fix_closed(PANTHEON, now(), tasks_now)
         if fixed:
             tasks_now = T.load_tasks(PANTHEON, T.WORK_TYPES)
+        nobody = T.bodyless_tasks(tasks_now, now())  # metis-0402: открытая задача без описания старше часа
+        unlinked = T.unlinked_decisions(tasks_now, _read_or_empty(os.path.join(PANTHEON, "decisions.md")),
+                                        _read_or_empty(path("owner-log", "zeus.md")),
+                                        _read_or_empty(path("owner-log", "board.jsonl")).splitlines(), now())
         field_errs, field_warns = T.board_problems(tasks_now, now(), night_end, autoclose_mod().open_pr_tasks(path("autoclose.json")))
         field_errs = [(i, f"status done без closed — проставлен из updated") for i in fixed] + field_errs
         for tid, text in field_errs:
@@ -6389,8 +6400,91 @@ def check(paths=None, quiet=False):
                        "check")
         else:
             clear_once("check-fields")
+        if nobody:
+            alert_once("check-nobody", "|".join(nobody),
+                       f"задачи без описания дольше {T.NO_BODY_HOURS} ч (только заголовок и журнал): "
+                       f"{', '.join(nobody[:12])}{f' и ещё {len(nobody) - 12}' if len(nobody) > 12 else ''} — "
+                       "дописать цель и «готово, когда» (pantheon task set ID --body-file …) или закрыть", "check")
+        else:
+            clear_once("check-nobody")
+        if unlinked:
+            alert_once("check-unlinked", "|".join(unlinked),
+                       f"слова владельца с [id] без задачи дольше {T.UNLINKED_MIN} мин: "
+                       f"{', '.join(unlinked[:12])}{f' и ещё {len(unlinked) - 12}' if len(unlinked) > 12 else ''} — "
+                       "завести задачу (pantheon task new) или дописать в decisions.md «[id] … не задача»", "check")
+        else:
+            clear_once("check-unlinked")
         return 0
     return 1 if bad or drift or view_drift or field_errs else 0
+
+
+# Флаги `task new` (metis-0402): неизвестный флаг — отказ с его именем, а не молчаливо потерянное поле.
+TASK_NEW_VALUE_FLAGS = {"--direction", "--title", "--project", "--text", "--body", "--body-file", "--type", "--status",
+                        "--priority", "--due", "--next", "--owner", "--release", "--wave", "--batch", "--mode", "--mode-why",
+                        "--touches", "--night", "--estimate", "--actual", "--acceptance", "--waiting-on", "--question",
+                        "--why", "--recommend", "--if-no-answer", "--option", "--depends-on", "--executor", "--parent"}
+TASK_NEW_BOOL_FLAGS = {"--risky"}
+TASK_SET_VALUE_FLAGS = {"--note", "--option", "--body", "--body-file"}
+
+
+def task_flag_error(sub, args, value_flags, bool_flags=()):
+    """Первая ошибка во флагах `--…` (неизвестный, без значения, лишнее слово) или None. Значение флага пропускается."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in bool_flags:
+            i += 1
+        elif a in value_flags:
+            if i + 1 >= len(args):
+                return f"pantheon task {sub}: у флага {a} нет значения"
+            i += 2
+        elif a.startswith("--"):
+            return f"pantheon task {sub}: неизвестный флаг {a.split('=', 1)[0]} — ничего не записано"
+        else:
+            return f"pantheon task {sub}: лишнее «{a}» — значения идут после своего флага"
+    return None
+
+
+def task_body_arg(sub, opt):
+    """Текст из --text, --body, --body-file (в этом порядке, через пустую строку) → (текст или None, ошибка или None)."""
+    parts = [opt("--text"), opt("--body")]
+    bf = opt("--body-file")
+    if bf:
+        try:
+            with open(bf, encoding="utf-8") as fh:
+                parts.append(fh.read())
+        except (OSError, UnicodeDecodeError) as e:
+            return None, f"pantheon task {sub}: --body-file {bf} не читается ({getattr(e, 'strerror', None) or e})"
+    parts = [x for x in parts if x and x.strip()]
+    return ("\n\n".join(x.strip() for x in parts) if parts else None), None
+
+
+def _read_or_empty(p):
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return fh.read()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def task_new_notify(T, tid, direction, title, text):
+    """Уведомление координатору направления (metis-0402 в): файл в directions/<направление>/inbox/ — входящие он
+    разбирает при старте и по ним его будит передача задания. Тот же канал, что находки. Сбой записи не отменяет
+    задачу: строка в stderr и тревога."""
+    if direction == "inbox" or os.environ.get("PANTHEON_SESSION") == direction:  # свою задачу координатор знает
+        return
+    ib = os.path.join(PANTHEON, "directions", direction, "inbox")
+    fname = f"{stamp()[:10]}-{stamp()[11:13]}{stamp()[14:16]}-task-{tid}.md"
+    who = os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "владелец"
+    try:
+        os.makedirs(ib, exist_ok=True)
+        write_atomic(os.path.join(ib, fname),
+                     f"# Новая задача {tid}: {' '.join(title.split())[:120]}\n\nОт: {who}\n\n"
+                     f"{T.NOTICE_MARK} задача уже заведена (`pantheon task show {tid}`), заводить её заново не нужно. "
+                     f"Возьми её в работу и перенеси этот файл в `inbox/done/`.\n")
+    except OSError as e:
+        print(f"предупреждение · уведомление координатору {direction} не записано: {e.strerror or e}", file=sys.stderr)
+        alert(f"новая задача {tid} ({direction}): уведомление в inbox не записано — {e.strerror or e}", "task-new")
 
 
 def task_cmd(rest):
@@ -6406,6 +6500,18 @@ def task_cmd(rest):
 
     try:
         if sub == "new":
+            err = task_flag_error("new", args, TASK_NEW_VALUE_FLAGS, TASK_NEW_BOOL_FLAGS)
+            if err:
+                print(err, file=sys.stderr)
+                return 2
+            body_text, err = task_body_arg("new", opt)
+            if err:
+                print(err, file=sys.stderr)
+                return 2
+            if body_text is None and not opt("--question"):
+                print("pantheon task new: нужен текст задачи — --text, --body или --body-file <путь> (цель и «готово, когда»); "
+                      "задача без описания не создаётся (вопрос владельцу — с --question)", file=sys.stderr)
+                return 2
             fields = {"status": opt("--status"), "priority": int(opt("--priority")) if opt("--priority") else None,
                       "due": opt("--due"), "next": opt("--next"), "owner": opt("--owner"),
                       "release": opt("--release") or opt("--wave"), "batch": opt("--batch"),
@@ -6427,16 +6533,24 @@ def task_cmd(rest):
                 print(f"pantheon task new: --type {opt('--type')} — только {' или '.join(T.WORK_TYPES)}", file=sys.stderr)
                 return 2
             tid, p = T.task_new(PANTHEON, now(), opt("--direction"), opt("--title"), project=opt("--project"),
-                                text=opt("--text"), kind=opt("--type") or "task", **fields)
+                                text=body_text, kind=opt("--type") or "task", **fields)
             print(f"{tid} {os.path.relpath(p, PANTHEON)}")
+            task_new_notify(T, tid, opt("--direction"), opt("--title"), body_text)
             for w in T.option_warns(fields):
                 print(f"предупреждение · {w}", file=sys.stderr)
         elif sub == "set" and args:
             tid, changes, note, i = args[0], {}, None, 1
+            new_body, err = task_body_arg("set", opt)
+            if err:
+                print(err, file=sys.stderr)
+                return 2
             # --wave — прежнее имя --release (metis-0069): выпуск строкой «pantheon 0.11.50»
             night_flags = {"--release": "release", "--wave": "release", "--batch": "batch", "--night": "night", "--estimate": "estimate",
                            "--actual": "actual", "--acceptance": "acceptance", "--mode": "mode", "--mode-why": "mode_why"}  # ночной цикл: флаги как у --due
             while i < len(args):
+                if args[i] in ("--body", "--body-file") and i + 1 < len(args):  # тело уже взято task_body_arg
+                    i += 2
+                    continue
                 if args[i] == "--note" and i + 1 < len(args):
                     note, i = args[i + 1], i + 2
                     continue
@@ -6444,6 +6558,12 @@ def task_cmd(rest):
                     changes["options"] = (changes.get("options") or []) + [args[i + 1]]  # и после options= (argus)
                     i += 2
                     continue
+                if args[i].startswith("--") and not (args[i] in night_flags and i + 1 < len(args)):
+                    # metis-0402: неизвестный флаг или флаг без значения — отказ с его именем, не «поле=значение»
+                    known = {"--note", "--option", "--body", "--body-file", *night_flags}
+                    print("pantheon task set: " + (f"у флага {args[i]} нет значения" if args[i] in known
+                          else f"неизвестный флаг {args[i].split('=', 1)[0]}") + " — ничего не записано", file=sys.stderr)
+                    return 2
                 if args[i] in night_flags and i + 1 < len(args):
                     k, v, eq, step = night_flags[args[i]], args[i + 1], "=", 2
                 else:
@@ -6464,7 +6584,7 @@ def task_cmd(rest):
                 changes[k] = None if v in ("", "null") else int(v) if kind == "int" else (v == "true") if kind == "bool" else \
                     [x.strip() for x in v.split(",") if x.strip()] if kind == "list" else v
                 i += step
-            p, head = T.task_set(PANTHEON, now(), tid, changes, note=note)
+            p, head = T.task_set(PANTHEON, now(), tid, changes, note=note, body=new_body)
             print(f"{tid}: {head.get('status')} · {os.path.relpath(p, PANTHEON)}")
             if changes.get("status") in ("done", "dropped"):
                 metrics_on_close(T, tid)

@@ -422,7 +422,7 @@ def test_session_waits_reaches_you():
     used = json.load(open(e.st("notify.json"))).get("used")
     check(s.count("coord-x ждёт вас") == 1 and s.count("coord-y ждёт вас") == 1 and used == 2,
           f"день ожидания двух сессий — по одной macOS, бюджет 2: {s!r} used={used}")
-    r = e.run("task", "new", "--direction", "coord-x", "--title", "Решить вечером", "--status", "waiting",
+    r = e.run("task", "new", "--text", "тест", "--direction", "coord-x", "--title", "Решить вечером", "--status", "waiting",
               "--waiting-on", "human", "--next", "ответ", "--question", "Что выбрать?", "--project", "coord-x",
               t=day + 11 * 3600 - 120)
     e.run("board", t=day + 11 * 3600 - 60)                       # 22:59 — ещё не тихие часы

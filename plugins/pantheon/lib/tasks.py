@@ -616,7 +616,7 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
     if errs:
         remove(path)
         raise ValueError("; ".join(errs))
-    desc = "\n".join(("\\" + ln) if ln.startswith("## ") else ln for ln in (text or "").strip().split("\n")).strip()
+    desc = escape_desc(text)
     try:
         write_task(path, head, f"\n# {title.strip()}\n\n" + (desc + "\n\n" if desc else "")
                    + f"## Журнал\n\n- {now_iso(t)[:16].replace('T', ' ')} — {actor}: создана\n")
@@ -661,7 +661,8 @@ def dir_lock(d, wait=10.0):
             os.close(fd)
 
 
-def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None):
+def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None, body=None):
+    """body — новый текст задачи (между заголовком «# …» и первым «## …»; metis-0402): прежний заменяется."""
     tasks = load_tasks(pantheon, WORK_TYPES)
     if tid not in tasks:
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
@@ -671,7 +672,7 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
     if par and tasks.get(par, ("", {}))[1].get("type") == "story" and not (changes.get("mode") or tasks[tid][1].get("mode")):
         raise ValueError(f"{tid}: {NO_MODE_BATCH}")
     with dir_lock(os.path.dirname(tasks[tid][0])):
-        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck)
+        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck, body)
 
 
 def task_note(pantheon, t, tid, note):
@@ -703,7 +704,23 @@ def task_claim(pantheon, t, tid, by, hours=1.0):
                     note=f"взял {by} до {until[11:16]}", precheck=precheck)
 
 
-def _task_set_locked(path, t, tid, changes, note, actor, precheck):
+def escape_desc(text):
+    """Текст задачи: строка «## …» внутри него экранируется, иначе она стала бы разделом (журналом) задачи."""
+    return "\n".join(("\\" + ln) if ln.startswith("## ") else ln for ln in (text or "").strip().split("\n")).strip()
+
+
+def replace_desc(body, text):
+    """Текст задачи между первым «# …» и следующим «## …» (или концом) заменён на text; нет заголовка — ValueError."""
+    lines = body.split("\n")
+    h = next((i for i, ln in enumerate(lines) if ln.startswith("# ")), None)
+    if h is None:
+        raise ValueError("в задаче нет заголовка «# …» — текст некуда вставить")
+    e = next((i for i in range(h + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    desc = escape_desc(text)
+    return "\n".join(lines[:h + 1] + [""] + ([desc, ""] if desc else []) + lines[e:])
+
+
+def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None):
     head, body = read(path)  # заново, уже под блокировкой: чужая правка между чтением и записью не потеряется
     if not head or head.get("id") != tid:
         raise ValueError(f"задача {tid} изменилась — повторите")
@@ -736,6 +753,8 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck):
     errs, _ = check_head(head)
     if errs:
         raise ValueError("; ".join(errs))
+    if new_body is not None:
+        body = replace_desc(body, new_body)
     if note:
         body = append_log(body, f"{now_iso(t)[:16].replace('T', ' ')} — {actor}: {' '.join(str(note).split())}")
     write_task(path, head, body)
@@ -2385,6 +2404,9 @@ def card_url(vault, name):
     return f"obsidian://open?vault={quote(vault)}&file={quote('Доска/' + name + '.md')}"
 
 
+NOTICE_MARK = "Уведомление, а не находка:"
+
+
 def inbox_items(pantheon):
     """Входящие направлений: свободные заявки directions/<имя>/inbox/*.md (разбирает координатор)."""
     out, d = {}, os.path.join(pantheon, "directions")
@@ -2399,6 +2421,8 @@ def inbox_items(pantheon):
             try:
                 text = read_text(path)[:20000]
             except (OSError, UnicodeDecodeError, ValueError):
+                continue
+            if NOTICE_MARK in text:  # уведомление о новой задаче (pantheon task new) — не заявка, карточки не даёт
                 continue
             m = re.search(r"^# (.+)$", text, re.M)
             frm = re.search(r"^От: (.+)$", text, re.M)
@@ -3020,3 +3044,103 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             fh.write(new_state)
         os.replace(tmp, state_path)
     return done_lines
+
+
+# --- ничего не теряем (metis-0402 п. 7): задача без описания и решение без задачи --------------------------------------
+# Тик (check --quiet) поднимает две тревоги. Первая: открытая задача больше NO_BODY_HOURS часов только с заголовком и
+# журналом — цели и «готово, когда» нет, исполнитель не поймёт, что делать. Вторая: слово владельца с [id] (запись
+# decisions.md или вопрос окна вопросов в owner-log) старше UNLINKED_MIN минут, а задачи с таким id или упоминанием
+# [id] нет и в decisions.md нет строки с [id] и словами «не задача».
+
+NO_BODY_HOURS = 1
+UNLINKED_MIN = 30
+UNLINKED_DAYS = 7  # старше — разбор уже не по тику, а ревизией
+OPEN_STATUSES = ("todo", "doing", "review", "waiting")
+DEC_ID_RE = re.compile(r"\[([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\](?!\()")
+DEC_LINE_RE = re.compile(r"^\s*[-*] (\d{1,2})\.(\d{2})(?: (\d{1,2}):(\d)([\dx]))?")
+CREATED_LOG_RE = re.compile(r"^- (\d{4}-\d\d-\d\d \d\d:\d\d) — [^:\n]*: создана", re.M)
+
+
+def has_description(body):
+    """Есть ли у задачи текст кроме заголовка и журнала: что-то между «# …» и первым «## …» или раздел кроме журнала."""
+    lines = (body or "").split("\n")
+    h = next((i for i, ln in enumerate(lines) if ln.startswith("# ")), -1)
+    in_log = False
+    for ln in lines[h + 1:]:
+        if ln.startswith("## "):
+            if not ln.startswith("## Журнал"):
+                return True
+            in_log = True
+        elif ln.strip() and not in_log:
+            return True
+    return False
+
+
+def created_ts(head, body):
+    m = CREATED_LOG_RE.search(body or "")
+    return ts_of(m.group(1).replace(" ", "T") + ":00") if m else ts_of(head.get("created"))
+
+
+def bodyless_tasks(tasks, t, hours=NO_BODY_HOURS):
+    """Открытые задачи старше hours часов без описания (вопросы владельцу — не в счёт: их суть в полях question/why)."""
+    out = []
+    for tid, (_, head, body) in sorted(tasks.items()):
+        if head.get("type") != "task" or head.get("status") not in OPEN_STATUSES or head.get("question"):
+            continue
+        made = created_ts(head, body)
+        if made is not None and t - made > hours * 3600 and not has_description(body):
+            out.append(tid)
+    return out
+
+
+def _dec_time(m, t):
+    day, mon = int(m.group(1)), int(m.group(2))
+    hh = int(m.group(3)) if m.group(3) else 0
+    mm = int(m.group(4) + m.group(5).replace("x", "0")) if m.group(4) else 0
+    year = datetime.fromtimestamp(t).year
+    try:
+        ts = datetime(year, mon, day, hh, mm).timestamp()
+        return ts if ts <= t + 86400 else datetime(year - 1, mon, day, hh, mm).timestamp()
+    except ValueError:
+        return None
+
+
+def owner_ids(decisions_text, zeus_log_text, board_lines, t):
+    """[(метка времени, id)] из слов владельца: строки decisions.md с временем, вопросы окна вопросов, ответы на доске."""
+    out = []
+    for ln in (decisions_text or "").split("\n"):
+        m = DEC_LINE_RE.match(ln)
+        ts = _dec_time(m, t) if m else None
+        if ts is not None:
+            out += [(ts, i) for i in DEC_ID_RE.findall(ln)]
+    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) · окно вопросов\s*$", zeus_log_text or "", re.M))
+    for k, m in enumerate(heads):
+        end = heads[k + 1].start() if k + 1 < len(heads) else len(zeus_log_text)
+        q = re.match(r"\s*вопрос: \[([a-z0-9][a-z0-9-]{0,40})\]", zeus_log_text[m.end():end])
+        ts = ts_of(m.group(1).replace(" ", "T"))
+        if q and ts is not None:
+            out.append((ts, q.group(1)))
+    for line in board_lines or []:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        ts = ts_of(rec.get("time", "")[:19]) if isinstance(rec, dict) else None
+        if ts is not None and rec.get("kind") == "answer" and isinstance(rec.get("id"), str):
+            out.append((ts, rec["id"]))
+    return out
+
+
+def unlinked_decisions(tasks, decisions_text, zeus_log_text, board_lines, t, minutes=UNLINKED_MIN, days=UNLINKED_DAYS):
+    """id слов владельца старше minutes минут (и не старше days дней), для которых нет задачи и записи «не задача»."""
+    cands = {i for ts, i in owner_ids(decisions_text, zeus_log_text, board_lines, t)
+             if minutes * 60 < t - ts <= days * 86400}
+    texts = [b + json.dumps(h, ensure_ascii=False) for _, h, b in tasks.values()]
+    notask = [ln for ln in (decisions_text or "").split("\n") if "не задача" in ln.lower()]
+    out = []
+    for i in sorted(cands):
+        word = re.compile(r"(?<![\w-])" + re.escape(i) + r"(?![\w-])")
+        if i in tasks or any(word.search(x) for x in texts) or any(f"[{i}]" in ln for ln in notask):
+            continue
+        out.append(i)
+    return out
