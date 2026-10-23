@@ -11,13 +11,18 @@
   $TMPDIR общий для всех сессий; файл в папке, которую создала не эта сессия, — чужой; чужой файл не запускать;
   отказ Write или Edit файла в $TMPDIR («File has not been read yet») — не запускать;
 - roles/_parts/report.part: сданный лог прогона не перезаписывать и закрывать от записи (`chmod a-w`);
-- tmp.part входит во все роли, которые запускают команды в общем $TMPDIR (обязательный набор, в нём hq), и каждый
-  шаблон с `{{> tmp}}` найден обходом всех roles/*.tmpl; у них же, кроме hq, есть `{{> report}}`;
+- `{{> tmp}}` есть в каждом roles/*.tmpl (обход всех шаблонов, новый шаблон тоже), кроме словаря исключений NO_TMP,
+  где у каждой роли причина: momus — Bash нет (и это сверено с disallowedTools), шесть ролей — решение в metis-0371;
+  устаревшее исключение (шаблона нет или tmp уже есть) — тоже красное. У шаблонов с tmp, кроме hq, есть `{{> report}}`;
+- ни в одном шаблоне и части нет предсказуемой папки: пути `$TMPDIR/tmp-…` и `tmp-…/` без `XXXXXX` (codex-dev:
+  поручение — в своей папке из `mktemp -d -p "$TMPDIR" tmp-codex-<ветка>-XXXXXX`), а `mkdir -p` упомянут только в
+  запрете «Не `mkdir -p` — на чужой папке он молча вернёт 0»;
 - сам приём работает: в закрытый `chmod a-w` лог `: > файл` не пишет, текст цел.
 
 Запуск: python3 -I plugins/pantheon/tests/test_tmp_rules.py  (код выхода 0 — все прошли; Python 3.9+)
 """
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -52,6 +57,7 @@ TMP_PHRASES = [
     "Временные файлы — только в своей папке внутри `$TMPDIR`.",
     "Её создаёт сама сессия, в начале работы: `mktemp -d -p \"$TMPDIR\" tmp-<задача>-XXXXXX` — случайный хвост имени,"
     " папка новая и пустая.",
+    "Не `mkdir -p` — на чужой папке он молча вернёт 0.",
     "Временный файл — `mktemp -p \"<своя папка>\"` или своё имя в ней.",
     "`$TMPDIR` — один на все сессии этого Mac:",
     "а папка `tmp-<задача>` без случайного хвоста бывает от прошлой сессии той же задачи.",
@@ -81,19 +87,62 @@ for phrase in REPORT_PHRASES:
     check("report.part: «" + phrase[:60] + "…»", has(report, phrase), report[-500:])
 check("report.part: «журнал» заменён на «лог прогона»", "журнал" not in report.lower())
 
-# Роли, которые запускают команды в общем $TMPDIR. Набор задан здесь, а не выводится из шаблонов: иначе роль, из
-# которой убрали {{> tmp}}, просто выпала бы из проверки.
-MUST_TMP = {"dev-opus", "dev-sonnet", "dev-haiku", "codex-dev", "talos", "hephaestus", "workshop",
-            "domain-coordinator", "argus", "hq"}
+# Шаблоны без {{> tmp}}: только с причиной. Любой другой шаблон, в том числе новый, обязан включать часть — иначе
+# роль с Bash кладёт файлы в общий $TMPDIR без правила своей папки (ревью PR 111, мутант MA).
+NO_BASH = "Bash нет"
+NO_TMP = {
+    "momus": NO_BASH,
+    **{r: "решение в metis-0371" for r in ("apollo", "clio", "iris", "prometheus", "hestia", "chiron")},
+}
 NO_REPORT = {"hq"}  # Пританей пишет владельцу, а не отчёт DONE-01 наверх
 templates = {f[:-len(".tmpl")]: read(ROLES, f) for f in sorted(os.listdir(ROLES)) if f.endswith(".tmpl")}
+parts = {f: read(PARTS, f) for f in sorted(os.listdir(PARTS)) if f.endswith(".part")}
 with_tmp = {r for r, text in templates.items() if "{{> tmp}}" in text}
-check("шаблоны с {{> tmp}} найдены обходом roles/*.tmpl, hq среди них", "hq" in with_tmp, sorted(with_tmp))
-for role in sorted(MUST_TMP | with_tmp):
-    text = templates.get(role, "")
-    check(f"{role}: входит часть tmp", "{{> tmp}}" in text)
+check("обход roles/*.tmpl нашёл шаблоны с tmp, hq и codex-dev среди них", {"hq", "codex-dev"} <= with_tmp,
+      sorted(with_tmp))
+
+
+def disallowed(text):
+    line = next((ln for ln in text.splitlines() if ln.startswith("disallowedTools:")), "")
+    return {t.strip() for t in line.split(":", 1)[-1].split(",")}
+
+
+for role, why in sorted(NO_TMP.items()):
+    text = templates.get(role)
+    check(f"{role}: исключение без tmp ({why}) — шаблон есть", text is not None)
+    check(f"{role}: исключение не устарело — {{{{> tmp}}}} ещё нет", role not in with_tmp)
+    if why == NO_BASH:
+        check(f"{role}: Bash и правда запрещён (disallowedTools)", "Bash" in disallowed(text or ""))
+for role in sorted(templates):
+    if role in NO_TMP:
+        continue
+    text = templates[role]
+    check(f"{role}: входит часть tmp (или причина в NO_TMP)", "{{> tmp}}" in text)
     if role not in NO_REPORT:
         check(f"{role}: входит часть report", "{{> report}}" in text)
+
+# Предсказуемая папка в $TMPDIR — та же ловушка, что в случае 0353: её могла завести прошлая сессия. Своя папка
+# называется только через mktemp -d, путь — из его вывода; в тексте ролей остаётся шаблон с XXXXXX.
+FIXED_DIR = re.compile(r"\$TMPDIR/tmp-|tmp-[^\s`\"'/]*/")
+MKDIR_BAN = "Не `mkdir -p` — на чужой папке он молча вернёт 0."
+texts = {f"roles/{r}.tmpl": t for r, t in templates.items()}
+texts.update({f"roles/_parts/{f}": t for f, t in parts.items()})
+for name, text in sorted(texts.items()):
+    bad = [m.group(0) for m in FIXED_DIR.finditer(text) if "XXXXXX" not in m.group(0)]
+    check(f"{name}: нет предсказуемой папки в $TMPDIR", not bad, bad)
+    allowed = flat(text).count(MKDIR_BAN)
+    check(f"{name}: `mkdir -p` только в запрете", flat(text).count("mkdir -p") == allowed, allowed)
+
+CODEX_PHRASES = [
+    "1. Своя папка на поручение — отдельным вызовом `mktemp -d -p \"$TMPDIR\" tmp-codex-<ветка>-XXXXXX`, путь бери из"
+    " его вывода.",
+    "Папку `tmp-codex-<ветка>` без хвоста заводит обёртка для своих логов — поручение туда не клади.",
+    "Поручение лида или координатора — дословно в файл `<своя папка>/brief.md`, без своих добавлений.",
+    "`pantheon exec codex <папка worktree> \"<своя папка>/brief.md\"`.",
+]
+codex = flat(templates.get("codex-dev", ""))
+for phrase in CODEX_PHRASES:
+    check("codex-dev: «" + phrase[:60] + "…»", has(codex, phrase))
 
 # Приём из report.part: закрытый от записи лог оболочка не обрезает и владельцу (не root).
 d = tempfile.mkdtemp(prefix="tmp-0353-")
