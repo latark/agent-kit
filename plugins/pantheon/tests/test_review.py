@@ -131,6 +131,85 @@ def run_all(tmp):
     r = pantheon("review", "status", "latark/other", "17")
     check("status — фильтр по репозиторию", r.returncode == 0 and "записей нет" in r.stdout)
 
+    # metis-0393: итог по head — последний вердикт каждого argus (рецензент — сессия и agent_id, как у шлюза)
+    opus = dict(full["checklist"], ran="модель: claude-opus-5-5, heavy pytest")
+
+    def v(kind, sha, aid, sid="s", pr=40, who="argus", cl=opus):
+        return dict(rec, kind=kind, sha=sha, pr=pr, by={"agent_type": who, "agent_id": aid, "session_id": sid},
+                    checklist=cl)
+    S2, S3, S4, S5 = "b" * 40, "c" * 40, "d" * 40, "e" * 40
+    sonnet = dict(opus, ran="модель: claude-sonnet-4-6, heavy pytest")
+    tally = [v("reject", SHA, "aaaaaaaa11"), v("accept", SHA, "aaaaaaaa11"),  # вернул и сам же снял
+             v("reject", SHA, "bbbbbbbb22"),                                   # вернул, не снял
+             v("accept", SHA, "bbbbbbbb22", sid="s2"),                         # тот же agent_id, другая сессия
+             v("accept", SHA, "cccccccc33", pr=41), v("talos", SHA, "dddddddd44", who="talos"),
+             v("accept", SHA, "eeeeeeee55", pr=None),            # без PR: review_records его пропускает, шлюз — нет
+             v("accept", SHA, "ffffffff66", who="dev-opus"),     # «принять» не от argus шлюз не считает
+             v("accept", S2, "aaaaaaaa11"), v("accept", S2, "bbbbbbbb22"),
+             # «принять» не на Opus не в счёт, как у шлюза (metis-0176): и «вернуть» того же рецензента не снимает
+             v("accept", S3, "aaaaaaaa11"), v("accept", S3, "gggggggg77", cl=sonnet),
+             v("accept", S3, "gggggggg78", cl=dict(opus, ran="heavy pytest, модель: claude-opus-5-5")),
+             v("reject", S3, "iiiiiiii99"), v("accept", S3, "iiiiiiii99", cl=sonnet),
+             # «принять» без полного перечня (Б6) не в счёт
+             v("accept", S4, "aaaaaaaa11"), v("accept", S4, "hhhhhhhh88", cl=None),
+             v("accept", S4, "hhhhhhhh89", cl=dict(opus, unchecked=" ")),
+             # metis-0393: модели транскрипта argus (поле models от хука guard) — как у шлюза merge.gate: «модель:
+             # claude-opus» в --ran, а по транскрипту Sonnet — не в счёт; models_note (транскрипта не было) — по --ran
+             dict(v("accept", S5, "jjjjjjjj01"), models=["claude-sonnet-4-6"]),
+             dict(v("accept", S5, "jjjjjjjj02"), models=["claude-opus-5-5-20261001"]),
+             dict(v("accept", S5, "jjjjjjjj03"), models_note="транскрипт argus не найден"),
+             dict(v("accept", S5, "jjjjjjjj04", cl=sonnet), models_note="транскрипт argus не найден")]
+    with open(os.path.join(state, "merge-gate", "records.jsonl"), "w") as fh:
+        fh.write("".join(json.dumps(x) + "\n" for x in tally))
+    r = pantheon("review", "status", "latark/agent-kit", "40")
+    out = r.stdout.splitlines()
+    check("status: итог на head — «вернуть» снимает только тот же рецензент; другой PR, без PR и не argus не в счёт",
+          f"итог на {SHA[:12]}: принять 2, вернуть 1 — последний вердикт каждого argus" in out, r.stdout)
+    check("status: итог на другом head — свой", f"итог на {S2[:12]}: принять 2, вернуть 0 — последний вердикт "
+          "каждого argus" in out, r.stdout)
+    check("status: «принять» на Sonnet и с «модель: claude-opus» не в начале --ran не в счёт, «вернуть» не снимает",
+          f"итог на {S3[:12]}: принять 1, вернуть 1 — последний вердикт каждого argus" in out, r.stdout)
+    check("status: «принять» без перечня или с пустым полем не в счёт",
+          f"итог на {S4[:12]}: принять 1, вернуть 0 — последний вердикт каждого argus" in out, r.stdout)
+    check("status: «принять» не на Opus помечено в журнале",
+          sum("не на Opus (--ran без «модель: claude-opus» в начале)" in ln for ln in out) == 4, r.stdout)
+    check("status: «принять» с Opus в --ran, но Sonnet по транскрипту argus не в счёт; models_note — по --ran",
+          f"итог на {S5[:12]}: принять 2, вернуть 0 — последний вердикт каждого argus" in out, r.stdout)
+    check("status: расхождение --ran с транскриптом помечено своей строкой",
+          sum("не на Opus по транскрипту argus" in ln for ln in out) == 1, r.stdout)
+    # тот же журнал — шлюз владельца merge.gate (общее правило review_accept_counts): Sonnet по транскрипту не в счёт
+    import importlib.util as _ilu
+    import types as _types
+
+    def _load(name, path):
+        spec = _ilu.spec_from_file_location(name, path)
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    _M = _load("merge_for_test", os.path.join(os.path.dirname(LIB), "merge.py"))
+    _P = _types.SimpleNamespace(review_records=lambda repo: [x for x in tally if x["sha"] == S5],
+                                review_accept_counts=_load("pantheon_for_test", LIB).review_accept_counts)
+    _M.P = _P
+    view = {"state": "OPEN", "isDraft": False, "headRefOid": S5,
+            "statusCheckRollup": [{"name": "tests", "status": "COMPLETED", "conclusion": "SUCCESS"}]}
+    st, why = _M.gate("latark/agent-kit", 40, S5, view)
+    check("merge.gate на том же журнале: Sonnet по транскрипту не в счёт, models_note — по --ran", st == "fail"
+          and "нет записи тестов" in why, (st, why))
+    tests_rec = dict(rec, kind="tests", pr=None, sha=S5)
+    _P.review_records = lambda repo: [tests_rec] + [x for x in tally if x["sha"] == S5]
+    st, why = _M.gate("latark/agent-kit", 40, S5, view)
+    check("merge.gate: «принять» ×2 (Opus по транскрипту и models_note), Sonnet по транскрипту отсеян",
+          st == "ok" and "argus ×2" in why, (st, why))
+    _P.review_records = lambda repo: [tests_rec] + [x for x in tally if x["sha"] == S5
+                                                     and x["by"]["agent_id"] in ("jjjjjjjj01", "jjjjjjjj02")]
+    st, why = _M.gate("latark/agent-kit", 40, S5, view)
+    check("merge.gate: Opus в --ran и Sonnet по транскрипту — «1 из 2»", st == "fail" and "1 из 2" in why, (st, why))
+    check("status: у вердикта виден рецензент (agent_id/сессия по 8 знаков)",
+          any(ln.endswith("argus bbbbbbbb/s2") for ln in out) and any(ln.endswith("argus aaaaaaaa/s") for ln in out),
+          r.stdout)
+    r = pantheon("review", "status")
+    check("status без PR — итога нет (он по одному PR)", r.returncode == 0 and "итог на" not in r.stdout, r.stdout)
+
     # metis-0158: метка «ревью идёт»
     import time as _time
     import shutil as _sh

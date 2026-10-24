@@ -15,9 +15,12 @@
 не сохраняется и не выводится.
 
 Круги argus — вердикты шлюза слияния (STATE/merge-gate/records.jsonl) по PR, названным в журнале задачи, и файлы
-review-*.md направления с id в заголовке; возвраты — «вернуть» argus и переносы карточки владельцем назад
-(owner-log/board.jsonl); правки владельца — его заметки, ответы и переносы; возврат после слияния — другие задачи со
-словами revert, hotfix, «откатили» в одной строке с id.
+review-*.md направления с id в заголовке (строка «модель: …» перед заголовком пропускается). Круг — один head (SHA):
+два argus и повторные вердикты на тот же SHA — один круг; «с первого круга» — итог первого SHA (metis-0393). SHA файла —
+из «Head: <sha>» шапки; «прошлый head <sha>» из поручения узкого повтора за него не считается.
+Возвраты — круги с итогом «вернуть» и переносы карточки владельцем назад (owner-log/board.jsonl); правки владельца —
+его заметки, ответы и переносы; возврат после слияния — другие задачи со словами revert, hotfix, «откатили» в одной
+строке с id.
 
 Свод — по исполнителю×модели×effort и по направлениям, за неделю и с начала: metrics/week-<ГГГГ-Wнн>.md и заметки
 Доска/Учёт/*.md для видов «Учёт недели» и «Учёт с начала» на Пульте. Модуль без tomllib: идёт и на системном 3.9.
@@ -42,6 +45,13 @@ JOURNAL_RE = re.compile(r"^- (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}) — ")
 PR_RE = re.compile(r"(?<![\w./-])([\w.-]+/[\w.-]+)#(\d{1,6})\b|github\.com/([\w.-]+/[\w.-]+)/pull/(\d{1,6})\b"
                    r"|(?:\bPR\s*#?|/pull/)(\d{1,6})\b")
 VERDICT_RE = re.compile(r"Вердикт:?\**:?\s*\**\s*(принять|вернуть)", re.I)
+# head ревью в файле: «Head: <sha>» или «Head <sha>»; нет — конец дельты «A..<sha>», затем SHA в заголовке
+# («… на 3eb43c1»). SHA — 7–40 hex с цифрой: слова из букв a–f за него не сойдут
+SHA_TOKEN = r"(?=[0-9a-f]*\d)([0-9a-f]{7,40})(?![0-9a-z])"
+HEAD_RES = (re.compile(r"\bhead\b[^\n0-9a-f]{0,30}?" + SHA_TOKEN, re.I), re.compile(r"\.\." + SHA_TOKEN, re.I))
+TITLE_SHA_RE = re.compile(r"(?<![0-9a-z])" + SHA_TOKEN, re.I)
+MODEL_LINE_RE = re.compile(r"^\W*модель\s*:", re.I)
+PREV_HEAD_RE = re.compile(r"\b(?:прошл|предыдущ|previous|prev|old)\w*\W{0,3}$", re.I)
 REVERT_RE = re.compile(r"\brevert(?:ed)?\b|hotfix|хотфикс|откатил|откатили|возврат после слияния|сломал[аио]? после слияния",
                        re.I)
 BACK_SRC = ("На проверке", "Готово")
@@ -277,8 +287,28 @@ def _jsonl(path):
     return out
 
 
+def review_title(text):
+    """Заголовок файла ревью — первая непустая строка, кроме строки «модель: …»: argus пишет её и до заголовка."""
+    for line in text.split("\n")[:10]:
+        if line.strip() and not MODEL_LINE_RE.match(line):
+            return line
+    return ""
+
+
+def review_sha(text, title):
+    """SHA проверенного head из шапки файла ревью (первые 7 знаков, нижний регистр) или None."""
+    top = text[:2000]
+    for rx in HEAD_RES:
+        for m in rx.finditer(top):
+            # «прошлый head <sha>» из поручения узкого повтора — не проверенный head: берём следующее совпадение
+            if not PREV_HEAD_RE.search(top[max(0, m.start() - 16):m.start()]):
+                return m.group(1)[:7].lower()
+    m = TITLE_SHA_RE.search(title)
+    return m.group(1)[:7].lower() if m else None
+
+
 def review_files(pantheon):
-    """review-*.md направлений → [(mtime, первая строка, вердикт «принять»/«вернуть» или None)]."""
+    """review-*.md направлений → [(mtime, заголовок, вердикт «принять»/«вернуть» или None, SHA head или None)]."""
     out = []
     for f in glob.glob(os.path.join(pantheon, "directions", "*", "review-*.md")):
         try:
@@ -287,8 +317,9 @@ def review_files(pantheon):
         except OSError:
             continue
         m = VERDICT_RE.search(text)
-        out.append((mt, text.split("\n", 1)[0], m.group(1).lower() if m else None))
-    return sorted(out)
+        title = review_title(text)
+        out.append((mt, title, m.group(1).lower() if m else None, review_sha(text, title)))
+    return sorted(out, key=lambda x: (x[0], x[1]))
 
 
 def pr_refs(body):
@@ -321,16 +352,25 @@ def argus_info(tid, body, gate, reviews, repos=None):
         with_gate = {x for r in verdicts if r.get("pr") == n for x in repos_of(r) if x in mine}
         if len(with_gate) == 1:
             refs.add((next(iter(with_gate)), n))
-    # круг — один проверенный head: вердикты на тот же SHA (повтор «принять» с перечнем) — один круг, итог — последний.
-    # PR в журнале бывает несколько (упомянуты чужие) — берём тот, где кругов больше всего
+    # круг — один проверенный head (metis-0393): все вердикты на тот же SHA — один круг, сколько бы argus его ни
+    # смотрели. Итог круга — «вернуть», если последний вердикт хоть одного argus на этом SHA «вернуть» (так считает и
+    # шлюз). PR в журнале бывает несколько (упомянуты чужие) — берём тот, где кругов больше всего
     per = defaultdict(dict)
     for r in sorted(verdicts, key=lambda r: epoch(str(r.get("time"))) or 0):
+        by = r.get("by") if isinstance(r.get("by"), dict) else {}
         for repo in repos_of(r):
             key = (repo, r.get("pr"))
             if key in refs:
-                per[key][str(r.get("sha"))] = "принять" if r["kind"] == "accept" else "вернуть"
-    kinds = max((list(v.values()) for v in per.values()), key=len, default=[])
-    rv = [v for _, title, v in reviews if v and re.search(rf"(?<![\w-]){re.escape(tid)}(?!\d)", title)]
+                per[key].setdefault(str(r.get("sha")), {})[str(by.get("agent_id") or "")] = r["kind"]
+    kinds = max(([("вернуть" if "reject" in v.values() else "принять") for v in shas.values()]
+                 for shas in per.values()), key=len, default=[])
+    # файлы ревью: два файла на один head (два argus, повтор с перечнем) — один круг; без SHA — круг на файл
+    files = {}
+    for i, rec in enumerate(reviews):
+        _, title, v, sha = (tuple(rec) + (None,))[:4]
+        if v and re.search(rf"(?<![\w-]){re.escape(tid)}(?!\d)", title):
+            files.setdefault(sha or ("file", i), []).append(v)
+    rv = [("вернуть" if "вернуть" in vs else "принять") for vs in files.values()]
     seq = kinds if len(kinds) >= len(rv) else rv
     return {"rounds": len(seq), "first_pass": (seq[0] == "принять") if seq else None,
             "rejects": seq.count("вернуть")}
@@ -583,9 +623,9 @@ def week_md(s, t):
     parts = [f"# Учёт задач: неделя {s['week_name']}", "",
              "Собрано из metrics/tasks.jsonl (pantheon metrics, metis-0294). "
              "«Оценка» — строки, восстановленные задним числом по журналам: расход и круги там неполные.", "",
-             "Столбцы: «с первого круга» — первый вердикт argus «принять» из задач, где вердикт известен; «кругов» — "
-             "среднее число вердиктов; токены и $ — среднее по задачам, где расход нашёлся; «возвратов» — «вернуть» "
-             "argus и переносы владельцем назад; «после слияния» — задачи, на которые ссылается revert или hotfix.", ""]
+             "Столбцы: «с первого круга» — итог первого проверенного head «принять» у всех argus, из задач, где он "
+             "известен; «кругов» — среднее число проверенных head (SHA), а не вердиктов; токены и $ — среднее по "
+             "задачам, где расход нашёлся; «возвратов» — круги с итогом «вернуть» и переносы владельцем назад; «после слияния» — задачи, на которые ссылается revert или hotfix.", ""]
     for name, label in (("week", f"Неделя {s['week_name']}"), ("all", "С начала учёта")):
         parts += [f"## {label}", "", "### По исполнителю × модели × effort", "",
                   _table(["исполнитель", "модель", "effort"], s[name]["by_executor"]), "",

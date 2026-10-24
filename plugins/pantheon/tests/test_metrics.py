@@ -338,6 +338,71 @@ def argus_multi():
           got == {"rounds": 1, "first_pass": True, "rejects": 0}, got)
 
 
+def argus_sha():
+    """Круг — один проверенный head (metis-0393): два argus и повторы на тот же SHA — один круг, «с первого круга» —
+    итог первого SHA; файл ревью со строкой «модель: …» перед заголовком тоже читается."""
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="metrics-sha-"))
+    atexit.register(shutil.rmtree, tmp, True)
+    d = os.path.join(tmp, "directions", "metis-pantheon")
+    os.makedirs(d)
+    h1, h2 = "1a2b3c4d5e6f708192a3b4c5d6e7f80912a3b4c5", "9f8e7d6"
+    files = [("review-120-a.md",
+              f"# Ревью PR #120 (metis-0950), argus a\n\nмодель: x\nHead: {h1}\n\nВердикт: вернуть\n"),
+             ("review-120-b.md", f"модель: claude-opus-5-5\n\n# Ревью PR #120 (metis-0950), второй argus\n\n"
+                                 f"Head {h1[:7]} (ls-remote совпал)\n\n**Вердикт: принять.**\n"),
+             ("review-120-a2.md",
+              f"# Ревью PR #120 (metis-0950), круг 2, дельта {h1[:7]}..{h2}\n\nВердикт: принять\n"),
+             ("review-121.md",
+              "модель: claude-opus-5-5\n# Ревью metis-0951 — argus\nHead: 0f0e0d0c\nВердикт: принять\n"),
+             ("review-122-a.md", "# Ревью metis-0952 — argus a\n\nhead: decaffed, не сверен\nВердикт: вернуть\n"),
+             ("review-122-b.md", "# Ревью metis-0952 — argus b «вернуть» на 3eb43c1\n\nВердикт: вернуть\n"),
+             ("review-123-a.md", "# Ревью metis-0953 — argus a\nHead: 5c5c5c5\nВердикт: вернуть\n"),
+             ("review-123-b.md", "# Ревью metis-0953 — argus b, обходы\nHead: 5c5c5c5\nВердикт: вернуть\n"),
+             ("review-123-a2.md", "# Ревью metis-0953 — argus a, круг 2\nHead: 6d6d6d6\nВердикт: принять\n"),
+             # узкий повтор (ревью #118 b, п. 3): «прошлый head» из поручения стоит раньше проверенного «Head:»
+             ("review-124-a.md", "# Ревью metis-0954 — argus a\nHead: aaaaaa1\nВердикт: вернуть\n"),
+             ("review-124-a2.md", "# Ревью metis-0954 — argus a, узкий\nУзкий повтор: прошлый head aaaaaa1. "
+                                  "Head: bbbbbb2\nВердикт: вернуть\n"),
+             ("review-124-a3.md", "# Ревью metis-0954 — argus a, круг 3\nHead: ccccc3c\nВердикт: принять\n")]
+    for i, (name, text) in enumerate(files):
+        f = os.path.join(d, name)
+        with open(f, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.utime(f, (T0 + i, T0 + i))
+    reviews = M.review_files(tmp)
+    got_shas = sorted(((tuple(x) + (None,))[3] or "-") for x in reviews)  # до metis-0393 SHA в записи не было
+    check("SHA из шапки: Head: <sha>, Head <sha>, конец дельты A..<sha>, «на <sha>» в заголовке; без SHA — None",
+          got_shas == sorted([h1[:7], h1[:7], h2, "0f0e0d0", "-", "3eb43c1", "5c5c5c5", "5c5c5c5", "6d6d6d6",
+                              "aaaaaa1", "bbbbbb2", "ccccc3c"]),
+          got_shas)
+    got = M.argus_info("metis-0954", "", [], reviews, None)
+    check("узкий повтор: «прошлый head <sha>» из поручения — не SHA круга, берётся «Head:» после него — 3 круга",
+          got == {"rounds": 3, "first_pass": False, "rejects": 2}, got)
+    got = M.argus_info("metis-0953", "", [], reviews, None)
+    check("два argus на один head, оба «вернуть», затем «принять» на новом — 2 круга, а не 3 файла",
+          got == {"rounds": 2, "first_pass": False, "rejects": 1}, got)
+    got = M.argus_info("metis-0950", "", [], reviews, None)
+    check("два файла ревью на один SHA — один круг: 3 файла, 2 head; первый head с «вернуть» — не с первого круга",
+          got == {"rounds": 2, "first_pass": False, "rejects": 1}, got)
+    got = M.argus_info("metis-0951", "", [], reviews, None)
+    check("файл со строкой «модель:» до заголовка читается: id в заголовке со второй строки",
+          got == {"rounds": 1, "first_pass": True, "rejects": 0}, got)
+    got = M.argus_info("metis-0952", "", [], reviews, None)
+    check("файл без SHA — свой круг, файл с SHA — свой", got == {"rounds": 2, "first_pass": False, "rejects": 2}, got)
+    def g(kind, sha, time, who):
+        return {"kind": kind, "repo": [KIT], "pr": 120, "sha": sha, "time": time, "by": {"agent_id": who}}
+
+    two = [g("accept", h1, "2026-10-19T10:30:00", "b"), g("reject", h1, "2026-10-19T10:20:00", "a")]
+    body = "- 2026-10-19 11:00 — metis: PR latark/agent-kit#120 argus\n"
+    got = M.argus_info("metis-0960", body, two, [], None)
+    check("шлюз: два argus на один SHA, первый «вернуть», второй позже «принять» — один круг, не с первого",
+          got == {"rounds": 1, "first_pass": False, "rejects": 1}, got)
+    two += [g("accept", h1, "2026-10-19T10:40:00", "a"), g("accept", h2, "2026-10-19T11:00:00", "a")]
+    got = M.argus_info("metis-0960", body, two, [], None)
+    check("шлюз: тот же argus снял «вернуть» на том же SHA — круг принят; новый SHA — второй круг",
+          got == {"rounds": 2, "first_pass": True, "rejects": 0}, got)
+
+
 def race():
     """Закрытие и плановый проход одной задачи разом (ревью #83, п. 2): пока закрытие читает транскрипты, проход
     успевает записать строку — закрытие её не дублирует. Без потоков: проход запускается изнутри чтения транскриптов."""
@@ -452,6 +517,7 @@ def cli():
 unit()
 argus_repo()
 argus_multi()
+argus_sha()
 race()
 cli()
 print(f"{sum(results)} из {len(results)} прошли")
