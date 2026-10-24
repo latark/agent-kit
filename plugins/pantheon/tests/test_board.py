@@ -588,7 +588,7 @@ def main():
         "--project", "ExampleApp", t=day - 60)
     run(away, "board", t=day)
     lines = [l for l in open(nlog, encoding="utf-8").read().split("\n") if l]
-    check("уведомление «❓ Вопрос к вам» ведёт в карточку", any("Вопрос к вам: Выбрать тариф" in l and "file=" in l and "%D0%92%D1%8B%D0%B1%D1%80" in l for l in lines))
+    check("уведомление «❓ Вопрос к вам» ведёт в карточку", any("Вопрос к вам: Выбрать тариф" in l and "open?path=%2F" in l and "file=" not in l and "%D0%92%D1%8B%D0%B1%D1%80" in l for l in lines))
     open(nlog, "w").close()
     run(env, "task", "new", "--direction", "athena-shop", "--title", "Ночной вопрос", "--status", "waiting",
         "--waiting-on", "human", "--next", "ответ", "--project", "ExampleApp", t=day + 60)
