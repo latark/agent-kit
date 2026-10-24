@@ -2092,7 +2092,7 @@ def t_carry_chain(h):
     merge_case("цепочка: «вернуть» второго argus на R в силе на N — отказ",
                h.pre(f"gh pr merge 7 --match-head-commit {s['N']}", pdir=cwd), False, "«вернуть» (reject)")
     # argus-117b7: вердикт только на R, на двух подтягиваниях базы (A, слияние main_new) и на выпуске N — ни одного;
-    # звенья цепочки — коммиты без вердикта между R и N (все, не только первая линия родителей, — t_carry_pull)
+    # звенья цепочки — коммиты без вердикта между R и N на линии первых родителей (t_carry_line)
     only = [rec("tests", "latark/agent-kit", None, s["N"], "dev-opus"),
             rec("reject", "latark/agent-kit", 7, s["R"], agent_id="argus2"), opus_accept(s["N"], "argus3")]
     for r in only:
@@ -2164,14 +2164,14 @@ def pull_history(p, side, empties=0):
 
 
 def t_carry_pull(h):
-    """argus-122b, блокеры 1 и 2: «вернуть» argus2 на R, Opus-«принять» argus3 на A, тесты на N. Звенья цепочки — все
-    коммиты между R и N, не только первая линия родителей (база подтянута слиянием «со стороны main»); звеньев больше
-    CARRY_LINKS, хоть окно rev-list и обрезано, — не переносится ничего, и «принять» с A тоже не проходит."""
+    """argus-122b, блокеры 1 и 2: «вернуть» argus2 на R, Opus-«принять» argus3 на A, тесты на N. База подтянута
+    слиянием «со стороны main» — не прямая линия первых родителей, не переносится ничего (решение владельца 24.10);
+    звеньев больше CARRY_LINKS, хоть окно rev-list и обрезано, — тоже ничего, и «принять» с A не проходит."""
     kit, cwd = h.j("projects/agent-kit"), "projects/agent-kit"
     mg = _load_merge_gate("merge_gate_pull")
     cases = [  # имя, слияние «со стороны main», пустых коммитов, R переходит
         ("обычный порядок родителей", False, 0, True),
-        ("слияние «со стороны main» (блокер 1)", True, 0, True),
+        ("слияние «со стороны main» (блокер 1)", True, 0, False),
         ("K=28 — 30 звеньев (контроль)", False, 28, True),
         ("K=29 — 31 звено (блокер 2)", False, 29, False),
         ("K=35 — 37 звеньев (блокер 2)", False, 35, False),
@@ -2192,6 +2192,10 @@ def t_carry_pull(h):
                                 lambda: (files, None))
         if carry:
             check(f"подтягивание {name}: на N переходят записи R и A", same == {s["R"], s["A"]}, (same, whys))
+        elif side:  # решение владельца 24.10 (consent metis-0427): первый родитель L2 — main_new, не прямая линия
+            check(f"подтягивание {name}: не переносится ничего, причина — не прямая линия первых родителей",
+                  same == set() and whys and "не прямая линия" in whys[-1] and "первый родитель" in whys[-1],
+                  (same, whys))
         else:
             check(f"подтягивание {name}: не переносится ничего, причина — больше {mg.CARRY_LINKS} коммитов",
                   same == set() and whys and f"больше {mg.CARRY_LINKS} коммитов" in whys[-1], (same, whys))
@@ -2201,6 +2205,142 @@ def t_carry_pull(h):
         merge_case(f"подтягивание {name}: «принять» другого argus на A «вернуть» с R не перекрывает — отказ",
                    h.pre(f"gh pr merge 7 --match-head-commit {s['N']}", pdir=cwd), False,
                    "«вернуть» (reject)" if carry else "")
+
+
+def line_history(p, mode):
+    """История pull_history (R правит g.py, main_old переименовал g.py в h.py, main_new переписал h.py), выпуски A
+    (0.11.85) и N (0.11.86) поверх; (коммиты, база PR). mode:
+    side — проба probe2 argus-122b9: S = R + то же переименование руками на побочной ветке, T = merge(S, main_old),
+      L1 = merge(R, T), L2 = merge(L1, main_new);
+    manual — S на первой линии: L1 = merge(S, main_old), L2 = merge(L1, main_new); R → L1 чисто, R → S и R → N — нет;
+    anc — коммит PR X (от R) уже в базе main_x = merge(main_old, X), L2 = merge(L1, main_x): ветвление внутри PR;
+    foreign — L1 = merge(R, main_old), в PR слита чужая ветка Z от B (не база), затем main_new;
+    p1 — база main_r = merge(main_old, R), M = merge(B, R) «со стороны B» (первый родитель B, второй R)."""
+    def put(files, msg):
+        for rel, text in files.items():
+            f = os.path.join(p, rel)
+            if text is None:
+                os.remove(f)
+                continue
+            os.makedirs(os.path.dirname(f), exist_ok=True)
+            with open(f, "w") as fh:
+                fh.write(text)
+        git(p, "add", "-A")
+        git(p, "commit", "-q", "--allow-empty", "-m", msg)
+        return git(p, "rev-parse", "HEAD")
+
+    def merge(x):
+        git(p, "merge", "-q", "--no-edit", "--no-ff", x)
+        return git(p, "rev-parse", "HEAD")
+
+    g, h_ = "plugins/pantheon/lib/g.py", "plugins/pantheon/lib/h.py"
+    lines = [f"l{i} = {i}\n" for i in range(1, 11)]
+    s = {}
+    git(p, "checkout", "-q", "-B", "c-base", "main")
+    s["B"] = put({PJ: _manifest("pantheon", "0.11.84"), g: "".join(lines)}, "B")
+    git(p, "checkout", "-q", "-B", "c-old", s["B"])
+    s["main_old"] = put({g: None, h_: "".join(lines)}, "main: g.py → h.py")
+    s["main_new"] = put({h_: "".join(lines[:4]) + "".join(f"m{i} = {i} * 7  # переписано\n" for i in range(40))},
+                        "main: h.py переписан")
+    base = s["main_new"]
+    git(p, "checkout", "-q", "-B", "c-pr", s["B"])
+    s["R"] = put({g: "l1 = 100\n" + "".join(lines[1:])}, "PR: строка 1 g.py")
+    renamed = {g: None, h_: "l1 = 100\n" + "".join(lines[1:])}
+    if mode == "side":
+        git(p, "checkout", "-q", "-B", "c-side", s["R"])
+        s["S"] = put(renamed, "побочная ветка: переименование как в main")
+        s["T"] = merge(s["main_old"])
+        git(p, "checkout", "-q", "c-pr")
+        s["L1"] = merge(s["T"])
+        s["L2"] = merge(s["main_new"])
+    elif mode == "manual":
+        s["S"] = put(renamed, "PR: переименование как в main")
+        s["L1"] = merge(s["main_old"])
+        s["L2"] = merge(s["main_new"])
+    elif mode == "anc":
+        git(p, "checkout", "-q", "-B", "c-x", s["R"])
+        s["X"] = put({"plugins/pantheon/lib/u.py": "u = 1\n"}, "PR: u.py")
+        git(p, "checkout", "-q", "-B", "c-mx", s["main_old"])  # main_new с правкой g.py не сливается чисто
+        base = s["main_x"] = merge(s["X"])
+        git(p, "checkout", "-q", "c-pr")
+        s["L1"] = merge(s["main_old"])
+        s["L2"] = merge(s["main_x"])
+    elif mode == "foreign":
+        s["L1"] = merge(s["main_old"])
+        git(p, "checkout", "-q", "-B", "c-z", s["B"])
+        s["Z"] = put({"plugins/pantheon/lib/z.py": "z = 1\n"}, "чужая ветка")
+        git(p, "checkout", "-q", "c-pr")
+        s["LZ"] = merge(s["Z"])
+        s["L2"] = merge(s["main_new"])
+    elif mode == "p1":
+        git(p, "checkout", "-q", "-B", "c-mr", s["main_old"])
+        base = s["main_r"] = merge(s["R"])
+        git(p, "checkout", "-q", "-B", "c-pr", s["B"])
+        s["M"] = merge(s["R"])
+    s["A"] = put({PJ: _manifest("pantheon", "0.11.85")}, "выпуск A")
+    s["N"] = put({PJ: _manifest("pantheon", "0.11.86")}, "выпуск N")
+    git(p, "checkout", "-q", "main")
+    return s, base
+
+
+def t_carry_line(h):
+    """Решение владельца 24.10 (consent metis-0427): перенос — только по прямой линии первых родителей от самого
+    старого head с вердиктом до нового; вторые родители — только подтянутая база, ветвлений внутри PR нет, все head с
+    вердиктами на линии. Иначе не переносится ничего — нужен свежий argus. «Вернуть» argus2 на R, Opus-«принять»
+    argus3 на A, тесты на N. На прямой линии звено сверяется с sha и со всеми перенесёнными звеньями, а не только с
+    последним (argus-122b9: побочное звено заслоняло L1)."""
+    kit, cwd = h.j("projects/agent-kit"), "projects/agent-kit"
+    mg = _load_merge_gate("merge_gate_line")
+    a, b = "a" * 40, "b" * 40
+    check("линия: rev-list не дал первых родителей (пусто, корневой коммит, не SHA) — не прямая",
+          all("не прочитаны" in (mg._bent(kit, rows, a, b, set(), b, "--max-count=1") or "")
+              for rows in ([], [[b]], [[b, "HEAD"]], [["c" * 40, a]])))
+    cases = [  # режим, подстрока причины (None — R и A переходят)
+        ("side", "второй родитель"), ("anc", "ветвление"), ("foreign", "второй родитель"),
+        ("p1", "первый родитель"), ("cand_off", "не на линии первых родителей"), ("manual", None),
+    ]
+    for mode, why in cases:
+        h.reset()
+        if mode == "cand_off":  # «вернуть» argus4 на коммите базы main_new: head с вердиктом не на линии PR
+            s = pull_history(kit, False)
+            base = s["main_new"]
+        else:
+            s, base = line_history(kit, mode)
+        recs = [rec("tests", "latark/agent-kit", None, s["N"], "dev-opus"),
+                rec("reject", "latark/agent-kit", 7, s["R"], agent_id="argus2"), opus_accept(s["A"], "argus3")]
+        if mode == "cand_off":
+            recs.append(rec("reject", "latark/agent-kit", 7, s["main_new"], agent_id="argus4"))
+        for r in recs:
+            r["repo"] = [x.lower() for x in r["repo"]]
+        if mode in ("side", "manual"):
+            check(f"линия {mode}: условие пробы — R → N не сверяется, R → L1 чисто",
+                  isinstance(mg.same_change(kit, s["R"], s["N"], base), str)
+                  and mg.same_change(kit, s["R"], s["L1"], base) is None)
+        files = pr_paths(kit, s["N"], base)
+        same, whys = mg.carried(kit, "latark/agent-kit", 7, s["N"], recs, lambda: {"baseRefOid": base},
+                                lambda: (files, None))
+        if why is None:
+            check(f"линия {mode}: R переходит через L1, хоть S сведено с N раньше", same == {s["R"], s["A"]},
+                  (same, whys))
+        else:
+            check(f"линия {mode}: не переносится ничего, причина — {why}",
+                  same == set() and whys and "не прямая линия" in whys[-1] and why in whys[-1], (same, whys))
+        h.view["agent-kit"]["baseRefOid"] = base
+        h.gh(files, head=s["N"])
+        h.seed(*recs)
+        merge_case(f"линия {mode}: «принять» с A не проходит — отказ",
+                   h.pre(f"gh pr merge 7 --match-head-commit {s['N']}", pdir=cwd), False,
+                   "«вернуть» (reject)" if why is None else "не прямая линия")
+        if mode == "manual":
+            old = mg.CARRY_CHECKS
+            mg.CARRY_CHECKS = 3
+            try:
+                same, whys = mg.carried(kit, "latark/agent-kit", 7, s["N"], recs, lambda: {"baseRefOid": base},
+                                        lambda: (files, None))
+            finally:
+                mg.CARRY_CHECKS = old
+            check("линия manual: сверок больше CARRY_CHECKS — не переносится ничего, причина в отказе",
+                  same == set() and whys and "сверок цепочки переноса больше 3" in whys[-1], (same, whys))
 
 
 def opus_accept(sha, aid):
@@ -2339,7 +2479,7 @@ CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, 
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_transcript, t_ci,
-         t_core_touchid, t_carry_unit, t_carry_gate, t_carry_product, t_carry_chain, t_carry_pull, t_carry_senior,
+         t_core_touchid, t_carry_unit, t_carry_gate, t_carry_product, t_carry_chain, t_carry_pull, t_carry_line, t_carry_senior,
          t_carry_opus, t_version_repo]
 
 

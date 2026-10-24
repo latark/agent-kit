@@ -41,7 +41,9 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    дерево нового head = git merge-tree прошлого head с базой, plugin.json сверяется по полям без version. Только вне
    ядра: PR задевает CORE_DIR или CORE_FILES — не переносится ничего (решение владельца 24.10). Перенос — по цепочке
    от последнего head с вердиктом: кандидат переходит, если до нового head или до уже перенесённого кандидата — только
-   номер версии и подтянутая база. Прошлых head с вердиктами больше CARRY_MAX — не переносится ничего. Иначе — не
+   номер версии и подтянутая база; только по прямой линии первых родителей, вторые родители — только подтянутая база,
+   без ветвлений внутри PR (решение владельца 24.10), иначе не переносится ничего.
+   Прошлых head с вердиктами больше CARRY_MAX — не переносится ничего. Иначе — не
    переносятся, причина в отказе. talos не переносится; reject переносится, как и accept.
    Номер версии (metis-0384, version_problem) — при каждом слиянии через шлюз, с переносом и без, по репозиторию PR,
    а не по git папки сливающего: файлы PR — gh api pulls/N/files, plugin.json на head и на живой вершине ветки базы
@@ -1071,6 +1073,7 @@ def _who(rec):
 VERSION_FILE = re.compile(r"plugins/[^/]+/\.claude-plugin/plugin\.json")
 CARRY_MAX = 10  # сколько прошлых head PR сверять (на каждый — десяток вызовов git); больше — не переносится ничего
 CARRY_LINKS = 30  # сколько коммитов без вердикта сверять звеньями цепочки переноса; больше — не переносится ничего
+CARRY_CHECKS = 60  # сколько сверок same_change на перенос (хук guard ограничен 10 с); больше — не переносится ничего
 _ABSENT = object()
 _CONFLICT = object()  # конфликт поля в _merge3: None — обычное значение поля (null в JSON), а не конфликт
 
@@ -1270,12 +1273,16 @@ def carried(d, repo, pr, sha, records, pr_view, pr_files):
     на этот PR; pr_view() и pr_files() — ответы gh pr view и _pr_files, зовутся, только если кандидаты есть.
     Только вне ядра (решение владельца 24.10): PR задевает CORE_DIR или CORE_FILES — не переносится ничего.
     Перенос — от последнего head с вердиктом: кандидаты-предки sha по числу коммитов, от нового к старому; кандидат
-    переходит, если от него до sha (same_change) или до последнего перенесённого кандидата — только номер версии и
+    переходит, если от него до sha (same_change) или до любого перенесённого звена — только номер версии и
     подтянутая база. Так «вернуть» с R не теряется, когда R → A и A → sha чистые, а R → sha — нет (merge-tree по
     переименованному в базе файлу, проба p6 argus-117b3). Звенья цепочки — и коммиты без вердикта от самого
-    старого кандидата до sha: все его потомки и предки sha, а не только первая линия родителей (два подтягивания базы
-    без вердикта между ними, argus-117b7; подтягивание слиянием «со стороны main», argus-122b). Их больше CARRY_LINKS
-    (считаются все, до обрезки окна) или git их не прочитал — не переносится ничего."""
+    старого кандидата до sha (два подтягивания базы без вердикта между ними, argus-117b7); звено переходит, если до
+    sha или до любого уже перенесённого звена — только номер версии и подтянутая база (argus-122b9).
+    Только по прямой линии (решение владельца 24.10, consent metis-0427; _bent): от самого старого кандидата до sha —
+    цепочка первых родителей, вторые родители — только подтянутая база, ветвлений внутри PR нет, все кандидаты на
+    линии. Иначе — подтягивание «со стороны main» (argus-122b), побочная ветка внутри PR (argus-122b9) — не
+    переносится ничего: нужен свежий argus, ложный отказ допустим, пропуск — нет. Коммитов на линии больше
+    CARRY_LINKS (считаются все, до обрезки окна), сверок больше CARRY_CHECKS или git их не прочитал — тоже ничего."""
     prevs = []
     for r in records:
         if r["kind"] in ("accept", "reject") and r["by"].get("agent_type") == "argus" and r["pr"] == pr \
@@ -1311,35 +1318,74 @@ def carried(d, repo, pr, sha, records, pr_view, pr_files):
         return set(), whys
     # звенья цепочки — и коммиты без вердикта от самого старого кандидата до sha (head после подтянутой базы, номер
     # версии): иначе «вернуть» с R теряется, когда R → N2 и N2 → N3 чистые, а R → N3 — нет и на N2 вердикта нет
-    # (argus-117b7). Все потомки кандидата и предки sha, а не только первая линия родителей: база, подтянутая слиянием
-    # «со стороны main», ставит прошлую вершину PR вторым родителем (argus-122b, блокер 1). Окно — с запасом на sha и
-    # все кандидаты: звеньев в нём больше CARRY_LINKS ровно тогда, когда их больше всего, а не только после обрезки
-    # окна кандидатами (argus-122b, блокер 2)
-    cands = {p for _n, p in order}
-    out = _git(d, "rev-list", "--ancestry-path", f"--max-count={CARRY_LINKS + len(cands) + 2}",
-               f"{max(order)[1]}..{sha}")
-    links = [x for x in (out or "").split() if x != sha and x not in cands]
+    # (argus-117b7). Только прямая линия (решение владельца 24.10, consent metis-0427): от самого старого кандидата
+    # до sha — цепочка первых родителей, вторые родители — только подтянутая база (предки baseRefOid), в PR нет
+    # ветвлений, все кандидаты на этой линии; иначе не переносится ничего. Подтягивание «со стороны main» (argus-122b,
+    # блокер 1) и побочная ветка внутри PR (argus-122b9) — не прямая линия. Окно — с запасом на sha и все кандидаты:
+    # звеньев в нём больше CARRY_LINKS ровно тогда, когда их больше всего (argus-122b, блокер 2)
+    cands, oldest = {p for _n, p in order}, max(order)[1]
+    cap = f"--max-count={CARRY_LINKS + len(cands) + 2}"
+    out = _git(d, "rev-list", "--first-parent", "--parents", cap, f"{oldest}..{sha}")
+    rows = [r.split() for r in (out or "").splitlines() if r.strip()]
+    chain = [r[0] for r in rows]
+    links = [x for x in chain if x != sha and x not in cands]
     if out is None or len(links) > CARRY_LINKS:
         return set(), whys + [("git rev-list не ответил" if out is None else
                                f"между прошлым head и новым больше {CARRY_LINKS} коммитов") +
                               " — записи не переносятся, нужны записи на этом head"]
-    for x in links:
-        count = _git(d, "rev-list", "--count", x) if SHA_RE.fullmatch(x) else None
-        if count is None or not count.strip().isdigit():
-            return set(), whys + [f"{x[:12]} — коммит цепочки не прочитан в git этой папки — записи не переносятся"]
-        order.append((-int(count.strip()), x))
-    same, last = set(), None
-    for _n, p in sorted(order):  # от нового head к старому: потомок длиннее предка по числу коммитов
-        why = same_change(d, p, sha, base.lower())
-        if why and last is not None and same_change(d, p, last, base.lower()) is None:
-            why = None  # p → last → … → sha: только номер версии и подтянутая база по цепочке
+    bent = _bent(d, rows, oldest, sha, cands, base.lower(), cap)
+    if bent:
+        return set(), whys + [f"история от {oldest[:12]} до нового head — не прямая линия первых родителей ({bent}) "
+                              "— записи не переносятся, нужны записи на этом head"]
+    # от нового head к старому по линии: звено переходит, если до sha или до любого уже перенесённого звена — только
+    # номер версии и подтянутая база (а не только до последнего перенесённого: побочное звено, сведённое с sha, не
+    # заслоняет более новое, с которым сводится кандидат, argus-122b9). Сверок больше CARRY_CHECKS — не переносится
+    # ничего: хук guard ограничен 10 с
+    same, passed, checks = set(), [], 0
+    for p in chain[1:] + [oldest]:
+        why = None
+        for q in [sha] + passed[::-1]:  # sha, затем перенесённые звенья от ближнего к дальнему
+            if checks >= CARRY_CHECKS:
+                return set(), whys + [f"сверок цепочки переноса больше {CARRY_CHECKS} — записи не переносятся, "
+                                      "нужны записи на этом head"]
+            checks += 1
+            got = same_change(d, p, q, base.lower())
+            if got is None:
+                why = None
+                break
+            why = why or got  # причина отказа — по сверке с sha
         if not why:
-            last = p
+            passed.append(p)
             if p in cands:
                 same.add(p)
         elif p in cands:
             whys.append(f"{p[:12]} — {why}")
     return same, whys
+
+
+def _bent(d, rows, oldest, sha, cands, base, cap):
+    """Почему история от oldest до sha — не прямая линия (carried, решение владельца 24.10); None — прямая. rows —
+    rev-list --first-parent --parents oldest..sha: строки «коммит родитель1 родитель2 …» от sha вниз. Прямая — первые
+    родители ведут от sha ровно к oldest; вторые родители — предки базы PR (подтянутая база); все потомки oldest и
+    предки sha (--ancestry-path) — на этой линии, ветвлений внутри PR нет; все кандидаты — на ней."""
+    if not rows or rows[0][0] != sha or any(len(r) < 2 or not all(SHA_RE.fullmatch(x) for x in r) for r in rows):
+        return "первые родители не прочитаны"
+    for r, nxt in zip(rows, [x[0] for x in rows[1:]] + [oldest]):
+        if r[1] != nxt:
+            return f"первый родитель {r[0][:12]} — не {nxt[:12]}"
+    for r in rows:
+        for x in r[2:]:
+            got = _git_rc(d, "merge-base", "--is-ancestor", x, base)
+            if got is None or got[0] != 0:
+                return f"второй родитель {r[0][:12]} — {x[:12]}, не подтянутая база PR"
+    line = {r[0] for r in rows}
+    out = _git(d, "rev-list", "--ancestry-path", cap, f"{oldest}..{sha}")
+    if out is None or set(out.split()) != line:
+        return "в PR есть ветвление: не все коммиты от прошлого head до нового — на линии первых родителей"
+    off = sorted(cands - line - {oldest})
+    if off:
+        return f"{off[0][:12]} — прошлый head с вердиктом не на линии первых родителей"
+    return None
 
 
 def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advice, protect, cwd=""):
