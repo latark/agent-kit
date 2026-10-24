@@ -3524,9 +3524,46 @@ def launch_folder(folders):
     return next((f for f in real if os.path.isdir(f)), real[0] if real else "")
 
 
+def hq_led(reg=None):
+    """metis-0155 (Б): направления, которые ведёт штаб, — `coordinator = false` в записи directions.toml. → {имя:
+    запись реестра}. По умолчанию координатор включён; выключает только булево false — другое значение `pantheon check`
+    считает ошибкой, а запуск — включённым координатором. Реестр не читается — пусто (координаторы как раньше)."""
+    if reg is None:
+        try:
+            with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
+                reg = tomllib.load(fh)
+        except (OSError, ValueError):
+            return {}
+    return {d["name"]: d for d in reg.get("direction") or []
+            if isinstance(d, dict) and isinstance(d.get("name"), str) and d.get("coordinator") is False}
+
+
+def hq_led_why(target):
+    return (f"направление {target} ведёт штаб (coordinator = false в directions.toml) — координатора не поднимаю; "
+            f"задачу направления — pantheon wake {target} --task <id> (окно лида)")
+
+
+def lead_session(target, entry):
+    """Имя окна лида кода выключенного направления — hephaestus-<коротко>, как у субагента лида (domains_build,
+    roles_build). → имя или None: имя направления не «бог-коротко» или в leads нет hephaestus."""
+    bases = entry.get("leads") if isinstance(entry.get("leads"), list) else []
+    if "hephaestus" not in bases or not re.fullmatch(r"[a-z0-9]+-[a-z0-9-]+", target):
+        return None
+    return "hephaestus-" + target.split("-", 1)[1]
+
+
 def start_target(target, rest):
-    """→ (имя сессии, роль, папка запуска, файл окна, поручение по умолчанию) или текст ошибки."""
+    """→ (имя сессии, роль, папка запуска, файл окна, поручение по умолчанию) или текст ошибки. Направление, которое
+    ведёт штаб (coordinator = false, metis-0155), — текст ошибки: координатора у него нет."""
     domains = read_json(path("domains.json"), {}).get("domains") or {}
+    if target in domains and target in hq_led():
+        return hq_led_why(target)
+    return direction_target(target, rest, domains)
+
+
+def direction_target(target, rest, domains):
+    """start_target без проверки переключателя координатора: окно лида выключенного направления (wake_lead) берёт
+    ту же папку и то же окно, что у координатора."""
     if target == "workshop":
         if not rest or not SESSION_NAME.fullmatch(rest[0]):
             return "pantheon start workshop <задача> [поручение]: имя задачи — a-z, 0-9, дефис"
@@ -3582,6 +3619,9 @@ def start_at(rest, origin, dry):
         print(f"pantheon start --at: {e}", file=sys.stderr)
         return 2
     got = start_target(target, [])
+    if isinstance(got, str) and target in hq_led():  # metis-0155: разовый запуск координатора, которого нет, — отказ
+        print(f"pantheon start --at: {got}", file=sys.stderr)
+        return 2
     text = text or (got[4] if not isinstance(got, str) else "")
     if dry:
         print(f"[at] {target} в {stamp(when)} — {text}")
@@ -3700,7 +3740,9 @@ def start(rest):
 
 
 def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win, need_word=False,
-                   cmd="pantheon start"):
+                   cmd="pantheon start", agent=None):
+    """agent — определение роли для `claude --agent`, если оно не совпадает с ролью окна (окно лида выключенного
+    направления, metis-0155: окно и PANTHEON_ROLE координатора, роль hephaestus-<коротко>)."""
     agents = agents_all()
     if not dry:  # metis-0261 А: слово владельца и замер — до любых действий; список сессий тот же, что ниже
         code, why = start_gate(name, origin, agents, need_word)
@@ -3745,7 +3787,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
         # DONE-02: /goal первым словом поручения — Stop-хук сессии с отдельной проверяющей моделью: координатор не
         # закончит, пока условие не выполнено (проверено вживую 15.10: `claude --bg "/goal …"` включает цель)
         prompt = "/goal " + prompt + " " + (TASK_GOAL if " ".join(rest).strip() else COORDINATOR_GOAL)
-    argv = [claude_bin(), "--bg", "--agent", role, "--name", name, "--settings", run, prompt]
+    argv = [claude_bin(), "--bg", "--agent", agent or role, "--name", name, "--settings", run, prompt]
     if dry:
         print(shlex.join(argv), f"(папка {folder})")
         return 0
@@ -3968,6 +4010,83 @@ def wake_hestia(rest):
                               need_word=bool(role), cmd="pantheon wake hestia")
 
 
+def wake_lead(rest):
+    """pantheon wake <направление> --task <id> [--dry-run] (metis-0155, вариант Б): направление с coordinator = false
+    ведёт штаб, а задачу направления делает фоновое окно лида кода `hephaestus-<коротко>`. Окно — то же, что у
+    координатора: settings/<направление>.json (песочница направления, её собирает sandbox_build — здесь не меняется),
+    папка запуска координатора, PANTHEON_ROLE=domain-coordinator; отличаются имя сессии и определение роли (--agent
+    hephaestus-<коротко>). Новых прав у штаба нет: PR лид сливает через шлюз, как координатор.
+    Отказ, код 2, claude не зовётся: не направление; у направления свой координатор; задачи нет, она не открыта или
+    другого направления. Код 1: нет лида hephaestus в leads, роли ~/.claude/agents/hephaestus-<коротко>.md, окна или
+    папки; allow проекта роняет окно; метка «остановлено вами» у лида или направления; технический перезапуск.
+    Откуда и слово владельца — как у wake hestia: hq → zeus (без вашего слова за 15 мин — отказ), иная роль → tick
+    (только по вашему слову), без роли → owner."""
+    dry = "--dry-run" in rest
+    args = [a for a in rest if a != "--dry-run"]
+    target = args[0]
+    cmd = f"pantheon wake {target}"
+    domains = read_json(path("domains.json"), {}).get("domains") or {}
+    if target not in domains:
+        print(f"{cmd}: отказ — «{target}» не направление из domains.json; claude не запускался", file=sys.stderr)
+        return 2
+    entry = hq_led().get(target)
+    if entry is None:
+        print(f"{cmd}: отказ — у направления {target} свой координатор (coordinator = false не стоит): задачу ему — "
+              f"pantheon start {target} \"<поручение>\"; claude не запускался", file=sys.stderr)
+        return 2
+    tid = args[2] if len(args) == 3 and args[1] == "--task" else None
+    head = None
+    if tid and tasks_mod().ID_RE.fullmatch(tid):
+        head = (tasks_mod().load_tasks(PANTHEON).get(tid) or (None, None, None))[1]
+    if not head or head.get("status") not in OPEN_STATUSES or head.get("direction") != target:
+        why = ("укажи --task <id> открытой задачи направления (todo, doing, review)" if head is None
+               else f"задача {tid} не открыта ({head.get('status')})" if head.get("status") not in OPEN_STATUSES
+               else f"задача {tid} — направления {head.get('direction')}, не {target}")
+        print(f"{cmd}: отказ — нет задачи: {why}; claude не запускался", file=sys.stderr)
+        return 2
+    lead = lead_session(target, entry)
+    if not lead:
+        print(f"{cmd}: у направления нет лида кода — в его записи directions.toml нужен leads = [\"hephaestus\"] "
+              "(и имя вида бог-коротко), затем pantheon domains build", file=sys.stderr)
+        return 1
+    if not os.path.isfile(os.path.join(AGENTS, lead + ".md")):
+        print(f"{cmd}: нет роли ~/.claude/agents/{lead}.md — pantheon roles build", file=sys.stderr)
+        return 1
+    got = direction_target(target, [], domains)
+    if isinstance(got, str):
+        print(f"{cmd}: {got}", file=sys.stderr)
+        return 1
+    _, role, folder, window, _ = got
+    win = path("settings", window + ".json")
+    problems = allow_gate(target)
+    if problems:
+        print(f"{cmd}: окно не собрано — {project_allow_text(target, problems)}", file=sys.stderr)
+        return 1
+    if not os.path.isfile(win):
+        print(f"{cmd}: нет окна {win.replace(HOME, '~')} — pantheon domains build", file=sys.stderr)
+        return 1
+    for n in (lead, target):
+        if os.path.exists(path("stopped", n)):
+            print(f"{cmd}: {n} остановлено вами (pantheon resume {n})", file=sys.stderr)
+            return 1
+    m = maintenance_active()
+    if m and not dry:
+        print(f"{cmd}: идёт технический перезапуск ({m.get('reason')}) — после pantheon restart --go", file=sys.stderr)
+        return 1
+    role_env = os.environ.get("PANTHEON_ROLE") or ""
+    origin = "zeus" if role_env == "hq" else "tick" if role_env else "owner"
+    task = (f"Задача {tid} направления {target}. Координатора у направления нет — его ведёт штаб, ты работаешь в окне "
+            f"направления вместо координатора. Прочитай карточку (pantheon task show {tid}) и сделай ровно её: план, "
+            "работа dev-*, ревью argus, PR и слияние через шлюз — как обычно. Отчёт — по формату роли разделом "
+            f"«{tid}» в ~/ai/pantheon/directions/{target}/STATUS.md (его читает штаб) и последним сообщением.")
+    with lock("start-" + lead, block=False) as got:
+        if not got:
+            print(f"{cmd}: {lead} уже запускается другой командой", file=sys.stderr)
+            return 1
+        return _start_session(lead, role, folder, window, task, [task], origin, dry, False, win,
+                              need_word=bool(role_env), cmd=cmd, agent=lead)
+
+
 def wake(rest):
     """pantheon wake [--dry-run]: прерванные сессии Пантеона (failed, stopped) с открытой задачей — поднять и сказать
     «продолжай». Свои метки «остановлено вами» и чужие сессии (не направление и не daedalus-*) не трогает."""
@@ -3998,6 +4117,7 @@ def _wake(dry):
         print("pantheon wake: claude agents --json не ответил", file=sys.stderr)
         return 1
     domains = read_json(path("domains.json"), {}).get("domains") or {}
+    off = hq_led()  # metis-0155: координатора направления, которое ведёт штаб, не поднимаем (pantheon check предупредит)
     done = failed = 0
     for a in agents:
         name, state = a.get("name") or "", a.get("state")
@@ -4005,7 +4125,7 @@ def _wake(dry):
         if not asleep and state == "blocked":  # стоит на недельном лимите, сброс прошёл (metis-0132) — тоже спит
             with contextlib.suppress(Exception):
                 asleep = awake_mod().limit_sleeping(a) is not None
-        if not asleep or not (name in domains or name.startswith("daedalus-")):
+        if not asleep or not (name in domains or name.startswith("daedalus-")) or name in off:
             continue
         if os.path.exists(path("stopped", name)) or load_pause(name):
             continue
@@ -6541,6 +6661,51 @@ def _check_long_state(quiet):
             print(f"предупреждение · {text}")
 
 
+def check_coordinators(quiet):
+    """metis-0155: переключатель координатора в directions.toml. Ошибка — coordinator не булево (запуск считает такого
+    координатора включённым). Предупреждения: у выключенного направления нет лида hephaestus (wake --task его не
+    поднимет) или открыт координатор (его сессия с именем направления жива — штаб и координатор вели бы его вдвоём).
+    Тик (--quiet): открытый координатор — одна тревога на набор. → число ошибок."""
+    try:
+        with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
+            reg = tomllib.load(fh)
+    except (OSError, ValueError):
+        return 0
+    errs, warns, live_off = [], [], []
+    for d in reg.get("direction") or []:
+        if isinstance(d, dict) and "coordinator" in d and not isinstance(d["coordinator"], bool):
+            errs.append(f"directions.toml: у направления {d.get('name')} coordinator = {d['coordinator']!r} — нужно "
+                        "true или false без кавычек; пока координатор считается включённым")
+    off = hq_led(reg)
+    for name, e in sorted(off.items()):
+        if not lead_session(name, e):
+            warns.append(f"directions.toml: {name} ведёт штаб, но лида кода нет (leads = ['hephaestus']) — "
+                         f"pantheon wake {name} --task <id> окно не поднимет")
+    agents = None
+    if off:
+        with contextlib.suppress(Exception):
+            agents = agents_all()
+    for name in sorted(off):
+        live = live_copies(name, agents) if agents is not None else []
+        if live:
+            ids = ", ".join(str(a.get("id") or a.get("name")) for a in live)
+            live_off.append(name)
+            warns.append(f"у направления {name} coordinator = false, а его координатор открыт ({ids}) — направление "
+                         f"ведёт штаб: остановить координатора — pantheon stop {name}")
+    for e in errs:
+        print(f"ОШИБКА · {e}")
+    if not quiet:
+        for w in warns:
+            print(f"предупреждение · {w}")
+    else:
+        if live_off:
+            alert_once("check-coord-off", ",".join(live_off), f"координатор открыт у направления, которое ведёт штаб: "
+                       f"{', '.join(live_off)} — pantheon stop <направление>", "check")
+        else:
+            clear_once("check-coord-off")
+    return len(errs)
+
+
 def check(paths=None, quiet=False):
     T = tasks_mod()
     files = paths or list(T.task_files(PANTHEON))
@@ -6564,8 +6729,10 @@ def check(paths=None, quiet=False):
         if old != text:
             with open(pp, "w", encoding="utf-8") as fh:
                 fh.write(text)
+    coord_errs = 0
     if not paths:
         _check_long_state(quiet)
+        coord_errs = check_coordinators(quiet)
         for dname, fs in sorted((read_json(path("domains.json"), {}).get("domains") or {}).items()):
             # allow со старым mtime сборка по --if-changed не видит: check снимает окно сам, иначе следующий wake поднял
             # бы сессию снова (ревью argus PR #32)
@@ -6625,7 +6792,7 @@ def check(paths=None, quiet=False):
         else:
             clear_once("check-fields")
         return 0
-    return 1 if bad or drift or view_drift or field_errs else 0
+    return 1 if bad or drift or view_drift or field_errs or coord_errs else 0
 
 
 def task_cmd(rest):
@@ -7879,6 +8046,11 @@ def main(argv):
     if cmd == "wake":
         if rest[:1] == ["hestia"]:
             return wake_hestia(rest)
+        if rest and not rest[0].startswith("-") and "--task" in rest:  # окно лида направления без координатора
+            return wake_lead(rest)
+        if rest and not rest[0].startswith("-") and rest[0] in hq_led():
+            print(f"pantheon wake: {hq_led_why(rest[0])}", file=sys.stderr)
+            return 2
         if rest and not rest[0].startswith("-"):
             return watch_cmd("wake", rest)
         return wake(rest)

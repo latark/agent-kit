@@ -1262,8 +1262,9 @@ def project_health(c):
 
 
 def project_registry(dirs):
-    """Записи [[direction]] реестра → {проект: {directions, mark, rank, goal, budget, status, coordinator}}.
-    Проект — поле project, иначе имя направления; ранг — поле rank, иначе порядок в реестре."""
+    """Записи [[direction]] реестра → {проект: {directions, mark, rank, goal, budget, status, coordinator, hq_led}}.
+    Проект — поле project, иначе имя направления; ранг — поле rank, иначе порядок в реестре. hq_led — у направления
+    координатора проекта `coordinator = false` (metis-0155): его ведёт штаб."""
     out = {}
     for n, d in enumerate(dirs or [], 1):
         if not isinstance(d, dict) or not isinstance(d.get("name"), str) or not d["name"] or d["name"] == "inbox":
@@ -1272,9 +1273,12 @@ def project_registry(dirs):
         rank = d.get("rank") if isinstance(d.get("rank"), int) and not isinstance(d.get("rank"), bool) else n
         e = out.setdefault(p, {"directions": [], "mark": d.get("mark"), "rank": rank, "goal": d.get("goal"),
                                "budget": d.get("budget"), "status": d.get("status") or "активный",
-                               "coordinator": d["name"]})
+                               "coordinator": d["name"], "hq_led": d.get("coordinator") is False})
         e["directions"].append(d["name"])
     return out
+
+
+HQ_LED = "ведёт штаб"  # метка проекта на пульте, когда у направления coordinator = false (metis-0155)
 
 
 def project_note_name(p):
@@ -1289,14 +1293,16 @@ def render_project_note(p, reg, tasks, t, roles=None):
     upd = max((str(h.get("updated") or "")[:10] for _, h, _ in tasks.values() if h.get("direction") in reg["directions"]),
               default=None)
     node = (roles or Roles(reg["directions"])).name(reg["coordinator"])
+    # metis-0155: координатор выключен — направление ведёт штаб, метка вместо ссылки на сессию координатора
+    coord = HQ_LED if reg.get("hq_led") else link(node)
     mark = project_mark(p, {p: reg.get("mark")} if reg.get("mark") else None)
     budget = reg.get("budget")
     head = {"Тип": "проект", "Направление": ", ".join(reg["directions"]), "Значок": mark,
-            "Статус проекта": one_line(reg.get("status")), "Ранг": reg["rank"], "Координатор": link(node),
+            "Статус проекта": one_line(reg.get("status")), "Ранг": reg["rank"], "Координатор": coord,
             "Цель": one_line(reg.get("goal")) or None, "Здоровье": hl, "Цвет": color, "Обновлено": upd or None,
             "Бюджет недели": one_line(budget) if budget not in (None, "") else None, **c}
     body = (f"\n> Заметку пишет плановый проход по `directions.toml` и задачам. Не правьте её: счётчики сверяет "
-            f"`pantheon check`.\n\n# {mark} {p}\n\n**Здоровье:** {hl} · **Координатор:** {link(node)}"
+            f"`pantheon check`.\n\n# {mark} {p}\n\n**Здоровье:** {hl} · **Координатор:** {coord}"
             + (f" · **Цель:** {head['Цель']}" if head["Цель"] else "")
             + f"\n\nОткрыто {c['Открыто']} · в работе {c['В работе']} · ждёт вас {c['Ждёт вас']} · просрочено "
               f"{c['Просрочено']} · с пересечениями {c['Пересечений']} · пачек {c['Пачек']}\n\n"
