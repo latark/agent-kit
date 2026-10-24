@@ -1005,10 +1005,16 @@ def plan_batch(tasks, tids, t, busy=None, stale_h=STALE_HOURS):
     return out
 
 
+def id_link(i, names):
+    """Ссылка на карточку задачи `[[<имя файла>|<id>]]`; карточки нет — голый id (metis-0322)."""
+    return f"[[{names[i]}|{i}]]" if names.get(i) else i
+
+
 def card_ctx(tid, head, tasks, names, cross, t=None, night_end="08:00", open_prs=None):
     """Что карточке задачи нужно знать о других: незакрытые зависимости, пересечения, пачка и место в ней, слова
     «внимания» по всему (review без PR, готово без приёмки)."""
-    ctx = {"waits": open_deps(head, tasks), "cross": cross.get(tid) or []}
+    ctx = {"waits": [id_link(i, names) for i in open_deps(head, tasks)],
+           "cross": [id_link(i, names) for i in cross.get(tid) or []]}
     if t is not None:
         ctx["flags"] = extra_attention(head, tasks[tid][2] if tid in tasks else "", tasks, t, night_end, open_prs)
     sid = head.get("parent")
@@ -1038,7 +1044,10 @@ def pct_text(x):
 
 
 def story_children(sid, tasks):
-    return [tid for tid, (_, h, _) in tasks.items() if h.get("parent") == sid and h.get("type") == "task"]
+    """Задачи пачки и её дети-пачки (пачка пачек, metis-0322): у ребёнка-пачки parent или batch равен id этой пачки."""
+    return [tid for tid, (_, h, _) in tasks.items() if tid != sid and (
+        h.get("parent") == sid and h.get("type") in ("task", "story")
+        or h.get("type") == "story" and h.get("batch") == sid)]
 
 
 def _prio(h):
@@ -1083,7 +1092,16 @@ def story_info(sid, tasks):
             "budget": pct(tasks[sid][1].get("estimate")) if sid in tasks else None,
             "closed": [i for i in ids if heads[i].get("status") in ("done", "dropped")],
             "chain": [i for i in ids if i not in par], "parallel": par, "cross": cross,
-            "unknown": [i for i in ids if not heads[i].get("touches")]}
+            "unknown": [i for i in ids if heads[i].get("type") != "story" and not heads[i].get("touches")],
+            "total": sum(1 for i in ids if heads[i].get("type") != "story")}
+
+
+def story_mode_warnings(tasks):
+    """Незакрытые задачи пачки без mode — для pantheon check: режим ставит тот, кто собирает пачку (metis-0322)."""
+    return [f"{tid}: задача пачки {h.get('parent')} без mode — «Режим» в составе пачки пуст"
+            for tid, (_, h, _) in sorted(tasks.items())
+            if h.get("type") == "task" and not h.get("mode") and h.get("status") not in ("done", "dropped")
+            and h.get("parent") in tasks and tasks[h["parent"]][1].get("type") == "story"]
 
 
 def over_budget(inf):
@@ -1191,27 +1209,37 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
     over = over_budget(inf)
     for k in ("Пачка", "Порядок", "Режим", "Режим почему", "Зависит от", "Области", "Пересечения"):
         card.pop(k, None)
+    lk = lambda i: id_link(i, names)  # noqa: E731
+    cross_l = [re.sub(r"^(\S+) и (\S+):", lambda m: f"{lk(m.group(1))} и {lk(m.group(2))}:", x) for x in inf["cross"]]
+    unknown = f"у {len(inf['unknown'])} из {inf['total']}" if inf["unknown"] else None
     card.update({"Пульт": link(f"{PROJECTS_DIR}/{project}|{project}") if project else None,
                  "Когда": _date(head.get("night"), 10) or _date(head.get("due"), 10),
                  "Бюджет": head.get("estimate"),
                  "Сумма оценок": pct_text(inf["sum"]) + (" ⚠ больше бюджета" if over else ""),
                  "Закрыто": f"{len(inf['closed'])} из {len(inf['ids'])}",
-                 "Цепочка": " → ".join(inf["chain"]) or None, "Параллельно": inf["parallel"] or None,
-                 "Пересечения": inf["cross"] or None, "Области не указаны": inf["unknown"] or None, "Тип": "пачка"})
+                 "Цепочка": [lk(i) for i in inf["chain"]] or None, "Параллельно": [lk(i) for i in inf["parallel"]] or None,
+                 "Пересечения": cross_l or None, "Области не указаны": unknown, "Тип": "пачка"})
     summary = (f"> **Пачка:** сумма оценок {pct_text(inf['sum'])}"
                + (f" из бюджета {pct_text(inf['budget'])}" if inf["budget"] is not None else " · бюджет не задан")
                + (" · ⚠ больше бюджета" if over else "") + f" · закрыто {card['Закрыто']}"
-               + (f"\n> **Цепочка одному исполнителю:** {' → '.join(inf['chain'])}" if inf["chain"] else "")
-               + (f"\n> **Параллельно:** {', '.join(inf['parallel'])}" if inf["parallel"] else "")
-               + (f"\n> **Пересечения по файлам:** {'; '.join(inf['cross'])}" if inf["cross"] else "")
-               + (f"\n> **Области не указаны:** {', '.join(inf['unknown'])}" if inf["unknown"] else ""))
+               + (f"\n> **Цепочка одному исполнителю:** {' → '.join(lk(i) for i in inf['chain'])}" if inf["chain"] else "")
+               + (f"\n> **Параллельно:** {', '.join(lk(i) for i in inf['parallel'])}" if inf["parallel"] else "")
+               + (f"\n> **Пересечения по файлам:** {'; '.join(cross_l)}" if inf["cross"] else "")
+               + (f"\n> **Области не указаны:** {unknown}" if unknown else ""))
     rows = []
+    cell = lambda i: f"[[{names[i]}\\|{i}]]" if names.get(i) else i  # noqa: E731  (в таблице «|» экранируется)
     for n, i in enumerate(inf["ids"], 1):
         h = tasks[i][1]
-        ref = f"[[{names[i]}\\|{i}]]" if names.get(i) else i
-        rows.append(f"| {n} | {ref} | {_plain(one_line(h.get('title'))).replace('|', '/')} | {label_of(h)} | "
-                    f"{_plain(h.get('estimate') or '—').replace('|', '/')} | {MODES.get(h.get('mode')) or '—'} | "
-                    f"{', '.join(open_deps(h, tasks)) or '—'} |")
+        # «Ждёт»: открытые depends_on и прошлое звено цепочки, если оно не закрыто; «ничего» — законно пусто
+        waits = [cell(d) for d in open_deps(h, tasks)]
+        k = inf["chain"].index(i) if i in inf["chain"] else 0
+        prev = inf["chain"][k - 1] if k else None
+        if prev and prev not in inf["closed"] and cell(prev) not in waits and h.get("status") not in ("done", "dropped"):
+            waits.append(cell(prev))
+        mode = MODES.get(h.get("mode")) or ("—" if h.get("type") == "story" else "не задан")
+        rows.append(f"| {n} | {cell(i)} | {_plain(one_line(h.get('title'))).replace('|', '/')} | {label_of(h)} | "
+                    f"{_plain(h.get('estimate') or '—').replace('|', '/')} | {mode} | "
+                    f"{', '.join(waits) or 'ничего'} |")
     table = ("## Состав\n\n| № | Задача | Название | Статус | Оценка | Режим | Ждёт |\n|---|---|---|---|---|---|---|\n"
              + ("\n".join(rows) if rows else "| — | задач пока нет | | | | | |"))
     first, sep, rest = text[1:].partition("\n\n")
@@ -1577,7 +1605,7 @@ PROP_TYPES = {"Внимание": "multitext", "Приоритет": "number", "
               "Вопрос задан": "datetime", "Вопрос": "text", "Закрыта": "date", "Кому": "text", "tags": "tags",
               "Выпуск": "text", "Пачка": "text", "Ночь": "date", "Оценка": "text", "Факт": "text", "Приёмка": "text",
               "Порядок": "number", "Режим": "text", "Зависит от": "multitext", "Области": "multitext",
-              "Пересечения": "multitext", "Параллельно": "multitext", "Области не указаны": "multitext",
+              "Пересечения": "multitext", "Параллельно": "multitext", "Области не указаны": "text",
               # заметка проекта на пульте
               "Ранг": "number", "Обновлено": "date", "Открыто": "number", "В работе": "number", "Ждёт вас": "number",
               "Просрочено": "number", "Пересечений": "number", "Пачек": "number"}
