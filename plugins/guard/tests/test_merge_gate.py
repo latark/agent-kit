@@ -1867,6 +1867,10 @@ def t_carry_unit(h):
     check("carried: field с вердиктом не предок нового head — не переносится ничего, и P тоже (argus-122b10)",
           same == set() and len(whys) == 2 and whys[0].startswith(s["field"][:12]) and "не предок" in whys[0]
           and "ни с одного" in whys[1], (same, whys))
+    gone = recs[:2] + [rec("reject", "latark/agent-kit", 7, "d" * 40, agent_id="a2")]
+    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], gone, view, files)
+    check("carried: head с «вернуть» нет в git папки — не переносится ничего, и P тоже (argus-122b10, замечание 2)",
+          same == set() and len(whys) == 2 and "git fetch" in whys[0] and "ни с одного" in whys[1], (same, whys))
     calls.clear()
     same, whys = mg.carried(kit, "latark/agent-kit", 9, s["merged_ver"], recs, view, files)
     check("carried: вердиктов на этот PR нет — gh pr view не зовётся", same == set() and not whys and not calls,
