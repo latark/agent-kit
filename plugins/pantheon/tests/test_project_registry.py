@@ -179,6 +179,12 @@ def pure():
     check("direction_project: inbox и реестр", T.direction_project(dirs, "inbox") == "входящие" and T.direction_project(dirs, "a-one") == "P"
           and T.direction_project(dirs, "нет") is None)
 
+    kn = T.known_projects(dirs)
+    check("project_ok: проект реестра и собственное имя направления вне реестра — да; чужое имя — нет",
+          T.project_ok({"project": "P", "direction": "a-one"}, dirs, kn) and T.project_ok({"project": "ghost", "direction": "ghost"}, dirs, kn)
+          and not T.project_ok({"project": "ghost", "direction": "metis-pantheon"}, dirs, kn)
+          and not T.project_ok({"project": "metis-pantheon", "direction": "metis-pantheon"}, dirs, kn))
+
 
 pure()
 if PY311:

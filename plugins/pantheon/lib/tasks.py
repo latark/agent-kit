@@ -3067,12 +3067,18 @@ def resolve_project(pantheon, direction, project):
     return project or direction_project(dirs, direction) or direction
 
 
+def project_ok(h, dirs, known):
+    """project карточки допустим: имя из реестра, а у направления без записи в реестре — его собственное имя."""
+    p, d = h.get("project"), h.get("direction")
+    return p in known or (p == d and direction_project(dirs, d) is None)
+
+
 def project_problems(tasks, dirs):
     """Задачи с project не из реестра → [(id, текст)]. tasks — load_tasks(...)."""
     known = known_projects(dirs)
     return [(tid, f"project «{str(h.get('project'))[:60]}» — не проект из directions.toml; "
                   f"исправить: pantheon task migrate-project")
-            for tid, (_, h, _) in sorted(tasks.items()) if h.get("project") not in known]
+            for tid, (_, h, _) in sorted(tasks.items()) if not project_ok(h, dirs, known)]
 
 
 def project_aliases(dirs):
@@ -3098,7 +3104,7 @@ def migrate_projects(pantheon, t, dirs, dry_run=True, actor="агент"):
     lines, failed = [], 0
     for tid, (_, h, _) in sorted(tasks.items()):
         old = h.get("project")
-        if old in known:
+        if project_ok(h, dirs, known):
             continue
         new = alias.get(old) or direction_project(dirs, h.get("direction"))
         if new is None:
