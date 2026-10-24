@@ -453,6 +453,8 @@ remote, cwd не репозиторий или без remote, журнал пр�
   образец — `policy.example.toml`, правит только metis-pantheon;
 - `~/.local/state/pantheon/merge-gate/records.jsonl` — журнал проверок шлюза слияния, пишет только хук guard
   (PostToolUse), смотреть — `pantheon review status`;
+- `~/.local/state/pantheon/merge-gate/carry.jsonl` — журнал переносов «принять» шлюзом слияния (guard 0.5.20), пишет
+  только хук guard (PreToolUse) перед тем, как пустить слияние;
 - `~/.local/state/tg-taint/<session_id>` — флаг tg-taint (время и источник, без текста), `<session_id>.dumps` — пути
   выгрузок из `-o`, `--files-dir`, `--out-dir` этой сессии;
 - выключить правило: `GUARD_OFF=dev-server,nextjs` в `env` файла settings.json (`push` выключает и запись журнала шлюза слияния).
