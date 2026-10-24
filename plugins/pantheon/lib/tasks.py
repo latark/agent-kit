@@ -2688,6 +2688,11 @@ BOOKMARKS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__
                               "pantheon-view-obsidian", "bookmarks.json")
 
 
+# Закладки образца до metis-0324 (его выдавал view-sync.sh): у кого bookmarks.json уже есть, а «bookmarks_seen» ещё нет,
+# эти пути считаются выданными — удалённую владельцем первый тик не возвращает; досыпает только новые.
+BOOKMARKS_LEGACY = ("Доска/Сводка.md", "Доска/Доска.base", "Кто есть кто.md", "Доска/Проблемы.md")
+
+
 def _bookmark_files(items):
     """Все закладки-файлы дерева (группы вложены)."""
     out = []
@@ -2735,6 +2740,8 @@ def _sync_bookmarks(vault, state, alert, src=None):
             return
     seen = state.get("bookmarks_seen")
     seen = set(seen) if isinstance(seen, list) else set()
+    if "bookmarks_seen" not in state and raw is not None:
+        seen |= set(BOOKMARKS_LEGACY)
     have = {it.get("path") for it in _bookmark_files(data["items"])}
     changed = False
     for grp in wanted:

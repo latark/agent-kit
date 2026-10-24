@@ -328,7 +328,11 @@ def bookmark_checks():
               and sorted(st["bookmarks_seen"]) == sorted(want_paths) and not alerts, got)
         before = open(p, "rb").read()
         T._sync_bookmarks(v, st, al)
-        check("закладки: второй тик ничего не пишет", open(p, "rb").read() == before)
+        sb = os.stat(p)
+        T._sync_bookmarks(v, st, al)
+        sa = os.stat(p)
+        check("закладки: второй тик ничего не пишет (ни байтов, ни inode, ни mtime)",
+              open(p, "rb").read() == before and (sb.st_ino, sb.st_mtime_ns) == (sa.st_ino, sa.st_mtime_ns))
         v0 = os.path.join(tmp, "none")
         os.makedirs(v0)
         T._sync_bookmarks(v0, {}, al)
@@ -341,7 +345,7 @@ def bookmark_checks():
                          {"type": "group", "ctime": 5, "title": "Своя группа", "items": [], "ключ": "x"}],
                "свойство": 1}
         v, p = vault("b", json.dumps(own, ensure_ascii=False))
-        st = {}
+        st = {"bookmarks_seen": []}  # состояние уже ведётся (не первый тик после выпуска): все недостающие свои — добавить
         T._sync_bookmarks(v, st, al)
         got = json.load(open(p, encoding="utf-8"))
         every = T._bookmark_files(got["items"])
@@ -372,6 +376,21 @@ def bookmark_checks():
         now = paths(json.load(open(p, encoding="utf-8")))
         check("закладки (в): новая своя закладка из образца приходит, удалённая — нет",
               "Доска/Новый вид.md" in now and "Доска/Пульт.base" not in now, now)
+
+        # хранилище старого образца (до 0324), «Кто есть кто» владелец удалил, состояния ещё нет — первый тик не возвращает
+        old = {"items": [{"type": "group", "ctime": 1, "title": "Каждый день", "items": [
+                   {"type": "file", "ctime": 2, "path": "Доска/Сводка.md", "title": "Сводка"},
+                   {"type": "file", "ctime": 3, "path": "Доска/Доска.base", "title": "Доска"}]},
+               {"type": "group", "ctime": 4, "title": "Справка", "items": [
+                   {"type": "file", "ctime": 5, "path": "Доска/Проблемы.md", "title": "Проблемы задач"}]}]}
+        v, p = vault("old", json.dumps(old, ensure_ascii=False))
+        st = {}
+        T._sync_bookmarks(v, st, al)
+        T._sync_bookmarks(v, st, al)
+        now = paths(json.load(open(p, encoding="utf-8")))
+        check("закладки (д): старый образец без ключа состояния — удалённая «Кто есть кто» не вернулась, новые пришли",
+              "Кто есть кто.md" not in now and {"Доска/Пульт.base", "board.md", f"Доска/{T.HELP_DIR}/{T.HELP_NOTE}.md"} <= set(now)
+              and "Доска/Сводка.md" in now, now)
 
         for name, raw in (("d1", '{"items": [ {'), ("d2", '["не", "словарь"]'), ("d3", '{"items": 5}')):
             v, p = vault(name, raw)
