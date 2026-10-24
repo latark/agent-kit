@@ -194,7 +194,8 @@ def cli(args, t=T0):
 
 
 def new(title, *extra, direction="metis-pantheon"):
-    r = cli(["task", "new", "--direction", direction, "--title", title, "--status", "todo", *extra])
+    status = [] if "--status" in extra else ["--status", "todo"]  # --status одиночный: у вызовов свой
+    r = cli(["task", "new", "--direction", direction, "--title", title, "--text", "тело задачи", *status, *extra])
     if r.returncode:
         raise SystemExit(f"task new: {r.stderr}")
     return r.stdout.split()[0], os.path.join(home, r.stdout.split()[1])

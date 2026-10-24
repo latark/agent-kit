@@ -329,7 +329,7 @@ write(board_md, BOARD.replace("- ручная строка Зевса, не тр
 
 
 def new(title, *extra):
-    r = cli(["task", "new", "--direction", "metis-pantheon", "--title", title, "--mode", "single", *extra], T0 + 3000)
+    r = cli(["task", "new", "--direction", "metis-pantheon", "--title", title, "--text", "тело задачи", "--mode", "single", *extra], T0 + 3000)
     if r.returncode:
         raise SystemExit(f"task new: {r.stderr}")
     return r.stdout.split()[0]
