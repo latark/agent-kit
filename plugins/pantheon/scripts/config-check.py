@@ -43,6 +43,7 @@ import subprocess
 import sys
 
 MD_GROWTH = 50_000
+OWNER_REPO = "latark/agent-kit"  # репозиторий, слияния которого владелец записывает в журналы
 URL_HOSTS = ("github.com", "githubusercontent.com", "api.github.com", "anthropic.com", "claude.ai", "claude.com",
              "localhost", "127.0.0.1", "brew.sh", "githubassets.com", "npmjs.org", "pypi.org", "pythonhosted.org")
 KNOWN_HOOK_PLACES = ("~/.claude/hooks/", "$HOME/.claude/hooks/", "~/.claude/sync.sh", "$HOME/.claude/sync.sh",
@@ -137,14 +138,14 @@ def owner_merged_shas():
             except ValueError:
                 continue
             if isinstance(d, dict) and d.get("event") == "merged" and isinstance(d.get("sha"), str) \
-                    and str(d.get("repo", "")).lower().endswith("/agent-kit"):
+                    and str(d.get("repo", "")).lower() == OWNER_REPO:
                 found.append(d["sha"])
     except (OSError, UnicodeDecodeError):
         pass
     try:
         for line in open(os.path.join(state, "owner-log", "merge-approve.log"), encoding="utf-8").read().splitlines():
             m = re.match(r"^\S+(?: \S+)? merge-approve (\S+)#\d+ ([0-9a-f]{40})$", line.strip())
-            if m and m.group(1).lower().endswith("/agent-kit"):
+            if m and m.group(1).lower() == OWNER_REPO:
                 found.append(m.group(2))
     except (OSError, UnicodeDecodeError):
         pass
@@ -152,7 +153,7 @@ def owner_merged_shas():
 
 
 def release_tip(clone):
-    """SHA вершины main клона agent-kit, если её саму или её родителя слил владелец; иначе None.
+    """SHA вершины main клона agent-kit, если её саму или голову PR (второй родитель merge-коммита) слил владелец; иначе None.
 
     Клон маркетплейса мелкий (depth 1): головы PR в нём нет, но id родителей записаны в самом объекте коммита.
     Слияние `--merge` даёт вершину — merge-коммит со слитой головой PR вторым родителем; перемотка — саму голову.
@@ -168,7 +169,8 @@ def release_tip(clone):
     head = body.stdout.split(b"\n\n", 1)[0].decode("ascii", "replace").splitlines()
     parents = [ln[len("parent "):] for ln in head if ln.startswith("parent ")]
     merged = owner_merged_shas()
-    return tip if tip in merged or any(p in merged for p in parents) else None
+    # у merge-коммита доверена голова PR (parents[1:]), не первый родитель: прямой коммит поверх слитой головы не доверен
+    return tip if tip in merged or any(p in merged for p in parents[1:]) else None
 
 
 def release_blobs():

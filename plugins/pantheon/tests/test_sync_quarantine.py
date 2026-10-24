@@ -367,10 +367,12 @@ class Rel:
             run_git(origin, "checkout", "-q", "main")
             if how == "merge":
                 run_git(origin, "merge", "-q", "--no-ff", "-m", f"Merge pull request #{7 + i}", f"pr{i}")
-            elif how == "ff":
+            elif how in ("ff", "ff+direct"):
                 run_git(origin, "merge", "-q", "--ff-only", f"pr{i}")
             else:
                 run_git(origin, "commit", "-q", "--allow-empty", "-m", "other")
+        if how == "ff+direct":  # прямой коммит поверх слитой головы: первый родитель слит, второго нет
+            run_git(origin, "commit", "-q", "--allow-empty", "-m", "direct")
         self.head = heads[-1]
         os.makedirs(os.path.dirname(self.clone))
         run_git(self.home, "clone", "-q", *(["--depth", "1"] if shallow else []), "file://" + origin, self.clone)
@@ -432,6 +434,13 @@ r_repo = Rel(repo="evil/other")
 check("слитый выпуск: запись журнала про чужой репозиторий — флаги", r_repo.flags() != [], r_repo.flags())
 r_repo_ap = Rel(log="approve", repo="evil/other")
 check("слитый выпуск: merge-approve.log про чужой репозиторий — флаги", r_repo_ap.flags() != [], r_repo_ap.flags())
+r_evil = Rel(repo="evil/agent-kit")
+check("слитый выпуск: запись журнала про evil/agent-kit (не latark/agent-kit) — флаги", r_evil.flags() != [], r_evil.flags())
+r_evil_ap = Rel(log="approve", repo="evil/agent-kit")
+check("слитый выпуск: merge-approve.log про evil/agent-kit — флаги", r_evil_ap.flags() != [], r_evil_ap.flags())
+r_dir1 = Rel(how="ff+direct")
+check("слитый выпуск: перемотанная слитая голова + прямой коммит поверх (второго родителя нет) — флаги",
+      r_dir1.flags() != [], r_dir1.flags())
 r_name = Rel(name="hooks/other.py")
 check("слитый выпуск: то же содержимое под другим именем — флаги", r_name.flags() != [], r_name.flags())
 r_dir = Rel(name="skills/x/hooks/gate.py")
@@ -461,6 +470,16 @@ with open(mut, "w", encoding="utf-8") as fh:
 check("мутант «всегда пропускать»: правка в байт проходит без флагов (тест на неё красный)", r_diff.flags(mut) == [],
       r_diff.flags(mut))
 check("мутант «всегда пропускать»: не слитый коммит проходит без флагов (тест красный)", r_nm.flags(mut) == [])
+
+for tag, a, b in (("parents вместо parents[1:]", "parents[1:]", "parents"),
+                  ("endswith вместо точного имени", "== OWNER_REPO", '.endswith("/agent-kit")')):
+    msrc = src.replace(a, b)
+    assert msrc != src, tag
+    mp = os.path.join(ROOT, "config-check-mutant2.py")
+    with open(mp, "w", encoding="utf-8") as fh:
+        fh.write(msrc)
+    probe = r_dir1 if "parents" in tag else r_evil
+    check(f"мутант «{tag}»: сценарий проходит без флагов (тест красный)", probe.flags(mp) == [], probe.flags(mp))
 
 print(f"\n{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)
