@@ -36,12 +36,14 @@ GREEN = [RUN_OK, {"__typename": "StatusContext", "context": "ci/legacy", "state"
 BASE = "c" * 40  # baseRefOid в ответе gh pr view
 
 
-# поддельный gh api graphql (metis-0384): переменные из -f, поля `<alias>: object(expression: $<var>) { oid }` и
-# `{ ... on Blob { text isTruncated } }` — по git папки $HOME/projects/<n>; коммита или файла нет — null, как у GitHub
+# поддельный gh api graphql (metis-0384): переменные из -f и -F, поля `<alias>: object(expression: $<var>) { oid }` и
+# `{ ... on Blob { text isTruncated } }` — по git папки $HOME/projects/<n>; коммита или файла нет — null, как у GitHub.
+# `pr: pullRequest(number: $pr) { baseRef { target { oid ... on Commit { <alias>: file(path: $<var>) … } } } }` —
+# живая вершина ветки базы: $HOME/gh.baseref.<n> (none — ветки нет), иначе baseRefOid из $HOME/gh.view.<n>
 GH_GRAPHQL = r"""import json, os, re, subprocess, sys
 a, v = sys.argv[3:], {}
 for i in range(0, len(a) - 1, 2):
-    if a[i] == "-f":
+    if a[i] in ("-f", "-F"):
         k, _, val = a[i + 1].partition("=")
         v[k] = val
 repo = os.path.join(os.environ["HOME"], "projects", v.get("n", ""))
@@ -60,6 +62,21 @@ for alias, var, kind in re.findall(r"(\w+): object\(expression: \$(\w+)\) \{ (oi
     else:
         t = (git("cat-file", "-t", expr) or "").strip()
         out[alias] = None if not t else {"text": git("cat-file", "-p", expr), "isTruncated": False} if t == "blob" else {}
+if "pullRequest(number: $pr)" in v["query"]:
+    home = os.environ["HOME"]
+    ref = os.path.join(home, "gh.baseref." + v["n"])
+    if os.path.exists(ref):
+        tip = open(ref).read().strip()
+    else:
+        tip = json.load(open(os.path.join(home, "gh.view." + v["n"]))).get("baseRefOid")
+    target = None
+    if tip and tip != "none":
+        target = {"oid": tip}
+        for alias, var in re.findall(r"(\w+): file\(path: \$(\w+)\)", v["query"]):
+            t = (git("cat-file", "-t", tip + ":" + v[var]) or "").strip()
+            target[alias] = None if not t else {"object": {"text": git("cat-file", "-p", tip + ":" + v[var]),
+                                                           "isTruncated": False} if t == "blob" else {}}
+    out["pr"] = {"baseRef": {"target": target} if target else None}
 print(json.dumps({"data": {"repository": out}}))
 """
 
@@ -144,7 +161,7 @@ class Home:
         shutil.rmtree(self.j(".local/state/pantheon/owner-log"), ignore_errors=True)
         for f in os.listdir(self.root):
             if f.startswith(("gh.fail", "gh.log", "gh.api.fail", "gh.ci.fail", "gh.wf.", "gh.view.", "gh.gql.",
-                             "gh.files.")):
+                             "gh.files.", "gh.baseref.")):
                 os.remove(self.j(f))
         open(self.j("ai/pantheon/alerts.md"), "w").close()
         self.view = {name: {"headRefOid": self.sha[name], "baseRefOid": BASE, "changedFiles": 0,
@@ -1660,15 +1677,15 @@ VERSION_BAD = (("ver_eq", "P", "version равна version на базе PR", "�
                ("pulled_same", "Pp", "код плагина и подтянутый main с тем же номером", "не больше, чем на базе PR"))
 
 
-def git_blobs(kit):
-    """_gh_blobs по git папки kit: {(rev, path): текст или None}."""
-    def blobs(repo, sha, base, paths):
+def git_blobs(kit, base):
+    """_gh_blobs по git папки kit, base — живая вершина ветки базы PR: (base, {(rev, path): текст или None})."""
+    def blobs(repo, pr, sha, paths):
         out = {}
         for path in paths:
             for rev in (sha, base):
                 r = subprocess.run(["git", "-C", kit, "show", f"{rev}:{path}"], capture_output=True, text=True)
                 out[(rev, path)] = r.stdout if r.returncode == 0 else None
-        return out
+        return base, out
     return blobs
 
 
@@ -1693,8 +1710,8 @@ def t_carry_unit(h):
     vp = mg.version_problem
 
     def vpk(sha, base, files=None):
-        return vp("latark/agent-kit", sha, base, (pr_paths(kit, sha, base) if files is None and base else files or [], None),
-                  git_blobs(kit))
+        return vp("latark/agent-kit", 7, sha, (pr_paths(kit, sha, base) if files is None else files, None),
+                  git_blobs(kit, base))
     for new, old, what, want in VERSION_BAD:
         why = mg.same_change(kit, s[old], s[new], s["M"])
         got = vpk(s[new], s["M"])
@@ -1773,31 +1790,29 @@ def t_carry_unit(h):
           vpk(s["ten"], s["M9"]))
     why = mg.same_change(kit, s["Pp"], s["ten"], s["M9"])
     check("перенос: 0.11.10 после 0.11.9 — записи переходят", why is None, why)
-    why, skip = vpk(s["rel_same"], None, [PJ])
-    check("версия: baseRefOid нет — пропуск с причиной", why is None and skip and "baseRefOid" in skip, (why, skip))
-    why, skip = vp("latark/agent-kit", s["rel_same"], s["M"], (None, mg.FILES_NONE), git_blobs(kit))
+    why, skip = vp("latark/agent-kit", 7, s["rel_same"], (None, mg.FILES_NONE), git_blobs(kit, s["M"]))
     check("версия: список файлов PR от gh не получен — пропуск с причиной",
           why is None and skip and mg.FILES_NONE in skip, (why, skip))
-    why, skip = vp("latark/agent-kit", s["rel_same"], s["M"], ([PJ], None), lambda *a: None)
-    check("версия: gh api graphql не ответил (нет доступа) — пропуск с причиной",
+    why, skip = vp("latark/agent-kit", 7, s["rel_same"], ([PJ], None), lambda *a: None)
+    check("версия: gh api graphql не ответил (нет доступа, нет ветки базы) — пропуск с причиной",
           why is None and skip and "graphql" in skip, (why, skip))
     check("версия: PR удалил плагин целиком — его номер не сверяется", vpk(s["drop"], s["M"]) == (None, None),
           vpk(s["drop"], s["M"]))
-    bad = git_blobs(kit)
+    bad = git_blobs(kit, s["B"])
 
-    def bad_base(repo, sha, base, paths):
-        out = bad(repo, sha, base, paths)
+    def bad_base(repo, pr, sha, paths):
+        base, out = bad(repo, pr, sha, paths)
         out[(base, paths[0])] = "{не json"
-        return out
-    why, skip = vp("latark/agent-kit", s["Pp"], s["B"], ([PJ], None), bad_base)
+        return base, out
+    why, skip = vp("latark/agent-kit", 7, s["Pp"], ([PJ], None), bad_base)
     check("версия: plugin.json на базе PR не JSON — отказ, а не пропуск (argus-117a3 №4)",
           why and "не разобрать как plugin.json" in why, (why, skip))
 
-    def bad_kind(repo, sha, base, paths):
-        out = bad(repo, sha, base, paths)
+    def bad_kind(repo, pr, sha, paths):
+        base, out = bad(repo, pr, sha, paths)
         out[(sha, paths[0])] = mg._BAD
-        return out
-    why, skip = vp("latark/agent-kit", s["Pp"], s["B"], ([PJ], None), bad_kind)
+        return base, out
+    why, skip = vp("latark/agent-kit", 7, s["Pp"], ([PJ], None), bad_kind)
     check("версия: по пути plugin.json на head не файл или текст обрезан — отказ", why and "не разобрать" in why,
           (why, skip))
     same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], recs, lambda: None, files)
@@ -1865,6 +1880,23 @@ def t_carry_gate(h):
                merge_at("pulled_same"), False, "не больше, чем на базе PR (0.11.85)")
     merge_case("шлюз: «выпуск + main + повтор release.py», записи переходят — проходит", merge_at("pulled_rel"),
                True)
+    # argus-117b4: baseRefOid — снимок M (0.11.85) с последнего push в PR, а main ушёл к M2: сосед слит раньше с тем же
+    # 0.11.86. GitHub сольёт в M2 — шлюз сверяет номер с живой вершиной ветки базы, а не со снимком
+    h.reset()
+    h.view["agent-kit"]["baseRefOid"] = s["M"]
+    h.seed(rec("tests", "latark/agent-kit", None, s["merged_ver"], "dev-opus"),
+           rec("accept", "latark/agent-kit", 7, s["merged_ver"]))
+    with open(h.j("gh.baseref.agent-kit"), "w") as fh:
+        fh.write(s["M2"] + "\n")
+    merge_case("шлюз: baseRefOid — старый main, живая вершина main с тем же номером — отказ «не больше»",
+               merge_at("merged_ver"), False, "не больше, чем на базе PR (0.11.86)")
+    with open(h.j("gh.baseref.agent-kit"), "w") as fh:
+        fh.write(s["M"] + "\n")
+    merge_case("шлюз: живая вершина main = baseRefOid, номер выше — проходит", merge_at("merged_ver"), True)
+    with open(h.j("gh.baseref.agent-kit"), "w") as fh:
+        fh.write("none\n")
+    got = merge_at("merged_ver")
+    merge_case("шлюз: ветки базы PR на GitHub нет — пропуск без ложного отказа", got, True)
 
 
 def t_carry_product(h):

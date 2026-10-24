@@ -41,7 +41,8 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    номер версии и подтянутая база. Прошлых head с вердиктами больше CARRY_MAX — не переносится ничего. Иначе — не
    переносятся, причина в отказе. talos не переносится; reject переносится, как и accept.
    Номер версии (metis-0384, version_problem) — при каждом слиянии через шлюз, с переносом и без, по репозиторию PR,
-   а не по git папки сливающего: файлы PR — gh api pulls/N/files, plugin.json на head и на baseRefOid — gh api graphql.
+   а не по git папки сливающего: файлы PR — gh api pulls/N/files, plugin.json на head и на живой вершине ветки базы
+   (baseRef.target, а не снимок baseRefOid) — gh api graphql.
    У каждого плагина с правками (любой файл plugins/<имя>/) version на head больше, чем на базе PR, кортежем чисел.
    Правок plugins/ нет (репозиторий не agent-kit), gh не ответил или нет доступа — проверка пропускается, причина —
    в stderr хука. pantheon merge (PR ядра) номер версии пока не сверяет — metis-0396.
@@ -1091,43 +1092,59 @@ PLUGIN_DIR = re.compile(r"plugins/([^/]+)/")
 _BAD = object()  # ответ _gh_blobs: по пути не файл или текст не полностью
 
 
-def _gh_blobs(repo, sha, base, paths):
-    """Тексты файлов paths на коммитах sha и base репозитория repo одним запросом gh api graphql (переменные — полями
-    -f, без подстановки в текст запроса): {(rev, path): текст | None — файла нет | _BAD}; None — сбой gh, нет доступа
-    к репозиторию или коммита sha или base на GitHub нет (object по несуществующему коммиту тоже null)."""
+def _gh_blobs(repo, pr, sha, paths):
+    """Живая вершина ветки базы PR и тексты файлов paths на sha и на ней одним запросом gh api graphql (переменные —
+    полями -f/-F, без подстановки в текст запроса): (вершина базы, {(rev, path): текст | None — файла нет | _BAD}).
+    База — pullRequest.baseRef.target: туда GitHub и сольёт; baseRefOid — снимок на момент последнего push в PR, и
+    сосед, слитый позже с тем же номером, им не виден (argus-117b4). Файлы базы — Commit.file того же target, в том же
+    ответе: вершина и тексты из одного снимка. None — сбой gh, нет доступа к репозиторию, PR или ветки базы на GitHub
+    нет, коммита sha на GitHub нет (object по несуществующему коммиту — null)."""
     owner, _, name = repo.partition("/")
-    decl, fields = ["$o: String!", "$n: String!", "$hc: String!", "$bc: String!"], \
-        ["hc: object(expression: $hc) { oid }", "bc: object(expression: $bc) { oid }"]
-    args = ["api", "graphql", "-f", f"o={owner}", "-f", f"n={name}", "-f", f"hc={sha}", "-f", f"bc={base}"]
-    keys = [(rev, path) for path in paths for rev in (sha, base)]
-    for i, (rev, path) in enumerate(keys):
-        decl.append(f"$e{i}: String!")
-        fields.append(f"f{i}: object(expression: $e{i}) {{ ... on Blob {{ text isTruncated }} }}")
-        args += ["-f", f"e{i}={rev}:{path}"]
+    decl, fields, bfields = ["$o: String!", "$n: String!", "$pr: Int!", "$hc: String!"], \
+        ["hc: object(expression: $hc) { oid }"], []
+    args = ["api", "graphql", "-f", f"o={owner}", "-f", f"n={name}", "-F", f"pr={int(pr)}", "-f", f"hc={sha}"]
+    blob = "{ ... on Blob { text isTruncated } }"
+    for i, path in enumerate(paths):
+        decl += [f"$e{i}: String!", f"$p{i}: String!"]
+        fields.append(f"f{i}: object(expression: $e{i}) {blob}")
+        bfields.append(f"b{i}: file(path: $p{i}) {{ object {blob} }}")
+        args += ["-f", f"e{i}={sha}:{path}", "-f", f"p{i}={path}"]
+    fields.append(f"pr: pullRequest(number: $pr) {{ baseRef {{ target {{ oid ... on Commit {{ {' '.join(bfields)} }} }} }} }}")
     query = f"query({', '.join(decl)}) {{ repository(owner: $o, name: $n) {{ {' '.join(fields)} }} }}"
     got = _gh_json(args + ["-f", f"query={query}"])
     data = got[0].get("data") if isinstance(got, list) and len(got) == 1 and isinstance(got[0], dict) else None
     data = data.get("repository") if isinstance(data, dict) else None
     if not isinstance(data, dict):
         return None
-    for alias, rev in (("hc", sha), ("bc", base)):
-        obj = data.get(alias)
-        if not isinstance(obj, dict) or not isinstance(obj.get("oid"), str) or obj["oid"].lower() != rev:
-            return None
+    obj = data.get("hc")
+    if not isinstance(obj, dict) or not isinstance(obj.get("oid"), str) or obj["oid"].lower() != sha:
+        return None
+    target = data.get("pr")
+    for key in ("baseRef", "target"):
+        target = target.get(key) if isinstance(target, dict) else None
+    base = target.get("oid") if isinstance(target, dict) else None
+    if not isinstance(base, str) or not SHA_RE.fullmatch(base.lower()):
+        return None
+    base = base.lower()
+
+    def text(o):
+        return o["text"] if isinstance(o, dict) and isinstance(o.get("text"), str) and o.get("isTruncated") is False \
+            else _BAD
     out = {}
-    for i, key in enumerate(keys):
+    for i, path in enumerate(paths):
         obj = data.get(f"f{i}", _BAD)
-        out[key] = None if obj is None else obj["text"] if isinstance(obj, dict) and isinstance(obj.get("text"), str) \
-            and obj.get("isTruncated") is False else _BAD
-    return out
+        out[(sha, path)] = None if obj is None else text(obj)
+        entry = target.get(f"b{i}", _BAD)
+        out[(base, path)] = None if entry is None else text(entry.get("object")) if isinstance(entry, dict) else _BAD
+    return base, out
 
 
-def version_problem(repo, sha, base, files, blobs=None):
+def version_problem(repo, pr, sha, files, blobs=None):
     """Номер версии плагинов с правками в PR — по репозиторию PR (gh), а не по git папки сливающего: (отказ, пропуск).
     Отказ — текст или None; пропуск — почему номер не сверен (без отказа), или None. files — ответ _pr_files
     (pulls/N/files: ровно то, что слияние приносит в базу, с previous_filename). Плагины с правками — любой путь
-    plugins/<имя>/ из files; у каждого, чей plugin.json есть на sha, version на sha больше, чем на базе PR (baseRefOid),
-    кортежем чисел (0.11.10 > 0.11.9); плагина нет на базе — номер ставит сам PR (release.py так же), нет на sha —
+    plugins/<имя>/ из files; у каждого, чей plugin.json есть на sha, version на sha больше, чем на живой вершине ветки
+    базы PR (baseRef.target из того же запроса _gh_blobs, а не снимок baseRefOid — argus-117b4), кортежем чисел (0.11.10 > 0.11.9); плагина нет на базе — номер ставит сам PR (release.py так же), нет на sha —
     плагин удалён. Сверка не ограничена plugin.json из разницы: выпущенный head, подтянувший main с тем же номером
     без повтора release.py, оставил бы на main свой код со старым номером — claude plugin update его не поставит.
     Пропуск (решение владельца 24.10, metis-0384): в PR нет plugins/<имя>/ (репозиторий не agent-kit), список файлов
@@ -1138,13 +1155,12 @@ def version_problem(repo, sha, base, files, blobs=None):
     names = sorted({m.group(1) for m in (PLUGIN_DIR.match(p) for p in paths) if m})
     if not names:
         return None, "в PR нет правок plugins/<имя>/ (репозиторий не agent-kit) — номер версии не сверяется"
-    if not isinstance(base, str) or not SHA_RE.fullmatch(base.lower()):
-        return None, "база PR (baseRefOid) от gh не получена — номер версии плагинов не сверен"
-    base = base.lower()
     manifests = [f"plugins/{name}/.claude-plugin/plugin.json" for name in names]
-    texts = (blobs or _gh_blobs)(repo, sha, base, manifests)
-    if texts is None:
-        return None, f"gh api graphql по {repo} не ответил — номер версии плагинов не сверен"
+    got = (blobs or _gh_blobs)(repo, pr, sha, manifests)
+    if got is None:
+        return None, (f"gh api graphql по {repo} не ответил или не дал вершину ветки базы PR — номер версии плагинов "
+                      "не сверен")
+    base, texts = got
     for name, path in zip(names, manifests):
         raw_new, raw_old = texts.get((sha, path), _BAD), texts.get((base, path), _BAD)
         if raw_new is None or (raw_old is None and raw_new is not _BAD):
@@ -1336,7 +1352,7 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
             return f"{why}. {MERGE_PROTECT}"
     # номер версии — при каждом слиянии через шлюз, по репозиторию PR из gh (а не по git папки сливающего); pantheon
     # merge (PR ядра) его пока не сверяет — metis-0396
-    why, skipped = version_problem(repo, sha, view.get("baseRefOid"), pr_files())
+    why, skipped = version_problem(repo, pr, sha, pr_files())
     if why:
         return f"{why}. {advice}"
     if skipped:
