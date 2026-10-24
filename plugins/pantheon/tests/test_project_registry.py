@@ -97,11 +97,14 @@ def main():
     check("направление без project в реестре: project = его имя", proj(home, b) == "plain-dir", proj(home, b))
     c = new(env, "themis-sources", "--project", "legal-watch и expert-corpus")
     check("--project с именем из реестра принят", proj(home, c) == "legal-watch и expert-corpus")
-    gn = new(env, "ghost", "--project", "ghost")
-    check("направление вне реестра: --project со своим именем принят, как в check", proj(home, gn) == "ghost", proj(home, gn))
+    r = run(env, "task", "new", "--direction", "ghost", "--title", "Своё имя", "--project", "ghost")
+    gn = r.stdout.split()[0] if r.returncode == 0 else None
+    check("направление вне реестра: --project со своим именем принят, как в check",
+          gn and proj(home, gn) == "ghost", (r.returncode, r.stderr[-200:]))
     r = run(env, "task", "new", "--direction", "ghost", "--title", "X", "--project", "metis-pantheon")
     check("направление вне реестра: чужое имя направления — отказ", r.returncode == 1 and "directions.toml" in r.stderr, r.stderr[-200:])
-    os.remove(T.load_tasks(home, T.WORK_TYPES)[gn][0])
+    if gn:
+        os.remove(T.load_tasks(home, T.WORK_TYPES)[gn][0])
     before = snapshot(home)
     for bad in ("agent-kit", "metis-pantheon", "pantheon 0.11.28", "сверка Paperclip 17.10: у них #3207"):
         r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "X", "--project", bad)
