@@ -83,6 +83,18 @@ names3["t-7"] = "t-7 x"
 check("пачка с задачей и детьми-пачками: «у 1 из 1», пачки в M не входят",
       card("s-0", tasks3, names3)[0]["Области не указаны"] == "у 1 из 1")
 
+# выжившие мутанты ревью 128 (п. 2): по проверке на каждый
+tasks4, names4 = world()
+tasks4["t-2"][1]["depends_on"] = ["t-1"]  # depends_on совпадает с прошлым звеном цепочки
+rows4 = [r for r in card("s-1", tasks4, names4)[1].splitlines() if r.startswith("| ") and "t-" in r]
+check("«Ждёт»: depends_on = прошлому звену — ссылка один раз", cell(rows4[1], 6).count("|t-1]]") == 1, rows4[1])
+check("«Ждёт»: у закрытой задачи после открытого звена — «ничего»", cell(rows[4], 6) == "ничего", rows[4])
+rows0 = [r for r in b0.splitlines() if r.startswith("| ") and "s-" in r]
+check("«Режим» у пачки без mode — «—»", rows0 and all(cell(r, 5) == "—" for r in rows0), rows0)
+tasks3["s-9"] = ("", {"type": "story", "id": "s-9", "title": "Сама себе", "status": "todo", "parent": "s-9"}, "")
+names3["s-9"] = "s-9 x"
+check("пачка с parent = своему id не входит в свой состав", "s-9" not in card("s-9", tasks3, names3)[1].split("## Состав")[-1])
+
 # карточки задач: «Зависит от», «Пересечения» — ссылки
 cross = T.crossings(tasks)
 ctx = T.card_ctx("t-3", tasks["t-3"][1], tasks, names, cross)
