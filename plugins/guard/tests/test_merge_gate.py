@@ -264,12 +264,14 @@ class Home:
         return decision(self.hook(event, pdir))
 
     def post(self, cmd, role, cwd="projects/tg-read", agent_id="x1", session="s-coord", name="PostToolUse", mode=(),
-             background=False, response=NORMAL):
+             background=False, response=NORMAL, transcript=None):
         tool_input = {"command": cmd}
         if background:
             tool_input["run_in_background"] = True
         event = {"hook_event_name": name, "tool_name": "Bash", "tool_input": tool_input, "cwd": self.j(cwd),
                  "session_id": session, "tool_use_id": "toolu_" + uuid.uuid4().hex, "agent_type": role}
+        if transcript:
+            event["transcript_path"] = transcript  # главной сессии, как его даёт Claude Code и в событиях субагента
         if agent_id:
             event["agent_id"] = agent_id
         if name == "PostToolUseFailure":
@@ -1124,6 +1126,116 @@ def t_opus_protect(h):
     check("verdict_parse: «<ID>» в ran — ошибка", bool(why) and "<ID>" in why, why)
     _, _, why = mg.verdict_parse("reject", ["latark/agent-kit", "7", sha, "--ran", "модель: <ID>"])
     check("verdict_parse: «<ID>» в ran у reject — без ошибки (вердикт «вернуть» в силе любой)", why is None, why)
+
+
+def t_opus_transcript(h):
+    """metis-0176 п. 2: модель argus — из его транскрипта (message.model assistant-записей), а не со слов --ran.
+    Путь хук выводит из входа: <папка transcript_path>/<session_id>/subagents/[<подпапка>/]agent-<agent_id>.jsonl.
+    В защитах «принять» засчитывается, только если все модели транскрипта Opus и среди них модель из --ran;
+    транскрипта нет — как раньше, по --ran, с пометкой models_note в записи."""
+    kit, sha = "projects/agent-kit", h.sha["agent-kit"]
+    cmd = f"gh pr merge 7 --match-head-commit {sha}"
+    tests = rec("tests", "latark/agent-kit", None, sha, "dev-opus")
+    proj = h.j("cc-projects/-p")
+    main_tp = os.path.join(proj, "s-coord.jsonl")
+
+    def transcript(models, path=None, extra=()):
+        path = path or os.path.join(proj, "s-coord", "subagents", "agent-ag1.jsonl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "assistant"}}) + "\n")
+            for m in models:
+                fh.write(json.dumps({"type": "assistant", "message": {"model": m, "role": "assistant"}}) + "\n")
+            for line in extra:
+                fh.write(line + "\n")
+        return path
+
+    def accept(ran="модель: claude-opus-5-5, тесты", agent_id="ag1", tp=main_tp, repo="latark/agent-kit", pr=7, s=sha):
+        h.reset()
+        h.seed(dict(tests, repo=[repo], sha=s))
+        # главная сессия argus (agent_id нет) — своя сессия, не та, что сливает
+        h.post(f"pantheon review accept {repo} {pr} {s} --opened a --unchecked c --ran \"{ran}\"", "argus",
+               agent_id=agent_id, transcript=tp, session="s-coord" if agent_id else "s-argus")
+        got = [r for r in h.read() if r["kind"] == "accept"]
+        return got[0] if got else {}
+
+    def clean():
+        shutil.rmtree(proj, ignore_errors=True)
+
+    clean()
+    transcript(["claude-opus-5-5", "claude-opus-5-5"])
+    r = accept()
+    check("транскрипт субагента на Opus — в записи models, без пометки",
+          r.get("models") == ["claude-opus-5-5"] and "models_note" not in r, r)
+    merge_case("защиты: --ran и транскрипт — Opus 5.5 — проходит", h.pre(cmd, pdir=kit), True)
+    clean()
+    transcript(["claude-sonnet-5"])
+    r = accept()
+    check("транскрипт на Sonnet — в записи models claude-sonnet-5", r.get("models") == ["claude-sonnet-5"], r)
+    merge_case("защиты: --ran говорит Opus, транскрипт — Sonnet — отказ", h.pre(cmd, pdir=kit), False,
+               "по транскрипту argus — claude-sonnet-5")
+    clean()
+    transcript(["claude-opus-5-5", "claude-sonnet-5", "<synthetic>"])
+    r = accept()
+    check("модели транскрипта — все, кроме <synthetic>", r.get("models") == ["claude-opus-5-5", "claude-sonnet-5"], r)
+    merge_case("защиты: модель сменилась на Sonnet в ходе проверки — отказ", h.pre(cmd, pdir=kit), False, "не на Opus")
+    clean()
+    transcript(["claude-opus-4-1"])
+    accept()
+    merge_case("защиты: --ran claude-opus-5-5, транскрипт claude-opus-4-1 — отказ (не совпадает)",
+               h.pre(cmd, pdir=kit), False, "в --ran claude-opus-5-5, а по транскрипту argus — claude-opus-4-1")
+    clean()
+    transcript(["claude-opus-4-1-20250805"])
+    accept(ran="модель: claude-opus-4-1, тесты")
+    merge_case("защиты: --ran claude-opus-4-1, транскрипт с датой claude-opus-4-1-20250805 — проходит",
+               h.pre(cmd, pdir=kit), True)
+    clean()
+    transcript(["claude-opus-5-5"], path=os.path.join(proj, "s-coord", "subagents", "wf1", "agent-ag1.jsonl"))
+    r = accept()
+    check("транскрипт в подпапке subagents/<подпапка>/ — найден", r.get("models") == ["claude-opus-5-5"], r)
+    clean()
+    transcript(["claude-sonnet-5"], path=main_tp)
+    r = accept(agent_id=None)
+    check("главная сессия argus (без agent_id) — модели из самого transcript_path", r.get("models") == ["claude-sonnet-5"], r)
+    merge_case("защиты: главная сессия argus на Sonnet — отказ", h.pre(cmd, pdir=kit), False, "по транскрипту argus")
+    # транскрипта нет — как раньше, по --ran, с пометкой
+    clean()
+    bait = os.path.join(proj, "agent-ag1.jsonl")  # приманка на Sonnet: читать её нельзя ни в одном случае ниже
+    for label, tp, aid in (("файла нет", main_tp, "ag1"), ("transcript_path нет во входе", None, "ag1"),
+                           ("путь не абсолютный", os.path.relpath(bait), None),
+                           ("agent_id с ../", main_tp, "x/../../../agent-ag1")):
+        transcript(["claude-sonnet-5"], path=bait)
+        os.makedirs(os.path.join(proj, "s-coord", "subagents", "agent-x"))  # чтобы ../ из agent_id разрешился
+        r = accept(agent_id=aid, tp=tp)
+        check(f"{label}: models нет, пометка «{mg_note}»", "models" not in r and r.get("models_note") == mg_note, r)
+        merge_case(f"{label}: «принять» на Opus по --ran — проходит", h.pre(cmd, pdir=kit), True)
+        clean()
+    transcript([], extra=("не json", json.dumps({"type": "assistant", "message": "x"})))
+    r = accept()
+    check("в транскрипте нет моделей — пометка, а не пустой список", "models" not in r and r.get("models_note") == mg_note, r)
+    accept(ran="модель: claude-sonnet-5, тесты")
+    merge_case("транскрипта без моделей: --ran Sonnet — отказ по --ran", h.pre(cmd, pdir=kit), False, "(по --ran)")
+    # симлинк на транскрипт не читается (O_NOFOLLOW)
+    clean()
+    real = transcript(["claude-opus-5-5"], path=os.path.join(proj, "elsewhere.jsonl"))
+    os.makedirs(os.path.join(proj, "s-coord", "subagents"))
+    os.symlink(real, os.path.join(proj, "s-coord", "subagents", "agent-ag1.jsonl"))
+    r = accept()
+    check("транскрипт — симлинк: не читается, пометка", "models" not in r and r.get("models_note") == mg_note, r)
+    # reject тоже несёт модели; не защиты — модель транскрипта не проверяется
+    clean()
+    transcript(["claude-sonnet-5"])
+    h.reset()
+    h.post(f"pantheon review reject latark/agent-kit 7 {sha}", "argus", agent_id="ag1", transcript=main_tp)
+    check("reject — тоже с models", [r.get("models") for r in h.read()] == [["claude-sonnet-5"]], h.read())
+    tsha = h.sha["tg-read"]
+    accept(repo="latark/tg-read", pr=3, s=tsha)
+    merge_case("внутреннее: транскрипт на Sonnet — проходит (модель проверяют только защиты)",
+               h.pre(f"gh pr merge 3 --match-head-commit {tsha}"), True)
+    clean()
+
+
+mg_note = "транскрипта argus нет — модель по --ran"
 
 
 def t_ci(h):
@@ -2039,7 +2151,7 @@ CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, 
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
-         t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_ci,
+         t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_transcript, t_ci,
          t_core_touchid, t_carry_unit, t_carry_gate, t_carry_product, t_carry_chain, t_version_repo]
 
 
