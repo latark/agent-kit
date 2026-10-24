@@ -2131,7 +2131,7 @@ def t_carry_senior(h):
     на том же коммите или новее."""
     kit, cwd = h.j("projects/agent-kit"), "projects/agent-kit"
     s = carry_history(kit)
-    P, N = s["P"], s["merged_ver"]
+    P, M, N = s["P"], s["merged"], s["merged_ver"]
 
     def rej(sha, aid):
         return rec("reject", "latark/agent-kit", 7, sha, agent_id=aid)
@@ -2146,6 +2146,11 @@ def t_carry_senior(h):
         ("«вернуть» на P, затем «принять» на N того же argus — проходит", [rej(P, "a1"), opus_accept(N, "a1")], True, ""),
         ("«вернуть» на P, затем «принять» на P того же argus — проходит", [rej(P, "a1"), opus_accept(P, "a1")], True, ""),
         ("«принять» на N, затем «вернуть» на P того же argus — отказ", [opus_accept(N, "a1"), rej(P, "a1")], False,
+         "«вернуть» (reject)"),
+        # оба коммита — прошлые head (P и merged переходят на N): старшинство по предкам в git
+        ("«вернуть» на P, затем «принять» на более новом merged — проходит", [rej(P, "a1"), opus_accept(M, "a1")],
+         True, ""),
+        ("«вернуть» на merged, затем «принять» на более старом P — отказ", [rej(M, "a1"), opus_accept(P, "a1")], False,
          "«вернуть» (reject)"),
     ]
     for name, recs, allow, why in cases:
