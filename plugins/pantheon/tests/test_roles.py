@@ -432,6 +432,22 @@ def main():
           all("Самопроверка: разработчику — «в отчёте строка по шести пунктам самопроверки роли: сделано "
               "(доказательство), не применимо (почему) или по отчёту Codex: путь»" in texts.get(f, "")
               for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md", "hq.md")))
+    # effort argus (metis-0176): кто зовёт argus — вне ядра с effort medium, ядро и защиты — без параметра (high);
+    # сам argus — на high в файле роли, знает правило и сверку модели шлюзом по транскрипту
+    effort_rule = ("Effort argus (metis-0176, решение владельца 23.10): вне ядра защит зови argus с параметром "
+                   "`effort: \"medium\"` — это экономит лимит. PR и работу, которые задевают ядро защит или защиты "
+                   "(репозиторий и папка metis-pantheon), argus проверяет без параметра `effort` — на high из файла роли.")
+    callers = ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md", "hq.md")
+    miss = [f for f in callers if effort_rule not in flat.get(f, "")]
+    check("лиды, координатор и Зевс: argus вне ядра — effort medium, ядро и защиты — без параметра"
+          + (f" (нет у: {miss})" if miss else ""), not miss)
+    argus_md = texts.get("argus.md", "")
+    check("argus: в файле роли effort: high и model: opus; знает, что вне ядра его зовут с medium, а шлюз сверяет "
+          "модель с транскриптом",
+          "\neffort: high\n" in argus_md.split("---")[1] and "\nmodel: opus\n" in argus_md.split("---")[1]
+          and "Вне защит тебя зовут с effort medium, на защиты — без него, на high из файла роли."
+          in flat.get("argus.md", "")
+          and "Шлюз сверяет модель из `--ran` с твоим транскриптом" in flat.get("argus.md", ""))
     # Гестия (metis-0245): окно песочницы есть — роль собирается; запреты шаблона на месте
     tmpl_h = read(os.path.join(real, "hestia.tmpl"))
     head = tmpl_h.split("---")[1] if tmpl_h.count("---") >= 2 else ""

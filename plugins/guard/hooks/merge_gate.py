@@ -17,7 +17,8 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
                       только agent_type argus; у accept все три поля перечня (Б6) обязательны и непусты;
      talos          — `pantheon review talos <owner/repo> <PR> <SHA>`, только agent_type talos.
    Строка: {"v":1,"kind","repo":[owner/repo…],"pr":N|null,"sha","by":{agent_type,agent_id,session_id},"cwd","time",
-   "tool_use_id","cmd"}, у accept (и у reject с полями) — ещё "checklist":{"opened","ran","unchecked"}. Подделать запись роль не может: ~/.local/state/pantheon закрыт ролям песочницей и
+   "tool_use_id","cmd"}, у accept (и у reject с полями) — ещё "checklist":{"opened","ran","unchecked"}, у обоих — "models":[…] или
+   "models_note" (metis-0176). Подделать запись роль не может: ~/.local/state/pantheon закрыт ролям песочницей и
    pantheon-acl, а вид записи хук берёт из agent_type события, а не из текста команды. Битые строки при чтении
    пропускаются: битая запись может только не дать разрешения.
 2. merge_problem — правило gh pr merge: кто сливает (координатор или его лид), чьё направление, защиты, затем запор:
@@ -32,17 +33,23 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    `<время> merge-approve <owner/repo>#<N> <sha>` для того же репозитория, PR и SHA в owner-log/merge-approve.log —
    её пишет тик после Touch ID владельца (metis-0285, `pantheon merge`), не старше суток. В защитах accept засчитывается, только если его ran начинается с
    «модель: claude-opus» (metis-0176): accept другой модели — как будто его нет, reject любой модели в силе.
-   Незаменённый шаблон «<ID>» в ran — отказ ещё до записи.
+   Незаменённый шаблон «<ID>» в ran — отказ ещё до записи. Модель сверяется и с транскриптом argus: record пишет в
+   accept и reject поле "models" — значения message.model его assistant-записей; в защитах accept засчитывается,
+   только если все они claude-opus и среди них модель из ran. Транскрипта нет — поле "models_note", судим по ran.
    Последним во всех режимах — проверки GitHub (metis-0297), один gh pr view на Д3 и проверки: PR на этом SHA, rollup зелёный;
    красная или идущая проверка, нет ответа gh — отказ; проверок нет — пропуск, только если .github/workflows нет ни на
    head, ни на base PR.
-Правдивость поля ran (модель argus) guard не проверяет: это защита от ошибки шаблона и запуска не той модели.
+Модель argus guard берёт из его транскрипта, а не только со слов ran (metis-0176): Claude Code не передаёт путь к
+транскрипту субагента в PreToolUse/PostToolUse (agent_transcript_path — только в SubagentStop), он выводится из входа
+хука — transcript_path, session_id, agent_id — по раскладке Claude Code. Это защита от ошибки шаблона и от запуска
+или подмены модели (запасная модель после отметки), а не от подделки транскрипта.
 Чего guard не проверяет: правдивость строки в сводке и перечня argus и то, что выбранная команда тестов — настоящие
 тесты: пустую программу (true, echo…, python3 -c pass, sh -c '') он ловит по короткому списку, а придуманную
 пустышку вроде `python3 -c "import os"` — нет (защита от ошибки, не от обхода).
 """
 
 import ast
+import glob
 import json
 import os
 import re
@@ -102,6 +109,9 @@ CHECKLIST_HINT = '--opened "<что открыл>" --ran "<что запусти
 # (metis-0176). Незаменённый шаблон «<ID>» в ran — ошибка шаблона роли, а не модель
 OPUS_RAN = re.compile(r"\s*модель:\s*claude-opus", re.I)
 UNFILLED_ID = re.compile(r"<\s*id\s*>", re.I)
+RAN_MODEL = re.compile(r"\s*модель:\s*(claude-[a-z0-9.-]*[a-z0-9])", re.I)  # ID модели из --ran
+SEGMENT_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # session_id и agent_id в пути транскрипта — одним сегментом
+NO_TRANSCRIPT = "транскрипта argus нет — модель по --ran"
 UNFILLED_ID_HINT = ("в --ran остался шаблон «<ID>»: подставь ID своей модели из системной подсказки — "
                     "`--ran \"модель: claude-opus-…, что запустил\"`")
 # пустая команда тестов: программа, которая ничего не проверяет (защита от ошибки, список короткий и явный); ещё
@@ -707,8 +717,73 @@ def record(event):
            "tool_use_id": event.get("tool_use_id") or "", "cmd": cmd}
     if rec_kind in ("accept", "reject") and checklist:
         rec["checklist"] = checklist
+    if rec_kind in ("accept", "reject"):  # модель argus — из данных сессии, а не со слов ran (metis-0176)
+        models = agent_models(event)
+        if models:
+            rec["models"] = models
+        else:
+            rec["models_note"] = NO_TRANSCRIPT
     append_record(rec)
     return rec_kind
+
+
+def agent_models(event):
+    """Модели сессии argus по её транскрипту (metis-0176): отсортированные значения message.model assistant-записей,
+    без «<synthetic>»; [] — моделей в нём нет, None — транскрипта нет или не прочесть. Путь у субагента —
+    <папка transcript_path>/<session_id>/subagents/[<подпапка>/]agent-<agent_id>.jsonl (так Claude Code кладёт
+    транскрипты субагентов), у главной сессии (agent_id нет) — сам transcript_path."""
+    tp, sid, aid = (event.get(k) for k in ("transcript_path", "session_id", "agent_id"))
+    if not isinstance(tp, str) or not os.path.isabs(tp):
+        return None
+    if aid:
+        if not (isinstance(aid, str) and isinstance(sid, str) and SEGMENT_ID.fullmatch(aid)
+                and SEGMENT_ID.fullmatch(sid)):
+            return None
+        base, name = os.path.join(os.path.dirname(tp), sid, "subagents"), f"agent-{aid}.jsonl"
+        paths = [os.path.join(base, name)] + sorted(glob.glob(os.path.join(glob.escape(base), "*", name)))
+    else:
+        paths = [tp]
+    for path in paths:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            continue
+        models = set()
+        with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"assistant"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                msg = entry.get("message") if isinstance(entry, dict) and entry.get("type") == "assistant" else None
+                model = msg.get("model") if isinstance(msg, dict) else None
+                if isinstance(model, str) and model.strip() and model != "<synthetic>":
+                    models.add(model.strip().lower())
+        return sorted(models)
+    return None
+
+
+def opus_problem(rec):
+    """Почему «принять» в защитах не засчитан (metis-0176), или None — засчитан: ran начинается с «модель:
+    claude-opus», а если в записи есть модели из транскрипта — все они claude-opus и среди них модель из ran (тот же
+    ID или он с датой: claude-opus-4-1 и claude-opus-4-1-20250805)."""
+    ran = rec["checklist"]["ran"]
+    if not OPUS_RAN.match(ran):
+        return "по --ran"
+    if "models" not in rec:
+        return None  # транскрипта не было (models_note) или запись до metis-0176 — судим по ran
+    seen = rec["models"]
+    if not isinstance(seen, list) or not seen or not all(isinstance(m, str) for m in seen):
+        return "модели транскрипта не разобрать"
+    if not all(m.startswith("claude-opus") for m in seen):
+        return f"по транскрипту argus — {', '.join(seen)}"
+    said = RAN_MODEL.match(ran)
+    said = said.group(1).lower() if said else ""
+    if not any(re.fullmatch(re.escape(said) + r"(-\d{8})?", m) for m in seen):
+        return f"в --ran {said or '?'}, а по транскрипту argus — {', '.join(seen)}"
+    return None
 
 
 def review_problem(role, args, cmd="", background=False):
@@ -987,12 +1062,12 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     verdicts = [r for r in records if mine(r, ("accept", "reject"), "argus")]
     # защиты (metis-0176): «принять» не на Opus не засчитывается — как будто его нет; «вернуть» любой модели в силе,
     # «принять» без перечня остаётся, чтобы отказ Б6 ниже сказал о перечне
-    weak = [r for r in verdicts if protect and r["kind"] == "accept" and checklist_ok(r)
-            and not OPUS_RAN.match(r["checklist"]["ran"])]
+    weak = [r for r in verdicts if protect and r["kind"] == "accept" and checklist_ok(r) and opus_problem(r)]
     verdicts = [r for r in verdicts if not any(r is w for w in weak)]
     if not verdicts and weak:
         unfilled = any(UNFILLED_ID.search(r["checklist"]["ran"]) for r in weak)
-        return (f"«принять» на {repo}#{pr}@{sha[:12]} от {'; '.join(_who(r) for r in weak)} — не на Opus: в "
+        return (f"«принять» на {repo}#{pr}@{sha[:12]} от {'; '.join(_who(r) + ' (' + opus_problem(r) + ')' for r in weak)}"
+                " — не на Opus: в "
                 "репозитории защит шлюз засчитывает только проверку argus на модели claude-opus (--ran начинается с "
                 "«модель: claude-opus»). Проверку повторяет argus на Opus и записывает `pantheon review accept "
                 f"{repo} {pr} {sha} --ran \"модель: claude-opus-…, что запустил\" …`."
