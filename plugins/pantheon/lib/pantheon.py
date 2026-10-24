@@ -140,7 +140,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon review status [<owner/repo> <PR>]   записи журнала ~/.local/state/pantheon/merge-gate/records.jsonl и
                                         метки «ревью идёт»; у вердикта — рецензент (agent_id/сессия, по 8 знаков),
                                         с PR — строка «итог на <head>: принять N, вернуть M» по последнему вердикту
-                                        каждого argus, как считает шлюз (по ней решают об узком повторе, metis-0393)
+                                        каждого argus, как считает шлюз защит: «принять» — только с полным перечнем
+                                        и на Opus (по ней решают об узком повторе, metis-0393)
   pantheon commit                       commit → pull без rebase → push ~/ai/pantheon
   pantheon install | uninstall          поставить или снять задачу launchd pantheon.tick
   pantheon tick                         один проход планировщика (его вызывает launchd)
@@ -7328,6 +7329,15 @@ REVIEW_USAGE = ("pantheon review test -- <команда…> | accept <owner/rep
 # перечень проверенного в «принять» (Б6, guard 0.5.6): у accept все три поля обязательны и непусты, у reject — по
 # желанию. Тот же разбор — в merge_gate.verdict_parse плагина guard (он и решает, будет ли запись)
 REVIEW_CHECKLIST = {"opened": "открыл", "ran": "запустил", "unchecked": "не проверял"}
+OPUS_RAN = re.compile(r"\s*модель:\s*claude-opus", re.I)   # как в шлюзе guard (metis-0176)
+
+
+def review_accept_counts(r):
+    """«Принять» в счёт шлюза (metis-0176, Б6): полный перечень и --ran с «модель: claude-opus» в начале. Одно правило
+    для шлюза владельца (merge.gate) и итога `review status` (review_tally), чтобы они не разошлись."""
+    c = r.get("checklist")
+    return (isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in REVIEW_CHECKLIST)
+            and bool(OPUS_RAN.match(c["ran"])))
 
 
 def _review_verdict(sub, args):
@@ -7411,12 +7421,17 @@ def review_records(repo=None, pr=None):
 def review_tally(recs, pr):
     """Итог argus по head PR (metis-0393): {sha: (принять, вернуть)} по последнему вердикту каждого рецензента.
     Рецензент — пара (session_id, agent_id), как у шлюза слияния guard: «вернуть» снимает только «принять» того же
-    вызова. По итогу прошлого head лид и argus решают, допустим ли узкий повтор, — не по отчётам и словам лида."""
+    вызова. По итогу прошлого head лид и argus решают, допустим ли узкий повтор, — не по отчётам и словам лида.
+    «Принять» без полного перечня или не на Opus не в счёт — как у шлюза владельца (review_accept_counts): «вернуть»
+    того же рецензента оно не снимает. Шлюз guard вне репозиториев защит «принять» не на Opus засчитывает — итог там
+    строже шлюза, узкий повтор от этого не пройдёт лишний раз."""
     last = {}
     for r in recs:
         by = r.get("by")
         if (r.get("kind") in ("accept", "reject") and r.get("pr") == pr and isinstance(by, dict)
                 and by.get("agent_type") == "argus" and isinstance(r.get("sha"), str)):
+            if r["kind"] == "accept" and not review_accept_counts(r):
+                continue
             last.setdefault(r["sha"].lower(), {})[(by.get("session_id") or "", by.get("agent_id") or "")] = r["kind"]
     return {sha: (sum(k == "accept" for k in v.values()), sum(k == "reject" for k in v.values()))
             for sha, v in last.items()}
@@ -7533,6 +7548,8 @@ def review_cmd(rest):
             if r.get("kind") == "accept" and not all(isinstance(cl.get(k), str) and cl[k].strip()
                                                      for k in REVIEW_CHECKLIST):
                 print("    без перечня проверенного (Б6) — шлюз слияния такое «принять» не пускает")
+            elif r.get("kind") == "accept" and not review_accept_counts(r):
+                print("    не на Opus (--ran без «модель: claude-opus» в начале) — шлюз защит и итог ниже его не считают")
             for k, label in REVIEW_CHECKLIST.items():
                 if isinstance(cl.get(k), str) and cl[k].strip():
                     print(f"    {label}: {cl[k]}")

@@ -71,8 +71,6 @@ MIN_ACCEPTS = 2
 GH_TIMEOUT = 30
 MERGE_TIMEOUT = 120
 APPROVE_FILE = "merge-approve.log"
-CHECKLIST = ("opened", "ran", "unchecked")
-OPUS_RAN = re.compile(r"\s*модель:\s*claude-opus", re.I)   # как в шлюзе guard (metis-0176)
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
 SWIFTC = "/usr/bin/swiftc"           # абсолютный путь: PATH прохода подменяем (launchctl setenv)
@@ -349,11 +347,6 @@ def ci_state(rollup):
 
 # --- шлюз -----------------------------------------------------------------------------------------------------------
 
-def _full_checklist(r):
-    c = r.get("checklist")
-    return isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in CHECKLIST)
-
-
 def gate(repo, pr, sha, view):
     """Шлюз на этот head заново: (ok|wait|fail, текст). Записи шлюза пишет только хук guard (роли их не подделают)."""
     if not isinstance(view, dict):
@@ -373,8 +366,9 @@ def gate(repo, pr, sha, view):
         by = r.get("by") if isinstance(r.get("by"), dict) else {}
         if r.get("kind") in ("accept", "reject") and by.get("agent_type") == "argus" and r.get("pr") == pr \
                 and r.get("sha") == sha:
-            # «принять» не на Opus не засчитывается — как будто его нет; «вернуть» любой модели в силе
-            if r["kind"] == "accept" and not (_full_checklist(r) and OPUS_RAN.match(r["checklist"]["ran"])):
+            # «принять» без перечня или не на Opus не засчитывается — как будто его нет; «вернуть» любой модели в силе.
+            # Правило общее с итогом `pantheon review status` (P.review_accept_counts, metis-0393)
+            if r["kind"] == "accept" and not P.review_accept_counts(r):
                 continue
             latest[(by.get("session_id") or "", by.get("agent_id") or "")] = r
     if any(r["kind"] != "accept" for r in latest.values()):
