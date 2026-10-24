@@ -1666,6 +1666,8 @@ def kit_history(h):
     for name, files, mode in (
             ("out", {"code.py": CODE.format(3)}, None),
             ("ws", {"code.py": CODE.format(2).replace("return x", "return x ")}, None),
+            # отступ в строке, которую PR и так правит: строки -/+ те же, без --verbatim patch-id их не различит
+            ("wsin", {"code.py": CODE.format(2).replace("    x = 2", "  x = 2")}, None),
             ("bin", {"bin.dat": b"\x00\x02bin\x00"}, None),
             ("field", {PJ: _man("pantheon", "0.11.86", description="другое")}, None),
             ("dup", {PJ: '{"name": "pantheon", "version": "0.11.86", "version": "0.11.86"}\n'}, None),
@@ -1761,7 +1763,8 @@ def t_carry_unit(h):
                        ("Nam", s["M1"]), ("Nredo", s["M1"]), ("Nrev", s["M1"]), ("N2", s["M2"])):
         check(f"отпечаток {name} = P (номер версии и подтянутый main)", fp(s[name], base) == ref, name)
     check("отпечаток P от base M2 — тот же", fp(s["P"], s["M2"]) == ref)
-    for name, why_ in (("out", "правка кода"), ("ws", "только пробел (patch-id --verbatim)"), ("bin", "двоичный файл"),
+    for name, why_ in (("out", "правка кода"), ("ws", "только пробел (patch-id --verbatim)"),
+                       ("wsin", "отступ в правленой строке (patch-id --verbatim)"), ("bin", "двоичный файл"),
                        ("field", "другое поле plugin.json (117-b1)"), ("mjson", "marketplace.json"),
                        ("mode", "режим файла"), ("newfile", "пустой новый файл"),
                        ("evil", "правка внутри слияния (117-a7)"), ("moddel", "файл, удалённый main, вернули (117-b3)"),
