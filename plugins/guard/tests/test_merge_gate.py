@@ -1861,9 +1861,12 @@ def t_carry_unit(h):
 
     def files():
         return ["README.md", "code.py", PJ], None
+    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], recs[:2] + recs[3:], view, files)
+    check("carried: P переходит; чужой PR и не argus — не кандидаты", same == {s["P"]} and not whys, (same, whys))
     same, whys = mg.carried(kit, "latark/agent-kit", 7, s["merged_ver"], recs, view, files)
-    check("carried: P переходит, field — нет; чужой PR и не argus — не кандидаты",
-          same == {s["P"]} and len(whys) == 1 and whys[0].startswith(s["field"][:12]), (same, whys))
+    check("carried: field с вердиктом не предок нового head — не переносится ничего, и P тоже (argus-122b10)",
+          same == set() and len(whys) == 2 and whys[0].startswith(s["field"][:12]) and "не предок" in whys[0]
+          and "ни с одного" in whys[1], (same, whys))
     calls.clear()
     same, whys = mg.carried(kit, "latark/agent-kit", 9, s["merged_ver"], recs, view, files)
     check("carried: вердиктов на этот PR нет — gh pr view не зовётся", same == set() and not whys and not calls,
@@ -2283,6 +2286,54 @@ def line_history(p, mode):
     return s, base
 
 
+def rewrite_history(p, mode):
+    """Проба probe3 argus-122b10: X — код PR от B, A = X + выпуск 0.11.85, R — head после A с тем же деревом, что у
+    N; (коммиты, база PR). mode:
+    amend — R = A + 0.11.86, затем git commit --amend — N: R не предок N;
+    redo_pull — R = merge(A, M1) + 0.11.86, затем reset --hard A, слияние M1 заново и 0.11.86 — N: R не предок N;
+    control — A → R → N на одной линии."""
+    def put(files, msg):
+        for rel, text in files.items():
+            f = os.path.join(p, rel)
+            os.makedirs(os.path.dirname(f), exist_ok=True)
+            with open(f, "w") as fh:
+                fh.write(text)
+        git(p, "add", "-A")
+        git(p, "commit", "-q", "--allow-empty", "-m", msg)
+        return git(p, "rev-parse", "HEAD")
+
+    g = "plugins/pantheon/lib/g.py"
+    lines = [f"l{i} = {i}\n" for i in range(1, 11)]
+    s = {}
+    git(p, "checkout", "-q", "-B", "c-base", "main")
+    s["B"] = put({PJ: _manifest("pantheon", "0.11.84"), g: "".join(lines)}, "B")
+    git(p, "checkout", "-q", "-B", "c-main", s["B"])
+    s["M1"] = put({"plugins/pantheon/lib/m.py": "m = 1\n"}, "main: m.py")
+    base = s["B"]
+    git(p, "checkout", "-q", "-B", "c-pr", s["B"])
+    s["X"] = put({g: "l1 = 100\n" + "".join(lines[1:])}, "PR: код")
+    s["A"] = put({PJ: _manifest("pantheon", "0.11.85")}, "выпуск A")
+    if mode == "amend":
+        s["R"] = put({PJ: _manifest("pantheon", "0.11.86")}, "выпуск R")
+        git(p, "commit", "-q", "--amend", "-m", "выпуск R (переписан)")
+        s["N"] = git(p, "rev-parse", "HEAD")
+    elif mode == "redo_pull":
+        git(p, "merge", "-q", "--no-edit", "--no-ff", s["M1"])
+        s["R"] = put({PJ: _manifest("pantheon", "0.11.86")}, "выпуск R")
+        git(p, "reset", "-q", "--hard", s["A"])
+        git(p, "merge", "-q", "--no-ff", "-m", "подтянуть main заново", s["M1"])
+        s["N"] = put({PJ: _manifest("pantheon", "0.11.86")}, "выпуск N")
+        base = s["M1"]
+    else:
+        s["R"] = put({PJ: _manifest("pantheon", "0.11.86")}, "выпуск R")
+        s["N"] = put({PJ: _manifest("pantheon", "0.11.87")}, "выпуск N")
+    git(p, "checkout", "-q", "main")
+    return s, base
+
+
+REWRITE = ("amend", "redo_pull", "control")
+
+
 def t_carry_line(h):
     """Решение владельца 24.10 (consent metis-0427): перенос — только по прямой линии первых родителей от самого
     старого head с вердиктом до нового; вторые родители — только подтянутая база, ветвлений внутри PR нет, все head с
@@ -2298,12 +2349,21 @@ def t_carry_line(h):
     cases = [  # режим, подстрока причины (None — R и A переходят)
         ("side", "второй родитель"), ("anc", "ветвление"), ("foreign", "второй родитель"),
         ("p1", "первый родитель"), ("cand_off", "не на линии первых родителей"), ("manual", None),
+        # argus-122b10: R с «вернуть» выпал из истории N (amend, повтор слияния после reset), дерево то же
+        ("amend", "история переписана"), ("redo_pull", "история переписана"), ("control", None),
     ]
     for mode, why in cases:
         h.reset()
         if mode == "cand_off":  # «вернуть» argus4 на коммите базы main_new: head с вердиктом не на линии PR
             s = pull_history(kit, False)
             base = s["main_new"]
+        elif mode in REWRITE:
+            s, base = rewrite_history(kit, mode)
+            tree = git(kit, "rev-parse", s["R"] + "^{tree}") == git(kit, "rev-parse", s["N"] + "^{tree}")
+            anc = mg._git_rc(kit, "merge-base", "--is-ancestor", s["R"], s["N"])[0] == 0
+            check(f"линия {mode}: условие пробы — " + ("R предок N" if mode == "control" else
+                                                       "у R и N одно дерево, R не предок N"),
+                  anc if mode == "control" else tree and not anc, (tree, anc))
         else:
             s, base = line_history(kit, mode)
         recs = [rec("tests", "latark/agent-kit", None, s["N"], "dev-opus"),
@@ -2319,18 +2379,23 @@ def t_carry_line(h):
         files = pr_paths(kit, s["N"], base)
         same, whys = mg.carried(kit, "latark/agent-kit", 7, s["N"], recs, lambda: {"baseRefOid": base},
                                 lambda: (files, None))
+        last = "ни с одного" if mode in REWRITE else "не прямая линия"
         if why is None:
-            check(f"линия {mode}: R переходит через L1, хоть S сведено с N раньше", same == {s["R"], s["A"]},
-                  (same, whys))
+            check(f"линия {mode}: R и A переходят (manual — R через L1, хоть S сведено с N раньше)",
+                  same == {s["R"], s["A"]}, (same, whys))
+        elif mode in REWRITE:
+            check(f"линия {mode}: не переносится ничего, и «принять» с предка A тоже — {why}",
+                  same == set() and len(whys) == 2 and whys[0].startswith(s["R"][:12]) and why in whys[0]
+                  and last in whys[-1], (same, whys))
         else:
             check(f"линия {mode}: не переносится ничего, причина — {why}",
-                  same == set() and whys and "не прямая линия" in whys[-1] and why in whys[-1], (same, whys))
+                  same == set() and whys and last in whys[-1] and why in whys[-1], (same, whys))
         h.view["agent-kit"]["baseRefOid"] = base
         h.gh(files, head=s["N"])
         h.seed(*recs)
         merge_case(f"линия {mode}: «принять» с A не проходит — отказ",
                    h.pre(f"gh pr merge 7 --match-head-commit {s['N']}", pdir=cwd), False,
-                   "«вернуть» (reject)" if why is None else "не прямая линия")
+                   "«вернуть» (reject)" if why is None else last)
         if mode == "manual":
             old = mg.CARRY_CHECKS
             mg.CARRY_CHECKS = 3
