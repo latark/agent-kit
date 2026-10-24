@@ -1070,6 +1070,7 @@ def _who(rec):
 # Запись talos не переносится: подтянутая база меняет живое приложение.
 VERSION_FILE = re.compile(r"plugins/[^/]+/\.claude-plugin/plugin\.json")
 CARRY_MAX = 10  # сколько прошлых head PR сверять (на каждый — десяток вызовов git); больше — не переносится ничего
+CARRY_LINKS = 30  # сколько коммитов без вердикта на первой линии родителей сверять звеньями цепочки; больше — ничего
 _ABSENT = object()
 _CONFLICT = object()  # конфликт поля в _merge3: None — обычное значение поля (null в JSON), а не конфликт
 
@@ -1271,7 +1272,9 @@ def carried(d, repo, pr, sha, records, pr_view, pr_files):
     Перенос — от последнего head с вердиктом: кандидаты-предки sha по числу коммитов, от нового к старому; кандидат
     переходит, если от него до sha (same_change) или до последнего перенесённого кандидата — только номер версии и
     подтянутая база. Так «вернуть» с R не теряется, когда R → A и A → sha чистые, а R → sha — нет (merge-tree по
-    переименованному в базе файлу, проба p6 argus-117b3)."""
+    переименованному в базе файлу, проба p6 argus-117b3). Звенья цепочки — и коммиты без вердикта на первой линии
+    родителей от самого старого кандидата до sha (два подтягивания базы без вердикта между ними, argus-117b7); их
+    больше CARRY_LINKS или git их не прочитал — не переносится ничего."""
     prevs = []
     for r in records:
         if r["kind"] in ("accept", "reject") and r["by"].get("agent_type") == "argus" and r["pr"] == pr \
@@ -1303,16 +1306,35 @@ def carried(d, repo, pr, sha, records, pr_view, pr_files):
             whys.append(f"{p[:12]} — коммитов нет в git этой папки — сделай git fetch")
         else:
             order.append((-int(count.strip()), p))
+    if not order:
+        return set(), whys
+    # звенья цепочки — и коммиты без вердикта на первой линии родителей от самого старого кандидата до sha (head после
+    # подтянутой базы, номер версии): иначе «вернуть» с R теряется, когда R → N2 и N2 → N3 чистые, а R → N3 — нет и
+    # на N2 вердикта нет (argus-117b7)
+    cands = {p for _n, p in order}
+    out = _git(d, "rev-list", "--first-parent", "--ancestry-path", f"--max-count={CARRY_LINKS + 2}",
+               f"{max(order)[1]}..{sha}")
+    links = [x for x in (out or "").split() if x != sha and x not in cands]
+    if out is None or len(links) > CARRY_LINKS:
+        return set(), whys + [("git rev-list не ответил" if out is None else
+                               f"между прошлым head и новым больше {CARRY_LINKS} коммитов") +
+                              " — записи не переносятся, нужны записи на этом head"]
+    for x in links:
+        count = _git(d, "rev-list", "--count", x) if SHA_RE.fullmatch(x) else None
+        if count is None or not count.strip().isdigit():
+            return set(), whys + [f"{x[:12]} — коммит цепочки не прочитан в git этой папки — записи не переносятся"]
+        order.append((-int(count.strip()), x))
     same, last = set(), None
     for _n, p in sorted(order):  # от нового head к старому: потомок длиннее предка по числу коммитов
         why = same_change(d, p, sha, base.lower())
         if why and last is not None and same_change(d, p, last, base.lower()) is None:
             why = None  # p → last → … → sha: только номер версии и подтянутая база по цепочке
-        if why:
-            whys.append(f"{p[:12]} — {why}")
-        else:
-            same.add(p)
+        if not why:
             last = p
+            if p in cands:
+                same.add(p)
+        elif p in cands:
+            whys.append(f"{p[:12]} — {why}")
     return same, whys
 
 
@@ -1390,13 +1412,28 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     if not verdicts:
         return (f"нет «принять» от argus на {repo}#{pr}@{sha[:12]}: позови argus, он проверит и запишет "
                 f"`pantheon review accept {repo} {pr} {sha} {CHECKLIST_HINT}`.{carry_note} {advice}")
-    latest = {}  # рецензент (session_id, agent_id) → его последний вердикт; порядок — по первой записи рецензента
-    for r in verdicts:
+
+    def lifts(x, y):  # «принять» на коммите y снимает «вернуть» того же рецензента на x: y — тот же коммит или новее
+        if x == y or y == sha:
+            return True
+        got = _git_rc(cwd, "merge-base", "--is-ancestor", x, y) if cwd else None
+        return got is not None and got[0] == 0
+
+    # рецензент (session_id, agent_id) → его вердикт в силе; порядок — по первой записи рецензента. «Вернуть» в силе,
+    # пока после него нет «принять» того же рецензента на том же коммите или новее: «принять» на прошлом head не
+    # снимает «вернуть» на новом (argus-117b7, K2). Иначе в силе его последнее «принять»
+    latest, held = {}, {}
+    for i, r in enumerate(verdicts):
         latest[_reviewer(r)] = r
+        if r["kind"] != "accept" and not any(y["kind"] == "accept" and _reviewer(y) == _reviewer(r)
+                                             and lifts(r["sha"], y["sha"]) for y in verdicts[i + 1:]):
+            held[_reviewer(r)] = r
+    latest.update(held)
     rejects = [r for r in latest.values() if r["kind"] != "accept"]
     if rejects:
         return (f"«вернуть» (reject) на {repo}#{pr}@{sha[:12]} от {'; '.join(_who(r) for r in rejects)}: его снимает "
-                "только «принять» того же рецензента, записанное после него (верни ему исправление), или новый коммит "
+                "только «принять» того же рецензента, записанное после него на том же коммите или новее (верни ему "
+                "исправление), или новый коммит "
                 f"с правками (номер версии и подтянутая база «вернуть» не снимают) и новыми записями тестов и argus — `pantheon review accept {repo} {pr} <новый SHA>`. «Принять» "
                 f"другого argus «вернуть» не перекрывает. {advice}")
     old = [r for r in latest.values() if not checklist_ok(r)]

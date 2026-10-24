@@ -2091,6 +2091,70 @@ def t_carry_chain(h):
     h.seed(*recs)
     merge_case("цепочка: «вернуть» второго argus на R в силе на N — отказ",
                h.pre(f"gh pr merge 7 --match-head-commit {s['N']}", pdir=cwd), False, "«вернуть» (reject)")
+    # argus-117b7: вердикт только на R, на двух подтягиваниях базы (A, слияние main_new) и на выпуске N — ни одного;
+    # звенья цепочки — коммиты первой линии родителей без вердикта
+    only = [rec("tests", "latark/agent-kit", None, s["N"], "dev-opus"),
+            rec("reject", "latark/agent-kit", 7, s["R"], agent_id="argus2"), opus_accept(s["N"], "argus3")]
+    for r in only:
+        r["repo"] = [x.lower() for x in r["repo"]]
+    same, whys = mg.carried(kit, "latark/agent-kit", 7, s["N"], only, lambda: {"baseRefOid": s["main_new"]},
+                            lambda: (files, None))
+    check("цепочка без вердиктов между: «вернуть» с R переходит на N через A", same == {s["R"]}, (same, whys))
+    h.reset()
+    h.view["agent-kit"]["baseRefOid"] = s["main_new"]
+    h.gh(files, head=s["N"])
+    h.seed(*only)
+    merge_case("цепочка без вердиктов между: «вернуть» с R, свежее Opus-«принять» другого argus на N — отказ",
+               h.pre(f"gh pr merge 7 --match-head-commit {s['N']}", pdir=cwd), False, "«вернуть» (reject)")
+    old = mg.CARRY_LINKS
+    mg.CARRY_LINKS = 1
+    try:
+        same, whys = mg.carried(kit, "latark/agent-kit", 7, s["N"], only, lambda: {"baseRefOid": s["main_new"]},
+                                lambda: (files, None))
+    finally:
+        mg.CARRY_LINKS = old
+    check("цепочка: звеньев больше CARRY_LINKS — не переносится ничего, причина в отказе",
+          same == set() and whys and "больше 1 коммитов" in whys[-1], (same, whys))
+
+
+def opus_accept(sha, aid):
+    """«принять» argus на Opus с перечнем: проходит сверку модели (metis-0176)."""
+    r = rec("accept", "latark/agent-kit", 7, sha, agent_id=aid,
+            checklist=dict(CHECKLIST, ran="модель: claude-opus-5-5, тесты"))
+    r["models"] = ["claude-opus-5-5"]
+    return r
+
+
+def t_carry_senior(h):
+    """argus-117b7 (K0–K3 пробы probe4): вердикт рецензента на новом head старше его вердиктов на прошлых head —
+    «принять» того же argus на прошлом head P не снимает его «вернуть» на новом N; «вернуть» снимает только «принять»
+    на том же коммите или новее."""
+    kit, cwd = h.j("projects/agent-kit"), "projects/agent-kit"
+    s = carry_history(kit)
+    P, N = s["P"], s["merged_ver"]
+
+    def rej(sha, aid):
+        return rec("reject", "latark/agent-kit", 7, sha, agent_id=aid)
+    cases = [
+        ("K0: «принять» на P — проходит", [opus_accept(P, "a1")], True, ""),
+        ("K1: «принять» на P, затем «вернуть» на N того же argus — отказ", [opus_accept(P, "a1"), rej(N, "a1")], False,
+         "«вернуть» (reject)"),
+        ("K2: «вернуть» на N, затем «принять» на P того же argus — отказ", [rej(N, "a1"), opus_accept(P, "a1")], False,
+         "«вернуть» (reject)"),
+        ("K3: «вернуть» на N от a2, «принять» на P от a1 — отказ", [rej(N, "a2"), opus_accept(P, "a1")], False,
+         "«вернуть» (reject)"),
+        ("«вернуть» на P, затем «принять» на N того же argus — проходит", [rej(P, "a1"), opus_accept(N, "a1")], True, ""),
+        ("«вернуть» на P, затем «принять» на P того же argus — проходит", [rej(P, "a1"), opus_accept(P, "a1")], True, ""),
+        ("«принять» на N, затем «вернуть» на P того же argus — отказ", [opus_accept(N, "a1"), rej(P, "a1")], False,
+         "«вернуть» (reject)"),
+    ]
+    for name, recs, allow, why in cases:
+        h.reset()
+        h.view["agent-kit"]["baseRefOid"] = s["M"]
+        h.seed(rec("tests", "latark/agent-kit", None, P, "dev-opus"), *recs)
+        h.gh(pr_paths(kit, N, s["M"]) or ["README.md"], head=N)
+        merge_case(f"старшинство вердиктов {name}", h.pre(f"gh pr merge 7 --match-head-commit {N}", pdir=cwd), allow,
+                   why)
 
 
 def t_carry_opus(h):
@@ -2184,7 +2248,7 @@ CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, 
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_transcript, t_ci,
-         t_core_touchid, t_carry_unit, t_carry_gate, t_carry_product, t_carry_chain, t_carry_opus,
+         t_core_touchid, t_carry_unit, t_carry_gate, t_carry_product, t_carry_chain, t_carry_senior, t_carry_opus,
          t_version_repo]
 
 
