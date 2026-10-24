@@ -595,8 +595,7 @@ APP = os.path.join(HOME, "Applications", "Доска.app")
 
 
 def board_url(name="Доска.base"):
-    from urllib.parse import quote
-    return f"obsidian://open?vault={quote(os.path.basename(VIEW))}&file={quote('Доска/' + name)}"
+    return tasks_mod().view_file_url(VIEW, "Доска/" + name)
 
 
 def _notifier():
