@@ -2092,7 +2092,7 @@ def t_carry_chain(h):
     merge_case("цепочка: «вернуть» второго argus на R в силе на N — отказ",
                h.pre(f"gh pr merge 7 --match-head-commit {s['N']}", pdir=cwd), False, "«вернуть» (reject)")
     # argus-117b7: вердикт только на R, на двух подтягиваниях базы (A, слияние main_new) и на выпуске N — ни одного;
-    # звенья цепочки — коммиты первой линии родителей без вердикта
+    # звенья цепочки — коммиты без вердикта между R и N (все, не только первая линия родителей, — t_carry_pull)
     only = [rec("tests", "latark/agent-kit", None, s["N"], "dev-opus"),
             rec("reject", "latark/agent-kit", 7, s["R"], agent_id="argus2"), opus_accept(s["N"], "argus3")]
     for r in only:
@@ -2115,6 +2115,92 @@ def t_carry_chain(h):
         mg.CARRY_LINKS = old
     check("цепочка: звеньев больше CARRY_LINKS — не переносится ничего, причина в отказе",
           same == set() and whys and "больше 1 коммитов" in whys[-1], (same, whys))
+
+
+def pull_history(p, side, empties=0):
+    """Пробы argus-122b: история chain_history, но вердикт только на R, а база подтянута дважды — L1 = merge(R,
+    main_old) и L2 = merge(L1, main_new); side — L2 сделан «со стороны main» (первый родитель main_new, второй L1).
+    Между L2 и выпуском A (0.11.85) — empties пустых коммитов, затем выпуск N (0.11.86)."""
+    def put(files, msg):
+        for rel, text in files.items():
+            f = os.path.join(p, rel)
+            if text is None:
+                os.remove(f)
+                continue
+            os.makedirs(os.path.dirname(f), exist_ok=True)
+            with open(f, "w") as fh:
+                fh.write(text)
+        git(p, "add", "-A")
+        git(p, "commit", "-q", "--allow-empty", "-m", msg)
+        return git(p, "rev-parse", "HEAD")
+
+    g, h_ = "plugins/pantheon/lib/g.py", "plugins/pantheon/lib/h.py"
+    lines = [f"l{i} = {i}\n" for i in range(1, 11)]
+    s = {}
+    git(p, "checkout", "-q", "-B", "c-base", "main")
+    s["B"] = put({PJ: _manifest("pantheon", "0.11.84"), g: "".join(lines)}, "B")
+    git(p, "checkout", "-q", "-B", "c-old", s["B"])
+    s["main_old"] = put({g: None, h_: "".join(lines)}, "main: g.py → h.py")
+    s["main_new"] = put({h_: "".join(lines[:4]) + "".join(f"m{i} = {i} * 7  # переписано\n" for i in range(40))},
+                        "main: h.py переписан")
+    git(p, "checkout", "-q", "-B", "c-pr", s["B"])
+    s["R"] = put({g: "l1 = 100\n" + "".join(lines[1:])}, "PR: строка 1 g.py")
+    git(p, "merge", "-q", "--no-edit", "--no-ff", s["main_old"])
+    s["L1"] = git(p, "rev-parse", "HEAD")
+    if side:
+        git(p, "checkout", "-q", "--detach", s["main_new"])
+        git(p, "merge", "-q", "--no-edit", "--no-ff", s["L1"])
+        s["L2"] = git(p, "rev-parse", "HEAD")
+        git(p, "checkout", "-q", "-B", "c-pr", s["L2"])
+    else:
+        git(p, "merge", "-q", "--no-edit", "--no-ff", s["main_new"])
+        s["L2"] = git(p, "rev-parse", "HEAD")
+    for i in range(empties):
+        put({}, f"пустой коммит {i}")
+    s["A"] = put({PJ: _manifest("pantheon", "0.11.85")}, "выпуск A")
+    s["N"] = put({PJ: _manifest("pantheon", "0.11.86")}, "выпуск N")
+    git(p, "checkout", "-q", "main")
+    return s
+
+
+def t_carry_pull(h):
+    """argus-122b, блокеры 1 и 2: «вернуть» argus2 на R, Opus-«принять» argus3 на A, тесты на N. Звенья цепочки — все
+    коммиты между R и N, не только первая линия родителей (база подтянута слиянием «со стороны main»); звеньев больше
+    CARRY_LINKS, хоть окно rev-list и обрезано, — не переносится ничего, и «принять» с A тоже не проходит."""
+    kit, cwd = h.j("projects/agent-kit"), "projects/agent-kit"
+    mg = _load_merge_gate("merge_gate_pull")
+    cases = [  # имя, слияние «со стороны main», пустых коммитов, R переходит
+        ("обычный порядок родителей", False, 0, True),
+        ("слияние «со стороны main» (блокер 1)", True, 0, True),
+        ("K=28 — 30 звеньев (контроль)", False, 28, True),
+        ("K=29 — 31 звено (блокер 2)", False, 29, False),
+        ("K=35 — 37 звеньев (блокер 2)", False, 35, False),
+    ]
+    for name, side, empties, carry in cases:
+        h.reset()
+        s = pull_history(kit, side, empties)
+        recs = [rec("tests", "latark/agent-kit", None, s["N"], "dev-opus"),
+                rec("reject", "latark/agent-kit", 7, s["R"], agent_id="argus2"), opus_accept(s["A"], "argus3")]
+        for r in recs:
+            r["repo"] = [x.lower() for x in r["repo"]]
+        if side:
+            check(f"подтягивание {name}: условие пробы — L1 второй родитель L2, R → N напрямую не сверяется",
+                  git(kit, "rev-parse", f"{s['L2']}^2") == s["L1"]
+                  and isinstance(mg.same_change(kit, s["R"], s["N"], s["main_new"]), str))
+        files = pr_paths(kit, s["N"], s["main_new"])
+        same, whys = mg.carried(kit, "latark/agent-kit", 7, s["N"], recs, lambda: {"baseRefOid": s["main_new"]},
+                                lambda: (files, None))
+        if carry:
+            check(f"подтягивание {name}: на N переходят записи R и A", same == {s["R"], s["A"]}, (same, whys))
+        else:
+            check(f"подтягивание {name}: не переносится ничего, причина — больше {mg.CARRY_LINKS} коммитов",
+                  same == set() and whys and f"больше {mg.CARRY_LINKS} коммитов" in whys[-1], (same, whys))
+        h.view["agent-kit"]["baseRefOid"] = s["main_new"]
+        h.gh(files, head=s["N"])
+        h.seed(*recs)
+        merge_case(f"подтягивание {name}: «принять» другого argus на A «вернуть» с R не перекрывает — отказ",
+                   h.pre(f"gh pr merge 7 --match-head-commit {s['N']}", pdir=cwd), False,
+                   "«вернуть» (reject)" if carry else "")
 
 
 def opus_accept(sha, aid):
@@ -2253,8 +2339,8 @@ CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, 
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_transcript, t_ci,
-         t_core_touchid, t_carry_unit, t_carry_gate, t_carry_product, t_carry_chain, t_carry_senior, t_carry_opus,
-         t_version_repo]
+         t_core_touchid, t_carry_unit, t_carry_gate, t_carry_product, t_carry_chain, t_carry_pull, t_carry_senior,
+         t_carry_opus, t_version_repo]
 
 
 def main():
