@@ -44,25 +44,6 @@ def manifest(name, ver, extra="", desc="d"):
     return '{\n  "name": "%s",\n  "version": "%s",%s\n  "description": "%s"\n}\n' % (name, ver, extra, desc)
 
 
-def _merge_gate():
-    """Шлюз guard (merge_gate.same_change) — чтобы сверить: после release.py записи с прошлого head переносятся."""
-    import importlib.util
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "guard",
-                        "hooks", "merge_gate.py")
-    spec = importlib.util.spec_from_file_location("merge_gate_release", path)
-    mg = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mg)
-    return mg
-
-
-MG = _merge_gate()
-
-
-def carry_why(work, prev):
-    """same_change шлюза: прошлый head prev → текущий HEAD, база PR — origin/main. None — записи переходят."""
-    return MG.same_change(work, prev, g(work, "rev-parse", "HEAD"), g(work, "rev-parse", "origin/main"))
-
-
 def version(d, name):
     with open(os.path.join(d, PJ.format(name)), encoding="utf-8") as fh:
         return json.load(fh)["version"]
@@ -162,7 +143,6 @@ def t_old_style_conflict():
         w = repo()
         commit(w, "plugins/guard/hooks/a.py", "a = 2\n")
         commit(w, PJ.format("guard"), manifest("guard", mine))
-        prev = g(w, "rev-parse", "HEAD")
         advance_main(w, PJ.format("guard"), manifest("guard", main_v))
         rc, out = run(w)
         tag = f"old {mine}/{main_v}"
@@ -170,16 +150,14 @@ def t_old_style_conflict():
         check(f"{tag}: конфликт решён по полям", "решён по полям" in out, out)
         check(f"{tag}: версия {want}", version(w, "guard") == want, out)
         check(f"{tag}: дерево чистое", g(w, "status", "--porcelain") == "", out)
-        check(f"{tag}: шлюз переносит записи с прошлого head", carry_why(w, prev) is None, carry_why(w, prev))
 
 
 def t_pr_field_kept():
     """argus-117a/b: PR меняет код и description guard, main выпустил guard 0.5.18 — конфликт в plugin.json; правка PR
-    цела, version 0.5.19, и шлюз переносит записи с прошлого head."""
+    цела, version 0.5.19."""
     w = repo()
     commit(w, "plugins/guard/hooks/a.py", "a = 2\n")
     commit(w, PJ.format("guard"), manifest("guard", "0.5.17", desc="dp"))
-    prev = g(w, "rev-parse", "HEAD")
     advance_main(w, PJ.format("guard"), manifest("guard", "0.5.18"))
     rc, out = run(w)
     check("field: код 0", rc == 0, out)
@@ -189,7 +167,6 @@ def t_pr_field_kept():
     check("field: description из PR цел, version 0.5.19", json.loads(text) == {"name": "guard", "version": "0.5.19",
                                                                               "description": "dp"}, text)
     check("field: форма файла PR сохранена", text == manifest("guard", "0.5.19", desc="dp"), text)
-    check("field: шлюз переносит записи", carry_why(w, prev) is None, carry_why(w, prev))
 
 
 def t_both_sides_fields():
@@ -197,7 +174,6 @@ def t_both_sides_fields():
     w = repo()
     commit(w, "plugins/guard/hooks/a.py", "a = 2\n")
     commit(w, PJ.format("guard"), manifest("guard", "0.5.17", '\n  "keywords": ["k"],'))
-    prev = g(w, "rev-parse", "HEAD")
     advance_main(w, PJ.format("guard"), manifest("guard", "0.5.18", desc="dm"))
     rc, out = run(w)
     with open(os.path.join(w, PJ.format("guard")), encoding="utf-8") as fh:
@@ -205,7 +181,6 @@ def t_both_sides_fields():
     check("both: код 0 и решён по полям", rc == 0 and "решён по полям" in out, out)
     check("both: keywords из PR, description из main, 0.5.19",
           data == {"name": "guard", "version": "0.5.19", "keywords": ["k"], "description": "dm"}, data)
-    check("both: шлюз переносит записи", carry_why(w, prev) is None, carry_why(w, prev))
 
 
 def t_field_conflict():
@@ -341,14 +316,12 @@ def t_null_field():
     w = repo()
     commit(w, "plugins/guard/hooks/a.py", "a = 2\n")
     commit(w, PJ.format("guard"), manifest("guard", "0.5.17", '\n  "homepage": null,'))
-    prev = g(w, "rev-parse", "HEAD")
     advance_main(w, PJ.format("guard"), manifest("guard", "0.5.18"))
     rc, out = run(w)
     with open(os.path.join(w, PJ.format("guard")), encoding="utf-8") as fh:
         data = json.load(fh)
     check("null: код 0, homepage null из PR, 0.5.19", rc == 0 and "homepage" in data and data["homepage"] is None
           and data["version"] == "0.5.19", (out, data))
-    check("null: шлюз переносит записи", carry_why(w, prev) is None, carry_why(w, prev))
 
 
 CASES = [t_version_only_not_plugin_change, t_bump_changed_only, t_pull_base, t_old_style_conflict, t_real_conflict, t_refusals,
