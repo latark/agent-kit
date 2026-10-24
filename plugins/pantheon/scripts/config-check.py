@@ -19,10 +19,12 @@
   везде — похожее на ключ (Anthropic, GitHub, AWS, Google, Slack, Hugging Face, приватный ключ).
 
 Слитый выпуск (metis-0209, вариант А; решено владельцем 23.10): файл, побайтно равный файлу plugins/pantheon или
-plugins/guard из коммита, который слил владелец (SHA из STATE/logs/merge.jsonl с событием merged или из
-STATE/owner-log/merge-approve.log — Touch ID), и этот коммит лежит в origin/main клона agent-kit
-(~/.claude/plugins/marketplaces/agent-kit), проходит без флагов и без карточки; имя файла должно совпасть с именем
-файла выпуска. Не слит, чужая ветка, отличие в байт, другое имя, удаление, ключ в тексте — флаги как раньше.
+plugins/guard в вершине refs/remotes/origin/main клона agent-kit (~/.claude/plugins/marketplaces/agent-kit), проходит
+без флагов и без карточки, если эту вершину или её родителя слил владелец (SHA из STATE/logs/merge.jsonl с событием
+merged или из STATE/owner-log/merge-approve.log — Touch ID). Клон мелкий (depth 1), но id родителей есть в самом
+объекте коммита: слияние `--merge` даёт вершину со слитой головой PR вторым родителем. Путь в ~/.claude должен
+совпасть с путём внутри плагина целиком (hooks/guard.py — plugins/guard/hooks/guard.py); tests/ не доверены.
+Старый выпуск (не текущая вершина), не слит, отличие в байт, другой путь, удаление, ключ в тексте — флаги как раньше.
 Пути — только от HOME; переменных окружения проверка не читает.
 
 Запуск:  config-check.py --repo ~/.claude --staged [--explain]     правки в индексе против HEAD
@@ -115,7 +117,8 @@ def blob_id(data):
 
 
 RELEASE_DIRS = ("plugins/pantheon", "plugins/guard")
-RELEASE_MAX = 300  # сколько последних слитых коммитов сверять
+RELEASE_REF = "refs/remotes/origin/main"  # полным именем: метка origin/main перекрыла бы ветку
+RELEASE_SKIP = "tests"  # тесты и фикстуры не доверены: в них нарочно опасные настройки
 _RELEASE = None
 
 
@@ -124,7 +127,7 @@ def _home():
 
 
 def owner_merged_shas():
-    """SHA коммитов, которые слил владелец: merge.jsonl (merged) и merge-approve.log (Touch ID), новые первыми."""
+    """Множество SHA коммитов, которые слил владелец: merge.jsonl (merged) и merge-approve.log (Touch ID)."""
     state = os.path.join(_home(), ".local", "state", "pantheon")
     found = []
     try:
@@ -145,47 +148,59 @@ def owner_merged_shas():
                 found.append(m.group(2))
     except (OSError, UnicodeDecodeError):
         pass
-    out = []
-    for sha in reversed(found):
-        if re.fullmatch(r"[0-9a-f]{40}", sha) and sha not in out:
-            out.append(sha)
-    return out[:RELEASE_MAX]
+    return {sha for sha in found if re.fullmatch(r"[0-9a-f]{40}", sha)}
+
+
+def release_tip(clone):
+    """SHA вершины main клона agent-kit, если её саму или её родителя слил владелец; иначе None.
+
+    Клон маркетплейса мелкий (depth 1): головы PR в нём нет, но id родителей записаны в самом объекте коммита.
+    Слияние `--merge` даёт вершину — merge-коммит со слитой головой PR вторым родителем; перемотка — саму голову.
+    Только текущая вершина: старые выпуски не доверены, откат файла к ним даёт карточку."""
+    r = subprocess.run(["git", "-C", clone, "rev-parse", "-q", "--verify", RELEASE_REF + "^{commit}"],
+                       capture_output=True, text=True)
+    if r.returncode:
+        return None
+    tip = r.stdout.strip()
+    body = subprocess.run(["git", "-C", clone, "cat-file", "commit", tip], capture_output=True)
+    if body.returncode:
+        return None
+    head = body.stdout.split(b"\n\n", 1)[0].decode("ascii", "replace").splitlines()
+    parents = [ln[len("parent "):] for ln in head if ln.startswith("parent ")]
+    merged = owner_merged_shas()
+    return tip if tip in merged or any(p in merged for p in parents) else None
 
 
 def release_blobs():
-    """{(blob, имя файла)} файлов выпуска pantheon/guard из слитых владельцем коммитов, лежащих в main agent-kit."""
+    """{(blob, путь от корня плагина)} файлов pantheon/guard из вершины main клона agent-kit, если её слил владелец.
+
+    plugins/guard/hooks/guard.py даёт hooks/guard.py — он сверяется с путём файла в ~/.claude целиком, а не с именем.
+    Файлы под tests/ не берутся."""
     global _RELEASE
     if _RELEASE is not None:
         return _RELEASE
     _RELEASE = set()
     clone = os.path.join(_home(), ".claude", "plugins", "marketplaces", "agent-kit")
-    shas = owner_merged_shas()
-    if not shas or not os.path.isdir(clone):
+    tip = release_tip(clone) if os.path.isdir(clone) else None
+    if tip is None:
         return _RELEASE
-    main = None
-    for ref in ("origin/main", "main"):
-        if subprocess.run(["git", "-C", clone, "rev-parse", "-q", "--verify", ref + "^{commit}"],
-                          capture_output=True).returncode == 0:
-            main = ref
-            break
-    if main is None:
+    r = subprocess.run(["git", "-C", clone, "ls-tree", "-r", "-z", tip, "--", *RELEASE_DIRS], capture_output=True)
+    if r.returncode:
         return _RELEASE
-    for sha in shas:
-        if subprocess.run(["git", "-C", clone, "merge-base", "--is-ancestor", sha, main], capture_output=True).returncode:
-            continue  # не в main (чужая ветка) или коммита нет в клоне
-        r = subprocess.run(["git", "-C", clone, "ls-tree", "-r", "-z", sha, "--", *RELEASE_DIRS], capture_output=True)
-        if r.returncode:
+    for ent in r.stdout.decode("utf-8", "replace").split("\0"):
+        meta, _, name = ent.partition("\t")
+        f = meta.split()
+        if len(f) != 3 or f[1] != "blob":
             continue
-        for ent in r.stdout.decode("utf-8", "replace").split("\0"):
-            meta, _, name = ent.partition("\t")
-            f = meta.split()
-            if len(f) == 3 and f[1] == "blob":
-                _RELEASE.add((f[2], os.path.basename(name)))
+        for d in RELEASE_DIRS:
+            sub = name[len(d) + 1:] if name.startswith(d + "/") else ""
+            if sub and RELEASE_SKIP not in sub.split("/"):
+                _RELEASE.add((f[2], sub))
     return _RELEASE
 
 
 def is_released(path, data):
-    return data is not None and (blob_id(data), os.path.basename(path)) in release_blobs()
+    return data is not None and (blob_id(data), path) in release_blobs()
 
 
 def changed(repo, staged, a=None, b=None):
