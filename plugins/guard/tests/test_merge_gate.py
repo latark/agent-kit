@@ -1851,7 +1851,8 @@ def t_carry_unit(h):
           [r["sha"] for r in car] == [P], car)
     check("_carried: отпечаток S неизвестен — ничего",
           mg._carried([opus(P, "x")], S, lambda x: None if x == S else prints.get(x)) == [])
-    check("_carried: reject не переносится", mg._carried([opus(P, "x", "reject")], S, lambda x: prints.get(x)) == [])
+    check("_carried: reject не переносится (и с перечнем)",
+          mg._carried([opus(P, "x", "reject", checklist=dict(CHECKLIST))], S, lambda x: prints.get(x)) == [])
     heads = ["%040x" % i for i in range(1, 13)]
     got = mg._carry_heads([opus(x, "a") for x in heads], S)
     check(f"_carry_heads: из 12 head — {mg.CARRY_HEADS} последних, старые — без отпечатка (117-b2-2)",
@@ -1940,6 +1941,8 @@ def t_carry_gate(h):
              "«вернуть» (reject)", extra_env=env)
         case("сбой git — прямое «принять» на head проходит", "N1", "M1", [opus(s["N1"]), tests(s["N1"])], True,
              extra_env=env)
+        case("сбой git patch-id — head с правкой кода «принять» с P не переносит", "out", "M1",
+             [opus(s["P"]), tests(s["out"])], False, "нет «принять»", extra_env=env)
     finally:
         os.remove(h.j("git.fail"))
     # «вернуть» привязано к PR
