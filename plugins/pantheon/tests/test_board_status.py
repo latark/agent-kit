@@ -128,7 +128,7 @@ repo = os.path.join(ROOT, "u", "agent-kit")
 os.makedirs(os.path.join(repo, ".git"))
 other = os.path.join(ROOT, "u", "site")
 os.makedirs(os.path.join(other, ".git"))
-doms = {"metis-pantheon": [repo, os.path.join(ROOT, "u", "нет-такой")], "hermes-alex": [other]}
+doms = {"metis-pantheon": [repo, os.path.join(ROOT, "u", "нет-такой")], "example-site": [other]}
 worktree(repo, "agent-1", "metis-0510-board-sync")
 worktree(other, "agent-2", "metis-0511-fix")         # репозиторий чужого направления
 gone = worktree(repo, "agent-3", "metis-0512-old")
@@ -173,14 +173,14 @@ check("3. по PR уже ставили review, а задачу вернули �
 tmp = os.path.join(ROOT, "e2e")
 home, state, view = (os.path.join(tmp, x) for x in ("pantheon", "state", "view"))
 os.makedirs(os.path.join(home, "directions", "metis-pantheon", "tasks"))
-os.makedirs(os.path.join(home, "directions", "hermes-alex", "tasks"))
+os.makedirs(os.path.join(home, "directions", "example-site", "tasks"))
 os.makedirs(view)
 erepo = os.path.join(tmp, "agent-kit")
 os.makedirs(os.path.join(erepo, ".git"))
 write(os.path.join(home, "schedule.toml"),
       'primary_host = "mac-a"\n\n[[job]]\nname = "board"\ncommand = "pantheon board"\nevery = "tick"\n')
 write(os.path.join(home, "directions.toml"), '[[direction]]\nname = "metis-pantheon"\nproject = "Пантеон"\n\n'
-      '[[direction]]\nname = "hermes-alex"\nproject = "Сайт"\n')
+      '[[direction]]\nname = "example-site"\nproject = "Сайт"\n')
 write(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), '[merge_repos]\nmetis-pantheon = ["latark/agent-kit"]\n')
 write(os.path.join(state, "domains.json"), json.dumps({"domains": {"metis-pantheon": [erepo]}}))
 env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state, "PANTHEON_VIEW": view,
@@ -211,7 +211,7 @@ t3, p3 = new("Через PR", "--mode", "single")
 s2, sp2 = new("Пачка готова", "--type", "story")
 t4, p4 = new("Последняя задача", "--parent", s2, "--mode", "single", "--status", "done")
 t5, p5 = new("PR частью", "--mode", "single")
-t6, p6 = new("Чужое направление", "--mode", "single", direction="hermes-alex")
+t6, p6 = new("Чужое направление", "--mode", "single", direction="example-site")
 s3, sp3 = new("Пачка на приёмке с вопросом", "--type", "story")
 t7, p7 = new("Готовая задача приёмки", "--parent", s3, "--mode", "single", "--status", "done")
 s4, sp4 = new("Пачка в очереди с вопросом", "--type", "story")
