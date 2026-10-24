@@ -162,10 +162,10 @@ jobs = {{n: {{"command": c}} for n, c in [("view", "pantheon view --quiet"), ("b
 fp = lambda: {{n: p.tick_fingerprint(j) for n, j in jobs.items()}}
 a = fp()
 mut = json.loads(sys.argv[1])
-for kind, target in mut:
+for kind, target, *body in mut:
     d = os.path.dirname(target)
     os.makedirs(d, exist_ok=True)
-    open(target, "a").write("x")
+    open(target, "w" if body else "a").write(body[0] if body else "x")
     b = fp()
     print(json.dumps([kind, [n for n in a if a[n] != b[n]]]))
     a = b
@@ -177,7 +177,28 @@ for d in (os.path.join(ROOT, "view"), os.path.join(e.pan, "inbox", "tasks")):
 muts = [["view", os.path.join(e.pan, "notes", "a.md")],
         ["board", os.path.join(e.pan, "inbox", "tasks", "t1.md")],
         ["sw", os.path.join(e.claude, ".sync-incoming")],
-        ["agents", os.path.join(e.claude, "daemon", "roster.json")]]
+        ["agents", os.path.join(e.claude, "daemon", "roster.json")],
+        # входы сводки board-auto.md (metis-0397): ревью, STATUS.md, decisions.md, журнал владельца, кэш открытых PR
+        ["b-review", os.path.join(e.pan, "directions", "metis-pantheon", "review-120-argus.md")],
+        ["b-status", os.path.join(e.pan, "directions", "metis-pantheon", "STATUS.md")],
+        ["b-decisions", os.path.join(e.pan, "decisions.md")],
+        ["b-ownerlog", os.path.join(e.state, "owner-log", "zeus.md")],
+        ["b-prs", os.path.join(e.state, "autoclose-prs.json"),
+         json.dumps({"open_prs": {"latark/agent-kit": [{"number": 120, "head": "abcdef1", "ids": [], "core": False}]}})],
+        ["b-prs-same", os.path.join(e.state, "autoclose-prs.json"),
+         json.dumps({"open_prs": {"latark/agent-kit": [{"number": 120, "head": "abcdef1", "ids": [], "core": False}]},
+                     "checked": 1})],
+        # следы работы для статусов (metis-0397, п. 7): worktree в репозитории направления, PR, закрывающий задачу
+        ["b-repo", os.path.join(ROOT, "fps-repo", ".git", "config")],
+        ["b-domains", os.path.join(e.state, "domains.json"),
+         json.dumps({"domains": {"metis-pantheon": [os.path.join(ROOT, "fps-repo")]}})],
+        ["b-wt-head", os.path.join(ROOT, "fps-repo", ".git", "worktrees", "w1", "HEAD"), "ref: refs/heads/metis-0600-x\n"],
+        ["b-wt-gitdir", os.path.join(ROOT, "fps-repo", ".git", "worktrees", "w1", "gitdir"),
+         os.path.join(ROOT, "fps-copy", ".git") + "\n"],
+        ["b-wt-live", os.path.join(ROOT, "fps-copy", ".git")],
+        ["b-closes", os.path.join(e.state, "autoclose-prs.json"),
+         json.dumps({"open_prs": {"latark/agent-kit": [{"number": 120, "head": "abcdef1", "ids": [], "core": False,
+                                                        "closes": ["metis-0600"]}]}, "checked": 1})]]
 r = subprocess.run([PY311, "-I", "-c", probe, json.dumps(muts)],
                    env={"PATH": os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pan, "PANTHEON_STATE": e.state,
                         "PANTHEON_VIEW": os.path.join(ROOT, "view"), "TMPDIR": ROOT},
@@ -190,6 +211,15 @@ check("6. новый файл в ~/ai/pantheon меняет отпечаток v
 check("6. новая задача меняет отпечаток board", "board" in rows.get("board", []), rows)
 check("6. .sync-incoming меняет отпечаток sync-answers", "sw" in rows.get("sw", []), rows)
 check("6. roster.json демона меняет отпечаток agents", "agents" in rows.get("agents", []), rows)
+for k, what in [("b-review", "review-*-argus.md"), ("b-status", "STATUS.md"), ("b-decisions", "decisions.md"),
+                ("b-ownerlog", "журнал владельца"), ("b-prs", "открытые PR в кэше autoclose")]:
+    check(f"6. {what} меняет отпечаток board", "board" in rows.get(k, []), rows)
+check("6. прочие поля кэша autoclose (не открытые PR) отпечаток board не меняют", "board" not in rows.get("b-prs-same", ["board"]),
+      rows)
+for k, what in [("b-domains", "новый репозиторий направления в domains.json"),
+                ("b-wt-head", "новая запись worktree (HEAD)"), ("b-wt-live", "появившаяся папка копии worktree"),
+                ("b-closes", "PR в кэше стал закрывать задачу")]:
+    check(f"6. {what} меняет отпечаток board", "board" in rows.get(k, []), rows)
 check("6. отпечаток только у задач таблицы (pantheon view без --quiet — нет)", rows.get("none") == ["other"], rows)
 
 print(f"\n{sum(results)}/{len(results)}")

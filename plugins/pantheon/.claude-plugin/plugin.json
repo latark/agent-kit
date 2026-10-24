@@ -1,6 +1,6 @@
 {
   "name": "pantheon",
-  "version": "0.11.86",
+  "version": "0.11.88",
   "description": "Механика Пантеона: планировщик pantheon-tick, команда pantheon, копия ~/ai/pantheon-view для Obsidian, коммит ~/ai/pantheon, сверка карты решений, хуки контекста и журнал ваших слов owner-log.",
   "author": {
     "name": "latark"
