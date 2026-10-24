@@ -49,9 +49,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…] [--quiet]      проверить шапки задач по схеме v1 (schema.md) и правила metis-0308: задача пачки без mode,
                                         закрытая по слиянию без release/actual, review больше суток без PR, нет приёмки; done
-                                        без closed — исправляет сам (closed из updated); directions.toml: coordinator не
-                                        true/false — ошибка, у выключенного направления открыт координатор или нет лида —
-                                        предупреждение (с --quiet — тревога об открытом координаторе)
+                                        без closed — исправляет сам (closed из updated); навыки (SKILL.md плагина и ~/.claude/skills):
+                                        шапка, name = папка, description ≤ 1024, ссылки на файлы (metis-0258); directions.toml: coordinator не true/false — ошибка,
+                                        у выключенного направления открыт координатор или нет лида — предупреждение (с --quiet —
+                                        тревога об открытом координаторе)
   pantheon autoclose fetch              сетевой проход (задача расписания): gh про слитые и открытые PR из [merge_repos] →
                                         кэш; лёгкий плановый проход по кэшу закрывает задачи, чей номер в ветке или после «Closes» в теле PR
   pantheon task new --direction D --title T [--type task|story --status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ]
@@ -6713,9 +6714,46 @@ def check_coordinators(quiet):
     return len(errs)
 
 
+SKILL_DIRS = [d for d in (os.environ.get("PANTHEON_SKILL_DIRS") or "").split(os.pathsep) if d] or [
+    os.path.join(PLUGIN, "skills"), os.path.join(HOME, ".claude", "skills")]
+
+
+def skills_mod():
+    """lib/skills_lint.py — линтер навыков (metis-0258)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_skills_lint", os.path.join(LIB, "skills_lint.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def check_skills(paths=None, quiet=False):
+    """Навыки по линтеру: (число проверенных, [(путь, ошибки)]). Ошибки печатает вызывающий; внимание — здесь."""
+    L = skills_mod()
+    rows = [(f, *L.lint_file(f)) for f in paths] if paths else L.lint_dirs(SKILL_DIRS)
+    bad = []
+    for f, errs, warns in rows:
+        if errs:
+            bad.append((f, errs))
+        elif warns and not quiet:
+            print(f"предупреждение · навык {f}: {'; '.join(warns)}")
+    for f, errs in bad:
+        print(f"ОШИБКА · навык {f}: {'; '.join(errs)}")
+    return len(rows), bad
+
+
 def check(paths=None, quiet=False):
     T = tasks_mod()
+    skill_paths = [p for p in (paths or []) if os.path.basename(p) == "SKILL.md"]
+    if skill_paths:  # pantheon check путь/SKILL.md — только линтер навыков
+        paths = [p for p in paths if p not in skill_paths]
+        n_sk, sk_bad = check_skills(skill_paths, quiet)
+        if not quiet or sk_bad:
+            print(f"навыков: {n_sk}, с ошибками: {len(sk_bad)}")
+        if not paths:
+            return 1 if sk_bad else 0
     files = paths or list(T.task_files(PANTHEON))
+    skill_arg_bad = sk_bad if skill_paths else []  # ошибки навыков из аргументов входят в код выхода
     bad, noheader, n = [], 0, 0
     for f in files:
         kind, errs, warns = T.check_file(f)
@@ -6775,6 +6813,11 @@ def check(paths=None, quiet=False):
     view_drift = T.check_views(BOARD) if not paths else []  # у каждого вида Доска.base — строка «что здесь» (metis-0288)
     for d in view_drift:
         print(f"ОШИБКА · {d}")
+    skill_bad = []
+    if not paths:  # навыки: битая шапка молча отключает навык (metis-0258)
+        n_sk, skill_bad = check_skills(None, quiet)
+        if not quiet or skill_bad:
+            print(f"навыков: {n_sk}, с ошибками: {len(skill_bad)}")
     if not quiet or bad:
         print(f"задач: {n}, с ошибками: {len(bad)}, без шапки: {noheader}")
     if quiet:  # тик: одна тревога на набор проблем, а не сбой задачи каждые 5 минут
@@ -6792,6 +6835,12 @@ def check(paths=None, quiet=False):
             alert_once("check-views", "|".join(view_drift), f"доска: {view_drift[0]}", "check")
         else:
             clear_once("check-views")
+        if skill_bad:
+            alert_once("check-skills", "|".join(f for f, _ in skill_bad),
+                       f"навыки с битой шапкой или ссылкой: {', '.join(os.path.basename(os.path.dirname(f)) for f, _ in skill_bad)[:200]}",
+                       "check")
+        else:
+            clear_once("check-skills")
         if field_errs:
             alert_once("check-fields", "|".join(i for i, _ in field_errs),
                        f"задачи с пустыми полями «Итогов пачек» или done без closed: {', '.join(sorted({i for i, _ in field_errs}))[:200]}",
@@ -6799,7 +6848,7 @@ def check(paths=None, quiet=False):
         else:
             clear_once("check-fields")
         return 0
-    return 1 if bad or drift or view_drift or field_errs or coord_errs else 0
+    return 1 if bad or drift or view_drift or field_errs or skill_bad or skill_arg_bad or coord_errs else 0
 
 
 def task_cmd(rest):

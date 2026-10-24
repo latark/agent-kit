@@ -280,6 +280,13 @@
   Пританею — все лиды и главные роли, направлению — chiron, главные роли и лиды других направлений. Любой сбой хука —
   код 2, то есть отказ. После выпуска нужны `pantheon domains build` и перезапуск окон. С 0.11.23 Пританею открыт
   momus — ревизор навыка audit (`agent: momus`): только чтение и веб, пишет лишь свой отчёт в `~/ai/knowledge/Inbox`.
+- `plugins/pantheon/lib/skills_lint.py` — линтер навыков в `pantheon check` (metis-0258): SKILL.md плагина и
+  `~/.claude/skills` — шапка, `name` = имя папки, `description` до 1024 знаков, ссылки на соседние файлы живы; ошибка —
+  код 1, в плановом проходе (`--quiet`) — одна тревога `check-skills`. `pantheon check путь/SKILL.md [задача.md …]` —
+  только указанные навыки (ошибка навыка даёт код 1 и рядом с задачами); нечитаемая папка навыков — ошибка в строке.
+- `plugins/pantheon/roles/_parts/{lesson,procedure,mode}.part` — общие куски ролей (metis-0258, 0248 ш.3): урок в
+  память только с вердиктом по контрасту; три процедурных правила (опись входов, цифра → источник, повторная проверка
+  готового файла); правило «сам / один исполнитель / параллельно».
 - `plugins/pantheon/bin/heavy` — тяжёлые команды через общую блокировку: два места, `--server` — один долгий процесс (MEM-03).
 - `plugins/pantheon/hooks/dev-stop-verify.py` — Stop разработчика (в шапке ролей dev-*): красная проверка проекта
   возвращает, не больше трёх раз; очередь `heavy` — не возврат (DONE-02).
@@ -287,7 +294,15 @@
 - `plugins/pantheon/scripts/decision-map-check.py` — сверка карты решений с `revisits.toml`.
 - `plugins/pantheon/scripts/baseline.py` — замер «как сейчас» по git и транскриптам (ORD-06); правила подсчёта — в шапке.
 - `plugins/pantheon/scripts/config-check.py` — проверка правок `~/.claude` для `sync.sh`: код и подозрительное — в
-  карантин с объяснением на доске, остальное уходит само (SEC-15).
+  карантин с объяснением на доске, остальное уходит само (SEC-15). Исключение (metis-0209): файл, побайтно равный
+  файлу `plugins/pantheon` или `plugins/guard` в вершине `refs/remotes/origin/main` клона agent-kit
+  (`~/.claude/plugins/marketplaces/agent-kit`), проходит без карточки, если эту вершину или голову PR (второй родитель
+  merge-коммита; первый не доверен) слил владелец (SHA в `logs/merge.jsonl` с событием `merged` или в `owner-log/merge-approve.log`, репозиторий ровно `latark/agent-kit`). Клон мелкий (depth 1), но id
+  родителей есть в самом коммите: слияние `--merge` кладёт голову PR вторым родителем. Только текущая вершина —
+  откат файла к старому выпуску даёт карточку. Путь сверяется целиком от корня плагина (`hooks/guard.py` —
+  `plugins/guard/hooks/guard.py`), файлы `tests/` не доверены, ключ в тексте флаг сохраняет. Доверено всё дерево вершины main, в том числе не-ядро, слитое через шлюз без Touch ID.
+  Слитое иначе, чем через
+  Touch ID `pantheon merge`, этот путь не видит — там карточка как раньше.
 - `plugins/guard/managed-settings.json` — управляемые настройки (SEC-28), ставятся через `sudo` (README guard).
 - `plugins/project-tools/stacks.json` — карта стеков (признак → что подключить); `plugins/project-tools/lib/project_tools.py`
   — команда `project-tools`. Пишет только записи из карты; в окнах ролей запись в `.mcp.json` и `.claude/settings*.json`
@@ -302,6 +317,8 @@
     python3 -I plugins/pantheon/tests/test_board_status.py # статусы задач и пачек по worktree, PR и составу
     python3 -I plugins/pantheon/tests/test_config_check.py   # правила карантина правок ~/.claude (SEC-15)
     bash plugins/pantheon/tests/test_sync_quarantine.sh ~/.claude/sync.sh "$(readlink ~/.local/bin/pantheon)" "$PWD/plugins/pantheon"
+    python3 -I plugins/pantheon/tests/test_check_skills.py   # линтер навыков: поломки шапки, name, ссылок, check и плановый проход
+    python3 -I plugins/pantheon/tests/test_roles_harness.py  # настоящие роли: урок с вердиктом, три правила, режим работы
     python3 -I plugins/pantheon/tests/test_start.py   # start, wake, roles build, approve, heavy, Stop-хук разработчика
     python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры
     python3 -I plugins/pantheon/tests/test_tick.py    # планировщик: сон, пробуждение, питание, простой, лимит, главный Mac
