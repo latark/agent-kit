@@ -285,7 +285,15 @@
 - `plugins/pantheon/scripts/decision-map-check.py` — сверка карты решений с `revisits.toml`.
 - `plugins/pantheon/scripts/baseline.py` — замер «как сейчас» по git и транскриптам (ORD-06); правила подсчёта — в шапке.
 - `plugins/pantheon/scripts/config-check.py` — проверка правок `~/.claude` для `sync.sh`: код и подозрительное — в
-  карантин с объяснением на доске, остальное уходит само (SEC-15).
+  карантин с объяснением на доске, остальное уходит само (SEC-15). Исключение (metis-0209): файл, побайтно равный
+  файлу `plugins/pantheon` или `plugins/guard` в вершине `refs/remotes/origin/main` клона agent-kit
+  (`~/.claude/plugins/marketplaces/agent-kit`), проходит без карточки, если эту вершину или голову PR (второй родитель
+  merge-коммита; первый не доверен) слил владелец (SHA в `logs/merge.jsonl` с событием `merged` или в `owner-log/merge-approve.log`, репозиторий ровно `latark/agent-kit`). Клон мелкий (depth 1), но id
+  родителей есть в самом коммите: слияние `--merge` кладёт голову PR вторым родителем. Только текущая вершина —
+  откат файла к старому выпуску даёт карточку. Путь сверяется целиком от корня плагина (`hooks/guard.py` —
+  `plugins/guard/hooks/guard.py`), файлы `tests/` не доверены, ключ в тексте флаг сохраняет. Доверено всё дерево вершины main, в том числе не-ядро, слитое через шлюз без Touch ID.
+  Слитое иначе, чем через
+  Touch ID `pantheon merge`, этот путь не видит — там карточка как раньше.
 - `plugins/guard/managed-settings.json` — управляемые настройки (SEC-28), ставятся через `sudo` (README guard).
 - `plugins/project-tools/stacks.json` — карта стеков (признак → что подключить); `plugins/project-tools/lib/project_tools.py`
   — команда `project-tools`. Пишет только записи из карты; в окнах ролей запись в `.mcp.json` и `.claude/settings*.json`
