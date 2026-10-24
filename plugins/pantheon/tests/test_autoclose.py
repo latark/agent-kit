@@ -93,7 +93,7 @@ def pan(env, t, *a):
 
 
 def new(env, home, t, direction, title, *extra):
-    r = pan(env, t, "task", "new", "--direction", direction, "--title", title, *extra)
+    r = pan(env, t, "task", "new", "--text", "тест", "--direction", direction, "--title", title, *extra)
     tid, rel = (r.stdout.split() + ["", ""])[:2]
     return tid, os.path.join(home, rel), r
 
@@ -390,10 +390,10 @@ def test_off_warning():
 def test_batch_needs_mode():
     tmp, home, state, gh, env = make()
     try:
-        r = pan(env, T0, "task", "new", "--direction", "demo", "--title", "Без режима", "--batch", "ночь · 1")
+        r = pan(env, T0, "task", "new", "--text", "тест", "--direction", "demo", "--title", "Без режима", "--batch", "ночь · 1")
         check("task new --batch без --mode — отказ", r.returncode != 0 and "--mode" in r.stderr and not os.listdir(os.path.join(home, "directions", "demo", "tasks")),
               r.stdout + r.stderr)
-        r = pan(env, T0, "task", "new", "--direction", "demo", "--title", "С режимом", "--batch", "ночь · 1", "--mode", "self")
+        r = pan(env, T0, "task", "new", "--text", "тест", "--direction", "demo", "--title", "С режимом", "--batch", "ночь · 1", "--mode", "self")
         check("task new --batch --mode self — принят", r.returncode == 0, r.stderr)
         tid = r.stdout.split()[0]
         x, px, _ = new(env, home, T0, "demo", "Другая")
@@ -416,10 +416,10 @@ def test_batch_needs_mode():
         r = pan(env, T0, "task", "set", z, f"parent={s}", "mode=self")
         check("task set parent=<пачка> вместе с mode — принят", r.returncode == 0 and "parent" in text(pz), r.stderr)
         n_before = len(os.listdir(os.path.join(home, "directions", "demo", "tasks")))
-        r = pan(env, T0, "task", "new", "--direction", "demo", "--title", "Новая в пачку", "--parent", s)
+        r = pan(env, T0, "task", "new", "--text", "тест", "--direction", "demo", "--title", "Новая в пачку", "--parent", s)
         check("task new --parent <пачка> без mode — отказ", r.returncode != 0 and "mode" in r.stderr
               and len(os.listdir(os.path.join(home, "directions", "demo", "tasks"))) == n_before, r.stdout + r.stderr)
-        r = pan(env, T0, "task", "new", "--direction", "demo", "--title", "Новая в пачку", "--parent", s, "--mode", "self")
+        r = pan(env, T0, "task", "new", "--text", "тест", "--direction", "demo", "--title", "Новая в пачку", "--parent", s, "--mode", "self")
         check("task new --parent <пачка> с mode — принят", r.returncode == 0, r.stderr)
     finally:
         shutil.rmtree(tmp, True)

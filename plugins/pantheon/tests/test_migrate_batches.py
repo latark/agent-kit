@@ -64,7 +64,7 @@ def run(env, *args, t=T0):
 
 
 def new(env, direction, *args):
-    r = run(env, "task", "new", "--direction", direction, *args)
+    r = run(env, "task", "new", "--text", "тест", "--direction", direction, *args)
     assert r.returncode == 0, r.stderr
     return r.stdout.split()[0], r.stdout.split()[1]
 

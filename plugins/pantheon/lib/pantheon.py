@@ -56,11 +56,26 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --next X --owner O --release R --batch X --night ГГГГ-ММ-ДД --estimate X --actual X
                     --acceptance принято|вернуть|к владельцу --parent ПАЧКА --mode self|single|parallel --mode-why X --touches ПУТЬ …
                     --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
-                    --recommend "А — потому что …" --if-no-answer "…" --depends-on ID --executor auto|claude|codex]
+                    --recommend "А — потому что …" --if-no-answer "…" --depends-on ID --executor auto|claude|codex
+                    --text|--body "текст" | --body-file ПУТЬ]
+                    текст задачи (цель, «готово, когда») обязателен: без --text/--body/--body-file — отказ, код 2;
+                    без текста можно только вопрос владельцу: --question, --why и не меньше двух --option, иначе код 2;
+                    неизвестный флаг (и «--флаг=значение») — отказ с его именем, код 2, файл не создан (metis-0402);
+                    повторяются только --option, --touches, --depends-on; другой флаг дважды (два --body) — отказ, код 2;
+                    новая задача → файл-уведомление «…-task-ID.md» в directions/<направление>/inbox/ координатору
+                    (не находка; «От:» — PANTHEON_SESSION, PANTHEON_ROLE или «агент»)
                     без --owner «Кому» — координатор направления; owner= (пусто) в task set — отказ;
                     --batch без --mode (и без mode в шапке) — отказ: режим обязателен при сборке пачки (metis-0308);
                     --depends-on / depends_on= с несуществующим id, самой собой или циклом — отказ при записи (metis-0248)
-  pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"]   pantheon task show ID
+  pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"] [--body "текст" | --body-file ПУТЬ]
+                    --body[-file] заменяет текст задачи между «# заголовок» и «## Журнал» («Заметки владельца» остаются),
+                    в журнал — «текст задачи заменён (было N знаков…)»; неизвестный флаг и повтор флага, кроме --option, —
+                    отказ, код 2
+                    плановый проход (check --quiet): открытая задача без текста дольше часа — тревога; слово владельца с [id]
+                    (decisions.md, окно вопросов) дольше 30 мин без задачи — тревога один раз на id: связь — [id] в
+                    тексте задачи до «## Журнал» (любой статус) или строка «не задача: [id] — причина» в decisions.md;
+                    тревога называет до 12 новых id, остальные — следующим проходом
+  pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
   pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту
   pantheon task attach ID ПАЧКА | detach ID   задача в пачку (story) и обратно; show ПАЧКА — состав и сумма оценок
@@ -480,7 +495,8 @@ def clear_once(key):
 JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
-                    "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder", "read", "autoclose"}
+                    "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder", "read", "autoclose",
+                    "archive"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 # Окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` из schedule.toml идёт с песочницей
 # settings/job-<роль>.json (собирает sandbox_build), а не без неё. Роль вне таблицы тик не запускает. write — куда
@@ -806,7 +822,28 @@ def _fp_board_inputs():
     out += _fp_files(sorted(glob.glob(os.path.join(PANTHEON, "directions", "*", "inbox", "*.md"))))
     out += _fp_files(sorted(glob.glob(os.path.join(BOARD, "*.md"))))
     out += _fp_files([os.path.join(PANTHEON, "directions.toml"), os.path.join(PANTHEON, "schedule.toml")])
+    out += _fp_files([os.path.join(PANTHEON, "board.md")])  # строка встраивания ![[board-auto]] (metis-0397)
+    out += _fp_board_auto()
+    try:  # следы работы для статусов (metis-0397, п. 7): записи worktree и живые копии, PR, закрывающие задачи
+        S = boardstatus_mod()
+        roots = sorted({r for rs in S.roots(board_domains()).values() for r in rs})
+        out += [_stat_rec(p, p) for root in roots for p in S.wt_heads(root)]
+        out += [("worktrees", root, S.live_worktrees(root)) for root in roots]
+        ops = read_json(path("autoclose-prs.json"), {}).get("open_prs")
+        out.append(("open_closing", sorted((r, str(p.get("number")), repr(p.get("closes")), bool(p.get("part")))
+                                           for r, ps in (ops if isinstance(ops, dict) else {}).items()
+                                           if isinstance(ps, list) for p in ps if isinstance(p, dict))))
+    except Exception as e:  # noqa: BLE001 — сломанный вход: отпечаток другой, проход не пропускается
+        out.append(("board-status-inputs", repr(e), now()))
     return out
+
+
+def _fp_board_auto():
+    """Входы автоблока board-auto.md (metis-0397): ревью, STATUS.md, decisions.md, журнал владельца — размер и время
+    правки; открытые PR и неделя — по содержимому кэша и целым процентам (fetch и строка статуса пишут их часто)."""
+    B = boardtext_mod()
+    return _fp_files(B.watch_files(PANTHEON, STATE)) + [("open_prs", B.open_prs(path("autoclose-prs.json"))),
+                                                        ("week", board_week())]
 
 
 TICK_SKIP = {
@@ -936,6 +973,11 @@ def tick():
             alert_once("roles-tick", type(e).__name__, f"личные роли: проход упал ({type(e).__name__}: {e})",
                        "pantheon-tick")
         if not primary or me == primary:  # общий результат (задачи, gh) — на одном Mac
+            try:
+                board_auto_watch(t, sched)
+            except Exception as e:  # сбой проверки не должен останавливать тик
+                alert_once("board-auto-watch", type(e).__name__, f"board-auto.md: проверка свежести упала "
+                           f"({type(e).__name__}: {e})", "pantheon-tick")
             try:
                 autoclose_tick(t)
             except Exception as e:  # сбой автозакрытия не должен останавливать тик
@@ -1803,8 +1845,10 @@ def write_atomic(p, text):
 
 
 def archive():
-    """Раздел «Сделано» доски старше 7 дней и строки alerts.md старше 30 дней — в ~/ai/pantheon/archive/.
-    Запускает Зевс при утренней сводке, поэтому у доски остаётся один писатель."""
+    """Раздел «Сделано» доски старше 7 дней и строки alerts.md старше 30 дней — в ~/ai/pantheon/archive/; STATUS.md
+    длиннее предела 9 000 знаков — разделы с датой старше суток в archive/ направления (archive_status). Файл
+    состояния и после этого длиннее предела — тревога: строки без даты архив не режет (metis-0397). Запуск — задача
+    `pantheon archive` в schedule.toml раз в сутки или руками."""
     t = now()
     today = datetime.fromtimestamp(t)
     moved = {"board": 0, "alerts": 0}
@@ -1854,9 +1898,60 @@ def archive():
                 append(f"alerts-{key}.md", items)
             if moved["alerts"]:
                 write_atomic(alerts, "".join(out))
+    sl = statelen_mod()
+    moved["status"] = 0
+    for f in sl.state_files(PANTHEON):
+        if not os.path.isfile(f):
+            continue
+        if os.path.basename(f) == "STATUS.md":
+            moved["status"] += archive_status(f, t, today, sl.STATE_FILE_LIMIT)
+        n, rel = sl.length(f) or 0, os.path.relpath(f, PANTHEON)
+        key = "trim-" + re.sub(r"[^\w-]", "_", rel)[:60]
+        if n > sl.STATE_FILE_LIMIT:
+            alert_once(key, "1", f"{rel}: {n} знаков при пределе {sl.STATE_FILE_LIMIT} — архив переносит только "
+                       "строки и разделы с датой старше срока, строки без даты не режет: подрезать вручную",
+                       "pantheon-archive")
+        else:
+            clear_once(key)
     lk.__exit__(None, None, None)
-    print(f"в архив: доска — {moved['board']} строк, тревоги — {moved['alerts']} строк")
+    print(f"в архив: доска — {moved['board']} строк, тревоги — {moved['alerts']} строк, "
+          f"STATUS.md — {moved['status']} разделов")
     return 0
+
+
+def archive_status(f, t, today, limit):
+    """STATUS.md длиннее limit: разделы «## …» с датой в заголовке старше суток, кроме первого (текущего), — в
+    directions/<d>/archive/STATUS-ГГГГ-ММ.md, старые первыми, пока файл не уложится в предел. Разделы без даты, первый
+    раздел и строки до первого заголовка не трогает. Файл правили во время прохода — ничего не переносит (следующий
+    проход). → сколько разделов перенесено."""
+    text = open(f, encoding="utf-8").read()
+    if len(text) <= limit:
+        return 0
+    lines = text.splitlines(keepends=True)
+    starts = [i for i, ln in enumerate(lines) if ln.startswith("## ")]
+    secs = []
+    for k in range(1, len(starts)):
+        i, end = starts[k], starts[k + 1] if k + 1 < len(starts) else len(lines)
+        d = line_date(lines[i], t)
+        if d and (today - d).days >= 1:
+            secs.append((d, i, end))
+    drop, size, moved = set(), len(text), {}
+    for d, i, end in sorted(secs):
+        if size <= limit:
+            break
+        chunk = "".join(lines[i:end])
+        size -= len(chunk)
+        drop.update(range(i, end))
+        moved.setdefault(d.strftime("%Y-%m"), []).append(chunk)
+    if not drop or open(f, encoding="utf-8").read() != text:
+        return 0
+    adir = os.path.join(os.path.dirname(f), "archive")
+    os.makedirs(adir, exist_ok=True)
+    for key, chunks in sorted(moved.items()):
+        with open(os.path.join(adir, f"STATUS-{key}.md"), "a", encoding="utf-8") as fh:
+            fh.writelines(chunks)
+    write_atomic(f, "".join(ln for j, ln in enumerate(lines) if j not in drop))
+    return sum(len(c) for c in moved.values())
 
 
 # Имена окон, которые не направления: sandbox_build пишет settings/hq.json, workshop.json, hestia.json (metis-0245) и
@@ -6089,6 +6184,7 @@ def board():
         if not got:
             return 0
         projects, marks, registry = board_registry(T)
+        status_lines = board_status_sync(T) if primary else []
         # политика уведомлений — под своей блокировкой на весь проход: сбои из run-job ждут, а не теряются
         with lock("notify"):
             pol = notify_policy(sched)
@@ -6106,11 +6202,161 @@ def board():
             fp = os.path.join(once_dir, f)
             if now() - os.path.getmtime(fp) > 90 * 86400:
                 os.remove(fp)
-    for ln in lines:
+        if primary:
+            board_auto_sync(T)
+    for ln in status_lines + lines:
         print(ln)
     if primary and os.environ.get("PANTHEON_METRICS") != "0":
         board_metrics(T)
     return 0
+
+
+def boardstatus_mod():
+    """lib/boardstatus.py — статусы задач и пачек по следам работы (metis-0397, расширение)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_boardstatus", os.path.join(LIB, "boardstatus.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def board_domains():
+    d = read_json(path("domains.json"), {}).get("domains")
+    return d if isinstance(d, dict) else {}
+
+
+def board_status_sync(T):
+    """Статусы в шаг с работой (metis-0397, п. 7–8): задача todo с живой worktree на ветке с её id → doing, пачка — по
+    составу. До сборки видов доски: виды Obsidian сразу видят новые статусы. Задача, которую вернули в todo, а работа
+    идёт, — тревога один раз на набор задач. Сбой — тревога, проход доски идёт дальше. → строки для вывода."""
+    out = []
+    try:
+        S = boardstatus_mod()
+        tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+        open_closing = {}
+        cache = read_json(path("autoclose-prs.json"), {})
+        for repo, prs in sorted((cache.get("open_prs") if isinstance(cache.get("open_prs"), dict) else {}).items()):
+            for pr in prs if isinstance(prs, list) else []:
+                if isinstance(pr, dict) and isinstance(pr.get("number"), int) and not pr.get("part"):
+                    for tid in pr.get("closes") if isinstance(pr.get("closes"), list) else []:
+                        if isinstance(tid, str):
+                            open_closing.setdefault(tid, []).append((repo, pr["number"]))
+        moves, stale = S.plan(tasks, board_domains(), open_closing)
+        for tid, ch, note in moves:
+            old = tasks[tid][1].get("status")
+
+            def same(h, old=old, tid=tid):
+                if h.get("status") != old:
+                    raise ValueError(f"{tid}: статус уже {h.get('status')}")
+            try:
+                T.task_set(PANTHEON, now(), tid, ch, note=note, actor="плановый проход", precheck=same)
+                out.append(f"статус · {tid}: {old} → {ch['status']}")
+            except ValueError as e:  # задачу правят прямо сейчас — следующий проход посмотрит заново
+                out.append(f"статус · {tid}: не сдвинут ({e})")
+    except Exception as e:  # noqa: BLE001 — сбой сверки статусов не ломает проход доски
+        alert_once("board-status", type(e).__name__, f"доска: сверка статусов упала ({type(e).__name__}: {e})", "board")
+        return out
+    clear_once("board-status")
+    held = {k: v for k, v in stale.items() if tasks.get(k, ("", {}, ""))[1].get("type") == "story"}
+    stale = {k: v for k, v in stale.items() if k not in held}
+    if stale:
+        alert_once("board-todo-live", ",".join(sorted(stale)), "доска: задачи в todo, а работа по ним идёт — "
+                   + "; ".join(f"{tid} ({why})" for tid, why in sorted(stale.items()))
+                   + ". Взять в работу — pantheon task claim ID --by КТО, или закрыть след (worktree, PR)", "board")
+    else:
+        clear_once("board-todo-live")
+    if held:  # пачку проход не двигает: решение за человеком (вопрос владельцу, ручной статус)
+        alert_once("board-story-hold", ",".join(sorted(held)), "доска: статус пачки по составу не поставлен — "
+                   + "; ".join(f"{sid} ({why})" for sid, why in sorted(held.items()))
+                   + ". Решить руками — pantheon task set ID status=…", "board")
+    else:
+        clear_once("board-story-hold")
+    return out
+
+
+def boardtext_mod():
+    """lib/boardtext.py — автоблок доски board-auto.md (metis-0397), общий с хуком hooks/ctx.py."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_boardtext", os.path.join(LIB, "boardtext.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def board_week():
+    """Неделя лимита целыми процентами по снимку строки статуса; снимка нет или неделя сброшена — None."""
+    with contextlib.suppress(Exception):
+        w = night_mod().snapshot()["week"]
+        if w and w[1] > now():
+            return int(round(w[0]))
+    return None
+
+
+def board_auto_fp():
+    return hashlib.sha1(repr(_fp_board_auto()).encode("utf-8", "replace")).hexdigest()
+
+
+def board_auto_sync(T):
+    """Автоблок доски — отдельный файл board-auto.md (metis-0397): PR, пачки, неделя, STATUS.md, ответы владельца.
+    board.md не пишет: только сверяет строку встраивания ![[board-auto]] вверху (нет — тревога). Удачная сборка
+    записывает отпечаток входов в board-auto.json (по нему board_auto_watch видит, что сборка отстала). Сбой — тревога,
+    проход доски идёт дальше."""
+    try:
+        B = boardtext_mod()
+        fp, t = board_auto_fp(), now()
+        data = B.collect(PANTHEON, STATE, T.load_tasks(PANTHEON, T.WORK_TYPES), t, board_week(),
+                         owner=lambda h: T.Roles(()).name(T.assignee(h)) == T.OWNER_NODE)
+        res = B.sync(os.path.join(PANTHEON, B.AUTO_NAME), B.render(data, t))
+        write_json(path("board-auto.json"), {"fp": fp, "built": t})
+    except Exception as e:  # noqa: BLE001 — сбой автоблока не ломает проход доски
+        alert_once("board-auto", type(e).__name__, f"board-auto.md: сборка упала ({type(e).__name__}: {e})", "board")
+        return
+    clear_once("board-auto")
+    if data["broken"]:
+        alert_once("board-auto-input", ",".join(data["broken"]), "board-auto.md: не читается вход "
+                   f"{', '.join(data['broken'])} — сводка собрана без него", "board")
+    else:
+        clear_once("board-auto-input")
+    if B.embed_ok(os.path.join(PANTHEON, "board.md")) is False:
+        alert_once("board-auto-embed", "1", f"board.md: вверху нет строки {B.EMBED} — сводка прохода (board-auto.md) "
+                   "не видна в доске; поставить её одной строкой в начало файла", "board")
+    else:
+        clear_once("board-auto-embed")
+    if res == "written":
+        print("board-auto.md: сводка прохода обновлена")
+
+
+def board_auto_watch(t, sched):
+    """Тик (primary): входы автоблока менялись, а удачной сборки после этого нет WATCH_GAP и больше — тревога без
+    модели (молчаливый отказ генератора, исследование 24.10 разд. 7.8). Счёт — от первого расхождения после удачной
+    сборки: входы, которые меняются чаще WATCH_GAP, его не сбрасывают. Одна тревога на расхождение. Сборка прошла
+    (она пишет board-auto.json заново) — отметка снимается. Задачи
+    `pantheon board` в расписании нет или она выключена — не сверяет: сборки и не ждут."""
+    if not any((parse_command(j.get("command")) or [""])[1:] == ["board"] and j.get("enabled") is not False
+               for j in sched.get("job") or []):
+        return
+    B = boardtext_mod()
+    st = read_json(path("board-auto.json"), {}) or {}
+    cur = board_auto_fp()
+    if st.get("fp") == cur:
+        if st.get("seen_fp") or st.get("seen_at"):
+            st.pop("seen_fp", None), st.pop("seen_at", None)
+            write_json(path("board-auto.json"), st)
+        clear_once("board-auto-stale")
+        return
+    if not st.get("seen_at"):  # первое расхождение после удачной сборки — отсюда и счёт; новые правки его не сбрасывают
+        st.update(seen_fp=cur, seen_at=t)
+        write_json(path("board-auto.json"), st)
+        return
+    if st.get("seen_fp") != cur:
+        st["seen_fp"] = cur
+        write_json(path("board-auto.json"), st)
+    seen = float(st["seen_at"])
+    if t - seen >= B.WATCH_GAP:
+        built = st.get("built")
+        alert_once("board-auto-stale", repr(seen), f"board-auto.md: входы менялись в {B.hm(seen)}, а сборки нет "
+                   f"{int((t - seen) // 60)} мин (последняя — {B.hm(float(built)) if built else 'не было'}); "
+                   "смотреть задачу board: pantheon jobs, alerts.md", "pantheon-tick")
 
 
 def autoclose_mod():
@@ -6198,7 +6444,8 @@ def autoclose_cmd(rest):
     if not repo_dirs:
         return 0
     A = autoclose_mod()
-    errors = A.fetch(path("autoclose-prs.json"), path("autoclose.json"), now(), sorted(repo_dirs), env=run_env())
+    errors = A.fetch(path("autoclose-prs.json"), path("autoclose.json"), now(), sorted(repo_dirs), env=run_env(),
+                     core=merge_mod().is_core)
     autoclose_alerts(sorted(repo_dirs), errors)
     for k, v in sorted(errors.items()):
         print(f"автозакрытие · {k}: {v}", file=sys.stderr)
@@ -6344,6 +6591,7 @@ def check(paths=None, quiet=False):
         for d in drift:
             print(f"ОШИБКА · Доска/{d}")
     field_errs, field_warns = [], []
+    nobody, unlinked = [], []
     if not paths:  # поля «Итогов пачек» и ожидание PR/приёмки (metis-0308)
         night_end = "08:00"
         with contextlib.suppress(Exception):
@@ -6352,6 +6600,10 @@ def check(paths=None, quiet=False):
         fixed = T.fix_closed(PANTHEON, now(), tasks_now)
         if fixed:
             tasks_now = T.load_tasks(PANTHEON, T.WORK_TYPES)
+        nobody = T.bodyless_tasks(tasks_now, now())  # metis-0402: открытая задача без описания старше часа
+        unlinked = T.unlinked_decisions(tasks_now, _read_or_empty(os.path.join(PANTHEON, "decisions.md")),
+                                        _read_or_empty(path("owner-log", "zeus.md")),
+                                        _read_or_empty(path("owner-log", "board.jsonl")).splitlines(), now())
         field_errs, field_warns = T.board_problems(tasks_now, now(), night_end, autoclose_mod().open_pr_tasks(path("autoclose.json")))
         field_errs = [(i, f"status done без closed — проставлен из updated") for i in fixed] + field_errs
         for tid, text in field_errs:
@@ -6389,8 +6641,146 @@ def check(paths=None, quiet=False):
                        "check")
         else:
             clear_once("check-fields")
+        if nobody:
+            alert_once("check-nobody", "|".join(nobody),
+                       f"задачи без описания дольше {T.NO_BODY_HOURS} ч (только заголовок и журнал): "
+                       f"{', '.join(nobody[:12])}{f' и ещё {len(nobody) - 12}' if len(nobody) > 12 else ''} — "
+                       "дописать цель и «готово, когда» (pantheon task set ID --body-file …) или закрыть", "check")
+        else:
+            clear_once("check-nobody")
+        unlinked_alert(T, unlinked)
         return 0
     return 1 if bad or drift or view_drift or field_errs else 0
+
+
+UNLINKED_SHOWN = 12  # сколько новых id называет одна тревога «без задачи»; остальные — следующим проходом
+
+
+def unlinked_alert(T, unlinked):
+    """Тревога «слово владельца с [id] без задачи» (metis-0402 г): один раз на id и только о новых. Показанные id — в
+    STATE/unlinked-seen.json (id → когда впервые); показанным считается только названный в тревоге. Первый проход (файла нет или он испорчен) только запоминает то, что
+    уже есть, без тревоги: старые вопросы окна Зевса задачи не имеют, и весь их набор стал бы шумом (argus a)."""
+    p = path("unlinked-seen.json")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            seen = json.load(fh)
+        if not isinstance(seen, dict):
+            raise ValueError("не словарь")
+    except (OSError, ValueError):
+        seen = None
+    t = now()
+    fresh = [i for i in unlinked if i not in seen] if seen is not None else []
+    shown = fresh[:UNLINKED_SHOWN]
+    if shown:
+        more = len(fresh) - len(shown)
+        alert(f"слова владельца с [id] без задачи дольше {T.UNLINKED_MIN} мин: {', '.join(shown)}"
+              f"{f' и ещё {more} (назову следующим проходом)' if more else ''} — завести задачу "
+              "(pantheon task new, [id] в тексте) или дописать в decisions.md отдельной строкой «не задача: [id] — причина»",
+              "check")
+    keep = {i: v for i, v in (seen or {}).items()
+            if isinstance(v, (int, float)) and t - v <= (T.UNLINKED_DAYS + 1) * 86400}
+    # показанными отмечаются только названные в тревоге (argus b, круг 2): иначе id с 13-го не появились бы нигде.
+    # Первый проход запоминает всё; уже показанные, но вычищенные по сроку, — продлеваются, а не становятся новыми
+    keep.update({i: t for i in unlinked if i not in keep and (seen is None or i in seen or i in shown)})
+    if keep != seen:
+        os.makedirs(STATE, exist_ok=True)
+        write_atomic(p, json.dumps(keep, ensure_ascii=False, sort_keys=True))
+
+
+# Флаги `task new` (metis-0402): неизвестный флаг — отказ с его именем, а не молчаливо потерянное поле.
+TASK_NEW_VALUE_FLAGS = {"--direction", "--title", "--project", "--text", "--body", "--body-file", "--type", "--status",
+                        "--priority", "--due", "--next", "--owner", "--release", "--wave", "--batch", "--mode", "--mode-why",
+                        "--touches", "--night", "--estimate", "--actual", "--acceptance", "--waiting-on", "--question",
+                        "--why", "--recommend", "--if-no-answer", "--option", "--depends-on", "--executor", "--parent"}
+TASK_NEW_BOOL_FLAGS = {"--risky"}
+TASK_SET_VALUE_FLAGS = {"--note", "--option", "--body", "--body-file"}
+# Повторяемые флаги — списки; любой другой повторённый флаг — отказ (argus b, круг 2): `opt()` берёт последнее
+# значение, и `--body "Цель" --body "Готово, когда"` молча терял бы первую часть. --wave — прежнее имя --release.
+TASK_REPEATABLE_FLAGS = {"--option", "--touches", "--depends-on"}
+TASK_FLAG_ALIASES = {"--wave": "--release"}
+
+
+def task_repeat_error(sub, a, seen):
+    """Отказ, если одиночный флаг `a` уже был (seen пополняется), иначе None."""
+    key = TASK_FLAG_ALIASES.get(a, a)
+    if key in TASK_REPEATABLE_FLAGS:
+        return None
+    if key in seen:
+        return (f"pantheon task {sub}: флаг {a} повторён — он одиночный, значения не склеиваются; весь текст — одним "
+                f"флагом (длинный — --body-file <путь>), повторяются только {', '.join(sorted(TASK_REPEATABLE_FLAGS))}"
+                " — ничего не записано")
+    seen.add(key)
+    return None
+
+
+def task_flag_error(sub, args, value_flags, bool_flags=()):
+    """Первая ошибка во флагах `--…` (неизвестный, без значения, повтор одиночного, лишнее слово) или None. Значение
+    флага пропускается."""
+    i, seen = 0, set()
+    while i < len(args):
+        a = args[i]
+        if a in bool_flags:
+            err = task_repeat_error(sub, a, seen)
+            if err:
+                return err
+            i += 1
+        elif a in value_flags:
+            if i + 1 >= len(args):
+                return f"pantheon task {sub}: у флага {a} нет значения"
+            err = task_repeat_error(sub, a, seen)
+            if err:
+                return err
+            i += 2
+        elif a.split("=", 1)[0] in value_flags | set(bool_flags):
+            return f"pantheon task {sub}: пишите «{a.split('=', 1)[0]} значение» через пробел, не «{a[:40]}» — ничего не записано"
+        elif a.startswith("--"):
+            return f"pantheon task {sub}: неизвестный флаг {a.split('=', 1)[0]} — ничего не записано"
+        else:
+            return f"pantheon task {sub}: лишнее «{a}» — значения идут после своего флага"
+    return None
+
+
+def task_body_arg(sub, opt):
+    """Текст из --text, --body, --body-file (в этом порядке, через пустую строку) → (текст или None, ошибка или None)."""
+    parts = [opt("--text"), opt("--body")]
+    bf = opt("--body-file")
+    if bf:
+        try:
+            with open(bf, encoding="utf-8") as fh:
+                parts.append(fh.read())
+        except (OSError, UnicodeDecodeError) as e:
+            return None, f"pantheon task {sub}: --body-file {bf} не читается ({getattr(e, 'strerror', None) or e})"
+    parts = [x for x in parts if x and x.strip()]
+    return ("\n\n".join(x.strip() for x in parts) if parts else None), None
+
+
+def _read_or_empty(p):
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return fh.read()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def task_new_notify(T, tid, direction, title, text):
+    """Уведомление координатору направления (metis-0402 в): файл в directions/<направление>/inbox/ — входящие он
+    разбирает при старте и по ним его будит передача задания. Тот же канал, что находки. Сбой записи не отменяет
+    задачу: строка в stderr и тревога."""
+    if direction == "inbox" or os.environ.get("PANTHEON_SESSION") == direction:  # свою задачу координатор знает
+        return
+    ib = os.path.join(PANTHEON, "directions", direction, "inbox")
+    fname = f"{stamp()[:10]}-{stamp()[11:13]}{stamp()[14:16]}-task-{tid}.md"
+    # без переменных роли — «агент»: «владелец» подписывает только owner-log, а не тот, кто вызвал команду (argus b)
+    who = os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "агент"
+    try:
+        os.makedirs(ib, exist_ok=True)
+        write_atomic(os.path.join(ib, fname),
+                     f"# Новая задача {tid}: {' '.join(title.split())[:120]}\n\nОт: {who}\n\n"
+                     f"{T.NOTICE_MARK} задача уже заведена (`pantheon task show {tid}`), заводить её заново не нужно. "
+                     f"Возьми её в работу и перенеси этот файл в `inbox/done/`.\n")
+    except OSError as e:
+        print(f"предупреждение · уведомление координатору {direction} не записано: {e.strerror or e}", file=sys.stderr)
+        alert(f"новая задача {tid} ({direction}): уведомление в inbox не записано — {e.strerror or e}", "task-new")
 
 
 def task_cmd(rest):
@@ -6406,6 +6796,23 @@ def task_cmd(rest):
 
     try:
         if sub == "new":
+            err = task_flag_error("new", args, TASK_NEW_VALUE_FLAGS, TASK_NEW_BOOL_FLAGS)
+            if err:
+                print(err, file=sys.stderr)
+                return 2
+            body_text, err = task_body_arg("new", opt)
+            if err:
+                print(err, file=sys.stderr)
+                return 2
+            if body_text is None and opt("--question") and (not opt("--why") or len(opt("--option", True)) < 2):
+                # metis-0402, argus a: без текста суть карточки вопроса — в её полях, поэтому они должны быть полными
+                print("pantheon task new: вопрос без текста задачи — нужны --why и не меньше двух --option "
+                      "(или текст --text/--body/--body-file); ничего не записано", file=sys.stderr)
+                return 2
+            if body_text is None and not opt("--question"):
+                print("pantheon task new: нужен текст задачи — --text, --body или --body-file <путь> (цель и «готово, когда»); "
+                      "задача без описания не создаётся (вопрос владельцу — с --question, --why и вариантами)", file=sys.stderr)
+                return 2
             fields = {"status": opt("--status"), "priority": int(opt("--priority")) if opt("--priority") else None,
                       "due": opt("--due"), "next": opt("--next"), "owner": opt("--owner"),
                       "release": opt("--release") or opt("--wave"), "batch": opt("--batch"),
@@ -6427,16 +6834,34 @@ def task_cmd(rest):
                 print(f"pantheon task new: --type {opt('--type')} — только {' или '.join(T.WORK_TYPES)}", file=sys.stderr)
                 return 2
             tid, p = T.task_new(PANTHEON, now(), opt("--direction"), opt("--title"), project=opt("--project"),
-                                text=opt("--text"), kind=opt("--type") or "task", **fields)
+                                text=body_text, kind=opt("--type") or "task", **fields)
             print(f"{tid} {os.path.relpath(p, PANTHEON)}")
+            task_new_notify(T, tid, opt("--direction"), opt("--title"), body_text)
             for w in T.option_warns(fields):
                 print(f"предупреждение · {w}", file=sys.stderr)
         elif sub == "set" and args:
-            tid, changes, note, i = args[0], {}, None, 1
+            tid, changes, note, i, seen = args[0], {}, None, 1, set()
             # --wave — прежнее имя --release (metis-0069): выпуск строкой «pantheon 0.11.50»
             night_flags = {"--release": "release", "--wave": "release", "--batch": "batch", "--night": "night", "--estimate": "estimate",
                            "--actual": "actual", "--acceptance": "acceptance", "--mode": "mode", "--mode-why": "mode_why"}  # ночной цикл: флаги как у --due
+            j = 1  # повтор одиночного флага — отказ до чтения --body-file и до записи; шаг — как в разборе ниже
+            while j < len(args):
+                if args[j] in TASK_SET_VALUE_FLAGS | set(night_flags) and j + 1 < len(args):
+                    err = task_repeat_error("set", args[j], seen)
+                    if err:
+                        print(err, file=sys.stderr)
+                        return 2
+                    j += 2
+                else:
+                    j += 1
+            new_body, err = task_body_arg("set", opt)
+            if err:
+                print(err, file=sys.stderr)
+                return 2
             while i < len(args):
+                if args[i] in ("--body", "--body-file") and i + 1 < len(args):  # тело уже взято task_body_arg
+                    i += 2
+                    continue
                 if args[i] == "--note" and i + 1 < len(args):
                     note, i = args[i + 1], i + 2
                     continue
@@ -6444,6 +6869,13 @@ def task_cmd(rest):
                     changes["options"] = (changes.get("options") or []) + [args[i + 1]]  # и после options= (argus)
                     i += 2
                     continue
+                if args[i].startswith("--") and not (args[i] in night_flags and i + 1 < len(args)):
+                    # metis-0402: неизвестный флаг или флаг без значения — отказ с его именем, не «поле=значение»
+                    known, name = {"--note", "--option", "--body", "--body-file", *night_flags}, args[i].split("=", 1)[0]
+                    print("pantheon task set: " + (f"у флага {args[i]} нет значения" if args[i] in known
+                          else f"пишите «{name} значение» через пробел, не «{args[i][:40]}»" if name in known
+                          else f"неизвестный флаг {name}") + " — ничего не записано", file=sys.stderr)
+                    return 2
                 if args[i] in night_flags and i + 1 < len(args):
                     k, v, eq, step = night_flags[args[i]], args[i + 1], "=", 2
                 else:
@@ -6464,7 +6896,7 @@ def task_cmd(rest):
                 changes[k] = None if v in ("", "null") else int(v) if kind == "int" else (v == "true") if kind == "bool" else \
                     [x.strip() for x in v.split(",") if x.strip()] if kind == "list" else v
                 i += step
-            p, head = T.task_set(PANTHEON, now(), tid, changes, note=note)
+            p, head = T.task_set(PANTHEON, now(), tid, changes, note=note, body=new_body)
             print(f"{tid}: {head.get('status')} · {os.path.relpath(p, PANTHEON)}")
             if changes.get("status") in ("done", "dropped"):
                 metrics_on_close(T, tid)

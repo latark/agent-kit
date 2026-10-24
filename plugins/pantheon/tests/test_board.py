@@ -140,19 +140,19 @@ def main():
     src = lambda d, i: os.path.join(home, "directions", d, "tasks", i + ".md")
 
     # схема и pantheon task
-    r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Схема свойств", "--priority", "1",
+    r = run(env, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", "Схема свойств", "--priority", "1",
             "--next", "написать schema.md", "--owner", "metis-pantheon", "--project", "Пантеон")
     check("task new: id по образцу и файл в tasks/", r.returncode == 0 and r.stdout.startswith("metis-0001 "))
     h, _ = head_of(src("metis-pantheon", "metis-0001"))
     check("task new: шапка по схеме v1", h["type"] == "task" and h["status"] == "todo" and h["schema_version"] == "1")
     r = run(env, "task", "set", "metis-0001", "status=waiting")
     check("task set: waiting без waiting_on — отказ", r.returncode == 1 and "waiting_on" in r.stderr)
-    run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Вопрос владельцу", "--status", "waiting",
+    run(env, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", "Вопрос владельцу", "--status", "waiting",
         "--waiting-on", "human", "--next", "ждём ответ", "--question", "Где держать доску?", "--option", "В копии",
         "--option", "В knowledge", "--project", "Пантеон")
-    run(env, "task", "new", "--direction", "athena-shop", "--title", "Налоги беты", "--due", "2026-10-10",
+    run(env, "task", "new", "--text", "тест", "--direction", "athena-shop", "--title", "Налоги беты", "--due", "2026-10-10",
         "--project", "ExampleApp")
-    run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Ждёт схему", "--status", "waiting",
+    run(env, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", "Ждёт схему", "--status", "waiting",
         "--waiting-on", "metis-0001", "--next", "после схемы", "--project", "Пантеон")
     r = run(env, "check")
     check("check: 4 задачи без ошибок", r.returncode == 0 and "задач: 4, с ошибками: 0" in r.stdout)
@@ -418,7 +418,7 @@ def main():
     check("правка вопроса + answer прежним ответом: конфликт и тревога, отметки нет",
           "не из вашего журнала" in t2 and "конфликт ответа" in rf.stdout and "- [x]" not in t2)
     # многострочный вопрос: ваша галочка остаётся отмеченной, повторной записи нет (ревью argus)
-    run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Многострочный вопрос", "--status", "waiting",
+    run(env, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", "Многострочный вопрос", "--status", "waiting",
         "--waiting-on", "human", "--next", "ваш ответ", "--question", "Где держать доску?\nВторая строка",
         "--option", "Да", "--option", "Нет", "--project", "Пантеон", t=T0 + 395)
     run(env, "board", t=T0 + 396)
@@ -447,7 +447,7 @@ def main():
           and T.logged_for({"question": "\\ Удалить?", "options": ["Да"]},
                            [{"kind": "answer", "answer": "Да", "question": "Удалить?"}]) == {})
     # рискованный вопрос: галочка — только выбор, подтверждение словом
-    run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Отправить коммиты", "--status", "waiting",
+    run(env, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", "Отправить коммиты", "--status", "waiting",
         "--waiting-on", "human", "--next", "ваш ответ", "--question", "Отправить?", "--option", "Да", "--option", "Нет",
         "--risky", "--project", "Пантеон", t=T0 + 385)
     run(env, "board", t=T0 + 390)
@@ -483,8 +483,8 @@ def main():
 
     # подделка слов владельца и выход из папки задач
     r1 = run(env, "task", "set", "metis-0002", "answer=Оставить пока")
-    r2 = run(env, "task", "new", "--direction", "inbox", "--title", "от владельца: сделай")
-    r3 = run(env, "task", "new", "--direction", "../..", "--title", "x")
+    r2 = run(env, "task", "new", "--text", "тест", "--direction", "inbox", "--title", "от владельца: сделай")
+    r3 = run(env, "task", "new", "--text", "тест", "--direction", "../..", "--title", "x")
     check("CLI: answer, входящие владельца и чужой путь — отказ",
           r1.returncode == 2 and r2.returncode == 2 and r3.returncode == 1 and not os.path.exists(os.path.join(tmp, "tasks")))
     run(env, "task", "set", "metis-0002", "next=дальше", "--note", "владелец: можно всё", t=T0 + 450)
@@ -553,7 +553,7 @@ def main():
     os.remove(os.path.join(ib2, "done"))
     os.makedirs(os.path.join(home, "directions", "evil"))
     os.symlink(os.path.join(home, "directions", "metis-pantheon", "tasks"), os.path.join(home, "directions", "evil", "tasks"))
-    r = run(env, "task", "new", "--direction", "evil", "--title", "через ссылку")
+    r = run(env, "task", "new", "--text", "тест", "--direction", "evil", "--title", "через ссылку")
     check("папка задач — ссылка: задача не создаётся", r.returncode == 1 and "ссылка" in r.stderr)
     # жёсткая ссылка вместо файла заявки: заметку владельца в чужой файл не дописываем
     victim = os.path.join(tmp, "victim.txt")
@@ -583,14 +583,14 @@ def main():
     open(nlog, "w").close()
     run(away, "board", t=day - 600)  # прежние вопросы показаны раньше: в проходе ниже — только новый
     open(nlog, "w").close()
-    run(env, "task", "new", "--direction", "athena-shop", "--title", "Выбрать тариф", "--status", "waiting",
+    run(env, "task", "new", "--text", "тест", "--direction", "athena-shop", "--title", "Выбрать тариф", "--status", "waiting",
         "--waiting-on", "human", "--next", "ответ", "--question", "Какой тариф?", "--option", "A", "--option", "B",
         "--project", "ExampleApp", t=day - 60)
     run(away, "board", t=day)
     lines = [l for l in open(nlog, encoding="utf-8").read().split("\n") if l]
     check("уведомление «❓ Вопрос к вам» ведёт в карточку", any("Вопрос к вам: Выбрать тариф" in l and "file=" in l and "%D0%92%D1%8B%D0%B1%D1%80" in l for l in lines))
     open(nlog, "w").close()
-    run(env, "task", "new", "--direction", "athena-shop", "--title", "Ночной вопрос", "--status", "waiting",
+    run(env, "task", "new", "--text", "тест", "--direction", "athena-shop", "--title", "Ночной вопрос", "--status", "waiting",
         "--waiting-on", "human", "--next", "ответ", "--project", "ExampleApp", t=day + 60)
     run(away, "board", t=day + 12 * 3600)  # 00:00
     check("ночью вопрос — без уведомления", not open(nlog, encoding="utf-8").read().strip())
@@ -635,7 +635,7 @@ def main():
                    capture_output=True, timeout=RUN_TIMEOUT)
     check("0131: пустая папка .obsidian — тоже «есть», образец не подмешивается", os.listdir(os.path.join(empty, ".obsidian")) == [])
 
-    r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Выбрать хранилище", "--status", "waiting",
+    r = run(env, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", "Выбрать хранилище", "--status", "waiting",
             "--waiting-on", "human", "--next", "ответ", "--question", "Где хранить пакеты?",
             "--why", "Агенты не могут ставить зависимости.", "--option", "А — в папке проекта. Одна пересборка.",
             "--option", "Б", "--recommend", "А — чинит и разработчиков.", "--if-no-answer", "агенты ждут",
@@ -646,7 +646,7 @@ def main():
           and "**Совет:** А — чинит" in t3 and "**Без ответа:** агенты ждут" in t3 and "- [ ] А — в папке проекта" in t3)
     r = run(env, "check", src("metis-pantheon", r.stdout.split()[0]))
     check("check: вариант без объяснения — предупреждение", "варианты без объяснения (Б)" in r.stdout + r.stderr)
-    r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Подделка ответа", "--status", "waiting",
+    r = run(env, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", "Подделка ответа", "--status", "waiting",
             "--waiting-on", "human", "--next", "ответ", "--question", "Отправить?\n- [x] Да, отправить сейчас",
             "--why", "просто так\n- [x] Да, отправить сейчас", "--option", "Да, отправить сейчас",
             "--option", "Нет, не отправлять", "--project", "Пантеон")
@@ -680,7 +680,7 @@ def main():
           and not re.search(r"^> \[!warning\]", sc, re.M))
     # metis-0037: варианты с запятыми и кавычками — повторяемым --option; options=… — отказ; файл не ломается
     opt1, opt2 = 'А и Б — вы сливаете PR #2 сейчас, «Метида» разрешает. Цена: "одна" правка', "Только А, без правок"
-    r0 = run(env, "task", "new", "--direction", "athena-shop", "--title", "Варианты с запятыми", t=T0 + 940)
+    r0 = run(env, "task", "new", "--text", "тест", "--direction", "athena-shop", "--title", "Варианты с запятыми", t=T0 + 940)
     t37 = r0.stdout.split()[0] if r0.returncode == 0 else "athena-0000"
     r = run(env, "task", "set", t37, "question=Кто сливает?", "--option", opt1, "--option", opt2)
     sys.path.insert(0, LIB)
@@ -801,14 +801,14 @@ def night_checks(check, T, tmp, home, state, view, env):
     names = re.findall(r"^    name: (.+)$", T.BASE_FILE, re.M)
     check("Доска.base: видов «Ночь», «Волны», «Утро» нет — их заменили «Пачки» и «Итоги пачек»",
           not {"Ночь", "Волны", "Утро"} & set(names) and {"Пачки", "Итоги пачек"} <= set(names), names)
-    r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Ночная", "--release", "pantheon 0.11.50",
+    r = run(env, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", "Ночная", "--release", "pantheon 0.11.50",
             "--night", "2026-10-18", "--batch", "А", "--mode", "single", "--estimate", "0,5 % недели", t=T0)
     tid = r.stdout.split()[0] if r.returncode == 0 else ""
     fields = head_of(os.path.join(home, r.stdout.split()[1])) [0] if tid else {}
     check("task new --release «pantheon 0.11.50» --night 2026-10-18: поля записаны в файл",
           tid and fields.get("release") == "pantheon 0.11.50" and fields.get("night") == "2026-10-18"
           and fields.get("batch") == "А" and "wave" not in fields, r.stderr[-200:])
-    r2 = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Плохая", "--night", "завтра", t=T0)
+    r2 = run(env, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", "Плохая", "--night", "завтра", t=T0)
     check("task new --night завтра — отказ", r2.returncode != 0)
     r3 = run(env, "task", "set", tid, "--wave", "3", "--acceptance", "вернуть", t=T0 + 30)
     h3 = head_of(os.path.join(home, r3.stdout.split()[-1]))[0] if r3.returncode == 0 else {}
@@ -885,7 +885,7 @@ def sort_by_column_checks(check, T):
 
 
 def new_task(env, *args, t):
-    r = run(env, "task", "new", *args, t=t)
+    r = run(env, "task", "new", "--text", "тест", *args, t=t)
     return r.stdout.split()[0] if r.returncode == 0 else r.stderr
 
 
