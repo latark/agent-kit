@@ -1589,12 +1589,458 @@ def t_hq_gh(h):
     case("hq: --remove-label X — значение, можно", hq("gh pr edit 5 -R latark/agent-kit --remove-label ready"), True)
 
 
+# --- перенос «принять» после подтягивания main (metis-0415) -------------------------------------------------------
+# Решение владельца 24.10 17:54 [metis-0384b]: «вернуть» привязано к PR (любой head) и снимается только более поздним
+# «принять»; «принять» переносится, только если собственный дифф PR от merge-base совпал (git patch-id, без строки
+# version в plugin.json); сбой git или неполная история — не переносится. Тесты на новом head — всегда свои.
+# Таблица «блокер прошлых кругов → тест» — в отчёте задачи; имена блокеров стоят в названиях проверок.
+
+PJ = "plugins/pantheon/.claude-plugin/plugin.json"
+GJ = "plugins/guard/.claude-plugin/plugin.json"
+CODE = "def f():\n    x = {}\n    return x\n\n\ndef g():\n    return 0\n"
+README = "".join(f"r{i}\n" for i in range(1, 13))
+G_PY = "".join(f"def g{i}():\n    return {i}\n\n\n" for i in range(6))
+
+
+def _man(name, ver, **kw):
+    return json.dumps(dict({"name": name, "version": ver}, **kw), indent=2) + "\n"
+
+
+class Hist:
+    """Коммиты на своих ветках репозитория p; в конце сборки — снова main (HEAD и дерево — как были)."""
+
+    def __init__(self, p):
+        self.p, self.s = p, {}
+
+    def put(self, files, msg, amend=False, mode=None):
+        for rel, text in files.items():
+            f = os.path.join(self.p, rel)
+            if text is None:
+                os.remove(f)
+                continue
+            os.makedirs(os.path.dirname(f), exist_ok=True)
+            with open(f, "wb" if isinstance(text, bytes) else "w") as fh:
+                fh.write(text)
+        if mode:
+            os.chmod(os.path.join(self.p, mode), 0o755)
+        git(self.p, "add", "-A")
+        git(self.p, "commit", "-q", "--allow-empty", "-m", msg, *(["--amend"] if amend else []))
+        return git(self.p, "rev-parse", "HEAD")
+
+    def br(self, name, start):
+        git(self.p, "checkout", "-q", "-B", name, start)
+
+    def merge(self, other, extra=None):
+        git(self.p, "merge", "-q", "--no-edit", "--no-ff", other)
+        if extra:
+            return self.put(extra, "правка внутри слияния", amend=True)
+        return git(self.p, "rev-parse", "HEAD")
+
+
+def kit_history(h):
+    """История PR в projects/agent-kit (один раз на прогон). B — база; M1 — main после соседнего PR (README внизу,
+    новый файл, удалён gone.py, g.py переименован в h.py, version 0.11.85); M2 — ещё один PR в main. P — проверенный
+    head PR (code.py и README вверху); N1 = P + подтянутый M1 + номер версии; N2 = N1 + подтянутый M2 + номер."""
+    if getattr(h, "hist", None):
+        return h.hist
+    p = h.j("projects/agent-kit")
+    H = Hist(p)
+    s = H.s
+    H.br("t-base", h.sha["agent-kit"])
+    s["B"] = H.put({PJ: _man("pantheon", "0.11.84"), GJ: _man("guard", "0.5.17"), "README.md": README,
+                    "code.py": CODE.format(1), "g.py": G_PY, "gone.py": "g = 1\n", "bin.dat": b"\x00\x01bin\x00",
+                    ".claude-plugin/marketplace.json": "{}\n"}, "B")
+    H.br("t-main", s["B"])
+    s["M1"] = H.put({PJ: _man("pantheon", "0.11.85"), "README.md": README.replace("r12", "r12m"), "other.py": "y = 1\n",
+                     "gone.py": None, "g.py": None, "h.py": G_PY}, "main: соседний PR и выпуск")
+    s["M2"] = H.put({PJ: _man("pantheon", "0.11.86"), "other2.py": "z = 1\n"}, "main: ещё один PR")
+    H.br("t-pr", s["B"])
+    s["P"] = H.put({"code.py": CODE.format(2), "README.md": README.replace("r1\n", "r1p\n")}, "PR")
+    s["Pv"] = H.put({PJ: _man("pantheon", "0.11.85"), GJ: _man("guard", "0.5.18")}, "выпуск без main")
+    H.br("t-pr-a", s["P"])
+    s["A1"] = H.merge(s["M1"])
+    s["N1"] = H.put({PJ: _man("pantheon", "0.11.86"), GJ: _man("guard", "0.5.18")}, "выпуск после main")
+    s["N2m"] = H.merge(s["M2"])
+    s["N2"] = H.put({PJ: _man("pantheon", "0.11.87")}, "выпуск после второго main")
+    # плохие head от N1: правка вне version
+    for name, files, mode in (
+            ("out", {"code.py": CODE.format(3)}, None),
+            ("ws", {"code.py": CODE.format(2).replace("return x", "return x ")}, None),
+            ("bin", {"bin.dat": b"\x00\x02bin\x00"}, None),
+            ("field", {PJ: _man("pantheon", "0.11.86", description="другое")}, None),
+            ("dup", {PJ: '{"name": "pantheon", "version": "0.11.86", "version": "0.11.86"}\n'}, None),
+            ("numver", {PJ: _man("pantheon", 86)}, None),
+            ("mjson", {".claude-plugin/marketplace.json": '{"x": 1}\n'}, None),
+            ("mode", {}, "code.py"),
+            ("newfile", {"empty.txt": ""}, None)):
+        H.br("t-" + name, s["N1"])
+        s[name] = H.put(files, name, mode=mode)
+    H.br("t-evil", s["P"])
+    s["evil"] = H.merge(s["M1"], extra={"code.py": CODE.format(9)})  # правка внутри коммита слияния (117-a7)
+    H.br("t-moddel", s["P"])
+    s["moddel"] = H.merge(s["M1"], extra={"gone.py": "g = 1\n"})  # вернул файл, который main удалил (117-b3)
+    H.br("t-side0", s["B"])
+    side = H.put({"evil.py": "e = 1\n"}, "побочная ветка не из main")
+    H.br("t-side", s["N1"])
+    s["side"] = H.merge(side)
+    # обратное слияние: первый родитель — main (122-b9)
+    H.br("t-rev", s["M1"])
+    s["Arev"] = H.merge(s["P"])
+    # «вернуть» → исправление → main (122-a11-1): R и A от одной merge-base
+    H.br("t-fix", s["P"])
+    s["R"] = H.put({"code.py": CODE.format(5)}, "правка, которую вернули")
+    s["A"] = H.put({"code.py": CODE.format(7)}, "исправление")
+    s["NA"] = H.merge(s["M1"])
+    # откат правки после «вернуть» (122-a11-2)
+    H.br("t-revert", s["N1"])
+    s["Rx"] = H.put({"x.py": "bad\n"}, "правка, которую вернули")
+    s["Nrev"] = H.put({"x.py": None, PJ: _man("pantheon", "0.11.87")}, "откат правки и выпуск")
+    # amend и повтор слияния после reset (122-a10, 122-b10)
+    H.br("t-amend", s["A1"])
+    s["Ram"] = H.put({PJ: _man("pantheon", "0.11.86")}, "выпуск, который вернули")
+    s["Nam"] = H.put({}, "выпуск (amend)", amend=True)
+    H.br("t-redo", s["P"])
+    H.merge(s["M1"])
+    s["Nredo"] = H.put({PJ: _man("pantheon", "0.11.86"), GJ: _man("guard", "0.5.18")}, "выпуск заново")
+    # длинная история (122-b-2): 35 пустых коммитов
+    H.br("t-long", s["P"])
+    for i in range(35):
+        H.put({}, f"пустой коммит {i}")
+    H.merge(s["M1"])
+    s["Nlong"] = H.put({PJ: _man("pantheon", "0.11.86")}, "выпуск")
+    # переименование в main (117-b3-2): Q правит g.py, M1 переносит g.py в h.py
+    H.br("t-q", s["B"])
+    s["Q"] = H.put({"g.py": G_PY.replace("return 3", "return 33")}, "PR правит g.py")
+    s["QA"] = H.merge(s["M1"])
+    s["QN"] = H.merge(s["M2"])
+    git(p, "checkout", "-q", "--orphan", "t-orphan")
+    s["orphan"] = H.put({}, "без общей истории")
+    git(p, "checkout", "-q", "-f", "main")
+    git(p, "clean", "-qfdx")
+    h.hist = s
+    return s
+
+
+def kit_pr(h, head, base):
+    """gh pr view для latark/agent-kit: PR на head, base PR — base, файлы без ядра."""
+    h.gh(["README.md", "code.py"], head=head)
+    h.view["agent-kit"]["baseRefOid"] = base
+    h.write_view("agent-kit")
+
+
+def carry_file(h):
+    return h.j(".local/state/pantheon/merge-gate/carry.jsonl")
+
+
+def carry_lines(h):
+    if not os.path.exists(carry_file(h)):
+        return []
+    with open(carry_file(h)) as fh:
+        return [json.loads(x) for x in fh if x.strip()]
+
+
+def opus(sha, agent_id="argus1", kind="accept", session="s-a", repo="latark/agent-kit", pr=7, **kw):
+    return rec(kind, repo, pr, sha, agent_id=agent_id, session=session, **kw)
+
+
+def t_carry_unit(h):
+    """Отпечаток собственного диффа PR (_fingerprint) и сверка git (_carry_git) — напрямую, и на Python 3.9."""
+    s = kit_history(h)
+    mg = _load_merge_gate("merge_gate_carry")
+    kit = h.j("projects/agent-kit")
+    gd, why = mg._carry_git(kit, "latark/agent-kit", s["M1"])
+    check("_carry_git: клон репозитория PR — git dir", gd and why is None, why)
+
+    def fp(head, base=s["M1"]):
+        got = mg._fingerprint(gd, base, head)
+        return got[0] if got and got[0] else None
+
+    ref = fp(s["P"])
+    check("отпечаток P считается", isinstance(ref, str) and len(ref) == 64, ref)
+    for name, base in (("N1", s["M1"]), ("A1", s["M1"]), ("Pv", s["M1"]), ("Arev", s["M1"]), ("Nlong", s["M1"]),
+                       ("Nam", s["M1"]), ("Nredo", s["M1"]), ("Nrev", s["M1"]), ("N2", s["M2"])):
+        check(f"отпечаток {name} = P (номер версии и подтянутый main)", fp(s[name], base) == ref, name)
+    check("отпечаток P от base M2 — тот же", fp(s["P"], s["M2"]) == ref)
+    for name, why_ in (("out", "правка кода"), ("ws", "только пробел (patch-id --verbatim)"), ("bin", "двоичный файл"),
+                       ("field", "другое поле plugin.json (117-b1)"), ("mjson", "marketplace.json"),
+                       ("mode", "режим файла"), ("newfile", "пустой новый файл"),
+                       ("evil", "правка внутри слияния (117-a7)"), ("moddel", "файл, удалённый main, вернули (117-b3)"),
+                       ("side", "слияние побочной ветки (122-b9)"), ("R", "правка, которую вернули"),
+                       ("Rx", "правка x.py (122-a11-2)")):
+        got = fp(s[name])
+        check(f"отпечаток {name} ≠ P: {why_}", got is not None and got != ref, got)
+    for name, why_ in (("dup", "два ключа version (117-b1)"), ("numver", "version числом (117-b1)")):
+        got = mg._fingerprint(gd, s["M1"], s[name])
+        check(f"{name}: отпечатка нет — {why_}", got[0] is None and got[1], got)
+    got = mg._fingerprint(gd, s["M1"], s["orphan"])
+    check("head без общей истории с base — отпечатка нет (нет merge-base)", got[0] is None and "merge-base" in got[1], got)
+    got = mg._fingerprint(gd, s["M1"], "d" * 40)
+    check("head нет в git — отпечатка нет", got[0] is None and "нет в git" in got[1], got)
+    fa, fr, fq, fqa = (mg._fingerprint(gd, s["M2"], s[x]) for x in ("A", "R", "Q", "QA"))
+    check("A и R — одна merge-base, разный код", fa[1] == fr[1] and fa[0] != fr[0], (fa, fr))
+    check("Q и QA (переименование в main) — разные merge-base", fq[1] != fqa[1], (fq, fqa))
+    # сверка git папки (_carry_git)
+    got = mg._carry_git(h.j("projects/tg-read"), "latark/agent-kit", s["M1"])
+    check("_carry_git: папка — клон другого репозитория — не переносится", got[0] is None and "не клон" in got[1], got)
+    got = mg._carry_git(os.path.join(kit, ".git"), "latark/agent-kit", s["M1"])
+    check("_carry_git: папка .git клона (117-b3) — git dir", got[0] and got[1] is None, got)
+    got = mg._carry_git(kit, "latark/agent-kit", "d" * 40)
+    check("_carry_git: коммита base PR нет в git — git fetch", got[0] is None and "git fetch" in got[1], got)
+    got = mg._carry_git(h.root, "latark/agent-kit", s["M1"])
+    check("_carry_git: не репозиторий — не переносится", got[0] is None and got[1], got)
+    shallow = os.path.join(kit, ".git", "shallow")
+    with open(shallow, "w") as fh:
+        fh.write(s["B"] + "\n")
+    try:
+        got = mg._carry_git(kit, "latark/agent-kit", s["M1"])
+        check("_carry_git: неполная история (.git/shallow, 122-b11) — не переносится",
+              got[0] is None and "неполная история" in got[1], got)
+    finally:
+        os.remove(shallow)
+    grafts = os.path.join(kit, ".git", "info", "grafts")
+    os.makedirs(os.path.dirname(grafts), exist_ok=True)
+    with open(grafts, "w") as fh:
+        fh.write(s["N1"] + "\n")
+    try:
+        got = mg._carry_git(kit, "latark/agent-kit", s["M1"])
+        check("_carry_git: info/grafts (117-b) — не переносится", got[0] is None and "grafts" in got[1], got)
+    finally:
+        os.remove(grafts)
+    git(kit, "replace", s["out"], s["N1"])
+    try:
+        check("git replace (117-b): подменённый head не выдаёт себя за N1", fp(s["out"]) != ref)
+    finally:
+        git(kit, "replace", "-d", s["out"])
+    # «вернуть» привязано к PR (_held): fp — словарь sha → (отпечаток, merge-base)
+    S, P, R, A, X = "5" * 40, "6" * 40, "7" * 40, "8" * 40, "9" * 40
+    prints = {S: ("f-s", "mb2"), P: ("f-s", "mb1"), R: ("f-r", "mb1"), A: ("f-a", "mb1"), X: ("f-s", "mb2")}
+
+    def held(*recs, f=prints, sha=S):
+        return [r["sha"] for r in mg._held(list(recs), sha, lambda x: f.get(x))]
+
+    rj = opus(R, "y", "reject", checklist=None)
+    check("reject на R, позже accept другого argus на A (тот же base, другой код) — снят",
+          held(rj, opus(A, "x")) == [])
+    check("тот же порядок, но отпечаток A неизвестен — в силе", held(rj, opus(A, "x"), f=dict(prints, **{A: None})) == [R])
+    check("тот же порядок, отпечаток R неизвестен — в силе", held(rj, opus(A, "x"), f=dict(prints, **{R: None})) == [R])
+    check("accept на A раньше reject — в силе", held(opus(A, "x"), rj) == [R])
+    check("accept на A с тем же кодом, что R (тот же base) — в силе",
+          held(rj, opus(A, "x"), f=dict(prints, **{A: ("f-r", "mb1")})) == [R])
+    check("accept на A с другой merge-base (117-b3-2) — в силе",
+          held(rj, opus(A, "x"), f=dict(prints, **{A: ("f-a", "mb9")})) == [R])
+    check("код S тот же, что у R (откат исправления) — accept на A не снимает",
+          held(rj, opus(A, "x"), f=dict(prints, **{S: ("f-r", "mb2")})) == [R])
+    check("свежее accept на S другого argus — снимает reject с R", held(rj, opus(S, "x")) == [])
+    check("accept того же рецензента на R — снимает", held(rj, opus(R, "y")) == [])
+    check("accept того же рецензента на R без перечня — снимает (Б6 скажет шлюз)",
+          held(rj, opus(R, "y", checklist=None)) == [])
+    check("accept другого argus на R — в силе (metis-0158)", held(rj, opus(R, "x")) == [R])
+    rs = opus(S, "y", "reject", checklist=None)
+    check("reject на S, accept другого argus на S — в силе (metis-0158)", held(rs, opus(S, "x")) == [S])
+    check("reject на S, тот же argus принял P с тем же кодом (117-b7 K2) — в силе", held(rs, opus(P, "y")) == [S])
+    check("reject на S, тот же argus принял X с тем же кодом (117-b7 K2) — в силе", held(rs, opus(X, "y")) == [S])
+    check("reject на S, тот же argus принял S — снят", held(rs, opus(S, "y")) == [])
+    check("accept без перечня другого argus на S reject с R не снимает", held(rj, opus(S, "x", checklist=None)) == [R])
+    # переносится только accept с перечнем на head с тем же отпечатком
+    car = mg._carried([opus(P, "x"), opus(R, "z"), opus(X, "w", checklist=None), opus(S, "v")], S,
+                      lambda x: prints.get(x))
+    check("_carried: P (тот же отпечаток) — да, R — нет, без перечня — нет, сам S — нет",
+          [r["sha"] for r in car] == [P], car)
+    check("_carried: отпечаток S неизвестен — ничего",
+          mg._carried([opus(P, "x")], S, lambda x: None if x == S else prints.get(x)) == [])
+    check("_carried: reject не переносится", mg._carried([opus(P, "x", "reject")], S, lambda x: prints.get(x)) == [])
+    heads = ["%040x" % i for i in range(1, 13)]
+    got = mg._carry_heads([opus(x, "a") for x in heads], S)
+    check(f"_carry_heads: из 12 head — {mg.CARRY_HEADS} последних, старые — без отпечатка (117-b2-2)",
+          got == set(heads[-mg.CARRY_HEADS:]) | {S}, sorted(got))
+
+
+def t_carry_gate(h):
+    """Шлюз целиком: перенос «принять» с head, чей собственный дифф совпал, и запись переноса в журнал."""
+    s = kit_history(h)
+    kit = "projects/agent-kit"
+    tests = lambda sha: rec("tests", "latark/agent-kit", None, sha, "dev-opus")
+    merge = lambda sha: f"gh pr merge 7 --match-head-commit {sha}"
+
+    def case(name, head, base, recs, allow, why="", cwd=None, cmd=None, extra_env=None):
+        h.reset()
+        kit_pr(h, s[head], s[base])
+        h.seed(*recs)
+        got = h.pre(cmd or merge(s[head]), pdir=kit, cwd=cwd, extra_env=extra_env)
+        merge_case(name, got, allow, why)
+        return got
+
+    case("N1 = P + main + номер: «принять» с P переносится", "N1", "M1", [opus(s["P"]), tests(s["N1"])], True)
+    if HAVE_TOML:
+        got = carry_lines(h)
+        check("перенос записан в merge-gate/carry.jsonl", len(got) == 1 and got[0].get("kind") == "carry"
+              and got[0].get("sha") == s["N1"] and [x.get("sha") for x in got[0].get("from", [])] == [s["P"]]
+              and len(got[0].get("fp") or "") == 64 and got[0].get("base") == s["M1"] and got[0].get("pr") == 7, got)
+        st = os.stat(carry_file(h))
+        check("carry.jsonl — 0600", stat.S_IMODE(st.st_mode) == 0o600, oct(st.st_mode))
+        check("records.jsonl перенос не меняет (читают pantheon review status и metrics)",
+              [r["kind"] for r in h.read()] == ["accept", "tests"], h.read())
+    case("N2 = N1 + второй main + номер: переносится", "N2", "M2", [opus(s["P"]), tests(s["N2"])], True)
+    case("Pv = P + номер, base M1: переносится", "Pv", "M1", [opus(s["P"]), tests(s["Pv"])], True)
+    case("длинная история (35 пустых коммитов, 122-b-2): переносится", "Nlong", "M1",
+         [opus(s["P"]), tests(s["Nlong"])], True)
+    case("прямое «принять» на N1: проходит без переноса", "N1", "M1", [opus(s["N1"]), tests(s["N1"])], True)
+    check("без переноса carry.jsonl не пишется", carry_lines(h) == [], carry_lines(h))
+    case("папка .git клона (117-b3): переносится", "N1", "M1", [opus(s["P"]), tests(s["N1"])], True,
+         cwd=kit + "/.git")
+    for head, why in (("out", "правка кода"), ("ws", "только пробел"), ("bin", "двоичный файл"),
+                      ("field", "другое поле plugin.json (117-b1)"), ("dup", "два ключа version (117-b1)"),
+                      ("numver", "version числом (117-b1)"), ("mjson", "marketplace.json"), ("mode", "режим файла"),
+                      ("evil", "правка в слиянии (117-a7)"), ("moddel", "modify/delete (117-b3)"),
+                      ("side", "побочная ветка (122-b9)"), ("orphan", "без общей истории")):
+        case(f"{head} — {why}: не переносится", head, "M1", [opus(s["P"]), tests(s[head])], False, "нет «принять»")
+    case("тесты не переносятся: тесты только на P", "N1", "M1", [opus(s["P"]), tests(s["P"])], False,
+         "нет записи тестов")
+    h.reset()
+    kit_pr(h, s["N1"], s["M1"])
+    h.view["agent-kit"]["baseRefOid"] = "d" * 40
+    h.write_view("agent-kit")
+    h.seed(opus(s["P"]), tests(s["N1"]))
+    merge_case("коммита base PR нет в git — не переносится, подсказка git fetch",
+               h.pre(merge(s["N1"]), pdir=kit), False, "git fetch")
+    case("слияние -R из клона другого репозитория (117-b3) — не переносится", "N1", "M1",
+         [opus(s["P"]), tests(s["N1"])], False, "не клон", cwd="projects/tg-read",
+         cmd=f"gh pr merge 7 -R latark/agent-kit --match-head-commit {s['N1']}")
+    p = h.j(kit)
+    with open(os.path.join(p, ".git", "shallow"), "w") as fh:
+        fh.write(s["B"] + "\n")
+    try:
+        case("неполная история (122-b11, git fetch --depth) — не переносится", "N1", "M1",
+             [opus(s["P"]), tests(s["N1"])], False, "неполная история")
+    finally:
+        os.remove(os.path.join(p, ".git", "shallow"))
+    git(p, "replace", s["out"], s["N1"])
+    try:
+        case("git replace (117-b): head с правкой кода не переносит", "out", "M1", [opus(s["P"]), tests(s["out"])],
+             False, "нет «принять»")
+    finally:
+        git(p, "replace", "-d", s["out"])
+    # сбой git (122-a11-1): patch-id не отвечает — ни переноса, ни снятия «вернуть»
+    wrap = h.j("gitwrap")
+    os.makedirs(wrap, exist_ok=True)
+    with open(os.path.join(wrap, "git"), "w") as fh:
+        fh.write(f'#!/bin/sh\ncase "$*" in *patch-id*) [ -f "$HOME/git.fail" ] && exit 1;; esac\n'
+                 f'exec {shutil.which("git")} "$@"\n')
+    os.chmod(os.path.join(wrap, "git"), 0o755)
+    env = {"PATH": wrap + os.pathsep + h.j("bin") + os.pathsep + os.environ["PATH"]}
+    fixed = [opus(s["P"], "x"), opus(s["R"], "y", "reject"), opus(s["A"], "z", session="s-z"), tests(s["NA"])]
+    case("«вернуть» на R снято «принять» на исправленном A, A переносится на NA", "NA", "M1", fixed, True,
+         extra_env=env)
+    open(h.j("git.fail"), "w").close()
+    try:
+        case("сбой git patch-id (122-a11-1) — нет переноса, «вернуть» в силе", "NA", "M1", fixed, False,
+             "«вернуть» (reject)", extra_env=env)
+        case("сбой git — прямое «принять» на head проходит", "N1", "M1", [opus(s["N1"]), tests(s["N1"])], True,
+             extra_env=env)
+    finally:
+        os.remove(h.j("git.fail"))
+    # «вернуть» привязано к PR
+    rej = lambda sha, who="y": opus(sha, who, "reject", checklist=None, session="s-y")
+    case("reject на P, «принять» другого argus на Arev (обратное слияние, 122-b9) — в силе", "N1", "M1",
+         [rej(s["P"]), opus(s["Arev"], "x"), tests(s["N1"])], False, "«вернуть» (reject)")
+    case("reject на P, «принять» другого argus на Pv (тот же код, 117-b3-2) — в силе", "N1", "M1",
+         [rej(s["P"]), opus(s["Pv"], "x"), tests(s["N1"])], False, "«вернуть» (reject)")
+    case("reject на A1, «принять» другого argus на A1 и перенос на N1 (122-b) — в силе", "N1", "M1",
+         [opus(s["P"], "x"), rej(s["A1"]), opus(s["A1"], "x"), tests(s["N1"])], False, "«вернуть» (reject)")
+    case("reject на Q, «принять» на QA после переименования в main (117-b3-2) — в силе", "QN", "M2",
+         [opus(s["Q"], "x"), rej(s["Q"]), opus(s["QA"], "x"), tests(s["QN"])], False, "«вернуть» (reject)")
+    case("reject на N1, тот же argus принял старый P (117-b7 K2) — в силе", "N1", "M1",
+         [rej(s["N1"], "x"), opus(s["P"], "x", session="s-y"), tests(s["N1"])], False, "«вернуть» (reject)")
+    case("amend после «вернуть» (122-b10) — в силе", "Nam", "M1",
+         [opus(s["A1"], "x"), rej(s["Ram"]), tests(s["Nam"])], False, "«вернуть» (reject)")
+    case("повтор слияния после reset (122-a10) — в силе", "Nredo", "M1",
+         [opus(s["P"], "x"), rej(s["N1"]), tests(s["Nredo"])], False, "«вернуть» (reject)")
+    case("откат правки после «вернуть» (122-a11-2) — старое «принять» не поднимается", "Nrev", "M1",
+         [opus(s["N1"], "x"), rej(s["Rx"]), tests(s["Nrev"])], False, "«вернуть» (reject)")
+    case("длинная история и reject (122-b-2) — в силе", "Nlong", "M1",
+         [opus(s["P"], "x"), rej(s["P"]), tests(s["Nlong"])], False, "«вернуть» (reject)")
+    got = case("свежее «принять» на N1 после reject на R — проходит (122-b10 зам. 1)", "N1", "M1",
+               [rej(s["P"]), opus(s["N1"], "x"), tests(s["N1"])], True)
+    got = case("отказ «вернуть» называет head и правило снятия", "N1", "M1",
+               [opus(s["P"], "x"), rej(s["Pv"]), tests(s["N1"])], False, f"на {s['Pv'][:12]}")
+    if HAVE_TOML:
+        check("отказ «вернуть» говорит, что оно привязано к PR", "привязано к PR" in got[1], got[1])
+    # переполнение: 12 head с вердиктами, reject на самом старом (117-b2-2)
+    many = [rej(s["R"])] + [opus("%040x" % i, "f%d" % i) for i in range(1, 11)] + [opus(s["A"], "x"), tests(s["NA"])]
+    case("12 head, reject на самом старом, «принять» на исправленном A (117-b2-2) — в силе", "NA", "M1", many, False,
+         "«вернуть» (reject)")
+    # сливающий — рецензент перенесённого «принять»
+    h.reset()
+    kit_pr(h, s["N1"], s["M1"])
+    h.seed(opus(s["P"], "L1", session="s-coord"), tests(s["N1"]))
+    merge_case("сливающий — автор перенесённого «принять» — отказ",
+               h.pre(merge(s["N1"]), role="hephaestus-pantheon", agent_id="L1", pdir=kit), False,
+               "рецензент и сливающий")
+    # журнал переноса не пишется — отказ
+    h.reset()
+    kit_pr(h, s["N1"], s["M1"])
+    h.seed(opus(s["P"]), tests(s["N1"]))
+    os.symlink(h.j("elsewhere.jsonl"), carry_file(h))
+    merge_case("carry.jsonl — симлинк: перенос не записать — отказ", h.pre(merge(s["N1"]), pdir=kit), False,
+               "не записать")
+    check("через симлинк ничего не записано", not os.path.exists(h.j("elsewhere.jsonl")))
+
+
+def t_carry_opus(h):
+    """117-m: в защитах переносится только «принять» на Opus; Sonnet-«принять» не переносится и не мешает."""
+    s = kit_history(h)
+    kit = "projects/agent-kit"
+    tests = rec("tests", "latark/agent-kit", None, s["N1"], "dev-opus")
+    sonnet = dict(CHECKLIST, ran="модель: claude-sonnet-5, тесты")
+    a = opus(s["P"])
+    a["models"] = ["claude-sonnet-5"]
+    for name, recs, allow, why in (
+            ("A: ran Opus, модели транскрипта Sonnet — не переносится", [a, tests], False, "не на Opus"),
+            ("B: ran Sonnet — не переносится", [opus(s["P"], checklist=sonnet), tests], False, "не на Opus"),
+            ("C: Opus — переносится", [opus(s["P"]), tests], True, ""),
+            ("G: Sonnet на P и Opus другого argus на N1 — проходит",
+             [opus(s["P"], checklist=sonnet), opus(s["N1"], "x"), tests], True, ""),
+            ("Sonnet-«принять» после reject того же argus на P не снимает", [opus(s["P"], "y", "reject", checklist=None),
+             opus(s["P"], "y", checklist=sonnet), opus(s["Pv"], "x"), tests], False, "«вернуть» (reject)")):
+        h.reset()
+        kit_pr(h, s["N1"], s["M1"])
+        h.seed(*recs)
+        merge_case(f"защиты, 117-m {name}", h.pre(f"gh pr merge 7 --match-head-commit {s['N1']}", pdir=kit), allow, why)
+
+
+def t_carry_product(h):
+    """117-a2: в продукте проверка talos не переносится — нужна запись talos на новом head."""
+    if not getattr(h, "broker_hist", None):
+        p = h.j("projects/broker")
+        H = Hist(p)
+        H.br("t-base", h.sha["broker"])
+        b = H.put({"app.py": CODE.format(1)}, "B")
+        H.br("t-main", b)
+        m1 = H.put({"other.py": "y = 1\n"}, "main")
+        H.br("t-pr", b)
+        pp = H.put({"app.py": CODE.format(2)}, "PR")
+        n = H.merge(m1)
+        git(p, "checkout", "-q", "main")
+        h.broker_hist = {"M1": m1, "P": pp, "N": n}
+    s = h.broker_hist
+    cmd = f"gh pr merge 5 --match-head-commit {s['N']}"
+    line = "2026-10-15 20:01 · athena-shop · latark/broker#5 ушло: налоги; откат: git revert abc"
+    for name, talos, allow, why in (("talos только на P — отказ", s["P"], False, "нет проверки talos"),
+                                    ("talos на N — проходит, «принять» перенесено", s["N"], True, "")):
+        h.reset()
+        h.ci(GREEN, name="broker", head=s["N"], baseRefOid=s["M1"])
+        h.seed(rec("tests", "latark/broker", None, s["N"], "dev-opus"), rec("accept", "latark/broker", 5, s["P"]),
+               rec("talos", "latark/broker", 5, talos, who="talos", agent_id="t1"))
+        h.alert(line)
+        merge_case(f"продукт (117-a2): {name}", h.pre(cmd, pdir="projects/broker"), allow, why)
+
+
 CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_transcript, t_ci,
-         t_core_touchid]
+         t_core_touchid, t_carry_unit, t_carry_gate, t_carry_opus, t_carry_product]
 
 
 def main():
