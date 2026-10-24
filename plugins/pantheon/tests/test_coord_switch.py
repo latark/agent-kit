@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Переключатель координатора направления (metis-0155, вариант Б): `coordinator = false` в directions.toml —
 направление ведёт Пританей. start/wake координатора не поднимают, `pantheon wake <направление> --task <id>` поднимает
-фоновое окно лида hephaestus-<коротко> с окном координатора, пульт пишет «ведёт Пританей», `pantheon check` сверяет
-поле и открытого координатора, самозапуск такое направление пропускает.
+фоновое окно с именем лида hephaestus-<коротко>, окном и ролью координатора (`--agent domain-coordinator`: guard и шлюз
+слияния судят по agent_type, проба guard ниже), пульт пишет «ведёт Пританей», `pantheon check` сверяет поле и
+открытого координатора, самозапуск такое направление пропускает. coordinator = "false" строкой координатора не
+выключает.
 
 Запуск: python3 -I plugins/pantheon/tests/test_coord_switch.py  (код выхода 0 — все прошли)
 claude подменён скриптом в PATH, как в test_start.py: `claude agents --json --all` отдаёт FAKE_AGENTS, остальные
@@ -14,6 +16,7 @@ import os
 import shutil
 import subprocess
 import sys
+import shlex
 import tempfile
 import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -79,6 +82,38 @@ def board_tests():
           "**Координатор:** ведёт Пританей" in site and "Координатор: ведёт Пританей" in site, site[:400])
     check("пульт: проект с координатором — ссылка на координатора, без «ведёт Пританей»",
           "ведёт Пританей" not in shop and "**Координатор:** [[" in shop, shop[:400])
+
+
+def agent_of(dry_out):
+    """Роль `claude --agent` из строки `--dry-run` (shlex.join argv + « (папка …)»)."""
+    argv = shlex.split(dry_out.strip().splitlines()[-1]) if dry_out.strip() else []
+    return argv[argv.index("--agent") + 1] if "--agent" in argv[:-1] else None
+
+
+def guard_probe(role):
+    """Блокеры argus PR #125: окно лида — главная сессия (agent_id нет) с agent_type из --agent. Настоящий guard на
+    фикстурах test_guard: такая сессия пишет STATUS.md своего направления и проходит шлюз gh pr merge; контроль —
+    agent_type лида (hephaestus-shop) главной сессией: guard отказывает. guard не меняется — только читается и
+    запускается. В копии одного плагина guard рядом нет — пропуск."""
+    gtests = os.path.join(os.path.dirname(ROOT), "guard", "tests")
+    if not os.path.isfile(os.path.join(gtests, "test_guard.py")):
+        print("skip проба guard: guard/tests рядом нет (копия одного плагина)")
+        return
+    sys.path.insert(0, gtests)
+    import test_guard as G  # noqa: E402
+    ghome = os.path.realpath(tempfile.mkdtemp(prefix="coord-guard-"))
+    G.setup(ghome)
+    G.merge_fixtures(ghome)
+    br, st = "projects/shopKeeperApp", os.path.join(ghome, "ai", "pantheon", "directions", "athena-shop", "STATUS.md")
+    penv = {"PANTHEON_ROLE": "domain-coordinator", "PANTHEON_SESSION": "hephaestus-shop"}
+
+    def probe(r):
+        return [G.run(ghome, br, r, "Write", {"file_path": st, "content": "x"}, python=PY311, penv=penv),
+                G.run(ghome, br, r, "Bash", {"command": "gh pr merge 1"}, python=PY311, penv=penv)]
+    got, ctl = probe(role), probe("hephaestus-shop")
+    check(f"guard: главная сессия окна (agent_type {role!r} из --agent) пишет STATUS.md направления и проходит "
+          "шлюз gh pr merge; agent_type лида главной сессией — отказ в обоих (контроль)",
+          got == ["allow", "allow"] and ctl == ["deny", "deny"], {"окно": got, "контроль": ctl})
 
 
 def cli_tests():
@@ -190,8 +225,9 @@ def cli_tests():
           r.returncode == 1 and "pantheon roles build" in r.stderr and not bg(), r.stderr)
 
     r = run("wake", "hermes-site", "--task", "hermes-0001", "--dry-run")
-    check("wake --task --dry-run: печатает запуск лида, claude --bg не звали",
-          r.returncode == 0 and "--agent hephaestus-site --name hephaestus-site" in r.stdout and not bg(), r.stdout)
+    check("wake --task --dry-run: печатает запуск окна hephaestus-site с ролью координатора, claude --bg не звали",
+          r.returncode == 0 and "--agent domain-coordinator --name hephaestus-site" in r.stdout and not bg(), r.stdout)
+    guard_probe(agent_of(r.stdout))
     word()
     r = run("wake", "hermes-site", "--task", "hermes-0001", extra={"PANTHEON_ROLE": "hq"})
     b = bg()
@@ -199,10 +235,10 @@ def cli_tests():
     win = json.load(open(os.path.join(state, "settings", "hermes-site.json")))
     coord_like = dict(win, env=dict(win.get("env") or {}, PANTHEON_ORIGIN="zeus", PANTHEON_SESSION="hephaestus-site",
                                     PANTHEON_ROLE="domain-coordinator"))
-    check("wake --task из hq со словом: claude --bg --agent hephaestus-site --name hephaestus-site --settings окно "
+    check("wake --task из hq со словом: claude --bg --agent domain-coordinator --name hephaestus-site --settings окно "
           "запуска, папка — папка координатора, /goal по поручению с id задачи",
           r.returncode == 0 and len(b) == 1
-          and b[0]["argv"][:6] == ["--bg", "--agent", "hephaestus-site", "--name", "hephaestus-site", "--settings"]
+          and b[0]["argv"][:6] == ["--bg", "--agent", "domain-coordinator", "--name", "hephaestus-site", "--settings"]
           and b[0]["argv"][6] == lrun and b[0]["cwd"] == os.path.join(tmp, "projects", "site")
           and b[0]["argv"][7].startswith("/goal ") and "pantheon task show hermes-0001" in b[0]["argv"][7]
           and "Другие задачи и пункты эпика в эту цель не входят" in b[0]["argv"][7],
@@ -246,7 +282,23 @@ def cli_tests():
     check("check: coordinator = \"false\" строкой — ОШИБКА «нужно true или false», код 1",
           r.returncode == 1 and "ОШИБКА · directions.toml: у направления clio-y coordinator = 'false' — нужно true или "
           "false" in r.stdout, (r.returncode, r.stdout[-600:]))
+    # строка "false" координатора не выключает (hq_led — только булево false): start поднимает координатора, wake --task
+    # отказывает «свой координатор» (выживший мутант argus PR #125: `coordinator in (False, "false")`)
+    os.makedirs(os.path.join(tmp, "projects", "y"), exist_ok=True)
+    os.makedirs(os.path.join(home, "directions", "clio-y", "tasks"), exist_ok=True)
+    rb = run("domains", "build")
+    rs = run("start", "clio-y", "--dry-run")
+    task("clio-0001", "todo", "clio-y")
+    rw = run("wake", "clio-y", "--task", "clio-0001")
+    check("CLI: coordinator = \"false\" строкой — start --dry-run поднимает координатора clio-y, wake --task — "
+          "«свой координатор», claude не звали",
+          rb.returncode == 0 and rs.returncode == 0 and "--agent domain-coordinator --name clio-y" in rs.stdout
+          and "ведёт Пританей" not in rs.stdout + rs.stderr
+          and rw.returncode == 2 and "свой координатор" in rw.stderr and not calls(),
+          (rb.returncode, rb.stderr[-200:], rs.returncode, rs.stdout[-200:], rs.stderr[-200:], rw.returncode, rw.stderr[-200:]))
+    os.remove(os.path.join(home, "directions", "clio-y", "tasks", "clio-0001.md"))
     open(reg_path, "w").write(REG)
+    run("domains", "build")
 
     # самозапуск: отметка владельца у задачи выключенного направления координатора не поднимает
     os.makedirs(os.path.join(state, "owner-log"), exist_ok=True)

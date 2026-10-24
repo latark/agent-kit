@@ -93,8 +93,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         из окна hq — как start --from zeus
   pantheon wake <направление> --task <id> [--dry-run]   направление с coordinator = false в directions.toml ведёт
                                         Пританей (metis-0155): start/wake координатора — отказ (код 2), а это поднимает
-                                        фоновое окно лида hephaestus-<коротко> с окном направления (settings/<направление>.json,
-                                        PANTHEON_ROLE=domain-coordinator) и задачей как целью; задача — открытая этого
+                                        фоновое окно лида hephaestus-<коротко> с окном и ролью координатора (settings/<направление>.json,
+                                        --agent domain-coordinator) и задачей как целью; задача — открытая этого
                                         направления, иначе «нет задачи» (код 2); слово владельца — как у wake hestia
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
                                         сессия уходит из фоновых сессий Claude Code) и вернуть
@@ -3747,9 +3747,7 @@ def start(rest):
 
 
 def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win, need_word=False,
-                   cmd="pantheon start", agent=None):
-    """agent — определение роли для `claude --agent`, если оно не совпадает с ролью окна (окно лида выключенного
-    направления, metis-0155: окно и PANTHEON_ROLE координатора, роль hephaestus-<коротко>)."""
+                   cmd="pantheon start"):
     agents = agents_all()
     if not dry:  # metis-0261 А: слово владельца и замер — до любых действий; список сессий тот же, что ниже
         code, why = start_gate(name, origin, agents, need_word)
@@ -3794,7 +3792,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
         # DONE-02: /goal первым словом поручения — Stop-хук сессии с отдельной проверяющей моделью: координатор не
         # закончит, пока условие не выполнено (проверено вживую 15.10: `claude --bg "/goal …"` включает цель)
         prompt = "/goal " + prompt + " " + (TASK_GOAL if " ".join(rest).strip() else COORDINATOR_GOAL)
-    argv = [claude_bin(), "--bg", "--agent", agent or role, "--name", name, "--settings", run, prompt]
+    argv = [claude_bin(), "--bg", "--agent", role, "--name", name, "--settings", run, prompt]
     if dry:
         print(shlex.join(argv), f"(папка {folder})")
         return 0
@@ -4021,8 +4019,10 @@ def wake_lead(rest):
     """pantheon wake <направление> --task <id> [--dry-run] (metis-0155, вариант Б): направление с coordinator = false
     ведёт Пританей, а задачу направления делает фоновое окно лида кода `hephaestus-<коротко>`. Окно — то же, что у
     координатора: settings/<направление>.json (песочница направления, её собирает sandbox_build — здесь не меняется),
-    папка запуска координатора, PANTHEON_ROLE=domain-coordinator; отличаются имя сессии и определение роли (--agent
-    hephaestus-<коротко>). Новых прав у Пританея нет: PR лид сливает через шлюз, как координатор.
+    папка запуска координатора, PANTHEON_ROLE=domain-coordinator и определение роли `--agent domain-coordinator`;
+    отличаются только имя сессии (hephaestus-<коротко>) и поручение — одна задача. Роль — координатора, а не лида: guard
+    и шлюз слияния судят по agent_type, и главную сессию с agent_type лида они не пускают ни в gh pr merge, ни в STATUS.md
+    направления (ревью argus PR #125, круг 1). Новых прав у Пританея нет: PR окно сливает через шлюз, как координатор.
     Отказ, код 2, claude не зовётся: не направление; у направления свой координатор; задачи нет, она не открыта или
     другого направления. Код 1: нет лида hephaestus в leads, роли ~/.claude/agents/hephaestus-<коротко>.md, окна или
     папки; allow проекта роняет окно; метка «остановлено вами» у лида или направления; технический перезапуск.
@@ -4091,7 +4091,7 @@ def wake_lead(rest):
             print(f"{cmd}: {lead} уже запускается другой командой", file=sys.stderr)
             return 1
         return _start_session(lead, role, folder, window, task, [task], origin, dry, False, win,
-                              need_word=bool(role_env), cmd=cmd, agent=lead)
+                              need_word=bool(role_env), cmd=cmd)
 
 
 def wake(rest):
