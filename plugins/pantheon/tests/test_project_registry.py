@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Поле project — только имя проекта из directions.toml (metis-0323): task new берёт проект направления и не
 принимает чужое имя; pantheon check — ошибка на карточку с чужим project; pantheon task migrate-project — сухой
-прогон ничего не пишет, --write переносит и пишет журнал, повтор пуст.
+прогон ничего не пишет, --write переносит и пишет журнал, не трогая updated, повтор пуст; пустой реестр — без сверки.
 
 Запуск: python3 -I plugins/pantheon/tests/test_project_registry.py  (код выхода 0 — все прошли)
 """
@@ -97,6 +97,11 @@ def main():
     check("направление без project в реестре: project = его имя", proj(home, b) == "plain-dir", proj(home, b))
     c = new(env, "themis-sources", "--project", "legal-watch и expert-corpus")
     check("--project с именем из реестра принят", proj(home, c) == "legal-watch и expert-corpus")
+    gn = new(env, "ghost", "--project", "ghost")
+    check("направление вне реестра: --project со своим именем принят, как в check", proj(home, gn) == "ghost", proj(home, gn))
+    r = run(env, "task", "new", "--direction", "ghost", "--title", "X", "--project", "metis-pantheon")
+    check("направление вне реестра: чужое имя направления — отказ", r.returncode == 1 and "directions.toml" in r.stderr, r.stderr[-200:])
+    os.remove(T.load_tasks(home, T.WORK_TYPES)[gn][0])
     before = snapshot(home)
     for bad in ("agent-kit", "metis-pantheon", "pantheon 0.11.28", "сверка Paperclip 17.10: у них #3207"):
         r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "X", "--project", bad)
@@ -124,6 +129,10 @@ def main():
     for tid, v in ((d, "expert-corpus"), (e, "pantheon 0.11.28"), (g, "themis-sources")):
         assert run(env, "task", "set", tid, f"project={v}").returncode == 0
     ok_card = new(env, "metis-pantheon")
+    # закрытая неделю назад карточка со старым project: перенос не должен вернуть её на доску
+    week = T0 - 8 * 86400
+    old = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Старая", t=week).stdout.split()[0]
+    assert run(env, "task", "set", old, "status=done", "project=agent-kit", t=week).returncode == 0
     # карточка без направления в реестре: project нельзя определить
     gh = os.path.join(home, "directions", "ghost", "tasks", "ghost-0001.md")
     open(gh, "w", encoding="utf-8").write(
@@ -143,7 +152,15 @@ def main():
     check("сухой прогон: направление вне реестра — «не определить», код 1",
           "ghost-0001" in r.stdout and "не определить" in r.stdout and r.returncode == 1, (r.returncode, r.stdout[-200:]))
     check("сухой прогон ничего не пишет", snapshot(home) == before)
+    upd = {i: h.get("updated") for i, (_, h, _) in T.load_tasks(home, T.WORK_TYPES).items()}
     r = run(env, "task", "migrate-project", "--write", t=T0 + 100)
+    heads = {i: h for i, (_, h, _) in T.load_tasks(home, T.WORK_TYPES).items()}
+    check("--write не меняет updated перенесённых карточек: перенос — не движение работы",
+          all(heads[i].get("updated") == upd[i] for i in [*want, old]) and heads[old]["project"] == "Пантеон",
+          {i: (upd[i], heads[i].get("updated")) for i in [*want, old] if heads[i].get("updated") != upd[i]})
+    check("--write: закрытая неделю назад карточка не вернулась на доску (_live)",
+          heads[old]["status"] == "done" and not T._live(heads[old], T0 + 100), heads[old].get("updated"))
+    want[old] = "Пантеон"
     pr = {i: proj(home, i) for i in want}
     check("--write: проекты перенесены (имя направления, папка, мусор → проект направления)", pr == want, pr)
     body = open(T.load_tasks(home, T.WORK_TYPES)[e][0], encoding="utf-8").read()
@@ -163,6 +180,14 @@ def main():
     os.remove(os.path.join(home, "directions.toml"))
     r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Без реестра", "--project", "что угодно")
     check("реестра нет: project не сверяется", r.returncode == 0, r.stderr[-200:])
+    for text in ("", "direction = []\n"):
+        open(os.path.join(home, "directions.toml"), "w", encoding="utf-8").write(text)
+        r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Пустой реестр", "--project", "что угодно")
+        check(f"пустой реестр {text.strip() or '(файл пуст)'}: task new с --project проходит без сверки",
+              r.returncode == 0 and proj(home, r.stdout.split()[0]) == "что угодно", r.stderr[-200:])
+        r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Пустой реестр")
+        check(f"пустой реестр {text.strip() or '(файл пуст)'}: без --project — имя направления",
+              r.returncode == 0 and proj(home, r.stdout.split()[0]) == "metis-pantheon", r.stderr[-200:])
     shutil.rmtree(tmp, True)
 
 

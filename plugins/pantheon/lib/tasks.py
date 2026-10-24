@@ -662,7 +662,9 @@ def dir_lock(d, wait=10.0):
             os.close(fd)
 
 
-def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None):
+def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None, keep_updated=False):
+    """keep_updated — служебная правка, не движение работы (migrate-project): прежнее updated остаётся, иначе
+    доска, «Готово за сутки» и тревога «застряла» приняли бы её за работу (metis-0323)."""
     tasks = load_tasks(pantheon, WORK_TYPES)
     if tid not in tasks:
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
@@ -672,7 +674,7 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
     if par and tasks.get(par, ("", {}))[1].get("type") == "story" and not (changes.get("mode") or tasks[tid][1].get("mode")):
         raise ValueError(f"{tid}: {NO_MODE_BATCH}")
     with dir_lock(os.path.dirname(tasks[tid][0])):
-        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck)
+        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck, keep_updated)
 
 
 def task_note(pantheon, t, tid, note):
@@ -704,7 +706,7 @@ def task_claim(pantheon, t, tid, by, hours=1.0):
                     note=f"взял {by} до {until[11:16]}", precheck=precheck)
 
 
-def _task_set_locked(path, t, tid, changes, note, actor, precheck):
+def _task_set_locked(path, t, tid, changes, note, actor, precheck, keep_updated=False):
     head, body = read(path)  # заново, уже под блокировкой: чужая правка между чтением и записью не потеряется
     if not head or head.get("id") != tid:
         raise ValueError(f"задача {tid} изменилась — повторите")
@@ -733,7 +735,8 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck):
         head["question_at"] = now_iso(t)
     if changes.get("batch") and not head.get("mode"):
         raise ValueError(NO_MODE_BATCH)
-    head["updated"] = now_iso(t)
+    if not (keep_updated and head.get("updated")):
+        head["updated"] = now_iso(t)
     errs, _ = check_head(head)
     if errs:
         raise ValueError("; ".join(errs))
@@ -3057,11 +3060,12 @@ def direction_project(dirs, direction):
 
 
 def resolve_project(pantheon, direction, project):
-    """project новой задачи: пусто → проект направления; чужое имя → ошибка. Реестра нет — как раньше."""
+    """project новой задачи: пусто → проект направления; чужое имя → ошибка, но направление вне реестра может
+    назвать своё имя — как project_ok в check. Реестра нет или он пуст — как раньше."""
     dirs = load_directions(pantheon)
     if dirs is None:
         return project or direction
-    if project and project not in known_projects(dirs):
+    if project and not project_ok({"project": project, "direction": direction}, dirs, known_projects(dirs)):
         raise ValueError(f"project «{project[:60]}» — не проект из directions.toml (есть: "
                          f"{', '.join(sorted(known_projects(dirs)))}); без --project берётся проект направления")
     return project or direction_project(dirs, direction) or direction
@@ -3098,7 +3102,8 @@ def project_aliases(dirs):
 
 def migrate_projects(pantheon, t, dirs, dry_run=True, actor="агент"):
     """Карточки с project не из реестра → проект по прежнему имени (направление, папка), иначе проект направления
-    карточки. Запись — task_set со строкой в журнал. Повтор ничего не меняет. → (строки «id: было → станет», сбои)."""
+    карточки. Запись — task_set со строкой в журнал и прежним updated: перенос не движение работы, старые закрытые
+    карточки не возвращаются на доску и в «Готово за сутки». Повтор ничего не меняет. → (строки «id: было → станет», сбои)."""
     tasks = load_tasks(pantheon, WORK_TYPES)
     known, alias = known_projects(dirs), project_aliases(dirs)
     lines, failed = [], 0
@@ -3115,7 +3120,7 @@ def migrate_projects(pantheon, t, dirs, dry_run=True, actor="агент"):
         if not dry_run:
             try:
                 task_set(pantheon, t, tid, {"project": new}, note=f"project «{old}» → «{new}» (по directions.toml)",
-                         actor=actor)
+                         actor=actor, keep_updated=True)
             except ValueError as e:
                 lines.append(f"  не записано: {e}")
                 failed += 1
