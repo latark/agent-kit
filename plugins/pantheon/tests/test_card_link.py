@@ -30,7 +30,9 @@ P = importlib.util.module_from_spec(_spec)
 sys.modules["pantheon_cardlink_test"] = P
 _spec.loader.exec_module(P)
 N = P.night_mod()
-VIEW = os.path.join(_ROOT, "home", "ai", "pantheon-view")
+# копия вида — вне HOME и в папке с пробелом: путь, зашитый от HOME, тест ловит (review-130, замечание 2)
+VIEW = os.path.join(_ROOT, "вид с пробелом", "pantheon-view")
+assert not VIEW.startswith(os.environ["HOME"] + os.sep)
 P.VIEW = VIEW
 T = P.tasks_mod()
 
