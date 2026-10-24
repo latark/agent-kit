@@ -18,6 +18,13 @@
   policy.toml — расширение привилегий (новые записи в [private], [coordinators], [sandbox_write], [agent_extra], always);
   везде — похожее на ключ (Anthropic, GitHub, AWS, Google, Slack, Hugging Face, приватный ключ).
 
+Слитый выпуск (metis-0209, вариант А; решено владельцем 23.10): файл, побайтно равный файлу plugins/pantheon или
+plugins/guard из коммита, который слил владелец (SHA из STATE/logs/merge.jsonl с событием merged или из
+STATE/owner-log/merge-approve.log — Touch ID), и этот коммит лежит в origin/main клона agent-kit
+(~/.claude/plugins/marketplaces/agent-kit), проходит без флагов и без карточки; имя файла должно совпасть с именем
+файла выпуска. Не слит, чужая ветка, отличие в байт, другое имя, удаление, ключ в тексте — флаги как раньше.
+Пути — только от HOME; переменных окружения проверка не читает.
+
 Запуск:  config-check.py --repo ~/.claude --staged [--explain]     правки в индексе против HEAD
          config-check.py --repo ~/.claude --range A B [--explain]   правки между коммитами A и B
 Вывод — JSON {"flags": [{"file", "kind", "reason"}], "files": {...}, "card": {...}}; код 0. С --explain для каждого
@@ -26,6 +33,7 @@
 текст карточки для доски с советом. Сбой самой проверки — код 3 (вызывающий держит всё).
 """
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -95,6 +103,89 @@ def show(repo, rev, path):
     """Содержимое файла в ревизии (rev '' — индекс); None — файла нет."""
     r = subprocess.run(["git", "-C", repo, "show", f"{rev}:{path}"], capture_output=True)
     return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
+
+
+def show_bytes(repo, rev, path):
+    r = subprocess.run(["git", "-C", repo, "show", f"{rev}:{path}"], capture_output=True)
+    return r.stdout if r.returncode == 0 else None
+
+
+def blob_id(data):
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+RELEASE_DIRS = ("plugins/pantheon", "plugins/guard")
+RELEASE_MAX = 300  # сколько последних слитых коммитов сверять
+_RELEASE = None
+
+
+def _home():
+    return os.path.expanduser("~")
+
+
+def owner_merged_shas():
+    """SHA коммитов, которые слил владелец: merge.jsonl (merged) и merge-approve.log (Touch ID), новые первыми."""
+    state = os.path.join(_home(), ".local", "state", "pantheon")
+    found = []
+    try:
+        for line in open(os.path.join(state, "logs", "merge.jsonl"), encoding="utf-8").read().splitlines():
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(d, dict) and d.get("event") == "merged" and isinstance(d.get("sha"), str) \
+                    and str(d.get("repo", "")).lower().endswith("/agent-kit"):
+                found.append(d["sha"])
+    except (OSError, UnicodeDecodeError):
+        pass
+    try:
+        for line in open(os.path.join(state, "owner-log", "merge-approve.log"), encoding="utf-8").read().splitlines():
+            m = re.match(r"^\S+(?: \S+)? merge-approve (\S+)#\d+ ([0-9a-f]{40})$", line.strip())
+            if m and m.group(1).lower().endswith("/agent-kit"):
+                found.append(m.group(2))
+    except (OSError, UnicodeDecodeError):
+        pass
+    out = []
+    for sha in reversed(found):
+        if re.fullmatch(r"[0-9a-f]{40}", sha) and sha not in out:
+            out.append(sha)
+    return out[:RELEASE_MAX]
+
+
+def release_blobs():
+    """{(blob, имя файла)} файлов выпуска pantheon/guard из слитых владельцем коммитов, лежащих в main agent-kit."""
+    global _RELEASE
+    if _RELEASE is not None:
+        return _RELEASE
+    _RELEASE = set()
+    clone = os.path.join(_home(), ".claude", "plugins", "marketplaces", "agent-kit")
+    shas = owner_merged_shas()
+    if not shas or not os.path.isdir(clone):
+        return _RELEASE
+    main = None
+    for ref in ("origin/main", "main"):
+        if subprocess.run(["git", "-C", clone, "rev-parse", "-q", "--verify", ref + "^{commit}"],
+                          capture_output=True).returncode == 0:
+            main = ref
+            break
+    if main is None:
+        return _RELEASE
+    for sha in shas:
+        if subprocess.run(["git", "-C", clone, "merge-base", "--is-ancestor", sha, main], capture_output=True).returncode:
+            continue  # не в main (чужая ветка) или коммита нет в клоне
+        r = subprocess.run(["git", "-C", clone, "ls-tree", "-r", "-z", sha, "--", *RELEASE_DIRS], capture_output=True)
+        if r.returncode:
+            continue
+        for ent in r.stdout.decode("utf-8", "replace").split("\0"):
+            meta, _, name = ent.partition("\t")
+            f = meta.split()
+            if len(f) == 3 and f[1] == "blob":
+                _RELEASE.add((f[2], os.path.basename(name)))
+    return _RELEASE
+
+
+def is_released(path, data):
+    return data is not None and (blob_id(data), os.path.basename(path)) in release_blobs()
 
 
 def changed(repo, staged, a=None, b=None):
@@ -448,7 +539,11 @@ def main(argv):
     for status, path in files:
         old = show(repo, old_rev, path) if status != "A" else None
         new = show(repo, new_rev, path) if status != "D" else None
-        flags += check_file(path, old, new)
+        got = check_file(path, old, new)
+        # слитый выпуск: побайтно равный файл — без флагов, кроме ключа (metis-0209)
+        if got and status != "D" and is_released(path, show_bytes(repo, new_rev, path)):
+            got = [f for f in got if f["kind"] == "secret"]
+        flags += got
     out = {"flags": flags}
     if "--explain" in argv and flags:
         stats = numstat(repo, "--range" not in argv, *( [old_rev, new_rev] if "--range" in argv else []))

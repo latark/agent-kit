@@ -278,7 +278,11 @@
 - `plugins/pantheon/scripts/decision-map-check.py` — сверка карты решений с `revisits.toml`.
 - `plugins/pantheon/scripts/baseline.py` — замер «как сейчас» по git и транскриптам (ORD-06); правила подсчёта — в шапке.
 - `plugins/pantheon/scripts/config-check.py` — проверка правок `~/.claude` для `sync.sh`: код и подозрительное — в
-  карантин с объяснением на доске, остальное уходит само (SEC-15).
+  карантин с объяснением на доске, остальное уходит само (SEC-15). Исключение (metis-0209): файл, побайтно равный
+  файлу `plugins/pantheon` или `plugins/guard` из коммита, который слил владелец (SHA в `logs/merge.jsonl` с событием
+  `merged` или в `owner-log/merge-approve.log`) и который лежит в main клона agent-kit
+  (`~/.claude/plugins/marketplaces/agent-kit`), проходит без карточки; имя файла должно совпасть, ключ в тексте флаг
+  сохраняет. Слитое иначе, чем через Touch ID `pantheon merge`, этот путь не видит — там карточка как раньше.
 - `plugins/guard/managed-settings.json` — управляемые настройки (SEC-28), ставятся через `sudo` (README guard).
 - `plugins/project-tools/stacks.json` — карта стеков (признак → что подключить); `plugins/project-tools/lib/project_tools.py`
   — команда `project-tools`. Пишет только записи из карты; в окнах ролей запись в `.mcp.json` и `.claude/settings*.json`

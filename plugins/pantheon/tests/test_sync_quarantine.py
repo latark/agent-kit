@@ -310,5 +310,96 @@ check("владелец держания неизвестен (.sync-incoming б
       ran and f"ответ по {e.task} применён" not in r.stdout and card_question(e, e.task) not in (None, "нет файла")
       and ".sync-incoming без task=" in r.stdout, r.stdout + r.stderr)
 
+# --- слитый выпуск проходит карантин без карточки (metis-0209, вариант А) -------------------------------------------
+# config-check.py решает, что идёт в карантин: файл, побайтно равный файлу plugins/pantheon|guard из коммита, который
+# слил владелец (merge.jsonl / merge-approve.log) и который лежит в main клона agent-kit, флагов не получает.
+CHECK = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "config-check.py")
+HOOK = "#!/usr/bin/env python3\nprint('guard hook')\n"
+GIT_ENV = {"PATH": os.environ["PATH"], "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+
+
+def run_git(d, *a):
+    r = subprocess.run(["git", "-C", d, *a], env=GIT_ENV, capture_output=True, text=True)
+    assert r.returncode == 0, (a, r.stderr)
+    return r.stdout.strip()
+
+
+class Rel:
+    """Временный HOME: клон agent-kit (main с выпуском), журналы владельца, репозиторий ~/.claude с правкой в индексе."""
+    n = 0
+
+    def __init__(self, log="merge.jsonl", on_main=True, merged=True, name="hooks/gate.py", content=HOOK):
+        Rel.n += 1
+        self.home = os.path.join(ROOT, f"r{Rel.n}")
+        clone = os.path.join(self.home, ".claude", "plugins", "marketplaces", "agent-kit")
+        self.cfg = os.path.join(self.home, ".claude")
+        os.makedirs(os.path.join(clone, "plugins", "guard", "hooks"))
+        run_git(clone, "init", "-q", "-b", "main")
+        run_git(clone, "commit", "-q", "--allow-empty", "-m", "root")
+        if not on_main:
+            run_git(clone, "checkout", "-q", "-b", "feature")
+        with open(os.path.join(clone, "plugins", "guard", "hooks", "gate.py"), "w") as fh:
+            fh.write(HOOK)
+        run_git(clone, "add", "-A")
+        run_git(clone, "commit", "-q", "-m", "release")
+        self.sha = run_git(clone, "rev-parse", "HEAD")
+        if not on_main:
+            run_git(clone, "checkout", "-q", "main")
+        run_git(self.cfg, "init", "-q")
+        with open(os.path.join(self.cfg, "keep.txt"), "w") as fh:
+            fh.write("x\n")
+        run_git(self.cfg, "add", "keep.txt")
+        run_git(self.cfg, "commit", "-q", "-m", "init")
+        state = os.path.join(self.home, ".local", "state", "pantheon")
+        os.makedirs(os.path.join(state, "logs"))
+        os.makedirs(os.path.join(state, "owner-log"))
+        if merged and log == "merge.jsonl":
+            with open(os.path.join(state, "logs", "merge.jsonl"), "w") as fh:
+                fh.write(json.dumps({"repo": "latark/agent-kit", "pr": 7, "sha": self.sha, "event": "merged"}) + "\n")
+        elif merged:
+            with open(os.path.join(state, "owner-log", "merge-approve.log"), "w") as fh:
+                fh.write(f"2026-10-23T17:00:00+03:00 merge-approve latark/agent-kit#7 {self.sha}\n")
+        os.makedirs(os.path.dirname(os.path.join(self.cfg, name)), exist_ok=True)
+        with open(os.path.join(self.cfg, name), "w", newline="") as fh:
+            fh.write(content)
+        run_git(self.cfg, "add", name)
+
+    def flags(self, script=CHECK):
+        env = {"PATH": os.environ["PATH"], "HOME": self.home}
+        r = subprocess.run([sys.executable, "-I", script, "--repo", self.cfg, "--staged"], env=env,
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stdout + r.stderr
+        return json.loads(r.stdout)["flags"]
+
+
+r_ok = Rel()
+check("слитый выпуск: файл равен выпуску из merge.jsonl — без флагов", r_ok.flags() == [], r_ok.flags())
+r_ap = Rel(log="approve")
+check("слитый выпуск: слияние записано в merge-approve.log — без флагов", r_ap.flags() == [], r_ap.flags())
+r_diff = Rel(content=HOOK + " ")
+check("слитый выпуск: отличается на байт — флаги как раньше", r_diff.flags() != [], r_diff.flags())
+r_nm = Rel(merged=False)
+check("слитый выпуск: коммит не слит владельцем — флаги", r_nm.flags() != [], r_nm.flags())
+r_br = Rel(on_main=False)
+check("слитый выпуск: коммит из чужой ветки, не из main — флаги", r_br.flags() != [], r_br.flags())
+r_name = Rel(name="hooks/other.py")
+check("слитый выпуск: то же содержимое под другим именем — флаги", r_name.flags() != [], r_name.flags())
+r_del = Rel()
+run_git(r_del.cfg, "commit", "-q", "-m", "add")
+os.remove(os.path.join(r_del.cfg, "hooks", "gate.py"))
+run_git(r_del.cfg, "add", "-A")
+check("слитый выпуск: удаление файла — флаги", r_del.flags() != [], r_del.flags())
+# мутант «всегда пропускать»: сценарии «отличается на байт» и «не слит» проходят без флагов — значит, тесты выше
+# на мутанте красные (их условие `!= []` не выполняется)
+mut = os.path.join(ROOT, "config-check-mutant.py")
+src = open(CHECK, encoding="utf-8").read()
+assert "def is_released(path, data):\n" in src
+with open(mut, "w", encoding="utf-8") as fh:
+    fh.write(src.replace("def is_released(path, data):\n", "def is_released(path, data):\n    return True\n"))
+check("мутант «всегда пропускать»: правка в байт проходит без флагов (тест на неё красный)", r_diff.flags(mut) == [],
+      r_diff.flags(mut))
+check("мутант «всегда пропускать»: не слитый коммит проходит без флагов (тест красный)", r_nm.flags(mut) == [])
+
 print(f"\n{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)
