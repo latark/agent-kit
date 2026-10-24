@@ -364,8 +364,7 @@ def blocked_why(a):
 def relay_block(t):
     """Почему «ждёт вас» сейчас нельзя передавать Зевсу, или None. Передача — ход Зевса, то есть расход модели, поэтому
     те же запреты, что у автоматического подъёма (wake_block): техперезапуск (SCHED-15), пауза планировщика, пятичасовой
-    лимит, недельный (night.gate("respawn")) и потолок владельца на день ([limits.owner_cap], как у wake и autostart:
-    gate его для respawn не смотрит)."""
+    лимит, недельный и недельный потолок владельца — оба в night.gate("respawn") ([limits.owner_cap], metis-0403)."""
     if os.environ.get("PANTHEON_DRYRUN") == "1" or dry():
         return "пробный запуск"
     if P.maintenance_active():
@@ -375,15 +374,9 @@ def relay_block(t):
     pct, lim = P.limit_pct(), threshold("limit_max_pct", 70)
     if pct is not None and pct >= lim:
         return f"пятичасовой лимит {pct:.0f} % ≥ {lim:g} %"
-    N = P.night_mod()
-    ok, why = N.gate("respawn", t)
+    ok, why = P.night_mod().gate("respawn", t)
     if not ok:
         return f"недельный лимит: {why}"
-    cap = N.owner_cap(t)
-    if cap:
-        m = N.measure(t)
-        if m.get("known") and m.get("used") is not None and m["used"] >= cap[0]:
-            return f"потолок владельца {cap[0]:g} %"
     return None
 
 
