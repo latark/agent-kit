@@ -2093,6 +2093,38 @@ def t_carry_chain(h):
                h.pre(f"gh pr merge 7 --match-head-commit {s['N']}", pdir=cwd), False, "«вернуть» (reject)")
 
 
+def t_carry_opus(h):
+    """metis-0384 × metis-0176 (argus-117m): перенесённый с прошлого head «принять» проходит сверку модели так же, как
+    на своём head, — по ran и по полю models из транскрипта argus. Сверка не сужается до записей на самом head."""
+    kit, cwd = h.j("projects/agent-kit"), "projects/agent-kit"
+    s = carry_history(kit)
+
+    def acc(sha, ran, models=None, aid="argus1"):
+        r = rec("accept", "latark/agent-kit", 7, sha, agent_id=aid, checklist=dict(CHECKLIST, ran=ran))
+        if models is not None:
+            r["models"] = models
+        return r
+
+    opus, sonnet = "модель: claude-opus-5-5, тесты", "модель: claude-sonnet-5, тесты"
+    cases = [
+        ("A: «принять» с P, ran Opus, models Sonnet — отказ «не на Opus»",
+         [acc(s["P"], opus, ["claude-sonnet-5"])], False, "не на Opus"),
+        ("B: «принять» с P, ran Sonnet, поля models нет — отказ «не на Opus»", [acc(s["P"], sonnet)], False,
+         "не на Opus"),
+        ("C: «принять» с P, ran Opus, models Opus — проходит", [acc(s["P"], opus, ["claude-opus-5-5"])], True, ""),
+        ("G: Sonnet-«принять» с P и Opus-«принять» другого argus на новом head — проходит",
+         [acc(s["P"], opus, ["claude-sonnet-5"]), rec("tests", "latark/agent-kit", None, s["merged_ver"], "dev-opus"),
+          acc(s["merged_ver"], opus, ["claude-opus-5-5"], aid="argus2")], True, ""),
+    ]
+    for name, recs, allow, why in cases:
+        h.reset()
+        h.view["agent-kit"]["baseRefOid"] = s["M"]
+        h.seed(rec("tests", "latark/agent-kit", None, s["P"], "dev-opus"), *recs)
+        h.gh(pr_paths(kit, s["merged_ver"], s["M"]) or ["README.md"], head=s["merged_ver"])
+        merge_case(f"перенос × модель {name}", h.pre(f"gh pr merge 7 --match-head-commit {s['merged_ver']}", pdir=cwd),
+                   allow, why)
+
+
 def t_version_repo(h):
     """metis-0384, решение владельца 24.10 п.1: номер версии сверяется по репозиторию PR (gh api), а не по git папки
     сливающего (argus-117a3 №1–2)."""
@@ -2152,7 +2184,8 @@ CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, 
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_transcript, t_ci,
-         t_core_touchid, t_carry_unit, t_carry_gate, t_carry_product, t_carry_chain, t_version_repo]
+         t_core_touchid, t_carry_unit, t_carry_gate, t_carry_product, t_carry_chain, t_carry_opus,
+         t_version_repo]
 
 
 def main():

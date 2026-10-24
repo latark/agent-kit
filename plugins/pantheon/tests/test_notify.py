@@ -69,7 +69,7 @@ def board(w, t, idle=0):
 
 
 def question(w, title, t, due=None, recommend=None):
-    args = ["task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", title, "--status", "waiting", "--waiting-on",
+    args = ["task", "new", "--direction", "metis-pantheon", "--title", title, "--status", "waiting", "--waiting-on",
             "human", "--next", "ответ", "--question", f"{title}?", "--option", "А — первый вариант, дешевле",
             "--option", "Б — второй вариант, дороже", "--project", "Пантеон"]
     if due:
@@ -365,7 +365,7 @@ def faults_case():
 def conflict_case():
     """Конфликт карточки («Перенос не применён») — без пинга, в сводку."""
     w = make()
-    r = run(w, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", "Конфликт", "--project", "Пантеон",
+    r = run(w, "task", "new", "--direction", "metis-pantheon", "--title", "Конфликт", "--project", "Пантеон",
             "--next", "шаг", t=at(20, 12))
     tid = r.stdout.split()[0]
     board(w, at(20, 12, 1), idle=1200)
@@ -424,7 +424,7 @@ def review_case():
           not a and any(x["id"] == q for x in st["queue"]) and len(b) == 1 and "Срочно" in b[0][1] and b[0][3] == q)
     # 2. вы сами перенесли карточку в «Нужен ответ» — пингов нет; это не ответ
     w = make()
-    r = run(w, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", "Сам спрошу", "--project", "Пантеон",
+    r = run(w, "task", "new", "--direction", "metis-pantheon", "--title", "Сам спрошу", "--project", "Пантеон",
             "--next", "шаг", t=at(20, 12))
     tid = r.stdout.split()[0]
     board(w, at(20, 12, 1), idle=0)
@@ -461,7 +461,7 @@ def review_case():
     # 4. ready — по времени срока: дата-время того же дня раньше даты без времени
     w = make()
     for title, due in (("Срок днём", "2026-10-21"), ("Срок утром", "2026-10-21T09:00")):
-        run(w, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", title, "--project", "Пантеон", "--due", due,
+        run(w, "task", "new", "--direction", "metis-pantheon", "--title", title, "--project", "Пантеон", "--due", due,
             t=at(20, 12))
     r = run(w, "task", "ready", t=at(20, 12))
     order = [l.split("\t")[-1] for l in r.stdout.splitlines() if "\t" in l]

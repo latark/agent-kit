@@ -233,7 +233,7 @@ def warn_checks():
         def run(*a):
             return subprocess.run([PY311, "-I", CLI, *a], env=env, capture_output=True, text=True, timeout=60)
 
-        r = run("task", "new", "--text", "тест", "--direction", "demo", "--title", "Выбор", "--option", "А ()", "--option", "Б ≈ )")
+        r = run("task", "new", "--direction", "demo", "--title", "Выбор", "--option", "А ()", "--option", "Б ≈ )")
         check("task new с «()» и «≈ )»: создана, предупреждение в stderr",
               r.returncode == 0 and r.stderr.count("предупреждение") == 2, r.stderr)
         tid = r.stdout.split()[0]

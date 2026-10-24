@@ -158,7 +158,7 @@ def with_card(held=".sync-held", applies=True):
     os.makedirs(os.path.join(e.pan, "directions", "metis-pantheon", "tasks"))
     env = {"PATH": os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pan, "PANTHEON_STATE": e.state,
            "PANTHEON_NOW": str(T0), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": ROOT}
-    r = subprocess.run([PY311, "-I", LIB, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--project", "Пантеон",
+    r = subprocess.run([PY311, "-I", LIB, "task", "new", "--direction", "metis-pantheon", "--project", "Пантеон",
                         "--title", "Правки ~/.claude", "--status", "waiting", "--waiting-on", "human", "--priority", "1",
                         "--next", "выбрать", "--question", "Отправить правки?", "--option", "Отправить",
                         "--option", "Пока держать"], env=env, capture_output=True, text=True, timeout=60)
@@ -192,7 +192,7 @@ check("карточка: ответ галочкой на доске — воп�
 # два держания: «Отправить» по .sync-held снимает вопрос, «Пока держать» по .sync-incoming — нет
 e = with_card()
 first = e.task
-r2 = subprocess.run([PY311, "-I", LIB, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--project", "Пантеон",
+r2 = subprocess.run([PY311, "-I", LIB, "task", "new", "--direction", "metis-pantheon", "--project", "Пантеон",
                      "--title", "Чужие правки", "--status", "waiting", "--waiting-on", "human", "--priority", "1",
                      "--next", "выбрать", "--question", "Откатить?", "--option", "Пока держать"],
                     env={"PATH": os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pan, "PANTHEON_STATE": e.state,
@@ -238,7 +238,7 @@ def mixed(after):
     a = e.task
     env = {"PATH": os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pan, "PANTHEON_STATE": e.state,
            "PANTHEON_NOW": str(T0), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": ROOT}
-    r2 = subprocess.run([PY311, "-I", LIB, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--project", "Пантеон",
+    r2 = subprocess.run([PY311, "-I", LIB, "task", "new", "--direction", "metis-pantheon", "--project", "Пантеон",
                          "--title", "Чужие правки", "--status", "waiting", "--waiting-on", "human", "--priority", "1",
                          "--next", "выбрать", "--question", "Откатить?", "--option", "Откатить правку"],
                         env=env, capture_output=True, text=True, timeout=60)
