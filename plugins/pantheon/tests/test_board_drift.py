@@ -84,6 +84,9 @@ check("1а. только предупреждение: код выхода check
 e.set_status(t, "review")
 check("1а. задача в review: расхождения нет", e.drift()[1] == [], e.drift()[1])
 
+e.set_status(t, "done")
+check("1а. PR открыт, задача done: сообщение", len(e.drift()[1]) == 1, e.drift()[1])
+
 # 1б. PR слит, а задача doing
 e = Env("pr-merged")
 t = e.task("Правка слита", "--status", "doing")
@@ -108,6 +111,10 @@ check("2. ответ в журнале, задача waiting: сообщение
 with open(os.path.join(e.state, "owner-log", "zeus.md"), "w", encoding="utf-8") as fh:
     fh.write(f"## 2999-01-01 10:00:00 · окно вопросов\nвопрос: [{t}-other] Брать?\nответ: А — да\n")
 check("2. ответ на чужой вопрос — не ответ", e.drift()[1] == [], e.drift()[1])
+
+with open(os.path.join(e.state, "owner-log", "zeus.md"), "w", encoding="utf-8") as fh:
+    fh.write(f"## 2000-01-01 10:00:00 · окно вопросов\nвопрос: [{t}] Брать?\nответ: А — да\n")
+check("2. ответ старше вопроса (до создания задачи) — не ответ", e.drift()[1] == [], e.drift()[1])
 
 # 3. записка обработана (есть задача с тем же заголовком), а лежит во «Входящих»
 e = Env("inbox")
