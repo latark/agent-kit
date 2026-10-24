@@ -2684,6 +2684,83 @@ def _sync_help(board, state, alert):
         alert("board-help", type(e).__name__, f"доска: справку по видам не записать ({e})", "board")
 
 
+BOOKMARKS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "share",
+                              "pantheon-view-obsidian", "bookmarks.json")
+
+
+def _bookmark_files(items):
+    """Все закладки-файлы дерева (группы вложены)."""
+    out = []
+    for it in items:
+        if isinstance(it, dict) and it.get("type") == "group" and isinstance(it.get("items"), list):
+            out += _bookmark_files(it["items"])
+        elif isinstance(it, dict) and it.get("type") == "file":
+            out.append(it)
+    return out
+
+
+def _sync_bookmarks(vault, state, alert, src=None):
+    """.obsidian/bookmarks.json хранилища (metis-0324): набор закладок по умолчанию (share/…/bookmarks.json — он же образец
+    для view-sync.sh) — часть вида. Как Доска.base: недостающие свои добавляет, закладки владельца и их порядок не трогает;
+    свою, удалённую владельцем, не возвращает — в состоянии «bookmarks_seen» пути, уже выданные или найденные у владельца.
+    Битый JSON — файл не тронут, одна тревога, состояние не меняется (поправит — тик продолжит). Запись атомарная.
+    Нет .obsidian — не трогаем (образец положит view-sync.sh). Новый вид или справка — строка в образце, в том же PR."""
+    if not os.path.isdir(os.path.join(vault, ".obsidian")):
+        return
+    try:
+        with open(BOOKMARKS_PATH if src is None else src, encoding="utf-8") as fh:
+            wanted = json.load(fh)["items"]
+        if not isinstance(wanted, list):
+            return
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    p = os.path.join(vault, ".obsidian", "bookmarks.json")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            raw = fh.read()
+    except FileNotFoundError:
+        raw = None
+    except (OSError, UnicodeDecodeError) as e:
+        alert("board-bookmarks", "unreadable", f"доска: {p} не читается ({e}) — закладки не обновлены", "board")
+        return
+    data = {"items": []}
+    if raw is not None:
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict) or not isinstance(data.setdefault("items", []), list):
+                raise ValueError("нет списка items")
+        except ValueError as e:
+            alert("board-bookmarks", _sha(raw), f"доска: {p} — битый JSON ({e}); закладки не обновлены, файл не тронут",
+                  "board")
+            return
+    seen = state.get("bookmarks_seen")
+    seen = set(seen) if isinstance(seen, list) else set()
+    have = {it.get("path") for it in _bookmark_files(data["items"])}
+    changed = False
+    for grp in wanted:
+        if not isinstance(grp, dict) or not isinstance(grp.get("items"), list):
+            continue
+        add = [dict(f) for f in grp["items"] if f.get("path") not in have and f.get("path") not in seen]
+        if not add:
+            continue
+        mine = next((g for g in data["items"] if isinstance(g, dict) and g.get("type") == "group"
+                     and g.get("title") == grp.get("title") and isinstance(g.get("items"), list)), None)
+        if mine is None:
+            mine = {k: v for k, v in grp.items() if k != "items"}
+            mine["items"] = []
+            data["items"].append(mine)
+        mine["items"] += add
+        changed = True
+    try:
+        if changed:
+            _write_plain(p, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    except OSError as e:
+        alert("board-bookmarks", type(e).__name__, f"доска: {p} не записать ({e}) — закладки не обновлены", "board")
+        return
+    state["bookmarks_seen"] = sorted(seen | {f.get("path") for g in wanted if isinstance(g, dict)
+                                             for f in g.get("items", []) if f.get("path")})
+
+
 def _sync_types(vault, alert):
     """.obsidian/types.json хранилища: типы свойств карточек. Свои ключи ставит, чужие не трогает, пишет только при
     изменении; битый JSON — не трогает, одна тревога."""
@@ -3012,6 +3089,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     _sync_base(board, state, state_path, t, alert, "Пульт.base", PULT_FILE, PULT_VERSION, "pult", ())
     _sync_projects(board, state, tasks, t, registry, roles, alert)
     _sync_types(os.path.dirname(os.path.abspath(board)), alert)
+    _sync_bookmarks(os.path.dirname(os.path.abspath(board)), state, alert)
     _sync_snippet(os.path.dirname(os.path.abspath(board)), state, state_path, t, alert)
     new_state = json.dumps(state, ensure_ascii=False, indent=1)
     try:
