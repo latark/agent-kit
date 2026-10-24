@@ -1,5 +1,7 @@
 Защищённые пути — их не трогает Codex, и argus проверяет их в каждом PR: `.claude/`, `.codex/`, `agents/`,
 `policy.toml`, `settings*.json`, `.mcp.json`, `AGENTS.md`, `CLAUDE.md`, `.github/workflows/`, `.pantheon-verify`,
-`.claude-plugin/`, `plugins/guard/`, `plugins/*/hooks/`, `plugins/pantheon/roles/` и правила autoMode и permissions окон —
-`plugins/pantheon/lib/window_rules.py` и их сборка в `plugins/pantheon/lib/pantheon.py`. Незакоммиченное смотри `git status --porcelain --ignored`: обычный вид
-игнорируемых файлов (`.claude/settings.local.json`) не покажет.
+`.claude-plugin/`, `plugins/guard/`, `plugins/*/hooks/`, `plugins/pantheon/roles/`, шлюз слияния владельца
+`plugins/pantheon/lib/merge.py`, правила autoMode и permissions окон `plugins/pantheon/lib/window_rules.py` и
+песочница окон — `sandbox_build` в `plugins/pantheon/lib/pantheon.py` и всё, что он записывает (правила окон,
+excludedCommands, denyWrite и другие поля sandbox). Незакоммиченное смотри `git status --porcelain --ignored`: обычный
+вид игнорируемых файлов (`.claude/settings.local.json`) не покажет.
