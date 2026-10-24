@@ -1475,12 +1475,16 @@ def autostart(agents, registry, doms, t, dry=False):
         tasks = {}
     since = sanction_since(t, preview=dry)
     marked = owner_marked(since)
-    want = {}
+    want, off, hq = {}, P.hq_led(), {}
     for tid in marked:  # порядок отметок владельца
         h = (tasks.get(tid) or (None, {}, None))[1]
         d = h.get("direction")
         if h.get("status") in ("todo", "doing") and d in doms:
-            want.setdefault(d, []).append(tid)
+            # metis-0155: координатора у направления, которое ведёт Пританей, нет — самозапуск его не поднимает
+            (hq if d in off else want).setdefault(d, []).append(tid)
+    for d, v in sorted(hq.items()):
+        say(f"{d}: ведёт Пританей (coordinator = false) — самозапуск не поднимает, задачи {', '.join(v)}: "
+            f"pantheon wake {d} --task <id>")
     say(f"решения владельца учитываются с {P.stamp(since)}; задачи с ними: "
         + ("; ".join(f"{d}: {', '.join(v)}" for d, v in sorted(want.items())) or "нет"))
     running = [d for d in doms if holders(d, agents, registry) or d in ONESHOT_STARTED]
