@@ -1264,7 +1264,7 @@ def project_health(c):
 def project_registry(dirs):
     """Записи [[direction]] реестра → {проект: {directions, mark, rank, goal, budget, status, coordinator, hq_led}}.
     Проект — поле project, иначе имя направления; ранг — поле rank, иначе порядок в реестре. hq_led — у направления
-    координатора проекта `coordinator = false` (metis-0155): его ведёт штаб."""
+    координатора проекта `coordinator = false` (metis-0155): его ведёт Пританей."""
     out = {}
     for n, d in enumerate(dirs or [], 1):
         if not isinstance(d, dict) or not isinstance(d.get("name"), str) or not d["name"] or d["name"] == "inbox":
@@ -1278,7 +1278,7 @@ def project_registry(dirs):
     return out
 
 
-HQ_LED = "ведёт штаб"  # метка проекта на пульте, когда у направления coordinator = false (metis-0155)
+HQ_LED = "ведёт Пританей"  # метка проекта на пульте, когда у направления coordinator = false (metis-0155)
 
 
 def project_note_name(p):
@@ -1293,7 +1293,7 @@ def render_project_note(p, reg, tasks, t, roles=None):
     upd = max((str(h.get("updated") or "")[:10] for _, h, _ in tasks.values() if h.get("direction") in reg["directions"]),
               default=None)
     node = (roles or Roles(reg["directions"])).name(reg["coordinator"])
-    # metis-0155: координатор выключен — направление ведёт штаб, метка вместо ссылки на сессию координатора
+    # metis-0155: координатор выключен — направление ведёт Пританей, метка вместо ссылки на сессию координатора
     coord = HQ_LED if reg.get("hq_led") else link(node)
     mark = project_mark(p, {p: reg.get("mark")} if reg.get("mark") else None)
     budget = reg.get("budget")

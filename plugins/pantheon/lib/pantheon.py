@@ -49,7 +49,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…] [--quiet]      проверить шапки задач по схеме v1 (schema.md) и правила metis-0308: задача пачки без mode,
                                         закрытая по слиянию без release/actual, review больше суток без PR, нет приёмки; done
-                                        без closed — исправляет сам (closed из updated)
+                                        без closed — исправляет сам (closed из updated); directions.toml: coordinator не
+                                        true/false — ошибка, у выключенного направления открыт координатор или нет лида —
+                                        предупреждение (с --quiet — тревога об открытом координаторе)
   pantheon autoclose fetch              сетевой проход (задача расписания): gh про слитые и открытые PR из [merge_repos] →
                                         кэш; лёгкий плановый проход по кэшу закрывает задачи, чей номер в ветке или после «Closes» в теле PR
   pantheon task new --direction D --title T [--type task|story --status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ]
@@ -89,6 +91,11 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         роли — только по слову владельца в окне Зевса за 15 мин, иначе код 2;
                                         из окна роли, кроме hq, со словом в красной зоне — код 5 «отложено» (повторите сами);
                                         из окна hq — как start --from zeus
+  pantheon wake <направление> --task <id> [--dry-run]   направление с coordinator = false в directions.toml ведёт
+                                        Пританей (metis-0155): start/wake координатора — отказ (код 2), а это поднимает
+                                        фоновое окно лида hephaestus-<коротко> с окном направления (settings/<направление>.json,
+                                        PANTHEON_ROLE=domain-coordinator) и задачей как целью; задача — открытая этого
+                                        направления, иначе «нет задачи» (код 2); слово владельца — как у wake hestia
   pantheon stop <имя>|--all, resume <имя>|--all   остановить (метка «остановлено вами», claude stop и claude rm —
                                         сессия уходит из фоновых сессий Claude Code) и вернуть
   pantheon pause <имя>|--all --reason limit|swap|manual ["почему"], pause --off [<имя>|--all]   пауза по нагрузке
@@ -3525,7 +3532,7 @@ def launch_folder(folders):
 
 
 def hq_led(reg=None):
-    """metis-0155 (Б): направления, которые ведёт штаб, — `coordinator = false` в записи directions.toml. → {имя:
+    """metis-0155 (Б): направления, которые ведёт Пританей, — `coordinator = false` в записи directions.toml. → {имя:
     запись реестра}. По умолчанию координатор включён; выключает только булево false — другое значение `pantheon check`
     считает ошибкой, а запуск — включённым координатором. Реестр не читается — пусто (координаторы как раньше)."""
     if reg is None:
@@ -3539,7 +3546,7 @@ def hq_led(reg=None):
 
 
 def hq_led_why(target):
-    return (f"направление {target} ведёт штаб (coordinator = false в directions.toml) — координатора не поднимаю; "
+    return (f"направление {target} ведёт Пританей (coordinator = false в directions.toml) — координатора не поднимаю; "
             f"задачу направления — pantheon wake {target} --task <id> (окно лида)")
 
 
@@ -3554,7 +3561,7 @@ def lead_session(target, entry):
 
 def start_target(target, rest):
     """→ (имя сессии, роль, папка запуска, файл окна, поручение по умолчанию) или текст ошибки. Направление, которое
-    ведёт штаб (coordinator = false, metis-0155), — текст ошибки: координатора у него нет."""
+    ведёт Пританей (coordinator = false, metis-0155), — текст ошибки: координатора у него нет."""
     domains = read_json(path("domains.json"), {}).get("domains") or {}
     if target in domains and target in hq_led():
         return hq_led_why(target)
@@ -4012,10 +4019,10 @@ def wake_hestia(rest):
 
 def wake_lead(rest):
     """pantheon wake <направление> --task <id> [--dry-run] (metis-0155, вариант Б): направление с coordinator = false
-    ведёт штаб, а задачу направления делает фоновое окно лида кода `hephaestus-<коротко>`. Окно — то же, что у
+    ведёт Пританей, а задачу направления делает фоновое окно лида кода `hephaestus-<коротко>`. Окно — то же, что у
     координатора: settings/<направление>.json (песочница направления, её собирает sandbox_build — здесь не меняется),
     папка запуска координатора, PANTHEON_ROLE=domain-coordinator; отличаются имя сессии и определение роли (--agent
-    hephaestus-<коротко>). Новых прав у штаба нет: PR лид сливает через шлюз, как координатор.
+    hephaestus-<коротко>). Новых прав у Пританея нет: PR лид сливает через шлюз, как координатор.
     Отказ, код 2, claude не зовётся: не направление; у направления свой координатор; задачи нет, она не открыта или
     другого направления. Код 1: нет лида hephaestus в leads, роли ~/.claude/agents/hephaestus-<коротко>.md, окна или
     папки; allow проекта роняет окно; метка «остановлено вами» у лида или направления; технический перезапуск.
@@ -4075,10 +4082,10 @@ def wake_lead(rest):
         return 1
     role_env = os.environ.get("PANTHEON_ROLE") or ""
     origin = "zeus" if role_env == "hq" else "tick" if role_env else "owner"
-    task = (f"Задача {tid} направления {target}. Координатора у направления нет — его ведёт штаб, ты работаешь в окне "
+    task = (f"Задача {tid} направления {target}. Координатора у направления нет — его ведёт Пританей, ты работаешь в окне "
             f"направления вместо координатора. Прочитай карточку (pantheon task show {tid}) и сделай ровно её: план, "
             "работа dev-*, ревью argus, PR и слияние через шлюз — как обычно. Отчёт — по формату роли разделом "
-            f"«{tid}» в ~/ai/pantheon/directions/{target}/STATUS.md (его читает штаб) и последним сообщением.")
+            f"«{tid}» в ~/ai/pantheon/directions/{target}/STATUS.md (его читает Пританей) и последним сообщением.")
     with lock("start-" + lead, block=False) as got:
         if not got:
             print(f"{cmd}: {lead} уже запускается другой командой", file=sys.stderr)
@@ -4117,7 +4124,7 @@ def _wake(dry):
         print("pantheon wake: claude agents --json не ответил", file=sys.stderr)
         return 1
     domains = read_json(path("domains.json"), {}).get("domains") or {}
-    off = hq_led()  # metis-0155: координатора направления, которое ведёт штаб, не поднимаем (pantheon check предупредит)
+    off = hq_led()  # metis-0155: координатора направления, которое ведёт Пританей, не поднимаем (pantheon check предупредит)
     done = failed = 0
     for a in agents:
         name, state = a.get("name") or "", a.get("state")
@@ -6664,7 +6671,7 @@ def _check_long_state(quiet):
 def check_coordinators(quiet):
     """metis-0155: переключатель координатора в directions.toml. Ошибка — coordinator не булево (запуск считает такого
     координатора включённым). Предупреждения: у выключенного направления нет лида hephaestus (wake --task его не
-    поднимет) или открыт координатор (его сессия с именем направления жива — штаб и координатор вели бы его вдвоём).
+    поднимет) или открыт координатор (его сессия с именем направления жива — Пританей и координатор вели бы его вдвоём).
     Тик (--quiet): открытый координатор — одна тревога на набор. → число ошибок."""
     try:
         with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
@@ -6679,7 +6686,7 @@ def check_coordinators(quiet):
     off = hq_led(reg)
     for name, e in sorted(off.items()):
         if not lead_session(name, e):
-            warns.append(f"directions.toml: {name} ведёт штаб, но лида кода нет (leads = ['hephaestus']) — "
+            warns.append(f"directions.toml: {name} ведёт Пританей, но лида кода нет (leads = ['hephaestus']) — "
                          f"pantheon wake {name} --task <id> окно не поднимет")
     agents = None
     if off:
@@ -6691,7 +6698,7 @@ def check_coordinators(quiet):
             ids = ", ".join(str(a.get("id") or a.get("name")) for a in live)
             live_off.append(name)
             warns.append(f"у направления {name} coordinator = false, а его координатор открыт ({ids}) — направление "
-                         f"ведёт штаб: остановить координатора — pantheon stop {name}")
+                         f"ведёт Пританей: остановить координатора — pantheon stop {name}")
     for e in errs:
         print(f"ОШИБКА · {e}")
     if not quiet:
@@ -6699,7 +6706,7 @@ def check_coordinators(quiet):
             print(f"предупреждение · {w}")
     else:
         if live_off:
-            alert_once("check-coord-off", ",".join(live_off), f"координатор открыт у направления, которое ведёт штаб: "
+            alert_once("check-coord-off", ",".join(live_off), f"координатор открыт у направления, которое ведёт Пританей: "
                        f"{', '.join(live_off)} — pantheon stop <направление>", "check")
         else:
             clear_once("check-coord-off")

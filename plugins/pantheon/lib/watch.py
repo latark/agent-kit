@@ -1480,10 +1480,10 @@ def autostart(agents, registry, doms, t, dry=False):
         h = (tasks.get(tid) or (None, {}, None))[1]
         d = h.get("direction")
         if h.get("status") in ("todo", "doing") and d in doms:
-            # metis-0155: координатора у направления, которое ведёт штаб, нет — самозапуск его не поднимает
+            # metis-0155: координатора у направления, которое ведёт Пританей, нет — самозапуск его не поднимает
             (hq if d in off else want).setdefault(d, []).append(tid)
     for d, v in sorted(hq.items()):
-        say(f"{d}: ведёт штаб (coordinator = false) — самозапуск не поднимает, задачи {', '.join(v)}: "
+        say(f"{d}: ведёт Пританей (coordinator = false) — самозапуск не поднимает, задачи {', '.join(v)}: "
             f"pantheon wake {d} --task <id>")
     say(f"решения владельца учитываются с {P.stamp(since)}; задачи с ними: "
         + ("; ".join(f"{d}: {', '.join(v)}" for d, v in sorted(want.items())) or "нет"))

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Переключатель координатора направления (metis-0155, вариант Б): `coordinator = false` в directions.toml —
-направление ведёт штаб. start/wake координатора не поднимают, `pantheon wake <направление> --task <id>` поднимает
-фоновое окно лида hephaestus-<коротко> с окном координатора, пульт пишет «ведёт штаб», `pantheon check` сверяет
+направление ведёт Пританей. start/wake координатора не поднимают, `pantheon wake <направление> --task <id>` поднимает
+фоновое окно лида hephaestus-<коротко> с окном координатора, пульт пишет «ведёт Пританей», `pantheon check` сверяет
 поле и открытого координатора, самозапуск такое направление пропускает.
 
 Запуск: python3 -I plugins/pantheon/tests/test_coord_switch.py  (код выхода 0 — все прошли)
@@ -65,7 +65,7 @@ def check(name, cond, detail=""):
 
 
 def board_tests():
-    """Пульт: проект направления с coordinator = false — «ведёт штаб» вместо ссылки на координатора."""
+    """Пульт: проект направления с coordinator = false — «ведёт Пританей» вместо ссылки на координатора."""
     reg = T.project_registry([{"name": "athena-shop", "project": "Shop"},
                               {"name": "hermes-site", "project": "Site", "coordinator": False},
                               {"name": "iris-x", "coordinator": "false"}])
@@ -75,10 +75,10 @@ def board_tests():
     t = time.time()
     site = T.render_project_note("Site", reg["Site"], {}, t)
     shop = T.render_project_note("Shop", reg["Shop"], {}, t)
-    check("пульт: заметка проекта, который ведёт штаб, — «Координатор: ведёт штаб» в шапке и в тексте",
-          "**Координатор:** ведёт штаб" in site and "Координатор: ведёт штаб" in site, site[:400])
-    check("пульт: проект с координатором — ссылка на координатора, без «ведёт штаб»",
-          "ведёт штаб" not in shop and "**Координатор:** [[" in shop, shop[:400])
+    check("пульт: заметка проекта, который ведёт Пританей, — «Координатор: ведёт Пританей» в шапке и в тексте",
+          "**Координатор:** ведёт Пританей" in site and "Координатор: ведёт Пританей" in site, site[:400])
+    check("пульт: проект с координатором — ссылка на координатора, без «ведёт Пританей»",
+          "ведёт Пританей" not in shop and "**Координатор:** [[" in shop, shop[:400])
 
 
 def cli_tests():
@@ -142,8 +142,8 @@ def cli_tests():
     # start и wake координатора выключенного направления — отказ, claude не зовётся
     rs = [run("start", "hermes-site"), run("start", "hermes-site", "--dry-run"), run("start", "hermes-site", "--at", "23:59"),
           run("wake", "hermes-site")]
-    check("start, start --dry-run, start --at и wake выключенного направления — код 2 «ведёт штаб», claude не звали",
-          all(x.returncode == 2 and "ведёт штаб" in x.stderr and "--task" in x.stderr for x in rs) and not calls()
+    check("start, start --dry-run, start --at и wake выключенного направления — код 2 «ведёт Пританей», claude не звали",
+          all(x.returncode == 2 and "ведёт Пританей" in x.stderr and "--task" in x.stderr for x in rs) and not calls()
           and not os.path.exists(os.path.join(state, "settings", "run", "hermes-site.json"))
           and not os.path.exists(os.path.join(state, "oneshot.json")), [(x.returncode, x.stderr[-200:]) for x in rs])
     r = run("start", "athena-shop", "--dry-run")
@@ -220,7 +220,7 @@ def cli_tests():
                                               "sessionId": "5a1a1a1a-0001", "cwd": tmp, "startedAt": 1}]))
     open(log, "w").close()
     r = run("wake")
-    check("pantheon wake: упавший координатор направления, которое ведёт штаб, с открытой задачей — не поднят",
+    check("pantheon wake: упавший координатор направления, которое ведёт Пританей, с открытой задачей — не поднят",
           r.returncode == 0 and "будить некого" in r.stdout and not calls(), r.stdout + r.stderr)
 
     # pantheon check: открытый координатор выключенного направления, нет лида, coordinator не булево
@@ -230,13 +230,13 @@ def cli_tests():
           "предупреждение · у направления hermes-site coordinator = false, а его координатор открыт (c2)" in r.stdout
           and "pantheon stop hermes-site" in r.stdout, r.stdout[-800:])
     check("check: у выключенного направления нет лида hephaestus — предупреждение; ошибки нет, код 0",
-          "предупреждение · directions.toml: iris-x ведёт штаб, но лида кода нет" in r.stdout and "ОШИБКА" not in r.stdout
+          "предупреждение · directions.toml: iris-x ведёт Пританей, но лида кода нет" in r.stdout and "ОШИБКА" not in r.stdout
           and r.returncode == 0, (r.returncode, r.stdout[-800:]))
     alerts = os.path.join(home, "alerts.md")
     r = run("check", "--quiet")
     al = open(alerts).read() if os.path.exists(alerts) else ""
-    check("check --quiet: открытый координатор — тревога «координатор открыт у направления, которое ведёт штаб»",
-          "координатор открыт у направления, которое ведёт штаб: hermes-site" in al and "предупреждение" not in r.stdout,
+    check("check --quiet: открытый координатор — тревога «координатор открыт у направления, которое ведёт Пританей»",
+          "координатор открыт у направления, которое ведёт Пританей: hermes-site" in al and "предупреждение" not in r.stdout,
           al[-400:])
     open(agents_file, "w").write("[]")
     r = run("check")
@@ -261,9 +261,9 @@ def cli_tests():
              "w.autostart([], [], {'athena-shop': ['~/projects/br'], 'hermes-site': ['~/projects/site']}, time.time(),"
              " dry=True)\n") % (LIB_DIR, os.path.join(LIB_DIR, "watch.py"))
     r = subprocess.run([PY311, "-I", "-c", probe], env=env, capture_output=True, text=True, timeout=120)
-    check("самозапуск --dry-run: направление, которое ведёт штаб, пропущено строкой «самозапуск не поднимает»; "
+    check("самозапуск --dry-run: направление, которое ведёт Пританей, пропущено строкой «самозапуск не поднимает»; "
           "направление с координатором рассматривается",
-          "hermes-site: ведёт штаб (coordinator = false) — самозапуск не поднимает, задачи hermes-0001" in r.stdout
+          "hermes-site: ведёт Пританей (coordinator = false) — самозапуск не поднимает, задачи hermes-0001" in r.stdout
           and "hermes-site: ждёт" not in r.stdout and "hermes-site: поднял бы" not in r.stdout
           and "athena-shop:" in r.stdout, (r.returncode, r.stdout[-600:], r.stderr[-400:]))
 
