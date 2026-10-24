@@ -1096,14 +1096,6 @@ def story_info(sid, tasks):
             "total": sum(1 for i in ids if heads[i].get("type") != "story")}
 
 
-def story_mode_warnings(tasks):
-    """Незакрытые задачи пачки без mode — для pantheon check: режим ставит тот, кто собирает пачку (metis-0322)."""
-    return [f"{tid}: задача пачки {h.get('parent')} без mode — «Режим» в составе пачки пуст"
-            for tid, (_, h, _) in sorted(tasks.items())
-            if h.get("type") == "task" and not h.get("mode") and h.get("status") not in ("done", "dropped")
-            and h.get("parent") in tasks and tasks[h["parent"]][1].get("type") == "story"]
-
-
 def over_budget(inf):
     return inf["budget"] is not None and inf["sum"] > inf["budget"] + 1e-9
 

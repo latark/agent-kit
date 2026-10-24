@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Карточка пачки в Obsidian (metis-0322): «Цепочка», «Параллельно», «Пересечения» и «Зависит от» — щёлкаемые ссылки
 [[имя карточки|id]], «Области не указаны» — «у N из M», «Режим» и «Ждёт» в «Составе» не пустые («ничего»), пачка пачек
-считает и детей-пачки, задача пачки без mode попадает в предупреждения check.
+считает и детей-пачки.
 
 Запуск: python3 -I plugins/pantheon/tests/test_story_links.py  (код выхода 0 — все прошли)
 """
@@ -92,11 +92,6 @@ check("задача: «Пересечения» — ссылка [[имя|id]]",
 tasks["t-2"][1]["depends_on"] = ["t-1"]
 ctx = T.card_ctx("t-2", tasks["t-2"][1], tasks, names, cross)
 check("задача: «Зависит от» с карточкой — ссылка", ctx["waits"] == [L("t-1")], ctx["waits"])
-
-# check: задача пачки без mode
-w = T.story_mode_warnings(tasks)
-check("check: задача открытой пачки без mode — предупреждение, закрытая и с mode — нет",
-      len(w) == 1 and "t-6" in w[0], w)
 
 print(f"{sum(results)} из {len(results)}")
 sys.exit(0 if all(results) else 1)
