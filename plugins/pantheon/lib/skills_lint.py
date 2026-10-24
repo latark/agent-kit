@@ -104,7 +104,13 @@ def skill_files(dirs):
 def lint_dirs(dirs):
     """[(путь, ошибки, предупреждения)] по всем навыкам каталогов."""
     res = []
-    for f in skill_files(dirs):
-        e, w = lint_file(f)
-        res.append((f, e, w))
+    for d in dirs:
+        try:
+            files = skill_files([d])
+        except OSError as e:  # нечитаемая папка навыков — ошибка, а не трассировка
+            res.append((d, [f"папка навыков не читается: {e.strerror or type(e).__name__}"], []))
+            continue
+        for f in files:
+            e, w = lint_file(f)
+            res.append((f, e, w))
     return res

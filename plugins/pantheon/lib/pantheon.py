@@ -6576,11 +6576,12 @@ def check(paths=None, quiet=False):
     if skill_paths:  # pantheon check путь/SKILL.md — только линтер навыков
         paths = [p for p in paths if p not in skill_paths]
         n_sk, sk_bad = check_skills(skill_paths, quiet)
+        if not quiet or sk_bad:
+            print(f"навыков: {n_sk}, с ошибками: {len(sk_bad)}")
         if not paths:
-            if not quiet or sk_bad:
-                print(f"навыков: {n_sk}, с ошибками: {len(sk_bad)}")
             return 1 if sk_bad else 0
     files = paths or list(T.task_files(PANTHEON))
+    skill_arg_bad = sk_bad if skill_paths else []  # ошибки навыков из аргументов входят в код выхода
     bad, noheader, n = [], 0, 0
     for f in files:
         kind, errs, warns = T.check_file(f)
@@ -6673,7 +6674,7 @@ def check(paths=None, quiet=False):
         else:
             clear_once("check-fields")
         return 0
-    return 1 if bad or drift or view_drift or field_errs or skill_bad else 0
+    return 1 if bad or drift or view_drift or field_errs or skill_bad or skill_arg_bad else 0
 
 
 def task_cmd(rest):

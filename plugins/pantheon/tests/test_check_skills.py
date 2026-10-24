@@ -126,6 +126,57 @@ def main():
     r = run(clean, os.path.join(clean, "good-one", "SKILL.md"))
     check("check путь/SKILL.md хорошего навыка — код 0", r.returncode == 0 and "с ошибками: 0" in r.stdout)
 
+    task_md = os.path.join(_ROOT, "plain-task.md")
+    write(task_md, "# обычный файл без шапки\n")
+    r = run(clean, task_md, f("dead-link"))
+    check("check задача.md + плохой SKILL.md: код 1, строка «навыков: 1, с ошибками: 1»",
+          r.returncode == 1 and "навыков: 1, с ошибками: 1" in r.stdout and "несуществующий файл" in r.stdout)
+
+    # тревога планового прохода: код 0, сигнал владельцу — одна строка в alerts.md (alert_once / clear_once)
+    one = os.path.join(_ROOT, "one")
+    bad_text = "---\nname: other\ndescription: x\n---\n\nтекст\n"
+    write(os.path.join(one, "broken", "SKILL.md"), bad_text)
+    alerts = os.path.join(home, "alerts.md")
+    if os.path.exists(alerts):  # прежние прогоны выше уже ставили метку и писали тревоги — начинаем с чистого
+        os.remove(alerts)
+    _shutil.rmtree(os.path.join(state, "once"), ignore_errors=True)
+
+    def n_alerts():
+        if not os.path.exists(alerts):
+            return 0
+        return len([ln for ln in open(alerts, encoding="utf-8").read().splitlines() if "навыки с битой шапкой" in ln])
+
+    r = run(one, "--quiet")
+    check("тик: плохой навык — код 0 и ровно одна тревога в alerts.md, с именем навыка",
+          r.returncode == 0 and n_alerts() == 1 and "broken" in open(alerts, encoding="utf-8").read())
+    r = run(one, "--quiet")
+    check("тик: повтор того же состояния — тревога не дублируется", r.returncode == 0 and n_alerts() == 1)
+    write(os.path.join(one, "broken", "ref.md"), "ref\n")
+    write(os.path.join(one, "broken", "SKILL.md"), GOOD.replace("good-one", "broken"))
+    r = run(one, "--quiet")
+    check("тик: навык исправлен — тишина, новых строк нет", r.returncode == 0 and r.stdout.strip() == "" and n_alerts() == 1)
+    write(os.path.join(one, "broken", "SKILL.md"), bad_text)
+    r = run(one, "--quiet")
+    check("тик: после исправления метка снята — новая поломка даёт вторую тревогу", n_alerts() == 2)
+
+    # нечитаемая папка навыков — ошибка в строке, а не трассировка
+    locked = os.path.join(_ROOT, "locked")
+    os.makedirs(locked)
+    os.chmod(locked, 0)
+    try:
+        if os.access(locked, os.R_OK):  # root читает всё
+            print("skip нечитаемая папка: процесс читает любые папки")
+        else:
+            rows = L.lint_dirs([locked])
+            check("lint_dirs: нечитаемая папка — строка с ошибкой, без исключения",
+                  len(rows) == 1 and rows[0][0] == locked and "не читается" in rows[0][1][0])
+            r = run(locked)
+            check("check: нечитаемая папка навыков — код 1, ОШИБКА без Traceback",
+                  r.returncode == 1 and "ОШИБКА · навык" in r.stdout and "не читается" in r.stdout
+                  and "Traceback" not in r.stderr)
+    finally:
+        os.chmod(locked, 0o700)
+
     print(f"\n{sum(results)}/{len(results)} прошли")
     return 0 if all(results) else 1
 
