@@ -169,11 +169,14 @@ class Box:
         with open(os.path.join(self.rec, name), "w") as fh:
             fh.write(str(value))
 
-    def add(self, kind, sha=SHA, pr=PR, who="argus", sid="s1", aid="a1", ran="модель: claude-opus-5-5, тесты"):
+    def add(self, kind, sha=SHA, pr=PR, who="argus", sid="s1", aid="a1", ran="модель: claude-opus-5-5, тесты",
+            models=None):
         rec = {"v": 1, "kind": kind, "repo": [REPO], "pr": None if kind == "tests" else pr, "sha": sha,
                "by": {"agent_type": who, "agent_id": aid, "session_id": sid}}
         if kind in ("accept", "reject"):
             rec["checklist"] = {"opened": "diff", "ran": ran, "unchecked": "ничего"}
+        if models is not None:   # модели транскрипта argus, как их пишет хук guard (metis-0176)
+            rec["models"] = models
         self.records.append(rec)
         d = os.path.join(self.state, "merge-gate")
         os.makedirs(d, exist_ok=True)
@@ -344,6 +347,24 @@ def test_request_refusals():
     b.add("accept", sid="s2", aid="a2", ran="модель: claude-sonnet-4-6, тесты")
     r = b.request()
     check("заявка: «принять» не на Opus не засчитан → отказ", r.returncode != 0 and b.req() is None, r.stderr)
+    # metis-0176: модель — из транскрипта argus (поле models от хука guard), а не только со слов ran
+    for name, models, ok in (
+            ("модели транскрипта Opus и та же, что в ran (и с датой) → засчитан",
+             ["claude-opus-5-5-20261001"], True),
+            ("модели нет в записи (транскрипта не было) → по ran, засчитан", None, True),
+            ("по транскрипту Sonnet, в ran Opus → не засчитан", ["claude-sonnet-4-6"], False),
+            ("по транскрипту Opus и Sonnet → не засчитан", ["claude-opus-5-5", "claude-sonnet-4-6"], False),
+            ("по транскрипту другой Opus, чем в ran → не засчитан", ["claude-opus-4-1"], False),
+            ("пустой список моделей → не засчитан", [], False),
+            ("модели не списком → не засчитан", {"claude-opus-5-5": 1}, False)):
+        b = Box()
+        b.records = []
+        b.add("tests")
+        b.add("accept", sid="s1", aid="a1")
+        b.add("accept", sid="s2", aid="a2", models=models)
+        r = b.request()
+        check("заявка: " + name, (r.returncode == 0 and b.req() is not None) if ok
+              else (r.returncode != 0 and b.req() is None and "1 из 2" in r.stderr), r.stderr)
     b = Box()
     b.records = []
     b.add("tests")
