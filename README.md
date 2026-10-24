@@ -292,6 +292,8 @@
   возвращает, не больше трёх раз; очередь `heavy` — не возврат (DONE-02).
 - `plugins/pantheon/scripts/git-crypt-merge.sh` — слияние файлов под git-crypt как текста (для `~/ai/pantheon` и `me/`).
 - `plugins/pantheon/scripts/decision-map-check.py` — сверка карты решений с `revisits.toml`.
+- `plugins/pantheon/scripts/release.py` — выпуск при слиянии: подтянуть main и поднять `version` тронутых плагинов
+  одним коммитом; PR номер версии не трогают (metis-0384, AGENTS.md «Выпуск»).
 - `plugins/pantheon/scripts/baseline.py` — замер «как сейчас» по git и транскриптам (ORD-06); правила подсчёта — в шапке.
 - `plugins/pantheon/scripts/config-check.py` — проверка правок `~/.claude` для `sync.sh`: код и подозрительное — в
   карантин с объяснением на доске, остальное уходит само (SEC-15). Исключение (metis-0209): файл, побайтно равный
@@ -323,6 +325,7 @@
     python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры
     python3 -I plugins/pantheon/tests/test_tick.py    # планировщик: сон, пробуждение, питание, простой, лимит, главный Mac
     python3 -I plugins/pantheon/tests/test_plugins_update.py   # обновления agent-kit плановым проходом: тесты, база, метки, коды
+    python3 -I plugins/pantheon/tests/test_release.py    # выпуск: номер версии от main, подтягивание main, конфликты
     python3 -I plugins/pantheon/tests/test_baseline.py   # замер «как сейчас»: задачи по git commit, сообщения, возвраты, цена
     python3 -I plugins/pantheon/tests/test_hooks.py   # хуки контекста и owner-log (и на системном: CTX_TEST_PYTHON=/usr/bin/python3)
     python3 -I plugins/project-tools/tests/test_project_tools.py   # карта стеков, apply, одобрения, Codex, подсказка
