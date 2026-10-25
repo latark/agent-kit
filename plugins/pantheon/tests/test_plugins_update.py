@@ -7,16 +7,13 @@
 файл, на `plugin list --json` отдаёт JSON из файла (после `plugin update` — уже с новой версией), на
 `plugin marketplace update` — код из STUB_MKT_RC. Настоящие `claude plugin …` не запускаются.
 """
-import contextlib
 import fcntl
 import json
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
-import time
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
 import atexit as _atexit
@@ -579,7 +576,7 @@ def fake(cmd, cwd=None, timeout=None, **kw):
     if f == "test_a.py":
         return subprocess.CompletedProcess(cmd, 1, stdout=b"FAIL old\\n")
     return subprocess.CompletedProcess(cmd, 0, stdout="ok\\n1 из 1 прошли\\n".encode())
-P._run_group = fake
+P.subprocess.run = fake
 os.makedirs(P.path("plugins", "tmp"), exist_ok=True)
 log, digest, fresh = P._plugin_check("x", "1.0.0", "1.1.0", sys.argv[2], sys.argv[3], {})[:3]
 print(json.dumps({"seen": seen, "fresh": sorted(k[2] for k in fresh)}))""", e.src, base)
@@ -711,7 +708,7 @@ def fake(cmd, cwd=None, timeout=None, **kw):
         raise subprocess.TimeoutExpired(cmd, timeout, output=b"ok   half\\n")
     clock[0] += sec
     return subprocess.CompletedProcess(cmd, rc, stdout=out.encode())
-P._run_group = fake
+P.subprocess.run = fake
 if len(sys.argv) > 3:  # своп для отсрочки (ревью 133, п.2)
     os.environ["PANTHEON_FAKE_SWAP"] = sys.argv[3]
 rc = P.plugins_update(quiet=True)
@@ -913,7 +910,7 @@ def fake(cmd, cwd=None, timeout=None, **kw):
     f = cmd[-1].split("/")[-1]
     out = sys.argv[3] if f == "test_a.py" else "ok   a\\n1 из 1 прошли\\n"
     return P.subprocess.CompletedProcess(cmd, int(sys.argv[4]) if f == "test_a.py" else 0, stdout=out.encode())
-P._run_group = fake
+P.subprocess.run = fake
 os.makedirs(P.path("plugins", "tmp"), exist_ok=True)
 log, digest, fresh, short = P._plugin_check("x", "0.9.0", "1.0.0", sys.argv[2], None, {})
 print(json.dumps({"digest": digest, "same": digest == P._tree_hash(sys.argv[2]), "short": len(short)}))"""
@@ -940,7 +937,7 @@ def fake(cmd, cwd=None, timeout=None, **kw):
     f = cmd[-1].split("/")[-1]
     out = sys.argv[3] if f == "test_a.py" else "ok   a\\n1 из 1 прошли\\n"
     return P.subprocess.CompletedProcess(cmd, 1 if f == "test_a.py" else 0, stdout=out.encode())
-P._run_group = fake
+P.subprocess.run = fake
 os.makedirs(P.path("plugins", "tmp"), exist_ok=True)
 log, digest, fresh, short = P._plugin_check("x", "0.9.0", "1.0.0", sys.argv[2], None, {})
 print(json.dumps({"digest": digest, "same": digest == P._tree_hash(sys.argv[2]), "short": len(short)}))""",
@@ -1002,72 +999,6 @@ print(json.dumps({"disk": on_disk, "got": [f for f in ("a.py", "b.py", "c.py") i
     lim = g6.get("lim") or [0, 0]
     check("0424: таймаут файла (test_guard на 3.9 — 241 с без нагрузки, 24.10 не успел за 600) — ≥ 1200 с и меньше "
           "срока прогона: первый файл продолжения успевает всегда", 1200 <= lim[0] < lim[1], lim)
-
-    # metis-0424: файл тестов в своей группе процессов — по таймауту и при прерывании гаснет вся группа. Файл порождает
-    # внука со sleep и висит; после таймаута (и после KeyboardInterrupt посреди прогона) внука нет (ProcessLookupError).
-    # До правки subprocess.run убивал только сам файл, внук жил дальше и грузил Mac (утро 25.10).
-    gdir = tempfile.mkdtemp(prefix="group-")
-    pid_t, pid_i = os.path.join(gdir, "pid-timeout"), os.path.join(gdir, "pid-interrupt")
-    hang = ('import subprocess, sys, time\n'
-            'p = subprocess.Popen(["sleep", "60"])\n'
-            'open(sys.argv[1] if len(sys.argv) > 1 else {pf!r}, "w").write(str(p.pid))\n'
-            'time.sleep(60)\n')
-    os.makedirs(os.path.join(gdir, "p", "tests"))
-    with open(os.path.join(gdir, "p", "tests", "test_hang.py"), "w") as fh:
-        fh.write(hang.format(pf=pid_t))
-    with open(os.path.join(gdir, "hang_i.py"), "w") as fh:
-        fh.write(hang.format(pf=pid_i))
-    probe_g = f"""
-import json, os, signal, subprocess, sys, time
-sys.path.insert(0, {os.path.dirname(LIB)!r})
-import pantheon as p
-p.PLUGIN_TEST_TIMEOUT = 5
-gdir = {gdir!r}
-log = open(os.path.join(gdir, "log"), "w")
-t0 = time.monotonic()
-sigs = p._run_plugin_tests(os.path.join(gdir, "p"), [sys.executable], gdir, log, "новая", time.monotonic() + 60)
-sec = time.monotonic() - t0
-def boom(*a):
-    raise KeyboardInterrupt
-signal.signal(signal.SIGALRM, boom)
-signal.alarm(5)
-intr = False
-try:
-    p._run_group([sys.executable, "-I", os.path.join(gdir, "hang_i.py")], timeout=60, stdin=subprocess.DEVNULL,
-                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-except KeyboardInterrupt:
-    intr = True
-print(json.dumps({{"sigs": sorted(k[2] for k in sigs), "sec": round(sec), "intr": intr}}))
-"""
-    r = subprocess.run([PY, "-I", "-c", probe_g], capture_output=True, text=True, timeout=120)
-    try:
-        gg = json.loads(r.stdout.splitlines()[-1])
-    except (ValueError, IndexError):
-        gg = {}
-        print(r.stderr[-1000:])
-
-    def alive(pf):
-        """Внук жив: pid из файла отвечает на сигнал 0. Мёртвого не сразу убирает launchd — ждём до 5 с."""
-        try:
-            pid = int(open(pf).read())
-        except (OSError, ValueError):
-            return None
-        for _ in range(50):
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                return False
-            time.sleep(0.1)
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGKILL)  # уборка за красным прогоном: внук не остаётся грузить Mac
-        return True
-
-    a_t, a_i = alive(pid_t), alive(pid_i)
-    check("0424: таймаут файла тестов гасит всю группу — внука со sleep нет (ProcessLookupError), файл — «таймаут»",
-          a_t is False and gg.get("sigs") == ["test_hang.py: таймаут"] and gg.get("sec", 99) < 30, f"{a_t} {gg}")
-    check("0424: прерывание посреди прогона файла гасит всю группу — внука нет, KeyboardInterrupt проброшен",
-          a_i is False and gg.get("intr") is True, f"{a_i} {gg}")
-    shutil.rmtree(gdir, ignore_errors=True)
 
     # 7. Своп выше порога дежурного — прогон отложен (тесты не гоняются, метка deferred_since, строка в журнале один
     # раз); дольше PLUGIN_DEFER_MAX не держит; своп ниже порога — прогон как обычно
