@@ -204,6 +204,18 @@ def test_cap_terms():
         check(ok == (not on), f"срок {extra!r}: gate {ok} {why}")
 
 
+def test_cap_since_reset_day():
+    """since — дата дня сброса, сброс позже в тот же день: до сброса потолок держит, после сброса — истёк."""
+    t2 = hm("19:00", DAY)  # новая неделя уже началась в 18:00
+    for t, used, line, on in ((T, 50.0, 96.43, True), (t2, 0.2, 0.6, False)):  # сброс 14.10 18:00; в 19:00 следующий — 21.10 18:00
+        for since in (f'"{DAY.isoformat()}"', f'"{DAY.isoformat()} 00:00"'):
+            e = env(used, line, sec=CAP50 + f'until = "reset"\nsince = {since}\n', t=t)
+            cap, note = N.cap_read(t)
+            check(bool(cap) == on and (on or "истёк" in note), f"since {since} в {t}: {cap} {note!r}")
+            ok, why = N.gate("wake", t, heavy=0)
+            check(ok == (not on), f"since {since} в {t}: gate {ok} {why}")
+
+
 def test_cap_broken_records():
     """Кривая запись — как без потолка, а status говорит почему."""
     for bad in ('[limits.owner_cap]\npct = "много"\n', '[limits.owner_cap]\ndecision = "x"\n', 'limits.owner_cap = 5\n',

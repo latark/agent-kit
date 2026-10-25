@@ -224,8 +224,8 @@ def cap_read(t, m=None):
             if since is None:
                 return None, "запись [limits.owner_cap] не разобрана: until = \"reset\" без since — неизвестно, какая неделя"
             r = (m if m is not None else measure(t)).get("resets")
-            # неделя началась позже since (допуск часа: сброс в снимке гуляет) — потолок прошлой недели истёк
-            if r and r - WEEK > since[1] + 3600:
+            # неделя началась позже начала суток since (допуск часа: сброс в снимке гуляет) — потолок прошлой недели истёк
+            if r and r - WEEK > since[0] + 3600:
                 return None, f"истёк: до сброса недели после {P.stamp(since[0])[:10]}"
             cap["scope"] = "до сброса недели" + (f" ({when(r)})" if r and r > t else "")
             return cap, ""
@@ -272,8 +272,9 @@ def cap_notice(t, m, cap):
             return st.get("card_id")
         title = f"Решить: стоять до сброса недели или поднять потолок до {num(up)} %"
         stay = f"А — стоять до сброса недели ({reset}): новых запусков и исполнителей нет, идущие доделывают шаг"
-        raise_ = (f"Б — поднять потолок до {num(up)} %: запуски и исполнители продолжатся до {num(up)} % недели. "
-                  f"Цена: меньше запаса до сброса")
+        raise_ = (f"Б — поднять потолок до {num(up)} %: потолок перестанет закрывать запуски раньше {num(up)} % недели; "
+                  f"самозапуск и подъём окон при этом открыты только в зелёной зоне недели, исполнители окон — до "
+                  f"{num(up)} %. Цена: меньше запаса до сброса")
         try:
             tid, _ = P.tasks_mod().task_new(
                 P.PANTHEON, t, "inbox", title, owner="zeus", status="waiting", waiting_on="human",
