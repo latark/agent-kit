@@ -39,9 +39,9 @@ project = "Пантеон"
 folders = ["~/projects/agent-kit", "~/.claude"]
 
 [[direction]]
-name = "themis-sources"
-project = "legal-watch и expert-corpus"
-folders = ["~/projects/legal-watch", "~/projects/expert-corpus"]
+name = "beta-dir"
+project = "proj-one и proj-two"
+folders = ["~/projects/proj-one", "~/projects/proj-two"]
 
 [[direction]]
 name = "plain-dir"
@@ -52,7 +52,7 @@ folders = ["~/projects/plain"]
 def make():
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="preg-test-"))
     home, state, view = (os.path.join(tmp, x) for x in ("pantheon", "state", "view"))
-    for d in ("metis-pantheon", "themis-sources", "plain-dir", "ghost"):
+    for d in ("metis-pantheon", "beta-dir", "plain-dir", "ghost"):
         os.makedirs(os.path.join(home, "directions", d, "tasks"))
     os.makedirs(os.path.join(home, "inbox", "tasks"))
     os.makedirs(view)
@@ -95,8 +95,8 @@ def main():
     check("task new без --project: проект направления из реестра, а не имя папки", proj(home, a) == "Пантеон", proj(home, a))
     b = new(env, "plain-dir")
     check("направление без project в реестре: project = его имя", proj(home, b) == "plain-dir", proj(home, b))
-    c = new(env, "themis-sources", "--project", "legal-watch и expert-corpus")
-    check("--project с именем из реестра принят", proj(home, c) == "legal-watch и expert-corpus")
+    c = new(env, "beta-dir", "--project", "proj-one и proj-two")
+    check("--project с именем из реестра принят", proj(home, c) == "proj-one и proj-two")
     r = run(env, "task", "new", "--direction", "ghost", "--title", "Своё имя", "--project", "ghost")
     gn = r.stdout.split()[0] if r.returncode == 0 else None
     check("направление вне реестра: --project со своим именем принят, как в check",
@@ -117,7 +117,7 @@ def main():
     r = run(env, "check")
     check("check на чистых данных: про project тишина", "project" not in r.stdout, r.stdout[-300:])
     clean_code = r.returncode
-    for tid, v in ((a, "agent-kit"), (b, "metis-pantheon"), (c, "legal-watch")):
+    for tid, v in ((a, "agent-kit"), (b, "metis-pantheon"), (c, "proj-one")):
         assert run(env, "task", "set", tid, f"project={v}").returncode == 0
     r = run(env, "check")
     check("check: ошибка на каждый неизвестный project, код не 0",
@@ -126,10 +126,10 @@ def main():
     check("check --quiet не падает", r2.returncode == 0, r2.stderr[-200:])
 
     # --- миграция ---
-    d = new(env, "themis-sources")
+    d = new(env, "beta-dir")
     e = new(env, "metis-pantheon")
-    g = new(env, "themis-sources")
-    for tid, v in ((d, "expert-corpus"), (e, "pantheon 0.11.28"), (g, "themis-sources")):
+    g = new(env, "beta-dir")
+    for tid, v in ((d, "proj-two"), (e, "pantheon 0.11.28"), (g, "beta-dir")):
         assert run(env, "task", "set", tid, f"project={v}").returncode == 0
     ok_card = new(env, "metis-pantheon")
     # закрытая неделю назад карточка со старым project: перенос не должен вернуть её на доску
@@ -146,8 +146,8 @@ def main():
         r = run(env, "task", "migrate-project", *bad)
         check(f"migrate-project {' '.join(bad)}: отказ, код 2, ничего не записано", r.returncode == 2 and snapshot(home) == before, r.returncode)
     r = run(env, "task", "migrate-project")
-    want = {a: "Пантеон", b: "plain-dir", c: "legal-watch и expert-corpus", d: "legal-watch и expert-corpus",
-            e: "Пантеон", g: "legal-watch и expert-corpus"}
+    want = {a: "Пантеон", b: "plain-dir", c: "proj-one и proj-two", d: "proj-one и proj-two",
+            e: "Пантеон", g: "proj-one и proj-two"}
     # b направления plain-dir: его проект — plain-dir, а project «metis-pantheon» — имя другого направления
     want[b] = "Пантеон"
     check("сухой прогон: «id: было → станет» по каждой карточке", all(f"{t}: " in r.stdout and f"→ {w}" in r.stdout for t, w in want.items()), r.stdout)
