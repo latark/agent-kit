@@ -6750,6 +6750,97 @@ def check_skills(paths=None, quiet=False):
     return len(rows), bad
 
 
+def _owner_answered(qid, since):
+    """Есть ли ответ владельца на вопрос по задаче qid позже since: выбор в окне вопросов (owner-log/zeus.md) или галочка на
+    доске (owner-log/board.jsonl) — те же признаки, что у `pantheon consent`. Журнал не читается — False."""
+    try:
+        with open(path("owner-log", "zeus.md"), encoding="utf-8") as fh:
+            text = fh.read()
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    own = re.compile(r"вопрос: \[" + re.escape(qid) + r"\]", re.I)
+    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
+    for i, m in enumerate(heads):
+        if m.group(2).strip() != "· окно вопросов":
+            continue
+        body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
+        try:
+            t = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+        except ValueError:
+            continue
+        if t >= since and own.match(body) and re.search(r"^ответ: \S", body, re.M):
+            return True
+    try:
+        with open(path("owner-log", "board.jsonl"), encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except (OSError, UnicodeDecodeError):
+        lines = []
+    for line in lines:
+        try:
+            rec = json.loads(line)
+            t = time.mktime(time.strptime(rec.get("time", "")[:19], "%Y-%m-%dT%H:%M:%S"))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        q, a = rec.get("question"), rec.get("answer")
+        if rec.get("kind") == "answer" and rec.get("id") == qid and t >= since and isinstance(q, str) \
+                and isinstance(a, str) and not re.search(r"%%|<", q):
+            return True
+    return False
+
+
+def board_drift(T, tasks, cache, inbox):
+    """Расхождения доски, которые владелец видит в Obsidian (metis-0441). Ничего не правит. tasks — T.load_tasks,
+    cache — autoclose-prs.json (merged, open_prs), inbox — T.inbox_items. → [(ключ, текст)]."""
+    A, out = autoclose_mod(), []
+    cache = cache if isinstance(cache, dict) else {}
+    open_ids = set()
+    for repo, prs in sorted((cache.get("open_prs") or {}).items() if isinstance(cache.get("open_prs"), dict) else []):
+        for pr in prs if isinstance(prs, list) else []:
+            if not isinstance(pr, dict) or pr.get("part") or not isinstance(pr.get("closes"), list):
+                continue  # как autoclose.review_pr: «часть» и неверная форма — пропуск, упоминание задачу не закрывает
+            for tid in pr["closes"]:
+                if not isinstance(tid, str):
+                    continue
+                open_ids.add(tid)
+                st = (tasks.get(tid) or (None, {}, ""))[1].get("status")
+                if st in ("todo", "done"):
+                    out.append((tid, f"статус {st}, а PR {repo}#{pr.get('number')} открыт — ждёт слияния (review)"))
+    for repo, rows in sorted((cache.get("merged") or {}).items() if isinstance(cache.get("merged"), dict) else []):
+        for pr in rows if isinstance(rows, list) else []:
+            if not isinstance(pr, dict) or any(not isinstance(pr.get(k), (str, type(None))) for k in ("body", "headRefName")) \
+                    or A.is_part(pr.get("body")):
+                continue
+            mts = A.merged_ts(pr.get("mergedAt"))
+            for tid in A.closing_ids(pr.get("headRefName"), pr.get("body")):
+                h = (tasks.get(tid) or (None, {}, ""))[1]
+                if h.get("status") in ("doing", "review") and tid not in open_ids \
+                        and not (mts and (T.ts_of(h.get("updated")) or 0) > mts):
+                    out.append((tid, f"статус {h['status']}, а PR {repo}#{pr.get('number')} уже слит"))
+    for tid, (_, h, _) in sorted(tasks.items()):
+        if h.get("status") == "waiting" and h.get("waiting_on") == "human":
+            since = T.ts_of(h.get("question_at")) or T.ts_of(h.get("created")) or 0
+            if _owner_answered(tid, since):
+                out.append((tid, "владелец ответил на вопрос, а задача ещё в «От меня нужно» (waiting)"))
+    for cid, it in sorted(inbox.items()):
+        d = os.path.join(os.path.dirname(it["path"]), "done")
+        same = [t for t, (_, h, _) in tasks.items() if h.get("direction") == it["direction"]
+                and str(h.get("title") or "").strip() == it["title"]]
+        archived = any(os.path.exists(os.path.join(d, pre + it["file"])) for pre in ("", "отклонено-"))
+        if same or archived:
+            out.append((f"{it['direction']}/inbox/{it['file']}", "записка обработана ("
+                        + (f"задача {same[0]}" if same else "лежит в inbox/done") + "), а она ещё во «Входящих»"))
+    return out
+
+
+def board_drift_report(T, quiet):
+    """Печатает board_drift предупреждениями (код выхода check не меняет); тик (quiet) молчит."""
+    if quiet:
+        return
+    for k, text in board_drift(T, T.load_tasks(PANTHEON, T.WORK_TYPES), read_json(path("autoclose-prs.json"), {}),
+                               T.inbox_items(PANTHEON)):
+        print(f"предупреждение · доска · {k}: {text}")
+
+
 def check_task_projects(T, quiet):
     """project задачи — только имя проекта из directions.toml (metis-0323). → число задач с чужим именем; на тике
     (quiet) — одна тревога на набор. Реестра нет — не сверяем."""
@@ -6833,6 +6924,7 @@ def check(paths=None, quiet=False):
         for tid, text in field_warns:
             if not quiet:
                 print(f"внимание · {tid}: {text}")
+    board_drift_report(T, quiet) if not paths else None  # расхождения доски (metis-0441)
     if not paths and not quiet:
         off = autoclose_off_reason(now())
         if off:
