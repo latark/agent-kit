@@ -2432,13 +2432,50 @@ def t_carry_r4_gate(h):
         os.remove(h.j("git.slow"))
 
 
+def t_carry_r6(h):
+    """argus-b r2 (#134): откат force-push к точному старому head, принятому до «вернуть», после снятия «вернуть»
+    правилом 3 — прямое «принять» до отсечки не засчитывается, как и перенос."""
+    s = kit_history(h)
+    kit = "projects/agent-kit"
+    tests = lambda sha: rec("tests", "latark/agent-kit", None, sha, "dev-opus")
+    rej = lambda sha, who="y": opus(sha, who, "reject", checklist=None, session="s-y")
+
+    def case(name, head, base, recs, allow, why=""):
+        h.reset()
+        kit_pr(h, s[head], s[base])
+        h.seed(*recs)
+        got = h.pre(f"gh pr merge 7 --match-head-commit {s[head]}", pdir=kit)
+        merge_case(name, got, allow, why)
+        return got
+
+    case("r6 ctl1: z принял N1, y вернул R, слияние N1 — «вернуть» в силе", "N1", "M1",
+         [opus(s["N1"], "z", session="s-z"), rej(s["R"]), tests(s["N1"])], False, "«вернуть» (reject)")
+    case("r6 ctl2: z принял P, y вернул R, w принял A, слияние N1 — перенос отсечён", "N1", "M1",
+         [opus(s["P"], "z", session="s-z"), rej(s["R"]), opus(s["A"], "w", session="s-w"), tests(s["N1"])], False,
+         "нет «принять»")
+    got = case("r6 обход: z принял N1, y вернул R, w принял A, force-push на N1 — отказ", "N1", "M1",
+               [opus(s["N1"], "z", session="s-z"), rej(s["R"]), opus(s["A"], "w", session="s-w"), tests(s["N1"])],
+               False, "нет «принять»")
+    if HAVE_TOML:
+        check("r6 обход: отказ называет «принять» z на N1 и отсёкшее его «вернуть» y на R",
+              "записано раньше «вернуть»" in got[1] and f"на {s['N1'][:12]}" in got[1]
+              and f"на {s['R'][:12]}" in got[1] and "ни на своём head" in got[1], got[1])
+    case("r6: z снова принял N1 после «вернуть» — проходит", "N1", "M1",
+         [opus(s["N1"], "z", session="s-z"), rej(s["R"]), opus(s["A"], "w", session="s-w"),
+          opus(s["N1"], "z", session="s-z"), tests(s["N1"])], True)
+    case("r6: w принял A после «вернуть» R, слияние A — проходит (правило 3 не тронуто)", "A", "M1",
+         [opus(s["N1"], "z", session="s-z"), rej(s["R"]), opus(s["A"], "w", session="s-w"), tests(s["A"])], True)
+    case("r6: y вернул R и сам принял R — отсечки нет, «принять» z на N1 до «вернуть» в силе", "N1", "M1",
+         [opus(s["N1"], "z", session="s-z"), rej(s["R"]), opus(s["R"], "y", session="s-y"), tests(s["N1"])], True)
+
+
 CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_transcript, t_ci,
          t_core_touchid, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
-         t_carry_r4_gate]
+         t_carry_r4_gate, t_carry_r6]
 
 
 def main():

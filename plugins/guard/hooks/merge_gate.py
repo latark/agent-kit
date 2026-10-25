@@ -39,9 +39,10 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    version с учётом режима. Настройки git (diff.*, core.abbrev, submodule.*.ignore, атрибуты, GIT_* окружения) на
    отпечаток не влияют: окружение без GIT_*, явный --git-dir. Вывод --raw разбирается строго (формат, \0 в конце,
    путь один раз), иначе отпечатка нет. Цена (решение владельца 25.10): main правил файл, который правит и PR, —
-   переноса нет, нужен argus. Переносится только accept, записанное позже каждого reject PR, кроме reject, снятого
-   accept с перечнем того же рецензента на том же head (_carried, #134 п.2): иначе откат к коду, принятому до reject,
-   прошёл бы по старому accept; отказ называет такое accept и reject. Сверяются CARRY_HEADS последних head за
+   переноса нет, нужен argus. Засчитывается — и прямо на своём head, и переносом — только accept, записанное позже
+   каждого reject PR, кроме reject, снятого accept с перечнем того же рецензента на том же head (_floor, _carried,
+   #134 п.2, argus-b r2): иначе откат к коду, принятому до reject (force-push на старый head после снятия reject
+   правилом 3), прошёл бы по старому accept; отказ называет такое accept и reject. Сверяются CARRY_HEADS последних head за
    CARRY_BUDGET секунд, у git — таймаут 3 с. Нет отпечатка — нет переноса: папка слияния не клон репозитория PR,
    shallow, info/grafts, нет коммита base или head, не одна merge-base, вывод --raw не разобрать, plugin.json — не
    файл, сбой или таймаут git; git replace не действует. Тесты и talos не
@@ -1210,18 +1211,26 @@ def _held(verdicts, sha, fp):
             and not any(a["kind"] == "accept" and _lifts(a, r, sha, fp) for a in verdicts[i + 1:])]
 
 
-def _carried(verdicts, sha, fp, cut=None):
-    """«Принять» с перечнем на других head того же PR, чей отпечаток равен отпечатку sha, записанные позже каждого
-    «вернуть» PR: «вернуть» отсекает более ранние «принять», если его не снял тот же рецензент «принять» с перечнем на том же head (#134 п.2:
-    иначе откат к коду, принятому до «вернуть», прошёл бы по старому «принять»). cut — список: в него пары
-    («принять», отсёкшее его «вернуть») с тем же отпечатком, но записанные раньше отсечки (для текста отказа)."""
-    fs = fp(sha)
-    if not fs:
-        return []
+def _floor(verdicts):
+    """Отсечка (#134 п.2, argus-b r2): номер последнего «вернуть» PR, которое не снял тот же рецензент «принять» с
+    перечнем на том же head (_self_lift), или -1. «Принять», записанное до отсечки, не засчитывается ни прямо на своём
+    head, ни переносом: иначе откат к коду, принятому до «вернуть» (force-push на старый head), прошёл бы по старому
+    «принять», если «вернуть» снято «принять» на другом коде (правило 3 _lifts)."""
     floor = -1
     for i, r in enumerate(verdicts):
         if r["kind"] == "reject" and not any(a["kind"] == "accept" and _self_lift(a, r) for a in verdicts[i + 1:]):
             floor = i
+    return floor
+
+
+def _carried(verdicts, sha, fp, cut=None):
+    """«Принять» с перечнем на других head того же PR, чей отпечаток равен отпечатку sha, записанные позже отсечки
+    _floor. cut — список: в него пары («принять», отсёкшее его «вернуть») с тем же отпечатком, но записанные раньше
+    отсечки (для текста отказа)."""
+    fs = fp(sha)
+    if not fs:
+        return []
+    floor = _floor(verdicts)
     out = []
     for i, a in enumerate(verdicts):
         if a["kind"] == "accept" and a["sha"] != sha and checklist_ok(a):
@@ -1372,8 +1381,11 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     for r in verdicts:
         if r["sha"] == sha:
             latest[_reviewer(r)] = r
-    direct = [r for r in latest.values() if r["kind"] == "accept"]
-    cut = []
+    # прямое «принять» на sha — тоже только после отсечки (argus-b r2): откат force-push на head, принятый до «вернуть»
+    floor = _floor(verdicts)
+    pos = {id(r): i for i, r in enumerate(verdicts)}
+    cut = [(r, verdicts[floor]) for r in latest.values() if r["kind"] == "accept" and pos[id(r)] <= floor]
+    direct = [r for r in latest.values() if r["kind"] == "accept" and pos[id(r)] > floor]
     carried = [] if direct else _carried(verdicts, sha, fp, cut)
     if not direct and not carried:
         fs = fp(sha) if weak else None
@@ -1393,7 +1405,8 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                 "plugin.json) и «принять» записано после каждого «вернуть» PR." + why_fp()
                 + (f" Дифф тот же у «принять» {'; '.join(_who(a) + ' на ' + a['sha'][:12] for a, _ in cut)}, но оно "
                    f"записано раньше «вернуть» {_who(cut[0][1])} на {cut[0][1]['sha'][:12]}: после «вернуть» старое "
-                   "«принять» не переносится (откат к принятому коду), нужен свежий argus." if cut else "")
+                   "«принять» не засчитывается ни на своём head, ни переносом (откат к принятому коду), нужен свежий "
+                   "argus." if cut else "")
                 + f" {advice}")
     old = [r for r in direct if not checklist_ok(r)]
     if old:
