@@ -1026,7 +1026,9 @@ def owner_approved(repo, pr, sha, now=None):
 CARRY_HEADS = 8  # сколько прошлых head с вердиктами сверять (кроме нового); старые — без отпечатка
 CARRY_BUDGET = 4  # с на все отпечатки одного шлюза: дальше — без отпечатка (таймаут хука 10 с, ещё gh pr view и CI)
 PLUGIN_JSON = "plugins/*/.claude-plugin/plugin.json"
-CARRY_PATHS = ("--", ".", ":(exclude,glob)" + PLUGIN_JSON)
+PLUGIN_JSON_RE = re.compile(rb"plugins/[^/]*/\.claude-plugin/plugin\.json")  # то же, что glob PLUGIN_JSON
+# :(top) — от корня дерева: при core.worktree у git папки префикс .git/, и «.» значил бы только .git/ (#134 п.1)
+CARRY_PATHS = ("--", ":(top)", ":(top,exclude,glob)" + PLUGIN_JSON)
 DIFF_FLAGS = ("--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color",
               "--no-relative", "--ignore-submodules=none", "--diff-algorithm=myers", "--src-prefix=a/",
               "--dst-prefix=b/", "-U3", "--function-context", "--inter-hunk-context=0")
@@ -1083,9 +1085,10 @@ def _manifest_canon(raw):
 
 
 def _manifests(gd, mb, head):
-    """Правки plugin.json плагинов между mb и head без строки version → список строк или None (не разобрать)."""
-    out = _git_bytes(gd, "diff", "--name-status", "-z", "--no-renames", "--no-relative", mb, head, "--",
-                     ":(glob)" + PLUGIN_JSON)
+    """Правки plugin.json плагинов между mb и head без строки version → список строк или None (не разобрать).
+    Список файлов — без pathspec, plugin.json отбирает PLUGIN_JSON_RE: префикс git папки его не сузит."""
+    out = _git_bytes(gd, "diff", "--name-status", "-z", "--no-renames", "--no-relative", "--ignore-submodules=none",
+                     mb, head)
     if out is None:
         return None
     parts = out.split(b"\0")
@@ -1095,6 +1098,8 @@ def _manifests(gd, mb, head):
         return None
     entries = []
     for st, path in zip(parts[::2], parts[1::2]):
+        if not PLUGIN_JSON_RE.fullmatch(path):
+            continue
         sides = {"A": (head,), "D": (mb,), "M": (mb, head)}.get(st.decode("ascii", "replace"))
         if sides is None:
             return None
@@ -1125,11 +1130,15 @@ def _fingerprint(gd, base, head):
         return None, f"у {head[:12]} и base PR нет единственной merge-base"
     mb = mbs[0].decode("ascii", "replace")
     diff = _git_bytes(gd, "diff", *DIFF_FLAGS, mb, head, *CARRY_PATHS)
-    raw = _git_bytes(gd, "diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-relative",
-                     "--ignore-submodules=none", mb, head, *CARRY_PATHS)
+    raw_args = ("diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-relative", "--ignore-submodules=none",
+                mb, head)
+    raw = _git_bytes(gd, *raw_args, *CARRY_PATHS)
+    raw_all = _git_bytes(gd, *raw_args)  # без pathspec: им сверяется, что pathspec ничего не потерял (#134 п.1)
     plugins = _manifests(gd, mb, head)
-    if diff is None or raw is None:
+    if diff is None or raw is None or raw_all is None:
         return None, f"git diff на {head[:12]} не ответил"
+    if raw.split(b"\0")[1::2] != [p for p in raw_all.split(b"\0")[1::2] if not PLUGIN_JSON_RE.fullmatch(p)]:
+        return None, f"дифф {head[:12]} по pathspec не сошёлся со списком файлов (core.worktree?)"
     if plugins is None:
         return None, f"plugin.json на {head[:12]} не разобрать (не JSON, два ключа или version не строкой)"
     pid = b"EMPTY"
@@ -1182,13 +1191,20 @@ def _held(verdicts, sha, fp):
 
 
 def _carried(verdicts, sha, fp):
-    """«Принять» с перечнем на других head того же PR, чей отпечаток равен отпечатку sha."""
+    """«Принять» с перечнем на других head того же PR, чей отпечаток равен отпечатку sha, записанные позже каждого
+    «вернуть» PR: «вернуть» отсекает более ранние «принять», если его не снял сам рецензент на том же head (#134 п.2:
+    иначе откат к коду, принятому до «вернуть», прошёл бы по старому «принять»)."""
     fs = fp(sha)
     if not fs:
         return []
+    floor = -1
+    for i, r in enumerate(verdicts):
+        if r["kind"] == "reject" and not any(a["kind"] == "accept" and _reviewer(a) == _reviewer(r)
+                                             and a["sha"] == r["sha"] for a in verdicts[i + 1:]):
+            floor = i
     out = []
-    for a in verdicts:
-        if a["kind"] == "accept" and a["sha"] != sha and checklist_ok(a):
+    for i, a in enumerate(verdicts):
+        if i > floor and a["kind"] == "accept" and a["sha"] != sha and checklist_ok(a):
             fa = fp(a["sha"])
             if fa and fa[0] == fs[0]:
                 out.append(a)

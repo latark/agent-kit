@@ -1859,6 +1859,73 @@ def t_carry_unit(h):
           got == set(heads[-mg.CARRY_HEADS:]) | {S}, sorted(got))
 
 
+def t_carry_r2(h):
+    """Замечания argus к #134 (metis-0415 r2): core.worktree не сужает дифф до .git/ (п.1), «принять», записанное
+    раньше снятого «вернуть», не переносится (п.2), criss-cross — две merge-base — без отпечатка (п.3)."""
+    s = kit_history(h)
+    mg = _load_merge_gate("merge_gate_carry_r2")
+    kit = h.j("projects/agent-kit")
+    gd, why = mg._carry_git(kit, "latark/agent-kit", s["M1"])
+    check("r2: _carry_git — git dir", gd and why is None, why)
+
+    def fp(head, base=s["M1"]):
+        return mg._fingerprint(gd, base, head)[0]
+
+    ref = fp(s["P"])
+    # п.1: core.worktree = корень клона → у git префикс .git/, и pathspec «.» значил бы только .git/
+    git(kit, "config", "core.worktree", kit)
+    try:
+        n1 = fp(s["N1"])
+        check("п.1 core.worktree: отпечаток N1 — как у P (номер версии и main)", n1 == ref, n1)
+        for name in ("out", "side", "evil", "newfile"):
+            got = fp(s[name])
+            check(f"п.1 core.worktree: отпечаток {name} ≠ N1 (правка вне .git/ видна)", got is not None and got != n1,
+                  got)
+        saved = mg.CARRY_PATHS
+        mg.CARRY_PATHS = ("--", ".", ":(exclude,glob)" + mg.PLUGIN_JSON)  # pathspec без :(top), как на 624cbfe
+        try:
+            got = mg._fingerprint(gd, s["M1"], s["out"])
+            check("п.1 сверка путей: дифф по pathspec не сошёлся со списком файлов — отпечатка нет",
+                  got[0] is None and "не сошёлся" in got[1], got)
+        finally:
+            mg.CARRY_PATHS = saved
+    finally:
+        git(kit, "config", "--unset", "core.worktree")
+    # п.2: x «принять» A (код X), y «вернуть» R (код Y), z «принять» F (код Z) снимает R; N — снова код X
+    A, R, F, N = "a" * 40, "b" * 40, "c" * 40, "d" * 40
+    prints = {A: ("X", "mb1"), R: ("Y", "mb1"), F: ("Z", "mb1"), N: ("X", "mb2")}
+    look = lambda x: prints.get(x)
+    rj = opus(R, "y", "reject", checklist=None)
+    v = [opus(A, "x"), rj, opus(F, "z")]
+    check("п.2: «вернуть» R снято «принять» F (код N — не код R)", mg._held(v, N, look) == [])
+    got = [r["sha"] for r in mg._carried(v, N, look)]
+    check("п.2: «принять» A записано раньше «вернуть» R — не переносится на N с кодом A", got == [], got)
+    got = [r["sha"] for r in mg._carried([rj, opus(A, "x")], N, look)]
+    check("п.2: «принять» A записано после «вернуть» R — переносится", got == [A], got)
+    got = [r["sha"] for r in mg._carried([opus(A, "x"), rj, opus(R, "y")], N, look)]
+    check("п.2: «вернуть» R снял сам рецензент на R — «принять» A до него переносится", got == [A], got)
+    got = [r["sha"] for r in mg._carried([opus(A, "x"), rj, opus(R, "w")], N, look)]
+    check("п.2: «принять» другого argus на R не снимает отсечку — A не переносится", got == [], got)
+    # п.3: крест слияний — у head PR и base две merge-base
+    H = Hist(kit)
+    H.br("t-cc-main", s["B"])
+    x1 = H.put({"cc-main.py": "m = 1\n"}, "main: правка")
+    H.br("t-cc-pr", s["B"])
+    y1 = H.put({"code.py": CODE.format(2)}, "PR: правка")
+    H.br("t-cc-main2", x1)
+    base2 = H.merge(y1)
+    H.br("t-cc-pr2", y1)
+    H.merge(x1)
+    head2 = H.put({"cc-pr.py": "p = 1\n"}, "PR: ещё правка")
+    git(kit, "checkout", "-q", "-f", "main")
+    git(kit, "clean", "-qfdx")
+    mbs = git(kit, "merge-base", "--all", base2, head2).split()
+    check("п.3: крест слияний — две merge-base", len(mbs) == 2, mbs)
+    got = mg._fingerprint(gd, base2, head2)
+    check("п.3: две merge-base — отпечатка нет, «принять» не переносится",
+          got[0] is None and "единственной merge-base" in got[1], got)
+
+
 def t_carry_gate(h):
     """Шлюз целиком: перенос «принять» с head, чей собственный дифф совпал, и запись переноса в журнал."""
     s = kit_history(h)
@@ -2046,7 +2113,7 @@ CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, 
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_transcript, t_ci,
-         t_core_touchid, t_carry_unit, t_carry_gate, t_carry_opus, t_carry_product]
+         t_core_touchid, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product]
 
 
 def main():
