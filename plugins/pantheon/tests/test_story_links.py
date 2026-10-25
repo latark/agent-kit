@@ -95,6 +95,36 @@ tasks3["s-9"] = ("", {"type": "story", "id": "s-9", "title": "Сама себе"
 names3["s-9"] = "s-9 x"
 check("пачка с parent = своему id не входит в свой состав", "s-9" not in card("s-9", tasks3, names3)[1].split("## Состав")[-1])
 
+# review 128b п.1: звено, которое уже идёт, не «ждёт» прошлое открытое звено
+tasks5, names5 = world()
+tasks5["t-3"][1].pop("depends_on")
+for i, st in (("t-2", "review"), ("t-3", "doing"), ("t-4", "waiting")):
+    tasks5[i][1]["status"] = st
+    tasks5[i][1]["mode"] = "single"
+tasks5["t-6"][1]["status"] = "todo"
+tasks5["t-6"][1]["order"] = 5
+tasks5["t-5"][1]["order"] = 9
+tasks5["t-8"] = ("", H("t-8", order=6, status=""), "")
+names5["t-8"] = "t-8 x"
+rows5 = {cell(r, 1).split("|")[-1].rstrip("]"): r for r in card("s-1", tasks5, names5)[1].splitlines() if r.startswith("| ") and "t-" in r}
+check("«Ждёт»: звено в review после открытого — «ничего»", cell(rows5["t-2"], 6) == "ничего", rows5["t-2"])
+check("«Ждёт»: звено в doing после открытого — «ничего»", cell(rows5["t-3"], 6) == "ничего", rows5["t-3"])
+check("«Ждёт»: звено в waiting после открытого — «ничего»", cell(rows5["t-4"], 6) == "ничего", rows5["t-4"])
+check("«Ждёт»: не начатое звено со status todo ждёт прошлое", "[[" in cell(rows5["t-6"], 6), rows5["t-6"])
+check("«Ждёт»: не начатое звено с пустым status ждёт прошлое", "[[" in cell(rows5["t-8"], 6), rows5["t-8"])
+tasks5["t-3"][1]["depends_on"] = ["t-1"]
+r3 = [r for r in card("s-1", tasks5, names5)[1].splitlines() if r.startswith("| ") and "[[t-3 " in r][0]
+check("«Ждёт»: звено в doing с открытым depends_on — ссылка на него", "t-1" in cell(r3, 6), r3)
+
+# review 128b п.2: мутанты
+tasks6, names6 = world()
+tasks6["t-7"] = ("", H("t-7", parent="s-1", batch="s-0"), "")  # задача (не пачка) со старым полем batch
+check("story_children: задача с batch = id пачки не входит в её состав без parent",
+      "t-7" not in T.story_children("s-0", tasks6), T.story_children("s-0", tasks6))
+summary = [x for x in card("s-1", tasks, names)[1].splitlines() if "Цепочка одному исполнителю" in x]
+check("сводка «Цепочка одному исполнителю» — ссылки, а не голые id",
+      summary and summary[0].count("[[") == 4 and L("t-1") in summary[0], summary)
+
 # карточки задач: «Зависит от», «Пересечения» — ссылки
 cross = T.crossings(tasks)
 ctx = T.card_ctx("t-3", tasks["t-3"][1], tasks, names, cross)
