@@ -1226,11 +1226,11 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
     cell = lambda i: f"[[{names[i]}\\|{i}]]" if names.get(i) else i  # noqa: E731  (в таблице «|» экранируется)
     for n, i in enumerate(inf["ids"], 1):
         h = tasks[i][1]
-        # «Ждёт»: открытые depends_on и прошлое звено цепочки (только у не начатых: todo или пусто); «ничего» — законно пусто
+        # «Ждёт»: открытые depends_on и ближайшее незакрытое прошлое звено цепочки (только у не начатых: todo или пусто); «ничего» — законно пусто
         waits = [cell(d) for d in open_deps(h, tasks)]
         k = inf["chain"].index(i) if i in inf["chain"] else 0
-        prev = inf["chain"][k - 1] if k else None
-        if prev and prev not in inf["closed"] and cell(prev) not in waits and h.get("status") in ("todo", None, ""):
+        prev = next((j for j in reversed(inf["chain"][:k]) if j not in inf["closed"]), None)  # ближайшее незакрытое
+        if prev and cell(prev) not in waits and h.get("status") in ("todo", None, ""):
             waits.append(cell(prev))
         mode = MODES.get(h.get("mode")) or ("—" if h.get("type") == "story" else "не задан")
         rows.append(f"| {n} | {cell(i)} | {_plain(one_line(h.get('title'))).replace('|', '/')} | {label_of(h)} | "
@@ -1601,7 +1601,7 @@ PROP_TYPES = {"Внимание": "multitext", "Приоритет": "number", "
               "Вопрос задан": "datetime", "Вопрос": "text", "Закрыта": "date", "Кому": "text", "tags": "tags",
               "Выпуск": "text", "Пачка": "text", "Ночь": "date", "Оценка": "text", "Факт": "text", "Приёмка": "text",
               "Порядок": "number", "Режим": "text", "Зависит от": "multitext", "Области": "multitext",
-              "Пересечения": "multitext", "Параллельно": "multitext", "Области не указаны": "text",
+              "Пересечения": "multitext", "Цепочка": "multitext", "Параллельно": "multitext", "Области не указаны": "text",
               # заметка проекта на пульте
               "Ранг": "number", "Обновлено": "date", "Открыто": "number", "В работе": "number", "Ждёт вас": "number",
               "Просрочено": "number", "Пересечений": "number", "Пачек": "number"}

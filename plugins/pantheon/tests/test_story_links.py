@@ -65,7 +65,19 @@ check("в «Составе» нет пустых «Режим» и «Ждёт» 
 check("«Ждёт»: у первого звена «ничего»", cell(rows[0], 6) == "ничего", rows[0])
 check("«Ждёт»: у второго звена прошлое звено цепочки ссылкой", "t-1" in cell(rows[1], 6) and "[[" in cell(rows[1], 6), rows[1])
 check("«Ждёт»: открытый depends_on", "t-9" in cell(rows[2], 6), rows[2])
-check("«Ждёт»: после закрытого звена — «ничего»", cell(rows[5], 6) == "ничего", rows[5])
+check("«Ждёт»: звено после закрытого ждёт ближайшее НЕзакрытое (t-2)", "t-2" in cell(rows[5], 6) and "t-5" not in cell(rows[5], 6), rows[5])
+tasks4, names4 = world()
+for i in ("t-1", "t-2"):
+    tasks4[i][1]["status"] = "done"
+_, body4 = card("s-1", tasks4, names4)
+rows4 = [r for r in body4.splitlines() if r.startswith("| ") and "t-" in r]
+check("«Ждёт»: все прошлые звенья закрыты — «ничего»", cell(rows4[5], 6) == "ничего", rows4[5])
+tasks5, names5 = world()
+tasks5["t-6"][1]["status"] = "doing"
+_, body5 = card("s-1", tasks5, names5)
+rows5 = [r for r in body5.splitlines() if r.startswith("| ") and "t-" in r]
+check("«Ждёт»: начатое звено (doing) не ждёт прошлых", cell(rows5[5], 6) == "ничего", rows5[5])
+check("тип свойства «Цепочка» — multitext", T.PROP_TYPES.get("Цепочка") == "multitext", T.PROP_TYPES.get("Цепочка"))
 check("«Режим» без mode — «не задан», а не «—»", cell(rows[5], 5) == "не задан", rows[5])
 check("ссылки в таблице экранируют «|»", f"[[{names['t-1']}\\|t-1]]" in body, body[-600:])
 
