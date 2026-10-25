@@ -795,23 +795,29 @@ print(json.dumps({"rc": rc, "seen": seen}))"""
           f"{g2} {e.journal()[-300:]!r}")
     e.close()
 
-    # ревью 133 круг 2, п.1: база падает на обоих файлах (как guard 0.5.17 на 3.9) и не успела второй. Продолжение
-    # берёт из кэша и упавший файл базы своего прогона — гоняет только base/test_b и ставит версию. Мутант
-    # «_base_reuse без своего прогона» гонял бы base/test_a заново, срок кончался бы снова — partial до потолка
+    # metis-0424 вариант Б (владелец 25.10): упавшая база из кэша не берётся никогда, даже своего прогона. База падает
+    # на обоих файлах (как guard 0.5.17 на 3.9) и не успела второй — partial. Продолжение гоняет base/test_a заново
+    # (иначе при продолжении после установки соседа гасилось бы падение, снятое со старым соседом, — argus B к #133),
+    # в кэш базы падение не пишется, а новая берётся из кэша. На 613076b (_base_reuse своего прогона) — красный
     e = Env("1.0.0", "1.1.0", OK, OK)
     two_files(e)
     plan5 = {"new/test_a.py": [100, 1, OLD], "new/test_b.py": [100, 1, OLD],
-             "base/test_a.py": [1000, 1, OLD], "base/test_b.py": [1000, 1, OLD]}
+             "base/test_a.py": [700, 1, OLD], "base/test_b.py": [1000, 1, OLD]}
     g1 = tick(e, plan5)
     m1 = e.marks().get("x", {})
     a1 = e.argv()
+    rdir = os.path.join(e.state, "plugins", "results")
+    base_rc = sorted((k, v.get("rc")) for n in (os.listdir(rdir) if os.path.isdir(rdir) else [])
+                     for d in [json.load(open(os.path.join(rdir, n)))] if d.get("version") == "1.0.0"
+                     for k, v in d.get("files", {}).items())
     g2 = tick(e, plan5)
-    check("ревью 133 р2 п.1: база с падением своего прогона берётся при продолжении — 2-й проход гоняет только "
-          "base/test_b, версия поставлена",
-          m1.get("result") == "partial" and "plugin update" not in a1
+    check("вариант Б: упавшая база не кэшируется — продолжение гоняет base/test_a заново, новая из кэша, версия "
+          "поставлена",
+          m1.get("result") == "partial" and "plugin update" not in a1 and base_rc == []
           and g1.get("seen") == ["new/test_a.py", "new/test_b.py", "base/test_a.py", "base/test_b.py"]
-          and g2.get("seen") == ["base/test_b.py"] and g2.get("rc") == 0 and "plugin update x@agent-kit" in e.argv(),
-          f"{g1} {m1} {g2} {e.journal()[-300:]!r}")
+          and g2.get("seen") == ["base/test_a.py", "base/test_b.py"] and g2.get("rc") == 0
+          and "plugin update x@agent-kit" in e.argv(),
+          f"{g1} {m1} {base_rc} {g2} {e.journal()[-300:]!r}")
     e.close()
 
     # ревью 133 круг 2, п.2: счёт partial — только своей версии. Метка прошлой версии каталога (1.0.9) partial с
@@ -971,6 +977,25 @@ print(json.dumps({"old": r2.get("py", "t_old.py") is not None, "now": r2.get("py
     check("0424: кэш — таймаут при старом меньшем таймауте не берётся, при нынешнем и код 0 — берутся",
           g6.get("old") is False and g6.get("now") is True and g6.get("ok") is True and g6.get("other_run") is False,
           got)
+    # вариант Б: кэш базы (store=_base_clean) пишет только чистый результат; падение и таймаут не пишутся и не берутся
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    got = e.py("""import json
+b = P._Results("x", "hb", "1.0.0", "run1", "c", P._base_clean, store=P._base_clean)
+b.put("py", "t_ok.py", 0, [], [1, 1, True], False, 3.0, P.PLUGIN_TEST_TIMEOUT)
+b.put("py", "t_fail.py", 1, ["FAIL a"], [0, 1, True], False, 3.0, P.PLUGIN_TEST_TIMEOUT)
+b.put("py", "t_sig.py", 0, ["FAIL a"], [0, 1, True], False, 3.0, P.PLUGIN_TEST_TIMEOUT)
+b.put("py", "t_to.py", None, ["t_to.py: таймаут"], None, False, P.PLUGIN_TEST_TIMEOUT, P.PLUGIN_TEST_TIMEOUT)
+on_disk = sorted(P.read_json(P._results_path("x", "hb"), {}).get("files", {}))
+P.write_json(P._results_path("x", "hb"), {"plugin": "x", "hash": "hb", "version": "1.0.0", "files": {
+    f"py\\t{f}": {"rc": rc, "sigs": s, "ok": None, "bare": False, "sec": 1.0, "limit": P.PLUGIN_TEST_TIMEOUT,
+                 "at": "x", "run": "run1", "ctx": "c"} for f, rc, s in (("a.py", 0, []), ("b.py", 1, ["FAIL a"]),
+                                                                       ("c.py", None, ["c.py: таймаут"]))}})
+b2 = P._Results("x", "hb", "1.0.0", "run1", "c", P._base_clean, store=P._base_clean)
+print(json.dumps({"disk": on_disk, "got": [f for f in ("a.py", "b.py", "c.py") if b2.get("py", f) is not None]}))""")
+    e.close()
+    check("вариант Б: кэш базы пишет только чистый файл и берёт только чистый, даже своего прогона",
+          bool(got) and got[-1] == json.dumps({"disk": ["py\tt_ok.py"], "got": ["a.py"]}), got)
+
     lim = g6.get("lim") or [0, 0]
     check("0424: таймаут файла (test_guard на 3.9 — 241 с без нагрузки, 24.10 не успел за 600) — ≥ 1200 с и меньше "
           "срока прогона: первый файл продолжения успевает всегда", 1200 <= lim[0] < lim[1], lim)

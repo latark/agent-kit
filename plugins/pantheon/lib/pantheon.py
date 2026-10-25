@@ -7056,8 +7056,10 @@ def usage_report(rest):
 # partial, а не red: следующий проход продолжает тот же прогон (run в метке), уже посчитанные файлы берёт из кэша
 # результатов STATE/plugins/results/<плагин>-<хеш дерева>.json — ключ (плагин, хеш дерева, python, файл). Новая версия
 # берёт из кэша только файлы своего прогона (тот же run и те же соседи — ctx): удалённая метка — свежий прогон. База
-# берёт чистый результат своего дерева любого прогона — прежде всего тот, что оно получило, когда само шло «новой», — а
-# с падением только своего прогона (_base_reuse), остальные файлы гоняет. Падение, которое уже не изменится, — red
+# берёт только чистый результат своего дерева любого прогона — прежде всего тот, что оно получило, когда само шло
+# «новой» (_base_clean). Файл базы с падением или таймаутом гоняется заново на каждом проходе и в кэш не пишется:
+# падение, снятое при других соседях или случайно, не гасит падение новой (решение владельца 25.10, вариант Б).
+# Остальные файлы база гоняет. Падение, которое уже не изменится, — red
 # сразу, даже если другие файлы не успели. partial подряд — не больше PLUGIN_PARTIAL_MAX проходов, затем red с тревогой.
 # Под давлением памяти (своп выше порога дежурного) прогон откладывается, не дольше PLUGIN_DEFER_MAX от первой отсрочки
 # (deferred_since переходит в метку partial).
@@ -7451,12 +7453,14 @@ class _Results:
     """Кэш результатов файлов тестов одного дерева плагина (metis-0424): {"<python>\\t<файл>": запись}. Запись — код
     (None — таймаут), подписи, _ok_count, bare, когда и за сколько секунд, run и ctx прогона. Результат «срок
     прогона» не пишется: файл не досчитан. reuse(запись) решает, можно ли взять запись вместо прогона: новой —
-    только своего прогона (run, ctx), базе — чистую (код 0, без подписей) любого прогона, а с падением — только своего
-    прогона (_base_reuse). Таймаут берётся, только если был при нынешнем таймауте файла. Файл кэша чужого плагина или
-    дерева (plugin, hash внутри не те) не читается вовсе."""
+    только своего прогона (run, ctx), базе — только чистую (код 0, без подписей) любого прогона (_base_clean). store —
+    какие результаты писать: None — все; у базы — тоже _base_clean, её падение и таймаут в кэш не идут (вариант Б,
+    25.10). Таймаут берётся, только если был при нынешнем таймауте файла. Файл кэша чужого плагина или дерева
+    (plugin, hash внутри не те) не читается вовсе."""
 
-    def __init__(self, name, digest, version, run, ctx, reuse):
+    def __init__(self, name, digest, version, run, ctx, reuse, store=None):
         self.name, self.digest, self.version, self.run, self.ctx, self.reuse = name, digest, version, run, ctx, reuse
+        self.store = store
         d = read_json(_results_path(name, digest), {}) if digest else {}
         ok = isinstance(d, dict) and d.get("plugin") == name and d.get("hash") == digest
         self.files = d["files"] if ok and isinstance(d.get("files"), dict) else {}
@@ -7483,7 +7487,7 @@ class _Results:
         return e if self._valid(e) and self.reuse(e) else None
 
     def put(self, py, f, rc, sigs, okv, bare, sec, limit):
-        if not self.digest:
+        if not self.digest or (self.store is not None and not self.store({"rc": rc, "sigs": list(sigs)})):
             return
         self.files[f"{py}\t{f}"] = {"rc": rc, "sigs": list(sigs), "ok": None if okv is None else list(okv),
                                     "bare": bool(bare), "sec": round(sec, 1), "limit": limit, "at": stamp(),
@@ -7492,11 +7496,12 @@ class _Results:
                    {"plugin": self.name, "hash": self.digest, "version": self.version, "files": self.files})
 
 
-def _base_reuse(run):
-    """Какие записи кэша берёт база (ревью 133, п.5): чистую — любого прогона, она ничего не гасит; с падением или
-    таймаутом — только этого прогона (продолжение после partial). Случайное падение базы, записанное однажды, иначе
-    гасило бы ту же подпись у всех следующих версий."""
-    return lambda e: (e.get("rc") == 0 and not e.get("sigs")) or e.get("run") == run
+def _base_clean(e):
+    """Какие записи кэша база берёт и пишет: только чистую (код 0, без подписей) любого прогона — она ничего не
+    гасит. Файл базы с падением или таймаутом не кэшируется и гоняется заново на каждом проходе (решение владельца
+    25.10, вариант Б): падение, снятое при других соседях копии (argus B к #133) или случайно (ревью 133, п.5), иначе
+    гасило бы ту же подпись у новой версии."""
+    return e.get("rc") == 0 and not e.get("sigs")
 
 
 def _results_prune(name, keep):
@@ -7750,7 +7755,7 @@ def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=N
                              lambda e: bool(resume) and e.get("run") == resume and e.get("ctx") == ctx_new)
         base_digest = _tree_hash(base_dir)
         cache_base = _Results(name, base_digest, old, run, base_dir and _copy_ctx(os.path.join(tmp, "base"), name),
-                              _base_reuse(run))
+                              _base_clean, store=_base_clean)
         pythons = _pythons_for(name)
         with open(log, "a" if resume else "w", encoding="utf-8") as fh:
             if resume:
