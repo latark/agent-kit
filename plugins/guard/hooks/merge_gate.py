@@ -1180,16 +1180,29 @@ def _carry_heads(verdicts, sha):
     return {sha, *order[:CARRY_HEADS]}
 
 
+def _self_lift(a, r):
+    """«Принять» a с перечнем того же рецензента на том же head, что «вернуть» r: рецензент сам снял своё «вернуть»
+    (правило 1 _lifts и отсечка _carried; без перечня не снимает — metis-0415, Зевс 25.10 23:10)."""
+    return _reviewer(a) == _reviewer(r) and a["sha"] == r["sha"] and checklist_ok(a)
+
+
 def _lifts(a, r, sha, fp):
     """Снимает ли «принять» a (записано после «вернуть» r) это «вернуть» для слияния sha. fp(head) → (отпечаток,
-    merge-base) или None. Снимает: тот же рецензент на том же head; свежее «принять» с перечнем на sha (r — на
-    другом head); «принять» с перечнем на третьем head с другим кодом от той же merge-base, если код sha — не код r."""
-    if _reviewer(a) == _reviewer(r) and a["sha"] == r["sha"]:
-        return True
+    merge-base) или None. Все правила — только «принять» с перечнем (Б6). 1: тот же рецензент на том же head.
+    2: на sha, r — на другом head: тот же рецензент — снимает; другой argus — только если код sha посчитан и не
+    равен коду r (решение 25.10 23:10, 0415b: иначе «вернуть» обходится выбором рецензента; код не посчитан — не
+    снимает). 3: на третьем head с другим кодом от той же merge-base, если код sha — не код r."""
     if not checklist_ok(a):
         return False
+    if _self_lift(a, r):
+        return True
     if a["sha"] == sha:
-        return r["sha"] != sha
+        if r["sha"] == sha:
+            return False
+        if _reviewer(a) == _reviewer(r):
+            return True
+        fr, fs = fp(r["sha"]), fp(sha)
+        return bool(fr and fs) and fs[0] != fr[0]
     if r["sha"] == sha or a["sha"] == r["sha"]:
         return False
     fr, fa, fs = fp(r["sha"]), fp(a["sha"]), fp(sha)
@@ -1212,8 +1225,7 @@ def _carried(verdicts, sha, fp, cut=None):
         return []
     floor = -1
     for i, r in enumerate(verdicts):
-        if r["kind"] == "reject" and not any(a["kind"] == "accept" and _reviewer(a) == _reviewer(r)
-                                             and a["sha"] == r["sha"] for a in verdicts[i + 1:]):
+        if r["kind"] == "reject" and not any(a["kind"] == "accept" and _self_lift(a, r) for a in verdicts[i + 1:]):
             floor = i
     out = []
     for i, a in enumerate(verdicts):
@@ -1355,10 +1367,11 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     held = _held(verdicts, sha, fp)
     if held:
         return (f"«вернуть» (reject) на {repo}#{pr} от {'; '.join(_who(r) + ' на ' + r['sha'][:12] for r in held)}: "
-                "«вернуть» привязано к PR, а не к коммиту. Его снимает «принять» того же рецензента на том же коммите, "
-                "записанное после него (верни ему исправление), или свежее «принять» argus на новый коммит "
-                f"{sha[:12]} — `pantheon review accept {repo} {pr} {sha} {CHECKLIST_HINT}`. «Принять» другого argus на "
-                "тот же коммит, на коммит с тем же кодом или с другой merge-base «вернуть» не перекрывает."
+                "«вернуть» привязано к PR, а не к коммиту. Его снимает «принять» с перечнем, записанное после него: "
+                "того же рецензента (верни ему исправление) или свежее «принять» argus на новый коммит "
+                f"{sha[:12]} с другим кодом — `pantheon review accept {repo} {pr} {sha} {CHECKLIST_HINT}`. «Принять» "
+                "другого argus на тот же коммит, на коммит с тем же кодом, что у «вернуть» (и на сливаемый), или с "
+                "другой merge-base «вернуть» не перекрывает; код не посчитан — тоже."
                 + why_fp() + f" {advice}")
     latest = {}  # рецензент (session_id, agent_id) → его последний вердикт на sha; порядок — по первой записи
     for r in verdicts:

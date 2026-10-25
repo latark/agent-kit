@@ -902,7 +902,8 @@ def t_reviewers(h):
     merge_case("два accept от двух рецензентов — проходит", h.pre(merge), True)
     h.reset()
     h.seed(tests, rec("reject", "latark/tg-read", 3, OLD, agent_id="argus2", session="s-b"), a1)
-    merge_case("reject на старый коммит новому SHA не мешает", h.pre(merge), True)
+    merge_case("reject на старый коммит, код не посчитан — accept другого argus не снимает (0415b), причина в отказе",
+               h.pre(merge), False, "Перенос не сверен")
     h.reset()
     # сливающий — лид L1 в сессии s-coord; его «принять» — первым, последним — чужое: раньше смотрелся только last
     h.seed(tests, rec("accept", "latark/tg-read", 3, sha, agent_id="L1", session="s-coord"), a1)
@@ -1835,8 +1836,17 @@ def t_carry_unit(h):
           held(rj, opus(A, "x"), f=dict(prints, **{S: ("f-r", "mb2")})) == [R])
     check("свежее accept на S другого argus — снимает reject с R", held(rj, opus(S, "x")) == [])
     check("accept того же рецензента на R — снимает", held(rj, opus(R, "y")) == [])
-    check("accept того же рецензента на R без перечня — снимает (Б6 скажет шлюз)",
-          held(rj, opus(R, "y", checklist=None)) == [])
+    check("правило 1: accept того же рецензента на R без перечня — не снимает (0415b)",
+          held(rj, opus(R, "y", checklist=None)) == [R])
+    check("правило 2: accept другого argus на S, код S равен коду R — не снимает (0415b)",
+          held(rj, opus(S, "x"), f=dict(prints, **{S: ("f-r", "mb2")})) == [R])
+    check("правило 2: код S не посчитан — accept другого argus на S не снимает",
+          held(rj, opus(S, "x"), f=dict(prints, **{S: None})) == [R])
+    check("правило 2: код R не посчитан — accept другого argus на S не снимает",
+          held(rj, opus(S, "x"), f=dict(prints, **{R: None})) == [R])
+    check("правило 2: тот же рецензент принял S с кодом R — снимает (сам передумал)",
+          held(rj, opus(S, "y"), f=dict(prints, **{S: ("f-r", "mb2")})) == [])
+    check("правило 2: тот же рецензент на S без перечня — не снимает", held(rj, opus(S, "y", checklist=None)) == [R])
     check("accept другого argus на R — в силе (metis-0158)", held(rj, opus(R, "x")) == [R])
     rs = opus(S, "y", "reject", checklist=None)
     check("reject на S, accept другого argus на S — в силе (metis-0158)", held(rs, opus(S, "x")) == [S])
@@ -1904,6 +1914,8 @@ def t_carry_r2(h):
     check("п.2: «принять» A записано после «вернуть» R — переносится", got == [A], got)
     got = [r["sha"] for r in mg._carried([opus(A, "x"), rj, opus(R, "y")], N, look)]
     check("п.2: «вернуть» R снял сам рецензент на R — «принять» A до него переносится", got == [A], got)
+    got = [r["sha"] for r in mg._carried([opus(A, "x"), rj, opus(R, "y", checklist=None)], N, look)]
+    check("п.2: тот же рецензент на R без перечня отсечку не снимает — A не переносится", got == [], got)
     got = [r["sha"] for r in mg._carried([opus(A, "x"), rj, opus(R, "w")], N, look)]
     check("п.2: «принять» другого argus на R не снимает отсечку — A не переносится", got == [], got)
     # r3 п.1: тот же рецензент снял «вернуть» R, но «принять» на другом head F — отсечка в силе (обычный поток:
@@ -2066,8 +2078,12 @@ def t_carry_gate(h):
          [opus(s["N1"], "x"), rej(s["Rx"]), tests(s["Nrev"])], False, "«вернуть» (reject)")
     case("длинная история и reject (122-b-2) — в силе", "Nlong", "M1",
          [opus(s["P"], "x"), rej(s["P"]), tests(s["Nlong"])], False, "«вернуть» (reject)")
-    got = case("свежее «принять» на N1 после reject на R — проходит (122-b10 зам. 1)", "N1", "M1",
-               [rej(s["P"]), opus(s["N1"], "x"), tests(s["N1"])], True)
+    case("reject на P, другой argus принял N1 с тем же кодом (правило 2, 0415b) — в силе", "N1", "M1",
+         [rej(s["P"]), opus(s["N1"], "x"), tests(s["N1"])], False, "«вернуть» (reject)")
+    case("reject на P, тот же argus принял N1 с перечнем — проходит", "N1", "M1",
+         [rej(s["P"]), opus(s["N1"], "y", session="s-y"), tests(s["N1"])], True)
+    case("свежее «принять» другого argus на NA после reject на R (код другой) — проходит (122-b10 зам. 1)", "NA",
+         "M1", [rej(s["R"]), opus(s["NA"], "x"), tests(s["NA"])], True)
     got = case("отказ «вернуть» называет head и правило снятия", "N1", "M1",
                [opus(s["P"], "x"), rej(s["Pv"]), tests(s["N1"])], False, f"на {s['Pv'][:12]}")
     if HAVE_TOML:
