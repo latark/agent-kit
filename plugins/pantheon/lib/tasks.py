@@ -589,6 +589,7 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
         raise ValueError(f"нет направления {direction}")
     if fields.get("depends_on"):
         check_depends(load_tasks(pantheon, WORK_TYPES), None, fields["depends_on"])  # новая задача в цикл не входит
+    project = resolve_project(pantheon, direction, project)  # metis-0323: только имя проекта из directions.toml
     tid = new_id(pantheon, direction)
     path = _file_for(pantheon, direction, tid)
     while True:
@@ -661,7 +662,9 @@ def dir_lock(d, wait=10.0):
             os.close(fd)
 
 
-def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None):
+def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None, keep_updated=False):
+    """keep_updated — служебная правка, не движение работы (migrate-project): прежнее updated остаётся, иначе
+    доска, «Готово за сутки» и тревога «застряла» приняли бы её за работу (metis-0323)."""
     tasks = load_tasks(pantheon, WORK_TYPES)
     if tid not in tasks:
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
@@ -671,7 +674,7 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
     if par and tasks.get(par, ("", {}))[1].get("type") == "story" and not (changes.get("mode") or tasks[tid][1].get("mode")):
         raise ValueError(f"{tid}: {NO_MODE_BATCH}")
     with dir_lock(os.path.dirname(tasks[tid][0])):
-        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck)
+        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck, keep_updated)
 
 
 def task_note(pantheon, t, tid, note):
@@ -703,7 +706,7 @@ def task_claim(pantheon, t, tid, by, hours=1.0):
                     note=f"взял {by} до {until[11:16]}", precheck=precheck)
 
 
-def _task_set_locked(path, t, tid, changes, note, actor, precheck):
+def _task_set_locked(path, t, tid, changes, note, actor, precheck, keep_updated=False):
     head, body = read(path)  # заново, уже под блокировкой: чужая правка между чтением и записью не потеряется
     if not head or head.get("id") != tid:
         raise ValueError(f"задача {tid} изменилась — повторите")
@@ -732,7 +735,8 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck):
         head["question_at"] = now_iso(t)
     if changes.get("batch") and not head.get("mode"):
         raise ValueError(NO_MODE_BATCH)
-    head["updated"] = now_iso(t)
+    if not (keep_updated and head.get("updated")):
+        head["updated"] = now_iso(t)
     errs, _ = check_head(head)
     if errs:
         raise ValueError("; ".join(errs))
@@ -3111,3 +3115,98 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             fh.write(new_state)
         os.replace(tmp, state_path)
     return done_lines
+
+
+# --- поле project — только имя проекта из directions.toml (metis-0323) ---------------------------------------------
+INBOX_PROJECT = "входящие"  # у карточек владельца и входящих задач своего направления в реестре нет
+
+
+def load_directions(pantheon):
+    """Записи [[direction]] из <pantheon>/directions.toml → список; None — реестра нет, нечитаем или нет tomllib
+    (Python < 3.11): тогда project не сверяется, как до metis-0323."""
+    try:
+        import tomllib
+        with open(os.path.join(pantheon, "directions.toml"), "rb") as fh:
+            dirs = tomllib.load(fh).get("direction")
+    except (ImportError, OSError, ValueError):
+        return None
+    return [d for d in dirs if isinstance(d, dict)] if isinstance(dirs, list) and dirs else None
+
+
+def known_projects(dirs):
+    return set(project_registry(dirs)) | {INBOX_PROJECT}
+
+
+def direction_project(dirs, direction):
+    """Проект направления по реестру; входящие — «входящие»; направления нет в реестре — None."""
+    if direction == "inbox":
+        return INBOX_PROJECT
+    return next((p for p, r in project_registry(dirs).items() if direction in r["directions"]), None)
+
+
+def resolve_project(pantheon, direction, project):
+    """project новой задачи: пусто → проект направления; чужое имя → ошибка, но направление вне реестра может
+    назвать своё имя — как project_ok в check. Реестра нет или он пуст — как раньше."""
+    dirs = load_directions(pantheon)
+    if dirs is None:
+        return project or direction
+    if project and not project_ok({"project": project, "direction": direction}, dirs, known_projects(dirs)):
+        raise ValueError(f"project «{project[:60]}» — не проект из directions.toml (есть: "
+                         f"{', '.join(sorted(known_projects(dirs)))}); без --project берётся проект направления")
+    return project or direction_project(dirs, direction) or direction
+
+
+def project_ok(h, dirs, known):
+    """project карточки допустим: имя из реестра, а у направления без записи в реестре — его собственное имя."""
+    p, d = h.get("project"), h.get("direction")
+    return p in known or (p == d and direction_project(dirs, d) is None)
+
+
+def project_problems(tasks, dirs):
+    """Задачи с project не из реестра → [(id, текст)]. tasks — load_tasks(...)."""
+    known = known_projects(dirs)
+    return [(tid, f"project «{str(h.get('project'))[:60]}» — не проект из directions.toml; "
+                  f"исправить: pantheon task migrate-project")
+            for tid, (_, h, _) in sorted(tasks.items()) if not project_ok(h, dirs, known)]
+
+
+def project_aliases(dirs):
+    """Прежнее имя → проект реестра: имена направлений и последние части их папок. Имя, которое ведёт к двум разным
+    проектам, и имя, уже являющееся проектом, не берутся."""
+    known, found = known_projects(dirs), {}
+    for p, r in project_registry(dirs).items():
+        names = list(r["directions"])
+        for d in dirs:
+            if d.get("name") in r["directions"] and isinstance(d.get("folders"), list):
+                names += [os.path.basename(str(f).rstrip("/")) for f in d["folders"] if isinstance(f, str)]
+        for n in names:
+            if n and n not in known:
+                found.setdefault(n, set()).add(p)
+    return {n: next(iter(ps)) for n, ps in found.items() if len(ps) == 1}
+
+
+def migrate_projects(pantheon, t, dirs, dry_run=True, actor="агент"):
+    """Карточки с project не из реестра → проект по прежнему имени (направление, папка), иначе проект направления
+    карточки. Запись — task_set со строкой в журнал и прежним updated: перенос не движение работы, старые закрытые
+    карточки не возвращаются на доску и в «Готово за сутки». Повтор ничего не меняет. → (строки «id: было → станет», сбои)."""
+    tasks = load_tasks(pantheon, WORK_TYPES)
+    known, alias = known_projects(dirs), project_aliases(dirs)
+    lines, failed = [], 0
+    for tid, (_, h, _) in sorted(tasks.items()):
+        old = h.get("project")
+        if project_ok(h, dirs, known):
+            continue
+        new = alias.get(old) or direction_project(dirs, h.get("direction"))
+        if new is None:
+            lines.append(f"{tid}: {old!r:.70} → не определить (направление {h.get('direction')} не в реестре)")
+            failed += 1
+            continue
+        lines.append(f"{tid}: {old!r:.70} → {new}")
+        if not dry_run:
+            try:
+                task_set(pantheon, t, tid, {"project": new}, note=f"project «{old}» → «{new}» (по directions.toml)",
+                         actor=actor, keep_updated=True)
+            except ValueError as e:
+                lines.append(f"  не записано: {e}")
+                failed += 1
+    return lines, failed
