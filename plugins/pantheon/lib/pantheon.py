@@ -7527,6 +7527,31 @@ def _results_prune(name, keep):
                 os.remove(e.path)
 
 
+def _run_group(cmd, timeout=None, **kw):
+    """subprocess.run для файла тестов в своей группе процессов (metis-0424): по таймауту и при прерывании гаснет вся
+    группа (killpg SIGKILL), а не только первый процесс — внуки (git, заглушки claude, sleep) не остаются грузить Mac.
+    TimeoutExpired несёт вывод до таймаута, как у subprocess.run."""
+    proc = subprocess.Popen(cmd, start_new_session=True, **kw)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except BaseException as e:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        if not isinstance(e, subprocess.TimeoutExpired):
+            proc.wait()
+            raise
+        try:
+            out, err = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired as e2:  # потомок ушёл в свою сессию и держит вывод — берём, что есть
+            out, err = e2.output, e2.stderr
+            for fh in (proc.stdout, proc.stderr):
+                if fh:
+                    fh.close()
+            proc.wait()
+        raise subprocess.TimeoutExpired(cmd, timeout, output=out, stderr=err) from None
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
 def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=None, bare=None, cache=None):
     """tests/test_*.py папки pdir по одному на каждом python → Counter подписей (python, файл, подпись). only —
     множество (python, файл): гонять только их (база, metis-0358); None — все. Срок — общий deadline прогона:
@@ -7567,7 +7592,7 @@ def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=N
                 tdir = tempfile.mkdtemp(prefix="tmpdir-", dir=tmp)
                 limit = min(PLUGIN_TEST_TIMEOUT, left)
                 try:
-                    r = subprocess.run([py, "-I", os.path.join("tests", f)], cwd=pdir, env={**env0, "HOME": home, "TMPDIR": tdir},
+                    r = _run_group([py, "-I", os.path.join("tests", f)], cwd=pdir, env={**env0, "HOME": home, "TMPDIR": tdir},
                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        timeout=limit)
                     out, rc = r.stdout, r.returncode
