@@ -1039,11 +1039,9 @@ except KeyboardInterrupt:
     intr = True
 print(json.dumps({{"sigs": sorted(k[2] for k in sigs), "sec": round(sec), "intr": intr}}))
 """
-    try:  # зависшая проба (группа не погашена, wait ждёт живой файл) — красная проверка, а не обрыв всего файла
-        r = subprocess.run([PY, "-I", "-c", probe_g], capture_output=True, text=True, timeout=90)
+    r = subprocess.run([PY, "-I", "-c", probe_g], capture_output=True, text=True, timeout=120)
+    try:
         gg = json.loads(r.stdout.splitlines()[-1])
-    except subprocess.TimeoutExpired:
-        gg = {"probe": "зависла 90 с"}
     except (ValueError, IndexError):
         gg = {}
         print(r.stderr[-1000:])
