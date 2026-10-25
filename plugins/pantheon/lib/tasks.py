@@ -2390,9 +2390,17 @@ def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None):
 
 
 
-def card_url(vault, name):
+def view_file_url(view_dir, rel):
+    """Ссылка Obsidian на файл копии вида: obsidian://open?path=<абсолютный путь> (metis-0318). Документация Obsidian
+    URI: path перекрывает vault и file, хранилище ищется по пути, имя хранилища и последний открытый файл не нужны;
+    «/» кодируется как %2F, пробел — %20. Единственное место построения ссылки: card_url, pantheon.board_url."""
     from urllib.parse import quote
-    return f"obsidian://open?vault={quote(vault)}&file={quote('Доска/' + name + '.md')}"
+    return "obsidian://open?path=" + quote(os.path.join(os.path.abspath(view_dir), rel), safe="")
+
+
+def card_url(view_dir, name):
+    """Ссылка на карточку Доска/<name>.md в копии вида view_dir (name — как у card_name, без «.md»)."""
+    return view_file_url(view_dir, "Доска/" + name + ".md")
 
 
 def inbox_items(pantheon):
@@ -2820,7 +2828,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     projects = projects or {}
     if registry is None:
         registry = project_registry([{"name": d, "project": p, "mark": (marks or {}).get(p)} for d, p in projects.items()])
-    vault = os.path.basename(os.path.dirname(os.path.abspath(board)))
+    vault = os.path.dirname(os.path.abspath(board))  # папка копии вида: card_url строит по ней путь
     done_lines, moved_by_owner = [], set()
     os.makedirs(board, exist_ok=True)
     try:

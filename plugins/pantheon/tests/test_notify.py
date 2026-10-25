@@ -145,7 +145,7 @@ def presence_case():
     c = sent(w)
     check("(а) простой 1 мин («здесь») и 5 мин («рядом») — без macOS по решению", not pings(a) and not pings(b))
     check("(а) простой 15 мин («нет») — одно уведомление «❓ Вопрос к вам» с карточкой и группой id",
-          len(c) == 1 and "Вопрос к вам: Присутствие" in c[0][1] and "file=" in c[0][2] and c[0][3] == q)
+          len(c) == 1 and "Вопрос к вам: Присутствие" in c[0][1] and c[0][2].startswith("obsidian://open?path=%2F") and "file=" not in c[0][2] and c[0][3] == q)
 
 
 def quiet_case():
