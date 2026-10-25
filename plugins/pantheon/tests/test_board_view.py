@@ -449,6 +449,39 @@ def bookmark_checks():
         T._sync_bookmarks(v, st, al)
         check("закладки (з): следующий тик после сбоя досыпает все закладки",
               paths(json.load(open(p, encoding="utf-8"))) == want_paths and sorted(st["bookmarks_seen"]) == sorted(want_paths))
+        # одиночный суррогат в названии закладки (половина эмодзи из JSON.stringify): не кодируется в utf-8
+        for kind in ("bookmarks", "types"):
+            v, p = vault("sur-" + kind, json.dumps({"items": [{"type": "file", "ctime": 1, "path": "Чужая.md",
+                                                           "title": "Обрезанный \ud83d"}]}) if kind == "bookmarks" else None)
+            if kind == "types":
+                with open(os.path.join(v, ".obsidian", "types.json"), "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"types": {"чужое": "text", "k\ud83d": "text"}}))
+            alerts.clear()
+            st = {}
+            try:
+                if kind == "bookmarks":
+                    T._sync_bookmarks(v, st, al)
+                else:
+                    T._sync_types(v, al)
+                ok = True
+            except Exception as e:
+                ok = repr(e)
+            left = [x for x in os.listdir(os.path.join(v, ".obsidian")) if x.endswith(".tmp")]
+            check(f"закладки (и): суррогат ({kind}) — не падает, tmp не остаётся, тревога есть",
+                  ok is True and not left and len(alerts) == 1 and alerts[0][0] == "board-" + kind, (ok, left, alerts))
+            if kind == "bookmarks":
+                check("закладки (и): суррогат — bookmarks_seen не обновлён", "bookmarks_seen" not in st, st)
+        # board_sync с суррогатом доходит до записи board.json
+        v, p = vault("sur-bs", json.dumps({"items": [{"type": "file", "ctime": 1, "path": "Чужая.md", "title": "О \ud83d"}]}))
+        sp = os.path.join(tmp, "state-sur", "board.json")
+        pan = os.path.join(tmp, "pan-sur")
+        os.makedirs(pan)
+        try:
+            T.board_sync(pan, os.path.join(v, "Доска"), sp, os.path.join(tmp, "log"), T0 + 50, alert=al)
+            ok = os.path.exists(sp)
+        except Exception as e:
+            ok = repr(e)
+        check("закладки (и): board_sync с суррогатом доходит до записи board.json", ok is True, ok)
     finally:
         shutil.rmtree(tmp, True)
 

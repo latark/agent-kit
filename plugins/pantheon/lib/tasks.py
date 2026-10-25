@@ -2497,9 +2497,16 @@ def _write_plain(path, text):
     """Запись вне корня Пантеона (папка доски, хранилище, состояние): через временный файл."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def node_texts(roles, tasks, names, slugs):
@@ -2765,7 +2772,7 @@ def _sync_bookmarks(vault, state, alert, src=None):
     try:
         if changed:
             _write_plain(p, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-    except OSError as e:
+    except (OSError, ValueError) as e:  # ValueError: одиночный суррогат в названии закладки не кодируется в utf-8
         alert("board-bookmarks", type(e).__name__, f"доска: {p} не записать ({e}) — закладки не обновлены", "board")
         return
     state["bookmarks_seen"] = sorted(seen | {f.get("path") for g in wanted if isinstance(g, dict)
@@ -2797,7 +2804,10 @@ def _sync_types(vault, alert):
     if all(data["types"].get(k) == v for k, v in PROP_TYPES.items()):
         return
     data["types"].update(PROP_TYPES)
-    _write_plain(p, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    try:
+        _write_plain(p, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    except (OSError, ValueError) as e:
+        alert("board-types", type(e).__name__, f"доска: {p} не записать ({e}) — типы свойств не обновлены", "board")
 
 
 def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None, primary=True, projects=None,
