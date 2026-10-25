@@ -589,6 +589,7 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
         raise ValueError(f"нет направления {direction}")
     if fields.get("depends_on"):
         check_depends(load_tasks(pantheon, WORK_TYPES), None, fields["depends_on"])  # новая задача в цикл не входит
+    project = resolve_project(pantheon, direction, project)  # metis-0323: только имя проекта из directions.toml
     tid = new_id(pantheon, direction)
     path = _file_for(pantheon, direction, tid)
     while True:
@@ -661,7 +662,9 @@ def dir_lock(d, wait=10.0):
             os.close(fd)
 
 
-def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None):
+def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None, keep_updated=False):
+    """keep_updated — служебная правка, не движение работы (migrate-project): прежнее updated остаётся, иначе
+    доска, «Готово за сутки» и тревога «застряла» приняли бы её за работу (metis-0323)."""
     tasks = load_tasks(pantheon, WORK_TYPES)
     if tid not in tasks:
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
@@ -671,7 +674,7 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
     if par and tasks.get(par, ("", {}))[1].get("type") == "story" and not (changes.get("mode") or tasks[tid][1].get("mode")):
         raise ValueError(f"{tid}: {NO_MODE_BATCH}")
     with dir_lock(os.path.dirname(tasks[tid][0])):
-        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck)
+        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck, keep_updated)
 
 
 def task_note(pantheon, t, tid, note):
@@ -703,7 +706,7 @@ def task_claim(pantheon, t, tid, by, hours=1.0):
                     note=f"взял {by} до {until[11:16]}", precheck=precheck)
 
 
-def _task_set_locked(path, t, tid, changes, note, actor, precheck):
+def _task_set_locked(path, t, tid, changes, note, actor, precheck, keep_updated=False):
     head, body = read(path)  # заново, уже под блокировкой: чужая правка между чтением и записью не потеряется
     if not head or head.get("id") != tid:
         raise ValueError(f"задача {tid} изменилась — повторите")
@@ -732,7 +735,8 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck):
         head["question_at"] = now_iso(t)
     if changes.get("batch") and not head.get("mode"):
         raise ValueError(NO_MODE_BATCH)
-    head["updated"] = now_iso(t)
+    if not (keep_updated and head.get("updated")):
+        head["updated"] = now_iso(t)
     errs, _ = check_head(head)
     if errs:
         raise ValueError("; ".join(errs))
@@ -1005,10 +1009,16 @@ def plan_batch(tasks, tids, t, busy=None, stale_h=STALE_HOURS):
     return out
 
 
+def id_link(i, names):
+    """Ссылка на карточку задачи `[[<имя файла>|<id>]]`; карточки нет — голый id (metis-0322)."""
+    return f"[[{names[i]}|{i}]]" if names.get(i) else i
+
+
 def card_ctx(tid, head, tasks, names, cross, t=None, night_end="08:00", open_prs=None):
     """Что карточке задачи нужно знать о других: незакрытые зависимости, пересечения, пачка и место в ней, слова
     «внимания» по всему (review без PR, готово без приёмки)."""
-    ctx = {"waits": open_deps(head, tasks), "cross": cross.get(tid) or []}
+    ctx = {"waits": [id_link(i, names) for i in open_deps(head, tasks)],
+           "cross": [id_link(i, names) for i in cross.get(tid) or []]}
     if t is not None:
         ctx["flags"] = extra_attention(head, tasks[tid][2] if tid in tasks else "", tasks, t, night_end, open_prs)
     sid = head.get("parent")
@@ -1038,7 +1048,10 @@ def pct_text(x):
 
 
 def story_children(sid, tasks):
-    return [tid for tid, (_, h, _) in tasks.items() if h.get("parent") == sid and h.get("type") == "task"]
+    """Задачи пачки и её дети-пачки (пачка пачек, metis-0322): у ребёнка-пачки parent или batch равен id этой пачки."""
+    return [tid for tid, (_, h, _) in tasks.items() if tid != sid and (
+        h.get("parent") == sid and h.get("type") in ("task", "story")
+        or h.get("type") == "story" and h.get("batch") == sid)]
 
 
 def _prio(h):
@@ -1083,7 +1096,8 @@ def story_info(sid, tasks):
             "budget": pct(tasks[sid][1].get("estimate")) if sid in tasks else None,
             "closed": [i for i in ids if heads[i].get("status") in ("done", "dropped")],
             "chain": [i for i in ids if i not in par], "parallel": par, "cross": cross,
-            "unknown": [i for i in ids if not heads[i].get("touches")]}
+            "unknown": [i for i in ids if heads[i].get("type") != "story" and not heads[i].get("touches")],
+            "total": sum(1 for i in ids if heads[i].get("type") != "story")}
 
 
 def over_budget(inf):
@@ -1191,27 +1205,37 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
     over = over_budget(inf)
     for k in ("Пачка", "Порядок", "Режим", "Режим почему", "Зависит от", "Области", "Пересечения"):
         card.pop(k, None)
+    lk = lambda i: id_link(i, names)  # noqa: E731
+    cross_l = [re.sub(r"^(\S+) и (\S+):", lambda m: f"{lk(m.group(1))} и {lk(m.group(2))}:", x) for x in inf["cross"]]
+    unknown = f"у {len(inf['unknown'])} из {inf['total']}" if inf["unknown"] else None
     card.update({"Пульт": link(f"{PROJECTS_DIR}/{project}|{project}") if project else None,
                  "Когда": _date(head.get("night"), 10) or _date(head.get("due"), 10),
                  "Бюджет": head.get("estimate"),
                  "Сумма оценок": pct_text(inf["sum"]) + (" ⚠ больше бюджета" if over else ""),
                  "Закрыто": f"{len(inf['closed'])} из {len(inf['ids'])}",
-                 "Цепочка": " → ".join(inf["chain"]) or None, "Параллельно": inf["parallel"] or None,
-                 "Пересечения": inf["cross"] or None, "Области не указаны": inf["unknown"] or None, "Тип": "пачка"})
+                 "Цепочка": [lk(i) for i in inf["chain"]] or None, "Параллельно": [lk(i) for i in inf["parallel"]] or None,
+                 "Пересечения": cross_l or None, "Области не указаны": unknown, "Тип": "пачка"})
     summary = (f"> **Пачка:** сумма оценок {pct_text(inf['sum'])}"
                + (f" из бюджета {pct_text(inf['budget'])}" if inf["budget"] is not None else " · бюджет не задан")
                + (" · ⚠ больше бюджета" if over else "") + f" · закрыто {card['Закрыто']}"
-               + (f"\n> **Цепочка одному исполнителю:** {' → '.join(inf['chain'])}" if inf["chain"] else "")
-               + (f"\n> **Параллельно:** {', '.join(inf['parallel'])}" if inf["parallel"] else "")
-               + (f"\n> **Пересечения по файлам:** {'; '.join(inf['cross'])}" if inf["cross"] else "")
-               + (f"\n> **Области не указаны:** {', '.join(inf['unknown'])}" if inf["unknown"] else ""))
+               + (f"\n> **Цепочка одному исполнителю:** {' → '.join(lk(i) for i in inf['chain'])}" if inf["chain"] else "")
+               + (f"\n> **Параллельно:** {', '.join(lk(i) for i in inf['parallel'])}" if inf["parallel"] else "")
+               + (f"\n> **Пересечения по файлам:** {'; '.join(cross_l)}" if inf["cross"] else "")
+               + (f"\n> **Области не указаны:** {unknown}" if unknown else ""))
     rows = []
+    cell = lambda i: f"[[{names[i]}\\|{i}]]" if names.get(i) else i  # noqa: E731  (в таблице «|» экранируется)
     for n, i in enumerate(inf["ids"], 1):
         h = tasks[i][1]
-        ref = f"[[{names[i]}\\|{i}]]" if names.get(i) else i
-        rows.append(f"| {n} | {ref} | {_plain(one_line(h.get('title'))).replace('|', '/')} | {label_of(h)} | "
-                    f"{_plain(h.get('estimate') or '—').replace('|', '/')} | {MODES.get(h.get('mode')) or '—'} | "
-                    f"{', '.join(open_deps(h, tasks)) or '—'} |")
+        # «Ждёт»: открытые depends_on и ближайшее незакрытое прошлое звено цепочки (только у не начатых: todo или пусто); «ничего» — законно пусто
+        waits = [cell(d) for d in open_deps(h, tasks)]
+        k = inf["chain"].index(i) if i in inf["chain"] else 0
+        prev = next((j for j in reversed(inf["chain"][:k]) if j not in inf["closed"]), None)  # ближайшее незакрытое
+        if prev and cell(prev) not in waits and h.get("status") in ("todo", None, ""):
+            waits.append(cell(prev))
+        mode = MODES.get(h.get("mode")) or ("—" if h.get("type") == "story" else "не задан")
+        rows.append(f"| {n} | {cell(i)} | {_plain(one_line(h.get('title'))).replace('|', '/')} | {label_of(h)} | "
+                    f"{_plain(h.get('estimate') or '—').replace('|', '/')} | {mode} | "
+                    f"{', '.join(waits) or 'ничего'} |")
     table = ("## Состав\n\n| № | Задача | Название | Статус | Оценка | Режим | Ждёт |\n|---|---|---|---|---|---|---|\n"
              + ("\n".join(rows) if rows else "| — | задач пока нет | | | | | |"))
     first, sep, rest = text[1:].partition("\n\n")
@@ -1577,7 +1601,7 @@ PROP_TYPES = {"Внимание": "multitext", "Приоритет": "number", "
               "Вопрос задан": "datetime", "Вопрос": "text", "Закрыта": "date", "Кому": "text", "tags": "tags",
               "Выпуск": "text", "Пачка": "text", "Ночь": "date", "Оценка": "text", "Факт": "text", "Приёмка": "text",
               "Порядок": "number", "Режим": "text", "Зависит от": "multitext", "Области": "multitext",
-              "Пересечения": "multitext", "Параллельно": "multitext", "Области не указаны": "multitext",
+              "Пересечения": "multitext", "Цепочка": "multitext", "Параллельно": "multitext", "Области не указаны": "text",
               # заметка проекта на пульте
               "Ранг": "number", "Обновлено": "date", "Открыто": "number", "В работе": "number", "Ждёт вас": "number",
               "Просрочено": "number", "Пересечений": "number", "Пачек": "number"}
@@ -2386,9 +2410,17 @@ def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None):
 
 
 
-def card_url(vault, name):
+def view_file_url(view_dir, rel):
+    """Ссылка Obsidian на файл копии вида: obsidian://open?path=<абсолютный путь> (metis-0318). Документация Obsidian
+    URI: path перекрывает vault и file, хранилище ищется по пути, имя хранилища и последний открытый файл не нужны;
+    «/» кодируется как %2F, пробел — %20. Единственное место построения ссылки: card_url, pantheon.board_url."""
     from urllib.parse import quote
-    return f"obsidian://open?vault={quote(vault)}&file={quote('Доска/' + name + '.md')}"
+    return "obsidian://open?path=" + quote(os.path.join(os.path.abspath(view_dir), rel), safe="")
+
+
+def card_url(view_dir, name):
+    """Ссылка на карточку Доска/<name>.md в копии вида view_dir (name — как у card_name, без «.md»)."""
+    return view_file_url(view_dir, "Доска/" + name + ".md")
 
 
 def inbox_items(pantheon):
@@ -2493,9 +2525,16 @@ def _write_plain(path, text):
     """Запись вне корня Пантеона (папка доски, хранилище, состояние): через временный файл."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def node_texts(roles, tasks, names, slugs):
@@ -2684,6 +2723,90 @@ def _sync_help(board, state, alert):
         alert("board-help", type(e).__name__, f"доска: справку по видам не записать ({e})", "board")
 
 
+BOOKMARKS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "share",
+                              "pantheon-view-obsidian", "bookmarks.json")
+
+
+# Закладки образца до metis-0324 (его выдавал view-sync.sh): у кого bookmarks.json уже есть, а «bookmarks_seen» ещё нет,
+# эти пути считаются выданными — удалённую владельцем первый тик не возвращает; досыпает только новые.
+BOOKMARKS_LEGACY = ("Доска/Сводка.md", "Доска/Доска.base", "Кто есть кто.md", "Доска/Проблемы.md")
+
+
+def _bookmark_files(items):
+    """Все закладки-файлы дерева (группы вложены)."""
+    out = []
+    for it in items:
+        if isinstance(it, dict) and it.get("type") == "group" and isinstance(it.get("items"), list):
+            out += _bookmark_files(it["items"])
+        elif isinstance(it, dict) and it.get("type") == "file":
+            out.append(it)
+    return out
+
+
+def _sync_bookmarks(vault, state, alert, src=None):
+    """.obsidian/bookmarks.json хранилища (metis-0324): набор закладок по умолчанию (share/…/bookmarks.json — он же образец
+    для view-sync.sh) — часть вида. Как Доска.base: недостающие свои добавляет, закладки владельца и их порядок не трогает;
+    свою, удалённую владельцем, не возвращает — в состоянии «bookmarks_seen» пути, уже выданные или найденные у владельца.
+    Битый JSON — файл не тронут, одна тревога, состояние не меняется (поправит — тик продолжит). Запись атомарная.
+    Нет .obsidian — не трогаем (образец положит view-sync.sh). Новый вид или справка — строка в образце, в том же PR."""
+    if not os.path.isdir(os.path.join(vault, ".obsidian")):
+        return
+    try:
+        with open(BOOKMARKS_PATH if src is None else src, encoding="utf-8") as fh:
+            wanted = json.load(fh)["items"]
+        if not isinstance(wanted, list):
+            return
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    p = os.path.join(vault, ".obsidian", "bookmarks.json")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            raw = fh.read()
+    except FileNotFoundError:
+        raw = None
+    except (OSError, UnicodeDecodeError) as e:
+        alert("board-bookmarks", "unreadable", f"доска: {p} не читается ({e}) — закладки не обновлены", "board")
+        return
+    data = {"items": []}
+    if raw is not None:
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict) or not isinstance(data.setdefault("items", []), list):
+                raise ValueError("нет списка items")
+        except ValueError as e:
+            alert("board-bookmarks", _sha(raw), f"доска: {p} — битый JSON ({e}); закладки не обновлены, файл не тронут",
+                  "board")
+            return
+    seen = state.get("bookmarks_seen")
+    seen = {x for x in seen if isinstance(x, str)} if isinstance(seen, list) else set()
+    if "bookmarks_seen" not in state and raw is not None:
+        seen |= set(BOOKMARKS_LEGACY)
+    have = {it["path"] for it in _bookmark_files(data["items"]) if isinstance(it.get("path"), str)}
+    changed = False
+    for grp in wanted:
+        if not isinstance(grp, dict) or not isinstance(grp.get("items"), list):
+            continue
+        add = [dict(f) for f in grp["items"] if f.get("path") not in have and f.get("path") not in seen]
+        if not add:
+            continue
+        mine = next((g for g in data["items"] if isinstance(g, dict) and g.get("type") == "group"
+                     and g.get("title") == grp.get("title") and isinstance(g.get("items"), list)), None)
+        if mine is None:
+            mine = {k: v for k, v in grp.items() if k != "items"}
+            mine["items"] = []
+            data["items"].append(mine)
+        mine["items"] += add
+        changed = True
+    try:
+        if changed:
+            _write_plain(p, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    except (OSError, ValueError) as e:  # ValueError: одиночный суррогат в названии закладки не кодируется в utf-8
+        alert("board-bookmarks", type(e).__name__, f"доска: {p} не записать ({e}) — закладки не обновлены", "board")
+        return
+    state["bookmarks_seen"] = sorted(seen | {f.get("path") for g in wanted if isinstance(g, dict)
+                                             for f in g.get("items", []) if f.get("path")})
+
+
 def _sync_types(vault, alert):
     """.obsidian/types.json хранилища: типы свойств карточек. Свои ключи ставит, чужие не трогает, пишет только при
     изменении; битый JSON — не трогает, одна тревога."""
@@ -2709,7 +2832,10 @@ def _sync_types(vault, alert):
     if all(data["types"].get(k) == v for k, v in PROP_TYPES.items()):
         return
     data["types"].update(PROP_TYPES)
-    _write_plain(p, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    try:
+        _write_plain(p, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    except (OSError, ValueError) as e:
+        alert("board-types", type(e).__name__, f"доска: {p} не записать ({e}) — типы свойств не обновлены", "board")
 
 
 def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None, primary=True, projects=None,
@@ -2722,7 +2848,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     projects = projects or {}
     if registry is None:
         registry = project_registry([{"name": d, "project": p, "mark": (marks or {}).get(p)} for d, p in projects.items()])
-    vault = os.path.basename(os.path.dirname(os.path.abspath(board)))
+    vault = os.path.dirname(os.path.abspath(board))  # папка копии вида: card_url строит по ней путь
     done_lines, moved_by_owner = [], set()
     os.makedirs(board, exist_ok=True)
     try:
@@ -3012,6 +3138,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     _sync_base(board, state, state_path, t, alert, "Пульт.base", PULT_FILE, PULT_VERSION, "pult", ())
     _sync_projects(board, state, tasks, t, registry, roles, alert)
     _sync_types(os.path.dirname(os.path.abspath(board)), alert)
+    _sync_bookmarks(os.path.dirname(os.path.abspath(board)), state, alert)
     _sync_snippet(os.path.dirname(os.path.abspath(board)), state, state_path, t, alert)
     new_state = json.dumps(state, ensure_ascii=False, indent=1)
     try:
@@ -3026,3 +3153,98 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             fh.write(new_state)
         os.replace(tmp, state_path)
     return done_lines
+
+
+# --- поле project — только имя проекта из directions.toml (metis-0323) ---------------------------------------------
+INBOX_PROJECT = "входящие"  # у карточек владельца и входящих задач своего направления в реестре нет
+
+
+def load_directions(pantheon):
+    """Записи [[direction]] из <pantheon>/directions.toml → список; None — реестра нет, нечитаем или нет tomllib
+    (Python < 3.11): тогда project не сверяется, как до metis-0323."""
+    try:
+        import tomllib
+        with open(os.path.join(pantheon, "directions.toml"), "rb") as fh:
+            dirs = tomllib.load(fh).get("direction")
+    except (ImportError, OSError, ValueError):
+        return None
+    return [d for d in dirs if isinstance(d, dict)] if isinstance(dirs, list) and dirs else None
+
+
+def known_projects(dirs):
+    return set(project_registry(dirs)) | {INBOX_PROJECT}
+
+
+def direction_project(dirs, direction):
+    """Проект направления по реестру; входящие — «входящие»; направления нет в реестре — None."""
+    if direction == "inbox":
+        return INBOX_PROJECT
+    return next((p for p, r in project_registry(dirs).items() if direction in r["directions"]), None)
+
+
+def resolve_project(pantheon, direction, project):
+    """project новой задачи: пусто → проект направления; чужое имя → ошибка, но направление вне реестра может
+    назвать своё имя — как project_ok в check. Реестра нет или он пуст — как раньше."""
+    dirs = load_directions(pantheon)
+    if dirs is None:
+        return project or direction
+    if project and not project_ok({"project": project, "direction": direction}, dirs, known_projects(dirs)):
+        raise ValueError(f"project «{project[:60]}» — не проект из directions.toml (есть: "
+                         f"{', '.join(sorted(known_projects(dirs)))}); без --project берётся проект направления")
+    return project or direction_project(dirs, direction) or direction
+
+
+def project_ok(h, dirs, known):
+    """project карточки допустим: имя из реестра, а у направления без записи в реестре — его собственное имя."""
+    p, d = h.get("project"), h.get("direction")
+    return p in known or (p == d and direction_project(dirs, d) is None)
+
+
+def project_problems(tasks, dirs):
+    """Задачи с project не из реестра → [(id, текст)]. tasks — load_tasks(...)."""
+    known = known_projects(dirs)
+    return [(tid, f"project «{str(h.get('project'))[:60]}» — не проект из directions.toml; "
+                  f"исправить: pantheon task migrate-project")
+            for tid, (_, h, _) in sorted(tasks.items()) if not project_ok(h, dirs, known)]
+
+
+def project_aliases(dirs):
+    """Прежнее имя → проект реестра: имена направлений и последние части их папок. Имя, которое ведёт к двум разным
+    проектам, и имя, уже являющееся проектом, не берутся."""
+    known, found = known_projects(dirs), {}
+    for p, r in project_registry(dirs).items():
+        names = list(r["directions"])
+        for d in dirs:
+            if d.get("name") in r["directions"] and isinstance(d.get("folders"), list):
+                names += [os.path.basename(str(f).rstrip("/")) for f in d["folders"] if isinstance(f, str)]
+        for n in names:
+            if n and n not in known:
+                found.setdefault(n, set()).add(p)
+    return {n: next(iter(ps)) for n, ps in found.items() if len(ps) == 1}
+
+
+def migrate_projects(pantheon, t, dirs, dry_run=True, actor="агент"):
+    """Карточки с project не из реестра → проект по прежнему имени (направление, папка), иначе проект направления
+    карточки. Запись — task_set со строкой в журнал и прежним updated: перенос не движение работы, старые закрытые
+    карточки не возвращаются на доску и в «Готово за сутки». Повтор ничего не меняет. → (строки «id: было → станет», сбои)."""
+    tasks = load_tasks(pantheon, WORK_TYPES)
+    known, alias = known_projects(dirs), project_aliases(dirs)
+    lines, failed = [], 0
+    for tid, (_, h, _) in sorted(tasks.items()):
+        old = h.get("project")
+        if project_ok(h, dirs, known):
+            continue
+        new = alias.get(old) or direction_project(dirs, h.get("direction"))
+        if new is None:
+            lines.append(f"{tid}: {old!r:.70} → не определить (направление {h.get('direction')} не в реестре)")
+            failed += 1
+            continue
+        lines.append(f"{tid}: {old!r:.70} → {new}")
+        if not dry_run:
+            try:
+                task_set(pantheon, t, tid, {"project": new}, note=f"project «{old}» → «{new}» (по directions.toml)",
+                         actor=actor, keep_updated=True)
+            except ValueError as e:
+                lines.append(f"  не записано: {e}")
+                failed += 1
+    return lines, failed

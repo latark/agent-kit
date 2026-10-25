@@ -65,6 +65,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --depends-on / depends_on= с несуществующим id, самой собой или циклом — отказ при записи (metis-0248)
   pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"]   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
+  pantheon task migrate-project [--write]   project карточек → имя проекта из directions.toml; без --write — сухой
+                    прогон «id: было → станет», с --write — запись через task set со строкой в журнал (metis-0323)
   pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту
   pantheon task attach ID ПАЧКА | detach ID   задача в пачку (story) и обратно; show ПАЧКА — состав и сумма оценок
   pantheon executors                    набор исполнителей кода (Claude всегда, Codex — дополнение) и включён ли Codex
@@ -595,8 +597,7 @@ APP = os.path.join(HOME, "Applications", "Доска.app")
 
 
 def board_url(name="Доска.base"):
-    from urllib.parse import quote
-    return f"obsidian://open?vault={quote(os.path.basename(VIEW))}&file={quote('Доска/' + name)}"
+    return tasks_mod().view_file_url(VIEW, "Доска/" + name)
 
 
 def _notifier():
@@ -6344,7 +6345,10 @@ def board_domains():
 def board_status_sync(T):
     """Статусы в шаг с работой (metis-0397, п. 7–8): задача todo с живой worktree на ветке с её id → doing, пачка — по
     составу. До сборки видов доски: виды Obsidian сразу видят новые статусы. Задача, которую вернули в todo, а работа
-    идёт, — тревога один раз на набор задач. Сбой — тревога, проход доски идёт дальше. → строки для вывода."""
+    идёт, — тревога один раз на набор задач; пачка, которую проход не двигает, — один раз на набор «id и причина»:
+    сменилась причина — тревога заново. Под блокировкой записи сдвиг сверяет статус, а у пачки ещё и вопрос владельцу
+    (STORY_HOLD): поставили между планом и записью — не сдвигаем. Сбой — тревога, проход доски идёт дальше.
+    → строки для вывода."""
     out = []
     try:
         S = boardstatus_mod()
@@ -6364,9 +6368,13 @@ def board_status_sync(T):
             def same(h, old=old, tid=tid):
                 if h.get("status") != old:
                     raise ValueError(f"{tid}: статус уже {h.get('status')}")
+                held = [f for f in S.STORY_HOLD if h.get(f)] if h.get("type") == "story" else []
+                if held:  # вопрос поставили после плана: done стёр бы его (metis-0412)
+                    raise ValueError(f"{tid}: ждёт ответа владельца ({', '.join(held)})")
             try:
                 T.task_set(PANTHEON, now(), tid, ch, note=note, actor="плановый проход", precheck=same)
-                out.append(f"статус · {tid}: {old} → {ch['status']}")
+                out.append(f"статус · {tid}: {old} → {ch['status']}" if "status" in ch
+                           else f"статус · {tid}: {old}, отметка в журнале")
             except ValueError as e:  # задачу правят прямо сейчас — следующий проход посмотрит заново
                 out.append(f"статус · {tid}: не сдвинут ({e})")
     except Exception as e:  # noqa: BLE001 — сбой сверки статусов не ломает проход доски
@@ -6382,8 +6390,8 @@ def board_status_sync(T):
     else:
         clear_once("board-todo-live")
     if held:  # пачку проход не двигает: решение за человеком (вопрос владельцу, ручной статус)
-        alert_once("board-story-hold", ",".join(sorted(held)), "доска: статус пачки по составу не поставлен — "
-                   + "; ".join(f"{sid} ({why})" for sid, why in sorted(held.items()))
+        reasons = "; ".join(f"{sid} ({why})" for sid, why in sorted(held.items()))  # ключ — id и причина (metis-0412)
+        alert_once("board-story-hold", reasons, "доска: статус пачки по составу не поставлен — " + reasons
                    + ". Решить руками — pantheon task set ID status=…", "board")
     else:
         clear_once("board-story-hold")
@@ -6833,6 +6841,24 @@ def board_drift_report(T, quiet):
         print(f"предупреждение · доска · {k}: {text}")
 
 
+def check_task_projects(T, quiet):
+    """project задачи — только имя проекта из directions.toml (metis-0323). → число задач с чужим именем; на тике
+    (quiet) — одна тревога на набор. Реестра нет — не сверяем."""
+    dirs = T.load_directions(PANTHEON)
+    bad = T.project_problems(T.load_tasks(PANTHEON, T.WORK_TYPES), dirs) if dirs else []
+    for tid, text in bad[:20]:
+        print(f"ОШИБКА · {tid}: {text}")
+    if len(bad) > 20:
+        print(f"ОШИБКА · ещё {len(bad) - 20} задач с project не из directions.toml: pantheon task migrate-project")
+    if bad:
+        if quiet:
+            alert_once("check-task-projects", "|".join(i for i, _ in bad),
+                       f"задачи с project не из directions.toml: {len(bad)} — pantheon task migrate-project", "check")
+    else:
+        clear_once("check-task-projects")
+    return len(bad)
+
+
 def check(paths=None, quiet=False):
     T = tasks_mod()
     skill_paths = [p for p in (paths or []) if os.path.basename(p) == "SKILL.md"]
@@ -6869,6 +6895,7 @@ def check(paths=None, quiet=False):
     if not paths:
         _check_long_state(quiet)
         coord_errs = check_coordinators(quiet)
+        coord_errs += check_task_projects(T, quiet)
         for dname, fs in sorted((read_json(path("domains.json"), {}).get("domains") or {}).items()):
             # allow со старым mtime сборка по --if-changed не видит: check снимает окно сам, иначе следующий wake поднял
             # бы сессию снова (ревью argus PR #32)
@@ -7045,6 +7072,21 @@ def task_cmd(rest):
             print("\n".join(plan) if plan else "переносить нечего")
             if dry and plan:
                 print("(--dry-run: ничего не записано)")
+        elif sub == "migrate-project":
+            if any(a != "--write" for a in args):
+                print(f"pantheon task migrate-project: не понял «{' '.join(args)}» — допустим только --write", file=sys.stderr)
+                return 2
+            dirs = T.load_directions(PANTHEON)
+            if dirs is None:
+                print("pantheon task migrate-project: нет читаемого directions.toml", file=sys.stderr)
+                return 1
+            plan, failed = T.migrate_projects(PANTHEON, now(), dirs, dry_run="--write" not in args)
+            print("\n".join(plan) if plan else "переносить нечего")
+            if plan and "--write" not in args:
+                print(f"(сухой прогон: {len(plan)} карточек, ничего не записано; запись — с --write)")
+            if failed:
+                print(f"не перенесено: {failed}", file=sys.stderr)
+                return 1
         elif sub == "detach" and len(args) == 1:
             sid = T.task_detach(PANTHEON, now(), args[0])
             print(f"{args[0]}: откреплена от пачки {sid}")
@@ -7144,10 +7186,30 @@ def usage_report(rest):
 # Одинаковая строка FAIL с другой причиной гасится: деталь — в самой строке, а строже — нестабильно на окружении.
 # Хеш дерева проверенной копии сверяется с тем, что встало: update сам обновляет каталог и может поставить версию
 # новее проверенной. Метка testing ловит прерванный прогон (таймаут задачи тика, сбой): такая версия — красная.
+# metis-0424: «не досчитано» — не «сломано». Файл, не успевший в срок прогона (у новой или у нужной базы), — метка
+# partial, а не red: следующий проход продолжает тот же прогон (run в метке), уже посчитанные файлы берёт из кэша
+# результатов STATE/plugins/results/<плагин>-<хеш дерева>.json — ключ (плагин, хеш дерева, python, файл). Новая версия
+# берёт из кэша только файлы своего прогона (тот же run и те же соседи — ctx): удалённая метка — свежий прогон. База
+# берёт только чистый результат своего дерева любого прогона — прежде всего тот, что оно получило, когда само шло
+# «новой» (_base_clean). Файл базы с падением или таймаутом гоняется заново на каждом проходе и в кэш не пишется:
+# падение, снятое при других соседях или случайно, не гасит падение новой (решение владельца 25.10, вариант Б).
+# Остальные файлы база гоняет. Падение, которое уже не изменится, — red
+# сразу, даже если другие файлы не успели. partial подряд — не больше PLUGIN_PARTIAL_MAX проходов, затем red с тревогой.
+# Под давлением памяти (своп выше порога дежурного) прогон откладывается, не дольше PLUGIN_DEFER_MAX от первой отсрочки
+# (deferred_since переходит в метку partial).
 
 MARKETPLACE = "agent-kit"
-PLUGIN_TEST_TIMEOUT = 600    # один файл тестов
-PLUGIN_RUN_LIMIT = 1800      # весь прогон плагина (новая + база, все python) — меньше timeout задачи в schedule.toml
+# один файл тестов (metis-0424): было 600 — test_guard на системном 3.9 не успевал (24.10, guard 0.5.18 и 0.5.19).
+# Таймаут — страховка от зависания, а не проверка скорости; меньше PLUGIN_RUN_LIMIT, поэтому первый незакэшированный
+# файл продолжения успевает всегда и прогон движется вперёд с каждым проходом
+PLUGIN_TEST_TIMEOUT = 1500
+PLUGIN_RUN_LIMIT = 1800      # прогон за один проход (новая + база, все python) — меньше timeout задачи в schedule.toml
+PLUGIN_RESULTS_KEEP = 8      # кэш результатов: деревьев на плагин (новые и установленные), старые удаляются
+PLUGIN_DEFER_MAX = 3 * 3600  # своп выше порога откладывает прогон не дольше этого: иначе выпуск не встал бы никогда
+# проходов подряд с меткой partial, после которых версия красная с тревогой (ревью 133, п.1): прогон, который не
+# движется (соседи копии меняются при каждом слиянии, и кэш новой сбрасывается), не держит очередь плагинов вечно
+PLUGIN_PARTIAL_MAX = 6
+PARTIAL = "partial"
 NO_TESTS = "нет тестов"
 WHY_DETAIL = "последняя строка — деталь провала, не итог"
 BARE_END = "код 0, строки ok и ни строки итога — оборвался без итога"  # metis-0361
@@ -7517,11 +7579,87 @@ def _base_targets(got_new, bare=()):
     return ({(py, f) for (py, f, _s) in got_new} - stuck) | set(bare)
 
 
-def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=None, bare=None):
+def _results_path(name, digest):
+    return path("plugins", "results", f"{_plugins_safe(name)}-{_plugins_safe(digest)}.json")
+
+
+class _Results:
+    """Кэш результатов файлов тестов одного дерева плагина (metis-0424): {"<python>\\t<файл>": запись}. Запись — код
+    (None — таймаут), подписи, _ok_count, bare, когда и за сколько секунд, run и ctx прогона. Результат «срок
+    прогона» не пишется: файл не досчитан. reuse(запись) решает, можно ли взять запись вместо прогона: новой —
+    только своего прогона (run, ctx), базе — только чистую (код 0, без подписей) любого прогона (_base_clean). store —
+    какие результаты писать: None — все; у базы — тоже _base_clean, её падение и таймаут в кэш не идут (вариант Б,
+    25.10). Таймаут берётся, только если был при нынешнем таймауте файла. Файл кэша чужого плагина или дерева
+    (plugin, hash внутри не те) не читается вовсе."""
+
+    def __init__(self, name, digest, version, run, ctx, reuse, store=None):
+        self.name, self.digest, self.version, self.run, self.ctx, self.reuse = name, digest, version, run, ctx, reuse
+        self.store = store
+        d = read_json(_results_path(name, digest), {}) if digest else {}
+        ok = isinstance(d, dict) and d.get("plugin") == name and d.get("hash") == digest
+        self.files = d["files"] if ok and isinstance(d.get("files"), dict) else {}
+
+    @staticmethod
+    def _valid(e):
+        if not isinstance(e, dict):
+            return False
+        rc, sigs, okv = e.get("rc"), e.get("sigs"), e.get("ok")
+        if not (rc is None or (isinstance(rc, int) and not isinstance(rc, bool))):
+            return False
+        if not (isinstance(sigs, list) and all(isinstance(x, str) for x in sigs) and isinstance(e.get("bare"), bool)):
+            return False
+        if okv is not None and not (isinstance(okv, list) and len(okv) == 3 and isinstance(okv[0], int)
+                                    and (okv[1] is None or isinstance(okv[1], int)) and isinstance(okv[2], bool)):
+            return False
+        lim = e.get("limit")
+        return rc is not None or (isinstance(lim, (int, float)) and lim >= PLUGIN_TEST_TIMEOUT)
+
+    def get(self, py, f):
+        if not self.digest:
+            return None
+        e = self.files.get(f"{py}\t{f}")
+        return e if self._valid(e) and self.reuse(e) else None
+
+    def put(self, py, f, rc, sigs, okv, bare, sec, limit):
+        if not self.digest or (self.store is not None and not self.store({"rc": rc, "sigs": list(sigs)})):
+            return
+        self.files[f"{py}\t{f}"] = {"rc": rc, "sigs": list(sigs), "ok": None if okv is None else list(okv),
+                                    "bare": bool(bare), "sec": round(sec, 1), "limit": limit, "at": stamp(),
+                                    "run": self.run, "ctx": self.ctx}
+        write_json(_results_path(self.name, self.digest),
+                   {"plugin": self.name, "hash": self.digest, "version": self.version, "files": self.files})
+
+
+def _base_clean(e):
+    """Какие записи кэша база берёт и пишет: только чистую (код 0, без подписей) любого прогона — она ничего не
+    гасит. Файл базы с падением или таймаутом не кэшируется и гоняется заново на каждом проходе (решение владельца
+    25.10, вариант Б): падение, снятое при других соседях копии (argus B к #133) или случайно (ревью 133, п.5), иначе
+    гасило бы ту же подпись у новой версии."""
+    return e.get("rc") == 0 and not e.get("sigs")
+
+
+def _results_prune(name, keep):
+    """Оставить PLUGIN_RESULTS_KEEP последних деревьев плагина и деревья keep (новая и база этого прогона)."""
+    d = path("plugins", "results")
+    pre = f"{_plugins_safe(name)}-"
+    try:
+        found = [e for e in os.scandir(d) if e.name.startswith(pre) and e.name.endswith(".json") and e.is_file()]
+    except OSError:
+        return
+    mine = {os.path.basename(_results_path(name, k)) for k in keep if k}
+    found.sort(key=lambda e: e.stat().st_mtime, reverse=True)
+    for e in found[PLUGIN_RESULTS_KEEP:]:
+        if e.name not in mine:
+            with contextlib.suppress(OSError):
+                os.remove(e.path)
+
+
+def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=None, bare=None, cache=None):
     """tests/test_*.py папки pdir по одному на каждом python → Counter подписей (python, файл, подпись). only —
     множество (python, файл): гонять только их (база, metis-0358); None — все. Срок — общий deadline прогона:
     базе достаётся то, что осталось после новой версии. bare — множество, куда попадают (python, файл) с кодом 0, строками ok и без итога (metis-0361). oks — словарь, куда пишется {(python, файл): _ok_count}
-    файлов, дошедших до выхода (не таймаут и не срок) — для сравнения с базой (metis-0360)."""
+    файлов, дошедших до выхода (не таймаут и не срок) — для сравнения с базой (metis-0360). cache — _Results дерева
+    (metis-0424): годная запись заменяет прогон файла, досчитанный файл записывается туда же."""
     sigs = collections.Counter()
     env0 = {k: v for k, v in os.environ.items()
             if not k.startswith("PANTHEON_") and k not in ("FORCE_COLOR", "CLICOLOR_FORCE")}
@@ -7530,7 +7668,24 @@ def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=N
         for f in _test_files(pdir):
             if only is not None and (py, f) not in only:
                 continue
+            hit = cache.get(py, f) if cache is not None else None
+            if hit is not None:
+                rc, fsigs = hit["rc"], list(hit["sigs"])
+                okv = None if hit["ok"] is None else tuple(hit["ok"])
+                state = "таймаут" if rc is None else f"код {rc}"
+                log.write(f"\n===== {label} · {py} · {f} · {state} · из кэша (прогон {hit.get('at')}, "
+                          f"{hit.get('sec')} с) =====\n" + "".join(s + "\n" for s in fsigs))
+                log.flush()
+                if oks is not None and okv is not None:
+                    oks[(py, f)] = okv
+                for s in fsigs:
+                    sigs[(py, f, s)] += 1
+                if bare is not None and hit["bare"]:
+                    bare.add((py, f))
+                continue
             left = deadline - time.monotonic()
+            t0 = time.monotonic()
+            limit = None
             if left <= 0:
                 out, rc = "", "срок"
             else:
@@ -7548,17 +7703,21 @@ def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=N
                 except OSError as e:
                     out, rc = str(e), 127
                 out = out.decode("utf-8", "replace") if isinstance(out, bytes) else out
+            sec = time.monotonic() - t0
             state = {None: "таймаут", "срок": "срок прогона"}.get(rc, f"код {rc}")
-            log.write(f"\n===== {label} · {py} · {f} · {state} =====\n{out}")
+            log.write(f"\n===== {label} · {py} · {f} · {state} · {sec:.0f} с =====\n{out}")
             log.flush()
-            if oks is not None and rc not in (None, "срок"):
-                oks[(py, f)] = _ok_count(out)
+            okv = _ok_count(out) if rc not in (None, "срок") else None
+            if oks is not None and okv is not None:
+                oks[(py, f)] = okv
             fsigs = _failure_signatures(f, out, rc)
             for s in fsigs:
                 sigs[(py, f, s)] += 1
-            if bare is not None and rc == 0 and not fsigs and oks is not None and (py, f) in oks \
-                    and oks[(py, f)][0] and not oks[(py, f)][2]:
+            is_bare = rc == 0 and not fsigs and okv is not None and bool(okv[0]) and not okv[2]
+            if bare is not None and is_bare:
                 bare.add((py, f))
+            if cache is not None and rc != "срок":
+                cache.put(py, f, rc, fsigs, okv, is_bare, sec, limit)
     return sigs
 
 
@@ -7686,14 +7845,35 @@ def _copy_clone(root, name, src, peers, mkt_json):
     return pdir, notes
 
 
-def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=None, mkt_json=None):
-    """Тесты новой версии против установленной. Отдаёт (лог, хеш проверенной копии, новые подписи). metis-0368:
-    копии новой и базы — клоны с соседями (_copy_clone): у новой соседи из того же каталога (peers_new), у базы —
-    установленные версии (peers_base), не установленного соседа база берёт из каталога. Хеш — только дерево
-    проверяемого плагина."""
+def _copy_ctx(root, name):
+    """Соседи копии-клона (metis-0424): sha256 по именам и хешам деревьев root/plugins/* кроме самого плагина и по
+    marketplace.json. Новая версия берёт из кэша только результаты с тем же ctx: сосед сменился — файлы считаются
+    заново."""
+    h = hashlib.sha256()
+    plugins = os.path.join(root, "plugins")
+    for peer in sorted(os.listdir(plugins)) if os.path.isdir(plugins) else []:
+        if peer != _plugins_safe(name):
+            h.update(f"{peer}\0{_tree_hash(os.path.join(plugins, peer))}\0".encode())
+    mj = os.path.join(root, ".claude-plugin", "marketplace.json")
+    with contextlib.suppress(OSError):
+        with open(mj, "rb") as fh:
+            h.update(fh.read())
+    return h.hexdigest()
+
+
+def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=None, mkt_json=None, resume=None):
+    """Тесты новой версии против установленной. Отдаёт (лог, хеш проверенной копии, новые подписи, не досчитано).
+    metis-0368: копии новой и базы — клоны с соседями (_copy_clone): у новой соседи из того же каталога (peers_new), у
+    базы — установленные версии (peers_base), не установленного соседа база берёт из каталога. Хеш — только дерево
+    проверяемого плагина. metis-0424: не досчитано — множество (python, файл), не успевших в срок прогона у новой или
+    у нужной базы; непустое — решения нет (падения, которое уже не изменится, тоже нет), вызывающий ведёт счёт partial. resume — run прерванного так прогона:
+    новая берёт из кэша результаты этого run, лог дописывается; None — свежий прогон. Метку partial (с run) ставит
+    сама: следующий проход продолжает по ней."""
     log = path("plugins", f"{_plugins_safe(name)}-{_plugins_safe(new)}.log")
     tmp = tempfile.mkdtemp(prefix=f"{_plugins_safe(name)}-", dir=path("plugins", "tmp"))
     deadline = time.monotonic() + PLUGIN_RUN_LIMIT
+    run = resume or f"{stamp()} {os.getpid()} {os.urandom(4).hex()}"
+    digest = base_digest = None
     try:
         new_dir, notes_new = _copy_clone(os.path.join(tmp, "new"), name, src, peers_new, mkt_json)
         digest = _tree_hash(new_dir)
@@ -7704,41 +7884,74 @@ def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=N
             peers = {**(peers_new or {}), **{k: v for k, v in (peers_base or {}).items()
                                              if isinstance(v, str) and os.path.isdir(v)}}
             base_dir, notes_base = _copy_clone(os.path.join(tmp, "base"), name, base, peers, mkt_json)
+        ctx_new = _copy_ctx(os.path.join(tmp, "new"), name)
+        cache_new = _Results(name, digest, new, run, ctx_new,
+                             lambda e: bool(resume) and e.get("run") == resume and e.get("ctx") == ctx_new)
+        base_digest = _tree_hash(base_dir)
+        cache_base = _Results(name, base_digest, old, run, base_dir and _copy_ctx(os.path.join(tmp, "base"), name),
+                              _base_clean, store=_base_clean)
         pythons = _pythons_for(name)
-        with open(log, "w", encoding="utf-8") as fh:
+        with open(log, "a" if resume else "w", encoding="utf-8") as fh:
+            if resume:
+                fh.write(f"\n\n{stamp()} продолжение прогона {run} — прошлый проход не досчитан\n")
             fh.write(f"{stamp()} {name}: новая {new} из {src} (хеш {digest}), база {old} из "
-                     f"{base_dir and base or '—'}; python: {', '.join(pythons)}\n")
+                     f"{base_dir and base or '—'} (хеш {base_digest or '—'}); python: {', '.join(pythons)}\n")
             for who, notes in (("новая", notes_new), ("база", notes_base)):
                 for n in notes:
                     fh.write(f"копия ({who}): {n}\n")
             ok_new, ok_base, bare, bare_base = {}, {}, set(), set()
-            got_new = _run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}", deadline, oks=ok_new, bare=bare)
+            got_new = _run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}", deadline, oks=ok_new, bare=bare,
+                                        cache=cache_new)
             want = _base_targets(got_new, bare)
             skipped = sum(1 for py in pythons for f in _test_files(base_dir) if (py, f) not in want)
             if base_dir and skipped:
                 fh.write(f"\n===== база {old}: {skipped} файл(ов) не гоняются — у новой версии в них нет падений, "
                          "либо таймаут, срок прогона или ни одной проверки (их база не гасит) =====\n")
             got_base = _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline, only=want, oks=ok_base,
-                                        bare=bare_base)
+                                        bare=bare_base, cache=cache_base)
             fresh, unknown = _fresh_failures(got_new, got_base, ok_new, ok_base, bare, bare_base)
-            for py, f in sorted(unknown):
-                fh.write(f"база не досчитана: {py} · {f} — файл базы не дошёл до конца (таймаут или срок прогона), "
-                         "падения новой версии в нём считаются новыми\n")
+            short = {(py, f) for (py, f, s) in list(got_new) + list(got_base) if s.endswith(": срок прогона")}
             if notes_new:  # копия новой версии не собралась — красное, база его не гасит (metis-0369)
                 fresh[("-", "-", "копия новой версии не собралась: " + "; ".join(notes_new))] = 1
             if not _test_files(new_dir):  # без тестов зелёного нет, даже если их нет и у базы
                 fresh[("-", "-", NO_TESTS)] = 1
+            # падение, которое уже не изменится: файл новой досчитан, и база по нему досчитана или не нужна. Оно красное
+            # сразу, сколько бы файлов ни не успело (ревью 133, п.3): ждать остальные незачем
+            sure = [k for k in fresh if (k[0], k[1]) not in short and (k[0], k[1]) not in unknown]
+            if short and not sure:  # не досчитано — не «сломано»: решение на следующем проходе (metis-0424)
+                fh.write(f"\n===== не досчитано: {len(short)} файл(ов) не успели в срок прогона "
+                         f"({PLUGIN_RUN_LIMIT} с) — продолжу на следующем проходе, run {run} =====\n")
+                for py, f in sorted(short):
+                    fh.write(f"{py} · {f}\n")
+                _plugins_mark(marks, name, {"version": new, "result": PARTIAL, "log": log, "hash": digest, "run": run})
+                return log, digest, fresh, short
+            for py, f in sorted(unknown):
+                fh.write(f"база не досчитана: {py} · {f} — файл базы не дошёл до конца (таймаут или срок прогона), "
+                         "падения новой версии в нём считаются новыми\n")
             fh.write(f"\n===== новых падений: {sum(fresh.values())} =====\n")
             for (py, f, s) in sorted(fresh):
                 fh.write(f"{py} · {f} · {s}\n")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    return log, digest, fresh
+        _results_prune(name, (digest, base_digest))
+    return log, digest, fresh, set()
 
 
 def plugins_update(quiet=False):
     with lock("plugins-update", block=False) as got:
         return _plugins_update(quiet) if got else 0
+
+
+def _plugins_memory():
+    """Причина отложить прогон тестов (metis-0424) или None: своп выше порога дежурного (swap_alert_gb, тот же, что у
+    pantheon start и тревоги о свопе). Своп не прочитан — не откладываем: без сигнала выпуск не держим."""
+    try:
+        w = watch_mod()
+        gb = w.swap_gb()
+        limit = w.threshold("swap_alert_gb", w.SWAP_ALERT_GB)
+    except Exception:  # замер — подсказка, а не условие: сбой не держит выпуск
+        return None
+    return f"своп {gb:.1f} ГБ > {limit:g} ГБ" if gb is not None and gb > limit else None
 
 
 def _plugins_red(marks, name, old, new, log, what):
@@ -7782,7 +7995,7 @@ def _plugins_update(quiet):
         return 1
     catalog = _plugins_catalog()
     marks = read_json(path("plugins", "marks.json"))
-    rc, tested = 0, False
+    rc, tested, busy = 0, False, None
     for name in sorted(installed):
         if name not in catalog:
             continue
@@ -7812,12 +8025,47 @@ def _plugins_update(quiet):
             if not quiet:
                 print(f"{name}: {new} — проверю на следующем запуске")
             continue
+        if busy is None:
+            busy = [_plugins_memory()]
+        since = mark.get("deferred_since") if same else None
+        since = since if isinstance(since, (int, float)) and not isinstance(since, bool) else None
+        if busy[0] and (since is None or now() - since < PLUGIN_DEFER_MAX):
+            # metis-0424: под давлением памяти прогон на 30 мин только хуже — откладываем, не дольше PLUGIN_DEFER_MAX
+            if since is None:
+                _plugins_journal(f"{name} {old} → {new}: прогон тестов отложен — {busy[0]}")
+            _plugins_mark(marks, name, {**(mark if same else {"version": new}), "deferred_since": since or now()})
+            if not quiet:
+                print(f"{name}: {new} — прогон тестов отложен: {busy[0]}")
+            continue
         tested = True
-        log, digest, fresh = _plugin_check(
+        resume = mark.get("run") if same and mark.get("result") == PARTIAL and isinstance(mark.get("run"), str) else None
+        log, digest, fresh, short = _plugin_check(
             name, old, new, src, installed[name].get("installPath"), marks,
             peers_new={k: d for k, (_v, d) in catalog.items() if k != name},
             peers_base={k: row.get("installPath") for k, row in installed.items() if k != name},
-            mkt_json=os.path.join(_catalog_root(), ".claude-plugin", "marketplace.json"))
+            mkt_json=os.path.join(_catalog_root(), ".claude-plugin", "marketplace.json"), resume=resume)
+        if short:  # не досчитано — не «сломано» (metis-0424): метка partial поставлена, следующий проход продолжит
+            # счёт проходов подряд и начало отсрочки переходят в новую метку (ревью 133, п.1 и 2): иначе partial без
+            # потолка, а предел отсрочки 3 ч начинался бы заново после каждого прохода
+            prev = mark.get("partials") if same and mark.get("result") == PARTIAL else None
+            n = (prev if isinstance(prev, int) and not isinstance(prev, bool) and prev > 0 else 0) + 1
+            keep = {"deferred_since": since} if since is not None else {}
+            _plugins_mark(marks, name, {**marks.get(name, {}), **keep, "partials": n})
+            if n >= PLUGIN_PARTIAL_MAX:
+                with contextlib.suppress(OSError), open(log, "a", encoding="utf-8") as fh:
+                    fh.write(f"\n===== не ставлю: не досчитано {n} проходов подряд (предел {PLUGIN_PARTIAL_MAX}) — "
+                             "продолжения не будет; заново — удалить запись плагина из marks.json =====\n")
+                rc = max(rc, _plugins_red(marks, name, old, new, log,
+                                          f"тесты не досчитаны за {n} проходов подряд ({len(short)} файл(ов) не "
+                                          "успели в срок прогона) — прогон не движется"))
+                if not quiet:
+                    print(f"{name}: {new} не ставлю — тесты не досчитаны за {n} проходов подряд")
+                continue
+            _plugins_journal(f"{name} {old} → {new}: не досчитано — {len(short)} файл(ов) не успели в срок прогона, "
+                             f"продолжу на следующем проходе (проход {n} из {PLUGIN_PARTIAL_MAX})")
+            if not quiet:
+                print(f"{name}: {new} — тесты не досчитаны ({len(short)} файл(ов)), продолжу на следующем проходе")
+            continue
         if not fresh:
             rc = max(rc, _plugin_install(name, old, new, log, marks, quiet, digest))
             continue
