@@ -1029,6 +1029,8 @@ PLUGIN_JSON = "plugins/*/.claude-plugin/plugin.json"
 PLUGIN_JSON_RE = re.compile(rb"plugins/[^/]*/\.claude-plugin/plugin\.json")  # то же, что glob PLUGIN_JSON
 # :(top) — от корня дерева: при core.worktree у git папки префикс .git/, и «.» значил бы только .git/ (#134 п.1)
 CARRY_PATHS = ("--", ":(top)", ":(top,exclude,glob)" + PLUGIN_JSON)
+# файл и номера строк каждого блока диффа: строка «diff --git» и «@@ -a,b +c,d @@» без текста функции
+HUNK_RE = re.compile(rb"^(?:diff --git [^\n]*|@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@)", re.M)
 DIFF_FLAGS = ("--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color",
               "--no-relative", "--ignore-submodules=none", "--diff-algorithm=myers", "--src-prefix=a/",
               "--dst-prefix=b/", "-U3", "--function-context", "--inter-hunk-context=0")
@@ -1147,6 +1149,9 @@ def _fingerprint(gd, base, head):
         if got is None:
             return None, f"git patch-id на {head[:12]} не ответил"
         pid = got.split()[0] if got.split() else b"NOHUNK"
+    # patch-id не видит номеров строк (@@): без них вставка в другом месте периодического файла дала бы тот же
+    # отпечаток (#134 п.4). Цена: main сдвинул строки над правкой PR в том же файле — переноса нет, нужен argus
+    hunks = b"\n".join(HUNK_RE.findall(diff))
     fields = raw.split(b"\0")
     kinds = []  # «:старый_режим новый_режим sha sha вид» и путь — без sha блобов: их сверяет patch-id
     for meta, path in zip(fields[::2], fields[1::2]):
@@ -1154,7 +1159,7 @@ def _fingerprint(gd, base, head):
         if len(m) < 5:
             return None, f"git diff --raw на {head[:12]} не разобрать"
         kinds.append(b" ".join((m[0], m[1], m[4], path)))
-    h = hashlib.sha256(b"carry-v1\0" + pid + b"\0" + b"\0".join(sorted(kinds)) + b"\0"
+    h = hashlib.sha256(b"carry-v2\0" + pid + b"\0" + hunks + b"\0" + b"\0".join(sorted(kinds)) + b"\0"
                        + "\0".join(plugins).encode("utf-8"))
     return h.hexdigest(), mb
 

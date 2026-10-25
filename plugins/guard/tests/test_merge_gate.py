@@ -1924,6 +1924,28 @@ def t_carry_r2(h):
     got = mg._fingerprint(gd, base2, head2)
     check("п.3: две merge-base — отпечатка нет, «принять» не переносится",
           got[0] is None and "единственной merge-base" in got[1], got)
+    # п.4: patch-id не видит номеров строк — у периодического файла вставка после 5-го и 6-го блока одна и та же
+    per = ["A\n", " x\n"] * 20
+    H.br("t-per", s["B"])
+    bp = H.put({"p.txt": "".join(per)}, "main: периодический файл")
+    q5 = H.put({"p.txt": "".join(per[:10] + [" y\n"] + per[10:])}, "PR: после 5-го блока")
+    H.br("t-per6", bp)
+    q6 = H.put({"p.txt": "".join(per[:12] + [" y\n"] + per[12:])}, "PR: после 6-го блока")
+    lines = [f"c{i}\n" for i in range(30)]
+    H.br("t-shift", s["B"])
+    bc = H.put({"c.txt": "".join(lines)}, "main: файл c.txt")
+    H.br("t-shift-main", bc)
+    bc2 = H.put({"c.txt": "top\n" + "".join(lines)}, "main: строка над правкой PR")
+    H.br("t-shift-pr", bc)
+    qc = H.put({"c.txt": "".join(lines[:20] + ["pr\n"] + lines[21:])}, "PR: правка c.txt")
+    qcm = H.merge(bc2)
+    git(kit, "checkout", "-q", "-f", "main")
+    git(kit, "clean", "-qfdx")
+    f5, f6 = mg._fingerprint(gd, bp, q5)[0], mg._fingerprint(gd, bp, q6)[0]
+    check("п.4: вставка в другом месте периодического файла — отпечаток другой", f5 and f6 and f5 != f6, (f5, f6))
+    fc, fcm = mg._fingerprint(gd, bc, qc)[0], mg._fingerprint(gd, bc2, qcm)[0]
+    check("п.4 цена: main сдвинул строки над правкой PR в том же файле — отпечаток другой (позовут argus)",
+          fc and fcm and fc != fcm, (fc, fcm))
 
 
 def t_carry_gate(h):
