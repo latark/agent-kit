@@ -6788,16 +6788,19 @@ def board_drift(T, tasks, cache, inbox):
     open_ids = set()
     for repo, prs in sorted((cache.get("open_prs") or {}).items() if isinstance(cache.get("open_prs"), dict) else []):
         for pr in prs if isinstance(prs, list) else []:
-            if not isinstance(pr, dict):
-                continue
-            for tid in pr.get("ids") or []:
+            if not isinstance(pr, dict) or pr.get("part") or not isinstance(pr.get("closes"), list):
+                continue  # как autoclose.review_pr: «часть» и неверная форма — пропуск, упоминание задачу не закрывает
+            for tid in pr["closes"]:
+                if not isinstance(tid, str):
+                    continue
                 open_ids.add(tid)
                 st = (tasks.get(tid) or (None, {}, ""))[1].get("status")
                 if st in ("todo", "done"):
                     out.append((tid, f"статус {st}, а PR {repo}#{pr.get('number')} открыт — ждёт слияния (review)"))
     for repo, rows in sorted((cache.get("merged") or {}).items() if isinstance(cache.get("merged"), dict) else []):
         for pr in rows if isinstance(rows, list) else []:
-            if not isinstance(pr, dict) or A.is_part(pr.get("body")):
+            if not isinstance(pr, dict) or any(not isinstance(pr.get(k), (str, type(None))) for k in ("body", "headRefName")) \
+                    or A.is_part(pr.get("body")):
                 continue
             mts = A.merged_ts(pr.get("mergedAt"))
             for tid in A.closing_ids(pr.get("headRefName"), pr.get("body")):

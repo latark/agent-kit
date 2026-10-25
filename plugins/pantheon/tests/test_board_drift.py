@@ -129,4 +129,95 @@ code, lines = e.drift()
 check("3. задача с заголовком записки есть: сообщение", len(lines) == 1 and "2026-10-20-взята.md" in lines[0] and t in lines[0],
       lines)
 
+
+# 4. PR только упоминает задачу (ids, но не closes) и PR «часть» — задачу не закрывают, предупреждения нет (как review_pr)
+e = Env("pr-mention")
+t = e.task("Упомянутая в PR")
+e.cache(open_prs={"o/r": [{"number": 8, "head": "a" * 40, "ids": [t], "closes": [], "part": False, "core": False},
+                          {"number": 10, "head": "c" * 40, "ids": [t], "closes": [t], "part": True, "core": False}]},
+        merged={"o/r": []})
+check("4. PR только упоминает задачу / PR part=True: предупреждения нет", e.drift()[1] == [], e.drift()[1])
+e.cache(open_prs={"o/r": [{"number": 8, "head": "a" * 40, "ids": [t], "closes": [t], "part": False, "core": False}]},
+        merged={"o/r": []})
+check("4. тот же PR с closes: предупреждение есть", len(e.drift()[1]) == 1, e.drift()[1])
+
+# 4б. слитый PR «часть» задачу не закрывает; слияние раньше правки задачи — не расхождение
+e = Env("pr-merged-part")
+t = e.task("Слита частью", "--status", "doing")
+e.cache(open_prs={"o/r": []}, merged={"o/r": [{"number": 11, "headRefName": f"feat/{t}", "body": "Часть " + t,
+                                              "mergedAt": "2999-01-01T00:00:00Z", "oid": "d" * 40}]})
+check("4б. слитый PR part: предупреждения нет", e.drift()[1] == [], e.drift()[1])
+e.cache(open_prs={"o/r": []}, merged={"o/r": [{"number": 12, "headRefName": f"feat/{t}", "body": "",
+                                              "mergedAt": "2000-01-01T00:00:00Z", "oid": "d" * 40}]})
+check("4б. задача обновлена после слияния: предупреждения нет", e.drift()[1] == [], e.drift()[1])
+e.cache(open_prs={"o/r": []}, merged={"o/r": [{"number": 13, "headRefName": f"feat/{t}", "body": "",
+                                              "mergedAt": "2999-01-01T00:00:00Z", "oid": "d" * 40}]})
+check("4б. контроль: слитый не part, задача старше слияния — предупреждение", len(e.drift()[1]) == 1, e.drift()[1])
+
+# 5. галочка на доске (owner-log/board.jsonl)
+e = Env("board")
+t = e.task("Вопрос на доске", "--status", "waiting", "--waiting-on", "human", "--question", "Брать?", "--why", "нужно",
+           "--option", "А — да", "--option", "Б — нет", "--recommend", "А — проще", "--if-no-answer", "ждём")
+
+
+def board(*recs):
+    with open(os.path.join(e.state, "owner-log", "board.jsonl"), "w", encoding="utf-8") as fh:
+        for r in recs:
+            fh.write(json.dumps({"kind": "answer", "time": "2999-01-01T10:00:00", "question": "Брать?", "answer": "А — да",
+                                 **r}, ensure_ascii=False) + "\n")
+
+
+board({"id": t})
+lines = e.drift()[1]
+check("5. галочка со своим id: сообщение", len(lines) == 1 and t in lines[0] and "ответил" in lines[0], lines)
+board({"id": t + "-other"})
+check("5. галочка на чужой id — не ответ", e.drift()[1] == [], e.drift()[1])
+board({"id": t, "time": "2000-01-01T10:00:00"})
+check("5. галочка старше вопроса — не ответ", e.drift()[1] == [], e.drift()[1])
+board({"id": t, "question": "Брать %% да?"})
+check("5. %% в вопросе — не ответ", e.drift()[1] == [], e.drift()[1])
+board({"id": t, "question": "Брать <b>?"})
+check("5. < в вопросе — не ответ", e.drift()[1] == [], e.drift()[1])
+board({"id": t, "kind": "view"})
+check("5. запись не kind=answer — не ответ", e.drift()[1] == [], e.drift()[1])
+with open(os.path.join(e.state, "owner-log", "zeus.md"), "w", encoding="utf-8") as fh:
+    fh.write(f"## 2999-01-01 10:00:00 · другое окно\nвопрос: [{t}] Брать?\nответ: А — да\n")
+check("5. запись zeus.md не из окна вопросов — не ответ", e.drift()[1] == [], e.drift()[1])
+
+# 6. записка: копия в inbox/done (в том числе «отклонено-»)
+e = Env("inbox-done")
+e.inbox("2026-10-20-старая.md", "# Старая записка\nОт: zeus\n\nтекст\n")
+check("6. нет копии в done: расхождения нет", e.drift()[1] == [], e.drift()[1])
+d = os.path.join(e.pan, "directions", DIR, "inbox", "done")
+os.makedirs(d, exist_ok=True)
+with open(os.path.join(d, "2026-10-20-старая.md"), "w", encoding="utf-8") as fh:
+    fh.write("# Старая записка\n")
+lines = e.drift()[1]
+check("6. копия в inbox/done: сообщение", len(lines) == 1 and "inbox/done" in lines[0], lines)
+os.rename(os.path.join(d, "2026-10-20-старая.md"), os.path.join(d, "отклонено-2026-10-20-старая.md"))
+check("6. копия «отклонено-» в inbox/done: сообщение", len(e.drift()[1]) == 1, e.drift()[1])
+
+# 7. check --quiet (плановый проход) строк «доска» не печатает, код выхода тот же
+e = Env("quiet")
+t = e.task("Тихая")
+e.cache(open_prs={"o/r": [{"number": 7, "head": "a" * 40, "ids": [t], "closes": [t], "part": False, "core": False}]},
+        merged={"o/r": []})
+check("7. контроль: полный проход видит расхождение", len(e.drift()[1]) == 1, e.drift()[1])
+r = e.run(["check", "--quiet"])
+check("7. --quiet: строк «доска» нет, код 0", r.returncode == 0 and "доска" not in r.stdout, (r.returncode, r.stdout))
+
+# 8. кэш верного JSON, но неверной формы: без трассировки, код 0
+bad = [{"open_prs": {"o/r": [{"number": 1, "ids": 5, "closes": 5, "part": False}]}, "merged": {"o/r": []}},
+       {"open_prs": {"o/r": [{"number": 1, "ids": [["x"]], "closes": [["x"], 5, None], "part": False}]}, "merged": {}},
+       {"open_prs": {"o/r": []}, "merged": {"o/r": [{"number": 2, "headRefName": 5, "body": "", "mergedAt": "x"}]}},
+       {"open_prs": {"o/r": []}, "merged": {"o/r": [{"number": 2, "headRefName": "a", "body": 5, "mergedAt": "x"}]}},
+       {"open_prs": {"o/r": [5, "x", None]}, "merged": {"o/r": [[], 7]}}, {"open_prs": 5, "merged": [1]}]
+e = Env("badshape")
+e.task("Задача при кривом кэше", "--status", "doing")
+for i, c in enumerate(bad):
+    e.cache(**c)
+    r = e.run(["check"])
+    check(f"8.{i} кэш неверной формы: без трассировки, код 0", r.returncode == 0 and "Traceback" not in r.stderr
+          and "· доска ·" not in r.stdout, (r.returncode, r.stderr[-300:], r.stdout[-200:]))
+
 sys.exit(0 if all(results) else 1)
