@@ -795,6 +795,38 @@ print(json.dumps({"rc": rc, "seen": seen}))"""
           f"{g2} {e.journal()[-300:]!r}")
     e.close()
 
+    # ревью 133 круг 2, п.1: база падает на обоих файлах (как guard 0.5.17 на 3.9) и не успела второй. Продолжение
+    # берёт из кэша и упавший файл базы своего прогона — гоняет только base/test_b и ставит версию. Мутант
+    # «_base_reuse без своего прогона» гонял бы base/test_a заново, срок кончался бы снова — partial до потолка
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    two_files(e)
+    plan5 = {"new/test_a.py": [100, 1, OLD], "new/test_b.py": [100, 1, OLD],
+             "base/test_a.py": [1000, 1, OLD], "base/test_b.py": [1000, 1, OLD]}
+    g1 = tick(e, plan5)
+    m1 = e.marks().get("x", {})
+    a1 = e.argv()
+    g2 = tick(e, plan5)
+    check("ревью 133 р2 п.1: база с падением своего прогона берётся при продолжении — 2-й проход гоняет только "
+          "base/test_b, версия поставлена",
+          m1.get("result") == "partial" and "plugin update" not in a1
+          and g1.get("seen") == ["new/test_a.py", "new/test_b.py", "base/test_a.py", "base/test_b.py"]
+          and g2.get("seen") == ["base/test_b.py"] and g2.get("rc") == 0 and "plugin update x@agent-kit" in e.argv(),
+          f"{g1} {m1} {g2} {e.journal()[-300:]!r}")
+    e.close()
+
+    # ревью 133 круг 2, п.2: счёт partial — только своей версии. Метка прошлой версии каталога (1.0.9) partial с
+    # partials=5, вышла 1.1.0 и тоже не досчитана — partials 1 и partial, а не red «за 6 проходов» с чужим счётом
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    two_files(e)
+    mp = os.path.join(e.state, "plugins", "marks.json")
+    e.write(mp, json.dumps({"x": {"version": "1.0.9", "result": "partial", "run": "r-old", "partials": 5}}))
+    g = tick(e, plan)
+    m = e.marks().get("x", {})
+    check("ревью 133 р2 п.2: partial прошлой версии (partials=5) не переходит к новой — partials 1, partial, не red",
+          g.get("rc") == 0 and m.get("version") == "1.1.0" and m.get("result") == "partial" and m.get("partials") == 1
+          and "не досчитаны" not in e.alerts(), f"{g} {m} {e.alerts()[-300:]!r}")
+    e.close()
+
     # ревью 133, п.1: partial с потолком. Соседи копии меняются каждый проход (как при слияниях pantheon) — кэш новой
     # сбрасывается, прогон не движется. PLUGIN_PARTIAL_MAX-й partial подряд — красное с тревогой, дальше не гоняется
     e = Env("1.0.0", "1.1.0", OK, OK)
