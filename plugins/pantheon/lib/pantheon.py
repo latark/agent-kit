@@ -6817,7 +6817,7 @@ def board_drift(T, tasks, cache, inbox):
                         and not (mts and (T.ts_of(h.get("updated")) or 0) > mts):
                     out.append((tid, f"статус {h['status']}, а PR {repo}#{pr.get('number')} уже слит"))
     for tid, (_, h, _) in sorted(tasks.items()):
-        if h.get("status") == "waiting" and (h.get("waiting_on") == "human" or h.get("question")):
+        if h.get("status") == "waiting" and h.get("waiting_on") == "human":
             since = T.ts_of(h.get("question_at")) or T.ts_of(h.get("created")) or 0
             if _owner_answered(tid, since):
                 out.append((tid, "владелец ответил на вопрос, а задача ещё в «От меня нужно» (waiting)"))

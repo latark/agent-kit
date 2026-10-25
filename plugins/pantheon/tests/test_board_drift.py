@@ -119,6 +119,18 @@ with open(os.path.join(e.state, "owner-log", "zeus.md"), "w", encoding="utf-8") 
     fh.write(f"## 2000-01-01 10:00:00 · окно вопросов\nвопрос: [{t}] Брать?\nответ: А — да\n")
 check("2. ответ старше вопроса (до создания задачи) — не ответ", e.drift()[1] == [], e.drift()[1])
 
+# 2б. задача ждёт агента (waiting_on не human), поле question осталось: это не «От меня нужно» (tasks.py, «Нужен ответ»)
+for who in ("zeus", "metis-pantheon"):
+    e = Env("answered-" + who)
+    t = e.task("Вопрос ушёл к агенту", "--status", "waiting", "--waiting-on", "human", "--question", "Брать?",
+               "--why", "нужно", "--option", "А — да", "--option", "Б — нет", "--recommend", "А — проще",
+               "--if-no-answer", "ждём")
+    r = e.run(["task", "set", t, "waiting_on=" + who, "--note", "тест"])
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    with open(os.path.join(e.state, "owner-log", "zeus.md"), "w", encoding="utf-8") as fh:
+        fh.write(f"## 2999-01-01 10:00:00 · окно вопросов\nвопрос: [{t}] Брать?\nответ: А — да\n")
+    check(f"2б. waiting_on {who} с question и ответом: «От меня нужно» нет", e.drift()[1] == [], e.drift()[1])
+
 # 3. записка обработана (есть задача с тем же заголовком), а лежит во «Входящих»
 e = Env("inbox")
 e.inbox("2026-10-20-взята.md", "# Взятая записка\nОт: zeus\n\nтекст\n")
@@ -153,6 +165,17 @@ check("4б. задача обновлена после слияния: пред�
 e.cache(open_prs={"o/r": []}, merged={"o/r": [{"number": 13, "headRefName": f"feat/{t}", "body": "",
                                               "mergedAt": "2999-01-01T00:00:00Z", "oid": "d" * 40}]})
 check("4б. контроль: слитый не part, задача старше слияния — предупреждение", len(e.drift()[1]) == 1, e.drift()[1])
+
+# 4в. слитый PR и открытый PR закрывают одну задачу: «уже слит» не выходит (tid not in open_ids)
+e = Env("pr-merged-and-open")
+t = e.task("Закрывает и слитый, и открытый", "--status", "review")
+e.cache(open_prs={"o/r": [{"number": 20, "head": "e" * 40, "ids": [t], "closes": [t], "part": False, "core": False}]},
+        merged={"o/r": [{"number": 19, "headRefName": f"feat/{t}", "body": "", "mergedAt": "2999-01-01T00:00:00Z",
+                         "oid": "f" * 40}]})
+check("4в. есть открытый PR на задачу: «уже слит» нет", e.drift()[1] == [], e.drift()[1])
+e.cache(open_prs={"o/r": []}, merged={"o/r": [{"number": 19, "headRefName": f"feat/{t}", "body": "",
+                                              "mergedAt": "2999-01-01T00:00:00Z", "oid": "f" * 40}]})
+check("4в. контроль: открытого PR нет — «уже слит»", len(e.drift()[1]) == 1 and "уже слит" in e.drift()[1][0], e.drift()[1])
 
 # 5. галочка на доске (owner-log/board.jsonl)
 e = Env("board")
