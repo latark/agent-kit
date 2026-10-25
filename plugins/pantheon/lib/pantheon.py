@@ -65,6 +65,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --depends-on / depends_on= с несуществующим id, самой собой или циклом — отказ при записи (metis-0248)
   pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"]   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
+  pantheon task migrate-project [--write]   project карточек → имя проекта из directions.toml; без --write — сухой
+                    прогон «id: было → станет», с --write — запись через task set со строкой в журнал (metis-0323)
   pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту
   pantheon task attach ID ПАЧКА | detach ID   задача в пачку (story) и обратно; show ПАЧКА — состав и сумма оценок
   pantheon executors                    набор исполнителей кода (Claude всегда, Codex — дополнение) и включён ли Codex
@@ -6749,6 +6751,24 @@ def check_skills(paths=None, quiet=False):
     return len(rows), bad
 
 
+def check_task_projects(T, quiet):
+    """project задачи — только имя проекта из directions.toml (metis-0323). → число задач с чужим именем; на тике
+    (quiet) — одна тревога на набор. Реестра нет — не сверяем."""
+    dirs = T.load_directions(PANTHEON)
+    bad = T.project_problems(T.load_tasks(PANTHEON, T.WORK_TYPES), dirs) if dirs else []
+    for tid, text in bad[:20]:
+        print(f"ОШИБКА · {tid}: {text}")
+    if len(bad) > 20:
+        print(f"ОШИБКА · ещё {len(bad) - 20} задач с project не из directions.toml: pantheon task migrate-project")
+    if bad:
+        if quiet:
+            alert_once("check-task-projects", "|".join(i for i, _ in bad),
+                       f"задачи с project не из directions.toml: {len(bad)} — pantheon task migrate-project", "check")
+    else:
+        clear_once("check-task-projects")
+    return len(bad)
+
+
 def check(paths=None, quiet=False):
     T = tasks_mod()
     skill_paths = [p for p in (paths or []) if os.path.basename(p) == "SKILL.md"]
@@ -6785,6 +6805,7 @@ def check(paths=None, quiet=False):
     if not paths:
         _check_long_state(quiet)
         coord_errs = check_coordinators(quiet)
+        coord_errs += check_task_projects(T, quiet)
         for dname, fs in sorted((read_json(path("domains.json"), {}).get("domains") or {}).items()):
             # allow со старым mtime сборка по --if-changed не видит: check снимает окно сам, иначе следующий wake поднял
             # бы сессию снова (ревью argus PR #32)
@@ -6960,6 +6981,21 @@ def task_cmd(rest):
             print("\n".join(plan) if plan else "переносить нечего")
             if dry and plan:
                 print("(--dry-run: ничего не записано)")
+        elif sub == "migrate-project":
+            if any(a != "--write" for a in args):
+                print(f"pantheon task migrate-project: не понял «{' '.join(args)}» — допустим только --write", file=sys.stderr)
+                return 2
+            dirs = T.load_directions(PANTHEON)
+            if dirs is None:
+                print("pantheon task migrate-project: нет читаемого directions.toml", file=sys.stderr)
+                return 1
+            plan, failed = T.migrate_projects(PANTHEON, now(), dirs, dry_run="--write" not in args)
+            print("\n".join(plan) if plan else "переносить нечего")
+            if plan and "--write" not in args:
+                print(f"(сухой прогон: {len(plan)} карточек, ничего не записано; запись — с --write)")
+            if failed:
+                print(f"не перенесено: {failed}", file=sys.stderr)
+                return 1
         elif sub == "detach" and len(args) == 1:
             sid = T.task_detach(PANTHEON, now(), args[0])
             print(f"{args[0]}: откреплена от пачки {sid}")
