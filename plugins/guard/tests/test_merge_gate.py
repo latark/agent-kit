@@ -1906,6 +1906,18 @@ def t_carry_r2(h):
     check("п.2: «вернуть» R снял сам рецензент на R — «принять» A до него переносится", got == [A], got)
     got = [r["sha"] for r in mg._carried([opus(A, "x"), rj, opus(R, "w")], N, look)]
     check("п.2: «принять» другого argus на R не снимает отсечку — A не переносится", got == [], got)
+    # r3 п.1: тот же рецензент снял «вернуть» R, но «принять» на другом head F — отсечка в силе (обычный поток:
+    # исправление на новом коммите), откат N к коду A по старому «принять» A не проходит
+    v3 = [opus(A, "x"), rj, opus(F, "y")]
+    got = [r["sha"] for r in mg._carried(v3, N, look)]
+    check("п.2 r3: «вернуть» R снял сам рецензент, но на другом head F — A не переносится", got == [], got)
+    cut = []
+    mg._carried(v3, N, look, cut)
+    got = [(a["sha"], r["sha"]) for a, r in cut]
+    check("п.2 r3: отсечённое «принять» A и отсёкшее «вернуть» R — для текста отказа", got == [(A, R)], got)
+    cut = []
+    mg._carried([rj, opus(A, "x")], N, look, cut)
+    check("п.2 r3: «принять» после «вернуть» — не отсечено, cut пуст", cut == [], cut)
     # п.3: крест слияний — у head PR и base две merge-base
     H = Hist(kit)
     H.br("t-cc-main", s["B"])
@@ -2060,6 +2072,14 @@ def t_carry_gate(h):
                [opus(s["P"], "x"), rej(s["Pv"]), tests(s["N1"])], False, f"на {s['Pv'][:12]}")
     if HAVE_TOML:
         check("отказ «вернуть» говорит, что оно привязано к PR", "привязано к PR" in got[1], got[1])
+    # #134 r2 п.3: откат к коду P после «вернуть» R, снятого «принять» на исправленном A, — отказ называет отсечку
+    got = case("откат к коду P после снятого «вернуть» R — «принять» P отсечено, отказ называет его", "N1", "M1",
+               [opus(s["P"], "x"), opus(s["R"], "y", "reject"), opus(s["A"], "z", session="s-z"), tests(s["N1"])],
+               False, "нет «принять»")
+    if HAVE_TOML:
+        check("отказ при отсечке называет «принять» P и «вернуть» R",
+              "записано раньше «вернуть»" in got[1] and f"на {s['P'][:12]}" in got[1]
+              and f"на {s['R'][:12]}" in got[1], got[1])
     # переполнение: 12 head с вердиктами, reject на самом старом (117-b2-2)
     many = [rej(s["R"])] + [opus("%040x" % i, "f%d" % i) for i in range(1, 11)] + [opus(s["A"], "x"), tests(s["NA"])]
     case("12 head, reject на самом старом, «принять» на исправленном A (117-b2-2) — в силе", "NA", "M1", many, False,

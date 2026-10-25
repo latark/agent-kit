@@ -31,9 +31,16 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    head) или с перечнем на третьем head с другим кодом от той же merge-base, если код сливаемого SHA — не код reject
    (_held; metis-0158: два argus на одном head — accept и reject в любом порядке дают отказ). Перенос accept: accept с
    перечнем на прошлом head PR засчитывается на новом SHA, если собственный дифф PR (merge-base с base PR..head) тот
-   же — отпечаток _fingerprint: git patch-id --verbatim, режимы и вид файлов, plugin.json плагинов без строки version;
-   сверяются CARRY_HEADS последних head. Нет отпечатка — нет переноса: папка слияния не клон репозитория PR, shallow,
-   info/grafts, нет коммита base или head, не одна merge-base, сбой git; git replace не действует. Тесты и talos не
+   же — отпечаток _fingerprint: git patch-id --verbatim, режимы и вид файлов, plugin.json плагинов без строки version
+   и номера строк блоков диффа (@@, HUNK_RE): patch-id их не видит, и вставка в другом месте периодического файла
+   дала бы тот же отпечаток (#134 п.4; цена, решение владельца 25.10: main сдвинул строки над правкой PR в том же
+   файле — переноса нет, нужен argus). Пути — от корня дерева (:(top) в CARRY_PATHS): при core.worktree «.» значил бы
+   только .git/, поэтому список файлов диффа ещё сверяется со списком без pathspec (#134 п.1). Переносится только
+   accept, записанное позже каждого reject PR, кроме reject, снятого accept того же рецензента на том же head
+   (_carried, #134 п.2): иначе откат к коду, принятому до reject, прошёл бы по старому accept; отказ называет такое
+   accept и reject. Сверяются CARRY_HEADS последних head. Нет отпечатка — нет переноса: папка слияния не клон
+   репозитория PR, shallow, info/grafts, нет коммита base или head, не одна merge-base, дифф по pathspec не сошёлся со
+   списком файлов, сбой git; git replace не действует. Тесты и talos не
    переносятся; каждый перенос — строка в STATE_DIR/merge-gate/carry.jsonl, не записалась — отказ; продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
    owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES), casefold;
    файлы из pulls/N/files с previous_filename; PR, задевающий ядро, проходит только со строкой
@@ -1195,10 +1202,11 @@ def _held(verdicts, sha, fp):
             and not any(a["kind"] == "accept" and _lifts(a, r, sha, fp) for a in verdicts[i + 1:])]
 
 
-def _carried(verdicts, sha, fp):
+def _carried(verdicts, sha, fp, cut=None):
     """«Принять» с перечнем на других head того же PR, чей отпечаток равен отпечатку sha, записанные позже каждого
     «вернуть» PR: «вернуть» отсекает более ранние «принять», если его не снял сам рецензент на том же head (#134 п.2:
-    иначе откат к коду, принятому до «вернуть», прошёл бы по старому «принять»)."""
+    иначе откат к коду, принятому до «вернуть», прошёл бы по старому «принять»). cut — список: в него пары
+    («принять», отсёкшее его «вернуть») с тем же отпечатком, но записанные раньше отсечки (для текста отказа)."""
     fs = fp(sha)
     if not fs:
         return []
@@ -1209,10 +1217,13 @@ def _carried(verdicts, sha, fp):
             floor = i
     out = []
     for i, a in enumerate(verdicts):
-        if i > floor and a["kind"] == "accept" and a["sha"] != sha and checklist_ok(a):
+        if a["kind"] == "accept" and a["sha"] != sha and checklist_ok(a):
             fa = fp(a["sha"])
             if fa and fa[0] == fs[0]:
-                out.append(a)
+                if i > floor:
+                    out.append(a)
+                elif cut is not None:
+                    cut.append((a, verdicts[floor]))
     return out
 
 
@@ -1354,7 +1365,8 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
         if r["sha"] == sha:
             latest[_reviewer(r)] = r
     direct = [r for r in latest.values() if r["kind"] == "accept"]
-    carried = [] if direct else _carried(verdicts, sha, fp)
+    cut = []
+    carried = [] if direct else _carried(verdicts, sha, fp, cut)
     if not direct and not carried:
         fs = fp(sha) if weak else None
         weak_used = [r for r in weak if r["sha"] == sha or (fs and fp(r["sha"]) and fp(r["sha"])[0] == fs[0])]
@@ -1370,7 +1382,11 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
         return (f"нет «принять» от argus на {repo}#{pr}@{sha[:12]}: позови argus, он проверит и запишет "
                 f"`pantheon review accept {repo} {pr} {sha} {CHECKLIST_HINT}`. «Принять» с прошлого head PR переходит "
                 "на новый, только если собственный дифф PR от merge-base с base PR тот же (кроме номера версии в "
-                "plugin.json)." + why_fp() + f" {advice}")
+                "plugin.json) и «принять» записано после каждого «вернуть» PR." + why_fp()
+                + (f" Дифф тот же у «принять» {'; '.join(_who(a) + ' на ' + a['sha'][:12] for a, _ in cut)}, но оно "
+                   f"записано раньше «вернуть» {_who(cut[0][1])} на {cut[0][1]['sha'][:12]}: после «вернуть» старое "
+                   "«принять» не переносится (откат к принятому коду), нужен свежий argus." if cut else "")
+                + f" {advice}")
     old = [r for r in direct if not checklist_ok(r)]
     if old:
         return (f"«принять» на {repo}#{pr}@{sha[:12]} от {'; '.join(_who(r) for r in old)} — без перечня "
