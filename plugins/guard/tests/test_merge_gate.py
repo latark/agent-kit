@@ -2230,6 +2230,9 @@ def r4_history(h):
     heads["Prc"] = (plumb(p, [mc], {"code.py": F(CODE.format(28)), "README.md": F(README.replace("r1\n", "r1p\n"))},
                           "rebase P с конфликтом"), mc)
     heads["Pmc"] = (s["P"], mc)
+    # конфликт решён своей стороной: code.py как у P, правка main выброшена — новое содержимое то же, старое (osha) другое
+    heads["Pours"] = (plumb(p, [mc], {"code.py": F(CODE.format(2)), "README.md": F(README.replace("r1\n", "r1p\n"))},
+                            "rebase P: конфликт решён своей стороной"), mc)
     # cherry-pick правки README из PR в main
     mcp = plumb(p, [s["M1"]], {"README.md": F(README.replace("r1\n", "r1p\n"))}, "main: cherry-pick README из PR")
     heads["Ncp"] = (plumb(p, [s["P"], mcp], {"code.py": F(CODE.format(2)), PJ: F(_man("pantheon", "0.11.86"))},
@@ -2318,6 +2321,8 @@ def t_carry_r4(h):
     check("r4: чистый rebase P на M1 — тот же код, перенос", clean["Preb"] == ref, clean["Preb"])
     check("r4: rebase с конфликтом, решённым иначе — код другой", clean["Prc"] and clean["Prc"] != clean["Pmc"] == ref,
           (clean["Prc"], clean["Pmc"]))
+    check("r4: rebase с конфликтом, решённым своей стороной (правка main откатится) — код другой",
+          clean["Pours"] and clean["Pours"] != ref, (clean["Pours"], ref))
     check("r4: cherry-pick части PR в main — код другой (ложный отказ, строго)", clean["Ncp"] and clean["Ncp"] != ref,
           clean["Ncp"])
     check("r4: смена базы на ветку эпика — main в диффе PR, код другой", clean["N1e"] and clean["N1e"] != clean["Pe"]
