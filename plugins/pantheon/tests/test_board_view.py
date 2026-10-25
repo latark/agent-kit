@@ -408,6 +408,47 @@ def bookmark_checks():
         T.board_sync(pan, os.path.join(v, "Доска"), os.path.join(tmp, "state-e", "board.json"),
                      os.path.join(tmp, "log"), T0 + 30, alert=al)
         check("закладки: тик доски (board_sync) ставит набор", paths(json.load(open(p, encoding="utf-8"))) == want_paths)
+        # path закладки владельца — не строка (список, объект): тик не падает, файл не тронут в чужой части, board.json пишется
+        for name, bad in (("p1", ["x"]), ("p2", {"a": 1}), ("p3", 5), ("p4", None)):
+            raw = json.dumps({"items": [{"type": "file", "ctime": 1, "path": bad, "title": "Чужая"}]}, ensure_ascii=False)
+            v, p = vault(name, raw)
+            st = {"bookmarks_seen": [["y"], {"b": 1}, "Доска/Сводка.md"]}
+            try:
+                T._sync_bookmarks(v, st, al)
+                ok = True
+            except Exception as e:
+                ok = repr(e)
+            got = json.load(open(p, encoding="utf-8"))
+            check(f"закладки (ж): path не строка ({name}) — не падает, закладка владельца на месте, свои добавлены",
+                  ok is True and got["items"][0]["path"] == bad and "Доска/Пульт.base" in paths(got)
+                  and "Доска/Сводка.md" not in paths(got) and all(isinstance(x, str) for x in st["bookmarks_seen"]), ok)
+            sp = os.path.join(tmp, "state-" + name, "board.json")
+            pan = os.path.join(tmp, "pan-" + name)
+            os.makedirs(pan)
+            try:
+                T.board_sync(pan, os.path.join(v, "Доска"), sp, os.path.join(tmp, "log"), T0 + 40, alert=al)
+                ok = os.path.exists(sp)
+            except Exception as e:
+                ok = repr(e)
+            check(f"закладки (ж): board_sync с path не строкой ({name}) доходит до записи board.json", ok is True, ok)
+        # запись bookmarks.json падает: seen не обновился, тревога одна, следующий тик досыпает
+        v, p = vault("w")
+        st = {}
+        alerts.clear()
+        real = T._write_plain
+
+        def boom(path, text):
+            raise OSError("диск полон")
+        T._write_plain = boom
+        try:
+            T._sync_bookmarks(v, st, al)
+        finally:
+            T._write_plain = real
+        check("закладки (з): запись упала — bookmarks_seen не обновлён, файла нет, тревога одна",
+              "bookmarks_seen" not in st and not os.path.exists(p) and len(alerts) == 1 and alerts[0][0] == "board-bookmarks", (st, alerts))
+        T._sync_bookmarks(v, st, al)
+        check("закладки (з): следующий тик после сбоя досыпает все закладки",
+              paths(json.load(open(p, encoding="utf-8"))) == want_paths and sorted(st["bookmarks_seen"]) == sorted(want_paths))
     finally:
         shutil.rmtree(tmp, True)
 

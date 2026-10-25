@@ -2739,10 +2739,10 @@ def _sync_bookmarks(vault, state, alert, src=None):
                   "board")
             return
     seen = state.get("bookmarks_seen")
-    seen = set(seen) if isinstance(seen, list) else set()
+    seen = {x for x in seen if isinstance(x, str)} if isinstance(seen, list) else set()
     if "bookmarks_seen" not in state and raw is not None:
         seen |= set(BOOKMARKS_LEGACY)
-    have = {it.get("path") for it in _bookmark_files(data["items"])}
+    have = {it["path"] for it in _bookmark_files(data["items"]) if isinstance(it.get("path"), str)}
     changed = False
     for grp in wanted:
         if not isinstance(grp, dict) or not isinstance(grp.get("items"), list):
