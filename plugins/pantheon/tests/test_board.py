@@ -30,7 +30,7 @@ T0 = 1_792_000_000  # 2026-10-15
 # Таймаут одного вызова — страховка от зависания, а не проверка скорости: ни одна проверка файла время не меряет.
 # 60 с не хватило под нагрузкой (metis-0368: прогон автоустановки при load avg 13,5 — `task new --direction ../..`,
 # мгновенный отказ, не уложился в 60 с и оборвал файл исключением). Зависший вызов всё равно ловится: 300 с здесь и
-# PLUGIN_TEST_TIMEOUT (600 с) на файл у автоустановки
+# PLUGIN_TEST_TIMEOUT (1500 с, metis-0424) на файл у автоустановки
 RUN_TIMEOUT = 300
 results = []
 
@@ -588,7 +588,16 @@ def main():
         "--project", "ExampleApp", t=day - 60)
     run(away, "board", t=day)
     lines = [l for l in open(nlog, encoding="utf-8").read().split("\n") if l]
-    check("уведомление «❓ Вопрос к вам» ведёт в карточку", any("Вопрос к вам: Выбрать тариф" in l and "file=" in l and "%D0%92%D1%8B%D0%B1%D1%80" in l for l in lines))
+    check("уведомление «❓ Вопрос к вам» ведёт в карточку", any("Вопрос к вам: Выбрать тариф" in l and "open?path=%2F" in l and "file=" not in l and "%D0%92%D1%8B%D0%B1%D1%80" in l for l in lines))
+    # путь в ссылке — файл карточки в копии вида (metis-0318): мутант «имя папки вместо пути» даёт другой path
+    from urllib.parse import unquote, urlsplit, parse_qs
+    qlines = [l for l in lines if "Вопрос к вам: Выбрать тариф" in l]
+    qurl = qlines[0].split("|")[2] if qlines and len(qlines[0].split("|")) > 2 else ""
+    qpath = parse_qs(urlsplit(qurl).query).get("path", [""])[0]
+    want = [os.path.join(view, "Доска", f) for f in os.listdir(os.path.join(view, "Доска")) if "Выбрать тариф" in f]
+    check("ссылка «❓ Вопрос к вам»: path = <копия вида>/Доска/<карточка>.md, файл есть",
+          len(want) == 1 and os.path.realpath(qpath) == os.path.realpath(want[0]) and os.path.isfile(qpath),
+          f"url={qurl} want={want}")
     open(nlog, "w").close()
     run(env, "task", "new", "--direction", "athena-shop", "--title", "Ночной вопрос", "--status", "waiting",
         "--waiting-on", "human", "--next", "ответ", "--project", "ExampleApp", t=day + 60)

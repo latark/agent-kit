@@ -59,6 +59,7 @@ REG = ('[[direction]]\nname = "athena-shop"\nproject = "ExampleApp"\nfolders = [
        'coordinator = false\n'
        '[[direction]]\nname = "iris-x"\nfolders = ["~/projects/x"]\ncoordinator = false\n')
 
+PROJ = {'athena-shop': 'ExampleApp', 'hermes-site': 'Site'}
 results = []
 
 
@@ -154,7 +155,7 @@ def cli_tests():
 
     def task(tid, status, direction):
         open(os.path.join(home, "directions", direction, "tasks", tid + ".md"), "w").write(
-            f"---\ntype: task\nid: {tid}\ntitle: t\nstatus: {status}\nproject: P\ndirection: {direction}\n"
+            f"---\ntype: task\nid: {tid}\ntitle: t\nstatus: {status}\nproject: {PROJ.get(direction, direction)}\ndirection: {direction}\n"
             + ("next: дальше\n" if status == "doing" else "") + ("closed: 2026-10-14\n" if status == "done" else "") + "created: 2026-10-14\nupdated: 2026-10-14\n"
             "schema_version: 1\n---\n\n## Журнал\n")
 
