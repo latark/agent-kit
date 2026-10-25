@@ -417,6 +417,15 @@ def main():
          "`plugins/pantheon/lib/pantheon.py` и всё, что он записывает"))
     for label, rule in argus_rules:
         check(f"argus.md: {label}", rule in a)
+    # сортировка находок (metis-0406): тест держит структуру, а не формулировки — в каждой собранной роли есть раздел
+    # признаков Б (от «Б — блокер» до «Д — долг»), и в нём по одному якорю на пункт; текст вокруг якорей свободный
+    anchors = ("секреты и личное", "дефект нового кода", "неверно по критерию")
+    for f in ("argus.md", "hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md"):
+        t = flat.get(f, "")
+        sect = t.split("Б — блокер", 1)[1].split("Д — долг", 1)[0] if "Б — блокер" in t and "Д — долг" in t else ""
+        check(f"{f}: раздел признаков Б есть, в нём пункты: " + ", ".join(anchors),
+              bool(sect) and all(x in sect for x in anchors))
+
     check("argus.md: нет старого узкого списка ядра, range-diff и «<новая база>» без источника",
           not any(x in a for x in ("или песочницу окон (`sandbox_build`, `window_rules.py`)", "остальное ядро; вне ядра",
                                    "Ядро защит — PR задевает", "`git range-diff <старая база>", "<новая база>",
