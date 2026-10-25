@@ -207,13 +207,44 @@ def test_cap_terms():
 def test_cap_since_reset_day():
     """since — дата дня сброса, сброс позже в тот же день: до сброса потолок держит, после сброса — истёк."""
     t2 = hm("19:00", DAY)  # новая неделя уже началась в 18:00
-    for t, used, line, on in ((T, 50.0, 96.43, True), (t2, 0.2, 0.6, False)):  # сброс 14.10 18:00; в 19:00 следующий — 21.10 18:00
-        for since in (f'"{DAY.isoformat()}"', f'"{DAY.isoformat()} 00:00"'):
-            e = env(used, line, sec=CAP50 + f'until = "reset"\nsince = {since}\n', t=t)
-            cap, note = N.cap_read(t)
-            check(bool(cap) == on and (on or "истёк" in note), f"since {since} в {t}: {cap} {note!r}")
-            ok, why = N.gate("wake", t, heavy=0)
-            check(ok == (not on), f"since {since} в {t}: gate {ok} {why}")
+    # сброс 14.10 18:00; в 19:00 следующий — 21.10 18:00. Дата — по конец суток: запись после сброса держит до
+    # следующего; время 00:00 — до сброса дня, после него истёк
+    for t, used, line, since, on in ((T, 50.0, 96.43, f'"{DAY.isoformat()}"', True),
+                                     (T, 50.0, 96.43, f'"{DAY.isoformat()} 00:00"', True),
+                                     (t2, 0.2, 0.6, f'"{DAY.isoformat()}"', True),
+                                     (t2, 0.2, 0.6, f'"{DAY.isoformat()} 00:00"', False)):
+        e = env(used, line, sec=CAP50 + f'until = "reset"\nsince = {since}\n', t=t)
+        cap, note = N.cap_read(t)
+        check(bool(cap) == on and (on or "истёк" in note), f"since {since} в {t}: {cap} {note!r}")
+        ok, why = N.gate("wake", t, heavy=0)
+        check(ok == (not (on and used >= 50.0)), f"since {since} в {t}: gate {ok} {why}")  # новая неделя — потолок не достигнут
+
+
+def test_cap_since_date_after_reset_hour():
+    """Argus B: потолок 25, неделя 30, сброс был сегодня в 10:00, since — дата сброса, сейчас 12:00: потолок держит
+    (раньше дата считалась с 00:00 и потолок сразу «истекал»); неделей позже — истёк."""
+    d = DAY.isoformat()
+    e = env(30.0, 100.0 * 2 / (7 * 24), sec=CAP50.replace("50", "25") + f'until = "reset"\nsince = "{d}"\n')
+    cap, note = N.cap_read(T)
+    check(cap and cap["pct"] == 25.0, f"потолок не действует: {cap} {note!r}")
+    check(not N.gate("wake", T, heavy=0)[0], "gate wake пропустил")
+    why = with_role("domain-coordinator", lambda: N.agent_gate(T))
+    check(why and "потолок владельца 25 %" in why, f"agent_gate не отказал: {why!r}")
+    t3 = T + WEEK  # следующая неделя: потолок записан на ту, что кончилась
+    e.snap(t3, 5.0, e.resets + WEEK)
+    cap, note = N.cap_read(t3)
+    check(cap is None and "истёк" in note, f"через неделю: {cap} {note!r}")
+
+
+def test_cap_bad_record_alert_once():
+    """Кривая или истёкшая запись — одна тревога в watch с причиной; повтор молчит; исправили — тревога снимается."""
+    for sec, word in ((CAP50 + 'until = "сброс"\n', "не разобрана"),
+                      (CAP50 + 'until = "reset"\nsince = "2020-01-01"\n', "истёк")):
+        e = env(10.0, 10.0, sec=sec)
+        for k in range(3):
+            e.watch(T + 60 * k)
+        al = e.alerts()
+        check(al.count("потолок владельца не действует") == 1 and word in al, f"{word}: {al!r}")
 
 
 def test_cap_broken_records():
