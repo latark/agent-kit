@@ -1,7 +1,8 @@
 """Темп недельного лимита и ночной цикл Пантеона (metis-0127 п. 1 и 3, metis-0128, metis-0129; решения владельца 16.10).
 
-  pantheon night [status]   неделя, линия, запас, зона; ночь; давность снимка лимита
-  pantheon night report     блок «Лимит» для ежедневной сводки: неделя, линия, запас, зона, ночь, тревоги, сброс
+  pantheon night [status]   неделя, линия, запас, зона; ночь; давность снимка лимита; потолок владельца и запас до него
+  pantheon night report     блок «Лимит» для ежедневной сводки: неделя, потолок, линия, запас, зона, ночь, тревоги, сброс
+  pantheon night agent-gate хук PreToolUse Agent|Task окон координаторов: отказ новому субагенту при потолке (ниже)
 
 Снимок лимита пишет строка статуса Claude Code в ~/.local/state/claude-statusline/ (путь — от HOME, как LIMIT_SNAPSHOT):
 `five-hour` — «pct resets_at now», `seven-day` — «pct resets_at now», `week-usage` — строки «now resets_at pct» (до 200).
@@ -60,14 +61,32 @@ start_pct, budget_pct, skipped, alerts[] (и служебные: answer_at, spen
   morning_five_hour_max = 50
   last_night_pct = 10      # последняя ночь перед сбросом недели
 
-Потолок дня владельца (его пишет Зевс по [id] решения владельца; без раздела или с кривым — как без потолка):
+Недельный потолок владельца (metis-0403; его пишет Зевс по [id] решения владельца; без раздела — потолка нет):
 
   [limits.owner_cap]
-  date = "2026-10-19"      # день, на который потолок действует (прошедшая дата — не действует)
-  pct = 58                 # днём (вне ночи) при неделе ниже стольких % жёлтая и красная зона не закрывают wake и
-                           # autostart; heavy_max, hard_pct, respawn и ночь не меняются; неделя ≥ pct — закрыто и тревога в любой
-                           # дневной зоне, зелёной тоже
-  decision = "18.10 13:47" # id или время решения владельца
+  pct = 50                 # неделя ≥ стольких % — новое не начинается: autostart, wake и respawn днём и ночью
+                           # (отказ с причиной) и новые субагенты из окон координаторов (хук PreToolUse Agent, ниже)
+  decision = "zeus-limit-budget"  # [id] решения владельца
+  # срок — одно из (без них потолок стоит каждую неделю, пока запись есть):
+  until = "2026-11-30"     # каждую неделю по эту дату включительно
+  until = "reset"          # до сброса недели, в которую попал since (since обязателен)
+  since = "2026-10-24"     # не раньше: дата — с начала суток (для until = "reset" — по конец этих суток: запись в день
+                           # сброса после его часа держит до следующего сброса), «ГГГГ-ММ-ДД ЧЧ:ММ» или дата-время TOML — с момента
+  date = "2026-10-19"      # старый вид: только этот день
+
+Потолок только сужает: жёлтую и красную зону, heavy_max, hard_pct и ночь не снимает (решение 25.10; дневной потолок
+metis-0275 работал как разрешение). Достигнут — неделя по снимку ≥ pct при сбросе в будущем; старый снимок тоже
+годится: в пределах недели расход не убывает. Кривая запись (pct не число в (0, 100], nan, until = "reset" без since,
+кривая дата) не действует, а `pantheon night status` пишет почему; кривая или истёкшая запись — ещё и одна тревога
+в watch (причина в тексте). При достижении (главный Mac, дежурный или шлюз) —
+одна строка в тревогах с уведомлением и одна карточка Зевсу «Ждёт вас» на неделю и pct (STATE/owner-cap.json):
+стоять до сброса или поднять до pct + 10 %. Идущее не рвём: отказ — только новому.
+
+Хук `pantheon night agent-gate` (hooks.json, PreToolUse Agent|Task): в окне координатора (PANTHEON_ROLE
+domain-coordinator или workshop, и у его субагентов — лидов) при достигнутом потолке запуск субагента — отказ
+(permissionDecision deny) с причиной. Окно штаба (hq), окна задач тика и ваш терминал хук не трогает. Python не
+запускается, пока в schedule.toml нет owner_cap (проверка оболочкой). Сбой расчёта или битая запись — не отказ (как
+без потолка), код 1 и причина в stderr.
 
   [night]
   ask_at = "22:00"         # вопрос владельцу
@@ -113,6 +132,7 @@ def set_core(mod):
 
 WEEK = 7 * 86400
 KINDS = ("autostart", "wake", "respawn")
+CAP_ROLES = ("domain-coordinator", "workshop")  # окна, чьи новые субагенты держит потолок владельца (agent-gate)
 LIMITS = {"warn_pp": 2.0, "stop_pp": 5.0, "hard_pct": 85.0, "snapshot_ok_min": 30.0, "snapshot_max_min": 180.0,
           "heavy_max": 2.0}
 NIGHT = {"start": "23:00", "end": "08:00", "budget_pct": 3.0, "check_pct": 1.0, "cap_pct": 5.0, "carry_share": 0.3,
@@ -156,26 +176,128 @@ def config():
     return merge(LIMITS, lim), merge(NIGHT, nl), merge(ASK, ask)
 
 
-def owner_cap(t):
-    """(pct, decision) потолка владельца на день t из [limits.owner_cap] или None: нет раздела, кривые поля или дата
-    не сегодня (прошедшая и будущая не действуют)."""
+def _cap_moment(v):
+    """Поле срока потолка → (начало, конец): дата — сутки целиком; дата-время TOML или «ГГГГ-ММ-ДД ЧЧ:ММ» — этот
+    момент (начало = конец). Иначе ValueError."""
+    if isinstance(v, datetime):  # раньше date: datetime — его подкласс
+        return v.timestamp(), v.timestamp()
+    if isinstance(v, date):
+        return (datetime.combine(v, dtime()).timestamp(),
+                datetime.combine(v + timedelta(days=1), dtime()).timestamp())
+    if isinstance(v, str):
+        s = v.strip().replace("T", " ")
+        with contextlib.suppress(ValueError):
+            return _cap_moment(datetime.strptime(s, "%Y-%m-%d %H:%M"))
+        with contextlib.suppress(ValueError):
+            return _cap_moment(datetime.strptime(s, "%Y-%m-%d").date())
+    raise ValueError(f"срок {str(v)[:40]!r} — не дата")
+
+
+def cap_read(t, m=None):
+    """(потолок, пометка) из [limits.owner_cap] на момент t. Потолок — {"pct", "decision", "scope"} или None; пометка —
+    почему не действует ("" — раздела нет). m — замер (нужен сброс недели для until = "reset"), иначе считается."""
     try:
         lim = P.load_schedule().get("limits")
-        c = lim.get("owner_cap") if isinstance(lim, dict) else None
-        if not isinstance(c, dict):
-            return None
-        d, pct = c.get("date"), c.get("pct")
-        if isinstance(d, datetime):
-            d = d.date()
-        elif isinstance(d, str):
-            d = datetime.strptime(d, "%Y-%m-%d").date()
-        if not isinstance(d, date) or isinstance(pct, bool) or not isinstance(pct, (int, float)) or not math.isfinite(pct) or pct <= 0:
-            return None
-        if d != datetime.fromtimestamp(t).date():
-            return None
-        return float(pct), str(c.get("decision") or "")
-    except Exception:  # noqa: BLE001 — битая секция: как без потолка
+    except Exception as e:  # noqa: BLE001 — нет или битый schedule.toml: как без потолка
+        return None, f"schedule.toml не прочитать ({type(e).__name__})"
+    c = lim.get("owner_cap") if isinstance(lim, dict) else None
+    if c is None:
+        return None, ""
+    if not isinstance(c, dict):
+        return None, "запись [limits.owner_cap] не разобрана: не таблица"
+    pct = c.get("pct")
+    if isinstance(pct, bool) or not isinstance(pct, (int, float)) or not math.isfinite(pct) or not 0 < pct <= 100:
+        return None, "запись [limits.owner_cap] не разобрана: pct — не число от 0 до 100"
+    cap = {"pct": float(pct), "decision": " ".join(str(c.get("decision") or "").split())[:80], "scope": "каждую неделю"}
+    try:
+        if c.get("date") is not None:  # старый вид (metis-0275): один день
+            a, b = _cap_moment(c["date"])
+            if not a <= t < b:
+                return None, f"потолок на {datetime.fromtimestamp(a).strftime('%d.%m')} — не сегодня"
+            cap["scope"] = f"на {datetime.fromtimestamp(a).strftime('%d.%m')}"
+            return cap, ""
+        since = _cap_moment(c["since"]) if c.get("since") is not None else None
+        if since and t < since[0]:
+            return None, f"действует с {P.stamp(since[0])}"
+        u = c.get("until")
+        if u is None:
+            return cap, ""
+        if u == "reset":
+            if since is None:
+                return None, "запись [limits.owner_cap] не разобрана: until = \"reset\" без since — неизвестно, какая неделя"
+            r = (m if m is not None else measure(t)).get("resets")
+            # неделя началась позже конца since (дата — конец суток, время — этот момент; допуск часа: сброс в снимке
+            # гуляет) — потолок прошлой недели истёк. Дата дня сброса, записанная после часа сброса, держит до
+            # следующего сброса: потолок только сужает, неоднозначный день лучше продлить (metis-0403, argus B)
+            if r and r - WEEK > since[1] + 3600:
+                return None, f"истёк: до сброса недели после {P.stamp(since[0])[:10]}"
+            cap["scope"] = "до сброса недели" + (f" ({when(r)})" if r and r > t else "")
+            return cap, ""
+        a, b = _cap_moment(u)
+        if t >= b:
+            return None, f"истёк {datetime.fromtimestamp(b - 1).strftime('%d.%m')}"
+        cap["scope"] = f"каждую неделю по {datetime.fromtimestamp(b - 1).strftime('%d.%m')}"
+        return cap, ""
+    except (ValueError, TypeError, OverflowError, OSError) as e:
+        return None, f"запись [limits.owner_cap] не разобрана: {str(e)[:80]}"
+
+
+def owner_cap(t, m=None):
+    """Действующий потолок владельца на момент t ({"pct", "decision", "scope"}) или None."""
+    return cap_read(t, m)[0]
+
+
+def cap_hit(m, cap, t):
+    """Потолок достигнут: неделя по снимку ≥ pct, сброс в будущем. Старый снимок годится — расход недели не убывает."""
+    return (bool(cap) and m.get("used") is not None and bool(m.get("resets")) and m["resets"] > t
+            and m["used"] >= cap["pct"])
+
+
+def cap_why(m, cap):
+    return (f"недельный потолок владельца {num(cap['pct'])} % достигнут: неделя {num(m['used'])} %"
+            + (f" (решение {cap['decision']})" if cap["decision"] else ""))
+
+
+def cap_notice(t, m, cap):
+    """Одна тревога (с уведомлением) и одна карточка Зевсу «Ждёт вас» на неделю и pct: стоять до сброса или поднять
+    до pct + 10 %. Только главный Mac и не пробный запуск. → id карточки или None."""
+    if os.environ.get("PANTHEON_DRYRUN") == "1" or not primary():
         return None
+    key = f"{round(m['resets'] / 3600)}-{num(cap['pct'])}"
+    why = cap_why(m, cap)
+    reset = when(m["resets"])
+    up = min(100.0, cap["pct"] + 10)
+    tid = None
+    with P.lock("owner-cap"):
+        sp = P.path("owner-cap.json")
+        st = P.read_json(sp, {})
+        st = st if isinstance(st, dict) else {}
+        if st.get("key") == key:
+            return st.get("card_id")
+        title = f"Решить: стоять до сброса недели или поднять потолок до {num(up)} %"
+        stay = f"А — стоять до сброса недели ({reset}): новых запусков и исполнителей нет, идущие доделывают шаг"
+        raise_ = (f"Б — поднять потолок до {num(up)} %: потолок перестанет закрывать запуски раньше {num(up)} % недели; "
+                  f"самозапуск и подъём окон при этом открыты только в зелёной зоне недели, исполнители окон — до "
+                  f"{num(up)} %. Цена: меньше запаса до сброса")
+        try:
+            tid, _ = P.tasks_mod().task_new(
+                P.PANTHEON, t, "inbox", title, owner="zeus", status="waiting", waiting_on="human",
+                next="ответ владельца: стоять или поднять потолок", question=title,
+                why=(f"Неделя {num(m['used'])} % при вашем потолке {num(cap['pct'])} % ({cap['scope']}"
+                     + (f", решение {cap['decision']}" if cap["decision"] else "") + "). Самозапуск, подъём окон и "
+                     "новые исполнители и argus из окон координаторов стоят; начатое не прерывается."),
+                options=[stay, raise_], recommend=stay.split(" — ")[0] + " — так вы решили" + (
+                    f" [{cap['decision']}]" if cap["decision"] else ""),
+                if_no_answer=f"Без ответа новые запуски стоят до сброса недели ({reset}); на новой неделе потолок "
+                             "снова действует.", actor="плановый проход")
+        except Exception as e:  # noqa: BLE001 — шлюз не падает из-за карточки; повтор — следующим проходом
+            P.alert_daily("owner-cap-card", f"карточку о потолке владельца не завести: {type(e).__name__}: "
+                                            f"{str(e)[:120]}", "night")
+        else:
+            P.write_json(sp, {"key": key, "card_id": tid, "at": P.stamp(t), "pct": cap["pct"], "used": m["used"]})
+    text = f"{why} — новые запуски стоят до сброса недели ({reset})" + (f", вопрос владельцу {tid}" if tid else "")
+    P.alert_once("owner-cap", key, text, "night", note=text)
+    return tid
 
 
 def primary():
@@ -412,20 +534,19 @@ def gate(kind, t, agents=None, registry=None, heavy=None):
     cfg = config()
     m = measure(t, cfg)
     d = night_of(t, cfg)
+    # недельный потолок владельца (metis-0403) — первым и для всех трёх видов, днём и ночью: только сужает, поэтому
+    # ниже зоны и ночь проверяются как без него. Старый снимок годится: расход недели не убывает
+    cap = owner_cap(t, m)
+    if cap_hit(m, cap, t):
+        cap_notice(t, m, cap)
+        return False, cap_why(m, cap)
     if not m["known"]:
         # днём продолжение прерванной снимка не ждёт: «лимит неизвестен — новое не запускать» (решение 16.10) — о
         # новом; иначе без строки статуса за 30 мин встал бы любой автоподъём (решение лида 17.10)
         if kind == "respawn" and d is None:
             return True, ""
         return False, m["why"]
-    cap = (owner_cap(t) if kind != "respawn" and d is None
-           and m["used"] < cfg[0]["hard_pct"] else None)  # hard_pct потолок не отменяет
-    if cap and m["used"] >= cap[0]:
-        why = f"потолок владельца {num(cap[0])} % на {datetime.fromtimestamp(t).strftime('%d.%m')} достигнут"
-        P.alert_once("owner-cap", f"{datetime.fromtimestamp(t).date()}-{num(cap[0])}",
-                     f"{why}: неделя {num(m['used'])} %" + (f" (решение {cap[1]})" if cap[1] else ""), "night")
-        return False, why
-    if cap is None and m["zone"] == "red":  # с потолком выше расхода зона не закрывает; heavy_max — ниже
+    if m["zone"] == "red":
         return False, f"красная зона — неделя {num(m['used'])} % при линии {num(m['line'])} %"
     if kind == "respawn":
         if d is None:
@@ -434,7 +555,7 @@ def gate(kind, t, agents=None, registry=None, heavy=None):
         if not ok:
             return False, why
         return morning(t, d, cfg)  # у правила утра исключения для продолжения нет (решение лида 17.10)
-    if d is None and m["zone"] == "yellow" and cap is None:
+    if d is None and m["zone"] == "yellow":
         return False, f"жёлтая зона днём — неделя {num(m['used'])} % при линии {num(m['line'])} %"
     if heavy is None:
         heavy = heavy_count(agents, registry)
@@ -482,6 +603,13 @@ def watch(agents=None, registry=None, doms=None, t=None):
         text = (f"Недельный лимит: {num(m['used'])} % при линии {num(m['line'])} % (запас {signed(m['over'])} п.п.) — "
                 f"зона {ZONES[m['zone']]}: {what}")
         P.alert_once(f"limit-zone-{m['zone']}", day, text, "night", note=text)
+    cap, note = cap_read(t, m)
+    if note.startswith(("запись [limits.owner_cap] не разобрана", "истёк")):  # решение владельца не должно пропасть молча
+        P.alert_once("owner-cap-note", note, f"потолок владельца не действует: {note}", "night", note=note)
+    else:
+        P.clear_once("owner-cap-note")
+    if cap_hit(m, cap, t):  # карточка и тревога — и без попытки запуска в этом проходе (одна на неделю и pct)
+        cap_notice(t, m, cap)
     power_check(t, cfg)
     d = evening(t, cfg)
     if d is not None:
@@ -945,7 +1073,37 @@ def status_lines(t=None):
     m = measure(t, cfg)
     d = evening(t, cfg)
     night = night_line(load(d), d, t, cfg) if d else f"не открыта — вопрос в {cfg[2]['ask_at']}"
-    return [week_line(m), "Ночь: " + night, snap_line(m, cfg)] + [f"Разовый запуск {x}" for x in oneshot_lines(t)]
+    return ([week_line(m), "Ночь: " + night, snap_line(m, cfg), cap_line(t, m)]
+            + [f"Разовый запуск {x}" for x in oneshot_lines(t)])
+
+
+def cap_line(t, m):
+    """Потолок владельца и запас до него (п. п.) — или почему его нет."""
+    cap, note = cap_read(t, m)
+    if cap is None:
+        return "Потолок владельца: " + (f"не действует — {note}" if note else "нет")
+    s = f"Потолок владельца: {num(cap['pct'])} % {cap['scope']}" + (
+        f" · решение {cap['decision']}" if cap["decision"] else "")
+    if cap_hit(m, cap, t):
+        return s + f" · достигнут (неделя {num(m['used'])} %) — новые запуски и исполнители стоят"
+    if m["used"] is None or not m["resets"] or m["resets"] <= t:
+        return s + " · запас неизвестен (расхода недели нет)"
+    return s + f" · запас {num(cap['pct'] - m['used'])} п.п."
+
+
+def agent_gate(t=None):
+    """Хук PreToolUse Agent|Task: причина отказа запуску субагента в окне координатора при достигнутом потолке или
+    None. Окно — по PANTHEON_ROLE (domain-coordinator, workshop); hq, окна задач и терминал владельца — None."""
+    if (os.environ.get("PANTHEON_ROLE") or "") not in CAP_ROLES:
+        return None
+    t = P.now() if t is None else t
+    m = measure(t)
+    cap = owner_cap(t, m)
+    if not cap_hit(m, cap, t):
+        return None
+    return (f"Пантеон: {cap_why(m, cap)}. Новых исполнителей, лидов и argus не запускай до сброса недели "
+            f"({when(m['resets'])}) или нового слова владельца: доделай текущий шаг без них, запиши в файл состояния, "
+            "где остановилась и что ждёт запуска. Поднять потолок может только владелец — вопрос ему уже на доске.")
 
 
 def snap_line(m, cfg):
@@ -964,7 +1122,7 @@ def report_lines(t=None):
     m = measure(t, cfg)
     d = last_evening(t, cfg)
     st = load(d)
-    out = [week_line(m)]
+    out = [week_line(m), cap_line(t, m)]
     nl = night_line(st, d, t, cfg, now_night=evening(t, cfg) is not None)
     al = st.get("alerts") or []
     out.append(f"Ночь {d.strftime('%d.%m')}: {nl}" + (f" · тревоги: {', '.join(f'{x} %' for x in al)}" if al else
@@ -991,5 +1149,18 @@ def main(rest):
         for ln in report_lines():
             print(f"  {ln}")
         return 0
-    print("pantheon night [status|report]", file=P.sys.stderr)
+    if sub == "agent-gate":  # хук PreToolUse (hooks.json): событие в stdin не нужно — решает окно и потолок
+        with contextlib.suppress(OSError, ValueError):
+            P.sys.stdin.read()
+        try:
+            why = agent_gate()
+        except Exception as e:  # noqa: BLE001 — сбой расчёта не отказ (как битая запись), но виден: код 1
+            print(f"pantheon night agent-gate: потолок не проверен ({type(e).__name__}: {str(e)[:120]})",
+                  file=P.sys.stderr)
+            return 1
+        if why:
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                     "permissionDecisionReason": why}}, ensure_ascii=False))
+        return 0
+    print("pantheon night [status|report|agent-gate]", file=P.sys.stderr)
     return 2

@@ -6346,7 +6346,10 @@ def board_domains():
 def board_status_sync(T):
     """Статусы в шаг с работой (metis-0397, п. 7–8): задача todo с живой worktree на ветке с её id → doing, пачка — по
     составу. До сборки видов доски: виды Obsidian сразу видят новые статусы. Задача, которую вернули в todo, а работа
-    идёт, — тревога один раз на набор задач. Сбой — тревога, проход доски идёт дальше. → строки для вывода."""
+    идёт, — тревога один раз на набор задач; пачка, которую проход не двигает, — один раз на набор «id и причина»:
+    сменилась причина — тревога заново. Под блокировкой записи сдвиг сверяет статус, а у пачки ещё и вопрос владельцу
+    (STORY_HOLD): поставили между планом и записью — не сдвигаем. Сбой — тревога, проход доски идёт дальше.
+    → строки для вывода."""
     out = []
     try:
         S = boardstatus_mod()
@@ -6366,9 +6369,13 @@ def board_status_sync(T):
             def same(h, old=old, tid=tid):
                 if h.get("status") != old:
                     raise ValueError(f"{tid}: статус уже {h.get('status')}")
+                held = [f for f in S.STORY_HOLD if h.get(f)] if h.get("type") == "story" else []
+                if held:  # вопрос поставили после плана: done стёр бы его (metis-0412)
+                    raise ValueError(f"{tid}: ждёт ответа владельца ({', '.join(held)})")
             try:
                 T.task_set(PANTHEON, now(), tid, ch, note=note, actor="плановый проход", precheck=same)
-                out.append(f"статус · {tid}: {old} → {ch['status']}")
+                out.append(f"статус · {tid}: {old} → {ch['status']}" if "status" in ch
+                           else f"статус · {tid}: {old}, отметка в журнале")
             except ValueError as e:  # задачу правят прямо сейчас — следующий проход посмотрит заново
                 out.append(f"статус · {tid}: не сдвинут ({e})")
     except Exception as e:  # noqa: BLE001 — сбой сверки статусов не ломает проход доски
@@ -6384,8 +6391,8 @@ def board_status_sync(T):
     else:
         clear_once("board-todo-live")
     if held:  # пачку проход не двигает: решение за человеком (вопрос владельцу, ручной статус)
-        alert_once("board-story-hold", ",".join(sorted(held)), "доска: статус пачки по составу не поставлен — "
-                   + "; ".join(f"{sid} ({why})" for sid, why in sorted(held.items()))
+        reasons = "; ".join(f"{sid} ({why})" for sid, why in sorted(held.items()))  # ключ — id и причина (metis-0412)
+        alert_once("board-story-hold", reasons, "доска: статус пачки по составу не поставлен — " + reasons
                    + ". Решить руками — pantheon task set ID status=…", "board")
     else:
         clear_once("board-story-hold")
