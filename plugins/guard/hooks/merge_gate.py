@@ -1028,19 +1028,18 @@ def owner_approved(repo, pr, sha, now=None):
 
 
 # перенос «принять» после подтягивания main (metis-0415, решение владельца 24.10 17:54 [metis-0384b]): «принять»
-# с прошлого head переходит на новый, только если собственный дифф PR от merge-base с base PR тот же (git patch-id),
-# кроме строки version в plugin.json; сбой git и неполная история — не переходит
+# с прошлого head переходит на новый, только если собственный дифф PR от merge-base с base PR тот же — по содержимому
+# файлов (git diff --raw, решение владельца 25.10 23:05), кроме строки version в plugin.json; сбой git и неполная
+# история — не переходит
 CARRY_HEADS = 8  # сколько прошлых head с вердиктами сверять (кроме нового); старые — без отпечатка
 CARRY_BUDGET = 4  # с на все отпечатки одного шлюза: дальше — без отпечатка (таймаут хука 10 с, ещё gh pr view и CI)
-PLUGIN_JSON = "plugins/*/.claude-plugin/plugin.json"
-PLUGIN_JSON_RE = re.compile(rb"plugins/[^/]*/\.claude-plugin/plugin\.json")  # то же, что glob PLUGIN_JSON
-# :(top) — от корня дерева: при core.worktree у git папки префикс .git/, и «.» значил бы только .git/ (#134 п.1)
-CARRY_PATHS = ("--", ":(top)", ":(top,exclude,glob)" + PLUGIN_JSON)
-# файл и номера строк каждого блока диффа: строка «diff --git» и «@@ -a,b +c,d @@» без текста функции
-HUNK_RE = re.compile(rb"^(?:diff --git [^\n]*|@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@)", re.M)
-DIFF_FLAGS = ("--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color",
-              "--no-relative", "--ignore-submodules=none", "--diff-algorithm=myers", "--src-prefix=a/",
-              "--dst-prefix=b/", "-U3", "--function-context", "--inter-hunk-context=0")
+PLUGIN_JSON_RE = re.compile(rb"plugins/[^/]*/\.claude-plugin/plugin\.json")
+# дифф без pathspec и без текста: от конфига git (diff.*, core.abbrev, атрибуты, diff.submodule) вывод не зависит,
+# orderFile меняет только порядок строк — сортировка в Python (threat-134-carry п.2)
+RAW_FLAGS = ("--raw", "-z", "--no-abbrev", "--no-renames", "--no-relative", "--ignore-submodules=none")
+# «:режим режим sha sha статус» строки --raw; --no-renames — статус одной буквой без процента, sha1 или sha256
+RAW_META_RE = re.compile(rb":([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40}(?:[0-9a-f]{24})?) ([0-9a-f]{40}(?:[0-9a-f]{24})?) "
+                         rb"([ADMT])")
 
 
 def _git_bytes(gd, *args, input=None):
@@ -1093,44 +1092,57 @@ def _manifest_canon(raw):
     return json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
-def _manifests(gd, mb, head):
-    """Правки plugin.json плагинов между mb и head без строки version → список строк или None (не разобрать).
-    Список файлов — без pathspec, plugin.json отбирает PLUGIN_JSON_RE: префикс git папки его не сузит."""
-    out = _git_bytes(gd, "diff", "--name-status", "-z", "--no-renames", "--no-relative", "--ignore-submodules=none",
-                     mb, head)
+def _raw_entries(gd, mb, head):
+    """git diff --raw mb..head без pathspec → [(режим, режим, sha, sha, статус, путь)] (байты) или None: сбой git
+    или вывод не по формату (строгий разбор: лишнее поле или статус — None)."""
+    out = _git_bytes(gd, "diff", *RAW_FLAGS, mb, head)
     if out is None:
         return None
-    parts = out.split(b"\0")
-    if parts and parts[-1] == b"":
-        parts.pop()
+    if not out:
+        return []
+    if not out.endswith(b"\0"):
+        return None
+    parts = out[:-1].split(b"\0")
     if len(parts) % 2:
         return None
     entries = []
-    for st, path in zip(parts[::2], parts[1::2]):
-        if not PLUGIN_JSON_RE.fullmatch(path):
-            continue
-        sides = {"A": (head,), "D": (mb,), "M": (mb, head)}.get(st.decode("ascii", "replace"))
+    for meta, path in zip(parts[::2], parts[1::2]):
+        m = RAW_META_RE.fullmatch(meta)
+        if not m or not path:
+            return None
+        entries.append(m.groups() + (path,))
+    if len({e[5] for e in entries}) != len(entries):
+        return None
+    return entries
+
+
+def _manifests(gd, entries):
+    """Правки plugin.json плагинов (из _raw_entries) без строки version → список строк или None (не разобрать).
+    Пропускается только правка, где поменялся один номер версии: режим тот же, канон без version тот же."""
+    out = []
+    for om, nm, osha, nsha, st, path in entries:
+        sides = {b"A": (nsha,), b"D": (osha,), b"M": (osha, nsha)}.get(st)
         if sides is None:
             return None
         canon = []
-        for c in sides:
-            blob = _git_bytes(gd, "cat-file", "blob", c.encode() + b":" + path)
+        for blob_sha in sides:
+            blob = _git_bytes(gd, "cat-file", "blob", blob_sha)
             if blob is None:
                 return None
             try:
                 canon.append(_manifest_canon(blob))
             except (ValueError, UnicodeDecodeError, RecursionError):
                 return None
-        if st == b"M" and canon[0] == canon[1]:
+        if st == b"M" and om == nm and canon[0] == canon[1]:
             continue  # поменялся только номер версии
-        entries.append(st.decode() + "\0" + os.fsdecode(path) + "\0" + "\0".join(canon))
-    return sorted(entries)
+        out.append("\0".join((st.decode(), om.decode(), nm.decode(), os.fsdecode(path), *canon)))
+    return sorted(out)
 
 
 def _fingerprint(gd, base, head):
-    """Отпечаток собственного диффа PR: merge-base(base, head)..head — git patch-id --verbatim (пробелы считаются),
-    режимы и вид файлов, правки plugin.json без строки version → (отпечаток, merge-base) или (None, почему не
-    посчитан)."""
+    """Отпечаток собственного диффа PR: merge-base(base, head)..head — строки git diff --raw (режимы, sha блобов и
+    gitlink, статус, путь; решение владельца 25.10 23:05), сортированные по пути, кроме plugin.json плагинов — их
+    правки без строки version → (отпечаток, merge-base) или (None, почему не посчитан)."""
     if not SHA_RE.fullmatch(head) or _git_bytes(gd, "cat-file", "-e", head + "^{commit}") is None:
         return None, f"коммита {head[:12]} нет в git папки"
     out = _git_bytes(gd, "merge-base", "--all", base, head)
@@ -1138,35 +1150,14 @@ def _fingerprint(gd, base, head):
     if len(mbs) != 1:
         return None, f"у {head[:12]} и base PR нет единственной merge-base"
     mb = mbs[0].decode("ascii", "replace")
-    diff = _git_bytes(gd, "diff", *DIFF_FLAGS, mb, head, *CARRY_PATHS)
-    raw_args = ("diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-relative", "--ignore-submodules=none",
-                mb, head)
-    raw = _git_bytes(gd, *raw_args, *CARRY_PATHS)
-    raw_all = _git_bytes(gd, *raw_args)  # без pathspec: им сверяется, что pathspec ничего не потерял (#134 п.1)
-    plugins = _manifests(gd, mb, head)
-    if diff is None or raw is None or raw_all is None:
-        return None, f"git diff на {head[:12]} не ответил"
-    if raw.split(b"\0")[1::2] != [p for p in raw_all.split(b"\0")[1::2] if not PLUGIN_JSON_RE.fullmatch(p)]:
-        return None, f"дифф {head[:12]} по pathspec не сошёлся со списком файлов (core.worktree?)"
+    entries = _raw_entries(gd, mb, head)
+    if entries is None:
+        return None, f"git diff --raw на {head[:12]} не ответил или не разобрать"
+    plugins = _manifests(gd, [e for e in entries if PLUGIN_JSON_RE.fullmatch(e[5])])
     if plugins is None:
-        return None, f"plugin.json на {head[:12]} не разобрать (не JSON, два ключа или version не строкой)"
-    pid = b"EMPTY"
-    if diff:
-        got = _git_bytes(gd, "patch-id", "--verbatim", input=diff)
-        if got is None:
-            return None, f"git patch-id на {head[:12]} не ответил"
-        pid = got.split()[0] if got.split() else b"NOHUNK"
-    # patch-id не видит номеров строк (@@): без них вставка в другом месте периодического файла дала бы тот же
-    # отпечаток (#134 п.4). Цена: main сдвинул строки над правкой PR в том же файле — переноса нет, нужен argus
-    hunks = b"\n".join(HUNK_RE.findall(diff))
-    fields = raw.split(b"\0")
-    kinds = []  # «:старый_режим новый_режим sha sha вид» и путь — без sha блобов: их сверяет patch-id
-    for meta, path in zip(fields[::2], fields[1::2]):
-        m = meta.split()
-        if len(m) < 5:
-            return None, f"git diff --raw на {head[:12]} не разобрать"
-        kinds.append(b" ".join((m[0], m[1], m[4], path)))
-    h = hashlib.sha256(b"carry-v2\0" + pid + b"\0" + hunks + b"\0" + b"\0".join(sorted(kinds)) + b"\0"
+        return None, f"plugin.json на {head[:12]} не разобрать (не JSON, два ключа, version не строкой, не файл)"
+    rows = sorted((e for e in entries if not PLUGIN_JSON_RE.fullmatch(e[5])), key=lambda e: e[5])
+    h = hashlib.sha256(b"carry-v3\0" + b"".join(b" ".join(e[:5]) + b"\0" + e[5] + b"\0" for e in rows) + b"\0"
                        + "\0".join(plugins).encode("utf-8"))
     return h.hexdigest(), mb
 

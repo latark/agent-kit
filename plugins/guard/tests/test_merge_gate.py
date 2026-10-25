@@ -1639,8 +1639,8 @@ class Hist:
 
 
 def kit_history(h):
-    """История PR в projects/agent-kit (один раз на прогон). B — база; M1 — main после соседнего PR (README внизу,
-    новый файл, удалён gone.py, g.py переименован в h.py, version 0.11.85); M2 — ещё один PR в main. P — проверенный
+    """История PR в projects/agent-kit (один раз на прогон). B — база; M1 — main после соседнего PR (MAIN.md — файл
+    не из PR: отпечаток — по содержимому файлов PR, решение 25.10 23:05; новый файл, удалён gone.py, g.py переименован в h.py, version 0.11.85); M2 — ещё один PR в main. P — проверенный
     head PR (code.py и README вверху); N1 = P + подтянутый M1 + номер версии; N2 = N1 + подтянутый M2 + номер."""
     if getattr(h, "hist", None):
         return h.hist
@@ -1650,9 +1650,9 @@ def kit_history(h):
     H.br("t-base", h.sha["agent-kit"])
     s["B"] = H.put({PJ: _man("pantheon", "0.11.84"), GJ: _man("guard", "0.5.17"), "README.md": README,
                     "code.py": CODE.format(1), "g.py": G_PY, "gone.py": "g = 1\n", "bin.dat": b"\x00\x01bin\x00",
-                    ".claude-plugin/marketplace.json": "{}\n"}, "B")
+                    ".claude-plugin/marketplace.json": "{}\n", "MAIN.md": README}, "B")
     H.br("t-main", s["B"])
-    s["M1"] = H.put({PJ: _man("pantheon", "0.11.85"), "README.md": README.replace("r12", "r12m"), "other.py": "y = 1\n",
+    s["M1"] = H.put({PJ: _man("pantheon", "0.11.85"), "MAIN.md": README.replace("r12", "r12m"), "other.py": "y = 1\n",
                      "gone.py": None, "g.py": None, "h.py": G_PY}, "main: соседний PR и выпуск")
     s["M2"] = H.put({PJ: _man("pantheon", "0.11.86"), "other2.py": "z = 1\n"}, "main: ещё один PR")
     H.br("t-pr", s["B"])
@@ -1667,7 +1667,7 @@ def kit_history(h):
     for name, files, mode in (
             ("out", {"code.py": CODE.format(3)}, None),
             ("ws", {"code.py": CODE.format(2).replace("return x", "return x ")}, None),
-            # отступ в строке, которую PR и так правит: строки -/+ те же, без --verbatim patch-id их не различит
+            # отступ в строке, которую PR и так правит (у patch-id без --verbatim строки -/+ были бы те же)
             ("wsin", {"code.py": CODE.format(2).replace("    x = 2", "  x = 2")}, None),
             ("bin", {"bin.dat": b"\x00\x02bin\x00"}, None),
             ("field", {PJ: _man("pantheon", "0.11.86", description="другое")}, None),
@@ -1764,8 +1764,8 @@ def t_carry_unit(h):
                        ("Nam", s["M1"]), ("Nredo", s["M1"]), ("Nrev", s["M1"]), ("N2", s["M2"])):
         check(f"отпечаток {name} = P (номер версии и подтянутый main)", fp(s[name], base) == ref, name)
     check("отпечаток P от base M2 — тот же", fp(s["P"], s["M2"]) == ref)
-    for name, why_ in (("out", "правка кода"), ("ws", "только пробел (patch-id --verbatim)"),
-                       ("wsin", "отступ в правленой строке (patch-id --verbatim)"), ("bin", "двоичный файл"),
+    for name, why_ in (("out", "правка кода"), ("ws", "только пробел"),
+                       ("wsin", "отступ в правленой строке"), ("bin", "двоичный файл"),
                        ("field", "другое поле plugin.json (117-b1)"), ("mjson", "marketplace.json"),
                        ("mode", "режим файла"), ("newfile", "пустой новый файл"),
                        ("evil", "правка внутри слияния (117-a7)"), ("moddel", "файл, удалённый main, вернули (117-b3)"),
@@ -1882,8 +1882,10 @@ def t_carry_r2(h):
         return mg._fingerprint(gd, base, head)[0]
 
     ref = fp(s["P"])
-    # п.1: core.worktree = корень клона → у git префикс .git/, и pathspec «.» значил бы только .git/
+    # п.1: core.worktree = корень клона → у git префикс .git/, и pathspec «.» значил бы только .git/, а
+    # diff.relative — дифф только .git/ (без --no-relative)
     git(kit, "config", "core.worktree", kit)
+    git(kit, "config", "diff.relative", "true")
     try:
         n1 = fp(s["N1"])
         check("п.1 core.worktree: отпечаток N1 — как у P (номер версии и main)", n1 == ref, n1)
@@ -1891,16 +1893,9 @@ def t_carry_r2(h):
             got = fp(s[name])
             check(f"п.1 core.worktree: отпечаток {name} ≠ N1 (правка вне .git/ видна)", got is not None and got != n1,
                   got)
-        saved = mg.CARRY_PATHS
-        mg.CARRY_PATHS = ("--", ".", ":(exclude,glob)" + mg.PLUGIN_JSON)  # pathspec без :(top), как на 624cbfe
-        try:
-            got = mg._fingerprint(gd, s["M1"], s["out"])
-            check("п.1 сверка путей: дифф по pathspec не сошёлся со списком файлов — отпечатка нет",
-                  got[0] is None and "не сошёлся" in got[1], got)
-        finally:
-            mg.CARRY_PATHS = saved
     finally:
         git(kit, "config", "--unset", "core.worktree")
+        git(kit, "config", "--unset", "diff.relative")
     # п.2: x «принять» A (код X), y «вернуть» R (код Y), z «принять» F (код Z) снимает R; N — снова код X
     A, R, F, N = "a" * 40, "b" * 40, "c" * 40, "d" * 40
     prints = {A: ("X", "mb1"), R: ("Y", "mb1"), F: ("Z", "mb1"), N: ("X", "mb2")}
@@ -1948,7 +1943,7 @@ def t_carry_r2(h):
     got = mg._fingerprint(gd, base2, head2)
     check("п.3: две merge-base — отпечатка нет, «принять» не переносится",
           got[0] is None and "единственной merge-base" in got[1], got)
-    # п.4: patch-id не видит номеров строк — у периодического файла вставка после 5-го и 6-го блока одна и та же
+    # п.4: вставка после 5-го и 6-го блока периодического файла — у patch-id без номеров строк одна и та же
     per = ["A\n", " x\n"] * 20
     H.br("t-per", s["B"])
     bp = H.put({"p.txt": "".join(per)}, "main: периодический файл")
@@ -1968,7 +1963,7 @@ def t_carry_r2(h):
     f5, f6 = mg._fingerprint(gd, bp, q5)[0], mg._fingerprint(gd, bp, q6)[0]
     check("п.4: вставка в другом месте периодического файла — отпечаток другой", f5 and f6 and f5 != f6, (f5, f6))
     fc, fcm = mg._fingerprint(gd, bc, qc)[0], mg._fingerprint(gd, bc2, qcm)[0]
-    check("п.4 цена: main сдвинул строки над правкой PR в том же файле — отпечаток другой (позовут argus)",
+    check("цена: main правил файл PR (строка над правкой) — отпечаток другой (позовут argus)",
           fc and fcm and fc != fcm, (fc, fcm))
 
 
@@ -2037,11 +2032,14 @@ def t_carry_gate(h):
              False, "нет «принять»")
     finally:
         git(p, "replace", "-d", s["out"])
-    # сбой git (122-a11-1): patch-id не отвечает — ни переноса, ни снятия «вернуть»
+    # сбой git (122-a11-1) и старый git без флага (unknown option): diff --raw не отвечает — ни переноса, ни снятия
+    # «вернуть»; с git.slow — diff --raw дольше таймаута 3 с
     wrap = h.j("gitwrap")
     os.makedirs(wrap, exist_ok=True)
     with open(os.path.join(wrap, "git"), "w") as fh:
-        fh.write(f'#!/bin/sh\ncase "$*" in *patch-id*) [ -f "$HOME/git.fail" ] && exit 1;; esac\n'
+        fh.write('#!/bin/sh\ncase "$*" in *--raw*)\n'
+                 '  [ -f "$HOME/git.fail" ] && { echo "error: unknown option no-relative" >&2; exit 129; }\n'
+                 '  [ -f "$HOME/git.slow" ] && exec sleep 9;;\nesac\n'
                  f'exec {shutil.which("git")} "$@"\n')
     os.chmod(os.path.join(wrap, "git"), 0o755)
     env = {"PATH": wrap + os.pathsep + h.j("bin") + os.pathsep + os.environ["PATH"]}
@@ -2050,11 +2048,11 @@ def t_carry_gate(h):
          extra_env=env)
     open(h.j("git.fail"), "w").close()
     try:
-        case("сбой git patch-id (122-a11-1) — нет переноса, «вернуть» в силе", "NA", "M1", fixed, False,
+        case("сбой git diff --raw (122-a11-1, старый git) — нет переноса, «вернуть» в силе", "NA", "M1", fixed, False,
              "«вернуть» (reject)", extra_env=env)
         case("сбой git — прямое «принять» на head проходит", "N1", "M1", [opus(s["N1"]), tests(s["N1"])], True,
              extra_env=env)
-        case("сбой git patch-id — head с правкой кода «принять» с P не переносит", "out", "M1",
+        case("сбой git diff --raw — head с правкой кода «принять» с P не переносит", "out", "M1",
              [opus(s["P"]), tests(s["out"])], False, "нет «принять»", extra_env=env)
     finally:
         os.remove(h.j("git.fail"))
@@ -2166,12 +2164,275 @@ def t_carry_product(h):
         merge_case(f"продукт (117-a2): {name}", h.pre(cmd, pdir="projects/broker"), allow, why)
 
 
+def plumb(p, parents, changes, msg, src=None):
+    """Коммит без рабочего дерева (read-tree, update-index, commit-tree): changes — путь → None (удалить) или
+    (режим, байты) — для 160000 вместо байтов sha gitlink. Дерево — от src или первого родителя."""
+    idx = os.path.join(p, ".git", "plumb-index")
+    env = dict(os.environ, GIT_INDEX_FILE=idx)
+
+    def run(*a, inp=None):
+        return subprocess.run(["git", "-C", p, "-c", "user.name=t", "-c", "user.email=t@example.com", *a], input=inp,
+                              env=env, check=True, capture_output=True).stdout.decode().strip()
+    run("read-tree", src or parents[0])
+    for path, v in changes.items():
+        if v is None:
+            run("update-index", "--force-remove", path)
+            continue
+        mode, data = v
+        sha = data if mode == "160000" else run("hash-object", "-w", "--stdin", inp=data)
+        run("update-index", "--add", "--cacheinfo", f"{mode},{sha},{path}")
+    tree = run("write-tree")
+    c = run("commit-tree", tree, *sum((["-p", x] for x in parents), []), "-m", msg)
+    os.remove(idx)
+    return c
+
+
+def r4_history(h):
+    """Истории для #134 r4 (один раз на прогон): T0 — база с подмодулем, симлинком, .gitattributes; TM — main, файлы
+    PR не трогает; heads — (head, base) по имени; имя с «n» на конце — то же + main + номер версии."""
+    if getattr(h, "r4", None):
+        return h.r4
+    s = kit_history(h)
+    p = h.j("projects/agent-kit")
+    F = lambda b: ("100644", b if isinstance(b, bytes) else b.encode())
+    L = lambda t: ("120000", t.encode())
+    G = lambda sha: ("160000", sha)
+    t0 = plumb(p, [s["B"]], {"sub": G(s["B"]), "z.txt": F("z\n"), "t.txt": F("t\n"), "ln": L("t.txt"), "tf": F("t.txt"),
+                             "crlf.txt": F("a\ny\n"), "data.bin": F(b"\x00\x01"), "w.txt": F("w\n"),
+                             ".gitattributes": F("* diff=x binary\n")}, "r4: база")
+    tm = plumb(p, [t0], {"main2.py": F("m = 2\n"), PJ: F(_man("pantheon", "0.11.85"))}, "r4: main")
+    hex1, hex2 = "1" * 40, "2" * 40
+    own = {"g1": {"sub": G(s["M1"])}, "g2": {"sub": G(s["M2"])},
+           "ga1": {"sub": G(s["M1"]), "z.txt": F("z1\n")}, "ga2": {"sub": G(s["M1"]), "z.txt": F("z2\n")},
+           "s1": {"ln": L("w.txt")}, "s2": {"ln": L("z.txt")},
+           "ty0": {"w.txt": F("w1\n")}, "ty1": {"w.txt": F("w1\n"), "tf": L("t.txt")},
+           "c1": {"crlf.txt": F("a\r\nx\n")}, "c2": {"crlf.txt": F("a\nx\n")},
+           "b1": {"data.bin": F(b"\x00\ndiff --git a/x b/x\n" + hex1.encode() + b"\n")},
+           "b2": {"data.bin": F(b"\x00\ndiff --git a/x b/x\n" + hex2.encode() + b"\n")},
+           "nl1": {"x\ny.py": F("1\n")}, "nl2": {"x\ny.py": F("2\n")}, "nl3": {"x": F("1\n"), "y.py": F("1\n")}}
+    heads = {}
+    for name, ch in own.items():
+        c = plumb(p, [t0], ch, "r4: " + name)
+        heads[name] = (c, tm)
+        n = plumb(p, [c, tm], dict(ch, **{"main2.py": F("m = 2\n"), PJ: F(_man("pantheon", "0.11.86"))}), "r4: main",
+                  src=tm)
+        heads[name + "n"] = (n, tm)
+    # plugin.json: смена только режима, симлинк вместо файла
+    pj = subprocess.run(["git", "-C", p, "rev-parse", s["N1"] + ":" + PJ], capture_output=True, text=True).stdout.strip()
+    heads["pm"] = (plumb(p, [s["N1"]], {PJ: ("100755", subprocess.run(["git", "-C", p, "cat-file", "blob", pj],
+                                                                       capture_output=True).stdout)}, "chmod +x"), s["M1"])
+    heads["pl"] = (plumb(p, [s["N1"]], {PJ: L("../../README.md")}, "plugin.json — симлинк"), s["M1"])
+    # rebase P на M1 без правок; P на main, правившем code.py, — конфликт решён иначе
+    heads["Preb"] = (plumb(p, [s["M1"]], {"code.py": F(CODE.format(2)), "README.md": F(README.replace("r1\n", "r1p\n"))},
+                           "rebase P"), s["M1"])
+    mc = plumb(p, [s["B"]], {"code.py": F(CODE.format(8))}, "main: code.py")
+    heads["Prc"] = (plumb(p, [mc], {"code.py": F(CODE.format(28)), "README.md": F(README.replace("r1\n", "r1p\n"))},
+                          "rebase P с конфликтом"), mc)
+    heads["Pmc"] = (s["P"], mc)
+    # cherry-pick правки README из PR в main
+    mcp = plumb(p, [s["M1"]], {"README.md": F(README.replace("r1\n", "r1p\n"))}, "main: cherry-pick README из PR")
+    heads["Ncp"] = (plumb(p, [s["P"], mcp], {"code.py": F(CODE.format(2)), PJ: F(_man("pantheon", "0.11.86"))},
+                          "PR: подтянул main", src=mcp), mcp)
+    # ветка эпика от B: PR перенацелен на неё, а head подтянул main
+    epic = plumb(p, [s["B"]], {"epic.py": F("e = 1\n")}, "ветка эпика")
+    heads["N1e"] = (s["N1"], epic)
+    heads["Pe"] = (s["P"], epic)
+    for name in ("P", "N1", "out", "ws", "wsin", "bin", "mode", "newfile", "field", "evil", "R", "A", "NA"):
+        heads[name] = (s[name], s["M1"])
+    h.r4 = {"heads": heads, "t0": t0, "tm": tm, "epic": epic}
+    return h.r4
+
+
+class _Env:
+    """Временное окружение процесса: kv — переменная → значение или None (убрать)."""
+
+    def __init__(self, **kv):
+        self.kv, self.old = kv, {}
+
+    def __enter__(self):
+        for k, v in self.kv.items():
+            self.old[k] = os.environ.get(k)
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def __exit__(self, *a):
+        for k, v in self.old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def hostile_config(d):
+    """Конфиг git, который меняет вывод diff: diff.*, core.abbrev, атрибуты, textconv, подмодули → путь .gitconfig."""
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "order"), "w") as fh:
+        fh.write("z.txt\nsub\nx*\n*\n")
+    with open(os.path.join(d, "attrs"), "w") as fh:
+        fh.write("* diff=x binary -text\n")
+    with open(os.path.join(d, ".gitconfig"), "w") as fh:
+        fh.write("[diff]\n\tsubmodule = log\n\tindentHeuristic = false\n\torderFile = %s\n\tsuppressBlankEmpty = true\n"
+                 "\tmnemonicPrefix = true\n\tnoprefix = true\n\texternal = false\n\trenames = copies\n\trelative = true\n"
+                 "\tignoreSubmodules = all\n\talgorithm = patience\n\tcontext = 9\n"
+                 "[core]\n\tabbrev = 4\n\tattributesFile = %s\n\tquotePath = false\n\tautocrlf = true\n"
+                 "[diff \"x\"]\n\ttextconv = echo same\n" % (os.path.join(d, "order"), os.path.join(d, "attrs")))
+    return os.path.join(d, ".gitconfig")
+
+
+def t_carry_r4(h):
+    """#134 r4 (threat-134-carry, решение владельца 25.10 23:05): отпечаток — содержимое файлов (git diff --raw), от
+    конфига и окружения git не зависит; подмодуль, симлинк, typechange, CRLF, двоичный файл, имя с \\n, режим
+    plugin.json; rebase, cherry-pick, смена базы."""
+    r4 = r4_history(h)
+    heads = r4["heads"]
+    mg = _load_merge_gate("merge_gate_carry_r4")
+    kit = h.j("projects/agent-kit")
+    gd, why = mg._carry_git(kit, "latark/agent-kit", r4["tm"])
+    check("r4: _carry_git — git dir", gd and why is None, why)
+    clean_home = h.j("r4-clean")
+    os.makedirs(clean_home, exist_ok=True)
+
+    def fp(name):
+        head, base = heads[name]
+        return mg._fingerprint(gd, base, head)[0]
+
+    with _Env(HOME=clean_home, XDG_CONFIG_HOME=None):
+        clean = {name: fp(name) for name in heads}
+    ref = clean["P"]
+    for a, b, why_ in (("g1", "g2", "правка только gitlink"), ("ga1", "ga2", "правка после gitlink"),
+                       ("s1", "s2", "цель симлинка"), ("ty0", "ty1", "файл → симлинк с тем же текстом"),
+                       ("c1", "c2", "CRLF против LF в одной строке"),
+                       ("b1", "b2", "двоичный файл: «diff --git» и 40 hex внутри"),
+                       ("nl1", "nl2", "имя с \\n, другое содержимое"), ("nl1", "nl3", "имя с \\n против двух файлов")):
+        check(f"r4: {a} ≠ {b} — {why_}", clean[a] and clean[b] and clean[a] != clean[b], (clean[a], clean[b]))
+    for name in ("g1", "ga1", "s1", "ty1", "c1", "b1", "nl1"):
+        check(f"r4: {name}n = {name} (main и номер версии)", clean[name] and clean[name + "n"] == clean[name],
+              (clean[name], clean[name + "n"]))
+    check("r4: plugin.json chmod +x — отпечаток другой", clean["pm"] and clean["pm"] != clean["N1"] == ref,
+          (clean["pm"], clean["N1"]))
+    got = mg._fingerprint(gd, heads["pl"][1], heads["pl"][0])
+    check("r4: plugin.json — симлинк (typechange) — отпечатка нет", got[0] is None and "plugin.json" in got[1], got)
+    check("r4: чистый rebase P на M1 — тот же код, перенос", clean["Preb"] == ref, clean["Preb"])
+    check("r4: rebase с конфликтом, решённым иначе — код другой", clean["Prc"] and clean["Prc"] != clean["Pmc"] == ref,
+          (clean["Prc"], clean["Pmc"]))
+    check("r4: cherry-pick части PR в main — код другой (ложный отказ, строго)", clean["Ncp"] and clean["Ncp"] != ref,
+          clean["Ncp"])
+    check("r4: смена базы на ветку эпика — main в диффе PR, код другой", clean["N1e"] and clean["N1e"] != clean["Pe"]
+          == ref, (clean["N1e"], clean["Pe"]))
+    # конфиг: HOME/.gitconfig, XDG, .git/config, info/attributes, GIT_* окружения — отпечатки те же
+    hostile = h.j("r4-hostile")
+    hostile_config(hostile)
+    xdg = os.path.join(hostile, "xdg")
+    os.makedirs(os.path.join(xdg, "git"), exist_ok=True)
+    shutil.copy(os.path.join(hostile, ".gitconfig"), os.path.join(xdg, "git", "config"))
+    cfg = os.path.join(kit, ".git", "config")
+    attrs = os.path.join(kit, ".git", "info", "attributes")
+    os.makedirs(os.path.dirname(attrs), exist_ok=True)
+    with open(cfg, "rb") as fh:
+        saved = fh.read()
+    try:
+        with open(cfg, "ab") as fh:
+            fh.write(b"[diff]\n\tsubmodule = log\n[submodule \"sub\"]\n\tignore = all\n[core]\n\tabbrev = 5\n")
+        with open(attrs, "w") as fh:
+            fh.write("* diff=x binary\n")
+        with _Env(HOME=hostile, XDG_CONFIG_HOME=xdg, GIT_CONFIG_PARAMETERS="'diff.submodule'='log' 'core.abbrev'='4'",
+                  GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="diff.relative", GIT_CONFIG_VALUE_0="true",
+                  GIT_EXTERNAL_DIFF="false", GIT_DIFF_OPTS="--unified=9", GIT_DIR=h.j("nonexistent"),
+                  GIT_OBJECT_DIRECTORY=h.j("nonexistent")):
+            bad = {}
+            for name in heads:
+                got = fp(name)
+                if got != clean[name]:
+                    bad[name] = (clean[name], got)
+        check(f"r4: конфиг и окружение git (diff.submodule=log, diff.*, core.abbrev=4, атрибуты) — те же отпечатки у "
+              f"{len(heads)} head", not bad, bad)
+    finally:
+        with open(cfg, "wb") as fh:
+            fh.write(saved)
+        os.remove(attrs)
+    # строгий разбор --raw: лишнее поле, чужой статус, пустой путь, повтор пути — отпечатка нет
+    saved_git = mg._git_bytes
+    for out, why_ in ((b":100644 100644 " + b"1" * 40 + b" " + b"2" * 40 + b" M\0ab", "без \\0 в конце"),
+                      (b":100644 100644 " + b"1" * 40 + b" " + b"2" * 40 + b" R100\0a\0b\0", "статус R"),
+                      (b":100644 100644 " + b"1" * 40 + b" " + b"2" * 40 + b" M\0\0", "пустой путь"),
+                      (b":100644 100644 " + b"1" * 4 + b" " + b"2" * 40 + b" M\0a\0", "короткий sha"),
+                      ((b":100644 100644 " + b"1" * 40 + b" " + b"2" * 40 + b" M\0a\0") * 2, "путь дважды")):
+        mg._git_bytes = lambda gd_, *a, _o=out, **k: _o if "--raw" in a else saved_git(gd_, *a, **k)
+        try:
+            got = mg._fingerprint(gd, s_m1(h), heads["P"][0])
+        finally:
+            mg._git_bytes = saved_git
+        check(f"r4: вывод --raw не по формату ({why_}) — отпечатка нет", got[0] is None and "--raw" in got[1], got)
+
+
+def s_m1(h):
+    return kit_history(h)["M1"]
+
+
+def t_carry_r4_gate(h):
+    """#134 r4 шлюзом: конфиг git в HOME не влияет на перенос, подмодуль, смена базы, таймаут git."""
+    r4 = r4_history(h)
+    heads = r4["heads"]
+    s = kit_history(h)
+    kit = "projects/agent-kit"
+    tests = lambda sha: rec("tests", "latark/agent-kit", None, sha, "dev-opus")
+    rej = lambda sha, who="y": opus(sha, who, "reject", checklist=None, session="s-y")
+
+    def case(name, head, base, recs, allow, why="", extra_env=None):
+        h.reset()
+        kit_pr(h, head, base)
+        h.seed(*recs)
+        t = time.monotonic()
+        got = h.pre(f"gh pr merge 7 --match-head-commit {head}", pdir=kit, extra_env=extra_env)
+        merge_case(name, got, allow, why)
+        return got, time.monotonic() - t
+
+    hostile_config(h.root)  # HOME хука — h.root
+    try:
+        g1, tm = heads["g1"]
+        case("r4 шлюз: .gitconfig с diff.submodule=log — N1 переносит «принять» с P", s["N1"], s["M1"],
+             [opus(s["P"]), tests(s["N1"])], True)
+        case("r4 шлюз: .gitconfig — правка кода не переносит", s["out"], s["M1"], [opus(s["P"]), tests(s["out"])], False,
+             "нет «принять»")
+        case("r4 шлюз: подмодуль g1 → g1n переносится", heads["g1n"][0], tm, [opus(g1), tests(heads["g1n"][0])], True)
+        case("r4 шлюз: «принять» на g1 не переносится на g2 (другой gitlink)", heads["g2n"][0], tm,
+             [opus(g1), tests(heads["g2n"][0])], False, "нет «принять»")
+        case("r4 шлюз: другой argus принял g1n, «вернуть» на g1 с тем же кодом — в силе (0415b)", heads["g1n"][0], tm,
+             [rej(g1), opus(heads["g1n"][0], "x"), tests(heads["g1n"][0])], False, "«вернуть» (reject)")
+    finally:
+        os.remove(h.j(".gitconfig"))
+    case("r4 шлюз: «принять» на P (base M1) не переносится на N1 при базе — ветке эпика", s["N1"], r4["epic"],
+         [opus(s["P"]), tests(s["N1"])], False, "нет «принять»")
+    # таймаут git: diff --raw дольше 3 с — без переноса, хук укладывается в 8 с
+    wrap = h.j("gitwrap")
+    os.makedirs(wrap, exist_ok=True)
+    with open(os.path.join(wrap, "git"), "w") as fh:
+        fh.write('#!/bin/sh\ncase "$*" in *--raw*) [ -f "$HOME/git.slow" ] && exec sleep 9;; esac\n'
+                 f'exec {shutil.which("git")} "$@"\n')
+    os.chmod(os.path.join(wrap, "git"), 0o755)
+    env = {"PATH": wrap + os.pathsep + h.j("bin") + os.pathsep + os.environ["PATH"]}
+    open(h.j("git.slow"), "w").close()
+    try:
+        recs = [opus(s["P"], "x"), rej(s["R"]), opus(s["A"], "z", session="s-z"), opus(s["N1"], "w", session="s-w"),
+                tests(s["NA"])]
+        got, took = case("r4 шлюз: git diff --raw дольше таймаута — «вернуть» в силе", s["NA"], s["M1"], recs, False,
+                         "«вернуть» (reject)", extra_env=env)
+        check(f"r4 шлюз: таймаут git — хук за {took:.1f} с ≤ 8 с", took <= 8, took)
+        if HAVE_TOML:
+            check("r4 шлюз: таймаут git — причина в отказе", "не ответил" in got[1] or "дольше" in got[1], got[1])
+    finally:
+        os.remove(h.j("git.slow"))
+
+
 CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_transcript, t_ci,
-         t_core_touchid, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product]
+         t_core_touchid, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
+         t_carry_r4_gate]
 
 
 def main():
