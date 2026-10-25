@@ -8,7 +8,7 @@
                             (metis-0181), уборка: claude rm сессий Пантеона, закончивших ход или остановленных
                             больше 2 ч назад (metis-0250); раз в сутки — журналы ваших слов (COMM-10).
                             --dry-run — только показать, кого самозапуск поднял бы и почему нет, ничего не меняя
-                            Самозапуск по отметкам отдаёт задачи сначала по depends_on, при равенстве — по порядку отметок
+                            Самозапуск по отметкам отдаёт задачи сначала по depends_on, при равенстве — priority, порядок пачки (order), запас последним, затем порядок отметок
                             (tasks.plan_batch, metis-0248). Не отдаёт: с незакрытым предшественником вне пачки; с зависшим
                             (waiting/dropped/удалён или без изменений > 24 ч) — тревога «ждёт зависший»; в цикле — тревога,
                             без запуска; с пересечением непустых touches с идущей в другом направлении (пустой touches
@@ -1450,6 +1450,15 @@ def oneshots(agents, registry, doms, t):
         started = True
 
 
+def push_key(h, pos):
+    """Порядок задач в толчке самозапуска (metis-0292): основные раньше запаса, затем priority (меньше — важнее),
+    порядок пачки (поле order), затем отметка владельца. Запас — order от 10**6 (migrate_batches) или место «запас»."""
+    T = P.tasks_mod()
+    o = T._ord(h)
+    spare = (10 ** 6 <= o < 10 ** 9) or "запас" in str(h.get("batch") or "").lower()
+    return (spare, T._prio(h), o, pos)
+
+
 def autostart(agents, registry, doms, t, dry=False):
     say = print if dry else (lambda *_: None)
     st = {d: as_state(v) for d, v in P.read_json(P.path("autostart.json"), {}).items()}
@@ -1475,6 +1484,9 @@ def autostart(agents, registry, doms, t, dry=False):
         if h.get("status") in ("todo", "doing") and d in doms:
             # metis-0155: координатора у направления, которое ведёт Пританей, нет — самозапуск его не поднимает
             (hq if d in off else want).setdefault(d, []).append(tid)
+    for v in want.values():  # толчок идёт по важности, а не по времени отметки (metis-0292)
+        pos = {x: n for n, x in enumerate(v)}
+        v.sort(key=lambda x: push_key(tasks[x][1], pos[x]))
     for d, v in sorted(hq.items()):
         say(f"{d}: ведёт Пританей (coordinator = false) — самозапуск не поднимает, задачи {', '.join(v)}: "
             f"pantheon wake {d} --task <id>")
@@ -1580,7 +1592,8 @@ def autostart(agents, registry, doms, t, dry=False):
                 P.alert_once(f"autostart-wait-{d}", f"{today(t)}-{why[:40]}", f"самозапуск {d} ждёт: {why} (задачи "
                              f"{', '.join(tids[:3])})", "watch")
             continue
-        task = (f"Самозапуск дежурным по задачам с вашим решением (сначала зависимости, затем порядок ваших отметок; цепочку веди сама, не режь): {', '.join(tids)}. Прочитай STATUS.md и "
+        task = (f"Самозапуск дежурным по задачам с вашим решением (сначала зависимости, затем приоритет, порядок пачки и ваших отметок, запас последним; "
+                f"цепочку веди сама, не режь): следующая: {tids[0]}. Все: {', '.join(tids)}. Прочитай STATUS.md и "
                 "задачи, продолжай с первой по приоритету; что ждёт владельца — Зевсу строкой.")
         prev = {k: s.get(k) for k in ("last", "pending")}
         s.update(last=t, pending=True)
