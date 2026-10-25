@@ -7056,8 +7056,11 @@ def usage_report(rest):
 # partial, а не red: следующий проход продолжает тот же прогон (run в метке), уже посчитанные файлы берёт из кэша
 # результатов STATE/plugins/results/<плагин>-<хеш дерева>.json — ключ (плагин, хеш дерева, python, файл). Новая версия
 # берёт из кэша только файлы своего прогона (тот же run и те же соседи — ctx): удалённая метка — свежий прогон. База
-# берёт любой результат своего дерева — прежде всего тот, что оно получило, когда само шло «новой», и гоняется только
-# по файлам без записи. Под давлением памяти (своп выше порога дежурного) прогон откладывается, не дольше PLUGIN_DEFER_MAX.
+# берёт чистый результат своего дерева любого прогона — прежде всего тот, что оно получило, когда само шло «новой», — а
+# с падением только своего прогона (_base_reuse), остальные файлы гоняет. Падение, которое уже не изменится, — red
+# сразу, даже если другие файлы не успели. partial подряд — не больше PLUGIN_PARTIAL_MAX проходов, затем red с тревогой.
+# Под давлением памяти (своп выше порога дежурного) прогон откладывается, не дольше PLUGIN_DEFER_MAX от первой отсрочки
+# (deferred_since переходит в метку partial).
 
 MARKETPLACE = "agent-kit"
 # один файл тестов (metis-0424): было 600 — test_guard на системном 3.9 не успевал (24.10, guard 0.5.18 и 0.5.19).
@@ -7067,6 +7070,9 @@ PLUGIN_TEST_TIMEOUT = 1500
 PLUGIN_RUN_LIMIT = 1800      # прогон за один проход (новая + база, все python) — меньше timeout задачи в schedule.toml
 PLUGIN_RESULTS_KEEP = 8      # кэш результатов: деревьев на плагин (новые и установленные), старые удаляются
 PLUGIN_DEFER_MAX = 3 * 3600  # своп выше порога откладывает прогон не дольше этого: иначе выпуск не встал бы никогда
+# проходов подряд с меткой partial, после которых версия красная с тревогой (ревью 133, п.1): прогон, который не
+# движется (соседи копии меняются при каждом слиянии, и кэш новой сбрасывается), не держит очередь плагинов вечно
+PLUGIN_PARTIAL_MAX = 6
 PARTIAL = "partial"
 NO_TESTS = "нет тестов"
 WHY_DETAIL = "последняя строка — деталь провала, не итог"
@@ -7445,7 +7451,9 @@ class _Results:
     """Кэш результатов файлов тестов одного дерева плагина (metis-0424): {"<python>\\t<файл>": запись}. Запись — код
     (None — таймаут), подписи, _ok_count, bare, когда и за сколько секунд, run и ctx прогона. Результат «срок
     прогона» не пишется: файл не досчитан. reuse(запись) решает, можно ли взять запись вместо прогона: новой —
-    только своего прогона (run, ctx), базе — любую. Таймаут берётся, только если был при нынешнем таймауте файла."""
+    только своего прогона (run, ctx), базе — чистую (код 0, без подписей) любого прогона, а с падением — только своего
+    прогона (_base_reuse). Таймаут берётся, только если был при нынешнем таймауте файла. Файл кэша чужого плагина или
+    дерева (plugin, hash внутри не те) не читается вовсе."""
 
     def __init__(self, name, digest, version, run, ctx, reuse):
         self.name, self.digest, self.version, self.run, self.ctx, self.reuse = name, digest, version, run, ctx, reuse
@@ -7482,6 +7490,13 @@ class _Results:
                                     "run": self.run, "ctx": self.ctx}
         write_json(_results_path(self.name, self.digest),
                    {"plugin": self.name, "hash": self.digest, "version": self.version, "files": self.files})
+
+
+def _base_reuse(run):
+    """Какие записи кэша берёт база (ревью 133, п.5): чистую — любого прогона, она ничего не гасит; с падением или
+    таймаутом — только этого прогона (продолжение после partial). Случайное падение базы, записанное однажды, иначе
+    гасило бы ту же подпись у всех следующих версий."""
+    return lambda e: (e.get("rc") == 0 and not e.get("sigs")) or e.get("run") == run
 
 
 def _results_prune(name, keep):
@@ -7712,7 +7727,7 @@ def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=N
     metis-0368: копии новой и базы — клоны с соседями (_copy_clone): у новой соседи из того же каталога (peers_new), у
     базы — установленные версии (peers_base), не установленного соседа база берёт из каталога. Хеш — только дерево
     проверяемого плагина. metis-0424: не досчитано — множество (python, файл), не успевших в срок прогона у новой или
-    у нужной базы; непустое — решения нет, вызывающий ставит метку partial. resume — run прерванного так прогона:
+    у нужной базы; непустое — решения нет (падения, которое уже не изменится, тоже нет), вызывающий ведёт счёт partial. resume — run прерванного так прогона:
     новая берёт из кэша результаты этого run, лог дописывается; None — свежий прогон. Метку partial (с run) ставит
     сама: следующий проход продолжает по ней."""
     log = path("plugins", f"{_plugins_safe(name)}-{_plugins_safe(new)}.log")
@@ -7735,7 +7750,7 @@ def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=N
                              lambda e: bool(resume) and e.get("run") == resume and e.get("ctx") == ctx_new)
         base_digest = _tree_hash(base_dir)
         cache_base = _Results(name, base_digest, old, run, base_dir and _copy_ctx(os.path.join(tmp, "base"), name),
-                              lambda e: True)
+                              _base_reuse(run))
         pythons = _pythons_for(name)
         with open(log, "a" if resume else "w", encoding="utf-8") as fh:
             if resume:
@@ -7757,7 +7772,14 @@ def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=N
                                         bare=bare_base, cache=cache_base)
             fresh, unknown = _fresh_failures(got_new, got_base, ok_new, ok_base, bare, bare_base)
             short = {(py, f) for (py, f, s) in list(got_new) + list(got_base) if s.endswith(": срок прогона")}
-            if short and not notes_new:  # не досчитано — не «сломано»: решение на следующем проходе (metis-0424)
+            if notes_new:  # копия новой версии не собралась — красное, база его не гасит (metis-0369)
+                fresh[("-", "-", "копия новой версии не собралась: " + "; ".join(notes_new))] = 1
+            if not _test_files(new_dir):  # без тестов зелёного нет, даже если их нет и у базы
+                fresh[("-", "-", NO_TESTS)] = 1
+            # падение, которое уже не изменится: файл новой досчитан, и база по нему досчитана или не нужна. Оно красное
+            # сразу, сколько бы файлов ни не успело (ревью 133, п.3): ждать остальные незачем
+            sure = [k for k in fresh if (k[0], k[1]) not in short and (k[0], k[1]) not in unknown]
+            if short and not sure:  # не досчитано — не «сломано»: решение на следующем проходе (metis-0424)
                 fh.write(f"\n===== не досчитано: {len(short)} файл(ов) не успели в срок прогона "
                          f"({PLUGIN_RUN_LIMIT} с) — продолжу на следующем проходе, run {run} =====\n")
                 for py, f in sorted(short):
@@ -7767,10 +7789,6 @@ def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=N
             for py, f in sorted(unknown):
                 fh.write(f"база не досчитана: {py} · {f} — файл базы не дошёл до конца (таймаут или срок прогона), "
                          "падения новой версии в нём считаются новыми\n")
-            if notes_new:  # копия новой версии не собралась — красное, база его не гасит (metis-0369)
-                fresh[("-", "-", "копия новой версии не собралась: " + "; ".join(notes_new))] = 1
-            if not _test_files(new_dir):  # без тестов зелёного нет, даже если их нет и у базы
-                fresh[("-", "-", NO_TESTS)] = 1
             fh.write(f"\n===== новых падений: {sum(fresh.values())} =====\n")
             for (py, f, s) in sorted(fresh):
                 fh.write(f"{py} · {f} · {s}\n")
@@ -7888,8 +7906,24 @@ def _plugins_update(quiet):
             peers_base={k: row.get("installPath") for k, row in installed.items() if k != name},
             mkt_json=os.path.join(_catalog_root(), ".claude-plugin", "marketplace.json"), resume=resume)
         if short:  # не досчитано — не «сломано» (metis-0424): метка partial поставлена, следующий проход продолжит
+            # счёт проходов подряд и начало отсрочки переходят в новую метку (ревью 133, п.1 и 2): иначе partial без
+            # потолка, а предел отсрочки 3 ч начинался бы заново после каждого прохода
+            prev = mark.get("partials") if same and mark.get("result") == PARTIAL else None
+            n = (prev if isinstance(prev, int) and not isinstance(prev, bool) and prev > 0 else 0) + 1
+            keep = {"deferred_since": since} if since is not None else {}
+            _plugins_mark(marks, name, {**marks.get(name, {}), **keep, "partials": n})
+            if n >= PLUGIN_PARTIAL_MAX:
+                with contextlib.suppress(OSError), open(log, "a", encoding="utf-8") as fh:
+                    fh.write(f"\n===== не ставлю: не досчитано {n} проходов подряд (предел {PLUGIN_PARTIAL_MAX}) — "
+                             "продолжения не будет; заново — удалить запись плагина из marks.json =====\n")
+                rc = max(rc, _plugins_red(marks, name, old, new, log,
+                                          f"тесты не досчитаны за {n} проходов подряд ({len(short)} файл(ов) не "
+                                          "успели в срок прогона) — прогон не движется"))
+                if not quiet:
+                    print(f"{name}: {new} не ставлю — тесты не досчитаны за {n} проходов подряд")
+                continue
             _plugins_journal(f"{name} {old} → {new}: не досчитано — {len(short)} файл(ов) не успели в срок прогона, "
-                             "продолжу на следующем проходе")
+                             f"продолжу на следующем проходе (проход {n} из {PLUGIN_PARTIAL_MAX})")
             if not quiet:
                 print(f"{name}: {new} — тесты не досчитаны ({len(short)} файл(ов)), продолжу на следующем проходе")
             continue

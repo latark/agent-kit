@@ -709,13 +709,15 @@ def fake(cmd, cwd=None, timeout=None, **kw):
     clock[0] += sec
     return subprocess.CompletedProcess(cmd, rc, stdout=out.encode())
 P.subprocess.run = fake
+if len(sys.argv) > 3:  # своп для отсрочки (ревью 133, п.2)
+    os.environ["PANTHEON_FAKE_SWAP"] = sys.argv[3]
 rc = P.plugins_update(quiet=True)
 print(json.dumps({"rc": rc, "seen": seen}))"""
     GOOD = "ok   a\n1 из 1 прошли\n"
     OLD = "ok   a\nFAIL старое окружение\n1 из 2 прошли\n"
 
-    def tick(e, plan):
-        got = e.py(TICK, json.dumps(plan), stub=True)
+    def tick(e, plan, swap=None):
+        got = e.py(TICK, json.dumps(plan), *([swap] if swap else []), stub=True)
         try:
             return json.loads(got[-1])
         except (ValueError, IndexError):
@@ -793,8 +795,98 @@ print(json.dumps({"rc": rc, "seen": seen}))"""
           f"{g2} {e.journal()[-300:]!r}")
     e.close()
 
-    # 5. Кэш базы: результаты версии, когда она сама шла «новой», — база по ним не гоняется (мутант «база без кэша
-    # гоняется всегда» — красный). Сначала 1.0.0 проверена новой (против 0.9.0), затем 1.1.0 против неё
+    # ревью 133, п.1: partial с потолком. Соседи копии меняются каждый проход (как при слияниях pantheon) — кэш новой
+    # сбрасывается, прогон не движется. PLUGIN_PARTIAL_MAX-й partial подряд — красное с тревогой, дальше не гоняется
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    two_files(e)
+    mj = os.path.join(os.path.dirname(os.path.dirname(e.src)), ".claude-plugin", "marketplace.json")
+    trail = []
+    for i in range(6):
+        e.write(mj, json.dumps({**json.load(open(mj)), "description": f"каталог {i}"}))
+        g = tick(e, plan)
+        m = e.marks().get("x", {})
+        trail.append((g.get("rc"), m.get("result"), m.get("partials"), "не досчитаны" in e.alerts()))
+    g7 = tick(e, plan)
+    check("ревью 133 п.1: partial без движения — 5 проходов partial без тревоги, 6-й — red с тревогой, 7-й не гоняет",
+          trail[:5] == [(0, "partial", n, False) for n in range(1, 6)] and trail[5][1] == "red" and trail[5][3]
+          and "x 1.1.0 не поставлен: тесты не досчитаны за 6 проходов подряд" in e.alerts()
+          and "не ставлю" in e.journal() and g7.get("seen") == [] and "plugin update" not in e.argv()
+          and "не ставлю: не досчитано 6 проходов подряд" in xlog(e),
+          f"{trail} {g7} {e.journal()[-300:]!r}")
+    e.close()
+
+    # ревью 133, п.2: отсрочка не начинается заново после partial. Проход 1 отложен, отсрочка состарена на 3 ч+,
+    # проход 2 идёт и даёт partial — метка хранит deferred_since; проход 3 при том же свопе не откладывается
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    two_files(e)
+    g1 = tick(e, plan, "5")
+    mp = os.path.join(e.state, "plugins", "marks.json")
+    mk = json.load(open(mp))
+    old_since = mk.get("x", {}).get("deferred_since", 0) - 3 * 3600 - 60
+    mk.get("x", {})["deferred_since"] = old_since
+    e.write(mp, json.dumps(mk))
+    g2 = tick(e, plan, "5")
+    m2 = e.marks().get("x", {})
+    g3 = tick(e, plan, "5")
+    check("ревью 133 п.2: partial хранит deferred_since — третий проход не откладывается, «отложен» в журнале раз",
+          g1.get("seen") == [] and g2.get("seen") == ["new/test_a.py", "new/test_b.py"]
+          and m2.get("result") == "partial" and m2.get("deferred_since") == old_since
+          and g3.get("seen") == ["new/test_b.py"] and "plugin update x@agent-kit" in e.argv()
+          and e.journal().count("прогон тестов отложен") == 1, f"{g1} {g2} {m2} {g3} {e.journal()!r}")
+    e.close()
+
+    # ревью 133, п.3: досчитанный файл уже упал (таймаут — база его не гасит), другой не успел в срок — красное
+    # сразу, а не partial: падение уже не изменится
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    two_files(e)
+    g = tick(e, {"new/test_a.py": [1600, 0, GOOD], "new/test_b.py": [500, 0, GOOD]})
+    m = e.marks().get("x", {})
+    check("ревью 133 п.3: test_a упал (таймаут), test_b не успел — red с тревогой, не partial, update не вызван",
+          g.get("rc") is not None and m.get("result") == "red" and "test_a.py: таймаут" in e.alerts()
+          and "plugin update" not in e.argv() and "не досчитано" not in e.journal(), f"{g} {m} {e.alerts()[-300:]!r}")
+    e.close()
+
+    # ревью 133, п.4: файл кэша под именем этого дерева, но с чужим hash или plugin внутри, не читается
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    got = e.py("""import json
+entry = {"rc": 0, "sigs": [], "ok": [1, 1, True], "bare": False, "sec": 1.0, "limit": P.PLUGIN_TEST_TIMEOUT,
+         "at": "x", "run": "r", "ctx": "c"}
+res = {}
+for tag, plugin, h in (("own", "x", "h1"), ("hash", "x", "h2"), ("plugin", "y", "h1")):
+    P.write_json(P._results_path("x", "h1"), {"plugin": plugin, "hash": h, "version": "1", "files": {"py\tt.py": entry}})
+    res[tag] = P._Results("x", "h1", "1", "r", "c", lambda e: True).get("py", "t.py") is not None
+print(json.dumps(res))""")
+    e.close()
+    check("ревью 133 п.4: кэш с чужим hash или plugin внутри не берётся, свой — берётся",
+          got and got[-1] == json.dumps({"own": True, "hash": False, "plugin": False}), got)
+
+    # 5. Кэш базы: результаты версии, когда она сама шла «новой». Чистую запись база берёт (не гоняется; мутант «база
+    # без кэша гоняется всегда» — красный), запись с падением другого прогона — нет (ревью 133, п.5: случайное старое
+    # падение не гасит ту же подпись у следующих версий). Сначала 1.0.0 проверена новой (против 0.9.0), затем 1.1.0
+    PRE = """import json, os
+P._pythons_for = lambda name: ["py"]
+real = P.subprocess.run
+def fake(cmd, cwd=None, timeout=None, **kw):
+    if cmd[0] != "py":
+        return real(cmd, cwd=cwd, timeout=timeout, **kw)
+    f = cmd[-1].split("/")[-1]
+    out = sys.argv[3] if f == "test_a.py" else "ok   a\\n1 из 1 прошли\\n"
+    return P.subprocess.CompletedProcess(cmd, int(sys.argv[4]) if f == "test_a.py" else 0, stdout=out.encode())
+P.subprocess.run = fake
+os.makedirs(P.path("plugins", "tmp"), exist_ok=True)
+log, digest, fresh, short = P._plugin_check("x", "0.9.0", "1.0.0", sys.argv[2], None, {})
+print(json.dumps({"digest": digest, "same": digest == P._tree_hash(sys.argv[2]), "short": len(short)}))"""
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    base = two_files(e)
+    e.py(PRE, base, GOOD, "0")
+    g = tick(e, {"new/test_a.py": [100, 1, OLD], "new/test_b.py": [5, 0, GOOD], "base/test_a.py": [60, 1, OLD]})
+    lg = xlog(e)
+    check("0424: база 1.0.0 из кэша — чистая запись берётся (база не гоняется), падение новой — красное",
+          g.get("seen") == ["new/test_a.py", "new/test_b.py"] and e.marks().get("x", {}).get("result") == "red"
+          and "===== база 1.0.0 · py · test_a.py · код 0 · из кэша" in lg and "plugin update" not in e.argv(),
+          f"{g} {lg[-500:]!r}")
+    e.close()
+
     e = Env("1.0.0", "1.1.0", OK, OK)
     base = two_files(e)
     plan5 = {"new/test_a.py": [100, 1, OLD], "new/test_b.py": [5, 0, GOOD], "base/test_a.py": [60, 1, OLD]}
@@ -821,9 +913,10 @@ print(json.dumps({"digest": digest, "same": digest == P._tree_hash(sys.argv[2]),
     check("0424: 1.0.0 шла новой — её результаты в кэше под хешем её дерева",
           p0.get("same") and os.path.exists(os.path.join(e.state, "plugins", "results", f"x-{p0.get('digest')}.json")),
           pre)
-    check("0424: база 1.0.0 из кэша — не гоняется, старое падение погашено, update вызван",
-          g.get("seen") == ["new/test_a.py", "new/test_b.py"] and g.get("rc") == 0
-          and "plugin update x@agent-kit" in e.argv() and "===== база 1.0.0 · py · test_a.py · код 1 · из кэша" in lg,
+    check("0424: запись базы с падением другого прогона не берётся — база гоняет test_a, старое падение погашено, "
+          "update вызван (ревью 133, п.5)",
+          g.get("seen") == ["new/test_a.py", "new/test_b.py", "base/test_a.py"] and g.get("rc") == 0
+          and "plugin update x@agent-kit" in e.argv() and "· test_a.py · код 1 · из кэша" not in lg,
           f"{g} {lg[-500:]!r}")
 
     # 6. Кэш: таймаут, записанный при меньшем таймауте файла, не берётся (тогда файл не успевал из-за старого 600 с);
