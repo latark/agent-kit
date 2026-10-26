@@ -1076,7 +1076,7 @@ def t_opus_protect(h):
 
 def t_opus_transcript(h):
     """metis-0176 п. 2: модель argus — из его транскрипта (message.model assistant-записей), а не со слов --ran.
-    Путь хук выводит из входа: <папка transcript_path>/<session_id>/subagents/[<подпапка>/]agent-<agent_id>.jsonl.
+    Путь хук выводит из входа: <папка transcript_path>/<session_id>/subagents/[workflows/<runId>/]agent-<agent_id>.jsonl.
     В защитах «принять» засчитывается, только если все модели транскрипта Opus и среди них модель из --ran;
     транскрипта нет — как раньше, по --ran, с пометкой models_note в записи."""
     kit, sha = "projects/agent-kit", h.sha["agent-kit"]
@@ -1135,10 +1135,31 @@ def t_opus_transcript(h):
     accept(ran="модель: claude-opus-4-1, тесты")
     merge_case("защиты: --ran claude-opus-4-1, транскрипт с датой claude-opus-4-1-20250805 — проходит",
                h.pre(cmd, pdir=kit), True)
+    # агент из Workflow (metis-0413 п. 1): Claude Code кладёт его транскрипт в subagents/workflows/<runId>/
+    wf = os.path.join(proj, "s-coord", "subagents", "workflows", "wf_8f3a2c1d", "agent-ag1.jsonl")
+    clean()
+    transcript(["claude-sonnet-5"], path=wf)
+    r = accept()
+    check("Workflow: транскрипт в subagents/workflows/<runId>/ — найден, Sonnet в models",
+          r.get("models") == ["claude-sonnet-5"] and "models_note" not in r, r)
+    merge_case("Workflow: argus на Sonnet, --ran говорит Opus — отказ по транскрипту", h.pre(cmd, pdir=kit), False,
+               "по транскрипту argus — claude-sonnet-5")
     clean()
     transcript(["claude-opus-5-5"], path=os.path.join(proj, "s-coord", "subagents", "wf1", "agent-ag1.jsonl"))
     r = accept()
-    check("транскрипт в подпапке subagents/<подпапка>/ — найден", r.get("models") == ["claude-opus-5-5"], r)
+    check("транскрипт в одной подпапке subagents/<подпапка>/ — тоже найден", r.get("models") == ["claude-opus-5-5"], r)
+    # свой транскрипт не подменяется главным (metis-0413 п. 2): главный transcript_path — сессия того, кто позвал
+    clean()
+    transcript(["claude-opus-5-5"], path=main_tp)
+    r = accept()
+    check("своего файла нет, главный на Opus — models нет, пометка «транскрипта нет» (главный не читается)",
+          "models" not in r and r.get("models_note") == mg_note, r)
+    transcript(["claude-sonnet-5"], path=wf)
+    r = accept()
+    check("главный на Opus, свой в Workflow на Sonnet — models свои (Sonnet), а не главного",
+          r.get("models") == ["claude-sonnet-5"], r)
+    merge_case("главный на Opus, свой на Sonnet — отказ", h.pre(cmd, pdir=kit), False,
+               "по транскрипту argus — claude-sonnet-5")
     clean()
     transcript(["claude-sonnet-5"], path=main_tp)
     r = accept(agent_id=None)
@@ -1156,11 +1177,17 @@ def t_opus_transcript(h):
         check(f"{label}: models нет, пометка «{mg_note}»", "models" not in r and r.get("models_note") == mg_note, r)
         merge_case(f"{label}: «принять» на Opus по --ran — проходит", h.pre(cmd, pdir=kit), True)
         clean()
-    transcript([], extra=("не json", json.dumps({"type": "assistant", "message": "x"})))
+    # транскрипт найден, а моделей в нём нет (metis-0413 п. 3): не молча как «транскрипта нет» — models: [] и своя
+    # пометка; в защитах «принять» не в счёт даже с Opus в --ran, отказ называет причину
+    transcript([], extra=("не json", json.dumps({"type": "assistant", "message": "x"}),
+                          json.dumps({"type": "assistant", "message": {"model": "<synthetic>"}})))
     r = accept()
-    check("в транскрипте нет моделей — пометка, а не пустой список", "models" not in r and r.get("models_note") == mg_note, r)
+    check(f"в транскрипте нет моделей — models: [] и пометка «{mg_no_models}», не «транскрипта нет»",
+          r.get("models") == [] and r.get("models_note") == mg_no_models, r)
+    merge_case("транскрипт без моделей: --ran Opus — отказ, причина названа", h.pre(cmd, pdir=kit), False,
+               f"({mg_no_models})")
     accept(ran="модель: claude-sonnet-5, тесты")
-    merge_case("транскрипта без моделей: --ran Sonnet — отказ по --ran", h.pre(cmd, pdir=kit), False, "(по --ran)")
+    merge_case("транскрипт без моделей: --ran Sonnet — отказ по --ran", h.pre(cmd, pdir=kit), False, "(по --ran)")
     # симлинк на транскрипт не читается (O_NOFOLLOW)
     clean()
     real = transcript(["claude-opus-5-5"], path=os.path.join(proj, "elsewhere.jsonl"))
@@ -1182,6 +1209,7 @@ def t_opus_transcript(h):
 
 
 mg_note = "транскрипта argus нет — модель по --ran"
+mg_no_models = "транскрипт argus найден, но моделей в нём нет — модель не подтвердить"
 
 
 def t_ci(h):
