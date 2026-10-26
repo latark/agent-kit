@@ -14,7 +14,8 @@ SRC="${1:-$HOME/ai/pantheon}"; DST="${2:-$HOME/ai/pantheon-view}"; INBOX="${3:-$
 BOARD="Доска"
 mkdir -p "$DST"
 # Образец настроек Obsidian (тема, сниппеты, закладки; без workspace.json): кладётся только если в копии нет .obsidian
-# совсем — на новом Mac или у нового пользователя; существующую папку не трогаем (metis-0131)
+# совсем — на новом Mac или у нового пользователя; существующую папку не трогаем (metis-0131). Закладки в существующей
+# папке досыпает тик доски (tasks.py _sync_bookmarks, metis-0324) из того же образца — сюда за ними ходить не нужно.
 SAMPLE="${4:-${0:A:h}/../share/pantheon-view-obsidian}"
 if [[ ! -e "$DST/.obsidian" && -d "$SAMPLE" ]]; then
   cp -R "$SAMPLE" "$DST/.obsidian" && chmod -R u+w "$DST/.obsidian"

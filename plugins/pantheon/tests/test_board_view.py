@@ -4,6 +4,7 @@
 
 Запуск: python3 -I plugins/pantheon/tests/test_board_view.py  (код выхода 0 — все прошли)
 """
+import json
 import os
 import re
 import shutil
@@ -296,7 +297,197 @@ def snippet_checks():
         shutil.rmtree(tmp, True)
 
 
+def bookmark_checks():
+    """metis-0324: закладки Obsidian — часть вида. Тик добавляет недостающие свои, закладки владельца не трогает,
+    удалённую владельцем свою не возвращает, битый JSON не перезаписывает (одна тревога)."""
+    tmp = tempfile.mkdtemp(dir=os.environ.get("TMPDIR"))
+    try:
+        want = json.load(open(T.BOOKMARKS_PATH, encoding="utf-8"))["items"]
+        want_paths = [f["path"] for g in want for f in g["items"]]
+        paths = lambda data: [f["path"] for f in T._bookmark_files(data["items"])]
+        check("закладки: образец содержит Сводку, Доску, Пульт, Сроки, Кто есть кто, Проблемы и справку по видам",
+              {"Доска/Сводка.md", "Доска/Доска.base", "Доска/Пульт.base", "board.md", "Кто есть кто.md",
+               "Доска/Проблемы.md", f"Доска/{T.HELP_DIR}/{T.HELP_NOTE}.md"} <= set(want_paths), want_paths)
+
+        def vault(name, raw=None):
+            v = os.path.join(tmp, name)
+            os.makedirs(os.path.join(v, ".obsidian"))
+            p = os.path.join(v, ".obsidian", "bookmarks.json")
+            if raw is not None:
+                open(p, "w", encoding="utf-8").write(raw)
+            return v, p
+        alerts = []
+        al = lambda *a, **k: alerts.append(a)
+
+        v, p = vault("a")
+        st = {}
+        T._sync_bookmarks(v, st, al)
+        got = json.load(open(p, encoding="utf-8"))
+        check("закладки (а): пустой vault — все свои закладки, по группам образца",
+              paths(got) == want_paths and [g["title"] for g in got["items"]] == [g["title"] for g in want]
+              and sorted(st["bookmarks_seen"]) == sorted(want_paths) and not alerts, got)
+        before = open(p, "rb").read()
+        T._sync_bookmarks(v, st, al)
+        sb = os.stat(p)
+        T._sync_bookmarks(v, st, al)
+        sa = os.stat(p)
+        check("закладки: второй тик ничего не пишет (ни байтов, ни inode, ни mtime)",
+              open(p, "rb").read() == before and (sb.st_ino, sb.st_mtime_ns) == (sa.st_ino, sa.st_mtime_ns))
+        v0 = os.path.join(tmp, "none")
+        os.makedirs(v0)
+        T._sync_bookmarks(v0, {}, al)
+        check("закладки: нет .obsidian — ничего не создаём", not os.path.exists(os.path.join(v0, ".obsidian")))
+
+        own = {"items": [{"type": "file", "ctime": 1, "path": "Моя заметка.md", "title": "Моя"},
+                         {"type": "group", "ctime": 2, "title": "Каждый день", "items": [
+                             {"type": "file", "ctime": 3, "path": "Доска/Доска.base", "title": "Моя Доска"},
+                             {"type": "file", "ctime": 4, "path": "Другое.md", "title": "Другое"}]},
+                         {"type": "group", "ctime": 5, "title": "Своя группа", "items": [], "ключ": "x"}],
+               "свойство": 1}
+        v, p = vault("b", json.dumps(own, ensure_ascii=False))
+        st = {"bookmarks_seen": []}  # состояние уже ведётся (не первый тик после выпуска): все недостающие свои — добавить
+        T._sync_bookmarks(v, st, al)
+        got = json.load(open(p, encoding="utf-8"))
+        every = T._bookmark_files(got["items"])
+        check("закладки (б): закладки владельца целы и в том же порядке, свои добавлены",
+              got["items"][0] == own["items"][0] and got["items"][2] == own["items"][2] and got["свойство"] == 1
+              and [i["path"] for i in got["items"][1]["items"][:2]] == ["Доска/Доска.base", "Другое.md"]
+              and got["items"][1]["items"][0]["title"] == "Моя Доска"
+              and [g.get("title") for g in got["items"]].count("Каждый день") == 1
+              and "Доска/Пульт.base" in [i["path"] for i in got["items"][1]["items"]]
+              and set(want_paths) <= {i["path"] for i in every}
+              and [i["path"] for i in every].count("Доска/Доска.base") == 1, got)
+
+        v, p = vault("c")
+        st = {}
+        T._sync_bookmarks(v, st, al)
+        got = json.load(open(p, encoding="utf-8"))
+        got["items"][0]["items"] = [i for i in got["items"][0]["items"] if i["path"] != "Доска/Пульт.base"]
+        open(p, "w", encoding="utf-8").write(json.dumps(got, ensure_ascii=False))
+        T._sync_bookmarks(v, st, al)
+        T._sync_bookmarks(v, st, al)
+        check("закладки (в): свою удалили — не вернулась", "Доска/Пульт.base" not in paths(json.load(open(p, encoding="utf-8"))))
+        # новая свою закладка (образец дополнили) приходит, а удалённая по-прежнему нет
+        src = os.path.join(tmp, "sample.json")
+        ext = json.loads(json.dumps({"items": want}))
+        ext["items"][1]["items"].append({"type": "file", "ctime": 9, "path": "Доска/Новый вид.md", "title": "Новый вид"})
+        open(src, "w", encoding="utf-8").write(json.dumps(ext, ensure_ascii=False))
+        T._sync_bookmarks(v, st, al, src=src)
+        now = paths(json.load(open(p, encoding="utf-8")))
+        check("закладки (в): новая своя закладка из образца приходит, удалённая — нет",
+              "Доска/Новый вид.md" in now and "Доска/Пульт.base" not in now, now)
+
+        # хранилище старого образца (до 0324), «Кто есть кто» владелец удалил, состояния ещё нет — первый тик не возвращает
+        old = {"items": [{"type": "group", "ctime": 1, "title": "Каждый день", "items": [
+                   {"type": "file", "ctime": 2, "path": "Доска/Сводка.md", "title": "Сводка"},
+                   {"type": "file", "ctime": 3, "path": "Доска/Доска.base", "title": "Доска"}]},
+               {"type": "group", "ctime": 4, "title": "Справка", "items": [
+                   {"type": "file", "ctime": 5, "path": "Доска/Проблемы.md", "title": "Проблемы задач"}]}]}
+        v, p = vault("old", json.dumps(old, ensure_ascii=False))
+        st = {}
+        T._sync_bookmarks(v, st, al)
+        T._sync_bookmarks(v, st, al)
+        now = paths(json.load(open(p, encoding="utf-8")))
+        check("закладки (д): старый образец без ключа состояния — удалённая «Кто есть кто» не вернулась, новые пришли",
+              "Кто есть кто.md" not in now and {"Доска/Пульт.base", "board.md", f"Доска/{T.HELP_DIR}/{T.HELP_NOTE}.md"} <= set(now)
+              and "Доска/Сводка.md" in now, now)
+
+        for name, raw in (("d1", '{"items": [ {'), ("d2", '["не", "словарь"]'), ("d3", '{"items": 5}')):
+            v, p = vault(name, raw)
+            alerts.clear()
+            st = {}
+            T._sync_bookmarks(v, st, al)
+            T._sync_bookmarks(v, st, al)
+            check(f"закладки (г): битый bookmarks.json ({name}) — файл не тронут, состояние пусто, тревога",
+                  open(p, encoding="utf-8").read() == raw and not st and alerts and alerts[0][0] == "board-bookmarks"
+                  and not [f for f in os.listdir(os.path.dirname(p)) if f.endswith(".tmp")], alerts)
+        # через тик
+        v, p = vault("e")
+        pan = os.path.join(tmp, "pan")
+        os.makedirs(pan, exist_ok=True)
+        T.board_sync(pan, os.path.join(v, "Доска"), os.path.join(tmp, "state-e", "board.json"),
+                     os.path.join(tmp, "log"), T0 + 30, alert=al)
+        check("закладки: тик доски (board_sync) ставит набор", paths(json.load(open(p, encoding="utf-8"))) == want_paths)
+        # path закладки владельца — не строка (список, объект): тик не падает, файл не тронут в чужой части, board.json пишется
+        for name, bad in (("p1", ["x"]), ("p2", {"a": 1}), ("p3", 5), ("p4", None)):
+            raw = json.dumps({"items": [{"type": "file", "ctime": 1, "path": bad, "title": "Чужая"}]}, ensure_ascii=False)
+            v, p = vault(name, raw)
+            st = {"bookmarks_seen": [["y"], {"b": 1}, "Доска/Сводка.md"]}
+            try:
+                T._sync_bookmarks(v, st, al)
+                ok = True
+            except Exception as e:
+                ok = repr(e)
+            got = json.load(open(p, encoding="utf-8"))
+            check(f"закладки (ж): path не строка ({name}) — не падает, закладка владельца на месте, свои добавлены",
+                  ok is True and got["items"][0]["path"] == bad and "Доска/Пульт.base" in paths(got)
+                  and "Доска/Сводка.md" not in paths(got) and all(isinstance(x, str) for x in st["bookmarks_seen"]), ok)
+            sp = os.path.join(tmp, "state-" + name, "board.json")
+            pan = os.path.join(tmp, "pan-" + name)
+            os.makedirs(pan)
+            try:
+                T.board_sync(pan, os.path.join(v, "Доска"), sp, os.path.join(tmp, "log"), T0 + 40, alert=al)
+                ok = os.path.exists(sp)
+            except Exception as e:
+                ok = repr(e)
+            check(f"закладки (ж): board_sync с path не строкой ({name}) доходит до записи board.json", ok is True, ok)
+        # запись bookmarks.json падает: seen не обновился, тревога одна, следующий тик досыпает
+        v, p = vault("w")
+        st = {}
+        alerts.clear()
+        real = T._write_plain
+
+        def boom(path, text):
+            raise OSError("диск полон")
+        T._write_plain = boom
+        try:
+            T._sync_bookmarks(v, st, al)
+        finally:
+            T._write_plain = real
+        check("закладки (з): запись упала — bookmarks_seen не обновлён, файла нет, тревога одна",
+              "bookmarks_seen" not in st and not os.path.exists(p) and len(alerts) == 1 and alerts[0][0] == "board-bookmarks", (st, alerts))
+        T._sync_bookmarks(v, st, al)
+        check("закладки (з): следующий тик после сбоя досыпает все закладки",
+              paths(json.load(open(p, encoding="utf-8"))) == want_paths and sorted(st["bookmarks_seen"]) == sorted(want_paths))
+        # одиночный суррогат в названии закладки (половина эмодзи из JSON.stringify): не кодируется в utf-8
+        for kind in ("bookmarks", "types"):
+            v, p = vault("sur-" + kind, json.dumps({"items": [{"type": "file", "ctime": 1, "path": "Чужая.md",
+                                                           "title": "Обрезанный \ud83d"}]}) if kind == "bookmarks" else None)
+            if kind == "types":
+                with open(os.path.join(v, ".obsidian", "types.json"), "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"types": {"чужое": "text", "k\ud83d": "text"}}))
+            alerts.clear()
+            st = {}
+            try:
+                if kind == "bookmarks":
+                    T._sync_bookmarks(v, st, al)
+                else:
+                    T._sync_types(v, al)
+                ok = True
+            except Exception as e:
+                ok = repr(e)
+            left = [x for x in os.listdir(os.path.join(v, ".obsidian")) if x.endswith(".tmp")]
+            check(f"закладки (и): суррогат ({kind}) — не падает, tmp не остаётся, тревога есть",
+                  ok is True and not left and len(alerts) == 1 and alerts[0][0] == "board-" + kind, (ok, left, alerts))
+            if kind == "bookmarks":
+                check("закладки (и): суррогат — bookmarks_seen не обновлён", "bookmarks_seen" not in st, st)
+        # board_sync с суррогатом доходит до записи board.json
+        v, p = vault("sur-bs", json.dumps({"items": [{"type": "file", "ctime": 1, "path": "Чужая.md", "title": "О \ud83d"}]}))
+        sp = os.path.join(tmp, "state-sur", "board.json")
+        pan = os.path.join(tmp, "pan-sur")
+        os.makedirs(pan)
+        try:
+            T.board_sync(pan, os.path.join(v, "Доска"), sp, os.path.join(tmp, "log"), T0 + 50, alert=al)
+            ok = os.path.exists(sp)
+        except Exception as e:
+            ok = repr(e)
+        check("закладки (и): board_sync с суррогатом доходит до записи board.json", ok is True, ok)
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def main():
+    bookmark_checks()
     base_checks()
     card_checks()
     summary_checks()

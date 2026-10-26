@@ -104,7 +104,7 @@ def text(p):
 
 def put(home, direction, tid, status="doing", body="", **f):
     """Файл задачи руками: нужное время updated и поля, которых CLI не даёт."""
-    head = {"type": "task", "id": tid, "title": "Задача " + tid, "status": status, "project": direction,
+    head = {"type": "task", "id": tid, "title": "Задача " + tid, "status": status, "project": {"metis-pantheon": "Пантеон", "demo": "Демо"}.get(direction, direction),
             "direction": direction, "owner": direction, "created": "2026-10-01", "updated": "2026-10-10T10:00:00",
             "schema_version": 1}
     head.update(f)

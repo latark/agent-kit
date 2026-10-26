@@ -64,3 +64,22 @@ def keychain_has(service):
     """Есть ли в Связке ключей запись службы. Значение не читается (нет флагов -w и -g)."""
     r = _run(["security", "find-generic-password", "-s", service])
     return r.returncode == 0
+
+
+def keychain_add(service, account, secret):
+    """Новая запись Связки ключей (без -U: существующую не перезаписывает). → (ok, причина). Секрет уходит в
+    `security -i` через stdin, а не в argv (argv виден в `ps`); после добавления запись проверяется, потому что
+    `security -i` на ошибке команды может выйти с кодом 0. В причину идёт последняя строка stderr."""
+    if not secret or any(ch.isspace() or ch in "\"'\\" for ch in secret):
+        return False, "секрет не годится для передачи через stdin"
+    cmd = f'add-generic-password -s "{service}" -a "{account}" -w "{secret}"\n'
+    try:
+        r = _run(["security", "-i"], input=cmd, timeout=60)
+        has = keychain_has(service) if r.returncode == 0 else False
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, type(e).__name__
+    if r.returncode != 0:
+        return False, ((r.stderr or "").strip().splitlines() or [f"security: код {r.returncode}"])[-1]
+    if not has:
+        return False, ((r.stderr or "").strip().splitlines() or ["запись не появилась в Связке ключей"])[-1]
+    return True, ""

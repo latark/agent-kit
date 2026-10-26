@@ -684,14 +684,16 @@ def tests():
     spec.loader.exec_module(m)
     part = open(PROTECTED_PART, encoding="utf-8").read()
     missing = [p for p in m.PROTECTED_ANY + m.PROTECTED_ROOT if f"`{p}`" not in part]
-    in_part = set(re.findall(r"`([^` ]+)`", part)) - {"plugins/pantheon/lib/pantheon.py", ".claude/settings.local.json"}
+    in_part = set(re.findall(r"`([^` ]+)`", part)) - {"plugins/pantheon/lib/pantheon.py", ".claude/settings.local.json",
+                                                        "sandbox_build"}
     lost = sorted(in_part - set(m.PROTECTED_ANY + m.PROTECTED_ROOT))
     check("защищённые пути обёртки совпадают с protected.part", not missing and not lost, (missing, lost))
     cases = {".claude/settings.json": True, "sub/.codex/config.toml": True, "AGENTS.md": True, "docs/CLAUDE.md": True,
              "settings.local.json": True, ".github/workflows/ci.yml": True, "plugins/guard/hooks/guard.py": True,
              "plugins/x/hooks/a.py": True, "plugins/pantheon/roles/a.tmpl": True, ".pantheon-verify": True,
              "README.md": False, "docs/plugins/guard/x.md": False, "src/app.py": False, ".github/ISSUE.md": False,
-             "plugins/pantheon/lib/executors.py": False, "plugins/pantheon/lib/window_rules.py": True}
+             "plugins/pantheon/lib/executors.py": False, "plugins/pantheon/lib/window_rules.py": True,
+             "plugins/pantheon/lib/merge.py": True, "plugins/pantheon/lib/merge.pyc": False}
     wrong = {p: v for p, v in cases.items() if m.protected_hit(p) != v}
     check("защищённые пути: глубина и шаблоны", not wrong, wrong)
     fresh = os.path.join(TMP, "fresh")
@@ -701,6 +703,11 @@ def tests():
     with open(os.path.join(fresh, "plugins", "pantheon", "lib", "pantheon.py"), "w") as fh:
         fh.write('D = {"permissions": 1}\n')
     check("правила окон: новый неотслеживаемый pantheon.py тоже смотрится", m.window_rules_hit(fresh, "HEAD"))
+    # песочница окон (metis-0393): всё, что пишет sandbox_build, — и excludedCommands, и списки *_EXCLUDED
+    check("песочница окон: строка с excludedCommands — защита",
+          bool(m.WINDOW_WORDS.search('HQ_X = ["pantheon alert *"]  # excludedCommands'))
+          and bool(m.WINDOW_WORDS.search('HQ_EXCLUDED = ["pantheon alert *"]'))
+          and not m.WINDOW_WORDS.search('HQ_X = ["pantheon alert *"]'))
 
     # --- Stop-хук: запуск Codex — правка ----------------------------------------------------------------------------------
     spec = importlib.util.spec_from_file_location("dev_stop", HOOK)

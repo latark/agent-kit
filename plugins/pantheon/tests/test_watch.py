@@ -148,11 +148,11 @@ class Env:
         json.dump(data, open(cj, "w"))
         return folder
 
-    def task(self, tid, direction, status="todo", extra="", updated="2026-10-15T07:00:00"):
+    def task(self, tid, direction, status="todo", extra="", updated="2026-10-15T07:00:00", priority=2):
         p = os.path.join(self.pantheon, "directions", direction, "tasks", tid + ".md")
         open(p, "w").write(f"---\ntype: task\nid: {tid}\ntitle: проба\nstatus: {status}\nproject: {direction}\n"
                            f"direction: {direction}\ncreated: 2026-10-15\nupdated: {updated}\n"
-                           f"schema_version: 1\npriority: 2\n{extra}---\n\nтекст\n")
+                           f"schema_version: 1\npriority: {priority}\n{extra}---\n\nтекст\n")
 
     def board(self, tid, t, kind="move", dst="Очередь"):
         rec = {"time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t)), "kind": kind, "id": tid, "dst": dst}
@@ -288,6 +288,31 @@ def test_autostart_order_board_vs_zeus_0242():
 def _bg_text(e):
     starts = [c for c in e.calls() if c[:1] == ["--bg"]]
     return starts, " ".join(starts[0]) if starts else ""
+
+
+def test_autostart_push_order_priority_pack_reserve_0292():
+    """metis-0292: в толчке сначала высший priority, затем порядок пачки (order), запас — последним, хоть он и важнее;
+    первая названа «следующая: <id>»; тревога и текст — в том же порядке."""
+    e = Env()
+    e.direction("athena-x")
+    e.task("athena-0001", "athena-x", priority=3, extra="order: 2\n")
+    e.task("athena-0002", "athena-x", priority=3, extra="order: 1\n")
+    e.task("athena-0003", "athena-x", priority=0, extra="order: 1000001\n")  # запас, важный, но последний
+    e.task("athena-0004", "athena-x", priority=1)
+    e.task("athena-0005", "athena-x", priority=2)
+    e.task("athena-0006", "athena-x", priority=0)
+    e.task("athena-0007", "athena-x", priority=3, extra="order: 3\n")
+    e.run("watch", t=T0)
+    for i, n in enumerate((1, 2, 3, 4, 5, 6, 7)):  # отметки идут по id: прежний порядок
+        e.board(f"athena-000{n}", T0 + 100 + i * 10)
+    e.run("watch", t=T0 + 500)
+    starts, text = _bg_text(e)
+    check(len(starts) == 1, f"0292: самозапуск не пошёл: {e.calls()}")
+    want = "athena-0006, athena-0004, athena-0005, athena-0002, athena-0001, athena-0007, athena-0003"
+    check("следующая: athena-0006." in text, f"0292: нет «следующая: athena-0006»: {text[-500:]}")
+    check(want in text, f"0292: порядок толчка ({want}): {text[-500:]}")
+    check("athena-0006, athena-0004, athena-0005, athena-0002, athena-0001" in e.alerts(),
+          f"0292: тревога в другом порядке: {e.alerts()[-400:]}")
 
 
 def test_autostart_deps_order_0248():

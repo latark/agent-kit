@@ -12,7 +12,10 @@
     закрывает человек, а не состав) и dropped, пачку без задач и смешанный состав без работы — не трогаем. Пачку с
     открытым вопросом владельцу (question, options, requested) не двигаем вовсе — done стёр бы вопрос (tasks.task_set),
     — а тревожим. Сдвиг пачки — строка в её журнал; проход уже ставил этот статус, а пачку вернули руками (закрыли,
-    открыли) — второй раз не двигаем, а тревожим, как у задач.
+    открыли) — второй раз не двигаем, а тревожим, как у задач. Пачку, которая уже в doing не проходом (создана так,
+    выдана, поставлена руками) и состав держит её там, проход один раз отмечает в журнале той же строкой без сдвига:
+    закрыли её потом руками — второй раз не открываем, а тревожим (metis-0412). Вопрос владельцу, появившийся между
+    планом и записью, сверяет проверка под блокировкой (pantheon.board_status_sync): сдвиг не стирает его.
 Выдача исполнителю командой `pantheon task claim` ставит doing сама (tasks.task_claim).
 
 Только стандартная библиотека, Python 3.9+: тесты зовут модуль напрямую, проход — из pantheon.py.
@@ -37,16 +40,24 @@ def last_story_move(body):
     return found[-1] if found else None
 
 
-def story_target(sid, tasks):
-    """Статус, который пачке нужен по составу, или None — оставить как есть."""
-    head = tasks[sid][1]
+def story_want(sid, tasks):
+    """Статус, которого требует состав пачки, без оглядки на её текущий статус: doing, done или None."""
     kids = [h.get("status") for _, h, _ in tasks.values() if h.get("parent") == sid and h.get("type") == "task"]
     if not kids:
         return None
-    st = head.get("status")
     if any(k in ("doing", "review") for k in kids):
-        return "doing" if st in STORY_DOING_FROM else None
+        return "doing"
     if all(k in ("done", "dropped") for k in kids):
+        return "done"
+    return None
+
+
+def story_target(sid, tasks):
+    """Статус, который пачке нужен по составу, или None — оставить как есть."""
+    want, st = story_want(sid, tasks), tasks[sid][1].get("status")
+    if want == "doing":
+        return "doing" if st in STORY_DOING_FROM else None
+    if want == "done":
         return "done" if st in STORY_DONE_FROM else None
     return None
 
@@ -106,8 +117,8 @@ def review_note(repo, number):
 
 def plan(tasks, domains, open_closing=None):
     """Что сделать по следам работы → (moves, stale).
-    moves — [(tid, changes, note)] для task_set; stale — {tid: причина} задач в todo, по которым идёт работа, но
-    двигать проход не стал: их уже двигали этим же следом, а их вернули в todo (или worktree — в репозитории не их
+    moves — [(tid, changes, note)] для task_set (changes пустой — только отметка в журнале пачки); stale — {tid:
+    причина} задач в todo, по которым идёт работа, но двигать проход не стал: их уже двигали этим же следом, а их вернули в todo (или worktree — в репозитории не их
     направления); и пачек, которым состав требует другой статус, а проход не двигает: открыт вопрос владельцу или
     этот статус проход уже ставил, а пачку вернули руками. open_closing — {id задачи: [(repo, номер)]} открытых PR, которые её закрывают (кэш autoclose)."""
     moves, stale = [], {}
@@ -145,9 +156,13 @@ def plan(tasks, domains, open_closing=None):
         if h.get("type") != "story":
             continue
         want = story_target(sid, view)
+        held = [f for f in STORY_HOLD if h.get(f)]
+        if h.get("status") == "doing" and story_want(sid, view) == "doing" and not held \
+                and last_story_move(body) != "doing":  # в doing не проходом: отметка — ручное закрытие не откроем
+            moves.append((sid, {}, f"{STORY_MARK} уже в работе, есть задача в работе или на проверке → doing"))
+            continue
         if not want or want == h.get("status"):
             continue
-        held = [f for f in STORY_HOLD if h.get(f)]
         if held:  # done стёр бы вопрос и выбор владельца (tasks.task_set), doing — увёл бы пачку из «Нужен ответ»
             stale[sid] = f"пачка ждёт ответа владельца ({', '.join(held)}), по составу — {want}"
         elif last_story_move(body) == want:  # проход уже ставил этот статус, а пачку вернули руками

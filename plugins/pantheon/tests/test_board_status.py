@@ -88,7 +88,18 @@ check("1. пачка ждёт человека (waiting) или снята (drop
       S.story_target("metis-0500", story("waiting", "doing")) is None
       and S.story_target("metis-0500", story("waiting", "done")) is None
       and S.story_target("metis-0500", story("dropped", "doing")) is None)
-check("1. уже в нужном статусе — plan не пишет", S.plan(story("doing", "doing"), {})[0] == [])
+DOING_LINE = "- 2026-10-24 02:00 — плановый проход: пачка по составу: есть задача в работе или на проверке → doing"
+check("1. уже в нужном статусе и отметка прохода в журнале — plan не пишет",
+      S.plan(dict(story("doing", "doing"), **{"metis-0500": task("metis-0500", "doing", "story", body=DOING_LINE)[1]}),
+             {}) == ([], {}))
+mv, hold = S.plan(story("doing", "doing"), {})
+check("1. пачка в doing не проходом, состав держит doing → одна отметка в журнале без сдвига (metis-0412)",
+      [(m[0], m[1]) for m in mv] == [("metis-0500", {})] and S.last_story_move("- 24.10 — плановый проход: " + mv[0][2])
+      == "doing" and hold == {}, (mv, hold))
+check("1. пачка done или todo при задаче doing — отметки нет, а сдвиг; пачка doing без задачи в работе — ничего",
+      S.plan(story("done", "doing"), {})[0][0][1] == {"status": "doing"}
+      and S.plan(story("todo", "doing"), {})[0][0][1] == {"status": "doing"}
+      and S.plan(story("doing", "todo", "done"), {}) == ([], {}))
 check("1. задача другой пачки и пачка-заметка (type stage) состав не меняют",
       S.story_target("metis-0500", dict(story("todo", "todo"), **dict([task("metis-0599", "doing", parent="metis-0600")]))) is None)
 
@@ -122,6 +133,12 @@ check("1. проход последним ставил done, а задачу в�
       [m[0] for m in mv] == ["metis-0500"] and mv[0][1] == {"status": "doing"} and hold == {}, (mv, hold))
 mv, hold = S.plan(story_with("done", None, "в описании: пачка по составу: … → doing", "doing"), {})
 check("1. похожий текст не в журнале прохода отметкой не считается", [m[0] for m in mv] == ["metis-0500"], (mv, hold))
+mv, hold = S.plan(story_with("done", None, DOING_LINE + "\n- 2026-10-24 03:00 — плановый проход: пачка по составу: "
+                                               "все задачи закрыты → done", "doing"), {})
+check("1. журнал из двух сдвигов (→ doing, затем → done), задача снова в работе → doing: важна последняя отметка",
+      [(m[0], m[1]) for m in mv] == [("metis-0500", {"status": "doing"})] and hold == {}, (mv, hold))
+check("1. пачка doing с вопросом владельцу — отметки нет (вопрос проход не трогает)",
+      S.plan(story_with("doing", {"question": "Принять?"}, "", "doing"), {}) == ([], {}))
 
 # --- 2. worktree на ветке с id задачи → doing; вернули в todo — тревога ----------------------------------------------
 repo = os.path.join(ROOT, "u", "agent-kit")
@@ -217,6 +234,8 @@ s3, sp3 = new("Пачка на приёмке с вопросом", "--type", "s
 t7, p7 = new("Готовая задача приёмки", "--parent", s3, "--mode", "single", "--status", "done")
 s4, sp4 = new("Пачка в очереди с вопросом", "--type", "story")
 t8, p8 = new("Готовая задача очереди", "--parent", s4, "--mode", "single", "--status", "done")
+s5, sp5 = new("Пачка в работе руками", "--type", "story", "--status", "doing")  # doing не проходом (metis-0412)
+t9, p9 = new("Задача пачки в работе", "--parent", s5, "--mode", "single", "--status", "doing")
 ASK = ('question: "Принять итоги ночи?"\noptions: ["А — принять итоги, все проверки зелёные", '
        '"Б — вернуть на доработку, нужен ещё круг"]\nrecommend: "А — проверки зелёные"\n')
 for sp_, st_ in ((sp3, "review"), (sp4, "todo")):
@@ -235,7 +254,7 @@ check("4. открытый PR, который закрывает задачу, �
 check("4. PR «часть» и PR из репозитория чужого направления review не ставят",
       head(p5).get("status") == "todo" and head(p6).get("status") == "todo", (head(p5), head(p6)))
 worktree(erepo, "agent-e2e", f"{t2}-work")
-r = cli(["board"], T0 + 120)
+r = r_first = cli(["board"], T0 + 120)
 check("4. проход доски: worktree на ветке задачи → doing, строка в журнал",
       head(p2).get("status") == "doing" and f"worktree на ветке {t2}-work → doing" in read(p2), r.stdout + r.stderr)
 check("4. пачка с задачей doing → doing («В работе»)", head(sp).get("status") == "doing", r.stdout + r.stderr)
@@ -256,6 +275,19 @@ for rnd in range(2):  # пачку закрыли руками — проход 
     hand.append((head(sp).get("status"), rr.stdout))
 check("4. пачку, которую проход ставил в doing, закрыли руками — два прохода подряд статус done",
       [h for h, _ in hand] == ["done", "done"] and f"вернули руками в done" in hand[0][1], hand)
+check("4. пачка в doing не проходом → отметка в её журнале без сдвига, проход печатает её",
+      head(sp5).get("status") == "doing" and S.last_story_move(read(sp5)) == "doing"
+      and f"статус · {s5}: doing, отметка в журнале" in r_first.stdout, (read(sp5), r_first.stdout))
+cli(["task", "set", s5, "status=done"], T0 + 172)
+rr = cli(["board"], T0 + 174)
+check("4. её закрыли руками → проход не открывает, тревога «вернули руками» (metis-0412)",
+      head(sp5).get("status") == "done" and f"{s5} (пачку вернули руками в done" in rr.stdout, (read(sp5), rr.stdout))
+write(sp, read(sp).replace("status: done\n", 'status: done\nquestion: "Закрыть пачку насовсем?"\n', 1))
+rr = cli(["board"], T0 + 176)
+check("4. у той же пачки сменилась причина (ручной статус → вопрос владельцу) → тревога звучит заново",
+      f"{sid} (пачка ждёт ответа владельца (question)" in rr.stdout and head(sp).get("status") == "done", rr.stdout)
+rr = cli(["board"], T0 + 178)
+check("4. … повтор той же причины молчит", "статус пачки по составу не поставлен" not in rr.stdout, rr.stdout)
 cli(["task", "set", t2, "status=todo"], T0 + 180)
 r = cli(["board"], T0 + 240)
 check("4. задачу вернули в todo при живой worktree → проход не двигает, тревога «в очереди, а работа идёт»",
@@ -317,6 +349,27 @@ r = subprocess.run([PY311, "-I", "-c", probe], env=dict(env, PANTHEON_NOW=str(T0
                    timeout=120)
 check("5. статус сменился после чтения прохода → задача не сдвинута, строка «не сдвинут»",
       f"статус · {t2}: не сдвинут" in r.stdout and head(p2).get("status") == "doing", r.stdout + r.stderr)
+probe = f"""
+import sys
+sys.path.insert(0, {os.path.join(PLUGIN, "lib")!r})
+import pantheon as p
+T = p.tasks_mod()
+class Late:  # вопрос пачке поставили после плана прохода: план его не видел, файл — с вопросом
+    def __getattr__(self, k):
+        return getattr(T, k)
+    def load_tasks(self, *a):
+        out = T.load_tasks(*a)
+        pth, h, body = out[{s4!r}]
+        out[{s4!r}] = (pth, dict(h, question=None, options=None, requested=None), body)
+        return out
+print("\\n".join(p.board_status_sync(Late())))
+"""
+r = subprocess.run([PY311, "-I", "-c", probe], env=dict(env, PANTHEON_NOW=str(T0 + 530)), capture_output=True, text=True,
+                   timeout=120)
+hd = head(sp4)
+check("5. вопрос пачке поставили между планом и записью → пачка не сдвинута, вопрос на месте (metis-0412)",
+      f"статус · {s4}: не сдвинут ({s4}: ждёт ответа владельца" in r.stdout and hd.get("status") == "todo"
+      and "Принять итоги ночи?" in hd.get("question", ""), r.stdout + r.stderr + read(sp4))
 probe = f"""
 import sys
 sys.path.insert(0, {os.path.join(PLUGIN, "lib")!r})
