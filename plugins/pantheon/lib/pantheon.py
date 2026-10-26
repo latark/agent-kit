@@ -7168,7 +7168,7 @@ def usage_report(rest):
 # --- обновления плагинов agent-kit (metis-0052) ----------------------------------------------------------------
 # Тик раз в 10 минут, вне песочницы: каталог agent-kit → новые версии установленных плагинов → тесты новой версии и
 # установленной (база) на одних и тех же python → есть новые падения — не ставим, тревога; нет — claude plugin update.
-# База нужна, чтобы падения от места запуска (временная папка, python 3.9) не держали обновление вечно.
+# База нужна, чтобы падения от места запуска (временная папка, другой python3 из PATH) не держали обновление вечно.
 # Подпись падения (metis-0360): строка FAIL или «НЕ ПРОШЛО» / «НЕ ПРОШЁЛ» / «ОШИБКА:» (в них изменчивое — время,
 # pid, порты, списки чисел [..], числа от 4 знаков и замеры с тремя и более знаками после точки — N; номер и значение
 # проверки короче («запас +4», «сбой 3», «ответ в 23:10») остаются; значение из 4+ знаков склеивается — имя проверки
@@ -7320,19 +7320,9 @@ def _tree_hash(root):
 
 
 def _test_pythons():
-    """python3 из PATH и системный /usr/bin/python3 — если он есть, инструменты командной строки установлены
-    (иначе macOS покажет окно установки) и это не тот же python."""
-    first = shutil.which("python3") or sys.executable
-    out = [first]
-    sysp = "/usr/bin/python3"
-    if os.path.exists(sysp) and os.path.realpath(sysp) != os.path.realpath(first):
-        try:
-            ok = subprocess.run(["xcode-select", "-p"], capture_output=True, timeout=30).returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
-            ok = False
-        if ok:
-            out.append(sysp)
-    return out
+    """Матрица тестов плагинов: только python3 из PATH (или тот, которым запущен pantheon). Системный /usr/bin/python3
+    (3.9 на macOS) не добавляем — решение владельца [sb-python314]: тесты только на 3.14, это вдвое короче прогон guard."""
+    return [shutil.which("python3") or sys.executable]
 
 
 def _py_ge311(py):
@@ -7344,8 +7334,8 @@ def _py_ge311(py):
 
 
 def _pythons_for(name):
-    """Тесты плагина pantheon идут только интерпретаторами 3.11+ (tomllib); guard — на всех: его хуки идут на python3
-    из PATH, в том числе на системном 3.9."""
+    """Тесты плагина pantheon идут только интерпретатором 3.11+ (tomllib); guard — тем же python3 из PATH, что и pantheon
+    (metis-0448: /usr/bin/python3 в матрицу не входит)."""
     pythons = _test_pythons()
     return [py for py in pythons if _py_ge311(py)] if name == "pantheon" else pythons
 
