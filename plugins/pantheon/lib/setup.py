@@ -197,6 +197,7 @@ def step_github():
 BACKUP = "резервная копия"
 BACKUP_REPO = "pantheon-hq"  # «личный штаб»: не путать с agent-kit и его плагином pantheon
 BACKUP_SERVICE = "pantheon-git-crypt"
+BACKUP_OLD_REF = "refs/pantheon/pre-backup"  # прежняя история до снимка (пишется один раз)
 BACKUP_LATER = "копии нет: при потере Mac данные пропадут; включить позже: `pantheon-setup --add backup`"
 BACKUP_ATTRS = "* filter=git-crypt diff=git-crypt\n.gitattributes !filter !diff\n.gitignore !filter !diff\n"
 CRYPT_HEADER = b"\x00GITCRYPT\x00"
@@ -274,7 +275,7 @@ def backup_snapshot():
     if c.returncode != 0:
         return None, "git commit-tree: " + last_line(c)
     if old:
-        pgit("update-ref", "refs/pantheon/pre-backup", old, "")  # только первый раз: исходная история
+        pgit("update-ref", BACKUP_OLD_REF, old, "")  # только первый раз: исходная история
     u = pgit("update-ref", f"refs/heads/{branch}", c.stdout.strip(), old)
     if u.returncode != 0:
         return None, f"ветка {branch} сдвинулась во время шага (плановый коммит?) — запустите снова: " + last_line(u)
@@ -299,7 +300,8 @@ def step_backup(name=BACKUP_REPO):
         report(BACKUP, "пропуск", "нет git-crypt (`brew install git-crypt`); " + BACKUP_LATER)
         return False
     if not ask(f"Завести резервную копию в приватном репозитории GitHub ({name}, файлы под шифрованием "
-               "git-crypt, ключ — в Связке ключей)?"):
+               f"git-crypt, ключ — в Связке ключей)? История git в {PANTHEON} заменится одним снимком: "
+               f"прежние коммиты останутся только на этом Mac, в {BACKUP_OLD_REF}."):
         report(BACKUP, "пропуск", BACKUP_LATER)
         return False
     inited = os.path.isdir(os.path.join(PANTHEON, ".git", "git-crypt"))

@@ -367,6 +367,11 @@ def main():
     check("копия «да»: код 0, строка «[ок] резервная копия», вопрос задан",
           r.returncode == 0 and "[ок] резервная копия" in out
           and "Завести резервную копию в приватном репозитории GitHub" in out, out[-1500:])
+    qline = next((ln for ln in out.splitlines() if "Завести резервную копию" in ln), "")
+    check("копия: вопрос до «да» — история заменится одним снимком, прежняя останется в refs/pantheon/pre-backup",
+          "заменится одним снимком" in qline and "прежние коммиты останутся" in qline
+          and "refs/pantheon/pre-backup" in qline and qline.rstrip().endswith("[да/нет, по умолчанию нет]"),
+          qline[:600])
     want = ["git-crypt init", "git-crypt export-key", "security add-generic-password", "gh repo create"]
     pos = [next((i for i, x in enumerate(lg) if x.startswith(w)), -1) for w in want]
     check("копия: порядок — git-crypt init, export-key, ключ в Связку, и только потом gh repo create",

@@ -7169,22 +7169,23 @@ def usage_report(rest):
 # Тик раз в 10 минут, вне песочницы: каталог agent-kit → новые версии установленных плагинов → тесты новой версии и
 # установленной (база) на одних и тех же python → есть новые падения — не ставим, тревога; нет — claude plugin update.
 # База нужна, чтобы падения от места запуска (временная папка, другой python3 из PATH) не держали обновление вечно.
-# Подпись падения (metis-0360): строка FAIL или «НЕ ПРОШЛО» / «НЕ ПРОШЁЛ» / «ОШИБКА:» (в них изменчивое — время,
-# pid, порты, списки чисел [..], числа от 4 знаков и замеры с тремя и более знаками после точки — N; номер и значение
-# проверки короче («запас +4», «сбой 3», «ответ в 23:10») остаются; значение из 4+ знаков склеивается — имя проверки
-# с таким значением новому тесту не давать), исключение в конце вывода вместе с текстом
-# (адреса 0x… — 0x…), «код N», «нет итоговой строки» (последняя непустая строка — не итог: упал до него; деталь,
-# похожая на итог, — «нет итоговой строки (последняя строка — деталь провала, не итог)», её «нет итога» базы не гасит), таймаут,
-# срок прогона. Временный путь: корень — <tmp>, случайные папки цепочки от корня и tmpXXXXXXXX — «…», корень копии —
-# <copy>, путь внутри и имя файла остаются. База гасит только совпавшие подписи той же пары (python, файл). Не гасит:
+# Подпись падения (metis-0360, metis-0449): провал проверки по её идентификатору (_check_sig: «FAIL <имя>» без
+# детали, если имя в выводе файла одно; иначе строка целиком), строка «НЕ ПРОШЛО» / «НЕ ПРОШЁЛ» / «ОШИБКА:» целиком,
+# исключение в конце вывода вместе с текстом, «код N», «нет итоговой строки» (последняя непустая строка — не итог:
+# упал до него; деталь, похожая на итог, — «нет итоговой строки (последняя строка — деталь провала, не итог)», её «нет
+# итога» базы не гасит), таймаут, срок прогона. Новые падения = подписи новой − подписи базы, то есть по проверкам —
+# {id упавших у новой} − {id упавших у базы}. Нормализации текста нет (metis-0449: три круга дыр 0359–0362 шли от неё):
+# числа, время, pid и адреса в строке целиком остаются, и флак с другим числом в такой строке — красное. Подменяются
+# только известные корни прогона этого файла (_roots_sub: корень копии, HOME, TMPDIR — у новой и базы они разные по
+# построению), а не всё, что похоже на временный путь. База гасит только совпавшие подписи той же пары (python, файл). Не гасит:
 # «ни одной проверки» (код 0 без ok и без числа проверок в итоге: нет итога, «0 из 0», «OK 0» — база по такому файлу
 # не гоняется) и «проверок меньше, чем у базы» (строк ok у новой меньше или итог называет меньше проверок).
 # Код 0, строки ok и ни строки итога (metis-0361): пять файлов agent-kit так кончаются законно, поэтому базу по ним гоняем
 # и сверяем: у базы файла нет или итог был — красное «оборвался без итога»; у базы тот же стиль — решает число строк ok.
-# Цена строгости (ревью 0359, круг 3): тот же флак с другим счётчиком в строке провала («ответов 9» против «10» у
-# keep-alive test_svc_ondemand) базой не гасится — красное, а не склейка соседних проверок цикла. Флак чинится в
-# самом тесте, а не подписью: keep-alive с metis-0365 меряет время жизни соединения, а не число ответов.
-# Одинаковая строка FAIL с другой причиной гасится: деталь — в самой строке, а строже — нестабильно на окружении.
+# Цена строгости (ревью 0359, круг 3; metis-0449): флак с другим числом в строке без выделяемого имени («НЕ ПРОШЁЛ:
+# keep-alive ответов 9» против «10», pid, порт, время) базой не гасится — красное, а не склейка соседних проверок
+# цикла. Флак чинится в самом тесте, а не подписью: keep-alive с metis-0365 меряет время жизни соединения.
+# Провал той же проверки (то же единственное имя) с другой деталью гасится: деталь — не часть идентификатора.
 # Хеш дерева проверенной копии сверяется с тем, что встало: update сам обновляет каталог и может поставить версию
 # новее проверенной. Метка testing ловит прерванный прогон (таймаут задачи тика, сбой): такая версия — красная.
 # metis-0424: «не досчитано» — не «сломано». Файл, не успевший в срок прогона (у новой или у нужной базы), — метка
@@ -7219,8 +7220,6 @@ NO_CHECKS = "ни одной проверки"  # код 0, ни строки ok
 # «N команд × …» (guard test_shell_diff). Есть у файлов, дошедших до конца; файл без своего итога (кончается строкой
 # ok) при падении получает «нет итоговой строки» и у новой, и у базы — она вычитается, как любая общая подпись.
 TEST_SUMMARY = re.compile(r"(?:\d+\s*(?:из\s+\d+|/\s*\d+|команд\b)|тестов:\s*\d+|(?:OK|FAIL)\s+\d+$|ПРОВАЛ\b)")
-_HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
-_TMP_RE = None
 ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])")
 
 
@@ -7340,46 +7339,21 @@ def _pythons_for(name):
     return [py for py in pythons if _py_ge311(py)] if name == "pantheon" else pythons
 
 
-def _tmp_re():
-    """Корни временных папок (группа 1 — путь под корнем): у новой версии и базы они разные, а падение одно; разбор
-    пути — _tmp_sub."""
-    global _TMP_RE
-    if _TMP_RE is None:
-        pre = {"/private/tmp/", "/tmp/", "/private/var/folders/", "/var/folders/"}
-        for t in (tempfile.gettempdir(), path("plugins", "tmp")):
-            for v in (t, os.path.realpath(t)):
-                pre.add(v.rstrip("/") + "/")
-        alts = "|".join(re.escape(p) for p in sorted(pre, key=len, reverse=True))
-        _TMP_RE = re.compile(rf"(?:{alts})([^\s'\"(),:;]*)")
-    return _TMP_RE
-
-
-# Случайная часть пути во временной папке — имя от mkdtemp/mkstemp: приставка («tmp», «home-», «guard-») и 8 знаков.
-# С дефисом — только в цепочке от корня временной папки (ревью 0359, второй argus круг 2, п.3): ниже настоящей папки
-# «metis-pantheon» и «hephaestus-pantheon» — имена, а не случай; «tmp» и 8 знаков — случай везде
-_RAND_TMP = re.compile(r"tmp[a-z0-9_]{8}")
-_RAND_SEG = re.compile(r"[\w.+-]*[-_][a-z0-9_]{8}")
-
-
-def _tmp_sub(s):
-    """Временные пути в строке подписи: корень временной папки — <tmp>, случайные имена папок — «…», корень копии
-    (new/ или base/ после случайной папки прогона) — <copy>; остальной путь и имя файла остаются (ревью 0359,
-    второй argus, п.1): иначе FileNotFoundError на разных файлах в tmp давал одну подпись и база гасила чужое."""
-    def one(m):
-        out = []
-        chain = True  # все папки до этой — случайные
-        for seg in m.group(1).split("/"):
-            if _RAND_TMP.fullmatch(seg) or (chain and _RAND_SEG.fullmatch(seg)):
-                seg = "…"
-            elif seg in ("new", "base") and out and out[-1] == "…":
-                seg = "<copy>"
-            else:
-                chain = False
-            if not (seg == "…" and out and out[-1] == "…"):
-                out.append(seg)
-        rest = "/".join(out)
-        return "<tmp>/" + rest if rest else "<tmp>"
-    return _tmp_re().sub(one, s)
+def _roots_sub(s, roots):
+    """Известные корни прогона этого файла в строке подписи — их метки (metis-0449): roots — [(путь, метка)], у новой и
+    базы это корень копии (<copy>), HOME (<home>) и TMPDIR (<tmpdir>) файла; они разные по построению, а путь внутри
+    них один. Только точные строки этих путей (и их realpath) целыми именами — не часть имени соседа («…/h1» не
+    трогает «…/h10» и «/x/var/…»), длинные первыми; на остальной текст не смотрим — случайная папка, которую тест
+    создал сам, остаётся как есть (строже: такая подпись базой не гасится)."""
+    pairs = {}
+    for p, label in roots or ():
+        if isinstance(p, str) and p.strip("/"):
+            for v in (p, os.path.realpath(p)):
+                pairs.setdefault(v.rstrip("/"), label)
+    if not pairs:
+        return s
+    alts = "|".join(re.escape(p) for p in sorted(pairs, key=len, reverse=True))
+    return re.sub(rf"(?<![\w.+-])(?:{alts})(?![\w.+-])", lambda m: pairs[m[0]], s)
 
 
 # Итог файла — только последняя непустая строка вывода (ревью 0359, второй argus, п.4): «2/3» или «N из M» из вывода
@@ -7392,28 +7366,43 @@ _SUMMARY_TOTAL = (
     (re.compile(r"(\d+)\s*команд\b"), lambda m: int(m[1])),
 )
 # Строки провала: FAIL и «НЕ ПРОШЛО» / «НЕ ПРОШЁЛ» / «ОШИБКА:» файлов без строк ok (test_watch, test_night,
-# test_awake, test_mmv, test_svc_ondemand и др., ревью 0359, первый argus). У вторых деталь проверки — в той же
-# строке, поэтому изменчивое в ней — N (_VOLATILE): время, pid и их списки, порты, эпоха, байты (числа от 4 знаков). Номер и значение проверки короче 4 знаков
-# («запас +4», «сбой 3», «ответ в 23:10», «неделя 31.6 %») остаются: числа целиком в N склеивали соседние проверки
-# цикла, и провал базы в одной гасил провал новой в другой (ревью 0359, второй argus круг 2, п.1)
+# test_awake, test_mmv, test_svc_ondemand и др., ревью 0359, первый argus). У вторых имя и деталь разделены одним
+# пробелом («НЕ ПРОШЁЛ: {имя} {деталь}», «ОШИБКА: {функция} {тип} {текст}» — в функции несколько проверок), имя не
+# выделить — подпись по строке целиком (metis-0449)
 FAIL_PREFIXES = ("FAIL",)
 FAIL_PREFIXES_N = ("НЕ ПРОШЛО", "НЕ ПРОШЁЛ", "ОШИБКА:")
-_DIGITS = re.compile(r"\d+")
-_VOLATILE = (
-    (_HEX_RE, "0x…"),
-    (re.compile(r"\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d(?:[.,]\d+)?(?:Z|[+-]\d\d:?\d\d)?"
-                r"|(?<![\d:])\d\d?:\d\d:\d\d(?:[.,]\d+)?"), "<время>"),       # время с секундами; «23:10» — нет
-    (re.compile(r"(?i)\b(pid|port|порт)([\s=:]*)\d+"), r"\1\2N"),
-    (re.compile(r"\[\d+(?:,\s*\d+)*\]"), lambda m: _DIGITS.sub("N", m[0])),  # список pid: [308, 567]
-    (re.compile(r"(?<![\w.])\d{4,}(?:\.\d+)?(?![\w.-])"), "N"),               # pid, порт, эпоха, байты, мс
-    (re.compile(r"(?<![\w.])\d+\.\d{3,}(?![\w.])"), "N"),                     # замер с долями: 0.5321 с
-)
+# Разделитель имени проверки и детали в строках ok/FAIL: два и более пробела или табуляция («FAIL имя  [деталь]»,
+# «FAIL имя  {extra}»). В именах agent-kit двойного пробела нет; « — » есть в 1300+ именах, поэтому « — деталь»
+# (test_merge, test_read, test_tmp_rules, test_metrics) разделителем не считается: такая строка — имя целиком
+_DETAIL_SEP = re.compile(r" {2,}|\t")
+NAME_NOT_ONE = "имя проверки в выводе не одно"
 
 
-def _volatile_sub(s):
-    for rx, to in _VOLATILE:
-        s = rx.sub(to, s)
-    return s
+def _line_id(ln):
+    """Идентификатор проверки в строке вывода (metis-0449) — пара (слово, имя) или None. ln — строка без краевых
+    пробелов и ANSI. Строка проверки — «ok» или «FAIL», затем пробел или табуляция, затем имя; имя — текст до первого
+    разделителя детали (_DETAIL_SEP), если разделителя нет — весь остаток. Деталь на следующих строках («FAIL имя»,
+    затем «     деталь») в имя не входит сама. «ok» без имени, «FAILED …», «FAIL:» — не строки проверки (None)."""
+    for word in ("ok", "FAIL"):
+        if ln.startswith(word) and ln[len(word):len(word) + 1] in (" ", "\t"):
+            name = _DETAIL_SEP.split(ln[len(word):].strip(), 1)[0].strip()
+            return (word, name) if name else None
+    return None
+
+
+def _check_sig(ln, ids, roots):
+    """Подпись строки FAIL (metis-0449): «FAIL <имя>» без детали — только если имя в выводе этого файла одно (ids —
+    Counter имён всех строк ok и FAIL прогона, _line_id). Имя повторяется (проверка в цикле с одним именем, два
+    имени с общим началом до двух пробелов) — строка целиком с пометкой NAME_NOT_ONE: такую подпись гасит только та
+    же строка у базы, а не «FAIL <имя>», иначе провал одной итерации гасил бы провал другой. Строки без имени
+    («FAILED …») — целиком. Итог по паре (python, файл): новые падения = {имена упавших у новой} − {имена упавших у
+    базы}; ошибиться можно только в сторону лишнего красного."""
+    li = _line_id(ln)
+    if li is None:
+        return _roots_sub(ln, roots)
+    if ids[li[1]] == 1:
+        return "FAIL " + _roots_sub(li[1], roots)
+    return f"{_roots_sub(ln, roots)} · {NAME_NOT_ONE}"
 
 
 def _ok_lines(lines):
@@ -7476,22 +7465,25 @@ def _fewer_checks(new, base):
     return None
 
 
-def _failure_signatures(fname, out, rc):
-    """Подписи падений одного файла тестов: строки FAIL, исключение в конце вывода с текстом сообщения, ненулевой код
+def _failure_signatures(fname, out, rc, roots=()):
+    """Подписи падений одного файла тестов: строки FAIL по имени проверки (_check_sig, metis-0449), строки «НЕ ПРОШЛО» /
+    «НЕ ПРОШЁЛ» / «ОШИБКА:» целиком, исключение в конце вывода с текстом сообщения целиком, ненулевой код
     (всегда — иначе гибель по сигналу прячется за старой строкой FAIL); rc None — таймаут, rc "срок" — не успел в
     срок прогона. metis-0360: ненулевой код без итоговой строки (TEST_SUMMARY) — «нет итоговой строки» (файл
     оборвался, проверки после обрыва не прошли); код 0 без единой проверки и итога — NO_CHECKS, её база не гасит.
     Ревью 0359: итог — только последняя непустая строка; итог с нулём проверок («0 из 0», «тестов: 0») — тоже
-    NO_CHECKS; строки провала — FAIL_PREFIXES и FAIL_PREFIXES_N (изменчивое в них — N, _VOLATILE). Круг 3: код 0
-    без строк ok и без числа проверок в итоге («OK 0» test_mmv) — тоже NO_CHECKS."""
+    NO_CHECKS; строки провала — FAIL_PREFIXES и FAIL_PREFIXES_N. Круг 3: код 0 без строк ok и без числа проверок в
+    итоге («OK 0» test_mmv) — тоже NO_CHECKS. roots — известные корни прогона файла (_roots_sub); других замен в
+    тексте нет (metis-0449)."""
     out = ANSI.sub("", out)
     sigs = []
-    for ln in out.splitlines():
-        ln = ln.strip()
+    stripped = [ln.strip() for ln in out.splitlines()]
+    ids = collections.Counter(li[1] for li in map(_line_id, stripped) if li)
+    for ln in stripped:
         if ln.startswith(FAIL_PREFIXES):
-            sigs.append(_tmp_sub(ln))
+            sigs.append(_check_sig(ln, ids, roots))
         elif ln.startswith(FAIL_PREFIXES_N):
-            sigs.append(_volatile_sub(_tmp_sub(ln)))
+            sigs.append(_roots_sub(ln, roots))
     if rc is None:
         return sigs + [f"{fname}: таймаут"]
     if rc == "срок":
@@ -7500,8 +7492,8 @@ def _failure_signatures(fname, out, rc):
     if "Traceback (most recent call last):" in out and lines and not lines[-1][:1].isspace():
         m = re.match(r"([A-Za-z_][\w.]*)(?::|$)", lines[-1])
         if m:
-            # с текстом: FileNotFoundError окружения у базы не гасит другой FileNotFoundError новой версии
-            msg = _HEX_RE.sub("0x…", _tmp_sub(lines[-1][m.end():].strip()))[:200]
+            # с текстом целиком: FileNotFoundError окружения у базы не гасит другой FileNotFoundError новой версии
+            msg = _roots_sub(lines[-1][m.end():].strip(), roots)
             sigs.append(f"{fname}: исключение {m.group(1)}" + (f": {msg}" if msg else ""))
     summary, total, why = _summary_of(lines)
     if rc != 0:
@@ -7715,12 +7707,15 @@ def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=N
             t0 = time.monotonic()
             limit = None
             measured = False
+            # корни прогона файла для подписей (metis-0449): у новой и базы разные по построению, путь внутри — один
+            roots = [(os.path.dirname(os.path.dirname(pdir)), "<copy>")]
             if left <= 0:
                 out, rc = "", "срок"
             else:
                 home = tempfile.mkdtemp(prefix="home-", dir=tmp)
                 # TMPDIR внутри папки прогона: временные папки тестов уходят вместе с ней, а не копятся в общем TMPDIR
                 tdir = tempfile.mkdtemp(prefix="tmpdir-", dir=tmp)
+                roots += [(home, "<home>"), (tdir, "<tmpdir>")]
                 limit = min(PLUGIN_TEST_TIMEOUT, left)
                 l0, c0, measured = _load1(), _child_cpu(), True
                 try:
@@ -7745,7 +7740,7 @@ def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=N
             okv = _ok_count(out) if rc not in (None, "срок") else None
             if oks is not None and okv is not None:
                 oks[(py, f)] = okv
-            fsigs = _failure_signatures(f, out, rc)
+            fsigs = _failure_signatures(f, out, rc, roots)
             for s in fsigs:
                 sigs[(py, f, s)] += 1
             is_bare = rc == 0 and not fsigs and okv is not None and bool(okv[0]) and not okv[2]
@@ -8107,7 +8102,8 @@ def _plugins_update(quiet):
             rc = max(rc, _plugin_install(name, old, new, log, marks, quiet, digest))
             continue
         # одна подпись на двух python — одна строка в тревоге
-        first = list(dict.fromkeys(s if s.startswith(f + ":") or f == "-" else f"{f}: {s}"
+        # подпись — строка целиком без обрезки (metis-0449), в тревогу — не длиннее 300 знаков
+        first = list(dict.fromkeys((s if s.startswith(f + ":") or f == "-" else f"{f}: {s}")[:300]
                                    for (py, f, s) in sorted(fresh)))[:3]
         rc = _plugins_red(marks, name, old, new, log,
                           f"новые падения тестов ({sum(fresh.values())}) — {'; '.join(first)}")
