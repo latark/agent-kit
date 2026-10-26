@@ -3,12 +3,14 @@
 ставит uv и Python 3.14 и вызывает этот файл: `setup.py --python <путь> [--codex|--no-codex] [--markers ФАЙЛ]`).
 
 Шаги по порядку, у каждого строка итога «ок / пропуск / не вышло: почему». До любых изменений две проверки:
-Пантеон уже есть (отказ, ничего не меняем) и нет Claude Code (отказ). Режим `--add codex` — только шаг Codex на
-готовой установке. К системе ходит только через platform_macos.py. Пути — от HOME и PANTHEON_HOME/PANTHEON_STATE.
+Пантеон уже есть (отказ, ничего не меняем) и нет Claude Code (отказ). Режимы `--add codex` и `--add backup` — только
+шаг Codex или шаг резервной копии (`--backup-name ИМЯ`, по умолчанию pantheon-hq) на готовой установке. К системе ходит только через platform_macos.py. Пути — от HOME и PANTHEON_HOME/PANTHEON_STATE.
 """
+import base64
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -192,6 +194,217 @@ def step_github():
            "" if r.returncode == 0 else last_line(r))
 
 
+BACKUP = "резервная копия"
+BACKUP_REPO = "pantheon-hq"  # «личный штаб»: не путать с agent-kit и его плагином pantheon
+BACKUP_SERVICE = "pantheon-git-crypt"
+BACKUP_OLD_REF = "refs/pantheon/pre-backup"  # прежняя история до снимка (повтор после сбоя — pre-backup-2 и т. д.)
+BACKUP_SNAPSHOT_MSG = "pantheon: резервная копия (git-crypt)"
+BACKUP_LATER = "копии нет: при потере Mac данные пропадут; включить позже: `pantheon-setup --add backup`"
+BACKUP_ATTRS = "* filter=git-crypt diff=git-crypt\n.gitattributes !filter !diff\n.gitignore !filter !diff\n"
+CRYPT_HEADER = b"\x00GITCRYPT\x00"
+CRYPT_EXEMPT = (".gitattributes", ".gitignore")
+
+
+def pgit(*args, env=None):
+    return run(["git", "-C", PANTHEON, *args], env=env, timeout=600)
+
+
+def backup_plain_files(tree):
+    """Файлы дерева, которые git-crypt не зашифровал (кроме .gitattributes и .gitignore). → (список, ошибка)."""
+    ls = run(["git", "-C", PANTHEON, "ls-tree", "-r", "-z", tree])
+    if ls.returncode != 0:
+        return None, "git ls-tree: " + last_line(ls)
+    blobs, plain = [], []
+    for ent in ls.stdout.split("\0"):
+        if not ent:
+            continue
+        meta, name = ent.split("\t", 1)
+        mode, kind, sha = meta.split()
+        if kind != "blob" or os.path.basename(name) in CRYPT_EXEMPT:
+            continue
+        if mode == "120000":  # ссылку фильтр не шифрует: цель ушла бы открытой
+            plain.append(name)
+            continue
+        blobs.append((sha, name))
+    if not blobs:
+        return plain, None
+    try:
+        r = subprocess.run(["git", "-C", PANTHEON, "cat-file", "--batch"], input="".join(s + "\n" for s, _ in blobs)
+                           .encode(), capture_output=True, timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"git cat-file: {e}"
+    data, pos = r.stdout, 0
+    for sha, name in blobs:
+        nl = data.find(b"\n", pos)
+        head = data[pos:nl].split() if nl >= 0 else []
+        if len(head) != 3 or head[1] != b"blob":
+            return None, f"git cat-file: не прочитан {name}"
+        size = int(head[2])
+        if not data[nl + 1:nl + 1 + size].startswith(CRYPT_HEADER):
+            plain.append(name)
+        pos = nl + 1 + size + 1
+    return plain, None
+
+
+def backup_keep_old(old):
+    """Голова до снимка остаётся достижимой из refs/pantheon/*. Первый раз — BACKUP_OLD_REF; при повторе (сбой на
+    GitHub, потом коммит поверх снимка) — новая ссылка pre-backup-2, -3…, чтобы коммиты не потерялись. Если голова
+    уже достижима из такой ссылки или это сам прежний снимок (без родителей) — ничего не пишет. → (ссылка|None, ошибка)."""
+    refs = pgit("for-each-ref", "--format=%(refname)", "refs/pantheon/")
+    if refs.returncode != 0:
+        return None, "git for-each-ref: " + last_line(refs)
+    if pgit("for-each-ref", "--contains", old, "refs/pantheon/").stdout.strip():
+        return None, None
+    c = pgit("log", "-1", "--format=%P|%s", old).stdout.strip()
+    if c == "|" + BACKUP_SNAPSHOT_MSG:  # прежний снимок: его дерево воспроизведётся, терять нечего
+        return None, None
+    have = set(refs.stdout.split())
+    ref, n = BACKUP_OLD_REF, 1
+    while ref in have:
+        n += 1
+        ref = f"{BACKUP_OLD_REF}-{n}"
+    u = pgit("update-ref", ref, old, "")
+    if u.returncode != 0:
+        return None, f"git update-ref {ref}: " + last_line(u)
+    return ref, None
+
+
+def backup_snapshot():
+    """Коммит без родителей из текущих файлов, прошедших фильтр git-crypt, — ветка переставляется на него.
+    Прежние коммиты были бы открытыми в истории push; они остаются локально в refs/pantheon/pre-backup.
+    → (ветка, ошибка)."""
+    branch = pgit("symbolic-ref", "-q", "--short", "HEAD").stdout.strip()
+    if not branch:
+        return None, "HEAD не на ветке"
+    old = pgit("rev-parse", "-q", "--verify", "HEAD").stdout.strip()
+    for args in (("add", "-A"), ("add", "--renormalize", ".")):
+        r = pgit(*args)
+        if r.returncode != 0:
+            return None, f"git {args[0]}: " + last_line(r)
+    tree = pgit("write-tree")
+    if tree.returncode != 0:
+        return None, "git write-tree: " + last_line(tree)
+    tree = tree.stdout.strip()
+    plain, err = backup_plain_files(tree)
+    if err:
+        return None, err
+    if plain:
+        return None, (f"git-crypt не зашифровал {len(plain)} файл(ов) ({', '.join(plain[:3])}) — push не делаю, "
+                      "чтобы они не ушли в GitHub открытыми")
+    env = None
+    if pgit("var", "GIT_COMMITTER_IDENT").returncode != 0:  # на новом Mac git может не знать имени
+        env = dict(os.environ, GIT_AUTHOR_NAME="Pantheon", GIT_AUTHOR_EMAIL="pantheon@localhost",
+                   GIT_COMMITTER_NAME="Pantheon", GIT_COMMITTER_EMAIL="pantheon@localhost")
+    c = pgit("commit-tree", tree, "-m", BACKUP_SNAPSHOT_MSG, env=env)
+    if c.returncode != 0:
+        return None, "git commit-tree: " + last_line(c)
+    if old:
+        saved, err = backup_keep_old(old)
+        if err:
+            return None, err
+    u = pgit("update-ref", f"refs/heads/{branch}", c.stdout.strip(), old)
+    if u.returncode != 0:
+        return None, f"ветка {branch} сдвинулась во время шага (плановый коммит?) — запустите снова: " + last_line(u)
+    return branch, None
+
+
+def step_backup(name=BACKUP_REPO):
+    """Резервная копия ~/ai/pantheon: приватный репозиторий GitHub под git-crypt (metis-0476). Сначала всё
+    локальное (git-crypt, ключ в Связке, снимок), GitHub — последним: при сбое до него снаружи ничего нет.
+    → True, если копия заведена или origin уже задан."""
+    if not os.path.isdir(os.path.join(PANTHEON, ".git")):
+        report(BACKUP, "не вышло", f"{PANTHEON} — не git-репозиторий")
+        return False
+    o = pgit("remote", "get-url", "origin")
+    if o.returncode == 0 and o.stdout.strip():
+        report(BACKUP, "пропуск", f"origin уже задан ({o.stdout.strip()}): второй репозиторий не завожу")
+        return True
+    if not shutil.which("gh") or run(["gh", "auth", "status"]).returncode != 0:
+        report(BACKUP, "пропуск", "gh не вошёл в GitHub (`gh auth login`); " + BACKUP_LATER)
+        return False
+    if not shutil.which("git-crypt"):
+        report(BACKUP, "пропуск", "нет git-crypt (`brew install git-crypt`); " + BACKUP_LATER)
+        return False
+    if not ask(f"Завести резервную копию в приватном репозитории GitHub ({name}, файлы под шифрованием "
+               f"git-crypt, ключ — в Связке ключей)? История git в {PANTHEON} заменится одним снимком: "
+               f"прежние коммиты останутся только на этом Mac, в {BACKUP_OLD_REF} (при повторе — в -2, -3…)."):
+        report(BACKUP, "пропуск", BACKUP_LATER)
+        return False
+    inited = os.path.isdir(os.path.join(PANTHEON, ".git", "git-crypt"))
+    try:
+        has_key = PLAT.keychain_has(BACKUP_SERVICE)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        report(BACKUP, "не вышло", f"Связка ключей: {type(e).__name__}")
+        return False
+    if has_key and not inited:
+        report(BACKUP, "не вышло", f"в Связке ключей уже есть ключ {BACKUP_SERVICE} от другой копии — новый не "
+               "завожу, чтобы не потерять старый")
+        return False
+    if not inited:
+        r = run(["git-crypt", "init"], cwd=PANTHEON)
+        if r.returncode != 0:
+            report(BACKUP, "не вышло", "git-crypt init: " + last_line(r))
+            return False
+    if not has_key:
+        td = tempfile.mkdtemp(prefix="tmp-backup-key-")  # $TMPDIR, права 0700; удаляется сразу
+        try:
+            kf = os.path.join(td, "key")
+            r = run(["git-crypt", "export-key", kf], cwd=PANTHEON)
+            if r.returncode != 0 or not os.path.isfile(kf):
+                report(BACKUP, "не вышло", "git-crypt export-key: " + last_line(r))
+                return False
+            with open(kf, "rb") as fh:
+                secret = base64.b64encode(fh.read()).decode()
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+        ok, why = PLAT.keychain_add(BACKUP_SERVICE, "pantheon", secret)
+        del secret
+        if not ok:
+            report(BACKUP, "не вышло", f"ключ в Связку ключей ({BACKUP_SERVICE}): {why}; GitHub не тронут")
+            return False
+    attrs = os.path.join(PANTHEON, ".gitattributes")
+    try:
+        if os.path.exists(attrs):
+            with open(attrs, encoding="utf-8") as fh:
+                if fh.read() != BACKUP_ATTRS:
+                    report(BACKUP, "не вышло", ".gitattributes уже свой — шифрование не настраиваю поверх")
+                    return False
+        else:
+            with open(attrs, "w", encoding="utf-8") as fh:
+                fh.write(BACKUP_ATTRS)
+    except OSError as e:
+        report(BACKUP, "не вышло", f".gitattributes: {e}")
+        return False
+    branch, err = backup_snapshot()
+    if err:
+        report(BACKUP, "не вышло", err + "; GitHub не тронут")
+        return False
+    r = run(["gh", "repo", "create", name, "--private"])
+    if r.returncode != 0:
+        report(BACKUP, "не вышло", f"gh repo create {name}: {last_line(r)}; другое имя: "
+               "`pantheon-setup --add backup --backup-name ИМЯ`")
+        return False
+    urls = [w for w in (r.stdout or "").split() if "://" in w]
+    if not urls:
+        report(BACKUP, "не вышло", f"gh repo create {name}: не вернул адрес репозитория")
+        return False
+    a = pgit("remote", "add", "origin", urls[-1])
+    if a.returncode != 0:
+        report(BACKUP, "не вышло", f"репозиторий {urls[-1]} создан, git remote add: " + last_line(a))
+        return False
+    p = pgit("push", "-u", "origin", branch, env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+    if p.returncode != 0:
+        report(BACKUP, "не вышло", f"репозиторий {urls[-1]} создан, push не прошёл: {last_line(p)}; повторить: "
+               f"`git -C {PANTHEON.replace(HOME, '~')} push -u origin {branch}`")
+        return False
+    report(BACKUP, "ок", f"{urls[-1]} (приватный, git-crypt); ключ — в Связке ключей, служба {BACKUP_SERVICE}; "
+           "вернуть на другом Mac — README agent-kit, пункт «Резервная копия»")
+    # Связка ключей не уходит в iCloud: без копии ключа вне Mac шифрованная копия при потере Mac не читается
+    print(f"Сохраните ключ вне этого Mac (менеджер паролей): его покажет `security find-generic-password -s "
+          f"{BACKUP_SERVICE} -w`. Без ключа резервную копию не расшифровать.", flush=True)
+    return True
+
+
 def step_notifier():
     if shutil.which("terminal-notifier"):
         report("terminal-notifier", "ок", "уже стоит")
@@ -264,11 +477,11 @@ def step_codex():
 # --- главное --------------------------------------------------------------------------------------------------
 
 def parse(argv):
-    opts = {"python": sys.executable, "codex": None, "markers": None, "add": None}
+    opts = {"python": sys.executable, "codex": None, "markers": None, "add": None, "backup-name": BACKUP_REPO}
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ("--python", "--markers", "--add") and i + 1 < len(argv):
+        if a in ("--python", "--markers", "--add", "--backup-name") and i + 1 < len(argv):
             opts[a[2:]] = argv[i + 1]
             i += 2
         elif a == "--codex":
@@ -279,9 +492,11 @@ def parse(argv):
             i += 1
         else:
             raise ValueError(f"непонятный аргумент {a!r}. Допустимо: --python ПУТЬ, --codex, --no-codex, "
-                             "--markers ФАЙЛ, --add codex")
-    if opts["add"] not in (None, "codex"):
-        raise ValueError("--add понимает только codex")
+                             "--markers ФАЙЛ, --add codex, --add backup, --backup-name ИМЯ")
+    if opts["add"] not in (None, "codex", "backup"):
+        raise ValueError("--add понимает только codex и backup")
+    if not re.fullmatch(r"[A-Za-z0-9_.][A-Za-z0-9_.-]{0,99}", opts["backup-name"]):
+        raise ValueError("--backup-name: только латиница, цифры, «.», «_», «-», не с «-»")
     return opts
 
 
@@ -296,10 +511,12 @@ def main(argv):
         return 1
     if o["add"] == "codex":
         return 0 if step_codex() else 1
+    if o["add"] == "backup":
+        return 0 if step_backup(o["backup-name"]) else 1
     if os.path.exists(PANTHEON) and (not os.path.isdir(PANTHEON) or os.listdir(PANTHEON)):
         print(f"pantheon-setup: {PANTHEON} уже есть и не пуст — установка ничего не меняет. Если Пантеон нужен "
-              "заново, переименуйте или уберите эту папку сами. Добавить Codex к готовой установке: "
-              "`pantheon-setup --add codex`.", file=sys.stderr)
+              "заново, переименуйте или уберите эту папку сами. Добавить к готовой установке Codex или "
+              "резервную копию: `pantheon-setup --add codex`, `pantheon-setup --add backup`.", file=sys.stderr)
         return 1
     if not shutil.which("claude"):
         print("pantheon-setup: сначала поставьте Claude Code (https://claude.com/claude-code) и запустите снова.",
@@ -316,6 +533,7 @@ def main(argv):
     step_pantheon_install(py)
     step_roles(py)
     step_github()
+    step_backup(o["backup-name"])
     step_notifier()
     step_traces(root, o["markers"])
     want = o["codex"] if o["codex"] is not None else ask("Подключить Codex (второй исполнитель задач)?")
