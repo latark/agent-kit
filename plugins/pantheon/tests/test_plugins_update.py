@@ -2,7 +2,7 @@
 """Синтетические тесты `pantheon plugins update` (metis-0052): тик ставит новые версии плагинов agent-kit после тестов.
 
 Запуск: python3 -I plugins/pantheon/tests/test_plugins_update.py  (код выхода 0 — все прошли)
-Идёт и на системном /usr/bin/python3 (3.9): сам pantheon.py тогда запускается через python3 из PATH (нужен 3.11).
+Матрица плагинов (metis-0448): тесты guard и pantheon идут на python3 из PATH (3.14), /usr/bin/python3 не добавляется.
 Временный HOME с каталогом agent-kit и кэшем установленной версии; `claude` — заглушка первой в PATH: пишет argv в
 файл, на `plugin list --json` отдаёт JSON из файла (после `plugin update` — уже с новой версией), на
 `plugin marketplace update` — код из STUB_MKT_RC. Настоящие `claude plugin …` не запускаются.
@@ -390,6 +390,10 @@ def main():
     check("зелёные: в логе прогон новой версии и строка «база 1.0.0 … не гоняются» (базу не гоняли), helper.py не гонялся",
           "===== новая 1.1.0 · " in ltxt and "===== база 1.0.0 · " not in ltxt
           and "база 1.0.0: " in ltxt and "не гоняются" in ltxt and "helper.py" not in ltxt, ltxt[-300:])
+    check("зелёные: в логе строка замера файла (py, wall, cpu, rc, load) и в конце сводка самых медленных (metis-0447)",
+          "замер · новая 1.1.0 · py=" in ltxt and " · wall=" in ltxt and " · cpu=" in ltxt and " · rc=0 · load=" in ltxt
+          and "===== замер: " in ltxt and "самых медленных из" in ltxt
+          and ltxt.rindex("===== замер: ") > ltxt.rindex("замер · новая 1.1.0 · py="), ltxt[-500:])
     check("зелёные: временные копии убраны (своя TMPDIR и STATE/plugins/tmp пусты)", e.leftovers() == [],
           e.leftovers())
     check("зелёные: без критической тревоги (хеш кэша с .in_use совпал с проверенной копией)",
@@ -1056,7 +1060,8 @@ print(json.dumps({"disk": on_disk, "got": [f for f in ("a.py", "b.py", "c.py") i
         e.close()
 
     # п.2: исключение сравнивается с текстом сообщения — FileNotFoundError окружения у базы не гасит другой
-    # FileNotFoundError новой; тот же текст с другим временным путём — гасит (мутант: подпись только по типу)
+    # FileNotFoundError новой; тот же текст в своей копии (корень копии у новой и базы разный) — гасит (мутант: подпись
+    # только по типу; metis-0449: корень копии — <copy> точной подменой, _roots_sub)
     BASE_FNF = 'import os\nraise FileNotFoundError("нет соседнего guard: " + os.path.abspath(__file__))\n'
     NEW_FNF = 'import os\nopen(os.path.join(os.path.dirname(os.path.abspath(__file__)), "нет-файла.json"))\n'
     e = Env("1.0.0", "1.1.0", BASE_FNF, NEW_FNF)
@@ -1064,7 +1069,7 @@ print(json.dumps({"disk": on_disk, "got": [f for f in ("a.py", "b.py", "c.py") i
     fr = fresh_of(e)
     check("0360 п.2: другой FileNotFoundError у новой — не гасится FileNotFoundError базы",
           r.returncode == 76 and "исключение FileNotFoundError: [Errno 2] No such file or directory: "
-          "'<tmp>/…/<copy>/plugins/x/tests/нет-файла.json'" in fr, f"{r.returncode} {fr!r}")
+          "'<copy>/plugins/x/tests/нет-файла.json'" in fr, f"{r.returncode} {fr!r}")
     e.close()
     e = Env("1.0.0", "1.1.0", BASE_FNF, BASE_FNF)
     r = e.run()
@@ -1083,8 +1088,8 @@ print(json.dumps({"disk": on_disk, "got": [f for f in ("a.py", "b.py", "c.py") i
     e.close()
 
     # Ревью 0359 (второй argus). п.1: FileNotFoundError на разных файлах во временной папке — разные подписи: путь
-    # внутри копии и имя файла остаются, корень копии (new/ и base/) и случайные папки — нет (мутант: путь целиком
-    # в <tmp>); тот же файл у обеих — гасится (выше, BASE_FNF)
+    # внутри копии и имя файла остаются, корень копии (new/ и base/) — <copy> (мутант: путь целиком в <copy>); тот же
+    # файл у обеих — гасится (выше, BASE_FNF)
     def open_in_copy(rel):
         return ("import os\nhere = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\n"
                 f"open(os.path.join(here, {rel!r}))\n")
@@ -1092,7 +1097,7 @@ print(json.dumps({"disk": on_disk, "got": [f for f in ("a.py", "b.py", "c.py") i
     r = e.run()
     fr = fresh_of(e)
     check("0359b п.1: FileNotFoundError на другом файле в tmp — не гасится базой, путь внутри копии в подписи",
-          r.returncode == 76 and "No such file or directory: '<tmp>/…/<copy>/plugins/x/lib/rules.toml'" in fr
+          r.returncode == 76 and "No such file or directory: '<copy>/plugins/x/lib/rules.toml'" in fr
           and "README.md" not in fr, f"{r.returncode} {fr!r}")
     e.close()
     e = Env("1.0.0", "1.1.0", open_in_copy("README.md"), open_in_copy("README.md"))
@@ -1157,14 +1162,23 @@ print(json.dumps({"disk": on_disk, "got": [f for f in ("a.py", "b.py", "c.py") i
         check(f"0359b: строка «{line.split(':')[0]}» — подпись провала, база с другим провалом её не гасит",
               r.returncode == 76 and line in fr and "НЕ ПРОШЛО: env" not in fr, f"{r.returncode} {fr!r}")
         e.close()
-    # деталь в той же строке: изменчивое (pid, порты, время) в подписи — N, тот же провал окружения с другими pid
-    # и временем у базы гасится (мутант: без _VOLATILE — тик держал бы обновление на каждом флаке keep-alive)
+    # metis-0449 (замена проверки 0359b «pid и время — N»): в «НЕ ПРОШЁЛ: {имя} {деталь}» имя от детали отделено одним
+    # пробелом, идентификатор не выделить — подпись по строке целиком, без нормализации: тот же провал с другими pid,
+    # портом и временем — красное (строже, ошибка только в сторону лишнего красного); та же строка — база гасит
+    # (мутант: нормализация чисел вернулась — первая зелёная; подпись не по строке — вторая красная)
     KA = ('print("НЕ ПРОШЁЛ: keep-alive ответов 10 из ≥11, [{}, {}] pid {} в {} 127.0.0.1:{}")\n'
           'print("38 из 39 прошли")\nraise SystemExit(1)\n')
     e = Env("1.0.0", "1.1.0", KA.format(40600, 40601, 812, "12:01:02.5", 52311),
             KA.format(308, 567, 97, "2026-10-22T13:45:12+03:00", 60001))
     r = e.run()
-    check("0359b: «НЕ ПРОШЁЛ» с другими pid, портом и временем — тот же провал, база гасит",
+    fr = fresh_of(e)
+    check("0449: «НЕ ПРОШЁЛ» с другими pid, портом и временем — строка целиком, красное",
+          r.returncode == 76 and "pid 97 в 2026-10-22T13:45:12+03:00 127.0.0.1:60001" in fr and "pid 812" not in fr,
+          f"{r.returncode} {fr!r}")
+    e.close()
+    e = Env("1.0.0", "1.1.0", KA.format(308, 567, 97, "12:01:02.5", 60001), KA.format(308, 567, 97, "12:01:02.5", 60001))
+    r = e.run()
+    check("0449: «НЕ ПРОШЁЛ» — та же строка у базы, база гасит",
           r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), f"{r.returncode} {fresh_of(e)!r}")
     e.close()
     # Круг 3, п.1: номер и значение проверки не N — соседние проверки цикла test_night/test_watch («запас +0» и
@@ -1321,13 +1335,72 @@ print(json.dumps({"disk": on_disk, "got": [f for f in ("a.py", "b.py", "c.py") i
     check("0362 S1b: настоящий итог «38 из 39 прошли» у обеих — база гасит",
           r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), f"{r.returncode} {fresh_of(e)!r}")
     e.close()
-    # шапка: числа от 4 знаков в строке провала — N (склеиваются), короче — нет (мутант: порог 3 знака или 5)
+    # metis-0449 (замена проверки 0362 «числа от 4 знаков — N»): нормализации нет — любое другое число в строке без
+    # имени проверки — другая подпись, красное; та же строка — гасится (мутант: N для 4+ знаков вернулся — зелёное)
     SUM = 'print("тестов: 40, не прошло: 1")\nraise SystemExit(1)\n'
-    for was, now, same in (("размер 4096", "размер 8192", True), ("размер 999", "размер 998", False)):
+    for was, now, same in (("размер 4096", "размер 8192", False), ("размер 999", "размер 998", False),
+                           ("размер 4096", "размер 4096", True)):
         e = Env("1.0.0", "1.1.0", f"print('НЕ ПРОШЛО:', {was!r})\n" + SUM, f"print('НЕ ПРОШЛО:', {now!r})\n" + SUM)
         r = e.run()
-        check(f"0362 шапка: «{was}» против «{now}» — " + ("склеиваются (число от 4 знаков — N)" if same else "разные"),
-              (r.returncode == 0) == same, f"{r.returncode} {fresh_of(e)!r}")
+        check(f"0449: «НЕ ПРОШЛО: {was}» против «{now}» — " + ("та же строка, гасится" if same else "разные, красное"),
+              (r.returncode == 0) == same and r.returncode in (0, 76), f"{r.returncode} {fresh_of(e)!r}")
+        e.close()
+
+    # metis-0449: строки FAIL — по идентификатору проверки (имя до двух пробелов): новые падения = {имена упавших у
+    # новой} − {имена упавших у базы}
+    S2 = 'print("1 из 2 прошли")\nraise SystemExit(1)\n'
+    # у новой падает X, у базы — Y с той же деталью: красное «FAIL X» (мутант: подпись по детали, а не по имени)
+    e = Env("1.0.0", "1.1.0", 'print("ok   X")\nprint("FAIL Y  [boom 7]")\n' + S2,
+            'print("FAIL X  [boom 7]")\nprint("ok   Y")\n' + S2)
+    r = e.run()
+    fr = fresh_of(e)
+    check("0449: у новой упала X, у базы Y с той же деталью — красное «FAIL X»",
+          r.returncode == 76 and "· FAIL X\n" in fr and "FAIL Y" not in fr, f"{r.returncode} {fr!r}")
+    e.close()
+    # та же X у обеих, другие числа в детали — гасится (мутант: имя — строка целиком, деталь в подписи)
+    for what, b, n in (("в скобках", "FAIL X  [ждали 3, получено 5, pid 812]", "FAIL X  [ждали 3, получено 6, pid 97]"),
+                       ("через табуляцию", "FAIL X\\tполучено 5", "FAIL X\\tполучено 6"),
+                       ("на следующей строке", "FAIL X\\n     получено 5", "FAIL X\\n     получено 6")):
+        e = Env("1.0.0", "1.1.0", f'print("ok   a")\nprint("{b}")\n' + S2, f'print("ok   a")\nprint("{n}")\n' + S2)
+        r = e.run()
+        check(f"0449: та же X у обеих, другие числа в детали {what} — база гасит, update вызван",
+              r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), f"{r.returncode} {fresh_of(e)!r}")
+        e.close()
+    # имя проверки не одно (цикл с одним именем): провал другой итерации не гасится — строка целиком с пометкой
+    # (мутант: имя считается единственным всегда — зелёное); та же строка у обеих — гасится
+    e = Env("1.0.0", "1.1.0", 'print("ok   n")\nprint("FAIL n  [итерация 3]")\n' + S2,
+            'print("FAIL n  [итерация 5]")\nprint("ok   n")\n' + S2)
+    r = e.run()
+    fr = fresh_of(e)
+    check("0449: имя «n» в выводе не одно, провал другой итерации — красное, строка целиком",
+          r.returncode == 76 and "FAIL n  [итерация 5] · имя проверки в выводе не одно" in fr, f"{r.returncode} {fr!r}")
+    e.close()
+    e = Env("1.0.0", "1.1.0", 'print("ok   n")\nprint("FAIL n  [итерация 3]")\n' + S2,
+            'print("ok   n")\nprint("FAIL n  [итерация 3]")\n' + S2)
+    r = e.run()
+    check("0449: имя не одно, та же строка у обеих — база гасит",
+          r.returncode == 0 and "plugin update x@agent-kit" in e.argv(), f"{r.returncode} {fresh_of(e)!r}")
+    e.close()
+    # « — » — не разделитель (он есть в 1300+ именах проверок): «FAIL X — получено 5» — имя целиком, другое число —
+    # красное (мутант: « — » разделяет имя и деталь — зелёное)
+    e = Env("1.0.0", "1.1.0", 'print("ok   a")\nprint("FAIL X — получено 5")\n' + S2,
+            'print("ok   a")\nprint("FAIL X — получено 6")\n' + S2)
+    r = e.run()
+    fr = fresh_of(e)
+    check("0449: «FAIL X — деталь» — имя не выделить, другое число — красное",
+          r.returncode == 76 and "FAIL X — получено 6" in fr, f"{r.returncode} {fr!r}")
+    e.close()
+    # имя совпало и гасится, но файл кончился другим кодом или оборвался — красное, как раньше (мутант: «код N» и
+    # «нет итоговой строки» гасятся по одной лишь строке FAIL)
+    for what, tail, want in (("код 2 вместо 1", 'print("1 из 2 прошли")\nraise SystemExit(2)\n', "test_a.py: код 2"),
+                             ("обрыв без итога", 'import sys\nsys.stdout.flush()\nimport os\nos._exit(1)\n',
+                              "test_a.py: нет итоговой строки")):
+        e = Env("1.0.0", "1.1.0", 'print("ok   a")\nprint("FAIL X  [5]")\n' + S2,
+                'print("ok   a")\nprint("FAIL X  [6]")\n' + tail)
+        r = e.run()
+        fr = fresh_of(e)
+        check(f"0449: та же X, но {what} — красное «{want}», «FAIL X» погашен",
+              r.returncode == 76 and want in fr and "FAIL X" not in fr, f"{r.returncode} {fr!r}")
         e.close()
 
     # Нет папки установленной версии — база пустая, старое падение уже красное
@@ -1396,12 +1469,17 @@ cmds = ["pantheon plugins update --quiet", "pantheon plugins update", "pantheon 
 sig = p._failure_signatures
 print(json.dumps({{
   "cmds": {{c: p.parse_command(c) is not None for c in cmds}},
-  "tmp": sig("t.py", "FAIL x " + p.tempfile.gettempdir() + "/abc/new/x/f.py\\n  FAIL y /private/tmp/q/z\\n", 1),
-  "rand": [p._tmp_sub("x " + p.tempfile.gettempdir() + "/guard-ab12cd34/" + w + "/guard/tmpq1w2e3r4/README.md")
-           for w in ("new", "base")]
-          + [p._tmp_sub("'" + p.tempfile.gettempdir() + "/board-root-1az784c9/board-test-ef6u2lif/state/x.json'")],
-  "names": [p._tmp_sub(p.tempfile.gettempdir() + "/home-q1w2e3r4/ai/pantheon/directions/" + d + "/STATUS.md")
-            for d in ("metis-pantheon", "hephaestus-pantheon")],
+  "tmp": sig("t.py", "FAIL x " + p.tempfile.gettempdir() + "/abc/new/x/f.py\\n  FAIL y /private/tmp/q/z\\n", 1,
+             [(p.tempfile.gettempdir() + "/abc/new", "<copy>")]),
+  "rand": [p._roots_sub("x " + p.tempfile.gettempdir() + "/guard-ab12cd34/" + w + "/guard/tmpq1w2e3r4/README.md",
+                        [(p.tempfile.gettempdir() + "/guard-ab12cd34/" + w, "<copy>")]) for w in ("new", "base")],
+  "real": p._roots_sub("a " + p.os.path.realpath(p.tempfile.gettempdir()) + "/r1/new/f b /var/x/h1/z c /var/x/h10"
+                       " d /q/var/x/h1 e '/var/x/h1'",
+                       [(p.tempfile.gettempdir() + "/r1/new", "<copy>"), ("/var/x/h1", "<home>")]),
+  "keep": p._roots_sub("'" + p.tempfile.gettempdir() + "/board-root-1az784c9/x.json' pid 4096 0x7f12ab", []),
+  "ids": [p._line_id(s) for s in ("ok   a", "ok a  [d]", "FAIL x  [d 5]", "FAIL\\tx", "FAIL x — y", "FAILED (x)",
+                                  "FAIL", "FAIL ", "ok", "okay x", "FAIL:x")],
+  "dup": sig("t.py", "ok   n\\nFAIL n  [3]\\nFAIL m  [4]\\nFAIL m  [5]\\nFAIL q  [6]\\n", 1),
   "code": sig("t.py", "что-то\\n", 2), "ok": sig("t.py", "ok\\n", 0), "timeout": sig("t.py", "", None),
   "exc": sig("t.py", "FAIL a\\nTraceback (most recent call last):\\n  File \\"t.py\\", line 1\\nValueError: b\\n", 1),
   "ansi": sig("t.py", "\\x1b[31mFAIL c\\x1b[0m\\n", 1), "killed": sig("t.py", "FAIL d\\n", -9),
@@ -1421,13 +1499,23 @@ print(json.dumps({{
           cmds and not any(cmds[c] for c in ("pantheon plugins foo", "pantheon plugins update --force",
                                               "pantheon plugins")), cmds)
     NS = "t.py: нет итоговой строки"
-    check("подписи: корень временной папки → <tmp>, путь внутри остаётся (ревью 0359, п.1)",
-          got.get("tmp") == ["FAIL x <tmp>/abc/new/x/f.py", "FAIL y <tmp>/q/z", "t.py: код 1", NS], got.get("tmp"))
-    check("подписи: случайные папки mkdtemp → «…», корень копии new/ и base/ → <copy>, имя файла остаётся",
-          got.get("rand") == ["x <tmp>/…/<copy>/guard/…/README.md"] * 2 + ["'<tmp>/…/state/x.json'"], got.get("rand"))
-    check("подписи: имя с дефисом и 8 знаками ниже настоящей папки — не «…» (ревью 0359, круг 3, п.3)",
-          got.get("names") == [f"<tmp>/…/ai/pantheon/directions/{d}/STATUS.md"
-                               for d in ("metis-pantheon", "hephaestus-pantheon")], got.get("names"))
+    # metis-0449 (замена проверок 0359 «корень → <tmp>, случайные папки → …»): подменяются только известные корни
+    # прогона (_roots_sub), путь внутри и имя файла остаются; всё остальное — как есть
+    TMPD = tempfile.gettempdir()
+    check("подписи: корень копии → <copy>, путь внутри остаётся; чужой временный путь — как есть (metis-0449)",
+          got.get("tmp") == ["FAIL x <copy>/x/f.py", "FAIL y /private/tmp/q/z", "t.py: код 1", NS], got.get("tmp"))
+    check("подписи: корень копии new/ и base/ → <copy>, случайная папка теста внутри — как есть (metis-0449)",
+          got.get("rand") == ["x <copy>/guard/tmpq1w2e3r4/README.md"] * 2, got.get("rand"))
+    check("подписи: realpath корня подменяется; корень не задевает соседний путь с тем же началом — длинные первыми",
+          got.get("real") == "a <copy>/f b <home>/z c /var/x/h10 d /q/var/x/h1 e '<home>'", got.get("real"))
+    check("подписи: без корней прогона — ни путей, ни чисел, ни адресов не трогаем (metis-0449: нормализации нет)",
+          got.get("keep") == f"'{TMPD}/board-root-1az784c9/x.json' pid 4096 0x7f12ab", got.get("keep"))
+    check("идентификатор проверки: имя до двух пробелов или табуляции; « — » не разделитель; без имени — None",
+          got.get("ids") == [["ok", "a"], ["ok", "a"], ["FAIL", "x"], ["FAIL", "x"], ["FAIL", "x — y"], None, None,
+                             None, None, None, None], got.get("ids"))
+    check("подписи: имя одно — «FAIL <имя>» без детали; имя не одно (ok и FAIL, два FAIL) — строка целиком с пометкой",
+          got.get("dup") == ["FAIL n  [3] · имя проверки в выводе не одно", "FAIL m  [4] · имя проверки в выводе не одно",
+                             "FAIL m  [5] · имя проверки в выводе не одно", "FAIL q", "t.py: код 1", NS], got.get("dup"))
     check("подписи: код без FAIL, зелёный файл, таймаут",
           got.get("code") == ["t.py: код 2", NS] and got.get("ok") == [] and got.get("timeout") == ["t.py: таймаут"],
           got)
@@ -1450,11 +1538,20 @@ fresh, unk = p._fresh_failures(new, base)
 clean, unk2 = p._fresh_failures(C({{("py", "u.py", "FAIL old"): 1}}), C({{("py", "u.py", "FAIL old"): 1}}))
 tg = p._base_targets(C({{("py", "a.py", "FAIL x"): 1, ("py", "t.py", "t.py: таймаут"): 1, ("py", "t.py", "FAIL y"): 1,
                          ("py", "v.py", "v.py: срок прогона"): 1, ("py2", "a.py", "a.py: код 1"): 1}}))
-p._test_pythons = lambda: [sys.executable, "/old/python3"]
-p._py_ge311 = lambda py: py == sys.executable
+# metis-0448: настоящий _test_pythons; /usr/bin/python3 «установлен» и xcode-select «есть» — в матрицу он не попадает
+import subprocess
+p.shutil.which = lambda n: "/opt/x/python3"
+p.os.path.exists = lambda x: True
+p.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 0)
+p._py_ge311 = lambda py: True
+tp = p._test_pythons()
+pan_ok = p._pythons_for("pantheon")
+p._py_ge311 = lambda py: False  # metis-0448: python из PATH ниже 3.11 — pantheon его не получает, guard — получает
+pan_no = p._pythons_for("pantheon")
+guard_no = p._pythons_for("guard")
 print(json.dumps({{"fresh": sorted(k[1] + "|" + k[2] for k in fresh), "unk": sorted(unk), "clean": sorted(clean),
-                  "clean_unk": sorted(unk2), "targets": sorted(tg), "pan": p._pythons_for("pantheon") == [sys.executable],
-                  "guard": p._pythons_for("guard") == [sys.executable, "/old/python3"]}}))
+                  "clean_unk": sorted(unk2), "targets": sorted(tg), "tp": tp, "pan_ok": pan_ok, "pan_no": pan_no,
+                  "guard": guard_no}}))
 """
     r = subprocess.run([PY, "-I", "-c", probe2], capture_output=True, text=True, timeout=60)
     try:
@@ -1469,7 +1566,10 @@ print(json.dumps({{"fresh": sorted(k[1] + "|" + k[2] for k in fresh), "unk": sor
           g2.get("clean_unk") == [], g2)
     check("цели базы: только (python, файл) с падениями новой, без таймаута и срока прогона (metis-0358)",
           g2.get("targets") == [["py", "a.py"], ["py2", "a.py"]], g2.get("targets"))
-    check("интерпретаторы: pantheon — только 3.11+, guard — все", g2.get("pan") and g2.get("guard"), g2)
+    check("интерпретаторы: матрица — только python3 из PATH, /usr/bin/python3 не входит (metis-0448)",
+          g2.get("tp") == ["/opt/x/python3"], g2)
+    check("интерпретаторы: pantheon получает python 3.11+ из PATH; ниже 3.11 — отфильтрован, guard — на нём (metis-0448)",
+          g2.get("pan_ok") == ["/opt/x/python3"] and g2.get("pan_no") == [] and g2.get("guard") == ["/opt/x/python3"], g2)
     r = subprocess.run([PY, "-I", LIB, "plugins", "foo"], capture_output=True, text=True, timeout=60)
     check("pantheon plugins foo — код 2", r.returncode == 2)
 

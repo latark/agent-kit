@@ -47,7 +47,9 @@ PostToolUse (Bash:
                  репозитории по git remote — только Метида или её лид. Во всех режимах — запор (P1-4, guard 0.5.4,
                  merge_gate.py): один номер PR, без --auto и --admin, ровно один --match-head-commit <SHA>,
                  репозитории — из [merge_repos], записи журнала merge-gate: тесты на SHA и у каждого argus на
-                 (repo, PR, SHA) последний вердикт — «принять» (metis-0158), рецензенты — не сливающий; продукт — ещё talos и строка «откат» в
+                 (repo, PR, SHA) последний вердикт — «принять» (metis-0158), «вернуть» привязано к PR, «принять» с
+                 прошлого head переносится, если собственный дифф PR тот же (metis-0415, carry.jsonl), рецензенты —
+                 не сливающий; продукт — ещё talos и строка «откат» в
                  alerts.md; защиты — ещё Д3: PR не задевает ядро (весь plugins/guard/**, casefold; файлы из
                  pulls/N/files с previous_filename), его сливает только владелец. Журнал пишет этот же хук на PostToolUse
                  (`pantheon review …`). argus не делает git commit, merge, rebase и другие правки истории. Любой сбой
