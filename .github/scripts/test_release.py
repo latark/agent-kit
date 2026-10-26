@@ -203,6 +203,16 @@ def t_refuse():
     check("повторный ключ в plugin.json — код 1", rc == 1 and "повторный ключ" in out, out)
     rc, out = run(w, "--nope")
     check("неверный вызов — код 2", rc == 2, out)
+    # не тот репозиторий: плагинов нет — отказ без коммита, а не пустой releases.json
+    empty = tempfile.mkdtemp(prefix="rel-empty-")
+    subprocess.run(["git", "init", "-q", "-b", "main", empty], check=True, env=ENV)
+    put(empty, "README.md", "r\n")
+    g(empty, "add", "-A")
+    g(empty, "commit", "-qm", "init")
+    rc, out = run(empty)
+    check("репозиторий без плагинов — код 1, без коммита и releases.json", rc == 1
+          and "нет ни одного plugin.json" in out.strip().splitlines()[-1]
+          and g(empty, "rev-list", "--count", "HEAD") == "1" and not os.path.exists(os.path.join(empty, REL)), out)
 
 
 def t_push_race():

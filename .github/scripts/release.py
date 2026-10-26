@@ -156,6 +156,8 @@ def release_once(root):
     """Поднять номера и записать releases.json одним коммитом → текст итога или None (поднимать нечего)."""
     if git(root, "status", "--porcelain", "--untracked-files=all").stdout.strip():
         raise Refuse("дерево не чистое — выпуск делается только с чистого main")
+    if not plugin_names(root):
+        raise Refuse("в plugins/ нет ни одного plugin.json — не тот репозиторий, выпускать нечего")
     todo = plan(root)
     for n, _old, _new, fixed in todo:
         with open(os.path.join(root, manifest(n)), "w", encoding="utf-8") as fh:
