@@ -5898,7 +5898,8 @@ def metrics_cmd(rest):
         print(f"учёт: строк дописано {len(rows)}; свод — {tilde(os.path.dirname(ctx.rows_path))}")
         return 0
     if sub == "summary":
-        print(M.week_md(M.summary(M.read_rows(ctx.rows_path), ctx.t, M.post_merge_index(tasks)), ctx.t))
+        print(M.week_md(M.summary(M.read_rows(ctx.rows_path), ctx.t, M.post_merge_index(tasks),
+                                M.merged_index(tasks)), ctx.t))
         return 0
     if sub == "backfill":
         opts, dry, i = {}, False, 0
