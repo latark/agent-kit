@@ -80,7 +80,7 @@ class Home:
         # поддельный gh: вызовы — в $HOME/gh.log, с $HOME/gh.fail — сбой любого вызова.
         # pr view N -R owner/repo … — $HOME/gh.view.<repo> ($5), с gh.ci.fail — сбой; один вызов на шлюз (metis-0297).
         # api …/contents/.github/workflows?ref=<sha> — с gh.wf.fail.<sha> 502, с gh.wf.<sha> его текст (код 0), иначе 404;
-        # api …/pulls/N/files — $HOME/gh.files, с gh.api.fail — сбой
+        # api …/pulls/N/files — $HOME/gh.files, с gh.api.fail — сбой, с gh.api.fail1 — сбой один раз (файл убирается)
         with open(j("bin/gh"), "w") as fh:
             fh.write('#!/bin/sh\necho "$@" >> "$HOME/gh.log"\n[ -f "$HOME/gh.fail" ] && exit 1\n'
                      'case "$*" in\n'
@@ -90,7 +90,8 @@ class Home:
                      '[ -f "$HOME/gh.wf.$ref" ] && { cat "$HOME/gh.wf.$ref"; exit 0; }; '
                      'echo \'{"message":"Not Found","status":"404"}\'; echo "gh: Not Found (HTTP 404)" >&2; exit 1;;\n'
                      'esac\n'
-                     'if [ "$1" = api ]; then [ -f "$HOME/gh.api.fail" ] && exit 1; cat "$HOME/gh.files"; exit 0; fi\n'
+                     'if [ "$1" = api ]; then [ -f "$HOME/gh.api.fail1" ] && { rm -f "$HOME/gh.api.fail1"; exit 1; }; '
+                     '[ -f "$HOME/gh.api.fail" ] && exit 1; cat "$HOME/gh.files"; exit 0; fi\n'
                      'exit 1\n')
         os.chmod(j("bin/gh"), 0o755)
 
@@ -831,6 +832,22 @@ def t_version_bump_refused(h):
                                              "status": "renamed"}])):
         h.gh(["README.md"] + files)
         merge_case(f"защиты: {name} — отказ", h.pre(cmd, pdir=kit), False, "номер версии")
+    # argus-b PR #153 Б1: сбой первого запроса файлов не пропускает проверку номера — второго запроса нет, отказ
+    h.gh(["README.md", {"filename": pj, "status": "modified", "patch": VERSION_PATCH}])
+    open(h.j("gh.api.fail1"), "w").close()
+    h.reset_log()
+    merge_case("защиты: version в plugin.json, gh api файлов упал один раз — отказ", h.pre(cmd, pdir=kit), False,
+               "список файлов PR не получен")
+    check("защиты: сбой файлов — один запрос pulls/N/files на шлюз, без повтора",
+          sum(1 for ln in open(h.j("gh.log")) if ln.startswith("api ") and "/files" in ln) == 1,
+          open(h.j("gh.log")).read())
+    # и с Touch ID владельца: сбой gh — отказ, согласие пускает только задетое ядро
+    h.gh(["plugins/guard/README.md", {"filename": pj, "status": "modified", "patch": VERSION_PATCH}])
+    h.approve(f"{ts()} merge-approve latark/agent-kit#7 {sha}", fresh=True)
+    open(h.j("gh.api.fail1"), "w").close()
+    merge_case("защиты: ядро + version, согласие владельца, gh api упал один раз — отказ", h.pre(cmd, pdir=kit),
+               False, "список файлов PR не получен")
+    os.remove(h.approve_path)
     # Touch ID владельца не снимает отказ: строка согласия есть, а PR всё равно с номером
     h.gh(["plugins/guard/README.md", {"filename": pj, "status": "modified", "patch": VERSION_PATCH}])
     h.approve(f"{ts()} merge-approve latark/agent-kit#7 {sha}", fresh=True)

@@ -909,12 +909,16 @@ def _pr_files(repo, pr):
     return _gh_json(["api", f"repos/{repo}/pulls/{pr}/files?per_page=100", "--paginate", "--jq", ".[]"])
 
 
-def _core_problem(repo, pr, sha, data, files=None):
+_FETCH = object()  # _core_problem без files: список запросить здесь
+
+
+def _core_problem(repo, pr, sha, data, files=_FETCH):
     """Д3: PR защит, который задевает ядро, ждёт слияния владельцем. data — ответ _pr_view. Файлы — из REST
     pulls/N/files (там есть status и previous_filename: переименование ядра не прячет старый путь); files — уже
-    полученный ответ _pr_files, иначе запрос здесь. Список файлов неполон, PR на другом коммите — тоже отказ."""
+    полученный ответ _pr_files, в том числе None (сбой gh — отказ, без второго запроса: argus-b PR #153 Б1), без
+    него — запрос здесь. Список файлов неполон, PR на другом коммите — тоже отказ."""
     count, head = data.get("changedFiles"), data.get("headRefOid")
-    if files is None:
+    if files is _FETCH:
         files = _pr_files(repo, pr)
     paths = None
     if isinstance(files, list) and all(isinstance(f, dict) for f in files):
@@ -1500,6 +1504,8 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
         return (f"{CI_NONE}: gh pr view {pr} -R {repo} не ответил — без него не сверить ни проверки GitHub, ни "
                 f"файлы PR (ядро), повтори позже. {advice}")
     if protect:
+        # один запрос файлов на шлюз: сбой (None) не повторяется в _core_problem, а даёт там отказ — иначе удачный
+        # второй запрос пропустил бы PR с правкой version мимо _version_problem (argus-b PR #153 Б1)
         files = _pr_files(repo, pr)
         why = _version_problem(files)
         if why:
