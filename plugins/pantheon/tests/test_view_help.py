@@ -86,7 +86,7 @@ def run(env, *args, t=T0):
 def live_checks():
     tmp, home, view, env = make()
     board = os.path.join(view, "Доска")
-    r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Первая")
+    r = run(env, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", "Первая")
     assert r.returncode == 0, r.stderr
     r = run(env, "board", t=T0 + 10)
     check("тик: код 0", r.returncode == 0, r.stderr[-300:])

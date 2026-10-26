@@ -201,7 +201,7 @@ def main():
 def tests():
     # задачи для pick: без поля (auto), закреплённая за codex, за claude
     def task(title, *extra):
-        r = run("task", "new", "--direction", "demo", "--title", title, *extra)
+        r = run("task", "new", "--text", "тест", "--direction", "demo", "--title", title, *extra)
         assert r.returncode == 0, r.stderr
         return r.stdout.split()[0]
     t_auto, t_codex, t_claude = task("Механика"), task("За Codex", "--executor", "codex"), \
