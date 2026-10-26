@@ -256,6 +256,52 @@ def t_push_race():
                                                                                        "прошёл за 3"), out)
 
 
+def t_reconcile():
+    """Сверка перед коммитом: лишний файл или правка plugin.json не только в version — отказ без коммита."""
+    w, _o = repo()
+    merge_pr(w, {"plugins/guard/hooks/a.py": "a = 9\n"}, "code")
+    head = g(w, "rev-parse", "HEAD")
+    orig_records, orig_plan = R.records, R.plan
+
+    def stray_records(root):
+        put(root, "plugins/guard/hooks/stray.py", "s\n")
+        return orig_records(root)
+
+    def wide_plan(root):
+        return [(n, o, v, fixed.replace('"description": "d"', '"description": "changed"'))
+                for n, o, v, fixed in orig_plan(root)]
+
+    for label, attr, fake, want in (("лишний файл", "records", stray_records, "изменено лишнее"),
+                                    ("plugin.json не только version", "plan", wide_plan, "задела не только version")):
+        setattr(R, attr, fake)
+        try:
+            R.release_once(w)
+            got = "без отказа"
+        except R.Refuse as e:
+            got = str(e)
+        finally:
+            setattr(R, attr, orig_records if attr == "records" else orig_plan)
+        check(f"сверка: {label} — отказ, коммита нет", want in got and g(w, "rev-parse", "HEAD") == head, got)
+        g(w, "checkout", "-q", "--", ".")
+        g(w, "clean", "-qfd")
+
+
+def t_first_parent():
+    """Прошлый выпуск — по первой родительской линии: PR старого порядка поднял номер в своём коммите, а за ним шёл
+    ещё коммит кода. Слияние такого PR — уже выпуск: номер второй раз не поднимается."""
+    w, _o = repo()
+    g(w, "checkout", "-q", "-b", "legacy", "main")
+    put(w, PJ.format("guard"), manifest("guard", "0.5.18"))
+    g(w, "commit", "-qam", "bump in branch")
+    put(w, "plugins/guard/hooks/a.py", "a = 10\n")
+    g(w, "commit", "-qam", "code after bump")
+    g(w, "checkout", "-q", "main")
+    g(w, "merge", "-q", "--no-ff", "-m", "Merge pull request (legacy)", "legacy")
+    rc, out = run(w)
+    check("PR старого порядка с кодом после подъёма — guard остаётся 0.5.18", rc == 0 and version(w, "guard") == "0.5.18"
+          and released(w)["plugins"]["guard"]["version"] == "0.5.18", out)
+
+
 def t_tree_hash_matches_pantheon():
     """Счёт дерева скрипта выпуска = pantheon._tree_hash: иначе плановый проход ни одной версии не поставит."""
     d = tempfile.mkdtemp(prefix="tree-")
@@ -298,7 +344,8 @@ def t_workflows():
     check("release.yml: ${{ }} не в run (инъекция)", not re.search(r"run:.*\$\{\{", text), text)
 
 
-for t in (t_first_and_bump, t_rules, t_refuse, t_push_race, t_tree_hash_matches_pantheon, t_workflows):
+for t in (t_first_and_bump, t_rules, t_refuse, t_push_race, t_reconcile, t_first_parent, t_tree_hash_matches_pantheon,
+          t_workflows):
     try:
         t()
     except Exception as e:  # noqa: BLE001 — падение случая — провал, остальные идут
