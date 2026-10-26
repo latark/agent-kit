@@ -2113,10 +2113,11 @@ MAIN_ROLES = ("hq", "domain-coordinator", "workshop")
 # (CTX-09); веба через него не больше, чем через prometheus и лидов. clio зовут Зевс и mnemo-brain (роль clio).
 # momus — ревизор навыка audit (metis-0095, решение владельца 15.10): только чтение и веб, пишет лишь свой отчёт в
 # ~/ai/knowledge/Inbox. Координаторам его нет — без отдельного слова владельца.
-HQ_AGENTS = ["prometheus", "clio", "chiron", "momus", "Explore"]
+HQ_AGENTS = ["prometheus", "clio", "chiron", "momus", "palamedes", "Explore"]
 # dev-haiku, dev-sonnet, dev-opus — разработчики: координатор отдаёт им мелкие правки сам, не гоняя лида (эпик
-# «Альфа»); codex-dev сюда не входит — его зовёт только лид по правилу executor.
-COORDINATOR_AGENTS = ["argus", "talos", "prometheus", "Explore", "dev-haiku", "dev-sonnet", "dev-opus"]
+# «Альфа»); codex-dev сюда не входит — его зовёт только лид по правилу executor. palamedes — исполнитель без кода
+# (metis-0224): тексты, юридический разбор, синтез; веба и Bash у него нет, пишет только свой черновик.
+COORDINATOR_AGENTS = ["argus", "talos", "prometheus", "palamedes", "Explore", "dev-haiku", "dev-sonnet", "dev-opus"]
 COORDINATOR_EXTRA_AGENTS = {"mnemo-brain": ["clio"]}
 # Skill — навык с context: fork идёт субагентом своего agent: мимо инструмента Agent (Claude Code 2.1.292)
 AGENT_MATCHER = "Agent|Task|Skill"
@@ -4822,13 +4823,13 @@ WHO_ANY_DIRECTION = ("domain-coordinator",)
 # Остальной код (команды, пути, `claude agents`) под образец не подходит. Список — боги из карты имён и прошлых
 # направлений; нового бога дописать сюда (иначе его удалённая роль не будет найдена как лишняя).
 WHO_GODS = ("zeus", "athena", "hermes", "themis", "calliope", "mnemo", "proteus", "metis", "janus", "daedalus",
-            "apollo", "hephaestus", "argus", "chiron", "prometheus", "talos", "clio", "iris", "momus", "charon", "hestia")
+            "apollo", "hephaestus", "argus", "chiron", "prometheus", "talos", "clio", "iris", "momus", "charon", "hestia", "palamedes")
 WHO_TOKEN = re.compile(r"`([^`\n]+)`")
 WHO_WORD = re.compile(r"[a-z][a-z0-9-]*")
 # Ещё места, где роли названы (metis-0252): холст «Кто есть кто.canvas» — по-русски (имя бога или слово), system.md —
 # именем роли. Роль без строки здесь — «+имя (файл)» в той же тревоге. Новую роль без бога в холсте искать по её имени.
 WHO_CANVAS_RU = {"hq": "Зевс", "workshop": "Дедал", "argus": "Аргус", "momus": "Мом", "prometheus": "Прометей",
-                 "chiron": "Хирон", "clio": "Клио", "iris": "Ирида", "talos": "Талос", "hestia": "Гестия",
+                 "chiron": "Хирон", "clio": "Клио", "iris": "Ирида", "talos": "Талос", "hestia": "Гестия", "palamedes": "Паламед",
                  "hephaestus": "Гефест", "apollo": "Аполлон", "dev": "Разработчик", "codex-dev": "Codex",
                  "tg-reader": "Telegram", "domain-coordinator": "координатор"}
 

@@ -44,7 +44,7 @@ folders = ["~/projects/kn"]
 leads = []
 """
 MAIN = ["hq", "domain-coordinator", "workshop"]
-COORD = ["argus", "talos", "prometheus", "Explore", "dev-haiku", "dev-sonnet", "dev-opus"]
+COORD = ["argus", "talos", "prometheus", "palamedes", "Explore", "dev-haiku", "dev-sonnet", "dev-opus"]
 
 
 def lib_python():
@@ -140,7 +140,7 @@ def main():
 
     # --- окна ---------------------------------------------------------------------------------------------------------
     want = {
-        "hq": (hq, ["prometheus", "clio", "chiron", "momus", "Explore"],
+        "hq": (hq, ["prometheus", "clio", "chiron", "momus", "palamedes", "Explore"],
                ["hephaestus-shop", "apollo-shop", "hephaestus-docs"] + MAIN + ["hestia"]),
         "athena-shop": (ab, ["hephaestus-shop", "apollo-shop"] + COORD,
                         ["chiron", "hestia"] + MAIN + ["hephaestus-docs"]),
