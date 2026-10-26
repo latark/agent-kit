@@ -339,7 +339,7 @@ def pr_refs(body):
 
 
 def argus_info(tid, body, gate, reviews, repos=None):
-    """→ {rounds, first_pass, rejects}: вердикты шлюза по PR из журнала задачи (repo и номер, pr_refs) и review-*.md
+    """→ {rounds, first_pass, rejects, last}: last — итог последнего круга («принять»/«вернуть»/None); вердикты шлюза по PR из журнала задачи (repo и номер, pr_refs) и review-*.md
     с id в заголовке. Нет ни того ни другого — rounds 0, first_pass None (неизвестно). Голый «PR #N» относим к repo
     направления (repos), только если вердикты на номер N есть ровно у одного из них: номера у разных репозиториев
     совпадают, и при двух кандидатах чужие круги не считаем."""
@@ -377,7 +377,8 @@ def argus_info(tid, body, gate, reviews, repos=None):
     rv = [("вернуть" if "вернуть" in vs else "принять") for vs in files.values()]
     seq = kinds if len(kinds) >= len(rv) else rv
     return {"rounds": len(seq), "first_pass": (seq[0] == "принять") if seq else None,
-            "rejects": seq.count("вернуть")}
+            "rejects": seq.count("вернуть"),
+            "last": seq[-1] if seq else None}
 
 
 def owner_info(tid, owner_log):
@@ -435,6 +436,7 @@ def build_row(ctx, tid, path, head, body, use, gate, reviews, owner_log, post, e
         "roles": roles, "sessions": len(use["sessions"]), "link": sorted(use["links"]) or ["нет"],
         "shared": use["shared"],
         "argus_rounds": ar["rounds"], "argus_first_pass": ar["first_pass"], "argus_rejects": ar["rejects"],
+        "argus_last": ar["last"],
         "owner_notes": ow["notes"], "owner_answers": ow["answers"], "owner_moves": ow["moves"],
         "owner_returns": ow["returns"], "returns": ar["rejects"] + ow["returns"],
         "post_merge": post.get(tid, []), "estimate": bool(estimate), "recorded_at": iso(ctx.t),
@@ -578,10 +580,13 @@ def merged_index(tasks):
 
 
 def accepted(r, merged=()):
-    """Задача принята (metis-0390): закрыта done и либо последний круг argus «принять» (кругов больше нуля и не все
-    «вернуть»), либо PR слит (id в merged). Отменённые и закрытые без проверки и слияния не принятые."""
+    """Задача принята (metis-0390): закрыта done и либо последний круг argus «принять» (поле argus_last; у старых строк без
+    поля — кругов больше нуля и не все «вернуть»), либо PR слит (id в merged). Отменённые и закрытые без проверки и слияния не принятые."""
     if r.get("status") != "done":
         return False
+    last = r.get("argus_last")
+    if last:  # новые строки: решает итог последнего круга (metis-0390); у старых строк поля нет — правило ниже
+        return last == "принять" or r.get("id") in merged
     rounds = r.get("argus_rounds") or 0
     return (rounds > 0 and (r.get("argus_rejects") or 0) < rounds) or r.get("id") in merged
 
