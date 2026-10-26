@@ -1461,10 +1461,13 @@ p.os.path.exists = lambda x: True
 p.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 0)
 p._py_ge311 = lambda py: True
 tp = p._test_pythons()
+pan_ok = p._pythons_for("pantheon")
+p._py_ge311 = lambda py: False  # metis-0448: python из PATH ниже 3.11 — pantheon его не получает, guard — получает
+pan_no = p._pythons_for("pantheon")
+guard_no = p._pythons_for("guard")
 print(json.dumps({{"fresh": sorted(k[1] + "|" + k[2] for k in fresh), "unk": sorted(unk), "clean": sorted(clean),
-                  "clean_unk": sorted(unk2), "targets": sorted(tg), "tp": tp,
-                  "pan": p._pythons_for("pantheon") == ["/opt/x/python3"],
-                  "guard": p._pythons_for("guard") == ["/opt/x/python3"]}}))
+                  "clean_unk": sorted(unk2), "targets": sorted(tg), "tp": tp, "pan_ok": pan_ok, "pan_no": pan_no,
+                  "guard": guard_no}}))
 """
     r = subprocess.run([PY, "-I", "-c", probe2], capture_output=True, text=True, timeout=60)
     try:
@@ -1479,8 +1482,10 @@ print(json.dumps({{"fresh": sorted(k[1] + "|" + k[2] for k in fresh), "unk": sor
           g2.get("clean_unk") == [], g2)
     check("цели базы: только (python, файл) с падениями новой, без таймаута и срока прогона (metis-0358)",
           g2.get("targets") == [["py", "a.py"], ["py2", "a.py"]], g2.get("targets"))
-    check("интерпретаторы: матрица — только python3 из PATH, /usr/bin/python3 не входит; pantheon и guard — на нём (metis-0448)",
-          g2.get("tp") == ["/opt/x/python3"] and g2.get("pan") is True and g2.get("guard") is True, g2)
+    check("интерпретаторы: матрица — только python3 из PATH, /usr/bin/python3 не входит (metis-0448)",
+          g2.get("tp") == ["/opt/x/python3"], g2)
+    check("интерпретаторы: pantheon получает python 3.11+ из PATH; ниже 3.11 — отфильтрован, guard — на нём (metis-0448)",
+          g2.get("pan_ok") == ["/opt/x/python3"] and g2.get("pan_no") == [] and g2.get("guard") == ["/opt/x/python3"], g2)
     r = subprocess.run([PY, "-I", LIB, "plugins", "foo"], capture_output=True, text=True, timeout=60)
     check("pantheon plugins foo — код 2", r.returncode == 2)
 
