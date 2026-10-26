@@ -68,7 +68,7 @@ def hook_tests():
     home, state = os.path.join(tmp, "ai", "pantheon"), os.path.join(tmp, "state")
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": tmp, "PANTHEON_HOME": home,
            "PANTHEON_STATE": state}
-    drafts = os.path.join(home, "directions", "calliope-content", "drafts")
+    drafts = os.path.join(home, "directions", "example-content", "drafts")
     good = os.path.join(drafts, "c-1-avito.md")
     write(good, GOOD)
     n = [0]
@@ -143,7 +143,7 @@ def hook_tests():
     check("text-stop: похожие слова (Тодорова, xxx, ИИСУС) — не заглушки, пропуск", r.returncode == 0)
 
     # список направления: только для итога в папке направления
-    write(os.path.join(home, "directions", "calliope-content", "stop-words.txt"),
+    write(os.path.join(home, "directions", "example-content", "stop-words.txt"),
           "# слова канала\nуникальное предложение\n\n")
     p = os.path.join(drafts, "words.md")
     write(p, GOOD + "\nЭто Уникальное предложение!\n")
@@ -154,7 +154,7 @@ def hook_tests():
     write(out, GOOD + "\nЭто Уникальное предложение!\n")
     r = stop(rep(out))
     check("text-stop: итог вне папки направления — список направления не действует", r.returncode == 0)
-    write(os.path.join(home, "directions", "calliope-content", "stop-words.txt"), "TODO\n")
+    write(os.path.join(home, "directions", "example-content", "stop-words.txt"), "TODO\n")
     p = os.path.join(drafts, "todo2.md")
     write(p, GOOD + "\ntodo\n")
     r = stop(rep(p))
@@ -263,7 +263,7 @@ def build_test():
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="text-build-"))
     home = os.path.join(tmp, "ai", "pantheon")
     write(os.path.join(home, "directions.toml"),
-          '[[direction]]\nname = "calliope-content"\nproject = "content"\nfolders = ["~/projects/content"]\n'
+          '[[direction]]\nname = "example-content"\nproject = "example"\nfolders = ["~/projects/example"]\n'
           'leads = ["hephaestus", "apollo"]\ndoes = "Тексты"\ndoes_not = "Код"\nexamples = ["а", "б", "в"]\n')
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": tmp, "PANTHEON_HOME": home,
            "PANTHEON_STATE": os.path.join(tmp, "state"), "PANTHEON_PLUGIN_ROLES": ROLES, "PANTHEON_NO_NOTIFY": "1",
@@ -280,7 +280,7 @@ def build_test():
           and "text-stop-verify.py" in head(pal))
     for lead in ("hephaestus-content", "apollo-content"):
         built = read(os.path.join(out, lead + ".md"))
-        check(f"roles build: {lead}.md собран, в шапке нет isolation (папка ~/projects/content без git)",
+        check(f"roles build: {lead}.md собран, в шапке нет isolation (папка ~/projects/example без git)",
               built.startswith("---\nname: " + lead + "\n") and "isolation" not in head(built))
     check("roles build: palamedes.md — Skill в disallowedTools",
           re.search(r"^disallowedTools:[^\n]*\bSkill\b", head(pal), re.M) is not None)
