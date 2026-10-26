@@ -10,9 +10,7 @@ agent_transcript_path) и файлу, который отчёт называет
   2. в файле есть таблица Markdown «утверждение → источник»: в шапке столбцы со словами «утверждение» и «источник»,
      хотя бы одна строка, и у каждой строки обе ячейки заполнены — не пусто, не «—», не «?», не «нет»;
   3. в файле нет запрещённых слов: заглушек и следов черновика (TODO, TBD, FIXME, XXX, lorem ipsum, «[источник]»,
-     «[вставить …]», «как языковая модель») и слов из необязательного списка направления
-     `~/ai/pantheon/directions/<направление>/stop-words.txt` (по фразе в строке, # — примечание), если итог лежит в
-     папке этого направления. Список направления только добавляет слова: встроенные из него не убрать.
+     «[вставить …]», «как языковая модель»).
 Не так — выход 2 и что поправить; не больше трёх возвратов подряд на одного исполнителя: дальше хук отпускает, а
 исполнитель пишет в отчёте «заблокировано».
 
@@ -27,7 +25,6 @@ import sys
 
 HOME = os.path.expanduser("~")
 STATE = os.path.realpath(os.environ.get("PANTHEON_STATE") or os.path.join(HOME, ".local", "state", "pantheon"))
-PANTHEON = os.path.realpath(os.environ.get("PANTHEON_HOME") or os.path.join(HOME, "ai", "pantheon"))
 MAX_RETURNS = 3
 MAX_BYTES = 2 * 1024 * 1024
 SUFFIXES = (".md", ".txt")
@@ -46,7 +43,6 @@ FORBIDDEN = [
     (re.compile(r"как\s+(?:языковая\s+модель|ии\b|искусственный\s+интеллект)", re.I), "как языковая модель"),
     (re.compile(r"\bas\s+an\s+ai\b", re.I), "as an AI"),
 ]
-MAX_STOP_WORDS = 200
 
 
 def report_text(ev):
@@ -119,21 +115,6 @@ def source_table(lines):
     return None
 
 
-def stop_words(result):
-    """Слова направления: итог в ~/ai/pantheon/directions/<имя>/… → его stop-words.txt."""
-    base = os.path.join(PANTHEON, "directions") + os.sep
-    if not result.startswith(base):
-        return []
-    name = result[len(base):].split(os.sep, 1)[0]
-    p = os.path.join(base, name, "stop-words.txt")
-    try:
-        raw = open(p, encoding="utf-8").read(64 * 1024)
-    except OSError:
-        return []
-    words = [w.strip() for w in raw.splitlines() if w.strip() and not w.strip().startswith("#")]
-    return words[:MAX_STOP_WORDS]
-
-
 def problems(report):
     """→ (путь итога или None, [что не так])."""
     m = list(RESULT_LINE.finditer(report or ""))
@@ -169,9 +150,8 @@ def problems(report):
                        + " — у каждого утверждения источник: файл:строка, статья, ссылка; без источника — убери "
                        "утверждение из текста")
     found = []
-    extra = [(re.compile(re.escape(w), re.I), w) for w in stop_words(real)]
     for n, line in enumerate(lines, 1):
-        for rx, word in FORBIDDEN + extra:
+        for rx, word in FORBIDDEN:
             if rx.search(line):
                 found.append(f"«{word}» (строка {n})")
     if found:

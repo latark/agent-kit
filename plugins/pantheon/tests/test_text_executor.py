@@ -4,7 +4,7 @@
 Запуск: python3 -I plugins/pantheon/tests/test_text_executor.py  (код выхода 0 — все прошли)
 Проверяет:
   - Stop-хук hooks/text-stop-verify.py: пропуск при годном итоге и отказ (выход 2), когда нет строки «Итог:», файла,
-    таблицы «утверждение → источник», источника в строке, есть заглушка или слово из stop-words.txt направления;
+    таблицы «утверждение → источник», источника в строке, есть заглушка;
     чтение отчёта из транскрипта, три возврата и отпуск, текст итога в вывод не попадает;
   - шапки ролей: нет isolation у hephaestus и apollo (в папке без git лид бы не поднялся), у palamedes — свой
     Stop-хук, закрыты веб, Bash, Agent и Skill (навык с context: fork поднял бы агента с вебом), список tools: —
@@ -141,24 +141,6 @@ def hook_tests():
     write(p, GOOD + "\nТодорова — фамилия, xxx в нижнем регистре, ИИСУС — не слово «ИИ».\n")
     r = stop(rep(p))
     check("text-stop: похожие слова (Тодорова, xxx, ИИСУС) — не заглушки, пропуск", r.returncode == 0)
-
-    # список направления: только для итога в папке направления
-    write(os.path.join(home, "directions", "example-content", "stop-words.txt"),
-          "# слова канала\nуникальное предложение\n\n")
-    p = os.path.join(drafts, "words.md")
-    write(p, GOOD + "\nЭто Уникальное предложение!\n")
-    r = stop(rep(p))
-    check("text-stop: слово из stop-words.txt направления — отказ",
-          r.returncode == 2 and "«уникальное предложение» (строка 10)" in r.stderr)
-    out = os.path.join(tmp, "outside", "words.md")
-    write(out, GOOD + "\nЭто Уникальное предложение!\n")
-    r = stop(rep(out))
-    check("text-stop: итог вне папки направления — список направления не действует", r.returncode == 0)
-    write(os.path.join(home, "directions", "example-content", "stop-words.txt"), "TODO\n")
-    p = os.path.join(drafts, "todo2.md")
-    write(p, GOOD + "\ntodo\n")
-    r = stop(rep(p))
-    check("text-stop: список направления встроенные слова не снимает", r.returncode == 2 and "TODO" in r.stderr)
 
     # отчёт из транскрипта, когда поля last_assistant_message нет
     tr = os.path.join(tmp, "agent.jsonl")
