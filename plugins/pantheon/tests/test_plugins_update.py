@@ -2,7 +2,7 @@
 """Синтетические тесты `pantheon plugins update` (metis-0052): тик ставит новые версии плагинов agent-kit после тестов.
 
 Запуск: python3 -I plugins/pantheon/tests/test_plugins_update.py  (код выхода 0 — все прошли)
-Идёт и на системном /usr/bin/python3 (3.9): сам pantheon.py тогда запускается через python3 из PATH (нужен 3.11).
+Матрица плагинов (metis-0448): тесты guard и pantheon идут на python3 из PATH (3.14), /usr/bin/python3 не добавляется.
 Временный HOME с каталогом agent-kit и кэшем установленной версии; `claude` — заглушка первой в PATH: пишет argv в
 файл, на `plugin list --json` отдаёт JSON из файла (после `plugin update` — уже с новой версией), на
 `plugin marketplace update` — код из STUB_MKT_RC. Настоящие `claude plugin …` не запускаются.
@@ -1454,11 +1454,17 @@ fresh, unk = p._fresh_failures(new, base)
 clean, unk2 = p._fresh_failures(C({{("py", "u.py", "FAIL old"): 1}}), C({{("py", "u.py", "FAIL old"): 1}}))
 tg = p._base_targets(C({{("py", "a.py", "FAIL x"): 1, ("py", "t.py", "t.py: таймаут"): 1, ("py", "t.py", "FAIL y"): 1,
                          ("py", "v.py", "v.py: срок прогона"): 1, ("py2", "a.py", "a.py: код 1"): 1}}))
-p._test_pythons = lambda: [sys.executable, "/old/python3"]
-p._py_ge311 = lambda py: py == sys.executable
+# metis-0448: настоящий _test_pythons; /usr/bin/python3 «установлен» и xcode-select «есть» — в матрицу он не попадает
+import subprocess
+p.shutil.which = lambda n: "/opt/x/python3"
+p.os.path.exists = lambda x: True
+p.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 0)
+p._py_ge311 = lambda py: True
+tp = p._test_pythons()
 print(json.dumps({{"fresh": sorted(k[1] + "|" + k[2] for k in fresh), "unk": sorted(unk), "clean": sorted(clean),
-                  "clean_unk": sorted(unk2), "targets": sorted(tg), "pan": p._pythons_for("pantheon") == [sys.executable],
-                  "guard": p._pythons_for("guard") == [sys.executable, "/old/python3"]}}))
+                  "clean_unk": sorted(unk2), "targets": sorted(tg), "tp": tp,
+                  "pan": p._pythons_for("pantheon") == ["/opt/x/python3"],
+                  "guard": p._pythons_for("guard") == ["/opt/x/python3"]}}))
 """
     r = subprocess.run([PY, "-I", "-c", probe2], capture_output=True, text=True, timeout=60)
     try:
@@ -1473,7 +1479,8 @@ print(json.dumps({{"fresh": sorted(k[1] + "|" + k[2] for k in fresh), "unk": sor
           g2.get("clean_unk") == [], g2)
     check("цели базы: только (python, файл) с падениями новой, без таймаута и срока прогона (metis-0358)",
           g2.get("targets") == [["py", "a.py"], ["py2", "a.py"]], g2.get("targets"))
-    check("интерпретаторы: pantheon — только 3.11+, guard — все", g2.get("pan") and g2.get("guard"), g2)
+    check("интерпретаторы: матрица — только python3 из PATH, /usr/bin/python3 не входит; pantheon и guard — на нём (metis-0448)",
+          g2.get("tp") == ["/opt/x/python3"] and g2.get("pan") is True and g2.get("guard") is True, g2)
     r = subprocess.run([PY, "-I", LIB, "plugins", "foo"], capture_output=True, text=True, timeout=60)
     check("pantheon plugins foo — код 2", r.returncode == 2)
 
