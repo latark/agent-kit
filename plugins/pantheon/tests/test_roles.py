@@ -231,7 +231,7 @@ def main():
     reg2 = os.path.join(env["PANTHEON_HOME"], "directions.toml")
     lead_reg = REG.replace('examples', 'leads = ["hephaestus", "apollo"]\nexamples')
     tmpls = sorted(f[:-5] for f in os.listdir(real) if f.endswith(".tmpl"))
-    owner_lines = ("Браузер владельца у этого Пантеона:", "Браузер владельца и адрес демона:", "Коллекции направлений:")
+    owner_lines = ("Браузер владельца у этого Пантеона:", "Коллекции направлений:")
     for label, extra in (("без [person]", ""), ("с [person]", '[person]\nqmd_collections = ["legal", "docs (справка)"]\n'
                                                              'browser = "Nova — демон CDP 127.0.0.1:9400"\n')):
         write(reg2, lead_reg + extra)
