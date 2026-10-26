@@ -6,10 +6,11 @@
   - Stop-хук hooks/text-stop-verify.py: пропуск при годном итоге и отказ (выход 2), когда нет строки «Итог:», файла,
     таблицы «утверждение → источник», источника в строке, есть заглушка или слово из stop-words.txt направления;
     чтение отчёта из транскрипта, три возврата и отпуск, текст итога в вывод не попадает;
-  - шапки ролей: isolation: worktree у hephaestus и apollo, у palamedes — свой Stop-хук, нет веба, Bash и Agent;
-  - тексты: координатор зовёт лида с isolation и знает palamedes, brief.part — исключение «модель в вызове», имя в
+  - шапки ролей: нет isolation у hephaestus и apollo (в папке без git лид бы не поднялся), у palamedes — свой
+    Stop-хук, закрыты веб, Bash, Agent и Skill (навык с context: fork поднял бы агента с вебом);
+  - тексты: координатор передаёт лиду isolation только из папки в git и знает palamedes, brief.part — исключение «модель в вызове», имя в
     names.part, palamedes в списках окон HQ_AGENTS и COORDINATOR_AGENTS;
-  - сборку ролей из шаблонов плагина (Python 3.11+): palamedes.md и лиды с isolation.
+  - сборку ролей из шаблонов плагина (Python 3.11+): palamedes.md со Skill в запрете, лиды без isolation.
 HOME, PANTHEON_HOME и PANTHEON_STATE подменены временной папкой. PANTHEON_TEST_TEXT_STOP_HOOK — путь к другой копии
 хука (прогон мутантов).
 """
@@ -197,8 +198,7 @@ def hook_tests():
 def template_tests():
     t = {f[:-5]: read(os.path.join(ROLES, f)) for f in os.listdir(ROLES) if f.endswith(".tmpl")}
     for lead in ("hephaestus", "apollo"):
-        check(f"{lead}.tmpl: в шапке isolation: worktree",
-              re.search(r"^isolation:\s*worktree\s*$", head(t[lead]), re.M) is not None)
+        check(f"{lead}.tmpl: в шапке нет isolation (Б1 ревью #137: папка без git)", "isolation" not in head(t[lead]))
     pal = t.get("palamedes", "")
     h = head(pal)
     check("palamedes.tmpl: name palamedes, без isolation", re.search(r"^name:\s*palamedes\s*$", h, re.M) is not None
@@ -208,6 +208,10 @@ def template_tests():
     check("palamedes.tmpl: закрыты веб, Bash, Agent, Task, SendMessage, браузеры",
           {"WebFetch", "WebSearch", "Bash", "Agent", "Task", "SendMessage", "mcp__claude-in-chrome",
            "mcp__chrome-devtools", "mcp__computer-use"} <= dis)
+    check("palamedes.tmpl: Skill закрыт целиком (Б2 ревью #137), а не отдельный навык", "Skill" in dis)
+    check("palamedes.tmpl: нет предзагрузки навыков (skills:) и велено читать SKILL.md, а не звать Skill",
+          re.search(r"^skills:", h, re.M) is None and "Прочитай этот файл (Read)" in pal
+          and "загрузи его до начала (Skill)" not in pal)
     m = re.search(r'command:\s*python3 "\$HOME/\.local/share/pantheon/current/hooks/([\w.-]+)"', h)
     check("palamedes.tmpl: Stop-хук — text-stop-verify.py, файл есть в hooks/",
           m is not None and m.group(1) == "text-stop-verify.py" and "\n  Stop:" in h
@@ -215,8 +219,10 @@ def template_tests():
     check("palamedes.tmpl: в отчёте строка «Итог: <путь>» и таблица «утверждение → источник»",
           "`Итог: <абсолютный путь к файлу>`" in pal and "| Утверждение | Источник |" in pal)
     dc = t["domain-coordinator"]
-    check("domain-coordinator.tmpl: лида зовёт с isolation worktree в вызове",
-          'Лида зовёшь с `isolation: "worktree"` в вызове' in dc)
+    check("domain-coordinator.tmpl: isolation лиду — только из папки в git, иначе без неё",
+          'Лиду `isolation: "worktree"` передаёшь в вызове, только если твоя папка в git' in dc
+          and "git rev-parse --is-inside-work-tree" in dc and "зови без isolation" in dc
+          and "Лида зовёшь с `isolation" not in dc)
     check("domain-coordinator.tmpl: работа без кода — palamedes, модель и effort в вызове",
           "palamedes (Паламед)" in dc and "(`model`, `effort`)" in dc)
     check("hq.tmpl: palamedes и модель в вызове", "palamedes (Паламед)" in t["hq"] and "(`model`, `effort`)" in t["hq"])
@@ -255,8 +261,11 @@ def build_test():
           pal.startswith("---\nname: palamedes\n") and "{{" not in pal and "Отчёт наверх" in pal
           and "text-stop-verify.py" in head(pal))
     for lead in ("hephaestus-content", "apollo-content"):
-        check(f"roles build: {lead}.md — isolation: worktree в шапке",
-              re.search(r"^isolation:\s*worktree\s*$", head(read(os.path.join(out, lead + ".md"))), re.M) is not None)
+        built = read(os.path.join(out, lead + ".md"))
+        check(f"roles build: {lead}.md собран, в шапке нет isolation (папка ~/projects/content без git)",
+              built.startswith("---\nname: " + lead + "\n") and "isolation" not in head(built))
+    check("roles build: palamedes.md — Skill в disallowedTools",
+          re.search(r"^disallowedTools:[^\n]*\bSkill\b", head(pal), re.M) is not None)
 
 
 def main():
