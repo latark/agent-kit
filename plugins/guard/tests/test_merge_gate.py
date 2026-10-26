@@ -838,9 +838,10 @@ def t_version_bump_refused(h):
     h.reset_log()
     merge_case("защиты: version в plugin.json, gh api файлов упал один раз — отказ", h.pre(cmd, pdir=kit), False,
                "список файлов PR не получен")
+    log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+    # без tomllib (3.9) слияние закрыто до gh: запросов нет вовсе
     check("защиты: сбой файлов — один запрос pulls/N/files на шлюз, без повтора",
-          sum(1 for ln in open(h.j("gh.log")) if ln.startswith("api ") and "/files" in ln) == 1,
-          open(h.j("gh.log")).read())
+          sum(1 for ln in log.splitlines() if ln.startswith("api ") and "/files" in ln) == (1 if HAVE_TOML else 0), log)
     # и с Touch ID владельца: сбой gh — отказ, согласие пускает только задетое ядро
     h.gh(["plugins/guard/README.md", {"filename": pj, "status": "modified", "patch": VERSION_PATCH}])
     h.approve(f"{ts()} merge-approve latark/agent-kit#7 {sha}", fresh=True)
