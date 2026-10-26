@@ -8393,6 +8393,8 @@ def review_cmd(rest):
                 print("    без перечня проверенного (Б6) — шлюз слияния такое «принять» не пускает")
             elif r.get("kind") == "accept" and not OPUS_RAN.match(cl["ran"]):
                 print("    не на Opus (--ran без «модель: claude-opus» в начале) — шлюз защит и итог ниже его не считают")
+            elif r.get("kind") == "accept" and r.get("models") == []:  # metis-0413: транскрипт найден, моделей нет
+                print("    транскрипт argus найден, но моделей в нём нет — шлюз защит и итог ниже его не считают")
             elif r.get("kind") == "accept" and not review_accept_counts(r):
                 print("    не на Opus по транскрипту argus (поле models не сходится с --ran) — шлюз защит и итог ниже "
                       "его не считают")
