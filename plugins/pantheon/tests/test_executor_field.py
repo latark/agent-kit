@@ -35,12 +35,12 @@ def main():
         def run(*a):
             return subprocess.run([PY311, "-I", CLI, *a], env=env, capture_output=True, text=True, timeout=60)
 
-        r = run("task", "new", "--direction", "demo", "--title", "Механика", "--executor", "codex")
+        r = run("task", "new", "--text", "тест", "--direction", "demo", "--title", "Механика", "--executor", "codex")
         check("task new --executor codex — принят", r.returncode == 0, r.stderr)
         tid, rel = (r.stdout.split() + ["", ""])[:2]
         text = open(os.path.join(home, rel), encoding="utf-8").read() if rel else ""
         check("шапка: executor: codex", "\nexecutor: codex\n" in text, text[:300])
-        r = run("task", "new", "--direction", "demo", "--title", "Плохое", "--executor", "gpt")
+        r = run("task", "new", "--text", "тест", "--direction", "demo", "--title", "Плохое", "--executor", "gpt")
         check("task new --executor gpt — отказ с перечнем", r.returncode != 0 and "auto, claude, codex" in r.stderr,
               r.stdout + r.stderr)
         r = run("task", "set", tid, "executor=claude")
@@ -48,7 +48,7 @@ def main():
         check("task set executor=claude", r.returncode == 0 and "\nexecutor: claude\n" in text, r.stderr)
         r = run("task", "set", tid, "executor=human")
         check("task set executor=human — отказ", r.returncode != 0, r.stdout + r.stderr)
-        r = run("task", "new", "--direction", "demo", "--title", "Без поля")
+        r = run("task", "new", "--text", "тест", "--direction", "demo", "--title", "Без поля")
         rel2 = r.stdout.split()[1]
         check("без --executor поля нет (по умолчанию auto)",
               "executor:" not in open(os.path.join(home, rel2), encoding="utf-8").read())
