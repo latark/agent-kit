@@ -5898,7 +5898,8 @@ def metrics_cmd(rest):
         print(f"учёт: строк дописано {len(rows)}; свод — {tilde(os.path.dirname(ctx.rows_path))}")
         return 0
     if sub == "summary":
-        print(M.week_md(M.summary(M.read_rows(ctx.rows_path), ctx.t, M.post_merge_index(tasks)), ctx.t))
+        print(M.week_md(M.summary(M.read_rows(ctx.rows_path), ctx.t, M.post_merge_index(tasks),
+                                M.merged_index(tasks)), ctx.t))
         return 0
     if sub == "backfill":
         opts, dry, i = {}, False, 0
@@ -8393,6 +8394,8 @@ def review_cmd(rest):
                 print("    без перечня проверенного (Б6) — шлюз слияния такое «принять» не пускает")
             elif r.get("kind") == "accept" and not OPUS_RAN.match(cl["ran"]):
                 print("    не на Opus (--ran без «модель: claude-opus» в начале) — шлюз защит и итог ниже его не считают")
+            elif r.get("kind") == "accept" and r.get("models") == []:  # metis-0413: транскрипт найден, моделей нет
+                print("    транскрипт argus найден, но моделей в нём нет — шлюз защит и итог ниже его не считают")
             elif r.get("kind") == "accept" and not review_accept_counts(r):
                 print("    не на Opus по транскрипту argus (поле models не сходится с --ran) — шлюз защит и итог ниже "
                       "его не считают")

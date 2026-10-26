@@ -158,7 +158,10 @@ def run_all(tmp):
              dict(v("accept", S5, "jjjjjjjj01"), models=["claude-sonnet-4-6"]),
              dict(v("accept", S5, "jjjjjjjj02"), models=["claude-opus-5-5-20261001"]),
              dict(v("accept", S5, "jjjjjjjj03"), models_note="транскрипт argus не найден"),
-             dict(v("accept", S5, "jjjjjjjj04", cl=sonnet), models_note="транскрипт argus не найден")]
+             dict(v("accept", S5, "jjjjjjjj04", cl=sonnet), models_note="транскрипт argus не найден"),
+             # metis-0413: транскрипт найден, моделей нет (models: []) — не в счёт, как в шлюзе guard
+             dict(v("accept", S5, "jjjjjjjj05"), models=[],
+                  models_note="транскрипт argus найден, но моделей в нём нет — модель не подтвердить")]
     with open(os.path.join(state, "merge-gate", "records.jsonl"), "w") as fh:
         fh.write("".join(json.dumps(x) + "\n" for x in tally))
     r = pantheon("review", "status", "latark/agent-kit", "40")
@@ -177,6 +180,8 @@ def run_all(tmp):
           f"итог на {S5[:12]}: принять 2, вернуть 0 — последний вердикт каждого argus" in out, r.stdout)
     check("status: расхождение --ran с транскриптом помечено своей строкой",
           sum("не на Opus по транскрипту argus" in ln for ln in out) == 1, r.stdout)
+    check("status: транскрипт без моделей (models: []) помечен своей строкой, а не «по --ran»",
+          sum("транскрипт argus найден, но моделей в нём нет" in ln for ln in out) == 1, r.stdout)
     # тот же журнал — шлюз владельца merge.gate (общее правило review_accept_counts): Sonnet по транскрипту не в счёт
     import importlib.util as _ilu
     import types as _types
