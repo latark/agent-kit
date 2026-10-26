@@ -1,6 +1,8 @@
 """Запор слияния guard (P1-4, Д2, Д3, guard 0.5.4) — часть ядра защит: ядро — весь plugins/guard/**, общие роли
-plugins/pantheon/roles/** и правила окон plugins/pantheon/lib/window_rules.py, casefold; файлы из pulls/N/files с
-previous_filename. PR, задевающий ядро, агенты не сливают: он ждёт слияния владельцем (Д3).
+plugins/pantheon/roles/**, CI .github/** и правила окон plugins/pantheon/lib/window_rules.py, casefold; файлы из
+pulls/N/files с previous_filename. PR, задевающий ядро, агенты не сливают: он ждёт слияния владельцем (Д3).
+PR защит, который правит version в plugins/*/.claude-plugin/plugin.json или трогает .claude-plugin/releases.json, не
+проходит совсем (metis-0512, _version_problem): номер поднимает workflow release на main после слияния.
 
 Модуль без своего состояния: общие помощники guard.py (load_policy, privileged, private_conf, _inside, _norm, _key,
 STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — его присваивает guard.py при загрузке
@@ -93,7 +95,7 @@ MERGE_PRODUCT = ("Продукт для клиентов сливай после
                  "на этот SHA, строка в сводке «что ушло» со ссылкой owner/repo#N и откатом (`pantheon alert`), затем "
                  f"{MERGE_CMD}.")
 MERGE_PROTECT = ("Защиты сливает только Метида или её лид через шлюз слияния: тесты и «принять» от argus на этот SHA, "
-                 f"{MERGE_CMD}; PR, который задевает ядро защит (весь plugins/guard/, plugins/pantheon/roles/, "
+                 f"{MERGE_CMD}; PR, который задевает ядро защит (весь plugins/guard/, plugins/pantheon/roles/, .github/, "
                  "plugins/pantheon/lib/window_rules.py и .claude-plugin/marketplace.json), ждёт слияния владельцем (Д3): "
                  "заявка `pantheon merge request N -R <owner/repo>`, сливает плановый проход после Touch ID владельца.")
 MERGE_OWNER = "Слияние делает владелец."
@@ -114,7 +116,9 @@ CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_
               ".claude-plugin/marketplace.json")  # откуда ставятся плагины: подмена источника guard (metis-0115)
 # и папки целиком: весь плагин guard (metis-0092) — код, тесты, README, настройки; общие роли Пантеона — в них
 # правила ролей, которые guard проверяет по agent_type (metis-0182). Папки может ещё не быть в main — путь всё равно ядро
-CORE_DIR = ("plugins/guard", "plugins/pantheon/roles")
+CORE_DIR = ("plugins/guard", "plugins/pantheon/roles",
+            # CI с правом записи в main (metis-0512): workflow release и его скрипт .github/scripts/release.py
+            ".github")
 GH_TIMEOUT = 6
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 REPO_RE = re.compile(r"[a-z0-9_.-]+/[a-z0-9_.-]+")
@@ -900,12 +904,18 @@ def _pr_view(repo, pr):
     return data if isinstance(data, dict) else None
 
 
-def _core_problem(repo, pr, sha, data):
+def _pr_files(repo, pr):
+    """Файлы PR из REST pulls/N/files (status, previous_filename, patch) — список или None (сбой gh)."""
+    return _gh_json(["api", f"repos/{repo}/pulls/{pr}/files?per_page=100", "--paginate", "--jq", ".[]"])
+
+
+def _core_problem(repo, pr, sha, data, files=None):
     """Д3: PR защит, который задевает ядро, ждёт слияния владельцем. data — ответ _pr_view. Файлы — из REST
-    pulls/N/files (там есть status и previous_filename: переименование ядра не прячет старый путь). Список файлов
-    неполон, PR на другом коммите — тоже отказ."""
+    pulls/N/files (там есть status и previous_filename: переименование ядра не прячет старый путь); files — уже
+    полученный ответ _pr_files, иначе запрос здесь. Список файлов неполон, PR на другом коммите — тоже отказ."""
     count, head = data.get("changedFiles"), data.get("headRefOid")
-    files = _gh_json(["api", f"repos/{repo}/pulls/{pr}/files?per_page=100", "--paginate", "--jq", ".[]"])
+    if files is None:
+        files = _pr_files(repo, pr)
     paths = None
     if isinstance(files, list) and all(isinstance(f, dict) for f in files):
         paths = []
@@ -923,6 +933,56 @@ def _core_problem(repo, pr, sha, data):
     if hit:
         return f"{MERGE_CORE_HIT}{', '.join(hit)}"
     return None
+
+
+# номер версии плагина поднимает workflow release на main после слияния (metis-0512, вариант Б): PR его не трогает,
+# иначе соседние PR конфликтуют в plugin.json после каждого слияния. Отказ — и с Touch ID владельца: коммиты выпуска
+# Action идут в main мимо PR, а номер в PR — всегда ошибка автора
+PLUGIN_MANIFEST_RE = re.compile(r"plugins/[^/]+/\.claude-plugin/plugin\.json")
+RELEASES_FILE = ".claude-plugin/releases.json"
+JSON_STR_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+MERGE_VERSION = ("номер версии поднимает workflow release на main после слияния (metis-0512): убери из PR правку "
+                 "version в plugin.json и файл .claude-plugin/releases.json; новый коммит — новые записи тестов и argus")
+
+
+def _touches_version(patch):
+    """В строках +/- патча есть JSON-строка "version" (и с \\u-экранированием, без учёта регистра) — True."""
+    for line in patch.splitlines():
+        if line[:1] not in ("+", "-"):
+            continue
+        for m in JSON_STR_RE.finditer(line[1:]):
+            try:
+                val = json.loads(m.group(0))
+            except ValueError:
+                return True  # строку не разобрать — считаем правкой номера
+            if isinstance(val, str) and val.strip().casefold() == "version":
+                return True
+    return False
+
+
+def _version_problem(files):
+    """metis-0512: PR правит version в plugins/*/.claude-plugin/plugin.json или трогает .claude-plugin/releases.json —
+    текст отказа, иначе None. files — ответ _pr_files; сбой и неполный список решает _core_problem. Новый и удалённый
+    plugin.json (новый плагин или его удаление) — можно. Патча нет — отказ: правку version не проверить."""
+    if not isinstance(files, list):
+        return None
+    hit = []
+    for f in files:
+        if not isinstance(f, dict):
+            return None
+        names = [n for n in (f.get("filename"), f.get("previous_filename")) if isinstance(n, str)]
+        norm = [n.strip("/").casefold() for n in names]
+        if not names:
+            continue
+        if RELEASES_FILE in norm:
+            hit.append(f"{names[0]} (пишет только workflow release)")
+        elif not any(PLUGIN_MANIFEST_RE.fullmatch(n) for n in norm) or f.get("status") in ("added", "removed"):
+            continue
+        elif not isinstance(f.get("patch"), str):
+            hit.append(f"{names[0]} (патча нет — правку version не проверить)")
+        elif _touches_version(f["patch"]):
+            hit.append(f"{names[0]} (меняет version)")
+    return f"PR трогает номер версии: {', '.join(hit)}" if hit else None
 
 
 # проверки GitHub на head PR (metis-0297): разбор rollup — как ci_state в pantheon/lib/merge.py (PR #79, metis-0285)
@@ -1440,7 +1500,11 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
         return (f"{CI_NONE}: gh pr view {pr} -R {repo} не ответил — без него не сверить ни проверки GitHub, ни "
                 f"файлы PR (ядро), повтори позже. {advice}")
     if protect:
-        why = _core_problem(repo, pr, sha, view)
+        files = _pr_files(repo, pr)
+        why = _version_problem(files)
+        if why:
+            return f"{why}. {MERGE_VERSION}. {advice}"
+        why = _core_problem(repo, pr, sha, view, files)
         # Д3 через Touch ID (metis-0285): палец владельца на этот PR и этот SHA — строка тика в owner-log. Пускает
         # только задетое ядро; сбой gh, неполный список файлов и другой head — отказ и со строкой
         if why and not (why.startswith(MERGE_CORE_HIT) and owner_approved(repo, pr, sha)):

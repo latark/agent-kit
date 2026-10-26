@@ -689,7 +689,8 @@ def tests():
     lost = sorted(in_part - set(m.PROTECTED_ANY + m.PROTECTED_ROOT))
     check("защищённые пути обёртки совпадают с protected.part", not missing and not lost, (missing, lost))
     cases = {".claude/settings.json": True, "sub/.codex/config.toml": True, "AGENTS.md": True, "docs/CLAUDE.md": True,
-             "settings.local.json": True, ".github/workflows/ci.yml": True, "plugins/guard/hooks/guard.py": True,
+             "settings.local.json": True, ".github/workflows/ci.yml": True, ".github/scripts/release.py": True,
+             "plugins/guard/hooks/guard.py": True,
              "plugins/x/hooks/a.py": True, "plugins/pantheon/roles/a.tmpl": True, ".pantheon-verify": True,
              "README.md": False, "docs/plugins/guard/x.md": False, "src/app.py": False, ".github/ISSUE.md": False,
              "plugins/pantheon/lib/executors.py": False, "plugins/pantheon/lib/window_rules.py": True,

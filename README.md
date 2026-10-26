@@ -355,8 +355,10 @@
   `isolation: "worktree"` в вызове лида, только если папка направления в git, иначе лид работает в своей worktree.
 - `plugins/pantheon/scripts/git-crypt-merge.sh` — слияние файлов под git-crypt как текста (для `~/ai/pantheon` и `me/`).
 - `plugins/pantheon/scripts/decision-map-check.py` — сверка карты решений с `revisits.toml`.
-- `plugins/pantheon/scripts/release.py` — выпуск при слиянии: подтянуть main и поднять `version` тронутых плагинов
-  одним коммитом; PR номер версии не трогают (metis-0384, AGENTS.md «Выпуск»).
+- `.github/workflows/release.yml` и `.github/scripts/release.py` — выпуск после слияния (metis-0512): на push в main
+  поднимают `version` тронутых с прошлого выпуска плагинов и пишут `.claude-plugin/releases.json` одним коммитом от
+  github-actions[bot]. PR номер версии не трогают: шлюз guard такой PR не сливает (AGENTS.md «Выпуск»). `.github` —
+  ядро шлюза: право записи в main есть только у этого workflow.
 - `plugins/pantheon/scripts/baseline.py` — замер «как сейчас» по git и транскриптам (ORD-06); правила подсчёта — в шапке.
 - `plugins/pantheon/scripts/config-check.py` — проверка правок `~/.claude` для `sync.sh`: код и подозрительное — в
   карантин с объяснением на доске, остальное уходит само (SEC-15). Исключение (metis-0209): файл, побайтно равный
@@ -389,7 +391,7 @@
     python3 -I plugins/pantheon/tests/test_tick.py    # планировщик: сон, пробуждение, питание, простой, лимит, главный Mac
     python3 -I plugins/pantheon/tests/test_plugins_update.py   # обновления agent-kit плановым проходом: тесты, база, метки, коды
     python3 -I plugins/pantheon/tests/test_test_timing.py   # замер тестов плагина: строки по файлам и сводка медленных в логе прогона
-    python3 -I plugins/pantheon/tests/test_release.py    # выпуск: номер версии от main, подтягивание main, конфликты
+    python3 -I .github/scripts/test_release.py    # выпуск Action: номер от прошлого выпуска, releases.json, гонка push, права
     python3 -I plugins/pantheon/tests/test_baseline.py   # замер «как сейчас»: задачи по git commit, сообщения, возвраты, цена
     python3 -I plugins/pantheon/tests/test_hooks.py   # хуки контекста и owner-log (и на системном: CTX_TEST_PYTHON=/usr/bin/python3)
     python3 -I plugins/project-tools/tests/test_project_tools.py   # карта стеков, apply, одобрения, Codex, подсказка

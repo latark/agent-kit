@@ -70,7 +70,7 @@ STDERR_NOISE = re.compile(r"^(YOLO mode is enabled|\[paperclip\])|state db missi
 # путь из нескольких частей — от корня репозитория.
 PROTECTED_ANY = (".claude/", ".codex/", "agents/", "policy.toml", "settings*.json", ".mcp.json", "AGENTS.md",
                  "CLAUDE.md", ".pantheon-verify", ".claude-plugin/")
-PROTECTED_ROOT = (".github/workflows/", "plugins/guard/", "plugins/*/hooks/", "plugins/pantheon/roles/",
+PROTECTED_ROOT = (".github/workflows/", ".github/scripts/", "plugins/guard/", "plugins/*/hooks/", "plugins/pantheon/roles/",
                   "plugins/pantheon/lib/merge.py", "plugins/pantheon/lib/window_rules.py")
 # песочница и правила окон в pantheon.py (sandbox_build и всё, что он записывает): защищены строки диффа с этими словами
 WINDOW_FILE = "plugins/pantheon/lib/pantheon.py"
