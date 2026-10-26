@@ -393,6 +393,9 @@ def option_warns(head):
     out = []
     for o in head.get("options") or []:
         o = str(o)
+        if not o.strip():
+            out.append("пустой вариант --option \"\" — проверьте переменную в кавычках: она пуста")
+            continue
         if _OPT_EMPTY.search(o) or _OPT_CUT.search(o):
             out.append(f"вариант «{o[:60]}» с пустыми скобками или обрезанной суммой («()», «≈ )», «$…») — "
                        "проверьте кавычки: оболочка съедает «$…», пишите сумму в одинарных кавычках")
@@ -3239,7 +3242,8 @@ def created_ts(head, body):
 
 def is_full_question(head):
     """Вопрос владельцу, суть которого в полях: question, why и не меньше двух вариантов (writing.part)."""
-    return bool(head.get("question") and head.get("why") and len(head.get("options") or []) >= 2)
+    opts = [o for o in head.get("options") or [] if str(o).strip()]  # пустые --option "" не варианты (argus b2)
+    return bool(head.get("question") and head.get("why") and len(opts) >= 2)
 
 
 def bodyless_tasks(tasks, t, hours=NO_BODY_HOURS):
@@ -3292,7 +3296,8 @@ def owner_ids(decisions_text, zeus_log_text, board_lines, t):
     return out
 
 
-NOTASK_RE = re.compile(r"^\s*(?:[-*]\s+)?не задача: \[([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\] [—–-] \S")
+# id пометки — тот же набор знаков, что у вопроса окна вопросов в owner_ids (без дефиса и с цифры тоже бывает)
+NOTASK_RE = re.compile(r"^\s*(?:[-*]\s+)?не задача: \[([a-z0-9][a-z0-9-]{0,40})\] [—–-] \S")
 WORD_RE = re.compile(r"[\w-]+")
 
 

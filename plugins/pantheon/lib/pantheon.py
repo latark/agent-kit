@@ -272,7 +272,7 @@ def lock(name, block=True):
         # ставится первой, а проскочить может только подъём, уже прошедший проверку метки в ту же секунду, — stop
         # идёт без блокировки с предупреждением. Замок alerts — тоже: строка тревоги дописывается одним write в режиме
         # append, она не рвётся. Неблокирующие замки (start, тик) и git без файла не берутся.
-        if not (block and (name.startswith("start-") or name == "alerts")):
+        if not (block and (name.startswith("start-") or name in ("alerts", "unlinked"))):
             raise
         print(f"pantheon: нет права записи в {path('locks').replace(HOME, '~')} ({e.strerror}) — работаю без "
               f"блокировки {name}: подъём этой же сессии в ту же секунду может проскочить", file=sys.stderr)
@@ -6937,9 +6937,12 @@ def check(paths=None, quiet=False):
         if fixed:
             tasks_now = T.load_tasks(PANTHEON, T.WORK_TYPES)
         nobody = T.bodyless_tasks(tasks_now, now())  # metis-0402: открытая задача без описания старше часа
-        unlinked = T.unlinked_decisions(tasks_now, _read_or_empty(os.path.join(PANTHEON, "decisions.md")),
-                                        _read_or_empty(path("owner-log", "zeus.md")),
-                                        _read_or_empty(path("owner-log", "board.jsonl")).splitlines(), now())
+        srcs = [_read_strict(os.path.join(PANTHEON, "decisions.md")), _read_strict(path("owner-log", "zeus.md")),
+                _read_strict(path("owner-log", "board.jsonl"))]
+        # источник не прочитался (не «файла нет») — проход пропущен: иначе seen запомнил бы набор без него, и следующий
+        # проход назвал бы одной строкой все его id (argus a2 п. 3)
+        unlinked = None if any(x is None for x in srcs) else T.unlinked_decisions(
+            tasks_now, srcs[0], srcs[1], srcs[2].splitlines(), now())
         field_errs, field_warns = T.board_problems(tasks_now, now(), night_end, autoclose_mod().open_pr_tasks(path("autoclose.json")))
         field_errs = [(i, f"status done без closed — проставлен из updated") for i in fixed] + field_errs
         for tid, text in field_errs:
@@ -7007,32 +7010,50 @@ UNLINKED_SHOWN = 12  # сколько новых id называет одна т
 def unlinked_alert(T, unlinked):
     """Тревога «слово владельца с [id] без задачи» (metis-0402 г): один раз на id и только о новых. Показанные id — в
     STATE/unlinked-seen.json (id → когда впервые); показанным считается только названный в тревоге. Первый проход (файла нет или он испорчен) только запоминает то, что
-    уже есть, без тревоги: старые вопросы окна Зевса задачи не имеют, и весь их набор стал бы шумом (argus a)."""
+    уже есть, без тревоги: старые вопросы окна Зевса задачи не имеют, и весь их набор стал бы шумом (argus a).
+    unlinked None — источник не прочитался, проход пропущен. Под lock("unlinked") и запись раньше тревоги (metis-0409):
+    два параллельных прохода не дадут одну строку дважды, а сбой записи не превращается в тревогу каждый проход.
+    Сухой прогон без ALERTS_IN_DRYRUN только печатает тревогу и seen не пишет."""
+    if unlinked is None:
+        return
     p = path("unlinked-seen.json")
-    try:
-        with open(p, encoding="utf-8") as fh:
-            seen = json.load(fh)
-        if not isinstance(seen, dict):
-            raise ValueError("не словарь")
-    except (OSError, ValueError):
-        seen = None
-    t = now()
-    fresh = [i for i in unlinked if i not in seen] if seen is not None else []
-    shown = fresh[:UNLINKED_SHOWN]
-    if shown:
-        more = len(fresh) - len(shown)
-        alert(f"слова владельца с [id] без задачи дольше {T.UNLINKED_MIN} мин: {', '.join(shown)}"
-              f"{f' и ещё {more} (назову следующим проходом)' if more else ''} — завести задачу "
-              "(pantheon task new, [id] в тексте) или дописать в decisions.md отдельной строкой «не задача: [id] — причина»",
-              "check")
-    keep = {i: v for i, v in (seen or {}).items()
-            if isinstance(v, (int, float)) and t - v <= (T.UNLINKED_DAYS + 1) * 86400}
-    # показанными отмечаются только названные в тревоге (argus b, круг 2): иначе id с 13-го не появились бы нигде.
-    # Первый проход запоминает всё; уже показанные, но вычищенные по сроку, — продлеваются, а не становятся новыми
-    keep.update({i: t for i in unlinked if i not in keep and (seen is None or i in seen or i in shown)})
-    if keep != seen:
-        os.makedirs(STATE, exist_ok=True)
-        write_atomic(p, json.dumps(keep, ensure_ascii=False, sort_keys=True))
+    dry = os.environ.get("PANTHEON_DRYRUN") == "1" and not os.environ.get("PANTHEON_ALERTS_IN_DRYRUN")
+    with lock("unlinked"):
+        try:
+            with open(p, encoding="utf-8") as fh:
+                seen = json.load(fh)
+            if not isinstance(seen, dict):
+                raise ValueError("не словарь")
+        except (OSError, ValueError):
+            seen = None
+        t = now()
+        fresh = [i for i in unlinked if i not in seen] if seen is not None else []
+        shown = fresh[:UNLINKED_SHOWN]
+        keep = {i: v for i, v in (seen or {}).items()
+                if isinstance(v, (int, float)) and t - v <= (T.UNLINKED_DAYS + 1) * 86400}
+        # показанными отмечаются только названные в тревоге (argus b, круг 2): иначе id с 13-го не появились бы нигде.
+        # Первый проход запоминает всё; уже показанные, но вычищенные по сроку, — продлеваются, а не становятся новыми
+        keep.update({i: t for i in unlinked if i not in keep and (seen is None or i in seen or i in shown)})
+        if keep != seen and not dry:
+            try:
+                os.makedirs(STATE, exist_ok=True)
+                write_atomic(p, json.dumps(keep, ensure_ascii=False, sort_keys=True))
+            except OSError as e:
+                print(f"предупреждение · unlinked-seen.json не записан ({e.strerror or e}) — тревога «без задачи» "
+                      "отложена до следующего прохода", file=sys.stderr)
+                return
+        if shown:
+            more = len(fresh) - len(shown)
+            try:
+                alert(f"слова владельца с [id] без задачи дольше {T.UNLINKED_MIN} мин: {', '.join(shown)}"
+                      f"{f' и ещё {more} (назову следующим проходом)' if more else ''} — завести задачу "
+                      "(pantheon task new, [id] в тексте) или дописать в decisions.md отдельной строкой «не задача: [id] — причина»",
+                      "check")
+            except Exception:
+                if keep != seen and not dry and seen is not None:  # тревога не записана — id снова новые
+                    with contextlib.suppress(OSError):
+                        write_atomic(p, json.dumps(seen, ensure_ascii=False, sort_keys=True))
+                raise
 
 
 # Флаги `task new` (metis-0402): неизвестный флаг — отказ с его именем, а не молчаливо потерянное поле.
@@ -7102,6 +7123,17 @@ def task_body_arg(sub, opt):
     return ("\n\n".join(x.strip() for x in parts) if parts else None), None
 
 
+def _read_strict(p):
+    """Текст файла; «файла нет» — пусто, любой другой сбой чтения — None (источник не прочитан)."""
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return ""
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 def _read_or_empty(p):
     try:
         with open(p, encoding="utf-8") as fh:
@@ -7152,11 +7184,16 @@ def task_cmd(rest):
             if err:
                 print(err, file=sys.stderr)
                 return 2
-            if body_text is None and opt("--question") and (not opt("--why") or len(opt("--option", True)) < 2):
+            if body_text is None and opt("--question") and not T.is_full_question(
+                    {"question": opt("--question"), "why": opt("--why"), "options": opt("--option", True)}):
                 # metis-0402, argus a: без текста суть карточки вопроса — в её полях, поэтому они должны быть полными
                 print("pantheon task new: вопрос без текста задачи — нужны --why и не меньше двух --option "
                       "(или текст --text/--body/--body-file); ничего не записано", file=sys.stderr)
                 return 2
+            if body_text is not None and opt("--question") and not T.is_full_question(
+                    {"question": opt("--question"), "why": opt("--why"), "options": opt("--option", True)}):
+                print("предупреждение · вопрос владельцу без --why или без двух непустых --option: карточка выйдет "
+                      "неполной (writing.part — суть, причина и варианты всегда)", file=sys.stderr)
             if body_text is None and not opt("--question"):
                 print("pantheon task new: нужен текст задачи — --text, --body или --body-file <путь> (цель и «готово, когда»); "
                       "задача без описания не создаётся (вопрос владельцу — с --question, --why и вариантами)", file=sys.stderr)
@@ -7205,6 +7242,9 @@ def task_cmd(rest):
             new_body, err = task_body_arg("set", opt)
             if err:
                 print(err, file=sys.stderr)
+                return 2
+            if new_body is None and (opt("--body") is not None or opt("--body-file") is not None):
+                print("pantheon task set: --body/--body-file пусты — текст не заменён; ничего не записано", file=sys.stderr)
                 return 2
             while i < len(args):
                 if args[i] in ("--body", "--body-file") and i + 1 < len(args):  # тело уже взято task_body_arg
