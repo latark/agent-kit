@@ -45,7 +45,7 @@ class Env:
         return subprocess.run([PY311, "-I", LIB] + args, env=env, capture_output=True, text=True, timeout=120)
 
     def task(self, title, *extra):
-        r = self.run(["task", "new", "--direction", DIR, "--title", title, *extra])
+        r = self.run(["task", "new", "--direction", DIR, "--title", title, "--text", "тело задачи", *extra])
         assert r.returncode == 0, (r.stdout, r.stderr)
         return r.stdout.split()[0]
 
