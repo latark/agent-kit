@@ -173,6 +173,7 @@ import hashlib
 import json
 import os
 import re
+import resource
 import shlex
 import shutil
 import signal
@@ -7654,12 +7655,49 @@ def _results_prune(name, keep):
                 os.remove(e.path)
 
 
-def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=None, bare=None, cache=None):
+def _load1():
+    """Load average за минуту или None (замер — подсказка, сбой его не ломает)."""
+    try:
+        return os.getloadavg()[0]
+    except (OSError, AttributeError):
+        return None
+
+
+def _child_cpu():
+    """user+sys завершённых и подобранных детей процесса, с."""
+    r = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return r.ru_utime + r.ru_stime
+
+
+def _timing_line(label, py, f, wall, cpu, rc, l0, l1):
+    """Строка замера одного файла в журнал прогона (metis-0447): интерпретатор, wall, CPU детей, rc, load до и после."""
+    fmt = lambda x: "—" if x is None else f"{x:.2f}"  # noqa: E731
+    rcs = "таймаут" if rc is None else str(rc)
+    return (f"замер · {label} · py={py} · файл={f} · wall={wall:.2f} с · cpu={cpu:.2f} с · rc={rcs} · "
+            f"load={fmt(l0)}→{fmt(l1)}")
+
+
+def _timing_summary(timings, top=8):
+    """Строки сводки самых медленных файлов по wall для конца журнала (metis-0447). timings — [(подпись, python,
+    файл, wall, cpu, rc)] реально прогнанных в этом проходе; из кэша в них нет."""
+    rows = sorted(timings, key=lambda t: -t[3])[:top]
+    out = [f"===== замер: {len(rows)} самых медленных из {len(timings)} прогнанных файлов "
+           f"(сумма wall {sum(t[3] for t in timings):.0f} с, cpu {sum(t[4] for t in timings):.0f} с) ====="]
+    for i, (label, py, f, wall, cpu, rc) in enumerate(rows, 1):
+        out.append(f"{i}. wall={wall:.2f} с · cpu={cpu:.2f} с · {label} · py={py} · файл={f} · "
+                   f"rc={'таймаут' if rc is None else rc}")
+    return out
+
+
+def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=None, bare=None, cache=None,
+                      timings=None):
     """tests/test_*.py папки pdir по одному на каждом python → Counter подписей (python, файл, подпись). only —
     множество (python, файл): гонять только их (база, metis-0358); None — все. Срок — общий deadline прогона:
     базе достаётся то, что осталось после новой версии. bare — множество, куда попадают (python, файл) с кодом 0, строками ok и без итога (metis-0361). oks — словарь, куда пишется {(python, файл): _ok_count}
     файлов, дошедших до выхода (не таймаут и не срок) — для сравнения с базой (metis-0360). cache — _Results дерева
-    (metis-0424): годная запись заменяет прогон файла, досчитанный файл записывается туда же."""
+    (metis-0424): годная запись заменяет прогон файла, досчитанный файл записывается туда же. timings — список, куда попадает
+    (подпись, python, файл, wall, cpu детей, rc) каждого реально прогнанного файла; строка замера — в журнал сразу после
+    его вывода (metis-0447)."""
     sigs = collections.Counter()
     env0 = {k: v for k, v in os.environ.items()
             if not k.startswith("PANTHEON_") and k not in ("FORCE_COLOR", "CLICOLOR_FORCE")}
@@ -7686,6 +7724,7 @@ def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=N
             left = deadline - time.monotonic()
             t0 = time.monotonic()
             limit = None
+            measured = False
             if left <= 0:
                 out, rc = "", "срок"
             else:
@@ -7693,6 +7732,7 @@ def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=N
                 # TMPDIR внутри папки прогона: временные папки тестов уходят вместе с ней, а не копятся в общем TMPDIR
                 tdir = tempfile.mkdtemp(prefix="tmpdir-", dir=tmp)
                 limit = min(PLUGIN_TEST_TIMEOUT, left)
+                l0, c0, measured = _load1(), _child_cpu(), True
                 try:
                     r = subprocess.run([py, "-I", os.path.join("tests", f)], cwd=pdir, env={**env0, "HOME": home, "TMPDIR": tdir},
                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -7703,9 +7743,14 @@ def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=N
                 except OSError as e:
                     out, rc = str(e), 127
                 out = out.decode("utf-8", "replace") if isinstance(out, bytes) else out
+                l1, cpu = _load1(), _child_cpu() - c0
             sec = time.monotonic() - t0
             state = {None: "таймаут", "срок": "срок прогона"}.get(rc, f"код {rc}")
             log.write(f"\n===== {label} · {py} · {f} · {state} · {sec:.0f} с =====\n{out}")
+            if measured:
+                log.write("\n" + _timing_line(label, py, f, sec, cpu, rc, l0, l1) + "\n")
+                if timings is not None:
+                    timings.append((label, py, f, sec, cpu, rc))
             log.flush()
             okv = _ok_count(out) if rc not in (None, "срок") else None
             if oks is not None and okv is not None:
@@ -7899,16 +7944,18 @@ def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=N
             for who, notes in (("новая", notes_new), ("база", notes_base)):
                 for n in notes:
                     fh.write(f"копия ({who}): {n}\n")
-            ok_new, ok_base, bare, bare_base = {}, {}, set(), set()
+            ok_new, ok_base, bare, bare_base, timings = {}, {}, set(), set(), []
             got_new = _run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}", deadline, oks=ok_new, bare=bare,
-                                        cache=cache_new)
+                                        cache=cache_new, timings=timings)
             want = _base_targets(got_new, bare)
             skipped = sum(1 for py in pythons for f in _test_files(base_dir) if (py, f) not in want)
             if base_dir and skipped:
                 fh.write(f"\n===== база {old}: {skipped} файл(ов) не гоняются — у новой версии в них нет падений, "
                          "либо таймаут, срок прогона или ни одной проверки (их база не гасит) =====\n")
             got_base = _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline, only=want, oks=ok_base,
-                                        bare=bare_base, cache=cache_base)
+                                        bare=bare_base, cache=cache_base, timings=timings)
+            if timings:  # сводка замера — до решения, чтобы была и в журнале недосчитанного прогона (metis-0447)
+                fh.write("\n" + "\n".join(_timing_summary(timings)) + "\n")
             fresh, unknown = _fresh_failures(got_new, got_base, ok_new, ok_base, bare, bare_base)
             short = {(py, f) for (py, f, s) in list(got_new) + list(got_base) if s.endswith(": срок прогона")}
             if notes_new:  # копия новой версии не собралась — красное, база его не гасит (metis-0369)

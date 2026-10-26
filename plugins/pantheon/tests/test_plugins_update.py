@@ -390,6 +390,10 @@ def main():
     check("зелёные: в логе прогон новой версии и строка «база 1.0.0 … не гоняются» (базу не гоняли), helper.py не гонялся",
           "===== новая 1.1.0 · " in ltxt and "===== база 1.0.0 · " not in ltxt
           and "база 1.0.0: " in ltxt and "не гоняются" in ltxt and "helper.py" not in ltxt, ltxt[-300:])
+    check("зелёные: в логе строка замера файла (py, wall, cpu, rc, load) и в конце сводка самых медленных (metis-0447)",
+          "замер · новая 1.1.0 · py=" in ltxt and " · wall=" in ltxt and " · cpu=" in ltxt and " · rc=0 · load=" in ltxt
+          and "===== замер: " in ltxt and "самых медленных из" in ltxt
+          and ltxt.rindex("===== замер: ") > ltxt.rindex("замер · новая 1.1.0 · py="), ltxt[-500:])
     check("зелёные: временные копии убраны (своя TMPDIR и STATE/plugins/tmp пусты)", e.leftovers() == [],
           e.leftovers())
     check("зелёные: без критической тревоги (хеш кэша с .in_use совпал с проверенной копией)",
