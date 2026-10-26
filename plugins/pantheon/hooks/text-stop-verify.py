@@ -14,6 +14,10 @@ agent_transcript_path) и файлу, который отчёт называет
 Не так — выход 2 и что поправить; не больше трёх возвратов подряд на одного исполнителя: дальше хук отпускает, а
 исполнитель пишет в отчёте «заблокировано».
 
+Границы: stop-words.txt направления действует только на файлы в папке направления; если «Итог:» назвал файл вне неё,
+стоп-слова к нему не применяются (хук — от ошибок, а не от намеренного обхода). Нет last_assistant_message и
+agent_transcript_path — хук отпускает: transcript_path в SubagentStop — транскрипт главной сессии, его не читаем.
+
 Хук только читает: файл итога не запускает и не печатает его текст — только номера строк и найденное слово.
 Python 3.9+ (хуки запускает python3 из PATH). Состояние — ~/.local/state/pantheon/ctx/text-stop/<agent_id>.
 PANTHEON_TEXT_STOP_OFF=1 — выключить (как PANTHEON_DEV_STOP_OFF у разработчиков).
@@ -46,11 +50,14 @@ FORBIDDEN = [
 
 
 def report_text(ev):
-    """Последний текст исполнителя: поле события или транскрипт. None — взять неоткуда."""
+    """Последний текст исполнителя: поле события или agent_transcript_path. None — взять неоткуда."""
     msg = ev.get("last_assistant_message")
     if isinstance(msg, str) and msg.strip():
         return msg
-    path = ev.get("agent_transcript_path") or ev.get("transcript_path") or ""
+    # transcript_path в SubagentStop — транскрипт главной сессии, а не исполнителя: его не читаем (metis-0473)
+    path = ev.get("agent_transcript_path")
+    if not isinstance(path, str) or not path:
+        return None
     try:
         fh = open(path, encoding="utf-8")
     except OSError:

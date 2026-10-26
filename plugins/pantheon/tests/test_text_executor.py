@@ -175,6 +175,17 @@ def hook_tests():
     r = stop(raw="не json")
     check("text-stop: не JSON на входе — не держит", r.returncode == 0)
     r = stop(rep(bad), extra_env={"PANTHEON_TEXT_STOP_OFF": "1"})
+    # metis-0473 Д1: transcript_path в SubagentStop — транскрипт главной сессии; без agent_transcript_path отпускаем
+    main_tr = os.path.join(tmp, "main-session.jsonl")
+    with open(main_tr, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Готово."}]}}) + "\n")
+    ev0 = {"agent_id": "p-main", "agent_type": "palamedes", "hook_event_name": "SubagentStop", "cwd": tmp,
+           "transcript_path": main_tr}
+    r = subprocess.run([sys.executable, "-I", HOOK], input=json.dumps(ev0), env=env, capture_output=True, text=True,
+                       timeout=30)
+    check("text-stop: нет last_assistant_message и agent_transcript_path, есть transcript_path без «Итог:» — "
+          "отпускает (выход 0, без вывода)", r.returncode == 0 and not r.stdout and not r.stderr)
+
     check("text-stop: PANTHEON_TEXT_STOP_OFF=1 — выключен", r.returncode == 0)
 
 
