@@ -7,7 +7,8 @@
     таблицы «утверждение → источник», источника в строке, есть заглушка или слово из stop-words.txt направления;
     чтение отчёта из транскрипта, три возврата и отпуск, текст итога в вывод не попадает;
   - шапки ролей: нет isolation у hephaestus и apollo (в папке без git лид бы не поднялся), у palamedes — свой
-    Stop-хук, закрыты веб, Bash, Agent и Skill (навык с context: fork поднял бы агента с вебом);
+    Stop-хук, закрыты веб, Bash, Agent и Skill (навык с context: fork поднял бы агента с вебом), список tools: —
+    только файлы, ToolSearch и MCP qmd;
   - тексты: координатор передаёт лиду isolation только из папки в git и знает palamedes, brief.part — исключение «модель в вызове», имя в
     names.part, palamedes в списках окон HQ_AGENTS и COORDINATOR_AGENTS;
   - сборку ролей из шаблонов плагина (Python 3.11+): palamedes.md со Skill в запрете, лиды без isolation.
@@ -195,6 +196,15 @@ def hook_tests():
     check("text-stop: PANTHEON_TEXT_STOP_OFF=1 — выключен", r.returncode == 0)
 
 
+PALAMEDES_TOOLS = {"Read", "Write", "Edit", "Glob", "Grep", "ToolSearch", "mcp__qmd__query", "mcp__qmd__get",
+                   "mcp__qmd__multi_get", "mcp__qmd__status"}
+
+
+def palamedes_tools(h):
+    m = re.search(r"^tools:\s*(.+)$", h, re.M)
+    return {x.strip() for x in m.group(1).split(",") if x.strip()} if m else None
+
+
 def template_tests():
     t = {f[:-5]: read(os.path.join(ROLES, f)) for f in os.listdir(ROLES) if f.endswith(".tmpl")}
     for lead in ("hephaestus", "apollo"):
@@ -209,6 +219,14 @@ def template_tests():
           {"WebFetch", "WebSearch", "Bash", "Agent", "Task", "SendMessage", "mcp__claude-in-chrome",
            "mcp__chrome-devtools", "mcp__computer-use"} <= dis)
     check("palamedes.tmpl: Skill закрыт целиком (Б2 ревью #137), а не отдельный навык", "Skill" in dis)
+    tools = palamedes_tools(h)
+    check("palamedes.tmpl: есть список tools: и в нём только разрешённое — файлы, ToolSearch, MCP qmd",
+          tools is not None and {"Read", "Write", "Edit", "Glob", "Grep"} <= tools and tools <= PALAMEDES_TOOLS)
+    check("palamedes.tmpl: в tools: нет Bash, Skill, веба, Agent, SendMessage и mcp__ кроме qmd",
+          tools is not None and not any(x in ("Bash", "Skill", "Agent", "Task", "SendMessage") or x.startswith("Web")
+                                        or x.split("(")[0] in ("Bash", "Skill", "Agent", "Task")
+                                        or (x.startswith("mcp__") and not x.startswith("mcp__qmd__"))
+                                        for x in tools))
     check("palamedes.tmpl: нет предзагрузки навыков (skills:) и велено читать SKILL.md, а не звать Skill",
           re.search(r"^skills:", h, re.M) is None and "Прочитай этот файл (Read)" in pal
           and "загрузи его до начала (Skill)" not in pal)
@@ -266,6 +284,9 @@ def build_test():
               built.startswith("---\nname: " + lead + "\n") and "isolation" not in head(built))
     check("roles build: palamedes.md — Skill в disallowedTools",
           re.search(r"^disallowedTools:[^\n]*\bSkill\b", head(pal), re.M) is not None)
+    built_tools = palamedes_tools(head(pal))
+    check("roles build: palamedes.md — tools: дошёл до сборки тем же списком",
+          built_tools is not None and {"Read", "Write"} <= built_tools and built_tools <= PALAMEDES_TOOLS)
 
 
 def main():
