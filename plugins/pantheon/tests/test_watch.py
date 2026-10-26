@@ -1077,6 +1077,40 @@ def test_maintenance():
     check(not os.path.exists(e.st("maintenance.json")) and "истекла" in e.alerts(), "истёкшая метка не снята")
 
 
+def test_restart_go_picks_saved_session_0421():
+    """metis-0421: ожившая остановленная копия с тем же именем и более свежим startedAt не перехватывает restart --go:
+    берётся сессия, записавшая pantheon saved (по id); нет записи id — прежний выбор и предупреждение в stderr."""
+    go = {"PANTHEON_DRYRUN": "1", "PANTHEON_ALERTS_IN_DRYRUN": "1"}
+    saved_id = "5a5a5a5a-1111-4111-8111-111111111111"
+    for with_id in (True, False):
+        e = Env()
+        e.direction("sv-dir")
+        e.agents([bg("sv-dir", "working", saved_id, pid=41, started=T0 - 500),
+                  bg("sv-dir", "stopped", "bbbbbbbb-2222-4222-8222-222222222222", started=T0 - 10)])
+        e.run("restart", "--prepare", "обновление", t=T0)
+        sid_env = {"PANTHEON_SESSION": "sv-dir"}
+        if with_id:
+            sid_env["CLAUDE_CODE_SESSION_ID"] = saved_id
+        r = e.run("saved", "--by", "sv-dir", "--state", "STATUS.md", t=T0 + 20, extra=sid_env)
+        rec = json.load(open(e.st("maintenance", "sv-dir.json")))
+        check(r.returncode == 0 and (rec.get("sessionId") == saved_id) == with_id, f"saved пишет id: {rec} {r.stderr}")
+        r = e.run("restart", "--go", t=T0 + 40, extra=go)
+        if with_id:
+            check("[resume] sv-dir 5a5a5a5a" in r.stdout and "bbbbbbbb" not in r.stdout and "нет среди" not in r.stderr,
+                  f"--go взял не сохранённую сессию: {r.stdout!r} {r.stderr!r}")
+        else:
+            check("[resume] sv-dir bbbbbbbb" in r.stdout and "нет id сессии" in r.stderr,
+                  f"без id — прежний выбор с предупреждением: {r.stdout!r} {r.stderr!r}")
+    # id записан, но такой сессии среди сессий с этим именем уже нет — прежний выбор и предупреждение
+    e = Env()
+    e.direction("sv-dir")
+    e.agents([bg("sv-dir", "working", "bbbbbbbb-2222-4222-8222-222222222222", pid=42, started=T0 - 10)])
+    e.run("restart", "--prepare", "обновление", t=T0)
+    e.run("saved", "--by", "sv-dir", t=T0 + 20, extra={"PANTHEON_SESSION": "sv-dir", "CLAUDE_CODE_SESSION_ID": saved_id})
+    r = e.run("restart", "--go", t=T0 + 40, extra=go)
+    check("[resume] sv-dir bbbbbbbb" in r.stdout and "5a5a5a5a" in r.stderr, f"id не найден: {r.stdout!r} {r.stderr!r}")
+
+
 def test_stop_resume_all_precise():
     """resume --all снимает только метки, поставленные stop --all."""
     e = Env()

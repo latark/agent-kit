@@ -1980,6 +1980,7 @@ def resume(rest, who):
 #    работать дальше (кроме отчёта Зевсу).
 # 2) `pantheon restart --status` — кто сохранился. 3) `pantheon restart --go` — сохранившиеся останавливаются и
 #    продолжаются той же сессией с её именем и окном (новые плагины, роли и Claude Code берутся при старте процесса);
+#    сессию выбирает id, записанный `pantheon saved` (metis-0421), а не самый свежий startedAt; нет id — прежний выбор;
 #    повтор --go не трогает уже перезапущенные. Зевс — интерактивная сессия владельца: его перезапуск —
 #    `pantheon start zeus --restart` во вкладке iTerm. Метка истекла — дежурный снимает её с тревогой.
 
@@ -2168,6 +2169,21 @@ def plugins_respawn(agents, doms, t):
                         os.remove(respawn_path("respawn-ok", f))
 
 
+def saved_agent(name, mine, sid):
+    """metis-0421: сессия для restart --go — та, что записала `pantheon saved` (по id), а не самая свежая по startedAt: ожившая
+    остановленная копия с тем же именем иначе перехватила бы перезапуск. Записи или id нет в списке — прежний выбор
+    (самая свежая) и предупреждение в stderr."""
+    if sid:
+        for a in mine:
+            if a.get("sessionId") == sid:
+                return a
+        why = f"сохранённой сессии {sid[:8]} нет среди сессий с этим именем"
+    else:
+        why = "в записи saved нет id сессии"
+    print(f"pantheon restart: {name}: {why} — беру самую свежую по startedAt", file=P.sys.stderr)
+    return max(mine, key=lambda a: a.get("startedAt") or 0)
+
+
 def restart(rest, who):
     m = P.read_json(maint_path(), None)
     if rest[:1] == ["--prepare"]:
@@ -2231,7 +2247,7 @@ def restart(rest, who):
             if not mine:
                 skip.append(f"{n} (нет фоновой сессии — вкладка? перезапустить вручную)")
                 continue
-            rc = P.resume_session(n, max(mine, key=lambda a: a.get("startedAt") or 0), RESTART_TEXT, "restart",
+            rc = P.resume_session(n, saved_agent(n, mine, (saved.get(n) or {}).get("sessionId")), RESTART_TEXT, "restart",
                                   recheck=lambda n=n: "остановлено вами" if os.path.exists(P.path("stopped", n))
                                   else None)[0]
             if rc == 0:
@@ -2292,8 +2308,11 @@ def saved_cmd(rest, who):
               file=P.sys.stderr)
         return 2
     os.makedirs(P.path("maintenance"), exist_ok=True)
-    P.write_json(P.path("maintenance", name + ".json"), {"time": P.stamp(), "state": " ".join(state.split())[:300],
-                                                          "by": who})
+    rec = {"time": P.stamp(), "state": " ".join(state.split())[:300], "by": who}
+    sid = P.os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+    if own and re.fullmatch(r"[0-9a-f-]{8,64}", sid):  # metis-0421: restart --go продолжит именно эту сессию
+        rec["sessionId"] = sid
+    P.write_json(P.path("maintenance", name + ".json"), rec)
     print(f"{name}: отмечено «сохранилась». Отчитайся Зевсу строкой (SendMessage zeus) и жди перезапуска: дальше "
           "инструменты закрыты до pantheon restart --go")
     return 0
