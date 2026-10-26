@@ -12,7 +12,7 @@
   отказ Write или Edit файла в $TMPDIR («File has not been read yet») — не запускать;
 - roles/_parts/report.part: сданный лог прогона не перезаписывать и закрывать от записи (`chmod a-w`);
 - `{{> tmp}}` есть в каждом roles/*.tmpl (обход всех шаблонов, новый шаблон тоже), кроме словаря исключений NO_TMP,
-  где у каждой роли причина: momus — Bash нет (и это сверено с disallowedTools), шесть ролей — решение в metis-0371;
+  где у каждой роли причина: momus и palamedes — Bash нет (и это сверено с disallowedTools), шесть ролей — решение в metis-0371;
   устаревшее исключение (шаблона нет или tmp уже есть) — тоже красное. У шаблонов с tmp, кроме hq, есть `{{> report}}`;
 - ни в одном шаблоне и части нет предсказуемой папки: пути `$TMPDIR/tmp-…` и `tmp-…/` без `XXXXXX` (codex-dev:
   поручение — в своей папке из `mktemp -d -p "$TMPDIR" tmp-codex-<ветка>-XXXXXX`), а `mkdir -p` упомянут только в
@@ -92,6 +92,7 @@ check("report.part: «журнал» заменён на «лог прогона
 NO_BASH = "Bash нет"
 NO_TMP = {
     "momus": NO_BASH,
+    "palamedes": NO_BASH,  # исполнитель без кода (metis-0224): команд оболочки нет
     **{r: "решение в metis-0371" for r in ("apollo", "clio", "iris", "prometheus", "hestia", "chiron")},
 }
 NO_REPORT = {"hq"}  # Пританей пишет владельцу, а не отчёт DONE-01 наверх

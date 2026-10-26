@@ -325,12 +325,14 @@
 - `plugins/pantheon/hooks/agents.py` (0.11.19, P0-6) — PreToolUse `Agent|Task|Skill` в окнах Пританея и координаторов:
   главная сессия зовёт только субагентов из списка окна, навык с `context: fork` проверяется по своему `agent:`.
   Субагенты окна (лиды с их dev-*, argus) не проверяются. Списки — в `pantheon.py`: `HQ_AGENTS`, `COORDINATOR_AGENTS`
-  (argus, talos, prometheus, Explore и разработчики dev-haiku, dev-sonnet, dev-opus: координатор отдаёт им мелкие
-  правки сам; codex-dev не входит — его зовёт только лид), `COORDINATOR_EXTRA_AGENTS`, у координатора ещё свои лиды из
+  (argus, talos, prometheus, palamedes, Explore и разработчики dev-haiku, dev-sonnet, dev-opus: координатор отдаёт им
+  мелкие правки сам; codex-dev не входит — его зовёт только лид), `COORDINATOR_EXTRA_AGENTS`, у координатора ещё свои лиды из
   реестра. В окна добавлены и правила `deny Agent(…)`:
   Пританею — все лиды и главные роли, направлению — chiron, главные роли и лиды других направлений. Любой сбой хука —
   код 2, то есть отказ. После выпуска нужны `pantheon domains build` и перезапуск окон. С 0.11.23 Пританею открыт
   momus — ревизор навыка audit (`agent: momus`): только чтение и веб, пишет лишь свой отчёт в `~/ai/knowledge/Inbox`.
+  С metis-0224 Пританею и координаторам открыт palamedes — исполнитель без кода (тексты, юридический разбор,
+  синтез; без веба и Bash), модель и effort ему передают в вызове.
 - `plugins/pantheon/lib/skills_lint.py` — линтер навыков в `pantheon check` (metis-0258): SKILL.md плагина и
   `~/.claude/skills` — шапка, `name` = имя папки, `description` до 1024 знаков, ссылки на соседние файлы живы; ошибка —
   код 1, в плановом проходе (`--quiet`) — одна тревога `check-skills`. `pantheon check путь/SKILL.md [задача.md …]` —
@@ -347,6 +349,10 @@
 - `plugins/pantheon/bin/heavy` — тяжёлые команды через общую блокировку: два места, `--server` — один долгий процесс (MEM-03).
 - `plugins/pantheon/hooks/dev-stop-verify.py` — Stop разработчика (в шапке ролей dev-*): красная проверка проекта
   возвращает, не больше трёх раз; очередь `heavy` — не возврат (DONE-02).
+- `plugins/pantheon/hooks/text-stop-verify.py` — Stop исполнителя без кода palamedes (metis-0224): в отчёте строка
+  «Итог: <путь>», файл есть, таблица «утверждение → источник» заполнена, заглушек нет; не больше трёх возвратов. У palamedes список `tools:` — чтение, запись своего файла и MCP qmd;
+  Skill, Bash, веб и другие MCP закрыты. В шаблонах hephaestus и apollo `isolation` нет: координатор передаёт
+  `isolation: "worktree"` в вызове лида, только если папка направления в git, иначе лид работает в своей worktree.
 - `plugins/pantheon/scripts/git-crypt-merge.sh` — слияние файлов под git-crypt как текста (для `~/ai/pantheon` и `me/`).
 - `plugins/pantheon/scripts/decision-map-check.py` — сверка карты решений с `revisits.toml`.
 - `plugins/pantheon/scripts/release.py` — выпуск при слиянии: подтянуть main и поднять `version` тронутых плагинов
