@@ -331,8 +331,7 @@
 - `plugins/pantheon/hooks/dev-stop-verify.py` — Stop разработчика (в шапке ролей dev-*): красная проверка проекта
   возвращает, не больше трёх раз; очередь `heavy` — не возврат (DONE-02).
 - `plugins/pantheon/hooks/text-stop-verify.py` — Stop исполнителя без кода palamedes (metis-0224): в отчёте строка
-  «Итог: <путь>», файл есть, таблица «утверждение → источник» заполнена, заглушек и слов из `stop-words.txt`
-  направления нет; не больше трёх возвратов. У palamedes список `tools:` — чтение, запись своего файла и MCP qmd;
+  «Итог: <путь>», файл есть, таблица «утверждение → источник» заполнена, заглушек нет; не больше трёх возвратов. У palamedes список `tools:` — чтение, запись своего файла и MCP qmd;
   Skill, Bash, веб и другие MCP закрыты. В шаблонах hephaestus и apollo `isolation` нет: координатор передаёт
   `isolation: "worktree"` в вызове лида, только если папка направления в git, иначе лид работает в своей worktree.
 - `plugins/pantheon/scripts/git-crypt-merge.sh` — слияние файлов под git-crypt как текста (для `~/ai/pantheon` и `me/`).
