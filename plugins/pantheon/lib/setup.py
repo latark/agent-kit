@@ -197,7 +197,8 @@ def step_github():
 BACKUP = "резервная копия"
 BACKUP_REPO = "pantheon-hq"  # «личный штаб»: не путать с agent-kit и его плагином pantheon
 BACKUP_SERVICE = "pantheon-git-crypt"
-BACKUP_OLD_REF = "refs/pantheon/pre-backup"  # прежняя история до снимка (пишется один раз)
+BACKUP_OLD_REF = "refs/pantheon/pre-backup"  # прежняя история до снимка (повтор после сбоя — pre-backup-2 и т. д.)
+BACKUP_SNAPSHOT_MSG = "pantheon: резервная копия (git-crypt)"
 BACKUP_LATER = "копии нет: при потере Mac данные пропадут; включить позже: `pantheon-setup --add backup`"
 BACKUP_ATTRS = "* filter=git-crypt diff=git-crypt\n.gitattributes !filter !diff\n.gitignore !filter !diff\n"
 CRYPT_HEADER = b"\x00GITCRYPT\x00"
@@ -245,6 +246,29 @@ def backup_plain_files(tree):
     return plain, None
 
 
+def backup_keep_old(old):
+    """Голова до снимка остаётся достижимой из refs/pantheon/*. Первый раз — BACKUP_OLD_REF; при повторе (сбой на
+    GitHub, потом коммит поверх снимка) — новая ссылка pre-backup-2, -3…, чтобы коммиты не потерялись. Если голова
+    уже достижима из такой ссылки или это сам прежний снимок (без родителей) — ничего не пишет. → (ссылка|None, ошибка)."""
+    refs = pgit("for-each-ref", "--format=%(refname)", "refs/pantheon/")
+    if refs.returncode != 0:
+        return None, "git for-each-ref: " + last_line(refs)
+    if pgit("for-each-ref", "--contains", old, "refs/pantheon/").stdout.strip():
+        return None, None
+    c = pgit("log", "-1", "--format=%P|%s", old).stdout.strip()
+    if c == "|" + BACKUP_SNAPSHOT_MSG:  # прежний снимок: его дерево воспроизведётся, терять нечего
+        return None, None
+    have = set(refs.stdout.split())
+    ref, n = BACKUP_OLD_REF, 1
+    while ref in have:
+        n += 1
+        ref = f"{BACKUP_OLD_REF}-{n}"
+    u = pgit("update-ref", ref, old, "")
+    if u.returncode != 0:
+        return None, f"git update-ref {ref}: " + last_line(u)
+    return ref, None
+
+
 def backup_snapshot():
     """Коммит без родителей из текущих файлов, прошедших фильтр git-crypt, — ветка переставляется на него.
     Прежние коммиты были бы открытыми в истории push; они остаются локально в refs/pantheon/pre-backup.
@@ -271,11 +295,13 @@ def backup_snapshot():
     if pgit("var", "GIT_COMMITTER_IDENT").returncode != 0:  # на новом Mac git может не знать имени
         env = dict(os.environ, GIT_AUTHOR_NAME="Pantheon", GIT_AUTHOR_EMAIL="pantheon@localhost",
                    GIT_COMMITTER_NAME="Pantheon", GIT_COMMITTER_EMAIL="pantheon@localhost")
-    c = pgit("commit-tree", tree, "-m", "pantheon: резервная копия (git-crypt)", env=env)
+    c = pgit("commit-tree", tree, "-m", BACKUP_SNAPSHOT_MSG, env=env)
     if c.returncode != 0:
         return None, "git commit-tree: " + last_line(c)
     if old:
-        pgit("update-ref", BACKUP_OLD_REF, old, "")  # только первый раз: исходная история
+        saved, err = backup_keep_old(old)
+        if err:
+            return None, err
     u = pgit("update-ref", f"refs/heads/{branch}", c.stdout.strip(), old)
     if u.returncode != 0:
         return None, f"ветка {branch} сдвинулась во время шага (плановый коммит?) — запустите снова: " + last_line(u)
@@ -301,7 +327,7 @@ def step_backup(name=BACKUP_REPO):
         return False
     if not ask(f"Завести резервную копию в приватном репозитории GitHub ({name}, файлы под шифрованием "
                f"git-crypt, ключ — в Связке ключей)? История git в {PANTHEON} заменится одним снимком: "
-               f"прежние коммиты останутся только на этом Mac, в {BACKUP_OLD_REF}."):
+               f"прежние коммиты останутся только на этом Mac, в {BACKUP_OLD_REF} (при повторе — в -2, -3…)."):
         report(BACKUP, "пропуск", BACKUP_LATER)
         return False
     inited = os.path.isdir(os.path.join(PANTHEON, ".git", "git-crypt"))

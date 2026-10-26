@@ -133,12 +133,17 @@ def new_root(with_uv=False, with_claude=True, with_notifier=False, with_crypt=Tr
                 '  export-key) printf "%s" "$GC_KEY" > "$2";;\nesac\nexit 0\n')
     # Связка ключей — файл KC_FILE; настоящий /usr/bin/security в пробе не вызывается никогда
     sh_file(os.path.join(stubs, "security"),
+            # в журнал — только argv; команда из stdin (`security -i`) в журнал идёт одним глаголом, без аргументов,
+            # а целиком — в «Связку» (KC_FILE): так тест видит, что ключ дошёл, и что в argv его не было
             'echo "security $*" >> "$STUB_LOG"\n'
-            '[ "$FAIL_CMD" = "security $1" ] && { echo "security: заглушка упала" >&2; exit 1; }\n'
-            'case "$1" in\n'
+            'cmd="$*"\n'
+            'if [ "$1" = "-i" ]; then read -r cmd; echo "security ${cmd%% *}" >> "$STUB_LOG"; fi\n'
+            'verb="${cmd%% *}"\n'
+            '[ "$FAIL_CMD" = "security $verb" ] && { echo "security: заглушка упала" >&2; exit 1; }\n'
+            'case "$verb" in\n'
             '  find-generic-password) [ -s "$KC_FILE" ]; exit $?;;\n'
             '  add-generic-password) [ -s "$KC_FILE" ] && { echo "already exists" >&2; exit 45; }; '
-            'echo "$*" >> "$KC_FILE";;\nesac\nexit 0\n')
+            '[ "$SEC_SILENT" = "1" ] && exit 0; echo "$cmd" >> "$KC_FILE";;\nesac\nexit 0\n')
     for n in ("brew",) + (("terminal-notifier",) if with_notifier else ()):
         sh_file(os.path.join(stubs, n), f'echo "{n} $*" >> "$STUB_LOG"\nexit 0\n')
     env = {"PATH": stubs + ":/usr/bin:/bin", "HOME": home, "PANTHEON_HOME": os.path.join(home, "ai", "pantheon"),
@@ -379,8 +384,11 @@ def main():
     check("копия: gh repo create pantheon-hq --private, один раз",
           [x for x in lg if x.startswith("gh repo")] == ["gh repo create pantheon-hq --private"], lg)
     sec = [x for x in lg if x.startswith("security add-generic-password")]
-    check("копия: ключ в Связке — служба pantheon-git-crypt, значение base64 ключа",
-          len(sec) == 1 and "-s pantheon-git-crypt" in sec[0] and f"-w {GC_KEY_B64}" in sec[0], sec)
+    kc = open(env["KC_FILE"], encoding="utf-8").read()
+    check("копия: ключ в Связке — одна запись через stdin: служба pantheon-git-crypt, значение base64 ключа",
+          len(sec) == 1 and "security -i" in lg and "-s \"pantheon-git-crypt\"" in kc and GC_KEY_B64 in kc, (sec, kc))
+    check("копия: ключа (ни сырого, ни base64) нет в аргументах ни одного вызова security и вообще в журнале заглушек",
+          not any(GC_KEY_B64 in x or GC_KEY in x or "-w" in x.split() for x in lg if x.startswith("security")), lg)
     check("копия: ключа (ни сырого, ни base64) нет в выводе установщика",
           GC_KEY not in out and GC_KEY_B64 not in out, out[-800:])
     check("копия: файла с ключом в пробе не осталось (временный удалён)", leaked_key_files(root, env) == [],
@@ -429,6 +437,46 @@ def main():
           and len(git_out(env, env["GH_REMOTE"], "rev-list", "--all").split()) == 1, (r.returncode, r.stdout[-600:]))
     check("--add backup: старая история цела локально в refs/pantheon/pre-backup",
           git_out(env, pan, "rev-parse", "refs/pantheon/pre-backup") == old, old)
+
+    # повтор после сбоя на GitHub: коммит между попытками не теряется (Б1)
+    root, env, _ = new_root(with_uv=True)
+    pan = prep_pan(env, history=True)
+    old = git_out(env, pan, "rev-parse", "HEAD")
+    env["FAIL_CMD"] = "gh repo"
+    r1 = setup(env, "да\n", "--add", "backup")
+    s1 = git_out(env, pan, "rev-parse", "HEAD")
+    gc = ["git", "-C", pan, "-c", "user.name=t", "-c", "user.email=t@t"]
+    with open(os.path.join(pan, "board.md"), "a", encoding="utf-8") as fh:
+        fh.write("после первого снимка\n")
+    subprocess.run(gc + ["commit", "-q", "-a", "-m", "между попытками"], check=True, env=env)
+    c1 = git_out(env, pan, "rev-parse", "HEAD")
+    env.pop("FAIL_CMD")
+    r2 = setup(env, "да\n", "--add", "backup")
+    holders = git_out(env, pan, "for-each-ref", "--contains", c1, "--format=%(refname)", "refs/pantheon/")
+    check("повтор после сбоя gh: коммит между попытками достижим из refs/pantheon/*, старая история тоже",
+          r1.returncode == 1 and r2.returncode == 0 and holders != ""
+          and git_out(env, pan, "for-each-ref", "--contains", old, "--format=%(refname)", "refs/pantheon/") != ""
+          and git_out(env, pan, "rev-parse", "refs/pantheon/pre-backup") == old,
+          (r1.returncode, r2.returncode, holders, r2.stdout[-500:]))
+    # повтор без коммитов между попытками: лишних ссылок нет
+    root, env, _ = new_root(with_uv=True)
+    pan = prep_pan(env, history=True)
+    env["FAIL_CMD"] = "gh repo"
+    setup(env, "да\n", "--add", "backup")
+    env.pop("FAIL_CMD")
+    r2 = setup(env, "да\n", "--add", "backup")
+    refs = git_out(env, pan, "for-each-ref", "--format=%(refname)", "refs/pantheon/").split()
+    check("повтор без новых коммитов: код 0, ссылка одна — pre-backup", r2.returncode == 0
+          and refs == ["refs/pantheon/pre-backup"], (r2.returncode, refs, r2.stdout[-400:]))
+
+    # `security -i` вышел с кодом 0, но записи нет — шаг не врёт «ок»
+    root, env, _ = new_root(with_uv=True)
+    prep_pan(env)
+    env["SEC_SILENT"] = "1"
+    r = setup(env, "да\n", "--add", "backup")
+    check("security -i без записи в Связке: «не вышло», gh repo create не звали, код 1",
+          r.returncode == 1 and "[не вышло] резервная копия" in r.stdout
+          and not any(x.startswith("gh repo") for x in log_of(env)), (r.returncode, r.stdout[-500:]))
 
     for fail, why, github in (("git-crypt init", "git-crypt init: git-crypt init: заглушка упала", False),
                               ("git-crypt export-key", "git-crypt export-key: заглушка упала", False),
