@@ -18,9 +18,9 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
      talos          — `pantheon review talos <owner/repo> <PR> <SHA>`, только agent_type talos.
    Строка: {"v":1,"kind","repo":[owner/repo…],"pr":N|null,"sha","by":{agent_type,agent_id,session_id},"cwd","time",
    "tool_use_id","cmd"}, у accept (и у reject с полями) — ещё "checklist":{"opened","ran","unchecked"}, у обоих — "models":[…] или
-   "models_note" (metis-0176). Подделать запись роль не может: ~/.local/state/pantheon закрыт ролям песочницей и
-   pantheon-acl, а вид записи хук берёт из agent_type события, а не из текста команды. Битые строки при чтении
-   пропускаются: битая запись может только не дать разрешения.
+   "models_note" (metis-0176), у пустого "models": [] — оба (metis-0413). Подделать запись роль не может:
+   ~/.local/state/pantheon закрыт ролям песочницей и pantheon-acl, а вид записи хук берёт из agent_type события, а не
+   из текста команды. Битые строки при чтении пропускаются: битая запись может только не дать разрешения.
 2. merge_problem — правило gh pr merge: кто сливает (координатор или его лид), чьё направление, защиты, затем запор:
    один номер PR, без --auto и --admin, ровно один --match-head-commit <SHA> (его сверяет GitHub), все репозитории
    команды — из [merge_repos] направления, запись tests на (repo, SHA), вердикты argus на (repo, PR, SHA): рецензент —
@@ -54,7 +54,8 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    «модель: claude-opus» (metis-0176): accept другой модели — как будто его нет, reject любой модели в силе.
    Незаменённый шаблон «<ID>» в ran — отказ ещё до записи. Модель сверяется и с транскриптом argus: record пишет в
    accept и reject поле "models" — значения message.model его assistant-записей; в защитах accept засчитывается,
-   только если все они claude-opus и среди них модель из ran. Транскрипта нет — поле "models_note", судим по ran.
+   только если все они claude-opus и среди них модель из ran. Транскрипта нет — поле "models_note", судим по ran;
+   транскрипт найден, а моделей в нём нет — "models": [] и пометка NO_MODELS, в защитах accept не в счёт (metis-0413).
    Последним во всех режимах — проверки GitHub (metis-0297), один gh pr view на Д3 и проверки: PR на этом SHA, rollup зелёный;
    красная или идущая проверка, нет ответа gh — отказ; проверок нет — пропуск, только если .github/workflows нет ни на
    head, ни на base PR.
@@ -132,6 +133,7 @@ UNFILLED_ID = re.compile(r"<\s*id\s*>", re.I)
 RAN_MODEL = re.compile(r"\s*модель:\s*(claude-[a-z0-9.-]*[a-z0-9])", re.I)  # ID модели из --ran
 SEGMENT_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # session_id и agent_id в пути транскрипта — одним сегментом
 NO_TRANSCRIPT = "транскрипта argus нет — модель по --ran"
+NO_MODELS = "транскрипт argus найден, но моделей в нём нет — модель не подтвердить"  # metis-0413: не молча как NO_TRANSCRIPT
 UNFILLED_ID_HINT = ("в --ran остался шаблон «<ID>»: подставь ID своей модели из системной подсказки — "
                     "`--ran \"модель: claude-opus-…, что запустил\"`")
 # пустая команда тестов: программа, которая ничего не проверяет (защита от ошибки, список короткий и явный); ещё
@@ -739,10 +741,12 @@ def record(event):
         rec["checklist"] = checklist
     if rec_kind in ("accept", "reject"):  # модель argus — из данных сессии, а не со слов ran (metis-0176)
         models = agent_models(event)
-        if models:
-            rec["models"] = models
-        else:
+        if models is None:
             rec["models_note"] = NO_TRANSCRIPT
+        else:  # [] — транскрипт найден, моделей нет (сменился формат?): в защитах не в счёт, а не «как без транскрипта»
+            rec["models"] = models
+            if not models:
+                rec["models_note"] = NO_MODELS
     append_record(rec)
     return rec_kind
 
@@ -750,8 +754,10 @@ def record(event):
 def agent_models(event):
     """Модели сессии argus по её транскрипту (metis-0176): отсортированные значения message.model assistant-записей,
     без «<synthetic>»; [] — моделей в нём нет, None — транскрипта нет или не прочесть. Путь у субагента —
-    <папка transcript_path>/<session_id>/subagents/[<подпапка>/]agent-<agent_id>.jsonl (так Claude Code кладёт
-    транскрипты субагентов), у главной сессии (agent_id нет) — сам transcript_path."""
+    <папка transcript_path>/<session_id>/subagents/agent-<agent_id>.jsonl, у агента из Workflow — на две подпапки
+    глубже, subagents/workflows/<runId>/agent-<agent_id>.jsonl (transcriptSubdir Claude Code, metis-0413); ищется и
+    одна подпапка. У главной сессии (agent_id нет) — сам transcript_path. Свой файл субагента не нашёлся — None, а не
+    главный transcript_path: он чужой (сессия того, кто позвал argus)."""
     tp, sid, aid = (event.get(k) for k in ("transcript_path", "session_id", "agent_id"))
     if not isinstance(tp, str) or not os.path.isabs(tp):
         return None
@@ -760,7 +766,8 @@ def agent_models(event):
                 and SEGMENT_ID.fullmatch(sid)):
             return None
         base, name = os.path.join(os.path.dirname(tp), sid, "subagents"), f"agent-{aid}.jsonl"
-        paths = [os.path.join(base, name)] + sorted(glob.glob(os.path.join(glob.escape(base), "*", name)))
+        paths = [os.path.join(base, name)] + [p for sub in (("*",), ("*", "*")) for p in
+                                              sorted(glob.glob(os.path.join(glob.escape(base), *sub, name)))]
     else:
         paths = [tp]
     for path in paths:
@@ -788,13 +795,16 @@ def agent_models(event):
 def opus_problem(rec):
     """Почему «принять» в защитах не засчитан (metis-0176), или None — засчитан: ran начинается с «модель:
     claude-opus», а если в записи есть модели из транскрипта — все они claude-opus и среди них модель из ran (тот же
-    ID или он с датой: claude-opus-4-1 и claude-opus-4-1-20250805)."""
+    ID или он с датой: claude-opus-4-1 и claude-opus-4-1-20250805). Транскрипт найден, а моделей нет ("models": []) —
+    не засчитан с причиной NO_MODELS (metis-0413)."""
     ran = rec["checklist"]["ran"]
     if not OPUS_RAN.match(ran):
         return "по --ran"
     if "models" not in rec:
         return None  # транскрипта не было (models_note) или запись до metis-0176 — судим по ran
     seen = rec["models"]
+    if seen == []:
+        return NO_MODELS  # metis-0413: транскрипт без моделей не равен «транскрипта нет»
     if not isinstance(seen, list) or not seen or not all(isinstance(m, str) for m in seen):
         return "модели транскрипта не разобрать"
     if not all(m.startswith("claude-opus") for m in seen):
