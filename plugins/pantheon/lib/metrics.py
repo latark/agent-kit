@@ -22,6 +22,10 @@ review-*.md направления с id в заголовке (строка «�
 его заметки, ответы и переносы; возврат после слияния — другие задачи со словами revert, hotfix, «откатили» в одной
 строке с id.
 
+Замер «Лимит» (metis-0390): в своде недели — цена принятой задачи (токены и $ всех кругов, разработчик + argus, на
+принятую: последний круг argus «принять» или PR слит) и вмешательства владельца на принятую (заметки, ответы, переносы,
+возвраты, доля без вмешательства) по неделям; меньше 20 принятых — «мало данных».
+
 Свод — по исполнителю×модели×effort и по направлениям, за неделю и с начала: metrics/week-<ГГГГ-Wнн>.md и заметки
 Доска/Учёт/*.md для видов «Учёт недели» и «Учёт с начала» на Пульте. Модуль без tomllib: идёт и на системном 3.9.
 """
@@ -559,13 +563,52 @@ def latest(rows):
     return list(by.values())
 
 
-def _group(rows):
+MERGED_RE = re.compile(r"\bPR\b.*\bслит[аоы]?\b|\bслит[аоы]?\b.*\bPR\b|\bPR\b.*\bmerged\b", re.I)
+NOT_MERGED_RE = re.compile(r"\bне\s+слит|\bnot\s+merged", re.I)
+FEW = 20  # меньше принятых задач в ячейке — «мало данных» (решение владельца [metis-0389] «А», 23.10)
+
+
+def merged_index(tasks):
+    """{id задач, в журнале которых есть строка «PR … слит»} — слитый PR принимает задачу и без вердикта argus."""
+    out = set()
+    for tid, (_, _, body) in tasks.items():
+        if any(MERGED_RE.search(ln) and not NOT_MERGED_RE.search(ln) for ln in (body or "").split("\n")):
+            out.add(tid)
+    return out
+
+
+def accepted(r, merged=()):
+    """Задача принята (metis-0390): закрыта done и либо последний круг argus «принять» (кругов больше нуля и не все
+    «вернуть»), либо PR слит (id в merged). Отменённые и закрытые без проверки и слияния не принятые."""
+    if r.get("status") != "done":
+        return False
+    rounds = r.get("argus_rounds") or 0
+    return (rounds > 0 and (r.get("argus_rejects") or 0) < rounds) or r.get("id") in merged
+
+
+def _group(rows, merged=()):
     done = [r for r in rows if r.get("status") == "done"]
     known = [r for r in done if r.get("argus_first_pass") is not None]
     rounds = [r["argus_rounds"] for r in done if r.get("argus_rounds")]
     used = [r for r in rows if r.get("tokens_total")]
     hours = sorted(r["hours"] for r in done if isinstance(r.get("hours"), (int, float)))
+    acc = [r for r in done if accepted(r, merged)]
+    acc_used = [r for r in acc if r.get("tokens_total")]
+    n = len(acc)
+    own = lambda k: sum(r.get(k) or 0 for r in acc)
     return {
+        # цена принятой задачи: расход принятых (разработчик + argus всех кругов) / принятые; «всего» — весь расход
+        # группы, в том числе отменённых и не принятых, на принятую: сколько стоит принятая вместе с браком
+        "accepted": n, "few": n < FEW,
+        "acc_tokens": int(sum(r["tokens_total"] for r in acc_used) / len(acc_used)) if acc_used else None,
+        "acc_usd": round(sum(r.get("usd") or 0 for r in acc_used) / len(acc_used), 2) if acc_used else None,
+        "all_usd_per_acc": round(sum(r.get("usd") or 0 for r in rows) / n, 2) if n else None,
+        "owner_notes": round(own("owner_notes") / n, 2) if n else None,
+        "owner_answers": round(own("owner_answers") / n, 2) if n else None,
+        "owner_moves": round(own("owner_moves") / n, 2) if n else None,
+        "owner_returns": round(own("owner_returns") / n, 2) if n else None,
+        "no_owner": (sum(1 for r in acc if not any(r.get(k) for k in (
+            "owner_notes", "owner_answers", "owner_moves", "owner_returns"))) / n) if n else None,
         "tasks": len(done), "dropped": len(rows) - len(done),
         "first_pass": sum(1 for r in known if r["argus_first_pass"]), "first_known": len(known),
         "rounds_avg": round(sum(rounds) / len(rounds), 2) if rounds else None,
@@ -579,7 +622,7 @@ def _group(rows):
     }
 
 
-def summary(rows, t, post=None):
+def summary(rows, t, post=None, merged=()):
     """Свод: {"week": …, "all": …}, в каждом {"by_executor": {(исполнитель, модель, effort): группа},
     "by_direction": {направление: группа}}. post — свежий индекс возвратов после слияния (заменяет записанный)."""
     rows = latest(rows)
@@ -588,13 +631,19 @@ def summary(rows, t, post=None):
     w0 = week_start(t)
     week = [r for r in rows if (epoch(str(r.get("closed_at") or "")) or 0) >= w0]
     out = {"week_name": week_of(t)}
+    byweek = defaultdict(list)
+    for r in rows:
+        c = epoch(str(r.get("closed_at") or ""))
+        if c:
+            byweek[week_of(c)].append(r)
+    out["weeks"] = {k: _group(v, merged) for k, v in sorted(byweek.items())}
     for name, rs in (("week", week), ("all", rows)):
         ex, di = defaultdict(list), defaultdict(list)
         for r in rs:
             ex[(r.get("executor") or "—", r.get("model") or "—", r.get("effort") or "—")].append(r)
             di[r.get("direction") or "—"].append(r)
-        out[name] = {"by_executor": {k: _group(v) for k, v in ex.items()},
-                     "by_direction": {k: _group(v) for k, v in di.items()}, "total": _group(rs)}
+        out[name] = {"by_executor": {k: _group(v, merged) for k, v in ex.items()},
+                     "by_direction": {k: _group(v, merged) for k, v in di.items()}, "total": _group(rs, merged)}
     return out
 
 
@@ -619,6 +668,24 @@ def _table(first, groups):
     return "\n".join(lines)
 
 
+def _limit_table(weeks, base=("2026-W42", "2026-W43")):
+    """Таблица замера «Лимит» (metis-0390): по неделям; база «до пачки» — W42 и W43. Меньше FEW принятых — «мало данных»."""
+    f = lambda v, fm: fm.format(v) if v is not None else "—"
+    head = ["неделя", "принято", "токенов/принятую", "$/принятую", "$ всего/принятую", "заметок", "ответов",
+            "переносов", "возвратов владельцем", "без вмешательства", "примечание"]
+    lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+    for w, g in sorted(weeks.items()):
+        note = ["база до пачки"] if w in base else []
+        if g["few"]:
+            note.append("мало данных")
+        lines.append("| " + " | ".join([
+            w, str(g["accepted"]), f(g["acc_tokens"] and round(g["acc_tokens"] / 1000), "{}K"),
+            f(g["acc_usd"], "{:.2f}"), f(g["all_usd_per_acc"], "{:.2f}"), f(g["owner_notes"], "{:.2f}"),
+            f(g["owner_answers"], "{:.2f}"), f(g["owner_moves"], "{:.2f}"), f(g["owner_returns"], "{:.2f}"),
+            f(g["no_owner"] is not None and round(g["no_owner"] * 100), "{}%"), ", ".join(note) or "—"]) + " |")
+    return "\n".join(lines)
+
+
 def week_md(s, t):
     parts = [f"# Учёт задач: неделя {s['week_name']}", "",
              "Собрано из metrics/tasks.jsonl (pantheon metrics, metis-0294). "
@@ -626,6 +693,12 @@ def week_md(s, t):
              "Столбцы: «с первого круга» — итог первого проверенного head «принять» у всех argus, из задач, где он "
              "известен; «кругов» — среднее число проверенных head (SHA), а не вердиктов; токены и $ — среднее по "
              "задачам, где расход нашёлся; «возвратов» — круги с итогом «вернуть» и переносы владельцем назад; «после слияния» — задачи, на которые ссылается revert или hotfix.", ""]
+    parts += ["## Замер пачки «Лимит»: цена принятой задачи и вмешательства владельца (metis-0390)", "",
+              "Принятая — закрыта done, и последний круг argus «принять» либо PR слит. Токены и $ — среднее по принятым: "
+              "все круги (разработчик + argus); «$ всего/принятую» — весь расход недели, включая отменённые и не "
+              f"принятые, на принятую. Вмешательства — среднее на принятую задачу. Меньше {FEW} принятых — «мало "
+              "данных». «% недели на задачу» в учёте не хранится — только токены и $ (оценка).", "",
+              _limit_table(s.get("weeks", {})), ""]
     for name, label in (("week", f"Неделя {s['week_name']}"), ("all", "С начала учёта")):
         parts += [f"## {label}", "", "### По исполнителю × модели × effort", "",
                   _table(["исполнитель", "модель", "effort"], s[name]["by_executor"]), "",
@@ -707,7 +780,7 @@ def sync_pult(board, notes):
 
 def publish(ctx, tasks):
     """Свод → metrics/week-<неделя>.md и заметки Пульта (если задана доска). → свод."""
-    s = summary(read_rows(ctx.rows_path), ctx.t, post_merge_index(tasks))
+    s = summary(read_rows(ctx.rows_path), ctx.t, post_merge_index(tasks), merged_index(tasks))
     write_if_changed(os.path.join(ctx.pantheon, "metrics", f"week-{s['week_name']}.md"), week_md(s, ctx.t))
     if ctx.board and os.path.isdir(ctx.board):
         sync_pult(ctx.board, pult_notes(s, ctx.t))

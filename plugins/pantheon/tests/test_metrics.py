@@ -514,7 +514,59 @@ def cli():
           p.returncode == 0 and "Traceback" not in p.stderr, (p.returncode, p.stderr[-300:]))
 
 
+def limit():
+    """Замер «Лимит» (metis-0390): цена принятой задачи и вмешательства владельца на принятую."""
+    def row(i, day, status="done", rounds=1, rejects=0, usd=10.0, tok=1000, **ow):
+        d = f"2026-10-{day:02d}T12:00:00"
+        r = {"id": f"x-{i:04d}", "status": status, "closed_at": d, "closed": d[:10], "direction": "d",
+             "executor": "e", "model": "m", "effort": "h", "argus_rounds": rounds, "argus_rejects": rejects,
+             "argus_first_pass": (rejects == 0) if rounds else None, "usd": usd, "tokens_total": tok, "returns": 0,
+             "owner_notes": 0, "owner_answers": 0, "owner_moves": 0, "owner_returns": 0}
+        r.update(ow)
+        return r
+
+    # W42 (12–18.10): 20 принятых по 10 $ (две с заметками, одна с возвратом), одна принятая со второго круга за 20 $,
+    # отменённая 100 $ и не принятая (все круги «вернуть») 50 $; W43 (19–25.10): 2 принятых, третья — слитый PR без
+    # вердиктов (id в merged)
+    rows = [row(i, 14, owner_notes=2 if i < 2 else 0, owner_returns=1 if i == 0 else 0) for i in range(20)]
+    rows += [row(30, 15, status="dropped", rounds=0, usd=100.0, tok=9000), row(31, 15, rounds=2, rejects=2, usd=50.0),
+             row(32, 15, rounds=3, rejects=1, usd=20.0, tok=2000)]
+    rows += [row(40, 20, usd=4.0, tok=400), row(41, 21, usd=6.0, tok=600, owner_answers=3),
+             row(42, 22, rounds=0, usd=8.0, tok=800)]
+    tmp = tempfile.mkdtemp(prefix="tmp-metrics-limit-")
+    atexit.register(shutil.rmtree, tmp, True)
+    path = os.path.join(tmp, "tasks.jsonl")
+    write_jsonl(path, rows)  # фикстура tasks.jsonl
+    s = M.summary(M.read_rows(path), datetime(2026, 10, 26, 12, 0).timestamp(), merged={"x-0042"})
+    w42, w43 = s["weeks"]["2026-W42"], s["weeks"]["2026-W43"]
+    check("замер: W42 — принято 21 (отменённая и все-«вернуть» не в счёте), W43 — 3 (слитый PR принят без вердикта)",
+          (w42["accepted"], w43["accepted"]) == (21, 3), (w42["accepted"], w43["accepted"]))
+    check("замер: цена принятой в W42 — (200 + 20) / 21 $ и токенов (20000 + 2000) / 21, а не по всем задачам",
+          w42["acc_usd"] == round(220 / 21, 2) and w42["acc_tokens"] == int(22000 / 21), w42)
+    check("замер: расход всего на принятую в W42 включает отменённую и не принятую: 370 / 21",
+          w42["all_usd_per_acc"] == round(370 / 21, 2), w42["all_usd_per_acc"])
+    check("замер: вмешательства на принятую — заметок 4/21, возвратов 1/21, без вмешательства 19 из 21",
+          (w42["owner_notes"], w42["owner_returns"], round(w42["no_owner"] * 21)) == (round(4 / 21, 2), round(1 / 21, 2), 19),
+          w42)
+    check("замер: W43 — ответов 3/3 = 1, без вмешательства 2 из 3",
+          (w43["owner_answers"], round(w43["no_owner"] * 3)) == (1.0, 2), w43)
+    check("замер: «мало данных» — W42 (21 принятая) нет, W43 (3) есть", (w42["few"], w43["few"]) == (False, True))
+    check("замер: ровно 19 принятых — мало данных, 20 — нет",
+          M.summary([row(i, 14) for i in range(19)], T0)["weeks"]["2026-W42"]["few"] is True
+          and M.summary([row(i, 14) for i in range(20)], T0)["weeks"]["2026-W42"]["few"] is False)
+    check("замер: нет принятых — прочерк, не деление на ноль",
+          M.summary([row(1, 14, status="dropped", rounds=0)], T0)["weeks"]["2026-W42"]["acc_usd"] is None)
+    md = M.week_md(s, T0)
+    check("week md: раздел замера, база до пачки и «мало данных» в строках W42/W43",
+          "## Замер пачки «Лимит»" in md and "| 2026-W42 | 21 |" in md and "база до пачки" in md
+          and "| 2026-W43 | 3 |" in md and "мало данных" in md, md[:900])
+    t = {"a-1": ("p", {}, "- 2026-10-19 10:00 — x: PR #5 слит"), "a-2": ("p", {}, "- 2026-10-19 — PR #6 не слит"),
+         "a-3": ("p", {}, "- 2026-10-19 — слит PR #7 в main"), "a-4": ("p", {}, "- 2026-10-19 — ветка слита")}
+    check("merged_index: «PR слит» да, «не слит» и без PR — нет", M.merged_index(t) == {"a-1", "a-3"}, M.merged_index(t))
+
+
 unit()
+limit()
 argus_repo()
 argus_multi()
 argus_sha()
