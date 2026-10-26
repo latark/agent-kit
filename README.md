@@ -31,11 +31,25 @@
   у каждого итог «ок / пропуск / не вышло»: путь Python в `config.toml`; маркетплейс и плагины guard, pantheon,
   project-tools; пустой `~/ai/pantheon` из `plugins/pantheon/template/pantheon/` с `git init`; `pantheon install`;
   `pantheon roles build`; вход git в GitHub через gh (`gh auth setup-git` — только после явного «да»);
-  terminal-notifier; проверка личных следов (`scripts/check-traces.py` по файлам установщика и собранным ролям, маркеры —
+  резервная копия (ниже); terminal-notifier; проверка личных следов (`scripts/check-traces.py` по файлам установщика и собранным ролям, маркеры —
   `--markers ФАЙЛ` или `PANTHEON_TRACE_MARKERS`, нет файла — пропуск); Codex (`--codex`, `--no-codex`, без флагов —
   вопрос, по умолчанию нет). `pantheon-setup --add codex` — только шаг Codex на готовой установке. К системе
   `setup.py` ходит через `lib/platform_macos.py` (Homebrew, launchd, sandbox-exec, Связка ключей, текст про
   уведомления). Тест — `plugins/pantheon/tests/test_setup.py`, все внешние программы в нём — заглушки.
+- Резервная копия (metis-0476): шаг установщика после входа в GitHub и `pantheon-setup --add backup` на готовой
+  установке. Идёт, только если gh вошёл и стоит git-crypt (`brew install git-crypt`), и только после «да» на вопрос;
+  иначе строка «копии нет: при потере Mac данные пропадут». Уже задан `origin` — пропуск, второй репозиторий не
+  заводится. Порядок: `git-crypt init` → ключ (`git-crypt export-key` во временный файл в `$TMPDIR`, сразу удаляется)
+  base64 в Связку ключей, служба `pantheon-git-crypt` (запись уже есть — отказ, старый ключ не перезаписывается) →
+  `.gitattributes` (`* filter=git-crypt diff=git-crypt`, `.gitattributes` и `.gitignore` открыты) → снимок: коммит
+  без родителей, ветка переставляется на него, прежняя история остаётся локально в `refs/pantheon/pre-backup` (иначе
+  старые коммиты ушли бы в GitHub открытыми) → проверка, что каждый файл снимка начинается с заголовка git-crypt →
+  только потом `gh repo create <имя> --private` (`--backup-name ИМЯ`, по умолчанию `pantheon-hq`), `origin` и
+  `git push -u`. Сбой до GitHub ничего снаружи не создаёт. Связка ключей не уходит в iCloud, поэтому установщик
+  просит сохранить ключ ещё и вне Mac (менеджер паролей; показать — `security find-generic-password -s
+  pantheon-git-crypt -w`). Вернуть на другом Mac, положив ключ в его Связку под той же службой: `git clone <адрес> ~/ai/pantheon`, затем в этой папке
+  `security find-generic-password -s pantheon-git-crypt -w | base64 -d > "$TMPDIR/k" && git-crypt unlock "$TMPDIR/k"`
+  и `rm "$TMPDIR/k"`.
 - Настройки человека — `STATE/config.toml` (`~/.local/state/pantheon/`, свои у каждого Mac): `python`, таблица
   `[executors] set` (Claude всегда, Codex — дополнение) и `[codex]` (состояние проверки). Читает и пишет только
   `lib/pconfig.py` (`load`, `update`).

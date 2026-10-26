@@ -64,3 +64,15 @@ def keychain_has(service):
     """Есть ли в Связке ключей запись службы. Значение не читается (нет флагов -w и -g)."""
     r = _run(["security", "find-generic-password", "-s", service])
     return r.returncode == 0
+
+
+def keychain_add(service, account, secret):
+    """Новая запись Связки ключей (без -U: существующую не перезаписывает). → (ok, причина). Секрет уходит только
+    в argv `security`; в причину отказа идёт последняя строка stderr, а не argv."""
+    try:
+        r = _run(["security", "add-generic-password", "-s", service, "-a", account, "-w", secret], timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, type(e).__name__
+    if r.returncode != 0:
+        return False, ((r.stderr or "").strip().splitlines() or [f"security: код {r.returncode}"])[-1]
+    return True, ""

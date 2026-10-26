@@ -3,12 +3,14 @@
 
 Корень tempfile.mkdtemp(prefix="tmp-setup-") в $TMPDIR; HOME, PANTHEON_HOME, PANTHEON_STATE — в нём; PATH — папка
 заглушек + /usr/bin:/bin (git настоящий). Все внешние программы — заглушки (uv, curl, claude, gh, brew,
-terminal-notifier), каждая пишет argv в журнал. Настоящие ~/.claude/settings.json, ~/ai/pantheon и ~/.gitconfig
+terminal-notifier, git-crypt, security), каждая пишет argv в журнал. «GitHub» резервной копии — голый репозиторий
+в корне пробы, «Связка ключей» — файл; настоящие GitHub и Связка ключей не трогаются. Настоящие ~/.claude/settings.json, ~/ai/pantheon и ~/.gitconfig
 сверяются по хешу до и после.
 
 Запуск: python3 -I plugins/pantheon/tests/test_setup.py  (код выхода 0 — все прошли; на 3.9 CLI честно пропускается)
 """
 import atexit
+import base64
 import hashlib
 import os
 import shutil
@@ -73,7 +75,12 @@ def uv_body(py):
             'if [ "$1 $2" = "python find" ]; then echo "' + py + '"; fi\nexit 0\n')
 
 
-def new_root(with_uv=False, with_claude=True, with_notifier=False):
+GC_KEY = "FAKEKEY0476zzSECRET"  # «ключ» заглушки git-crypt: ни он, ни его base64 не должны попасть в вывод
+GC_KEY_B64 = base64.b64encode(GC_KEY.encode()).decode()
+CRYPT_HEADER = b"\x00GITCRYPT\x00"
+
+
+def new_root(with_uv=False, with_claude=True, with_notifier=False, with_crypt=True):
     """→ (корень, env, папка заглушек). Пантеона в корне ещё нет."""
     root = os.path.realpath(tempfile.mkdtemp(prefix="tmp-setup-"))
     roots.append(root)
@@ -103,16 +110,87 @@ def new_root(with_uv=False, with_claude=True, with_notifier=False):
                 '    mkdir -p "$HOME/.claude/plugins/marketplaces"\n'
                 '    ln -s "' + CLONE + '" "$HOME/.claude/plugins/marketplaces/agent-kit";;\n'
                 'esac\nexit 0\n')
+    # gh repo create заводит «GitHub» — голый репозиторий в корне пробы — и печатает его адрес, как настоящий gh
     sh_file(os.path.join(stubs, "gh"),
             'echo "gh $*" >> "$STUB_LOG"\n'
-            'if [ "$1 $2" = "auth status" ]; then [ "$GH_LOGGED" = "1" ]; exit $?; fi\nexit 0\n')
+            'if [ "$1 $2" = "auth status" ]; then [ "$GH_LOGGED" = "1" ]; exit $?; fi\n'
+            'if [ "$1 $2" = "repo create" ]; then\n'
+            '  [ "$FAIL_CMD" = "gh repo" ] && { echo "gh repo create: заглушка упала" >&2; exit 1; }\n'
+            '  git init -q --bare "$GH_REMOTE" || exit 1\n  echo "$GH_URL"\nfi\nexit 0\n')
+    # git-crypt: init ставит фильтр в .git/config, clean «шифрует» (заголовок GITCRYPT + base64 текста, открытого
+    # текста в объекте нет; GC_NOENC=1 — фильтр отдаёт текст как есть)
+    if with_crypt:
+        sh_file(os.path.join(stubs, "git-crypt"),
+                'case "$1" in\n'
+                "  clean) if [ \"$GC_NOENC\" = \"1\" ]; then cat; else printf '\\000GITCRYPT\\000'; base64; fi; exit 0;;\n"
+                '  smudge) tail -c +11 | base64 -D; exit 0;;\n  diff) tail -c +11 "$2" | base64 -D; exit 0;;\nesac\n'
+                'echo "git-crypt $*" >> "$STUB_LOG"\n'
+                '[ "$FAIL_CMD" = "git-crypt $1" ] && { echo "git-crypt $1: заглушка упала" >&2; exit 1; }\n'
+                'case "$1" in\n'
+                '  init) git config filter.git-crypt.clean "git-crypt clean" && '
+                'git config filter.git-crypt.smudge "git-crypt smudge" && git config filter.git-crypt.required true '
+                '&& mkdir -p .git/git-crypt/keys;;\n'
+                '  export-key) printf "%s" "$GC_KEY" > "$2";;\nesac\nexit 0\n')
+    # Связка ключей — файл KC_FILE; настоящий /usr/bin/security в пробе не вызывается никогда
+    sh_file(os.path.join(stubs, "security"),
+            'echo "security $*" >> "$STUB_LOG"\n'
+            '[ "$FAIL_CMD" = "security $1" ] && { echo "security: заглушка упала" >&2; exit 1; }\n'
+            'case "$1" in\n'
+            '  find-generic-password) [ -s "$KC_FILE" ]; exit $?;;\n'
+            '  add-generic-password) [ -s "$KC_FILE" ] && { echo "already exists" >&2; exit 45; }; '
+            'echo "$*" >> "$KC_FILE";;\nesac\nexit 0\n')
     for n in ("brew",) + (("terminal-notifier",) if with_notifier else ()):
         sh_file(os.path.join(stubs, n), f'echo "{n} $*" >> "$STUB_LOG"\nexit 0\n')
     env = {"PATH": stubs + ":/usr/bin:/bin", "HOME": home, "PANTHEON_HOME": os.path.join(home, "ai", "pantheon"),
            "PANTHEON_STATE": os.path.join(root, "state"), "PANTHEON_VIEW": os.path.join(root, "view"),
            "PANTHEON_DRYRUN": "1", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": root, "STUB_LOG": log, "GH_LOGGED": "1",
-           "LANG": "en_US.UTF-8"}
+           "LANG": "en_US.UTF-8", "GC_KEY": GC_KEY, "KC_FILE": os.path.join(root, "keychain"),
+           "GH_REMOTE": os.path.join(root, "remote.git"), "GH_URL": "file://" + os.path.join(root, "remote.git")}
     return root, env, stubs
+
+
+def prep_pan(env, history=False):
+    """Готовый Пантеон без копии (для `--add backup`): файлы, git init; history — ещё коммит открытым текстом."""
+    pan = env["PANTHEON_HOME"]
+    os.makedirs(os.path.join(pan, "directions", "x"))
+    for rel, text in (("board.md", "доска\n"), ("directions/x/STATUS.md", "SECRET-PLAINTEXT-0476\n"),
+                      (".gitignore", "*.tmp\n")):
+        with open(os.path.join(pan, rel), "w", encoding="utf-8") as fh:
+            fh.write(text)
+    subprocess.run(["git", "-C", pan, "init", "-q"], check=True, env=env)
+    if history:
+        g = ["git", "-C", pan, "-c", "user.name=t", "-c", "user.email=t@t"]
+        subprocess.run(g + ["add", "-A"], check=True, env=env)
+        subprocess.run(g + ["commit", "-q", "-m", "старое"], check=True, env=env)
+    return pan
+
+
+def git_out(env, repo, *args):
+    return subprocess.run(["git", "-C", repo, *args], env=env, capture_output=True, text=True).stdout.strip()
+
+
+def remote_objects(env):
+    """Все объекты «GitHub» байтами (для поиска открытого текста)."""
+    r = subprocess.run(["git", "-C", env["GH_REMOTE"], "cat-file", "--batch-all-objects", "--batch"], env=env,
+                       capture_output=True)
+    return r.stdout
+
+
+def leaked_key_files(root, env):
+    """Файлы пробы, где лежит ключ, кроме журнала заглушек и «Связки» (туда его кладёт сама заглушка)."""
+    bad = []
+    for d, _, files in os.walk(root):
+        for f in files:
+            p = os.path.join(d, f)
+            if p in (env["STUB_LOG"], env["KC_FILE"]):
+                continue
+            try:
+                data = open(p, "rb").read()
+            except OSError:
+                continue
+            if GC_KEY.encode() in data or GC_KEY_B64.encode() in data:
+                bad.append(p)
+    return bad
 
 
 def setup(env, stdin="", *args):
@@ -163,6 +241,10 @@ def main():
           "brew install terminal-notifier" in lg and "Системные настройки" in out, lg)
     check("проверка личных следов без файла маркеров — пропуск", "[пропуск] проверка личных следов: нет файла маркеров" in out, out[-800:])
     check("у каждого шага строка итога (нет «не вышло»)", "[не вышло]" not in out, out)
+    check("резервная копия: конец ввода — «нет», строка «копии нет», GitHub и git-crypt не тронуты",
+          "[пропуск] резервная копия: копии нет: при потере Mac данные пропадут; включить позже: "
+          "`pantheon-setup --add backup`" in out and not any(x.startswith(("gh repo", "git-crypt", "security"))
+                                                             for x in lg), (out[-800:], lg))
 
     # --- 2. повторный запуск на готовом Пантеоне: отказ, файлы не тронуты --------------------------------------
     h1 = tree_hash(pan)
@@ -275,6 +357,126 @@ def main():
     check("проверка личных следов через PANTHEON_TRACE_MARKERS: маркер найден в файле установщика → «не вышло», код 1",
           r.returncode == 1 and "[не вышло] проверка личных следов" in r.stdout and "setup.py" in r.stdout,
           (r.returncode, r.stdout[-600:]))
+
+    # --- 9. резервная копия (metis-0476): «да» в полном проходе ----------------------------------------------------
+    root, env, _ = new_root(with_uv=True)
+    r = setup(env, "нет\nда\n", "--no-codex")  # setup-git — нет, копия — да
+    out = r.stdout + r.stderr
+    lg = log_of(env)
+    pan = env["PANTHEON_HOME"]
+    check("копия «да»: код 0, строка «[ок] резервная копия», вопрос задан",
+          r.returncode == 0 and "[ок] резервная копия" in out
+          and "Завести резервную копию в приватном репозитории GitHub" in out, out[-1500:])
+    want = ["git-crypt init", "git-crypt export-key", "security add-generic-password", "gh repo create"]
+    pos = [next((i for i, x in enumerate(lg) if x.startswith(w)), -1) for w in want]
+    check("копия: порядок — git-crypt init, export-key, ключ в Связку, и только потом gh repo create",
+          -1 not in pos and pos == sorted(pos), (pos, lg))
+    check("копия: gh repo create pantheon-hq --private, один раз",
+          [x for x in lg if x.startswith("gh repo")] == ["gh repo create pantheon-hq --private"], lg)
+    sec = [x for x in lg if x.startswith("security add-generic-password")]
+    check("копия: ключ в Связке — служба pantheon-git-crypt, значение base64 ключа",
+          len(sec) == 1 and "-s pantheon-git-crypt" in sec[0] and f"-w {GC_KEY_B64}" in sec[0], sec)
+    check("копия: ключа (ни сырого, ни base64) нет в выводе установщика",
+          GC_KEY not in out and GC_KEY_B64 not in out, out[-800:])
+    check("копия: файла с ключом в пробе не осталось (временный удалён)", leaked_key_files(root, env) == [],
+          leaked_key_files(root, env))
+    attrs = open(os.path.join(pan, ".gitattributes"), encoding="utf-8").read() \
+        if os.path.exists(os.path.join(pan, ".gitattributes")) else ""
+    check("копия: .gitattributes по образцу, без merge-драйверов",
+          attrs == "* filter=git-crypt diff=git-crypt\n.gitattributes !filter !diff\n.gitignore !filter !diff\n", attrs)
+    branch = git_out(env, pan, "symbolic-ref", "--short", "HEAD")
+    commits = git_out(env, env["GH_REMOTE"], "rev-list", "--all").split()
+    check("копия: на «GitHub» один коммит без родителей, ветка с upstream origin",
+          len(commits) == 1 and git_out(env, env["GH_REMOTE"], "log", "-1", "--format=%P", commits[0]) == ""
+          and git_out(env, pan, "rev-parse", "--abbrev-ref", "@{u}") == f"origin/{branch}",
+          (commits, branch, git_out(env, pan, "rev-parse", "--abbrev-ref", "@{u}")))
+    names = git_out(env, env["GH_REMOTE"], "ls-tree", "-r", "--name-only", commits[0] if commits else "HEAD").split()
+    enc = all(subprocess.run(["git", "-C", env["GH_REMOTE"], "cat-file", "blob", f"{commits[0]}:{n}"], env=env,
+                             capture_output=True).stdout.startswith(CRYPT_HEADER)
+              for n in names if n != ".gitattributes") if commits else False
+    check("копия: в «GitHub» все файлы, кроме .gitattributes, зашифрованы (board.md там есть)",
+          enc and "board.md" in names, names)
+    check("копия: рабочая папка чистая после шага", git_out(env, pan, "status", "--porcelain") == "",
+          git_out(env, pan, "status", "--porcelain"))
+    n_gh = len([x for x in log_of(env) if x.startswith("gh repo create")])
+    r = setup(env, "да\n", "--add", "backup")
+    check("повторно --add backup при заданном origin: пропуск, второго репозитория нет, код 0",
+          r.returncode == 0 and "origin уже задан" in r.stdout and "второй репозиторий не завожу" in r.stdout
+          and len([x for x in log_of(env) if x.startswith("gh repo create")]) == n_gh == 1, (r.returncode, r.stdout))
+
+    # --- 10. --add backup на готовой установке: «нет», старая история, сбои -------------------------------------
+    root, env, _ = new_root(with_uv=True)
+    pan = prep_pan(env)
+    r = setup(env, "нет\n", "--add", "backup")
+    check("--add backup, «нет»: строка «копии нет», код 1, ничего не заведено",
+          r.returncode == 1 and "[пропуск] резервная копия: копии нет" in r.stdout
+          and "[ок] Python" not in r.stdout
+          and not any(x.startswith(("gh repo", "git-crypt", "security add")) for x in log_of(env))
+          and not os.path.exists(os.path.join(pan, ".gitattributes")), (r.returncode, r.stdout, log_of(env)))
+
+    root, env, _ = new_root(with_uv=True)
+    pan = prep_pan(env, history=True)
+    old = git_out(env, pan, "rev-parse", "HEAD")
+    r = setup(env, "да\n", "--add", "backup")
+    objs = remote_objects(env)
+    check("--add backup на истории открытым текстом: код 0, в «GitHub» нет открытого текста старых коммитов",
+          r.returncode == 0 and objs and b"SECRET-PLAINTEXT-0476" not in objs
+          and len(git_out(env, env["GH_REMOTE"], "rev-list", "--all").split()) == 1, (r.returncode, r.stdout[-600:]))
+    check("--add backup: старая история цела локально в refs/pantheon/pre-backup",
+          git_out(env, pan, "rev-parse", "refs/pantheon/pre-backup") == old, old)
+
+    for fail, why, github in (("git-crypt init", "git-crypt init: git-crypt init: заглушка упала", False),
+                              ("git-crypt export-key", "git-crypt export-key: заглушка упала", False),
+                              ("security add-generic-password", "security: заглушка упала", False),
+                              ("gh repo", "gh repo create: заглушка упала", True),
+                              ("push", "push не прошёл", True)):
+        root, env, _ = new_root(with_uv=True)
+        prep_pan(env)
+        env["FAIL_CMD"] = fail
+        if fail == "push":
+            env["GH_URL"] = "file://" + os.path.join(root, "нет-такого", "x.git")
+        r = setup(env, "да\n", "--add", "backup")
+        out = r.stdout + r.stderr
+        lg = log_of(env)
+        check(f"сбой «{fail}»: «[не вышло] резервная копия» с причиной, код 1, без трассы, ключа в выводе нет",
+              r.returncode == 1 and "[не вышло] резервная копия" in out and why in out and "Traceback" not in out
+              and GC_KEY not in out and GC_KEY_B64 not in out, (r.returncode, out[-700:]))
+        check(f"сбой «{fail}»: GitHub {'тронут только после локальной подготовки' if github else 'не тронут'}",
+              any(x.startswith("gh repo create") for x in lg) == github, lg)
+
+    root, env, _ = new_root(with_uv=True)
+    prep_pan(env)
+    env["GC_NOENC"] = "1"  # фильтр не шифрует — push запрещён
+    r = setup(env, "да\n", "--add", "backup")
+    check("фильтр не зашифровал файлы: «не вышло», gh repo create не звали",
+          r.returncode == 1 and "не зашифровал" in r.stdout and not any(x.startswith("gh repo") for x in log_of(env)),
+          (r.stdout[-600:], log_of(env)))
+
+    root, env, _ = new_root(with_uv=True)
+    prep_pan(env)
+    open(env["KC_FILE"], "w").write("чужой ключ\n")
+    r = setup(env, "да\n", "--add", "backup")
+    check("в Связке уже есть pantheon-git-crypt: «не вышло», git-crypt init не звали, запись не тронута",
+          r.returncode == 1 and "уже есть ключ" in r.stdout and "git-crypt init" not in log_of(env)
+          and open(env["KC_FILE"]).read() == "чужой ключ\n", (r.stdout[-500:], log_of(env)))
+
+    root, env, _ = new_root(with_uv=True, with_crypt=False)
+    prep_pan(env)
+    r = setup(env, "да\n", "--add", "backup")
+    check("нет git-crypt: пропуск с `brew install git-crypt` и «копии нет», вопрос не задан",
+          r.returncode == 1 and "`brew install git-crypt`" in r.stdout and "копии нет" in r.stdout
+          and "Завести резервную копию" not in r.stdout, r.stdout[-500:])
+
+    root, env, _ = new_root(with_uv=True)
+    prep_pan(env)
+    env["GH_LOGGED"] = "0"
+    r = setup(env, "да\n", "--add", "backup")
+    check("gh не вошёл: пропуск «копии нет», вопрос не задан, gh repo create не звали",
+          r.returncode == 1 and "копии нет" in r.stdout and "Завести резервную копию" not in r.stdout
+          and not any(x.startswith("gh repo") for x in log_of(env)), r.stdout[-500:])
+    r = setup(env, "", "--add", "backup", "--backup-name", "-x")
+    check("--backup-name с «-»: отказ разбора, код 2", r.returncode == 2 and "--backup-name" in r.stderr,
+          (r.returncode, r.stderr))
 
     # --- 8. настоящие файлы владельца не тронуты ------------------------------------------------------------------
     after = real_snapshot()
