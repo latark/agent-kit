@@ -89,6 +89,8 @@ check("wall медленного >= 0.9 с", float(rows["test_b_slow.py"]["wall"
 check("cpu медленного >= 0.35 с (жжёт процессор)", float(rows["test_b_slow.py"]["cpu"]) >= 0.35, rows["test_b_slow.py"][0])
 check("cpu спящего меньше его wall", float(rows["test_d_hang.py"]["cpu"]) < float(rows["test_d_hang.py"]["wall"]) - 0.5,
       rows["test_d_hang.py"][0])
+check("cpu файла после медленного < 0.3 с (разность, а не накопление)", float(rows["test_c_fail.py"]["cpu"]) < 0.3,
+      rows["test_c_fail.py"][0])
 check("wall зависшего ~ таймаут 2 с", 1.9 <= float(rows["test_d_hang.py"]["wall"]) < 6, rows["test_d_hang.py"][0])
 check("load до и после — числа (или —, если ОС не отдала)",
       all(re.fullmatch(r"\d+\.\d\d|—", m["l0"]) and re.fullmatch(r"\d+\.\d\d|—", m["l1"]) for m in rows.values()))
@@ -116,7 +118,7 @@ r3 = run({"test_only.py": "print('1 ok')\n"})
 check("один файл — одна строка замера и сводка из 1", r3.stdout.count("замер · новая") == 1
       and "1 самых медленных из 1" in r3.stdout, r3.stdout[-300:])
 
-# мутант: без timings (не передан) журнал всё равно пишет строки, список не нужен
+# вызов без timings: список не передан, журнал всё равно пишет строки, список не нужен
 DRV2 = DRIVER.replace("log, \"новая 1.0\", __import__(\"time\").monotonic() + 100, timings=timings)",
                       "log, \"новая 1.0\", __import__(\"time\").monotonic() + 100)")
 d = mkplugin({"test_x.py": "print('1 ok')\n"})
