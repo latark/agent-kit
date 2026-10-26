@@ -31,6 +31,11 @@ spec.loader.exec_module(M)
 results = []
 
 
+def ai(*a):
+    """argus_info без поля last: эти проверки сравнивают rounds/first_pass/rejects, last — в своих тестах."""
+    return {k: v for k, v in M.argus_info(*a).items() if k != "last"}
+
+
 def check(name, ok, got=None):
     results.append(bool(ok))
     print(("ok  " if ok else "FAIL") + " " + name + ("" if ok or got is None else f" — получено {got!r}"))
@@ -303,18 +308,18 @@ def argus_repo():
     gate += [{"kind": "reject", "repo": [OTHER], "pr": 83, "sha": x, "time": "2026-10-18T10:00:00"} for x in "bcd"]
     want = {"rounds": 1, "first_pass": True, "rejects": 0}
     full = "- 2026-10-19 11:00 — metis: PR latark/agent-kit#83 argus принять\n"
-    got = M.argus_info("metis-0294", full, gate, [], None)
+    got = ai("metis-0294", full, gate, [], None)
     check("owner/repo#N: круги только своего repo, три «вернуть» чужого #83 не в счёт", got == want, got)
     url = "- 2026-10-19 11:00 — metis: https://github.com/Latark/Agent-Kit/pull/83 слит\n"
-    got = M.argus_info("metis-0294", url, gate, [], None)
+    got = ai("metis-0294", url, gate, [], None)
     check("ссылка github.com/…/pull/N: repo из ссылки (без учёта регистра)", got == want, got)
     bare = "- 2026-10-19 11:00 — metis: PR #83 argus принять\n"
-    got = M.argus_info("metis-0294", bare, gate, [], [KIT])
+    got = ai("metis-0294", bare, gate, [], [KIT])
     check("«PR #N» без repo — repo направления из [merge_repos]", got == want, got)
-    got = M.argus_info("metis-0294", bare, gate, [], [OTHER])
+    got = ai("metis-0294", bare, gate, [], [OTHER])
     check("«PR #N» у направления с другим repo — круги того repo",
           got == {"rounds": 3, "first_pass": False, "rejects": 3}, got)
-    got = M.argus_info("metis-0294", bare, gate, [], None)
+    got = ai("metis-0294", bare, gate, [], None)
     check("«PR #N», repo направления не определить — не считается",
           got == {"rounds": 0, "first_pass": None, "rejects": 0}, got)
 
@@ -325,15 +330,15 @@ def argus_multi():
     bare = "- 2026-10-19 11:00 — metis: PR #5 argus принять\n"
     gate = [{"kind": "accept", "repo": [KIT], "pr": 5, "sha": "a", "time": "2026-10-19T11:00:00"}]
     gate += [{"kind": "reject", "repo": [OTHER], "pr": 6, "sha": "q", "time": "2026-10-18T10:00:00"}]
-    got = M.argus_info("metis-0294", bare, gate, [], two)
+    got = ai("metis-0294", bare, gate, [], two)
     check("два repo, вердикты на #5 только у одного — круги этого repo",
           got == {"rounds": 1, "first_pass": True, "rejects": 0}, got)
     gate += [{"kind": "reject", "repo": [OTHER], "pr": 5, "sha": x, "time": "2026-10-18T10:00:00"} for x in "bcd"]
-    got = M.argus_info("metis-0294", bare, gate, [], two)
+    got = ai("metis-0294", bare, gate, [], two)
     check("два repo, вердикты на #5 у обоих — не считается",
           got == {"rounds": 0, "first_pass": None, "rejects": 0}, got)
     full = "- 2026-10-19 11:00 — metis: PR latark/agent-kit#5 argus принять\n"
-    got = M.argus_info("metis-0294", full, gate, [], two)
+    got = ai("metis-0294", full, gate, [], two)
     check("два repo, repo назван явно — круги названного",
           got == {"rounds": 1, "first_pass": True, "rejects": 0}, got)
 
@@ -375,30 +380,30 @@ def argus_sha():
           got_shas == sorted([h1[:7], h1[:7], h2, "0f0e0d0", "-", "3eb43c1", "5c5c5c5", "5c5c5c5", "6d6d6d6",
                               "aaaaaa1", "bbbbbb2", "ccccc3c"]),
           got_shas)
-    got = M.argus_info("metis-0954", "", [], reviews, None)
+    got = ai("metis-0954", "", [], reviews, None)
     check("узкий повтор: «прошлый head <sha>» из поручения — не SHA круга, берётся «Head:» после него — 3 круга",
           got == {"rounds": 3, "first_pass": False, "rejects": 2}, got)
-    got = M.argus_info("metis-0953", "", [], reviews, None)
+    got = ai("metis-0953", "", [], reviews, None)
     check("два argus на один head, оба «вернуть», затем «принять» на новом — 2 круга, а не 3 файла",
           got == {"rounds": 2, "first_pass": False, "rejects": 1}, got)
-    got = M.argus_info("metis-0950", "", [], reviews, None)
+    got = ai("metis-0950", "", [], reviews, None)
     check("два файла ревью на один SHA — один круг: 3 файла, 2 head; первый head с «вернуть» — не с первого круга",
           got == {"rounds": 2, "first_pass": False, "rejects": 1}, got)
-    got = M.argus_info("metis-0951", "", [], reviews, None)
+    got = ai("metis-0951", "", [], reviews, None)
     check("файл со строкой «модель:» до заголовка читается: id в заголовке со второй строки",
           got == {"rounds": 1, "first_pass": True, "rejects": 0}, got)
-    got = M.argus_info("metis-0952", "", [], reviews, None)
+    got = ai("metis-0952", "", [], reviews, None)
     check("файл без SHA — свой круг, файл с SHA — свой", got == {"rounds": 2, "first_pass": False, "rejects": 2}, got)
     def g(kind, sha, time, who):
         return {"kind": kind, "repo": [KIT], "pr": 120, "sha": sha, "time": time, "by": {"agent_id": who}}
 
     two = [g("accept", h1, "2026-10-19T10:30:00", "b"), g("reject", h1, "2026-10-19T10:20:00", "a")]
     body = "- 2026-10-19 11:00 — metis: PR latark/agent-kit#120 argus\n"
-    got = M.argus_info("metis-0960", body, two, [], None)
+    got = ai("metis-0960", body, two, [], None)
     check("шлюз: два argus на один SHA, первый «вернуть», второй позже «принять» — один круг, не с первого",
           got == {"rounds": 1, "first_pass": False, "rejects": 1}, got)
     two += [g("accept", h1, "2026-10-19T10:40:00", "a"), g("accept", h2, "2026-10-19T11:00:00", "a")]
-    got = M.argus_info("metis-0960", body, two, [], None)
+    got = ai("metis-0960", body, two, [], None)
     check("шлюз: тот же argus снял «вернуть» на том же SHA — круг принят; новый SHA — второй круг",
           got == {"rounds": 2, "first_pass": True, "rejects": 0}, got)
 
@@ -514,7 +519,71 @@ def cli():
           p.returncode == 0 and "Traceback" not in p.stderr, (p.returncode, p.stderr[-300:]))
 
 
+def limit():
+    """Замер «Лимит» (metis-0390): цена принятой задачи и вмешательства владельца на принятую."""
+    def row(i, day, status="done", rounds=1, rejects=0, usd=10.0, tok=1000, **ow):
+        d = f"2026-10-{day:02d}T12:00:00"
+        r = {"id": f"x-{i:04d}", "status": status, "closed_at": d, "closed": d[:10], "direction": "d",
+             "executor": "e", "model": "m", "effort": "h", "argus_rounds": rounds, "argus_rejects": rejects,
+             "argus_first_pass": (rejects == 0) if rounds else None, "usd": usd, "tokens_total": tok, "returns": 0,
+             "owner_notes": 0, "owner_answers": 0, "owner_moves": 0, "owner_returns": 0}
+        r.update(ow)
+        return r
+
+    # W42 (12–18.10): 20 принятых по 10 $ (две с заметками, одна с возвратом), одна принятая со второго круга за 20 $,
+    # отменённая 100 $ и не принятая (все круги «вернуть») 50 $; W43 (19–25.10): 2 принятых, третья — слитый PR без
+    # вердиктов (id в merged)
+    rows = [row(i, 14, owner_notes=2 if i < 2 else 0, owner_returns=1 if i == 0 else 0) for i in range(20)]
+    rows += [row(30, 15, status="dropped", rounds=0, usd=100.0, tok=9000), row(31, 15, rounds=2, rejects=2, usd=50.0),
+             row(32, 15, rounds=3, rejects=1, usd=20.0, tok=2000)]
+    rows += [row(40, 20, usd=4.0, tok=400), row(41, 21, usd=6.0, tok=600, owner_answers=3),
+             row(42, 22, rounds=0, usd=8.0, tok=800)]
+    tmp = tempfile.mkdtemp(prefix="tmp-metrics-limit-")
+    atexit.register(shutil.rmtree, tmp, True)
+    path = os.path.join(tmp, "tasks.jsonl")
+    write_jsonl(path, rows)  # фикстура tasks.jsonl
+    s = M.summary(M.read_rows(path), datetime(2026, 10, 26, 12, 0).timestamp(), merged={"x-0042"})
+    w42, w43 = s["weeks"]["2026-W42"], s["weeks"]["2026-W43"]
+    check("замер: W42 — принято 21 (отменённая и все-«вернуть» не в счёте), W43 — 3 (слитый PR принят без вердикта)",
+          (w42["accepted"], w43["accepted"]) == (21, 3), (w42["accepted"], w43["accepted"]))
+    check("замер: цена принятой в W42 — (200 + 20) / 21 $ и токенов (20000 + 2000) / 21, а не по всем задачам",
+          w42["acc_usd"] == round(220 / 21, 2) and w42["acc_tokens"] == int(22000 / 21), w42)
+    check("замер: расход всего на принятую в W42 включает отменённую и не принятую: 370 / 21",
+          w42["all_usd_per_acc"] == round(370 / 21, 2), w42["all_usd_per_acc"])
+    check("замер: вмешательства на принятую — заметок 4/21, возвратов 1/21, без вмешательства 19 из 21",
+          (w42["owner_notes"], w42["owner_returns"], round(w42["no_owner"] * 21)) == (round(4 / 21, 2), round(1 / 21, 2), 19),
+          w42)
+    check("замер: W43 — ответов 3/3 = 1, без вмешательства 2 из 3",
+          (w43["owner_answers"], round(w43["no_owner"] * 3)) == (1.0, 2), w43)
+    check("замер: «мало данных» — W42 (21 принятая) нет, W43 (3) есть", (w42["few"], w43["few"]) == (False, True))
+    check("замер: ровно 19 принятых — мало данных, 20 — нет",
+          M.summary([row(i, 14) for i in range(19)], T0)["weeks"]["2026-W42"]["few"] is True
+          and M.summary([row(i, 14) for i in range(20)], T0)["weeks"]["2026-W42"]["few"] is False)
+    check("замер: нет принятых — прочерк, не деление на ноль",
+          M.summary([row(1, 14, status="dropped", rounds=0)], T0)["weeks"]["2026-W42"]["acc_usd"] is None)
+    # последний круг (metis-0390): [принять, вернуть] без слияния — не принята; [вернуть, принять] — принята
+    def acc(**kw):
+        return M.accepted(row(1, 14, **kw), set())
+    check("accepted: круги [принять, вернуть], argus_last=вернуть, без слияния — не принята",
+          acc(rounds=2, rejects=1, argus_last="вернуть") is False)
+    check("accepted: [принять, вернуть] со слитым PR — принята",
+          M.accepted(row(1, 14, rounds=2, rejects=1, argus_last="вернуть"), {"x-0001"}) is True)
+    check("accepted: [вернуть, принять], argus_last=принять — принята", acc(rounds=2, rejects=1, argus_last="принять") is True)
+    check("accepted: старая строка без argus_last — прежнее правило (2 круга, 1 вернуть — принята; все вернуть — нет)",
+          acc(rounds=2, rejects=1) is True and acc(rounds=2, rejects=2) is False)
+    ar = M.argus_info("x-1", "", [], [("a.md", "x-1", "принять", "s1"), ("b.md", "x-1", "вернуть", "s2")])
+    check("argus_info: last — итог последнего круга", ar["last"] == "вернуть" and ar["rounds"] == 2, ar)
+    md = M.week_md(s, T0)
+    check("week md: раздел замера, база до пачки и «мало данных» в строках W42/W43",
+          "## Замер пачки «Лимит»" in md and "| 2026-W42 | 21 |" in md and "база до пачки" in md
+          and "| 2026-W43 | 3 |" in md and "мало данных" in md, md[:900])
+    t = {"a-1": ("p", {}, "- 2026-10-19 10:00 — x: PR #5 слит"), "a-2": ("p", {}, "- 2026-10-19 — PR #6 не слит"),
+         "a-3": ("p", {}, "- 2026-10-19 — слит PR #7 в main"), "a-4": ("p", {}, "- 2026-10-19 — ветка слита")}
+    check("merged_index: «PR слит» да, «не слит» и без PR — нет", M.merged_index(t) == {"a-1", "a-3"}, M.merged_index(t))
+
+
 unit()
+limit()
 argus_repo()
 argus_multi()
 argus_sha()
