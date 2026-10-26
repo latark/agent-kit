@@ -18,6 +18,12 @@ PostToolUse (Bash:
                  остальное — setenv, bootstrap, load, submit, kickstart, asuser и неизвестное — отказ (окружение тика);
                  swiftc — только абсолютным /usr/bin/swiftc, голое имя и другой путь — отказ (metis-0298);
   domain       — субагент, тиммейт, координатор и сессия мастерской пишут только в своё направление;
+  draft-role   — исполнитель без кода palamedes (субагент и главная сессия `--agent palamedes`, metis-0469) пишет
+                 только черновик: Write, Edit, MultiEdit в ~/ai/pantheon/directions/<своё направление>/drafts/**, из окна
+                 Пританея (PANTHEON_ROLE=hq) — в drafts/ любого направления из domains.json; код проектов, свой и чужой
+                 STATUS.md, планы, любые inbox/, ~/ai/knowledge, ~/.claude, память и временные папки — отказ; из
+                 инструментов, которые видит guard, — только Read, Grep, Glob и эти три: Bash, NotebookEdit, WebFetch,
+                 Agent, Task, Skill — отказ (MCP и WebSearch закрывает список tools: в шапке роли);
   pantheon-acl — запись в ~/ai/pantheon по карте прав; ~/.local/state/pantheon — ни одной роли; файлы задач
                  (directions/*/tasks/, inbox/tasks/) — ни одной роли, штабу тоже: только `pantheon task`; доска
                  ~/ai/pantheon-view и журналы ваших слов owner-log — ни одной сессии Claude, без роли тоже (metis-0044);
@@ -77,7 +83,7 @@ PostToolUse (Bash:
   --managed     — хук из управляемых настроек: то же, что плагин;
   --strict      — хук окна роли с onFailure: "block" (собирает `pantheon domains build`, SEC-29).
 При сбое (SEC-10, metis-0094) — во всех трёх режимах одинаково, обёртка run_hook: событие не JSON или не объект,
-исключение в проверке прав (domain, pantheon-acl, protect-config, private, cdp-role, push, terminal, hq-telegram,
+исключение в проверке прав (domain, draft-role, pantheon-acl, protect-config, private, cdp-role, push, terminal, hq-telegram,
 hq-gh, tg-role, chiron, hestia) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
 stderr: Claude Code блокирует вызов на любой версии, и в вашей сессии тоже. PostToolUse (журнал запора слияния):
 код 2 только показывает причину агенту — команда уже выполнена. Исключения: правила-подсказки (dev-server,
@@ -604,7 +610,9 @@ def check_nextjs(event):
 #   domain       — субагент, тиммейт и любая роль Пантеона, кроме штаба, пишут только в своё направление:
 #                  папки из domains.json (собирает `pantheon domains build` из ~/ai/pantheon/directions.toml),
 #                  временные папки, ~/.claude/agent-memory и agent_extra из policy.toml. Мастерская — папка
-#                  запуска. Записи в ~/ai/pantheon проверяет pantheon-acl.
+#                  запуска. Записи в ~/ai/pantheon проверяет pantheon-acl. Исполнителю без кода (DRAFT_ONLY_ROLES,
+#                  palamedes, metis-0469) вне ~/ai/pantheon корней нет совсем, а в ~/ai/pantheon pantheon-acl
+#                  пускает его только в directions/<своё>/drafts/** (drafts_allowed): Write, Edit, MultiEdit.
 #   pantheon-acl — запись в ~/ai/pantheon по карте прав (STATE-06 карты решений; карта — здесь, в коде, а не в
 #                  domains.json: его собирают из реестра, который правит штаб); файлы задач (directions/*/tasks/,
 #                  inbox/tasks/) роли и любые субагенты, штаб тоже, меняют только командой `pantheon task`: прямой
@@ -651,6 +659,14 @@ PANTHEON_ROLES = {"hq", "domain-coordinator", "workshop", "chiron", "argus", "ta
 PANTHEON_ROLE_PREFIXES = ("hephaestus-", "apollo-")
 # ревизор: пишет только в agent_extra своей роли (policy.toml), свою память и временные папки — корней по cwd нет (0122)
 EXTRA_ONLY_ROLES = {"momus"}
+# исполнитель без кода (metis-0469): пишет только черновики — Write, Edit, MultiEdit в
+# ~/ai/pantheon/directions/<своё направление>/drafts/** (из окна Пританея — drafts/ любого направления из domains.json).
+# Код проектов, STATUS.md, inbox/, ~/ai/knowledge, ~/.claude, память и временные папки — нет; agent_extra не действует.
+# Инструменты — только DRAFT_TOOLS: Bash, NotebookEdit, WebFetch, Agent, Task, Skill — отказ (правило draft-role)
+DRAFT_ONLY_ROLES = {"palamedes"}
+DRAFT_TOOLS = {"Read", "Grep", "Glob", "Write", "Edit", "MultiEdit"}
+DRAFT_WRITE_TOOLS = {"Write", "Edit", "MultiEdit"}
+DRAFTS_DIR = "drafts"
 UNRESOLVED = "\0неразобранная-цель"
 # stop|resume|pause|restart — окна сессий (metis-0047); `pantheon jobs pause|resume` — другая команда (PANTHEON_JOB_ACTIONS)
 PANTHEON_PRIVILEGED = {"archive", "install", "uninstall", "commit", "start", "wake", "roles",
@@ -710,8 +726,10 @@ def load_policy():
 
 def is_pantheon_role(role):
     # ревизор тоже роль Пантеона: главная сессия `--agent momus` (agent_type есть, agent_id нет) иначе писала бы
-    # куда угодно — domain и protect-config судят только роли Пантеона и субагентов (metis-0177)
-    return role in PANTHEON_ROLES or role in EXTRA_ONLY_ROLES or role.startswith(PANTHEON_ROLE_PREFIXES)
+    # куда угодно — domain и protect-config судят только роли Пантеона и субагентов (metis-0177); так же palamedes
+    # (metis-0469)
+    return (role in PANTHEON_ROLES or role in EXTRA_ONLY_ROLES or role in DRAFT_ONLY_ROLES
+            or role.startswith(PANTHEON_ROLE_PREFIXES))
 
 
 def who(event):
@@ -2324,6 +2342,12 @@ def check_domain(event, tool, tool_input):
     targets = [p for p in targets if not _inside(p, [PANTHEON, PANTHEON_VIEW, STATE_DIR])]  # это — pantheon-acl
     if not targets:
         return None
+    if role in DRAFT_ONLY_ROLES:
+        # исполнитель без кода (metis-0469): вне ~/ai/pantheon корней нет совсем — ни папок направления, ни agent_extra,
+        # ни памяти, ни временных папок; drafts/ внутри ~/ai/pantheon решает pantheon-acl (drafts_allowed)
+        return (f"Правило domain: роль «{role}» пишет только черновики — в ~/ai/pantheon/directions/<своё "
+                f"направление>/{DRAFTS_DIR}/. Чужая зона: {', '.join(p.replace(HOME, '~') for p in targets[:3])}. "
+                "Код, знания, настройки и временные папки — не твои: итог — файл в drafts/, остальное — в отчёт.")
     if role == "workshop" and not sub:
         roots = [pdir]
     elif role in EXTRA_ONLY_ROLES:
@@ -2364,12 +2388,31 @@ HQ_ONLY = {x.casefold() for x in ("board.md", "decisions.md", "revisits.toml", "
                                   "handoff", "inbox-view")}
 
 
+def drafts_allowed(pdir, parts, tool, domains):
+    """Исполнитель без кода (metis-0469): Write, Edit, MultiEdit — только файл внутри directions/<имя>/drafts/, где
+    имя — направление папки запуска, а в окне Пританея — любое направление из domains.json. parts — путь от корня
+    ~/ai/pantheon после realpath и _key: «..» и симлинки уже раскрыты, регистр и форма Юникода — как у macOS."""
+    why = (f"исполнитель без кода пишет только черновик — файл в ~/ai/pantheon/directions/<своё направление>/"
+           f"{DRAFTS_DIR}/ (из окна Пританея — {DRAFTS_DIR}/ направления из реестра); STATUS.md, планы, inbox/ и "
+           "задачи — не твои, всё остальное — в отчёт")
+    if tool not in DRAFT_WRITE_TOOLS:  # Bash и NotebookEdit закрыты и правилом draft-role; здесь — без него (GUARD_OFF)
+        return False, why
+    if len(parts) < 4 or parts[0] != "directions" or parts[2] != DRAFTS_DIR:
+        return False, why
+    if window_role() == "hq":
+        return parts[1] in {_key(n) for n in (domains.get("domains") or {})}, why
+    own, _ = direction_of(domains, pdir)
+    return bool(own) and parts[1] == _key(own), why
+
+
 def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
     top = rel.split("/", 1)[0]
     hq = role == "hq" and not sub
     if rel in (".", "") or top in (".git", ".gitattributes", ".gitignore"):
         return False, "git и служебные файлы ~/ai/pantheon роли не трогают: коммитит задача планового прохода pantheon-commit"
     parts = rel.split("/")
+    if role in DRAFT_ONLY_ROLES:
+        return drafts_allowed(pdir, parts, tool, domains)
     # файлы задач (metis-0044): directions/<имя>/tasks/ и входящие владельца inbox/tasks/ — только `pantheon task`,
     # всем ролям и субагентам, штабу тоже. Можно создать ещё не существующую папку tasks/ и заглушку .gitkeep или
     # .keep в ней (пустую папку тик в git не положит): ответа в них нет
@@ -3586,6 +3629,18 @@ def check_hestia(event, tool, tool_input):
     return None
 
 
+def check_draft_role(event, tool, tool_input):
+    """draft-role (metis-0469): исполнителю без кода — субагенту и главной сессии `--agent palamedes` — из того, что
+    видит guard, открыты только чтение файлов и правка черновика (DRAFT_TOOLS). Шапка роли закрывает то же списком
+    tools:, guard — второй слой на случай её правки; куда писать, решают pantheon-acl и domain."""
+    role = who(event)[0]
+    if role in DRAFT_ONLY_ROLES and tool not in DRAFT_TOOLS:
+        return (f"Правило draft-role: роли «{role}» инструмент {tool} закрыт (metis-0469) — исполнителю без кода "
+                "открыты только Read, Grep, Glob и Write/Edit своего черновика в ~/ai/pantheon/directions/<своё "
+                f"направление>/{DRAFTS_DIR}/. Веб — вопрос для prometheus, команды и субагенты — в отчёт тому, кто позвал.")
+    return None
+
+
 def check_window(event, tool, tool_input):
     for rule, check in (("hq-telegram", check_hq_telegram), ("hq-gh", check_hq_gh), ("tg-role", check_tg_role),
                         ("chiron", check_chiron_call), ("hestia", check_hestia_call)):
@@ -3683,9 +3738,11 @@ def main():
     if name == "PreToolUse":
         tool_input = event.get("tool_input") or {}
         reason = None
-        if tool in WINDOW_ONLY_TOOLS:
+        if "draft-role" not in OFF:
+            reason = strict(check_draft_role, event, tool, tool_input)
+        if not reason and tool in WINDOW_ONLY_TOOLS:
             reason = strict_window(check_window, event, tool, tool_input)
-        if tool == "Bash":
+        if not reason and tool == "Bash":
             cmd = tool_input.get("command") or ""
             if "dev-server" not in OFF:
                 reason = soft(check_dev_server, cmd, event)
@@ -3695,7 +3752,7 @@ def main():
                 reason = hard(check_tg_secret_bash, cmd)
             if not reason:
                 reason = strict_window(check_window, event, tool, tool_input)
-        elif tool in EDIT_TOOLS:
+        elif not reason and tool in EDIT_TOOLS:
             if "cdp" not in OFF:
                 reason = soft(check_cdp, tool_input)
             if not reason and "tg-secret" not in OFF:
