@@ -76,6 +76,15 @@ def lib_checks(home):
                                 "direction": "d", "created": "2026-10-26", "updated": "2026-10-26T10:00",
                                 "schema_version": 1, "from": v})
         check(f"check_head: from «{v}» принят", not errs, errs)
+    errs, _ = T.check_head({"type": "task", "id": "demo-0001", "title": "x", "status": "todo", "project": "p",
+                            "direction": "d", "created": "2026-10-26", "updated": "2026-10-26T10:00", "schema_version": 1,
+                            "from": "остаток", "source": "demo-0001"})
+    check("check_head: source на саму задачу — ошибка", any("саму" in e for e in errs), errs)
+    try:
+        T.check_source(home, "demo-0001", "demo-0001")
+        check("check_source: ссылка на себя — отказ", False)
+    except ValueError as e:
+        check("check_source: ссылка на себя — отказ", "саму" in str(e), e)
     check("FROM_VALUES — шесть значений решения",
           T.FROM_VALUES == ("слово владельца", "отчёт", "ревью", "остаток", "план", "по ходу"), T.FROM_VALUES)
     check("from и source — в FIELDS", "from" in T.FIELDS and "source" in T.FIELDS)
