@@ -26,8 +26,27 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    команды — из [merge_repos] направления, запись tests на (repo, SHA), вердикты argus на (repo, PR, SHA): рецензент —
    пара (session_id, agent_id), у каждого считается его последний вердикт; пускает, только если рецензент есть,
    последний вердикт каждого — accept с полным перечнем проверенного (Б6) и ни один рецензент не тот, кто сливает.
-   reject снимает только accept того же рецензента после него или новый коммит (metis-0158: два argus на одном
-   head — accept и reject в любом порядке дают отказ); продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
+   reject привязан к PR, на каком бы head он ни был (metis-0415, решение владельца 24.10): его снимает только
+   записанное после него accept с перечнем (_lifts): 1) того же рецензента на том же head; 2) на сливаемый SHA при
+   reject на другом head — того же рецензента или другого argus, если коды reject и сливаемого SHA посчитаны и
+   различаются (0415b: accept другого argus на код, равный коду reject, reject не снимает; код не посчитан — тоже);
+   3) на третьем head с другим кодом от той же merge-base, если код сливаемого SHA — не код reject (_held; metis-0158:
+   два argus на одном head — accept и reject в любом порядке дают отказ). Перенос accept: accept с перечнем на
+   прошлом head PR засчитывается на новом SHA, если собственный дифф PR (merge-base с base PR..head) тот же —
+   отпечаток _fingerprint по содержимому файлов (решение владельца 25.10 23:05): `git diff --raw -z --no-abbrev
+   --no-renames --no-relative --ignore-submodules=none` без pathspec — режим, sha блоба или gitlink, статус и путь
+   каждого файла; фильтр plugin.json и сортировка по пути — в Python, plugin.json плагинов сверяется по канону без
+   version с учётом режима. Настройки git (diff.*, core.abbrev, submodule.*.ignore, атрибуты, GIT_* окружения) на
+   отпечаток не влияют: окружение без GIT_*, явный --git-dir. Вывод --raw разбирается строго (формат, \0 в конце,
+   путь один раз), иначе отпечатка нет. Цена (решение владельца 25.10): main правил файл, который правит и PR, —
+   переноса нет, нужен argus. Засчитывается — и прямо на своём head, и переносом — только accept, записанное позже
+   каждого reject PR, кроме reject, снятого accept с перечнем того же рецензента на том же head (_floor, _carried,
+   #134 п.2, argus-b r2): иначе откат к коду, принятому до reject (force-push на старый head после снятия reject
+   правилом 3), прошёл бы по старому accept; отказ называет такое accept и reject. Сверяются CARRY_HEADS последних head за
+   CARRY_BUDGET секунд, у git — таймаут 3 с. Нет отпечатка — нет переноса: папка слияния не клон репозитория PR,
+   shallow, info/grafts, нет коммита base или head, не одна merge-base, вывод --raw не разобрать, plugin.json — не
+   файл, сбой или таймаут git; git replace не действует. Тесты и talos не
+   переносятся; каждый перенос — строка в STATE_DIR/merge-gate/carry.jsonl, не записалась — отказ; продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
    owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES), casefold;
    файлы из pulls/N/files с previous_filename; PR, задевающий ядро, проходит только со строкой
    `<время> merge-approve <owner/repo>#<N> <sha>` для того же репозитория, PR и SHA в owner-log/merge-approve.log —
@@ -50,6 +69,7 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
 
 import ast
 import glob
+import hashlib
 import json
 import os
 import re
@@ -1012,6 +1032,277 @@ def owner_approved(repo, pr, sha, now=None):
     return False
 
 
+# перенос «принять» после подтягивания main (metis-0415, решение владельца 24.10 17:54 [metis-0384b]): «принять»
+# с прошлого head переходит на новый, только если собственный дифф PR от merge-base с base PR тот же — по содержимому
+# файлов (git diff --raw, решение владельца 25.10 23:05), кроме строки version в plugin.json; сбой git и неполная
+# история — не переходит
+CARRY_HEADS = 8  # сколько прошлых head с вердиктами сверять (кроме нового); старые — без отпечатка
+CARRY_BUDGET = 4  # с на все отпечатки одного шлюза: дальше — без отпечатка (таймаут хука 10 с, ещё gh pr view и CI)
+PLUGIN_JSON_RE = re.compile(rb"plugins/[^/]*/\.claude-plugin/plugin\.json")
+# дифф без pathspec и без текста: от конфига git (diff.*, core.abbrev, атрибуты, diff.submodule) вывод не зависит,
+# orderFile меняет только порядок строк — сортировка в Python (threat-134-carry п.2)
+RAW_FLAGS = ("--raw", "-z", "--no-abbrev", "--no-renames", "--no-relative", "--ignore-submodules=none")
+# «:режим режим sha sha статус» строки --raw; --no-renames — статус одной буквой без процента, sha1 или sha256
+RAW_META_RE = re.compile(rb":([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40}(?:[0-9a-f]{24})?) ([0-9a-f]{40}(?:[0-9a-f]{24})?) "
+                         rb"([ADMT])")
+
+
+def _git_bytes(gd, *args, input=None):
+    """Вывод git (байты) в git dir gd без рабочего дерева, без подмен git replace; None — сбой, таймаут, код не 0."""
+    env = dict(_git_env(), GIT_NO_REPLACE_OBJECTS="1")
+    try:
+        r = subprocess.run(["git", "-C", gd, "--git-dir=" + gd, "--no-replace-objects", "-c", "core.quotePath=true",
+                            *args], input=input, capture_output=True, timeout=3, env=env)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _carry_git(cwd, repo, base):
+    """Git папки слияния для сверки диффов → (git dir, None) или (None, почему не переносится). Нужны: папка — клон
+    repo (remote), полная история (не shallow, без info/grafts) и коммит base PR в git папки."""
+    remotes = _git_remotes(cwd) if cwd else None
+    if remotes is None or repo not in {_repo_tail(r) for r in remotes}:
+        return None, f"папка слияния — не клон {repo}, диффы не сверить (сливай из клона {repo})"
+    out = _git(cwd, "rev-parse", "--absolute-git-dir")
+    gd = (out or "").strip()
+    if not gd:
+        return None, "git папки слияния не ответил"
+    shallow = _git_bytes(gd, "rev-parse", "--is-shallow-repository")
+    if shallow is None or shallow.strip() != b"false":
+        return None, "неполная история в git папки (shallow clone, git fetch --depth) — сделай git fetch --unshallow"
+    grafts = _git_bytes(gd, "rev-parse", "--git-path", "info/grafts")
+    if grafts is None:
+        return None, "git папки слияния не ответил"
+    if os.path.lexists(os.path.join(gd, os.fsdecode(grafts.strip()))):
+        return None, "в git папки есть info/grafts — история подменена"
+    if not isinstance(base, str) or not SHA_RE.fullmatch(base.lower()) \
+            or _git_bytes(gd, "cat-file", "-e", base.lower() + "^{commit}") is None:
+        return None, f"коммита base PR ({str(base)[:12]}) нет в git папки — сделай git fetch"
+    return gd, None
+
+
+def _manifest_canon(raw):
+    """plugin.json без поля version — каноничная строка; не JSON-объект, два одинаковых ключа или version не
+    строкой — ValueError."""
+    def pairs(items):
+        keys = [k for k, _ in items]
+        if len(keys) != len(set(keys)):
+            raise ValueError("два одинаковых ключа")
+        return dict(items)
+    obj = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
+    if not isinstance(obj, dict) or not isinstance(obj.get("version", ""), str):
+        raise ValueError("не объект или version не строкой")
+    obj.pop("version", None)
+    return json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def _raw_entries(gd, mb, head):
+    """git diff --raw mb..head без pathspec → [(режим, режим, sha, sha, статус, путь)] (байты) или None: сбой git
+    или вывод не по формату (строгий разбор: лишнее поле или статус — None)."""
+    out = _git_bytes(gd, "diff", *RAW_FLAGS, mb, head)
+    if out is None:
+        return None
+    if not out:
+        return []
+    if not out.endswith(b"\0"):
+        return None
+    parts = out[:-1].split(b"\0")
+    if len(parts) % 2:
+        return None
+    entries = []
+    for meta, path in zip(parts[::2], parts[1::2]):
+        m = RAW_META_RE.fullmatch(meta)
+        if not m or not path:
+            return None
+        entries.append(m.groups() + (path,))
+    if len({e[5] for e in entries}) != len(entries):
+        return None
+    return entries
+
+
+def _manifests(gd, entries):
+    """Правки plugin.json плагинов (из _raw_entries) без строки version → список строк или None (не разобрать).
+    Пропускается только правка, где поменялся один номер версии: режим тот же, канон без version тот же."""
+    out = []
+    for om, nm, osha, nsha, st, path in entries:
+        sides = {b"A": (nsha,), b"D": (osha,), b"M": (osha, nsha)}.get(st)
+        if sides is None:
+            return None
+        canon = []
+        for blob_sha in sides:
+            blob = _git_bytes(gd, "cat-file", "blob", blob_sha)
+            if blob is None:
+                return None
+            try:
+                canon.append(_manifest_canon(blob))
+            except (ValueError, UnicodeDecodeError, RecursionError):
+                return None
+        if st == b"M" and om == nm and canon[0] == canon[1]:
+            continue  # поменялся только номер версии
+        out.append("\0".join((st.decode(), om.decode(), nm.decode(), os.fsdecode(path), *canon)))
+    return sorted(out)
+
+
+def _fingerprint(gd, base, head):
+    """Отпечаток собственного диффа PR: merge-base(base, head)..head — строки git diff --raw (режимы, sha блобов и
+    gitlink, статус, путь; решение владельца 25.10 23:05), сортированные по пути, кроме plugin.json плагинов — их
+    правки без строки version → (отпечаток, merge-base) или (None, почему не посчитан)."""
+    if not SHA_RE.fullmatch(head) or _git_bytes(gd, "cat-file", "-e", head + "^{commit}") is None:
+        return None, f"коммита {head[:12]} нет в git папки"
+    out = _git_bytes(gd, "merge-base", "--all", base, head)
+    mbs = out.split() if out is not None else []
+    if len(mbs) != 1:
+        return None, f"у {head[:12]} и base PR нет единственной merge-base"
+    mb = mbs[0].decode("ascii", "replace")
+    entries = _raw_entries(gd, mb, head)
+    if entries is None:
+        return None, f"git diff --raw на {head[:12]} не ответил или не разобрать"
+    plugins = _manifests(gd, [e for e in entries if PLUGIN_JSON_RE.fullmatch(e[5])])
+    if plugins is None:
+        return None, f"plugin.json на {head[:12]} не разобрать (не JSON, два ключа, version не строкой, не файл)"
+    rows = sorted((e for e in entries if not PLUGIN_JSON_RE.fullmatch(e[5])), key=lambda e: e[5])
+    h = hashlib.sha256(b"carry-v3\0" + b"".join(b" ".join(e[:5]) + b"\0" + e[5] + b"\0" for e in rows) + b"\0"
+                       + "\0".join(plugins).encode("utf-8"))
+    return h.hexdigest(), mb
+
+
+def _carry_heads(verdicts, sha):
+    """Head, у которых считается отпечаток: sha и CARRY_HEADS последних (по последней записи) других head."""
+    order = []
+    for r in reversed(verdicts):
+        if r["sha"] != sha and r["sha"] not in order:
+            order.append(r["sha"])
+    return {sha, *order[:CARRY_HEADS]}
+
+
+def _self_lift(a, r):
+    """«Принять» a с перечнем того же рецензента на том же head, что «вернуть» r: рецензент сам снял своё «вернуть»
+    (правило 1 _lifts и отсечка _carried; без перечня не снимает — metis-0415, Зевс 25.10 23:10)."""
+    return _reviewer(a) == _reviewer(r) and a["sha"] == r["sha"] and checklist_ok(a)
+
+
+def _lifts(a, r, sha, fp):
+    """Снимает ли «принять» a (записано после «вернуть» r) это «вернуть» для слияния sha. fp(head) → (отпечаток,
+    merge-base) или None. Все правила — только «принять» с перечнем (Б6). 1: тот же рецензент на том же head.
+    2: на sha, r — на другом head: тот же рецензент — снимает; другой argus — только если код sha посчитан и не
+    равен коду r (решение 25.10 23:10, 0415b: иначе «вернуть» обходится выбором рецензента; код не посчитан — не
+    снимает). 3: на третьем head с другим кодом от той же merge-base, если код sha — не код r."""
+    if not checklist_ok(a):
+        return False
+    if _self_lift(a, r):
+        return True
+    if a["sha"] == sha:
+        if r["sha"] == sha:
+            return False
+        if _reviewer(a) == _reviewer(r):
+            return True
+        fr, fs = fp(r["sha"]), fp(sha)
+        return bool(fr and fs) and fs[0] != fr[0]
+    if r["sha"] == sha or a["sha"] == r["sha"]:
+        return False
+    fr, fa, fs = fp(r["sha"]), fp(a["sha"]), fp(sha)
+    return bool(fr and fa and fs) and fr[1] == fa[1] and fr[0] != fa[0] and fs[0] != fr[0]
+
+
+def _held(verdicts, sha, fp):
+    """«Вернуть» на PR (любой head), которые в силе: ни одно «принять», записанное после, их не сняло (_lifts)."""
+    return [r for i, r in enumerate(verdicts) if r["kind"] == "reject"
+            and not any(a["kind"] == "accept" and _lifts(a, r, sha, fp) for a in verdicts[i + 1:])]
+
+
+def _floor(verdicts):
+    """Отсечка (#134 п.2, argus-b r2): номер последнего «вернуть» PR, которое не снял тот же рецензент «принять» с
+    перечнем на том же head (_self_lift), или -1. «Принять», записанное до отсечки, не засчитывается ни прямо на своём
+    head, ни переносом: иначе откат к коду, принятому до «вернуть» (force-push на старый head), прошёл бы по старому
+    «принять», если «вернуть» снято «принять» на другом коде (правило 3 _lifts)."""
+    floor = -1
+    for i, r in enumerate(verdicts):
+        if r["kind"] == "reject" and not any(a["kind"] == "accept" and _self_lift(a, r) for a in verdicts[i + 1:]):
+            floor = i
+    return floor
+
+
+def _carried(verdicts, sha, fp, cut=None):
+    """«Принять» с перечнем на других head того же PR, чей отпечаток равен отпечатку sha, записанные позже отсечки
+    _floor. cut — список: в него пары («принять», отсёкшее его «вернуть») с тем же отпечатком, но записанные раньше
+    отсечки (для текста отказа)."""
+    fs = fp(sha)
+    if not fs:
+        return []
+    floor = _floor(verdicts)
+    out = []
+    for i, a in enumerate(verdicts):
+        if a["kind"] == "accept" and a["sha"] != sha and checklist_ok(a):
+            fa = fp(a["sha"])
+            if fa and fa[0] == fs[0]:
+                if i > floor:
+                    out.append(a)
+                elif cut is not None:
+                    cut.append((a, verdicts[floor]))
+    return out
+
+
+class _Prints:
+    """Отпечатки head для одного шлюза: git папки и base PR — один раз, отпечаток — по запросу и только для
+    _carry_heads; why — почему чего-то не посчитали (для текста отказа)."""
+
+    def __init__(self, cwd, repo, sha, verdicts, view):
+        self.cwd, self.repo, self.sha, self.view = cwd, repo, sha, view
+        self.allowed = _carry_heads(verdicts, sha)
+        self.memo, self.why, self.gd, self.base, self.ready = {}, [], None, None, False
+        self.t0 = time.monotonic()
+
+    def _note(self, why):
+        if why and why not in self.why:
+            self.why.append(why)
+
+    def __call__(self, head):
+        if head not in self.allowed:
+            self._note(f"head {head[:12]} старше {CARRY_HEADS} последних — не сверялся")
+            return None
+        if not self.ready:
+            self.ready = True
+            v = self.view()
+            base = v.get("baseRefOid") if isinstance(v, dict) else None
+            if base is None:
+                self._note("gh pr view не ответил — base PR неизвестна")
+            else:
+                self.gd, why = _carry_git(self.cwd, self.repo, base)
+                self.base = base.lower() if self.gd else None
+                self._note(why)
+        if not self.gd:
+            return None
+        if head not in self.memo and time.monotonic() - self.t0 > CARRY_BUDGET:
+            self._note(f"сверка дольше {CARRY_BUDGET} с — остановлена (таймаут хука 10 с)")
+            return None
+        if head not in self.memo:
+            got = _fingerprint(self.gd, self.base, head)
+            self.memo[head] = got if got[0] else None
+            if not got[0]:
+                self._note(got[1])
+        return self.memo[head]
+
+
+def carry_file():
+    """Журнал переносов «принять» (metis-0415) — отдельно от records.jsonl: тот читают pantheon review status и
+    метрики, вида carry там нет."""
+    return os.path.join(gate_dir(), "carry.jsonl")
+
+
+def append_carry(rec):
+    d = gate_dir()
+    if os.path.islink(d):
+        raise OSError("merge-gate — симлинк")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    os.chmod(d, 0o700)
+    fd = os.open(carry_file(), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
 def _reviewer(rec):
     """Рецензент записи — пара (session_id, agent_id): два argus одной сессии — разные рецензенты (metis-0158)."""
     return rec["by"].get("session_id") or "", rec["by"].get("agent_id") or ""
@@ -1024,7 +1315,7 @@ def _who(rec):
             f"запись {rec.get('time') if isinstance(rec.get('time'), str) else '?'}")
 
 
-def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advice, protect):
+def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advice, protect, cwd=None):
     """Запор (P1-4): то, что проверено, — ровно то, что сливается. Текст отказа или None."""
     if auto:
         return f"без --auto: сливается сейчас ровно проверенный PR, а не позже сам. {advice}"
@@ -1055,52 +1346,86 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                 f"`pantheon review test -- <команда тестов>` (запишет хук guard). Тесты долгие: запускай "
                 f"`pantheon review test` не в фоне, с timeout до 600000 мс (у Bash по умолчанию 120 с). {advice}")
 
-    def mine(r, kinds, who):
-        return (r["kind"] in kinds and r["by"].get("agent_type") == who and r["pr"] == pr and r["sha"] == sha
-                and repo in [x.lower() for x in r["repo"]])
+    def mine(r, kinds, who, any_sha=False):
+        return (r["kind"] in kinds and r["by"].get("agent_type") == who and r["pr"] == pr
+                and (any_sha or r["sha"] == sha) and repo in [x.lower() for x in r["repo"]])
 
-    verdicts = [r for r in records if mine(r, ("accept", "reject"), "argus")]
+    # вердикты argus на PR — на любом head (metis-0415): «вернуть» привязано к PR, «принять» переносится по отпечатку
+    pr_verdicts = [r for r in records if mine(r, ("accept", "reject"), "argus", any_sha=True)]
     # защиты (metis-0176): «принять» не на Opus не засчитывается — как будто его нет; «вернуть» любой модели в силе,
     # «принять» без перечня остаётся, чтобы отказ Б6 ниже сказал о перечне
-    weak = [r for r in verdicts if protect and r["kind"] == "accept" and checklist_ok(r) and opus_problem(r)]
-    verdicts = [r for r in verdicts if not any(r is w for w in weak)]
-    if not verdicts and weak:
-        unfilled = any(UNFILLED_ID.search(r["checklist"]["ran"]) for r in weak)
-        return (f"«принять» на {repo}#{pr}@{sha[:12]} от {'; '.join(_who(r) + ' (' + opus_problem(r) + ')' for r in weak)}"
-                " — не на Opus: в "
-                "репозитории защит шлюз засчитывает только проверку argus на модели claude-opus (--ran начинается с "
-                "«модель: claude-opus»). Проверку повторяет argus на Opus и записывает `pantheon review accept "
-                f"{repo} {pr} {sha} --ran \"модель: claude-opus-…, что запустил\" …`."
-                + (f" Кроме того, {UNFILLED_ID_HINT}." if unfilled else "") + f" {advice}")
-    if not verdicts:
-        return (f"нет «принять» от argus на {repo}#{pr}@{sha[:12]}: позови argus, он проверит и запишет "
-                f"`pantheon review accept {repo} {pr} {sha} {CHECKLIST_HINT}`. {advice}")
-    latest = {}  # рецензент (session_id, agent_id) → его последний вердикт; порядок — по первой записи рецензента
+    weak = [r for r in pr_verdicts if protect and r["kind"] == "accept" and checklist_ok(r) and opus_problem(r)]
+    verdicts = [r for r in pr_verdicts if not any(r is w for w in weak)]
+    seen_view = []
+
+    def pr_view():
+        if not seen_view:
+            seen_view.append(_pr_view(repo, pr))
+        return seen_view[0]
+
+    fp = _Prints(cwd, repo, sha, pr_verdicts, pr_view)
+
+    def why_fp():
+        return (" Перенос не сверен: " + "; ".join(fp.why) + ".") if fp.why else ""
+
+    held = _held(verdicts, sha, fp)
+    if held:
+        return (f"«вернуть» (reject) на {repo}#{pr} от {'; '.join(_who(r) + ' на ' + r['sha'][:12] for r in held)}: "
+                "«вернуть» привязано к PR, а не к коммиту. Его снимает «принять» с перечнем, записанное после него: "
+                "того же рецензента (верни ему исправление) или свежее «принять» argus на новый коммит "
+                f"{sha[:12]} с другим кодом — `pantheon review accept {repo} {pr} {sha} {CHECKLIST_HINT}`. «Принять» "
+                "другого argus на тот же коммит, на коммит с тем же кодом, что у «вернуть» (и на сливаемый), или с "
+                "другой merge-base «вернуть» не перекрывает; код не посчитан — тоже."
+                + why_fp() + f" {advice}")
+    latest = {}  # рецензент (session_id, agent_id) → его последний вердикт на sha; порядок — по первой записи
     for r in verdicts:
-        latest[_reviewer(r)] = r
-    rejects = [r for r in latest.values() if r["kind"] != "accept"]
-    if rejects:
-        return (f"«вернуть» (reject) на {repo}#{pr}@{sha[:12]} от {'; '.join(_who(r) for r in rejects)}: его снимает "
-                "только «принять» того же рецензента, записанное после него (верни ему исправление), или новый коммит "
-                f"с новыми записями тестов и argus — `pantheon review accept {repo} {pr} <новый SHA>`. «Принять» "
-                f"другого argus «вернуть» не перекрывает. {advice}")
-    old = [r for r in latest.values() if not checklist_ok(r)]
+        if r["sha"] == sha:
+            latest[_reviewer(r)] = r
+    # прямое «принять» на sha — тоже только после отсечки (argus-b r2): откат force-push на head, принятый до «вернуть»
+    floor = _floor(verdicts)
+    pos = {id(r): i for i, r in enumerate(verdicts)}
+    cut = [(r, verdicts[floor]) for r in latest.values() if r["kind"] == "accept" and pos[id(r)] <= floor]
+    direct = [r for r in latest.values() if r["kind"] == "accept" and pos[id(r)] > floor]
+    carried = [] if direct else _carried(verdicts, sha, fp, cut)
+    if not direct and not carried:
+        fs = fp(sha) if weak else None
+        weak_used = [r for r in weak if r["sha"] == sha or (fs and fp(r["sha"]) and fp(r["sha"])[0] == fs[0])]
+        if weak_used:
+            unfilled = any(UNFILLED_ID.search(r["checklist"]["ran"]) for r in weak_used)
+            return (f"«принять» на {repo}#{pr}@{sha[:12]} от "
+                    f"{'; '.join(_who(r) + ' на ' + r['sha'][:12] + ' (' + opus_problem(r) + ')' for r in weak_used)}"
+                    " — не на Opus: в "
+                    "репозитории защит шлюз засчитывает только проверку argus на модели claude-opus (--ran начинается с "
+                    "«модель: claude-opus»). Проверку повторяет argus на Opus и записывает `pantheon review accept "
+                    f"{repo} {pr} {sha} --ran \"модель: claude-opus-…, что запустил\" …`."
+                    + (f" Кроме того, {UNFILLED_ID_HINT}." if unfilled else "") + f" {advice}")
+        return (f"нет «принять» от argus на {repo}#{pr}@{sha[:12]}: позови argus, он проверит и запишет "
+                f"`pantheon review accept {repo} {pr} {sha} {CHECKLIST_HINT}`. «Принять» с прошлого head PR переходит "
+                "на новый, только если собственный дифф PR от merge-base с base PR тот же (кроме номера версии в "
+                "plugin.json) и «принять» записано после каждого «вернуть» PR." + why_fp()
+                + (f" Дифф тот же у «принять» {'; '.join(_who(a) + ' на ' + a['sha'][:12] for a, _ in cut)}, но оно "
+                   f"записано раньше «вернуть» {_who(cut[0][1])} на {cut[0][1]['sha'][:12]}: после «вернуть» старое "
+                   "«принять» не засчитывается ни на своём head, ни переносом (откат к принятому коду), нужен свежий "
+                   "argus." if cut else "")
+                + f" {advice}")
+    old = [r for r in direct if not checklist_ok(r)]
     if old:
         return (f"«принять» на {repo}#{pr}@{sha[:12]} от {'; '.join(_who(r) for r in old)} — без перечня "
                 f"проверенного (Б6): запись старого формата или неполная. Тот же argus, повтори `pantheon review "
                 f"accept {repo} {pr} {sha} {CHECKLIST_HINT}`. {advice}")
     me = ((event or {}).get("session_id") or "", (event or {}).get("agent_id") or "")
-    if me in latest:
+    if me in latest or me in {_reviewer(r) for r in carried}:
         return (f"рецензент и сливающий — одна и та же сессия: «принять» должен дать отдельный argus, а среди "
                 f"рецензентов {repo}#{pr}@{sha[:12]} — и сливающий. {advice}")
     if advice == MERGE_PRODUCT:
         if not any(mine(r, ("talos",), "talos") for r in records):
             return (f"продукт — нет проверки talos на {repo}#{pr}@{sha[:12]}: позови talos, он проверит живое "
-                    f"приложение и запишет `pantheon review talos {repo} {pr} {sha}`. {advice}")
+                    f"приложение и запишет `pantheon review talos {repo} {pr} {sha}` (talos не переносится "
+                    f"с прошлого head). {advice}")
         if not _alert_ok(repo, pr):
             return (f"продукт — нет строки «что ушло» в ~/ai/pantheon/alerts.md со ссылкой {repo}#{pr} и словом "
                     f"«откат»: `pantheon alert \"{repo}#{pr}: что ушло; откат: <команда>\"`. {advice}")
-    view = _pr_view(repo, pr)
+    view = pr_view()
     if view is None:
         return (f"{CI_NONE}: gh pr view {pr} -R {repo} не ответил — без него не сверить ни проверки GitHub, ни "
                 f"файлы PR (ядро), повтори позже. {advice}")
@@ -1113,8 +1438,17 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     why = _ci_problem(repo, pr, sha, view)
     if why:
         return f"{why}. {advice}"
+    if carried:
+        try:
+            append_carry({"v": RECORD_V, "kind": "carry", "repo": [repo], "pr": pr, "sha": sha, "base": fp.base,
+                          "fp": fp(sha)[0], "by": {"session_id": me[0], "agent_id": me[1]},
+                          "from": [{"sha": r["sha"], "by": r["by"], "time": r.get("time")} for r in carried],
+                          "time": datetime.now().astimezone().isoformat(timespec="seconds")})
+        except (OSError, TypeError, ValueError) as e:
+            return (f"перенос «принять» на {repo}#{pr}@{sha[:12]} не записать в журнал "
+                    f"~/.local/state/pantheon/merge-gate/carry.jsonl ({e}) — без записи переноса шлюз не пускает. "
+                    f"{MERGE_OWNER}")
     return None
-
 
 def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
     """gh pr merge (metis-0038, guard 0.5.0; запор P1-4, guard 0.5.4). Сливает главная сессия координатора
@@ -1242,4 +1576,4 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
             return f"без чужого репозитория (-R): только из [merge_repos] своего направления. {advice}"
         if not numbers:
             return f"с -R PR указывай номером. {advice}"
-    return gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advice, protect)
+    return gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advice, protect, cwd=cwd)
