@@ -2467,6 +2467,22 @@ def t_carry_r6(h):
          [opus(s["N1"], "z", session="s-z"), rej(s["R"]), opus(s["A"], "w", session="s-w"), tests(s["A"])], True)
     case("r6: y вернул R и сам принял R — отсечки нет, «принять» z на N1 до «вернуть» в силе", "N1", "M1",
          [opus(s["N1"], "z", session="s-z"), rej(s["R"]), opus(s["R"], "y", session="s-y"), tests(s["N1"])], True)
+    # r7 (argus-134a5): отсечка берёт ПОСЛЕДНИЙ неснятый «вернуть», а не первый
+    rej2 = lambda sha, who: opus(sha, who, "reject", checklist=None, session="s-" + who)
+    case("r6 n3: y1 вернул out, z принял N1, y2 вернул R, w принял A, force-push на N1 — отказ", "N1", "M1",
+         [rej2(s["out"], "y1"), opus(s["N1"], "z", session="s-z"), rej2(s["R"], "y2"),
+          opus(s["A"], "w", session="s-w"), tests(s["N1"])], False, "нет «принять»")
+    case("r6 n3 ctl: y1 вернул out, z принял N1, слияние N1 — проходит", "N1", "M1",
+         [rej2(s["out"], "y1"), opus(s["N1"], "z", session="s-z"), tests(s["N1"])], True)
+    # r7: своё «принять» не на Opus не засчитывается и отсечку не снимает
+    sonnet = dict(CHECKLIST, ran="модель: claude-sonnet-5, heavy python3 -I tests/test_merge_gate.py")
+    case("r6 n7 ctl: только «принять» не на Opus на N1 — отказ «не на Opus»", "N1", "M1",
+         [rec("accept", "latark/agent-kit", 7, s["N1"], agent_id="q", session="s-q", checklist=sonnet),
+          tests(s["N1"])], False, "не на Opus")
+    case("r6 n7: z принял N1, y вернул R, y принял R не на Opus, w принял A, force-push на N1 — отказ", "N1", "M1",
+         [opus(s["N1"], "z", session="s-z"), rej(s["R"]),
+          rec("accept", "latark/agent-kit", 7, s["R"], agent_id="y", session="s-y", checklist=sonnet),
+          opus(s["A"], "w", session="s-w"), tests(s["N1"])], False, "нет «принять»")
 
 
 CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
