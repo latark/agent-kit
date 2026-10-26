@@ -46,7 +46,7 @@ PostToolUse (Bash:
                 только чтение в любой форме (`git -c … commit` тоже отказ), gh без слияния и записи, claude — plugin
                 list и agents, pantheon — выпуск (plugins update), сборка окон, restart без --force, alert и чтение
                 (metis-0245);
-  cdp-role     — демон браузера с вашими входами — только мастерская, /close — никому (SEC-13);
+  cdp-role     — демон браузера с вашими входами — никому из ролей (до Харона, metis-0077), /close — никому (SEC-13);
   push         — git push: координатор, лиды и мастерская, не в main и master; gh pr merge — главная сессия
                  координатора или его лид (hephaestus-/apollo-<направление> субагентом, metis-0054) в папках своего
                  направления (domains.json, [merge], [merge_client]); защиты — папки metis-pantheon и их
@@ -2591,8 +2591,8 @@ CDP_DIRECT = re.compile(r"(?<![\w.])9222(?![\w.])|DevToolsActivePort|/devtools/(
 # WebFetch ролей — только наружу: адрес петли и локальной сети — это демон браузера или dev-сервер владельца
 LOCAL_URL = re.compile(r"^\w+://(?:[^/@]*@)?(?:localhost|[\d.]+|0x[0-9a-f]+|\[[0-9a-f:.]*\]|[^/:]*\.local)(?::\d+)?(?:/|$)",
                        re.I)
-CDP_READERS = set()  # демон с входами владельца — только мастерской (metis-0087, шаг 2); читателей нет
-CDP_ACTORS = {"workshop"}
+CDP_READERS = set()  # демон с входами владельца — никому из ролей: браузеры владельца будут у роли Харон (решение 113, metis-0227)
+CDP_ACTORS = set()
 PROTECTED_BRANCHES = {"main", "master"}
 TERMINAL_CMDS = {"osascript", "cliclick", "xdotool"}
 _GIT_OPT_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"}
@@ -2838,7 +2838,7 @@ def check_cdp_role(event, tool, tool_input):
     cmd = cmd + "\n" + re.sub(r"[\"'\\]", "", cmd)
     if CDP_DIRECT.search(cmd):
         return ("Правило cdp-role: прямое подключение к отладочному порту браузера владельца ролям закрыто — только через "
-                "общий демон (`curl 127.0.0.1:9333/…`), и только мастерской.")
+                "общий демон (`curl 127.0.0.1:9333/…`), а к нему сейчас не допущена ни одна роль.")
     if not CDP_TARGET.search(cmd):
         return None
     if re.search(r"/close\b", cmd):
@@ -2849,7 +2849,7 @@ def check_cdp_role(event, tool, tool_input):
     if role in CDP_READERS and not re.search(r"/cmd\b", cmd):
         return None
     return (f"Правило cdp-role: роль «{role or 'субагент'}» не пользуется браузером с входами владельца (демон CDP). "
-            "Читать сайт и действовать на нём — мастерская после «да» владельца; публичные страницы — веб-поиск prometheus без входов. "
+            "Сайт со входом владельца — Харон, после metis-0077; публичные страницы — веб-поиск prometheus без входов. "
             "Проверить своё приложение на localhost — chrome-devtools-mcp --isolated или Playwright (talos).")
 
 
