@@ -64,7 +64,7 @@ def run(env, *args, t=T0):
 
 
 def new(env, *args, t=T0):
-    r = run(env, "task", "new", "--direction", "metis-pantheon", *args, t=t)
+    r = run(env, "task", "new", "--text", "тест", "--direction", "metis-pantheon", *args, t=t)
     assert r.returncode == 0, r.stderr
     return r.stdout.split()[0], r.stdout.split()[1]
 
@@ -212,9 +212,9 @@ def unit_checks():
 def pult_checks(env, home, view, sid):
     board = os.path.join(view, "Доска")
     # просроченная задача и вопрос к владельцу в «Магазине»
-    r = run(env, "task", "new", "--direction", "athena-shop", "--title", "Просрочка", "--due", "2026-10-01", t=T0)
+    r = run(env, "task", "new", "--text", "тест", "--direction", "athena-shop", "--title", "Просрочка", "--due", "2026-10-01", t=T0)
     shop_tid = r.stdout.split()[0]
-    r = run(env, "task", "new", "--direction", "athena-shop", "--title", "Вопрос", t=T0)
+    r = run(env, "task", "new", "--text", "тест", "--direction", "athena-shop", "--title", "Вопрос", t=T0)
     q_tid = r.stdout.split()[0]
     r = run(env, "task", "set", q_tid, "status=waiting", "waiting_on=human", t=T0 + 5)
     check("задача ждёт владельца", r.returncode == 0, r.stderr[-300:])
@@ -267,9 +267,9 @@ def pult_checks(env, home, view, sid):
 def depends_cli_checks(env, home):
     """metis-0248, поправка 1: --depends-on с несуществующим id или циклом отклоняется при записи."""
     ok_id, _ = new(env, "--title", "предшественник")
-    r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "x", "--depends-on", "metis-9999")
+    r = run(env, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", "x", "--depends-on", "metis-9999")
     check("0248 task new --depends-on несуществующий id → отказ, код не 0", r.returncode != 0 and "нет задачи" in r.stderr, r.stderr)
-    r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "зависимая", "--depends-on", ok_id)
+    r = run(env, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--title", "зависимая", "--depends-on", ok_id)
     check("0248 task new --depends-on существующий → принят", r.returncode == 0, r.stderr)
     dep = r.stdout.split()[0]
     r = run(env, "task", "set", ok_id, f"depends_on={dep}")

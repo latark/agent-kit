@@ -70,7 +70,7 @@ def run(env, *args, t=T0):
 
 
 def new(env, direction, *args):
-    r = run(env, "task", "new", "--direction", direction, "--title", "Задача", *args)
+    r = run(env, "task", "new", "--direction", direction, "--title", "Задача", "--text", "тело задачи", *args)
     assert r.returncode == 0, r.stderr
     return r.stdout.split()[0]
 
@@ -97,20 +97,20 @@ def main():
     check("направление без project в реестре: project = его имя", proj(home, b) == "plain-dir", proj(home, b))
     c = new(env, "beta-dir", "--project", "proj-one и proj-two")
     check("--project с именем из реестра принят", proj(home, c) == "proj-one и proj-two")
-    r = run(env, "task", "new", "--direction", "ghost", "--title", "Своё имя", "--project", "ghost")
+    r = run(env, "task", "new", "--direction", "ghost", "--title", "Своё имя", "--text", "тело задачи", "--project", "ghost")
     gn = r.stdout.split()[0] if r.returncode == 0 else None
     check("направление вне реестра: --project со своим именем принят, как в check",
           gn and proj(home, gn) == "ghost", (r.returncode, r.stderr[-200:]))
-    r = run(env, "task", "new", "--direction", "ghost", "--title", "X", "--project", "metis-pantheon")
+    r = run(env, "task", "new", "--direction", "ghost", "--title", "X", "--text", "тело задачи", "--project", "metis-pantheon")
     check("направление вне реестра: чужое имя направления — отказ", r.returncode == 1 and "directions.toml" in r.stderr, r.stderr[-200:])
     if gn:
         os.remove(T.load_tasks(home, T.WORK_TYPES)[gn][0])
     before = snapshot(home)
     for bad in ("agent-kit", "metis-pantheon", "pantheon 0.11.28", "сверка Paperclip 17.10: у них #3207"):
-        r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "X", "--project", bad)
+        r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "X", "--text", "тело задачи", "--project", bad)
         check(f"--project «{bad[:20]}»: отказ, код 1, файл не создан",
               r.returncode == 1 and "directions.toml" in r.stderr and snapshot(home) == before, (r.returncode, r.stderr[-200:]))
-    st = run(env, "task", "new", "--direction", "metis-pantheon", "--type", "story", "--title", "Пачка")
+    st = run(env, "task", "new", "--direction", "metis-pantheon", "--type", "story", "--title", "Пачка", "--text", "тело задачи")
     check("story без --project: проект направления", st.returncode == 0 and proj(home, st.stdout.split()[0]) == "Пантеон", st.stderr)
 
     # --- check ---
@@ -134,7 +134,7 @@ def main():
     ok_card = new(env, "metis-pantheon")
     # закрытая неделю назад карточка со старым project: перенос не должен вернуть её на доску
     week = T0 - 8 * 86400
-    old = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Старая", t=week).stdout.split()[0]
+    old = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Старая", "--text", "тело задачи", t=week).stdout.split()[0]
     assert run(env, "task", "set", old, "status=done", "project=agent-kit", t=week).returncode == 0
     # карточка без направления в реестре: project нельзя определить
     gh = os.path.join(home, "directions", "ghost", "tasks", "ghost-0001.md")
@@ -181,14 +181,14 @@ def main():
 
     # --- без реестра: как раньше ---
     os.remove(os.path.join(home, "directions.toml"))
-    r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Без реестра", "--project", "что угодно")
+    r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Без реестра", "--text", "тело задачи", "--project", "что угодно")
     check("реестра нет: project не сверяется", r.returncode == 0, r.stderr[-200:])
     for text in ("", "direction = []\n"):
         open(os.path.join(home, "directions.toml"), "w", encoding="utf-8").write(text)
-        r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Пустой реестр", "--project", "что угодно")
+        r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Пустой реестр", "--text", "тело задачи", "--project", "что угодно")
         check(f"пустой реестр {text.strip() or '(файл пуст)'}: task new с --project проходит без сверки",
               r.returncode == 0 and proj(home, r.stdout.split()[0]) == "что угодно", r.stderr[-200:])
-        r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Пустой реестр")
+        r = run(env, "task", "new", "--direction", "metis-pantheon", "--title", "Пустой реестр", "--text", "тело задачи")
         check(f"пустой реестр {text.strip() or '(файл пуст)'}: без --project — имя направления",
               r.returncode == 0 and proj(home, r.stdout.split()[0]) == "metis-pantheon", r.stderr[-200:])
     shutil.rmtree(tmp, True)

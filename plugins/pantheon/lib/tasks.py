@@ -617,7 +617,7 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
     if errs:
         remove(path)
         raise ValueError("; ".join(errs))
-    desc = "\n".join(("\\" + ln) if ln.startswith("## ") else ln for ln in (text or "").strip().split("\n")).strip()
+    desc = escape_desc(text)
     try:
         write_task(path, head, f"\n# {title.strip()}\n\n" + (desc + "\n\n" if desc else "")
                    + f"## Журнал\n\n- {now_iso(t)[:16].replace('T', ' ')} — {actor}: создана\n")
@@ -662,8 +662,10 @@ def dir_lock(d, wait=10.0):
             os.close(fd)
 
 
-def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None, keep_updated=False):
-    """keep_updated — служебная правка, не движение работы (migrate-project): прежнее updated остаётся, иначе
+def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None, body=None, keep_updated=False):
+    """body — новый текст задачи (между заголовком «# …» и «## Журнал», «Заметки владельца» остаются; metis-0402):
+    прежний заменяется, в журнал — строка «текст задачи заменён».
+    keep_updated — служебная правка, не движение работы (migrate-project): прежнее updated остаётся, иначе
     доска, «Готово за сутки» и тревога «застряла» приняли бы её за работу (metis-0323)."""
     tasks = load_tasks(pantheon, WORK_TYPES)
     if tid not in tasks:
@@ -674,7 +676,7 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
     if par and tasks.get(par, ("", {}))[1].get("type") == "story" and not (changes.get("mode") or tasks[tid][1].get("mode")):
         raise ValueError(f"{tid}: {NO_MODE_BATCH}")
     with dir_lock(os.path.dirname(tasks[tid][0])):
-        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck, keep_updated)
+        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck, body, keep_updated)
 
 
 def task_note(pantheon, t, tid, note):
@@ -706,7 +708,32 @@ def task_claim(pantheon, t, tid, by, hours=1.0):
                     note=f"взял {by} до {until[11:16]}", precheck=precheck)
 
 
-def _task_set_locked(path, t, tid, changes, note, actor, precheck, keep_updated=False):
+def escape_desc(text):
+    """Текст задачи: строка «## …» внутри него экранируется, иначе она стала бы разделом (журналом) задачи."""
+    return "\n".join(("\\" + ln) if ln.startswith("## ") else ln for ln in (text or "").strip().split("\n")).strip()
+
+
+def replace_desc(body, text):
+    """Текст задачи между первым «# …» и «## Журнал» (или концом) заменён на text, раздел «## Заметки владельца» там же
+    остаётся (metis-0402). → (новое тело, длина прежнего текста в знаках); нет заголовка — ValueError."""
+    lines = body.split("\n")
+    h = next((i for i, ln in enumerate(lines) if ln.startswith("# ")), None)
+    if h is None:
+        raise ValueError("в задаче нет заголовка «# …» — текст некуда вставить")
+    e = next((i for i in range(h + 1, len(lines)) if lines[i].startswith("## Журнал")), len(lines))
+    keep, old, in_notes = [], [], False
+    for ln in lines[h + 1:e]:
+        if ln.startswith("## "):
+            in_notes = ln.startswith(OWNER_NOTES)
+        (keep if in_notes else old).append(ln)
+    while keep and not keep[-1].strip():
+        keep.pop()
+    desc = escape_desc(text)
+    new = lines[:h + 1] + [""] + ([desc, ""] if desc else []) + (keep + [""] if keep else []) + lines[e:]
+    return "\n".join(new), len("\n".join(old).strip())
+
+
+def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None, keep_updated=False):
     head, body = read(path)  # заново, уже под блокировкой: чужая правка между чтением и записью не потеряется
     if not head or head.get("id") != tid:
         raise ValueError(f"задача {tid} изменилась — повторите")
@@ -740,6 +767,10 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck, keep_updated=
     errs, _ = check_head(head)
     if errs:
         raise ValueError("; ".join(errs))
+    if new_body is not None:  # прежний текст остаётся в истории Пританея, в журнале — строка о замене (argus b)
+        body, was = replace_desc(body, new_body)
+        body = append_log(body, f"{now_iso(t)[:16].replace('T', ' ')} — {actor}: текст задачи заменён "
+                                f"(было {was} знаков, стало {len(escape_desc(new_body))})")
     if note:
         body = append_log(body, f"{now_iso(t)[:16].replace('T', ' ')} — {actor}: {' '.join(str(note).split())}")
     write_task(path, head, body)
@@ -2423,6 +2454,19 @@ def card_url(view_dir, name):
     return view_file_url(view_dir, "Доска/" + name + ".md")
 
 
+NOTICE_MARK = "Уведомление, а не находка:"
+NOTICE_NAME_RE = re.compile(r"\d{4}-\d\d-\d\d-\d{4}-task-([a-z0-9][a-z0-9-]{0,60})\.md")
+
+
+def is_task_notice(d, name, f, text):
+    """Уведомление `task new` узнаётся только по точной форме (argus b): имя «…-task-<id>.md», первая строка
+    «# Новая задача <id>: …», пометка NOTICE_MARK, и задача <id> в этом направлении есть. Находка, которая лишь
+    цитирует пометку, остаётся находкой и карточку на доске не теряет."""
+    m = NOTICE_NAME_RE.fullmatch(f)
+    return bool(m and text.startswith(f"# Новая задача {m.group(1)}: ") and NOTICE_MARK in text
+                and os.path.isfile(os.path.join(d, name, "tasks", m.group(1) + ".md")))
+
+
 def inbox_items(pantheon):
     """Входящие направлений: свободные заявки directions/<имя>/inbox/*.md (разбирает координатор)."""
     out, d = {}, os.path.join(pantheon, "directions")
@@ -2437,6 +2481,8 @@ def inbox_items(pantheon):
             try:
                 text = read_text(path)[:20000]
             except (OSError, UnicodeDecodeError, ValueError):
+                continue
+            if is_task_notice(d, name, f, text):  # уведомление о новой задаче (task new) — не заявка, карточки нет
                 continue
             m = re.search(r"^# (.+)$", text, re.M)
             frm = re.search(r"^От: (.+)$", text, re.M)
@@ -3153,6 +3199,120 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             fh.write(new_state)
         os.replace(tmp, state_path)
     return done_lines
+
+
+# --- ничего не теряем (metis-0402 п. 7): задача без описания и решение без задачи --------------------------------------
+# Тик (check --quiet) поднимает две тревоги. Первая: открытая задача больше NO_BODY_HOURS часов только с заголовком и
+# журналом — цели и «готово, когда» нет, исполнитель не поймёт, что делать. Вторая: слово владельца с [id] (запись
+# decisions.md или вопрос окна вопросов в owner-log) старше UNLINKED_MIN минут, а задачи с таким id или с [id] в теле
+# нет и в decisions.md нет отдельной строки «не задача: [id] — причина». Тревога — один раз на id и только о новых:
+# что было на первом проходе, запоминается без тревоги (check в pantheon.py, файл unlinked-seen.json).
+
+NO_BODY_HOURS = 1
+UNLINKED_MIN = 30
+UNLINKED_DAYS = 7  # старше — разбор уже не по тику, а ревизией
+OPEN_STATUSES = ("todo", "doing", "review", "waiting")
+DEC_ID_RE = re.compile(r"\[([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\](?!\()")
+DEC_LINE_RE = re.compile(r"^\s*[-*] (\d{1,2})\.(\d{2})(?: (\d{1,2}):(\d)([\dx]))?")
+CREATED_LOG_RE = re.compile(r"^- (\d{4}-\d\d-\d\d \d\d:\d\d) — [^:\n]*: создана", re.M)
+
+
+def has_description(body):
+    """Есть ли у задачи текст кроме заголовка и журнала: что-то между «# …» и первым «## …» или раздел кроме журнала."""
+    lines = (body or "").split("\n")
+    h = next((i for i, ln in enumerate(lines) if ln.startswith("# ")), -1)
+    in_log = False
+    for ln in lines[h + 1:]:
+        if ln.startswith("## "):
+            if not ln.startswith("## Журнал"):
+                return True
+            in_log = True
+        elif ln.strip() and not in_log:
+            return True
+    return False
+
+
+def created_ts(head, body):
+    m = CREATED_LOG_RE.search(body or "")
+    return ts_of(m.group(1).replace(" ", "T") + ":00") if m else ts_of(head.get("created"))
+
+
+def is_full_question(head):
+    """Вопрос владельцу, суть которого в полях: question, why и не меньше двух вариантов (writing.part)."""
+    return bool(head.get("question") and head.get("why") and len(head.get("options") or []) >= 2)
+
+
+def bodyless_tasks(tasks, t, hours=NO_BODY_HOURS):
+    """Открытые задачи старше hours часов без описания (полный вопрос владельцу — не в счёт: суть в его полях)."""
+    out = []
+    for tid, (_, head, body) in sorted(tasks.items()):
+        if head.get("type") != "task" or head.get("status") not in OPEN_STATUSES or is_full_question(head):
+            continue
+        made = created_ts(head, body)
+        if made is not None and t - made > hours * 3600 and not has_description(body):
+            out.append(tid)
+    return out
+
+
+def _dec_time(m, t):
+    day, mon = int(m.group(1)), int(m.group(2))
+    hh = int(m.group(3)) if m.group(3) else 0
+    mm = int(m.group(4) + m.group(5).replace("x", "0")) if m.group(4) else 0
+    year = datetime.fromtimestamp(t).year
+    try:
+        ts = datetime(year, mon, day, hh, mm).timestamp()
+        return ts if ts <= t + 86400 else datetime(year - 1, mon, day, hh, mm).timestamp()
+    except ValueError:
+        return None
+
+
+def owner_ids(decisions_text, zeus_log_text, board_lines, t):
+    """[(метка времени, id)] из слов владельца: строки decisions.md с временем, вопросы окна вопросов, ответы на доске."""
+    out = []
+    for ln in (decisions_text or "").split("\n"):
+        m = DEC_LINE_RE.match(ln)
+        ts = _dec_time(m, t) if m else None
+        if ts is not None:
+            out += [(ts, i) for i in DEC_ID_RE.findall(ln)]
+    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) · окно вопросов\s*$", zeus_log_text or "", re.M))
+    for k, m in enumerate(heads):
+        end = heads[k + 1].start() if k + 1 < len(heads) else len(zeus_log_text)
+        q = re.match(r"\s*вопрос: \[([a-z0-9][a-z0-9-]{0,40})\]", zeus_log_text[m.end():end])
+        ts = ts_of(m.group(1).replace(" ", "T"))
+        if q and ts is not None:
+            out.append((ts, q.group(1)))
+    for line in board_lines or []:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        ts = ts_of(rec.get("time", "")[:19]) if isinstance(rec, dict) else None
+        if ts is not None and rec.get("kind") == "answer" and isinstance(rec.get("id"), str):
+            out.append((ts, rec["id"]))
+    return out
+
+
+NOTASK_RE = re.compile(r"^\s*(?:[-*]\s+)?не задача: \[([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\] [—–-] \S")
+WORD_RE = re.compile(r"[\w-]+")
+
+
+def task_words(body):
+    """Слова текста задачи до «## Журнал»: id в теле связывает задачу со словом владельца, упоминание в журнале — нет."""
+    m = re.search(r"^## Журнал", body or "", re.M)
+    return WORD_RE.findall((body or "")[:m.start()] if m else (body or ""))
+
+
+def unlinked_decisions(tasks, decisions_text, zeus_log_text, board_lines, t, minutes=UNLINKED_MIN, days=UNLINKED_DAYS):
+    """id слов владельца старше minutes минут (и не старше days дней) без задачи: нет задачи с этим id, id нет в теле
+    ни одной задачи до «## Журнал» (статус любой, dropped — тоже решение) и в decisions.md нет отдельной строки
+    «не задача: [id] — причина». Слова владельца, цитаты и другие формы слова пометкой не считаются (argus a, b)."""
+    cands = {i for ts, i in owner_ids(decisions_text, zeus_log_text, board_lines, t)
+             if minutes * 60 < t - ts <= days * 86400}
+    words = set()
+    for _, _, b in tasks.values():  # один проход по задачам, а не регулярка на каждую пару id × задача
+        words.update(task_words(b))
+    notask = {m.group(1) for m in map(NOTASK_RE.match, (decisions_text or "").split("\n")) if m}
+    return sorted(i for i in cands if i not in tasks and i not in words and i not in notask)
 
 
 # --- поле project — только имя проекта из directions.toml (metis-0323) ---------------------------------------------
