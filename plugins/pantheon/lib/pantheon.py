@@ -60,7 +60,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --acceptance принято|вернуть|к владельцу --parent ПАЧКА --mode self|single|parallel --mode-why X --touches ПУТЬ …
                     --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
                     --recommend "А — потому что …" --if-no-answer "…" --depends-on ID --executor auto|claude|codex
-                    --text|--body "текст" | --body-file ПУТЬ]
+                    --text|--body "текст" | --body-file ПУТЬ
+                    --from слово владельца|отчёт|ревью|остаток|план|по ходу --source ID|ПУТЬ#якорь   откуда задача (metis-0502)
+                    --done-when "пункт" …]   пункты раздела «Готово, когда» (повторяемый); без него в теле — раздел с подсказкой
                     текст задачи (цель, «готово, когда») обязателен: без --text/--body/--body-file — отказ, код 2;
                     без текста можно только вопрос владельцу: --question, --why и не меньше двух --option, иначе код 2;
                     неизвестный флаг (и «--флаг=значение») — отказ с его именем, код 2, файл не создан (metis-0402);
@@ -83,6 +85,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon task migrate-project [--write]   project карточек → имя проекта из directions.toml; без --write — сухой
                     прогон «id: было → станет», с --write — запись через task set со строкой в журнал (metis-0323)
   pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту
+  pantheon task split ID --title "остаток" [--done-when "пункт" …] [--text "описание"]
+                    остаток исходной задачи — новой задачей в том же направлении: from=остаток, source=ID, тег «остаток»,
+                    та же пачка; пункты — из --done-when, иначе неотмеченные из исходной; строка в журнале обеих (metis-0502)
   pantheon task attach ID ПАЧКА | detach ID   задача в пачку (story) и обратно; show ПАЧКА — состав и сумма оценок
   pantheon executors                    набор исполнителей кода (Claude всегда, Codex — дополнение) и включён ли Codex
   pantheon executors check              проверить Codex: на PATH → вход (CODEX_HOME роли) → hello-проба
@@ -7039,12 +7044,14 @@ def unlinked_alert(T, unlinked):
 TASK_NEW_VALUE_FLAGS = {"--direction", "--title", "--project", "--text", "--body", "--body-file", "--type", "--status",
                         "--priority", "--due", "--next", "--owner", "--release", "--wave", "--batch", "--mode", "--mode-why",
                         "--touches", "--night", "--estimate", "--actual", "--acceptance", "--waiting-on", "--question",
-                        "--why", "--recommend", "--if-no-answer", "--option", "--depends-on", "--executor", "--parent"}
+                        "--why", "--recommend", "--if-no-answer", "--option", "--depends-on", "--executor", "--parent",
+                        "--from", "--source", "--done-when"}
 TASK_NEW_BOOL_FLAGS = {"--risky"}
+TASK_SPLIT_VALUE_FLAGS = {"--title", "--done-when", "--text"}
 TASK_SET_VALUE_FLAGS = {"--note", "--option", "--body", "--body-file"}
 # Повторяемые флаги — списки; любой другой повторённый флаг — отказ (argus b, круг 2): `opt()` берёт последнее
 # значение, и `--body "Цель" --body "Готово, когда"` молча терял бы первую часть. --wave — прежнее имя --release.
-TASK_REPEATABLE_FLAGS = {"--option", "--touches", "--depends-on"}
+TASK_REPEATABLE_FLAGS = {"--option", "--touches", "--depends-on", "--done-when"}
 TASK_FLAG_ALIASES = {"--wave": "--release"}
 
 
@@ -7170,7 +7177,8 @@ def task_cmd(rest):
                       "waiting_on": opt("--waiting-on"), "question": opt("--question"), "why": opt("--why"),
                       "recommend": opt("--recommend"), "if_no_answer": opt("--if-no-answer"),
                       "options": opt("--option", True) or None, "depends_on": opt("--depends-on", True) or None,
-                      "risky": True if "--risky" in args else None, "executor": opt("--executor"), "parent": opt("--parent")}
+                      "risky": True if "--risky" in args else None, "executor": opt("--executor"), "parent": opt("--parent"),
+                      "from": opt("--from"), "source": opt("--source")}
             if not opt("--direction") or not opt("--title"):
                 print("pantheon task new: нужны --direction и --title", file=sys.stderr)
                 return 2
@@ -7182,7 +7190,7 @@ def task_cmd(rest):
                 print(f"pantheon task new: --type {opt('--type')} — только {' или '.join(T.WORK_TYPES)}", file=sys.stderr)
                 return 2
             tid, p = T.task_new(PANTHEON, now(), opt("--direction"), opt("--title"), project=opt("--project"),
-                                text=body_text, kind=opt("--type") or "task", **fields)
+                                text=body_text, kind=opt("--type") or "task", done_when=opt("--done-when", True) or None, **fields)
             print(f"{tid} {os.path.relpath(p, PANTHEON)}")
             task_new_notify(T, tid, opt("--direction"), opt("--title"), body_text)
             for w in T.option_warns(fields):
@@ -7263,6 +7271,20 @@ def task_cmd(rest):
             for w in words or [{"time": "—", "kind": "нет записей"}]:
                 print(f"- {w.get('time', '')[:16].replace('T', ' ')} · {w.get('kind')} · "
                       f"{w.get('dst') or w.get('answer') or w.get('text') or w.get('title') or ''}")
+        elif sub == "split" and args and not args[0].startswith("--"):
+            err = task_flag_error("split", args[1:], TASK_SPLIT_VALUE_FLAGS)
+            if err:
+                print(err, file=sys.stderr)
+                return 2
+            tid0 = args[0]
+            args = args[1:]
+            if not opt("--title"):
+                print("pantheon task split: нужен --title — название остатка; ничего не записано", file=sys.stderr)
+                return 2
+            tid, p = T.task_split(PANTHEON, now(), tid0, opt("--title"), done_when=opt("--done-when", True) or None,
+                                  text=opt("--text"))
+            print(f"{tid} {os.path.relpath(p, PANTHEON)} (остаток {tid0})")
+            task_new_notify(T, tid, T.read(p)[0].get("direction"), opt("--title"), opt("--text"))
         elif sub == "attach" and len(args) == 2:
             old = T.task_attach(PANTHEON, now(), args[0], args[1])
             print(f"{args[0]} → пачка {args[1]}" + (f" (была в {old})" if old else ""))

@@ -65,6 +65,9 @@ FIELDS = {
     "mode": ("str", False), "mode_why": ("str", False), "touches": ("list", False),
     # место задачи в пачке (metis-0069, перенос batch): меньше — раньше; без него — по зависимостям и приоритету
     "order": ("int", False),
+    # откуда задача взялась (metis-0502): from — одно из FROM_VALUES, source — на что ссылается («metis-0400» или путь
+    # отчёта/ревью с #якорем); у остатка source — исходная задача. Старые задачи без from читаются как раньше
+    "from": ("str", False), "source": ("str", False),
 }
 # прежние ключи шапки → нынешние: читаются при разборе, при записи уходят под новым именем
 LEGACY_KEYS = {"wave": "release"}
@@ -75,6 +78,9 @@ MODES = {"self": "сам", "single": "один исполнитель", "paralle
 EXECUTORS = ("auto", "claude", "codex")
 # итог приёмки утром: как у приоритета — значение из перечня, иное — ошибка шапки
 ACCEPTANCE = ("принято", "вернуть", "к владельцу")
+# откуда взялась задача: слово владельца · отчёт · ревью · остаток (task split) · план · найдено по ходу чужой работы
+FROM_VALUES = ("слово владельца", "отчёт", "ревью", "остаток", "план", "по ходу")
+REST_TAG = "остаток"
 # срок due — дата (срок — конец дня) или дата со временем «ГГГГ-ММ-ДДTЧЧ:ММ» (умные уведомления, metis-0023)
 ORDER = list(FIELDS)
 PRIORITY = {0: "срочно", 1: "высокий", 2: "обычный", 3: "низкий"}
@@ -429,6 +435,12 @@ def check_head(head):
         errs.append(f"acceptance «{head.get('acceptance')}» — не из {', '.join(ACCEPTANCE)}")
     if head.get("id") and not ID_RE.fullmatch(str(head["id"])):
         errs.append(f"id «{head['id']}» — нужен вид «pan-0001»")
+    if head.get("from") not in (None, *FROM_VALUES):
+        errs.append(f"from «{head.get('from')}» — не из {', '.join(FROM_VALUES)}")
+    if head.get("source") and head.get("source") == head.get("id"):
+        errs.append("source ссылается на саму задачу")
+    if head.get("source") and not head.get("from"):
+        errs.append("source без from — не сказано, чем является ссылка (слово владельца · отчёт · ревью · остаток · план · по ходу)")
     if head.get("mode") is not None and head.get("mode") not in MODES:
         errs.append(f"mode «{head.get('mode')}» — не из {', '.join(MODES)}")
     if head.get("mode") == "parallel" and not head.get("touches"):
@@ -579,8 +591,47 @@ def _file_for(pantheon, direction, tid):
     return os.path.join(base, tid + ".md")
 
 
-def task_new(pantheon, t, direction, title, project=None, actor="агент", text=None, kind="task", **fields):
-    """kind — task или story (пачка, metis-0069)."""
+DONE_WHEN = "Готово, когда"
+DONE_WHEN_HEAD = f"## {DONE_WHEN}"
+DONE_WHEN_HINT = "(впишите проверяемые пункты: что должно работать и как это проверить)"
+_DW_LINE = re.compile(rf"^\s*(?:#{{1,6}}\s*)?{DONE_WHEN}\s*:?\s*$", re.IGNORECASE)
+_DW_ITEM = re.compile(r"^\s*[-*]\s*\[([ xXхХ])\]\s*(.*?)\s*$")
+
+
+def done_criteria(body):
+    """Пункты «Готово, когда» в теле → [(отмечен, текст)]. Раздел — строка «## Готово, когда» или «Готово, когда:», дальше
+    чек-лист; кончается заголовком или любой строкой не из списка. Подсказка-заглушка считается пунктом."""
+    out, on = [], False
+    for ln in (body or "").split("\n"):
+        if not on:
+            on = bool(_DW_LINE.match(ln))
+            continue
+        m = _DW_ITEM.match(ln)
+        if m:
+            out.append((m.group(1) != " ", m.group(2)))
+        elif ln.strip():
+            break
+    return out
+
+
+def done_when_section(items):
+    """Раздел «## Готово, когда» с чек-листом; нет пунктов — одна подсказка вместо них."""
+    items = [" ".join(str(x).split()) for x in (items or []) if str(x).strip()]
+    return DONE_WHEN_HEAD + "\n\n" + "\n".join(f"- [ ] {x}" for x in (items or [DONE_WHEN_HINT])) + "\n\n"
+
+
+def check_source(pantheon, tid, source):
+    """source вида id задачи (ID_RE) — такая задача должна быть и не быть самой собой; путь отчёта/ревью — как есть."""
+    if source and ID_RE.fullmatch(str(source)):
+        if source == tid:
+            raise ValueError("source ссылается на саму задачу")
+        if source not in load_tasks(pantheon, WORK_TYPES):
+            raise ValueError(f"source {source}: нет такой задачи")
+
+
+def task_new(pantheon, t, direction, title, project=None, actor="агент", text=None, kind="task", done_when=None, created_note=None, **fields):
+    """kind — task или story (пачка, metis-0069). done_when — пункты «Готово, когда» (metis-0502): критерии пишет автор при
+    создании; раздел есть всегда, без пунктов — с подсказкой."""
     if kind not in WORK_TYPES:
         raise ValueError(f"тип {kind!r} — только {', '.join(WORK_TYPES)}")
     if not DIRECTION_RE.fullmatch(str(direction)):
@@ -589,6 +640,10 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
         raise ValueError(f"нет направления {direction}")
     if fields.get("depends_on"):
         check_depends(load_tasks(pantheon, WORK_TYPES), None, fields["depends_on"])  # новая задача в цикл не входит
+    if fields.get("source"):
+        check_source(pantheon, None, fields["source"])
+    if done_when and done_criteria(escape_desc(text)):
+        raise ValueError("в тексте уже есть «Готово, когда» с пунктами — пишите их либо там, либо в --done-when, не в обоих местах")
     project = resolve_project(pantheon, direction, project)  # metis-0323: только имя проекта из directions.toml
     tid = new_id(pantheon, direction)
     path = _file_for(pantheon, direction, tid)
@@ -618,9 +673,12 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
         remove(path)
         raise ValueError("; ".join(errs))
     desc = escape_desc(text)
+    # свой раздел — всегда, кроме случая, когда пункты уже в тексте (старый образец «Готово, когда:» со списком)
+    dw = "" if done_criteria(desc) else done_when_section(done_when)
     try:
-        write_task(path, head, f"\n# {title.strip()}\n\n" + (desc + "\n\n" if desc else "")
-                   + f"## Журнал\n\n- {now_iso(t)[:16].replace('T', ' ')} — {actor}: создана\n")
+        write_task(path, head, f"\n# {title.strip()}\n\n" + (desc + "\n\n" if desc else "") + dw
+                   + f"## Журнал\n\n- {now_iso(t)[:16].replace('T', ' ')} — {actor}: создана"
+                   + (f" — {created_note}" if created_note else "") + "\n")
     except ValueError:
         remove(path)  # заготовку create_excl не оставляем
         raise
@@ -675,8 +733,36 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
     par = changes.get("parent")
     if par and tasks.get(par, ("", {}))[1].get("type") == "story" and not (changes.get("mode") or tasks[tid][1].get("mode")):
         raise ValueError(f"{tid}: {NO_MODE_BATCH}")
+    if changes.get("source"):
+        check_source(pantheon, tid, changes["source"])
     with dir_lock(os.path.dirname(tasks[tid][0])):
         return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck, body, keep_updated)
+
+
+def task_split(pantheon, t, tid, title, done_when=None, text=None, actor="агент"):
+    """Остаток задачи tid — новой задачей одной командой (metis-0502): то же направление, проект, пачка и режим, from=остаток,
+    source=tid, тег «остаток»; пункты — done_when, иначе неотмеченные пункты исходной. В журнале обеих — строка со ссылкой.
+    → (id новой, путь)."""
+    tasks = load_tasks(pantheon, WORK_TYPES)
+    if tid not in tasks:
+        raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
+    path0, h0, b0 = tasks[tid]
+    if h0.get("type") != "task":
+        raise ValueError(f"{tid} — не задача: остаток выносится только из задачи")
+    if not str(title or "").strip():
+        raise ValueError("нужен --title: название остатка")
+    items = [x for x in (done_when or []) if str(x).strip()] or [x for done, x in done_criteria(b0) if not done and x != DONE_WHEN_HINT]
+    fields = {k: h0[k] for k in ("owner", "parent", "mode", "mode_why", "priority", "executor") if h0.get(k) is not None}
+    fields.update({"from": "остаток", "source": tid, "tags": sorted({*(h0.get("tags") or []), REST_TAG})})
+    desc = text if text else f"Остаток задачи {tid} «{h0.get('title')}»."
+    nid, p = task_new(pantheon, t, h0["direction"], title, project=h0.get("project"), actor=actor, text=desc,
+                      done_when=items, created_note=f"остаток задачи {tid}", **fields)
+    try:
+        task_set(pantheon, t, tid, {}, note=f"остаток вынесен в {nid}: {' '.join(str(title).split())}", actor=actor)
+    except Exception:
+        remove(p)  # исходная не записана — новая без пары в журнале не остаётся
+        raise
+    return nid, p
 
 
 def task_note(pantheon, t, tid, note):
@@ -768,9 +854,14 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None
     if errs:
         raise ValueError("; ".join(errs))
     if new_body is not None:  # прежний текст остаётся в истории Пританея, в журнале — строка о замене (argus b)
+        crit_was = [x for _, x in done_criteria(body)]
         body, was = replace_desc(body, new_body)
         body = append_log(body, f"{now_iso(t)[:16].replace('T', ' ')} — {actor}: текст задачи заменён "
                                 f"(было {was} знаков, стало {len(escape_desc(new_body))})")
+        crit_now = [x for _, x in done_criteria(body)]
+        if crit_was != crit_now:  # критерии фиксируются при создании; правка — только с записью (metis-0502)
+            body = append_log(body, f"{now_iso(t)[:16].replace('T', ' ')} — {actor}: критерии «{DONE_WHEN}» изменены "
+                                    f"(было пунктов {len(crit_was)}, стало {len(crit_now)})")
     if note:
         body = append_log(body, f"{now_iso(t)[:16].replace('T', ' ')} — {actor}: {' '.join(str(note).split())}")
     write_task(path, head, body)
@@ -1621,7 +1712,7 @@ PULT_VERSION = hashlib.sha256(PULT_FILE.encode("utf-8")).hexdigest()[:12]  # с�
 
 # --- доска владельца ------------------------------------------------------------
 
-CARD_ORDER = ["Статус", "Проект", "Внимание", "Вопрос", "Приоритет", "Срок", "Кому", "Дальше", "Ждёт", "Создана", "Вопрос задан",
+CARD_ORDER = ["Статус", "Проект", "Внимание", "Вопрос", "Приоритет", "Срок", "Кому", "Дальше", "Ждёт", "Создана", "Откуда", "Вопрос задан",
               "Закрыта", "Выпуск", "Пачка", "Пульт", "Ночь", "Оценка", "Факт", "Приёмка", "Порядок", "Режим", "Режим почему",
               "Зависит от", "Области", "Пересечения",
               # карточка пачки (story) и заметка проекта (пульт)
@@ -1629,7 +1720,7 @@ CARD_ORDER = ["Статус", "Проект", "Внимание", "Вопрос"
               "Тип", "id", "tags"]
 # типы свойств карточек для Obsidian (.obsidian/types.json хранилища): тик ставит свои ключи, чужие не трогает
 PROP_TYPES = {"Внимание": "multitext", "Приоритет": "number", "Срок": "date", "Создана": "date",
-              "Вопрос задан": "datetime", "Вопрос": "text", "Закрыта": "date", "Кому": "text", "tags": "tags",
+              "Вопрос задан": "datetime", "Откуда": "text", "Вопрос": "text", "Закрыта": "date", "Кому": "text", "tags": "tags",
               "Выпуск": "text", "Пачка": "text", "Ночь": "date", "Оценка": "text", "Факт": "text", "Приёмка": "text",
               "Порядок": "number", "Режим": "text", "Зависит от": "multitext", "Области": "multitext",
               "Пересечения": "multitext", "Цепочка": "multitext", "Параллельно": "multitext", "Области не указаны": "text",
@@ -1867,6 +1958,7 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
             "Кому": link(node), "Дальше": None if closed else head.get("next"),
             "Ждёт": head.get("waiting_on") if head.get("waiting_on") not in (None, "human") else None,
             "Создана": _date(head.get("created"), 10),
+            "Откуда": " · ".join(x for x in (head.get("from"), head.get("source")) if x) or None,
             "Вопрос задан": _date(head.get("question_at"), 19) if head.get("question") else None,
             "Вопрос": _plain(head["question"]) if head.get("question") and not closed else None,
             # закрытые до 0.9.28 даты закрытия не имеют — тогда последнее изменение задачи (из её шапки)
@@ -3221,13 +3313,14 @@ def has_description(body):
     """Есть ли у задачи текст кроме заголовка и журнала: что-то между «# …» и первым «## …» или раздел кроме журнала."""
     lines = (body or "").split("\n")
     h = next((i for i, ln in enumerate(lines) if ln.startswith("# ")), -1)
-    in_log = False
+    in_log = in_dw = False
     for ln in lines[h + 1:]:
         if ln.startswith("## "):
-            if not ln.startswith("## Журнал"):
+            in_dw = ln.startswith(DONE_WHEN_HEAD)  # раздел критериев с подсказкой описанием не считается (metis-0502)
+            if not in_dw and not ln.startswith("## Журнал"):
                 return True
-            in_log = True
-        elif ln.strip() and not in_log:
+            in_log = in_log or ln.startswith("## Журнал")
+        elif ln.strip() and not in_log and not in_dw:
             return True
     return False
 
