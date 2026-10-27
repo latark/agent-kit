@@ -38,8 +38,8 @@ PostToolUse (Bash:
   hq-gh        — окну штаба gh pr — только с -R из [merge_repos], PR номером, без GH_* в команде и GH_REPO/GH_HOST/
                  GH_CONFIG_DIR в окружении, без обсуждений (--comments, --json comments) и без личного в команде;
                  слияние (gh pr merge, gh api …/merge) — отказ всегда (metis-0247);
-  hq-sessync   — окну штаба `sessync find <слова> [-p проект]` разрешён (мимо песочницы, вывод с маской ключей), с --raw
-                 и --no-mask (и их сокращениями) — отказ (metis-0566);
+  hq-sessync   — окну Пританея `sessync find <слова> [-p имя] [-n число]` — только одной командой в строке и только эти
+                 аргументы (белый список); любой другой токен с «-», составная команда и обёртка — отказ (metis-0566);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
                  status, chats, folders, verify, split — можно; без PANTHEON_ROLE (плановый проход) — можно (metis-0267);
@@ -3829,12 +3829,16 @@ def check_draft_role(event, tool, tool_input):
     return None
 
 
-# hq-sessync (metis-0566, решение владельца 27.10). Окну штаба `sessync find <слова> [-p проект]` выпущен мимо песочницы
-# (excludedCommands, HQ_EXCLUDED): читает транскрипты ~/.claude/projects, а вывод проходит маску похожего на ключи — она
-# в самом sessync. Флаги, которые маску или её границы снимают, — отказ: --raw (поиск по сырым транскриптам, вывод
-# инструментов) и --no-mask. argparse в sessync принимает и сокращения (--ra, --no-m), поэтому отказ — на любой
-# аргумент, который начало одного из них. Другие окна `sessync find` не получают: в их excludedCommands его нет.
-SESSYNC_BAD_FLAGS = ("--raw", "--no-mask")
+# hq-sessync (metis-0566, решение владельца 27.10). Окну Пританея `sessync find <слова> [-p проект] [-n число]` выпущен
+# мимо песочницы (excludedCommands, HQ_EXCLUDED): читает транскрипты ~/.claude/projects, а вывод проходит маску похожего
+# на ключи — она в самом sessync. Белый список, а не запреты: после `find` только слова (не с «-»), `-p <имя>` и
+# `-n <цифры>`; любой другой токен с «-» (--raw, --no-mask, их сокращения, --foo, -h) — отказ, как и неразрешимое слово.
+# И только одной командой в строке: `;`, `&`, `|`, `<`, `>`, `$`, обратная кавычка, скобки, перевод строки, обратная косая
+# или обёртка (bash -c, env) — отказ: правило excludedCommands сверяет начало команды, и хвост ушёл бы мимо песочницы.
+# Другие окна `sessync find` не получают: в их excludedCommands его нет.
+SESSYNC_PROJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
+SESSYNC_N_RE = re.compile(r"[0-9]+\Z")
+SESSYNC_SHELL_CHARS = re.compile(r"[;&|<>$`()\\\n\r]")
 
 
 def check_hq_sessync(event, tool, tool_input):
@@ -3843,21 +3847,31 @@ def check_hq_sessync(event, tool, tool_input):
     cmd = tool_input.get("command") or ""
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     _, cmds = bash_analysis(cmd, cwd)
+    head = "Правило hq-sessync: окну Пританея `sessync find` — только `sessync find слова [-p проект] [-n число]` (metis-0566)"
     for n, t in cmds:
         if not n or os.path.basename(n.rstrip("/")) != "sessync":
             continue
-        args = [a for a in t if isinstance(a, str)]
-        if "find" not in args:
+        if "find" not in [a for a in t if isinstance(a, str)]:
             continue
-        if len(args) != len(t):  # аргумент не вычислить ($X, $(…)) — не понять, нет ли в нём --raw
-            return ("Правило hq-sessync: окну Пританея `sessync find` — слова только буквами, без подстановок "
-                    "$(…) и переменных (metis-0566): в них мог бы быть --raw.")
-        bad = [a for a in args if a.startswith("--") and len(a) > 2
-               and any(f.startswith(a.split("=", 1)[0]) for f in SESSYNC_BAD_FLAGS)]
-        if bad:
-            return ("Правило hq-sessync: окну Пританея `sessync find` — без --raw и --no-mask (metis-0566): вывод "
-                    "проходит маску похожего на ключи, а эти флаги её снимают или ищут по выводу инструментов. "
-                    f"Убери {bad[0]}.")
+        if len(cmds) != 1 or SESSYNC_SHELL_CHARS.search(cmd):
+            return (f"{head}: одной командой в строке, без `;`, `&&`, `||`, `|`, перенаправлений, подстановок "
+                    "$(…) и обратных кавычек, обёрток bash -c и env.")
+        if any(not isinstance(a, str) for a in t):
+            return f"{head}: слова только буквами, без переменных и подстановок."
+        if t[0] != "find":
+            return f"{head}: первым после sessync идёт find."
+        args = t[1:]
+        k = 0
+        while k < len(args):
+            a = args[k]
+            if not a.startswith("-"):
+                k += 1
+            elif a == "-p" and k + 1 < len(args) and SESSYNC_PROJECT_RE.match(args[k + 1]):
+                k += 2
+            elif a == "-n" and k + 1 < len(args) and SESSYNC_N_RE.match(args[k + 1]):
+                k += 2
+            else:
+                return f"{head}: аргумент «{a}» не из белого списка (разрешены -p <имя>, -n <число> и слова)."
     return None
 
 
