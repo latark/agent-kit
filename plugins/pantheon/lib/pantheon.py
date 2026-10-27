@@ -86,6 +86,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon task migrate-project [--write]   project карточек → имя проекта из directions.toml; без --write — сухой
                     прогон «id: было → станет», с --write — запись через task set со строкой в журнал (metis-0323)
   pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту
+  pantheon task migrate-mode [--dry-run]   разово: открытым задачам всех направлений без mode — mode undecided («не
+                    решено»); задачи пачек, пачки, закрытые и входящие не трогает; с --dry-run — только план (metis-0505)
   pantheon task split ID --title "остаток" [--done-when "пункт" …] [--text "описание"]
                     остаток исходной задачи — новой задачей в том же направлении: from=остаток, source=ID, тег «остаток»,
                     та же пачка; пункты — из --done-when, иначе неотмеченные из исходной; строка в журнале обеих (metis-0502)
@@ -6957,6 +6959,12 @@ def check(paths=None, quiet=False):
         for tid, text in field_warns:
             if not quiet:
                 print(f"внимание · {tid}: {text}")
+        if not quiet:  # сводка по направлениям и пропуски «Кто делает» (metis-0505): строки, не тревоги и не код выхода
+            for dname, c in T.direction_summary(tasks_now, T.direction_names(PANTHEON, T.load_directions(PANTHEON))).items():
+                print(T.summary_line(dname, c))
+                if c["no_mode"]:  # id — в плане migrate-mode --dry-run: тут их сотни у старых направлений
+                    print(f"внимание · {dname}: без «Кто делает» (mode) открытых задач {c['no_mode']} — "
+                          "список и правка: pantheon task migrate-mode --dry-run, затем без --dry-run")
     board_drift_report(T, quiet) if not paths else None  # расхождения доски (metis-0441)
     if not paths and not quiet:
         off = autoclose_off_reason(now())
@@ -7344,6 +7352,18 @@ def task_cmd(rest):
             print("\n".join(plan) if plan else "переносить нечего")
             if dry and plan:
                 print("(--dry-run: ничего не записано)")
+        elif sub == "migrate-mode":
+            if any(a != "--dry-run" for a in args):
+                print(f"pantheon task migrate-mode: не понял «{' '.join(args)}» — допустим только --dry-run", file=sys.stderr)
+                return 2
+            dry = "--dry-run" in args
+            plan, failed = T.migrate_modes(PANTHEON, now(), dry_run=dry)
+            print("\n".join(plan) if plan else "переносить нечего")
+            if dry and plan:
+                print("(--dry-run: ничего не записано)")
+            if failed:
+                print(f"pantheon task migrate-mode: не записано {failed} — строки «не записано» выше", file=sys.stderr)
+                return 1
         elif sub == "migrate-project":
             if any(a != "--write" for a in args):
                 print(f"pantheon task migrate-project: не понял «{' '.join(args)}» — допустим только --write", file=sys.stderr)

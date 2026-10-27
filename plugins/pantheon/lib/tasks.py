@@ -72,10 +72,21 @@ FIELDS = {
 # прежние ключи шапки → нынешние: читаются при разборе, при записи уходят под новым именем
 LEGACY_KEYS = {"wave": "release"}
 # режим: сам координатор, один исполнитель на цепочку, параллельно; пусто — как single
-NO_MODE_BATCH = ("в пачку без режима нельзя: поставьте --mode self|single|parallel (и --mode-why — почему), "
+NO_MODE_BATCH = ("в пачку без режима нельзя: поставьте --mode self|single|parallel (и --mode-why — почему; «не решено» не годится), "
                  "режим нужен «Итогам пачек» и порядку запуска")
 MODES = {"self": "сам", "single": "один исполнитель", "parallel": "параллельно"}
 EXECUTORS = ("auto", "claude", "codex")
+# metis-0505: «не решено» — законное значение у задачи вне пачки (ставит разовая pantheon task migrate-mode открытым
+# задачам без mode); пачке и порядку запуска оно не годится — там нужен решённый режим (mode_decided)
+UNDECIDED = "undecided"
+MODES[UNDECIDED] = "не решено"
+
+
+def mode_decided(head):
+    """Режим решён: self, single или parallel. Пусто и «не решено» (undecided) — нет."""
+    return head.get("mode") in MODES and head.get("mode") != UNDECIDED
+
+
 # итог приёмки утром: как у приоритета — значение из перечня, иное — ошибка шапки
 ACCEPTANCE = ("принято", "вернуть", "к владельцу")
 # откуда взялась задача: слово владельца · отчёт · ревью · остаток (task split) · план · найдено по ходу чужой работы
@@ -675,10 +686,10 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
     if head.get("question"):
         head["question_at"] = now_iso(t)
     errs, _ = check_head(head)
-    if head.get("batch") and not head.get("mode"):
+    if head.get("batch") and not mode_decided(head):
         errs.append(NO_MODE_BATCH)
     par = head.get("parent")
-    if par and not head.get("mode") and load_tasks(pantheon, WORK_TYPES).get(par, ("", {}))[1].get("type") == "story":
+    if par and not mode_decided(head) and load_tasks(pantheon, WORK_TYPES).get(par, ("", {}))[1].get("type") == "story":
         errs.append(NO_MODE_BATCH)
     if errs:
         remove(path)
@@ -742,8 +753,10 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
     if changes.get("depends_on"):
         check_depends(tasks, tid, changes["depends_on"])
-    par = changes.get("parent")
-    if par and tasks.get(par, ("", {}))[1].get("type") == "story" and not (changes.get("mode") or tasks[tid][1].get("mode")):
+    # в пачку — только с решённым режимом; и снять или сделать «не решено» режим у задачи пачки нельзя (metis-0505)
+    par = changes.get("parent", tasks[tid][1].get("parent")) if "parent" in changes or "mode" in changes else None
+    mode = changes["mode"] if "mode" in changes else tasks[tid][1].get("mode")
+    if par and tasks.get(par, ("", {}))[1].get("type") == "story" and not mode_decided({"mode": mode}):
         raise ValueError(f"{tid}: {NO_MODE_BATCH}")
     if changes.get("source"):
         check_source(pantheon, tid, changes["source"])
@@ -855,7 +868,8 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None
     if "owner" in changes and not changes["owner"]:
         raise ValueError("owner не очищается: у задачи всегда есть «Кому» — поставьте другого исполнителя")
     old_q, was_closed = head.get("question"), head.get("status") in ("done", "dropped")
-    if changes.get("status") == "done" and not was_closed and actor not in CLOSE_EXEMPT_ACTORS:
+    # dropped → done — тоже закрытие: правило критериев действует (metis-0543 Д1); done → done его не повторяет
+    if changes.get("status") == "done" and head.get("status") != "done" and actor not in CLOSE_EXEMPT_ACTORS:
         left = unchecked_criteria(head, new_body if new_body is not None else body)
         rest = rest_ids(pantheon, tid) if left and pantheon else []
         if left and force is not None and not " ".join(str(force).split()):
@@ -881,7 +895,7 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None
         head["question_at"] = None
     elif head.get("question") != old_q:
         head["question_at"] = now_iso(t)
-    if changes.get("batch") and not head.get("mode"):
+    if changes.get("batch") and not mode_decided(head):
         raise ValueError(NO_MODE_BATCH)
     if not (keep_updated and head.get("updated")):
         head["updated"] = now_iso(t)
@@ -961,8 +975,8 @@ def board_problems(tasks, t, night_end="08:00", open_prs=None):
     done без closed; закрытая по слиянию без release или actual. Предупреждения — слова extra_attention и хвосты в журнале без задачи (tail_lines)."""
     errs, warns = [], []
     for tid, (_, h, b) in sorted(tasks.items()):
-        if h.get("type") == "task" and in_pack(h, tasks) and not h.get("mode"):
-            errs.append((tid, "задача пачки без mode (self|single|parallel) — поле нужно «Итогам пачек»"))
+        if h.get("type") == "task" and in_pack(h, tasks) and not mode_decided(h):
+            errs.append((tid, "задача пачки без mode (self|single|parallel; «не решено» не годится) — поле нужно «Итогам пачек»"))
         if h.get("status") == "done" and not h.get("closed"):
             errs.append((tid, "status done без closed — дата закрытия берётся из updated"))
         if h.get("status") == "done" and CLOSED_BY_MERGE in (b or ""):
@@ -971,7 +985,86 @@ def board_problems(tasks, t, night_end="08:00", open_prs=None):
                     errs.append((tid, f"закрыта по слиянию, а поле {k} пусто — его пишет плановый проход, «Итоги пачек» без него неполны"))
         warns += [(tid, w) for w in extra_attention(h, b, tasks, t, night_end, open_prs)]
     warns += [(tid, f"хвост в журнале без задачи: {ln}") for tid, ln in tail_lines(tasks, t)]  # metis-0504, не блок
+    warns += pack_title_warns(tasks)  # metis-0505
     return errs, warns
+
+
+# --- единая структура по направлениям (metis-0505) -------------------------------------
+# Уровни: Проект → Цель (если в ней две и больше пачки) → Пачка → Задача; цель и пачка — обе type story. Цель — story с
+# пачками внутри или с названием «Цель: …»; остальные story — пачки: «Пачка: <результат одной фразой>», без номера
+# (порядок — поле order или срок). Правила названий — для story с created от CRITERIA_FROM: старые не штрафуем.
+PACK_PREFIX, GOAL_PREFIX = "Пачка: ", "Цель: "
+_PACK_TITLE = re.compile(r"^Пачка: (?!№?\s*\d+(?:\W|$))\S")
+_NUMBERED = re.compile(r"^\s*(?:П\s*\d+|Пачка\s*№?\s*\d+)(?:\W|$)")
+
+
+def is_goal(sid, tasks):
+    """story — цель: в ней есть другие story (parent) или название начинается с «Цель: »."""
+    h = tasks.get(sid, ("", {}, ""))[1]
+    return h.get("type") == "story" and (str(h.get("title") or "").startswith(GOAL_PREFIX) or any(
+        x.get("type") == "story" and x.get("parent") == sid for _, x, _ in tasks.values()))
+
+
+def pack_title_warns(tasks):
+    """Названия открытых пачек и целей → [(id, текст)]: новая пачка не «Пачка: <результат>» или с номером, новая цель
+    с «Пачка» в названии, две открытые story одного направления с одним названием (любой давности)."""
+    out, seen = [], {}
+    for sid, (_, h, _) in sorted(tasks.items()):
+        if h.get("type") != "story" or h.get("status") in ("done", "dropped"):
+            continue
+        title = " ".join(str(h.get("title") or "").split())
+        key = (h.get("direction"), title.casefold())
+        if key in seen:
+            out.append((sid, f"то же название, что у {seen[key]}: «{title[:60]}» — назовите пачку её результатом"))
+        else:
+            seen[key] = sid
+        if str(h.get("created") or "") < CRITERIA_FROM:
+            continue
+        if is_goal(sid, tasks):
+            if title.startswith("Пачка") or _NUMBERED.match(title):
+                out.append((sid, "цель (в ней пачки) называется «Цель: <результат>», без «Пачка» и номера"))
+        elif not _PACK_TITLE.match(title):
+            out.append((sid, f"название пачки «{title[:60]}» — нужно «{PACK_PREFIX}<результат одной фразой>», без номера: "
+                             "порядок — поле order или срок (schema.md)"))
+    return out
+
+
+SUMMARY_KEYS = ("open", "no_pack", "no_criteria", "no_mode", "undecided", "rest_open")
+
+
+def direction_names(pantheon, dirs=None):
+    """Направления для сводки: папки directions/<имя> и записи реестра (без inbox) — и те, где задач нет."""
+    d = os.path.join(pantheon, "directions")
+    names = {x for x in list_dir(d) if DIRECTION_RE.fullmatch(x) and os.path.isdir(os.path.join(d, x))}
+    names |= {x["name"] for x in dirs or [] if isinstance(x, dict) and isinstance(x.get("name"), str)
+              and DIRECTION_RE.fullmatch(x["name"]) and x["name"] != "inbox"}
+    return sorted(names)
+
+
+def direction_summary(tasks, names=()):
+    """Сводка по открытым задачам (type task, не done/dropped) каждого направления → {направление: счётчики SUMMARY_KEYS и
+    no_mode_ids}. no_criteria — нет пунктов «Готово, когда» (одна заглушка-подсказка — тоже нет); no_mode — mode пуст;
+    undecided — «не решено»; rest_open — открытые остатки (тег «остаток»). names — направления, показанные и с нулём."""
+    blank = lambda: dict(dict.fromkeys(SUMMARY_KEYS, 0), no_mode_ids=[])  # noqa: E731
+    out = {n: blank() for n in names}
+    for tid, (_, h, b) in sorted(tasks.items()):
+        if h.get("type") != "task" or h.get("status") in ("done", "dropped") or h.get("direction") == "inbox":
+            continue
+        c = out.setdefault(str(h.get("direction")), blank())
+        c["open"] += 1
+        c["no_pack"] += not in_pack(h, tasks)
+        c["no_criteria"] += not [x for _, x in done_criteria(b) if x != DONE_WHEN_HINT]
+        if h.get("mode") in (None, ""):
+            c["no_mode"] += 1
+            c["no_mode_ids"].append(tid)
+        c["undecided"] += h.get("mode") == UNDECIDED
+        c["rest_open"] += REST_TAG in (h.get("tags") or [])
+    return out
+
+
+def summary_line(direction, c):
+    return (f"сводка · {direction}: открытых {c['open']} · без пачки {c['no_pack']} · без «{DONE_WHEN}» {c['no_criteria']}"
+            f" · без «Кто делает» {c['no_mode']} · «не решено» {c['undecided']} · остатков открытых {c['rest_open']}")
 
 
 def fix_closed(pantheon, t, tasks=None):
@@ -1290,7 +1383,7 @@ def task_attach(pantheon, t, tid, sid, actor="агент"):
     old = tasks[tid][1].get("parent")
     if old == sid:
         raise ValueError(f"{tid} уже в пачке {sid}")
-    if not tasks[tid][1].get("mode"):
+    if not mode_decided(tasks[tid][1]):
         raise ValueError(f"{tid}: {NO_MODE_BATCH}")
     was = f" (была в {old})" if old else ""
     task_set(pantheon, t, tid, {"parent": sid}, note=f"прикреплена к пачке {sid}{was}", actor=actor)
@@ -1351,6 +1444,32 @@ def migrate_batches(pantheon, t, dry_run=False, actor="агент"):
                 task_set(pantheon, t, tid, {"order": n, "batch": None}, note=f"batch «{name} · {place}» перенесён: порядок {n}",
                          actor=actor)
     return plan
+
+
+def migrate_modes(pantheon, t, dry_run=False, actor="агент"):
+    """Разовая миграция (metis-0505): открытые задачи всех направлений без mode → mode undecided («не решено»). Пачки (story),
+    закрытые, входящие (inbox/) и задачи пачек не трогаются: в пачке режим решает координатор, а «не решено» там — ошибка
+    check. Запись — task_set со строкой в журнал и прежним updated (как migrate_projects): это не движение работы.
+    Повтор ничего не меняет. → (строки плана, сбои)."""
+    tasks = load_tasks(pantheon, WORK_TYPES)
+    root = os.path.join(pantheon, "directions") + os.sep
+    lines, failed = [], 0
+    for tid, (p, h, _) in sorted(tasks.items()):
+        if (h.get("type") != "task" or h.get("status") in ("done", "dropped") or h.get("mode") not in (None, "")
+                or not p.startswith(root)):
+            continue
+        if in_pack(h, tasks):
+            lines.append(f"{tid}: в пачке {h.get('parent') or h.get('batch')} без mode — пропущена, режим решает координатор")
+            continue
+        lines.append(f"{tid}: mode пуст → {UNDECIDED} («{MODES[UNDECIDED]}»)")
+        if not dry_run:
+            try:
+                task_set(pantheon, t, tid, {"mode": UNDECIDED}, actor=actor, keep_updated=True,
+                         note=f"«Кто делает»: {MODES[UNDECIDED]} (разовая миграция mode, metis-0505)")
+            except (ValueError, OSError) as e:
+                lines.append(f"  не записано: {e}")
+                failed += 1
+    return lines, failed
 
 
 def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
@@ -2007,7 +2126,8 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
             "Факт": head.get("actual"), "Приёмка": head.get("acceptance"),
             # режим и зависимости (план metis-0248): «Зависит от» — только незакрытые depends_on, «Пересечения» —
             # живые задачи с общей областью (считает тик, overlaps)
-            "Режим": MODES.get(head.get("mode")), "Режим почему": head.get("mode_why"),
+            # «не решено» — пустое свойство: вид .base показывает пустой режим сам (metis-0500), а не «один исполнитель»
+            "Режим": MODES.get(head.get("mode")) if mode_decided(head) else None, "Режим почему": head.get("mode_why"),
             "Зависит от": ctx.get("waits") or None, "Области": head.get("touches") or None,
             "Пересечения": ctx.get("cross") or None,
             "Тип": "задача", "id": head.get("id"), "tags": [f"направление/{direction}"]}
