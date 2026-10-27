@@ -153,6 +153,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         ~/.claude/agents → roles build; плановый проход делает это сам, «Нет» — rejected
   pantheon role status [<имя>] | cancel <имя>   заявки на роли | отозвать открытую заявку
   pantheon approve [list] | add --site S --allow "…" [--limits "…"] | remove N   заранее разрешённое (только вы)
+  pantheon launch-question <id> запустить|перезапустить <направление>   вопрос и варианты для окна вопросов Зевса:
+                                        ваш выбор «Да — запустить <имя>» плановый проход исполняет сам (metis-0523)
   pantheon consent <id> [--days N]      ваш ответ Зевсу на вопрос <id> (журнал owner-log Зевса, по умолчанию 7 дней) —
                                         для исполнителя: согласие, данное в окне Зевса
   pantheon review test -- <команда…>    тесты для шлюза слияния (guard 0.5.9): в чистом дереве git запустить
@@ -269,31 +271,104 @@ def path(*parts):
     return os.path.join(STATE, *parts)
 
 
+# Окно Зевса пишет только в STATE/hq-rw/locks и STATE/hq-rw/autostart-reset (metis-0523, ревью безопасности): там замки
+# имён сессий (start-*, wake) и метки сброса самозапуска, которые берут его `pantheon start|wake|stop|resume`. Замки
+# прохода (tick, watch, board, notify, git…) — в STATE/locks, куда окно не пишет. Файл в hq-rw открывается
+# hq_open: O_NOFOLLOW|O_NONBLOCK через дескриптор папки, затем fstat — обычный файл, одна ссылка, владелец — мы; иначе
+# UnsafeFile, и файл не тронут. Ждущий замок в hq-rw ждёт не дольше HQ_LOCK_WAIT: окно не повесит проход.
+HQ_RW = "hq-rw"
+HQ_RW_DIRS = ("locks", "autostart-reset")
+HQ_LOCK_WAIT = 60.0  # с
+
+
+class UnsafeFile(OSError):
+    """Файл в папке окна Зевса — ссылка, жёсткая ссылка, не обычный файл или чужой: не пишем."""
+
+
+def hq_lock_name(name):
+    """Замок, который берёт и окно Зевса, — живёт в STATE/hq-rw/locks."""
+    return name.startswith("start-") or name == "wake"
+
+
+def hq_open(sub, fname):
+    """Дескриптор для дозаписи STATE/hq-rw/<sub>/<fname> (создаётся, 0600) после проверки; иначе UnsafeFile/OSError."""
+    if sub not in HQ_RW_DIRS or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}", fname or ""):
+        raise UnsafeFile(f"{sub}/{fname}: имя не по образцу")
+    d = path(HQ_RW, sub)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fd = os.open(fname, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=dfd)
+    finally:
+        os.close(dfd)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != os.getuid():
+        os.close(fd)
+        raise UnsafeFile(f"{sub}/{fname}: не обычный файл, ссылок {st.st_nlink} или владелец {st.st_uid}")
+    return fd
+
+
+def hq_mark(sub, fname, text):
+    """Метка в STATE/hq-rw/<sub>: подложенную ссылку на месте имени снимаем (unlink ссылку не проходит) и пишем заново."""
+    try:
+        fd = hq_open(sub, fname)
+    except UnsafeFile:
+        with contextlib.suppress(FileNotFoundError, IsADirectoryError, PermissionError):
+            os.unlink(path(HQ_RW, sub, fname))
+        fd = hq_open(sub, fname)
+    try:
+        os.write(fd, text.encode())
+    finally:
+        os.close(fd)
+
+
 @contextlib.contextmanager
 def lock(name, block=True):
-    """flock на файле в ~/.local/state/pantheon/locks/. Отдаёт True, если блокировка взята."""
+    """flock на файле в STATE/locks/ (замки имён сессий — в STATE/hq-rw/locks, см. выше). Отдаёт True, если взята."""
+    shared = hq_lock_name(name)
     try:
-        os.makedirs(path("locks"), exist_ok=True)
-        # O_NOFOLLOW: locks/ теперь пишет и окно Зевса (metis-0523) — ссылка на месте файла замка не уведёт запись
-        fh = os.fdopen(os.open(path("locks", name + ".lock"), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
-                               0o600), "a")
+        if shared:
+            fd = hq_open("locks", name + ".lock")
+        else:
+            os.makedirs(path("locks"), exist_ok=True)
+            fd = os.open(path("locks", name + ".lock"), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        fh = os.fdopen(fd, "a")
+    except UnsafeFile as e:
+        print(f"pantheon: замок {name} не взят — {e}", file=sys.stderr)
+        yield False
+        return
     except PermissionError as e:
-        # окно, собранное до metis-0523, не пишет в locks/ (metis-0078): ждущую блокировку имени сессии pantheon stop берёт, чтобы подъём,
-        # начатый до метки «остановлено», не проскочил после неё. Без права записи метка stopped/<имя> всё равно
-        # ставится первой, а проскочить может только подъём, уже прошедший проверку метки в ту же секунду, — stop
-        # идёт без блокировки с предупреждением. Замок alerts — тоже: строка тревоги дописывается одним write в режиме
-        # append, она не рвётся. Неблокирующие замки (start, тик) и git без файла не берутся.
+        # окно без записи в папку замков (собранное до metis-0523, metis-0078): ждущую блокировку имени сессии pantheon
+        # stop берёт, чтобы подъём, начатый до метки «остановлено», не проскочил после неё. Без права записи метка
+        # stopped/<имя> всё равно ставится первой, а проскочить может только подъём, уже прошедший проверку метки в ту
+        # же секунду, — stop идёт без блокировки с предупреждением. Замок alerts — тоже: строка тревоги дописывается
+        # одним write в режиме append, она не рвётся. Неблокирующие замки (start, тик) и git без файла не берутся.
         if not (block and (name.startswith("start-") or name == "alerts")):
             raise
-        print(f"pantheon: нет права записи в {path('locks').replace(HOME, '~')} ({e.strerror}) — работаю без "
+        where = path(HQ_RW, "locks") if shared else path("locks")
+        print(f"pantheon: нет права записи в {where.replace(HOME, '~')} ({e.strerror}) — работаю без "
               f"блокировки {name}: подъём этой же сессии в ту же секунду может проскочить", file=sys.stderr)
         yield True
         return
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
-        got = True
-    except BlockingIOError:
-        got = False
+    got = False
+    if shared and block:  # окно Зевса держит этот замок сколько угодно — проход ждёт не дольше HQ_LOCK_WAIT
+        deadline = time.monotonic() + HQ_LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                got = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    print(f"pantheon: замок {name} занят дольше {HQ_LOCK_WAIT:.0f} с — иду без него", file=sys.stderr)
+                    break
+                time.sleep(0.2)
+    else:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
+            got = True
+        except BlockingIOError:
+            got = False
     try:
         yield got
     finally:
@@ -2202,16 +2277,16 @@ def ssh_remote(folder):
     return False
 
 
-HQ_STATE_DIRS = ("locks", "autostart-reset")  # папки STATE, куда пишет окно Зевса (metis-0523)
-
-
 def hq_state_dirs():
-    """Настоящие пути STATE/locks и STATE/autostart-reset (создаются); ссылка или не папка — не даётся."""
+    """Настоящие пути STATE/hq-rw/locks и STATE/hq-rw/autostart-reset (создаются) — запись окну Зевса. Сама hq-rw ему
+    не даётся: подменить подпапку ссылкой окно не может. Ссылка или не папка — не даётся."""
     out = []
-    for n in HQ_STATE_DIRS:
-        p = path(n)
+    if os.path.islink(path(HQ_RW)):
+        return out
+    for n in HQ_RW_DIRS:
+        p = path(HQ_RW, n)
         with contextlib.suppress(OSError):
-            os.makedirs(p, exist_ok=True)
+            os.makedirs(p, mode=0o700, exist_ok=True)
         if os.path.isdir(p) and not os.path.islink(p):
             out.append(os.path.realpath(p))
     return out
@@ -2940,9 +3015,9 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hq = role_settings([root], None, memory, hq_cache, False, keys, None, guard)
     hq["sandbox"]["excludedCommands"] = list(HQ_EXCLUDED) + HQ_GH
     hq["sandbox"]["filesystem"]["denyWrite"] += [os.path.join(root, ".git"), os.path.join(root, "alerts.md")]
-    # [sb-simplify] п. 5 (metis-0523): замки и метки сброса самозапуска — в папки, куда окно Зевса пишет: без них
-    # `pantheon stop|resume|wake|start` из его окна падали с PermissionError на locks/ и autostart-reset/ (15.10–27.10).
-    # Только эти две папки STATE: журналы ваших слов, метки «остановлено вами» и остальное состояние — по-прежнему нет
+    # [sb-simplify] п. 5 (metis-0523): замки имён сессий и метки сброса самозапуска — в STATE/hq-rw/{locks,autostart-reset}:
+    # без них `pantheon stop|resume|wake|start` из его окна падали с PermissionError (15.10–27.10). Замки прохода
+    # (STATE/locks), журналы ваших слов, метки «остановлено вами» и остальное состояние — по-прежнему нет
     hq["sandbox"]["filesystem"]["allowWrite"] += hq_state_dirs()
     hq["sandbox"]["network"]["allowedDomains"] = []
     # корпус лекций — чужой контент (SEC-13, metis-0025): у Зевса уже есть личное и действия наружу, поэтому корпус ему
@@ -7609,7 +7684,8 @@ def task_cmd(rest):
 
 
 # --- дежурный и управление сессиями (шаг 1.4) — lib/watch.py ---------------------------------------------------------
-WATCH_CMDS = {"watch", "agents", "revisits", "stop", "resume", "pause", "restart", "saved", "who", "infra-check"}
+WATCH_CMDS = {"watch", "agents", "revisits", "stop", "resume", "pause", "restart", "saved", "who", "infra-check",
+              "launch-question"}
 
 
 def watch_cmd(cmd, rest):
@@ -7624,7 +7700,7 @@ def watch_cmd(cmd, rest):
     return {"watch": lambda: w.watch(dry="--dry-run" in rest), "agents": w.agents_cmd, "revisits": w.revisits,
             "stop": lambda: w.stop(rest, who), "resume": lambda: w.resume(rest, who), "pause": lambda: w.pause(rest, who),
             "restart": lambda: w.restart(rest, who), "saved": lambda: w.saved_cmd(rest, who), "who": w.who,
-            "infra-check": w.infra_cmd}[cmd]()
+            "infra-check": w.infra_cmd, "launch-question": lambda: w.launch_question_cmd(rest)}[cmd]()
 
 
 def usage_report(rest):

@@ -1060,8 +1060,8 @@ def test_fresh_path_busy_0207():
     a = bg("fb-dir", "blocked", "fdfdfdfd-1")
     e.agents([a])
     transcript(e, a, 130_000, T0 - 7200)
-    os.makedirs(e.st("locks"), exist_ok=True)
-    with open(e.st("locks", "start-fb-dir.lock"), "a") as fh:
+    os.makedirs(e.st("hq-rw", "locks"), exist_ok=True)  # замки имён сессий — в STATE/hq-rw/locks (metis-0523)
+    with open(e.st("hq-rw", "locks", "start-fb-dir.lock"), "a") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         e.run("watch", t=T0, extra=ZEUS_RUN)
     c = e.calls()
@@ -1199,11 +1199,12 @@ def test_stop_removes_from_fleet():
 
 
 def test_stop_without_locks_write():
-    """metis-0078: окно Зевса не пишет в locks/ — pantheon stop работает без блокировки имени, с предупреждением."""
+    """metis-0078: окно без записи в папку замков имён (STATE/hq-rw/locks, metis-0523) — pantheon stop работает без
+    блокировки имени, с предупреждением."""
     e = Env()
     e.direction("nl-dir")
     e.agents([bg("nl-dir", "working", "nlnlnlnl-1", pid=51)])
-    locks = e.st("locks")
+    locks = e.st("hq-rw", "locks")
     os.makedirs(locks, exist_ok=True)
     os.chmod(locks, 0o500)
     try:
@@ -1222,42 +1223,49 @@ def test_stop_without_locks_write():
         os.chmod(locks, 0o700)
 
 
-def _zeus_answer(e, t, question, answer, mark="· окно вопросов"):
+def _zeus_answer(e, t, question, answer, mark="· окно вопросов", note=None):
     """Запись хука answer в owner-log/zeus.md: заголовок со временем t и пометкой, тело «вопрос: … / ответ: …»."""
     with open(e.st("owner-log", "zeus.md"), "a", encoding="utf-8") as fh:
         fh.write(f"## {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t))} {mark}\nвопрос: {question}\n"
-                 f"ответ: {answer}\n\n")
+                 f"ответ: {answer}\n" + (f"заметка: {note}\n" if note else "") + "\n")
 
 
-def _start_log(e):
+def _start_rows(e):
     p = e.st("logs", "start.log")
     return [ln.split("\t") for ln in open(p, encoding="utf-8").read().splitlines()] if os.path.exists(p) else []
 
 
 def test_word_launch_0523():
-    """metis-0523 (решение владельца 27.10 «(а)»): ваш «Да» в окне вопросов на «[id] Запустить <направление>» — плановый
-    проход сам поднимает окно, без СБ и без команд запуска в окне Зевса; строка word-launch в start.log и тревога на
-    каждое поручение; один раз на запись. Не «Да», без пометки «окно вопросов», без [id], неизвестное имя, запись до
-    включения прохода — без запуска."""
+    """metis-0523 (решение владельца 27.10 «(а)», ревью безопасности): ваш выбор «Да — запустить <имя>» на вопрос по шаблону
+    pantheon launch-question — плановый проход сам поднимает окно, без СБ; строка word-launch в start.log и тревога на
+    каждое поручение; один раз на запись. Вопрос не по шаблону (текст после имени, «вернуть»), ответ не точный вариант,
+    заметка, без пометки «окно вопросов», без [id], неизвестное имя, запись до включения прохода — без запуска."""
     e = Env()
     e.direction("wl-dir")
     e.direction("wl-two")
-    _zeus_answer(e, T0 - 600, "[metis-0523] Запустить wl-dir? давняя запись", "Да")  # до включения прохода
+    _zeus_answer(e, T0 - 600, "[metis-0523] Запустить wl-dir?", "Да — запустить wl-dir")  # до включения прохода
     e.run("watch", t=T0)
     check(not _bgs(e), f"0523: запись до включения прохода подняла окно: {e.calls()}")
-    _zeus_answer(e, T0 + 30, "[metis-0523] Запустить wl-dir? Окно встало", "Да, поднимай")
+    _zeus_answer(e, T0 + 30, "[metis-0523] Запустить wl-dir?", "Да — запустить wl-dir")
     _zeus_answer(e, T0 + 31, "[metis-0524] Запустить wl-two?", "Нет")
-    _zeus_answer(e, T0 + 32, "[metis-0525] Запустить wl-two?", "Да", mark="· свободный ввод")
-    _zeus_answer(e, T0 + 33, "Запустить wl-two?", "Да")
-    _zeus_answer(e, T0 + 34, "[metis-0526] Запустить nosuch-dir?", "Да")
-    _zeus_answer(e, T0 + 35, "[metis-0527] Давай без спешки: запустить wl-two?", "Да")
+    _zeus_answer(e, T0 + 32, "[metis-0525] Запустить wl-two?", "Да — запустить wl-two", mark="· свободный ввод")
+    _zeus_answer(e, T0 + 33, "Запустить wl-two?", "Да — запустить wl-two")
+    _zeus_answer(e, T0 + 34, "[metis-0526] Запустить nosuch-dir?", "Да — запустить nosuch-dir")
+    _zeus_answer(e, T0 + 35, "[metis-0527] Давай без спешки: запустить wl-two?", "Да — запустить wl-two")
+    _zeus_answer(e, T0 + 36, "[metis-0529] Запустить wl-two? Только не сейчас", "Да — запустить wl-two")
+    _zeus_answer(e, T0 + 37, "[metis-0530] Запустить wl-two?", "Да")
+    _zeus_answer(e, T0 + 38, "[metis-0531] Запустить wl-two?", "Да — запустить wl-two", note="но не сегодня")
+    _zeus_answer(e, T0 + 39, "[metis-0532] Вернуть wl-two?", "Да — вернуть wl-two")
+    _zeus_answer(e, T0 + 40, "[metis-0534] Запустить wl-two?", "Да — запустить wl-two, но не сейчас")
     e.run("watch", t=T0 + 60)
-    check(len(_bgs(e, "wl-dir")) == 1, f"0523: «Да» не подняло wl-dir: {e.calls()}")
-    check(not _bgs(e, "wl-two"), f"0523: wl-two поднят без своего «Да» на [id] с глаголом: {e.calls()}")
-    wl = [r for r in _start_log(e) if r[1:2] == ["word-launch"]]
-    check([(r[2], r[3], r[4]) for r in wl] == [("wl-dir", "запустить", "metis-0523"), ("wl-two", "запустить", "metis-0524"),
-                                                ("nosuch-dir", "запустить", "metis-0526")]
-          and wl[0][-1] == "поднято" and "а не «Да»" in wl[1][-1] and "нет такого направления" in wl[2][-1],
+    check(len(_bgs(e, "wl-dir")) == 1, f"0523: «Да — запустить» не подняло wl-dir: {e.calls()}")
+    check(not _bgs(e, "wl-two"), f"0523: wl-two поднят без точного выбора на вопрос по шаблону: {e.calls()}")
+    wl = [r for r in _start_rows(e) if r[1:2] == ["word-launch"]]
+    check([r[4] for r in wl] == ["metis-0523", "metis-0524", "metis-0526", "metis-0529", "metis-0530", "metis-0531",
+                                 "metis-0532", "metis-0534"]
+          and wl[0][2] == "wl-dir" and wl[0][-1] == "поднято" and "а не «Да — запустить wl-two»" in wl[1][-1]
+          and "нет такого направления" in wl[2][-1] and "не по шаблону" in wl[3][-1] and "а не «Да" in wl[4][-1]
+          and "заметка" in wl[5][-1] and "не по шаблону" in wl[6][-1] and "а не «Да" in wl[7][-1],
           f"0523: строки журнала поручений: {wl}")
     al = e.alerts()
     check("по вашему ответу в окне вопросов" in al and "[metis-0523]): запустить wl-dir — поднято" in al,
@@ -1266,57 +1274,103 @@ def test_word_launch_0523():
     check("pantheon task show metis-0523" in task_text and "[Пантеон: поручение от tick]" in task_text,
           f"0523: поручение без id и origin: {task_text}")
     e.run("watch", t=T0 + 360)
-    check(len(_bgs(e, "wl-dir")) == 1 and len([r for r in _start_log(e) if r[1:2] == ["word-launch"]]) == 3,
+    check(len(_bgs(e, "wl-dir")) == 1 and len([r for r in _start_rows(e) if r[1:2] == ["word-launch"]]) == 8,
           f"0523: запись исполнена повторно: {e.calls()}")
-    # старше окна (12 ч) — не исполняется
-    _zeus_answer(e, T0 + 400, "[metis-0528] Запустить wl-two?", "Да")
+    # старше окна (12 ч) — не исполняется; испорченный word-launch.json проверку не роняет
+    _zeus_answer(e, T0 + 400, "[metis-0528] Запустить wl-two?", "Да — запустить wl-two")
+    with open(e.st("word-launch.json"), "w") as fh:
+        fh.write("[]")
     e.run("watch", t=T0 + 400 + 13 * 3600)
     check(not _bgs(e, "wl-two"), f"0523: запись старше 12 ч исполнена: {e.calls()}")
+    check("«окна по вашему ответу» упала" not in e.alerts(), f"0523: испорченный word-launch.json уронил проверку")
+    # шаблон печатает pantheon launch-question; «вернуть», лишнее и неизвестное имя — код 2
+    r = e.run("launch-question", "metis-0533", "запустить", "wl-two", t=T0)
+    check(r.returncode == 0 and "вопрос: [metis-0533] Запустить wl-two?" in r.stdout
+          and "Да — запустить wl-two | Нет" in r.stdout, f"0523: launch-question: {r.returncode} {r.stdout!r} {r.stderr!r}")
+    bad = [e.run("launch-question", *a, t=T0).returncode for a in (("metis-0533", "вернуть", "wl-two"),
+                                                                   ("metis-0533", "запустить", "nosuch-dir"),
+                                                                   ("metis-0533", "запустить", "wl-two", "сейчас"))]
+    check(bad == [2, 2, 2], f"0523: launch-question без отказа: {bad}")
 
 
 def test_word_launch_return_restart_0523():
-    """metis-0523: «запустить» метку «остановлено вами» не снимает; «вернуть» снимает и поднимает; «перезапустить» —
+    """metis-0523: «запустить» метку «остановлено вами» не снимает (вернуть — только pantheon resume); «перезапустить» —
     pantheon start --restart: живая копия останавливается, поднимается новая; живую «запустить» не трогает."""
     e = Env()
     e.direction("wr-dir")
     e.run("watch", t=T0)
     os.makedirs(e.st("stopped"), exist_ok=True)
     open(e.st("stopped", "wr-dir"), "w").write("x\n")
-    _zeus_answer(e, T0 + 10, "[metis-0600] Запустить wr-dir?", "Да")
+    _zeus_answer(e, T0 + 10, "[metis-0600] Запустить wr-dir?", "Да — запустить wr-dir")
     e.run("watch", t=T0 + 60)
     check(not _bgs(e, "wr-dir") and os.path.exists(e.st("stopped", "wr-dir")),
           f"0523: «запустить» подняло остановленное вами: {e.calls()}")
-    check("снимает только ответ «вернуть»" in e.alerts(), f"0523: нет причины отказа: {e.alerts()[-300:]}")
-    _zeus_answer(e, T0 + 100, "[metis-0600] Вернуть wr-dir?", "Да")
-    e.run("watch", t=T0 + 160)
-    # метку сброса счётчика (autostart-reset/) самозапуск забирает в том же проходе — проверяется снятие метки и подъём
-    check(len(_bgs(e, "wr-dir")) == 1 and not os.path.exists(e.st("stopped", "wr-dir")),
-          f"0523: «вернуть» не сняло метку или не подняло: {e.calls()}")
+    check("снимает только ваша команда pantheon resume" in e.alerts(), f"0523: нет причины отказа: {e.alerts()[-300:]}")
+    os.remove(e.st("stopped", "wr-dir"))
     e.agents([bg("wr-dir", "working", "wrwrwrwr-1", pid=None)])
-    _zeus_answer(e, T0 + 200, "[metis-0601] Запустить wr-dir?", "Да")
+    _zeus_answer(e, T0 + 200, "[metis-0601] Запустить wr-dir?", "Да — запустить wr-dir")
     e.run("watch", t=T0 + 260)
-    check(len(_bgs(e, "wr-dir")) == 1 and "уже работает" in e.alerts(), f"0523: живую подняли второй раз: {e.calls()}")
-    _zeus_answer(e, T0 + 300, "[metis-0602] Перезапустить wr-dir?", "Да")
+    check(not _bgs(e, "wr-dir") and "уже работает" in e.alerts(), f"0523: живую подняли второй раз: {e.calls()}")
+    _zeus_answer(e, T0 + 300, "[metis-0602] Перезапустить wr-dir?", "Да — перезапустить wr-dir")
     e.run("watch", t=T0 + 360, extra={"FAKE_STOP_MARK": "1"})
-    check(["stop", "wrwrwrwr"] in e.calls() and len(_bgs(e, "wr-dir")) == 2,
+    check(["stop", "wrwrwrwr"] in e.calls() and len(_bgs(e, "wr-dir")) == 1,
           f"0523: «перезапустить» не остановило и не подняло: {e.calls()}")
-    wl = [r[-1] for r in _start_log(e) if r[1:2] == ["word-launch"]]
+    wl = [r[-1] for r in _start_rows(e) if r[1:2] == ["word-launch"]]
     check(wl[-1] == "перезапущено", f"0523: итог перезапуска: {wl}")
 
 
 def test_lock_symlink_refused_0523():
-    """metis-0523: locks/ пишет и окно Зевса — файл замка, подменённый ссылкой, не открывается (O_NOFOLLOW): запись
-    по ссылке не уходит, start падает, а не пишет в чужой файл."""
+    """metis-0523, ревью безопасности: окно Зевса пишет только в STATE/hq-rw; замок имени там, подменённый ссылкой или
+    жёсткой ссылкой, не берётся (O_NOFOLLOW, fstat: st_nlink == 1) — запись не уходит, start не поднимает; метка сброса
+    самозапуска по ссылке не пишется; ждущий замок в hq-rw окно не держит дольше HQ_LOCK_WAIT."""
+    import fcntl
     e = Env()
     e.direction("ln-dir")
-    os.makedirs(e.st("locks"), exist_ok=True)
+    hl = e.st("hq-rw", "locks")
+    os.makedirs(hl, exist_ok=True)
     victim = e.st("victim.txt")
     with open(victim, "w") as fh:
         fh.write("целый\n")
-    os.symlink(victim, e.st("locks", "start-ln-dir.lock"))
+    os.symlink(victim, os.path.join(hl, "start-ln-dir.lock"))
     r = e.run("start", "ln-dir", t=T0)
-    check(r.returncode != 0 and not _bgs(e, "ln-dir"), f"0523: замок по ссылке взят: {r.returncode} {e.calls()}")
-    check(open(victim).read() == "целый\n", "0523: файл по ссылке изменён")
+    check(not _bgs(e, "ln-dir") and open(victim).read() == "целый\n",
+          f"0523: замок по ссылке взят: {r.returncode} {e.calls()} {r.stderr[-200:]}")
+    os.remove(os.path.join(hl, "start-ln-dir.lock"))
+    os.link(victim, os.path.join(hl, "start-ln-dir.lock"))
+    r = e.run("start", "ln-dir", t=T0)
+    check(not _bgs(e, "ln-dir") and "замок start-ln-dir не взят" in r.stderr and open(victim).read() == "целый\n",
+          f"0523: замок по жёсткой ссылке взят: {r.returncode} {e.calls()} {r.stderr[-200:]}")
+    # замки прохода — не в hq-rw
+    e.run("watch", t=T0)
+    check(os.path.exists(e.st("locks", "watch.lock")) and not os.path.exists(os.path.join(hl, "watch.lock")),
+          "0523: замок прохода не в STATE/locks")
+    # метка сброса самозапуска: ссылка на её месте снимается, чужой файл цел; ждущий замок имени, занятый «окном», —
+    # не дольше HQ_LOCK_WAIT
+    ar = e.st("hq-rw", "autostart-reset")
+    os.makedirs(ar, exist_ok=True)
+    os.symlink(victim, os.path.join(ar, "ln-dir"))
+    os.remove(os.path.join(hl, "start-ln-dir.lock"))
+    with open(os.path.join(hl, "start-ln-dir.lock"), "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        r = e.run(LIB, t=T0, argv=[PY311, "-I", "-c", _HQ_RW_PROBE])
+    check(open(victim).read() == "целый\n" and not os.path.islink(os.path.join(ar, "ln-dir"))
+          and open(os.path.join(ar, "ln-dir")).read() == "метка\n", f"0523: метка сброса ушла по ссылке: {r.stderr[-300:]}")
+    out = (r.stdout.strip().splitlines() or [""])[-1].split()
+    check(out[:1] == ["False"] and len(out) == 2 and float(out[1]) < 5,
+          f"0523: ждущий замок в hq-rw: {r.stdout!r} {r.stderr[-300:]}")
+
+
+_HQ_RW_PROBE = r"""
+import importlib.util, sys, time
+spec = importlib.util.spec_from_file_location("pantheon_lib", sys.argv[1])
+P = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(P)
+P.hq_mark("autostart-reset", "ln-dir", "метка\n")
+P.HQ_LOCK_WAIT = 0.5
+t0 = time.monotonic()
+with P.lock("start-ln-dir") as got:
+    print(got, round(time.monotonic() - t0, 2))
+"""
 
 
 def test_pauses():
@@ -2075,7 +2129,8 @@ def test_watch_and_wake_second_instance_exits_0184():
     e.agents([{"id": "dead0001", "sessionId": "dead0001-x", "name": "g-dir", "state": "failed", "kind": "background",
                "cwd": folder, "startedAt": (T0 - 7200) * 1000}])
     os.makedirs(e.st("locks"), exist_ok=True)
-    with open(e.st("locks", "watch.lock"), "a") as fw, open(e.st("locks", "wake.lock"), "a") as fk:
+    os.makedirs(e.st("hq-rw", "locks"), exist_ok=True)
+    with open(e.st("locks", "watch.lock"), "a") as fw, open(e.st("hq-rw", "locks", "wake.lock"), "a") as fk:
         fcntl.flock(fw, fcntl.LOCK_EX)
         fcntl.flock(fk, fcntl.LOCK_EX)
         rw = e.run("watch", t=T0)
