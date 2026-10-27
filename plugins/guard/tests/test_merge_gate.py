@@ -406,7 +406,7 @@ def t_core(h):
     merge_case("защиты: PR не задевает ядро — проходит", h.pre(cmd, pdir="projects/agent-kit"), True)
     if HAVE_TOML:
         log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
-        check("gh pr view зовётся с -R и номером", "pr view 7 -R latark/agent-kit --json headRefOid,baseRefOid,changedFiles,statusCheckRollup"
+        check("gh pr view зовётся с -R и номером", "pr view 7 -R latark/agent-kit --json headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup"
               in log and "api repos/latark/agent-kit/pulls/7/files" in log and "--paginate" in log, log)
         check("защиты: один gh pr view на Д3 и проверки GitHub (таймаут хука 10 с)", log.count("pr view") == 1, log)
     h.gh(["README.md", "plugins/guard/hooks/merge_gate.py"])
@@ -1306,7 +1306,7 @@ def t_ci(h):
     if HAVE_TOML:
         log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
         check("CI: gh pr view зовётся с -R, номером и statusCheckRollup",
-              "pr view 3 -R latark/tg-read --json headRefOid,baseRefOid,changedFiles,statusCheckRollup" in log, log)
+              "pr view 3 -R latark/tg-read --json headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup" in log, log)
         check("CI: зелёные — один вызов gh, workflows не спрашивает", log.count("\n") == 1, log)
     red = dict(RUN_OK, conclusion="FAILURE")
     h.ci([GREEN[1], red])
@@ -1430,9 +1430,9 @@ def t_ci(h):
     calls = []
     mg._gh_json = lambda args: calls.append(args) or [{"headRefOid": sha}]
     check("_pr_view: объект ответа", mg._pr_view("latark/tg-read", 3) == {"headRefOid": sha})
-    check("_pr_view: один вызов gh pr view с headRefOid,baseRefOid,changedFiles,statusCheckRollup",
+    check("_pr_view: один вызов gh pr view с headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup",
           calls == [["pr", "view", "3", "-R", "latark/tg-read", "--json",
-                     "headRefOid,baseRefOid,changedFiles,statusCheckRollup"]], calls)
+                     "headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup"]], calls)
     for got in (None, [], [["x"]], [{"a": 1}, {"b": 2}]):
         mg._gh_json = lambda args: got
         check(f"_pr_view: ответ {got!r} — None", mg._pr_view("latark/tg-read", 3) is None)
