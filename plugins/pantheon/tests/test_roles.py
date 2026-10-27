@@ -582,11 +582,11 @@ def main():
           and "проверяет, что слитый выпуск встал (ставит его плановый проход, не она)" in fh)
     # п. 2: сеть, push и запись в PR — только по consent; push из запретов шапки снят, merge и gh api остались
     check("hestia: сеть, git push, gh pr create|edit — только по `pantheon consent <id>`; push не в запретах шапки",
-          "## Наружу — по consent" in fh and "запусти `pantheon consent <id>`" in fh
+          "## Наружу — по consent" in fh and "запусти `pantheon consent <id задачи>`" in fh
           and "Bash(git push *)" not in deny and "Bash(git -C * push *)" not in deny
           and "Bash(gh pr merge *)" in deny and "Bash(gh api *)" in deny
-          and "push в main и принудительный push закрыты и с consent" in fh
-          and "Сеть, `git push` и запись в PR — только после `pantheon consent <id>`" in fh)
+          and "Сети у тебя нет." in fh and "Push — на имя remote, не в main и не принудительно" in fh
+          and "`git push` и запись в PR — только после «да» владельца (`pantheon consent <id>`)" in fh)
     # п. 3 (F9): пакет для бага и возврат пейджера Метиде
     check("hestia: обязанности F9 — собрать пакет для бага (не отправлять, не чинить) и «Возврат пейджера» Метиде",
           "Собрать пакет для бага: когда задача — сбой системы, не отправляй его и не чини" in fh

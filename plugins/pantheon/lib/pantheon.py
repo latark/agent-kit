@@ -563,9 +563,10 @@ BUILTIN_AGENTS = ["general-purpose", "claude", "Explore", "Plan", "statusline-se
 # сверка хеша, проверенное дерево — голый `claude plugin update` оставил бы непроверенное и закрыл окна ролей),
 # сборка окон и ролей, технический перезапуск окон и тревога. Остальные подкоманды pantheon — в песочнице, а какие ей
 # вообще можно, решает guard (правило hestia). Файловых правок, веба и субагентов у окна нет.
-# Наружу (metis-0562, «Да, по consent» владельца 27.10 22:38): сеть Bash открыта на домены песочницы, мимо неё — `git push`
-# и запись в PR (в песочнице macOS они не работают, как у окон направлений), `pantheon consent` (читает журнал владельца).
-# Условие — в guard: сеть, push и запись в PR без свежей метки `pantheon consent` (её ставит сама команда) — отказ
+# Наружу (metis-0562, «Да, по consent» владельца 27.10 22:38): сеть у песочницы пустая; мимо неё — только `git push`
+# и запись в PR (`gh pr create|edit`; в песочнице macOS они не работают, как у окон направлений) и `pantheon consent`
+# (читает журнал владельца). Условие — в guard: push и запись в PR без свежей метки именно этой задачи (PANTHEON_TASK
+# окна; метку ставит `pantheon consent` только на явное «да») — отказ
 HESTIA_EXCLUDED = ["pantheon plugins update", "pantheon plugins update *", "pantheon domains build",
                    "pantheon restart *", "pantheon alert *", "pantheon consent *",
                    "git push", "git push *", "gh pr create *", "gh pr edit *"]
@@ -2889,7 +2890,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hs_cache = _real_dir(f"{caches}/hestia", [caches], strict=True, create=True)
     hs = role_settings([], None, [], hs_cache, False, private_paths, None, guard)
     hs["sandbox"]["excludedCommands"] = list(HESTIA_EXCLUDED)
-    hs["sandbox"]["network"]["allowedDomains"] = list(SANDBOX_DOMAINS)  # открыта сеть; без consent её закрывает guard
+    hs["sandbox"]["network"]["allowedDomains"] = []  # сети у песочницы нет; наружу — только excludedCommands + guard
     hs["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
     hs.setdefault("permissions", {}).setdefault("deny", []).extend(HESTIA_DENY_TOOLS)
     # denyRead песочницы держит только Bash; Read и Grep её не проходят, а главная сессия окна приходит без agent_type
@@ -3138,10 +3139,11 @@ def load_pause(name):
     return None
 
 
-RUN_ENV = ("PANTHEON_ORIGIN", "PANTHEON_SESSION", "PANTHEON_ROLE", "PANTHEON_WINDOW")
+RUN_ENV = ("PANTHEON_ORIGIN", "PANTHEON_SESSION", "PANTHEON_ROLE", "PANTHEON_WINDOW", "PANTHEON_TASK",
+           "PANTHEON_TASK_DIRECTION")
 
 
-def run_settings(name, role, window, origin):
+def run_settings(name, role, window, origin, extra_env=None):
     """Окно этого запуска: настройки окна + PANTHEON_ORIGIN (кто запустил), имя и роль — переменные сессии и её
     хуков. → путь файла или None (окна нет: pantheon domains build)."""
     win = path("settings", window + ".json")
@@ -3152,6 +3154,7 @@ def run_settings(name, role, window, origin):
     data["env"]["PANTHEON_SESSION"] = name
     data["env"]["PANTHEON_ROLE"] = role
     data["env"]["PANTHEON_WINDOW"] = window  # по нему сборка обновляет файл запущенной сессии (write_window)
+    data["env"].update(extra_env or {})  # wake hestia: PANTHEON_TASK, PANTHEON_TASK_DIRECTION — задача окна (metis-0562)
     run = path("settings", "run", name + ".json")
     write_json(run, data)
     return run
@@ -3918,7 +3921,7 @@ def start(rest):
 
 
 def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win, need_word=False,
-                   cmd="pantheon start"):
+                   cmd="pantheon start", extra_env=None):
     agents = agents_all()
     if not dry:  # metis-0261 А: слово владельца и замер — до любых действий; список сессий тот же, что ниже
         code, why = start_gate(name, origin, agents, need_word)
@@ -3967,7 +3970,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     if dry:
         print(shlex.join(argv), f"(папка {folder})")
         return 0
-    if run_settings(name, role, window, origin) != run:  # окно пропало после проверки — прежний файл запуска не берём
+    if run_settings(name, role, window, origin, extra_env) != run:  # окно пропало после проверки — прежний файл запуска не берём
         print(f"pantheon start: нет окна {win.replace(HOME, '~')} — pantheon domains build", file=sys.stderr)
         return 1
     before = {a.get("id") for a in agents_all() or [] if a.get("id")}
@@ -4181,7 +4184,8 @@ def wake_hestia(rest):
             print("pantheon wake hestia: hestia уже запускается другой командой", file=sys.stderr)
             return 1
         return _start_session("hestia", "hestia", folder, "hestia", task, [], origin, dry, False, win,
-                              need_word=bool(role), cmd="pantheon wake hestia")
+                              need_word=bool(role), cmd="pantheon wake hestia",
+                              extra_env={"PANTHEON_TASK": tid, "PANTHEON_TASK_DIRECTION": str(head.get("direction") or "")})
 
 
 def wake_lead(rest):
@@ -5588,6 +5592,19 @@ CONSENT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 CONSENT_MAX = 1500
 
 
+CONSENT_ANSWER = re.compile(r"^ответ:[ \t]*(.*)$", re.M)
+CONSENT_YES = re.compile(r"да(?![\w-])", re.I)
+CONSENT_NO = re.compile(r"(?<![\w-])(?:не|нет|no)(?![\w-])", re.I)
+
+
+def consent_is_yes(body):
+    """Явное «да» владельца в записи ответа: строка «ответ: …» начинается словом «да» и в ней нет «не», «нет»
+    («Да — отправить», «Да, по consent» — да; «Нет», «Да, но не сегодня», «Другое» — нет)."""
+    m = CONSENT_ANSWER.search(body or "")
+    ans = m.group(1).strip() if m else ""
+    return bool(CONSENT_YES.match(ans)) and not CONSENT_NO.search(ans)
+
+
 def consent(rest):
     if not rest or not CONSENT_ID.fullmatch(rest[0]):
         print("pantheon consent <id> [--days N] — id задачи вида metis-0032 или tbankrot-8057746", file=sys.stderr)
@@ -5602,6 +5619,11 @@ def consent(rest):
     hestia = os.environ.get("PANTHEON_ROLE") == "hestia"
     if hestia:
         days = min(days, HESTIA_CONSENT_DAYS)
+        # окно Гестии одно на задачу (wake hestia --task): согласие — только на id этой задачи (metis-0562)
+        if not CONSENT_ID.fullmatch(os.environ.get("PANTHEON_TASK") or "") or qid != os.environ["PANTHEON_TASK"]:
+            print(f"pantheon consent: из окна hestia — только по своей задаче ({os.environ.get('PANTHEON_TASK') or 'не задана'}), "
+                  f"не по {qid}", file=sys.stderr)
+            return 2
     try:
         with open(path("owner-log", "zeus.md"), encoding="utf-8") as fh:
             text = fh.read()
@@ -5651,15 +5673,21 @@ def consent(rest):
                       "сообщения людям, удаление — не по галочке, только окном вопросов)",
                       f"вопрос: {q.strip()}\nответ: {a.strip()}"))
     found.sort(key=lambda x: x[0])
+    said_yes = any(consent_is_yes(body) for _, _, body in found)
     found = [(head, body if len(body) <= CONSENT_MAX else body[:CONSENT_MAX] + "…") for _, head, body in found]
     hint = (f"\nУпоминаний {qid} в словах владельца без окна вопросов: {mentions} — это не ответ; попроси Зевса "
             f"переспросить окном вопросов «[{qid}] …»." if mentions else "")
     if not found:
         print(f"ответа владельца на {qid} в окне вопросов Зевса и на доске за {days:g} дн. нет{hint}")
         return 1
+    if hestia and not said_yes:
+        print(f"Ответ на {qid} есть, но это не «да» — метки для окна нет; наружу не иди, отчёт Зевсу.")
+        for t, body in found:
+            print(f"\n## {t}\n{body}")
+        return 1
     if hestia:
-        # метка «ответ найден»: по ней guard пускает окно Гестии в сеть, push и запись в PR на 2 часа (metis-0562).
-        # Нет метки (запись не удалась) — код 3, а не «согласие есть»
+        # метка «владелец ответил «да»»: по ней guard пускает окно Гестии в push и запись в PR на 2 часа, только для
+        # этой задачи (metis-0562). Нет метки (запись не удалась) — код 3, а не «согласие есть»
         try:
             d = os.path.join(STATE, "hestia-consent")
             os.makedirs(d, exist_ok=True)

@@ -248,21 +248,40 @@ cr = subprocess.run([PY311, "-I", CLI, "consent", "metis-0032"], env=dict(BASE),
 check("0162: журнал на месте → по-прежнему ответ (код 0)", cr.returncode == 0, cr.stdout + cr.stderr)
 # metis-0562: роль hestia — найденный ответ ставит метку для guard (сеть, push, запись в PR); без ответа и вне роли меток нет
 hmark = os.path.join(state, "hestia-consent")
-HS_ENV = dict(BASE, PANTHEON_ROLE="hestia")
+HS_ENV = dict(BASE, PANTHEON_ROLE="hestia", PANTHEON_TASK="metis-0032")
 check("0562: до consent метки нет", not os.path.exists(hmark))
 cr = subprocess.run([PY311, "-I", CLI, "consent", "metis-0032"], env=dict(BASE), capture_output=True, text=True, timeout=30)
 check("0562: consent не из окна hestia (с ответом) — метки нет", cr.returncode == 0 and not os.path.exists(hmark),
       cr.stdout + cr.stderr)
-cr = subprocess.run([PY311, "-I", CLI, "consent", "metis-0031"], env=dict(HS_ENV), capture_output=True, text=True, timeout=30)
+cr = subprocess.run([PY311, "-I", CLI, "consent", "metis-0031"], env=dict(HS_ENV, PANTHEON_TASK="metis-0031"), capture_output=True, text=True, timeout=30)
 check("0562: окно hestia, ответа нет (код 1) — метки нет", cr.returncode == 1 and not os.path.exists(hmark),
       cr.stdout + cr.stderr)
 cr = subprocess.run([PY311, "-I", CLI, "consent", "metis-0032"], env=dict(HS_ENV), capture_output=True, text=True, timeout=30)
 check("0562: окно hestia, ответ найден (код 0) — метка <state>/hestia-consent/<id>",
       cr.returncode == 0 and os.path.isfile(os.path.join(hmark, "metis-0032")), cr.stdout + cr.stderr)
 os.remove(os.path.join(hmark, "metis-0032"))
+# argus 0562: метка — только своей задачи окна и только на явное «да»
+cr = subprocess.run([PY311, "-I", CLI, "consent", "metis-0031"], env=dict(HS_ENV), capture_output=True, text=True, timeout=30)
+check("0562: окно hestia просит согласие по чужой задаче — код 2, метки нет",
+      cr.returncode == 2 and not os.path.exists(os.path.join(hmark, "metis-0031")), cr.stdout + cr.stderr)
+cr = subprocess.run([PY311, "-I", CLI, "consent", "metis-0032"], env=dict(BASE, PANTHEON_ROLE="hestia"),
+                    capture_output=True, text=True, timeout=30)
+check("0562: окно hestia без PANTHEON_TASK — код 2, метки нет",
+      cr.returncode == 2 and not os.path.exists(os.path.join(hmark, "metis-0032")), cr.stdout + cr.stderr)
+for task, ans, want in (("metis-0571", "Нет", False), ("metis-0572", "Да, но не сегодня", False),
+                        ("metis-0573", "Другое: делай что хочешь", False), ("metis-0574", "Дальше", False),
+                        ("metis-0575", "Да, по consent", True), ("metis-0576", "да", True),
+                        ("metis-0577", "Да — отправить", True)):
+    open(os.path.join(LOG, "zeus.md"), "a").write("## %s · окно вопросов\nвопрос: [%s] Отправить?\nответ: %s\n\n"
+                                                    % (time.strftime("%Y-%m-%d %H:%M:%S"), task, ans))
+    cr = subprocess.run([PY311, "-I", CLI, "consent", task], env=dict(HS_ENV, PANTHEON_TASK=task), capture_output=True,
+                        text=True, timeout=30)
+    got = os.path.isfile(os.path.join(hmark, task))
+    check(f"0562: ответ «{ans}» → метка {'есть' if want else 'нет'} (код {0 if want else 1})",
+          got == want and cr.returncode == (0 if want else 1), cr.stdout + cr.stderr)
 open(os.path.join(LOG, "zeus.md"), "a").write("## %s · окно вопросов\nвопрос: [metis-0562] Старый?\nответ: Да\n\n"
                                                 % datetime.fromtimestamp(time.time() - 3 * 86400).strftime("%Y-%m-%d %H:%M:%S"))
-cr = subprocess.run([PY311, "-I", CLI, "consent", "metis-0562", "--days", "7"], env=dict(HS_ENV), capture_output=True,
+cr = subprocess.run([PY311, "-I", CLI, "consent", "metis-0562", "--days", "7"], env=dict(HS_ENV, PANTHEON_TASK="metis-0562"), capture_output=True,
                     text=True, timeout=30)
 check("0562: окно hestia — ответ старше суток метки не даёт, даже с --days 7 (код 1)",
       cr.returncode == 1 and not os.path.exists(os.path.join(hmark, "metis-0562")), cr.stdout + cr.stderr)

@@ -746,14 +746,13 @@ def main():
     hcache = os.path.join(tmp, "Library", "Caches", "pantheon-sandbox", "hestia")
     hdeny = hwin.get("permissions", {}).get("deny", [])
     check("окно hestia: PANTHEON_ROLE=hestia, мимо песочницы — plugins update, domains build, restart, alert, consent, "
-          "git push, gh pr create|edit; сеть на домены песочницы, Edit/Write/WebFetch закрыты, Agent закрыт, кэш создан",
+          "git push, gh pr create|edit; сети в песочнице нет, Edit/Write/WebFetch закрыты, Agent закрыт, кэш создан",
           hwin.get("env", {}).get("PANTHEON_ROLE") == "hestia" and hwin["sandbox"]["enabled"]
           and hwin["sandbox"]["excludedCommands"] == ["pantheon plugins update", "pantheon plugins update *",
                                                       "pantheon domains build", "pantheon restart *",
                                                       "pantheon alert *", "pantheon consent *", "git push",
                                                       "git push *", "gh pr create *", "gh pr edit *"]
-          and "github.com" in hwin["sandbox"]["network"]["allowedDomains"]
-          and "api.github.com" in hwin["sandbox"]["network"]["allowedDomains"]
+          and hwin["sandbox"]["network"]["allowedDomains"] == []
           and all(t in hdeny for t in ("Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"))
           and "Agent" in hdeny and os.path.isdir(hcache))
     # argus круг 2: Read и Grep песочница не держит — личное закрыто правилами deny окна
@@ -820,6 +819,7 @@ def main():
           and bg[0]["argv"][6] == hrun_path and "Задача athena-0001" in bg[0]["argv"][7]
           and "pantheon task show athena-0001" in bg[0]["argv"][7] and bg[0]["cwd"] == hcache
           and hrun.get("env", {}).get("PANTHEON_ROLE") == "hestia"
+          and hrun["env"].get("PANTHEON_TASK") == "athena-0001" and hrun["env"].get("PANTHEON_TASK_DIRECTION") == "athena-shop"
           and hrun["env"].get("PANTHEON_ORIGIN") == "zeus" and hrun["env"].get("PANTHEON_SESSION") == "hestia"
           and hrun["sandbox"]["excludedCommands"] == hwin["sandbox"]["excludedCommands"])
     os.remove(hwin_path)
