@@ -49,6 +49,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         «да» на [read-<rid>] → выгрузка и разбор плановым проходом → вы одобряете пункты
   pantheon merge request|run|status|cancel   слияние PR ядра по Touch ID (metis-0285, lib/merge.py): заявка роли →
                                         плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA
+  pantheon outside test|serve|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
+                                        тесты проекта или dev-сервер под sandbox-exec без ключей, браузеров и
+                                        местного прокси → код и хвост журнала или адрес; после «принять» argus
+                                        плановый проход сам гоняет тесты и пишет запись tests шлюза слияния
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…] [--quiet]      проверить шапки задач по схеме v1 (schema.md) и правила metis-0308: задача пачки без mode,
@@ -1124,6 +1128,7 @@ def tick():
             alert_once("svc-sync", type(e).__name__, f"службы: сверка с launchd упала ({type(e).__name__}: {e})",
                        "pantheon-tick")
         merge_kick()
+        outside_kick()
         try:
             roles_tick()  # личные роли по вашей галочке на доске (metis-0262 PR 4)
         except Exception as e:  # сбой ролей не должен останавливать тик
@@ -6115,6 +6120,22 @@ def merge_kick():
                    "pantheon-tick")
 
 
+def outside_kick():
+    """Проверки вне окна роли ([sb-simplify] п. 7, lib/outside.py) — отдельным процессом: тесты идут минутами."""
+    try:
+        if locked("outside-run") or not outside_mod().pending():
+            return
+        if os.environ.get("PANTHEON_DRYRUN") == "1":
+            with open(path("dryrun.log"), "a") as fh:
+                fh.write(f"{int(now())} outside-run\n")
+            return
+        subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "outside", "run"], env=outside_mod().pass_env(),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception as e:  # сбой проверок не должен останавливать тик
+        alert_once("outside-kick", type(e).__name__, f"проверки вне окна: проход не запущен ({type(e).__name__}: {e})",
+                   "pantheon-tick")
+
 def build_app():
     """~/Applications/Доска.app: Spotlight «Доска» и значок в Dock открывают доску в Obsidian."""
     import tempfile
@@ -6464,6 +6485,20 @@ def merge_mod():
         _MERGE.set_core(sys.modules[__name__])
     return _MERGE
 
+
+_OUTSIDE = None
+
+
+def outside_mod():
+    """lib/outside.py — тесты и dev-сервер вне окна роли ([sb-simplify] п. 7)."""
+    global _OUTSIDE
+    if _OUTSIDE is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_outside", os.path.join(LIB, "outside.py"))
+        _OUTSIDE = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_OUTSIDE)
+        _OUTSIDE.set_core(sys.modules[__name__])
+    return _OUTSIDE
 
 _MMV = None
 
@@ -9260,6 +9295,8 @@ def main(argv):
         return read_mod().main(rest)
     if cmd == "merge":
         return merge_mod().main(rest)
+    if cmd == "outside":
+        return outside_mod().main(rest)
     if cmd == "mmv":
         return mmv_mod().main(rest, STATE, now())
     if cmd == "qmd":

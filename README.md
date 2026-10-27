@@ -404,6 +404,17 @@
   память только с вердиктом по контрасту; три процедурных правила (опись входов, цифра → источник, повторная проверка
   готового файла); правило «сам / один исполнитель / параллельно».
 - `plugins/pantheon/bin/heavy` — тяжёлые команды через общую блокировку: два места, `--server` — один долгий процесс (MEM-03).
+- `plugins/pantheon/lib/outside.py` — проверки вне окна роли ([sb-simplify] п. 7): окну роли песочница не даёт
+  местных портов, поэтому тесты с портом и dev-сервер роль заказывает одной командой — `pantheon outside test`
+  (проверка проекта на чистом HEAD: `.pantheon-verify` из ветки по умолчанию, иначе test/check package.json, иначе
+  pytest) или `pantheon outside serve` (скрипт dev → адрес `http://127.0.0.1:<3200–3299>`, сам гаснет через 30 минут,
+  не больше 120; `pantheon outside stop ID` — раньше). Заявка — в кэш окна, исполняет плановый проход (`outside run`,
+  только тик) под `sandbox-exec` с профилем: без чтения ключей (`.env*`, `secrets/`, `~/.ssh`, пароль демона CDP,
+  Связка ключей), без записи в состояние и ядро и без сети к портам браузеров (9222, 9333–9339) и местного прокси (6152,
+  6153); окружение с нуля. Только папки реестра (`domains.json`): окну — папки своего направления, мастерской — отказ.
+  После «принять» argus проход сам гоняет тесты этого SHA (копия реестра или временный worktree) и пишет запись tests
+  шлюза слияния (`by.agent_type` = `pantheon-outside`): роль её не напишет — STATE ей закрыт, команде под профилем тоже.
+  Подробности — в шапке модуля.
 - `plugins/pantheon/hooks/dev-stop-verify.py` — Stop разработчика (в шапке ролей dev-*): красная проверка проекта
   возвращает, не больше трёх раз; очередь `heavy` — не возврат (DONE-02).
 - `plugins/pantheon/hooks/text-stop-verify.py` — Stop исполнителя без кода palamedes (metis-0224): в отчёте строка
@@ -453,6 +464,7 @@
     python3 -I plugins/pantheon/tests/test_check_skills.py   # линтер навыков: поломки шапки, name, ссылок, check и плановый проход
     python3 -I plugins/pantheon/tests/test_roles_harness.py  # настоящие роли: урок с вердиктом, три правила, режим работы
     python3 -I plugins/pantheon/tests/test_start.py   # start, wake, roles build, approve, heavy, Stop-хук разработчика
+    python3 -I plugins/pantheon/tests/test_outside.py # проверки вне окна: tests после «принять», заявки, dev-сервер, профиль
     python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры
     python3 -I plugins/pantheon/tests/test_tick.py    # планировщик: сон, пробуждение, питание, простой, лимит, главный Mac
     python3 -I plugins/pantheon/tests/test_plugins_update.py   # обновления agent-kit плановым проходом: тесты, база, метки, коды
