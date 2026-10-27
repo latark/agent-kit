@@ -169,6 +169,20 @@ def split_checks(home):
             check(f"split: {why} — отказ", False)
         except ValueError as e:
             check(f"split: {why} — отказ", True, e)
+    # подмена direction в шапке исходной (файл остаётся в своей папке) → отказ, файла нет (Б1 argus)
+    tdir = os.path.join(home, "directions/metis-pantheon/tasks")
+    files0 = set(os.listdir(tdir))
+    good = read(home, sp)
+    open(os.path.join(home, sp), "w", encoding="utf-8").write(good.replace("direction: metis-pantheon", "direction: athena-shop", 1))
+    swapped = read(home, sp)
+    try:
+        T.task_split(home, T0 + 35, src, "Чужое")
+        check("split: direction в шапке не совпадает с папкой — отказ", False)
+    except ValueError as e:
+        check("split: direction в шапке не совпадает с папкой — отказ", "athena-shop" in str(e), e)
+    check("split: при подмене direction файла не появилось и исходная не тронута",
+          set(os.listdir(tdir)) == files0 and read(home, sp) == swapped)
+    open(os.path.join(home, sp), "w", encoding="utf-8").write(good)
     before = read(home, sp)
     # сбой записи в исходную → новая не остаётся
     real = T.task_set

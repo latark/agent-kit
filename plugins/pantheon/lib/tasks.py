@@ -749,6 +749,10 @@ def task_split(pantheon, t, tid, title, done_when=None, text=None, actor="аге
     path0, h0, b0 = tasks[tid]
     if h0.get("type") != "task":
         raise ValueError(f"{tid} — не задача: остаток выносится только из задачи")
+    folder = os.path.basename(os.path.dirname(os.path.dirname(path0)))
+    if h0.get("direction") != folder:  # guard проверяет папку файла, остаток заводится по шапке: расхождение — подмена направления
+        raise ValueError(f"{tid}: в шапке direction={h0.get('direction')}, а файл лежит в «{folder}» — остаток не заведён; "
+                         "верните direction задачи в направление её папки")
     if not str(title or "").strip():
         raise ValueError("нужен --title: название остатка")
     items = [x for x in (done_when or []) if str(x).strip()] or [x for done, x in done_criteria(b0) if not done and x != DONE_WHEN_HINT]
