@@ -21,8 +21,8 @@ FORCE_COLOR и CLICOLOR_FORCE, с NO_COLOR=1. Тесты на 3.9 — тот ж�
 
 Итог: строка на каждый файл по мере готовности (ok / FAIL, время, число проверок), затем выводы упавших файлов
 (хвост) и последняя строка — файлов, ok, FAIL, сумма проверок, время. Код выхода не 0, если: нет ни одного файла
-тестов, файл упал (код не 0), превысил таймаут, вышел с кодом 0 без строки итога или с итогом без проверок, или
-раннер прерван сигналом. Число проверок файла — из его итоговой строки, без числа в ней — по строкам `ok`.
+тестов, файл упал (код не 0), превысил таймаут, вышел с кодом 0 без строки итога (кроме старых файлов NO_SUMMARY)
+или с итогом без проверок, или раннер прерван сигналом. Число проверок файла — из его итоговой строки, без числа в ней — по строкам `ok`.
 Python 3.9+, только stdlib.
 """
 import os
@@ -40,6 +40,11 @@ SLOW = {
 }
 # Файлы, которым параллель мешает: идут в конце по одному.
 SERIAL = ()
+# Файлы, которые и на main кончаются последней строкой ok без строки итога (замер metis-0450): у них код 0 со строками
+# ok и без строк FAIL — зелёный. Новый файл без итога сюда не попадает и остаётся красным; файл, получивший итог,
+# из списка убрать.
+NO_SUMMARY = frozenset({
+})
 
 # Копия TEST_SUMMARY и _SUMMARY_TOTAL из pantheon.py (импортировать нельзя: pantheon.py требует 3.11+, раннер — 3.9+).
 # Тест test_run_tests сверяет копию с pantheon.py.
@@ -126,8 +131,10 @@ def checks(out):
     return True, n, None
 
 
-def verdict(rc, out, timed_out):
-    """(ok, почему не ok или None, число проверок)."""
+def verdict(rc, out, timed_out, label=None, no_summary=None):
+    """(ok, почему не ok или None, число проверок). Код 0 без итога — красный, кроме файлов NO_SUMMARY со строками ok
+    и без строк FAIL."""
+    no_summary = NO_SUMMARY if no_summary is None else no_summary
     has, n, bad = checks(out)
     if timed_out:
         return False, "таймаут", n
@@ -135,6 +142,8 @@ def verdict(rc, out, timed_out):
         why = f"сигнал {-rc}" if rc < 0 else f"код {rc}"
         return False, why, n
     if not has:
+        if label in no_summary and n and not re.search(r"^\s*FAIL\b", ANSI.sub("", out), re.M):
+            return True, None, n
         return False, "код 0 без строки итога", n
     if bad:
         return False, bad, n
@@ -198,7 +207,7 @@ class Job:
         with open(self.outpath, "rb") as fh:
             self.out = fh.read().decode("utf-8", "replace")
         shutil.rmtree(self.dir, ignore_errors=True)
-        self.ok, self.why, self.n = verdict(self.proc.returncode, self.out, self.timed_out)
+        self.ok, self.why, self.n = verdict(self.proc.returncode, self.out, self.timed_out, self.label)
 
 
 def parse(argv):
@@ -301,11 +310,16 @@ def main(argv):
         for job in running:
             job.kill()
             job.fh.close()
+        n_killed, running = len(running), []
         shutil.rmtree(root, ignore_errors=True)
-        print(f"run-tests: прерван сигналом {e.signum} — погашено файлов: {len(running)}, "
+        print(f"run-tests: прерван сигналом {e.signum} — погашено файлов: {n_killed}, "
               f"готово {len(done)} из {total_files}", flush=True)
         return 128 + e.signum
     finally:
+        # любой другой обрыв раннера (сбой запуска, ошибка в коде) тоже не оставляет идущих файлов
+        for job in running:
+            job.kill()
+            job.fh.close()
         for s, h in old.items():
             signal.signal(s, h)
         shutil.rmtree(root, ignore_errors=True)

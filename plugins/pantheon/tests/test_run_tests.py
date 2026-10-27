@@ -225,6 +225,17 @@ check("checks: «тестов: 3 прошло, 1 не прошло» — 4", R.c
 check("checks: ANSI не мешает итогу", R.checks("\x1b[32mok a\x1b[0m\n\x1b[1m1 из 1\x1b[0m\n") == (True, 1, None))
 check("verdict: код 0 с ПРОВАЛ — не ok", R.verdict(0, "ok a\nПРОВАЛ: b\n", False)[0] is False)
 check("verdict: код 0, «1/1» — ok", R.verdict(0, "ok a\n1/1\n", False) == (True, None, 1))
+NS = frozenset({"g/test_old.py"})
+check("verdict: старый файл без итога из списка — ok", R.verdict(0, "ok a\nok b\n", False, "g/test_old.py", NS)
+      == (True, None, 2))
+check("verdict: файл без итога не из списка — не ok", R.verdict(0, "ok a\n", False, "g/test_new.py", NS)[0] is False)
+check("verdict: из списка, но со строкой FAIL — не ok",
+      R.verdict(0, "ok a\nFAIL b  x\nok c\n", False, "g/test_old.py", NS)[0] is False)
+check("verdict: из списка, без строк ok — не ok", R.verdict(0, "привет\n", False, "g/test_old.py", NS)[0] is False)
+check("verdict: из списка, код 1 — не ok", R.verdict(1, "ok a\n", False, "g/test_old.py", NS)[0] is False)
+missing = [lb for lb in tuple(R.NO_SUMMARY) + tuple(R.SLOW) + tuple(R.SERIAL) if not os.path.exists(
+    os.path.join(os.path.dirname(PLUGIN), lb.split("/")[0], "tests", lb.split("/")[1]))]
+check("NO_SUMMARY, SLOW, SERIAL — только существующие файлы", not missing, missing)
 
 # --- копия итоговых регулярок совпадает с pantheon.py (импортировать его на 3.9 нельзя) ---
 src = open(os.path.join(PLUGIN, "lib", "pantheon.py"), encoding="utf-8").read()
