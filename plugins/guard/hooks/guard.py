@@ -2293,7 +2293,7 @@ def pantheon_cli(cmd, cwd):
 
 
 def task_targets(cmd, cwd):
-    """`pantheon task new|set|claim` в команде → направления, которые она меняет (None — не определить)."""
+    """`pantheon task new|set|claim|split` в команде → направления, которые она меняет (None — не определить)."""
     out = []
     for name, texts in bash_analysis(cmd, cwd)[1]:
         bases = ["pantheon" if x and os.path.basename(x.rstrip("/")).lower() in ("pantheon", "pantheon.py")
@@ -2309,7 +2309,7 @@ def task_targets(cmd, cwd):
         elif act == "new":
             d = [texts[i + 1] for i in range(2, len(texts) - 1) if texts[i] == "--direction"]
             out.append(d[-1] if d and d[-1] and re.fullmatch(r"[a-z0-9][a-z0-9-]*", d[-1]) else None)
-        elif act in ("set", "claim"):
+        elif act in ("set", "claim", "split"):
             tid = texts[2] if len(texts) > 2 else None
             hits = [os.path.basename(os.path.dirname(os.path.dirname(f)))
                     for f in glob.glob(os.path.join(PANTHEON, "directions", "*", "tasks", f"{tid}.md"))] \
