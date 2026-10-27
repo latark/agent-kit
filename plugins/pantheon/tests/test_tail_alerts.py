@@ -90,7 +90,7 @@ def main():
     new(env, "задача с хвостом")                                   # metis-0001
     new(env, "задача с отчётом, разбор research-linked.md")        # metis-0002
     run(env, "task", "set", "metis-0001", "--note", "сделано A; остался хвост по resume", t=T0)
-    run(env, "task", "set", "metis-0002", "--note", "остаток вынесен в metis-0009", t=T0)
+    run(env, "task", "set", "metis-0002", "--note", "остаток вынесен в metis-0001", t=T0)
     put(os.path.join(inbox, "research-old.md"), "---\nfindings: 3\n---\n# a\n")
     put(os.path.join(inbox, "research-zero.md"), "---\nfindings: 0\n---\n# a\n")
     put(os.path.join(inbox, "research-linked.md"), "# a\n")
@@ -174,8 +174,16 @@ def main():
     j = "\n## Журнал\n\n- 2026-10-24 11:00 — агент: {}\n"
     check("tail_lines: каждое слово хвоста находится",
           all(tl(j.format(w)) for w in ("остался хвост", "Остаток не берём", "не сделано X", "вынесен позже", "потом, позже")))
+    def tl2(text):
+        return T.tail_lines(
+            {"x-0001": ("p", {"id": "x-0001", "type": "task", "status": "todo"}, "\n## Журнал\n\n- 2026-10-24 11:00 — агент: " + text + "\n"),
+             "metis-0009": ("p", {"id": "metis-0009", "type": "task", "status": "todo"}, "")}, T0)
+
+    check("tail_lines: review-113, x86-64, свой id, несуществующий id — тревога; настоящий чужой id — гасит",
+          all(tl2(x) for x in ("остаток из review-113-argus.md", "хвост на x86-64", "остаток, см. x-0001", "остаток: заведу metis-9999"))
+          and not tl2("остаток вынесен в metis-0009") and not tl2("остаток: review-113, дальше metis-0009"))
     check("tail_lines: id задачи в строке гасит; слова без хвоста, actor check, старая и не-журнальная строки — нет",
-          not tl(j.format("остаток вынесен в metis-0009")) and not tl(j.format("всё готово"))
+          not tl2("остаток вынесен в metis-0009") and not tl(j.format("всё готово"))
           and not tl("\n## Журнал\n\n- 2026-10-24 11:00 — check: остаток\n")
           and not tl("\n## Журнал\n\n- 2026-10-01 11:00 — агент: остаток\n")
           and not tl("\nхвост в тексте, не в журнале\n\n## Журнал\n\n- 2026-10-24 11:00 — агент: создана\n"))

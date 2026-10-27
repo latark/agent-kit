@@ -3432,7 +3432,7 @@ D_FINDING_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)?\**Д\d*(?![\w])\**\s*[·
 
 
 def tail_lines(tasks, t, days=TAIL_DAYS):
-    """[(id задачи, строка журнала)] со словами хвоста и без id задачи в самой строке, не старше days дней.
+    """[(id задачи, строка журнала)] со словами хвоста и без id другой существующей задачи в самой строке, не старше days дней.
     Строки самого тика (actor check) не считаются; журнал — после «## Журнал», до следующего «## »."""
     out = []
     for tid, (_, head, body) in sorted(tasks.items()):
@@ -3450,7 +3450,8 @@ def tail_lines(tasks, t, days=TAIL_DAYS):
             ts = ts_of(jm.group(1).replace(" ", "T") + ":00")
             if ts is None or t - ts > days * 86400 or not TAIL_RE.search(jm.group(3)):
                 continue
-            if not TAIL_ID_RE.search(jm.group(3)):
+            # id гасит тревогу, только если такая задача есть и это не сама задача (review-113, x86-64, свой id — не хвост)
+            if not any(i != tid and i in tasks for i in TAIL_ID_RE.findall(jm.group(3))):
                 out.append((tid, ln.strip()))
     return out
 
