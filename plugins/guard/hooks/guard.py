@@ -38,8 +38,8 @@ PostToolUse (Bash:
   hq-gh        — окну штаба gh pr — только с -R из [merge_repos], PR номером, без GH_* в команде и GH_REPO/GH_HOST/
                  GH_CONFIG_DIR в окружении, без обсуждений (--comments, --json comments) и без личного в команде;
                  слияние (gh pr merge, gh api …/merge) — отказ всегда (metis-0247);
-  hq-sessync   — окну Пританея `sessync find <слова> [-p имя] [-n число]` — только одной командой в строке и только эти
-                 аргументы (белый список); любой другой токен с «-», составная команда и обёртка — отказ (metis-0566);
+  hq-sessync   — окну Пританея `sessync find <слова> [-p имя] [-n число]` — только строкой целиком по строгому образцу
+                 (слова из букв, цифр и _.-); флаги, присваивание перед командой, обёртки, глобы — отказ (metis-0566);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
                  status, chats, folders, verify, split — можно; без PANTHEON_ROLE (плановый проход) — можно (metis-0267);
@@ -3829,16 +3829,20 @@ def check_draft_role(event, tool, tool_input):
     return None
 
 
-# hq-sessync (metis-0566, решение владельца 27.10). Окну Пританея `sessync find <слова> [-p проект] [-n число]` выпущен
+# hq-sessync (metis-0566, решение владельца 27.10). Окну Пританея `sessync find <слова> [-p имя] [-n число]` выпущен
 # мимо песочницы (excludedCommands, HQ_EXCLUDED): читает транскрипты ~/.claude/projects, а вывод проходит маску похожего
-# на ключи — она в самом sessync. Белый список, а не запреты: после `find` только слова (не с «-»), `-p <имя>` и
-# `-n <цифры>`; любой другой токен с «-» (--raw, --no-mask, их сокращения, --foo, -h) — отказ, как и неразрешимое слово.
-# И только одной командой в строке: `;`, `&`, `|`, `<`, `>`, `$`, обратная кавычка, скобки, перевод строки, обратная косая
-# или обёртка (bash -c, env) — отказ: правило excludedCommands сверяет начало команды, и хвост ушёл бы мимо песочницы.
-# Другие окна `sessync find` не получают: в их excludedCommands его нет.
-SESSYNC_PROJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
-SESSYNC_N_RE = re.compile(r"[0-9]+\Z")
-SESSYNC_SHELL_CHARS = re.compile(r"[;&|<>$`()\\\n\r]")
+# на ключи — она в самом sessync. Правило — одна строгая проверка всей сырой строки (SESSYNC_LINE), а не разбор:
+# строка целиком `sessync find` + токены, где токен — слово из букв, цифр и `_.-` (не с «-»), такое же слово в одинарных
+# или двойных кавычках (внутри ещё пробелы), `-p <имя>` или `-n <цифры>`. Всё остальное — отказ: --raw, --no-mask и
+# любой другой флаг, префикс присваивания (`PATH=… sessync find`), обёртки (env, bash -c), `;`, `&`, `|`, `<`, `>`,
+# подстановки, глобы (`* ? [ ] { } ~ ^ # !`), перевод строки. Иначе тот, что оболочка раскрыла бы или запустила, ушёл бы
+# мимо песочницы вместе с `find`. Правило срабатывает на любую строку, где есть `sessync find` или команда sessync с
+# аргументом find. Другие окна `sessync find` не получают: в их excludedCommands его нет.
+_SW = r"[\w.][\w.\-]*"
+SESSYNC_LINE = re.compile(
+    r"[ \t]*sessync[ \t]+find(?:[ \t]+(?:" + _SW + r"|\"[\w.][\w.\- ]*\"|'[\w.][\w.\- ]*'"
+    r"|-p[ \t]+[A-Za-z0-9][A-Za-z0-9_-]*|-n[ \t]+[0-9]+))*[ \t]*\Z")
+SESSYNC_MENTION = re.compile(r"\bsessync[ \t]+(?:\S+[ \t]+)*?find\b")
 
 
 def check_hq_sessync(event, tool, tool_input):
@@ -3847,32 +3851,15 @@ def check_hq_sessync(event, tool, tool_input):
     cmd = tool_input.get("command") or ""
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     _, cmds = bash_analysis(cmd, cwd)
-    head = "Правило hq-sessync: окну Пританея `sessync find` — только `sessync find слова [-p проект] [-n число]` (metis-0566)"
-    for n, t in cmds:
-        if not n or os.path.basename(n.rstrip("/")) != "sessync":
-            continue
-        if "find" not in [a for a in t if isinstance(a, str)]:
-            continue
-        if len(cmds) != 1 or SESSYNC_SHELL_CHARS.search(cmd):
-            return (f"{head}: одной командой в строке, без `;`, `&&`, `||`, `|`, перенаправлений, подстановок "
-                    "$(…) и обратных кавычек, обёрток bash -c и env.")
-        if any(not isinstance(a, str) for a in t):
-            return f"{head}: слова только буквами, без переменных и подстановок."
-        if t[0] != "find":
-            return f"{head}: первым после sessync идёт find."
-        args = t[1:]
-        k = 0
-        while k < len(args):
-            a = args[k]
-            if not a.startswith("-"):
-                k += 1
-            elif a == "-p" and k + 1 < len(args) and SESSYNC_PROJECT_RE.match(args[k + 1]):
-                k += 2
-            elif a == "-n" and k + 1 < len(args) and SESSYNC_N_RE.match(args[k + 1]):
-                k += 2
-            else:
-                return f"{head}: аргумент «{a}» не из белого списка (разрешены -p <имя>, -n <число> и слова)."
-    return None
+    named = any(n and os.path.basename(n.rstrip("/")) == "sessync" and "find" in [a for a in t if isinstance(a, str)]
+                for n, t in cmds)
+    if not named and not SESSYNC_MENTION.search(cmd):
+        return None
+    if SESSYNC_LINE.match(cmd):
+        return None
+    return ("Правило hq-sessync: окну Пританея `sessync find` — только строкой `sessync find слова [-p имя] [-n число]` "
+            "(metis-0566): слова из букв, цифр и _.-, без флагов (--raw, --no-mask и любых других), без префикса "
+            "присваивания, env, bash -c, `;`, `&`, `|`, перенаправлений, подстановок и глобов (* ? [ ] { } ~ ^ # !).")
 
 
 def check_window(event, tool, tool_input):

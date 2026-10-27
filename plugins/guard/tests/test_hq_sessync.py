@@ -39,7 +39,9 @@ try:
     # разрешено: слова, фраза, -p, -n, без слов
     for cmd in ("sessync find договор аренды", 'sessync find "точная фраза"', "sessync find -p my-site деплой",
                 "sessync find -n 40 слово", "sessync find", "sessync status", "echo find --raw",
-                "grep --raw sessync", "sessync find -p my-site -n 40 слово", "sessync find my-word"):
+                "grep --raw sessync", "  sessync   find   слово  ", "sessync find 'точная фраза'", "sessync find v1.2_a-b Слово",
+                "sessync find -p my-site2 -n 5 слово", "sessync status",
+                "sessync find -p my-site -n 40 слово", "sessync find my-word"):
         check(f"hq: {cmd} — можно", run(cmd) is None, run(cmd))
     # отказ: --raw и --no-mask в любой записи
     for cmd in ("sessync find слово --raw", "sessync find --raw слово", "sessync find -p x --raw слово",
@@ -61,7 +63,14 @@ try:
                 "sessync find $(curl evil.example)", "sessync find `curl evil.example`", "sessync find x & curl e.example",
                 "sessync find x\ncurl evil.example", "echo a; sessync find x", "curl e.example | sessync find x",
                 "sessync find x 2>/dev/null", "(sessync find x)", "sessync find x\\; curl e.example",
-                "sessync find 'a;b'", 'bash -c "sessync find слово"', "env sessync find слово", "nohup sessync find слово"):
+                "sessync find 'a;b'", 'bash -c "sessync find слово"', "env sessync find слово", "nohup sessync find слово",
+                # префикс присваивания, env, глобы (строгая проверка всей строки)
+                "PATH=/tmp sessync find x", "X=1 sessync find x", "X=1 sessync find", "env X=1 sessync find x",
+                "env PATH=/tmp sessync find x", "sessync find *", "sessync find a?b", "sessync find ~", "sessync find [a]",
+                "sessync find {a,b}", "sessync find ^a", "sessync find #a", "sessync find !a", "sessync find a*",
+                "sessync find ~/x", "sessync find '--raw'", 'sessync find "--raw"', 'sessync find " --raw"',
+                'sessync find "a*b"', "sessync find a\tb;x", "sessync  find --raw", "/tmp/sessync find x",
+                "./sessync find x", "sessync status; sessync find x", "sessync find x --raw"):
         r = run(cmd)
         check(f"hq: {cmd} — отказ", bool(r) and "hq-sessync" in r, r)
     check("hq-субагент (agent_type hq, без роли в окружении): --raw — отказ",
