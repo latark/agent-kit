@@ -1240,7 +1240,7 @@ def _start_rows(e):
 def test_word_launch_0523():
     """metis-0523 (решение владельца 27.10 «(а)», ревью безопасности): ваш выбор «Да — запустить <имя>» на вопрос по шаблону
     pantheon launch-question — плановый проход сам поднимает окно, без СБ; строка word-launch в start.log и тревога на
-    каждое поручение; один раз на запись. Вопрос не по шаблону (текст после имени, «вернуть»), ответ не точный вариант,
+    каждое поручение; один раз на запись. Вопрос не по шаблону (текст после имени), ответ не точный вариант,
     заметка, без пометки «окно вопросов», без [id], неизвестное имя, запись до включения прохода — без запуска."""
     e = Env()
     e.direction("wl-dir")
@@ -1257,7 +1257,7 @@ def test_word_launch_0523():
     _zeus_answer(e, T0 + 36, "[metis-0529] Запустить wl-two? Только не сейчас", "Да — запустить wl-two")
     _zeus_answer(e, T0 + 37, "[metis-0530] Запустить wl-two?", "Да")
     _zeus_answer(e, T0 + 38, "[metis-0531] Запустить wl-two?", "Да — запустить wl-two", note="но не сегодня")
-    _zeus_answer(e, T0 + 39, "[metis-0532] Вернуть wl-two?", "Да — вернуть wl-two")
+    _zeus_answer(e, T0 + 39, "[metis-0532] Вернуть wl-two?", "Да — вернуть")
     _zeus_answer(e, T0 + 40, "[metis-0534] Запустить wl-two?", "Да — запустить wl-two, но не сейчас")
     e.run("watch", t=T0 + 60)
     check(len(_bgs(e, "wl-dir")) == 1, f"0523: «Да — запустить» не подняло wl-dir: {e.calls()}")
@@ -1267,7 +1267,7 @@ def test_word_launch_0523():
                                  "metis-0532", "metis-0534"]
           and wl[0][2] == "wl-dir" and wl[0][-1] == "поднято" and "а не «Да — запустить wl-two»" in wl[1][-1]
           and "нет такого направления" in wl[2][-1] and "не по шаблону" in wl[3][-1] and "а не «Да" in wl[4][-1]
-          and "заметка" in wl[5][-1] and "не по шаблону" in wl[6][-1] and "а не «Да" in wl[7][-1],
+          and "заметка" in wl[5][-1] and "а не «Да — вернуть wl-two»" in wl[6][-1] and "а не «Да" in wl[7][-1],
           f"0523: строки журнала поручений: {wl}")
     al = e.alerts()
     check("по вашему ответу в окне вопросов" in al and "[metis-0523]): запустить wl-dir — поднято" in al,
@@ -1285,37 +1285,58 @@ def test_word_launch_0523():
     e.run("watch", t=T0 + 400 + 13 * 3600)
     check(not _bgs(e, "wl-two"), f"0523: запись старше 12 ч исполнена: {e.calls()}")
     check("«окна по вашему ответу» упала" not in e.alerts(), f"0523: испорченный word-launch.json уронил проверку")
-    # шаблон печатает pantheon launch-question; «вернуть», лишнее и неизвестное имя — код 2
+    # шаблон печатает pantheon launch-question; чужой глагол, лишнее и неизвестное имя — код 2
     r = e.run("launch-question", "metis-0533", "запустить", "wl-two", t=T0)
     check(r.returncode == 0 and "вопрос: [metis-0533] Запустить wl-two?" in r.stdout
           and "Да — запустить wl-two | Нет" in r.stdout, f"0523: launch-question: {r.returncode} {r.stdout!r} {r.stderr!r}")
-    bad = [e.run("launch-question", *a, t=T0).returncode for a in (("metis-0533", "вернуть", "wl-two"),
+    r = e.run("launch-question", "metis-0533", "вернуть", "wl-two", t=T0)
+    check(r.returncode == 0 and "вопрос: [metis-0533] Вернуть wl-two?" in r.stdout
+          and "Да — вернуть wl-two | Нет" in r.stdout, f"28.10: launch-question вернуть: {r.returncode} {r.stdout!r}")
+    bad = [e.run("launch-question", *a, t=T0).returncode for a in (("metis-0533", "поднять", "wl-two"),
                                                                    ("metis-0533", "запустить", "nosuch-dir"),
                                                                    ("metis-0533", "запустить", "wl-two", "сейчас"))]
     check(bad == [2, 2, 2], f"0523: launch-question без отказа: {bad}")
 
 
 def test_word_launch_return_restart_0523():
-    """metis-0523: «запустить» метку «остановлено вами» не снимает (вернуть — только pantheon resume); «перезапустить» —
-    pantheon start --restart: живая копия останавливается, поднимается новая; живую «запустить» не трогает."""
+    """metis-0523 и решение владельца 28.10: «запустить» метку «остановлено вами» не снимает; «Да — вернуть <имя>» на
+    «[<id>] Вернуть <имя>?» — снимает (метка, имя в stopped-all.json) и поднимает окно, не дословный ответ — отказ, метка
+    остаётся; «перезапустить» — pantheon start --restart: живая копия останавливается, поднимается новая; живую
+    «запустить» не трогает."""
     e = Env()
     e.direction("wr-dir")
     e.run("watch", t=T0)
     os.makedirs(e.st("stopped"), exist_ok=True)
     open(e.st("stopped", "wr-dir"), "w").write("x\n")
+    open(e.st("stopped", "zz-other"), "w").write("x\n")
+    json.dump({"names": ["wr-dir", "zz-other"]}, open(e.st("stopped-all.json"), "w"))
     _zeus_answer(e, T0 + 10, "[metis-0600] Запустить wr-dir?", "Да — запустить wr-dir")
+    _zeus_answer(e, T0 + 11, "[metis-0603] Вернуть wr-dir?", "Да — вернуть wr-dir сейчас")
+    _zeus_answer(e, T0 + 12, "[metis-0604] Вернуть wr-dir?", "Да — вернуть wr-dir", note="после обеда")
     e.run("watch", t=T0 + 60)
     check(not _bgs(e, "wr-dir") and os.path.exists(e.st("stopped", "wr-dir")),
-          f"0523: «запустить» подняло остановленное вами: {e.calls()}")
-    check("снимает только ваша команда pantheon resume" in e.alerts(), f"0523: нет причины отказа: {e.alerts()[-300:]}")
-    os.remove(e.st("stopped", "wr-dir"))
+          f"0523: «запустить» или не дословное «вернуть» подняло остановленное вами: {e.calls()}")
+    check("снимает ответ «Да — вернуть wr-dir» или ваша команда pantheon resume" in e.alerts(),
+          f"0523: нет причины отказа: {e.alerts()[-300:]}")
+    _zeus_answer(e, T0 + 100, "[metis-0605] Вернуть wr-dir?", "Да — вернуть wr-dir")
+    json.dump({"wr-dir": {"fails": 3, "gave_up": T0, "last": T0}}, open(e.st("autostart.json"), "w"))
+    e.run("watch", t=T0 + 160)
+    asj = json.load(open(e.st("autostart.json")))
+    check(not (asj.get("wr-dir") or {}).get("gave_up") and not (asj.get("wr-dir") or {}).get("fails"),
+          f"28.10: «вернуть» не сбросило счётчик самозапуска: {asj}")
+    info = json.load(open(e.st("stopped-all.json")))
+    check(not os.path.exists(e.st("stopped", "wr-dir")) and os.path.exists(e.st("stopped", "zz-other"))
+          and info.get("names") == ["zz-other"] and len(_bgs(e, "wr-dir")) == 1,
+          f"28.10: «Да — вернуть» не сняло метку или не подняло: {info} {e.calls()}")
+    check("wr-dir: метка «остановлено вами» снята (ваш ответ «Да — вернуть wr-dir»" in e.alerts()
+          and "[metis-0605]): вернуть wr-dir — поднято" in e.alerts(), f"28.10: тревоги возврата: {e.alerts()[-500:]}")
     e.agents([bg("wr-dir", "working", "wrwrwrwr-1", pid=None)])
     _zeus_answer(e, T0 + 200, "[metis-0601] Запустить wr-dir?", "Да — запустить wr-dir")
     e.run("watch", t=T0 + 260)
-    check(not _bgs(e, "wr-dir") and "уже работает" in e.alerts(), f"0523: живую подняли второй раз: {e.calls()}")
+    check(len(_bgs(e, "wr-dir")) == 1 and "уже работает" in e.alerts(), f"0523: живую подняли второй раз: {e.calls()}")
     _zeus_answer(e, T0 + 300, "[metis-0602] Перезапустить wr-dir?", "Да — перезапустить wr-dir")
     e.run("watch", t=T0 + 360, extra={"FAKE_STOP_MARK": "1"})
-    check(["stop", "wrwrwrwr"] in e.calls() and len(_bgs(e, "wr-dir")) == 1,
+    check(["stop", "wrwrwrwr"] in e.calls() and len(_bgs(e, "wr-dir")) == 2,
           f"0523: «перезапустить» не остановило и не подняло: {e.calls()}")
     wl = [r[-1] for r in _start_rows(e) if r[1:2] == ["word-launch"]]
     check(wl[-1] == "перезапущено", f"0523: итог перезапуска: {wl}")
@@ -1530,32 +1551,59 @@ def _pack_night(e, name="athena-p"):
     e.pack = os.path.join(e.pantheon, e.pack_rel)
     open(e.pack, "w", encoding="utf-8").write(f"# Ночная пачка {name}\n\n| # | Задача |\n|---|---|\n| 1 | athena-0300 |\n")
     e.night_file = e.st("night", evening + ".json")
+    e.evening = evening
 
 
-def test_night_no_question_0523():
-    """[sb-simplify] п. 10: вечером плановый проход вопроса не задаёт — ни карточки во входящих, ни уведомления; ночь
-    отмечена разрешённой сама, никого ради этого не поднимают."""
+def _night_yes(e, t, qid="metis-0700"):
+    """Ваш выбор «Да — ночь <дата>» на вопрос pantheon night ask о пачке e.pack (её sha256 сейчас)."""
+    sha = hashlib.sha256(open(e.pack, "rb").read()).hexdigest()
+    _zeus_answer(e, t, f"[{qid}] Ночь {e.evening}: пачка {e.pack_rel} sha256 {sha}?", f"Да — ночь {e.evening}")
+
+
+def test_night_only_by_answer_0523():
+    """Решение владельца 28.10 (вариант Б): вечером плановый проход вопроса не задаёт — ни карточки во входящих, ни
+    уведомления; без вашего ответа о пачке ночь не открыта: ночью ни пачку, ни задачу с отметкой не поднимают. Ответ
+    на напечатанный `pantheon night ask` вопрос, но с пачкой, изменённой после него, — отказ и тревога."""
     e = Env()
-    _night_now(e)
+    _pack_night(e)
+    e.direction("athena-q")
+    e.task("athena-0301", "athena-q")
     e.agents([])
     r = e.run("watch", t=T0 - 7200)
-    st = json.load(open(e.st("night", time.strftime("%Y-%m-%d", time.localtime(T0 - 7200)) + ".json")))
+    st = json.load(open(e.night_file)) if os.path.exists(e.night_file) else {}
     box = os.path.join(e.pantheon, "inbox", "tasks")
     cards = os.listdir(box) if os.path.isdir(box) else []
-    check(st.get("answer") == "да" and st.get("auto") and not st.get("card_id") and not cards,
+    check(st.get("answer") is None and not st.get("packs") and not st.get("card_id") and not cards,
           f"вечер: {st} {cards} {r.stderr[-300:]}")
     check("на ночь" not in e.sent(), f"уведомление о ночи: {e.sent()[-300:]}")
-    check(not _bgs(e), f"вечером кого-то подняли: {e.calls()}")
+    e.board("athena-0301", T0 - 3650)
+    e.run("watch", t=T0 - 3500)
+    e.run("watch", t=T0 - 3400)
+    st = json.load(open(e.night_file)) if os.path.exists(e.night_file) else {}
+    check(not _bgs(e) and not st.get("opened_at"), f"ночь без ответа — кого-то подняли: {e.calls()} {st}")
+    # pantheon night ask печатает вопрос; ответ на него, а пачку потом изменили — не одобрена
+    r = e.run("night", "ask", "metis-0710", "athena-p", e.evening, t=T0 - 3300)
+    q = r.stdout.splitlines()[0][len("вопрос: "):] if r.stdout else ""
+    check(r.returncode == 0 and q.startswith(f"[metis-0710] Ночь {e.evening}: пачка {e.pack_rel} sha256 "),
+          f"night ask: {r.returncode} {r.stdout!r} {r.stderr[-300:]}")
+    _zeus_answer(e, T0 - 3290, q, f"Да — ночь {e.evening}")
+    open(e.pack, "a", encoding="utf-8").write("| 2 | athena-0399 | дописано после вопроса |\n")
+    e.run("watch", t=T0 - 3200)
+    st = json.load(open(e.night_file))
+    check(not _bgs(e) and not st.get("packs") and "изменилась после вашего ответа" in e.alerts(),
+          f"изменённую после вопроса пачку одобрили: {st} {e.calls()} {e.alerts()[-300:]}")
+    check(e.run("night", "ask", "metis-0710", "nosuch-dir", t=T0).returncode == 2, "night ask без пачки — не код 2")
 
 
 def test_night_pack_starts_once_0284():
-    """Пачка, лежащая к началу вечера, фиксируется сама: в начале ночи плановый проход поднимает её координатора с путём
+    """Пачка с вашим ответом «Да — ночь» одобрена: в начале ночи плановый проход поднимает её координатора с путём
     пачки в задании — один раз; отметки владельца у других направлений ночью с пачкой никого не поднимают."""
     e = Env()
     _pack_night(e)
     e.direction("athena-q")
     e.task("athena-0301", "athena-q")
-    e.run("watch", t=T0 - 7200)                       # вечер: пачка зафиксирована, разовый запуск записан
+    _night_yes(e, T0 - 7300)
+    e.run("watch", t=T0 - 7200)                       # вечер: пачка одобрена вашим ответом, разовый запуск записан
     st = json.load(open(e.night_file))
     check([x["path"] for x in st.get("packs") or []] == [e.pack_rel], f"пачка не зафиксирована: {st}")
     e.run("watch", t=T0 - 7000)
@@ -1576,9 +1624,10 @@ def test_night_pack_starts_once_0284():
 
 
 def test_night_pack_changed_not_started_0284():
-    """Пачка, изменённая после фиксации вечером, не запускается: запись гаснет, тревога и уведомление."""
+    """Пачка, изменённая после одобрения вечером, не запускается: запись гаснет, тревога и уведомление."""
     e = Env()
     _pack_night(e)
+    _night_yes(e, T0 - 7300)
     e.run("watch", t=T0 - 7200)
     e.run("watch", t=T0 - 7000)
     open(e.pack, "a", encoding="utf-8").write("| 2 | athena-0399 | дописано после фиксации |\n")

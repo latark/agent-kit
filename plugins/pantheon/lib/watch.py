@@ -1644,17 +1644,19 @@ def autostart(agents, registry, doms, t, dry=False):
 
 
 # --- окна по вашему ответу в окне вопросов (metis-0523, [sb-simplify] п. 5, решение владельца 27.10 «(а)») -----------
-# Вопрос — только по шаблону, его печатает `pantheon launch-question <id> запустить|перезапустить <направление>`:
+# Вопрос — только по шаблону, его печатает `pantheon launch-question <id> запустить|перезапустить|вернуть <направление>`:
 # «[<id>] Запустить <имя>?» и варианты «Да — запустить <имя>» | «Нет». Ваш выбор хук answer пишет в owner-log/zeus.md с
 # пометкой «окно вопросов» — роли её не подделать. Плановый проход (вне песочницы окон) сверяет запись целиком: строка
 # вопроса точно по шаблону, ответ — точно вариант «Да — <глагол> <имя>», других строк (заметки, свой текст) нет.
 # Любое отличие — отказ без запуска (ревью безопасности: намерение не выводится из свободного текста модели).
 # запустить — продолжение остановленной сессии или новая (как самозапуск), перезапустить — pantheon start --restart.
-# Метку «остановлено вами» этот путь не снимает: вернуть — только ваша команда `pantheon resume <имя>`. Каждое
+# Метку «остановлено вами» запустить и перезапустить не снимают (отказ). Её снимает вернуть (решение владельца 28.10):
+# «[<id>] Вернуть <имя>?» / «Да — вернуть <имя>» — та же дословная сверка, затем как `pantheon resume <имя>` (метка,
+# имя в stopped-all.json и сброс самозапуска) и подъём окна, как у запустить. `pantheon resume` остаётся. Каждое
 # поручение — строка word-launch в logs/start.log и строка в alerts.md; запись исполняется один раз
 # (word-launch.json), только не старше WORD_LAUNCH_HOURS и не раньше включения прохода (word-launch-since: старые «да»
 # после выпуска никого не поднимают). Окну Зевса и СБ команды запуска для этого не нужны.
-WORD_LAUNCH_VERBS = ("запустить", "перезапустить")
+WORD_LAUNCH_VERBS = ("запустить", "перезапустить", "вернуть")
 WORD_LAUNCH_ID = r"[a-z0-9][a-z0-9-]{0,40}"
 WORD_LAUNCH_NAME = r"[a-z][a-z0-9-]{0,40}"
 # похоже на поручение запуска — тогда запись разбирается и при несовпадении с шаблоном даёт отказ в журнале
@@ -1673,7 +1675,7 @@ def word_parse(body):
     lines = body.split("\n")
     if not lines or not WORD_LAUNCH_HINT.match(lines[0]):
         return None
-    m = re.fullmatch(rf"вопрос: \[({WORD_LAUNCH_ID})\] (Запустить|Перезапустить) ({WORD_LAUNCH_NAME})\?", lines[0])
+    m = re.fullmatch(rf"вопрос: \[({WORD_LAUNCH_ID})\] (Запустить|Перезапустить|Вернуть) ({WORD_LAUNCH_NAME})\?", lines[0])
     qid0 = WORD_LAUNCH_HINT.match(lines[0]).group(1)
     ans = lines[1][len("ответ: "):] if len(lines) > 1 and lines[1].startswith("ответ: ") else ""
     if not m:
@@ -1719,11 +1721,12 @@ def word_orders(t):
 
 
 def launch_question_cmd(rest):
-    """pantheon launch-question <id> запустить|перезапустить <направление> — вопрос и варианты для окна вопросов."""
+    """pantheon launch-question <id> запустить|перезапустить|вернуть <направление> — вопрос и варианты для окна вопросов."""
     doms = domains()
     if (len(rest) != 3 or not re.fullmatch(WORD_LAUNCH_ID, rest[0]) or rest[1] not in WORD_LAUNCH_VERBS
             or not re.fullmatch(WORD_LAUNCH_NAME, rest[2])):
-        print("pantheon launch-question <id> запустить|перезапустить <направление> — id и имя строчными", file=sys.stderr)
+        print("pantheon launch-question <id> запустить|перезапустить|вернуть <направление> — id и имя строчными",
+              file=sys.stderr)
         return 2
     if rest[2] not in doms:
         print(f"pantheon launch-question: нет направления {rest[2]} в domains.json", file=sys.stderr)
@@ -1762,8 +1765,11 @@ def word_launch(agents, registry, doms, t):
 def _word_do(verb, name, qid, ts, ans, agents, registry):
     text = (f"[Пантеон: запуск по ответу владельца в окне вопросов {ts}, [{qid}] — «{ans[:80]}»] "
             f"Продолжай работу; поручение и контекст — pantheon task show {qid}, свои входящие и STATUS.md.")
+    if verb == "вернуть":  # как pantheon resume: метка, имя в «остановить всё», сброс самозапуска — затем подъём
+        _word_unstop(name)
     if os.path.exists(P.path("stopped", name)):
-        return "не исполняю: «остановлено вами» — снимает только ваша команда pantheon resume"
+        return ("не исполняю: «остановлено вами» — снимает ответ «Да — вернуть " + name + "» или ваша команда "
+                "pantheon resume")
     if verb == "перезапустить":
         try:
             r = subprocess.run([os.path.join(P.PLUGIN, "bin", "pantheon"), "start", name, "--from", "tick", "--restart",
@@ -1784,6 +1790,22 @@ def _word_do(verb, name, qid, ts, ans, agents, registry):
         ONESHOT_STARTED.append(name)  # самозапуск этого прохода направление не тронет
         return "поднято"
     return f"не вышло, код {rc}"
+
+
+def _word_unstop(name):
+    """Снять «остановлено вами» с направления — по вашему ответу «Да — вернуть <имя>» (как pantheon resume)."""
+    _forget_autostart(name)
+    try:
+        os.unlink(P.path("stopped", name))
+        P.alert(f"{name}: метка «остановлено вами» снята (ваш ответ «Да — вернуть {name}» в окне вопросов)",
+                "pantheon-stop")
+    except OSError:  # метки нет; не снялась иначе — она остаётся, и ниже отказ с причиной, а не падение проверки
+        pass
+    sp = P.path("stopped-all.json")
+    st = P.read_json(sp, None)
+    if isinstance(st, dict) and name in (st.get("names") or []):
+        st["names"] = [x for x in st["names"] if x != name]
+        P.write_json(sp, st)
 
 
 def resume_or_start(name, agents, text, origin, only_resume=False, auto=False):

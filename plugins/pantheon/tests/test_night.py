@@ -6,6 +6,9 @@ pantheon.py загружается в этом же процессе; кажды
 подменяются), снимок строки статуса пишется в HOME/.local/state/claude-statusline. Время — местное: дата вечера
 VEVENING, часы «ЧЧ:ММ» считаются от неё.
 """
+import contextlib
+import hashlib
+import io
 import json
 import os
 import subprocess
@@ -264,35 +267,63 @@ def test_day_rules_and_respawn():
     check(not ok and why.startswith("лимит неизвестен"), f"respawn ночью при неизвестном лимите: {ok} {why}")
 
 
-def test_night_opens_itself_0523():
-    """[sb-simplify] п. 10 (решение владельца 27.10): вопроса «работать ли ночью» нет — ни карточки, ни уведомления; в
-    22:00 ночь отмечается разрешённой (одна строка в тревогах), открывается в 23:00 с бюджетом; gate до 23:00 — днём."""
+def night_yes(e, t, qid="metis-0700", d=EVENING, rel=None, sha=None, answer=None, note=None, question=None,
+              mark="· окно вопросов"):
+    """Запись хука answer в owner-log/zeus.md: ваш выбор на вопрос `pantheon night ask` (по умолчанию — «Да — ночь <дата>»
+    на пачку e.pack с её текущим sha256)."""
+    ds = d.isoformat()
+    rel = rel or os.path.relpath(e.pack, e.pantheon)
+    sha = sha or hashlib.sha256(open(e.pack, "rb").read()).hexdigest()
+    q = question or f"[{qid}] Ночь {ds}: пачка {rel} sha256 {sha}?"
+    with open(os.path.join(e.state, "owner-log", "zeus.md"), "a", encoding="utf-8") as fh:
+        fh.write(f"## {datetime.fromtimestamp(t).strftime('%Y-%m-%d %H:%M:%S')} {mark}\nвопрос: {q}\n"
+                 f"ответ: {answer or 'Да — ночь ' + ds}\n" + (f"заметка: {note}\n" if note else "") + "\n")
+
+
+def test_night_by_answer_only_b():
+    """Решение владельца 28.10 (вариант Б): фиксированного вопроса в 22:00 нет, ночь открывается только вашим ответом
+    «Да — ночь <дата>» на вопрос `pantheon night ask` о пачке (путь и sha256 в вопросе). Без ответа — ни карточки, ни
+    уведомления, ночь не открыта, новое ночью не идёт; ответ после начала ночи открывает её в момент ответа."""
     e = Env()
     e.resets = hm("22:00") + 3 * 86400
-    e.at_line(hm("21:55"), 0)
-    e.watch(hm("21:55"))
-    check(not os.path.exists(os.path.join(e.state, "night", EVENING.isoformat() + ".json")), "до 22:00 ночь отмечена")
-    for x in ("22:00", "22:30", "23:00", "23:30"):
+    for x in ("21:55", "22:00", "22:30", "23:00", "23:30"):
         e.at_line(hm(x), 0)
         e.watch(hm(x))
     check(not e.cards() and not e.sent(), f"вопрос на ночь задан: карточки {e.cards()}, уведомления {e.sent()}")
-    st = e.state_of()
-    check(st["answer"] == "да" and st.get("auto") and st["opened_at"] == hm("23:00") and st["budget_pct"] == 3
-          and not st["skipped"], f"ночь не открылась сама: {st}")
-    check(e.alerts().count("откроется сама в 23:00") == 1 and "открыта с 23:00" in e.alerts(),
-          f"строки ночи в тревогах: {e.alerts()}")
-    check(N.gate("autostart", hm("23:40"), heavy=0) == (True, ""), f"открытая ночь — gate: {N.gate('autostart', hm('23:40'), heavy=0)}")
-    check(N.status_lines(hm("23:30"))[1].startswith("Ночь: открыта с 23:00, потрачено "), N.status_lines(hm("23:30")))
-    # Mac проснулся в 00:30: ночь открывается в том же проходе, тревога одна
-    e2 = Env()
-    e2.resets = hm("22:00") + 3 * 86400
-    e2.at_line(hm("00:30"), 0)
-    e2.watch(hm("00:30"))
+    st = N.load(EVENING)
+    check(st["answer"] is None and not st.get("opened_at") and not st.get("packs"), f"ночь без ответа: {st}")
+    check(N.gate("autostart", hm("23:40"), heavy=0) == (False, "ночь не открыта"),
+          f"ночь без ответа — gate: {N.gate('autostart', hm('23:40'), heavy=0)}")
+    check(N.status_lines(hm("23:30"))[1] == "Ночь: " + N.NIGHT_CLOSED, N.status_lines(hm("23:30")))
+    check("ночь" not in e.alerts().lower(), f"строка о ночи без ответа: {e.alerts()}")
+    # пачка и точный ответ днём: одобрена в 22:00, ночь открыта в 23:00
+    e1 = _pack_env(start_line="")
+    rel = os.path.relpath(e1.pack, e1.pantheon)
+    night_yes(e1, hm("21:00"))
+    for x in ("22:00", "23:00"):
+        e1.at_line(hm(x), 0)
+        e1.watch(hm(x))
+    st = e1.state_of()
+    check(st["answer"] == "да" and st["answer_at"] == hm("21:00") and st["opened_at"] == hm("23:00")
+          and st["budget_pct"] == 3 and [x["path"] for x in st["packs"]] == [rel] and not st.get("auto"),
+          f"ночь по ответу: {st}")
+    check(e1.alerts().count("одобрена вашим ответом") == 1 and "открыта с 23:00" in e1.alerts(),
+          f"строки ночи в тревогах: {e1.alerts()}")
+    check(N.gate("autostart", hm("23:20"), heavy=0) == (True, ""), f"открытая ночь — gate: {N.gate('autostart', hm('23:40'), heavy=0)}")
+    check(N.status_lines(hm("23:10"))[1].startswith("Ночь: открыта с 23:00, потрачено "), N.status_lines(hm("23:10")))
+    # ответ после начала ночи (00:30) — ночь открывается в момент ответа
+    e2 = _pack_env(start_line="")
+    e2.at_line(hm("22:00"), 0)
+    e2.watch(hm("22:00"))
+    check(e2.state_of()["answer"] is None, f"ночь до ответа: {e2.state_of()}")
+    night_yes(e2, hm("00:30"))
+    e2.at_line(hm("00:31"), 0)
+    e2.watch(hm("00:31"))
     st = e2.state_of()
-    check(st.get("opened_at") == hm("23:00") and abs(st["start_pct"] - N.measure(hm("00:30"))["used"]) < 1e-9,
-          f"проснулся в 00:30 — ночь: {st}")
-    # лимит недели неизвестен — ночь разрешена, но не открыта и новое не идёт; status — «откроется сама»
-    e3 = Env()
+    check(st.get("opened_at") == hm("00:30") and st["answer_at"] == hm("00:30"), f"ответ в 00:30 — ночь: {st}")
+    # лимит недели неизвестен — ночь разрешена, но не открыта и новое не идёт
+    e3 = _pack_env(start_line="")
+    night_yes(e3, hm("21:00"))
     e3.at_line(hm("22:00") - 7200, 0)
     e3.watch(hm("23:10"))
     st = e3.state_of()
@@ -300,7 +331,8 @@ def test_night_opens_itself_0523():
           f"неизвестный лимит — ночь: {st}")
     # потолок недели держит и ночь
     e4 = Env('primary_host = "mac-a"\n[limits.owner_cap]\npct = 20\ndecision = "zeus-x"\n')
-    e4.resets = hm("22:00") + 3 * 86400
+    _add_pack(e4, "")
+    night_yes(e4, hm("21:00"))
     e4.snap(hm("23:10"), 30.0, e4.resets)
     e4.watch(hm("22:00"))
     e4.watch(hm("23:10"))
@@ -308,9 +340,78 @@ def test_night_opens_itself_0523():
     check(not ok and "20" in why, f"потолок недели ночью не держит: {ok} {why}")
 
 
+def test_night_answer_refused_b():
+    """Ответ, по которому ночь не открывается: пачка изменилась после вопроса (sha256 другой), ответ не дословный,
+    заметка, вопрос не по шаблону, ответ «Нет», вопрос о другой ночи, без пометки «окно вопросов», пачки по пути нет.
+    Отказ — строка в тревогах с причиной (кроме «Нет», чужой ночи и чужой пометки), ночь не открыта, запусков нет."""
+    def changed(e):
+        night_yes(e, hm("21:00"))
+        open(e.pack, "a", encoding="utf-8").write("| 3 | metis-0399 | дописано после вопроса |\n")
+
+    def no_sha(e):
+        rel = os.path.relpath(e.pack, e.pantheon)
+        night_yes(e, hm("21:00"), question=f"[metis-0700] Ночь {EVENING.isoformat()}: пачка {rel}?")
+
+    cases = (
+        ("пачка изменилась", changed, "изменилась после вашего ответа"),
+        ("ответ «Да»", lambda e: night_yes(e, hm("21:00"), answer="Да"), "а не «Да — ночь 2026-10-15»"),
+        ("ответ с хвостом", lambda e: night_yes(e, hm("21:00"), answer="Да — ночь 2026-10-15, но только 0210"),
+         "а не «Да — ночь"),
+        ("заметка", lambda e: night_yes(e, hm("21:00"), note="только metis-0210"), "заметка"),
+        ("вопрос без sha256", no_sha, "не по шаблону pantheon night ask"),
+        ("чужой sha256", lambda e: night_yes(e, hm("21:00"), sha="0" * 64), "изменилась после вашего ответа"),
+        ("нет такой пачки", lambda e: night_yes(e, hm("21:00"), rel="directions/metis-x/night-2026-01-01-pack.md"),
+         "ночь по ней не открываю"),
+        ("ответ «Нет»", lambda e: night_yes(e, hm("21:00"), answer="Нет"), None),
+        ("другая ночь", lambda e: night_yes(e, hm("21:00"), d=EVENING - timedelta(days=1)), None),
+        ("свободный ввод", lambda e: night_yes(e, hm("21:00"), mark="· свободный ввод"), None),
+    )
+    for label, prep, why in cases:
+        e = _pack_env(start_line="")
+        prep(e)
+        e.at_line(hm("23:05"), 0)
+        e.watch(hm("23:05"))
+        e.watch(hm("23:10"))
+        st = N.load(EVENING)
+        check(st["answer"] is None and not st.get("opened_at") and not st.get("packs") and not oneshots(e)
+              and not N.gate("autostart", hm("23:20"), heavy=0)[0], f"{label}: ночь открылась: {st} {oneshots(e)}")
+        al = e.alerts()
+        if why:
+            check(why in al and al.count("ночь 15.10:") == 1, f"{label}: нет причины отказа «{why}» (одна): {al}")
+        else:
+            check("ночь 15.10:" not in al, f"{label}: лишняя строка: {al}")
+
+
+def test_night_ask_cmd_b():
+    """`pantheon night ask <id> <направление>` печатает вопрос по шаблону с путём и sha256 пачки и варианты; ваш выбор
+    «Да — ночь <дата>» на этот вопрос открывает ночь. Нет пачки, кривой id, лишний аргумент, кривая дата — код 2."""
+    e = _pack_env(start_line="")
+
+    def ask(*a):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = N.night_ask_cmd(list(a), t=hm("21:00"))
+        return rc, out.getvalue(), err.getvalue()
+
+    rc, out, err = ask("metis-0700", "metis-x")
+    sha = hashlib.sha256(open(e.pack, "rb").read()).hexdigest()
+    rel = os.path.relpath(e.pack, e.pantheon)
+    q = f"[metis-0700] Ночь 2026-10-15: пачка {rel} sha256 {sha}?"
+    check(rc == 0 and out.startswith(f"вопрос: {q}\nварианты: Да — ночь 2026-10-15 | Нет\n"), f"night ask: {rc} {out!r} {err!r}")
+    bad = [ask(*a)[0] for a in (("metis-0700", "nosuch"), ("Metis-0700", "metis-x"), ("metis-0700", "metis-x", "x"),
+                                ("metis-0700",), ("metis-0700", "metis-x", "2026-10-15", "лишнее"))]
+    check(bad == [2, 2, 2, 2, 2], f"night ask без отказа: {bad}")
+    check(ask("metis-0700", "metis-x", "2026-10-15")[0] == 0, "night ask с датой")
+    lines = out.splitlines()
+    night_yes(e, hm("21:01"), question=lines[0][len("вопрос: "):], answer=lines[1][len("варианты: "):].split(" | ")[0])
+    e.at_line(hm("23:00"), 0)
+    e.watch(hm("23:00"))
+    check(e.state_of().get("opened_at") == hm("23:00"), f"ответ на напечатанный вопрос не открыл ночь: {e.state_of()}")
+
+
 def test_night_old_card_closed_0523():
-    """Карточка вопроса, заданного до выпуска (card_id в состоянии ночи, ответа нет), снимается проходом; ночь
-    открывается сама; уже пропущенная ночь («Нет» до выпуска) не открывается."""
+    """Карточка вопроса, заданного до выпуска (card_id в состоянии ночи, ответа нет), снимается проходом; без ответа
+    о пачке ночь не открыта; уже пропущенная ночь («Нет» до выпуска) не открывается."""
     e = Env()
     e.resets = hm("22:00") + 3 * 86400
     T = P.tasks_mod()
@@ -321,7 +422,7 @@ def test_night_old_card_closed_0523():
               open(os.path.join(e.state, "night", EVENING.isoformat() + ".json"), "w"))
     e.at_line(hm("23:05"), 0)
     e.watch(hm("23:05"))
-    check(e.cards()[tid]["status"] == "dropped" and e.state_of().get("opened_at") == hm("23:00"),
+    check(e.cards()[tid]["status"] == "dropped" and not e.state_of().get("opened_at"),
           f"старая карточка: {e.cards()[tid]['status']}, ночь {e.state_of()}")
     e2 = Env()
     os.makedirs(os.path.join(e2.state, "night"), exist_ok=True)
@@ -334,7 +435,9 @@ def test_night_old_card_closed_0523():
 
 
 def open_night(e, answer_at=None, over=0.0):
-    """Вечер 22:00: ночь отмечается разрешённой сама ([sb-simplify] п. 10); answer_at — от старого вопроса, не действует."""
+    """Ночь с пачкой и вашим ответом «Да — ночь» (вариант Б, 28.10), в 21:00; answer_at — от старого вопроса, не действует."""
+    _add_pack(e, "")
+    night_yes(e, hm("21:00"))
     e.resets = hm("22:00") + 3 * 86400
     e.at_line(hm("22:00"), over)
     e.watch(hm("22:00"))
@@ -587,7 +690,7 @@ def test_status_format():
     lines = N.status_lines(t)
     check(lines[0] == "Неделя: 41 % · линия 43 % · запас −2 п.п. · зона: зелёная · сброс пт 10:00", lines[0])
     check(lines[2] == "Снимок лимита: 5 мин назад", lines[2])
-    check(lines[1] == "Ночь: не открыта — откроется сама в 23:00", lines[1])
+    check(lines[1] == "Ночь: не открыта — только по вашему ответу на вопрос о пачке (pantheon night ask)", lines[1])
     e.snap(t - 45 * 60, 41.0, resets)
     check(N.status_lines(t)[2] == "лимит неизвестен (45 мин)", N.status_lines(t)[2])
     check(N.num(1.25) in ("1,2", "1,3") and N.num(-2) == "−2" and N.signed(2.1) == "+2,1", "формат чисел")
@@ -605,14 +708,18 @@ def test_status_format():
     check(r.returncode == 0 and r.stdout.startswith("Лимит\n") and "Сброс недели: пт 10:00" in r.stdout
           and "Ночь " in r.stdout, f"pantheon night report: {r.stdout} {r.stderr[-300:]}")
     check(run("night", "bogus").returncode == 2, "pantheon night bogus — не код 2")
-    check("pantheon night [status|report]" in run("help").stdout, "в справке нет pantheon night")
+    check("pantheon night [status|report]" in run("help").stdout and "pantheon night ask <id>" in run("help").stdout,
+          "в справке нет pantheon night")
     r = run("status")
     check("Лимит и ночь" in r.stdout and "Неделя: 41 %" in r.stdout, f"pantheon status без раздела: {r.stdout[-800:]}")
 
 
 def _pack_env(start_line="- Старт — 04:00, но не раньше выпуска"):
     """Направление metis-x с ночной пачкой на утро после вечера EVENING (как night-2026-10-19-pack.md у ночи 18→19)."""
-    e = Env()
+    return _add_pack(Env(), start_line)
+
+
+def _add_pack(e, start_line):
     folder = os.path.join(e.home, "projects", "metis-x")
     os.makedirs(folder, exist_ok=True)
     json.dump({"domains": {"metis-x": [folder]}}, open(os.path.join(e.state, "domains.json"), "w"))
@@ -632,20 +739,23 @@ def oneshots(e):
 
 
 def test_pack_approved_0284():
-    """Пачка, лежащая к 22:00, фиксируется сама (вопроса нет, [sb-simplify] п. 10): путь и sha256 — в состоянии ночи,
-    ровно один разовый запуск её координатора на старт пачки (04:00) со сроком до конца ночи; ночью — только пачки."""
+    """Пачка с вашим ответом «Да — ночь» (вариант Б, 28.10) одобрена: путь и sha256 — в состоянии ночи, ровно один разовый
+    запуск её координатора на старт пачки (04:00) со сроком до конца ночи, и повторный ответ его не удваивает."""
     e = _pack_env()
     rel = f"directions/metis-x/night-{(EVENING + timedelta(days=1)).isoformat()}-pack.md"
+    night_yes(e, hm("21:00"))
     check(N.pack_night(hm("21:50")) == [], "пачка до вечера — уже ночь пачек")
     e.at_line(hm("22:00"), 0)
     e.watch(hm("22:00"))
+    night_yes(e, hm("22:03"), qid="metis-0701")
     e.watch(hm("22:05"))
     check(not e.cards(), f"карточка вопроса: {e.cards()}")
     st = e.state_of()
     check([p["path"] for p in st.get("packs") or []] == [rel] and st["packs"][0]["start"] == "04:00"
           and len(st["packs"][0]["sha"]) == 64 and st["packs"][0]["tasks"] == ["metis-0210", "metis-0251"],
           f"пачка в состоянии: {st.get('packs')}")
-    check("пачки: metis-x/night-" in e.alerts(), f"тревога не называет пачку: {e.alerts()}")
+    check("пачка metis-x/night-" in e.alerts() and e.alerts().count("одобрена вашим ответом") == 1,
+          f"тревога не называет пачку: {e.alerts()}")
     items = oneshots(e)
     check(len(items) == 1, f"разовых запусков {len(items)}: {items}")
     if items:
@@ -661,6 +771,7 @@ def test_pack_approved_0284():
     check(any("Разовый запуск pack-" in x for x in N.status_lines(hm("23:00"))), "pantheon night не показывает запуск")
     # без строки «Старт» — в начале ночи; следующей ночью эта пачка уже взята — не берётся снова
     e2 = _pack_env(start_line="")
+    night_yes(e2, hm("21:00"))
     e2.at_line(hm("22:00"), 0)
     e2.watch(hm("22:00"))
     check([x["at"] for x in oneshots(e2)] == [hm("23:00")], f"без «Старт» — не в начале ночи: {oneshots(e2)}")
@@ -674,6 +785,7 @@ def test_pack_skip_cancels_0284():
     """Ночь пропущена (бюджета нет: последняя ночь перед сбросом, неделя у порога) — разовый запуск пачки погашен без
     запуска."""
     e = _pack_env()
+    night_yes(e, hm("21:00"))
     e.resets = hm("22:00") + 12 * 3600
     e.snap(hm("22:00"), 85.0, e.resets)
     e.watch(hm("22:00"))
