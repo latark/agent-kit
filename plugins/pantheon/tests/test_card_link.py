@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Ссылка уведомления ведёт на саму карточку (metis-0318): obsidian://open?path=<абсолютный путь файла в копии вида>.
-Проверяем итоговую ссылку: night.remind (через PANTHEON_NOTIFY_LOG), tasks.card_url, pantheon.board_url; имя карточки
+Проверяем итоговую ссылку: tasks.card_url, pantheon.board_url (night.remind снят с вечерним вопросом, metis-0523); имя карточки
 с «·» и «꞉»; ссылка раскодируется в существующий файл временной копии вида. Настоящий ~/ai/pantheon-view не трогаем.
 Запуск: python3 -I plugins/pantheon/tests/test_card_link.py  (код 0 — все прошли)
 """
@@ -29,7 +29,6 @@ _spec = importlib.util.spec_from_file_location("pantheon_cardlink_test", os.path
 P = importlib.util.module_from_spec(_spec)
 sys.modules["pantheon_cardlink_test"] = P
 _spec.loader.exec_module(P)
-N = P.night_mod()
 # копия вида — вне HOME и в папке с пробелом: путь, зашитый от HOME, тест ловит (review-130, замечание 2)
 VIEW = os.path.join(_ROOT, "вид с пробелом", "pantheon-view")
 assert not VIEW.startswith(os.environ["HOME"] + os.sep)
@@ -82,26 +81,6 @@ def test_board_url():
     name = T.card_name(HEAD)
     check(target_path(P.board_url(name + ".md")) == os.path.join(VIEW, "Доска", name + ".md"),
           "board_url(имя.md) не ведёт на карточку")
-
-
-def test_night_remind():
-    log = os.path.join(_ROOT, "notify.log")
-    os.environ["PANTHEON_NOTIFY_LOG"] = log
-    name = T.card_name(HEAD)
-    f = make_card(name)
-    real = T.load_tasks
-    T.load_tasks = lambda root: {"inbox-0005": (None, HEAD, None)}
-    try:
-        N.remind({"card_id": "inbox-0005"}, 1_800_000_000.0, "повтор вопроса на ночь")
-    finally:
-        T.load_tasks = real
-        os.environ.pop("PANTHEON_NOTIFY_LOG")
-    lines = open(log, encoding="utf-8").read().splitlines()
-    check(len(lines) == 1, f"ожидалось 1 уведомление: {lines}")
-    parts = lines[0].split("|")
-    target, group = parts[-2], parts[-1]
-    check(group == "inbox-0005", f"group: {group}")
-    check(target_path(target) == f and os.path.isfile(f), f"щелчок по night.remind не ведёт на карточку: {target}")
 
 
 if __name__ == "__main__":

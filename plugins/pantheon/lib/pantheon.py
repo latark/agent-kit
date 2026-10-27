@@ -42,7 +42,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
   pantheon status                       один экран для отладки: плановый проход, сессии, вопросы к вам, тревоги, защиты, sync, места heavy, версии
   pantheon night [status|report]        недельный лимит: неделя, линия, запас, зона, ночь, снимок; report — блок
-                                        «Лимит» для сводки (вечерний вопрос и ночь ведёт дежурный, lib/night.py)
+                                        «Лимит» для сводки (ночь открывает сам дежурный, вопроса нет; lib/night.py)
   pantheon read request|run|status|cancel   чтение личного чата по заявке (metis-0267, lib/read.py): заявка → ваше
                                         «да» на [read-<rid>] → выгрузка и разбор плановым проходом → вы одобряете пункты
   pantheon merge request|run|status|cancel   слияние PR ядра по Touch ID (metis-0285, lib/merge.py): заявка роли →

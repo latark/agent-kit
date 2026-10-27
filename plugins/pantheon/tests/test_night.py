@@ -587,7 +587,7 @@ def test_status_format():
     lines = N.status_lines(t)
     check(lines[0] == "Неделя: 41 % · линия 43 % · запас −2 п.п. · зона: зелёная · сброс пт 10:00", lines[0])
     check(lines[2] == "Снимок лимита: 5 мин назад", lines[2])
-    check(lines[1].startswith("Ночь: не открыта — вопрос в 22:00") or lines[1].startswith("Ночь:"), lines[1])
+    check(lines[1] == "Ночь: не открыта — откроется сама в 23:00", lines[1])
     e.snap(t - 45 * 60, 41.0, resets)
     check(N.status_lines(t)[2] == "лимит неизвестен (45 мин)", N.status_lines(t)[2])
     check(N.num(1.25) in ("1,2", "1,3") and N.num(-2) == "−2" and N.signed(2.1) == "+2,1", "формат чисел")
