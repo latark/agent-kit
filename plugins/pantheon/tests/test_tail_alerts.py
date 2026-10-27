@@ -180,9 +180,9 @@ def main():
           and not tl("\n## Журнал\n\n- 2026-10-01 11:00 — агент: остаток\n")
           and not tl("\nхвост в тексте, не в журнале\n\n## Журнал\n\n- 2026-10-24 11:00 — агент: создана\n"))
     dr = T.D_FINDING_RE
-    check("D_FINDING_RE: «- Д ·», «1. Д —», «**Д**», «Д:» — да; «Д3», «Добавь», «Б», «Дифф» — нет",
-          all(dr.match(x) for x in ("- Д · a:1 x", "1. Д — a", "  * **Д** a", "Д: a", "- Д a"))
-          and not any(dr.match(x) for x in ("- Д3 a", "Добавь Д", "- Б a", "Дифф 1", "Д", "- Д")))
+    check("D_FINDING_RE: «- Д ·», «1. Д —», «**Д**», «Д:», «- Д3 a», «Д1.», «**Д2** —» — да; «Д3б», «Добавь», «Б», «Дифф» — нет",
+          all(dr.match(x) for x in ("- Д · a:1 x", "1. Д — a", "  * **Д** a", "Д: a", "- Д a", "- Д3 a", "Д1. a", "**Д2** — a", "- **Д12** a"))
+          and not any(dr.match(x) for x in ("Д3б a", "Добавь Д", "- Б a", "Дифф 1", "Д", "- Д")))
 
     print(f"\n{sum(results)}/{len(results)}")
     sys.exit(0 if all(results) else 1)

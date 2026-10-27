@@ -3428,7 +3428,7 @@ TAIL_ID_RE = re.compile(r"(?<![\w-])[a-z][a-z0-9]*-\d{2,}(?!\w)")
 JOURNAL_LINE_RE = re.compile(r"^- (\d{4}-\d\d-\d\d \d\d:\d\d) — ([^:\n]*): (.*)$")
 TAIL_SKIP_ACTORS = ("check",)  # записи самого тика — не слова агента
 FINDINGS_ZERO_RE = re.compile(r"^findings:\s*0\s*$", re.M)
-D_FINDING_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)?\**Д(?![\w])\**\s*[·.:—–)-]?\s*\S")
+D_FINDING_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)?\**Д\d*(?![\w])\**\s*[·.:—–)-]?\s*\S")
 
 
 def tail_lines(tasks, t, days=TAIL_DAYS):
