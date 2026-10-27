@@ -480,7 +480,16 @@ def main():
                                      "pantheon archive", "pantheon jobs *", "pantheon domains build",
                                      "pantheon roles build", "pantheon stop *", "pantheon resume *", "pantheon pause *",
                                      "pantheon restart *", "pantheon saved *", "pantheon who", "pantheon agents",
+                                     "sessync find", "sessync find *",
                                      "gh pr view", "gh pr view *", "gh pr checks", "gh pr checks *", "gh pr edit *"])
+    others = {n: load(n)["sandbox"]["excludedCommands"] for n in ("athena-shop", "metis-pantheon", "workshop",
+                                                                    "mnemo-brain", "zz", "hestia")}
+    others.update({f"job-{r}": load(f"job-{r}")["sandbox"]["excludedCommands"]
+                   for r in ("clio", "prometheus", "iris") if os.path.exists(os.path.join(state, "settings", f"job-{r}.json"))})
+    check("sessync find (metis-0566): мимо песочницы только у окна штаба; у окон направлений, мастерской, Гестии и "
+          "задач его нет",
+          len(others) >= 7 and not any("sessync" in x for v in others.values() for x in v)
+          and "sessync find *" in hb["excludedCommands"])
     check("окно штаба: gh api, gh issue, gh run, gh repo, gh pr create/close/comment/merge, gh с флагами до "
           "подкоманды, «gh *» и «gh pr *» — в песочнице (metis-0247)",
           not any(x.startswith(("gh api", "gh issue", "gh run", "gh repo", "gh pr create", "gh pr close", "gh pr merge",

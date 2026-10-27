@@ -38,6 +38,8 @@ PostToolUse (Bash:
   hq-gh        — окну штаба gh pr — только с -R из [merge_repos], PR номером, без GH_* в команде и GH_REPO/GH_HOST/
                  GH_CONFIG_DIR в окружении, без обсуждений (--comments, --json comments) и без личного в команде;
                  слияние (gh pr merge, gh api …/merge) — отказ всегда (metis-0247);
+  hq-sessync   — окну штаба `sessync find <слова> [-p проект]` разрешён (мимо песочницы, вывод с маской ключей), с --raw
+                 и --no-mask (и их сокращениями) — отказ (metis-0566);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
                  status, chats, folders, verify, split — можно; без PANTHEON_ROLE (плановый проход) — можно (metis-0267);
@@ -86,7 +88,7 @@ PostToolUse (Bash:
   --strict      — хук окна роли с onFailure: "block" (собирает `pantheon domains build`, SEC-29).
 При сбое (SEC-10, metis-0094) — во всех трёх режимах одинаково, обёртка run_hook: событие не JSON или не объект,
 исключение в проверке прав (domain, draft-role, pantheon-acl, protect-config, private, cdp-role, push, terminal, hq-telegram,
-hq-gh, tg-role, chiron, hestia) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
+hq-gh, hq-sessync, tg-role, chiron, hestia) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
 stderr: Claude Code блокирует вызов на любой версии, и в вашей сессии тоже. PostToolUse (журнал запора слияния):
 код 2 только показывает причину агенту — команда уже выполнена. Исключения: правила-подсказки (dev-server,
 attribution, cdp, nextjs) при сбое пропускают к остальным проверкам; сбой на Stop — выход 0 (код 2 не дал бы
@@ -3827,8 +3829,41 @@ def check_draft_role(event, tool, tool_input):
     return None
 
 
+# hq-sessync (metis-0566, решение владельца 27.10). Окну штаба `sessync find <слова> [-p проект]` выпущен мимо песочницы
+# (excludedCommands, HQ_EXCLUDED): читает транскрипты ~/.claude/projects, а вывод проходит маску похожего на ключи — она
+# в самом sessync. Флаги, которые маску или её границы снимают, — отказ: --raw (поиск по сырым транскриптам, вывод
+# инструментов) и --no-mask. argparse в sessync принимает и сокращения (--ra, --no-m), поэтому отказ — на любой
+# аргумент, который начало одного из них. Другие окна `sessync find` не получают: в их excludedCommands его нет.
+SESSYNC_BAD_FLAGS = ("--raw", "--no-mask")
+
+
+def check_hq_sessync(event, tool, tool_input):
+    if tool != "Bash" or not (window_role() == "hq" or event.get("agent_type") == "hq"):
+        return None
+    cmd = tool_input.get("command") or ""
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    _, cmds = bash_analysis(cmd, cwd)
+    for n, t in cmds:
+        if not n or os.path.basename(n.rstrip("/")) != "sessync":
+            continue
+        args = [a for a in t if isinstance(a, str)]
+        if "find" not in args:
+            continue
+        if len(args) != len(t):  # аргумент не вычислить ($X, $(…)) — не понять, нет ли в нём --raw
+            return ("Правило hq-sessync: окну Пританея `sessync find` — слова только буквами, без подстановок "
+                    "$(…) и переменных (metis-0566): в них мог бы быть --raw.")
+        bad = [a for a in args if a.startswith("--") and len(a) > 2
+               and any(f.startswith(a.split("=", 1)[0]) for f in SESSYNC_BAD_FLAGS)]
+        if bad:
+            return ("Правило hq-sessync: окну Пританея `sessync find` — без --raw и --no-mask (metis-0566): вывод "
+                    "проходит маску похожего на ключи, а эти флаги её снимают или ищут по выводу инструментов. "
+                    f"Убери {bad[0]}.")
+    return None
+
+
 def check_window(event, tool, tool_input):
-    for rule, check in (("hq-telegram", check_hq_telegram), ("hq-gh", check_hq_gh), ("tg-role", check_tg_role),
+    for rule, check in (("hq-telegram", check_hq_telegram), ("hq-gh", check_hq_gh), ("hq-sessync", check_hq_sessync),
+                        ("tg-role", check_tg_role),
                         ("chiron", check_chiron_call), ("hestia", check_hestia_call)):
         if rule not in OFF:
             reason = check(event, tool, tool_input)
