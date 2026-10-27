@@ -38,6 +38,8 @@ PostToolUse (Bash:
   hq-gh        — окну штаба gh pr — только с -R из [merge_repos], PR номером, без GH_* в команде и GH_REPO/GH_HOST/
                  GH_CONFIG_DIR в окружении, без обсуждений (--comments, --json comments) и без личного в команде;
                  слияние (gh pr merge, gh api …/merge) — отказ всегда (metis-0247);
+  hq-sessync   — окну Пританея `sessync find <слова> [-p имя] [-n число]` — только строкой целиком по строгому образцу
+                 (слова из букв, цифр и _.-); флаги, присваивание перед командой, обёртки, глобы — отказ (metis-0566);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
                  status, chats, folders, verify, split — можно; без PANTHEON_ROLE (плановый проход) — можно (metis-0267);
@@ -86,7 +88,7 @@ PostToolUse (Bash:
   --strict      — хук окна роли с onFailure: "block" (собирает `pantheon domains build`, SEC-29).
 При сбое (SEC-10, metis-0094) — во всех трёх режимах одинаково, обёртка run_hook: событие не JSON или не объект,
 исключение в проверке прав (domain, draft-role, pantheon-acl, protect-config, private, cdp-role, push, terminal, hq-telegram,
-hq-gh, tg-role, chiron, hestia) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
+hq-gh, hq-sessync, tg-role, chiron, hestia) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
 stderr: Claude Code блокирует вызов на любой версии, и в вашей сессии тоже. PostToolUse (журнал запора слияния):
 код 2 только показывает причину агенту — команда уже выполнена. Исключения: правила-подсказки (dev-server,
 attribution, cdp, nextjs) при сбое пропускают к остальным проверкам; сбой на Stop — выход 0 (код 2 не дал бы
@@ -3827,8 +3829,42 @@ def check_draft_role(event, tool, tool_input):
     return None
 
 
+# hq-sessync (metis-0566, решение владельца 27.10). Окну Пританея `sessync find <слова> [-p имя] [-n число]` выпущен
+# мимо песочницы (excludedCommands, HQ_EXCLUDED): читает транскрипты ~/.claude/projects, а вывод проходит маску похожего
+# на ключи — она в самом sessync. Правило — одна строгая проверка всей сырой строки (SESSYNC_LINE), а не разбор:
+# строка целиком `sessync find` + токены, где токен — слово из букв, цифр и `_.-` (не с «-»), такое же слово в одинарных
+# или двойных кавычках (внутри ещё пробелы), `-p <имя>` или `-n <цифры>`. Всё остальное — отказ: --raw, --no-mask и
+# любой другой флаг, префикс присваивания (`PATH=… sessync find`), обёртки (env, bash -c), `;`, `&`, `|`, `<`, `>`,
+# подстановки, глобы (`* ? [ ] { } ~ ^ # !`), перевод строки. Иначе тот, что оболочка раскрыла бы или запустила, ушёл бы
+# мимо песочницы вместе с `find`. Правило срабатывает на любую строку, где есть `sessync find` или команда sessync с
+# аргументом find. Другие окна `sessync find` не получают: в их excludedCommands его нет.
+_SW = r"[\w.][\w.\-]*"
+SESSYNC_LINE = re.compile(
+    r"[ \t]*sessync[ \t]+find(?:[ \t]+(?:" + _SW + r"|\"[\w.][\w.\- ]*\"|'[\w.][\w.\- ]*'"
+    r"|-p[ \t]+[A-Za-z0-9][A-Za-z0-9_-]*|-n[ \t]+[0-9]+))*[ \t]*\Z")
+SESSYNC_MENTION = re.compile(r"\bsessync[ \t]+(?:\S+[ \t]+)*?find\b")
+
+
+def check_hq_sessync(event, tool, tool_input):
+    if tool != "Bash" or not (window_role() == "hq" or event.get("agent_type") == "hq"):
+        return None
+    cmd = tool_input.get("command") or ""
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    _, cmds = bash_analysis(cmd, cwd)
+    named = any(n and os.path.basename(n.rstrip("/")) == "sessync" and "find" in [a for a in t if isinstance(a, str)]
+                for n, t in cmds)
+    if not named and not SESSYNC_MENTION.search(cmd):
+        return None
+    if SESSYNC_LINE.match(cmd):
+        return None
+    return ("Правило hq-sessync: окну Пританея `sessync find` — только строкой `sessync find слова [-p имя] [-n число]` "
+            "(metis-0566): слова из букв, цифр и _.-, без флагов (--raw, --no-mask и любых других), без префикса "
+            "присваивания, env, bash -c, `;`, `&`, `|`, перенаправлений, подстановок и глобов (* ? [ ] { } ~ ^ # !).")
+
+
 def check_window(event, tool, tool_input):
-    for rule, check in (("hq-telegram", check_hq_telegram), ("hq-gh", check_hq_gh), ("tg-role", check_tg_role),
+    for rule, check in (("hq-telegram", check_hq_telegram), ("hq-gh", check_hq_gh), ("hq-sessync", check_hq_sessync),
+                        ("tg-role", check_tg_role),
                         ("chiron", check_chiron_call), ("hestia", check_hestia_call)):
         if rule not in OFF:
             reason = check(event, tool, tool_input)

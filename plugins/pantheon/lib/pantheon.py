@@ -2992,7 +2992,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
 HQ_EXCLUDED = ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheon wake *", "pantheon archive",
                "pantheon jobs *", "pantheon domains build", "pantheon roles build", "pantheon stop *",
                "pantheon resume *", "pantheon pause *", "pantheon restart *", "pantheon saved *", "pantheon who",
-               "pantheon agents"]
+               "pantheon agents", "sessync find", "sessync find *"]
+# `sessync find` (metis-0566, решение владельца 27.10): поиск прошлых разговоров читает транскрипты ~/.claude/projects, а
+# окну штаба они закрыты — поэтому только эта команда и только здесь, мимо песочницы; вывод проходит маску ключей в самом
+# sessync, а --raw и --no-mask отказывает guard (hq-sessync). Другим окнам команды нет: в их песочнице она не читает.
 START_MARK = "[Пантеон:"
 WAKE_TEXT = (START_MARK + " пробуждение] Тебя прервало выключение или перезапуск. Сверь файл состояния и «начато» без "
              "«сделано» (не повторяй внешнее действие, пока не проверишь, что оно не ушло), затем продолжай задачу.")
