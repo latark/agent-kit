@@ -130,6 +130,10 @@ r = run([])
 check("без аргументов — код 2", r.returncode == 2, r.stdout)
 r = run(["-j", "0", p])
 check("-j 0 — отказ, не прогон", r.returncode != 0 and "больше нуля" in r.stdout, r.stdout)
+for bad_args, word in ((["--bogus", p], "неизвестный ключ"), (["-j"], "без значения"), (["-j", "abc", p], "не число")):
+    r = run(bad_args)
+    check(f"ключи {' '.join(bad_args[:2])} — отказ без прогона", r.returncode != 0 and word in r.stdout
+          and "файлов" not in r.stdout, r.stdout)
 
 # --- таймаут: файл висит, его внук тоже; оба погашены, раннер не 0 ---
 gp = os.path.join(_ROOT, "gpid-timeout")
