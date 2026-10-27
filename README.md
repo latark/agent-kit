@@ -332,7 +332,8 @@
   код 2, то есть отказ. После выпуска нужны `pantheon domains build` и перезапуск окон. С 0.11.23 Пританею открыт
   momus — ревизор навыка audit (`agent: momus`): только чтение и веб, пишет лишь свой отчёт в `~/ai/knowledge/Inbox`.
   С metis-0224 Пританею и координаторам открыт palamedes — исполнитель без кода (тексты, юридический разбор,
-  синтез; без веба и Bash), модель и effort ему передают в вызове.
+  синтез; без веба и Bash), модель и effort ему передают в вызове. С metis-0469 guard пускает его писать только в
+  `~/ai/pantheon/directions/<направление>/drafts/` (правило draft-role и `DRAFT_ONLY_ROLES`, README guard).
 - `plugins/pantheon/lib/skills_lint.py` — линтер навыков в `pantheon check` (metis-0258): SKILL.md плагина и
   `~/.claude/skills` — шапка, `name` = имя папки, `description` до 1024 знаков, ссылки на соседние файлы живы; ошибка —
   код 1, в плановом проходе (`--quiet`) — одна тревога `check-skills`. `pantheon check путь/SKILL.md [задача.md …]` —
