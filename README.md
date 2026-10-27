@@ -165,11 +165,14 @@
   Зарезервированные имена (metis-0163): `hq`, `workshop`, `hestia` и всё вида `job-*` — имена окон системы
   (`settings/hq.json`, `workshop.json`, `hestia.json`, `job-<роль>.json`); направлением в `directions.toml` их назвать
   нельзя — `pantheon domains build` и `pantheon direction check` отказывают понятной строкой.
-  Окно Гестии `settings/hestia.json` (metis-0245): служебная роль hestia ставит выпуски и перезапускает окна. Поднимает
+  Окно Гестии `settings/hestia.json` (metis-0245): служебная роль hestia пересобирает и перезапускает окна и сверяет выпуск (ставит его плановый проход). Поднимает
   её только `pantheon wake hestia --task <id>` с открытой задачей (без задачи — отказ «нет задачи», код 2) фоновой
-  сессией `hestia`, папка запуска — её кэш. Из окна роли (задан `PANTHEON_ROLE`, не hq) — только по слову владельца в окне Зевса за 15 мин: без слова отказ, код 2; со словом в красной зоне памяти — код 5 «отложено», повторять надо самому (самозапуск `wake hestia` не повторяет); из окна hq — как start --from zeus: без вашего слова код 2, со словом красная зона не откладывает. `PANTHEON_ROLE=hestia`; Bash пишет только в TMPDIR (в кэш окна guard запись не пускает), сети нет, личное
-  закрыто для Bash, Read и Grep; мимо песочницы — `pantheon plugins update`, `domains build`, `restart`, `alert`; Edit, Write, WebFetch,
-  WebSearch и Agent закрыты. Остальное решает правило guard hestia (git только для чтения, `restart` без `--force`).
+  сессией `hestia`, папка запуска — её кэш. Из окна роли (задан `PANTHEON_ROLE`, не hq) — только по слову владельца в окне Зевса за 15 мин: без слова отказ, код 2; со словом в красной зоне памяти — код 5 «отложено», повторять надо самому (самозапуск `wake hestia` не повторяет); из окна hq — как start --from zeus: без вашего слова код 2, со словом красная зона не откладывает. `PANTHEON_ROLE=hestia`; Bash пишет только в TMPDIR (в кэш окна guard запись не пускает), личное
+  закрыто для Bash, Read и Grep; мимо песочницы — `pantheon plugins update`, `domains build`, `restart`, `alert`, `consent`, `git push`,
+  `gh pr create|edit`; Edit, Write, WebFetch, WebSearch и Agent закрыты. Сети в песочнице окна нет (`allowedDomains`
+  пуст); `git push` и `gh pr create|edit` guard пускает только после `pantheon consent <id задачи>` — явное «да» владельца
+  из окна вопросов Зевса не старше суток; на «да» команда ставит метку `<state>/hestia-consent/<id>` на 2 часа, и
+  только для задачи окна (`PANTHEON_TASK`); ответ «нет» или иной метки не даёт (metis-0562). Остальное решает правило guard hestia (git только для чтения и push, `restart` без `--force`).
   Субагент hestia запрещён в окнах направлений, Пританея и задач. Перезапуска планового прохода (launchctl) у окна нет.
   Направление без координатора (metis-0155): `coordinator = false` у направления в `directions.toml` (по умолчанию
   координатор включён) — направление ведёт Пританей. `pantheon start|wake <направление>` координатора не поднимают (отказ,
