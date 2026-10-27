@@ -1,0 +1,17 @@
+{
+  "plugins": {
+    "guard": {
+      "tree": "101dfd9ad4f62971d1ace826a833a8f490af873a5903bee1b31c203352c7db16",
+      "version": "0.5.25"
+    },
+    "pantheon": {
+      "tree": "a80e1aa1510ac7049340a855f20ffc6aee84106af53a7081b2fc84d427fe1b80",
+      "version": "0.11.129"
+    },
+    "project-tools": {
+      "tree": "5ae5ceee46c3f19a0db10797f049e67ba2e5388cff84f5d6a37882dbce018bef",
+      "version": "0.1.6"
+    }
+  },
+  "v": 1
+}
