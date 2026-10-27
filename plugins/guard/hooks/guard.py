@@ -3582,6 +3582,7 @@ HESTIA_PANTHEON = {("plugins", "update"), ("domains", "build"), ("restart",), ("
 # --task`), метка чужой задачи не годится. Окну в state писать нельзя (pantheon-acl, песочница) — подделать метку
 # нечем. Метка живёт 2 часа. Сети у песочницы окна нет: push и gh идут мимо неё (excludedCommands), поэтому всё, что
 # они могут, ограничивает этот разбор. fetch, pull, clone и ls-remote — не открыты (пишут в репозиторий или не нужны)
+# Остаток: защита от ошибки, не от намеренной подмены .git/config (модель угроз README guard).
 HESTIA_GIT_NET = {"push"}
 HESTIA_GH_WRITE = {("pr", "create"), ("pr", "edit")}
 HESTIA_CONSENT_DIR = os.path.join(STATE_DIR, "hestia-consent")
@@ -3623,7 +3624,25 @@ def _hestia_need_consent(what):
                                      f"(метка живёт {HESTIA_CONSENT_TTL // 3600} ч)")
 
 
-HESTIA_PUSH_BAD = ("--receive-pack", "--exec", "--repo", "--config-env", "--exec-path", "--upload-pack")
+HESTIA_PUSH_LEASE = re.compile(r"--force-with-lease(=[A-Za-z0-9._/-]+)?")
+
+
+def _hestia_push_flags(texts, args):
+    """Белый список опций `git push` окна: до push у git опций нет, после — только -u/--set-upstream и
+    --force-with-lease (без значения или =ветка). Git принимает сокращения длинных опций (--rec = --receive-pack),
+    поэтому запрет по списку плохих не годится. Остаток: .git/config (core.sshCommand, remote.*.receivepack,
+    url.*.insteadOf) может подменить запуск — защита от ошибки, не от намеренной подмены .git/config (модель угроз
+    README guard)."""
+    pre = texts[:len(texts) - len(args) - 1]  # texts — слова после имени git
+    for a in pre:
+        if a.startswith("-"):
+            return f"опция git «{a}» перед push (-C, -c, --git-dir, --work-tree, --exec-path …) не принимается"
+    for a in args:
+        if a in ("-u", "--set-upstream") or HESTIA_PUSH_LEASE.fullmatch(a):
+            continue
+        if a.startswith("-"):
+            return f"опция push «{a}» — разрешены только -u/--set-upstream и --force-with-lease[=ветка]"
+    return None
 
 
 def _hestia_outside_sandbox(name, texts):
@@ -3743,11 +3762,11 @@ def check_hestia(event, tool, tool_input):
                     return _hestia_need_consent(f"git {parsed[1]}")
                 # окно главной сессии без agent_type — check_push его не судит, поэтому правила push здесь же:
                 # не в main/master, без force и удаления; куда — только имя remote (не адрес): push идёт мимо песочницы
-                why = push_problem(texts, os.path.realpath(event.get("cwd") or os.getcwd()),
-                                   any(n == "cd" for n, _ in cmds))
-                if not why and ("-c" in texts or any(x.startswith(HESTIA_PUSH_BAD) or x == "-o" or x.startswith("--push-option")
-                                                      for x in texts)):
-                    why = "--receive-pack, --exec, --repo, -c, --push-option исполняют или подменяют команду вне песочницы"
+                why = _hestia_push_flags(texts, parsed[2])
+                if not why:  # --force-with-lease разрешён (ветка не защищённая — проверяет push_problem)
+                    why = push_problem([t for t in texts if not HESTIA_PUSH_LEASE.fullmatch(t)],
+                                       os.path.realpath(event.get("cwd") or os.getcwd()),
+                                       any(n == "cd" for n, _ in cmds))
                 if not why:
                     pos = [x for x in parsed[2] if not x.startswith("-")]
                     if pos and not HESTIA_REMOTE_RE.fullmatch(pos[0]):
