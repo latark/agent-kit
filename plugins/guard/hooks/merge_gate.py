@@ -901,8 +901,10 @@ def _is_core(path, core_files):
 # именам, транзитивно в пределах файла (role_settings, JOB_ROLES, SANDBOX_DOMAINS…). Правка — инструкция верхнего уровня
 # с другим AST (комментарии не в счёт), которая задаёт или меняет такое имя: def и class — своё имя, global, запись в
 # элемент или поле, метод-мутатор; прочие инструкции — все свои имена. Файл до и после — из git папки слияния
-# (merge-base PR и head, как у переноса «принять»); не получить, не разобрать, нет корня, файл переименован или в другом
-# регистре — ядро. Вне признака: обращения по строке (getattr, globals()), псевдоним изменяемого значения, другие файлы
+# (merge-base PR и head, как у переноса «принять»). Имена сборки — объединение замыканий на merge-base, head, base PR
+# и живой вершине ветки base (gh api …/git/ref/heads/<base>): соседний PR, слитый в base после ответвления, мог
+# добавить в сборку вызов функции, которую правит этот PR (ревью argus-b PR #160, Б1). Не получить, не разобрать, нет
+# корня, файл переименован или в другом регистре — ядро. Вне признака: обращения по строке (getattr, globals()), псевдоним изменяемого значения, другие файлы
 # (window_rules.py — в CORE_FILES)
 SANDBOX_BUILD_FILE = "plugins/pantheon/lib/pantheon.py"
 SANDBOX_BUILD_ROOTS = ("sandbox_build", "domains_build", "run_settings")
@@ -1000,13 +1002,18 @@ def _defs_closure(src):
     return dumps, seen
 
 
-def sandbox_build_changes(old, new):
+def sandbox_build_changes(old, new, *tips):
     """Исходники pantheon.py до и после → имена сборки окон, которые PR задевает (отсортированы), или None — не
-    разобрать или нет корня: тогда ядро."""
+    разобрать или нет корня: тогда ядро. tips — исходники на вершинах base: их замыкания тоже в счёт (Б1 PR #160 —
+    в base после ответвления PR сборка стала звать функцию, которую PR правит)."""
     a, b = _defs_closure(old), _defs_closure(new)
-    if a is None or b is None:
+    more = [_defs_closure(t) for t in tips]
+    if a is None or b is None or any(c is None for c in more):
         return None
-    return sorted(n for n in a[1] | b[1] if a[0].get(n, []) != b[0].get(n, []))
+    names = a[1] | b[1]
+    for c in more:
+        names |= c[1]
+    return sorted(n for n in names if a[0].get(n, []) != b[0].get(n, []))
 
 
 def _blob(gd, rev, path):
@@ -1022,9 +1029,27 @@ def _blob(gd, rev, path):
         return None
 
 
-def _sandbox_problem(cwd, repo, base, sha):
+BRANCH_RE = re.compile(r"(?!.*\.\.)(?!/)(?!.*//)[A-Za-z0-9._/-]{1,200}(?<![/.])")
+
+
+def _base_tip(repo, branch):
+    """Живая вершина ветки branch в repo (gh api …/git/ref/heads/<branch>) — SHA коммита или None (сбой gh, не та
+    ветка, не коммит, имя ветки не по формату)."""
+    if not isinstance(branch, str) or not BRANCH_RE.fullmatch(branch):
+        return None
+    got = _gh_json(["api", f"repos/{repo}/git/ref/heads/{branch}"])
+    ref = got[0] if isinstance(got, list) and len(got) == 1 and isinstance(got[0], dict) else {}
+    obj = ref.get("object") if isinstance(ref.get("object"), dict) else {}
+    sha = obj.get("sha")
+    if ref.get("ref") != "refs/heads/" + branch or obj.get("type") != "commit" or not isinstance(sha, str) \
+            or not SHA_RE.fullmatch(sha.lower()):
+        return None
+    return sha.lower()
+
+
+def _sandbox_problem(cwd, repo, base, sha, branch=None):
     """PR правит pantheon.py: ядро ли это (metis-0404) — текст для списка задетого ядра или None (сборку окон не
-    задевает)."""
+    задевает). base — baseRefOid, branch — baseRefName: замыкание берётся и на живой вершине ветки (Б1 PR #160)."""
     gd, why = _carry_git(cwd, repo, base)
     if gd is None:
         return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: {why})"
@@ -1034,8 +1059,17 @@ def _sandbox_problem(cwd, repo, base, sha):
     mbs = out.split() if out is not None else []
     if len(mbs) != 1:
         return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: у {sha[:12]} и base PR нет единственной merge-base)"
-    old, new = _blob(gd, mbs[0].decode("ascii", "replace"), SANDBOX_BUILD_FILE), _blob(gd, sha, SANDBOX_BUILD_FILE)
-    got = sandbox_build_changes(old, new) if old is not None and new is not None else None
+    tip = _base_tip(repo, branch)
+    if tip is None:
+        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: вершину ветки base PR ({branch}) не получить от gh)"
+    if _git_bytes(gd, "cat-file", "-e", tip + "^{commit}") is None:
+        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: вершины base {tip[:12]} нет в git папки — сделай " \
+               f"git fetch)"
+    mb = mbs[0].decode("ascii", "replace")
+    old, new = _blob(gd, mb, SANDBOX_BUILD_FILE), _blob(gd, sha, SANDBOX_BUILD_FILE)
+    tips = [_blob(gd, r, SANDBOX_BUILD_FILE) for r in dict.fromkeys((base.lower(), tip)) if r != mb]
+    ok = old is not None and new is not None and all(t is not None for t in tips)
+    got = sandbox_build_changes(old, new, *tips) if ok else None
     if got is None:
         return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: файла нет до или после, не разобрать или нет " \
                f"{'/'.join(SANDBOX_BUILD_ROOTS)})"
@@ -1045,7 +1079,7 @@ def _sandbox_problem(cwd, repo, base, sha):
     return None
 
 
-PR_VIEW_FIELDS = "headRefOid,baseRefOid,changedFiles,statusCheckRollup"
+PR_VIEW_FIELDS = "headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup"
 
 
 def _pr_view(repo, pr):
@@ -1095,7 +1129,7 @@ def _core_problem(repo, pr, sha, data, files=_FETCH, cwd=None):
         if len(own) != 1 or own[0].get("filename") != SANDBOX_BUILD_FILE or own[0].get("previous_filename") is not None:
             hit.append(f"{SANDBOX_BUILD_FILE} (переименован, удалён, добавлен или путь в другом регистре)")
         else:
-            why = _sandbox_problem(cwd, repo, data.get("baseRefOid"), sha)
+            why = _sandbox_problem(cwd, repo, data.get("baseRefOid"), sha, data.get("baseRefName"))
             if why:
                 hit.append(why)
     if hit:
