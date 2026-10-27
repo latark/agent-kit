@@ -6,7 +6,8 @@ PostToolUse (Bash:
 журнал запора слияния) и Stop плагина guard (hooks/hooks.json). Код запора слияния и protect-config — в merge_gate.py
 и protect_config.py рядом (ядро защит, Д3).
 Правила:
-  dev-server   — не запускать dev-сервер (next dev, npm/pnpm/yarn/bun run dev, turbo dev);
+  dev-server   — вашим сессиям без роли: не запускать dev-сервер (next dev, npm/pnpm/yarn/bun run dev, turbo dev);
+                 окна ролей и их субагенты — можно ([sb-simplify] 27.10);
   attribution  — никаких пометок об авторстве Claude в коммитах, тегах и PR;
   cdp          — не писать свой код подключения к браузеру мимо ~/.claude/tools/cdp-daemon.mjs;
   nextjs       — после правок в Next.js-проекте с запущенным dev-сервером проверить get_errors;
@@ -17,7 +18,7 @@ PostToolUse (Bash:
   launchd-env  — роли не меняют launchd: белый список launchctl только для чтения (list, print, getenv, blame, version…),
                  остальное — setenv, bootstrap, load, submit, kickstart, asuser и неизвестное — отказ (окружение тика);
                  swiftc — только абсолютным /usr/bin/swiftc, голое имя и другой путь — отказ (metis-0298);
-  domain       — субагент, тиммейт, координатор и сессия мастерской пишут только в своё направление;
+  domain       — palamedes пишет только черновики, momus — только свой отчёт; зоны направлений сняты ([sb-simplify]);
   draft-role   — исполнитель без кода palamedes (субагент и главная сессия `--agent palamedes`, metis-0469) пишет
                  только черновик: Write, Edit, MultiEdit в ~/ai/pantheon/directions/<своё направление>/drafts/**, из окна
                  Пританея (PANTHEON_ROLE=hq) — в drafts/ любого направления из domains.json; код проектов, свой и чужой
@@ -210,7 +211,9 @@ def in_worktree(event):
 
 
 def check_dev_server(cmd, event=None):
-    if event and event.get("agent_id") and event.get("agent_type") in DEV_SERVER_ROLES and in_worktree(event):
+    # окна ролей Пантеона и их субагенты поднимают dev-сервер сами ([sb-simplify] 27.10: порт и сокеты окну даёт
+    # песочница); подсказка остаётся только вашим сессиям без роли — правило из ~/.claude/CLAUDE.md
+    if os.environ.get("PANTHEON_ROLE") or (event and (event.get("agent_id") or is_pantheon_role(event.get("agent_type") or ""))):
         return None
     if DEV_SERVER.search(strip_quoted(cmd)):
         return (
@@ -2331,9 +2334,22 @@ def write_targets(event, tool, tool_input):
 
 
 def check_domain(event, tool, tool_input):
+    # Зоны записи по направлениям сняты ([sb-simplify], «да» владельца 27.10): чужая папка проекта — не ущерб из
+    # пяти, запись в ядро, настройки, личное и журналы держат protect-config, private и pantheon-acl, а Bash —
+    # песочница окна. Остались только роли с узкой работой: palamedes пишет черновики, momus — свой отчёт
     role, sub, pdir = who(event)
     pantheon_role = is_pantheon_role(role)
     if not sub and (not pantheon_role or role == "hq"):
+        return None
+    if role not in DRAFT_ONLY_ROLES and role not in EXTRA_ONLY_ROLES:
+        # память другой роли загружается в её контекст, а у Зевса и координаторов есть действия наружу
+        mem = os.path.join(HOME, ".claude", "agent-memory")
+        _, targets = write_targets(event, tool, tool_input)
+        bad = [p for p in targets if _inside(p, [mem]) and not (role and _inside(p, [os.path.join(mem, role)]))]
+        if bad:
+            return (f"Правило domain: роль «{role or 'субагент'}» пишет только в свою память "
+                    f"(~/.claude/agent-memory/{role or '<роль>'}/). Чужая: "
+                    f"{', '.join(p.replace(HOME, '~') for p in bad[:3])}.")
         return None
     domains, policy = load_domains(), load_policy()
     cwd, targets = write_targets(event, tool, tool_input)

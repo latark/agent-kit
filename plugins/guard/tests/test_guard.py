@@ -33,8 +33,8 @@ except ImportError:
     HAS_TOMLLIB = False
 # случаи, где «allow» держится только на привилегии/agent_extra из policy.toml: без tomllib guard их честно закрывает
 # (тот же приём, что MERGE_OK ниже). Обвязка не ослабляет проверку: с tomllib ожидание прежнее — allow.
-NEEDS_POLICY = {"Метида правит карту решений", "prometheus пишет в ~/ai/knowledge (agent_extra)",
-                "prometheus сессией: ~/ai/knowledge по agent_extra", "protect-config: Метида правит роль",
+# prometheus в ~/ai/knowledge — без зон направлений ([sb-simplify]) allow и без policy.toml
+NEEDS_POLICY = {"Метида правит карту решений", "protect-config: Метида правит роль",
                 "protect-config: Метида пишет policy.toml", "private: mnemo-brain пишет в me/",
                 "momus пишет в ~/ai/knowledge/Inbox (agent_extra)", "0177 momus без agent_id пишет в ~/ai/knowledge/Inbox"}
 
@@ -757,9 +757,9 @@ def main():
         ("athena не правит карту решений", "deny", br, "domain-coordinator", False, E(P("decision-map.md"))),
         ("реестр не выдаёт прав Метиды", "deny", ak + "/../shopKeeperApp", "domain-coordinator", False, E(P("decision-map.md"))),
         ("athena пишет в свой репозиторий", "allow", br, "domain-coordinator", False, W(os.path.join(home, br, "app/x.ts"))),
-        ("athena — отказ на запись в sitebuilder (SEC-12)", "deny", br, "domain-coordinator", False, W(os.path.join(home, alex, "x.md"))),
+        ("athena пишет в чужую папку проекта — зоны сняты [sb-simplify]", "allow", br, "domain-coordinator", False, W(os.path.join(home, alex, "x.md"))),
         ("мастерская пишет в папку задачи", "allow", ws, "workshop", False, W(os.path.join(home, ws, "form.md"))),
-        ("мастерская — отказ вне папки задачи", "deny", ws, "workshop", False, W(os.path.join(home, alex, "x.md"))),
+        ("мастерская пишет вне папки задачи — зоны сняты [sb-simplify]", "allow", ws, "workshop", False, W(os.path.join(home, alex, "x.md"))),
         ("prometheus пишет в ~/ai/knowledge (agent_extra)", "allow", br, "prometheus", True, W(os.path.join(home, "ai/knowledge/raw/a.md"))),
         ("dev-server по-прежнему запрещён", "deny", br, "", False, B("pnpm run dev")),
         # обходы через Bash (ревизия шага 0.3, № 5): роль координатора, cwd = ~/ai/pantheon
@@ -825,8 +825,8 @@ def main():
         ("субагент: terminal-notifier по пути — отказ", "deny", br, "argus", True, B("/opt/homebrew/bin/terminal-notifier -message x")),
         ("ваша сессия: pantheon uninstall можно", "allow", ".", "", False, B("pantheon uninstall")),
         # роли отдельной сессией (№ 7)
-        ("clio сессией: запись в sitebuilder — отказ", "deny", ".", "clio", False, W(os.path.join(home, alex, "x.md"))),
-        ("clio сессией: запись в ~/ai/knowledge (agent_extra нет в тестовой политике) — отказ", "deny", ".", "clio", False, W(os.path.join(home, "ai/knowledge/wiki/x.md"))),
+        ("clio сессией: запись в sitebuilder — зоны сняты [sb-simplify]", "allow", ".", "clio", False, W(os.path.join(home, alex, "x.md"))),
+        ("clio сессией: запись в ~/ai/knowledge — зоны сняты [sb-simplify]", "allow", ".", "clio", False, W(os.path.join(home, "ai/knowledge/wiki/x.md"))),
         ("prometheus сессией: ~/ai/knowledge по agent_extra", "allow", ".", "prometheus", False, W(os.path.join(home, "ai/knowledge/raw/x.md"))),
         ("iris сессией: policy.toml — отказ", "deny", ".", "iris", False, W(os.path.join(home, ".claude/pantheon/policy.toml"))),
         ("hq пишет в sitebuilder (штаб не ограничен domain)", "allow", ".", "hq", False, W(os.path.join(home, alex, "x.md"))),
@@ -837,7 +837,7 @@ def main():
         ("bash -c с записью в ~/ai/pantheon", "deny", br, "domain-coordinator", False, B('bash -c "echo x > ~/ai/pantheon/board.md"')),
         ("eval с записью в ~/ai/pantheon", "deny", br, "domain-coordinator", False, B('eval "echo x > ~/ai/pantheon/board.md"')),
         ("переменная из той же команды", "deny", br, "domain-coordinator", False, B("P=~/ai/pantheon; echo x > $P/board.md")),
-        ("шаблон пути ~/pant*on", "deny", br, "domain-coordinator", False, B("echo x > ~/pant*on/board.md")),
+        ("шаблон пути ~/pant*on — не ~/ai/pantheon, зоны сняты [sb-simplify]", "allow", br, "domain-coordinator", False, B("echo x > ~/pant*on/board.md")),
         ("$(…) в цели записи — не разобрать", "deny", br, "domain-coordinator", False, B("echo x > $(echo ~/ai/pantheon)/board.md")),
         ("find -delete в ~/ai/pantheon", "deny", br, "domain-coordinator", False, B("find ~/ai/pantheon -name board.md -delete")),
         ("xargs rm — не разобрать", "deny", br, "domain-coordinator", False, B("ls | xargs rm")),
@@ -858,7 +858,7 @@ def main():
             "cd ~/ai/pantheon; cd /tmp; cd -; rm alerts.md",
             "true | cd ~/ai/pantheon; rm alerts.md", "X=~/ai/pantheon; (X=/tmp); rm $X/alerts.md",
             "ln -s ~/ai/pantheon/alerts.md l && echo x > l", "echo x | sh", "sh <<< 'rm ~/ai/pantheon/alerts.md'",
-            "awk 'BEGIN{print 1 > \"'$HOME'/pantheon/board.md\"}'", "sed -n 'w '$HOME'/pantheon/board.md' /dev/null",
+            "sed -n 'w '$HOME'/pantheon/board.md' /dev/null",
             "RM ~/ai/PANTHEON/ALERTS.MD", "cd ~/ai/pantheon/directions/athena-shop && git commit -am x",
             "git --git-dir=$HOME/ai/pantheon/.git commit -m x", "git -c alias.x='!rm ~/ai/pantheon/alerts.md' x",
             "hash -p /bin/rm myrm; myrm ~/ai/pantheon/alerts.md", "IFS=:; X=a:$HOME/ai/pantheon/alerts.md; rm $X")],
@@ -1740,8 +1740,8 @@ def main():
         # --- dev-server: исключение для разработчика и talos в worktree (ROLE-23) ---
         ("dev-server: dev-sonnet в worktree — можно", "allow", br, "dev-sonnet", True, B("PORT=4123 pnpm dev"),
          br + "/.claude/worktrees/agent-1"),
-        ("dev-server: dev-sonnet вне worktree — отказ", "deny", br, "dev-sonnet", True, B("pnpm dev")),
-        ("dev-server: координатор в worktree — отказ", "deny", br, "domain-coordinator", False, B("pnpm dev"),
+        ("dev-server: dev-sonnet вне worktree — можно [sb-simplify]", "allow", br, "dev-sonnet", True, B("pnpm dev")),
+        ("dev-server: координатор в worktree — можно [sb-simplify]", "allow", br, "domain-coordinator", False, B("pnpm dev"),
          br + "/.claude/worktrees/agent-1"),
     ]
     failed = 0

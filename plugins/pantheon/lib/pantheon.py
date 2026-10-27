@@ -1997,7 +1997,9 @@ def domains_build(if_changed=False):
     такая папка пропускается с тревогой — иначе правкой реестра можно было бы отдать чужому код guard или me/."""
     reg_path = os.path.join(PANTHEON, "directions.toml")
     policy_path = os.path.join(HOME, ".claude", "pantheon", "policy.toml")
-    if if_changed:
+    # демон CDP заперли или открыли — окна пересобираются с портами или без (sandbox_build)
+    ports = cdp_locked()
+    if if_changed and read_json(path("domains.json")).get("ports") == ports:
         built = read_json(path("domains.json")).get("built_ts") or 0
         # и новые папки сессий: правило Read окна штаба закрывает чужие шаблонами по префиксам — новый префикс тоже должен
         # попасть в hq.json
@@ -2052,10 +2054,10 @@ def domains_build(if_changed=False):
             leads[name] = [f"{b}-{short}" for b in LEAD_ROLES if b in bases]
     write_json(path("domains.json"), {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml. Руками не править.",
-        "built": stamp(), "built_ts": now(), "domains": domains})
+        "built": stamp(), "built_ts": now(), "domains": domains, "ports": ports})
     # живую сессию с проблемой проектных allow останавливает только путь тика (--if-changed): ручная сборка и тесты
     # зовут её с настоящим claude в PATH — claude stop из них остановил бы ваши сессии
-    built = sandbox_build(domains, policy_path, stores, leads, stop_live=if_changed)
+    built = sandbox_build(domains, policy_path, stores, leads, stop_live=if_changed, ports=ports)
     os.makedirs(path("locks"), exist_ok=True)
     for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):  # места обёртки heavy: роль в песочнице сама их не создаст
         open(path("locks", slot + ".lock"), "a").close()
@@ -2109,6 +2111,37 @@ HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks") for tail in ("", " *")] 
 # пускает guard (_PUSH_BAD)
 GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
 COORDINATOR_COMPACT = 200000
+# Пароль демона CDP (~/.claude/tools/cdp-daemon.mjs, браузер с входами владельца): без него демон отвечает 401. Окнам
+# ролей файл закрыт на чтение — и песочницей Bash, и правилом Read. Местные порты окну (allowLocalBinding) Claude Code
+# открывает целиком: bind и connect на localhost:* (проверено в 2.1.311), то есть и на 9333–9339. Поэтому порт окна
+# даётся, только когда каждый слушающий демон без пароля отвечает 401 (cdp_locked, [sb-simplify] 27.10)
+CDP_TOKEN_DIR = os.path.join(HOME, ".config", "cdp-daemon")
+CDP_PORTS = [int(x) for x in (os.environ.get("PANTHEON_CDP_PORTS") or "9333,9334,9335,9336,9337,9338,9339").split(",")]
+
+
+def _cdp_port_state(port):
+    """closed — порт не слушают; locked — POST /eval без пароля дал 401; open — всё остальное (и нет ответа)."""
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=2)
+    except OSError:
+        return "closed"
+    try:
+        body = b'{"expr":"1"}'
+        s.sendall(b"POST /eval HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nContent-Type: application/json\r\n"
+                  b"Content-Length: %d\r\nConnection: close\r\n\r\n%s" % (port, len(body), body))
+        head = s.recv(64).split(b"\r\n", 1)[0].split()
+    except OSError:
+        return "open"
+    finally:
+        s.close()
+    return "locked" if len(head) >= 2 and head[1] == b"401" else "open"
+
+
+def cdp_locked():
+    """Порт окнам можно: пароль демона есть и ни один демон на CDP_PORTS не пускает без него."""
+    if not os.path.isfile(os.path.join(CDP_TOKEN_DIR, "token")):
+        return False
+    return all(_cdp_port_state(p) != "open" for p in CDP_PORTS)
 
 
 # Правила слияния через шлюз guard (permissions.allow и autoMode.allow окон координаторов) — в lib/window_rules.py:
@@ -2336,10 +2369,13 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "filesystem": {
                 "allowWrite": allow,
                 "denyWrite": deny_write,
-                "denyRead": _deny_forms(deny_read) + NOTIFIER_PATHS,
+                "denyRead": _deny_forms(deny_read) + NOTIFIER_PATHS + _deny_forms([CDP_TOKEN_DIR]),
             },
             "network": {"allowedDomains": SANDBOX_DOMAINS},
         },
+        # пароль демона CDP — и инструментам Read, Grep, Glob (песочница держит только Bash)
+        "permissions": {"deny": [f"Read({x}/**)" if x.startswith("~") else f"Read(/{x}/**)"
+                                 for x in _deny_forms([CDP_TOKEN_DIR.replace(HOME, "~", 1)])]},
     }
     if guard:
         data["hooks"] = {"PreToolUse": [{"matcher": GUARD_MATCHER, "hooks": [{
@@ -2613,10 +2649,19 @@ def project_allow_stop(name, problems):
     return [a["id"] for a in ids]
 
 
-def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False):
+def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False, ports=None):
     """domains.json и policy.toml → ~/.local/state/pantheon/settings/<направление>.json и workshop.json.
     leads — {направление: ["hephaestus-<коротко>", "apollo-<коротко>"]}: субагенты окна (P0-6). stop_live — путь тика
-    (domains build --if-changed): живую сессию направления с проблемой проектных allow остановить."""
+    (domains build --if-changed): живую сессию направления с проблемой проектных allow остановить. ports — местные
+    порты окнам направлений и мастерской (по умолчанию cdp_locked())."""
+    if ports is None:
+        ports = cdp_locked()
+    if ports:
+        clear_once("cdp-unlocked")
+    else:
+        alert_once("cdp-unlocked", "1", "местные порты окнам ролей не открыты: демон CDP без пароля или нет "
+                   "~/.config/cdp-daemon/token — перезапустить демон на версии с паролем (POST /eval без X-CDP-Token "
+                   "должен давать 401); окна пересоберутся сами", "pantheon")
     try:
         with open(policy_path, "rb") as fh:
             policy = tomllib.load(fh)
@@ -2675,10 +2720,16 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             # заявка на слияние ядра по Touch ID (metis-0285) пишет в STATE/merge-queue — вне песочницы окна. Сливает
             # не она: `pantheon merge run` ролям закрыт guard, окно Touch ID показывает только плановый проход
             data["sandbox"]["excludedCommands"] += MERGE_REQUEST_CMDS
-        if name == "workshop":
-            # Unix-сокеты офлайн-тестов (metis-0278, решение владельца «А» 19.10) — только в своём кэше окна: не
-            # $TMPDIR (/tmp/claude-<uid> общий у всех сессий, там их сокеты); allowLocalBinding — нет, см. ниже
-            data["sandbox"]["network"]["allowUnixSockets"] = [cache]
+        # окна направлений и мастерская сами поднимают dev-сервер и гоняют тесты своего проекта ([sb-simplify] 27.10):
+        # Unix-сокеты (tsx IPC, профиль Chromium) — только в своём кэше окна, не в $TMPDIR (/tmp/claude-<uid> общий у
+        # всех сессий); местные порты — когда демон CDP заперт паролем (cdp_locked)
+        data["sandbox"]["network"]["allowUnixSockets"] = [cache]
+        # TMPDIR песочница ставит свой (/tmp/claude-<uid>, env окна его не перебивает — проба 27.10): тесты с сокетами
+        # запускают `TMPDIR=$PANTHEON_TMP …`
+        os.makedirs(os.path.join(cache, "tmp"), exist_ok=True)
+        data["env"]["PANTHEON_TMP"] = os.path.join(cache, "tmp")
+        if ports:
+            data["sandbox"]["network"]["allowLocalBinding"] = True
         if allow:
             data.setdefault("permissions", {}).setdefault("allow", []).extend(allow)
         if agents:
@@ -2710,8 +2761,6 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски; список субагентов — вне P0-6
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
-    # местные порты мастерской закрыты: на macOS allowLocalBinding открывает все порты 127.0.0.1, в том числе демон CDP
-    # с входами владельца; браузеры владельца — только у роли Харон (решение владельца 15.10, отмена metis-0053)
     built.append("workshop")
     # окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` тика (parse_command добавляет --settings).
     # Пишет только своё (JOB_ROLES), память ролей и свой кэш; личное закрыто на чтение и запись; сети Bash нет (веб у
