@@ -371,6 +371,10 @@
   поднимают `version` тронутых с прошлого выпуска плагинов и пишут `.claude-plugin/releases.json` одним коммитом от
   github-actions[bot]. PR номер версии не трогают: шлюз guard такой PR не сливает (AGENTS.md «Выпуск»). `.github` —
   ядро шлюза: право записи в main есть только у этого workflow.
+- `plugins/pantheon/scripts/run-tests.py` — параллельный прогон `tests/test_*.py` плагинов (metis-0450): каждый
+  файл — свой процесс в своей группе со своим HOME и TMPDIR, воркеров min(ядра/2, 3), медленные первыми,
+  таймаут файла и SIGTERM/HUP/INT гасят группы файлов; код не 0 при падении, таймауте, 0 файлов и коде 0 без
+  строки итога. Подробности — в шапке скрипта.
 - `plugins/pantheon/scripts/baseline.py` — замер «как сейчас» по git и транскриптам (ORD-06); правила подсчёта — в шапке.
 - `plugins/pantheon/scripts/config-check.py` — проверка правок `~/.claude` для `sync.sh`: код и подозрительное — в
   карантин с объяснением на доске, остальное уходит само (SEC-15). Исключение (metis-0209): файл, побайтно равный
@@ -393,6 +397,7 @@
 
 ## Проверки
 
+    heavy python3 -I plugins/pantheon/scripts/run-tests.py plugins/guard plugins/pantheon  # все файлы сразу, параллельно
     python3 -I plugins/guard/tests/test_guard.py      # карта прав ~/ai/pantheon, domain, привилегии, protect-config, режимы
     python3 -I plugins/guard/tests/test_shell_diff.py # разбор Bash против настоящих zsh и bash
     python3 -I plugins/pantheon/tests/test_board.py   # задачи и доска владельца
