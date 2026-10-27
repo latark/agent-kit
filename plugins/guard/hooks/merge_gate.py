@@ -49,7 +49,7 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    shallow, info/grafts, нет коммита base или head, не одна merge-base, вывод --raw не разобрать, plugin.json — не
    файл, сбой или таймаут git; git replace не действует. Тесты и talos не
    переносятся; каждый перенос — строка в STATE_DIR/merge-gate/carry.jsonl, не записалась — отказ; продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
-   owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES), casefold;
+   owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES, сборка окон в pantheon.py по AST — metis-0404), casefold;
    файлы из pulls/N/files с previous_filename; PR, задевающий ядро, проходит только со строкой
    `<время> merge-approve <owner/repo>#<N> <sha>` для того же репозитория, PR и SHA в owner-log/merge-approve.log —
    её пишет тик после Touch ID владельца (metis-0285, `pantheon merge`), не старше суток. В защитах accept засчитывается, только если его ran начинается с
@@ -96,7 +96,8 @@ MERGE_PRODUCT = ("Продукт для клиентов сливай после
                  f"{MERGE_CMD}.")
 MERGE_PROTECT = ("Защиты сливает только Метида или её лид через шлюз слияния: тесты и «принять» от argus на этот SHA, "
                  f"{MERGE_CMD}; PR, который задевает ядро защит (весь plugins/guard/, plugins/pantheon/roles/, .github/, "
-                 "plugins/pantheon/lib/window_rules.py и .claude-plugin/marketplace.json), ждёт слияния владельцем (Д3): "
+                 "plugins/pantheon/lib/window_rules.py, сборка окон sandbox_build в plugins/pantheon/lib/pantheon.py и "
+                 ".claude-plugin/marketplace.json), ждёт слияния владельцем (Д3): "
                  "заявка `pantheon merge request N -R <owner/repo>`, сливает плановый проход после Touch ID владельца.")
 MERGE_OWNER = "Слияние делает владелец."
 MERGE_AMBIGUOUS = "\0два направления"
@@ -894,6 +895,156 @@ def _is_core(path, core_files):
     return p in core_files or any(p == d or p.startswith(d + "/") for d in CORE_DIR)
 
 
+# Сборка окон в pantheon.py — тоже ядро (metis-0404, «да» владельца 27.10): sandbox_build пишет settings/<окно>.json —
+# песочницу, permissions и env окон ролей. Признак — не весь файл, а то, от чего зависит записанное: функции
+# SANDBOX_BUILD_ROOTS (сборка, её вызов с папками и лидами из реестра, файл запуска окна) и всё, на что они ссылаются по
+# именам, транзитивно в пределах файла (role_settings, JOB_ROLES, SANDBOX_DOMAINS…). Правка — инструкция верхнего уровня
+# с другим AST (комментарии не в счёт), которая задаёт или меняет такое имя: def и class — своё имя, global, запись в
+# элемент или поле, метод-мутатор; прочие инструкции — все свои имена. Файл до и после — из git папки слияния
+# (merge-base PR и head, как у переноса «принять»); не получить, не разобрать, нет корня, файл переименован или в другом
+# регистре — ядро. Вне признака: обращения по строке (getattr, globals()), псевдоним изменяемого значения, другие файлы
+# (window_rules.py — в CORE_FILES)
+SANDBOX_BUILD_FILE = "plugins/pantheon/lib/pantheon.py"
+SANDBOX_BUILD_ROOTS = ("sandbox_build", "domains_build", "run_settings")
+MUTATORS = frozenset({"append", "extend", "insert", "update", "setdefault", "pop", "popitem", "remove", "clear", "add",
+                      "discard", "sort", "reverse", "__setitem__", "__delitem__", "__iadd__", "__ior__"})
+_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _base_name(n):
+    """Имя в основании a.b[c].d — или None."""
+    while isinstance(n, (ast.Attribute, ast.Subscript)):
+        n = n.value
+    return n.id if isinstance(n, ast.Name) else None
+
+
+def _mutated(node):
+    """Имена, которые node меняет на месте: global/nonlocal, запись и del в элемент или поле, метод-мутатор."""
+    out = set()
+    for n in ast.walk(node):
+        if isinstance(n, (ast.Global, ast.Nonlocal)):
+            out.update(n.names)
+        elif isinstance(n, (ast.Attribute, ast.Subscript)) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            out.add(_base_name(n))
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in MUTATORS:
+            out.add(_base_name(n.func.value))
+    out.discard(None)
+    return out
+
+
+def _all_names(node):
+    """Все имена в node: Name, имена def и class, import."""
+    out = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name):
+            out.add(n.id)
+        elif isinstance(n, _DEFS):
+            out.add(n.name)
+        elif isinstance(n, ast.alias):
+            out.add((n.asname or n.name).split(".")[0])
+    return out
+
+
+def _touched(st, data):
+    """Имена, которые задаёт или меняет инструкция верхнего уровня st; data — имена данных модуля (у def и class
+    засчитывается изменение только их, а не своих локальных переменных)."""
+    if isinstance(st, _DEFS):
+        return {st.name} | (_mutated(st) & data)
+    if isinstance(st, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
+        targets = st.targets if isinstance(st, (ast.Assign, ast.Delete)) else [st.target]
+        out = _mutated(st)
+        for t in targets:
+            out |= {n.id for n in ast.walk(t) if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del))}
+        return out
+    # import, выражение, if/try/for/with верхнего уровня: что в них присваивается, объявляется и меняется на месте
+    out = _mutated(st)
+    for n in ast.walk(st):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            out.add(n.id)
+        elif isinstance(n, _DEFS):
+            out.add(n.name)
+        elif isinstance(n, ast.alias):
+            out.add((n.asname or n.name).split(".")[0])
+    return out
+
+
+def _defs_closure(src):
+    """Исходник → (имя → дампы его инструкций по порядку, замыкание SANDBOX_BUILD_ROOTS) или None: не разобрать,
+    нет корня функцией верхнего уровня."""
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+    defs, dumps = {}, {}
+    data = set()
+    for st in tree.body:
+        if not isinstance(st, _DEFS):
+            data |= _touched(st, set())
+    for st in tree.body:
+        for name in _touched(st, data):
+            defs.setdefault(name, []).append(st)
+    if not all(any(isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)) and st.name == r for st in tree.body)
+               for r in SANDBOX_BUILD_ROOTS):
+        return None
+    seen, todo = set(), list(SANDBOX_BUILD_ROOTS)
+    while todo:
+        name = todo.pop()
+        if name in seen or name not in defs:
+            continue
+        seen.add(name)
+        for st in defs[name]:
+            todo.extend(_all_names(st))
+    memo = {id(st): ast.dump(st) for st in tree.body}
+    for name, sts in defs.items():
+        dumps[name] = [memo[id(st)] for st in sts]
+    return dumps, seen
+
+
+def sandbox_build_changes(old, new):
+    """Исходники pantheon.py до и после → имена сборки окон, которые PR задевает (отсортированы), или None — не
+    разобрать или нет корня: тогда ядро."""
+    a, b = _defs_closure(old), _defs_closure(new)
+    if a is None or b is None:
+        return None
+    return sorted(n for n in a[1] | b[1] if a[0].get(n, []) != b[0].get(n, []))
+
+
+def _blob(gd, rev, path):
+    """Текст обычного файла path в коммите rev из git gd или None (нет, ссылка, подмодуль, не UTF-8, сбой)."""
+    out = _git_bytes(gd, "ls-tree", "-z", rev, "--", path)
+    m = re.fullmatch(rb"(100644|100755) blob ([0-9a-f]{40,64})\t([^\0]*)\0", out or b"")
+    if not m or m.group(3) != path.encode():
+        return None
+    raw = _git_bytes(gd, "cat-file", "blob", m.group(2).decode())
+    try:
+        return raw.decode("utf-8") if raw is not None else None
+    except UnicodeDecodeError:
+        return None
+
+
+def _sandbox_problem(cwd, repo, base, sha):
+    """PR правит pantheon.py: ядро ли это (metis-0404) — текст для списка задетого ядра или None (сборку окон не
+    задевает)."""
+    gd, why = _carry_git(cwd, repo, base)
+    if gd is None:
+        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: {why})"
+    if _git_bytes(gd, "cat-file", "-e", sha + "^{commit}") is None:
+        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: коммита {sha[:12]} нет в git папки — сделай git fetch)"
+    out = _git_bytes(gd, "merge-base", "--all", base.lower(), sha)
+    mbs = out.split() if out is not None else []
+    if len(mbs) != 1:
+        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: у {sha[:12]} и base PR нет единственной merge-base)"
+    old, new = _blob(gd, mbs[0].decode("ascii", "replace"), SANDBOX_BUILD_FILE), _blob(gd, sha, SANDBOX_BUILD_FILE)
+    got = sandbox_build_changes(old, new) if old is not None and new is not None else None
+    if got is None:
+        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: файла нет до или после, не разобрать или нет " \
+               f"{'/'.join(SANDBOX_BUILD_ROOTS)})"
+    if got:
+        shown = ", ".join(got[:8]) + (f" и ещё {len(got) - 8}" if len(got) > 8 else "")
+        return f"{SANDBOX_BUILD_FILE} (сборка окон: {shown})"
+    return None
+
+
 PR_VIEW_FIELDS = "headRefOid,baseRefOid,changedFiles,statusCheckRollup"
 
 
@@ -912,7 +1063,7 @@ def _pr_files(repo, pr):
 _FETCH = object()  # _core_problem без files: список запросить здесь
 
 
-def _core_problem(repo, pr, sha, data, files=_FETCH):
+def _core_problem(repo, pr, sha, data, files=_FETCH, cwd=None):
     """Д3: PR защит, который задевает ядро, ждёт слияния владельцем. data — ответ _pr_view. Файлы — из REST
     pulls/N/files (там есть status и previous_filename: переименование ядра не прячет старый путь); files — уже
     полученный ответ _pr_files, в том числе None (сбой gh — отказ, без второго запроса: argus-b PR #153 Б1), без
@@ -934,6 +1085,19 @@ def _core_problem(repo, pr, sha, data, files=_FETCH):
         return f"{MERGE_CORE}: PR сейчас на другом коммите ({head}), а не на {sha}"
     core = {c.casefold() for c in CORE_FILES}
     hit = [p for p in paths if _is_core(p, core)]
+    # сборка окон в pantheon.py (metis-0404): ядро, если PR задевает её имена; переименование и другой регистр — ядро
+    norm = [p.strip("/").casefold() for p in paths]
+    while any(p.startswith("./") for p in norm):
+        norm = [p[2:].lstrip("/") if p.startswith("./") else p for p in norm]
+    if SANDBOX_BUILD_FILE in norm:
+        own = [f for f in files if SANDBOX_BUILD_FILE in [str(n).strip("/").casefold().lstrip("./")
+                                                          for n in (f.get("filename"), f.get("previous_filename"))]]
+        if len(own) != 1 or own[0].get("filename") != SANDBOX_BUILD_FILE or own[0].get("previous_filename") is not None:
+            hit.append(f"{SANDBOX_BUILD_FILE} (переименован, удалён, добавлен или путь в другом регистре)")
+        else:
+            why = _sandbox_problem(cwd, repo, data.get("baseRefOid"), sha)
+            if why:
+                hit.append(why)
     if hit:
         return f"{MERGE_CORE_HIT}{', '.join(hit)}"
     return None
@@ -1510,7 +1674,7 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
         why = _version_problem(files)
         if why:
             return f"{why}. {MERGE_VERSION}. {advice}"
-        why = _core_problem(repo, pr, sha, view, files)
+        why = _core_problem(repo, pr, sha, view, files, cwd)
         # Д3 через Touch ID (metis-0285): палец владельца на этот PR и этот SHA — строка тика в owner-log. Пускает
         # только задетое ядро; сбой gh, неполный список файлов и другой head — отказ и со строкой
         if why and not (why.startswith(MERGE_CORE_HIT) and owner_approved(repo, pr, sha)):
