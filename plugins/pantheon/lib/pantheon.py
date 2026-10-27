@@ -2012,7 +2012,10 @@ def domains_build(if_changed=False):
                    *(os.path.join(l, ".claude", fn) for l in launches if l for fn in PROJECT_SETTINGS_FILES))
         newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
         # и пропавшее окно задачи расписания (P0-3): без него задача не идёт — в том числе сразу после обновления
-        if built >= newest and all(os.path.isfile(job_window(r)) for r in JOB_ROLES):
+        # и grants.toml: правка — сразу, срок разрешения — к сроку (grants_next)
+        newest = max(newest, os.path.getmtime(GRANTS) if os.path.exists(GRANTS) else 0)
+        due = read_json(path("domains.json")).get("grants_next")
+        if built >= newest and not (due and now() >= due) and all(os.path.isfile(job_window(r)) for r in JOB_ROLES):
             return 0
     with open(reg_path, "rb") as fh:
         reg = tomllib.load(fh)
@@ -2052,7 +2055,7 @@ def domains_build(if_changed=False):
             leads[name] = [f"{b}-{short}" for b in LEAD_ROLES if b in bases]
     write_json(path("domains.json"), {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml. Руками не править.",
-        "built": stamp(), "built_ts": now(), "domains": domains})
+        "built": stamp(), "built_ts": now(), "domains": domains, "grants_next": grants_load()[1]})
     # живую сессию с проблемой проектных allow останавливает только путь тика (--if-changed): ручная сборка и тесты
     # зовут её с настоящим claude в PATH — claude stop из них остановил бы ваши сессии
     built = sandbox_build(domains, policy_path, stores, leads, stop_live=if_changed)
@@ -2109,8 +2112,9 @@ HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks") for tail in ("", " *")] 
 # пускает guard (_PUSH_BAD)
 GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
 COORDINATOR_COMPACT = 200000
-
-
+# Пароль демона CDP (~/.claude/tools/cdp-daemon.mjs, браузер с входами владельца): без него демон отвечает 401. Окнам
+# ролей файл закрыт на чтение — и песочницей Bash, и правилом Read ([sb-simplify] 27.10)
+CDP_TOKEN_DIR = os.path.join(HOME, ".config", "cdp-daemon")
 # Правила слияния через шлюз guard (permissions.allow и autoMode.allow окон координаторов) — в lib/window_rules.py:
 # он в ядре защит (metis-0174), его PR ждёт слияния владельцем. Имена здесь — для прежних вызовов и тестов
 def _window_rules():
@@ -2238,8 +2242,100 @@ def sandbox_size(data):
     return sum(len(x.encode()) + 1 for x in items)
 
 
+# Ручные разрешения окнам ([sb-simplify] п. 6): ~/.claude/pantheon/grants.toml — его правит владелец или Метида
+# (protect-config), выпуск его не стирает. Каждое — со сроком: сборка применяет его по «until» включительно, потом
+# снимает сама (тик пересобирает окна к сроку) и пишет тревогу. Записи в ключи, конфиг и браузер — не даются
+GRANTS = os.path.join(HOME, ".claude", "pantheon", "grants.toml")
+GRANT_KEYS = {"allow": ("permissions", "allow"), "write": ("sandbox", "filesystem", "allowWrite"),
+              "domains": ("sandbox", "network", "allowedDomains")}
+# запись не даётся в ключи, конфиг, автозапуск, код и состояние Пантеона (STATE, ~/.local целиком, PANTHEON)
+GRANT_NO_WRITE = ("~/.claude", "~/.config", "~/.ssh", "~/.gnupg", "~/Library", "~/.local", "~/.zshrc", "~/.zprofile",
+                  "~/.bashrc", "~/.profile", STATE, PANTHEON)
+GRANT_STAR_SKIP = re.compile(r"hq|hestia|job-.+")  # «*» — окнам направлений и мастерской, не служебным
+
+
+def grants_load():
+    """grants.toml → (разрешения в силе, ближайший срок окончания в секундах или None, ошибки, истёкшие)."""
+    try:
+        with open(GRANTS, "rb") as fh:
+            raw = tomllib.load(fh).get("grant") or []
+    except FileNotFoundError:
+        return [], None, [], []
+    except (OSError, ValueError) as e:
+        return [], None, [f"grants.toml не читается: {e}"], []
+    live, errors, expired, nxt = [], [], [], None
+    for i, g in enumerate(raw if isinstance(raw, list) else [], 1):
+        win, until = g.get("window"), str(g.get("until") or "")
+        try:
+            end = (datetime.strptime(until, "%Y-%m-%d") + timedelta(days=1)).timestamp()
+        except ValueError:
+            errors.append(f"grant {i}: until — дата ГГГГ-ММ-ДД, а не {until!r}")
+            continue
+        if not isinstance(win, str) or not re.fullmatch(r"[a-z0-9-]+|\*", win):
+            errors.append(f"grant {i}: window — имя окна или «*», а не {win!r}")
+            continue
+        bad = [k for k in g if k not in GRANT_KEYS and k not in ("window", "until", "why")]
+        lists = {k: g[k] for k in GRANT_KEYS if k in g}
+        if bad or not lists or not all(isinstance(v, list) and all(isinstance(x, str) for x in v) for v in lists.values()):
+            errors.append(f"grant {i} ({win}): ключи — {', '.join(GRANT_KEYS)} списками строк" +
+                          (f"; лишние: {', '.join(bad)}" if bad else ""))
+            continue
+        norm = lambda x: os.path.realpath(os.path.expanduser(x))  # noqa: E731
+        glob_w = [x for x in lists.get("write", []) if re.search(r"[*?\[\]{}]", x) or not x.startswith(("/", "~/"))]
+        if glob_w:
+            errors.append(f"grant {i} ({win}): write — только путь от / или ~/ без шаблонов: {', '.join(glob_w)}")
+            continue
+        closed = [x for x in lists.get("write", []) if any(
+            norm(x) == norm(c) or norm(x).startswith(norm(c).rstrip("/") + "/") or norm(c).startswith(norm(x).rstrip("/") + "/")
+            for c in GRANT_NO_WRITE)]
+        if closed:
+            errors.append(f"grant {i} ({win}): запись в ключи, конфиг и автозапуск не даётся: {', '.join(closed)}")
+            continue
+        if end <= now():
+            expired.append((i, win, until))
+            continue
+        live.append({"window": win, "until": until, **lists})
+        nxt = end if nxt is None else min(nxt, end)
+    return live, nxt, errors, expired
+
+
+def grants_apply(name, data, grants):
+    """Разрешения окна name (и «*») — в его настройки, без повторов."""
+    for g in grants:
+        if g["window"] != name and not (g["window"] == "*" and not GRANT_STAR_SKIP.fullmatch(name)):
+            continue
+        for k, keys in GRANT_KEYS.items():
+            if k not in g:
+                continue
+            node = data
+            for key in keys[:-1]:
+                node = node.setdefault(key, {})
+            vals = list(node.get(keys[-1]) or [])  # копия: списки окна бывают общими константами модуля
+            for x in g[k]:
+                x = os.path.realpath(os.path.expanduser(x)) if k == "write" else x
+                if x not in vals:
+                    vals.append(x)
+            node[keys[-1]] = vals
+
+
+def grants_check():
+    """Тревоги сборки: ошибки в grants.toml и истёкшие разрешения (одна на разрешение)."""
+    _, _, errors, expired = grants_load()
+    if errors:
+        alert_once("grants-bad", "; ".join(errors), "grants.toml: " + "; ".join(errors[:5]) + " — эти разрешения "
+                   "не применены (Метида)", "pantheon")
+    else:
+        clear_once("grants-bad")
+    for i, win, until in expired:
+        alert_once(f"grant-expired-{win}-{until}-{i}", "1", f"grants.toml: разрешение {i} окну {win} истекло {until} — "
+                   "снято при сборке; продлить или удалить запись (Метида)", "pantheon")
+
+
 def write_window(out_dir, name, data):
-    """Файл окна, если его песочница в пределах SANDBOX_SIZE_LIMIT; иначе тревога и прежний файл остаётся."""
+    """Файл окна, если его песочница в пределах SANDBOX_SIZE_LIMIT; иначе тревога и прежний файл остаётся.
+    Разрешения grants.toml — сюда же; файлы запущенных сессий этого окна (settings/run/) обновляются: Claude Code
+    перечитывает их на ходу, и выданное или истёкшее разрешение доходит без перезапуска."""
+    grants_apply(name, data, grants_load()[0])
     size, key = sandbox_size(data), f"sandbox-size-{name}"
     if size > SANDBOX_SIZE_LIMIT:
         print(f"песочница {name}: {size} байт путей > {SANDBOX_SIZE_LIMIT} — окно не пересобрано", file=sys.stderr)
@@ -2250,6 +2346,16 @@ def write_window(out_dir, name, data):
         return False
     clear_once(key)
     write_json(os.path.join(out_dir, name + ".json"), data)
+    run_dir = os.path.join(out_dir, "run")
+    for f in os.listdir(run_dir) if os.path.isdir(run_dir) else []:
+        old = read_json(os.path.join(run_dir, f), {}) if f.endswith(".json") else {}
+        env = old.get("env") or {}
+        if env.get("PANTHEON_WINDOW") != name:
+            continue
+        new = json.loads(json.dumps(data))
+        new.setdefault("env", {}).update({k: env[k] for k in RUN_ENV if k in env})
+        if new != old:
+            write_json(os.path.join(run_dir, f), new)
     return True
 
 
@@ -2336,10 +2442,13 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "filesystem": {
                 "allowWrite": allow,
                 "denyWrite": deny_write,
-                "denyRead": _deny_forms(deny_read) + NOTIFIER_PATHS,
+                "denyRead": _deny_forms(deny_read) + NOTIFIER_PATHS + _deny_forms([CDP_TOKEN_DIR]),
             },
             "network": {"allowedDomains": SANDBOX_DOMAINS},
         },
+        # пароль демона CDP — и инструментам Read, Grep, Glob (песочница держит только Bash)
+        "permissions": {"deny": [f"Read({x}/**)" if x.startswith("~") else f"Read(/{x}/**)"
+                                 for x in _deny_forms([CDP_TOKEN_DIR.replace(HOME, "~", 1)])]},
     }
     if guard:
         data["hooks"] = {"PreToolUse": [{"matcher": GUARD_MATCHER, "hooks": [{
@@ -2622,6 +2731,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             policy = tomllib.load(fh)
     except (OSError, ValueError):
         policy = {}
+    grants_check()
     extra = policy.get("sandbox_write") or {}
     private = private_conf(policy)
     private_paths = [p for p in private["paths"] if p.startswith("~/")]
@@ -2675,10 +2785,15 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             # заявка на слияние ядра по Touch ID (metis-0285) пишет в STATE/merge-queue — вне песочницы окна. Сливает
             # не она: `pantheon merge run` ролям закрыт guard, окно Touch ID показывает только плановый проход
             data["sandbox"]["excludedCommands"] += MERGE_REQUEST_CMDS
-        if name == "workshop":
-            # Unix-сокеты офлайн-тестов (metis-0278, решение владельца «А» 19.10) — только в своём кэше окна: не
-            # $TMPDIR (/tmp/claude-<uid> общий у всех сессий, там их сокеты); allowLocalBinding — нет, см. ниже
-            data["sandbox"]["network"]["allowUnixSockets"] = [cache]
+        # окна направлений и мастерская сами поднимают dev-сервер и гоняют тесты своего проекта ([sb-simplify] 27.10):
+        # Unix-сокеты (tsx IPC, профиль Chromium) — только в своём кэше окна, не в $TMPDIR (/tmp/claude-<uid> общий у
+        # всех сессий). Местных портов (allowLocalBinding) нет: он открывает весь localhost — и местный прокси (выход наружу
+        # мимо allowedDomains), и 9222 браузера; проверено в бинарнике 2.1.311, ревью 27.10
+        data["sandbox"]["network"]["allowUnixSockets"] = [cache]
+        # TMPDIR песочница ставит свой (/tmp/claude-<uid>, env окна его не перебивает — проба 27.10): тесты с сокетами
+        # запускают `TMPDIR=$PANTHEON_TMP …`
+        os.makedirs(os.path.join(cache, "tmp"), exist_ok=True)
+        data["env"]["PANTHEON_TMP"] = os.path.join(cache, "tmp")
         if allow:
             data.setdefault("permissions", {}).setdefault("allow", []).extend(allow)
         if agents:
@@ -2710,8 +2825,6 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски; список субагентов — вне P0-6
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
-    # местные порты мастерской закрыты: на macOS allowLocalBinding открывает все порты 127.0.0.1, в том числе демон CDP
-    # с входами владельца; браузеры владельца — только у роли Харон (решение владельца 15.10, отмена metis-0053)
     built.append("workshop")
     # окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` тика (parse_command добавляет --settings).
     # Пишет только своё (JOB_ROLES), память ролей и свой кэш; личное закрыто на чтение и запись; сети Bash нет (веб у
@@ -3000,6 +3113,9 @@ def load_pause(name):
     return None
 
 
+RUN_ENV = ("PANTHEON_ORIGIN", "PANTHEON_SESSION", "PANTHEON_ROLE", "PANTHEON_WINDOW")
+
+
 def run_settings(name, role, window, origin):
     """Окно этого запуска: настройки окна + PANTHEON_ORIGIN (кто запустил), имя и роль — переменные сессии и её
     хуков. → путь файла или None (окна нет: pantheon domains build)."""
@@ -3010,6 +3126,7 @@ def run_settings(name, role, window, origin):
     data.setdefault("env", {})["PANTHEON_ORIGIN"] = origin
     data["env"]["PANTHEON_SESSION"] = name
     data["env"]["PANTHEON_ROLE"] = role
+    data["env"]["PANTHEON_WINDOW"] = window  # по нему сборка обновляет файл запущенной сессии (write_window)
     run = path("settings", "run", name + ".json")
     write_json(run, data)
     return run

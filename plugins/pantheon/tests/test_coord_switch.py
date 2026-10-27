@@ -235,7 +235,7 @@ def cli_tests():
     lr = json.load(open(lrun)) if os.path.exists(lrun) else {}
     win = json.load(open(os.path.join(state, "settings", "hermes-site.json")))
     coord_like = dict(win, env=dict(win.get("env") or {}, PANTHEON_ORIGIN="zeus", PANTHEON_SESSION="hephaestus-site",
-                                    PANTHEON_ROLE="domain-coordinator"))
+                                    PANTHEON_ROLE="domain-coordinator", PANTHEON_WINDOW="hermes-site"))
     check("wake --task из hq со словом: claude --bg --agent domain-coordinator --name hephaestus-site --settings окно "
           "запуска, папка — папка координатора, /goal по поручению с id задачи",
           r.returncode == 0 and len(b) == 1
