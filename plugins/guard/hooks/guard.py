@@ -2350,6 +2350,15 @@ def check_domain(event, tool, tool_input):
             return (f"Правило domain: роль «{role or 'субагент'}» пишет только в свою память "
                     f"(~/.claude/agent-memory/{role or '<роль>'}/). Чужая: "
                     f"{', '.join(p.replace(HOME, '~') for p in bad[:3])}.")
+        if tool != "Bash":
+            # Edit/Write песочница не держит: ~/.zshrc, ~/.ssh, ~/Library исполняются потом вне неё — уход из окна
+            # ~/.claude и состояние Пантеона держат protect-config и pantheon-acl, кэш окна — свой у каждого окна
+            own = [os.path.join(HOME, ".claude"), STATE_DIR, os.path.join(HOME, "Library", "Caches", "pantheon-sandbox")]
+            dot = [p for p in targets if p != UNRESOLVED and _inside(p, [HOME]) and not _inside(p, own) and (
+                os.path.relpath(p, HOME).startswith(".") or _inside(p, [os.path.join(HOME, "Library")]))]
+            if dot:
+                return (f"Правило domain: роль «{role or 'субагент'}» не пишет в настройки и служебные папки "
+                        f"HOME (~/.*, ~/Library): {', '.join(p.replace(HOME, '~') for p in dot[:3])}.")
         return None
     domains, policy = load_domains(), load_policy()
     cwd, targets = write_targets(event, tool, tool_input)

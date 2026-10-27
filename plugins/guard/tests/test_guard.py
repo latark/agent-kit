@@ -887,6 +887,11 @@ def main():
             "git -c color.ui=false log --oneline -5", "git diff HEAD~1 -- src", "git log --format=%h -3",
             "cp -R ~/ai/pantheon/directions/athena-shop /tmp/backup", "ls ~/ai/pantheon")],
         ("argus не пишет в память штаба", "deny", br, "argus", True, W(os.path.join(home, ".claude/agent-memory/hq/MEMORY.md"))),
+        # Edit/Write песочница не держит: точечные файлы HOME и ~/Library исполняются вне окна ([sb-simplify], ревью 27.10)
+        ("координатор Write в ~/.zshrc — отказ", "deny", br, "domain-coordinator", False, W(os.path.join(home, ".zshrc"))),
+        ("dev-sonnet Write в ~/.ssh/authorized_keys — отказ", "deny", br, "dev-sonnet", True, W(os.path.join(home, ".ssh/authorized_keys"))),
+        ("мастерская Write в ~/Library/LaunchAgents — отказ", "deny", ws, "workshop", False, W(os.path.join(home, "Library/LaunchAgents/x.plist"))),
+        ("argus пишет в свою память — можно", "allow", br, "argus", True, W(os.path.join(home, ".claude/agent-memory/argus/MEMORY.md"))),
         ("argus пишет в свою память", "allow", br, "argus", True, W(os.path.join(home, ".claude/agent-memory/argus/MEMORY.md"))),
         ("hq: регистр не обходит alerts.md", "deny", ".", "hq", False, B("rm ~/ai/PANTHEON/Alerts.md")),
         ("hq: папка, внутри которой ~/ai/pantheon, — отказ", "deny", ".", "hq", False, B("find ~ -name '*.md' -delete")),
