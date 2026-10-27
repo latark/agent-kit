@@ -332,7 +332,8 @@
   код 2, то есть отказ. После выпуска нужны `pantheon domains build` и перезапуск окон. С 0.11.23 Пританею открыт
   momus — ревизор навыка audit (`agent: momus`): только чтение и веб, пишет лишь свой отчёт в `~/ai/knowledge/Inbox`.
   С metis-0224 Пританею и координаторам открыт palamedes — исполнитель без кода (тексты, юридический разбор,
-  синтез; без веба и Bash), модель и effort ему передают в вызове.
+  синтез; без веба и Bash), модель и effort ему передают в вызове. С metis-0469 guard пускает его писать только в
+  `~/ai/pantheon/directions/<направление>/drafts/` (правило draft-role и `DRAFT_ONLY_ROLES`, README guard).
 - Роли (`plugins/pantheon/roles/*.tmpl`, metis-0419): `maxTurns` в шапке — страховка от зацикливания, а не экономия
   (поле работает у агентов плагина, plugins-reference Claude Code): argus 150, dev-haiku 80, dev-sonnet 150, dev-opus 200,
   hephaestus и apollo 300. Строку «Самопроверка» отчёта разработчика проверяют лид (hephaestus), apollo и координатор
