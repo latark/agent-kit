@@ -2248,8 +2248,10 @@ def sandbox_size(data):
 GRANTS = os.path.join(HOME, ".claude", "pantheon", "grants.toml")
 GRANT_KEYS = {"allow": ("permissions", "allow"), "write": ("sandbox", "filesystem", "allowWrite"),
               "domains": ("sandbox", "network", "allowedDomains")}
-GRANT_NO_WRITE = ("~/.claude", "~/.config", "~/.ssh", "~/.gnupg", "~/Library", "~/.local/bin", "~/.zshrc", "~/.zprofile",
-                  "~/.bashrc", "~/.profile")
+# запись не даётся в ключи, конфиг, автозапуск, код и состояние Пантеона (STATE, ~/.local целиком, PANTHEON)
+GRANT_NO_WRITE = ("~/.claude", "~/.config", "~/.ssh", "~/.gnupg", "~/Library", "~/.local", "~/.zshrc", "~/.zprofile",
+                  "~/.bashrc", "~/.profile", STATE, PANTHEON)
+GRANT_STAR_SKIP = re.compile(r"hq|hestia|job-.+")  # «*» — окнам направлений и мастерской, не служебным
 
 
 def grants_load():
@@ -2279,6 +2281,10 @@ def grants_load():
                           (f"; лишние: {', '.join(bad)}" if bad else ""))
             continue
         norm = lambda x: os.path.realpath(os.path.expanduser(x))  # noqa: E731
+        glob_w = [x for x in lists.get("write", []) if re.search(r"[*?\[\]{}]", x) or not x.startswith(("/", "~/"))]
+        if glob_w:
+            errors.append(f"grant {i} ({win}): write — только путь от / или ~/ без шаблонов: {', '.join(glob_w)}")
+            continue
         closed = [x for x in lists.get("write", []) if any(
             norm(x) == norm(c) or norm(x).startswith(norm(c).rstrip("/") + "/") or norm(c).startswith(norm(x).rstrip("/") + "/")
             for c in GRANT_NO_WRITE)]
@@ -2296,7 +2302,7 @@ def grants_load():
 def grants_apply(name, data, grants):
     """Разрешения окна name (и «*») — в его настройки, без повторов."""
     for g in grants:
-        if g["window"] not in (name, "*"):
+        if g["window"] != name and not (g["window"] == "*" and not GRANT_STAR_SKIP.fullmatch(name)):
             continue
         for k, keys in GRANT_KEYS.items():
             if k not in g:
@@ -2304,9 +2310,12 @@ def grants_apply(name, data, grants):
             node = data
             for key in keys[:-1]:
                 node = node.setdefault(key, {})
-            vals = node.setdefault(keys[-1], [])
-            vals += [os.path.realpath(os.path.expanduser(x)) if k == "write" else x
-                     for x in g[k] if (os.path.realpath(os.path.expanduser(x)) if k == "write" else x) not in vals]
+            vals = list(node.get(keys[-1]) or [])  # копия: списки окна бывают общими константами модуля
+            for x in g[k]:
+                x = os.path.realpath(os.path.expanduser(x)) if k == "write" else x
+                if x not in vals:
+                    vals.append(x)
+            node[keys[-1]] = vals
 
 
 def grants_check():

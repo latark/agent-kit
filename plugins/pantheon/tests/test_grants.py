@@ -98,6 +98,16 @@ write = ["~/.ssh"]
 window = "athena-shop"
 until = "{future}"
 excluded = ["curl *"]
+
+[[grant]]
+window = "athena-shop"
+until = "{future}"
+write = ["~/.c*e"]
+
+[[grant]]
+window = "athena-shop"
+until = "{future}"
+write = ["~/state/x"]
 ''')
     check("сборка прошла", build())
     a = win("athena-shop")
@@ -110,6 +120,13 @@ excluded = ["curl *"]
     check("без срока не применено", "Bash(nodate *)" not in a["permissions"]["allow"])
     check("запись в ~/.ssh не дана", not any(x.endswith("/.ssh") for x in a["sandbox"]["filesystem"]["allowWrite"]))
     check("excludedCommands не дан", "curl *" not in a["sandbox"]["excludedCommands"])
+    check("write шаблоном не дан", not any("*" in x for x in a["sandbox"]["filesystem"]["allowWrite"]))
+    check("write в состояние Пантеона не дан", not any(x.startswith(os.path.realpath(state))
+                                                       for x in a["sandbox"]["filesystem"]["allowWrite"]))
+    for n in ("hq", "hestia", "job-clio"):
+        if os.path.isfile(os.path.join(out, n + ".json")):
+            check(f"«*» не попадает в служебное окно {n}",
+                  "Bash(make check)" not in win(n).get("permissions", {}).get("allow", []))
     txt = alert_text()
     check("тревога: истёкшее", f"истекло {past}" in txt)
     check("тревога: ошибки grants.toml", "grants.toml:" in txt and "until" in txt and "лишние: excluded" in txt
