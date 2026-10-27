@@ -36,7 +36,26 @@ import time
 
 TIMEOUT = 600  # с на файл; медленным — свой предел в SLOW
 # Медленные файлы по замеру metis-0450 (последовательный прогон, 3.14): идут первыми, предел — свой, с.
+#   предел — 3 × время файла с округлением вверх до минуты, не меньше 180 с; в комментарии — замер 27.10, с.
 SLOW = {
+    "pantheon/test_watch.py": 720,  # 231 — дольше всех: полный прогон не короче его
+    "guard/test_merge_gate.py": 480,  # 143
+    "pantheon/test_plugins_update.py": 420,  # 136
+    "guard/test_shell_diff.py": 420,  # 129
+    "pantheon/test_board.py": 360,  # 115
+    "pantheon/test_setup.py": 360,  # 113
+    "pantheon/test_start.py": 360,  # 105
+    "pantheon/test_sync_quarantine.py": 240,  # 70
+    "guard/test_guard.py": 240,  # 64
+    "pantheon/test_executors.py": 180,  # 57
+    "pantheon/test_tick.py": 180,  # 50
+    "pantheon/test_merge.py": 180,  # 53
+    "pantheon/test_notify.py": 180,  # 50
+    "pantheon/test_read.py": 180,  # 43
+    "pantheon/test_hooks.py": 180,  # 43
+    "pantheon/test_owner_log_gap.py": 180,  # 42
+    "pantheon/test_autoclose.py": 180,  # 36
+    "pantheon/test_board_metrics.py": 180,  # 31
 }
 # Файлы, которым параллель мешает: идут в конце по одному.
 SERIAL = ()
@@ -44,6 +63,14 @@ SERIAL = ()
 # ok и без строк FAIL — зелёный. Новый файл без итога сюда не попадает и остаётся красным; файл, получивший итог,
 # из списка убрать.
 NO_SUMMARY = frozenset({
+    "guard/test_canaries.py",
+    "guard/test_misc.py",
+    "guard/test_tg_self.py",
+    "pantheon/test_board_drift.py",
+    "pantheon/test_merge.py",  # «все прошли» — без числа, TEST_SUMMARY его не берёт
+    "pantheon/test_path_clean.py",
+    "pantheon/test_read.py",  # «все прошли»
+    "pantheon/test_test_timing.py",  # «все проверки прошли»
 })
 
 # Копия TEST_SUMMARY и _SUMMARY_TOTAL из pantheon.py (импортировать нельзя: pantheon.py требует 3.11+, раннер — 3.9+).
