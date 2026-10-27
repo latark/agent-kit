@@ -356,15 +356,21 @@
   `isolation: "worktree"` в вызове лида, только если папка направления в git, иначе лид работает в своей worktree.
 - `plugins/pantheon/scripts/git-crypt-merge.sh` — слияние файлов под git-crypt как текста (для `~/ai/pantheon` и `me/`).
 - `plugins/pantheon/scripts/decision-map-check.py` — сверка карты решений с `revisits.toml`.
-- `plugins/pantheon/scripts/release.py` — выпуск при слиянии: подтянуть main и поднять `version` тронутых плагинов
-  одним коммитом; PR номер версии не трогают (metis-0384, AGENTS.md «Выпуск»).
+- `.github/workflows/release.yml` и `.github/scripts/release.py` — выпуск после слияния (metis-0512): на push в main
+  поднимают `version` тронутых с прошлого выпуска плагинов и пишут `.claude-plugin/releases.json` одним коммитом от
+  github-actions[bot]. PR номер версии не трогают: шлюз guard такой PR не сливает (AGENTS.md «Выпуск»). `.github` —
+  ядро шлюза: право записи в main есть только у этого workflow.
 - `plugins/pantheon/scripts/baseline.py` — замер «как сейчас» по git и транскриптам (ORD-06); правила подсчёта — в шапке.
 - `plugins/pantheon/scripts/config-check.py` — проверка правок `~/.claude` для `sync.sh`: код и подозрительное — в
   карантин с объяснением на доске, остальное уходит само (SEC-15). Исключение (metis-0209): файл, побайтно равный
   файлу `plugins/pantheon` или `plugins/guard` в вершине `refs/remotes/origin/main` клона agent-kit
   (`~/.claude/plugins/marketplaces/agent-kit`), проходит без карточки, если эту вершину или голову PR (второй родитель
   merge-коммита; первый не доверен) слил владелец (SHA в `logs/merge.jsonl` с событием `merged` или в `owner-log/merge-approve.log`, репозиторий ровно `latark/agent-kit`). Клон мелкий (depth 1), но id
-  родителей есть в самом коммите: слияние `--merge` кладёт голову PR вторым родителем. Только текущая вершина —
+  родителей есть в самом коммите: слияние `--merge` кладёт голову PR вторым родителем. Вершина — коммит выпуска
+  workflow release (metis-0512) с одним родителем, которого слил владелец, — тоже доверена, если меняет только строки
+  `version` в `plugins/*/.claude-plugin/plugin.json` и `.claude-plugin/releases.json`: доверие по содержимому, не по
+  автору. Объект родителя в мелком клоне догружается `git fetch --depth 2 origin <вершина>`; без сети — карточки как
+  раньше. Только текущая вершина —
   откат файла к старому выпуску даёт карточку. Путь сверяется целиком от корня плагина (`hooks/guard.py` —
   `plugins/guard/hooks/guard.py`), файлы `tests/` не доверены, ключ в тексте флаг сохраняет. Доверено всё дерево вершины main, в том числе не-ядро, слитое через шлюз без Touch ID.
   Слитое иначе, чем через
@@ -390,7 +396,7 @@
     python3 -I plugins/pantheon/tests/test_tick.py    # планировщик: сон, пробуждение, питание, простой, лимит, главный Mac
     python3 -I plugins/pantheon/tests/test_plugins_update.py   # обновления agent-kit плановым проходом: тесты, база, метки, коды
     python3 -I plugins/pantheon/tests/test_test_timing.py   # замер тестов плагина: строки по файлам и сводка медленных в логе прогона
-    python3 -I plugins/pantheon/tests/test_release.py    # выпуск: номер версии от main, подтягивание main, конфликты
+    python3 -I .github/scripts/test_release.py    # выпуск Action: номер от прошлого выпуска, releases.json, гонка push, права
     python3 -I plugins/pantheon/tests/test_baseline.py   # замер «как сейчас»: задачи по git commit, сообщения, возвраты, цена
     python3 -I plugins/pantheon/tests/test_hooks.py   # хуки контекста и owner-log (и на системном: CTX_TEST_PYTHON=/usr/bin/python3)
     python3 -I plugins/project-tools/tests/test_project_tools.py   # карта стеков, apply, одобрения, Codex, подсказка

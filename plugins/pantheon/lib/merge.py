@@ -20,7 +20,8 @@ PR ядра защит (Д3) агенты не сливают: его слива
      записал их, по моделям транскрипта argus — metis-0176), рецензентов-«принять» не
      меньше двух, «вернуть» нет; проверки GitHub (CI) — все SUCCESS/NEUTRAL/SKIPPED. CI ещё идёт или проверок пока
      нет — заявка ждёт; иначе снята с тревогой. Список файлов PR (REST pulls/N/files) полон — иначе ждёт: окно
-     показывает задетые файлы ядра, без списка их не показать.
+     показывает задетые файлы ядра, без списка их не показать. PR правит version в plugin.json плагина или трогает
+     .claude-plugin/releases.json — снята с тревогой (metis-0512: номер поднимает workflow release после слияния).
   4. Владелец у Mac (простой меньше PRESENT_SEC) — окно Touch ID: помощник pantheon-touchid (lib/touchid.swift,
      LocalAuthentication), в тексте — задетые файлы ядра, заголовок PR последним. После пальца, под замком
      merge-queue: заявка в очереди та же (не снята и не заменена), репозиторий в [merge_repos], шлюз заново — только
@@ -84,7 +85,7 @@ TEST = None
 CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_config.py",
               "plugins/guard/managed-settings.json", "plugins/pantheon/lib/window_rules.py",
               ".claude-plugin/marketplace.json")
-CORE_DIR = ("plugins/guard", "plugins/pantheon/roles")
+CORE_DIR = ("plugins/guard", "plugins/pantheon/roles", ".github")
 USAGE = "pantheon merge request|cancel <N> -R <owner/repo> | run [--click] | status"
 
 
@@ -286,9 +287,9 @@ def pr_view(repo, pr):
     return data if isinstance(data, dict) else None
 
 
-def pr_files(repo, pr, view):
+def pr_files(repo, pr, view, raw=None):
     """Пути файлов PR (и previous_filename, как у шлюза guard) из REST pulls/N/files или None — gh не ответил или
-    список неполон (не равен changedFiles)."""
+    список неполон (не равен changedFiles). raw — список: в него кладутся сами записи файлов (для version_problem)."""
     count = view.get("changedFiles") if isinstance(view, dict) else None
     if not isinstance(count, int) or isinstance(count, bool):
         return None
@@ -300,6 +301,8 @@ def pr_files(repo, pr, view):
         return None
     if not isinstance(files, list) or len(files) != count or not all(isinstance(f, dict) for f in files):
         return None
+    if raw is not None:
+        raw.extend(files)
     paths = []
     for f in files:
         for k in ("filename", "previous_filename"):
@@ -308,6 +311,47 @@ def pr_files(repo, pr, view):
                     return None
                 paths.append(f[k])
     return paths
+
+
+# номер версии поднимает workflow release на main после слияния (metis-0512) — как _version_problem шлюза guard:
+# совпадение ответов на общих случаях сверяет test_merge. Проход сливает PR ядра мимо хука guard, поэтому сверка здесь
+PLUGIN_MANIFEST_RE = re.compile(r"plugins/[^/]+/\.claude-plugin/plugin\.json")
+RELEASES_FILE = ".claude-plugin/releases.json"
+JSON_STR_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+def _touches_version(patch):
+    for line in patch.splitlines():
+        if line[:1] not in ("+", "-"):
+            continue
+        for m in JSON_STR_RE.finditer(line[1:]):
+            try:
+                val = json.loads(m.group(0))
+            except ValueError:
+                return True
+            if isinstance(val, str) and val.strip().casefold() == "version":
+                return True
+    return False
+
+
+def version_problem(files):
+    """PR правит version в plugins/*/.claude-plugin/plugin.json (не новый и не удалённый файл; патча нет — тоже) или
+    трогает .claude-plugin/releases.json — текст, иначе None."""
+    hit = []
+    for f in files:
+        names = [n for n in (f.get("filename"), f.get("previous_filename")) if isinstance(n, str)]
+        norm = [n.strip("/").casefold() for n in names]
+        if not names:
+            continue
+        if RELEASES_FILE in norm:
+            hit.append(f"{names[0]} (пишет только workflow release)")
+        elif not any(PLUGIN_MANIFEST_RE.fullmatch(n) for n in norm) or f.get("status") in ("added", "removed"):
+            continue
+        elif not isinstance(f.get("patch"), str):
+            hit.append(f"{names[0]} (патча нет — правку version не проверить)")
+        elif _touches_version(f["patch"]):
+            hit.append(f"{names[0]} (меняет version)")
+    return f"PR трогает номер версии: {', '.join(hit)}" if hit else None
 
 
 def is_core(path):
@@ -557,9 +601,13 @@ def check_all(req):
     state, why = gate(req["repo"], req["pr"], req["sha"], view)
     if state != "ok":
         return state, why, view, None
-    paths = pr_files(req["repo"], req["pr"], view)
+    raw = []
+    paths = pr_files(req["repo"], req["pr"], view, raw)
     if paths is None:
         return "wait", "список файлов PR не получен или неполон", view, None
+    bad = version_problem(raw)
+    if bad:
+        return "fail", f"{bad} — номер поднимает workflow release после слияния (metis-0512)", view, None
     return "ok", why, view, paths
 
 

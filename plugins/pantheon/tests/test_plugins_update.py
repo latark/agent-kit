@@ -1570,6 +1570,38 @@ print(json.dumps({{"fresh": sorted(k[1] + "|" + k[2] for k in fresh), "unk": sor
           g2.get("tp") == ["/opt/x/python3"], g2)
     check("интерпретаторы: pantheon получает python 3.11+ из PATH; ниже 3.11 — отфильтрован, guard — на нём (metis-0448)",
           g2.get("pan_ok") == ["/opt/x/python3"] and g2.get("pan_no") == [] and g2.get("guard") == ["/opt/x/python3"], g2)
+    # metis-0512: номер поднимает workflow release после слияния и пишет .claude-plugin/releases.json каталога. Новая
+    # версия ставится, только если запись выпуска совпала с каталогом (версия и дерево); файла нет — по-старому
+    for case in ("match", "old_version", "other_tree", "broken", "no_record", "bad_v", "link"):
+        e = Env("1.0.0", "1.1.0", OK, OK)
+        mkt = os.path.join(e.home, ".claude", "plugins", "marketplaces", "agent-kit")
+        rel = os.path.join(mkt, ".claude-plugin", "releases.json")
+        tree = (e.py("print(P._tree_hash(sys.argv[2]))", e.src) or ["?"])[0]
+        rec = {"version": "1.1.0", "tree": tree}
+        body = {"match": {"v": 1, "plugins": {"x": rec}},
+                "old_version": {"v": 1, "plugins": {"x": {**rec, "version": "1.0.0"}}},
+                "other_tree": {"v": 1, "plugins": {"x": {**rec, "tree": "0" * 64}}},
+                "no_record": {"v": 1, "plugins": {"y": rec}},
+                "bad_v": {"v": 2, "plugins": {"x": rec}}}.get(case)
+        if case == "link":
+            e.write(os.path.join(e.tmp, "rel.json"), json.dumps({"v": 1, "plugins": {"x": rec}}))
+            os.symlink(os.path.join(e.tmp, "rel.json"), rel)
+        else:
+            e.write(rel, "{не json" if case == "broken" else json.dumps(body))
+        r = e.run("plugins", "update")
+        put = "plugin update" in e.argv()
+        if case == "match":
+            check("releases.json: запись совпала (версия и дерево) — тесты и установка",
+                  r.returncode == 0 and put and e.runs() > 0, f"{r.returncode} {r.stdout!r} {e.argv()!r}")
+        else:
+            check(f"releases.json {case}: слито, выпуска ещё нет — тестов и установки нет, причина в выводе и журнале",
+                  r.returncode == 0 and not put and e.runs() == 0 and "не ставлю" in r.stdout
+                  and "не ставлю" in e.journal(), f"{r.returncode} {r.stdout!r} {e.journal()!r}")
+            e.run()
+            check(f"releases.json {case}: второй проход — строка в журнале одна",
+                  e.journal().count("не ставлю") == 1, e.journal())
+        e.close()
+
     r = subprocess.run([PY, "-I", LIB, "plugins", "foo"], capture_output=True, text=True, timeout=60)
     check("pantheon plugins foo — код 2", r.returncode == 2)
 

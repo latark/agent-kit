@@ -8210,6 +8210,44 @@ def _current_sync():
         alert(f"pantheon: current не перевесилась на {want}: {type(e).__name__} {e}", "plugins-update")
 
 
+def _release_problem(name, ver, src):
+    """metis-0512 (вариант Б): номер версии поднимает workflow release на main после слияния и пишет
+    .claude-plugin/releases.json — {"v": 1, "plugins": {имя: {"version", "tree"}}}, tree — _tree_hash папки плагина
+    в коммите выпуска. Между слиянием PR и коммитом выпуска в каталоге новый код под прошлым номером: ставить его
+    нельзя (номер уже занят другим деревом). Поэтому новая версия ставится, только если запись выпуска совпала с
+    каталогом — та же версия и то же дерево. Текст причины или None. Файла нет — None: переход, до первого запуска
+    workflow ставим по-старому. Клон каталога неглубокий, поэтому сверка по записи, а не по истории git."""
+    p = os.path.join(_catalog_root(), ".claude-plugin", "releases.json")
+    if not os.path.lexists(p):
+        return None
+    try:
+        if os.path.islink(p) or not os.path.isfile(p):
+            raise ValueError("не обычный файл")
+        with open(p, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as e:
+        why = f"releases.json каталога не разобрать ({e}) — выпуск не сверить"
+    else:
+        rec = data.get("plugins", {}).get(name) if isinstance(data, dict) and data.get("v") == 1 \
+            and isinstance(data.get("plugins"), dict) else None
+        if not isinstance(rec, dict):
+            why = "в releases.json каталога нет записи выпуска — слито, выпуска ещё нет"
+        elif rec.get("version") != ver:
+            why = f"слито, выпуска ещё нет: в releases.json {rec.get('version')!r}, в каталоге {ver}"
+        elif rec.get("tree") != _tree_hash(src):
+            why = f"слито после выпуска {ver}: дерево каталога не то, что выпущено, — жду следующий выпуск"
+        else:
+            return None
+    # строка в журнал выпусков — один раз на состояние, а не на каждый плановый проход
+    seen = read_json(path("plugins", "unreleased.json"))
+    seen = seen if isinstance(seen, dict) else {}
+    if seen.get(name) != f"{ver} {why}":
+        _plugins_journal(f"{name} {ver}: не ставлю — {why}")
+        with contextlib.suppress(OSError):
+            write_json(path("plugins", "unreleased.json"), {**seen, name: f"{ver} {why}"})
+    return why
+
+
 def _plugins_update(quiet):
     # остатки прогона, прерванного таймаутом задачи или сбоем (блокировка взята — чужого прогона нет)
     shutil.rmtree(path("plugins", "tmp"), ignore_errors=True)
@@ -8239,6 +8277,11 @@ def _plugins_update(quiet):
                 _current_sync()
             if not quiet:
                 print(f"{name}: {old}, новее нет")
+            continue
+        why = _release_problem(name, new, src)
+        if why:  # metis-0512: слито в main, а workflow release номер ещё не поднял — код не ставим
+            if not quiet:
+                print(f"{name}: {new} не ставлю — {why}")
             continue
         mark = marks.get(name) if isinstance(marks.get(name), dict) else {}
         same = mark.get("version") == new

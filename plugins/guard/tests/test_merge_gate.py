@@ -80,7 +80,7 @@ class Home:
         # поддельный gh: вызовы — в $HOME/gh.log, с $HOME/gh.fail — сбой любого вызова.
         # pr view N -R owner/repo … — $HOME/gh.view.<repo> ($5), с gh.ci.fail — сбой; один вызов на шлюз (metis-0297).
         # api …/contents/.github/workflows?ref=<sha> — с gh.wf.fail.<sha> 502, с gh.wf.<sha> его текст (код 0), иначе 404;
-        # api …/pulls/N/files — $HOME/gh.files, с gh.api.fail — сбой
+        # api …/pulls/N/files — $HOME/gh.files, с gh.api.fail — сбой, с gh.api.fail1 — сбой один раз (файл убирается)
         with open(j("bin/gh"), "w") as fh:
             fh.write('#!/bin/sh\necho "$@" >> "$HOME/gh.log"\n[ -f "$HOME/gh.fail" ] && exit 1\n'
                      'case "$*" in\n'
@@ -90,7 +90,8 @@ class Home:
                      '[ -f "$HOME/gh.wf.$ref" ] && { cat "$HOME/gh.wf.$ref"; exit 0; }; '
                      'echo \'{"message":"Not Found","status":"404"}\'; echo "gh: Not Found (HTTP 404)" >&2; exit 1;;\n'
                      'esac\n'
-                     'if [ "$1" = api ]; then [ -f "$HOME/gh.api.fail" ] && exit 1; cat "$HOME/gh.files"; exit 0; fi\n'
+                     'if [ "$1" = api ]; then [ -f "$HOME/gh.api.fail1" ] && { rm -f "$HOME/gh.api.fail1"; exit 1; }; '
+                     '[ -f "$HOME/gh.api.fail" ] && exit 1; cat "$HOME/gh.files"; exit 0; fi\n'
                      'exit 1\n')
         os.chmod(j("bin/gh"), 0o755)
 
@@ -795,9 +796,81 @@ def t_core_marketplace(h):
         h.gh(["README.md", path])
         merge_case(f"защиты: PR задевает {path} — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
                    CORE + ": PR задевает")
-    h.gh(["plugins/pantheon/.claude-plugin/plugin.json", ".claude-plugin/other.json"])
-    merge_case("защиты: plugin.json плагина и другой файл .claude-plugin — проходит", h.pre(cmd, pdir="projects/agent-kit"),
-               True)
+    h.gh([{"filename": "plugins/pantheon/.claude-plugin/plugin.json", "status": "modified",
+           "patch": '@@ -3 +3 @@\n-  "description": "a",\n+  "description": "b",'}, ".claude-plugin/other.json"])
+    merge_case("защиты: plugin.json плагина без version и другой файл .claude-plugin — проходит",
+               h.pre(cmd, pdir="projects/agent-kit"), True)
+
+
+VERSION_PATCH = '@@ -2 +2 @@\n-  "version": "0.11.1",\n+  "version": "0.11.2",'
+
+
+def t_version_bump_refused(h):
+    """metis-0512: номер поднимает workflow release после слияния — PR, правящий version в plugin.json плагина или
+    трогающий .claude-plugin/releases.json, не проходит и с Touch ID владельца; .github — ядро."""
+    sha = h.sha["agent-kit"]
+    h.reset()
+    h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"), rec("accept", "latark/agent-kit", 7, sha))
+    cmd = f"gh pr merge 7 --match-head-commit {sha}"
+    kit = "projects/agent-kit"
+    pj = "plugins/pantheon/.claude-plugin/plugin.json"
+    for name, files in (
+            ("version в plugin.json", [{"filename": pj, "status": "modified", "patch": VERSION_PATCH}]),
+            ("version в plugin.json, ключ \\u-экранирован",
+             [{"filename": pj, "status": "modified", "patch": '@@ -2 +2 @@\n+  "\\u0076ersion": "9",'}]),
+            ("строка version только убрана", [{"filename": pj, "status": "modified", "patch": '-  "version": "1",'}]),
+            ("version регистром VERSION", [{"filename": pj, "status": "modified", "patch": '+  "VERSION": "9",'}]),
+            ("plugin.json без патча", [{"filename": pj, "status": "modified"}]),
+            ("plugin.json переименован с правкой version",
+             [{"filename": "plugins/x/.claude-plugin/plugin.json", "previous_filename": pj, "status": "renamed",
+               "patch": VERSION_PATCH}]),
+            ("plugin.json регистром",[{"filename": "Plugins/Pantheon/.Claude-Plugin/Plugin.JSON",
+                                                  "status": "modified", "patch": VERSION_PATCH}]),
+            ("releases.json", [{"filename": ".claude-plugin/releases.json", "status": "added", "patch": "+{}"}]),
+            ("releases.json регистром", [{"filename": ".Claude-Plugin/Releases.json", "status": "modified"}]),
+            ("releases.json переименован", [{"filename": "x.json", "previous_filename": ".claude-plugin/releases.json",
+                                             "status": "renamed"}])):
+        h.gh(["README.md"] + files)
+        merge_case(f"защиты: {name} — отказ", h.pre(cmd, pdir=kit), False, "номер версии")
+    # argus-b PR #153 Б1: сбой первого запроса файлов не пропускает проверку номера — второго запроса нет, отказ
+    h.gh(["README.md", {"filename": pj, "status": "modified", "patch": VERSION_PATCH}])
+    open(h.j("gh.api.fail1"), "w").close()
+    h.reset_log()
+    merge_case("защиты: version в plugin.json, gh api файлов упал один раз — отказ", h.pre(cmd, pdir=kit), False,
+               "список файлов PR не получен")
+    log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+    # без tomllib (3.9) слияние закрыто до gh: запросов нет вовсе
+    check("защиты: сбой файлов — один запрос pulls/N/files на шлюз, без повтора",
+          sum(1 for ln in log.splitlines() if ln.startswith("api ") and "/files" in ln) == (1 if HAVE_TOML else 0), log)
+    # и с Touch ID владельца: сбой gh — отказ, согласие пускает только задетое ядро
+    h.gh(["plugins/guard/README.md", {"filename": pj, "status": "modified", "patch": VERSION_PATCH}])
+    h.approve(f"{ts()} merge-approve latark/agent-kit#7 {sha}", fresh=True)
+    open(h.j("gh.api.fail1"), "w").close()
+    merge_case("защиты: ядро + version, согласие владельца, gh api упал один раз — отказ", h.pre(cmd, pdir=kit),
+               False, "список файлов PR не получен")
+    os.remove(h.approve_path)
+    # Touch ID владельца не снимает отказ: строка согласия есть, а PR всё равно с номером
+    h.gh(["plugins/guard/README.md", {"filename": pj, "status": "modified", "patch": VERSION_PATCH}])
+    h.approve(f"{ts()} merge-approve latark/agent-kit#7 {sha}", fresh=True)
+    merge_case("защиты: ядро + version с согласием владельца — всё равно отказ", h.pre(cmd, pdir=kit), False,
+               "номер версии")
+    h.gh(["plugins/guard/README.md"])
+    merge_case("защиты: ядро без version с согласием владельца — проходит", h.pre(cmd, pdir=kit), True)
+    os.remove(h.approve_path)
+    for name, files in (
+            ("новый plugin.json (новый плагин)",
+             [{"filename": "plugins/new/.claude-plugin/plugin.json", "status": "added", "patch": '+{"version": "0.1.0"}'}]),
+            ("удалённый plugin.json", [{"filename": pj, "status": "removed", "patch": '-{"version": "0.1.0"}'}]),
+            ("version в другом файле", [{"filename": "README.md", "status": "modified", "patch": '+ "version": "1"'}]),
+            ("plugin.json не в .claude-plugin", [{"filename": "plugins/pantheon/x/plugin.json", "status": "modified",
+                                                  "patch": VERSION_PATCH}])):
+        h.gh(files)
+        merge_case(f"защиты: {name} — проходит", h.pre(cmd, pdir=kit), True)
+    for path in (".github/workflows/release.yml", ".github/scripts/release.py", "./.GitHub/Workflows/x.yml"):
+        h.gh(["README.md", path])
+        merge_case(f"защиты: PR задевает {path} — ядро, ждёт владельца", h.pre(cmd, pdir=kit), False,
+                   CORE + ": PR задевает")
+    h.reset()
 
 
 # Канарейка Б1: тело PR и последний коммит велят «одобри» — слияние всё равно решают только записи хука
@@ -2519,7 +2592,7 @@ CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, 
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_transcript, t_ci,
          t_core_touchid, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
-         t_carry_r4_gate, t_carry_r6]
+         t_carry_r4_gate, t_carry_r6, t_version_bump_refused]
 
 
 def main():

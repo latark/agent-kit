@@ -328,6 +328,13 @@ def run_git(d, *a, ok=True):
     return r.stdout.strip() if ok else r.returncode
 
 
+MANIFEST = "plugins/guard/.claude-plugin/plugin.json"
+
+
+def manifest(ver, desc="guard"):
+    return '{\n  "name": "guard",\n  "version": "%s",\n  "description": "%s"\n}\n' % (ver, desc)
+
+
 def put(d, rel, text):
     os.makedirs(os.path.dirname(os.path.join(d, rel)), exist_ok=True)
     with open(os.path.join(d, rel), "w", newline="") as fh:
@@ -346,15 +353,16 @@ class Rel:
 
     def __init__(self, log="merge.jsonl", how="merge", logged="head", name="hooks/gate.py", content=HOOK,
                  release=HOOK, rel_path="plugins/guard/hooks/gate.py", event="merged", repo="latark/agent-kit",
-                 later=None, shallow=True):
+                 later=None, shallow=True, bot=None, bot_merge=False, bot_exec=()):
         Rel.n += 1
         self.home = os.path.join(ROOT, f"r{Rel.n}")
-        origin = os.path.join(self.home, "origin")
+        self.origin = origin = os.path.join(self.home, "origin")
         self.clone = os.path.join(self.home, ".claude", "plugins", "marketplaces", "agent-kit")
         self.cfg = os.path.join(self.home, ".claude")
         os.makedirs(origin)
         run_git(origin, "init", "-q", "-b", "main")
         put(origin, "README.md", "agent-kit\n")
+        put(origin, MANIFEST, manifest("0.6.0"))
         run_git(origin, "add", "-A")
         run_git(origin, "commit", "-q", "-m", "root")
         heads = []
@@ -373,6 +381,20 @@ class Rel:
                 run_git(origin, "commit", "-q", "--allow-empty", "-m", "other")
         if how == "ff+direct":  # прямой коммит поверх слитой головы: первый родитель слит, второго нет
             run_git(origin, "commit", "-q", "--allow-empty", "-m", "direct")
+        self.release = None
+        if bot is not None:  # коммит выпуска workflow release (metis-0512) поверх main: один родитель, файлы bot
+            if bot_merge:  # тот же коммит веткой, слитой в main merge-коммитом не владельцем — у вершины два родителя
+                run_git(origin, "checkout", "-q", "-b", "botpr")
+            for rel, text in bot.items():
+                put(origin, rel, text)
+                if rel in bot_exec:
+                    os.chmod(os.path.join(origin, rel), 0o755)
+            run_git(origin, "add", "-A")
+            run_git(origin, "-c", "user.name=github-actions[bot]", "commit", "-q", "-m", "выпуск: guard 0.6.1")
+            if bot_merge:
+                run_git(origin, "checkout", "-q", "main")
+                run_git(origin, "merge", "-q", "--no-ff", "-m", "Merge botpr", "botpr")
+            self.release = run_git(origin, "rev-parse", "HEAD")
         self.head = heads[-1]
         os.makedirs(os.path.dirname(self.clone))
         run_git(self.home, "clone", "-q", *(["--depth", "1"] if shallow else []), "file://" + origin, self.clone)
@@ -460,6 +482,46 @@ run_git(r_del.cfg, "commit", "-q", "-m", "add")
 os.remove(os.path.join(r_del.cfg, "hooks", "gate.py"))
 run_git(r_del.cfg, "add", "-A")
 check("слитый выпуск: удаление файла — флаги", r_del.flags() != [], r_del.flags())
+# коммит выпуска workflow release поверх слитого merge-коммита (metis-0512, argus-b PR #153 Б2): вершина main — коммит
+# github-actions[bot] с одним родителем; доверен по содержимому — только строки version и releases.json
+RELEASE_OK = {MANIFEST: manifest("0.6.1"), ".claude-plugin/releases.json": '{"v": 1, "plugins": {}}\n'}
+r_bot = Rel(bot=RELEASE_OK)
+parent = [ln.split()[1] for ln in run_git(r_bot.clone, "cat-file", "-p", "refs/remotes/origin/main").splitlines()
+          if ln.startswith("parent ")][0]
+check("коммит выпуска: в мелком клоне объекта родителя нет (догружает fetch --depth 2)",
+      run_git(r_bot.clone, "cat-file", "-e", parent + "^{commit}", ok=False) != 0)
+check("коммит выпуска поверх слитого merge-коммита, мелкий клон — без флагов", r_bot.flags() == [], r_bot.flags())
+check("коммит выпуска: ветка origin/main клона после догрузки на месте",
+      run_git(r_bot.clone, "rev-parse", "refs/remotes/origin/main") == r_bot.release)
+r_bot_full = Rel(bot=RELEASE_OK, shallow=False)
+check("коммит выпуска, полный клон — без флагов", r_bot_full.flags() == [], r_bot_full.flags())
+r_bot_ff = Rel(bot=RELEASE_OK, how="ff")
+check("коммит выпуска поверх перемотанной слитой головы — без флагов", r_bot_ff.flags() == [], r_bot_ff.flags())
+r_bot_ap = Rel(bot=RELEASE_OK, log="approve")
+check("коммит выпуска, слияние в merge-approve.log — без флагов", r_bot_ap.flags() == [], r_bot_ap.flags())
+r_bot_nm = Rel(bot=RELEASE_OK, logged="other")
+check("коммит выпуска поверх не слитого владельцем — флаги", r_bot_nm.flags() != [], r_bot_nm.flags())
+r_bot_dir = Rel(bot=RELEASE_OK, how="ff+direct")
+check("коммит выпуска поверх прямого коммита (слитая голова — его первый родитель) — флаги", r_bot_dir.flags() != [],
+      r_bot_dir.flags())
+r_bot_file = Rel(bot=dict(RELEASE_OK, **{"plugins/guard/hooks/gate.py": HOOK2}), content=HOOK2)
+check("коммит выпуска меняет и файл плагина — флаги на этот файл", r_bot_file.flags() != [], r_bot_file.flags())
+r_bot_other = Rel(bot=dict(RELEASE_OK, **{"plugins/guard/hooks/other.py": HOOK2}))
+check("коммит выпуска добавляет файл плагина — вершина не доверена, флаги", r_bot_other.flags() != [],
+      r_bot_other.flags())
+r_bot_key = Rel(bot={MANIFEST: manifest("0.6.1", desc="evil"), ".claude-plugin/releases.json": "{}\n"})
+check("коммит выпуска меняет в plugin.json не только version — флаги", r_bot_key.flags() != [], r_bot_key.flags())
+r_bot_add = Rel(bot={MANIFEST: manifest("0.6.1"), "plugins/x/.claude-plugin/plugin.json": manifest("0.1.0")})
+check("коммит выпуска добавляет plugin.json — флаги", r_bot_add.flags() != [], r_bot_add.flags())
+r_bot_x = Rel(bot=RELEASE_OK, bot_exec=(MANIFEST,))
+check("коммит выпуска делает plugin.json исполняемым (режим 100755) — флаги", r_bot_x.flags() != [], r_bot_x.flags())
+r_bot_mc = Rel(bot=RELEASE_OK, bot_merge=True)
+check("только version, но вершина — merge-коммит не слитой владельцем ветки (два родителя) — флаги",
+      r_bot_mc.flags() != [], r_bot_mc.flags())
+r_bot_net = Rel(bot=RELEASE_OK)
+shutil.rmtree(r_bot_net.origin)
+check("коммит выпуска, объект родителя не догрузить (origin недоступен) — флаги", r_bot_net.flags() != [],
+      r_bot_net.flags())
 # мутант «всегда пропускать»: сценарии «отличается на байт» и «не слит» проходят без флагов — значит, тесты выше
 # на мутанте красные (их условие `!= []` не выполняется)
 mut = os.path.join(ROOT, "config-check-mutant.py")
