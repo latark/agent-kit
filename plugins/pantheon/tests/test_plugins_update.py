@@ -1066,7 +1066,7 @@ print(json.dumps({"disk": on_disk, "got": [f for f in ("a.py", "b.py", "c.py") i
     check("0531: новая версия с пустой матрицей — не ставится: красное, тестов нет, update нет, тревога",
           e.runs() == 0 and "plugin update" not in e.argv() and e.marks().get("x", {}).get("result") == "red"
           and "x 1.0.0 → 1.1.0: новые падения тестов (1) — матрица тестов новой версии пустая" in j
-          and "не ставлю" in e.alerts(), f"{r.returncode} {e.runs()} {j!r}")
+          and "x 1.1.0 не поставлен: новые падения тестов (1) — матрица тестов новой версии пустая" in e.alerts(), f"{r.returncode} {e.runs()} {j!r} alerts={e.alerts()!r} marks={e.marks()!r}")
     e.close()
 
     e = Env("1.0.0", "1.1.0", OK, OK)
