@@ -119,17 +119,6 @@ class Env:
         T = P.tasks_mod()
         return {tid: h for tid, (_, h, _) in T.load_tasks(self.pantheon).items() if h.get("direction") == "inbox"}
 
-    def board_answer(self, cid, answer, t, question=None):
-        rec = {"time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t)), "kind": "answer", "id": cid,
-               "answer": answer, "question": question or N.TITLE}
-        with open(os.path.join(self.state, "owner-log", "board.jsonl"), "a") as fh:
-            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-    def zeus_answer(self, cid, answer, t):
-        with open(os.path.join(self.state, "owner-log", "zeus.md"), "a", encoding="utf-8") as fh:
-            fh.write(f"\n## {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t))} · окно вопросов\n\n"
-                     f"вопрос: [{cid}] {N.TITLE}\nответ: {answer}\n")
-
 
 def zone(e, over, used=None, t=None):
     t = t or day()
@@ -275,190 +264,81 @@ def test_day_rules_and_respawn():
     check(not ok and why.startswith("лимит неизвестен"), f"respawn ночью при неизвестном лимите: {ok} {why}")
 
 
-def test_evening_question():
+def test_night_opens_itself_0523():
+    """[sb-simplify] п. 10 (решение владельца 27.10): вопроса «работать ли ночью» нет — ни карточки, ни уведомления; в
+    22:00 ночь отмечается разрешённой (одна строка в тревогах), открывается в 23:00 с бюджетом; gate до 23:00 — днём."""
     e = Env()
-    t = hm("21:55")
-    e.at_line(t, 0)
-    e.watch(t)
-    check(not e.cards() and not e.sent(), "до 22:00 вопрос задан")
-    e.at_line(hm("22:00"), 0)
-    e.watch(hm("22:00"))
-    cards = e.cards()
-    check(len(cards) == 1, f"22:00 — карточек {len(cards)}")
-    cid, h = next(iter(cards.items()))
-    T = P.tasks_mod()
-    check(T.label_of(h) == T.HUMAN_WAIT, f"карточка не в «Нужен ответ»: {T.label_of(h)}")
-    check(h["title"] == N.TITLE and h["owner"] == "zeus" and h["question"] == N.TITLE, f"шапка: {h}")
-    check(h["options"] == ["Да — открыть ночь: бюджет 3 % недели, работа до 08:00", "Нет — ночь пропустить"],
-          f"варианты: {h['options']}")
-    check(h.get("why") and h.get("recommend") and h.get("if_no_answer"), "нет why/recommend/if_no_answer")
-    check(len(e.sent()) == 1 and cid in e.sent()[0], f"22:00 — уведомлений {e.sent()}")
-    st = e.state_of()
-    check(st["card_id"] == cid and len(st["asked_at"]) == 1, f"состояние: {st}")
-    e.watch(hm("22:30"))
-    check(len(e.sent()) == 1, "22:30 — лишнее уведомление")
-    for i, x in enumerate(("23:00", "23:30"), start=2):
+    e.resets = hm("22:00") + 3 * 86400
+    e.at_line(hm("21:55"), 0)
+    e.watch(hm("21:55"))
+    check(not os.path.exists(os.path.join(e.state, "night", EVENING.isoformat() + ".json")), "до 22:00 ночь отмечена")
+    for x in ("22:00", "22:30", "23:00", "23:30"):
         e.at_line(hm(x), 0)
         e.watch(hm(x))
-        check(len(e.cards()) == 1, f"{x} — вторая карточка")
-        check(len(e.sent()) == i, f"{x} — повтор не ушёл: {len(e.sent())}")
-    e.watch(hm("23:45"))
-    check(len(e.sent()) == 3, "23:45 — лишний повтор")
-    check(not N.gate("autostart", hm("23:45"), heavy=0)[0], "ночь без ответа — gate пустил")
-    e.at_line(hm("00:00"), 0)
-    e.watch(hm("00:00"))
+    check(not e.cards() and not e.sent(), f"вопрос на ночь задан: карточки {e.cards()}, уведомления {e.sent()}")
     st = e.state_of()
-    check(st["skipped"] == "нет ответа к 00:00", f"00:00 без ответа — не пропущена: {st}")
-    check("пропущена: нет ответа к 00:00" in e.alerts(), "нет строки о пропуске в тревогах")
-    check(e.cards()[cid]["status"] == "dropped", f"карточка не закрыта: {e.cards()[cid]['status']}")
-    check("Ночь: пропущена (нет ответа к 00:00)" in N.status_lines(hm("00:10")), N.status_lines(hm("00:10")))
-    ok, why = N.gate("autostart", hm("00:10"), heavy=0)
-    check(not ok and "пропущена" in why, f"пропущенная ночь — gate: {ok} {why}")
-    # поздний ответ после 00:00 ночь не открывает
-    e.board_answer(cid, h["options"][0], hm("00:05"))
-    e.watch(hm("00:15"))
-    check(not e.state_of().get("opened_at"), "ответ после 00:00 открыл ночь")
+    check(st["answer"] == "да" and st.get("auto") and st["opened_at"] == hm("23:00") and st["budget_pct"] == 3
+          and not st["skipped"], f"ночь не открылась сама: {st}")
+    check(e.alerts().count("откроется сама в 23:00") == 1 and "открыта с 23:00" in e.alerts(),
+          f"строки ночи в тревогах: {e.alerts()}")
+    check(N.gate("autostart", hm("23:40"), heavy=0) == (True, ""), f"открытая ночь — gate: {N.gate('autostart', hm('23:40'), heavy=0)}")
+    check(N.status_lines(hm("23:30"))[1].startswith("Ночь: открыта с 23:00, потрачено "), N.status_lines(hm("23:30")))
+    # Mac проснулся в 00:30: ночь открывается в том же проходе, тревога одна
+    e2 = Env()
+    e2.resets = hm("22:00") + 3 * 86400
+    e2.at_line(hm("00:30"), 0)
+    e2.watch(hm("00:30"))
+    st = e2.state_of()
+    check(st.get("opened_at") == hm("23:00") and abs(st["start_pct"] - N.measure(hm("00:30"))["used"]) < 1e-9,
+          f"проснулся в 00:30 — ночь: {st}")
+    # лимит недели неизвестен — ночь разрешена, но не открыта и новое не идёт; status — «откроется сама»
+    e3 = Env()
+    e3.at_line(hm("22:00") - 7200, 0)
+    e3.watch(hm("23:10"))
+    st = e3.state_of()
+    check(st["answer"] == "да" and not st.get("opened_at") and not N.gate("autostart", hm("23:10"), heavy=0)[0],
+          f"неизвестный лимит — ночь: {st}")
+    # потолок недели держит и ночь
+    e4 = Env('primary_host = "mac-a"\n[limits.owner_cap]\npct = 20\ndecision = "zeus-x"\n')
+    e4.resets = hm("22:00") + 3 * 86400
+    e4.snap(hm("23:10"), 30.0, e4.resets)
+    e4.watch(hm("22:00"))
+    e4.watch(hm("23:10"))
+    ok, why = N.gate("autostart", hm("23:15"), heavy=0)
+    check(not ok and "20" in why, f"потолок недели ночью не держит: {ok} {why}")
 
 
-def test_missed_slots_no_burst():
-    """Mac проснулся в 23:40: карточка и одно уведомление, без пачки повторов."""
+def test_night_old_card_closed_0523():
+    """Карточка вопроса, заданного до выпуска (card_id в состоянии ночи, ответа нет), снимается проходом; ночь
+    открывается сама; уже пропущенная ночь («Нет» до выпуска) не открывается."""
     e = Env()
-    e.at_line(hm("23:40"), 0)
-    e.watch(hm("23:40"))
-    check(len(e.cards()) == 1 and len(e.sent()) == 1, f"23:40 — {len(e.cards())} карточек, {len(e.sent())} уведомлений")
-    e.watch(hm("23:50"))
-    check(len(e.sent()) == 1, "23:50 — повтор за прошедший слот")
+    e.resets = hm("22:00") + 3 * 86400
+    T = P.tasks_mod()
+    tid, _ = T.task_new(e.pantheon, hm("22:00"), "inbox", "Запустить сегодня на ночь выполнение задач?", owner="zeus",
+                        status="waiting", waiting_on="human", actor="плановый проход")
+    os.makedirs(os.path.join(e.state, "night"), exist_ok=True)
+    json.dump({"card_id": tid, "card_at": hm("22:00"), "asked_at": ["x"]},
+              open(os.path.join(e.state, "night", EVENING.isoformat() + ".json"), "w"))
+    e.at_line(hm("23:05"), 0)
+    e.watch(hm("23:05"))
+    check(e.cards()[tid]["status"] == "dropped" and e.state_of().get("opened_at") == hm("23:00"),
+          f"старая карточка: {e.cards()[tid]['status']}, ночь {e.state_of()}")
+    e2 = Env()
+    os.makedirs(os.path.join(e2.state, "night"), exist_ok=True)
+    json.dump({"answer": "нет", "skipped": "ответ «Нет»"},
+              open(os.path.join(e2.state, "night", EVENING.isoformat() + ".json"), "w"))
+    e2.at_line(hm("23:05"), 0)
+    e2.watch(hm("23:05"))
+    check(not e2.state_of().get("opened_at") and not N.gate("autostart", hm("23:10"), heavy=0)[0],
+          f"пропущенная до выпуска ночь открылась: {e2.state_of()}")
 
 
-def open_night(e, answer_at, over=0.0, how="board"):
+def open_night(e, answer_at=None, over=0.0):
+    """Вечер 22:00: ночь отмечается разрешённой сама ([sb-simplify] п. 10); answer_at — от старого вопроса, не действует."""
     e.resets = hm("22:00") + 3 * 86400
     e.at_line(hm("22:00"), over)
     e.watch(hm("22:00"))
-    cid, h = next(iter(e.cards().items()))
-    if how == "board":
-        e.board_answer(cid, h["options"][0], answer_at)
-    else:
-        e.zeus_answer(cid, h["options"][0], answer_at)
-    return cid, h
-
-
-def test_answer_opens_night():
-    e = Env()
-    cid, h = open_night(e, hm("23:10"))
-    e.at_line(hm("23:15"), 0)
-    e.watch(hm("23:15"))
-    st = e.state_of()
-    check(st["answer"] == "да" and st["opened_at"] == hm("23:10"), f"ответ в 23:10 — opened_at {st.get('opened_at')}")
-    check(st["budget_pct"] == 3 and abs(st["start_pct"] - N.measure(hm("23:15"))["used"]) < 1e-9, f"бюджет: {st}")
-    check(e.cards()[cid]["status"] == "done", "карточка с ответом «Да» не закрыта")
-    check(N.gate("autostart", hm("23:20"), heavy=0) == (True, ""), f"открытая ночь — gate: {N.gate('autostart', hm('23:20'), heavy=0)}")
-    check(N.gate("respawn", hm("23:20")) == (True, ""), "открытая ночь — respawn не пустил")
-    lines = N.status_lines(hm("23:20"))
-    check(lines[1] == "Ночь: открыта с 23:10, потрачено 0 из 3 %", f"строка ночи: {lines[1]}")
-    check("открыта с 23:10" in e.alerts(), "нет строки об открытии в тревогах")
-    e.watch(hm("23:30"))
-    check(len(e.sent()) == 1, f"после ответа — повтор вопроса: {e.sent()}")
-    # ответ до 23:00 открывает ночь с 23:00
-    e2 = Env()
-    open_night(e2, hm("22:30"))
-    e2.at_line(hm("22:40"), 0)
-    e2.watch(hm("22:40"))
-    check(not e2.state_of().get("opened_at"), "ночь открылась до 23:00")
-    e2.at_line(hm("23:02"), 0)
-    e2.watch(hm("23:02"))
-    check(e2.state_of()["opened_at"] == hm("23:00"), f"ответ в 22:30 — opened_at {e2.state_of().get('opened_at')}")
-    # ответ окном вопросов Зевса
-    e3 = Env()
-    open_night(e3, hm("23:20"), how="zeus")
-    e3.at_line(hm("23:25"), 0)
-    e3.watch(hm("23:25"))
-    check(e3.state_of().get("opened_at") == hm("23:20"), f"ответ Зевсу — {e3.state_of()}")
-
-
-def test_answer_no_and_file_only():
-    e = Env()
-    e.at_line(hm("22:00"), 0)
-    e.watch(hm("22:00"))
-    cid, h = next(iter(e.cards().items()))
-    e.board_answer(cid, h["options"][1], hm("22:20"))
-    e.watch(hm("22:25"))
-    st = e.state_of()
-    check(st["skipped"] == "ответ «Нет»" and st["answer"] == "нет", f"«Нет» — не пропущена: {st}")
-    check(e.cards()[cid]["status"] == "dropped", "карточка с «Нет» не закрыта")
-    e.watch(hm("23:00"))
-    check(len(e.sent()) == 1, "после «Нет» — повтор вопроса")
-    # ответ только в файле задачи — не ответ
-    e2 = Env()
-    e2.at_line(hm("22:00"), 0)
-    e2.watch(hm("22:00"))
-    cid, h = next(iter(e2.cards().items()))
-    P.tasks_mod().task_set(e2.pantheon, hm("22:10"), cid, {"answer": h["options"][0]}, actor="агент")
-    e2.at_line(hm("23:15"), 0)
-    e2.watch(hm("23:15"))
-    st = e2.state_of()
-    check(st["answer"] is None and not st.get("opened_at"), f"ответ в файле задачи засчитан: {st}")
-    # ответ в журнале на другой вопрос или чужой вариант — не ответ
-    e2.board_answer(cid, h["options"][0], hm("23:16"), question="Другой вопрос?")
-    e2.board_answer(cid, "Да, конечно", hm("23:17"))
-    e2.watch(hm("23:20"))
-    check(e2.state_of()["answer"] is None, "ответ на чужой вопрос или не из вариантов засчитан")
-    # строка Зевсу без пометки «окно вопросов» — не ответ
-    with open(os.path.join(e2.state, "owner-log", "zeus.md"), "a", encoding="utf-8") as fh:
-        fh.write(f"\n## {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(hm('23:21')))}\n\n"
-                 f"вопрос: [{cid}] {N.TITLE}\nответ: Да\n")
-    e2.watch(hm("23:25"))
-    check(e2.state_of()["answer"] is None, "строка Зевсу без «окно вопросов» засчитана")
-    e2.at_line(hm("00:00"), 0)
-    e2.watch(hm("00:00"))
-    check(e2.state_of()["skipped"], "без ответа из журнала ночь не пропущена")
-
-
-def test_answer_changed():
-    """Передумали: последний ответ до 00:00 решает — «Да» в 22:30, «Нет» в 22:50 — ночь пропущена."""
-    for both in (True, False):  # оба ответа к одному проходу или «Да» уже записан проходом 22:35
-        e = Env()
-        e.at_line(hm("22:00"), 0)
-        e.watch(hm("22:00"))
-        cid, h = next(iter(e.cards().items()))
-        e.board_answer(cid, h["options"][0], hm("22:30"))
-        if not both:
-            e.watch(hm("22:35"))
-            check(e.state_of()["answer"] == "да", f"«Да» в 22:30 не записан: {e.state_of()}")
-        e.board_answer(cid, h["options"][1], hm("22:50"))
-        e.watch(hm("22:55"))
-        e.at_line(hm("23:05"), 0)
-        e.watch(hm("23:05"))
-        st = e.state_of()
-        check(st["skipped"] == "ответ «Нет»" and st["answer"] == "нет" and not st.get("opened_at"),
-              f"«Да» 22:30, «Нет» 22:50 ({'один проход' if both else 'два прохода'}) — {st}")
-        check(not N.gate("autostart", hm("23:10"), heavy=0)[0], "после «Нет» gate пустил")
-        check(e.cards()[cid]["status"] == "dropped", f"карточка после «Нет»: {e.cards()[cid]['status']}")
-    # «Нет», потом «Да» — ночь уже пропущена и не открывается
-    e = Env()
-    e.at_line(hm("22:00"), 0)
-    e.watch(hm("22:00"))
-    cid, h = next(iter(e.cards().items()))
-    e.board_answer(cid, h["options"][1], hm("22:30"))
-    e.watch(hm("22:35"))
-    e.board_answer(cid, h["options"][0], hm("22:40"))
-    e.at_line(hm("23:05"), 0)
-    e.watch(hm("23:05"))
-    check(e.state_of()["skipped"] and not e.state_of().get("opened_at"), f"«Нет», затем «Да» — {e.state_of()}")
-
-
-def test_late_answer_first_pass():
-    """Ответ в журнале в 00:02, первый проход после него в 00:05 — ночь пропущена, не открыта."""
-    e = Env()
-    e.at_line(hm("22:00"), 0)
-    e.watch(hm("22:00"))
-    cid, h = next(iter(e.cards().items()))
-    e.board_answer(cid, h["options"][0], hm("00:02"))
-    e.at_line(hm("00:05"), 0)
-    e.watch(hm("00:05"))
-    st = e.state_of()
-    check(st["skipped"] == "нет ответа к 00:00" and st["answer"] is None and not st.get("opened_at"),
-          f"ответ в 00:02 — {st}")
-    check(not N.gate("autostart", hm("00:10"), heavy=0)[0], "ответ после 00:00 — gate пустил")
+    return None, None
 
 
 def test_budget():
@@ -519,7 +399,7 @@ def test_night_alerts_and_close():
     check(e.alerts().count("Ночь 15.10: потрачено") == 3, "тревога ночи повторилась")
     e.snap(hm("08:55"), u0 + 3.1, resets)
     rep = N.report_lines(hm("09:00"))
-    check(any(ln.startswith("Ночь 15.10: открыта с 23:05, потрачено 3 из 3 %") and "тревоги: 50 %, 80 %, 100 %" in ln
+    check(any(ln.startswith("Ночь 15.10: открыта с 23:00, потрачено 3 из 3 %") and "тревоги: 50 %, 80 %, 100 %" in ln
               for ln in rep), f"сводка: {rep}")
 
 
@@ -752,26 +632,20 @@ def oneshots(e):
 
 
 def test_pack_approved_0284():
-    """«Да» на вопрос ночи одобряет конкретную пачку: вопрос называет её, путь и sha256 — в состоянии ночи, после «Да» —
+    """Пачка, лежащая к 22:00, фиксируется сама (вопроса нет, [sb-simplify] п. 10): путь и sha256 — в состоянии ночи,
     ровно один разовый запуск её координатора на старт пачки (04:00) со сроком до конца ночи; ночью — только пачки."""
     e = _pack_env()
+    rel = f"directions/metis-x/night-{(EVENING + timedelta(days=1)).isoformat()}-pack.md"
+    check(N.pack_night(hm("21:50")) == [], "пачка до вечера — уже ночь пачек")
     e.at_line(hm("22:00"), 0)
     e.watch(hm("22:00"))
-    cid, h = next(iter(e.cards().items()))
-    rel = f"directions/metis-x/night-{(EVENING + timedelta(days=1)).isoformat()}-pack.md"
-    check("metis-x/night-" in h["options"][0] and h["options"][0].startswith("Да — открыть ночь с пачкой"),
-          f"вопрос не называет пачку: {h['options']}")
-    check("metis-0210" in h["why"] and "metis-0251" in h["why"] and "night-1019" not in h["why"].split("задачи")[-1],
-          f"задачи пачки в карточке: {h['why']}")
+    e.watch(hm("22:05"))
+    check(not e.cards(), f"карточка вопроса: {e.cards()}")
     st = e.state_of()
     check([p["path"] for p in st.get("packs") or []] == [rel] and st["packs"][0]["start"] == "04:00"
-          and len(st["packs"][0]["sha"]) == 64, f"пачка в состоянии: {st.get('packs')}")
-    check(not oneshots(e), "разовый запуск до ответа")
-    check(N.pack_night(hm("22:10")) == [], "пачка без «Да» — уже ночь пачек")
-    e.board_answer(cid, h["options"][0], hm("22:30"))
-    e.at_line(hm("22:35"), 0)
-    e.watch(hm("22:35"))
-    e.watch(hm("22:40"))
+          and len(st["packs"][0]["sha"]) == 64 and st["packs"][0]["tasks"] == ["metis-0210", "metis-0251"],
+          f"пачка в состоянии: {st.get('packs')}")
+    check("пачки: metis-x/night-" in e.alerts(), f"тревога не называет пачку: {e.alerts()}")
     items = oneshots(e)
     check(len(items) == 1, f"разовых запусков {len(items)}: {items}")
     if items:
@@ -779,39 +653,36 @@ def test_pack_approved_0284():
         check(it["target"] == "metis-x" and it["at"] == hm("04:00") and it["expires"] == hm("08:00")
               and it["pack"] == rel and it["sha"] == st["packs"][0]["sha"] and not it["done_at"],
               f"запись разового запуска: {it}")
-        check(rel in it["text"] and cid in it["text"] and "не согласие" in it["text"], f"задание: {it['text']}")
+        check(rel in it["text"] and "не согласие" in it["text"] and "ответил «Да»" not in it["text"],
+              f"задание: {it['text']}")
     check(e.state_of().get("pack_jobs") == [x["id"] for x in items], f"pack_jobs: {e.state_of().get('pack_jobs')}")
-    check([p["path"] for p in N.pack_night(hm("23:30"))] == [rel], "ночь с одобренной пачкой — pack_night пуст")
+    check([p["path"] for p in N.pack_night(hm("23:30"))] == [rel], "ночь с пачкой — pack_night пуст")
     check(N.oneshot_due(hm("03:59")) == [] and len(N.oneshot_due(hm("04:00"))) == 1, "время разового запуска")
     check(any("Разовый запуск pack-" in x for x in N.status_lines(hm("23:00"))), "pantheon night не показывает запуск")
-    # без строки «Старт» — в начале ночи; следующей ночью эта пачка уже одобрена — не предлагается снова
+    # без строки «Старт» — в начале ночи; следующей ночью эта пачка уже взята — не берётся снова
     e2 = _pack_env(start_line="")
     e2.at_line(hm("22:00"), 0)
     e2.watch(hm("22:00"))
-    cid2, h2 = next(iter(e2.cards().items()))
-    e2.board_answer(cid2, h2["options"][0], hm("22:05"))
-    e2.watch(hm("22:10"))
     check([x["at"] for x in oneshots(e2)] == [hm("23:00")], f"без «Старт» — не в начале ночи: {oneshots(e2)}")
     nxt = EVENING + timedelta(days=1)
     open(e2.pack.replace(nxt.isoformat(), (nxt - timedelta(days=1)).isoformat()), "w").write("старая\n")
-    check(N.packs(nxt) == [] , f"одобренная прошлой ночью пачка предложена снова: {N.packs(nxt)}")
+    check(N.packs(nxt) == [] , f"взятая прошлой ночью пачка взята снова: {N.packs(nxt)}")
     check([p["path"] for p in N.packs(EVENING)] == [p["path"] for p in e2.state_of()["packs"]], "пачка вечера")
 
 
-def test_pack_no_cancels_0284():
-    """«Нет» после «Да» до срока: ночь пропущена, разовый запуск пачки погашен без запуска."""
+def test_pack_skip_cancels_0284():
+    """Ночь пропущена (бюджета нет: последняя ночь перед сбросом, неделя у порога) — разовый запуск пачки погашен без
+    запуска."""
     e = _pack_env()
-    e.at_line(hm("22:00"), 0)
+    e.resets = hm("22:00") + 12 * 3600
+    e.snap(hm("22:00"), 85.0, e.resets)
     e.watch(hm("22:00"))
-    cid, h = next(iter(e.cards().items()))
-    e.board_answer(cid, h["options"][0], hm("22:30"))
-    e.watch(hm("22:35"))
-    e.board_answer(cid, N.NO_OPTION, hm("23:10"))
-    e.watch(hm("23:15"))
+    e.snap(hm("23:05"), 85.0, e.resets)
+    e.watch(hm("23:05"))
     items = oneshots(e)
-    check(len(items) == 1 and items[0]["done_at"] and "отменён" in (items[0]["result"] or ""),
-          f"«Нет» не погасил запуск пачки: {items}")
-    check(N.oneshot_due(hm("04:00")) == [] and N.pack_night(hm("23:30")) == [], "после «Нет» пачка ещё в ночи")
+    check(e.state_of()["skipped"] and len(items) == 1 and items[0]["done_at"] and "отменён" in (items[0]["result"] or ""),
+          f"пропуск ночи не погасил запуск пачки: {e.state_of()} {items}")
+    check(N.oneshot_due(hm("04:00")) == [] and N.pack_night(hm("23:30")) == [], "после пропуска пачка ещё в ночи")
 
 
 def test_oneshot_id_by_source_0284():

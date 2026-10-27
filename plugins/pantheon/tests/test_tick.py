@@ -474,6 +474,14 @@ def main():
           and "git push *" not in hb["excludedCommands"]
           and hq["hooks"]["PreToolUse"][0] == sa["hooks"]["PreToolUse"][0] and "worktree" not in hq
           and "~/ai/knowledge/me" not in hb["filesystem"]["denyRead"])
+    sw_hq = hb["filesystem"]["allowWrite"]
+    st_real = os.path.realpath(state)
+    check("окно штаба (metis-0523): из STATE пишет только locks/ и autostart-reset/ — настоящими путями; "
+          "stopped/, owner-log/, autostart.json и прочее состояние закрыты",
+          os.path.join(st_real, "locks") in sw_hq and os.path.join(st_real, "autostart-reset") in sw_hq
+          and [x for x in sw_hq if x == st_real or x.startswith(st_real + "/")]
+          == [os.path.join(st_real, "locks"), os.path.join(st_real, "autostart-reset")]
+          and not any(x.startswith(st_real + "/") for x in sa["sandbox"]["filesystem"]["allowWrite"]))
     check("окно штаба: мимо песочницы — прежний список пульта и gh PR (view/checks/edit), без сетевого git "
           "(metis-0064, metis-0247)",
           hb["excludedCommands"] == ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheon wake *",

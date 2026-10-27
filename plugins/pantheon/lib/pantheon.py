@@ -103,7 +103,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
   pantheon start zeus                   Пританей: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
-                                        start, дошедший до запуска сессии, пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2); красный замер или «нет сигнала» без слова — код 5 (отложено); в окне роли origin берётся из PANTHEON_ROLE, явный --from там только свой (hq → zeus, иная роль → tick); wake пишет строку замера и не откладывает, wake <имя> "задание" из окна роли без слова владельца — отказ (код 2)
+                                        start, дошедший до запуска сессии, пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2); красный замер или «нет сигнала» — только предупреждение (stderr, тревога раз в день), запуск идёт; в окне роли origin берётся из PANTHEON_ROLE, явный --from там только свой (hq → zeus, иная роль → tick); wake пишет строку замера и не откладывает, wake <имя> "задание" из окна роли без слова владельца — отказ (код 2)
   pantheon start <направление> --at ЧЧ:ММ [поручение]   разовый запуск плановым проходом вместо sleep в сессии;
                                         --at-list — записи, --at-cancel <id> — отменить (lib/night.py)
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
@@ -117,7 +117,6 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon wake hestia --task <id> [--dry-run]   Гестия в своём окне песочницы (settings/hestia.json) с открытой
                                         задачей; без задачи или с закрытой — отказ «нет задачи» (код 2); из окна
                                         роли — только по слову владельца в окне Зевса за 15 мин, иначе код 2;
-                                        из окна роли, кроме hq, со словом в красной зоне — код 5 «отложено» (повторите сами);
                                         из окна hq — как start --from zeus
   pantheon wake <направление> --task <id> [--dry-run]   направление с coordinator = false в directions.toml ведёт
                                         Пританей (metis-0155): start/wake координатора — отказ (код 2), а это поднимает
@@ -275,9 +274,11 @@ def lock(name, block=True):
     """flock на файле в ~/.local/state/pantheon/locks/. Отдаёт True, если блокировка взята."""
     try:
         os.makedirs(path("locks"), exist_ok=True)
-        fh = open(path("locks", name + ".lock"), "a")
+        # O_NOFOLLOW: locks/ теперь пишет и окно Зевса (metis-0523) — ссылка на месте файла замка не уведёт запись
+        fh = os.fdopen(os.open(path("locks", name + ".lock"), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+                               0o600), "a")
     except PermissionError as e:
-        # окно Зевса не пишет в locks/ (metis-0078): ждущую блокировку имени сессии pantheon stop берёт, чтобы подъём,
+        # окно, собранное до metis-0523, не пишет в locks/ (metis-0078): ждущую блокировку имени сессии pantheon stop берёт, чтобы подъём,
         # начатый до метки «остановлено», не проскочил после неё. Без права записи метка stopped/<имя> всё равно
         # ставится первой, а проскочить может только подъём, уже прошедший проверку метки в ту же секунду, — stop
         # идёт без блокировки с предупреждением. Замок alerts — тоже: строка тревоги дописывается одним write в режиме
@@ -2201,6 +2202,21 @@ def ssh_remote(folder):
     return False
 
 
+HQ_STATE_DIRS = ("locks", "autostart-reset")  # папки STATE, куда пишет окно Зевса (metis-0523)
+
+
+def hq_state_dirs():
+    """Настоящие пути STATE/locks и STATE/autostart-reset (создаются); ссылка или не папка — не даётся."""
+    out = []
+    for n in HQ_STATE_DIRS:
+        p = path(n)
+        with contextlib.suppress(OSError):
+            os.makedirs(p, exist_ok=True)
+        if os.path.isdir(p) and not os.path.islink(p):
+            out.append(os.path.realpath(p))
+    return out
+
+
 def _real_dir(p, roots, strict=False, create=False):
     """Папка от ~/ внутри одной из roots → её настоящий абсолютный путь; None — вне них, ссылка или папки нет.
     В настройки идёт настоящий путь, а не «~/…»: подмена папки ссылкой после сборки не сдвинет границу."""
@@ -2924,6 +2940,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hq = role_settings([root], None, memory, hq_cache, False, keys, None, guard)
     hq["sandbox"]["excludedCommands"] = list(HQ_EXCLUDED) + HQ_GH
     hq["sandbox"]["filesystem"]["denyWrite"] += [os.path.join(root, ".git"), os.path.join(root, "alerts.md")]
+    # [sb-simplify] п. 5 (metis-0523): замки и метки сброса самозапуска — в папки, куда окно Зевса пишет: без них
+    # `pantheon stop|resume|wake|start` из его окна падали с PermissionError на locks/ и autostart-reset/ (15.10–27.10).
+    # Только эти две папки STATE: журналы ваших слов, метки «остановлено вами» и остальное состояние — по-прежнему нет
+    hq["sandbox"]["filesystem"]["allowWrite"] += hq_state_dirs()
     hq["sandbox"]["network"]["allowedDomains"] = []
     # корпус лекций — чужой контент (SEC-13, metis-0025): у Зевса уже есть личное и действия наружу, поэтому корпус ему
     # закрыт (решение владельца 15.10) — guard corpus-role (команда corpus), хук qmd-query (поиск), а здесь — чтение
@@ -3827,11 +3847,10 @@ def start(rest):
                                                                                     плановым проходом (вместо sleep)
     Запуск сессии пишет замер в STATE/capacity.jsonl (сессий Пантеона, давление памяти, свободно %, своп). Откуда запуск:
     --from, а без него по окну — PANTHEON_ROLE=hq это zeus, другая роль tick, без роли owner; в окне роли --from owner
-    и любой --from, не совпадающий с origin окна (hq → zeus, иная роль → tick), не принимаются (код 2). Отказ, код 2: zeus без вашего слова в owner-log/zeus.md за 15 мин (и у --at при постановке);
-    красный замер (своп выше порога дежурного, давление не «норма») или «нет сигнала» (своп и давление не прочитаны) —
-    код 5 «отложено» (не сбой: самозапуск и разовый запуск повторяются), слово только у owner и zeus со словом.
-    Разовый запуск (--at) исполняется по правилам планового прохода: в красной зоне ждёт, слово при постановке
-    не переносится."""
+    и любой --from, не совпадающий с origin окна (hq → zeus, иная роль → tick), не принимаются (код 2). Отказ, код 2: zeus без вашего слова в owner-log/zeus.md за 15 мин (и у --at при постановке).
+    Красный замер (своп выше порога дежурного, давление не «норма») или «нет сигнала» — только предупреждение
+    (строка в stderr, тревога раз в день, red в замере): запуск не откладывается ([sb-simplify] п. 5, metis-0523).
+    Разовый запуск (--at) исполняется по правилам планового прохода, слово при постановке не переносится."""
     dry = "--dry-run" in rest
     restart = "--restart" in rest
     rest = [a for a in rest if a not in ("--dry-run", "--restart")]
@@ -3863,7 +3882,7 @@ def start(rest):
         if not dry:  # сессии не считаем: лишний claude agents ломает сценарии ожидания имени; слово и память — да
             code, why = start_gate(target, origin, None)
             if why:
-                print(f"pantheon start: {'отказ' if code == 2 else 'отложено'} — {why}", file=sys.stderr)
+                print(f"pantheon start: отказ — {why}", file=sys.stderr)
                 return code
         # штаб — ваша интерактивная сессия в iTerm: команда заменяет себя на claude в ~/ai/pantheon
         argv = [claude_bin(), "--agent", "hq", "--name", "zeus", "--settings", path("settings", "hq.json")]
@@ -3929,7 +3948,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     if not dry:  # metis-0261 А: слово владельца и замер — до любых действий; список сессий тот же, что ниже
         code, why = start_gate(name, origin, agents, need_word)
         if why:
-            print(f"{cmd}: {'отказ' if code == 2 else 'отложено'} — {why}", file=sys.stderr)
+            print(f"{cmd}: отказ — {why}", file=sys.stderr)
             return code
     same = [a for a in agents or [] if a.get("name") == name]
     live = live_copies(name, agents)
@@ -4065,7 +4084,7 @@ def capacity_log(row):
 NO_WORD_WHY = (f"запуск от Зевса без вашего слова в его окне за {OWNER_WORD_WINDOW // 60} мин "
                "(сообщение другой сессии согласием не считается)")
 START_REFUSED = 2   # отказ: нет слова владельца (--from zeus) — повтор бесполезен
-START_DEFERRED = 5  # отложено: красный замер памяти без слова владельца — повторит следующий плановый проход, не сбой
+START_DEFERRED = 5  # было «отложено по красной памяти»; с [sb-simplify] п. 5 start_gate его не отдаёт (код занят)
 # (3 и 4 заняты: NO_WINDOW и SKIPPED у resume_session, те же числа дошли бы до дежурного как коды запуска)
 
 
@@ -4074,9 +4093,11 @@ def start_gate(target, origin, agents, need_word=False):
     дошедшего до этого шага; ранние выходы — «остановлено вами», «нет окна», занятое имя — и продолжение через
     resume_session строки не пишут). → (код, причина); (0, None) — можно.
     Слово владельца: --from owner (по умолчанию) — он сам; --from zeus — его свежая запись в owner-log/zeus.md (без неё
-    отказ, код 2, всегда); tick слова не имеет и в красной зоне получает код 5 (отложено) при любом zeus.md.
+    отказ, код 2, всегда); tick слова не имеет.
     need_word (wake hestia из окна роли, не hq): запуск с поручением из окна роли — только по свежей записи в zeus.md,
-    без неё отказ, код 2, в любой зоне (как wake <имя> "задание"); со словом tick по-прежнему откладывается в красной."""
+    без неё отказ, код 2, в любой зоне (как wake <имя> "задание").
+    Память (своп, давление) — только предупреждение для любого origin: строка в stderr и тревога раз в день, запуск идёт
+    ([sb-simplify] п. 5, metis-0523; было — код 5 «отложено»)."""
     m = capacity_probe(agents)
     word = origin == "owner" or (origin == "zeus" and owner_spoke_recently("zeus", OWNER_WORD_WINDOW))
     code, why = 0, None
@@ -4085,12 +4106,15 @@ def start_gate(target, origin, agents, need_word=False):
     elif need_word and origin != "owner" and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
         code, why = START_REFUSED, (f"поручение из окна роли — только по вашему слову: в журнале Зевса нет вашей строки "
                                     f"за {OWNER_WORD_WINDOW // 60} мин (сообщение другой сессии согласием не считается)")
-    elif (m["red"] or m["unknown"]) and not word:
+    elif m["red"] or m["unknown"]:
+        # [sb-simplify] п. 5 (metis-0523): своп и давление памяти — только предупреждение, запуск не откладывается.
+        # Строка в stderr и одна тревога в день; от расхода держит потолок недели (night.gate), а не замер памяти
         reasons = "; ".join(m["red"]) if m["red"] else "нет сигнала: своп и давление памяти не прочитаны"
-        # wake hestia (need_word) никто не повторяет — не обещать самозапуск (ревью #110, круг 6)
-        again = "слово в окне Зевса из окна роли красную зону не снимает; повторите после нормы памяти" if need_word else "самозапуск повторит позже"
-        code, why = START_DEFERRED, (f"память Mac в красной зоне ({reasons}) — запуск только со словом владельца, "
-                                     f"{again}")
+        print(f"pantheon start: предупреждение — память Mac в красной зоне ({reasons}), {target} запускается",
+              file=sys.stderr)
+        with contextlib.suppress(OSError):  # тревога — подсказка: её сбой запуск не держит
+            alert_once("start-memory-red", stamp()[:10], f"запуски идут при красной памяти Mac ({reasons}) — "
+                       f"предупреждение, не отказ; первый за день: {target}", "pantheon-start")
     capacity_log({"t": round(now(), 1), "at": stamp(), "target": target, "origin": origin, "sessions": m["sessions"],
                   "pressure": m["pressure"], "free_pct": m["free_pct"], "swap_gb": None if m["swap_gb"] is None
                   else round(m["swap_gb"], 2), "red": bool(m["red"]),

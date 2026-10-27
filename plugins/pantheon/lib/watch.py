@@ -3,7 +3,9 @@
   pantheon watch [--dry-run]  задача тика раз в 5 мин (SCHED-09): снимок `claude agents` для строки статуса и
                             `pantheon who` (COMM-14), ждущие и упавшие сессии Пантеона, давно не обновлённый и длинный
                             STATUS.md, swap и открытые подключения (COMM-13), копии worktree (QA-05), смена версии
-                            Claude Code (SCOUT-05, SEC-16), паузы по нагрузке (COST-04), самозапуск координаторов,
+                            Claude Code (SCOUT-05, SEC-16), паузы по нагрузке (COST-04), самозапуск координаторов
+                            (задачу с owner другой сессии не отдаёт, metis-0564), окна по вашему ответу «Да» на
+                            «[id] Запустить|Перезапустить|Вернуть <направление>» в окне вопросов (metis-0523),
                             метка технического перезапуска, передача «ждёт вас» Зевсу (metis-0277), перезапуск свободных окон после обновления плагинов
                             (metis-0181), уборка: claude rm сессий Пантеона, закончивших ход или остановленных
                             больше 2 ч назад (metis-0250); раз в сутки — журналы ваших слов (COMM-10).
@@ -276,6 +278,8 @@ def _watch(dry=False):
               ("перезапуск после обновления плагинов", lambda: plugins_respawn(agents, doms, t)),
               ("ночь", lambda: P.night_mod().watch(agents, reg, doms, t)),
               ("разовые запуски", lambda: oneshots(agents, reg, doms, t)),
+              # после разовых (они чистят ONESHOT_STARTED), до самозапуска: поднятое здесь самозапуск не тронет
+              ("окна по вашему ответу", lambda: word_launch(agents, reg, doms, t)),
               ("самозапуск", lambda: autostart(agents, reg, doms, t)),
               ("возобновление после недельного лимита", lambda: awake().limit_resume(agents, reg, doms, t)),
               ("возобновление ждущих сессий", lambda: awake().wake_waiting(agents, reg, doms, t)),
@@ -1244,7 +1248,9 @@ def zeus_clean(agents, t):
 # сразу и трёх сессий всего, пауза выше лимита, под паузой и при техперезапуске, «остановлено вами» не будит, без
 # доверия к папке — тревога вместо запуска. Сбой (сессия не стартовала или упала раньше 30 мин) — пауза растёт 1 ч →
 # 2 ч → 4 ч, после трёх подряд самозапуск направления встаёт до `pantheon resume <имя>` или `pantheon wake <имя>`.
-# Каждый самозапуск — строка в alerts.md (её Зевс несёт в сводку).
+# Каждый самозапуск — строка в alerts.md (её Зевс несёт в сводку). Задачу, которую ведёт другая сессия (owner не пуст, не
+# само направление и не его команда — TEAM_OWNERS), координатору не отдаёт: строка «не отдаю координатору» (metis-0564).
+# Красная память Mac самозапуск не откладывает — pantheon start только предупреждает ([sb-simplify] п. 5).
 
 def sanction_since(t, preview=False):
     p = P.path("autostart-since")
@@ -1390,7 +1396,7 @@ ONESHOT_STARTED = []  # направления, поднятые разовым 
 def oneshots(agents, registry, doms, t):
     """Разовые запуски (metis-0284, STATE/oneshot.json — lib/night.py): пришло время — поднять направление один раз.
     Запись гасится до запуска, повторный проход её не повторит. Пока нельзя (шлюз недели и ночи, сессия занята, одна
-    за проход) — ждёт до срока; после срока гаснет с тревогой. Пачка ночи, изменённая после «Да», не запускается.
+    за проход) — ждёт до срока; после срока гаснет с тревогой. Пачка ночи, изменённая после фиксации вечером, не запускается.
     Закрытый недельный запор — запись ждёт до срока (не гасится). Код возврата запуска ≠0: запись уже погашена
     (повтора нет), владельцу — уведомление «не вышел»."""
     N = P.night_mod()
@@ -1402,7 +1408,7 @@ def oneshots(agents, registry, doms, t):
         if d not in doms:
             bad = f"нет направления «{d}» в domains.json"
         elif it.get("pack") and N._sha(os.path.join(P.PANTHEON, it["pack"])) != it.get("sha"):
-            bad = f"пачка {it['pack']} изменилась после «Да» — владелец одобрял другой текст"
+            bad = f"пачка {it['pack']} изменилась после фиксации в начале вечера — запускался бы не тот текст"
         elif it.get("night"):
             st = N.load(date.fromisoformat(it["night"]))
             if st.get("skipped"):
@@ -1433,12 +1439,7 @@ def oneshots(agents, registry, doms, t):
             rc = P.resume_session(d, poke, it["text"], "tick", recheck=recheck(d, True, nudge=True))[0]
         else:
             rc = resume_or_start(d, agents, it["text"], origin="tick", auto=True)
-        if rc == P.START_DEFERRED and not poke:  # память Mac красная (metis-0261): не сбой, запись остаётся в очереди
-            why = "память Mac в красной зоне — pantheon start отложил запуск"
-            N.oneshot_update(oid, t, done_at=None, result=None, wait=why)
-            P.alert_once(f"oneshot-red-{oid}", today(t), f"разовый запуск {oid} ждёт: {why} (срок "
-                         f"{P.stamp(float(it['expires']))[11:]})", "watch")
-            continue
+        # красная память запуск больше не откладывает ([sb-simplify] п. 5): pantheon start только предупреждает
         res = ("передано задание простаивающей сессии" if poke else "запущен") if rc == 0 else f"не вышло, код {rc}"
         N.oneshot_update(oid, t, result=res)
         P.alert(f"разовый запуск {oid}: {d} — {res}" + (f" (пачка {it['pack']})" if it.get("pack") else ""), "watch")
@@ -1448,6 +1449,20 @@ def oneshots(agents, registry, doms, t):
             awake().RESUMED.append(d)
         ONESHOT_STARTED.append(d)
         started = True
+
+
+# metis-0564: кто входит в команду координатора — его лиды и исполнители (субагенты его сессии). Задачу с таким
+# owner координатор и ведёт; задачу другой сессии (agent-kit-62, zeus, «вы», другое направление, мастерская daedalus-*,
+# hestia) самозапуск его сессии не отдаёт.
+TEAM_OWNERS = ("hephaestus", "apollo", "dev", "talos", "argus", "codex")
+
+
+def owner_elsewhere(h, d):
+    """owner задачи, если её ведёт не координатор направления d и не его команда; иначе None."""
+    o = str(h.get("owner") or "").strip().lower()
+    if not o or o == d or o.split("-")[0] in TEAM_OWNERS:
+        return None
+    return o
 
 
 def push_key(h, pos):
@@ -1477,10 +1492,15 @@ def autostart(agents, registry, doms, t, dry=False):
         tasks = {}
     since = sanction_since(t, preview=dry)
     marked = owner_marked(since)
-    want, off, hq = {}, P.hq_led(), {}
+    want, off, hq, other = {}, P.hq_led(), {}, {}
     for tid in marked:  # порядок отметок владельца
         h = (tasks.get(tid) or (None, {}, None))[1]
         d = h.get("direction")
+        if h.get("status") in ("todo", "doing") and d in doms and owner_elsewhere(h, d):
+            # metis-0564: задачу ведёт другая сессия (agent-kit-62, Зевс, вы, другое направление) — координатору
+            # направления её не отдаём, и места в очереди его самозапуска она не держит
+            other.setdefault(d, []).append(f"{tid} ({owner_elsewhere(h, d)})")
+            continue
         if h.get("status") in ("todo", "doing") and d in doms:
             # metis-0155: координатора у направления, которое ведёт Пританей, нет — самозапуск его не поднимает
             (hq if d in off else want).setdefault(d, []).append(tid)
@@ -1490,6 +1510,8 @@ def autostart(agents, registry, doms, t, dry=False):
     for d, v in sorted(hq.items()):
         say(f"{d}: ведёт Пританей (coordinator = false) — самозапуск не поднимает, задачи {', '.join(v)}: "
             f"pantheon wake {d} --task <id>")
+    for d, v in sorted(other.items()):
+        say(f"{d}: не отдаю координатору — задачи ведёт другая сессия (owner): {', '.join(v)}")
     say(f"решения владельца учитываются с {P.stamp(since)}; задачи с ними: "
         + ("; ".join(f"{d}: {', '.join(v)}" for d, v in sorted(want.items())) or "нет"))
     running = [d for d in doms if holders(d, agents, registry) or d in ONESHOT_STARTED]
@@ -1595,7 +1617,6 @@ def autostart(agents, registry, doms, t, dry=False):
         task = (f"Самозапуск дежурным по задачам с вашим решением (сначала зависимости, затем приоритет, порядок пачки и ваших отметок, запас последним; "
                 f"цепочку веди сама, не режь): следующая: {tids[0]}. Все: {', '.join(tids)}. Прочитай STATUS.md и "
                 "задачи, продолжай с первой по приоритету; что ждёт владельца — Зевсу строкой.")
-        prev = {k: s.get(k) for k in ("last", "pending")}
         s.update(last=t, pending=True)
         P.write_json(P.path("autostart.json"), st)  # до запуска: проход могут оборвать по таймауту
         if poke:  # тот же путь, что продолжение остановленной: claude respawn + текст для хука push (P.resume_session)
@@ -1604,18 +1625,9 @@ def autostart(agents, registry, doms, t, dry=False):
                                     f"передать задание не вышло, код {rc}"), "watch")
         else:
             rc = resume_or_start(d, agents, task, origin="tick", auto=True)
-            if rc != P.START_DEFERRED:
-                P.alert(f"самозапуск: {d} по задачам {', '.join(tids[:5])} — " + ("запущен" if rc == 0 else
-                                                                                   f"не вышло, код {rc}"), "watch")
-        # память Mac красная (metis-0261): не сбой, без счёта и паузы — повторит плановый проход
-        if rc == P.START_DEFERRED and not poke:
-            s.update(prev)
-            if prev["last"] is None:
-                s.pop("last", None)
-            P.alert_once(f"autostart-red-{d}", today(t), f"самозапуск {d} ждёт: память Mac в красной зоне (pantheon "
-                         "start отложил запуск)", "watch")
-            P.write_json(P.path("autostart.json"), st)
-            continue
+            P.alert(f"самозапуск: {d} по задачам {', '.join(tids[:5])} — " + ("запущен" if rc == 0 else
+                                                                               f"не вышло, код {rc}"), "watch")
+        # красная память запуск не откладывает ([sb-simplify] п. 5, metis-0523): pantheon start только предупреждает
         if rc != 0:
             fail(d, s, t, f"код запуска {rc}")
         else:  # список сессий этого прохода её ещё не видит — «запрет сна Mac» держится по этой метке
@@ -1625,6 +1637,117 @@ def autostart(agents, registry, doms, t, dry=False):
         started = True
     if not dry:
         P.write_json(P.path("autostart.json"), st)
+
+
+# --- окна по вашему ответу в окне вопросов (metis-0523, [sb-simplify] п. 5, решение владельца 27.10 «(а)») -----------
+# Зевс спрашивает окном вопросов «[<id>] Перезапустить athena-x? …» (глагол сразу после [id]: запустить | поднять |
+# перезапустить | вернуть, затем имя направления). Ваш ответ «Да…» хук answer пишет в owner-log/zeus.md с пометкой
+# «окно вопросов» — роли её не подделать. Плановый проход (вне песочницы окон) по такой записи сам поднимает окно:
+# запустить/поднять — продолжение остановленной сессии или новая (как самозапуск), перезапустить — pantheon start
+# --restart, вернуть — снять метку «остановлено вами» и счётчик сбоев самозапуска, затем поднять. Окну Зевса и СБ
+# команды запуска для этого не нужны. Каждое поручение — строка word-launch в logs/start.log и строка в alerts.md;
+# запись исполняется один раз (word-launch.json), только не старше WORD_LAUNCH_HOURS и не раньше включения прохода
+# (word-launch-since: старые «да» после выпуска никого не поднимают). Ответ не «Да» и неизвестное имя — без запуска.
+WORD_LAUNCH_Q = re.compile(r"вопрос: \[([^\]\s]{1,40})\]\s*(запустить|поднять|перезапустить|вернуть)\s+([a-z][a-z0-9-]{0,40})",
+                           re.I)
+WORD_LAUNCH_YES = re.compile(r"ответ:\s*да(?![а-яё\w])", re.I)
+WORD_LAUNCH_HOURS = 12
+WORD_LAUNCH_MAX = 3  # поручений за проход — не больше
+
+
+def word_orders(t):
+    """Записи «окно вопросов» в zeus.md с поручением запуска → [(ключ, время, id, глагол, имя, ответ)], старые первыми."""
+    p = P.path("word-launch-since")
+    try:
+        since = float(open(p).read().strip())
+    except (OSError, ValueError):
+        since = t
+        P.write_atomic(p, f"{int(t)}\n")
+    since = max(since, t - WORD_LAUNCH_HOURS * 3600)
+    try:
+        text = open(P.path("owner-log", "zeus.md"), encoding="utf-8").read()
+    except (OSError, UnicodeDecodeError):
+        return []
+    out = []
+    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
+    for i, m in enumerate(heads):
+        if m.group(2).strip() != "· окно вопросов":
+            continue
+        try:
+            ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+        except ValueError:
+            continue
+        if ts < since or ts > t + 60:
+            continue
+        body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
+        q = WORD_LAUNCH_Q.match(body)
+        a = re.search(r"^ответ: (.*)$", body, re.M)
+        if not q or not a:
+            continue
+        qid, verb, name = q.group(1).lower(), q.group(2).lower(), q.group(3).lower()
+        out.append((f"{m.group(1)}|{qid}|{name}", m.group(1), qid, verb, name, a.group(1).strip(),
+                    bool(WORD_LAUNCH_YES.match(a.group(0)))))
+    return out
+
+
+def word_launch(agents, registry, doms, t):
+    """Поручения запуска из ваших ответов в окне вопросов — исполнить (см. блок выше)."""
+    sp = P.path("word-launch.json")
+    st = P.read_json(sp, {})
+    done = st.get("done") if isinstance(st.get("done"), dict) else {}
+    orders = [o for o in word_orders(t) if o[0] not in done]
+    n = 0
+    for key, ts, qid, verb, name, ans, yes in orders:
+        if not yes:
+            res = f"не исполняю: ответ «{ans[:60]}», а не «Да»"
+        elif name not in doms:
+            res = "не исполняю: нет такого направления в domains.json"
+        elif n >= WORD_LAUNCH_MAX:
+            break  # остальные — следующим проходом
+        else:
+            n += 1
+            res = _word_do(verb, name, qid, ts, ans, agents, registry)
+        done[key] = {"t": t, "result": res}
+        P.start_log(f"word-launch\t{name}\t{verb}\t{qid}\t{ts}\t{res}")
+        P.alert(f"по вашему ответу в окне вопросов ({ts}, [{qid}]): {verb} {name} — {res}", "watch")
+        cut = t - 2 * WORD_LAUNCH_HOURS * 3600
+        st["done"] = {k: v for k, v in done.items() if float((v or {}).get("t") or 0) >= cut}
+        P.write_json(sp, st)  # после каждого поручения: проход могут оборвать, повтора запуска быть не должно
+
+
+def _word_do(verb, name, qid, ts, ans, agents, registry):
+    text = (f"[Пантеон: запуск по ответу владельца в окне вопросов {ts}, [{qid}] — «{ans[:80]}»] "
+            f"Продолжай работу; поручение и контекст — pantheon task show {qid}, свои входящие и STATUS.md.")
+    if verb == "вернуть":
+        _forget_autostart(name)
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(P.path("stopped", name))
+            info = P.read_json(P.path("stopped-all.json"), None)
+            if info and name in (info.get("names") or []):
+                info["names"].remove(name)
+                P.write_json(P.path("stopped-all.json"), info)
+    elif os.path.exists(P.path("stopped", name)):
+        return "не исполняю: «остановлено вами» — снимает только ответ «вернуть»"
+    if verb == "перезапустить":
+        try:
+            r = subprocess.run([os.path.join(P.PLUGIN, "bin", "pantheon"), "start", name, "--from", "tick", "--restart",
+                                text], capture_output=True, text=True, timeout=start_timeout(), env=P.claude_env())
+        except subprocess.TimeoutExpired:
+            return f"pantheon start --restart не уложился в {start_timeout():.0f} с"
+        tail = (r.stderr or r.stdout).strip().splitlines()
+        if r.returncode == 0:
+            ONESHOT_STARTED.append(name)
+        return "перезапущено" if r.returncode == 0 else f"не вышло, код {r.returncode}" + (f": {tail[-1][:160]}" if tail else "")
+    if name in ONESHOT_STARTED or name in awake().RESUMED:
+        return "уже поднято этим проходом"
+    if P.live_copies(name, agents, registry=registry):
+        return "уже работает — не трогаю (перезапуск — ответ на «перезапустить»)"
+    rc = resume_or_start(name, agents, text, origin="tick")
+    if rc == 0:
+        awake().RESUMED.append(name)
+        ONESHOT_STARTED.append(name)  # самозапуск этого прохода направление не тронет
+        return "поднято"
+    return f"не вышло, код {rc}"
 
 
 def resume_or_start(name, agents, text, origin, only_resume=False, auto=False):
