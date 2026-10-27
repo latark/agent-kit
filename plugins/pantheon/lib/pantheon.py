@@ -410,12 +410,32 @@ def clean_path(path_value, plugin_dir=None):
     return ":".join(out)
 
 
+def nvm_bin():
+    """bin версии node по умолчанию из nvm (alias/default, иначе новейшая): там node, pnpm и corepack. Окна запускает
+    launchd без ~/.zprofile, и nvm в их PATH не было — `pnpm check` разработчика не находил pnpm (metis-0563)."""
+    root = os.path.join(os.environ.get("NVM_DIR") or os.path.join(HOME, ".nvm"), "versions", "node")
+    try:
+        vers = sorted((v for v in os.listdir(root) if v.startswith("v")), key=lambda v: _vkey(v[1:]))
+    except OSError:
+        return None
+    try:
+        want = open(os.path.join(os.path.dirname(os.path.dirname(root)), "alias", "default")).read().strip().lstrip("v")
+    except OSError:
+        want = ""
+    pick = [v for v in vers if want and (v[1:] == want or v[1:].startswith(want + "."))]
+    v = (pick or vers or [None])[-1]
+    return os.path.join(root, v, "bin") if v else None
+
+
 def run_env():
     env = dict(os.environ)
     if env.get("PATH"):
         env["PATH"] = clean_path(env["PATH"])
     extra = [os.path.join(installed_plugin_dir(), "bin"), os.path.dirname(sys.executable), "/opt/homebrew/bin",
              os.path.join(HOME, ".local", "bin")]
+    nvm = nvm_bin()
+    if nvm and nvm not in (env.get("PATH") or "").split(":"):
+        extra.insert(1, nvm)
     env["PATH"] = ":".join(extra + [env.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin"])
     env["PANTHEON_PYTHON"] = sys.executable  # bin/pantheon дочерних задач берёт тот же интерпретатор (lib/find-python.sh)
     return env
