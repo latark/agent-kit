@@ -192,6 +192,7 @@ PANTHEON_NO_NOTIFY — без уведомлений, PANTHEON_NOTIFY_LOG — у
 """
 import collections
 import contextlib
+import errno
 import fcntl
 import fnmatch
 import glob
@@ -278,7 +279,9 @@ def path(*parts):
 # UnsafeFile, и файл не тронут. Ждущий замок в hq-rw ждёт не дольше HQ_LOCK_WAIT: окно не повесит проход.
 HQ_RW = "hq-rw"
 HQ_RW_DIRS = ("locks", "autostart-reset")
-HQ_LOCK_WAIT = 60.0  # с
+HQ_LOCK_WAIT = float(os.environ.get("PANTHEON_HQ_LOCK_WAIT") or 60)  # с; переменная — для тестов
+# errno, которые даёт подложенная запись (ссылка, FIFO без читателя, папка, не папка на месте папки) — это UnsafeFile
+HQ_BAD_ERRNO = {errno.ELOOP, errno.ENXIO, errno.EISDIR, errno.ENOTDIR, errno.EMLINK, errno.EOPNOTSUPP}
 
 
 class UnsafeFile(OSError):
@@ -295,10 +298,21 @@ def hq_open(sub, fname):
     if sub not in HQ_RW_DIRS or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}", fname or ""):
         raise UnsafeFile(f"{sub}/{fname}: имя не по образцу")
     d = path(HQ_RW, sub)
-    os.makedirs(d, mode=0o700, exist_ok=True)
-    dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileExistsError:
+        raise UnsafeFile(f"{sub}: на месте папки не папка") from None
+    except OSError as e:
+        if e.errno in HQ_BAD_ERRNO:
+            raise UnsafeFile(f"{sub}: на месте папки ссылка или не папка ({e.strerror})") from None
+        raise
     try:
         fd = os.open(fname, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=dfd)
+    except OSError as e:
+        if e.errno in HQ_BAD_ERRNO:
+            raise UnsafeFile(f"{sub}/{fname}: ссылка, FIFO или папка ({e.strerror})") from None
+        raise
     finally:
         os.close(dfd)
     st = os.fstat(fd)
@@ -309,17 +323,27 @@ def hq_open(sub, fname):
 
 
 def hq_mark(sub, fname, text):
-    """Метка в STATE/hq-rw/<sub>: подложенную ссылку на месте имени снимаем (unlink ссылку не проходит) и пишем заново."""
+    """Метка в STATE/hq-rw/<sub>: подложенную запись на месте имени (ссылку, FIFO, жёсткую ссылку) снимаем через
+    дескриптор папки (unlink ссылку не проходит) и пишем заново. Не вышло — предупреждение и False, без исключения."""
     try:
-        fd = hq_open(sub, fname)
-    except UnsafeFile:
-        with contextlib.suppress(FileNotFoundError, IsADirectoryError, PermissionError):
-            os.unlink(path(HQ_RW, sub, fname))
-        fd = hq_open(sub, fname)
-    try:
-        os.write(fd, text.encode())
-    finally:
-        os.close(fd)
+        try:
+            fd = hq_open(sub, fname)
+        except UnsafeFile:
+            dfd = os.open(path(HQ_RW, sub), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                with contextlib.suppress(OSError):
+                    os.unlink(fname, dir_fd=dfd)
+            finally:
+                os.close(dfd)
+            fd = hq_open(sub, fname)
+        try:
+            os.write(fd, text.encode())
+        finally:
+            os.close(fd)
+        return True
+    except OSError as e:
+        print(f"pantheon: метка {sub}/{fname} не записана — {e}", file=sys.stderr)
+        return False
 
 
 @contextlib.contextmanager
@@ -337,14 +361,19 @@ def lock(name, block=True):
         print(f"pantheon: замок {name} не взят — {e}", file=sys.stderr)
         yield False
         return
-    except PermissionError as e:
+    except OSError as e:
+        if not (isinstance(e, PermissionError) and block and (name.startswith("start-") or name == "alerts")):
+            if not shared:
+                raise
+            # любой иной сбой на пути hq-rw — отказ замка с предупреждением, а не падение start и прохода
+            print(f"pantheon: замок {name} не взят — {type(e).__name__}: {e}", file=sys.stderr)
+            yield False
+            return
         # окно без записи в папку замков (собранное до metis-0523, metis-0078): ждущую блокировку имени сессии pantheon
         # stop берёт, чтобы подъём, начатый до метки «остановлено», не проскочил после неё. Без права записи метка
         # stopped/<имя> всё равно ставится первой, а проскочить может только подъём, уже прошедший проверку метки в ту
         # же секунду, — stop идёт без блокировки с предупреждением. Замок alerts — тоже: строка тревоги дописывается
         # одним write в режиме append, она не рвётся. Неблокирующие замки (start, тик) и git без файла не берутся.
-        if not (block and (name.startswith("start-") or name == "alerts")):
-            raise
         where = path(HQ_RW, "locks") if shared else path("locks")
         print(f"pantheon: нет права записи в {where.replace(HOME, '~')} ({e.strerror}) — работаю без "
               f"блокировки {name}: подъём этой же сессии в ту же секунду может проскочить", file=sys.stderr)
@@ -4012,7 +4041,8 @@ def start(rest):
     # проверка и запуск — под блокировкой имени: тик и Зевс не запустят две копии одновременно
     with lock("start-" + name, block=False) as got:
         if not got:
-            print(f"pantheon start: {name} уже запускается другой командой", file=sys.stderr)
+            print(f"pantheon start: {name} — замок имени не взят: уже запускается другой командой или запись замка "
+                  f"подложена (строка выше)", file=sys.stderr)
             return 1
         return _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win)
 

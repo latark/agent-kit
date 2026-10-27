@@ -2004,10 +2004,14 @@ def stop(rest, who):
                         and is_pantheon(a.get("name") or "", doms) and not (a.get("name") or "").startswith("zeus")})
         marked = []
         left_all = []
+        refused = []
         for n in names:
             if not os.path.exists(P.path("stopped", n)):
                 marked.append(n)
-            left_all += [(n, i, r) for i, r in _stop_one(n, agents, who)[1]]
+            cnt, lft = _stop_one(n, agents, who)
+            if cnt is None:
+                refused.append(n)
+            left_all += [(n, i, r) for i, r in lft]
         prev = P.read_json(P.path("stopped-all.json"), {}).get("names") or []
         old = P.read_json(P.path("stopped-all.json"), {})
         P.write_json(P.path("stopped-all.json"), {"time": P.stamp(), "by": who, "names": sorted(set(prev) | set(marked)),
@@ -2020,7 +2024,10 @@ def stop(rest, who):
                 "pantheon resume --all", "pantheon-stop")
         print(f"остановлены: {', '.join(names) or 'никого'}; планировщик на паузе. Вернуть: pantheon resume --all"
               + "".join(f"\n{n}: осталась среди фоновых сессий Claude Code: {i}, причина: {r}" for n, i, r in left_all))
-        return 0
+        for n in refused:
+            P.alert(_stop_refused_text(n), "pantheon-stop")
+            print(f"pantheon stop: {_stop_refused_text(n)}", file=P.sys.stderr)
+        return 1 if refused else 0
     if not rest or not P.SESSION_NAME.fullmatch(rest[0]):
         print("pantheon stop <направление|daedalus-задача> | --all", file=P.sys.stderr)
         return 2
@@ -2029,6 +2036,10 @@ def stop(rest, who):
         print(f"pantheon stop: {name} — не сессия направления или мастерской", file=P.sys.stderr)
         return 2
     n, left = _stop_one(name, agents, who)
+    if n is None:
+        P.alert(_stop_refused_text(name), "pantheon-stop")
+        print(f"pantheon stop: {_stop_refused_text(name)}", file=P.sys.stderr)
+        return 1
     if left:
         P.alert(f"{name}: осталась среди фоновых сессий Claude Code ({', '.join(sorted({P.refused_by(r) for _, r in left}))}): "
                 f"{'; '.join(i + ' — ' + r for i, r in left)}",
@@ -2041,9 +2052,20 @@ def stop(rest, who):
 
 
 def _stop_one(name, agents, who):
-    # та же блокировка имени, что у pantheon start и подъёма сессии: подъём, начатый до метки, не проскочит после неё
-    with P.lock("start-" + name):
+    """Та же блокировка имени, что у pantheon start и подъёма сессии: подъём, начатый до метки, не проскочит после неё.
+    Замок не взят (занят дольше P.HQ_LOCK_WAIT или подложенная запись в hq-rw) — вслепую не останавливаем: ставим только
+    метку «остановлено вами» (новые запуски не пойдут) и отдаём (None, []) — вызывающий выходит с кодом 1."""
+    with P.lock("start-" + name) as got:
+        if not got:
+            os.makedirs(P.path("stopped"), exist_ok=True)
+            P.write_atomic(P.path("stopped", name), f"{P.stamp()} {who}\n")
+            return None, []
         return _stop_locked(name, agents, who)
+
+
+def _stop_refused_text(name):
+    return (f"{name} не остановлена: замок имени start-{name} занят (идёт запуск?) или не взят — сессии не тронуты, "
+            f"метка «остановлено вами» стоит, новых запусков не будет; повторите pantheon stop {name}")
 
 
 def _stop_locked(name, agents, who):

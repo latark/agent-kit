@@ -1216,9 +1216,11 @@ def test_stop_without_locks_write():
         check(["stop", "nlnlnlnl"] in e.calls(), "stop без записи в locks не остановил сессию")
         check("нет права записи" in r.stderr and "start-nl-dir" in r.stderr and "Traceback" not in r.stderr,
               f"нет понятного предупреждения: {r.stderr[-300:]}")
-        # неблокирующий замок без файла по-прежнему отказ, а не молчаливое «взял»
+        # неблокирующий замок без файла — отказ с кодом 1 и предупреждением, а не молчаливое «взял» и не падение
+        os.remove(e.st("stopped", "nl-dir"))
         r2 = e.run("start", "nl-dir", t=T0)
-        check("Traceback" in r2.stderr or r2.returncode != 0, f"start без locks прошёл молча: {r2.stdout} {r2.stderr[-200:]}")
+        check(r2.returncode == 1 and "Traceback" not in r2.stderr and "замок start-nl-dir не взят" in r2.stderr,
+              f"start без записи в замки: {r2.returncode} {r2.stdout} {r2.stderr[-200:]}")
     finally:
         os.chmod(locks, 0o700)
 
@@ -1358,6 +1360,60 @@ def test_lock_symlink_refused_0523():
     out = (r.stdout.strip().splitlines() or [""])[-1].split()
     check(out[:1] == ["False"] and len(out) == 2 and float(out[1]) < 5,
           f"0523: ждущий замок в hq-rw: {r.stdout!r} {r.stderr[-300:]}")
+
+
+def test_hq_rw_bad_entries_0523():
+    """Ревью безопасности (metis-0523): подложенная в STATE/hq-rw запись — FIFO, папка, ссылка на месте замка, файл на
+    месте папки autostart-reset — замок не берётся с предупреждением, start выходит с кодом 1, плановый проход и
+    resume не падают (ELOOP/ENXIO/EISDIR/ENOTDIR → UnsafeFile)."""
+    e = Env()
+    e.direction("bd-dir")
+    hl = e.st("hq-rw", "locks")
+    os.makedirs(hl, exist_ok=True)
+    p = os.path.join(hl, "start-bd-dir.lock")
+    for kind in ("fifo", "dir", "link"):
+        if os.path.islink(p) or os.path.isfile(p) or (os.path.exists(p) and not os.path.isdir(p)):
+            os.remove(p)
+        elif os.path.isdir(p):
+            os.rmdir(p)
+        if kind == "fifo":
+            os.mkfifo(p)
+        elif kind == "dir":
+            os.mkdir(p)
+        else:
+            os.symlink(e.st("nowhere"), p)
+        r = e.run("start", "bd-dir", t=T0)
+        check(r.returncode == 1 and "Traceback" not in r.stderr and "замок start-bd-dir не взят" in r.stderr
+              and "замок имени не взят" in r.stderr.strip().splitlines()[-1] and not _bgs(e, "bd-dir"),
+              f"0523: {kind} на месте замка: {r.returncode} {r.stderr[-300:]}")
+    os.mkdir(os.path.join(hl, "wake.lock"))
+    r = e.run("watch", t=T0)
+    check(r.returncode == 0 and "Traceback" not in r.stderr + r.stdout and "упала" not in e.alerts(),
+          f"0523: папка на месте wake.lock уронила проход: {r.returncode} {r.stderr[-300:]} {e.alerts()[-300:]}")
+    open(e.st("hq-rw", "autostart-reset"), "w").write("x")
+    r = e.run("resume", "bd-dir", t=T0)
+    check("Traceback" not in r.stderr and "метка autostart-reset/bd-dir не записана" in r.stderr,
+          f"0523: файл на месте autostart-reset уронил resume: {r.returncode} {r.stderr[-300:]}")
+
+
+def test_stop_lock_busy_fail_closed_0523():
+    """Ревью безопасности (metis-0523): замок имени в hq-rw занят дольше PANTHEON_HQ_LOCK_WAIT — pantheon stop не
+    останавливает вслепую: код 1, причина последней строкой, сессии не тронуты, метка «остановлено вами» стоит (новые
+    запуски не пойдут), тревога. Замок свободен — stop останавливает."""
+    import fcntl
+    e = Env()
+    e.direction("sb-dir")
+    e.agents([bg("sb-dir", "working", "sbsbsbsb-1", pid=52)])
+    hl = e.st("hq-rw", "locks")
+    os.makedirs(hl, exist_ok=True)
+    with open(os.path.join(hl, "start-sb-dir.lock"), "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        r = e.run("stop", "sb-dir", t=T0, extra={"PANTHEON_HQ_LOCK_WAIT": "0.3"})
+    check(r.returncode == 1 and ["stop", "sbsbsbsb"] not in e.calls() and os.path.exists(e.st("stopped", "sb-dir"))
+          and "не остановлена" in r.stderr.strip().splitlines()[-1] and "sb-dir не остановлена" in e.alerts(),
+          f"0523: stop при занятом замке: {r.returncode} {e.calls()} {r.stderr[-300:]}")
+    r = e.run("stop", "sb-dir", t=T0 + 10)
+    check(r.returncode == 0 and ["stop", "sbsbsbsb"] in e.calls(), f"0523: stop при свободном замке: {r.stderr[-300:]}")
 
 
 _HQ_RW_PROBE = r"""
