@@ -42,7 +42,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
   pantheon status                       один экран для отладки: плановый проход, сессии, вопросы к вам, тревоги, защиты, sync, места heavy, версии
   pantheon night [status|report]        недельный лимит: неделя, линия, запас, зона, ночь, снимок; report — блок
-                                        «Лимит» для сводки (вечерний вопрос и ночь ведёт дежурный, lib/night.py)
+                                        «Лимит» для сводки (lib/night.py)
+  pantheon night ask <id> <направление> [ГГГГ-ММ-ДД]   вопрос о ночной пачке для окна вопросов Зевса: ночь
+                                        открывается только по вашему «Да — ночь <дата>», sha256 пачки сверяется
   pantheon read request|run|status|cancel   чтение личного чата по заявке (metis-0267, lib/read.py): заявка → ваше
                                         «да» на [read-<rid>] → выгрузка и разбор плановым проходом → вы одобряете пункты
   pantheon merge request|run|status|cancel   слияние PR ядра по Touch ID (metis-0285, lib/merge.py): заявка роли →
@@ -103,7 +105,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
   pantheon start zeus                   Пританей: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
-                                        start, дошедший до запуска сессии, пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2); красный замер или «нет сигнала» без слова — код 5 (отложено); в окне роли origin берётся из PANTHEON_ROLE, явный --from там только свой (hq → zeus, иная роль → tick); wake пишет строку замера и не откладывает, wake <имя> "задание" из окна роли без слова владельца — отказ (код 2)
+                                        start, дошедший до запуска сессии, пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2); красный замер или «нет сигнала» — только предупреждение (stderr, тревога раз в день), запуск идёт; в окне роли origin берётся из PANTHEON_ROLE, явный --from там только свой (hq → zeus, иная роль → tick); wake пишет строку замера и не откладывает, wake <имя> "задание" из окна роли без слова владельца — отказ (код 2)
   pantheon start <направление> --at ЧЧ:ММ [поручение]   разовый запуск плановым проходом вместо sleep в сессии;
                                         --at-list — записи, --at-cancel <id> — отменить (lib/night.py)
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
@@ -117,7 +119,6 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon wake hestia --task <id> [--dry-run]   Гестия в своём окне песочницы (settings/hestia.json) с открытой
                                         задачей; без задачи или с закрытой — отказ «нет задачи» (код 2); из окна
                                         роли — только по слову владельца в окне Зевса за 15 мин, иначе код 2;
-                                        из окна роли, кроме hq, со словом в красной зоне — код 5 «отложено» (повторите сами);
                                         из окна hq — как start --from zeus
   pantheon wake <направление> --task <id> [--dry-run]   направление с coordinator = false в directions.toml ведёт
                                         Пританей (metis-0155): start/wake координатора — отказ (код 2), а это поднимает
@@ -154,6 +155,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         ~/.claude/agents → roles build; плановый проход делает это сам, «Нет» — rejected
   pantheon role status [<имя>] | cancel <имя>   заявки на роли | отозвать открытую заявку
   pantheon approve [list] | add --site S --allow "…" [--limits "…"] | remove N   заранее разрешённое (только вы)
+  pantheon launch-question <id> запустить|перезапустить|вернуть <направление>   вопрос и варианты для окна вопросов
+                                        Зевса: ваш выбор «Да — запустить <имя>» плановый проход исполняет сам
+                                        (metis-0523); «вернуть» снимает и «остановлено вами»
   pantheon consent <id> [--days N]      ваш ответ Зевсу на вопрос <id> (журнал owner-log Зевса, по умолчанию 7 дней) —
                                         для исполнителя: согласие, данное в окне Зевса
   pantheon review test -- <команда…>    тесты для шлюза слияния (guard 0.5.9): в чистом дереве git запустить
@@ -191,6 +195,7 @@ PANTHEON_NO_NOTIFY — без уведомлений, PANTHEON_NOTIFY_LOG — у
 """
 import collections
 import contextlib
+import errno
 import fcntl
 import fnmatch
 import glob
@@ -270,29 +275,132 @@ def path(*parts):
     return os.path.join(STATE, *parts)
 
 
+# Окно Зевса пишет только в STATE/hq-rw/locks и STATE/hq-rw/autostart-reset (metis-0523, ревью безопасности): там замки
+# имён сессий (start-*, wake) и метки сброса самозапуска, которые берут его `pantheon start|wake|stop|resume`. Замки
+# прохода (tick, watch, board, notify, git…) — в STATE/locks, куда окно не пишет. Файл в hq-rw открывается
+# hq_open: O_NOFOLLOW|O_NONBLOCK через дескриптор папки, затем fstat — обычный файл, одна ссылка, владелец — мы; иначе
+# UnsafeFile, и файл не тронут. Ждущий замок в hq-rw ждёт не дольше HQ_LOCK_WAIT: окно не повесит проход.
+HQ_RW = "hq-rw"
+HQ_RW_DIRS = ("locks", "autostart-reset")
+HQ_LOCK_WAIT = float(os.environ.get("PANTHEON_HQ_LOCK_WAIT") or 60)  # с; переменная — для тестов
+# errno, которые даёт подложенная запись (ссылка, FIFO без читателя, папка, не папка на месте папки) — это UnsafeFile
+HQ_BAD_ERRNO = {errno.ELOOP, errno.ENXIO, errno.EISDIR, errno.ENOTDIR, errno.EMLINK, errno.EOPNOTSUPP}
+
+
+class UnsafeFile(OSError):
+    """Файл в папке окна Зевса — ссылка, жёсткая ссылка, не обычный файл или чужой: не пишем."""
+
+
+def hq_lock_name(name):
+    """Замок, который берёт и окно Зевса, — живёт в STATE/hq-rw/locks."""
+    return name.startswith("start-") or name == "wake"
+
+
+def hq_open(sub, fname):
+    """Дескриптор для дозаписи STATE/hq-rw/<sub>/<fname> (создаётся, 0600) после проверки; иначе UnsafeFile/OSError."""
+    if sub not in HQ_RW_DIRS or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}", fname or ""):
+        raise UnsafeFile(f"{sub}/{fname}: имя не по образцу")
+    d = path(HQ_RW, sub)
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileExistsError:
+        raise UnsafeFile(f"{sub}: на месте папки не папка") from None
+    except OSError as e:
+        if e.errno in HQ_BAD_ERRNO:
+            raise UnsafeFile(f"{sub}: на месте папки ссылка или не папка ({e.strerror})") from None
+        raise
+    try:
+        fd = os.open(fname, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=dfd)
+    except OSError as e:
+        if e.errno in HQ_BAD_ERRNO:
+            raise UnsafeFile(f"{sub}/{fname}: ссылка, FIFO или папка ({e.strerror})") from None
+        raise
+    finally:
+        os.close(dfd)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != os.getuid():
+        os.close(fd)
+        raise UnsafeFile(f"{sub}/{fname}: не обычный файл, ссылок {st.st_nlink} или владелец {st.st_uid}")
+    return fd
+
+
+def hq_mark(sub, fname, text):
+    """Метка в STATE/hq-rw/<sub>: подложенную запись на месте имени (ссылку, FIFO, жёсткую ссылку) снимаем через
+    дескриптор папки (unlink ссылку не проходит) и пишем заново. Не вышло — предупреждение и False, без исключения."""
+    try:
+        try:
+            fd = hq_open(sub, fname)
+        except UnsafeFile:
+            dfd = os.open(path(HQ_RW, sub), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                with contextlib.suppress(OSError):
+                    os.unlink(fname, dir_fd=dfd)
+            finally:
+                os.close(dfd)
+            fd = hq_open(sub, fname)
+        try:
+            os.write(fd, text.encode())
+        finally:
+            os.close(fd)
+        return True
+    except OSError as e:
+        print(f"pantheon: метка {sub}/{fname} не записана — {e}", file=sys.stderr)
+        return False
+
+
 @contextlib.contextmanager
 def lock(name, block=True):
-    """flock на файле в ~/.local/state/pantheon/locks/. Отдаёт True, если блокировка взята."""
+    """flock на файле в STATE/locks/ (замки имён сессий — в STATE/hq-rw/locks, см. выше). Отдаёт True, если взята."""
+    shared = hq_lock_name(name)
     try:
-        os.makedirs(path("locks"), exist_ok=True)
-        fh = open(path("locks", name + ".lock"), "a")
-    except PermissionError as e:
-        # окно Зевса не пишет в locks/ (metis-0078): ждущую блокировку имени сессии pantheon stop берёт, чтобы подъём,
-        # начатый до метки «остановлено», не проскочил после неё. Без права записи метка stopped/<имя> всё равно
-        # ставится первой, а проскочить может только подъём, уже прошедший проверку метки в ту же секунду, — stop
-        # идёт без блокировки с предупреждением. Замок alerts — тоже: строка тревоги дописывается одним write в режиме
-        # append, она не рвётся. Неблокирующие замки (start, тик) и git без файла не берутся.
-        if not (block and (name.startswith("start-") or name == "alerts")):
-            raise
-        print(f"pantheon: нет права записи в {path('locks').replace(HOME, '~')} ({e.strerror}) — работаю без "
+        if shared:
+            fd = hq_open("locks", name + ".lock")
+        else:
+            os.makedirs(path("locks"), exist_ok=True)
+            fd = os.open(path("locks", name + ".lock"), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        fh = os.fdopen(fd, "a")
+    except UnsafeFile as e:
+        print(f"pantheon: блокировка {name} не взята — {e}", file=sys.stderr)
+        yield False
+        return
+    except OSError as e:
+        if not (isinstance(e, PermissionError) and block and (name.startswith("start-") or name == "alerts")):
+            if not shared:
+                raise
+            # любой иной сбой на пути hq-rw — отказ замка с предупреждением, а не падение start и прохода
+            print(f"pantheon: блокировка {name} не взята — {type(e).__name__}: {e}", file=sys.stderr)
+            yield False
+            return
+        # окно без записи в папку замков (собранное до metis-0523, metis-0078): ждущую блокировку имени сессии pantheon
+        # stop берёт, чтобы подъём, начатый до метки «остановлено», не проскочил после неё. Без права записи метка
+        # stopped/<имя> всё равно ставится первой, а проскочить может только подъём, уже прошедший проверку метки в ту
+        # же секунду, — stop идёт без блокировки с предупреждением. Замок alerts — тоже: строка тревоги дописывается
+        # одним write в режиме append, она не рвётся. Неблокирующие замки (start, тик) и git без файла не берутся.
+        where = path(HQ_RW, "locks") if shared else path("locks")
+        print(f"pantheon: нет права записи в {where.replace(HOME, '~')} ({e.strerror}) — работаю без "
               f"блокировки {name}: подъём этой же сессии в ту же секунду может проскочить", file=sys.stderr)
         yield True
         return
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
-        got = True
-    except BlockingIOError:
-        got = False
+    got = False
+    if shared and block:  # окно Зевса держит этот замок сколько угодно — проход ждёт не дольше HQ_LOCK_WAIT
+        deadline = time.monotonic() + HQ_LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                got = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    print(f"pantheon: блокировка {name} занята дольше {HQ_LOCK_WAIT:.0f} с — иду без него", file=sys.stderr)
+                    break
+                time.sleep(0.2)
+    else:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
+            got = True
+        except BlockingIOError:
+            got = False
     try:
         yield got
     finally:
@@ -2201,6 +2309,21 @@ def ssh_remote(folder):
     return False
 
 
+def hq_state_dirs():
+    """Настоящие пути STATE/hq-rw/locks и STATE/hq-rw/autostart-reset (создаются) — запись окну Зевса. Сама hq-rw ему
+    не даётся: подменить подпапку ссылкой окно не может. Ссылка или не папка — не даётся."""
+    out = []
+    if os.path.islink(path(HQ_RW)):
+        return out
+    for n in HQ_RW_DIRS:
+        p = path(HQ_RW, n)
+        with contextlib.suppress(OSError):
+            os.makedirs(p, mode=0o700, exist_ok=True)
+        if os.path.isdir(p) and not os.path.islink(p):
+            out.append(os.path.realpath(p))
+    return out
+
+
 def _real_dir(p, roots, strict=False, create=False):
     """Папка от ~/ внутри одной из roots → её настоящий абсолютный путь; None — вне них, ссылка или папки нет.
     В настройки идёт настоящий путь, а не «~/…»: подмена папки ссылкой после сборки не сдвинет границу."""
@@ -2924,6 +3047,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hq = role_settings([root], None, memory, hq_cache, False, keys, None, guard)
     hq["sandbox"]["excludedCommands"] = list(HQ_EXCLUDED) + HQ_GH
     hq["sandbox"]["filesystem"]["denyWrite"] += [os.path.join(root, ".git"), os.path.join(root, "alerts.md")]
+    # [sb-simplify] п. 5 (metis-0523): замки имён сессий и метки сброса самозапуска — в STATE/hq-rw/{locks,autostart-reset}:
+    # без них `pantheon stop|resume|wake|start` из его окна падали с PermissionError (15.10–27.10). Замки прохода
+    # (STATE/locks), журналы ваших слов, метки «остановлено вами» и остальное состояние — по-прежнему нет
+    hq["sandbox"]["filesystem"]["allowWrite"] += hq_state_dirs()
     hq["sandbox"]["network"]["allowedDomains"] = []
     # корпус лекций — чужой контент (SEC-13, metis-0025): у Зевса уже есть личное и действия наружу, поэтому корпус ему
     # закрыт (решение владельца 15.10) — guard corpus-role (команда corpus), хук qmd-query (поиск), а здесь — чтение
@@ -3827,11 +3954,10 @@ def start(rest):
                                                                                     плановым проходом (вместо sleep)
     Запуск сессии пишет замер в STATE/capacity.jsonl (сессий Пантеона, давление памяти, свободно %, своп). Откуда запуск:
     --from, а без него по окну — PANTHEON_ROLE=hq это zeus, другая роль tick, без роли owner; в окне роли --from owner
-    и любой --from, не совпадающий с origin окна (hq → zeus, иная роль → tick), не принимаются (код 2). Отказ, код 2: zeus без вашего слова в owner-log/zeus.md за 15 мин (и у --at при постановке);
-    красный замер (своп выше порога дежурного, давление не «норма») или «нет сигнала» (своп и давление не прочитаны) —
-    код 5 «отложено» (не сбой: самозапуск и разовый запуск повторяются), слово только у owner и zeus со словом.
-    Разовый запуск (--at) исполняется по правилам планового прохода: в красной зоне ждёт, слово при постановке
-    не переносится."""
+    и любой --from, не совпадающий с origin окна (hq → zeus, иная роль → tick), не принимаются (код 2). Отказ, код 2: zeus без вашего слова в owner-log/zeus.md за 15 мин (и у --at при постановке).
+    Красный замер (своп выше порога дежурного, давление не «норма») или «нет сигнала» — только предупреждение
+    (строка в stderr, тревога раз в день, red в замере): запуск не откладывается ([sb-simplify] п. 5, metis-0523).
+    Разовый запуск (--at) исполняется по правилам планового прохода, слово при постановке не переносится."""
     dry = "--dry-run" in rest
     restart = "--restart" in rest
     rest = [a for a in rest if a not in ("--dry-run", "--restart")]
@@ -3863,7 +3989,7 @@ def start(rest):
         if not dry:  # сессии не считаем: лишний claude agents ломает сценарии ожидания имени; слово и память — да
             code, why = start_gate(target, origin, None)
             if why:
-                print(f"pantheon start: {'отказ' if code == 2 else 'отложено'} — {why}", file=sys.stderr)
+                print(f"pantheon start: отказ — {why}", file=sys.stderr)
                 return code
         # штаб — ваша интерактивная сессия в iTerm: команда заменяет себя на claude в ~/ai/pantheon
         argv = [claude_bin(), "--agent", "hq", "--name", "zeus", "--settings", path("settings", "hq.json")]
@@ -3918,7 +4044,8 @@ def start(rest):
     # проверка и запуск — под блокировкой имени: тик и Зевс не запустят две копии одновременно
     with lock("start-" + name, block=False) as got:
         if not got:
-            print(f"pantheon start: {name} уже запускается другой командой", file=sys.stderr)
+            print(f"pantheon start: {name} — блокировка имени не взята: уже запускается другой командой или запись блокировки "
+                  f"подложена (строка выше)", file=sys.stderr)
             return 1
         return _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win)
 
@@ -3929,7 +4056,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     if not dry:  # metis-0261 А: слово владельца и замер — до любых действий; список сессий тот же, что ниже
         code, why = start_gate(name, origin, agents, need_word)
         if why:
-            print(f"{cmd}: {'отказ' if code == 2 else 'отложено'} — {why}", file=sys.stderr)
+            print(f"{cmd}: отказ — {why}", file=sys.stderr)
             return code
     same = [a for a in agents or [] if a.get("name") == name]
     live = live_copies(name, agents)
@@ -4065,7 +4192,7 @@ def capacity_log(row):
 NO_WORD_WHY = (f"запуск от Зевса без вашего слова в его окне за {OWNER_WORD_WINDOW // 60} мин "
                "(сообщение другой сессии согласием не считается)")
 START_REFUSED = 2   # отказ: нет слова владельца (--from zeus) — повтор бесполезен
-START_DEFERRED = 5  # отложено: красный замер памяти без слова владельца — повторит следующий плановый проход, не сбой
+START_DEFERRED = 5  # было «отложено по красной памяти»; с [sb-simplify] п. 5 start_gate его не отдаёт (код занят)
 # (3 и 4 заняты: NO_WINDOW и SKIPPED у resume_session, те же числа дошли бы до дежурного как коды запуска)
 
 
@@ -4074,9 +4201,11 @@ def start_gate(target, origin, agents, need_word=False):
     дошедшего до этого шага; ранние выходы — «остановлено вами», «нет окна», занятое имя — и продолжение через
     resume_session строки не пишут). → (код, причина); (0, None) — можно.
     Слово владельца: --from owner (по умолчанию) — он сам; --from zeus — его свежая запись в owner-log/zeus.md (без неё
-    отказ, код 2, всегда); tick слова не имеет и в красной зоне получает код 5 (отложено) при любом zeus.md.
+    отказ, код 2, всегда); tick слова не имеет.
     need_word (wake hestia из окна роли, не hq): запуск с поручением из окна роли — только по свежей записи в zeus.md,
-    без неё отказ, код 2, в любой зоне (как wake <имя> "задание"); со словом tick по-прежнему откладывается в красной."""
+    без неё отказ, код 2, в любой зоне (как wake <имя> "задание").
+    Память (своп, давление) — только предупреждение для любого origin: строка в stderr и тревога раз в день, запуск идёт
+    ([sb-simplify] п. 5, metis-0523; было — код 5 «отложено»)."""
     m = capacity_probe(agents)
     word = origin == "owner" or (origin == "zeus" and owner_spoke_recently("zeus", OWNER_WORD_WINDOW))
     code, why = 0, None
@@ -4085,12 +4214,15 @@ def start_gate(target, origin, agents, need_word=False):
     elif need_word and origin != "owner" and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
         code, why = START_REFUSED, (f"поручение из окна роли — только по вашему слову: в журнале Зевса нет вашей строки "
                                     f"за {OWNER_WORD_WINDOW // 60} мин (сообщение другой сессии согласием не считается)")
-    elif (m["red"] or m["unknown"]) and not word:
+    elif m["red"] or m["unknown"]:
+        # [sb-simplify] п. 5 (metis-0523): своп и давление памяти — только предупреждение, запуск не откладывается.
+        # Строка в stderr и одна тревога в день; от расхода держит потолок недели (night.gate), а не замер памяти
         reasons = "; ".join(m["red"]) if m["red"] else "нет сигнала: своп и давление памяти не прочитаны"
-        # wake hestia (need_word) никто не повторяет — не обещать самозапуск (ревью #110, круг 6)
-        again = "слово в окне Зевса из окна роли красную зону не снимает; повторите после нормы памяти" if need_word else "самозапуск повторит позже"
-        code, why = START_DEFERRED, (f"память Mac в красной зоне ({reasons}) — запуск только со словом владельца, "
-                                     f"{again}")
+        print(f"pantheon start: предупреждение — память Mac в красной зоне ({reasons}), {target} запускается",
+              file=sys.stderr)
+        with contextlib.suppress(OSError):  # тревога — подсказка: её сбой запуск не держит
+            alert_once("start-memory-red", stamp()[:10], f"запуски идут при красной памяти Mac ({reasons}) — "
+                       f"предупреждение, не отказ; первый за день: {target}", "pantheon-start")
     capacity_log({"t": round(now(), 1), "at": stamp(), "target": target, "origin": origin, "sessions": m["sessions"],
                   "pressure": m["pressure"], "free_pct": m["free_pct"], "swap_gb": None if m["swap_gb"] is None
                   else round(m["swap_gb"], 2), "red": bool(m["red"]),
@@ -7585,7 +7717,8 @@ def task_cmd(rest):
 
 
 # --- дежурный и управление сессиями (шаг 1.4) — lib/watch.py ---------------------------------------------------------
-WATCH_CMDS = {"watch", "agents", "revisits", "stop", "resume", "pause", "restart", "saved", "who", "infra-check"}
+WATCH_CMDS = {"watch", "agents", "revisits", "stop", "resume", "pause", "restart", "saved", "who", "infra-check",
+              "launch-question"}
 
 
 def watch_cmd(cmd, rest):
@@ -7600,7 +7733,7 @@ def watch_cmd(cmd, rest):
     return {"watch": lambda: w.watch(dry="--dry-run" in rest), "agents": w.agents_cmd, "revisits": w.revisits,
             "stop": lambda: w.stop(rest, who), "resume": lambda: w.resume(rest, who), "pause": lambda: w.pause(rest, who),
             "restart": lambda: w.restart(rest, who), "saved": lambda: w.saved_cmd(rest, who), "who": w.who,
-            "infra-check": w.infra_cmd}[cmd]()
+            "infra-check": w.infra_cmd, "launch-question": lambda: w.launch_question_cmd(rest)}[cmd]()
 
 
 def usage_report(rest):

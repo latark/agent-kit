@@ -2,6 +2,7 @@
 
   pantheon night [status]   неделя, линия, запас, зона; ночь; давность снимка лимита; потолок владельца и запас до него
   pantheon night report     блок «Лимит» для ежедневной сводки: неделя, потолок, линия, запас, зона, ночь, тревоги, сброс
+  pantheon night ask <id> <направление> [ГГГГ-ММ-ДД]   вопрос о ночной пачке для окна вопросов Зевса (ниже)
   pantheon night agent-gate хук PreToolUse Agent|Task окон координаторов: отказ новому субагенту при потолке (ниже)
 
 Снимок лимита пишет строка статуса Claude Code в ~/.local/state/claude-statusline/ (путь — от HOME, как LIMIT_SNAPSHOT):
@@ -27,14 +28,19 @@ cap_pct. Последняя ночь перед сбросом недели — 
 Тревоги на 50, 80 и 100 % бюджета ночи — по одной на порог за ночь (P.alert_once); на 100 % ночь закрыта для нового.
 После morning_after новое запускается, только если пятичасовой лимит не выше morning_five_hour_max.
 
-Вечерний вопрос (только главный Mac): в ask_at — карточка «Запустить сегодня на ночь выполнение задач?» во входящих
-Зевса (колонка «Нужен ответ») и уведомление; повтор уведомления в каждое время repeat; нет ответа к deadline — ночь
-пропущена (строка в тревогах). Ответ «Да» после начала ночи открывает её с времени ответа, «Нет» — ночь пропущена.
-Ответ — только из журналов ваших слов (owner-log, их пишут хук и тик, не роли): галочка на карточке
-(board.jsonl, kind answer, сверка с вопросом и вариантами — tasks.logged_for) или выбор в окне вопросов Зевса
-(zeus.md, раздел «· окно вопросов», тело «вопрос: [<id>] …», строка «ответ: Да…|Нет…»). Поле answer в файле задачи
-ответом не считается. Состояние ночи — STATE/night/<дата вечера>.json: asked_at[], card_id, answer, opened_at,
-start_pct, budget_pct, skipped, alerts[] (и служебные: answer_at, spent, last_used, resets_at, closed, last_night).
+Вечер (только главный Mac, [sb-simplify] п. 10, решение владельца 28.10, вариант Б): фиксированного вопроса в 22:00 нет,
+ночь открывается только вашим ответом на вопрос о ночной пачке. Вопрос печатает `pantheon night ask <id> <направление>`:
+«[<id>] Ночь <ГГГГ-ММ-ДД>: пачка <путь от ~/ai/pantheon> sha256 <64 hex>?», варианты «Да — ночь <ГГГГ-ММ-ДД>» | «Нет»
+(дата — вечер ночи). Хук answer пишет выбор в owner-log/zeus.md с пометкой «окно вопросов». С ask_at до конца ночи
+проход сверяет запись целиком: вопрос точно по шаблону, ответ — точно «Да — ночь <дата>», других строк нет, пачка по
+этому пути есть и её sha256 сейчас тот же, что в вопросе. Тогда пачка одобрена (packs), ночь разрешена (answer «да»,
+answer_at — время первого такого ответа) и открывается в start (ответ позже — в момент ответа). Любое отличие —
+отказ и строка в тревогах, пачка изменилась после вопроса — тоже отказ: нужен новый вопрос. Каждая запись разбирается
+один раз (answers_seen). Без такого ответа ночь не открывается: ночью новое не запускается. От расхода держат бюджет
+ночи, зоны недели и потолок владельца (ниже). Карточку вопроса, заданного до выпуска, проход снимает. Состояние ночи —
+STATE/night/<дата вечера>.json: answer, packs, opened_at, start_pct, budget_pct, skipped, alerts[] (и служебные:
+answer_at, answers_seen, pack_jobs, spent, last_used, resets_at, closed, last_night; asked_at, card_id и auto — от
+старых выпусков).
 
 Метрики (STATE/metrics): новые строки week-usage дописываются в week-usage.log (только дописывание, без повторов —
 по последнему скопированному now); смена resets_at — строка в weeks.jsonl: итог прошлой недели и её ночи.
@@ -89,9 +95,7 @@ domain-coordinator или workshop, и у его субагентов — лид
 без потолка), код 1 и причина в stderr.
 
   [night]
-  ask_at = "22:00"         # вопрос владельцу
-  repeat = ["23:00", "23:30"]
-  deadline = "00:00"       # без ответа к этому времени — ночь пропущена
+  ask_at = "22:00"         # начало вечера: с него проход сверяет ваши ответы на вопросы о пачках
   power_at = "21:30"       # с этого времени до ask_at — проверка питания (pmset -g batt)
   batt_min = 80            # на батарее с зарядом ниже — тревога «подключите зарядку», одна за вечер
 
@@ -99,14 +103,14 @@ domain-coordinator или workshop, и у его субагентов — лид
 
 Ночная пачка (metis-0284): ~/ai/pantheon/directions/<направление>/night-<дата>-pack.md, дата — утро ночи (как
 night-2026-10-19-pack.md у ночи 18→19) или вечер; направление — из domains.json. Пачка, уже одобренная прошлой ночью,
-не берётся. Вопрос ночи называет найденные пачки, и «Да» одобряет именно их: путь и sha256 файла — в состоянии ночи
-(packs). После «Да» каждая пачка — разовый запуск её координатора в начале ночи (строка «Старт — ЧЧ:ММ» в пачке
-сдвигает его позже), срок — конец ночи. Пачка изменилась после «Да» — запуска нет, тревога. В ночь с одобренными
-пачками самозапуск по отметкам владельца не поднимает никого: ночью идут только пачки.
+не берётся. Одобрена — только вашим ответом на её вопрос (выше): путь и sha256 файла — в состоянии ночи (packs). Каждая
+пачка — разовый запуск её координатора в начале ночи (строка «Старт — ЧЧ:ММ» в пачке сдвигает его позже), срок —
+конец ночи. Пачка изменилась после ответа — запуска нет, тревога. Ночью идут только одобренные пачки: самозапуск по
+отметкам владельца ночь с пачками не трогает, а без пачки ночь не открыта.
 
 Разовые запуски (STATE/oneshot.json, items): {id, target, at, expires, text, by, pack?, sha?, night?, done_at, result,
-wait}. Ставит `pantheon start <направление> --at ЧЧ:ММ|"ГГГГ-ММ-ДД ЧЧ:ММ" [поручение]` (срок — 3 ч) и «Да» на вопрос
-ночи; исполняет дежурный (watch.oneshots) один раз: запись гасится (done_at) до самого запуска. Пока запуск закрыт
+wait}. Ставит `pantheon start <направление> --at ЧЧ:ММ|"ГГГГ-ММ-ДД ЧЧ:ММ" [поручение]` (срок — 3 ч) и пачки ночи
+(pack_schedule); исполняет дежурный (watch.oneshots) один раз: запись гасится (done_at) до самого запуска. Пока запуск закрыт
 (шлюз недели и ночи, сессия занята) — ждёт следующего прохода до срока, после срока гаснет с тревогой.
 
 Питание (metis-0284): с power_at до ask_at на главном Mac, если ночь этого вечера ещё не пропущена, — `pmset -g batt`;
@@ -137,14 +141,13 @@ LIMITS = {"warn_pp": 2.0, "stop_pp": 5.0, "hard_pct": 85.0, "snapshot_ok_min": 3
           "heavy_max": 2.0}
 NIGHT = {"start": "23:00", "end": "08:00", "budget_pct": 3.0, "check_pct": 1.0, "cap_pct": 5.0, "carry_share": 0.3,
          "carry_after_pp": 5.0, "morning_after": "04:00", "morning_five_hour_max": 50.0, "last_night_pct": 10.0}
+# repeat и deadline — от вечернего вопроса, снятого [sb-simplify] п. 10: в schedule.toml допустимы, не действуют
 ASK = {"ask_at": "22:00", "repeat": ["23:00", "23:30"], "deadline": "00:00", "power_at": "21:30", "batt_min": 80.0}
 PACK_START = re.compile(r"^\W*старт\s*[—–:-]+\s*([01]\d|2[0-3]):([0-5]\d)", re.I | re.M)
 PACK_TASK = re.compile(r"(?<![\w-])([a-z]+-\d{4})(?![\w-])")
 ONESHOT_TTL = 3 * 3600  # разовый запуск `pantheon start --at` ждёт открытого шлюза столько, потом гаснет
 ONESHOT_KEEP = 7 * 86400  # погашенные записи хранятся столько
 THRESHOLDS = (50, 80, 100)
-TITLE = "Запустить сегодня на ночь выполнение задач?"
-NO_OPTION = "Нет — ночь пропустить"
 HM = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
 DAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 ZONES = {"green": "зелёная", "yellow": "жёлтая", "red": "красная"}
@@ -301,7 +304,7 @@ def cap_notice(t, m, cap):
 
 
 def primary():
-    """Вечерний вопрос и ночь — только на главном Mac (как самозапуск): два Mac задали бы два вопроса."""
+    """Вечер и ночь — только на главном Mac (как самозапуск): два Mac открыли бы две ночи и запустили пачки дважды."""
     try:
         ph = P.load_schedule().get("primary_host")
     except Exception:  # noqa: BLE001
@@ -414,7 +417,7 @@ def at(d, hm, cfg):
 
 
 def evening(t, cfg):
-    """Дата вечера, если t — между вопросом (ask_at) и концом ночи (end), иначе None (день)."""
+    """Дата вечера, если t — между началом вечера (ask_at) и концом ночи (end), иначе None (день)."""
     lt = datetime.fromtimestamp(t)
     d = lt.date() if (lt.hour, lt.minute) >= _hm(cfg[2]["ask_at"]) else lt.date() - timedelta(days=1)
     return d if at(d, cfg[2]["ask_at"], cfg) <= t < at(d, cfg[1]["end"], cfg) else None
@@ -584,11 +587,11 @@ def morning(t, d, cfg):
 # --- проход дежурного ----------------------------------------------------------------------------------------------
 
 def watch(agents=None, registry=None, doms=None, t=None):
-    """Проверка «ночь» дежурного (раз в 5 мин): метрики, давность снимка, зона, вечерний вопрос и ночь."""
+    """Проверка «ночь» дежурного (раз в 5 мин): метрики, давность снимка, зона, вечер и ночь."""
     t = P.now() if t is None else t
     cfg = config()
     metrics(t)
-    if not primary():  # снимок и вопрос — у главного Mac; второй не шумит своим старым снимком
+    if not primary():  # снимок и ночь — у главного Mac; второй не шумит своим старым снимком
         return
     m = measure(t, cfg)
     day = datetime.fromtimestamp(t).strftime("%Y-%m-%d")
@@ -614,48 +617,6 @@ def watch(agents=None, registry=None, doms=None, t=None):
     d = evening(t, cfg)
     if d is not None:
         evening_pass(d, m, t, cfg)
-
-
-def card_head(st):
-    """Вопрос и варианты карточки — из состояния ночи, а не из файла задачи (его может поправить агент)."""
-    return {"question": st.get("question") or TITLE, "options": st.get("options") or []}
-
-
-def find_answer(st, until=None):
-    """(«да»|«нет», время) — ваш последний ответ по карточке ночи из журналов owner-log в окне от карточки до until
-    (срок вопроса), или None: передумали — «Нет» после «Да» отменяет ночь."""
-    cid, since = st["card_id"], float(st.get("card_at") or 0) - 60
-    T = P.tasks_mod()
-    found = []
-    head = card_head(st)
-    for rec in T.owner_answers_all(P.path("owner-log", "board.jsonl")).get(cid) or []:
-        if rec.get("kind") != "answer" or not T.logged_for(head, [rec]).get("answer"):
-            continue
-        try:
-            ts = datetime.strptime(str(rec.get("time"))[:19], "%Y-%m-%dT%H:%M:%S").timestamp()
-        except ValueError:
-            continue
-        found.append((ts, rec["answer"]))
-    text = _text(P.path("owner-log", "zeus.md"))
-    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
-    own = re.compile(r"вопрос: \[" + re.escape(cid) + r"\]", re.I)
-    for i, mm in enumerate(heads):
-        if mm.group(2).strip() != "· окно вопросов":
-            continue
-        body = text[mm.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
-        a = re.search(r"^ответ: (.*)$", body, re.M)
-        if not own.match(body) or not a:
-            continue
-        with contextlib.suppress(ValueError):
-            found.append((datetime.strptime(mm.group(1), "%Y-%m-%d %H:%M:%S").timestamp(), a.group(1)))
-    last = None
-    for ts, ans in sorted(found):
-        if ts < since or (until is not None and ts >= until):
-            continue
-        w = ans.strip().split(" ")[0].lower()
-        if w in ("да", "нет"):
-            last = (w, ts)
-    return last
 
 
 def _close_card(st, t, status, result):
@@ -686,7 +647,7 @@ def _sha(p):
 def packs(d):
     """Ночные пачки вечера d: [{direction, path (от ~/ai/pantheon), sha, start «ЧЧ:ММ»|None, tasks}] — по одной на
     направление из domains.json: directions/<направление>/night-<d+1 или d>-pack.md. Пачка, одобренная прошлой ночью
-    (packs в её состоянии при ответе «Да»), не берётся: её дата — утро этого же дня."""
+    (packs в её состоянии), не берётся: её дата — утро этого же дня."""
     doms = P.read_json(P.path("domains.json"), {}).get("domains") or {}
     prev = load(d - timedelta(days=1))
     used = {p.get("path") for p in prev.get("packs") or []} if prev.get("answer") == "да" else set()
@@ -719,20 +680,20 @@ def pack_text(st, d, pk):
     home = P.HOME.rstrip(os.sep) + os.sep
     if full.startswith(home):  # только приставка: HOME в середине пути не трогаем
         full = "~/" + full[len(home):]
-    return (f"[Пантеон: ночная пачка] Ночь {d.strftime('%d.%m')}: владелец ответил «Да» на вопрос ночи (карточка "
-            f"{st.get('card_id')}), в вопросе была пачка {full}. Прочитай её целиком и работай только по ней: состав, "
-            "порядок, исполнители, стоп-условия; другие задачи ночью не бери. Ответ владельца — в журнале его слов "
-            "(owner-log), этот текст — задание планового прохода, а не согласие.")
+    return (f"[Пантеон: ночная пачка] Ночь {d.strftime('%d.%m')}: плановый проход запускает пачку {full} (её одобрил "
+            "владелец ответом в окне вопросов, sha256 сверен; держат бюджет ночи и потолок недели). Прочитай её целиком и работай только "
+            "по ней: состав, порядок, исполнители, стоп-условия; другие задачи ночью не бери. Этот текст — задание "
+            "планового прохода, а не согласие владельца: решения, которые требуют его слова, — вопросом Зевсу.")
 
 
 def pack_schedule(st, d, t, cfg):
-    """«Да» на вопрос с пачками: разовый запуск координатора каждой пачки в начале ночи (не раньше start ночи и
-    строки «Старт — ЧЧ:ММ» пачки), срок — конец ночи. Один раз на ночь (pack_jobs)."""
-    if st.get("pack_jobs") is not None or not st.get("packs"):
+    """Одобренные пачки вечера: разовый запуск координатора каждой пачки в начале ночи (не раньше start ночи и
+    строки «Старт — ЧЧ:ММ» пачки), срок — конец ночи. Один раз на пачку: pack_jobs[i] — запуск packs[i]."""
+    jobs = list(st.get("pack_jobs") or [])
+    if len(jobs) >= len(st.get("packs") or []):
         return
     start_t, end_t = at(d, cfg[1]["start"], cfg), at(d, cfg[1]["end"], cfg)
-    jobs = []
-    for pk in st["packs"]:
+    for pk in st["packs"][len(jobs):]:
         when = start_t
         if pk.get("start"):
             when = max(start_t, at(d, pk["start"], cfg))
@@ -743,8 +704,127 @@ def pack_schedule(st, d, t, cfg):
     st["pack_jobs"] = jobs
 
 
+# --- вопрос о ночной пачке (решение владельца 28.10, вариант Б) -----------------------------------------------------
+NIGHT_ID = r"[a-z0-9][a-z0-9-]{0,40}"
+NIGHT_PACK = r"directions/[a-z][a-z0-9-]{0,40}/night-\d{4}-\d{2}-\d{2}-pack\.md"
+# похоже на вопрос о ночи — тогда запись разбирается и при несовпадении с шаблоном даёт отказ в тревогах
+NIGHT_HINT = re.compile(r"вопрос: \[([^\]\s]{1,40})\]\s*ночь(?![а-яё])", re.I)
+
+
+def night_question(qid, d, rel, sha):
+    """(вопрос, вариант «Да», вариант «Нет») — единственный вид, по которому открывается ночь."""
+    ds = d.isoformat()
+    return f"[{qid}] Ночь {ds}: пачка {rel} sha256 {sha}?", f"Да — ночь {ds}", "Нет"
+
+
+def night_parse(body, d):
+    """Тело записи «окно вопросов» → (id, путь, sha, да, почему нет) или None — не вопрос о ночи вечера d."""
+    lines = body.split("\n")
+    h = NIGHT_HINT.match(lines[0]) if lines else None
+    if not h:
+        return None
+    m = re.fullmatch(rf"вопрос: \[({NIGHT_ID})\] Ночь (\d{{4}}-\d{{2}}-\d{{2}}): пачка ({NIGHT_PACK}) sha256 ([0-9a-f]{{64}})\?",
+                     lines[0])
+    ans = lines[1][len("ответ: "):] if len(lines) > 1 and lines[1].startswith("ответ: ") else ""
+    if not m:
+        return h.group(1).lower(), "?", "", False, "вопрос не по шаблону pantheon night ask"
+    qid, ds, rel, sha = m.groups()
+    if ds != d.isoformat():
+        return None  # вопрос о другой ночи
+    yes = night_question(qid, d, rel, sha)[1]
+    if len(lines) != 2 or not ans:
+        return qid, rel, sha, False, "в записи есть заметка или свой текст — исполняю только чистый выбор"
+    if ans == "Нет":
+        return qid, rel, sha, False, ""
+    if ans != yes:
+        return qid, rel, sha, False, f"ответ «{ans[:60]}», а не «{yes}»"
+    return qid, rel, sha, True, ""
+
+
+def night_answers(d, t):
+    """Записи «окно вопросов» о ночи вечера d из zeus.md (с полуночи накануне вечера до t) → [(ключ, «ГГГГ-ММ-ДД
+    ЧЧ:ММ:СС», время, id, путь, sha, да, почему нет)], старые первыми."""
+    try:
+        text = open(P.path("owner-log", "zeus.md"), encoding="utf-8").read()
+    except (OSError, UnicodeDecodeError):
+        return []
+    lo = datetime.combine(d - timedelta(days=1), dtime(0, 0)).timestamp()
+    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
+    out = []
+    for i, m in enumerate(heads):
+        if m.group(2).strip() != "· окно вопросов":
+            continue
+        try:
+            ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+        except ValueError:
+            continue
+        if ts < lo or ts > t + 60:
+            continue
+        r = night_parse(text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip(), d)
+        if r:
+            out.append((f"{m.group(1)}|{r[0]}|{r[1]}", m.group(1), ts) + r)
+    return out
+
+
+def night_approve(st, d, t):
+    """Ваши ответы о пачках этой ночи → одобренные пачки (packs) и answer «да». Каждая запись — один раз."""
+    seen = list(st.get("answers_seen") or [])
+    cur = {pk["path"]: pk for pk in packs(d)}
+    have = {pk.get("path") for pk in st.get("packs") or []}
+    dd = d.strftime("%d.%m")
+    for key, stamp, ts, qid, rel, sha, yes, why in night_answers(d, t):
+        if key in seen:
+            continue
+        seen.append(key)
+        if not yes:
+            if why:
+                P.alert(f"ночь {dd}: ответ в окне вопросов ({stamp}, [{qid}]) не исполняю: {why}", "night")
+            continue
+        if rel in have:
+            continue
+        pk = cur.get(rel)
+        if pk is None:
+            P.alert(f"ночь {dd}: ответ «да» ({stamp}, [{qid}]) — пачки {rel} нет или она уже шла прошлой ночью; "
+                    "ночь по ней не открываю", "night")
+            continue
+        if pk["sha"] != sha:
+            P.alert(f"ночь {dd}: пачка {pack_word(pk)} изменилась после вашего ответа ({stamp}, [{qid}]) — не запускаю; "
+                    "нужен новый вопрос (pantheon night ask)", "night")
+            continue
+        st["packs"] = list(st.get("packs") or []) + [pk]
+        have.add(rel)
+        if st.get("answer") != "да":
+            st.update(answer="да", answer_at=ts)
+        P.alert(f"ночь {dd}: пачка {pack_word(pk)} одобрена вашим ответом ({stamp}, [{qid}])", "night")
+    st["answers_seen"] = seen[-200:]
+
+
+def night_ask_cmd(rest, t=None):
+    """pantheon night ask <id> <направление> [ГГГГ-ММ-ДД] — вопрос и варианты для окна вопросов Зевса."""
+    t = P.now() if t is None else t
+    cfg = config()
+    if (not 2 <= len(rest) <= 3 or not re.fullmatch(NIGHT_ID, rest[0])
+            or not re.fullmatch(r"[a-z][a-z0-9-]{0,40}", rest[1])):
+        print("pantheon night ask <id> <направление> [ГГГГ-ММ-ДД] — id и имя строчными", file=P.sys.stderr)
+        return 2
+    try:
+        d = date.fromisoformat(rest[2]) if len(rest) == 3 else (evening(t, cfg) or datetime.fromtimestamp(t).date())
+    except ValueError:
+        print(f"pantheon night ask: дата «{rest[2]}» не ГГГГ-ММ-ДД", file=P.sys.stderr)
+        return 2
+    pk = [x for x in packs(d) if x["direction"] == rest[1]]
+    if not pk or not pk[0]["sha"]:
+        print(f"pantheon night ask: у {rest[1]} нет ночной пачки на ночь {d.isoformat()} "
+              f"(directions/{rest[1]}/night-<дата>-pack.md, направление — из domains.json)", file=P.sys.stderr)
+        return 2
+    q, yes, no = night_question(rest[0], d, pk[0]["path"], pk[0]["sha"])
+    print(f"вопрос: {q}\nварианты: {yes} | {no}\n(вопрос и варианты — дословно, без пояснений: иначе плановый проход "
+          "откажет; пачку после вопроса не менять — изменённая не запускается)")
+    return 0
+
+
 def pack_night(t, cfg=None):
-    """Одобренные пачки вечера, идущего в момент t (от вопроса до конца ночи), или [] — тогда самозапуск по отметкам."""
+    """Одобренные пачки вечера, идущего в момент t (от ask_at до конца ночи), или [] — тогда самозапуск по отметкам."""
     cfg = cfg or config()
     d = evening(t, cfg)
     if d is None:
@@ -875,73 +955,19 @@ def power_check(t, cfg):
     P.alert_once("night-power", d.isoformat(), text, "night", note=text)
 
 
-def ask(st, d, m, t, cfg):
-    """Карточка вопроса во входящих Зевса (колонка «Нужен ответ») и первое уведомление. Есть ночные пачки — вопрос
-    называет их, и «Да» одобряет именно их (путь и sha256 — в состоянии ночи)."""
-    b = budget(m, d, cfg)[0] if m["known"] else cfg[1]["budget_pct"]
-    end = cfg[1]["end"]
-    pk = packs(d)
-    names = ", ".join(pack_word(x) for x in pk)
-    yes = (f"Да — открыть ночь с пачкой {names}: бюджет {num(b)} % недели, работа до {end}" if pk else
-           f"Да — открыть ночь: бюджет {num(b)} % недели, работа до {end}")
-    opts = [yes, NO_OPTION]
-    week = (f"Неделя {num(m['used'])} % при линии {num(m['line'])} %, зона {ZONES[m['zone']]}." if m["known"]
-            else f"Недельный лимит сейчас неизвестен ({m['why']}): пока снимка нет, ночь не начнёт новое.")
-    if pk:
-        what = "Ночью плановый проход поднимет координаторов по пачкам: " + "; ".join(
-            f"{pack_word(x)} ({x['direction']}, старт {x.get('start') or cfg[1]['start']}"
-            + (f", задачи {', '.join(x['tasks'][:8])}" if x["tasks"] else "") + ")" for x in pk) + \
-            ". Другие задачи с вашими отметками ночью не запускаются; пачка, изменённая после «Да», не запускается."
-    else:
-        what = "Ночью дежурный может поднимать направления по задачам с вашим решением."
-    T = P.tasks_mod()
-    tid, _ = T.task_new(P.PANTHEON, t, "inbox", TITLE, owner="zeus", status="waiting", waiting_on="human",
-                        next="ответ владельца до " + cfg[2]["deadline"], question=TITLE,
-                        why=f"{what} {week}",
-                        options=opts, recommend=yes if m["known"] and m["zone"] == "green" else NO_OPTION,
-                        if_no_answer=f"Без ответа к {cfg[2]['deadline']} ночь пропускается: новое ночью не "
-                                     "запускается, идущие сессии работают.", actor="плановый проход")
-    st.update(card_id=tid, card_at=t, question=TITLE, options=opts, packs=pk)
-    remind(st, t, "Вопрос на ночь")
-
-
-def remind(st, t, title):
-    head = None
-    with contextlib.suppress(Exception):
-        head = P.tasks_mod().load_tasks(P.PANTHEON).get(st["card_id"], (None, None, None))[1]
-    target = P.board_url(P.tasks_mod().card_name(head) + ".md") if head else P.board_url()
-    P.notify(f"{TITLE} Ответ на карточке {st['card_id']} до {config()[2]['deadline']}", f"Пантеон · {title}",
-             target=target, group=st["card_id"])
-    st["asked_at"] = list(st.get("asked_at") or []) + [P.stamp(t)]
-
-
 def evening_pass(d, m, t, cfg):
     st = load(d)
     before = json.dumps(st, sort_keys=True)
-    ask_t, dl_t = at(d, cfg[2]["ask_at"], cfg), at(d, cfg[2]["deadline"], cfg)
+    ask_t = at(d, cfg[2]["ask_at"], cfg)
     start_t, end_t = at(d, cfg[1]["start"], cfg), at(d, cfg[1]["end"], cfg)
-    if not st["skipped"]:
-        if st["card_id"]:
-            # последний ответ до срока: «Нет» после «Да» (до 00:00) пропускает и уже открытую ночь
-            got = find_answer(st, dl_t)
-            if got and (st["answer"], st.get("answer_at")) != got:
-                st["answer"], st["answer_at"] = got
-                if got[0] == "нет":
-                    _skip(st, d, t, "ответ «Нет»")
-                else:
-                    _close_card(st, t, "done", f"Ночь разрешена: откроется с {P.stamp(max(got[1], start_t))[11:]}")
-                    pack_schedule(st, d, t, cfg)
-        if st["answer"] is None and not st["skipped"] and t >= dl_t:
-            _skip(st, d, t, f"нет ответа к {cfg[2]['deadline']}")
-        if st["answer"] is None and not st["skipped"] and ask_t <= t < dl_t:
-            if not st["card_id"]:
-                ask(st, d, m, t, cfg)
-            else:
-                slots = [at(d, x, cfg) for x in [cfg[2]["ask_at"]] + cfg[2]["repeat"]]
-                slot = max(x for x in slots if x <= t)
-                last = max((datetime.strptime(x, "%Y-%m-%d %H:%M").timestamp() for x in st["asked_at"]), default=0)
-                if last < slot:
-                    remind(st, t, "повтор вопроса на ночь")
+    if not st["skipped"] and ask_t <= t < end_t and st.get("answer") in (None, "да"):
+        # решение владельца 28.10 (вариант Б): ночь — только по вашему ответу на вопрос о пачке (pantheon night ask);
+        # пачка с другим sha256, чем в вопросе, не одобряется, изменённая после этого — не запускается (oneshots)
+        if st.get("card_id") and not st.get("card_closed"):  # карточка вопроса, заданного до выпуска: снимаем
+            _close_card(st, t, "dropped", "Вопрос на ночь снят: ночь — по вашему ответу на вопрос о ночной пачке")
+            st["card_closed"] = True
+        night_approve(st, d, t)
+        pack_schedule(st, d, t, cfg)
     if st["answer"] == "да" and not st["skipped"] and not st["opened_at"] and start_t <= t < end_t and m["known"]:
         b, last_night = budget(m, d, cfg)
         if b <= 0:
@@ -1050,8 +1076,10 @@ def week_line(m):
     return "Неделя: расход неизвестен — новые запуски стоят"
 
 
+NIGHT_CLOSED = "не открыта — только по вашему ответу на вопрос о пачке (pantheon night ask)"
+
+
 def night_line(st, d, t, cfg, now_night=True):
-    ask_hm, dl = cfg[2]["ask_at"], cfg[2]["deadline"]
     if st.get("skipped"):
         return f"пропущена ({st['skipped']})"
     if st.get("opened_at"):
@@ -1061,10 +1089,9 @@ def night_line(st, d, t, cfg, now_night=True):
             s += " — закрыта: бюджет исчерпан"
         return s
     if st.get("answer") == "да":
-        return f"ответ «Да» — откроется в {cfg[1]['start']}" if now_night else "ответ «Да», но не открылась"
-    if st.get("card_id"):
-        return f"вопрос задан ({st['card_id']}), ответа нет — без ответа к {dl} ночь пропускается"
-    return f"не открыта — вопрос в {ask_hm}"
+        return (f"откроется в {cfg[1]['start']}, пачки: {', '.join(pack_word(x) for x in st.get('packs') or [])}"
+                if now_night else "не открылась (лимит недели неизвестен)")
+    return NIGHT_CLOSED
 
 
 def status_lines(t=None):
@@ -1072,7 +1099,7 @@ def status_lines(t=None):
     cfg = config()
     m = measure(t, cfg)
     d = evening(t, cfg)
-    night = night_line(load(d), d, t, cfg) if d else f"не открыта — вопрос в {cfg[2]['ask_at']}"
+    night = night_line(load(d), d, t, cfg) if d else NIGHT_CLOSED
     return ([week_line(m), "Ночь: " + night, snap_line(m, cfg), cap_line(t, m)]
             + [f"Разовый запуск {x}" for x in oneshot_lines(t)])
 
@@ -1162,5 +1189,7 @@ def main(rest):
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": why}}, ensure_ascii=False))
         return 0
-    print("pantheon night [status|report|agent-gate]", file=P.sys.stderr)
+    if sub == "ask":
+        return night_ask_cmd(rest[1:])
+    print("pantheon night [status|report|ask|agent-gate]", file=P.sys.stderr)
     return 2

@@ -368,25 +368,29 @@ def main():
           r.returncode == 0 and len(calls()) == c0 + 1 and row["result"] == "allowed" and row["origin"] == "zeus"
           and row["target"] == "athena-shop" and row["sessions"] == 0 and row["pressure"] == 1
           and row["free_pct"] == 60 and abs(row["swap_gb"] - 100 / 1024) < 0.01 and row["red"] is False)
-    # красный замер: своп выше порога дежурного (4 ГБ) или давление не «норма»
+    # красный замер: своп выше порога дежурного (4 ГБ) или давление не «норма» — только предупреждение
+    # ([sb-simplify] п. 5, metis-0523; было — код 5 «отложено»)
     os.remove(zlog)
     open(agents_file, "w").write("[]")
     n0, c0 = len(caprows()), len(calls())
+    alerts_md = os.path.join(home, "alerts.md")
     r = run("start", "athena-shop", "красный", "--from", "tick", extra={"FAKE_SWAP_MB": "5000.00"})
-    check("start --from tick при своп 5 ГБ (> порога) — отложено, код 5 (не 2), claude не звали, red в замере",
-          r.returncode == 5 and "красной зоне" in r.stderr and "своп" in r.stderr and len(calls()) == c0
-          and "самозапуск повторит позже" in r.stderr
-          and caprows()[-1]["red"] is True and caprows()[-1]["result"] == "deferred" and len(caprows()) == n0 + 1)
-    word()  # свежее слово владельца в окне Зевса tick в красной зоне не пропускает (ревью argus #110)
-    r = run("start", "athena-shop", "красный", "--from", "tick", extra={"FAKE_SWAP_MB": "5000.00"})
-    check("start --from tick в красной зоне при свежем zeus.md — по-прежнему код 5, claude не звали",
-          r.returncode == 5 and len(calls()) == c0 and caprows()[-1]["result"] == "deferred")
-    os.remove(zlog)
+    check("start --from tick при своп 5 ГБ (> порога) — запуск, код 0, в stderr предупреждение, red в замере, allowed",
+          r.returncode == 0 and "предупреждение" in r.stderr and "своп" in r.stderr and len(calls()) == c0 + 1
+          and "самозапуск повторит" not in r.stderr
+          and caprows()[-1]["red"] is True and caprows()[-1]["result"] == "allowed" and len(caprows()) == n0 + 1)
+    al = open(alerts_md, encoding="utf-8").read() if os.path.exists(alerts_md) else ""
+    check("красная память — одна тревога-предупреждение в день", al.count("запуски идут при красной памяти") == 1)
+    open(agents_file, "w").write("[]")
     r = run("start", "athena-shop", "красный", "--from", "tick", extra={"FAKE_PRESSURE": "2"})
-    check("start --from tick при давлении «предупреждение» — отложено, код 5",
-          r.returncode == 5 and "давление" in r.stderr and len(calls()) == c0)
+    al = open(alerts_md, encoding="utf-8").read() if os.path.exists(alerts_md) else ""
+    check("start --from tick при давлении «предупреждение» — запуск, вторая тревога за день не пишется",
+          r.returncode == 0 and "давление" in r.stderr and len(calls()) == c0 + 2
+          and al.count("запуски идут при красной памяти") == 1)
+    open(agents_file, "w").write("[]")
     r = run("start", "athena-shop", "красный", "--from", "tick", extra={"FAKE_SWAP_MB": "3000.00"})
-    check("start --from tick при своп 3 ГБ (ниже порога) — запуск", r.returncode == 0 and len(calls()) == c0 + 1)
+    check("start --from tick при своп 3 ГБ (ниже порога) — запуск без предупреждения",
+          r.returncode == 0 and len(calls()) == c0 + 3 and "предупреждение" not in r.stderr)
     open(agents_file, "w").write("[]")
     r = run("start", "athena-shop", "красный", "--from", "owner", extra={"FAKE_SWAP_MB": "5000.00", "FAKE_PRESSURE": "4"})
     check("start --from owner в красной зоне — запуск (слово владельца — он сам), red True в замере",
@@ -426,8 +430,10 @@ def main():
     r = run("start", "athena-shop", "роль", "--from", "owner", extra=dict(red, PANTHEON_ROLE="domain-coordinator"))
     check("--from owner не принимается и в окне другой роли", r.returncode == 2 and len(calls()) == c0)
     r = run("start", "athena-shop", "роль", extra=dict(red, PANTHEON_ROLE="domain-coordinator"))
-    check("другая роль без --from при красном замере — как tick: отложено, код 5",
-          r.returncode == 5 and len(calls()) == c0 and caprows()[-1]["origin"] == "tick")
+    check("другая роль без --from при красном замере — как tick: запуск с предупреждением (metis-0523)",
+          r.returncode == 0 and len(calls()) == c0 + 1 and caprows()[-1]["origin"] == "tick")
+    c0 = len(calls())
+    open(agents_file, "w").write("[]")
     r = run("start", "athena-shop", "роль", "--from", "tick", extra=dict(red, PANTHEON_ROLE="hq"))
     check("PANTHEON_ROLE=hq, --from tick в красной зоне — отказ, код 2 (не origin окна)",
           r.returncode == 2 and "только zeus" in r.stderr and len(calls()) == c0)
@@ -478,12 +484,14 @@ def main():
     open(agents_file, "w").write("[]")
     c0 = len(calls())
     r = run("start", "athena-shop", "тишина", "--from", "tick", extra={"FAKE_NOSIGNAL": "1"})
-    check("своп и давление не прочитаны — tick: отложено, код 5, «нет сигнала»",
-          r.returncode == 5 and "нет сигнала" in r.stderr and len(calls()) == c0 and caprows()[-1]["unknown"] is True)
+    check("своп и давление не прочитаны — tick: запуск с предупреждением «нет сигнала» (metis-0523), unknown в замере",
+          r.returncode == 0 and "нет сигнала" in r.stderr and "предупреждение" in r.stderr and len(calls()) == c0 + 1
+          and caprows()[-1]["unknown"] is True and caprows()[-1]["result"] == "allowed")
+    open(agents_file, "w").write("[]")
     word()
     r = run("start", "athena-shop", "тишина", "--from", "zeus", extra={"FAKE_NOSIGNAL": "1"})
     check("своп и давление не прочитаны — zeus со словом: запуск, в замере unknown",
-          r.returncode == 0 and len(calls()) == c0 + 1 and caprows()[-1]["unknown"] is True
+          r.returncode == 0 and len(calls()) == c0 + 2 and caprows()[-1]["unknown"] is True
           and caprows()[-1]["swap_gb"] is None and caprows()[-1]["result"] == "allowed")
     os.remove(zlog)
     open(agents_file, "w").write("[]")
@@ -794,10 +802,13 @@ def main():
           hx[2].returncode == 2 and "pantheon wake hestia: отказ — запуск от Зевса без вашего слова" in hx[2].stderr)
     word()
     r = run("wake", "hestia", "--task", "athena-0001", extra=red_env)
-    check("wake hestia из окна направления со словом, но в красной зоне — код 5 «отложено» (tick слова не имеет), "
-          "claude не звали", r.returncode == 5 and "pantheon wake hestia: отложено — память Mac" in r.stderr
-          and not calls() and caprows()[-1]["result"] == "deferred" and caprows()[-1]["origin"] == "tick"
-          and "самозапуск" not in r.stderr and "слово в окне Зевса из окна роли красную зону не снимает; повторите после нормы памяти" in r.stderr)
+    check("wake hestia из окна направления со словом и в красной зоне — запуск с предупреждением о памяти (metis-0523)",
+          r.returncode == 0 and "предупреждение — память Mac" in r.stderr
+          and len([x for x in calls() if "--bg" in x["argv"]]) == 1 and caprows()[-1]["result"] == "allowed"
+          and caprows()[-1]["origin"] == "tick" and caprows()[-1]["red"] is True)
+    open(agents_file, "w").write("[]")
+    open(log, "w").close()
+    os.remove(hrun_path)
     r = run("wake", "hestia", "--task", "athena-0001", extra=shop_env)
     hrun = json.load(open(hrun_path)) if os.path.exists(hrun_path) else {}
     check("wake hestia из окна направления со словом — запуск, в окне запуска PANTHEON_ORIGIN=tick",
