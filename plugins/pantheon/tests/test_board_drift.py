@@ -50,7 +50,7 @@ class Env:
         return r.stdout.split()[0]
 
     def set_status(self, tid, status):
-        r = self.run(["task", "set", tid, "status=" + status, "--note", "тест"])
+        r = self.run(["task", "set", tid, "status=" + status, "--note", "тест"] + (["--force", "тест"] if status == "done" else []))
         assert r.returncode == 0, (r.stdout, r.stderr)
 
     def cache(self, **kw):

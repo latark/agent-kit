@@ -594,6 +594,10 @@ def _file_for(pantheon, direction, tid):
 DONE_WHEN = "Готово, когда"
 DONE_WHEN_HEAD = f"## {DONE_WHEN}"
 DONE_WHEN_HINT = "(впишите проверяемые пункты: что должно работать и как это проверить)"
+# metis-0503: правило «нельзя закрыть с неотмеченными пунктами» — только для задач, созданных с этого дня
+# (старые чек-листы не вели; константой пользуется и metis-0505).
+CRITERIA_FROM = "2026-10-27"
+CLOSE_EXEMPT_ACTORS = ("владелец", "плановый проход", "pantheon role")  # карточки заявок и слово владельца этим правилом не режем
 _DW_LINE = re.compile(rf"^\s*(?:#{{1,6}}\s*)?{DONE_WHEN}\s*:?\s*$", re.IGNORECASE)
 _DW_ITEM = re.compile(r"^\s*[-*]\s*\[([ xXхХ])\]\s*(.*?)\s*$")
 
@@ -612,6 +616,13 @@ def done_criteria(body):
         elif ln.strip():
             break
     return out
+
+
+def unchecked_criteria(head, body):
+    """Число неотмеченных пунктов «Готово, когда» (заглушка-подсказка — тоже неотмеченный); 0 — у задач, созданных до CRITERIA_FROM."""
+    if str(head.get("created") or "") < CRITERIA_FROM:
+        return 0
+    return sum(1 for done, _ in done_criteria(body) if not done)
 
 
 def done_when_section(items):
@@ -720,11 +731,12 @@ def dir_lock(d, wait=10.0):
             os.close(fd)
 
 
-def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None, body=None, keep_updated=False):
+def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None, body=None, keep_updated=False, force=None):
     """body — новый текст задачи (между заголовком «# …» и «## Журнал», «Заметки владельца» остаются; metis-0402):
     прежний заменяется, в журнал — строка «текст задачи заменён».
     keep_updated — служебная правка, не движение работы (migrate-project): прежнее updated остаётся, иначе
-    доска, «Готово за сутки» и тревога «застряла» приняли бы её за работу (metis-0323)."""
+    доска, «Готово за сутки» и тревога «застряла» приняли бы её за работу (metis-0323).
+    force — причина закрытия (done) при неотмеченных пунктах «Готово, когда»; уходит строкой в журнал (metis-0503)."""
     tasks = load_tasks(pantheon, WORK_TYPES)
     if tid not in tasks:
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
@@ -736,7 +748,14 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
     if changes.get("source"):
         check_source(pantheon, tid, changes["source"])
     with dir_lock(os.path.dirname(tasks[tid][0])):
-        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck, body, keep_updated)
+        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck, body, keep_updated, force,
+                                pantheon)
+
+
+def rest_ids(pantheon, tid):
+    """id задач-остатков tid (source=tid, тег «остаток»)."""
+    return [i for i, (_, h, _b) in load_tasks(pantheon, WORK_TYPES).items()
+            if h.get("source") == tid and REST_TAG in (h.get("tags") or [])]
 
 
 def task_split(pantheon, t, tid, title, done_when=None, text=None, actor="агент"):
@@ -762,7 +781,9 @@ def task_split(pantheon, t, tid, title, done_when=None, text=None, actor="аге
     nid, p = task_new(pantheon, t, h0["direction"], title, project=h0.get("project"), actor=actor, text=desc,
                       done_when=items, created_note=f"остаток задачи {tid}", **fields)
     try:
-        task_set(pantheon, t, tid, {}, note=f"остаток вынесен в {nid}: {' '.join(str(title).split())}", actor=actor)
+        res = h0.get("result")  # result ссылается на остаток: по нему ручной done проходит без --force (metis-0503)
+        task_set(pantheon, t, tid, {"result": f"{res}; остаток в {nid}" if res else f"остаток в {nid}"},
+                 note=f"остаток вынесен в {nid}: {' '.join(str(title).split())}", actor=actor)
     except Exception:
         remove(p)  # исходная не записана — новая без пары в журнале не остаётся
         raise
@@ -823,7 +844,7 @@ def replace_desc(body, text):
     return "\n".join(new), len("\n".join(old).strip())
 
 
-def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None, keep_updated=False):
+def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None, keep_updated=False, force=None, pantheon=None):
     head, body = read(path)  # заново, уже под блокировкой: чужая правка между чтением и записью не потеряется
     if not head or head.get("id") != tid:
         raise ValueError(f"задача {tid} изменилась — повторите")
@@ -834,6 +855,16 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None
     if "owner" in changes and not changes["owner"]:
         raise ValueError("owner не очищается: у задачи всегда есть «Кому» — поставьте другого исполнителя")
     old_q, was_closed = head.get("question"), head.get("status") in ("done", "dropped")
+    if changes.get("status") == "done" and not was_closed and actor not in CLOSE_EXEMPT_ACTORS:
+        left = unchecked_criteria(head, new_body if new_body is not None else body)
+        rest = rest_ids(pantheon, tid) if left and pantheon else []
+        if left and force is not None and not " ".join(str(force).split()):
+            raise ValueError("--force: нужна причина текстом")
+        if left and force is None and not any(r in str(changes.get("result", head.get("result")) or "") for r in rest):
+            raise ValueError(f"{tid}: неотмечено {left} пунктов «{DONE_WHEN}»: отметьте их или вынесите остаток "
+                             "(pantheon task split), либо --force \"причина\"")
+        if left and force is not None:
+            note = f"закрыта с неотмеченными ({left}), --force: {' '.join(str(force).split())}" + (f"; {note}" if note else "")
     for k, v in changes.items():
         if k not in FIELDS or k in ("type", "id", "created", "schema_version"):
             raise ValueError(f"поле {k} так не меняется")
@@ -927,7 +958,7 @@ def extra_attention(head, body, tasks, t, night_end="08:00", open_prs=None):
 
 def board_problems(tasks, t, night_end="08:00", open_prs=None):
     """Сверка по всем задачам → (ошибки, предупреждения), каждое — (id, текст). Ошибки: задача пачки без mode;
-    done без closed; закрытая по слиянию без release или actual. Предупреждения — слова extra_attention."""
+    done без closed; закрытая по слиянию без release или actual. Предупреждения — слова extra_attention и хвосты в журнале без задачи (tail_lines)."""
     errs, warns = [], []
     for tid, (_, h, b) in sorted(tasks.items()):
         if h.get("type") == "task" and in_pack(h, tasks) and not h.get("mode"):
@@ -939,6 +970,7 @@ def board_problems(tasks, t, night_end="08:00", open_prs=None):
                 if not h.get(k):
                     errs.append((tid, f"закрыта по слиянию, а поле {k} пусто — его пишет плановый проход, «Итоги пачек» без него неполны"))
         warns += [(tid, w) for w in extra_attention(h, b, tasks, t, night_end, open_prs)]
+    warns += [(tid, f"хвост в журнале без задачи: {ln}") for tid, ln in tail_lines(tasks, t)]  # metis-0504, не блок
     return errs, warns
 
 
@@ -1016,7 +1048,7 @@ def open_deps(head, tasks):
             if d not in tasks or tasks[d][1].get("status") not in ("done", "dropped")]
 
 
-PARALLEL_MAX = 3      # потолок параллельных исполнителей за ночь (metis-0248, поправка 6); AUTOSTART_MAX в watch.py — жёстче
+PARALLEL_MAX = 3      # потолок параллельных исполнителей за ночь (metis-0248, поправка 6); `AUTOSTART_MAX` в watch.py — жёстче: потолок самозапуска, не больше двух направлений сразу
 STALE_HOURS = 24      # предшественник без изменений дольше — «зависший» (допущение плана, поправим по замеру)
 
 
@@ -3410,6 +3442,127 @@ def unlinked_decisions(tasks, decisions_text, zeus_log_text, board_lines, t, min
         words.update(task_words(b))
     notask = {m.group(1) for m in map(NOTASK_RE.match, (decisions_text or "").split("\n")) if m}
     return sorted(i for i in cands if i not in tasks and i not in words and i not in notask)
+
+
+# --- хвосты не теряются (metis-0504, исследование 26.10 разд. 5 пп. 6–7) ---------------------------------------------
+# Три тревоги тика рядом с «слово владельца без задачи» (стиль тот же: один раз на ключ, только о новых, первый проход
+# без тревоги; check в pantheon.py, файл tail-seen.json). (а) Строка журнала задачи со словами «хвост / остаток / не
+# сделано / вынесен / позже» без id задачи в этой строке — только предупреждение (эвристика шумит), не блок.
+# (б) Файл knowledge/inbox старше суток, на имя которого не ссылается ни одна задача (source/from или текст);
+# отчёт с `findings: 0` в шапке — исключение. (в) directions/*/review-*.md с находкой класса Д (строка начинается с «Д»),
+# на имя которого не ссылается ни одна задача; тот же срок, что у (б): лид заводит задачи после слияния, не сразу.
+
+TAIL_DAYS = 7  # строка журнала старше — уже не для тика
+TAIL_FILE_HOURS = 24
+TAIL_RE = re.compile(r"хвост\w*|остат(?:ок|к\w+)|не сделан\w*|вынесен\w*|позже", re.I)
+TAIL_ID_RE = re.compile(r"(?<![\w-])[a-z][a-z0-9]*-\d{2,}(?!\w)")
+JOURNAL_LINE_RE = re.compile(r"^- (\d{4}-\d\d-\d\d \d\d:\d\d) — ([^:\n]*): (.*)$")
+TAIL_SKIP_ACTORS = ("check",)  # записи самого тика — не слова агента
+FINDINGS_ZERO_RE = re.compile(r"^findings:\s*0\s*$", re.M)
+D_FINDING_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)?\**Д\d*(?![\w])\**\s*[·.:—–)-]?\s*\S")
+
+
+def tail_lines(tasks, t, days=TAIL_DAYS):
+    """[(id задачи, строка журнала)] со словами хвоста и без id другой существующей задачи в самой строке, не старше days дней.
+    Строки самого тика (actor check) не считаются; журнал — после «## Журнал», до следующего «## »."""
+    out = []
+    for tid, (_, head, body) in sorted(tasks.items()):
+        if head.get("type") != "task":
+            continue
+        m = re.search(r"^## Журнал[^\n]*\n", body or "", re.M)
+        if not m:
+            continue
+        for ln in (body[m.end():]).split("\n"):
+            if ln.startswith("## "):
+                break
+            jm = JOURNAL_LINE_RE.match(ln)
+            if not jm or jm.group(2).strip() in TAIL_SKIP_ACTORS:
+                continue
+            ts = ts_of(jm.group(1).replace(" ", "T") + ":00")
+            if ts is None or t - ts > days * 86400 or not TAIL_RE.search(jm.group(3)):
+                continue
+            # id гасит тревогу, только если такая задача есть и это не сама задача (review-113, x86-64, свой id — не хвост)
+            if not any(i != tid and i in tasks for i in TAIL_ID_RE.findall(jm.group(3))):
+                out.append((tid, ln.strip()))
+    return out
+
+
+def _task_refs(tasks):
+    """Слова, на которые ссылаются задачи: поля source и from, заголовок и тело (до и после «## Журнал») целиком."""
+    parts = []
+    for _, head, body in tasks.values():
+        parts += [str(head.get(k) or "") for k in ("source", "from", "title")]
+        parts.append(body or "")
+    text = "\n".join(parts)
+    return text, set(re.findall(r"[\w.-]+", text))
+
+
+def _file_linked(name, text, words):
+    stem = os.path.splitext(name)[0]
+    return name in words or stem in words or (("." in stem) and stem in text)
+
+
+def _listing(d, pattern=None):
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return []
+    return [n for n in names if not n.startswith(".") and (pattern is None or pattern.match(n))
+            and os.path.isfile(os.path.join(d, n))]
+
+
+def _old_enough(p, t, hours):
+    try:
+        return t - os.stat(p).st_mtime > hours * 3600
+    except OSError:
+        return False
+
+
+def inbox_orphans(tasks, inbox_dir, t, hours=TAIL_FILE_HOURS):
+    """[(путь, 1)] файлы inbox старше hours часов, на имя которых не ссылается ни одна задача; findings: 0 — исключение."""
+    text, words = _task_refs(tasks)
+    out = []
+    for n in _listing(inbox_dir):
+        p = os.path.join(inbox_dir, n)
+        if not _old_enough(p, t, hours) or _file_linked(n, text, words):
+            continue
+        try:
+            with open(p, encoding="utf-8") as fh:
+                if FINDINGS_ZERO_RE.search("".join(fh.readline() for _ in range(40))):
+                    continue
+        except (OSError, UnicodeDecodeError):
+            pass  # не текст — ссылки на него всё равно нет
+        out.append((p, 1))
+    return out
+
+
+def review_debts(tasks, pantheon, t, hours=TAIL_FILE_HOURS):
+    """[(путь, строка первой Д-находки)] из <pantheon>/directions/*/review-*.md, старше hours часов, без ссылки из задач."""
+    text, words = _task_refs(tasks)
+    rx = re.compile(r"review-.*\.md$")
+    out = []
+    base = os.path.join(pantheon, "directions")
+    for dn in _listing_dirs(base):
+        for n in _listing(os.path.join(base, dn), rx):
+            p = os.path.join(base, dn, n)
+            if not _old_enough(p, t, hours) or _file_linked(n, text, words):
+                continue
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    for i, ln in enumerate(fh, 1):
+                        if D_FINDING_RE.match(ln):
+                            out.append((p, i))
+                            break
+            except (OSError, UnicodeDecodeError):
+                continue
+    return out
+
+
+def _listing_dirs(d):
+    try:
+        return sorted(n for n in os.listdir(d) if os.path.isdir(os.path.join(d, n)))
+    except OSError:
+        return []
 
 
 # --- поле project — только имя проекта из directions.toml (metis-0323) ---------------------------------------------

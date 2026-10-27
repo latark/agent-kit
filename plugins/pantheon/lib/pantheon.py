@@ -73,6 +73,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --batch без --mode (и без mode в шапке) — отказ: режим обязателен при сборке пачки (metis-0308);
                     --depends-on / depends_on= с несуществующим id, самой собой или циклом — отказ при записи (metis-0248)
   pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"] [--body "текст" | --body-file ПУТЬ]
+                    [--force "причина"]  (status=done при неотмеченных «Готово, когда» у задач с 27.10 — отказ; --force пишет причину в журнал)
                     --body[-file] заменяет текст задачи между «# заголовок» и «## Журнал» («Заметки владельца» остаются),
                     в журнал — «текст задачи заменён (было N знаков…)»; неизвестный флаг и повтор флага, кроме --option, —
                     отказ, код 2
@@ -6932,7 +6933,7 @@ def check(paths=None, quiet=False):
         for d in drift:
             print(f"ОШИБКА · Доска/{d}")
     field_errs, field_warns = [], []
-    nobody, unlinked = [], []
+    nobody, unlinked, tails = [], [], []
     if not paths:  # поля «Итогов пачек» и ожидание PR/приёмки (metis-0308)
         night_end = "08:00"
         with contextlib.suppress(Exception):
@@ -6945,6 +6946,10 @@ def check(paths=None, quiet=False):
         unlinked = T.unlinked_decisions(tasks_now, _read_or_empty(os.path.join(PANTHEON, "decisions.md")),
                                         _read_or_empty(path("owner-log", "zeus.md")),
                                         _read_or_empty(path("owner-log", "board.jsonl")).splitlines(), now())
+        tails = ([("хвост", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
+                  for i, ln in T.tail_lines(tasks_now, now())]
+                 + [("отчёт", p, f"{p}:{n}") for p, n in T.inbox_orphans(tasks_now, os.path.join(AI_HOME, "knowledge", "inbox"), now())]
+                 + [("ревью", p, f"{p}:{n}") for p, n in T.review_debts(tasks_now, PANTHEON, now())])
         field_errs, field_warns = T.board_problems(tasks_now, now(), night_end, autoclose_mod().open_pr_tasks(path("autoclose.json")))
         field_errs = [(i, f"status done без closed — проставлен из updated") for i in fixed] + field_errs
         for tid, text in field_errs:
@@ -7002,6 +7007,7 @@ def check(paths=None, quiet=False):
         else:
             clear_once("check-nobody")
         unlinked_alert(T, unlinked)
+        tail_alert(T, tails)
         return 0
     return 1 if bad or drift or view_drift or field_errs or skill_bad or skill_arg_bad or coord_errs else 0
 
@@ -7040,6 +7046,44 @@ def unlinked_alert(T, unlinked):
         write_atomic(p, json.dumps(keep, ensure_ascii=False, sort_keys=True))
 
 
+TAIL_SHOWN = 12
+TAIL_TEXT = {"хвост": "хвост в журнале без задачи (нет id задачи в строке)",
+             "отчёт": "файл inbox старше суток без задачи разбора (нет ссылки source/from или в тексте)",
+             "ревью": "ревью с находкой Д без задачи (нет ссылки на файл ревью)"}
+
+
+def tail_alert(T, items):
+    """Тревоги «хвосты не теряются» (metis-0504): items — [(вид, ключ, место)], вид хвост | отчёт | ревью, место — id
+    задачи и строка журнала либо файл:строка. Стиль unlinked_alert: один раз на ключ, только о новых, первый проход
+    (файла STATE/tail-seen.json нет или он испорчен) только запоминает без тревоги. Записи о том, чего в наборе
+    больше нет (хвост поправили, задачу завели), из файла уходят; по виду называется не больше TAIL_SHOWN."""
+    p = path("tail-seen.json")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            seen = json.load(fh)
+        if not isinstance(seen, dict):
+            raise ValueError("не словарь")
+    except (OSError, ValueError):
+        seen = None
+    t = now()
+    keep, shown_all = {}, set()
+    for kind in TAIL_TEXT:
+        mine = [(f"{kind}|{k}", where) for kd, k, where in items if kd == kind]
+        fresh = [(k, w) for k, w in mine if k not in seen] if seen is not None else []
+        shown = fresh[:TAIL_SHOWN]
+        if shown:
+            more = len(fresh) - len(shown)
+            alert(f"{TAIL_TEXT[kind]}: {'; '.join(w for _, w in shown)}"
+                  f"{f' и ещё {more} (назову следующим проходом)' if more else ''} — завести задачу "
+                  "(pantheon task new, ссылка на файл или id в тексте)", "check")
+        shown_all.update(k for k, _ in shown)
+        # названные в тревоге и уже показанные остаются; неназванные (сверх TAIL_SHOWN) — нет; первый проход помнит всё
+        keep.update({k: (seen or {}).get(k, t) for k, _ in mine if seen is None or k in seen or k in shown_all})
+    if keep != seen:
+        os.makedirs(STATE, exist_ok=True)
+        write_atomic(p, json.dumps(keep, ensure_ascii=False, sort_keys=True))
+
+
 # Флаги `task new` (metis-0402): неизвестный флаг — отказ с его именем, а не молчаливо потерянное поле.
 TASK_NEW_VALUE_FLAGS = {"--direction", "--title", "--project", "--text", "--body", "--body-file", "--type", "--status",
                         "--priority", "--due", "--next", "--owner", "--release", "--wave", "--batch", "--mode", "--mode-why",
@@ -7048,7 +7092,7 @@ TASK_NEW_VALUE_FLAGS = {"--direction", "--title", "--project", "--text", "--body
                         "--from", "--source", "--done-when"}
 TASK_NEW_BOOL_FLAGS = {"--risky"}
 TASK_SPLIT_VALUE_FLAGS = {"--title", "--done-when", "--text"}
-TASK_SET_VALUE_FLAGS = {"--note", "--option", "--body", "--body-file"}
+TASK_SET_VALUE_FLAGS = {"--note", "--option", "--body", "--body-file", "--force"}
 # Повторяемые флаги — списки; любой другой повторённый флаг — отказ (argus b, круг 2): `opt()` берёт последнее
 # значение, и `--body "Цель" --body "Готово, когда"` молча терял бы первую часть. --wave — прежнее имя --release.
 TASK_REPEATABLE_FLAGS = {"--option", "--touches", "--depends-on", "--done-when"}
@@ -7196,7 +7240,7 @@ def task_cmd(rest):
             for w in T.option_warns(fields):
                 print(f"предупреждение · {w}", file=sys.stderr)
         elif sub == "set" and args:
-            tid, changes, note, i, seen = args[0], {}, None, 1, set()
+            tid, changes, note, i, seen, force = args[0], {}, None, 1, set(), None
             # --wave — прежнее имя --release (metis-0069): выпуск строкой «pantheon 0.11.50»
             night_flags = {"--release": "release", "--wave": "release", "--batch": "batch", "--night": "night", "--estimate": "estimate",
                            "--actual": "actual", "--acceptance": "acceptance", "--mode": "mode", "--mode-why": "mode_why"}  # ночной цикл: флаги как у --due
@@ -7221,13 +7265,16 @@ def task_cmd(rest):
                 if args[i] == "--note" and i + 1 < len(args):
                     note, i = args[i + 1], i + 2
                     continue
+                if args[i] == "--force" and i + 1 < len(args):  # причина закрытия с неотмеченными пунктами (metis-0503)
+                    force, i = args[i + 1], i + 2
+                    continue
                 if args[i] == "--option" and i + 1 < len(args):  # варианты с запятыми и кавычками (metis-0037)
                     changes["options"] = (changes.get("options") or []) + [args[i + 1]]  # и после options= (argus)
                     i += 2
                     continue
                 if args[i].startswith("--") and not (args[i] in night_flags and i + 1 < len(args)):
                     # metis-0402: неизвестный флаг или флаг без значения — отказ с его именем, не «поле=значение»
-                    known, name = {"--note", "--option", "--body", "--body-file", *night_flags}, args[i].split("=", 1)[0]
+                    known, name = {"--note", "--option", "--body", "--body-file", "--force", *night_flags}, args[i].split("=", 1)[0]
                     print("pantheon task set: " + (f"у флага {args[i]} нет значения" if args[i] in known
                           else f"пишите «{name} значение» через пробел, не «{args[i][:40]}»" if name in known
                           else f"неизвестный флаг {name}") + " — ничего не записано", file=sys.stderr)
@@ -7252,7 +7299,7 @@ def task_cmd(rest):
                 changes[k] = None if v in ("", "null") else int(v) if kind == "int" else (v == "true") if kind == "bool" else \
                     [x.strip() for x in v.split(",") if x.strip()] if kind == "list" else v
                 i += step
-            p, head = T.task_set(PANTHEON, now(), tid, changes, note=note, body=new_body)
+            p, head = T.task_set(PANTHEON, now(), tid, changes, note=note, body=new_body, force=force)
             print(f"{tid}: {head.get('status')} · {os.path.relpath(p, PANTHEON)}")
             if changes.get("status") in ("done", "dropped"):
                 metrics_on_close(T, tid)
