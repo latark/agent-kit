@@ -316,6 +316,13 @@ def close_pr(pantheon, t, repo, pr, dirs, T, actual_for, log, errors):
                     T.task_set(pantheon, t, tid, {}, actor="плановый проход", note=note)
                     log.append(f"{tid}: PR #{n} слит, «часть» — не закрыта")
                 continue
+            left = T.unchecked_criteria(head, tasks[tid][2])
+            if left:  # хвосты «Готово, когда» не теряем (metis-0503): слитый PR без «часть» — на проверку, не в done
+                note = f"PR #{n} ({repo}) слит, неотмечено {left}"
+                if head.get("status") != "review" or not journal_has(tasks[tid][0], T, note):
+                    T.task_set(pantheon, t, tid, {"status": "review"}, actor="плановый проход", note=note)
+                    log.append(f"{tid}: PR #{n} слит, неотмечено {left} — review")
+                continue
             mark = f"PR #{n} ({repo}) →"
             if journal_has(tasks[tid][0], T, T.CLOSED_BY_MERGE + " " + mark):
                 continue  # этим PR задачу уже закрывали; владелец вернул её в работу — второй раз не трогаем

@@ -594,6 +594,10 @@ def _file_for(pantheon, direction, tid):
 DONE_WHEN = "Готово, когда"
 DONE_WHEN_HEAD = f"## {DONE_WHEN}"
 DONE_WHEN_HINT = "(впишите проверяемые пункты: что должно работать и как это проверить)"
+# metis-0503: правило «нельзя закрыть с неотмеченными пунктами» — только для задач, созданных с этого дня
+# (старые чек-листы не вели; константой пользуется и metis-0505).
+CRITERIA_FROM = "2026-10-27"
+CLOSE_EXEMPT_ACTORS = ("владелец", "плановый проход", "pantheon role")  # карточки заявок и слово владельца этим правилом не режем
 _DW_LINE = re.compile(rf"^\s*(?:#{{1,6}}\s*)?{DONE_WHEN}\s*:?\s*$", re.IGNORECASE)
 _DW_ITEM = re.compile(r"^\s*[-*]\s*\[([ xXхХ])\]\s*(.*?)\s*$")
 
@@ -612,6 +616,13 @@ def done_criteria(body):
         elif ln.strip():
             break
     return out
+
+
+def unchecked_criteria(head, body):
+    """Число неотмеченных пунктов «Готово, когда» (заглушка-подсказка — тоже неотмеченный); 0 — у задач, созданных до CRITERIA_FROM."""
+    if str(head.get("created") or "") < CRITERIA_FROM:
+        return 0
+    return sum(1 for done, _ in done_criteria(body) if not done)
 
 
 def done_when_section(items):
@@ -720,11 +731,12 @@ def dir_lock(d, wait=10.0):
             os.close(fd)
 
 
-def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None, body=None, keep_updated=False):
+def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None, body=None, keep_updated=False, force=None):
     """body — новый текст задачи (между заголовком «# …» и «## Журнал», «Заметки владельца» остаются; metis-0402):
     прежний заменяется, в журнал — строка «текст задачи заменён».
     keep_updated — служебная правка, не движение работы (migrate-project): прежнее updated остаётся, иначе
-    доска, «Готово за сутки» и тревога «застряла» приняли бы её за работу (metis-0323)."""
+    доска, «Готово за сутки» и тревога «застряла» приняли бы её за работу (metis-0323).
+    force — причина закрытия (done) при неотмеченных пунктах «Готово, когда»; уходит строкой в журнал (metis-0503)."""
     tasks = load_tasks(pantheon, WORK_TYPES)
     if tid not in tasks:
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
@@ -736,7 +748,14 @@ def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=
     if changes.get("source"):
         check_source(pantheon, tid, changes["source"])
     with dir_lock(os.path.dirname(tasks[tid][0])):
-        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck, body, keep_updated)
+        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck, body, keep_updated, force,
+                                pantheon)
+
+
+def rest_ids(pantheon, tid):
+    """id задач-остатков tid (source=tid, тег «остаток»)."""
+    return [i for i, (_, h, _b) in load_tasks(pantheon, WORK_TYPES).items()
+            if h.get("source") == tid and REST_TAG in (h.get("tags") or [])]
 
 
 def task_split(pantheon, t, tid, title, done_when=None, text=None, actor="агент"):
@@ -762,7 +781,9 @@ def task_split(pantheon, t, tid, title, done_when=None, text=None, actor="аге
     nid, p = task_new(pantheon, t, h0["direction"], title, project=h0.get("project"), actor=actor, text=desc,
                       done_when=items, created_note=f"остаток задачи {tid}", **fields)
     try:
-        task_set(pantheon, t, tid, {}, note=f"остаток вынесен в {nid}: {' '.join(str(title).split())}", actor=actor)
+        res = h0.get("result")  # result ссылается на остаток: по нему ручной done проходит без --force (metis-0503)
+        task_set(pantheon, t, tid, {"result": f"{res}; остаток в {nid}" if res else f"остаток в {nid}"},
+                 note=f"остаток вынесен в {nid}: {' '.join(str(title).split())}", actor=actor)
     except Exception:
         remove(p)  # исходная не записана — новая без пары в журнале не остаётся
         raise
@@ -823,7 +844,7 @@ def replace_desc(body, text):
     return "\n".join(new), len("\n".join(old).strip())
 
 
-def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None, keep_updated=False):
+def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None, keep_updated=False, force=None, pantheon=None):
     head, body = read(path)  # заново, уже под блокировкой: чужая правка между чтением и записью не потеряется
     if not head or head.get("id") != tid:
         raise ValueError(f"задача {tid} изменилась — повторите")
@@ -834,6 +855,16 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None
     if "owner" in changes and not changes["owner"]:
         raise ValueError("owner не очищается: у задачи всегда есть «Кому» — поставьте другого исполнителя")
     old_q, was_closed = head.get("question"), head.get("status") in ("done", "dropped")
+    if changes.get("status") == "done" and not was_closed and actor not in CLOSE_EXEMPT_ACTORS:
+        left = unchecked_criteria(head, new_body if new_body is not None else body)
+        rest = rest_ids(pantheon, tid) if left and pantheon else []
+        if left and force is not None and not " ".join(str(force).split()):
+            raise ValueError("--force: нужна причина текстом")
+        if left and force is None and not any(r in str(changes.get("result", head.get("result")) or "") for r in rest):
+            raise ValueError(f"{tid}: неотмечено {left} пунктов «{DONE_WHEN}»: отметьте их или вынесите остаток "
+                             "(pantheon task split), либо --force \"причина\"")
+        if left and force is not None:
+            note = f"закрыта с неотмеченными ({left}), --force: {' '.join(str(force).split())}" + (f"; {note}" if note else "")
     for k, v in changes.items():
         if k not in FIELDS or k in ("type", "id", "created", "schema_version"):
             raise ValueError(f"поле {k} так не меняется")
