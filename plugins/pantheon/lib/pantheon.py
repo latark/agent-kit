@@ -4021,11 +4021,9 @@ def capacity_probe(agents):
                               and w.is_pantheon(a.get("name"), doms))
     with contextlib.suppress(Exception):
         out["swap_gb"] = w.swap_gb()
-    with contextlib.suppress(Exception):
-        r = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True, text=True,
-                           timeout=10)
-        if r.returncode == 0 and r.stdout.strip().isdigit():
-            out["pressure"] = int(r.stdout.strip())
+    # через _memory_pressure: она понимает подмену PANTHEON_FAKE_PRESSURE — прямой sysctl тут давал тестам давление
+    # настоящего Mac, и при «предупреждении» у владельца test_watch падал целиком (36 из 85)
+    out["pressure"] = _memory_pressure()
     with contextlib.suppress(Exception):
         r = subprocess.run(["memory_pressure"], capture_output=True, text=True, timeout=10)
         m = re.search(r"free percentage:\s*(\d+)%", r.stdout)
