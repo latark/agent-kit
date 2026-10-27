@@ -2787,7 +2787,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             data["sandbox"]["excludedCommands"] += MERGE_REQUEST_CMDS
         # окна направлений и мастерская сами поднимают dev-сервер и гоняют тесты своего проекта ([sb-simplify] 27.10):
         # Unix-сокеты (tsx IPC, профиль Chromium) — только в своём кэше окна, не в $TMPDIR (/tmp/claude-<uid> общий у
-        # всех сессий). Местных портов (allowLocalBinding) нет: он открывает весь localhost — и Surge (прокси наружу
+        # всех сессий). Местных портов (allowLocalBinding) нет: он открывает весь localhost — и местный прокси (выход наружу
         # мимо allowedDomains), и 9222 браузера; проверено в бинарнике 2.1.311, ревью 27.10
         data["sandbox"]["network"]["allowUnixSockets"] = [cache]
         # TMPDIR песочница ставит свой (/tmp/claude-<uid>, env окна его не перебивает — проба 27.10): тесты с сокетами

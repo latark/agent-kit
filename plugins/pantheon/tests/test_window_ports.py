@@ -4,7 +4,7 @@
 Запуск: python3 -I plugins/pantheon/tests/test_window_ports.py  (код выхода 0 — все прошли)
 - `pantheon domains build` на временном HOME: окна направлений и мастерская получают allowUnixSockets — ровно свой кэш,
   и PANTHEON_TMP — папку tmp в нём;
-- allowLocalBinding нет ни у кого: он открывает весь localhost (Surge — прокси наружу мимо allowedDomains, 9222);
+- allowLocalBinding нет ни у кого: он открывает весь localhost (местный прокси — прокси наружу мимо allowedDomains, 9222);
 - пароль демона CDP закрыт всем окнам: denyRead песочницы и правило Read(…/**);
 - окна задач расписания, Гестии и штаба сокетов не получают.
 """
@@ -64,7 +64,7 @@ def main():
         cache = os.path.realpath(os.path.join(tmp, "Library", "Caches", "pantheon-sandbox", n))
         check(f"{n}: allowUnixSockets — ровно свой кэш", net.get("allowUnixSockets") == [cache])
         check(f"{n}: PANTHEON_TMP — tmp в своём кэше", win(n)["env"].get("PANTHEON_TMP") == os.path.join(cache, "tmp"))
-        # allowLocalBinding открывает весь localhost: Surge (прокси наружу мимо allowedDomains) и 9222 браузера
+        # allowLocalBinding открывает весь localhost: местный прокси (выход наружу мимо allowedDomains) и 9222 браузера
         check(f"{n}: allowLocalBinding нет", "allowLocalBinding" not in net)
     for n in ("athena-shop", "hq", "hestia", "job-clio"):
         if os.path.isfile(os.path.join(out, n + ".json")):

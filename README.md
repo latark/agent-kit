@@ -77,7 +77,7 @@
   `~/Library/Caches/pantheon-sandbox/<окно>` (tsx IPC, профиль Chromium), и `PANTHEON_TMP` — папку `tmp` в нём.
   `TMPDIR` песочница ставит сама (`/tmp/claude-<uid>`, env окна его не перебивает, сокет там запрещён), поэтому тесты с
   сокетами запускают `TMPDIR=$PANTHEON_TMP …`. Местных портов (`allowLocalBinding`) нет ни у одного окна: в Claude Code
-  2.1.311 он открывает весь localhost — и прокси Surge (выход наружу мимо `allowedDomains`), и 9222 браузера. Пароль
+  2.1.311 он открывает весь localhost — и местный прокси (выход наружу мимо `allowedDomains`), и 9222 браузера. Пароль
   демона CDP (`~/.config/cdp-daemon`) окнам закрыт на чтение — песочницей и правилом Read. Окна задач расписания,
   Гестии и Пританея сокетов не получают.
 - Ручные разрешения окнам ([sb-simplify] п. 6): `~/.claude/pantheon/grants.toml` — правит владелец или Метида
