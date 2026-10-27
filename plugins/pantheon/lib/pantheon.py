@@ -6932,7 +6932,7 @@ def check(paths=None, quiet=False):
         for d in drift:
             print(f"ОШИБКА · Доска/{d}")
     field_errs, field_warns = [], []
-    nobody, unlinked = [], []
+    nobody, unlinked, tails = [], [], []
     if not paths:  # поля «Итогов пачек» и ожидание PR/приёмки (metis-0308)
         night_end = "08:00"
         with contextlib.suppress(Exception):
@@ -6945,6 +6945,10 @@ def check(paths=None, quiet=False):
         unlinked = T.unlinked_decisions(tasks_now, _read_or_empty(os.path.join(PANTHEON, "decisions.md")),
                                         _read_or_empty(path("owner-log", "zeus.md")),
                                         _read_or_empty(path("owner-log", "board.jsonl")).splitlines(), now())
+        tails = ([("хвост", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
+                  for i, ln in T.tail_lines(tasks_now, now())]
+                 + [("отчёт", p, f"{p}:{n}") for p, n in T.inbox_orphans(tasks_now, os.path.join(AI_HOME, "knowledge", "inbox"), now())]
+                 + [("ревью", p, f"{p}:{n}") for p, n in T.review_debts(tasks_now, PANTHEON, now())])
         field_errs, field_warns = T.board_problems(tasks_now, now(), night_end, autoclose_mod().open_pr_tasks(path("autoclose.json")))
         field_errs = [(i, f"status done без closed — проставлен из updated") for i in fixed] + field_errs
         for tid, text in field_errs:
@@ -7002,6 +7006,7 @@ def check(paths=None, quiet=False):
         else:
             clear_once("check-nobody")
         unlinked_alert(T, unlinked)
+        tail_alert(T, tails)
         return 0
     return 1 if bad or drift or view_drift or field_errs or skill_bad or skill_arg_bad or coord_errs else 0
 
@@ -7035,6 +7040,44 @@ def unlinked_alert(T, unlinked):
     # показанными отмечаются только названные в тревоге (argus b, круг 2): иначе id с 13-го не появились бы нигде.
     # Первый проход запоминает всё; уже показанные, но вычищенные по сроку, — продлеваются, а не становятся новыми
     keep.update({i: t for i in unlinked if i not in keep and (seen is None or i in seen or i in shown)})
+    if keep != seen:
+        os.makedirs(STATE, exist_ok=True)
+        write_atomic(p, json.dumps(keep, ensure_ascii=False, sort_keys=True))
+
+
+TAIL_SHOWN = 12
+TAIL_TEXT = {"хвост": "хвост в журнале без задачи (нет id задачи в строке)",
+             "отчёт": "файл inbox старше суток без задачи разбора (нет ссылки source/from или в тексте)",
+             "ревью": "ревью с находкой Д без задачи (нет ссылки на файл ревью)"}
+
+
+def tail_alert(T, items):
+    """Тревоги «хвосты не теряются» (metis-0504): items — [(вид, ключ, место)], вид хвост | отчёт | ревью, место — id
+    задачи и строка журнала либо файл:строка. Стиль unlinked_alert: один раз на ключ, только о новых, первый проход
+    (файла STATE/tail-seen.json нет или он испорчен) только запоминает без тревоги. Записи о том, чего в наборе
+    больше нет (хвост поправили, задачу завели), из файла уходят; по виду называется не больше TAIL_SHOWN."""
+    p = path("tail-seen.json")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            seen = json.load(fh)
+        if not isinstance(seen, dict):
+            raise ValueError("не словарь")
+    except (OSError, ValueError):
+        seen = None
+    t = now()
+    keep, shown_all = {}, set()
+    for kind in TAIL_TEXT:
+        mine = [(f"{kind}|{k}", where) for kd, k, where in items if kd == kind]
+        fresh = [(k, w) for k, w in mine if k not in seen] if seen is not None else []
+        shown = fresh[:TAIL_SHOWN]
+        if shown:
+            more = len(fresh) - len(shown)
+            alert(f"{TAIL_TEXT[kind]}: {'; '.join(w for _, w in shown)}"
+                  f"{f' и ещё {more} (назову следующим проходом)' if more else ''} — завести задачу "
+                  "(pantheon task new, ссылка на файл или id в тексте)", "check")
+        shown_all.update(k for k, _ in shown)
+        # названные в тревоге и уже показанные остаются; неназванные (сверх TAIL_SHOWN) — нет; первый проход помнит всё
+        keep.update({k: (seen or {}).get(k, t) for k, _ in mine if seen is None or k in seen or k in shown_all})
     if keep != seen:
         os.makedirs(STATE, exist_ok=True)
         write_atomic(p, json.dumps(keep, ensure_ascii=False, sort_keys=True))

@@ -927,7 +927,7 @@ def extra_attention(head, body, tasks, t, night_end="08:00", open_prs=None):
 
 def board_problems(tasks, t, night_end="08:00", open_prs=None):
     """Сверка по всем задачам → (ошибки, предупреждения), каждое — (id, текст). Ошибки: задача пачки без mode;
-    done без closed; закрытая по слиянию без release или actual. Предупреждения — слова extra_attention."""
+    done без closed; закрытая по слиянию без release или actual. Предупреждения — слова extra_attention и хвосты в журнале без задачи (tail_lines)."""
     errs, warns = [], []
     for tid, (_, h, b) in sorted(tasks.items()):
         if h.get("type") == "task" and in_pack(h, tasks) and not h.get("mode"):
@@ -939,6 +939,7 @@ def board_problems(tasks, t, night_end="08:00", open_prs=None):
                 if not h.get(k):
                     errs.append((tid, f"закрыта по слиянию, а поле {k} пусто — его пишет плановый проход, «Итоги пачек» без него неполны"))
         warns += [(tid, w) for w in extra_attention(h, b, tasks, t, night_end, open_prs)]
+    warns += [(tid, f"хвост в журнале без задачи: {ln}") for tid, ln in tail_lines(tasks, t)]  # metis-0504, не блок
     return errs, warns
 
 
@@ -3410,6 +3411,127 @@ def unlinked_decisions(tasks, decisions_text, zeus_log_text, board_lines, t, min
         words.update(task_words(b))
     notask = {m.group(1) for m in map(NOTASK_RE.match, (decisions_text or "").split("\n")) if m}
     return sorted(i for i in cands if i not in tasks and i not in words and i not in notask)
+
+
+# --- хвосты не теряются (metis-0504, исследование 26.10 разд. 5 пп. 6–7) ---------------------------------------------
+# Три тревоги тика рядом с «слово владельца без задачи» (стиль тот же: один раз на ключ, только о новых, первый проход
+# без тревоги; check в pantheon.py, файл tail-seen.json). (а) Строка журнала задачи со словами «хвост / остаток / не
+# сделано / вынесен / позже» без id задачи в этой строке — только предупреждение (эвристика шумит), не блок.
+# (б) Файл knowledge/inbox старше суток, на имя которого не ссылается ни одна задача (source/from или текст);
+# отчёт с `findings: 0` в шапке — исключение. (в) directions/*/review-*.md с находкой класса Д (строка начинается с «Д»),
+# на имя которого не ссылается ни одна задача; тот же срок, что у (б): лид заводит задачи после слияния, не сразу.
+
+TAIL_DAYS = 7  # строка журнала старше — уже не для тика
+TAIL_FILE_HOURS = 24
+TAIL_RE = re.compile(r"хвост\w*|остат(?:ок|к\w+)|не сделан\w*|вынесен\w*|позже", re.I)
+TAIL_ID_RE = re.compile(r"(?<![\w-])[a-z][a-z0-9]*-\d{2,}(?!\w)")
+JOURNAL_LINE_RE = re.compile(r"^- (\d{4}-\d\d-\d\d \d\d:\d\d) — ([^:\n]*): (.*)$")
+TAIL_SKIP_ACTORS = ("check",)  # записи самого тика — не слова агента
+FINDINGS_ZERO_RE = re.compile(r"^findings:\s*0\s*$", re.M)
+D_FINDING_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)?\**Д\d*(?![\w])\**\s*[·.:—–)-]?\s*\S")
+
+
+def tail_lines(tasks, t, days=TAIL_DAYS):
+    """[(id задачи, строка журнала)] со словами хвоста и без id другой существующей задачи в самой строке, не старше days дней.
+    Строки самого тика (actor check) не считаются; журнал — после «## Журнал», до следующего «## »."""
+    out = []
+    for tid, (_, head, body) in sorted(tasks.items()):
+        if head.get("type") != "task":
+            continue
+        m = re.search(r"^## Журнал[^\n]*\n", body or "", re.M)
+        if not m:
+            continue
+        for ln in (body[m.end():]).split("\n"):
+            if ln.startswith("## "):
+                break
+            jm = JOURNAL_LINE_RE.match(ln)
+            if not jm or jm.group(2).strip() in TAIL_SKIP_ACTORS:
+                continue
+            ts = ts_of(jm.group(1).replace(" ", "T") + ":00")
+            if ts is None or t - ts > days * 86400 or not TAIL_RE.search(jm.group(3)):
+                continue
+            # id гасит тревогу, только если такая задача есть и это не сама задача (review-113, x86-64, свой id — не хвост)
+            if not any(i != tid and i in tasks for i in TAIL_ID_RE.findall(jm.group(3))):
+                out.append((tid, ln.strip()))
+    return out
+
+
+def _task_refs(tasks):
+    """Слова, на которые ссылаются задачи: поля source и from, заголовок и тело (до и после «## Журнал») целиком."""
+    parts = []
+    for _, head, body in tasks.values():
+        parts += [str(head.get(k) or "") for k in ("source", "from", "title")]
+        parts.append(body or "")
+    text = "\n".join(parts)
+    return text, set(re.findall(r"[\w.-]+", text))
+
+
+def _file_linked(name, text, words):
+    stem = os.path.splitext(name)[0]
+    return name in words or stem in words or (("." in stem) and stem in text)
+
+
+def _listing(d, pattern=None):
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return []
+    return [n for n in names if not n.startswith(".") and (pattern is None or pattern.match(n))
+            and os.path.isfile(os.path.join(d, n))]
+
+
+def _old_enough(p, t, hours):
+    try:
+        return t - os.stat(p).st_mtime > hours * 3600
+    except OSError:
+        return False
+
+
+def inbox_orphans(tasks, inbox_dir, t, hours=TAIL_FILE_HOURS):
+    """[(путь, 1)] файлы inbox старше hours часов, на имя которых не ссылается ни одна задача; findings: 0 — исключение."""
+    text, words = _task_refs(tasks)
+    out = []
+    for n in _listing(inbox_dir):
+        p = os.path.join(inbox_dir, n)
+        if not _old_enough(p, t, hours) or _file_linked(n, text, words):
+            continue
+        try:
+            with open(p, encoding="utf-8") as fh:
+                if FINDINGS_ZERO_RE.search("".join(fh.readline() for _ in range(40))):
+                    continue
+        except (OSError, UnicodeDecodeError):
+            pass  # не текст — ссылки на него всё равно нет
+        out.append((p, 1))
+    return out
+
+
+def review_debts(tasks, pantheon, t, hours=TAIL_FILE_HOURS):
+    """[(путь, строка первой Д-находки)] из <pantheon>/directions/*/review-*.md, старше hours часов, без ссылки из задач."""
+    text, words = _task_refs(tasks)
+    rx = re.compile(r"review-.*\.md$")
+    out = []
+    base = os.path.join(pantheon, "directions")
+    for dn in _listing_dirs(base):
+        for n in _listing(os.path.join(base, dn), rx):
+            p = os.path.join(base, dn, n)
+            if not _old_enough(p, t, hours) or _file_linked(n, text, words):
+                continue
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    for i, ln in enumerate(fh, 1):
+                        if D_FINDING_RE.match(ln):
+                            out.append((p, i))
+                            break
+            except (OSError, UnicodeDecodeError):
+                continue
+    return out
+
+
+def _listing_dirs(d):
+    try:
+        return sorted(n for n in os.listdir(d) if os.path.isdir(os.path.join(d, n)))
+    except OSError:
+        return []
 
 
 # --- поле project — только имя проекта из directions.toml (metis-0323) ---------------------------------------------
