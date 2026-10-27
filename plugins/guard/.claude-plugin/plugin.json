@@ -1,6 +1,6 @@
 {
   "name": "guard",
-  "version": "0.5.28",
+  "version": "0.5.29",
   "description": "Правила, которые Claude Code проверяет сам, а не на память модели: dev-server, attribution, cdp, tg-secret, nextjs, domain, pantheon-acl, protect-config, corpus-role, launchd-env. Ловит ошибки агента; граница — песочница и управляемые настройки (README).",
   "author": { "name": "latark" }
 }
