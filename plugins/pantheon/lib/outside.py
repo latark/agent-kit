@@ -38,11 +38,15 @@ node из nvm, TMPDIR — своя временная папка, у тесто�
 всё разрешено, кроме чтения ключей (.env*, secrets/, ~/.ssh, ~/.config/cdp-daemon, ~/.config/gh, ~/.gnupg, ~/.aws,
 ~/.netrc, ~/.git-credentials, ~/Library/Keychains и служба Связки ключей com.apple.SecurityServer), записи в
 состояние и ядро (STATE, ~/ai/pantheon, ~/.claude, ~/.local/bin, ~/.local/share/pantheon, ~/Library/LaunchAgents,
-профили оболочки, ~/.gitconfig, .git/config и .git/hooks папок реестра) и сети к портам браузеров (9222, 9333–9339) и
+профили оболочки, ~/.gitconfig, ~/.npmrc, ~/.nvm, кэши окон ~/Library/Caches/pantheon-sandbox, .git/config и
+.git/hooks папок реестра) и сети к портам браузеров (9222, 9333–9339) и
 местного прокси (6152, 6153) на любом адресе.
 
-Запись tests для шлюза слияния: тесты кончились кодом 0, HEAD и дерево до и после те же, команда не пустая (true,
-echo… — отказ) — проход дописывает в STATE/merge-gate/records.jsonl строку того же формата, что пишет хук guard
+Запись tests для шлюза слияния — только у проверки проекта (без --script; у serve её нет никогда): тесты кончились
+кодом 0, HEAD и дерево до и после те же, команда не пустая (true, echo… — отказ; у скрипта package.json — по его
+телу). Команда видна в записи (cmd), argus её сверяет: у скрипта package.json — с телом («pnpm run test  # package.json:
+vitest run»), строка .pantheon-verify из файла ветки (в клоне нет origin/HEAD, origin/main, origin/master с этим
+файлом) — с пометкой «# .pantheon-verify ветки (HEAD)»: эти файлы PR меняет сам, остаток — README guard. Проход дописывает в STATE/merge-gate/records.jsonl строку того же формата, что пишет хук guard
 (kind tests, repo — remote папки, pr null, sha), by.agent_type = "pantheon-outside". Пишет только проход: роль в
 своём окне STATE не пишет, а команда под профилем — тоже (deny file-write STATE). Хук guard на `pantheon review test`
 по-прежнему пишет свою запись; шлюз принимает любую из двух.
@@ -317,7 +321,10 @@ def command(d, kind, script=None):
             return None, f"в package.json папки нет скрипта «{name}»"
         pm = package_manager(d, pkg)
         return [pm, "run", name], f"{pm} run {name}"
-    text = _show(d, base_rev(d), ".pantheon-verify") or _show(d, "HEAD", ".pantheon-verify")
+    base = base_rev(d)
+    text, own = _show(d, base, ".pantheon-verify"), base == "HEAD"
+    if not text and not own:
+        text, own = _show(d, "HEAD", ".pantheon-verify"), True
     if text:
         line = next((x.strip() for x in text.splitlines() if x.strip() and not x.lstrip().startswith("#")), "")
         if line:
@@ -325,13 +332,18 @@ def command(d, kind, script=None):
             while words and words[0] in ("heavy", "--server"):   # heavy проход ставит сам, снаружи профиля
                 words = words[1:]
             line = line.split(None, len(line.split()) - len(words))[-1] if words else ""
-            return (["/bin/sh", "-c", line], line) if line else (None, ".pantheon-verify без команды")
+            if not line:
+                return None, ".pantheon-verify без команды"
+            # строка из файла ветки (нет origin/HEAD, origin/main, origin/master или там файла нет) — видна в записи tests
+            return ["/bin/sh", "-c", line], line + ("  # .pantheon-verify ветки (HEAD)" if own else "")
     if pkg:
         scripts = pkg.get("scripts") or {}
         name = "test" if "test" in scripts else "check" if "check" in scripts else None
         if name:
             pm = package_manager(d, pkg)
-            return [pm, "run", name], f"{pm} run {name}"
+            # тело скрипта — в строке записи tests: package.json ветки PR меняет сам, argus сверяет команду
+            body = " ".join(str(scripts[name]).split())[:300]
+            return [pm, "run", name], f"{pm} run {name}  # package.json: {body}"
     try:
         with open(os.path.join(d, "pyproject.toml"), encoding="utf-8") as fh:
             py = fh.read()
@@ -344,7 +356,10 @@ def command(d, kind, script=None):
 
 
 def empty_command(line):
-    """Пустая команда тестов (true, echo ok, CI=1 true): записи tests не будет."""
+    """Пустая команда тестов (true, echo ok, CI=1 true): записи tests не будет. У скрипта package.json — его тело."""
+    line, _, note = line.partition("  # ")
+    if note.startswith("package.json: "):
+        line = note[len("package.json: "):]
     try:
         words = shlex.split(line)
     except ValueError:
@@ -370,9 +385,10 @@ def profile_text(roots=()):
            ['(regex #"/\\.env[^/]*$")', '(regex #"/secrets(/|$)")']
     wdirs = [P.STATE, P.PANTHEON, os.path.join(h, ".claude"), os.path.join(h, ".local", "bin"),
              os.path.join(h, ".local", "share", "pantheon"), os.path.join(h, "Library", "LaunchAgents"),
-             os.path.join(h, ".config", "git")]
+             os.path.join(h, ".config", "git"), os.path.join(h, ".nvm"),
+             os.path.join(h, "Library", "Caches", "pantheon-sandbox")]   # node владельца и кэши окон ролей
     wfiles = [os.path.join(h, x) for x in (".zshrc", ".zprofile", ".zshenv", ".zlogin", ".bashrc", ".bash_profile",
-                                          ".profile", ".gitconfig")]
+                                          ".profile", ".gitconfig", ".npmrc")]
     write = [f"(subpath {_q(os.path.realpath(x))})" for x in wdirs] + [f"(literal {_q(x)})" for x in wfiles]
     for r in roots:
         write.append(f'(regex #"^{re.escape(r)}/(.*/)?\\.git/(config|hooks)(/|$)")')
@@ -529,7 +545,9 @@ def new_log(rid):
 # --- тесты --------------------------------------------------------------------------------------------------------
 
 def run_test(rid, d, script, window, qdir, roots, record=True):
-    """Проверка проекта в папке d на её HEAD → итог. Запись tests — при коде 0 и том же чистом HEAD."""
+    """Проверка проекта в папке d на её HEAD → итог. Запись tests — при коде 0 и том же чистом HEAD, только у проверки
+    проекта: с --script записи нет."""
+    record = record and not script
     sha, clean = head_state(d)
     if not sha:
         return save_result(qdir, rid, {"state": "failed", "kind": "test", "why": "папка не репозиторий git или нет коммитов"})
@@ -568,7 +586,9 @@ def run_test(rid, d, script, window, qdir, roots, record=True):
         res["why"] = f"тесты дольше {TEST_TIMEOUT} с — остановлены"
     elif sha2 != sha or not clean2:
         res["why"] = f"команда изменила HEAD или дерево (стало {sha2 or '?'}, чистое: {'да' if clean2 else 'нет'}) — записи нет"
-    elif code == 0 and record:
+    elif code == 0 and not record:
+        res["note"] = "запись tests для шлюза — только у проверки проекта (без --script)"
+    elif code == 0:
         repos = remotes(d)
         if empty_command(line):
             res["why"] = f"команда «{line}» ничего не проверяет — записи tests нет"
@@ -796,7 +816,7 @@ def handle(qdir, window, rid, req):
         return save_result(qdir, rid, {"state": "failed", "kind": req["kind"], "why": roots})
     if req["kind"] == "serve":
         return run_serve(rid, d, req.get("script"), req.get("minutes", SERVE_MIN), window, qdir, roots)
-    return run_test(rid, d, req.get("script"), window, qdir, registry(None) or roots)
+    return run_test(rid, d, req.get("script"), window, qdir, registry(None) or roots, record=not req.get("script"))
 
 
 # --- тесты после «принять» ----------------------------------------------------------------------------------------
@@ -1040,6 +1060,8 @@ def show(res):
         print("запись tests для шлюза слияния сделана")
     if res.get("why"):
         print(f"причина: {res['why']}")
+    if res.get("note"):
+        print(res["note"])
     if res.get("tail"):
         print("--- хвост журнала ---\n" + res["tail"])
 

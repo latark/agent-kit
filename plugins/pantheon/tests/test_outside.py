@@ -76,6 +76,9 @@ if tail == ["run", "bad"]:
 if tail == ["run", "slow"]:
     time.sleep(60)
     os._exit(0)
+if tail in (["run", "test"], ["run", "check"]):
+    body = json.load(open("package.json"))["scripts"][tail[1]]
+    os.execv("/bin/sh", ["/bin/sh", "-c", body])
 if tail == ["run", "lint"] or cmd[1:2] in (["ci"], ["install"]):
     print("ok", cmd)
     os._exit(0)
@@ -179,11 +182,18 @@ check("профиль: порты браузеров и прокси",
       all(f'(remote ip "*:{p}")' in prof for p in (9222, 9333, 9334, 9339, 6152, 6153)) and '"*:9340"' not in prof)
 check("профиль: запись в STATE закрыта", f'(subpath "{STATE}")' in prof.split("(deny file-write*\n")[1])
 check("профиль: .git/config папок реестра", "\\.git/(config|hooks)" in prof)
-check("команда: строка .pantheon-verify без heavy", O.command(os.path.realpath(APP), "test") == (["/bin/sh", "-c", "python3 t.py"], "python3 t.py"))
+wsec = prof.split("(deny file-write*\n")[1]
+check("профиль: запись в ~/.nvm, ~/.npmrc, ~/.claude и кэши окон закрыта",
+      all(x in wsec for x in ('/.nvm")', '/.npmrc")', '/.claude")', '/Library/Caches/pantheon-sandbox")')), wsec)
+HEAD_NOTE = "python3 t.py  # .pantheon-verify ветки (HEAD)"
+check("команда: строка .pantheon-verify без heavy, из ветки — с пометкой",
+      O.command(os.path.realpath(APP), "test") == (["/bin/sh", "-c", "python3 t.py"], HEAD_NOTE))
 check("команда: --script из package.json", O.command(os.path.realpath(APP), "test", "lint")[1] == "npm run lint")
 check("команда: скрипта нет — отказ", O.command(os.path.realpath(APP), "test", "nope")[0] is None)
 check("команда: сервер без скрипта dev — отказ", O.command(os.path.realpath(OTHER), "serve")[0] is None)
-check("пустые команды", all(O.empty_command(x) for x in ("true", "CI=1 true", "echo ok", "/bin/echo", ":"))
+check("пустые команды", all(O.empty_command(x) for x in ("true", "CI=1 true", "echo ok", "/bin/echo", ":",
+                                                       "npm run test  # package.json: echo no tests"))
+      and not O.empty_command("npm run test  # package.json: vitest run")
       and not O.empty_command("python3 t.py") and not O.empty_command("pnpm run test"))
 
 # .pantheon-verify — из ветки по умолчанию (origin/main), а не из PR
@@ -205,7 +215,7 @@ check("запись tests принята настоящим шлюзом guard",
 r0 = recs[0] if recs else {}
 check("запись: repo по remote, pr null, by = проход",
       r0.get("repo") == [REPO] and r0.get("pr") is None and r0.get("by", {}).get("agent_type") == "pantheon-outside", r0)
-check("запись: команда и папка", r0.get("cmd") == "python3 t.py" and r0.get("cwd") == os.path.realpath(APP), r0)
+check("запись: команда и папка", r0.get("cmd") == HEAD_NOTE and r0.get("cwd") == os.path.realpath(APP), r0)
 c = calls()[before:]
 check("прогон — под sandbox-exec с профилем STATE/outside/profile.sb",
       len(c) == 1 and c[0]["profile"] == os.path.join(STATE, "outside", "profile.sb") and os.path.isfile(c[0]["profile"]), c)
@@ -332,6 +342,16 @@ rc, q, rid = role_request("athena-x", APP, "test", "--script", "nope")
 run_pass()
 res = O.load_result(q, rid) or {}
 check("скрипта нет: отказ", res.get("state") == "failed" and "нет скрипта" in res.get("why", ""), res)
+rc, q, rid = role_request("athena-x", APP, "test", "--script", "lint")
+before_recs = len(gate_records())
+run_pass()
+res = O.load_result(q, rid) or {}
+check("--script: прогон есть, код 0, записи tests нет", res.get("state") == "done" and res.get("code") == 0
+      and res.get("record") is False and "только у проверки проекта" in res.get("note", "")
+      and len(gate_records()) == before_recs, res)
+os.environ["PANTHEON_TMP"] = os.path.join(CACHE, "athena-x", "tmp")
+check("--script: --wait даёт код команды 0", O.wait_result(q, rid, 3) == 0)
+os.environ.pop("PANTHEON_TMP")
 rc, _, _ = role_request("athena-x", APP, "test", "--script", "a;rm")
 check("имя скрипта не по образцу: код 2", rc == 2)
 rc, _, _ = role_request("athena-x", os.path.join(APP, "node_modules") if os.path.isdir(os.path.join(APP, "node_modules")) else _ROOT, "test")
@@ -366,6 +386,29 @@ check("вне окна: заявка в STATE/outside/queue", rc == 0 and any(n.
 run_pass()
 check("очередь STATE: проверка другой папки реестра прошла, запись tests",
       len(tests_for(git(OTHER, "rev-parse", "HEAD"))) == 1)
+
+# скрипт test из package.json ветки: тело видно в записи; пустое тело — записи нет
+PKGD = os.path.join(HOME, "projects", "pkg")
+os.makedirs(PKGD)
+git(PKGD, "init", "-q", "-b", "main")
+git(PKGD, "remote", "add", "origin", "https://github.com/latark/pkg.git")
+commit(PKGD, {"package.json": json.dumps({"scripts": {"test": "python3 -c 'import sys; sys.exit(0)'"}}),
+              "pnpm-lock.yaml": ""}, "p1")
+P.write_json(os.path.join(STATE, "domains.json"),
+             {"domains": {"athena-x": ["~/projects/app"], "metis-y": ["~/projects/other", "~/projects/pkg"]}})
+os.chdir(PKGD)
+O.main(["test"])
+os.chdir(old)
+run_pass()
+pr = tests_for(git(PKGD, "rev-parse", "HEAD"))
+check("package.json: запись tests с телом скрипта", len(pr) == 1
+      and pr[0]["cmd"] == "pnpm run test  # package.json: python3 -c 'import sys; sys.exit(0)'", pr)
+P2 = commit(PKGD, {"package.json": json.dumps({"scripts": {"test": "echo no tests"}})}, "p2 пустой test")
+os.chdir(PKGD)
+O.main(["test"])
+os.chdir(old)
+run_pass()
+check("package.json: пустое тело (echo) — записи нет", not tests_for(P2))
 
 # проход только плановый
 os.environ["CLAUDECODE"] = "1"
