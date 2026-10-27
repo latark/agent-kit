@@ -24,6 +24,14 @@ send-keys и т. п. — ввод от имени владельца), попо�
 - **momus** (ревизор) пишет только в `agent_extra` своей роли из policy.toml, свою память и временные папки — корней по папке запуска
   или git-репозиторию у неё нет (`EXTRA_ONLY_ROLES`), а новый файл в чужой `inbox/` направления ей закрыт; без policy.toml — только память и временное.
 - **momus без agent_id** (главная сессия `--agent momus`) получает те же границы, что momus-субагент (guard 0.5.10, metis-0177).
+- **palamedes** (исполнитель без кода, `DRAFT_ONLY_ROLES`, metis-0469) пишет только черновики: Write, Edit, MultiEdit в
+  `~/ai/pantheon/directions/<своё направление>/drafts/**` (направление — по папке запуска окна), из окна Пританея
+  (`PANTHEON_ROLE=hq`) — в `drafts/` любого направления из domains.json. Закрыто: код проектов, свой и чужой `STATUS.md`,
+  планы и другие файлы направления, любые `inbox/`, `~/ai/knowledge`, `~/.claude`, память, временные папки; `agent_extra`
+  из policy.toml для неё не действует. Пути сравниваются после realpath и без регистра (macOS): `drafts/../STATUS.md` и
+  симлинк из `drafts/` наружу — отказ. Правило draft-role: из инструментов, которые видит guard, ей открыты только Read,
+  Grep, Glob и эти три — Bash, NotebookEdit, WebFetch, Agent, Task и Skill закрыты (MCP и WebSearch закрывает список
+  `tools:` в шапке роли). Главная сессия `--agent palamedes` (без agent_id) — те же границы.
 - **protect-config** защищает и саму папку `<репо>/.claude` как цель записи (`cp -R x <репо>/.claude/`, `mv`, `tar -C`, `rsync`):
   в неё можно положить settings.json и agents. Вложенное (`.claude/worktrees/…`) правилом не закрыто. С guard 0.5.10 (metis-0177):
   - `hooks/`, `skills/` и `commands/` проекта (`<репо>/.claude/…`, и в worktree) закрыты, как `agents/`;
