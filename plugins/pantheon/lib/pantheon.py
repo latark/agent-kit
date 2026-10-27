@@ -562,9 +562,14 @@ BUILTIN_AGENTS = ["general-purpose", "claude", "Explore", "Plan", "statusline-se
 # Окно Гестии (metis-0245): мимо песочницы — только выпуск плагинов (`pantheon plugins update`: тесты, установка,
 # сверка хеша, проверенное дерево — голый `claude plugin update` оставил бы непроверенное и закрыл окна ролей),
 # сборка окон и ролей, технический перезапуск окон и тревога. Остальные подкоманды pantheon — в песочнице, а какие ей
-# вообще можно, решает guard (правило hestia). Файловых правок, веба и субагентов у окна нет
+# вообще можно, решает guard (правило hestia). Файловых правок, веба и субагентов у окна нет.
+# Наружу (metis-0562, «Да, по consent» владельца 27.10 22:38): сеть Bash открыта на домены песочницы, мимо неё — `git push`
+# и запись в PR (в песочнице macOS они не работают, как у окон направлений), `pantheon consent` (читает журнал владельца).
+# Условие — в guard: сеть, push и запись в PR без свежей метки `pantheon consent` (её ставит сама команда) — отказ
 HESTIA_EXCLUDED = ["pantheon plugins update", "pantheon plugins update *", "pantheon domains build",
-                   "pantheon restart *", "pantheon alert *"]
+                   "pantheon restart *", "pantheon alert *", "pantheon consent *",
+                   "git push", "git push *", "gh pr create *", "gh pr edit *"]
+HESTIA_CONSENT_DAYS = 1.0       # ответ владельца для метки Гестии — не старше суток
 HESTIA_DENY_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Agent"]
 
 
@@ -2884,7 +2889,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hs_cache = _real_dir(f"{caches}/hestia", [caches], strict=True, create=True)
     hs = role_settings([], None, [], hs_cache, False, private_paths, None, guard)
     hs["sandbox"]["excludedCommands"] = list(HESTIA_EXCLUDED)
-    hs["sandbox"]["network"]["allowedDomains"] = []
+    hs["sandbox"]["network"]["allowedDomains"] = list(SANDBOX_DOMAINS)  # открыта сеть; без consent её закрывает guard
     hs["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
     hs.setdefault("permissions", {}).setdefault("deny", []).extend(HESTIA_DENY_TOOLS)
     # denyRead песочницы держит только Bash; Read и Grep её не проходят, а главная сессия окна приходит без agent_type
@@ -5594,6 +5599,9 @@ def consent(rest):
         except (IndexError, ValueError):
             print("pantheon consent: --days — число дней", file=sys.stderr)
             return 2
+    hestia = os.environ.get("PANTHEON_ROLE") == "hestia"
+    if hestia:
+        days = min(days, HESTIA_CONSENT_DAYS)
     try:
         with open(path("owner-log", "zeus.md"), encoding="utf-8") as fh:
             text = fh.read()
@@ -5649,6 +5657,17 @@ def consent(rest):
     if not found:
         print(f"ответа владельца на {qid} в окне вопросов Зевса и на доске за {days:g} дн. нет{hint}")
         return 1
+    if hestia:
+        # метка «ответ найден»: по ней guard пускает окно Гестии в сеть, push и запись в PR на 2 часа (metis-0562).
+        # Нет метки (запись не удалась) — код 3, а не «согласие есть»
+        try:
+            d = os.path.join(STATE, "hestia-consent")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, qid), "w", encoding="utf-8") as fh:
+                fh.write(f"{stamp()} {qid}\n")
+        except OSError as e:
+            print(f"pantheon consent: метку для окна записать не удалось ({e}) — наружу не пустят", file=sys.stderr)
+            return 3
     print(f"Ответы владельца на {qid} (журналы пишут хук и плановый проход, не роли; сверь, что ответ — на твой вопрос и твоё действие):")
     for t, body in found:
         print(f"\n## {t}\n{body}")

@@ -246,6 +246,26 @@ for jname in ("zeus.md", "board.jsonl"):
           cr.returncode == 3 and "ответ проверить нельзя" in cr.stderr and not cr.stdout, cr.stdout + cr.stderr)
 cr = subprocess.run([PY311, "-I", CLI, "consent", "metis-0032"], env=dict(BASE), capture_output=True, text=True, timeout=30)
 check("0162: журнал на месте → по-прежнему ответ (код 0)", cr.returncode == 0, cr.stdout + cr.stderr)
+# metis-0562: роль hestia — найденный ответ ставит метку для guard (сеть, push, запись в PR); без ответа и вне роли меток нет
+hmark = os.path.join(state, "hestia-consent")
+HS_ENV = dict(BASE, PANTHEON_ROLE="hestia")
+check("0562: до consent метки нет", not os.path.exists(hmark))
+cr = subprocess.run([PY311, "-I", CLI, "consent", "metis-0032"], env=dict(BASE), capture_output=True, text=True, timeout=30)
+check("0562: consent не из окна hestia (с ответом) — метки нет", cr.returncode == 0 and not os.path.exists(hmark),
+      cr.stdout + cr.stderr)
+cr = subprocess.run([PY311, "-I", CLI, "consent", "metis-0031"], env=dict(HS_ENV), capture_output=True, text=True, timeout=30)
+check("0562: окно hestia, ответа нет (код 1) — метки нет", cr.returncode == 1 and not os.path.exists(hmark),
+      cr.stdout + cr.stderr)
+cr = subprocess.run([PY311, "-I", CLI, "consent", "metis-0032"], env=dict(HS_ENV), capture_output=True, text=True, timeout=30)
+check("0562: окно hestia, ответ найден (код 0) — метка <state>/hestia-consent/<id>",
+      cr.returncode == 0 and os.path.isfile(os.path.join(hmark, "metis-0032")), cr.stdout + cr.stderr)
+os.remove(os.path.join(hmark, "metis-0032"))
+open(os.path.join(LOG, "zeus.md"), "a").write("## %s · окно вопросов\nвопрос: [metis-0562] Старый?\nответ: Да\n\n"
+                                                % datetime.fromtimestamp(time.time() - 3 * 86400).strftime("%Y-%m-%d %H:%M:%S"))
+cr = subprocess.run([PY311, "-I", CLI, "consent", "metis-0562", "--days", "7"], env=dict(HS_ENV), capture_output=True,
+                    text=True, timeout=30)
+check("0562: окно hestia — ответ старше суток метки не даёт, даже с --days 7 (код 1)",
+      cr.returncode == 1 and not os.path.exists(os.path.join(hmark, "metis-0562")), cr.stdout + cr.stderr)
 
 # пробы argus 15.10: машинный промпт не проходит за ваш ввод
 append(tr, queued("да", time.time()))

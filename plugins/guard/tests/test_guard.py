@@ -327,6 +327,89 @@ def corpus_policy_checks(br, cases):
     return failed
 
 
+def hestia_consent_checks(br, cases):
+    """Гестия наружу (metis-0562): сеть, git push и запись в PR (gh pr create|edit) — только со свежей меткой
+    `pantheon consent` в <state>/hestia-consent; без метки, с просроченной и с метками-подделками (папка, ссылка) —
+    отказ; слияние, gh api с записью и запись в main не открываются и с меткой."""
+    failed = 0
+    HS = {"PANTHEON_ROLE": "hestia"}
+    net = {
+        "git push origin feature-x": "git push",
+        "git -C projects/agent-kit push origin feature-x": "git -C push",
+        "git ls-remote origin": "git ls-remote",
+        "gh pr create -t x -b y": "gh pr create",
+        "gh pr edit 1 -b y": "gh pr edit",
+        "gh -R o/r pr create -t x": "gh -R pr create",
+        "curl https://api.github.com": "curl",
+        "wget -q -O /tmp/hestia-x https://pypi.org": "wget",
+        "ssh git@github.com": "ssh",
+    }
+    never = ["git fetch origin", "git pull origin x", "git clone https://github.com/a/b", "gh pr merge 1",
+             "git push origin feature-x && touch projects/agent-kit/x", "curl -o ~/x https://pypi.org", "gh api -X POST repos/a/b/issues", "git push --force origin x", "git push origin main",
+             "git commit -m x", "git push origin :x", "gh pr create -t x && gh pr merge 1"]
+    ok_reads = ["git status", "gh pr view 1", "pantheon task show metis-0562"]
+
+    def home_with(stamp):
+        h = os.path.realpath(tempfile.mkdtemp(prefix="guard-test-"))
+        setup(h)
+        d = os.path.join(h, ".local", "state", "pantheon", "hestia-consent")
+        if stamp is not None:
+            stamp(d)
+        return h
+
+    def fresh(d):
+        os.makedirs(d, exist_ok=True)
+        open(os.path.join(d, "metis-0562"), "w").write("x\n")
+
+    def old(d):
+        fresh(d)
+        t = time.time() - 3 * 3600
+        os.utime(os.path.join(d, "metis-0562"), (t, t))
+
+    def as_dir(d):  # метка-папка, а не файл
+        os.makedirs(os.path.join(d, "metis-0562"), exist_ok=True)
+
+    def as_link(d):  # метка-ссылка на настоящий файл
+        os.makedirs(d, exist_ok=True)
+        tgt = os.path.join(os.path.dirname(d), "real")
+        open(tgt, "w").write("x")
+        os.symlink(tgt, os.path.join(d, "metis-0562"))
+
+    def check(name, ok, got):
+        nonlocal failed
+        failed += not ok
+        cases.append(None)
+        print(f"{'ok  ' if ok else 'FAIL'} hestia-consent: {name}: {got}")
+
+    def verdicts(h, cmds):
+        return {c: run(h, ".", "", "Bash", {"command": c}, penv=HS) for c in cmds}
+
+    h0, h1 = home_with(None), home_with(fresh)
+    v0, v1 = verdicts(h0, list(net)), verdicts(h1, list(net))
+    check("без метки сеть, push и запись в PR — отказ", all(x == "deny" for x in v0.values()), v0)
+    check("со свежей меткой — идут", all(x == "allow" for x in v1.values()), v1)
+    r = run(h0, ".", "", "Bash", {"command": "git push origin feature-x"}, penv=HS, raw=True)
+    check("причина отказа называет `pantheon consent`", "pantheon consent" in r, r[-300:])
+    for name, mk in (("просроченная метка (3 ч)", old), ("метка — папка", as_dir), ("метка — ссылка", as_link)):
+        v = verdicts(home_with(mk), list(net))
+        check(f"{name} — отказ", all(x == "deny" for x in v.values()), v)
+    vn = verdicts(h1, never)
+    check("с меткой слияние, gh api с записью, push в main/force/удаление, commit — всё равно отказ",
+          all(x == "deny" for x in vn.values()), vn)
+    vr = verdicts(h0, ok_reads)
+    check("чтение без метки по-прежнему можно", all(x == "allow" for x in vr.values()), vr)
+    # метка нужна только окну Гестии: роль вне окна и обычная сессия правилом hestia не затронуты
+    check("вне окна Гестии правило не действует (git push в agent-kit — решают другие правила, не hestia)",
+          "hestia" not in run(h0, ak_dir(br), "", "Bash", {"command": "git fetch origin"}, raw=True), "")
+    check("консент-запись разрешена окну: pantheon consent metis-0562",
+          run(h0, ".", "", "Bash", {"command": "pantheon consent metis-0562"}, penv=HS) == "allow", "")
+    return failed
+
+
+def ak_dir(br):
+    return os.path.join(os.path.dirname(br), "agent-kit")
+
+
 def merge_security_checks(home, MERGE_OK, cases):
     """Находка проверки безопасности 2eda45f: защиты по remote, любой сбой — отказ; лиды (metis-0054). С guard 0.5.4
     поштучного «да» владельца нет — его заменил запор (test_merge_gate.py). Возвращает число упавших проверок."""
@@ -1860,6 +1943,7 @@ def main():
     cases.append(None)
     print(f"{'ok  ' if ok else 'FAIL'} merge -R: merge_repos не таблицей — закрыто и -R, и без -R (запор, 0.5.4): {got}")
     failed += corpus_policy_checks(br, cases)
+    failed += hestia_consent_checks(br, cases)
     failed += merge_security_checks(home, MERGE_OK, cases)
     # № 1: на системном Python 3.9 (без tomllib) guard не падает и прежние правила работают
     if os.path.exists("/usr/bin/python3"):

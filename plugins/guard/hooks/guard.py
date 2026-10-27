@@ -46,8 +46,9 @@ PostToolUse (Bash:
                 отказ любому инструменту; в окне — без файловых правок, Bash пишет только во временные папки, git —
                 только чтение в любой форме (`git -c … commit` тоже отказ), gh без слияния и записи, claude — plugin
                 list и agents, pantheon — выпуск (plugins update), сборка окон, restart без --force, alert и чтение
-                (metis-0245);
-  cdp-role     — демон браузера с вашими входами — никому из ролей (до Харона, metis-0077), /close — никому (SEC-13);
+                (metis-0245); сеть, git push и gh pr create|edit — только при свежей метке `pantheon consent`
+                (metis-0562);
+  cdp-role    — демон браузера с вашими входами — никому из ролей (до Харона, metis-0077), /close — никому (SEC-13);
   push         — git push: координатор, лиды и мастерская, не в main и master; gh pr merge — главная сессия
                  координатора или его лид (hephaestus-/apollo-<направление> субагентом, metis-0054) в папках своего
                  направления (domains.json, [merge], [merge_client]); защиты — папки metis-pantheon и их
@@ -3574,11 +3575,21 @@ HESTIA_GH_READ = {("pr", "view"), ("pr", "list"), ("pr", "diff"), ("pr", "checks
                   ("--version", None), ("version", None)}
 HESTIA_CLAUDE = (("plugin", "list"), ("plugins", "list"), ("agents",), ("--version",), ("-v",))
 HESTIA_PANTHEON = {("plugins", "update"), ("domains", "build"), ("restart",), ("alert",), ("task", "show"),
-                   ("status",), ("who",), ("agents",), ("help",)}
+                   ("status",), ("who",), ("agents",), ("help",), ("consent",)}
+# Наружу (metis-0562, «Да, по consent» владельца 27.10 22:38): сеть, `git push` и запись в PR — только после записи
+# `pantheon consent <id>` с ответом владельца. Метку ставит сама команда (роль hestia, ответ найден) в
+# <state>/hestia-consent/<id>; окну в state писать нельзя (pantheon-acl, песочница), подделать её нечем. Метка живёт
+# 2 часа: ответ нужен под каждое действие, а не «навсегда». К задаче метка не привязана — id называет сама Гестия
+# fetch, pull и clone пишут в репозиторий — Гестии, у которой кода нет, они не открыты и с меткой
+HESTIA_GIT_NET = {"push", "ls-remote"}
+HESTIA_GH_WRITE = {("pr", "create"), ("pr", "edit")}
+HESTIA_NET_TOOLS = {"curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "telnet", "ftp"}
+HESTIA_CONSENT_DIR = os.path.join(STATE_DIR, "hestia-consent")
+HESTIA_CONSENT_TTL = 2 * 3600
 HESTIA_REASON = ("Правило hestia (metis-0245): {what}. Гестии можно: `pantheon plugins update`, `pantheon domains "
                  "build`, `pantheon restart` без --force, `pantheon alert`, чтение (`pantheon task show|status|who`, "
-                 "логи, git только для чтения, `claude plugin list|agents`); писать — только во временные папки. "
-                 "Остальное — в отчёт Зевсу.")
+                 "логи, git только для чтения, `claude plugin list|agents`); писать — только во временные папки; "
+                 "сеть, `git push`, `gh pr create|edit` — после `pantheon consent <id>`. Остальное — в отчёт Зевсу.")
 
 
 def check_hestia_call(event, tool, tool_input):
@@ -3589,6 +3600,23 @@ def check_hestia_call(event, tool, tool_input):
         return ("Правило hestia: роль hestia — только в своём окне песочницы (`pantheon wake hestia --task <id>`), "
                 f"здесь окно «{window_role() or 'нет'}» — инструменты закрыты.")
     return None
+
+
+def hestia_consent_fresh():
+    """Есть ли свежая метка `pantheon consent` (ответ владельца найден не раньше HESTIA_CONSENT_TTL назад)."""
+    try:
+        for n in os.listdir(HESTIA_CONSENT_DIR):
+            st = os.lstat(os.path.join(HESTIA_CONSENT_DIR, n))
+            if stat.S_ISREG(st.st_mode) and 0 <= time.time() - st.st_mtime <= HESTIA_CONSENT_TTL:
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _hestia_need_consent(what):
+    return HESTIA_REASON.format(what=f"{what} — наружу только после записи владельца: `pantheon consent <id задачи>` "
+                                     f"(ответ на вопрос [id] в окне Зевса; метка живёт {HESTIA_CONSENT_TTL // 3600} ч)")
 
 
 def _pantheon_words(name, texts):
@@ -3614,6 +3642,17 @@ def check_hestia(event, tool, tool_input):
     cmd = tool_input.get("command") or ""
     targets, cmds = bash_analysis(cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
     bad = [p for p in targets if p == UNRESOLVED or not _inside(p, TEMP_ROOTS)]
+    if bad and hestia_consent_fresh():
+        # git push разбор считает записью в репозиторий (корень и .git); при свежей метке этих двух путей он не
+        # касается. `cd папка && git push` так не пройдёт — репозиторий называют через `git -C папка push`
+        cwd0, skip = os.path.realpath(event.get("cwd") or os.getcwd()), set()
+        for name, texts in cmds:
+            parsed = _git_sub(texts) if name and os.path.basename(name.rstrip("/")).lower() == "git" else None
+            if parsed and parsed[1] == "push":
+                d = os.path.realpath(os.path.join(cwd0, os.path.expanduser(parsed[0] or ".")))
+                top = _git_top(d)
+                skip |= {top, os.path.join(top, ".git")}
+        bad = [p for p in bad if p == UNRESOLVED or p not in skip]
     if bad:
         return HESTIA_REASON.format(what="запись " + ("в путь, который не разобрать" if bad[0] == UNRESOLVED
                                                      else f"в {bad[0].replace(HOME, '~')}") + " — вне временных папок")
@@ -3623,6 +3662,16 @@ def check_hestia(event, tool, tool_input):
         base = os.path.basename(name.rstrip("/")).lower()
         if base == "git":
             parsed = _git_sub(texts)
+            if parsed is not None and parsed[1] in HESTIA_GIT_NET:
+                if not hestia_consent_fresh():
+                    return _hestia_need_consent(f"git {parsed[1]}")
+                # окно главной сессии без agent_type — check_push его не судит, поэтому правила push здесь же:
+                # не в main/master, без force и удаления
+                why = push_problem(texts, os.path.realpath(event.get("cwd") or os.getcwd()),
+                                   any(n == "cd" for n, _ in cmds)) if parsed[1] == "push" else None
+                if why:
+                    return HESTIA_REASON.format(what=f"git push — {why}; и с consent main, force и удаление ветки закрыты")
+                continue
             if parsed is None or (parsed[1] is not None and parsed[1] not in HESTIA_GIT_READ):
                 return HESTIA_REASON.format(what=f"git {parsed[1] if parsed else '<не разобрать>'} — git только для "
                                                  "чтения, коммиты, отправку и слияние делают направления")
@@ -3631,10 +3680,19 @@ def check_hestia(event, tool, tool_input):
             dyn, cands = _gh_parse(texts)
             api = _gh_api(texts)
             subs = {(texts[q], texts[i] if i is not None else None) for q, i in cands}
+            if not dyn and cands and api is None and subs <= HESTIA_GH_WRITE | HESTIA_GH_READ \
+                    and subs & HESTIA_GH_WRITE:
+                if not hestia_consent_fresh():
+                    return _hestia_need_consent("gh " + " ".join(sorted(f"{x} {y}" for x, y in subs & HESTIA_GH_WRITE)))
+                continue
             if dyn or not cands or (api is not None and _gh_api_writes(api)) or \
                     any(s != "api" and (s, a) not in HESTIA_GH_READ for s, a in subs):
                 return HESTIA_REASON.format(what="gh — только чтение (`gh pr view|list|diff|checks|status`, "
                                                  "`gh api` без записи)")
+            continue
+        if base in HESTIA_NET_TOOLS:
+            if not hestia_consent_fresh():
+                return _hestia_need_consent(base)
             continue
         if base == "claude":
             if not any(tuple(texts[:len(w)]) == w for w in HESTIA_CLAUDE):

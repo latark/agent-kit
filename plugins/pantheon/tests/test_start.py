@@ -745,13 +745,15 @@ def main():
     hq_win = json.load(open(os.path.join(state, "settings", "hq.json")))
     hcache = os.path.join(tmp, "Library", "Caches", "pantheon-sandbox", "hestia")
     hdeny = hwin.get("permissions", {}).get("deny", [])
-    check("окно hestia: PANTHEON_ROLE=hestia, мимо песочницы — только plugins update, domains build, restart, alert; "
-          "сети нет, Edit/Write/WebFetch закрыты, Agent закрыт, кэш создан",
+    check("окно hestia: PANTHEON_ROLE=hestia, мимо песочницы — plugins update, domains build, restart, alert, consent, "
+          "git push, gh pr create|edit; сеть на домены песочницы, Edit/Write/WebFetch закрыты, Agent закрыт, кэш создан",
           hwin.get("env", {}).get("PANTHEON_ROLE") == "hestia" and hwin["sandbox"]["enabled"]
           and hwin["sandbox"]["excludedCommands"] == ["pantheon plugins update", "pantheon plugins update *",
                                                       "pantheon domains build", "pantheon restart *",
-                                                      "pantheon alert *"]
-          and hwin["sandbox"]["network"]["allowedDomains"] == []
+                                                      "pantheon alert *", "pantheon consent *", "git push",
+                                                      "git push *", "gh pr create *", "gh pr edit *"]
+          and "github.com" in hwin["sandbox"]["network"]["allowedDomains"]
+          and "api.github.com" in hwin["sandbox"]["network"]["allowedDomains"]
           and all(t in hdeny for t in ("Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"))
           and "Agent" in hdeny and os.path.isdir(hcache))
     # argus круг 2: Read и Grep песочница не держит — личное закрыто правилами deny окна
