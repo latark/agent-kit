@@ -361,7 +361,7 @@ def lock(name, block=True):
             fd = os.open(path("locks", name + ".lock"), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
         fh = os.fdopen(fd, "a")
     except UnsafeFile as e:
-        print(f"pantheon: замок {name} не взят — {e}", file=sys.stderr)
+        print(f"pantheon: блокировка {name} не взята — {e}", file=sys.stderr)
         yield False
         return
     except OSError as e:
@@ -369,7 +369,7 @@ def lock(name, block=True):
             if not shared:
                 raise
             # любой иной сбой на пути hq-rw — отказ замка с предупреждением, а не падение start и прохода
-            print(f"pantheon: замок {name} не взят — {type(e).__name__}: {e}", file=sys.stderr)
+            print(f"pantheon: блокировка {name} не взята — {type(e).__name__}: {e}", file=sys.stderr)
             yield False
             return
         # окно без записи в папку замков (собранное до metis-0523, metis-0078): ждущую блокировку имени сессии pantheon
@@ -392,7 +392,7 @@ def lock(name, block=True):
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    print(f"pantheon: замок {name} занят дольше {HQ_LOCK_WAIT:.0f} с — иду без него", file=sys.stderr)
+                    print(f"pantheon: блокировка {name} занята дольше {HQ_LOCK_WAIT:.0f} с — иду без него", file=sys.stderr)
                     break
                 time.sleep(0.2)
     else:
@@ -4044,7 +4044,7 @@ def start(rest):
     # проверка и запуск — под блокировкой имени: тик и Зевс не запустят две копии одновременно
     with lock("start-" + name, block=False) as got:
         if not got:
-            print(f"pantheon start: {name} — замок имени не взят: уже запускается другой командой или запись замка "
+            print(f"pantheon start: {name} — блокировка имени не взята: уже запускается другой командой или запись блокировки "
                   f"подложена (строка выше)", file=sys.stderr)
             return 1
         return _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win)

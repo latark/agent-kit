@@ -1219,7 +1219,7 @@ def test_stop_without_locks_write():
         # неблокирующий замок без файла — отказ с кодом 1 и предупреждением, а не молчаливое «взял» и не падение
         os.remove(e.st("stopped", "nl-dir"))
         r2 = e.run("start", "nl-dir", t=T0)
-        check(r2.returncode == 1 and "Traceback" not in r2.stderr and "замок start-nl-dir не взят" in r2.stderr,
+        check(r2.returncode == 1 and "Traceback" not in r2.stderr and "блокировка start-nl-dir не взята" in r2.stderr,
               f"start без записи в замки: {r2.returncode} {r2.stdout} {r2.stderr[-200:]}")
     finally:
         os.chmod(locks, 0o700)
@@ -1361,7 +1361,7 @@ def test_lock_symlink_refused_0523():
     os.remove(os.path.join(hl, "start-ln-dir.lock"))
     os.link(victim, os.path.join(hl, "start-ln-dir.lock"))
     r = e.run("start", "ln-dir", t=T0)
-    check(not _bgs(e, "ln-dir") and "замок start-ln-dir не взят" in r.stderr and open(victim).read() == "целый\n",
+    check(not _bgs(e, "ln-dir") and "блокировка start-ln-dir не взята" in r.stderr and open(victim).read() == "целый\n",
           f"0523: замок по жёсткой ссылке взят: {r.returncode} {e.calls()} {r.stderr[-200:]}")
     # замки прохода — не в hq-rw
     e.run("watch", t=T0)
@@ -1404,8 +1404,8 @@ def test_hq_rw_bad_entries_0523():
         else:
             os.symlink(e.st("nowhere"), p)
         r = e.run("start", "bd-dir", t=T0)
-        check(r.returncode == 1 and "Traceback" not in r.stderr and "замок start-bd-dir не взят" in r.stderr
-              and "замок имени не взят" in r.stderr.strip().splitlines()[-1] and not _bgs(e, "bd-dir"),
+        check(r.returncode == 1 and "Traceback" not in r.stderr and "блокировка start-bd-dir не взята" in r.stderr
+              and "блокировка имени не взята" in r.stderr.strip().splitlines()[-1] and not _bgs(e, "bd-dir"),
               f"0523: {kind} на месте замка: {r.returncode} {r.stderr[-300:]}")
     os.mkdir(os.path.join(hl, "wake.lock"))
     r = e.run("watch", t=T0)
