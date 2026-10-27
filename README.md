@@ -122,7 +122,8 @@
   Gated Merge описывает ровно форму, которую пускает шлюз слияния guard:
   `gh pr merge <N> -R|--repo <owner/repo> --match-head-commit <sha>`, а последующие `gh pr view` или `git fetch`
   классификатор считает обычными. `--admin`, `--auto`, `gh api` и ядро защит (`plugins/guard/`,
-  `plugins/pantheon/roles/`, `plugins/pantheon/lib/window_rules.py`, `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
+  `plugins/pantheon/roles/`, `plugins/pantheon/lib/window_rules.py`, сборка окон `sandbox_build` в
+  `plugins/pantheon/lib/pantheon.py`, `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
   из `policy.toml`; направлению без такой записи правила слияния нет. Окну с доступом к личному (`[private]`
   `coordinators`, сейчас mnemo-brain) правило слияния не выдаётся и при `[merge_repos]`: его PR сливает владелец
   (metis-0156). Имён владельца, направлений и репозиториев в
@@ -269,7 +270,8 @@
   Хук `ctx.py qmd-query` пропускает только поиск `vec`/`lex` в названных коллекциях с `rerank: false` (QMD-04).
 - `plugins/pantheon/lib/window_rules.py` — правила окон координаторов для слияния через шлюз guard
   (`permissions.allow` и `autoMode.allow`, metis-0174); их собирает `pantheon domains build`. Файл — в ядре защит:
-  PR, который его задевает, ждёт слияния владельцем.
+  PR, который его задевает, ждёт слияния владельцем. С metis-0404 так же и PR, который меняет в `pantheon.py`
+  сборку окон: `sandbox_build`, `domains_build`, `run_settings` и то, что они зовут и читают (README guard, Д3).
 - `plugins/pantheon/lib/autoclose.py` — автозакрытие задач при слиянии PR (metis-0308). Два прохода: `pantheon autoclose fetch`
   (отдельная задача расписания, предел 240 с на весь проход) спрашивает gh про слитые и открытые PR из `[merge_repos]` и пишет
   кэш `autoclose-prs.json`; лёгкий плановый проход читает только кэш и в сеть не ходит. Задачу закрывает PR из репозитория её направления,

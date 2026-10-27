@@ -81,6 +81,7 @@ class Home:
         # pr view N -R owner/repo … — $HOME/gh.view.<repo> ($5), с gh.ci.fail — сбой; один вызов на шлюз (metis-0297).
         # api …/contents/.github/workflows?ref=<sha> — с gh.wf.fail.<sha> 502, с gh.wf.<sha> его текст (код 0), иначе 404;
         # api …/pulls/N/files — $HOME/gh.files, с gh.api.fail — сбой, с gh.api.fail1 — сбой один раз (файл убирается)
+        # api repos/o/<repo>/git/ref/heads/<ветка> — $HOME/gh.ref.<repo> (вершина base, metis-0404 Б1), нет файла — сбой
         with open(j("bin/gh"), "w") as fh:
             fh.write('#!/bin/sh\necho "$@" >> "$HOME/gh.log"\n[ -f "$HOME/gh.fail" ] && exit 1\n'
                      'case "$*" in\n'
@@ -89,6 +90,8 @@ class Home:
                      '[ -f "$HOME/gh.wf.fail.$ref" ] && { echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1; }; '
                      '[ -f "$HOME/gh.wf.$ref" ] && { cat "$HOME/gh.wf.$ref"; exit 0; }; '
                      'echo \'{"message":"Not Found","status":"404"}\'; echo "gh: Not Found (HTTP 404)" >&2; exit 1;;\n'
+                     '*/git/ref/heads/*) r="$HOME/gh.ref.$(basename "${2%%/git/ref/*}")"; '
+                     '[ -f "$r" ] || exit 1; cat "$r"; exit 0;;\n'
                      'esac\n'
                      'if [ "$1" = api ]; then [ -f "$HOME/gh.api.fail1" ] && { rm -f "$HOME/gh.api.fail1"; exit 1; }; '
                      '[ -f "$HOME/gh.api.fail" ] && exit 1; cat "$HOME/gh.files"; exit 0; fi\n'
@@ -107,14 +110,15 @@ class Home:
         shutil.rmtree(self.j(".local/state/pantheon/merge-gate"), ignore_errors=True)
         shutil.rmtree(self.j(".local/state/pantheon/owner-log"), ignore_errors=True)
         for f in os.listdir(self.root):
-            if f.startswith(("gh.fail", "gh.log", "gh.api.fail", "gh.ci.fail", "gh.wf.", "gh.view.")):
+            if f.startswith(("gh.fail", "gh.log", "gh.api.fail", "gh.ci.fail", "gh.wf.", "gh.view.", "gh.ref.")):
                 os.remove(self.j(f))
         open(self.j("ai/pantheon/alerts.md"), "w").close()
-        self.view = {name: {"headRefOid": self.sha[name], "baseRefOid": BASE, "changedFiles": 0,
+        self.tip = {}  # вершина ветки base от gh api …/git/ref/heads (имя → SHA, "fail" — сбой); без записи — baseRefOid
+        self.view = {name: {"headRefOid": self.sha[name], "baseRefOid": BASE, "baseRefName": "main", "changedFiles": 0,
                             "statusCheckRollup": GREEN} for name in self.sha}
         for name in self.sha:
             self.write_view(name)
-        self.gh(["README.md", "plugins/pantheon/lib/pantheon.py"])
+        self.gh(["README.md", "plugins/pantheon/lib/merge.py"])  # pantheon.py — ядро по сборке окон (t_core_sandbox)
 
     def reset_log(self):
         if os.path.exists(self.j("gh.log")):
@@ -128,6 +132,13 @@ class Home:
     def write_view(self, name, raw=None):
         with open(self.j("gh.view." + name), "w") as fh:
             fh.write(raw if raw is not None else json.dumps(self.view[name]))
+        tip = self.tip.get(name, self.view[name].get("baseRefOid"))
+        if os.path.exists(self.j("gh.ref." + name)):
+            os.remove(self.j("gh.ref." + name))
+        if tip != "fail":
+            with open(self.j("gh.ref." + name), "w") as fh:
+                json.dump({"ref": "refs/heads/" + str(self.view[name].get("baseRefName")),
+                           "object": {"sha": tip, "type": "commit"}}, fh)
 
     def ci(self, rollup, name="tg-read", head=None, raw=None, **fields):
         """Проверки GitHub (statusCheckRollup) и head в ответе gh pr view для latark/<name>; raw — сырой ответ;
@@ -149,6 +160,7 @@ class Home:
         old = self.view["agent-kit"]
         self.view["agent-kit"] = dict({"changedFiles": len(files) if count is None else count,
                                        "headRefOid": head or self.sha["agent-kit"], "baseRefOid": old.get("baseRefOid", BASE),
+                                       "baseRefName": old.get("baseRefName", "main"),
                                        "statusCheckRollup": old["statusCheckRollup"]}, **(extra or {}))
         self.write_view("agent-kit")
         recs = [f if isinstance(f, dict) else {"filename": f, "status": "modified"} for f in files]
@@ -394,7 +406,7 @@ def t_core(h):
     merge_case("защиты: PR не задевает ядро — проходит", h.pre(cmd, pdir="projects/agent-kit"), True)
     if HAVE_TOML:
         log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
-        check("gh pr view зовётся с -R и номером", "pr view 7 -R latark/agent-kit --json headRefOid,baseRefOid,changedFiles,statusCheckRollup"
+        check("gh pr view зовётся с -R и номером", "pr view 7 -R latark/agent-kit --json headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup"
               in log and "api repos/latark/agent-kit/pulls/7/files" in log and "--paginate" in log, log)
         check("защиты: один gh pr view на Д3 и проверки GitHub (таймаут хука 10 с)", log.count("pr view") == 1, log)
     h.gh(["README.md", "plugins/guard/hooks/merge_gate.py"])
@@ -406,7 +418,7 @@ def t_core(h):
     h.gh([{"filename": "plugins/other/g.py", "status": "renamed", "previous_filename": "plugins/guard/hooks/guard.py"}])
     merge_case("защиты: вынос файла из plugins/guard наружу — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
                CORE + ": PR задевает plugins/guard/hooks/guard.py")
-    h.gh(["plugins/pantheon/lib/pantheon.py", "plugins/guardian/x.py", "plugins/pantheon/tests/test_a.py"])
+    h.gh(["plugins/pantheon/lib/merge.py", "plugins/guardian/x.py", "plugins/pantheon/tests/test_a.py"])
     merge_case("защиты: PR только в plugins/pantheon (и plugins/guardian) — проходит",
                h.pre(cmd, pdir="projects/agent-kit"), True)
     # metis-0182 п. 4 и metis-0174: общие роли и правила autoMode окон — тоже ядро (даже если папки ещё нет на main)
@@ -1294,7 +1306,7 @@ def t_ci(h):
     if HAVE_TOML:
         log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
         check("CI: gh pr view зовётся с -R, номером и statusCheckRollup",
-              "pr view 3 -R latark/tg-read --json headRefOid,baseRefOid,changedFiles,statusCheckRollup" in log, log)
+              "pr view 3 -R latark/tg-read --json headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup" in log, log)
         check("CI: зелёные — один вызов gh, workflows не спрашивает", log.count("\n") == 1, log)
     red = dict(RUN_OK, conclusion="FAILURE")
     h.ci([GREEN[1], red])
@@ -1418,9 +1430,9 @@ def t_ci(h):
     calls = []
     mg._gh_json = lambda args: calls.append(args) or [{"headRefOid": sha}]
     check("_pr_view: объект ответа", mg._pr_view("latark/tg-read", 3) == {"headRefOid": sha})
-    check("_pr_view: один вызов gh pr view с headRefOid,baseRefOid,changedFiles,statusCheckRollup",
+    check("_pr_view: один вызов gh pr view с headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup",
           calls == [["pr", "view", "3", "-R", "latark/tg-read", "--json",
-                     "headRefOid,baseRefOid,changedFiles,statusCheckRollup"]], calls)
+                     "headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup"]], calls)
     for got in (None, [], [["x"]], [{"a": 1}, {"b": 2}]):
         mg._gh_json = lambda args: got
         check(f"_pr_view: ответ {got!r} — None", mg._pr_view("latark/tg-read", 3) is None)
@@ -2586,13 +2598,180 @@ def t_carry_r6(h):
           opus(s["A"], "w", session="s-w"), tests(s["N1"])], False, "нет «принять»")
 
 
-CASES = [t_hq_gh, t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
+# --- сборка окон в pantheon.py — ядро (metis-0404) ------------------------------------------------------------------
+SB = "plugins/pantheon/lib/pantheon.py"
+SB_SRC = '''import os
+HOME = os.environ.get("HOME", "")
+SANDBOX_DOMAINS = ["pypi.org"]
+JOB_ROLES = {"iris": {"write": []}}
+
+
+def role_settings(folders):
+    return {"sandbox": {"domains": list(SANDBOX_DOMAINS), "write": folders}, "jobs": sorted(JOB_ROLES)}
+
+
+def sandbox_build(domains):
+    # окна направлений
+    return {n: role_settings(f) for n, f in domains.items()}
+
+
+def domains_build():
+    return sandbox_build({"x": [HOME]})
+
+
+def run_settings(name):
+    return name
+
+
+def task_cmd(argv):
+    out = []
+    out.append(len(argv))
+    return out
+'''
+# head от базы: имя, замена (было → стало), ядро ли
+SB_VARIANTS = (
+    ("sb", ("return {n: role_settings(f)", "return {n: role_settings(f + ['/'])"), True),
+    ("helper", ('"write": folders}', '"write": folders + ["/"]}'), True),
+    ("const", ('["pypi.org"]', '["pypi.org", "evil.example"]'), True),
+    ("mutate", ("    out = []\n", "    SANDBOX_DOMAINS.append('evil.example')\n    out = []\n"), True),
+    ("glob", ("    out = []\n", "    global JOB_ROLES\n    JOB_ROLES = {}\n    out = []\n"), True),
+    ("toplevel", ("\n\ndef role_settings", "\nJOB_ROLES.update(x={})\n\n\ndef role_settings"), True),
+    ("caller", ('[HOME]})', '[HOME, "/"]})'), True),
+    ("run", ("    return name\n", "    return name + '.json'\n"), True),
+    ("rename", ("def sandbox_build(domains):", "def build_windows(domains):"), True),
+    ("syntax", ("def task_cmd(argv):", "def task_cmd(argv:"), True),
+    ("other", ("out.append(len(argv))", "out.append(len(argv) + 1)"), False),
+    ("comment", ("    # окна направлений\n", "    # окна направлений, другой комментарий\n"), False),
+    ("local", ("    out = []\n", "    out = []\n    out.extend([1])\n"), False),
+    ("newfn", ("\n\ndef task_cmd", "\n\ndef board_cmd():\n    return 1\n\n\ndef task_cmd"), False),
+)
+# Б1 ревью argus-b PR #160: в base после ответвления PR слит соседний PR — sandbox_build стала звать task_cmd,
+# а PR (вариант «other») правит task_cmd. На merge-base и head task_cmd вне сборки, на вершине base — внутри
+SB_TIP = ("    return {n: role_settings(f) for n, f in domains.items()}",
+          "    task_cmd([])\n    return {n: role_settings(f) for n, f in domains.items()}")
+
+
+def t_core_sandbox_unit(h):
+    """sandbox_build_changes напрямую: правка сборки окон и того, что она пишет, — имена; правка другой функции,
+    комментарий — пусто; не разобрать или нет корня — None. И на настоящем pantheon.py репозитория."""
+    mg = _load_merge_gate("merge_gate_sb")
+    for name, (a, b), core in SB_VARIANTS:
+        check(f"сборка окон: замена «{name}» есть в образце", a in SB_SRC)
+        got = mg.sandbox_build_changes(SB_SRC, SB_SRC.replace(a, b, 1))
+        check(f"сборка окон: {name} — {'ядро' if core else 'не ядро'}", (got is None or bool(got)) == core, got)
+    check("сборка окон: имя правки — role_settings",
+          mg.sandbox_build_changes(SB_SRC, SB_SRC.replace(*SB_VARIANTS[1][1])) == ["role_settings"])
+    other, tip = SB_SRC.replace(*SB_VARIANTS[10][1]), SB_SRC.replace(*SB_TIP)
+    check("сборка окон Б1: вызов есть в образце вершины", SB_TIP[0] in SB_SRC and SB_VARIANTS[10][0] == "other")
+    check("сборка окон Б1: без вершины base правка task_cmd — не ядро", mg.sandbox_build_changes(SB_SRC, other) == [])
+    check("сборка окон Б1: вершина base зовёт task_cmd, PR правит task_cmd — ядро",
+          mg.sandbox_build_changes(SB_SRC, other, tip) == ["task_cmd"], mg.sandbox_build_changes(SB_SRC, other, tip))
+    check("сборка окон Б1: вершина base без нового вызова — не ядро",
+          mg.sandbox_build_changes(SB_SRC, other, SB_SRC) == [])
+    check("сборка окон Б1: вершину base не разобрать — None",
+          mg.sandbox_build_changes(SB_SRC, other, "def (") is None)
+    real_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(GUARD))), "pantheon", "lib", "pantheon.py")
+    real = open(real_path, encoding="utf-8").read()
+    got = mg._defs_closure(real)
+    check("настоящий pantheon.py: разбирается, корни на месте", got is not None)
+    seen = got[1] if got else set()
+    want = {"sandbox_build", "role_settings", "agents_window", "JOB_ROLES", "SANDBOX_DOMAINS", "GH_PR_WRITE",
+            "HESTIA_EXCLUDED", "COORDINATOR_AGENTS", "WINDOW_RULES", "run_settings", "domains_build"}
+    check("настоящий pantheon.py: в сборке окон — role_settings, JOB_ROLES, SANDBOX_DOMAINS…", want <= seen,
+          sorted(want - seen))
+    check("настоящий pantheon.py: без правки — пусто", mg.sandbox_build_changes(real, real) == [])
+    check("настоящий pantheon.py: новая функция в конце — не ядро",
+          mg.sandbox_build_changes(real, real + "\n\ndef _metis_0404_probe():\n    return 1\n") == [])
+    import ast
+    tree = ast.parse(real)
+    fn = next(st for st in tree.body if isinstance(st, ast.FunctionDef) and st.name == "role_settings")
+    lines = real.splitlines(True)
+    first = fn.body[0]
+    indent = lines[first.lineno - 1][:first.col_offset]
+    probe = "".join(lines[:first.lineno - 1] + [indent + "_probe = 1\n"] + lines[first.lineno - 1:])
+    check("настоящий pantheon.py: правка role_settings — ядро",
+          mg.sandbox_build_changes(real, probe) == ["role_settings"], mg.sandbox_build_changes(real, probe))
+
+
+def t_core_sandbox(h):
+    """Шлюз: PR, который правит сборку окон в pantheon.py, — ядро, лид его не сливает; правка другой функции —
+    проходит; сборку не проверить (не клон, нет коммита, переименование, другой регистр) — ядро; Touch ID — проходит."""
+    p, kit = h.j("projects/agent-kit"), "projects/agent-kit"
+    H = Hist(p)
+    H.br("t-sb-base", h.sha["agent-kit"])
+    base = H.put({SB: SB_SRC}, "база сборки окон")
+    heads = {}
+    for name, (a, b), _ in SB_VARIANTS:
+        H.br("t-sb-" + name, base)
+        heads[name] = H.put({SB: SB_SRC.replace(a, b, 1)}, name)
+    H.br("t-sb-gone", base)
+    heads["gone"] = H.put({SB: None}, "pantheon.py удалён, а gh пишет modified")
+    H.br("t-sb-tip", base)
+    tip = H.put({SB: SB_SRC.replace(*SB_TIP)}, "соседний PR: sandbox_build зовёт task_cmd (Б1)")
+    H.br("t-sb-tip-other", base)
+    tip_other = H.put({SB: SB_SRC.replace(*SB_VARIANTS[13][1])}, "соседний PR: новая функция вне сборки")
+    git(p, "checkout", "-q", "-f", "main")
+    git(p, "clean", "-qfdx")
+
+    def case(title, name, allow, why="", files=None, sha=None, role="hephaestus-pantheon", agent_id="L1", cwd=None,
+             cmd=None, tip_sha=None, vbase=None, bname="main"):
+        sha = sha or heads[name]
+        h.reset()
+        h.gh(files or [SB], head=sha)
+        h.view["agent-kit"].update(baseRefOid=vbase or base, baseRefName=bname)
+        if tip_sha:
+            h.tip["agent-kit"] = tip_sha
+        h.write_view("agent-kit")
+        h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"), rec("accept", "latark/agent-kit", 7, sha))
+        got = h.pre(cmd or f"gh pr merge 7 --match-head-commit {sha}", role=role, agent_id=agent_id, pdir=kit, cwd=cwd)
+        merge_case(title, got, allow, why)
+        return got
+
+    for name, _, core in SB_VARIANTS:
+        case(f"сборка окон, лид: {name} — {'отказ (ядро)' if core else 'проходит'}", name, not core,
+             CORE + ": PR задевает " + SB)
+    case("сборка окон, координатор: правка sandbox_build — отказ", "sb", False, CORE + ": PR задевает " + SB,
+         role="domain-coordinator", agent_id=None)
+    case("window_rules.py — ядро, как и раньше", "other", False, CORE + ": PR задевает plugins/pantheon/lib/window_rules.py",
+         files=["plugins/pantheon/lib/window_rules.py"])
+    case("сборка окон: слияние -R не из клона — не проверить, отказ", "other", False, "сборку окон не проверить",
+         cwd="projects/tg-read", cmd=f"gh pr merge 7 -R latark/agent-kit --match-head-commit {heads['other']}")
+    case("сборка окон: коммита head нет в git — отказ, подсказка git fetch", "other", False, "git fetch", sha="e" * 40)
+    case("сборка окон: переименование в pantheon.py — отказ", "other", False, "переименован",
+         files=[{"filename": SB, "status": "renamed", "previous_filename": "plugins/pantheon/lib/old.py"}])
+    case("сборка окон: файла нет в head, хотя gh пишет modified — отказ", "gone", False, "файла нет до или после")
+    case("сборка окон: путь в другом регистре — отказ", "other", False, "в другом регистре",
+         files=["plugins/Pantheon/lib/pantheon.py"])
+    # Б1 (argus-b PR #160): вершина base ушла вперёд, соседний PR добавил в sandbox_build вызов task_cmd
+    case("сборка окон Б1: baseRefOid — merge-base, вершина base зовёт task_cmd, PR правит task_cmd — отказ (ядро)",
+         "other", False, "сборка окон: task_cmd", tip_sha=tip)
+    case("сборка окон Б1: baseRefOid и вершина — коммит с вызовом task_cmd, PR правит task_cmd — отказ (ядро)",
+         "other", False, "сборка окон: task_cmd", vbase=tip)
+    case("сборка окон Б1: вершина base с правкой вне сборки — правка task_cmd проходит", "other", True,
+         tip_sha=tip_other)
+    case("сборка окон Б1: gh не дал вершину base — отказ", "other", False, "не получить от gh", tip_sha="fail")
+    case("сборка окон Б1: вершины base нет в git папки — отказ, подсказка git fetch", "other", False,
+         "вершины base dddddddddddd нет в git папки", tip_sha="d" * 40)
+    case("сборка окон Б1: имя ветки base не по формату — отказ", "other", False, "не получить от gh", bname="../x")
+    h.reset()
+    h.approve(f"{ts()} merge-approve latark/agent-kit#7 {heads['sb']}")
+    h.gh([SB], head=heads["sb"])
+    h.view["agent-kit"]["baseRefOid"] = base
+    h.write_view("agent-kit")
+    h.seed(rec("tests", "latark/agent-kit", None, heads["sb"], "dev-opus"),
+           rec("accept", "latark/agent-kit", 7, heads["sb"]))
+    merge_case("сборка окон: строка Touch ID владельца — проходит",
+               h.pre(f"gh pr merge 7 --match-head-commit {heads['sb']}", role="hephaestus-pantheon", agent_id="L1",
+                     pdir=kit), True)
+
+
+CASES = [t_hq_gh,t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_transcript, t_ci,
          t_core_touchid, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
-         t_carry_r4_gate, t_carry_r6, t_version_bump_refused]
+         t_carry_r4_gate, t_carry_r6, t_version_bump_refused, t_core_sandbox_unit, t_core_sandbox]
 
 
 def main():
