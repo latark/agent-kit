@@ -22,7 +22,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         со строками ok, но без итога; таймауты и срок прогона не гоняются, базе достаётся
                                         остаток срока; база не гасит «ни одной проверки» и «проверок меньше, чем у базы»
                                         (metis-0360); код 0 без итога красный, если у базы итог был или файла нет (metis-0361);
-                                        после установки плановый проход перезапускает свободные окна (metis-0181)
+                                        после установки плановый проход перезапускает свободные окна (metis-0181);
+                                        прогон откладывает только критичное давление памяти, своп не держит; матрица
+                                        python — из ставимой версии, пустая — не ставлю (metis-0531)
   pantheon plugins accept [--new] [guard] [pantheon]   принять установленное дерево как проверенное (verified.json):
                                         живой код и окна ролей идут только на проверенное (metis-0321); только руками
   pantheon direction check <имя>        что готово у нового направления (навык new-direction): реестр, «да»,
@@ -7488,8 +7490,9 @@ def usage_report(rest):
 # падение, снятое при других соседях или случайно, не гасит падение новой (решение владельца 25.10, вариант Б).
 # Остальные файлы база гоняет. Падение, которое уже не изменится, — red
 # сразу, даже если другие файлы не успели. partial подряд — не больше PLUGIN_PARTIAL_MAX проходов, затем red с тревогой.
-# Под давлением памяти (своп выше порога дежурного) прогон откладывается, не дольше PLUGIN_DEFER_MAX от первой отсрочки
-# (deferred_since переходит в метку partial).
+# При критичном давлении памяти (metis-0531; давление не прочитано — своп выше порога дежурного) прогон откладывается,
+# не дольше PLUGIN_DEFER_MAX от первой отсрочки (deferred_since переходит в метку partial). Матрица python — из
+# ставимой версии (_pythons_new), пустая — красное.
 
 MARKETPLACE = "agent-kit"
 # один файл тестов (metis-0424): было 600 — test_guard на системном 3.9 не успевал (24.10, guard 0.5.18 и 0.5.19).
@@ -7628,6 +7631,51 @@ def _pythons_for(name):
     (metis-0448: /usr/bin/python3 в матрицу не входит)."""
     pythons = _test_pythons()
     return [py for py in pythons if _py_ge311(py)] if name == "pantheon" else pythons
+
+
+MATRIX_EMPTY = "матрица тестов новой версии пустая — она снимает тесты целиком"
+_MATRIX_PROBE = ("import json, sys; sys.path.insert(0, sys.argv[1]); import pantheon as p; "
+                 "print(json.dumps(p._pythons_for(sys.argv[2])))")
+
+
+def _pythons_new(name, root, tmp):
+    """metis-0531: матрица прогона — из ставимой версии, а не из установленной: иначе снятие /usr/bin/python3 из
+    матрицы (metis-0448) не доходит, пока выпуск не встал, а он не встаёт из-за падений на 3.9. Спрашиваем
+    _pythons_for у pantheon копии новой версии (root/plugins/pantheon — сам плагин или сосед из каталога) отдельным
+    процессом во временных HOME и STATE. Отдаёт (матрица, заметки для лога). Границы: не шире — только известные
+    интерпретаторы (python3 из PATH, этот python, /usr/bin/python3), остальное отброшено; не уже — python3 из PATH
+    добавляется всегда (хуки идут им); пустой ответ — пустая матрица: новая версия снимает тесты целиком, это
+    красное (_plugin_check). Ответа нет (pantheon в копии нет, старый без _pythons_for, сбой) — своя матрица."""
+    lib = os.path.join(root, "plugins", "pantheon", "lib")
+    own = _pythons_for(name)
+    if not os.path.isfile(os.path.join(lib, "pantheon.py")):
+        return own, []
+    box = tempfile.mkdtemp(prefix="matrix-", dir=tmp)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PANTHEON_")}
+    env.update({"HOME": box, "TMPDIR": box, "PANTHEON_HOME": os.path.join(box, "pantheon"),
+                "PANTHEON_STATE": os.path.join(box, "state"), "PANTHEON_NO_NOTIFY": "1"})
+    try:
+        r = subprocess.run([sys.executable, "-I", "-c", _MATRIX_PROBE, lib, name], cwd=box, env=env,
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        got = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 and r.stdout.strip() else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        got = None
+    if not isinstance(got, list) or not all(isinstance(p, str) for p in got):
+        return own, [f"матрица новой версии не прочитана — беру свою: {', '.join(own) or '—'}"]
+    if not got:
+        return [], [MATRIX_EMPTY]
+    first = shutil.which("python3") or sys.executable
+    known = {first, sys.executable, "/usr/bin/python3"}
+    out, notes = [], []
+    for p in dict.fromkeys(got):
+        if p in known:
+            out.append(p)
+        else:
+            notes.append(f"матрица новой версии: {p} — не из известных интерпретаторов, не гоняю")
+    if first not in out:
+        out.insert(0, first)
+        notes.append(f"матрица новой версии без python3 из PATH — добавлен {first}")
+    return out, notes
 
 
 def _roots_sub(s, roots):
@@ -8182,14 +8230,16 @@ def _copy_ctx(root, name):
     return h.hexdigest()
 
 
-def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=None, mkt_json=None, resume=None):
+def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=None, mkt_json=None, resume=None,
+                  memory=None):
     """Тесты новой версии против установленной. Отдаёт (лог, хеш проверенной копии, новые подписи, не досчитано).
     metis-0368: копии новой и базы — клоны с соседями (_copy_clone): у новой соседи из того же каталога (peers_new), у
     базы — установленные версии (peers_base), не установленного соседа база берёт из каталога. Хеш — только дерево
     проверяемого плагина. metis-0424: не досчитано — множество (python, файл), не успевших в срок прогона у новой или
     у нужной базы; непустое — решения нет (падения, которое уже не изменится, тоже нет), вызывающий ведёт счёт partial. resume — run прерванного так прогона:
     новая берёт из кэша результаты этого run, лог дописывается; None — свежий прогон. Метку partial (с run) ставит
-    сама: следующий проход продолжает по ней."""
+    сама: следующий проход продолжает по ней. metis-0531: матрица python — из копии новой версии (_pythons_new), она
+    же у базы; memory — заметка о памяти Mac для лога (_plugins_memory)."""
     log = path("plugins", f"{_plugins_safe(name)}-{_plugins_safe(new)}.log")
     tmp = tempfile.mkdtemp(prefix=f"{_plugins_safe(name)}-", dir=path("plugins", "tmp"))
     deadline = time.monotonic() + PLUGIN_RUN_LIMIT
@@ -8211,12 +8261,14 @@ def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=N
         base_digest = _tree_hash(base_dir)
         cache_base = _Results(name, base_digest, old, run, base_dir and _copy_ctx(os.path.join(tmp, "base"), name),
                               _base_clean, store=_base_clean)
-        pythons = _pythons_for(name)
+        pythons, notes_matrix = _pythons_new(name, os.path.join(tmp, "new"), tmp)
         with open(log, "a" if resume else "w", encoding="utf-8") as fh:
             if resume:
                 fh.write(f"\n\n{stamp()} продолжение прогона {run} — прошлый проход не досчитан\n")
             fh.write(f"{stamp()} {name}: новая {new} из {src} (хеш {digest}), база {old} из "
-                     f"{base_dir and base or '—'} (хеш {base_digest or '—'}); python: {', '.join(pythons)}\n")
+                     f"{base_dir and base or '—'} (хеш {base_digest or '—'}); python: {', '.join(pythons) or '—'}\n")
+            for n in notes_matrix + ([memory] if memory else []):
+                fh.write(n + "\n")
             for who, notes in (("новая", notes_new), ("база", notes_base)):
                 for n in notes:
                     fh.write(f"копия ({who}): {n}\n")
@@ -8238,6 +8290,8 @@ def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=N
                 fresh[("-", "-", "копия новой версии не собралась: " + "; ".join(notes_new))] = 1
             if not _test_files(new_dir):  # без тестов зелёного нет, даже если их нет и у базы
                 fresh[("-", "-", NO_TESTS)] = 1
+            if not pythons:  # metis-0531: новая версия не может снять тесты целиком пустой матрицей
+                fresh[("-", "-", MATRIX_EMPTY)] = 1
             # падение, которое уже не изменится: файл новой досчитан, и база по нему досчитана или не нужна. Оно красное
             # сразу, сколько бы файлов ни не успело (ревью 133, п.3): ждать остальные незачем
             sure = [k for k in fresh if (k[0], k[1]) not in short and (k[0], k[1]) not in unknown]
@@ -8265,16 +8319,44 @@ def plugins_update(quiet=False):
         return _plugins_update(quiet) if got else 0
 
 
+def _memory_pressure():
+    """Давление памяти macOS (kern.memorystatus_vm_pressure_level, как _load_snapshot): 1 норма, 2 предупреждение,
+    4 критично; другое значение или сбой чтения — None. PANTHEON_FAKE_PRESSURE — подмена для тестов и проб, как
+    PANTHEON_FAKE_SWAP; пустая строка — «не прочитано»."""
+    fake = os.environ.get("PANTHEON_FAKE_PRESSURE")
+    try:
+        if fake is not None:
+            level = int(fake)
+        else:
+            r = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True,
+                               text=True, timeout=10)
+            level = int(r.stdout.strip()) if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    return level if level in (1, 2, 4) else None
+
+
 def _plugins_memory():
-    """Причина отложить прогон тестов (metis-0424) или None: своп выше порога дежурного (swap_alert_gb, тот же, что у
-    pantheon start и тревоги о свопе). Своп не прочитан — не откладываем: без сигнала выпуск не держим."""
+    """Решение о прогоне тестов по памяти Mac (metis-0531, было — по свопу, metis-0424): (причина отложить или None,
+    заметка для лога или None). Решает давление памяти, а не своп: своп 5–8 ГБ — обычное состояние этого Mac, и порог
+    свопа держал выпуски с 26.10. «Норма» — прогон при любом свопе; «предупреждение» — прогон в один процесс (раннер
+    plugins update и так гоняет файлы по одному; заметка — в лог); «критично» — отложить. Давление не прочитано — как
+    раньше: своп выше порога дежурного (swap_alert_gb) откладывает, своп тоже не прочитан — прогон идёт: без сигнала
+    выпуск не держим."""
+    level = _memory_pressure()
+    if level == 4:
+        return "давление памяти критичное", None
+    if level == 2:
+        return None, "давление памяти: предупреждение — прогон в один процесс"
+    if level == 1:
+        return None, None
     try:
         w = watch_mod()
         gb = w.swap_gb()
         limit = w.threshold("swap_alert_gb", w.SWAP_ALERT_GB)
     except Exception:  # замер — подсказка, а не условие: сбой не держит выпуск
-        return None
-    return f"своп {gb:.1f} ГБ > {limit:g} ГБ" if gb is not None and gb > limit else None
+        return None, None
+    return (f"своп {gb:.1f} ГБ > {limit:g} ГБ" if gb is not None and gb > limit else None), None
 
 
 def _plugins_red(marks, name, old, new, log, what):
@@ -8395,13 +8477,13 @@ def _plugins_update(quiet):
             busy = [_plugins_memory()]
         since = mark.get("deferred_since") if same else None
         since = since if isinstance(since, (int, float)) and not isinstance(since, bool) else None
-        if busy[0] and (since is None or now() - since < PLUGIN_DEFER_MAX):
+        if busy[0][0] and (since is None or now() - since < PLUGIN_DEFER_MAX):
             # metis-0424: под давлением памяти прогон на 30 мин только хуже — откладываем, не дольше PLUGIN_DEFER_MAX
             if since is None:
-                _plugins_journal(f"{name} {old} → {new}: прогон тестов отложен — {busy[0]}")
+                _plugins_journal(f"{name} {old} → {new}: прогон тестов отложен — {busy[0][0]}")
             _plugins_mark(marks, name, {**(mark if same else {"version": new}), "deferred_since": since or now()})
             if not quiet:
-                print(f"{name}: {new} — прогон тестов отложен: {busy[0]}")
+                print(f"{name}: {new} — прогон тестов отложен: {busy[0][0]}")
             continue
         tested = True
         resume = mark.get("run") if same and mark.get("result") == PARTIAL and isinstance(mark.get("run"), str) else None
@@ -8409,7 +8491,8 @@ def _plugins_update(quiet):
             name, old, new, src, installed[name].get("installPath"), marks,
             peers_new={k: d for k, (_v, d) in catalog.items() if k != name},
             peers_base={k: row.get("installPath") for k, row in installed.items() if k != name},
-            mkt_json=os.path.join(_catalog_root(), ".claude-plugin", "marketplace.json"), resume=resume)
+            mkt_json=os.path.join(_catalog_root(), ".claude-plugin", "marketplace.json"), resume=resume,
+            memory=busy[0][1])
         if short:  # не досчитано — не «сломано» (metis-0424): метка partial поставлена, следующий проход продолжит
             # счёт проходов подряд и начало отсрочки переходят в новую метку (ревью 133, п.1 и 2): иначе partial без
             # потолка, а предел отсрочки 3 ч начинался бы заново после каждого прохода

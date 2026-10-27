@@ -1141,7 +1141,7 @@ def open_deps(head, tasks):
             if d not in tasks or tasks[d][1].get("status") not in ("done", "dropped")]
 
 
-PARALLEL_MAX = 3      # потолок параллельных исполнителей за ночь (metis-0248, поправка 6); AUTOSTART_MAX в watch.py — жёстче
+PARALLEL_MAX = 3      # потолок параллельных исполнителей за ночь (metis-0248, поправка 6); `AUTOSTART_MAX` в watch.py — жёстче: потолок самозапуска, не больше двух направлений сразу
 STALE_HOURS = 24      # предшественник без изменений дольше — «зависший» (допущение плана, поправим по замеру)
 
 
