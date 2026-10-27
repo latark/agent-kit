@@ -138,7 +138,8 @@ class Env:
         env.update({"PATH": self.stub + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.home,
                     "PANTHEON_HOME": self.pantheon, "PANTHEON_STATE": self.state, "PANTHEON_NO_NOTIFY": "1",
                     "PANTHEON_NOTIFY_LOG": self.notes, "STUB_DIR": self.stub, "TMPDIR": self.tmpdir,
-                    "PANTHEON_FAKE_SWAP": "0"})  # своп Mac не откладывает прогон тестов (metis-0424); тест задаёт свой
+                    "PANTHEON_FAKE_SWAP": "0", "PANTHEON_FAKE_PRESSURE": ""})
+        # своп и давление памяти Mac не откладывают прогон тестов (metis-0424, metis-0531); тест задаёт свои
         env.update(extra or {})
         args = args or ("plugins", "update", "--quiet")
         return subprocess.run([PY, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=300)
@@ -148,7 +149,8 @@ class Env:
         заглушка claude первой в PATH, как у run (весь проход plugins update внутри процесса)."""
         env = {k: v for k, v in os.environ.items() if not k.startswith(("PANTHEON_", "STUB_"))}
         env.update({"HOME": self.home, "PANTHEON_HOME": self.pantheon, "PANTHEON_STATE": self.state,
-                    "PANTHEON_NO_NOTIFY": "1", "TMPDIR": self.tmpdir, "PANTHEON_FAKE_SWAP": "0"})
+                    "PANTHEON_NO_NOTIFY": "1", "TMPDIR": self.tmpdir, "PANTHEON_FAKE_SWAP": "0",
+                    "PANTHEON_FAKE_PRESSURE": ""})
         if stub:
             env.update({"PATH": self.stub + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
                         "STUB_DIR": self.stub, "PANTHEON_NOTIFY_LOG": self.notes})
@@ -1028,6 +1030,80 @@ print(json.dumps({"disk": on_disk, "got": [f for f in ("a.py", "b.py", "c.py") i
     check("0424: своп 3.5 ГБ ниже порога — прогон без отсрочки",
           r.returncode == 0 and e.runs() > 0 and "отложен" not in e.journal(), f"{r.returncode} {e.journal()!r}")
     e.close()
+
+    # metis-0531: решает давление памяти, а не своп (своп 5–8 ГБ — обычное состояние Mac, выпуски стояли с 26.10)
+    for level, swap, want in (("1", "8", "обновлён"), ("2", "8", "обновлён"), ("4", "8", "отложен"),
+                              ("4", "0", "отложен")):
+        e = Env("1.0.0", "1.1.0", OK, OK)
+        r = e.run(extra={"PANTHEON_FAKE_SWAP": swap, "PANTHEON_FAKE_PRESSURE": level})
+        j, lg = e.journal(), xlog(e)
+        if want == "обновлён":
+            ok = (r.returncode == 0 and e.runs() > 0 and "x 1.0.0 → 1.1.0: обновлён" in j and "отложен" not in j
+                  and "plugin update x@agent-kit" in e.argv()
+                  and (("предупреждение — прогон в один процесс" in lg) == (level == "2")))
+        else:
+            ok = (r.returncode == 0 and e.runs() == 0 and "plugin update" not in e.argv()
+                  and j.count("x 1.0.0 → 1.1.0: прогон тестов отложен — давление памяти критичное") == 1
+                  and isinstance(e.marks().get("x", {}).get("deferred_since"), (int, float)))
+        check(f"0531: давление {level}, своп {swap} ГБ — {want}", ok, f"{r.returncode} {e.runs()} {j!r} {lg[:300]!r}")
+        e.close()
+
+    # metis-0531: матрица python — из ставимой версии (pantheon копии новой: сам плагин или сосед из каталога)
+    def with_pantheon(e, body):
+        mkt = os.path.join(e.home, ".claude", "plugins", "marketplaces", "agent-kit")
+        d = os.path.join(mkt, "plugins", "pantheon")
+        e.write(os.path.join(d, ".claude-plugin", "plugin.json"), json.dumps({"name": "pantheon", "version": "9.9.9"}))
+        e.write(os.path.join(d, "lib", "pantheon.py"), body)
+        mj = os.path.join(mkt, ".claude-plugin", "marketplace.json")
+        m = json.load(open(mj))
+        m["plugins"].append({"name": "pantheon", "source": "./plugins/pantheon"})
+        e.write(mj, json.dumps(m))
+
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    with_pantheon(e, "def _pythons_for(name):\n    return []\n")
+    r = e.run(extra={"PANTHEON_FAKE_SWAP": "8", "PANTHEON_FAKE_PRESSURE": "1"})
+    j = e.journal()
+    check("0531: новая версия с пустой матрицей — не ставится: красное, тестов нет, update нет, тревога",
+          e.runs() == 0 and "plugin update" not in e.argv() and e.marks().get("x", {}).get("result") == "red"
+          and "x 1.0.0 → 1.1.0: новые падения тестов (1) — матрица тестов новой версии пустая" in j
+          and "x 1.1.0 не поставлен: новые падения тестов (1) — матрица тестов новой версии пустая" in e.alerts(), f"{r.returncode} {e.runs()} {j!r} alerts={e.alerts()!r} marks={e.marks()!r}")
+    e.close()
+
+    e = Env("1.0.0", "1.1.0", OK, OK)
+    MATRIX = """import json, os, shutil
+P._pythons_for = lambda name: ["own"]
+root = sys.argv[2]
+lib = os.path.join(root, "plugins", "pantheon", "lib", "pantheon.py")
+out = {}
+for key, body in (("empty", "def _pythons_for(n):\\n    return []\\n"),
+                  ("wide", "import sys\\ndef _pythons_for(n):\\n    return ['/bin/echo', '/usr/bin/python3', n]\\n"),
+                  ("same", "import shutil, sys\\ndef _pythons_for(n):\\n    return [shutil.which('python3') or sys.executable]\\n"),
+                  ("crash", "raise SystemExit(3)\\n"), ("old", "X = 1\\n"), ("junk", "def _pythons_for(n):\\n    return 'py'\\n")):
+    os.makedirs(os.path.dirname(lib), exist_ok=True)
+    open(lib, "w").write(body)
+    out[key] = P._pythons_new("guard", root, root)
+shutil.rmtree(os.path.join(root, "plugins"))
+out["none"] = P._pythons_new("guard", root, root)
+out["first"] = shutil.which("python3") or sys.executable
+print(json.dumps(out))"""
+    root = tempfile.mkdtemp(dir=e.tmp)
+    got = e.py(MATRIX, root)
+    e.close()
+    try:
+        m = json.loads(got[-1])
+    except (ValueError, IndexError):
+        m = {}
+    first = m.get("first")
+    check("0531: матрица новой версии пустая — пустая, заметка «снимает тесты целиком»",
+          m.get("empty") == [[], ["матрица тестов новой версии пустая — она снимает тесты целиком"]], m)
+    wide = m.get("wide") or [[], []]
+    check("0531: матрица не шире известных интерпретаторов и не уже python3 из PATH",
+          wide[0] == [first, "/usr/bin/python3"] and any("/bin/echo" in n for n in wide[1])
+          and any("guard" in n for n in wide[1]) and any("без python3 из PATH" in n for n in wide[1]), m)
+    check("0531: матрица новой версии берётся как есть, если она в границах", m.get("same") == [[first], []], m)
+    check("0531: ответа нет (сбой, старый pantheon без _pythons_for, не список, pantheon в копии нет) — своя матрица",
+          all((m.get(k) or [None])[0] == ["own"] for k in ("crash", "old", "junk", "none"))
+          and m.get("none") == [["own"], []], m)
 
     # metis-0360: подписи не гасят настоящие поломки (ревью 0358, второй argus). fresh_of — новые падения из лога.
     def log_of(e, ver="1.1.0"):
