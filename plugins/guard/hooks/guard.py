@@ -3623,6 +3623,21 @@ def _hestia_need_consent(what):
                                      f"(метка живёт {HESTIA_CONSENT_TTL // 3600} ч)")
 
 
+HESTIA_PUSH_BAD = ("--receive-pack", "--exec", "--repo", "--config-env", "--exec-path", "--upload-pack")
+
+
+def _hestia_outside_sandbox(name, texts):
+    """Команда из excludedCommands окна: git push, gh pr create|edit, pantheon (plugins update, domains build, restart,
+    alert, consent)."""
+    base = os.path.basename((name or "").rstrip("/")).lower()
+    if base == "git":
+        parsed = _git_sub(texts)
+        return parsed is None or parsed[1] == "push"
+    if base == "gh":
+        return any(a in texts for a in ("create", "edit")) and "pr" in texts or None in texts
+    return _pantheon_words(name, texts) is not None
+
+
 def _hestia_gh_write_problem(sub, texts, cmd, cwd):
     """gh pr create|edit Гестии: репозиторий — только явный -R/--repo из [merge_repos] направления задачи, текст из
     файла (--body-file, -F) — только из временных папок. Словом «почему нет» или None."""
@@ -3630,6 +3645,8 @@ def _hestia_gh_write_problem(sub, texts, cmd, cwd):
         return "без GH_REPO, GH_HOST и других GH_* — репозиторий только через -R"
     if any(t is None for t in texts):
         return "слово команды не вычислить (переменная, $(…))"
+    if any("://" in t or re.search(r"/[^\s/]+#\d+", t) for t in texts):  # URL и owner/repo#N уводят в другой репозиторий
+        return "адрес и owner/repo#N не принимаются — номер PR или имя ветки"
     args = texts[1:]  # -R бывает и до pr (`gh -R o/r pr create`); слова pr, create флагами не являются
     repos, files, nxt = [], [], None
     for a in args:
@@ -3691,6 +3708,11 @@ def check_hestia(event, tool, tool_input):
         return None
     cmd = tool_input.get("command") or ""
     targets, cmds = bash_analysis(cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
+    if len(cmds) > 1:  # команда мимо песочницы — только одна в строке: рядом с ней чужая шла бы так же вне песочницы
+        for name, texts in cmds:
+            if _hestia_outside_sandbox(name, texts):
+                return HESTIA_REASON.format(what="команда мимо песочницы (git push, gh pr create|edit, pantheon "
+                                                 "consent …) — в строке только одна, без `&&`, `;`, `|`")
     bad = [p for p in targets if p == UNRESOLVED or not _inside(p, TEMP_ROOTS)]
     if bad and hestia_consent_fresh():
         # git push разбор считает записью в репозиторий (корень и .git); при свежей метке этих двух путей он не
@@ -3723,6 +3745,9 @@ def check_hestia(event, tool, tool_input):
                 # не в main/master, без force и удаления; куда — только имя remote (не адрес): push идёт мимо песочницы
                 why = push_problem(texts, os.path.realpath(event.get("cwd") or os.getcwd()),
                                    any(n == "cd" for n, _ in cmds))
+                if not why and ("-c" in texts or any(x.startswith(HESTIA_PUSH_BAD) or x == "-o" or x.startswith("--push-option")
+                                                      for x in texts)):
+                    why = "--receive-pack, --exec, --repo, -c, --push-option исполняют или подменяют команду вне песочницы"
                 if not why:
                     pos = [x for x in parsed[2] if not x.startswith("-")]
                     if pos and not HESTIA_REMOTE_RE.fullmatch(pos[0]):
