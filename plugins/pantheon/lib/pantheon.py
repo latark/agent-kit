@@ -179,8 +179,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon review status [<owner/repo> <PR>]   записи журнала ~/.local/state/pantheon/merge-gate/records.jsonl и
                                         метки «ревью идёт»; у вердикта — рецензент (agent_id/сессия, по 8 знаков),
                                         с PR — строка «итог на <head>: принять N, вернуть M» по последнему вердикту
-                                        каждого argus, как считает шлюз защит: «принять» — только с полным перечнем
-                                        и на Opus (по ней решают об узком повторе, metis-0393)
+                                        каждого argus: «принять» — только с полным перечнем, на любой модели (вне
+                                        ядра шлюз так и считает); если часть «принять» не на Opus — ещё строка «для PR
+                                        ядра» с числами только по Opus. По ним решают об узком повторе, metis-0393
   pantheon commit                       commit → pull без rebase → push ~/ai/pantheon
   pantheon install | uninstall          поставить или снять задачу launchd pantheon.tick
   pantheon tick                         один проход планировщика (его вызывает launchd)
@@ -8896,15 +8897,21 @@ OPUS_RAN = re.compile(r"\s*модель:\s*claude-opus", re.I)   # как в ш�
 RAN_MODEL = re.compile(r"\s*модель:\s*(claude-[a-z0-9.-]*[a-z0-9])", re.I)  # ID модели из ran, как в шлюзе guard
 
 
+def review_accept_full(r):
+    """«Принять» с полным перечнем «открыл / запустил / не проверял» (Б6) — любая модель. Вне ядра шлюз guard считает
+    такое «принять» (simplify п. 9); в PR ядра нужен ещё Opus — review_accept_counts."""
+    c = r.get("checklist")
+    return isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in REVIEW_CHECKLIST)
+
+
 def review_accept_counts(r):
-    """«Принять» в счёт шлюза (metis-0176, Б6): полный перечень и --ran с «модель: claude-opus» в начале, а если хук
+    """«Принять» в счёт шлюза ядра (metis-0176, Б6): полный перечень и --ran с «модель: claude-opus» в начале, а если хук
     guard записал модели из транскрипта argus (поле models) — все они claude-opus и среди них модель из ran (тот же ID
     или он с датой), как opus_problem шлюза guard. Поля models нет (models_note — транскрипта не было, или запись
     старше) — судим по ran. Одно правило для шлюза владельца (merge.gate) и итога `review status` (review_tally),
-    чтобы они не разошлись (metis-0393)."""
+    чтобы они не разошлись (metis-0393). Шлюз ядра владельца — только для PR ядра, там Opus обязателен."""
     c = r.get("checklist")
-    if not (isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in REVIEW_CHECKLIST)
-            and OPUS_RAN.match(c["ran"])):
+    if not (review_accept_full(r) and OPUS_RAN.match(c["ran"])):
         return False
     if "models" not in r:
         return True
@@ -8994,20 +9001,20 @@ def review_records(repo=None, pr=None):
     return out
 
 
-def review_tally(recs, pr):
+def review_tally(recs, pr, opus_only=False):
     """Итог argus по head PR (metis-0393): {sha: (принять, вернуть)} по последнему вердикту каждого рецензента.
     Рецензент — пара (session_id, agent_id), как у шлюза слияния guard: «вернуть» снимает только «принять» того же
     вызова. По итогу прошлого head лид и argus решают, допустим ли узкий повтор, — не по отчётам и словам лида.
-    «Принять» без полного перечня или не на Opus (по --ran и по моделям транскрипта argus) не в счёт — как у шлюза
-    владельца (review_accept_counts): «вернуть»
-    того же рецензента оно не снимает. Шлюз guard вне репозиториев защит «принять» не на Opus засчитывает — итог там
-    строже шлюза, узкий повтор от этого не пройдёт лишний раз."""
+    «Принять» без полного перечня не в счёт: «вернуть» того же рецензента оно не снимает. Модель не смотрим — вне
+    ядра шлюз guard считает «принять» на любой модели (simplify п. 9, 27.10); opus_only=True — как для PR ядра:
+    ещё и на Opus (по --ran и по моделям транскрипта argus, review_accept_counts)."""
+    ok = review_accept_counts if opus_only else review_accept_full
     last = {}
     for r in recs:
         by = r.get("by")
         if (r.get("kind") in ("accept", "reject") and r.get("pr") == pr and isinstance(by, dict)
                 and by.get("agent_type") == "argus" and isinstance(r.get("sha"), str)):
-            if r["kind"] == "accept" and not review_accept_counts(r):
+            if r["kind"] == "accept" and not ok(r):
                 continue
             last.setdefault(r["sha"].lower(), {})[(by.get("session_id") or "", by.get("agent_id") or "")] = r["kind"]
     return {sha: (sum(k == "accept" for k in v.values()), sum(k == "reject" for k in v.values()))
@@ -9126,18 +9133,24 @@ def review_cmd(rest):
                                                      for k in REVIEW_CHECKLIST):
                 print("    без перечня проверенного (Б6) — шлюз слияния такое «принять» не пускает")
             elif r.get("kind") == "accept" and not OPUS_RAN.match(cl["ran"]):
-                print("    не на Opus (--ran без «модель: claude-opus» в начале) — шлюз защит и итог ниже его не считают")
+                print("    не на Opus (--ran без «модель: claude-opus» в начале) — для PR ядра не в счёт; вне ядра "
+                      "шлюз его считает")
             elif r.get("kind") == "accept" and r.get("models") == []:  # metis-0413: транскрипт найден, моделей нет
-                print("    транскрипт argus найден, но моделей в нём нет — шлюз защит и итог ниже его не считают")
+                print("    транскрипт argus найден, но моделей в нём нет — для PR ядра не в счёт; вне ядра шлюз его "
+                      "считает")
             elif r.get("kind") == "accept" and not review_accept_counts(r):
-                print("    не на Opus по транскрипту argus (поле models не сходится с --ran) — шлюз защит и итог ниже "
-                      "его не считают")
+                print("    не на Opus по транскрипту argus (поле models не сходится с --ran) — для PR ядра не в счёт; "
+                      "вне ядра шлюз его считает")
             for k, label in REVIEW_CHECKLIST.items():
                 if isinstance(cl.get(k), str) and cl[k].strip():
                     print(f"    {label}: {cl[k]}")
         if args:
+            strict = review_tally(recs, int(args[1]), opus_only=True)
             for sha, (acc, rej) in review_tally(recs, int(args[1])).items():
                 print(f"итог на {sha[:12]}: принять {acc}, вернуть {rej} — последний вердикт каждого argus")
+                if strict.get(sha, (0, 0)) != (acc, rej):   # для PR ядра в счёт только «принять» на Opus
+                    print(f"  для PR ядра (в счёт только «принять» на Opus): принять {strict.get(sha, (0, 0))[0]}, "
+                          f"вернуть {strict.get(sha, (0, 0))[1]}")
         return 0
     print(f"pantheon review: {REVIEW_USAGE}", file=sys.stderr)
     return 2
