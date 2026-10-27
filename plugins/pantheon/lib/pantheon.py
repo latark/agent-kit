@@ -2012,7 +2012,10 @@ def domains_build(if_changed=False):
                    *(os.path.join(l, ".claude", fn) for l in launches if l for fn in PROJECT_SETTINGS_FILES))
         newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
         # и пропавшее окно задачи расписания (P0-3): без него задача не идёт — в том числе сразу после обновления
-        if built >= newest and all(os.path.isfile(job_window(r)) for r in JOB_ROLES):
+        # и grants.toml: правка — сразу, срок разрешения — к сроку (grants_next)
+        newest = max(newest, os.path.getmtime(GRANTS) if os.path.exists(GRANTS) else 0)
+        due = read_json(path("domains.json")).get("grants_next")
+        if built >= newest and not (due and now() >= due) and all(os.path.isfile(job_window(r)) for r in JOB_ROLES):
             return 0
     with open(reg_path, "rb") as fh:
         reg = tomllib.load(fh)
@@ -2052,7 +2055,7 @@ def domains_build(if_changed=False):
             leads[name] = [f"{b}-{short}" for b in LEAD_ROLES if b in bases]
     write_json(path("domains.json"), {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml. Руками не править.",
-        "built": stamp(), "built_ts": now(), "domains": domains})
+        "built": stamp(), "built_ts": now(), "domains": domains, "grants_next": grants_load()[1]})
     # живую сессию с проблемой проектных allow останавливает только путь тика (--if-changed): ручная сборка и тесты
     # зовут её с настоящим claude в PATH — claude stop из них остановил бы ваши сессии
     built = sandbox_build(domains, policy_path, stores, leads, stop_live=if_changed)
@@ -2239,8 +2242,91 @@ def sandbox_size(data):
     return sum(len(x.encode()) + 1 for x in items)
 
 
+# Ручные разрешения окнам ([sb-simplify] п. 6): ~/.claude/pantheon/grants.toml — его правит владелец или Метида
+# (protect-config), выпуск его не стирает. Каждое — со сроком: сборка применяет его по «until» включительно, потом
+# снимает сама (тик пересобирает окна к сроку) и пишет тревогу. Записи в ключи, конфиг и браузер — не даются
+GRANTS = os.path.join(HOME, ".claude", "pantheon", "grants.toml")
+GRANT_KEYS = {"allow": ("permissions", "allow"), "write": ("sandbox", "filesystem", "allowWrite"),
+              "domains": ("sandbox", "network", "allowedDomains")}
+GRANT_NO_WRITE = ("~/.claude", "~/.config", "~/.ssh", "~/.gnupg", "~/Library", "~/.local/bin", "~/.zshrc", "~/.zprofile",
+                  "~/.bashrc", "~/.profile")
+
+
+def grants_load():
+    """grants.toml → (разрешения в силе, ближайший срок окончания в секундах или None, ошибки, истёкшие)."""
+    try:
+        with open(GRANTS, "rb") as fh:
+            raw = tomllib.load(fh).get("grant") or []
+    except FileNotFoundError:
+        return [], None, [], []
+    except (OSError, ValueError) as e:
+        return [], None, [f"grants.toml не читается: {e}"], []
+    live, errors, expired, nxt = [], [], [], None
+    for i, g in enumerate(raw if isinstance(raw, list) else [], 1):
+        win, until = g.get("window"), str(g.get("until") or "")
+        try:
+            end = (datetime.strptime(until, "%Y-%m-%d") + timedelta(days=1)).timestamp()
+        except ValueError:
+            errors.append(f"grant {i}: until — дата ГГГГ-ММ-ДД, а не {until!r}")
+            continue
+        if not isinstance(win, str) or not re.fullmatch(r"[a-z0-9-]+|\*", win):
+            errors.append(f"grant {i}: window — имя окна или «*», а не {win!r}")
+            continue
+        bad = [k for k in g if k not in GRANT_KEYS and k not in ("window", "until", "why")]
+        lists = {k: g[k] for k in GRANT_KEYS if k in g}
+        if bad or not lists or not all(isinstance(v, list) and all(isinstance(x, str) for x in v) for v in lists.values()):
+            errors.append(f"grant {i} ({win}): ключи — {', '.join(GRANT_KEYS)} списками строк" +
+                          (f"; лишние: {', '.join(bad)}" if bad else ""))
+            continue
+        norm = lambda x: os.path.realpath(os.path.expanduser(x))  # noqa: E731
+        closed = [x for x in lists.get("write", []) if any(
+            norm(x) == norm(c) or norm(x).startswith(norm(c).rstrip("/") + "/") or norm(c).startswith(norm(x).rstrip("/") + "/")
+            for c in GRANT_NO_WRITE)]
+        if closed:
+            errors.append(f"grant {i} ({win}): запись в ключи, конфиг и автозапуск не даётся: {', '.join(closed)}")
+            continue
+        if end <= now():
+            expired.append((i, win, until))
+            continue
+        live.append({"window": win, "until": until, **lists})
+        nxt = end if nxt is None else min(nxt, end)
+    return live, nxt, errors, expired
+
+
+def grants_apply(name, data, grants):
+    """Разрешения окна name (и «*») — в его настройки, без повторов."""
+    for g in grants:
+        if g["window"] not in (name, "*"):
+            continue
+        for k, keys in GRANT_KEYS.items():
+            if k not in g:
+                continue
+            node = data
+            for key in keys[:-1]:
+                node = node.setdefault(key, {})
+            vals = node.setdefault(keys[-1], [])
+            vals += [os.path.realpath(os.path.expanduser(x)) if k == "write" else x
+                     for x in g[k] if (os.path.realpath(os.path.expanduser(x)) if k == "write" else x) not in vals]
+
+
+def grants_check():
+    """Тревоги сборки: ошибки в grants.toml и истёкшие разрешения (одна на разрешение)."""
+    _, _, errors, expired = grants_load()
+    if errors:
+        alert_once("grants-bad", "; ".join(errors), "grants.toml: " + "; ".join(errors[:5]) + " — эти разрешения "
+                   "не применены (Метида)", "pantheon")
+    else:
+        clear_once("grants-bad")
+    for i, win, until in expired:
+        alert_once(f"grant-expired-{win}-{until}-{i}", "1", f"grants.toml: разрешение {i} окну {win} истекло {until} — "
+                   "снято при сборке; продлить или удалить запись (Метида)", "pantheon")
+
+
 def write_window(out_dir, name, data):
-    """Файл окна, если его песочница в пределах SANDBOX_SIZE_LIMIT; иначе тревога и прежний файл остаётся."""
+    """Файл окна, если его песочница в пределах SANDBOX_SIZE_LIMIT; иначе тревога и прежний файл остаётся.
+    Разрешения grants.toml — сюда же; файлы запущенных сессий этого окна (settings/run/) обновляются: Claude Code
+    перечитывает их на ходу, и выданное или истёкшее разрешение доходит без перезапуска."""
+    grants_apply(name, data, grants_load()[0])
     size, key = sandbox_size(data), f"sandbox-size-{name}"
     if size > SANDBOX_SIZE_LIMIT:
         print(f"песочница {name}: {size} байт путей > {SANDBOX_SIZE_LIMIT} — окно не пересобрано", file=sys.stderr)
@@ -2251,6 +2337,16 @@ def write_window(out_dir, name, data):
         return False
     clear_once(key)
     write_json(os.path.join(out_dir, name + ".json"), data)
+    run_dir = os.path.join(out_dir, "run")
+    for f in os.listdir(run_dir) if os.path.isdir(run_dir) else []:
+        old = read_json(os.path.join(run_dir, f), {}) if f.endswith(".json") else {}
+        env = old.get("env") or {}
+        if env.get("PANTHEON_WINDOW") != name:
+            continue
+        new = json.loads(json.dumps(data))
+        new.setdefault("env", {}).update({k: env[k] for k in RUN_ENV if k in env})
+        if new != old:
+            write_json(os.path.join(run_dir, f), new)
     return True
 
 
@@ -2626,6 +2722,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             policy = tomllib.load(fh)
     except (OSError, ValueError):
         policy = {}
+    grants_check()
     extra = policy.get("sandbox_write") or {}
     private = private_conf(policy)
     private_paths = [p for p in private["paths"] if p.startswith("~/")]
@@ -3007,6 +3104,9 @@ def load_pause(name):
     return None
 
 
+RUN_ENV = ("PANTHEON_ORIGIN", "PANTHEON_SESSION", "PANTHEON_ROLE", "PANTHEON_WINDOW")
+
+
 def run_settings(name, role, window, origin):
     """Окно этого запуска: настройки окна + PANTHEON_ORIGIN (кто запустил), имя и роль — переменные сессии и её
     хуков. → путь файла или None (окна нет: pantheon domains build)."""
@@ -3017,6 +3117,7 @@ def run_settings(name, role, window, origin):
     data.setdefault("env", {})["PANTHEON_ORIGIN"] = origin
     data["env"]["PANTHEON_SESSION"] = name
     data["env"]["PANTHEON_ROLE"] = role
+    data["env"]["PANTHEON_WINDOW"] = window  # по нему сборка обновляет файл запущенной сессии (write_window)
     run = path("settings", "run", name + ".json")
     write_json(run, data)
     return run

@@ -6,9 +6,15 @@ NotebookEdit, Read, Grep, Glob, WebFetch, Agent, Task, Skill) и Stop; код �
 
 ## От чего защищает (модель угроз, SEC-27, решено 14.10)
 
-guard ловит **ошибки агента**: запись не в своё направление (domain), правку чужого файла Пританея, файла задачи
+С [sb-simplify] (27.10) правило остаётся, только если называет ущерб из пяти: ключи; браузер со входами владельца;
+main и ядро без ревью; действия наружу; удаление данных. Поэтому сняты зоны записи по направлениям (domain) и запрет
+dev-сервера: от domain остались чужая память ролей (она попадает в контекст другой роли) и Edit/Write в точечные файлы
+HOME и `~/Library` — `~/.zshrc`, `~/.ssh`, LaunchAgents исполняются вне песочницы, а Edit/Write она не держит
+(`~/.claude` и состояние Пантеона — по protect-config и pantheon-acl). dev-server — подсказка только владельцу.
+
+guard ловит **ошибки агента**: запись чужой памяти ролей и точечных файлов HOME (domain), правку чужого файла Пританея, файла задачи
 мимо `pantheon task` и доски или журнала ваших слов любой сессией Claude (pantheon-acl), правку защит не той ролью (protect-config), команду пульта не той ролью, чтение ключей
-(tg-secret; ролям из демона tg-readd — только `status` и `kickstart`), пометки об авторстве Claude, свой dev-сервер; с шага 1.2 — по ролям Пантеона: личное (private: `me/`,
+(tg-secret; ролям из демона tg-readd — только `status` и `kickstart`), пометки об авторстве Claude; с шага 1.2 — по ролям Пантеона: личное (private: `me/`,
 ключи git-crypt, журнал Пританея — только hq, chiron в окне Пританея и mnemo-brain; ключи — никому из ролей), Telegram
 и коуча chiron вне своего окна, Гестию субагентом и вне её окна, gh pr окна Пританея не по своему репозиторию (hq-telegram, chiron, hestia, hq-gh — раздел «Окно Пританея»), выгрузку личного чата Telegram в окне любой роли (tg-role), браузер владельца
 (cdp-role: демон — никому из ролей, браузеры владельца — у Харона после metis-0077; прямой отладочный порт и WebFetch на локальные адреса —
@@ -17,7 +23,7 @@ guard ловит **ошибки агента**: запись не в своё н
 числе `+ветка` — и удаления; `gh api` с записью — нет; `gh pr merge` — только главная сессия координатора или его лид в папках своего направления, защиты — только Метида или её лид; везде — через шлюз слияния: тесты, «принять» от argus и `--match-head-commit` на один SHA, подробно — раздел «Слияние PR»; координатор с личным в папке — mnemo-brain —
 не отправляет и не сливает сам; отправляют только свой репозиторий — папки своего направления), печать в терминал (terminal: osascript, tmux
 send-keys и т. п. — ввод от имени владельца), пополнение корпуса (corpus-role: подкоманды, скрипты и ключи в Связке — по списку из раздела `[corpus]` policy.toml,
-образец — в `policy.example.toml`; ни одной роли, только через посредника; Пританею корпус закрыт целиком; раздела нет — правило ничего не узнаёт, битый раздел — ролям Bash закрыт), launchd (launchd-env, metis-0298: ролям, субагентам и главной сессии окна роли (`PANTHEON_ROLE` задан, agent_type в событии нет) `launchctl` — только белый список для чтения: list, print, print-cache, print-disabled, getenv, blame, version, help, procinfo, hostinfo, managerpid, manageruid, managername; остальное — setenv, unsetenv, config, bootstrap, bootout, load, unload, submit, remove, kickstart, enable, disable, обёртки asuser и bsexec, вызов без подкоманды и неизвестное — отказ: окружение и службы launchd берёт плановый проход Пантеона; имя переменной и метка не важны; `swiftc` — только абсолютным `/usr/bin/swiftc`, путь сверяется у слова каждой команды (metis-0314); launchctl внутри `python3 -c`, `perl -e` и скриптов — ниже модели угроз, guard его не видит, как и launchctl внутри `pantheon` и `tg-readd`). dev-серверы субагентам dev-* и talos в своей worktree — можно.
+образец — в `policy.example.toml`; ни одной роли, только через посредника; Пританею корпус закрыт целиком; раздела нет — правило ничего не узнаёт, битый раздел — ролям Bash закрыт), launchd (launchd-env, metis-0298: ролям, субагентам и главной сессии окна роли (`PANTHEON_ROLE` задан, agent_type в событии нет) `launchctl` — только белый список для чтения: list, print, print-cache, print-disabled, getenv, blame, version, help, procinfo, hostinfo, managerpid, manageruid, managername; остальное — setenv, unsetenv, config, bootstrap, bootout, load, unload, submit, remove, kickstart, enable, disable, обёртки asuser и bsexec, вызов без подкоманды и неизвестное — отказ: окружение и службы launchd берёт плановый проход Пантеона; имя переменной и метка не важны; `swiftc` — только абсолютным `/usr/bin/swiftc`, путь сверяется у слова каждой команды (metis-0314); launchctl внутри `python3 -c`, `perl -e` и скриптов — ниже модели угроз, guard его не видит, как и launchctl внутри `pantheon` и `tg-readd`).
 
 Узкие роли и защиты проекта:
 
