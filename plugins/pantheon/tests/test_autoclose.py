@@ -550,14 +550,13 @@ def test_close_criteria():
         except ValueError as e:
             err = str(e)
         check("result со ссылкой на чужой id не обходит правило", "неотмечено" in err, err)
-        if PY311 is not None:
-            p19 = put(home, "metis-pantheon", "metis-0019", body=two, created="2026-10-27")
-            r = pan(env, T0, "task", "set", "metis-0019", "status=done")
-            check("CLI: task set status=done → код не 0 и «неотмечено 1»", r.returncode != 0 and "неотмечено 1" in r.stdout + r.stderr,
-                  f"{r.returncode} {r.stdout}{r.stderr}")
-            r = pan(env, T0, "task", "set", "metis-0019", "status=done", "--force", "отменён")
-            check("CLI: --force причина → код 0, done", r.returncode == 0 and T.read(p19)[0].get("status") == "done",
-                  f"{r.returncode} {r.stdout}{r.stderr}")
+        p19 = put(home, "metis-pantheon", "metis-0019", body=two, created="2026-10-27")
+        r = pan(env, T0, "task", "set", "metis-0019", "status=done")
+        check("CLI: task set status=done → код не 0 и «неотмечено 1»", r.returncode != 0 and "неотмечено 1" in r.stdout + r.stderr,
+              f"{r.returncode} {r.stdout}{r.stderr}")
+        r = pan(env, T0, "task", "set", "metis-0019", "status=done", "--force", "отменён")
+        check("CLI: --force причина → код 0, done", r.returncode == 0 and T.read(p19)[0].get("status") == "done",
+              f"{r.returncode} {r.stdout}{r.stderr}")
     finally:
         shutil.rmtree(tmp, True)
 
@@ -567,18 +566,15 @@ def main():
     test_board_problems_unit()
     test_attention_on_card()
     test_close_criteria()
-    if PY311 is None:
-        print("нет Python 3.11+ для CLI — проверки тика и check пропущены")
-    else:
-        test_tick()
-        test_old_and_errors()
-        test_rules()
-        test_reopen_and_eviction()
-        test_mutants()
-        test_fetch_budget()
-        test_batch_needs_mode()
-        test_off_warning()
-        test_check()
+    test_tick()
+    test_old_and_errors()
+    test_rules()
+    test_reopen_and_eviction()
+    test_mutants()
+    test_fetch_budget()
+    test_batch_needs_mode()
+    test_off_warning()
+    test_check()
     print(f"{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 

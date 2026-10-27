@@ -29,7 +29,7 @@ unconfirmed/. 10 — вложения нет. 11 — одно вложение �
 поставлено только что. 13 — старое «да» другой сессии не гасит ваш ввод. 14 — окно владельца: хук при наборе.
 15–17 — пересылка из Slack (verifiedSlackHumanTurn) не ваша. 18 — транскрипта нет на старте хука: только время.
 
-Запуск: python3 -I plugins/pantheon/tests/test_owner_log_midturn.py  (0 — прошли; проверяется и на /usr/bin/python3).
+Запуск: python3 -I plugins/pantheon/tests/test_owner_log_midturn.py  (0 — прошли).
 CTX_TEST_HOOK — путь к другому ctx.py (проверка мутантов).
 """
 import atexit

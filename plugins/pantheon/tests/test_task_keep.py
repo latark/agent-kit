@@ -362,7 +362,7 @@ def main():
     check("тик: следующий проход называет оставшиеся 3, третий молчит — каждый из 15 id назван в alerts.md ровно раз",
           len(lines) == 2 and all(sum(i in ln for ln in lines) == 1 for i in many) and "и ещё" not in lines[1], lines)
 
-    # чистые функции (одно и то же на 3.9 и 3.14)
+    # чистые функции
     desc = T.has_description
     check("has_description: заголовок и журнал — нет; текст — да; чужой раздел — да",
           not desc("\n# A\n\n## Журнал\n\n- x — агент: создана\n") and desc("\n# A\n\nтекст\n\n## Журнал\n")

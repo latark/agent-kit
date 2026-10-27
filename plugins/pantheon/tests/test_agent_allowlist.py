@@ -3,7 +3,7 @@
 
 Запуск: python3 -I plugins/pantheon/tests/test_agent_allowlist.py  (код выхода 0 — все прошли)
 Проверяет на временных папках (HOME, PANTHEON_*, PANTHEON_CLAUDE_TMP — подменены, настоящие не трогаются):
-- `pantheon domains build`: в окнах hq и направлений — хук `python3 <hooks/agents.py> <список>` (matcher
+- `pantheon domains build`: в окнах hq и направлений — хук `/bin/sh <hooks/python.sh> <hooks/agents.py> <список>` (matcher
   Agent|Task|Skill) с точным списком и правила deny Agent(<тип>) — жёсткие границы окна; запись guard и правила Read
   штаба на месте; мастерская без хука; ctx.py в хуке не участвует; нет agents.py — команда окна выходит с кодом 2;
 - agents.py: главная сессия зовёт только типы из списка (general-purpose и пустой тип — отказ JSON-ом), вызов
@@ -48,14 +48,8 @@ COORD = ["argus", "talos", "prometheus", "palamedes", "Explore", "dev-haiku", "d
 
 
 def lib_python():
-    """pantheon.py — Python 3.11+ (tomllib); хук agents.py — тем, чем запущен тест (на системном 3.9 — как в окнах)."""
-    if sys.version_info >= (3, 11):
-        return sys.executable
-    for v in ("3.14", "3.13", "3.12", "3.11"):
-        p = shutil.which("python" + v)
-        if p:
-            return p
-    sys.exit("нет Python 3.11+ для pantheon.py")
+    """pantheon.py и хук agents.py — тем же Python 3.11+, что и тест."""
+    return sys.executable
 
 
 def setup(tmp):
@@ -78,8 +72,16 @@ def agents_hook(data):
     for e in (data.get("hooks") or {}).get("PreToolUse") or []:
         for h in e.get("hooks") or []:
             argv = shlex.split(h.get("command", ""))
-            if len(argv) == 3 and argv[0] == "python3" and argv[1].endswith(os.path.join("hooks", "agents.py")):
-                return e.get("matcher"), argv[2].split(","), h
+            # через запускатель (metis-0571): /bin/sh <hooks/python.sh> <hooks/agents.py> <список>; запускателя рядом
+            # нет (проверенного дерева нет или оно старее) — прежняя форма python3 <hooks/agents.py> <список>
+            if len(argv) == 4 and argv[0] == "/bin/sh" and argv[1].endswith(os.path.join("hooks", "python.sh")):
+                argv = argv[2:]
+            elif len(argv) == 3 and argv[0] == "python3":
+                argv = argv[1:]
+            else:
+                continue
+            if argv[0].endswith(os.path.join("hooks", "agents.py")):
+                return e.get("matcher"), argv[1].split(","), h
     return None
 
 

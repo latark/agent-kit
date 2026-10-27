@@ -32,14 +32,7 @@ LIB = os.path.join(LIBDIR, "pantheon.py")
 
 
 def pantheon_python():
-    if sys.version_info >= (3, 11):
-        return sys.executable
-    py = shutil.which("python3")
-    ok = py and subprocess.run([py, "-c", "import sys; print(sys.version_info >= (3, 11))"], capture_output=True,
-                               text=True).stdout.strip() == "True"
-    if not ok:
-        sys.exit("нужен python3 3.11+ в PATH: pantheon.py на системном python не идёт")
-    return py
+    return sys.executable
 
 
 PY = pantheon_python()

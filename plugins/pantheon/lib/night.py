@@ -115,7 +115,6 @@ wait}. Ставит `pantheon start <направление> --at ЧЧ:ММ|"Г�
 
 Питание (metis-0284): с power_at до ask_at на главном Mac, если ночь этого вечера ещё не пропущена, — `pmset -g batt`;
 на батарее с зарядом ниже batt_min — тревога и уведомление «подключите зарядку», одна за вечер.
-Модуль работает на Python 3.9: без match и аннотаций X | Y (gate зовёт awake.py).
 """
 import contextlib
 import fcntl

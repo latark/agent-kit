@@ -2785,9 +2785,20 @@ def _pconfig():
 
 HQ_MISSING = "в policy.toml нет раздела [hq]: Пританею ничего не закрыто"
 CORPUS_MISSING = "в policy.toml нет раздела [corpus]: правило corpus-role ничего не закрывает"
-HOOK_PYTHON = "python3"  # как в hooks.json guard; тесты подменяют
-HOOKS_NO_TOMLLIB = ("python3 хуков без tomllib (Python до 3.11): guard не читает policy.toml, правило corpus-role "
-                    "пусто — Метиде: python3 в PATH должен быть 3.11+")
+HOOK_LAUNCHER = None  # запускатель хуков hooks/python.sh (metis-0571); тесты подменяют
+HOOKS_NO_TOMLLIB = ("запускатель хуков hooks/python.sh не нашёл Python 3.11+: guard останавливает каждое действие, "
+                    "остальные хуки молчат — Метиде: brew install python@3.14")
+
+
+def _hook_launcher(script=None):
+    """hooks/python.sh рядом со скриптом хука (guard), иначе — свой, pantheon (копии одинаковые, metis-0571)."""
+    if HOOK_LAUNCHER:
+        return HOOK_LAUNCHER
+    if script:
+        near = os.path.join(os.path.dirname(script), "python.sh")
+        if os.path.isfile(near):
+            return near
+    return os.path.join(P.PLUGIN, "hooks", "python.sh")
 
 
 def _corpus_declared(hq):
@@ -2812,7 +2823,7 @@ def infra_check():
     if g and os.path.exists(g):
         probe = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "agent_type": "dev-haiku",
                             "cwd": P.HOME, "tool_input": {"command": "git push --force origin main"}})
-        argv = ["python3", "-I", g] + (["--managed"] if _managed_guard_active() else [])
+        argv = ["/bin/sh", _hook_launcher(g), g] + (["--managed"] if _managed_guard_active() else [])
         r = subprocess.run(argv, input=probe, capture_output=True, text=True, timeout=30)
         add(r.returncode == 2 or '"deny"' in r.stdout, "guard отказывает на git push --force (роль dev-haiku)")
     else:
@@ -2865,14 +2876,15 @@ def infra_check():
         else:
             P.alert_once("corpus-policy-missing", "1", CORPUS_MISSING + " — Метиде: добавить раздел, образец — "
                          "policy.example.toml плагина guard", "watch")
-    # guard читает policy.toml через tomllib (Python 3.11+). Хуки зовут python3 из PATH: без tomllib guard
-    # раздел [corpus] не видит и corpus-role молча пуст (metis-0182) — до перевода хуков на полный путь (0.5.11)
+    # хуки зовут Python через hooks/python.sh (metis-0571): без 3.11+ guard отказывает на каждом действии. Вне хука
+    # запускатель без Python молчит с кодом 0, поэтому успех — только напечатанное «ok»
     try:
-        ok = subprocess.run([HOOK_PYTHON, "-I", "-c", "import tomllib"], capture_output=True,
-                            timeout=30).returncode == 0
+        r = subprocess.run(["/bin/sh", _hook_launcher(g), "-c", "import tomllib; print('ok')"],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        ok = r.returncode == 0 and r.stdout.strip() == "ok"
     except (OSError, subprocess.SubprocessError):
         ok = False
-    add(ok, "python3 хуков читает policy.toml (tomllib, Python 3.11+)")
+    add(ok, "запускатель хуков находит Python 3.11+ (tomllib)")
     if ok:
         P.clear_once("hooks-python-no-tomllib")
     else:

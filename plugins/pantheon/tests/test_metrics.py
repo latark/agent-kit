@@ -2,8 +2,8 @@
 """metrics.py (metis-0294): строка учёта при закрытии задачи, свод неделя / с начала, задним числом с пометкой «оценка».
 
 Всё — во временной папке: поддельные транскрипты в HOME/.claude/projects, задачи, журнал шлюза и журнал владельца.
-Модуль — напрямую (идёт и на системном 3.9); CLI `pantheon task set … status=done`, `pantheon metrics backfill` и
-`pantheon board` — на 3.11+ (_py311), иначе эта часть честно пропускается.
+Модуль — напрямую; CLI `pantheon task set … status=done`, `pantheon metrics backfill` и `pantheon board` —
+подпроцессом тем же Python (_py311).
 
 Запуск: python3 -I plugins/pantheon/tests/test_metrics.py  (код выхода 0 — все прошли)
 """
@@ -440,9 +440,6 @@ def race():
 
 
 def cli():
-    if not PY311:
-        print("skip CLI: нет Python 3.11+ для pantheon.py")
-        return
     tmp, pantheon, state, view, tasks = setup()
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": pantheon, "PANTHEON_STATE": state,
            "PANTHEON_VIEW": view, "PANTHEON_HOST": "mac-a", "PANTHEON_DRYRUN": "1", "PANTHEON_NO_NOTIFY": "1",

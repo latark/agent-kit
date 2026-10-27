@@ -18,7 +18,7 @@ agent_transcript_path) и файлу, который отчёт называет
 last_assistant_message и agent_transcript_path — хук отпускает: transcript_path в SubagentStop — транскрипт главной сессии, его не читаем.
 
 Хук только читает: файл итога не запускает и не печатает его текст — только номера строк и найденное слово.
-Python 3.9+ (хуки запускает python3 из PATH). Состояние — ~/.local/state/pantheon/ctx/text-stop/<agent_id>.
+Python 3.11+: хуки запускает hooks/python.sh (metis-0571). Состояние — ~/.local/state/pantheon/ctx/text-stop/<agent_id>.
 PANTHEON_TEXT_STOP_OFF=1 — выключить (как PANTHEON_DEV_STOP_OFF у разработчиков).
 """
 import json

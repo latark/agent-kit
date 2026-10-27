@@ -30,13 +30,7 @@ def check(name, cond):
 
 
 def py311():
-    if sys.version_info >= (3, 11):
-        return sys.executable
-    for v in ("3.14", "3.13", "3.12", "3.11"):
-        p = shutil.which("python" + v)
-        if p:
-            return p
-    sys.exit("нет Python 3.11+ для pantheon.py")
+    return sys.executable
 
 
 def main():

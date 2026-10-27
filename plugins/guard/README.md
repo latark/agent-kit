@@ -170,7 +170,7 @@ answer и плановый проход, это скрипты, guard их не 
   Зевса личное. Поэтому в этом окне любой `gh pr` проходит только с явным `-R`/`--repo` из `[merge_repos]` policy.toml
   и номером PR; без `-R`, с любой `GH_*` в команде или с `GH_REPO`, `GH_HOST`, `GH_CONFIG_DIR` в окружении, с `--comments`/`-c` и `--json comments`
   — отказ. Личный путь в команде (`--body-file`, `-F`, `$(cat …)`, `< файл`, `$(< файл)`) — отказ тем же разбором, что правило private у
-  координаторов. Без tomllib (Python 3.9) `[merge_repos]` не прочитать — окну Пританея закрыт любой `gh pr`.
+  координаторов.
   Слияние окну Пританея закрыто всегда (ревью 69m-b): `gh pr merge` с `-R` и без, а также `gh api` к
   `…/pulls/<N>/merge`, `…/merges` и мутации `mergePullRequest`, `enablePullRequestAutoMerge` — отказ. Шлюз слияния
   берёт роль из agent_type, а у главной сессии окна его нет: без этого отказа она прошла бы мимо шлюза.
@@ -482,7 +482,7 @@ set-default, worktree или симлинк agent-kit в любой папке �
 domains.json, и оно должно совпасть с направлением папки запуска. Корень вроде «~/projects» у одного направления
 не открывает папку другого внутри.
 
-**Любой сбой — отказ.** Нет policy.toml (или Python без tomllib), нет непустого списка `[coordinators]
+**Любой сбой — отказ.** Нет policy.toml, нет непустого списка `[coordinators]
 metis-pantheon`, `[private]` или domains.json не разобрать, git не ответил, у папки защит с `.git` не читается
 remote, cwd не репозиторий или без remote, журнал проверок не читается, gh не ответил — слияние закрыто.
 
@@ -521,6 +521,13 @@ remote, cwd не репозиторий или без remote, журнал пр�
 `rm -rf`, terminal-notifier) и хук guard из клона маркетплейса. Обновить — та же команда после обновления
 маркетплейса. Проверка: в папке с `.claude/settings.json`, где разрешено `Bash(git clean *)`, команда
 `git clean -n` всё равно получает отказ.
+
+С metis-0571 хук в этом файле — `/bin/sh …/hooks/python.sh …/hooks/guard.py --managed`: запускатель
+ищет Python 3.11+ (`python3.14`…`python3.11` в `/opt/homebrew/bin`, `/usr/local/bin`, python.org и PATH, затем
+`python3` из PATH с проверкой версии) и без него останавливает PreToolUse кодом 2. Уже поставленный файл со старой
+командой `python3 …/guard.py --managed` продолжает работать: guard.py на Python ниже 3.11 сам перезапускается через
+`hooks/python.sh`. Переустановить файл той же командой `sudo install` — по желанию, чтобы хук не тратил лишний запуск
+системного Python.
 
 ## Данные и выключатель
 

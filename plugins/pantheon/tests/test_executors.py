@@ -23,8 +23,6 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _py311 import PY311  # CLI pantheon и pconfig — только на Python 3.11+
 
-if sys.version_info < (3, 11):  # на системном 3.9 — тем же тестом под найденным 3.11+ (нет — _py311 уже пропустил)
-    os.execv(PY311, [PY311, "-I", os.path.abspath(__file__)])
 
 import tomllib  # noqa: E402
 

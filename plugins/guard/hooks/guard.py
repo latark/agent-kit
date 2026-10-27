@@ -108,7 +108,22 @@ import subprocess
 import sys
 import time
 
-OFF = {r.strip() for r in os.environ.get("GUARD_OFF", "").split(",") if r.strip()}
+if sys.version_info < (3, 11) and __name__ == "__main__":
+    # metis-0571: хуки зовут guard через hooks/python.sh (Python 3.11+). Голым python3 его зовут только настройки,
+    # собранные раньше: управляемые (ставятся через sudo, README «Управляемые настройки») и окна до пересборки. Там
+    # python3 бывает системным 3.9 — перезапуск тем же запускателем; нет 3.11+ — он сам откажет на PreToolUse.
+    # GUARD_PY_REEXEC — защита от круга, если запускатель вдруг вернул старый Python.
+    if os.environ.get("GUARD_PY_REEXEC"):
+        sys.stderr.write("guard: нужен Python 3.11+, запускатель hooks/python.sh дал %d.%d — действие остановлено.\n"
+                         % sys.version_info[:2])
+        os._exit(2)
+    os.environ["GUARD_PY_REEXEC"] = "1"
+    _me = os.path.realpath(__file__)
+    os.execv("/bin/sh", ["/bin/sh", os.path.join(os.path.dirname(_me), "python.sh"), _me] + sys.argv[1:])
+
+import tomllib  # noqa: E402
+
+OFF ={r.strip() for r in os.environ.get("GUARD_OFF", "").split(",") if r.strip()}
 HOME = os.path.expanduser("~")
 MODE = "strict" if "--strict" in sys.argv[1:] else "managed" if "--managed" in sys.argv[1:] else "plugin"
 FAIL_LOG = os.path.join(HOME, ".local", "state", "pantheon", "logs", "guard-failures.log")
@@ -723,10 +738,9 @@ def load_domains():
 
 def load_policy():
     try:
-        import tomllib  # Python 3.11+; на старом Python guard работает без привилегий, а не падает
         with open(POLICY_FILE, "rb") as fh:
             return tomllib.load(fh)
-    except (ImportError, OSError, ValueError):
+    except (OSError, ValueError):
         return {}
 
 
@@ -3113,7 +3127,7 @@ def check_push(event, tool, tool_input):
     can_push = role == "domain-coordinator" or role.startswith(PANTHEON_ROLE_PREFIXES) or (role == "workshop" and not sub)
     # координатор, в чьей папке лежит личное (mnemo-brain: ~/ai/knowledge/me), не отправляет сам: он видит me/ и читает
     # выписки из веба — третье свойство (наружу) ему не даём (SEC-13, 15.10); хранилище отправляет Obsidian Git. По
-    # папке, а не по policy.toml: без tomllib (Python 3.9) политика пуста, а запрет должен остаться
+    # папке, а не по policy.toml: policy.toml может не прочитаться, а запрет должен остаться
     if can_push and role == "domain-coordinator":
         if any(_inside(x, [pdir]) for x in _norm(private_conf(load_policy())["paths"])):
             can_push = False
@@ -3196,7 +3210,7 @@ def check_terminal(event, tool, tool_input):
 #   служб Связки с ключами корпуса.
 # Раздела или ключа нет — пусто: правило этого не узнаёт. Ключ — не список непустых строк, [corpus] не таблица или
 # policy.toml не разобрать — ошибка: ролям Bash закрыт с предупреждением, пока раздел не исправят (закрыто, а не
-# пусто). На Python без tomllib (3.9) политики нет совсем, как и у остальных правил: раздел не читается — пусто.
+# пусто).
 CORPUS_KEYS = ("commands", "modules", "write_subcommands", "scripts", "keychain_prefixes")
 CORPUS_REASON = (
     "Правило corpus-role: роли не запускают пополнение корпуса (подкоманды пополнения и скрипты из [corpus] "
@@ -3207,12 +3221,8 @@ CORPUS_REASON = (
 
 
 def load_policy_checked():
-    """policy.toml для правил, которым сбой разбора — ошибка: словарь; {} — файла нет или нет tomllib (Python 3.9,
-    как load_policy); None — файл есть, но не читается или это не TOML."""
-    try:
-        import tomllib
-    except ImportError:
-        return {}
+    """policy.toml для правил, которым сбой разбора — ошибка: словарь; {} — файла нет (как load_policy); None — файл
+    есть, но не читается или это не TOML."""
     try:
         with open(POLICY_FILE, "rb") as fh:
             return tomllib.load(fh)

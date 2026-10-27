@@ -31,7 +31,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB_DIR = os.path.join(ROOT, "lib")
 LIB = os.path.join(LIB_DIR, "pantheon.py")
 sys.path.insert(0, LIB_DIR)
-import tasks as T  # noqa: E402  — пульт проверяется и на системном 3.9
+import tasks as T  # noqa: E402
 
 FAKE = r'''#!/usr/bin/env python3
 import json, os, sys
@@ -109,8 +109,8 @@ def guard_probe(role):
     penv = {"PANTHEON_ROLE": "domain-coordinator", "PANTHEON_SESSION": "hephaestus-shop"}
 
     def probe(r):
-        return [G.run(ghome, br, r, "Write", {"file_path": st, "content": "x"}, python=PY311, penv=penv),
-                G.run(ghome, br, r, "Bash", {"command": "gh pr merge 1"}, python=PY311, penv=penv)]
+        return [G.run(ghome, br, r, "Write", {"file_path": st, "content": "x"}, penv=penv),
+                G.run(ghome, br, r, "Bash", {"command": "gh pr merge 1"}, penv=penv)]
     got, ctl = probe(role), probe("hephaestus-shop")
     check(f"guard: главная сессия окна (agent_type {role!r} из --agent) пишет STATUS.md направления и проходит "
           "шлюз gh pr merge; agent_type лида главной сессией — отказ в обоих (контроль)",
@@ -323,10 +323,7 @@ def cli_tests():
 
 def main():
     board_tests()
-    if PY311:
-        cli_tests()
-    else:
-        print("пропуск CLI: нет Python 3.11+")
+    cli_tests()
     print(f"{sum(results)}/{len(results)}")
     return 0 if all(results) else 1
 

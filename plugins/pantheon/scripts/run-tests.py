@@ -6,9 +6,9 @@
   --timeout С     предел одного файла, с (по умолчанию TIMEOUT; у медленных файлов свой — SLOW)
   --log-dir ПАПКА полный вывод каждого файла — в ПАПКА/<плагин>__<файл>.log
 
-Каждый tests/test_*.py — отдельный процесс `<этот python> -I tests/<файл>` в папке плагина, как в
-`_run_plugin_tests` (pantheon.py): свой HOME и TMPDIR во временной папке прогона, окружение без PANTHEON_*,
-FORCE_COLOR и CLICOLOR_FORCE, с NO_COLOR=1. Тесты на 3.9 — тот же скрипт под /usr/bin/python3.
+Каждый tests/test_*.py — отдельный процесс `<этот python> -I tests/<файл>` в папке плагина: свой HOME и TMPDIR во
+временной папке прогона, окружение без PANTHEON_*, FORCE_COLOR и CLICOLOR_FORCE, с NO_COLOR=1. Тесты идут на
+Python 3.11+ (metis-0571); тот же скрипт гоняет workflow tests в GitHub Actions на 3.14 (.github/workflows/tests.yml).
 
 Порядок: сначала медленные (SLOW, по замеру), затем остальные по имени. Файлы SERIAL идут в конце по одному, когда
 больше ничего не идёт: им параллель мешает.
@@ -23,7 +23,7 @@ FORCE_COLOR и CLICOLOR_FORCE, с NO_COLOR=1. Тесты на 3.9 — тот ж�
 (хвост) и последняя строка — файлов, ok, FAIL, сумма проверок, время. Код выхода не 0, если: нет ни одного файла
 тестов, файл упал (код не 0), превысил таймаут, вышел с кодом 0 без строки итога (кроме старых файлов NO_SUMMARY)
 или с итогом без проверок, или раннер прерван сигналом. Число проверок файла — из его итоговой строки, без числа в ней — по строкам `ok`.
-Python 3.9+, только stdlib.
+Только stdlib.
 """
 import os
 import re
@@ -70,11 +70,10 @@ NO_SUMMARY = frozenset({
     "pantheon/test_merge.py",  # «все прошли» — без числа, TEST_SUMMARY его не берёт
     "pantheon/test_path_clean.py",
     "pantheon/test_read.py",  # «все прошли»
-    "pantheon/test_test_timing.py",  # «все проверки прошли»
 })
 
-# Копия TEST_SUMMARY и _SUMMARY_TOTAL из pantheon.py (импортировать нельзя: pantheon.py требует 3.11+, раннер — 3.9+).
-# Тест test_run_tests сверяет копию с pantheon.py.
+# Строка итога файла — последняя непустая строка вывода. Прежде такая же копия в pantheon.py разбирала вывод локального
+# прогона автоустановки; его больше нет (п. 8 страницы упрощения 27.10), раннер — единственное место.
 TEST_SUMMARY = re.compile(r"(?:\d+\s*(?:из\s+\d+|/\s*\d+|команд\b)|тестов:\s*\d+|(?:OK|FAIL)\s+\d+$|ПРОВАЛ\b)")
 ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])")
 _SUMMARY_TOTAL = (
@@ -134,8 +133,7 @@ def order(items, slow=None, serial=None):
 
 
 def checks(out):
-    """(есть ли итог, число проверок, плохой итог или None). Итог — последняя непустая строка, как TEST_SUMMARY в
-    pantheon.py; число проверок — из итога, без числа в нём — по строкам ok."""
+    """(есть ли итог, число проверок, плохой итог или None). Итог — последняя непустая строка (TEST_SUMMARY); число проверок — из итога, без числа в нём — по строкам ok."""
     lines = ANSI.sub("", out).splitlines()
     last = next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
     nok = sum(1 for ln in lines if re.match(r"\s*ok\b", ln))
@@ -204,7 +202,7 @@ class Job:
 
     def exited(self):
         """Вышел ли файл; вышел — гасит его группу (оставленных внуков). Лидер группы до killpg не пожимается
-        (waitid WNOWAIT), чтобы номер группы не ушёл другому процессу; без waitid (3.9 на macOS) — poll, затем
+        (waitid WNOWAIT), чтобы номер группы не ушёл другому процессу; без waitid (macOS до Python 3.13) — poll, затем
         killpg: внуки держат группу живой, и её номер не переиспользуется, пока они есть."""
         pid = self.proc.pid
         if hasattr(os, "waitid"):

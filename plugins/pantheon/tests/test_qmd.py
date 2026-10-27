@@ -237,11 +237,6 @@ def test_qmd_config():
                   r.stderr)
 
 
-try:
-    import tomllib  # noqa: F401
-    HAS_TOMLLIB = True
-except ImportError:  # системный 3.9: хук не прочтёт [hq] — штабу qmd закрыт целиком (ошибка, а не «пусто»)
-    HAS_TOMLLIB = False
 # закрытые штабу коллекции — только из [hq] policy.toml (metis-0182); в домашней папке тестов — две
 HQ_HOME = tempfile.mkdtemp(prefix="qmd-hq-")
 os.makedirs(os.path.join(HQ_HOME, ".claude", "pantheon"))
@@ -250,8 +245,8 @@ with open(os.path.join(HQ_HOME, ".claude", "pantheon", "policy.toml"), "w") as _
 
 
 def hq_open(denied):
-    """Штабу пропуск: на 3.11+ — нет отказа; на 3.9 [hq] не прочитать — отказ."""
-    return not denied if HAS_TOMLLIB else denied
+    """Штабу пропуск — нет отказа."""
+    return not denied
 
 
 def hook(ti, tool="mcp__qmd__query", role=None, window=None, raw=False, home=None):
@@ -296,7 +291,7 @@ def test_hook():
     check("штаб: query по legal и pantheon — отказ", hook({**q, "collections": ["pantheon", " legal"]}, role="hq"))
     out = hook({**q, "collections": ["legal"]}, window="hq", raw=True)
     check("штаб: отказ по legal — нейтральный текст: координатору направления поручением, без имён",
-          "координатору направления" in out and "поручением" in out and ("legal" in out or not HAS_TOMLLIB)
+          "координатору направления" in out and "поручением" in out and "legal" in out
           and "themis" not in out and "Telegram" not in out, out)
     check("штаб (окно hq): query по pantheon — пропуск",
           hq_open(hook({**q, "collections": ["pantheon"]}, window="hq")))

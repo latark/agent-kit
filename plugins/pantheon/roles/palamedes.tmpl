@@ -10,7 +10,7 @@ hooks:
   Stop:
     - hooks:
         - type: command
-          command: python3 "$HOME/.local/share/pantheon/current/hooks/text-stop-verify.py"
+          command: /bin/sh "$HOME/.local/share/pantheon/current/hooks/python.sh" "$HOME/.local/share/pantheon/current/hooks/text-stop-verify.py"
           timeout: 60
 ---
 

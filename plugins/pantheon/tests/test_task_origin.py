@@ -252,14 +252,11 @@ def main():
         lib_checks(home)
         split_checks(home)
         card_checks()
-        if PY311:
-            tmp2, home2, env2 = make()
-            try:
-                cli_checks(home2, env2)
-            finally:
-                shutil.rmtree(tmp2, True)
-        else:
-            print("CLI-проверки пропущены: нет Python 3.11+")
+        tmp2, home2, env2 = make()
+        try:
+            cli_checks(home2, env2)
+        finally:
+            shutil.rmtree(tmp2, True)
     finally:
         shutil.rmtree(tmp, True)
     print(f"{sum(results)} из {len(results)} прошли")

@@ -223,7 +223,8 @@ def template_tests():
     check("palamedes.tmpl: нет предзагрузки навыков (skills:) и велено читать SKILL.md, а не звать Skill",
           re.search(r"^skills:", h, re.M) is None and "Прочитай этот файл (Read)" in pal
           and "загрузи его до начала (Skill)" not in pal)
-    m = re.search(r'command:\s*python3 "\$HOME/\.local/share/pantheon/current/hooks/([\w.-]+)"', h)
+    m = re.search(r'command:\s*/bin/sh "\$HOME/\.local/share/pantheon/current/hooks/python\.sh" '
+                  r'"\$HOME/\.local/share/pantheon/current/hooks/([\w.-]+)"', h)
     check("palamedes.tmpl: Stop-хук — text-stop-verify.py, файл есть в hooks/",
           m is not None and m.group(1) == "text-stop-verify.py" and "\n  Stop:" in h
           and os.path.isfile(os.path.join(PLUGIN, "hooks", m.group(1))))
@@ -250,9 +251,6 @@ def template_tests():
 
 
 def build_test():
-    if not PY311:
-        print("skip сборка ролей: нет Python 3.11+")
-        return
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="text-build-"))
     home = os.path.join(tmp, "ai", "pantheon")
     write(os.path.join(home, "directions.toml"),

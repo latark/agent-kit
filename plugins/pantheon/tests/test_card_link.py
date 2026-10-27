@@ -13,9 +13,7 @@ import tempfile
 from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _py311 import PY311  # pantheon.py — только на Python 3.11+
-if sys.version_info < (3, 11):
-    os.execv(PY311, [PY311, "-I", os.path.abspath(__file__)])
+from _py311 import PY311  # noqa: E402,F401  — Python 3.11+ и PANTHEON_TEST=1
 _ROOT = tempfile.mkdtemp(prefix="cardlink-root-")
 tempfile.tempdir = _ROOT
 os.environ["TMPDIR"] = _ROOT

@@ -7,7 +7,7 @@ terminal-notifier, git-crypt, security), каждая пишет argv в жур�
 в корне пробы, «Связка ключей» — файл; настоящие GitHub и Связка ключей не трогаются. Настоящие ~/.claude/settings.json, ~/ai/pantheon и ~/.gitconfig
 сверяются по хешу до и после.
 
-Запуск: python3 -I plugins/pantheon/tests/test_setup.py  (код выхода 0 — все прошли; на 3.9 CLI честно пропускается)
+Запуск: python3 -I plugins/pantheon/tests/test_setup.py  (код выхода 0 — все прошли)
 """
 import atexit
 import base64

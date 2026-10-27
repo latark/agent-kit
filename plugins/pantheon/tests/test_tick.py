@@ -330,6 +330,7 @@ def main():
     os.makedirs(os.path.join(groot, "hooks"))
     os.makedirs(os.path.join(groot, ".claude-plugin"))
     open(os.path.join(groot, "hooks", "guard.py"), "w").write("# guard из кэша\n")
+    open(os.path.join(groot, "hooks", "python.sh"), "w").write("# запускатель из кэша\n")
     open(os.path.join(groot, ".claude-plugin", "plugin.json"), "w").write('{"name": "guard", "version": "0.1.0"}')
     open(os.path.join(tmp, ".claude/plugins/installed_plugins.json"), "w").write(json.dumps(
         {"version": 2, "plugins": {"guard@agent-kit": [{"scope": "user", "installPath": groot}]}}))
@@ -461,8 +462,9 @@ def main():
     # вторая запись PreToolUse у координаторов и штаба — хук субагентов окна (P0-6, test_agent_allowlist.py)
     hk = [h for g in sa.get("hooks", {}).get("PreToolUse", []) if g["matcher"] != "Agent|Task|Skill" for h in g["hooks"]]
     gpath = os.path.realpath(os.path.join(groot, "hooks", "guard.py"))
-    check("строгий guard в окне роли (SEC-29): --strict, onFailure block, только проверенный кэш, у мастерской тоже",
-          len(hk) == 1 and hk[0]["onFailure"] == "block" and hk[0]["command"] == f"python3 {gpath} --strict"
+    check("строгий guard в окне роли (SEC-29): --strict через hooks/python.sh, onFailure block, только проверенный кэш, "
+          "у мастерской тоже",
+          len(hk) == 1 and hk[0]["onFailure"] == "block" and hk[0]["command"] == f"/bin/sh {os.path.join(os.path.dirname(gpath), 'python.sh')} {gpath} --strict"
           and "projects" not in hk[0]["command"] and sw["hooks"]["PreToolUse"] == sa["hooks"]["PreToolUse"][:1]
           and sa["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill")
     hq = load("hq")

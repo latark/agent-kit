@@ -25,17 +25,14 @@ def main():
     check("шаблон: board.md и decisions.md с шапкой",
           open(os.path.join(TPL, "board.md"), encoding="utf-8").read().startswith("# Доска")
           and open(os.path.join(TPL, "decisions.md"), encoding="utf-8").read().startswith("# Журнал решений"))
-    if sys.version_info < (3, 11):
-        print("tomllib нет (Python < 3.11) — проверка directions.toml пропущена")
-    else:
-        import tomllib
-        with open(os.path.join(TPL, "directions.toml"), "rb") as fh:
-            data = tomllib.load(fh)
-        person = data.get("person")
-        check("directions.toml читается и содержит [person]", isinstance(person, dict))
-        check("[person]: qmd_collections = [] и browser = \"\"",
-              isinstance(person, dict) and person.get("qmd_collections") == [] and person.get("browser") == "")
-        check("пример направления закомментирован — реестр пуст", not data.get("direction"))
+    import tomllib
+    with open(os.path.join(TPL, "directions.toml"), "rb") as fh:
+        data = tomllib.load(fh)
+    person = data.get("person")
+    check("directions.toml читается и содержит [person]", isinstance(person, dict))
+    check("[person]: qmd_collections = [] и browser = \"\"",
+          isinstance(person, dict) and person.get("qmd_collections") == [] and person.get("browser") == "")
+    check("пример направления закомментирован — реестр пуст", not data.get("direction"))
     print(f"{len(OK)} из {len(OK) + len(FAIL)} прошли")
     sys.exit(1 if FAIL else 0)
 

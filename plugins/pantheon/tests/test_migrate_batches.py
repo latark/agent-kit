@@ -143,9 +143,6 @@ def main():
     shutil.rmtree(tmp, True)
 
 
-if PY311:
-    main()
-else:
-    print("skip: нужен Python 3.11+ для CLI")
+main()
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)
