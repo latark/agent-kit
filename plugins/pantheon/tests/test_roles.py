@@ -573,7 +573,7 @@ def main():
               for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md", "hq.md")))
     # effort argus (metis-0176): кто зовёт argus — вне ядра с effort medium, ядро и защиты — без параметра (high);
     # сам argus — на high в файле роли, знает правило и сверку модели шлюзом по транскрипту
-    effort_rule = ("Модель и effort argus (metis-0176, упрощение п. 9, владелец 27.10): в файле роли argus — Sonnet. "
+    effort_rule = ("Модель и effort argus (metis-0176, упрощение п. 9, владелец 27.10; на ядре это второе исключение): в файле роли argus — Sonnet. "
                    "Вне ядра защит зови его с параметром `effort: \"medium\"`, модель в вызове не передавай. PR, который "
                    "задевает ядро защит, зови с `model: \"opus\"` и без параметра `effort` — на high из файла роли: ядро "
                    "проверяют два argus на Opus, шлюз «принять» на другой модели в PR ядра не засчитает.")
