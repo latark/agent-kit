@@ -144,6 +144,17 @@ def test_unit():
             T.task_set = real
         check("migrate_modes: сбой task_set → сбоев 5, строки «не записано»", failed == len(MIGRATED)
               and sum("не записано: занято" in x for x in lines) == len(MIGRATED), (failed, lines))
+        # attach отказывает сам, до записи: шлюз task_set за ним — второй слой, а не единственный
+        calls = []
+        T.task_set = lambda *a, **kw: calls.append(a)
+        try:
+            T.task_attach(home, T_NEW, "beta-0007", "alpha-0001")
+            err = ""
+        except ValueError as e:
+            err = str(e)
+        finally:
+            T.task_set = real
+        check("task_attach: undecided — отказ до любой записи", "не годится" in err and not calls, (err, calls))
         # карточка: «не решено» — пустое свойство «Режим», иначе вид показал бы «один исполнитель»
         card, _ = T.render_card(head_of(p["b_und"]), "", "x.md", T_NEW)
         card2, _ = T.render_card(head_of(p["b_self"]), "", "x.md", T_NEW)
