@@ -44,6 +44,16 @@ sys.path.insert(0, LIBDIR)
 import pantheon as P  # noqa: E402
 O = P.outside_mod()
 
+
+def _kill_servers():
+    """Серверы теста гаснут и при падении проверки (мутант без гашения не оставляет http.server висеть)."""
+    for s in O.servers().values():
+        if s.get("pid"):
+            O.kill_group(int(s["pid"]))
+
+
+_atexit.register(_kill_servers)  # раньше rmtree: atexit идёт с конца
+
 FAILS = []
 TOTAL = [0]
 
