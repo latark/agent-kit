@@ -5,7 +5,7 @@
 плановый проход (launchd, вне песочницы окон) запускает проверку проекта под своим профилем sandbox-exec и отдаёт
 результат. Образец — `pantheon merge request|run`: заявка роли → проход тика отдельным процессом.
 
-  pantheon outside test [--script ИМЯ] [--wait С]    проверка проекта на HEAD этой папки (дерево чистое): команда —
+  pantheon outside test [--script ИМЯ] [--wait С]    проверка проекта на HEAD этой папки (дерево чистое; неотслеживаемый .claude/worktrees/ не в счёт): команда —
                                          первая строка .pantheon-verify (из origin/HEAD, иначе из HEAD), иначе скрипт
                                          test/check package.json, иначе pytest; --script — скрипт package.json
   pantheon outside serve [--script ИМЯ] [--minutes N] [--wait С]   dev-сервер (скрипт dev или --script) → адрес
