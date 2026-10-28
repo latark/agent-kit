@@ -6735,7 +6735,8 @@ def board():
                                  night_end=night_end, open_prs=autoclose_mod().open_pr_tasks(path("autoclose.json")),
                                  alert=lambda k, v, text, who="board", note=None: alert_once(k, v, text, who, note,
                                                                                             policy=pol),
-                                 primary=primary, projects=projects, policy=pol, marks=marks, registry=registry)
+                                 primary=primary, projects=projects, policy=pol, marks=marks, registry=registry,
+                                 **board_links())
             pol.save()
         once_dir = path("once")  # отметки «уже сообщали» старше 90 дней — убрать: папка не растёт без конца
         for f in os.listdir(once_dir) if os.path.isdir(once_dir) else []:
@@ -6749,6 +6750,20 @@ def board():
     if primary and os.environ.get("PANTHEON_METRICS") != "0":
         board_metrics(T)
     return 0
+
+
+def board_links():
+    """Ссылки на PR и коммиты и хвосты для карточек (metis-0501 [zeus-pr-link], metis-0572): индекс PR по кэшу gh,
+    репозитории направлений из [merge_repos] и хвосты последнего check. Сбой — без ссылок: доска важнее."""
+    out = {"tails": read_json(path("tails.json"), {})}
+    if not isinstance(out["tails"], dict):
+        out["tails"] = {}
+    try:
+        out["repos"] = metrics_ctx().repos
+        out["pr_index"] = autoclose_mod().pr_index(read_json(path("autoclose-prs.json"), {}))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 _CULPRITS = None
@@ -7367,7 +7382,10 @@ def check(paths=None, quiet=False):
                  + [("часть", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
                     for i, ln in T.part_stalled(tasks_now, now())])
         stall = T.stalled(tasks_now, now())  # metis-0583: doing/review без записи в журнале дольше 2 суток — без тревоги
-        tails_board(tails + [("застой", i, f"{i}: {st}, без записи в журнале {d} сут") for i, st, d in stall])
+        # metis-0572: расхождения доски («ответил, а waiting», «PR слит, а задача открыта») — в Хвосты.md и на карточку
+        off = [("доска", k, f"{k}: {text}") for k, text in board_drift(T, tasks_now, read_json(path("autoclose-prs.json"), {}),
+                                                                       T.inbox_items(PANTHEON))]
+        tails_board(tails + [("застой", i, f"{i}: {st}, без записи в журнале {d} сут") for i, st, d in stall] + off)
         if stall and not quiet:  # сводка check: одна строка, не тревога на каждую задачу
             print(f"внимание · застой: {len(stall)} задач в doing/review без записи в журнале дольше {T.STALL_DAYS} сут — "
                   + ", ".join(i for i, _, _ in stall[:TAIL_SHOWN]) + (f" и ещё {len(stall) - TAIL_SHOWN}" if len(stall) > TAIL_SHOWN else "")
@@ -7480,12 +7498,30 @@ TAIL_TEXT = {"хвост": "хвост в журнале без задачи (н
              "ревью": "ревью с находкой Д без задачи (нет ссылки на файл ревью)",
              "часть": "PR слит с «часть», задача без движения дольше 24 ч (закрыть, завести остаток или записать ход)"}
 # виды только для Доска/Хвосты.md: тревоги на каждую нет (metis-0583) — список и строка в сводке check
-TAIL_BOARD_TEXT = dict(TAIL_TEXT, **{"застой": "застой doing/review (записать ход, закрыть или вернуть в очередь)"})
+TAIL_BOARD_TEXT = dict(TAIL_TEXT, **{"застой": "застой doing/review (записать ход, закрыть или вернуть в очередь)",
+                                     "доска": "доска расходится с задачей (поправить статус задачи или вход)"})
+TAIL_CARD = {"хвост": "хвост в журнале", "часть": "PR слит с «часть», без движения", "застой": "застой",
+             "доска": "доска"}  # подпись свойства «Хвост» карточки; отчёт и ревью — файлы, не задачи
+
+
+def tails_by_task(items):
+    """{id: [«подпись: текст»]} для свойства «Хвост» карточек (metis-0572, 0506): где — «<id>: …»."""
+    out = {}
+    for kind, _, where in items:
+        tid, sep, rest = str(where).partition(": ")
+        if kind in TAIL_CARD and sep and re.fullmatch(r"[a-z][a-z0-9]{1,11}-\d{3,}", tid):
+            out.setdefault(tid, []).append(f"{TAIL_CARD[kind]}: {rest}"[:200])
+    return out
 
 
 def tails_board(items):
     """Доска/Хвосты.md (metis-0572): все хвосты, как их видит проход сейчас, а не только новые для тревоги — тревогу
-    первый проход глотает, а владелец смотрит доску. Файла нет, пока доски нет; пишется только при изменении."""
+    первый проход глотает, а владелец смотрит доску. Файла нет, пока доски нет; пишется только при изменении.
+    Хвосты задач — ещё в STATE/tails.json: проход доски ставит их свойством «Хвост» карточки (вид «Хвосты»)."""
+    by_task = tails_by_task(items)
+    if read_json(path("tails.json"), None) != by_task:
+        os.makedirs(STATE, exist_ok=True)
+        write_atomic(path("tails.json"), json.dumps(by_task, ensure_ascii=False, sort_keys=True))
     if not os.path.isdir(BOARD):
         return
     rows = [f"- **{TAIL_BOARD_TEXT[kind].split(' (')[0]}** — {where}" for kind, _, where in items]

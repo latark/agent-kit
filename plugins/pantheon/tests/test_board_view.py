@@ -72,13 +72,13 @@ def base_filter(view_text):
     return lambda card: ev(tree, card)
 
 
-VIEWS5 = ["От меня нужно", "Доска", "Пачки", "Итоги пачек", "Все задачи"]
+VIEWS5 = ["От меня нужно", "Доска", "Пачки", "Итоги пачек", "Все задачи", "Новое за неделю", "Хвосты"]  # + два вида metis-0506
 
 
 def base_checks():
     vs = views()
     names = [n for n, _ in vs]
-    check("Доска.base: ровно пять видов по порядку (metis-0069)", names == VIEWS5, names)
+    check("Доска.base: ровно семь видов по порядку (metis-0069, metis-0506)", names == VIEWS5, names)
     check("Доска.base: старых видов нет", not {"Мне ответить", "Система", "Очередь агентов", "Нужен ответ", "Горит",
                                                "Ночь", "Волны", "Утро", "Срочно"} & set(names), names)
     mine = dict(vs)["От меня нужно"]

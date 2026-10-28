@@ -208,6 +208,32 @@ def save_state(p, st):
     os.replace(tmp, p)
 
 
+def pr_index(cache):
+    """PR задач по кэшу fetch (metis-0501 [zeus-pr-link]) → {id: [{"repo", "number", "sha", "merged"}]}: слитые — по
+    ветке и «Closes» (и с «часть»: PR всё равно её), открытые — по closes. Карточка задачи берёт отсюда ссылки на GitHub;
+    упоминания в журнале дополняет tasks.work_links."""
+    out = {}
+    cache = cache if isinstance(cache, dict) else {}
+    for key, merged in (("merged", True), ("open_prs", False)):
+        rows_by = cache.get(key) if isinstance(cache.get(key), dict) else {}
+        for repo, rows in sorted(rows_by.items()):
+            for pr in rows if isinstance(rows, list) else []:
+                if not isinstance(pr, dict) or not isinstance(pr.get("number"), int) or isinstance(pr.get("number"), bool):
+                    continue
+                if merged:
+                    if any(not isinstance(pr.get(k), (str, type(None))) for k in ("body", "headRefName")):
+                        continue
+                    ids = closing_ids(pr.get("headRefName"), pr.get("body"))
+                else:
+                    ids = [i for i in pr.get("closes") or [] if isinstance(i, str)] if isinstance(pr.get("closes"), list) else []
+                sha = str(pr.get("oid") or "") if merged else ""
+                for tid in ids:
+                    out.setdefault(tid, []).append({"repo": repo, "number": pr["number"],
+                                                    "sha": sha if re.fullmatch(r"[0-9a-f]{7,40}", sha) else "",
+                                                    "merged": merged})
+    return out
+
+
 def open_pr_tasks(state_file):
     """id задач с открытым PR по последнему проходу; нет состояния — None (неизвестно)."""
     st = load_state(state_file)

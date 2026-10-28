@@ -1261,16 +1261,97 @@ def plan_batch(tasks, tids, t, busy=None, stale_h=STALE_HOURS):
     return out
 
 
+def outcomes(tasks):
+    """{id: [id задач, у которых source — эта задача]}: «Что вышло» на карточке (metis-0506), по порядку id."""
+    out = {}
+    for i, (_, h, _) in sorted(tasks.items()):
+        src = h.get("source")
+        if isinstance(src, str) and src in tasks and src != i:
+            out.setdefault(src, []).append(i)
+    return out
+
+
+def criteria_count(body):
+    """«N из M» отмеченных пунктов «Готово, когда» (metis-0506); только заглушка-подсказка — «не заданы»; раздела нет — None."""
+    items = done_criteria(body)
+    real = [ok for ok, text in items if text != DONE_WHEN_HINT]
+    if real:
+        return f"{sum(real)} из {len(real)}"
+    return "не заданы" if items else None
+
+
+GH_REPO = r"[A-Za-z0-9][\w.-]{0,99}/[\w.-]{1,100}"
+_SHA = r"[0-9a-f]{7,40}"
+# PR в строке журнала: «PR #163 (latark/agent-kit)», «latark/agent-kit#163», «github.com/latark/agent-kit/pull/163», «PR #163»
+_PR_EXPLICIT = re.compile(r"\bPR\s*#?(\d{1,6})\s*\((" + GH_REPO + r")\)|(?<![\w/.-])(" + GH_REPO + r")#(\d{1,6})\b"
+                          r"|github\.com/(" + GH_REPO + r")/pull/(\d{1,6})\b")
+_PR_BARE = re.compile(r"\bPR\s*#?(\d{1,6})\b")
+_PR_EVENT = re.compile(r"слит|открыт|squash|merge|влит", re.I)
+_COMMIT = re.compile(r"(?:\bsquash|коммит|\bcommit|→)\s+(" + _SHA + r")\b|github\.com/(" + GH_REPO + r")/commit/(" + _SHA + r")\b",
+                     re.I)
+
+
+def work_links(head, body, idx, repos):
+    """PR и коммиты задачи для карточки (metis-0501 [zeus-pr-link]) → ([(repo, номер, слит: True|False|None)],
+    [(repo, sha)]). Источники: idx — autoclose.pr_index по кэшу gh; поле release «PR #N → sha»; журнал. Репозиторий —
+    только из репозиториев направления (repos: направление → [repo], [merge_repos] политики): строка журнала чужой
+    репозиторий ссылкой не сделает. «PR #N» без репозитория — только если у направления он один и в строке слит/открыт/squash."""
+    own = [r.lower() for r in (repos or {}).get(head.get("direction")) or [] if isinstance(r, str)]
+    single = own[0] if len(own) == 1 else None
+    prs, commits = {}, []
+
+    def add_commit(repo, sha):
+        if repo in own and (repo, sha) not in commits and not any(r == repo and (c.startswith(sha) or sha.startswith(c))
+                                                                  for r, c in commits):
+            commits.append((repo, sha))
+    for x in (idx or {}).get(head.get("id")) or []:
+        if x.get("repo") in own:
+            prs[(x["repo"], x["number"])] = bool(x.get("merged")) or prs.get((x["repo"], x["number"])) or False
+            if x.get("sha"):
+                add_commit(x["repo"], x["sha"][:7])
+    rel = str(head.get("release") or "")
+    lines = [(rel, True)] + [(x[2], False) for x in _journal(body)]
+    for text, is_rel in lines:
+        found = []
+        for m in _PR_EXPLICIT.finditer(text):
+            n, repo = (m.group(1), m.group(2)) if m.group(1) else (m.group(4), m.group(3)) if m.group(4) else (m.group(6), m.group(5))
+            found.append((repo.lower(), int(n)))  # [merge_repos] и кэш gh — в нижнем регистре (metrics.Ctx)
+        if not found and single and (is_rel or _PR_EVENT.search(text)):
+            found = [(single, int(n)) for n in _PR_BARE.findall(text)]
+        for repo, n in found:
+            if repo in own:
+                prs.setdefault((repo, n), None)
+        for m in _COMMIT.finditer(text):
+            if m.group(1):
+                repo = found[0][0] if found else single
+                if repo:
+                    add_commit(repo, m.group(1)[:7])
+            else:
+                add_commit(m.group(2).lower(), m.group(3)[:7])
+    return [(r, n, v) for (r, n), v in prs.items()], commits
+
+
+def links_lines(links):
+    """Строки раздела «PR и коммиты»: markdown-ссылки на GitHub."""
+    prs, commits = links
+    state = {True: " · слит", False: " · открыт", None: ""}
+    return ([f"- [PR #{n}](https://github.com/{r}/pull/{n}) · {r}{state[v]}" for r, n, v in prs]
+            + [f"- [коммит {c}](https://github.com/{r}/commit/{c}) · {r}" for r, c in commits])
+
+
 def id_link(i, names):
     """Ссылка на карточку задачи `[[<имя файла>|<id>]]`; карточки нет — голый id (metis-0322)."""
     return f"[[{names[i]}|{i}]]" if names.get(i) else i
 
 
-def card_ctx(tid, head, tasks, names, cross, t=None, night_end="08:00", open_prs=None):
+def card_ctx(tid, head, tasks, names, cross, t=None, night_end="08:00", open_prs=None, outs=None, links=None, tails=None):
     """Что карточке задачи нужно знать о других: незакрытые зависимости, пересечения, пачка и место в ней, слова
-    «внимания» по всему (review без PR, готово без приёмки)."""
+    «внимания» по всему (review без PR, готово без приёмки). outs — outcomes(tasks): что из задачи вышло; links —
+    work_links (PR и коммиты); tails — {id: [текст]} хвостов последнего pantheon check (metis-0506, metis-0572)."""
     ctx = {"waits": [id_link(i, names) for i in open_deps(head, tasks)],
-           "cross": [id_link(i, names) for i in cross.get(tid) or []]}
+           "cross": [id_link(i, names) for i in cross.get(tid) or []],
+           "outcome": [id_link(i, names) for i in (outs or {}).get(tid) or []],
+           "links": links or ([], []), "tails": [str(x) for x in (tails or {}).get(tid) or [] if x]}
     if t is not None:
         ctx["flags"] = extra_attention(head, tasks[tid][2] if tid in tasks else "", tasks, t, night_end, open_prs)
     sid = head.get("parent")
@@ -1478,6 +1559,7 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
     бюджета, цепочка, параллельно, пересечения. project — имя заметки проекта на пульте: ссылка на неё нужна виду
     «Пачки проекта»."""
     names = kw.get("names") or {}
+    child_links = kw.pop("child_links", None) or {}  # {id задачи: work_links} — список PR задач пачки ([zeus-pr-link])
     card, text = render_card(head, body, src_rel, t, **kw)
     inf = story_info(head.get("id"), tasks)
     over = over_budget(inf)
@@ -1516,6 +1598,15 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
                     f"{', '.join(waits) or 'ничего'} |")
     table = ("## Состав\n\n| № | Задача | Название | Статус | Оценка | Режим | Ждёт |\n|---|---|---|---|---|---|---|\n"
              + ("\n".join(rows) if rows else "| — | задач пока нет | | | | | |"))
+    prl = []
+    for i in inf["ids"]:
+        prs, commits = child_links.get(i) or ([], [])
+        if prs or commits:
+            prl.append(f"- {id_link(i, names)}: " + ", ".join(
+                [f"[PR #{n}](https://github.com/{r}/pull/{n})" for r, n, _ in prs]
+                + [f"[{c}](https://github.com/{r}/commit/{c})" for r, c in commits]))
+    if prl:
+        table += "\n\n## PR задач\n\n" + "\n".join(prl)
     first, sep, rest = text[1:].partition("\n\n")
     return card, "\n" + first + "\n" + summary + "\n\n" + table + (sep + rest if sep else "\n")
 
@@ -1868,7 +1959,7 @@ PULT_VERSION = hashlib.sha256(PULT_FILE.encode("utf-8")).hexdigest()[:12]  # с�
 
 # --- доска владельца ------------------------------------------------------------
 
-CARD_ORDER = ["Статус", "Проект", "Внимание", "Вопрос", "Приоритет", "Срок", "Кому", "Дальше", "Ждёт", "Создана", "Откуда", "Вопрос задан",
+CARD_ORDER = ["Статус", "Проект", "Внимание", "Вопрос", "Приоритет", "Срок", "Кому", "Дальше", "Ждёт", "Создана", "Откуда", "Из чего", "Критерии", "Хвост", "Вопрос задан",
               "Закрыта", "Выпуск", "Пачка", "Пульт", "Ночь", "Оценка", "Факт", "Приёмка", "Порядок", "Режим", "Режим почему",
               "Зависит от", "Области", "Пересечения",
               # карточка пачки (story) и заметка проекта (пульт)
@@ -1876,7 +1967,7 @@ CARD_ORDER = ["Статус", "Проект", "Внимание", "Вопрос"
               "Тип", "id", "tags"]
 # типы свойств карточек для Obsidian (.obsidian/types.json хранилища): тик ставит свои ключи, чужие не трогает
 PROP_TYPES = {"Внимание": "multitext", "Приоритет": "number", "Срок": "date", "Создана": "date",
-              "Вопрос задан": "datetime", "Откуда": "text", "Вопрос": "text", "Закрыта": "date", "Кому": "text", "tags": "tags",
+              "Вопрос задан": "datetime", "Откуда": "text", "Из чего": "text", "Критерии": "text", "Хвост": "multitext", "Вопрос": "text", "Закрыта": "date", "Кому": "text", "tags": "tags",
               "Выпуск": "text", "Пачка": "text", "Ночь": "date", "Оценка": "text", "Факт": "text", "Приёмка": "text",
               "Порядок": "number", "Режим": "text", "Зависит от": "multitext", "Области": "multitext",
               "Пересечения": "multitext", "Цепочка": "multitext", "Параллельно": "multitext", "Области не указаны": "text",
@@ -2114,7 +2205,11 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
             "Кому": link(node), "Дальше": None if closed else head.get("next"),
             "Ждёт": head.get("waiting_on") if head.get("waiting_on") not in (None, "human") else None,
             "Создана": _date(head.get("created"), 10),
-            "Откуда": " · ".join(x for x in (head.get("from"), head.get("source")) if x) or None,
+            # «Откуда» — вид появления (from), по нему группирует «Новое за неделю»; «Из чего» — ссылка на источник (metis-0506)
+            "Откуда": head.get("from") or None,
+            "Из чего": (id_link(head["source"], names or {}) if ID_RE.fullmatch(str(head.get("source") or ""))
+                        else head.get("source")) or None,
+            "Критерии": criteria_count(body), "Хвост": list(ctx.get("tails") or []) or None,
             "Вопрос задан": _date(head.get("question_at"), 19) if head.get("question") else None,
             "Вопрос": _plain(head["question"]) if head.get("question") and not closed else None,
             # закрытые до 0.9.28 даты закрытия не имеют — тогда последнее изменение задачи (из её шапки)
@@ -2184,6 +2279,17 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
     shown = head.get("answer") if logged is None else logged.get("answer")
     if shown and not head.get("question"):
         parts.append(f"**Ваш ответ:** {shown}")
+    if card["Хвост"]:
+        parts.append("> [!warning] Хвост\n" + "\n".join(f"> - {x}" for x in card["Хвост"]))
+    origin = [f"**Из чего возникла:** {card['Из чего']}" + (f" ({card['Откуда']})" if card["Откуда"] else "")
+              if card["Из чего"] else (f"**Из чего возникла:** {card['Откуда']}" if card["Откуда"] else "")]
+    if ctx.get("outcome"):
+        origin.append(f"**Что вышло:** {', '.join(ctx['outcome'])}")
+    if any(origin):
+        parts.append("\n".join(x for x in origin if x))
+    lk = links_lines(ctx.get("links") or ([], []))
+    if lk:
+        parts.append("## PR и коммиты\n\n" + "\n".join(lk))
     m = re.search(r"## Журнал\n(.*)$", body, re.S)
     if m:
         log = [x for x in m.group(1).strip().split("\n") if x.startswith("- ")][-3:][::-1]
@@ -2518,9 +2624,40 @@ views:
         direction: ASC
       - property: formula.age_key
         direction: ASC
-    order: [note.id, file.name, formula.status_view, formula.prio_view, note.Внимание, note.Кому, note.Срок, note.Дальше, note.Создана, note.Закрыта]
+    order: [note.id, file.name, formula.status_view, formula.prio_view, note.Внимание, note.Кому, note.Срок, note.Дальше, note.Создана, note.Закрыта, note.Откуда, note.Критерии]
     columnSize:
       note.id: 150
+  - type: table
+    name: Новое за неделю
+    filters:
+      and:
+        - 'note["Создана"] >= today() - "7d"'
+        - 'note["Статус"] != "Отменено"'
+    groupBy:
+      property: note.Откуда
+      direction: ASC
+    sort:
+      - property: formula.cr_n
+        direction: DESC
+    order: [note.id, file.name, formula.status_view, note.Откуда, note.Из чего, note.Критерии, note.Кому, note.Создана]
+  - type: table
+    name: Хвосты
+    filters:
+      and:
+        - 'note["Статус"] != "Отменено"'
+        - or:
+            - '!note["Хвост"].isEmpty()'
+            - and:
+                - or:
+                    - 'note["Откуда"] == "остаток"'
+                    - 'note["Откуда"] == "ревью"'
+                - 'note["Статус"] != "Готово"'
+    sort:
+      - property: formula.urgency
+        direction: ASC
+      - property: formula.cr_n
+        direction: ASC
+    order: [note.id, file.name, formula.status_view, note.Хвост, note.Откуда, note.Из чего, note.Критерии, note.Кому]
 """
 for _i in (1, 2, 3):
     BASE_FILE = BASE_FILE.replace("{COLK%d}" % _i, _col_formula(_i - 1))
@@ -2543,6 +2680,11 @@ VIEW_HELP = {
     "Итоги пачек": "Задачи из пачек, которые дошли до проверки, готовы или ждут приёмки, по пачкам. Что делать: принять "
                    "результат ночи.",
     "Все задачи": "Вообще все задачи и пачки, включая готовые, по проектам. Что делать: искать то, чего нет в других видах.",
+    "Новое за неделю": "Задачи и пачки, заведённые за 7 дней, по тому, откуда взялись: ваше слово, отчёт, ревью, остаток, "
+                       "план, по ходу. Что делать: проверить, что новое — то, что вы просили.",
+    "Хвосты": "Что застряло или потерялось: задачи со свойством «Хвост» (последний pantheon check: застой doing/review "
+              "больше 2 суток, вы ответили, а задача ждёт, PR слит, а задача открыта) и открытые остатки и находки ревью. "
+              "Полный список — Хвосты.md. Что делать: закрыть, вернуть в очередь или поручить.",
 }
 HELP_DIR = "Справка"
 HELP_NOTE = "Виды доски"
@@ -3135,11 +3277,13 @@ def _sync_types(vault, alert):
 
 
 def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None, primary=True, projects=None,
-               policy=None, marks=None, registry=None, night_end="08:00", open_prs=None):
+               policy=None, marks=None, registry=None, night_end="08:00", open_prs=None, pr_index=None, repos=None,
+               tails=None):
     """Один проход доски. → список строк «что сделано» (для журнала тика). policy — политика уведомлений
     (lib/notify.py, её передаёт pantheon.py): решает, что показать, что отложить в сводку. Без неё — без
     уведомлений; notify — прежний параметр, не используется. registry — проекты для пульта (project_registry);
-    без него — из projects и marks."""
+    без него — из projects и marks. pr_index — autoclose.pr_index, repos — направление → [repo]: ссылки на PR и коммиты
+    в карточках; tails — {id: [текст]} хвостов последнего pantheon check (свойство «Хвост»)."""
     alert = alert or (lambda *a, **k: None)
     projects = projects or {}
     if registry is None:
@@ -3360,6 +3504,8 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             name = f"{name} ({cid})"
         names[cid] = name
     cross = crossings(tasks)
+    outs = outcomes(tasks)
+    wl = {i: work_links(h, b, pr_index, repos) for i, (_, h, b) in tasks.items()} if repos else {}
     for cid, _, src, h, b in items:
         name = names[cid]
         st = cards.setdefault(cid, {})
@@ -3381,9 +3527,10 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
             if h.get("type") == "story":
                 pn = next((project_note_name(pr) for pr, r in registry.items() if h.get("direction") in r["directions"]),
                           None)
-                card, cbody = render_story_card(h, b, rel(src), t, tasks, project=pn, **kw)
+                card, cbody = render_story_card(h, b, rel(src), t, tasks, project=pn, child_links=wl, **kw)
             else:
-                card, cbody = render_card(h, b, rel(src), t, ctx=card_ctx(cid, h, tasks, names, cross, t, night_end, open_prs), **kw)
+                card, cbody = render_card(h, b, rel(src), t, ctx=card_ctx(cid, h, tasks, names, cross, t, night_end, open_prs,
+                                                                          outs, wl.get(cid), tails), **kw)
         target = os.path.join(board, name + ".md")
         old = present.get(cid)
         if old and (digest(old[0]) != seen.get(cid) or cid in typing):
