@@ -630,6 +630,16 @@ def test_lists_and_checked():
         check("владелец вернул в работу — тем же PR второй раз не закрываем; открытый PR ушёл — закрываем",
               T.read(pa)[0].get("status") == "doing" and text(pa).count("закрыта по слиянию PR #40") == 1
               and T.read(pd)[0].get("status") == "done", text(pa)[-300:])
+        # сбой записи одной задачи (шапка не прошла проверку) — ошибка в errors, проход идёт дальше
+        pi = with_journal("metis-0048", ok_body, extra="## Журнал\n\n- 2026-10-27 21:25 — агент: PR #44 слит\n")
+        pj = with_journal("metis-0049", ok_body, extra="## Журнал\n\n- 2026-10-27 21:25 — агент: PR #45 слит\n")
+        prs2 = {"latark/agent-kit": [cpr(44, "c", "", T0 - 600), cpr(45, "d", "", T0 - 500)]}
+        A.save_state(cache, {"fetched": T0 + 400, "merged": prs2, "open": {}, "errors": {}})
+        log, errs = A.run(home, os.path.join(state, "autoclose.json"), cache, T0 + 400,
+                          {"latark/agent-kit": {"metis-pantheon"}}, FailOnce({"metis-0048"}))
+        check("все пункты отмечены: сбой записи одной задачи — в errors, соседняя закрыта",
+              "metis-0048" in errs.get("latark/agent-kit#44", "") and T.read(pi)[0].get("status") == "doing"
+              and T.read(pj)[0].get("status") == "done", str(errs) + str(log))
     finally:
         shutil.rmtree(tmp, True)
 
