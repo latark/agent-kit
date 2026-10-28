@@ -362,6 +362,95 @@ def main():
     check("тик: следующий проход называет оставшиеся 3, третий молчит — каждый из 15 id назван в alerts.md ровно раз",
           len(lines) == 2 and all(sum(i in ln for ln in lines) == 1 for i in many) and "и ещё" not in lines[1], lines)
 
+    # --- края тревоги (metis-0409) ---
+    import fcntl
+    import time as _time
+    # п. 3: decisions.md не прочитался (не «файла нет») — проход пропущен, seen не пишется; следующий читаемый — первый
+    tmp4, home4, state4, env4 = make()
+    dec4, seen4 = os.path.join(home4, "decisions.md"), os.path.join(state4, "unlinked-seen.json")
+    os.makedirs(dec4)  # каталог на месте файла: open → IsADirectoryError
+    r = run(env4, "check", "--quiet")
+    check("тик: decisions.md не читается — seen не создан, тревоги нет", r.returncode == 0 and not os.path.exists(seen4)
+          and "без задачи" not in alerts_of(home4), (r.stderr, os.path.exists(seen4)))
+    os.rmdir(dec4)
+    open(dec4, "w", encoding="utf-8").write("- 24.10 09:00 — владелец: давнее [zeus-a-one]\n- 24.10 09:01 — владелец: давнее [zeus-a-two]\n")
+    run(env4, "check", "--quiet", t=T0 + 60)
+    check("тик: после нечитаемого прохода первый читаемый только запоминает — одной строки со всеми id нет",
+          "без задачи" not in alerts_of(home4) and "zeus-a-two" in read(seen4), alerts_of(home4))
+    # п. 4: id вопроса без дефиса закрывается пометкой «не задача»
+    zl4 = os.path.join(state4, "owner-log")
+    os.makedirs(zl4)
+    open(os.path.join(zl4, "zeus.md"), "w", encoding="utf-8").write(
+        "## 2026-10-24 10:00:00 · окно вопросов\nвопрос: [q1abc] выбрать?\n\n"
+        "## 2026-10-24 10:01:00 · окно вопросов\nвопрос: [q2abc] выбрать?\n")
+    open(dec4, "a", encoding="utf-8").write("не задача: [q1abc] — решено словами\n")
+    run(env4, "check", "--quiet", t=T0 + 120)
+    last = [ln for ln in alerts_of(home4).splitlines() if "без задачи" in ln]
+    check("тик: id без дефиса — пометка «не задача: [q1abc] — причина» его закрывает, q2abc без пометки тревожит",
+          len(last) == 1 and "q2abc" in last[0] and "q1abc" not in last[0], last)
+    # п. 6а: тревога и запись seen — под замком; пока замок занят, тик ждёт
+    open(dec4, "a", encoding="utf-8").write("- 24.10 09:30 — владелец: ещё [zeus-b-race]\n")
+    os.makedirs(os.path.join(state4, "locks"), exist_ok=True)
+    held = open(os.path.join(state4, "locks", "unlinked.lock"), "a")
+    fcntl.flock(held, fcntl.LOCK_EX)
+    proc = subprocess.Popen([PY311, "-I", CLI, "check", "--quiet"], env=dict(env4, PANTHEON_NOW=str(T0 + 180)),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    _time.sleep(4)
+    waiting = proc.poll() is None and "zeus-b-race" not in alerts_of(home4)
+    fcntl.flock(held, fcntl.LOCK_UN)
+    held.close()
+    proc.communicate(timeout=120)
+    check("тик: пока замок unlinked занят другим проходом, тревога не пишется и проход ждёт; после — ровно одна строка",
+          waiting and alerts_of(home4).count("zeus-b-race") == 1, (waiting, alerts_of(home4)))
+    # п. 6б: seen не записывается — тревоги нет (не каждый проход)
+    open(dec4, "a", encoding="utf-8").write("- 24.10 09:31 — владелец: ещё [zeus-c-nowrite]\n")
+    n0 = alerts_of(home4).count("без задачи")
+    os.chmod(state4, 0o500)
+    try:
+        r1 = run(env4, "check", "--quiet", t=T0 + 240)
+        r2 = run(env4, "check", "--quiet", t=T0 + 300)
+    finally:
+        os.chmod(state4, 0o700)
+    check("тик: seen не записан — тревоги «без задачи» нет ни в первый, ни во второй проход, причина в stderr",
+          alerts_of(home4).count("без задачи") == n0 and "unlinked-seen.json не записан" in r1.stderr + r2.stderr
+          and "zeus-c-nowrite" not in read(seen4), (r1.stderr[-300:], r2.stderr[-300:]))
+    run(env4, "check", "--quiet", t=T0 + 360)
+    check("тик: запись снова возможна — тревога о нём один раз", alerts_of(home4).count("zeus-c-nowrite") == 1,
+          alerts_of(home4))
+    # b2 3: сухой прогон без ALERTS_IN_DRYRUN печатает тревогу, но id не прячет от настоящего прохода
+    open(dec4, "a", encoding="utf-8").write("- 24.10 09:32 — владелец: ещё [zeus-d-dry]\n")
+    dry_env = {k: v for k, v in env4.items() if k != "PANTHEON_ALERTS_IN_DRYRUN"}
+    r = run(dry_env, "check", "--quiet", t=T0 + 420)
+    check("тик, сухой прогон: тревога только напечатана, в seen id не записан",
+          "zeus-d-dry" in r.stdout and "zeus-d-dry" not in read(seen4) and "zeus-d-dry" not in alerts_of(home4),
+          (r.stdout[-300:], read(seen4)))
+    run(env4, "check", "--quiet", t=T0 + 480)
+    check("тик: настоящий проход после сухого называет этот id", alerts_of(home4).count("zeus-d-dry") == 1, alerts_of(home4))
+    # b2 1: пустые --option не варианты
+    tmp5, home5, state5, env5 = make()
+    r = run(env5, "task", "new", "--direction", "metis-pantheon", "--title", "В", "--question", "Что?", "--why", "потому",
+            "--option", "", "--option", "")
+    check("task new: вопрос без текста с двумя пустыми --option — отказ 2, файл не создан",
+          r.returncode == 2 and "--option" in r.stderr and tasks_of(home5) == [], (r.returncode, r.stderr))
+    check("is_full_question: пустые варианты не считаются",
+          not T.is_full_question({"question": "?", "why": "w", "options": ["", " "]})
+          and T.is_full_question({"question": "?", "why": "w", "options": ["А", "Б", ""]}))
+    # п. 7: вопрос с текстом, но без --why или вариантов — предупреждение, не отказ
+    r = new(env5, "--body", "Цель и готово", "--question", "Что?")
+    r2 = new(env5, "--body", "Цель и готово", "--question", "Что?", "--why", "потому", "--option", "А — да", "--option", "Б — нет")
+    check("task new: вопрос с текстом без --why/вариантов — код 0 и предупреждение; полный вопрос — без него",
+          r.returncode == 0 and "вопрос владельцу без --why" in r.stderr and r2.returncode == 0
+          and "вопрос владельцу без --why" not in r2.stderr, (r.stderr, r2.stderr))
+    # b2 2: пустой --body в task set — отказ
+    tp5 = os.path.join(home5, "directions", "metis-pantheon", "tasks", "metis-0001.md")
+    before = read(tp5)
+    r = run(env5, "task", "set", "metis-0001", "--body", "   ")
+    open(os.path.join(tmp5, "empty.txt"), "w").write("\n")
+    r2 = run(env5, "task", "set", "metis-0001", "--body-file", os.path.join(tmp5, "empty.txt"))
+    check("task set: пустой --body и пустой --body-file — отказ 2, задача не изменена",
+          r.returncode == 2 and r2.returncode == 2 and "пусты" in r.stderr and read(tp5) == before,
+          (r.returncode, r2.returncode, r.stderr))
+
     # чистые функции
     desc = T.has_description
     check("has_description: заголовок и журнал — нет; текст — да; чужой раздел — да",
