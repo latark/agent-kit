@@ -347,12 +347,27 @@ def t_workflows():
     uses = re.findall(r"uses:\s*(\S+)", text)
     check("tests.yml: Action только checkout и setup-python по 40 знакам SHA",
           uses and all(re.fullmatch(r"actions/(checkout|setup-python)@[0-9a-f]{40}", u) for u in uses), uses)
-    check("tests.yml: только чтение, PR в main, macOS, Python 3.14",
+    jobs = re.split(r"^jobs:\n", text, flags=re.M)[-1]
+    parts = re.split(r"^  (?=[a-z]+:\n)", jobs, flags=re.M)
+    job = {m.group(1): part for part in parts if (m := re.match(r"([a-z]+):\n", part))}
+    aff, full = job.get("affected", ""), job.get("full", "")
+    check("tests.yml: только чтение, PR и push в main, ручной запуск, Python 3.14, без токена в checkout",
           re.search(r"^permissions:\n  contents: read$", text, re.M) and re.search(r"pull_request:\n\s+branches: \[main\]", text)
-          and re.search(r"runs-on: macos-", text) and 'python-version: "3.14"' in text
-          and "persist-credentials: false" in text, text)
-    run = text.split("run: |", 1)[-1]
-    check("tests.yml: раннер run-tests.py по всем трём плагинам, ${{ }} не в run",
+          and re.search(r"push:\n\s+branches: \[main\]", text) and "workflow_dispatch:" in text
+          and text.count('python-version: "3.14"') == 2 and text.count("persist-credentials: false") == 2, text)
+    check("tests.yml: PR — job affected на Linux (минута macOS ×10), полная история для merge-base",
+          set(job) == {"affected", "full"} and re.search(r"if: github.event_name == 'pull_request'", aff)
+          and re.search(r"runs-on: ubuntu-", aff) and "fetch-depth: 0" in aff, job.keys())
+    check("tests.yml: push в main и ручной запуск — job full на macOS, не на PR",
+          re.search(r"if: github.event_name != 'pull_request'", full) and re.search(r"runs-on: macos-", full)
+          and "--affected" not in full, full)
+    run = aff.split("run: |", 1)[-1]
+    check("tests.yml: affected — раннер --affected --base origin/main по всем трём плагинам, код 3 — успех, ${{ }} не в run",
+          "plugins/pantheon/scripts/run-tests.py" in run and "--affected --base origin/main" in run
+          and all(f"plugins/{p}" in run.split("run-tests.py", 1)[-1] for p in ("guard", "pantheon", "project-tools"))
+          and re.search(r'if \[ "\$code" -eq 3 \]', run) and 'exit "$code"' in run and "${{" not in run, run)
+    run = full.split("run: |", 1)[-1]
+    check("tests.yml: full — раннер по всем трём плагинам, ${{ }} не в run",
           "plugins/pantheon/scripts/run-tests.py" in run and all(f"plugins/{p}" in run.split("run-tests.py", 1)[-1]
                                                                  for p in ("guard", "pantheon", "project-tools"))
           and "${{" not in run, run)

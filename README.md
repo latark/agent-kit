@@ -248,8 +248,8 @@
   каталоге сверяет запись выпуска `.claude-plugin/releases.json` (её пишет workflow release после слияния,
   metis-0512): та же версия и тот же хеш дерева, что в каталоге, — `claude plugin update <плагин>@agent-kit` без `-y`
   и тревога «обновлён X → Y»; записи нет, версия или дерево другие, файла нет или он битый — не ставит, причина одной
-  строкой в журнале. Тесты идут до слияния — workflow tests в GitHub Actions на каждый PR в main (macOS, Python 3.14,
-  все три плагина); локального прогона тестов новой версии, порога свопа и давления памяти у планового прохода больше нет (п. 8
+  строкой в журнале. Тесты идут до слияния — workflow tests в GitHub Actions на каждый PR в main (затронутое по карте, ubuntu-latest,
+  Python 3.14, все три плагина; полный набор на macOS — после слияния и вручную); локального прогона тестов новой версии, порога свопа и давления памяти у планового прохода больше нет (п. 8
   страницы упрощения 27.10): выпуск встаёт на первом плановом проходе после коммита «выпуск: …». За проход ставятся
   все плагины с выпуском. Установка не удалась — тревога одна на версию, следующий проход пробует снова. Встало не
   то, что выпущено (другая версия или хеш дерева), — критическая тревога. Журнал — `~/.local/state/pantheon/plugins/`.
@@ -415,7 +415,9 @@
   строки итога. `--affected` (metis-0451) — только тесты, связанные с изменёнными от `origin/main` (или `--base`)
   файлами, по карте `scripts/affected-map.json`: правка общего файла (lib/pantheon.py, hooks/python.sh, сам раннер,
   карта), файл вне карты, ошибка git — весь набор; ничего не затронуто — код 3 «нечего гонять». Шлюз и выпуск гоняют
-  полный набор. Подробности — в шапке скрипта.
+  полный набор. Не macOS (CI на Linux): файлы из `SKIP_NOT_MAC` не идут и печатаются строкой `skip … пропущено`
+  (отдельное число в итоге), команд ioreg, pmset, scutil файлы тестов получают как заглушки. Подробности — в шапке
+  скрипта.
 - `plugins/pantheon/scripts/affected-map.py` — строит карту для `--affected` прогоном всех тестов: каждый файл тестов
   в своей копии репозитория с метками, которые записывают, какие файлы он загрузил, открыл, запустил или скопировал
   (около 8 мин при трёх воркерах). Карту строят заново после большой правки тестов; то, что устаревшая карта
@@ -442,7 +444,7 @@
 
 ## Проверки
 
-    heavy python3 -I plugins/pantheon/scripts/run-tests.py plugins/guard plugins/pantheon plugins/project-tools  # все сразу; так же — CI
+    heavy python3 -I plugins/pantheon/scripts/run-tests.py plugins/guard plugins/pantheon plugins/project-tools  # все сразу; на main после слияния — и CI (macOS)
     heavy python3 -I plugins/pantheon/scripts/run-tests.py --affected plugins/guard plugins/pantheon plugins/project-tools  # во время правки
     heavy python3 -I plugins/pantheon/scripts/affected-map.py plugins/guard plugins/pantheon plugins/project-tools  # карта заново
     python3 -I plugins/guard/tests/test_guard.py      # карта прав ~/ai/pantheon, domain, привилегии, protect-config, режимы
