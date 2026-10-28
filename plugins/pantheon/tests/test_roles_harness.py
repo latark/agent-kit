@@ -25,6 +25,7 @@ _atexit.register(_shutil.rmtree, _ROOT, True)
 
 PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(PLUGIN, "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 results = []
 
 
@@ -51,7 +52,7 @@ def build(roles_dir):
         fh.write(REG)
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": os.path.join(tmp, "state"),
            "PANTHEON_PLUGIN_ROLES": roles_dir, "PANTHEON_NO_NOTIFY": "1"}
-    r = subprocess.run([PY311, "-I", LIB, "roles", "build", "--out", out], env=env, capture_output=True, text=True,
+    r = subprocess.run([PY311, "-I", RUN_PY, "roles", "build", "--out", out], env=env, capture_output=True, text=True,
                        timeout=120)
     return r.returncode, out, r.stdout + r.stderr
 

@@ -19,6 +19,7 @@ from _py311 import PY311  # noqa: E402
 ROOT = os.path.realpath(tempfile.mkdtemp(prefix="board-drift-"))
 atexit.register(shutil.rmtree, ROOT, True)
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 results = []
 DIR = "metis-pantheon"
 
@@ -42,7 +43,7 @@ class Env:
     def run(self, args):
         env = {"PATH": os.environ["PATH"], "HOME": self.home, "PANTHEON_HOME": self.pan, "PANTHEON_STATE": self.state,
                "PANTHEON_VIEW": os.path.join(ROOT, "view"), "PANTHEON_NO_NOTIFY": "1", "TMPDIR": ROOT}
-        return subprocess.run([PY311, "-I", LIB] + args, env=env, capture_output=True, text=True, timeout=120)
+        return subprocess.run([PY311, "-I", RUN_PY] + args, env=env, capture_output=True, text=True, timeout=120)
 
     def task(self, title, *extra):
         r = self.run(["task", "new", "--direction", DIR, "--title", title, "--text", "тело задачи", *extra])

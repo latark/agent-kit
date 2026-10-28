@@ -18,6 +18,7 @@ import tempfile
 
 PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(PLUGIN, "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 ROOT = os.path.realpath(tempfile.mkdtemp(prefix="win-ports-"))
 atexit.register(shutil.rmtree, ROOT, True)
 results = []
@@ -46,7 +47,7 @@ def main():
     def build(*args):
         env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
                "PANTHEON_NO_NOTIFY": "1"}
-        r = subprocess.run([py311(), "-I", LIB, "domains", "build", *args], env=env, capture_output=True, text=True,
+        r = subprocess.run([py311(), "-I", RUN_PY, "domains", "build", *args], env=env, capture_output=True, text=True,
                            timeout=120)
         if r.returncode:
             print(r.stderr)

@@ -19,6 +19,7 @@ from datetime import date, timedelta
 
 PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(PLUGIN, "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 ROOT = os.path.realpath(tempfile.mkdtemp(prefix="grants-"))
 atexit.register(shutil.rmtree, ROOT, True)
 results = []
@@ -49,7 +50,7 @@ def main():
            "PANTHEON_NO_NOTIFY": "1"}
 
     def build(*args):
-        r = subprocess.run([py311(), "-I", LIB, "domains", "build", *args], env=env, capture_output=True, text=True,
+        r = subprocess.run([py311(), "-I", RUN_PY, "domains", "build", *args], env=env, capture_output=True, text=True,
                            timeout=120)
         if r.returncode:
             print(r.stderr)

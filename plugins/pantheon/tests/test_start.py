@@ -26,6 +26,7 @@ import time
 OWNER_WINDOW = 15 * 60
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 HEAVY = os.path.join(ROOT, "bin", "heavy")
 DEV_STOP = os.path.join(ROOT, "hooks", "dev-stop-verify.py")
 
@@ -123,11 +124,11 @@ def main():
 
     def run(*args, stdin=None, extra=None, tty=False):
         if not tty:
-            return subprocess.run([PY311, "-I", LIB, *args], env=dict(env, **(extra or {})),
+            return subprocess.run([PY311, "-I", RUN_PY, *args], env=dict(env, **(extra or {})),
                                   capture_output=True, text=True, timeout=60, input=stdin)
         # pantheon start zeus идёт только из терминала; псевдотерминалов в песочнице нет — stdin подменён на «терминал»
         boot = ("import runpy, sys\nclass T:\n    def isatty(self):\n        return True\n"
-                f"sys.stdin = T()\nsys.argv = [{LIB!r}] + {list(args)!r}\nrunpy.run_path({LIB!r}, run_name='__main__')\n")
+                f"sys.stdin = T()\nsys.argv = [{RUN_PY!r}] + {list(args)!r}\nrunpy.run_path({RUN_PY!r}, run_name='__main__')\n")
         return subprocess.run([PY311, "-I", "-c", boot], env=dict(env, **(extra or {})), capture_output=True,
                               text=True, timeout=60)
 

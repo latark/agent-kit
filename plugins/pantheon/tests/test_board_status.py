@@ -28,6 +28,7 @@ PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(PLUGIN, "lib", "pantheon.py")
 
 
+RUN_PY = os.path.join(os.path.dirname(CLI), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 def load(name):
     spec = importlib.util.spec_from_file_location(name, os.path.join(PLUGIN, "lib", name + ".py"))
     m = importlib.util.module_from_spec(spec)
@@ -206,7 +207,7 @@ env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON
 
 
 def cli(args, t=T0):
-    return subprocess.run([PY311, "-I", CLI] + args, env=dict(env, PANTHEON_NOW=str(t)), capture_output=True, text=True,
+    return subprocess.run([PY311, "-I", RUN_PY] + args, env=dict(env, PANTHEON_NOW=str(t)), capture_output=True, text=True,
                           timeout=300)
 
 

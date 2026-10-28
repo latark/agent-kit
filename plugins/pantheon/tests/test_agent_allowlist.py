@@ -22,6 +22,7 @@ import tempfile
 
 PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(PLUGIN, "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 AGENTS = os.path.join(PLUGIN, "hooks", "agents.py")
 CTX = os.path.join(PLUGIN, "hooks", "ctx.py")
 ROOT = os.path.realpath(tempfile.mkdtemp(prefix="agent-allowlist-test-"))
@@ -131,7 +132,7 @@ def main():
     tmp = os.path.join(ROOT, "a")
     os.makedirs(tmp)
     home, state, env = setup(tmp)
-    r = subprocess.run([lib_python(), "-I", LIB, "domains", "build"], env=env, capture_output=True, text=True,
+    r = subprocess.run([lib_python(), "-I", RUN_PY, "domains", "build"], env=env, capture_output=True, text=True,
                        timeout=120)
     check("сборка прошла", r.returncode == 0)
     if r.returncode != 0:

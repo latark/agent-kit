@@ -19,6 +19,7 @@ from _py311 import PY311  # CLI pantheon — только на Python 3.11+
 import tempfile
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 ROOT = os.path.realpath(tempfile.mkdtemp(prefix="sandbox-size-test-"))
 atexit.register(shutil.rmtree, ROOT, True)
 dash = lambda p: re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(p))  # noqa: E731
@@ -61,7 +62,7 @@ def setup(tmp):
 
 
 def build(env):
-    return subprocess.run([PY311, "-I", LIB, "domains", "build"], env=env, capture_output=True, text=True,
+    return subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True, text=True,
                           timeout=120)
 
 

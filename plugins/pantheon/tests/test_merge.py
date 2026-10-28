@@ -28,6 +28,7 @@ _atexit.register(_shutil.rmtree, _ROOT, True)
 HERE = os.path.dirname(os.path.abspath(__file__))
 LIBDIR = os.path.join(os.path.dirname(HERE), "lib")
 LIB = os.path.join(LIBDIR, "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 GUARD_HOOKS = os.path.join(os.path.dirname(os.path.dirname(HERE)), "guard", "hooks")
 T0 = 1_792_000_000
 REPO = "latark/agent-kit"
@@ -142,7 +143,7 @@ class Box:
             cmd = [PY311, "-I", "-c", HARNESS] + args
             env = dict(env, **(evil or {}), MERGE_TEST=json.dumps({"env": env}))
         else:
-            cmd = [PY311, "-I", LIB] + args
+            cmd = [PY311, "-I", RUN_PY] + args
         r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=60)
         self.outs.append(r.stdout + r.stderr)
         return r
@@ -985,7 +986,7 @@ def test_env_home():
     """HOME не домашняя папка учётной записи (launchctl setenv HOME) — проход не идёт. Без обвязки: как у тика."""
     b = Box()
     b.request()
-    r = subprocess.run([PY311, "-I", LIB, "merge", "run"], env=b.env(T0), capture_output=True, text=True, timeout=60)
+    r = subprocess.run([PY311, "-I", RUN_PY, "merge", "run"], env=b.env(T0), capture_output=True, text=True, timeout=60)
     check("HOME из launchd не домашняя папка учётной записи → отказ (код 2), окна и слияния нет, заявка цела",
           r.returncode == 2 and not b.windows() and not b.merges() and b.req() is not None, r.stdout + r.stderr)
 

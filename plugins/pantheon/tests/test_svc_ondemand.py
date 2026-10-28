@@ -31,6 +31,7 @@ _atexit.register(_shutil.rmtree, _ROOT, True)
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(HERE, "lib")
 PAN = os.path.join(LIB, "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(PAN), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 T0 = 1_792_000_000
 OK, FAIL = [], []
 IDLE = 2  # секунды простоя в тесте (в жизни — idle_min, 30 мин)
@@ -500,7 +501,7 @@ def test_qmd_serve():
         open(os.path.join(pan, "qmd.toml"), "w").write(f"port = {lport}\n")
         logp = os.path.join(tmp, "serve.log")
         with open(logp, "w") as log:
-            proxy = subprocess.Popen([PY311, "-I", PAN, "qmd", "serve"], env=env, pass_fds=(lst.fileno(),),
+            proxy = subprocess.Popen([PY311, "-I", RUN_PY, "qmd", "serve"], env=env, pass_fds=(lst.fileno(),),
                                      stdout=log, stderr=log)
             time.sleep(IDLE / 2)
             check("qmd serve по сокету: без запроса процесса qmd нет", proxy.poll() is None and pids(pidfile) == [],
@@ -529,7 +530,7 @@ def test_qmd_serve_no_launchd():
     with tempfile.TemporaryDirectory() as tmp:
         home, pan, state, env = env_for(tmp, {"PANTHEON_QMD_BIN": fake_qmd(tmp), "PANTHEON_SVC_SOCKET": "Listeners"})
         open(os.path.join(pan, "qmd.toml"), "w").write("port = 8199\n")
-        r = subprocess.run([PY311, "-I", PAN, "qmd", "serve"], env=env, capture_output=True, text=True, timeout=60)
+        r = subprocess.run([PY311, "-I", RUN_PY, "qmd", "serve"], env=env, capture_output=True, text=True, timeout=60)
         check("qmd serve по требованию не под launchd — код 1 и причина", r.returncode == 1
               and "нет сокета службы по требованию" in r.stderr and "Traceback" not in r.stderr, r.stderr)
 
@@ -552,7 +553,7 @@ socket = 80
 
 
 def run(env, *args):
-    return subprocess.run([PY311, "-I", PAN, *args], env=env, capture_output=True, text=True, timeout=60)
+    return subprocess.run([PY311, "-I", RUN_PY, *args], env=env, capture_output=True, text=True, timeout=60)
 
 
 def dry(state):

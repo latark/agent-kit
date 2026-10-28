@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
 CLI = os.path.join(LIB, "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(CLI), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 MSK = timezone(timedelta(hours=3))  # Москва без перехода на летнее время с 2014 года
 results = []
 
@@ -58,7 +59,7 @@ def make(schedule=""):
 
 def run(w, *args, t, idle=0, env=None):
     e = dict(w["env"], PANTHEON_NOW=str(t), PANTHEON_FAKE_IDLE=str(idle), **(env or {}))
-    return subprocess.run([PY311, "-I", CLI, *args], env=e, capture_output=True, text=True, timeout=60)
+    return subprocess.run([PY311, "-I", RUN_PY, *args], env=e, capture_output=True, text=True, timeout=60)
 
 
 def board(w, t, idle=0):
@@ -450,7 +451,7 @@ def review_case():
     fd = os.open(os.path.join(w["state"], "locks", "notify.lock"), os.O_WRONLY | os.O_CREAT)
     fcntl.flock(fd, fcntl.LOCK_EX)
     t0 = _time.time()
-    r = subprocess.run([PY311, "-I", CLI, "alert", "прод упал", "--critical", "--from", "zeus"],
+    r = subprocess.run([PY311, "-I", RUN_PY, "alert", "прод упал", "--critical", "--from", "zeus"],
                        env=dict(w["env"], PANTHEON_NOW=str(at(20, 12))), capture_output=True, text=True, timeout=60)
     took = _time.time() - t0
     fcntl.flock(fd, fcntl.LOCK_UN)

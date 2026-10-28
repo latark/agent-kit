@@ -18,6 +18,7 @@ os.environ["TMPDIR"] = _ROOT
 _atexit.register(shutil.rmtree, _ROOT, True)
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 SHA = "a" * 40
 results = []
 
@@ -45,7 +46,7 @@ def run_all(tmp):
            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
 
     def pantheon(*args, cwd=tmp):
-        return subprocess.run([sys.executable, "-I", LIB, *args], capture_output=True, text=True, env=env, cwd=cwd)
+        return subprocess.run([sys.executable, "-I", RUN_PY, *args], capture_output=True, text=True, env=env, cwd=cwd)
 
     def git(*args, cwd):
         return subprocess.run(["git", *args], capture_output=True, text=True, env=env, cwd=cwd)
@@ -237,7 +238,7 @@ def run_all(tmp):
     import shutil as _sh
 
     def at(t, *args):
-        return subprocess.run([sys.executable, "-I", LIB, *args], capture_output=True, text=True,
+        return subprocess.run([sys.executable, "-I", RUN_PY, *args], capture_output=True, text=True,
                               env=dict(env, PANTHEON_NOW=str(t), PANTHEON_SESSION="hephaestus-x"), cwd=tmp)
 
     T = 1_800_000_000

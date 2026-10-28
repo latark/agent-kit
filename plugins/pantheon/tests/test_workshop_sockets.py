@@ -22,6 +22,7 @@ PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(PLUGIN, "lib", "pantheon.py")
 
 
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 def _root():
     # короткий корень для пробы: путь сокета на macOS — до 104 байт; в песочнице /tmp закрыт — тогда $TMPDIR
     try:
@@ -115,7 +116,7 @@ def main():
     os.symlink(real_lib, os.path.join(tmp, "Library"))
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_NO_NOTIFY": "1"}
-    r = subprocess.run([py311(), "-I", LIB, "domains", "build"], env=env, capture_output=True, text=True, timeout=120)
+    r = subprocess.run([py311(), "-I", RUN_PY, "domains", "build"], env=env, capture_output=True, text=True, timeout=120)
     check("domains build на временном HOME прошёл", r.returncode == 0)
     if r.returncode != 0:
         print(r.stderr)

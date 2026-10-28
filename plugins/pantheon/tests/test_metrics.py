@@ -24,6 +24,7 @@ sys.path.insert(0, HERE)
 from _py311 import PY311  # noqa: E402
 
 CLI = os.path.join(PLUGIN, "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(CLI), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 spec = importlib.util.spec_from_file_location("metrics_under_test", os.path.join(PLUGIN, "lib", "metrics.py"))
 M = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(M)
@@ -446,7 +447,7 @@ def cli():
            "PANTHEON_FAKE_IDLE": "0"}
 
     def run(*args, t=T0, **extra):
-        return subprocess.run([PY311, "-I", CLI, *args], env=dict(env, PANTHEON_NOW=str(t), **extra),
+        return subprocess.run([PY311, "-I", RUN_PY, *args], env=dict(env, PANTHEON_NOW=str(t), **extra),
                               capture_output=True, text=True, timeout=120)
 
     rows_path = os.path.join(pantheon, "metrics", "tasks.jsonl")

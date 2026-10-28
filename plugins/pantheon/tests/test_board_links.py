@@ -24,6 +24,7 @@ import tasks as T  # noqa: E402
 from _py311 import PY311  # noqa: E402
 
 CLI = os.path.join(LIB, "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(CLI), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 T0 = datetime(2026, 10, 28, 12, 0).timestamp()
 R = "latark/agent-kit"
 results = []
@@ -152,7 +153,7 @@ def unit():
 
 
 def run(env, *args, t=T0):
-    return subprocess.run([PY311, "-I", CLI, *args], env=dict(env, PANTHEON_NOW=str(t)), capture_output=True,
+    return subprocess.run([PY311, "-I", RUN_PY, *args], env=dict(env, PANTHEON_NOW=str(t)), capture_output=True,
                           text=True, timeout=300)
 
 

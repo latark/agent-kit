@@ -30,6 +30,7 @@ atexit.register(shutil.rmtree, _ROOT, True)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB_DIR = os.path.join(ROOT, "lib")
 LIB = os.path.join(LIB_DIR, "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 sys.path.insert(0, LIB_DIR)
 import tasks as T  # noqa: E402
 
@@ -145,7 +146,7 @@ def cli_tests():
 
     def run(*args, extra=None):
         e = dict(env, **(extra or {}))
-        return subprocess.run([PY311, "-I", LIB, *args], env=e, capture_output=True, text=True, timeout=120)
+        return subprocess.run([PY311, "-I", RUN_PY, *args], env=e, capture_output=True, text=True, timeout=120)
 
     def calls():
         return [json.loads(x) for x in open(log)] if os.path.exists(log) else []

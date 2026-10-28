@@ -36,6 +36,7 @@ PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROLES = os.path.join(PLUGIN, "roles")
 HOOK = os.environ.get("PANTHEON_TEST_TEXT_STOP_HOOK") or os.path.join(PLUGIN, "hooks", "text-stop-verify.py")
 LIB = os.path.join(PLUGIN, "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 results = []
 
 
@@ -261,7 +262,7 @@ def build_test():
            "PANTHEON_CLAUDE_TMP": os.path.join(tmp, "ctmp")}
     os.makedirs(env["PANTHEON_CLAUDE_TMP"])
     out = os.path.join(tmp, "out")
-    r = subprocess.run([PY311, "-I", LIB, "roles", "build", "--out", out], env=env, capture_output=True, text=True,
+    r = subprocess.run([PY311, "-I", RUN_PY, "roles", "build", "--out", out], env=env, capture_output=True, text=True,
                        timeout=120)
     errs = [x for x in r.stderr.splitlines() if x.startswith("roles build:")]
     pal = read(os.path.join(out, "palamedes.md"))

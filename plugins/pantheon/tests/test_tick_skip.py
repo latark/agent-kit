@@ -18,6 +18,7 @@ from _py311 import PY311  # noqa: E402
 ROOT = os.path.realpath(tempfile.mkdtemp(prefix="tick-skip-"))
 atexit.register(shutil.rmtree, ROOT, True)
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 T0 = 1_792_000_000
 results = []
 
@@ -81,7 +82,7 @@ class Env:
         if dry:
             env["PANTHEON_DRYRUN"] = "1"
         env.update(extra)
-        return subprocess.run([PY311, "-I", LIB] + args, env=env, capture_output=True, text=True, timeout=60)
+        return subprocess.run([PY311, "-I", RUN_PY] + args, env=env, capture_output=True, text=True, timeout=60)
 
     def syncs(self):
         return len(open(self.mark).read().split()) if os.path.exists(self.mark) else 0

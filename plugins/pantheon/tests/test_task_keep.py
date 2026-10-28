@@ -26,6 +26,7 @@ _atexit.register(_shutil.rmtree, _ROOT, True)
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
 CLI = os.path.join(LIB, "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(CLI), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 sys.path.insert(0, LIB)
 T0 = datetime(2026, 10, 24, 12, 0).timestamp()
 results = []
@@ -50,7 +51,7 @@ def make():
 
 
 def run(env, *args, t=T0):
-    return subprocess.run([PY311, "-I", CLI, *args], env=dict(env, PANTHEON_NOW=str(t)), capture_output=True,
+    return subprocess.run([PY311, "-I", RUN_PY, *args], env=dict(env, PANTHEON_NOW=str(t)), capture_output=True,
                           text=True, timeout=300)
 
 
@@ -393,7 +394,7 @@ def main():
     os.makedirs(os.path.join(state4, "locks"), exist_ok=True)
     held = open(os.path.join(state4, "locks", "unlinked.lock"), "a")
     fcntl.flock(held, fcntl.LOCK_EX)
-    proc = subprocess.Popen([PY311, "-I", CLI, "check", "--quiet"], env=dict(env4, PANTHEON_NOW=str(T0 + 180)),
+    proc = subprocess.Popen([PY311, "-I", RUN_PY, "check", "--quiet"], env=dict(env4, PANTHEON_NOW=str(T0 + 180)),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     _time.sleep(4)
     waiting = proc.poll() is None and "zeus-b-race" not in alerts_of(home4)
