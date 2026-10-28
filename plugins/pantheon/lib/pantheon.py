@@ -115,7 +115,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon revisits                     пересмотры к сроку и по событиям (плановый проход раз в сутки)
   pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией; задание из окна роли
                                         — только по слову владельца в окне Зевса за 15 мин, иначе код 2
-  pantheon wake hestia --task <id> [--dry-run]   Гестия в своём окне песочницы (settings/hestia.json) с открытой
+  pantheon wake hestia --task <id> [--restart] [--dry-run]   Гестия в своём окне песочницы (settings/hestia.json) с открытой
                                         задачей; без задачи или с закрытой — отказ «нет задачи» (код 2); из окна
                                         роли — только по слову владельца в окне Зевса за 15 мин, иначе код 2;
                                         из окна hq — как start --from zeus
@@ -3618,12 +3618,15 @@ def _fresh_start(name, a, text, origin, reason=None):
     return 0
 
 
-def copies_message(name, live):
+def copies_message(name, live, again=None):
+    """again — готовая команда «начать заново» (у wake hestia сообщение сессии не доходит: blocked без сокета)."""
     tab = [a for a in live if not a.get("id")]
     if tab:
         return (f"{name} открыта во вкладке терминала (pid {tab[0].get('pid')}) — перейдите в неё или закройте её и "
                 "запустите снова")
     ids = ", ".join(f"{a.get('name')} {a['id']} ({a.get('state')})" for a in live)
+    if again:
+        return f"{name} уже работает: {ids}. Убрать её и поднять новую — {again}; или claude attach {live[0]['id']}"
     return (f"{name} уже работает: {ids}. Поручение — сообщением ей (SendMessage, адрес {name}) или claude attach "
             f"{live[0]['id']}; начать заново — тот же запуск с --restart")
 
@@ -4067,7 +4070,7 @@ def start(rest):
 
 
 def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win, need_word=False,
-                   cmd="pantheon start", extra_env=None):
+                   cmd="pantheon start", extra_env=None, again=None):
     agents = agents_all()
     if not dry:  # metis-0261 А: слово владельца и замер — до любых действий; список сессий тот же, что ниже
         code, why = start_gate(name, origin, agents, need_word)
@@ -4086,7 +4089,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
             for a in dead:
                 start_log(f"dead-blocked\t{name}\t{a['id']}\tнет процесса и вопроса — заменяется новой")
     if live and not dry and (not restart or any(not a.get("id") for a in live)):
-        print(f"pantheon start: {copies_message(name, live)}", file=sys.stderr)
+        print(f"{cmd}: {copies_message(name, live, again)}", file=sys.stderr)
         return 1
     stopped = []
     if live and not dry:
@@ -4289,7 +4292,7 @@ def wake_recheck(name, state=None):
 
 
 def wake_hestia(rest):
-    """pantheon wake hestia --task <id> [--dry-run] (metis-0217, metis-0245): Гестия — фоновой сессией `hestia` в своём
+    """pantheon wake hestia --task <id> [--restart] [--dry-run] (metis-0217, metis-0245): Гестия — фоновой сессией `hestia` в своём
     окне песочницы (settings/hestia.json, собирает sandbox_build; PANTHEON_ROLE=hestia — правило guard hestia), папка
     запуска — её кэш. Одна задача — одна сессия: без задачи, с id не по образцу, несуществующей или не открытой задачей
     — отказ «нет задачи», код 2, claude не зовётся. Нет окна, кэша или роли (~/.claude/agents/hestia.md) — код 1 с
@@ -4297,7 +4300,8 @@ def wake_hestia(rest):
     Откуда — как у start: hq → zeus, иная роль → tick, без роли → owner; из окна роли без вашего слова в
     owner-log/zeus.md за 15 мин — отказ, код 2, строка refused в capacity.jsonl, claude не зовётся."""
     dry = "--dry-run" in rest
-    args = [a for a in rest[1:] if a != "--dry-run"]
+    restart = "--restart" in rest  # metis-0575: зависшую прежнюю Гестию стопит и убирает (claude stop, затем rm_previous)
+    args = [a for a in rest[1:] if a not in ("--dry-run", "--restart")]
     tid = args[1] if len(args) == 2 and args[0] == "--task" else None
     head = None
     if tid and tasks_mod().ID_RE.fullmatch(tid):
@@ -4334,8 +4338,9 @@ def wake_hestia(rest):
         if not got:
             print("pantheon wake hestia: hestia уже запускается другой командой", file=sys.stderr)
             return 1
-        return _start_session("hestia", "hestia", folder, "hestia", task, [], origin, dry, False, win,
+        return _start_session("hestia", "hestia", folder, "hestia", task, [], origin, dry, restart, win,
                               need_word=bool(role), cmd="pantheon wake hestia",
+                              again=f"pantheon wake hestia --task {tid} --restart",
                               extra_env={"PANTHEON_TASK": tid, "PANTHEON_TASK_DIRECTION": str(head.get("direction") or "")})
 
 
@@ -7358,7 +7363,10 @@ def check(paths=None, quiet=False):
         tails = ([("хвост", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
                   for i, ln in T.tail_lines(tasks_now, now())]
                  + [("отчёт", p, f"{p}:{n}") for p, n in T.inbox_orphans(tasks_now, os.path.join(AI_HOME, "knowledge", "inbox"), now())]
-                 + [("ревью", p, f"{p}:{n}") for p, n in T.review_debts(tasks_now, PANTHEON, now())])
+                 + [("ревью", p, f"{p}:{n}") for p, n in T.review_debts(tasks_now, PANTHEON, now())]
+                 + [("часть", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
+                    for i, ln in T.part_stalled(tasks_now, now())])
+        tails_board(tails)  # metis-0572: полный список — на доску, в том числе то, о чём тревога уже была или молчит
         field_errs, field_warns = T.board_problems(tasks_now, now(), night_end, autoclose_mod().open_pr_tasks(path("autoclose.json")))
         field_errs = [(i, f"status done без closed — проставлен из updated") for i in fixed] + field_errs
         for tid, text in field_errs:
@@ -7464,7 +7472,23 @@ def unlinked_alert(T, unlinked):
 TAIL_SHOWN = 12
 TAIL_TEXT = {"хвост": "хвост в журнале без задачи (нет id задачи в строке)",
              "отчёт": "файл inbox старше суток без задачи разбора (нет ссылки source/from или в тексте)",
-             "ревью": "ревью с находкой Д без задачи (нет ссылки на файл ревью)"}
+             "ревью": "ревью с находкой Д без задачи (нет ссылки на файл ревью)",
+             "часть": "PR слит с «часть», задача без движения дольше 24 ч (закрыть, завести остаток или записать ход)"}
+
+
+def tails_board(items):
+    """Доска/Хвосты.md (metis-0572): все хвосты, как их видит проход сейчас, а не только новые для тревоги — тревогу
+    первый проход глотает, а владелец смотрит доску. Файла нет, пока доски нет; пишется только при изменении."""
+    if not os.path.isdir(BOARD):
+        return
+    rows = [f"- **{TAIL_TEXT[kind].split(' (')[0]}** — {where}" for kind, _, where in items]
+    text = ("# Хвосты\n\nЧто плановый проход считает потерянным: строка журнала без задачи, файл inbox и ревью без задачи, "
+            "слитый PR «часть» без движения. Погасить — строка в журнале задачи «→ <id>» или «не задача: …» либо "
+            "задача на разбор.\n\n" + ("\n".join(rows) or "Нет — всё в порядке.") + "\n")
+    pp = os.path.join(BOARD, "Хвосты.md")
+    old = open(pp, encoding="utf-8").read() if os.path.exists(pp) else ""
+    if old != text:
+        write_atomic(pp, text)
 
 
 def tail_alert(T, items):

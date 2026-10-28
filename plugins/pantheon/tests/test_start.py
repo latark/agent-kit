@@ -834,6 +834,38 @@ def main():
           and hrun["env"].get("PANTHEON_TASK") == "athena-0001" and hrun["env"].get("PANTHEON_TASK_DIRECTION") == "athena-shop"
           and hrun["env"].get("PANTHEON_ORIGIN") == "zeus" and hrun["env"].get("PANTHEON_SESSION") == "hestia"
           and hrun["sandbox"]["excludedCommands"] == hwin["sandbox"]["excludedCommands"])
+    # metis-0575: зависшая прежняя Гестия (blocked с процессом) — без --restart отказ с подсказкой --restart, с ним —
+    # claude stop, новая сессия и claude rm прежней; pantheon stop hestia убирает её же
+    stuck = [{"id": "h1", "name": "hestia", "state": "blocked", "pid": 4242, "sessionId": "5a1a1a1a-0777", "kind": "background"}]
+    hq = {"PANTHEON_ROLE": "hq"}
+    open(agents_file, "w").write(json.dumps(stuck))
+    open(log, "w").close()
+    r = run("wake", "hestia", "--task", "athena-0001", extra=hq)
+    check("wake hestia: прежняя hestia blocked, без --restart — код 1, подсказка «wake hestia --task athena-0001 --restart» "
+          "(не SendMessage), claude stop/--bg не звали",
+          r.returncode == 1 and "pantheon wake hestia: hestia уже работает" in r.stderr
+          and "pantheon wake hestia --task athena-0001 --restart" in r.stderr and "SendMessage" not in r.stderr
+          and not calls())
+    r = run("wake", "hestia", "--task", "athena-0001", "--restart", extra=hq)
+    a = [x["argv"] for x in calls()]
+    check("wake hestia --restart: stop h1, затем новая сессия --bg, затем rm h1; код 0",
+          r.returncode == 0 and a[0] == ["stop", "h1"] and "--bg" in a[1] and a[-1] == ["rm", "h1"] and len(a) == 3)
+    open(agents_file, "w").write(json.dumps(stuck))
+    open(log, "w").close()
+    r = run("wake", "hestia", "--task", "athena-0001", "--restart", "--dry-run", extra=hq)
+    check("wake hestia --restart --dry-run: ничего не останавливает", r.returncode == 0 and not calls())
+    open(agents_file, "w").write(json.dumps(stuck))
+    open(log, "w").close()
+    r = run("stop", "hestia")
+    a = [x["argv"] for x in calls()]
+    check("pantheon stop hestia: stop и rm зависшей, метка «остановлено вами», код 0",
+          r.returncode == 0 and a == [["stop", "h1"], ["rm", "h1"]] and os.path.exists(os.path.join(state, "stopped", "hestia")))
+    os.remove(os.path.join(state, "stopped", "hestia"))
+    open(log, "w").close()
+    r = run("stop", "nonsense")
+    check("pantheon stop nonsense: по-прежнему «не сессия направления», код 2, claude не звали",
+          r.returncode == 2 and "не сессия направления" in r.stderr and not calls())
+    open(agents_file, "w").write("[]")
     os.remove(hwin_path)
     open(log, "w").close()
     r = run("wake", "hestia", "--task", "athena-0001")
