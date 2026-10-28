@@ -582,6 +582,10 @@ def main():
     miss = [f for f in callers if effort_rule not in flat.get(f, "")]
     check("лиды, координатор и Зевс: argus вне ядра — Sonnet с effort medium, ядро — model opus без effort"
           + (f" (нет у: {miss})" if miss else ""), not miss)
+    check("hq: каждый вопрос владельцу вопрос на решение начинается с «[<id>]», карточка — по «Вопрос на решение» (metis-0408)",
+          "Вопрос владельцу на решение — в окне вопросов, в карточке, в сообщении — начинается с «[<id>]»"
+          in flat.get("hq.md", "") and "(`--question`, `--why`, два `--option`, `--recommend`)" in flat.get("hq.md", "")
+          and "вопрос о карточке сверх лимита — с id задачи-причины" in flat.get("hq.md", ""))
     argus_md = texts.get("argus.md", "")
     check("argus: в файле роли effort: high и model: sonnet; знает, что вне ядра его зовут с medium, а шлюз сверяет "
           "модель с транскриптом",
