@@ -26,17 +26,6 @@ import uuid
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
 SHIM = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_guard_shim.py")  # запуск guard без зависимости от места тестов
-try:  # привилегии из policy.toml читает tomllib (Python 3.11+); на системном 3.9 политика пуста — это безопасный отказ
-    import tomllib  # noqa: F401
-    HAS_TOMLLIB = True
-except ImportError:
-    HAS_TOMLLIB = False
-# случаи, где «allow» держится только на привилегии/agent_extra из policy.toml: без tomllib guard их честно закрывает
-# (тот же приём, что MERGE_OK ниже). Обвязка не ослабляет проверку: с tomllib ожидание прежнее — allow.
-# prometheus в ~/ai/knowledge — без зон направлений ([sb-simplify]) allow и без policy.toml
-NEEDS_POLICY = {"Метида правит карту решений", "protect-config: Метида правит роль",
-                "protect-config: Метида пишет policy.toml", "private: mnemo-brain пишет в me/",
-                "momus пишет в ~/ai/knowledge/Inbox (agent_extra)", "0177 momus без agent_id пишет в ~/ai/knowledge/Inbox"}
 
 
 # имена корпуса для corpus-role — только из [corpus] policy.toml (metis-0182); здесь выдуманный корпус lecture-notes
@@ -254,7 +243,7 @@ def _read(path):
         return fh.read()
 
 
-def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None, raw=False, tuid=None, penv=None):
+def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, raw=False, tuid=None, penv=None):
     event = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": with_head(tool, tool_input),
              "cwd": os.path.join(home, cwd if cwd is not None else pdir), "session_id": "s-test",
              "tool_use_id": tuid or "toolu_" + uuid.uuid4().hex}
@@ -264,7 +253,7 @@ def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None, ra
         event["agent_id"] = "a1"
     env = {"HOME": home, "PATH": os.path.join(home, "fake-bin") + os.pathsep + os.environ["PATH"],
            "CLAUDE_PROJECT_DIR": os.path.join(home, pdir), "TMPDIR": "/nonexistent-tmp", **(penv or {})}
-    r = subprocess.run([python or sys.executable, "-I", SHIM, GUARD], input=json.dumps(event), capture_output=True,
+    r = subprocess.run([sys.executable, "-I", SHIM, GUARD], input=json.dumps(event), capture_output=True,
                        text=True, env=env, timeout=10)
     out = r.stdout
     if r.returncode == 2:  # сбой (metis-0094): Claude Code понимает код 2 как отказ с причиной из stderr
@@ -275,6 +264,42 @@ def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, python=None, ra
     if raw:
         return out
     return "deny" if '"deny"' in out else "allow"
+
+
+OLD_PYTHON = "/usr/bin/python3"  # на macOS — 3.9 из Command Line Tools
+
+
+def old_python_checks(home, br, cases):
+    """metis-0571: управляемые настройки, поставленные раньше, и окна до пересборки зовут guard голым python3. Если это
+    системный 3.9, guard перезапускается запускателем hooks/python.sh и работает целиком: corpus-role читает [corpus]
+    policy.toml (до metis-0571 на 3.9 правило молча пропускало). Круг (запускатель вернул старый Python) — код 2."""
+    failed = 0
+    old = subprocess.run([OLD_PYTHON, "-c", "import sys; print(sys.version_info < (3, 11))"], capture_output=True,
+                         text=True, timeout=30).stdout.strip() if os.path.exists(OLD_PYTHON) else ""
+    if old != "True":
+        print(f"пропуск: {OLD_PYTHON} нет или он 3.11+ — перезапуск guard со старого Python не проверить")
+        return 0
+    event = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "agent_type": "domain-coordinator",
+             "tool_input": {"command": "corpus add https://youtu.be/x"}, "cwd": os.path.join(home, br),
+             "session_id": "s-test", "tool_use_id": "toolu_" + uuid.uuid4().hex}
+    env = {"HOME": home, "PATH": "/usr/bin:/bin:" + os.path.dirname(sys.executable), "TMPDIR": "/nonexistent-tmp",
+           "CLAUDE_PROJECT_DIR": os.path.join(home, br)}
+    for label, extra in (("плагин", []), ("--managed", ["--managed"]), ("--strict", ["--strict"])):
+        r = subprocess.run([OLD_PYTHON, GUARD] + extra, input=json.dumps(event), capture_output=True, text=True,
+                           env=env, timeout=30)
+        ok = r.returncode == 0 and '"deny"' in r.stdout and "corpus-role" in r.stdout
+        failed += not ok
+        cases.append(None)
+        print(f"{'ok  ' if ok else 'FAIL'} {OLD_PYTHON} (3.9) {label}: guard перезапущен на 3.11+, corpus-role закрыт"
+              + ("" if ok else f": код {r.returncode} {r.stdout[:200]} {r.stderr[:300]}"))
+    r = subprocess.run([OLD_PYTHON, GUARD], input=json.dumps(event), capture_output=True, text=True,
+                       env=dict(env, GUARD_PY_REEXEC="1"), timeout=30)
+    ok = r.returncode == 2 and "нужен Python 3.11+" in r.stderr
+    failed += not ok
+    cases.append(None)
+    print(f"{'ok  ' if ok else 'FAIL'} старый Python после перезапуска (круг) — код 2 с причиной"
+          + ("" if ok else f": код {r.returncode} {r.stderr[:300]}"))
+    return failed
 
 
 def corpus_policy_checks(br, cases):
@@ -308,8 +333,6 @@ def corpus_policy_checks(br, cases):
     h = variant(lambda t: t.replace(CORPUS_SECTION, "[corpus]\n" + empty))
     got = tuple(run(h, br, "domain-coordinator", "Bash", x) for x in (add, script))
     check("пустые списки — правило пустое", got == ("allow", "allow"), got)
-    if not HAS_TOMLLIB:  # без tomllib политики нет: раздел не читается, битое значение не отличить от пустого
-        return failed
     broken = [
         ("commands строкой", lambda t: t.replace('commands = ["corpus"]', 'commands = "corpus"')),
         ("в scripts не строка", lambda t: t.replace('scripts = ["krisp_trash.py"', 'scripts = [1, "krisp_trash.py"')),
@@ -335,15 +358,14 @@ def hestia_consent_checks(br, cases):
     failed = 0
     TASK = "metis-0562"
     HS = {"PANTHEON_ROLE": "hestia", "PANTHEON_TASK": TASK, "PANTHEON_TASK_DIRECTION": "metis-pantheon"}
-    gh_ok = "allow" if HAS_TOMLLIB else "deny"  # -R сверяется с [merge_repos]; без tomllib политика пуста
     net = {
         "git push origin feature-x": "allow",
         "git push -u origin feature-x": "allow",
         "git push --force-with-lease origin feature-x": "allow",
         "git push --force-with-lease=feature-x origin feature-x": "allow",
-        "gh pr create -R latark/agent-kit -t x -b y": gh_ok,
-        "gh pr edit 1 --repo latark/agent-kit -b y": gh_ok,
-        "gh pr create -R latark/agent-kit -t x --body-file /tmp/hestia-body.md": gh_ok,
+        "gh pr create -R latark/agent-kit -t x -b y": "allow",
+        "gh pr edit 1 --repo latark/agent-kit -b y": "allow",
+        "gh pr create -R latark/agent-kit -t x --body-file /tmp/hestia-body.md": "allow",
     }
     never = {
         "git fetch origin": "fetch", "git pull origin x": "pull", "git clone https://github.com/a/b": "clone",
@@ -453,12 +475,11 @@ def ak_dir(br):
     return os.path.join(os.path.dirname(br), "agent-kit")
 
 
-def merge_security_checks(home, MERGE_OK, cases):
+def merge_security_checks(home, cases):
     """Находка проверки безопасности 2eda45f: защиты по remote, любой сбой — отказ; лиды (metis-0054). С guard 0.5.4
     поштучного «да» владельца нет — его заменил запор (test_merge_gate.py). Возвращает число упавших проверок."""
     failed = 0
     ak, ec = "projects/agent-kit", "projects/lecture-notes"
-    allow_ok = MERGE_OK == "allow"
 
     def check(name, ok):
         nonlocal failed
@@ -512,13 +533,13 @@ def merge_security_checks(home, MERGE_OK, cases):
     out = run(variant(policy_fn=lambda t: t + "\n[private]\ncoordinators = [1]\n"), ec, "domain-coordinator", "Bash",
               {"command": "gh pr merge 1"}, raw=True)
     check("[private].coordinators = [1] — отказ называет [private]",
-          deny(out) and ("[private] в policy.toml не разобрать" in out or not allow_ok))
+          deny(out) and ("[private] в policy.toml не разобрать" in out))
     got = M(variant(policy_fn=lambda t: t + "\n[private]\ncoordinators = []\nroles = []\n"), "gh pr merge 1", pdir=ec)
-    check(f"[private] с пустыми roles и coordinators — слияние как было: {got}", got == MERGE_OK)
+    check(f"[private] с пустыми roles и coordinators — слияние как было: {got}", got == "allow")
     # paths = [] — умолчание, как у guard (private_conf; ревью PR #35): шлюз не закрывается, личное не открывается
     hp = variant(policy_fn=lambda t: t + "\n[private]\npaths = []\n")
     got = M(hp, "gh pr merge 1", pdir=ec)
-    check(f"[private] paths = [] — слияние как было: {got}", got == MERGE_OK)
+    check(f"[private] paths = [] — слияние как было: {got}", got == "allow")
     me = os.path.join(hp, "ai/knowledge/me/finance.md")
     got = (run(hp, "projects/shopKeeperApp", "dev-sonnet", "Read", {"file_path": me}, sub=True),
            run(hp, ec, "domain-coordinator", "Bash", {"command": f"cat {me}"}))
@@ -531,7 +552,7 @@ def merge_security_checks(home, MERGE_OK, cases):
                                               'themis-library = ["latark/lecture-notes", "latark/agent-kit"]'))
     got = (M(h, "gh pr merge 5 -R latark/agent-kit", pdir=ec), M(h, "gh pr merge 2 -R latark/lecture-notes", pdir=ec))
     check(f"защиты по -R: latark/agent-kit в [merge_repos] Фемиды — отказ, свой -R — как было: {got}",
-          got == ("deny", MERGE_OK))
+          got == ("deny", "allow"))
     # корень направления-родитель («~/projects») не открывает папку другого направления внутри
     # широкий корень — первым в реестре: проверка «по первому совпадению» отдала бы ему sitebuilder
     h = variant(domains_fn=lambda t: json.dumps({"domains": dict({"zeta-wide": ["~/projects"]},
@@ -543,13 +564,13 @@ def merge_security_checks(home, MERGE_OK, cases):
            M(h, "gh pr merge 1", pdir="projects", cwd="projects/zz-own"),
            M(h, "gh pr merge 1", pdir="projects", cwd="projects/zz-plain"))
     check(f"чужая папка: корень «~/projects» над sitebuilder — отказ, своя папка — можно, не репозиторий git — отказ: {got}",
-          got == ("deny", MERGE_OK, "deny"))
+          got == ("deny", "allow", "deny"))
     # битая запись одного направления не выпадает молча: иначе его папку «унаследовал» бы широкий корень
     h = variant(domains_fn=lambda t: json.dumps({"domains": dict(json.loads(t)["domains"], **{
         "zeta-wide": ["~/projects"], "hermes-site": "~/projects/sitebuilder"})}))
     out = M(h, "gh pr merge 1", pdir="projects", cwd="projects/sitebuilder", raw=True)
     check("сбой — отказ: папки одного направления строкой — широкий корень не получает его папку",
-          deny(out) and ("domains.json" in out or not allow_ok))
+          deny(out) and ("domains.json" in out))
     # ревью argus 210766a: domains.json битый или удалён — без отката на старый ~/.claude/hooks/domains.json, где
     # направление шире (broker = shopKeeperApp + sitebuilder + law-feed): Гермес слил бы в law-feed
     legacy = {"domains": {"broker": ["~/projects/shopKeeperApp", "~/projects/sitebuilder", "~/projects/law-feed"]}}
@@ -566,7 +587,7 @@ def merge_security_checks(home, MERGE_OK, cases):
             os.remove(dom)
         out = M(h, "gh pr merge 2", pdir="projects/sitebuilder", cwd="projects/law-feed", raw=True)
         check(f"старый реестр: domains.json {label}, ~/.claude/hooks/domains.json есть — Гермес в law-feed — отказ",
-              deny(out) and ("domains.json" in out or not allow_ok))
+              deny(out) and ("domains.json" in out))
     # папка защит с .git, у которой remote не читается, — отказ всем; без .git — защищена только по пути
     h = variant(policy_fn=lambda t: t.replace('metis-pantheon = ["~/projects/agent-kit"]',
                                               'metis-pantheon = ["~/projects/agent-kit", "~/projects/broken-prot"]'))
@@ -577,7 +598,7 @@ def merge_security_checks(home, MERGE_OK, cases):
     os.remove(os.path.join(h, "projects/broken-prot/.git"))
     got = M(h, "gh pr merge 1", pdir=ec)
     check(f"сбой git: у папки защит сломан .git — отказ всем, без .git — как было: {got}",
-          deny(out) and ("не читается git remote" in out or not allow_ok) and got == MERGE_OK)
+          deny(out) and ("не читается git remote" in out) and got == "allow")
     # --- включение новой схемы строкой [merge_client]: без неё — как в 0.4.7 (решение лида, 15.10) ---
     no_client = lambda t: t.replace('[merge_client]\nathena-shop = ["~/projects/shopKeeperApp", '
                                     '"~/projects/broker-landing"]\n', "")
@@ -590,11 +611,11 @@ def merge_security_checks(home, MERGE_OK, cases):
     check(f"без [merge_client] (схема 0.4.7): Фемида и её -R — можно, Гермес и Афина — нельзя, Метида в "
           f"agent-kit по записям запора — можно, без записей — нельзя, её внутренняя папка (нет в [merge]) — нельзя, "
           f"Фемида в чужой папке (cwd без cd) — нельзя: {got}",
-          got == (MERGE_OK, MERGE_OK, "deny", "deny", MERGE_OK, "deny", "deny", "deny"))
+          got == ("allow", "allow", "deny", "deny", "allow", "deny", "deny", "deny"))
     h = variant(policy_fn=lambda t: no_client(t) + "[merge_client]\n")
     got = (M(h, "gh pr merge 1", pdir=alex), M(h, "gh pr merge 1", pdir=br), M(h, "gh pr merge 1", pdir=ec))
     check(f"пустая [merge_client] — новая схема: Гермес, Афина и Фемида в своих папках — можно: {got}",
-          got == (MERGE_OK, MERGE_OK, MERGE_OK))
+          got == ("allow", "allow", "allow"))
     h = variant(policy_fn=lambda t: 'merge_client = "x"\n' + no_client(t))  # ключ верхнего уровня — до таблиц
     got = M(h, "gh pr merge 1", pdir=alex)
     check(f"[merge_client] не таблицей — как без неё (0.4.7): Гермес — нельзя: {got}", got == "deny")
@@ -612,14 +633,14 @@ def merge_security_checks(home, MERGE_OK, cases):
     out = M(home, "gh pr merge 5 --auto", raw=True)
     check("защиты: отказ не просит «да» владельца, а называет шлюз слияния и Д3",
           deny(out) and (("шлюз слияния" in out and "(Д3)" in out and "окн" not in out and "--subject" not in out)
-                         or not allow_ok))
+                        ))
 
     # metis-0054: лид Метиды (hephaestus-pantheon субагентом) — по тем же правилам, что Метида
     def L(h, cmd, role="hephaestus-pantheon", pdir=ak, cwd=None, raw=False):
         return run(h, pdir, role, "Bash", {"command": cmd}, sub=True, cwd=cwd, raw=raw)
     got = (L(home, "gh pr merge 5 --squash"), L(home, "gh pr merge 3 -R latark/tg-read", cwd=tg))
     check(f"защиты: лид Метиды сливает защиты и -R из [merge_repos] по запору — можно: {got}",
-          got == (MERGE_OK, MERGE_OK))
+          got == ("allow", "allow"))
     got = (L(home, "gh pr merge 5 --auto"), L(home, "gh pr merge 5 6"), L(home, "gh pr merge 3 -R latark/sitebuilder", cwd=tg),
            L(home, "gh pr merge 3 -R latark/tg-read -R latark/agent-kit", cwd=tg),
            L(home, "gh pr merge 5", pdir=br, cwd=ak), L(home, "gh pr merge 5", role="hephaestus-shop"),
@@ -630,13 +651,13 @@ def merge_security_checks(home, MERGE_OK, cases):
     for r in ("dev-sonnet", "argus", "talos", "prometheus", "hephaestus", "hephaestus-"):
         out = L(home, "gh pr merge 1", role=r, pdir=br, raw=True)
         check(f"merge: {r} субагентом — отказ, текст про лида и отчёт лиду",
-              deny(out) and (("лид направления" in out and "отчёте лиду" in out) or not allow_ok))
+              deny(out) and (("лид направления" in out and "отчёте лиду" in out)))
     out = L(home, "gh pr merge 4", role="hephaestus-shop", pdir=alex, raw=True)
     check("merge: лид чужого направления (hephaestus-shop в сессии hermes-site) — отказ, текст про своё направление",
-          deny(out) and ("не лид направления этой сессии (hermes-site)" in out or not allow_ok))
+          deny(out) and ("не лид направления этой сессии (hermes-site)" in out))
     out = L(home, "gh pr merge 1", role="hephaestus-shop", pdir=br, raw=True)
     check("merge: лид своего направления — можно (текст отказа не про лида)",
-          (allow_ok and not deny(out)) or (not allow_ok and "не лид" not in out))
+          not deny(out))
     # реестр «по ошибке» отдал agent-kit/sub Афине (athena-shop-2): его лид — hephaestus-shop-2, защиты ему закрыты
     got = (L(home, "gh pr merge 5", role="hephaestus-shop-2", pdir=ak + "/sub"),
            L(home, "gh pr merge 5 -R latark/agent-kit", role="hephaestus-shop-2", pdir=ak + "/sub"))
@@ -646,12 +667,12 @@ def merge_security_checks(home, MERGE_OK, cases):
         json.loads(t)["domains"], **{"mnemo-brain": ["~/ai/knowledge"]}))))
     out = L(h, "gh pr merge 1", role="hephaestus-brain", pdir="ai/knowledge", raw=True)
     check("merge: лид mnemo-brain (hephaestus-brain) — отказ, у направления личное",
-          deny(out) and ("личному" in out or not allow_ok))
+          deny(out) and ("личному" in out))
     # [merge_protect] больше не читается: consent = false ничего не открывает и не ломает
     h = variant(policy_fn=lambda t: t + "[merge_protect]\nconsent = false\n")
     got = (M(h, "gh pr merge 5"), M(h, "gh pr merge 13"))
     check(f"[merge_protect] consent = false не читается: по запору — можно, без записей — отказ: {got}",
-          got == (MERGE_OK, "deny"))
+          got == ("allow", "deny"))
     h = variant()
     shutil.rmtree(os.path.join(h, ".local/state/pantheon"))
     out = M(h, "gh pr merge 5", raw=True)
@@ -777,11 +798,6 @@ def main():
     br, ak, alex, ws = "projects/shopKeeperApp", "projects/agent-kit", "projects/sitebuilder", "projects/workshop/visa"
     ec, lw = "projects/lecture-notes", "projects/law-feed"
     merge_fixtures(home)
-    try:  # без tomllib (Python 3.9) политика пуста — слияние закрыто, это безопасный отказ
-        import tomllib  # noqa: F401
-        MERGE_OK = "allow"
-    except ImportError:
-        MERGE_OK = "deny"
     cases = [
         # (имя, ожидание, папка запуска, роль, субагент, (инструмент, вход))
         ("hq пишет доску", "allow", ".", "hq", False, W(P("board.md"))),
@@ -1475,7 +1491,7 @@ def main():
         ("push: cd и push без ветки — отказ", "deny", br, "domain-coordinator", False, B(f"cd {home}/{alex} && git push")),
         # до 0.5.0 здесь был отказ: Афины нет в [merge]. С 0.5.0 свои папки берутся из domains.json, и
         # shopKeeperApp — её продукт ([merge_client]): слияние открыто, talos и откат — обязанность роли
-        ("push: gh pr merge Афиной в своём продукте — можно (0.5.0)", MERGE_OK, br, "domain-coordinator", False,
+        ("push: gh pr merge Афиной в своём продукте — можно (0.5.0)", "allow", br, "domain-coordinator", False,
          B("gh pr merge 12 --merge")),
         ("push: ваша сессия в main — можно", "allow", alex, "", False, B("git push origin main")),
         ("push: git push внутри текста коммита — не отправка", "allow", br, "dev-sonnet", True,
@@ -1553,11 +1569,11 @@ def main():
         ("corpus-role: ваша сессия без роли, corpus stage — можно", "allow", ".", "", False,
          B("corpus stage process --job a")),
         # --- push: gh pr merge координатору из [merge] (metis-0027) ---
-        ("merge: Фемида сливает свой PR — можно", MERGE_OK, ec, "domain-coordinator", False, B("gh pr merge 1 --squash")),
+        ("merge: Фемида сливает свой PR — можно", "allow", ec, "domain-coordinator", False, B("gh pr merge 1 --squash")),
         ("merge: Фемида без номера (текущая ветка) — отказ: запор сверяет записи на номер", "deny", ec,
          "domain-coordinator", False,
          B("gh pr merge --merge --delete-branch")),
-        ("merge: Фемида с заголовком слияния — можно", MERGE_OK, ec, "domain-coordinator", False,
+        ("merge: Фемида с заголовком слияния — можно", "allow", ec, "domain-coordinator", False,
          B("gh pr merge 1 --squash --subject 'Индекс только для чтения'")),
         ("merge: Фемида с --admin — отказ", "deny", ec, "domain-coordinator", False, B("gh pr merge 1 --admin")),
         ("merge: Фемида с --admin=true — отказ", "deny", ec, "domain-coordinator", False, B("gh pr merge 1 --admin=true")),
@@ -1567,7 +1583,7 @@ def main():
          B("gh pr merge https://github.com/latark/sitebuilder/pull/1")),
         ("merge: Фемида через cd в чужую папку — отказ", "deny", ec, "domain-coordinator", False,
          B(f"cd {home}/{alex} && gh pr merge 1")),
-        ("merge: лид Фемиды (hephaestus-library) — можно (metis-0054)", MERGE_OK, ec, "hephaestus-library", True,
+        ("merge: лид Фемиды (hephaestus-library) — можно (metis-0054)", "allow", ec, "hephaestus-library", True,
          B("gh pr merge 1")),
         ("merge: лид Фемиды с --admin — отказ", "deny", ec, "hephaestus-library", True, B("gh pr merge 1 --admin")),
         ("merge: dev-sonnet Фемиды — отказ", "deny", ec, "dev-sonnet", True, B("gh pr merge 1")),
@@ -1589,15 +1605,15 @@ def main():
         ("corpus-role: python -c с runpy скрипта Krisp — отказ", "deny", br, "dev-sonnet", True,
          B("python3 -c 'import runpy; runpy.run_path(\"tools/krisp_trash.py\")'")),
         # --- merge -R из [merge_repos]: Фемида в law-feed сливает PR lecture-notes (themis-0015) ---
-        ("merge -R: Фемида из law-feed в lecture-notes — можно", MERGE_OK, lw, "domain-coordinator", False,
+        ("merge -R: Фемида из law-feed в lecture-notes — можно", "allow", lw, "domain-coordinator", False,
          B("gh pr merge 2 -R latark/lecture-notes --merge")),
-        ("merge -R: --repo= и регистр — можно", MERGE_OK, lw, "domain-coordinator", False,
+        ("merge -R: --repo= и регистр — можно", "allow", lw, "domain-coordinator", False,
          B("gh pr merge 2 --repo=Latark/Lecture-Notes --squash")),
-        ("merge -R: github.com/owner/repo — можно", MERGE_OK, lw, "domain-coordinator", False,
+        ("merge -R: github.com/owner/repo — можно", "allow", lw, "domain-coordinator", False,
          B("gh pr merge 2 --repo github.com/latark/lecture-notes")),
-        ("merge -R: -Rowner/repo слитно — можно", MERGE_OK, lw, "domain-coordinator", False,
+        ("merge -R: -Rowner/repo слитно — можно", "allow", lw, "domain-coordinator", False,
          B("gh pr merge 2 -Rlatark/lecture-notes")),
-        ("merge -R: gh pr -R … merge — можно", MERGE_OK, lw, "domain-coordinator", False,
+        ("merge -R: gh pr -R … merge — можно", "allow", lw, "domain-coordinator", False,
          B("gh pr -R latark/lecture-notes merge 2")),
         ("merge -R: другой репозиторий — отказ", "deny", lw, "domain-coordinator", False,
          B("gh pr merge 2 -R latark/sitebuilder")),
@@ -1614,7 +1630,7 @@ def main():
          B("gh pr merge 2 -R latark/lecture-notes --admin")),
         ("merge -R: $REPO вместо имени — отказ", "deny", lw, "domain-coordinator", False,
          B("gh pr merge 2 -R $REPO")),
-        ("merge -R: лид Фемиды из [merge_repos] — можно", MERGE_OK, lw, "hephaestus-library", True,
+        ("merge -R: лид Фемиды из [merge_repos] — можно", "allow", lw, "hephaestus-library", True,
          B("gh pr merge 2 -R latark/lecture-notes")),
         ("merge -R: лид Фемиды вне [merge_repos] — отказ", "deny", lw, "hephaestus-library", True,
          B("gh pr merge 2 -R latark/sitebuilder")),
@@ -1630,39 +1646,39 @@ def main():
          B("gh pr -sRlatark/sitebuilder merge 2")),
         ("merge -R: -dR <чужой> через пробел — отказ", "deny", lw, "domain-coordinator", False,
          B("gh pr merge 2 -dR latark/sitebuilder")),
-        ("merge -R: склеенные -dR<свой> — можно", MERGE_OK, lw, "domain-coordinator", False,
+        ("merge -R: склеенные -dR<свой> — можно", "allow", lw, "domain-coordinator", False,
          B("gh pr merge 2 -dRlatark/lecture-notes")),
-        ("merge -R: -R=<свой> — можно", MERGE_OK, lw, "domain-coordinator", False,
+        ("merge -R: -R=<свой> — можно", "allow", lw, "domain-coordinator", False,
          B("gh pr merge 2 -R=latark/lecture-notes")),
-        ("merge: -tR… — R в заголовке, а не -R — можно", MERGE_OK, ec, "domain-coordinator", False,
+        ("merge: -tR… — R в заголовке, а не -R — можно", "allow", ec, "domain-coordinator", False,
          B("gh pr merge 2 -tRelease")),
         ("merge -R: Фемида с GH_REPO — по-прежнему отказ", "deny", lw, "domain-coordinator", False,
          B("GH_REPO=latark/lecture-notes gh pr merge 2")),
-        ("merge: Афина без [merge] — можно: папки из domains.json (0.5.0)", MERGE_OK, br, "domain-coordinator", False,
+        ("merge: Афина без [merge] — можно: папки из domains.json (0.5.0)", "allow", br, "domain-coordinator", False,
          B("gh pr merge 1")),
         ("merge: Фемида git push в main — по-прежнему отказ", "deny", ec, "domain-coordinator", False,
          B("git push origin main")),
         # --- guard 0.5.0 (metis-0038): слияние по схеме владельца ---
         # внутреннее: своё направление по domains.json
-        ("merge 0.5: Гермес в своей папке — можно", MERGE_OK, alex, "domain-coordinator", False, B("gh pr merge 4 --squash")),
+        ("merge 0.5: Гермес в своей папке — можно", "allow", alex, "domain-coordinator", False, B("gh pr merge 4 --squash")),
         ("merge 0.5: Гермес в чужой папке (cwd без cd) — отказ", "deny", alex, "domain-coordinator", False,
          B("gh pr merge 4"), br),
         ("merge 0.5: Гермес из своей папки с cd в чужую — отказ", "deny", alex, "domain-coordinator", False,
          B(f"cd {home}/{br} && gh pr merge 4")),
-        ("merge 0.5: лид Гермеса hephaestus-site — можно", MERGE_OK, alex, "hephaestus-site", True, B("gh pr merge 4")),
-        ("merge 0.5: лид дизайна Гермеса apollo-site — можно", MERGE_OK, alex, "apollo-site", True, B("gh pr merge 4")),
+        ("merge 0.5: лид Гермеса hephaestus-site — можно", "allow", alex, "hephaestus-site", True, B("gh pr merge 4")),
+        ("merge 0.5: лид дизайна Гермеса apollo-site — можно", "allow", alex, "apollo-site", True, B("gh pr merge 4")),
         ("merge 0.5: лид Гермеса в чужой папке (cwd без cd) — отказ", "deny", alex, "hephaestus-site", True,
          B("gh pr merge 4"), br),
         ("merge 0.5: лид Гермеса в сессии Афины — отказ", "deny", br, "hephaestus-site", True, B("gh pr merge 4")),
         ("merge 0.5: лид Афины в сессии Гермеса — отказ", "deny", alex, "hephaestus-shop", True, B("gh pr merge 4")),
         ("merge 0.5: dev-sonnet Гермеса — отказ", "deny", alex, "dev-sonnet", True, B("gh pr merge 4")),
         # продукт: [merge_client] — пропуск так же, папка из [merge_client] вне domains.json — тоже
-        ("merge 0.5: Афина в shopKeeperApp — можно", MERGE_OK, br, "domain-coordinator", False,
+        ("merge 0.5: Афина в shopKeeperApp — можно", "allow", br, "domain-coordinator", False,
          B("gh pr merge 7 --squash --delete-branch")),
-        ("merge 0.5: Афина в папке [merge_client] вне domains.json — можно", MERGE_OK, br, "domain-coordinator", False,
+        ("merge 0.5: Афина в папке [merge_client] вне domains.json — можно", "allow", br, "domain-coordinator", False,
          B("gh pr merge 7"), "projects/broker-landing"),
-        ("merge 0.5: лид Афины в продукте — можно", MERGE_OK, br, "hephaestus-shop", True, B("gh pr merge 7")),
-        ("merge 0.5: apollo-shop в [merge_client] вне domains.json — можно", MERGE_OK, br, "apollo-shop", True,
+        ("merge 0.5: лид Афины в продукте — можно", "allow", br, "hephaestus-shop", True, B("gh pr merge 7")),
+        ("merge 0.5: apollo-shop в [merge_client] вне domains.json — можно", "allow", br, "apollo-shop", True,
          B("gh pr merge 7"), "projects/broker-landing"),
         ("merge 0.5: лид Гермеса в [merge_client] Афины — отказ", "deny", alex, "hephaestus-site", True,
          B("gh pr merge 7"), "projects/broker-landing"),
@@ -1690,10 +1706,10 @@ def main():
          B("gh pr merge 1")),
         # защиты: только Метида и её лид, через запор (guard 0.5.4): поштучного «да» владельца больше нет, ядро защит
         # (Д3) — PR ждёт слияния владельцем. Сам запор — test_merge_gate.py; здесь — кто, где и в каком репозитории
-        ("защиты: Метида по записям запора — можно", MERGE_OK, ak, "domain-coordinator", False, B("gh pr merge 5 --squash")),
-        ("защиты: Метида с --subject — можно (заголовок больше не нужен и не мешает)", MERGE_OK, ak, "domain-coordinator",
+        ("защиты: Метида по записям запора — можно", "allow", ak, "domain-coordinator", False, B("gh pr merge 5 --squash")),
+        ("защиты: Метида с --subject — можно (заголовок больше не нужен и не мешает)", "allow", ak, "domain-coordinator",
          False, B('gh pr merge 5 --squash --subject "guard 0.5.4"')),
-        ("защиты: Метида со склеенным -st — можно", MERGE_OK, ak, "domain-coordinator", False,
+        ("защиты: Метида со склеенным -st — можно", "allow", ak, "domain-coordinator", False,
          B('gh pr merge 5 "-stguard 0.5.4"')),
         ("защиты: Метида без номера (текущая ветка) — отказ", "deny", ak, "domain-coordinator", False,
          B("gh pr merge --squash")),
@@ -1703,14 +1719,14 @@ def main():
         ("защиты: --auto — отказ", "deny", ak, "domain-coordinator", False, B("gh pr merge 5 --auto")),
         ("защиты: --admin — отказ", "deny", ak, "domain-coordinator", False, B("gh pr merge 5 --admin")),
         ("защиты: субагент dev-opus Метиды — отказ", "deny", ak, "dev-opus", True, B("gh pr merge 5")),
-        ("защиты: лид Метиды — можно (metis-0054)", MERGE_OK, ak, "hephaestus-pantheon", True, B("gh pr merge 5")),
+        ("защиты: лид Метиды — можно (metis-0054)", "allow", ak, "hephaestus-pantheon", True, B("gh pr merge 5")),
         ("защиты: лид Метиды с --auto — отказ", "deny", ak, "hephaestus-pantheon", True, B("gh pr merge 5 --auto")),
         ("защиты: лид Метиды с двумя номерами — отказ", "deny", ak, "hephaestus-pantheon", True, B("gh pr merge 5 6")),
-        ("защиты: apollo-pantheon — можно", MERGE_OK, ak, "apollo-pantheon", True, B("gh pr merge 5")),
+        ("защиты: apollo-pantheon — можно", "allow", ak, "apollo-pantheon", True, B("gh pr merge 5")),
         ("защиты: лид Афины в agent-kit — отказ", "deny", br, "hephaestus-shop", True, B("gh pr merge 5"), ak),
-        ("Метида внутреннее: лид без -R — можно", MERGE_OK, ak, "hephaestus-pantheon", True,
+        ("Метида внутреннее: лид без -R — можно", "allow", ak, "hephaestus-pantheon", True,
          B("gh pr merge 3 --squash"), "projects/other/tg-read-dev"),
-        ("Метида внутреннее: лид с -R из [merge_repos] — можно", MERGE_OK, ak, "hephaestus-pantheon", True,
+        ("Метида внутреннее: лид с -R из [merge_repos] — можно", "allow", ak, "hephaestus-pantheon", True,
          B("gh pr merge 3 -R latark/tg-read"), "projects/other/tg-read-dev"),
         ("защиты: другой координатор в agent-kit — отказ", "deny", br, "domain-coordinator", False,
          B("gh pr merge 5"), ak),
@@ -1718,20 +1734,20 @@ def main():
          B("gh pr merge 5"), ak + "/sub"),
         ("защиты: Метида с cd в agent-kit — отказ", "deny", ak, "domain-coordinator", False,
          B(f"cd {home}/{ak} && gh pr merge 5"), "projects/other/tg-read-dev"),
-        ("Метида внутреннее: без -R — можно", MERGE_OK, ak, "domain-coordinator", False,
+        ("Метида внутреннее: без -R — можно", "allow", ak, "domain-coordinator", False,
          B("gh pr merge 3 --squash"), "projects/other/tg-read-dev"),
-        ("Метида внутреннее: -R из [merge_repos] — можно", MERGE_OK, ak, "domain-coordinator", False,
+        ("Метида внутреннее: -R из [merge_repos] — можно", "allow", ak, "domain-coordinator", False,
          B("gh pr merge 3 -R latark/tg-read"), "projects/other/tg-read-dev"),
         ("Метида внутреннее: -R вне [merge_repos] — отказ", "deny", ak, "domain-coordinator", False,
          B("gh pr merge 3 -R latark/claude-config"), "projects/other/tg-read-dev"),
         ("Метида внутреннее: -R и --auto — отказ", "deny", ak, "domain-coordinator", False,
          B("gh pr merge 3 -R latark/tg-read --auto"), "projects/other/tg-read-dev"),
-        ("Метида из tg-read-dev как папки запуска: -R — можно", MERGE_OK, "projects/other/tg-read-dev",
+        ("Метида из tg-read-dev как папки запуска: -R — можно", "allow", "projects/other/tg-read-dev",
          "domain-coordinator", False, B("gh pr merge 3 -R latark/tg-read")),
-        ("Фемида -R из [merge_repos] — можно", MERGE_OK, lw, "domain-coordinator", False,
+        ("Фемида -R из [merge_repos] — можно", "allow", lw, "domain-coordinator", False,
          B("gh pr merge 2 -R latark/lecture-notes")),
         # --- находка проверки безопасности 2eda45f: защиты по репозиторию (remote), сбой — отказ ---
-        ("защиты по remote: клон agent-kit в tg-read-dev — Метида по запору — можно", MERGE_OK, ak,
+        ("защиты по remote: клон agent-kit в tg-read-dev — Метида по запору — можно", "allow", ak,
          "domain-coordinator", False, B("gh pr merge 5"), "projects/other/tg-read-dev/x"),
         ("защиты по remote: клон agent-kit (другой регистр, git@) у Фемиды — отказ", "deny", lw, "domain-coordinator",
          False, B("gh pr merge 5"), lw + "/akclone"),
@@ -1741,24 +1757,24 @@ def main():
          B("gh pr merge 5"), alex + "/ak-link"),
         ("защиты: путь в другом регистре — Гермес — отказ", "deny", alex, "domain-coordinator", False,
          B("gh pr merge 5"), "projects/AGENT-KIT"),
-        ("защиты: путь в другом регистре — Метида по запору — можно", MERGE_OK, ak, "domain-coordinator", False,
+        ("защиты: путь в другом регистре — Метида по запору — можно", "allow", ak, "domain-coordinator", False,
          B("gh pr merge 5"), "projects/Agent-Kit"),
-        ("защиты: worktree agent-kit во внутренней папке Метиды — по запору можно", MERGE_OK, ak, "domain-coordinator",
+        ("защиты: worktree agent-kit во внутренней папке Метиды — по запору можно", "allow", ak, "domain-coordinator",
          False, B("gh pr merge 5"), "projects/other/tg-read-dev/wt"),
         ("защиты: worktree agent-kit вне направлений (как /tmp) — Гермес — отказ", "deny", alex, "domain-coordinator",
          False, B("gh pr merge 5"), "wt-ak"),
-        ("защиты: worktree agent-kit вне направлений — Метида по запору — можно", MERGE_OK, ak, "domain-coordinator",
+        ("защиты: worktree agent-kit вне направлений — Метида по запору — можно", "allow", ak, "domain-coordinator",
          False, B("gh pr merge 5"), "wt-ak"),
-        ("защиты: Метида -R latark/agent-kit из agent-kit — можно (есть в [merge_repos])", MERGE_OK, ak,
+        ("защиты: Метида -R latark/agent-kit из agent-kit — можно (есть в [merge_repos])", "allow", ak,
          "domain-coordinator", False, B("gh pr merge 5 -R latark/agent-kit")),
         ("репозиторий: репозиторий без remote — отказ", "deny", alex, "domain-coordinator", False,
          B("gh pr merge 5"), alex + "/no-remote"),
         ("запор: два номера PR в команде — отказ", "deny", ak, "domain-coordinator", False, B("gh pr merge 5 6")),
-        ("ssh-псевдоним: клон agent-kit через gh-alt — Метида по запору — можно", MERGE_OK, ak,
+        ("ssh-псевдоним: клон agent-kit через gh-alt — Метида по запору — можно", "allow", ak,
          "domain-coordinator", False, B("gh pr merge 5"), "projects/other/tg-read-dev/alias"),
         ("gh-resolved: клон форка у Гермеса, set-default = latark/agent-kit — отказ", "deny", alex, "domain-coordinator",
          False, B("gh pr merge 5"), alex + "/fork"),
-        ("gh-resolved: «base» — сам remote, своё слияние — можно", MERGE_OK, alex, "domain-coordinator", False,
+        ("gh-resolved: «base» — сам remote, своё слияние — можно", "allow", alex, "domain-coordinator", False,
          B("gh pr merge 5"), alex + "/base-clone"),
         # --- 0122: momus (ревизор) — только agent_extra, своя память и временное; корней по cwd нет ---
         ("momus с cwd в репозитории: запись в репозиторий — отказ", "deny", br, "momus", True, W(os.path.join(home, br, "app/x.ts"))),
@@ -1878,8 +1894,6 @@ def main():
     failed = 0
     for case in cases:
         name, want, pdir, role, sub, (tool, ti) = case[:6]
-        if want == "allow" and name in NEEDS_POLICY and not HAS_TOMLLIB:
-            want = "deny"  # без tomllib привилегий нет (см. NEEDS_POLICY)
         cwd = case[6] if len(case) > 6 else None
         penv = case[7] if len(case) > 7 else None  # env окна: PANTHEON_ROLE (guard 0.5.5)
         got = run(home, os.path.normpath(pdir), role, tool, ti, sub, cwd, penv=penv)
@@ -1931,14 +1945,11 @@ def main():
         "защиты": run(home, ak, "domain-coordinator", "Bash", {"command": "gh pr merge 1 --auto"}, raw=True),
         "личное": run(home, "ai/knowledge", "domain-coordinator", "Bash", {"command": "gh pr merge 1"}, raw=True),
     }
-    if MERGE_OK == "allow":
-        want = {"закрыто": ("gh pr create", "отчёте лиду"), "внутреннее": ("argus", "--admin"),
-                "продукт": ("talos", "откат", "--match-head-commit"), "защиты": ("шлюз слияния", "argus", "(Д3)"),
-                "личное": ("личному",)}
-        ok = all('"deny"' in texts[k] and all(w in texts[k] for w in ws) for k, ws in want.items()) \
-            and "talos" not in texts["внутреннее"]
-    else:  # без tomllib политика пуста: всем, кроме ролей, которым слияние закрыто, — отказ «политика не прочиталась»
-        ok = "gh pr create" in texts["закрыто"] and all("политика" in texts[k] for k in texts if k != "закрыто")
+    want = {"закрыто": ("gh pr create", "отчёте лиду"), "внутреннее": ("argus", "--admin"),
+            "продукт": ("talos", "откат", "--match-head-commit"), "защиты": ("шлюз слияния", "argus", "(Д3)"),
+            "личное": ("личному",)}
+    ok = all('"deny"' in texts[k] and all(w in texts[k] for w in ws) for k, ws in want.items()) \
+        and "talos" not in texts["внутреннее"]
     failed += not ok
     cases.append(None)
     print(f"{'ok  ' if ok else 'FAIL'} merge 0.5: тексты отказов по режиму (закрыто, внутреннее, продукт, защиты, личное)")
@@ -1959,7 +1970,7 @@ def main():
     text = _read(pol) + '\n[private]\ncoordinators = ["mnemo-brain"]\npaths = ["~/ai/pantheon/.git/git-crypt"]\n'
     open(pol, "w").write(text)
     out = run(home5, "ai/knowledge", "domain-coordinator", "Bash", {"command": "gh pr merge 1"}, raw=True)
-    ok = '"deny"' in out and ("личному" in out or MERGE_OK == "deny")
+    ok = '"deny"' in out and "личному" in out
     failed += not ok
     cases.append(None)
     print(f"{'ok  ' if ok else 'FAIL'} merge 0.5: координатор из [private].coordinators — отказ про личное")
@@ -1987,14 +1998,8 @@ def main():
     print(f"{'ok  ' if ok else 'FAIL'} merge -R: merge_repos не таблицей — закрыто и -R, и без -R (запор, 0.5.4): {got}")
     failed += corpus_policy_checks(br, cases)
     failed += hestia_consent_checks(br, cases)
-    failed += merge_security_checks(home, MERGE_OK, cases)
-    # № 1: на системном Python 3.9 (без tomllib) guard не падает и прежние правила работают
-    if os.path.exists("/usr/bin/python3"):
-        got = run(home, br, "", "Bash", {"command": "pnpm run dev"}, python="/usr/bin/python3")
-        ok = got == "deny"
-        failed += not ok
-        cases.append(None)
-        print(f"{'ok  ' if ok else 'FAIL'} системный Python 3.9: dev-server запрещён: {got}")
+    failed += merge_security_checks(home, cases)
+    failed += old_python_checks(home, br, cases)
     # metis-0079: Stop без транскрипта (файла нет / по пути папка) — без сбоя в журнале и без блокировки
     stop_home = tempfile.mkdtemp(prefix="guard-stop-")
     stop_log = os.path.join(stop_home, ".local/state/pantheon/logs/guard-failures.log")

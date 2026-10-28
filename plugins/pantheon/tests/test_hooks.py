@@ -4,7 +4,7 @@
 поручение — нет; подсказка «пора очистить» на порогах; пробуждение после /clear только при обновлённом файле
 состояния; файл состояния после сжатия; новые тревоги и журналы штабу.
 
-Запуск: python3 -I plugins/pantheon/tests/test_hooks.py  (код выхода 0 — все прошли; проверяется и на /usr/bin/python3)
+Запуск: python3 -I plugins/pantheon/tests/test_hooks.py  (код выхода 0 — все прошли)
 """
 import json
 import re
@@ -723,17 +723,18 @@ check("перезапуск: метка не читается → тишина, 
 with open(os.path.join(os.path.dirname(os.path.dirname(HOOK)), "hooks", "hooks.json")) as fh:
     sh = json.load(fh)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
 os.remove(MAINT)
-env = dict(BASE, CLAUDE_PLUGIN_ROOT=os.path.dirname(os.path.dirname(HOOK)), PANTHEON_SESSION="alpha",
-           PATH=os.path.join(home, "nopython") + ":/usr/bin:/bin")
-os.makedirs(os.path.join(home, "nopython"), exist_ok=True)
-with open(os.path.join(home, "nopython", "python3"), "w") as fh:
-    fh.write("#!/bin/sh\necho PYTHON-STARTED\n")
-os.chmod(os.path.join(home, "nopython", "python3"), 0o755)
+# Python хуки запускают через hooks/python.sh (metis-0571): подменённый корень плагина, где запускатель — заглушка
+FAKE_ROOT = os.path.join(home, "fake-plugin")
+os.makedirs(os.path.join(FAKE_ROOT, "hooks"), exist_ok=True)
+with open(os.path.join(FAKE_ROOT, "hooks", "python.sh"), "w") as fh:
+    fh.write('#!/bin/sh\necho "PYTHON-STARTED $*"\n')
+env = dict(BASE, CLAUDE_PLUGIN_ROOT=FAKE_ROOT, PANTHEON_SESSION="alpha", PATH="/usr/bin:/bin")
 r = subprocess.run(["sh", "-c", sh], input=json.dumps(pre), env=env, capture_output=True, text=True, timeout=30)
 check("hooks.json: без метки python не запускается", r.stdout.strip() == "" and r.returncode == 0, r.stdout + r.stderr)
 mark()
 r = subprocess.run(["sh", "-c", sh], input=json.dumps(pre), env=env, capture_output=True, text=True, timeout=30)
-check("hooks.json: с меткой запускается ctx.py maint-pre", "PYTHON-STARTED" in r.stdout, r.stdout + r.stderr)
+check("hooks.json: с меткой запускается ctx.py maint-pre (через hooks/python.sh)",
+      r.stdout.strip() == f"PYTHON-STARTED {FAKE_ROOT}/hooks/ctx.py maint-pre", r.stdout + r.stderr)
 os.remove(MAINT)
 
 # --- текст сессии после claude respawn ----------------------------------------------
@@ -795,7 +796,8 @@ r = subprocess.run(["sh", "-c", sh], input="{}", env=env, capture_output=True, t
 check("hooks.json: без папки push python не запускается", r.stdout.strip() == "" and r.returncode == 0, r.stdout + r.stderr)
 os.makedirs(PUSHD)
 r = subprocess.run(["sh", "-c", sh], input="{}", env=env, capture_output=True, text=True, timeout=30)
-check("hooks.json: с папкой push запускается ctx.py push", "PYTHON-STARTED" in r.stdout, r.stdout + r.stderr)
+check("hooks.json: с папкой push запускается ctx.py push (через hooks/python.sh)",
+      r.stdout.strip() == f"PYTHON-STARTED {FAKE_ROOT}/hooks/ctx.py push", r.stdout + r.stderr)
 
 shutil.rmtree(tmp)
 # 15.10: в UserPromptSubmit основной сессии с --agent нет agent_type — роль берётся из записи SessionStart

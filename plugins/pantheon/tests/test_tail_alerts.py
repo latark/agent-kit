@@ -164,7 +164,7 @@ def main():
           len(ls) == 2 and "и ещё 2" in ls[0]
           and all(sum(f"research-many-{i:02d}.md" in ln for ln in ls) == 1 for i in range(14)), ls)
 
-    # --- чистые функции (одно и то же на 3.9 и 3.14)
+    # --- чистые функции
     def mk(tid, body):
         return {tid: ("p", {"id": tid, "type": "task", "status": "todo"}, body)}
 

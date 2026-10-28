@@ -13,9 +13,7 @@ import os
 import subprocess
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _py311 import PY311  # CLI pantheon — только на Python 3.11+
-if sys.version_info < (3, 11):  # часть проверок импортирует pantheon.py в этом же процессе — ему нужен tomllib
-    os.execv(PY311, [PY311, "-I", os.path.abspath(__file__)])
+from _py311 import PY311  # noqa: E402
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
@@ -612,9 +610,6 @@ def test_autostart_backoff_and_give_up():
 def test_autostart_start_timeout_0141():
     """metis-0141 п. 1: pantheon start из самозапуска не уложился в срок — строка в тревогах и код 124, без трассировки;
     срок по умолчанию покрывает шаги запуска (около 410 с) и меньше срока прохода дежурного (600 с)."""
-    if sys.version_info < (3, 11):  # pantheon.py сам требует 3.11 (tomllib): на 3.9 он отвечал бы отказом на всё
-        print("ok   пропуск: срок pantheon start требует Python 3.11+ (здесь %d.%d)" % sys.version_info[:2])
-        return
     e = Env()
     e.direction("pluto-x")
     e.task("pluto-0001", "pluto-x")
@@ -2452,8 +2447,9 @@ def test_infra_check_corpus_section():
 
 
 def test_infra_check_hooks_tomllib():
-    """infra-check: python3 хуков без tomllib — строка НЕТ и тревога «guard не читает policy.toml»; с tomllib —
-    строка «готово» и тревога снята (metis-0182: иначе пустой corpus-role на Python до 3.11 молчит)."""
+    """infra-check: запускатель хуков hooks/python.sh без Python 3.11+ — строка НЕТ и тревога; нашёл — строка
+    «готово» и тревога снята (metis-0571; раньше — python3 хуков без tomllib, metis-0182). Без Python запускатель вне
+    хука молчит с кодом 0 — это тоже НЕТ."""
     import importlib.util
     sys.path.insert(0, os.path.join(ROOT, "lib"))
     import importlib
@@ -2469,29 +2465,35 @@ def test_infra_check_hooks_tomllib():
         p.MANAGED, p.HOME, p.guard_script, p.agents_all = os.path.join(d, "none.json"), d, (lambda: ""), (lambda: [])
         p.alert_once = lambda key, value, text, *a, **k: calls.append(("alert", key, text))
         p.clear_once = lambda key: calls.append(("clear", key))
-        line = "python3 хуков читает policy.toml"
-        for rc, name in ((1, "без tomllib"), (0, "с tomllib")):
-            fake = os.path.join(d, f"py{rc}")
+        line = "запускатель хуков находит Python 3.11+"
+        for body, good, name in (("exit 0", False, "нет 3.11+ (молчит, код 0)"), ("exit 1", False, "сбой"),
+                                 ('echo "$*" > /dev/null; echo ok', True, "нашёл 3.11+")):
+            fake = os.path.join(d, f"launcher-{len(calls)}-{good}.sh")
             with open(fake, "w") as fh:
-                fh.write(f"#!/bin/sh\nexit {rc}\n")
-            os.chmod(fake, 0o755)
-            w.HOOK_PYTHON = fake
+                fh.write(f"#!/bin/sh\n{body}\n")
+            w.HOOK_LAUNCHER = fake
             calls.clear()
             _, lines = w.infra_check()
-            alerted = any(c[0] == "alert" and c[1] == "hooks-python-no-tomllib" and "policy.toml" in c[2]
+            alerted = any(c[0] == "alert" and c[1] == "hooks-python-no-tomllib" and "python@3.14" in c[2]
                           for c in calls)
-            if rc:
+            if not good:
                 check(any(x.startswith("НЕТ") and line in x for x in lines) and alerted,
                       f"infra-check, {name}: нет строки НЕТ или тревоги ({lines}, {calls})")
             else:
                 check(any(x.startswith("готово") and line in x for x in lines) and not alerted
                       and ("clear", "hooks-python-no-tomllib") in calls,
                       f"infra-check, {name}: строка НЕТ, тревога или тревога не снята ({lines}, {calls})")
-        w.HOOK_PYTHON = os.path.join(d, "нет-такого")
+        w.HOOK_LAUNCHER = os.path.join(d, "нет-такого")
         calls.clear()
         _, lines = w.infra_check()
         check(any(x.startswith("НЕТ") and line in x for x in lines),
-              f"infra-check, python3 не найден: нет строки НЕТ ({lines})")
+              f"infra-check, запускатель не найден: нет строки НЕТ ({lines})")
+        # настоящий запускатель плагина: тест идёт на 3.11+, значит и он находит 3.11+
+        w.HOOK_LAUNCHER = None
+        calls.clear()
+        _, lines = w.infra_check()
+        check(any(x.startswith("готово") and line in x for x in lines),
+              f"infra-check, настоящий hooks/python.sh: нет строки «готово» ({lines})")
     finally:
         for k, v in saved.items():
             setattr(p, k, v)

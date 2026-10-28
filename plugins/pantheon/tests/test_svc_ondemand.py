@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Тест служб по требованию (metis-0151): сокет у launchd, прокси lib/ondemand.py, qmd поднимается запросом.
 
-Запуск: python3 -I plugins/pantheon/tests/test_svc_ondemand.py  (код выхода 0 — все прошли), на 3.9 и 3.14.
+Запуск: python3 -I plugins/pantheon/tests/test_svc_ondemand.py  (код выхода 0 — все прошли).
 Живой launchd не трогается: слушающий сокет создаёт сам тест и передаёт прокси через PANTHEON_LISTEN_FDS — так же,
 как launchd держит сокет и отдаёт его службе. qmd подменён маленьким HTTP-сервером (fake_qmd), тик — PANTHEON_DRYRUN.
 Где слушать порт нельзя (песочница окна: bind → EPERM), сквозная часть через настоящие сокеты пропускается, а те же
@@ -122,7 +122,7 @@ def wait_dead(pid, t=10):
     return False
 
 
-# --- прокси напрямую (lib/ondemand.py на этом python: 3.9 или 3.14) ---------------------------------------------------
+# --- прокси напрямую (lib/ondemand.py на этом python) -------------------------------------------------------------------
 PROXY = r'''
 import os, subprocess, sys
 sys.path.insert(0, sys.argv[1])
@@ -624,12 +624,9 @@ if __name__ == "__main__":
         test_backend_fails()
     else:
         print("слушать порт нельзя (bind → EPERM, песочница) — сквозная часть через сокеты и qmd serve пропущены")
-    if PY311:
-        if listen:
-            test_qmd_serve()
-        test_qmd_serve_no_launchd()
-        test_tick()
-    else:
-        print("нет Python 3.11+ — части с CLI pantheon пропущены")
+    if listen:
+        test_qmd_serve()
+    test_qmd_serve_no_launchd()
+    test_tick()
     print(f"{len(OK)} из {len(OK) + len(FAIL)} прошли")
     sys.exit(1 if FAIL else 0)

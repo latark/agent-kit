@@ -7,7 +7,6 @@
 Сам разбор карантина проверяет tests/test_sync_quarantine.sh (нужен настоящий ~/.claude/sync.sh).
 
 Запуск: python3 -I plugins/pantheon/tests/test_sync_quarantine.py  (код выхода 0 — все прошли)
-Идёт и на системном /usr/bin/python3 (3.9): pantheon.py тогда запускается через python3 3.11+ (tests/_py311.py).
 Временный HOME и состояние; настоящие ~/.claude и журналы не трогаются.
 """
 import atexit

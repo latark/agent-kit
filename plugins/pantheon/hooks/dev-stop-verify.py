@@ -17,7 +17,7 @@ SubagentStop). Основа — stop-verify.sh одного из проекто�
 Нечем проверить или правок нет — не держит. Иначе — выход 2 с тем, что запустить; не больше трёх возвратов подряд
 на одного разработчика: дальше хук отпускает, а разработчик пишет в отчёте «заблокировано» (лид выносит наверх).
 
-Python 3.9+ (хуки запускает python3 из PATH). Состояние — ~/.local/state/pantheon/ctx/dev-stop/<agent_id>.
+Python 3.11+: хуки запускает hooks/python.sh (metis-0571). Состояние — ~/.local/state/pantheon/ctx/dev-stop/<agent_id>.
 """
 import json
 import os

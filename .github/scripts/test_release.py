@@ -2,8 +2,8 @@
 """Тесты .github/scripts/release.py и .github/workflows/release.yml (metis-0512): номер версии поднимает Action на
 main после слияния, PR его не трогают.
 
-Запуск: python3 -I .github/scripts/test_release.py  (код 0 — все прошли; идёт и на системном 3.9 — сверке счёта
-дерева с pantheon._tree_hash нужен python3 3.11+ в PATH). Каждый случай — временный репозиторий с голым origin;
+Запуск: python3 -I .github/scripts/test_release.py  (код 0 — все прошли; Python 3.11+, как все тесты
+agent-kit, metis-0571). Каждый случай — временный репозиторий с голым origin;
 настоящий репозиторий и ~/.gitconfig не трогаются (HOME — временная папка).
 """
 import atexit
@@ -312,7 +312,7 @@ def t_tree_hash_matches_pantheon():
     put(d, "a/__pycache__/x.pyc", "skip")
     put(d, "z/.git/HEAD", "skip")
     os.symlink("a/b.txt", os.path.join(d, "link"))
-    py = sys.executable if sys.version_info >= (3, 11) else shutil.which("python3")
+    py = sys.executable
     env = dict(ENV, PANTHEON_HOME=os.path.join(_ROOT, "ph"), PANTHEON_STATE=os.path.join(_ROOT, "ps"),
                PANTHEON_NO_NOTIFY="1")
     r = subprocess.run([py, "-I", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import pantheon as P; "
@@ -342,6 +342,20 @@ def t_workflows():
           and "if: github.ref == 'refs/heads/main'" in text, text)
     check("release.yml: запускает скрипт ядра --push", "python3 -I .github/scripts/release.py --push" in text, text)
     check("release.yml: ${{ }} не в run (инъекция)", not re.search(r"run:.*\$\{\{", text), text)
+    # п. 8 (27.10): тесты до слияния — tests.yml; тик ставит выпуск без своего прогона, красный CI и есть «не ставить»
+    text = open(os.path.join(WORKFLOWS, "tests.yml")).read()
+    uses = re.findall(r"uses:\s*(\S+)", text)
+    check("tests.yml: Action только checkout и setup-python по 40 знакам SHA",
+          uses and all(re.fullmatch(r"actions/(checkout|setup-python)@[0-9a-f]{40}", u) for u in uses), uses)
+    check("tests.yml: только чтение, PR в main, macOS, Python 3.14",
+          re.search(r"^permissions:\n  contents: read$", text, re.M) and re.search(r"pull_request:\n\s+branches: \[main\]", text)
+          and re.search(r"runs-on: macos-", text) and 'python-version: "3.14"' in text
+          and "persist-credentials: false" in text, text)
+    run = text.split("run: |", 1)[-1]
+    check("tests.yml: раннер run-tests.py по всем трём плагинам, ${{ }} не в run",
+          "plugins/pantheon/scripts/run-tests.py" in run and all(f"plugins/{p}" in run.split("run-tests.py", 1)[-1]
+                                                                 for p in ("guard", "pantheon", "project-tools"))
+          and "${{" not in run, run)
 
 
 for t in (t_first_and_bump, t_rules, t_refuse, t_push_race, t_reconcile, t_first_parent, t_tree_hash_matches_pantheon,

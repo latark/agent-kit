@@ -4,8 +4,6 @@
 защиты — ещё Д3 (поддельный gh в PATH). Подменённый HOME во временной папке, всё убирается в конце.
 
 Запуск: python3 -I plugins/guard/tests/test_merge_gate.py   (код 0 — все прошли)
-На Python без tomllib (3.9) policy.toml не читается и слияние закрыто всем: проверки, которым нужна политика,
-там проверяют именно этот отказ.
 """
 import io
 import json
@@ -19,7 +17,6 @@ import time
 import uuid
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
-HAVE_TOML = sys.version_info >= (3, 11)
 OLD = "b" * 40
 CORE = "ядро защит — PR ждёт слияния владельцем (Д3)"
 # перечень проверенного в «принять» (Б6, guard 0.5.6): кавычки и пробелы внутри поля, обе формы флага
@@ -265,11 +262,9 @@ def rec(kind, repo, pr, sha, who="argus", agent_id="argus1", session="s-coord", 
 
 
 def merge_case(name, got, allow, why=""):
-    """Решение по слиянию: на Python без tomllib — отказ «политика не прочиталась» для любого случая."""
+    """Решение по слиянию: allow — пропуск, иначе отказ с why в причине."""
     decision, reason = got
-    if not HAVE_TOML:
-        check(name + " (без tomllib — слияние закрыто)", decision == "deny" and "не прочиталась" in reason, reason)
-    elif allow:
+    if allow:
         check(name, decision == "allow", reason)
     else:
         check(name, decision == "deny" and why in reason, reason)
@@ -340,7 +335,7 @@ def t_admin_auto(h):
     # обычную; мутация «без разбора флагов до подкоманды» краснеет здесь
     def gate(name, cmd, why):
         d, r = h.pre(cmd)
-        check(name, d == "deny" and "Правило push: gh pr merge" in r and (why in r or not HAVE_TOML), r)
+        check(name, d == "deny" and "Правило push: gh pr merge" in r and why in r, r)
     gate("gh -R o/r pr merge 1 — шлюз: без --match-head-commit — отказ", "gh -R latark/tg-read pr merge 3",
          "нужен ровно один --match-head-commit")
     gate("gh --repo=o/r pr merge 1 --admin — отказ", f"gh --repo=latark/tg-read pr merge 3 --admin --match-head-commit {sha}",
@@ -408,11 +403,10 @@ def t_core(h):
     h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"), rec("accept", "latark/agent-kit", 7, sha))
     cmd = f"gh pr merge 7 --match-head-commit {sha}"
     merge_case("защиты: PR не задевает ядро — проходит", h.pre(cmd, pdir="projects/agent-kit"), True)
-    if HAVE_TOML:
-        log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
-        check("gh pr view зовётся с -R и номером", "pr view 7 -R latark/agent-kit --json headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup"
-              in log and "api repos/latark/agent-kit/pulls/7/files" in log and "--paginate" in log, log)
-        check("защиты: один gh pr view на Д3 и проверки GitHub (таймаут хука 10 с)", log.count("pr view") == 1, log)
+    log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+    check("gh pr view зовётся с -R и номером", "pr view 7 -R latark/agent-kit --json headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup"
+          in log and "api repos/latark/agent-kit/pulls/7/files" in log and "--paginate" in log, log)
+    check("защиты: один gh pr view на Д3 и проверки GitHub (таймаут хука 10 с)", log.count("pr view") == 1, log)
     h.gh(["README.md", "plugins/guard/hooks/merge_gate.py"])
     merge_case("защиты: PR задевает ядро (merge_gate.py) — отказ", h.pre(cmd, pdir="projects/agent-kit"), False, CORE + ": PR задевает")
     for path in ("plugins/guard/tests/x.py", "plugins/guard/README.md", "PLUGINS/Guard/x.py", "plugins/guard/hooks/guard.py"):
@@ -855,9 +849,8 @@ def t_version_bump_refused(h):
     merge_case("защиты: version в plugin.json, gh api файлов упал один раз — отказ", h.pre(cmd, pdir=kit), False,
                "список файлов PR не получен")
     log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
-    # без tomllib (3.9) слияние закрыто до gh: запросов нет вовсе
     check("защиты: сбой файлов — один запрос pulls/N/files на шлюз, без повтора",
-          sum(1 for ln in log.splitlines() if ln.startswith("api ") and "/files" in ln) == (1 if HAVE_TOML else 0), log)
+          sum(1 for ln in log.splitlines() if ln.startswith("api ") and "/files" in ln) == 1, log)
     # и с Touch ID владельца: сбой gh — отказ, согласие пускает только задетое ядро
     h.gh(["plugins/guard/README.md", {"filename": pj, "status": "modified", "patch": VERSION_PATCH}])
     h.approve(f"{ts()} merge-approve latark/agent-kit#7 {sha}", fresh=True)
@@ -957,9 +950,8 @@ def t_canary_b1(h):
     h.post(tests, "dev-opus", cwd=kit)
     h.post(accept + CL, "argus", cwd=kit, agent_id="a1")
     merge_case("Б1 е) контроль: tests и accept с перечнем на тот же SHA — слияние пущено", h.pre(merge, pdir=kit), True)
-    if HAVE_TOML:
-        log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
-        check("Б1 е) gh с текстом «одобри» в PR реально опрошен (Д3)", f"pr view {pr}" in log, log)
+    log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+    check("Б1 е) gh с текстом «одобри» в PR реально опрошен (Д3)", f"pr view {pr}" in log, log)
 
 
 def t_reviewers(h):
@@ -976,10 +968,9 @@ def t_reviewers(h):
         h.seed(tests, *order)
         got = h.pre(merge)
         merge_case(f"два argus на одном head: {name} — отказ", got, False, "«вернуть» (reject)")
-        if HAVE_TOML:
-            check(f"{name}: отказ называет чей reject и когда, и как его снять",
-                  "argus agent argus2, сессия s-b" in got[1] and "2026-10-16T12:20:55" in got[1]
-                  and "того же рецензента" in got[1] and "новый коммит" in got[1], got[1])
+        check(f"{name}: отказ называет чей reject и когда, и как его снять",
+              "argus agent argus2, сессия s-b" in got[1] and "2026-10-16T12:20:55" in got[1]
+              and "того же рецензента" in got[1] and "новый коммит" in got[1], got[1])
     h.reset()
     h.seed(tests, r2, rec("accept", "latark/tg-read", 3, sha, agent_id="argus2", session="s-b"))
     merge_case("reject, затем accept того же рецензента — проходит", h.pre(merge), True)
@@ -1092,11 +1083,9 @@ def t_merge_hints(h):
         bare = re.findall(r"gh pr merge [^\s\"]+ --match-head-commit", src)
         check(f"{f}: нет подсказки `gh pr merge N --match-head-commit` без -R", not bare, bare)
     d, why = h.pre(f"gh pr merge 3 --match-head-commit {h.sha['tg-read']}")
-    if HAVE_TOML:
-        check("отказ шлюза слияния (внутреннее) подсказывает форму с -R", d == "deny" and form in why, why)
+    check("отказ шлюза слияния (внутреннее) подсказывает форму с -R", d == "deny" and form in why, why)
     d, why = h.pre(f"gh pr merge 7 --match-head-commit {h.sha['agent-kit']}", pdir="projects/agent-kit")
-    if HAVE_TOML:
-        check("отказ шлюза слияния (защиты) подсказывает форму с -R", d == "deny" and form in why, why)
+    check("отказ шлюза слияния (защиты) подсказывает форму с -R", d == "deny" and form in why, why)
 
 
 def t_opus_protect(h):
@@ -1363,11 +1352,10 @@ def t_ci(h):
     h.seed(rec("tests", "latark/tg-read", None, sha, "dev-opus"), rec("accept", "latark/tg-read", 3, sha))
     cmd = f"gh pr merge 3 --match-head-commit {sha}"
     merge_case("CI: зелёные проверки — проходит", h.pre(cmd), True)
-    if HAVE_TOML:
-        log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
-        check("CI: gh pr view зовётся с -R, номером и statusCheckRollup",
-              "pr view 3 -R latark/tg-read --json headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup" in log, log)
-        check("CI: зелёные — один вызов gh, workflows не спрашивает", log.count("\n") == 1, log)
+    log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+    check("CI: gh pr view зовётся с -R, номером и statusCheckRollup",
+          "pr view 3 -R latark/tg-read --json headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup" in log, log)
+    check("CI: зелёные — один вызов gh, workflows не спрашивает", log.count("\n") == 1, log)
     red = dict(RUN_OK, conclusion="FAILURE")
     h.ci([GREEN[1], red])
     merge_case("CI: красная CheckRun — отказ с именем проверки", h.pre(cmd), False, "check-traces красная: FAILURE")
@@ -1400,18 +1388,16 @@ def t_ci(h):
     merge_case("CI: headRefOid в верхнем регистре — тот же SHA, проходит", h.pre(cmd), True)
     h.ci([])
     merge_case("CI: проверок нет и .github/workflows нет (404) ни на head, ни на base — проходит", h.pre(cmd), True)
-    if HAVE_TOML:
-        log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
-        check("CI: при пустом rollup спрашивает .github/workflows на head и на base PR",
-              f"api repos/latark/tg-read/contents/.github/workflows?ref={sha}" in log
-              and f"api repos/latark/tg-read/contents/.github/workflows?ref={BASE}" in log, log)
+    log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+    check("CI: при пустом rollup спрашивает .github/workflows на head и на base PR",
+          f"api repos/latark/tg-read/contents/.github/workflows?ref={sha}" in log
+          and f"api repos/latark/tg-read/contents/.github/workflows?ref={BASE}" in log, log)
     h.wf(sha, '[{"name": "check-traces.yml", "type": "file"}]')
     h.reset_log()
     merge_case("CI: проверок нет, а .github/workflows на head есть — отказ «не встали»", h.pre(cmd), False,
                "ещё не встали")
-    if HAVE_TOML:
-        log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
-        check("CI: workflows на head есть — base не спрашивает", f"ref={BASE}" not in log, log)
+    log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+    check("CI: workflows на head есть — base не спрашивает", f"ref={BASE}" not in log, log)
     h.reset_wf()
     h.wf(BASE, '[{"name": "check-traces.yml", "type": "file"}]')
     merge_case("CI: head 404, а на base PR .github/workflows есть (PR убирает workflows) — отказ", h.pre(cmd), False,
@@ -1444,7 +1430,7 @@ def t_ci(h):
     h.ci([dict(RUN_OK, conclusion="FAILURE")], name="agent-kit")
     merge_case("CI: защиты, PR без ядра, красная проверка — отказ", h.pre(f"gh pr merge 7 --match-head-commit {kit}",
                pdir="projects/agent-kit"), False, "check-traces красная")
-    # без политики (Python 3.9) шлюз до проверок не доходит — сами проверки здесь, на любом Python
+    # сами проверки CI — напрямую, без шлюза
     mg = _load_merge_gate("merge_gate_ci")
     check("_ci_rollup: зелёный", mg._ci_rollup(GREEN)[0] == "ok")
     check("_ci_rollup: FAILURE — fail", mg._ci_rollup([dict(RUN_OK, conclusion="FAILURE")])[0] == "fail")
@@ -1585,7 +1571,7 @@ def t_core_touchid(h):
 
 def t_hq_gh(h):
     """hq-gh (metis-0247, ревью argus-69b): окну штаба gh pr — только с -R из [merge_repos], без обсуждений и без
-    личного. Без tomllib (3.9) [merge_repos] не прочитать — штабу закрыт любой gh pr."""
+    личного."""
     HQ = {"PANTHEON_ROLE": "hq"}
 
     def hq(cmd, role="hq", agent_id=None, env=None):
@@ -1593,9 +1579,7 @@ def t_hq_gh(h):
 
     def case(name, got, allow, why="hq-gh"):
         decision, reason = got
-        if allow and not HAVE_TOML:
-            check(name + " (без tomllib — отказ)", decision == "deny" and "не прочиталась" in reason, reason)
-        elif allow:
+        if allow:
             check(name, decision == "allow", reason)
         else:
             check(name, decision == "deny" and why in reason, reason)
@@ -1608,7 +1592,7 @@ def t_hq_gh(h):
          hq("gh pr view 5 -R torvalds/linux --comments"), False)
     # -R: только из [merge_repos]; мутация «без проверки -R» краснеет здесь
     case("hq: gh pr view -R чужой (без --comments) — отказ", hq("gh pr view 5 -R torvalds/linux"), False,
-         "нет в [merge_repos]" if HAVE_TOML else "hq-gh")
+         "нет в [merge_repos]")
     case("hq: gh pr view без -R — отказ (репозиторий папки не проверить)", hq("gh pr view 5"), False, "-R")
     case("hq: склейка -Rчужой — отказ", hq("gh pr checks 5 -Rtorvalds/linux"), False)
     case("hq: --repo=чужой — отказ", hq("gh pr view 5 --repo=torvalds/linux"), False)
@@ -1622,19 +1606,19 @@ def t_hq_gh(h):
          hq("gh pr view 5 -R torvalds/linux", role="general-purpose", agent_id="sub1"), False)
     # обсуждения — и в своём репозитории (решение Зевса 19.10); мутация «без проверки --comments» краснеет здесь
     case("hq: gh pr view -R свой --comments — отказ", hq("gh pr view 5 -R latark/agent-kit --comments"), False,
-         "обсуждений" if HAVE_TOML else "hq-gh")
+         "обсуждений")
     case("hq: gh pr view -R свой -c — отказ", hq("gh pr view 5 -R latark/agent-kit -c"), False,
-         "обсуждений" if HAVE_TOML else "hq-gh")
+         "обсуждений")
     case("hq: склейка -cR свой — отказ", hq("gh pr view 5 -cR latark/agent-kit"), False,
-         "обсуждений" if HAVE_TOML else "hq-gh")
+         "обсуждений")
     case("hq: --json comments — отказ", hq("gh pr view 5 -R latark/agent-kit --json title,comments"), False,
-         "обсуждений" if HAVE_TOML else "hq-gh")
+         "обсуждений")
     # личное — свой репозиторий, но путь в me/; мутация «без проверки private» краснеет здесь
     for cmd in (f"gh pr edit 5 -R latark/agent-kit --body-file {me}", f"gh pr edit 5 -R latark/agent-kit -F {me}",
                 f"gh pr edit 5 -R latark/agent-kit --body-file={me}", f"gh pr edit 5 -R latark/agent-kit -F{me}",
                 f'gh pr edit 5 -R latark/agent-kit --body "$(cat {me})"',
                 f"cat {me} | gh pr edit 5 -R latark/agent-kit --body-file -"):
-        case(f"hq: личное в команде с gh pr — отказ ({cmd})", hq(cmd), False, "личное (" if HAVE_TOML else "hq-gh")
+        case(f"hq: личное в команде с gh pr — отказ ({cmd})", hq(cmd), False, "личное (")
     # входное перенаправление (argus-69b2): цель `<` разбор не держал среди слов; мутация «цели < не учитываются»
     # краснеет здесь. Перенаправления, которые уже ловились (`< <(cat …)`, `<<< "$(cat …)"`), — рядом, чтобы не сломать
     via_stdin = (f"gh pr edit 5 -R latark/agent-kit --body-file - < {me}",
@@ -1646,7 +1630,7 @@ def t_hq_gh(h):
                  f'gh pr edit 5 -R latark/agent-kit --body-file - <<< "$(cat {me})"')
     for cmd in via_stdin:
         case(f"hq: личное через перенаправление — отказ ({cmd})", hq(cmd), False,
-             "личное (" if HAVE_TOML else "hq-gh")
+             "личное (")
     case("hq: GH_CONFIG_DIR в команде — отказ",
          hq("GH_CONFIG_DIR=/tmp/x gh pr view 5 -R latark/agent-kit"), False, "GH_CONFIG_DIR")
     case("hq: GH_CONFIG_DIR в окружении — отказ",
@@ -1666,7 +1650,7 @@ def t_hq_gh(h):
     d, r = hq(f"gh pr merge 5 -R latark/agent-kit --match-head-commit {OLD} --merge")
     check("hq: gh pr merge -R свой (agent_type hq) — отказ", d == "deny" and ("hq-gh" in r or "Правило push" in r), r)
     # ревью 69m-b: главная сессия окна штаба без agent_type для push — владелец, merge_problem не зовётся; слияние
-    # окну штаба закрыто всегда (и без tomllib). Мутация «проверка слияния в check_hq_gh убрана» краснеет здесь
+    # окну штаба закрыто всегда. Мутация «проверка слияния в check_hq_gh убрана» краснеет здесь
     merge_why = "слияние PR закрыто"
     for cmd in ("gh pr merge 5 -R latark/agent-kit", "gh pr merge 5 -R latark/agent-kit --squash",
                 "gh pr merge 5 -R latark/agent-kit --auto --squash", "gh pr merge 5 --repo latark/agent-kit --merge",
@@ -1713,7 +1697,7 @@ def t_hq_gh(h):
     check("hq: gh $SUB merge 1 — слово до подкоманды не вычислить — отказ", d == "deny" and "не вычислить" in r, r)
     case("hq: gh -R свой pr view N — можно (флаг до pr тоже виден)", hq("gh -R latark/agent-kit pr view 5", role=None), True)
     case("hq: gh -R чужой pr view N — отказ", hq("gh -R torvalds/linux pr view 5", role=None), False,
-         "нет в [merge_repos]" if HAVE_TOML else "hq-gh")
+         "нет в [merge_repos]")
     case("hq: gh --hostname h pr view N -R свой — отказ (до pr только -R)",
          hq("gh --hostname evil.example pr view 5 -R latark/agent-kit", role=None), False, "hq-gh")
     case("hq: gh pr checks N -R свой — можно", hq("gh pr checks 5 -R latark/agent-kit", role=None), True)
@@ -1758,7 +1742,7 @@ def t_hq_gh(h):
     # --remove-milestone булев: следующий --repo=чужой виден hq-gh (argus-69b3, п. 2)
     case("hq: --remove-milestone не съедает следующий --repo=чужой — отказ",
          hq("gh pr edit 5 -R latark/agent-kit --remove-milestone --repo=torvalds/linux --title x"), False,
-         "нет в [merge_repos]" if HAVE_TOML else "hq-gh")
+         "нет в [merge_repos]")
     case("hq: --remove-milestone — можно", hq("gh pr edit 5 -R latark/agent-kit --remove-milestone --title x"), True)
     case("hq: --remove-label X — значение, можно", hq("gh pr edit 5 -R latark/agent-kit --remove-label ready"), True)
 
@@ -1921,7 +1905,7 @@ def opus(sha, agent_id="argus1", kind="accept", session="s-a", repo="latark/agen
 
 
 def t_carry_unit(h):
-    """Отпечаток собственного диффа PR (_fingerprint) и сверка git (_carry_git) — напрямую, и на Python 3.9."""
+    """Отпечаток собственного диффа PR (_fingerprint) и сверка git (_carry_git) — напрямую."""
     s = kit_history(h)
     mg = _load_merge_gate("merge_gate_carry")
     kit = h.j("projects/agent-kit")
@@ -2157,15 +2141,14 @@ def t_carry_gate(h):
         return got
 
     case("N1 = P + main + номер: «принять» с P переносится", "N1", "M1", [opus(s["P"]), tests(s["N1"])], True)
-    if HAVE_TOML:
-        got = carry_lines(h)
-        check("перенос записан в merge-gate/carry.jsonl", len(got) == 1 and got[0].get("kind") == "carry"
-              and got[0].get("sha") == s["N1"] and [x.get("sha") for x in got[0].get("from", [])] == [s["P"]]
-              and len(got[0].get("fp") or "") == 64 and got[0].get("base") == s["M1"] and got[0].get("pr") == 7, got)
-        st = os.stat(carry_file(h))
-        check("carry.jsonl — 0600", stat.S_IMODE(st.st_mode) == 0o600, oct(st.st_mode))
-        check("records.jsonl перенос не меняет (читают pantheon review status и metrics)",
-              [r["kind"] for r in h.read()] == ["accept", "tests"], h.read())
+    got = carry_lines(h)
+    check("перенос записан в merge-gate/carry.jsonl", len(got) == 1 and got[0].get("kind") == "carry"
+          and got[0].get("sha") == s["N1"] and [x.get("sha") for x in got[0].get("from", [])] == [s["P"]]
+          and len(got[0].get("fp") or "") == 64 and got[0].get("base") == s["M1"] and got[0].get("pr") == 7, got)
+    st = os.stat(carry_file(h))
+    check("carry.jsonl — 0600", stat.S_IMODE(st.st_mode) == 0o600, oct(st.st_mode))
+    check("records.jsonl перенос не меняет (читают pantheon review status и metrics)",
+          [r["kind"] for r in h.read()] == ["accept", "tests"], h.read())
     case("N2 = N1 + второй main + номер: переносится", "N2", "M2", [opus(s["P"]), tests(s["N2"])], True)
     case("Pv = P + номер, base M1: переносится", "Pv", "M1", [opus(s["P"]), tests(s["Pv"])], True)
     case("длинная история (35 пустых коммитов, 122-b-2): переносится", "Nlong", "M1",
@@ -2258,16 +2241,14 @@ def t_carry_gate(h):
          "M1", [rej(s["R"]), opus(s["NA"], "x"), tests(s["NA"])], True)
     got = case("отказ «вернуть» называет head и правило снятия", "N1", "M1",
                [opus(s["P"], "x"), rej(s["Pv"]), tests(s["N1"])], False, f"на {s['Pv'][:12]}")
-    if HAVE_TOML:
-        check("отказ «вернуть» говорит, что оно привязано к PR", "привязано к PR" in got[1], got[1])
+    check("отказ «вернуть» говорит, что оно привязано к PR", "привязано к PR" in got[1], got[1])
     # #134 r2 п.3: откат к коду P после «вернуть» R, снятого «принять» на исправленном A, — отказ называет отсечку
     got = case("откат к коду P после снятого «вернуть» R — «принять» P отсечено, отказ называет его", "N1", "M1",
                [opus(s["P"], "x"), opus(s["R"], "y", "reject"), opus(s["A"], "z", session="s-z"), tests(s["N1"])],
                False, "нет «принять»")
-    if HAVE_TOML:
-        check("отказ при отсечке называет «принять» P и «вернуть» R",
-              "записано раньше «вернуть»" in got[1] and f"на {s['P'][:12]}" in got[1]
-              and f"на {s['R'][:12]}" in got[1], got[1])
+    check("отказ при отсечке называет «принять» P и «вернуть» R",
+          "записано раньше «вернуть»" in got[1] and f"на {s['P'][:12]}" in got[1]
+          and f"на {s['R'][:12]}" in got[1], got[1])
     # переполнение: 12 head с вердиктами, reject на самом старом (117-b2-2)
     many = [rej(s["R"])] + [opus("%040x" % i, "f%d" % i) for i in range(1, 11)] + [opus(s["A"], "x"), tests(s["NA"])]
     case("12 head, reject на самом старом, «принять» на исправленном A (117-b2-2) — в силе", "NA", "M1", many, False,
@@ -2602,8 +2583,7 @@ def t_carry_r4_gate(h):
         got, took = case("r4 шлюз: git diff --raw дольше таймаута — «вернуть» в силе", s["NA"], s["M1"], recs, False,
                          "«вернуть» (reject)", extra_env=env)
         check(f"r4 шлюз: таймаут git — хук за {took:.1f} с ≤ 8 с", took <= 8, took)
-        if HAVE_TOML:
-            check("r4 шлюз: таймаут git — причина в отказе", "не ответил" in got[1] or "дольше" in got[1], got[1])
+        check("r4 шлюз: таймаут git — причина в отказе", "не ответил" in got[1] or "дольше" in got[1], got[1])
     finally:
         os.remove(h.j("git.slow"))
 
@@ -2632,10 +2612,9 @@ def t_carry_r6(h):
     got = case("r6 обход: z принял N1, y вернул R, w принял A, force-push на N1 — отказ", "N1", "M1",
                [opus(s["N1"], "z", session="s-z"), rej(s["R"]), opus(s["A"], "w", session="s-w"), tests(s["N1"])],
                False, "нет «принять»")
-    if HAVE_TOML:
-        check("r6 обход: отказ называет «принять» z на N1 и отсёкшее его «вернуть» y на R",
-              "записано раньше «вернуть»" in got[1] and f"на {s['N1'][:12]}" in got[1]
-              and f"на {s['R'][:12]}" in got[1] and "ни на своём head" in got[1], got[1])
+    check("r6 обход: отказ называет «принять» z на N1 и отсёкшее его «вернуть» y на R",
+          "записано раньше «вернуть»" in got[1] and f"на {s['N1'][:12]}" in got[1]
+          and f"на {s['R'][:12]}" in got[1] and "ни на своём head" in got[1], got[1])
     case("r6: z снова принял N1 после «вернуть» — проходит", "N1", "M1",
          [opus(s["N1"], "z", session="s-z"), rej(s["R"]), opus(s["A"], "w", session="s-w"),
           opus(s["N1"], "z", session="s-z"), tests(s["N1"])], True)

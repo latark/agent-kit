@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Параллельный раннер файлов тестов scripts/run-tests.py (metis-0450).
 
-Запуск: python3 -I plugins/pantheon/tests/test_run_tests.py  (код выхода 0 — все прошли). Идёт и на системном
-/usr/bin/python3 (3.9). Фальшивые плагины во временной папке: зелёный, падающий, зависающий, без итога, без файлов;
+Запуск: python3 -I plugins/pantheon/tests/test_run_tests.py  (код выхода 0 — все прошли). Фальшивые плагины во временной папке: зелёный, падающий, зависающий, без итога, без файлов;
 раннер в своей сессии, как задача run_job, гасится SIGTERM / SIGHUP / SIGINT — ни файла тестов, ни его внука после."""
 import atexit
 import os
@@ -240,16 +239,6 @@ check("verdict: из списка, код 1 — не ok", R.verdict(1, "ok a\n",
 missing = [lb for lb in tuple(R.NO_SUMMARY) + tuple(R.SLOW) + tuple(R.SERIAL) if not os.path.exists(
     os.path.join(os.path.dirname(PLUGIN), lb.split("/")[0], "tests", lb.split("/")[1]))]
 check("NO_SUMMARY, SLOW, SERIAL — только существующие файлы", not missing, missing)
-
-# --- копия итоговых регулярок совпадает с pantheon.py (импортировать его на 3.9 нельзя) ---
-src = open(os.path.join(PLUGIN, "lib", "pantheon.py"), encoding="utf-8").read()
-m = re.search(r'^TEST_SUMMARY = re\.compile\(r"(.*)"\)$', src, re.M)
-check("TEST_SUMMARY — как в pantheon.py", m is not None and m.group(1) == R.TEST_SUMMARY.pattern, m and m.group(1))
-m = re.search(r"^_SUMMARY_TOTAL = \(\n(.*?)\n\)$", src, re.M | re.S)
-pats = re.findall(r're\.compile\(r"(.*?)"\)', m.group(1)) if m else []
-check("_SUMMARY_TOTAL — как в pantheon.py", pats == [rx.pattern for rx, _ in R._SUMMARY_TOTAL], pats)
-m = re.search(r'^ANSI = re\.compile\(r"(.*)"\)$', src, re.M)
-check("ANSI — как в pantheon.py", m is not None and m.group(1) == R.ANSI.pattern)
 
 # --- сигналы: раннер в своей сессии, как задача run_job; killpg TERM/HUP/INT, через 5 с SIGKILL; сирот нет ---
 for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):

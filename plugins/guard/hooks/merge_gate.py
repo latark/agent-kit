@@ -1760,7 +1760,7 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
     policy = G.load_policy()
     coords = policy.get("coordinators")
     if not isinstance(coords, dict):
-        # без политики (нет tomllib на Python 3.9 или нет policy.toml) guard не знает папок защит — закрыто всем
+        # без политики (нет policy.toml или он не разбирается) guard не знает папок защит — закрыто всем
         return "политика ~/.claude/pantheon/policy.toml не прочиталась, а без неё папки защит неизвестны. " + MERGE_OWNER
     metis = _str_list(coords.get("metis-pantheon"))
     if metis is None:

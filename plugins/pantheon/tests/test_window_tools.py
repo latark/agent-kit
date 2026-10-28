@@ -22,11 +22,12 @@ LIB = os.path.join(PLUGIN, "lib")
 HEAVY = os.path.join(PLUGIN, "bin", "heavy")
 CODE = "import json,sys; sys.path.insert(0, sys.argv[1]); import pantheon as P; print(json.dumps(P.run_env()['PATH']))"
 
-fails = []
+fails, done = [], []
 
 
 def check(name, cond, extra=""):
     print(("ok   " if cond else "FAIL ") + name + (f" {extra}" if not cond else ""))
+    done.append(name)
     if not cond:
         fails.append(name)
 
@@ -70,5 +71,5 @@ with tempfile.TemporaryDirectory(prefix="wintools-") as raw:
     check("heavy вне окна: TMPDIR не тронут", heavy_tmpdir(home, None) == "/sandbox-tmp")
     check("heavy: папки PANTHEON_TMP нет — TMPDIR не тронут", heavy_tmpdir(home, os.path.join(home, "nope")) == "/sandbox-tmp")
 
-print(f"\n{'не прошло: ' + str(len(fails)) if fails else 'все прошли'}")
+print(f"\n{len(done) - len(fails)} из {len(done)} прошли")  # итог с числом: его требует run-tests.py
 sys.exit(1 if fails else 0)

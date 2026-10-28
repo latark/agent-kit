@@ -5,8 +5,10 @@
 
 ## Как проверять
 
-- Тесты плагина — его папка `tests/` (`python3 -I tests/test_*.py`), на Python 3.14 и на системном 3.9: хуки
-  запускают `python3` из PATH.
+- Тесты плагина — его папка `tests/` (`python3 -I tests/test_*.py`), только на Python 3.14 (metis-0571): хуки
+  запускает `hooks/python.sh` на 3.11+, системный 3.9 не нужен. Все три плагина сразу —
+  `heavy python3 -I plugins/pantheon/scripts/run-tests.py plugins/guard plugins/pantheon plugins/project-tools`; то же
+  гоняет workflow tests на каждый PR в main (`.github/workflows/tests.yml`, macOS, 3.14).
 - Изменение системы — вживую и в изоляции: временные папки, `--plugin-dir <клон>`, `--settings <файл>` на одну
   сессию, модель Haiku; ничего не ставить ради проверки. Хеш `~/.claude/settings.json` (`shasum -a 256`) — до и
   после, оба в отчёт.

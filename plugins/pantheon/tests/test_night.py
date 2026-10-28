@@ -14,9 +14,7 @@ import os
 import subprocess
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _py311 import PY311  # pantheon.py — только на Python 3.11+ (tomllib)
-if sys.version_info < (3, 11):
-    os.execv(PY311, [PY311, "-I", os.path.abspath(__file__)])
+from _py311 import PY311  # noqa: E402
 import tempfile
 import atexit as _atexit
 import shutil as _shutil
@@ -907,17 +905,6 @@ def test_power_0284():
         for k, v in saved.items():
             if v is not None:
                 os.environ[k] = v
-
-
-def test_py39_compile():
-    py39 = "/usr/bin/python3"
-    if not os.path.exists(py39):
-        print("пропуск: нет /usr/bin/python3")
-        return
-    r = subprocess.run([py39, "-I", "-c", "import sys; compile(open(sys.argv[1], encoding='utf-8').read(), "
-                        "sys.argv[1], 'exec'); print(sys.version_info[:2])", os.path.join(LIB, "night.py")],
-                       capture_output=True, text=True, timeout=60)
-    check(r.returncode == 0, f"night.py не компилируется на {py39}: {r.stderr[-400:]}")
 
 
 if __name__ == "__main__":

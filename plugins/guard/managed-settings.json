@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/plugins/marketplaces/agent-kit/plugins/guard/hooks/guard.py\" --managed",
+            "command": "/bin/sh \"$HOME/.claude/plugins/marketplaces/agent-kit/plugins/guard/hooks/python.sh\" \"$HOME/.claude/plugins/marketplaces/agent-kit/plugins/guard/hooks/guard.py\" --managed",
             "timeout": 10
           }
         ]
@@ -46,7 +46,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/plugins/marketplaces/agent-kit/plugins/guard/hooks/guard.py\" --managed",
+            "command": "/bin/sh \"$HOME/.claude/plugins/marketplaces/agent-kit/plugins/guard/hooks/python.sh\" \"$HOME/.claude/plugins/marketplaces/agent-kit/plugins/guard/hooks/guard.py\" --managed",
             "timeout": 15
           }
         ]

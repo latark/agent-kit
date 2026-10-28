@@ -28,9 +28,6 @@ def check(name, cond, detail=""):
 
 
 def main():
-    if sys.version_info < (3, 11):  # pantheon.py сам требует 3.11 (tomllib): на 3.9 он отвечал бы отказом на всё
-        print("ok   пропуск: pantheon review требует Python 3.11+ (здесь %d.%d)" % sys.version_info[:2])
-        return 0
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="review-test-"))
     try:
         run_all(tmp)

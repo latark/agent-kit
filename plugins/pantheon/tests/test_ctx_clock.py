@@ -2,7 +2,7 @@
 """Часы в контексте ролей (metis-0281): хук ctx.py clock (UserPromptSubmit) и start (SessionStart) выдают строку
 «Сейчас: ДД.ММ ЧЧ:ММ (часы Mac)» в окнах ролей Пантеона; вне их и в субагенте — нет.
 
-Запуск: python3 -I plugins/pantheon/tests/test_ctx_clock.py  (код выхода 0 — все прошли; и на /usr/bin/python3)
+Запуск: python3 -I plugins/pantheon/tests/test_ctx_clock.py  (код выхода 0 — все прошли)
 Часы подменены PANTHEON_NOW (секунды с эпохи), пояс TZ=Europe/Moscow.
 """
 import json

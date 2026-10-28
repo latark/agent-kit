@@ -19,7 +19,7 @@
   запрете «Не `mkdir -p` — на чужой папке он молча вернёт 0»;
 - сам приём работает: в закрытый `chmod a-w` лог `: > файл` не пишет, текст цел.
 
-Запуск: python3 -I plugins/pantheon/tests/test_tmp_rules.py  (код выхода 0 — все прошли; Python 3.9+)
+Запуск: python3 -I plugins/pantheon/tests/test_tmp_rules.py  (код выхода 0 — все прошли)
 """
 import os
 import re

@@ -311,10 +311,7 @@ def main():
     test_unit()
     test_pack_titles()
     test_dropped_to_done()
-    if PY311:
-        test_cli()
-    else:
-        print("skip: CLI — нужен Python 3.11+")
+    test_cli()
 
 
 main()

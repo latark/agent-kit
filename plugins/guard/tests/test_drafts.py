@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Исполнитель без кода palamedes в guard (metis-0469): пишет только черновики.
 
-Запуск: python3 -I plugins/guard/tests/test_drafts.py   (код выхода 0 — все прошли; и на системном Python 3.9)
+Запуск: python3 -I plugins/guard/tests/test_drafts.py   (код выхода 0 — все прошли)
 
 Проверяет (обвязка и HOME во временной папке — из test_guard.py):
   - draft-role: из инструментов guard palamedes открыты только Read, Grep, Glob, Write, Edit, MultiEdit;
