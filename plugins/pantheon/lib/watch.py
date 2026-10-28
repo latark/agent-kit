@@ -2057,7 +2057,7 @@ def stop(rest, who):
         print("pantheon stop <направление|daedalus-задача> | --all", file=P.sys.stderr)
         return 2
     name = rest[0]
-    if not is_pantheon(name, doms) or name.startswith("zeus"):
+    if (not is_pantheon(name, doms) and name != "hestia") or name.startswith("zeus"):  # hestia — служебная (metis-0575)
         print(f"pantheon stop: {name} — не сессия направления или мастерской", file=P.sys.stderr)
         return 2
     n, left = _stop_one(name, agents, who)
