@@ -151,8 +151,10 @@ def main():
           if any("guard.py" in h.get("command", "") for h in g.get("hooks") or [])]  # без хука agents.py (P0-6)
     check("строгий guard окон штаба и направления: matcher с Agent|Task|Skill (hq-telegram, chiron)",
           len(gm) == 2 and all({"Agent", "Task", "Skill", "Bash", "Read"} <= set(m.split("|")) for m in gm))
+    # постоянное число записей, а не перечисление папок: личное, terminal-notifier, пароль демона CDP, разборы чатов
+    # (metis-0270) и демон Claude Code (metis-0287) — каждое в двух видах (~/… и настоящий путь)
     check("окно направления: allowRead нет, запретов чтения — единицы (координаторы не раздуваются)",
-          "allowRead" not in sa["sandbox"]["filesystem"] and len(sa["sandbox"]["filesystem"]["denyRead"]) < 20)
+          "allowRead" not in sa["sandbox"]["filesystem"] and len(sa["sandbox"]["filesystem"]["denyRead"]) < 40)
 
     # [hq] (metis-0182): без раздела — штабу из policy ничего не закрыто; битый раздел — окно штаба не пересобрано,
     # прежний файл на месте, одна тревога; остальные окна собираются; исправили — пересобрано, тревога снята
