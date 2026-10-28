@@ -230,6 +230,18 @@ def cli_tests():
     check("wake --task --dry-run: печатает запуск окна hephaestus-site с ролью координатора, claude --bg не звали",
           r.returncode == 0 and "--agent domain-coordinator --name hephaestus-site" in r.stdout and not bg(), r.stdout)
     guard_probe(agent_of(r.stdout))
+    # metis-0444: недельный потолок владельца — лид направления не поднимается и со словом, --over-cap из hq не действует
+    sl = os.path.join(tmp, ".local", "state", "claude-statusline")
+    os.makedirs(sl, exist_ok=True)
+    open(os.path.join(sl, "seven-day"), "w").write(f"60 {time.time() + 3 * 86400:.0f} {time.time():.0f}\n")
+    sched_p = os.path.join(home, "schedule.toml")
+    open(sched_p, "w").write('[limits.owner_cap]\npct = 50\ndecision = "zeus-test-cap"\n')
+    word()
+    r = run("wake", "hermes-site", "--task", "hermes-0001", "--over-cap", extra={"PANTHEON_ROLE": "hq"})
+    os.remove(sched_p)
+    check("wake --task из hq со словом при недельном потолке (и с --over-cap) — код 2 «потолок владельца», claude не звали",
+          r.returncode == 2 and "потолок владельца 50 %" in r.stderr and "только в его терминале" in r.stderr
+          and not bg() and not os.path.exists(lrun), (r.returncode, r.stderr[-300:]))
     word()
     r = run("wake", "hermes-site", "--task", "hermes-0001", extra={"PANTHEON_ROLE": "hq"})
     b = bg()

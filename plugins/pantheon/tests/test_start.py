@@ -1014,6 +1014,97 @@ def main():
           and caprows()[-1]["origin"] == "wake" and caprows()[-1]["red"] is True
           and caprows()[-1]["result"] == "allowed" and caprows()[-1]["target"] == "athena-shop")
 
+    # metis-0444: недельный потолок владельца держит ручные start и wake (кроме start zeus); сверх него — только из
+    # вашего терминала флагом --over-cap, в окне роли флаг не действует
+    sched_p, sl = os.path.join(home, "schedule.toml"), os.path.join(tmp, ".local", "state", "claude-statusline")
+    os.makedirs(sl, exist_ok=True)
+
+    def week(used):
+        now_ = time.time()
+        open(os.path.join(sl, "seven-day"), "w").write(f"{used} {now_ + 3 * 86400:.0f} {now_:.0f}\n")
+        open(os.path.join(sl, "five-hour"), "w").write(f"10 {now_ + 3600:.0f} {now_:.0f}\n")
+    open(sched_p, "w").write('[limits.owner_cap]\npct = 50\ndecision = "zeus-test-cap"\n')
+    trust = os.path.join(tmp, ".claude.json")
+    open(trust, "w").write(json.dumps({"projects": {os.path.join(tmp, "projects", "br"): {"hasTrustDialogAccepted": True}}}))
+    week(60)
+    open(agents_file, "w").write("[]")
+    open(log, "w").close()
+    n0 = len(caprows())
+    r = run("start", "athena-shop", "под", "потолком")
+    check("потолок 50, неделя 60: start из вашего терминала — отказ, код 2, причина и подсказка --over-cap, claude не "
+          "звали, замер refused (metis-0444)",
+          r.returncode == 2 and "потолок владельца 50 %" in r.stderr and "неделя 60 %" in r.stderr
+          and "zeus-test-cap" in r.stderr and "--over-cap" in r.stderr and not calls() and len(caprows()) == n0 + 1
+          and caprows()[-1]["result"] == "refused" and "over_cap" not in caprows()[-1])
+    r = run("start", "athena-shop", "под", "--from", "tick")
+    check("потолок: start --from tick — отказ, код 2, «поднять потолок может только владелец», без подсказки флага",
+          r.returncode == 2 and "может только владелец" in r.stderr and "только в его терминале" not in r.stderr
+          and not calls())
+    r = run("start", "workshop", "capx", "--from", "tick")
+    check("потолок: start workshop — отказ, код 2", r.returncode == 2 and "потолок владельца" in r.stderr and not calls())
+    word()
+    r = run("start", "athena-shop", "сверх", "--over-cap", extra={"PANTHEON_ROLE": "hq"})
+    check("потолок: окно hq со словом владельца и --over-cap — отказ, код 2: флаг только в вашем терминале",
+          r.returncode == 2 and "только в его терминале" in r.stderr and not calls())
+    r = run("start", "athena-shop", "сверх", "--over-cap", "--from", "tick")
+    check("потолок: --from tick и --over-cap из терминала — отказ (флаг снимает только origin owner)",
+          r.returncode == 2 and "потолок владельца" in r.stderr and not calls())
+    os.remove(zlog)
+    r = run("start", "athena-shop", "сверх", "--over-cap")
+    c = calls()
+    check("потолок: --over-cap из вашего терминала — запуск, флаг не попал в поручение, в замере over_cap",
+          r.returncode == 0 and len(c) == 1 and "--over-cap" not in json.dumps(c) and "сверх" in c[0]["argv"][7]
+          and caprows()[-1]["result"] == "allowed" and caprows()[-1].get("over_cap") is True)
+    open(agents_file, "w").write("[]")
+    open(log, "w").close()
+    r = run("start", "zeus", tty=True)
+    check("потолок: start zeus из терминала — не отказан (штаб — окно владельца), claude --agent hq",
+          r.returncode == 0 and [x["argv"][:2] for x in calls()] == [["--agent", "hq"]])
+    open(log, "w").close()
+    r, c = wake_case(90_000, 10)
+    check("потолок: общий wake — отказ, код 2, никого не поднимает, причина в stderr",
+          r.returncode == 2 and not c and "потолок владельца 50 %" in r.stderr and "никого не поднимаю" in r.stderr)
+    r, c = wake_case(90_000, 10, "--dry-run")
+    check("потолок: wake --dry-run потолок не проверяет — показывает, кого поднял бы",
+          r.returncode == 0 and not c and "будет поднята: athena-shop" in r.stdout)
+    r, c = wake_case(90_000, 10, "--over-cap")
+    check("потолок: wake --over-cap из терминала — подъём", r.returncode == 0 and [x["argv"] for x in c] == [["respawn", "a1"]])
+    r, c = wake_case(90_000, 10, "--over-cap", extra={"PANTHEON_ROLE": "hq"})
+    check("потолок: wake --over-cap в окне hq — отказ, код 2", r.returncode == 2 and not c and "только в его терминале" in r.stderr)
+    r, c = wake_case(90_000, 10, "athena-shop")
+    check("потолок: wake <имя> из терминала — отказ, код 2, подсказка --over-cap, claude не звали",
+          r.returncode == 2 and not c and "потолок владельца 50 %" in r.stderr and "--over-cap" in r.stderr
+          and caprows()[-1]["result"] == "refused" and caprows()[-1]["target"] == "athena-shop")
+    r, c = wake_case(90_000, 10, "--over-cap", "athena-shop")
+    check("потолок: wake --over-cap <имя> (флаг первым) — подъём уснувшей той же сессией",
+          r.returncode == 0 and [x["argv"] for x in c] == [["respawn", "a1"]] and caprows()[-1]["result"] == "allowed")
+    word()
+    r, c = wake_case(90_000, 10, "athena-shop", "дело", "--over-cap", extra={"PANTHEON_ROLE": "hq"})
+    check("потолок: wake <имя> «задание» из hq со словом и --over-cap — отказ, код 2",
+          r.returncode == 2 and not c and "только в его терминале" in r.stderr)
+    hmd = os.path.join(agents_dir, "hestia.md")
+    open(hmd, "w").write("---\nname: hestia\n---\nГестия\n")
+    open(agents_file, "w").write("[]")
+    open(log, "w").close()
+    word()
+    r = run("wake", "hestia", "--task", "athena-0001", "--over-cap", extra={"PANTHEON_ROLE": "hq"})
+    check("потолок: wake hestia --task из hq со словом и --over-cap — отказ, код 2, claude не звали",
+          r.returncode == 2 and "потолок владельца 50 %" in r.stderr and "только в его терминале" in r.stderr
+          and not calls())
+    os.remove(hmd)
+    os.remove(zlog)
+    week(49)
+    r, c = wake_case(90_000, 10, "athena-shop")
+    check("ниже потолка (49 из 50): wake <имя> — как без потолка, подъём", r.returncode == 0 and [x["argv"] for x in c] == [["respawn", "a1"]])
+    open(agents_file, "w").write("[]")
+    open(log, "w").close()
+    r = run("start", "athena-shop", "ниже")
+    check("ниже потолка: start — запуск", r.returncode == 0 and len(calls()) == 1)
+    for f in (sched_p, trust, os.path.join(sl, "seven-day"), os.path.join(sl, "five-hour")):
+        os.remove(f)
+    open(agents_file, "w").write("[]")
+    open(log, "w").close()
+
     # ревью argus PR #32 (c6eb7e1): allow со старым mtime (cp -p, rsync -a, tar) сборка --if-changed не видит —
     # правило перепроверяют каждый подъём сессии и check --quiet
     run("domains", "build")
