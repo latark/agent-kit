@@ -1561,6 +1561,9 @@ def migrate_modes(pantheon, t, dry_run=False, actor="агент"):
     return lines, failed
 
 
+NOT_STARTED = ("inbox", "todo", None, "")  # не начатые звенья пачки «ждут» прошлое; inbox — тоже (metis-0457)
+
+
 def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
     """Карточка пачки: та же, что у задачи (вопрос, ответ, заметки работают так же), плюс состав, сумма оценок против
     бюджета, цепочка, параллельно, пересечения. project — имя заметки проекта на пульте: ссылка на неё нужна виду
@@ -1597,7 +1600,7 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
         waits = [cell(d) for d in open_deps(h, tasks)]
         k = inf["chain"].index(i) if i in inf["chain"] else 0
         prev = next((j for j in reversed(inf["chain"][:k]) if j not in inf["closed"]), None)  # ближайшее незакрытое
-        if prev and cell(prev) not in waits and h.get("status") in ("todo", None, ""):
+        if prev and cell(prev) not in waits and h.get("status") in NOT_STARTED:
             waits.append(cell(prev))
         mode = MODES.get(h.get("mode")) or ("—" if h.get("type") == "story" else "не задан")
         rows.append(f"| {n} | {cell(i)} | {_plain(one_line(h.get('title'))).replace('|', '/')} | {label_of(h)} | "
