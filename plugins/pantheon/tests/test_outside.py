@@ -197,8 +197,10 @@ check("профиль: пароль демона CDP закрыт", "/.config/cd
 check("профиль: .env* и secrets/", '/\\.env[^/]*$' in prof and "/secrets(/|$)" in prof)
 # metis-0578: шаблоны .env.example/.sample/.template читаются, остальное .env* закрыто; запись в шаблоны закрыта
 ALLOW = '(allow file-read* (regex #"/\\.env\\.(example|sample|template)$"))'
-check("профиль: allow шаблонов .env — после deny чтения, до deny записи",
-      ALLOW in prof and prof.index("(deny file-read* file-write*") < prof.index(ALLOW) < prof.index("(deny file-write*\n"))
+DENY_SEC = '(deny file-read* (regex #"/secrets(/|$)"))'
+check("профиль: deny чтения < allow шаблонов .env < deny secrets < deny записи",
+      ALLOW in prof and DENY_SEC in prof and prof.index("(deny file-read* file-write*") < prof.index(ALLOW)
+      < prof.index(DENY_SEC) < prof.index("(deny file-write*\n"))
 
 
 def env_probe(profile):
@@ -208,6 +210,9 @@ def env_probe(profile):
               ".env.template"):
         with open(os.path.join(d, n), "w") as fh:
             fh.write("x")
+    os.makedirs(os.path.join(d, "secrets"))
+    with open(os.path.join(d, "secrets", ".env.example"), "w") as fh:
+        fh.write("x")
     sb = os.path.join(d, "p.sb")
     with open(sb, "w") as fh:
         fh.write(profile)
@@ -227,6 +232,8 @@ def env_probe(profile):
     for n in (".env", ".env.local", ".env.production.local", ".env.example.bak"):
         if run("/bin/cat", n).returncode == 0:
             bad.append("прочитан " + n)
+    if run("/bin/cat", "secrets/.env.example").returncode == 0:
+        bad.append("прочитан secrets/.env.example")
     # запись в шаблон: deny file-write* на .env* не снимается allow-ом чтения
     if run("/bin/sh", "-c", "echo y > .env.example").returncode == 0:
         bad.append("записан .env.example")
@@ -240,6 +247,7 @@ else:
     check("профиль вживую: .env.example читается, .env/.env.local/.env.*.local/.env.example.bak и запись закрыты",
           bad == [], bad)
     check("мутант «нет allow» ловится пробой", env_probe(prof.replace(ALLOW, ""))[0] != [])
+    check("мутант «без повторного deny secrets» ловится пробой", env_probe(prof.replace(DENY_SEC, ""))[0] != [])
     check("мутант «allow без $» ловится пробой", env_probe(prof.replace("(example|sample|template)$", "(example|sample|template)"))[0] != [])
 check("профиль: Связка ключей", "com.apple.SecurityServer" in prof and "/Library/Keychains" in prof)
 check("профиль: порты браузеров и прокси",

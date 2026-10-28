@@ -404,6 +404,7 @@ def profile_text(roots=()):
         "(deny file-read* file-write*\n  " + "\n  ".join(read) + ")",
         # шаблоны без секретов читаются (metis-0578); поздние правила сильнее; запись в них закрыта deny выше
         '(allow file-read* (regex #"/\\.env\\.(example|sample|template)$"))',
+        '(deny file-read* (regex #"/secrets(/|$)"))',   # secrets/ закрыта целиком, и шаблон в ней тоже
         '(deny mach-lookup (global-name "com.apple.SecurityServer"))',
         "(deny file-write*\n  " + "\n  ".join(write) + ")",
         "(deny network-outbound\n  " + "\n  ".join(net) + ")",
