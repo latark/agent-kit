@@ -36,7 +36,8 @@ def check(name, ok, detail=""):
 
 def unit_checks():
     names = T.base_views(T.BASE_FILE)
-    check("в шаблоне пять видов, имена не удлинены (до 14 знаков)", len(names) == 5 and all(len(n) <= 14 for n in names), names)
+    # metis-0506: + «Новое за неделю» (15 знаков — имя из карточки задачи) и «Хвосты»
+    check("в шаблоне семь видов, имена не удлинены (до 15 знаков)", len(names) == 7 and all(len(n) <= 15 for n in names), names)
     check("у каждого вида шаблона есть непустая строка, лишних нет",
           list(T.VIEW_HELP) == names and all(v.strip() for v in T.VIEW_HELP.values()), (names, list(T.VIEW_HELP)))
     check("строки человеческие: «Что делать:» в каждой, без формул и полей",

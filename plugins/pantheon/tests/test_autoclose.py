@@ -461,7 +461,11 @@ def test_check():
         put(home, "demo", "demo-0106", status="review", updated=time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(T0 - 3 * 3600)))
         r = run_check(env, T0)
         check("check: review > 24 ч без PR — «внимание»", "внимание · demo-0104: review без PR" in r.stdout, r.stdout)
-        check("check: review с PR в тексте и свежий review — без внимания", "demo-0105" not in r.stdout and "demo-0106" not in r.stdout, r.stdout)
+        own = "\n".join(x for x in r.stdout.splitlines() if not x.startswith("внимание · застой:"))  # сводка застоя (0583) — своя строка
+        check("check: review с PR в тексте и свежий review — без внимания", "demo-0105" not in own and "demo-0106" not in own, r.stdout)
+        check("check: застой doing/review > 2 сут — одна строка сводки с id (0583)",
+              sum(x.startswith("внимание · застой: ") for x in r.stdout.splitlines()) == 1 and "demo-0104" in r.stdout.split("внимание · застой:")[1].split("\n")[0],
+              r.stdout)
         # 5. готово в пачке, ночь кончилась, приёмки нет
         put(home, "demo", "demo-0107", status="done", closed="2026-10-12", parent=s, mode="self")
         put(home, "demo", "demo-0108", status="done", closed="2026-10-12", parent=s, mode="self", acceptance="принято")
@@ -561,7 +565,87 @@ def test_close_criteria():
         shutil.rmtree(tmp, True)
 
 
+def test_lists_and_checked():
+    """metis-0583: «Closes» со списком закрывает каждую задачу; без Closes задачу с отмеченными пунктами и слитым PR в
+    журнале закрывает close_checked; неотмеченные, без пунктов, с открытым PR, PR чужого репозитория — нет."""
+    ids = lambda b: A.closing_ids("simplify-1-windows", b)  # noqa: E731
+    check("Closes списком: полные id, «и», «;», «and»", ids("Closes metis-0522, metis-0534 и metis-0535; metis-0536 and demo-0001")
+          == ["metis-0522", "metis-0534", "metis-0535", "metis-0536", "demo-0001"], str(ids("Closes metis-0522, metis-0534 и metis-0535")))
+    check("Closes списком: номер без префикса берёт префикс прошлого", ids("Closes metis-0522, 0534, 0535 и 0536.")
+          == ["metis-0522", "metis-0534", "metis-0535", "metis-0536"], str(ids("Closes metis-0522, 0534, 0535 и 0536.")))
+    check("Closes списком: префикс берётся у ближайшего полного id", ids("Closes demo-0001, 0002 и metis-0003, 0004")
+          == ["demo-0001", "demo-0002", "metis-0003", "metis-0004"], str(ids("Closes demo-0001, 0002 и metis-0003, 0004")))
+    check("Closes списком: «100 тестов», «1500 строк», «часть metis-…», «и это» — не номера",
+          ids("Closes metis-0522, 100 тестов") == ["metis-0522"] and ids("Closes metis-0522, 100.") == ["metis-0522"] and ids("Closes metis-0522, 1500 строк") == ["metis-0522"]
+          and ids("Closes metis-0522, часть metis-0004") == ["metis-0522"] and ids("Closes metis-0522 и это всё") == ["metis-0522"],
+          str(ids("Closes metis-0522, 1500 строк")))
+    check("Closes списком: «См. также a, b» — по-прежнему не закрывает; отрицание гасит весь список",
+          ids("См. также metis-0522, metis-0534") == [] and ids("Не закрывает metis-0522, metis-0534") == [])
+    check("Список PR #163 (без Closes) — ничего не закрывает", ids("PR 1 «окна»: metis-0522, 0534, 0535, 0536.") == [])
+    tmp, home, state, gh, env = make()
+    try:
+        st = lambda i: T.read(os.path.join(home, "directions", "metis-pantheon", "tasks", i + ".md"))[0]  # noqa: E731
+        for i in ("metis-0030", "metis-0031", "metis-0032"):
+            put(home, "metis-pantheon", i, status="doing")
+        log, errs = run_cache(home, state, T0, {"latark/agent-kit": [cpr(30, "simplify-2", "Closes metis-0030, 0031 и metis-0032", T0 - 3600)]})
+        check("слитый PR «Closes a, b и c» под общей веткой закрывает все три",
+              all(st(i).get("status") == "done" for i in ("metis-0030", "metis-0031", "metis-0032")), str(log) + str(errs))
+        ok_body = "Готово, когда:\n- [x] сделано одно\n- [x] сделано второе\n"
+        jr = "\n## Журнал\n\n- 2026-10-27 21:25 — агент: PR #40 слит владельцем (squash 1a1f77a)\n"
+        mk = lambda i, body, **f: put(home, "metis-pantheon", i, body=body.replace("\n## Журнал", "") , created="2026-10-27", **f)  # noqa: E731
+
+        def with_journal(i, body, extra=jr, **f):
+            p = mk(i, body, **f)
+            open(p, "a", encoding="utf-8").write(extra.split("## Журнал\n\n")[1])
+            return p
+        pa = with_journal("metis-0040", ok_body)
+        pb = with_journal("metis-0041", "Готово, когда:\n- [x] одно\n- [ ] второе\n")
+        pc = with_journal("metis-0042", "Без чек-листа.\n")
+        pd = with_journal("metis-0043", ok_body)
+        pe = with_journal("metis-0044", ok_body, extra="## Журнал\n\n- 2026-10-27 21:25 — агент: PR #41 слит\n")
+        pf = with_journal("metis-0045", ok_body, status="review")
+        pg = with_journal("metis-0046", ok_body, status="todo")
+        ph = with_journal("metis-0047", ok_body, extra="## Журнал\n\n- 2026-10-27 10:00 — агент: PR #42 слит\n- 2026-10-27 11:00 — агент: доделка, PR #43 слит\n")
+        prs = {"latark/agent-kit": [cpr(40, "simplify-1-windows", "PR 1: metis-0040, 0041", T0 - 7200),
+                                    cpr(43, "b", "", T0 - 1800), cpr(42, "a", "", T0 - 9000)],
+               "acme/site": [cpr(41, "x", "", T0 - 7200)]}
+        cache = os.path.join(state, "autoclose-prs.json")
+        A.save_state(cache, {"fetched": T0 + 100, "merged": prs, "open": {"latark/agent-kit": ["metis-0043"]}, "errors": {}})
+        log, errs = A.run(home, os.path.join(state, "autoclose.json"), cache, T0 + 100,
+                          {"latark/agent-kit": {"metis-pantheon"}, "acme/site": {"demo"}}, T)
+        ha = T.read(pa)[0]
+        check("все пункты отмечены, PR #40 из журнала слит → done, closed, release, строка в журнале",
+              ha.get("status") == "done" and ha.get("closed") == day(T0 - 7200) and ha.get("release") == "PR #40 → abcdef0"
+              and "закрыта по слиянию PR #40 (latark/agent-kit) → abcdef0" in text(pa) and A.CHECKED_WHY in text(pa)
+              and ha.get("actual") == A.NO_METRIC, str(ha) + text(pa)[-300:])
+        check("в журнале два слитых PR — закрывает последний по слиянию", "закрыта по слиянию PR #43" in text(ph)
+              and T.read(ph)[0].get("closed") == day(T0 - 1800), text(ph)[-300:])
+        check("review со всеми пунктами и слитым PR → done", T.read(pf)[0].get("status") == "done", text(pf)[-200:])
+        check("неотмеченный пункт, нет чек-листа, открытый PR, PR чужого репозитория, todo — не трогаем",
+              [T.read(p)[0].get("status") for p in (pb, pc, pd, pe, pg)] == ["doing", "doing", "doing", "doing", "todo"],
+              str([T.read(p)[0].get("status") for p in (pb, pc, pd, pe, pg)]) + str(log))
+        T.task_set(home, T0 + 200, "metis-0040", {"status": "doing"}, actor="владелец")
+        A.save_state(cache, {"fetched": T0 + 300, "merged": prs, "open": {}, "errors": {}})
+        A.run(home, os.path.join(state, "autoclose.json"), cache, T0 + 300, {"latark/agent-kit": {"metis-pantheon"}}, T)
+        check("владелец вернул в работу — тем же PR второй раз не закрываем; открытый PR ушёл — закрываем",
+              T.read(pa)[0].get("status") == "doing" and text(pa).count("закрыта по слиянию PR #40") == 1
+              and T.read(pd)[0].get("status") == "done", text(pa)[-300:])
+        # сбой записи одной задачи (шапка не прошла проверку) — ошибка в errors, проход идёт дальше
+        pi = with_journal("metis-0048", ok_body, extra="## Журнал\n\n- 2026-10-27 21:25 — агент: PR #44 слит\n")
+        pj = with_journal("metis-0049", ok_body, extra="## Журнал\n\n- 2026-10-27 21:25 — агент: PR #45 слит\n")
+        prs2 = {"latark/agent-kit": [cpr(44, "c", "", T0 - 600), cpr(45, "d", "", T0 - 500)]}
+        A.save_state(cache, {"fetched": T0 + 400, "merged": prs2, "open": {}, "errors": {}})
+        log, errs = A.run(home, os.path.join(state, "autoclose.json"), cache, T0 + 400,
+                          {"latark/agent-kit": {"metis-pantheon"}}, FailOnce({"metis-0048"}))
+        check("все пункты отмечены: сбой записи одной задачи — в errors, соседняя закрыта",
+              "metis-0048" in errs.get("latark/agent-kit#44", "") and T.read(pi)[0].get("status") == "doing"
+              and T.read(pj)[0].get("status") == "done", str(errs) + str(log))
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def main():
+    test_lists_and_checked()
     test_unit()
     test_board_problems_unit()
     test_attention_on_card()

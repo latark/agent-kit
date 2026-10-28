@@ -72,13 +72,13 @@ def base_filter(view_text):
     return lambda card: ev(tree, card)
 
 
-VIEWS5 = ["От меня нужно", "Доска", "Пачки", "Итоги пачек", "Все задачи"]
+VIEWS5 = ["От меня нужно", "Доска", "Пачки", "Итоги пачек", "Все задачи", "Новое за неделю", "Хвосты"]  # + два вида metis-0506
 
 
 def base_checks():
     vs = views()
     names = [n for n, _ in vs]
-    check("Доска.base: ровно пять видов по порядку (metis-0069)", names == VIEWS5, names)
+    check("Доска.base: ровно семь видов по порядку (metis-0069, metis-0506)", names == VIEWS5, names)
     check("Доска.base: старых видов нет", not {"Мне ответить", "Система", "Очередь агентов", "Нужен ответ", "Горит",
                                                "Ночь", "Волны", "Утро", "Срочно"} & set(names), names)
     mine = dict(vs)["От меня нужно"]
@@ -209,15 +209,22 @@ def summary_checks():
     t3 = dict(t2, **{"metis-1007": mk(7, owner="argus", status="review", acceptance="к владельцу")})
     cnt3 = next(ln for ln in T._summary(t3, T0)[0].split("\n") if "От меня нужно" in ln and "Просрочено" in ln)
     check("сводка: приёмка «к владельцу» тоже в «От меня нужно», как в виде", "От меня нужно 3 ·" in cnt3, cnt3)
+    # metis-0240: счётчик сравнивает «Кому» так же, как вид (contains «Владелец»), а не равенством
+    t4 = dict(t2, **{"metis-1008": mk(8, owner="Владелец · гость")})
+    cnt4 = next(ln for ln in T._summary(t4, T0)[0].split("\n") if "От меня нужно" in ln and "Просрочено" in ln)
+    check("сводка: узел «Владелец · гость» в «От меня нужно», как в виде (contains)",
+          T.Roles(()).name("Владелец · гость") == "Владелец · гость" and "От меня нужно 3 ·" in cnt4
+          and 'note["Кому"].toString().contains("Владелец")' in T.BASE_FILE, cnt4)
     check("сводка: «Готово за сутки» свёрнуто", "> [!success]- 🟢 Готово за сутки (1)" in text)
 
 
 def warn_checks():
-    bad = ["А ()", "Б ( )", "В ≈ )", "Г $…", "Д ≈ "]
+    bad = ["А ()", "Б ( )", "В ≈ )", "Г $…", "Д ≈ ", "Е. всего  $ в месяц", "Ж. 20$ и ещё $"]
     check("option_warns: «()», «( )», «≈ )», «$…» — предупреждение",
           all(T.option_warns({"options": [o]}) for o in bad), [o for o in bad if not T.option_warns({"options": [o]})])
-    good0 = ["А. Купить за 20$", "Б. Купить за 20 $", "В. 5 000 $ в месяц", "Г. $5"]
-    check("option_warns: «20$», «20 $» — тихо", not any(T.option_warns({"options": [o]}) for o in good0),
+    good0 = ["А. Купить за 20$", "Б. Купить за 20 $", "В. 5 000 $ в месяц", "Г. $5", "Д. за 20  $", "Е. за 20\u00a0$",
+             "Ж. за 20 \u202f $ и 30$"]  # metis-0240: два пробела и неразрывный пробел перед «$» — тоже валюта
+    check("option_warns: «20$», «20 $», «20  $» — тихо", not any(T.option_warns({"options": [o]}) for o in good0),
           [o for o in good0 if T.option_warns({"options": [o]})])
     good = ["А. Купить за 5 000 ₽ (дороже). Цена: деньги", "Б. Подождать до пятницы. Цена: срок", "В. ≈ 5 дней"]
     check("option_warns: нормальные варианты — тихо", not any(T.option_warns({"options": [o]}) for o in good))

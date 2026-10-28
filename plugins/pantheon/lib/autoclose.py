@@ -3,7 +3,10 @@
 Два прохода. fetch (`pantheon autoclose fetch`, отдельная задача расписания, с пределом времени FETCH_BUDGET на весь
 проход) спрашивает gh про слитые и открытые PR репозиториев из [merge_repos] policy.toml и пишет кэш STATE/autoclose-prs.json.
 run (лёгкий тик) читает только кэш, в сеть не ходит. Задачу (`<префикс>-NNNN`) закрывает только PR из репозитория её
-направления, и только если её номер в имени ветки или после «Closes/Fixes» в теле: упоминание («См. также») не считается.
+направления, и только если её номер в имени ветки или после «Closes/Fixes» в теле — там и списком: «Closes metis-0522,
+metis-0534 и 0535» закрывает все три (metis-0583); упоминание («См. также») не считается.
+Второй путь (metis-0583, close_checked): задача doing/review, у которой все пункты «Готово, когда» отмечены, а PR из её
+журнала («PR #N») слит в репозитории её направления, — done той же записью: PR под общей веткой без Closes не оставляет её висеть.
 Слитый PR закрывает такую задачу: status done, closed —
 день слияния, release — «PR #N → коммит» (версия плагина, если PR поднял plugin.json), actual — из учёта по задачам
 (metrics/tasks.jsonl, metis-0294), нет замера — «нет замера»; в журнал задачи — строка с CLOSED_BY_MERGE.
@@ -53,11 +56,40 @@ CLOSE_RE = re.compile(r"(?<!\w)(?i:close[sd]?|fix(?:es|ed)?|resolve[sd]?|зак�
 NEG_BEFORE_RE = re.compile(r"(?:(?<!\w)(?:не|нет|not|never|no)|n['’]t)\s+(?:\w+\s+)?$", re.I)
 
 
+# после «Closes <id>» — список (metis-0583): «, <id>», «и <id>», «and <id>», «; <id>», «& <id>». Номер без префикса
+# («Closes metis-0522, 0534 и 0535») берёт префикс прошлого id, если в нём столько же цифр и за ним конец, знак или «и»
+LIST_NEXT_RE = re.compile(r"\s*(?:,|;|&|\s(?:и|and)(?=\s))\s*(?:(" + ID_RE.pattern + r")|(?<![\w-])(\d{3,})(?=$|[\s,;.()&]))", re.I)
+BARE_END_RE = re.compile(r"\s*(?:$|[,;.()&—–-]|(?:и|and)\s)", re.I)
+
+
+def _id_list(text, pos, first):
+    """Номера после первого id списка «Closes a-1, a-2 и 0003» → [a-2, a-0003]; pos — конец первого id."""
+    out, prev = [], first
+    while True:
+        m = LIST_NEXT_RE.match(text, pos)
+        if not m:
+            return out
+        if m.group(1):
+            prev = m.group(1)
+        else:
+            pre, num = prev.rsplit("-", 1)
+            if len(m.group(2)) != len(num) or not BARE_END_RE.match(text, m.end()):
+                return out  # «Closes metis-0522, 100 тестов» — число, а не номер задачи
+            prev = f"{pre}-{m.group(2)}"
+        out.append(prev)
+        pos = m.end()
+
+
 def closing_ids(branch, body):
-    """Номера задач, которые PR закрывает: id в имени ветки или «Closes/Fixes <id>» в теле. Простое упоминание
-    («См. также», «зависит от», «часть») — нет."""
+    """Номера задач, которые PR закрывает: id в имени ветки или «Closes/Fixes <id>» в теле, со списком после него
+    («Closes metis-0522, metis-0534 и 0535» — все три, metis-0583). Простое упоминание («См. также», «зависит от»,
+    «часть») — нет."""
     body = body or ""
-    return find_ids(branch, *[m.group(1) for m in CLOSE_RE.finditer(body) if not NEG_BEFORE_RE.search(body[:m.start()])])
+    ids = []
+    for m in CLOSE_RE.finditer(body):
+        if not NEG_BEFORE_RE.search(body[:m.start()]):
+            ids += [m.group(1)] + _id_list(body, m.end(1), m.group(1))
+    return find_ids(branch, *ids)
 
 
 def is_part(body):
@@ -176,6 +208,32 @@ def save_state(p, st):
     os.replace(tmp, p)
 
 
+def pr_index(cache):
+    """PR задач по кэшу fetch (metis-0501 [zeus-pr-link]) → {id: [{"repo", "number", "sha", "merged"}]}: слитые — по
+    ветке и «Closes» (и с «часть»: PR всё равно её), открытые — по closes. Карточка задачи берёт отсюда ссылки на GitHub;
+    упоминания в журнале дополняет tasks.work_links."""
+    out = {}
+    cache = cache if isinstance(cache, dict) else {}
+    for key, merged in (("merged", True), ("open_prs", False)):
+        rows_by = cache.get(key) if isinstance(cache.get(key), dict) else {}
+        for repo, rows in sorted(rows_by.items()):
+            for pr in rows if isinstance(rows, list) else []:
+                if not isinstance(pr, dict) or not isinstance(pr.get("number"), int) or isinstance(pr.get("number"), bool):
+                    continue
+                if merged:
+                    if any(not isinstance(pr.get(k), (str, type(None))) for k in ("body", "headRefName")):
+                        continue
+                    ids = closing_ids(pr.get("headRefName"), pr.get("body"))
+                else:
+                    ids = [i for i in pr.get("closes") or [] if isinstance(i, str)] if isinstance(pr.get("closes"), list) else []
+                sha = str(pr.get("oid") or "") if merged else ""
+                for tid in ids:
+                    out.setdefault(tid, []).append({"repo": repo, "number": pr["number"],
+                                                    "sha": sha if re.fullmatch(r"[0-9a-f]{7,40}", sha) else "",
+                                                    "merged": merged})
+    return out
+
+
 def open_pr_tasks(state_file):
     """id задач с открытым PR по последнему проходу; нет состояния — None (неизвестно)."""
     st = load_state(state_file)
@@ -266,6 +324,7 @@ def run(pantheon, state_file, cache_file, t, repo_dirs, T, actual_for=None):
             for pr in (cache.get("open_prs") or {}).get(repo) or []:
                 if isinstance(pr, dict):
                     review_pr(pantheon, t, repo, pr, repo_dirs[repo], T, log, errors)
+        close_checked(pantheon, t, merged, repo_dirs, T, actual_for, log, errors, open_ids)
         finished = True
     finally:  # сбой посреди прохода (не только ValueError): отметки уже обработанных PR не теряем, кэш прочтём заново
         keep = dict(sorted(done.items(), key=lambda kv: kv[1])[-KEEP:])
@@ -325,24 +384,72 @@ def close_pr(pantheon, t, repo, pr, dirs, T, actual_for, log, errors):
                     T.task_set(pantheon, t, tid, {"status": "review"}, actor="плановый проход", note=note)
                     log.append(f"{tid}: PR #{n} слит, неотмечено {left} — review")
                 continue
-            mark = f"PR #{n} ({repo}) →"
-            if journal_has(tasks[tid][0], T, T.CLOSED_BY_MERGE + " " + mark):
-                continue  # этим PR задачу уже закрывали; владелец вернул её в работу — второй раз не трогаем
-            day = merged_day(pr.get("mergedAt")) or T.now_iso(t)[:10]
-            changes = {"status": "done", "closed": day}
-            if not head.get("release"):
-                changes["release"] = release_text(repo, pr)
-            T.task_set(pantheon, t, tid, changes, actor="плановый проход",
-                       note=f"{T.CLOSED_BY_MERGE} {mark} {(pr.get('oid') or '')[:7]}, closed {day}")
-            if not head.get("actual"):
-                val = None
-                try:
-                    val = actual_for(tid) if actual_for else None
-                except Exception:  # noqa: BLE001 — учёт не должен мешать закрытию
-                    val = None
-                T.task_set(pantheon, t, tid, {"actual": val or NO_METRIC}, actor="плановый проход")
-            log.append(f"{tid}: закрыта по слиянию PR #{n} ({repo})")
+            if close_done(pantheon, t, tid, tasks[tid], repo, pr, T, actual_for):
+                log.append(f"{tid}: закрыта по слиянию PR #{n} ({repo})")
         except ValueError as e:  # задача изменилась или шапка не прошла проверку — PR не отмечаем, повторим
             ok = False
             errors[f"{repo}#{n}"] = f"{tid}: {e}"
     return ok
+
+
+def close_done(pantheon, t, tid, task, repo, pr, T, actual_for, why=""):
+    """Задача → done по слитому PR: closed — день слияния, release, actual, строка CLOSED_BY_MERGE в журнал.
+    → False, если этим PR её уже закрывали (владелец вернул в работу — второй раз не трогаем)."""
+    path, head, _ = task
+    mark = f"PR #{pr.get('number')} ({repo}) →"
+    if journal_has(path, T, T.CLOSED_BY_MERGE + " " + mark):
+        return False
+    day = merged_day(pr.get("mergedAt")) or T.now_iso(t)[:10]
+    changes = {"status": "done", "closed": day}
+    if not head.get("release"):
+        changes["release"] = release_text(repo, pr)
+    T.task_set(pantheon, t, tid, changes, actor="плановый проход",
+               note=f"{T.CLOSED_BY_MERGE} {mark} {(pr.get('oid') or '')[:7]}, closed {day}{why}")
+    if not head.get("actual"):
+        val = None
+        try:
+            val = actual_for(tid) if actual_for else None
+        except Exception:  # noqa: BLE001 — учёт не должен мешать закрытию
+            val = None
+        T.task_set(pantheon, t, tid, {"actual": val or NO_METRIC}, actor="плановый проход")
+    return True
+
+
+# PR в журнале задачи (metis-0583): «PR #163», «PR 163», «…/pull/163», «owner/repo#163»
+JOURNAL_PR_RE = re.compile(r"(?:\bPR\s*#?|/pull/|(?<=[\w.-])#)(\d{1,6})\b")
+CHECKED_WHY = ", все пункты «Готово, когда» отмечены"
+
+
+def close_checked(pantheon, t, merged, repo_dirs, T, actual_for, log, errors, open_ids=()):
+    """Задача doing/review, у которой все пункты «Готово, когда» отмечены (хотя бы один), а PR из её журнала слит
+    (кэш fetch, репозиторий её направления), → done той же записью, что и по Closes (metis-0583). PR без Closes и под
+    общей веткой (simplify-*) иначе оставляли задачу висеть в doing после слияния. Без пунктов «Готово, когда» не
+    закрываем: «всё отмечено» нечем доказать; задачу с открытым PR (open_ids) — тоже: работа ещё идёт. Из нескольких
+    слитых PR журнала — последний по времени слияния."""
+    by_num = {}
+    for repo, rows in sorted(merged.items()):
+        if repo not in repo_dirs:
+            continue
+        for pr in rows if isinstance(rows, list) else []:
+            if isinstance(pr, dict) and isinstance(pr.get("number"), int) and merged_ts(pr.get("mergedAt")) is not None:
+                by_num.setdefault(pr["number"], []).append((repo, pr))
+    if not by_num:
+        return
+    tasks = T.load_tasks(pantheon, T.WORK_TYPES)
+    for tid, (path, head, body) in sorted(tasks.items()):
+        if head.get("type") != "task" or head.get("status") not in ("doing", "review") or tid in open_ids:
+            continue
+        crit = T.done_criteria(body)
+        if not crit or not all(ok for ok, _ in crit):
+            continue
+        nums = {int(n) for x in T._journal(body) for n in JOURNAL_PR_RE.findall(x[2])}
+        found = [(merged_ts(pr.get("mergedAt")), repo, pr) for n in nums for repo, pr in by_num.get(n, [])
+                 if head.get("direction") in repo_dirs[repo]]
+        if not found:
+            continue
+        _, repo, pr = max(found, key=lambda x: (x[0], x[1]))
+        try:
+            if close_done(pantheon, t, tid, (path, head, body), repo, pr, T, actual_for, CHECKED_WHY):
+                log.append(f"{tid}: закрыта — все пункты отмечены, PR #{pr['number']} ({repo}) слит")
+        except ValueError as e:
+            errors[f"{repo}#{pr['number']}"] = f"{tid}: {e}"

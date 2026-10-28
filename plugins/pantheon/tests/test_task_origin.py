@@ -220,7 +220,9 @@ def card_checks():
     base = {"type": "task", "id": "metis-0001", "title": "x", "status": "todo", "project": "Пантеон",
             "direction": "metis-pantheon", "created": "2026-10-26", "updated": "2026-10-26T10:00", "owner": "a"}
     card = T.render_card(dict(base, **{"from": "остаток", "source": "metis-0000"}), "", "x.md", T0)[0]
-    check("карточка: «Откуда» — остаток · исходная", card.get("Откуда") == "остаток · metis-0000", card.get("Откуда"))
+    # metis-0506: «Откуда» — только вид (по нему группирует «Новое за неделю»), источник — отдельным «Из чего»
+    check("карточка: «Откуда» — остаток, «Из чего» — исходная", card.get("Откуда") == "остаток"
+          and card.get("Из чего") == "metis-0000", (card.get("Откуда"), card.get("Из чего")))
     card = T.render_card(base, "", "x.md", T0)[0]
     check("карточка старой задачи: «Откуда» пусто", card.get("Откуда") is None, card.get("Откуда"))
     check("«Откуда» есть в порядке свойств", "Откуда" in T.CARD_ORDER)
