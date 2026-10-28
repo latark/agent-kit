@@ -3589,7 +3589,8 @@ HESTIA_CLAUDE = (("plugin", "list"), ("plugins", "list"), ("agents",), ("--versi
 HESTIA_PANTHEON = {("plugins", "update"), ("domains", "build"), ("restart",), ("alert",), ("task", "show"),
                    ("status",), ("who",), ("agents",), ("help",), ("consent",), ("reap",)}
 # `pantheon reap` (metis-0568): виновники памяти; гасит сама команда и только брошенное в папках Пантеона, по --pid —
-# после метки consent задачи окна (проверяет pantheon). Идёт мимо песочницы, как остальные команды пульта Гестии
+# только pid из вопроса о гашении с «да» владельца: метка <id>.reap (проверяет pantheon; push она не открывает).
+# Идёт мимо песочницы, как остальные команды пульта Гестии
 # Наружу (metis-0562, «Да, по consent» владельца 27.10 22:38): `git push` и запись в PR (`gh pr create|edit`) — только
 # после явного «да» владельца: `pantheon consent <id задачи>`, запущенный в окне hestia, ставит метку
 # <state>/hestia-consent/<id> и только на «да». Id — задача окна (PANTHEON_TASK из настроек запуска `wake hestia

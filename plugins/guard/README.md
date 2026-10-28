@@ -153,7 +153,8 @@ answer и плановый проход, это скрипты, guard их не 
   view|list|diff|checks|status` и `gh api` без записи; `claude` — только `plugin list`, `agents`, `--version` (выпуск
   ставит `pantheon plugins update`, голый `claude plugin update` — отказ); пульт — только `plugins update`, `domains
   build`, `restart` без `--force`, `alert`, `task show`, `status`, `who`, `agents`, `consent`, `reap` (виновники памяти,
-  metis-0568: гасит сама команда и только брошенное в папках Пантеона, по `--pid` — после метки consent), и через
+  metis-0568: гасит сама команда и только брошенное в папках Пантеона, по `--pid` — только pid из вопроса о гашении
+  с «да» владельца: метка `<id>.reap`, push и PR она не открывает), и через
   оболочку или python по пути тоже. Имя команды или подкоманду не вычислить (`$X`, `$(…)`) — отказ.
   Наружу (metis-0562, «Да, по consent» владельца 27.10): сети у песочницы окна нет; мимо неё идут только `git push` и
   `gh pr create|edit`, и только при свежей (до 2 ч) метке задачи окна в `<state>/hestia-consent/<id>`. Метку ставит

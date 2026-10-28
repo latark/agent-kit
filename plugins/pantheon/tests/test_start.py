@@ -754,11 +754,12 @@ def main():
     hcache = os.path.join(tmp, "Library", "Caches", "pantheon-sandbox", "hestia")
     hdeny = hwin.get("permissions", {}).get("deny", [])
     check("окно hestia: PANTHEON_ROLE=hestia, мимо песочницы — plugins update, domains build, restart, alert, consent, "
-          "git push, gh pr create|edit; сети в песочнице нет, Edit/Write/WebFetch закрыты, Agent закрыт, кэш создан",
+          "reap, git push, gh pr create|edit; сети в песочнице нет, Edit/Write/WebFetch закрыты, Agent закрыт, кэш создан",
           hwin.get("env", {}).get("PANTHEON_ROLE") == "hestia" and hwin["sandbox"]["enabled"]
           and hwin["sandbox"]["excludedCommands"] == ["pantheon plugins update", "pantheon plugins update *",
                                                       "pantheon domains build", "pantheon restart *",
-                                                      "pantheon alert *", "pantheon consent *", "git push",
+                                                      "pantheon alert *", "pantheon consent *", "pantheon reap",
+                                                      "pantheon reap *", "git push",
                                                       "git push *", "gh pr create *", "gh pr edit *"]
           and hwin["sandbox"]["network"]["allowedDomains"] == []
           and all(t in hdeny for t in ("Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"))
