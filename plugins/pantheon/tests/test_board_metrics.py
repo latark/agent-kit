@@ -60,6 +60,15 @@ def runs():
         return 0
 
 
+def stamp_state():
+    """Отметка запуска учёта: board пишет её синхронно перед Popen, так что к выходу board видно, был ли запуск
+    (metis-0585: вместо сна 4,5 с «а вдруг процесс ещё стартует», который под нагрузкой всё равно не гарантия)."""
+    try:
+        return os.stat(stamp_p).st_mtime_ns
+    except OSError:
+        return None
+
+
 def wait_runs(n, limit=15):
     end = time.time() + limit
     while time.time() < end and runs() < n:
@@ -83,22 +92,21 @@ check("учёт запущен отдельным процессом: board ве
 check("отметка запуска записана", os.path.exists(stamp_p))
 check("фоновый учёт дошёл до конца (одна запись)", wait_runs(1) == 1, runs())
 
+s0 = stamp_state()
 p, dt = board()
-time.sleep(4.5)
-check("второй board в пределах 30 минут учёт не запускает", p.returncode == 0 and runs() == 1, runs())
+check("второй board в пределах 30 минут учёт не запускает",
+      p.returncode == 0 and runs() == 1 and stamp_state() == s0 and s0 is not None, (runs(), s0, stamp_state()))
 
 os.remove(stamp_p)
 fh = open(lock_p, "a")
 fcntl.flock(fh, fcntl.LOCK_EX)
 p, dt = board()
-time.sleep(4.5)
 check("блокировка metrics занята: учёт не запускается и отметка не ставится",
       p.returncode == 0 and runs() == 1 and not os.path.exists(stamp_p), (runs(), os.path.exists(stamp_p)))
 fcntl.flock(fh, fcntl.LOCK_UN)
 fh.close()
 
 p, dt = board(PANTHEON_METRICS="0")
-time.sleep(4.5)
 check("PANTHEON_METRICS=0: учёт не запускается", runs() == 1 and not os.path.exists(stamp_p), runs())
 
 p, dt = board()
