@@ -2255,6 +2255,14 @@ COORDINATOR_COMPACT = 200000
 # Пароль демона CDP (~/.claude/tools/cdp-daemon.mjs, браузер с входами владельца): без него демон отвечает 401. Окнам
 # ролей файл закрыт на чтение — и песочницей Bash, и правилом Read ([sb-simplify] 27.10)
 CDP_TOKEN_DIR = os.path.join(HOME, ".config", "cdp-daemon")
+# Реестр и ключ демона Claude Code (metis-0287): control.key и roster.json — в нём ключи PTY и rendezvous каждой фоновой
+# сессии (ptyAuth, rvAuth), с ними пишут в чужую сессию. Закрыт окнам направлений, мастерской и задач расписания; штабу
+# и Гестии открыт — их `claude agents` и `pantheon who` читают реестр демона (роли hq и hestia)
+DAEMON_DIR = os.path.join(HOME, ".claude", "daemon")
+# Заявки на чтение личного чата (metis-0270, read.py): сырая выгрузка, ответ читателя, пункт проверки и разбор с окнами
+# переписки — текст, который владелец ещё не одобрил. Закрыты всем окнам; approved.md той же папки открыт — его по
+# указателю из inbox читает направление (read.py, deliver)
+READ_UNAPPROVED = ("raw.md", "answer.md", "item.md", "summary.md")
 # Правила слияния через шлюз guard (permissions.allow и autoMode.allow окон координаторов) — в lib/window_rules.py:
 # он в ядре защит (metis-0174), его PR ждёт слияния владельцем. Имена здесь — для прежних вызовов и тестов
 def _window_rules():
@@ -2627,6 +2635,24 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
     if auto_allow:
         # окна координаторов: исключения классификатора auto под шлюз слияния (coordinator_auto_allow, metis-0098)
         data["autoMode"] = WINDOW_RULES.auto_mode(auto_allow)
+    close_read(data, [os.path.join(_home_form(STATE), "read", "*", f) for f in READ_UNAPPROVED])
+    return data
+
+
+def _home_form(p):
+    """Путь под HOME — в виде «~/…» (_deny_forms добавит настоящий), иначе как есть."""
+    return "~" + p[len(HOME):] if p.startswith(HOME.rstrip("/") + "/") else p
+
+
+def close_read(data, paths, tree=False):
+    """Закрыть окну чтение paths: Bash — denyRead песочницы, инструментам Read, Grep и Glob — правилом Read (песочница
+    держит только Bash). Оба вида пути — «~/…» и настоящий (_deny_forms). tree — папки: правило Read на всё поддерево."""
+    fs = data["sandbox"]["filesystem"]["denyRead"]
+    rules = data.setdefault("permissions", {}).setdefault("deny", [])
+    for x in _deny_forms(paths):
+        rule = f"Read({x}{'/**' if tree else ''})" if x.startswith("~") else f"Read(/{x}{'/**' if tree else ''})"
+        fs.extend([] if x in fs else [x])
+        rules.extend([] if rule in rules else [rule])
     return data
 
 
@@ -2940,6 +2966,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         # сетевой git: окну направления — всегда, мастерской — при SSH-remote (P0-4, metis-0064)
         data = role_settings(ok, own_real, write, cache, direction or any(ssh_remote(r) for r in ok), deny, compact,
                              guard, auto_allow)
+        close_read(data, [_home_form(DAEMON_DIR)], tree=True)  # ключи демона Claude Code (metis-0287)
         if direction:
             data["sandbox"]["excludedCommands"] += GH_PR_WRITE
         if name == "metis-pantheon":
@@ -3013,6 +3040,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         job["sandbox"]["excludedCommands"] = list(JOB_EXCLUDED)
         job["sandbox"]["network"]["allowedDomains"] = []
         job["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
+        close_read(job, [_home_form(DAEMON_DIR)], tree=True)  # ключи демона Claude Code (metis-0287)
         job["env"]["PANTHEON_ROLE"] = role  # хукам: роль окна, как у штаба
         # субагенты (P0-6): главная сессия задачи зовёт только своих (хук agents.py); deny — все известные типы,
         # кроме своих: встроенные, роли из ~/.claude/agents, лиды реестра и главные роли
