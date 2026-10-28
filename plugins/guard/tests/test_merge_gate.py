@@ -54,6 +54,7 @@ MISSING = object()
 class Home:
     def __init__(self, root):
         self.root = root
+        self.core = False  # reset(): PR agent-kit#7 задевает ядро (со строкой согласия владельца) — см. CASES_CORE
         j = self.j
         for d in ("ai/pantheon", ".local/state/pantheon", ".claude/pantheon", "bin"):
             os.makedirs(j(d), exist_ok=True)
@@ -119,6 +120,9 @@ class Home:
         for name in self.sha:
             self.write_view(name)
         self.gh(["README.md", "plugins/pantheon/lib/merge.py"])  # pantheon.py — ядро по сборке окон (t_core_sandbox)
+        if self.core:  # PR ядра со строкой согласия владельца: «не на Opus» проверяется на нём, а не отпадает как не ядро
+            self.gh(["README.md", "plugins/guard/hooks/merge_gate.py"])
+            self.approve(f"{ts()} merge-approve latark/agent-kit#7 {self.sha['agent-kit']}")
 
     def reset_log(self):
         if os.path.exists(self.j("gh.log")):
@@ -1159,6 +1163,62 @@ def t_opus_protect(h):
     check("verdict_parse: «<ID>» в ran у reject — без ошибки (вердикт «вернуть» в силе любой)", why is None, why)
 
 
+def t_opus_not_core(h):
+    """Упрощение п. 9: вне ядра хватает одного «принять» argus на любой модели (Sonnet); Opus нужен только в PR,
+    который задевает ядро. Ядро ли — тот же _core_problem, что у Д3; проверить не удалось — считается ядром."""
+    kit, sha = "projects/agent-kit", h.sha["agent-kit"]
+    cmd = f"gh pr merge 7 --match-head-commit {sha}"
+    tests = rec("tests", "latark/agent-kit", None, sha, "dev-opus")
+    sonnet = dict(CHECKLIST, ran="модель: claude-sonnet-5, heavy python3 -I tests/test_merge_gate.py")
+    h.seed(tests, rec("accept", "latark/agent-kit", 7, sha, checklist=sonnet))
+    merge_case("не ядро: один «принять» argus на Sonnet — проходит", h.pre(cmd, pdir=kit), True)
+    h.reset()
+    h.seed(tests, dict(rec("accept", "latark/agent-kit", 7, sha, checklist=sonnet), models=["claude-sonnet-5"]))
+    merge_case("не ядро: Sonnet по --ran и по транскрипту — проходит", h.pre(cmd, pdir=kit), True)
+    h.reset()
+    h.seed(tests, rec("accept", "latark/agent-kit", 7, sha, checklist=dict(CHECKLIST, ran="без модели, тесты")))
+    merge_case("не ядро: ran без «модель:» — проходит", h.pre(cmd, pdir=kit), True)
+    h.reset()
+    h.seed(tests, rec("accept", "latark/agent-kit", 7, sha, checklist=None))
+    merge_case("не ядро: «принять» без перечня — по-прежнему отказ Б6", h.pre(cmd, pdir=kit), False,
+               "без перечня проверенного (Б6)")
+    h.reset()
+    h.seed(tests, rec("reject", "latark/agent-kit", 7, sha, checklist=None, agent_id="r1"),
+           rec("accept", "latark/agent-kit", 7, sha, checklist=sonnet))
+    merge_case("не ядро: «вернуть» другого argus и «принять» на Sonnet — «вернуть» в силе", h.pre(cmd, pdir=kit),
+               False, "«вернуть» (reject)")
+    # ядро: тот же Sonnet-«принять» — отказ (мутант: условие «не ядро» всегда истинно — эти случаи покраснеют)
+    for label, files in (("ядро (merge_gate.py)", ["README.md", "plugins/guard/hooks/merge_gate.py"]),
+                         ("ядро (роли)", ["plugins/pantheon/roles/argus.tmpl"]),
+                         ("ядро (.github)", [".github/workflows/release.yml"]),
+                         ("ядро: переименование из ядра", [{"filename": "docs/x.md", "status": "renamed",
+                                                          "previous_filename": "plugins/guard/README.md"}])):
+        h.reset()
+        h.gh(files)
+        h.seed(tests, rec("accept", "latark/agent-kit", 7, sha, checklist=sonnet))
+        merge_case(f"{label}: «принять» на Sonnet — отказ «не на Opus»", h.pre(cmd, pdir=kit), False, "не на Opus")
+    # проверить, ядро ли PR, не удалось — строго, как для ядра
+    h.reset()
+    open(h.j("gh.api.fail"), "w").close()
+    h.seed(tests, rec("accept", "latark/agent-kit", 7, sha, checklist=sonnet))
+    merge_case("список файлов PR не получен: «принять» на Sonnet — отказ «не на Opus»", h.pre(cmd, pdir=kit), False,
+               "не на Opus")
+    h.reset()
+    h.gh(["README.md", "code.py", "x.py"], count=5)
+    h.seed(tests, rec("accept", "latark/agent-kit", 7, sha, checklist=sonnet))
+    merge_case("список файлов PR неполон: «принять» на Sonnet — отказ «не на Opus»", h.pre(cmd, pdir=kit), False,
+               "не на Opus")
+    h.reset()
+    open(h.j("gh.fail"), "w").close()
+    h.seed(tests, rec("accept", "latark/agent-kit", 7, sha, checklist=sonnet))
+    merge_case("gh pr view не ответил: «принять» на Sonnet — отказ", h.pre(cmd, pdir=kit), False, "")
+    # ядро и Opus: по-прежнему только со строкой владельца
+    h.reset()
+    h.gh(["plugins/guard/hooks/merge_gate.py"])
+    h.seed(tests, rec("accept", "latark/agent-kit", 7, sha))
+    merge_case("ядро: «принять» на Opus без строки владельца — отказ Д3", h.pre(cmd, pdir=kit), False, CORE)
+
+
 def t_opus_transcript(h):
     """metis-0176 п. 2: модель argus — из его транскрипта (message.model assistant-записей), а не со слов --ran.
     Путь хук выводит из входа: <папка transcript_path>/<session_id>/subagents/[workflows/<runId>/]agent-<agent_id>.jsonl.
@@ -1838,9 +1898,9 @@ def kit_history(h):
     return s
 
 
-def kit_pr(h, head, base):
-    """gh pr view для latark/agent-kit: PR на head, base PR — base, файлы без ядра."""
-    h.gh(["README.md", "code.py"], head=head)
+def kit_pr(h, head, base, core=False):
+    """gh pr view для latark/agent-kit: PR на head, base PR — base, файлы без ядра (core — с ядром)."""
+    h.gh(["README.md", "plugins/guard/hooks/merge_gate.py" if core else "code.py"], head=head)
     h.view["agent-kit"]["baseRefOid"] = base
     h.write_view("agent-kit")
 
@@ -2237,16 +2297,19 @@ def t_carry_opus(h):
     sonnet = dict(CHECKLIST, ran="модель: claude-sonnet-5, тесты")
     a = opus(s["P"])
     a["models"] = ["claude-sonnet-5"]
-    for name, recs, allow, why in (
-            ("A: ran Opus, модели транскрипта Sonnet — не переносится", [a, tests], False, "не на Opus"),
-            ("B: ran Sonnet — не переносится", [opus(s["P"], checklist=sonnet), tests], False, "не на Opus"),
-            ("C: Opus — переносится", [opus(s["P"]), tests], True, ""),
+    for name, recs, allow, why, core in (
+            ("A: ran Opus, модели транскрипта Sonnet — не переносится", [a, tests], False, "не на Opus", True),
+            ("B: ran Sonnet — не переносится", [opus(s["P"], checklist=sonnet), tests], False, "не на Opus", True),
+            ("C: Opus — переносится", [opus(s["P"]), tests], True, "", False),
             ("G: Sonnet на P и Opus другого argus на N1 — проходит",
-             [opus(s["P"], checklist=sonnet), opus(s["N1"], "x"), tests], True, ""),
+             [opus(s["P"], checklist=sonnet), opus(s["N1"], "x"), tests], True, "", False),
             ("Sonnet-«принять» после reject того же argus на P не снимает", [opus(s["P"], "y", "reject", checklist=None),
-             opus(s["P"], "y", checklist=sonnet), opus(s["Pv"], "x"), tests], False, "«вернуть» (reject)")):
+             opus(s["P"], "y", checklist=sonnet), opus(s["Pv"], "x"), tests], False, "«вернуть» (reject)", True),
+            # вне ядра (simplify п. 9) Sonnet переносится как любой argus
+            ("не ядро: ran Sonnet — переносится", [opus(s["P"], checklist=sonnet), tests], True, "", False),
+            ("не ядро: модели транскрипта Sonnet — переносится", [a, tests], True, "", False)):
         h.reset()
-        kit_pr(h, s["N1"], s["M1"])
+        kit_pr(h, s["N1"], s["M1"], core=core)
         h.seed(*recs)
         merge_case(f"защиты, 117-m {name}", h.pre(f"gh pr merge 7 --match-head-commit {s['N1']}", pdir=kit), allow, why)
 
@@ -2553,9 +2616,9 @@ def t_carry_r6(h):
     tests = lambda sha: rec("tests", "latark/agent-kit", None, sha, "dev-opus")
     rej = lambda sha, who="y": opus(sha, who, "reject", checklist=None, session="s-y")
 
-    def case(name, head, base, recs, allow, why=""):
+    def case(name, head, base, recs, allow, why="", core=False):
         h.reset()
-        kit_pr(h, s[head], s[base])
+        kit_pr(h, s[head], s[base], core=core)
         h.seed(*recs)
         got = h.pre(f"gh pr merge 7 --match-head-commit {s[head]}", pdir=kit)
         merge_case(name, got, allow, why)
@@ -2591,11 +2654,11 @@ def t_carry_r6(h):
     sonnet = dict(CHECKLIST, ran="модель: claude-sonnet-5, heavy python3 -I tests/test_merge_gate.py")
     case("r6 n7 ctl: только «принять» не на Opus на N1 — отказ «не на Opus»", "N1", "M1",
          [rec("accept", "latark/agent-kit", 7, s["N1"], agent_id="q", session="s-q", checklist=sonnet),
-          tests(s["N1"])], False, "не на Opus")
+          tests(s["N1"])], False, "не на Opus", core=True)
     case("r6 n7: z принял N1, y вернул R, y принял R не на Opus, w принял A, force-push на N1 — отказ", "N1", "M1",
          [opus(s["N1"], "z", session="s-z"), rej(s["R"]),
           rec("accept", "latark/agent-kit", 7, s["R"], agent_id="y", session="s-y", checklist=sonnet),
-          opus(s["A"], "w", session="s-w"), tests(s["N1"])], False, "нет «принять»")
+          opus(s["A"], "w", session="s-w"), tests(s["N1"])], False, "нет «принять»", core=True)
 
 
 # --- сборка окон в pantheon.py — ядро (metis-0404) ------------------------------------------------------------------
@@ -2769,9 +2832,13 @@ CASES = [t_hq_gh,t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
-         t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_transcript, t_ci,
+         t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_not_core, t_opus_transcript, t_ci,
          t_core_touchid, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
          t_carry_r4_gate, t_carry_r6, t_version_bump_refused, t_core_sandbox_unit, t_core_sandbox]
+
+# случаи про «не на Opus»: правило действует только в PR ядра (simplify п. 9), поэтому PR agent-kit#7 в них — ядро;
+# вне ядра те же записи проходят — это проверяют отдельные места в самих случаях (h.core = False; h.reset())
+CASES_CORE = (t_opus_protect, t_opus_transcript)
 
 
 def main():
@@ -2782,6 +2849,7 @@ def main():
         for case in CASES:
             if only and case.__name__ not in only:
                 continue
+            h.core = case in CASES_CORE
             h.reset()
             case(h)
     finally:

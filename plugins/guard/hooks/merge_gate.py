@@ -53,11 +53,13 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    файлы из pulls/N/files с previous_filename; PR, задевающий ядро, проходит только со строкой
    `<время> merge-approve <owner/repo>#<N> <sha>` для того же репозитория, PR и SHA в owner-log/merge-approve.log —
    её пишет тик после Touch ID владельца (metis-0285, `pantheon merge`), не старше суток. В защитах accept засчитывается, только если его ran начинается с
-   «модель: claude-opus» (metis-0176): accept другой модели — как будто его нет, reject любой модели в силе.
+   «модель: claude-opus» (metis-0176) — но лишь в PR, который задевает ядро (или ядро не проверить): вне ядра один
+   argus на любой модели, в том числе Sonnet (упрощение п. 9, 27.10). accept другой модели в PR ядра — как будто его
+   нет, reject любой модели в силе.
    Незаменённый шаблон «<ID>» в ran — отказ ещё до записи. Модель сверяется и с транскриптом argus: record пишет в
-   accept и reject поле "models" — значения message.model его assistant-записей; в защитах accept засчитывается,
+   accept и reject поле "models" — значения message.model его assistant-записей; в PR ядра accept засчитывается,
    только если все они claude-opus и среди них модель из ran. Транскрипта нет — поле "models_note", судим по ran;
-   транскрипт найден, а моделей в нём нет — "models": [] и пометка NO_MODELS, в защитах accept не в счёт (metis-0413).
+   транскрипт найден, а моделей в нём нет — "models": [] и пометка NO_MODELS, в PR ядра accept не в счёт (metis-0413).
    Последним во всех режимах — проверки GitHub (metis-0297), один gh pr view на Д3 и проверки: PR на этом SHA, rollup зелёный;
    красная или идущая проверка, нет ответа gh — отказ; проверок нет — пропуск, только если .github/workflows нет ни на
    head, ни на base PR.
@@ -131,8 +133,8 @@ NOT_SIMPLE = re.compile(r"[;|&<>`\n\r]|\$\(")
 # перечень проверенного в «принять» (Б6): что argus открыл, что запустил, чего не проверял — поля записи и флаги
 CHECKLIST = ("opened", "ran", "unchecked")
 CHECKLIST_HINT = '--opened "<что открыл>" --ran "<что запустил>" --unchecked "<что не проверял>"'
-# защиты: «принять» засчитывается, только если argus проверял на Opus — поле ran начинается с «модель: claude-opus»
-# (metis-0176). Незаменённый шаблон «<ID>» в ran — ошибка шаблона роли, а не модель
+# PR ядра: «принять» засчитывается, только если argus проверял на Opus — поле ran начинается с «модель: claude-opus»
+# (metis-0176; вне ядра модель не проверяется — упрощение п. 9). Незаменённый шаблон «<ID>» в ran — ошибка шаблона роли, а не модель
 OPUS_RAN = re.compile(r"\s*модель:\s*claude-opus", re.I)
 UNFILLED_ID = re.compile(r"<\s*id\s*>", re.I)
 RAN_MODEL = re.compile(r"\s*модель:\s*(claude-[a-z0-9.-]*[a-z0-9])", re.I)  # ID модели из --ran
@@ -1624,16 +1626,31 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
 
     # вердикты argus на PR — на любом head (metis-0415): «вернуть» привязано к PR, «принять» переносится по отпечатку
     pr_verdicts = [r for r in records if mine(r, ("accept", "reject"), "argus", any_sha=True)]
-    # защиты (metis-0176): «принять» не на Opus не засчитывается — как будто его нет; «вернуть» любой модели в силе,
-    # «принять» без перечня остаётся, чтобы отказ Б6 ниже сказал о перечне
-    weak = [r for r in pr_verdicts if protect and r["kind"] == "accept" and checklist_ok(r) and opus_problem(r)]
-    verdicts = [r for r in pr_verdicts if not any(r is w for w in weak)]
     seen_view = []
+    seen_files = []
 
     def pr_view():
         if not seen_view:
             seen_view.append(_pr_view(repo, pr))
         return seen_view[0]
+
+    def pr_files():
+        # один запрос файлов на шлюз: сбой (None) не повторяется в _core_problem, а даёт там отказ — иначе удачный
+        # второй запрос пропустил бы PR с правкой version мимо _version_problem (argus-b PR #153 Б1)
+        if not seen_files:
+            seen_files.append(_pr_files(repo, pr))
+        return seen_files[0]
+
+    # защиты (metis-0176, simplify п. 9): «принять» не на Opus не засчитывается — как будто его нет — только в PR,
+    # который задевает ядро; вне ядра один argus на любой модели. «Вернуть» любой модели в силе, «принять» без перечня
+    # остаётся, чтобы отказ Б6 ниже сказал о перечне. Ядро ли — по тому же _core_problem, что и Д3; не удалось
+    # проверить (gh не ответил, список файлов неполон) — считаем ядром: строже, а отказ Д3 ниже всё равно будет
+    weak = [r for r in pr_verdicts if protect and r["kind"] == "accept" and checklist_ok(r) and opus_problem(r)]
+    if weak:
+        view = pr_view()
+        if view is not None and _core_problem(repo, pr, sha, view, pr_files(), cwd) is None:
+            weak = []
+    verdicts = [r for r in pr_verdicts if not any(r is w for w in weak)]
 
     fp = _Prints(cwd, repo, sha, pr_verdicts, pr_view)
 
@@ -1666,9 +1683,9 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
             unfilled = any(UNFILLED_ID.search(r["checklist"]["ran"]) for r in weak_used)
             return (f"«принять» на {repo}#{pr}@{sha[:12]} от "
                     f"{'; '.join(_who(r) + ' на ' + r['sha'][:12] + ' (' + opus_problem(r) + ')' for r in weak_used)}"
-                    " — не на Opus: в "
-                    "репозитории защит шлюз засчитывает только проверку argus на модели claude-opus (--ran начинается с "
-                    "«модель: claude-opus»). Проверку повторяет argus на Opus и записывает `pantheon review accept "
+                    " — не на Opus: "
+                    "в PR, который задевает ядро защит (или ядро не проверить), шлюз засчитывает только проверку argus "
+                    "на модели claude-opus (--ran начинается с «модель: claude-opus»). Проверку повторяет argus на Opus и записывает `pantheon review accept "
                     f"{repo} {pr} {sha} --ran \"модель: claude-opus-…, что запустил\" …`."
                     + (f" Кроме того, {UNFILLED_ID_HINT}." if unfilled else "") + f" {advice}")
         return (f"нет «принять» от argus на {repo}#{pr}@{sha[:12]}: позови argus, он проверит и запишет "
@@ -1702,9 +1719,7 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
         return (f"{CI_NONE}: gh pr view {pr} -R {repo} не ответил — без него не сверить ни проверки GitHub, ни "
                 f"файлы PR (ядро), повтори позже. {advice}")
     if protect:
-        # один запрос файлов на шлюз: сбой (None) не повторяется в _core_problem, а даёт там отказ — иначе удачный
-        # второй запрос пропустил бы PR с правкой version мимо _version_problem (argus-b PR #153 Б1)
-        files = _pr_files(repo, pr)
+        files = pr_files()
         why = _version_problem(files)
         if why:
             return f"{why}. {MERGE_VERSION}. {advice}"
