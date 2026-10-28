@@ -29,7 +29,8 @@
   pantheon who              координаторы: состояние, short из реестра, давность (COMM-14)
   pantheon wake <имя> ["задание"]   поднять уснувшую сессию направления и сказать «посмотри входящие» (COMM-04);
                             задание из окна роли — только по слову владельца в окне Зевса за 15 мин, иначе код 2
-                            (metis-0261 А); строка замера в capacity.jsonl — у подъёма и у отказа
+                            (metis-0261 А); строка замера в capacity.jsonl — у подъёма и у отказа; недельный потолок
+                            владельца достигнут — отказ, код 2 (--over-cap — только ваш терминал, metis-0444)
   pantheon infra-check      лёгкая проверка опор системы после обновления Claude Code (SEC-16)
 
 Всё, что дежурный находит, — строка в ~/ai/pantheon/alerts.md один раз на состояние (alert_once) и, где нужно вас,
@@ -1773,6 +1774,10 @@ def _word_do(verb, name, qid, ts, ans, agents, registry):
     if os.path.exists(P.path("stopped", name)):
         return ("не исполняю: «остановлено вами» — снимает ответ «Да — вернуть " + name + "» или ваша команда "
                 "pantheon resume")
+    # metis-0444: недельный потолок держит и запуск по ответу — сверх потолка только ваш терминал (--over-cap)
+    cap = P.night_mod().launch_cap("tick")
+    if cap:
+        return f"не исполняю: {cap}"
     if verb == "перезапустить":
         try:
             r = subprocess.run([os.path.join(P.PLUGIN, "bin", "pantheon"), "start", name, "--from", "tick", "--restart",
@@ -2692,7 +2697,7 @@ def who():
     return 0
 
 
-def wake_one(rest, who="владелец"):
+def wake_one(rest, who="владелец", over=False):
     name = rest[0]
     if not P.SESSION_NAME.fullmatch(name):
         print("pantheon wake <имя> [\"задание\"]", file=P.sys.stderr)
@@ -2726,7 +2731,13 @@ def wake_one(rest, who="владелец"):
     # по вашему слову (owner_word_ok, как у resume). Без него — отказ, код 2, respawn не зовётся. Замер — строка в
     # capacity.jsonl у каждого подъёма и у отказа (как _wake); красная зона подъём со словом не откладывает (как _wake).
     word = not (extra and os.environ.get("PANTHEON_ROLE")) or owner_word_ok()
-    P.capacity_note(name, "wake", agents, "allowed" if word else "refused")
+    # metis-0444: недельный потолок владельца — отказ, код 2 (--over-cap снимает его только в вашем терминале)
+    role = os.environ.get("PANTHEON_ROLE") or ""
+    cap = P.night_mod().launch_cap("zeus" if role == "hq" else "tick" if role else "owner", over) if word else None
+    P.capacity_note(name, "wake", agents, "allowed" if word and not cap else "refused")
+    if cap:
+        print(f"pantheon wake {name}: отказ — {cap}; claude не запускался", file=P.sys.stderr)
+        return P.START_REFUSED
     if not word:
         print(f"pantheon wake {name}: задание из окна роли — только по слову владельца: в журнале Зевса нет его строки "
               f"за {P.OWNER_WORD_WINDOW // 60} мин (сообщение другой сессии согласием не считается); без задания "

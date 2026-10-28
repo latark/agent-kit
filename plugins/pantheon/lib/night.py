@@ -3,7 +3,7 @@
   pantheon night [status]   неделя, линия, запас, зона; ночь; давность снимка лимита; потолок владельца и запас до него
   pantheon night report     блок «Лимит» для ежедневной сводки: неделя, потолок, линия, запас, зона, ночь, тревоги, сброс
   pantheon night ask <id> <направление> [ГГГГ-ММ-ДД]   вопрос о ночной пачке для окна вопросов Зевса (ниже)
-  pantheon night agent-gate хук PreToolUse Agent|Task окон координаторов: отказ новому субагенту при потолке (ниже)
+  pantheon night agent-gate хук PreToolUse Agent|Task окон координаторов и штаба: отказ новому субагенту при потолке (ниже)
 
 Снимок лимита пишет строка статуса Claude Code в ~/.local/state/claude-statusline/ (путь — от HOME, как LIMIT_SNAPSHOT):
 `five-hour` — «pct resets_at now», `seven-day` — «pct resets_at now», `week-usage` — строки «now resets_at pct» (до 200).
@@ -71,7 +71,8 @@ answer_at, answers_seen, pack_jobs, spent, last_used, resets_at, closed, last_ni
 
   [limits.owner_cap]
   pct = 50                 # неделя ≥ стольких % — новое не начинается: autostart, wake и respawn днём и ночью
-                           # (отказ с причиной) и новые субагенты из окон координаторов (хук PreToolUse Agent, ниже)
+                           # (отказ с причиной), новые субагенты из окон координаторов и штаба (хук PreToolUse
+                           # Agent, ниже), задачи `claude -p` тика и ручные start и wake (ниже, metis-0444)
   decision = "zeus-limit-budget"  # [id] решения владельца
   # срок — одно из (без них потолок стоит каждую неделю, пока запись есть):
   until = "2026-11-30"     # каждую неделю по эту дату включительно
@@ -89,10 +90,19 @@ metis-0275 работал как разрешение). Достигнут — �
 стоять до сброса или поднять до pct + 10 %. Идущее не рвём: отказ — только новому.
 
 Хук `pantheon night agent-gate` (hooks.json, PreToolUse Agent|Task): в окне координатора (PANTHEON_ROLE
-domain-coordinator или workshop, и у его субагентов — лидов) при достигнутом потолке запуск субагента — отказ
-(permissionDecision deny) с причиной. Окно штаба (hq), окна задач тика и ваш терминал хук не трогает. Python не
-запускается, пока в schedule.toml нет owner_cap (проверка оболочкой). Сбой расчёта или битая запись — не отказ (как
-без потолка), код 1 и причина в stderr.
+domain-coordinator или workshop, и у его субагентов — лидов) и в окне штаба (hq, metis-0444) при достигнутом потолке
+запуск субагента — отказ (permissionDecision deny) с причиной. Окна задач тика субагентов не зовут (agents.py), ваш
+терминал хук не трогает. Python не запускается, пока в schedule.toml нет owner_cap (проверка оболочкой). Сбой
+расчёта или битая запись — не отказ (как без потолка), код 1 и причина в stderr.
+
+Ручные запуски и окна тика (metis-0444, launch_cap): при достигнутом потолке отказ, код 2, с причиной получают
+`pantheon start <направление>|workshop`, `pantheon wake` (общий), `pantheon wake <имя>`, `wake <направление> --task`,
+`wake hestia` и исполнение вашего ответа «Да — запустить|перезапустить|вернуть» плановым проходом; задача `claude -p`
+тика не запускается и ждёт («ждёт: недельный потолок…» в `pantheon jobs`), срок не сдвигается. Пробный запуск
+(--dry-run) не проверяется. `pantheon start zeus` потолок не держит: штаб — ваше окно, в нём вы и отвечаете на
+вопрос о потолке. Запустить сверх потолка можно только из вашего терминала (без PANTHEON_ROLE) флагом --over-cap;
+в окне роли (hq, координатор, плановый проход) флаг не действует — там только поднять потолок вашим словом. Сбой
+расчёта — не отказ (как у хука): строка в stderr и одна тревога в день.
 
   [night]
   ask_at = "22:00"         # начало вечера: с него проход сверяет ваши ответы на вопросы о пачках
@@ -135,7 +145,8 @@ def set_core(mod):
 
 WEEK = 7 * 86400
 KINDS = ("autostart", "wake", "respawn")
-CAP_ROLES = ("domain-coordinator", "workshop")  # окна, чьи новые субагенты держит потолок владельца (agent-gate)
+CAP_ROLES = ("domain-coordinator", "workshop", "hq")  # окна, чьи новые субагенты держит потолок владельца (agent-gate)
+OVER_CAP = "--over-cap"  # ручной запуск сверх потолка — только из терминала владельца (launch_cap, metis-0444)
 LIMITS = {"warn_pp": 2.0, "stop_pp": 5.0, "hard_pct": 85.0, "snapshot_ok_min": 30.0, "snapshot_max_min": 180.0,
           "heavy_max": 2.0}
 NIGHT = {"start": "23:00", "end": "08:00", "budget_pct": 3.0, "check_pct": 1.0, "cap_pct": 5.0, "carry_share": 0.3,
@@ -1115,18 +1126,49 @@ def cap_line(t, m):
 
 
 def agent_gate(t=None):
-    """Хук PreToolUse Agent|Task: причина отказа запуску субагента в окне координатора при достигнутом потолке или
-    None. Окно — по PANTHEON_ROLE (domain-coordinator, workshop); hq, окна задач и терминал владельца — None."""
-    if (os.environ.get("PANTHEON_ROLE") or "") not in CAP_ROLES:
+    """Хук PreToolUse Agent|Task: причина отказа запуску субагента в окне координатора или штаба при достигнутом
+    потолке или None. Окно — по PANTHEON_ROLE (CAP_ROLES: domain-coordinator, workshop, hq); окна задач и терминал
+    владельца — None."""
+    role = os.environ.get("PANTHEON_ROLE") or ""
+    if role not in CAP_ROLES:
         return None
     t = P.now() if t is None else t
     m = measure(t)
     cap = owner_cap(t, m)
     if not cap_hit(m, cap, t):
         return None
+    if role == "hq":  # Зевс — он: отвечает владельцу сам, без субагентов
+        return (f"Пантеон: {cap_why(m, cap)}. Субагентов не запускай до сброса недели ({when(m['resets'])}) или "
+                "нового слова владельца: отвечай владельцу сам, без них. Поднять потолок может только владелец — "
+                "вопрос ему уже на доске.")
     return (f"Пантеон: {cap_why(m, cap)}. Новых исполнителей, лидов и argus не запускай до сброса недели "
             f"({when(m['resets'])}) или нового слова владельца: доделай текущий шаг без них, запиши в файл состояния, "
             "где остановилась и что ждёт запуска. Поднять потолок может только владелец — вопрос ему уже на доске.")
+
+
+def launch_cap(origin, over=False, t=None):
+    """Ручной запуск и задача `claude -p` тика при достигнутом потолке (metis-0444): причина отказа или None.
+    origin — owner (ваш терминал), zeus (окно штаба), tick (плановый проход и другие окна ролей). over — флаг
+    --over-cap: снимает отказ только у owner. Достигнут — ещё карточка и тревога (cap_notice, одна на неделю и pct).
+    Сбой расчёта — не отказ: строка в stderr и одна тревога в день (как у agent-gate)."""
+    t = P.now() if t is None else t
+    try:
+        m = measure(t)
+        cap = owner_cap(t, m)
+        if not cap_hit(m, cap, t) or (over and origin == "owner"):
+            return None
+        cap_notice(t, m, cap)
+        why = f"{cap_why(m, cap)}, новые запуски стоят до сброса недели ({when(m['resets'])})"
+    except Exception as e:  # noqa: BLE001 — потолок не проверен: запуск идёт, сбой виден
+        text = f"потолок владельца не проверен ({type(e).__name__}: {str(e)[:120]}) — запуск идёт без него"
+        print(f"pantheon: {text}", file=P.sys.stderr)
+        with contextlib.suppress(Exception):
+            P.alert_daily("owner-cap-check", text, "night")
+        return None
+    if origin == "owner":
+        return f"{why}; запустить сверх потолка — та же команда с {OVER_CAP}"
+    return (f"{why}; поднять потолок может только владелец (вопрос ему на доске)"
+            + (f", {OVER_CAP} действует только в его терминале" if over else ""))
 
 
 def snap_line(m, cfg):
