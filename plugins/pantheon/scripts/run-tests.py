@@ -103,9 +103,6 @@ NO_SUMMARY = frozenset({
 # (python:3.14, не root, zip как на ubuntu-latest): остальные файлы проходят с заглушками STUBS.
 SKIP_NOT_MAC = {
     "pantheon/test_setup.py": ("установщик pantheon-setup поддерживает только macOS", None),
-    "pantheon/test_board.py": ("view-sync.sh запускается как /bin/zsh", "/bin/zsh"),
-    "pantheon/test_pyfind.py": ("ищет Python в папках macOS и ждёт старый системный python3; на Linux находит свой", None),
-    "guard/test_hooks_json.py": ("то же: поиск Python в папках macOS через python.sh", None),
 }
 # Команды macOS, которых нет на Linux: заглушка с выводом, при котором код идёт обычным путём.
 STUBS = {"ioreg": "exit 0", "pmset": 'echo "Now drawing from AC Power"', "scutil": "echo linux-host"}

@@ -25,6 +25,14 @@ def check(name, ok, detail=""):
     print(("ok  " if ok else "FAIL") + " " + name + ("" if ok else f"  [{detail}]"))
 
 
+def check_mac(name, ok, detail=""):
+    """Случай про системный python3 macOS (3.9) и его папки: вне macOS — строка «пропущено», а не проверка."""
+    if sys.platform == "darwin":
+        check(name, ok, detail)
+    else:
+        print(f"пропущено: нужен macOS — {name}")
+
+
 tmp = os.path.realpath(tempfile.mkdtemp(prefix="pyfind-test-"))
 atexit.register(shutil.rmtree, tmp, True)
 fake = os.path.join(tmp, "fake")
@@ -84,7 +92,7 @@ check("PANTHEON_PYTHON важнее config.toml", r.stdout.strip() == PY311, r.s
 os.remove(cfg_py)
 os.symlink("/usr/bin/false", cfg_py)  # записан, но не работает → прежний порядок (здесь — ничего)
 r = run(["sh", "-c", probe], env_for(PANTHEON_STATE=cfg_state))
-check("сломанный python из config.toml пропускается", r.returncode != 0 and r.stdout.strip() == "", (r.stdout, r.returncode))
+check_mac("сломанный python из config.toml пропускается", r.returncode != 0 and r.stdout.strip() == "", (r.stdout, r.returncode))
 
 # _py_ok проверяет кандидата с -I: sitecustomize из PYTHONPATH (окружение тика задаёт launchd) не исполняется
 pp = os.path.join(tmp, "pp")
@@ -98,7 +106,7 @@ check("_py_ok: кандидат с -I — sitecustomize из PYTHONPATH не и�
 
 # ничего подходящего
 r = run([os.path.join(BIN, "pantheon"), "status"], env_for())
-check("нет Python 3.11+: понятная строка, код не 0, без трассы",
+check_mac("нет Python 3.11+: понятная строка, код не 0, без трассы",
       r.returncode != 0 and "нужен Python 3.11+" in r.stderr and "Traceback" not in r.stderr + r.stdout
       and "brew install" in r.stderr, (r.returncode, r.stderr[-200:]))
 
