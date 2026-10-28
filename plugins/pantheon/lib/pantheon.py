@@ -8372,6 +8372,10 @@ def review_cmd(rest):
                   + (f", {d['by']}" if d.get("by") else "") + ") — второго argus не звать")
         if not recs:
             print("pantheon review status: записей нет")
+        # строки про Opus — только там, где бывает ядро: репозиторий metis-pantheon в [merge_repos] или неизвестный
+        # (строже); у репозитория продукта шлюз считает «принять» на любой модели, и эти строки только путают
+        dirs = autoclose_repo_dirs().get(args[0].lower()) if args else None
+        core_repo = not dirs or "metis-pantheon" in dirs
         for r in recs:
             by = r.get("by") if isinstance(r.get("by"), dict) else {}
             pr = f"#{r['pr']}" if r.get("pr") else ""
@@ -8384,6 +8388,8 @@ def review_cmd(rest):
             if r.get("kind") == "accept" and not all(isinstance(cl.get(k), str) and cl[k].strip()
                                                      for k in REVIEW_CHECKLIST):
                 print("    без перечня проверенного (Б6) — шлюз слияния такое «принять» не пускает")
+            elif r.get("kind") == "accept" and not core_repo:
+                pass
             elif r.get("kind") == "accept" and not OPUS_RAN.match(cl["ran"]):
                 print("    не на Opus (--ran без «модель: claude-opus» в начале) — для PR ядра не в счёт; вне ядра "
                       "шлюз его считает")
@@ -8400,7 +8406,7 @@ def review_cmd(rest):
             strict = review_tally(recs, int(args[1]), opus_only=True)
             for sha, (acc, rej) in review_tally(recs, int(args[1])).items():
                 print(f"итог на {sha[:12]}: принять {acc}, вернуть {rej} — последний вердикт каждого argus")
-                if strict.get(sha, (0, 0)) != (acc, rej):   # для PR ядра в счёт только «принять» на Opus
+                if core_repo and strict.get(sha, (0, 0)) != (acc, rej):   # для PR ядра — только «принять» на Opus
                     print(f"  для PR ядра (в счёт только «принять» на Opus): принять {strict.get(sha, (0, 0))[0]}, "
                           f"вернуть {strict.get(sha, (0, 0))[1]}")
         return 0
