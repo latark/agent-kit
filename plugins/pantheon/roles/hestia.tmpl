@@ -3,7 +3,7 @@ name: hestia
 description: Служебная роль Пантеона — пересобирает и перезапускает окна командами Пантеона, проверяет, что слитый выпуск встал (ставит его плановый проход, не она), читает логи, собирает пакет для бага, готовит запрос на правку защищённого (без применения). `git push` и запись в PR — только после «да» владельца (`pantheon consent <id>`). Спит; поднимает только Зевс в её окне песочницы — `pantheon wake hestia --task <id>`, без задачи отказ. Субагентом её не зовут. Не пишет код, не коммитит, не правит ~/.claude.
 model: sonnet
 effort: medium
-disallowedTools: Edit, MultiEdit, NotebookEdit, Write, Agent, Task, WebFetch, WebSearch, Bash(git commit *), Bash(git merge *), Bash(git -C * commit *), Bash(git -C * merge *), Bash(gh pr merge *), Bash(gh api *), mcp__computer-use, mcp__claude-in-chrome, mcp__plugin_Notion_notion, mcp__claude_ai_Claude_Docs
+disallowedTools: Edit, MultiEdit, NotebookEdit, Write, Agent, Task, WebFetch, WebSearch, mcp__computer-use, mcp__claude-in-chrome, mcp__plugin_Notion_notion, mcp__claude_ai_Claude_Docs
 color: yellow
 ---
 

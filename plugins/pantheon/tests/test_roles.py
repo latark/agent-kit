@@ -599,10 +599,10 @@ def main():
     head = tmpl_h.split("---")[1] if tmpl_h.count("---") >= 2 else ""
     deny = next((ln for ln in head.splitlines() if ln.startswith("disallowedTools:")), "")
     built_h = texts.get("hestia.md", "")
-    check("hestia: роль собрана (name: hestia), запрещены Edit/Write, Agent, коммит, push, merge; выпуск — "
+    # metis-0576: Bash(...) в шапке убирает Bash целиком — коммит, merge, gh api запрещает guard (правило hestia)
+    check("hestia: роль собрана (name: hestia), запрещены Edit/Write, Agent, Bash(...) в шапке нет; выпуск — "
           "pantheon plugins update, окно — wake hestia --task",
-          all(t in deny for t in ("Edit", "Write", "Agent", "Bash(git commit *)",
-                                  "Bash(git merge *)", "Bash(gh pr merge *)", "Bash(gh api *)"))
+          all(t in deny for t in ("Edit", "Write", "Agent")) and "Bash" not in deny
           and built_h.startswith("---\nname: hestia\n") and "pantheon plugins update" in built_h
           and "pantheon wake hestia --task" in built_h and "Гестия (hestia" in texts.get("argus.md", ""))
     # metis-0562 п. 1 (F4): установщик один — плановый проход; Гестия выпуски не ставит, только сверяет
@@ -613,10 +613,9 @@ def main():
           and "ставит слитые выпуски" not in fh and "Поставить слитый выпуск" not in fh
           and "проверяет, что слитый выпуск встал (ставит его плановый проход, не она)" in fh)
     # п. 2: сеть, push и запись в PR — только по consent; push из запретов шапки снят, merge и gh api остались
-    check("hestia: сеть, git push, gh pr create|edit — только по `pantheon consent <id>`; push не в запретах шапки",
+    check("hestia: сеть, git push, gh pr create|edit — только по `pantheon consent <id>`; Bash(...) нет в шапке",
           "## Наружу — по consent" in fh and "запусти `pantheon consent <id задачи>`" in fh
-          and "Bash(git push *)" not in deny and "Bash(git -C * push *)" not in deny
-          and "Bash(gh pr merge *)" in deny and "Bash(gh api *)" in deny
+          and "Bash" not in deny
           and "Сети у тебя нет." in fh and "Push — на имя remote, не в main и не принудительно" in fh
           and "`git push` и запись в PR — только после «да» владельца (`pantheon consent <id>`)" in fh)
     # п. 3 (F9): пакет для бага и возврат пейджера Метиде
@@ -647,6 +646,15 @@ def main():
           and os.path.isfile(os.path.join(old, "argus.md")))
     for f in ("hearth.tmpl", "twin.tmpl", "fine.tmpl"):
         os.remove(os.path.join(mine_dir, f))
+    # metis-0576: Bash(...) в disallowedTools шапки — роль не собрана, прежняя сборка цела, ошибка в stderr
+    write(os.path.join(mine_dir, "narrow.tmpl"),
+          "---\nname: narrow\ndescription: x\ndisallowedTools: Edit, Bash(git commit *)\n---\nтело\n")
+    write(os.path.join(old, "narrow.md"), "---\nname: narrow\n---\n<!-- собрано pantheon roles build из narrow.tmpl -->\nстарая\n")
+    r = run("roles", "build", "--out", old)
+    check("Bash(...) в disallowedTools — роль не собрана, прежняя сборка цела, ошибка в stderr",
+          "narrow.tmpl → narrow.md: Bash(...) в disallowedTools" in r.stderr
+          and "старая" in read(os.path.join(old, "narrow.md")) and os.path.isfile(os.path.join(old, "argus.md")))
+    os.remove(os.path.join(mine_dir, "narrow.tmpl"))
     agents2 = os.path.join(home2, ".claude", "agents")
     r = run("roles", "build")
     check("новая машина: ~/.claude/agents ещё нет — живая сборка создаёт папку и кладёт общие роли",
