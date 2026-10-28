@@ -806,6 +806,12 @@ def main():
     cases = [
         # (имя, ожидание, папка запуска, роль, субагент, (инструмент, вход))
         ("hq пишет доску", "allow", ".", "hq", False, W(P("board.md"))),
+        *[(f"HQ_ONLY: {who} — {f}: {'можно' if v == 'allow' else 'отказ'}", v, d, r, sa, W(P(f)))
+          for f in ("approvals.toml", "schedule.toml", "directions.toml", "decisions.md")
+          for who, v, d, r, sa in (("hq", "allow", ".", "hq", False), ("координатор", "deny", br, "domain-coordinator", False),
+                                   ("субагент", "deny", br, "argus", True), ("hephaestus-shop", "deny", br, "hephaestus-shop", True))],
+        ("HQ_ONLY: координатор Bash >> schedule.toml — отказ", "deny", br, "domain-coordinator", False,
+         B(f"echo x >> {home}/ai/pantheon/schedule.toml")),
         ("субагент не hq — отказ на board.md", "deny", br, "argus", True, W(P("board.md"))),
         ("субагент штаба (chiron) — отказ на board.md", "deny", ".", "chiron", True, E(P("board.md"))),
         ("ваша сессия без роли пишет доску", "allow", ".", "", False, W(P("board.md"))),
@@ -955,17 +961,17 @@ def main():
         ("координатор: своя задача — можно", "allow", br, "domain-coordinator", False, B("pantheon task set athena-0001 status=doing")),
         ("координатор: новая задача своего направления — можно", "allow", br, "domain-coordinator", False,
          B("pantheon task new --direction athena-shop --title x")),
-        ("координатор: чужая задача — отказ", "deny", br, "domain-coordinator", False, B("pantheon task set metis-0001 status=done")),
-        ("координатор: новая задача чужому направлению — отказ", "deny", br, "domain-coordinator", False,
+        ("координатор: чужая задача — можно (решение 28.10)", "allow", br, "domain-coordinator", False, B("pantheon task set metis-0001 status=done")),
+        ("координатор: новая задача чужому направлению — можно", "allow", br, "domain-coordinator", False,
          B("pantheon task new --direction metis-pantheon --title x")),
-        ("координатор: задача, которой нет, — отказ", "deny", br, "domain-coordinator", False, B("pantheon task claim zz-0001 --by a")),
-        ("субагент координатора: чужая задача — отказ", "deny", br, "hephaestus-shop", True, B("pantheon task set metis-0001 next=x")),
+        ("координатор: задача, которой нет, — можно (проверит сам pantheon)", "allow", br, "domain-coordinator", False, B("pantheon task claim zz-0001 --by a")),
+        ("субагент координатора: чужая задача — можно", "allow", br, "hephaestus-shop", True, B("pantheon task set metis-0001 next=x")),
         ("координатор: task ready и show — можно", "allow", br, "domain-coordinator", False, B("pantheon task ready; pantheon task show metis-0001")),
         ("hq: любая задача — можно", "allow", ".", "hq", False, B("pantheon task set athena-0001 status=todo")),
         ("координатор: split своей задачи — можно", "allow", br, "domain-coordinator", False, B('pantheon task split athena-0001 --title "остаток"')),
-        ("координатор: split чужой задачи — отказ", "deny", br, "domain-coordinator", False, B('pantheon task split metis-0001 --title "остаток"')),
-        ("субагент координатора: split чужой задачи — отказ", "deny", br, "hephaestus-shop", True, B('pantheon task split metis-0001 --title x')),
-        ("координатор: split несуществующей задачи — отказ", "deny", br, "domain-coordinator", False, B('pantheon task split zz-0001 --title x')),
+        ("координатор: split чужой задачи — можно", "allow", br, "domain-coordinator", False, B('pantheon task split metis-0001 --title "остаток"')),
+        ("субагент координатора: split чужой задачи — можно", "allow", br, "hephaestus-shop", True, B('pantheon task split metis-0001 --title x')),
+        ("координатор: split несуществующей задачи — можно", "allow", br, "domain-coordinator", False, B('pantheon task split zz-0001 --title x')),
         ("hq: split любой задачи — можно", "allow", ".", "hq", False, B('pantheon task split athena-0001 --title x')),
         ("координатор: terminal-notifier — отказ", "deny", br, "domain-coordinator", False,
          B('terminal-notifier -title "Пантеон" -message "x"')),
@@ -1102,10 +1108,15 @@ def main():
          ("Write", {"file_path": os.path.join(home, br, "c.mjs"), "content": "read DevTools" + "ActivePort"})),
         ("tg-secret: чтение ключа tg-read — отказ", "deny", br, "", False,
          B("security find-generic-" + "password -s tg-" + "read -w")),
-        # --- шаг 1.2: команды пульта start/wake/roles — штаб и вы; approve — только вы ---
+        # --- шаг 1.2: start/wake открыты ролям (решение 28.10); roles и остальной пульт — штаб; approve — только вы ---
         ("hq: pantheon start athena-shop", "allow", "ai/pantheon", "hq", False, B("pantheon start athena-shop --from zeus")),
-        ("координатор: pantheon start — отказ", "deny", br, "domain-coordinator", False, B("pantheon start hermes-site")),
-        ("субагент: pantheon wake — отказ", "deny", br, "general-purpose", True, B("pantheon wake")),
+        ("координатор: pantheon start — можно (решение 28.10)", "allow", br, "domain-coordinator", False, B("pantheon start hermes-site")),
+        ("субагент: pantheon wake — можно", "allow", br, "general-purpose", True, B("pantheon wake")),
+        *[(f"координатор: pantheon {c} — отказ (не запуск окон)", "deny", br, "domain-coordinator", False, B(f"pantheon {c}"))
+          for c in ("uninstall", "install", "commit", "stop --all", "pause hermes-site", "jobs disable x", "jobs enable x",
+                    "jobs renew x", "jobs pause x", "roles build", "roles build --out /dev/null")],
+        *[(f"hq: pantheon {c} — можно", "allow", "ai/pantheon", "hq", False, B(f"pantheon {c}"))
+          for c in ("uninstall", "install", "jobs disable x", "roles build")],
         ("hq: pantheon approve — отказ", "deny", "ai/pantheon", "hq", False, B("pantheon approve add --site a --allow b")),
         ("вы: pantheon approve", "allow", ".", "", False, B("pantheon approve add --site a --allow b")),
         ("мастерская: pantheon approve list — отказ", "deny", ws, "workshop", False, B("pantheon approve list")),
@@ -1292,9 +1303,9 @@ def main():
          B('nc -U "$HOME/Library/Application Support/tg-read/tg-readd.sock"')),
         # metis-0047: пульт окон — только привилегированным
         ("координатор: pantheon stop --all — отказ", "deny", br, "domain-coordinator", False, B("pantheon stop --all")),
-        ("координатор: pantheon resume — отказ", "deny", br, "domain-coordinator", False, B("pantheon resume athena-shop")),
+        ("координатор: pantheon resume — можно (запуск окон)", "allow", br, "domain-coordinator", False, B("pantheon resume athena-shop")),
         ("координатор: pantheon pause — отказ", "deny", br, "domain-coordinator", False, B("pantheon pause hermes-site")),
-        ("координатор: pantheon restart — отказ", "deny", br, "domain-coordinator", False, B("pantheon restart hermes-site")),
+        ("координатор: pantheon restart — можно (запуск окон)", "allow", br, "domain-coordinator", False, B("pantheon restart hermes-site")),
         ("hq: pantheon stop --all можно", "allow", "ai/pantheon", "hq", False, B("pantheon stop --all")),
         ("hq: pantheon resume, pause, restart можно", "allow", "ai/pantheon", "hq", False,
          B("pantheon resume athena-shop; pantheon pause hermes-site; pantheon restart hermes-site")),

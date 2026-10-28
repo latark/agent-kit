@@ -74,7 +74,10 @@ LEGACY_KEYS = {"wave": "release"}
 # режим: сам координатор, один исполнитель на цепочку, параллельно; пусто — как single
 NO_MODE_BATCH = ("в пачку без режима нельзя: поставьте --mode self|single|parallel (и --mode-why — почему; «не решено» не годится), "
                  "режим нужен «Итогам пачек» и порядку запуска")
-MODES = {"self": "сам", "single": "один исполнитель", "parallel": "параллельно"}
+MODES = {"self": "сам", "single": "один исполнитель", "parallel": "параллельно"}  # значения свойства «Режим» в карточке — не менять (metis-0500)
+# как режим называется на показе (таблица «Состав», строка на карточке, вид .base); ключ — mode из карточки задачи (metis-0500)
+MODE_VIEW = {"self": "координатор сам", "single": "один разработчик", "parallel": "несколько разработчиков параллельно"}
+MODE_UNSET = "не решено"
 EXECUTORS = ("auto", "claude", "codex")
 # metis-0505: «не решено» — законное значение у задачи вне пачки (ставит разовая pantheon task migrate-mode открытым
 # задачам без mode); пачке и порядку запуска оно не годится — там нужен решённый режим (mode_decided)
@@ -417,6 +420,9 @@ def option_warns(head):
     out = []
     for o in head.get("options") or []:
         o = str(o)
+        if not o.strip():
+            out.append("пустой вариант --option \"\" — проверьте переменную в кавычках: она пуста")
+            continue
         if _OPT_EMPTY.search(o) or _opt_cut(o):
             out.append(f"вариант «{o[:60]}» с пустыми скобками или обрезанной суммой («()», «≈ )», «$…») — "
                        "проверьте кавычки: оболочка съедает «$…», пишите сумму в одинарных кавычках")
@@ -1451,7 +1457,7 @@ def story_text(sid, tasks):
     for n, i in enumerate(inf["ids"], 1):
         h = tasks[i][1]
         lines.append(f"{n}. {i} · {label_of(h)} · {h.get('estimate') or 'без оценки'} · "
-                     f"{MODES.get(h.get('mode')) or 'режим не задан'} · {one_line(h.get('title'))}")
+                     f"{MODE_VIEW.get(h.get('mode')) or 'кто делает: ' + MODE_UNSET} · {one_line(h.get('title'))}")
     lines.append(f"сумма {pct_text(inf['sum'])}"
                  + (f" из бюджета {pct_text(inf['budget'])}" if inf["budget"] is not None else " (бюджет не задан)")
                  + (" — больше бюджета" if over_budget(inf) else "")
@@ -1596,17 +1602,17 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
     cell = lambda i: f"[[{names[i]}\\|{i}]]" if names.get(i) else i  # noqa: E731  (в таблице «|» экранируется)
     for n, i in enumerate(inf["ids"], 1):
         h = tasks[i][1]
-        # «Ждёт»: открытые depends_on и ближайшее незакрытое прошлое звено цепочки (только у не начатых: todo или пусто); «ничего» — законно пусто
+        # «Зависимость»: открытые depends_on и ближайшее незакрытое прошлое звено цепочки (только у не начатых: todo или пусто); «ничего» — законно пусто
         waits = [cell(d) for d in open_deps(h, tasks)]
         k = inf["chain"].index(i) if i in inf["chain"] else 0
         prev = next((j for j in reversed(inf["chain"][:k]) if j not in inf["closed"]), None)  # ближайшее незакрытое
         if prev and cell(prev) not in waits and h.get("status") in NOT_STARTED:
             waits.append(cell(prev))
-        mode = MODES.get(h.get("mode")) or ("—" if h.get("type") == "story" else "не задан")
+        mode = MODE_VIEW.get(h.get("mode")) or ("—" if h.get("type") == "story" else MODE_UNSET)
         rows.append(f"| {n} | {cell(i)} | {_plain(one_line(h.get('title'))).replace('|', '/')} | {label_of(h)} | "
                     f"{_plain(h.get('estimate') or '—').replace('|', '/')} | {mode} | "
-                    f"{', '.join(waits) or 'ничего'} |")
-    table = ("## Состав\n\n| № | Задача | Название | Статус | Оценка | Режим | Ждёт |\n|---|---|---|---|---|---|---|\n"
+                    f"{', '.join(waits) or 'нет'} |")
+    table = ("## Состав\n\n| № | Задача | Название | Статус | Оценка | Кто делает | Зависимость |\n|---|---|---|---|---|---|---|\n"
              + ("\n".join(rows) if rows else "| — | задач пока нет | | | | | |"))
     prl = []
     for i in inf["ids"]:
@@ -1801,7 +1807,7 @@ PULT_FILE = """filters:
     - '!file.inFolder("Доска/Узлы")'
 formulas:
   prio_rank: 'if(note["Приоритет"].isEmpty(), 2, number(note["Приоритет"]))'
-  mode_view: 'if(note["Режим"].isEmpty(), "", if(note["Режим"] == "параллельно", "⇉ параллельно", if(note["Режим"] == "сам", "● сам", "→ один исполнитель")))'
+  mode_view: 'if(note["Режим"].isEmpty(), "не решено", if(note["Режим"] == "параллельно", "⇉ несколько разработчиков параллельно", if(note["Режим"] == "сам", "● координатор сам", "→ один разработчик")))'
   waits: 'if(note["Зависит от"].isEmpty(), "", "⏳ ждёт " + note["Зависит от"].join(", "))'
   cross: 'if(note["Пересечения"].isEmpty(), "", "✂ " + note["Пересечения"].join(", "))'
   areas: 'if(note["Области"].isEmpty(), "❔ не указаны", note["Области"].join(", "))'
@@ -1814,7 +1820,7 @@ properties:
   note.id:
     displayName: №
   formula.mode_view:
-    displayName: Режим
+    displayName: Кто делает
   formula.waits:
     displayName: Ждёт задачу
   formula.cross:
@@ -2257,7 +2263,7 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
     if head.get("waiting_on") not in (None, "human"):
         parts[-1] += f"\n> **Ждёт:** {head['waiting_on']}"
     if not closed and card["Режим"]:
-        parts[-1] += f"\n> **Режим:** {card['Режим']}" + (f" — {head['mode_why']}" if head.get("mode_why") else "")
+        parts[-1] += f"\n> **Кто делает:** {MODE_VIEW.get(head.get('mode'), card['Режим'])}" + (f" — **Почему так:** {head['mode_why']}" if head.get("mode_why") else "")
     if not closed and card["Зависит от"]:
         parts[-1] += f"\n> **Ждёт задачу:** {', '.join(card['Зависит от'])}"
     if not closed and card["Пересечения"]:
@@ -2513,7 +2519,7 @@ formulas:
   stage: 'if(note["Статус"] == "Нужен ответ", 0, if(note["Статус"] == "Входящие", 1, if(note["Статус"] == "На проверке", 2, if(note["Статус"] == "В работе", 3, if(note["Статус"] == "Ждёт", 4, if(note["Статус"] == "Очередь", 5, if(note["Статус"] == "Готово", 6, 7)))))))'
   status_view: 'if(note["Статус"] == "Нужен ответ", "🔴 Нужен ответ", if(note["Статус"] == "Входящие", "📥 Входящие", if(note["Статус"] == "В работе", "🟡 В работе", if(note["Статус"] == "На проверке", "🔵 На проверке", if(note["Статус"] == "Ждёт", "⏸ Ждёт", if(note["Статус"] == "Очередь", "⚪ Очередь", if(note["Статус"] == "Готово", "🟢 Готово", if(note["Статус"] == "Отменено", "⚫ Отменено", note["Статус"]))))))))'
   prio_view: 'if(note["Приоритет"].isEmpty(), "", if(number(note["Приоритет"]) == 0, "🔥🔥 0 срочно", if(number(note["Приоритет"]) == 1, "🔥 1 высокий", if(number(note["Приоритет"]) == 2, "2 обычный", "▫️ 3 низкий"))))'
-  mode_view: 'if(note["Режим"].isEmpty(), "", if(note["Режим"] == "параллельно", "⇉ параллельно", if(note["Режим"] == "сам", "● сам", "→ один исполнитель")))'
+  mode_view: 'if(note["Режим"].isEmpty(), "не решено", if(note["Режим"] == "параллельно", "⇉ несколько разработчиков параллельно", if(note["Режим"] == "сам", "● координатор сам", "→ один разработчик")))'
   waits: 'if(note["Зависит от"].isEmpty(), "", "⏳ ждёт " + note["Зависит от"].join(", "))'
   cross: 'if(note["Пересечения"].isEmpty(), "", "✂ " + note["Пересечения"].join(", "))'
   warn: 'if(note["Режим"] == "параллельно" && note["Области"].isEmpty(), "⚠ области не указаны", if(note["Режим"] == "параллельно" && !note["Пересечения"].isEmpty(), "⚠ параллельно при общей области", if(note["Режим"] == "параллельно" && !note["Зависит от"].isEmpty(), "⚠ параллельно, но ждёт", "")))'
@@ -2536,7 +2542,7 @@ properties:
   formula.prio_view:
     displayName: Приоритет
   formula.mode_view:
-    displayName: Режим
+    displayName: Кто делает
   formula.waits:
     displayName: Ждёт задачу
   formula.cross:
@@ -3653,7 +3659,8 @@ def created_ts(head, body):
 
 def is_full_question(head):
     """Вопрос владельцу, суть которого в полях: question, why и не меньше двух вариантов (writing.part)."""
-    return bool(head.get("question") and head.get("why") and len(head.get("options") or []) >= 2)
+    opts = [o for o in head.get("options") or [] if str(o).strip()]  # пустые --option "" не варианты (argus b2)
+    return bool(head.get("question") and head.get("why") and len(opts) >= 2)
 
 
 def bodyless_tasks(tasks, t, hours=NO_BODY_HOURS):
@@ -3706,7 +3713,8 @@ def owner_ids(decisions_text, zeus_log_text, board_lines, t):
     return out
 
 
-NOTASK_RE = re.compile(r"^\s*(?:[-*]\s+)?не задача: \[([a-z][a-z0-9]*(?:-[a-z0-9]+)+)\] [—–-] \S")
+# id пометки — тот же набор знаков, что у вопроса окна вопросов в owner_ids (без дефиса и с цифры тоже бывает)
+NOTASK_RE = re.compile(r"^\s*(?:[-*]\s+)?не задача: \[([a-z0-9][a-z0-9-]{0,40})\] [—–-] \S")
 WORD_RE = re.compile(r"[\w-]+")
 
 

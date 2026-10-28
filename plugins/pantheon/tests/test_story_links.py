@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Карточка пачки в Obsidian (metis-0322): «Цепочка», «Параллельно», «Пересечения» и «Зависит от» — щёлкаемые ссылки
-[[имя карточки|id]], «Области не указаны» — «у N из M», «Режим» и «Ждёт» в «Составе» не пустые («ничего»), пачка пачек
+[[имя карточки|id]], «Области не указаны» — «у N из M», «Кто делает» и «Зависимость» в «Составе» не пустые («нет»), пачка пачек
 считает и детей-пачки.
 
 Запуск: python3 -I plugins/pantheon/tests/test_story_links.py  (код выхода 0 — все прошли)
@@ -60,25 +60,25 @@ for i in ("t-3", "t-4", "t-5", "t-6"):
 check("все области указаны — поля нет", card("s-1", tasks2, names2)[0]["Области не указаны"] is None)
 rows = [r for r in body.splitlines() if r.startswith("| ") and "t-" in r]
 cell = lambda r, n: [x.strip() for x in r.strip("|").split(" | ")][n]  # noqa: E731
-check("в «Составе» нет пустых «Режим» и «Ждёт» («—»)", rows and all(cell(r, 5) != "—" and cell(r, 6) != "—" for r in rows),
+check("в «Составе» нет пустых «Кто делает» и «Зависимость» («—»)", rows and all(cell(r, 5) != "—" and cell(r, 6) != "—" for r in rows),
       rows)
-check("«Ждёт»: у первого звена «ничего»", cell(rows[0], 6) == "ничего", rows[0])
-check("«Ждёт»: у второго звена прошлое звено цепочки ссылкой", "t-1" in cell(rows[1], 6) and "[[" in cell(rows[1], 6), rows[1])
-check("«Ждёт»: открытый depends_on", "t-9" in cell(rows[2], 6), rows[2])
-check("«Ждёт»: звено после закрытого ждёт ближайшее НЕзакрытое (t-2)", "t-2" in cell(rows[5], 6) and "t-5" not in cell(rows[5], 6), rows[5])
+check("«Зависимость»: у первого звена «нет»", cell(rows[0], 6) == "нет", rows[0])
+check("«Зависимость»: у второго звена прошлое звено цепочки ссылкой", "t-1" in cell(rows[1], 6) and "[[" in cell(rows[1], 6), rows[1])
+check("«Зависимость»: открытый depends_on", "t-9" in cell(rows[2], 6), rows[2])
+check("«Зависимость»: звено после закрытого ждёт ближайшее НЕзакрытое (t-2)", "t-2" in cell(rows[5], 6) and "t-5" not in cell(rows[5], 6), rows[5])
 tasks4, names4 = world()
 for i in ("t-1", "t-2"):
     tasks4[i][1]["status"] = "done"
 _, body4 = card("s-1", tasks4, names4)
 rows4 = [r for r in body4.splitlines() if r.startswith("| ") and "t-" in r]
-check("«Ждёт»: все прошлые звенья закрыты — «ничего»", cell(rows4[5], 6) == "ничего", rows4[5])
+check("«Зависимость»: все прошлые звенья закрыты — «нет»", cell(rows4[5], 6) == "нет", rows4[5])
 tasks5, names5 = world()
 tasks5["t-6"][1]["status"] = "doing"
 _, body5 = card("s-1", tasks5, names5)
 rows5 = [r for r in body5.splitlines() if r.startswith("| ") and "t-" in r]
-check("«Ждёт»: начатое звено (doing) не ждёт прошлых", cell(rows5[5], 6) == "ничего", rows5[5])
+check("«Зависимость»: начатое звено (doing) не ждёт прошлых", cell(rows5[5], 6) == "нет", rows5[5])
 check("тип свойства «Цепочка» — multitext", T.PROP_TYPES.get("Цепочка") == "multitext", T.PROP_TYPES.get("Цепочка"))
-check("«Режим» без mode — «не задан», а не «—»", cell(rows[5], 5) == "не задан", rows[5])
+check("«Кто делает» без mode — «не решено», а не «—»", cell(rows[5], 5) == "не решено", rows[5])
 check("ссылки в таблице экранируют «|»", f"[[{names['t-1']}\\|t-1]]" in body, body[-600:])
 
 # пачка пачек: дети — stories с parent или batch = её id
@@ -99,10 +99,10 @@ check("пачка с задачей и детьми-пачками: «у 1 из 
 tasks4, names4 = world()
 tasks4["t-2"][1]["depends_on"] = ["t-1"]  # depends_on совпадает с прошлым звеном цепочки
 rows4 = [r for r in card("s-1", tasks4, names4)[1].splitlines() if r.startswith("| ") and "t-" in r]
-check("«Ждёт»: depends_on = прошлому звену — ссылка один раз", cell(rows4[1], 6).count("|t-1]]") == 1, rows4[1])
-check("«Ждёт»: у закрытой задачи после открытого звена — «ничего»", cell(rows[4], 6) == "ничего", rows[4])
+check("«Зависимость»: depends_on = прошлому звену — ссылка один раз", cell(rows4[1], 6).count("|t-1]]") == 1, rows4[1])
+check("«Зависимость»: у закрытой задачи после открытого звена — «нет»", cell(rows[4], 6) == "нет", rows[4])
 rows0 = [r for r in b0.splitlines() if r.startswith("| ") and "s-" in r]
-check("«Режим» у пачки без mode — «—»", rows0 and all(cell(r, 5) == "—" for r in rows0), rows0)
+check("«Кто делает» у пачки без mode — «—»", rows0 and all(cell(r, 5) == "—" for r in rows0), rows0)
 tasks3["s-9"] = ("", {"type": "story", "id": "s-9", "title": "Сама себе", "status": "todo", "parent": "s-9"}, "")
 names3["s-9"] = "s-9 x"
 check("пачка с parent = своему id не входит в свой состав", "s-9" not in card("s-9", tasks3, names3)[1].split("## Состав")[-1])
@@ -119,14 +119,14 @@ tasks5["t-5"][1]["order"] = 9
 tasks5["t-8"] = ("", H("t-8", order=6, status=""), "")
 names5["t-8"] = "t-8 x"
 rows5 = {cell(r, 1).split("|")[-1].rstrip("]"): r for r in card("s-1", tasks5, names5)[1].splitlines() if r.startswith("| ") and "t-" in r}
-check("«Ждёт»: звено в review после открытого — «ничего»", cell(rows5["t-2"], 6) == "ничего", rows5["t-2"])
-check("«Ждёт»: звено в doing после открытого — «ничего»", cell(rows5["t-3"], 6) == "ничего", rows5["t-3"])
-check("«Ждёт»: звено в waiting после открытого — «ничего»", cell(rows5["t-4"], 6) == "ничего", rows5["t-4"])
-check("«Ждёт»: не начатое звено со status todo ждёт прошлое", "[[" in cell(rows5["t-6"], 6), rows5["t-6"])
-check("«Ждёт»: не начатое звено с пустым status ждёт прошлое", "[[" in cell(rows5["t-8"], 6), rows5["t-8"])
+check("«Зависимость»: звено в review после открытого — «нет»", cell(rows5["t-2"], 6) == "нет", rows5["t-2"])
+check("«Зависимость»: звено в doing после открытого — «нет»", cell(rows5["t-3"], 6) == "нет", rows5["t-3"])
+check("«Зависимость»: звено в waiting после открытого — «нет»", cell(rows5["t-4"], 6) == "нет", rows5["t-4"])
+check("«Зависимость»: не начатое звено со status todo ждёт прошлое", "[[" in cell(rows5["t-6"], 6), rows5["t-6"])
+check("«Зависимость»: не начатое звено с пустым status ждёт прошлое", "[[" in cell(rows5["t-8"], 6), rows5["t-8"])
 tasks5["t-3"][1]["depends_on"] = ["t-1"]
 r3 = [r for r in card("s-1", tasks5, names5)[1].splitlines() if r.startswith("| ") and "[[t-3 " in r][0]
-check("«Ждёт»: звено в doing с открытым depends_on — ссылка на него", "t-1" in cell(r3, 6), r3)
+check("«Зависимость»: звено в doing с открытым depends_on — ссылка на него", "t-1" in cell(r3, 6), r3)
 
 # review 128b п.2: мутанты
 tasks6, names6 = world()
@@ -146,6 +146,26 @@ check("задача: «Пересечения» — ссылка [[имя|id]]",
 tasks["t-2"][1]["depends_on"] = ["t-1"]
 ctx = T.card_ctx("t-2", tasks["t-2"][1], tasks, names, cross)
 check("задача: «Зависит от» с карточкой — ссылка", ctx["waits"] == [L("t-1")], ctx["waits"])
+
+# metis-0500: подписи для владельца — «Кто делает» / «Зависимость», значения режима словами, «не решено»
+check("«Состав»: заголовок «Кто делает | Зависимость», старых «Режим» и «Ждёт» нет",
+      "| Оценка | Кто делает | Зависимость |" in body and "| Режим |" not in body and "| Ждёт |" not in body, body[:300])
+check("«Кто делает»: self / single / parallel словами",
+      [cell(rows[i], 5) for i in (0, 2, 3)] == ["один разработчик", "несколько разработчиков параллельно", "несколько разработчиков параллельно"]
+      and cell(rows[4], 5) == "координатор сам", [cell(r, 5) for r in rows])
+for pult, nm in ((T.PULT_FILE, "Пульт"), (T.BASE_FILE, "Доска")):
+    mv = [x for x in pult.splitlines() if x.startswith("  mode_view:")]
+    check(f"{nm}.base: mode_view со словами «координатор сам» / «один разработчик» / «несколько разработчиков параллельно» / «не решено»",
+          len(mv) == 1 and all(w in mv[0] for w in ("координатор сам", "один разработчик", "несколько разработчиков параллельно", "не решено"))
+          and "один исполнитель" not in mv[0], mv)
+    check(f"{nm}.base: колонка «Кто делает», значения свойства «Режим» (сам/параллельно) в формуле не тронуты",
+          "formula.mode_view:\n    displayName: Кто делает" in pult and 'note["Режим"] == "параллельно"' in pult and 'note["Режим"] == "сам"' in pult)
+tk = {"t-1": ("", H("t-1", mode="single", mode_why="узкая правка"), "")}
+_, tbody = T.render_card(tk["t-1"][1], "", "x.md", T0, names={"t-1": "t-1 x"})
+check("карточка: строка «Кто делает: один разработчик — Почему так: …», слова «Режим:» нет",
+      "**Кто делает:** один разработчик — **Почему так:** узкая правка" in tbody and "**Режим:**" not in tbody, tbody[:400])
+check("task show пачки: режим словами, пусто — «не решено»",
+      "один разработчик" in T.story_text("s-1", tasks) and "кто делает: не решено" in T.story_text("s-1", tasks), T.story_text("s-1", tasks))
 
 print(f"{sum(results)} из {len(results)}")
 sys.exit(0 if all(results) else 1)
