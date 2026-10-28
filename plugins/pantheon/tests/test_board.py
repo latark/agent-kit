@@ -27,6 +27,11 @@ from datetime import datetime
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
 CLI = os.path.join(LIB, "pantheon.py")
 T0 = 1_792_000_000  # 2026-10-15
+# Часы теста — по Москве (day = «12:00 по Москве», ночь и утро уведомлений): на раннере CI пояс UTC (metis-0573).
+# Пояс один для теста (datetime.fromtimestamp) и для CLI в подпроцессах.
+TZ = "Europe/Moscow"
+os.environ["TZ"] = TZ
+time.tzset()
 # Таймаут одного вызова — страховка от зависания, а не проверка скорости: ни одна проверка файла время не меряет.
 # 60 с не хватило под нагрузкой (metis-0368: прогон при load avg 13,5 — `task new --direction ../..`, мгновенный
 # отказ, не уложился в 60 с и оборвал файл исключением). Зависший вызов всё равно ловится: 300 с здесь и таймаут
@@ -49,7 +54,8 @@ def make():
     open(os.path.join(home, "schedule.toml"), "w").write('primary_host = "mac-a"\n')
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_VIEW": view, "PANTHEON_HOST": "mac-a", "PANTHEON_DRYRUN": "1", "PANTHEON_NO_NOTIFY": "1",
-           "PANTHEON_FAKE_IDLE": "0"}  # простой — явно: уведомления зависят от присутствия (metis-0023)
+           "PANTHEON_FAKE_IDLE": "0",  # простой — явно: уведомления зависят от присутствия (metis-0023)
+           "TZ": TZ}
     return tmp, home, state, view, env
 
 

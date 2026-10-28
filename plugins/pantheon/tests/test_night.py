@@ -694,8 +694,15 @@ def test_status_format():
     check(N.num(1.25) in ("1,2", "1,3") and N.num(-2) == "−2" and N.signed(2.1) == "+2,1", "формат чисел")
     # CLI: pantheon night, pantheon night report, справка, pantheon status
     e.snap(t - 300, 41.0, resets)
-    env = {"PATH": os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pantheon, "PANTHEON_STATE": e.state,
-           "PANTHEON_NOW": str(t), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": _ROOT}
+    # поддельный claude первым в PATH: «pantheon status» считает тяжёлые сессии через `claude agents` — без подделки
+    # тест звал бы настоящий claude владельца, а на раннере CI, где его нет, status падал (metis-0573)
+    fbin = os.path.join(e.home, "fake-bin")
+    os.makedirs(fbin, exist_ok=True)
+    with open(os.path.join(fbin, "claude"), "w") as fh:
+        fh.write("#!/bin/sh\necho '[]'\n")
+    os.chmod(os.path.join(fbin, "claude"), 0o755)
+    env = {"PATH": fbin + os.pathsep + os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pantheon,
+           "PANTHEON_STATE": e.state, "PANTHEON_NOW": str(t), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": _ROOT}
     if "TZ" in os.environ:  # дочерний процесс в том же поясе, что и тест (metis-0222)
         env["TZ"] = os.environ["TZ"]
     run = lambda *a: subprocess.run([PY311, "-I", os.path.join(LIB, "pantheon.py"), *a], env=env,  # noqa: E731
@@ -709,7 +716,7 @@ def test_status_format():
     check("pantheon night [status|report]" in run("help").stdout and "pantheon night ask <id>" in run("help").stdout,
           "в справке нет pantheon night")
     r = run("status")
-    check("Лимит и ночь" in r.stdout and "Неделя: 41 %" in r.stdout, f"pantheon status без раздела: {r.stdout[-800:]}")
+    check("Лимит и ночь" in r.stdout and "Неделя: 41 %" in r.stdout, f"pantheon status без раздела: код {r.returncode} {r.stdout[-800:]} {r.stderr[-600:]}")
 
 
 def _pack_env(start_line="- Старт — 04:00, но не раньше выпуска"):
