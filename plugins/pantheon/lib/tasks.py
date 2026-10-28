@@ -400,7 +400,14 @@ def digest(path):
 
 # Битый текст варианта (metis-0123): пустые скобки, обрезанная сумма («≈ )»; «$…» в athena-0005 съела оболочка).
 _OPT_EMPTY = re.compile(r"\(\s*\)")
-_OPT_CUT = re.compile(r"≈\s*[)\s]*(\)|$)|(?<!\d)(?<!\d\s)\$(?!\d)")  # «20$», «20 $» — валюта, не съеденная оболочкой
+_OPT_CUT = re.compile(r"≈\s*[)\s]*(\)|$)")
+_OPT_DOLLAR = re.compile(r"\$(?!\d)")
+
+
+def _opt_cut(o):
+    """Обрезанная сумма: «≈ )» или «$» без числа ни до, ни после. «20$», «20 $», «20  $» и «20\u00a0$» — валюта, не
+    съеденная оболочкой: пробелы любой длины (и неразрывные) до «$» после числа не в счёт (metis-0240)."""
+    return bool(_OPT_CUT.search(o)) or any(not o[:m.start()].rstrip()[-1:].isdigit() for m in _OPT_DOLLAR.finditer(o))
 _OPT_RISKY = re.compile(r"[₽$€]|\bруб|деньг|оплат|платеж|платёж|списан|необратим|удал|безвозврат", re.I)
 
 
@@ -410,7 +417,7 @@ def option_warns(head):
     out = []
     for o in head.get("options") or []:
         o = str(o)
-        if _OPT_EMPTY.search(o) or _OPT_CUT.search(o):
+        if _OPT_EMPTY.search(o) or _opt_cut(o):
             out.append(f"вариант «{o[:60]}» с пустыми скобками или обрезанной суммой («()», «≈ )», «$…») — "
                        "проверьте кавычки: оболочка съедает «$…», пишите сумму в одинарных кавычках")
         if "(совет)" in o.lower() and _OPT_RISKY.search(o):
@@ -2051,6 +2058,12 @@ GODS = {"zeus": "Зевс", "hq": "Зевс", "athena": "Афина", "hermes": 
         "talos": "Талос", "clio": "Клио", "iris": "Ирида", "hestia": "Гестия", "palamedes": "Паламед"}
 OWNER_SLUGS = ("вы", "владелец", "owner", "human")
 OWNER_NODE, HQ_NODE = "Владелец", "Зевс"
+
+
+def owner_addressed(head):
+    """Задача адресована владельцу — тем же правилом, что вид «От меня нужно»: «Кому» содержит «Владелец»
+    (note["Кому"].toString().contains), а не равно ему: узел «Владелец · гость» вид считает, и счётчик сводки — тоже (metis-0240)."""
+    return OWNER_NODE in Roles(()).name(assignee(head))
 LEAD_GODS = ("hephaestus", "apollo")  # лиды направлений: подчиняются координатору направления с тем же суффиксом
 
 
@@ -2789,7 +2802,7 @@ def _summary(tasks, t, inbox=None, names=None, long_ids=None, queue=None):
     for tid, (p, h, _) in sorted(tasks.items()):
         if (h.get("status") == "waiting" and h.get("waiting_on") == "human") or (
                 h.get("status") not in ("done", "dropped")
-                and (Roles(()).name(assignee(h)) == OWNER_NODE or h.get("acceptance") == "к владельцу")):
+                and (owner_addressed(h) or h.get("acceptance") == "к владельцу")):
             mine.add(tid)
         name = f"[[Доска/{names.get(tid) or card_name(h)}|{_plain(h.get('title'))}]] · {_plain(h.get('project'))}"
         if h.get("status") == "waiting" and h.get("waiting_on") == "human":
