@@ -26,6 +26,7 @@ from datetime import datetime
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
 CLI = os.path.join(LIB, "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(CLI), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 T0 = 1_792_000_000  # 2026-10-15
 # Часы теста — по Москве (day = «12:00 по Москве», ночь и утро уведомлений): на раннере CI пояс UTC (metis-0573).
 # Пояс один для теста (datetime.fromtimestamp) и для CLI в подпроцессах.
@@ -61,7 +62,7 @@ def make():
 
 def run(env, *args, t=T0):
     e = dict(env, PANTHEON_NOW=str(t))
-    return subprocess.run([PY311, "-I", CLI, *args], env=e, capture_output=True, text=True, timeout=RUN_TIMEOUT)
+    return subprocess.run([PY311, "-I", RUN_PY, *args], env=e, capture_output=True, text=True, timeout=RUN_TIMEOUT)
 
 
 def head_of(path):
@@ -196,13 +197,13 @@ def main():
     a4 = open(alerts, encoding="utf-8").read()
     check("0230: через >24 ч — вторая строка по каждому файлу, с новым размером",
           a4.count("знаков при пределе 9000") == 4 and "9600 знаков" in a4, a4)
-    subprocess.run([PY311, "-I", CLI, "alert", "agent ждёт вас: claude attach x", "--from", "watch"], env=env,
+    subprocess.run([PY311, "-I", RUN_PY, "alert", "agent ждёт вас: claude attach x", "--from", "watch"], env=env,
                        capture_output=True, text=True)
-    subprocess.run([PY311, "-I", CLI, "alert", "agent ждёт вас: claude attach x", "--from", "watch"], env=env,
+    subprocess.run([PY311, "-I", RUN_PY, "alert", "agent ждёт вас: claude attach x", "--from", "watch"], env=env,
                    capture_output=True, text=True)
     a5 = open(alerts, encoding="utf-8").read()
     check("0230: две одинаковые строки «ждёт вас» — одна", a5.count("agent ждёт вас: claude attach x") == 1, a5)
-    subprocess.run([PY311, "-I", CLI, "alert", "agent ждёт вас: claude attach y", "--from", "watch"], env=env,
+    subprocess.run([PY311, "-I", RUN_PY, "alert", "agent ждёт вас: claude attach y", "--from", "watch"], env=env,
                    capture_output=True, text=True)
     check("0230: другая строка не сливается", open(alerts, encoding="utf-8").read().count("claude attach") == 2)
     os.remove(stp)

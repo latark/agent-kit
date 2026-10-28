@@ -16,6 +16,7 @@ from _py311 import PY311  # CLI pantheon — только на Python 3.11+
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
 CLI = os.path.join(LIB, "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(CLI), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 sys.path.insert(0, LIB)
 import tasks as T  # noqa: E402
 
@@ -239,7 +240,7 @@ def warn_checks():
                "PANTHEON_NOW": str(T0), "TMPDIR": tmp}
 
         def run(*a):
-            return subprocess.run([PY311, "-I", CLI, *a], env=env, capture_output=True, text=True, timeout=60)
+            return subprocess.run([PY311, "-I", RUN_PY, *a], env=env, capture_output=True, text=True, timeout=60)
 
         r = run("task", "new", "--text", "тест", "--direction", "demo", "--title", "Выбор", "--option", "А ()", "--option", "Б ≈ )")
         check("task new с «()» и «≈ )»: создана, предупреждение в stderr",

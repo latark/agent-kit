@@ -29,6 +29,7 @@ import tomllib  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 CLI = os.path.join(ROOT, "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(CLI), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 EXE = os.path.join(ROOT, "lib", "executors.py")
 STUB = os.path.join(HERE, "fixtures", "codex-stub", "codex")
 PROTECTED_PART = os.path.join(ROOT, "roles", "_parts", "protected.part")
@@ -70,7 +71,7 @@ ENV = {"PATH": f"{GITBIN}:{BIN}:{BASE_PATH}", "HOME": HOME, "USER": "tester", "L
 def run(*a, env=None, timeout=120, inp=None):
     e = dict(ENV, **(env or {}))
     e = {k: v for k, v in e.items() if v is not None}
-    return subprocess.run([PY311, "-I", CLI, *a], env=e, capture_output=True, text=True, timeout=timeout, input=inp)
+    return subprocess.run([PY311, "-I", RUN_PY, *a], env=e, capture_output=True, text=True, timeout=timeout, input=inp)
 
 
 def py(code, env=None, timeout=120):
@@ -630,7 +631,7 @@ def tests():
         e = {k: v for k, v in ENV.items() if v is not None}
         if ign:
             e["PANTHEON_CODEX_GRACE_S"] = "1"
-        p = subprocess.Popen([PY311, "-I", CLI, "exec", "codex", wt, BRIEF], env=e, stdout=subprocess.PIPE,
+        p = subprocess.Popen([PY311, "-I", RUN_PY, "exec", "codex", wt, BRIEF], env=e, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True)
         pidf, selff = os.path.join(CH, "stub-child.pid"), os.path.join(CH, "stub-self.pid")
         for _ in range(200):

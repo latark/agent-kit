@@ -21,6 +21,7 @@ os.environ["TMPDIR"] = _ROOT
 atexit.register(shutil.rmtree, _ROOT, True)
 
 CLI = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(CLI), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 results = []
 
 
@@ -47,7 +48,7 @@ ENV = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON
 def board(**extra):
     env = {k: v for k, v in dict(ENV, **extra).items() if v is not None}
     t0 = time.time()
-    p = subprocess.run([PY311, "-I", CLI, "board"], env=env, capture_output=True, text=True, timeout=60)
+    p = subprocess.run([PY311, "-I", RUN_PY, "board"], env=env, capture_output=True, text=True, timeout=60)
     return p, time.time() - t0
 
 
@@ -114,7 +115,7 @@ check("отметка старше 30 минут: учёт запускаетс�
 n0 = runs()
 fh = open(lock_p, "a")
 fcntl.flock(fh, fcntl.LOCK_EX)
-q = subprocess.run([PY311, "-I", CLI, "metrics", "run"], env=dict(ENV, PANTHEON_METRICS_TEST_SLEEP="0"),
+q = subprocess.run([PY311, "-I", RUN_PY, "metrics", "run"], env=dict(ENV, PANTHEON_METRICS_TEST_SLEEP="0"),
                    capture_output=True, text=True, timeout=60)
 fcntl.flock(fh, fcntl.LOCK_UN)
 fh.close()

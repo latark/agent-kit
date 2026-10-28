@@ -3,7 +3,10 @@
 
 Запуск: python3 -I plugins/pantheon/tests/test_run_tests.py  (код выхода 0 — все прошли). Фальшивые плагины во временной папке: зелёный, падающий, зависающий, без итога, без файлов;
 раннер в своей сессии, как задача run_job, гасится SIGTERM / SIGHUP / SIGINT — ни файла тестов, ни его внука после."""
+import ast
 import atexit
+import importlib.util
+import json
 import os
 import re
 import shutil
@@ -264,6 +267,286 @@ check("verdict: из списка, код 1 — не ok", R.verdict(1, "ok a\n",
 missing = [lb for lb in tuple(R.NO_SUMMARY) + tuple(R.SLOW) + tuple(R.SERIAL) if not os.path.exists(
     os.path.join(os.path.dirname(PLUGIN), lb.split("/")[0], "tests", lb.split("/")[1]))]
 check("NO_SUMMARY, SLOW, SERIAL — только существующие файлы", not missing, missing)
+
+# --- --affected: карта affected-map.json и выбор по ней (metis-0451) ---
+REPO = os.path.dirname(os.path.dirname(PLUGIN))
+amap, why = R.load_map()
+check("карта репозитория читается, версия та", amap is not None, why)
+amap = amap or {"tests": set(), "always": set(), "files": {}}
+# сам этот файл в копии сборки проверяет прошлую карту: упал он в прошлой сборке — упадёт и в этой, если не исключить
+check("карта: при сборке не упал ни один файл тестов", not amap["always"] - {"pantheon/test_run_tests.py"},
+      sorted(amap["always"]))
+check("FULL: lib/pantheon.py, hooks/python.sh обоих плагинов, сам раннер — общие",
+      {"plugins/pantheon/lib/pantheon.py", "plugins/pantheon/hooks/python.sh", "plugins/guard/hooks/python.sh",
+       "plugins/pantheon/scripts/run-tests.py"} <= R.FULL)
+gone = sorted(p for p in R.FULL if not os.path.isfile(os.path.join(REPO, p)))
+check("FULL: только существующие файлы", not gone, gone)
+# карта по прогону видит ленивую загрузку: watch.py грузит pantheon.py по требованию, по тексту test_tick его не зовёт
+for path, lb in (("plugins/pantheon/lib/watch.py", "pantheon/test_watch.py"),
+                 ("plugins/guard/hooks/guard.py", "guard/test_guard.py"),
+                 ("plugins/guard/hooks/merge_gate.py", "guard/test_merge_gate.py"),
+                 ("plugins/project-tools/lib/project_tools.py", "project-tools/test_project_tools.py")):
+    check(f"карта: {path} → {lb}", lb in amap["files"].get(path, ()), sorted(amap["files"].get(path, ())))
+check("карта: AGENTS.md не задевает ни один тест", amap["files"].get("AGENTS.md") == set(),
+      amap["files"].get("AGENTS.md"))
+
+
+def mkmap(tests, files, broken=(), version=1):
+    p = os.path.join(tempfile.mkdtemp(prefix="map-"), "m.json")
+    idx = {lb: i for i, lb in enumerate(tests)}
+    with open(p, "w") as fh:
+        json.dump({"version": version, "tests": list(tests), "broken": list(broken),
+                   "files": {k: [idx[x] for x in v] for k, v in files.items()}}, fh)
+    return p
+
+
+ITEMS = [("/r/plugins/alpha", "alpha/test_x.py"), ("/r/plugins/alpha", "alpha/test_y.py"),
+         ("/r/plugins/beta", "beta/test_b.py")]
+MT = ["alpha/test_x.py", "alpha/test_y.py", "beta/test_b.py", "alpha/test_z.py", "gamma/test_g.py"]
+AM, _ = R.load_map(mkmap(MT, {"plugins/alpha/lib/x.py": ["alpha/test_x.py"], "README.md": [],
+                              "plugins/alpha/lib/z.py": ["alpha/test_z.py"], "plugins/gamma/g.py": ["gamma/test_g.py"],
+                              "plugins/alpha/tests/_helper.py": ["alpha/test_y.py"]}))
+check("load_map: метки по номерам", AM and AM["files"]["plugins/alpha/lib/x.py"] == {"alpha/test_x.py"}, AM)
+sel = R.select(["plugins/alpha/lib/x.py"], "/r", ITEMS, AM)
+check("select: файл из карты — только его тесты", sel == ([ITEMS[0]], [], []), sel)
+sel = R.select(["plugins/alpha/tests/_helper.py"], "/r", ITEMS, AM)
+check("select: помощник тестов из карты — его тесты", sel == ([ITEMS[1]], [], []), sel)
+sel = R.select(["plugins/beta/tests/test_b.py"], "/r", ITEMS, AM)
+check("select: правка файла тестов — он сам", sel == ([ITEMS[2]], [], []), sel)
+sel = R.select(["plugins/alpha/tests/test_gone.py"], "/r", ITEMS, AM)
+check("select: удалённый файл тестов — ничего", sel == ([], [], []), sel)
+sel = R.select(["README.md"], "/r", ITEMS, AM)
+check("select: только README (пустой список) — ничего", sel == ([], [], []), sel)
+sel = R.select(["plugins/gamma/g.py"], "/r", ITEMS, AM)
+check("select: тесты плагина не из аргументов — ничего", sel == ([], [], []), sel)
+sel = R.select(["plugins/alpha/lib/z.py"], "/r", ITEMS, AM)
+check("select: карта называет удалённый файл тестов — ничего", sel == ([], [], []), sel)
+for path, why in (("plugins/alpha/lib/y.py", "нет в карте"), ("plugins/alpha/tests/_other.py", "нет в карте"),
+                  ("plugins/pantheon/lib/pantheon.py", "общий файл"), ("plugins/guard/hooks/python.sh", "общий файл"),
+                  ("plugins/pantheon/scripts/run-tests.py", "общий файл")):
+    sel = R.select(["plugins/alpha/lib/x.py", path], "/r", ITEMS, AM)
+    check(f"select: {path} — весь набор ({why})", sel[0] is None and sel[1] and sel[1][0][0] == path
+          and why in sel[1][0][1], sel)
+AM2, _ = R.load_map(mkmap(MT[:2], {"plugins/alpha/lib/x.py": ["alpha/test_x.py"], "README.md": []},
+                          broken=["alpha/test_y.py"]))
+sel = R.select(["plugins/alpha/lib/x.py"], "/r", ITEMS, AM2)
+check("select: новый файл тестов (карта не знает) и упавший при сборке — всегда",
+      sel == (ITEMS, [], ["alpha/test_y.py", "beta/test_b.py"]), sel)
+sel = R.select(["README.md"], "/r", ITEMS, AM2)
+check("select: ничего не задето — «всегда» не гонит прогон", sel[0] == [], sel)
+for body, why in (("{", "JSONDecodeError"), ('{"version": 2, "tests": [], "files": {}}', "версии 2"),
+                  ('{"version": 1, "tests": ["a/test_a.py"], "files": {"x": [5]}}', "IndexError"),
+                  ('{"version": 1, "files": {}}', "KeyError"), ("[]", "AttributeError")):
+    p = os.path.join(tempfile.mkdtemp(prefix="map-"), "m.json")
+    with open(p, "w") as fh:
+        fh.write(body)
+    got = R.load_map(p)
+    check(f"load_map: {body[:30]} — нет карты ({why})", got[0] is None and why in got[1], got)
+got = R.load_map("/нет/такой/карты.json")
+check("load_map: нет файла — нет карты", got[0] is None and "не прочесть" in got[1], got)
+
+# сквозная проба: временный репозиторий, своя карта через MAP модуля
+GENV = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="t",
+            GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+
+
+def git(repo, *args):
+    return subprocess.run(["git", *args], cwd=repo, env=GENV, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, check=True).stdout
+
+
+def put(path, body):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write(body)
+
+
+repo = tempfile.mkdtemp(prefix="repo-")
+al = os.path.join(repo, "plugins", "alpha")
+put(os.path.join(repo, "README.md"), "# r\n")
+put(os.path.join(al, "lib", "x.py"), "X = 1\n")
+put(os.path.join(al, "lib", "y.py"), "Y = 1\n")
+put(os.path.join(al, "tests", "test_x.py"), OK2)
+put(os.path.join(al, "tests", "test_y.py"), OK2)
+git(repo, "init", "-q", "-b", "main")
+git(repo, "add", "-A")
+git(repo, "commit", "-q", "-m", "база")
+git(repo, "checkout", "-q", "-b", "work")
+MAPF = mkmap(["alpha/test_x.py", "alpha/test_y.py"], {"plugins/alpha/lib/x.py": ["alpha/test_x.py"], "README.md": [],
+                                                      "plugins/alpha/lib/y.py": ["alpha/test_y.py"]})
+DRV_AFF = ("import importlib.util, sys\nspec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
+           "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+           "m.MAP = sys.argv[2]\nsys.exit(m.main(sys.argv[3:]))\n")
+
+
+def run_aff(*args, mapf=MAPF):
+    return subprocess.run([sys.executable, "-I", "-c", DRV_AFF, RUNNER, mapf, *args], env=GENV,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+
+
+r = run_aff("--affected", "--base", "main", al)
+check("--affected: изменений нет — код 3, «нечего гонять», без прогона", r.returncode == 3
+      and "изменений нет — нечего гонять" in r.stdout and "итого" not in r.stdout, r.stdout)
+put(os.path.join(repo, "README.md"), "# r\nправка\n")
+r = run_aff("--affected", "--base", "main", al)
+check("--affected: только README — код 3, «нечего гонять», без прогона", r.returncode == 3
+      and "нечего гонять" in r.stdout and "README.md" in r.stdout and "итого" not in r.stdout, r.stdout)
+check("--affected: причина — последней строкой", r.stdout.strip().splitlines()[-1].startswith("run-tests: затронутое"),
+      r.stdout)
+put(os.path.join(al, "lib", "x.py"), "X = 2\n")
+git(repo, "commit", "-q", "-am", "x")
+r = run_aff("--affected", "--base", "main", al)
+check("--affected: закоммиченная правка x.py — только test_x", r.returncode == 0 and "тестов 1 из 2" in r.stdout
+      and "alpha/test_x.py" in r.stdout and "test_y.py" not in r.stdout and "файлов 1, ok 1" in r.stdout, r.stdout)
+put(os.path.join(al, "tests", "test_new.py"), OK2)
+r = run_aff("--affected", "--base", "main", al)
+check("--affected: новый файл тестов — он сам и затронутое", r.returncode == 0 and "тестов 2 из 3" in r.stdout
+      and "alpha/test_new.py" in r.stdout and "test_y.py" not in r.stdout, r.stdout)
+os.remove(os.path.join(al, "tests", "test_new.py"))
+put(os.path.join(al, "lib", "new.py"), "N = 1\n")
+r = run_aff("--affected", "--base", "main", al)
+check("--affected: новый файл вне карты — весь набор", r.returncode == 0 and "lib/new.py — нет в карте" in r.stdout
+      and "весь набор" in r.stdout and "файлов 2, ok 2" in r.stdout, r.stdout)
+os.remove(os.path.join(al, "lib", "new.py"))
+os.remove(os.path.join(al, "lib", "y.py"))
+r = run_aff("--affected", "--base", "main", al)
+check("--affected: удалённый файл из карты — его тесты", r.returncode == 0 and "тестов 2 из 2" in r.stdout, r.stdout)
+git(repo, "checkout", "-q", "--", "plugins/alpha/lib/y.py")
+r = run_aff("--affected", "--base", "main", al, mapf="/нет/карты.json")
+check("--affected: карты нет — весь набор, причина строкой", r.returncode == 0 and "не прочесть" in r.stdout
+      and "весь набор" in r.stdout and "файлов 2, ok 2" in r.stdout, r.stdout)
+r = run_aff(al)
+check("без --affected — полный прогон, как раньше", r.returncode == 0 and "файлов 2, ok 2" in r.stdout
+      and "затронутое" not in r.stdout, r.stdout)
+r = run_aff("--affected", "--base", "нет-такой-ветки", al)
+check("--affected: нет базы — весь набор, причина строкой", r.returncode == 0
+      and "изменённые файлы не получить" in r.stdout and "весь набор" in r.stdout and "файлов 2, ok 2" in r.stdout,
+      r.stdout)
+r = run_aff("--affected", "--base", "main", mkplugin({"test_a.py": OK2}))
+check("--affected вне репозитория git — весь набор", r.returncode == 0 and "не получить" in r.stdout
+      and "файлов 1, ok 1" in r.stdout, r.stdout)
+put(os.path.join(al, "tests", "test_bad.py"), "import sys\nprint('ok   a')\nsys.exit(1)\n")
+r = run_aff("--affected", "--base", "main", al)
+check("--affected: упавший затронутый файл — код 1", r.returncode == 1 and "FAIL alpha/test_bad.py" in r.stdout,
+      r.stdout)
+os.remove(os.path.join(al, "tests", "test_bad.py"))
+r = run(["--base", "main", al])
+check("--base без --affected — отказ без прогона", r.returncode != 0 and "--base без --affected" in r.stdout
+      and "файлов" not in r.stdout, r.stdout)
+
+# --- affected-map.py: карта по прогону в копии с метками ---
+MAPPER = os.path.join(PLUGIN, "scripts", "affected-map.py")
+spec_m = importlib.util.spec_from_file_location("affected_map_mod", MAPPER)
+AMOD = importlib.util.module_from_spec(spec_m)
+spec_m.loader.exec_module(AMOD)
+STMT = "exec('pass')"
+for name, src in (("docstring", '"""Док.\n\nвторая строка"""\nimport os\nX = 1\n'),
+                  ("docstring и __future__", '"""Д."""\nfrom __future__ import annotations\nX = 1\n'),
+                  ("без docstring, import", "#!/usr/bin/env python3\nimport os\nX = 1\n"),
+                  ("без docstring, def", "def f():\n    return 1\n"),
+                  ("пустой", "")):
+    new = AMOD.mark_py(src, STMT)
+    ok = new is not None and STMT in new and compile(new, "x", "exec") is not None
+    shift = 1 if name in ("без docstring, def", "пустой") else 0  # перед def — своя строка, это единственный сдвиг
+    if ok:
+        ok = new.count("\n") == src.count("\n") + shift
+    if ok and src:
+        t0, t1 = ast.parse(src), ast.parse(new)
+        ok = ast.get_docstring(t0) == ast.get_docstring(t1) and [n.lineno + shift for n in t0.body if not isinstance(
+            n, ast.Expr)][-1:] == [n.lineno for n in t1.body if not isinstance(n, ast.Expr)][-1:]
+    check(f"mark_py: {name} — метка есть, docstring на месте, строки сдвинуты на {shift}", ok, new)
+check("mark_py: не Python — None", AMOD.mark_py("def (:\n", STMT) is None)
+sh = AMOD.mark_sh("#!/bin/sh\necho a\n", "printf x")
+check("mark_sh: метка после #!", sh == "#!/bin/sh\nprintf x\necho a\n", sh)
+sh = AMOD.mark_sh("# Поиск python\n# ещё\n\nx=1\n", "printf x")
+check("mark_sh: шапка комментариев остаётся первой", sh == "# Поиск python\n# ещё\n\nprintf x\nx=1\n", sh)
+sh = AMOD.mark_sh("# только шапка", "printf x")
+check("mark_sh: файл из одних комментариев — метка в конце", sh == "# только шапка\nprintf x\n", sh)
+
+mrepo = tempfile.mkdtemp(prefix="mrepo-")
+ma = os.path.join(mrepo, "plugins", "alpha")
+put(os.path.join(mrepo, "AGENTS.md"), "правила\n")
+put(os.path.join(ma, "lib", "x.py"), '"""Модуль x."""\nX = 1\n')
+put(os.path.join(ma, "lib", "lazy.py"), "L = 1\n")
+put(os.path.join(ma, "lib", "front.py"), '"""Грузит lazy по требованию."""\nimport importlib.util, os, sys\n'
+    "def load():\n    s = importlib.util.spec_from_file_location('lazy', os.path.join(os.path.dirname("
+    "os.path.abspath(__file__)), 'lazy.py'))\n    m = importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
+    "    return m\nif __name__ == '__main__' and sys.argv[1:] == ['lazy']:\n    load()\n")
+put(os.path.join(ma, "lib", "data.txt"), "данные\n")
+put(os.path.join(ma, "lib", "s.sh"), "#!/bin/sh\necho s\n")
+put(os.path.join(ma, "lib", "copied.py"), "print('copied')\n")
+HDR = "import os, shutil, subprocess, sys, tempfile\nP = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\n"
+put(os.path.join(ma, "tests", "test_x.py"), HDR + "sys.path.insert(0, os.path.join(P, 'lib'))\nimport x\n"
+    "open(os.path.join(P, 'lib', 'data.txt')).read()\n" + OK2)
+put(os.path.join(ma, "tests", "test_lazy.py"), HDR + "subprocess.run([sys.executable, '-I', os.path.join(P, 'lib', "
+    "'front.py'), 'lazy'], check=True)\n" + OK2)
+put(os.path.join(ma, "tests", "test_sh.py"), HDR + "subprocess.run(['/bin/sh', os.path.join(P, 'lib', 's.sh')], "
+    "check=True, stdout=subprocess.DEVNULL)\n" + OK2)
+put(os.path.join(ma, "tests", "test_copy.py"), HDR + "d = tempfile.mkdtemp()\nshutil.copy(os.path.join(P, 'lib', "
+    "'copied.py'), d)\nsubprocess.run([sys.executable, '-I', os.path.join(d, 'copied.py')], check=True, "
+    "stdout=subprocess.DEVNULL)\n" + OK2)
+put(os.path.join(ma, "tests", "test_plain.py"), OK2)
+put(os.path.join(ma, "lib", "tree", "a.txt"), "a\n")
+put(os.path.join(ma, "lib", "tree", "sub", "b.txt"), "b\n")
+put(os.path.join(ma, "tests", "test_tree.py"), HDR + "shutil.copytree(os.path.join(P, 'lib', 'tree'), "
+    "os.path.join(tempfile.mkdtemp(), 't'))\n" + OK2)
+TWIN = "#!/bin/sh\necho twin\n"
+put(os.path.join(ma, "lib", "twin_a.sh"), TWIN)
+put(os.path.join(ma, "lib", "twin_b.sh"), TWIN)
+put(os.path.join(ma, "tests", "test_twin.py"), HDR + "a, b = (open(os.path.join(P, 'lib', f)).read() for f in "
+    "('twin_a.sh', 'twin_b.sh'))\nassert a == b, 'копии разошлись'\nsubprocess.run(['/bin/sh', os.path.join(P, "
+    "'lib', 'twin_a.sh')], check=True, stdout=subprocess.DEVNULL)\n" + OK2)
+put(os.path.join(ma, "tests", "test_fail.py"), "import sys\nprint('ok   a')\nsys.exit(1)\n")
+git(mrepo, "init", "-q", "-b", "main")
+git(mrepo, "add", "-A")
+git(mrepo, "commit", "-q", "-m", "база")
+mout = os.path.join(tempfile.mkdtemp(prefix="mout-"), "map.json")
+r = subprocess.run([sys.executable, "-I", MAPPER, "-j", "3", "--out", mout, ma], env=GENV, stdout=subprocess.PIPE,
+                   stderr=subprocess.STDOUT, text=True, timeout=180)
+check("affected-map: код 0, карта записана", r.returncode == 0 and os.path.isfile(mout), r.stdout)
+mm, why = R.load_map(mout)
+mm = mm or {"tests": set(), "always": set(), "files": {}}
+F = mm["files"]
+for path, want in (("plugins/alpha/lib/x.py", {"alpha/test_x.py"}),
+                   ("plugins/alpha/lib/data.txt", {"alpha/test_x.py"}),
+                   ("plugins/alpha/lib/front.py", {"alpha/test_lazy.py"}),
+                   ("plugins/alpha/lib/lazy.py", {"alpha/test_lazy.py"}),
+                   ("plugins/alpha/lib/s.sh", {"alpha/test_sh.py"}),
+                   ("plugins/alpha/lib/copied.py", {"alpha/test_copy.py"}),
+                   ("plugins/alpha/lib/tree/a.txt", {"alpha/test_tree.py"}),
+                   ("plugins/alpha/lib/tree/sub/b.txt", {"alpha/test_tree.py"}),
+                   ("plugins/alpha/lib/twin_a.sh", {"alpha/test_twin.py"}),
+                   ("plugins/alpha/lib/twin_b.sh", {"alpha/test_twin.py"}),
+                   ("AGENTS.md", set())):
+    check(f"affected-map: {path} → {sorted(want) or 'ничего'}", F.get(path) == want, (F.get(path), why))
+check("affected-map: tests — все файлы тестов, broken — упавший", mm["tests"] == {
+    "alpha/test_x.py", "alpha/test_lazy.py", "alpha/test_sh.py", "alpha/test_copy.py", "alpha/test_plain.py",
+    "alpha/test_fail.py", "alpha/test_tree.py", "alpha/test_twin.py"} and mm["always"] == {"alpha/test_fail.py"}, mm)
+with open(os.path.join(ma, "lib", "x.py")) as fh:
+    check("affected-map: исходники репозитория без меток", fh.read() == '"""Модуль x."""\nX = 1\n')
+r = subprocess.run([sys.executable, "-I", MAPPER, "--out", mout, mkplugin({"test_a.py": OK2})], env=GENV,
+                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+check("affected-map: не git — код 2", r.returncode == 2 and "не репозиторий git" in r.stdout, r.stdout)
+os.makedirs(os.path.join(mrepo, "plugins", "empty", "tests"))
+r = subprocess.run([sys.executable, "-I", MAPPER, "--out", mout, os.path.join(mrepo, "plugins", "empty")], env=GENV,
+                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+check("affected-map: ни одного файла тестов — код 1", r.returncode == 1 and "ни одного файла" in r.stdout, r.stdout)
+FAIL1 = "import sys\nprint('ok   a')\nsys.exit(1)\n"
+put(os.path.join(mrepo, "plugins", "half", "tests", "test_f1.py"), FAIL1)
+put(os.path.join(mrepo, "plugins", "half", "tests", "test_f2.py"), FAIL1)
+put(os.path.join(mrepo, "plugins", "half", "tests", "test_ok.py"), OK2)
+git(mrepo, "add", "-A")
+git(mrepo, "commit", "-q", "-m", "half")
+r = subprocess.run([sys.executable, "-I", MAPPER, "--out", mout, os.path.join(mrepo, "plugins", "half")], env=GENV,
+                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+check("affected-map: упало больше половины — код 1, карта всё равно записана",
+      r.returncode == 1 and os.path.isfile(mout), r.stdout)
+FILES = ["a/x.py", "a/tree/b.txt", "a/tree/sub/c.txt", "a/treeX.txt", "z.md"]
+check("expand: файл — он сам, папка — все файлы под ней, соседнее имя с тем же началом — нет",
+      AMOD.expand({"a/x.py", "a/tree/"}, FILES) == {"a/x.py", "a/tree/b.txt", "a/tree/sub/c.txt"},
+      AMOD.expand({"a/x.py", "a/tree/"}, FILES))
+check("expand: корень и пустой путь не раскрываются во весь репозиторий", AMOD.expand({".", ""}, FILES) == set(),
+      AMOD.expand({".", ""}, FILES))
 
 # --- сигналы: раннер в своей сессии, как задача run_job; killpg TERM/HUP/INT, через 5 с SIGKILL; сирот нет ---
 for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):

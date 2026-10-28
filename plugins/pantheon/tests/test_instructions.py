@@ -19,6 +19,7 @@ _os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 results = []
 
 
@@ -49,7 +50,7 @@ def main():
     write(os.path.join(app, "node_modules", "pkg", "AGENTS.md"), "n\n" * 30000)  # не считается
     env = {"PATH": "/usr/bin:/bin", "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_NO_NOTIFY": "1", "CODEX_HOME": codex}
-    run = lambda *a: subprocess.run([PY311, "-I", LIB, *a], env=env, capture_output=True, text=True)
+    run = lambda *a: subprocess.run([PY311, "-I", RUN_PY, *a], env=env, capture_output=True, text=True)
     alerts = lambda: open(os.path.join(home, "alerts.md"), encoding="utf-8").read() \
         if os.path.exists(os.path.join(home, "alerts.md")) else ""
 

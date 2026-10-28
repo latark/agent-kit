@@ -31,6 +31,7 @@ _os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 results = []
 
 
@@ -78,7 +79,7 @@ def main():
 
     def run(*args, extra=None):
         e = dict(env, **(extra or {}))
-        return subprocess.run([PY311, "-I", LIB, *args], env=e, capture_output=True, text=True, timeout=120)
+        return subprocess.run([PY311, "-I", RUN_PY, *args], env=e, capture_output=True, text=True, timeout=120)
 
     def status(name):
         recs = []

@@ -19,6 +19,7 @@ _os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 results = []
 
 
@@ -58,7 +59,7 @@ def main():
     write(os.path.join(tmp, ".claude", "agents", "hephaestus-demo.md"), "x")
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_NO_NOTIFY": "1"}
-    run = lambda name: subprocess.run([PY311, "-I", LIB, "direction", "check", name], env=env,
+    run = lambda name: subprocess.run([PY311, "-I", RUN_PY, "direction", "check", name], env=env,
                                       capture_output=True, text=True)
 
     r = run("iris-demo")
@@ -137,7 +138,7 @@ def test_init():
     write(os.path.join(tmp, ".gitconfig"), "[user]\n\tname = Test\n\temail = test@example.com\n")
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_NO_NOTIFY": "1"}
-    run = lambda *a: subprocess.run([PY311, "-I", LIB, "direction", *a], env=env,
+    run = lambda *a: subprocess.run([PY311, "-I", RUN_PY, "direction", *a], env=env,
                                     capture_output=True, text=True)
     git = lambda p, *a: subprocess.run(["git", "-C", p, *a], env=env, capture_output=True, text=True).stdout.strip()
     reg = os.path.join(home, "directions.toml")
@@ -184,7 +185,7 @@ def test_init():
     os.makedirs(home2)
     os.symlink(os.path.join(tmp, "aside"), os.path.join(home2, "projects"))
     setreg(["~/projects/viaLink"])
-    r = subprocess.run([PY311, "-I", LIB, "direction", "init", "iris-new"], env=dict(env, HOME=home2),
+    r = subprocess.run([PY311, "-I", RUN_PY, "direction", "init", "iris-new"], env=dict(env, HOME=home2),
                        capture_output=True, text=True)
     check("init: ~/projects — ссылка в сторону — код 1, ничего не создано",
           r.returncode == 1 and "вне ~/projects" in r.stdout and os.listdir(os.path.join(tmp, "aside")) == [])
@@ -286,7 +287,7 @@ def test_init():
     subprocess.run(["git", "init", "-q", outer], env=env, check=True)
     setreg(["~/projects/hooked"])
     env_hook = dict(env, GIT_DIR=os.path.join(outer, ".git"), GIT_WORK_TREE=outer)
-    r = subprocess.run([PY311, "-I", LIB, "direction", "init", "iris-new"], env=env_hook,
+    r = subprocess.run([PY311, "-I", RUN_PY, "direction", "init", "iris-new"], env=env_hook,
                        capture_output=True, text=True)
     hooked = os.path.join(projects, "hooked")
     check("init: GIT_DIR/GIT_WORK_TREE из окружения не уводят git в чужой репозиторий",

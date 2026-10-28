@@ -30,6 +30,7 @@ from datetime import datetime
 HERE = os.path.dirname(os.path.abspath(__file__))
 LIBDIR = os.path.join(os.path.dirname(HERE), "lib")
 LIB = os.path.join(LIBDIR, "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 TAINT = os.path.join(os.path.dirname(os.path.dirname(HERE)), "guard", "hooks", "taint.py")
 T0 = 1_792_000_000
 CHAT = "-1001234567"
@@ -178,7 +179,7 @@ class Box:
         return env
 
     def cli(self, args, t=T0, extra=None):
-        r = subprocess.run([PY311, "-I", LIB] + args, env=self.env(t, extra), capture_output=True, text=True,
+        r = subprocess.run([PY311, "-I", RUN_PY] + args, env=self.env(t, extra), capture_output=True, text=True,
                            timeout=60)
         self.outs.append(r.stdout + r.stderr)
         return r
@@ -394,7 +395,7 @@ def _stopped_pass(sig):
     """`read run` с медленным читателем; плановый проход шлёт sig группе прохода (как по таймауту задачи)."""
     b, rid, q = test_request_ok()
     b.answer(T0 + 60, q, "Да")
-    proc = subprocess.Popen([PY311, "-I", LIB, "read", "run"], env=b.env(T0 + 120, {"FAKE_CLAUDE_MODE": "slow"}),
+    proc = subprocess.Popen([PY311, "-I", RUN_PY, "read", "run"], env=b.env(T0 + 120, {"FAKE_CLAUDE_MODE": "slow"}),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
     pidf = os.path.join(b.rec, "slow.pid")
     for _ in range(200):

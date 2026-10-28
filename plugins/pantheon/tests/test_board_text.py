@@ -27,6 +27,7 @@ os.environ["TMPDIR"] = ROOT
 atexit.register(shutil.rmtree, ROOT, True)
 PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(PLUGIN, "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(CLI), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 HOOK = os.path.join(PLUGIN, "hooks", "ctx.py")
 spec = importlib.util.spec_from_file_location("boardtext", os.path.join(PLUGIN, "lib", "boardtext.py"))
 B = importlib.util.module_from_spec(spec)
@@ -199,7 +200,7 @@ home_auto = os.path.join(home, "board-auto.md")
 
 
 def cli(args, t=T0):
-    return subprocess.run([PY311, "-I", CLI] + args, env=dict(env, PANTHEON_NOW=str(t)), capture_output=True, text=True,
+    return subprocess.run([PY311, "-I", RUN_PY] + args, env=dict(env, PANTHEON_NOW=str(t)), capture_output=True, text=True,
                           timeout=300)
 
 

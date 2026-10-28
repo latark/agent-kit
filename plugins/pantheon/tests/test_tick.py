@@ -26,6 +26,7 @@ _atexit.register(_shutil.rmtree, _ROOT, True)
 import time
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 T0 = 1_792_000_000  # опорное время
 
 
@@ -44,7 +45,7 @@ def tick(home, state, t, host="mac-a", wake=T0 - 7200, ac="1", idle=1200, limit=
     if limit is not None:
         env["PANTHEON_FAKE_LIMIT"] = str(limit)
     env.update(extra or {})
-    return subprocess.run([PY311, "-I", LIB, "tick"], env=env, capture_output=True, text=True, timeout=30)
+    return subprocess.run([PY311, "-I", RUN_PY, "tick"], env=env, capture_output=True, text=True, timeout=30)
 
 
 def runs(state):
@@ -160,7 +161,7 @@ def main():
     home, state = make(tmp, '[[job]]\nname = "bad"\ncommand = "pantheon domains build"\nevery = 5\n')
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_NO_NOTIFY": "1"}
-    rc = subprocess.run([PY311, "-I", LIB, "run-job", "bad"], env=env, capture_output=True).returncode
+    rc = subprocess.run([PY311, "-I", RUN_PY, "run-job", "bad"], env=env, capture_output=True).returncode
     alerts = open(os.path.join(home, "alerts.md")).read()
     check("упавшая задача: код 1, строка в alerts.md", rc == 1 and "задача bad упала (код 1" in alerts)
 
@@ -194,7 +195,7 @@ def main():
     g("pull", "-q", "origin", "main", cwd=cb); g("branch", "-q", "--set-upstream-to=origin/main", "main", cwd=cb)
     st_dir = os.path.join(tmp, "state")
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_STATE": st_dir, "PANTHEON_NO_NOTIFY": "1"}
-    commit = lambda clone, now=None: subprocess.run([PY311, "-I", LIB, "commit"], capture_output=True, text=True,
+    commit = lambda clone, now=None: subprocess.run([PY311, "-I", RUN_PY, "commit"], capture_output=True, text=True,
                                                     env={**env, "PANTHEON_HOME": clone, **({"PANTHEON_NOW": str(now)} if now else {})}).returncode
     open(os.path.join(ca, "board.md"), "w").write("строка 1 — A\nстрока 2\n")
     open(os.path.join(cb, "board.md"), "w").write("строка 1 — B\nстрока 2\n")
@@ -224,7 +225,7 @@ def main():
     # общий слой ролей плагина пуст: здесь каталог ролей — только то, что тест кладёт сам (оба слоя — test_roles.py)
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_PLUGIN_ROLES": os.path.join(tmp, "plugin-roles-empty")}
-    subprocess.run([PY311, "-I", LIB, "domains", "build"], env=env, capture_output=True)
+    subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
     dj = json.load(open(os.path.join(state, "domains.json")))["domains"]
     check("реестр: папка Метиды у athena пропущена, у Метиды осталась",
           dj["athena-shop"] == ["~/projects/br"] and dj["metis-pantheon"] == ["~/projects/agent-kit"])
@@ -239,7 +240,7 @@ def main():
     open(os.path.join(rtmp, ".claude", "pantheon", "policy.toml"), "w").write("")
     renv = {"PATH": os.environ["PATH"], "HOME": rtmp, "PANTHEON_HOME": rhome, "PANTHEON_STATE": rstate,
             "PANTHEON_NO_NOTIFY": "1"}
-    rr = subprocess.run([PY311, "-I", LIB, "domains", "build"], env=renv, capture_output=True, text=True)
+    rr = subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=renv, capture_output=True, text=True)
     rdj = json.load(open(os.path.join(rstate, "domains.json")))["domains"]
     check("реестр: направления hq, workshop, hestia, job-* пропущены с понятной ошибкой, обычное имя осталось",
           list(rdj) == ["athena-shop"] and rr.stderr.count("зарезервировано под окна системы") == 5
@@ -259,7 +260,7 @@ def main():
         open(os.path.join(atmp, ".claude", "pantheon", "policy.toml"), "w").write("")
         aenv = {"PATH": os.environ["PATH"], "HOME": atmp, "PANTHEON_HOME": ahome, "PANTHEON_STATE": astate,
                 "PANTHEON_NO_NOTIFY": "1"}
-        cli = lambda *a: subprocess.run([PY311, "-I", LIB, *a], env=aenv, capture_output=True, text=True)  # noqa: E731
+        cli = lambda *a: subprocess.run([PY311, "-I", RUN_PY, *a], env=aenv, capture_output=True, text=True)  # noqa: E731
         wr = lambda r: open(os.path.join(atmp, "projects", "br", ".claude", fname), "w").write(  # noqa: E731
             json.dumps({"permissions": {"allow": r}}))
         if second is not None:  # прежний файл окна от сборки без проблемы должен исчезнуть
@@ -334,7 +335,7 @@ def main():
     open(os.path.join(groot, ".claude-plugin", "plugin.json"), "w").write('{"name": "guard", "version": "0.1.0"}')
     open(os.path.join(tmp, ".claude/plugins/installed_plugins.json"), "w").write(json.dumps(
         {"version": 2, "plugins": {"guard@agent-kit": [{"scope": "user", "installPath": groot}]}}))
-    subprocess.run([PY311, "-I", LIB, "plugins", "accept", "guard"], env=env, capture_output=True, check=True)
+    subprocess.run([PY311, "-I", RUN_PY, "plugins", "accept", "guard"], env=env, capture_output=True, check=True)
     os.symlink(os.path.join(tmp, "pantheon"), os.path.join(tmp, "projects", "ln"))
     with open(os.path.join(home, "directions.toml"), "a") as fh:
         fh.write('sandbox_write = ["~/.ssh"]\n'
@@ -365,7 +366,7 @@ def main():
     os.makedirs(os.path.join(tmp, "foreign-mem"))
     os.makedirs(os.path.join(tmp, ".claude", "agent-memory"), exist_ok=True)
     os.symlink(os.path.join(tmp, "foreign-mem"), os.path.join(tmp, ".claude", "agent-memory", "linked"))
-    subprocess.run([PY311, "-I", LIB, "domains", "build"], env=env, capture_output=True)
+    subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
     load = lambda n: json.load(open(os.path.join(state, "settings", n + ".json")))
     sa, sm, sw, sn, sz = load("athena-shop"), load("metis-pantheon"), load("workshop"), load("mnemo-brain"), load("zz")
     real = lambda x: os.path.realpath(os.path.join(tmp, x))
@@ -388,12 +389,12 @@ def main():
     os.makedirs(wr, exist_ok=True)
     subprocess.run(["git", "init", "-q", wr], check=True)
     subprocess.run(["git", "-C", wr, "remote", "add", "origin", "git@github.com:x/w.git"], check=True)
-    subprocess.run([PY311, "-I", LIB, "domains", "build"], env=env, capture_output=True)
+    subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
     swx = load("workshop")["sandbox"]["excludedCommands"]
     check("песочница: у мастерской при SSH-remote в ~/projects/workshop git push/fetch/pull мимо песочницы",
           all(c in swx for c in ("git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *")))
     _shutil.rmtree(wr)
-    subprocess.run([PY311, "-I", LIB, "domains", "build"], env=env, capture_output=True)
+    subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
     check("песочница: репозиторий с SSH-remote убран → у мастерской сетевого git снова нет",
           not any(x.startswith("git ") for x in load("workshop")["sandbox"]["excludedCommands"]))
     reads = ["gh pr view", "gh pr view *", "gh pr checks", "gh pr checks *", "gh pr diff", "gh pr diff *",
@@ -604,7 +605,7 @@ def main():
     t0 = json.load(open(os.path.join(state, "domains.json")))["built_ts"]
     no_loop = os.path.getmtime(ag) <= t0
     open(os.path.join(ag, "prometheus.md"), "w").write("---\nname: prometheus\nmemory: user\n---\nтекст\n")
-    subprocess.run([PY311, "-I", LIB, "domains", "build", "--if-changed"], env=env, capture_output=True)
+    subprocess.run([PY311, "-I", RUN_PY, "domains", "build", "--if-changed"], env=env, capture_output=True)
     mem_p = real(".claude/agent-memory/prometheus")
     check("каталог ролей: сборка его не трогает, новая роль с memory: — пересборка и её память в окнах",
           no_loop and json.load(open(os.path.join(state, "domains.json")))["built_ts"] > t0
@@ -617,7 +618,7 @@ def main():
     os.makedirs(os.path.dirname(inst), exist_ok=True)
     open(inst, "w").write("{}")
     os.utime(inst, (t1 + 30, t1 + 30))
-    subprocess.run([PY311, "-I", LIB, "domains", "build", "--if-changed"], env=env, capture_output=True)
+    subprocess.run([PY311, "-I", RUN_PY, "domains", "build", "--if-changed"], env=env, capture_output=True)
     check("installed_plugins.json новее сборки: окна пересобраны (built_ts вырос)",
           json.load(open(os.path.join(state, "domains.json")))["built_ts"] > t1)
 
@@ -666,7 +667,7 @@ def main():
     check("окно штаба: кэши задач (выдача из веба) закрыты для чтения",
           any(x.endswith("pantheon-sandbox/job-prometheus") for x in load("hq")["sandbox"]["filesystem"]["denyRead"]))
     os.remove(os.path.join(state, "settings", "job-iris.json"))
-    subprocess.run([PY311, "-I", LIB, "domains", "build", "--if-changed"], env=env, capture_output=True)
+    subprocess.run([PY311, "-I", RUN_PY, "domains", "build", "--if-changed"], env=env, capture_output=True)
     check("domains build --if-changed: пропавшее окно задачи пересобирается",
           os.path.isfile(os.path.join(state, "settings", "job-iris.json")))
 
@@ -705,26 +706,26 @@ print(json.dumps({{c: p.parse_command(c) for c in cmds}}))
     jenv = {**env, "PATH": fake + os.pathsep + os.environ["PATH"], "PANTHEON_NO_NOTIFY": "1"}
     os.remove(win("clio"))
     al0 = open(os.path.join(home, "alerts.md")).read() if os.path.exists(os.path.join(home, "alerts.md")) else ""
-    rcs = [subprocess.run([PY311, "-I", LIB, "run-job", "clio-weekly"], env=jenv, capture_output=True).returncode
+    rcs = [subprocess.run([PY311, "-I", RUN_PY, "run-job", "clio-weekly"], env=jenv, capture_output=True).returncode
            for _ in range(2)]
     al = open(os.path.join(home, "alerts.md")).read()[len(al0):]
-    jobs = subprocess.run([PY311, "-I", LIB, "jobs"], env=jenv, capture_output=True, text=True)
+    jobs = subprocess.run([PY311, "-I", RUN_PY, "jobs"], env=jenv, capture_output=True, text=True)
     check("run-job: окна задачи нет — claude не вызван, код не 0, тревога одна с «pantheon domains build»",
           rcs[0] != 0 and rcs[1] != 0 and not os.path.exists(calls)
           and al.count("задача clio-weekly не идёт") == 1 and "pantheon domains build" in al)
     check("pantheon jobs: не падает и показывает причину", jobs.returncode == 0 and "нет окна песочницы" in jobs.stdout)
     os.symlink(os.path.join(tmp, "pantheon", "schedule.toml"), win("clio"))
-    rc_link = subprocess.run([PY311, "-I", LIB, "run-job", "clio-weekly"], env=jenv, capture_output=True).returncode
+    rc_link = subprocess.run([PY311, "-I", RUN_PY, "run-job", "clio-weekly"], env=jenv, capture_output=True).returncode
     check("run-job: окно задачи — ссылка, а не обычный файл — claude не вызван",
           rc_link != 0 and not os.path.exists(calls))
     os.remove(win("clio"))
-    subprocess.run([PY311, "-I", LIB, "domains", "build"], env=env, capture_output=True)
+    subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
     # run_env ставит /opt/homebrew/bin и папку python перед PATH: настоящий claude там перехватил бы подменный
     shadow = [d for d in ("/opt/homebrew/bin", os.path.dirname(sys.executable)) if os.path.exists(os.path.join(d, "claude"))]
     if shadow:
         print(f"skip run-job с окном: настоящий claude в {shadow[0]} раньше подменного")
     else:
-        rc_ok = subprocess.run([PY311, "-I", LIB, "run-job", "clio-weekly"], env=jenv,
+        rc_ok = subprocess.run([PY311, "-I", RUN_PY, "run-job", "clio-weekly"], env=jenv,
                                capture_output=True).returncode
         called = open(calls).read() if os.path.exists(calls) else ""
         check("run-job: окно на месте — claude -p идёт с --settings окна clio",
@@ -742,7 +743,7 @@ print(json.dumps({{c: p.parse_command(c) for c in cmds}}))
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_NOW": str(1760432400)}  # 2025-10-14 — год подставляется из «сейчас»
     env["PANTHEON_NOW"] = str(1791958800)   # 2026-10-14
-    subprocess.run([PY311, "-I", LIB, "archive"], env=env, capture_output=True)
+    subprocess.run([PY311, "-I", RUN_PY, "archive"], env=env, capture_output=True)
     board = open(os.path.join(home, "board.md")).read()
     arch = open(os.path.join(home, "archive", "board-2026-10.md")).read()
     check("архив: «Сделано» старше 7 дней ушло вместе с подробностями, свежее осталось",
@@ -759,15 +760,15 @@ print(json.dumps({{c: p.parse_command(c) for c in cmds}}))
     log = os.path.join(tmp, "notify.log")
     env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
            "PANTHEON_NOTIFY_LOG": log}
-    subprocess.run([PY311, "-I", LIB, "alert", "обычная", "--from", "athena"], env=env, capture_output=True)
-    rc = subprocess.run([PY311, "-I", LIB, "alert", "ключ в логе", "--critical", "--from", "zeus"],
+    subprocess.run([PY311, "-I", RUN_PY, "alert", "обычная", "--from", "athena"], env=env, capture_output=True)
+    rc = subprocess.run([PY311, "-I", RUN_PY, "alert", "ключ в логе", "--critical", "--from", "zeus"],
                         env={**env, "PANTHEON_ROLE": "hq"}, capture_output=True).returncode
     al = open(os.path.join(home, "alerts.md")).read()
     sent = open(log).read() if os.path.exists(log) else ""
     check("alert --critical: «КРИТИЧНО» в alerts.md и одно уведомление от того, кто нашёл",
           rc == 0 and "zeus · КРИТИЧНО: ключ в логе" in al and "athena · обычная" in al
           and sent.count("\n") == 1 and "Пантеон · критично|ключ в логе (со слов: zeus)" in sent)
-    subprocess.run([PY311, "-I", LIB, "alert", "прод упал", "--critical", "--from", "zeus"],
+    subprocess.run([PY311, "-I", RUN_PY, "alert", "прод упал", "--critical", "--from", "zeus"],
                    env={**env, "PANTHEON_ROLE": "workshop"}, capture_output=True)
     sent = open(log).read()
     check("alert --critical: заголовок не называет отправителя — имя только «со слов»",

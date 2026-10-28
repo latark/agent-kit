@@ -28,6 +28,7 @@ _atexit.register(_shutil.rmtree, _ROOT, True)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, "lib", "pantheon.py")
 
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 STUB = """#!/bin/sh
 echo "$*" >> "$STUB_DIR/argv.log"
 case "$1 $2" in
@@ -119,7 +120,7 @@ class Env:
         args = args or ("plugins", "update", "--quiet")
         if self.release is True and args[:2] == ("plugins", "update"):
             self.released(self.release_names)
-        return subprocess.run([PY, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=300)
+        return subprocess.run([PY, "-I", RUN_PY, *args], env=env, capture_output=True, text=True, timeout=300)
 
     def py(self, code, *args, stub=False):
         """Код с `import pantheon as P` в этом HOME (как окно роли: только чтение реестра); stdout строками. stub —
@@ -521,7 +522,7 @@ print(json.dumps({{
                   e.journal().count("не ставлю") == 1, e.journal())
         e.close()
 
-    r = subprocess.run([PY, "-I", LIB, "plugins", "foo"], capture_output=True, text=True, timeout=60)
+    r = subprocess.run([PY, "-I", RUN_PY, "plugins", "foo"], capture_output=True, text=True, timeout=60)
     check("pantheon plugins foo — код 2", r.returncode == 2)
 
     print(f"\n{sum(results)} из {len(results)} прошли")

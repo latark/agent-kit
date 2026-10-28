@@ -31,6 +31,7 @@ LIBDIR = os.environ.get("TEST_PANTHEON_LIB") or os.path.join(ROOT, "lib")
 LIB = os.path.join(LIBDIR, "pantheon.py")
 
 
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 def pantheon_python():
     return sys.executable
 
@@ -78,7 +79,7 @@ def run(h, *args, extra=None):
                 "PANTHEON_NO_NOTIFY": "1", "PANTHEON_DRYRUN": "1"})
     env.update(extra or {})
     os.makedirs(env["PANTHEON_HOME"], exist_ok=True)
-    return subprocess.run([PY, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=120)
+    return subprocess.run([PY, "-I", RUN_PY, *args], env=env, capture_output=True, text=True, timeout=120)
 
 
 def current(h):

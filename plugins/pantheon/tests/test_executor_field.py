@@ -14,6 +14,7 @@ from _py311 import PY311  # CLI pantheon — только на Python 3.11+
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
 CLI = os.path.join(LIB, "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(CLI), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 T0 = 1_792_000_000
 results = []
 
@@ -33,7 +34,7 @@ def main():
                "PANTHEON_NOW": str(T0), "TMPDIR": tmp}
 
         def run(*a):
-            return subprocess.run([PY311, "-I", CLI, *a], env=env, capture_output=True, text=True, timeout=60)
+            return subprocess.run([PY311, "-I", RUN_PY, *a], env=env, capture_output=True, text=True, timeout=60)
 
         r = run("task", "new", "--text", "тест", "--direction", "demo", "--title", "Механика", "--executor", "codex")
         check("task new --executor codex — принят", r.returncode == 0, r.stderr)

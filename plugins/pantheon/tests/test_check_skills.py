@@ -24,6 +24,7 @@ _atexit.register(_shutil.rmtree, _ROOT, True)
 
 PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(PLUGIN, "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 results = []
 
 
@@ -103,7 +104,7 @@ def main():
     def run(skill_dirs, *args):
         env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
                "PANTHEON_SKILL_DIRS": skill_dirs, "PANTHEON_NO_NOTIFY": "1"}
-        return subprocess.run([PY311, "-I", LIB, "check", *args], env=env, capture_output=True, text=True, timeout=120)
+        return subprocess.run([PY311, "-I", RUN_PY, "check", *args], env=env, capture_output=True, text=True, timeout=120)
 
     clean = os.path.join(_ROOT, "clean")
     write(os.path.join(clean, "good-one", "SKILL.md"), GOOD)

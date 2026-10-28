@@ -25,6 +25,7 @@ atexit.register(shutil.rmtree, _ROOT, True)
 
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
 CLI = os.path.join(LIB, "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(CLI), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 sys.path.insert(0, LIB)
 import tasks as T  # noqa: E402
 import autoclose as A  # noqa: E402
@@ -88,7 +89,7 @@ def make():
 
 
 def pan(env, t, *a):
-    return subprocess.run([PY311, "-I", CLI, *a], env=dict(env, PANTHEON_NOW=str(t)), capture_output=True, text=True,
+    return subprocess.run([PY311, "-I", RUN_PY, *a], env=dict(env, PANTHEON_NOW=str(t)), capture_output=True, text=True,
                           timeout=120)
 
 

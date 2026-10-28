@@ -63,8 +63,10 @@ LOG = os.path.join(state, "owner-log")
 UNC = os.path.join(LOG, "unconfirmed")
 BASE = {"PATH": os.environ["PATH"], "HOME": home, "PANTHEON_HOME": pantheon, "PANTHEON_VIEW": view,
         "PANTHEON_STATE": state, "CLAUDE_PID": str(os.getpid()), "CLAUDE_CODE_ENTRYPOINT": "cli",
-        "PANTHEON_CONFIRM_WAIT": "1", "PANTHEON_QUEUED_WAIT": "6", "PANTHEON_REWAKE_DELAY": "0",
+        "PANTHEON_CONFIRM_WAIT": "1", "PANTHEON_QUEUED_WAIT": "4", "PANTHEON_REWAKE_DELAY": "0",
         "TZ": "Europe/Moscow"}
+# QUEUED_WAIT 4 с (было 6, metis-0544): запись queued приходит через ~1,8 с после события (0,3 + delay 1,5) —
+# запас 2 с; отказные сценарии ждут срок целиком, поэтому каждая секунда здесь — 5 с файла
 
 
 def run(ev):

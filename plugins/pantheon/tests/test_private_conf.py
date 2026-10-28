@@ -19,6 +19,7 @@ import tempfile
 
 PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(PLUGIN, "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 ROOT = os.path.realpath(tempfile.mkdtemp(prefix="private-conf-test-"))
 atexit.register(shutil.rmtree, ROOT, True)
 results = []
@@ -97,7 +98,7 @@ def main():
             fh.write(private_toml)
         env = {"PATH": os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
                "PANTHEON_NO_NOTIFY": "1"}
-        r = subprocess.run([py311(), "-I", LIB, "domains", "build"], env=env, capture_output=True, text=True,
+        r = subprocess.run([py311(), "-I", RUN_PY, "domains", "build"], env=env, capture_output=True, text=True,
                            timeout=120)
         win = lambda n: json.load(open(os.path.join(state, "settings", n + ".json")))  # noqa: E731
         return r, win, tmp

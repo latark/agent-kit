@@ -25,6 +25,7 @@ atexit.register(shutil.rmtree, _ROOT, True)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 T0 = 1_792_000_000
 H = 3600
 FAILS = []
@@ -95,7 +96,7 @@ class Env:
         return env
 
     def reap(self, *args, extra=None):
-        return subprocess.run([PY311, "-I", LIB, "reap", *args], env=self.env(extra), capture_output=True, text=True,
+        return subprocess.run([PY311, "-I", RUN_PY, "reap", *args], env=self.env(extra), capture_output=True, text=True,
                               timeout=60)
 
     def watch_check(self, t, agents=None, extra=None):
@@ -193,7 +194,7 @@ def test_pid_needs_consent_in_hestia():
         when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(T0 - 60))
         open(os.path.join(e.state, "owner-log", "zeus.md"), "w").write(
             f"## {when} {head}\nвопрос: {question}\nответ: {ans}\n")
-        return subprocess.run([PY311, "-I", LIB, "consent", "metis-9999"], env=e.env(hs), capture_output=True,
+        return subprocess.run([PY311, "-I", RUN_PY, "consent", "metis-9999"], env=e.env(hs), capture_output=True,
                               text=True, timeout=60)
 
     # «да» на вопрос о гашении — метка <id>.reap со списком pid из вопроса, метки push нет
@@ -224,7 +225,7 @@ def test_pid_needs_consent_in_hestia():
     with open(os.path.join(e.state, "owner-log", "board.jsonl"), "w") as fh:
         fh.write(json.dumps({"kind": "answer", "id": "metis-9999", "question": q, "answer": "Да — погасить",
                              "time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(T0 - 60))}) + "\n")
-    c = subprocess.run([PY311, "-I", LIB, "consent", "metis-9999"], env=e.env(hs), capture_output=True, text=True,
+    c = subprocess.run([PY311, "-I", RUN_PY, "consent", "metis-9999"], env=e.env(hs), capture_output=True, text=True,
                        timeout=60)
     check(c.returncode == 1 and "галочкой на доске" in c.stdout and not os.listdir(d),
           f"гашение не по галочке доски: {c.returncode} {c.stdout} {os.listdir(d)}")

@@ -24,6 +24,7 @@ from _py311 import PY311  # noqa: E402
 ROOT = tempfile.mkdtemp(prefix="sync-quarantine-")
 atexit.register(shutil.rmtree, ROOT, True)
 LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 T0 = 1_800_000_000
 results = []
 
@@ -75,7 +76,7 @@ class Env:
     def run(self):
         env = {"PATH": os.environ["PATH"], "HOME": self.home, "PANTHEON_HOME": self.pan, "PANTHEON_STATE": self.state,
                "PANTHEON_NOW": str(T0), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": ROOT}
-        r = subprocess.run([PY311, "-I", LIB, "sync-answers"], env=env, capture_output=True, text=True, timeout=60)
+        r = subprocess.run([PY311, "-I", RUN_PY, "sync-answers"], env=env, capture_output=True, text=True, timeout=60)
         return r, os.path.exists(self.mark)
 
 
@@ -157,7 +158,7 @@ def with_card(held=".sync-held", applies=True):
     os.makedirs(os.path.join(e.pan, "directions", "metis-pantheon", "tasks"))
     env = {"PATH": os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pan, "PANTHEON_STATE": e.state,
            "PANTHEON_NOW": str(T0), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": ROOT}
-    r = subprocess.run([PY311, "-I", LIB, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--project", "Пантеон",
+    r = subprocess.run([PY311, "-I", RUN_PY, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--project", "Пантеон",
                         "--title", "Правки ~/.claude", "--status", "waiting", "--waiting-on", "human", "--priority", "1",
                         "--next", "выбрать", "--question", "Отправить правки?", "--option", "Отправить",
                         "--option", "Пока держать"], env=env, capture_output=True, text=True, timeout=60)
@@ -191,7 +192,7 @@ check("карточка: ответ галочкой на доске — воп�
 # два держания: «Отправить» по .sync-held снимает вопрос, «Пока держать» по .sync-incoming — нет
 e = with_card()
 first = e.task
-r2 = subprocess.run([PY311, "-I", LIB, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--project", "Пантеон",
+r2 = subprocess.run([PY311, "-I", RUN_PY, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--project", "Пантеон",
                      "--title", "Чужие правки", "--status", "waiting", "--waiting-on", "human", "--priority", "1",
                      "--next", "выбрать", "--question", "Откатить?", "--option", "Пока держать"],
                     env={"PATH": os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pan, "PANTHEON_STATE": e.state,
@@ -237,7 +238,7 @@ def mixed(after):
     a = e.task
     env = {"PATH": os.environ["PATH"], "HOME": e.home, "PANTHEON_HOME": e.pan, "PANTHEON_STATE": e.state,
            "PANTHEON_NOW": str(T0), "PANTHEON_HOST": "mac-a", "PANTHEON_NO_NOTIFY": "1", "TMPDIR": ROOT}
-    r2 = subprocess.run([PY311, "-I", LIB, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--project", "Пантеон",
+    r2 = subprocess.run([PY311, "-I", RUN_PY, "task", "new", "--text", "тест", "--direction", "metis-pantheon", "--project", "Пантеон",
                          "--title", "Чужие правки", "--status", "waiting", "--waiting-on", "human", "--priority", "1",
                          "--next", "выбрать", "--question", "Откатить?", "--option", "Откатить правку"],
                         env=env, capture_output=True, text=True, timeout=60)

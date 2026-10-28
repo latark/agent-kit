@@ -25,6 +25,7 @@ _atexit.register(_shutil.rmtree, _ROOT, True)
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(HERE, "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 CTX = os.path.join(HERE, "hooks", "ctx.py")
 T0 = 1_792_000_000
 OK, FAIL = [], []
@@ -74,7 +75,7 @@ def run(home, pan, state, *args, extra=None, host="mac-a"):
            "PANTHEON_FAKE_WAKE": str(T0 - 7200), "PANTHEON_FAKE_AC": "1", "PANTHEON_FAKE_IDLE": "1200",
            "PANTHEON_ALERTS_IN_DRYRUN": "1"}
     env.update(extra or {})
-    return subprocess.run([PY311, "-I", LIB, *args], env=env, capture_output=True, text=True, timeout=60)
+    return subprocess.run([PY311, "-I", RUN_PY, *args], env=env, capture_output=True, text=True, timeout=60)
 
 
 def dry(state):

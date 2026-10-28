@@ -28,6 +28,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, "lib", "pantheon.py")
+RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 T0 = 1_792_000_000
 FAILS = []
 
@@ -174,7 +175,7 @@ class Env:
             env["TZ"] = os.environ["TZ"]
         env.update(self.extra)
         env.update(extra or {})
-        return subprocess.run([*(argv or [PY311, "-I", LIB]), *args], env=env, capture_output=True, text=True, timeout=60)
+        return subprocess.run([*(argv or [PY311, "-I", RUN_PY]), *args], env=env, capture_output=True, text=True, timeout=60)
 
     def calls(self):
         if not os.path.exists(self.log):
