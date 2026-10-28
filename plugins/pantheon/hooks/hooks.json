@@ -85,7 +85,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "case \"$PANTHEON_ROLE\" in domain-coordinator|workshop) ;; *) exit 0 ;; esac; grep -qs owner_cap \"${PANTHEON_HOME:-$HOME/ai/pantheon}/schedule.toml\" || exit 0; exec \"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" night agent-gate",
+            "command": "case \"$PANTHEON_ROLE\" in domain-coordinator|workshop|hq) ;; *) exit 0 ;; esac; grep -qs owner_cap \"${PANTHEON_HOME:-$HOME/ai/pantheon}/schedule.toml\" || exit 0; exec \"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" night agent-gate",
             "timeout": 15,
             "onFailure": "block"
           }

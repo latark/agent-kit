@@ -112,6 +112,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon start <направление> --at ЧЧ:ММ [поручение]   разовый запуск плановым проходом вместо sleep в сессии;
                                         --at-list — записи, --at-cancel <id> — отменить (lib/night.py)
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
+  --over-cap (start, wake)              недельный потолок владельца достигнут — start и wake отказаны (код 2), кроме
+                                        start zeus и wake hestia; флаг запускает сверх потолка только из вашего терминала (metis-0444)
   pantheon watch [--dry-run]            дежурный (плановый проход раз в 5 мин): сессии, STATUS.md, swap, worktree, версия Claude Code,
                                         паузы, самозапуск по вашим решениям; --dry-run — кого поднял бы и почему нет
   pantheon reboot-reminder [--now]      пятница после 09:30: Mac не перезагружался с прошлой пятницы — карточка и уведомление
@@ -1060,6 +1062,23 @@ def launch(name, t):
                      start_new_session=True, env=run_env(), cwd=HOME)
 
 
+def job_cap_hold(name, argv, st, t, memo=None):
+    """metis-0444: задача `claude -p` при достигнутом недельном потолке владельца не запускается, а ждёт — причина в
+    st["waiting"] (её показывает `pantheon jobs`), срок не сдвигается, сбоем не считается. memo — словарь на один
+    проход тика: потолок считается один раз. → True, если задача ждёт."""
+    if not argv or argv[0] != "claude":
+        return False
+    memo = {} if memo is None else memo
+    if "why" not in memo:
+        memo["why"] = night_mod().launch_cap("tick", t=t)
+    if not memo["why"]:
+        return False
+    st["waiting"] = memo["why"]
+    st.setdefault("waiting_since", t)
+    save_job_state(name, st)
+    return True
+
+
 def tick():
     os.makedirs(STATE, exist_ok=True)
     with lock("tick", block=False) as got:
@@ -1084,7 +1103,7 @@ def tick():
         for bad in sched.get("bad_names") or []:
             alert_once("badname-" + re.sub(r"[^\w-]", "_", bad)[:40], bad, f"schedule.toml: задача или служба с именем не по образцу "
                        f"или повтором имени ({bad[:60]!r}; только a-z, 0-9, дефис, имена не повторяются) — пропущена", "pantheon-tick")
-        heavy, skipped = [], []
+        heavy, skipped, cap_memo = [], [], {}
         for job in sched.get("job") or []:
             name = job["name"]
             st = job_state(name)
@@ -1119,6 +1138,8 @@ def tick():
                 continue
             if tick_skippable(job, st, t):  # входы не менялись с прошлого удачного прогона (metis-0149)
                 skipped.append(name)
+                continue
+            if job_cap_hold(name, parse_command(job.get("command")), st, t, cap_memo):
                 continue
             if job.get("class", "light") == "heavy":
                 heavy.append((job, st, due_at))
@@ -1485,6 +1506,8 @@ def run_job(name):
             save_job_state(name, st)
             return ALERTED
         clear_once("job-window-" + name)
+        if job_cap_hold(name, argv, job_state(name), now()):  # и прямой run-job: тик проверял до запуска процесса
+            return 0
         with (lock("heavy-run", block=False) if heavy else contextlib.nullcontext(True)) as hgot:
             if not hgot:
                 return 0
@@ -3983,7 +4006,8 @@ def start(rest):
     Разовый запуск (--at) исполняется по правилам планового прохода, слово при постановке не переносится."""
     dry = "--dry-run" in rest
     restart = "--restart" in rest
-    rest = [a for a in rest if a not in ("--dry-run", "--restart")]
+    over = OVER_CAP in rest  # metis-0444: сверх недельного потолка — только ваш терминал (launch_cap)
+    rest = [a for a in rest if a not in ("--dry-run", "--restart", OVER_CAP)]
     # откуда запуск, по окну вызова (metis-0261 А, ревью argus): в окне роли PANTHEON_ROLE задан, и владелец там не
     # говорит — окно Пританея (hq) считается Зевсом, остальные — плановым проходом (tick); без роли — терминал владельца
     role = os.environ.get("PANTHEON_ROLE") or ""
@@ -4070,14 +4094,15 @@ def start(rest):
             print(f"pantheon start: {name} — блокировка имени не взята: уже запускается другой командой или запись блокировки "
                   f"подложена (строка выше)", file=sys.stderr)
             return 1
-        return _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win)
+        return _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win,
+                              over_cap=over)
 
 
 def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win, need_word=False,
-                   cmd="pantheon start", extra_env=None, again=None):
+                   cmd="pantheon start", extra_env=None, again=None, over_cap=False):
     agents = agents_all()
-    if not dry:  # metis-0261 А: слово владельца и замер — до любых действий; список сессий тот же, что ниже
-        code, why = start_gate(name, origin, agents, need_word)
+    if not dry:  # metis-0261 А: слово владельца, потолок и замер — до любых действий; список сессий тот же, что ниже
+        code, why = start_gate(name, origin, agents, need_word, over_cap)
         if why:
             print(f"{cmd}: отказ — {why}", file=sys.stderr)
             return code
@@ -4219,7 +4244,13 @@ START_DEFERRED = 5  # было «отложено по красной памят
 # (3 и 4 заняты: NO_WINDOW и SKIPPED у resume_session, те же числа дошли бы до дежурного как коды запуска)
 
 
-def start_gate(target, origin, agents, need_word=False):
+OVER_CAP = "--over-cap"  # то же, что night.OVER_CAP: ручной запуск сверх недельного потолка (metis-0444)
+# недельный потолок их не держит (metis-0444): zeus — окно владельца; hestia — служебная, ставит выпуски и чинит окна
+# (решение владельца 29.10 по PR #193, «Б: Гестию оставить»)
+CAP_FREE = ("zeus", "hestia")
+
+
+def start_gate(target, origin, agents, need_word=False, over_cap=False):
     """pantheon start, перед запуском сессии (metis-0261 А): замер в capacity.jsonl (строка — у каждого не-dry start,
     дошедшего до этого шага; ранние выходы — «остановлено вами», «нет окна», занятое имя — и продолжение через
     resume_session строки не пишут). → (код, причина); (0, None) — можно.
@@ -4227,6 +4258,8 @@ def start_gate(target, origin, agents, need_word=False):
     отказ, код 2, всегда); tick слова не имеет.
     need_word (wake hestia из окна роли, не hq): запуск с поручением из окна роли — только по свежей записи в zeus.md,
     без неё отказ, код 2, в любой зоне (как wake <имя> "задание").
+    Недельный потолок владельца достигнут (metis-0444, night.launch_cap) — отказ, код 2, у любого target, кроме CAP_FREE
+    (zeus — окно владельца, hestia — служебная); over_cap (--over-cap) снимает отказ только при origin owner.
     Память (своп, давление) — только предупреждение для любого origin: строка в stderr и тревога раз в день, запуск идёт
     ([sb-simplify] п. 5, metis-0523; было — код 5 «отложено»)."""
     m = capacity_probe(agents)
@@ -4237,6 +4270,8 @@ def start_gate(target, origin, agents, need_word=False):
     elif need_word and origin != "owner" and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
         code, why = START_REFUSED, (f"поручение из окна роли — только по вашему слову: в журнале Зевса нет вашей строки "
                                     f"за {OWNER_WORD_WINDOW // 60} мин (сообщение другой сессии согласием не считается)")
+    elif target not in CAP_FREE and (cap := night_mod().launch_cap(origin, over_cap)):
+        code, why = START_REFUSED, cap
     elif m["red"] or m["unknown"]:
         # [sb-simplify] п. 5 (metis-0523): своп и давление памяти — только предупреждение, запуск не откладывается.
         # Строка в stderr и одна тревога в день; от расхода держит потолок недели (night.gate), а не замер памяти
@@ -4249,7 +4284,8 @@ def start_gate(target, origin, agents, need_word=False):
     capacity_log({"t": round(now(), 1), "at": stamp(), "target": target, "origin": origin, "sessions": m["sessions"],
                   "pressure": m["pressure"], "free_pct": m["free_pct"], "swap_gb": None if m["swap_gb"] is None
                   else round(m["swap_gb"], 2), "red": bool(m["red"]),
-                  "unknown": m["unknown"], "result": {0: "allowed", START_REFUSED: "refused", START_DEFERRED: "deferred"}[code]})
+                  "unknown": m["unknown"], "result": {0: "allowed", START_REFUSED: "refused", START_DEFERRED: "deferred"}[code]}
+                 | ({"over_cap": True} if over_cap and origin == "owner" else {}))
     return code, why
 
 
@@ -4302,7 +4338,8 @@ def wake_hestia(rest):
     — отказ «нет задачи», код 2, claude не зовётся. Нет окна, кэша или роли (~/.claude/agents/hestia.md) — код 1 с
     командой сборки. Метка «остановлено вами», технический перезапуск и живая копия — отказ, как у start.
     Откуда — как у start: hq → zeus, иная роль → tick, без роли → owner; из окна роли без вашего слова в
-    owner-log/zeus.md за 15 мин — отказ, код 2, строка refused в capacity.jsonl, claude не зовётся."""
+    owner-log/zeus.md за 15 мин — отказ, код 2, строка refused в capacity.jsonl, claude не зовётся. Недельный потолок
+    владельца Гестию не держит (CAP_FREE, решение владельца 29.10)."""
     dry = "--dry-run" in rest
     restart = "--restart" in rest  # metis-0575: зависшую прежнюю Гестию стопит и убирает (claude stop, затем rm_previous)
     args = [a for a in rest[1:] if a not in ("--dry-run", "--restart")]
@@ -4348,7 +4385,7 @@ def wake_hestia(rest):
                               extra_env={"PANTHEON_TASK": tid, "PANTHEON_TASK_DIRECTION": str(head.get("direction") or "")})
 
 
-def wake_lead(rest):
+def wake_lead(rest, over=False):
     """pantheon wake <направление> --task <id> [--dry-run] (metis-0155, вариант Б): направление с coordinator = false
     ведёт Пританей, а задачу направления делает фоновое окно лида кода `hephaestus-<коротко>`. Окно — то же, что у
     координатора: settings/<направление>.json (песочница направления, её собирает sandbox_build — здесь не меняется),
@@ -4424,18 +4461,20 @@ def wake_lead(rest):
             print(f"{cmd}: {lead} уже запускается другой командой", file=sys.stderr)
             return 1
         return _start_session(lead, role, folder, window, task, [task], origin, dry, False, win,
-                              need_word=bool(role_env), cmd=cmd)
+                              need_word=bool(role_env), cmd=cmd, over_cap=over)
 
 
-def wake(rest):
-    """pantheon wake [--dry-run]: прерванные сессии Пантеона (failed, stopped) с открытой задачей — поднять и сказать
-    «продолжай». Свои метки «остановлено вами» и чужие сессии (не направление и не daedalus-*) не трогает."""
+def wake(rest, over=False):
+    """pantheon wake [--dry-run] [--over-cap]: прерванные сессии Пантеона (failed, stopped) с открытой задачей — поднять
+    и сказать «продолжай». Свои метки «остановлено вами» и чужие сессии (не направление и не daedalus-*) не трогает.
+    Недельный потолок владельца достигнут — отказ, код 2, никого не поднимает (metis-0444; --over-cap — только ваш
+    терминал); --dry-run потолок не проверяет."""
     dry = "--dry-run" in rest
     with lock("wake", block=False) as got:
         if not got:
             print("pantheon wake: уже идёт в другом процессе")
             return 0
-        return _wake(dry)
+        return _wake(dry, over)
 
 
 def capacity_note(target, origin, agents, result="allowed"):
@@ -4447,11 +4486,17 @@ def capacity_note(target, origin, agents, result="allowed"):
                   else round(m["swap_gb"], 2), "red": bool(m["red"]), "unknown": m["unknown"], "result": result})
 
 
-def _wake(dry):
+def _wake(dry, over=False):
     m = maintenance_active()
     if m:
         print(f"идёт технический перезапуск ({m.get('reason')}) — будить некого до pantheon restart --go")
         return 0
+    if not dry:
+        role = os.environ.get("PANTHEON_ROLE") or ""
+        cap = night_mod().launch_cap("zeus" if role == "hq" else "tick" if role else "owner", over)
+        if cap:
+            print(f"pantheon wake: отказ — {cap}; никого не поднимаю", file=sys.stderr)
+            return START_REFUSED
     agents = agents_all()
     if agents is None:
         print("pantheon wake: claude agents --json не ответил", file=sys.stderr)
@@ -7930,7 +7975,7 @@ WATCH_CMDS = {"watch", "agents", "revisits", "stop", "resume", "pause", "restart
               "launch-question"}
 
 
-def watch_cmd(cmd, rest):
+def watch_cmd(cmd, rest, over=False):
     import importlib.util
     spec = importlib.util.spec_from_file_location("pantheon_watch", os.path.join(LIB, "watch.py"))
     w = importlib.util.module_from_spec(spec)
@@ -7938,7 +7983,7 @@ def watch_cmd(cmd, rest):
     w.set_core(sys.modules[__name__])
     who = " ".join((os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "владелец").split())[:40]
     if cmd == "wake":
-        return w.wake_one(rest, who)
+        return w.wake_one(rest, who, over)
     return {"watch": lambda: w.watch(dry="--dry-run" in rest), "agents": w.agents_cmd, "revisits": w.revisits,
             "stop": lambda: w.stop(rest, who), "resume": lambda: w.resume(rest, who), "pause": lambda: w.pause(rest, who),
             "restart": lambda: w.restart(rest, who), "saved": lambda: w.saved_cmd(rest, who), "who": w.who,
@@ -8651,16 +8696,18 @@ def main(argv):
     if cmd == "start":
         return start(rest)
     if cmd == "wake":
+        over = OVER_CAP in rest  # metis-0444: флаг в любом месте строки, до разбора остального
+        rest = [a for a in rest if a != OVER_CAP]
         if rest[:1] == ["hestia"]:
-            return wake_hestia(rest)
+            return wake_hestia(rest)  # потолок Гестию не держит (CAP_FREE)
         if rest and not rest[0].startswith("-") and "--task" in rest:  # окно лида направления без координатора
-            return wake_lead(rest)
+            return wake_lead(rest, over)
         if rest and not rest[0].startswith("-") and rest[0] in hq_led():
             print(f"pantheon wake: {hq_led_why(rest[0])}", file=sys.stderr)
             return 2
         if rest and not rest[0].startswith("-"):
-            return watch_cmd("wake", rest)
-        return wake(rest)
+            return watch_cmd("wake", rest, over)
+        return wake(rest, over)
     if cmd == "roles" and rest[:1] == ["build"]:
         src = out = None
         flags = rest[1:]

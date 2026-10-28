@@ -2,8 +2,9 @@
 """Недельный потолок владельца ([limits.owner_cap], metis-0403; раньше дневной metis-0275).
 
 Потолок только сужает: достигнут (неделя ≥ pct) — autostart, wake и respawn отказаны днём и ночью, новые субагенты из
-окон координаторов — тоже (хук `pantheon night agent-gate`); ниже потолка — поведение как без него (жёлтая и красная
-зона, hard_pct, ночь). При достижении — одна тревога и одна карточка Зевсу на неделю и pct.
+окон координаторов и штаба — тоже (хук `pantheon night agent-gate`); задачи `claude -p` тика ждут, запуск по ответу в
+окне вопросов отказан (metis-0444; ручные start и wake — test_start.py); ниже потолка — поведение как без него (жёлтая
+и красная зона, hard_pct, ночь). При достижении — одна тревога и одна карточка Зевсу на неделю и pct.
 
 Запуск: python3 -I plugins/pantheon/tests/test_owner_cap.py  (код выхода 0 — все прошли)
 Помощники (Env, hm, check) — из test_night.py.
@@ -74,11 +75,14 @@ def test_criterion_cap50_week50():
     for kind in ("autostart", "wake", "respawn"):
         ok, why = N.gate(kind, TN_NIGHT, heavy=0)
         check(not ok and "потолок владельца" in why, f"ночь, потолок достигнут, {kind}: {ok} {why}")
-    # окно координатора и мастерская — отказ с причиной; штаб, окна задач и терминал — нет
-    for role in ("domain-coordinator", "workshop"):
+    # окно координатора, мастерская и штаб (metis-0444) — отказ с причиной; окна задач и терминал — нет
+    for role in ("domain-coordinator", "workshop", "hq"):
         why = with_role(role, lambda: N.agent_gate(TN_NIGHT))  # noqa: B023
         check(why and "потолок владельца 50 %" in why and "не запускай" in why, f"agent_gate {role}: {why!r}")
-    for role in ("hq", "job", "", None):
+    hq_why = with_role("hq", lambda: N.agent_gate(TN_NIGHT)) or ""
+    check(hq_why.startswith("Пантеон: недельный потолок") and "Субагентов не запускай" in hq_why
+          and "отвечай владельцу сам" in hq_why and "остановилась" not in hq_why, f"agent_gate hq: {hq_why!r}")
+    for role in ("job", "clio", "hestia", "", None):
         check(with_role(role, lambda: N.agent_gate(TN_NIGHT)) is None, f"agent_gate отказал роли {role!r}")
     cards = e.cards()
     check(len(cards) == 1, f"карточек должна быть одна: {sorted(cards)}")
@@ -313,18 +317,19 @@ def test_hook_agent_gate():
     with open(os.path.join(fake, "bin", "pantheon"), "w") as fh:
         fh.write("#!/bin/sh\necho STARTED \"$@\"\n")
     os.chmod(os.path.join(fake, "bin", "pantheon"), 0o755)
-    for role in ("hq", "job", "", None):
+    for role in ("job", "clio", "", None):
         r = run(_cli_env(e, T, role=role, CLAUDE_PLUGIN_ROOT=fake))
         check(r.returncode == 0 and r.stdout == "", f"роль {role!r}: хук запустил pantheon: {r.stdout!r}")
-    r = run(_cli_env(e, T, CLAUDE_PLUGIN_ROOT=fake))
-    check(r.stdout.strip() == "STARTED night agent-gate", f"координатор с owner_cap: {r.stdout!r} {r.stderr!r}")
+    for role in ("domain-coordinator", "workshop", "hq"):
+        r = run(_cli_env(e, T, role=role, CLAUDE_PLUGIN_ROOT=fake))
+        check(r.stdout.strip() == "STARTED night agent-gate", f"{role} с owner_cap: {r.stdout!r} {r.stderr!r}")
     e2 = env(50.0, 50.0, sec="")
     r = run(_cli_env(e2, T, CLAUDE_PLUGIN_ROOT=fake))
     check(r.returncode == 0 and r.stdout == "", f"без owner_cap хук запустил pantheon: {r.stdout!r}")
     r = run(_cli_env(e2, T, CLAUDE_PLUGIN_ROOT=fake, PANTHEON_HOME=os.path.join(e2.tmp, "нет")))
     check(r.returncode == 0 and r.stdout == "", f"без schedule.toml хук запустил pantheon: {r.stdout!r}")
     # настоящий плагин: достигнут — отказ с причиной, код 0
-    for role in ("domain-coordinator", "workshop"):
+    for role in ("domain-coordinator", "workshop", "hq"):
         r = run(_cli_env(e, T, role=role))
         try:
             out = json.loads(r.stdout)["hookSpecificOutput"]
@@ -342,6 +347,127 @@ def test_hook_agent_gate():
     last = (r.stderr.strip().splitlines() or [""])[-1]
     check(r.returncode == 1 and r.stdout == "" and last.startswith("pantheon night agent-gate: потолок не проверен"),
           f"сбой хука: {r.returncode} {r.stdout!r} {r.stderr[-300:]!r}")
+
+
+def test_launch_cap():
+    """metis-0444: launch_cap — причина отказа ручному запуску по origin; --over-cap снимает только у owner; ниже
+    потолка и без него — None; достигнут — карточка одна; сбой расчёта — не отказ, строка в stderr и тревога."""
+    e = env(50.0, 50.0)
+    own = N.launch_cap("owner", t=T)
+    check(own and own.startswith("недельный потолок владельца 50 % достигнут: неделя 50 %") and "zeus-limit-budget" in own
+          and "до сброса недели" in own and "с --over-cap" in own and "может только владелец" not in own, f"owner: {own!r}")
+    check(N.launch_cap("owner", True, t=T) is None, "--over-cap из терминала не снял отказ")
+    for origin in ("zeus", "tick"):
+        why = N.launch_cap(origin, t=T)
+        check(why and "может только владелец" in why and "--over-cap" not in why, f"{origin}: {why!r}")
+        why = N.launch_cap(origin, True, t=T)
+        check(why and "может только владелец" in why and "только в его терминале" in why, f"{origin} + over: {why!r}")
+    check(len(e.cards()) == 1 and cap_alerts(e) == 1, f"карточек {len(e.cards())}, тревог {cap_alerts(e)}")
+    e = env(49.9, 49.0)
+    check(all(N.launch_cap(o, t=T) is None for o in ("owner", "zeus", "tick")), "ниже потолка — отказ")
+    e = env(90.0, 50.0, sec="")
+    check(all(N.launch_cap(o, t=T) is None for o in ("owner", "zeus", "tick")), "без потолка — отказ")
+    e = env(60.0, 50.0)
+    import contextlib
+    import io
+    real, err = N.measure, io.StringIO()
+    N.measure = lambda *a, **k: 1 / 0
+    try:
+        with contextlib.redirect_stderr(err):
+            got = N.launch_cap("tick", t=T)
+    finally:
+        N.measure = real
+    last = (err.getvalue().strip().splitlines() or [""])[-1]
+    check(got is None and last.startswith("pantheon: потолок владельца не проверен (ZeroDivisionError")
+          and "потолок владельца не проверен" in e.alerts(), f"сбой расчёта: {got!r} {last!r}")
+
+
+JOBS = ('[[job]]\nname = "clio-weekly"\ncommand = "claude -p --agent clio \\"проход\\""\nevery = 5\n'
+        '[[job]]\nname = "scout"\ncommand = "claude -p --agent iris \\"x\\""\nevery = 5\nclass = "heavy"\nclaude = true\n'
+        '[[job]]\nname = "view"\ncommand = "pantheon view"\nevery = 5\n')
+
+
+def _runs(e):
+    p = os.path.join(e.state, "dryrun.log")
+    return [ln.split()[1] for ln in open(p)] if os.path.exists(p) else []
+
+
+def _jst(e, name):
+    p = os.path.join(e.state, "jobs", name + ".json")
+    return json.load(open(p)) if os.path.exists(p) else {}
+
+
+def test_tick_claude_jobs_wait():
+    """metis-0444: потолок достигнут — задачи `claude -p` тика (лёгкая и тяжёлая) не запускаются и ждут с причиной,
+    срок не сдвигается; остальные задачи идут. Ниже потолка — запускаются."""
+    e = env(60.0, 50.0, sec=CAP50 + JOBS)
+    fake = {"PANTHEON_DRYRUN": "1", "PANTHEON_FAKE_WAKE": str(T - 7200), "PANTHEON_FAKE_AC": "1",
+            "PANTHEON_FAKE_IDLE": "1200", "PANTHEON_FAKE_LIMIT": "10"}
+    r = subprocess.run([PY311, "-I", os.path.join(TN.LIB, "run.py"), "tick"],
+                       env=_cli_env(e, T, role=None, **fake), capture_output=True, text=True, timeout=60)
+    check(r.returncode == 0, f"тик: {r.returncode} {r.stderr[-300:]!r}")
+    check(_runs(e) == ["view"], f"под потолком тик запустил: {_runs(e)}")
+    for name in ("clio-weekly", "scout"):
+        st = _jst(e, name)
+        check("потолок владельца 50 %" in str(st.get("waiting")) and st.get("last_start") is None,
+              f"{name} под потолком: {st}")
+    e.snap(T + 120, 49.0, e.resets)
+    r = subprocess.run([PY311, "-I", os.path.join(TN.LIB, "run.py"), "tick"],
+                       env=_cli_env(e, T + 120, role=None, **fake), capture_output=True, text=True, timeout=60)
+    check(sorted(_runs(e)) == ["clio-weekly", "scout", "view"], f"ниже потолка тик не запустил: {_runs(e)} {r.stderr[-300:]!r}")
+    check(not _jst(e, "scout").get("waiting"), f"ждёт после снятия: {_jst(e, 'scout')}")
+
+
+def test_run_job_claude_cap():
+    """metis-0444: прямой `pantheon run-job` задачи `claude -p` при потолке — код 0, claude не зовётся, задача ждёт;
+    ниже потолка — claude идёт."""
+    e = env(60.0, 50.0, sec=CAP50 + JOBS)
+    os.makedirs(os.path.join(e.state, "settings"), exist_ok=True)
+    open(os.path.join(e.state, "settings", "job-clio.json"), "w").write("{}")
+    bindir, mark = os.path.join(e.tmp, "bin"), os.path.join(e.tmp, "claude-ran")
+    os.makedirs(bindir)
+    with open(os.path.join(bindir, "claude"), "w") as fh:
+        fh.write(f"#!/bin/sh\necho \"$@\" >> {mark}\n")
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+
+    def run_job(t):
+        env_ = _cli_env(e, t, role=None, PANTHEON_FAKE_IDLE="1200", PANTHEON_FAKE_AC="1")
+        env_["PATH"] = bindir + ":" + env_["PATH"]
+        return subprocess.run([PY311, "-I", os.path.join(TN.LIB, "run.py"), "run-job", "clio-weekly"], env=env_,
+                              capture_output=True, text=True, timeout=60)
+    r = run_job(T)
+    st = _jst(e, "clio-weekly")
+    check(r.returncode == 0 and not os.path.exists(mark) and "потолок владельца 50 %" in str(st.get("waiting"))
+          and st.get("last_start") is None, f"run-job под потолком: {r.returncode} {st} {r.stderr[-300:]!r}")
+    e.snap(T + 60, 49.0, e.resets)
+    r = run_job(T + 60)
+    check(r.returncode == 0 and os.path.exists(mark) and "waiting" not in _jst(e, "clio-weekly"),
+          f"run-job ниже потолка: {r.returncode} {_jst(e, 'clio-weekly')} {r.stderr[-300:]!r}")
+
+
+def test_word_launch_cap():
+    """metis-0444: ответ «Да — запустить|перезапустить|вернуть» при достигнутом потолке не исполняется — причина в
+    результате; ниже потолка проверка потолка не мешает."""
+    W = P.watch_mod()
+    e = env(60.0, 50.0)
+    for verb in ("запустить", "перезапустить", "вернуть"):
+        res = W._word_do(verb, "athena-shop", "metis-0001", "2026-10-14 12:00:00", f"Да — {verb} athena-shop", [], [])
+        check(res.startswith("не исполняю: недельный потолок владельца 50 %"), f"{verb}: {res!r}")
+    # Гестию потолок не держит (решение владельца 29.10, PR #193): до запуска доходит — «уже поднято этим проходом»
+    W.ONESHOT_STARTED.append("hestia")
+    try:
+        res = W._word_do("запустить", "hestia", "metis-0001", "2026-10-14 12:00:00", "Да — запустить hestia", [], [])
+    finally:
+        W.ONESHOT_STARTED.remove("hestia")
+    check(res == "уже поднято этим проходом", f"hestia под потолком: {res!r}")
+    e = env(49.0, 49.0)
+    W.ONESHOT_STARTED.append("athena-shop")  # дальше — «уже поднято этим проходом», без запуска
+    try:
+        res = W._word_do("запустить", "athena-shop", "metis-0001", "2026-10-14 12:00:00", "Да — запустить athena-shop",
+                         [], [])
+    finally:
+        W.ONESHOT_STARTED.remove("athena-shop")
+    check(res == "уже поднято этим проходом", f"ниже потолка: {res!r}")
 
 
 if __name__ == "__main__":
