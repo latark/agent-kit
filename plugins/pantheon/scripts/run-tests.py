@@ -73,7 +73,7 @@ SLOW = {
     "pantheon/test_setup.py": 360,  # 113
     "pantheon/test_start.py": 360,  # 105
     "pantheon/test_sync_quarantine.py": 240,  # 70
-    "guard/test_guard.py": 240,  # 64
+    "guard/test_guard.py": 600,  # 64; на Linux в Docker под нагрузкой 120-240 с, на 2-ядерном ubuntu-latest дольше
     "pantheon/test_executors.py": 180,  # 57
     "pantheon/test_tick.py": 180,  # 50
     "pantheon/test_merge.py": 180,  # 53
