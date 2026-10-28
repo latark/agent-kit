@@ -412,7 +412,14 @@
 - `plugins/pantheon/scripts/run-tests.py` — параллельный прогон `tests/test_*.py` плагинов (metis-0450): каждый
   файл — свой процесс в своей группе со своим HOME и TMPDIR, воркеров min(ядра/2, 3), медленные первыми,
   таймаут файла и SIGTERM/HUP/INT гасят группы файлов; код не 0 при падении, таймауте, 0 файлов и коде 0 без
-  строки итога. Подробности — в шапке скрипта.
+  строки итога. `--affected` (metis-0451) — только тесты, связанные с изменёнными от `origin/main` (или `--base`)
+  файлами, по карте `scripts/affected-map.json`: правка общего файла (lib/pantheon.py, hooks/python.sh, сам раннер,
+  карта), файл вне карты, ошибка git — весь набор; ничего не затронуто — код 3 «нечего гонять». Шлюз и выпуск гоняют
+  полный набор. Подробности — в шапке скрипта.
+- `plugins/pantheon/scripts/affected-map.py` — строит карту для `--affected` прогоном всех тестов: каждый файл тестов
+  в своей копии репозитория с метками, которые записывают, какие файлы он загрузил, открыл, запустил или скопировал
+  (около 8 мин при трёх воркерах). Карту строят заново после большой правки тестов; то, что устаревшая карта
+  пропустила, ловит полный прогон.
 - `plugins/pantheon/scripts/baseline.py` — замер «как сейчас» по git и транскриптам (ORD-06); правила подсчёта — в шапке.
 - `plugins/pantheon/scripts/config-check.py` — проверка правок `~/.claude` для `sync.sh`: код и подозрительное — в
   карантин с объяснением на доске, остальное уходит само (SEC-15). Исключение (metis-0209): файл, побайтно равный
@@ -436,6 +443,8 @@
 ## Проверки
 
     heavy python3 -I plugins/pantheon/scripts/run-tests.py plugins/guard plugins/pantheon plugins/project-tools  # все сразу; так же — CI
+    heavy python3 -I plugins/pantheon/scripts/run-tests.py --affected plugins/guard plugins/pantheon plugins/project-tools  # во время правки
+    heavy python3 -I plugins/pantheon/scripts/affected-map.py plugins/guard plugins/pantheon plugins/project-tools  # карта заново
     python3 -I plugins/guard/tests/test_guard.py      # карта прав ~/ai/pantheon, domain, привилегии, protect-config, режимы
     python3 -I plugins/guard/tests/test_shell_diff.py # разбор Bash против настоящих zsh и bash
     python3 -I plugins/pantheon/tests/test_board.py   # задачи и доска владельца

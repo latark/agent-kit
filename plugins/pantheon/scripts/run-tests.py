@@ -5,6 +5,21 @@
   -j N            воркеров (по умолчанию min(ядра // 2, 3), при load1 выше числа ядер — 1)
   --timeout С     предел одного файла, с (по умолчанию TIMEOUT; у медленных файлов свой — SLOW)
   --log-dir ПАПКА полный вывод каждого файла — в ПАПКА/<плагин>__<файл>.log
+  --affected      только затронутое (metis-0451): файлы тестов, связанные с изменёнными файлами, по карте MAP
+  --base REF      база для --affected (по умолчанию origin/main)
+
+Только затронутое — для агента во время правки и для PR; полный набор — без ключа (на main, в шлюзе и перед
+выпуском). Изменённые файлы — `git diff --no-renames` рабочего дерева от merge-base REF и HEAD, плюс новые файлы вне
+.gitignore. Карта MAP (scripts/affected-map.json) построена прогоном: какой файл тестов какой файл репозитория
+загрузил, открыл или запустил (как — шапка scripts/affected-map.py). Каждый изменённый файл (путь от корня):
+  - общий (FULL: lib/pantheon.py, hooks/python.sh, сам раннер, карта) — весь набор;
+  - сам tests/test_*.py одной из папок — он сам; удалённый файл тестов — ничего;
+  - есть в карте — его файлы тестов; пустой список — файл не задел ни один тест (AGENTS.md);
+  - иначе (новый файл, карты нет или она другой версии) — весь набор: неизвестное гоняет всё.
+Файлы тестов, которых карта не знает (новые после её сборки) или которые при сборке упали (broken), идут всегда.
+Тесты плагинов, которых нет в аргументах, не идут. Изменений нет или ни один не ведёт к тестам — код 3 и строка
+«нечего гонять», а не пустой зелёный. Ошибка git (нет базы, не репозиторий, мелкий клон без merge-base) — весь
+набор и причина строкой: при сомнении раннер гоняет всё, а не ничего.
 
 Каждый tests/test_*.py — отдельный процесс `<этот python> -I tests/<файл>` в папке плагина: свой HOME и TMPDIR во
 временной папке прогона, окружение без PANTHEON_*, FORCE_COLOR и CLICOLOR_FORCE, с NO_COLOR=1. Тесты идут на
@@ -25,6 +40,7 @@ Python 3.11+ (metis-0571); тот же скрипт гоняет workflow tests 
 или с итогом без проверок, или раннер прерван сигналом. Число проверок файла — из его итоговой строки, без числа в ней — по строкам `ok`.
 Только stdlib.
 """
+import json
 import os
 import re
 import shutil
@@ -70,6 +86,21 @@ NO_SUMMARY = frozenset({
     "pantheon/test_merge.py",  # «все прошли» — без числа, TEST_SUMMARY его не берёт
     "pantheon/test_path_clean.py",
     "pantheon/test_read.py",  # «все прошли»
+})
+# Карта для --affected (metis-0451): строит scripts/affected-map.py прогоном всех тестов, правится только им.
+MAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "affected-map.json")
+MAP_VERSION = 1
+# Общие файлы: их правка гонит весь набор, что бы ни говорила карта (их грузит почти каждый тест или они меняют
+# сам выбор тестов).
+FULL = frozenset({
+    "plugins/pantheon/lib/pantheon.py",
+    "plugins/pantheon/lib/run.py",
+    "plugins/pantheon/lib/find-python.sh",
+    "plugins/pantheon/hooks/python.sh",
+    "plugins/guard/hooks/python.sh",
+    "plugins/pantheon/scripts/run-tests.py",
+    "plugins/pantheon/scripts/affected-map.py",
+    "plugins/pantheon/scripts/affected-map.json",
 })
 
 # Строка итога файла — последняя непустая строка вывода. Прежде такая же копия в pantheon.py разбирала вывод локального
@@ -120,6 +151,81 @@ def collect(pdirs):
             if f.startswith("test_") and f.endswith(".py"):
                 items.append((os.path.abspath(pdir), f"{name}/{f}"))
     return items
+
+
+class GitError(Exception):
+    pass
+
+
+def _git(cwd, *args):
+    r = subprocess.run(["git", "-c", "core.quotePath=false", *args], cwd=cwd, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if r.returncode != 0:
+        err = r.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise GitError(f"git {' '.join(args[:2])}: {err[-1] if err else f'код {r.returncode}'}")
+    return r.stdout.decode("utf-8", "replace")
+
+
+def changed_files(pdir, base):
+    """(корень репозитория, короткий sha merge-base, [пути от корня]) — изменённое рабочим деревом от merge-base base и
+    HEAD (закоммиченное, в индексе, не в индексе, удалённое) и новые файлы вне .gitignore."""
+    root = _git(pdir, "rev-parse", "--show-toplevel").strip()
+    mb = _git(root, "merge-base", base, "HEAD").strip()
+    names = _git(root, "diff", "--name-only", "--no-renames", "-z", mb, "--").split("\0")
+    names += _git(root, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
+    return root, mb[:7], sorted({n for n in names if n})
+
+
+def load_map(path=None):
+    """(карта {"tests": {метка}, "always": {метка}, "files": {путь: {метка}}} или None, почему None)."""
+    path = MAP if path is None else path
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        if raw.get("version") != MAP_VERSION:
+            return None, f"карта {os.path.basename(path)} версии {raw.get('version')!r}, нужна {MAP_VERSION}"
+        tests = list(raw["tests"])
+        files = {k: {tests[i] for i in v} for k, v in raw["files"].items()}
+        return {"tests": set(tests), "always": set(raw.get("broken") or ()), "files": files}, None
+    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as e:
+        return None, f"карту {os.path.basename(path)} не прочесть — {type(e).__name__}: {e}"
+
+
+def select(changed, root, items, amap):
+    """(выбранные items или None — весь набор, [(путь, почему весь набор)], [метки, что идут всегда]) по карте amap
+    (load_map)."""
+    labels = {label for _, label in items}
+    plugins = {}
+    for pdir, label in items:
+        plugins.setdefault(label.split("/", 1)[0], os.path.realpath(pdir))
+    root = os.path.realpath(root)
+    want, unknown = set(), []
+    for path in changed:
+        if path in FULL:
+            unknown.append((path, "общий файл"))
+            continue
+        full = os.path.join(root, path)
+        hit = None
+        for name, pd in plugins.items():
+            rel = os.path.relpath(full, pd)
+            if re.fullmatch(r"tests/test_[^/]+\.py", rel):
+                hit = f"{name}/{rel[len('tests/'):]}"
+                break
+        if hit is not None:
+            if hit in labels:
+                want.add(hit)
+            continue  # удалённый файл тестов ничего не проверяет
+        if path in amap["files"]:
+            want.update(lb for lb in amap["files"][path] if lb in labels)
+            continue
+        unknown.append((path, "нет в карте"))
+    if unknown:
+        return None, unknown, []
+    always = sorted(lb for lb in labels if lb not in amap["tests"] or lb in amap["always"])
+    if not want:
+        return [], [], always
+    want.update(always)
+    return [it for it in items if it[1] in want], [], always
 
 
 def order(items, slow=None, serial=None):
@@ -236,18 +342,22 @@ class Job:
 
 
 def parse(argv):
-    opts = {"jobs": None, "timeout": None, "log_dir": None, "dirs": []}
+    opts = {"jobs": None, "timeout": None, "log_dir": None, "dirs": [], "affected": False, "base": None}
     it = iter(argv)
     for a in it:
         if a in ("-h", "--help"):
             print(__doc__)
             sys.exit(0)
-        elif a in ("-j", "--jobs", "--timeout", "--log-dir"):
+        elif a == "--affected":
+            opts["affected"] = True
+        elif a in ("-j", "--jobs", "--timeout", "--log-dir", "--base"):
             v = next(it, None)
             if v is None:
                 sys.exit(f"run-tests: {a} без значения")
             if a == "--log-dir":
                 opts["log_dir"] = v
+            elif a == "--base":
+                opts["base"] = v
             else:
                 try:
                     num = int(v) if a != "--timeout" else float(v)
@@ -260,7 +370,40 @@ def parse(argv):
             sys.exit(f"run-tests: неизвестный ключ {a}")
         else:
             opts["dirs"].append(a)
+    if opts["base"] is not None and not opts["affected"]:
+        sys.exit("run-tests: --base без --affected — полный прогон базы не требует")
     return opts
+
+
+def pick_affected(items, dirs, base, map_path=None):
+    """(items для прогона или None — выйти с кодом code, code). Печатает, что выбрано и почему."""
+    head = f"run-tests: затронутое от {base}"
+    try:
+        root, mb, changed = changed_files(dirs[0], base)
+    except (GitError, OSError) as e:
+        print(f"{head}: изменённые файлы не получить — {e} — весь набор", flush=True)
+        return items, 0
+    head += f" ({mb})"
+    if not changed:
+        print(f"{head}: изменений нет — нечего гонять (полный прогон — без --affected)")
+        return None, 3
+    amap, why = load_map(map_path)
+    if amap is None:
+        print(f"{head}: {why} — весь набор", flush=True)
+        return items, 0
+    chosen, unknown, always = select(changed, root, items, amap)
+    if unknown:
+        path, why = unknown[0]
+        more = f" и ещё {len(unknown) - 1}" if len(unknown) > 1 else ""
+        print(f"{head}: изменено {len(changed)}, {path} — {why}{more} — весь набор", flush=True)
+        return items, 0
+    if not chosen:
+        print(f"{head}: изменено {len(changed)}, ни один не проверяется тестами по карте — нечего гонять "
+              f"({', '.join(changed[:5])}{' …' if len(changed) > 5 else ''})")
+        return None, 3
+    extra = f", из них всегда (карта их не знает или они упали при сборке): {', '.join(always)}" if always else ""
+    print(f"{head}: изменено {len(changed)}, тестов {len(chosen)} из {len(items)}{extra}", flush=True)
+    return chosen, 0
 
 
 def main(argv):
@@ -272,11 +415,16 @@ def main(argv):
         if not os.path.isdir(d):
             print(f"run-tests: нет папки {d}")
             return 2
-    par, ser = order(collect(opts["dirs"]))
-    total_files = len(par) + len(ser)
-    if not total_files:
+    items = collect(opts["dirs"])
+    if not items:
         print(f"run-tests: ни одного файла tests/test_*.py в {' '.join(opts['dirs'])} — нечего проверять")
         return 1
+    if opts["affected"]:
+        items, code = pick_affected(items, opts["dirs"], opts["base"] or "origin/main")
+        if items is None:
+            return code
+    par, ser = order(items)
+    total_files = len(par) + len(ser)
     cpus, load = os.cpu_count(), load1()
     n = opts["jobs"] or workers(cpus, load)
     print(f"run-tests: {total_files} файлов, воркеров {n} (ядер {cpus}, load1 "
