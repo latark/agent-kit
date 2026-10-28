@@ -5,7 +5,7 @@
 плановый проход (launchd, вне песочницы окон) запускает проверку проекта под своим профилем sandbox-exec и отдаёт
 результат. Образец — `pantheon merge request|run`: заявка роли → проход тика отдельным процессом.
 
-  pantheon outside test [--script ИМЯ] [--wait С]    проверка проекта на HEAD этой папки (дерево чистое): команда —
+  pantheon outside test [--script ИМЯ] [--wait С]    проверка проекта на HEAD этой папки (дерево чистое; неотслеживаемый .claude/worktrees/ не в счёт): команда —
                                          первая строка .pantheon-verify (из origin/HEAD, иначе из HEAD), иначе скрипт
                                          test/check package.json, иначе pytest; --script — скрипт package.json
   pantheon outside serve [--script ИМЯ] [--minutes N] [--wait С]   dev-сервер (скрипт dev или --script) → адрес
@@ -269,11 +269,17 @@ def remotes(d):
     return sorted({remote_id(ln.split()[1]) for ln in out.splitlines() if len(ln.split()) >= 2})
 
 
+# Живые worktree субагентов Claude Code лежат в .claude/worktrees/ и для git неотслеживаемые; грязью их не считаем.
+# Только строка `?? ` с этим путём от корня репозитория: `.claude/worktrees-x/` и `a/.claude/worktrees/` не подходят.
+WORKTREES_UNTRACKED = "?? .claude/worktrees/"
+
+
 def head_state(d):
     """(HEAD, дерево чистое) папки d; HEAD None — не git или нет коммитов."""
     h = (git(d, "rev-parse", "HEAD") or "").strip().lower()
     st = git(d, "status", "--porcelain")
-    return (h if SHA_RE.fullmatch(h) else None), (st is not None and not st.strip())
+    clean = st is not None and all(ln.startswith(WORKTREES_UNTRACKED) for ln in st.splitlines() if ln.strip())
+    return (h if SHA_RE.fullmatch(h) else None), clean
 
 
 def toplevel(d):

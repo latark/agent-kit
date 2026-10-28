@@ -441,6 +441,34 @@ res = O.load_result(q, rid) or {}
 check("грязное дерево: отказ, записи нет", res.get("state") == "failed" and "не чистое" in res.get("why", ""), res)
 git(APP, "checkout", "--", "t.py")
 
+
+# .claude/worktrees/ (живые worktree субагентов) — не грязь; прочее неотслеживаемое и правки — грязь
+def _dirty_case(name, mk, want):
+    d = tempfile.mkdtemp(prefix="hs-", dir=os.environ.get("TMPDIR"))
+    git(d, "init", "-q")
+    commit(d, {"a.txt": "1\n", ".claude/settings.json": "{}"}, "i")
+    mk(d)
+    check(f"head_state: {name}", O.head_state(d)[1] is want, git(d, "status", "--porcelain"))
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def _touch(d, rel, text="x"):
+    os.makedirs(os.path.dirname(os.path.join(d, rel)), exist_ok=True)
+    with open(os.path.join(d, rel), "w") as fh:
+        fh.write(text)
+
+
+_dirty_case("только ?? .claude/worktrees/ — чисто", lambda d: _touch(d, ".claude/worktrees/x/f"), True)
+_dirty_case("?? other.txt — грязно", lambda d: _touch(d, "other.txt"), False)
+_dirty_case("worktrees и ?? other.txt — грязно", lambda d: (_touch(d, ".claude/worktrees/x/f"), _touch(d, "other.txt")), False)
+_dirty_case("worktrees и правка отслеживаемого — грязно",
+            lambda d: (_touch(d, ".claude/worktrees/x/f"), _touch(d, "a.txt", "2\n")), False)
+_dirty_case(".claude/worktrees-evil/ — грязно", lambda d: _touch(d, ".claude/worktrees-evil/f"), False)
+_dirty_case("a/.claude/worktrees/ — грязно", lambda d: _touch(d, "a/.claude/worktrees/f"), False)
+_dirty_case("отслеживаемый файл под worktrees с правкой — грязно",
+            lambda d: (_touch(d, ".claude/worktrees/t"), git(d, "add", "-f", ".claude/worktrees/t"),
+                       git(d, "commit", "-q", "-m", "t"), _touch(d, ".claude/worktrees/t", "y")), False)
+
 # подложенная ссылка вместо заявки — не читается и не исполняется
 q = os.path.join(CACHE, "athena-x", "outside")
 secret = os.path.join(_ROOT, "secret.json")
