@@ -4616,6 +4616,12 @@ def _marked(text, tmpl):
 ROLES_DEFERRED = {}
 
 
+def _head_lines(text):
+    """Строки шапки роли между --- и ---; [] — шапки нет."""
+    end = text.find("\n---\n", 3) if text.startswith("---\n") else -1
+    return text[4:end].splitlines() if end >= 0 else []
+
+
 def _head_names(text):
     """Значения полей name: шапки роли без кавычек, по порядку; [] — шапки или поля нет, два и больше — повтор."""
     end = text.find("\n---\n", 3) if text.startswith("---\n") else -1
@@ -4705,6 +4711,15 @@ def roles_build(src=None, out=None, role_errors=None):
                     else "повторён (" + ", ".join(f"«{g}»" for g in got) + ")")
             err(tmpl, f"{tmpl} → {fname}: поле name: в шапке {what} — не совпадает с именем роли «{fname[:-3]}», "
                 f"роль не собрана")
+    # шаблон Bash(...) в disallowedTools шапки: Claude Code 2.1.312 убирает из-за него Bash целиком (metis-0576, Гестия
+    # осталась без Bash). Запреты по командам — в guard и deny окна, а не в шапке роли; роль не собирается, прежняя
+    # собранная версия остаётся
+    for fname in sorted(want):
+        if any(re.match(r"disallowedTools\s*:.*\bBash\s*\(", ln) for ln in _head_lines(want[fname][1])):
+            tmpl = want.pop(fname)[0]
+            kept.add(fname)
+            err(tmpl, f"{tmpl} → {fname}: Bash(...) в disallowedTools шапки убирает Bash целиком (metis-0576) — запрет "
+                "команд ставят в guard или permissions.deny окна; роль не собрана")
     made = []
     if want:  # и на новой машине: ~/.claude/agents ещё нет, а общие роли плагина собрать надо
         os.makedirs(out, exist_ok=True)
