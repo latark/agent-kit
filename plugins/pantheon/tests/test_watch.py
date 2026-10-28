@@ -1809,6 +1809,25 @@ def test_status_long_and_swap_keep():
     check("работают сессий: 1" in e.alerts() and "claude attach" in e.alerts(), "тревога swap")
 
 
+def test_culprits_wired_0568():
+    """metis-0568: дежурный в красной зоне зовёт проверку «виновники памяти» — строка с таблицей в alerts.md, одна на
+    эпизод; в зелёной зоне и без подмены процессов (тесты не читают настоящий ps) строки нет. Подробно — test_culprits.py."""
+    e = Env()
+    folder = e.direction("athena-c")
+    gone = os.path.join(folder, ".claude", "worktrees", "agent-gone")
+    procs = json.dumps([{"pid": 4242, "ppid": 1, "age": 5 * 3600, "rss": 900 * 1024, "args": "node zprobe1.ts",
+                         "cwd": gone}])
+    e.run("watch", t=T0, extra={"PANTHEON_FAKE_SWAP": "9"})
+    check("виновники памяти" not in e.alerts(), "0568: без подмены процессов настоящий ps в тестах не читается")
+    e.run("watch", t=T0 + 60, extra={"PANTHEON_FAKE_PROCS": procs})
+    check("виновники памяти" not in e.alerts(), "0568: зелёная зона — без строки")
+    e.run("watch", t=T0 + 120, extra={"PANTHEON_FAKE_SWAP": "9", "PANTHEON_FAKE_PROCS": procs})
+    e.run("watch", t=T0 + 420, extra={"PANTHEON_FAKE_SWAP": "9", "PANTHEON_FAKE_PROCS": procs})
+    a = e.alerts()
+    check(a.count("виновники памяти") == 1 and "node zprobe1.ts (pid 4242) → athena-c, worktree agent-gone" in a
+          and "проверка «виновники памяти» упала" not in a, f"0568: строка виновников в тревогах: {a[-600:]}")
+
+
 def test_owner_logs_daily():
     """Раз в сутки: записи старше 30 дней уходят, права сужаются, изменение задним числом — тревога."""
     e = Env()

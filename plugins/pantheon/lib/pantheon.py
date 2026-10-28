@@ -131,6 +131,11 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском; без техперезапуска —
                                         метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code
+  pantheon reap [--apply] [--pid N …]   виновники памяти (lib/culprits.py, metis-0568): процессы claude/node/tsx/
+                                        next/vitest/pnpm и сироты multiprocessing старше 2 ч — чей, память, возраст;
+                                        --apply гасит только брошенное (worktree удалён, задача закрыта, сирота в
+                                        папках Пантеона) и печатает вопрос «[id] …» об остальном своём; --pid — после
+                                        «да» владельца, только процессы Пантеона (у Гестии — по `pantheon consent`)
   pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (плановый проход раз в неделю);
                                         запись закрыта (окно роли) — отчёт в stdout, причина в stderr, код 1
   pantheon metrics sync|summary|run     учёт по задачам: строки закрытых задач в ~/ai/pantheon/metrics/tasks.jsonl
@@ -669,12 +674,14 @@ BUILTIN_AGENTS = ["general-purpose", "claude", "Explore", "Plan", "statusline-se
 # выпуска, установка, сверка хеша, проверенное дерево — голый `claude plugin update` оставил бы непроверенное и
 # закрыл окна ролей), сборка окон и ролей, технический перезапуск окон и тревога. Остальные подкоманды pantheon — в песочнице, а какие ей
 # вообще можно, решает guard (правило hestia). Файловых правок, веба и субагентов у окна нет.
+# `pantheon reap` (metis-0568) — тоже мимо песочницы: в ней ps, lsof и kill чужих процессов не работают; что гасить,
+# решает сама команда (только брошенное в папках Пантеона, остальное — по «да» владельца через consent)
 # Наружу (metis-0562, «Да, по consent» владельца 27.10 22:38): сеть у песочницы пустая; мимо неё — только `git push`
 # и запись в PR (`gh pr create|edit`; в песочнице macOS они не работают, как у окон направлений) и `pantheon consent`
 # (читает журнал владельца). Условие — в guard: push и запись в PR без свежей метки именно этой задачи (PANTHEON_TASK
 # окна; метку ставит `pantheon consent` только на явное «да») — отказ
 HESTIA_EXCLUDED = ["pantheon plugins update", "pantheon plugins update *", "pantheon domains build",
-                   "pantheon restart *", "pantheon alert *", "pantheon consent *",
+                   "pantheon restart *", "pantheon alert *", "pantheon consent *", "pantheon reap", "pantheon reap *",
                    "git push", "git push *", "gh pr create *", "gh pr edit *"]
 HESTIA_CONSENT_DAYS = 1.0       # ответ владельца для метки Гестии — не старше суток
 HESTIA_DENY_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Agent"]
@@ -5749,6 +5756,9 @@ def direction(rest):
 # записи с номером его вопроса.
 CONSENT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 CONSENT_MAX = 1500
+# вопрос `pantheon reap --apply` об остальном своём (lib/culprits.py): «да» на него — метка <id>.reap со списком pid
+# из вопроса, а не метка push (metis-0568: согласия на push и на гашение не путаются)
+CONSENT_REAP_Q = "Погасить процессы Пантеона"
 
 
 CONSENT_ANSWER = re.compile(r"^ответ:[ \t]*(.*)$", re.M)
@@ -5833,6 +5843,9 @@ def consent(rest):
                       f"вопрос: {q.strip()}\nответ: {a.strip()}"))
     found.sort(key=lambda x: x[0])
     said_yes = any(consent_is_yes(body) for _, _, body in found)
+    last_yes = next(((head, body) for _, head, body in reversed(found) if consent_is_yes(body)), ("", ""))
+    reap_q = last_yes[1].split("\nответ:")[0]
+    reap_q = reap_q if CONSENT_REAP_Q in reap_q else None
     found = [(head, body if len(body) <= CONSENT_MAX else body[:CONSENT_MAX] + "…") for _, head, body in found]
     hint = (f"\nУпоминаний {qid} в словах владельца без окна вопросов: {mentions} — это не ответ; попроси Зевса "
             f"переспросить окном вопросов «[{qid}] …»." if mentions else "")
@@ -5844,14 +5857,20 @@ def consent(rest):
         for t, body in found:
             print(f"\n## {t}\n{body}")
         return 1
+    if hestia and reap_q is not None and "окно вопросов" not in last_yes[0]:
+        print(f"«Да» на {qid} о гашении процессов — галочкой на доске, а не в окне вопросов: метки нет, отчёт Зевсу.")
+        return 1
     if hestia:
         # метка «владелец ответил «да»»: по ней guard пускает окно Гестии в push и запись в PR на 2 часа, только для
-        # этой задачи (metis-0562). Нет метки (запись не удалась) — код 3, а не «согласие есть»
+        # этой задачи (metis-0562). Нет метки (запись не удалась) — код 3, а не «согласие есть». «Да» на вопрос о
+        # гашении — своя метка <id>.reap с pid из вопроса: её читает только pantheon reap (metis-0568)
         try:
             d = os.path.join(STATE, "hestia-consent")
             os.makedirs(d, exist_ok=True)
-            with open(os.path.join(d, qid), "w", encoding="utf-8") as fh:
+            with open(os.path.join(d, qid + (".reap" if reap_q is not None else "")), "w", encoding="utf-8") as fh:
                 fh.write(f"{stamp()} {qid}\n")
+                if reap_q is not None:
+                    fh.write("pids: " + " ".join(re.findall(r"\bpid (\d+)", reap_q)) + "\n")
         except OSError as e:
             print(f"pantheon consent: метку для окна записать не удалось ({e}) — наружу не пустят", file=sys.stderr)
             return 3
@@ -6725,6 +6744,21 @@ def board():
     if primary and os.environ.get("PANTHEON_METRICS") != "0":
         board_metrics(T)
     return 0
+
+
+_CULPRITS = None
+
+
+def culprits_mod():
+    """lib/culprits.py — виновники памяти в красной зоне и pantheon reap (metis-0568)."""
+    global _CULPRITS
+    if _CULPRITS is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_culprits", os.path.join(LIB, "culprits.py"))
+        _CULPRITS = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_CULPRITS)
+        _CULPRITS.set_core(sys.modules[__name__])
+    return _CULPRITS
 
 
 def boardstatus_mod():
@@ -8532,6 +8566,8 @@ def main(argv):
         return approve(rest)
     if cmd == "consent":
         return consent(rest)
+    if cmd == "reap":
+        return culprits_mod().reap(rest)
     if cmd in WATCH_CMDS:
         return watch_cmd(cmd, rest)
     if cmd == "usage":

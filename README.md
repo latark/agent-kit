@@ -187,11 +187,13 @@
   Окно Гестии `settings/hestia.json` (metis-0245): служебная роль hestia пересобирает и перезапускает окна и сверяет выпуск (ставит его плановый проход). Поднимает
   её только `pantheon wake hestia --task <id>` с открытой задачей (без задачи — отказ «нет задачи», код 2) фоновой
   сессией `hestia`, папка запуска — её кэш. Из окна роли (задан `PANTHEON_ROLE`, не hq) — только по слову владельца в окне Зевса за 15 мин: без слова отказ, код 2; красная зона памяти — только предупреждение, не отказ ([sb-simplify] п. 5); из окна hq — как start --from zeus: без вашего слова код 2. `PANTHEON_ROLE=hestia`; Bash пишет только в TMPDIR (в кэш окна guard запись не пускает), личное
-  закрыто для Bash, Read и Grep; мимо песочницы — `pantheon plugins update`, `domains build`, `restart`, `alert`, `consent`, `git push`,
+  закрыто для Bash, Read и Grep; мимо песочницы — `pantheon plugins update`, `domains build`, `restart`, `alert`, `consent`, `reap`, `git push`,
   `gh pr create|edit`; Edit, Write, WebFetch, WebSearch и Agent закрыты. Сети в песочнице окна нет (`allowedDomains`
   пуст); `git push` и `gh pr create|edit` guard пускает только после `pantheon consent <id задачи>` — явное «да» владельца
   из окна вопросов Зевса не старше суток; на «да» команда ставит метку `<state>/hestia-consent/<id>` на 2 часа, и
-  только для задачи окна (`PANTHEON_TASK`); ответ «нет» или иной метки не даёт (metis-0562). Остальное решает правило guard hestia (git только для чтения и push, `restart` без `--force`).
+  только для задачи окна (`PANTHEON_TASK`); ответ «нет» или иной метки не даёт (metis-0562). «Да» на вопрос
+  «Погасить процессы Пантеона» — другая метка, `<id>.reap` с pid из вопроса: её читает только `pantheon reap`, push
+  она не открывает (metis-0568). Остальное решает правило guard hestia (git только для чтения и push, `restart` без `--force`).
   Субагент hestia запрещён в окнах направлений, Пританея и задач. Перезапуска планового прохода (launchctl) у окна нет.
   Направление без координатора (metis-0155): `coordinator = false` у направления в `directions.toml` (по умолчанию
   координатор включён) — направление ведёт Пританей. `pantheon start|wake <направление>` координатора не поднимают (отказ,
@@ -225,6 +227,14 @@
 - `plugins/pantheon/lib/watch.py` — дежурный и управление сессиями (шаг 1.4): `pantheon watch [--dry-run]`, `agents`,
   `who`, `revisits`, `wake <имя>`, `stop|resume <имя>|--all`, `pause <имя>|--all --reason limit|swap|manual`,
   `restart --prepare|--status|--go|--cancel`, `saved`, `infra-check`. Подключает его `pantheon.py` (`watch_cmd`).
+- `plugins/pantheon/lib/culprits.py` — виновники памяти (metis-0568). В красной зоне — своп выше порога, давление
+  памяти от «предупреждения» или нагрузка выше 4 на ядро — дежурный пишет в `alerts.md` одну строку на эпизод (перерыв меньше
+  часа — тот же эпизод). В строке таблица «процесс → чей → память → возраст»: claude, node, tsx, next, vitest, pnpm
+  старше 2 ч и сироты Python multiprocessing (resource_tracker, spawn_main с ppid 1). Сам дежурный ничего не гасит.
+  `pantheon reap` показывает тот же список с вердиктом. `pantheon reap --apply` гасит только брошенное: копию
+  удалили, задачи ветки закрыты или это сирота multiprocessing в папках Пантеона. Об остальном своём печатает вопрос
+  «[id] …» для окна вопросов Зевса. `--apply --pid N …` гасит своё по «да», а в окне Гестии — только при метке
+  `pantheon consent <id>`. Чужое (вне worktree, папок направлений, Пантеона и состояния) и claude не гасит никогда.
 - Службы (с 0.11.0, SCHED-05): `[[service]]` в `schedule.toml` — постоянный процесс, своя задача launchd
   `pantheon.svc.<имя>` с KeepAlive, запуск через `pantheon service-run <имя>` (команда — только `pantheon …`
   или скрипт плагина). Плановый проход сверяет launchd с расписанием; `pantheon jobs pause|resume|disable|enable <служба>` действует
@@ -429,6 +439,7 @@
     python3 -I plugins/pantheon/tests/test_start.py   # start, wake, roles build, approve, heavy, Stop-хук разработчика
     python3 -I plugins/pantheon/tests/test_outside.py # проверки вне окна: tests после «принять», заявки, dev-сервер, профиль
     python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры
+    python3 -I plugins/pantheon/tests/test_culprits.py   # виновники памяти: тревога на эпизод, чей процесс, pantheon reap
     python3 -I plugins/pantheon/tests/test_tick.py    # планировщик: сон, пробуждение, питание, простой, лимит, главный Mac
     python3 -I plugins/pantheon/tests/test_plugins_update.py   # обновления agent-kit плановым проходом: сверка выпуска, установка, коды
     python3 -I .github/scripts/test_release.py    # выпуск Action: номер от прошлого выпуска, releases.json, гонка push, права

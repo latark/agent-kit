@@ -160,6 +160,31 @@ gpid = int(open(os.path.join(p, "tests", "test_leave.py.pid")).read())
 time.sleep(0.3)
 check("брошенный внук после выхода файла погашен", r.returncode == 0 and not alive(gpid), r.stdout)
 
+# --- пул multiprocessing (spawn), брошенный файлом: воркеры и resource_tracker гаснут с группой (metis-0568) ---
+# файл выходит os._exit(0) без shutdown пула — как упавший или убитый: без killpg группы его воркеры и resource_tracker
+# остаются сиротами с ppid 1 (СБ 28.10: ~40 таких по 4–11 дней от прогонов тестов)
+MP = ("import os, sys, multiprocessing as mp\nfrom concurrent.futures import ProcessPoolExecutor\n"
+      "def f(x):\n    return os.getpid()\n"
+      "if __name__ == '__main__':\n"
+      "    pool = ProcessPoolExecutor(max_workers=2, mp_context=mp.get_context('spawn'))\n"
+      "    list(pool.map(f, range(8)))\n"
+      "    from multiprocessing import resource_tracker\n    resource_tracker.ensure_running()\n"
+      "    rt = resource_tracker._resource_tracker._pid\n"
+      "    open(sys.argv[0] + '.pid', 'w').write(' '.join(map(str, list(pool._processes) + [rt or 0])))\n"
+      "    print('ok a'); print('1 из 1', flush=True)\n    os._exit(0)\n")
+p = mkplugin({"test_mp.py": MP})
+r = run([p])
+mp_pids = [int(x) for x in open(os.path.join(p, "tests", "test_mp.py.pid")).read().split() if x != "0"]
+time.sleep(0.5)
+left = [x for x in mp_pids if alive(x)]
+for x in left:  # не оставлять сирот и при провале проверки
+    try:
+        os.kill(x, signal.SIGKILL)
+    except OSError:
+        pass
+check("пул multiprocessing после выхода файла: воркеры и resource_tracker погашены",
+      r.returncode == 0 and len(mp_pids) >= 2 and not left, (r.stdout, mp_pids, left))
+
 # --- окружение файла: свой HOME и TMPDIR, без PANTHEON_*, -I, папка плагина ---
 ENVF = ("import os, sys\nprint(repr((os.environ.get('HOME'), os.environ.get('TMPDIR'), "
         "sorted(k for k in os.environ if k.startswith('PANTHEON_')), os.getcwd(), sys.flags.isolated, "
