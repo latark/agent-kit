@@ -38,7 +38,7 @@ IDLE = 2  # секунды простоя в тесте (в жизни — idle_
 # Поддельный qmd: `--index index mcp --http --port N --host H`, пишет «pid порт» в FAKE_PIDS и отвечает на POST /mcp
 # JSON-ом с заголовком Host запроса — видно, что ответ пришёл от него и что Host клиента дошёл как есть.
 FAKE = r'''
-import json, os, sys
+import json, os, socketserver, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 argv = sys.argv[1:]
 port = int(argv[argv.index("--port") + 1]); host = argv[argv.index("--host") + 1]
@@ -53,7 +53,11 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(body)
     def log_message(self, *a):
         pass
-srv = HTTPServer((host, port), H)
+class S(HTTPServer):
+    def server_bind(self):  # без socket.getfqdn: обратный DNS на раннере CI висит дольше таймаута теста (metis-0573)
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = host, self.server_address[1]
+srv = S((host, port), H)
 with open(os.environ["FAKE_PIDS"], "a") as fh:
     fh.write(f"{os.getpid()} {port}\n")
 srv.serve_forever()
@@ -161,8 +165,11 @@ def test_proxy():
             check("Host клиента доходит до qmd как есть (порт сокета, а не внутренний)",
                   isinstance(body, dict) and body.get("host") == f"127.0.0.1:{lport}" and body.get("port") != lport,
                   str(body))
-            code2, body2 = post(lport)
-            check("второй запрос — тот же qmd, без нового запуска", code2 == 200 and body2.get("pid") == ps[0]
+            try:
+                code2, body2 = post(lport)
+            except OSError as e:
+                code2, body2 = None, {"ошибка": str(e)}
+            check("второй запрос — тот же qmd, без нового запуска", code2 == 200 and ps and body2.get("pid") == ps[0]
                   and pids(pidfile) == ps, f"{body2} {pids(pidfile)}")
             # молчащий поток (как subscriptions/listen у клиентов MCP) простою не мешает
             silent = socket.create_connection(("127.0.0.1", lport))
@@ -172,7 +179,7 @@ def test_proxy():
             except subprocess.TimeoutExpired:
                 rc = None
             check("после простоя прокси выходит сам (код 0), хотя соединение открыто", rc == 0, str(rc))
-            check("после простоя qmd выходит", wait_dead(ps[0]), str(ps))
+            check("после простоя qmd выходит", bool(ps) and wait_dead(ps[0]), str(ps))
             silent.settimeout(5)
             try:
                 closed = silent.recv(10) == b""

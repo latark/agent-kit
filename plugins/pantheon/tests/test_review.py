@@ -184,6 +184,21 @@ def run_all(tmp):
           sum("не на Opus по транскрипту argus" in ln for ln in out) == 1, r.stdout)
     check("status: транскрипт без моделей (models: []) помечен своей строкой, а не «по --ran»",
           sum("транскрипт argus найден, но моделей в нём нет" in ln for ln in out) == 1, r.stdout)
+    # репозиторий продукта в [merge_repos] (не metis-pantheon): ядра там нет — без строк про Opus (app#20, 28.10)
+    os.makedirs(os.path.join(tmp, ".claude", "pantheon"), exist_ok=True)
+    with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w") as fh:
+        fh.write('[merge_repos]\nathena-x = ["acme/app"]\nmetis-pantheon = ["latark/agent-kit"]\n')
+    with open(os.path.join(state, "merge-gate", "records.jsonl"), "a") as fh:
+        fh.write(json.dumps(dict(v("accept", S5, "kkkkkkkk01", pr=20, cl=sonnet), repo=["acme/app"],
+                                 models=["claude-sonnet-5-5"])) + "\n")
+    r = pantheon("review", "status", "acme/app", "20")
+    check("status: продукт — Sonnet в счёт, без «не на Opus» и без строки «для PR ядра»",
+          f"итог на {S5[:12]}: принять 1, вернуть 0 — последний вердикт каждого argus" in r.stdout
+          and "Opus" not in r.stdout, r.stdout)
+    r = pantheon("review", "status", "latark/agent-kit", "40")
+    check("status: репозиторий metis-pantheon в [merge_repos] — строка «для PR ядра» на месте",
+          "  для PR ядра (в счёт только «принять» на Opus): принять 2, вернуть 0" in r.stdout, r.stdout)
+    os.remove(os.path.join(tmp, ".claude", "pantheon", "policy.toml"))
     # тот же журнал — шлюз владельца merge.gate (общее правило review_accept_counts): Sonnet по транскрипту не в счёт
     import importlib.util as _ilu
     import types as _types

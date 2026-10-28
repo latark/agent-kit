@@ -18,7 +18,8 @@ PostToolUse (Bash:
   launchd-env  — роли не меняют launchd: белый список launchctl только для чтения (list, print, getenv, blame, version…),
                  остальное — setenv, bootstrap, load, submit, kickstart, asuser и неизвестное — отказ (окружение тика);
                  swiftc — только абсолютным /usr/bin/swiftc, голое имя и другой путь — отказ (metis-0298);
-  domain       — palamedes пишет только черновики, momus — только свой отчёт; зоны направлений сняты ([sb-simplify]);
+  domain       — зоны направлений сняты ([sb-simplify]): роли не пишут в чужую память ролей, Edit/Write — в ~/.*
+                 и ~/Library мимо protect-config; palamedes пишет только черновики, momus — только свой отчёт;
   draft-role   — исполнитель без кода palamedes (субагент и главная сессия `--agent palamedes`, metis-0469) пишет
                  только черновик: Write, Edit, MultiEdit в ~/ai/pantheon/directions/<своё направление>/drafts/**, из окна
                  Пританея (PANTHEON_ROLE=hq) — в drafts/ любого направления из domains.json; код проектов, свой и чужой
@@ -69,13 +70,10 @@ PostToolUse (Bash:
                  из Связки: только через посредника; штабу (hq) корпус закрыт целиком (metis-0021, 15.10). Имена
                  корпуса — раздел [corpus] policy.toml; раздела нет — правило ничего не узнаёт (metis-0182).
 
-Модель угроз (SEC-27, решено 14.10). guard ловит ошибки агента: запись не в своё направление, правку чужого
-файла штаба или защит, команду пульта не той ролью. От намеренного обхода и внедрённых инструкций он не
-защищает: что пишет программа изнутри (python script.py, node -e, make), он не видит, и свой разбор Bash мы
-больше не наращиваем. Настоящая граница — песочница macOS в окнах ролей (SEC-19, SEC-26) и управляемые
-настройки /Library/Application Support/ClaudeCode/managed-settings.json (SEC-28): их не перебить настройками
-проекта и модами. Находку проверки безопасности по разбору Bash разбираем как «ошибка агента или граница
-песочницы», а не как новый раунд обходов.
+Модель угроз (SEC-27, [sb-simplify] 27.10) — README guard, раздел «От чего защищает». Пять ущербов: ключи,
+браузер со входами владельца, main и ядро без ревью, действия наружу, удаление данных. Граница — песочница
+macOS окна роли и управляемые настройки; guard ловит ошибки агента, а не намеренный обход: что пишет программа
+изнутри (python script.py, node -e, make), он не видит, и разбор Bash ради новых обходов мы не наращиваем.
 
 Плагин guard из маркетплейса agent-kit (latark/agent-kit). Данные: ~/.local/state/pantheon/domains.json (собирает
 `pantheon domains build` из ~/ai/pantheon/directions.toml) и ~/.claude/pantheon/policy.toml (привилегии, правит
@@ -216,16 +214,6 @@ def strip_quoted(cmd):
     """Убирает строки в кавычках и тела heredoc, чтобы не ловить `npm run dev` внутри текста коммита."""
     cmd = re.sub(r"<<-?\s*'?\"?(\w+)'?\"?.*?^\s*\1\s*$", " ", cmd, flags=re.S | re.M)
     return re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", " ", cmd)
-
-
-# Исключение (ROLE-23): разработчик и talos — субагенты в своей worktree (.claude/worktrees/…) — сами поднимают
-# dev-сервер на выделенном порту и гасят его после проверки. Ваши сессии и координаторы — по-прежнему нет.
-DEV_SERVER_ROLES = {"dev-opus", "dev-sonnet", "dev-haiku", "talos"}
-
-
-def in_worktree(event):
-    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
-    return "/.claude/worktrees/" in cwd + "/"
 
 
 def check_dev_server(cmd, event=None):
@@ -628,12 +616,13 @@ def check_nextjs(event):
 # domain-coordinator, workshop, нижние роли); встроенные и ваши собственные субагенты живут по прежнему правилу domain.
 # Направление координатора guard узнаёт по папке, где запущена сессия (CLAUDE_PROJECT_DIR не меняется
 # всю сессию, в отличие от cwd), а не по agent_type: у всех семи координаторов он один.
-#   domain       — субагент, тиммейт и любая роль Пантеона, кроме штаба, пишут только в своё направление:
-#                  папки из domains.json (собирает `pantheon domains build` из ~/ai/pantheon/directions.toml),
-#                  временные папки, ~/.claude/agent-memory и agent_extra из policy.toml. Мастерская — папка
-#                  запуска. Записи в ~/ai/pantheon проверяет pantheon-acl. Исполнителю без кода (DRAFT_ONLY_ROLES,
-#                  palamedes, metis-0469) вне ~/ai/pantheon корней нет совсем, а в ~/ai/pantheon pantheon-acl
-#                  пускает его только в directions/<своё>/drafts/** (drafts_allowed): Write, Edit, MultiEdit.
+#   domain       — зоны по направлениям сняты ([sb-simplify], 27.10): Bash держит песочница окна. Осталось: роль
+#                  и субагент не пишут в чужую память ролей ~/.claude/agent-memory/<другая>/ и Edit/Write — в ~/.* и
+#                  ~/Library мимо protect-config (то, что он судит сам, ему и оставлено); ревизор (EXTRA_ONLY_ROLES,
+#                  momus) пишет только agent_extra своей роли, свою память и временные папки. Записи в ~/ai/pantheon
+#                  проверяет pantheon-acl. Исполнителю без кода (DRAFT_ONLY_ROLES, palamedes, metis-0469) вне
+#                  ~/ai/pantheon корней нет совсем, а в ~/ai/pantheon pantheon-acl пускает его только в
+#                  directions/<своё>/drafts/** (drafts_allowed): Write, Edit, MultiEdit.
 #   pantheon-acl — запись в ~/ai/pantheon по карте прав (STATE-06 карты решений; карта — здесь, в коде, а не в
 #                  domains.json: его собирают из реестра, который правит штаб); файлы задач (directions/*/tasks/,
 #                  inbox/tasks/) роли и любые субагенты, штаб тоже, меняют только командой `pantheon task`: прямой
@@ -2353,10 +2342,10 @@ def write_targets(event, tool, tool_input):
 def check_domain(event, tool, tool_input):
     # Зоны записи по направлениям сняты ([sb-simplify], «да» владельца 27.10): чужая папка проекта — не ущерб из
     # пяти, запись в ядро, настройки, личное и журналы держат protect-config, private и pantheon-acl, а Bash —
-    # песочница окна. Остались только роли с узкой работой: palamedes пишет черновики, momus — свой отчёт
-    role, sub, pdir = who(event)
-    pantheon_role = is_pantheon_role(role)
-    if not sub and (not pantheon_role or role == "hq"):
+    # песочница окна. Остались чужая память ролей, Edit/Write в ~/.* и ~/Library мимо protect-config и роли с узкой
+    # работой: palamedes пишет черновики, momus — свой отчёт
+    role, sub, _ = who(event)
+    if not sub and (not is_pantheon_role(role) or role == "hq"):
         return None
     if role not in DRAFT_ONLY_ROLES and role not in EXTRA_ONLY_ROLES:
         # память другой роли загружается в её контекст, а у Зевса и координаторов есть действия наружу
@@ -2368,9 +2357,12 @@ def check_domain(event, tool, tool_input):
                     f"(~/.claude/agent-memory/{role or '<роль>'}/). Чужая: "
                     f"{', '.join(p.replace(HOME, '~') for p in bad[:3])}.")
         if tool != "Bash":
-            # Edit/Write песочница не держит: ~/.zshrc, ~/.ssh, ~/Library исполняются потом вне неё — уход из окна
-            # ~/.claude и состояние Пантеона держат protect-config и pantheon-acl, кэш окна — свой у каждого окна
+            # Edit/Write песочница не держит, а настройки в HOME исполняются потом вне неё. Профили оболочки, ~/.ssh,
+            # настройки git, ~/.claude.json, ~/.local/bin, LaunchAgents судит protect-config (Метиде он их открывает),
+            # ~/.claude и состояние Пантеона — protect-config и pantheon-acl, кэш окна — свой у каждого окна. Здесь —
+            # остальное: ~/.config, ~/.npmrc, ~/Library/Application Support и т. п.
             own = [os.path.join(HOME, ".claude"), STATE_DIR, os.path.join(HOME, "Library", "Caches", "pantheon-sandbox")]
+            own += protect_config.protected()
             dot = [p for p in targets if p != UNRESOLVED and _inside(p, [HOME]) and not _inside(p, own) and (
                 os.path.relpath(p, HOME).startswith(".") or _inside(p, [os.path.join(HOME, "Library")]))]
             if dot:
@@ -2378,7 +2370,7 @@ def check_domain(event, tool, tool_input):
                         f"HOME (~/.*, ~/Library): {', '.join(p.replace(HOME, '~') for p in dot[:3])}.")
         return None
     domains, policy = load_domains(), load_policy()
-    cwd, targets = write_targets(event, tool, tool_input)
+    _, targets = write_targets(event, tool, tool_input)
     if UNRESOLVED in targets:
         return UNRESOLVED_REASON
     targets = [p for p in targets if not _inside(p, [PANTHEON, PANTHEON_VIEW, STATE_DIR])]  # это — pantheon-acl
@@ -2390,37 +2382,20 @@ def check_domain(event, tool, tool_input):
         return (f"Правило domain: роль «{role}» пишет только черновики — в ~/ai/pantheon/directions/<своё "
                 f"направление>/{DRAFTS_DIR}/. Чужая зона: {', '.join(p.replace(HOME, '~') for p in targets[:3])}. "
                 "Код, знания, настройки и временные папки — не твои: итог — файл в drafts/, остальное — в отчёт.")
-    if role == "workshop" and not sub:
-        roots = [pdir]
-    elif role in EXTRA_ONLY_ROLES:
-        roots = []
-    elif not pantheon_role:
-        # встроенный или ваш собственный субагент: прежнее правило — направление по cwd, иначе git-репозиторий
-        name, roots = direction_of(domains, cwd)
-        if not roots:
-            top = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
-                                 capture_output=True, text=True, timeout=3).stdout.strip()
-            roots = [os.path.realpath(top or cwd)]
-    else:
-        name, roots = direction_of(domains, pdir)
-        if not roots and sub:
-            name, roots = direction_of(domains, cwd)
-        if not roots and role == "domain-coordinator":
-            roots = [pdir]
-    roots = list(roots) + _norm((policy.get("agent_extra") or domains.get("agent_extra") or {}).get(role, []))
-    # своя память, а не вся ~/.claude/agent-memory: память другой роли загружается в её контекст
+    # ревизор (EXTRA_ONLY_ROLES): agent_extra своей роли, своя память (а не вся ~/.claude/agent-memory: память другой
+    # роли загружается в её контекст) и временные папки
+    roots = _norm((policy.get("agent_extra") or domains.get("agent_extra") or {}).get(role, []))
     roots += [os.path.join(r, role) if os.path.basename(r) == "agent-memory" else r
-              for r in _norm(policy.get("always") or domains.get("always") or ["~/.claude/agent-memory"]) if role]
+              for r in _norm(policy.get("always") or domains.get("always") or ["~/.claude/agent-memory"])]
     roots += TEMP_ROOTS
     bad = [p for p in targets if not _inside(p, roots)]
     if not bad:
         return None
-    return (f"Правило domain: роль «{role or 'субагент'}» пишет только в своём направлении "
+    return (f"Правило domain: роль «{role}» пишет только свой отчёт, свою память и временные папки "
             f"({', '.join(r.replace(HOME, '~') for r in roots[:4])}). "
             f"Чужая зона: {', '.join(p.replace(HOME, '~') for p in bad[:3])}. "
             "Не чини сам — опиши находку в отчёте по формату «Находка» "
-            "(где, что не так, доказательство, срочность): лид или координатор передаст её владельцу, "
-            "координатор — Зевсу файлом в inbox/ того направления.")
+            "(где, что не так, доказательство, срочность): её передаст тот, кто тебя позвал.")
 
 
 # Карта прав ~/ai/pantheon (STATE-06). Ключ — первый элемент пути от корня ~/ai/pantheon (в нижнем регистре:

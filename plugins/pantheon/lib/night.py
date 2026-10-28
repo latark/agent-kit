@@ -140,8 +140,7 @@ LIMITS = {"warn_pp": 2.0, "stop_pp": 5.0, "hard_pct": 85.0, "snapshot_ok_min": 3
           "heavy_max": 2.0}
 NIGHT = {"start": "23:00", "end": "08:00", "budget_pct": 3.0, "check_pct": 1.0, "cap_pct": 5.0, "carry_share": 0.3,
          "carry_after_pp": 5.0, "morning_after": "04:00", "morning_five_hour_max": 50.0, "last_night_pct": 10.0}
-# repeat и deadline — от вечернего вопроса, снятого [sb-simplify] п. 10: в schedule.toml допустимы, не действуют
-ASK = {"ask_at": "22:00", "repeat": ["23:00", "23:30"], "deadline": "00:00", "power_at": "21:30", "batt_min": 80.0}
+ASK = {"ask_at": "22:00", "power_at": "21:30", "batt_min": 80.0}
 PACK_START = re.compile(r"^\W*старт\s*[—–:-]+\s*([01]\d|2[0-3]):([0-5]\d)", re.I | re.M)
 PACK_TASK = re.compile(r"(?<![\w-])([a-z]+-\d{4})(?![\w-])")
 ONESHOT_TTL = 3 * 3600  # разовый запуск `pantheon start --at` ждёт открытого шлюза столько, потом гаснет
@@ -172,8 +171,6 @@ def config():
                 out[k] = float(g)
             elif isinstance(v, str) and isinstance(g, str) and HM.fullmatch(g):
                 out[k] = g
-            elif isinstance(v, list) and isinstance(g, list) and all(isinstance(x, str) and HM.fullmatch(x) for x in g):
-                out[k] = list(g)
         return out
     return merge(LIMITS, lim), merge(NIGHT, nl), merge(ASK, ask)
 
