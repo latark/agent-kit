@@ -1166,6 +1166,19 @@ def main():
                ("Bash", {"command": f'pantheon exec codex {wt} "$TMPDIR/tmp-codex-b/brief.md"'}, False))
     r = stop("dev-4")
     check("dev-stop: запуск `pantheon exec codex` после прогона — правка, снова нужен прогон", r.returncode == 2)
+    # metis-0573: тестам нужен порт — проверка проекта вне окна с ожиданием итога считается прогоном
+    transcript(("Edit", {"file_path": "a.txt"}, False), ("Bash", {"command": "pantheon outside test --wait 590"}, False))
+    r = stop("dev-5")
+    check("dev-stop: `pantheon outside test --wait 590` после правки, зелёный — отпускает", r.returncode == 0 and not r.stderr)
+    transcript(("Edit", {"file_path": "a.txt"}, False), ("Bash", {"command": "pantheon outside test --wait 590"}, True))
+    r = stop("dev-6")
+    check("dev-stop: `pantheon outside test` красный или без итога (75) — выход 2", r.returncode == 2 and "красный" in r.stderr)
+    for i, c in enumerate(("pantheon outside test", "pantheon outside test --wait 0",
+                           "pantheon outside test --script lint --wait 590", "pantheon outside serve --wait 120",
+                           "pantheon outside status 20261028-010101-abcdef")):
+        transcript(("Edit", {"file_path": "a.txt"}, False), ("Bash", {"command": c}, False))
+        r = stop(f"dev-7{i}")
+        check(f"dev-stop: {c!r} — не прогон проверки проекта, выход 2", r.returncode == 2 and "outside test --wait 590" in r.stderr)
 
     # heavy --server: один долгий процесс, второе место — сборкам
     srv = subprocess.Popen([sys.executable, "-I", HEAVY, "--server", "/bin/sh", "-c", "sleep 4"], env=env)
