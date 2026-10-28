@@ -79,7 +79,15 @@ with open(%r, "a") as fh:
 tail = cmd[-2:]
 if tail == ["run", "dev"]:
     print("сервер слушает", os.environ["PORT"], flush=True)
-    os.execv(sys.executable, [sys.executable, "-m", "http.server", os.environ["PORT"], "--bind", "127.0.0.1"])
+    # не «-m http.server»: его server_bind зовёт socket.getfqdn, а обратный DNS на раннере CI висит дольше
+    # READY_SEC — порт не открывается вовремя (metis-0573)
+    import http.server, socketserver
+    class S(http.server.HTTPServer):
+        def server_bind(self):
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+    S(("127.0.0.1", int(os.environ["PORT"])), http.server.SimpleHTTPRequestHandler).serve_forever()
+    os._exit(0)
 if tail == ["run", "bad"]:
     print("boom: не собралось", flush=True)
     os._exit(3)
