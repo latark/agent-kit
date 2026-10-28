@@ -23,7 +23,7 @@ NotebookEdit, Read, Grep, Glob, WebFetch, Agent, Task, Skill) и Stop; код �
 - **Чтение `.env` и `secrets/`** держат правила `Read(.env)`, `Read(.env.local)`, `Read(.env.*.local)`, `Read(secrets/**)`
   в managed-settings.json: Claude Code вливает их в denyRead песочницы (тест — `test_canaries.py`).
 - **Grep Пританея по `.git`** держит только песочница.
-- **Задачи чужого направления** (решение 28.10, п. 4). Роль может вести задачи другого направления через `pantheon task`: проверка `task_targets` снята. Доску и owner-log пишет только тик, «да» владельца — только owner-log.
+- **Задачи чужого направления** (решение 28.10, п. 4). Роль может вести задачи другого направления через `pantheon task`: проверка `task_targets` снята. Доску и owner-log пишет только плановый проход, «да» владельца — только owner-log.
 - **Edit/Write песочница не держит.** Их судят protect-config (профили оболочки, `~/.ssh`, настройки git, LaunchAgents,
   `~/.claude.json`, `~/.local/bin`, защиты в `~/.claude`), pantheon-acl, private и domain (остальное в `~/.*` и
   `~/Library`). Сессии владельца без роли domain не ограничивает.
@@ -199,7 +199,7 @@ answer и плановый проход, это скрипты, guard их не 
   Edit, MultiEdit, NotebookEdit, Read, Grep, Glob и WebFetch. Поэтому эти три инструмента хук плагина проверяет и тогда,
   когда guard уже стоит в управляемых настройках. Сбой этих проверок — отказ.
 - **Пульт (metis-0047; решение владельца 28.10, п. 5).** Запуск и перезапуск окон — `pantheon start`, `wake`, `resume`,
-  `restart` — ролям открыт: их делают Зевс и тик без «да», границы задаёт сам пульт. Остальной пульт — только штаб и ваши
+  `restart` — ролям открыт: их делают Зевс и плановый проход без «да», границы задаёт сам пульт. Остальной пульт — только Пританей и ваши
   сессии: `archive`, `install`, `uninstall`, `commit`, `stop`, `pause`, `jobs pause|resume|disable|enable|renew`,
   `roles build` (ролям — только `--out <папка> [--src <папка>]` внутри временной папки, п. ниже). `pantheon saved` и
   `pantheon who` открыты всем. `pantheon approve` — только владелец, `pantheon merge` — роли только `request`, `status`,
