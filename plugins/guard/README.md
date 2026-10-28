@@ -23,6 +23,7 @@ NotebookEdit, Read, Grep, Glob, WebFetch, Agent, Task, Skill) и Stop; код �
 - **Чтение `.env` и `secrets/`** держат правила `Read(.env)`, `Read(.env.local)`, `Read(.env.*.local)`, `Read(secrets/**)`
   в managed-settings.json: Claude Code вливает их в denyRead песочницы (тест — `test_canaries.py`).
 - **Grep Пританея по `.git`** держит только песочница.
+- **Задачи чужого направления** (решение 28.10, п. 4). Роль может вести задачи другого направления через `pantheon task`: проверка `task_targets` снята. Доску и owner-log пишет только тик, «да» владельца — только owner-log.
 - **Edit/Write песочница не держит.** Их судят protect-config (профили оболочки, `~/.ssh`, настройки git, LaunchAgents,
   `~/.claude.json`, `~/.local/bin`, защиты в `~/.claude`), pantheon-acl, private и domain (остальное в `~/.*` и
   `~/Library`). Сессии владельца без роли domain не ограничивает.
@@ -40,7 +41,7 @@ NotebookEdit, Read, Grep, Glob, WebFetch, Agent, Task, Skill) и Stop; код �
 ### Что ловит
 
 guard ловит **ошибки агента**: запись чужой памяти ролей и Edit/Write в `~/.*` и `~/Library` мимо protect-config (domain), правку чужого файла Пританея, файла задачи
-мимо `pantheon task` и доски или журнала ваших слов любой сессией Claude (pantheon-acl), `pantheon approve` и `pantheon merge run` ролью, правку защит не той ролью (protect-config), чтение ключей
+мимо `pantheon task` и доски или журнала ваших слов любой сессией Claude (pantheon-acl), пульт (кроме запуска окон), `pantheon approve` и `pantheon merge run` ролью, правку защит не той ролью (protect-config), чтение ключей
 (tg-secret; ролям из демона tg-readd — только `status` и `kickstart`), пометки об авторстве Claude; с шага 1.2 — по ролям Пантеона: личное (private: `me/`,
 ключи git-crypt, журнал Пританея — только hq, chiron в окне Пританея и mnemo-brain; ключи — никому из ролей), Telegram
 и коуча chiron вне своего окна, Гестию субагентом и вне её окна, gh pr окна Пританея не по своему репозиторию (hq-telegram, chiron, hestia, hq-gh — раздел «Окно Пританея»), выгрузку личного чата Telegram в окне любой роли (tg-role), браузер владельца
@@ -197,13 +198,15 @@ answer и плановый проход, это скрипты, guard их не 
 - **Agent, Task и Skill при управляемых настройках.** Управляемые настройки вызывают guard только для Bash, Write,
   Edit, MultiEdit, NotebookEdit, Read, Grep, Glob и WebFetch. Поэтому эти три инструмента хук плагина проверяет и тогда,
   когда guard уже стоит в управляемых настройках. Сбой этих проверок — отказ.
-- **Пульт (решение владельца 28.10, упрощение п. 4–5).** Пульт `pantheon` ролям не закрыт: `start`, `wake`, `stop`,
-  `resume`, `pause`, `restart`, `archive`, `commit`, `roles build`, `jobs` и задачи другого направления
-  (`pantheon task new|set|claim|split`) guard пропускает, а кто и когда может запускать окна, решает сам пульт. Закрыты
-  две вещи: `pantheon approve` — только владелец, `pantheon merge` — роли только `request`, `status`, `cancel`. Обёртка
-  пульта по пути (`sh ~/.local/bin/pantheon …`), копия пульта под другим именем и подкоманда, которую не разобрать
-  (`pantheon $X`), считаются `merge`/`approve`: отказ. Файлы `~/ai/pantheon` из `HQ_ONLY` (approvals.toml, schedule.toml,
-  directions.toml, decisions.md, board.md и др.) правит только Пританей — это правило карты прав не менялось.
+- **Пульт (metis-0047; решение владельца 28.10, п. 5).** Запуск и перезапуск окон — `pantheon start`, `wake`, `resume`,
+  `restart` — ролям открыт: их делают Зевс и тик без «да», границы задаёт сам пульт. Остальной пульт — только штаб и ваши
+  сессии: `archive`, `install`, `uninstall`, `commit`, `stop`, `pause`, `jobs pause|resume|disable|enable|renew`,
+  `roles build` (ролям — только `--out <папка> [--src <папка>]` внутри временной папки, п. ниже). `pantheon saved` и
+  `pantheon who` открыты всем. `pantheon approve` — только владелец, `pantheon merge` — роли только `request`, `status`,
+  `cancel`. Пульт по пути (`sh ~/.local/bin/pantheon …`) и копия под другим именем судятся так же. Файлы `~/ai/pantheon`
+  из `HQ_ONLY` (approvals.toml, schedule.toml, directions.toml, decisions.md, board.md и др.) правит только Пританей.
+- **Пробная сборка ролей (metis-0097).** `pantheon roles build` ролям закрыт, кроме `--out <папка> [--src <папка>]`, где
+  `--out` — разобранный путь внутри временной папки (TMPDIR, /tmp); любой другой вид команды — отказ.
 - **Ключи git-crypt Пританею (metis-0084).** У hq и chiron из личного закрыты только ключи. Отказ — на явный путь в ключ
   или шаблон, который в него раскрывается (`ls ~/ai/pantheon/.git/*`). Поиск по папке выше (`grep -r … ~/ai/pantheon`,
   Grep по ней) проходит: ключи закрывает и песочница окна. Ролям без доступа к личному правило прежнее: `grep -r` по

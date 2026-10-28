@@ -631,10 +631,12 @@ def check_nextjs(event):
 #                  в Obsidian) и в журналы ваших слов owner-log (их пишут хук и тик) — ни одна сессия Claude, без роли
 #                  тоже (guard 0.5.1). У сессии без роли запрет — по явным целям внутри этих двух папок: цель «не
 #                  разобрать» и запись в папку выше ей не запрещены; git в ~/ai/pantheon роли не трогают — коммитит
-#                  тик; пульт — `pantheon approve` (заранее разрешённое) только ваши сессии, `pantheon merge` — роли
-#                  только request, status, cancel; остальные команды пульта и задачи другого направления через
-#                  `pantheon task` не закрыты (решение владельца 28.10, упрощение п. 4–5); файлы ~/ai/pantheon
-#                  из HQ_ONLY (approvals.toml, schedule.toml, directions.toml, decisions.md и др.) — только штаб.
+#                  тик; команды пульта (`pantheon archive|install|uninstall|commit|roles|stop|pause`,
+#                  `pantheon jobs pause|resume|disable|enable|renew`) — только штаб и ваши сессии; запуск окон
+#                  (`start`, `wake`, `resume`, `restart`) открыт ролям, как и задачи другого направления через
+#                  `pantheon task` (решение владельца 28.10, п. 4–5); `pantheon approve` (заранее разрешённое) — только
+#                  ваши; файлы ~/ai/pantheon из HQ_ONLY (approvals.toml, schedule.toml, directions.toml, decisions.md
+#                  и др.) — только штаб.
 # Привилегии (кто mnemo-brain и metis-pantheon, у кого доступ к me/) — в ~/.claude/pantheon/policy.toml:
 # реестр правит штаб, и его правкой их не выдать.
 # Пути сравниваются без учёта регистра и формы Юникода: так их сравнивает файловая система macOS.
@@ -676,9 +678,11 @@ DRAFT_TOOLS = {"Read", "Grep", "Glob", "Write", "Edit", "MultiEdit"}
 DRAFT_WRITE_TOOLS = {"Write", "Edit", "MultiEdit"}
 DRAFTS_DIR = "drafts"
 UNRESOLVED = "\0неразобранная-цель"
-# решение владельца 28.10 (упрощение, п. 4–5): запуск, перезапуск, wake, resume, архив, коммит, jobs и сборка ролей
-# ролям не закрыты; остались `pantheon approve` (только владелец) и `pantheon merge` (кроме request, status, cancel)
+# решение владельца 28.10 (п. 5): запуск и перезапуск окон (start, wake, resume, restart) ролям открыт; остальные
+# команды пульта, что выключают защиты или чужие службы, — только штаб и ваши сессии
+PANTHEON_PRIVILEGED = {"archive", "install", "uninstall", "commit", "roles", "stop", "pause"}
 PANTHEON_OWNER_ONLY = {"approve"}  # заранее разрешённое (DONE-11) — только вы, не штаб: согласие не от имени владельца
+PANTHEON_JOB_ACTIONS = {"pause", "resume", "disable", "enable", "renew"}
 # слияние ядра по Touch ID (metis-0285): заявку ставит и снимает роль, исполняет (`pantheon merge run`) только тик и
 # владелец — никому из ролей, и штабу тоже
 PANTHEON_MERGE_ROLE = {"request", "status", "cancel"}
@@ -2257,16 +2261,27 @@ def bash_targets(cmd, cwd):
     return bash_analysis(cmd, cwd)[0]
 
 
+def roles_probe_ok(texts):
+    """`pantheon roles build --out X [--src Y]` (metis-0097): пробная сборка в TEMP_ROOTS. Нужно: X — разобранный
+    литерал внутри временной папки (не /dev/null), Y — разобранный литерал, других аргументов нет."""
+    args = texts[2:]
+    if len(args) not in (2, 4) or args[0] != "--out" or (len(args) == 4 and args[2] != "--src"):
+        return False
+    if any(not a or a.startswith("\0") or a == UNRESOLVED for a in args):
+        return False
+    real = os.path.realpath(os.path.expanduser(args[1]))
+    return any(real.startswith(r + os.sep) for r in TEMP_ROOTS if r != os.path.realpath("/dev/null"))
+
+
 def pantheon_cli(cmd, cwd):
-    """Подкоманды пульта pantheon, закрытые ролям, в команде Bash: approve, merge (кроме request, status, cancel) и
-    подкоманда, которую не разобрать (список строк для причины)."""
+    """Привилегированные подкоманды пульта pantheon в команде Bash (список строк для причины)."""
     found = []
     for name, texts in bash_analysis(cmd, cwd)[1]:
         # файл пульта (~/.local/bin/pantheon, lib/pantheon.py), а не папка ~/ai/pantheon
         bases = ["pantheon" if x and os.path.basename(x.rstrip("/")).lower() in ("pantheon", "pantheon.py")
                  and _key(os.path.realpath(os.path.expanduser(x))) != _key(PANTHEON) else "" for x in texts]
         if name in _MOVE | _COPY and "pantheon" in bases[:-1]:
-            found.append("pantheon <копия пульта под другим именем>")
+            found.append(f"{name} pantheon (копия пульта под другим именем)")
             continue
         # sh ~/.local/bin/pantheon archive, python3 …/lib/pantheon.py archive — тот же пульт по пути
         k = next((i for i, b in enumerate(bases) if b), None)
@@ -2275,9 +2290,11 @@ def pantheon_cli(cmd, cwd):
         if name not in ("pantheon", "?") or not texts:
             continue
         sub, act = texts[0], texts[1] if len(texts) > 1 else ""
+        if sub == "roles" and act == "build" and roles_probe_ok(texts):
+            continue
         if sub is None and name == "pantheon":
             found.append("pantheon <подкоманда не разобрана>")
-        elif sub in PANTHEON_OWNER_ONLY:
+        elif sub in PANTHEON_PRIVILEGED | PANTHEON_OWNER_ONLY or (sub == "jobs" and (act is None or act in PANTHEON_JOB_ACTIONS)):
             found.append(f"pantheon {sub} {act or ''}".strip())
         elif sub == "merge" and act not in PANTHEON_MERGE_ROLE:
             found.append(f"pantheon merge {act or '<действие не разобрано>'}")
@@ -2464,12 +2481,18 @@ def check_pantheon(event, tool, tool_input):
         if any(c.split()[1:2] and c.split()[1] in PANTHEON_OWNER_ONLY for c in cli):
             return ("Правило pantheon-acl: `pantheon approve` — согласие владельца заранее, его набирает только владелец "
                     "(в своём терминале или в окне Зевса после «!»). Предложи строку разрешения владельцу словами.")
-        merge = [c for c in cli if c.startswith(("pantheon merge ", "pantheon <"))]
+        merge = [c for c in cli if c.startswith("pantheon merge ")]
         if merge:
             return (f"Правило pantheon-acl: «{merge[0]}» — слияние по заявке исполняет только плановый проход после "
                     "Touch ID владельца. Роли — `pantheon merge request N -R <owner/repo>`, `pantheon merge status`, "
                     "`pantheon merge cancel N -R <owner/repo>`.")
     if tool == "Bash" and pantheon_role and not (role == "hq" and not sub):
+        if role == "hestia" and not sub and window_role() == "hestia":
+            # Гестия в своём окне: её команды пульта уже сверило правило hestia (белый список, restart без --force)
+            cli = [c for c in cli if c.split()[1:2] != ["restart"]]
+        if cli:
+            return (f"Правило pantheon-acl: «{cli[0]}» — команда пульта, её запускают только Пританей и ваши сессии. "
+                    "Архив, коммит и пауза задач — через Зевса; дописать тревогу — `pantheon alert`.")
         names = {n for n, _ in bash_analysis(tool_input.get("command") or "", os.path.realpath(event.get("cwd") or os.getcwd()))[1]}
         if "terminal-notifier" in names or "?" in names and "terminal-notifier" in (tool_input.get("command") or ""):
             return ("Правило pantheon-acl: terminal-notifier ролям недоступен — по щелчку он выполняет команду от имени "
