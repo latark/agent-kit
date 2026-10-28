@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "head": "08da18d",
+  "head": "a35fc34",
   "python": "3.14",
   "tests": [
     "guard/test_canaries.py",
@@ -90,7 +90,7 @@
     "pantheon/test_workshop_sockets.py",
     "project-tools/test_project_tools.py"
   ],
-  "broken": ["pantheon/test_run_tests.py"],
+  "broken": [],
   "files": {
     ".claude-plugin/marketplace.json": [61],
     ".claude-plugin/releases.json": [],
