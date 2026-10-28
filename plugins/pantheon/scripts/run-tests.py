@@ -17,6 +17,10 @@
   - есть в карте — его файлы тестов; пустой список — файл не задел ни один тест (AGENTS.md);
   - иначе (новый файл, карты нет или она другой версии) — весь набор: неизвестное гоняет всё.
 Файлы тестов, которых карта не знает (новые после её сборки) или которые при сборке упали (broken), идут всегда.
+Карта хранит sha256 каждого файла тестов (hashes): файл, изменённый после сборки (хеш другой), мог начать задевать новые
+файлы — его связи не верны, и он идёт при любом изменении (в выводе: «изменены после сборки карты»); таких файлов
+STALE_FULL и больше — карта устарела целиком, весь набор с причиной. Так правка теста после сборки не пропускает нужные
+тесты из-за старой карты; карту пересобирают, когда таких файлов набралось.
 Тесты плагинов, которых нет в аргументах, не идут. Изменений нет или ни один не ведёт к тестам — код 3 и строка
 «нечего гонять», а не пустой зелёный. Ошибка git (нет базы, не репозиторий, мелкий клон без merge-base) — весь
 набор и причина строкой: при сомнении раннер гоняет всё, а не ничего.
@@ -46,6 +50,7 @@ Python 3.11+ (metis-0571); тот же скрипт гоняет workflow tests 
 или с итогом без проверок, или раннер прерван сигналом. Число проверок файла — из его итоговой строки, без числа в ней — по строкам `ok`.
 Только stdlib.
 """
+import hashlib
 import json
 import os
 import re
@@ -107,7 +112,10 @@ STUBS = {"ioreg": "exit 0", "pmset": 'echo "Now drawing from AC Power"', "scutil
 PLATFORM = os.environ.get("RUN_TESTS_PLATFORM") or sys.platform
 # Карта для --affected (metis-0451): строит scripts/affected-map.py прогоном всех тестов, правится только им.
 MAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "affected-map.json")
-MAP_VERSION = 1
+MAP_VERSION = 2
+# Карта старше файла тестов (правка после сборки): связи этого файла по карте неверны, файл идёт всегда. Столько файлов
+# и больше — карта устарела целиком: весь набор с причиной в выводе.
+STALE_FULL = 8
 # Общие файлы: их правка гонит весь набор, что бы ни говорила карта (их грузит почти каждый тест или они меняют
 # сам выбор тестов).
 FULL = frozenset({
@@ -204,14 +212,37 @@ def load_map(path=None):
             return None, f"карта {os.path.basename(path)} версии {raw.get('version')!r}, нужна {MAP_VERSION}"
         tests = list(raw["tests"])
         files = {k: {tests[i] for i in v} for k, v in raw["files"].items()}
-        return {"tests": set(tests), "always": set(raw.get("broken") or ()), "files": files}, None
+        hashes = {k: str(v) for k, v in raw["hashes"].items()}
+        return {"tests": set(tests), "always": set(raw.get("broken") or ()), "files": files, "hashes": hashes}, None
     except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as e:
         return None, f"карту {os.path.basename(path)} не прочесть — {type(e).__name__}: {e}"
 
 
-def select(changed, root, items, amap):
+def test_hash(pdir, label):
+    """sha256 файла тестов (так хеши пишет affected-map.py); None — файла нет или не прочесть."""
+    try:
+        with open(os.path.join(pdir, "tests", label.split("/", 1)[1]), "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def stale_tests(items, amap):
+    """[метки] файлов тестов, которые есть в карте, но изменены после её сборки (хеш другой): связи таких файлов по
+    карте неверны — они могли начать задевать новые файлы. Нет файла — не устарел (нечего гонять)."""
+    old = amap.get("hashes") or {}
+    out = []
+    for pdir, label in items:
+        if label in amap["tests"]:
+            cur = test_hash(pdir, label)
+            if cur is not None and cur != old.get(label):
+                out.append(label)
+    return sorted(out)
+
+
+def select(changed, root, items, amap, stale=()):
     """(выбранные items или None — весь набор, [(путь, почему весь набор)], [метки, что идут всегда]) по карте amap
-    (load_map)."""
+    (load_map). stale — метки из stale_tests: идут при любом изменении (любой файл мог стать их зависимостью)."""
     labels = {label for _, label in items}
     plugins = {}
     for pdir, label in items:
@@ -240,9 +271,11 @@ def select(changed, root, items, amap):
     if unknown:
         return None, unknown, []
     always = sorted(lb for lb in labels if lb not in amap["tests"] or lb in amap["always"])
+    want_stale = {lb for lb in stale if lb in labels}
     if not want:
-        return [], [], always
+        return [it for it in items if it[1] in want_stale], [], always
     want.update(always)
+    want.update(want_stale)
     return [it for it in items if it[1] in want], [], always
 
 
@@ -440,7 +473,13 @@ def pick_affected(items, dirs, base, map_path=None):
     if amap is None:
         print(f"{head}: {why} — весь набор", flush=True)
         return items, 0
-    chosen, unknown, always = select(changed, root, items, amap)
+    stale = stale_tests(items, amap)
+    if len(stale) >= STALE_FULL:
+        print(f"{head}: карта устарела — {len(stale)} файлов тестов изменены после её сборки (порог {STALE_FULL}): "
+              f"{', '.join(stale[:3])}{' …' if len(stale) > 3 else ''} — весь набор; пересобрать: affected-map.py",
+              flush=True)
+        return items, 0
+    chosen, unknown, always = select(changed, root, items, amap, stale)
     if unknown:
         path, why = unknown[0]
         more = f" и ещё {len(unknown) - 1}" if len(unknown) > 1 else ""
@@ -451,6 +490,8 @@ def pick_affected(items, dirs, base, map_path=None):
               f"({', '.join(changed[:5])}{' …' if len(changed) > 5 else ''})")
         return None, 3
     extra = f", из них всегда (карта их не знает или они упали при сборке): {', '.join(always)}" if always else ""
+    if stale:
+        extra += f"; изменены после сборки карты, идут всегда (пересобрать: affected-map.py): {', '.join(stale)}"
     print(f"{head}: изменено {len(changed)}, тестов {len(chosen)} из {len(items)}{extra}", flush=True)
     return chosen, 0
 

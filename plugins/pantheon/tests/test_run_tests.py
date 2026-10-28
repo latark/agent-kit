@@ -5,6 +5,7 @@
 раннер в своей сессии, как задача run_job, гасится SIGTERM / SIGHUP / SIGINT — ни файла тестов, ни его внука после."""
 import ast
 import atexit
+import hashlib
 import importlib.util
 import json
 import os
@@ -291,11 +292,12 @@ check("карта: AGENTS.md не задевает ни один тест", amap
       amap["files"].get("AGENTS.md"))
 
 
-def mkmap(tests, files, broken=(), version=1):
+def mkmap(tests, files, broken=(), version=2, hashes=None):
     p = os.path.join(tempfile.mkdtemp(prefix="map-"), "m.json")
     idx = {lb: i for i, lb in enumerate(tests)}
     with open(p, "w") as fh:
         json.dump({"version": version, "tests": list(tests), "broken": list(broken),
+                   "hashes": {lb: "0" for lb in tests} if hashes is None else hashes,
                    "files": {k: [idx[x] for x in v] for k, v in files.items()}}, fh)
     return p
 
@@ -334,9 +336,11 @@ check("select: новый файл тестов (карта не знает) и 
       sel == (ITEMS, [], ["alpha/test_y.py", "beta/test_b.py"]), sel)
 sel = R.select(["README.md"], "/r", ITEMS, AM2)
 check("select: ничего не задето — «всегда» не гонит прогон", sel[0] == [], sel)
-for body, why in (("{", "JSONDecodeError"), ('{"version": 2, "tests": [], "files": {}}', "версии 2"),
-                  ('{"version": 1, "tests": ["a/test_a.py"], "files": {"x": [5]}}', "IndexError"),
-                  ('{"version": 1, "files": {}}', "KeyError"), ("[]", "AttributeError")):
+for body, why in (("{", "JSONDecodeError"), ('{"version": 3, "tests": [], "files": {}}', "версии 3"),
+                  ('{"version": 1, "tests": [], "files": {}}', "версии 1"),
+                  ('{"version": 2, "hashes": {}, "tests": ["a/test_a.py"], "files": {"x": [5]}}', "IndexError"),
+                  ('{"version": 2, "tests": [], "files": {}}', "KeyError"),
+                  ('{"version": 2, "files": {}}', "KeyError"), ("[]", "AttributeError")):
     p = os.path.join(tempfile.mkdtemp(prefix="map-"), "m.json")
     with open(p, "w") as fh:
         fh.write(body)
@@ -372,8 +376,10 @@ git(repo, "init", "-q", "-b", "main")
 git(repo, "add", "-A")
 git(repo, "commit", "-q", "-m", "база")
 git(repo, "checkout", "-q", "-b", "work")
+OK2H = hashlib.sha256(OK2.encode()).hexdigest()
 MAPF = mkmap(["alpha/test_x.py", "alpha/test_y.py"], {"plugins/alpha/lib/x.py": ["alpha/test_x.py"], "README.md": [],
-                                                      "plugins/alpha/lib/y.py": ["alpha/test_y.py"]})
+                                                      "plugins/alpha/lib/y.py": ["alpha/test_y.py"]},
+             hashes={"alpha/test_x.py": OK2H, "alpha/test_y.py": OK2H})
 DRV_AFF = ("import importlib.util, sys\nspec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
            "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
            "m.MAP = sys.argv[2]\nsys.exit(m.main(sys.argv[3:]))\n")
@@ -433,6 +439,70 @@ os.remove(os.path.join(al, "tests", "test_bad.py"))
 r = run(["--base", "main", al])
 check("--base без --affected — отказ без прогона", r.returncode != 0 and "--base без --affected" in r.stdout
       and "файлов" not in r.stdout, r.stdout)
+
+# --- устаревшая карта: файл тестов, изменённый после её сборки, идёт всегда (хеши в карте) ---
+Y2 = OK2 + "# правка после сборки карты\n"
+put(os.path.join(al, "tests", "test_y.py"), Y2)
+git(repo, "commit", "-q", "-am", "правка теста после карты")
+git(repo, "branch", "b2")  # база — после правки теста: в diff от неё test_y уже нет, а карта его хеш не знает
+put(os.path.join(al, "lib", "x.py"), "X = 3\n")
+r = run_aff("--affected", "--base", "b2", al)
+check("устаревшая карта: правка x.py — идёт и test_x, и test_y (изменён после сборки), причина в выводе",
+      r.returncode == 0 and "тестов 2 из 2" in r.stdout and "изменены после сборки карты" in r.stdout
+      and "alpha/test_y.py" in r.stdout and "файлов 2, ok 2" in r.stdout, r.stdout)
+MAPOK = mkmap(["alpha/test_x.py", "alpha/test_y.py"], {"plugins/alpha/lib/x.py": ["alpha/test_x.py"], "README.md": [],
+                                                       "plugins/alpha/lib/y.py": ["alpha/test_y.py"]},
+              hashes={"alpha/test_x.py": OK2H, "alpha/test_y.py": hashlib.sha256(Y2.encode()).hexdigest()})
+r = run_aff("--affected", "--base", "b2", al, mapf=MAPOK)
+check("карта с теми же хешами: устаревших нет, идёт только test_x", r.returncode == 0 and "тестов 1 из 2" in r.stdout
+      and "изменены после сборки" not in r.stdout and "файлов 1, ok 1" in r.stdout, r.stdout)
+git(repo, "checkout", "-q", "--", "plugins/alpha/lib/x.py")
+put(os.path.join(repo, "README.md"), "# только текст\n")
+r = run_aff("--affected", "--base", "b2", al)
+check("устаревшая карта: даже правка README гонит test_y (он мог начать читать README), test_x — нет",
+      r.returncode == 0 and "тестов 1 из 2" in r.stdout and "изменены после сборки карты" in r.stdout
+      and "файлов 1, ok 1" in r.stdout and "ok   alpha/test_y.py" in r.stdout, r.stdout)
+r = run_aff("--affected", "--base", "b2", al, mapf=MAPOK)
+check("карта с теми же хешами: README ничего не задевает — нечего гонять, код 3",
+      r.returncode == 3 and "нечего гонять" in r.stdout, (r.returncode, r.stdout))
+git(repo, "checkout", "-q", "--", "README.md")
+SI = [("/r/plugins/alpha", "alpha/test_x.py"), ("/r/plugins/alpha", "alpha/test_y.py")]
+SM = R.load_map(mkmap(["alpha/test_x.py", "alpha/test_y.py"], {"README.md": [], "plugins/alpha/lib/x.py": ["alpha/test_x.py"]}))[0]
+sel = R.select(["README.md"], "/r", SI, SM, stale=["alpha/test_y.py"])
+check("select: ничего не задето, но test_y устарел — идёт он", sel == ([SI[1]], [], []), sel)
+sel = R.select(["plugins/alpha/lib/x.py"], "/r", SI, SM, stale=["alpha/test_y.py", "gamma/test_g.py"])
+check("select: устаревший идёт вместе с затронутым, метка не из набора игнорируется", sel == (SI, [], []), sel)
+sdir = mkplugin({"test_a.py": OK2, "test_b.py": OK2 + "# другой\n"}, "alpha")
+sitems = [(sdir, "alpha/test_a.py"), (sdir, "alpha/test_b.py"), (sdir, "alpha/test_c.py")]
+sm = R.load_map(mkmap(["alpha/test_a.py", "alpha/test_b.py"], {}, hashes={"alpha/test_a.py": OK2H, "alpha/test_b.py": "не тот"}))[0]
+check("stale_tests: хеш другой — устарел; хеш тот же и файл, которого нет в карте, — нет",
+      R.stale_tests(sitems, sm) == ["alpha/test_b.py"], R.stale_tests(sitems, sm))
+sm = R.load_map(mkmap(["alpha/test_a.py", "alpha/test_b.py"], {}, hashes={}))[0]
+check("stale_tests: в карте нет хеша файла — устарел", R.stale_tests(sitems, sm) == ["alpha/test_a.py", "alpha/test_b.py"],
+      R.stale_tests(sitems, sm))
+check("test_hash: sha256 содержимого; нет файла — None",
+      R.test_hash(sdir, "alpha/test_a.py") == OK2H and R.test_hash(sdir, "alpha/test_zzz.py") is None)
+# много устаревших — карта устарела целиком: весь набор с причиной (порог STALE_FULL)
+many = {f"test_{i}.py": OK2 + f"# {i}\n" for i in range(R.STALE_FULL)}
+mdir = mkplugin(many, "alpha")
+mrepo2 = os.path.dirname(mdir)
+put(os.path.join(mdir, "lib", "z.py"), "Z = 1\n")
+git(mrepo2, "init", "-q", "-b", "main")
+git(mrepo2, "add", "-A")
+git(mrepo2, "commit", "-q", "-m", "база")
+put(os.path.join(mdir, "lib", "z.py"), "Z = 2\n")
+mlabels = sorted(f"alpha/{f}" for f in many)
+mm2 = mkmap(mlabels, {os.path.relpath(os.path.join(mdir, "lib", "z.py"), mrepo2): [mlabels[0]]},
+            hashes={lb: "старый" for lb in mlabels})
+r = run_aff("--affected", "--base", "main", mdir, mapf=mm2)
+check(f"устаревшая карта: {R.STALE_FULL} файлов изменены — весь набор, причина «карта устарела»",
+      r.returncode == 0 and "карта устарела" in r.stdout and f"файлов {R.STALE_FULL}, ok {R.STALE_FULL}" in r.stdout, r.stdout)
+mm3 = mkmap(mlabels, {os.path.relpath(os.path.join(mdir, "lib", "z.py"), mrepo2): [mlabels[0]]},
+            hashes={lb: ("старый" if i < R.STALE_FULL - 1 else R.test_hash(mdir, lb)) for i, lb in enumerate(mlabels)})
+r = run_aff("--affected", "--base", "main", mdir, mapf=mm3)
+check("устаревшая карта: на один меньше порога — не «карта устарела», а идут устаревшие и затронутый",
+      r.returncode == 0 and "карта устарела" not in r.stdout and "изменены после сборки карты" in r.stdout
+      and f"тестов {R.STALE_FULL - 1} из {R.STALE_FULL}" in r.stdout, r.stdout)
 
 # --- affected-map.py: карта по прогону в копии с метками ---
 MAPPER = os.path.join(PLUGIN, "scripts", "affected-map.py")
@@ -519,6 +589,9 @@ for path, want in (("plugins/alpha/lib/x.py", {"alpha/test_x.py"}),
                    ("plugins/alpha/lib/twin_b.sh", {"alpha/test_twin.py"}),
                    ("AGENTS.md", set())):
     check(f"affected-map: {path} → {sorted(want) or 'ничего'}", F.get(path) == want, (F.get(path), why))
+check("affected-map: version 2, hashes — sha256 каждого файла тестов", mm.get("hashes") and all(
+    mm["hashes"].get(lb) == hashlib.sha256(open(os.path.join(ma, "tests", lb.split("/")[1]), "rb").read()).hexdigest()
+    for lb in mm["tests"]), mm.get("hashes"))
 check("affected-map: tests — все файлы тестов, broken — упавший", mm["tests"] == {
     "alpha/test_x.py", "alpha/test_lazy.py", "alpha/test_sh.py", "alpha/test_copy.py", "alpha/test_plain.py",
     "alpha/test_fail.py", "alpha/test_tree.py", "alpha/test_twin.py"} and mm["always"] == {"alpha/test_fail.py"}, mm)
