@@ -7363,7 +7363,10 @@ def check(paths=None, quiet=False):
         tails = ([("хвост", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
                   for i, ln in T.tail_lines(tasks_now, now())]
                  + [("отчёт", p, f"{p}:{n}") for p, n in T.inbox_orphans(tasks_now, os.path.join(AI_HOME, "knowledge", "inbox"), now())]
-                 + [("ревью", p, f"{p}:{n}") for p, n in T.review_debts(tasks_now, PANTHEON, now())])
+                 + [("ревью", p, f"{p}:{n}") for p, n in T.review_debts(tasks_now, PANTHEON, now())]
+                 + [("часть", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
+                    for i, ln in T.part_stalled(tasks_now, now())])
+        tails_board(tails)  # metis-0572: полный список — на доску, в том числе то, о чём тревога уже была или молчит
         field_errs, field_warns = T.board_problems(tasks_now, now(), night_end, autoclose_mod().open_pr_tasks(path("autoclose.json")))
         field_errs = [(i, f"status done без closed — проставлен из updated") for i in fixed] + field_errs
         for tid, text in field_errs:
@@ -7469,7 +7472,23 @@ def unlinked_alert(T, unlinked):
 TAIL_SHOWN = 12
 TAIL_TEXT = {"хвост": "хвост в журнале без задачи (нет id задачи в строке)",
              "отчёт": "файл inbox старше суток без задачи разбора (нет ссылки source/from или в тексте)",
-             "ревью": "ревью с находкой Д без задачи (нет ссылки на файл ревью)"}
+             "ревью": "ревью с находкой Д без задачи (нет ссылки на файл ревью)",
+             "часть": "PR слит с «часть», задача без движения дольше 24 ч (закрыть, завести остаток или записать ход)"}
+
+
+def tails_board(items):
+    """Доска/Хвосты.md (metis-0572): все хвосты, как их видит проход сейчас, а не только новые для тревоги — тревогу
+    первый проход глотает, а владелец смотрит доску. Файла нет, пока доски нет; пишется только при изменении."""
+    if not os.path.isdir(BOARD):
+        return
+    rows = [f"- **{TAIL_TEXT[kind].split(' (')[0]}** — {where}" for kind, _, where in items]
+    text = ("# Хвосты\n\nЧто тик считает потерянным: строка журнала без задачи, файл inbox и ревью без задачи, "
+            "слитый PR «часть» без движения. Погасить — строка в журнале задачи «→ <id>» или «не задача: …» либо "
+            "задача на разбор.\n\n" + ("\n".join(rows) or "Нет — всё в порядке.") + "\n")
+    pp = os.path.join(BOARD, "Хвосты.md")
+    old = open(pp, encoding="utf-8").read() if os.path.exists(pp) else ""
+    if old != text:
+        write_atomic(pp, text)
 
 
 def tail_alert(T, items):

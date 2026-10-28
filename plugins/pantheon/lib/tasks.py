@@ -2375,6 +2375,7 @@ BASE_FILE = """filters:
     - 'file.folder == "Доска"'
     - file.name != "Сводка"
     - file.name != "Проблемы"
+    - file.name != "Хвосты"
 formulas:
   urgency: 'if(note["Внимание"], if(note["Внимание"].contains("конфликт"), 0, if(note["Внимание"].contains("подтвердите словом"), 0, if(note["Внимание"].contains("просрочено"), 1, if(note["Внимание"].contains("долго ждёт"), 1, if(note["Внимание"].contains("срок скоро"), 2, 3))))), 3)'
   prio_rank: 'if(note["Приоритет"].isEmpty(), 2, number(note["Приоритет"]))'
@@ -3160,7 +3161,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     # 1. что сейчас лежит в доске
     present, fresh, seen, mtime = {}, [], {}, {}
     for f in sorted(os.listdir(board)):
-        if not f.endswith(".md") or f.startswith((".", "_")) or f in ("Сводка.md", "Проблемы.md"):
+        if not f.endswith(".md") or f.startswith((".", "_")) or f in ("Сводка.md", "Проблемы.md", "Хвосты.md"):
             continue
         p = os.path.join(board, f)
         try:
@@ -3582,28 +3583,77 @@ FINDINGS_ZERO_RE = re.compile(r"^findings:\s*0\s*$", re.M)
 D_FINDING_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)?\**Д\d*(?![\w])\**\s*[·.:—–)-]?\s*\S")
 
 
+TAIL_CLOSED_RE = re.compile(r"(?:закрыт|снят|устранён|устранен|выполнен|доделан|погашен)\w*", re.I)
+TAIL_CLEAR_RE = re.compile(r"^(?:→|->|не задача:)", re.I)  # строка-погашение: «→ <id>» или «не задача: …» (metis-0572)
+TAIL_BARE_RE = re.compile(r"(?<![\w.-])\d{3,4}(?![\w.-])")  # id без префикса: «0366»
+TAIL_OPEN = ("todo", "doing", "review", "waiting")
+
+
+def _journal(body):
+    """[(время, актор, текст, строка)] журнала задачи: после «## Журнал» до следующего «## »."""
+    m = re.search(r"^## Журнал[^\n]*\n", body or "", re.M)
+    out = []
+    if not m:
+        return out
+    for ln in (body[m.end():]).split("\n"):
+        if ln.startswith("## "):
+            break
+        jm = JOURNAL_LINE_RE.match(ln)
+        if jm:
+            out.append((ts_of(jm.group(1).replace(" ", "T") + ":00"), jm.group(2).strip(), jm.group(3), ln.strip()))
+    return out
+
+
 def tail_lines(tasks, t, days=TAIL_DAYS):
-    """[(id задачи, строка журнала)] со словами хвоста и без id другой существующей задачи в самой строке, не старше days дней.
-    Строки самого тика (actor check) не считаются; журнал — после «## Журнал», до следующего «## »."""
+    """[(id задачи, строка журнала)] со словами хвоста, не старше days дней. Строки самого тика (actor check) не считаются.
+    Не хвост (metis-0572): в строке id другой существующей задачи (в том числе без префикса — «0366», если такая задача
+    одна) или «не задача:»; строка открытой задачи о ней самой (её id в строке); остаток закрыт позже в той же задаче
+    (строка со словом хвоста и «закрыт/снят/устранён/выполнен…»; такая строка и сама не хвост); позже в той же задаче есть строка «→ …» или «не задача: …»
+    — она гасит все прежние хвосты задачи (старую строку править не нужно)."""
+    suffix = {}
+    for i in tasks:
+        suffix.setdefault(i.rsplit("-", 1)[-1], []).append(i)
     out = []
     for tid, (_, head, body) in sorted(tasks.items()):
         if head.get("type") != "task":
             continue
-        m = re.search(r"^## Журнал[^\n]*\n", body or "", re.M)
-        if not m:
-            continue
-        for ln in (body[m.end():]).split("\n"):
-            if ln.startswith("## "):
-                break
-            jm = JOURNAL_LINE_RE.match(ln)
-            if not jm or jm.group(2).strip() in TAIL_SKIP_ACTORS:
-                continue
-            ts = ts_of(jm.group(1).replace(" ", "T") + ":00")
-            if ts is None or t - ts > days * 86400 or not TAIL_RE.search(jm.group(3)):
+        jl = [x for x in _journal(body) if x[1] not in TAIL_SKIP_ACTORS]
+        for k, (ts, _, text, ln) in enumerate(jl):
+            if ts is None or t - ts > days * 86400 or not TAIL_RE.search(text):
                 continue
             # id гасит тревогу, только если такая задача есть и это не сама задача (review-113, x86-64, свой id — не хвост)
-            if not any(i != tid and i in tasks for i in TAIL_ID_RE.findall(jm.group(3))):
-                out.append((tid, ln.strip()))
+            if any(i != tid and i in tasks for i in TAIL_ID_RE.findall(text)):
+                continue
+            if any(len(suffix.get(b, [])) == 1 and suffix[b][0] != tid for b in TAIL_BARE_RE.findall(text)):
+                continue
+            if "не задача:" in text.lower() or TAIL_CLOSED_RE.search(text):  # строка о закрытии хвоста — не хвост
+                continue
+            if head.get("status") in TAIL_OPEN and tid in TAIL_ID_RE.findall(text):
+                continue
+            if any((TAIL_RE.search(x[2]) and TAIL_CLOSED_RE.search(x[2])) or TAIL_CLEAR_RE.match(x[2].strip())
+                   for x in jl[k + 1:]):
+                continue
+            out.append((tid, ln))
+    return out
+
+
+PART_STALL_HOURS = 24
+PART_NOTE_RE = re.compile(r"PR #\d+ \([^)]*\) слит, в теле «часть»")
+
+
+def part_stalled(tasks, t, hours=PART_STALL_HOURS):
+    """[(id, строка)] открытые задачи, у которых последняя запись журнала (кроме тика) — «PR слит, в теле «часть»» и она
+    старше hours часов: автозакрытие оставило задачу открытой без сигнала (metis-0572, 0503). Любая позже запись
+    (агента, владельца) — движение, тревоги нет."""
+    out = []
+    for tid, (_, head, body) in sorted(tasks.items()):
+        if head.get("type") != "task" or head.get("status") not in TAIL_OPEN:
+            continue
+        jl = [x for x in _journal(body) if x[1] not in TAIL_SKIP_ACTORS]
+        # запись плановый проход ставит сам — «движение» после неё только от других авторов
+        last = jl[-1] if jl else None
+        if last and last[0] is not None and PART_NOTE_RE.search(last[2]) and t - last[0] > hours * 3600:
+            out.append((tid, last[3]))
     return out
 
 
