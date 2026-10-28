@@ -351,14 +351,11 @@ class Rel:
     слитого после первого (тогда в журнале обе головы)."""
     n = 0
 
-    def __init__(self, log="merge.jsonl", how="merge", logged="head", name="hooks/gate.py", content=HOOK,
-                 release=HOOK, rel_path="plugins/guard/hooks/gate.py", event="merged", repo="latark/agent-kit",
-                 later=None, shallow=True, bot=None, bot_merge=False, bot_exec=()):
-        Rel.n += 1
-        self.home = os.path.join(ROOT, f"r{Rel.n}")
-        self.origin = origin = os.path.join(self.home, "origin")
-        self.clone = os.path.join(self.home, ".claude", "plugins", "marketplaces", "agent-kit")
-        self.cfg = os.path.join(self.home, ".claude")
+    tpl = {}  # ключ параметров git-части -> (папка шаблона, головы PR, SHA выпуска): metis-0452
+
+    @staticmethod
+    def _build(home, origin, clone, cfg, how, release, rel_path, later, shallow, bot, bot_merge, bot_exec):
+        """Собирает в home «origin», его клон и репозиторий ~/.claude. Возвращает (головы PR, SHA выпуска)."""
         os.makedirs(origin)
         run_git(origin, "init", "-q", "-b", "main")
         put(origin, "README.md", "agent-kit\n")
@@ -381,7 +378,7 @@ class Rel:
                 run_git(origin, "commit", "-q", "--allow-empty", "-m", "other")
         if how == "ff+direct":  # прямой коммит поверх слитой головы: первый родитель слит, второго нет
             run_git(origin, "commit", "-q", "--allow-empty", "-m", "direct")
-        self.release = None
+        release_sha = None
         if bot is not None:  # коммит выпуска workflow release (metis-0512) поверх main: один родитель, файлы bot
             if bot_merge:  # тот же коммит веткой, слитой в main merge-коммитом не владельцем — у вершины два родителя
                 run_git(origin, "checkout", "-q", "-b", "botpr")
@@ -394,14 +391,41 @@ class Rel:
             if bot_merge:
                 run_git(origin, "checkout", "-q", "main")
                 run_git(origin, "merge", "-q", "--no-ff", "-m", "Merge botpr", "botpr")
-            self.release = run_git(origin, "rev-parse", "HEAD")
+            release_sha = run_git(origin, "rev-parse", "HEAD")
+        os.makedirs(os.path.dirname(clone))
+        run_git(home, "clone", "-q", *(["--depth", "1"] if shallow else []), "file://" + origin, clone)
+        run_git(cfg, "init", "-q")
+        put(cfg, "keep.txt", "x\n")
+        run_git(cfg, "add", "keep.txt")
+        run_git(cfg, "commit", "-q", "-m", "init")
+        return heads, release_sha
+
+    def __init__(self, log="merge.jsonl", how="merge", logged="head", name="hooks/gate.py", content=HOOK,
+                 release=HOOK, rel_path="plugins/guard/hooks/gate.py", event="merged", repo="latark/agent-kit",
+                 later=None, shallow=True, bot=None, bot_merge=False, bot_exec=()):
+        Rel.n += 1
+        self.home = os.path.join(ROOT, f"r{Rel.n}")
+        self.origin = origin = os.path.join(self.home, "origin")
+        self.clone = os.path.join(self.home, ".claude", "plugins", "marketplaces", "agent-kit")
+        self.cfg = os.path.join(self.home, ".claude")
+        # git-часть (origin, клон, ~/.claude) зависит только от этих параметров: собираем один раз на набор,
+        # остальные случаи копируют готовую папку, а remote клона переписываем на свой origin (metis-0452)
+        key = repr((how, release, rel_path, later, shallow, bot, bot_merge, bot_exec))
+        if key not in Rel.tpl:
+            t = os.path.join(ROOT, f"tpl{len(Rel.tpl)}")
+            torig = os.path.join(t, "origin")
+            tclone = os.path.join(t, ".claude", "plugins", "marketplaces", "agent-kit")
+            heads, rel_sha = Rel._build(t, torig, tclone, os.path.join(t, ".claude"), how, release, rel_path, later,
+                                        shallow, bot, bot_merge, bot_exec)
+            Rel.tpl[key] = (t, heads, rel_sha)
+        t, heads, self.release = Rel.tpl[key]
+        shutil.copytree(t, self.home, symlinks=True)
+        cfgp = os.path.join(self.clone, ".git", "config")
+        with open(cfgp, encoding="utf-8") as fh:
+            txt = fh.read()
+        with open(cfgp, "w", encoding="utf-8") as fh:
+            fh.write(txt.replace("file://" + os.path.join(t, "origin"), "file://" + origin))
         self.head = heads[-1]
-        os.makedirs(os.path.dirname(self.clone))
-        run_git(self.home, "clone", "-q", *(["--depth", "1"] if shallow else []), "file://" + origin, self.clone)
-        run_git(self.cfg, "init", "-q")
-        put(self.cfg, "keep.txt", "x\n")
-        run_git(self.cfg, "add", "keep.txt")
-        run_git(self.cfg, "commit", "-q", "-m", "init")
         state = os.path.join(self.home, ".local", "state", "pantheon")
         os.makedirs(os.path.join(state, "logs"))
         os.makedirs(os.path.join(state, "owner-log"))
