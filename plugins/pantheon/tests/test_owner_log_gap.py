@@ -24,7 +24,7 @@
 журнал хуков (8–9). 10–11 — одна запись засчитывается один раз; 12–13 — запись не теряется, когда за время
 ожидания транскрипт вырос больше окна хвоста (было 2 МБ у prompt_entry и 4 МБ у очереди).
 
-Запуск: python3 -I plugins/pantheon/tests/test_owner_log_gap.py  (0 — прошли; проверяется и на /usr/bin/python3)
+Запуск: python3 -I plugins/pantheon/tests/test_owner_log_gap.py  (0 — прошли)
 """
 import atexit
 import json

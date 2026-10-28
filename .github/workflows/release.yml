@@ -1,0 +1,35 @@
+# Выпуск плагинов (metis-0512, вариант Б): номер версии тронутых плагинов поднимается здесь, после слияния в main,
+# одним коммитом от github-actions[bot]. PR version в plugin.json не трогают — соседние PR не конфликтуют.
+# Логика — .github/scripts/release.py (шапка там). Без состояния: каждый запуск считает от прошлого выпуска.
+# Право contents: write — только у этого workflow; .github целиком — ядро шлюза guard (CORE_DIR), правит владелец.
+# Сторонних Action, кроме actions/checkout по полному SHA, нет: подмена версии Action дала бы запись в main.
+# GITHUB_TOKEN: коммит выпуска не запускает workflow заново (цикла нет), check-traces на нём тоже не идёт.
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+# один выпуск за раз: идущий не отменяется (push посреди запуска), из ожидающих остаётся последний — лишние
+# отменяются; запуск берёт свежий main, поэтому покрывает и отменённые
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Номер версии тронутых плагинов
+        run: python3 -I .github/scripts/release.py --push

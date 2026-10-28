@@ -8,7 +8,10 @@ SubagentStop). Основа — stop-verify.sh одного из проекто�
 Хук сам код проекта НЕ запускает: хуки идут вне песочницы, а `.pantheon-verify`, `package.json` и тесты в worktree
 разработчик может поменять — запуск их из хука был бы выходом из песочницы (находка проверки безопасности 15.10).
 Вместо этого хук читает транскрипт разработчика (agent_transcript_path) и требует, чтобы проверку проекта он прогнал
-сам — в своей песочнице, через `heavy` — и чтобы последний её прогон после последней правки был зелёным.
+сам — в своей песочнице, через `heavy` — и чтобы последний её прогон после последней правки был зелёным. Тестам
+нужен порт или сокет, которых в окне нет, — прогоном считается и `pantheon outside test --wait N` (N > 0, без
+--script): плановый проход гоняет проверку проекта вне окна на закоммиченном HEAD, код выхода — код тестов, 75 —
+итога не дождался (красный).
 
 Какая проверка — по версии файлов в точке, от которой ответвилась ветка разработчика (не по его правкам):
   1. первая строка .pantheon-verify в корне репозитория (её кладёт лид или координатор);
@@ -17,7 +20,7 @@ SubagentStop). Основа — stop-verify.sh одного из проекто�
 Нечем проверить или правок нет — не держит. Иначе — выход 2 с тем, что запустить; не больше трёх возвратов подряд
 на одного разработчика: дальше хук отпускает, а разработчик пишет в отчёте «заблокировано» (лид выносит наверх).
 
-Python 3.9+ (хуки запускает python3 из PATH). Состояние — ~/.local/state/pantheon/ctx/dev-stop/<agent_id>.
+Python 3.11+: хуки запускает hooks/python.sh (metis-0571). Состояние — ~/.local/state/pantheon/ctx/dev-stop/<agent_id>.
 """
 import json
 import os
@@ -35,6 +38,9 @@ BASH_WRITES = re.compile(r"(?:^|[;&|]\s*)(?:sed\s+-i|perl\s+-[a-z]*i|mv|cp|rm|te
                          r"\S*(?:pnpm|npm|yarn|npx)\s+(?:add|remove|install|i|up|update)|"
                          r"\S*pantheon\s+exec\s+codex)\b"  # Codex правит worktree за роль — это правка
                          r"|[^<>&0-9]>{1,2}\s*[^&\s]")
+# проверка проекта вне окна (lib/outside.py): с ожиданием итога и без --script — это прогон самой проверки проекта
+OUTSIDE_TEST = re.compile(r"(?:^|[;&|]\s*)\S*pantheon\s+outside\s+test\b(?![^;&|]*--script)"
+                          r"(?=[^;&|]*--wait\s+[1-9])")
 
 
 def git(cwd, *args):
@@ -116,7 +122,7 @@ def last_runs(transcript, variants):
     for i, uid in enumerate(order):
         name, inp = uses[uid]
         cmd = norm(inp.get("command", "")) if name == "Bash" else ""
-        if name == "Bash" and any(v in cmd for v in variants):
+        if name == "Bash" and (any(v in cmd for v in variants) or OUTSIDE_TEST.search(cmd)):
             if uid in results:
                 last_run = (i, not results[uid])
             continue
@@ -179,7 +185,8 @@ def main():
         why = (f"последний прогон проверки проекта «{label}» после правок — красный. Работа не сдана, пока проверка не "
                "зелёная: почини и прогони снова.")
     else:
-        why = f"после последней правки ты не прогнал проверку проекта. Запусти `heavy {label}` и добейся зелёного результата."
+        why = (f"после последней правки ты не прогнал проверку проекта. Запусти `heavy {label}` (тестам нужен порт "
+               "или сокет — `pantheon outside test --wait 590` на закоммиченной ветке) и добейся зелёного результата.")
     print(f"СТОП ({n} из {MAX_RETURNS}): {why} Если причина вне твоей задачи — опиши её в отчёте по формату «Находка» "
           "и закончи со статусом «заблокировано».", file=sys.stderr)
     return 2

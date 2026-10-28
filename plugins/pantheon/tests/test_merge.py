@@ -654,6 +654,66 @@ def test_core_matches_guard():
     check("ядро merge.py == ядро merge_gate.py", r.stdout.strip() == "True", r.stdout + r.stderr)
 
 
+PJ = "plugins/pantheon/.claude-plugin/plugin.json"
+# случаи номера версии (metis-0512): (файлы PR, отказ?) — общие для прохода и шлюза guard
+VERSION_CASES = [
+    ([{"filename": PJ, "status": "modified", "patch": '@@ -2 +2 @@\n-  "version": "0.11.1",\n+  "version": "0.11.2",'}],
+     True),
+    ([{"filename": PJ, "status": "modified", "patch": '@@ -3 +3 @@\n-  "description": "a",\n+  "description": "b",'}],
+     False),
+    ([{"filename": PJ, "status": "modified", "patch": '@@ -2 +2 @@\n+  "\\u0076ersion": "9.9.9",'}], True),
+    ([{"filename": PJ, "status": "modified", "patch": '@@ -2 +2 @@\n+  "VERSION": "9.9.9",'}], True),
+    ([{"filename": PJ, "status": "modified"}], True),
+    ([{"filename": PJ, "status": "added", "patch": '+{"version": "0.1.0"}'}], False),
+    ([{"filename": PJ, "status": "removed", "patch": '-{"version": "0.1.0"}'}], False),
+    ([{"filename": "plugins/new/.claude-plugin/plugin.json", "previous_filename": PJ, "status": "renamed",
+       "patch": '-  "version": "1",\n+  "version": "2",'}], True),
+    ([{"filename": ".claude-plugin/releases.json", "status": "modified", "patch": "+{}"}], True),
+    ([{"filename": ".Claude-Plugin/Releases.JSON", "status": "added", "patch": "+{}"}], True),
+    ([{"filename": "x.json", "previous_filename": ".claude-plugin/releases.json", "status": "renamed"}], True),
+    ([{"filename": "README.md", "status": "modified", "patch": '+ "version": "1"'}], False),
+    ([{"filename": "plugins/pantheon/x/plugin.json", "status": "modified", "patch": '+ "version": "1"'}], False),
+]
+
+
+def test_version_matches_guard():
+    """metis-0512: version_problem прохода и _version_problem шлюза guard отвечают одинаково на общих случаях."""
+    code = ("import sys, json, importlib.util; sys.path.insert(0, %r); import merge_gate as g\n"
+            "s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
+            "s.loader.exec_module(m)\ncases = json.loads(sys.stdin.read())\n"
+            "print(json.dumps([[bool(g._version_problem(f)), bool(m.version_problem(f))] for f, _w in cases]))"
+            % (GUARD_HOOKS, os.path.join(LIBDIR, "merge.py")))
+    r = subprocess.run([sys.executable, "-I", "-c", code], input=json.dumps(VERSION_CASES), capture_output=True,
+                       text=True, timeout=60)
+    try:
+        got = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        got = []
+    check("version: случаев столько же", len(got) == len(VERSION_CASES), r.stdout + r.stderr)
+    for i, ((files, want), pair) in enumerate(zip(VERSION_CASES, got)):
+        check(f"version {i}: {files[0]['filename']} {files[0].get('status')} — отказ {want} у guard и прохода",
+              pair == [want, want], (pair, files))
+
+
+def test_version_pr_dropped():
+    """metis-0512: PR ядра правит version в plugin.json — окна Touch ID нет, слияния нет, заявка снята."""
+    for files in (VERSION_CASES[0][0], VERSION_CASES[8][0]):
+        b = Box()
+        b.view(SHA, files=["README.md", CORE_FILE] + files)
+        b.request()
+        b.set("touchid-rc", 0)
+        b.run()
+        check(f"version: {files[0]['filename']} — окна нет, слияния и согласия нет, заявка снята",
+              not b.windows() and not b.merges() and not b.approve_lines() and b.req() is None
+              and "номер версии" in b.outs[-1], b.outs[-1])
+    b = Box()
+    b.view(SHA, files=["README.md", CORE_FILE] + VERSION_CASES[1][0])
+    b.request()
+    b.set("touchid-rc", 1)
+    b.run()
+    check("version: plugin.json без правки version — окно есть", len(b.windows()) == 1, b.outs[-1])
+
+
 def test_approve_expires():
     """argus-b 3: строка согласия в силе сутки; старая, из будущего и без разборного времени — нет."""
     b = Box()

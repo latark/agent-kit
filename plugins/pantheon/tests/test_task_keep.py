@@ -107,13 +107,13 @@ def main():
     p1 = os.path.join(home, "directions", "metis-pantheon", "tasks", "metis-0001.md")
     t1 = read(p1) if os.path.exists(p1) else ""
     check("task new --body: тело между заголовком и «## Журнал»", r.returncode == 0
-          and re.search(r"# Проба\n\nЦель: X\.\nГотово, когда: Y\.\n\n## Журнал", t1), (r.stderr, t1))
+          and re.search(r"# Проба\n\nЦель: X\.\nГотово, когда: Y\.\n\n## Готово, когда\n\n- \[ \] [^\n]+\n\n## Журнал", t1), (r.stderr, t1))
     bf = os.path.join(tmp, "body.md")
     open(bf, "w", encoding="utf-8").write("Из файла.\n## Не раздел\nещё строка\n")
     r = new(env, "--body-file", bf)
     t2 = read(os.path.join(home, "directions", "metis-pantheon", "tasks", "metis-0002.md"))
     check("task new --body-file: текст из файла до журнала, «## » внутри экранирован",
-          r.returncode == 0 and "Из файла.\n\\## Не раздел\nещё строка\n\n## Журнал" in t2, t2)
+          r.returncode == 0 and "Из файла.\n\\## Не раздел\nещё строка\n\n## Готово, когда\n\n- [ ] " in t2 and "\n\n## Журнал" in t2, t2)
     r = new(env, "--body-file", os.path.join(tmp, "нет-такого.md"))
     check("task new --body-file с чужим путём: код 2, новой задачи нет", r.returncode == 2 and "не читается" in r.stderr
           and len(tasks_of(home)) == 2, r.stderr)
@@ -362,11 +362,14 @@ def main():
     check("тик: следующий проход называет оставшиеся 3, третий молчит — каждый из 15 id назван в alerts.md ровно раз",
           len(lines) == 2 and all(sum(i in ln for ln in lines) == 1 for i in many) and "и ещё" not in lines[1], lines)
 
-    # чистые функции (одно и то же на 3.9 и 3.14)
+    # чистые функции
     desc = T.has_description
     check("has_description: заголовок и журнал — нет; текст — да; чужой раздел — да",
           not desc("\n# A\n\n## Журнал\n\n- x — агент: создана\n") and desc("\n# A\n\nтекст\n\n## Журнал\n")
           and desc("\n# A\n\n## Журнал\n\n- x\n\n## Заметки владельца\n\nа\n"))
+    check("has_description: раздел «Готово, когда» с подсказкой описанием не считается (metis-0502)",
+          not desc("\n# A\n\n## Готово, когда\n\n- [ ] (впишите)\n\n## Журнал\n\n- x — агент: создана\n")
+          and desc("\n# A\n\nтекст\n\n## Готово, когда\n\n- [ ] а\n\n## Журнал\n"))
 
     print(f"\n{sum(results)}/{len(results)}")
     sys.exit(0 if all(results) else 1)

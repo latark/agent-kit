@@ -3,7 +3,7 @@
 целиком в stdout, в stderr «отчёт не сохранён: …», код 1 (плановый проход поднимет тревогу). Закрыт только alerts.md —
 файл сохранён, путь в stdout, в stderr «тревога не записана», код 1. Запись доступна — поведение прежнее (путь файла).
 
-usage.py подменён заглушкой в временной копии PLUGIN. pantheon.py идёт в этом же процессе (3.11+; на 3.9 — перезапуск).
+usage.py подменён заглушкой в временной копии PLUGIN. pantheon.py идёт в этом же процессе.
 Запуск: python3 -I plugins/pantheon/tests/test_usage_ro.py  (код выхода 0 — все прошли)
 """
 import atexit
@@ -17,9 +17,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _py311 import PY311  # noqa: E402
-if sys.version_info < (3, 11):
-    os.execv(PY311, [PY311, "-I", os.path.abspath(__file__)])
+from _py311 import PY311  # noqa: E402,F401  — Python 3.11+ и PANTHEON_TEST=1
 
 ROOT = os.path.realpath(tempfile.mkdtemp(prefix="usage-ro-"))
 

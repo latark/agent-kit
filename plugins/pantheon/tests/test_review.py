@@ -28,9 +28,6 @@ def check(name, cond, detail=""):
 
 
 def main():
-    if sys.version_info < (3, 11):  # pantheon.py сам требует 3.11 (tomllib): на 3.9 он отвечал бы отказом на всё
-        print("ok   пропуск: pantheon review требует Python 3.11+ (здесь %d.%d)" % sys.version_info[:2])
-        return 0
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="review-test-"))
     try:
         run_all(tmp)
@@ -170,18 +167,38 @@ def run_all(tmp):
           f"итог на {SHA[:12]}: принять 2, вернуть 1 — последний вердикт каждого argus" in out, r.stdout)
     check("status: итог на другом head — свой", f"итог на {S2[:12]}: принять 2, вернуть 0 — последний вердикт "
           "каждого argus" in out, r.stdout)
-    check("status: «принять» на Sonnet и с «модель: claude-opus» не в начале --ran не в счёт, «вернуть» не снимает",
-          f"итог на {S3[:12]}: принять 1, вернуть 1 — последний вердикт каждого argus" in out, r.stdout)
+    check("status: «принять» на Sonnet и с «модель: claude-opus» не в начале --ran в счёт (вне ядра хватает любой "
+          "модели) и снимает «вернуть» того же рецензента; строка «для PR ядра» считает только Opus и «вернуть» держит",
+          f"итог на {S3[:12]}: принять 4, вернуть 0 — последний вердикт каждого argus" in out
+          and f"итог на {S3[:12]}: принять 4, вернуть 0 — последний вердикт каждого argus" in out
+          and out[out.index(f"итог на {S3[:12]}: принять 4, вернуть 0 — последний вердикт каждого argus") + 1]
+          == "  для PR ядра (в счёт только «принять» на Opus): принять 1, вернуть 1", r.stdout)
     check("status: «принять» без перечня или с пустым полем не в счёт",
           f"итог на {S4[:12]}: принять 1, вернуть 0 — последний вердикт каждого argus" in out, r.stdout)
     check("status: «принять» не на Opus помечено в журнале",
-          sum("не на Opus (--ran без «модель: claude-opus» в начале)" in ln for ln in out) == 4, r.stdout)
-    check("status: «принять» с Opus в --ran, но Sonnet по транскрипту argus не в счёт; models_note — по --ran",
-          f"итог на {S5[:12]}: принять 2, вернуть 0 — последний вердикт каждого argus" in out, r.stdout)
+          sum("не на Opus (--ran без «модель: claude-opus» в начале) — для PR ядра не в счёт" in ln for ln in out) == 4, r.stdout)
+    check("status: Sonnet по транскрипту argus в счёт вне ядра, для ядра — нет; models_note — по --ran",
+          f"итог на {S5[:12]}: принять 5, вернуть 0 — последний вердикт каждого argus" in out
+          and "  для PR ядра (в счёт только «принять» на Opus): принять 2, вернуть 0" in out, r.stdout)
     check("status: расхождение --ran с транскриптом помечено своей строкой",
           sum("не на Opus по транскрипту argus" in ln for ln in out) == 1, r.stdout)
     check("status: транскрипт без моделей (models: []) помечен своей строкой, а не «по --ran»",
           sum("транскрипт argus найден, но моделей в нём нет" in ln for ln in out) == 1, r.stdout)
+    # репозиторий продукта в [merge_repos] (не metis-pantheon): ядра там нет — без строк про Opus (app#20, 28.10)
+    os.makedirs(os.path.join(tmp, ".claude", "pantheon"), exist_ok=True)
+    with open(os.path.join(tmp, ".claude", "pantheon", "policy.toml"), "w") as fh:
+        fh.write('[merge_repos]\nathena-x = ["acme/app"]\nmetis-pantheon = ["latark/agent-kit"]\n')
+    with open(os.path.join(state, "merge-gate", "records.jsonl"), "a") as fh:
+        fh.write(json.dumps(dict(v("accept", S5, "kkkkkkkk01", pr=20, cl=sonnet), repo=["acme/app"],
+                                 models=["claude-sonnet-5-5"])) + "\n")
+    r = pantheon("review", "status", "acme/app", "20")
+    check("status: продукт — Sonnet в счёт, без «не на Opus» и без строки «для PR ядра»",
+          f"итог на {S5[:12]}: принять 1, вернуть 0 — последний вердикт каждого argus" in r.stdout
+          and "Opus" not in r.stdout, r.stdout)
+    r = pantheon("review", "status", "latark/agent-kit", "40")
+    check("status: репозиторий metis-pantheon в [merge_repos] — строка «для PR ядра» на месте",
+          "  для PR ядра (в счёт только «принять» на Opus): принять 2, вернуть 0" in r.stdout, r.stdout)
+    os.remove(os.path.join(tmp, ".claude", "pantheon", "policy.toml"))
     # тот же журнал — шлюз владельца merge.gate (общее правило review_accept_counts): Sonnet по транскрипту не в счёт
     import importlib.util as _ilu
     import types as _types

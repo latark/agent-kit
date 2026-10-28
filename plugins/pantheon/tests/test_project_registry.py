@@ -195,7 +195,7 @@ def main():
 
 
 def pure():
-    """Чистые функции — и на системном Python 3.9 (без CLI)."""
+    """Чистые функции (без CLI)."""
     dirs = [{"name": "metis-pantheon", "project": "Пантеон", "folders": ["~/projects/agent-kit"]},
             {"name": "a-one", "project": "P", "folders": ["~/projects/shared"]},
             {"name": "b-two", "project": "Q", "folders": ["~/projects/shared"]}]
@@ -215,9 +215,6 @@ def pure():
 
 
 pure()
-if PY311:
-    main()
-else:
-    print("skip: нужен Python 3.11+ для CLI")
+main()
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

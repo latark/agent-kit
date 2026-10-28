@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Тесты замера минут владельца (lib/mmv.py; metis-0169). Запуск: python3 -I plugins/pantheon/tests/test_mmv.py
 
-Модуль самостоятельный — идёт и на системном 3.9. Каждый тест — своя временная STATE; настоящие ~/.local/state и
-~/.claude не трогаются. CLI (`pantheon mmv`, `night report`) проверяется интерпретатором 3.11+ из _py311.
+Модуль самостоятельный. Каждый тест — своя временная STATE; настоящие ~/.local/state и
+~/.claude не трогаются. CLI (`pantheon mmv`, `night report`) — подпроцессом тем же Python (_py311).
 """
 import importlib.util
 import json
@@ -166,28 +166,25 @@ check([M._entries(n) for n in (1, 2, 5, 11, 12, 21, 22, 25)] ==
       "склонение «вход»")
 
 # 9. CLI на 3.11+: pantheon mmv и night report (HOME и STATE — временные)
-if PY311:
-    s = state([rec("2026-10-15T10:00:00"), rec("2026-10-15T10:02:00"), rec("2026-10-15T10:20:00")])
-    home = tempfile.mkdtemp(prefix="mmv-home-")
-    TMPS.append(home)
-    env = dict(os.environ, HOME=home, PANTHEON_HOME=os.path.join(home, "ai", "pantheon"), PANTHEON_STATE=s,
-               PANTHEON_HOST="mac-a", PANTHEON_NOW=str(T16))
-    cli = os.path.join(ROOT, "lib", "pantheon.py")
+s = state([rec("2026-10-15T10:00:00"), rec("2026-10-15T10:02:00"), rec("2026-10-15T10:20:00")])
+home = tempfile.mkdtemp(prefix="mmv-home-")
+TMPS.append(home)
+env = dict(os.environ, HOME=home, PANTHEON_HOME=os.path.join(home, "ai", "pantheon"), PANTHEON_STATE=s,
+           PANTHEON_HOST="mac-a", PANTHEON_NOW=str(T16))
+cli = os.path.join(ROOT, "lib", "pantheon.py")
 
-    def run(*a):
-        return subprocess.run([PY311, "-I", cli] + list(a), capture_output=True, text=True, env=env, timeout=120)
+def run(*a):
+    return subprocess.run([PY311, "-I", cli] + list(a), capture_output=True, text=True, env=env, timeout=120)
 
-    p = run("mmv", "--days", "400")
-    check(p.returncode == 0 and "2026-10-15" in p.stdout and "3,5" in p.stdout,
-          f"CLI mmv: {p.returncode} {p.stdout[-300:]} {p.stderr[-300:]}")
-    rows = [json.loads(x) for x in open(os.path.join(s, "mmv.jsonl"), encoding="utf-8")]
-    check(any(x["date"] == "2026-10-15" and x["min"] == 3.5 for x in rows), f"CLI пишет mmv.jsonl: {rows[:2]}")
-    check(run("mmv", "--days", "x").returncode == 2, "CLI mmv --days x → код 2")
-    p = run("night", "report")
-    check(p.returncode == 0 and "ММВ" in p.stdout, f"night report содержит ММВ: {p.stdout[-400:]} {p.stderr[-300:]}")
-    check("вчера 3,5 мин (2 входа)" in p.stdout, f"night report: «вчера» от PANTHEON_NOW: {p.stdout[-400:]}")
-else:
-    print("CLI пропущен: нет Python 3.11+")
+p = run("mmv", "--days", "400")
+check(p.returncode == 0 and "2026-10-15" in p.stdout and "3,5" in p.stdout,
+      f"CLI mmv: {p.returncode} {p.stdout[-300:]} {p.stderr[-300:]}")
+rows = [json.loads(x) for x in open(os.path.join(s, "mmv.jsonl"), encoding="utf-8")]
+check(any(x["date"] == "2026-10-15" and x["min"] == 3.5 for x in rows), f"CLI пишет mmv.jsonl: {rows[:2]}")
+check(run("mmv", "--days", "x").returncode == 2, "CLI mmv --days x → код 2")
+p = run("night", "report")
+check(p.returncode == 0 and "ММВ" in p.stdout, f"night report содержит ММВ: {p.stdout[-400:]} {p.stderr[-300:]}")
+check("вчера 3,5 мин (2 входа)" in p.stdout, f"night report: «вчера» от PANTHEON_NOW: {p.stdout[-400:]}")
 
 for t in TMPS:
     shutil.rmtree(t, True)

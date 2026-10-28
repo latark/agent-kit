@@ -11,9 +11,7 @@
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _py311 import PY311  # pantheon.py — только на Python 3.11+ (tomllib)
-if sys.version_info < (3, 11):
-    os.execv(PY311, [PY311, "-I", os.path.abspath(__file__)])
+from _py311 import PY311  # noqa: E402
 import json
 import subprocess
 from datetime import datetime, timedelta

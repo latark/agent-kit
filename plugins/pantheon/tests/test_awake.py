@@ -13,9 +13,7 @@ import os
 import subprocess
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _py311 import PY311  # pantheon.py идёт только на Python 3.11+
-if sys.version_info < (3, 11):
-    os.execv(PY311, [PY311, "-I", os.path.abspath(__file__)])
+from _py311 import PY311  # noqa: E402,F401  — Python 3.11+ и PANTHEON_TEST=1
 import atexit
 import contextlib
 import io

@@ -41,8 +41,8 @@
 ~/ai/pantheon/directions/<имя>/ (направление — по папке запуска, как у guard); workshop —
 ~/ai/pantheon/workshop/<задача>.md; сессия без роли — последний HANDOFF.md, который она читала или писала.
 Выключатель хуков контекста — PANTHEON_CTX_OFF=1 (журнал ваших слов он не выключает). Пороги — PANTHEON_CTX_AT,
-PANTHEON_CTX_STEP; папки — PANTHEON_HOME, PANTHEON_STATE (для проверок). Python 3.9+: хуки запускает python3
-из PATH, на чистом Mac это системный 3.9.
+PANTHEON_CTX_STEP; папки — PANTHEON_HOME, PANTHEON_STATE (для проверок). Python 3.11+: хуки запускает
+hooks/python.sh (metis-0571).
 """
 import fcntl
 import hashlib
@@ -1368,7 +1368,7 @@ HQ_KEYS = ("closed_dirs", "closed_collections")
 
 def hq_policy(path=None):
     """[hq] policy.toml → {"closed_dirs": […], "closed_collections": […], "present": есть ли раздел}. Файла или раздела
-    нет — пустые списки. Файл не прочитать, не TOML, нет tomllib (Python 3.9), [hq] не таблица, ключ не список
+    нет — пустые списки. Файл не прочитать, не TOML, [hq] не таблица, ключ не список
     непустых строк, папка не от «~/» или «/» — ValueError с тем, что не так."""
     try:
         fh = open(path or POLICY, "rb")
@@ -1377,10 +1377,7 @@ def hq_policy(path=None):
     except OSError as e:
         raise ValueError("policy.toml не прочитать (%s)" % type(e).__name__)
     with fh:
-        try:
-            import tomllib
-        except ImportError:
-            raise ValueError("policy.toml не разобрать: нет tomllib (Python %d.%d)" % sys.version_info[:2])
+        import tomllib
         try:
             policy = tomllib.load(fh)
         except (OSError, ValueError) as e:  # TOMLDecodeError и битый UTF-8 — ValueError

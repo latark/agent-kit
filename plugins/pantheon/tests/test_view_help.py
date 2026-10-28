@@ -117,9 +117,6 @@ def live_checks():
 
 
 unit_checks()
-if PY311:
-    live_checks()
-else:
-    print("skip: нужен Python 3.11+ для CLI")
+live_checks()
 print(f"\n{sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)
