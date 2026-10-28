@@ -303,6 +303,8 @@ def t_no_tests(h):
                "нет записи тестов")
     merge_case("отказ про тесты подсказывает не-фон и timeout 600000", h.pre(f"gh pr merge 3 --match-head-commit {sha}"),
                False, "timeout до 600000 мс")
+    merge_case("отказ про тесты называет проверку вне окна (metis-0573)", h.pre(f"gh pr merge 3 --match-head-commit {sha}"),
+               False, "pantheon outside test --wait 590")
 
 
 def t_author_is_reviewer(h):

@@ -1618,7 +1618,9 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     if not any(r["kind"] == "tests" and r["sha"] == sha and repo in [x.lower() for x in r["repo"]] for r in records):
         return (f"нет записи тестов на {repo}@{sha[:12]}: в чистом дереве на этом коммите запусти "
                 f"`pantheon review test -- <команда тестов>` (запишет хук guard). Тесты долгие: запускай "
-                f"`pantheon review test` не в фоне, с timeout до 600000 мс (у Bash по умолчанию 120 с). {advice}")
+                f"`pantheon review test` не в фоне, с timeout до 600000 мс (у Bash по умолчанию 120 с). Тестам нужен "
+                f"порт или сокет, которых в окне нет, — `pantheon outside test --wait 590` в той же копии (запись "
+                f"tests сделает плановый проход; dev-сервер — `pantheon outside serve --wait 120`). {advice}")
 
     def mine(r, kinds, who, any_sha=False):
         return (r["kind"] in kinds and r["by"].get("agent_type") == who and r["pr"] == pr
