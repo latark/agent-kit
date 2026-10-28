@@ -17,7 +17,7 @@
 Папка среди путей (copytree, `cp -R папка`, `git -C папка`) — все файлы под ней: тест, что копирует плагин целиком,
 зависит от всего плагина.
 
-Карта: tests — файлы тестов, по которым она строилась; broken — файлы, которые в копии упали (их пути могут быть
+Карта: hashes — sha256 этих файлов (run-tests по ним находит файлы, изменённые после сборки); tests — файлы тестов, по которым она строилась; broken — файлы, которые в копии упали (их пути могут быть
 неполными, run-tests берёт их всегда); files — путь → номера файлов тестов в tests. Файл, который не задел ни один
 тест, — с пустым списком. Код выхода не 0: нет файлов тестов, не git, таймаут или упал больше половины файлов.
 Карта устаревает, когда тесты начинают задевать новые файлы: run-tests о ней не знает, поэтому после большой правки
@@ -37,7 +37,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "affected-map.json")
-VERSION = 1
+VERSION = 2
 
 _spec = importlib.util.spec_from_file_location("run_tests", os.path.join(HERE, "run-tests.py"))
 RT = importlib.util.module_from_spec(_spec)
@@ -372,10 +372,13 @@ def main(argv):
     for rel in files:
         users = {lb for lb in labels if rel in hits[lb]}
         fmap[rel] = sorted(idx[lb] for lb in users)
+    hashes = {label: RT.test_hash(pdir, label) for pdir, label in items}
     data = {"version": VERSION, "head": head, "python": "%d.%d" % sys.version_info[:2], "tests": labels,
             "broken": sorted(broken), "files": fmap}
     body = ["{", f'  "version": {VERSION},', f'  "head": {json.dumps(head)},',
             f'  "python": {json.dumps(data["python"])},',
+            '  "hashes": {', ",\n".join(f"    {json.dumps(lb, ensure_ascii=False)}: {json.dumps(hashes[lb])}" for lb in labels),
+            "  },",
             '  "tests": [', ",\n".join(f"    {json.dumps(lb, ensure_ascii=False)}" for lb in labels), "  ],",
             f'  "broken": {json.dumps(data["broken"], ensure_ascii=False)},', '  "files": {',
             ",\n".join(f"    {json.dumps(rel, ensure_ascii=False)}: {json.dumps(v)}" for rel, v in fmap.items()),

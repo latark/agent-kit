@@ -75,6 +75,15 @@ def launch(args, path, stdin="", launcher=LAUNCHER, cwd=None):
                           capture_output=True, text=True, timeout=60, cwd=cwd or tmp)
 
 
+def check_mac(name, ok, info=None):
+    """Известные папки DIRS/FW в python.sh: вне macOS (/bin/sh — dash) списком `$DIRS:$FW/…:$PATH` склеиваются, берётся
+    только PATH. Случай про папки — на macOS проверка, вне его строка «пропущено» (находка в отчёте пачки «Скорость»)."""
+    if sys.platform == "darwin":
+        check(name, ok, info)
+    else:
+        print(f"пропущено: нужен macOS — {name}")
+
+
 def fake(d, name, body):
     os.makedirs(d, exist_ok=True)
     p = os.path.join(d, name)
@@ -127,7 +136,7 @@ try:
     # имя называет версию: python3.12 в известной папке берётся, -I и аргументы доходят
     fake(known, "python3.12", 'echo "K312 $*"')
     r = launch(["s.py", "a b", "--strict"], old, pre_ev, iso)
-    check("python3.12 в известной папке → exec с -I и аргументами", r.stdout.strip() == "K312 -I s.py a b --strict",
+    check_mac("python3.12 в известной папке → exec с -I и аргументами", r.stdout.strip() == "K312 -I s.py a b --strict",
           (r.stdout, r.stderr))
     # новее — раньше: python3.14 в PATH важнее python3.12 в известной папке
     newer = os.path.join(tmp, "newer")
@@ -137,13 +146,13 @@ try:
     # при одной версии известная папка раньше PATH
     fake(known, "python3.14", 'echo "K314 $*"')
     r = launch(["s.py"], f"{newer}:{old}", pre_ev, iso)
-    check("одна версия: известная папка раньше PATH", r.stdout.strip() == "K314 -I s.py", r.stdout)
+    check_mac("одна версия: известная папка раньше PATH", r.stdout.strip() == "K314 -I s.py", r.stdout)
     # python.org: FW/<v>/bin/python<v>
     os.remove(os.path.join(known, "python3.14"))
     os.remove(os.path.join(known, "python3.12"))
     fake(os.path.join(fw, "3.13", "bin"), "python3.13", 'echo "FW313 $*"')
     r = launch(["s.py"], old, pre_ev, iso)
-    check("python.org: Versions/3.13/bin/python3.13", r.stdout.strip() == "FW313 -I s.py", r.stdout)
+    check_mac("python.org: Versions/3.13/bin/python3.13", r.stdout.strip() == "FW313 -I s.py", r.stdout)
     shutil.rmtree(os.path.join(fw, "3.13"))
     # относительная папка PATH не берётся (подложенный python в текущей папке)
     rel = os.path.join(tmp, "cwd")

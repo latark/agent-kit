@@ -342,20 +342,63 @@ def t_workflows():
           and "if: github.ref == 'refs/heads/main'" in text, text)
     check("release.yml: запускает скрипт ядра --push", "python3 -I .github/scripts/release.py --push" in text, text)
     check("release.yml: ${{ }} не в run (инъекция)", not re.search(r"run:.*\$\{\{", text), text)
-    # п. 8 (27.10): тесты до слияния — tests.yml; тик ставит выпуск без своего прогона, красный CI и есть «не ставить»
+    # п. 8 (27.10): тесты до слияния — tests.yml (PR: затронутое на Linux; main: полный набор на macOS после слияния).
+    # Красный прогон на main — сигнал откатывать: тик ставит выпуск без своего прогона тестов.
     text = open(os.path.join(WORKFLOWS, "tests.yml")).read()
     uses = re.findall(r"uses:\s*(\S+)", text)
     check("tests.yml: Action только checkout и setup-python по 40 знакам SHA",
           uses and all(re.fullmatch(r"actions/(checkout|setup-python)@[0-9a-f]{40}", u) for u in uses), uses)
-    check("tests.yml: только чтение, PR в main, macOS, Python 3.14",
+    jobs = re.split(r"^jobs:\n", text, flags=re.M)[-1]
+    parts = re.split(r"^  (?=[a-z]+:\n)", jobs, flags=re.M)
+    job = {m.group(1): part for part in parts if (m := re.match(r"([a-z]+):\n", part))}
+    aff, full = job.get("affected", ""), job.get("full", "")
+    check("tests.yml: только чтение, PR и push в main, ручной запуск, Python 3.14, без токена в checkout",
           re.search(r"^permissions:\n  contents: read$", text, re.M) and re.search(r"pull_request:\n\s+branches: \[main\]", text)
-          and re.search(r"runs-on: macos-", text) and 'python-version: "3.14"' in text
-          and "persist-credentials: false" in text, text)
-    run = text.split("run: |", 1)[-1]
-    check("tests.yml: раннер run-tests.py по всем трём плагинам, ${{ }} не в run",
-          "plugins/pantheon/scripts/run-tests.py" in run and all(f"plugins/{p}" in run.split("run-tests.py", 1)[-1]
-                                                                 for p in ("guard", "pantheon", "project-tools"))
-          and "${{" not in run, run)
+          and re.search(r"push:\n\s+branches: \[main\]", text) and "workflow_dispatch:" in text
+          and text.count('python-version: "3.14"') == 2 and text.count("persist-credentials: false") == 2, text)
+    check("tests.yml: сбой шага не прячется — continue-on-error нигде нет",
+          not re.search(r"continue-on-error", text), text)
+    check("tests.yml: ни один шаг не выключается (`if:` только на уровне job), checkout не берёт чужой ref",
+          not re.search(r"^(      - |        )if:", text, re.M) and not re.search(r"^\s*(- )?ref:", text, re.M), text)
+    check("tests.yml: PR — job affected на закреплённом Linux (минута macOS ×10), полная история для merge-base",
+          set(job) == {"affected", "full"} and re.search(r"^    if: github.event_name == 'pull_request'$", aff, re.M)
+          and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", aff, re.M) and "fetch-depth: 0" in aff, job.keys())
+    check("tests.yml: push в main и ручной запуск — job full на закреплённом macOS, не на PR, не на коммите выпуска",
+          re.search(r"^    if: github.event_name != 'pull_request' && !startsWith\(github\.event\.head_commit\.message, "
+                    r"'выпуск: '\)$", full, re.M)
+          and re.search(r"^    runs-on: macos-\d+$", full, re.M) and "--affected" not in full, full)
+
+    def runs(part):
+        """[(имя шага, [строки run, продолжения через обратную косую склеены])]: строки целиком, комментарий — отдельная строка."""
+        out = []
+        for st in re.split(r"^      - (?=name:|uses:)", part, flags=re.M)[1:]:
+            name = re.search(r"name:\s*(.+)", st)
+            m = re.search(r"^        run: (\|\n)?(.*(?:\n.*)*)", st, re.M)
+            if not m:
+                continue
+            body = [ln.strip() for ln in m.group(2).split("\n") if ln.strip()] if m.group(1) else [m.group(2).strip()]
+            lines, cur = [], ""
+            for ln in body:
+                cur += ln[:-1].rstrip() + " " if ln.endswith("\\") else ln
+                if not ln.endswith("\\"):
+                    lines.append(cur)
+                    cur = ""
+            out.append((name.group(1) if name else "", lines))
+        return out
+
+    call = ('python3 -I plugins/pantheon/scripts/run-tests.py --affected --base origin/main -j 3 '
+            '--log-dir "$RUNNER_TEMP/tests" plugins/guard plugins/pantheon plugins/project-tools || code=$?')
+    ar = [ln for _, lines in runs(aff) for ln in lines]
+    check("tests.yml: affected — тесты скриптов выпуска, затем раннер --affected по трём плагинам; код 3 — успех, "
+          "остальные коды — job красный (строки run целиком, без комментариев и лишних ветвей)",
+          ar == ["python3 -I .github/scripts/test_release.py", "python3 --version", "code=0", call,
+                 'if [ "$code" -eq 3 ]; then', 'echo "нечего гонять: изменения не задевают тесты"', "code=0", "fi",
+                 'exit "$code"'], ar)
+    fr = [ln for _, lines in runs(full) for ln in lines]
+    check("tests.yml: full — раннер по трём плагинам без --affected, код раннера — код job",
+          fr == ["python3 --version", 'python3 -I plugins/pantheon/scripts/run-tests.py -j 3 --log-dir '
+                 '"$RUNNER_TEMP/tests" plugins/guard plugins/pantheon plugins/project-tools'], fr)
+    check("tests.yml: ${{ }} не в run (инъекция)", not any("${{" in ln for ln in ar + fr), ar + fr)
 
 
 for t in (t_first_and_bump, t_rules, t_refuse, t_push_race, t_reconcile, t_first_parent, t_tree_hash_matches_pantheon,

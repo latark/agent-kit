@@ -17,9 +17,19 @@
   - есть в карте — его файлы тестов; пустой список — файл не задел ни один тест (AGENTS.md);
   - иначе (новый файл, карты нет или она другой версии) — весь набор: неизвестное гоняет всё.
 Файлы тестов, которых карта не знает (новые после её сборки) или которые при сборке упали (broken), идут всегда.
+Карта хранит sha256 каждого файла тестов (hashes): файл, изменённый после сборки (хеш другой), мог начать задевать новые
+файлы — его связи не верны, и он идёт при любом изменении (в выводе: «изменены после сборки карты»); таких файлов
+STALE_FULL и больше — карта устарела целиком, весь набор с причиной. Так правка теста после сборки не пропускает нужные
+тесты из-за старой карты; карту пересобирают, когда таких файлов набралось.
 Тесты плагинов, которых нет в аргументах, не идут. Изменений нет или ни один не ведёт к тестам — код 3 и строка
 «нечего гонять», а не пустой зелёный. Ошибка git (нет базы, не репозиторий, мелкий клон без merge-base) — весь
 набор и причина строкой: при сомнении раннер гоняет всё, а не ничего.
+
+Не macOS (CI на Linux, п. 1 пачки «Скорость»): файлы из SKIP_NOT_MAC не идут, а печатаются строкой `skip … · пропущено:
+нужен macOS — причина` и считаются в итоге отдельным числом — это не «ok» и не «FAIL»; нужной программы (unless) нет — файл
+пропускается, есть — идёт. Команд macOS, которых на PATH нет (ioreg, pmset, scutil), файлы тестов получают как заглушки
+из STUBS (папка в PATH, строка «заглушки» в начале прогона): код с ними не ходит к системе, а гоняется. Платформу для
+проверки раннера подменяет RUN_TESTS_PLATFORM (по умолчанию sys.platform). Полный прогон на macOS ничего не пропускает.
 
 Каждый tests/test_*.py — отдельный процесс `<этот python> -I tests/<файл>` в папке плагина: свой HOME и TMPDIR во
 временной папке прогона, окружение без PANTHEON_*, FORCE_COLOR и CLICOLOR_FORCE, с NO_COLOR=1. Тесты идут на
@@ -40,6 +50,7 @@ Python 3.11+ (metis-0571); тот же скрипт гоняет workflow tests 
 или с итогом без проверок, или раннер прерван сигналом. Число проверок файла — из его итоговой строки, без числа в ней — по строкам `ok`.
 Только stdlib.
 """
+import hashlib
 import json
 import os
 import re
@@ -62,7 +73,7 @@ SLOW = {
     "pantheon/test_setup.py": 360,  # 113
     "pantheon/test_start.py": 360,  # 105
     "pantheon/test_sync_quarantine.py": 240,  # 70
-    "guard/test_guard.py": 240,  # 64
+    "guard/test_guard.py": 600,  # 64; на Linux в Docker под нагрузкой 120-240 с, на 2-ядерном ubuntu-latest дольше
     "pantheon/test_executors.py": 180,  # 57
     "pantheon/test_tick.py": 180,  # 50
     "pantheon/test_merge.py": 180,  # 53
@@ -87,9 +98,21 @@ NO_SUMMARY = frozenset({
     "pantheon/test_path_clean.py",
     "pantheon/test_read.py",  # «все прошли»
 })
+# Файлы, которые не идут вне macOS: метка → (причина, unless — программа, при наличии которой файл идёт, или None).
+# Явный список: пропуск виден строкой в прогоне и числом в итоге, а не молчаливым выходом самого файла. Замер на Linux
+# (python:3.14, не root, zip как на ubuntu-latest): остальные файлы проходят с заглушками STUBS.
+SKIP_NOT_MAC = {
+    "pantheon/test_setup.py": ("установщик pantheon-setup поддерживает только macOS", None),
+}
+# Команды macOS, которых нет на Linux: заглушка с выводом, при котором код идёт обычным путём.
+STUBS = {"ioreg": "exit 0", "pmset": 'echo "Now drawing from AC Power"', "scutil": "echo linux-host"}
+PLATFORM = os.environ.get("RUN_TESTS_PLATFORM") or sys.platform
 # Карта для --affected (metis-0451): строит scripts/affected-map.py прогоном всех тестов, правится только им.
 MAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "affected-map.json")
-MAP_VERSION = 1
+MAP_VERSION = 2
+# Карта старше файла тестов (правка после сборки): связи этого файла по карте неверны, файл идёт всегда. Столько файлов
+# и больше — карта устарела целиком: весь набор с причиной в выводе.
+STALE_FULL = 8
 # Общие файлы: их правка гонит весь набор, что бы ни говорила карта (их грузит почти каждый тест или они меняют
 # сам выбор тестов).
 FULL = frozenset({
@@ -186,14 +209,37 @@ def load_map(path=None):
             return None, f"карта {os.path.basename(path)} версии {raw.get('version')!r}, нужна {MAP_VERSION}"
         tests = list(raw["tests"])
         files = {k: {tests[i] for i in v} for k, v in raw["files"].items()}
-        return {"tests": set(tests), "always": set(raw.get("broken") or ()), "files": files}, None
+        hashes = {k: str(v) for k, v in raw["hashes"].items()}
+        return {"tests": set(tests), "always": set(raw.get("broken") or ()), "files": files, "hashes": hashes}, None
     except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as e:
         return None, f"карту {os.path.basename(path)} не прочесть — {type(e).__name__}: {e}"
 
 
-def select(changed, root, items, amap):
+def test_hash(pdir, label):
+    """sha256 файла тестов (так хеши пишет affected-map.py); None — файла нет или не прочесть."""
+    try:
+        with open(os.path.join(pdir, "tests", label.split("/", 1)[1]), "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def stale_tests(items, amap):
+    """[метки] файлов тестов, которые есть в карте, но изменены после её сборки (хеш другой): связи таких файлов по
+    карте неверны — они могли начать задевать новые файлы. Нет файла — не устарел (нечего гонять)."""
+    old = amap.get("hashes") or {}
+    out = []
+    for pdir, label in items:
+        if label in amap["tests"]:
+            cur = test_hash(pdir, label)
+            if cur is not None and cur != old.get(label):
+                out.append(label)
+    return sorted(out)
+
+
+def select(changed, root, items, amap, stale=()):
     """(выбранные items или None — весь набор, [(путь, почему весь набор)], [метки, что идут всегда]) по карте amap
-    (load_map)."""
+    (load_map). stale — метки из stale_tests: идут при любом изменении (любой файл мог стать их зависимостью)."""
     labels = {label for _, label in items}
     plugins = {}
     for pdir, label in items:
@@ -222,10 +268,40 @@ def select(changed, root, items, amap):
     if unknown:
         return None, unknown, []
     always = sorted(lb for lb in labels if lb not in amap["tests"] or lb in amap["always"])
-    if not want:
-        return [], [], always
-    want.update(always)
+    want.update(always)  # тесты не из карты и упавшие при её сборке идут всегда, в том числе когда файлы ничего не задели
+    want.update(lb for lb in stale if lb in labels)
     return [it for it in items if it[1] in want], [], always
+
+
+def split_skipped(items, platform=None, exists=os.path.exists):
+    """(идут, [(метка, причина)]): вне macOS файлы SKIP_NOT_MAC не идут, если нет их unless."""
+    platform = PLATFORM if platform is None else platform
+    if platform == "darwin":
+        return list(items), []
+    run, skipped = [], []
+    for it in items:
+        why = SKIP_NOT_MAC.get(it[1])
+        if why and not (why[1] and exists(why[1])):
+            skipped.append((it[1], why[0]))
+        else:
+            run.append(it)
+    return run, skipped
+
+
+def make_stubs(root, platform=None, which=shutil.which):
+    """(папка с заглушками или None, [команды]): вне macOS — только тех команд STUBS, которых нет на PATH."""
+    platform = PLATFORM if platform is None else platform
+    missing = sorted(c for c in STUBS if platform != "darwin" and not which(c))
+    if not missing:
+        return None, []
+    d = os.path.join(root, "stubs")
+    os.mkdir(d)
+    for c in missing:
+        path = os.path.join(d, c)
+        with open(path, "w") as fh:
+            fh.write(f"#!/bin/sh\n{STUBS[c]}\n")
+        os.chmod(path, 0o755)
+    return d, missing
 
 
 def order(items, slow=None, serial=None):
@@ -391,7 +467,13 @@ def pick_affected(items, dirs, base, map_path=None):
     if amap is None:
         print(f"{head}: {why} — весь набор", flush=True)
         return items, 0
-    chosen, unknown, always = select(changed, root, items, amap)
+    stale = stale_tests(items, amap)
+    if len(stale) >= STALE_FULL:
+        print(f"{head}: карта устарела — {len(stale)} файлов тестов изменены после её сборки (порог {STALE_FULL}): "
+              f"{', '.join(stale[:3])}{' …' if len(stale) > 3 else ''} — весь набор; пересобрать: affected-map.py",
+              flush=True)
+        return items, 0
+    chosen, unknown, always = select(changed, root, items, amap, stale)
     if unknown:
         path, why = unknown[0]
         more = f" и ещё {len(unknown) - 1}" if len(unknown) > 1 else ""
@@ -402,6 +484,8 @@ def pick_affected(items, dirs, base, map_path=None):
               f"({', '.join(changed[:5])}{' …' if len(changed) > 5 else ''})")
         return None, 3
     extra = f", из них всегда (карта их не знает или они упали при сборке): {', '.join(always)}" if always else ""
+    if stale:
+        extra += f"; изменены после сборки карты, идут всегда (пересобрать: affected-map.py): {', '.join(stale)}"
     print(f"{head}: изменено {len(changed)}, тестов {len(chosen)} из {len(items)}{extra}", flush=True)
     return chosen, 0
 
@@ -423,18 +507,30 @@ def main(argv):
         items, code = pick_affected(items, opts["dirs"], opts["base"] or "origin/main")
         if items is None:
             return code
+    items, skipped = split_skipped(items)
+    if not items:
+        for label, why in skipped:
+            print(f"skip {label} · пропущено: нужен macOS — {why}")
+        print("run-tests: все выбранные файлы пропущены — нечего гонять")
+        return 3
     par, ser = order(items)
     total_files = len(par) + len(ser)
     cpus, load = os.cpu_count(), load1()
     n = opts["jobs"] or workers(cpus, load)
     print(f"run-tests: {total_files} файлов, воркеров {n} (ядер {cpus}, load1 "
           f"{'—' if load is None else f'{load:.1f}'}), {sys.executable}", flush=True)
+    for label, why in skipped:
+        print(f"skip {label} · пропущено: нужен macOS — {why}", flush=True)
     if opts["log_dir"]:
         os.makedirs(opts["log_dir"], exist_ok=True)
     env0 = {k: v for k, v in os.environ.items()
             if not k.startswith("PANTHEON_") and k not in ("FORCE_COLOR", "CLICOLOR_FORCE")}
     env0.update({"NO_COLOR": "1", "PYTHON_COLORS": "0"})
     root = tempfile.mkdtemp(prefix="run-tests-")
+    stubs, stubbed = make_stubs(root)
+    if stubs:
+        env0["PATH"] = stubs + os.pathsep + env0.get("PATH", "")
+        print(f"run-tests: не macOS — заглушки команд в PATH файлов: {', '.join(stubbed)}", flush=True)
     state = {"spawning": False, "pending": None}
 
     def on_signal(signum, _frame):
@@ -496,7 +592,7 @@ def main(argv):
         for s, h in old.items():
             signal.signal(s, h)
         shutil.rmtree(root, ignore_errors=True)
-    return summary(done, total_files, n, time.monotonic() - t_all)
+    return summary(done, total_files, n, time.monotonic() - t_all, len(skipped))
 
 
 def report(job, log_dir):
@@ -508,7 +604,7 @@ def report(job, log_dir):
             fh.write(job.out)
 
 
-def summary(done, total_files, n, sec):
+def summary(done, total_files, n, sec, skipped=0):
     bad = [j for j in done if not j.ok]
     for j in bad:
         lines = j.out.rstrip("\n").splitlines()
@@ -517,7 +613,8 @@ def summary(done, total_files, n, sec):
     slow = sorted(done, key=lambda j: -j.sec)[:5]
     print("\nмедленные: " + ", ".join(f"{j.label} {j.sec:.0f} с" for j in slow))
     checks_sum = sum(j.n for j in done)
-    print(f"итого: файлов {total_files}, ok {len(done) - len(bad)}, FAIL {len(bad)}; проверок {checks_sum}; "
+    skip = f", пропущено {skipped}" if skipped else ""
+    print(f"итого: файлов {total_files}, ok {len(done) - len(bad)}, FAIL {len(bad)}{skip}; проверок {checks_sum}; "
           f"{sec:.0f} с, воркеров {n}", flush=True)
     return 1 if bad or len(done) != total_files else 0
 
