@@ -250,6 +250,32 @@ def main():
           len(lines_with(home2, "слит с «часть»")) == 1 and "metis-0002" in lines_with(home2, "слит с «часть»")[0]
           and "слит с «часть»" in read(bp), alerts_of(home2))
 
+    # metis-0583: застой doing/review — без записи в журнале дольше 2 суток; в Хвосты.md, без тревоги
+    def stl(lines, status="doing", updated="2026-10-20T10:00:00"):
+        body = "\n## Журнал\n\n" + "".join(f"- 2026-10-{d} {h} — {a}: {x}\n" for d, h, a, x in lines)
+        return T.stalled({"x-0001": ("p", {"id": "x-0001", "type": "task", "status": status, "updated": updated}, body)}, T0)
+    check("0583: застой — doing и review, последняя запись старше 2 суток; запись check движением не считается",
+          stl([("21", "10:00", "агент", "взял")]) == [("x-0001", "doing", 3)]
+          and stl([("21", "10:00", "агент", "взял")], status="review") == [("x-0001", "review", 3)]
+          and stl([("21", "10:00", "агент", "взял"), ("24", "10:00", "check", "сверка")]) == [("x-0001", "doing", 3)],
+          str(stl([("21", "10:00", "агент", "взял")])))
+    check("0583: не застой — свежая запись (<2 сут), todo/waiting/done; без журнала — по updated",
+          not stl([("22", "13:00", "агент", "взял")]) and not stl([("21", "10:00", "агент", "x")], status="todo")
+          and not stl([("21", "10:00", "агент", "x")], status="waiting") and not stl([("21", "10:00", "агент", "x")], status="done")
+          and not stl([], updated="2026-10-23T12:00:00") and stl([], updated="2026-10-20T12:00:00"))
+    new(env2, "третья", t=T0 - 5 * 86400)
+    run(env2, "task", "set", "metis-0003", "status=doing", "mode=single", t=T0 - 5 * 86400)
+    before = len(alerts_of(home2).splitlines())
+    run(env2, "check", "--quiet", t=T0 + 70)
+    r = run(env2, "check", t=T0 + 80)
+    check("0583: застой — строка в Хвосты.md и в сводке check, тревоги нет",
+          "застой doing/review** — metis-0003: doing, без записи в журнале 5 сут" in read(bp)
+          and "внимание · застой: 1 задач" in r.stdout and "metis-0003" in r.stdout
+          and not any("metis-0003" in x for x in alerts_of(home2).splitlines()[before:]), read(bp) + r.stdout[-600:])
+    run(env2, "task", "set", "metis-0003", "--note", "жду живой проверки", t=T0 + 90)
+    run(env2, "check", "--quiet", t=T0 + 100)
+    check("0583: запись хода в журнал гасит застой", "metis-0003" not in read(bp), read(bp))
+
     dr = T.D_FINDING_RE
     check("D_FINDING_RE: «- Д ·», «1. Д —», «**Д**», «Д:», «- Д3 a», «Д1.», «**Д2** —» — да; «Д3б», «Добавь», «Б», «Дифф» — нет",
           all(dr.match(x) for x in ("- Д · a:1 x", "1. Д — a", "  * **Д** a", "Д: a", "- Д a", "- Д3 a", "Д1. a", "**Д2** — a", "- **Д12** a"))

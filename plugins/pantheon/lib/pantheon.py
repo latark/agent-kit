@@ -7366,7 +7366,12 @@ def check(paths=None, quiet=False):
                  + [("ревью", p, f"{p}:{n}") for p, n in T.review_debts(tasks_now, PANTHEON, now())]
                  + [("часть", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
                     for i, ln in T.part_stalled(tasks_now, now())])
-        tails_board(tails)  # metis-0572: полный список — на доску, в том числе то, о чём тревога уже была или молчит
+        stall = T.stalled(tasks_now, now())  # metis-0583: doing/review без записи в журнале дольше 2 суток — без тревоги
+        tails_board(tails + [("застой", i, f"{i}: {st}, без записи в журнале {d} сут") for i, st, d in stall])
+        if stall and not quiet:  # сводка check: одна строка, не тревога на каждую задачу
+            print(f"внимание · застой: {len(stall)} задач в doing/review без записи в журнале дольше {T.STALL_DAYS} сут — "
+                  + ", ".join(i for i, _, _ in stall[:TAIL_SHOWN]) + (f" и ещё {len(stall) - TAIL_SHOWN}" if len(stall) > TAIL_SHOWN else "")
+                  + " (список — Доска/Хвосты.md)")
         field_errs, field_warns = T.board_problems(tasks_now, now(), night_end, autoclose_mod().open_pr_tasks(path("autoclose.json")))
         field_errs = [(i, f"status done без closed — проставлен из updated") for i in fixed] + field_errs
         for tid, text in field_errs:
@@ -7474,6 +7479,8 @@ TAIL_TEXT = {"хвост": "хвост в журнале без задачи (н
              "отчёт": "файл inbox старше суток без задачи разбора (нет ссылки source/from или в тексте)",
              "ревью": "ревью с находкой Д без задачи (нет ссылки на файл ревью)",
              "часть": "PR слит с «часть», задача без движения дольше 24 ч (закрыть, завести остаток или записать ход)"}
+# виды только для Доска/Хвосты.md: тревоги на каждую нет (metis-0583) — список и строка в сводке check
+TAIL_BOARD_TEXT = dict(TAIL_TEXT, **{"застой": "застой doing/review (записать ход, закрыть или вернуть в очередь)"})
 
 
 def tails_board(items):
@@ -7481,10 +7488,11 @@ def tails_board(items):
     первый проход глотает, а владелец смотрит доску. Файла нет, пока доски нет; пишется только при изменении."""
     if not os.path.isdir(BOARD):
         return
-    rows = [f"- **{TAIL_TEXT[kind].split(' (')[0]}** — {where}" for kind, _, where in items]
+    rows = [f"- **{TAIL_BOARD_TEXT[kind].split(' (')[0]}** — {where}" for kind, _, where in items]
     text = ("# Хвосты\n\nЧто плановый проход считает потерянным: строка журнала без задачи, файл inbox и ревью без задачи, "
-            "слитый PR «часть» без движения. Погасить — строка в журнале задачи «→ <id>» или «не задача: …» либо "
-            "задача на разбор.\n\n" + ("\n".join(rows) or "Нет — всё в порядке.") + "\n")
+            "слитый PR «часть» без движения, задача doing/review без записи в журнале дольше 2 суток. Погасить — строка "
+            "в журнале задачи «→ <id>» или «не задача: …», задача на разбор или запись хода в журнал.\n\n"
+            + ("\n".join(rows) or "Нет — всё в порядке.") + "\n")
     pp = os.path.join(BOARD, "Хвосты.md")
     old = open(pp, encoding="utf-8").read() if os.path.exists(pp) else ""
     if old != text:

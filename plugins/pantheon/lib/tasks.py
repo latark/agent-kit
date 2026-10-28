@@ -3658,6 +3658,25 @@ def part_stalled(tasks, t, hours=PART_STALL_HOURS):
     return out
 
 
+STALL_DAYS = 2
+STALL_STATUSES = ("doing", "review")
+
+
+def stalled(tasks, t, days=STALL_DAYS):
+    """[(id, статус, суток)] задачи doing/review без записи в журнале дольше days суток (metis-0583): слито и забыто,
+    ждёт живой проверки, брошено. Записи самого check не движение; журнала нет — по updated. Не тревога на каждую:
+    список — в Доска/Хвосты.md, на карточку («Хвост») и строкой в сводку pantheon check."""
+    out = []
+    for tid, (_, head, body) in sorted(tasks.items()):
+        if head.get("type") != "task" or head.get("status") not in STALL_STATUSES:
+            continue
+        marks = [x[0] for x in _journal(body) if x[1] not in TAIL_SKIP_ACTORS and x[0] is not None]
+        last = max(marks) if marks else ts_of(head.get("updated"))
+        if last is not None and t - last > days * 86400:
+            out.append((tid, head["status"], int((t - last) // 86400)))
+    return out
+
+
 def _task_refs(tasks):
     """Слова, на которые ссылаются задачи: поля source и from, заголовок и тело (до и после «## Журнал») целиком."""
     parts = []
