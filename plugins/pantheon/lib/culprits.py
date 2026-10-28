@@ -13,10 +13,13 @@
       все задачи её ветки закрыты (done, dropped), и сироту multiprocessing с cwd в папках Пантеона (в том числе
       ~/.local/state/pantheon и кэш плагинов agent-kit). Остальное своё — строка вопроса «[<id>] …» для окна вопросов Зевса.
       --apply --pid N … — после «да» владельца: только процессы Пантеона из списка (worktree, папки направлений,
-      ~/ai/pantheon, мастерская), не claude; из окна Гестии — только при свежей метке `pantheon consent <id задачи>`.
+      ~/ai/pantheon, мастерская), не claude; из окна Гестии — только pid из вопроса, на который владелец ответил «да»:
+      свежая метка `<state>/hestia-consent/<id задачи>.reap`, её пишет `pantheon consent <id>` (метка push не годится).
       Чужое (вне папок Пантеона) не гасится никогда. Гашение — SIGTERM, через REAP_WAIT с — SIGKILL; строка в
       alerts.md. Коды: 0 — сделано; 1 — что-то не погашено или отказано; 2 — ошибка вызова или нет согласия;
       3 — список процессов не прочитан.
+      Остаток (модель угроз guard): окно Гестии узнаём по PANTHEON_ROLE из окружения — команда с подменённой
+      переменной проходит мимо проверки согласия. Это намеренный обход, граница — песочница окна.
 
 Подмены для тестов: PANTHEON_FAKE_PROCS — список процессов JSON ([{pid, ppid, age (с), rss (КБ), args, cwd, mem и cmprs
 (МБ, необязательно)}]); PANTHEON_FAKE_LOAD — нагрузка; PANTHEON_FAKE_KILL_LOG — файл, куда пишется «pid сигнал»
@@ -409,17 +412,23 @@ def _stop(pid):
     return None
 
 
-def _consent_ok():
-    """Окно Гестии: свежая метка `pantheon consent <задача окна>` (как правило hestia в guard: 2 ч)."""
+def consent_pids():
+    """Окно Гестии: pid из вопроса о гашении, на который владелец ответил «да» — свежая (2 ч, как у guard) метка
+    `<state>/hestia-consent/<задача окна>.reap`, её пишет `pantheon consent`. Метка push (без .reap) не годится.
+    None — метки нет или она устарела."""
     task = os.environ.get("PANTHEON_TASK") or ""
     if not P.CONSENT_ID.fullmatch(task):
-        return False
+        return None
+    path = os.path.join(P.STATE, "hestia-consent", task + ".reap")
     try:
-        st = os.lstat(os.path.join(P.STATE, "hestia-consent", task))
-    except OSError:
-        return False
-    import stat as _st
-    return _st.S_ISREG(st.st_mode) and 0 <= time.time() - st.st_mtime <= 2 * 3600
+        st = os.lstat(path)
+        import stat as _st
+        if not _st.S_ISREG(st.st_mode) or not 0 <= time.time() - st.st_mtime <= 2 * 3600:
+            return None
+        m = re.search(r"^pids:([\d ]*)$", open(path, encoding="utf-8").read(), re.M)
+    except (OSError, UnicodeDecodeError):
+        return None
+    return {int(x) for x in m.group(1).split()} if m else None
 
 
 USAGE = "pantheon reap [--apply] [--pid N …] — без --apply только показать"
@@ -444,8 +453,9 @@ def reap(rest):
     if bad or (pids and not apply_):
         print(f"{USAGE}; не понял: {' '.join(bad) or '--pid без --apply'}", file=sys.stderr)
         return 2
-    if pids and os.environ.get("PANTHEON_ROLE") == "hestia" and not _consent_ok():
-        print(f"pantheon reap --pid: нет свежего «да» владельца — сначала `pantheon consent "
+    allowed = consent_pids() if pids and os.environ.get("PANTHEON_ROLE") == "hestia" else None
+    if pids and os.environ.get("PANTHEON_ROLE") == "hestia" and allowed is None:
+        print(f"pantheon reap --pid: нет свежего «да» владельца на вопрос о гашении — сначала `pantheon consent "
               f"{os.environ.get('PANTHEON_TASK') or '<id задачи>'}` (код 0), затем повтор", file=sys.stderr)
         return 2
     procs = collect()
@@ -470,7 +480,9 @@ def reap(rest):
         todo, refused = [], []
         for pid in pids:
             r = by_pid.get(pid)
-            if r is None:
+            if allowed is not None and pid not in allowed:
+                refused.append(f"pid {pid} — не из вопроса, на который владелец ответил «да»")
+            elif r is None:
                 refused.append(f"pid {pid} — нет среди процессов claude/node/tsx/next/vitest/pnpm")
             elif r[2] not in ("abandoned", "ask") or r[0]["kind"] == "claude":
                 refused.append(f"pid {pid} — {r[1]}: {mark[r[2]] if r[0]['kind'] != 'claude' else 'claude не гашу'}")

@@ -5741,6 +5741,9 @@ def direction(rest):
 # записи с номером его вопроса.
 CONSENT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 CONSENT_MAX = 1500
+# вопрос `pantheon reap --apply` об остальном своём (lib/culprits.py): «да» на него — метка <id>.reap со списком pid
+# из вопроса, а не метка push (metis-0568: согласия на push и на гашение не путаются)
+CONSENT_REAP_Q = "Погасить процессы Пантеона"
 
 
 CONSENT_ANSWER = re.compile(r"^ответ:[ \t]*(.*)$", re.M)
@@ -5825,6 +5828,9 @@ def consent(rest):
                       f"вопрос: {q.strip()}\nответ: {a.strip()}"))
     found.sort(key=lambda x: x[0])
     said_yes = any(consent_is_yes(body) for _, _, body in found)
+    last_yes = next(((head, body) for _, head, body in reversed(found) if consent_is_yes(body)), ("", ""))
+    reap_q = last_yes[1].split("\nответ:")[0]
+    reap_q = reap_q if CONSENT_REAP_Q in reap_q else None
     found = [(head, body if len(body) <= CONSENT_MAX else body[:CONSENT_MAX] + "…") for _, head, body in found]
     hint = (f"\nУпоминаний {qid} в словах владельца без окна вопросов: {mentions} — это не ответ; попроси Зевса "
             f"переспросить окном вопросов «[{qid}] …»." if mentions else "")
@@ -5836,14 +5842,20 @@ def consent(rest):
         for t, body in found:
             print(f"\n## {t}\n{body}")
         return 1
+    if hestia and reap_q is not None and "окно вопросов" not in last_yes[0]:
+        print(f"«Да» на {qid} о гашении процессов — галочкой на доске, а не в окне вопросов: метки нет, отчёт Зевсу.")
+        return 1
     if hestia:
         # метка «владелец ответил «да»»: по ней guard пускает окно Гестии в push и запись в PR на 2 часа, только для
-        # этой задачи (metis-0562). Нет метки (запись не удалась) — код 3, а не «согласие есть»
+        # этой задачи (metis-0562). Нет метки (запись не удалась) — код 3, а не «согласие есть». «Да» на вопрос о
+        # гашении — своя метка <id>.reap с pid из вопроса: её читает только pantheon reap (metis-0568)
         try:
             d = os.path.join(STATE, "hestia-consent")
             os.makedirs(d, exist_ok=True)
-            with open(os.path.join(d, qid), "w", encoding="utf-8") as fh:
+            with open(os.path.join(d, qid + (".reap" if reap_q is not None else "")), "w", encoding="utf-8") as fh:
                 fh.write(f"{stamp()} {qid}\n")
+                if reap_q is not None:
+                    fh.write("pids: " + " ".join(re.findall(r"\bpid (\d+)", reap_q)) + "\n")
         except OSError as e:
             print(f"pantheon consent: метку для окна записать не удалось ({e}) — наружу не пустят", file=sys.stderr)
             return 3

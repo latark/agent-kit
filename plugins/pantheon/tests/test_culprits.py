@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _py311 import PY311  # noqa: E402
@@ -183,16 +184,50 @@ def test_pid_needs_consent_in_hestia():
     d = os.path.join(e.state, "hestia-consent")
     os.makedirs(d)
     open(os.path.join(d, "metis-9999"), "w").write("x\n")
-    r = e.reap("--apply", "--pid", "103", "105", "104", "106", "999", extra=hs)
+    r = e.reap("--apply", "--pid", "103", extra=hs)
+    check(r.returncode == 2 and not e.killed(), f"метка push (без .reap) гасить не пускает: {r.returncode}")
+    os.remove(os.path.join(d, "metis-9999"))
+
+    def answer(question, ans, head="· окно вопросов"):
+        os.makedirs(os.path.join(e.state, "owner-log"), exist_ok=True)
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(T0 - 60))
+        open(os.path.join(e.state, "owner-log", "zeus.md"), "w").write(
+            f"## {when} {head}\nвопрос: {question}\nответ: {ans}\n")
+        return subprocess.run([PY311, "-I", LIB, "consent", "metis-9999"], env=e.env(hs), capture_output=True,
+                              text=True, timeout=60)
+
+    # «да» на вопрос о гашении — метка <id>.reap со списком pid из вопроса, метки push нет
+    q = ("[metis-9999] Погасить процессы Пантеона: pid 103 next (athena-x, 512 МБ, 3 ч), pid 105 node, pid 104 claude, "
+         "pid 106 node young.ts?")
+    c = answer(q, "Да — погасить")
+    check(c.returncode == 0 and os.path.isfile(os.path.join(d, "metis-9999.reap"))
+          and not os.path.exists(os.path.join(d, "metis-9999")), f"consent на гашение — метка .reap: {c.stdout} {c.stderr}")
+    r = e.reap("--apply", "--pid", "103", "105", "104", "106", "999", "110", extra=hs)
     k = e.killed()
-    check(set(k) == {103, 106}, f"с меткой: гасит своё (103, молодой 106), не чужое 105, не claude 104: {sorted(k)}")
+    check(set(k) == {103, 106}, f"с меткой: гасит своё из вопроса (103, молодой 106), не чужое 105, не claude 104, "
+          f"не 110 вне вопроса: {sorted(k)}")
     check(r.returncode == 1 and "отказ: pid 105" in r.stdout and "отказ: pid 104" in r.stdout
-          and "отказ: pid 999" in r.stdout, f"отказы названы, код 1: {r.returncode} {r.stdout[-500:]}")
+          and "отказ: pid 999" in r.stdout and "pid 110 — не из вопроса" in r.stdout,
+          f"отказы названы, код 1: {r.returncode} {r.stdout[-500:]}")
     check("по «да» владельца" in e.alerts(), "строка в alerts.md о гашении по «да»")
     # метка другой задачи не годится
     os.remove(os.path.join(e.kills))
     r = e.reap("--apply", "--pid", "103", extra={"PANTHEON_ROLE": "hestia", "PANTHEON_TASK": "metis-1111"})
     check(r.returncode == 2 and not e.killed(), f"метка чужой задачи — отказ: {r.returncode}")
+    # «да» на вопрос о push — метка push, не .reap
+    os.remove(os.path.join(d, "metis-9999.reap"))
+    c = answer("[metis-9999] Отправить ветку в PR?", "Да — отправить")
+    check(c.returncode == 0 and os.path.isfile(os.path.join(d, "metis-9999"))
+          and not os.path.exists(os.path.join(d, "metis-9999.reap")), f"consent на push — метка push: {c.stderr}")
+    os.remove(os.path.join(d, "metis-9999"))
+    os.remove(os.path.join(e.state, "owner-log", "zeus.md"))
+    with open(os.path.join(e.state, "owner-log", "board.jsonl"), "w") as fh:
+        fh.write(json.dumps({"kind": "answer", "id": "metis-9999", "question": q, "answer": "Да — погасить",
+                             "time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(T0 - 60))}) + "\n")
+    c = subprocess.run([PY311, "-I", LIB, "consent", "metis-9999"], env=e.env(hs), capture_output=True, text=True,
+                       timeout=60)
+    check(c.returncode == 1 and "галочкой на доске" in c.stdout and not os.listdir(d),
+          f"гашение не по галочке доски: {c.returncode} {c.stdout} {os.listdir(d)}")
 
 
 def test_usage_and_unreadable():
