@@ -468,6 +468,11 @@ def hestia_consent_checks(br, cases):
           "hestia" not in run(h0, ak_dir(br), "", "Bash", {"command": "git fetch origin"}, raw=True), "")
     check("pantheon consent метки не требует",
           run(h0, ".", "", "Bash", {"command": "pantheon consent metis-0562"}, penv=HS) == "allow", "")
+    # metis-0568: виновники памяти — `pantheon reap` Гестии выдан; согласие на --pid проверяет сама команда
+    for c in ("pantheon reap", "pantheon reap --apply", "pantheon reap --apply --pid 123 456"):
+        check(f"{c} — можно", run(h0, ".", "", "Bash", {"command": c}, penv=HS) == "allow", c)
+    check("pantheon reap рядом с другой командой — отказ (мимо песочницы одна в строке)",
+          run(h0, ".", "", "Bash", {"command": "pantheon reap --apply && ls"}, penv=HS) == "deny", "")
     return failed
 
 

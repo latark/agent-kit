@@ -3587,7 +3587,9 @@ HESTIA_GH_READ = {("pr", "view"), ("pr", "list"), ("pr", "diff"), ("pr", "checks
                   ("--version", None), ("version", None)}
 HESTIA_CLAUDE = (("plugin", "list"), ("plugins", "list"), ("agents",), ("--version",), ("-v",))
 HESTIA_PANTHEON = {("plugins", "update"), ("domains", "build"), ("restart",), ("alert",), ("task", "show"),
-                   ("status",), ("who",), ("agents",), ("help",), ("consent",)}
+                   ("status",), ("who",), ("agents",), ("help",), ("consent",), ("reap",)}
+# `pantheon reap` (metis-0568): виновники памяти; гасит сама команда и только брошенное в папках Пантеона, по --pid —
+# после метки consent задачи окна (проверяет pantheon). Идёт мимо песочницы, как остальные команды пульта Гестии
 # Наружу (metis-0562, «Да, по consent» владельца 27.10 22:38): `git push` и запись в PR (`gh pr create|edit`) — только
 # после явного «да» владельца: `pantheon consent <id задачи>`, запущенный в окне hestia, ставит метку
 # <state>/hestia-consent/<id> и только на «да». Id — задача окна (PANTHEON_TASK из настроек запуска `wake hestia
@@ -3602,7 +3604,7 @@ HESTIA_CONSENT_TTL = 2 * 3600
 HESTIA_TASK_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 HESTIA_REMOTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 HESTIA_REASON = ("Правило hestia (metis-0245): {what}. Гестии можно: `pantheon plugins update`, `pantheon domains "
-                 "build`, `pantheon restart` без --force, `pantheon alert`, чтение (`pantheon task show|status|who`, "
+                 "build`, `pantheon restart` без --force, `pantheon alert`, `pantheon reap`, чтение (`pantheon task show|status|who`, "
                  "логи, git только для чтения, `claude plugin list|agents`); писать — только во временные папки; "
                  "`git push` и `gh pr create|edit` — после «да» владельца (`pantheon consent <id задачи>`). Остальное — в отчёт "
                  "Зевсу.")
@@ -3659,7 +3661,7 @@ def _hestia_push_flags(texts, args):
 
 def _hestia_outside_sandbox(name, texts):
     """Команда из excludedCommands окна: git push, gh pr create|edit, pantheon (plugins update, domains build, restart,
-    alert, consent)."""
+    alert, consent, reap)."""
     base = os.path.basename((name or "").rstrip("/")).lower()
     if base == "git":
         parsed = _git_sub(texts)

@@ -2,7 +2,9 @@
 
   pantheon watch [--dry-run]  задача тика раз в 5 мин (SCHED-09): снимок `claude agents` для строки статуса и
                             `pantheon who` (COMM-14), ждущие и упавшие сессии Пантеона, давно не обновлённый и длинный
-                            STATUS.md, swap и открытые подключения (COMM-13), копии worktree (QA-05), смена версии
+                            STATUS.md, swap и открытые подключения (COMM-13), виновники памяти в красной зоне — своп,
+                            давление, нагрузка: процесс → чей → память → возраст, раз на эпизод (lib/culprits.py,
+                            metis-0568), копии worktree (QA-05), смена версии
                             Claude Code (SCOUT-05, SEC-16), паузы по нагрузке (COST-04), самозапуск координаторов
                             (задачу с owner другой сессии не отдаёт, metis-0564), окна по вашему выбору «Да — запустить|перезапустить
                             <имя>» на вопрос pantheon launch-question в окне вопросов (metis-0523),
@@ -271,6 +273,7 @@ def _watch(dry=False):
               ("сессии", lambda: sessions(agents, doms, t)),
               ("STATUS.md", lambda: status_files(doms, t)),
               ("swap", lambda: swap(agents, t)),
+              ("виновники памяти", lambda: P.culprits_mod().watch_check(agents, t)),
               ("worktree", lambda: worktrees(agents, reg, doms, t)),
               ("версия Claude Code", lambda: cc_version(t)),
               ("памятка Кто есть кто", lambda: P.who_is_who_alert()),

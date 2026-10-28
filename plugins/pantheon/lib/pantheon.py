@@ -131,6 +131,11 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском; без техперезапуска —
                                         метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code
+  pantheon reap [--apply] [--pid N …]   виновники памяти (lib/culprits.py, metis-0568): процессы claude/node/tsx/
+                                        next/vitest/pnpm и сироты multiprocessing старше 2 ч — чей, память, возраст;
+                                        --apply гасит только брошенное (worktree удалён, задача закрыта, сирота в
+                                        папках Пантеона) и печатает вопрос «[id] …» об остальном своём; --pid — после
+                                        «да» владельца, только процессы Пантеона (у Гестии — по `pantheon consent`)
   pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (плановый проход раз в неделю);
                                         запись закрыта (окно роли) — отчёт в stdout, причина в stderr, код 1
   pantheon metrics sync|summary|run     учёт по задачам: строки закрытых задач в ~/ai/pantheon/metrics/tasks.jsonl
@@ -669,12 +674,14 @@ BUILTIN_AGENTS = ["general-purpose", "claude", "Explore", "Plan", "statusline-se
 # выпуска, установка, сверка хеша, проверенное дерево — голый `claude plugin update` оставил бы непроверенное и
 # закрыл окна ролей), сборка окон и ролей, технический перезапуск окон и тревога. Остальные подкоманды pantheon — в песочнице, а какие ей
 # вообще можно, решает guard (правило hestia). Файловых правок, веба и субагентов у окна нет.
+# `pantheon reap` (metis-0568) — тоже мимо песочницы: в ней ps, lsof и kill чужих процессов не работают; что гасить,
+# решает сама команда (только брошенное в папках Пантеона, остальное — по «да» владельца через consent)
 # Наружу (metis-0562, «Да, по consent» владельца 27.10 22:38): сеть у песочницы пустая; мимо неё — только `git push`
 # и запись в PR (`gh pr create|edit`; в песочнице macOS они не работают, как у окон направлений) и `pantheon consent`
 # (читает журнал владельца). Условие — в guard: push и запись в PR без свежей метки именно этой задачи (PANTHEON_TASK
 # окна; метку ставит `pantheon consent` только на явное «да») — отказ
 HESTIA_EXCLUDED = ["pantheon plugins update", "pantheon plugins update *", "pantheon domains build",
-                   "pantheon restart *", "pantheon alert *", "pantheon consent *",
+                   "pantheon restart *", "pantheon alert *", "pantheon consent *", "pantheon reap", "pantheon reap *",
                    "git push", "git push *", "gh pr create *", "gh pr edit *"]
 HESTIA_CONSENT_DAYS = 1.0       # ответ владельца для метки Гестии — не старше суток
 HESTIA_DENY_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Agent"]
@@ -6712,6 +6719,21 @@ def board():
     return 0
 
 
+_CULPRITS = None
+
+
+def culprits_mod():
+    """lib/culprits.py — виновники памяти в красной зоне и pantheon reap (metis-0568)."""
+    global _CULPRITS
+    if _CULPRITS is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_culprits", os.path.join(LIB, "culprits.py"))
+        _CULPRITS = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_CULPRITS)
+        _CULPRITS.set_core(sys.modules[__name__])
+    return _CULPRITS
+
+
 def boardstatus_mod():
     """lib/boardstatus.py — статусы задач и пачек по следам работы (metis-0397, расширение)."""
     import importlib.util
@@ -8511,6 +8533,8 @@ def main(argv):
         return approve(rest)
     if cmd == "consent":
         return consent(rest)
+    if cmd == "reap":
+        return culprits_mod().reap(rest)
     if cmd in WATCH_CMDS:
         return watch_cmd(cmd, rest)
     if cmd == "usage":
