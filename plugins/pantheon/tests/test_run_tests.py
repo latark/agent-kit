@@ -688,6 +688,8 @@ check("split_skipped: unless — без /bin/zsh board пропущен, с ни
       [lb for lb, _ in got[1]] == ["pantheon/test_board.py"] and got2 == (IT, []), (got, got2))
 missing = [lb for lb in R.SKIP_NOT_MAC if not os.path.exists(
     os.path.join(os.path.dirname(PLUGIN), lb.split("/")[0], "tests", lb.split("/")[1]))]
+check("SKIP_NOT_MAC — ровно test_setup: остальное пропускается случаями внутри тестов, а не файлом",
+      set(R.SKIP_NOT_MAC) == {"pantheon/test_setup.py"}, sorted(R.SKIP_NOT_MAC))
 check("SKIP_NOT_MAC — только существующие файлы, у каждого есть причина",
       not missing and all(why for why, _ in R.SKIP_NOT_MAC.values()), missing)
 sd = tempfile.mkdtemp(prefix="stubs-")
