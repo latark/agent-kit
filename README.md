@@ -37,7 +37,9 @@
   `pantheon roles build`; вход git в GitHub через gh (`gh auth setup-git` — только после явного «да»);
   резервная копия (ниже); terminal-notifier; проверка личных следов (`scripts/check-traces.py` по файлам установщика и собранным ролям, маркеры —
   `--markers ФАЙЛ` или `PANTHEON_TRACE_MARKERS`, нет файла — пропуск); Codex (`--codex`, `--no-codex`, без флагов —
-  вопрос, по умолчанию нет). `pantheon-setup --add codex` — только шаг Codex на готовой установке. К системе
+  вопрос, по умолчанию нет). До push — `pantheon traces` (та же проверка, что CI check-traces, по файлам репозитория; маркеры —
+  `--markers ФАЙЛ`, `PANTHEON_TRACE_MARKERS` или `~/.config/pantheon/trace-markers.txt`; нет файла — отказ, код 2) и
+  `pantheon traces install-hook` (pre-push в репозитории, без молчаливой замены чужого хука). `pantheon-setup --add codex` — только шаг Codex на готовой установке. К системе
   `setup.py` ходит через `lib/platform_macos.py` (Homebrew, launchd, sandbox-exec, Связка ключей, текст про
   уведомления). Тест — `plugins/pantheon/tests/test_setup.py`, все внешние программы в нём — заглушки.
 - Резервная копия (metis-0476): шаг установщика после входа в GitHub и `pantheon-setup --add backup` на готовой

@@ -48,6 +48,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         тесты проекта или dev-сервер под sandbox-exec без ключей, браузеров и
                                         местного прокси → код и хвост журнала или адрес; после «принять» argus
                                         плановый проход сам гоняет тесты и пишет запись tests шлюза слияния
+  pantheon traces [--markers ФАЙЛ] | install-hook   личные следы до push (lib/traces.py, metis-0414): та же проверка, что CI
+                                        check-traces; маркеры — файл вне репозитория; нет файла — отказ, код 2; install-hook ставит pre-push
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…] [--quiet]      проверить шапки задач по схеме v1 (schema.md) и правила metis-0308: задача пачки без mode,
@@ -6559,6 +6561,15 @@ def mmv_mod():
     return _MMV
 
 
+def traces_mod():
+    """lib/traces.py — личные следы до push (metis-0414); самостоятельный модуль."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_traces", os.path.join(LIB, "traces.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def tasks_mod():
     """lib/tasks.py — схема задач и доска владельца (python3 -I не кладёт папку скрипта в путь импорта)."""
     global _TASKS
@@ -8694,6 +8705,8 @@ def main(argv):
         return merge_mod().main(rest)
     if cmd == "outside":
         return outside_mod().main(rest)
+    if cmd == "traces":
+        return traces_mod().main(rest)
     if cmd == "mmv":
         return mmv_mod().main(rest, STATE, now())
     if cmd == "qmd":
