@@ -631,11 +631,10 @@ def check_nextjs(event):
 #                  в Obsidian) и в журналы ваших слов owner-log (их пишут хук и тик) — ни одна сессия Claude, без роли
 #                  тоже (guard 0.5.1). У сессии без роли запрет — по явным целям внутри этих двух папок: цель «не
 #                  разобрать» и запись в папку выше ей не запрещены; git в ~/ai/pantheon роли не трогают — коммитит
-#                  тик; команды пульта
-#                  (`pantheon archive|install|uninstall|commit|start|wake|roles|stop|resume|pause|restart`,
-#                  `pantheon jobs pause|resume|disable|enable|renew`) — только штаб и ваши сессии (stop, resume, pause и
-#                  restart — с guard 0.5.5, metis-0047: роль не гасит и не будит чужие окна; `pantheon saved` и
-#                  `pantheon who` — всем); `pantheon approve` (заранее разрешённое) — только ваши.
+#                  тик; пульт — `pantheon approve` (заранее разрешённое) только ваши сессии, `pantheon merge` — роли
+#                  только request, status, cancel; остальные команды пульта и задачи другого направления через
+#                  `pantheon task` не закрыты (решение владельца 28.10, упрощение п. 4–5); файлы ~/ai/pantheon
+#                  из HQ_ONLY (approvals.toml, schedule.toml, directions.toml, decisions.md и др.) — только штаб.
 # Привилегии (кто mnemo-brain и metis-pantheon, у кого доступ к me/) — в ~/.claude/pantheon/policy.toml:
 # реестр правит штаб, и его правкой их не выдать.
 # Пути сравниваются без учёта регистра и формы Юникода: так их сравнивает файловая система macOS.
@@ -650,7 +649,6 @@ def check_nextjs(event):
 # Предел: что пишет программа изнутри (python script.py, python -c, node -e, make, свой скрипт), guard не
 # видит. Это защита от ошибки агента, а не от намеренного обхода; настоящая граница — песочница (SEC-19).
 
-import glob
 import hashlib
 import stat
 import unicodedata
@@ -678,11 +676,9 @@ DRAFT_TOOLS = {"Read", "Grep", "Glob", "Write", "Edit", "MultiEdit"}
 DRAFT_WRITE_TOOLS = {"Write", "Edit", "MultiEdit"}
 DRAFTS_DIR = "drafts"
 UNRESOLVED = "\0неразобранная-цель"
-# stop|resume|pause|restart — окна сессий (metis-0047); `pantheon jobs pause|resume` — другая команда (PANTHEON_JOB_ACTIONS)
-PANTHEON_PRIVILEGED = {"archive", "install", "uninstall", "commit", "start", "wake", "roles",
-                       "stop", "resume", "pause", "restart"}
+# решение владельца 28.10 (упрощение, п. 4–5): запуск, перезапуск, wake, resume, архив, коммит, jobs и сборка ролей
+# ролям не закрыты; остались `pantheon approve` (только владелец) и `pantheon merge` (кроме request, status, cancel)
 PANTHEON_OWNER_ONLY = {"approve"}  # заранее разрешённое (DONE-11) — только вы, не штаб: согласие не от имени владельца
-PANTHEON_JOB_ACTIONS = {"pause", "resume", "disable", "enable", "renew"}
 # слияние ядра по Touch ID (metis-0285): заявку ставит и снимает роль, исполняет (`pantheon merge run`) только тик и
 # владелец — никому из ролей, и штабу тоже
 PANTHEON_MERGE_ROLE = {"request", "status", "cancel"}
@@ -2261,27 +2257,16 @@ def bash_targets(cmd, cwd):
     return bash_analysis(cmd, cwd)[0]
 
 
-def roles_probe_ok(texts):
-    """`pantheon roles build --out X [--src Y]` (metis-0097): пробная сборка в TEMP_ROOTS. Нужно: X — разобранный
-    литерал внутри временной папки (не /dev/null), Y — разобранный литерал, других аргументов нет."""
-    args = texts[2:]
-    if len(args) not in (2, 4) or args[0] != "--out" or (len(args) == 4 and args[2] != "--src"):
-        return False
-    if any(not a or a.startswith("\0") or a == UNRESOLVED for a in args):
-        return False
-    real = os.path.realpath(os.path.expanduser(args[1]))
-    return any(real.startswith(r + os.sep) for r in TEMP_ROOTS if r != os.path.realpath("/dev/null"))
-
-
 def pantheon_cli(cmd, cwd):
-    """Привилегированные подкоманды пульта pantheon в команде Bash (список строк для причины)."""
+    """Подкоманды пульта pantheon, закрытые ролям, в команде Bash: approve, merge (кроме request, status, cancel) и
+    подкоманда, которую не разобрать (список строк для причины)."""
     found = []
     for name, texts in bash_analysis(cmd, cwd)[1]:
         # файл пульта (~/.local/bin/pantheon, lib/pantheon.py), а не папка ~/ai/pantheon
         bases = ["pantheon" if x and os.path.basename(x.rstrip("/")).lower() in ("pantheon", "pantheon.py")
                  and _key(os.path.realpath(os.path.expanduser(x))) != _key(PANTHEON) else "" for x in texts]
         if name in _MOVE | _COPY and "pantheon" in bases[:-1]:
-            found.append(f"{name} pantheon (копия пульта под другим именем)")
+            found.append("pantheon <копия пульта под другим именем>")
             continue
         # sh ~/.local/bin/pantheon archive, python3 …/lib/pantheon.py archive — тот же пульт по пути
         k = next((i for i, b in enumerate(bases) if b), None)
@@ -2290,43 +2275,13 @@ def pantheon_cli(cmd, cwd):
         if name not in ("pantheon", "?") or not texts:
             continue
         sub, act = texts[0], texts[1] if len(texts) > 1 else ""
-        if sub == "roles" and act == "build" and roles_probe_ok(texts):
-            continue
         if sub is None and name == "pantheon":
             found.append("pantheon <подкоманда не разобрана>")
-        elif sub in PANTHEON_PRIVILEGED | PANTHEON_OWNER_ONLY or (sub == "jobs" and (act is None or act in PANTHEON_JOB_ACTIONS)):
+        elif sub in PANTHEON_OWNER_ONLY:
             found.append(f"pantheon {sub} {act or ''}".strip())
         elif sub == "merge" and act not in PANTHEON_MERGE_ROLE:
             found.append(f"pantheon merge {act or '<действие не разобрано>'}")
     return found
-
-
-def task_targets(cmd, cwd):
-    """`pantheon task new|set|claim|split` в команде → направления, которые она меняет (None — не определить)."""
-    out = []
-    for name, texts in bash_analysis(cmd, cwd)[1]:
-        bases = ["pantheon" if x and os.path.basename(x.rstrip("/")).lower() in ("pantheon", "pantheon.py")
-                 and _key(os.path.realpath(os.path.expanduser(x))) != _key(PANTHEON) else "" for x in texts]
-        k = next((i for i, b in enumerate(bases) if b), None)
-        if name not in ("pantheon", "?") and k is not None:
-            name, texts = "pantheon", texts[k + 1:]
-        if name not in ("pantheon", "?") or len(texts) < 2 or texts[0] != "task":
-            continue
-        act = texts[1]
-        if act is None:
-            out.append(None)
-        elif act == "new":
-            d = [texts[i + 1] for i in range(2, len(texts) - 1) if texts[i] == "--direction"]
-            out.append(d[-1] if d and d[-1] and re.fullmatch(r"[a-z0-9][a-z0-9-]*", d[-1]) else None)
-        elif act in ("set", "claim", "split"):
-            tid = texts[2] if len(texts) > 2 else None
-            hits = [os.path.basename(os.path.dirname(os.path.dirname(f)))
-                    for f in glob.glob(os.path.join(PANTHEON, "directions", "*", "tasks", f"{tid}.md"))] \
-                if tid and re.fullmatch(r"[a-z][a-z0-9]{1,11}-\d{3,}", tid) else []
-            if tid and os.path.exists(os.path.join(PANTHEON, "inbox", "tasks", f"{tid}.md")):
-                hits.append("inbox")
-            out.append(hits[0] if len(hits) == 1 else None)
-    return out
 
 
 def write_targets(event, tool, tool_input):
@@ -2509,33 +2464,17 @@ def check_pantheon(event, tool, tool_input):
         if any(c.split()[1:2] and c.split()[1] in PANTHEON_OWNER_ONLY for c in cli):
             return ("Правило pantheon-acl: `pantheon approve` — согласие владельца заранее, его набирает только владелец "
                     "(в своём терминале или в окне Зевса после «!»). Предложи строку разрешения владельцу словами.")
-        merge = [c for c in cli if c.startswith("pantheon merge ")]
+        merge = [c for c in cli if c.startswith(("pantheon merge ", "pantheon <"))]
         if merge:
             return (f"Правило pantheon-acl: «{merge[0]}» — слияние по заявке исполняет только плановый проход после "
                     "Touch ID владельца. Роли — `pantheon merge request N -R <owner/repo>`, `pantheon merge status`, "
                     "`pantheon merge cancel N -R <owner/repo>`.")
     if tool == "Bash" and pantheon_role and not (role == "hq" and not sub):
-        if role == "hestia" and not sub and window_role() == "hestia":
-            # Гестия в своём окне: её команды пульта уже сверило правило hestia (белый список, restart без --force)
-            cli = [c for c in cli if c.split()[1:2] != ["restart"]]
-        if cli:
-            return (f"Правило pantheon-acl: «{cli[0]}» — команда пульта, её запускают только Пританей и ваши сессии. "
-                    "Архив, коммит и пауза задач — через Зевса; дописать тревогу — `pantheon alert`.")
         names = {n for n, _ in bash_analysis(tool_input.get("command") or "", os.path.realpath(event.get("cwd") or os.getcwd()))[1]}
         if "terminal-notifier" in names or "?" in names and "terminal-notifier" in (tool_input.get("command") or ""):
             return ("Правило pantheon-acl: terminal-notifier ролям недоступен — по щелчку он выполняет команду от имени "
                     "владельца. Уведомления Пантеона шлёт плановый проход; нужно сообщить владельцу — `pantheon alert` или вопрос "
                     "на доске (`pantheon task new … --waiting-on human --question …`).")
-        dirs = task_targets(tool_input.get("command") or "", os.path.realpath(event.get("cwd") or os.getcwd()))
-        if dirs:
-            own, _ = direction_of(load_domains(), pdir)
-            if not own and sub:
-                own, _ = direction_of(load_domains(), os.path.realpath(event.get("cwd") or os.getcwd()))
-            bad = [d for d in dirs if d is None or d != own]
-            if bad:
-                return (f"Правило pantheon-acl: роль «{role or 'субагент'}» ведёт задачи только своего направления "
-                        f"({own or 'нет направления'}), а команда трогает {bad[0] or 'задачу, направление которой не определить'}. "
-                        "Задачу другому направлению — новым файлом в его inbox/ (Write); входящие владельца пишет только доска.")
     cwd, targets = write_targets(event, tool, tool_input)
     if not targets:
         return None
