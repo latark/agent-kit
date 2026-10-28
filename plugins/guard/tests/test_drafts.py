@@ -8,6 +8,7 @@
     Bash, NotebookEdit, WebFetch, Agent, Task, Skill — отказ, и у главной сессии `--agent palamedes` (без agent_id);
   - pantheon-acl: запись только в directions/<своё направление>/drafts/** — в окне координатора по папке запуска,
     в окне Пританея (PANTHEON_ROLE=hq) — в drafts/ любого направления из domains.json, но не в inbox/ и STATUS.md;
+  - направление с заглавными буквами и NFD в имени (metis-0494): свой drafts/ сравнивается по ключу;
   - обходы: drafts/../STATUS.md, симлинк из drafts наружу и симлинк самой drafts, регистр и Юникод (NFD, кириллица
     вместо латиницы), путь drafts как файл, drafts не на третьем месте пути;
   - domain: код проектов, ~/ai/knowledge, ~/.claude, память, временные папки — отказ, agent_extra из policy.toml не
@@ -15,6 +16,7 @@
   - вторая линия без draft-role (GUARD_OFF=draft-role): Bash и NotebookEdit в drafts/ — всё равно отказ.
 """
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -68,6 +70,16 @@ def main():
     nfd = unicodedata.normalize("NFD", "разбор-йод.md")  # «й» разложенной формой, как его пишет Finder
     lookalike = "drаfts"  # «а» кириллицей: другое имя и для macOS
     upper = "allow" if IS_MAC else "deny"  # на macOS DRAFTS — та же папка drafts (файловая система без регистра)
+    # направление с заглавными буквами и NFD в имени (metis-0494): в реестре — NFD, папка запуска — свой репозиторий;
+    # ключ сравнения — NFC+casefold на macOS, поэтому и реестр, и имя папки проходят через _key
+    elan = unicodedata.normalize("NFD", "ÉLAN-SHOP")  # «É» разложенной формой
+    elan_nfc = unicodedata.normalize("NFC", elan)
+    os.makedirs(os.path.join(home, "projects/elanApp"), exist_ok=True)
+    dom_file = os.path.join(home, ".local/state/pantheon/domains.json")
+    dom = json.loads(T._read(dom_file))
+    dom["domains"][elan] = ["~/projects/elanApp"]
+    with open(dom_file, "w") as fh:
+        json.dump(dom, fh, ensure_ascii=False)
 
     cases = [
         # --- можно: свой черновик (субагент в окне координатора и без окна) ---
@@ -184,6 +196,14 @@ def main():
         ("без draft-role: NotebookEdit в drafts/ — отказ", "deny", br, True, N(D("athena-shop", "x.ipynb")), None, OFF),
         ("без draft-role: Bash > в репозиторий — отказ", "deny", br, True, B("echo x > app/y.ts"), None, OFF),
         ("без draft-role: Write в свой drafts/ — можно", "allow", br, True, W(D("athena-shop", "c-4.md")), None, OFF),
+        # --- направление с заглавными и NFD в имени (metis-0494): свой drafts/, окно Пританея, чужой ---
+        ("NFD+заглавные направление: свой drafts/", "allow", "projects/elanApp", True, W(D(elan, "e-1.md"))),
+        ("NFC-вариант папки того же направления (macOS — та же папка)", "allow" if IS_MAC else "deny", "projects/elanApp",
+         True, W(D(elan_nfc, "e-2.md"))),
+        ("NFD+заглавные: чужой drafts/ — отказ", "deny", "projects/elanApp", True, W(D("athena-shop", "e-3.md"))),
+        ("окно Пританея: NFD+заглавные направление из реестра", "allow", hqdir, True, W(D(elan, "z-4.md")), None, HQ),
+        ("окно Пританея: NFC-вариант папки того же направления (macOS — та же папка)", "allow" if IS_MAC else "deny",
+         hqdir, True, W(D(elan_nfc, "z-5.md")), None, HQ),
         # --- соседи не задеты: momus и dev-sonnet ---
         ("dev-sonnet: свой STATUS.md — как было, можно", "allow", br, True, W(P("directions/athena-shop/STATUS.md")),
          None, None, "dev-sonnet"),
