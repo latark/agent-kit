@@ -17,6 +17,7 @@ import time
 import uuid
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
+CACHED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_cached_main.py")  # guard из .pyc (metis-0544)
 OLD = "b" * 40
 CORE = "ядро защит — PR ждёт слияния владельцем (Д3)"
 # перечень проверенного в «принять» (Б6, guard 0.5.6): кавычки и пробелы внутри поля, обе формы флага
@@ -199,7 +200,7 @@ class Home:
                 "CLAUDE_PROJECT_DIR": self.j(pdir), "TMPDIR": "/nonexistent-tmp"}
 
     def hook(self, event, pdir, mode=(), extra_env=None):
-        return subprocess.run([sys.executable, "-I", GUARD, *mode], input=json.dumps(event), capture_output=True,
+        return subprocess.run([sys.executable, "-I", CACHED, GUARD, *mode], input=json.dumps(event), capture_output=True,
                               text=True, env=dict(self.env(pdir), **(extra_env or {})), timeout=20)
 
     def pre(self, cmd, role="domain-coordinator", pdir="projects/tg-read", cwd=None, agent_id=None, session="s-coord",

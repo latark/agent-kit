@@ -27,6 +27,7 @@ _atexit.register(_shutil.rmtree, _ROOT, True)
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
+CACHED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_cached_main.py")  # guard из .pyc (metis-0544)
 SHELLS = [s for s in ("/bin/zsh", "/bin/bash") if os.path.exists(s)]
 PROJECT = "projects/shopKeeperApp"
 
@@ -131,7 +132,7 @@ def guard_says(home, cmd, role):
              "cwd": os.path.join(home, PROJECT), "agent_type": role}
     env = {"HOME": home, "PATH": os.environ["PATH"], "CLAUDE_PROJECT_DIR": os.path.join(home, PROJECT),
            "TMPDIR": os.path.join(home, "tmp")}
-    r = subprocess.run([sys.executable, "-I", GUARD], input=json.dumps(event), capture_output=True, text=True,
+    r = subprocess.run([sys.executable, "-I", CACHED, GUARD], input=json.dumps(event), capture_output=True, text=True,
                        env=env, timeout=20)
     return "deny" if r.returncode == 2 or '"deny"' in r.stdout else "allow"  # код 2 — сбой, отказ (metis-0094)
 
