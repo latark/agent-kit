@@ -5,8 +5,7 @@
 входы менялись, а сборки нет 10 мин; хук SessionStart Зевса кладёт файл в контекст после сжатия и /clear;
 `pantheon archive` переносит старые разделы STATUS.md с датой, строки без даты не режет — тревога.
 
-Запуск: python3 -I plugins/pantheon/tests/test_board_text.py  (код выхода 0 — все прошли; и на /usr/bin/python3:
-блок и хук — на любом python3, сквозные проверки CLI pantheon — на Python 3.11+)
+Запуск: python3 -I plugins/pantheon/tests/test_board_text.py  (код выхода 0 — все прошли)
 """
 import atexit
 import importlib.util

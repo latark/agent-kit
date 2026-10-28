@@ -21,19 +21,19 @@
           {
             "type": "command",
             "if": "Write(~/ai/pantheon/**)",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" state-len",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" state-len",
             "timeout": 10
           },
           {
             "type": "command",
             "if": "Edit(~/ai/pantheon/**)",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" state-len",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" state-len",
             "timeout": 10
           },
           {
             "type": "command",
             "if": "MultiEdit(~/ai/pantheon/**)",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" state-len",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" state-len",
             "timeout": 10
           }
         ]
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" answer",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" answer",
             "timeout": 15
           }
         ]
@@ -52,7 +52,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "f=\"${PANTHEON_STATE:-$HOME/.local/state/pantheon}/maintenance.json\"; [ -f \"$f\" ] || exit 0; exec python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" maint-post",
+            "command": "f=\"${PANTHEON_STATE:-$HOME/.local/state/pantheon}/maintenance.json\"; [ -f \"$f\" ] || exit 0; exec /bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" maint-post",
             "timeout": 10
           }
         ]
@@ -63,7 +63,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "f=\"${PANTHEON_STATE:-$HOME/.local/state/pantheon}/maintenance.json\"; [ -f \"$f\" ] || exit 0; exec python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" maint-pre",
+            "command": "f=\"${PANTHEON_STATE:-$HOME/.local/state/pantheon}/maintenance.json\"; [ -f \"$f\" ] || exit 0; exec /bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" maint-pre",
             "timeout": 10,
             "onFailure": "block"
           }
@@ -74,7 +74,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" qmd-query",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" qmd-query",
             "timeout": 10,
             "onFailure": "block"
           }
@@ -86,7 +86,8 @@
           {
             "type": "command",
             "command": "case \"$PANTHEON_ROLE\" in domain-coordinator|workshop) ;; *) exit 0 ;; esac; grep -qs owner_cap \"${PANTHEON_HOME:-$HOME/ai/pantheon}/schedule.toml\" || exit 0; exec \"${CLAUDE_PLUGIN_ROOT}/bin/pantheon\" night agent-gate",
-            "timeout": 15
+            "timeout": 15,
+            "onFailure": "block"
           }
         ]
       }
@@ -96,7 +97,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" owner-log",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" owner-log",
             "async": true,
             "timeout": 600
           }
@@ -106,7 +107,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" clock",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" clock",
             "timeout": 5
           }
         ]
@@ -117,7 +118,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" stop",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" stop",
             "timeout": 15
           }
         ]
@@ -128,7 +129,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" dir-added",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" dir-added",
             "timeout": 10
           }
         ]
@@ -139,7 +140,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "d=\"${PANTHEON_STATE:-$HOME/.local/state/pantheon}/push\"; [ -d \"$d\" ] || exit 0; exec python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" push",
+            "command": "d=\"${PANTHEON_STATE:-$HOME/.local/state/pantheon}/push\"; [ -d \"$d\" ] || exit 0; exec /bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" push",
             "asyncRewake": true,
             "timeout": 60
           }
@@ -149,7 +150,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" start",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" start",
             "timeout": 15
           }
         ]
@@ -159,7 +160,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" rewake",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/hooks/python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/ctx.py\" rewake",
             "asyncRewake": true,
             "timeout": 60
           }

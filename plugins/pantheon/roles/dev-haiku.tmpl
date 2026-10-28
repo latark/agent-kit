@@ -3,6 +3,7 @@ name: dev-haiku
 description: Разработчик Пантеона для механики: переименовать, разнести, обновить по образцу, простые тесты. Субагент лида, работает в своей worktree. Только по вызову лида или координатора Пантеона.
 model: haiku
 effort: low
+maxTurns: 80
 disallowedTools: Agent, SendMessage, mcp__computer-use, mcp__claude-in-chrome, mcp__plugin_Notion_notion, mcp__claude_ai_Claude_Docs
 isolation: worktree
 color: green
@@ -15,7 +16,7 @@ hooks:
   Stop:
     - hooks:
         - type: command
-          command: python3 "$HOME/.local/share/pantheon/current/hooks/dev-stop-verify.py"
+          command: /bin/sh "$HOME/.local/share/pantheon/current/hooks/python.sh" "$HOME/.local/share/pantheon/current/hooks/dev-stop-verify.py"
           timeout: 900
 ---
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Тест служб по требованию (metis-0151): сокет у launchd, прокси lib/ondemand.py, qmd поднимается запросом.
 
-Запуск: python3 -I plugins/pantheon/tests/test_svc_ondemand.py  (код выхода 0 — все прошли), на 3.9 и 3.14.
+Запуск: python3 -I plugins/pantheon/tests/test_svc_ondemand.py  (код выхода 0 — все прошли).
 Живой launchd не трогается: слушающий сокет создаёт сам тест и передаёт прокси через PANTHEON_LISTEN_FDS — так же,
 как launchd держит сокет и отдаёт его службе. qmd подменён маленьким HTTP-сервером (fake_qmd), тик — PANTHEON_DRYRUN.
 Где слушать порт нельзя (песочница окна: bind → EPERM), сквозная часть через настоящие сокеты пропускается, а те же
@@ -38,7 +38,7 @@ IDLE = 2  # секунды простоя в тесте (в жизни — idle_
 # Поддельный qmd: `--index index mcp --http --port N --host H`, пишет «pid порт» в FAKE_PIDS и отвечает на POST /mcp
 # JSON-ом с заголовком Host запроса — видно, что ответ пришёл от него и что Host клиента дошёл как есть.
 FAKE = r'''
-import json, os, sys
+import json, os, socketserver, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 argv = sys.argv[1:]
 port = int(argv[argv.index("--port") + 1]); host = argv[argv.index("--host") + 1]
@@ -53,7 +53,11 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(body)
     def log_message(self, *a):
         pass
-srv = HTTPServer((host, port), H)
+class S(HTTPServer):
+    def server_bind(self):  # без socket.getfqdn: обратный DNS на раннере CI висит дольше таймаута теста (metis-0573)
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = host, self.server_address[1]
+srv = S((host, port), H)
 with open(os.environ["FAKE_PIDS"], "a") as fh:
     fh.write(f"{os.getpid()} {port}\n")
 srv.serve_forever()
@@ -122,7 +126,7 @@ def wait_dead(pid, t=10):
     return False
 
 
-# --- прокси напрямую (lib/ondemand.py на этом python: 3.9 или 3.14) ---------------------------------------------------
+# --- прокси напрямую (lib/ondemand.py на этом python) -------------------------------------------------------------------
 PROXY = r'''
 import os, subprocess, sys
 sys.path.insert(0, sys.argv[1])
@@ -161,8 +165,11 @@ def test_proxy():
             check("Host клиента доходит до qmd как есть (порт сокета, а не внутренний)",
                   isinstance(body, dict) and body.get("host") == f"127.0.0.1:{lport}" and body.get("port") != lport,
                   str(body))
-            code2, body2 = post(lport)
-            check("второй запрос — тот же qmd, без нового запуска", code2 == 200 and body2.get("pid") == ps[0]
+            try:
+                code2, body2 = post(lport)
+            except OSError as e:
+                code2, body2 = None, {"ошибка": str(e)}
+            check("второй запрос — тот же qmd, без нового запуска", code2 == 200 and ps and body2.get("pid") == ps[0]
                   and pids(pidfile) == ps, f"{body2} {pids(pidfile)}")
             # молчащий поток (как subscriptions/listen у клиентов MCP) простою не мешает
             silent = socket.create_connection(("127.0.0.1", lport))
@@ -172,7 +179,7 @@ def test_proxy():
             except subprocess.TimeoutExpired:
                 rc = None
             check("после простоя прокси выходит сам (код 0), хотя соединение открыто", rc == 0, str(rc))
-            check("после простоя qmd выходит", wait_dead(ps[0]), str(ps))
+            check("после простоя qmd выходит", bool(ps) and wait_dead(ps[0]), str(ps))
             silent.settimeout(5)
             try:
                 closed = silent.recv(10) == b""
@@ -624,12 +631,9 @@ if __name__ == "__main__":
         test_backend_fails()
     else:
         print("слушать порт нельзя (bind → EPERM, песочница) — сквозная часть через сокеты и qmd serve пропущены")
-    if PY311:
-        if listen:
-            test_qmd_serve()
-        test_qmd_serve_no_launchd()
-        test_tick()
-    else:
-        print("нет Python 3.11+ — части с CLI pantheon пропущены")
+    if listen:
+        test_qmd_serve()
+    test_qmd_serve_no_launchd()
+    test_tick()
     print(f"{len(OK)} из {len(OK) + len(FAIL)} прошли")
     sys.exit(1 if FAIL else 0)

@@ -8,12 +8,14 @@ run (лёгкий тик) читает только кэш, в сеть не х�
 день слияния, release — «PR #N → коммит» (версия плагина, если PR поднял plugin.json), actual — из учёта по задачам
 (metrics/tasks.jsonl, metis-0294), нет замера — «нет замера»; в журнал задачи — строка с CLOSED_BY_MERGE.
 В теле PR слово «часть» — PR закрывает только часть задачи: задача не закрывается.
+Неотмеченные пункты «Готово, когда» (задачи с T.CRITERIA_FROM, metis-0503): слитый PR без «часть» ставит review и
+строку «слит, неотмечено N», а не done — хвосты не теряются; закрыть — отметить пункты, `pantheon task split` или --force.
 Открытый PR, который так же закрывает задачу (без «часть»), ставит задаче todo/doing её направления review — один раз
 на PR (строка REVIEW_MARK в журнале).
 Обработанные PR отмечены в STATE/autoclose.json; задачу, уже закрытую этим PR (строка в журнале), второй раз не трогаем. Заодно проход запоминает, у каких
 задач есть открытый PR: без него «review больше суток» на доске — повод для внимания.
 
-Модуль без tomllib и без обращения к pantheon.py: работает и на системном Python 3.9, тесты зовут его напрямую.
+Модуль без обращения к pantheon.py: тесты зовут его напрямую.
 """
 import json
 import os
@@ -315,6 +317,13 @@ def close_pr(pantheon, t, repo, pr, dirs, T, actual_for, log, errors):
                 if not journal_has(tasks[tid][0], T, note):
                     T.task_set(pantheon, t, tid, {}, actor="плановый проход", note=note)
                     log.append(f"{tid}: PR #{n} слит, «часть» — не закрыта")
+                continue
+            left = T.unchecked_criteria(head, tasks[tid][2])
+            if left:  # хвосты «Готово, когда» не теряем (metis-0503): слитый PR без «часть» — на проверку, не в done
+                note = f"PR #{n} ({repo}) слит, неотмечено {left}"
+                if head.get("status") != "review" or not journal_has(tasks[tid][0], T, note):
+                    T.task_set(pantheon, t, tid, {"status": "review"}, actor="плановый проход", note=note)
+                    log.append(f"{tid}: PR #{n} слит, неотмечено {left} — review")
                 continue
             mark = f"PR #{n} ({repo}) →"
             if journal_has(tasks[tid][0], T, T.CLOSED_BY_MERGE + " " + mark):

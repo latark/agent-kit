@@ -330,6 +330,7 @@ def main():
     os.makedirs(os.path.join(groot, "hooks"))
     os.makedirs(os.path.join(groot, ".claude-plugin"))
     open(os.path.join(groot, "hooks", "guard.py"), "w").write("# guard из кэша\n")
+    open(os.path.join(groot, "hooks", "python.sh"), "w").write("# запускатель из кэша\n")
     open(os.path.join(groot, ".claude-plugin", "plugin.json"), "w").write('{"name": "guard", "version": "0.1.0"}')
     open(os.path.join(tmp, ".claude/plugins/installed_plugins.json"), "w").write(json.dumps(
         {"version": 2, "plugins": {"guard@agent-kit": [{"scope": "user", "installPath": groot}]}}))
@@ -461,8 +462,9 @@ def main():
     # вторая запись PreToolUse у координаторов и штаба — хук субагентов окна (P0-6, test_agent_allowlist.py)
     hk = [h for g in sa.get("hooks", {}).get("PreToolUse", []) if g["matcher"] != "Agent|Task|Skill" for h in g["hooks"]]
     gpath = os.path.realpath(os.path.join(groot, "hooks", "guard.py"))
-    check("строгий guard в окне роли (SEC-29): --strict, onFailure block, только проверенный кэш, у мастерской тоже",
-          len(hk) == 1 and hk[0]["onFailure"] == "block" and hk[0]["command"] == f"python3 {gpath} --strict"
+    check("строгий guard в окне роли (SEC-29): --strict через hooks/python.sh, onFailure block, только проверенный кэш, "
+          "у мастерской тоже",
+          len(hk) == 1 and hk[0]["onFailure"] == "block" and hk[0]["command"] == f"/bin/sh {os.path.join(os.path.dirname(gpath), 'python.sh')} {gpath} --strict"
           and "projects" not in hk[0]["command"] and sw["hooks"]["PreToolUse"] == sa["hooks"]["PreToolUse"][:1]
           and sa["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Agent|Task|Skill")
     hq = load("hq")
@@ -474,13 +476,30 @@ def main():
           and "git push *" not in hb["excludedCommands"]
           and hq["hooks"]["PreToolUse"][0] == sa["hooks"]["PreToolUse"][0] and "worktree" not in hq
           and "~/ai/knowledge/me" not in hb["filesystem"]["denyRead"])
+    sw_hq = hb["filesystem"]["allowWrite"]
+    st_real = os.path.realpath(state)
+    hq_rw = os.path.join(st_real, "hq-rw")
+    check("окно штаба (metis-0523, ревью безопасности): из STATE пишет только hq-rw/locks и hq-rw/autostart-reset — "
+          "настоящими путями; сама hq-rw, замки прохода (locks/), stopped/, owner-log/, autostart.json закрыты",
+          [x for x in sw_hq if x == st_real or x.startswith(st_real + "/")]
+          == [os.path.join(hq_rw, "locks"), os.path.join(hq_rw, "autostart-reset")]
+          and not any(x.startswith(st_real + "/") for x in sa["sandbox"]["filesystem"]["allowWrite"]))
     check("окно штаба: мимо песочницы — прежний список пульта и gh PR (view/checks/edit), без сетевого git "
           "(metis-0064, metis-0247)",
           hb["excludedCommands"] == ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheon wake *",
                                      "pantheon archive", "pantheon jobs *", "pantheon domains build",
                                      "pantheon roles build", "pantheon stop *", "pantheon resume *", "pantheon pause *",
                                      "pantheon restart *", "pantheon saved *", "pantheon who", "pantheon agents",
+                                     "sessync find", "sessync find *",
                                      "gh pr view", "gh pr view *", "gh pr checks", "gh pr checks *", "gh pr edit *"])
+    others = {n: load(n)["sandbox"]["excludedCommands"] for n in ("athena-shop", "metis-pantheon", "workshop",
+                                                                    "mnemo-brain", "zz", "hestia")}
+    others.update({f"job-{r}": load(f"job-{r}")["sandbox"]["excludedCommands"]
+                   for r in ("clio", "prometheus", "iris") if os.path.exists(os.path.join(state, "settings", f"job-{r}.json"))})
+    check("sessync find (metis-0566): мимо песочницы только у окна штаба; у окон направлений, мастерской, Гестии и "
+          "задач его нет",
+          len(others) >= 7 and not any("sessync" in x for v in others.values() for x in v)
+          and "sessync find *" in hb["excludedCommands"])
     check("окно штаба: gh api, gh issue, gh run, gh repo, gh pr create/close/comment/merge, gh с флагами до "
           "подкоманды, «gh *» и «gh pr *» — в песочнице (metis-0247)",
           not any(x.startswith(("gh api", "gh issue", "gh run", "gh repo", "gh pr create", "gh pr close", "gh pr merge",

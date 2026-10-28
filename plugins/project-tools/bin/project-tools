@@ -1,12 +1,41 @@
 #!/bin/sh
 # Команда project-tools — инструменты проекта по карте стеков. Код — ../lib/project_tools.py.
-# Нужен Python 3.11+ (tomllib); /usr/bin/python3 на macOS старше, поэтому ищем дальше. Подсказка без него молчит.
+# Нужен Python 3.11+ (tomllib); /usr/bin/python3 на macOS — 3.9. Поиск — тот же, что у hooks/python.sh guard и
+# pantheon (metis-0571): python3.14…3.11 в /opt/homebrew/bin, /usr/local/bin, python.org и PATH (имя называет версию),
+# затем python3 из PATH с проверкой версии. Подсказка (hint, хук SessionStart) без Python молчит, остальное — код 2.
 here=$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")" && pwd)
-for py in python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do
-  if "$py" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then
-    exec "$py" -I "$here/../lib/project_tools.py" "$@"
-  fi
+FW=/Library/Frameworks/Python.framework/Versions
+DIRS=/opt/homebrew/bin:/usr/local/bin
+
+py=
+old_ifs=$IFS
+IFS=:
+set -f
+for v in 3.14 3.13 3.12 3.11; do
+    for d in $DIRS:$FW/$v/bin:$PATH; do
+        case $d in
+            /*) ;;
+            *) continue ;;
+        esac
+        if [ -f "$d/python$v" ] && [ -x "$d/python$v" ]; then
+            py=$d/python$v
+            break 2
+        fi
+    done
 done
+set +f
+IFS=$old_ifs
+
+if [ -z "$py" ]; then
+    p=$(command -v python3 2>/dev/null)
+    case $p in
+        /*) "$p" -I -c 'import sys; sys.exit(sys.version_info < (3, 11))' >/dev/null 2>&1 && py=$p ;;
+    esac
+fi
+
+if [ -n "$py" ]; then
+    exec "$py" -I "$here/../lib/project_tools.py" "$@"
+fi
 [ "$1" = hint ] && exit 0
-echo "project-tools: нужен Python 3.11 или новее (brew install python)" >&2
+echo "project-tools: нужен Python 3.11 или новее (brew install python@3.14)" >&2
 exit 2

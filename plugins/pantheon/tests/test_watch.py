@@ -13,9 +13,7 @@ import os
 import subprocess
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _py311 import PY311  # CLI pantheon — только на Python 3.11+
-if sys.version_info < (3, 11):  # часть проверок импортирует pantheon.py в этом же процессе — ему нужен tomllib
-    os.execv(PY311, [PY311, "-I", os.path.abspath(__file__)])
+from _py311 import PY311  # noqa: E402
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
@@ -170,7 +168,7 @@ class Env:
         env = {"PATH": self.bin + ":" + os.environ["PATH"], "HOME": self.home, "PANTHEON_HOME": self.pantheon,
                "PANTHEON_STATE": self.state, "PANTHEON_NOW": str(t), "PANTHEON_HOST": "mac-a",
                "PANTHEON_NOTIFY_LOG": self.notify, "FAKE_CLAUDE_LOG": self.log, "FAKE_AGENTS": self.agents_file,
-               "PANTHEON_FAKE_SWAP": "1.0", "PANTHEON_FAKE_PS": "", "PANTHEON_FAKE_CC": "2.1.292",
+               "PANTHEON_FAKE_SWAP": "1.0", "PANTHEON_FAKE_PRESSURE": "1", "PANTHEON_FAKE_PS": "", "PANTHEON_FAKE_CC": "2.1.292",
                "PANTHEON_FAKE_LIMIT": "10", "PANTHEON_CAFFEINATE": os.path.join(self.bin, "caffeinate")}
         if "TZ" in os.environ:  # дочерний процесс в том же поясе, что и тест, который считает местное время (metis-0222)
             env["TZ"] = os.environ["TZ"]
@@ -283,6 +281,34 @@ def test_autostart_order_board_vs_zeus_0242():
     check(len(starts) == 1, f"самозапуск не пошёл: {e.calls()}")
     want = "athena-0001, athena-0002, athena-0003"
     check(want in " ".join(starts[0]), f"порядок board/zeus.md нарушен ({want}): {' '.join(starts[0])[-400:]}")
+
+
+def test_autostart_owner_elsewhere_0564():
+    """metis-0564: задачу с owner не координатора направления (другая сессия, Зевс, вы, другое направление) самозапуск
+    его сессии не отдаёт и места в очереди ею не занимает; owner — само направление или его лид/исполнитель — отдаёт."""
+    e = Env()
+    e.direction("metis-x")
+    e.task("metis-0001", "metis-x", extra="owner: agent-kit-62\n")
+    e.task("metis-0002", "metis-x", extra="owner: zeus\n")
+    e.task("metis-0003", "metis-x", extra="owner: вы\n")
+    e.run("watch", t=T0)
+    for i, n in enumerate((1, 2, 3)):
+        e.board(f"metis-000{n}", T0 + 100 + i * 10)
+    out = e.run("watch", "--dry-run", t=T0 + 200).stdout
+    check("не отдаю координатору" in out and "metis-0001 (agent-kit-62)" in out and "задачи с ними: нет" in out,
+          f"0564: dry-run не говорит, что задачи чужие: {out}")
+    e.run("watch", t=T0 + 240)
+    check(not [c for c in e.calls() if c[:1] == ["--bg"]], f"0564: координатор поднят по чужой задаче: {e.calls()}")
+    e.task("metis-0004", "metis-x", extra="owner: metis-x\n")
+    e.task("metis-0005", "metis-x", extra="owner: hephaestus-board\n")
+    e.task("metis-0006", "metis-x")  # без owner — координатор направления
+    for i, n in enumerate((4, 5, 6)):
+        e.board(f"metis-000{n}", T0 + 300 + i * 10)
+    e.run("watch", t=T0 + 400)
+    starts, text = _bg_text(e)
+    check(len(starts) == 1 and "metis-0004, metis-0005, metis-0006" in text
+          and not any(f"metis-000{n}" in text for n in (1, 2, 3)),
+          f"0564: в задании координатору не те задачи: {text[-400:]}")
 
 
 def _bg_text(e):
@@ -584,9 +610,6 @@ def test_autostart_backoff_and_give_up():
 def test_autostart_start_timeout_0141():
     """metis-0141 п. 1: pantheon start из самозапуска не уложился в срок — строка в тревогах и код 124, без трассировки;
     срок по умолчанию покрывает шаги запуска (около 410 с) и меньше срока прохода дежурного (600 с)."""
-    if sys.version_info < (3, 11):  # pantheon.py сам требует 3.11 (tomllib): на 3.9 он отвечал бы отказом на всё
-        print("ok   пропуск: срок pantheon start требует Python 3.11+ (здесь %d.%d)" % sys.version_info[:2])
-        return
     e = Env()
     e.direction("pluto-x")
     e.task("pluto-0001", "pluto-x")
@@ -1032,8 +1055,8 @@ def test_fresh_path_busy_0207():
     a = bg("fb-dir", "blocked", "fdfdfdfd-1")
     e.agents([a])
     transcript(e, a, 130_000, T0 - 7200)
-    os.makedirs(e.st("locks"), exist_ok=True)
-    with open(e.st("locks", "start-fb-dir.lock"), "a") as fh:
+    os.makedirs(e.st("hq-rw", "locks"), exist_ok=True)  # замки имён сессий — в STATE/hq-rw/locks (metis-0523)
+    with open(e.st("hq-rw", "locks", "start-fb-dir.lock"), "a") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         e.run("watch", t=T0, extra=ZEUS_RUN)
     c = e.calls()
@@ -1171,11 +1194,12 @@ def test_stop_removes_from_fleet():
 
 
 def test_stop_without_locks_write():
-    """metis-0078: окно Зевса не пишет в locks/ — pantheon stop работает без блокировки имени, с предупреждением."""
+    """metis-0078: окно без записи в папку замков имён (STATE/hq-rw/locks, metis-0523) — pantheon stop работает без
+    блокировки имени, с предупреждением."""
     e = Env()
     e.direction("nl-dir")
     e.agents([bg("nl-dir", "working", "nlnlnlnl-1", pid=51)])
-    locks = e.st("locks")
+    locks = e.st("hq-rw", "locks")
     os.makedirs(locks, exist_ok=True)
     os.chmod(locks, 0o500)
     try:
@@ -1187,11 +1211,238 @@ def test_stop_without_locks_write():
         check(["stop", "nlnlnlnl"] in e.calls(), "stop без записи в locks не остановил сессию")
         check("нет права записи" in r.stderr and "start-nl-dir" in r.stderr and "Traceback" not in r.stderr,
               f"нет понятного предупреждения: {r.stderr[-300:]}")
-        # неблокирующий замок без файла по-прежнему отказ, а не молчаливое «взял»
+        # неблокирующий замок без файла — отказ с кодом 1 и предупреждением, а не молчаливое «взял» и не падение
+        os.remove(e.st("stopped", "nl-dir"))
         r2 = e.run("start", "nl-dir", t=T0)
-        check("Traceback" in r2.stderr or r2.returncode != 0, f"start без locks прошёл молча: {r2.stdout} {r2.stderr[-200:]}")
+        check(r2.returncode == 1 and "Traceback" not in r2.stderr and "блокировка start-nl-dir не взята" in r2.stderr,
+              f"start без записи в замки: {r2.returncode} {r2.stdout} {r2.stderr[-200:]}")
     finally:
         os.chmod(locks, 0o700)
+
+
+def _zeus_answer(e, t, question, answer, mark="· окно вопросов", note=None):
+    """Запись хука answer в owner-log/zeus.md: заголовок со временем t и пометкой, тело «вопрос: … / ответ: …»."""
+    with open(e.st("owner-log", "zeus.md"), "a", encoding="utf-8") as fh:
+        fh.write(f"## {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t))} {mark}\nвопрос: {question}\n"
+                 f"ответ: {answer}\n" + (f"заметка: {note}\n" if note else "") + "\n")
+
+
+def _start_rows(e):
+    p = e.st("logs", "start.log")
+    return [ln.split("\t") for ln in open(p, encoding="utf-8").read().splitlines()] if os.path.exists(p) else []
+
+
+def test_word_launch_0523():
+    """metis-0523 (решение владельца 27.10 «(а)», ревью безопасности): ваш выбор «Да — запустить <имя>» на вопрос по шаблону
+    pantheon launch-question — плановый проход сам поднимает окно, без СБ; строка word-launch в start.log и тревога на
+    каждое поручение; один раз на запись. Вопрос не по шаблону (текст после имени), ответ не точный вариант,
+    заметка, без пометки «окно вопросов», без [id], неизвестное имя, запись до включения прохода — без запуска."""
+    e = Env()
+    e.direction("wl-dir")
+    e.direction("wl-two")
+    _zeus_answer(e, T0 - 600, "[metis-0523] Запустить wl-dir?", "Да — запустить wl-dir")  # до включения прохода
+    e.run("watch", t=T0)
+    check(not _bgs(e), f"0523: запись до включения прохода подняла окно: {e.calls()}")
+    _zeus_answer(e, T0 + 30, "[metis-0523] Запустить wl-dir?", "Да — запустить wl-dir")
+    _zeus_answer(e, T0 + 31, "[metis-0524] Запустить wl-two?", "Нет")
+    _zeus_answer(e, T0 + 32, "[metis-0525] Запустить wl-two?", "Да — запустить wl-two", mark="· свободный ввод")
+    _zeus_answer(e, T0 + 33, "Запустить wl-two?", "Да — запустить wl-two")
+    _zeus_answer(e, T0 + 34, "[metis-0526] Запустить nosuch-dir?", "Да — запустить nosuch-dir")
+    _zeus_answer(e, T0 + 35, "[metis-0527] Давай без спешки: запустить wl-two?", "Да — запустить wl-two")
+    _zeus_answer(e, T0 + 36, "[metis-0529] Запустить wl-two? Только не сейчас", "Да — запустить wl-two")
+    _zeus_answer(e, T0 + 37, "[metis-0530] Запустить wl-two?", "Да")
+    _zeus_answer(e, T0 + 38, "[metis-0531] Запустить wl-two?", "Да — запустить wl-two", note="но не сегодня")
+    _zeus_answer(e, T0 + 39, "[metis-0532] Вернуть wl-two?", "Да — вернуть")
+    _zeus_answer(e, T0 + 40, "[metis-0534] Запустить wl-two?", "Да — запустить wl-two, но не сейчас")
+    e.run("watch", t=T0 + 60)
+    check(len(_bgs(e, "wl-dir")) == 1, f"0523: «Да — запустить» не подняло wl-dir: {e.calls()}")
+    check(not _bgs(e, "wl-two"), f"0523: wl-two поднят без точного выбора на вопрос по шаблону: {e.calls()}")
+    wl = [r for r in _start_rows(e) if r[1:2] == ["word-launch"]]
+    check([r[4] for r in wl] == ["metis-0523", "metis-0524", "metis-0526", "metis-0529", "metis-0530", "metis-0531",
+                                 "metis-0532", "metis-0534"]
+          and wl[0][2] == "wl-dir" and wl[0][-1] == "поднято" and "а не «Да — запустить wl-two»" in wl[1][-1]
+          and "нет такого направления" in wl[2][-1] and "не по шаблону" in wl[3][-1] and "а не «Да" in wl[4][-1]
+          and "заметка" in wl[5][-1] and "а не «Да — вернуть wl-two»" in wl[6][-1] and "а не «Да" in wl[7][-1],
+          f"0523: строки журнала поручений: {wl}")
+    al = e.alerts()
+    check("по вашему ответу в окне вопросов" in al and "[metis-0523]): запустить wl-dir — поднято" in al,
+          f"0523: нет тревоги о поручении: {al[-400:]}")
+    task_text = [c for c in _bgs(e, "wl-dir")][0][-1]
+    check("pantheon task show metis-0523" in task_text and "[Пантеон: поручение от tick]" in task_text,
+          f"0523: поручение без id и origin: {task_text}")
+    e.run("watch", t=T0 + 360)
+    check(len(_bgs(e, "wl-dir")) == 1 and len([r for r in _start_rows(e) if r[1:2] == ["word-launch"]]) == 8,
+          f"0523: запись исполнена повторно: {e.calls()}")
+    # старше окна (12 ч) — не исполняется; испорченный word-launch.json проверку не роняет
+    _zeus_answer(e, T0 + 400, "[metis-0528] Запустить wl-two?", "Да — запустить wl-two")
+    with open(e.st("word-launch.json"), "w") as fh:
+        fh.write("[]")
+    e.run("watch", t=T0 + 400 + 13 * 3600)
+    check(not _bgs(e, "wl-two"), f"0523: запись старше 12 ч исполнена: {e.calls()}")
+    check("«окна по вашему ответу» упала" not in e.alerts(), f"0523: испорченный word-launch.json уронил проверку")
+    # шаблон печатает pantheon launch-question; чужой глагол, лишнее и неизвестное имя — код 2
+    r = e.run("launch-question", "metis-0533", "запустить", "wl-two", t=T0)
+    check(r.returncode == 0 and "вопрос: [metis-0533] Запустить wl-two?" in r.stdout
+          and "Да — запустить wl-two | Нет" in r.stdout, f"0523: launch-question: {r.returncode} {r.stdout!r} {r.stderr!r}")
+    r = e.run("launch-question", "metis-0533", "вернуть", "wl-two", t=T0)
+    check(r.returncode == 0 and "вопрос: [metis-0533] Вернуть wl-two?" in r.stdout
+          and "Да — вернуть wl-two | Нет" in r.stdout, f"28.10: launch-question вернуть: {r.returncode} {r.stdout!r}")
+    bad = [e.run("launch-question", *a, t=T0).returncode for a in (("metis-0533", "поднять", "wl-two"),
+                                                                   ("metis-0533", "запустить", "nosuch-dir"),
+                                                                   ("metis-0533", "запустить", "wl-two", "сейчас"))]
+    check(bad == [2, 2, 2], f"0523: launch-question без отказа: {bad}")
+
+
+def test_word_launch_return_restart_0523():
+    """metis-0523 и решение владельца 28.10: «запустить» метку «остановлено вами» не снимает; «Да — вернуть <имя>» на
+    «[<id>] Вернуть <имя>?» — снимает (метка, имя в stopped-all.json) и поднимает окно, не дословный ответ — отказ, метка
+    остаётся; «перезапустить» — pantheon start --restart: живая копия останавливается, поднимается новая; живую
+    «запустить» не трогает."""
+    e = Env()
+    e.direction("wr-dir")
+    e.run("watch", t=T0)
+    os.makedirs(e.st("stopped"), exist_ok=True)
+    open(e.st("stopped", "wr-dir"), "w").write("x\n")
+    open(e.st("stopped", "zz-other"), "w").write("x\n")
+    json.dump({"names": ["wr-dir", "zz-other"]}, open(e.st("stopped-all.json"), "w"))
+    _zeus_answer(e, T0 + 10, "[metis-0600] Запустить wr-dir?", "Да — запустить wr-dir")
+    _zeus_answer(e, T0 + 11, "[metis-0603] Вернуть wr-dir?", "Да — вернуть wr-dir сейчас")
+    _zeus_answer(e, T0 + 12, "[metis-0604] Вернуть wr-dir?", "Да — вернуть wr-dir", note="после обеда")
+    e.run("watch", t=T0 + 60)
+    check(not _bgs(e, "wr-dir") and os.path.exists(e.st("stopped", "wr-dir")),
+          f"0523: «запустить» или не дословное «вернуть» подняло остановленное вами: {e.calls()}")
+    check("снимает ответ «Да — вернуть wr-dir» или ваша команда pantheon resume" in e.alerts(),
+          f"0523: нет причины отказа: {e.alerts()[-300:]}")
+    _zeus_answer(e, T0 + 100, "[metis-0605] Вернуть wr-dir?", "Да — вернуть wr-dir")
+    json.dump({"wr-dir": {"fails": 3, "gave_up": T0, "last": T0}}, open(e.st("autostart.json"), "w"))
+    e.run("watch", t=T0 + 160)
+    asj = json.load(open(e.st("autostart.json")))
+    check(not (asj.get("wr-dir") or {}).get("gave_up") and not (asj.get("wr-dir") or {}).get("fails"),
+          f"28.10: «вернуть» не сбросило счётчик самозапуска: {asj}")
+    info = json.load(open(e.st("stopped-all.json")))
+    check(not os.path.exists(e.st("stopped", "wr-dir")) and os.path.exists(e.st("stopped", "zz-other"))
+          and info.get("names") == ["zz-other"] and len(_bgs(e, "wr-dir")) == 1,
+          f"28.10: «Да — вернуть» не сняло метку или не подняло: {info} {e.calls()}")
+    check("wr-dir: метка «остановлено вами» снята (ваш ответ «Да — вернуть wr-dir»" in e.alerts()
+          and "[metis-0605]): вернуть wr-dir — поднято" in e.alerts(), f"28.10: тревоги возврата: {e.alerts()[-500:]}")
+    e.agents([bg("wr-dir", "working", "wrwrwrwr-1", pid=None)])
+    _zeus_answer(e, T0 + 200, "[metis-0601] Запустить wr-dir?", "Да — запустить wr-dir")
+    e.run("watch", t=T0 + 260)
+    check(len(_bgs(e, "wr-dir")) == 1 and "уже работает" in e.alerts(), f"0523: живую подняли второй раз: {e.calls()}")
+    _zeus_answer(e, T0 + 300, "[metis-0602] Перезапустить wr-dir?", "Да — перезапустить wr-dir")
+    e.run("watch", t=T0 + 360, extra={"FAKE_STOP_MARK": "1"})
+    check(["stop", "wrwrwrwr"] in e.calls() and len(_bgs(e, "wr-dir")) == 2,
+          f"0523: «перезапустить» не остановило и не подняло: {e.calls()}")
+    wl = [r[-1] for r in _start_rows(e) if r[1:2] == ["word-launch"]]
+    check(wl[-1] == "перезапущено", f"0523: итог перезапуска: {wl}")
+
+
+def test_lock_symlink_refused_0523():
+    """metis-0523, ревью безопасности: окно Зевса пишет только в STATE/hq-rw; замок имени там, подменённый ссылкой или
+    жёсткой ссылкой, не берётся (O_NOFOLLOW, fstat: st_nlink == 1) — запись не уходит, start не поднимает; метка сброса
+    самозапуска по ссылке не пишется; ждущий замок в hq-rw окно не держит дольше HQ_LOCK_WAIT."""
+    import fcntl
+    e = Env()
+    e.direction("ln-dir")
+    hl = e.st("hq-rw", "locks")
+    os.makedirs(hl, exist_ok=True)
+    victim = e.st("victim.txt")
+    with open(victim, "w") as fh:
+        fh.write("целый\n")
+    os.symlink(victim, os.path.join(hl, "start-ln-dir.lock"))
+    r = e.run("start", "ln-dir", t=T0)
+    check(not _bgs(e, "ln-dir") and open(victim).read() == "целый\n",
+          f"0523: замок по ссылке взят: {r.returncode} {e.calls()} {r.stderr[-200:]}")
+    os.remove(os.path.join(hl, "start-ln-dir.lock"))
+    os.link(victim, os.path.join(hl, "start-ln-dir.lock"))
+    r = e.run("start", "ln-dir", t=T0)
+    check(not _bgs(e, "ln-dir") and "блокировка start-ln-dir не взята" in r.stderr and open(victim).read() == "целый\n",
+          f"0523: замок по жёсткой ссылке взят: {r.returncode} {e.calls()} {r.stderr[-200:]}")
+    # замки прохода — не в hq-rw
+    e.run("watch", t=T0)
+    check(os.path.exists(e.st("locks", "watch.lock")) and not os.path.exists(os.path.join(hl, "watch.lock")),
+          "0523: замок прохода не в STATE/locks")
+    # метка сброса самозапуска: ссылка на её месте снимается, чужой файл цел; ждущий замок имени, занятый «окном», —
+    # не дольше HQ_LOCK_WAIT
+    ar = e.st("hq-rw", "autostart-reset")
+    os.makedirs(ar, exist_ok=True)
+    os.symlink(victim, os.path.join(ar, "ln-dir"))
+    os.remove(os.path.join(hl, "start-ln-dir.lock"))
+    with open(os.path.join(hl, "start-ln-dir.lock"), "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        r = e.run(LIB, t=T0, argv=[PY311, "-I", "-c", _HQ_RW_PROBE])
+    check(open(victim).read() == "целый\n" and not os.path.islink(os.path.join(ar, "ln-dir"))
+          and open(os.path.join(ar, "ln-dir")).read() == "метка\n", f"0523: метка сброса ушла по ссылке: {r.stderr[-300:]}")
+    out = (r.stdout.strip().splitlines() or [""])[-1].split()
+    check(out[:1] == ["False"] and len(out) == 2 and float(out[1]) < 5,
+          f"0523: ждущий замок в hq-rw: {r.stdout!r} {r.stderr[-300:]}")
+
+
+def test_hq_rw_bad_entries_0523():
+    """Ревью безопасности (metis-0523): подложенная в STATE/hq-rw запись — FIFO, папка, ссылка на месте замка, файл на
+    месте папки autostart-reset — замок не берётся с предупреждением, start выходит с кодом 1, плановый проход и
+    resume не падают (ELOOP/ENXIO/EISDIR/ENOTDIR → UnsafeFile)."""
+    e = Env()
+    e.direction("bd-dir")
+    hl = e.st("hq-rw", "locks")
+    os.makedirs(hl, exist_ok=True)
+    p = os.path.join(hl, "start-bd-dir.lock")
+    for kind in ("fifo", "dir", "link"):
+        if os.path.islink(p) or os.path.isfile(p) or (os.path.exists(p) and not os.path.isdir(p)):
+            os.remove(p)
+        elif os.path.isdir(p):
+            os.rmdir(p)
+        if kind == "fifo":
+            os.mkfifo(p)
+        elif kind == "dir":
+            os.mkdir(p)
+        else:
+            os.symlink(e.st("nowhere"), p)
+        r = e.run("start", "bd-dir", t=T0)
+        check(r.returncode == 1 and "Traceback" not in r.stderr and "блокировка start-bd-dir не взята" in r.stderr
+              and "блокировка имени не взята" in r.stderr.strip().splitlines()[-1] and not _bgs(e, "bd-dir"),
+              f"0523: {kind} на месте замка: {r.returncode} {r.stderr[-300:]}")
+    os.mkdir(os.path.join(hl, "wake.lock"))
+    r = e.run("watch", t=T0)
+    check(r.returncode == 0 and "Traceback" not in r.stderr + r.stdout and "упала" not in e.alerts(),
+          f"0523: папка на месте wake.lock уронила проход: {r.returncode} {r.stderr[-300:]} {e.alerts()[-300:]}")
+    open(e.st("hq-rw", "autostart-reset"), "w").write("x")
+    r = e.run("resume", "bd-dir", t=T0)
+    check("Traceback" not in r.stderr and "метка autostart-reset/bd-dir не записана" in r.stderr,
+          f"0523: файл на месте autostart-reset уронил resume: {r.returncode} {r.stderr[-300:]}")
+
+
+def test_stop_lock_busy_fail_closed_0523():
+    """Ревью безопасности (metis-0523): замок имени в hq-rw занят дольше PANTHEON_HQ_LOCK_WAIT — pantheon stop не
+    останавливает вслепую: код 1, причина последней строкой, сессии не тронуты, метка «остановлено вами» стоит (новые
+    запуски не пойдут), тревога. Замок свободен — stop останавливает."""
+    import fcntl
+    e = Env()
+    e.direction("sb-dir")
+    e.agents([bg("sb-dir", "working", "sbsbsbsb-1", pid=52)])
+    hl = e.st("hq-rw", "locks")
+    os.makedirs(hl, exist_ok=True)
+    with open(os.path.join(hl, "start-sb-dir.lock"), "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        r = e.run("stop", "sb-dir", t=T0, extra={"PANTHEON_HQ_LOCK_WAIT": "0.3"})
+    check(r.returncode == 1 and ["stop", "sbsbsbsb"] not in e.calls() and os.path.exists(e.st("stopped", "sb-dir"))
+          and "не остановлена" in r.stderr.strip().splitlines()[-1] and "sb-dir не остановлена" in e.alerts(),
+          f"0523: stop при занятом замке: {r.returncode} {e.calls()} {r.stderr[-300:]}")
+    r = e.run("stop", "sb-dir", t=T0 + 10)
+    check(r.returncode == 0 and ["stop", "sbsbsbsb"] in e.calls(), f"0523: stop при свободном замке: {r.stderr[-300:]}")
+
+
+_HQ_RW_PROBE = r"""
+import importlib.util, sys, time
+spec = importlib.util.spec_from_file_location("pantheon_lib", sys.argv[1])
+P = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(P)
+P.hq_mark("autostart-reset", "ln-dir", "метка\n")
+P.HQ_LOCK_WAIT = 0.5
+t0 = time.monotonic()
+with P.lock("start-ln-dir") as got:
+    print(got, round(time.monotonic() - t0, 2))
+"""
 
 
 def test_pauses():
@@ -1221,8 +1472,8 @@ def test_pauses():
 
 
 def _night_now(e):
-    """Ночь идёт в T0 и без ответа пропущена: вопрос за 2 ч, срок за 30 мин, ночь с T0 − 1 ч до T0 + 3 ч (по местному
-    времени машины, на которой идут тесты)."""
+    """Ночь идёт в T0: вечер (ask_at) за 2 ч, ночь с T0 − 1 ч до T0 + 3 ч (по местному времени машины, на которой идут
+    тесты); вопроса на ночь нет ([sb-simplify] п. 10), repeat и deadline не действуют."""
     f = lambda s: time.strftime("%H:%M", time.localtime(T0 + s))  # noqa: E731
     open(os.path.join(e.pantheon, "schedule.toml"), "w").write(
         f'primary_host = "mac-a"\n[defaults]\nlimit_max_pct = 70\n[night]\nask_at = "{f(-7200)}"\nrepeat = []\n'
@@ -1256,8 +1507,11 @@ def test_week_limit_blocks_wake_after_pause():
     остаётся; неделя снова зелёная днём — продолжена."""
     for night in (False, True):
         e = Env()
-        if night:
+        if night:  # ночь идёт и закрыта (пропущена): вопроса больше нет, состояние ночи — готовое
             _night_now(e)
+            os.makedirs(e.st("night"), exist_ok=True)
+            json.dump({"answer": "да", "skipped": "проба: ночь закрыта"},
+                      open(e.st("night", time.strftime("%Y-%m-%d", time.localtime(T0 - 7200)) + ".json"), "w"))
         e.direction("p9-dir")
         e.agents([bg("p9-dir", "working", "p9p9p9p9-1", pid=43)])
         e.run("pause", "p9-dir", "--reason", "limit", "лимит 80", t=T0)
@@ -1270,7 +1524,7 @@ def test_week_limit_blocks_wake_after_pause():
         check(not any("p9p9p9p9-1" in c for c in e.calls() if "--resume" in c), f"{what} — сессия продолжена: {e.calls()}")
         if night:
             st = json.load(open(e.st("night", time.strftime("%Y-%m-%d", time.localtime(T0 - 7200)) + ".json")))
-            check(st.get("skipped"), f"ночь без ответа не пропущена: {st}")
+            check(st.get("skipped") and not st.get("opened_at"), f"пропущенная ночь открылась: {st}")
         else:
             e.week_pct = 10.0
             e.run("watch", t=T0 + 120, extra={"PANTHEON_FAKE_LIMIT": "20"})
@@ -1278,15 +1532,12 @@ def test_week_limit_blocks_wake_after_pause():
             check(any("p9p9p9p9-1" in c for c in e.calls() if "--resume" in c), "зелёная — сессия не продолжена")
 
 
-NIGHT_TITLE = "Запустить сегодня на ночь выполнение задач?"
-
-
 def _bgs(e, who=None):
     return [c for c in e.calls() if c[:1] == ["--bg"] and (who is None or any(who in x for x in c))]
 
 
 def _pack_night(e, name="athena-p"):
-    """Ночь как в _night_now (вопрос T0 − 2 ч, ночь с T0 − 1 ч) и ночная пачка направления name на утро после вечера."""
+    """Ночь как в _night_now (вечер с T0 − 2 ч, ночь с T0 − 1 ч) и ночная пачка направления name на утро после вечера."""
     _night_now(e)
     e.direction(name)
     evening = time.strftime("%Y-%m-%d", time.localtime(T0 - 7200))
@@ -1295,44 +1546,62 @@ def _pack_night(e, name="athena-p"):
     e.pack = os.path.join(e.pantheon, e.pack_rel)
     open(e.pack, "w", encoding="utf-8").write(f"# Ночная пачка {name}\n\n| # | Задача |\n|---|---|\n| 1 | athena-0300 |\n")
     e.night_file = e.st("night", evening + ".json")
+    e.evening = evening
 
 
-def _say_yes(e, t):
-    st = json.load(open(e.night_file))
-    rec = {"time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t)), "kind": "answer", "id": st["card_id"],
-           "answer": st["options"][0], "question": NIGHT_TITLE}
-    with open(e.st("owner-log", "board.jsonl"), "a") as fh:
-        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    return st
+def _night_yes(e, t, qid="metis-0700"):
+    """Ваш выбор «Да — ночь <дата>» на вопрос pantheon night ask о пачке e.pack (её sha256 сейчас)."""
+    sha = hashlib.sha256(open(e.pack, "rb").read()).hexdigest()
+    _zeus_answer(e, t, f"[{qid}] Ночь {e.evening}: пачка {e.pack_rel} sha256 {sha}?", f"Да — ночь {e.evening}")
 
 
-def test_night_question_without_zeus_0284():
-    """Вопрос ночи задаёт плановый проход сам: Зевса нет (сессий нет вовсе) — в ask_at карточка во входящих и
-    уведомление владельцу, никого для этого не поднимают."""
-    e = Env()
-    _night_now(e)
-    e.agents([])
-    r = e.run("watch", t=T0 - 7200)
-    st = json.load(open(e.st("night", time.strftime("%Y-%m-%d", time.localtime(T0 - 7200)) + ".json")))
-    box = os.path.join(e.pantheon, "inbox", "tasks")
-    cards = [open(os.path.join(box, f), encoding="utf-8").read() for f in os.listdir(box)] if os.path.isdir(box) else []
-    check(st.get("card_id") and any(st["card_id"] in f and NIGHT_TITLE in f for f in cards),
-          f"без Зевса нет карточки: {st} {cards} {r.stderr[-300:]}")
-    check(NIGHT_TITLE in e.sent(), f"без Зевса нет уведомления: {e.sent()[-300:]}")
-    check(not _bgs(e), f"ради вопроса кого-то подняли: {e.calls()}")
-
-
-def test_night_pack_starts_once_0284():
-    """«Да» одобряет пачку: в начале ночи плановый проход поднимает её координатора с путём пачки в задании — один
-    раз; отметки владельца у других направлений ночью с пачкой никого не поднимают."""
+def test_night_only_by_answer_0523():
+    """Решение владельца 28.10 (вариант Б): вечером плановый проход вопроса не задаёт — ни карточки во входящих, ни
+    уведомления; без вашего ответа о пачке ночь не открыта: ночью ни пачку, ни задачу с отметкой не поднимают. Ответ
+    на напечатанный `pantheon night ask` вопрос, но с пачкой, изменённой после него, — отказ и тревога."""
     e = Env()
     _pack_night(e)
     e.direction("athena-q")
     e.task("athena-0301", "athena-q")
-    e.run("watch", t=T0 - 7200)                       # вопрос
-    st = _say_yes(e, T0 - 7100)
-    check(e.pack_rel in st["options"][0] or "athena-p/night-" in st["options"][0], f"вопрос без пачки: {st['options']}")
-    e.run("watch", t=T0 - 7000)                       # «Да» принят, разовый запуск пачки записан
+    e.agents([])
+    r = e.run("watch", t=T0 - 7200)
+    st = json.load(open(e.night_file)) if os.path.exists(e.night_file) else {}
+    box = os.path.join(e.pantheon, "inbox", "tasks")
+    cards = os.listdir(box) if os.path.isdir(box) else []
+    check(st.get("answer") is None and not st.get("packs") and not st.get("card_id") and not cards,
+          f"вечер: {st} {cards} {r.stderr[-300:]}")
+    check("на ночь" not in e.sent(), f"уведомление о ночи: {e.sent()[-300:]}")
+    e.board("athena-0301", T0 - 3650)
+    e.run("watch", t=T0 - 3500)
+    e.run("watch", t=T0 - 3400)
+    st = json.load(open(e.night_file)) if os.path.exists(e.night_file) else {}
+    check(not _bgs(e) and not st.get("opened_at"), f"ночь без ответа — кого-то подняли: {e.calls()} {st}")
+    # pantheon night ask печатает вопрос; ответ на него, а пачку потом изменили — не одобрена
+    r = e.run("night", "ask", "metis-0710", "athena-p", e.evening, t=T0 - 3300)
+    q = r.stdout.splitlines()[0][len("вопрос: "):] if r.stdout else ""
+    check(r.returncode == 0 and q.startswith(f"[metis-0710] Ночь {e.evening}: пачка {e.pack_rel} sha256 "),
+          f"night ask: {r.returncode} {r.stdout!r} {r.stderr[-300:]}")
+    _zeus_answer(e, T0 - 3290, q, f"Да — ночь {e.evening}")
+    open(e.pack, "a", encoding="utf-8").write("| 2 | athena-0399 | дописано после вопроса |\n")
+    e.run("watch", t=T0 - 3200)
+    st = json.load(open(e.night_file))
+    check(not _bgs(e) and not st.get("packs") and "изменилась после вашего ответа" in e.alerts(),
+          f"изменённую после вопроса пачку одобрили: {st} {e.calls()} {e.alerts()[-300:]}")
+    check(e.run("night", "ask", "metis-0710", "nosuch-dir", t=T0).returncode == 2, "night ask без пачки — не код 2")
+
+
+def test_night_pack_starts_once_0284():
+    """Пачка с вашим ответом «Да — ночь» одобрена: в начале ночи плановый проход поднимает её координатора с путём
+    пачки в задании — один раз; отметки владельца у других направлений ночью с пачкой никого не поднимают."""
+    e = Env()
+    _pack_night(e)
+    e.direction("athena-q")
+    e.task("athena-0301", "athena-q")
+    _night_yes(e, T0 - 7300)
+    e.run("watch", t=T0 - 7200)                       # вечер: пачка одобрена вашим ответом, разовый запуск записан
+    st = json.load(open(e.night_file))
+    check([x["path"] for x in st.get("packs") or []] == [e.pack_rel], f"пачка не зафиксирована: {st}")
+    e.run("watch", t=T0 - 7000)
     e.run("watch", t=T0 - 3700)                       # до начала ночи
     check(not _bgs(e), f"пачку подняли до ночи: {e.calls()}")
     e.board("athena-0301", T0 - 3650)                 # владелец отметил задачу другого направления
@@ -1350,17 +1619,17 @@ def test_night_pack_starts_once_0284():
 
 
 def test_night_pack_changed_not_started_0284():
-    """Пачка, изменённая после «Да», не запускается: запись гаснет, тревога и уведомление."""
+    """Пачка, изменённая после одобрения вечером, не запускается: запись гаснет, тревога и уведомление."""
     e = Env()
     _pack_night(e)
+    _night_yes(e, T0 - 7300)
     e.run("watch", t=T0 - 7200)
-    _say_yes(e, T0 - 7100)
     e.run("watch", t=T0 - 7000)
-    open(e.pack, "a", encoding="utf-8").write("| 2 | athena-0399 | дописано после «Да» |\n")
+    open(e.pack, "a", encoding="utf-8").write("| 2 | athena-0399 | дописано после фиксации |\n")
     e.run("watch", t=T0 - 3500)
     e.run("watch", t=T0 - 3400)
     check(not _bgs(e), f"изменённую пачку подняли: {e.calls()}")
-    check("изменилась после «Да»" in e.alerts(), f"нет тревоги об изменённой пачке: {e.alerts()[-400:]}")
+    check("изменилась после фиксации" in e.alerts(), f"нет тревоги об изменённой пачке: {e.alerts()[-400:]}")
     check("не состоялся" in e.sent() or os.path.exists(e.st("notify.json")), "нет уведомления об изменённой пачке")
 
 
@@ -1437,25 +1706,21 @@ def test_oneshot_week_gate_0284():
     check(_oneshot_rec(e, oid)["done_at"], "запущенная запись не погашена")
 
 
-def test_red_memory_defers_oneshot_0261():
-    """metis-0261 А: красный замер памяти (pantheon start → код 5) — не сбой разового запуска: запись остаётся в очереди
-    с причиной, не гасится, уведомления «не вышел» нет; память пришла в норму — запуск идёт."""
+def test_red_memory_warns_oneshot_0523():
+    """[sb-simplify] п. 5 (metis-0523; было metis-0261 А — «отложено»): красный замер памяти разовый запуск не держит —
+    запуск в том же проходе, запись погашена, в тревогах — предупреждение о памяти, а не «ждёт»."""
     e, oid = _oneshot_env()
     e.run("watch", t=T0 + 660, extra={"PANTHEON_FAKE_SWAP": "9"})
-    check(not _bgs(e), f"запуск при красной памяти: {e.calls()}")
+    check(len(_bgs(e, "athena-a")) == 1, f"0523: красная память отложила разовый запуск: {e.calls()}")
     rec = _oneshot_rec(e, oid)
-    check(not rec["done_at"] and "красной зоне" in (rec["wait"] or "") and not rec["result"], f"запись не ждёт: {rec}")
-    check("не вышло" not in e.alerts() and "не вышел" not in (open(e.notify).read() if os.path.exists(e.notify) else ""),
-          f"красная память засчитана сбоем: {e.alerts()[-300:]}")
-    e.run("watch", t=T0 + 720)
-    check(len(_bgs(e, "athena-a")) == 1, f"память в норме, запуска нет: {e.calls()}")
-    check(_oneshot_rec(e, oid)["done_at"], "запущенная запись не погашена")
+    check(rec["done_at"] and rec["result"] == "запущен" and not rec.get("wait"), f"0523: запись не погашена: {rec}")
+    check("красной памяти" in e.alerts() and "предупреждение" in e.alerts(),
+          f"0523: нет предупреждения о памяти: {e.alerts()[-300:]}")
 
 
-def test_red_memory_defers_zeus_oneshot_0261():
-    """metis-0261 А (ревью argus-b): запись, поставленная `--at --from zeus` со словом владельца, при исполнении
-    плановым проходом красной памяти не обходит: слово проверено при постановке, а запуск ждёт нормы (код 5,
-    запись не гасится)."""
+def test_red_memory_warns_zeus_oneshot_0523():
+    """metis-0523: запись `--at --from zeus` со словом владельца при постановке исполняется плановым проходом и при
+    красной памяти (слово проверено при постановке, память — только предупреждение)."""
     e = Env()
     e.direction("athena-a")
     with open(e.st("owner-log", "zeus.md"), "w") as fh:
@@ -1466,28 +1731,25 @@ def test_red_memory_defers_zeus_oneshot_0261():
     oid = r.stdout.split("разовый запуск ")[1].split(":")[0]
     check(_oneshot_rec(e, oid)["by"] == "zeus", f"origin не сохранён: {_oneshot_rec(e, oid)}")
     e.run("watch", t=T0 + 660, extra={"PANTHEON_FAKE_SWAP": "9"})
-    check(not _bgs(e) and not _oneshot_rec(e, oid)["done_at"], f"красная память обойдена словом при постановке: {e.calls()}")
-    e.run("watch", t=T0 + 720)
-    check(len(_bgs(e, "athena-a")) == 1, f"память в норме, запуска нет: {e.calls()}")
+    check(len(_bgs(e, "athena-a")) == 1 and _oneshot_rec(e, oid)["done_at"],
+          f"0523: красная память отложила запись со словом: {e.calls()}")
 
 
-def test_red_memory_defers_autostart_0261():
-    """metis-0261 А: красный замер (код 5 от pantheon start) — самозапуск не считает сбоем: fails нет, паузы-backoff нет,
-    gave_up нет, повтор на следующем проходе сразу, как память пришла в норму."""
-    e = Env()
-    e.direction("hermes-x")
-    e.task("hermes-0001", "hermes-x")
-    e.run("watch", t=T0)
-    e.board("hermes-0001", T0 + 10)
-    for i in range(4):  # больше AUTOSTART_FAILS_MAX: сбоями это не считается
-        e.run("watch", t=T0 + 60 + 120 * i, extra={"PANTHEON_FAKE_SWAP": "9"})
-    st = json.load(open(e.st("autostart.json"))).get("hermes-x") or {}
-    check(not _bgs(e), f"запуск при красной памяти: {e.calls()}")
-    check(not st.get("fails") and not st.get("gave_up") and not st.get("next") and not st.get("pending"),
-          f"красная память засчитана сбоем или паузой: {st}")
-    check("сбой" not in e.alerts() and "остановлен" not in e.alerts(), f"тревога о сбое: {e.alerts()[-300:]}")
-    e.run("watch", t=T0 + 60 + 120 * 4)
-    check(len(_bgs(e, "hermes-x")) == 1, f"память в норме, запуска нет: {e.calls()}")
+def test_red_memory_warns_autostart_0523():
+    """metis-0523: красный замер (своп 9 ГБ, давление «предупреждение») самозапуск не держит — запуск в первом же
+    проходе, сбоя и паузы нет."""
+    for label, ex in (("своп", {"PANTHEON_FAKE_SWAP": "9"}), ("давление", {"PANTHEON_FAKE_PRESSURE": "2"})):
+        e = Env()
+        e.direction("hermes-x")
+        e.task("hermes-0001", "hermes-x")
+        e.run("watch", t=T0)
+        e.board("hermes-0001", T0 + 10)
+        e.run("watch", t=T0 + 60, extra=ex)
+        st = json.load(open(e.st("autostart.json"))).get("hermes-x") or {}
+        check(len(_bgs(e, "hermes-x")) == 1, f"0523 {label}: самозапуск отложен по памяти: {e.calls()}")
+        check(not st.get("fails") and st.get("pending"), f"0523 {label}: состояние самозапуска: {st}")
+        check("самозапуск: hermes-x по задачам hermes-0001 — запущен" in e.alerts(),
+              f"0523 {label}: нет строки самозапуска: {e.alerts()[-300:]}")
 
 
 def test_oneshot_pack_and_hand_same_minute_0284():
@@ -1512,7 +1774,7 @@ def test_oneshot_pack_and_hand_same_minute_0284():
     open(pk, "a").write("дописано\n")
     e.run("watch", t=T0 + 660)
     rec = _oneshot_rec(e, pid)
-    check(rec["done_at"] and "изменилась после «Да»" in rec["result"], f"sha пачки не сверена: {rec}")
+    check(rec["done_at"] and "изменилась после фиксации" in rec["result"], f"sha пачки не сверена: {rec}")
     got = _bgs(e, "athena-a")
     check(len(got) == 1 and any("ручное" in x for x in got[0]) and not any("текст пачки" in x for x in got[0]),
           f"ручная запись не ушла или ушла пачка: {e.calls()}")
@@ -1545,6 +1807,25 @@ def test_status_long_and_swap_keep():
     rows = [json.loads(ln) for ln in open(e.st("swap.jsonl"))]
     check(len(rows) == 2 and rows[-1].get("working") == 1, f"замеры swap 15 дней: {rows}")
     check("работают сессий: 1" in e.alerts() and "claude attach" in e.alerts(), "тревога swap")
+
+
+def test_culprits_wired_0568():
+    """metis-0568: дежурный в красной зоне зовёт проверку «виновники памяти» — строка с таблицей в alerts.md, одна на
+    эпизод; в зелёной зоне и без подмены процессов (тесты не читают настоящий ps) строки нет. Подробно — test_culprits.py."""
+    e = Env()
+    folder = e.direction("athena-c")
+    gone = os.path.join(folder, ".claude", "worktrees", "agent-gone")
+    procs = json.dumps([{"pid": 4242, "ppid": 1, "age": 5 * 3600, "rss": 900 * 1024, "args": "node zprobe1.ts",
+                         "cwd": gone}])
+    e.run("watch", t=T0, extra={"PANTHEON_FAKE_SWAP": "9"})
+    check("виновники памяти" not in e.alerts(), "0568: без подмены процессов настоящий ps в тестах не читается")
+    e.run("watch", t=T0 + 60, extra={"PANTHEON_FAKE_PROCS": procs})
+    check("виновники памяти" not in e.alerts(), "0568: зелёная зона — без строки")
+    e.run("watch", t=T0 + 120, extra={"PANTHEON_FAKE_SWAP": "9", "PANTHEON_FAKE_PROCS": procs})
+    e.run("watch", t=T0 + 420, extra={"PANTHEON_FAKE_SWAP": "9", "PANTHEON_FAKE_PROCS": procs})
+    a = e.alerts()
+    check(a.count("виновники памяти") == 1 and "node zprobe1.ts (pid 4242) → athena-c, worktree agent-gone" in a
+          and "проверка «виновники памяти» упала" not in a, f"0568: строка виновников в тревогах: {a[-600:]}")
 
 
 def test_owner_logs_daily():
@@ -1967,7 +2248,8 @@ def test_watch_and_wake_second_instance_exits_0184():
     e.agents([{"id": "dead0001", "sessionId": "dead0001-x", "name": "g-dir", "state": "failed", "kind": "background",
                "cwd": folder, "startedAt": (T0 - 7200) * 1000}])
     os.makedirs(e.st("locks"), exist_ok=True)
-    with open(e.st("locks", "watch.lock"), "a") as fw, open(e.st("locks", "wake.lock"), "a") as fk:
+    os.makedirs(e.st("hq-rw", "locks"), exist_ok=True)
+    with open(e.st("locks", "watch.lock"), "a") as fw, open(e.st("hq-rw", "locks", "wake.lock"), "a") as fk:
         fcntl.flock(fw, fcntl.LOCK_EX)
         fcntl.flock(fk, fcntl.LOCK_EX)
         rw = e.run("watch", t=T0)
@@ -2184,8 +2466,9 @@ def test_infra_check_corpus_section():
 
 
 def test_infra_check_hooks_tomllib():
-    """infra-check: python3 хуков без tomllib — строка НЕТ и тревога «guard не читает policy.toml»; с tomllib —
-    строка «готово» и тревога снята (metis-0182: иначе пустой corpus-role на Python до 3.11 молчит)."""
+    """infra-check: запускатель хуков hooks/python.sh без Python 3.11+ — строка НЕТ и тревога; нашёл — строка
+    «готово» и тревога снята (metis-0571; раньше — python3 хуков без tomllib, metis-0182). Без Python запускатель вне
+    хука молчит с кодом 0 — это тоже НЕТ."""
     import importlib.util
     sys.path.insert(0, os.path.join(ROOT, "lib"))
     import importlib
@@ -2201,29 +2484,35 @@ def test_infra_check_hooks_tomllib():
         p.MANAGED, p.HOME, p.guard_script, p.agents_all = os.path.join(d, "none.json"), d, (lambda: ""), (lambda: [])
         p.alert_once = lambda key, value, text, *a, **k: calls.append(("alert", key, text))
         p.clear_once = lambda key: calls.append(("clear", key))
-        line = "python3 хуков читает policy.toml"
-        for rc, name in ((1, "без tomllib"), (0, "с tomllib")):
-            fake = os.path.join(d, f"py{rc}")
+        line = "запускатель хуков находит Python 3.11+"
+        for body, good, name in (("exit 0", False, "нет 3.11+ (молчит, код 0)"), ("exit 1", False, "сбой"),
+                                 ('echo "$*" > /dev/null; echo ok', True, "нашёл 3.11+")):
+            fake = os.path.join(d, f"launcher-{len(calls)}-{good}.sh")
             with open(fake, "w") as fh:
-                fh.write(f"#!/bin/sh\nexit {rc}\n")
-            os.chmod(fake, 0o755)
-            w.HOOK_PYTHON = fake
+                fh.write(f"#!/bin/sh\n{body}\n")
+            w.HOOK_LAUNCHER = fake
             calls.clear()
             _, lines = w.infra_check()
-            alerted = any(c[0] == "alert" and c[1] == "hooks-python-no-tomllib" and "policy.toml" in c[2]
+            alerted = any(c[0] == "alert" and c[1] == "hooks-python-no-tomllib" and "python@3.14" in c[2]
                           for c in calls)
-            if rc:
+            if not good:
                 check(any(x.startswith("НЕТ") and line in x for x in lines) and alerted,
                       f"infra-check, {name}: нет строки НЕТ или тревоги ({lines}, {calls})")
             else:
                 check(any(x.startswith("готово") and line in x for x in lines) and not alerted
                       and ("clear", "hooks-python-no-tomllib") in calls,
                       f"infra-check, {name}: строка НЕТ, тревога или тревога не снята ({lines}, {calls})")
-        w.HOOK_PYTHON = os.path.join(d, "нет-такого")
+        w.HOOK_LAUNCHER = os.path.join(d, "нет-такого")
         calls.clear()
         _, lines = w.infra_check()
         check(any(x.startswith("НЕТ") and line in x for x in lines),
-              f"infra-check, python3 не найден: нет строки НЕТ ({lines})")
+              f"infra-check, запускатель не найден: нет строки НЕТ ({lines})")
+        # настоящий запускатель плагина: тест идёт на 3.11+, значит и он находит 3.11+
+        w.HOOK_LAUNCHER = None
+        calls.clear()
+        _, lines = w.infra_check()
+        check(any(x.startswith("готово") and line in x for x in lines),
+              f"infra-check, настоящий hooks/python.sh: нет строки «готово» ({lines})")
     finally:
         for k, v in saved.items():
             setattr(p, k, v)

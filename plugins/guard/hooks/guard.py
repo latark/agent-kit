@@ -6,7 +6,8 @@ PostToolUse (Bash:
 журнал запора слияния) и Stop плагина guard (hooks/hooks.json). Код запора слияния и protect-config — в merge_gate.py
 и protect_config.py рядом (ядро защит, Д3).
 Правила:
-  dev-server   — не запускать dev-сервер (next dev, npm/pnpm/yarn/bun run dev, turbo dev);
+  dev-server   — вашим сессиям без роли: не запускать dev-сервер (next dev, npm/pnpm/yarn/bun run dev, turbo dev);
+                 окна ролей и их субагенты — можно ([sb-simplify] 27.10);
   attribution  — никаких пометок об авторстве Claude в коммитах, тегах и PR;
   cdp          — не писать свой код подключения к браузеру мимо ~/.claude/tools/cdp-daemon.mjs;
   nextjs       — после правок в Next.js-проекте с запущенным dev-сервером проверить get_errors;
@@ -17,7 +18,14 @@ PostToolUse (Bash:
   launchd-env  — роли не меняют launchd: белый список launchctl только для чтения (list, print, getenv, blame, version…),
                  остальное — setenv, bootstrap, load, submit, kickstart, asuser и неизвестное — отказ (окружение тика);
                  swiftc — только абсолютным /usr/bin/swiftc, голое имя и другой путь — отказ (metis-0298);
-  domain       — субагент, тиммейт, координатор и сессия мастерской пишут только в своё направление;
+  domain       — зоны направлений сняты ([sb-simplify]): роли не пишут в чужую память ролей, Edit/Write — в ~/.*
+                 и ~/Library мимо protect-config; palamedes пишет только черновики, momus — только свой отчёт;
+  draft-role   — исполнитель без кода palamedes (субагент и главная сессия `--agent palamedes`, metis-0469) пишет
+                 только черновик: Write, Edit, MultiEdit в ~/ai/pantheon/directions/<своё направление>/drafts/**, из окна
+                 Пританея (PANTHEON_ROLE=hq) — в drafts/ любого направления из domains.json; код проектов, свой и чужой
+                 STATUS.md, планы, любые inbox/, ~/ai/knowledge, ~/.claude, память и временные папки — отказ; из
+                 инструментов, которые видит guard, — только Read, Grep, Glob и эти три: Bash, NotebookEdit, WebFetch,
+                 Agent, Task, Skill — отказ (MCP и WebSearch закрывает список tools: в шапке роли);
   pantheon-acl — запись в ~/ai/pantheon по карте прав; ~/.local/state/pantheon — ни одной роли; файлы задач
                  (directions/*/tasks/, inbox/tasks/) — ни одной роли, штабу тоже: только `pantheon task`; доска
                  ~/ai/pantheon-view и журналы ваших слов owner-log — ни одной сессии Claude, без роли тоже (metis-0044);
@@ -31,6 +39,8 @@ PostToolUse (Bash:
   hq-gh        — окну штаба gh pr — только с -R из [merge_repos], PR номером, без GH_* в команде и GH_REPO/GH_HOST/
                  GH_CONFIG_DIR в окружении, без обсуждений (--comments, --json comments) и без личного в команде;
                  слияние (gh pr merge, gh api …/merge) — отказ всегда (metis-0247);
+  hq-sessync   — окну Пританея `sessync find <слова> [-p имя] [-n число]` — только строкой целиком по строгому образцу
+                 (слова из букв, цифр и _.-); флаги, присваивание перед командой, обёртки, глобы — отказ (metis-0566);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
                  unread, context, download и сокет tg-readd — выгрузка только через `pantheon read request`; posts,
                  status, chats, folders, verify, split — можно; без PANTHEON_ROLE (плановый проход) — можно (metis-0267);
@@ -39,8 +49,9 @@ PostToolUse (Bash:
                 отказ любому инструменту; в окне — без файловых правок, Bash пишет только во временные папки, git —
                 только чтение в любой форме (`git -c … commit` тоже отказ), gh без слияния и записи, claude — plugin
                 list и agents, pantheon — выпуск (plugins update), сборка окон, restart без --force, alert и чтение
-                (metis-0245);
-  cdp-role     — демон браузера с вашими входами — только мастерская, /close — никому (SEC-13);
+                (metis-0245); git push и gh pr create|edit — только при свежей метке «да» на задачу окна
+                (`pantheon consent`, metis-0562), -R и --body-file в gh ограничены, сети у окна нет;
+  cdp-role    — демон браузера с вашими входами — никому из ролей (до Харона, metis-0077), /close — никому (SEC-13);
   push         — git push: координатор, лиды и мастерская, не в main и master; gh pr merge — главная сессия
                  координатора или его лид (hephaestus-/apollo-<направление> субагентом, metis-0054) в папках своего
                  направления (domains.json, [merge], [merge_client]); защиты — папки metis-pantheon и их
@@ -59,13 +70,10 @@ PostToolUse (Bash:
                  из Связки: только через посредника; штабу (hq) корпус закрыт целиком (metis-0021, 15.10). Имена
                  корпуса — раздел [corpus] policy.toml; раздела нет — правило ничего не узнаёт (metis-0182).
 
-Модель угроз (SEC-27, решено 14.10). guard ловит ошибки агента: запись не в своё направление, правку чужого
-файла штаба или защит, команду пульта не той ролью. От намеренного обхода и внедрённых инструкций он не
-защищает: что пишет программа изнутри (python script.py, node -e, make), он не видит, и свой разбор Bash мы
-больше не наращиваем. Настоящая граница — песочница macOS в окнах ролей (SEC-19, SEC-26) и управляемые
-настройки /Library/Application Support/ClaudeCode/managed-settings.json (SEC-28): их не перебить настройками
-проекта и модами. Находку проверки безопасности по разбору Bash разбираем как «ошибка агента или граница
-песочницы», а не как новый раунд обходов.
+Модель угроз (SEC-27, [sb-simplify] 27.10) — README guard, раздел «От чего защищает». Пять ущербов: ключи,
+браузер со входами владельца, main и ядро без ревью, действия наружу, удаление данных. Граница — песочница
+macOS окна роли и управляемые настройки; guard ловит ошибки агента, а не намеренный обход: что пишет программа
+изнутри (python script.py, node -e, make), он не видит, и разбор Bash ради новых обходов мы не наращиваем.
 
 Плагин guard из маркетплейса agent-kit (latark/agent-kit). Данные: ~/.local/state/pantheon/domains.json (собирает
 `pantheon domains build` из ~/ai/pantheon/directions.toml) и ~/.claude/pantheon/policy.toml (привилегии, правит
@@ -77,8 +85,8 @@ PostToolUse (Bash:
   --managed     — хук из управляемых настроек: то же, что плагин;
   --strict      — хук окна роли с onFailure: "block" (собирает `pantheon domains build`, SEC-29).
 При сбое (SEC-10, metis-0094) — во всех трёх режимах одинаково, обёртка run_hook: событие не JSON или не объект,
-исключение в проверке прав (domain, pantheon-acl, protect-config, private, cdp-role, push, terminal, hq-telegram,
-hq-gh, tg-role, chiron, hestia) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
+исключение в проверке прав (domain, draft-role, pantheon-acl, protect-config, private, cdp-role, push, terminal, hq-telegram,
+hq-gh, hq-sessync, tg-role, chiron, hestia) или tg-secret, сбой всего скрипта, свой срок DEADLINE (8 с, раньше таймаута хука) — выход 2 и причина в
 stderr: Claude Code блокирует вызов на любой версии, и в вашей сессии тоже. PostToolUse (журнал запора слияния):
 код 2 только показывает причину агенту — команда уже выполнена. Исключения: правила-подсказки (dev-server,
 attribution, cdp, nextjs) при сбое пропускают к остальным проверкам; сбой на Stop — выход 0 (код 2 не дал бы
@@ -98,7 +106,22 @@ import subprocess
 import sys
 import time
 
-OFF = {r.strip() for r in os.environ.get("GUARD_OFF", "").split(",") if r.strip()}
+if sys.version_info < (3, 11) and __name__ == "__main__":
+    # metis-0571: хуки зовут guard через hooks/python.sh (Python 3.11+). Голым python3 его зовут только настройки,
+    # собранные раньше: управляемые (ставятся через sudo, README «Управляемые настройки») и окна до пересборки. Там
+    # python3 бывает системным 3.9 — перезапуск тем же запускателем; нет 3.11+ — он сам откажет на PreToolUse.
+    # GUARD_PY_REEXEC — защита от круга, если запускатель вдруг вернул старый Python.
+    if os.environ.get("GUARD_PY_REEXEC"):
+        sys.stderr.write("guard: нужен Python 3.11+, запускатель hooks/python.sh дал %d.%d — действие остановлено.\n"
+                         % sys.version_info[:2])
+        os._exit(2)
+    os.environ["GUARD_PY_REEXEC"] = "1"
+    _me = os.path.realpath(__file__)
+    os.execv("/bin/sh", ["/bin/sh", os.path.join(os.path.dirname(_me), "python.sh"), _me] + sys.argv[1:])
+
+import tomllib  # noqa: E402
+
+OFF ={r.strip() for r in os.environ.get("GUARD_OFF", "").split(",") if r.strip()}
 HOME = os.path.expanduser("~")
 MODE = "strict" if "--strict" in sys.argv[1:] else "managed" if "--managed" in sys.argv[1:] else "plugin"
 FAIL_LOG = os.path.join(HOME, ".local", "state", "pantheon", "logs", "guard-failures.log")
@@ -193,18 +216,10 @@ def strip_quoted(cmd):
     return re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", " ", cmd)
 
 
-# Исключение (ROLE-23): разработчик и talos — субагенты в своей worktree (.claude/worktrees/…) — сами поднимают
-# dev-сервер на выделенном порту и гасят его после проверки. Ваши сессии и координаторы — по-прежнему нет.
-DEV_SERVER_ROLES = {"dev-opus", "dev-sonnet", "dev-haiku", "talos"}
-
-
-def in_worktree(event):
-    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
-    return "/.claude/worktrees/" in cwd + "/"
-
-
 def check_dev_server(cmd, event=None):
-    if event and event.get("agent_id") and event.get("agent_type") in DEV_SERVER_ROLES and in_worktree(event):
+    # окна ролей Пантеона и их субагенты поднимают dev-сервер сами ([sb-simplify] 27.10: порт и сокеты окну даёт
+    # песочница); подсказка остаётся только вашим сессиям без роли — правило из ~/.claude/CLAUDE.md
+    if os.environ.get("PANTHEON_ROLE") or (event and (event.get("agent_id") or is_pantheon_role(event.get("agent_type") or ""))):
         return None
     if DEV_SERVER.search(strip_quoted(cmd)):
         return (
@@ -601,10 +616,13 @@ def check_nextjs(event):
 # domain-coordinator, workshop, нижние роли); встроенные и ваши собственные субагенты живут по прежнему правилу domain.
 # Направление координатора guard узнаёт по папке, где запущена сессия (CLAUDE_PROJECT_DIR не меняется
 # всю сессию, в отличие от cwd), а не по agent_type: у всех семи координаторов он один.
-#   domain       — субагент, тиммейт и любая роль Пантеона, кроме штаба, пишут только в своё направление:
-#                  папки из domains.json (собирает `pantheon domains build` из ~/ai/pantheon/directions.toml),
-#                  временные папки, ~/.claude/agent-memory и agent_extra из policy.toml. Мастерская — папка
-#                  запуска. Записи в ~/ai/pantheon проверяет pantheon-acl.
+#   domain       — зоны по направлениям сняты ([sb-simplify], 27.10): Bash держит песочница окна. Осталось: роль
+#                  и субагент не пишут в чужую память ролей ~/.claude/agent-memory/<другая>/ и Edit/Write — в ~/.* и
+#                  ~/Library мимо protect-config (то, что он судит сам, ему и оставлено); ревизор (EXTRA_ONLY_ROLES,
+#                  momus) пишет только agent_extra своей роли, свою память и временные папки. Записи в ~/ai/pantheon
+#                  проверяет pantheon-acl. Исполнителю без кода (DRAFT_ONLY_ROLES, palamedes, metis-0469) вне
+#                  ~/ai/pantheon корней нет совсем, а в ~/ai/pantheon pantheon-acl пускает его только в
+#                  directions/<своё>/drafts/** (drafts_allowed): Write, Edit, MultiEdit.
 #   pantheon-acl — запись в ~/ai/pantheon по карте прав (STATE-06 карты решений; карта — здесь, в коде, а не в
 #                  domains.json: его собирают из реестра, который правит штаб); файлы задач (directions/*/tasks/,
 #                  inbox/tasks/) роли и любые субагенты, штаб тоже, меняют только командой `pantheon task`: прямой
@@ -651,6 +669,14 @@ PANTHEON_ROLES = {"hq", "domain-coordinator", "workshop", "chiron", "argus", "ta
 PANTHEON_ROLE_PREFIXES = ("hephaestus-", "apollo-")
 # ревизор: пишет только в agent_extra своей роли (policy.toml), свою память и временные папки — корней по cwd нет (0122)
 EXTRA_ONLY_ROLES = {"momus"}
+# исполнитель без кода (metis-0469): пишет только черновики — Write, Edit, MultiEdit в
+# ~/ai/pantheon/directions/<своё направление>/drafts/** (из окна Пританея — drafts/ любого направления из domains.json).
+# Код проектов, STATUS.md, inbox/, ~/ai/knowledge, ~/.claude, память и временные папки — нет; agent_extra не действует.
+# Инструменты — только DRAFT_TOOLS: Bash, NotebookEdit, WebFetch, Agent, Task, Skill — отказ (правило draft-role)
+DRAFT_ONLY_ROLES = {"palamedes"}
+DRAFT_TOOLS = {"Read", "Grep", "Glob", "Write", "Edit", "MultiEdit"}
+DRAFT_WRITE_TOOLS = {"Write", "Edit", "MultiEdit"}
+DRAFTS_DIR = "drafts"
 UNRESOLVED = "\0неразобранная-цель"
 # stop|resume|pause|restart — окна сессий (metis-0047); `pantheon jobs pause|resume` — другая команда (PANTHEON_JOB_ACTIONS)
 PANTHEON_PRIVILEGED = {"archive", "install", "uninstall", "commit", "start", "wake", "roles",
@@ -701,17 +727,18 @@ def load_domains():
 
 def load_policy():
     try:
-        import tomllib  # Python 3.11+; на старом Python guard работает без привилегий, а не падает
         with open(POLICY_FILE, "rb") as fh:
             return tomllib.load(fh)
-    except (ImportError, OSError, ValueError):
+    except (OSError, ValueError):
         return {}
 
 
 def is_pantheon_role(role):
     # ревизор тоже роль Пантеона: главная сессия `--agent momus` (agent_type есть, agent_id нет) иначе писала бы
-    # куда угодно — domain и protect-config судят только роли Пантеона и субагентов (metis-0177)
-    return role in PANTHEON_ROLES or role in EXTRA_ONLY_ROLES or role.startswith(PANTHEON_ROLE_PREFIXES)
+    # куда угодно — domain и protect-config судят только роли Пантеона и субагентов (metis-0177); так же palamedes
+    # (metis-0469)
+    return (role in PANTHEON_ROLES or role in EXTRA_ONLY_ROLES or role in DRAFT_ONLY_ROLES
+            or role.startswith(PANTHEON_ROLE_PREFIXES))
 
 
 def who(event):
@@ -2275,7 +2302,7 @@ def pantheon_cli(cmd, cwd):
 
 
 def task_targets(cmd, cwd):
-    """`pantheon task new|set|claim` в команде → направления, которые она меняет (None — не определить)."""
+    """`pantheon task new|set|claim|split` в команде → направления, которые она меняет (None — не определить)."""
     out = []
     for name, texts in bash_analysis(cmd, cwd)[1]:
         bases = ["pantheon" if x and os.path.basename(x.rstrip("/")).lower() in ("pantheon", "pantheon.py")
@@ -2291,7 +2318,7 @@ def task_targets(cmd, cwd):
         elif act == "new":
             d = [texts[i + 1] for i in range(2, len(texts) - 1) if texts[i] == "--direction"]
             out.append(d[-1] if d and d[-1] and re.fullmatch(r"[a-z0-9][a-z0-9-]*", d[-1]) else None)
-        elif act in ("set", "claim"):
+        elif act in ("set", "claim", "split"):
             tid = texts[2] if len(texts) > 2 else None
             hits = [os.path.basename(os.path.dirname(os.path.dirname(f)))
                     for f in glob.glob(os.path.join(PANTHEON, "directions", "*", "tasks", f"{tid}.md"))] \
@@ -2313,48 +2340,62 @@ def write_targets(event, tool, tool_input):
 
 
 def check_domain(event, tool, tool_input):
-    role, sub, pdir = who(event)
-    pantheon_role = is_pantheon_role(role)
-    if not sub and (not pantheon_role or role == "hq"):
+    # Зоны записи по направлениям сняты ([sb-simplify], «да» владельца 27.10): чужая папка проекта — не ущерб из
+    # пяти, запись в ядро, настройки, личное и журналы держат protect-config, private и pantheon-acl, а Bash —
+    # песочница окна. Остались чужая память ролей, Edit/Write в ~/.* и ~/Library мимо protect-config и роли с узкой
+    # работой: palamedes пишет черновики, momus — свой отчёт
+    role, sub, _ = who(event)
+    if not sub and (not is_pantheon_role(role) or role == "hq"):
+        return None
+    if role not in DRAFT_ONLY_ROLES and role not in EXTRA_ONLY_ROLES:
+        # память другой роли загружается в её контекст, а у Зевса и координаторов есть действия наружу
+        mem = os.path.join(HOME, ".claude", "agent-memory")
+        _, targets = write_targets(event, tool, tool_input)
+        bad = [p for p in targets if _inside(p, [mem]) and not (role and _inside(p, [os.path.join(mem, role)]))]
+        if bad:
+            return (f"Правило domain: роль «{role or 'субагент'}» пишет только в свою память "
+                    f"(~/.claude/agent-memory/{role or '<роль>'}/). Чужая: "
+                    f"{', '.join(p.replace(HOME, '~') for p in bad[:3])}.")
+        if tool != "Bash":
+            # Edit/Write песочница не держит, а настройки в HOME исполняются потом вне неё. Профили оболочки, ~/.ssh,
+            # настройки git, ~/.claude.json, ~/.local/bin, LaunchAgents судит protect-config (Метиде он их открывает),
+            # ~/.claude и состояние Пантеона — protect-config и pantheon-acl, кэш окна — свой у каждого окна. Здесь —
+            # остальное: ~/.config, ~/.npmrc, ~/Library/Application Support и т. п.
+            own = [os.path.join(HOME, ".claude"), STATE_DIR, os.path.join(HOME, "Library", "Caches", "pantheon-sandbox")]
+            own += protect_config.protected()
+            dot = [p for p in targets if p != UNRESOLVED and _inside(p, [HOME]) and not _inside(p, own) and (
+                os.path.relpath(p, HOME).startswith(".") or _inside(p, [os.path.join(HOME, "Library")]))]
+            if dot:
+                return (f"Правило domain: роль «{role or 'субагент'}» не пишет в настройки и служебные папки "
+                        f"HOME (~/.*, ~/Library): {', '.join(p.replace(HOME, '~') for p in dot[:3])}.")
         return None
     domains, policy = load_domains(), load_policy()
-    cwd, targets = write_targets(event, tool, tool_input)
+    _, targets = write_targets(event, tool, tool_input)
     if UNRESOLVED in targets:
         return UNRESOLVED_REASON
     targets = [p for p in targets if not _inside(p, [PANTHEON, PANTHEON_VIEW, STATE_DIR])]  # это — pantheon-acl
     if not targets:
         return None
-    if role == "workshop" and not sub:
-        roots = [pdir]
-    elif role in EXTRA_ONLY_ROLES:
-        roots = []
-    elif not pantheon_role:
-        # встроенный или ваш собственный субагент: прежнее правило — направление по cwd, иначе git-репозиторий
-        name, roots = direction_of(domains, cwd)
-        if not roots:
-            top = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
-                                 capture_output=True, text=True, timeout=3).stdout.strip()
-            roots = [os.path.realpath(top or cwd)]
-    else:
-        name, roots = direction_of(domains, pdir)
-        if not roots and sub:
-            name, roots = direction_of(domains, cwd)
-        if not roots and role == "domain-coordinator":
-            roots = [pdir]
-    roots = list(roots) + _norm((policy.get("agent_extra") or domains.get("agent_extra") or {}).get(role, []))
-    # своя память, а не вся ~/.claude/agent-memory: память другой роли загружается в её контекст
+    if role in DRAFT_ONLY_ROLES:
+        # исполнитель без кода (metis-0469): вне ~/ai/pantheon корней нет совсем — ни папок направления, ни agent_extra,
+        # ни памяти, ни временных папок; drafts/ внутри ~/ai/pantheon решает pantheon-acl (drafts_allowed)
+        return (f"Правило domain: роль «{role}» пишет только черновики — в ~/ai/pantheon/directions/<своё "
+                f"направление>/{DRAFTS_DIR}/. Чужая зона: {', '.join(p.replace(HOME, '~') for p in targets[:3])}. "
+                "Код, знания, настройки и временные папки — не твои: итог — файл в drafts/, остальное — в отчёт.")
+    # ревизор (EXTRA_ONLY_ROLES): agent_extra своей роли, своя память (а не вся ~/.claude/agent-memory: память другой
+    # роли загружается в её контекст) и временные папки
+    roots = _norm((policy.get("agent_extra") or domains.get("agent_extra") or {}).get(role, []))
     roots += [os.path.join(r, role) if os.path.basename(r) == "agent-memory" else r
-              for r in _norm(policy.get("always") or domains.get("always") or ["~/.claude/agent-memory"]) if role]
+              for r in _norm(policy.get("always") or domains.get("always") or ["~/.claude/agent-memory"])]
     roots += TEMP_ROOTS
     bad = [p for p in targets if not _inside(p, roots)]
     if not bad:
         return None
-    return (f"Правило domain: роль «{role or 'субагент'}» пишет только в своём направлении "
+    return (f"Правило domain: роль «{role}» пишет только свой отчёт, свою память и временные папки "
             f"({', '.join(r.replace(HOME, '~') for r in roots[:4])}). "
             f"Чужая зона: {', '.join(p.replace(HOME, '~') for p in bad[:3])}. "
             "Не чини сам — опиши находку в отчёте по формату «Находка» "
-            "(где, что не так, доказательство, срочность): лид или координатор передаст её владельцу, "
-            "координатор — Зевсу файлом в inbox/ того направления.")
+            "(где, что не так, доказательство, срочность): её передаст тот, кто тебя позвал.")
 
 
 # Карта прав ~/ai/pantheon (STATE-06). Ключ — первый элемент пути от корня ~/ai/pantheon (в нижнем регистре:
@@ -2364,12 +2405,31 @@ HQ_ONLY = {x.casefold() for x in ("board.md", "decisions.md", "revisits.toml", "
                                   "handoff", "inbox-view")}
 
 
+def drafts_allowed(pdir, parts, tool, domains):
+    """Исполнитель без кода (metis-0469): Write, Edit, MultiEdit — только файл внутри directions/<имя>/drafts/, где
+    имя — направление папки запуска, а в окне Пританея — любое направление из domains.json. parts — путь от корня
+    ~/ai/pantheon после realpath и _key: «..» и симлинки уже раскрыты, регистр и форма Юникода — как у macOS."""
+    why = (f"исполнитель без кода пишет только черновик — файл в ~/ai/pantheon/directions/<своё направление>/"
+           f"{DRAFTS_DIR}/ (из окна Пританея — {DRAFTS_DIR}/ направления из реестра); STATUS.md, планы, inbox/ и "
+           "задачи — не твои, всё остальное — в отчёт")
+    if tool not in DRAFT_WRITE_TOOLS:  # Bash и NotebookEdit закрыты и правилом draft-role; здесь — без него (GUARD_OFF)
+        return False, why
+    if len(parts) < 4 or parts[0] != "directions" or parts[2] != DRAFTS_DIR:
+        return False, why
+    if window_role() == "hq":
+        return parts[1] in {_key(n) for n in (domains.get("domains") or {})}, why
+    own, _ = direction_of(domains, pdir)
+    return bool(own) and parts[1] == _key(own), why
+
+
 def pantheon_allowed(role, sub, pdir, rel, tool, exists, domains, policy):
     top = rel.split("/", 1)[0]
     hq = role == "hq" and not sub
     if rel in (".", "") or top in (".git", ".gitattributes", ".gitignore"):
         return False, "git и служебные файлы ~/ai/pantheon роли не трогают: коммитит задача планового прохода pantheon-commit"
     parts = rel.split("/")
+    if role in DRAFT_ONLY_ROLES:
+        return drafts_allowed(pdir, parts, tool, domains)
     # файлы задач (metis-0044): directions/<имя>/tasks/ и входящие владельца inbox/tasks/ — только `pantheon task`,
     # всем ролям и субагентам, штабу тоже. Можно создать ещё не существующую папку tasks/ и заглушку .gitkeep или
     # .keep в ней (пустую папку тик в git не положит): ответа в них нет
@@ -2548,8 +2608,8 @@ CDP_DIRECT = re.compile(r"(?<![\w.])9222(?![\w.])|DevToolsActivePort|/devtools/(
 # WebFetch ролей — только наружу: адрес петли и локальной сети — это демон браузера или dev-сервер владельца
 LOCAL_URL = re.compile(r"^\w+://(?:[^/@]*@)?(?:localhost|[\d.]+|0x[0-9a-f]+|\[[0-9a-f:.]*\]|[^/:]*\.local)(?::\d+)?(?:/|$)",
                        re.I)
-CDP_READERS = set()  # демон с входами владельца — только мастерской (metis-0087, шаг 2); читателей нет
-CDP_ACTORS = {"workshop"}
+CDP_READERS = set()  # демон с входами владельца — никому из ролей: браузеры владельца будут у роли Харон (решение 113, metis-0227)
+CDP_ACTORS = set()
 PROTECTED_BRANCHES = {"main", "master"}
 TERMINAL_CMDS = {"osascript", "cliclick", "xdotool"}
 _GIT_OPT_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"}
@@ -2795,7 +2855,7 @@ def check_cdp_role(event, tool, tool_input):
     cmd = cmd + "\n" + re.sub(r"[\"'\\]", "", cmd)
     if CDP_DIRECT.search(cmd):
         return ("Правило cdp-role: прямое подключение к отладочному порту браузера владельца ролям закрыто — только через "
-                "общий демон (`curl 127.0.0.1:9333/…`), и только мастерской.")
+                "общий демон (`curl 127.0.0.1:9333/…`), а к нему сейчас не допущена ни одна роль.")
     if not CDP_TARGET.search(cmd):
         return None
     if re.search(r"/close\b", cmd):
@@ -2806,7 +2866,7 @@ def check_cdp_role(event, tool, tool_input):
     if role in CDP_READERS and not re.search(r"/cmd\b", cmd):
         return None
     return (f"Правило cdp-role: роль «{role or 'субагент'}» не пользуется браузером с входами владельца (демон CDP). "
-            "Читать сайт и действовать на нём — мастерская после «да» владельца; публичные страницы — веб-поиск prometheus без входов. "
+            "Сайт со входом владельца — Харон, после metis-0077; публичные страницы — веб-поиск prometheus без входов. "
             "Проверить своё приложение на localhost — chrome-devtools-mcp --isolated или Playwright (talos).")
 
 
@@ -3042,7 +3102,7 @@ def check_push(event, tool, tool_input):
     can_push = role == "domain-coordinator" or role.startswith(PANTHEON_ROLE_PREFIXES) or (role == "workshop" and not sub)
     # координатор, в чьей папке лежит личное (mnemo-brain: ~/ai/knowledge/me), не отправляет сам: он видит me/ и читает
     # выписки из веба — третье свойство (наружу) ему не даём (SEC-13, 15.10); хранилище отправляет Obsidian Git. По
-    # папке, а не по policy.toml: без tomllib (Python 3.9) политика пуста, а запрет должен остаться
+    # папке, а не по policy.toml: policy.toml может не прочитаться, а запрет должен остаться
     if can_push and role == "domain-coordinator":
         if any(_inside(x, [pdir]) for x in _norm(private_conf(load_policy())["paths"])):
             can_push = False
@@ -3125,7 +3185,7 @@ def check_terminal(event, tool, tool_input):
 #   служб Связки с ключами корпуса.
 # Раздела или ключа нет — пусто: правило этого не узнаёт. Ключ — не список непустых строк, [corpus] не таблица или
 # policy.toml не разобрать — ошибка: ролям Bash закрыт с предупреждением, пока раздел не исправят (закрыто, а не
-# пусто). На Python без tomllib (3.9) политики нет совсем, как и у остальных правил: раздел не читается — пусто.
+# пусто).
 CORPUS_KEYS = ("commands", "modules", "write_subcommands", "scripts", "keychain_prefixes")
 CORPUS_REASON = (
     "Правило corpus-role: роли не запускают пополнение корпуса (подкоманды пополнения и скрипты из [corpus] "
@@ -3136,12 +3196,8 @@ CORPUS_REASON = (
 
 
 def load_policy_checked():
-    """policy.toml для правил, которым сбой разбора — ошибка: словарь; {} — файла нет или нет tomllib (Python 3.9,
-    как load_policy); None — файл есть, но не читается или это не TOML."""
-    try:
-        import tomllib
-    except ImportError:
-        return {}
+    """policy.toml для правил, которым сбой разбора — ошибка: словарь; {} — файла нет (как load_policy); None — файл
+    есть, но не читается или это не TOML."""
     try:
         with open(POLICY_FILE, "rb") as fh:
             return tomllib.load(fh)
@@ -3506,11 +3562,28 @@ HESTIA_GH_READ = {("pr", "view"), ("pr", "list"), ("pr", "diff"), ("pr", "checks
                   ("--version", None), ("version", None)}
 HESTIA_CLAUDE = (("plugin", "list"), ("plugins", "list"), ("agents",), ("--version",), ("-v",))
 HESTIA_PANTHEON = {("plugins", "update"), ("domains", "build"), ("restart",), ("alert",), ("task", "show"),
-                   ("status",), ("who",), ("agents",), ("help",)}
+                   ("status",), ("who",), ("agents",), ("help",), ("consent",), ("reap",)}
+# `pantheon reap` (metis-0568): виновники памяти; гасит сама команда и только брошенное в папках Пантеона, по --pid —
+# только pid из вопроса о гашении с «да» владельца: метка <id>.reap (проверяет pantheon; push она не открывает).
+# Идёт мимо песочницы, как остальные команды пульта Гестии
+# Наружу (metis-0562, «Да, по consent» владельца 27.10 22:38): `git push` и запись в PR (`gh pr create|edit`) — только
+# после явного «да» владельца: `pantheon consent <id задачи>`, запущенный в окне hestia, ставит метку
+# <state>/hestia-consent/<id> и только на «да». Id — задача окна (PANTHEON_TASK из настроек запуска `wake hestia
+# --task`), метка чужой задачи не годится. Окну в state писать нельзя (pantheon-acl, песочница) — подделать метку
+# нечем. Метка живёт 2 часа. Сети у песочницы окна нет: push и gh идут мимо неё (excludedCommands), поэтому всё, что
+# они могут, ограничивает этот разбор. fetch, pull, clone и ls-remote — не открыты (пишут в репозиторий или не нужны)
+# Остаток: защита от ошибки, не от намеренной подмены .git/config (модель угроз README guard).
+HESTIA_GIT_NET = {"push"}
+HESTIA_GH_WRITE = {("pr", "create"), ("pr", "edit")}
+HESTIA_CONSENT_DIR = os.path.join(STATE_DIR, "hestia-consent")
+HESTIA_CONSENT_TTL = 2 * 3600
+HESTIA_TASK_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
+HESTIA_REMOTE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 HESTIA_REASON = ("Правило hestia (metis-0245): {what}. Гестии можно: `pantheon plugins update`, `pantheon domains "
-                 "build`, `pantheon restart` без --force, `pantheon alert`, чтение (`pantheon task show|status|who`, "
-                 "логи, git только для чтения, `claude plugin list|agents`); писать — только во временные папки. "
-                 "Остальное — в отчёт Зевсу.")
+                 "build`, `pantheon restart` без --force, `pantheon alert`, `pantheon reap`, чтение (`pantheon task show|status|who`, "
+                 "логи, git только для чтения, `claude plugin list|agents`); писать — только во временные папки; "
+                 "`git push` и `gh pr create|edit` — после «да» владельца (`pantheon consent <id задачи>`). Остальное — в отчёт "
+                 "Зевсу.")
 
 
 def check_hestia_call(event, tool, tool_input):
@@ -3520,6 +3593,105 @@ def check_hestia_call(event, tool, tool_input):
     if who(event)[0] == "hestia" and window_role() != "hestia":
         return ("Правило hestia: роль hestia — только в своём окне песочницы (`pantheon wake hestia --task <id>`), "
                 f"здесь окно «{window_role() or 'нет'}» — инструменты закрыты.")
+    return None
+
+
+def hestia_consent_fresh():
+    """Есть ли свежая метка «да» на задачу этого окна (PANTHEON_TASK): обычный файл с именем задачи, не старше TTL."""
+    task = os.environ.get("PANTHEON_TASK") or ""
+    if not HESTIA_TASK_RE.fullmatch(task):
+        return False
+    try:
+        st = os.lstat(os.path.join(HESTIA_CONSENT_DIR, task))
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and 0 <= time.time() - st.st_mtime <= HESTIA_CONSENT_TTL
+
+
+def _hestia_need_consent(what):
+    return HESTIA_REASON.format(what=f"{what} — наружу только после «да» владельца на задачу окна: попроси Зевса "
+                                     f"задать вопрос [id] окном вопросов и запусти `pantheon consent <id задачи>` "
+                                     f"(метка живёт {HESTIA_CONSENT_TTL // 3600} ч)")
+
+
+HESTIA_PUSH_LEASE = re.compile(r"--force-with-lease(=[A-Za-z0-9._/-]+)?")
+
+
+def _hestia_push_flags(texts, args):
+    """Белый список опций `git push` окна: до push у git опций нет, после — только -u/--set-upstream и
+    --force-with-lease (без значения или =ветка). Git принимает сокращения длинных опций (--rec = --receive-pack),
+    поэтому запрет по списку плохих не годится. Остаток: .git/config (core.sshCommand, remote.*.receivepack,
+    url.*.insteadOf) может подменить запуск — защита от ошибки, не от намеренной подмены .git/config (модель угроз
+    README guard)."""
+    pre = texts[:len(texts) - len(args) - 1]  # texts — слова после имени git
+    for a in pre:
+        if a.startswith("-"):
+            return f"опция git «{a}» перед push (-C, -c, --git-dir, --work-tree, --exec-path …) не принимается"
+    for a in args:
+        if a in ("-u", "--set-upstream") or HESTIA_PUSH_LEASE.fullmatch(a):
+            continue
+        if a.startswith("-"):
+            return f"опция push «{a}» — разрешены только -u/--set-upstream и --force-with-lease[=ветка]"
+    return None
+
+
+def _hestia_outside_sandbox(name, texts):
+    """Команда из excludedCommands окна: git push, gh pr create|edit, pantheon (plugins update, domains build, restart,
+    alert, consent, reap)."""
+    base = os.path.basename((name or "").rstrip("/")).lower()
+    if base == "git":
+        parsed = _git_sub(texts)
+        return parsed is None or parsed[1] == "push"
+    if base == "gh":
+        return any(a in texts for a in ("create", "edit")) and "pr" in texts or None in texts
+    return _pantheon_words(name, texts) is not None
+
+
+def _hestia_gh_write_problem(sub, texts, cmd, cwd):
+    """gh pr create|edit Гестии: репозиторий — только явный -R/--repo из [merge_repos] направления задачи, текст из
+    файла (--body-file, -F) — только из временных папок. Словом «почему нет» или None."""
+    if re.search(r"\bGH_[A-Z0-9_]+", cmd) or any(os.environ.get(v) for v in GH_REDIRECT_ENV):
+        return "без GH_REPO, GH_HOST и других GH_* — репозиторий только через -R"
+    if any(t is None for t in texts):
+        return "слово команды не вычислить (переменная, $(…))"
+    if any("://" in t or re.search(r"/[^\s/]+#\d+", t) for t in texts):  # URL и owner/repo#N уводят в другой репозиторий
+        return "адрес и owner/repo#N не принимаются — номер PR или имя ветки"
+    args = texts[1:]  # -R бывает и до pr (`gh -R o/r pr create`); слова pr, create флагами не являются
+    repos, files, nxt = [], [], None
+    for a in args:
+        if nxt:
+            (repos if nxt == "repo" else files if nxt == "file" else []).append(a)
+            nxt = None
+            continue
+        if a in ("-R", "--repo"):
+            nxt = "repo"
+        elif a in ("-F", "--body-file"):
+            nxt = "file"
+        elif a.startswith("--repo="):
+            repos.append(a[7:])
+        elif a.startswith("--body-file="):
+            files.append(a[12:])
+        elif a.startswith("-R") and not a.startswith("--"):
+            repos.append(a[2:].lstrip("="))
+        elif a.startswith("-F") and not a.startswith("--"):
+            files.append(a[2:].lstrip("="))
+        elif a.startswith("-") and not a.startswith("--") and len(a) > 2 and ("R" in a[1:] or "F" in a[1:]):
+            return "склеенные короткие флаги с -R или -F — пиши раздельно"
+    if nxt:
+        return "-R или -F без значения"
+    for f in files:
+        full = os.path.realpath(os.path.join(cwd, os.path.expanduser(f))) if f != "-" else None
+        if full is None or not _inside(full, TEMP_ROOTS):
+            return f"--body-file {f} — читать можно только из временных папок (TMPDIR, /tmp)"
+    if not repos:
+        return "укажи репозиторий явно: -R <owner/repo> из [merge_repos] направления задачи"
+    mr = load_policy().get("merge_repos")
+    mine = mr.get(os.environ.get("PANTHEON_TASK_DIRECTION") or "") if isinstance(mr, dict) else None
+    allowed = {r.strip().lower() for r in (mine if isinstance(mine, list) else ()) if isinstance(r, str) and r.strip()}
+    bad = [r for r in repos if not _merge_repo_ok(r, allowed)]
+    if bad:
+        return (f"-R {bad[0]} нет среди [merge_repos] направления задачи "
+                f"({os.environ.get('PANTHEON_TASK_DIRECTION') or 'не задано'})")
     return None
 
 
@@ -3545,7 +3717,27 @@ def check_hestia(event, tool, tool_input):
         return None
     cmd = tool_input.get("command") or ""
     targets, cmds = bash_analysis(cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
+    if len(cmds) > 1:  # команда мимо песочницы — только одна в строке: рядом с ней чужая шла бы так же вне песочницы
+        for name, texts in cmds:
+            if _hestia_outside_sandbox(name, texts):
+                return HESTIA_REASON.format(what="команда мимо песочницы (git push, gh pr create|edit, pantheon "
+                                                 "consent …) — в строке только одна, без `&&`, `;`, `|`")
     bad = [p for p in targets if p == UNRESOLVED or not _inside(p, TEMP_ROOTS)]
+    if bad and hestia_consent_fresh():
+        # git push разбор считает записью в репозиторий (корень и .git); при свежей метке этих двух путей он не
+        # касается — но только если вся команда состоит из одних `git push` (`git push && rm …` так не пройдёт).
+        # `cd папка && git push` тоже: репозиторий называют через `git -C папка push`
+        cwd0, skip, pushes = os.path.realpath(event.get("cwd") or os.getcwd()), set(), []
+        for name, texts in cmds:
+            parsed = _git_sub(texts) if name and os.path.basename(name.rstrip("/")).lower() == "git" else None
+            pushes.append(bool(parsed and parsed[1] == "push"))
+            if parsed and parsed[1] == "push":
+                d = os.path.realpath(os.path.join(cwd0, os.path.expanduser(parsed[0] or ".")))
+                top = _git_top(d)
+                skip |= {top, os.path.join(top, ".git")}
+        if not all(pushes):  # рядом с push есть другая команда (`git push && rm …`) — её цели никто не отделит от push
+            skip = set()
+        bad = [p for p in bad if p == UNRESOLVED or p not in skip]
     if bad:
         return HESTIA_REASON.format(what="запись " + ("в путь, который не разобрать" if bad[0] == UNRESOLVED
                                                      else f"в {bad[0].replace(HOME, '~')}") + " — вне временных папок")
@@ -3555,6 +3747,23 @@ def check_hestia(event, tool, tool_input):
         base = os.path.basename(name.rstrip("/")).lower()
         if base == "git":
             parsed = _git_sub(texts)
+            if parsed is not None and parsed[1] in HESTIA_GIT_NET:
+                if not hestia_consent_fresh():
+                    return _hestia_need_consent(f"git {parsed[1]}")
+                # окно главной сессии без agent_type — check_push его не судит, поэтому правила push здесь же:
+                # не в main/master, без force и удаления; куда — только имя remote (не адрес): push идёт мимо песочницы
+                why = _hestia_push_flags(texts, parsed[2])
+                if not why:  # --force-with-lease разрешён (ветка не защищённая — проверяет push_problem)
+                    why = push_problem([t for t in texts if not HESTIA_PUSH_LEASE.fullmatch(t)],
+                                       os.path.realpath(event.get("cwd") or os.getcwd()),
+                                       any(n == "cd" for n, _ in cmds))
+                if not why:
+                    pos = [x for x in parsed[2] if not x.startswith("-")]
+                    if pos and not HESTIA_REMOTE_RE.fullmatch(pos[0]):
+                        why = f"куда: «{pos[0]}» — нужно имя remote, не адрес"
+                if why:
+                    return HESTIA_REASON.format(what=f"git push — {why}; и с «да» main, force и удаление ветки закрыты")
+                continue
             if parsed is None or (parsed[1] is not None and parsed[1] not in HESTIA_GIT_READ):
                 return HESTIA_REASON.format(what=f"git {parsed[1] if parsed else '<не разобрать>'} — git только для "
                                                  "чтения, коммиты, отправку и слияние делают направления")
@@ -3563,6 +3772,16 @@ def check_hestia(event, tool, tool_input):
             dyn, cands = _gh_parse(texts)
             api = _gh_api(texts)
             subs = {(texts[q], texts[i] if i is not None else None) for q, i in cands}
+            if not dyn and cands and api is None and subs <= HESTIA_GH_WRITE | HESTIA_GH_READ \
+                    and subs & HESTIA_GH_WRITE:
+                if not hestia_consent_fresh():
+                    return _hestia_need_consent("gh " + " ".join(sorted(f"{x} {y}" for x, y in subs & HESTIA_GH_WRITE)))
+                if len(subs) != 1:
+                    return HESTIA_REASON.format(what="gh pr create|edit — подкоманду определить однозначно не вышло")
+                why = _hestia_gh_write_problem(next(iter(subs))[1], texts, cmd, os.path.realpath(event.get("cwd") or os.getcwd()))
+                if why:
+                    return HESTIA_REASON.format(what=f"gh pr {next(iter(subs))[1]} — {why}")
+                continue
             if dyn or not cands or (api is not None and _gh_api_writes(api)) or \
                     any(s != "api" and (s, a) not in HESTIA_GH_READ for s, a in subs):
                 return HESTIA_REASON.format(what="gh — только чтение (`gh pr view|list|diff|checks|status`, "
@@ -3586,8 +3805,54 @@ def check_hestia(event, tool, tool_input):
     return None
 
 
+def check_draft_role(event, tool, tool_input):
+    """draft-role (metis-0469): исполнителю без кода — субагенту и главной сессии `--agent palamedes` — из того, что
+    видит guard, открыты только чтение файлов и правка черновика (DRAFT_TOOLS). Шапка роли закрывает то же списком
+    tools:, guard — второй слой на случай её правки; куда писать, решают pantheon-acl и domain."""
+    role = who(event)[0]
+    if role in DRAFT_ONLY_ROLES and tool not in DRAFT_TOOLS:
+        return (f"Правило draft-role: роли «{role}» инструмент {tool} закрыт (metis-0469) — исполнителю без кода "
+                "открыты только Read, Grep, Glob и Write/Edit своего черновика в ~/ai/pantheon/directions/<своё "
+                f"направление>/{DRAFTS_DIR}/. Веб — вопрос для prometheus, команды и субагенты — в отчёт тому, кто позвал.")
+    return None
+
+
+# hq-sessync (metis-0566, решение владельца 27.10). Окну Пританея `sessync find <слова> [-p имя] [-n число]` выпущен
+# мимо песочницы (excludedCommands, HQ_EXCLUDED): читает транскрипты ~/.claude/projects, а вывод проходит маску похожего
+# на ключи — она в самом sessync. Правило — одна строгая проверка всей сырой строки (SESSYNC_LINE), а не разбор:
+# строка целиком `sessync find` + токены, где токен — слово из букв, цифр и `_.-` (не с «-»), такое же слово в одинарных
+# или двойных кавычках (внутри ещё пробелы), `-p <имя>` или `-n <цифры>`. Всё остальное — отказ: --raw, --no-mask и
+# любой другой флаг, префикс присваивания (`PATH=… sessync find`), обёртки (env, bash -c), `;`, `&`, `|`, `<`, `>`,
+# подстановки, глобы (`* ? [ ] { } ~ ^ # !`), перевод строки. Иначе тот, что оболочка раскрыла бы или запустила, ушёл бы
+# мимо песочницы вместе с `find`. Правило срабатывает на любую строку, где есть `sessync find` или команда sessync с
+# аргументом find. Другие окна `sessync find` не получают: в их excludedCommands его нет.
+_SW = r"[\w.][\w.\-]*"
+SESSYNC_LINE = re.compile(
+    r"[ \t]*sessync[ \t]+find(?:[ \t]+(?:" + _SW + r"|\"[\w.][\w.\- ]*\"|'[\w.][\w.\- ]*'"
+    r"|-p[ \t]+[A-Za-z0-9][A-Za-z0-9_-]*|-n[ \t]+[0-9]+))*[ \t]*\Z")
+SESSYNC_MENTION = re.compile(r"\bsessync[ \t]+(?:\S+[ \t]+)*?find\b")
+
+
+def check_hq_sessync(event, tool, tool_input):
+    if tool != "Bash" or not (window_role() == "hq" or event.get("agent_type") == "hq"):
+        return None
+    cmd = tool_input.get("command") or ""
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    _, cmds = bash_analysis(cmd, cwd)
+    named = any(n and os.path.basename(n.rstrip("/")) == "sessync" and "find" in [a for a in t if isinstance(a, str)]
+                for n, t in cmds)
+    if not named and not SESSYNC_MENTION.search(cmd):
+        return None
+    if SESSYNC_LINE.match(cmd):
+        return None
+    return ("Правило hq-sessync: окну Пританея `sessync find` — только строкой `sessync find слова [-p имя] [-n число]` "
+            "(metis-0566): слова из букв, цифр и _.-, без флагов (--raw, --no-mask и любых других), без префикса "
+            "присваивания, env, bash -c, `;`, `&`, `|`, перенаправлений, подстановок и глобов (* ? [ ] { } ~ ^ # !).")
+
+
 def check_window(event, tool, tool_input):
-    for rule, check in (("hq-telegram", check_hq_telegram), ("hq-gh", check_hq_gh), ("tg-role", check_tg_role),
+    for rule, check in (("hq-telegram", check_hq_telegram), ("hq-gh", check_hq_gh), ("hq-sessync", check_hq_sessync),
+                        ("tg-role", check_tg_role),
                         ("chiron", check_chiron_call), ("hestia", check_hestia_call)):
         if rule not in OFF:
             reason = check(event, tool, tool_input)
@@ -3683,9 +3948,11 @@ def main():
     if name == "PreToolUse":
         tool_input = event.get("tool_input") or {}
         reason = None
-        if tool in WINDOW_ONLY_TOOLS:
+        if "draft-role" not in OFF:
+            reason = strict(check_draft_role, event, tool, tool_input)
+        if not reason and tool in WINDOW_ONLY_TOOLS:
             reason = strict_window(check_window, event, tool, tool_input)
-        if tool == "Bash":
+        if not reason and tool == "Bash":
             cmd = tool_input.get("command") or ""
             if "dev-server" not in OFF:
                 reason = soft(check_dev_server, cmd, event)
@@ -3695,7 +3962,7 @@ def main():
                 reason = hard(check_tg_secret_bash, cmd)
             if not reason:
                 reason = strict_window(check_window, event, tool, tool_input)
-        elif tool in EDIT_TOOLS:
+        elif not reason and tool in EDIT_TOOLS:
             if "cdp" not in OFF:
                 reason = soft(check_cdp, tool_input)
             if not reason and "tg-secret" not in OFF:

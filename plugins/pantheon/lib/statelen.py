@@ -1,5 +1,5 @@
 """Длина файлов состояния (metis-0160, metis-0274): общая проверка для дежурного (`pantheon check`) и хука
-PostToolUse (hooks/ctx.py state-len). Только стандартная библиотека и Python 3.9: хук запускает системный python3."""
+PostToolUse (hooks/ctx.py state-len). Только стандартная библиотека."""
 import glob
 import os
 

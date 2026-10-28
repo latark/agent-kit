@@ -2,11 +2,13 @@
 """project-tools на временных папках: карта стеков, apply и его повтор, монорепозиторий, Next 15 и 16, отличие от
 карты и --update, «одобрять всё» → явный список, замена плагина, отказы владельца, Codex, битые файлы, подсказка.
 
-Запуск: python3 -I plugins/project-tools/tests/test_project_tools.py  (код выхода 0 — все прошли)
-На Python старше 3.11 (/usr/bin/python3) прогоняется только подсказка; на машине с /usr/bin/python3 её прогон обязателен.
+Запуск: python3 -I plugins/project-tools/tests/test_project_tools.py  (код выхода 0 — все прошли; Python 3.11+)
+Обёртка bin/project-tools: при /usr/bin/python3 (3.9) первым в PATH берёт 3.11+; без 3.11+ подсказка молчит (код 0),
+команда — код 2 с причиной (metis-0571).
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -65,18 +67,9 @@ def pkg(**deps):
 
 home = make_home()
 
-# Python старше 3.11 (/usr/bin/python3 = 3.9, без tomllib): весь набор не поднимается, поэтому гоняем только
-# подсказку на старом интерпретаторе и выходим; счёт — один прогон проверки, он обязан выполниться
-if sys.version_info < (3, 11):
-    _home = make_home()
-    try:
-        _r = subprocess.run([sys.executable, "-I", CLI, "hint"], input="{}", capture_output=True, text=True,
-                            env=env_for(_home))
-        check("Python старше 3.11: подсказка молчит, код 0", _r.returncode == 0 and _r.stdout == "" and _r.stderr == "")
-    finally:
-        shutil.rmtree(_home)
-    print(f"\n{sum(results)}/{len(results)}")
-    sys.exit(0 if all(results) else 1)
+if sys.version_info < (3, 11):  # metis-0571: тесты — только на 3.11+ (AGENTS.md, CI на 3.14)
+    print(f"FAIL тесты project-tools идут на Python 3.11+, здесь {sys.version_info[0]}.{sys.version_info[1]}")
+    sys.exit(1)
 
 import tomllib  # noqa: E402
 
@@ -406,6 +399,51 @@ check("карта: стеки ссылаются на инструменты и�
 check("карта: у stdio-серверов закреплены версии", all(
     any(a.startswith(t["npm"] + "@") and a.split("@", 1)[1][:1].isdigit() for a in t["mcp"]["args"])
     for t in MAP["tools"].values() if "mcp" in t))
+
+# 11. Обёртка bin/project-tools (metis-0571): поиск Python 3.11+ как у hooks/python.sh
+WRAP = os.path.join(PLUGIN, "bin", "project-tools")
+check("обёртка исполняемая", os.access(WRAP, os.X_OK))
+r = subprocess.run([WRAP, "hint"], input="{}", capture_output=True, text=True, timeout=60,
+                   env=dict(env_for(home), PATH="/usr/bin:/bin:" + os.path.dirname(sys.executable)))
+check("обёртка: /usr/bin первым в PATH — подсказка идёт на 3.11+ (код 0, без ошибки)",
+      r.returncode == 0 and "нужен Python" not in r.stderr and "Traceback" not in r.stderr)
+r = subprocess.run([WRAP, "nope-cmd"], capture_output=True, text=True, timeout=60,
+                   env=dict(env_for(home), PATH="/usr/bin:/bin:" + os.path.dirname(sys.executable)))
+check("обёртка: команда доходит до project_tools.py (не «нужен Python»)", "нужен Python" not in r.stderr)
+_w = tempfile.mkdtemp(prefix="project-tools-wrap-")
+try:
+    src = open(WRAP, encoding="utf-8").read()
+    src = re.sub(r"^FW=.*$", "FW=" + os.path.join(_w, "fw"), src, count=1, flags=re.M)
+    src = re.sub(r"^DIRS=.*$", "DIRS=" + os.path.join(_w, "known"), src, count=1, flags=re.M)
+    os.makedirs(os.path.join(_w, "bin"))
+    iso = os.path.join(_w, "bin", "project-tools")
+    with open(iso, "w", encoding="utf-8") as fh:
+        fh.write(src)
+    os.chmod(iso, 0o755)
+    old_dir = os.path.join(_w, "old")
+    os.makedirs(old_dir)
+    with open(os.path.join(old_dir, "python3"), "w") as fh:
+        fh.write("#!/bin/sh\nexit 1\n")  # python3 старше 3.11: проверка версии не проходит
+    os.chmod(os.path.join(old_dir, "python3"), 0o755)
+    # old_dir раньше /usr/bin: «python3» из PATH — старый; python3.1x в /usr/bin и /bin нет
+    sh_env = {"PATH": old_dir + ":/usr/bin:/bin", "HOME": home}
+    r = subprocess.run(["/bin/sh", iso, "hint"], input="{}", capture_output=True, text=True, timeout=60,
+                       env=sh_env)
+    check("обёртка без 3.11+: hint — код 0 молча", r.returncode == 0 and r.stdout == "" and r.stderr == "")
+    r = subprocess.run(["/bin/sh", iso, "check"], capture_output=True, text=True, timeout=60,
+                       env=sh_env)
+    check("обёртка без 3.11+: команда — код 2 и «нужен Python 3.11»",
+          r.returncode == 2 and "нужен Python 3.11" in r.stderr)
+    os.makedirs(os.path.join(_w, "known"))
+    with open(os.path.join(_w, "known", "python3.12"), "w") as fh:
+        fh.write('#!/bin/sh\necho "K312 $*"\n')
+    os.chmod(os.path.join(_w, "known", "python3.12"), 0o755)
+    r = subprocess.run(["/bin/sh", iso, "check"], capture_output=True, text=True, timeout=60,
+                       env=sh_env)
+    check("обёртка: python3.12 в известной папке — exec с -I", r.stdout.startswith("K312 -I ")
+          and r.stdout.rstrip().endswith("project_tools.py check"))
+finally:
+    shutil.rmtree(_w, ignore_errors=True)
 
 shutil.rmtree(home)
 print(f"\n{sum(results)}/{len(results)}")

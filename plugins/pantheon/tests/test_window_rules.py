@@ -77,34 +77,42 @@ def main():
            if x in psrc]
     check("pantheon.py сам правил не определяет — только берёт из window_rules.py", not own, own)
 
-    if sys.version_info < (3, 11):  # pantheon.py требует 3.11 (tomllib)
-        print("ok   пропуск: загрузка pantheon.py требует Python 3.11+")
-    else:
-        tmp = os.path.realpath(tempfile.mkdtemp(prefix="window-rules-"))
-        old = {k: os.environ.get(k) for k in ("HOME", "PANTHEON_HOME", "PANTHEON_STATE")}
-        try:
-            os.environ.update(HOME=tmp, PANTHEON_HOME=os.path.join(tmp, "ai/pantheon"),
-                              PANTHEON_STATE=os.path.join(tmp, "state"))
-            p = load("pantheon_t", os.path.join(LIB, "pantheon.py"))
-            check("pantheon.py: имена правил — те же объекты из window_rules.py",
-                  os.path.realpath(p.WINDOW_RULES.__file__)
-                  == os.path.realpath(os.path.join(LIB, "window_rules.py"))
-                  and all(getattr(p, n) is getattr(p.WINDOW_RULES, n) for n in (
-                      "COORDINATOR_ALLOW", "GATED_MERGE_RULE", "LEAD_DELIVERY_RULE", "REVIEW_RECORD_RULE", "MERGE_REPO_RE",
-                      "coordinator_auto_allow")))
-            rs = p.role_settings([], None, [], os.path.join(tmp, "cache"), False, [],
-                                 auto_allow=p.coordinator_auto_allow(["a-org/app"]))
-            check("role_settings: autoMode окна — из window_rules.auto_mode",
-                  rs.get("autoMode") == {"allow": w.coordinator_auto_allow(["a-org/app"])}, rs.get("autoMode"))
-            rs = p.role_settings([], None, [], os.path.join(tmp, "cache"), False, [])
-            check("role_settings без auto_allow: autoMode нет", "autoMode" not in rs, rs.get("autoMode"))
-        finally:
-            for k, v in old.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
-            shutil.rmtree(tmp, ignore_errors=True)
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="window-rules-"))
+    old = {k: os.environ.get(k) for k in ("HOME", "PANTHEON_HOME", "PANTHEON_STATE")}
+    try:
+        os.environ.update(HOME=tmp, PANTHEON_HOME=os.path.join(tmp, "ai/pantheon"),
+                          PANTHEON_STATE=os.path.join(tmp, "state"))
+        p = load("pantheon_t", os.path.join(LIB, "pantheon.py"))
+        check("pantheon.py: имена правил — те же объекты из window_rules.py",
+              os.path.realpath(p.WINDOW_RULES.__file__)
+              == os.path.realpath(os.path.join(LIB, "window_rules.py"))
+              and all(getattr(p, n) is getattr(p.WINDOW_RULES, n) for n in (
+                  "COORDINATOR_ALLOW", "GATED_MERGE_RULE", "LEAD_DELIVERY_RULE", "REVIEW_RECORD_RULE", "MERGE_REPO_RE",
+                  "coordinator_auto_allow")))
+        rs = p.role_settings([], None, [], os.path.join(tmp, "cache"), False, [],
+                             auto_allow=p.coordinator_auto_allow(["a-org/app"]))
+        check("role_settings: autoMode окна — из window_rules.auto_mode",
+              rs.get("autoMode") == {"allow": w.coordinator_auto_allow(["a-org/app"])}, rs.get("autoMode"))
+        rs = p.role_settings([], None, [], os.path.join(tmp, "cache"), False, [])
+        check("role_settings без auto_allow: autoMode нет", "autoMode" not in rs, rs.get("autoMode"))
+        # хуки окна на Python — через hooks/python.sh рядом со скриптом (metis-0571); его нет — прежняя форма
+        hd = os.path.join(tmp, "plug dir", "hooks")
+        os.makedirs(hd)
+        script = os.path.join(hd, "agents.py")
+        open(script, "w").close()
+        check("hook_python_cmd: без python.sh рядом — python3 <скрипт> <аргументы> (в кавычках)",
+              p.hook_python_cmd(script, "a,b") == f"python3 '{script}' a,b", p.hook_python_cmd(script, "a,b"))
+        open(os.path.join(hd, "python.sh"), "w").close()
+        check("hook_python_cmd: python.sh рядом — /bin/sh <python.sh> <скрипт> <аргументы>",
+              p.hook_python_cmd(script, "--strict") == f"/bin/sh '{hd}/python.sh' '{script}' --strict",
+              p.hook_python_cmd(script, "--strict"))
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(tmp, ignore_errors=True)
 
     if os.path.exists(GATE):
         tree = ast.parse(open(GATE, encoding="utf-8").read())

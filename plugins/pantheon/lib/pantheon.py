@@ -16,12 +16,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         (службы [[service]] — те же pause|resume|disable|enable: launchd снимается сразу)
   pantheon qmd config|update|embed|serve|install|status   общий поиск qmd: index.yml из ~/ai/pantheon/qmd.toml,
                                         освежить индекс, сервер MCP (служба), подключить к Claude на этом Mac
-  pantheon plugins update [--quiet]     новые версии плагинов agent-kit (плановый проход раз в 10 мин): тесты новой и
-                                        установленной версии; нет новых падений — claude plugin update, есть — тревога;
-                                        установленная гоняется лишь по (python, файл), где новая упала или кончилась кодом 0
-                                        со строками ok, но без итога; таймауты и срок прогона не гоняются, базе достаётся
-                                        остаток срока; база не гасит «ни одной проверки» и «проверок меньше, чем у базы»
-                                        (metis-0360); код 0 без итога красный, если у базы итог был или файла нет (metis-0361);
+  pantheon plugins update [--quiet]     новые версии плагинов agent-kit (плановый проход раз в 10 мин): ставит
+                                        выпуск, если запись в releases.json каталога совпала с ним (версия и дерево);
+                                        тесты — в GitHub Actions до слияния, локального прогона нет (п. 8, 27.10);
                                         после установки плановый проход перезапускает свободные окна (metis-0181)
   pantheon plugins accept [--new] [guard] [pantheon]   принять установленное дерево как проверенное (verified.json):
                                         живой код и окна ролей идут только на проверенное (metis-0321); только руками
@@ -40,11 +37,17 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
   pantheon status                       один экран для отладки: плановый проход, сессии, вопросы к вам, тревоги, защиты, sync, места heavy, версии
   pantheon night [status|report]        недельный лимит: неделя, линия, запас, зона, ночь, снимок; report — блок
-                                        «Лимит» для сводки (вечерний вопрос и ночь ведёт дежурный, lib/night.py)
+                                        «Лимит» для сводки (lib/night.py)
+  pantheon night ask <id> <направление> [ГГГГ-ММ-ДД]   вопрос о ночной пачке для окна вопросов Зевса: ночь
+                                        открывается только по вашему «Да — ночь <дата>», sha256 пачки сверяется
   pantheon read request|run|status|cancel   чтение личного чата по заявке (metis-0267, lib/read.py): заявка → ваше
                                         «да» на [read-<rid>] → выгрузка и разбор плановым проходом → вы одобряете пункты
   pantheon merge request|run|status|cancel   слияние PR ядра по Touch ID (metis-0285, lib/merge.py): заявка роли →
                                         плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA
+  pantheon outside test|serve|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
+                                        тесты проекта или dev-сервер под sandbox-exec без ключей, браузеров и
+                                        местного прокси → код и хвост журнала или адрес; после «принять» argus
+                                        плановый проход сам гоняет тесты и пишет запись tests шлюза слияния
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
   pantheon sync-answers                 ваш ответ на доске по карантину ~/.claude — применить сразу (sync.sh), без новой сессии
   pantheon check [файл…] [--quiet]      проверить шапки задач по схеме v1 (schema.md) и правила metis-0308: задача пачки без mode,
@@ -57,10 +60,12 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         кэш; лёгкий плановый проход по кэшу закрывает задачи, чей номер в ветке или после «Closes» в теле PR
   pantheon task new --direction D --title T [--type task|story --status S --priority N --due ГГГГ-ММ-ДД[TЧЧ:ММ]
                     --next X --owner O --release R --batch X --night ГГГГ-ММ-ДД --estimate X --actual X
-                    --acceptance принято|вернуть|к владельцу --parent ПАЧКА --mode self|single|parallel --mode-why X --touches ПУТЬ …
+                    --acceptance принято|вернуть|к владельцу --parent ПАЧКА --mode self|single|parallel|undecided --mode-why X --touches ПУТЬ …
                     --project P --waiting-on W --question Q --why W --option "А — … Цена: …" --option …
                     --recommend "А — потому что …" --if-no-answer "…" --depends-on ID --executor auto|claude|codex
-                    --text|--body "текст" | --body-file ПУТЬ]
+                    --text|--body "текст" | --body-file ПУТЬ
+                    --from слово владельца|отчёт|ревью|остаток|план|по ходу --source ID|ПУТЬ#якорь   откуда задача (metis-0502)
+                    --done-when "пункт" …]   пункты раздела «Готово, когда» (повторяемый); без него в теле — раздел с подсказкой
                     текст задачи (цель, «готово, когда») обязателен: без --text/--body/--body-file — отказ, код 2;
                     без текста можно только вопрос владельцу: --question, --why и не меньше двух --option, иначе код 2;
                     неизвестный флаг (и «--флаг=значение») — отказ с его именем, код 2, файл не создан (metis-0402);
@@ -71,6 +76,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     --batch без --mode (и без mode в шапке) — отказ: режим обязателен при сборке пачки (metis-0308);
                     --depends-on / depends_on= с несуществующим id, самой собой или циклом — отказ при записи (metis-0248)
   pantheon task set ID поле=значение … [--option "вариант" …] [--note "строка в журнал"] [--body "текст" | --body-file ПУТЬ]
+                    [--force "причина"]  (status=done при неотмеченных «Готово, когда» у задач с 27.10 — отказ; --force пишет причину в журнал)
                     --body[-file] заменяет текст задачи между «# заголовок» и «## Журнал» («Заметки владельца» остаются),
                     в журнал — «текст задачи заменён (было N знаков…)»; неизвестный флаг и повтор флага, кроме --option, —
                     отказ, код 2
@@ -85,6 +91,11 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon task migrate-project [--write]   project карточек → имя проекта из directions.toml; без --write — сухой
                     прогон «id: было → станет», с --write — запись через task set со строкой в журнал (metis-0323)
   pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту
+  pantheon task migrate-mode [--dry-run]   разово: открытым задачам всех направлений без mode — mode undecided («не
+                    решено»); задачи пачек, пачки, закрытые и входящие не трогает; с --dry-run — только план (metis-0505)
+  pantheon task split ID --title "остаток" [--done-when "пункт" …] [--text "описание"] [--mode M --mode-why X]
+                    остаток исходной задачи — новой задачей в том же направлении: from=остаток, source=ID, тег «остаток»,
+                    та же пачка; пункты — из --done-when, иначе неотмеченные из исходной; строка в журнале обеих (metis-0502)
   pantheon task attach ID ПАЧКА | detach ID   задача в пачку (story) и обратно; show ПАЧКА — состав и сумма оценок
   pantheon executors                    набор исполнителей кода (Claude всегда, Codex — дополнение) и включён ли Codex
   pantheon executors check              проверить Codex: на PATH → вход (CODEX_HOME роли) → hello-проба
@@ -95,7 +106,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon start <направление> [поручение]   координатор: фоновая сессия domain-coordinator в окне направления
   pantheon start workshop <задача> [поручение]   мастерская: daedalus-<задача> в ~/projects/workshop/<задача>
   pantheon start zeus                   Пританей: ваша сессия hq в ~/ai/pantheon с окном hq.json   (--from zeus|tick|owner)
-                                        start, дошедший до запуска сессии, пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2); красный замер или «нет сигнала» без слова — код 5 (отложено); в окне роли origin берётся из PANTHEON_ROLE, явный --from там только свой (hq → zeus, иная роль → tick); wake пишет строку замера и не откладывает, wake <имя> "задание" из окна роли без слова владельца — отказ (код 2)
+                                        start, дошедший до запуска сессии, пишет замер в capacity.jsonl; --from zeus без слова владельца — отказ (код 2); красный замер или «нет сигнала» — только предупреждение (stderr, тревога раз в день), запуск идёт; в окне роли origin берётся из PANTHEON_ROLE, явный --from там только свой (hq → zeus, иная роль → tick); wake пишет строку замера и не откладывает, wake <имя> "задание" из окна роли без слова владельца — отказ (код 2)
   pantheon start <направление> --at ЧЧ:ММ [поручение]   разовый запуск плановым проходом вместо sleep в сессии;
                                         --at-list — записи, --at-cancel <id> — отменить (lib/night.py)
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
@@ -106,10 +117,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon revisits                     пересмотры к сроку и по событиям (плановый проход раз в сутки)
   pantheon wake <имя> ["задание"]        поднять уснувшую сессию направления той же сессией; задание из окна роли
                                         — только по слову владельца в окне Зевса за 15 мин, иначе код 2
-  pantheon wake hestia --task <id> [--dry-run]   Гестия в своём окне песочницы (settings/hestia.json) с открытой
+  pantheon wake hestia --task <id> [--restart] [--dry-run]   Гестия в своём окне песочницы (settings/hestia.json) с открытой
                                         задачей; без задачи или с закрытой — отказ «нет задачи» (код 2); из окна
                                         роли — только по слову владельца в окне Зевса за 15 мин, иначе код 2;
-                                        из окна роли, кроме hq, со словом в красной зоне — код 5 «отложено» (повторите сами);
                                         из окна hq — как start --from zeus
   pantheon wake <направление> --task <id> [--dry-run]   направление с coordinator = false в directions.toml ведёт
                                         Пританей (metis-0155): start/wake координатора — отказ (код 2), а это поднимает
@@ -123,6 +133,11 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon saved --by <имя> --state <путь>   сессия сохранилась перед техперезапуском; без техперезапуска —
                                         метка «можно» для перезапуска после обновления плагинов
   pantheon infra-check                  опоры системы после обновления Claude Code
+  pantheon reap [--apply] [--pid N …]   виновники памяти (lib/culprits.py, metis-0568): процессы claude/node/tsx/
+                                        next/vitest/pnpm и сироты multiprocessing старше 2 ч — чей, память, возраст;
+                                        --apply гасит только брошенное (worktree удалён, задача закрыта, сирота в
+                                        папках Пантеона) и печатает вопрос «[id] …» об остальном своём; --pid — после
+                                        «да» владельца, только процессы Пантеона (у Гестии — по `pantheon consent`)
   pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (плановый проход раз в неделю);
                                         запись закрыта (окно роли) — отчёт в stdout, причина в stderr, код 1
   pantheon metrics sync|summary|run     учёт по задачам: строки закрытых задач в ~/ai/pantheon/metrics/tasks.jsonl
@@ -146,6 +161,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         ~/.claude/agents → roles build; плановый проход делает это сам, «Нет» — rejected
   pantheon role status [<имя>] | cancel <имя>   заявки на роли | отозвать открытую заявку
   pantheon approve [list] | add --site S --allow "…" [--limits "…"] | remove N   заранее разрешённое (только вы)
+  pantheon launch-question <id> запустить|перезапустить|вернуть <направление>   вопрос и варианты для окна вопросов
+                                        Зевса: ваш выбор «Да — запустить <имя>» плановый проход исполняет сам
+                                        (metis-0523); «вернуть» снимает и «остановлено вами»
   pantheon consent <id> [--days N]      ваш ответ Зевсу на вопрос <id> (журнал owner-log Зевса, по умолчанию 7 дней) —
                                         для исполнителя: согласие, данное в окне Зевса
   pantheon review test -- <команда…>    тесты для шлюза слияния (guard 0.5.9): в чистом дереве git запустить
@@ -167,8 +185,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon review status [<owner/repo> <PR>]   записи журнала ~/.local/state/pantheon/merge-gate/records.jsonl и
                                         метки «ревью идёт»; у вердикта — рецензент (agent_id/сессия, по 8 знаков),
                                         с PR — строка «итог на <head>: принять N, вернуть M» по последнему вердикту
-                                        каждого argus, как считает шлюз защит: «принять» — только с полным перечнем
-                                        и на Opus (по ней решают об узком повторе, metis-0393)
+                                        каждого argus: «принять» — только с полным перечнем, на любой модели (вне
+                                        ядра шлюз так и считает); если часть «принять» не на Opus — ещё строка «для PR
+                                        ядра» с числами только по Opus. По ним решают об узком повторе, metis-0393
   pantheon commit                       commit → pull без rebase → push ~/ai/pantheon
   pantheon install | uninstall          поставить или снять задачу launchd pantheon.tick
   pantheon tick                         один проход планировщика (его вызывает launchd)
@@ -181,8 +200,8 @@ PANTHEON_NO_NOTIFY — без уведомлений, PANTHEON_NOTIFY_LOG — у
 Тест или проба (PANTHEON_TEST или папка состояния не настоящая) на экран уведомлений не шлёт: они идут строкой
 в STATE/notify-test.log (metis-0307).
 """
-import collections
 import contextlib
+import errno
 import fcntl
 import fnmatch
 import glob
@@ -190,7 +209,6 @@ import hashlib
 import json
 import os
 import re
-import resource
 import shlex
 import shutil
 import signal
@@ -262,29 +280,132 @@ def path(*parts):
     return os.path.join(STATE, *parts)
 
 
+# Окно Зевса пишет только в STATE/hq-rw/locks и STATE/hq-rw/autostart-reset (metis-0523, ревью безопасности): там замки
+# имён сессий (start-*, wake) и метки сброса самозапуска, которые берут его `pantheon start|wake|stop|resume`. Замки
+# прохода (tick, watch, board, notify, git…) — в STATE/locks, куда окно не пишет. Файл в hq-rw открывается
+# hq_open: O_NOFOLLOW|O_NONBLOCK через дескриптор папки, затем fstat — обычный файл, одна ссылка, владелец — мы; иначе
+# UnsafeFile, и файл не тронут. Ждущий замок в hq-rw ждёт не дольше HQ_LOCK_WAIT: окно не повесит проход.
+HQ_RW = "hq-rw"
+HQ_RW_DIRS = ("locks", "autostart-reset")
+HQ_LOCK_WAIT = float(os.environ.get("PANTHEON_HQ_LOCK_WAIT") or 60)  # с; переменная — для тестов
+# errno, которые даёт подложенная запись (ссылка, FIFO без читателя, папка, не папка на месте папки) — это UnsafeFile
+HQ_BAD_ERRNO = {errno.ELOOP, errno.ENXIO, errno.EISDIR, errno.ENOTDIR, errno.EMLINK, errno.EOPNOTSUPP}
+
+
+class UnsafeFile(OSError):
+    """Файл в папке окна Зевса — ссылка, жёсткая ссылка, не обычный файл или чужой: не пишем."""
+
+
+def hq_lock_name(name):
+    """Замок, который берёт и окно Зевса, — живёт в STATE/hq-rw/locks."""
+    return name.startswith("start-") or name == "wake"
+
+
+def hq_open(sub, fname):
+    """Дескриптор для дозаписи STATE/hq-rw/<sub>/<fname> (создаётся, 0600) после проверки; иначе UnsafeFile/OSError."""
+    if sub not in HQ_RW_DIRS or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,120}", fname or ""):
+        raise UnsafeFile(f"{sub}/{fname}: имя не по образцу")
+    d = path(HQ_RW, sub)
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileExistsError:
+        raise UnsafeFile(f"{sub}: на месте папки не папка") from None
+    except OSError as e:
+        if e.errno in HQ_BAD_ERRNO:
+            raise UnsafeFile(f"{sub}: на месте папки ссылка или не папка ({e.strerror})") from None
+        raise
+    try:
+        fd = os.open(fname, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=dfd)
+    except OSError as e:
+        if e.errno in HQ_BAD_ERRNO:
+            raise UnsafeFile(f"{sub}/{fname}: ссылка, FIFO или папка ({e.strerror})") from None
+        raise
+    finally:
+        os.close(dfd)
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != os.getuid():
+        os.close(fd)
+        raise UnsafeFile(f"{sub}/{fname}: не обычный файл, ссылок {st.st_nlink} или владелец {st.st_uid}")
+    return fd
+
+
+def hq_mark(sub, fname, text):
+    """Метка в STATE/hq-rw/<sub>: подложенную запись на месте имени (ссылку, FIFO, жёсткую ссылку) снимаем через
+    дескриптор папки (unlink ссылку не проходит) и пишем заново. Не вышло — предупреждение и False, без исключения."""
+    try:
+        try:
+            fd = hq_open(sub, fname)
+        except UnsafeFile:
+            dfd = os.open(path(HQ_RW, sub), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                with contextlib.suppress(OSError):
+                    os.unlink(fname, dir_fd=dfd)
+            finally:
+                os.close(dfd)
+            fd = hq_open(sub, fname)
+        try:
+            os.write(fd, text.encode())
+        finally:
+            os.close(fd)
+        return True
+    except OSError as e:
+        print(f"pantheon: метка {sub}/{fname} не записана — {e}", file=sys.stderr)
+        return False
+
+
 @contextlib.contextmanager
 def lock(name, block=True):
-    """flock на файле в ~/.local/state/pantheon/locks/. Отдаёт True, если блокировка взята."""
+    """flock на файле в STATE/locks/ (замки имён сессий — в STATE/hq-rw/locks, см. выше). Отдаёт True, если взята."""
+    shared = hq_lock_name(name)
     try:
-        os.makedirs(path("locks"), exist_ok=True)
-        fh = open(path("locks", name + ".lock"), "a")
-    except PermissionError as e:
-        # окно Зевса не пишет в locks/ (metis-0078): ждущую блокировку имени сессии pantheon stop берёт, чтобы подъём,
-        # начатый до метки «остановлено», не проскочил после неё. Без права записи метка stopped/<имя> всё равно
-        # ставится первой, а проскочить может только подъём, уже прошедший проверку метки в ту же секунду, — stop
-        # идёт без блокировки с предупреждением. Замок alerts — тоже: строка тревоги дописывается одним write в режиме
-        # append, она не рвётся. Неблокирующие замки (start, тик) и git без файла не берутся.
-        if not (block and (name.startswith("start-") or name in ("alerts", "unlinked"))):
-            raise
-        print(f"pantheon: нет права записи в {path('locks').replace(HOME, '~')} ({e.strerror}) — работаю без "
+        if shared:
+            fd = hq_open("locks", name + ".lock")
+        else:
+            os.makedirs(path("locks"), exist_ok=True)
+            fd = os.open(path("locks", name + ".lock"), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        fh = os.fdopen(fd, "a")
+    except UnsafeFile as e:
+        print(f"pantheon: блокировка {name} не взята — {e}", file=sys.stderr)
+        yield False
+        return
+    except OSError as e:
+        if not (isinstance(e, PermissionError) and block and (name.startswith("start-") or name in ("alerts", "unlinked"))):
+            if not shared:
+                raise
+            # любой иной сбой на пути hq-rw — отказ замка с предупреждением, а не падение start и прохода
+            print(f"pantheon: блокировка {name} не взята — {type(e).__name__}: {e}", file=sys.stderr)
+            yield False
+            return
+        # окно без записи в папку замков (собранное до metis-0523, metis-0078): ждущую блокировку имени сессии pantheon
+        # stop берёт, чтобы подъём, начатый до метки «остановлено», не проскочил после неё. Без права записи метка
+        # stopped/<имя> всё равно ставится первой, а проскочить может только подъём, уже прошедший проверку метки в ту
+        # же секунду, — stop идёт без блокировки с предупреждением. Замок alerts — тоже: строка тревоги дописывается
+        # одним write в режиме append, она не рвётся. Неблокирующие замки (start, тик) и git без файла не берутся.
+        where = path(HQ_RW, "locks") if shared else path("locks")
+        print(f"pantheon: нет права записи в {where.replace(HOME, '~')} ({e.strerror}) — работаю без "
               f"блокировки {name}: подъём этой же сессии в ту же секунду может проскочить", file=sys.stderr)
         yield True
         return
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
-        got = True
-    except BlockingIOError:
-        got = False
+    got = False
+    if shared and block:  # окно Зевса держит этот замок сколько угодно — проход ждёт не дольше HQ_LOCK_WAIT
+        deadline = time.monotonic() + HQ_LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                got = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    print(f"pantheon: блокировка {name} занята дольше {HQ_LOCK_WAIT:.0f} с — иду без него", file=sys.stderr)
+                    break
+                time.sleep(0.2)
+    else:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
+            got = True
+        except BlockingIOError:
+            got = False
     try:
         yield got
     finally:
@@ -402,12 +523,32 @@ def clean_path(path_value, plugin_dir=None):
     return ":".join(out)
 
 
+def nvm_bin():
+    """bin версии node по умолчанию из nvm (alias/default, иначе новейшая): там node, pnpm и corepack. Окна запускает
+    launchd без ~/.zprofile, и nvm в их PATH не было — `pnpm check` разработчика не находил pnpm (metis-0563)."""
+    root = os.path.join(os.environ.get("NVM_DIR") or os.path.join(HOME, ".nvm"), "versions", "node")
+    try:
+        vers = sorted((v for v in os.listdir(root) if v.startswith("v")), key=lambda v: _vkey(v[1:]))
+    except OSError:
+        return None
+    try:
+        want = open(os.path.join(os.path.dirname(os.path.dirname(root)), "alias", "default")).read().strip().lstrip("v")
+    except OSError:
+        want = ""
+    pick = [v for v in vers if want and (v[1:] == want or v[1:].startswith(want + "."))]
+    v = (pick or vers or [None])[-1]
+    return os.path.join(root, v, "bin") if v else None
+
+
 def run_env():
     env = dict(os.environ)
     if env.get("PATH"):
         env["PATH"] = clean_path(env["PATH"])
     extra = [os.path.join(installed_plugin_dir(), "bin"), os.path.dirname(sys.executable), "/opt/homebrew/bin",
              os.path.join(HOME, ".local", "bin")]
+    nvm = nvm_bin()
+    if nvm and nvm not in (env.get("PATH") or "").split(":"):
+        extra.insert(1, nvm)
     env["PATH"] = ":".join(extra + [env.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin"])
     env["PANTHEON_PYTHON"] = sys.executable  # bin/pantheon дочерних задач берёт тот же интерпретатор (lib/find-python.sh)
     return env
@@ -531,12 +672,20 @@ JOB_EXCLUDED = ["pantheon alert *"]
 JOB_NO_AGENTS = "никого"
 # Встроенные типы Claude Code — в deny окна задачи вместе с ролями из ~/.claude/agents и лидами реестра
 BUILTIN_AGENTS = ["general-purpose", "claude", "Explore", "Plan", "statusline-setup", "claude-code-guide"]
-# Окно Гестии (metis-0245): мимо песочницы — только выпуск плагинов (`pantheon plugins update`: тесты, установка,
-# сверка хеша, проверенное дерево — голый `claude plugin update` оставил бы непроверенное и закрыл окна ролей),
-# сборка окон и ролей, технический перезапуск окон и тревога. Остальные подкоманды pantheon — в песочнице, а какие ей
-# вообще можно, решает guard (правило hestia). Файловых правок, веба и субагентов у окна нет
+# Окно Гестии (metis-0245): мимо песочницы — только выпуск плагинов (`pantheon plugins update`: сверка с записью
+# выпуска, установка, сверка хеша, проверенное дерево — голый `claude plugin update` оставил бы непроверенное и
+# закрыл окна ролей), сборка окон и ролей, технический перезапуск окон и тревога. Остальные подкоманды pantheon — в песочнице, а какие ей
+# вообще можно, решает guard (правило hestia). Файловых правок, веба и субагентов у окна нет.
+# `pantheon reap` (metis-0568) — тоже мимо песочницы: в ней ps, lsof и kill чужих процессов не работают; что гасить,
+# решает сама команда (только брошенное в папках Пантеона, остальное — по «да» владельца через consent)
+# Наружу (metis-0562, «Да, по consent» владельца 27.10 22:38): сеть у песочницы пустая; мимо неё — только `git push`
+# и запись в PR (`gh pr create|edit`; в песочнице macOS они не работают, как у окон направлений) и `pantheon consent`
+# (читает журнал владельца). Условие — в guard: push и запись в PR без свежей метки именно этой задачи (PANTHEON_TASK
+# окна; метку ставит `pantheon consent` только на явное «да») — отказ
 HESTIA_EXCLUDED = ["pantheon plugins update", "pantheon plugins update *", "pantheon domains build",
-                   "pantheon restart *", "pantheon alert *"]
+                   "pantheon restart *", "pantheon alert *", "pantheon consent *", "pantheon reap", "pantheon reap *",
+                   "git push", "git push *", "gh pr create *", "gh pr edit *"]
+HESTIA_CONSENT_DAYS = 1.0       # ответ владельца для метки Гестии — не старше суток
 HESTIA_DENY_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Agent"]
 
 
@@ -982,6 +1131,7 @@ def tick():
             alert_once("svc-sync", type(e).__name__, f"службы: сверка с launchd упала ({type(e).__name__}: {e})",
                        "pantheon-tick")
         merge_kick()
+        outside_kick()
         try:
             roles_tick()  # личные роли по вашей галочке на доске (metis-0262 PR 4)
         except Exception as e:  # сбой ролей не должен останавливать тик
@@ -2004,7 +2154,10 @@ def domains_build(if_changed=False):
                    *(os.path.join(l, ".claude", fn) for l in launches if l for fn in PROJECT_SETTINGS_FILES))
         newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
         # и пропавшее окно задачи расписания (P0-3): без него задача не идёт — в том числе сразу после обновления
-        if built >= newest and all(os.path.isfile(job_window(r)) for r in JOB_ROLES):
+        # и grants.toml: правка — сразу, срок разрешения — к сроку (grants_next)
+        newest = max(newest, os.path.getmtime(GRANTS) if os.path.exists(GRANTS) else 0)
+        due = read_json(path("domains.json")).get("grants_next")
+        if built >= newest and not (due and now() >= due) and all(os.path.isfile(job_window(r)) for r in JOB_ROLES):
             return 0
     with open(reg_path, "rb") as fh:
         reg = tomllib.load(fh)
@@ -2044,7 +2197,7 @@ def domains_build(if_changed=False):
             leads[name] = [f"{b}-{short}" for b in LEAD_ROLES if b in bases]
     write_json(path("domains.json"), {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml. Руками не править.",
-        "built": stamp(), "built_ts": now(), "domains": domains})
+        "built": stamp(), "built_ts": now(), "domains": domains, "grants_next": grants_load()[1]})
     # живую сессию с проблемой проектных allow останавливает только путь тика (--if-changed): ручная сборка и тесты
     # зовут её с настоящим claude в PATH — claude stop из них остановил бы ваши сессии
     built = sandbox_build(domains, policy_path, stores, leads, stop_live=if_changed)
@@ -2101,8 +2254,9 @@ HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks") for tail in ("", " *")] 
 # пускает guard (_PUSH_BAD)
 GIT_NETWORK = ["git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *"]
 COORDINATOR_COMPACT = 200000
-
-
+# Пароль демона CDP (~/.claude/tools/cdp-daemon.mjs, браузер с входами владельца): без него демон отвечает 401. Окнам
+# ролей файл закрыт на чтение — и песочницей Bash, и правилом Read ([sb-simplify] 27.10)
+CDP_TOKEN_DIR = os.path.join(HOME, ".config", "cdp-daemon")
 # Правила слияния через шлюз guard (permissions.allow и autoMode.allow окон координаторов) — в lib/window_rules.py:
 # он в ядре защит (metis-0174), его PR ждёт слияния владельцем. Имена здесь — для прежних вызовов и тестов
 def _window_rules():
@@ -2161,6 +2315,21 @@ def ssh_remote(folder):
         if re.search(r"\s(ssh://|[\w.-]+@[\w.-]+:)", out):
             return True
     return False
+
+
+def hq_state_dirs():
+    """Настоящие пути STATE/hq-rw/locks и STATE/hq-rw/autostart-reset (создаются) — запись окну Зевса. Сама hq-rw ему
+    не даётся: подменить подпапку ссылкой окно не может. Ссылка или не папка — не даётся."""
+    out = []
+    if os.path.islink(path(HQ_RW)):
+        return out
+    for n in HQ_RW_DIRS:
+        p = path(HQ_RW, n)
+        with contextlib.suppress(OSError):
+            os.makedirs(p, mode=0o700, exist_ok=True)
+        if os.path.isdir(p) and not os.path.islink(p):
+            out.append(os.path.realpath(p))
+    return out
 
 
 def _real_dir(p, roots, strict=False, create=False):
@@ -2230,8 +2399,100 @@ def sandbox_size(data):
     return sum(len(x.encode()) + 1 for x in items)
 
 
+# Ручные разрешения окнам ([sb-simplify] п. 6): ~/.claude/pantheon/grants.toml — его правит владелец или Метида
+# (protect-config), выпуск его не стирает. Каждое — со сроком: сборка применяет его по «until» включительно, потом
+# снимает сама (тик пересобирает окна к сроку) и пишет тревогу. Записи в ключи, конфиг и браузер — не даются
+GRANTS = os.path.join(HOME, ".claude", "pantheon", "grants.toml")
+GRANT_KEYS = {"allow": ("permissions", "allow"), "write": ("sandbox", "filesystem", "allowWrite"),
+              "domains": ("sandbox", "network", "allowedDomains")}
+# запись не даётся в ключи, конфиг, автозапуск, код и состояние Пантеона (STATE, ~/.local целиком, PANTHEON)
+GRANT_NO_WRITE = ("~/.claude", "~/.config", "~/.ssh", "~/.gnupg", "~/Library", "~/.local", "~/.zshrc", "~/.zprofile",
+                  "~/.bashrc", "~/.profile", STATE, PANTHEON)
+GRANT_STAR_SKIP = re.compile(r"hq|hestia|job-.+")  # «*» — окнам направлений и мастерской, не служебным
+
+
+def grants_load():
+    """grants.toml → (разрешения в силе, ближайший срок окончания в секундах или None, ошибки, истёкшие)."""
+    try:
+        with open(GRANTS, "rb") as fh:
+            raw = tomllib.load(fh).get("grant") or []
+    except FileNotFoundError:
+        return [], None, [], []
+    except (OSError, ValueError) as e:
+        return [], None, [f"grants.toml не читается: {e}"], []
+    live, errors, expired, nxt = [], [], [], None
+    for i, g in enumerate(raw if isinstance(raw, list) else [], 1):
+        win, until = g.get("window"), str(g.get("until") or "")
+        try:
+            end = (datetime.strptime(until, "%Y-%m-%d") + timedelta(days=1)).timestamp()
+        except ValueError:
+            errors.append(f"grant {i}: until — дата ГГГГ-ММ-ДД, а не {until!r}")
+            continue
+        if not isinstance(win, str) or not re.fullmatch(r"[a-z0-9-]+|\*", win):
+            errors.append(f"grant {i}: window — имя окна или «*», а не {win!r}")
+            continue
+        bad = [k for k in g if k not in GRANT_KEYS and k not in ("window", "until", "why")]
+        lists = {k: g[k] for k in GRANT_KEYS if k in g}
+        if bad or not lists or not all(isinstance(v, list) and all(isinstance(x, str) for x in v) for v in lists.values()):
+            errors.append(f"grant {i} ({win}): ключи — {', '.join(GRANT_KEYS)} списками строк" +
+                          (f"; лишние: {', '.join(bad)}" if bad else ""))
+            continue
+        norm = lambda x: os.path.realpath(os.path.expanduser(x))  # noqa: E731
+        glob_w = [x for x in lists.get("write", []) if re.search(r"[*?\[\]{}]", x) or not x.startswith(("/", "~/"))]
+        if glob_w:
+            errors.append(f"grant {i} ({win}): write — только путь от / или ~/ без шаблонов: {', '.join(glob_w)}")
+            continue
+        closed = [x for x in lists.get("write", []) if any(
+            norm(x) == norm(c) or norm(x).startswith(norm(c).rstrip("/") + "/") or norm(c).startswith(norm(x).rstrip("/") + "/")
+            for c in GRANT_NO_WRITE)]
+        if closed:
+            errors.append(f"grant {i} ({win}): запись в ключи, конфиг и автозапуск не даётся: {', '.join(closed)}")
+            continue
+        if end <= now():
+            expired.append((i, win, until))
+            continue
+        live.append({"window": win, "until": until, **lists})
+        nxt = end if nxt is None else min(nxt, end)
+    return live, nxt, errors, expired
+
+
+def grants_apply(name, data, grants):
+    """Разрешения окна name (и «*») — в его настройки, без повторов."""
+    for g in grants:
+        if g["window"] != name and not (g["window"] == "*" and not GRANT_STAR_SKIP.fullmatch(name)):
+            continue
+        for k, keys in GRANT_KEYS.items():
+            if k not in g:
+                continue
+            node = data
+            for key in keys[:-1]:
+                node = node.setdefault(key, {})
+            vals = list(node.get(keys[-1]) or [])  # копия: списки окна бывают общими константами модуля
+            for x in g[k]:
+                x = os.path.realpath(os.path.expanduser(x)) if k == "write" else x
+                if x not in vals:
+                    vals.append(x)
+            node[keys[-1]] = vals
+
+
+def grants_check():
+    """Тревоги сборки: ошибки в grants.toml и истёкшие разрешения (одна на разрешение)."""
+    _, _, errors, expired = grants_load()
+    if errors:
+        alert_once("grants-bad", "; ".join(errors), "grants.toml: " + "; ".join(errors[:5]) + " — эти разрешения "
+                   "не применены (Метида)", "pantheon")
+    else:
+        clear_once("grants-bad")
+    for i, win, until in expired:
+        alert_once(f"grant-expired-{win}-{until}-{i}", "1", f"grants.toml: разрешение {i} окну {win} истекло {until} — "
+                   "снято при сборке; продлить или удалить запись (Метида)", "pantheon")
+
+
 def write_window(out_dir, name, data):
-    """Файл окна, если его песочница в пределах SANDBOX_SIZE_LIMIT; иначе тревога и прежний файл остаётся."""
+    """Файл окна, если его песочница в пределах SANDBOX_SIZE_LIMIT; иначе тревога и прежний файл остаётся.
+    Разрешения grants.toml — сюда же; файлы запущенных сессий этого окна (settings/run/) обновляются: Claude Code
+    перечитывает их на ходу, и выданное или истёкшее разрешение доходит без перезапуска."""
+    grants_apply(name, data, grants_load()[0])
     size, key = sandbox_size(data), f"sandbox-size-{name}"
     if size > SANDBOX_SIZE_LIMIT:
         print(f"песочница {name}: {size} байт путей > {SANDBOX_SIZE_LIMIT} — окно не пересобрано", file=sys.stderr)
@@ -2242,6 +2503,16 @@ def write_window(out_dir, name, data):
         return False
     clear_once(key)
     write_json(os.path.join(out_dir, name + ".json"), data)
+    run_dir = os.path.join(out_dir, "run")
+    for f in os.listdir(run_dir) if os.path.isdir(run_dir) else []:
+        old = read_json(os.path.join(run_dir, f), {}) if f.endswith(".json") else {}
+        env = old.get("env") or {}
+        if env.get("PANTHEON_WINDOW") != name:
+            continue
+        new = json.loads(json.dumps(data))
+        new.setdefault("env", {}).update({k: env[k] for k in RUN_ENV if k in env})
+        if new != old:
+            write_json(os.path.join(run_dir, f), new)
     return True
 
 
@@ -2288,12 +2559,22 @@ def agents_script():
     return _installed_hook("pantheon", MARKET_AGENTS)
 
 
+def hook_python_cmd(script, *args):
+    """Команда хука окна на Python: через hooks/python.sh рядом со скриптом (Python 3.11+, metis-0571). Проверенное
+    дерево старее запускателя (его нет рядом) — прежняя форма `python3 <скрипт>`: guard сам перезапустится на 3.11+."""
+    tail = " ".join(shlex.quote(x) for x in (script, *args))
+    launcher = os.path.join(os.path.dirname(script), "python.sh")
+    if os.path.isfile(launcher):
+        return f"/bin/sh {shlex.quote(launcher)} {tail}"
+    return f"python3 {tail}"
+
+
 def agents_window(data, allowed, deny, script):
     """Окну (P0-6): хук `agents.py <список>` для главной сессии и правила deny Agent(<тип>) на всё окно. Запись
     guard и прежние правила (Read у штаба) остаются; без дублей, порядок стабильный."""
     uniq = lambda xs: list(dict.fromkeys(xs))  # noqa: E731
     data.setdefault("hooks", {}).setdefault("PreToolUse", []).append({"matcher": AGENT_MATCHER, "hooks": [{
-        "type": "command", "command": f"python3 {shlex.quote(script)} {shlex.quote(','.join(uniq(allowed)))}",
+        "type": "command", "command": hook_python_cmd(script, ','.join(uniq(allowed))),
         "timeout": 10, "onFailure": "block"}]})
     rules = data.setdefault("permissions", {}).setdefault("deny", [])
     rules.extend([r for r in uniq(f"Agent({x})" for x in deny) if r not in rules])
@@ -2328,14 +2609,17 @@ def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=
             "filesystem": {
                 "allowWrite": allow,
                 "denyWrite": deny_write,
-                "denyRead": _deny_forms(deny_read) + NOTIFIER_PATHS,
+                "denyRead": _deny_forms(deny_read) + NOTIFIER_PATHS + _deny_forms([CDP_TOKEN_DIR]),
             },
             "network": {"allowedDomains": SANDBOX_DOMAINS},
         },
+        # пароль демона CDP — и инструментам Read, Grep, Glob (песочница держит только Bash)
+        "permissions": {"deny": [f"Read({x}/**)" if x.startswith("~") else f"Read(/{x}/**)"
+                                 for x in _deny_forms([CDP_TOKEN_DIR.replace(HOME, "~", 1)])]},
     }
     if guard:
         data["hooks"] = {"PreToolUse": [{"matcher": GUARD_MATCHER, "hooks": [{
-            "type": "command", "command": f"python3 {shlex.quote(guard)} --strict", "timeout": 10,
+            "type": "command", "command": hook_python_cmd(guard, "--strict"), "timeout": 10,
             "onFailure": "block"}]}]}
     if compact:
         # координатор: окно сжатия 200k (CTX-04); фоновая сессия уходит в свою worktree, и worktree работников лида
@@ -2614,6 +2898,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             policy = tomllib.load(fh)
     except (OSError, ValueError):
         policy = {}
+    grants_check()
     extra = policy.get("sandbox_write") or {}
     private = private_conf(policy)
     private_paths = [p for p in private["paths"] if p.startswith("~/")]
@@ -2667,10 +2952,15 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             # заявка на слияние ядра по Touch ID (metis-0285) пишет в STATE/merge-queue — вне песочницы окна. Сливает
             # не она: `pantheon merge run` ролям закрыт guard, окно Touch ID показывает только плановый проход
             data["sandbox"]["excludedCommands"] += MERGE_REQUEST_CMDS
-        if name == "workshop":
-            # Unix-сокеты офлайн-тестов (metis-0278, решение владельца «А» 19.10) — только в своём кэше окна: не
-            # $TMPDIR (/tmp/claude-<uid> общий у всех сессий, там их сокеты); allowLocalBinding — нет, см. ниже
-            data["sandbox"]["network"]["allowUnixSockets"] = [cache]
+        # окна направлений и мастерская сами поднимают dev-сервер и гоняют тесты своего проекта ([sb-simplify] 27.10):
+        # Unix-сокеты (tsx IPC, профиль Chromium) — только в своём кэше окна, не в $TMPDIR (/tmp/claude-<uid> общий у
+        # всех сессий). Местных портов (allowLocalBinding) нет: он открывает весь localhost — и местный прокси (выход наружу
+        # мимо allowedDomains), и 9222 браузера; проверено в бинарнике 2.1.311, ревью 27.10
+        data["sandbox"]["network"]["allowUnixSockets"] = [cache]
+        # TMPDIR песочница ставит свой (/tmp/claude-<uid>, env окна его не перебивает — проба 27.10): тесты с сокетами
+        # запускают `TMPDIR=$PANTHEON_TMP …`
+        os.makedirs(os.path.join(cache, "tmp"), exist_ok=True)
+        data["env"]["PANTHEON_TMP"] = os.path.join(cache, "tmp")
         if allow:
             data.setdefault("permissions", {}).setdefault("allow", []).extend(allow)
         if agents:
@@ -2702,8 +2992,6 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             built.append(name)
     # мастерская пишет в папку запуска (~/projects/workshop/<задача>) и в workshop/ доски; список субагентов — вне P0-6
     one("workshop", ["~/projects/workshop"], os.path.join(PANTHEON, "workshop"), None, private_paths)
-    # местные порты мастерской закрыты: на macOS allowLocalBinding открывает все порты 127.0.0.1, в том числе демон CDP
-    # с входами владельца; браузеры владельца — только у роли Харон (решение владельца 15.10, отмена metis-0053)
     built.append("workshop")
     # окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` тика (parse_command добавляет --settings).
     # Пишет только своё (JOB_ROLES), память ролей и свой кэш; личное закрыто на чтение и запись; сети Bash нет (веб у
@@ -2743,7 +3031,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hs_cache = _real_dir(f"{caches}/hestia", [caches], strict=True, create=True)
     hs = role_settings([], None, [], hs_cache, False, private_paths, None, guard)
     hs["sandbox"]["excludedCommands"] = list(HESTIA_EXCLUDED)
-    hs["sandbox"]["network"]["allowedDomains"] = []
+    hs["sandbox"]["network"]["allowedDomains"] = []  # сети у песочницы нет; наружу — только excludedCommands + guard
     hs["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
     hs.setdefault("permissions", {}).setdefault("deny", []).extend(HESTIA_DENY_TOOLS)
     # denyRead песочницы держит только Bash; Read и Grep её не проходят, а главная сессия окна приходит без agent_type
@@ -2777,6 +3065,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hq = role_settings([root], None, memory, hq_cache, False, keys, None, guard)
     hq["sandbox"]["excludedCommands"] = list(HQ_EXCLUDED) + HQ_GH
     hq["sandbox"]["filesystem"]["denyWrite"] += [os.path.join(root, ".git"), os.path.join(root, "alerts.md")]
+    # [sb-simplify] п. 5 (metis-0523): замки имён сессий и метки сброса самозапуска — в STATE/hq-rw/{locks,autostart-reset}:
+    # без них `pantheon stop|resume|wake|start` из его окна падали с PermissionError (15.10–27.10). Замки прохода
+    # (STATE/locks), журналы ваших слов, метки «остановлено вами» и остальное состояние — по-прежнему нет
+    hq["sandbox"]["filesystem"]["allowWrite"] += hq_state_dirs()
     hq["sandbox"]["network"]["allowedDomains"] = []
     # корпус лекций — чужой контент (SEC-13, metis-0025): у Зевса уже есть личное и действия наружу, поэтому корпус ему
     # закрыт (решение владельца 15.10) — guard corpus-role (команда corpus), хук qmd-query (поиск), а здесь — чтение
@@ -2845,7 +3137,10 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
 HQ_EXCLUDED = ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheon wake *", "pantheon archive",
                "pantheon jobs *", "pantheon domains build", "pantheon roles build", "pantheon stop *",
                "pantheon resume *", "pantheon pause *", "pantheon restart *", "pantheon saved *", "pantheon who",
-               "pantheon agents"]
+               "pantheon agents", "sessync find", "sessync find *"]
+# `sessync find` (metis-0566, решение владельца 27.10): поиск прошлых разговоров читает транскрипты ~/.claude/projects, а
+# окну штаба они закрыты — поэтому только эта команда и только здесь, мимо песочницы; вывод проходит маску ключей в самом
+# sessync, а --raw и --no-mask отказывает guard (hq-sessync). Другим окнам команды нет: в их песочнице она не читает.
 START_MARK = "[Пантеон:"
 WAKE_TEXT = (START_MARK + " пробуждение] Тебя прервало выключение или перезапуск. Сверь файл состояния и «начато» без "
              "«сделано» (не повторяй внешнее действие, пока не проверишь, что оно не ушло), затем продолжай задачу.")
@@ -2992,7 +3287,11 @@ def load_pause(name):
     return None
 
 
-def run_settings(name, role, window, origin):
+RUN_ENV = ("PANTHEON_ORIGIN", "PANTHEON_SESSION", "PANTHEON_ROLE", "PANTHEON_WINDOW", "PANTHEON_TASK",
+           "PANTHEON_TASK_DIRECTION")
+
+
+def run_settings(name, role, window, origin, extra_env=None):
     """Окно этого запуска: настройки окна + PANTHEON_ORIGIN (кто запустил), имя и роль — переменные сессии и её
     хуков. → путь файла или None (окна нет: pantheon domains build)."""
     win = path("settings", window + ".json")
@@ -3002,6 +3301,8 @@ def run_settings(name, role, window, origin):
     data.setdefault("env", {})["PANTHEON_ORIGIN"] = origin
     data["env"]["PANTHEON_SESSION"] = name
     data["env"]["PANTHEON_ROLE"] = role
+    data["env"]["PANTHEON_WINDOW"] = window  # по нему сборка обновляет файл запущенной сессии (write_window)
+    data["env"].update(extra_env or {})  # wake hestia: PANTHEON_TASK, PANTHEON_TASK_DIRECTION — задача окна (metis-0562)
     run = path("settings", "run", name + ".json")
     write_json(run, data)
     return run
@@ -3319,12 +3620,15 @@ def _fresh_start(name, a, text, origin, reason=None):
     return 0
 
 
-def copies_message(name, live):
+def copies_message(name, live, again=None):
+    """again — готовая команда «начать заново» (у wake hestia сообщение сессии не доходит: blocked без сокета)."""
     tab = [a for a in live if not a.get("id")]
     if tab:
         return (f"{name} открыта во вкладке терминала (pid {tab[0].get('pid')}) — перейдите в неё или закройте её и "
                 "запустите снова")
     ids = ", ".join(f"{a.get('name')} {a['id']} ({a.get('state')})" for a in live)
+    if again:
+        return f"{name} уже работает: {ids}. Убрать её и поднять новую — {again}; или claude attach {live[0]['id']}"
     return (f"{name} уже работает: {ids}. Поручение — сообщением ей (SendMessage, адрес {name}) или claude attach "
             f"{live[0]['id']}; начать заново — тот же запуск с --restart")
 
@@ -3671,11 +3975,10 @@ def start(rest):
                                                                                     плановым проходом (вместо sleep)
     Запуск сессии пишет замер в STATE/capacity.jsonl (сессий Пантеона, давление памяти, свободно %, своп). Откуда запуск:
     --from, а без него по окну — PANTHEON_ROLE=hq это zeus, другая роль tick, без роли owner; в окне роли --from owner
-    и любой --from, не совпадающий с origin окна (hq → zeus, иная роль → tick), не принимаются (код 2). Отказ, код 2: zeus без вашего слова в owner-log/zeus.md за 15 мин (и у --at при постановке);
-    красный замер (своп выше порога дежурного, давление не «норма») или «нет сигнала» (своп и давление не прочитаны) —
-    код 5 «отложено» (не сбой: самозапуск и разовый запуск повторяются), слово только у owner и zeus со словом.
-    Разовый запуск (--at) исполняется по правилам планового прохода: в красной зоне ждёт, слово при постановке
-    не переносится."""
+    и любой --from, не совпадающий с origin окна (hq → zeus, иная роль → tick), не принимаются (код 2). Отказ, код 2: zeus без вашего слова в owner-log/zeus.md за 15 мин (и у --at при постановке).
+    Красный замер (своп выше порога дежурного, давление не «норма») или «нет сигнала» — только предупреждение
+    (строка в stderr, тревога раз в день, red в замере): запуск не откладывается ([sb-simplify] п. 5, metis-0523).
+    Разовый запуск (--at) исполняется по правилам планового прохода, слово при постановке не переносится."""
     dry = "--dry-run" in rest
     restart = "--restart" in rest
     rest = [a for a in rest if a not in ("--dry-run", "--restart")]
@@ -3707,7 +4010,7 @@ def start(rest):
         if not dry:  # сессии не считаем: лишний claude agents ломает сценарии ожидания имени; слово и память — да
             code, why = start_gate(target, origin, None)
             if why:
-                print(f"pantheon start: {'отказ' if code == 2 else 'отложено'} — {why}", file=sys.stderr)
+                print(f"pantheon start: отказ — {why}", file=sys.stderr)
                 return code
         # штаб — ваша интерактивная сессия в iTerm: команда заменяет себя на claude в ~/ai/pantheon
         argv = [claude_bin(), "--agent", "hq", "--name", "zeus", "--settings", path("settings", "hq.json")]
@@ -3762,18 +4065,19 @@ def start(rest):
     # проверка и запуск — под блокировкой имени: тик и Зевс не запустят две копии одновременно
     with lock("start-" + name, block=False) as got:
         if not got:
-            print(f"pantheon start: {name} уже запускается другой командой", file=sys.stderr)
+            print(f"pantheon start: {name} — блокировка имени не взята: уже запускается другой командой или запись блокировки "
+                  f"подложена (строка выше)", file=sys.stderr)
             return 1
         return _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win)
 
 
 def _start_session(name, role, folder, window, default_task, rest, origin, dry, restart, win, need_word=False,
-                   cmd="pantheon start"):
+                   cmd="pantheon start", extra_env=None, again=None):
     agents = agents_all()
     if not dry:  # metis-0261 А: слово владельца и замер — до любых действий; список сессий тот же, что ниже
         code, why = start_gate(name, origin, agents, need_word)
         if why:
-            print(f"{cmd}: {'отказ' if code == 2 else 'отложено'} — {why}", file=sys.stderr)
+            print(f"{cmd}: отказ — {why}", file=sys.stderr)
             return code
     same = [a for a in agents or [] if a.get("name") == name]
     live = live_copies(name, agents)
@@ -3787,7 +4091,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
             for a in dead:
                 start_log(f"dead-blocked\t{name}\t{a['id']}\tнет процесса и вопроса — заменяется новой")
     if live and not dry and (not restart or any(not a.get("id") for a in live)):
-        print(f"pantheon start: {copies_message(name, live)}", file=sys.stderr)
+        print(f"{cmd}: {copies_message(name, live, again)}", file=sys.stderr)
         return 1
     stopped = []
     if live and not dry:
@@ -3817,7 +4121,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     if dry:
         print(shlex.join(argv), f"(папка {folder})")
         return 0
-    if run_settings(name, role, window, origin) != run:  # окно пропало после проверки — прежний файл запуска не берём
+    if run_settings(name, role, window, origin, extra_env) != run:  # окно пропало после проверки — прежний файл запуска не берём
         print(f"pantheon start: нет окна {win.replace(HOME, '~')} — pantheon domains build", file=sys.stderr)
         return 1
     before = {a.get("id") for a in agents_all() or [] if a.get("id")}
@@ -3876,11 +4180,9 @@ def capacity_probe(agents):
                               and w.is_pantheon(a.get("name"), doms))
     with contextlib.suppress(Exception):
         out["swap_gb"] = w.swap_gb()
-    with contextlib.suppress(Exception):
-        r = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True, text=True,
-                           timeout=10)
-        if r.returncode == 0 and r.stdout.strip().isdigit():
-            out["pressure"] = int(r.stdout.strip())
+    # через _memory_pressure: она понимает подмену PANTHEON_FAKE_PRESSURE — прямой sysctl тут давал тестам давление
+    # настоящего Mac, и при «предупреждении» у владельца test_watch падал целиком (36 из 85)
+    out["pressure"] = _memory_pressure()
     with contextlib.suppress(Exception):
         r = subprocess.run(["memory_pressure"], capture_output=True, text=True, timeout=10)
         m = re.search(r"free percentage:\s*(\d+)%", r.stdout)
@@ -3911,7 +4213,7 @@ def capacity_log(row):
 NO_WORD_WHY = (f"запуск от Зевса без вашего слова в его окне за {OWNER_WORD_WINDOW // 60} мин "
                "(сообщение другой сессии согласием не считается)")
 START_REFUSED = 2   # отказ: нет слова владельца (--from zeus) — повтор бесполезен
-START_DEFERRED = 5  # отложено: красный замер памяти без слова владельца — повторит следующий плановый проход, не сбой
+START_DEFERRED = 5  # было «отложено по красной памяти»; с [sb-simplify] п. 5 start_gate его не отдаёт (код занят)
 # (3 и 4 заняты: NO_WINDOW и SKIPPED у resume_session, те же числа дошли бы до дежурного как коды запуска)
 
 
@@ -3920,9 +4222,11 @@ def start_gate(target, origin, agents, need_word=False):
     дошедшего до этого шага; ранние выходы — «остановлено вами», «нет окна», занятое имя — и продолжение через
     resume_session строки не пишут). → (код, причина); (0, None) — можно.
     Слово владельца: --from owner (по умолчанию) — он сам; --from zeus — его свежая запись в owner-log/zeus.md (без неё
-    отказ, код 2, всегда); tick слова не имеет и в красной зоне получает код 5 (отложено) при любом zeus.md.
+    отказ, код 2, всегда); tick слова не имеет.
     need_word (wake hestia из окна роли, не hq): запуск с поручением из окна роли — только по свежей записи в zeus.md,
-    без неё отказ, код 2, в любой зоне (как wake <имя> "задание"); со словом tick по-прежнему откладывается в красной."""
+    без неё отказ, код 2, в любой зоне (как wake <имя> "задание").
+    Память (своп, давление) — только предупреждение для любого origin: строка в stderr и тревога раз в день, запуск идёт
+    ([sb-simplify] п. 5, metis-0523; было — код 5 «отложено»)."""
     m = capacity_probe(agents)
     word = origin == "owner" or (origin == "zeus" and owner_spoke_recently("zeus", OWNER_WORD_WINDOW))
     code, why = 0, None
@@ -3931,12 +4235,15 @@ def start_gate(target, origin, agents, need_word=False):
     elif need_word and origin != "owner" and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
         code, why = START_REFUSED, (f"поручение из окна роли — только по вашему слову: в журнале Зевса нет вашей строки "
                                     f"за {OWNER_WORD_WINDOW // 60} мин (сообщение другой сессии согласием не считается)")
-    elif (m["red"] or m["unknown"]) and not word:
+    elif m["red"] or m["unknown"]:
+        # [sb-simplify] п. 5 (metis-0523): своп и давление памяти — только предупреждение, запуск не откладывается.
+        # Строка в stderr и одна тревога в день; от расхода держит потолок недели (night.gate), а не замер памяти
         reasons = "; ".join(m["red"]) if m["red"] else "нет сигнала: своп и давление памяти не прочитаны"
-        # wake hestia (need_word) никто не повторяет — не обещать самозапуск (ревью #110, круг 6)
-        again = "слово в окне Зевса из окна роли красную зону не снимает; повторите после нормы памяти" if need_word else "самозапуск повторит позже"
-        code, why = START_DEFERRED, (f"память Mac в красной зоне ({reasons}) — запуск только со словом владельца, "
-                                     f"{again}")
+        print(f"pantheon start: предупреждение — память Mac в красной зоне ({reasons}), {target} запускается",
+              file=sys.stderr)
+        with contextlib.suppress(OSError):  # тревога — подсказка: её сбой запуск не держит
+            alert_once("start-memory-red", stamp()[:10], f"запуски идут при красной памяти Mac ({reasons}) — "
+                       f"предупреждение, не отказ; первый за день: {target}", "pantheon-start")
     capacity_log({"t": round(now(), 1), "at": stamp(), "target": target, "origin": origin, "sessions": m["sessions"],
                   "pressure": m["pressure"], "free_pct": m["free_pct"], "swap_gb": None if m["swap_gb"] is None
                   else round(m["swap_gb"], 2), "red": bool(m["red"]),
@@ -3987,7 +4294,7 @@ def wake_recheck(name, state=None):
 
 
 def wake_hestia(rest):
-    """pantheon wake hestia --task <id> [--dry-run] (metis-0217, metis-0245): Гестия — фоновой сессией `hestia` в своём
+    """pantheon wake hestia --task <id> [--restart] [--dry-run] (metis-0217, metis-0245): Гестия — фоновой сессией `hestia` в своём
     окне песочницы (settings/hestia.json, собирает sandbox_build; PANTHEON_ROLE=hestia — правило guard hestia), папка
     запуска — её кэш. Одна задача — одна сессия: без задачи, с id не по образцу, несуществующей или не открытой задачей
     — отказ «нет задачи», код 2, claude не зовётся. Нет окна, кэша или роли (~/.claude/agents/hestia.md) — код 1 с
@@ -3995,7 +4302,8 @@ def wake_hestia(rest):
     Откуда — как у start: hq → zeus, иная роль → tick, без роли → owner; из окна роли без вашего слова в
     owner-log/zeus.md за 15 мин — отказ, код 2, строка refused в capacity.jsonl, claude не зовётся."""
     dry = "--dry-run" in rest
-    args = [a for a in rest[1:] if a != "--dry-run"]
+    restart = "--restart" in rest  # metis-0575: зависшую прежнюю Гестию стопит и убирает (claude stop, затем rm_previous)
+    args = [a for a in rest[1:] if a not in ("--dry-run", "--restart")]
     tid = args[1] if len(args) == 2 and args[0] == "--task" else None
     head = None
     if tid and tasks_mod().ID_RE.fullmatch(tid):
@@ -4032,8 +4340,10 @@ def wake_hestia(rest):
         if not got:
             print("pantheon wake hestia: hestia уже запускается другой командой", file=sys.stderr)
             return 1
-        return _start_session("hestia", "hestia", folder, "hestia", task, [], origin, dry, False, win,
-                              need_word=bool(role), cmd="pantheon wake hestia")
+        return _start_session("hestia", "hestia", folder, "hestia", task, [], origin, dry, restart, win,
+                              need_word=bool(role), cmd="pantheon wake hestia",
+                              again=f"pantheon wake hestia --task {tid} --restart",
+                              extra_env={"PANTHEON_TASK": tid, "PANTHEON_TASK_DIRECTION": str(head.get("direction") or "")})
 
 
 def wake_lead(rest):
@@ -4320,6 +4630,12 @@ def _marked(text, tmpl):
 ROLES_DEFERRED = {}
 
 
+def _head_lines(text):
+    """Строки шапки роли между --- и ---; [] — шапки нет."""
+    end = text.find("\n---\n", 3) if text.startswith("---\n") else -1
+    return text[4:end].splitlines() if end >= 0 else []
+
+
 def _head_names(text):
     """Значения полей name: шапки роли без кавычек, по порядку; [] — шапки или поля нет, два и больше — повтор."""
     end = text.find("\n---\n", 3) if text.startswith("---\n") else -1
@@ -4409,6 +4725,15 @@ def roles_build(src=None, out=None, role_errors=None):
                     else "повторён (" + ", ".join(f"«{g}»" for g in got) + ")")
             err(tmpl, f"{tmpl} → {fname}: поле name: в шапке {what} — не совпадает с именем роли «{fname[:-3]}», "
                 f"роль не собрана")
+    # шаблон Bash(...) в disallowedTools шапки: Claude Code 2.1.312 убирает из-за него Bash целиком (metis-0576, Гестия
+    # осталась без Bash). Запреты по командам — в guard и deny окна, а не в шапке роли; роль не собирается, прежняя
+    # собранная версия остаётся
+    for fname in sorted(want):
+        if any(re.match(r"disallowedTools\s*:.*\bBash\s*\(", ln) for ln in _head_lines(want[fname][1])):
+            tmpl = want.pop(fname)[0]
+            kept.add(fname)
+            err(tmpl, f"{tmpl} → {fname}: Bash(...) в disallowedTools шапки убирает Bash целиком (metis-0576) — запрет "
+                "команд ставят в guard или permissions.deny окна; роль не собрана")
     made = []
     if want:  # и на новой машине: ~/.claude/agents ещё нет, а общие роли плагина собрать надо
         os.makedirs(out, exist_ok=True)
@@ -5438,6 +5763,22 @@ def direction(rest):
 # записи с номером его вопроса.
 CONSENT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 CONSENT_MAX = 1500
+# вопрос `pantheon reap --apply` об остальном своём (lib/culprits.py): «да» на него — метка <id>.reap со списком pid
+# из вопроса, а не метка push (metis-0568: согласия на push и на гашение не путаются)
+CONSENT_REAP_Q = "Погасить процессы Пантеона"
+
+
+CONSENT_ANSWER = re.compile(r"^ответ:[ \t]*(.*)$", re.M)
+CONSENT_YES = re.compile(r"да(?![\w-])", re.I)
+CONSENT_NO = re.compile(r"(?<![\w-])(?:не|нет|no)(?![\w-])", re.I)
+
+
+def consent_is_yes(body):
+    """Явное «да» владельца в записи ответа: строка «ответ: …» начинается словом «да» и в ней нет «не», «нет»
+    («Да — отправить», «Да, по consent» — да; «Нет», «Да, но не сегодня», «Другое» — нет)."""
+    m = CONSENT_ANSWER.search(body or "")
+    ans = m.group(1).strip() if m else ""
+    return bool(CONSENT_YES.match(ans)) and not CONSENT_NO.search(ans)
 
 
 def consent(rest):
@@ -5450,6 +5791,14 @@ def consent(rest):
             days = min(30.0, max(0.1, float(rest[rest.index("--days") + 1])))
         except (IndexError, ValueError):
             print("pantheon consent: --days — число дней", file=sys.stderr)
+            return 2
+    hestia = os.environ.get("PANTHEON_ROLE") == "hestia"
+    if hestia:
+        days = min(days, HESTIA_CONSENT_DAYS)
+        # окно Гестии одно на задачу (wake hestia --task): согласие — только на id этой задачи (metis-0562)
+        if not CONSENT_ID.fullmatch(os.environ.get("PANTHEON_TASK") or "") or qid != os.environ["PANTHEON_TASK"]:
+            print(f"pantheon consent: из окна hestia — только по своей задаче ({os.environ.get('PANTHEON_TASK') or 'не задана'}), "
+                  f"не по {qid}", file=sys.stderr)
             return 2
     try:
         with open(path("owner-log", "zeus.md"), encoding="utf-8") as fh:
@@ -5500,12 +5849,38 @@ def consent(rest):
                       "сообщения людям, удаление — не по галочке, только окном вопросов)",
                       f"вопрос: {q.strip()}\nответ: {a.strip()}"))
     found.sort(key=lambda x: x[0])
+    said_yes = any(consent_is_yes(body) for _, _, body in found)
+    last_yes = next(((head, body) for _, head, body in reversed(found) if consent_is_yes(body)), ("", ""))
+    reap_q = last_yes[1].split("\nответ:")[0]
+    reap_q = reap_q if CONSENT_REAP_Q in reap_q else None
     found = [(head, body if len(body) <= CONSENT_MAX else body[:CONSENT_MAX] + "…") for _, head, body in found]
     hint = (f"\nУпоминаний {qid} в словах владельца без окна вопросов: {mentions} — это не ответ; попроси Зевса "
             f"переспросить окном вопросов «[{qid}] …»." if mentions else "")
     if not found:
         print(f"ответа владельца на {qid} в окне вопросов Зевса и на доске за {days:g} дн. нет{hint}")
         return 1
+    if hestia and not said_yes:
+        print(f"Ответ на {qid} есть, но это не «да» — метки для окна нет; наружу не иди, отчёт Зевсу.")
+        for t, body in found:
+            print(f"\n## {t}\n{body}")
+        return 1
+    if hestia and reap_q is not None and "окно вопросов" not in last_yes[0]:
+        print(f"«Да» на {qid} о гашении процессов — галочкой на доске, а не в окне вопросов: метки нет, отчёт Зевсу.")
+        return 1
+    if hestia:
+        # метка «владелец ответил «да»»: по ней guard пускает окно Гестии в push и запись в PR на 2 часа, только для
+        # этой задачи (metis-0562). Нет метки (запись не удалась) — код 3, а не «согласие есть». «Да» на вопрос о
+        # гашении — своя метка <id>.reap с pid из вопроса: её читает только pantheon reap (metis-0568)
+        try:
+            d = os.path.join(STATE, "hestia-consent")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, qid + (".reap" if reap_q is not None else "")), "w", encoding="utf-8") as fh:
+                fh.write(f"{stamp()} {qid}\n")
+                if reap_q is not None:
+                    fh.write("pids: " + " ".join(re.findall(r"\bpid (\d+)", reap_q)) + "\n")
+        except OSError as e:
+            print(f"pantheon consent: метку для окна записать не удалось ({e}) — наружу не пустят", file=sys.stderr)
+            return 3
     print(f"Ответы владельца на {qid} (журналы пишут хук и плановый проход, не роли; сверь, что ответ — на твой вопрос и твоё действие):")
     for t, body in found:
         print(f"\n## {t}\n{body}")
@@ -5667,7 +6042,7 @@ def verified_write(name, root, digest, version, by):
 def installed_dir(name, checked=True):
     """Дерево плагина name@agent-kit, с которым работает живой код: current, `pantheon install`, хуки окон ролей,
     версия в status (metis-0321). Разрешение, а не запрет: годится только дерево, чей хеш совпал с verified.json (его
-    пишет успешная установка plugins-update — тесты и сверка — или ваша команда `pantheon plugins accept`).
+    пишет успешная установка plugins-update — выпуск после CI и сверка — или ваша команда `pantheon plugins accept`).
     1. installPath из installed_plugins.json (уровень пользователя, внутри ~/.claude/plugins/cache) с хешем из записи.
     2. Иначе — последнее проверенное дерево по пути из записи, если оно цело (хеш тот же), и тревога.
     3. Иначе None и тревога: проверенного нет. Клон маркетплейса — никогда.
@@ -5789,6 +6164,22 @@ def merge_kick():
         alert_once("merge-kick", type(e).__name__, f"слияние по Touch ID: проход не запущен ({type(e).__name__}: {e})",
                    "pantheon-tick")
 
+
+def outside_kick():
+    """Проверки вне окна роли ([sb-simplify] п. 7, lib/outside.py) — отдельным процессом: тесты идут минутами."""
+    try:
+        if locked("outside-run") or not outside_mod().pending():
+            return
+        if os.environ.get("PANTHEON_DRYRUN") == "1":
+            with open(path("dryrun.log"), "a") as fh:
+                fh.write(f"{int(now())} outside-run\n")
+            return
+        subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "outside", "run"], env=outside_mod().pass_env(),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception as e:  # сбой проверок не должен останавливать тик
+        alert_once("outside-kick", type(e).__name__, f"проверки вне окна: проход не запущен ({type(e).__name__}: {e})",
+                   "pantheon-tick")
 
 def build_app():
     """~/Applications/Доска.app: Spotlight «Доска» и значок в Dock открывают доску в Obsidian."""
@@ -6140,6 +6531,20 @@ def merge_mod():
     return _MERGE
 
 
+_OUTSIDE = None
+
+
+def outside_mod():
+    """lib/outside.py — тесты и dev-сервер вне окна роли ([sb-simplify] п. 7)."""
+    global _OUTSIDE
+    if _OUTSIDE is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_outside", os.path.join(LIB, "outside.py"))
+        _OUTSIDE = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_OUTSIDE)
+        _OUTSIDE.set_core(sys.modules[__name__])
+    return _OUTSIDE
+
 _MMV = None
 
 
@@ -6346,6 +6751,21 @@ def board():
     if primary and os.environ.get("PANTHEON_METRICS") != "0":
         board_metrics(T)
     return 0
+
+
+_CULPRITS = None
+
+
+def culprits_mod():
+    """lib/culprits.py — виновники памяти в красной зоне и pantheon reap (metis-0568)."""
+    global _CULPRITS
+    if _CULPRITS is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_culprits", os.path.join(LIB, "culprits.py"))
+        _CULPRITS = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_CULPRITS)
+        _CULPRITS.set_core(sys.modules[__name__])
+    return _CULPRITS
 
 
 def boardstatus_mod():
@@ -6929,7 +7349,7 @@ def check(paths=None, quiet=False):
         for d in drift:
             print(f"ОШИБКА · Доска/{d}")
     field_errs, field_warns = [], []
-    nobody, unlinked = [], []
+    nobody, unlinked, tails = [], [], []
     if not paths:  # поля «Итогов пачек» и ожидание PR/приёмки (metis-0308)
         night_end = "08:00"
         with contextlib.suppress(Exception):
@@ -6945,6 +7365,13 @@ def check(paths=None, quiet=False):
         # проход назвал бы одной строкой все его id (argus a2 п. 3)
         unlinked = None if any(x is None for x in srcs) else T.unlinked_decisions(
             tasks_now, srcs[0], srcs[1], srcs[2].splitlines(), now())
+        tails = ([("хвост", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
+                  for i, ln in T.tail_lines(tasks_now, now())]
+                 + [("отчёт", p, f"{p}:{n}") for p, n in T.inbox_orphans(tasks_now, os.path.join(AI_HOME, "knowledge", "inbox"), now())]
+                 + [("ревью", p, f"{p}:{n}") for p, n in T.review_debts(tasks_now, PANTHEON, now())]
+                 + [("часть", f"{i}:{hashlib.sha1(ln.encode()).hexdigest()[:10]}", f"{i}: «{ln[:140]}»")
+                    for i, ln in T.part_stalled(tasks_now, now())])
+        tails_board(tails)  # metis-0572: полный список — на доску, в том числе то, о чём тревога уже была или молчит
         field_errs, field_warns = T.board_problems(tasks_now, now(), night_end, autoclose_mod().open_pr_tasks(path("autoclose.json")))
         field_errs = [(i, f"status done без closed — проставлен из updated") for i in fixed] + field_errs
         for tid, text in field_errs:
@@ -6952,6 +7379,12 @@ def check(paths=None, quiet=False):
         for tid, text in field_warns:
             if not quiet:
                 print(f"внимание · {tid}: {text}")
+        if not quiet:  # сводка по направлениям и пропуски «Кто делает» (metis-0505): строки, не тревоги и не код выхода
+            for dname, c in T.direction_summary(tasks_now, T.direction_names(PANTHEON, T.load_directions(PANTHEON))).items():
+                print(T.summary_line(dname, c))
+                if c["no_mode"]:  # id — в плане migrate-mode --dry-run: тут их сотни у старых направлений
+                    print(f"внимание · {dname}: без «Кто делает» (mode) открытых задач {c['no_mode']} — "
+                          "список и правка: pantheon task migrate-mode --dry-run, затем без --dry-run")
     board_drift_report(T, quiet) if not paths else None  # расхождения доски (metis-0441)
     if not paths and not quiet:
         off = autoclose_off_reason(now())
@@ -7002,6 +7435,7 @@ def check(paths=None, quiet=False):
         else:
             clear_once("check-nobody")
         unlinked_alert(T, unlinked)
+        tail_alert(T, tails)
         return 0
     return 1 if bad or drift or view_drift or field_errs or skill_bad or skill_arg_bad or coord_errs else 0
 
@@ -7058,16 +7492,72 @@ def unlinked_alert(T, unlinked):
                 raise
 
 
+TAIL_SHOWN = 12
+TAIL_TEXT = {"хвост": "хвост в журнале без задачи (нет id задачи в строке)",
+             "отчёт": "файл inbox старше суток без задачи разбора (нет ссылки source/from или в тексте)",
+             "ревью": "ревью с находкой Д без задачи (нет ссылки на файл ревью)",
+             "часть": "PR слит с «часть», задача без движения дольше 24 ч (закрыть, завести остаток или записать ход)"}
+
+
+def tails_board(items):
+    """Доска/Хвосты.md (metis-0572): все хвосты, как их видит проход сейчас, а не только новые для тревоги — тревогу
+    первый проход глотает, а владелец смотрит доску. Файла нет, пока доски нет; пишется только при изменении."""
+    if not os.path.isdir(BOARD):
+        return
+    rows = [f"- **{TAIL_TEXT[kind].split(' (')[0]}** — {where}" for kind, _, where in items]
+    text = ("# Хвосты\n\nЧто плановый проход считает потерянным: строка журнала без задачи, файл inbox и ревью без задачи, "
+            "слитый PR «часть» без движения. Погасить — строка в журнале задачи «→ <id>» или «не задача: …» либо "
+            "задача на разбор.\n\n" + ("\n".join(rows) or "Нет — всё в порядке.") + "\n")
+    pp = os.path.join(BOARD, "Хвосты.md")
+    old = open(pp, encoding="utf-8").read() if os.path.exists(pp) else ""
+    if old != text:
+        write_atomic(pp, text)
+
+
+def tail_alert(T, items):
+    """Тревоги «хвосты не теряются» (metis-0504): items — [(вид, ключ, место)], вид хвост | отчёт | ревью, место — id
+    задачи и строка журнала либо файл:строка. Стиль unlinked_alert: один раз на ключ, только о новых, первый проход
+    (файла STATE/tail-seen.json нет или он испорчен) только запоминает без тревоги. Записи о том, чего в наборе
+    больше нет (хвост поправили, задачу завели), из файла уходят; по виду называется не больше TAIL_SHOWN."""
+    p = path("tail-seen.json")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            seen = json.load(fh)
+        if not isinstance(seen, dict):
+            raise ValueError("не словарь")
+    except (OSError, ValueError):
+        seen = None
+    t = now()
+    keep, shown_all = {}, set()
+    for kind in TAIL_TEXT:
+        mine = [(f"{kind}|{k}", where) for kd, k, where in items if kd == kind]
+        fresh = [(k, w) for k, w in mine if k not in seen] if seen is not None else []
+        shown = fresh[:TAIL_SHOWN]
+        if shown:
+            more = len(fresh) - len(shown)
+            alert(f"{TAIL_TEXT[kind]}: {'; '.join(w for _, w in shown)}"
+                  f"{f' и ещё {more} (назову следующим проходом)' if more else ''} — завести задачу "
+                  "(pantheon task new, ссылка на файл или id в тексте)", "check")
+        shown_all.update(k for k, _ in shown)
+        # названные в тревоге и уже показанные остаются; неназванные (сверх TAIL_SHOWN) — нет; первый проход помнит всё
+        keep.update({k: (seen or {}).get(k, t) for k, _ in mine if seen is None or k in seen or k in shown_all})
+    if keep != seen:
+        os.makedirs(STATE, exist_ok=True)
+        write_atomic(p, json.dumps(keep, ensure_ascii=False, sort_keys=True))
+
+
 # Флаги `task new` (metis-0402): неизвестный флаг — отказ с его именем, а не молчаливо потерянное поле.
 TASK_NEW_VALUE_FLAGS = {"--direction", "--title", "--project", "--text", "--body", "--body-file", "--type", "--status",
                         "--priority", "--due", "--next", "--owner", "--release", "--wave", "--batch", "--mode", "--mode-why",
                         "--touches", "--night", "--estimate", "--actual", "--acceptance", "--waiting-on", "--question",
-                        "--why", "--recommend", "--if-no-answer", "--option", "--depends-on", "--executor", "--parent"}
+                        "--why", "--recommend", "--if-no-answer", "--option", "--depends-on", "--executor", "--parent",
+                        "--from", "--source", "--done-when"}
 TASK_NEW_BOOL_FLAGS = {"--risky"}
-TASK_SET_VALUE_FLAGS = {"--note", "--option", "--body", "--body-file"}
+TASK_SPLIT_VALUE_FLAGS = {"--title", "--done-when", "--text", "--mode", "--mode-why"}
+TASK_SET_VALUE_FLAGS = {"--note", "--option", "--body", "--body-file", "--force"}
 # Повторяемые флаги — списки; любой другой повторённый флаг — отказ (argus b, круг 2): `opt()` берёт последнее
 # значение, и `--body "Цель" --body "Готово, когда"` молча терял бы первую часть. --wave — прежнее имя --release.
-TASK_REPEATABLE_FLAGS = {"--option", "--touches", "--depends-on"}
+TASK_REPEATABLE_FLAGS = {"--option", "--touches", "--depends-on", "--done-when"}
 TASK_FLAG_ALIASES = {"--wave": "--release"}
 
 
@@ -7209,7 +7699,8 @@ def task_cmd(rest):
                       "waiting_on": opt("--waiting-on"), "question": opt("--question"), "why": opt("--why"),
                       "recommend": opt("--recommend"), "if_no_answer": opt("--if-no-answer"),
                       "options": opt("--option", True) or None, "depends_on": opt("--depends-on", True) or None,
-                      "risky": True if "--risky" in args else None, "executor": opt("--executor"), "parent": opt("--parent")}
+                      "risky": True if "--risky" in args else None, "executor": opt("--executor"), "parent": opt("--parent"),
+                      "from": opt("--from"), "source": opt("--source")}
             if not opt("--direction") or not opt("--title"):
                 print("pantheon task new: нужны --direction и --title", file=sys.stderr)
                 return 2
@@ -7221,13 +7712,13 @@ def task_cmd(rest):
                 print(f"pantheon task new: --type {opt('--type')} — только {' или '.join(T.WORK_TYPES)}", file=sys.stderr)
                 return 2
             tid, p = T.task_new(PANTHEON, now(), opt("--direction"), opt("--title"), project=opt("--project"),
-                                text=body_text, kind=opt("--type") or "task", **fields)
+                                text=body_text, kind=opt("--type") or "task", done_when=opt("--done-when", True) or None, **fields)
             print(f"{tid} {os.path.relpath(p, PANTHEON)}")
             task_new_notify(T, tid, opt("--direction"), opt("--title"), body_text)
             for w in T.option_warns(fields):
                 print(f"предупреждение · {w}", file=sys.stderr)
         elif sub == "set" and args:
-            tid, changes, note, i, seen = args[0], {}, None, 1, set()
+            tid, changes, note, i, seen, force = args[0], {}, None, 1, set(), None
             # --wave — прежнее имя --release (metis-0069): выпуск строкой «pantheon 0.11.50»
             night_flags = {"--release": "release", "--wave": "release", "--batch": "batch", "--night": "night", "--estimate": "estimate",
                            "--actual": "actual", "--acceptance": "acceptance", "--mode": "mode", "--mode-why": "mode_why"}  # ночной цикл: флаги как у --due
@@ -7255,13 +7746,16 @@ def task_cmd(rest):
                 if args[i] == "--note" and i + 1 < len(args):
                     note, i = args[i + 1], i + 2
                     continue
+                if args[i] == "--force" and i + 1 < len(args):  # причина закрытия с неотмеченными пунктами (metis-0503)
+                    force, i = args[i + 1], i + 2
+                    continue
                 if args[i] == "--option" and i + 1 < len(args):  # варианты с запятыми и кавычками (metis-0037)
                     changes["options"] = (changes.get("options") or []) + [args[i + 1]]  # и после options= (argus)
                     i += 2
                     continue
                 if args[i].startswith("--") and not (args[i] in night_flags and i + 1 < len(args)):
                     # metis-0402: неизвестный флаг или флаг без значения — отказ с его именем, не «поле=значение»
-                    known, name = {"--note", "--option", "--body", "--body-file", *night_flags}, args[i].split("=", 1)[0]
+                    known, name = {"--note", "--option", "--body", "--body-file", "--force", *night_flags}, args[i].split("=", 1)[0]
                     print("pantheon task set: " + (f"у флага {args[i]} нет значения" if args[i] in known
                           else f"пишите «{name} значение» через пробел, не «{args[i][:40]}»" if name in known
                           else f"неизвестный флаг {name}") + " — ничего не записано", file=sys.stderr)
@@ -7286,7 +7780,7 @@ def task_cmd(rest):
                 changes[k] = None if v in ("", "null") else int(v) if kind == "int" else (v == "true") if kind == "bool" else \
                     [x.strip() for x in v.split(",") if x.strip()] if kind == "list" else v
                 i += step
-            p, head = T.task_set(PANTHEON, now(), tid, changes, note=note, body=new_body)
+            p, head = T.task_set(PANTHEON, now(), tid, changes, note=note, body=new_body, force=force)
             print(f"{tid}: {head.get('status')} · {os.path.relpath(p, PANTHEON)}")
             if changes.get("status") in ("done", "dropped"):
                 metrics_on_close(T, tid)
@@ -7305,6 +7799,20 @@ def task_cmd(rest):
             for w in words or [{"time": "—", "kind": "нет записей"}]:
                 print(f"- {w.get('time', '')[:16].replace('T', ' ')} · {w.get('kind')} · "
                       f"{w.get('dst') or w.get('answer') or w.get('text') or w.get('title') or ''}")
+        elif sub == "split" and args and not args[0].startswith("--"):
+            err = task_flag_error("split", args[1:], TASK_SPLIT_VALUE_FLAGS)
+            if err:
+                print(err, file=sys.stderr)
+                return 2
+            tid0 = args[0]
+            args = args[1:]
+            if not opt("--title"):
+                print("pantheon task split: нужен --title — название остатка; ничего не записано", file=sys.stderr)
+                return 2
+            tid, p = T.task_split(PANTHEON, now(), tid0, opt("--title"), done_when=opt("--done-when", True) or None,
+                                  text=opt("--text"), mode=opt("--mode"), mode_why=opt("--mode-why"))
+            print(f"{tid} {os.path.relpath(p, PANTHEON)} (остаток {tid0})")
+            task_new_notify(T, tid, T.read(p)[0].get("direction"), opt("--title"), opt("--text"))
         elif sub == "attach" and len(args) == 2:
             old = T.task_attach(PANTHEON, now(), args[0], args[1])
             print(f"{args[0]} → пачка {args[1]}" + (f" (была в {old})" if old else ""))
@@ -7317,6 +7825,18 @@ def task_cmd(rest):
             print("\n".join(plan) if plan else "переносить нечего")
             if dry and plan:
                 print("(--dry-run: ничего не записано)")
+        elif sub == "migrate-mode":
+            if any(a != "--dry-run" for a in args):
+                print(f"pantheon task migrate-mode: не понял «{' '.join(args)}» — допустим только --dry-run", file=sys.stderr)
+                return 2
+            dry = "--dry-run" in args
+            plan, failed = T.migrate_modes(PANTHEON, now(), dry_run=dry)
+            print("\n".join(plan) if plan else "переносить нечего")
+            if dry and plan:
+                print("(--dry-run: ничего не записано)")
+            if failed:
+                print(f"pantheon task migrate-mode: не записано {failed} — строки «не записано» выше", file=sys.stderr)
+                return 1
         elif sub == "migrate-project":
             if any(a != "--write" for a in args):
                 print(f"pantheon task migrate-project: не понял «{' '.join(args)}» — допустим только --write", file=sys.stderr)
@@ -7351,7 +7871,8 @@ def task_cmd(rest):
 
 
 # --- дежурный и управление сессиями (шаг 1.4) — lib/watch.py ---------------------------------------------------------
-WATCH_CMDS = {"watch", "agents", "revisits", "stop", "resume", "pause", "restart", "saved", "who", "infra-check"}
+WATCH_CMDS = {"watch", "agents", "revisits", "stop", "resume", "pause", "restart", "saved", "who", "infra-check",
+              "launch-question"}
 
 
 def watch_cmd(cmd, rest):
@@ -7366,7 +7887,7 @@ def watch_cmd(cmd, rest):
     return {"watch": lambda: w.watch(dry="--dry-run" in rest), "agents": w.agents_cmd, "revisits": w.revisits,
             "stop": lambda: w.stop(rest, who), "resume": lambda: w.resume(rest, who), "pause": lambda: w.pause(rest, who),
             "restart": lambda: w.restart(rest, who), "saved": lambda: w.saved_cmd(rest, who), "who": w.who,
-            "infra-check": w.infra_cmd}[cmd]()
+            "infra-check": w.infra_cmd, "launch-question": lambda: w.launch_question_cmd(rest)}[cmd]()
 
 
 def usage_report(rest):
@@ -7410,71 +7931,21 @@ def usage_report(rest):
 
 
 # --- обновления плагинов agent-kit (metis-0052) ----------------------------------------------------------------
-# Тик раз в 10 минут, вне песочницы: каталог agent-kit → новые версии установленных плагинов → тесты новой версии и
-# установленной (база) на одних и тех же python → есть новые падения — не ставим, тревога; нет — claude plugin update.
-# База нужна, чтобы падения от места запуска (временная папка, другой python3 из PATH) не держали обновление вечно.
-# Подпись падения (metis-0360, metis-0449): провал проверки по её идентификатору (_check_sig: «FAIL <имя>» без
-# детали, если имя в выводе файла одно; иначе строка целиком), строка «НЕ ПРОШЛО» / «НЕ ПРОШЁЛ» / «ОШИБКА:» целиком,
-# исключение в конце вывода вместе с текстом, «код N», «нет итоговой строки» (последняя непустая строка — не итог:
-# упал до него; деталь, похожая на итог, — «нет итоговой строки (последняя строка — деталь провала, не итог)», её «нет
-# итога» базы не гасит), таймаут, срок прогона. Новые падения = подписи новой − подписи базы, то есть по проверкам —
-# {id упавших у новой} − {id упавших у базы}. Нормализации текста нет (metis-0449: три круга дыр 0359–0362 шли от неё):
-# числа, время, pid и адреса в строке целиком остаются, и флак с другим числом в такой строке — красное. Подменяются
-# только известные корни прогона этого файла (_roots_sub: корень копии, HOME, TMPDIR — у новой и базы они разные по
-# построению), а не всё, что похоже на временный путь. База гасит только совпавшие подписи той же пары (python, файл). Не гасит:
-# «ни одной проверки» (код 0 без ok и без числа проверок в итоге: нет итога, «0 из 0», «OK 0» — база по такому файлу
-# не гоняется) и «проверок меньше, чем у базы» (строк ok у новой меньше или итог называет меньше проверок).
-# Код 0, строки ok и ни строки итога (metis-0361): пять файлов agent-kit так кончаются законно, поэтому базу по ним гоняем
-# и сверяем: у базы файла нет или итог был — красное «оборвался без итога»; у базы тот же стиль — решает число строк ok.
-# Цена строгости (ревью 0359, круг 3; metis-0449): флак с другим числом в строке без выделяемого имени («НЕ ПРОШЁЛ:
-# keep-alive ответов 9» против «10», pid, порт, время) базой не гасится — красное, а не склейка соседних проверок
-# цикла. Флак чинится в самом тесте, а не подписью: keep-alive с metis-0365 меряет время жизни соединения.
-# Провал той же проверки (то же единственное имя) с другой деталью гасится: деталь — не часть идентификатора.
-# Хеш дерева проверенной копии сверяется с тем, что встало: update сам обновляет каталог и может поставить версию
-# новее проверенной. Метка testing ловит прерванный прогон (таймаут задачи тика, сбой): такая версия — красная.
-# metis-0424: «не досчитано» — не «сломано». Файл, не успевший в срок прогона (у новой или у нужной базы), — метка
-# partial, а не red: следующий проход продолжает тот же прогон (run в метке), уже посчитанные файлы берёт из кэша
-# результатов STATE/plugins/results/<плагин>-<хеш дерева>.json — ключ (плагин, хеш дерева, python, файл). Новая версия
-# берёт из кэша только файлы своего прогона (тот же run и те же соседи — ctx): удалённая метка — свежий прогон. База
-# берёт только чистый результат своего дерева любого прогона — прежде всего тот, что оно получило, когда само шло
-# «новой» (_base_clean). Файл базы с падением или таймаутом гоняется заново на каждом проходе и в кэш не пишется:
-# падение, снятое при других соседях или случайно, не гасит падение новой (решение владельца 25.10, вариант Б).
-# Остальные файлы база гоняет. Падение, которое уже не изменится, — red
-# сразу, даже если другие файлы не успели. partial подряд — не больше PLUGIN_PARTIAL_MAX проходов, затем red с тревогой.
-# Под давлением памяти (своп выше порога дежурного) прогон откладывается, не дольше PLUGIN_DEFER_MAX от первой отсрочки
-# (deferred_since переходит в метку partial).
+# Тик раз в 10 минут, вне песочницы: каталог agent-kit → новые версии установленных плагинов → claude plugin update.
+# Тесты идут до слияния — workflow tests в GitHub Actions на каждый PR в main (п. 8 страницы упрощения 27.10); после
+# слияния workflow release поднимает номер и пишет .claude-plugin/releases.json (metis-0512). Тик ставит версию, только
+# если запись выпуска совпала с каталогом — та же версия и то же дерево (_release_problem); локального прогона тестов,
+# порога свопа и давления памяти больше нет: выпуск доходит за один плановый проход. Хеш дерева каталога сверяется с
+# тем, что встало: update сам обновляет каталог и может поставить другое дерево — тогда критическая тревога, живой
+# код и окна остаются на последнем проверенном (verified.json, metis-0321).
 
 MARKETPLACE = "agent-kit"
-# один файл тестов (metis-0424): было 600 — test_guard на системном 3.9 не успевал (24.10, guard 0.5.18 и 0.5.19).
-# Таймаут — страховка от зависания, а не проверка скорости; меньше PLUGIN_RUN_LIMIT, поэтому первый незакэшированный
-# файл продолжения успевает всегда и прогон движется вперёд с каждым проходом
-PLUGIN_TEST_TIMEOUT = 1500
-PLUGIN_RUN_LIMIT = 1800      # прогон за один проход (новая + база, все python) — меньше timeout задачи в schedule.toml
-PLUGIN_RESULTS_KEEP = 8      # кэш результатов: деревьев на плагин (новые и установленные), старые удаляются
-PLUGIN_DEFER_MAX = 3 * 3600  # своп выше порога откладывает прогон не дольше этого: иначе выпуск не встал бы никогда
-# проходов подряд с меткой partial, после которых версия красная с тревогой (ревью 133, п.1): прогон, который не
-# движется (соседи копии меняются при каждом слиянии, и кэш новой сбрасывается), не держит очередь плагинов вечно
-PLUGIN_PARTIAL_MAX = 6
-PARTIAL = "partial"
-NO_TESTS = "нет тестов"
-WHY_DETAIL = "последняя строка — деталь провала, не итог"
-BARE_END = "код 0, строки ok и ни строки итога — оборвался без итога"  # metis-0361
-NO_CHECKS = "ни одной проверки"  # код 0, ни строки ok, ни FAIL, ни итога — файл ничего не проверил (metis-0360)
-# Итоговая строка файла тестов agent-kit: «N из M прошли», «N/M», «тестов: N …», «OK N» / «FAIL N», «ПРОВАЛ: …»,
-# «N команд × …» (guard test_shell_diff). Есть у файлов, дошедших до конца; файл без своего итога (кончается строкой
-# ok) при падении получает «нет итоговой строки» и у новой, и у базы — она вычитается, как любая общая подпись.
-TEST_SUMMARY = re.compile(r"(?:\d+\s*(?:из\s+\d+|/\s*\d+|команд\b)|тестов:\s*\d+|(?:OK|FAIL)\s+\d+$|ПРОВАЛ\b)")
-ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])")
 
 
 def _plugins_journal(line):
     os.makedirs(path("plugins"), exist_ok=True)
     with open(path("plugins", "journal.log"), "a", encoding="utf-8") as fh:
         fh.write(f"{stamp()} {line}\n")
-
-
-def _plugins_safe(s):
-    return re.sub(r"[^\w.+-]", "_", str(s))[:80] or "_"
 
 
 def _version_newer(new, old):
@@ -7562,448 +8033,6 @@ def _tree_hash(root):
     return h.hexdigest()
 
 
-def _test_pythons():
-    """Матрица тестов плагинов: только python3 из PATH (или тот, которым запущен pantheon). Системный /usr/bin/python3
-    (3.9 на macOS) не добавляем — решение владельца [sb-python314]: тесты только на 3.14, это вдвое короче прогон guard."""
-    return [shutil.which("python3") or sys.executable]
-
-
-def _py_ge311(py):
-    try:
-        return subprocess.run([py, "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"],
-                              capture_output=True, timeout=30).returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-
-
-def _pythons_for(name):
-    """Тесты плагина pantheon идут только интерпретатором 3.11+ (tomllib); guard — тем же python3 из PATH, что и pantheon
-    (metis-0448: /usr/bin/python3 в матрицу не входит)."""
-    pythons = _test_pythons()
-    return [py for py in pythons if _py_ge311(py)] if name == "pantheon" else pythons
-
-
-def _roots_sub(s, roots):
-    """Известные корни прогона этого файла в строке подписи — их метки (metis-0449): roots — [(путь, метка)], у новой и
-    базы это корень копии (<copy>), HOME (<home>) и TMPDIR (<tmpdir>) файла; они разные по построению, а путь внутри
-    них один. Только точные строки этих путей (и их realpath) целыми именами — не часть имени соседа («…/h1» не
-    трогает «…/h10» и «/x/var/…»), длинные первыми; на остальной текст не смотрим — случайная папка, которую тест
-    создал сам, остаётся как есть (строже: такая подпись базой не гасится)."""
-    pairs = {}
-    for p, label in roots or ():
-        if isinstance(p, str) and p.strip("/"):
-            for v in (p, os.path.realpath(p)):
-                pairs.setdefault(v.rstrip("/"), label)
-    if not pairs:
-        return s
-    alts = "|".join(re.escape(p) for p in sorted(pairs, key=len, reverse=True))
-    return re.sub(rf"(?<![\w.+-])(?:{alts})(?![\w.+-])", lambda m: pairs[m[0]], s)
-
-
-# Итог файла — только последняя непустая строка вывода (ревью 0359, второй argus, п.4): «2/3» или «N из M» из вывода
-# ребёнка в детали FAIL не прячет обрыв. Число проверок в итоге — для файлов без строк ok (п.3).
-_SUMMARY_TOTAL = (
-    (re.compile(r"тестов:\s*(\d+)\s+прошло,\s*(\d+)\s+не\s+прошло"), lambda m: int(m[1]) + int(m[2])),
-    (re.compile(r"\d+\s*из\s+(\d+)"), lambda m: int(m[1])),
-    (re.compile(r"\d+\s*/\s*(\d+)"), lambda m: int(m[1])),
-    (re.compile(r"тестов:\s*(\d+)"), lambda m: int(m[1])),
-    (re.compile(r"(\d+)\s*команд\b"), lambda m: int(m[1])),
-)
-# Строки провала: FAIL и «НЕ ПРОШЛО» / «НЕ ПРОШЁЛ» / «ОШИБКА:» файлов без строк ok (test_watch, test_night,
-# test_awake, test_mmv, test_svc_ondemand и др., ревью 0359, первый argus). У вторых имя и деталь разделены одним
-# пробелом («НЕ ПРОШЁЛ: {имя} {деталь}», «ОШИБКА: {функция} {тип} {текст}» — в функции несколько проверок), имя не
-# выделить — подпись по строке целиком (metis-0449)
-FAIL_PREFIXES = ("FAIL",)
-FAIL_PREFIXES_N = ("НЕ ПРОШЛО", "НЕ ПРОШЁЛ", "ОШИБКА:")
-# Разделитель имени проверки и детали в строках ok/FAIL: два и более пробела или табуляция («FAIL имя  [деталь]»,
-# «FAIL имя  {extra}»). В именах agent-kit двойного пробела нет; « — » есть в 1300+ именах, поэтому « — деталь»
-# (test_merge, test_read, test_tmp_rules, test_metrics) разделителем не считается: такая строка — имя целиком
-_DETAIL_SEP = re.compile(r" {2,}|\t")
-NAME_NOT_ONE = "имя проверки в выводе не одно"
-
-
-def _line_id(ln):
-    """Идентификатор проверки в строке вывода (metis-0449) — пара (слово, имя) или None. ln — строка без краевых
-    пробелов и ANSI. Строка проверки — «ok» или «FAIL», затем пробел или табуляция, затем имя; имя — текст до первого
-    разделителя детали (_DETAIL_SEP), если разделителя нет — весь остаток. Деталь на следующих строках («FAIL имя»,
-    затем «     деталь») в имя не входит сама. «ok» без имени, «FAILED …», «FAIL:» — не строки проверки (None)."""
-    for word in ("ok", "FAIL"):
-        if ln.startswith(word) and ln[len(word):len(word) + 1] in (" ", "\t"):
-            name = _DETAIL_SEP.split(ln[len(word):].strip(), 1)[0].strip()
-            return (word, name) if name else None
-    return None
-
-
-def _check_sig(ln, ids, roots):
-    """Подпись строки FAIL (metis-0449): «FAIL <имя>» без детали — только если имя в выводе этого файла одно (ids —
-    Counter имён всех строк ok и FAIL прогона, _line_id). Имя повторяется (проверка в цикле с одним именем, два
-    имени с общим началом до двух пробелов) — строка целиком с пометкой NAME_NOT_ONE: такую подпись гасит только та
-    же строка у базы, а не «FAIL <имя>», иначе провал одной итерации гасил бы провал другой. Строки без имени
-    («FAILED …») — целиком. Итог по паре (python, файл): новые падения = {имена упавших у новой} − {имена упавших у
-    базы}; ошибиться можно только в сторону лишнего красного."""
-    li = _line_id(ln)
-    if li is None:
-        return _roots_sub(ln, roots)
-    if ids[li[1]] == 1:
-        return "FAIL " + _roots_sub(li[1], roots)
-    return f"{_roots_sub(ln, roots)} · {NAME_NOT_ONE}"
-
-
-def _ok_lines(lines):
-    return sum(1 for ln in lines if re.match(r"\s*ok\b", ln))
-
-
-def _summary_of(lines):
-    """Итоговая строка файла — последняя непустая, если она похожа на итог (TEST_SUMMARY): (есть ли итог, число
-    проверок в нём или None, why). why — не None, когда последняя строка выглядит как итог, но им не считается
-    (деталь провала, не итог): «нет итоговой строки» у такого файла получает отдельную подпись (metis-0362, R1), и
-    «нет итога» базы не гасит настоящий обрыв новой. Итог с числом прошедших («N из M», «N/M») у файла со строками
-    ok верен, только если N — их число: «2/3» из вывода ребёнка последней строкой перед молчаливым обрывом за итог
-    не считается (ревью 0359, п.4, проба G)."""
-    last = next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
-    nok = _ok_lines(lines)
-    passed = re.match(r"(\d+)\s*(?:из\s|/)", last)
-    if not TEST_SUMMARY.match(last):
-        return False, None, None
-    if nok and passed and int(passed[1]) != nok:
-        return False, None, WHY_DETAIL
-    failed = any(ln.strip().startswith(FAIL_PREFIXES + FAIL_PREFIXES_N) for ln in lines)
-    total = _summary_total(last)
-    # «все прошли» («39/39», «39 из 39») при строке провала выше — не итог, а строка из детали (п.4, проба S1)
-    if passed and total == int(passed[1]) and failed:
-        return False, None, WHY_DETAIL
-    # голое «N/M» у файла без строк ok — деталь («38/39» из вывода ребёнка, S1b, metis-0362):
-    # настоящие итоги таких файлов — «N из M прошли» и «тестов: N, …», голое N/M печатают только файлы со строками ok
-    if not nok and re.fullmatch(r"\d+\s*/\s*\d+", last):
-        return False, None, WHY_DETAIL
-    return True, total, None
-
-
-def _summary_total(line):
-    """Число проверок из итоговой строки («N из M» → M, «N/M» → M, «тестов: N» → N, «тестов: N прошло, K не прошло»
-    → N+K, «N команд» → N); итога без числа проверок («OK 0» — это число провалов, «ПРОВАЛ: …») — None."""
-    for rx, total in _SUMMARY_TOTAL:
-        m = rx.match(line)
-        if m:
-            return total(m)
-    return None
-
-
-def _ok_count(out):
-    """Сколько проверок прошёл файл — пара (строк `ok …`, число проверок из итоговой строки или None) (metis-0360;
-    ревью 0359, п.3: десять файлов строк ok не печатают, их число видно только в итоге). Меньше, чем у базы, по любой
-    из двух мер — проверки пропущены (_fresh_failures)."""
-    lines = ANSI.sub("", out).splitlines()
-    summary, total, _why = _summary_of(lines)
-    return _ok_lines(lines), total, summary
-
-
-def _fewer_checks(new, base):
-    """Причина «проверок меньше» или None: строк ok меньше, чем у базы, или итог называет меньше проверок (обе меры
-    известны). Число вместо пары — только строки ok (старые вызовы)."""
-    (n, nt), (m, mt) = ((tuple(v[:2]) if isinstance(v, tuple) else (v or 0, None)) for v in (new, base))
-    if n < m:
-        return f"{n} < {m}"
-    if nt is not None and mt is not None and nt < mt:
-        return f"по итогу {nt} < {mt}"
-    return None
-
-
-def _failure_signatures(fname, out, rc, roots=()):
-    """Подписи падений одного файла тестов: строки FAIL по имени проверки (_check_sig, metis-0449), строки «НЕ ПРОШЛО» /
-    «НЕ ПРОШЁЛ» / «ОШИБКА:» целиком, исключение в конце вывода с текстом сообщения целиком, ненулевой код
-    (всегда — иначе гибель по сигналу прячется за старой строкой FAIL); rc None — таймаут, rc "срок" — не успел в
-    срок прогона. metis-0360: ненулевой код без итоговой строки (TEST_SUMMARY) — «нет итоговой строки» (файл
-    оборвался, проверки после обрыва не прошли); код 0 без единой проверки и итога — NO_CHECKS, её база не гасит.
-    Ревью 0359: итог — только последняя непустая строка; итог с нулём проверок («0 из 0», «тестов: 0») — тоже
-    NO_CHECKS; строки провала — FAIL_PREFIXES и FAIL_PREFIXES_N. Круг 3: код 0 без строк ok и без числа проверок в
-    итоге («OK 0» test_mmv) — тоже NO_CHECKS. roots — известные корни прогона файла (_roots_sub); других замен в
-    тексте нет (metis-0449)."""
-    out = ANSI.sub("", out)
-    sigs = []
-    stripped = [ln.strip() for ln in out.splitlines()]
-    ids = collections.Counter(li[1] for li in map(_line_id, stripped) if li)
-    for ln in stripped:
-        if ln.startswith(FAIL_PREFIXES):
-            sigs.append(_check_sig(ln, ids, roots))
-        elif ln.startswith(FAIL_PREFIXES_N):
-            sigs.append(_roots_sub(ln, roots))
-    if rc is None:
-        return sigs + [f"{fname}: таймаут"]
-    if rc == "срок":
-        return sigs + [f"{fname}: срок прогона"]
-    lines = [ln for ln in out.splitlines() if ln.strip()]
-    if "Traceback (most recent call last):" in out and lines and not lines[-1][:1].isspace():
-        m = re.match(r"([A-Za-z_][\w.]*)(?::|$)", lines[-1])
-        if m:
-            # с текстом целиком: FileNotFoundError окружения у базы не гасит другой FileNotFoundError новой версии
-            msg = _roots_sub(lines[-1][m.end():].strip(), roots)
-            sigs.append(f"{fname}: исключение {m.group(1)}" + (f": {msg}" if msg else ""))
-    summary, total, why = _summary_of(lines)
-    if rc != 0:
-        sigs.append(f"{fname}: код {rc}")
-        if not summary:  # деталь, похожая на итог, — своя подпись: «нет итога» базы не гасит обрыв новой (R1)
-            sigs.append(f"{fname}: нет итоговой строки" + (f" ({why})" if why else ""))
-    elif not sigs and not _ok_lines(lines) and not total:  # нет итога, «0 из 0» или итог без числа проверок
-        sigs.append(f"{fname}: {NO_CHECKS}")
-    return sigs
-
-
-def _fresh_failures(got_new, got_base, ok_new=None, ok_base=None, bare=(), bare_base=None):
-    """Новые падения = подписи новой версии минус подписи базы. Файл, который у базы кончился таймаутом или сроком
-    прогона, — не «чистый» и не «такой же сбой»: о нём ничего не известно, поэтому у новой версии в нём ничто не
-    гасится (в том числе её собственный таймаут) — падение остаётся падением. Отдаёт (Counter, {(python, файл)}).
-    metis-0360: ok_new/ok_base — {(python, файл): _ok_count} досчитанных файлов (_run_plugin_tests). Новая прошла
-    меньше проверок, чем база, в том же файле (строк ok или по итогу, _fewer_checks) — подпись «проверок меньше, чем у
-    базы»: оборвалась молча раньше, и
-    общие с базой подписи не должны прятать непроверенный остаток. NO_CHECKS база не гасит.
-    metis-0361: bare — {(python, файл)} с кодом 0, строками ok и без итоговой строки (_run_plugin_tests). Пять
-    файлов agent-kit так заканчиваются законно, поэтому их сверяют с базой: у базы нет этого файла или итог у неё
-    был, а у новой пропал — «оборвался без итога»; у базы тот же стиль без итога — строки ok сравнивает _fewer_checks
-    (новая оборвалась раньше — «проверок меньше»). «Тот же стиль» — только если и база сама в bare_base (код 0, строки
-    ok, без итога и без подписей): база, которая упала (код не 0, FAIL, Traceback), — красное «у базы файл упал»
-    (ревью 115, п.1); bare_base None — старые вызовы, база считается упавшей."""
-    unknown = {(py, f) for (py, f, s) in got_base if s.endswith((": срок прогона", ": таймаут"))}
-    known_base = collections.Counter({k: n for k, n in got_base.items() if (k[0], k[1]) not in unknown})
-    fresh = got_new - known_base
-    for k, n in got_new.items():  # не успевшее у новой не гасится тем, что не успело и у базы
-        if k[2].endswith((": срок прогона", f": {NO_CHECKS}")):
-            fresh[k] = n
-    for (py, f), m in (ok_base or {}).items():
-        why = _fewer_checks((ok_new or {}).get((py, f), 0), m)
-        if (py, f) not in unknown and why:
-            fresh[(py, f, f"{f}: проверок меньше, чем у базы ({why})")] = 1
-    for py, f in bare:
-        b = (ok_base or {}).get((py, f))
-        if (py, f) in unknown:
-            reason = "база не досчитана"
-        elif b is None:
-            reason = "у базы такого файла нет"
-        elif len(b) > 2 and b[2]:
-            reason = "у базы итог был"
-        elif (py, f) not in (bare_base or ()):
-            reason = "у базы файл упал"
-        else:
-            continue
-        fresh[(py, f, f"{f}: {BARE_END} ({reason})")] = 1
-    return fresh, unknown
-
-
-def _test_files(pdir):
-    tests_dir = os.path.join(pdir, "tests") if pdir else ""
-    return sorted(f for f in os.listdir(tests_dir) if f.startswith("test_") and f.endswith(".py")) \
-        if tests_dir and os.path.isdir(tests_dir) else []
-
-
-def _base_targets(got_new, bare=()):
-    """metis-0358: (python, файл), которые стоит гонять у базы, — только где у новой версии есть подписи падений:
-    базу нужно лишь вычитать из них. Файл, где новая кончилась таймаутом или сроком прогона, база погасить не может
-    (_fresh_failures), поэтому и его не гоняем. Чистые файлы новой — тоже: раньше база шла по всем и не успевала в
-    PLUGIN_RUN_LIMIT, а недосчитанная база превращала прежние падения окружения в новые. Файл без единой проверки
-    (NO_CHECKS) — тоже: база его не гасит (metis-0360). Исключение — bare (код 0, строки ok, без итога, metis-0361):
-    базу гоняем, чтобы сверить число строк ok и наличие итога."""
-    stuck = {(py, f) for (py, f, s) in got_new if s.endswith((": срок прогона", ": таймаут", f": {NO_CHECKS}"))}
-    return ({(py, f) for (py, f, _s) in got_new} - stuck) | set(bare)
-
-
-def _results_path(name, digest):
-    return path("plugins", "results", f"{_plugins_safe(name)}-{_plugins_safe(digest)}.json")
-
-
-class _Results:
-    """Кэш результатов файлов тестов одного дерева плагина (metis-0424): {"<python>\\t<файл>": запись}. Запись — код
-    (None — таймаут), подписи, _ok_count, bare, когда и за сколько секунд, run и ctx прогона. Результат «срок
-    прогона» не пишется: файл не досчитан. reuse(запись) решает, можно ли взять запись вместо прогона: новой —
-    только своего прогона (run, ctx), базе — только чистую (код 0, без подписей) любого прогона (_base_clean). store —
-    какие результаты писать: None — все; у базы — тоже _base_clean, её падение и таймаут в кэш не идут (вариант Б,
-    25.10). Таймаут берётся, только если был при нынешнем таймауте файла. Файл кэша чужого плагина или дерева
-    (plugin, hash внутри не те) не читается вовсе."""
-
-    def __init__(self, name, digest, version, run, ctx, reuse, store=None):
-        self.name, self.digest, self.version, self.run, self.ctx, self.reuse = name, digest, version, run, ctx, reuse
-        self.store = store
-        d = read_json(_results_path(name, digest), {}) if digest else {}
-        ok = isinstance(d, dict) and d.get("plugin") == name and d.get("hash") == digest
-        self.files = d["files"] if ok and isinstance(d.get("files"), dict) else {}
-
-    @staticmethod
-    def _valid(e):
-        if not isinstance(e, dict):
-            return False
-        rc, sigs, okv = e.get("rc"), e.get("sigs"), e.get("ok")
-        if not (rc is None or (isinstance(rc, int) and not isinstance(rc, bool))):
-            return False
-        if not (isinstance(sigs, list) and all(isinstance(x, str) for x in sigs) and isinstance(e.get("bare"), bool)):
-            return False
-        if okv is not None and not (isinstance(okv, list) and len(okv) == 3 and isinstance(okv[0], int)
-                                    and (okv[1] is None or isinstance(okv[1], int)) and isinstance(okv[2], bool)):
-            return False
-        lim = e.get("limit")
-        return rc is not None or (isinstance(lim, (int, float)) and lim >= PLUGIN_TEST_TIMEOUT)
-
-    def get(self, py, f):
-        if not self.digest:
-            return None
-        e = self.files.get(f"{py}\t{f}")
-        return e if self._valid(e) and self.reuse(e) else None
-
-    def put(self, py, f, rc, sigs, okv, bare, sec, limit):
-        if not self.digest or (self.store is not None and not self.store({"rc": rc, "sigs": list(sigs)})):
-            return
-        self.files[f"{py}\t{f}"] = {"rc": rc, "sigs": list(sigs), "ok": None if okv is None else list(okv),
-                                    "bare": bool(bare), "sec": round(sec, 1), "limit": limit, "at": stamp(),
-                                    "run": self.run, "ctx": self.ctx}
-        write_json(_results_path(self.name, self.digest),
-                   {"plugin": self.name, "hash": self.digest, "version": self.version, "files": self.files})
-
-
-def _base_clean(e):
-    """Какие записи кэша база берёт и пишет: только чистую (код 0, без подписей) любого прогона — она ничего не
-    гасит. Файл базы с падением или таймаутом не кэшируется и гоняется заново на каждом проходе (решение владельца
-    25.10, вариант Б): падение, снятое при других соседях копии (argus B к #133) или случайно (ревью 133, п.5), иначе
-    гасило бы ту же подпись у новой версии."""
-    return e.get("rc") == 0 and not e.get("sigs")
-
-
-def _results_prune(name, keep):
-    """Оставить PLUGIN_RESULTS_KEEP последних деревьев плагина и деревья keep (новая и база этого прогона)."""
-    d = path("plugins", "results")
-    pre = f"{_plugins_safe(name)}-"
-    try:
-        found = [e for e in os.scandir(d) if e.name.startswith(pre) and e.name.endswith(".json") and e.is_file()]
-    except OSError:
-        return
-    mine = {os.path.basename(_results_path(name, k)) for k in keep if k}
-    found.sort(key=lambda e: e.stat().st_mtime, reverse=True)
-    for e in found[PLUGIN_RESULTS_KEEP:]:
-        if e.name not in mine:
-            with contextlib.suppress(OSError):
-                os.remove(e.path)
-
-
-def _load1():
-    """Load average за минуту или None (замер — подсказка, сбой его не ломает)."""
-    try:
-        return os.getloadavg()[0]
-    except (OSError, AttributeError):
-        return None
-
-
-def _child_cpu():
-    """user+sys завершённых и подобранных детей процесса, с."""
-    r = resource.getrusage(resource.RUSAGE_CHILDREN)
-    return r.ru_utime + r.ru_stime
-
-
-def _timing_line(label, py, f, wall, cpu, rc, l0, l1):
-    """Строка замера одного файла в журнал прогона (metis-0447): интерпретатор, wall, CPU детей, rc, load до и после."""
-    fmt = lambda x: "—" if x is None else f"{x:.2f}"  # noqa: E731
-    rcs = "таймаут" if rc is None else str(rc)
-    return (f"замер · {label} · py={py} · файл={f} · wall={wall:.2f} с · cpu={cpu:.2f} с · rc={rcs} · "
-            f"load={fmt(l0)}→{fmt(l1)}")
-
-
-def _timing_summary(timings, top=8):
-    """Строки сводки самых медленных файлов по wall для конца журнала (metis-0447). timings — [(подпись, python,
-    файл, wall, cpu, rc)] реально прогнанных в этом проходе; из кэша в них нет."""
-    rows = sorted(timings, key=lambda t: -t[3])[:top]
-    out = [f"===== замер: {len(rows)} самых медленных из {len(timings)} прогнанных файлов "
-           f"(сумма wall {sum(t[3] for t in timings):.0f} с, cpu {sum(t[4] for t in timings):.0f} с) ====="]
-    for i, (label, py, f, wall, cpu, rc) in enumerate(rows, 1):
-        out.append(f"{i}. wall={wall:.2f} с · cpu={cpu:.2f} с · {label} · py={py} · файл={f} · "
-                   f"rc={'таймаут' if rc is None else rc}")
-    return out
-
-
-def _run_plugin_tests(pdir, pythons, tmp, log, label, deadline, only=None, oks=None, bare=None, cache=None,
-                      timings=None):
-    """tests/test_*.py папки pdir по одному на каждом python → Counter подписей (python, файл, подпись). only —
-    множество (python, файл): гонять только их (база, metis-0358); None — все. Срок — общий deadline прогона:
-    базе достаётся то, что осталось после новой версии. bare — множество, куда попадают (python, файл) с кодом 0, строками ok и без итога (metis-0361). oks — словарь, куда пишется {(python, файл): _ok_count}
-    файлов, дошедших до выхода (не таймаут и не срок) — для сравнения с базой (metis-0360). cache — _Results дерева
-    (metis-0424): годная запись заменяет прогон файла, досчитанный файл записывается туда же. timings — список, куда попадает
-    (подпись, python, файл, wall, cpu детей, rc) каждого реально прогнанного файла; строка замера — в журнал сразу после
-    его вывода (metis-0447)."""
-    sigs = collections.Counter()
-    env0 = {k: v for k, v in os.environ.items()
-            if not k.startswith("PANTHEON_") and k not in ("FORCE_COLOR", "CLICOLOR_FORCE")}
-    env0.update({"NO_COLOR": "1", "PYTHON_COLORS": "0"})
-    for py in pythons:
-        for f in _test_files(pdir):
-            if only is not None and (py, f) not in only:
-                continue
-            hit = cache.get(py, f) if cache is not None else None
-            if hit is not None:
-                rc, fsigs = hit["rc"], list(hit["sigs"])
-                okv = None if hit["ok"] is None else tuple(hit["ok"])
-                state = "таймаут" if rc is None else f"код {rc}"
-                log.write(f"\n===== {label} · {py} · {f} · {state} · из кэша (прогон {hit.get('at')}, "
-                          f"{hit.get('sec')} с) =====\n" + "".join(s + "\n" for s in fsigs))
-                log.flush()
-                if oks is not None and okv is not None:
-                    oks[(py, f)] = okv
-                for s in fsigs:
-                    sigs[(py, f, s)] += 1
-                if bare is not None and hit["bare"]:
-                    bare.add((py, f))
-                continue
-            left = deadline - time.monotonic()
-            t0 = time.monotonic()
-            limit = None
-            measured = False
-            # корни прогона файла для подписей (metis-0449): у новой и базы разные по построению, путь внутри — один
-            roots = [(os.path.dirname(os.path.dirname(pdir)), "<copy>")]
-            if left <= 0:
-                out, rc = "", "срок"
-            else:
-                home = tempfile.mkdtemp(prefix="home-", dir=tmp)
-                # TMPDIR внутри папки прогона: временные папки тестов уходят вместе с ней, а не копятся в общем TMPDIR
-                tdir = tempfile.mkdtemp(prefix="tmpdir-", dir=tmp)
-                roots += [(home, "<home>"), (tdir, "<tmpdir>")]
-                limit = min(PLUGIN_TEST_TIMEOUT, left)
-                l0, c0, measured = _load1(), _child_cpu(), True
-                try:
-                    r = subprocess.run([py, "-I", os.path.join("tests", f)], cwd=pdir, env={**env0, "HOME": home, "TMPDIR": tdir},
-                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                       timeout=limit)
-                    out, rc = r.stdout, r.returncode
-                except subprocess.TimeoutExpired as e:
-                    out, rc = e.stdout or b"", None if limit >= PLUGIN_TEST_TIMEOUT else "срок"
-                except OSError as e:
-                    out, rc = str(e), 127
-                out = out.decode("utf-8", "replace") if isinstance(out, bytes) else out
-                l1, cpu = _load1(), _child_cpu() - c0
-            sec = time.monotonic() - t0
-            state = {None: "таймаут", "срок": "срок прогона"}.get(rc, f"код {rc}")
-            log.write(f"\n===== {label} · {py} · {f} · {state} · {sec:.0f} с =====\n{out}")
-            if measured:
-                log.write("\n" + _timing_line(label, py, f, sec, cpu, rc, l0, l1) + "\n")
-                if timings is not None:
-                    timings.append((label, py, f, sec, cpu, rc))
-            log.flush()
-            okv = _ok_count(out) if rc not in (None, "срок") else None
-            if oks is not None and okv is not None:
-                oks[(py, f)] = okv
-            fsigs = _failure_signatures(f, out, rc, roots)
-            for s in fsigs:
-                sigs[(py, f, s)] += 1
-            is_bare = rc == 0 and not fsigs and okv is not None and bool(okv[0]) and not okv[2]
-            if bare is not None and is_bare:
-                bare.add((py, f))
-            if cache is not None and rc != "срок":
-                cache.put(py, f, rc, fsigs, okv, is_bare, sec, limit)
-    return sigs
-
-
-def _plugins_mark(marks, name, mark):
-    """Метка сразу после каждого шага: следующий может упасть, а сделанное не повторяется."""
-    if mark is None:
-        marks.pop(name, None)
-    else:
-        marks[name] = {**mark, "at": stamp()}
-    write_json(path("plugins", "marks.json"), marks)
-
-
 def _plugins_respawn_mark(name):
     """metis-0181: отметка «нужен перезапуск» для тика (watch.plugins_respawn). since — время последней установки:
     окна, поднятые раньше, тик перезапускает, когда они свободны; done — уже перезапущенные сессии, новая установка
@@ -8015,9 +8044,9 @@ def _plugins_respawn_mark(name):
         write_json(path("plugins", "respawn.json"), {"since": now(), "at": stamp(), "plugins": plugins, "done": []})
 
 
-def _plugin_install(name, old, new, log, marks, quiet, digest):
+def _plugin_install(name, old, new, quiet, digest):
     """claude plugin update без -y (новая команда установки в каталоге должна требовать человека) и сверка того, что
-    встало, с проверенной копией: версия и хеш дерева installPath."""
+    встало, с выпущенным деревом каталога: версия и хеш дерева installPath."""
     try:
         r = subprocess.run([claude_bin(), "plugin", "update", f"{name}@{MARKETPLACE}", "-s", "user"],
                            env=claude_env(), capture_output=True, text=True, timeout=600)
@@ -8028,8 +8057,8 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
     row = (_plugins_installed() or {}).get(name) or {}
     got = row.get("version")
     if got == new and _tree_hash(row.get("installPath")) == digest:
-        _plugins_mark(marks, name, None)
-        # разрешение: это дерево прошло тесты и сверку — живой код и окна идут только на него (metis-0321)
+        # разрешение: это дерево прошло CI до слияния и совпало с записью выпуска — живой код и окна идут только на
+        # него (metis-0321)
         verified_write(name, row["installPath"], digest, new, "plugins-update")
         um = read_json(_unchecked_path(), {}) or {}
         if um.pop(name, None) is not None:
@@ -8048,26 +8077,24 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
             print(f"{name}: обновлён {old} → {new}")
         return 0
     if got == old or (got is None and not ok):
-        # ничего не встало: тесты зелёные, установка не удалась — пробуем на следующих запусках без тестов
+        # ничего не встало — пробуем на следующих проходах; тревога одна на версию
         if ok:
             why = f"после update версия {got}, а не {new}"
-        _plugins_mark(marks, name, {"version": new, "result": "green", "log": log, "hash": digest})
-        _plugins_journal(f"{name} {old} → {new}: тесты зелёные, установка не удалась ({why})")
-        alert_once(f"plugins-update-{name}", new, f"{name} {new}: тесты прошли, но claude plugin update не поставил "
+        _plugins_journal(f"{name} {old} → {new}: установка не удалась ({why})")
+        alert_once(f"plugins-update-{name}", new, f"{name} {new}: claude plugin update не поставил выпуск "
                    f"({why}). Руками: claude plugin update {name}@{MARKETPLACE}", "plugins-update")
         if not quiet:
-            print(f"{name}: {new} — тесты прошли, установка не удалась ({why})")
+            print(f"{name}: {new} — установка не удалась ({why})")
         return ALERTED
-    # встало не то, что проверяли: другая версия или другое содержимое (update сам обновил каталог)
-    _plugins_mark(marks, name, None)
+    # встало не то, что выпущено: другая версия или другое содержимое (update сам обновил каталог)
     bad = _tree_hash(row.get("installPath"))
     if bad:  # запись для разбора; живой код его и так не возьмёт — хеша нет в verified.json
         um = read_json(_unchecked_path(), {}) or {}
         um[name] = {"hash": bad, "version": got, "path": os.path.realpath(row.get("installPath")), "at": stamp()}
         write_json(_unchecked_path(), um)
     seen = got or "неизвестна"
-    _plugins_journal(f"{name} {old} → {seen}: встала непроверенная версия (проверялась {new}, хеш {digest})")
-    text = (f"встала непроверенная версия {name} {seen} (проверялась {new}) — живой код и окна остаются на последнем "
+    _plugins_journal(f"{name} {old} → {seen}: встала непроверенная версия (выпуск {new}, хеш {digest})")
+    text = (f"встала непроверенная версия {name} {seen} (выпуск {new}) — живой код и окна остаются на последнем "
             "проверенном дереве; что делать — README agent-kit, «Живой код»")
     alert("КРИТИЧНО: " + text, "plugins-update")
     notify(text, title="Пантеон · критично", group="critical")
@@ -8076,165 +8103,26 @@ def _plugin_install(name, old, new, log, marks, quiet, digest):
     return ALERTED
 
 
-_COPY_IGNORE = shutil.ignore_patterns(".git", "__pycache__")
-# git в копии — без настроек владельца и системы (хуки, подпись коммитов, шаблоны): только то, что нужно клону
-_COPY_GIT = ["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "init.templateDir=",
-             "-c", "user.name=pantheon", "-c", "user.email=pantheon@localhost"]
-
-
-def _copy_clone(root, name, src, peers, mkt_json):
-    """metis-0368: копия для прогона тестов — как клон agent-kit, а не одна папка плагина. Тесты ходят к соседям
-    (`../guard/hooks` в test_merge и test_read) и к git (test_setup: `git rev-parse --show-toplevel` и путь
-    <клон>/plugins/pantheon в клоне маркетплейса). Поэтому root/plugins/<имя> — проверяемый плагин,
-    root/plugins/<сосед> — соседи из peers {имя: папка}, root/.claude-plugin/marketplace.json — из каталога, root —
-    git-репозиторий с одним коммитом. Отдаёт (папка плагина, строки для лога о том, чего не вышло). Строки не
-    молчат: _plugin_check пишет их в лог, а для НОВОЙ версии любая такая строка — красное без вычитания базой
-    (metis-0369): сбой окружения копии нельзя списать на то, что он же и у базы."""
-    plugins = os.path.join(root, "plugins")
-    pdir = os.path.join(plugins, _plugins_safe(name))
-    shutil.copytree(src, pdir, symlinks=True, ignore=_COPY_IGNORE)
-    notes = []
-    for peer, d in sorted((peers or {}).items()):
-        if peer == name:
-            continue
-        if not isinstance(d, str) or not os.path.isdir(d):
-            notes.append(f"сосед {peer}: нет папки {d}")
-            continue
-        shutil.copytree(d, os.path.join(plugins, _plugins_safe(peer)), symlinks=True, ignore=_COPY_IGNORE)
-    if isinstance(mkt_json, str) and os.path.isfile(mkt_json):
-        os.makedirs(os.path.join(root, ".claude-plugin"), exist_ok=True)
-        shutil.copy2(mkt_json, os.path.join(root, ".claude-plugin", "marketplace.json"))
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"})
-    for argv in (["init", "-q"], ["add", "-A"], ["commit", "-q", "--no-verify", "-m", "копия для тестов"]):
-        try:
-            r = subprocess.run(_COPY_GIT + argv, cwd=root, env=env, stdin=subprocess.DEVNULL,
-                               capture_output=True, text=True, timeout=120)
-            why = None if r.returncode == 0 else f"код {r.returncode}: {' '.join((r.stderr or '').split())[:200]}"
-        except (OSError, subprocess.TimeoutExpired) as e:
-            why = type(e).__name__
-        if why:
-            notes.append(f"git {argv[0]}: {why}")
-            break
-    return pdir, notes
-
-
-def _copy_ctx(root, name):
-    """Соседи копии-клона (metis-0424): sha256 по именам и хешам деревьев root/plugins/* кроме самого плагина и по
-    marketplace.json. Новая версия берёт из кэша только результаты с тем же ctx: сосед сменился — файлы считаются
-    заново."""
-    h = hashlib.sha256()
-    plugins = os.path.join(root, "plugins")
-    for peer in sorted(os.listdir(plugins)) if os.path.isdir(plugins) else []:
-        if peer != _plugins_safe(name):
-            h.update(f"{peer}\0{_tree_hash(os.path.join(plugins, peer))}\0".encode())
-    mj = os.path.join(root, ".claude-plugin", "marketplace.json")
-    with contextlib.suppress(OSError):
-        with open(mj, "rb") as fh:
-            h.update(fh.read())
-    return h.hexdigest()
-
-
-def _plugin_check(name, old, new, src, base, marks, peers_new=None, peers_base=None, mkt_json=None, resume=None):
-    """Тесты новой версии против установленной. Отдаёт (лог, хеш проверенной копии, новые подписи, не досчитано).
-    metis-0368: копии новой и базы — клоны с соседями (_copy_clone): у новой соседи из того же каталога (peers_new), у
-    базы — установленные версии (peers_base), не установленного соседа база берёт из каталога. Хеш — только дерево
-    проверяемого плагина. metis-0424: не досчитано — множество (python, файл), не успевших в срок прогона у новой или
-    у нужной базы; непустое — решения нет (падения, которое уже не изменится, тоже нет), вызывающий ведёт счёт partial. resume — run прерванного так прогона:
-    новая берёт из кэша результаты этого run, лог дописывается; None — свежий прогон. Метку partial (с run) ставит
-    сама: следующий проход продолжает по ней."""
-    log = path("plugins", f"{_plugins_safe(name)}-{_plugins_safe(new)}.log")
-    tmp = tempfile.mkdtemp(prefix=f"{_plugins_safe(name)}-", dir=path("plugins", "tmp"))
-    deadline = time.monotonic() + PLUGIN_RUN_LIMIT
-    run = resume or f"{stamp()} {os.getpid()} {os.urandom(4).hex()}"
-    digest = base_digest = None
-    try:
-        new_dir, notes_new = _copy_clone(os.path.join(tmp, "new"), name, src, peers_new, mkt_json)
-        digest = _tree_hash(new_dir)
-        _plugins_mark(marks, name, {"version": new, "result": "testing", "log": log, "hash": digest})
-        base_dir, notes_base = None, []
-        if isinstance(base, str) and os.path.isdir(base):
-            # установленный сосед, чьей папки нет на диске (metis-0369), берётся из каталога, как неустановленный
-            peers = {**(peers_new or {}), **{k: v for k, v in (peers_base or {}).items()
-                                             if isinstance(v, str) and os.path.isdir(v)}}
-            base_dir, notes_base = _copy_clone(os.path.join(tmp, "base"), name, base, peers, mkt_json)
-        ctx_new = _copy_ctx(os.path.join(tmp, "new"), name)
-        cache_new = _Results(name, digest, new, run, ctx_new,
-                             lambda e: bool(resume) and e.get("run") == resume and e.get("ctx") == ctx_new)
-        base_digest = _tree_hash(base_dir)
-        cache_base = _Results(name, base_digest, old, run, base_dir and _copy_ctx(os.path.join(tmp, "base"), name),
-                              _base_clean, store=_base_clean)
-        pythons = _pythons_for(name)
-        with open(log, "a" if resume else "w", encoding="utf-8") as fh:
-            if resume:
-                fh.write(f"\n\n{stamp()} продолжение прогона {run} — прошлый проход не досчитан\n")
-            fh.write(f"{stamp()} {name}: новая {new} из {src} (хеш {digest}), база {old} из "
-                     f"{base_dir and base or '—'} (хеш {base_digest or '—'}); python: {', '.join(pythons)}\n")
-            for who, notes in (("новая", notes_new), ("база", notes_base)):
-                for n in notes:
-                    fh.write(f"копия ({who}): {n}\n")
-            ok_new, ok_base, bare, bare_base, timings = {}, {}, set(), set(), []
-            got_new = _run_plugin_tests(new_dir, pythons, tmp, fh, f"новая {new}", deadline, oks=ok_new, bare=bare,
-                                        cache=cache_new, timings=timings)
-            want = _base_targets(got_new, bare)
-            skipped = sum(1 for py in pythons for f in _test_files(base_dir) if (py, f) not in want)
-            if base_dir and skipped:
-                fh.write(f"\n===== база {old}: {skipped} файл(ов) не гоняются — у новой версии в них нет падений, "
-                         "либо таймаут, срок прогона или ни одной проверки (их база не гасит) =====\n")
-            got_base = _run_plugin_tests(base_dir, pythons, tmp, fh, f"база {old}", deadline, only=want, oks=ok_base,
-                                        bare=bare_base, cache=cache_base, timings=timings)
-            if timings:  # сводка замера — до решения, чтобы была и в журнале недосчитанного прогона (metis-0447)
-                fh.write("\n" + "\n".join(_timing_summary(timings)) + "\n")
-            fresh, unknown = _fresh_failures(got_new, got_base, ok_new, ok_base, bare, bare_base)
-            short = {(py, f) for (py, f, s) in list(got_new) + list(got_base) if s.endswith(": срок прогона")}
-            if notes_new:  # копия новой версии не собралась — красное, база его не гасит (metis-0369)
-                fresh[("-", "-", "копия новой версии не собралась: " + "; ".join(notes_new))] = 1
-            if not _test_files(new_dir):  # без тестов зелёного нет, даже если их нет и у базы
-                fresh[("-", "-", NO_TESTS)] = 1
-            # падение, которое уже не изменится: файл новой досчитан, и база по нему досчитана или не нужна. Оно красное
-            # сразу, сколько бы файлов ни не успело (ревью 133, п.3): ждать остальные незачем
-            sure = [k for k in fresh if (k[0], k[1]) not in short and (k[0], k[1]) not in unknown]
-            if short and not sure:  # не досчитано — не «сломано»: решение на следующем проходе (metis-0424)
-                fh.write(f"\n===== не досчитано: {len(short)} файл(ов) не успели в срок прогона "
-                         f"({PLUGIN_RUN_LIMIT} с) — продолжу на следующем проходе, run {run} =====\n")
-                for py, f in sorted(short):
-                    fh.write(f"{py} · {f}\n")
-                _plugins_mark(marks, name, {"version": new, "result": PARTIAL, "log": log, "hash": digest, "run": run})
-                return log, digest, fresh, short
-            for py, f in sorted(unknown):
-                fh.write(f"база не досчитана: {py} · {f} — файл базы не дошёл до конца (таймаут или срок прогона), "
-                         "падения новой версии в нём считаются новыми\n")
-            fh.write(f"\n===== новых падений: {sum(fresh.values())} =====\n")
-            for (py, f, s) in sorted(fresh):
-                fh.write(f"{py} · {f} · {s}\n")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-        _results_prune(name, (digest, base_digest))
-    return log, digest, fresh, set()
-
-
 def plugins_update(quiet=False):
     with lock("plugins-update", block=False) as got:
         return _plugins_update(quiet) if got else 0
 
 
-def _plugins_memory():
-    """Причина отложить прогон тестов (metis-0424) или None: своп выше порога дежурного (swap_alert_gb, тот же, что у
-    pantheon start и тревоги о свопе). Своп не прочитан — не откладываем: без сигнала выпуск не держим."""
+def _memory_pressure():
+    """Давление памяти macOS (kern.memorystatus_vm_pressure_level, как _load_snapshot): 1 норма, 2 предупреждение,
+    4 критично; другое значение или сбой чтения — None. PANTHEON_FAKE_PRESSURE — подмена для тестов и проб, как
+    PANTHEON_FAKE_SWAP; пустая строка — «не прочитано»."""
+    fake = os.environ.get("PANTHEON_FAKE_PRESSURE")
     try:
-        w = watch_mod()
-        gb = w.swap_gb()
-        limit = w.threshold("swap_alert_gb", w.SWAP_ALERT_GB)
-    except Exception:  # замер — подсказка, а не условие: сбой не держит выпуск
+        if fake is not None:
+            level = int(fake)
+        else:
+            r = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True,
+                               text=True, timeout=10)
+            level = int(r.stdout.strip()) if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
-    return f"своп {gb:.1f} ГБ > {limit:g} ГБ" if gb is not None and gb > limit else None
-
-
-def _plugins_red(marks, name, old, new, log, what):
-    _plugins_mark(marks, name, {"version": new, "result": "red", "log": log})
-    _plugins_journal(f"{name} {old} → {new}: {what}, не ставлю ({log})")
-    alert(f"{name} {new} не поставлен: {what}. Лог: {log.replace(HOME, '~')}", "plugins-update")
-    return ALERTED
+    return level if level in (1, 2, 4) else None
 
 
 def _current_sync():
@@ -8252,10 +8140,46 @@ def _current_sync():
         alert(f"pantheon: current не перевесилась на {want}: {type(e).__name__} {e}", "plugins-update")
 
 
+def _release_problem(name, ver, digest):
+    """metis-0512 (вариант Б): номер версии поднимает workflow release на main после слияния и пишет
+    .claude-plugin/releases.json — {"v": 1, "plugins": {имя: {"version", "tree"}}}, tree — _tree_hash папки плагина
+    в коммите выпуска. Между слиянием PR и коммитом выпуска в каталоге новый код под прошлым номером: ставить его
+    нельзя (номер уже занят другим деревом). Поэтому новая версия ставится, только если запись выпуска совпала с
+    каталогом — та же версия и то же дерево (digest). Текст причины или None. Файла нет — тоже причина: локального
+    прогона тестов больше нет, и без записи выпуска не видно, что дерево прошло CI и workflow release. Клон каталога
+    неглубокий, поэтому сверка по записи, а не по истории git."""
+    p = os.path.join(_catalog_root(), ".claude-plugin", "releases.json")
+    try:
+        if not os.path.lexists(p):
+            raise ValueError("файла нет")
+        if os.path.islink(p) or not os.path.isfile(p):
+            raise ValueError("не обычный файл")
+        with open(p, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as e:
+        why = f"releases.json каталога не разобрать ({e}) — выпуск не сверить"
+    else:
+        rec = data.get("plugins", {}).get(name) if isinstance(data, dict) and data.get("v") == 1 \
+            and isinstance(data.get("plugins"), dict) else None
+        if not isinstance(rec, dict):
+            why = "в releases.json каталога нет записи выпуска — слито, выпуска ещё нет"
+        elif rec.get("version") != ver:
+            why = f"слито, выпуска ещё нет: в releases.json {rec.get('version')!r}, в каталоге {ver}"
+        elif not digest or rec.get("tree") != digest:
+            why = f"слито после выпуска {ver}: дерево каталога не то, что выпущено, — жду следующий выпуск"
+        else:
+            return None
+    # строка в журнал выпусков — один раз на состояние, а не на каждый плановый проход
+    seen = read_json(path("plugins", "unreleased.json"))
+    seen = seen if isinstance(seen, dict) else {}
+    if seen.get(name) != f"{ver} {why}":
+        _plugins_journal(f"{name} {ver}: не ставлю — {why}")
+        with contextlib.suppress(OSError):
+            write_json(path("plugins", "unreleased.json"), {**seen, name: f"{ver} {why}"})
+    return why
+
+
 def _plugins_update(quiet):
-    # остатки прогона, прерванного таймаутом задачи или сбоем (блокировка взята — чужого прогона нет)
-    shutil.rmtree(path("plugins", "tmp"), ignore_errors=True)
-    os.makedirs(path("plugins", "tmp"), exist_ok=True)
     try:
         ok = subprocess.run([claude_bin(), "plugin", "marketplace", "update", MARKETPLACE],
                             env=claude_env(), capture_output=True, text=True, timeout=300).returncode == 0
@@ -8270,8 +8194,7 @@ def _plugins_update(quiet):
         print("pantheon plugins update: не прочитал claude plugin list --json", file=sys.stderr)
         return 1
     catalog = _plugins_catalog()
-    marks = read_json(path("plugins", "marks.json"))
-    rc, tested, busy = 0, False, None
+    rc = 0
     for name in sorted(installed):
         if name not in catalog:
             continue
@@ -8282,77 +8205,13 @@ def _plugins_update(quiet):
             if not quiet:
                 print(f"{name}: {old}, новее нет")
             continue
-        mark = marks.get(name) if isinstance(marks.get(name), dict) else {}
-        same = mark.get("version") == new
-        log = mark.get("log") or path("plugins", f"{_plugins_safe(name)}-{_plugins_safe(new)}.log")
-        if same and mark.get("result") == "red":
+        digest = _tree_hash(src)
+        why = _release_problem(name, new, digest)
+        if why:  # metis-0512: слито в main, а workflow release номер ещё не поднял — код не ставим
             if not quiet:
-                print(f"{name}: {new} не ставлю — тесты были красные ({mark.get('log')})")
+                print(f"{name}: {new} не ставлю — {why}")
             continue
-        if same and mark.get("result") == "testing":
-            rc = max(rc, _plugins_red(marks, name, old, new, log, "прогон тестов прерван — таймаут задачи или сбой"))
-            if not quiet:
-                print(f"{name}: {new} не ставлю — прошлый прогон тестов прерван")
-            continue
-        if same and mark.get("result") == "green" and mark.get("hash") and _tree_hash(src) == mark["hash"]:
-            rc = max(rc, _plugin_install(name, old, new, log, marks, quiet, mark["hash"]))
-            continue
-        if tested:  # тесты — не больше одного плагина за запуск: иначе не уложиться в timeout задачи
-            if not quiet:
-                print(f"{name}: {new} — проверю на следующем запуске")
-            continue
-        if busy is None:
-            busy = [_plugins_memory()]
-        since = mark.get("deferred_since") if same else None
-        since = since if isinstance(since, (int, float)) and not isinstance(since, bool) else None
-        if busy[0] and (since is None or now() - since < PLUGIN_DEFER_MAX):
-            # metis-0424: под давлением памяти прогон на 30 мин только хуже — откладываем, не дольше PLUGIN_DEFER_MAX
-            if since is None:
-                _plugins_journal(f"{name} {old} → {new}: прогон тестов отложен — {busy[0]}")
-            _plugins_mark(marks, name, {**(mark if same else {"version": new}), "deferred_since": since or now()})
-            if not quiet:
-                print(f"{name}: {new} — прогон тестов отложен: {busy[0]}")
-            continue
-        tested = True
-        resume = mark.get("run") if same and mark.get("result") == PARTIAL and isinstance(mark.get("run"), str) else None
-        log, digest, fresh, short = _plugin_check(
-            name, old, new, src, installed[name].get("installPath"), marks,
-            peers_new={k: d for k, (_v, d) in catalog.items() if k != name},
-            peers_base={k: row.get("installPath") for k, row in installed.items() if k != name},
-            mkt_json=os.path.join(_catalog_root(), ".claude-plugin", "marketplace.json"), resume=resume)
-        if short:  # не досчитано — не «сломано» (metis-0424): метка partial поставлена, следующий проход продолжит
-            # счёт проходов подряд и начало отсрочки переходят в новую метку (ревью 133, п.1 и 2): иначе partial без
-            # потолка, а предел отсрочки 3 ч начинался бы заново после каждого прохода
-            prev = mark.get("partials") if same and mark.get("result") == PARTIAL else None
-            n = (prev if isinstance(prev, int) and not isinstance(prev, bool) and prev > 0 else 0) + 1
-            keep = {"deferred_since": since} if since is not None else {}
-            _plugins_mark(marks, name, {**marks.get(name, {}), **keep, "partials": n})
-            if n >= PLUGIN_PARTIAL_MAX:
-                with contextlib.suppress(OSError), open(log, "a", encoding="utf-8") as fh:
-                    fh.write(f"\n===== не ставлю: не досчитано {n} проходов подряд (предел {PLUGIN_PARTIAL_MAX}) — "
-                             "продолжения не будет; заново — удалить запись плагина из marks.json =====\n")
-                rc = max(rc, _plugins_red(marks, name, old, new, log,
-                                          f"тесты не досчитаны за {n} проходов подряд ({len(short)} файл(ов) не "
-                                          "успели в срок прогона) — прогон не движется"))
-                if not quiet:
-                    print(f"{name}: {new} не ставлю — тесты не досчитаны за {n} проходов подряд")
-                continue
-            _plugins_journal(f"{name} {old} → {new}: не досчитано — {len(short)} файл(ов) не успели в срок прогона, "
-                             f"продолжу на следующем проходе (проход {n} из {PLUGIN_PARTIAL_MAX})")
-            if not quiet:
-                print(f"{name}: {new} — тесты не досчитаны ({len(short)} файл(ов)), продолжу на следующем проходе")
-            continue
-        if not fresh:
-            rc = max(rc, _plugin_install(name, old, new, log, marks, quiet, digest))
-            continue
-        # одна подпись на двух python — одна строка в тревоге
-        # подпись — строка целиком без обрезки (metis-0449), в тревогу — не длиннее 300 знаков
-        first = list(dict.fromkeys((s if s.startswith(f + ":") or f == "-" else f"{f}: {s}")[:300]
-                                   for (py, f, s) in sorted(fresh)))[:3]
-        rc = _plugins_red(marks, name, old, new, log,
-                          f"новые падения тестов ({sum(fresh.values())}) — {'; '.join(first)}")
-        if not quiet:
-            print(f"{name}: {new} не ставлю — новые падения тестов, лог {log}")
+        rc = max(rc, _plugin_install(name, old, new, quiet, digest))
     return rc
 
 
@@ -8405,15 +8264,21 @@ OPUS_RAN = re.compile(r"\s*модель:\s*claude-opus", re.I)   # как в ш�
 RAN_MODEL = re.compile(r"\s*модель:\s*(claude-[a-z0-9.-]*[a-z0-9])", re.I)  # ID модели из ran, как в шлюзе guard
 
 
+def review_accept_full(r):
+    """«Принять» с полным перечнем «открыл / запустил / не проверял» (Б6) — любая модель. Вне ядра шлюз guard считает
+    такое «принять» (simplify п. 9); в PR ядра нужен ещё Opus — review_accept_counts."""
+    c = r.get("checklist")
+    return isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in REVIEW_CHECKLIST)
+
+
 def review_accept_counts(r):
-    """«Принять» в счёт шлюза (metis-0176, Б6): полный перечень и --ran с «модель: claude-opus» в начале, а если хук
+    """«Принять» в счёт шлюза ядра (metis-0176, Б6): полный перечень и --ran с «модель: claude-opus» в начале, а если хук
     guard записал модели из транскрипта argus (поле models) — все они claude-opus и среди них модель из ran (тот же ID
     или он с датой), как opus_problem шлюза guard. Поля models нет (models_note — транскрипта не было, или запись
     старше) — судим по ran. Одно правило для шлюза владельца (merge.gate) и итога `review status` (review_tally),
-    чтобы они не разошлись (metis-0393)."""
+    чтобы они не разошлись (metis-0393). Шлюз ядра владельца — только для PR ядра, там Opus обязателен."""
     c = r.get("checklist")
-    if not (isinstance(c, dict) and all(isinstance(c.get(k), str) and c[k].strip() for k in REVIEW_CHECKLIST)
-            and OPUS_RAN.match(c["ran"])):
+    if not (review_accept_full(r) and OPUS_RAN.match(c["ran"])):
         return False
     if "models" not in r:
         return True
@@ -8503,20 +8368,20 @@ def review_records(repo=None, pr=None):
     return out
 
 
-def review_tally(recs, pr):
+def review_tally(recs, pr, opus_only=False):
     """Итог argus по head PR (metis-0393): {sha: (принять, вернуть)} по последнему вердикту каждого рецензента.
     Рецензент — пара (session_id, agent_id), как у шлюза слияния guard: «вернуть» снимает только «принять» того же
     вызова. По итогу прошлого head лид и argus решают, допустим ли узкий повтор, — не по отчётам и словам лида.
-    «Принять» без полного перечня или не на Opus (по --ran и по моделям транскрипта argus) не в счёт — как у шлюза
-    владельца (review_accept_counts): «вернуть»
-    того же рецензента оно не снимает. Шлюз guard вне репозиториев защит «принять» не на Opus засчитывает — итог там
-    строже шлюза, узкий повтор от этого не пройдёт лишний раз."""
+    «Принять» без полного перечня не в счёт: «вернуть» того же рецензента оно не снимает. Модель не смотрим — вне
+    ядра шлюз guard считает «принять» на любой модели (simplify п. 9, 27.10); opus_only=True — как для PR ядра:
+    ещё и на Opus (по --ran и по моделям транскрипта argus, review_accept_counts)."""
+    ok = review_accept_counts if opus_only else review_accept_full
     last = {}
     for r in recs:
         by = r.get("by")
         if (r.get("kind") in ("accept", "reject") and r.get("pr") == pr and isinstance(by, dict)
                 and by.get("agent_type") == "argus" and isinstance(r.get("sha"), str)):
-            if r["kind"] == "accept" and not review_accept_counts(r):
+            if r["kind"] == "accept" and not ok(r):
                 continue
             last.setdefault(r["sha"].lower(), {})[(by.get("session_id") or "", by.get("agent_id") or "")] = r["kind"]
     return {sha: (sum(k == "accept" for k in v.values()), sum(k == "reject" for k in v.values()))
@@ -8622,6 +8487,10 @@ def review_cmd(rest):
                   + (f", {d['by']}" if d.get("by") else "") + ") — второго argus не звать")
         if not recs:
             print("pantheon review status: записей нет")
+        # строки про Opus — только там, где бывает ядро: репозиторий metis-pantheon в [merge_repos] или неизвестный
+        # (строже); у репозитория продукта шлюз считает «принять» на любой модели, и эти строки только путают
+        dirs = autoclose_repo_dirs().get(args[0].lower()) if args else None
+        core_repo = not dirs or "metis-pantheon" in dirs
         for r in recs:
             by = r.get("by") if isinstance(r.get("by"), dict) else {}
             pr = f"#{r['pr']}" if r.get("pr") else ""
@@ -8634,19 +8503,27 @@ def review_cmd(rest):
             if r.get("kind") == "accept" and not all(isinstance(cl.get(k), str) and cl[k].strip()
                                                      for k in REVIEW_CHECKLIST):
                 print("    без перечня проверенного (Б6) — шлюз слияния такое «принять» не пускает")
+            elif r.get("kind") == "accept" and not core_repo:
+                pass
             elif r.get("kind") == "accept" and not OPUS_RAN.match(cl["ran"]):
-                print("    не на Opus (--ran без «модель: claude-opus» в начале) — шлюз защит и итог ниже его не считают")
+                print("    не на Opus (--ran без «модель: claude-opus» в начале) — для PR ядра не в счёт; вне ядра "
+                      "шлюз его считает")
             elif r.get("kind") == "accept" and r.get("models") == []:  # metis-0413: транскрипт найден, моделей нет
-                print("    транскрипт argus найден, но моделей в нём нет — шлюз защит и итог ниже его не считают")
+                print("    транскрипт argus найден, но моделей в нём нет — для PR ядра не в счёт; вне ядра шлюз его "
+                      "считает")
             elif r.get("kind") == "accept" and not review_accept_counts(r):
-                print("    не на Opus по транскрипту argus (поле models не сходится с --ran) — шлюз защит и итог ниже "
-                      "его не считают")
+                print("    не на Opus по транскрипту argus (поле models не сходится с --ran) — для PR ядра не в счёт; "
+                      "вне ядра шлюз его считает")
             for k, label in REVIEW_CHECKLIST.items():
                 if isinstance(cl.get(k), str) and cl[k].strip():
                     print(f"    {label}: {cl[k]}")
         if args:
+            strict = review_tally(recs, int(args[1]), opus_only=True)
             for sha, (acc, rej) in review_tally(recs, int(args[1])).items():
                 print(f"итог на {sha[:12]}: принять {acc}, вернуть {rej} — последний вердикт каждого argus")
+                if core_repo and strict.get(sha, (0, 0)) != (acc, rej):   # для PR ядра — только «принять» на Opus
+                    print(f"  для PR ядра (в счёт только «принять» на Opus): принять {strict.get(sha, (0, 0))[0]}, "
+                          f"вернуть {strict.get(sha, (0, 0))[1]}")
         return 0
     print(f"pantheon review: {REVIEW_USAGE}", file=sys.stderr)
     return 2
@@ -8755,6 +8632,8 @@ def main(argv):
         return approve(rest)
     if cmd == "consent":
         return consent(rest)
+    if cmd == "reap":
+        return culprits_mod().reap(rest)
     if cmd in WATCH_CMDS:
         return watch_cmd(cmd, rest)
     if cmd == "usage":
@@ -8769,6 +8648,8 @@ def main(argv):
         return read_mod().main(rest)
     if cmd == "merge":
         return merge_mod().main(rest)
+    if cmd == "outside":
+        return outside_mod().main(rest)
     if cmd == "mmv":
         return mmv_mod().main(rest, STATE, now())
     if cmd == "qmd":

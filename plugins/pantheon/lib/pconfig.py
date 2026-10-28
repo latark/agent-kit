@@ -19,7 +19,7 @@
 """
 import contextlib
 import os
-import sys
+import tomllib
 
 try:
     import fcntl
@@ -41,9 +41,6 @@ def path():
 def load(p=None):
     """→ dict. Нет файла — {}. Битый файл — ValueError: молча терять набор исполнителей нельзя."""
     p = p or path()
-    if sys.version_info < (3, 11):
-        raise RuntimeError("pconfig: нужен Python 3.11+ (tomllib)")
-    import tomllib
     try:
         with open(p, "rb") as fh:
             return tomllib.load(fh)

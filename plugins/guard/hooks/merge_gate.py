@@ -1,6 +1,8 @@
 """Запор слияния guard (P1-4, Д2, Д3, guard 0.5.4) — часть ядра защит: ядро — весь plugins/guard/**, общие роли
-plugins/pantheon/roles/** и правила окон plugins/pantheon/lib/window_rules.py, casefold; файлы из pulls/N/files с
-previous_filename. PR, задевающий ядро, агенты не сливают: он ждёт слияния владельцем (Д3).
+plugins/pantheon/roles/**, CI .github/** и правила окон plugins/pantheon/lib/window_rules.py, casefold; файлы из
+pulls/N/files с previous_filename. PR, задевающий ядро, агенты не сливают: он ждёт слияния владельцем (Д3).
+PR защит, который правит version в plugins/*/.claude-plugin/plugin.json или трогает .claude-plugin/releases.json, не
+проходит совсем (metis-0512, _version_problem): номер поднимает workflow release на main после слияния.
 
 Модуль без своего состояния: общие помощники guard.py (load_policy, privileged, private_conf, _inside, _norm, _key,
 STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — его присваивает guard.py при загрузке
@@ -47,15 +49,17 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    shallow, info/grafts, нет коммита base или head, не одна merge-base, вывод --raw не разобрать, plugin.json — не
    файл, сбой или таймаут git; git replace не действует. Тесты и talos не
    переносятся; каждый перенос — строка в STATE_DIR/merge-gate/carry.jsonl, не записалась — отказ; продукт — ещё запись talos и строка в ~/ai/pantheon/alerts.md со ссылкой
-   owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES), casefold;
+   owner/repo#N и словом «откат»; защиты — ещё Д3: PR не задевает ядро (CORE_DIR и CORE_FILES, сборка окон в pantheon.py по AST — metis-0404), casefold;
    файлы из pulls/N/files с previous_filename; PR, задевающий ядро, проходит только со строкой
    `<время> merge-approve <owner/repo>#<N> <sha>` для того же репозитория, PR и SHA в owner-log/merge-approve.log —
    её пишет тик после Touch ID владельца (metis-0285, `pantheon merge`), не старше суток. В защитах accept засчитывается, только если его ran начинается с
-   «модель: claude-opus» (metis-0176): accept другой модели — как будто его нет, reject любой модели в силе.
+   «модель: claude-opus» (metis-0176) — но лишь в PR, который задевает ядро (или ядро не проверить): вне ядра один
+   argus на любой модели, в том числе Sonnet (упрощение п. 9, 27.10). accept другой модели в PR ядра — как будто его
+   нет, reject любой модели в силе.
    Незаменённый шаблон «<ID>» в ran — отказ ещё до записи. Модель сверяется и с транскриптом argus: record пишет в
-   accept и reject поле "models" — значения message.model его assistant-записей; в защитах accept засчитывается,
+   accept и reject поле "models" — значения message.model его assistant-записей; в PR ядра accept засчитывается,
    только если все они claude-opus и среди них модель из ran. Транскрипта нет — поле "models_note", судим по ran;
-   транскрипт найден, а моделей в нём нет — "models": [] и пометка NO_MODELS, в защитах accept не в счёт (metis-0413).
+   транскрипт найден, а моделей в нём нет — "models": [] и пометка NO_MODELS, в PR ядра accept не в счёт (metis-0413).
    Последним во всех режимах — проверки GitHub (metis-0297), один gh pr view на Д3 и проверки: PR на этом SHA, rollup зелёный;
    красная или идущая проверка, нет ответа gh — отказ; проверок нет — пропуск, только если .github/workflows нет ни на
    head, ни на base PR.
@@ -93,8 +97,9 @@ MERGE_PRODUCT = ("Продукт для клиентов сливай после
                  "на этот SHA, строка в сводке «что ушло» со ссылкой owner/repo#N и откатом (`pantheon alert`), затем "
                  f"{MERGE_CMD}.")
 MERGE_PROTECT = ("Защиты сливает только Метида или её лид через шлюз слияния: тесты и «принять» от argus на этот SHA, "
-                 f"{MERGE_CMD}; PR, который задевает ядро защит (весь plugins/guard/, plugins/pantheon/roles/, "
-                 "plugins/pantheon/lib/window_rules.py и .claude-plugin/marketplace.json), ждёт слияния владельцем (Д3): "
+                 f"{MERGE_CMD}; PR, который задевает ядро защит (весь plugins/guard/, plugins/pantheon/roles/, .github/, "
+                 "plugins/pantheon/lib/window_rules.py, сборка окон sandbox_build в plugins/pantheon/lib/pantheon.py и "
+                 ".claude-plugin/marketplace.json), ждёт слияния владельцем (Д3): "
                  "заявка `pantheon merge request N -R <owner/repo>`, сливает плановый проход после Touch ID владельца.")
 MERGE_OWNER = "Слияние делает владелец."
 MERGE_AMBIGUOUS = "\0два направления"
@@ -114,7 +119,9 @@ CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_
               ".claude-plugin/marketplace.json")  # откуда ставятся плагины: подмена источника guard (metis-0115)
 # и папки целиком: весь плагин guard (metis-0092) — код, тесты, README, настройки; общие роли Пантеона — в них
 # правила ролей, которые guard проверяет по agent_type (metis-0182). Папки может ещё не быть в main — путь всё равно ядро
-CORE_DIR = ("plugins/guard", "plugins/pantheon/roles")
+CORE_DIR = ("plugins/guard", "plugins/pantheon/roles",
+            # CI с правом записи в main (metis-0512): workflow release и его скрипт .github/scripts/release.py
+            ".github")
 GH_TIMEOUT = 6
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 REPO_RE = re.compile(r"[a-z0-9_.-]+/[a-z0-9_.-]+")
@@ -126,8 +133,8 @@ NOT_SIMPLE = re.compile(r"[;|&<>`\n\r]|\$\(")
 # перечень проверенного в «принять» (Б6): что argus открыл, что запустил, чего не проверял — поля записи и флаги
 CHECKLIST = ("opened", "ran", "unchecked")
 CHECKLIST_HINT = '--opened "<что открыл>" --ran "<что запустил>" --unchecked "<что не проверял>"'
-# защиты: «принять» засчитывается, только если argus проверял на Opus — поле ran начинается с «модель: claude-opus»
-# (metis-0176). Незаменённый шаблон «<ID>» в ran — ошибка шаблона роли, а не модель
+# PR ядра: «принять» засчитывается, только если argus проверял на Opus — поле ran начинается с «модель: claude-opus»
+# (metis-0176; вне ядра модель не проверяется — упрощение п. 9). Незаменённый шаблон «<ID>» в ran — ошибка шаблона роли, а не модель
 OPUS_RAN = re.compile(r"\s*модель:\s*claude-opus", re.I)
 UNFILLED_ID = re.compile(r"<\s*id\s*>", re.I)
 RAN_MODEL = re.compile(r"\s*модель:\s*(claude-[a-z0-9.-]*[a-z0-9])", re.I)  # ID модели из --ran
@@ -890,7 +897,191 @@ def _is_core(path, core_files):
     return p in core_files or any(p == d or p.startswith(d + "/") for d in CORE_DIR)
 
 
-PR_VIEW_FIELDS = "headRefOid,baseRefOid,changedFiles,statusCheckRollup"
+# Сборка окон в pantheon.py — тоже ядро (metis-0404, «да» владельца 27.10): sandbox_build пишет settings/<окно>.json —
+# песочницу, permissions и env окон ролей. Признак — не весь файл, а то, от чего зависит записанное: функции
+# SANDBOX_BUILD_ROOTS (сборка, её вызов с папками и лидами из реестра, файл запуска окна) и всё, на что они ссылаются по
+# именам, транзитивно в пределах файла (role_settings, JOB_ROLES, SANDBOX_DOMAINS…). Правка — инструкция верхнего уровня
+# с другим AST (комментарии не в счёт), которая задаёт или меняет такое имя: def и class — своё имя, global, запись в
+# элемент или поле, метод-мутатор; прочие инструкции — все свои имена. Файл до и после — из git папки слияния
+# (merge-base PR и head, как у переноса «принять»). Имена сборки — объединение замыканий на merge-base, head, base PR
+# и живой вершине ветки base (gh api …/git/ref/heads/<base>): соседний PR, слитый в base после ответвления, мог
+# добавить в сборку вызов функции, которую правит этот PR (ревью argus-b PR #160, Б1). Не получить, не разобрать, нет
+# корня, файл переименован или в другом регистре — ядро. Вне признака: обращения по строке (getattr, globals()), псевдоним изменяемого значения, другие файлы
+# (window_rules.py — в CORE_FILES)
+SANDBOX_BUILD_FILE = "plugins/pantheon/lib/pantheon.py"
+SANDBOX_BUILD_ROOTS = ("sandbox_build", "domains_build", "run_settings")
+MUTATORS = frozenset({"append", "extend", "insert", "update", "setdefault", "pop", "popitem", "remove", "clear", "add",
+                      "discard", "sort", "reverse", "__setitem__", "__delitem__", "__iadd__", "__ior__"})
+_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _base_name(n):
+    """Имя в основании a.b[c].d — или None."""
+    while isinstance(n, (ast.Attribute, ast.Subscript)):
+        n = n.value
+    return n.id if isinstance(n, ast.Name) else None
+
+
+def _mutated(node):
+    """Имена, которые node меняет на месте: global/nonlocal, запись и del в элемент или поле, метод-мутатор."""
+    out = set()
+    for n in ast.walk(node):
+        if isinstance(n, (ast.Global, ast.Nonlocal)):
+            out.update(n.names)
+        elif isinstance(n, (ast.Attribute, ast.Subscript)) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            out.add(_base_name(n))
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in MUTATORS:
+            out.add(_base_name(n.func.value))
+    out.discard(None)
+    return out
+
+
+def _all_names(node):
+    """Все имена в node: Name, имена def и class, import."""
+    out = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name):
+            out.add(n.id)
+        elif isinstance(n, _DEFS):
+            out.add(n.name)
+        elif isinstance(n, ast.alias):
+            out.add((n.asname or n.name).split(".")[0])
+    return out
+
+
+def _touched(st, data):
+    """Имена, которые задаёт или меняет инструкция верхнего уровня st; data — имена данных модуля (у def и class
+    засчитывается изменение только их, а не своих локальных переменных)."""
+    if isinstance(st, _DEFS):
+        return {st.name} | (_mutated(st) & data)
+    if isinstance(st, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
+        targets = st.targets if isinstance(st, (ast.Assign, ast.Delete)) else [st.target]
+        out = _mutated(st)
+        for t in targets:
+            out |= {n.id for n in ast.walk(t) if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del))}
+        return out
+    # import, выражение, if/try/for/with верхнего уровня: что в них присваивается, объявляется и меняется на месте
+    out = _mutated(st)
+    for n in ast.walk(st):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            out.add(n.id)
+        elif isinstance(n, _DEFS):
+            out.add(n.name)
+        elif isinstance(n, ast.alias):
+            out.add((n.asname or n.name).split(".")[0])
+    return out
+
+
+def _defs_closure(src):
+    """Исходник → (имя → дампы его инструкций по порядку, замыкание SANDBOX_BUILD_ROOTS) или None: не разобрать,
+    нет корня функцией верхнего уровня."""
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+    defs, dumps = {}, {}
+    data = set()
+    for st in tree.body:
+        if not isinstance(st, _DEFS):
+            data |= _touched(st, set())
+    for st in tree.body:
+        for name in _touched(st, data):
+            defs.setdefault(name, []).append(st)
+    if not all(any(isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)) and st.name == r for st in tree.body)
+               for r in SANDBOX_BUILD_ROOTS):
+        return None
+    seen, todo = set(), list(SANDBOX_BUILD_ROOTS)
+    while todo:
+        name = todo.pop()
+        if name in seen or name not in defs:
+            continue
+        seen.add(name)
+        for st in defs[name]:
+            todo.extend(_all_names(st))
+    memo = {id(st): ast.dump(st) for st in tree.body}
+    for name, sts in defs.items():
+        dumps[name] = [memo[id(st)] for st in sts]
+    return dumps, seen
+
+
+def sandbox_build_changes(old, new, *tips):
+    """Исходники pantheon.py до и после → имена сборки окон, которые PR задевает (отсортированы), или None — не
+    разобрать или нет корня: тогда ядро. tips — исходники на вершинах base: их замыкания тоже в счёт (Б1 PR #160 —
+    в base после ответвления PR сборка стала звать функцию, которую PR правит)."""
+    a, b = _defs_closure(old), _defs_closure(new)
+    more = [_defs_closure(t) for t in tips]
+    if a is None or b is None or any(c is None for c in more):
+        return None
+    names = a[1] | b[1]
+    for c in more:
+        names |= c[1]
+    return sorted(n for n in names if a[0].get(n, []) != b[0].get(n, []))
+
+
+def _blob(gd, rev, path):
+    """Текст обычного файла path в коммите rev из git gd или None (нет, ссылка, подмодуль, не UTF-8, сбой)."""
+    out = _git_bytes(gd, "ls-tree", "-z", rev, "--", path)
+    m = re.fullmatch(rb"(100644|100755) blob ([0-9a-f]{40,64})\t([^\0]*)\0", out or b"")
+    if not m or m.group(3) != path.encode():
+        return None
+    raw = _git_bytes(gd, "cat-file", "blob", m.group(2).decode())
+    try:
+        return raw.decode("utf-8") if raw is not None else None
+    except UnicodeDecodeError:
+        return None
+
+
+BRANCH_RE = re.compile(r"(?!.*\.\.)(?!/)(?!.*//)[A-Za-z0-9._/-]{1,200}(?<![/.])")
+
+
+def _base_tip(repo, branch):
+    """Живая вершина ветки branch в repo (gh api …/git/ref/heads/<branch>) — SHA коммита или None (сбой gh, не та
+    ветка, не коммит, имя ветки не по формату)."""
+    if not isinstance(branch, str) or not BRANCH_RE.fullmatch(branch):
+        return None
+    got = _gh_json(["api", f"repos/{repo}/git/ref/heads/{branch}"])
+    ref = got[0] if isinstance(got, list) and len(got) == 1 and isinstance(got[0], dict) else {}
+    obj = ref.get("object") if isinstance(ref.get("object"), dict) else {}
+    sha = obj.get("sha")
+    if ref.get("ref") != "refs/heads/" + branch or obj.get("type") != "commit" or not isinstance(sha, str) \
+            or not SHA_RE.fullmatch(sha.lower()):
+        return None
+    return sha.lower()
+
+
+def _sandbox_problem(cwd, repo, base, sha, branch=None):
+    """PR правит pantheon.py: ядро ли это (metis-0404) — текст для списка задетого ядра или None (сборку окон не
+    задевает). base — baseRefOid, branch — baseRefName: замыкание берётся и на живой вершине ветки (Б1 PR #160)."""
+    gd, why = _carry_git(cwd, repo, base)
+    if gd is None:
+        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: {why})"
+    if _git_bytes(gd, "cat-file", "-e", sha + "^{commit}") is None:
+        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: коммита {sha[:12]} нет в git папки — сделай git fetch)"
+    out = _git_bytes(gd, "merge-base", "--all", base.lower(), sha)
+    mbs = out.split() if out is not None else []
+    if len(mbs) != 1:
+        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: у {sha[:12]} и base PR нет единственной merge-base)"
+    tip = _base_tip(repo, branch)
+    if tip is None:
+        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: вершину ветки base PR ({branch}) не получить от gh)"
+    if _git_bytes(gd, "cat-file", "-e", tip + "^{commit}") is None:
+        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: вершины base {tip[:12]} нет в git папки — сделай " \
+               f"git fetch)"
+    mb = mbs[0].decode("ascii", "replace")
+    old, new = _blob(gd, mb, SANDBOX_BUILD_FILE), _blob(gd, sha, SANDBOX_BUILD_FILE)
+    tips = [_blob(gd, r, SANDBOX_BUILD_FILE) for r in dict.fromkeys((base.lower(), tip)) if r != mb]
+    ok = old is not None and new is not None and all(t is not None for t in tips)
+    got = sandbox_build_changes(old, new, *tips) if ok else None
+    if got is None:
+        return f"{SANDBOX_BUILD_FILE} (сборку окон не проверить: файла нет до или после, не разобрать или нет " \
+               f"{'/'.join(SANDBOX_BUILD_ROOTS)})"
+    if got:
+        shown = ", ".join(got[:8]) + (f" и ещё {len(got) - 8}" if len(got) > 8 else "")
+        return f"{SANDBOX_BUILD_FILE} (сборка окон: {shown})"
+    return None
+
+
+PR_VIEW_FIELDS = "headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup"
 
 
 def _pr_view(repo, pr):
@@ -900,12 +1091,22 @@ def _pr_view(repo, pr):
     return data if isinstance(data, dict) else None
 
 
-def _core_problem(repo, pr, sha, data):
+def _pr_files(repo, pr):
+    """Файлы PR из REST pulls/N/files (status, previous_filename, patch) — список или None (сбой gh)."""
+    return _gh_json(["api", f"repos/{repo}/pulls/{pr}/files?per_page=100", "--paginate", "--jq", ".[]"])
+
+
+_FETCH = object()  # _core_problem без files: список запросить здесь
+
+
+def _core_problem(repo, pr, sha, data, files=_FETCH, cwd=None):
     """Д3: PR защит, который задевает ядро, ждёт слияния владельцем. data — ответ _pr_view. Файлы — из REST
-    pulls/N/files (там есть status и previous_filename: переименование ядра не прячет старый путь). Список файлов
-    неполон, PR на другом коммите — тоже отказ."""
+    pulls/N/files (там есть status и previous_filename: переименование ядра не прячет старый путь); files — уже
+    полученный ответ _pr_files, в том числе None (сбой gh — отказ, без второго запроса: argus-b PR #153 Б1), без
+    него — запрос здесь. Список файлов неполон, PR на другом коммите — тоже отказ."""
     count, head = data.get("changedFiles"), data.get("headRefOid")
-    files = _gh_json(["api", f"repos/{repo}/pulls/{pr}/files?per_page=100", "--paginate", "--jq", ".[]"])
+    if files is _FETCH:
+        files = _pr_files(repo, pr)
     paths = None
     if isinstance(files, list) and all(isinstance(f, dict) for f in files):
         paths = []
@@ -920,9 +1121,72 @@ def _core_problem(repo, pr, sha, data):
         return f"{MERGE_CORE}: PR сейчас на другом коммите ({head}), а не на {sha}"
     core = {c.casefold() for c in CORE_FILES}
     hit = [p for p in paths if _is_core(p, core)]
+    # сборка окон в pantheon.py (metis-0404): ядро, если PR задевает её имена; переименование и другой регистр — ядро
+    norm = [p.strip("/").casefold() for p in paths]
+    while any(p.startswith("./") for p in norm):
+        norm = [p[2:].lstrip("/") if p.startswith("./") else p for p in norm]
+    if SANDBOX_BUILD_FILE in norm:
+        own = [f for f in files if SANDBOX_BUILD_FILE in [str(n).strip("/").casefold().lstrip("./")
+                                                          for n in (f.get("filename"), f.get("previous_filename"))]]
+        if len(own) != 1 or own[0].get("filename") != SANDBOX_BUILD_FILE or own[0].get("previous_filename") is not None:
+            hit.append(f"{SANDBOX_BUILD_FILE} (переименован, удалён, добавлен или путь в другом регистре)")
+        else:
+            why = _sandbox_problem(cwd, repo, data.get("baseRefOid"), sha, data.get("baseRefName"))
+            if why:
+                hit.append(why)
     if hit:
         return f"{MERGE_CORE_HIT}{', '.join(hit)}"
     return None
+
+
+# номер версии плагина поднимает workflow release на main после слияния (metis-0512, вариант Б): PR его не трогает,
+# иначе соседние PR конфликтуют в plugin.json после каждого слияния. Отказ — и с Touch ID владельца: коммиты выпуска
+# Action идут в main мимо PR, а номер в PR — всегда ошибка автора
+PLUGIN_MANIFEST_RE = re.compile(r"plugins/[^/]+/\.claude-plugin/plugin\.json")
+RELEASES_FILE = ".claude-plugin/releases.json"
+JSON_STR_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+MERGE_VERSION = ("номер версии поднимает workflow release на main после слияния (metis-0512): убери из PR правку "
+                 "version в plugin.json и файл .claude-plugin/releases.json; новый коммит — новые записи тестов и argus")
+
+
+def _touches_version(patch):
+    """В строках +/- патча есть JSON-строка "version" (и с \\u-экранированием, без учёта регистра) — True."""
+    for line in patch.splitlines():
+        if line[:1] not in ("+", "-"):
+            continue
+        for m in JSON_STR_RE.finditer(line[1:]):
+            try:
+                val = json.loads(m.group(0))
+            except ValueError:
+                return True  # строку не разобрать — считаем правкой номера
+            if isinstance(val, str) and val.strip().casefold() == "version":
+                return True
+    return False
+
+
+def _version_problem(files):
+    """metis-0512: PR правит version в plugins/*/.claude-plugin/plugin.json или трогает .claude-plugin/releases.json —
+    текст отказа, иначе None. files — ответ _pr_files; сбой и неполный список решает _core_problem. Новый и удалённый
+    plugin.json (новый плагин или его удаление) — можно. Патча нет — отказ: правку version не проверить."""
+    if not isinstance(files, list):
+        return None
+    hit = []
+    for f in files:
+        if not isinstance(f, dict):
+            return None
+        names = [n for n in (f.get("filename"), f.get("previous_filename")) if isinstance(n, str)]
+        norm = [n.strip("/").casefold() for n in names]
+        if not names:
+            continue
+        if RELEASES_FILE in norm:
+            hit.append(f"{names[0]} (пишет только workflow release)")
+        elif not any(PLUGIN_MANIFEST_RE.fullmatch(n) for n in norm) or f.get("status") in ("added", "removed"):
+            continue
+        elif not isinstance(f.get("patch"), str):
+            hit.append(f"{names[0]} (патча нет — правку version не проверить)")
+        elif _touches_version(f["patch"]):
+            hit.append(f"{names[0]} (меняет version)")
+    return f"PR трогает номер версии: {', '.join(hit)}" if hit else None
 
 
 # проверки GitHub на head PR (metis-0297): разбор rollup — как ci_state в pantheon/lib/merge.py (PR #79, metis-0285)
@@ -1354,7 +1618,9 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     if not any(r["kind"] == "tests" and r["sha"] == sha and repo in [x.lower() for x in r["repo"]] for r in records):
         return (f"нет записи тестов на {repo}@{sha[:12]}: в чистом дереве на этом коммите запусти "
                 f"`pantheon review test -- <команда тестов>` (запишет хук guard). Тесты долгие: запускай "
-                f"`pantheon review test` не в фоне, с timeout до 600000 мс (у Bash по умолчанию 120 с). {advice}")
+                f"`pantheon review test` не в фоне, с timeout до 600000 мс (у Bash по умолчанию 120 с). Тестам нужен "
+                f"порт или сокет, которых в окне нет, — `pantheon outside test --wait 590` в той же копии (запись "
+                f"tests сделает плановый проход; dev-сервер — `pantheon outside serve --wait 120`). {advice}")
 
     def mine(r, kinds, who, any_sha=False):
         return (r["kind"] in kinds and r["by"].get("agent_type") == who and r["pr"] == pr
@@ -1362,16 +1628,31 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
 
     # вердикты argus на PR — на любом head (metis-0415): «вернуть» привязано к PR, «принять» переносится по отпечатку
     pr_verdicts = [r for r in records if mine(r, ("accept", "reject"), "argus", any_sha=True)]
-    # защиты (metis-0176): «принять» не на Opus не засчитывается — как будто его нет; «вернуть» любой модели в силе,
-    # «принять» без перечня остаётся, чтобы отказ Б6 ниже сказал о перечне
-    weak = [r for r in pr_verdicts if protect and r["kind"] == "accept" and checklist_ok(r) and opus_problem(r)]
-    verdicts = [r for r in pr_verdicts if not any(r is w for w in weak)]
     seen_view = []
+    seen_files = []
 
     def pr_view():
         if not seen_view:
             seen_view.append(_pr_view(repo, pr))
         return seen_view[0]
+
+    def pr_files():
+        # один запрос файлов на шлюз: сбой (None) не повторяется в _core_problem, а даёт там отказ — иначе удачный
+        # второй запрос пропустил бы PR с правкой version мимо _version_problem (argus-b PR #153 Б1)
+        if not seen_files:
+            seen_files.append(_pr_files(repo, pr))
+        return seen_files[0]
+
+    # защиты (metis-0176, simplify п. 9): «принять» не на Opus не засчитывается — как будто его нет — только в PR,
+    # который задевает ядро; вне ядра один argus на любой модели. «Вернуть» любой модели в силе, «принять» без перечня
+    # остаётся, чтобы отказ Б6 ниже сказал о перечне. Ядро ли — по тому же _core_problem, что и Д3; не удалось
+    # проверить (gh не ответил, список файлов неполон) — считаем ядром: строже, а отказ Д3 ниже всё равно будет
+    weak = [r for r in pr_verdicts if protect and r["kind"] == "accept" and checklist_ok(r) and opus_problem(r)]
+    if weak:
+        view = pr_view()
+        if view is not None and _core_problem(repo, pr, sha, view, pr_files(), cwd) is None:
+            weak = []
+    verdicts = [r for r in pr_verdicts if not any(r is w for w in weak)]
 
     fp = _Prints(cwd, repo, sha, pr_verdicts, pr_view)
 
@@ -1404,9 +1685,9 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
             unfilled = any(UNFILLED_ID.search(r["checklist"]["ran"]) for r in weak_used)
             return (f"«принять» на {repo}#{pr}@{sha[:12]} от "
                     f"{'; '.join(_who(r) + ' на ' + r['sha'][:12] + ' (' + opus_problem(r) + ')' for r in weak_used)}"
-                    " — не на Opus: в "
-                    "репозитории защит шлюз засчитывает только проверку argus на модели claude-opus (--ran начинается с "
-                    "«модель: claude-opus»). Проверку повторяет argus на Opus и записывает `pantheon review accept "
+                    " — не на Opus: "
+                    "в PR, который задевает ядро защит (или ядро не проверить), шлюз засчитывает только проверку argus "
+                    "на модели claude-opus (--ran начинается с «модель: claude-opus»). Проверку повторяет argus на Opus и записывает `pantheon review accept "
                     f"{repo} {pr} {sha} --ran \"модель: claude-opus-…, что запустил\" …`."
                     + (f" Кроме того, {UNFILLED_ID_HINT}." if unfilled else "") + f" {advice}")
         return (f"нет «принять» от argus на {repo}#{pr}@{sha[:12]}: позови argus, он проверит и запишет "
@@ -1440,7 +1721,11 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
         return (f"{CI_NONE}: gh pr view {pr} -R {repo} не ответил — без него не сверить ни проверки GitHub, ни "
                 f"файлы PR (ядро), повтори позже. {advice}")
     if protect:
-        why = _core_problem(repo, pr, sha, view)
+        files = pr_files()
+        why = _version_problem(files)
+        if why:
+            return f"{why}. {MERGE_VERSION}. {advice}"
+        why = _core_problem(repo, pr, sha, view, files, cwd)
         # Д3 через Touch ID (metis-0285): палец владельца на этот PR и этот SHA — строка тика в owner-log. Пускает
         # только задетое ядро; сбой gh, неполный список файлов и другой head — отказ и со строкой
         if why and not (why.startswith(MERGE_CORE_HIT) and owner_approved(repo, pr, sha)):
@@ -1477,7 +1762,7 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
     policy = G.load_policy()
     coords = policy.get("coordinators")
     if not isinstance(coords, dict):
-        # без политики (нет tomllib на Python 3.9 или нет policy.toml) guard не знает папок защит — закрыто всем
+        # без политики (нет policy.toml или он не разбирается) guard не знает папок защит — закрыто всем
         return "политика ~/.claude/pantheon/policy.toml не прочиталась, а без неё папки защит неизвестны. " + MERGE_OWNER
     metis = _str_list(coords.get("metis-pantheon"))
     if metis is None:

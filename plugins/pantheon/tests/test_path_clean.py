@@ -2,7 +2,7 @@
 """metis-0342: окно, запущенное из сессии на старой версии, не берёт pantheon из старого кэша.
 
 Запуск: python3 -I plugins/pantheon/tests/test_path_clean.py  (код выхода 0 — все прошли)
-pantheon.py идёт на Python 3.11+, поэтому проверка выполняется подпроцессом (на 3.9 берётся найденный 3.11+).
+Проверка выполняется подпроцессом pantheon.py тем же Python.
 """
 import json
 import os

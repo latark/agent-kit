@@ -21,6 +21,7 @@ import re
 import shutil
 import sys
 import tempfile
+import tomllib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN = os.path.dirname(HERE)
@@ -36,51 +37,11 @@ def check(name, cond, detail=""):
         print(f"НЕ ПРОШЁЛ: {name} {detail}")
 
 
-# --- чтение glossary.toml: tomllib (3.11+) или свой разбор подмножества (3.9) ---
-
-STR_RE = r"""'[^']*'|"(?:[^"\\]|\\.)*\""""
-
-
-def parse_mini(text):
-    """Подмножество TOML словаря: [[таблица]], ключ = 'строка' | "строка" | [список строк в одной строке]."""
-    out, cur = {}, None
-
-    def one(s):
-        return s[1:-1] if s[0] == "'" else json.loads(s)
-
-    for n, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        m = re.fullmatch(r"\[\[(\w+)\]\]", line)
-        if m:
-            cur = {}
-            out.setdefault(m.group(1), []).append(cur)
-            continue
-        m = re.fullmatch(r"(\w+)\s*=\s*(.*)", line)
-        if not m or cur is None:
-            raise ValueError(f"glossary.toml:{n}: не разобрать: {raw}")
-        key, val = m.group(1), m.group(2)
-        if val.startswith("["):
-            if re.sub(STR_RE, "", val).replace(",", "").replace(" ", "") != "[]":
-                raise ValueError(f"glossary.toml:{n}: список не разобрать: {raw}")
-            cur[key] = [one(s) for s in re.findall(STR_RE, val)]
-        elif re.fullmatch(STR_RE, val):
-            cur[key] = one(val)
-        else:
-            raise ValueError(f"glossary.toml:{n}: значение не разобрать: {raw}")
-    return out
-
+# --- чтение glossary.toml ---
 
 def load_glossary(path):
     with open(path, "rb") as fh:
-        text = fh.read().decode("utf-8")
-    mini = parse_mini(text)
-    try:
-        import tomllib
-    except ImportError:
-        return mini, None
-    return mini, tomllib.loads(text)
+        return tomllib.load(fh)
 
 
 # --- сбор текстов ---
@@ -209,12 +170,7 @@ def main():
     check("glossary.toml есть", os.path.isfile(path), path)
     if FAIL:
         return
-    mini, real = load_glossary(path)
-    if real is not None:
-        check("свой разбор toml совпадает с tomllib", mini == real)
-    else:
-        print("tomllib нет (Python < 3.11): словарь читает свой разбор")
-    gloss = real or mini
+    gloss = load_glossary(path)
     allow = gloss.get("allow", [])
     check("у каждого [[allow]] есть file, text и reason",
           all(a.get("file") and a.get("text") and a.get("reason") for a in allow))

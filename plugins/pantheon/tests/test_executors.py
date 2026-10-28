@@ -23,8 +23,6 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _py311 import PY311  # CLI pantheon и pconfig — только на Python 3.11+
 
-if sys.version_info < (3, 11):  # на системном 3.9 — тем же тестом под найденным 3.11+ (нет — _py311 уже пропустил)
-    os.execv(PY311, [PY311, "-I", os.path.abspath(__file__)])
 
 import tomllib  # noqa: E402
 
@@ -689,7 +687,8 @@ def tests():
     lost = sorted(in_part - set(m.PROTECTED_ANY + m.PROTECTED_ROOT))
     check("защищённые пути обёртки совпадают с protected.part", not missing and not lost, (missing, lost))
     cases = {".claude/settings.json": True, "sub/.codex/config.toml": True, "AGENTS.md": True, "docs/CLAUDE.md": True,
-             "settings.local.json": True, ".github/workflows/ci.yml": True, "plugins/guard/hooks/guard.py": True,
+             "settings.local.json": True, ".github/workflows/ci.yml": True, ".github/scripts/release.py": True,
+             "plugins/guard/hooks/guard.py": True,
              "plugins/x/hooks/a.py": True, "plugins/pantheon/roles/a.tmpl": True, ".pantheon-verify": True,
              "README.md": False, "docs/plugins/guard/x.md": False, "src/app.py": False, ".github/ISSUE.md": False,
              "plugins/pantheon/lib/executors.py": False, "plugins/pantheon/lib/window_rules.py": True,

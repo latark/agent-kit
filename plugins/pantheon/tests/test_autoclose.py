@@ -489,22 +489,92 @@ def test_board_problems_unit():
           [i for i, _ in errs] == ["x-0001"], str(errs))
 
 
+def test_close_criteria():
+    """metis-0503: слитый PR и ручной done не закрывают задачу с неотмеченными «Готово, когда» (случай metis-0421)."""
+    tmp, home, state, gh, env = make()
+    try:
+        two = "Готово, когда:\n- [x] сделано одно\n- [ ] сделано второе\n"
+        pa = put(home, "metis-pantheon", "metis-0010", body=two, created="2026-10-27")
+        pb = put(home, "metis-pantheon", "metis-0011", body=two, created="2026-10-26")
+        pc = put(home, "metis-pantheon", "metis-0012", body="Готово, когда:\n- [x] а\n- [x] б\n", created="2026-10-27")
+        pd = put(home, "metis-pantheon", "metis-0013", body=two, created="2026-10-27")
+        prs = [cpr(1, "metis-0010-x", "", T0 - 3600), cpr(2, "metis-0011-x", "", T0 - 3600),
+               cpr(3, "metis-0012-x", "", T0 - 3600), cpr(4, "metis-0013-x", "часть 1", T0 - 3600)]
+        log, errs = run_cache(home, state, T0, {"latark/agent-kit": prs})
+        ha = T.read(pa)[0]
+        check("0421: PR без «часть», 1 из 2 пунктов → review, не done", ha.get("status") == "review" and not ha.get("closed"), str(ha))
+        check("0421: в журнале «слит, неотмечено 1»", "слит, неотмечено 1" in text(pa), text(pa)[-300:])
+        check("задача от 26.10 закрывается как раньше", T.read(pb)[0].get("status") == "done", str(log))
+        check("все пункты отмечены → done", T.read(pc)[0].get("status") == "done")
+        check("«часть» остаётся как есть", T.read(pd)[0].get("status") == "doing" and "в теле «часть»" in text(pd))
+        run_cache(home, state, T0 + 10, {"latark/agent-kit": prs})
+        check("повторный проход не задваивает строку", text(pa).count("слит, неотмечено 1") == 1)
+        # ручной done
+        pe = put(home, "metis-pantheon", "metis-0014", body=two, created="2026-10-27")
+        try:
+            T.task_set(home, T0, "metis-0014", {"status": "done"})
+            err = ""
+        except ValueError as e:
+            err = str(e)
+        check("ручной done с неотмеченными → отказ «неотмечено 1»", "неотмечено 1" in err and "pantheon task split" in err
+              and T.read(pe)[0].get("status") == "doing", err)
+        try:
+            T.task_set(home, T0, "metis-0014", {"status": "done"}, force="  ")
+            err = ""
+        except ValueError as e:
+            err = str(e)
+        check("--force с пустой причиной → отказ", "причина" in err and T.read(pe)[0].get("status") == "doing", err)
+        T.task_set(home, T0, "metis-0014", {"status": "done"}, force="второй пункт отменён владельцем")
+        check("--force с причиной → done и строка в журнале", T.read(pe)[0].get("status") == "done"
+              and "--force: второй пункт отменён владельцем" in text(pe), text(pe)[-300:])
+        pf = put(home, "metis-pantheon", "metis-0015", body=two, created="2026-10-26")
+        T.task_set(home, T0, "metis-0015", {"status": "done"})
+        check("задача от 26.10 закрывается вручную без --force", T.read(pf)[0].get("status") == "done")
+        put(home, "metis-pantheon", "metis-0016", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n", created="2026-10-27")
+        try:
+            T.task_set(home, T0, "metis-0016", {"status": "done"})
+            err = ""
+        except ValueError as e:
+            err = str(e)
+        check("заглушка-подсказка — неотмеченный пункт", "неотмечено 1" in err, err)
+        # остаток: task split пишет result, по нему done проходит без --force
+        ph = put(home, "metis-pantheon", "metis-0017", body=two, created="2026-10-27")
+        nid, _ = T.task_split(home, T0, "metis-0017", "Второе")
+        check("task split пишет result со ссылкой на остаток", nid in str(T.read(ph)[0].get("result")), str(T.read(ph)[0].get("result")))
+        T.task_set(home, T0, "metis-0017", {"status": "done"})
+        check("после split ручной done проходит без --force", T.read(ph)[0].get("status") == "done")
+        put(home, "metis-pantheon", "metis-0018", body=two, created="2026-10-27")
+        try:
+            T.task_set(home, T0, "metis-0018", {"status": "done", "result": "остаток в metis-9999"})
+            err = ""
+        except ValueError as e:
+            err = str(e)
+        check("result со ссылкой на чужой id не обходит правило", "неотмечено" in err, err)
+        p19 = put(home, "metis-pantheon", "metis-0019", body=two, created="2026-10-27")
+        r = pan(env, T0, "task", "set", "metis-0019", "status=done")
+        check("CLI: task set status=done → код не 0 и «неотмечено 1»", r.returncode != 0 and "неотмечено 1" in r.stdout + r.stderr,
+              f"{r.returncode} {r.stdout}{r.stderr}")
+        r = pan(env, T0, "task", "set", "metis-0019", "status=done", "--force", "отменён")
+        check("CLI: --force причина → код 0, done", r.returncode == 0 and T.read(p19)[0].get("status") == "done",
+              f"{r.returncode} {r.stdout}{r.stderr}")
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def main():
     test_unit()
     test_board_problems_unit()
     test_attention_on_card()
-    if PY311 is None:
-        print("нет Python 3.11+ для CLI — проверки тика и check пропущены")
-    else:
-        test_tick()
-        test_old_and_errors()
-        test_rules()
-        test_reopen_and_eviction()
-        test_mutants()
-        test_fetch_budget()
-        test_batch_needs_mode()
-        test_off_warning()
-        test_check()
+    test_close_criteria()
+    test_tick()
+    test_old_and_errors()
+    test_rules()
+    test_reopen_and_eviction()
+    test_mutants()
+    test_fetch_budget()
+    test_batch_needs_mode()
+    test_off_warning()
+    test_check()
     print(f"{sum(results)} из {len(results)} прошли")
     sys.exit(0 if all(results) else 1)
 

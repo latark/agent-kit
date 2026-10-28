@@ -22,7 +22,10 @@
 plugins/guard в вершине refs/remotes/origin/main клона agent-kit (~/.claude/plugins/marketplaces/agent-kit), проходит
 без флагов и без карточки, если эту вершину или её родителя слил владелец (SHA из STATE/logs/merge.jsonl с событием
 merged или из STATE/owner-log/merge-approve.log — Touch ID). Клон мелкий (depth 1), но id родителей есть в самом
-объекте коммита: слияние `--merge` даёт вершину со слитой головой PR вторым родителем. Путь в ~/.claude должен
+объекте коммита: слияние `--merge` даёт вершину со слитой головой PR вторым родителем. Вершина — коммит выпуска
+workflow release (metis-0512) поверх слитого владельцем коммита — тоже доверена, если меняет только строки version в
+plugins/*/.claude-plugin/plugin.json и .claude-plugin/releases.json (объект родителя догружается `git fetch --depth 2`
+вершины; без сети — карточки как раньше). Путь в ~/.claude должен
 совпасть с путём внутри плагина целиком (hooks/guard.py — plugins/guard/hooks/guard.py); tests/ не доверены.
 Старый выпуск (не текущая вершина), не слит, отличие в байт, другой путь, удаление, ключ в тексте — флаги как раньше.
 Пути — только от HOME; переменных окружения проверка не читает.
@@ -152,25 +155,105 @@ def owner_merged_shas():
     return {sha for sha in found if re.fullmatch(r"[0-9a-f]{40}", sha)}
 
 
+def _parents(clone, sha):
+    """Родители коммита из его объекта (в мелком клоне id родителей есть, а их объектов может не быть) или None."""
+    body = subprocess.run(["git", "-C", clone, "cat-file", "commit", sha], capture_output=True)
+    if body.returncode:
+        return None
+    head = body.stdout.split(b"\n\n", 1)[0].decode("ascii", "replace").splitlines()
+    return [ln[len("parent "):] for ln in head if ln.startswith("parent ")]
+
+
+def _merged(sha, parents, merged):
+    """Коммит слил владелец: он сам в журнале или, у merge-коммита, голова PR — второй и дальше родитель."""
+    # у merge-коммита доверена голова PR (parents[1:]), не первый родитель: прямой коммит поверх слитой головы не доверен
+    return sha in merged or any(p in merged for p in parents[1:])
+
+
+RELEASE_MANIFEST = re.compile(r"plugins/[^/]+/\.claude-plugin/plugin\.json")
+RELEASE_RECORD = ".claude-plugin/releases.json"
+RELEASE_VERSION_LINE = re.compile(r'\s*"version"\s*:\s*"[^"\\]*"\s*,?\s*')
+FETCH_TIMEOUT = 30
+
+
+def _blob(clone, sha):
+    r = subprocess.run(["git", "-C", clone, "cat-file", "blob", sha], capture_output=True)
+    return r.stdout if r.returncode == 0 else None
+
+
+def _version_only(clone, old, new):
+    """Блоб new отличается от old только строками version: то же число строк, разные — обе вида "version": "…"."""
+    a, b = _blob(clone, old), _blob(clone, new)
+    if a is None or b is None:
+        return False
+    a, b = a.decode("utf-8", "replace").split("\n"), b.decode("utf-8", "replace").split("\n")
+    return len(a) == len(b) and all(x == y or (RELEASE_VERSION_LINE.fullmatch(x) and RELEASE_VERSION_LINE.fullmatch(y))
+                                    for x, y in zip(a, b))
+
+
+def _release_commit(clone, tip, parent):
+    """Вершина — коммит выпуска workflow release (metis-0512) поверх parent: изменены только строки version в
+    plugins/*/.claude-plugin/plugin.json и файл .claude-plugin/releases.json — True. Доверие по содержимому, а не по
+    автору: от github-actions[bot] пишет и любой workflow ветки (argus-b PR #153 Б2)."""
+    r = subprocess.run(["git", "-C", clone, "diff-tree", "-r", "-z", "--no-renames", parent, tip],
+                       capture_output=True)
+    if r.returncode:
+        return False
+    out = r.stdout.decode("utf-8", "replace").split("\0")
+    if out and out[-1] == "":
+        out.pop()
+    if not out or len(out) % 2:
+        return False
+    for meta, name in zip(out[::2], out[1::2]):
+        f = meta.lstrip(":").split()
+        if len(f) != 5:
+            return False
+        old_mode, new_mode, old, new, status = f
+        if name == RELEASE_RECORD and status in ("A", "M") and new_mode == "100644":
+            continue
+        # оба режима 100644 — файл изменён (не добавлен, не удалён, не ссылка): без --find-renames другого нет
+        if not (RELEASE_MANIFEST.fullmatch(name) and old_mode == new_mode == "100644"
+                and _version_only(clone, old, new)):
+            return False
+    return True
+
+
 def release_tip(clone):
-    """SHA вершины main клона agent-kit, если её саму или голову PR (второй родитель merge-коммита) слил владелец; иначе None.
+    """SHA вершины main клона agent-kit, если её слил владелец, иначе None. Слил — значит:
+    - вершина сама или голова PR (второй родитель merge-коммита) в журнале владельца;
+    - или вершина — коммит выпуска workflow release (metis-0512) с одним родителем, которого слил владелец (как
+      выше), и коммит меняет только строки version в plugin.json плагинов и .claude-plugin/releases.json.
 
     Клон маркетплейса мелкий (depth 1): головы PR в нём нет, но id родителей записаны в самом объекте коммита.
     Слияние `--merge` даёт вершину — merge-коммит со слитой головой PR вторым родителем; перемотка — саму голову.
+    Коммиту выпуска нужен и объект родителя: нет его в клоне — `git fetch --depth 2 origin <вершина>` (ветки и
+    метки не трогает), без сети или со сбоем — None, карточки как раньше.
     Только текущая вершина: старые выпуски не доверены, откат файла к ним даёт карточку."""
     r = subprocess.run(["git", "-C", clone, "rev-parse", "-q", "--verify", RELEASE_REF + "^{commit}"],
                        capture_output=True, text=True)
     if r.returncode:
         return None
     tip = r.stdout.strip()
-    body = subprocess.run(["git", "-C", clone, "cat-file", "commit", tip], capture_output=True)
-    if body.returncode:
+    parents = _parents(clone, tip)
+    if parents is None:
         return None
-    head = body.stdout.split(b"\n\n", 1)[0].decode("ascii", "replace").splitlines()
-    parents = [ln[len("parent "):] for ln in head if ln.startswith("parent ")]
     merged = owner_merged_shas()
-    # у merge-коммита доверена голова PR (parents[1:]), не первый родитель: прямой коммит поверх слитой головы не доверен
-    return tip if tip in merged or any(p in merged for p in parents[1:]) else None
+    if _merged(tip, parents, merged):
+        return tip
+    if len(parents) != 1:
+        return None
+    up = _parents(clone, parents[0])
+    if up is None:
+        try:
+            subprocess.run(["git", "-C", clone, "fetch", "-q", "--no-tags", "--depth", "2", "origin", tip],
+                           capture_output=True, timeout=FETCH_TIMEOUT, stdin=subprocess.DEVNULL,
+                           env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+        except (OSError, subprocess.SubprocessError):
+            return None
+        up = _parents(clone, parents[0])
+    if up is None or not _merged(parents[0], up, merged):
+        return None
+    return tip if _release_commit(clone, tip, parents[0]) else None
 
 
 def release_blobs():

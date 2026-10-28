@@ -65,16 +65,33 @@ FIELDS = {
     "mode": ("str", False), "mode_why": ("str", False), "touches": ("list", False),
     # место задачи в пачке (metis-0069, перенос batch): меньше — раньше; без него — по зависимостям и приоритету
     "order": ("int", False),
+    # откуда задача взялась (metis-0502): from — одно из FROM_VALUES, source — на что ссылается («metis-0400» или путь
+    # отчёта/ревью с #якорем); у остатка source — исходная задача. Старые задачи без from читаются как раньше
+    "from": ("str", False), "source": ("str", False),
 }
 # прежние ключи шапки → нынешние: читаются при разборе, при записи уходят под новым именем
 LEGACY_KEYS = {"wave": "release"}
 # режим: сам координатор, один исполнитель на цепочку, параллельно; пусто — как single
-NO_MODE_BATCH = ("в пачку без режима нельзя: поставьте --mode self|single|parallel (и --mode-why — почему), "
+NO_MODE_BATCH = ("в пачку без режима нельзя: поставьте --mode self|single|parallel (и --mode-why — почему; «не решено» не годится), "
                  "режим нужен «Итогам пачек» и порядку запуска")
 MODES = {"self": "сам", "single": "один исполнитель", "parallel": "параллельно"}
 EXECUTORS = ("auto", "claude", "codex")
+# metis-0505: «не решено» — законное значение у задачи вне пачки (ставит разовая pantheon task migrate-mode открытым
+# задачам без mode); пачке и порядку запуска оно не годится — там нужен решённый режим (mode_decided)
+UNDECIDED = "undecided"
+MODES[UNDECIDED] = "не решено"
+
+
+def mode_decided(head):
+    """Режим решён: self, single или parallel. Пусто и «не решено» (undecided) — нет."""
+    return head.get("mode") in MODES and head.get("mode") != UNDECIDED
+
+
 # итог приёмки утром: как у приоритета — значение из перечня, иное — ошибка шапки
 ACCEPTANCE = ("принято", "вернуть", "к владельцу")
+# откуда взялась задача: слово владельца · отчёт · ревью · остаток (task split) · план · найдено по ходу чужой работы
+FROM_VALUES = ("слово владельца", "отчёт", "ревью", "остаток", "план", "по ходу")
+REST_TAG = "остаток"
 # срок due — дата (срок — конец дня) или дата со временем «ГГГГ-ММ-ДДTЧЧ:ММ» (умные уведомления, metis-0023)
 ORDER = list(FIELDS)
 PRIORITY = {0: "срочно", 1: "высокий", 2: "обычный", 3: "низкий"}
@@ -432,6 +449,12 @@ def check_head(head):
         errs.append(f"acceptance «{head.get('acceptance')}» — не из {', '.join(ACCEPTANCE)}")
     if head.get("id") and not ID_RE.fullmatch(str(head["id"])):
         errs.append(f"id «{head['id']}» — нужен вид «pan-0001»")
+    if head.get("from") not in (None, *FROM_VALUES):
+        errs.append(f"from «{head.get('from')}» — не из {', '.join(FROM_VALUES)}")
+    if head.get("source") and head.get("source") == head.get("id"):
+        errs.append("source ссылается на саму задачу")
+    if head.get("source") and not head.get("from"):
+        errs.append("source без from — не сказано, чем является ссылка (слово владельца · отчёт · ревью · остаток · план · по ходу)")
     if head.get("mode") is not None and head.get("mode") not in MODES:
         errs.append(f"mode «{head.get('mode')}» — не из {', '.join(MODES)}")
     if head.get("mode") == "parallel" and not head.get("touches"):
@@ -582,8 +605,58 @@ def _file_for(pantheon, direction, tid):
     return os.path.join(base, tid + ".md")
 
 
-def task_new(pantheon, t, direction, title, project=None, actor="агент", text=None, kind="task", **fields):
-    """kind — task или story (пачка, metis-0069)."""
+DONE_WHEN = "Готово, когда"
+DONE_WHEN_HEAD = f"## {DONE_WHEN}"
+DONE_WHEN_HINT = "(впишите проверяемые пункты: что должно работать и как это проверить)"
+# metis-0503: правило «нельзя закрыть с неотмеченными пунктами» — только для задач, созданных с этого дня
+# (старые чек-листы не вели; константой пользуется и metis-0505).
+CRITERIA_FROM = "2026-10-27"
+CLOSE_EXEMPT_ACTORS = ("владелец", "плановый проход", "pantheon role")  # карточки заявок и слово владельца этим правилом не режем
+_DW_LINE = re.compile(rf"^\s*(?:#{{1,6}}\s*)?{DONE_WHEN}\s*:?\s*$", re.IGNORECASE)
+_DW_ITEM = re.compile(r"^\s*[-*]\s*\[([ xXхХ])\]\s*(.*?)\s*$")
+
+
+def done_criteria(body):
+    """Пункты «Готово, когда» в теле → [(отмечен, текст)]. Раздел — строка «## Готово, когда» или «Готово, когда:», дальше
+    чек-лист; кончается заголовком или любой строкой не из списка. Подсказка-заглушка считается пунктом."""
+    out, on = [], False
+    for ln in (body or "").split("\n"):
+        if not on:
+            on = bool(_DW_LINE.match(ln))
+            continue
+        m = _DW_ITEM.match(ln)
+        if m:
+            out.append((m.group(1) != " ", m.group(2)))
+        elif ln.strip():
+            break
+    return out
+
+
+def unchecked_criteria(head, body):
+    """Число неотмеченных пунктов «Готово, когда» (заглушка-подсказка — тоже неотмеченный); 0 — у задач, созданных до CRITERIA_FROM."""
+    if str(head.get("created") or "") < CRITERIA_FROM:
+        return 0
+    return sum(1 for done, _ in done_criteria(body) if not done)
+
+
+def done_when_section(items):
+    """Раздел «## Готово, когда» с чек-листом; нет пунктов — одна подсказка вместо них."""
+    items = [" ".join(str(x).split()) for x in (items or []) if str(x).strip()]
+    return DONE_WHEN_HEAD + "\n\n" + "\n".join(f"- [ ] {x}" for x in (items or [DONE_WHEN_HINT])) + "\n\n"
+
+
+def check_source(pantheon, tid, source):
+    """source вида id задачи (ID_RE) — такая задача должна быть и не быть самой собой; путь отчёта/ревью — как есть."""
+    if source and ID_RE.fullmatch(str(source)):
+        if source == tid:
+            raise ValueError("source ссылается на саму задачу")
+        if source not in load_tasks(pantheon, WORK_TYPES):
+            raise ValueError(f"source {source}: нет такой задачи")
+
+
+def task_new(pantheon, t, direction, title, project=None, actor="агент", text=None, kind="task", done_when=None, created_note=None, **fields):
+    """kind — task или story (пачка, metis-0069). done_when — пункты «Готово, когда» (metis-0502): критерии пишет автор при
+    создании; раздел есть всегда, без пунктов — с подсказкой."""
     if kind not in WORK_TYPES:
         raise ValueError(f"тип {kind!r} — только {', '.join(WORK_TYPES)}")
     if not DIRECTION_RE.fullmatch(str(direction)):
@@ -592,6 +665,10 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
         raise ValueError(f"нет направления {direction}")
     if fields.get("depends_on"):
         check_depends(load_tasks(pantheon, WORK_TYPES), None, fields["depends_on"])  # новая задача в цикл не входит
+    if fields.get("source"):
+        check_source(pantheon, None, fields["source"])
+    if done_when and done_criteria(escape_desc(text)):
+        raise ValueError("в тексте уже есть «Готово, когда» с пунктами — пишите их либо там, либо в --done-when, не в обоих местах")
     project = resolve_project(pantheon, direction, project)  # metis-0323: только имя проекта из directions.toml
     tid = new_id(pantheon, direction)
     path = _file_for(pantheon, direction, tid)
@@ -612,18 +689,21 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
     if head.get("question"):
         head["question_at"] = now_iso(t)
     errs, _ = check_head(head)
-    if head.get("batch") and not head.get("mode"):
+    if head.get("batch") and not mode_decided(head):
         errs.append(NO_MODE_BATCH)
     par = head.get("parent")
-    if par and not head.get("mode") and load_tasks(pantheon, WORK_TYPES).get(par, ("", {}))[1].get("type") == "story":
+    if par and not mode_decided(head) and load_tasks(pantheon, WORK_TYPES).get(par, ("", {}))[1].get("type") == "story":
         errs.append(NO_MODE_BATCH)
     if errs:
         remove(path)
         raise ValueError("; ".join(errs))
     desc = escape_desc(text)
+    # свой раздел — всегда, кроме случая, когда пункты уже в тексте (старый образец «Готово, когда:» со списком)
+    dw = "" if done_criteria(desc) else done_when_section(done_when)
     try:
-        write_task(path, head, f"\n# {title.strip()}\n\n" + (desc + "\n\n" if desc else "")
-                   + f"## Журнал\n\n- {now_iso(t)[:16].replace('T', ' ')} — {actor}: создана\n")
+        write_task(path, head, f"\n# {title.strip()}\n\n" + (desc + "\n\n" if desc else "") + dw
+                   + f"## Журнал\n\n- {now_iso(t)[:16].replace('T', ' ')} — {actor}: создана"
+                   + (f" — {created_note}" if created_note else "") + "\n")
     except ValueError:
         remove(path)  # заготовку create_excl не оставляем
         raise
@@ -665,21 +745,66 @@ def dir_lock(d, wait=10.0):
             os.close(fd)
 
 
-def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None, body=None, keep_updated=False):
+def task_set(pantheon, t, tid, changes, note=None, actor="агент", precheck=None, body=None, keep_updated=False, force=None):
     """body — новый текст задачи (между заголовком «# …» и «## Журнал», «Заметки владельца» остаются; metis-0402):
     прежний заменяется, в журнал — строка «текст задачи заменён».
     keep_updated — служебная правка, не движение работы (migrate-project): прежнее updated остаётся, иначе
-    доска, «Готово за сутки» и тревога «застряла» приняли бы её за работу (metis-0323)."""
+    доска, «Готово за сутки» и тревога «застряла» приняли бы её за работу (metis-0323).
+    force — причина закрытия (done) при неотмеченных пунктах «Готово, когда»; уходит строкой в журнал (metis-0503)."""
     tasks = load_tasks(pantheon, WORK_TYPES)
     if tid not in tasks:
         raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
     if changes.get("depends_on"):
         check_depends(tasks, tid, changes["depends_on"])
-    par = changes.get("parent")
-    if par and tasks.get(par, ("", {}))[1].get("type") == "story" and not (changes.get("mode") or tasks[tid][1].get("mode")):
+    # в пачку — только с решённым режимом; и снять или сделать «не решено» режим у задачи пачки нельзя (metis-0505)
+    par = changes.get("parent", tasks[tid][1].get("parent")) if "parent" in changes or "mode" in changes else None
+    mode = changes["mode"] if "mode" in changes else tasks[tid][1].get("mode")
+    if par and tasks.get(par, ("", {}))[1].get("type") == "story" and not mode_decided({"mode": mode}):
         raise ValueError(f"{tid}: {NO_MODE_BATCH}")
+    if changes.get("source"):
+        check_source(pantheon, tid, changes["source"])
     with dir_lock(os.path.dirname(tasks[tid][0])):
-        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck, body, keep_updated)
+        return _task_set_locked(tasks[tid][0], t, tid, changes, note, actor, precheck, body, keep_updated, force,
+                                pantheon)
+
+
+def rest_ids(pantheon, tid):
+    """id задач-остатков tid (source=tid, тег «остаток»)."""
+    return [i for i, (_, h, _b) in load_tasks(pantheon, WORK_TYPES).items()
+            if h.get("source") == tid and REST_TAG in (h.get("tags") or [])]
+
+
+def task_split(pantheon, t, tid, title, done_when=None, text=None, actor="агент", mode=None, mode_why=None):
+    """Остаток задачи tid — новой задачей одной командой (metis-0502): то же направление, проект, пачка и режим, from=остаток,
+    source=tid, тег «остаток»; пункты — done_when, иначе неотмеченные пункты исходной. В журнале обеих — строка со ссылкой.
+    → (id новой, путь)."""
+    tasks = load_tasks(pantheon, WORK_TYPES)
+    if tid not in tasks:
+        raise ValueError(f"нет задачи {tid} (или её шапка не проходит проверку)")
+    path0, h0, b0 = tasks[tid]
+    if h0.get("type") != "task":
+        raise ValueError(f"{tid} — не задача: остаток выносится только из задачи")
+    folder = os.path.basename(os.path.dirname(os.path.dirname(path0)))
+    if h0.get("direction") != folder:  # guard проверяет папку файла, остаток заводится по шапке: расхождение — подмена направления
+        raise ValueError(f"{tid}: в шапке direction={h0.get('direction')}, а файл лежит в «{folder}» — остаток не заведён; "
+                         "верните direction задачи в направление её папки")
+    if not str(title or "").strip():
+        raise ValueError("нужен --title: название остатка")
+    items = [x for x in (done_when or []) if str(x).strip()] or [x for done, x in done_criteria(b0) if not done and x != DONE_WHEN_HINT]
+    fields = {k: h0[k] for k in ("owner", "parent", "mode", "mode_why", "priority", "executor") if h0.get(k) is not None}
+    fields.update({k: v for k, v in (("mode", mode), ("mode_why", mode_why)) if v})  # у исходной в пачке нет режима — задаётся здесь
+    fields.update({"from": "остаток", "source": tid, "tags": sorted({*(h0.get("tags") or []), REST_TAG})})
+    desc = text if text else f"Остаток задачи {tid} «{h0.get('title')}»."
+    nid, p = task_new(pantheon, t, h0["direction"], title, project=h0.get("project"), actor=actor, text=desc,
+                      done_when=items, created_note=f"остаток задачи {tid}", **fields)
+    try:
+        res = h0.get("result")  # result ссылается на остаток: по нему ручной done проходит без --force (metis-0503)
+        task_set(pantheon, t, tid, {"result": f"{res}; остаток в {nid}" if res else f"остаток в {nid}"},
+                 note=f"остаток вынесен в {nid}: {' '.join(str(title).split())}", actor=actor)
+    except Exception:
+        remove(p)  # исходная не записана — новая без пары в журнале не остаётся
+        raise
+    return nid, p
 
 
 def task_note(pantheon, t, tid, note):
@@ -736,7 +861,7 @@ def replace_desc(body, text):
     return "\n".join(new), len("\n".join(old).strip())
 
 
-def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None, keep_updated=False):
+def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None, keep_updated=False, force=None, pantheon=None):
     head, body = read(path)  # заново, уже под блокировкой: чужая правка между чтением и записью не потеряется
     if not head or head.get("id") != tid:
         raise ValueError(f"задача {tid} изменилась — повторите")
@@ -747,6 +872,17 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None
     if "owner" in changes and not changes["owner"]:
         raise ValueError("owner не очищается: у задачи всегда есть «Кому» — поставьте другого исполнителя")
     old_q, was_closed = head.get("question"), head.get("status") in ("done", "dropped")
+    # dropped → done — тоже закрытие: правило критериев действует (metis-0543 Д1); done → done его не повторяет
+    if changes.get("status") == "done" and head.get("status") != "done" and actor not in CLOSE_EXEMPT_ACTORS:
+        left = unchecked_criteria(head, new_body if new_body is not None else body)
+        rest = rest_ids(pantheon, tid) if left and pantheon else []
+        if left and force is not None and not " ".join(str(force).split()):
+            raise ValueError("--force: нужна причина текстом")
+        if left and force is None and not any(r in str(changes.get("result", head.get("result")) or "") for r in rest):
+            raise ValueError(f"{tid}: неотмечено {left} пунктов «{DONE_WHEN}»: отметьте их или вынесите остаток "
+                             "(pantheon task split), либо --force \"причина\"")
+        if left and force is not None:
+            note = f"закрыта с неотмеченными ({left}), --force: {' '.join(str(force).split())}" + (f"; {note}" if note else "")
     for k, v in changes.items():
         if k not in FIELDS or k in ("type", "id", "created", "schema_version"):
             raise ValueError(f"поле {k} так не меняется")
@@ -763,7 +899,7 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None
         head["question_at"] = None
     elif head.get("question") != old_q:
         head["question_at"] = now_iso(t)
-    if changes.get("batch") and not head.get("mode"):
+    if changes.get("batch") and not mode_decided(head):
         raise ValueError(NO_MODE_BATCH)
     if not (keep_updated and head.get("updated")):
         head["updated"] = now_iso(t)
@@ -771,9 +907,14 @@ def _task_set_locked(path, t, tid, changes, note, actor, precheck, new_body=None
     if errs:
         raise ValueError("; ".join(errs))
     if new_body is not None:  # прежний текст остаётся в истории Пританея, в журнале — строка о замене (argus b)
+        crit_was = [x for _, x in done_criteria(body)]
         body, was = replace_desc(body, new_body)
         body = append_log(body, f"{now_iso(t)[:16].replace('T', ' ')} — {actor}: текст задачи заменён "
                                 f"(было {was} знаков, стало {len(escape_desc(new_body))})")
+        crit_now = [x for _, x in done_criteria(body)]
+        if crit_was != crit_now:  # критерии фиксируются при создании; правка — только с записью (metis-0502)
+            body = append_log(body, f"{now_iso(t)[:16].replace('T', ' ')} — {actor}: критерии «{DONE_WHEN}» изменены "
+                                    f"(было пунктов {len(crit_was)}, стало {len(crit_now)})")
     if note:
         body = append_log(body, f"{now_iso(t)[:16].replace('T', ' ')} — {actor}: {' '.join(str(note).split())}")
     write_task(path, head, body)
@@ -835,11 +976,11 @@ def extra_attention(head, body, tasks, t, night_end="08:00", open_prs=None):
 
 def board_problems(tasks, t, night_end="08:00", open_prs=None):
     """Сверка по всем задачам → (ошибки, предупреждения), каждое — (id, текст). Ошибки: задача пачки без mode;
-    done без closed; закрытая по слиянию без release или actual. Предупреждения — слова extra_attention."""
+    done без closed; закрытая по слиянию без release или actual. Предупреждения — слова extra_attention и хвосты в журнале без задачи (tail_lines)."""
     errs, warns = [], []
     for tid, (_, h, b) in sorted(tasks.items()):
-        if h.get("type") == "task" and in_pack(h, tasks) and not h.get("mode"):
-            errs.append((tid, "задача пачки без mode (self|single|parallel) — поле нужно «Итогам пачек»"))
+        if h.get("type") == "task" and in_pack(h, tasks) and not mode_decided(h):
+            errs.append((tid, "задача пачки без mode (self|single|parallel; «не решено» не годится) — поле нужно «Итогам пачек»"))
         if h.get("status") == "done" and not h.get("closed"):
             errs.append((tid, "status done без closed — дата закрытия берётся из updated"))
         if h.get("status") == "done" and CLOSED_BY_MERGE in (b or ""):
@@ -847,7 +988,87 @@ def board_problems(tasks, t, night_end="08:00", open_prs=None):
                 if not h.get(k):
                     errs.append((tid, f"закрыта по слиянию, а поле {k} пусто — его пишет плановый проход, «Итоги пачек» без него неполны"))
         warns += [(tid, w) for w in extra_attention(h, b, tasks, t, night_end, open_prs)]
+    warns += [(tid, f"хвост в журнале без задачи: {ln}") for tid, ln in tail_lines(tasks, t)]  # metis-0504, не блок
+    warns += pack_title_warns(tasks)  # metis-0505
     return errs, warns
+
+
+# --- единая структура по направлениям (metis-0505) -------------------------------------
+# Уровни: Проект → Цель (если в ней две и больше пачки) → Пачка → Задача; цель и пачка — обе type story. Цель — story с
+# пачками внутри или с названием «Цель: …»; остальные story — пачки: «Пачка: <результат одной фразой>», без номера
+# (порядок — поле order или срок). Правила названий — для story с created от CRITERIA_FROM: старые не штрафуем.
+PACK_PREFIX, GOAL_PREFIX = "Пачка: ", "Цель: "
+_PACK_TITLE = re.compile(r"^Пачка: (?!№?\s*\d+(?:\W|$))\S")
+_NUMBERED = re.compile(r"^\s*(?:П\s*\d+|Пачка\s*№?\s*\d+)(?:\W|$)")
+
+
+def is_goal(sid, tasks):
+    """story — цель: в ней есть другие story (parent) или название начинается с «Цель: »."""
+    h = tasks.get(sid, ("", {}, ""))[1]
+    return h.get("type") == "story" and (str(h.get("title") or "").startswith(GOAL_PREFIX) or any(
+        x.get("type") == "story" and x.get("parent") == sid for _, x, _ in tasks.values()))
+
+
+def pack_title_warns(tasks):
+    """Названия открытых пачек и целей → [(id, текст)]: новая пачка не «Пачка: <результат>» или с номером, новая цель
+    с «Пачка» в названии, две открытые story одного направления с одним названием (любой давности)."""
+    out, seen = [], {}
+    for sid, (_, h, _) in sorted(tasks.items()):
+        if h.get("type") != "story" or h.get("status") in ("done", "dropped"):
+            continue
+        title = " ".join(str(h.get("title") or "").split())
+        key = (h.get("direction"), title.casefold())
+        if key in seen:
+            out.append((sid, f"то же название, что у {seen[key]}: «{title[:60]}» — назовите пачку её результатом"))
+        else:
+            seen[key] = sid
+        if str(h.get("created") or "") < CRITERIA_FROM:
+            continue
+        if is_goal(sid, tasks):
+            if title.startswith("Пачка") or _NUMBERED.match(title):
+                out.append((sid, "цель (в ней пачки) называется «Цель: <результат>», без «Пачка» и номера"))
+        elif not _PACK_TITLE.match(title):
+            out.append((sid, f"название пачки «{title[:60]}» — нужно «{PACK_PREFIX}<результат одной фразой>», без номера: "
+                             "порядок — поле order или срок (schema.md)"))
+    return out
+
+
+SUMMARY_KEYS = ("open", "no_pack", "no_criteria", "no_mode", "undecided", "rest_open")
+
+
+def direction_names(pantheon, dirs=None):
+    """Направления для сводки: папки directions/<имя> и записи реестра (без inbox) — и те, где задач нет."""
+    d = os.path.join(pantheon, "directions")
+    names = {x for x in list_dir(d) if DIRECTION_RE.fullmatch(x) and os.path.isdir(os.path.join(d, x))}
+    names |= {x["name"] for x in dirs or [] if isinstance(x, dict) and isinstance(x.get("name"), str)
+              and DIRECTION_RE.fullmatch(x["name"]) and x["name"] != "inbox"}
+    return sorted(names)
+
+
+def direction_summary(tasks, names=()):
+    """Сводка по открытым задачам (type task, не done/dropped) каждого направления → {направление: счётчики SUMMARY_KEYS и
+    no_mode_ids}. no_criteria — нет пунктов «Готово, когда» (одна заглушка-подсказка — тоже нет); no_mode — mode пуст;
+    undecided — «не решено»; rest_open — открытые остатки (тег «остаток»). names — направления, показанные и с нулём."""
+    blank = lambda: dict(dict.fromkeys(SUMMARY_KEYS, 0), no_mode_ids=[])  # noqa: E731
+    out = {n: blank() for n in names}
+    for tid, (_, h, b) in sorted(tasks.items()):
+        if h.get("type") != "task" or h.get("status") in ("done", "dropped") or h.get("direction") == "inbox":
+            continue
+        c = out.setdefault(str(h.get("direction")), blank())
+        c["open"] += 1
+        c["no_pack"] += not in_pack(h, tasks)
+        c["no_criteria"] += not [x for _, x in done_criteria(b) if x != DONE_WHEN_HINT]
+        if h.get("mode") in (None, ""):
+            c["no_mode"] += 1
+            c["no_mode_ids"].append(tid)
+        c["undecided"] += h.get("mode") == UNDECIDED
+        c["rest_open"] += REST_TAG in (h.get("tags") or [])
+    return out
+
+
+def summary_line(direction, c):
+    return (f"сводка · {direction}: открытых {c['open']} · без пачки {c['no_pack']} · без «{DONE_WHEN}» {c['no_criteria']}"
+            f" · без «Кто делает» {c['no_mode']} · «не решено» {c['undecided']} · остатков открытых {c['rest_open']}")
 
 
 def fix_closed(pantheon, t, tasks=None):
@@ -924,7 +1145,7 @@ def open_deps(head, tasks):
             if d not in tasks or tasks[d][1].get("status") not in ("done", "dropped")]
 
 
-PARALLEL_MAX = 3      # потолок параллельных исполнителей за ночь (metis-0248, поправка 6); AUTOSTART_MAX в watch.py — жёстче
+PARALLEL_MAX = 3      # потолок параллельных исполнителей за ночь (metis-0248, поправка 6); `AUTOSTART_MAX` в watch.py — жёстче: потолок самозапуска, не больше двух направлений сразу
 STALE_HOURS = 24      # предшественник без изменений дольше — «зависший» (допущение плана, поправим по замеру)
 
 
@@ -1166,7 +1387,7 @@ def task_attach(pantheon, t, tid, sid, actor="агент"):
     old = tasks[tid][1].get("parent")
     if old == sid:
         raise ValueError(f"{tid} уже в пачке {sid}")
-    if not tasks[tid][1].get("mode"):
+    if not mode_decided(tasks[tid][1]):
         raise ValueError(f"{tid}: {NO_MODE_BATCH}")
     was = f" (была в {old})" if old else ""
     task_set(pantheon, t, tid, {"parent": sid}, note=f"прикреплена к пачке {sid}{was}", actor=actor)
@@ -1227,6 +1448,32 @@ def migrate_batches(pantheon, t, dry_run=False, actor="агент"):
                 task_set(pantheon, t, tid, {"order": n, "batch": None}, note=f"batch «{name} · {place}» перенесён: порядок {n}",
                          actor=actor)
     return plan
+
+
+def migrate_modes(pantheon, t, dry_run=False, actor="агент"):
+    """Разовая миграция (metis-0505): открытые задачи всех направлений без mode → mode undecided («не решено»). Пачки (story),
+    закрытые, входящие (inbox/) и задачи пачек не трогаются: в пачке режим решает координатор, а «не решено» там — ошибка
+    check. Запись — task_set со строкой в журнал и прежним updated (как migrate_projects): это не движение работы.
+    Повтор ничего не меняет. → (строки плана, сбои)."""
+    tasks = load_tasks(pantheon, WORK_TYPES)
+    root = os.path.join(pantheon, "directions") + os.sep
+    lines, failed = [], 0
+    for tid, (p, h, _) in sorted(tasks.items()):
+        if (h.get("type") != "task" or h.get("status") in ("done", "dropped") or h.get("mode") not in (None, "")
+                or not p.startswith(root)):
+            continue
+        if in_pack(h, tasks):
+            lines.append(f"{tid}: в пачке {h.get('parent') or h.get('batch')} без mode — пропущена, режим решает координатор")
+            continue
+        lines.append(f"{tid}: mode пуст → {UNDECIDED} («{MODES[UNDECIDED]}»)")
+        if not dry_run:
+            try:
+                task_set(pantheon, t, tid, {"mode": UNDECIDED}, actor=actor, keep_updated=True,
+                         note=f"«Кто делает»: {MODES[UNDECIDED]} (разовая миграция mode, metis-0505)")
+            except (ValueError, OSError) as e:
+                lines.append(f"  не записано: {e}")
+                failed += 1
+    return lines, failed
 
 
 def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
@@ -1624,7 +1871,7 @@ PULT_VERSION = hashlib.sha256(PULT_FILE.encode("utf-8")).hexdigest()[:12]  # с�
 
 # --- доска владельца ------------------------------------------------------------
 
-CARD_ORDER = ["Статус", "Проект", "Внимание", "Вопрос", "Приоритет", "Срок", "Кому", "Дальше", "Ждёт", "Создана", "Вопрос задан",
+CARD_ORDER = ["Статус", "Проект", "Внимание", "Вопрос", "Приоритет", "Срок", "Кому", "Дальше", "Ждёт", "Создана", "Откуда", "Вопрос задан",
               "Закрыта", "Выпуск", "Пачка", "Пульт", "Ночь", "Оценка", "Факт", "Приёмка", "Порядок", "Режим", "Режим почему",
               "Зависит от", "Области", "Пересечения",
               # карточка пачки (story) и заметка проекта (пульт)
@@ -1632,7 +1879,7 @@ CARD_ORDER = ["Статус", "Проект", "Внимание", "Вопрос"
               "Тип", "id", "tags"]
 # типы свойств карточек для Obsidian (.obsidian/types.json хранилища): тик ставит свои ключи, чужие не трогает
 PROP_TYPES = {"Внимание": "multitext", "Приоритет": "number", "Срок": "date", "Создана": "date",
-              "Вопрос задан": "datetime", "Вопрос": "text", "Закрыта": "date", "Кому": "text", "tags": "tags",
+              "Вопрос задан": "datetime", "Откуда": "text", "Вопрос": "text", "Закрыта": "date", "Кому": "text", "tags": "tags",
               "Выпуск": "text", "Пачка": "text", "Ночь": "date", "Оценка": "text", "Факт": "text", "Приёмка": "text",
               "Порядок": "number", "Режим": "text", "Зависит от": "multitext", "Области": "multitext",
               "Пересечения": "multitext", "Цепочка": "multitext", "Параллельно": "multitext", "Области не указаны": "text",
@@ -1870,6 +2117,7 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
             "Кому": link(node), "Дальше": None if closed else head.get("next"),
             "Ждёт": head.get("waiting_on") if head.get("waiting_on") not in (None, "human") else None,
             "Создана": _date(head.get("created"), 10),
+            "Откуда": " · ".join(x for x in (head.get("from"), head.get("source")) if x) or None,
             "Вопрос задан": _date(head.get("question_at"), 19) if head.get("question") else None,
             "Вопрос": _plain(head["question"]) if head.get("question") and not closed else None,
             # закрытые до 0.9.28 даты закрытия не имеют — тогда последнее изменение задачи (из её шапки)
@@ -1882,7 +2130,8 @@ def render_card(head, body, src_rel, t, conflict=None, notes=None, logged=None, 
             "Факт": head.get("actual"), "Приёмка": head.get("acceptance"),
             # режим и зависимости (план metis-0248): «Зависит от» — только незакрытые depends_on, «Пересечения» —
             # живые задачи с общей областью (считает тик, overlaps)
-            "Режим": MODES.get(head.get("mode")), "Режим почему": head.get("mode_why"),
+            # «не решено» — пустое свойство: вид .base показывает пустой режим сам (metis-0500), а не «один исполнитель»
+            "Режим": MODES.get(head.get("mode")) if mode_decided(head) else None, "Режим почему": head.get("mode_why"),
             "Зависит от": ctx.get("waits") or None, "Области": head.get("touches") or None,
             "Пересечения": ctx.get("cross") or None,
             "Тип": "задача", "id": head.get("id"), "tags": [f"направление/{direction}"]}
@@ -2130,6 +2379,7 @@ BASE_FILE = """filters:
     - 'file.folder == "Доска"'
     - file.name != "Сводка"
     - file.name != "Проблемы"
+    - file.name != "Хвосты"
 formulas:
   urgency: 'if(note["Внимание"], if(note["Внимание"].contains("конфликт"), 0, if(note["Внимание"].contains("подтвердите словом"), 0, if(note["Внимание"].contains("просрочено"), 1, if(note["Внимание"].contains("долго ждёт"), 1, if(note["Внимание"].contains("срок скоро"), 2, 3))))), 3)'
   prio_rank: 'if(note["Приоритет"].isEmpty(), 2, number(note["Приоритет"]))'
@@ -2915,7 +3165,7 @@ def board_sync(pantheon, board, state_path, log_path, t, alert=None, notify=None
     # 1. что сейчас лежит в доске
     present, fresh, seen, mtime = {}, [], {}, {}
     for f in sorted(os.listdir(board)):
-        if not f.endswith(".md") or f.startswith((".", "_")) or f in ("Сводка.md", "Проблемы.md"):
+        if not f.endswith(".md") or f.startswith((".", "_")) or f in ("Сводка.md", "Проблемы.md", "Хвосты.md"):
             continue
         p = os.path.join(board, f)
         try:
@@ -3224,13 +3474,14 @@ def has_description(body):
     """Есть ли у задачи текст кроме заголовка и журнала: что-то между «# …» и первым «## …» или раздел кроме журнала."""
     lines = (body or "").split("\n")
     h = next((i for i, ln in enumerate(lines) if ln.startswith("# ")), -1)
-    in_log = False
+    in_log = in_dw = False
     for ln in lines[h + 1:]:
         if ln.startswith("## "):
-            if not ln.startswith("## Журнал"):
+            in_dw = ln.startswith(DONE_WHEN_HEAD)  # раздел критериев с подсказкой описанием не считается (metis-0502)
+            if not in_dw and not ln.startswith("## Журнал"):
                 return True
-            in_log = True
-        elif ln.strip() and not in_log:
+            in_log = in_log or ln.startswith("## Журнал")
+        elif ln.strip() and not in_log and not in_dw:
             return True
     return False
 
@@ -3318,6 +3569,176 @@ def unlinked_decisions(tasks, decisions_text, zeus_log_text, board_lines, t, min
         words.update(task_words(b))
     notask = {m.group(1) for m in map(NOTASK_RE.match, (decisions_text or "").split("\n")) if m}
     return sorted(i for i in cands if i not in tasks and i not in words and i not in notask)
+
+
+# --- хвосты не теряются (metis-0504, исследование 26.10 разд. 5 пп. 6–7) ---------------------------------------------
+# Три тревоги тика рядом с «слово владельца без задачи» (стиль тот же: один раз на ключ, только о новых, первый проход
+# без тревоги; check в pantheon.py, файл tail-seen.json). (а) Строка журнала задачи со словами «хвост / остаток / не
+# сделано / вынесен / позже» без id задачи в этой строке — только предупреждение (эвристика шумит), не блок.
+# (б) Файл knowledge/inbox старше суток, на имя которого не ссылается ни одна задача (source/from или текст);
+# отчёт с `findings: 0` в шапке — исключение. (в) directions/*/review-*.md с находкой класса Д (строка начинается с «Д»),
+# на имя которого не ссылается ни одна задача; тот же срок, что у (б): лид заводит задачи после слияния, не сразу.
+
+TAIL_DAYS = 7  # строка журнала старше — уже не для тика
+TAIL_FILE_HOURS = 24
+TAIL_RE = re.compile(r"хвост\w*|остат(?:ок|к\w+)|не сделан\w*|вынесен\w*|позже", re.I)
+TAIL_ID_RE = re.compile(r"(?<![\w-])[a-z][a-z0-9]*-\d{2,}(?!\w)")
+JOURNAL_LINE_RE = re.compile(r"^- (\d{4}-\d\d-\d\d \d\d:\d\d) — ([^:\n]*): (.*)$")
+TAIL_SKIP_ACTORS = ("check",)  # записи самого тика — не слова агента
+FINDINGS_ZERO_RE = re.compile(r"^findings:\s*0\s*$", re.M)
+D_FINDING_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)?\**Д\d*(?![\w])\**\s*[·.:—–)-]?\s*\S")
+
+
+TAIL_CLOSED_RE = re.compile(r"(?:закрыт|снят|устранён|устранен|выполнен|доделан|погашен)\w*", re.I)
+TAIL_CLEAR_RE = re.compile(r"^(?:→|->|не задача:)", re.I)  # строка-погашение: «→ <id>» или «не задача: …» (metis-0572)
+TAIL_BARE_RE = re.compile(r"(?<![\w.-])\d{3,4}(?![\w.-])")  # id без префикса: «0366»
+TAIL_OPEN = ("todo", "doing", "review", "waiting")
+
+
+def _journal(body):
+    """[(время, актор, текст, строка)] журнала задачи: после «## Журнал» до следующего «## »."""
+    m = re.search(r"^## Журнал[^\n]*\n", body or "", re.M)
+    out = []
+    if not m:
+        return out
+    for ln in (body[m.end():]).split("\n"):
+        if ln.startswith("## "):
+            break
+        jm = JOURNAL_LINE_RE.match(ln)
+        if jm:
+            out.append((ts_of(jm.group(1).replace(" ", "T") + ":00"), jm.group(2).strip(), jm.group(3), ln.strip()))
+    return out
+
+
+def tail_lines(tasks, t, days=TAIL_DAYS):
+    """[(id задачи, строка журнала)] со словами хвоста, не старше days дней. Строки самого тика (actor check) не считаются.
+    Не хвост (metis-0572): в строке id другой существующей задачи (в том числе без префикса — «0366», если такая задача
+    одна) или «не задача:»; строка открытой задачи о ней самой (её id в строке); остаток закрыт позже в той же задаче
+    (строка со словом хвоста и «закрыт/снят/устранён/выполнен…»; такая строка и сама не хвост); позже в той же задаче есть строка «→ …» или «не задача: …»
+    — она гасит все прежние хвосты задачи (старую строку править не нужно)."""
+    suffix = {}
+    for i in tasks:
+        suffix.setdefault(i.rsplit("-", 1)[-1], []).append(i)
+    out = []
+    for tid, (_, head, body) in sorted(tasks.items()):
+        if head.get("type") != "task":
+            continue
+        jl = [x for x in _journal(body) if x[1] not in TAIL_SKIP_ACTORS]
+        for k, (ts, _, text, ln) in enumerate(jl):
+            if ts is None or t - ts > days * 86400 or not TAIL_RE.search(text):
+                continue
+            # id гасит тревогу, только если такая задача есть и это не сама задача (review-113, x86-64, свой id — не хвост)
+            if any(i != tid and i in tasks for i in TAIL_ID_RE.findall(text)):
+                continue
+            if any(len(suffix.get(b, [])) == 1 and suffix[b][0] != tid for b in TAIL_BARE_RE.findall(text)):
+                continue
+            if "не задача:" in text.lower() or TAIL_CLOSED_RE.search(text):  # строка о закрытии хвоста — не хвост
+                continue
+            if head.get("status") in TAIL_OPEN and tid in TAIL_ID_RE.findall(text):
+                continue
+            if any((TAIL_RE.search(x[2]) and TAIL_CLOSED_RE.search(x[2])) or TAIL_CLEAR_RE.match(x[2].strip())
+                   for x in jl[k + 1:]):
+                continue
+            out.append((tid, ln))
+    return out
+
+
+PART_STALL_HOURS = 24
+PART_NOTE_RE = re.compile(r"PR #\d+ \([^)]*\) слит, в теле «часть»")
+
+
+def part_stalled(tasks, t, hours=PART_STALL_HOURS):
+    """[(id, строка)] открытые задачи, у которых последняя запись журнала (кроме тика) — «PR слит, в теле «часть»» и она
+    старше hours часов: автозакрытие оставило задачу открытой без сигнала (metis-0572, 0503). Любая позже запись
+    (агента, владельца) — движение, тревоги нет."""
+    out = []
+    for tid, (_, head, body) in sorted(tasks.items()):
+        if head.get("type") != "task" or head.get("status") not in TAIL_OPEN:
+            continue
+        jl = [x for x in _journal(body) if x[1] not in TAIL_SKIP_ACTORS]
+        # запись плановый проход ставит сам — «движение» после неё только от других авторов
+        last = jl[-1] if jl else None
+        if last and last[0] is not None and PART_NOTE_RE.search(last[2]) and t - last[0] > hours * 3600:
+            out.append((tid, last[3]))
+    return out
+
+
+def _task_refs(tasks):
+    """Слова, на которые ссылаются задачи: поля source и from, заголовок и тело (до и после «## Журнал») целиком."""
+    parts = []
+    for _, head, body in tasks.values():
+        parts += [str(head.get(k) or "") for k in ("source", "from", "title")]
+        parts.append(body or "")
+    text = "\n".join(parts)
+    return text, set(re.findall(r"[\w.-]+", text))
+
+
+def _file_linked(name, text, words):
+    stem = os.path.splitext(name)[0]
+    return name in words or stem in words or (("." in stem) and stem in text)
+
+
+def _listing(d, pattern=None):
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return []
+    return [n for n in names if not n.startswith(".") and (pattern is None or pattern.match(n))
+            and os.path.isfile(os.path.join(d, n))]
+
+
+def _old_enough(p, t, hours):
+    try:
+        return t - os.stat(p).st_mtime > hours * 3600
+    except OSError:
+        return False
+
+
+def inbox_orphans(tasks, inbox_dir, t, hours=TAIL_FILE_HOURS):
+    """[(путь, 1)] файлы inbox старше hours часов, на имя которых не ссылается ни одна задача; findings: 0 — исключение."""
+    text, words = _task_refs(tasks)
+    out = []
+    for n in _listing(inbox_dir):
+        p = os.path.join(inbox_dir, n)
+        if not _old_enough(p, t, hours) or _file_linked(n, text, words):
+            continue
+        try:
+            with open(p, encoding="utf-8") as fh:
+                if FINDINGS_ZERO_RE.search("".join(fh.readline() for _ in range(40))):
+                    continue
+        except (OSError, UnicodeDecodeError):
+            pass  # не текст — ссылки на него всё равно нет
+        out.append((p, 1))
+    return out
+
+
+def review_debts(tasks, pantheon, t, hours=TAIL_FILE_HOURS):
+    """[(путь, строка первой Д-находки)] из <pantheon>/directions/*/review-*.md, старше hours часов, без ссылки из задач."""
+    text, words = _task_refs(tasks)
+    rx = re.compile(r"review-.*\.md$")
+    out = []
+    base = os.path.join(pantheon, "directions")
+    for dn in _listing_dirs(base):
+        for n in _listing(os.path.join(base, dn), rx):
+            p = os.path.join(base, dn, n)
+            if not _old_enough(p, t, hours) or _file_linked(n, text, words):
+                continue
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    for i, ln in enumerate(fh, 1):
+                        if D_FINDING_RE.match(ln):
+                            out.append((p, i))
+                            break
+            except (OSError, UnicodeDecodeError):
+                continue
+    return out
+
+
+def _listing_dirs(d):
+    try:
+        return sorted(n for n in os.listdir(d) if os.path.isdir(os.path.join(d, n)))
+    except OSError:
+        return []
 
 
 # --- поле project — только имя проекта из directions.toml (metis-0323) ---------------------------------------------
