@@ -183,6 +183,20 @@ def split_checks(home):
     check("split: при подмене direction файла не появилось и исходная не тронута",
           set(os.listdir(tdir)) == files0 and read(home, sp) == swapped)
     open(os.path.join(home, sp), "w", encoding="utf-8").write(good)
+    # исходная в пачке с режимом «не решено»: split без --mode — отказ, с --mode — проходит (metis-0579)
+    nomode, nmp = T.task_new(home, T0, "metis-pantheon", "Без режима", text="Цель.", done_when=["Пункт"])
+    nmp = os.path.relpath(nmp, home)
+    body = read(home, nmp).replace("\nowner:", f"\nparent: {sid}\nmode: undecided\nowner:", 1)
+    open(os.path.join(home, nmp), "w", encoding="utf-8").write(body)
+    try:
+        T.task_split(home, T0 + 36, nomode, "Остаток без режима")
+        check("split: пачка без режима и без --mode — отказ", False)
+    except ValueError as e:
+        check("split: пачка без режима и без --mode — отказ", "режима" in str(e), e)
+    nid3, np3 = T.task_split(home, T0 + 37, nomode, "Остаток с режимом", mode="self", mode_why="мелочь")
+    nh3 = T.split(read(home, os.path.relpath(np3, home)))[0]
+    check("split --mode: режим и довод записаны", nh3.get("mode") == "self" and nh3.get("mode_why") == "мелочь"
+          and nh3.get("parent") == sid, nh3)
     before = read(home, sp)
     # сбой записи в исходную → новая не остаётся
     real = T.task_set

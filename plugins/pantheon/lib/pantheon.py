@@ -91,7 +91,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту
   pantheon task migrate-mode [--dry-run]   разово: открытым задачам всех направлений без mode — mode undecided («не
                     решено»); задачи пачек, пачки, закрытые и входящие не трогает; с --dry-run — только план (metis-0505)
-  pantheon task split ID --title "остаток" [--done-when "пункт" …] [--text "описание"]
+  pantheon task split ID --title "остаток" [--done-when "пункт" …] [--text "описание"] [--mode M --mode-why X]
                     остаток исходной задачи — новой задачей в том же направлении: from=остаток, source=ID, тег «остаток»,
                     та же пачка; пункты — из --done-when, иначе неотмеченные из исходной; строка в журнале обеих (metis-0502)
   pantheon task attach ID ПАЧКА | detach ID   задача в пачку (story) и обратно; show ПАЧКА — состав и сумма оценок
@@ -7506,7 +7506,7 @@ TASK_NEW_VALUE_FLAGS = {"--direction", "--title", "--project", "--text", "--body
                         "--why", "--recommend", "--if-no-answer", "--option", "--depends-on", "--executor", "--parent",
                         "--from", "--source", "--done-when"}
 TASK_NEW_BOOL_FLAGS = {"--risky"}
-TASK_SPLIT_VALUE_FLAGS = {"--title", "--done-when", "--text"}
+TASK_SPLIT_VALUE_FLAGS = {"--title", "--done-when", "--text", "--mode", "--mode-why"}
 TASK_SET_VALUE_FLAGS = {"--note", "--option", "--body", "--body-file", "--force"}
 # Повторяемые флаги — списки; любой другой повторённый флаг — отказ (argus b, круг 2): `opt()` берёт последнее
 # значение, и `--body "Цель" --body "Готово, когда"` молча терял бы первую часть. --wave — прежнее имя --release.
@@ -7744,7 +7744,7 @@ def task_cmd(rest):
                 print("pantheon task split: нужен --title — название остатка; ничего не записано", file=sys.stderr)
                 return 2
             tid, p = T.task_split(PANTHEON, now(), tid0, opt("--title"), done_when=opt("--done-when", True) or None,
-                                  text=opt("--text"))
+                                  text=opt("--text"), mode=opt("--mode"), mode_why=opt("--mode-why"))
             print(f"{tid} {os.path.relpath(p, PANTHEON)} (остаток {tid0})")
             task_new_notify(T, tid, T.read(p)[0].get("direction"), opt("--title"), opt("--text"))
         elif sub == "attach" and len(args) == 2:
