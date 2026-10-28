@@ -37,7 +37,8 @@ STATE/outside/queue. Имя окна проход берёт из места п�
      суток (RESULT_TTL, по mtime) удаляются; файлы живого сервера — нет. Журналы в STATE/outside/runs не трогаются.
 Запуск: [heavy] sandbox-exec -f STATE/outside/profile.sb <команда> в папке репозитория, окружение с нуля (HOME, PATH с
 node из nvm, TMPDIR — своя временная папка, у тестов CI=1, у сервера PORT). Тесты — не дольше TEST_TIMEOUT. Профиль:
-всё разрешено, кроме чтения ключей (.env*, secrets/, ~/.ssh, ~/.config/cdp-daemon, ~/.config/gh, ~/.gnupg, ~/.aws,
+всё разрешено, кроме чтения ключей (.env*, кроме шаблонов .env.example, .env.sample, .env.template — они открыты
+на чтение, на запись нет; secrets/, ~/.ssh, ~/.config/cdp-daemon, ~/.config/gh, ~/.gnupg, ~/.aws,
 ~/.netrc, ~/.git-credentials, ~/.npmrc, ~/Library/Keychains и служба Связки ключей com.apple.SecurityServer), записи в
 состояние и ядро (STATE, ~/ai/pantheon, ~/.claude, ~/.local/bin, ~/.local/share/pantheon, ~/Library/LaunchAgents,
 профили оболочки, ~/.gitconfig, ~/.nvm, кэши окон ~/Library/Caches/pantheon-sandbox, .git/config и
@@ -401,6 +402,8 @@ def profile_text(roots=()):
         "(version 1)",
         "(allow default)",
         "(deny file-read* file-write*\n  " + "\n  ".join(read) + ")",
+        # шаблоны без секретов читаются (metis-0578); поздние правила сильнее; запись в них закрыта deny выше
+        '(allow file-read* (regex #"/\\.env\\.(example|sample|template)$"))',
         '(deny mach-lookup (global-name "com.apple.SecurityServer"))',
         "(deny file-write*\n  " + "\n  ".join(write) + ")",
         "(deny network-outbound\n  " + "\n  ".join(net) + ")",
