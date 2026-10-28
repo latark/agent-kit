@@ -24,6 +24,7 @@ NotebookEdit, Read, Grep, Glob, WebFetch, Agent, Task, Skill) и Stop; код �
   в managed-settings.json: Claude Code вливает их в denyRead песочницы (тест — `test_canaries.py`).
 - **Grep Пританея по `.git`** держит только песочница.
 - **Задачи чужого направления** (решение 28.10, п. 4). Роль может вести задачи другого направления через `pantheon task`: проверка `task_targets` снята. Доску и owner-log пишет только плановый проход, «да» владельца — только owner-log.
+- **Ключи демона Claude Code** (решение 28.10, metis-0287). `~/.claude/daemon` (roster.json, control.key) окнам ролей открыт: с ключами PTY можно напечатать текст в фоновую сессию, в том числе в окно Пританея, и owner-log может принять его за ввод владельца. Только намеренно или по внедрённой просьбе; владелец счёл риск малым.
 - **Edit/Write песочница не держит.** Их судят protect-config (профили оболочки, `~/.ssh`, настройки git, LaunchAgents,
   `~/.claude.json`, `~/.local/bin`, защиты в `~/.claude`), pantheon-acl, private и domain (остальное в `~/.*` и
   `~/Library`). Сессии владельца без роли domain не ограничивает.
