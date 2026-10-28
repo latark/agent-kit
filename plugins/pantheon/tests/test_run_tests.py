@@ -335,7 +335,8 @@ sel = R.select(["plugins/alpha/lib/x.py"], "/r", ITEMS, AM2)
 check("select: новый файл тестов (карта не знает) и упавший при сборке — всегда",
       sel == (ITEMS, [], ["alpha/test_y.py", "beta/test_b.py"]), sel)
 sel = R.select(["README.md"], "/r", ITEMS, AM2)
-check("select: ничего не задето — «всегда» не гонит прогон", sel[0] == [], sel)
+check("select: ничего не задето — «всегда» (не из карты, упавшие при сборке) всё равно идут",
+      sel == ([ITEMS[1], ITEMS[2]], [], ["alpha/test_y.py", "beta/test_b.py"]), sel)
 for body, why in (("{", "JSONDecodeError"), ('{"version": 3, "tests": [], "files": {}}', "версии 3"),
                   ('{"version": 1, "tests": [], "files": {}}', "версии 1"),
                   ('{"version": 2, "hashes": {}, "tests": ["a/test_a.py"], "files": {"x": [5]}}', "IndexError"),
@@ -673,12 +674,18 @@ IT = [("/r/plugins/pantheon", "pantheon/test_setup.py"), ("/r/plugins/pantheon",
       ("/r/plugins/pantheon", "pantheon/test_tick.py")]
 check("split_skipped: на macOS ничего не пропускается", R.split_skipped(IT, "darwin") == (IT, []))
 got = R.split_skipped(IT, "linux", exists=lambda p: False)
-check("split_skipped: на Linux — setup и board (нет /bin/zsh) пропущены с причиной, tick идёт",
-      got[0] == [IT[2]] and [lb for lb, _ in got[1]] == ["pantheon/test_setup.py", "pantheon/test_board.py"]
-      and all(why for _, why in got[1]), got)
-got = R.split_skipped(IT, "linux", exists=lambda p: p == "/bin/zsh")
-check("split_skipped: на Linux с /bin/zsh board идёт, setup — нет", got[0] == [IT[1], IT[2]]
-      and [lb for lb, _ in got[1]] == ["pantheon/test_setup.py"], got)
+check("split_skipped: на Linux — пропущен только test_setup (установщик), остальное идёт",
+      got[0] == [IT[1], IT[2]] and [lb for lb, _ in got[1]] == ["pantheon/test_setup.py"] and all(why for _, why in got[1]), got)
+# условие unless: файл идёт, если нужная программа есть (механизм остался, записей с ним сейчас нет)
+real = R.SKIP_NOT_MAC
+R.SKIP_NOT_MAC = {"pantheon/test_board.py": ("нужен zsh", "/bin/zsh")}
+try:
+    got = R.split_skipped(IT, "linux", exists=lambda p: False)
+    got2 = R.split_skipped(IT, "linux", exists=lambda p: p == "/bin/zsh")
+finally:
+    R.SKIP_NOT_MAC = real
+check("split_skipped: unless — без /bin/zsh board пропущен, с ним идёт",
+      [lb for lb, _ in got[1]] == ["pantheon/test_board.py"] and got2 == (IT, []), (got, got2))
 missing = [lb for lb in R.SKIP_NOT_MAC if not os.path.exists(
     os.path.join(os.path.dirname(PLUGIN), lb.split("/")[0], "tests", lb.split("/")[1]))]
 check("SKIP_NOT_MAC — только существующие файлы, у каждого есть причина",

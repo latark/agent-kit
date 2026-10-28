@@ -268,11 +268,8 @@ def select(changed, root, items, amap, stale=()):
     if unknown:
         return None, unknown, []
     always = sorted(lb for lb in labels if lb not in amap["tests"] or lb in amap["always"])
-    want_stale = {lb for lb in stale if lb in labels}
-    if not want:
-        return [it for it in items if it[1] in want_stale], [], always
-    want.update(always)
-    want.update(want_stale)
+    want.update(always)  # тесты не из карты и упавшие при её сборке идут всегда, в том числе когда файлы ничего не задели
+    want.update(lb for lb in stale if lb in labels)
     return [it for it in items if it[1] in want], [], always
 
 
