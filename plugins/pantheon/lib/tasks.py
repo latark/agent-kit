@@ -771,7 +771,7 @@ def rest_ids(pantheon, tid):
             if h.get("source") == tid and REST_TAG in (h.get("tags") or [])]
 
 
-def task_split(pantheon, t, tid, title, done_when=None, text=None, actor="агент"):
+def task_split(pantheon, t, tid, title, done_when=None, text=None, actor="агент", mode=None, mode_why=None):
     """Остаток задачи tid — новой задачей одной командой (metis-0502): то же направление, проект, пачка и режим, from=остаток,
     source=tid, тег «остаток»; пункты — done_when, иначе неотмеченные пункты исходной. В журнале обеих — строка со ссылкой.
     → (id новой, путь)."""
@@ -789,6 +789,7 @@ def task_split(pantheon, t, tid, title, done_when=None, text=None, actor="аге
         raise ValueError("нужен --title: название остатка")
     items = [x for x in (done_when or []) if str(x).strip()] or [x for done, x in done_criteria(b0) if not done and x != DONE_WHEN_HINT]
     fields = {k: h0[k] for k in ("owner", "parent", "mode", "mode_why", "priority", "executor") if h0.get(k) is not None}
+    fields.update({k: v for k, v in (("mode", mode), ("mode_why", mode_why)) if v})  # у исходной в пачке нет режима — задаётся здесь
     fields.update({"from": "остаток", "source": tid, "tags": sorted({*(h0.get("tags") or []), REST_TAG})})
     desc = text if text else f"Остаток задачи {tid} «{h0.get('title')}»."
     nid, p = task_new(pantheon, t, h0["direction"], title, project=h0.get("project"), actor=actor, text=desc,
