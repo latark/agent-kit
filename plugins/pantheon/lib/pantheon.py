@@ -111,7 +111,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         --at-list — записи, --at-cancel <id> — отменить (lib/night.py)
   pantheon wake [--dry-run]             поднять прерванные сессии Пантеона с открытой задачей и сказать «продолжай»
   --over-cap (start, wake)              недельный потолок владельца достигнут — start и wake отказаны (код 2), кроме
-                                        start zeus; флаг запускает сверх потолка только из вашего терминала (metis-0444)
+                                        start zeus и wake hestia; флаг запускает сверх потолка только из вашего терминала (metis-0444)
   pantheon watch [--dry-run]            дежурный (плановый проход раз в 5 мин): сессии, STATUS.md, swap, worktree, версия Claude Code,
                                         паузы, самозапуск по вашим решениям; --dry-run — кого поднял бы и почему нет
   pantheon reboot-reminder [--now]      пятница после 09:30: Mac не перезагружался с прошлой пятницы — карточка и уведомление
@@ -4243,6 +4243,9 @@ START_DEFERRED = 5  # было «отложено по красной памят
 
 
 OVER_CAP = "--over-cap"  # то же, что night.OVER_CAP: ручной запуск сверх недельного потолка (metis-0444)
+# недельный потолок их не держит (metis-0444): zeus — окно владельца; hestia — служебная, ставит выпуски и чинит окна
+# (решение владельца 29.10 по PR #193, «Б: Гестию оставить»)
+CAP_FREE = ("zeus", "hestia")
 
 
 def start_gate(target, origin, agents, need_word=False, over_cap=False):
@@ -4253,8 +4256,8 @@ def start_gate(target, origin, agents, need_word=False, over_cap=False):
     отказ, код 2, всегда); tick слова не имеет.
     need_word (wake hestia из окна роли, не hq): запуск с поручением из окна роли — только по свежей записи в zeus.md,
     без неё отказ, код 2, в любой зоне (как wake <имя> "задание").
-    Недельный потолок владельца достигнут (metis-0444, night.launch_cap) — отказ, код 2, у любого target, кроме zeus
-    (штаб — окно владельца); over_cap (--over-cap) снимает отказ только при origin owner.
+    Недельный потолок владельца достигнут (metis-0444, night.launch_cap) — отказ, код 2, у любого target, кроме CAP_FREE
+    (zeus — окно владельца, hestia — служебная); over_cap (--over-cap) снимает отказ только при origin owner.
     Память (своп, давление) — только предупреждение для любого origin: строка в stderr и тревога раз в день, запуск идёт
     ([sb-simplify] п. 5, metis-0523; было — код 5 «отложено»)."""
     m = capacity_probe(agents)
@@ -4265,7 +4268,7 @@ def start_gate(target, origin, agents, need_word=False, over_cap=False):
     elif need_word and origin != "owner" and not owner_spoke_recently("zeus", OWNER_WORD_WINDOW):
         code, why = START_REFUSED, (f"поручение из окна роли — только по вашему слову: в журнале Зевса нет вашей строки "
                                     f"за {OWNER_WORD_WINDOW // 60} мин (сообщение другой сессии согласием не считается)")
-    elif target != "zeus" and (cap := night_mod().launch_cap(origin, over_cap)):
+    elif target not in CAP_FREE and (cap := night_mod().launch_cap(origin, over_cap)):
         code, why = START_REFUSED, cap
     elif m["red"] or m["unknown"]:
         # [sb-simplify] п. 5 (metis-0523): своп и давление памяти — только предупреждение, запуск не откладывается.
@@ -4326,14 +4329,15 @@ def wake_recheck(name, state=None):
     return None
 
 
-def wake_hestia(rest, over=False):
+def wake_hestia(rest):
     """pantheon wake hestia --task <id> [--restart] [--dry-run] (metis-0217, metis-0245): Гестия — фоновой сессией `hestia` в своём
     окне песочницы (settings/hestia.json, собирает sandbox_build; PANTHEON_ROLE=hestia — правило guard hestia), папка
     запуска — её кэш. Одна задача — одна сессия: без задачи, с id не по образцу, несуществующей или не открытой задачей
     — отказ «нет задачи», код 2, claude не зовётся. Нет окна, кэша или роли (~/.claude/agents/hestia.md) — код 1 с
     командой сборки. Метка «остановлено вами», технический перезапуск и живая копия — отказ, как у start.
     Откуда — как у start: hq → zeus, иная роль → tick, без роли → owner; из окна роли без вашего слова в
-    owner-log/zeus.md за 15 мин — отказ, код 2, строка refused в capacity.jsonl, claude не зовётся."""
+    owner-log/zeus.md за 15 мин — отказ, код 2, строка refused в capacity.jsonl, claude не зовётся. Недельный потолок
+    владельца Гестию не держит (CAP_FREE, решение владельца 29.10)."""
     dry = "--dry-run" in rest
     restart = "--restart" in rest  # metis-0575: зависшую прежнюю Гестию стопит и убирает (claude stop, затем rm_previous)
     args = [a for a in rest[1:] if a not in ("--dry-run", "--restart")]
@@ -4376,8 +4380,7 @@ def wake_hestia(rest, over=False):
         return _start_session("hestia", "hestia", folder, "hestia", task, [], origin, dry, restart, win,
                               need_word=bool(role), cmd="pantheon wake hestia",
                               again=f"pantheon wake hestia --task {tid} --restart",
-                              extra_env={"PANTHEON_TASK": tid, "PANTHEON_TASK_DIRECTION": str(head.get("direction") or "")},
-                              over_cap=over)
+                              extra_env={"PANTHEON_TASK": tid, "PANTHEON_TASK_DIRECTION": str(head.get("direction") or "")})
 
 
 def wake_lead(rest, over=False):
@@ -8685,7 +8688,7 @@ def main(argv):
         over = OVER_CAP in rest  # metis-0444: флаг в любом месте строки, до разбора остального
         rest = [a for a in rest if a != OVER_CAP]
         if rest[:1] == ["hestia"]:
-            return wake_hestia(rest, over)
+            return wake_hestia(rest)  # потолок Гестию не держит (CAP_FREE)
         if rest and not rest[0].startswith("-") and "--task" in rest:  # окно лида направления без координатора
             return wake_lead(rest, over)
         if rest and not rest[0].startswith("-") and rest[0] in hq_led():

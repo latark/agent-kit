@@ -1775,7 +1775,7 @@ def _word_do(verb, name, qid, ts, ans, agents, registry):
         return ("не исполняю: «остановлено вами» — снимает ответ «Да — вернуть " + name + "» или ваша команда "
                 "pantheon resume")
     # metis-0444: недельный потолок держит и запуск по ответу — сверх потолка только ваш терминал (--over-cap)
-    cap = P.night_mod().launch_cap("tick")
+    cap = None if name in P.CAP_FREE else P.night_mod().launch_cap("tick")  # Гестию потолок не держит (29.10)
     if cap:
         return f"не исполняю: {cap}"
     if verb == "перезапустить":

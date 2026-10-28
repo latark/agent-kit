@@ -453,6 +453,13 @@ def test_word_launch_cap():
     for verb in ("запустить", "перезапустить", "вернуть"):
         res = W._word_do(verb, "athena-shop", "metis-0001", "2026-10-14 12:00:00", f"Да — {verb} athena-shop", [], [])
         check(res.startswith("не исполняю: недельный потолок владельца 50 %"), f"{verb}: {res!r}")
+    # Гестию потолок не держит (решение владельца 29.10, PR #193): до запуска доходит — «уже поднято этим проходом»
+    W.ONESHOT_STARTED.append("hestia")
+    try:
+        res = W._word_do("запустить", "hestia", "metis-0001", "2026-10-14 12:00:00", "Да — запустить hestia", [], [])
+    finally:
+        W.ONESHOT_STARTED.remove("hestia")
+    check(res == "уже поднято этим проходом", f"hestia под потолком: {res!r}")
     e = env(49.0, 49.0)
     W.ONESHOT_STARTED.append("athena-shop")  # дальше — «уже поднято этим проходом», без запуска
     try:

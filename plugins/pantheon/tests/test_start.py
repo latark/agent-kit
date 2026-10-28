@@ -1086,11 +1086,27 @@ def main():
     open(hmd, "w").write("---\nname: hestia\n---\nГестия\n")
     open(agents_file, "w").write("[]")
     open(log, "w").close()
+    # решение владельца 29.10 по PR #193 («Б: Гестию оставить»): Гестию потолок не держит — ни из hq, ни из терминала
+    hrun_p = os.path.join(state, "settings", "run", "hestia.json")
     word()
-    r = run("wake", "hestia", "--task", "athena-0001", "--over-cap", extra={"PANTHEON_ROLE": "hq"})
-    check("потолок: wake hestia --task из hq со словом и --over-cap — отказ, код 2, claude не звали",
-          r.returncode == 2 and "потолок владельца 50 %" in r.stderr and "только в его терминале" in r.stderr
-          and not calls())
+    r = run("wake", "hestia", "--task", "athena-0001", extra={"PANTHEON_ROLE": "hq"})
+    check("потолок: wake hestia --task из hq со словом — запуск идёт (Гестию потолок не держит), замер allowed",
+          r.returncode == 0 and "потолок" not in r.stderr and len([x for x in calls() if "--bg" in x["argv"]]) == 1
+          and caprows()[-1]["target"] == "hestia" and caprows()[-1]["result"] == "allowed")
+    open(agents_file, "w").write("[]")
+    open(log, "w").close()
+    if os.path.exists(hrun_p):
+        os.remove(hrun_p)
+    r = run("wake", "hestia", "--task", "athena-0001")
+    check("потолок: wake hestia --task из вашего терминала без --over-cap — запуск идёт",
+          r.returncode == 0 and "потолок" not in r.stderr and len([x for x in calls() if "--bg" in x["argv"]]) == 1)
+    r = run("wake", "hestia")
+    check("потолок: wake hestia без --task — прежний отказ «нет задачи», не потолок",
+          r.returncode == 2 and "нет задачи" in r.stderr and "потолок" not in r.stderr)
+    open(agents_file, "w").write("[]")
+    open(log, "w").close()
+    if os.path.exists(hrun_p):
+        os.remove(hrun_p)
     os.remove(hmd)
     os.remove(zlog)
     week(49)
