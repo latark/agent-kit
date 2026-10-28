@@ -63,7 +63,8 @@ def main():
         deny_fs = data["sandbox"]["filesystem"]["denyRead"]
         rules = data["permissions"]["deny"]
         reads = [x[5:-1] for x in rules if x.startswith("Read(")]
-        reads = [x[1:] if x.startswith("//") else x for x in reads]  # «//abs» — абсолютный путь правила
+        # абсолютный путь в правиле Claude Code — «//abs»; «/x» — путь от папки файла настроек, он не в счёт
+        reads = [x[1:] for x in reads if x.startswith("//")]
         for f in ("raw.md", "answer.md", "item.md", "summary.md"):
             p = os.path.join(rid_dir, f)
             check(f"{n}: {f} заявки — в denyRead песочницы", any(fnmatch.fnmatchcase(p, x) for x in deny_fs))

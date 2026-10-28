@@ -99,6 +99,11 @@
   2.1.311 он открывает весь localhost — и местный прокси (выход наружу мимо `allowedDomains`), и 9222 браузера. Пароль
   демона CDP (`~/.config/cdp-daemon`) окнам закрыт на чтение — песочницей и правилом Read. Окна задач расписания,
   Гестии и Пританея сокетов не получают.
+- Чтение, закрытое окнам (песочницей для Bash и правилом Read для Read, Grep и Glob). Всем окнам — неодобренный текст
+  заявок `pantheon read` (metis-0270): `raw.md`, `answer.md`, `item.md` и `summary.md` в `~/.local/state/pantheon/read/<rid>/`.
+  `approved.md` той же папки открыт: его по указателю из inbox читает направление. Окнам направлений, мастерской и задач
+  расписания — ещё `~/.claude/daemon` (metis-0287): в `roster.json` ключи PTY чужих фоновых сессий. Пританею и Гестии он
+  открыт, их `claude agents` и `pantheon who` читают реестр демона.
 - Ручные разрешения окнам ([sb-simplify] п. 6): `~/.claude/pantheon/grants.toml` — правит владелец или Метида
   (protect-config), выпуск его не стирает. Запись `[[grant]]`: `window` (имя окна или `"*"`), `until = "ГГГГ-ММ-ДД"`
   (включительно, обязателен), `why`, и списки `allow` (permissions.allow), `write` (allowWrite песочницы), `domains`

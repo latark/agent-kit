@@ -2647,12 +2647,11 @@ def _home_form(p):
 def close_read(data, paths, tree=False):
     """Закрыть окну чтение paths: Bash — denyRead песочницы, инструментам Read, Grep и Glob — правилом Read (песочница
     держит только Bash). Оба вида пути — «~/…» и настоящий (_deny_forms). tree — папки: правило Read на всё поддерево."""
-    fs = data["sandbox"]["filesystem"]["denyRead"]
-    rules = data.setdefault("permissions", {}).setdefault("deny", [])
+    tail = "/**" if tree else ""
     for x in _deny_forms(paths):
-        rule = f"Read({x}{'/**' if tree else ''})" if x.startswith("~") else f"Read(/{x}{'/**' if tree else ''})"
-        fs.extend([] if x in fs else [x])
-        rules.extend([] if rule in rules else [rule])
+        data["sandbox"]["filesystem"]["denyRead"].append(x)
+        data.setdefault("permissions", {}).setdefault("deny", []).append(
+            f"Read({x}{tail})" if x.startswith("~") else f"Read(/{x}{tail})")
     return data
 
 
