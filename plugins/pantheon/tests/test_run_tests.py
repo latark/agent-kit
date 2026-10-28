@@ -273,7 +273,9 @@ REPO = os.path.dirname(os.path.dirname(PLUGIN))
 amap, why = R.load_map()
 check("карта репозитория читается, версия та", amap is not None, why)
 amap = amap or {"tests": set(), "always": set(), "files": {}}
-check("карта: при сборке не упал ни один файл тестов", not amap["always"], sorted(amap["always"]))
+# сам этот файл в копии сборки проверяет прошлую карту: упал он в прошлой сборке — упадёт и в этой, если не исключить
+check("карта: при сборке не упал ни один файл тестов", not amap["always"] - {"pantheon/test_run_tests.py"},
+      sorted(amap["always"]))
 check("FULL: lib/pantheon.py, hooks/python.sh обоих плагинов, сам раннер — общие",
       {"plugins/pantheon/lib/pantheon.py", "plugins/pantheon/hooks/python.sh", "plugins/guard/hooks/python.sh",
        "plugins/pantheon/scripts/run-tests.py"} <= R.FULL)
