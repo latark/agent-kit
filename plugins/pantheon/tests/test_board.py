@@ -611,8 +611,16 @@ def main():
     run(away, "board", t=day + 12 * 3600)  # 00:00
     check("ночью вопрос — без уведомления", not open(nlog, encoding="utf-8").read().strip())
 
+    # образец Obsidian лежит в плагине: файлы читаются без zsh
+    sample = os.path.join(os.path.dirname(LIB), "share", "pantheon-view-obsidian")
+    check("0131: образец лежит в плагине без workspace.json",
+          os.path.isfile(os.path.join(sample, "app.json")) and not os.path.exists(os.path.join(sample, "workspace.json")))
+    check("0131: образец без чужого кода — ни тем, ни плагинов, community-plugins пуст, cssTheme не задан",
+          not os.path.exists(os.path.join(sample, "themes")) and not os.path.exists(os.path.join(sample, "plugins"))
+          and json.load(open(os.path.join(sample, "community-plugins.json"))) == []
+          and "cssTheme" not in json.load(open(os.path.join(sample, "appearance.json"))))
     if not os.path.exists("/bin/zsh"):
-        print("пропущено: нужен macOS — копия view-sync.sh запускается как /bin/zsh (6 проверок)")
+        print("пропущено: нужен macOS — копия view-sync.sh запускается как /bin/zsh (4 проверки)")
     else:
         # копия не трогает Доску
         src_dir, dst = os.path.join(tmp, "src"), os.path.join(tmp, "dst")
@@ -628,14 +636,7 @@ def main():
         check("копия: Доска цела и записываема, остальное — только чтение", kept and writable and ro)
 
         # metis-0131: пустая копия без .obsidian получает образец; существующий .obsidian не меняется ни на байт
-        sample = os.path.join(os.path.dirname(LIB), "share", "pantheon-view-obsidian")
         ob = os.path.join(dst, ".obsidian")
-        check("0131: образец лежит в плагине без workspace.json",
-              os.path.isfile(os.path.join(sample, "app.json")) and not os.path.exists(os.path.join(sample, "workspace.json")))
-        check("0131: образец без чужого кода — ни тем, ни плагинов, community-plugins пуст, cssTheme не задан",
-              not os.path.exists(os.path.join(sample, "themes")) and not os.path.exists(os.path.join(sample, "plugins"))
-              and json.load(open(os.path.join(sample, "community-plugins.json"))) == []
-              and "cssTheme" not in json.load(open(os.path.join(sample, "appearance.json"))))
         check("0131: копия без .obsidian получила образец (сниппеты, закладки, настройки), записываемый",
               os.path.isfile(os.path.join(ob, "app.json"))
               and os.path.isfile(os.path.join(ob, "snippets", "pantheon.css"))
