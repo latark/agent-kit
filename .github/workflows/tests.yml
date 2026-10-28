@@ -54,7 +54,7 @@ jobs:
           exit "$code"
 
   full:
-    if: github.event_name != 'pull_request' && !startsWith(github.event.head_commit.message, 'выпуск: ')
+    if: "github.event_name != 'pull_request' && !startsWith(github.event.head_commit.message, 'выпуск: ')"
     runs-on: macos-15
     timeout-minutes: 45
     steps:
