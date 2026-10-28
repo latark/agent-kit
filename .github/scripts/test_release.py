@@ -358,6 +358,8 @@ def t_workflows():
           and text.count('python-version: "3.14"') == 2 and text.count("persist-credentials: false") == 2, text)
     check("tests.yml: сбой шага не прячется — continue-on-error нигде нет",
           not re.search(r"continue-on-error", text), text)
+    check("tests.yml: shell и defaults нигде нет — подмена оболочки (`shell: bash -c 'exit 0' {0}`, defaults: run: shell:) прячет провал",
+          not re.search(r"(?:^|[\s{,\-])[\"']?(?:shell|defaults)[\"']?\s*:", text, re.M), text)
     check("tests.yml: ни один шаг не выключается (`if:` только на уровне job), checkout не берёт чужой ref",
           not re.search(r"^(      - |        )if:", text, re.M) and not re.search(r"^\s*(- )?ref:", text, re.M), text)
     check("tests.yml: PR — job affected на закреплённом Linux (минута macOS ×10), полная история для merge-base",
