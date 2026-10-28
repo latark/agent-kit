@@ -195,6 +195,60 @@ prof = O.profile_text([os.path.realpath(APP)])
 check("профиль: ~/.ssh закрыт на чтение", f'(subpath "{os.path.realpath(HOME)}/.ssh")' in prof.split("(deny file-write*\n")[0])
 check("профиль: пароль демона CDP закрыт", "/.config/cdp-daemon" in prof)
 check("профиль: .env* и secrets/", '/\\.env[^/]*$' in prof and "/secrets(/|$)" in prof)
+# metis-0578: шаблоны .env.example/.sample/.template читаются, остальное .env* закрыто; запись в шаблоны закрыта
+ALLOW = '(allow file-read* (regex #"/\\.env\\.(example|sample|template)$"))'
+DENY_SEC = '(deny file-read* (regex #"/secrets(/|$)"))'
+check("профиль: deny чтения < allow шаблонов .env < deny secrets < deny записи",
+      ALLOW in prof and DENY_SEC in prof and prof.index("(deny file-read* file-write*") < prof.index(ALLOW)
+      < prof.index(DENY_SEC) < prof.index("(deny file-write*\n"))
+
+
+def env_probe(profile):
+    """Живая проба: (None, причина), если sandbox-exec не запускается; иначе список расхождений с ожиданием."""
+    d = os.path.realpath(tempfile.mkdtemp(prefix="env-probe-", dir=_ROOT))
+    for n in (".env", ".env.local", ".env.production.local", ".env.example.bak", ".env.example", ".env.sample",
+              ".env.template"):
+        with open(os.path.join(d, n), "w") as fh:
+            fh.write("x")
+    os.makedirs(os.path.join(d, "secrets"))
+    with open(os.path.join(d, "secrets", ".env.example"), "w") as fh:
+        fh.write("x")
+    sb = os.path.join(d, "p.sb")
+    with open(sb, "w") as fh:
+        fh.write(profile)
+
+    def run(*cmd):
+        return subprocess.run(["/usr/bin/sandbox-exec", "-f", sb, *cmd], capture_output=True, text=True, cwd=d)
+    try:
+        r = run("/bin/cat", ".env.example")
+    except OSError as e:
+        return None, str(e)
+    if r.returncode != 0 and "sandbox_apply" in r.stderr:
+        return None, r.stderr.strip()
+    bad = []
+    for n in (".env.example", ".env.sample", ".env.template"):
+        if run("/bin/cat", n).returncode != 0:
+            bad.append("читать " + n)
+    for n in (".env", ".env.local", ".env.production.local", ".env.example.bak"):
+        if run("/bin/cat", n).returncode == 0:
+            bad.append("прочитан " + n)
+    if run("/bin/cat", "secrets/.env.example").returncode == 0:
+        bad.append("прочитан secrets/.env.example")
+    # запись в шаблон: deny file-write* на .env* не снимается allow-ом чтения
+    if run("/bin/sh", "-c", "echo y > .env.example").returncode == 0:
+        bad.append("записан .env.example")
+    return bad, ""
+
+
+bad, why = env_probe(prof)
+if bad is None:
+    print("ПРОПУЩЕНО (живая проба .env*): sandbox-exec не запускается:", why)
+else:
+    check("профиль вживую: .env.example читается, .env/.env.local/.env.*.local/.env.example.bak и запись закрыты",
+          bad == [], bad)
+    check("мутант «нет allow» ловится пробой", env_probe(prof.replace(ALLOW, ""))[0] != [])
+    check("мутант «без повторного deny secrets» ловится пробой", env_probe(prof.replace(DENY_SEC, ""))[0] != [])
+    check("мутант «allow без $» ловится пробой", env_probe(prof.replace("(example|sample|template)$", "(example|sample|template)"))[0] != [])
 check("профиль: Связка ключей", "com.apple.SecurityServer" in prof and "/Library/Keychains" in prof)
 check("профиль: порты браузеров и прокси",
       all(f'(remote ip "*:{p}")' in prof for p in (9222, 9333, 9334, 9339, 6152, 6153)) and '"*:9340"' not in prof)
