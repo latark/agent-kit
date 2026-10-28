@@ -21,6 +21,12 @@
 «нечего гонять», а не пустой зелёный. Ошибка git (нет базы, не репозиторий, мелкий клон без merge-base) — весь
 набор и причина строкой: при сомнении раннер гоняет всё, а не ничего.
 
+Не macOS (CI на Linux, п. 1 пачки «Скорость»): файлы из SKIP_NOT_MAC не идут, а печатаются строкой `skip … · пропущено:
+нужен macOS — причина` и считаются в итоге отдельным числом — это не «ok» и не «FAIL»; нужной программы (unless) нет — файл
+пропускается, есть — идёт. Команд macOS, которых на PATH нет (ioreg, pmset, scutil), файлы тестов получают как заглушки
+из STUBS (папка в PATH, строка «заглушки» в начале прогона): код с ними не ходит к системе, а гоняется. Платформу для
+проверки раннера подменяет RUN_TESTS_PLATFORM (по умолчанию sys.platform). Полный прогон на macOS ничего не пропускает.
+
 Каждый tests/test_*.py — отдельный процесс `<этот python> -I tests/<файл>` в папке плагина: свой HOME и TMPDIR во
 временной папке прогона, окружение без PANTHEON_*, FORCE_COLOR и CLICOLOR_FORCE, с NO_COLOR=1. Тесты идут на
 Python 3.11+ (metis-0571); тот же скрипт гоняет workflow tests в GitHub Actions на 3.14 (.github/workflows/tests.yml).
@@ -87,6 +93,18 @@ NO_SUMMARY = frozenset({
     "pantheon/test_path_clean.py",
     "pantheon/test_read.py",  # «все прошли»
 })
+# Файлы, которые не идут вне macOS: метка → (причина, unless — программа, при наличии которой файл идёт, или None).
+# Явный список: пропуск виден строкой в прогоне и числом в итоге, а не молчаливым выходом самого файла. Замер на Linux
+# (python:3.14, не root, zip как на ubuntu-latest): остальные файлы проходят с заглушками STUBS.
+SKIP_NOT_MAC = {
+    "pantheon/test_setup.py": ("установщик pantheon-setup поддерживает только macOS", None),
+    "pantheon/test_board.py": ("view-sync.sh запускается как /bin/zsh", "/bin/zsh"),
+    "pantheon/test_pyfind.py": ("ищет Python в папках macOS и ждёт старый системный python3; на Linux находит свой", None),
+    "guard/test_hooks_json.py": ("то же: поиск Python в папках macOS через python.sh", None),
+}
+# Команды macOS, которых нет на Linux: заглушка с выводом, при котором код идёт обычным путём.
+STUBS = {"ioreg": "exit 0", "pmset": 'echo "Now drawing from AC Power"', "scutil": "echo linux-host"}
+PLATFORM = os.environ.get("RUN_TESTS_PLATFORM") or sys.platform
 # Карта для --affected (metis-0451): строит scripts/affected-map.py прогоном всех тестов, правится только им.
 MAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "affected-map.json")
 MAP_VERSION = 1
@@ -226,6 +244,37 @@ def select(changed, root, items, amap):
         return [], [], always
     want.update(always)
     return [it for it in items if it[1] in want], [], always
+
+
+def split_skipped(items, platform=None, exists=os.path.exists):
+    """(идут, [(метка, причина)]): вне macOS файлы SKIP_NOT_MAC не идут, если нет их unless."""
+    platform = PLATFORM if platform is None else platform
+    if platform == "darwin":
+        return list(items), []
+    run, skipped = [], []
+    for it in items:
+        why = SKIP_NOT_MAC.get(it[1])
+        if why and not (why[1] and exists(why[1])):
+            skipped.append((it[1], why[0]))
+        else:
+            run.append(it)
+    return run, skipped
+
+
+def make_stubs(root, platform=None, which=shutil.which):
+    """(папка с заглушками или None, [команды]): вне macOS — только тех команд STUBS, которых нет на PATH."""
+    platform = PLATFORM if platform is None else platform
+    missing = sorted(c for c in STUBS if platform != "darwin" and not which(c))
+    if not missing:
+        return None, []
+    d = os.path.join(root, "stubs")
+    os.mkdir(d)
+    for c in missing:
+        path = os.path.join(d, c)
+        with open(path, "w") as fh:
+            fh.write(f"#!/bin/sh\n{STUBS[c]}\n")
+        os.chmod(path, 0o755)
+    return d, missing
 
 
 def order(items, slow=None, serial=None):
@@ -423,18 +472,30 @@ def main(argv):
         items, code = pick_affected(items, opts["dirs"], opts["base"] or "origin/main")
         if items is None:
             return code
+    items, skipped = split_skipped(items)
+    if not items:
+        for label, why in skipped:
+            print(f"skip {label} · пропущено: нужен macOS — {why}")
+        print("run-tests: все выбранные файлы пропущены — нечего гонять")
+        return 3
     par, ser = order(items)
     total_files = len(par) + len(ser)
     cpus, load = os.cpu_count(), load1()
     n = opts["jobs"] or workers(cpus, load)
     print(f"run-tests: {total_files} файлов, воркеров {n} (ядер {cpus}, load1 "
           f"{'—' if load is None else f'{load:.1f}'}), {sys.executable}", flush=True)
+    for label, why in skipped:
+        print(f"skip {label} · пропущено: нужен macOS — {why}", flush=True)
     if opts["log_dir"]:
         os.makedirs(opts["log_dir"], exist_ok=True)
     env0 = {k: v for k, v in os.environ.items()
             if not k.startswith("PANTHEON_") and k not in ("FORCE_COLOR", "CLICOLOR_FORCE")}
     env0.update({"NO_COLOR": "1", "PYTHON_COLORS": "0"})
     root = tempfile.mkdtemp(prefix="run-tests-")
+    stubs, stubbed = make_stubs(root)
+    if stubs:
+        env0["PATH"] = stubs + os.pathsep + env0.get("PATH", "")
+        print(f"run-tests: не macOS — заглушки команд в PATH файлов: {', '.join(stubbed)}", flush=True)
     state = {"spawning": False, "pending": None}
 
     def on_signal(signum, _frame):
@@ -496,7 +557,7 @@ def main(argv):
         for s, h in old.items():
             signal.signal(s, h)
         shutil.rmtree(root, ignore_errors=True)
-    return summary(done, total_files, n, time.monotonic() - t_all)
+    return summary(done, total_files, n, time.monotonic() - t_all, len(skipped))
 
 
 def report(job, log_dir):
@@ -508,7 +569,7 @@ def report(job, log_dir):
             fh.write(job.out)
 
 
-def summary(done, total_files, n, sec):
+def summary(done, total_files, n, sec, skipped=0):
     bad = [j for j in done if not j.ok]
     for j in bad:
         lines = j.out.rstrip("\n").splitlines()
@@ -517,7 +578,8 @@ def summary(done, total_files, n, sec):
     slow = sorted(done, key=lambda j: -j.sec)[:5]
     print("\nмедленные: " + ", ".join(f"{j.label} {j.sec:.0f} с" for j in slow))
     checks_sum = sum(j.n for j in done)
-    print(f"итого: файлов {total_files}, ok {len(done) - len(bad)}, FAIL {len(bad)}; проверок {checks_sum}; "
+    skip = f", пропущено {skipped}" if skipped else ""
+    print(f"итого: файлов {total_files}, ok {len(done) - len(bad)}, FAIL {len(bad)}{skip}; проверок {checks_sum}; "
           f"{sec:.0f} с, воркеров {n}", flush=True)
     return 1 if bad or len(done) != total_files else 0
 

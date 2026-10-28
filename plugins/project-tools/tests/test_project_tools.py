@@ -6,6 +6,7 @@
 Обёртка bin/project-tools: при /usr/bin/python3 (3.9) первым в PATH берёт 3.11+; без 3.11+ подсказка молчит (код 0),
 команда — код 2 с причиной (metis-0571).
 """
+import glob as _glob
 import json
 import os
 import re
@@ -25,6 +26,18 @@ results = []
 def check(name, ok):
     results.append(bool(ok))
     print(("ok  " if ok else "FAIL") + " " + name)
+
+
+# На macOS в /usr/bin и /bin нет python3.N (там только заглушка 3.9); на Linux есть системный — случаи про «нет 3.11+»
+# не могут быть выполнены: явный пропуск строкой, а не молчаливый выход.
+SYS_PY = bool(_glob.glob("/usr/bin/python3.*") or _glob.glob("/bin/python3.*"))
+
+
+def check_mac(name, ok):
+    if SYS_PY:
+        print(f"пропущено: {name} — нужен macOS (в /usr/bin или /bin есть свой python3.N)")
+        return
+    check(name, ok)
 
 
 def make_home():
@@ -385,7 +398,7 @@ try:
         check("Python старше 3.11: подсказка молчит, код 0", r.returncode == 0 and r.stdout == "" and r.stderr == "")
     # на машине с Xcode/CLT проверка обязана выполниться: счёт 0 — не «пройдено», а сбой
     if os.path.exists(old_py):
-        check("проверка старого Python выполнилась (счёт > 0)", old_ran > 0)
+        check_mac("проверка старого Python выполнилась (счёт > 0)", old_ran > 0)
 finally:
     for k, v in _saved_env.items():
         if v is None:
@@ -429,10 +442,10 @@ try:
     sh_env = {"PATH": old_dir + ":/usr/bin:/bin", "HOME": home}
     r = subprocess.run(["/bin/sh", iso, "hint"], input="{}", capture_output=True, text=True, timeout=60,
                        env=sh_env)
-    check("обёртка без 3.11+: hint — код 0 молча", r.returncode == 0 and r.stdout == "" and r.stderr == "")
+    check_mac("обёртка без 3.11+: hint — код 0 молча", r.returncode == 0 and r.stdout == "" and r.stderr == "")
     r = subprocess.run(["/bin/sh", iso, "check"], capture_output=True, text=True, timeout=60,
                        env=sh_env)
-    check("обёртка без 3.11+: команда — код 2 и «нужен Python 3.11»",
+    check_mac("обёртка без 3.11+: команда — код 2 и «нужен Python 3.11»",
           r.returncode == 2 and "нужен Python 3.11" in r.stderr)
     os.makedirs(os.path.join(_w, "known"))
     with open(os.path.join(_w, "known", "python3.12"), "w") as fh:
@@ -440,7 +453,7 @@ try:
     os.chmod(os.path.join(_w, "known", "python3.12"), 0o755)
     r = subprocess.run(["/bin/sh", iso, "check"], capture_output=True, text=True, timeout=60,
                        env=sh_env)
-    check("обёртка: python3.12 в известной папке — exec с -I", r.stdout.startswith("K312 -I ")
+    check_mac("обёртка: python3.12 в известной папке — exec с -I", r.stdout.startswith("K312 -I ")
           and r.stdout.rstrip().endswith("project_tools.py check"))
 finally:
     shutil.rmtree(_w, ignore_errors=True)

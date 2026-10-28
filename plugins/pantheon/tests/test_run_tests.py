@@ -595,5 +595,49 @@ time.sleep(0.3)
 check("SIGTERM одному раннеру: код 143, файл и внук погашены", job.returncode == 143 and pids
       and not any(alive(x) for x in pids), (job.returncode, pids, out))
 
+# --- не macOS: явный пропуск файлов и заглушки команд macOS (CI на Linux) ---
+IT = [("/r/plugins/pantheon", "pantheon/test_setup.py"), ("/r/plugins/pantheon", "pantheon/test_board.py"),
+      ("/r/plugins/pantheon", "pantheon/test_tick.py")]
+check("split_skipped: на macOS ничего не пропускается", R.split_skipped(IT, "darwin") == (IT, []))
+got = R.split_skipped(IT, "linux", exists=lambda p: False)
+check("split_skipped: на Linux — setup и board (нет /bin/zsh) пропущены с причиной, tick идёт",
+      got[0] == [IT[2]] and [lb for lb, _ in got[1]] == ["pantheon/test_setup.py", "pantheon/test_board.py"]
+      and all(why for _, why in got[1]), got)
+got = R.split_skipped(IT, "linux", exists=lambda p: p == "/bin/zsh")
+check("split_skipped: на Linux с /bin/zsh board идёт, setup — нет", got[0] == [IT[1], IT[2]]
+      and [lb for lb, _ in got[1]] == ["pantheon/test_setup.py"], got)
+missing = [lb for lb in R.SKIP_NOT_MAC if not os.path.exists(
+    os.path.join(os.path.dirname(PLUGIN), lb.split("/")[0], "tests", lb.split("/")[1]))]
+check("SKIP_NOT_MAC — только существующие файлы, у каждого есть причина",
+      not missing and all(why for why, _ in R.SKIP_NOT_MAC.values()), missing)
+sd = tempfile.mkdtemp(prefix="stubs-")
+check("make_stubs: на macOS заглушек нет", R.make_stubs(sd, "darwin", which=lambda c: None) == (None, []))
+check("make_stubs: на Linux все команды есть — заглушек нет", R.make_stubs(sd, "linux", which=lambda c: "/x") == (None, []))
+d, cmds = R.make_stubs(sd, "linux", which=lambda c: "/x" if c == "ioreg" else None)
+check("make_stubs: на Linux только недостающие (pmset, scutil)", cmds == ["pmset", "scutil"]
+      and sorted(os.listdir(d)) == ["pmset", "scutil"] and all(os.access(os.path.join(d, c), os.X_OK) for c in cmds),
+      (d, cmds))
+check("make_stubs: pmset отвечает «AC Power»",
+      "AC Power" in subprocess.run([os.path.join(d, "pmset"), "-g", "batt"], stdout=subprocess.PIPE, text=True).stdout)
+PEN = {"PATH": "/bin", "RUN_TESTS_PLATFORM": "linux"}  # на PATH только sh: ни ioreg, ни pmset, ни scutil
+STUB_T = ("import shutil\nok = all(shutil.which(c) for c in ('ioreg', 'pmset', 'scutil'))\n"
+          "print('ok   заглушки на PATH' if ok else 'FAIL нет заглушек')\nprint('1 из 1 прошли' if ok else '0 из 1')\n"
+          "raise SystemExit(0 if ok else 1)\n")
+p = mkplugin({"test_setup.py": "print('ok a')\nraise SystemExit(1)\n", "test_stub.py": STUB_T}, "pantheon")
+r = run([p], env=PEN)
+check("Linux: пропущенный файл — строка skip с причиной, код 0, число в итоге",
+      r.returncode == 0 and re.search(r"^skip pantheon/test_setup\.py · пропущено: нужен macOS — \S", r.stdout, re.M)
+      and "файлов 1, ok 1, FAIL 0, пропущено 1;" in r.stdout and "заглушки команд" in r.stdout, r.stdout)
+check("Linux: заглушки ioreg, pmset, scutil видны файлу тестов", "ok   pantheon/test_stub.py" in r.stdout, r.stdout)
+r = run([p], env=dict(PEN, RUN_TESTS_PLATFORM="darwin"))
+check("macOS: ничего не пропущено, setup идёт и падает, заглушек нет — код 1",
+      r.returncode == 1 and "skip " not in r.stdout and "FAIL pantheon/test_setup.py" in r.stdout
+      and "FAIL pantheon/test_stub.py" in r.stdout and "пропущено" not in r.stdout, r.stdout)
+p = mkplugin({"test_setup.py": "print('ok a')\nraise SystemExit(1)\n"}, "pantheon")
+r = run([p], env=PEN)
+check("Linux: все файлы пропущены — код 3 «нечего гонять», а не зелёный итог",
+      r.returncode == 3 and "skip pantheon/test_setup.py" in r.stdout and "нечего гонять" in r.stdout
+      and "итого" not in r.stdout, (r.returncode, r.stdout))
+
 print(f"\n{total - len(fails)} из {total} прошли")
 sys.exit(1 if fails else 0)
