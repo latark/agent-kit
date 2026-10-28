@@ -193,8 +193,12 @@ check("профиль: порты браузеров и прокси",
 check("профиль: запись в STATE закрыта", f'(subpath "{STATE}")' in prof.split("(deny file-write*\n")[1])
 check("профиль: .git/config папок реестра", "\\.git/(config|hooks)" in prof)
 wsec = prof.split("(deny file-write*\n")[1]
-check("профиль: запись в ~/.nvm, ~/.npmrc, ~/.claude и кэши окон закрыта",
-      all(x in wsec for x in ('/.nvm")', '/.npmrc")', '/.claude")', '/Library/Caches/pantheon-sandbox")')), wsec)
+check("профиль: запись в ~/.nvm, ~/.claude и кэши окон закрыта",
+      all(x in wsec for x in ('/.nvm")', '/.claude")', '/Library/Caches/pantheon-sandbox")')), wsec)
+# metis-0573: ключ реестра в ~/.npmrc — закрыт и на чтение (npm и pnpm без него работают, проба 28.10)
+rsec = prof.split("(deny file-write*\n")[0]
+check("профиль: ~/.npmrc, ~/.netrc закрыты на чтение",
+      all(f'(literal "{os.path.realpath(HOME)}/{x}")' in rsec for x in (".npmrc", ".netrc", ".git-credentials")), rsec)
 HEAD_NOTE = "python3 t.py  # .pantheon-verify ветки (HEAD)"
 check("команда: строка .pantheon-verify без heavy, из ветки — с пометкой",
       O.command(os.path.realpath(APP), "test") == (["/bin/sh", "-c", "python3 t.py"], HEAD_NOTE))
@@ -488,6 +492,51 @@ check("порт не открылся: failed, процесс погашен", r
       and not O.servers(), res)
 rc, _, _ = role_request("athena-x", APP, "serve", "--minutes", "500")
 check("срок больше 120 минут: код 2", rc == 2)
+
+# --- 4а. уборка итогов в папках заявок (metis-0573): старше суток — удалить ---------------------------------------
+q = os.path.join(CACHE, "athena-x", "outside")
+fresh = sorted(n for n in os.listdir(q) if n.endswith(".result.json"))
+OLD = time.time() - 25 * 3600
+
+
+def _old_file(d, name, text="{}"):
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, name)
+    with open(p, "w") as fh:
+        fh.write(text)
+    os.utime(p, (OLD, OLD))
+    return p
+
+
+old_res = _old_file(q, "20261001-010101-aaaaaa.result.json")
+old_stop = _old_file(q, "20261001-010101-bbbbbb.stop", "")
+day_res = os.path.join(q, "20261001-010101-dddddd.result.json")
+_old_file(q, "20261001-010101-dddddd.result.json")
+os.utime(day_res, (time.time() - 23 * 3600,) * 2)
+notes = _old_file(q, "notes.result.json")
+target = _old_file(os.path.join(_ROOT, "elsewhere"), "keep.json", "чужое")
+link = os.path.join(q, "20261001-010101-cccccc.result.json")
+os.symlink(target, link)
+os.utime(link, (OLD, OLD), follow_symlinks=False)
+state_res = _old_file(os.path.join(STATE, "outside", "queue"), "20261001-010101-eeeeee.result.json")
+live = _old_file(q, "20261001-010101-ffffff.result.json")
+O.save_servers({"20261001-010101-ffffff": {"pid": 0, "until": time.time() + 3600, "qdir": q}})
+stale = {n for _, n in O._stale()}
+check("уборка: файлы живого сервера — не к удалению", "20261001-010101-ffffff.result.json" not in stale
+      and "20261001-010101-aaaaaa.result.json" in stale, stale)
+O.save_servers({})
+check("тик: старые итоги — проход нужен", O.pending())
+run_pass()
+check("уборка: итог старше суток удалён", not os.path.lexists(old_res))
+check("уборка: брошенный «стоп» старше суток удалён", not os.path.lexists(old_stop))
+check("уборка: итог в STATE/outside/queue старше суток удалён", not os.path.lexists(state_res))
+check("уборка: итог младше суток остался", os.path.isfile(day_res))
+check("уборка: свежие итоги остались", fresh and all(os.path.isfile(os.path.join(q, n)) for n in fresh), fresh)
+check("уборка: имя не по образцу ID — не трогает", os.path.isfile(notes))
+check("уборка: ссылка не трогается, её цель цела", os.path.islink(link) and open(target).read() == "чужое")
+check("тик: убрано — прохода нет", not O.pending())
+for p in (notes, link, day_res):
+    os.remove(p)
 
 # --- 5. guard: команда роли не спрашивает и не считается dev-сервером -------------------------------------------
 code = ("import sys, json; sys.path.insert(0, %r); import guard as g; "

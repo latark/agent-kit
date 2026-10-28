@@ -33,12 +33,14 @@ STATE/outside/queue. Имя окна проход берёт из места п�
      ~/Library/Caches/pantheon-outside/wt (после прогона снимается; без node_modules сначала
      `<pm> install --frozen-lockfile`). Каждая пара (repo, SHA) — один раз (STATE/outside/auto.json); красные тесты и
      «нет копии» — тревога.
+  4. Уборка: итоги <ID>.result.json и брошенные <ID>.stop в папках заявок (кэш окна, STATE/outside/queue) старше
+     суток (RESULT_TTL, по mtime) удаляются; файлы живого сервера — нет. Журналы в STATE/outside/runs не трогаются.
 Запуск: [heavy] sandbox-exec -f STATE/outside/profile.sb <команда> в папке репозитория, окружение с нуля (HOME, PATH с
 node из nvm, TMPDIR — своя временная папка, у тестов CI=1, у сервера PORT). Тесты — не дольше TEST_TIMEOUT. Профиль:
 всё разрешено, кроме чтения ключей (.env*, secrets/, ~/.ssh, ~/.config/cdp-daemon, ~/.config/gh, ~/.gnupg, ~/.aws,
-~/.netrc, ~/.git-credentials, ~/Library/Keychains и служба Связки ключей com.apple.SecurityServer), записи в
+~/.netrc, ~/.git-credentials, ~/.npmrc, ~/Library/Keychains и служба Связки ключей com.apple.SecurityServer), записи в
 состояние и ядро (STATE, ~/ai/pantheon, ~/.claude, ~/.local/bin, ~/.local/share/pantheon, ~/Library/LaunchAgents,
-профили оболочки, ~/.gitconfig, ~/.npmrc, ~/.nvm, кэши окон ~/Library/Caches/pantheon-sandbox, .git/config и
+профили оболочки, ~/.gitconfig, ~/.nvm, кэши окон ~/Library/Caches/pantheon-sandbox, .git/config и
 .git/hooks папок реестра) и сети к портам браузеров (9222, 9333–9339) и
 местного прокси (6152, 6153) на любом адресе.
 
@@ -82,6 +84,7 @@ TEST_TIMEOUT = 1500                 # с
 READY_SEC = 90                      # сервер должен открыть порт за это время
 KILL_WAIT = 5
 AUTO_TTL = 24 * 3600                # «принять» старше суток тесты сам не зовёт
+RESULT_TTL = 24 * 3600              # итоги <ID>.result.json и брошенные <ID>.stop в папках заявок — сутки
 WAIT_MAX = 590
 TAIL_LINES, TAIL_CHARS = 40, 4000
 REQ_MAX = 64 * 1024
@@ -379,7 +382,8 @@ def profile_text(roots=()):
     """Профиль sandbox-exec: всё, кроме ключей, записи в состояние и ядро и портов браузеров и прокси."""
     h = os.path.realpath(P.HOME)
     secret_dirs = [".ssh", ".config/cdp-daemon", ".config/gh", ".gnupg", ".aws", "Library/Keychains"]
-    secret_files = [".netrc", ".git-credentials"]
+    # ~/.npmrc — ключи реестров (_authToken); npm и pnpm без него работают: проба 28.10, metis-0573
+    secret_files = [".netrc", ".git-credentials", ".npmrc"]
     read = [f"(subpath {_q(os.path.join(h, x))})" for x in secret_dirs] + \
            [f"(literal {_q(os.path.join(h, x))})" for x in secret_files] + \
            ['(regex #"/\\.env[^/]*$")', '(regex #"/secrets(/|$)")']
@@ -388,7 +392,7 @@ def profile_text(roots=()):
              os.path.join(h, ".config", "git"), os.path.join(h, ".nvm"),
              os.path.join(h, "Library", "Caches", "pantheon-sandbox")]   # node владельца и кэши окон ролей
     wfiles = [os.path.join(h, x) for x in (".zshrc", ".zprofile", ".zshenv", ".zlogin", ".bashrc", ".bash_profile",
-                                          ".profile", ".gitconfig", ".npmrc")]
+                                          ".profile", ".gitconfig")]
     write = [f"(subpath {_q(os.path.realpath(x))})" for x in wdirs] + [f"(literal {_q(x)})" for x in wfiles]
     for r in roots:
         write.append(f'(regex #"^{re.escape(r)}/(.*/)?\\.git/(config|hooks)(/|$)")')
@@ -742,6 +746,52 @@ def sweep_due(t=None):
     return False
 
 
+def _stale(t=None):
+    """[(папка заявок, имя)] — итоги <ID>.result.json и брошенные <ID>.stop старше RESULT_TTL (по mtime, обычные
+    файлы, не ссылки); у живого сервера его файлы не трогаем."""
+    t = P.now() if t is None else t
+    live, out = set(servers()), []
+    for qdir, _ in queue_dirs():
+        dfd = _open_dir(qdir)
+        if dfd is None:
+            continue
+        try:
+            for name in os.listdir(dfd):
+                rid, _, ext = name.partition(".")
+                if ext not in ("result.json", "stop") or not ID_RE.fullmatch(rid) or rid in live:
+                    continue
+                try:
+                    st = os.lstat(name, dir_fd=dfd)
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode) and t - st.st_mtime > RESULT_TTL:
+                    out.append((qdir, name))
+        finally:
+            os.close(dfd)
+    return out
+
+
+def prune(t=None):
+    """Уборка папок заявок (кэш окна и STATE/outside/queue): итоги и «стоп» старше суток — удалить. → число."""
+    n = 0
+    for qdir, name in _stale(t):
+        dfd = _open_dir(qdir)
+        if dfd is None:
+            continue
+        try:
+            st = os.lstat(name, dir_fd=dfd)
+            if stat.S_ISREG(st.st_mode):
+                _unlink_in(dfd, name)
+                n += 1
+        except OSError:
+            pass
+        finally:
+            os.close(dfd)
+    if n:
+        log_event(kind="prune", removed=n)
+    return n
+
+
 # --- заявки -------------------------------------------------------------------------------------------------------
 
 def requests():
@@ -952,14 +1002,14 @@ def auto_pass(t=None):
 # --- тик и проход -------------------------------------------------------------------------------------------------
 
 def pending():
-    """Тику: есть ли дело проходу — заявки, «стоп», серверы к гашению, новые записи шлюза."""
+    """Тику: есть ли дело проходу — заявки, «стоп», серверы к гашению, новые записи шлюза, старые итоги."""
     for qdir, _ in queue_dirs():
         try:
             if any(n.endswith(".req.json") for n in os.listdir(qdir)):
                 return True
         except OSError:
             continue
-    return sweep_due() or auto_due()
+    return sweep_due() or auto_due() or bool(_stale())
 
 
 def cmd_run():
@@ -975,6 +1025,7 @@ def cmd_run():
             sweep()
         if auto_due():
             auto_pass()
+        prune()
     return 0
 
 
