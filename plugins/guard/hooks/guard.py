@@ -3636,9 +3636,13 @@ def _gh_out_problem(texts, cmd, cwd, direction, file_roots, whose):
     extra = _gh_pre_extra(texts[:q])
     if extra is not None:
         return f"до pr — только -R/--repo (флаг gh «{extra}» не принимается)"
+    if _gh_pre_extra(texts[q + 1:i]) is not None:  # между pr и <sub> — только -R/--repo, как до pr
+        return "между pr и подкомандой — только -R/--repo"
     repos, files, nxt = [], [], None
     for k, a in enumerate(texts):
-        if k in (q, i):  # слова pr и <sub> — не флаги
+        if nxt and k in (q, i):  # pr или <sub> оказались значением флага — gh разберёт иначе
+            return f"слово «{a}» — значение флага, а не подкоманда: разбор расходится с gh"
+        if k in (q, i) and not nxt:  # слова pr и <sub> — не флаги
             continue
         if nxt:
             if nxt in ("repo", "file") and a.startswith("-"):

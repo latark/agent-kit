@@ -2890,6 +2890,9 @@ def t_gh_out(h):
     d3, r3 = h.pre(f"gh pr comment 5 {R} --body-file {hg}/sub/n.md", role="dev-sonnet", pdir="hgit/sub",
                    agent_id="sub1", extra_env=dict(W, HOME=hg))
     check("gh-out: .git в $HOME — корень не $HOME, файл под ним — отказ", d3 == "deny" and "realpath" in r3, r3)
+    case("gh-out: флаг до pr съедает pr (gh -F pr create …) — отказ", f"gh -F pr create {R} --title t", False)
+    case("gh-out: между pr и подкомандой чужой флаг — отказ", f"gh pr --body x comment 5 {R}", False, "между pr")
+    case("gh-out: между pr и подкомандой -R свой — можно", f"gh pr -R latark/agent-kit comment 5 -b x", True)
     case("gh-out: gh pr view без -R — не задевает (чтение)", "gh pr view 5", True)
     case("gh-out: gh pr merge — свой шлюз, правило не задевает", "gh pr merge 5", False, "слияние")
     # вне окна направления — не работает: нет PANTHEON_WINDOW
