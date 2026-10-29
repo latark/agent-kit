@@ -188,6 +188,13 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         второго argus не звали одновременно. Пишет только
                                         STATE/review-pending/<owner>__<repo>__<PR>.json; это НЕ вердикт и НЕ согласие,
                                         шлюз её не читает. Гаснет по вердикту (accept/reject) на этот PR и через 2 часа
+  pantheon review miss <owner/repo>#<PR> --by <argus> --text "<что пропустил>" [--class защиты|ядро|вне ядра]
+                                        пометка пропуска (metis-0401): ошибка найдена в PR, который argus принял;
+                                        нужен «принять» на этот PR в журнале шлюза. Строка в
+                                        STATE/argus-misses.jsonl (кто принял и сколько argus — из журнала), доля — в
+                                        своде недели metrics/week-*.md. Не вердикт и не согласие, шлюз её не читает
+  pantheon review sample   выборочная проверка недели: PR ядра с одним argus (от 3 в одном репозитории — одним
+                                        запуском), потолок 1 запуск в неделю, 2 — после недели с пропуском
   pantheon review status [<owner/repo> <PR>]   записи журнала ~/.local/state/pantheon/merge-gate/records.jsonl и
                                         метки «ревью идёт»; у вердикта — рецензент (agent_id/сессия, по 8 знаков),
                                         с PR — строка «итог на <head>: принять N, вернуть M» по последнему вердикту
@@ -8582,7 +8589,8 @@ REVIEW_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REVIEW_PR = re.compile(r"[1-9][0-9]{0,8}")
 REVIEW_USAGE = ("pantheon review test -- <команда…> | accept <owner/repo> <PR> <SHA 40 знаков> --opened \"<что "
                 "открыл>\" --ran \"<что запустил>\" --unchecked \"<что не проверял>\" | reject <owner/repo> <PR> <SHA> "
-                "[те же флаги] | talos <owner/repo> <PR> <SHA> | begin <owner/repo> <PR> <SHA> | status [<owner/repo> <PR>]")
+                "[те же флаги] | talos <owner/repo> <PR> <SHA> | begin <owner/repo> <PR> <SHA> | miss <owner/repo>#<PR> --by <argus> --text \"…\" | sample | "
+                "status [<owner/repo> <PR>]")
 # перечень проверенного в «принять» (Б6, guard 0.5.6): у accept все три поля обязательны и непусты, у reject — по
 # желанию. Тот же разбор — в merge_gate.verdict_parse плагина guard (он и решает, будет ли запись)
 REVIEW_CHECKLIST = {"opened": "открыл", "ran": "запустил", "unchecked": "не проверял"}
@@ -8745,6 +8753,38 @@ def review_pending(repo, pr, recs=None):
 
 def review_cmd(rest):
     sub = rest[0] if rest else ""
+    if sub == "miss":
+        m = re.fullmatch(r"(%s)#(%s)" % (REVIEW_REPO.pattern, REVIEW_PR.pattern), rest[1] if len(rest) > 1 else "")
+        opts, i, bad = {}, 2, None
+        while i < len(rest) and not bad:
+            k = rest[i]
+            if k not in ("--by", "--text", "--class") or k in opts or i + 1 >= len(rest) or rest[i + 1].startswith("--"):
+                bad = f"лишнее или без значения: {k}"
+            else:
+                opts[k] = rest[i + 1].strip()
+            i += 2
+        if not m or bad or not opts.get("--by") or not opts.get("--text"):
+            print(f"pantheon review miss: {bad + '. ' if bad else ''}формат: miss <owner/repo>#<PR> --by <argus> --text "
+                  "\"<что пропустил>\" [--class защиты|ядро|вне ядра]", file=sys.stderr)
+            return 2
+        row, why = metrics_mod().add_miss(metrics_ctx(), m.group(1), int(m.group(2)), opts["--by"][:80],
+                                          opts["--text"][:1000], opts.get("--class"))
+        if why:
+            print(f"pantheon review miss: {why}", file=sys.stderr)
+            return 2
+        print(f"pantheon review miss: {row['repo']}#{row['pr']} — пропуск argus записан (класс {row['class']}, "
+              f"argus принявших: {row['argus']}); завести задачу «пропуск из PR #{row['pr']}», класс — строкой в "
+              "agent-memory/argus")
+        return 0
+    if sub == "sample":
+        res = metrics_mod().sample_pick(metrics_ctx())
+        print(f"выборка недели {res['week']}: потолок {res['budget']} запуск(ов); узкий режим — дифф и тесты, "
+              "модель и усилие как у argus вне ядра (medium)")
+        if not res["targets"]:
+            print(res["why"])
+        for g in res["targets"]:
+            print("  " + (" + ".join(f"{r}#{n}" for r, n in g)) + (" — суммарный дифф области" if len(g) > 1 else ""))
+        return 0
     if sub == "begin":
         args, _, why = _review_verdict("talos", rest[1:])  # тот же разбор: repo, PR, SHA без флагов
         if why:
