@@ -3479,9 +3479,12 @@ def _resume_session(name, a, text, origin):
     r = subprocess.run(argv, cwd=a.get("cwd") or HOME, env=claude_env(), capture_output=True, text=True, timeout=180)
     m = COPY_NOTE.search((r.stdout or "") + (r.stderr or ""))
     start_log(f"resume\t{name}\t{a.get('id')}\t{origin}\t{r.returncode}" + (f"\tcopy {m.group(1)}" if m else ""))
-    if m:
-        alert(f"{name}: --resume сделал копию {m.group(1)} — исходная сессия {a.get('id')} ещё числится живой; проверить "
-              f"claude agents, лишнюю остановить", "pantheon")
+    if m:  # метка копии (metis-0081 п. 4): копию сразу убираем (stop + rm без --discard-unpushed), исходная остаётся
+        left = stop_and_rm(name, m.group(1), "copy-note")
+        start_log(f"copy-removed\t{name}\t{m.group(1)}" + (f"\trefused {left}" if left else ""))
+        alert(f"{name}: --resume сделал копию {m.group(1)} — исходная сессия {a.get('id')} ещё числится живой; "
+              + (f"копия убрана (claude stop + rm)" if not left else f"копию убрать не вышло ({left}) — claude agents, "
+                 "лишнюю остановить"), "pantheon")
     elif r.returncode == 0:  # копию (исходная ещё живая) не разбираем сами — тревога выше, решает Зевс
         rm_previous(name, "--resume", before=before, keep={a.get("id")}, wait=True)
     return r.returncode, (m.group(1) if m else None)
@@ -3675,7 +3678,7 @@ def copies_message(name, live, again=None):
             f"{live[0]['id']}; начать заново — тот же запуск с --restart")
 
 
-def stop_and_rm(name, sid):
+def stop_and_rm(name, sid, why="stop"):
     """claude stop, затем claude rm <id> (metis-0239): остановленную сессию Claude Code сам перезапускает
     (daemon.log: settled (killed) → claimed-spare (fleet)), пока она в его списке. rm убирает из списка фоновую сессию
     (и её worktree, если он чистый); переписка остаётся, вернуть — pantheon start / resume. Без --discard-unpushed и
@@ -3687,10 +3690,22 @@ def stop_and_rm(name, sid):
     if st.returncode != 0:  # не остановилась — rm не зовём (rm сносит сессию, а она ещё может работать)
         return ("claude stop: " + (" ".join(((st.stderr or "") + " " + (st.stdout or "")).split())
                                    or f"код {st.returncode}"))[:200]
-    return rm_session(sid)
+    return rm_session(sid, name=name, why=why)
 
 
-def rm_session(sid, tries=2):
+def reap_log(name, sid, why):
+    """Строка в logs/reap.log о каждом убранном claude rm: время, имя, id, причина, транскрипт (остаётся на месте), хост
+    (metis-0081 п. 3)."""
+    found = glob.glob(os.path.join(glob.escape(HOME), ".claude", "projects", "*", glob.escape(str(sid)) + "*.jsonl")) \
+        if re.fullmatch(r"[0-9a-f-]{4,64}", str(sid)) else []
+    tr = sorted(found)[0] if found else ""
+    with contextlib.suppress(OSError):
+        os.makedirs(path("logs"), exist_ok=True)
+        with open(path("logs", "reap.log"), "a") as fh:
+            fh.write(f"{stamp()}\t{name}\t{sid}\t{why}\t{tr}\t{host()}\n")
+
+
+def rm_session(sid, tries=2, name="", why="rm"):
     """claude rm <id> без --discard-unpushed и --force-remove-worktree (metis-0239; уборка дежурного metis-0250):
     сессию с неотправленной работой в worktree Claude Code не удаляет, и мы не настаиваем. → None или причина отказа."""
     r = None
@@ -3700,6 +3715,7 @@ def rm_session(sid, tries=2):
         except (OSError, subprocess.SubprocessError) as e:
             return f"claude rm не выполнился: {e}"[:200]
         if r.returncode == 0:
+            reap_log(name, sid, why)
             return None
         if attempt + 1 < tries:
             time.sleep(1)
@@ -3749,7 +3765,7 @@ def rm_previous(name, how, before=None, keep=(), loud=False, wait=False):
         if a["id"] in kept:
             continue
         has_process = a.get("state") in ("working", "blocked") or (a.get("pid") and a.get("state") not in ("stopped", "failed"))
-        reason = stop_and_rm(name, a["id"]) if has_process else rm_session(a["id"])
+        reason = stop_and_rm(name, a["id"], how) if has_process else rm_session(a["id"], name=name, why=how)
         start_log(f"rm-previous\t{name}\t{a['id']}\t{a.get('state')}\t{how}")
         if reason:
             start_log(f"rm-refused\t{name}\t{a['id']}\t{reason}")

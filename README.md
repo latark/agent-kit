@@ -188,6 +188,7 @@
   Зарезервированные имена (metis-0163): `hq`, `workshop`, `hestia` и всё вида `job-*` — имена окон системы
   (`settings/hq.json`, `workshop.json`, `hestia.json`, `job-<роль>.json`); направлением в `directions.toml` их назвать
   нельзя — `pantheon domains build` и `pantheon direction check` отказывают понятной строкой.
+  Уборка сессий (metis-0081): start, stop, restart и wake убирают прежние копии имени `claude rm` (после claude stop, без `--discard-unpushed`; транскрипт остаётся). Метка `started a copy as <id>` у `--resume` — копию сразу stop + rm, тревога. Каждый успешный rm — строка в `logs/reap.log`: время, имя, id, причина, путь транскрипта, хост.
   Окно Гестии `settings/hestia.json` (metis-0245): служебная роль hestia пересобирает и перезапускает окна и сверяет выпуск (ставит его плановый проход). Поднимает
   её только `pantheon wake hestia --task <id>` с открытой задачей (без задачи — отказ «нет задачи», код 2) фоновой
   сессией `hestia`, папка запуска — её кэш. Прежняя зависшая Гестия (blocked, SendMessage ей не доходит) — `wake hestia --task <id> --restart`: claude stop, новая сессия, затем claude rm прежней; `pantheon stop hestia` тоже работает (metis-0575). Из окна роли (задан `PANTHEON_ROLE`, не hq) — только по слову владельца в окне Зевса за 15 мин: без слова отказ, код 2; красная зона памяти — только предупреждение, не отказ ([sb-simplify] п. 5); из окна hq — как start --from zeus: без вашего слова код 2. `PANTHEON_ROLE=hestia`; Bash пишет только в TMPDIR (в кэш окна guard запись не пускает), личное

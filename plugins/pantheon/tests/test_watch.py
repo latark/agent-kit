@@ -1073,6 +1073,39 @@ def test_resume_copy_note():
     e.agents([bg("cp-dir", "failed", "eeeeeeee-1")])
     e.run("wake", "cp-dir", t=T0, extra={"FAKE_RESPAWN_RC": "1", "FAKE_RESUME_OUT": "note: session is running; started a copy as 0123abcd"})
     check("сделал копию 0123abcd" in e.alerts(), "копия после --resume не замечена")
+    # metis-0081 п. 4: копию сразу убираем — stop, затем rm без насильных флагов; исходная не тронута
+    c = e.calls()
+    check(["stop", "0123abcd"] in c and ["rm", "0123abcd"] in c and c.index(["stop", "0123abcd"]) < c.index(["rm", "0123abcd"])
+          and not [x for x in c if x[:2] in (["stop", "eeeeeeee"], ["rm", "eeeeeeee"]) or "--discard-unpushed" in x],
+          f"копия по COPY_NOTE не убрана или тронута исходная: {c}")
+    check("копия убрана" in e.alerts() and "copy-removed\tcp-dir\t0123abcd\n" in _start_log(e),
+          f"нет следа уборки копии: {e.alerts()!r}")
+    # отказ rm (незапушенная работа) — копия остаётся, тревога говорит об этом
+    e2 = Env()
+    e2.direction("cq-dir")
+    e2.agents([bg("cq-dir", "failed", "eeeeeeee-1")])
+    e2.run("wake", "cq-dir", t=T0, extra={"FAKE_RESPAWN_RC": "1", "FAKE_RM_REFUSE": "0123abcd",
+                                          "FAKE_RESUME_OUT": "note: session is running; started a copy as 0123abcd"})
+    check("копию убрать не вышло" in e2.alerts() and "refused" in _start_log(e2),
+          f"отказ rm копии без тревоги: {e2.alerts()!r}")
+
+
+def test_reap_log():
+    """metis-0081 п. 3: каждый claude rm — строка в logs/reap.log (время, имя, id, причина, транскрипт, хост); отказ rm строки
+    не даёт; транскрипт не тронут."""
+    e = Env()
+    e.direction("rl-dir")
+    e.direction("rn-dir")
+    tr = os.path.join(e.home, ".claude", "projects", "-x", "c1c1c1c1-aaaa.jsonl")
+    os.makedirs(os.path.dirname(tr))
+    open(tr, "w").write("{}\n")
+    e.agents([bg("rl-dir", "working", "c1c1c1c1-1", pid=61), bg("rn-dir", "working", "c2c2c2c2-1", pid=62)])
+    e.run("stop", "rl-dir", t=T0)
+    e.run("stop", "rn-dir", t=T0, extra={"FAKE_RM_REFUSE": "c2c2c2c2"})
+    rows = [ln.split("\t") for ln in open(e.st("logs", "reap.log")).read().splitlines()]
+    check(len(rows) == 1 and rows[0][1:5] == ["rl-dir", "c1c1c1c1", "stop", tr] and len(rows[0]) == 6,
+          f"reap.log неверен: {rows}")
+    check(os.path.exists(tr), "транскрипт тронут")
 
 
 def test_maintenance():
