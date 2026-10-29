@@ -524,7 +524,7 @@ print(json.dumps({{
 
     # metis-0587 (вариант Б): на новом выпуске тик смотрит tests на main (gh — заглушка в PATH). failure — одна тревога
     # на коммит; зелёный, нет данных, startup_failure, сбой gh — без тревоги, строка в журнале раз в день, выпуск идёт
-    GH = "#!/bin/sh\necho \"$*\" >> \"$STUB_DIR/gh.log\"\n[ \"${STUB_GH_RC:-0}\" = 0 ] || { echo boom >&2; exit \"$STUB_GH_RC\"; }\ncat \"$STUB_DIR/gh.json\"\n"
+    GH = "#!/bin/sh\necho \"$*\" >> \"$STUB_DIR/gh.log\"\ncat \"$STUB_DIR/gh.json\"\n[ \"${STUB_GH_RC:-0}\" = 0 ] || { echo boom >&2; exit \"$STUB_GH_RC\"; }\n"
 
     def ci_env(runs, rc=0, new=True):
         e = Env("1.0.0", "1.1.0" if new else "1.0.0")
