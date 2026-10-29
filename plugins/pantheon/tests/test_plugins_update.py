@@ -591,6 +591,22 @@ print(json.dumps({{
     e = Env("1.0.0", "1.1.0")  # gh нет вовсе
     r = e.run("plugins", "update", extra={"PATH": e.stub + os.pathsep + "/usr/bin:/bin"})
     check("gh не найден: тик цел, выпуск ставится", r.returncode == 0 and "plugin update" in e.argv(), r.stderr)
+    # metis-0573: потолки сетевых команд — 90 и 180 с (проходы по журналу — 11–27 с), вышедший срок каталога — TEMPFAIL
+    e = Env("1.0.0", "1.1.0")
+    out = e.py(
+        "import subprocess\n"
+        "seen = []\n"
+        "class R: returncode = 1; stdout = ''; stderr = ''\n"
+        "def fake(argv, **kw):\n"
+        "    seen.append((argv[1:3], kw.get('timeout')))\n"
+        "    if argv[1:3] == ['plugin', 'marketplace']: raise subprocess.TimeoutExpired(argv, kw['timeout'])\n"
+        "    return R()\n"
+        "P.subprocess.run = fake\n"
+        "rc = P._plugins_update(True)\n"
+        "P._plugin_install('x', '1', '2', True, 'h')\n"
+        "print(rc, [t for a, t in seen if a == ['plugin', 'marketplace']], [t for a, t in seen if a == ['plugin', 'update']])\n")
+    check("plugins update: каталог — потолок 90 с, срок вышел → TEMPFAIL 75; установка — потолок 180 с",
+          out == ["75 [90] [180]"], out)
     e.close()
 
     r = subprocess.run([PY, "-I", RUN_PY, "plugins", "foo"], capture_output=True, text=True, timeout=60)
