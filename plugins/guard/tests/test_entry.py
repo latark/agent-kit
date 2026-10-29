@@ -6,12 +6,12 @@
 - вход не держит правил: короткий, а guard_rules.py после первого запуска лежит в __pycache__ и не пересобирается;
 - постоянные входа совпадают с guard_rules.py, managed_guard_active — те же ответы на одних файлах;
 - решения «молчать» (правила подменены заглушкой, которая печатает RULES): хук плагина при управляемых настройках —
-  как раньше, Agent/Task/Skill и PostToolUse — не молчит; метка строгого guard: молчат копии плагина и управляемых
-  настроек только своей сессии, своего окна и инструмента, который строгий guard уже проверил; ссылка вместо метки,
+  как раньше, Agent/Task/Skill и PostToolUse — не молчит; метка строгого guard: молчит только хук плагина своей
+  сессии, своего окна и инструмента, который строгий guard уже проверил, а --managed проверяет всегда; ссылка вместо метки,
   чужое окно, другая сессия, нет окна, WebFetch, Stop, плохой session_id, метка старше 10 мин — полная проверка;
   уборка старых меток;
-- живой запуск через hooks/python.sh: --strict отказывает и ставит метку, затем --managed той же сессии молчит, а с
-  другим окном — отказывает сам;
+- живой запуск через hooks/python.sh: --strict отказывает и ставит метку, затем хук плагина той же сессии молчит,
+  а --managed той же сессии и хук плагина с другим окном отказывают сами;
 - свой срок на чтение события: stdin не закрыт — код 2 с причиной, а не пропуск по таймауту Claude Code.
 """
 import importlib.util
@@ -182,41 +182,45 @@ try:
     check("--strict повторно: проверяет снова (строгий никогда не молчит), строка метки не дублируется",
           ran(r) and open(marker).read().splitlines() == ["w1\tBash"], r)
     r = probe(["--managed"], pre("Bash", sid), inactive, window="w1")
-    check("--managed той же сессии, окна и инструмента — молчит", quiet(r), r)
+    r2 = probe(["--managed"], pre("Bash", sid), active, window="w1")
+    check("--managed той же сессии, окна и инструмента — всё равно проверяет (управляемая не молчит никогда)",
+          ran(r) and ran(r2), (r, r2))
     r = probe([], pre("Bash", sid), inactive, window="w1")
     check("плагин (без управляемых) той же сессии, окна и инструмента — молчит", quiet(r), r)
     t = time.time() - 900
     os.utime(marker, (t, t))
-    r = probe(["--managed"], pre("Bash", sid), inactive, window="w1")
-    check("метка старше 10 мин (строгий хук пропал из сессии) — --managed проверяет сам", ran(r), r)
+    r = probe([], pre("Bash", sid), inactive, window="w1")
+    check("метка старше 10 мин (строгий хук пропал из сессии) — плагин проверяет сам", ran(r), r)
     r = probe(["--strict"], pre("Bash", sid), inactive, window="w1")
-    r2 = probe(["--managed"], pre("Bash", sid), inactive, window="w1")
-    check("строгий обновил метку повторным вызовом — --managed снова молчит",
+    r2 = probe([], pre("Bash", sid), inactive, window="w1")
+    check("строгий обновил метку повторным вызовом — плагин снова молчит",
           ran(r) and quiet(r2) and os.stat(marker).st_mtime > time.time() - 60, (r, r2))
-    r = probe(["--managed"], pre("Read", sid), inactive, window="w1")
-    check("--managed, инструмент, который строгий ещё не проверял (Read), — проверяет", ran(r), r)
-    r = probe(["--managed"], pre("Bash", sid), inactive, window="w2")
-    check("--managed, другое окно (PANTHEON_WINDOW) — проверяет", ran(r), r)
-    r = probe(["--managed"], pre("Bash", sid), inactive)
-    check("--managed без PANTHEON_WINDOW (ваша сессия, `claude -r` без окна) — проверяет", ran(r), r)
-    r = probe(["--managed"], pre("Bash", "s-strict-0002"), inactive, window="w1")
-    check("--managed, другая сессия (вложенный claude) — проверяет", ran(r), r)
-    r = probe(["--managed"], {"hook_event_name": "Stop", "session_id": sid}, inactive, window="w1")
-    check("--managed, Stop той же сессии — проверяет (у строгого guard Stop нет)", ran(r), r)
-    r = probe(["--managed"], pre("WebFetch", sid), inactive, window="w1")
-    check("--managed, WebFetch (строгий его не проверяет, метки нет) — проверяет", ran(r), r)
+    r = probe([], pre("Read", sid), inactive, window="w1")
+    check("плагин, инструмент, который строгий ещё не проверял (Read), — проверяет", ran(r), r)
+    r = probe([], pre("Bash", sid), inactive, window="w2")
+    check("плагин, другое окно (PANTHEON_WINDOW) — проверяет", ran(r), r)
+    r = probe([], pre("Bash", sid), inactive)
+    check("плагин без PANTHEON_WINDOW (ваша сессия, `claude -r` без окна) — проверяет", ran(r), r)
+    r = probe([], pre("Bash", "s-strict-0002"), inactive, window="w1")
+    check("плагин, другая сессия (вложенный claude) — проверяет", ran(r), r)
+    r = probe([], {"hook_event_name": "Stop", "session_id": sid}, inactive, window="w1")
+    check("плагин без управляемых, Stop той же сессии — проверяет (у строгого guard Stop нет)", ran(r), r)
+    r = probe([], pre("WebFetch", sid), inactive, window="w1")
+    check("плагин без управляемых, WebFetch (строгий его не проверяет, метки нет) — проверяет", ran(r), r)
+    r = probe([], {"hook_event_name": "PostToolUse", "tool_name": "Bash", "session_id": sid}, inactive, window="w1")
+    check("плагин, PostToolUse той же сессии — не молчит (журнал запора слияния)", ran(r), r)
     r = probe(["--strict"], pre("Agent", sid), inactive, window="w1")
     r2 = probe([], pre("Agent", sid), active, window="w1")
     check("плагин при управляемых, Agent после строгого — молчит (Agent проверил строгий)", ran(r) and quiet(r2), (r, r2))
     for label, bad in (("путь в session_id", "../../x-escape"), ("короткий session_id", "s1"),
                        ("session_id не строка", 12345678)):
         r = probe(["--strict"], pre("Bash", bad), inactive, window="w1")
-        r2 = probe(["--managed"], pre("Bash", bad), inactive, window="w1")
-        check(f"{label}: метки нет, обе копии проверяют", ran(r) and ran(r2) and sorted(os.listdir(strict_dir)) == [sid],
+        r2 = probe([], pre("Bash", bad), inactive, window="w1")
+        check(f"{label}: метки нет, строгий и плагин проверяют", ran(r) and ran(r2) and sorted(os.listdir(strict_dir)) == [sid],
               (r, r2, os.listdir(strict_dir)))
     r = probe(["--strict"], pre("Bash", "s-strict-0004"), inactive)
-    r2 = probe(["--managed"], pre("Bash", "s-strict-0004"), inactive)
-    check("--strict без PANTHEON_WINDOW — метки нет, --managed проверяет",
+    r2 = probe([], pre("Bash", "s-strict-0004"), inactive)
+    check("--strict без PANTHEON_WINDOW — метки нет, плагин проверяет",
           ran(r) and ran(r2) and not os.path.exists(os.path.join(strict_dir, "s-strict-0004")), (r, r2))
     r = probe(["--strict"], pre("Bash", "s-strict-0003"), inactive, window="w1\tBash")
     check("окно с табуляцией — метки нет", ran(r) and not os.path.exists(os.path.join(strict_dir, "s-strict-0003")), r)
@@ -224,15 +228,15 @@ try:
     target = os.path.join(root, "fake-marker")
     open(target, "w").write("w1\tBash\n")
     os.symlink(target, os.path.join(strict_dir, "s-strict-link1"))
-    r = probe(["--managed"], pre("Bash", "s-strict-link1"), inactive, window="w1")
+    r = probe([], pre("Bash", "s-strict-link1"), inactive, window="w1")
     r2 = probe(["--strict"], pre("Read", "s-strict-link1"), inactive, window="w1")
-    check("метка-ссылка: --managed проверяет, --strict не пишет через ссылку и проверяет",
+    check("метка-ссылка: плагин проверяет, --strict не пишет через ссылку и проверяет",
           ran(r) and ran(r2) and open(target).read() == "w1\tBash\n", (r, r2))
     # метка — папка: --strict не падает, проверяет
     os.makedirs(os.path.join(strict_dir, "s-strict-dir01"))
     r = probe(["--strict"], pre("Bash", "s-strict-dir01"), inactive, window="w1")
-    r2 = probe(["--managed"], pre("Bash", "s-strict-dir01"), inactive, window="w1")
-    check("метка — папка: обе копии проверяют, без сбоя", ran(r) and ran(r2), (r, r2))
+    r2 = probe([], pre("Bash", "s-strict-dir01"), inactive, window="w1")
+    check("метка — папка: строгий и плагин проверяют, без сбоя", ran(r) and ran(r2), (r, r2))
     # уборка: при новой метке старые (старше 2 суток) удаляются, свежие остаются
     old = os.path.join(strict_dir, "s-strict-old01")
     open(old, "w").write("w1\tBash\n")
@@ -247,24 +251,27 @@ try:
     os.makedirs(os.path.dirname(strict_dir), exist_ok=True)
     open(strict_dir, "w").write("x")
     r = probe(["--strict"], pre("Bash", sid), inactive, window="w1")
-    r2 = probe(["--managed"], pre("Bash", sid), inactive, window="w1")
-    check("метку не записать (папки нет, на её месте файл) — обе копии проверяют, без сбоя", ran(r) and ran(r2), (r, r2))
+    r2 = probe([], pre("Bash", sid), inactive, window="w1")
+    check("метку не записать (папки нет, на её месте файл) — строгий и плагин проверяют, без сбоя", ran(r) and ran(r2), (r, r2))
     os.remove(strict_dir)
 
-    # --- живой запуск: строгий отказывает и ставит метку, управляемая копия той же сессии молчит --------------------
+    # --- живой запуск: строгий отказывает и ставит метку, хук плагина той же сессии молчит, управляемый — нет -------
     deny_ev = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "agent_type": "domain-coordinator",
                "tool_input": {"command": "tmux send-keys -t 0 x Enter"}, "cwd": home, "session_id": "s-live-0001"}
     r = entry(["--strict"], deny_ev, extra={"PANTHEON_WINDOW": "w1"})
     check("живой --strict: отказ правила terminal и метка", r.returncode == 0 and '"deny"' in r.stdout
           and os.path.isfile(os.path.join(strict_dir, "s-live-0001")), (r.returncode, r.stdout[:200], r.stderr))
-    r = entry(["--managed"], deny_ev, extra={"PANTHEON_WINDOW": "w1"})
-    check("живой --managed той же сессии и окна — молчит (проверку сделал строгий)",
+    r = entry([], deny_ev, extra={"PANTHEON_WINDOW": "w1"})
+    check("живой хук плагина той же сессии и окна — молчит (проверку сделал строгий)",
           r.returncode == 0 and r.stdout == "" and r.stderr == "", (r.returncode, r.stdout[:200], r.stderr))
-    r = entry(["--managed"], deny_ev, extra={"PANTHEON_WINDOW": "w2"})
-    check("живой --managed с другим окном — отказывает сам", r.returncode == 0 and '"deny"' in r.stdout,
+    r = entry(["--managed"], deny_ev, extra={"PANTHEON_WINDOW": "w1"})
+    check("живой --managed той же сессии и окна, метка есть — всё равно отказывает сам",
+          r.returncode == 0 and '"deny"' in r.stdout, (r.returncode, r.stdout[:200], r.stderr))
+    r = entry([], deny_ev, extra={"PANTHEON_WINDOW": "w2"})
+    check("живой хук плагина с другим окном — отказывает сам", r.returncode == 0 and '"deny"' in r.stdout,
           (r.returncode, r.stdout[:200], r.stderr))
-    r = entry(["--managed"], dict(deny_ev, session_id="s-live-0002"), extra={"PANTHEON_WINDOW": "w1"})
-    check("живой --managed другой сессии — отказывает сам", r.returncode == 0 and '"deny"' in r.stdout,
+    r = entry([], dict(deny_ev, session_id="s-live-0002"), extra={"PANTHEON_WINDOW": "w1"})
+    check("живой хук плагина другой сессии — отказывает сам", r.returncode == 0 and '"deny"' in r.stdout,
           (r.returncode, r.stdout[:200], r.stderr))
 
     r = entry([], "не json")
