@@ -1,8 +1,9 @@
 """Карта «окно или роль × плагин и MCP» (metis-0238): разбор plugins-by-role.toml и применение к настройкам окна и шапке роли.
 
-Часть ядра защит: карта задаёт, какие плагины и MCP окну и роли недоступны (enabledPlugins: false и правила
-permissions.deny mcp__<сервер> окна; mcp__<сервер> в disallowedTools шапки роли). Модуль без состояния и ввода-вывода,
-кроме чтения файла карты: его грузит pantheon.py по пути файла (python3 -I не кладёт папку скрипта в путь импорта).
+Станет ядром защит по metis-0598 (решение владельца). Карта задаёт, какие плагины и MCP окну и роли недоступны
+(enabledPlugins: false и правила permissions.deny mcp__<сервер> окна; mcp__<сервер> в disallowedTools шапки роли).
+Модуль без состояния и ввода-вывода, кроме чтения файла карты: его грузит pantheon.py по пути файла (python3 -I не
+кладёт папку скрипта в путь импорта).
 
 Запись карты — «оставить»: названное остаётся, остальное из [catalog] выключается. Окна или роли, которых в карте нет, и
 плагины и MCP вне [catalog] не трогаются — безопасный дефолт «всё включено».
@@ -13,11 +14,14 @@ import tomllib
 
 MCP_NAME = re.compile(r"[A-Za-z0-9_-]+")
 PLUGIN_ID = re.compile(r"[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+")
+# Каталог, чьи плагины карта не выключает никогда: agent-kit — сами защиты (guard), Пантеон и project-tools. Такой
+# плагин в [catalog] — ValueError: «оставить» без него выключило бы guard и pantheon во всех окнах.
+OWN_MARKET = "agent-kit"
 
 
 def load(path):
-    """Карта из файла. ValueError с причиной: нет файла, битый TOML, не тот тип, ключ «оставить» вне каталога (опечатка
-    молча выключила бы нужное)."""
+    """Карта из файла. ValueError с причиной: нет файла, битый TOML, не тот тип, плагин @agent-kit в каталоге, ключ
+    «оставить» вне каталога (опечатка молча выключила бы нужное)."""
     try:
         with open(path, "rb") as fh:
             raw = tomllib.load(fh)
@@ -29,6 +33,10 @@ def load(path):
     plugins, mcp = cat.get("plugins"), cat.get("mcp")
     if not (isinstance(plugins, list) and all(isinstance(x, str) and PLUGIN_ID.fullmatch(x) for x in plugins)):
         raise ValueError("карта плагинов: catalog.plugins — список «имя@каталог»")
+    own = [x for x in plugins if x.rsplit("@", 1)[1].lower() == OWN_MARKET]
+    if own:
+        raise ValueError(f"карта плагинов: catalog.plugins: {own} — плагины @{OWN_MARKET} (guard, pantheon, "
+                         "project-tools) карта не выключает, в каталоге их быть не может")
     if not (isinstance(mcp, list) and all(isinstance(x, str) and MCP_NAME.fullmatch(x) for x in mcp)):
         raise ValueError("карта плагинов: catalog.mcp — список имён серверов")
     out = {"plugins": list(plugins), "mcp": list(mcp), "window": {}, "role": {}}
@@ -50,6 +58,16 @@ def load(path):
                 keep[k] = list(vals)
             out[kind][name] = keep
     return out
+
+
+def unknown_enabled(pmap, enabled):
+    """Включённые плагины из enabledPlugins пользователя, которых нет в [catalog]: карта их не выключает ни в одном
+    окне. Плагины @agent-kit и встроенные @builtin не в счёт — их карта не трогает намеренно. enabled не словарь — []."""
+    if not isinstance(enabled, dict):
+        return []
+    return sorted(p for p, on in enabled.items()
+                  if isinstance(p, str) and on is not False and p not in pmap["plugins"]
+                  and p.rsplit("@", 1)[-1].lower() not in (OWN_MARKET, "builtin"))
 
 
 def window_key(pmap, name, direction):
@@ -82,7 +100,9 @@ def role_deny(pmap, role):
 
 def role_header(text, pmap, role):
     """Текст роли с дописанными в disallowedTools шапки запретами карты (без повторов, прежние остаются). Роли нет в
-    карте — text как есть. Строки disallowedTools в шапке нет — добавляется перед закрывающей «---»."""
+    карте — text как есть. Строки disallowedTools в шапке нет — добавляется перед закрывающей «---». disallowedTools
+    списком YAML (пустое значение и строки «- X» ниже, или «[…]») — ValueError: дописка через запятую сломала бы
+    список; сборка оставляет шапку как есть и называет ошибку роли."""
     deny = role_deny(pmap, role)
     if not deny or not text.startswith("---\n"):
         return text
@@ -93,6 +113,9 @@ def role_header(text, pmap, role):
     for i, ln in enumerate(lines):
         m = re.match(r"(disallowedTools\s*:)(.*)$", ln)
         if m:
+            if not m.group(2).strip() or m.group(2).strip()[0] in "[-":
+                raise ValueError("disallowedTools в шапке записан списком YAML — карта плагинов дописывает только в "
+                                 "строку через запятую (disallowedTools: A, B); шапка не тронута")
             have = [x.strip() for x in m.group(2).split(",") if x.strip()]
             lines[i] = m.group(1) + " " + ", ".join(have + [d for d in deny if d not in have])
             break

@@ -33,7 +33,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                           (--critical — ещё и уведомление macOS: COMM-08)
   pantheon archive                      «Сделано» доски старше 7 дней и тревоги старше 30 — в archive/
   pantheon domains build                ~/ai/pantheon/directions.toml → ~/.local/state/pantheon/domains.json
-                                        и настройки окон ролей с песочницей …/settings/<направление>.json
+                                        и настройки окон ролей с песочницей …/settings/<направление>.json;
+                                        окнам из карты plugins-by-role.toml — enabledPlugins: false и
+                                        permissions.deny mcp__<сервер> вне их «оставить» (metis-0238)
   pantheon view [--quiet]               обновить копию ~/ai/pantheon-view для Obsidian
   pantheon board                        доска владельца ~/ai/pantheon-view/Доска: карточки, ваши ходы, сводка
   pantheon status                       один экран для отладки: плановый проход, сессии, вопросы к вам, тревоги, защиты, sync, места heavy, версии
@@ -153,7 +155,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         эти дни задач с пометкой «оценка» (у кого строки нет)
   pantheon roles build                  роли ~/.claude/agents/*.md из общих шаблонов плагина (roles/*.tmpl,
                                         roles/_parts/*.part) и личного слоя ~/.claude/agents (*.tmpl, _parts/*.part
-                                        перекрывают общие по имени); подстановки — из [person] directions.toml
+                                        перекрывают общие по имени); подстановки — из [person] directions.toml;
+                                        роли из карты plugins-by-role.toml получают в disallowedTools шапки
+                                        mcp__<сервер> каждого MCP каталога вне своего «оставить» (metis-0238)
   pantheon roles build --out <папка> [--src <папка шаблонов>]   проба: собрать роли в --out, личный слой — из
                                         --src (по умолчанию ~/.claude/agents) поверх общего; живые роли не трогает,
                                         сигналов нет; --out в ~/.claude/agents или внутри — отказ (код 2)
@@ -2311,8 +2315,9 @@ def _window_rules():
 
 WINDOW_RULES = _window_rules()
 
-# Карта «окно или роль × плагин и MCP» (metis-0238) — plugins-by-role.toml, разбор — lib/plugin_map.py (ядро защит, как
-# window_rules.py). Окна: enabledPlugins и permissions.deny mcp__*; роли: disallowedTools шапки при roles build.
+# Карта «окно или роль × плагин и MCP» (metis-0238) — plugins-by-role.toml, разбор — lib/plugin_map.py; станет ядром
+# защит по metis-0598 (решение владельца). Окна: enabledPlugins и permissions.deny mcp__*; роли: disallowedTools шапки
+# при roles build.
 PLUGIN_MAP_FILE = os.path.join(PLUGIN, "plugins-by-role.toml")
 
 
@@ -2329,7 +2334,9 @@ PLUGIN_MAP = _plugin_map_mod()
 
 def plugin_map_load(alert=True):
     """Карта из PLUGIN_MAP_FILE или None, если файл не читается или неверен: тогда окна и роли остаются как были (всё
-    включено), а причина — в тревоге (alert) и в stderr: молча «не применено» было бы ложным «отключено»."""
+    включено), а причина — в тревоге (alert) и в stderr: молча «не применено» было бы ложным «отключено». С alert ещё
+    сверка с enabledPlugins пользователя (~/.claude/settings.json): включённый плагин вне каталога карта не выключает
+    нигде — тревога plugin-map-unknown один раз на список; пробная сборка (alert=False) тревог не шлёт и не снимает."""
     try:
         pmap = PLUGIN_MAP.load(PLUGIN_MAP_FILE)
     except ValueError as e:
@@ -2340,6 +2347,18 @@ def plugin_map_load(alert=True):
         return None
     if alert:
         clear_once("plugin-map-bad")
+        try:
+            with open(os.path.join(HOME, ".claude", "settings.json"), encoding="utf-8") as fh:
+                enabled = json.load(fh).get("enabledPlugins")
+        except (OSError, ValueError, AttributeError):
+            enabled = None  # нет настроек или битые — сверять не с чем, это не дело карты
+        unknown = PLUGIN_MAP.unknown_enabled(pmap, enabled)
+        if unknown:
+            alert_once("plugin-map-unknown", " ".join(unknown), f"plugins-by-role: {', '.join(unknown)} включены у вас, "
+                       "но их нет в [catalog] карты — карта их не выключает ни в одном окне; добавить в каталог и "
+                       "«оставить» нужным окнам (Метида)", "pantheon")
+        else:
+            clear_once("plugin-map-unknown")
     return pmap
 COORDINATOR_ALLOW = WINDOW_RULES.COORDINATOR_ALLOW
 MERGE_REPO_RE = WINDOW_RULES.MERGE_REPO_RE
@@ -4803,7 +4822,10 @@ def roles_build(src=None, out=None, role_errors=None):
                 kept.add(base + ".md")
             continue
         if pmap:
-            text = PLUGIN_MAP.role_header(text, pmap, base)
+            try:
+                text = PLUGIN_MAP.role_header(text, pmap, base)
+            except ValueError as e:  # disallowedTools списком YAML: шапка как в шаблоне (всё включено), ошибка роли
+                err(f, f"{f}: карта плагинов не применена — {e}")
         if base not in LEAD_ROLES:
             want[base + ".md"] = (f, text)
             continue
