@@ -30,7 +30,6 @@ import json
 import os
 import re
 import signal
-import stat
 import sys
 import time
 
@@ -108,14 +107,15 @@ def _strict_key(event):
 
 
 def _read_marker(path, fresh=None):
-    """Строки метки; обычный файл, не ссылка, не больше 64 КБ. Нет файла или (с fresh) метка старше fresh с — пусто."""
+    """Строки метки: не ссылка (O_NOFOLLOW), не больше 64 КБ. Нет файла или (с fresh) метка старше fresh с — пусто.
+    Папка на месте метки — исключение у fdopen, его ловит run: полная проверка."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return set()
     with os.fdopen(fd, "rb") as fh:
         st = os.fstat(fh.fileno())
-        if not stat.S_ISREG(st.st_mode) or (fresh is not None and st.st_mtime < time.time() - fresh):
+        if fresh is not None and st.st_mtime < time.time() - fresh:
             return set()
         return set(fh.read(65536).decode("utf-8", "replace").splitlines())
 

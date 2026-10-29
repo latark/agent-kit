@@ -222,6 +222,10 @@ try:
     r2 = probe([], pre("Bash", "s-strict-0004"), inactive)
     check("--strict без PANTHEON_WINDOW — метки нет, плагин проверяет",
           ran(r) and ran(r2) and not os.path.exists(os.path.join(strict_dir, "s-strict-0004")), (r, r2))
+    r = probe(["--strict"], {"hook_event_name": "PostToolUse", "tool_name": "Bash", "session_id": "s-strict-0005"},
+              inactive, window="w1")
+    check("--strict на событии не PreToolUse — проверяет, метки нет",
+          ran(r) and not os.path.exists(os.path.join(strict_dir, "s-strict-0005")), r)
     r = probe(["--strict"], pre("Bash", "s-strict-0003"), inactive, window="w1\tBash")
     check("окно с табуляцией — метки нет", ran(r) and not os.path.exists(os.path.join(strict_dir, "s-strict-0003")), r)
     # ссылка вместо метки (O_NOFOLLOW): не читается и не пишется — полная проверка
