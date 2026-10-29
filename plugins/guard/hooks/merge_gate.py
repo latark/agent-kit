@@ -77,6 +77,7 @@ import glob
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import subprocess
@@ -151,15 +152,19 @@ EMPTY_SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 # обёртки перед программой тестов: имя → флаги, за которыми идёт отдельное значение
 TEST_WRAPPERS = {"heavy": set(), "env": {"-u", "--unset", "-C", "--chdir"}, "time": set(),
                  "nice": {"-n", "--adjustment"}, "timeout": {"-s", "--signal", "-k", "--kill-after"},
+                 # оболочечные и пакетные обёртки (metis-0194): `command true`, `exec true`, `npx true`, `uvx true`
+                 "command": set(), "exec": {"-a"}, "npx": {"-p", "--package"},
+                 "uvx": {"--from", "--with", "-p", "--python", "--index", "--index-url"},
                  # `uv run <программа>` (metis-0177): uv run python без скрипта — такой же пустой python
                  "uv run": {"--with", "--with-editable", "--with-requirements", "-p", "--python", "--project",
                             "--directory", "--package", "--extra", "--group", "--only-group", "--no-group",
                             "--env-file", "--index", "--default-index", "-w"}}
+UV_VALUE_OPTS = {"--directory", "--project", "--config-file", "--cache-dir", "--color", "--python", "-p"}
 # присваивание перед программой (`CI=1 true`): оболочка его не запускает — судим программу за ним (metis-0177)
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # node без скрипта или с -e/-p из литералов, process.exit и console.log литерала — ничего не проверяет (metis-0177)
 EMPTY_NODE = {"node", "nodejs"}
-NODE_NOOP_ARGS = {"-", "-v", "--version", "-h", "--help"}
+NODE_NOOP_ARGS = {"-", "-v", "--version", "-h", "--help", "-c", "--check"}  # --check без скрипта читает stdin
 NODE_EVAL = {"-e", "--eval", "-p", "--print"}
 _JS_LIT = r"""(?:-?\d+(?:\.\d+)?|true|false|null|undefined|'[^'\\]*'|"[^"\\]*")"""
 NODE_NOOP_CODE = re.compile(rf"\s*(?:(?:{_JS_LIT}|process\.exit\(\s*{_JS_LIT}?\s*\)|console\.log\(\s*{_JS_LIT}?\s*\))"
@@ -481,7 +486,8 @@ def _program_at(argv):
         if name == "uv":
             j = i + 1
             while j < len(argv) and isinstance(argv[j], str) and argv[j].startswith("-") and argv[j] != "--":
-                j += 1  # общие флаги uv (--quiet, --offline)
+                # общие флаги uv (--quiet, --offline); с отдельным значением — --directory x, --project x (metis-0194)
+                j += 2 if argv[j] in UV_VALUE_OPTS else 1
             if j >= len(argv) or argv[j] != "run":
                 return i  # uv pip, uv sync … — сама программа uv
             i, name = j, "uv run"
@@ -589,8 +595,8 @@ def _node_empty(args):
         a = args[i]
         if not isinstance(a, str):
             return False
-        if a in NODE_EVAL:
-            code = args[i + 1] if i + 1 < len(args) else ""
+        if a in NODE_EVAL or (a[:1] == "-" and a[1:2] != "-" and len(a) > 1 and set(a[1:]) <= {"p", "e"}):
+            code = args[i + 1] if i + 1 < len(args) else ""  # -pe 1: связка коротких флагов (metis-0194)
             if not isinstance(code, str) or not NODE_NOOP_CODE.fullmatch(code):
                 return False
             i += 2
@@ -891,9 +897,7 @@ def _gh_json(args):
 
 def _is_core(path, core_files):
     """Ядро (metis-0092, решение владельца 15.10): папки CORE_DIR целиком без учёта регистра и отдельные файлы вне них."""
-    p = path.strip("/").casefold()
-    while p.startswith("./"):
-        p = p[2:].lstrip("/")
+    p = posixpath.normpath(path.strip("/") or ".").strip("/").casefold()  # ./, //, a/../b (metis-0194)
     return p in core_files or any(p == d or p.startswith(d + "/") for d in CORE_DIR)
 
 

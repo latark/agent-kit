@@ -730,7 +730,10 @@ EMPTY_TESTS = ("true", "heavy echo ok", ":", "/usr/bin/TRUE", "env A=1 -u B time
                "CI=1 true", "CI=1 FOO=x heavy echo ok", "CI=1", "CI=1 python3 -c pass", "heavy CI=1 true",
                "uv run python", "uv run python -c pass", "uv run --with pytest python3", "uv --quiet run python",
                "heavy uv run -p 3.14 python", "node", "node -", "heavy node", "node -e 0", "node -p 1",
-               "node -e 'process.exit(0)'", "nodejs --version", "CI=1 node")
+               "node -e 'process.exit(0)'", "nodejs --version", "CI=1 node",
+               # metis-0194 (ревью #35): оболочечные и пакетные обёртки, связка -pe, --check, uv с --directory
+               "command true", "exec true", "npx true", "uvx true", "heavy command true", "node -pe 1",
+               "node --check", "uv --directory x run true", "uv --project app run true", "node -pe 'process.exit(0)'")
 REAL_TESTS = ("heavy python3 -I tests/test_x.py", "env CI=1 heavy pnpm test", "timeout 600 pytest -q", "heavy pnpm test",
               "pytest", "pnpm test", "python3 -I tests/test_x.py", "python3 -m pytest -q", "python3 -W error tests/t.py",
               "bash tests/run.sh", "sh -c pytest", "bash -c 'heavy pnpm test'", "python3 -c 'from t import main'",
@@ -739,7 +742,10 @@ REAL_TESTS = ("heavy python3 -I tests/test_x.py", "env CI=1 heavy pnpm test", "t
               "python3.14t -I tests/test_x.py",
               # metis-0177: за присваиванием и uv run — настоящий раннер
               "CI=1 pytest", "CI=1 heavy pnpm test", "uv run pytest", "uv run python -m pytest", "uv run --with x python t.py",
-              "heavy uv run --directory app pytest -q", "uv sync", "node tests/t.js", "node --test", "node -e 'require(\"./t\")'")
+              "heavy uv run --directory app pytest -q", "uv sync", "node tests/t.js", "node --test", "node -e 'require(\"./t\")'",
+              # metis-0194: обёртки перед настоящей программой — раннер
+              "command -v python3 -I tests/t.py", "exec python3 -I tests/test_x.py", "npx vitest run",
+              "uvx pytest -q", "uv --directory app run pytest -q", "node -pe 1 pytest")
 
 
 def t_empty_tests(h):
@@ -757,6 +763,19 @@ def t_empty_tests(h):
         h.reset()
         h.post(f"pantheon review test -- {c}", "dev-opus")
         check(f"настоящая команда тестов `{c}` — запись есть", [r["kind"] for r in h.read()] == ["tests"], h.read())
+
+
+def t_core_paths(h):
+    """metis-0194: _is_core сводит ./, //, `..` в середине пути — путь ядра не проходит мимо проверки ядра."""
+    mg = _load_merge_gate("merge_gate_core")
+    core = {c.casefold() for c in mg.CORE_FILES}
+    for path, want in (("plugins/guard/hooks/merge_gate.py", True), ("./plugins/guard/hooks/merge_gate.py", True),
+                       ("plugins//guard/hooks/merge_gate.py", True), ("plugins/x/../guard/hooks/merge_gate.py", True),
+                       ("plugins/pantheon//roles/dev-sonnet.tmpl", True), ("PLUGINS/Guard/Hooks/Merge_Gate.py", True),
+                       ("plugins/x/../README.md", False), ("README.md", False),
+                       ("../agent-kit/plugins/guard/hooks/merge_gate.py", False)):
+        got = mg._is_core(path, core)
+        check(f"_is_core({path!r}) — {'ядро' if want else 'не ядро'}", got == want, got)
 
 
 def t_wrapped_review_test(h):
@@ -2907,7 +2926,7 @@ def t_gh_out(h):
 CASES = [t_gh_out, t_hq_gh,t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
-         t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
+         t_pre_not_simple, t_checklist, t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_not_core, t_opus_transcript, t_ci,
          t_core_touchid, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
          t_carry_r4_gate, t_carry_r6, t_version_bump_refused, t_core_sandbox_unit, t_core_sandbox]
