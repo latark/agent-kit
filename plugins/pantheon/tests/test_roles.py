@@ -9,6 +9,7 @@ roles_newest и пересборку domains build по правке в плаг
 """
 import json
 import os
+import re
 import subprocess
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -90,7 +91,7 @@ def main():
     r = run("roles", "build")
     clio, argus, talos = (read(os.path.join(agents, f + ".md")) for f in ("clio", "argus", "talos"))
     check("роль только из плагина собрана: метка, часть плагина, нет {{",
-          r.returncode == 0 and clio.startswith("---\nname: clio\n---\n<!-- собрано pantheon roles build из clio.tmpl")
+          r.returncode == 0 and re.match(r"---\nname: clio\ndisallowedTools: [\w, -]+\n---\n<!-- собрано pantheon roles build из clio.tmpl", clio)
           and "Находка: общая" in clio and "{{" not in clio)
     check("личный шаблон перекрывает общий по имени", "Личный talos" in talos and "Общий talos" not in talos)
     check("личная часть перекрывает общую — и в роли из плагина, и в личной",
