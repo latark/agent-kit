@@ -1,0 +1,123 @@
+# Карта «окно или роль × плагин и MCP» (metis-0238; слово владельца 17.10: отключать там, где 100% не нужно).
+# Читает lib/plugin_map.py; применяют `pantheon domains build` (окна: enabledPlugins и permissions.deny mcp__*) и
+# `pantheon roles build` (роли: disallowedTools в шапке). Данные, а не код: правка карты — правка защит окон.
+#
+# Правило записи — «оставить» (keep): что названо, остаётся включённым; всё остальное из [catalog] выключается.
+# Окно или роль, которых в карте нет, и плагин или MCP, которых нет в [catalog], не трогаются: новое по умолчанию
+# включено (безопасный дефолт, при сомнении — оставить). chrome-devtools в каталоге нет: его подключают сами роли
+# (mcpServers у dev-*, talos) и project-tools по проекту — запрет сломал бы их. Плагины guard, pantheon, project-tools
+# и встроенные в каталог не входят и выключены быть не могут.
+#
+# Основание — фактическое использование (шаблоны roles/*.tmpl): qmd зовут роли с частью {{> qmd}} (clio, apollo,
+# dev-*, argus, domain-coordinator, hq, palamedes, iris, hephaestus, prometheus, workshop); ни один шаблон не зовёт
+# computer-use, claude-in-chrome, Notion и jetbrains; Claude Docs — hq, domain-coordinator и ревизор momus;
+# context7 — только писатели и проверяющие код. Субагент окна наследует его настройки, поэтому окно держит
+# объединение нужного ему самому и всем, кого оно зовёт.
+
+[catalog]
+plugins = [
+  "typescript-lsp@claude-plugins-official",
+  "pyright-lsp@claude-plugins-official",
+  "swift-lsp@claude-plugins-official",
+  "feature-dev@claude-plugins-official",
+  "code-simplifier@claude-plugins-official",
+  "frontend-design@claude-plugins-official",
+  "security-guidance@claude-plugins-official",
+  "commit-commands@claude-plugins-official",
+  "claude-md-management@claude-plugins-official",
+  "notion@anthropic-plugin-directory",
+]
+# имя сервера в правиле mcp__<имя>
+mcp = ["qmd", "context7", "jetbrains", "computer-use", "claude-in-chrome", "plugin_Notion_notion", "claude_ai_Claude_Docs"]
+
+# --- окна (ключ — имя файла окна без .json; «direction» — все окна направлений, у кого нет своей записи) ---
+
+# координатор и его лиды пишут код: оставлено всё, кроме Notion, computer-use и claude-in-chrome
+[window.direction]
+plugins = [
+  "typescript-lsp@claude-plugins-official", "pyright-lsp@claude-plugins-official", "swift-lsp@claude-plugins-official",
+  "feature-dev@claude-plugins-official", "code-simplifier@claude-plugins-official",
+  "frontend-design@claude-plugins-official", "security-guidance@claude-plugins-official",
+  "commit-commands@claude-plugins-official", "claude-md-management@claude-plugins-official",
+]
+mcp = ["qmd", "context7", "jetbrains", "claude_ai_Claude_Docs"]
+
+# ~/ai/knowledge — одни markdown-файлы: кода, LSP и интерфейса нет
+[window.mnemo-brain]
+plugins = ["commit-commands@claude-plugins-official", "claude-md-management@claude-plugins-official"]
+mcp = ["qmd", "claude_ai_Claude_Docs"]
+
+[window.workshop]
+plugins = [
+  "typescript-lsp@claude-plugins-official", "pyright-lsp@claude-plugins-official", "swift-lsp@claude-plugins-official",
+  "feature-dev@claude-plugins-official", "code-simplifier@claude-plugins-official",
+  "frontend-design@claude-plugins-official", "security-guidance@claude-plugins-official",
+  "commit-commands@claude-plugins-official", "claude-md-management@claude-plugins-official",
+]
+mcp = ["qmd", "context7", "jetbrains"]
+
+# Пританей не пишет код и не коммитит (коммитит плановый проход); читает qmd; Docs — для ревизора momus
+[window.hq]
+plugins = ["claude-md-management@claude-plugins-official"]
+mcp = ["qmd", "claude_ai_Claude_Docs"]
+
+# Гестия: ни кода, ни коммитов, ни поиска
+[window.hestia]
+plugins = []
+mcp = []
+
+# окна задач расписания: тексты и веб, кода нет; у clio навык claude-md-improver
+[window.job-clio]
+plugins = ["claude-md-management@claude-plugins-official"]
+mcp = ["qmd"]
+
+[window.job-prometheus]
+plugins = []
+mcp = ["qmd"]
+
+[window.job-iris]
+plugins = []
+mcp = ["qmd"]
+
+# --- роли-субагенты (ключ — имя шаблона roles/<имя>.tmpl; лиды — apollo, hephaestus без короткого имени) ---
+# Здесь только mcp: плагины субагент берёт у окна. Роль в карте получает в disallowedTools шапки mcp__<имя> каждого
+# сервера каталога, которого нет в её списке.
+
+[role.apollo]
+mcp = ["qmd", "context7"]
+[role.hephaestus]
+mcp = ["qmd", "context7"]
+[role.argus]
+mcp = ["qmd", "context7"]
+[role.dev-haiku]
+mcp = ["qmd", "context7"]
+[role.dev-sonnet]
+mcp = ["qmd", "context7"]
+[role.dev-opus]
+mcp = ["qmd", "context7"]
+# код пишет codex, а не роль; qmd и context7 в её тексте нет
+[role.codex-dev]
+mcp = []
+[role.talos]
+mcp = ["context7"]
+[role.chiron]
+mcp = ["qmd"]
+[role.clio]
+mcp = ["qmd"]
+[role.prometheus]
+mcp = ["qmd"]
+[role.iris]
+mcp = ["qmd"]
+[role.palamedes]
+mcp = ["qmd"]
+[role.momus]
+mcp = ["claude_ai_Claude_Docs"]
+[role.hestia]
+mcp = []
+# главные сессии: то же, что окно (их --agent — эти роли)
+[role.hq]
+mcp = ["qmd", "claude_ai_Claude_Docs"]
+[role.domain-coordinator]
+mcp = ["qmd", "context7", "jetbrains", "claude_ai_Claude_Docs"]
+[role.workshop]
+mcp = ["qmd", "context7", "jetbrains"]

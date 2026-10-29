@@ -290,6 +290,15 @@
   (`permissions.allow` и `autoMode.allow`, metis-0174); их собирает `pantheon domains build`. Файл — в ядре защит:
   PR, который его задевает, ждёт слияния владельцем. С metis-0404 так же и PR, который меняет в `pantheon.py`
   сборку окон: `sandbox_build`, `domains_build`, `run_settings` и то, что они зовут и читают (README guard, Д3).
+- `plugins/pantheon/plugins-by-role.toml` и `lib/plugin_map.py` — карта «окно или роль × плагин и MCP» (metis-0238, слово
+  владельца 17.10: отключать там, где 100% не нужно). Запись — «оставить»: названное остаётся, остальное из `[catalog]`
+  выключается. Окно (`pantheon domains build`): `enabledPlugins: false` у лишних плагинов и `permissions.deny`
+  `mcp__<сервер>` у лишних MCP; ключ окна — его имя (`hq`, `hestia`, `workshop`, `job-*`, `mnemo-brain`), у остальных
+  окон направлений — запись `direction`. Роль (`pantheon roles build`): недостающие `mcp__<сервер>` дописываются в
+  `disallowedTools` шапки; ключ — имя шаблона. Чего нет в карте — окно, роль, плагин вне каталога — не трогается (всё
+  включено); `chrome-devtools` в каталоге нет (его подключают роли и project-tools). Опечатка в карте или битый файл —
+  карта не применяется, тревога `plugin-map-bad`. Тест — `tests/test_plugin_map.py`. Это ядро защит: правка карты
+  меняет окна, её сливает владелец.
 - `plugins/pantheon/lib/autoclose.py` — автозакрытие задач при слиянии PR (metis-0308). Два прохода: `pantheon autoclose fetch`
   (отдельная задача расписания, предел 240 с на весь проход) спрашивает gh про слитые и открытые PR из `[merge_repos]` и пишет
   кэш `autoclose-prs.json`; лёгкий плановый проход читает только кэш и в сеть не ходит. Задачу закрывает PR из репозитория её направления,
@@ -470,6 +479,7 @@
     bash plugins/pantheon/tests/test_sync_quarantine.sh ~/.claude/sync.sh "$(readlink ~/.local/bin/pantheon)" "$PWD/plugins/pantheon"
     python3 -I plugins/pantheon/tests/test_check_skills.py   # линтер навыков: поломки шапки, name, ссылок, check и плановый проход
     python3 -I plugins/pantheon/tests/test_roles_harness.py  # настоящие роли: урок с вердиктом, три правила, режим работы
+    python3 -I plugins/pantheon/tests/test_plugin_map.py   # карта плагинов и MCP: окна, роли, битая карта, неизвестное
     python3 -I plugins/pantheon/tests/test_start.py   # start, wake, roles build, approve, heavy, Stop-хук разработчика
     python3 -I plugins/pantheon/tests/test_outside.py # проверки вне окна: tests после «принять», заявки, dev-сервер, профиль
     python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры

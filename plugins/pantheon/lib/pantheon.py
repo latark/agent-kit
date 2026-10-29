@@ -2310,6 +2310,37 @@ def _window_rules():
 
 
 WINDOW_RULES = _window_rules()
+
+# Карта «окно или роль × плагин и MCP» (metis-0238) — plugins-by-role.toml, разбор — lib/plugin_map.py (ядро защит, как
+# window_rules.py). Окна: enabledPlugins и permissions.deny mcp__*; роли: disallowedTools шапки при roles build.
+PLUGIN_MAP_FILE = os.path.join(PLUGIN, "plugins-by-role.toml")
+
+
+def _plugin_map_mod():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_plugin_map", os.path.join(LIB, "plugin_map.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+PLUGIN_MAP = _plugin_map_mod()
+
+
+def plugin_map_load(alert=True):
+    """Карта из PLUGIN_MAP_FILE или None, если файл не читается или неверен: тогда окна и роли остаются как были (всё
+    включено), а причина — в тревоге (alert) и в stderr: молча «не применено» было бы ложным «отключено»."""
+    try:
+        pmap = PLUGIN_MAP.load(PLUGIN_MAP_FILE)
+    except ValueError as e:
+        print(f"plugins-by-role: {e} — карта не применена, у окон и ролей всё включено", file=sys.stderr)
+        if alert:
+            alert_once("plugin-map-bad", str(e), f"{e} — карта не применена, у окон и ролей всё включено (Метида)",
+                       "pantheon")
+        return None
+    if alert:
+        clear_once("plugin-map-bad")
+    return pmap
 COORDINATOR_ALLOW = WINDOW_RULES.COORDINATOR_ALLOW
 MERGE_REPO_RE = WINDOW_RULES.MERGE_REPO_RE
 GATED_MERGE_RULE = WINDOW_RULES.GATED_MERGE_RULE
@@ -2961,6 +2992,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     os.makedirs(out_dir, exist_ok=True)
 
     memory = memory_dirs()
+    pmap = plugin_map_load()
 
     def one(name, folders, own, compact, deny, allow=None, agents=None, direction=False, auto_allow=None):
         if direction:
@@ -3016,6 +3048,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
             else:
                 alert_once(f"pnpm-store-{name}", store, f"directions.toml: pnpm_store {store} направления {name} — вне "
                            "его папок, окно его не получит", "pantheon")
+        if pmap:
+            PLUGIN_MAP.window_apply(data, pmap, name, direction)
         write_window(out_dir, name, data)
         return True
 
@@ -3063,6 +3097,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
         mine = list(conf.get("agents") or [])
         agents_window(job, mine or [JOB_NO_AGENTS],
                       [x for x in BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES) if x not in mine], agents_py)
+        if pmap:
+            PLUGIN_MAP.window_apply(job, pmap, name)
         write_window(out_dir, name, job)
         built.append(name)
     # окно Гестии (metis-0245, решение владельца «А» 18.10): служебная роль ставит слитые выпуски и пересобирает и
@@ -3083,6 +3119,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     hs["permissions"]["deny"].extend(hs_rule(t, x) for t in ("Read", "Grep") for x in _deny_forms(private_paths))
     hs["env"]["PANTHEON_ROLE"] = "hestia"
     agents_window(hs, [JOB_NO_AGENTS], BUILTIN_AGENTS + known + all_leads + list(MAIN_ROLES), agents_py)
+    if pmap:
+        PLUGIN_MAP.window_apply(hs, pmap, "hestia")
     write_window(out_dir, "hestia", hs)
     built.append("hestia")
     # что закрыто штабу — [hq] policy.toml. Битый раздел — ошибка, а не «пусто»: окно Пританея не пересобираем, остаётся
@@ -3159,6 +3197,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     # P0-6: код — поручение направлению, а не лид в окне штаба; Гестия — своим окном (`pantheon wake hestia --task`)
     agents_window(hq, HQ_AGENTS, all_leads + list(MAIN_ROLES) + ["hestia"], agents_py)
     hq["env"]["PANTHEON_ROLE"] = "hq"  # хукам: в событиях фоновой сессии agent_type нет (15.10)
+    if pmap:
+        PLUGIN_MAP.window_apply(hq, pmap, "hq")
     write_window(out_dir, "hq", hq)
     built.append("hq")
     for f in os.listdir(out_dir):
@@ -4732,6 +4772,7 @@ def roles_build(src=None, out=None, role_errors=None):
         reg = tomllib.load(fh)
     person, person_bad = person_values(reg)
     want, errors = {}, []
+    pmap = plugin_map_load(alert=not probe)
 
     def err(tmpl, text):
         errors.append(text)
@@ -4761,6 +4802,8 @@ def roles_build(src=None, out=None, role_errors=None):
             else:
                 kept.add(base + ".md")
             continue
+        if pmap:
+            text = PLUGIN_MAP.role_header(text, pmap, base)
         if base not in LEAD_ROLES:
             want[base + ".md"] = (f, text)
             continue
