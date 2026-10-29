@@ -2351,7 +2351,7 @@ def plugin_map_load(alert=True):
             with open(os.path.join(HOME, ".claude", "settings.json"), encoding="utf-8") as fh:
                 enabled = json.load(fh).get("enabledPlugins")
         except (OSError, ValueError, AttributeError):
-            enabled = None  # нет настроек или битые — сверять не с чем, это не дело карты
+            return pmap  # нет настроек, битые или не прочесть — сверять не с чем; прежнюю тревогу не снимаем
         unknown = PLUGIN_MAP.unknown_enabled(pmap, enabled)
         if unknown:
             alert_once("plugin-map-unknown", " ".join(unknown), f"plugins-by-role: {', '.join(unknown)} включены у вас, "

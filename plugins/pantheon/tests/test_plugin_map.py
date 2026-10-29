@@ -335,6 +335,9 @@ check("включённый у владельца плагин вне катал
 build_plug(env3)
 check("повторная сборка с тем же списком — тревога не повторена",
       len([x for x in open(alerts, encoding="utf-8").read().splitlines() if "[catalog] карты" in x]) == 1)
+write(os.path.join(tmp3, ".claude", "settings.json"), "{битый")
+build_plug(env3)
+check("настройки не прочесть — метка plugin-map-unknown не снята (сверять не с чем)", once("plugin-map-unknown"))
 write(os.path.join(tmp3, ".claude", "settings.json"), json.dumps({"enabledPlugins": {NOTION: True}}))
 build_plug(env3)
 check("плагин убран из настроек — метка plugin-map-unknown снята", not once("plugin-map-unknown"))
