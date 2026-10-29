@@ -27,10 +27,11 @@ RUN_PY = os.path.join(LIB, "run.py")
 MAP = os.path.join(PLUGIN, "plugins-by-role.toml")
 ROOT = os.path.realpath(tempfile.mkdtemp(prefix="plugin-map-test-"))
 atexit.register(shutil.rmtree, ROOT, True)
-fails = []
+fails, total = [], []
 
 
 def check(name, cond, extra=""):
+    total.append(name)
     print(("ok   " if cond else "FAIL ") + name + (f"  {extra}" if not cond else ""))
     if not cond:
         fails.append(name)
@@ -239,5 +240,5 @@ alerts = os.path.join(env3["PANTHEON_HOME"], "alerts.md")
 check("битая карта: тревога в alerts.md, причина названа",
       os.path.exists(alerts) and "карта плагинов" in open(alerts, encoding="utf-8").read())
 
-print(f"\n{'FAIL ' + str(len(fails)) if fails else 'все прошли'}")
+print(f"\n{len(total) - len(fails)} из {len(total)} прошли")
 sys.exit(1 if fails else 0)
