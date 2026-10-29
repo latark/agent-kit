@@ -199,7 +199,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         из его транскрипта ~/.claude/projects/*/<сессия>/subagents/agent-<id>.jsonl
                                         (пара — из `review status`): после /clear SendMessage к нему не идёт, а новый
                                         argus ведёт повторный круг по дельте с этим отчётом (metis-0602). Нет файла,
-                                        несколько совпадений или нет отчёта по PR — отказ, код 1
+                                        несколько совпадений, нет вердикта пары в журнале или «Head:» отчёта ≠ head её
+                                        последнего вердикта — отказ, код 1; --out только под $TMPDIR или /private/tmp
   pantheon review status [<owner/repo> <PR>]   записи журнала ~/.local/state/pantheon/merge-gate/records.jsonl и
                                         метки «ревью идёт»; у вердикта — рецензент (agent_id/сессия, по 8 знаков),
                                         с PR — строка «итог на <head>: принять N, вернуть M» по последнему вердикту

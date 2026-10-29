@@ -1,5 +1,5 @@
 """Пантеон: pantheon review — записи для шлюза слияния guard (P1-4, guard 0.5.4): test, accept, reject, talos,
-begin, status.
+begin, miss, sample, status, report (metis-0602: отчёт прежнего argus из его транскрипта).
 
 Вынесено из pantheon.py (metis-0586) без изменения поведения. P — модуль pantheon: его ставит загрузчик
 pantheon._attach до выполнения этого файла, имена из __all__ становятся именами pantheon (P.review_cmd и т. д.).
@@ -16,7 +16,7 @@ __all__ = [
     "REVIEW_SHA", "REVIEW_REPO", "REVIEW_PR", "REVIEW_USAGE", "REVIEW_CHECKLIST", "OPUS_RAN", "RAN_MODEL",
     "review_accept_full", "review_accept_counts", "_review_verdict", "_review_git", "_review_state", "review_records",
     "review_tally", "REVIEW_PENDING_TTL", "_review_pending_path", "_record_epoch", "review_pending", "review_cmd",
-    "REVIEW_AGENT", "review_find_transcripts", "review_last_report",
+    "REVIEW_AGENT", "REVIEW_HEAD", "review_find_transcripts", "review_last_report",
 ]
 
 
@@ -122,23 +122,25 @@ def _review_state():
 REVIEW_AGENT = re.compile(r"([0-9a-f]{4,64})(?:/([0-9a-f]{4,64}))?", re.I)  # agent8[/сессия8], как в `review status`
 
 
-def review_find_transcripts(agent, session=None):
-    """Файлы субагента ~/.claude/projects/*/<сессия>*/subagents/[workflows/<run>/]agent-<agent>*.jsonl (путь шлюза
-    guard: agent_models) по началу agent_id и сессии. Транскрипт прежнего argus переживает /clear, а SendMessage к
-    нему уже нет (No transcript found) — отчёт читается из файла (metis-0602)."""
+def review_find_transcripts(agent, session):
+    """Файлы субагента ~/.claude/projects/*/<сессия>/subagents/[*/[*/]]agent-<agent>.jsonl (путь шлюза guard:
+    agent_models) по полным agent_id и сессии из журнала шлюза. Транскрипт прежнего argus переживает /clear, а
+    SendMessage к нему уже нет (No transcript found) — отчёт читается из файла (metis-0602). Симлинки отбрасываются."""
     base = glob.escape(os.path.join(P.HOME, ".claude", "projects"))
-    sess = glob.escape(session) if session else ""
     out = set()
     for sub in ((), ("*",), ("*", "*")):
-        out.update(glob.glob(os.path.join(base, "*", sess + "*", "subagents", *sub, f"agent-{glob.escape(agent)}*.jsonl")))
+        out.update(glob.glob(os.path.join(base, "*", glob.escape(session), "subagents", *sub,
+                                          f"agent-{glob.escape(agent)}.jsonl")))
     return sorted(p for p in out if os.path.isfile(p) and not os.path.islink(p))
 
 
-def review_last_report(path, pr):
-    """Последний финальный отчёт субагента в транскрипте, где назван этот PR: сообщение tool_use *Handback (поле
-    input.message), а если такого блока нет — последний длинный text. None — отчёта по PR нет."""
-    pr_re = re.compile(r"(?:#|/pull/|PR\s*)%s(?!\d)" % int(pr), re.I)
-    handback, texts = [], []
+REVIEW_HEAD = re.compile(r"Head:\s*\**\s*([0-9a-f]{40})", re.I)
+
+
+def review_last_report(path):
+    """Итоговый отчёт субагента: input.message последнего блока tool_use *Handback; блока нет — последний длинный
+    text (от 400 знаков). None — отчёта в транскрипте нет."""
+    handback, texts = None, None
     try:
         fh = open(path, encoding="utf-8", errors="replace")
     except OSError:
@@ -157,13 +159,19 @@ def review_last_report(path, pr):
                 inp = b.get("input")
                 if b.get("type") == "tool_use" and "Handback" in str(b.get("name")) and isinstance(inp, dict) \
                         and isinstance(inp.get("message"), str):
-                    handback.append(inp["message"])
+                    handback = inp["message"]
                 elif b.get("type") == "text" and isinstance(b.get("text"), str) and len(b["text"]) >= 400:
-                    texts.append(b["text"])
-    for text in reversed(handback or texts):
-        if pr_re.search(text):
-            return text
-    return None
+                    texts = b["text"]
+    return handback if handback is not None else texts
+
+
+def _review_out_ok(out):
+    """--out только под $TMPDIR (realpath) или /private/tmp: команду зовут роли, и писать им куда попало незачем."""
+    roots = {os.path.realpath("/private/tmp")}
+    if os.environ.get("TMPDIR"):
+        roots.add(os.path.realpath(os.environ["TMPDIR"]))
+    parent = os.path.realpath(os.path.dirname(os.path.abspath(out)))
+    return any(parent == r or parent.startswith(r + os.sep) for r in roots)
 
 
 def review_report(args):
@@ -190,21 +198,40 @@ def review_report(args):
     if not m or not REVIEW_REPO.fullmatch(pos[0]) or not REVIEW_PR.fullmatch(pos[1]):
         print(f"pantheon review report: аргументы не в формате {usage}", file=sys.stderr)
         return 2
-    repo, pr, agent, session = pos[0], pos[1], m.group(1).lower(), (m.group(2) or "").lower() or None
-    files = review_find_transcripts(agent, session)
-    if not files:
-        print(f"pantheon review report: транскрипта субагента agent-{agent}*.jsonl"
-              + (f" в сессии {session}*" if session else "") + " нет в ~/.claude/projects — сверь пару с "
-              f"`pantheon review status {repo} {pr}`; отчёта нет — новый argus идёт полным кругом", file=sys.stderr)
+    repo, pr, agent, session = pos[0], pos[1], m.group(1).lower(), (m.group(2) or "").lower()
+    if out is not None and not _review_out_ok(out):
+        print(f"pantheon review report: --out — только под $TMPDIR или /private/tmp, не {out}", file=sys.stderr)
+        return 2
+    # пара и последний head — из журнала шлюза: только argus, вынесший вердикт на этот PR, и только его последний head
+    last, pairs = None, set()
+    for r in P.review_records(repo, int(pr)):
+        by = r.get("by") if isinstance(r.get("by"), dict) else {}
+        a, ss = str(by.get("agent_id") or "").lower(), str(by.get("session_id") or "").lower()
+        if (r.get("pr") == int(pr) and r.get("kind") in ("accept", "reject") and by.get("agent_type") == "argus"
+                and a.startswith(agent) and ss.startswith(session) and isinstance(r.get("sha"), str)):
+            pairs.add((a, ss))
+            last = (a, ss, r["sha"].lower())
+    if len(pairs) != 1:
+        print(f"pantheon review report: в журнале {repo}#{pr} " + ("нет вердикта argus с такой парой" if not pairs else
+              "под пару подходит несколько argus — укажи длиннее agent_id и сессию") + f" (`pantheon review status "
+              f"{repo} {pr}`); отчёта нет — новый argus идёт полным кругом", file=sys.stderr)
         return 1
-    if len(files) > 1:
-        print("pantheon review report: под пару подходит несколько транскриптов — укажи сессию (agent8/сессия8) или "
-              "длиннее agent_id:\n" + "\n".join("  " + f for f in files), file=sys.stderr)
+    files = review_find_transcripts(last[0], last[1])
+    if len(files) != 1:
+        print(f"pantheon review report: транскрипт agent-{last[0]}.jsonl сессии {last[1][:8]} "
+              + ("не найден в ~/.claude/projects" if not files else "найден несколько раз:\n" + "\n".join(files))
+              + "; отчёта нет — новый argus идёт полным кругом", file=sys.stderr)
         return 1
-    text = review_last_report(files[0], pr)
+    text = review_last_report(files[0])
     if text is None:
-        print(f"pantheon review report: в {files[0]} нет итогового отчёта по {repo}#{pr} (блок *Handback с "
-              "полем message или длинный текст с номером PR) — новый argus идёт полным кругом", file=sys.stderr)
+        print(f"pantheon review report: в {files[0]} нет итогового отчёта (блок *Handback с полем message или длинный "
+              "text) — новый argus идёт полным кругом", file=sys.stderr)
+        return 1
+    hm = REVIEW_HEAD.search(text)
+    if not hm or hm.group(1).lower() != last[2]:
+        print(f"pantheon review report: «Head:» отчёта ({hm.group(1)[:12] if hm else 'нет'}) не равен head последнего "
+              f"вердикта этого argus в журнале ({last[2][:12]}) — отчёт не тот; новый argus идёт полным кругом",
+              file=sys.stderr)
         return 1
     if out is None:
         print(text)
