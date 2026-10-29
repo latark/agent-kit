@@ -76,12 +76,10 @@ def launch(args, path, stdin="", launcher=LAUNCHER, cwd=None):
 
 
 def check_mac(name, ok, info=None):
-    """Известные папки DIRS/FW в python.sh: вне macOS (/bin/sh — dash) списком `$DIRS:$FW/…:$PATH` склеиваются, берётся
-    только PATH. Случай про папки — на macOS проверка, вне его строка «пропущено» (находка в отчёте пачки «Скорость»)."""
-    if sys.platform == "darwin":
-        check(name, ok, info)
-    else:
-        print(f"пропущено: нужен macOS — {name}")
+    """Известные папки DIRS/FW в python.sh. Раньше проверка шла только на macOS: на Linux /bin/sh — dash, а dash
+    склеивал `$DIRS:$FW/…:$PATH` в одно слово, и папки DIRS, FW и PATH терялись (metis-0194). Теперь проверка идёт
+    везде, и её прогоняют под dash (Linux CI)."""
+    check(name, ok, info)
 
 
 def fake(d, name, body):
@@ -168,6 +166,19 @@ try:
     fake(v3, "python3", 'case "$*" in *version_info*) exit 0 ;; esac; echo "PY3 $*"')
     r = launch(["s.py"], v3, pre_ev, iso)
     check("python3 из PATH 3.11+ → берётся", r.stdout.strip() == "PY3 -I s.py", (r.stdout, r.stderr))
+    # metis-0194: средние места списка не склеиваются под dash. Второе место DIRS, и первое место PATH при пустых
+    # DIRS и FW (dash склеивал последнее место DIRS, FW и первое место PATH в одно слово и терял их)
+    second = os.path.join(tmp, "second")
+    fake(second, "python3.13", 'echo "SEC313 $*"')
+    iso2 = isolated(os.path.join(tmp, "nope1") + ":" + second, os.path.join(tmp, "nofw"))
+    r = launch(["s.py"], old, pre_ev, iso2)
+    check("второе место в DIRS: python3.13 берётся", r.stdout.strip() == "SEC313 -I s.py", (r.stdout, r.stderr))
+    first = os.path.join(tmp, "first")
+    fake(first, "python3.14", 'echo "FIRST314 $*"')
+    iso3 = isolated(os.path.join(tmp, "nope2") + ":" + os.path.join(tmp, "nope3"), os.path.join(tmp, "nofw"))
+    r = launch(["s.py"], f"{first}:{old}", pre_ev, iso3)
+    check("первое место в PATH (при пустых DIRS и FW): python3.14 берётся",
+          r.stdout.strip() == "FIRST314 -I s.py", (r.stdout, r.stderr))
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
