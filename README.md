@@ -151,10 +151,14 @@
   Claude Code перечитывает настройки на ходу, поэтому живую сессию с таким правилом останавливает плановый проход
   (`domains build --if-changed` и `check --quiet`): `claude stop` и тревога. Ручной `domains build` её не трогает —
   его зовут и тесты с настоящим `claude` в PATH.
-  Мимо песочницы gh (в ней не работает) — чтение: `gh pr view|checks|diff|list`, `gh run view|list|watch`,
-  `gh repo view`, `gh auth status`; `gh api`, `gh issue` и `gh run cancel|rerun|delete` в песочнице падают.
-  Окна направлений мимо песочницы ещё пишут PR: `gh pr create|edit|merge` и сетевой git (push, fetch, pull); мастерской —
-  только сетевой git и только при SSH-remote. Пританей (metis-0247, решение [zeus-0247-yes]) мимо песочницы читает PR
+  Мимо песочницы gh (в ней не работает) — чтение: `gh pr view|checks|diff|list|status`, `gh issue view|list`,
+  `gh run view|list|watch`, `gh repo view`, `gh auth status`; `gh api`, запись в `gh issue` и
+  `gh run cancel|rerun|delete` в песочнице падают. Окна направлений мимо песочницы ещё пишут PR:
+  `gh pr create|edit|comment|ready|merge` и сетевой git (push, fetch, pull); мастерской — только сетевой git и только
+  при SSH-remote. Запись в PR сужает правило guard gh-out (metis-0533, metis-0596): только `-R` из `[merge_repos]`
+  своего направления, без присваивания `GH_*` и `--hostname`, текст из файла (`--body-file`, `-F`) — из временных
+  папок и своей копии репозитория, но не из личного и не из `.git`; слияние судит шлюз (push). Подробности — README
+  guard (`plugins/guard/README.md`), раздел «Остатки — что guard не держит и так задумано». Пританей (metis-0247, решение [zeus-0247-yes]) мимо песочницы читает PR
   (`gh pr view|checks`) и правит `gh pr edit`; `gh pr merge` мимо песочницы ему не выпущен, а слияние guard закрывает всегда:
   правило hq-gh отказывает любому `gh pr merge` и `gh api` к `…/pulls/<N>/merge` и `…/merges` — и главной сессии
   без agent_type, которую шлюз слияния (merge_problem) не видит. Прочий `gh pr *`, `gh api` и `gh issue` в песочнице падают.

@@ -3622,14 +3622,25 @@ def _hestia_gh_write_problem(sub, texts, cmd, cwd):
                            "направления задачи")
 
 
+def _gh_env_assigned(cmd, cwd):
+    """В команде присваивают GH_*: `GH_REPO=x gh …`, `env GH_HOST=h …`, `export GH_TOKEN=…`, `read GH_REPO`.
+    Слово GH_TOKEN в тексте комментария или заголовка (`--body 'mentions GH_TOKEN'`) — не присваивание (metis-0596)."""
+    if GH_ENV_ASSIGN.search(cmd):
+        return True
+    _, cmds = bash_analysis(cmd, cwd)
+    return any(n in GH_ENV_BUILTINS and any(x and x.startswith("GH_") for x in t) for n, t in cmds)
+
+
 def _gh_out_problem(texts, cmd, cwd, direction, file_roots, whose):
     """gh pr create|edit|comment|ready мимо песочницы (Гестия, окна направлений; metis-0533): репозиторий — только
-    явный -R/--repo из [merge_repos] направления; GH_*, --hostname и адрес PR/owner/repo#N — отказ; текст из файла
-    (--body-file, -F) — только realpath внутри file_roots (симлинк наружу не проходит). Словом «почему нет» или None."""
-    if re.search(r"\bGH_[A-Z0-9_]+", cmd) or any(os.environ.get(v) for v in GH_REDIRECT_ENV):
+    явный -R/--repo из [merge_repos] направления; присваивание GH_*, --hostname и адрес PR/owner/repo#N — отказ; текст
+    из файла (--body-file, -F) — только realpath внутри file_roots (симлинк наружу не проходит), не из личного
+    ([private] paths) и не из папки .git любой копии (metis-0596). Словом «почему нет» или None."""
+    if _gh_env_assigned(cmd, cwd) or any(os.environ.get(v) for v in GH_REDIRECT_ENV):
         return "без GH_REPO, GH_HOST и других GH_* — репозиторий только через -R"
     if any(t is None for t in texts):
-        return "слово команды не вычислить (переменная, $(…))"
+        return ("слово команды не вычислить (переменная, $(…); знак $ буквально — в одинарных кавычках или \\$, "
+                "текст из файла — --body-file)")
     if any(t == "--hostname" or t.startswith("--hostname=") for t in texts):
         return "--hostname уводит gh на другой хост — без него"
     ps = _gh_pr_sub(texts)
@@ -3686,8 +3697,15 @@ def _gh_out_problem(texts, cmd, cwd, direction, file_roots, whose):
             return "адрес и owner/repo#N не принимаются — номер PR или имя ветки"
     if nxt:
         return "флаг без значения в конце команды"
+    priv = _norm(private_conf(load_policy())["paths"]) if files else []
     for f in files:
+        if re.search(r"[*?\[{]", f):
+            return f"--body-file {f} — шаблон оболочки не принимается: имя файла целиком"
         full = os.path.realpath(os.path.join(cwd, os.path.expanduser(f))) if f != "-" else None
+        # metis-0596: своя копия — корень чтения, но в ней бывают личное (~/ai/knowledge/me у окна mnemo-brain, где
+        # check_private главной сессии не судит) и .git с ключом git-crypt и config — их на GitHub не выносим
+        if full is not None and (_inside(full, priv) or any(_key(c) == ".git" for c in full.split(os.sep))):
+            return f"--body-file {f} — личное ([private] policy.toml) и файлы из .git на GitHub не выносятся"
         if full is None or not _inside(full, file_roots):
             return f"--body-file {f} — читать можно только из временных папок и своей копии репозитория (realpath)"
     if not repos:
@@ -3702,11 +3720,15 @@ def _gh_out_problem(texts, cmd, cwd, direction, file_roots, whose):
 
 
 GH_OUT_SUBS = {"create", "edit", "comment", "ready"}
+# присваивание GH_* — в начале слова (после пробела, ; & | ( ` кавычки или начала строки); export/read без «=» — по
+# разобранным командам. `--recover <файл>` в таблице нет: gh читает им любой файл как JSON (metis-0596)
+GH_ENV_ASSIGN = re.compile(r"(?:^|[\s;&|(`'\"])GH_[A-Za-z0-9_]*\+?=")
+GH_ENV_BUILTINS = {"export", "declare", "typeset", "local", "readonly", "read"}
 # флаги форм gh pr create|edit|comment|ready (gh 2.x); чего нет в таблице — отказ, как HQ_GH_VALUE у штаба
 GH_OUT_SHORT_VALUE = "RFbtBHalmprT"
 GH_OUT_SHORT_BOOL = "dfwe"
 GH_OUT_LONG_VALUE = {"--repo", "--body-file", "--body", "--title", "--base", "--head", "--assignee", "--label",
-                     "--milestone", "--project", "--reviewer", "--template", "--recover", "--add-assignee",
+                     "--milestone", "--project", "--reviewer", "--template", "--add-assignee",
                      "--add-label", "--add-project", "--add-reviewer", "--remove-assignee", "--remove-label",
                      "--remove-project", "--remove-reviewer"}
 GH_OUT_LONG_BOOL = {"--draft", "--fill", "--fill-first", "--fill-verbose", "--web", "--dry-run", "--editor",
@@ -3724,7 +3746,8 @@ def check_gh_out(event, tool, tool_input):
     cmd = tool_input.get("command") or ""
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     _, cmds = bash_analysis(cmd, cwd)
-    # своя копия репозитория — корень с .git, но не $HOME и не «/»; нет .git — только временные папки
+    # своя копия репозитория — корень с .git, но не $HOME и не «/»; нет .git — только временные папки. Личное и .git
+    # внутри неё _gh_out_problem не пускает (metis-0596)
     top = os.path.realpath(_git_top(cwd))
     roots = TEMP_ROOTS + ([top] if os.path.exists(os.path.join(top, ".git"))
                           and top not in (os.path.realpath(HOME), os.sep) else [])
