@@ -19,6 +19,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon plugins update [--quiet]     новые версии плагинов agent-kit (плановый проход раз в 10 мин): ставит
                                         выпуск, если запись в releases.json каталога совпала с ним (версия и дерево);
                                         тесты — в GitHub Actions до слияния, локального прогона нет (п. 8, 27.10);
+                                        на новом выпуске смотрит tests на main: красный — тревога на коммит (metis-0587);
                                         после установки плановый проход перезапускает свободные окна (metis-0181)
   pantheon plugins accept [--new] [guard] [pantheon]   принять установленное дерево как проверенное (verified.json):
                                         живой код и окна ролей идут только на проверенное (metis-0321); только руками
@@ -8283,6 +8284,50 @@ def _release_problem(name, ver, digest):
     return why
 
 
+def _gh_bin():
+    return shutil.which("gh", path=(os.environ.get("PATH") or "") + ":/opt/homebrew/bin:/usr/local/bin")
+
+
+def _main_ci_check():
+    """metis-0587 (вариант Б): выпуск не стопорится, но красный tests на main не должен пройти молча. Берём последний
+    завершённый прогон tests.yml на main (`gh run list`): failure — одна тревога на коммит (alert_once по headSha) со
+    ссылкой на прогон. Нет прогонов, startup_failure (Actions не стартовали, биллинг), cancelled, gh нет или упал —
+    не тревога: строка в журнал выпусков раз в день. Сбой gh тик не ломает."""
+    why = None
+    try:
+        gh = _gh_bin()
+        if not gh:
+            raise OSError("gh не найден")
+        r = subprocess.run([gh, "run", "list", "--repo", "latark/agent-kit", "--workflow", "tests.yml",
+                            "--branch", "main", "--limit", "10", "--json", "headSha,conclusion,status,url"],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            raise OSError(f"gh код {r.returncode}")
+        runs = json.loads(r.stdout)
+        done = [x for x in runs if isinstance(x, dict) and x.get("status") == "completed"] \
+            if isinstance(runs, list) else []
+        if not done:
+            why = "нет завершённых прогонов tests на main"
+        elif done[0].get("conclusion") == "failure":
+            sha, url = str(done[0].get("headSha") or "?"), done[0].get("url") or ""
+            alert_once("main-ci-red", sha, f"pantheon: tests красные на main, коммит {sha[:10]} — {url} "
+                       "(выпуск идёт; разобрать и чинить следующим PR)", "plugins-update")
+        elif done[0].get("conclusion") != "success":
+            why = f"последний прогон tests на main: {done[0].get('conclusion')!r} — Actions не отработали"
+    except (OSError, subprocess.TimeoutExpired, ValueError) as e:
+        why = f"статус tests на main не прочитан: {type(e).__name__} {e}"
+    if why:
+        day = stamp()[:10]
+        mark = path("plugins", "ci-nodata")
+        with contextlib.suppress(OSError):
+            if open(mark).read() == day:
+                return
+        _plugins_journal(f"tests на main: {why}")
+        with contextlib.suppress(OSError):
+            os.makedirs(path("plugins"), exist_ok=True)
+            open(mark, "w").write(day)
+
+
 def _plugins_update(quiet):
     try:
         ok = subprocess.run([claude_bin(), "plugin", "marketplace", "update", MARKETPLACE],
@@ -8299,10 +8344,14 @@ def _plugins_update(quiet):
         return 1
     catalog = _plugins_catalog()
     rc = 0
+    checked = False
     for name in sorted(installed):
         if name not in catalog:
             continue
         old, (new, src) = installed[name]["version"], catalog[name]
+        if _version_newer(new, old) and not checked:  # новый выпуск: заодно смотрим tests на main (metis-0587)
+            checked = True
+            _main_ci_check()
         if not _version_newer(new, old):
             if name == "pantheon":
                 _current_sync()
