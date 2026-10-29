@@ -673,6 +673,24 @@ def main():
     check("новая машина: ~/.claude/agents ещё нет — живая сборка создаёт папку и кладёт общие роли",
           r.returncode == 0 and os.path.isfile(os.path.join(agents2, "argus.md")))
 
+    # metis-0573: роли разработчика и talos называют pantheon outside — сборка настоящих шаблонов плагина
+    real = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "roles")
+    env_real = dict(env, PANTHEON_PLUGIN_ROLES=real, HOME=os.path.join(tmp, "home-real"))
+    os.makedirs(env_real["HOME"])
+    out_real = os.path.join(tmp, "real-out")
+    r = subprocess.run([PY311, "-I", RUN_PY, "roles", "build", "--out", out_real], env=env_real,
+                       capture_output=True, text=True, timeout=120)
+    devs = [f for f in sorted(os.listdir(real)) if f.startswith("dev-") and f.endswith(".tmpl")]
+    check("настоящие шаблоны плагина собираются, dev-*.tmpl найдены", r.returncode == 0 and len(devs) >= 3)
+    for f in devs:
+        text = read(os.path.join(out_real, f[:-5] + ".md"))
+        check(f"{f[:-5]}: тестам с портом — pantheon outside test --wait 590, dev-серверу — serve --wait 120",
+              "pantheon outside test --wait 590" in text and "pantheon outside serve --wait 120" in text
+              and "pantheon outside stop" in text)
+    talos_real = read(os.path.join(out_real, "talos.md"))
+    check("talos: dev-сервер — pantheon outside serve --wait 120, гасит stop",
+          "pantheon outside serve --wait 120" in talos_real and "pantheon outside stop" in talos_real)
+
     print(f"\n{sum(results)}/{len(results)} прошли")
     return 0 if all(results) else 1
 

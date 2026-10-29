@@ -17,6 +17,10 @@
   `~/ai/pantheon/directions.toml`) и `~/.claude/pantheon/policy.toml` — привилегии (образец —
   `plugins/guard/policy.example.toml`), правит только metis-pantheon.
 - `plugins/pantheon/lib/pantheon.py` — планировщик и команда; `pantheon help` — список команд.
+  Группы команд вынесены в модули `lib/` (metis-0586): `review`, `plugins`, `taskcli`, `consent`, `jobs`, `archive`,
+  `quarantine`, `instructions`, `rolecmd`, `sessions`. `pantheon.py` подключает их через `_attach`: их имена остаются
+  именами `pantheon`, а сами модули зовут pantheon через `P`. Сборка окон (`sandbox_build` и всё, на что она ссылается)
+  остаётся в `pantheon.py`: признак ядра в шлюзе guard (metis-0404) смотрит только этот файл.
   Задачи — `~/ai/pantheon/schedule.toml`, метки и журналы запусков — `~/.local/state/pantheon/` (свои у каждого Mac).
 - Требуется Python 3.11+ (`tomllib`). Системный `/usr/bin/python3` на macOS — 3.9, он не подходит; `bin/pantheon` и
   `bin/pantheon-tick` сами ищут 3.11+ (`lib/find-python.sh`): `PANTHEON_PYTHON`, затем `python = "…"` из
@@ -188,6 +192,7 @@
   Зарезервированные имена (metis-0163): `hq`, `workshop`, `hestia` и всё вида `job-*` — имена окон системы
   (`settings/hq.json`, `workshop.json`, `hestia.json`, `job-<роль>.json`); направлением в `directions.toml` их назвать
   нельзя — `pantheon domains build` и `pantheon direction check` отказывают понятной строкой.
+  Уборка сессий (metis-0081): start, stop, restart и wake убирают прежние копии имени `claude rm` (после claude stop, без `--discard-unpushed`; транскрипт остаётся). Метка `started a copy as <id>` у `--resume` — копию сразу stop + rm, тревога. Каждый успешный rm — строка в `logs/reap.log`: время, имя, id, причина, путь транскрипта, хост.
   Окно Гестии `settings/hestia.json` (metis-0245): служебная роль hestia пересобирает и перезапускает окна и сверяет выпуск (ставит его плановый проход). Поднимает
   её только `pantheon wake hestia --task <id>` с открытой задачей (без задачи — отказ «нет задачи», код 2) фоновой
   сессией `hestia`, папка запуска — её кэш. Прежняя зависшая Гестия (blocked, SendMessage ей не доходит) — `wake hestia --task <id> --restart`: claude stop, новая сессия, затем claude rm прежней; `pantheon stop hestia` тоже работает (metis-0575). Из окна роли (задан `PANTHEON_ROLE`, не hq) — только по слову владельца в окне Зевса за 15 мин: без слова отказ, код 2; красная зона памяти — только предупреждение, не отказ ([sb-simplify] п. 5); из окна hq — как start --from zeus: без вашего слова код 2. `PANTHEON_ROLE=hestia`; Bash пишет только в TMPDIR (в кэш окна guard запись не пускает), личное
@@ -431,7 +436,7 @@
   причиной в выводе. Карту строят заново, когда таких файлов набралось; то, что устаревшая карта пропустила, ловит
   полный прогон на main.
 - Замеры вне окна (metis-0537): в окне роли `sysctl` памяти даёт EPERM, `claude -p` без сети не работает, поэтому замеры
-  снимает плановый проход (`probes_tick` в `lib/pantheon.py`, каждый тик) и пишет `STATE/probes.json`: `mem` — своп, давление,
+  снимает плановый проход (`probes_tick` в `lib/pantheon.py`, каждый проход) и пишет `STATE/probes.json`: `mem` — своп, давление,
   свободно %; `capacity_probe` и `_memory_pressure` в окне берут из файла то, что сами не прочитали, если замер не старше 10 минут;
   старый, битый или отсутствующий файл — «не прочитано», как раньше. Замер `/context` (`claude -p /context`, стоит лимита)
   по умолчанию выключен: включается файлом `STATE/probe-context` (внутри число часов между замерами, пусто — 6), идёт отдельным
@@ -474,7 +479,7 @@
     python3 -I plugins/pantheon/tests/test_outside.py # проверки вне окна: tests после «принять», заявки, dev-сервер, профиль
     python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры
     python3 -I plugins/pantheon/tests/test_culprits.py   # виновники памяти: тревога на эпизод, чей процесс, pantheon reap
-    python3 -I plugins/pantheon/tests/test_probes.py  # замеры вне окна: тик пишет probes.json, окно читает свежий, старый/битый — как раньше
+    python3 -I plugins/pantheon/tests/test_probes.py  # замеры вне окна: плановый проход пишет probes.json, окно читает свежий, старый/битый — как раньше
     python3 -I plugins/pantheon/tests/test_tick.py    # планировщик: сон, пробуждение, питание, простой, лимит, главный Mac
     python3 -I plugins/pantheon/tests/test_plugins_update.py   # обновления agent-kit плановым проходом: сверка выпуска, установка, коды
     python3 -I .github/scripts/test_release.py    # выпуск Action: номер от прошлого выпуска, releases.json, гонка push, права

@@ -290,7 +290,8 @@ fn_src = src.split("def _installed_hook(", 1)[1].split("\ndef ", 1)[0]
 check("тест-страж: _installed_hook, guard_script и agents_script не возвращают клон маркетплейса",
       "return market_path" not in fn_src
       and "return MARKET_" not in src.split("def guard_script(", 1)[1].split("\ndef agents_window", 1)[0], fn_src[-300:])
-inst = src.split("def _plugin_install(", 1)[1].split("\ndef ", 1)[0]
+inst = open(os.path.join(LIBDIR, "plugins.py"), encoding="utf-8").read()  # plugins update — lib/plugins.py (metis-0586)
+inst = inst.split("def _plugin_install(", 1)[1].split("\ndef ", 1)[0]
 check("тест-страж: успешная установка пишет verified.json до перевеса current",
       "verified_write(" in inst and inst.index("verified_write(") < inst.index("link_current("))
 
