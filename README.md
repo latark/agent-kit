@@ -430,6 +430,12 @@
   сборки, и гонит их при любом изменении (их связи по карте могли устареть); таких 8 и больше — весь набор с
   причиной в выводе. Карту строят заново, когда таких файлов набралось; то, что устаревшая карта пропустила, ловит
   полный прогон на main.
+- Замеры вне окна (metis-0537): в окне роли `sysctl` памяти даёт EPERM, `claude -p` без сети не работает, поэтому замеры
+  снимает плановый проход (`probes_tick` в `lib/pantheon.py`, каждый тик) и пишет `STATE/probes.json`: `mem` — своп, давление,
+  свободно %; `capacity_probe` и `_memory_pressure` в окне берут из файла то, что сами не прочитали, если замер не старше 10 минут;
+  старый, битый или отсутствующий файл — «не прочитано», как раньше. Замер `/context` (`claude -p /context`, стоит лимита)
+  по умолчанию выключен: включается файлом `STATE/probe-context` (внутри число часов между замерами, пусто — 6), идёт отдельным
+  процессом, результат — раздел `context` того же файла. `pantheon probes [show|measure|context]` — посмотреть или снять вручную.
 - `plugins/pantheon/scripts/baseline.py` — замер «как сейчас» по git и транскриптам (ORD-06); правила подсчёта — в шапке.
 - `plugins/pantheon/scripts/config-check.py` — проверка правок `~/.claude` для `sync.sh`: код и подозрительное — в
   карантин с объяснением на доске, остальное уходит само (SEC-15). Исключение (metis-0209): файл, побайтно равный
@@ -468,6 +474,7 @@
     python3 -I plugins/pantheon/tests/test_outside.py # проверки вне окна: tests после «принять», заявки, dev-сервер, профиль
     python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры
     python3 -I plugins/pantheon/tests/test_culprits.py   # виновники памяти: тревога на эпизод, чей процесс, pantheon reap
+    python3 -I plugins/pantheon/tests/test_probes.py  # замеры вне окна: тик пишет probes.json, окно читает свежий, старый/битый — как раньше
     python3 -I plugins/pantheon/tests/test_tick.py    # планировщик: сон, пробуждение, питание, простой, лимит, главный Mac
     python3 -I plugins/pantheon/tests/test_plugins_update.py   # обновления agent-kit плановым проходом: сверка выпуска, установка, коды
     python3 -I .github/scripts/test_release.py    # выпуск Action: номер от прошлого выпуска, releases.json, гонка push, права
