@@ -522,6 +522,77 @@ print(json.dumps({{
                   e.journal().count("не ставлю") == 1, e.journal())
         e.close()
 
+    # metis-0587 (вариант Б): на новом выпуске тик смотрит tests на main (gh — заглушка в PATH). failure — одна тревога
+    # на коммит; зелёный, нет данных, startup_failure, сбой gh — без тревоги, строка в журнале раз в день, выпуск идёт
+    GH = "#!/bin/sh\necho \"$*\" >> \"$STUB_DIR/gh.log\"\ncat \"$STUB_DIR/gh.json\"\n[ \"${STUB_GH_RC:-0}\" = 0 ] || { echo boom >&2; exit \"$STUB_GH_RC\"; }\n"
+
+    def ci_env(runs, rc=0, new=True):
+        e = Env("1.0.0", "1.1.0" if new else "1.0.0")
+        e.write(os.path.join(e.stub, "gh"), GH)
+        os.chmod(os.path.join(e.stub, "gh"), 0o755)
+        e.write(os.path.join(e.stub, "gh.json"), json.dumps(runs))
+        shutil.copy(os.path.join(e.stub, "list.json"), os.path.join(e.stub, "list-before.json"))
+        return e, {"STUB_GH_RC": str(rc)}
+
+    def again(e, x):
+        """Ещё один проход с новым выпуском: установленная версия снова старая (как до установки)."""
+        shutil.copy(os.path.join(e.stub, "list-before.json"), os.path.join(e.stub, "list.json"))
+        return e.run("plugins", "update", extra=x)
+
+    def run_row(sha, conclusion, status="completed"):
+        return {"headSha": sha, "conclusion": conclusion, "status": status, "url": f"https://github.com/r/{sha}"}
+
+    red = [run_row("a" * 40, "failure"), run_row("b" * 40, "success")]
+    e, x = ci_env(red)
+    r = e.run("plugins", "update", extra=x)
+    check("tests красные на main: тревога с коммитом и ссылкой, выпуск всё равно ставится",
+          r.returncode == 0 and "plugin update" in e.argv() and "tests красные на main" in e.alerts()
+          and "a" * 10 in e.alerts() and "https://github.com/r/" + "a" * 40 in e.alerts(), f"{r.stdout!r} {e.alerts()!r}")
+    e.close()
+    e, x = ci_env(red)
+    e.run("plugins", "update", extra=x)
+    again(e, x)
+    again(e, x)
+    check("tests красные на main: повторные проходы той же беды не множат тревогу (одна на коммит)",
+          e.alerts().count("tests красные на main") == 1, e.alerts())
+    e.close()
+    e, x = ci_env(red)
+    e.run("plugins", "update", extra=x)
+    e.write(os.path.join(e.stub, "gh.json"), json.dumps([run_row("c" * 40, "failure")]))
+    again(e, x)
+    check("новый красный коммит — новая тревога", e.alerts().count("tests красные на main") == 2, e.alerts())
+    ghlog = open(os.path.join(e.stub, "gh.log")).read()
+    check("gh спрошен про tests.yml на ветке main репозитория latark/agent-kit",
+          "--branch main" in ghlog and "--workflow tests.yml" in ghlog and "--repo latark/agent-kit" in ghlog, ghlog)
+    e.close()
+    e, x = ci_env([run_row("d" * 40, None, "in_progress")] + red)
+    e.run("plugins", "update", extra=x)
+    check("идущий прогон пропускается: берётся последний завершённый", "a" * 10 in e.alerts(), e.alerts())
+    e.close()
+    for name, runs, rc in (("зелёный", [run_row("a" * 40, "success")], 0), ("нет прогонов", [], 0),
+                           ("startup_failure", [run_row("a" * 40, "startup_failure")], 0),
+                           ("сбой gh", red, 7)):
+        e, x = ci_env(runs, rc)
+        r = e.run("plugins", "update", extra=x)
+        again(e, x)
+        quiet = "tests красные" not in e.alerts()
+        if name == "зелёный":
+            check("tests зелёные на main: без тревоги и без строки в журнале",
+                  r.returncode == 0 and quiet and "tests на main" not in e.journal(), f"{e.alerts()!r} {e.journal()!r}")
+        else:
+            check(f"{name}: без тревоги, выпуск ставится, строка в журнале одна за день",
+                  r.returncode == 0 and quiet and "plugin update" in e.argv() and sum(l[17:].startswith("tests на main:") for l in e.journal().splitlines()) == 1,
+                  f"{r.returncode} {e.alerts()!r} {e.journal()!r}")
+        e.close()
+    e, x = ci_env(red, new=False)
+    e.run("plugins", "update", extra=x)
+    check("новых выпусков нет: gh не вызывается", not os.path.exists(os.path.join(e.stub, "gh.log")))
+    e.close()
+    e = Env("1.0.0", "1.1.0")  # gh нет вовсе
+    r = e.run("plugins", "update", extra={"PATH": e.stub + os.pathsep + "/usr/bin:/bin"})
+    check("gh не найден: тик цел, выпуск ставится", r.returncode == 0 and "plugin update" in e.argv(), r.stderr)
+    e.close()
+
     r = subprocess.run([PY, "-I", RUN_PY, "plugins", "foo"], capture_output=True, text=True, timeout=60)
     check("pantheon plugins foo — код 2", r.returncode == 2)
 
