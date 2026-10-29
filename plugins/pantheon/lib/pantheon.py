@@ -2315,9 +2315,9 @@ def _window_rules():
 
 WINDOW_RULES = _window_rules()
 
-# Карта «окно или роль × плагин и MCP» (metis-0238) — plugins-by-role.toml, разбор — lib/plugin_map.py; станет ядром
-# защит по metis-0598 (решение владельца). Окна: enabledPlugins и permissions.deny mcp__*; роли: disallowedTools шапки
-# при roles build.
+# Карта «окно или роль × плагин и MCP» (metis-0238) — plugins-by-role.toml, разбор — lib/plugin_map.py; оба — ядро
+# защит (metis-0598, решение владельца 30.10). Окна: enabledPlugins и permissions.deny mcp__*; роли: disallowedTools
+# шапки при roles build.
 PLUGIN_MAP_FILE = os.path.join(PLUGIN, "plugins-by-role.toml")
 
 

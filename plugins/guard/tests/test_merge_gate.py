@@ -117,7 +117,8 @@ class Home:
                             "statusCheckRollup": GREEN} for name in self.sha}
         for name in self.sha:
             self.write_view(name)
-        self.gh(["README.md", "plugins/pantheon/lib/merge.py"])  # pantheon.py — ядро по сборке окон (t_core_sandbox)
+        self.gh(["README.md", "plugins/pantheon/lib/tasks.py"])  # pantheon.py — ядро по сборке окон (t_core_sandbox),
+        # merge.py — ядро с metis-0598
         if self.core:  # PR ядра со строкой согласия владельца: «не на Opus» проверяется на нём, а не отпадает как не ядро
             self.gh(["README.md", "plugins/guard/hooks/merge_gate.py"])
             self.approve(f"{ts()} merge-approve latark/agent-kit#7 {self.sha['agent-kit']}")
@@ -419,7 +420,7 @@ def t_core(h):
     h.gh([{"filename": "plugins/other/g.py", "status": "renamed", "previous_filename": "plugins/guard/hooks/guard.py"}])
     merge_case("защиты: вынос файла из plugins/guard наружу — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
                CORE + ": PR задевает plugins/guard/hooks/guard.py")
-    h.gh(["plugins/pantheon/lib/merge.py", "plugins/guardian/x.py", "plugins/pantheon/tests/test_a.py"])
+    h.gh(["plugins/pantheon/lib/tasks.py", "plugins/guardian/x.py", "plugins/pantheon/tests/test_a.py"])
     merge_case("защиты: PR только в plugins/pantheon (и plugins/guardian) — проходит",
                h.pre(cmd, pdir="projects/agent-kit"), True)
     # metis-0182 п. 4 и metis-0174: общие роли и правила autoMode окон — тоже ядро (даже если папки ещё нет на main)
@@ -812,6 +813,34 @@ def t_core_marketplace(h):
     h.gh([{"filename": "plugins/pantheon/.claude-plugin/plugin.json", "status": "modified",
            "patch": '@@ -3 +3 @@\n-  "description": "a",\n+  "description": "b",'}, ".claude-plugin/other.json"])
     merge_case("защиты: plugin.json плагина без version и другой файл .claude-plugin — проходит",
+               h.pre(cmd, pdir="projects/agent-kit"), True)
+
+
+CORE_0598 = ("plugins/pantheon/hooks/ctx.py", "plugins/pantheon/hooks/hooks.json", "plugins/pantheon/lib/merge.py",
+             "plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/plugins-by-role.toml")
+
+
+def t_core_0598(h):
+    """metis-0598 (решение владельца 30.10): owner-log (ctx.py), регистрация хуков, слияние по Touch ID и карта
+    плагинов — ядро: PR, который меняет любой из пяти файлов, ждёт владельца; соседние файлы тех же папок — нет."""
+    sha = h.sha["agent-kit"]
+    h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"), rec("accept", "latark/agent-kit", 7, sha))
+    cmd = f"gh pr merge 7 --match-head-commit {sha}"
+    for path in CORE_0598:
+        h.gh(["README.md", path])
+        merge_case(f"защиты: metis-0598 — {path} — отказ", h.pre(cmd, pdir="projects/agent-kit"), False,
+                   CORE + ": PR задевает " + path)
+        h.gh(["README.md", "./" + path.upper()])
+        merge_case(f"защиты: metis-0598 — {path} в другом регистре — отказ", h.pre(cmd, pdir="projects/agent-kit"),
+                   False, CORE + ": PR задевает")
+    h.gh([{"filename": "plugins/pantheon/lib/merge2.py", "status": "renamed",
+           "previous_filename": "plugins/pantheon/lib/merge.py"}])
+    merge_case("защиты: metis-0598 — вынос merge.py под другим именем — отказ", h.pre(cmd, pdir="projects/agent-kit"),
+               False, CORE + ": PR задевает plugins/pantheon/lib/merge.py")
+    h.gh(["plugins/pantheon/lib/tasks.py", "plugins/pantheon/hooks/ctx_test.py", "plugins/pantheon/hooks/agents.py",
+          "plugins/pantheon/lib/merge_queue.py", "plugins/pantheon/plugins-by-role.md",
+          "plugins/pantheon/tests/test_plugin_map.py"])
+    merge_case("защиты: metis-0598 — соседи (lib/tasks.py, hooks/agents.py, merge_queue.py…) — проходит",
                h.pre(cmd, pdir="projects/agent-kit"), True)
 
 
@@ -2909,7 +2938,7 @@ CASES = [t_gh_out, t_hq_gh,t_pass_internal, t_old_sha, t_no_tests, t_author_is_r
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_not_core, t_opus_transcript, t_ci,
-         t_core_touchid, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
+         t_core_touchid, t_core_0598, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
          t_carry_r4_gate, t_carry_r6, t_version_bump_refused, t_core_sandbox_unit, t_core_sandbox]
 
 # случаи про «не на Opus»: правило действует только в PR ядра (simplify п. 9), поэтому PR agent-kit#7 в них — ядро;

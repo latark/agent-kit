@@ -116,6 +116,11 @@ CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_
               "plugins/guard/managed-settings.json",
               # правила autoMode и permissions окон: разрешают слияние через шлюз и запись вердиктов (metis-0174)
               "plugins/pantheon/lib/window_rules.py",
+              # metis-0598 (решение владельца 30.10): журнал ваших слов owner-log (ctx.py) и регистрация хуков
+              # Пантеона (hooks.json), слияние ядра по Touch ID (merge.py), карта плагинов и MCP окон и ролей
+              # (plugin_map.py и её данные plugins-by-role.toml)
+              "plugins/pantheon/hooks/ctx.py", "plugins/pantheon/hooks/hooks.json", "plugins/pantheon/lib/merge.py",
+              "plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/plugins-by-role.toml",
               ".claude-plugin/marketplace.json")  # откуда ставятся плагины: подмена источника guard (metis-0115)
 # и папки целиком: весь плагин guard (metis-0092) — код, тесты, README, настройки; общие роли Пантеона — в них
 # правила ролей, которые guard проверяет по agent_type (metis-0182). Папки может ещё не быть в main — путь всё равно ядро

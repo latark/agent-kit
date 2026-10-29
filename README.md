@@ -171,7 +171,9 @@
   `gh pr merge <N> -R|--repo <owner/repo> --match-head-commit <sha>`, а последующие `gh pr view` или `git fetch`
   классификатор считает обычными. `--admin`, `--auto`, `gh api` и ядро защит (`plugins/guard/`,
   `plugins/pantheon/roles/`, `plugins/pantheon/lib/window_rules.py`, сборка окон `sandbox_build` в
-  `plugins/pantheon/lib/pantheon.py`, `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
+  `plugins/pantheon/lib/pantheon.py`, с metis-0598 `plugins/pantheon/hooks/ctx.py`, `plugins/pantheon/hooks/hooks.json`,
+  `plugins/pantheon/lib/merge.py`, `plugins/pantheon/lib/plugin_map.py`, `plugins/pantheon/plugins-by-role.toml`,
+  `.claude-plugin/marketplace.json`) это правило не покрывает. Репозитории в правиле — ровно `[merge_repos]` направления
   из `policy.toml`; направлению без такой записи правила слияния нет. Окну с доступом к личному (`[private]`
   `coordinators`, сейчас mnemo-brain) правило слияния не выдаётся и при `[merge_repos]`: его PR сливает владелец
   (metis-0156). Имён владельца, направлений и репозиториев в
@@ -300,7 +302,7 @@
   карта не применяется, тревога `plugin-map-bad`; плагины `*@agent-kit` (guard, pantheon, project-tools) в `[catalog]` —
   тоже ошибка карты. `disallowedTools` шапки списком YAML карта не трогает — ошибка роли. Включённый у вас плагин вне
   каталога (кроме `*@agent-kit` и `*@builtin`) — тревога `plugin-map-unknown`. Тест — `tests/test_plugin_map.py`.
-  Станет ядром защит по metis-0598 (решение владельца).
+  Карта и `plugin_map.py` — ядро защит (metis-0598, решение владельца 30.10): PR, который их меняет, сливает владелец.
 - `plugins/pantheon/lib/autoclose.py` — автозакрытие задач при слиянии PR (metis-0308). Два прохода: `pantheon autoclose fetch`
   (отдельная задача расписания, предел 240 с на весь проход) спрашивает gh про слитые и открытые PR из `[merge_repos]` и пишет
   кэш `autoclose-prs.json`; лёгкий плановый проход читает только кэш и в сеть не ходит. Задачу закрывает PR из репозитория её направления,
