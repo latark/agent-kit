@@ -1157,6 +1157,7 @@ def tick():
                        "pantheon-tick")
         merge_kick()
         outside_kick()
+        probes_tick(t)
         try:
             roles_tick()  # личные роли по вашей галочке на доске (metis-0262 PR 4)
         except Exception as e:  # сбой ролей не должен останавливать тик
@@ -4212,6 +4213,8 @@ def capacity_probe(agents):
                               and w.is_pantheon(a.get("name"), doms))
     with contextlib.suppress(Exception):
         out["swap_gb"] = w.swap_gb()
+    if out["swap_gb"] is None:  # в окне роли sysctl даёт EPERM: берём замер тика (metis-0537)
+        out["swap_gb"] = probe_value("swap_gb")
     # через _memory_pressure: она понимает подмену PANTHEON_FAKE_PRESSURE — прямой sysctl тут давал тестам давление
     # настоящего Mac, и при «предупреждении» у владельца test_watch падал целиком (36 из 85)
     out["pressure"] = _memory_pressure()
@@ -4220,6 +4223,8 @@ def capacity_probe(agents):
         m = re.search(r"free percentage:\s*(\d+)%", r.stdout)
         if m:
             out["free_pct"] = int(m.group(1))
+    if out["free_pct"] is None:
+        out["free_pct"] = probe_value("free_pct")
     limit = w.threshold("swap_alert_gb", w.SWAP_ALERT_GB)
     reasons = []
     if out["swap_gb"] is not None and out["swap_gb"] > limit:
@@ -8213,10 +8218,10 @@ def plugins_update(quiet=False):
         return _plugins_update(quiet) if got else 0
 
 
-def _memory_pressure():
+def _memory_pressure_direct():
     """Давление памяти macOS (kern.memorystatus_vm_pressure_level, как _load_snapshot): 1 норма, 2 предупреждение,
     4 критично; другое значение или сбой чтения — None. PANTHEON_FAKE_PRESSURE — подмена для тестов и проб, как
-    PANTHEON_FAKE_SWAP; пустая строка — «не прочитано»."""
+    PANTHEON_FAKE_SWAP; пустая строка — «не прочитано». Читает сам sysctl: в окне роли он даёт EPERM."""
     fake = os.environ.get("PANTHEON_FAKE_PRESSURE")
     try:
         if fake is not None:
@@ -8228,6 +8233,174 @@ def _memory_pressure():
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
     return level if level in (1, 2, 4) else None
+
+
+def _memory_pressure():
+    """Давление памяти: сначала сам sysctl; не прочитался (окно роли) — свежий замер планового прохода (metis-0537)."""
+    level = _memory_pressure_direct()
+    if level is None:
+        v = probe_value("pressure")
+        level = v if v in (1, 2, 4) else None
+    return level
+
+
+# --- замеры вне окна (metis-0537) -------------------------------------------------------------------------------
+# В окне роли sysctl памяти даёт EPERM, а `claude -p` без сети не работает. Замеры делает плановый проход (тик, вне
+# окна) и пишет STATE/probes.json; окно только читает. Файл старше PROBE_MAX_AGE, битый или без поля — как «не
+# прочитано» (None): поведение прежнее, ничего не падает.
+
+PROBE_MAX_AGE = 600  # секунд: тик идёт раз в минуту-две, десять минут — запас на пропущенные проходы
+CONTEXT_PROBE_HOURS = 6
+CONTEXT_PROBE_TEXT_MAX = 6000
+
+
+def probes_path():
+    return path("probes.json")
+
+
+def probe_fresh(section, max_age=PROBE_MAX_AGE):
+    """Раздел файла замеров (dict) и его возраст в секундах; нет файла, битый, без времени, из будущего или старше
+    max_age — None."""
+    data = read_json(probes_path())
+    sec = data.get(section) if isinstance(data, dict) else None
+    if not isinstance(sec, dict):
+        return None
+    ts = sec.get("time")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None
+    age = now() - ts
+    if age < 0 or age > max_age:
+        return None
+    return sec, age
+
+
+def probe_value(key):
+    """Число из свежего замера памяти; нет, старое или не число — None."""
+    got = probe_fresh("mem")
+    v = got[0].get(key) if got else None
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _free_pct_direct():
+    try:
+        r = subprocess.run(["memory_pressure"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"free percentage:\s*(\d+)%", r.stdout)
+    return int(m.group(1)) if m else None
+
+
+def probes_measure(t=None):
+    """Замер памяти — только вне окна роли (тик): своп, давление, свободно %. Ничего не прочитано — файл не трогаем."""
+    t = now() if t is None else t
+    mem = {"time": t, "swap_gb": None, "pressure": _memory_pressure_direct(), "free_pct": _free_pct_direct()}
+    with contextlib.suppress(Exception):
+        mem["swap_gb"] = watch_mod().swap_gb()
+    if all(mem[k] is None for k in ("swap_gb", "pressure", "free_pct")):
+        return None
+    data = read_json(probes_path())
+    data = data if isinstance(data, dict) else {}
+    data.update(v=1, mem=mem)
+    write_json(probes_path(), data)
+    return mem
+
+
+def context_probe_hours():
+    """Выключатель замера /context: файла STATE/probe-context нет — выключен (по умолчанию: claude -p стоит лимита).
+    Есть — включён, в файле число часов между замерами (пусто или не число — CONTEXT_PROBE_HOURS)."""
+    p = path("probe-context")
+    if not os.path.isfile(p):
+        return None
+    try:
+        h = float(open(p).read().strip())
+    except (OSError, ValueError):
+        return CONTEXT_PROBE_HOURS
+    return h if h > 0 else CONTEXT_PROBE_HOURS
+
+
+def probes_context_run(t=None):
+    """Один замер `claude -p /context` (вне окна): текст и код выхода в probes.json. Сбой тоже записывается."""
+    t = now() if t is None else t
+    sec = {"time": t, "rc": None, "text": "", "error": None}
+    try:
+        r = subprocess.run([claude_bin(), "-p", "/context"], capture_output=True, text=True, timeout=180,
+                           stdin=subprocess.DEVNULL, cwd=STATE)
+        sec.update(rc=r.returncode, text=r.stdout[:CONTEXT_PROBE_TEXT_MAX])
+        if r.returncode != 0:
+            sec["error"] = (r.stderr.strip().splitlines() or ["код выхода не 0"])[-1][:200]
+    except (OSError, subprocess.TimeoutExpired) as e:
+        sec["error"] = f"{type(e).__name__}: {e}"[:200]
+    data = read_json(probes_path())
+    data = data if isinstance(data, dict) else {}
+    data.update(v=1, context=sec)
+    write_json(probes_path(), data)
+    return sec
+
+
+def probes_tick(t):
+    """Шаг тика: замер памяти каждый проход; /context — если включён и прошло N часов (отдельным процессом: claude -p
+    идёт минутами). Время запуска пишется до старта, чтобы следующий тик не запустил второй замер."""
+    try:
+        probes_measure(t)
+        hours = context_probe_hours()
+        if hours is None or locked("probe-context"):
+            return
+        data = read_json(probes_path())
+        last = (data.get("context") or {}).get("requested") if isinstance(data, dict) else None
+        if isinstance(last, (int, float)) and 0 <= t - last < hours * 3600:
+            return
+        data = data if isinstance(data, dict) else {}
+        ctx = data.get("context") if isinstance(data.get("context"), dict) else {}
+        ctx["requested"] = t
+        data.update(v=1, context=ctx)
+        write_json(probes_path(), data)
+        if os.environ.get("PANTHEON_DRYRUN") == "1":
+            with open(path("dryrun.log"), "a") as fh:
+                fh.write(f"{int(t)} probes-context\n")
+            return
+        subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "probes", "context"], env=os.environ.copy(),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception as e:  # сбой замеров не должен останавливать тик
+        alert_once("probes-tick", type(e).__name__, f"замеры вне окна: проход упал ({type(e).__name__}: {e})",
+                   "pantheon-tick")
+
+
+def probes_cmd(args):
+    """pantheon probes [show|measure|context]: show (по умолчанию) — что лежит в файле замеров и с каким возрастом;
+    measure — снять память сейчас (вне окна); context — снять /context сейчас (стоит лимита, только вне окна)."""
+    sub = args[0] if args else "show"
+    if sub == "measure":
+        mem = probes_measure()
+        print(json.dumps(mem, ensure_ascii=False) if mem else "не прочиталось ничего", file=sys.stdout if mem else sys.stderr)
+        return 0 if mem else 1
+    if sub == "context":
+        with lock("probe-context", block=False) as got:
+            if not got:
+                print("замер /context уже идёт", file=sys.stderr)
+                return 1
+            sec = probes_context_run()
+        print(f"/context: код {sec['rc']}" + (f", {sec['error']}" if sec["error"] else ""))
+        return 0 if sec["rc"] == 0 else 1
+    if sub != "show":
+        print("pantheon probes [show|measure|context]", file=sys.stderr)
+        return 2
+    data = read_json(probes_path())
+    for name in ("mem", "context"):
+        sec = data.get(name) if isinstance(data, dict) else None
+        ts = sec.get("time") if isinstance(sec, dict) else None
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+            print(f"{name}: нет замера")
+            continue
+        age = now() - ts
+        fresh = "свежий" if name == "context" or 0 <= age <= PROBE_MAX_AGE else "старый, окно его не берёт"
+        body = {k: v for k, v in sec.items() if k not in ("time", "text")}
+        print(f"{name}: {int(age)} с назад ({fresh}) {json.dumps(body, ensure_ascii=False)}")
+        if name == "context" and sec.get("text"):
+            print(sec["text"])
+    print("замер /context: " + ("включён, раз в %g ч" % context_probe_hours() if context_probe_hours() else
+                                "выключен (включить: записать число часов в %s)" % path("probe-context")))
+    return 0
 
 
 def _current_sync():
@@ -8805,6 +8978,8 @@ def main(argv):
         return merge_mod().main(rest)
     if cmd == "outside":
         return outside_mod().main(rest)
+    if cmd == "probes":
+        return probes_cmd(rest)
     if cmd == "traces":
         return traces_mod().main(rest)
     if cmd == "mmv":
