@@ -356,16 +356,24 @@ def t_workflows():
           re.search(r"^permissions:\n  contents: read$", text, re.M) and re.search(r"pull_request:\n\s+branches: \[main\]", text)
           and re.search(r"push:\n\s+branches: \[main\]", text) and "workflow_dispatch:" in text
           and text.count('python-version: "3.14"') == 2 and text.count("persist-credentials: false") == 2, text)
+    # YAML с «: » в простом скаляре GitHub не разбирает — workflow не запускается вовсе (так было после #192)
+    rb = shutil.which("ruby")
+    bad = subprocess.run([rb, "-ryaml", "-e", "ARGV.each { |f| YAML.load_file(f) }", *[os.path.join(WORKFLOWS, n) for n in names]],
+        capture_output=True, text=True) if rb else None
+    check("workflows: каждый .yml разбирается как YAML (ruby -ryaml)", bad is not None and bad.returncode == 0,
+          bad.stderr[-300:] if bad else "нет ruby")
     check("tests.yml: сбой шага не прячется — continue-on-error нигде нет",
           not re.search(r"continue-on-error", text), text)
+    check("tests.yml: shell и defaults нигде нет — подмена оболочки (`shell: bash -c 'exit 0' {0}`, defaults: run: shell:) прячет провал",
+          not re.search(r"(?:^|[\s{,\-])[\"']?(?:shell|defaults)[\"']?\s*:", text, re.M), text)
     check("tests.yml: ни один шаг не выключается (`if:` только на уровне job), checkout не берёт чужой ref",
           not re.search(r"^(      - |        )if:", text, re.M) and not re.search(r"^\s*(- )?ref:", text, re.M), text)
     check("tests.yml: PR — job affected на закреплённом Linux (минута macOS ×10), полная история для merge-base",
           set(job) == {"affected", "full"} and re.search(r"^    if: github.event_name == 'pull_request'$", aff, re.M)
           and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", aff, re.M) and "fetch-depth: 0" in aff, job.keys())
     check("tests.yml: push в main и ручной запуск — job full на закреплённом macOS, не на PR, не на коммите выпуска",
-          re.search(r"^    if: github.event_name != 'pull_request' && !startsWith\(github\.event\.head_commit\.message, "
-                    r"'выпуск: '\)$", full, re.M)
+          re.search(r"^    if: \"github.event_name != 'pull_request' && !startsWith\(github\.event\.head_commit\.message, "
+                    r"'выпуск: '\)\"$", full, re.M)
           and re.search(r"^    runs-on: macos-\d+$", full, re.M) and "--affected" not in full, full)
 
     def runs(part):
