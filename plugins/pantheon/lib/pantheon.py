@@ -254,6 +254,10 @@ LABEL = "pantheon.tick"
 # запущен install (рабочая копия при разработке).
 CURRENT = os.path.join(HOME, ".local", "share", "pantheon", "current")
 TEMPFAIL = 75   # задача ждёт (нет сети): не сбой, тревоги нет
+# plugins update (metis-0573): локального прогона тестов нет, остались две сетевые команды claude. По журналу
+# logs/plugins-update.log последние 12 проходов — 11–27 с на всё; потолки с запасом в разы, а не 300/600 с
+PLUGINS_CATALOG_TIMEOUT = 90    # claude plugin marketplace update: вышло — TEMPFAIL, тревоги нет
+PLUGIN_INSTALL_TIMEOUT = 180    # claude plugin update одного плагина: вышло — сбой установки, тревога, сверка по хешу
 ALERTED = 76    # сбой, о котором задача уже сообщила сама: вторую тревогу не давать
 PLIST = os.path.join(HOME, "Library", "LaunchAgents", LABEL + ".plist")
 LIMIT_SNAPSHOT = os.path.join(HOME, ".local", "state", "claude-statusline", "five-hour")
@@ -8166,7 +8170,7 @@ def _plugin_install(name, old, new, quiet, digest):
     встало, с выпущенным деревом каталога: версия и хеш дерева installPath."""
     try:
         r = subprocess.run([claude_bin(), "plugin", "update", f"{name}@{MARKETPLACE}", "-s", "user"],
-                           env=claude_env(), capture_output=True, text=True, timeout=600)
+                           env=claude_env(), capture_output=True, text=True, timeout=PLUGIN_INSTALL_TIMEOUT)
         ok = r.returncode == 0
         why = f"код {r.returncode}: {' '.join((r.stderr or r.stdout or '').split())[:200]}"
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -8511,7 +8515,8 @@ def _main_ci_check():
 def _plugins_update(quiet):
     try:
         ok = subprocess.run([claude_bin(), "plugin", "marketplace", "update", MARKETPLACE],
-                            env=claude_env(), capture_output=True, text=True, timeout=300).returncode == 0
+                            env=claude_env(), capture_output=True, text=True,
+                            timeout=PLUGINS_CATALOG_TIMEOUT).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         ok = False
     if not ok:  # нет сети или каталог недоступен — подождём следующего раза, без тревоги
