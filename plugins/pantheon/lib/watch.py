@@ -2798,7 +2798,9 @@ def _pconfig():
 
 
 HQ_MISSING = "в policy.toml нет раздела [hq]: Пританею ничего не закрыто"
-CORPUS_MISSING = "в policy.toml нет раздела [corpus]: правило corpus-role ничего не закрывает"
+CORPUS_MISSING = "в policy.toml нет раздела [corpus] или он пуст: правило corpus-role ничего не закрывает"
+# списки раздела [corpus] (guard CORPUS_KEYS): все пустые — правило молчит, как без раздела (metis-0194)
+CORPUS_LISTS = ("commands", "modules", "write_subcommands", "scripts", "keychain_prefixes")
 HOOK_LAUNCHER = None  # запускатель хуков hooks/python.sh (metis-0571); тесты подменяют
 HOOKS_NO_TOMLLIB = ("запускатель хуков hooks/python.sh не нашёл Python 3.11+: guard останавливает каждое действие, "
                     "остальные хуки молчат — Метиде: brew install python@3.14")
@@ -2871,7 +2873,9 @@ def infra_check():
     corpus = None
     try:
         with open(pol, "rb") as fh:
-            corpus = "corpus" in tomllib.load(fh)  # битый раздел guard читает как «закрыто»
+            sec = tomllib.load(fh).get("corpus")
+        # битый раздел (не таблица) guard читает как «закрыто» — это не молчание; пустой [corpus] — как его нет
+        corpus = sec is not None and (not isinstance(sec, dict) or any(sec.get(k) for k in CORPUS_LISTS))
     except FileNotFoundError:
         corpus = False
     except (OSError, ValueError):
@@ -2884,7 +2888,7 @@ def infra_check():
     if corpus is not None and not (declared or corpus):
         P.clear_once("corpus-policy-missing")
     elif corpus is not None:
-        add(corpus, "в policy.toml есть раздел [corpus] (что закрывает правило corpus-role)")
+        add(corpus, "в policy.toml есть непустой раздел [corpus] (что закрывает правило corpus-role)")
         if corpus:
             P.clear_once("corpus-policy-missing")
         else:

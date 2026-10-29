@@ -733,7 +733,10 @@ EMPTY_TESTS = ("true", "heavy echo ok", ":", "/usr/bin/TRUE", "env A=1 -u B time
                "node -e 'process.exit(0)'", "nodejs --version", "CI=1 node",
                # metis-0194 (ревью #35): оболочечные и пакетные обёртки, связка -pe, --check, uv с --directory
                "command true", "exec true", "npx true", "uvx true", "heavy command true", "node -pe 1",
-               "node --check", "uv --directory x run true", "uv --project app run true", "node -pe 'process.exit(0)'")
+               "node --check", "uv --directory x run true", "uv --project app run true", "node -pe 'process.exit(0)'",
+               # ревью argus #204: command -v/-V печатает путь, слова после кода -e/-p — process.argv, -a со значением
+               "command -v python3 -I tests/t.py", "heavy command -V pytest", "command -pv pytest", "node -pe 1 pytest",
+               "node -e 0 tests/t.js", "exec -a x true")
 REAL_TESTS = ("heavy python3 -I tests/test_x.py", "env CI=1 heavy pnpm test", "timeout 600 pytest -q", "heavy pnpm test",
               "pytest", "pnpm test", "python3 -I tests/test_x.py", "python3 -m pytest -q", "python3 -W error tests/t.py",
               "bash tests/run.sh", "sh -c pytest", "bash -c 'heavy pnpm test'", "python3 -c 'from t import main'",
@@ -744,8 +747,8 @@ REAL_TESTS = ("heavy python3 -I tests/test_x.py", "env CI=1 heavy pnpm test", "t
               "CI=1 pytest", "CI=1 heavy pnpm test", "uv run pytest", "uv run python -m pytest", "uv run --with x python t.py",
               "heavy uv run --directory app pytest -q", "uv sync", "node tests/t.js", "node --test", "node -e 'require(\"./t\")'",
               # metis-0194: обёртки перед настоящей программой — раннер
-              "command -v python3 -I tests/t.py", "exec python3 -I tests/test_x.py", "npx vitest run",
-              "uvx pytest -q", "uv --directory app run pytest -q", "node -pe 1 pytest")
+              "command python3 -I tests/t.py", "command -p pytest", "exec python3 -I tests/test_x.py", "npx vitest run",
+              "uvx pytest -q", "uv --directory app run pytest -q", "exec -a x pytest", "node -e 0 --test")
 
 
 def t_empty_tests(h):

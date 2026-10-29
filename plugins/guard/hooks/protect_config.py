@@ -18,7 +18,7 @@ claude-config: коммит в обход sync.sh отправил бы прав
 и .git/config. Цель выше .claude тоже (metis-0177): дерево, распакованное или скопированное в сам репозиторий или в
 папку над репозиториями (tar -x, unzip, ditto, cp -R, rsync -r/-a или «папка/», scp -r), и git clone в <репо>/.claude.
 Файлы с известными именами (curl -O, wget без -r и -m, patch, rsync одного файла) в корне репозитория — можно.
-С metis-0194 закрыты дыры ревью #35: rsync с «папка/.» и -R, wget -r/-m, git checkout/restore поверх .claude, 7z -o.
+С metis-0194 закрыты дыры ревью #35: rsync с «.», «папка/.» и -R, wget -r/-m, git checkout/restore поверх .claude, 7z -o.
 """
 
 import os
@@ -113,6 +113,21 @@ def _moved(cmds):
     return any(n in ("cd", "chdir", "pushd", "popd") for n, _ in cmds)
 
 
+def _cd_dirs(cmds, cwd):
+    """Папки, где может идти команда: папка события и цель каждого cd/chdir/pushd (относительная — от всех уже
+    известных: `cd app && cd ..`; без аргумента — HOME). Объединение, как у разбора Bash, а не порядок: для команд,
+    чьих целей разбор Bash не знает (7z), metis-0194. Неразобранная цель (`cd "$X"`) пропущена."""
+    out = [cwd]
+    for n, t in cmds:
+        if n not in ("cd", "chdir", "pushd"):
+            continue
+        arg = next((x for x in t if x is None or not x.startswith("-") or x == "-"), "$HOME")
+        if arg is None or arg == "-":
+            continue  # `cd -` — прошлая папка, она уже в списке
+        out += [p for p in (G._expand(arg, d) for d in list(out)) if p not in out]
+    return out
+
+
 def _tree_dests(cmds, cwd, targets):
     """Папки, в которые команда копирует дерево (cp -R, ditto, rsync -r/-a или источник «папка/», scp -r): последний
     операнд или -t. rsync без рекурсии и без «/» в конце источника кладёт отдельные файлы — это не дерево. После cd
@@ -175,8 +190,9 @@ def _rsync_tree(texts):
 
 
 def _dir_src(x):
-    """Источник — папка: «папка/» или «папка/.» (без рекурсии rsync не спросит, что внутри, — судим как дерево)."""
-    return x.endswith("/") or x.endswith("/.")
+    """Источник — папка: «.», «..», «папка/», «папка/.» или «папка/..» (без рекурсии rsync -d/--dirs кладёт её
+    содержимое — судим как дерево)."""
+    return x in (".", "..") or x.endswith(("/", "/.", "/.."))
 
 
 def _opt_dests(texts, short, long=()):
@@ -217,6 +233,11 @@ def _unpack_dests(cmds, cwd, targets):
             dests = _opt_dests(texts, "-d") or ["."]
         elif base in SEVEN_ZIP and next((x for x in texts if not x.startswith("-")), None) in ("x", "e"):
             dests = _opt_dests(texts, "-o") or ["."]  # 7z x a.7z -o<папка>; без -o — cwd (metis-0194)
+            if moved:  # разбор Bash 7z не знает — целей «…» нет: относительную папку судим от каждой папки cd
+                for d in dests:
+                    w = d.replace("${HOME}", G.HOME).replace("$HOME", G.HOME)
+                    out += [G._expand(w, c) for c in _cd_dirs(cmds, cwd)]
+                continue
         elif base == "ditto" and any(x[:1] == "-" and x[1:2] != "-" and "x" in x for x in texts):
             ops = [x for x in texts if not x.startswith("-")]
             dests = ops[-1:] if len(ops) > 1 else []
@@ -258,7 +279,8 @@ def _mirror_dests(cmds, cwd, targets):
         for d in _opt_dests(texts, "-P", ("--directory-prefix",)) or ["."]:
             w = d.replace("${HOME}", G.HOME).replace("$HOME", G.HOME)
             if moved and not os.path.isabs(os.path.expanduser(w)):
-                out += [p for p in targets if os.path.isdir(p)]
+                # цель wget у разбора Bash — «<папка>/…» от каждой папки cd (metis-0194)
+                out += [os.path.dirname(p) for p in targets if os.path.basename(p) == G.ANY_FILE]
             else:
                 out.append(G._expand(w, cwd))
     return out
@@ -267,7 +289,8 @@ def _mirror_dests(cmds, cwd, targets):
 def _git_targets(cmds, cwd):
     """git checkout и git restore переписывают пути в рабочей копии из индекса или коммита: `git checkout -- .claude/…`
     поверх защищённого файла (metis-0194). Операнды — пути (и имена веток: лишняя проверка безвредна). Только
-    --staged меняет индекс, а не рабочую копию, — его не судим."""
+    --staged меняет индекс, а не рабочую копию, — его не судим. `.` и папка репозитория — можно (решение лида по
+    ревью #204): возвращают только то, что уже в git, как reset --hard и checkout ветки."""
     out = []
     for name, texts in cmds:
         if os.path.basename((name or "").rstrip("/")) != "git" or any(x is None for x in texts):
@@ -330,7 +353,7 @@ def check_protect_config(event, tool, tool_input):
         bad += [p for p in _unpack_dests(cmds, cwd, targets) + _mirror_dests(cmds, cwd, targets) if p not in bad and (
             _repo_or_above(p) or _settings_file(p) or G._inside(p, prot))]
         bad += [p for p in _git_targets(cmds, cwd) if p not in bad and (
-            G._inside(p, prot) or _settings_file(p) or any(G._inside(x, [p]) for x in prot) or _repo_or_above(p))]
+            G._inside(p, prot) or _settings_file(p) or any(G._inside(x, [p]) for x in prot))]
         bad += [p for p in _clone_dests(cmds, cwd) if p not in bad and (
             G._inside(p, prot) or _settings_file(p) or any(G._inside(x, [p]) for x in prot))]
     if not bad:

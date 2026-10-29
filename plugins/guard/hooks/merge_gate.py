@@ -493,7 +493,7 @@ def _program_at(argv):
             i, name = j, "uv run"
         elif name not in TEST_WRAPPERS:
             return i
-        takes, i = TEST_WRAPPERS[name], i + 1
+        at, (takes, i) = i, (TEST_WRAPPERS[name], i + 1)
         while i < len(argv):
             a = argv[i]
             if not isinstance(a, str):
@@ -501,6 +501,8 @@ def _program_at(argv):
             if a == "--":
                 i += 1
                 break
+            if name == "command" and a[:1] == "-" and set(a[1:]) & {"v", "V"}:
+                return at  # `command -v pytest` печатает путь, а не запускает (metis-0194): программа — сам command
             if a in takes:
                 i += 2
             elif a.startswith("-") or (name == "env" and "=" in a):
@@ -589,17 +591,20 @@ def _relative(word):
 
 
 def _node_empty(args):
-    """Аргументы node без скрипта: только флаги из NODE_NOOP_ARGS и -e/-p с пустым кодом (`node -e 0`)."""
-    i = 0
+    """Аргументы node без скрипта: только флаги из NODE_NOOP_ARGS и -e/-p с пустым кодом (`node -e 0`). Слова после
+    кода -e/-p — process.argv, а не скрипт: `node -pe 1 pytest` печатает 1 (metis-0194)."""
+    i, evaled = 0, False
     while i < len(args):
         a = args[i]
         if not isinstance(a, str):
             return False
+        if evaled and not a.startswith("-"):
+            return True
         if a in NODE_EVAL or (a[:1] == "-" and a[1:2] != "-" and len(a) > 1 and set(a[1:]) <= {"p", "e"}):
             code = args[i + 1] if i + 1 < len(args) else ""  # -pe 1: связка коротких флагов (metis-0194)
             if not isinstance(code, str) or not NODE_NOOP_CODE.fullmatch(code):
                 return False
-            i += 2
+            i, evaled = i + 2, True
         elif a in NODE_NOOP_ARGS:
             i += 1
         else:
@@ -621,6 +626,8 @@ def _empty_run(argv, depth=0):
         return None
     if not prog or (prog in EMPTY_TEST_PROGRAMS and not _relative(word)):
         return prog or "нет"
+    if prog == "command":  # _program_at остановился на нём — это `command -v/-V`: только печать пути
+        return "command -v"
     if prog in EMPTY_NODE and _node_empty(rest):
         return f"{prog} без тестов"
     if EMPTY_PYTHON.fullmatch(prog):
