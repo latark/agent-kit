@@ -39,6 +39,9 @@ PostToolUse (Bash:
   hq-gh        — окну штаба gh pr — только с -R из [merge_repos], PR номером, без GH_* в команде и GH_REPO/GH_HOST/
                  GH_CONFIG_DIR в окружении, без обсуждений (--comments, --json comments) и без личного в команде;
                  слияние (gh pr merge, gh api …/merge) — отказ всегда (metis-0247);
+  gh-out       — окну направления (PANTHEON_WINDOW) gh pr create|edit|comment|ready — только с -R из [merge_repos] его
+                 направления, без GH_*, --hostname и адреса PR, --body-file и -F — только из временных папок и своей
+                 копии репозитория (realpath); эти формы идут мимо песочницы (metis-0533);
   hq-sessync   — окну Пританея `sessync find <слова> [-p имя] [-n число]` — только строкой целиком по строгому образцу
                  (слова из букв, цифр и _.-); флаги, присваивание перед командой, обёртки, глобы — отказ (metis-0566);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
@@ -3612,12 +3615,20 @@ def _hestia_outside_sandbox(name, texts):
 def _hestia_gh_write_problem(sub, texts, cmd, cwd):
     """gh pr create|edit Гестии: репозиторий — только явный -R/--repo из [merge_repos] направления задачи, текст из
     файла (--body-file, -F) — только из временных папок. Словом «почему нет» или None."""
+    return _gh_out_problem(texts, cmd, cwd, os.environ.get("PANTHEON_TASK_DIRECTION") or "", TEMP_ROOTS,
+                           "направления задачи")
+
+
+def _gh_out_problem(texts, cmd, cwd, direction, file_roots, whose):
+    """gh pr create|edit|comment|ready мимо песочницы (Гестия, окна направлений; metis-0533): репозиторий — только
+    явный -R/--repo из [merge_repos] направления; GH_*, --hostname и адрес PR/owner/repo#N — отказ; текст из файла
+    (--body-file, -F) — только realpath внутри file_roots (симлинк наружу не проходит). Словом «почему нет» или None."""
     if re.search(r"\bGH_[A-Z0-9_]+", cmd) or any(os.environ.get(v) for v in GH_REDIRECT_ENV):
         return "без GH_REPO, GH_HOST и других GH_* — репозиторий только через -R"
     if any(t is None for t in texts):
         return "слово команды не вычислить (переменная, $(…))"
-    if any("://" in t or re.search(r"/[^\s/]+#\d+", t) for t in texts):  # URL и owner/repo#N уводят в другой репозиторий
-        return "адрес и owner/repo#N не принимаются — номер PR или имя ветки"
+    if any(t == "--hostname" or t.startswith("--hostname=") for t in texts):
+        return "--hostname уводит gh на другой хост — без него"
     args = texts[1:]  # -R бывает и до pr (`gh -R o/r pr create`); слова pr, create флагами не являются
     repos, files, nxt = [], [], None
     for a in args:
@@ -3625,6 +3636,13 @@ def _hestia_gh_write_problem(sub, texts, cmd, cwd):
             (repos if nxt == "repo" else files if nxt == "file" else []).append(a)
             nxt = None
             continue
+        if a in ("-b", "--body", "-t", "--title", "-m", "--message"):
+            nxt = "text"  # текст комментария и заголовок — не адрес: ссылки в нём можно
+            continue
+        if a.startswith(("--body=", "--title=", "--message=")):
+            continue
+        if "://" in a or re.search(r"/[^\s/]+#\d+", a):  # URL и owner/repo#N уводят в другой репозиторий
+            return "адрес и owner/repo#N не принимаются — номер PR или имя ветки"
         if a in ("-R", "--repo"):
             nxt = "repo"
         elif a in ("-F", "--body-file"):
@@ -3639,21 +3657,50 @@ def _hestia_gh_write_problem(sub, texts, cmd, cwd):
             files.append(a[2:].lstrip("="))
         elif a.startswith("-") and not a.startswith("--") and len(a) > 2 and ("R" in a[1:] or "F" in a[1:]):
             return "склеенные короткие флаги с -R или -F — пиши раздельно"
-    if nxt:
+    if nxt in ("repo", "file"):
         return "-R или -F без значения"
     for f in files:
         full = os.path.realpath(os.path.join(cwd, os.path.expanduser(f))) if f != "-" else None
-        if full is None or not _inside(full, TEMP_ROOTS):
-            return f"--body-file {f} — читать можно только из временных папок (TMPDIR, /tmp)"
+        if full is None or not _inside(full, file_roots):
+            return f"--body-file {f} — читать можно только из временных папок и своей копии репозитория (realpath)"
     if not repos:
-        return "укажи репозиторий явно: -R <owner/repo> из [merge_repos] направления задачи"
+        return f"укажи репозиторий явно: -R <owner/repo> из [merge_repos] {whose}"
     mr = load_policy().get("merge_repos")
-    mine = mr.get(os.environ.get("PANTHEON_TASK_DIRECTION") or "") if isinstance(mr, dict) else None
+    mine = mr.get(direction) if isinstance(mr, dict) else None
     allowed = {r.strip().lower() for r in (mine if isinstance(mine, list) else ()) if isinstance(r, str) and r.strip()}
     bad = [r for r in repos if not _merge_repo_ok(r, allowed)]
     if bad:
-        return (f"-R {bad[0]} нет среди [merge_repos] направления задачи "
-                f"({os.environ.get('PANTHEON_TASK_DIRECTION') or 'не задано'})")
+        return f"-R {bad[0]} нет среди [merge_repos] {whose} ({direction or 'не задано'})"
+    return None
+
+
+GH_OUT_SUBS = {"create", "edit", "comment", "ready"}
+
+
+def check_gh_out(event, tool, tool_input):
+    """gh pr create|edit|comment|ready в окне направления (metis-0533): эти формы идут мимо песочницы (pantheon
+    GH_PR_WRITE), и без сужения они пишут в чужой репозиторий (-R, GH_REPO, --hostname) или выносят локальный файл на
+    GitHub (--body-file). Окно — по PANTHEON_WINDOW (направление); штаб (hq-gh) и Гестия (hestia) — свои правила."""
+    win = os.environ.get("PANTHEON_WINDOW") or ""
+    if tool != "Bash" or not win or window_role() in ("hq", "hestia") or event.get("agent_type") == "hq":
+        return None
+    cmd = tool_input.get("command") or ""
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    _, cmds = bash_analysis(cmd, cwd)
+    roots = TEMP_ROOTS + [os.path.realpath(_git_top(cwd))]
+    for n, t in cmds:
+        if not n or os.path.basename(n.rstrip("/")) != "gh":
+            continue
+        unresolved, cands = _gh_parse(t)
+        if unresolved:
+            return ("Правило gh-out: слово до подкоманды gh не вычислить (переменная, $(…)) — не понять, пишет ли "
+                    "она в GitHub мимо песочницы (metis-0533).")
+        for q, i in cands:
+            if t[q] == "pr" and i is not None and t[i] in GH_OUT_SUBS:
+                why = _gh_out_problem(t, cmd, cwd, win, roots, "своего направления")
+                if why:
+                    return (f"Правило gh-out: gh pr {t[i]} идёт мимо песочницы, поэтому {why} (metis-0533). Описание "
+                            "PR — в файл во временной папке или в своей копии репозитория и --body-file.")
     return None
 
 
@@ -3813,7 +3860,8 @@ def check_hq_sessync(event, tool, tool_input):
 
 
 def check_window(event, tool, tool_input):
-    for rule, check in (("hq-telegram", check_hq_telegram), ("hq-gh", check_hq_gh), ("hq-sessync", check_hq_sessync),
+    for rule, check in (("hq-telegram", check_hq_telegram), ("hq-gh", check_hq_gh), ("gh-out", check_gh_out),
+                        ("hq-sessync", check_hq_sessync),
                         ("tg-role", check_tg_role),
                         ("chiron", check_chiron_call), ("hestia", check_hestia_call)):
         if rule not in OFF:
