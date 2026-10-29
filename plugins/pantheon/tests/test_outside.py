@@ -535,6 +535,20 @@ def port_open(port):
         s.close()
 
 
+# порт, занятый слушателем на 0.0.0.0 (чужой http.server, dev-сервер), не свободен: на macOS bind с SO_REUSEADDR
+# на 127.0.0.1 при этом удавался, сервер «поднимался» на чужом порту (metis-0592)
+_wild = socket.socket()
+_wild.bind(("0.0.0.0", 0))
+_wild.listen()
+_wp = _wild.getsockname()[1]
+check("порт под слушателем на 0.0.0.0 не свободен", not O.port_free(_wp))
+_wild.close()
+_lo = socket.socket()
+_lo.bind(("127.0.0.1", 0))
+_lo.listen()
+check("порт под слушателем на 127.0.0.1 не свободен", not O.port_free(_lo.getsockname()[1]))
+_lo.close()
+
 before = len(calls())
 rc, q, rid = role_request("athena-x", APP, "serve", "--minutes", "5")
 run_pass()

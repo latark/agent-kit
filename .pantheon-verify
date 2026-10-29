@@ -1,0 +1,2 @@
+# полный набор тестов трёх плагинов (AGENTS.md); heavy проход ставит сам
+python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard plugins/pantheon plugins/project-tools

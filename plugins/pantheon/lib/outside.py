@@ -633,7 +633,7 @@ def save_servers(s):
 def port_free(port):
     s = socket.socket()
     try:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # без SO_REUSEADDR: с ним macOS даёт занять 127.0.0.1:порт, когда его уже держит слушатель на 0.0.0.0 (metis-0592)
         s.bind(("127.0.0.1", port))
         return True
     except OSError:
