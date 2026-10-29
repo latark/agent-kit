@@ -17,6 +17,10 @@
   `~/ai/pantheon/directions.toml`) и `~/.claude/pantheon/policy.toml` — привилегии (образец —
   `plugins/guard/policy.example.toml`), правит только metis-pantheon.
 - `plugins/pantheon/lib/pantheon.py` — планировщик и команда; `pantheon help` — список команд.
+  Группы команд вынесены в модули `lib/` (metis-0586): `review`, `plugins`, `taskcli`, `consent`, `jobs`, `archive`,
+  `quarantine`, `instructions`, `rolecmd`, `sessions`. `pantheon.py` подключает их через `_attach`: их имена остаются
+  именами `pantheon`, а сами модули зовут pantheon через `P`. Сборка окон (`sandbox_build` и всё, на что она ссылается)
+  остаётся в `pantheon.py`: признак ядра в шлюзе guard (metis-0404) смотрит только этот файл.
   Задачи — `~/ai/pantheon/schedule.toml`, метки и журналы запусков — `~/.local/state/pantheon/` (свои у каждого Mac).
 - Требуется Python 3.11+ (`tomllib`). Системный `/usr/bin/python3` на macOS — 3.9, он не подходит; `bin/pantheon` и
   `bin/pantheon-tick` сами ищут 3.11+ (`lib/find-python.sh`): `PANTHEON_PYTHON`, затем `python = "…"` из

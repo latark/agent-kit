@@ -89,14 +89,14 @@ where = "описания PR, тексты для человека"
 
 # Значения, которые сверяет код или внешний sync.sh (~/.claude), — менять только вместе с ними, отдельной задачей.
 [[allow]]
-file = 'lib/pantheon.py'
+file = 'lib/quarantine.py'
 text = 'Отправить на другие Mac'
 reason = 'прежняя метка старых карточек sync: SYNC_ACT её принимает, ~/.claude/sync.sh принимает её же (стр. 121); новые карточки sync.sh выдаёт с вариантом «Отправить»'
 
 [[allow]]
 file = 'scripts/config-check.py'
 text = 'Отправить на другие Mac'
-reason = 'прежняя метка старых карточек sync (option и recommend): SYNC_ACT в lib/pantheon.py и ~/.claude/sync.sh (стр. 121) принимают её; менять только вместе с ними'
+reason = 'прежняя метка старых карточек sync (option и recommend): SYNC_ACT в lib/quarantine.py и ~/.claude/sync.sh (стр. 121) принимают её; менять только вместе с ними'
 
 [[allow]]
 file = "roles/hq.tmpl"
