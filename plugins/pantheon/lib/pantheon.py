@@ -4752,42 +4752,6 @@ def _role_apply(name, by):
                f"(ваша галочка {str(rec.get('time') or '')[:16].replace('T', ' ')})")
 
 
-def role_propose(name, direction):
-    """Заявка: ворота без галочки, карточка с вопросом и статус proposed. Повтор с тем же черновиком — та же карточка;
-    с правленым — новая, прежняя уходит в «Отменено». → (код, текст)."""
-    with lock("roles"):
-        data, sha, errs = role_static_gate(name)
-        if errs:
-            return 1, "; ".join(errs)
-        last = role_last(name)
-        if last and last["status"] == "proposed" and last.get("sha") == sha:
-            return 0, f"заявка на роль {name} [{sha}] уже есть: карточка {last.get('card')}"
-        q = role_question(name, sha)
-        tid, _ = tasks_mod().task_new(
-            PANTHEON, now(), direction, f"Применить личную роль {name}", actor="pantheon role", status="waiting",
-            waiting_on="human", question=q,
-            why=f"Черновик роли готов: roles/proposed/{name}.tmpl, {len(data)} байт. Галочка «Да» ставит его в ваш "
-                f"личный слой ~/.claude/agents; правка черновика после галочки её отменяет.",
-            options=[f"Да — поставить роль {name} в личный слой", "Нет — отклонить заявку"],
-            recommend="Да — если черновик прочитан и роль нужна", if_no_answer="Роль не ставится, заявка ждёт.",
-            text=f"Черновик: `~/ai/pantheon/roles/proposed/{name}.tmpl`, хеш {sha}.\n"
-                 f"Поставить из терминала: `pantheon role apply {name}` — тоже только по галочке «Да».")
-        if last and last["status"] == "proposed":
-            _role_card_close(last.get("card"), "dropped", f"Заменена заявкой {tid}: черновик правлен")
-        role_status_add(name, "proposed", sha=sha, card=tid, direction=direction)
-        return 0, f"заявка на роль {name} [{sha}]: карточка {tid} «{q}»"
-
-
-def role_cancel(name):
-    with lock("roles"):
-        last = role_last(name)
-        if not last or last["status"] != "proposed":
-            return 1, f"у роли {name} нет открытой заявки (статус: {last['status'] if last else 'нет'})"
-        role_status_add(name, "cancelled", sha=last.get("sha"), card=last.get("card"))
-        _role_card_close(last.get("card"), "dropped", f"Заявка на роль {name} отозвана")
-        return 0, f"заявка на роль {name} отозвана"
-
-
 def roles_tick():
     """Плановый проход: заявка proposed с вашим ответом на её черновик — «Да» ставит роль (role apply), «Нет» — статус
     rejected. Отказ apply — тревога (раз на причину), заявка остаётся до ответа или отзыва."""
@@ -4811,37 +4775,6 @@ def roles_tick():
             alert_once("role-apply-" + name, text, f"pantheon role apply {name}: {text}", "pantheon-tick")
         else:
             clear_once("role-apply-" + name)
-
-
-def role_cmd(rest):
-    usage = "pantheon role propose <имя> --direction D | apply <имя> | status [<имя>] | cancel <имя>"
-    sub, args = (rest[0], rest[1:]) if rest else ("", [])
-    if sub == "status" and len(args) <= 1:
-        allst = role_status_all()
-        names = args or sorted(allst)
-        if not names:
-            print("заявок на роли нет")
-        for n in names:
-            last = (allst.get(n) or [None])[-1]
-            print(f"{n}: {last['status']} [{last.get('sha') or ''}] {str(last.get('time') or '')[:16].replace('T', ' ')}"
-                  + (f" · карточка {last['card']}" if last.get("card") else "") if last else f"{n}: заявки нет")
-        return 0
-    ok = (sub == "propose" and len(args) == 3 and args[1] == "--direction") \
-        or (sub in ("apply", "cancel") and len(args) == 1)
-    if not ok or args[0].startswith("-"):
-        print(usage, file=sys.stderr)
-        return 2
-    name = args[0]
-    try:
-        code, text = (role_propose(name, args[2]) if sub == "propose" else role_apply(name) if sub == "apply"
-                      else role_cancel(name))
-    except (OSError, ValueError) as e:
-        code, text = 1, str(e)
-    if code:
-        print(f"role {sub}: отказ — {text}", file=sys.stderr)
-    else:
-        print(text)
-    return code
 
 
 # --- сверка памятки «Кто есть кто.md» с ролями и реестром (metis-0120) ----------------------------
@@ -7222,6 +7155,7 @@ _attach("jobs")
 _attach("archive")
 _attach("quarantine")
 _attach("instructions")
+_attach("rolecmd")
 
 
 def main(argv):
