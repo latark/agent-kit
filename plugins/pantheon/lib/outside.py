@@ -14,7 +14,8 @@
   pantheon outside stop ID               погасить свой сервер раньше срока
   pantheon outside run                   проход по заявкам — только плановый проход (из окна Claude Code — отказ)
 --wait С — ждать итога до С секунд (не больше 590: у Bash окна предел 10 минут) и напечатать его; код выхода — код
-команды тестов, у сервера 0 — адрес готов, отказ — 1, итога не дождался — 75. Без --wait — номер заявки, итог —
+команды тестов, у сервера 0 — адрес готов, отказ — 1, итога не дождался — 75. Оба места heavy заняты тяжёлыми
+командами — serve стоит в очереди heavy до конца --wait (без --wait ~6 с), не дождался — итог failed с причиной и код 75. Без --wait — номер заявки, итог —
 `pantheon outside status ID`.
 
 Куда пишет заявка. В окне роли (есть PANTHEON_TMP — папка tmp кэша окна ~/Library/Caches/pantheon-sandbox/<окно>) —
@@ -84,6 +85,7 @@ SERVE_MIN, SERVE_MAX = 30, 120      # срок сервера, минуты
 TEST_TIMEOUT = 7200                 # с
 READY_SEC = 90                      # сервер должен открыть порт за это время
 KILL_WAIT = 5
+SERVE_QUEUE_MIN = 6                  # без --wait (или он вышел) heavy ждёт место столько секунд (metis-0593)
 AUTO_TTL = 24 * 3600                # «принять» старше суток тесты сам не зовёт
 RESULT_TTL = 24 * 3600              # итоги <ID>.result.json и брошенные <ID>.stop в папках заявок — сутки
 WAIT_MAX = 590
@@ -427,7 +429,7 @@ def write_profile(roots):
     return p
 
 
-def sandbox_env(tmpdir, kind, port=None):
+def sandbox_env(tmpdir, kind, port=None, heavy_wait=None):
     """Окружение команды с нуля: ни ключей окружения тика, ни GH_*, ни переменных launchd."""
     path = [x for x in [P.nvm_bin(), os.path.join(P.PLUGIN, "bin"), os.path.join(P.HOME, ".local", "bin")] if x]
     env = {"HOME": os.path.realpath(P.HOME), "PATH": ":".join(path + SAFE_PATH), "LANG": "en_US.UTF-8",
@@ -436,7 +438,8 @@ def sandbox_env(tmpdir, kind, port=None):
         env["CI"] = "1"
     if port:
         env["PORT"] = str(port)
-        env["HEAVY_WAIT_MAX"] = "5"   # место сервера занято — не ждать, итог «не поднялся»
+    if heavy_wait:   # metis-0593: heavy ждёт места не дольше остатка --wait роли, не 6 с
+        env["HEAVY_WAIT_MAX"] = str(int(heavy_wait))
     return env
 
 
@@ -658,7 +661,28 @@ def pick_port(taken):
     return next((p for p in SERVER_PORTS if p not in taken and port_free(p)), None)
 
 
-def run_serve(rid, d, script, minutes, window, qdir, roots):
+def heavy_busy_why(log, waited):
+    """Причина отказа heavy (код 75) по его последней строке в журнале: слоты заняты тестами или сервер уже есть."""
+    line = next((x for x in reversed(tail(log).splitlines()) if x.startswith("heavy:")), "")
+    m = re.search(r"за (\d+) с", line)
+    n = m.group(1) if m else str(int(waited))
+    if "оба места" in line:
+        return f"оба места heavy заняты тяжёлыми командами, не дождалась за {n} с — повтори, когда прогоны закончатся"
+    return (f"место для сервера занято: heavy --server держит один долгий процесс на Mac, не дождалась за {n} с — "
+            "погаси прежний (pantheon outside stop ID) или дождись его срока")
+
+
+def serve_wait(req):
+    """Сколько секунд heavy ждёт место: остаток --wait роли с момента заявки (без --wait — SERVE_QUEUE_MIN)."""
+    w = req.get("wait")
+    if not isinstance(w, int) or isinstance(w, bool) or w <= 0:
+        return SERVE_QUEUE_MIN
+    t = _epoch(req)
+    left = w - (P.now() - t if t else 0)
+    return max(1, int(left))
+
+
+def run_serve(rid, d, script, minutes, window, qdir, roots, wait=SERVE_QUEUE_MIN):
     argv, line = command(d, "serve", script)
     if not argv:
         return save_result(qdir, rid, {"state": "failed", "kind": "serve", "why": line})
@@ -672,24 +696,25 @@ def run_serve(rid, d, script, minutes, window, qdir, roots):
         os.write(fd, f"$ PORT={port} {line}  (папка {d})\n".encode())
     try:
         proc = subprocess.Popen(wrap(argv, write_profile(roots), server=True), cwd=d,
-                                env=sandbox_env(tmp, "serve", port), stdin=subprocess.DEVNULL, stdout=fd, stderr=fd,
+                                env=sandbox_env(tmp, "serve", port, wait if heavy_bin() else None), stdin=subprocess.DEVNULL, stdout=fd, stderr=fd,
                                 start_new_session=True)
     except OSError as e:
         os.close(fd)
         return save_result(qdir, rid, {"state": "failed", "kind": "serve", "why": f"сервер не запустился: {e}", "log": log})
     os.close(fd)
-    deadline = time.monotonic() + READY_SEC
+    t_start = time.monotonic()
+    deadline = t_start + READY_SEC + (wait if heavy_bin() else 0)   # очередь heavy + сами READY_SEC
     while time.monotonic() < deadline and proc.poll() is None and not port_open(port):
         time.sleep(0.5)
     if proc.poll() is not None or not port_open(port):
-        why = ("место для сервера занято: heavy --server держит один долгий процесс на Mac — погаси прежний "
-               "(pantheon outside stop ID) или дождись его срока" if proc.poll() == 75 and heavy_bin()
+        busy = proc.poll() == 75 and bool(heavy_bin())
+        why = (heavy_busy_why(log, time.monotonic() - t_start) if busy
                else f"сервер вышел с кодом {proc.returncode}" if proc.poll() is not None
                else f"порт {port} не открылся за {READY_SEC} с")
         kill_group(proc.pid)
         log_event(id=rid, kind="serve", window=window, dir=d, port=port, ok=False)
         return save_result(qdir, rid, {"state": "failed", "kind": "serve", "cmd": line, "dir": d, "why": why,
-                                       "log": log, "tail": tail(log)})
+                                       "log": log, "tail": tail(log), **({"busy": True} if busy else {})})
     until = P.now() + minutes * 60
     srv[rid] = {"pid": proc.pid, "port": port, "until": until, "qdir": qdir, "window": window, "dir": d, "tmp": tmp}
     save_servers(srv)
@@ -849,6 +874,9 @@ def check_request(req, rid):
     m = req.get("minutes", SERVE_MIN)
     if not isinstance(m, int) or isinstance(m, bool) or not 1 <= m <= SERVE_MAX:
         return f"срок сервера — от 1 до {SERVE_MAX} минут"
+    w = req.get("wait", 0)
+    if not isinstance(w, int) or isinstance(w, bool) or not 0 <= w <= WAIT_MAX:
+        return f"ожидание заявки — от 0 до {WAIT_MAX} секунд"
     return None
 
 
@@ -875,7 +903,8 @@ def handle(qdir, window, rid, req):
         log_event(id=rid, kind="refused", window=window, why=roots)
         return save_result(qdir, rid, {"state": "failed", "kind": req["kind"], "why": roots})
     if req["kind"] == "serve":
-        return run_serve(rid, d, req.get("script"), req.get("minutes", SERVE_MIN), window, qdir, roots)
+        return run_serve(rid, d, req.get("script"), req.get("minutes", SERVE_MIN), window, qdir, roots,
+                         serve_wait(req))
     return run_test(rid, d, req.get("script"), window, qdir, registry(None) or roots, record=not req.get("script"))
 
 
@@ -1074,6 +1103,7 @@ def cmd_request(kind, args):
         req["script"] = f["--script"]
     if kind == "serve":
         req["minutes"] = minutes
+        req["wait"] = wait
     why = check_request(req, rid)
     if why:
         err(f"pantheon outside: {why}")
@@ -1130,6 +1160,8 @@ def show(res):
 def result_code(res):
     if res.get("state") == "serving":
         return 0
+    if res.get("state") == "failed" and res.get("busy"):
+        return 75   # места heavy заняты, очередь не дождалась — как истёкшее ожидание
     if res.get("state") == "done" and isinstance(res.get("code"), int) and not res.get("why"):
         return res["code"]
     return 1
