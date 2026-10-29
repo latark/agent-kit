@@ -16,6 +16,7 @@ __all__ = [
     "REVIEW_SHA", "REVIEW_REPO", "REVIEW_PR", "REVIEW_USAGE", "REVIEW_CHECKLIST", "OPUS_RAN", "RAN_MODEL",
     "review_accept_full", "review_accept_counts", "_review_verdict", "_review_git", "_review_state", "review_records",
     "review_tally", "REVIEW_PENDING_TTL", "_review_pending_path", "_record_epoch", "review_pending", "review_cmd",
+    "REVIEW_AGENT", "review_find_transcripts", "review_last_report",
 ]
 
 
@@ -29,7 +30,7 @@ REVIEW_PR = re.compile(r"[1-9][0-9]{0,8}")
 REVIEW_USAGE = ("pantheon review test -- <команда…> | accept <owner/repo> <PR> <SHA 40 знаков> --opened \"<что "
                 "открыл>\" --ran \"<что запустил>\" --unchecked \"<что не проверял>\" | reject <owner/repo> <PR> <SHA> "
                 "[те же флаги] | talos <owner/repo> <PR> <SHA> | begin <owner/repo> <PR> <SHA> | miss <owner/repo>#<PR> --by <argus> --text \"…\" | sample | "
-                "status [<owner/repo> <PR>]")
+                "status [<owner/repo> <PR>] | report <owner/repo> <PR> <agent8>[/<сессия8>] [--out ПУТЬ]")
 # перечень проверенного в «принять» (Б6, guard 0.5.6): у accept все три поля обязательны и непусты, у reject — по
 # желанию. Тот же разбор — в merge_gate.verdict_parse плагина guard (он и решает, будет ли запись)
 REVIEW_CHECKLIST = {"opened": "открыл", "ran": "запустил", "unchecked": "не проверял"}
@@ -116,6 +117,108 @@ def _review_state():
     head = (_review_git("rev-parse", "HEAD") or "").strip().lower()
     status = _review_git("status", "--porcelain")
     return (head if REVIEW_SHA.fullmatch(head) else None), (status is not None and not status.strip())
+
+
+REVIEW_AGENT = re.compile(r"([0-9a-f]{4,64})(?:/([0-9a-f]{4,64}))?", re.I)  # agent8[/сессия8], как в `review status`
+
+
+def review_find_transcripts(agent, session=None):
+    """Файлы субагента ~/.claude/projects/*/<сессия>*/subagents/[workflows/<run>/]agent-<agent>*.jsonl (путь шлюза
+    guard: agent_models) по началу agent_id и сессии. Транскрипт прежнего argus переживает /clear, а SendMessage к
+    нему уже нет (No transcript found) — отчёт читается из файла (metis-0602)."""
+    base = glob.escape(os.path.join(P.HOME, ".claude", "projects"))
+    sess = glob.escape(session) if session else ""
+    out = set()
+    for sub in ((), ("*",), ("*", "*")):
+        out.update(glob.glob(os.path.join(base, "*", sess + "*", "subagents", *sub, f"agent-{glob.escape(agent)}*.jsonl")))
+    return sorted(p for p in out if os.path.isfile(p) and not os.path.islink(p))
+
+
+def review_last_report(path, pr):
+    """Последний финальный отчёт субагента в транскрипте, где назван этот PR: сообщение tool_use *Handback (поле
+    input.message), а если такого блока нет — последний длинный text. None — отчёта по PR нет."""
+    pr_re = re.compile(r"(?:#|/pull/|PR\s*)%s(?!\d)" % int(pr), re.I)
+    handback, texts = [], []
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    with fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            msg = rec.get("message") if isinstance(rec, dict) else None
+            blocks = msg.get("content") if isinstance(msg, dict) and rec.get("type") == "assistant" else None
+            for b in blocks if isinstance(blocks, list) else []:
+                if not isinstance(b, dict):
+                    continue
+                inp = b.get("input")
+                if b.get("type") == "tool_use" and "Handback" in str(b.get("name")) and isinstance(inp, dict) \
+                        and isinstance(inp.get("message"), str):
+                    handback.append(inp["message"])
+                elif b.get("type") == "text" and isinstance(b.get("text"), str) and len(b["text"]) >= 400:
+                    texts.append(b["text"])
+    for text in reversed(handback or texts):
+        if pr_re.search(text):
+            return text
+    return None
+
+
+def review_report(args):
+    """pantheon review report <owner/repo> <PR> <agent8>[/<сессия8>] [--out ПУТЬ] (metis-0602)."""
+    usage = "pantheon review report <owner/repo> <номер PR> <agent_id 8 знаков>[/<сессия 8 знаков>] [--out ПУТЬ]"
+    out, pos, i = None, [], 0
+    while i < len(args):
+        if args[i] == "--out" or args[i].startswith("--out="):
+            if out is not None:
+                print(f"pantheon review report: --out указан дважды. Формат: {usage}", file=sys.stderr)
+                return 2
+            if args[i] == "--out":
+                i += 1
+                out = args[i] if i < len(args) else ""
+            else:
+                out = args[i][6:]
+            if not out or out.startswith("--"):
+                print(f"pantheon review report: у --out нет пути. Формат: {usage}", file=sys.stderr)
+                return 2
+        else:
+            pos.append(args[i])
+        i += 1
+    m = REVIEW_AGENT.fullmatch(pos[2]) if len(pos) == 3 else None
+    if not m or not REVIEW_REPO.fullmatch(pos[0]) or not REVIEW_PR.fullmatch(pos[1]):
+        print(f"pantheon review report: аргументы не в формате {usage}", file=sys.stderr)
+        return 2
+    repo, pr, agent, session = pos[0], pos[1], m.group(1).lower(), (m.group(2) or "").lower() or None
+    files = review_find_transcripts(agent, session)
+    if not files:
+        print(f"pantheon review report: транскрипта субагента agent-{agent}*.jsonl"
+              + (f" в сессии {session}*" if session else "") + " нет в ~/.claude/projects — сверь пару с "
+              f"`pantheon review status {repo} {pr}`; отчёта нет — новый argus идёт полным кругом", file=sys.stderr)
+        return 1
+    if len(files) > 1:
+        print("pantheon review report: под пару подходит несколько транскриптов — укажи сессию (agent8/сессия8) или "
+              "длиннее agent_id:\n" + "\n".join("  " + f for f in files), file=sys.stderr)
+        return 1
+    text = review_last_report(files[0], pr)
+    if text is None:
+        print(f"pantheon review report: в {files[0]} нет итогового отчёта по {repo}#{pr} (блок *Handback с "
+              "полем message или длинный текст с номером PR) — новый argus идёт полным кругом", file=sys.stderr)
+        return 1
+    if out is None:
+        print(text)
+        return 0
+    try:
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        print(f"pantheon review report: в {out} записать нельзя: {e.strerror or e} (файл уже есть — возьми новое имя)",
+              file=sys.stderr)
+        return 1
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text if text.endswith("\n") else text + "\n")
+    print(f"pantheon review report: отчёт {repo}#{pr} от {agent} из {files[0]} записан в {out}")
+    return 0
 
 
 def review_records(repo=None, pr=None):
@@ -273,6 +376,8 @@ def review_cmd(rest):
         for k, v in checklist.items():
             print(f"  {REVIEW_CHECKLIST[k]}: {v}")
         return 0
+    if sub == "report":
+        return review_report(rest[1:])
     if sub == "status":
         args = rest[1:]
         if args and (len(args) != 2 or not REVIEW_REPO.fullmatch(args[0]) or not REVIEW_PR.fullmatch(args[1])):

@@ -279,6 +279,77 @@ def run_all(tmp):
           "head " + S2[:8] in r.stdout and SHA[:8] not in r.stdout.split("\n")[0], r.stdout)
     for bad in (["latark/agent-kit", "30"], ["latark/agent-kit", "30", "abc"], ["x", "30", SHA]):
         check(f"begin {' '.join(bad)[:30]}: плохой формат — код 2", at(T, "review", "begin", *bad).returncode == 2)
+    report_tests(tmp, pantheon)
+
+
+def report_tests(tmp, pantheon):
+    """review report (metis-0602): отчёт прежнего argus из транскрипта субагента; HOME — временный."""
+    sess, agent = "5e55" * 16, "ab12cd34" + "0" * 24
+    sdir = os.path.join(tmp, ".claude", "projects", "-x-proj", sess, "subagents")
+    os.makedirs(sdir)
+
+    def line(blocks):
+        return json.dumps({"type": "assistant", "message": {"role": "assistant", "content": blocks}}) + "\n"
+
+    def hb(text):
+        return {"type": "tool_use", "name": "SubagentHandback", "input": {"message": text}}
+    fp = os.path.join(sdir, f"agent-{agent}.jsonl")
+    with open(fp, "w") as fh:
+        fh.write(json.dumps({"type": "user", "message": {"content": "x"}}) + "\n")
+        fh.write("битая строка\n")
+        fh.write(line([hb("Head: " + SHA + "\nотчёт по latark/agent-kit#204, круг 1")]))
+        fh.write(line([{"type": "text", "text": "промежуточное"}]))
+        fh.write(line([hb("Head: " + "b" * 40 + "\nОТЧЁТ-ВТОРОЙ latark/agent-kit#204, Б1 закрыт")]))
+        fh.write(line([hb("отчёт по другому PR: latark/agent-kit#999")]))
+    ref = "latark/agent-kit"
+    r = pantheon("review", "report", ref, "204", "ab12cd34/5e55" + "5e55")
+    check("report: последний отчёт этого PR печатается, код 0", r.returncode == 0 and "ОТЧЁТ-ВТОРОЙ" in r.stdout
+          and "круг 1" not in r.stdout and "#999" not in r.stdout, r.stdout + r.stderr)
+    r = pantheon("review", "report", ref, "204", "ab12cd34")
+    check("report: сессия необязательна", r.returncode == 0 and "ОТЧЁТ-ВТОРОЙ" in r.stdout, r.stderr)
+    r = pantheon("review", "report", ref, "999", "ab12cd34")
+    check("report: отчёт по другому PR того же argus", r.returncode == 0 and "#999" in r.stdout, r.stderr)
+    r = pantheon("review", "report", ref, "205", "ab12cd34")
+    check("report: отчёта по этому PR нет — код 1 и «полным кругом»", r.returncode == 1 and "полным кругом" in r.stderr
+          and not r.stdout, r.stdout + r.stderr)
+    r = pantheon("review", "report", ref, "20", "ab12cd34")
+    check("report: PR 20 не принимает за 204", r.returncode == 1, r.stdout + r.stderr)
+    out = os.path.join(tmp, "rep.md")
+    r = pantheon("review", "report", ref, "204", "ab12cd34", "--out", out)
+    body = open(out).read() if os.path.exists(out) else ""
+    check("report --out: файл записан, 0600", r.returncode == 0 and "ОТЧЁТ-ВТОРОЙ" in body
+          and oct(os.stat(out).st_mode & 0o777) == "0o600", r.stdout + r.stderr)
+    r = pantheon("review", "report", ref, "204", "ab12cd34", "--out", out)
+    check("report --out: файл уже есть — отказ, код 1, не затёрт", r.returncode == 1 and open(out).read() == body, r.stderr)
+    r = pantheon("review", "report", ref, "204", "ffffffff")
+    check("report: нет файла — код 1 с причиной", r.returncode == 1 and "нет в ~/.claude/projects" in r.stderr, r.stderr)
+    r = pantheon("review", "report", ref, "204", "ab12cd34/dead")
+    check("report: сессия не та — нет файла, код 1", r.returncode == 1, r.stderr)
+    # второй транскрипт с тем же началом agent_id — несколько совпадений
+    sdir2 = os.path.join(tmp, ".claude", "projects", "-y-proj", "7" * 64, "subagents", "workflows", "run1")
+    os.makedirs(sdir2)
+    with open(os.path.join(sdir2, "agent-ab12cd34" + "1" * 24 + ".jsonl"), "w") as fh:
+        fh.write(line([hb("Head: " + SHA + " latark/agent-kit#204")]))
+    r = pantheon("review", "report", ref, "204", "ab12cd34")
+    check("report: несколько совпадений — отказ со списком, код 1", r.returncode == 1 and r.stderr.count(".jsonl") == 2
+          and not r.stdout, r.stderr)
+    r = pantheon("review", "report", ref, "204", "ab12cd34/" + "7" * 8)
+    check("report: сессия сужает до одного (подпапка workflows)", r.returncode == 0 and SHA in r.stdout, r.stderr)
+    # без Handback — последний длинный text
+    sdir3 = os.path.join(tmp, ".claude", "projects", "-z", "9" * 64, "subagents")
+    os.makedirs(sdir3)
+    with open(os.path.join(sdir3, "agent-cafe0000.jsonl"), "w") as fh:
+        fh.write(line([{"type": "text", "text": "Статус: готово. latark/agent-kit#7 " + "т" * 500}]))
+        fh.write(line([{"type": "text", "text": "коротко #7"}]))
+    r = pantheon("review", "report", ref, "7", "cafe0000")
+    check("report: нет Handback — берётся длинный text", r.returncode == 0 and "Статус: готово" in r.stdout, r.stderr)
+    with open(os.path.join(sdir3, "agent-beef0000.jsonl"), "w") as fh:
+        fh.write(line([{"type": "text", "text": "нет отчёта"}]))
+    r = pantheon("review", "report", ref, "7", "beef0000")
+    check("report: в транскрипте отчёта нет — код 1", r.returncode == 1 and "нет итогового отчёта" in r.stderr, r.stderr)
+    for bad in (["x", "204", "ab12cd34"], [ref, "0", "ab12cd34"], [ref, "204", "zz"], [ref, "204"],
+                [ref, "204", "ab12cd34", "--out"], [ref, "204", "ab12cd34", "--x"]):
+        check(f"report {' '.join(bad)[:30]}: плохой формат — код 2", pantheon("review", "report", *bad).returncode == 2)
 
 
 if __name__ == "__main__":

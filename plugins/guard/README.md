@@ -487,6 +487,10 @@ SDK (`sdk`) флаг не снимают — так же журнал owner-log 
   поля можно.
 - `pantheon review talos <owner/repo> <PR> <SHA>` — только если роль — talos.
 - `pantheon review status [<owner/repo> <PR>]` — показать записи.
+- `pantheon review report <owner/repo> <PR> <agent8>[/<сессия8>] [--out ПУТЬ]` (metis-0602) — последний отчёт прежнего
+  argus по PR из его транскрипта `~/.claude/projects/*/<сессия>/subagents/agent-<id>.jsonl` (пара — из `review status`).
+  Нужна, когда SendMessage к argus после /clear отвечает «No transcript found»: новый argus ведёт повторный круг по
+  дельте с этим отчётом. Нет файла, несколько совпадений или нет отчёта по PR — отказ, код 1; в журнал не пишет.
 
 Фоновая команда записи не даёт: для неё PostToolUse приходит при запуске, а не по итогу, а PostToolUseFailure не
 приходит вовсе. Поэтому хук не пишет, если во входе `run_in_background`, в ответе `backgroundTaskId` или ответ — не
