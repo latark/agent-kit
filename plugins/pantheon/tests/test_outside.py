@@ -597,6 +597,83 @@ check("порт не открылся: failed, процесс погашен", r
 rc, _, _ = role_request("athena-x", APP, "serve", "--minutes", "500")
 check("срок больше 120 минут: код 2", rc == 2)
 
+# --- serve и очередь heavy (metis-0593): оба места заняты — ждать в пределах --wait роли, не падать за 6 с ----------
+import fcntl, threading
+LOCKS = os.path.join(STATE, "locks")
+os.makedirs(LOCKS, exist_ok=True)
+for _n in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):
+    open(os.path.join(LOCKS, _n + ".lock"), "a").close()
+
+
+def hold(*names):
+    fds = []
+    for n in names:
+        fd = os.open(os.path.join(LOCKS, n + ".lock"), os.O_RDONLY)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fds.append(fd)
+    return fds
+
+
+def release(fds):
+    for fd in fds:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def serve_with_wait(wait, *args):
+    """Заявка serve с полем wait (как у `--wait N`, но без блокировки теста на N секунд)."""
+    rc, q, rid = role_request("athena-x", APP, "serve", *args)
+    fp = os.path.join(q, rid + ".req.json")
+    req = json.load(open(fp))
+    req["wait"] = wait
+    json.dump(req, open(fp, "w"))
+    return q, rid
+
+
+O.HEAVY = "default"
+held = hold("heavy-cmd-1", "heavy-cmd-2")
+q, rid = serve_with_wait(40)
+threading.Timer(9, release, [held]).start()   # дольше старых 6 с: мутант «ждать 6 с» этот тест краснит
+t0 = time.monotonic()
+run_pass()
+res = O.load_result(q, rid) or {}
+check("serve при занятых местах heavy: ждёт освобождения и поднимается (не failed за 6 с)",
+      res.get("state") == "serving" and time.monotonic() - t0 >= 8, (res, time.monotonic() - t0))
+check("serve из очереди: сервер отвечает", port_open(res.get("port") or 0))
+_srv = O.servers()
+O.kill_group(_srv[rid]["pid"])
+_srv.pop(rid)
+O.save_servers(_srv)
+
+held = hold("heavy-cmd-1", "heavy-cmd-2")
+q, rid = serve_with_wait(4)
+t0 = time.monotonic()
+run_pass()
+res = O.load_result(q, rid) or {}
+check("serve: места не освободились за --wait — failed, настоящая причина, не «сервер уже запущен»",
+      res.get("state") == "failed" and "оба места heavy заняты тяжёлыми командами" in res.get("why", "")
+      and "не дождалась за 4 с" in res.get("why", "") and "уже запущен" not in res.get("why", ""), res)
+check("serve: не дождалась — код 75", O.result_code(res) == 75 and 3 <= time.monotonic() - t0 < 14, O.result_code(res))
+release(held)
+
+held = hold("heavy-server")
+q, rid = serve_with_wait(4)
+run_pass()
+res = O.load_result(q, rid) or {}
+check("serve: место сервера занято другим сервером — своя причина и код 75",
+      res.get("state") == "failed" and "heavy --server держит" in res.get("why", "") and O.result_code(res) == 75, res)
+release(held)
+
+q, rid = serve_with_wait(0)
+held = hold("heavy-cmd-1", "heavy-cmd-2")
+t0 = time.monotonic()
+run_pass()
+res = O.load_result(q, rid) or {}
+check("serve без --wait: старое короткое ожидание, failed с верной причиной",
+      res.get("state") == "failed" and "оба места" in res.get("why", "") and time.monotonic() - t0 < 14, res)
+release(held)
+O.HEAVY = None
+
 # --- 4а. уборка итогов в папках заявок (metis-0573): старше суток — удалить ---------------------------------------
 q = os.path.join(CACHE, "athena-x", "outside")
 fresh = sorted(n for n in os.listdir(q) if n.endswith(".result.json"))
