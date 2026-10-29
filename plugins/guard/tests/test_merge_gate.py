@@ -17,6 +17,7 @@ import time
 import uuid
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
+RULES = os.path.join(os.path.dirname(GUARD), "guard_rules.py")  # правила; guard.py — короткий вход (metis-0148)
 CACHED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_cached_main.py")  # guard из .pyc (metis-0544)
 OLD = "b" * 40
 CORE = "ядро защит — PR ждёт слияния владельцем (Д3)"
@@ -576,7 +577,7 @@ def t_managed(h):
     event = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "agent_type": "argus", "agent_id": "a1",
              "session_id": "s-coord", "tool_use_id": "t1", "cwd": h.j("projects/tg-read"),
              "tool_input": {"command": f"pantheon review accept latark/tg-read 3 {sha}{CL}"}, "tool_response": NORMAL}
-    r = subprocess.run([sys.executable, "-I", "-c", MANAGED_PROBE, GUARD, mf, json.dumps(event)], capture_output=True,
+    r = subprocess.run([sys.executable, "-I", "-c", MANAGED_PROBE, RULES, mf, json.dumps(event)], capture_output=True,
                        text=True, env=h.env("projects/tg-read"), timeout=20)
     check("при активных управляемых настройках PostToolUse пишет",
           "active True" in r.stdout and [x["kind"] for x in h.read()] == ["accept"], r.stdout + r.stderr)
@@ -1131,7 +1132,7 @@ def t_merge_hints(h):
         text = getattr(mg, name)
         check(f"{name}: подсказка с -R и --merge", form in text, text)
         check(f"{name}: «шлюз слияния», не «запор»", "шлюз" in text and "запор" not in text, text)
-    for f in ("merge_gate.py", "guard.py"):
+    for f in ("merge_gate.py", "guard.py", "guard_rules.py"):
         with open(os.path.join(os.path.dirname(GUARD), f), encoding="utf-8") as fh:
             src = fh.read()
         bare = re.findall(r"gh pr merge [^\s\"]+ --match-head-commit", src)

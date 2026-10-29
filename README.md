@@ -12,7 +12,8 @@
 
 ## Где что лежит
 
-- `plugins/guard/hooks/guard.py` — все правила; шапка файла перечисляет их и выключатель `GUARD_OFF`.
+- `plugins/guard/hooks/guard_rules.py` — все правила guard; шапка файла перечисляет их и выключатель `GUARD_OFF`.
+  Хуки зовут короткий вход `plugins/guard/hooks/guard.py`: он грузит правила из кэша .pyc (metis-0148).
   Данные: `~/.local/state/pantheon/domains.json` (собирает `pantheon domains build` из
   `~/ai/pantheon/directions.toml`) и `~/.claude/pantheon/policy.toml` — привилегии (образец —
   `plugins/guard/policy.example.toml`), правит только metis-pantheon.
@@ -236,7 +237,7 @@
   Bash-запись в память всех таких ролей, а guard (правило domain) — каждую роль только в её собственную папку, для
   Write/Edit и для тех записей Bash, которые он распознаёт. Запись в память чужой роли (например, argus) остаётся
   возможной только командой Bash, которую guard не разобрал (скрипт, интерпретатор). Исключение — главная сессия
-  Пританея: правило domain её не ограничивает (`check_domain` в guard.py), поэтому Зевс пишет в память любой такой роли
+  Пританея: правило domain её не ограничивает (`check_domain` в guard_rules.py), поэтому Зевс пишет в память любой такой роли
   и через Write/Edit (как и раньше), и обычной командой Bash (с 0.11.14). Субагенты в окне Пританея ограничены своей
   папкой, как везде. Граница та же, что у остальных папок окна: guard — защита от ошибок, а не от намеренного обхода.
 - `plugins/pantheon/lib/watch.py` — дежурный и управление сессиями (шаг 1.4): `pantheon watch [--dry-run]`, `agents`,

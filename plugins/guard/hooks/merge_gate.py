@@ -4,8 +4,8 @@ pulls/N/files с previous_filename. PR, задевающий ядро, аген�
 PR защит, который правит version в plugins/*/.claude-plugin/plugin.json или трогает .claude-plugin/releases.json, не
 проходит совсем (metis-0512, _version_problem): номер поднимает workflow release на main после слияния.
 
-Модуль без своего состояния: общие помощники guard.py (load_policy, privileged, private_conf, _inside, _norm, _key,
-STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — его присваивает guard.py при загрузке
+Модуль без своего состояния: общие помощники guard_rules.py (load_policy, privileged, private_conf, _inside, _norm, _key,
+STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — его присваивает guard_rules.py при загрузке
 (`merge_gate.G = <модуль guard>`). Пути считаются при вызове, а не при импорте: тесты подменяют HOME.
 
 Две части.
@@ -84,7 +84,7 @@ import subprocess
 import time
 from datetime import datetime
 
-G = None  # модуль guard.py: присваивает guard.py при загрузке
+G = None  # модуль guard_rules.py: присваивает он сам при загрузке
 
 MERGE_CLOSED = ("слияние делает лид направления (hephaestus-*, apollo-* субагентом) или главная сессия его "
                 "координатора. Вместо него отправь свою ветку, открой PR (gh pr create) и в отчёте лиду напиши, что "

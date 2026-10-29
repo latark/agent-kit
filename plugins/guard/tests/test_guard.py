@@ -25,6 +25,7 @@ import time
 import uuid
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
+RULES = os.path.join(os.path.dirname(GUARD), "guard_rules.py")  # правила; guard.py — короткий вход (metis-0148)
 SHIM = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_guard_shim.py")  # запуск guard без зависимости от места тестов
 
 
@@ -777,17 +778,20 @@ def failure_checks(home, env, cases):
                 penv={"GUARD_SHIM_BOOM": "soft"})
     check("Stop, сбой — код 0, без трассировки, с причиной", r.returncode == 0 and "Stop" in r.stderr
           and "Traceback" not in r.stderr and '"block"' not in r.stdout, r)
-    # сбой загрузки самого guard (рядом нет merge_gate.py) — тоже код 2 с причиной, на Stop — 0; запуск как у хука
-    lone = tempfile.mkdtemp(prefix="guard-lone-")
-    shutil.copy(GUARD, lone)
-    for label, ev, want in (("PreToolUse", {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                                            "tool_input": {"command": "ls"}}, 2),
-                            ("Stop", {"hook_event_name": "Stop"}, 0)):
-        r = subprocess.run([sys.executable, "-I", os.path.join(lone, "guard.py")], input=json.dumps(ev),
-                           capture_output=True, text=True, env=env, timeout=20)
-        check(f"сбой загрузки guard (нет merge_gate.py), {label} — код {want} и причина",
-              r.returncode == want and "сбой загрузки" in r.stderr and "Traceback" not in r.stderr, r)
-    shutil.rmtree(lone, ignore_errors=True)
+    # сбой загрузки самого guard (рядом нет merge_gate.py; нет модуля правил guard_rules.py у входа guard.py,
+    # metis-0148) — тоже код 2 с причиной, на Stop — 0; запуск как у хука
+    for what, files in (("нет merge_gate.py", (GUARD, RULES)), ("нет guard_rules.py", (GUARD,))):
+        lone = tempfile.mkdtemp(prefix="guard-lone-")
+        for f in files:
+            shutil.copy(f, lone)
+        for label, ev, want in (("PreToolUse", {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                "tool_input": {"command": "ls"}}, 2),
+                                ("Stop", {"hook_event_name": "Stop"}, 0)):
+            r = subprocess.run([sys.executable, "-I", os.path.join(lone, "guard.py")], input=json.dumps(ev),
+                               capture_output=True, text=True, env=env, timeout=20)
+            check(f"сбой загрузки guard ({what}), {label} — код {want} и причина",
+                  r.returncode == want and "сбой загрузки" in r.stderr and "Traceback" not in r.stderr, r)
+        shutil.rmtree(lone, ignore_errors=True)
     # обычные отказ и пропуск прежние: отказ — JSON и код 0
     r, _ = hook(None, role="domain-coordinator", ti={"command": "tmux send-keys -t 0 'да' Enter"})
     check("обычный отказ — JSON deny и код 0, как раньше", r.returncode == 0 and '"deny"' in r.stdout, r)
@@ -2149,7 +2153,7 @@ def main():
     for content in ('{"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "python3 guard.py --managed"}]}]}}',
                     '{"permissions": {"deny": ["Bash(x)"]}}', "битый json"):
         open(mf, "w").write(content)
-        results.append(subprocess.run([sys.executable, "-I", probe, GUARD, mf], capture_output=True, text=True,
+        results.append(subprocess.run([sys.executable, "-I", probe, RULES, mf], capture_output=True, text=True,
                                       env=env, timeout=10).stdout.strip())
     ok = results == ["True", "False", "False"]
     failed += not ok
@@ -2180,7 +2184,7 @@ def main():
                             ("Bash", "Bash", {"command": "pnpm dev"})):
         ev = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": ti, "session_id": "s-test",
               "cwd": os.path.join(home, "ai/pantheon"), "agent_type": "hq"}
-        outs[label] = subprocess.run([sys.executable, "-I", probe2, GUARD, mf, json.dumps(ev)], capture_output=True,
+        outs[label] = subprocess.run([sys.executable, "-I", probe2, RULES, mf, json.dumps(ev)], capture_output=True,
                                      text=True, env=menv, timeout=10).stdout
     ok = '"deny"' in outs["Agent"] and "hq-telegram" in outs["Agent"] and '"deny"' in outs["Skill"] \
         and outs["Bash"].strip() == ""
@@ -2200,7 +2204,7 @@ def main():
                  "g.run_hook()\n")
     ev = {"hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input": {"subagent_type": "x", "prompt": "x"},
           "session_id": "s-test", "cwd": os.path.join(home, "ai/pantheon")}
-    got = [subprocess.run([sys.executable, "-I", probe3, GUARD, os.path.join(home, "no-managed.json"), json.dumps(ev)],
+    got = [subprocess.run([sys.executable, "-I", probe3, RULES, os.path.join(home, "no-managed.json"), json.dumps(ev)],
                           capture_output=True, text=True, env=e, timeout=10) for e in (menv, env)]
     ok = all(r.returncode == 2 and "сбой проверки окна" in r.stderr for r in got)
     failed += not ok

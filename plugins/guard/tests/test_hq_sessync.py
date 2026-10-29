@@ -11,6 +11,7 @@ import sys
 import tempfile
 
 GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.py")
+RULES = os.path.join(os.path.dirname(GUARD), "guard_rules.py")  # правила; guard.py — короткий вход (metis-0148)
 results = []
 
 
@@ -22,7 +23,7 @@ def check(name, ok, info=None):
 root = os.path.realpath(tempfile.mkdtemp(prefix="guard-sessync-"))
 os.environ["HOME"] = root
 try:
-    spec = importlib.util.spec_from_file_location("guard_under_test", GUARD)
+    spec = importlib.util.spec_from_file_location("guard_under_test", RULES)
     g = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(g)
 
