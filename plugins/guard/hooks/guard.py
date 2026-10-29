@@ -40,8 +40,12 @@ PostToolUse (Bash:
                  GH_CONFIG_DIR в окружении, без обсуждений (--comments, --json comments) и без личного в команде;
                  слияние (gh pr merge, gh api …/merge) — отказ всегда (metis-0247);
   gh-out       — окну направления (PANTHEON_WINDOW) gh pr create|edit|comment|ready — только с -R из [merge_repos] его
-                 направления, без GH_*, --hostname и адреса PR, --body-file и -F — только из временных папок и своей
-                 копии репозитория (realpath); эти формы идут мимо песочницы (metis-0533);
+                 направления, без «GH_X=» в строке (и в значении флага), export/read GH_* или $X и GH_REPO/GH_HOST/
+                 GH_CONFIG_DIR в окружении, без --hostname и адреса PR; --body-file и -F — только из временных папок
+                 и своей копии репозитория (realpath), но не из личного ([private] paths) и не из .git любой копии,
+                 без шаблона оболочки и без относительного пути в строке из нескольких команд или при вызове gh
+                 через обёртку; env с длинной опцией или -S в строке с gh и --recover — отказ; эти формы идут
+                 мимо песочницы (metis-0533, metis-0596);
   hq-sessync   — окну Пританея `sessync find <слова> [-p имя] [-n число]` — только строкой целиком по строгому образцу
                  (слова из букв, цифр и _.-); флаги, присваивание перед командой, обёртки, глобы — отказ (metis-0566);
   tg-role      — окну любой роли (PANTHEON_ROLE задан) личная переписка закрыта: в Bash tg_read.py history, search,
@@ -3623,12 +3627,39 @@ def _hestia_gh_write_problem(sub, texts, cmd, cwd):
 
 
 def _gh_env_assigned(cmd, cwd):
-    """В команде присваивают GH_*: `GH_REPO=x gh …`, `env GH_HOST=h …`, `export GH_TOKEN=…`, `read GH_REPO`.
-    Слово GH_TOKEN в тексте комментария или заголовка (`--body 'mentions GH_TOKEN'`) — не присваивание (metis-0596)."""
-    if GH_ENV_ASSIGN.search(cmd):
+    """В строке есть «GH_X=» — в сыром тексте (`GH_REPO=x gh …`, в том числе внутри sh -c '…') или в разобранном слове
+    любой команды (`env "GH_HOST"=h`, `env GH_HOST\\=h`), — или `export`/`read GH_*` и `export $X` (слово не вычислить). Значение флага gh не исключаем:
+    сырой текст и слова — два разных разбора, их сверка давала обход; ложный отказ на `--body 'GH_TOKEN=x'` — в README
+    guard (metis-0596)."""
+    if GH_ENV_WORD.search(cmd):
         return True
     _, cmds = bash_analysis(cmd, cwd)
-    return any(n in GH_ENV_BUILTINS and any(x and x.startswith("GH_") for x in t) for n, t in cmds)
+    return any((n in GH_ENV_BUILTINS and any(x is None or x.startswith("GH_") for x in t))
+               or any(x and GH_ENV_WORD.search(x) for x in t) for n, t in cmds)
+
+
+def _gh_moved(cmd, cwd):
+    """Папка gh может быть не cwd события: в строке больше одной команды (cd, pushd, подоболочка …) или gh вызван через
+    обёртку (env, sudo, uv, pnpm, nice …) — ни имена, ни опции не разбираем. Относительный путь в --body-file тогда —
+    отказ по умолчанию (metis-0596). Правило зовут, только когда разбор нашёл gh, а обёртка всегда даёт разбору вторую
+    команду (саму обёртку), поэтому довольно «команда не одна»."""
+    _, cmds = bash_analysis(cmd, cwd)
+    return len(cmds) != 1
+
+
+def _gh_env_split(cmd, cwd):
+    """env перед gh с длинной опцией (--split-string, --chdir, … — сокращения не перебираем) или с S среди коротких:
+    строку -S env разбирает сам, guard её слов не видит (metis-0596). Смотрим слова env до слова gh."""
+    _, cmds = bash_analysis(cmd, cwd)
+    for n, t in cmds:
+        if os.path.basename((n or "").rstrip("/")) != "env":
+            continue
+        for x in t:
+            if x and os.path.basename(x.rstrip("/")) == "gh":
+                break
+            if x and (x.startswith("--") or (x[:1] == "-" and "S" in x[1:])):
+                return True
+    return False
 
 
 def _gh_out_problem(texts, cmd, cwd, direction, file_roots, whose):
@@ -3698,9 +3729,14 @@ def _gh_out_problem(texts, cmd, cwd, direction, file_roots, whose):
     if nxt:
         return "флаг без значения в конце команды"
     priv = _norm(private_conf(load_policy())["paths"]) if files else []
+    moved = bool(files) and _gh_moved(cmd, cwd)
     for f in files:
         if re.search(r"[*?\[{]", f):
             return f"--body-file {f} — шаблон оболочки не принимается: имя файла целиком"
+        if moved and f != "-" and not os.path.isabs(os.path.expanduser(f)):
+            # metis-0596: `cd me && gh … -F diary.md` — путь считался бы от cwd события, а читается из другой папки
+            return (f"--body-file {f} — относительный путь в строке из нескольких команд или при вызове gh через "
+                    "обёртку (cd …;, env, sudo, uv …): папку не проследить, дай абсолютный путь")
         full = os.path.realpath(os.path.join(cwd, os.path.expanduser(f))) if f != "-" else None
         # metis-0596: своя копия — корень чтения, но в ней бывают личное (~/ai/knowledge/me у окна mnemo-brain, где
         # check_private главной сессии не судит) и .git с ключом git-crypt и config — их на GitHub не выносим
@@ -3720,9 +3756,9 @@ def _gh_out_problem(texts, cmd, cwd, direction, file_roots, whose):
 
 
 GH_OUT_SUBS = {"create", "edit", "comment", "ready"}
-# присваивание GH_* — в начале слова (после пробела, ; & | ( ` кавычки или начала строки); export/read без «=» — по
-# разобранным командам. `--recover <файл>` в таблице нет: gh читает им любой файл как JSON (metis-0596)
-GH_ENV_ASSIGN = re.compile(r"(?:^|[\s;&|(`'\"])GH_[A-Za-z0-9_]*\+?=")
+# «GH_X=» — в сыром тексте строки и в разобранных словах; export/read без «=» — по разобранным командам. `--recover
+# <файл>` в таблице нет: gh читает им любой файл как JSON (metis-0596)
+GH_ENV_WORD = re.compile(r"GH_[A-Za-z0-9_]*\+?=")  # «GH_X=» где угодно в строке и в словах — отказ
 GH_ENV_BUILTINS = {"export", "declare", "typeset", "local", "readonly", "read"}
 # флаги форм gh pr create|edit|comment|ready (gh 2.x); чего нет в таблице — отказ, как HQ_GH_VALUE у штаба
 GH_OUT_SHORT_VALUE = "RFbtBHalmprT"
@@ -3746,6 +3782,9 @@ def check_gh_out(event, tool, tool_input):
     cmd = tool_input.get("command") or ""
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     _, cmds = bash_analysis(cmd, cwd)
+    if re.search(r"(?<![\w.-])gh(?![\w.-])", cmd) and _gh_env_split(cmd, cwd):
+        return ("Правило gh-out: env с длинной опцией или -S (--split-string) в строке с gh не принимается — опции env "
+                "не разбираем; слова gh пиши прямо (metis-0596).")
     # своя копия репозитория — корень с .git, но не $HOME и не «/»; нет .git — только временные папки. Личное и .git
     # внутри неё _gh_out_problem не пускает (metis-0596)
     top = os.path.realpath(_git_top(cwd))

@@ -2907,6 +2907,62 @@ def t_gh_out(h):
                 "read GH_REPO; export GH_REPO; ", "X=1 GH_CONFIG_DIR=/tmp/c "):
         case(f"gh-out: {pre.strip()} перед gh — отказ", f"{pre}gh pr comment 5 {R} -b x", False, "GH_*")
     case("gh-out: sh -c 'GH_REPO=x gh …' — отказ", f"sh -c 'GH_REPO=x gh pr comment 5 {R} -b x'", False, "GH_*")
+    # второй круг argus #209: присваивание в обёртке с кавычками и \= — разобранные слова env/sudo
+    for pre in ('env "GH_HOST"=h ', "env 'GH_HOST'=h ", "env GH_HOST\\=h ", "sudo GH_HOST=h ", "env -i GH_HOST=h ",
+                "env -u X GH_HOST=h ", "nice -n 5 env GH_HOST=h ", "GH_TOKEN=x\\ y "):
+        case(f"gh-out: {pre.strip()} перед gh — отказ", f"{pre}gh pr comment 5 {R} -b x", False, "GH_*")
+    # последний круг #209: «GH_X=» где угодно в строке — отказ, и в значении флага gh тоже (ложный отказ — README guard):
+    # сверка сырого текста со словами давала обход (`GH_HOST=x gh … --body=GH_HOST=x`)
+    for text in ("--body 'set GH_TOKEN=x in env'", '-b "GH_REPO=x is wrong"', "--body='GH_X=1'", "-t 'GH_HOST=h'"):
+        case(f"gh-out: {text} (GH_X= в значении флага) — отказ", f"gh pr comment 5 {R} {text}", False, "GH_*")
+    for text in ("--body=GH_HOST=x", "-b=GH_HOST=x", "--body='GH_HOST=x'", "-b 'GH_HOST=x'"):
+        case(f"gh-out: GH_HOST=x gh … {text} — отказ", f"GH_HOST=x gh pr comment 5 {R} {text}", False, "GH_*")
+    case("gh-out: sh -c с GH_X= в значении -b — отказ", f"sh -c \"gh pr comment 5 {R} -b 'GH_TOKEN=x'\"", False,
+         "GH_*")
+    case("gh-out: GH_X= в слове соседней команды — отказ", f"echo GH_X=1; gh pr comment 5 {R} -b x", False, "GH_*")
+    # env с длинной опцией или S среди коротких — отказ (сокращения не перебираем)
+    for pre in ("env -S 'GH_HOST=x' ", "env -SGH_HOST=x ", "env --split-string='GH_HOST=x' ", "env -iS 'A=1' ",
+                "env -S 'GH_HOST=x gh' ", "env --spl='A=1' ", "env --unset=X ", "env --ignore-environment ",
+                "env --chdir=docs ", "env -- "):
+        case(f"gh-out: {pre.strip()} gh — отказ", f"{pre}gh pr comment 5 {R} -b x", False, "split-string")
+    case("gh-out: env -i gh … --body-file абсолютный (слова после gh — не опции env) — можно",
+         f"env -i gh pr comment 5 {R} --body-file {ok_body}", True)
+    case("gh-out: env -S 'gh pr comment …' (gh внутри строки -S) — отказ",
+         f"env -S 'gh pr comment 5 {R} -F /etc/hosts'", False, "split-string")
+    # Д3: глубокий путь в .git своей копии вне личного
+    os.makedirs(h.j("projects/agent-kit/.git/logs"), exist_ok=True)
+    open(h.j("projects/agent-kit/.git/logs/HEAD"), "w").write("x")
+    case("gh-out: -F .git/logs/HEAD своей копии — отказ", f"gh pr comment 5 {R} -F .git/logs/HEAD", False, ".git")
+    case("gh-out: --body-file абсолютный …/.git/logs/HEAD — отказ",
+         f"gh pr comment 5 {R} --body-file {h.j('projects/agent-kit/.git/logs/HEAD')}", False, ".git")
+    # Б1 второго круга: относительный файл после смены папки — отказ; абсолютный после cd — по обычным правилам
+    for pre in ("cd docs && ", "(cd docs; ", "pushd docs && ", "env -C docs ", "sudo -D docs ", "popd; ", "cd; "):
+        tail = ")" if pre.startswith("(") else ""
+        case(f"gh-out: {pre.strip()} … -F notes.md — отказ", f"{pre}gh pr comment 5 {R} -F notes.md{tail}", False,
+             "относительный")
+    case("gh-out: cd … && -F абсолютный своей копии — можно",
+         f"cd /tmp && gh pr comment 5 {R} -F {wt_body}", True)
+    case("gh-out: cd … && -F во временной папке — можно", f"cd {tmp} && gh pr comment 5 {R} -F {ok_body}", True)
+    # любая обёртка перед gh может сменить папку — относительный -F отказ, опции обёрток не разбираем
+    for pre in ("uv --directory docs run ", "pnpm -C docs exec ", "yarn --cwd docs ", "mise -C docs exec -- ",
+                "nice -n 5 ", "chroot / ", "env -i ", "env $X ", "sudo ", "doas -u me "):
+        case(f"gh-out: {pre.strip()} gh … -F notes.md — отказ", f"{pre}gh pr comment 5 {R} -F notes.md", False,
+             "абсолютный путь")
+    case("gh-out: uv --directory … gh -F абсолютный своей копии — можно",
+         f"uv --directory docs run gh pr comment 5 {R} -F {wt_body}", True)
+    case("gh-out: gh … -b gh -F notes.md (gh сам себе не обёртка) — можно",
+         f"gh pr comment 5 {R} -t gh -F notes.md", True)
+    # больше одной команды в строке — относительный -F отказ по умолчанию, имена команд не разбираем
+    for line in (f"true; gh pr comment 5 {R} -F notes.md", f"ls && gh pr comment 5 {R} -F notes.md",
+                 f"gh pr comment 5 {R} -F notes.md | cat", f"sh -c 'gh pr comment 5 {R} -F notes.md'",
+                 f"sh -c 'cd docs; gh pr comment 5 {R} -F notes.md'",
+                 f"gh pr comment 5 {R} -F notes.md; gh pr comment 6 {R} -F notes.md"):
+        case(f"gh-out: {line[:40]}… (несколько команд) — отказ", line, False, "абсолютный путь")
+    case("gh-out: одна команда gh -F notes.md — можно", f"gh pr comment 5 {R} -F notes.md", True)
+    # export/read/declare с неразобранным словом — отказ: имя переменной не вычислить
+    for pre in ("export $X; ", "read $V; ", 'declare "$X"; ', "readonly $(echo GH_REPO); "):
+        case(f"gh-out: {pre.strip()} gh — отказ", f"{pre}gh pr comment 5 {R} -b x", False, "GH_*")
+    case("gh-out: export X=1; gh — можно", f"export X=1; gh pr comment 5 {R} -b x", True)
     for text in ('--body "$(cat /etc/hosts)"', '--body "$X"', "--body $X", '-t "cost $5"'):
         case(f"gh-out: {text} — подстановку не вычислить — отказ", f"gh pr comment 5 {R} {text}", False,
              "не вычислить")
@@ -2975,6 +3031,11 @@ def t_gh_out_private(h):
             case("--body-file из своей копии вне личного — можно", f"gh pr comment 5 {R} --body-file notes/n.md", True)
             case("--body-file из временной папки — можно", f"gh pr comment 5 {R} --body-file {ok_body}", True)
             case("-b текст — можно", f"gh pr comment 5 {R} -b 'см. me/ и .git'", True)
+            # argus #209 Б1: относительный путь после смены папки в той же строке
+            for cmd in (f"cd me && gh pr comment 5 {R} -F diary.md", f"(cd me; gh pr comment 5 {R} -F diary.md)",
+                        f"pushd me && gh pr comment 5 {R} --body-file diary.md", f"cd .git && gh pr edit 5 {R} -F config",
+                        f"env -C me gh pr comment 5 {R} -F diary.md"):
+                case(f"{cmd} — отказ", cmd, False)
         # argus B2 #199: окно metis-pantheon, cwd внутри ~/ai/pantheon — выход через .. к .git своей копии
         WM = {"PANTHEON_ROLE": "domain-coordinator", "PANTHEON_WINDOW": "metis-pantheon"}
         for role, aid in ((None, None), ("dev-sonnet", "sub1")):
@@ -2987,6 +3048,11 @@ def t_gh_out_private(h):
                          pdir="projects/agent-kit", cwd="ai/pantheon/directions/metis-pantheon", agent_id=aid,
                          extra_env=WM)
             check(f"gh-out metis ({role or 'главная'}): -F ../../.git/config — отказ", d == "deny" and ".git" in r, r)
+            d, r = h.pre("cd ../../.git/git-crypt/keys && gh pr comment 1 -R latark/agent-kit -F default", role=role,
+                         pdir="projects/agent-kit", cwd="ai/pantheon/directions/metis-pantheon", agent_id=aid,
+                         extra_env=WM)
+            check(f"gh-out metis ({role or 'главная'}): cd ../../.git/git-crypt/keys && … -F default — отказ",
+                  d == "deny" and "gh-out" in r, r)
         # Гестия: тот же разбор файла — .git во временной папке тоже не выносится
         os.makedirs(os.path.join(tmp, ".git"), exist_ok=True)
         open(os.path.join(tmp, ".git/config"), "w").write("x")
