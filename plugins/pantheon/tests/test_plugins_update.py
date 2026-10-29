@@ -561,6 +561,9 @@ print(json.dumps({{
     e.write(os.path.join(e.stub, "gh.json"), json.dumps([run_row("c" * 40, "failure")]))
     again(e, x)
     check("новый красный коммит — новая тревога", e.alerts().count("tests красные на main") == 2, e.alerts())
+    ghlog = open(os.path.join(e.stub, "gh.log")).read()
+    check("gh спрошен про tests.yml на ветке main репозитория latark/agent-kit",
+          "--branch main" in ghlog and "--workflow tests.yml" in ghlog and "--repo latark/agent-kit" in ghlog, ghlog)
     e.close()
     e, x = ci_env([run_row("d" * 40, None, "in_progress")] + red)
     e.run("plugins", "update", extra=x)
@@ -568,7 +571,7 @@ print(json.dumps({{
     e.close()
     for name, runs, rc in (("зелёный", [run_row("a" * 40, "success")], 0), ("нет прогонов", [], 0),
                            ("startup_failure", [run_row("a" * 40, "startup_failure")], 0),
-                           ("сбой gh", [], 7)):
+                           ("сбой gh", red, 7)):
         e, x = ci_env(runs, rc)
         r = e.run("plugins", "update", extra=x)
         again(e, x)
