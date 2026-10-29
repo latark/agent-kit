@@ -8331,7 +8331,7 @@ def probes_context_run(t=None):
     sec = {"time": t, "rc": None, "text": "", "error": None}
     try:
         r = subprocess.run([claude_bin(), "-p", "/context"], capture_output=True, text=True, timeout=180,
-                           stdin=subprocess.DEVNULL, cwd=STATE)
+                           stdin=subprocess.DEVNULL, cwd=STATE, env=claude_env())
         sec.update(rc=r.returncode, text=r.stdout[:CONTEXT_PROBE_TEXT_MAX])
         if r.returncode != 0:
             sec["error"] = (r.stderr.strip().splitlines() or ["код выхода не 0"])[-1][:200]
