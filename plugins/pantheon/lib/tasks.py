@@ -677,7 +677,7 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
         check_depends(load_tasks(pantheon, WORK_TYPES), None, fields["depends_on"])  # новая задача в цикл не входит
     if fields.get("source"):
         check_source(pantheon, None, fields["source"])
-    if done_when and done_criteria(escape_desc(text)):
+    if done_when and (done_criteria(escape_desc(text)) or DONE_WHEN_HEAD in escape_desc(text).split("\n")):
         raise ValueError("в тексте уже есть «Готово, когда» с пунктами — пишите их либо там, либо в --done-when, не в обоих местах")
     project = resolve_project(pantheon, direction, project)  # metis-0323: только имя проекта из directions.toml
     tid = new_id(pantheon, direction)
@@ -709,7 +709,7 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
         raise ValueError("; ".join(errs))
     desc = escape_desc(text)
     # свой раздел — всегда, кроме случая, когда пункты уже в тексте (старый образец «Готово, когда:» со списком)
-    dw = "" if done_criteria(desc) else done_when_section(done_when)
+    dw = "" if done_criteria(desc) or DONE_WHEN_HEAD in desc.split("\n") else done_when_section(done_when)
     try:
         write_task(path, head, f"\n# {title.strip()}\n\n" + (desc + "\n\n" if desc else "") + dw
                    + f"## Журнал\n\n- {now_iso(t)[:16].replace('T', ' ')} — {actor}: создана"
@@ -847,8 +847,16 @@ def task_claim(pantheon, t, tid, by, hours=1.0):
 
 
 def escape_desc(text):
-    """Текст задачи: строка «## …» внутри него экранируется, иначе она стала бы разделом (журналом) задачи."""
-    return "\n".join(("\\" + ln) if ln.startswith("## ") else ln for ln in (text or "").strip().split("\n")).strip()
+    """Текст задачи: строка «## …» внутри него экранируется, иначе она стала бы разделом (журналом) задачи. Исключение —
+    первая строка «## Готово, когда»: это раздел критериев, он остаётся разделом (metis-0591); второй такой — экранируется."""
+    out, seen = [], False
+    for ln in (text or "").strip().split("\n"):
+        if ln == DONE_WHEN_HEAD and not seen:
+            seen = True
+        elif ln.startswith("## "):
+            ln = "\\" + ln
+        out.append(ln)
+    return "\n".join(out).strip()
 
 
 def replace_desc(body, text):
