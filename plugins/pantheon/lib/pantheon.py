@@ -2260,16 +2260,19 @@ SANDBOX_DOMAINS = ["registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "fi
                    "github.com", "api.github.com", "codeload.github.com", "objects.githubusercontent.com",
                    "raw.githubusercontent.com"]
 # Мимо песочницы: gh (в ней не работает — TLS Go на macOS) — только эти подкоманды; дописать тревогу. Всё, что не
-# исключено, в песочнице просто падает — это и есть отказ (P0-4, metis-0064): `gh api` и `gh issue` (любые записи в
-# GitHub) не выпускаются; из `gh pr` и `gh run` — только чтение (`gh run cancel|rerun|delete` падают). Голые формы —
-# отдельно: шаблон «… *» их не покрывает
-GH_PR_READ = [f"gh pr {c}{tail}" for c in ("view", "checks", "diff", "list") for tail in ("", " *")]
+# исключено, в песочнице просто падает — это и есть отказ (P0-4, metis-0064): `gh api` и запись в `gh issue` (любые
+# записи в GitHub) не выпускаются; из `gh pr`, `gh issue` и `gh run` — только чтение (`gh run cancel|rerun|delete`
+# падают). Голые формы — отдельно: шаблон «… *» их не покрывает (metis-0533: status и gh issue view|list добавлены)
+GH_PR_READ = [f"gh pr {c}{tail}" for c in ("view", "checks", "diff", "list", "status") for tail in ("", " *")]
+GH_ISSUE_READ = [f"gh issue {c}{tail}" for c in ("view", "list") for tail in ("", " *")]
 GH_RUN_READ = [f"gh run {c}{tail}" for c in ("view", "list", "watch") for tail in ("", " *")]
-SANDBOX_EXCLUDED = GH_PR_READ + GH_RUN_READ + ["gh repo view *", "gh auth status",
+SANDBOX_EXCLUDED = GH_PR_READ + GH_ISSUE_READ + GH_RUN_READ + ["gh repo view *", "gh auth status",
                                  "pantheon alert *", "pantheon consent *", "pantheon saved *"]
 # PR создают и правят (заголовок, описание, метки — `gh pr edit`, metis-0247) лиды, сливает координатор или лид —
-# только окна направлений; кто и что сливает, проверяет guard (merge_problem). Мастерской — нет
-GH_PR_WRITE = ["gh pr create *", "gh pr edit *", "gh pr merge *"]
+# только окна направлений; кто и что сливает, проверяет guard (merge_problem). Мастерской — нет. metis-0533: ещё
+# `gh pr comment` (ответ ревью в PR) и `gh pr ready` (снять черновик) — без произвольного кода; текст — через
+# --body-file. `gh pr close|reopen|review`, запись в `gh issue`, `gh api`, `gh auth token`, `gh extension` — в песочнице
+GH_PR_WRITE = ["gh pr create *", "gh pr edit *", "gh pr merge *", "gh pr comment *", "gh pr ready *"]
 # штаб (metis-0247, «да» владельца 19.10 [zeus-0247-yes]): сети у окна нет, а gh в песочнице всё равно падает (TLS Go,
 # x509 -26276) — мимо неё только чтение PR и правка. Слияния здесь нет (решение Зевса 19.10, metis-0247 r4): gh pr
 # merge, gh api и прочий gh остаются в песочнице без сети и падают; guard (hq-gh) вдобавок отказывает слиянию в любой
