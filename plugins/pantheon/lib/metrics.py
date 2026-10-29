@@ -22,6 +22,9 @@ review-*.md направления с id в заголовке (строка «�
 его заметки, ответы и переносы; возврат после слияния — другие задачи со словами revert, hotfix, «откатили» в одной
 строке с id.
 
+Пропуски argus (metis-0401): `pantheon review miss` пишет пометку в STATE/argus-misses.jsonl, свод недели даёт долю по
+классам (ядро и защиты / вне ядра) × 1 или 2 argus, `pantheon review sample` выбирает PR для выборочной проверки.
+
 Замер «Лимит» (metis-0390): в своде недели — цена принятой задачи (токены и $ всех кругов, разработчик + argus, на
 принятую: последний круг argus «принять» или PR слит) и вмешательства владельца на принятую (заметки, ответы, переносы,
 возвраты, доля без вмешательства) по неделям; меньше 20 принятых — «мало данных».
@@ -552,6 +555,116 @@ def backfill(ctx, tasks, frm, to=None, dry=False, out=None):
     return rows
 
 
+# --- пропуски argus (metis-0401) ------------------------------------------------------------------------------------
+# Пропуск — ошибка в PR, который argus принял (находка после «принять»). Пометка — `pantheon review miss`: строка в
+# STATE/argus-misses.jsonl. Знаменатель доли — PR с «принять» в журнале шлюза (STATE/merge-gate/records.jsonl; шлюз
+# без «принять» не сливает), неделя — по последнему «принять». Класс PR по журналу: репозиторий направления
+# metis-pantheon — «ядро и защиты» (защиты от ядра по журналу не отличить: у пометки класс указывает тот, кто её ставит),
+# остальные — «вне ядра». argus — сколько рецензентов приняли последний принятый head: 1 или 2 и больше.
+MISS_CLASSES = ("защиты", "ядро", "вне ядра")
+CORE_DIRECTION = "metis-pantheon"
+SAMPLE_GROUP = 3  # столько PR с одним argus в одном репозитории за неделю — выборка берёт их одним запуском
+CLASS_LABEL = {"ядро": "ядро и защиты", "защиты": "ядро и защиты", "вне ядра": "вне ядра"}
+
+
+def misses_path(ctx):
+    return os.path.join(ctx.state, "argus-misses.jsonl")
+
+
+def accepted_prs(ctx):
+    """{(repo, pr): {"t": epoch последнего «принять», "argus": число принявших последний принятый head, "sha": …}}."""
+    last, seq = {}, {}
+    for r in _jsonl(os.path.join(ctx.state, "merge-gate", "records.jsonl")):
+        by, repos = r.get("by"), r.get("repo")
+        if r.get("kind") not in ("accept", "reject") or not isinstance(by, dict) or by.get("agent_type") != "argus" \
+                or not isinstance(repos, list) or not repos or not isinstance(r.get("pr"), int) \
+                or not isinstance(r.get("sha"), str):
+            continue
+        key = (str(repos[0]).lower(), r["pr"])
+        who = (by.get("session_id") or "", by.get("agent_id") or "")
+        last.setdefault(key, {}).setdefault(r["sha"].lower(), {})[who] = r["kind"]
+        if r["kind"] == "accept":
+            seq[key] = (r["sha"].lower(), epoch(str(r.get("time"))) or 0)
+    return {k: {"sha": sha, "t": t, "argus": sum(v == "accept" for v in last[k][sha].values())}
+            for k, (sha, t) in seq.items() if any(v == "accept" for v in last[k][sha].values())}
+
+
+def repo_class(ctx, repo):
+    return "ядро" if str(repo).lower() in ctx.repos.get(CORE_DIRECTION, []) else "вне ядра"
+
+
+def add_miss(ctx, repo, pr, by, text, cls=None, t=None):
+    """Пометить пропуск argus → (строка, None) или (None, причина). PR без «принять» в журнале шлюза — не пропуск."""
+    prs = accepted_prs(ctx)
+    info = prs.get((repo.lower(), pr))
+    if not info:
+        return None, f"{repo}#{pr}: в журнале шлюза нет «принять» argus на этот PR — это не пропуск argus"
+    if cls is not None and cls not in MISS_CLASSES:
+        return None, f"класс «{cls}»: допустимы {', '.join(MISS_CLASSES)}"
+    row = {"v": 1, "time": iso(ctx.t if t is None else t), "repo": repo.lower(), "pr": pr, "by": by, "text": text,
+           "class": cls or repo_class(ctx, repo), "argus": min(info["argus"], 2), "sha": info["sha"],
+           "accepted_at": iso(info["t"])}
+    os.makedirs(ctx.state, exist_ok=True)
+    fd = os.open(misses_path(ctx), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.write(fd, (json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+    return row, None
+
+
+def miss_stats(ctx):
+    """{неделя: {(класс, argus): {"prs": N, "misses": M, "protect": из них защиты}}}, класс — «ядро и защиты»/«вне ядра»,
+    argus — 1 или 2 (два и больше). Неделя пропуска — по «принять» его PR, нет в журнале — по времени пометки."""
+    prs, out = accepted_prs(ctx), {}
+    cell = lambda w, k: out.setdefault(w, {}).setdefault(k, {"prs": 0, "misses": 0, "protect": 0})
+    for (repo, _), i in prs.items():
+        cell(week_of(i["t"]), (CLASS_LABEL[repo_class(ctx, repo)], min(i["argus"], 2)))["prs"] += 1
+    for m in _jsonl(misses_path(ctx)):
+        i = prs.get((str(m.get("repo")), m.get("pr")))
+        t = i["t"] if i else epoch(str(m.get("time")))
+        if t is None or m.get("class") not in MISS_CLASSES:
+            continue
+        c = cell(week_of(t), (CLASS_LABEL[m["class"]], 2 if m.get("argus") == 2 else 1))
+        c["misses"] += 1
+        c["protect"] += m["class"] == "защиты"
+    return out
+
+
+def misses_table(stats):
+    head = ["неделя", "класс", "argus", "принято PR", "пропусков", "доля", "из них защиты"]
+    lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+    for w, cells in sorted(stats.items()):
+        for (cls, n), c in sorted(cells.items()):
+            share = f"{round(100 * c['misses'] / c['prs'])}%" if c["prs"] else "—"
+            lines.append("| " + " | ".join([w, cls, str(n), str(c["prs"]), str(c["misses"]), share,
+                                            str(c["protect"])]) + " |")
+    return "\n".join(lines)
+
+
+def sample_pick(ctx, t=None):
+    """Выборочная проверка недели (metis-0401): → {"week", "budget", "targets": [[(repo, pr), …], …], "why"}.
+    Кандидаты — PR недели с одним argus в репозиториях ядра; нет их — пропуск недели. Группа — PR одного репозитория
+    (область) от SAMPLE_GROUP штук идёт одним запуском на суммарный дифф; больше PR — раньше. Потолок — 1 запуск,
+    2 — если на прошлой неделе был пропуск."""
+    t = ctx.t if t is None else t
+    week, prev = week_of(t), week_of(week_start(t) - 1)
+    budget = 2 if any(c["misses"] for c in miss_stats(ctx).get(prev, {}).values()) else 1
+    by = defaultdict(list)
+    for (repo, pr), i in accepted_prs(ctx).items():
+        if week_of(i["t"]) == week and i["argus"] == 1 and repo_class(ctx, repo) == "ядро":
+            by[repo].append((i["t"], pr))
+    if not by:
+        return {"week": week, "budget": budget, "targets": [], "why": "нет PR ядра с одним argus — неделя пропущена"}
+    order = sorted(by.items(), key=lambda kv: (len(kv[1]) >= SAMPLE_GROUP, len(kv[1]), max(kv[1])), reverse=True)
+    targets = []
+    for repo, v in order[:budget]:
+        v.sort()
+        targets.append([(repo, pr) for _, pr in (v if len(v) >= SAMPLE_GROUP else v[-1:])])
+    return {"week": week, "budget": budget, "targets": targets, "why": ""}
+
+
 # --- свод -------------------------------------------------------------------------------------------------------
 
 def latest(rows):
@@ -627,7 +740,7 @@ def _group(rows, merged=()):
     }
 
 
-def summary(rows, t, post=None, merged=()):
+def summary(rows, t, post=None, merged=(), misses=None):
     """Свод: {"week": …, "all": …}, в каждом {"by_executor": {(исполнитель, модель, effort): группа},
     "by_direction": {направление: группа}}. post — свежий индекс возвратов после слияния (заменяет записанный)."""
     rows = latest(rows)
@@ -635,7 +748,7 @@ def summary(rows, t, post=None, merged=()):
         rows = [dict(r, post_merge=post.get(r["id"], r.get("post_merge") or [])) for r in rows]
     w0 = week_start(t)
     week = [r for r in rows if (epoch(str(r.get("closed_at") or "")) or 0) >= w0]
-    out = {"week_name": week_of(t)}
+    out = {"week_name": week_of(t), "misses": misses or {}}
     byweek = defaultdict(list)
     for r in rows:
         c = epoch(str(r.get("closed_at") or ""))
@@ -704,6 +817,11 @@ def week_md(s, t):
               f"принятые, на принятую. Вмешательства — среднее на принятую задачу. Меньше {FEW} принятых — «мало "
               "данных». «% недели на задачу» в учёте не хранится — только токены и $ (оценка).", "",
               _limit_table(s.get("weeks", {})), ""]
+    if s.get("misses"):
+        parts += ["## Пропуски argus: доля по классам (metis-0401)", "",
+                  "Пропуск — ошибка в PR, который argus принял; пометка — `pantheon review miss`. «Принято PR» — PR с "
+                  "«принять» в журнале шлюза, неделя по последнему «принять». Решение о втором argus на ядре — по этим "
+                  "цифрам, словом владельца. `pantheon review sample` — выборка недели.", "", misses_table(s["misses"]), ""]
     for name, label in (("week", f"Неделя {s['week_name']}"), ("all", "С начала учёта")):
         parts += [f"## {label}", "", "### По исполнителю × модели × effort", "",
                   _table(["исполнитель", "модель", "effort"], s[name]["by_executor"]), "",
@@ -785,7 +903,7 @@ def sync_pult(board, notes):
 
 def publish(ctx, tasks):
     """Свод → metrics/week-<неделя>.md и заметки Пульта (если задана доска). → свод."""
-    s = summary(read_rows(ctx.rows_path), ctx.t, post_merge_index(tasks), merged_index(tasks))
+    s = summary(read_rows(ctx.rows_path), ctx.t, post_merge_index(tasks), merged_index(tasks), miss_stats(ctx))
     write_if_changed(os.path.join(ctx.pantheon, "metrics", f"week-{s['week_name']}.md"), week_md(s, ctx.t))
     if ctx.board and os.path.isdir(ctx.board):
         sync_pult(ctx.board, pult_notes(s, ctx.t))
