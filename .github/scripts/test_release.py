@@ -362,13 +362,25 @@ def t_workflows():
         capture_output=True, text=True) if rb else None
     check("workflows: каждый .yml разбирается как YAML (ruby -ryaml)", bad is not None and bad.returncode == 0,
           bad.stderr[-300:] if bad else "нет ruby")
-    check("tests.yml: сбой шага не прячется — continue-on-error нигде нет",
-          not re.search(r"continue-on-error", text), text)
-    check("tests.yml: shell и defaults нигде нет — подмена оболочки (`shell: bash -c 'exit 0' {0}`, defaults: run: shell:) прячет провал",
-          not re.search(r"(?:^|[\s{,\-])[\"']?(?:shell|defaults)[\"']?\s*:", text, re.M), text)
-    # metis-0590: env: (BASH_ENV подменяет оболочку и прячет провал), container:, services:, working-directory: — на любом уровне
-    check("tests.yml: env, container, services, working-directory нигде нет — подмена окружения и каталога прячет провал",
-          not re.search(r"(?:^|[\s{,\-])[\"']?(?:env|container|services|working-directory)[\"']?\s*:", text, re.M), text)
+    # metis-0597 (долг argus B #198): ключи ищем в разборе YAML, а не регуляркой — экранированная ("\x65nv"),
+    # flow-форма ({env: x}) и кавычки ("env") дают тот же ключ после разбора. Все уровни, все mapping.
+    def wf_keys(path):
+        """Все ключи mapping любого уровня файла (ruby -ryaml) или None, если разбор упал."""
+        rb = shutil.which("ruby")
+        if not rb:
+            return None
+        walk = ("def w(o, a) case o when Hash then o.each { |k, v| a << k.to_s; w(v, a) } "
+                "when Array then o.each { |x| w(x, a) } end; a end; "
+                "puts JSON.generate(w(YAML.load_file(ARGV[0]), []))")
+        r = subprocess.run([rb, "-rjson", "-ryaml", "-e", walk, path], capture_output=True, text=True)
+        return json.loads(r.stdout) if r.returncode == 0 else None
+
+    keys = wf_keys(os.path.join(WORKFLOWS, "tests.yml"))
+    forbidden = {"shell", "defaults", "env", "container", "services", "working-directory", "continue-on-error"}
+    hit = sorted(set(keys) & forbidden) if keys is not None else None
+    check("tests.yml: continue-on-error, shell, defaults, env, container, services, working-directory нигде нет "
+          "(ключи из разбора YAML, любой уровень): подмена оболочки, окружения, каталога и сбоя прячет провал",
+          keys is not None and not hit, hit if hit is not None else "разбор YAML не удался (нет ruby или ошибка)")
     check("tests.yml: ни один шаг не выключается (`if:` только на уровне job), checkout не берёт чужой ref",
           not re.search(r"^(      - |        )if:", text, re.M) and not re.search(r"^\s*(- )?ref:", text, re.M), text)
     check("tests.yml: PR — job affected на закреплённом Linux (минута macOS ×10), полная история для merge-base",
