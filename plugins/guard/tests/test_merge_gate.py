@@ -2859,11 +2859,37 @@ def t_gh_out(h):
          f"gh pr comment 5 {R} --body-file {link}", False, "realpath")
     case("gh-out: --body-file .. из временной папки наружу — отказ",
          f"gh pr comment 5 {R} --body-file {tmp}/../../etc/hosts", False, "realpath")
-    case("gh-out: --body-file - (stdin) — отказ", f"cat {ok_body} | gh pr comment 5 {R} --body-file -", False, "realpath")
+    case("gh-out: --body-file - (stdin) — отказ", f"cat {ok_body} | gh pr comment 5 {R} --body-file -", False, "«-»")
     case("gh-out: --body \"$(cat файл)\" — слово не вычислить — отказ",
          f'gh pr comment 5 {R} --body "$(cat /etc/hosts)"', False)
-    case("gh-out: склеенные -cFфайл — отказ", f"gh pr edit 5 {R} -aF/etc/hosts", False, "склеенные")
+    case("gh-out: склеенные -cFфайл — отказ", f"gh pr edit 5 {R} -dF/etc/hosts", False, "склеенные")
     case("gh-out: слово до подкоманды не вычислить — отказ", f"gh $X pr comment 5 {R} -b x", False, "не вычислить")
+    # второй круг: неизвестные флаги, значение с «-», корень копии без .git или $HOME
+    case("gh-out: неизвестный флаг формы — отказ", f"gh pr comment 5 {R} --unknown-flag x -b y", False, "не из таблицы")
+    case("gh-out: неизвестный флаг до pr — отказ", f"gh --jq x pr comment 5 {R} -b y", False, "до pr")
+    case("gh-out: -X до pr — отказ", f"gh -X pr comment 5 {R} -b y", False, "до pr")
+    case("gh-out: неизвестный короткий флаг — отказ", f"gh pr comment 5 {R} -Z y", False, "не из таблицы")
+    case("gh-out: булев флаг со значением --web=x — отказ", f"gh pr comment 5 {R} --web=x", False, "без значения")
+    case("gh-out: флаги из таблицы (--draft, -l x, --add-label x) — можно",
+         f"gh pr create {R} --draft -t t -b b -l bug --base main", True)
+    case("gh-out: -R со значением на «-» — отказ", "gh pr comment 5 -R -x -b y", False, "«-»")
+    case("gh-out: --repo=-x — отказ", "gh pr comment 5 --repo=-x -b y", False, "«-»")
+    case("gh-out: -F со значением на «-» — отказ", f"gh pr comment 5 {R} -F -x", False, "«-»")
+    case("gh-out: --body-file=-x — отказ", f"gh pr comment 5 {R} --body-file=-x", False, "«-»")
+    nogit = h.j("projects/nogit")
+    os.makedirs(nogit, exist_ok=True)
+    open(os.path.join(nogit, "n.md"), "w").write("x")
+    d, r = win(f"gh pr comment 5 {R} --body-file {nogit}/n.md")
+    d2, r2 = h.pre(f"gh pr comment 5 {R} --body-file {nogit}/n.md", role="dev-sonnet", pdir="projects/nogit",
+                   agent_id="sub1", extra_env=W)
+    check("gh-out: cwd без .git — корень копии не cwd, файл в cwd — отказ", d2 == "deny" and "realpath" in r2, r2)
+    hg = h.j("hgit")
+    os.makedirs(os.path.join(hg, ".git"), exist_ok=True)
+    os.makedirs(os.path.join(hg, "sub"), exist_ok=True)
+    open(os.path.join(hg, "sub", "n.md"), "w").write("x")
+    d3, r3 = h.pre(f"gh pr comment 5 {R} --body-file {hg}/sub/n.md", role="dev-sonnet", pdir="hgit/sub",
+                   agent_id="sub1", extra_env=dict(W, HOME=hg))
+    check("gh-out: .git в $HOME — корень не $HOME, файл под ним — отказ", d3 == "deny" and "realpath" in r3, r3)
     case("gh-out: gh pr view без -R — не задевает (чтение)", "gh pr view 5", True)
     case("gh-out: gh pr merge — свой шлюз, правило не задевает", "gh pr merge 5", False, "слияние")
     # вне окна направления — не работает: нет PANTHEON_WINDOW

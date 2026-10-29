@@ -3629,36 +3629,56 @@ def _gh_out_problem(texts, cmd, cwd, direction, file_roots, whose):
         return "слово команды не вычислить (переменная, $(…))"
     if any(t == "--hostname" or t.startswith("--hostname=") for t in texts):
         return "--hostname уводит gh на другой хост — без него"
-    args = texts[1:]  # -R бывает и до pr (`gh -R o/r pr create`); слова pr, create флагами не являются
+    ps = _gh_pr_sub(texts)
+    if ps is None:
+        return "подкоманду gh pr не разобрать"
+    q, i = ps
+    extra = _gh_pre_extra(texts[:q])
+    if extra is not None:
+        return f"до pr — только -R/--repo (флаг gh «{extra}» не принимается)"
     repos, files, nxt = [], [], None
-    for a in args:
+    for k, a in enumerate(texts):
+        if k in (q, i):  # слова pr и <sub> — не флаги
+            continue
         if nxt:
-            (repos if nxt == "repo" else files if nxt == "file" else []).append(a)
+            if nxt in ("repo", "file") and a.startswith("-"):
+                return f"значение -R/-F/--body-file не может начинаться с «-» ({a})"
+            (repos if nxt == "repo" else files if nxt == "file" else []).append(a) if nxt != "skip" else None
             nxt = None
             continue
-        if a in ("-b", "--body", "-t", "--title", "-m", "--message"):
-            nxt = "text"  # текст комментария и заголовок — не адрес: ссылки в нём можно
-            continue
-        if a.startswith(("--body=", "--title=", "--message=")):
-            continue
-        if "://" in a or re.search(r"/[^\s/]+#\d+", a):  # URL и owner/repo#N уводят в другой репозиторий
+        if a.startswith("--"):
+            flag, eq, val = a.partition("=")
+            if flag not in GH_OUT_LONG_VALUE and flag not in GH_OUT_LONG_BOOL:
+                return f"флаг {flag} не из таблицы формы gh pr {texts[i]}"
+            if flag in GH_OUT_LONG_VALUE:
+                kind = "repo" if flag == "--repo" else "file" if flag == "--body-file" else "skip"
+                if eq:
+                    if kind in ("repo", "file") and val.startswith("-"):
+                        return f"значение {flag} не может начинаться с «-» ({val})"
+                    (repos if kind == "repo" else files if kind == "file" else []).append(val) if kind != "skip" else None
+                else:
+                    nxt = kind
+            elif eq:
+                return f"флаг {flag} без значения, а дано «{a}»"
+        elif a.startswith("-") and len(a) > 1:
+            c, rest = a[1], a[2:]
+            if c in GH_OUT_SHORT_VALUE:
+                kind = "repo" if c == "R" else "file" if c == "F" else "skip"
+                rest = rest[1:] if rest.startswith("=") else rest
+                if rest:
+                    if kind in ("repo", "file") and rest.startswith("-"):
+                        return f"значение -{c} не может начинаться с «-» ({rest})"
+                    (repos if kind == "repo" else files if kind == "file" else []).append(rest) if kind != "skip" else None
+                else:
+                    nxt = kind
+            elif c in GH_OUT_SHORT_BOOL and not rest:
+                pass
+            else:
+                return f"флаг {a} не из таблицы формы gh pr {texts[i]} (склеенные короткие флаги — раздельно)"
+        elif "://" in a or re.search(r"/[^\s/]+#\d+", a):  # URL и owner/repo#N уводят в другой репозиторий
             return "адрес и owner/repo#N не принимаются — номер PR или имя ветки"
-        if a in ("-R", "--repo"):
-            nxt = "repo"
-        elif a in ("-F", "--body-file"):
-            nxt = "file"
-        elif a.startswith("--repo="):
-            repos.append(a[7:])
-        elif a.startswith("--body-file="):
-            files.append(a[12:])
-        elif a.startswith("-R") and not a.startswith("--"):
-            repos.append(a[2:].lstrip("="))
-        elif a.startswith("-F") and not a.startswith("--"):
-            files.append(a[2:].lstrip("="))
-        elif a.startswith("-") and not a.startswith("--") and len(a) > 2 and ("R" in a[1:] or "F" in a[1:]):
-            return "склеенные короткие флаги с -R или -F — пиши раздельно"
-    if nxt in ("repo", "file"):
-        return "-R или -F без значения"
+    if nxt:
+        return "флаг без значения в конце команды"
     for f in files:
         full = os.path.realpath(os.path.join(cwd, os.path.expanduser(f))) if f != "-" else None
         if full is None or not _inside(full, file_roots):
@@ -3675,6 +3695,16 @@ def _gh_out_problem(texts, cmd, cwd, direction, file_roots, whose):
 
 
 GH_OUT_SUBS = {"create", "edit", "comment", "ready"}
+# флаги форм gh pr create|edit|comment|ready (gh 2.x); чего нет в таблице — отказ, как HQ_GH_VALUE у штаба
+GH_OUT_SHORT_VALUE = "RFbtBHalmprT"
+GH_OUT_SHORT_BOOL = "dfwe"
+GH_OUT_LONG_VALUE = {"--repo", "--body-file", "--body", "--title", "--base", "--head", "--assignee", "--label",
+                     "--milestone", "--project", "--reviewer", "--template", "--recover", "--add-assignee",
+                     "--add-label", "--add-project", "--add-reviewer", "--remove-assignee", "--remove-label",
+                     "--remove-project", "--remove-reviewer"}
+GH_OUT_LONG_BOOL = {"--draft", "--fill", "--fill-first", "--fill-verbose", "--web", "--dry-run", "--editor",
+                    "--no-maintainer-edit", "--edit-last", "--delete-last", "--create-if-none", "--yes", "--undo",
+                    "--remove-milestone"}
 
 
 def check_gh_out(event, tool, tool_input):
@@ -3687,7 +3717,10 @@ def check_gh_out(event, tool, tool_input):
     cmd = tool_input.get("command") or ""
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     _, cmds = bash_analysis(cmd, cwd)
-    roots = TEMP_ROOTS + [os.path.realpath(_git_top(cwd))]
+    # своя копия репозитория — корень с .git, но не $HOME и не «/»; нет .git — только временные папки
+    top = os.path.realpath(_git_top(cwd))
+    roots = TEMP_ROOTS + ([top] if os.path.exists(os.path.join(top, ".git"))
+                          and top not in (os.path.realpath(HOME), os.sep) else [])
     for n, t in cmds:
         if not n or os.path.basename(n.rstrip("/")) != "gh":
             continue
