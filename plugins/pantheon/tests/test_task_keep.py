@@ -196,6 +196,31 @@ def main():
     open(bf, "w", encoding="utf-8").write("Из файла set.")
     r = run(env, "task", "set", "metis-0001", "--body-file", bf)
     check("task set --body-file", r.returncode == 0 and "# Проба\n\nИз файла set.\n\n## Журнал" in read(p1), r.stderr)
+    # metis-0591: «## Готово, когда» из --body-file остаётся разделом, прочие «## » экранируются, дубля нет
+    open(bf, "w", encoding="utf-8").write("Цель Z.\n\n## Готово, когда\n\n- [ ] первый\n- [x] второй\n\n## Журнал\nлишнее\n")
+    r = run(env, "task", "set", "metis-0001", "--body-file", bf)
+    t = read(p1)
+    check("task set --body-file: «## Готово, когда» не экранирован и распознаётся, «## Журнал» экранирован, раздел один",
+          r.returncode == 0 and "\n## Готово, когда\n\n- [ ] первый\n- [x] второй\n" in t and "\\## Готово" not in t
+          and "\\## Журнал\nлишнее" in t and t.count("## Готово, когда") == 1 and T.done_criteria(t) == [(False, "первый"), (True, "второй")]
+          and "критерии «Готово, когда» изменены" in t, (r.stderr, t))
+    tl = datetime(2026, 10, 28, 12, 0, 0).timestamp()  # после CRITERIA_FROM: правило закрытия действует
+    r = new(env, "--body", "Цель L.", t=tl)
+    nl = sorted(tasks_of(home))[-1]
+    pl = os.path.join(home, "directions", "metis-pantheon", "tasks", nl)
+    run(env, "task", "set", nl[:-3], "--body-file", bf, t=tl)
+    r = run(env, "task", "set", nl[:-3], "status=done", t=tl)
+    check("task set status=done с неотмеченным пунктом из --body-file — отказ", r.returncode != 0 and "неотмечено 1" in r.stderr
+          and "status: done" not in read(pl), (r.returncode, r.stderr, read(pl)))
+    check("escape_desc: второй раздел «Готово, когда» экранируется, «## Заметки владельца» тоже",
+          T.escape_desc("а\n## Готово, когда\n- [ ] x\n## Готово, когда\n## Заметки владельца") ==
+          "а\n## Готово, когда\n- [ ] x\n\\## Готово, когда\n\\## Заметки владельца")
+    r = new(env, "--body", "Цель Q.\n\n## Готово, когда\n\n- [ ] пункт Q")
+    tq = read(sorted(tasks_of(home))[-1] if os.path.isabs(sorted(tasks_of(home))[-1]) else os.path.join(home, "directions", "metis-pantheon", "tasks", sorted(tasks_of(home))[-1]))
+    check("task new с разделом в тексте: шаблон не добавлен, раздел один", r.returncode == 0
+          and tq.count("## Готово, когда") == 1 and "впишите" not in tq and T.done_criteria(tq) == [(False, "пункт Q")], (r.stderr, tq))
+    open(bf, "w", encoding="utf-8").write("Из файла set.")
+    run(env, "task", "set", "metis-0001", "--body-file", bf)  # состояние для следующих проверок
     # разделы до журнала (argus a): «## Что сделать» заменяется вместе с текстом, «## Заметки владельца» остаётся
     old_desc = "Цель старая.\n\n## Что сделать\n\n1. старый шаг"
     s1 = read(p1).replace("# Проба\n\nИз файла set.\n\n", "# Проба\n\n" + old_desc + "\n\n"
