@@ -3615,6 +3615,9 @@ def _hestia_outside_sandbox(name, texts):
 def _hestia_gh_write_problem(sub, texts, cmd, cwd):
     """gh pr create|edit Гестии: репозиторий — только явный -R/--repo из [merge_repos] направления задачи, текст из
     файла (--body-file, -F) — только из временных папок. Словом «почему нет» или None."""
+    ps = _gh_pr_sub(texts)
+    if ps is not None and ps[0] > 0:  # у Гестии -R до pr, как и прежде, — форма не разбирается
+        return "флаги до pr (-R до pr) — форма не разбирается, -R ставь после pr"
     return _gh_out_problem(texts, cmd, cwd, os.environ.get("PANTHEON_TASK_DIRECTION") or "", TEMP_ROOTS,
                            "направления задачи")
 
