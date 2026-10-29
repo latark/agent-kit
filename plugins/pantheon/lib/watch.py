@@ -528,7 +528,7 @@ def auto_rm(agents, doms, t):
         since = _job_time(P.claude_job_state(sid))
         if name not in live and (since is None or t - since < AUTO_RM_AFTER):
             continue  # у имени есть живая сессия — эта лишняя строка, убираем сразу (start/wake не добили)
-        reason = P.rm_session(sid, tries=1)
+        reason = P.rm_session(sid, tries=1, name=name, why="auto-rm")
         if reason is None:
             P.start_log(f"auto-rm\t{name}\t{sid}\t{a.get('state')}")
             gone.append(f"{name} {sid}")
@@ -2106,7 +2106,7 @@ def _stop_locked(name, agents, who):
     for a in P.live_copies(name, agents, registry=[]) + [a for a in agents if a.get("name") == name
                                                           and a.get("state") == "done" and a.get("pid")]:
         if a.get("id"):
-            reason = P.stop_and_rm(name, a["id"])  # metis-0239: без rm Claude Code сам перезапускает фоновую сессию
+            reason = P.stop_and_rm(name, a["id"], "stop")  # metis-0239: без rm Claude Code сам перезапускает фоновую сессию
             P.start_log(f"stop\t{name}\t{a.get('name')}\t{a['id']}\t{who}")
             if reason:
                 P.start_log(f"rm-refused\t{name}\t{a['id']}\t{reason}")
