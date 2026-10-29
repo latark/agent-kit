@@ -6047,12 +6047,6 @@ PLIST_TMPL = """<?xml version="1.0" encoding="UTF-8"?>
 INSTALLED_PLUGINS = os.path.join(HOME, ".claude", "plugins", "installed_plugins.json")
 
 
-def _unchecked_path():
-    """Запись критической ветки plugins-update: что встало непроверенным (для разбора). Решений по ней не принимают —
-    решает только verified.json."""
-    return path("plugins", "unchecked.json")
-
-
 def _verified_path():
     return path("plugins", "verified.json")
 
@@ -6113,14 +6107,6 @@ def verified_record(name):
     data = read_json(_verified_path(), {})
     rec = data.get(name) if isinstance(data, dict) else None
     return rec if isinstance(rec, dict) and isinstance(rec.get("hash"), str) and rec["hash"] else None
-
-
-def verified_write(name, root, digest, version, by):
-    """digest — хеш, с которым дерево сверили (а не пересчёт: между сверкой и записью дерево могли подменить)."""
-    data = read_json(_verified_path(), {})
-    data = data if isinstance(data, dict) else {}
-    data[name] = {"hash": digest, "path": os.path.realpath(root), "version": version, "at": stamp(), "by": by}
-    write_json(_verified_path(), data)
 
 
 def installed_dir(name, checked=True):
@@ -8079,69 +8065,6 @@ def usage_report(rest):
 MARKETPLACE = "agent-kit"
 
 
-def _plugins_journal(line):
-    os.makedirs(path("plugins"), exist_ok=True)
-    with open(path("plugins", "journal.log"), "a", encoding="utf-8") as fh:
-        fh.write(f"{stamp()} {line}\n")
-
-
-def _version_newer(new, old):
-    """Новее ли версия каталога установленной: сравнение кортежей чисел; не разобрать — новая, если строки разные."""
-    try:
-        return tuple(int(x) for x in str(new).split(".")) > tuple(int(x) for x in str(old).split("."))
-    except ValueError:
-        return str(new) != str(old)
-
-
-def _plugins_installed():
-    """{имя: {version, installPath}} — плагины agent-kit уровня пользователя по `claude plugin list --json`; None — сбой."""
-    try:
-        r = subprocess.run([claude_bin(), "plugin", "list", "--json"], env=claude_env(), capture_output=True, text=True, timeout=120)
-        data = json.loads(r.stdout or "null")
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        return None
-    if isinstance(data, dict):
-        data = data.get("plugins")
-    if r.returncode != 0 or not isinstance(data, list):
-        return None
-    out = {}
-    for p in data:
-        if not isinstance(p, dict) or p.get("scope") != "user":
-            continue
-        name, _, mkt = str(p.get("id", "")).partition("@")
-        if mkt == MARKETPLACE and name:
-            out[name] = {"version": str(p.get("version", "")), "installPath": p.get("installPath")}
-    return out
-
-
-def _catalog_root():
-    """Корень клона каталога agent-kit (installLocation из known_marketplaces.json, иначе папка по умолчанию)."""
-    known = read_json(os.path.join(HOME, ".claude", "plugins", "known_marketplaces.json"))
-    entry = known.get(MARKETPLACE) if isinstance(known, dict) else None
-    loc = entry.get("installLocation") if isinstance(entry, dict) else None
-    if not isinstance(loc, str) or not os.path.isdir(loc):
-        loc = os.path.join(HOME, ".claude", "plugins", "marketplaces", MARKETPLACE)
-    return os.path.realpath(loc)
-
-
-def _plugins_catalog():
-    """{имя: (версия, папка плагина)} из клона каталога agent-kit."""
-    root = _catalog_root()
-    mkt = read_json(os.path.join(root, ".claude-plugin", "marketplace.json"))
-    out = {}
-    for p in (mkt.get("plugins") or []) if isinstance(mkt, dict) else []:
-        if not isinstance(p, dict) or not isinstance(p.get("source"), str) or not p.get("name"):
-            continue
-        d = os.path.realpath(os.path.join(root, p["source"]))
-        if not d.startswith(root + os.sep):
-            continue  # источник вне клона каталога (абсолютный путь, ../) — не наш
-        meta = read_json(os.path.join(d, ".claude-plugin", "plugin.json"))
-        ver = meta.get("version") if isinstance(meta, dict) else None
-        if ver:
-            out[str(p["name"])] = (str(ver), d)
-    return out
-
-
 def _tree_hash(root):
     """sha256 дерева плагина: относительные пути и содержимое, ссылки — по тексту ссылки. Без .git и __pycache__ на
     любой глубине и без точечных файлов и папок верхнего уровня, кроме .claude-plugin (в кэше лишний `.in_use`).
@@ -8170,81 +8093,6 @@ def _tree_hash(root):
     return h.hexdigest()
 
 
-def _plugins_respawn_mark(name):
-    """metis-0181: отметка «нужен перезапуск» для тика (watch.plugins_respawn). since — время последней установки:
-    окна, поднятые раньше, тик перезапускает, когда они свободны; done — уже перезапущенные сессии, новая установка
-    его обнуляет (их версия этого плагина тоже старая)."""
-    with lock("plugins-respawn"):
-        cur = read_json(path("plugins", "respawn.json"), {})
-        cur = cur if isinstance(cur, dict) else {}
-        plugins = sorted({str(x) for x in cur.get("plugins") or []} | {name})
-        write_json(path("plugins", "respawn.json"), {"since": now(), "at": stamp(), "plugins": plugins, "done": []})
-
-
-def _plugin_install(name, old, new, quiet, digest):
-    """claude plugin update без -y (новая команда установки в каталоге должна требовать человека) и сверка того, что
-    встало, с выпущенным деревом каталога: версия и хеш дерева installPath."""
-    try:
-        r = subprocess.run([claude_bin(), "plugin", "update", f"{name}@{MARKETPLACE}", "-s", "user"],
-                           env=claude_env(), capture_output=True, text=True, timeout=PLUGIN_INSTALL_TIMEOUT)
-        ok = r.returncode == 0
-        why = f"код {r.returncode}: {' '.join((r.stderr or r.stdout or '').split())[:200]}"
-    except (OSError, subprocess.TimeoutExpired) as e:
-        ok, why = False, type(e).__name__
-    row = (_plugins_installed() or {}).get(name) or {}
-    got = row.get("version")
-    if got == new and _tree_hash(row.get("installPath")) == digest:
-        # разрешение: это дерево прошло CI до слияния и совпало с записью выпуска — живой код и окна идут только на
-        # него (metis-0321)
-        verified_write(name, row["installPath"], digest, new, "plugins-update")
-        um = read_json(_unchecked_path(), {}) or {}
-        if um.pop(name, None) is not None:
-            write_json(_unchecked_path(), um)
-        if name == "pantheon" and row.get("installPath"):
-            # живой код тика и команды pantheon — только проверенная и вставшая версия (metis-0321)
-            try:
-                link_current(os.path.realpath(row["installPath"]))
-            except OSError as e:
-                alert(f"pantheon: current не перевесилась на {row['installPath']}: {type(e).__name__} {e}", "plugins-update")
-        _plugins_journal(f"{name} {old} → {new}: обновлён")
-        _plugins_respawn_mark(name)
-        alert(f"обновлён {name} {old} → {new}, плановый проход перезапустит свободные окна (Зевса — вы сами: pantheon start zeus "
-              "--restart); окно, готовое раньше: pantheon saved --by <имя> --state <путь>", "plugins-update")
-        if not quiet:
-            print(f"{name}: обновлён {old} → {new}")
-        return 0
-    if got == old or (got is None and not ok):
-        # ничего не встало — пробуем на следующих проходах; тревога одна на версию
-        if ok:
-            why = f"после update версия {got}, а не {new}"
-        _plugins_journal(f"{name} {old} → {new}: установка не удалась ({why})")
-        alert_once(f"plugins-update-{name}", new, f"{name} {new}: claude plugin update не поставил выпуск "
-                   f"({why}). Руками: claude plugin update {name}@{MARKETPLACE}", "plugins-update")
-        if not quiet:
-            print(f"{name}: {new} — установка не удалась ({why})")
-        return ALERTED
-    # встало не то, что выпущено: другая версия или другое содержимое (update сам обновил каталог)
-    bad = _tree_hash(row.get("installPath"))
-    if bad:  # запись для разбора; живой код его и так не возьмёт — хеша нет в verified.json
-        um = read_json(_unchecked_path(), {}) or {}
-        um[name] = {"hash": bad, "version": got, "path": os.path.realpath(row.get("installPath")), "at": stamp()}
-        write_json(_unchecked_path(), um)
-    seen = got or "неизвестна"
-    _plugins_journal(f"{name} {old} → {seen}: встала непроверенная версия (выпуск {new}, хеш {digest})")
-    text = (f"встала непроверенная версия {name} {seen} (выпуск {new}) — живой код и окна остаются на последнем "
-            "проверенном дереве; что делать — README agent-kit, «Живой код»")
-    alert("КРИТИЧНО: " + text, "plugins-update")
-    notify(text, title="Пантеон · критично", group="critical")
-    if not quiet:
-        print(f"{name}: КРИТИЧНО — {text}")
-    return ALERTED
-
-
-def plugins_update(quiet=False):
-    with lock("plugins-update", block=False) as got:
-        return _plugins_update(quiet) if got else 0
-
-
 def _memory_pressure_direct():
     """Давление памяти macOS (kern.memorystatus_vm_pressure_level, как _load_snapshot): 1 норма, 2 предупреждение,
     4 критично; другое значение или сбой чтения — None. PANTHEON_FAKE_PRESSURE — подмена для тестов и проб, как
@@ -8260,15 +8108,6 @@ def _memory_pressure_direct():
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
     return level if level in (1, 2, 4) else None
-
-
-def _memory_pressure():
-    """Давление памяти: сначала сам sysctl; не прочитался (окно роли) — свежий замер планового прохода (metis-0537)."""
-    level = _memory_pressure_direct()
-    if level is None:
-        v = probe_value("pressure")
-        level = v if v in (1, 2, 4) else None
-    return level
 
 
 # --- замеры вне окна (metis-0537) -------------------------------------------------------------------------------
@@ -8430,177 +8269,6 @@ def probes_cmd(args):
     return 0
 
 
-def _current_sync():
-    """Новее нет (например, версию поставили руками `claude plugin update`): current должна вести в установленную папку.
-    Отстала или повисла — перевесить на installed_dir (версия та же, что у поставленной); сбой — тревога."""
-    want = installed_dir("pantheon")  # проверенное дерево или последнее проверенное; тревогу даёт installed_dir
-    if not want:
-        return
-    try:
-        if os.path.realpath(CURRENT) == want and os.path.isdir(CURRENT):
-            return
-        link_current(want)
-        _plugins_journal(f"pantheon: current перевешена на установленную {want}")
-    except OSError as e:
-        alert(f"pantheon: current не перевесилась на {want}: {type(e).__name__} {e}", "plugins-update")
-
-
-def _release_problem(name, ver, digest):
-    """metis-0512 (вариант Б): номер версии поднимает workflow release на main после слияния и пишет
-    .claude-plugin/releases.json — {"v": 1, "plugins": {имя: {"version", "tree"}}}, tree — _tree_hash папки плагина
-    в коммите выпуска. Между слиянием PR и коммитом выпуска в каталоге новый код под прошлым номером: ставить его
-    нельзя (номер уже занят другим деревом). Поэтому новая версия ставится, только если запись выпуска совпала с
-    каталогом — та же версия и то же дерево (digest). Текст причины или None. Файла нет — тоже причина: локального
-    прогона тестов больше нет, и без записи выпуска не видно, что дерево прошло CI и workflow release. Клон каталога
-    неглубокий, поэтому сверка по записи, а не по истории git."""
-    p = os.path.join(_catalog_root(), ".claude-plugin", "releases.json")
-    try:
-        if not os.path.lexists(p):
-            raise ValueError("файла нет")
-        if os.path.islink(p) or not os.path.isfile(p):
-            raise ValueError("не обычный файл")
-        with open(p, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError) as e:
-        why = f"releases.json каталога не разобрать ({e}) — выпуск не сверить"
-    else:
-        rec = data.get("plugins", {}).get(name) if isinstance(data, dict) and data.get("v") == 1 \
-            and isinstance(data.get("plugins"), dict) else None
-        if not isinstance(rec, dict):
-            why = "в releases.json каталога нет записи выпуска — слито, выпуска ещё нет"
-        elif rec.get("version") != ver:
-            why = f"слито, выпуска ещё нет: в releases.json {rec.get('version')!r}, в каталоге {ver}"
-        elif not digest or rec.get("tree") != digest:
-            why = f"слито после выпуска {ver}: дерево каталога не то, что выпущено, — жду следующий выпуск"
-        else:
-            return None
-    # строка в журнал выпусков — один раз на состояние, а не на каждый плановый проход
-    seen = read_json(path("plugins", "unreleased.json"))
-    seen = seen if isinstance(seen, dict) else {}
-    if seen.get(name) != f"{ver} {why}":
-        _plugins_journal(f"{name} {ver}: не ставлю — {why}")
-        with contextlib.suppress(OSError):
-            write_json(path("plugins", "unreleased.json"), {**seen, name: f"{ver} {why}"})
-    return why
-
-
-def _gh_bin():
-    return shutil.which("gh", path=(os.environ.get("PATH") or "") + ":/opt/homebrew/bin:/usr/local/bin")
-
-
-def _main_ci_check():
-    """metis-0587 (вариант Б): выпуск не стопорится, но красный tests на main не должен пройти молча. Берём последний
-    завершённый прогон tests.yml на main (`gh run list`): failure — одна тревога на коммит (alert_once по headSha) со
-    ссылкой на прогон. Нет прогонов, startup_failure (Actions не стартовали, биллинг), cancelled, gh нет или упал —
-    не тревога: строка в журнал выпусков раз в день. Сбой gh тик не ломает."""
-    why = None
-    try:
-        gh = _gh_bin()
-        if not gh:
-            raise OSError("gh не найден")
-        r = subprocess.run([gh, "run", "list", "--repo", "latark/agent-kit", "--workflow", "tests.yml",
-                            "--branch", "main", "--limit", "10", "--json", "headSha,conclusion,status,url"],
-                           capture_output=True, text=True, timeout=60)
-        if r.returncode != 0:
-            raise OSError(f"gh код {r.returncode}")
-        runs = json.loads(r.stdout)
-        done = [x for x in runs if isinstance(x, dict) and x.get("status") == "completed"] \
-            if isinstance(runs, list) else []
-        if not done:
-            why = "нет завершённых прогонов tests на main"
-        elif done[0].get("conclusion") == "failure":
-            sha, url = str(done[0].get("headSha") or "?"), done[0].get("url") or ""
-            alert_once("main-ci-red", sha, f"pantheon: tests красные на main, коммит {sha[:10]} — {url} "
-                       "(выпуск идёт; разобрать и чинить следующим PR)", "plugins-update")
-        elif done[0].get("conclusion") != "success":
-            why = f"последний прогон tests на main: {done[0].get('conclusion')!r} — Actions не отработали"
-    except (OSError, subprocess.TimeoutExpired, ValueError) as e:
-        why = f"статус tests на main не прочитан: {type(e).__name__} {e}"
-    if why:
-        day = stamp()[:10]
-        mark = path("plugins", "ci-nodata")
-        with contextlib.suppress(OSError):
-            if open(mark).read() == day:
-                return
-        _plugins_journal(f"tests на main: {why}")
-        with contextlib.suppress(OSError):
-            os.makedirs(path("plugins"), exist_ok=True)
-            open(mark, "w").write(day)
-
-
-def _plugins_update(quiet):
-    try:
-        ok = subprocess.run([claude_bin(), "plugin", "marketplace", "update", MARKETPLACE],
-                            env=claude_env(), capture_output=True, text=True,
-                            timeout=PLUGINS_CATALOG_TIMEOUT).returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        ok = False
-    if not ok:  # нет сети или каталог недоступен — подождём следующего раза, без тревоги
-        if not quiet:
-            print(f"каталог {MARKETPLACE} не обновился — попробую в следующий раз")
-        return TEMPFAIL
-    installed = _plugins_installed()
-    if installed is None:
-        print("pantheon plugins update: не прочитал claude plugin list --json", file=sys.stderr)
-        return 1
-    catalog = _plugins_catalog()
-    rc = 0
-    checked = False
-    for name in sorted(installed):
-        if name not in catalog:
-            continue
-        old, (new, src) = installed[name]["version"], catalog[name]
-        if _version_newer(new, old) and not checked:  # новый выпуск: заодно смотрим tests на main (metis-0587)
-            checked = True
-            _main_ci_check()
-        if not _version_newer(new, old):
-            if name == "pantheon":
-                _current_sync()
-            if not quiet:
-                print(f"{name}: {old}, новее нет")
-            continue
-        digest = _tree_hash(src)
-        why = _release_problem(name, new, digest)
-        if why:  # metis-0512: слито в main, а workflow release номер ещё не поднял — код не ставим
-            if not quiet:
-                print(f"{name}: {new} не ставлю — {why}")
-            continue
-        rc = max(rc, _plugin_install(name, old, new, quiet, digest))
-    return rc
-
-
-def plugins_accept(names, new_only=False):
-    """Ваше «да» установленному дереву без прохода тестов (новая машина, первый выпуск с verified.json, ручная
-    переустановка): его хеш и путь — в verified.json. Только руками: задача тика эту команду не запускает, окна ролей
-    в состояние не пишут. new_only (--new, pantheon-setup) — только плагины, о которых записи ещё нет."""
-    rc = 0
-    for name in names or ["guard", "pantheon"]:
-        if new_only and verified_record(name):
-            continue
-        raw = installed_dir(name, checked=False)
-        if not raw:
-            # --new (pantheon-setup): неустановленный плагин — не ошибка этого шага, установку проверяет свой шаг
-            print(f"pantheon plugins accept: {name}@{MARKETPLACE} не установлен в ~/.claude/plugins/cache", file=sys.stderr)
-            rc = rc if new_only else 1
-            continue
-        version = (read_json(os.path.join(raw, ".claude-plugin", "plugin.json"), {}) or {}).get("version", "?")
-        verified_write(name, raw, _tree_hash(raw), version, "accept")
-        _plugins_journal(f"{name} {version}: принято руками (pantheon plugins accept) — {raw}")
-        print(f"{name}: {version} принят — {raw.replace(HOME, '~')}")
-        if name == "pantheon":
-            link_current(raw)
-    return rc
-
-
-def plugins_cmd(rest):
-    if rest[:1] == ["update"] and all(a == "--quiet" for a in rest[1:]):
-        return plugins_update(quiet="--quiet" in rest)
-    if rest[:1] == ["accept"] and all(a in ("guard", "pantheon", "--new") for a in rest[1:]):
-        return plugins_accept([a for a in rest[1:] if a != "--new"], new_only="--new" in rest)
-    print("pantheon plugins: update [--quiet] | accept [--new] [guard] [pantheon]", file=sys.stderr)
-    return 2
-
-
 # --- команды в отдельных модулях lib/ (metis-0586) ------------------------------------------------------------------
 # Группы команд вынесены в lib/<модуль>.py без изменения поведения. Модуль получает P — имена этого модуля — до
 # выполнения своего файла, а его имена из __all__ становятся именами pantheon: main, остальной код, тесты и другие
@@ -8637,6 +8305,7 @@ def _attach(name):
 
 
 _attach("review")
+_attach("plugins")
 
 
 def main(argv):
