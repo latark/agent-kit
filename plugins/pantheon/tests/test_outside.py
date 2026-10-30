@@ -866,17 +866,42 @@ if _tz is None:
 else:
     os.environ["TZ"] = _tz
 time.tzset()
-_utc = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(leader.pid)], capture_output=True, text=True,
-                      env={"LC_ALL": "C", "TZ": "UTC", "PATH": "/usr/bin:/bin"}).stdout
-_ny = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(leader.pid)], capture_output=True, text=True,
-                     env={"LC_ALL": "C", "TZ": "America/New_York", "PATH": "/usr/bin:/bin"}).stdout
-check("время старта — в UTC и не зависит от пояса прохода: смена пояса не делает живой сервер чужим",
-      _seen == {" ".join(_utc.split())} and " ".join(_ny.split()) not in _seen, (_seen, _utc, _ny))
+_env_seen = []
+_real_run = O.subprocess.run
+
+
+def _spy_run(*a, **kw):
+    _env_seen.append(kw.get("env"))
+    return _real_run(*a, **kw)
+
+
+O.subprocess.run = _spy_run
+try:
+    O.started(leader.pid)
+finally:
+    O.subprocess.run = _real_run
+check("время старта — в UTC и не зависит от пояса прохода: ps зовётся с чистым env и TZ=UTC (metis-0609)",
+      len(_env_seen) == 1 and _env_seen[0] and _env_seen[0].get("TZ") == "UTC" and _env_seen[0].get("LC_ALL") == "C"
+      and len(_seen) == 1, (_env_seen, _seen))
 O.save_servers({"20261030-000000-c3c3c3": {"pid": leader.pid, "started": O.started(leader.pid), "port": 0,
                                            "until": 0, "qdir": None}})
 O.sweep()
 check("sweep: время старта совпало — срок вышел, процесс погашен", leader.wait(timeout=10) is not None
       and not O.servers())
+
+# --- время заявки в будущем (metis-0604): ожидание не больше --wait, заявка со временем позже now+60 с отклонена -----
+_fmt = "%Y-%m-%dT%H:%M:%S%z"
+check("serve_wait: заявка недавняя — остаток меньше --wait",
+      0 < O.serve_wait({"wait": 100, "time": time.strftime(_fmt, time.localtime(time.time() - 30))}) <= 71)
+check("serve_wait: время заявки в будущем не растит ожидание сверх --wait",
+      O.serve_wait({"wait": 100, "time": time.strftime(_fmt, time.localtime(time.time() + 3600))}) == 100)
+_ok = {"v": 1, "id": "r1", "kind": "serve", "dir": "/x", "wait": 5}
+check("check_request: время сейчас — принята",
+      O.check_request({**_ok, "time": time.strftime("%Y-%m-%d %H:%M")}, "r1") is None)
+check("check_request: время на час вперёд — отклонена (формат P.stamp)",
+      O.check_request({**_ok, "time": time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + 3600))}, "r1"))
+check("check_request: время на час вперёд — отклонена (формат с секундами и поясом)",
+      O.check_request({**_ok, "time": time.strftime(_fmt, time.localtime(time.time() + 3600))}, "r1"))
 
 # --- sweep_quiet (metis-0606, Д-1 argus): сбой sweep посреди прогона не роняет тесты, в журнал — один раз ------------
 O.SWEEP_EVERY = 0.2

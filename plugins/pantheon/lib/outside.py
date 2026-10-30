@@ -774,7 +774,7 @@ def serve_wait(req):
         return SERVE_QUEUE_MIN
     t = _epoch(req)
     left = w - (P.now() - t if t else 0)
-    return max(1, int(left))
+    return max(1, min(w, int(left)))   # время заявки в будущем не растит ожидание сверх --wait (metis-0604)
 
 
 def run_serve(rid, d, script, minutes, window, qdir, roots, wait=SERVE_QUEUE_MIN):
@@ -967,6 +967,20 @@ def requests():
     return out
 
 
+FUTURE_SLACK = 60                   # заявка со временем позже now+60 с отклоняется (metis-0604)
+
+
+def _req_time(req):
+    """Время заявки в секундах: «ГГГГ-ММ-ДД ЧЧ:ММ» (P.stamp) или с секундами и поясом; не разобрать — None."""
+    t = str(req.get("time"))
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            return datetime.strptime(t, fmt).timestamp()
+        except ValueError:
+            pass
+    return None
+
+
 def check_request(req, rid):
     if not isinstance(req, dict) or req.get("v") != 1 or req.get("id") != rid:
         return "заявка не в формате (v1, id = имя файла)"
@@ -983,6 +997,8 @@ def check_request(req, rid):
     w = req.get("wait", 0)
     if not isinstance(w, int) or isinstance(w, bool) or not 0 <= w <= WAIT_MAX:
         return f"ожидание заявки — от 0 до {WAIT_MAX} секунд"
+    if req.get("time") is not None and (_req_time(req) or 0) > P.now() + FUTURE_SLACK:
+        return "время заявки — позже, чем сейчас на часах прохода"
     return None
 
 
