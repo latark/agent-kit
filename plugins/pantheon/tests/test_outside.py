@@ -910,6 +910,9 @@ _t = json.load(open(os.path.join(_q, _rid + ".req.json")))["time"]
 os.remove(os.path.join(_q, _rid + ".req.json"))
 check("заявка от CLI несёт время с секундами и поясом (ожидание не теряет до минуты)",
       "T" in _t and abs(O._epoch({"time": _t}) - time.time()) < 5, _t)
+check("_epoch: минутное время — конец минуты (+59 с), ожидание старых заявок не занижается",
+      O._epoch({"time": "2026-10-30 10:00"}) - O._epoch({"time": "2026-10-30 09:59"}) == 60
+      and O._epoch({"time": "2026-10-30 10:00"}) - __import__("datetime").datetime(2026, 10, 30, 10, 0).timestamp() == 59)
 check("_epoch: оба формата разбираются, мусор и пусто — None",
       O._epoch({"time": "2026-10-30 10:00"}) is not None and O._epoch({"time": "2026-10-30T10:00:00+0300"}) is not None
       and O._epoch({"time": "вчера"}) is None and O._epoch({}) is None)
