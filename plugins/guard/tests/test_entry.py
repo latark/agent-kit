@@ -304,4 +304,5 @@ try:
 finally:
     shutil.rmtree(root, ignore_errors=True)
 
+print(f"\n{sum(results)} из {len(results)} прошли")
 sys.exit(0 if all(results) else 1)
