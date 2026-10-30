@@ -68,6 +68,8 @@ def check(name, cond, extra=""):
 # --- заглушка sandbox-exec: пишет argv и окружение, затем исполняет команду (или изображает npm) ------------------
 REC = os.path.join(_ROOT, "sandbox-calls.jsonl")
 FAKE = os.path.join(_ROOT, "fake-sandbox-exec")
+DEVTREE_PIDS = os.path.join(_ROOT, "devtree-pids")      # «turbo» и его задача (metis-0606)
+HOLD_RELEASE = os.path.join(_ROOT, "hold-release")      # тест «hold» идёт, пока нет этого файла
 with open(FAKE, "w") as fh:
     fh.write(f"#!{sys.executable}\n" + r'''
 import json, os, sys, time
@@ -94,6 +96,24 @@ if tail == ["run", "bad"]:
 if tail == ["run", "slow"]:
     time.sleep(60)
     os._exit(0)
+if tail == ["run", "devtree"]:
+    # как turbo (metis-0606): задача — в своей сессии и группе процессов, на SIGTERM не гаснет и держит PORT; сам
+    # «turbo» на SIGTERM выходит, задачу не гасит — killpg группы сервера её не достаёт
+    import subprocess, signal
+    task = ("import os, signal, socket\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "s = socket.socket(); s.bind(('127.0.0.1', int(os.environ['PORT']))); s.listen(64)\n"
+            "while True:\n    s.accept()[0].close()\n")
+    kid = subprocess.Popen([sys.executable, "-c", task], start_new_session=True)
+    with open(%r, "a") as fh:
+        fh.write(f"{os.getpid()} {kid.pid}\n")
+    time.sleep(600)
+    os._exit(0)
+if tail == ["run", "hold"]:
+    end = time.time() + 120
+    while time.time() < end and not os.path.exists(%r):
+        time.sleep(0.2)
+    os._exit(0)
 if tail in (["run", "test"], ["run", "check"]):
     body = json.load(open("package.json"))["scripts"][tail[1]]
     os.execv("/bin/sh", ["/bin/sh", "-c", body])
@@ -101,7 +121,7 @@ if tail == ["run", "lint"] or cmd[1:2] in (["ci"], ["install"]):
     print("ok", cmd)
     os._exit(0)
 os.execvp(cmd[0], cmd)
-''' % REC)
+''' % (REC, DEVTREE_PIDS, HOLD_RELEASE))
 os.chmod(FAKE, 0o755)
 O.SANDBOX_EXEC = FAKE
 O.HEAVY = None
@@ -127,7 +147,7 @@ def git(d, *args):
 APP = os.path.join(HOME, "projects", "app")
 OTHER = os.path.join(HOME, "projects", "other")
 REPO = "latark/app"
-PKG = {"name": "app", "scripts": {"dev": "next dev", "bad": "x", "slow": "x", "lint": "x"}}
+PKG = {"name": "app", "scripts": {"dev": "next dev", "bad": "x", "slow": "x", "lint": "x", "devtree": "x", "hold": "x"}}
 
 
 def commit(d, files, msg):
@@ -672,6 +692,121 @@ res = O.load_result(q, rid) or {}
 check("serve без --wait: старое короткое ожидание, failed с верной причиной",
       res.get("state") == "failed" and "оба места" in res.get("why", "") and time.monotonic() - t0 < 14, res)
 release(held)
+
+# --- «стоп» при занятом проходе и задача в своей группе процессов (metis-0606): настоящий heavy --server ----------
+# 30.10: проход держал замок, пока гонял тесты после «принять» (часами), «стоп» ждал конца всех прогонов; а turbo
+# ставит задаче свою группу — next dev переживал killpg группы сервера.
+
+
+def pid_alive(pid, grace=3):
+    end = time.monotonic() + grace
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        if time.monotonic() >= end:
+            return True
+        time.sleep(0.1)
+
+
+def devtree_pids():
+    try:
+        with open(DEVTREE_PIDS) as fh:
+            return [int(x) for x in fh.read().split()]
+    except (OSError, ValueError):
+        return []
+
+
+def _kill_devtree():
+    import signal as _sig
+    for p in devtree_pids():
+        try:
+            os.kill(p, _sig.SIGKILL)
+        except OSError:
+            pass
+
+
+_atexit.register(_kill_devtree)   # мутант без гашения ушедших групп не оставляет задачу висеть на порту
+
+
+def new_request(window, *args):
+    q = os.path.join(CACHE, window, "outside")
+    before = set(os.listdir(q)) if os.path.isdir(q) else set()
+    rc, q, _ = role_request(window, APP, *args)
+    rid = next(n[:-9] for n in os.listdir(q) if n.endswith(".req.json") and n not in before)
+    return q, rid
+
+
+def wait_for(fn, sec):
+    end = time.monotonic() + sec
+    while time.monotonic() < end:
+        v = fn()
+        if v:
+            return v
+        time.sleep(0.2)
+    return fn()
+
+
+def state(q, rid):
+    return (O.load_result(q, rid) or {}).get("state")
+
+
+O.READY_SEC = 15
+q, rid_s = new_request("athena-x", "serve", "--script", "devtree")
+_, rid_t = new_request("athena-x", "test", "--script", "hold")
+th = threading.Thread(target=run_pass)
+th.start()
+up = wait_for(lambda: state(q, rid_s) == "serving" and state(q, rid_t) == "running", 40)
+res = O.load_result(q, rid_s) or {}
+port, pids = res.get("port") or 0, devtree_pids()
+hv = int((O.servers().get(rid_s) or {}).get("pid") or 0)
+check("стоп при занятом проходе: сервер (heavy --server → «turbo» → задача в своей группе) поднят, тест идёт",
+      up and port_open(port) and len(pids) == 2 and hv and th.is_alive(), (res, pids, hv))
+os.environ["PANTHEON_TMP"] = os.path.join(CACHE, "athena-x", "tmp")
+O.main(["stop", rid_s])
+os.environ.pop("PANTHEON_TMP")
+t0 = time.monotonic()
+stopped = wait_for(lambda: state(q, rid_s) == "stopped", 20)
+dt = time.monotonic() - t0
+check("стоп во время прогона тестов прохода: stopped за ≤10 с, тест ещё идёт",
+      stopped and dt <= 10 and th.is_alive() and state(q, rid_t) == "running", (state(q, rid_s), round(dt, 1)))
+check("стоп: порт свободен, погашены heavy --server, «turbo» и задача в своей группе процессов",
+      O.port_free(port) and not any(pid_alive(p) for p in pids + [hv]) and rid_s not in O.servers()
+      and not (O.load_result(q, rid_s) or {}).get("note"), [(p, pid_alive(p, 0)) for p in pids + [hv]])
+open(HOLD_RELEASE, "w").close()
+th.join(90)
+res = O.load_result(q, rid_t) or {}
+check("тест после стопа сервера дошёл до конца, код 0", res.get("state") == "done" and res.get("code") == 0, res)
+_kill_devtree()
+
+# «погаси прежний и подними новый»: новый ждёт место heavy --server, «стоп» прежнего приходит в это время
+q, rid_a = new_request("athena-x", "serve")
+run_pass()
+check("прежний сервер поднят", state(q, rid_a) == "serving")
+q, rid_b = serve_with_wait(15)
+
+
+def _stop_a():
+    os.environ["PANTHEON_TMP"] = os.path.join(CACHE, "athena-x", "tmp")
+    O.main(["stop", rid_a])
+    os.environ.pop("PANTHEON_TMP")
+
+
+threading.Timer(3, _stop_a).start()
+t0 = time.monotonic()
+run_pass()
+dt = time.monotonic() - t0
+res = O.load_result(q, rid_b) or {}
+check("новый сервер ждёт место, «стоп» прежнего в это время — прежний гаснет, новый поднят до конца --wait",
+      state(q, rid_a) == "stopped" and res.get("state") == "serving" and dt < 14, (state(q, rid_a), res, round(dt, 1)))
+check("servers.json — только новый: прежний не вернулся из старого снимка", set(O.servers()) == {rid_b}, O.servers())
+_srv = O.servers()
+for _r in list(_srv):
+    O.kill_group(_srv[_r]["pid"])
+O.save_servers({})
 O.HEAVY = None
 
 # --- 4а. уборка итогов в папках заявок (metis-0573): старше суток — удалить ---------------------------------------
