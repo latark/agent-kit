@@ -904,7 +904,12 @@ check("check_request: время на час вперёд — отклонена
       O.check_request({**_ok, "time": time.strftime(_fmt, time.localtime(time.time() + 3600))}, "r1"))
 
 check("serve_wait: заявка от CLI (время P.stamp) — вычитает прошедшее время",
-      O.serve_wait({"wait": 300, "time": time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() - 120))}) <= 200)
+      O.serve_wait({"wait": 300, "time": time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() - 120))}) <= 240)
+_rc, _q, _rid = role_request("athena-x", APP, "serve")
+_t = json.load(open(os.path.join(_q, _rid + ".req.json")))["time"]
+os.remove(os.path.join(_q, _rid + ".req.json"))
+check("заявка от CLI несёт время с секундами и поясом (ожидание не теряет до минуты)",
+      "T" in _t and abs(O._epoch({"time": _t}) - time.time()) < 5, _t)
 check("_epoch: оба формата разбираются, мусор и пусто — None",
       O._epoch({"time": "2026-10-30 10:00"}) is not None and O._epoch({"time": "2026-10-30T10:00:00+0300"}) is not None
       and O._epoch({"time": "вчера"}) is None and O._epoch({}) is None)

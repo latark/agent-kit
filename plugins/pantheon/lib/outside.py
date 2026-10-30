@@ -1022,14 +1022,17 @@ def handle(qdir, window, rid, req):
 # --- тесты после «принять» ----------------------------------------------------------------------------------------
 
 def _epoch(rec):
-    """Время записи или заявки в секундах: «ГГГГ-ММ-ДД ЧЧ:ММ» (P.stamp, так пишет CLI) или «…T…:%S%z» (журнал шлюза);
-    не разобрать — None."""
-    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M"):
-        try:
-            return datetime.strptime(str(rec.get("time")), fmt).timestamp()
-        except ValueError:
-            pass
-    return None
+    """Время записи или заявки в секундах: «…T…:%S%z» (журнал шлюза, заявки CLI) или «ГГГГ-ММ-ДД ЧЧ:ММ» (P.stamp,
+    заявки до этой правки) — у второго точность минута, берётся её конец, чтобы не занижать ожидание; не разобрать — None."""
+    t = str(rec.get("time"))
+    try:
+        return datetime.strptime(t, "%Y-%m-%dT%H:%M:%S%z").timestamp()
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(t, "%Y-%m-%d %H:%M").timestamp() + 59
+    except ValueError:
+        return None
 
 
 def auto_todo(recs=None, t=None):
@@ -1217,7 +1220,7 @@ def cmd_request(kind, args):
         err("pantheon outside: папка не репозиторий git — запускай из корня копии проекта")
         return 2
     rid = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
-    req = {"v": 1, "id": rid, "kind": kind, "dir": d, "time": P.stamp(),
+    req = {"v": 1, "id": rid, "kind": kind, "dir": d, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
            "by": " ".join((os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "").split())[:40]}
     if f.get("--script"):
         req["script"] = f["--script"]
