@@ -335,26 +335,31 @@ _WF_WALK = (
     "steps.concat(j['steps']) if j.is_a?(Hash) && j['steps'].is_a?(Array) } end; "
     "steps = steps.select { |s| s.is_a?(Hash) }; "
     "puts JSON.generate({'keys' => w(d, []), 'refs' => v(d, 'ref', []), "
-    "'uses' => steps.map { |s| s['uses'] }.compact.map(&:to_s), "
+    "'uses' => v(d, 'uses', []), 'repos' => v(d, 'repository', []), "
+    "'jobs' => (d.is_a?(Hash) && d['jobs'].is_a?(Hash) ? d['jobs'].keys.map(&:to_s) : []), "
+    "'docs' => YAML.load_stream(File.read(ARGV[0])).size, "
     "'step_ifs' => steps.select { |s| s.key?('if') }.map { |s| s['if'].to_s }})"
 )
 
 
 def wf_parse(path):
     """Разбор workflow через ruby -ryaml: {'keys': все ключи mapping любого уровня (в т.ч. из escape, flow, merge-ключа
-    `<<`), 'refs': значения ref любого уровня, 'uses': uses шагов, 'step_ifs': if шагов} или (None, причина)."""
+    `<<`), 'refs': значения ref любого уровня, 'uses': uses любого уровня (job и шаг), 'repos': repository, 'jobs': имена job, 'step_ifs': if шагов} или (None, причина)."""
     rb = shutil.which("ruby")
     if not rb:
         return None, "нет ruby"
     r = subprocess.run([rb, "-rjson", "-ryaml", "-e", _WF_WALK, path], capture_output=True, text=True)
     if r.returncode != 0:
         return None, f"ruby код {r.returncode}: {r.stderr.strip()[-400:] or '(stderr пуст)'}"
-    return json.loads(r.stdout), ""
+    data = json.loads(r.stdout)
+    if data["docs"] != 1:
+        return None, f"в файле {data['docs']} YAML-документов, нужен один"
+    return data, ""
 
 
 def wf_step_bad(data):
     """Шаг выключается через if или checkout берёт чужой ref — по разбору YAML."""
-    return bool(data["step_ifs"] or data["refs"])
+    return bool(data["step_ifs"] or data["refs"] or data["repos"])
 
 
 def t_wf_parse_selftest():
@@ -376,25 +381,42 @@ def t_wf_parse_selftest():
         "      - run: z\n        if: y\n")
     data, why = wf_parse(path)
     check("wf_parse: uses, ref, if шага — из разбора, if job-а не в step_ifs",
-          data == {"keys": data["keys"], "refs": ["main"], "uses": ["a/b@1"], "step_ifs": ["y"]} if data else False,
+          data == {"keys": data["keys"], "refs": ["main"], "uses": ["a/b@1"], "repos": [], "jobs": ["a"], "docs": 1, "step_ifs": ["y"]} if data else False,
           why or data)
     check("wf_step_bad: if шага и ref пойманы, чистый файл — нет",
-          data is not None and wf_step_bad(data) and wf_step_bad({"step_ifs": [], "refs": ["x"]}) and not wf_step_bad({"step_ifs": [], "refs": []}), data)
+          data is not None and wf_step_bad(data) and wf_step_bad({"step_ifs": [], "refs": ["x"], "repos": []})
+          and wf_step_bad({"step_ifs": [], "refs": [], "repos": ["evil/r"]})
+          and not wf_step_bad({"step_ifs": [], "refs": [], "repos": []}), data)
+    put(d, "job.yml", "jobs:\n  evil-x:\n    uses: evil/repo/.github/workflows/x.yml@main\n    secrets: inherit\n")
+    data, why = wf_parse(os.path.join(d, "job.yml"))
+    check("wf_parse: uses на уровне job (reusable workflow) виден, имя job с дефисом тоже",
+          data is not None and data["uses"] == ["evil/repo/.github/workflows/x.yml@main"] and data["jobs"] == ["evil-x"],
+          why or data)
+    put(d, "repo.yml", "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@" + "0" * 40 + "\n        with: {repository: evil/r}\n")
+    data, why = wf_parse(os.path.join(d, "repo.yml"))
+    check("wf_parse: with.repository виден", data is not None and data["repos"] == ["evil/r"], why or data)
+    put(d, "multi.yml", "a: 1\n---\njobs: {}\n")
+    data, why = wf_parse(os.path.join(d, "multi.yml"))
+    check("wf_parse: два YAML-документа — провал с причиной", data is None and "документов" in why, why)
     bad = put(d, "bad.yml", "a: b: c\n") or os.path.join(d, "bad.yml")
     data, why = wf_parse(bad)
     check("wf_parse: битый YAML — None и причина из stderr ruby", data is None and "ruby код" in why and len(why) > 20, why)
 
 
-def t_workflows():
+def t_workflows(wfdir=WORKFLOWS):
     """Право contents: write — только у release.yml; сторонние Action только по полному SHA; запуск — main."""
-    names = sorted(n for n in os.listdir(WORKFLOWS) if n.endswith((".yml", ".yaml")))
-    write = [n for n in names if re.search(r"^\s*[a-z-]+:\s*write\b", open(os.path.join(WORKFLOWS, n)).read(), re.M)]
+    names = sorted(n for n in os.listdir(wfdir) if n.endswith((".yml", ".yaml")))
+    write = [n for n in names if re.search(r"^\s*[a-z-]+:\s*write\b", open(os.path.join(wfdir, n)).read(), re.M)]
     check("право на запись — только release.yml", write == ["release.yml"], write)
-    text = open(os.path.join(WORKFLOWS, "release.yml")).read()
-    rel, why = wf_parse(os.path.join(WORKFLOWS, "release.yml"))
+    text = open(os.path.join(wfdir, "release.yml")).read()
+    rel, why = wf_parse(os.path.join(wfdir, "release.yml"))
     uses = rel["uses"] if rel else None
     check("release.yml: Action только actions/checkout по 40 знакам SHA",
-          uses and all(re.fullmatch(r"actions/checkout@[0-9a-f]{40}", u) for u in uses), uses)
+          uses and all(re.fullmatch(r"actions/checkout@[0-9a-f]{40}", u) for u in uses), uses if rel else why)
+    check("release.yml: ровно один job release (имена из разбора YAML)", rel is not None and rel["jobs"] == ["release"],
+          rel["jobs"] if rel else why)
+    check("release.yml: checkout не берёт чужой репозиторий", rel is not None and not rel["repos"],
+          rel if rel else why)
     check("release.yml: общий permissions пуст, запись только у job", re.search(r"^permissions: \{\}$", text, re.M)
           and re.findall(r"^\s*contents:\s*write", text, re.M) == ["      contents: write"], text)
     check("release.yml: concurrency без отмены идущего", "group: release-main" in text
@@ -406,11 +428,11 @@ def t_workflows():
     check("release.yml: ${{ }} не в run (инъекция)", not re.search(r"run:.*\$\{\{", text), text)
     # п. 8 (27.10): тесты до слияния — tests.yml (PR: затронутое на Linux; main: полный набор на macOS после слияния).
     # Красный прогон на main — сигнал откатывать: тик ставит выпуск без своего прогона тестов.
-    text = open(os.path.join(WORKFLOWS, "tests.yml")).read()
-    tst, why = wf_parse(os.path.join(WORKFLOWS, "tests.yml"))
+    text = open(os.path.join(wfdir, "tests.yml")).read()
+    tst, why = wf_parse(os.path.join(wfdir, "tests.yml"))
     uses = tst["uses"] if tst else None
     check("tests.yml: Action только checkout и setup-python по 40 знакам SHA",
-          uses and all(re.fullmatch(r"actions/(checkout|setup-python)@[0-9a-f]{40}", u) for u in uses), uses)
+          uses and all(re.fullmatch(r"actions/(checkout|setup-python)@[0-9a-f]{40}", u) for u in uses), uses if tst else why)
     jobs = re.split(r"^jobs:\n", text, flags=re.M)[-1]
     parts = re.split(r"^  (?=[a-z]+:\n)", jobs, flags=re.M)
     job = {m.group(1): part for part in parts if (m := re.match(r"([a-z]+):\n", part))}
@@ -421,7 +443,8 @@ def t_workflows():
           and text.count('python-version: "3.14"') == 2 and text.count("persist-credentials: false") == 2, text)
     # YAML с «: » в простом скаляре GitHub не разбирает — workflow не запускается вовсе (так было после #192)
     rb = shutil.which("ruby")
-    bad = subprocess.run([rb, "-ryaml", "-e", "ARGV.each { |f| YAML.load_file(f) }", *[os.path.join(WORKFLOWS, n) for n in names]],
+    load = "ARGV.each { |f| begin YAML.load_file(f, aliases: true) rescue ArgumentError; YAML.load_file(f) end }"
+    bad = subprocess.run([rb, "-ryaml", "-e", load, *[os.path.join(wfdir, n) for n in names]],
         capture_output=True, text=True) if rb else None
     check("workflows: каждый .yml разбирается как YAML (ruby -ryaml)", bad is not None and bad.returncode == 0,
           bad.stderr[-300:] if bad else "нет ruby")
@@ -435,7 +458,8 @@ def t_workflows():
     check("tests.yml: ни один шаг не выключается (`if:` только на уровне job), checkout не берёт чужой ref",
           tst is not None and not wf_step_bad(tst), tst if tst else why)
     check("tests.yml: PR — job affected на закреплённом Linux (минута macOS ×10), полная история для merge-base",
-          set(job) == {"affected", "full"} and re.search(r"^    if: github.event_name == 'pull_request'$", aff, re.M)
+          tst is not None and sorted(tst["jobs"]) == ["affected", "full"] and set(job) == {"affected", "full"}
+          and re.search(r"^    if: github.event_name == 'pull_request'$", aff, re.M)
           and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", aff, re.M) and "fetch-depth: 0" in aff, job.keys())
     check("tests.yml: push в main и ручной запуск — job full на закреплённом macOS, не на PR, не на коммите выпуска",
           re.search(r"^    if: \"github.event_name != 'pull_request' && !startsWith\(github\.event\.head_commit\.message, "
@@ -475,8 +499,61 @@ def t_workflows():
     check("tests.yml: ${{ }} не в run (инъекция)", not any("${{" in ln for ln in ar + fr), ar + fr)
 
 
+def t_workflows_on_bad_copies():
+    """Сами проверки t_workflows (не только wf_parse) краснеют на плохой копии workflows: мутант в месте вызова
+    (`set(keys) & set()`, снятый wf_step_bad, подменённый список uses) выживать не должен."""
+    global count
+    real = open(os.path.join(WORKFLOWS, "tests.yml"), encoding="utf-8").read()
+    rel_real = open(os.path.join(WORKFLOWS, "release.yml"), encoding="utf-8").read()
+
+    def run_on(tests=None, release=None):
+        d = tempfile.mkdtemp(prefix="wfbad-")
+        put(d, "tests.yml", tests if tests is not None else real)
+        put(d, "release.yml", release if release is not None else rel_real)
+        saved, n = list(fails), count
+        fails.clear()
+        try:
+            t_workflows(d)
+            return list(fails)
+        finally:
+            fails[:] = saved
+            globals()["count"] = n
+
+    clean = run_on()
+    check("t_workflows на нетронутой копии — зелёный", not clean, clean)
+    ins = lambda text, old, new: text.replace(old, new, 1)
+    cases = [
+        ("env в job tests.yml", dict(tests=ins(real, "timeout-minutes: 30", "timeout-minutes: 30\n    env: {X: 1}")),
+         "tests.yml: continue-on-error, shell"),
+        ("if шага в кавычках", dict(tests=ins(real, "      - name: Тесты скриптов выпуска\n",
+                                              "      - name: Тесты скриптов выпуска\n        \"if\": \"false\"\n")),
+         "tests.yml: ни один шаг не выключается"),
+        ("uses на уровне job в tests.yml", dict(tests=real.rstrip("\n") + "\n  evil-x:\n    uses: evil/r/.github/workflows/x.yml@main\n"),
+         "tests.yml: Action только"),
+        ("uses на уровне job в release.yml", dict(release=rel_real.rstrip("\n") + "\n  evil-x:\n    uses: evil/r/.github/workflows/x.yml@main\n"),
+         "release.yml: Action только"),
+        ("job с дефисом в tests.yml", dict(tests=real.rstrip("\n") + "\n  evil-x:\n    runs-on: ubuntu-24.04\n"),
+         "tests.yml: PR — job affected"),
+        ("repository у checkout в release.yml", dict(release=ins(rel_real, "ref: main", "ref: main\n          repository: evil/r")),
+         "release.yml: checkout не берёт чужой репозиторий"),
+        ("второй YAML-документ в tests.yml", dict(tests=real.rstrip("\n") + "\n---\na: 1\n"), "tests.yml: continue-on-error, shell"),
+    ]
+    cases += [
+        ("второй job в release.yml", dict(release=rel_real.rstrip("\n") + "\n  evil-x:\n    runs-on: ubuntu-24.04\n"),
+         "release.yml: ровно один job"),
+    ]
+    for name, kw, prefix in cases:
+        got = run_on(**kw)
+        check(f"t_workflows краснеет: {name}", any(f.startswith(prefix) for f in got), got)
+    got = run_on(release="a: b: c\n")
+    check("t_workflows: упавший разбор — причина ruby в сообщении проверки uses",
+          any(f.startswith("release.yml: Action только") and "ruby код" in f for f in got), got)
+
+
+
+
 for t in (t_first_and_bump, t_rules, t_refuse, t_push_race, t_reconcile, t_first_parent, t_tree_hash_matches_pantheon,
-          t_wf_parse_selftest, t_workflows):
+          t_wf_parse_selftest, t_workflows, t_workflows_on_bad_copies):
     try:
         t()
     except Exception as e:  # noqa: BLE001 — падение случая — провал, остальные идут
