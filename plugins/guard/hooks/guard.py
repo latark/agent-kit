@@ -3802,6 +3802,10 @@ def check_gh_out(event, tool, tool_input):
             return ("Правило gh-out: слово до подкоманды gh не вычислить (переменная, $(…)) — не понять, пишет ли "
                     "она в GitHub мимо песочницы (metis-0533).")
         for q, i in cands:
+            if personal and t[q] == "pr" and i is not None and t[i] == "merge":
+                # merge тоже идёт мимо песочницы (GH_PR_WRITE) и несёт текст (--body, --subject): окну с личным — нет
+                return ("Правило gh-out: gh pr merge окну с личным закрыто (SEC-13, metis-0600): --body и --subject "
+                        "уходят на GitHub, а слиять с этого окна нечего. Слияние — лид или владелец.")
             if t[q] == "pr" and i is not None and t[i] in GH_OUT_SUBS:
                 why = _gh_out_problem(t, cmd, cwd, win, roots, "своего направления")
                 if why:

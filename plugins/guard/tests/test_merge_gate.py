@@ -3084,6 +3084,9 @@ def t_gh_out_private(h):
                  f"gh pr comment 5 {R} --body-file notes/n.md", False, "с личным")
             case("--body-file из временной папки — отказ (окно с личным)",
                  f"gh pr comment 5 {R} --body-file {ok_body}", False, "с личным")
+            for mc in ("gh pr merge 5 {R} --squash --body 'x'", "gh pr merge 5 {R} --squash", "gh pr merge {R} 5 -t t -F notes/n.md",
+                       "gh pr merge 5 {R} --match-head-commit abc --body-file notes/n.md"):
+                case(f"{mc[:30]}… — отказ merge (окно с личным)", mc.format(R=R), False, "merge окну с личным")
             for sub in ("comment 5", "edit 5", "create -t t", "ready 5"):
                 case(f"gh pr {sub} -b текст — отказ (окно с личным)", f"gh pr {sub} {R} -b 'привет'", False, "с личным")
             # argus #209 Б1: относительный путь после смены папки в той же строке
@@ -3113,6 +3116,10 @@ def t_gh_out_private(h):
             for cmd in ("gh pr comment 1 -R latark/agent-kit -b 'ok'", "gh pr create -R latark/agent-kit -t t -b 'ok'"):
                 d, r = h.pre(cmd, role=role, pdir="projects/agent-kit", agent_id=aid, extra_env=WM)
                 check(f"gh-out metis ({role or 'главная'}): {cmd[:22]}… без личного — можно", d == "allow", r)
+        for role, aid in ((None, None), ("domain-coordinator", None), ("dev-sonnet", "sub1")):
+            d, r = h.pre("gh pr merge 1 -R latark/agent-kit --squash --body 'x'", role=role, pdir="projects/agent-kit",
+                         agent_id=aid, extra_env=WM)
+            check(f"gh-out metis ({role or 'главная'}): merge не режется правилом окна с личным", "окну с личным" not in r, r)
         # Гестия: тот же разбор файла — .git во временной папке тоже не выносится
         os.makedirs(os.path.join(tmp, ".git"), exist_ok=True)
         open(os.path.join(tmp, ".git/config"), "w").write("x")
