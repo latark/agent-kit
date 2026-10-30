@@ -290,6 +290,21 @@ for path, lb in (("plugins/pantheon/lib/watch.py", "pantheon/test_watch.py"),
     check(f"карта: {path} → {lb}", lb in amap["files"].get(path, ()), sorted(amap["files"].get(path, ())))
 check("карта: AGENTS.md не задевает ни один тест", amap["files"].get("AGENTS.md") == set(),
       amap["files"].get("AGENTS.md"))
+# карта свежая (metis-0599): новый файл плагина, которого нет в карте, гонит весь набор (select: «нет в карте»), а
+# новый файл тестов карта не знает и гонит всегда. Так было после разбиения pantheon.py на lib/ (PR #210). Краснеет —
+# пересобрать: heavy python3 -I plugins/pantheon/scripts/affected-map.py plugins/guard plugins/pantheon plugins/project-tools
+_ls = subprocess.run(["git", "-C", REPO, "ls-files", "-z", "--", "plugins"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+if _ls.returncode == 0 and _ls.stdout:
+    _tracked = [p for p in _ls.stdout.decode().split("\0") if p and os.path.isfile(os.path.join(REPO, p))]
+    _missing = sorted(p for p in _tracked if p not in amap["files"] and p not in R.FULL
+                      and not re.fullmatch(r"plugins/[^/]+/tests/test_[^/]+\.py", p))
+    check("карта свежая: каждый файл плагинов в git есть в карте (иначе весь набор)", not _missing, _missing[:10])
+    _labels = {f"{p.split('/')[1]}/{p.rsplit('/', 1)[1]}" for p in _tracked
+               if re.fullmatch(r"plugins/[^/]+/tests/test_[^/]+\.py", p)}
+    _unknown = sorted(_labels - amap["tests"])
+    check("карта свежая: каждый файл тестов в git есть в карте", not _unknown, _unknown[:10])
+else:
+    check("карта свежая: git ls-files недоступен — проверка пропущена", True)
 
 
 def mkmap(tests, files, broken=(), version=2, hashes=None):
