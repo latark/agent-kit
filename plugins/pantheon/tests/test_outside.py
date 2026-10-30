@@ -68,6 +68,8 @@ def check(name, cond, extra=""):
 # --- заглушка sandbox-exec: пишет argv и окружение, затем исполняет команду (или изображает npm) ------------------
 REC = os.path.join(_ROOT, "sandbox-calls.jsonl")
 FAKE = os.path.join(_ROOT, "fake-sandbox-exec")
+DEVTREE_PIDS = os.path.join(_ROOT, "devtree-pids")      # «turbo» и его задача (metis-0606)
+HOLD_RELEASE = os.path.join(_ROOT, "hold-release")      # тест «hold» идёт, пока нет этого файла
 with open(FAKE, "w") as fh:
     fh.write(f"#!{sys.executable}\n" + r'''
 import json, os, sys, time
@@ -94,6 +96,27 @@ if tail == ["run", "bad"]:
 if tail == ["run", "slow"]:
     time.sleep(60)
     os._exit(0)
+if tail == ["run", "devtree"]:
+    # как turbo (metis-0606): задача — в своей сессии и группе процессов, на SIGTERM не гаснет и держит PORT; сам
+    # «turbo» на SIGTERM выходит, задачу не гасит — killpg группы сервера её не достаёт
+    import subprocess, signal
+    task = ("import os, signal, socket\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "s = socket.socket(); s.bind(('127.0.0.1', int(os.environ['PORT']))); s.listen(64)\n"
+            "while True:\n    s.accept()[0].close()\n")
+    kid = subprocess.Popen([sys.executable, "-c", task], start_new_session=True)
+    with open(%r, "a") as fh:
+        fh.write(f"{os.getpid()} {kid.pid}\n")
+    time.sleep(600)
+    os._exit(0)
+if tail == ["run", "nap"]:
+    time.sleep(1.5)
+    os._exit(0)
+if tail == ["run", "hold"]:
+    end = time.time() + 120
+    while time.time() < end and not os.path.exists(%r):
+        time.sleep(0.2)
+    os._exit(0)
 if tail in (["run", "test"], ["run", "check"]):
     body = json.load(open("package.json"))["scripts"][tail[1]]
     os.execv("/bin/sh", ["/bin/sh", "-c", body])
@@ -101,12 +124,18 @@ if tail == ["run", "lint"] or cmd[1:2] in (["ci"], ["install"]):
     print("ok", cmd)
     os._exit(0)
 os.execvp(cmd[0], cmd)
-''' % REC)
+''' % (REC, DEVTREE_PIDS, HOLD_RELEASE))
 os.chmod(FAKE, 0o755)
 O.SANDBOX_EXEC = FAKE
 O.HEAVY = None
 O.READY_SEC = 15
 O.KILL_WAIT = 2
+# свой случайный ряд портов вместо 3200–3299: два test_outside сразу (argus и разработчик) иначе берут один порт, и
+# «сервер поднят» видит чужой слушатель (metis-0606)
+import random as _random  # noqa: E402
+DEFAULT_PORTS = O.SERVER_PORTS
+_pbase = _random.randrange(20000, 48000, 100)
+O.SERVER_PORTS = range(_pbase, _pbase + 100)
 
 
 def calls():
@@ -127,7 +156,7 @@ def git(d, *args):
 APP = os.path.join(HOME, "projects", "app")
 OTHER = os.path.join(HOME, "projects", "other")
 REPO = "latark/app"
-PKG = {"name": "app", "scripts": {"dev": "next dev", "bad": "x", "slow": "x", "lint": "x"}}
+PKG = {"name": "app", "scripts": {"dev": "next dev", "bad": "x", "slow": "x", "lint": "x", "devtree": "x", "hold": "x", "nap": "x"}}
 
 
 def commit(d, files, msg):
@@ -554,7 +583,8 @@ rc, q, rid = role_request("athena-x", APP, "serve", "--minutes", "5")
 run_pass()
 res = O.load_result(q, rid) or {}
 port = res.get("port") or 0
-check("сервер: адрес http://127.0.0.1:<3200–3299>", res.get("state") == "serving" and 3200 <= port < 3300
+check("ряд портов сервера по умолчанию — 3200–3299", DEFAULT_PORTS == range(3200, 3300), DEFAULT_PORTS)
+check("сервер: адрес http://127.0.0.1:<порт из ряда>", res.get("state") == "serving" and port in O.SERVER_PORTS
       and res.get("url") == f"http://127.0.0.1:{port}", res)
 check("сервер отвечает по адресу", port_open(port))
 c = calls()[before:]
@@ -672,7 +702,207 @@ res = O.load_result(q, rid) or {}
 check("serve без --wait: старое короткое ожидание, failed с верной причиной",
       res.get("state") == "failed" and "оба места" in res.get("why", "") and time.monotonic() - t0 < 14, res)
 release(held)
+
+# --- «стоп» при занятом проходе и задача в своей группе процессов (metis-0606): настоящий heavy --server ----------
+# 30.10: проход держал замок, пока гонял тесты после «принять» (часами), «стоп» ждал конца всех прогонов; а turbo
+# ставит задаче свою группу — next dev переживал killpg группы сервера.
+
+
+def pid_alive(pid, grace=3):
+    end = time.monotonic() + grace
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        if time.monotonic() >= end:
+            return True
+        time.sleep(0.1)
+
+
+def devtree_pids():
+    try:
+        with open(DEVTREE_PIDS) as fh:
+            return [int(x) for x in fh.read().split()]
+    except (OSError, ValueError):
+        return []
+
+
+def _kill_devtree():
+    import signal as _sig
+    for p in devtree_pids():
+        try:
+            os.kill(p, _sig.SIGKILL)
+        except OSError:
+            pass
+
+
+_atexit.register(_kill_devtree)   # мутант без гашения ушедших групп не оставляет задачу висеть на порту
+
+
+def new_request(window, *args):
+    q = os.path.join(CACHE, window, "outside")
+    before = set(os.listdir(q)) if os.path.isdir(q) else set()
+    rc, q, _ = role_request(window, APP, *args)
+    rid = next(n[:-9] for n in os.listdir(q) if n.endswith(".req.json") and n not in before)
+    return q, rid
+
+
+def wait_for(fn, sec):
+    end = time.monotonic() + sec
+    while time.monotonic() < end:
+        v = fn()
+        if v:
+            return v
+        time.sleep(0.2)
+    return fn()
+
+
+def state(q, rid):
+    return (O.load_result(q, rid) or {}).get("state")
+
+
+O.READY_SEC = 15
+q, rid_s = new_request("athena-x", "serve", "--script", "devtree")
+_, rid_t = new_request("athena-x", "test", "--script", "hold")
+th = threading.Thread(target=run_pass)
+th.start()
+up = wait_for(lambda: state(q, rid_s) == "serving" and state(q, rid_t) == "running", 40)
+res = O.load_result(q, rid_s) or {}
+port, pids = res.get("port") or 0, devtree_pids()
+hv = int((O.servers().get(rid_s) or {}).get("pid") or 0)
+check("стоп при занятом проходе: сервер (heavy --server → «turbo» → задача в своей группе) поднят, тест идёт",
+      up and port_open(port) and len(pids) == 2 and hv and th.is_alive(), (res, pids, hv))
+os.environ["PANTHEON_TMP"] = os.path.join(CACHE, "athena-x", "tmp")
+O.main(["stop", rid_s])
+os.environ.pop("PANTHEON_TMP")
+t0 = time.monotonic()
+stopped = wait_for(lambda: state(q, rid_s) == "stopped", 20)
+dt = time.monotonic() - t0
+check("стоп во время прогона тестов прохода: stopped за ≤10 с, тест ещё идёт",
+      stopped and dt <= 10 and th.is_alive() and state(q, rid_t) == "running", (state(q, rid_s), round(dt, 1)))
+check("стоп: порт свободен, погашены heavy --server, «turbo» и задача в своей группе процессов",
+      # слушателя нет — не port_free: bind без SO_REUSEADDR (metis-0592) ловит TIME_WAIT после accept().close()
+      not port_open(port) and not any(pid_alive(p) for p in pids + [hv]) and rid_s not in O.servers()
+      and not (O.load_result(q, rid_s) or {}).get("note"), [(p, pid_alive(p, 0)) for p in pids + [hv]])
+open(HOLD_RELEASE, "w").close()
+th.join(90)
+res = O.load_result(q, rid_t) or {}
+check("тест после стопа сервера дошёл до конца, код 0", res.get("state") == "done" and res.get("code") == 0, res)
+_kill_devtree()
+
+# «погаси прежний и подними новый»: новый ждёт место heavy --server, «стоп» прежнего приходит в это время
+q, rid_a = new_request("athena-x", "serve")
+run_pass()
+check("прежний сервер поднят, в servers.json — время старта его процесса",
+      state(q, rid_a) == "serving" and O.servers()[rid_a].get("started") == O.started(O.servers()[rid_a]["pid"])
+      and O.servers()[rid_a].get("started"), O.servers().get(rid_a))
+q, rid_b = serve_with_wait(15)
+
+
+def _stop_a():
+    os.environ["PANTHEON_TMP"] = os.path.join(CACHE, "athena-x", "tmp")
+    O.main(["stop", rid_a])
+    os.environ.pop("PANTHEON_TMP")
+
+
+threading.Timer(3, _stop_a).start()
+t0 = time.monotonic()
+run_pass()
+dt = time.monotonic() - t0
+res = O.load_result(q, rid_b) or {}
+check("новый сервер ждёт место, «стоп» прежнего в это время — прежний гаснет, новый поднят до конца --wait",
+      state(q, rid_a) == "stopped" and res.get("state") == "serving" and dt < 14, (state(q, rid_a), res, round(dt, 1)))
+_stops = [json.loads(x) for x in open(os.path.join(STATE, "logs", "outside.jsonl"))]
+_stops = [x.get("why") for x in _stops if x.get("id") == rid_a and x.get("kind") == "stop"]
+check("servers.json — только новый: прежний не вернулся из старого снимка (один «стоп», причина — заявка)",
+      set(O.servers()) == {rid_b} and _stops == ["заявка «стоп»"]
+      and (O.load_result(q, rid_a) or {}).get("why") == "заявка «стоп»", (O.servers(), _stops))
+_srv = O.servers()
+for _r in list(_srv):
+    O.kill_group(_srv[_r]["pid"])
+O.save_servers({})
 O.HEAVY = None
+
+# --- номер процесса сервера занял чужой (metis-0606, Д-2 argus): не гасить ни его, ни его детей в своих группах ----
+_spawn = [sys.executable, "-c", "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', "
+          "'import time; time.sleep(60)'], start_new_session=True); time.sleep(60)"]
+alien = subprocess.Popen(_spawn)                                  # не глава группы: группа — наша, теста
+time.sleep(0.8)
+_ps = subprocess.run(["/bin/ps", "-axo", "pid=,ppid="], capture_output=True, text=True).stdout.split()
+_kid = [int(a) for a, b in zip(_ps[::2], _ps[1::2]) if int(b) == alien.pid]   # ребёнок в своей группе
+O.kill_group(alien.pid)
+check("kill_group по pid, который не глава группы: ни он, ни его ребёнок в своей группе не гаснут",
+      alien.poll() is None and _kid and all(pid_alive(p, 0) for p in _kid), (alien.poll(), _kid))
+O.save_servers({"20261030-000000-a1a1a1": {"pid": alien.pid, "port": 0, "until": 0, "qdir": None}})
+O.sweep()
+check("sweep: запись с чужим не-главой снята, процессы живы", not O.servers() and alien.poll() is None
+      and all(pid_alive(p, 0) for p in _kid), O.servers())
+for _p in _kid:
+    with __import__("contextlib").suppress(OSError):
+        os.kill(_p, 9)
+alien.kill()
+alien.wait()
+
+leader = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)   # глава своей группы, как heavy сервера
+time.sleep(0.3)
+O.save_servers({"20261030-000000-b2b2b2": {"pid": leader.pid, "started": "Thu Jan  1 00:00:00 1970", "port": 0,
+                                           "until": time.time() + 3600, "qdir": None}})
+check("номер сервера занял чужой процесс — серверу пора к гашению (sweep_due)", O.sweep_due())
+O.sweep()
+res = P.read_json(os.path.join(STATE, "outside", "runs", "20261030-000000-b2b2b2.json"), {})
+check("sweep: время старта не то — процесс не гасится, запись снята, причина «процесс завершился»",
+      leader.poll() is None and not O.servers() and res.get("why") == "процесс завершился", (leader.poll(), res))
+_tz = os.environ.get("TZ")
+_seen = set()
+for _z in ("Asia/Novosibirsk", "America/New_York", "UTC"):
+    os.environ["TZ"] = _z
+    time.tzset()
+    _seen.add(O.started(leader.pid))
+if _tz is None:
+    os.environ.pop("TZ")
+else:
+    os.environ["TZ"] = _tz
+time.tzset()
+_utc = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(leader.pid)], capture_output=True, text=True,
+                      env={"LC_ALL": "C", "TZ": "UTC", "PATH": "/usr/bin:/bin"}).stdout
+_ny = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(leader.pid)], capture_output=True, text=True,
+                     env={"LC_ALL": "C", "TZ": "America/New_York", "PATH": "/usr/bin:/bin"}).stdout
+check("время старта — в UTC и не зависит от пояса прохода: смена пояса не делает живой сервер чужим",
+      _seen == {" ".join(_utc.split())} and " ".join(_ny.split()) not in _seen, (_seen, _utc, _ny))
+O.save_servers({"20261030-000000-c3c3c3": {"pid": leader.pid, "started": O.started(leader.pid), "port": 0,
+                                           "until": 0, "qdir": None}})
+O.sweep()
+check("sweep: время старта совпало — срок вышел, процесс погашен", leader.wait(timeout=10) is not None
+      and not O.servers())
+
+# --- sweep_quiet (metis-0606, Д-1 argus): сбой sweep посреди прогона не роняет тесты, в журнал — один раз ------------
+O.SWEEP_EVERY = 0.2
+O._SWEEP_ERR.clear()
+_log = os.path.join(STATE, "logs", "outside.jsonl")
+_n0 = sum(1 for _ in open(_log))
+_real_sweep = O.sweep
+
+
+def _boom(t=None):
+    raise ValueError("битый servers.json")
+
+
+O.sweep = _boom
+try:
+    res = O.run_test("20261030-000000-d4d4d4", APP, "nap", "athena-x", None, O.registry(None))
+except Exception as e:  # noqa: BLE001 — мутант без try: исключение вышло из run_test
+    res = {"state": f"исключение {type(e).__name__}: {e}"}
+finally:
+    O.sweep = _real_sweep
+    O.SWEEP_EVERY = 2
+_errs = [json.loads(x) for x in list(open(_log))[_n0:]]
+_errs = [x for x in _errs if x.get("kind") == "sweep-error"]
+check("sweep падает посреди прогона: тест дошёл, done с кодом 0, в журнале один sweep-error",
+      res.get("state") == "done" and res.get("code") == 0 and len(_errs) == 1
+      and "битый servers.json" in _errs[0].get("why", ""), (res.get("state"), res.get("code"), _errs))
 
 # --- 4а. уборка итогов в папках заявок (metis-0573): старше суток — удалить ---------------------------------------
 q = os.path.join(CACHE, "athena-x", "outside")

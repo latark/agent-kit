@@ -26,7 +26,10 @@ STATE/outside/queue. Имя окна проход берёт из места п�
 
 Проход (`outside run`, его запускает тик, когда есть дело; замок outside-run — по одному):
   1. Серверы: срок вышел, есть заявка «стоп» (<ID>.stop в той же папке) или процесс умер — группа процессов гаснет
-     (SIGTERM, через 5 с SIGKILL), итог «stopped».
+     (SIGTERM, через 5 с SIGKILL) вместе с потомками, ушедшими в свою группу (turbo ставит её каждой задаче, next dev
+     в ней), итог «stopped»; порт после этого ещё отвечает — пометка в итоге. Номер процесса сервера занял чужой
+     (время старта по ps не то, что записано при запуске) — запись снимается без гашения. Пока проход занят тестами или ждёт
+     порт нового сервера, он смотрит серверы каждые 2 с (SWEEP_EVERY): «стоп» не ждёт конца прогонов (metis-0606).
   2. Заявки — по времени, сначала серверы, потом тесты. Заявка удаляется до запуска: одна заявка — один запуск.
   3. Тесты после «принять» argus: в журнале шлюза слияния (STATE/merge-gate/records.jsonl) «принять» не старше суток
      на (repo, SHA), а записи tests на этот SHA нет — проход ищет копию: корень папки реестра или его worktree внутри
@@ -85,6 +88,7 @@ SERVE_MIN, SERVE_MAX = 30, 120      # срок сервера, минуты
 TEST_TIMEOUT = 7200                 # с
 READY_SEC = 90                      # сервер должен открыть порт за это время
 KILL_WAIT = 5
+SWEEP_EVERY = 2                     # с: так часто проход смотрит «стоп» и срок серверов, пока идут его тесты (metis-0606)
 SERVE_QUEUE_MIN = 6                  # без --wait (или он вышел) heavy ждёт место столько секунд (metis-0593)
 AUTO_TTL = 24 * 3600                # «принять» старше суток тесты сам не зовёт
 RESULT_TTL = 24 * 3600              # итоги <ID>.result.json и брошенные <ID>.stop в папках заявок — сутки
@@ -459,22 +463,113 @@ def tail(log):
     return "\n".join(text.splitlines()[-TAIL_LINES:])[-TAIL_CHARS:]
 
 
-def kill_group(pid):
-    """SIGTERM группе процессов, через KILL_WAIT с — SIGKILL."""
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+def strays(pid):
+    """[(pid, pgid)] потомков группы pid, ушедших в свою группу процессов: turbo ставит каждой задаче свою, и next dev
+    в ней переживал killpg группы сервера (metis-0606). Собирать до сигнала: после него сироты уходят к launchd.
+    Начало обхода — только члены группы pid: pid не глава (номер достался чужому процессу) и группы нет — [], как у
+    killpg, который такой группе ничего не шлёт."""
+    try:
+        out = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,pgid="], capture_output=True, text=True,
+                             timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    kids, pgid = {}, {}
+    for ln in out.splitlines():
         try:
-            os.killpg(pid, sig)
+            p, pp, g = (int(x) for x in ln.split())
+        except ValueError:
+            continue
+        kids.setdefault(pp, []).append(p)
+        pgid[p] = g
+    seen, todo = set(), [p for p, g in pgid.items() if g == pid]
+    while todo:
+        p = todo.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        todo.extend(kids.get(p, ()))
+    return [(p, pgid[p]) for p in sorted(seen) if p in pgid and pgid[p] != pid]
+
+
+def _signal(pid, extra, sig):
+    """sig группе pid и ушедшим потомкам: группе, если её глава — наш потомок, иначе самому процессу."""
+    own = {p for p, _ in extra} | {pid}
+    for target, group in [(pid, True)] + [(g, True) if g in own else (p, False) for p, g in extra]:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            (os.killpg if group else os.kill)(target, sig)
+
+
+def _any_alive(pid, extra):
+    with contextlib.suppress(ChildProcessError, OSError):
+        os.waitpid(pid, os.WNOHANG)
+    for target, fn in [(pid, os.killpg)] + [(p, os.kill) for p, _ in extra]:
+        try:
+            fn(target, 0)
+            return True
         except (ProcessLookupError, PermissionError):
+            continue
+    return False
+
+
+def kill_group(pid):
+    """SIGTERM группе процессов и её потомкам в своих группах (strays), через KILL_WAIT с — SIGKILL."""
+    extra = strays(pid)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if not _any_alive(pid, extra):
             return
+        _signal(pid, extra, sig)
         deadline = time.monotonic() + (KILL_WAIT if sig == signal.SIGTERM else 1)
         while time.monotonic() < deadline:
-            with contextlib.suppress(ChildProcessError, OSError):
-                os.waitpid(pid, os.WNOHANG)
-            try:
-                os.killpg(pid, 0)
-            except (ProcessLookupError, PermissionError):
+            if not _any_alive(pid, extra):
                 return
             time.sleep(0.1)
+
+
+def wait_proc(proc, timeout):
+    """proc.wait(timeout), а каждые SWEEP_EVERY с — sweep_quiet(): проход держит замок outside-run, пока идут тесты
+    (после «принять» — подряд, часами), и тик его не зовёт; без этого «стоп» и срок сервера ждали конца всех прогонов
+    (metis-0606). TimeoutExpired — как у proc.wait."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return proc.wait(timeout=max(0.01, min(SWEEP_EVERY, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            if time.monotonic() >= deadline:
+                raise
+        sweep_quiet()
+
+
+_SWEEP_ERR = []
+
+
+def sweep_quiet():
+    """sweep() посреди чужой работы прохода: его сбой не роняет прогон тестов, в журнал — один раз."""
+    try:
+        sweep()
+    except Exception as e:  # noqa: BLE001 — прогон тестов важнее; сам сбой виден в журнале и на следующем sweep()
+        if not _SWEEP_ERR:
+            _SWEEP_ERR.append(e)
+            log_event(kind="sweep-error", why=f"{type(e).__name__}: {e}")
+
+
+def started(pid):
+    """Время старта процесса по ps (lstart, LC_ALL=C, TZ=UTC: смена пояса или летнего времени за жизнь сервера иначе
+    меняет строку, и живой сервер сочли бы чужим) или None — процесса нет."""
+    try:
+        r = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True,
+                           timeout=10, env={"LC_ALL": "C", "TZ": "UTC", "PATH": "/usr/bin:/bin"})
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return " ".join(r.stdout.split()) or None
+
+
+def foreign(pid, when):
+    """Номер pid сервера занял другой процесс: жив, а время старта не то, что записано при запуске. Такой не гасить —
+    только снять запись (metis-0606). Записи без времени (до этой правки) и умерший pid — не чужие."""
+    if not pid or not when:
+        return False
+    now = started(pid)
+    return now is not None and now != when
 
 
 def alive(pid):
@@ -588,7 +683,7 @@ def run_test(rid, d, script, window, qdir, roots, record=True):
             return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line,
                                            "why": f"команда не запустилась: {e}", "log": log})
         try:
-            code = proc.wait(timeout=TEST_TIMEOUT)
+            code = wait_proc(proc, TEST_TIMEOUT)
         except subprocess.TimeoutExpired:
             timed_out = True
             kill_group(proc.pid)
@@ -702,10 +797,13 @@ def run_serve(rid, d, script, minutes, window, qdir, roots, wait=SERVE_QUEUE_MIN
         os.close(fd)
         return save_result(qdir, rid, {"state": "failed", "kind": "serve", "why": f"сервер не запустился: {e}", "log": log})
     os.close(fd)
-    t_start = time.monotonic()
+    t_start = last = time.monotonic()
     deadline = t_start + READY_SEC + (wait if heavy_bin() else 0)   # очередь heavy + сами READY_SEC
     while time.monotonic() < deadline and proc.poll() is None and not port_open(port):
         time.sleep(0.5)
+        if time.monotonic() - last >= SWEEP_EVERY:   # очередь heavy — до 10 минут, «стоп» прежних не ждёт её
+            sweep_quiet()
+            last = time.monotonic()
     if proc.poll() is not None or not port_open(port):
         busy = proc.poll() == 75 and bool(heavy_bin())
         why = (heavy_busy_why(log, time.monotonic() - t_start) if busy
@@ -716,7 +814,9 @@ def run_serve(rid, d, script, minutes, window, qdir, roots, wait=SERVE_QUEUE_MIN
         return save_result(qdir, rid, {"state": "failed", "kind": "serve", "cmd": line, "dir": d, "why": why,
                                        "log": log, "tail": tail(log), **({"busy": True} if busy else {})})
     until = P.now() + minutes * 60
-    srv[rid] = {"pid": proc.pid, "port": port, "until": until, "qdir": qdir, "window": window, "dir": d, "tmp": tmp}
+    srv = servers()   # заново: sweep_quiet в ожидании порта мог погасить и убрать прежние
+    srv[rid] = {"pid": proc.pid, "started": started(proc.pid), "port": port, "until": until, "qdir": qdir,
+                "window": window, "dir": d, "tmp": tmp}
     save_servers(srv)
     log_event(id=rid, kind="serve", window=window, dir=d, port=port, ok=True, minutes=minutes)
     return save_result(qdir, rid, {"state": "serving", "kind": "serve", "cmd": line, "dir": d, "port": port,
@@ -745,11 +845,12 @@ def sweep(t=None):
     srv, n = servers(), 0
     for rid, s in list(srv.items()):
         pid = int(s.get("pid") or 0)
+        alien = foreign(pid, s.get("started"))
         why = ("срок вышел" if t >= float(s.get("until") or 0) else "заявка «стоп»" if _stop_asked(s.get("qdir"), rid)
-               else "процесс завершился" if not pid or not alive(pid) else None)
+               else "процесс завершился" if not pid or alien or not alive(pid) else None)
         if not why:
             continue
-        if pid:
+        if pid and not alien:
             kill_group(pid)
         if s.get("tmp"):
             shutil.rmtree(s["tmp"], ignore_errors=True)
@@ -764,9 +865,13 @@ def sweep(t=None):
                 os.remove(root("queue", rid + ".stop"))
         del srv[rid]
         n += 1
-        log_event(id=rid, kind="stop", why=why)
+        port = int(s.get("port") or 0)
+        busy = bool(port) and port_open(port)
+        log_event(id=rid, kind="stop", why=why, **({"port_busy": port} if busy else {}))
         save_result(qdir, rid, {"state": "stopped", "kind": "serve", "port": s.get("port"), "why": why,
-                                "log": root("runs", rid + ".log"), "tail": tail(root("runs", rid + ".log"))})
+                                "log": root("runs", rid + ".log"), "tail": tail(root("runs", rid + ".log")),
+                                **({"note": f"порт {port} после гашения ещё отвечает: его держит процесс вне дерева "
+                                            "сервера"} if busy else {})})
     if n:
         save_servers(srv)
     return n
@@ -776,7 +881,8 @@ def sweep_due(t=None):
     t = P.now() if t is None else t
     for rid, s in servers().items():
         pid = int(s.get("pid") or 0)
-        if t >= float(s.get("until") or 0) or _stop_asked(s.get("qdir"), rid) or not pid or not alive(pid):
+        if (t >= float(s.get("until") or 0) or _stop_asked(s.get("qdir"), rid) or not pid or not alive(pid)
+                or foreign(pid, s.get("started"))):
             return True
     return False
 
@@ -1016,8 +1122,13 @@ def prepare(d, rid):
     tmp = tempfile.mkdtemp(prefix="outside-")
     try:
         os.write(fd, f"$ {' '.join(argv)}  (зависимости свежего worktree)\n".encode())
-        subprocess.run(wrap(argv, write_profile(registry(None))), cwd=d, env=sandbox_env(tmp, "test"),
-                       stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, timeout=TEST_TIMEOUT, start_new_session=True)
+        proc = subprocess.Popen(wrap(argv, write_profile(registry(None))), cwd=d, env=sandbox_env(tmp, "test"),
+                                stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, start_new_session=True)
+        try:
+            wait_proc(proc, TEST_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            kill_group(proc.pid)
+            proc.wait()
     except (OSError, subprocess.SubprocessError):
         pass
     finally:
