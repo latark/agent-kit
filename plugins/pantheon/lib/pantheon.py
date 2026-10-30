@@ -199,6 +199,12 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         своде недели metrics/week-*.md. Не вердикт и не согласие, шлюз её не читает
   pantheon review sample   выборочная проверка недели: PR ядра с одним argus (от 3 в одном репозитории — одним
                                         запуском), потолок 1 запуск в неделю, 2 — после недели с пропуском
+  pantheon review report <owner/repo> <PR> <agent8>[/<сессия8>] [--out ПУТЬ]   последний отчёт прежнего argus
+                                        из его транскрипта ~/.claude/projects/*/<сессия>/subagents/agent-<id>.jsonl
+                                        (пара — из `review status`): после /clear SendMessage к нему не идёт, а новый
+                                        argus ведёт повторный круг по дельте с этим отчётом (metis-0602). Нет файла,
+                                        несколько совпадений, нет вердикта пары в журнале или «Head:» отчёта ≠ head её
+                                        последнего вердикта — отказ, код 1; --out только под $TMPDIR или /private/tmp
   pantheon review status [<owner/repo> <PR>]   записи журнала ~/.local/state/pantheon/merge-gate/records.jsonl и
                                         метки «ревью идёт»; у вердикта — рецензент (agent_id/сессия, по 8 знаков),
                                         с PR — строка «итог на <head>: принять N, вернуть M» по последнему вердикту

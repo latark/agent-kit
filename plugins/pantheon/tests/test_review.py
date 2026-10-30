@@ -42,7 +42,7 @@ def run_all(tmp):
     home, state = os.path.join(tmp, "ai", "pantheon"), os.path.join(tmp, "state")
     os.makedirs(home)
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": tmp, "PANTHEON_HOME": home,
-           "PANTHEON_STATE": state, "PANTHEON_NO_NOTIFY": "1", "GIT_CONFIG_NOSYSTEM": "1",
+           "PANTHEON_STATE": state, "TMPDIR": tmp, "PANTHEON_NO_NOTIFY": "1", "GIT_CONFIG_NOSYSTEM": "1",
            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
 
     def pantheon(*args, cwd=tmp):
@@ -279,6 +279,152 @@ def run_all(tmp):
           "head " + S2[:8] in r.stdout and SHA[:8] not in r.stdout.split("\n")[0], r.stdout)
     for bad in (["latark/agent-kit", "30"], ["latark/agent-kit", "30", "abc"], ["x", "30", SHA]):
         check(f"begin {' '.join(bad)[:30]}: плохой формат — код 2", at(T, "review", "begin", *bad).returncode == 2)
+    report_tests(tmp, pantheon)
+
+
+def report_tests(tmp, pantheon):
+    """review report (metis-0602): отчёт прежнего argus из транскрипта субагента; HOME — временный. Пара и последний
+    head берутся из журнала шлюза, «Head:» отчёта должен равняться head последнего вердикта пары."""
+    ref = "o/r-report"
+    sess, agent = "5e55" * 16, "ab12cd34" + "0" * 24
+    H1, H2 = "1" * 40, "2" * 40
+    gate = os.path.join(tmp, "state", "merge-gate")
+    os.makedirs(gate, exist_ok=True)
+
+    def verdict(kind, sha, a=agent, ss=sess, pr=204, typ="argus"):
+        with open(os.path.join(gate, "records.jsonl"), "a") as fh:
+            fh.write(json.dumps({"v": 1, "kind": kind, "repo": [ref], "pr": pr, "sha": sha, "time": "2026-10-30T10:00:00",
+                                 "by": {"agent_type": typ, "agent_id": a, "session_id": ss}}) + "\n")
+    verdict("reject", H1)
+    verdict("accept", H2)  # последний вердикт пары — на H2
+    sdir = os.path.join(tmp, ".claude", "projects", "-x-proj", sess, "subagents")
+    os.makedirs(sdir)
+
+    def line(blocks):
+        return json.dumps({"type": "assistant", "message": {"role": "assistant", "content": blocks}}) + "\n"
+
+    def hb(text):
+        return {"type": "tool_use", "name": "SubagentHandback", "input": {"message": text}}
+    fp = os.path.join(sdir, f"agent-{agent}.jsonl")
+    with open(fp, "w") as fh:
+        fh.write(json.dumps({"type": "user", "message": {"content": "x"}}) + "\n")
+        fh.write("битая строка\n")
+        fh.write(line([hb(f"Head: {H1}\nПЕРВЫЙ {ref}#204")]))
+        fh.write(line([hb(f"Head: {H2}\nВТОРОЙ-СТАРЫЙ {ref} 204")]))
+        fh.write(line([{"type": "text", "text": "длинный текст после отчёта " + "т" * 500}]))
+        fh.write(line([hb(f"Head: {H2}\nИТОГОВЫЙ {ref} 204 {H2}")]))  # PR без «#», два Handback на одном Head
+    r = pantheon("review", "report", ref, "204", "ab12cd34/5e555e55")
+    check("report: последний Handback (PR без «#»), не длинный text и не ранний", r.returncode == 0
+          and "ИТОГОВЫЙ" in r.stdout and "ПЕРВЫЙ" not in r.stdout and "СТАРЫЙ" not in r.stdout
+          and "длинный текст" not in r.stdout, r.stdout + r.stderr)
+    check("report: сессия необязательна", pantheon("review", "report", ref, "204", "ab12cd34").returncode == 0)
+    r = pantheon("review", "report", ref, "205", "ab12cd34")
+    check("report: на этом PR вердикта пары нет — код 1 и «полным кругом»", r.returncode == 1
+          and "полным кругом" in r.stderr and not r.stdout, r.stdout + r.stderr)
+    r = pantheon("review", "report", ref, "204", "ffffffff")
+    check("report: пары нет в журнале — код 1", r.returncode == 1 and "нет вердикта" in r.stderr, r.stderr)
+    r = pantheon("review", "report", ref, "204", "ab12cd34/dead")
+    check("report: сессия не та — код 1", r.returncode == 1, r.stderr)
+    out = os.path.join(tmp, "rep.md")
+    r = pantheon("review", "report", ref, "204", "ab12cd34", "--out", out)
+    body = open(out).read() if os.path.exists(out) else ""
+    check("report --out: файл записан, 0600", r.returncode == 0 and "ИТОГОВЫЙ" in body
+          and oct(os.stat(out).st_mode & 0o777) == "0o600", r.stdout + r.stderr)
+    r = pantheon("review", "report", ref, "204", "ab12cd34", "--out", out)
+    check("report --out: файл уже есть — код 1, не затёрт", r.returncode == 1 and open(out).read() == body, r.stderr)
+    victim = os.path.join(tmp, "victim.txt")
+    open(victim, "w").write("жертва")
+    link = os.path.join(tmp, "link.md")
+    os.symlink(victim, link)
+    r = pantheon("review", "report", ref, "204", "ab12cd34", "--out", link)
+    check("report --out в симлинк — код 1, цель не тронута", r.returncode == 1 and open(victim).read() == "жертва",
+          r.stderr)
+    r = pantheon("review", "report", ref, "204", "ab12cd34", "--out", os.path.join(tmp, "a.md"), "--out",
+                 os.path.join(tmp, "b.md"))
+    check("report: --out дважды — код 2, файлов нет", r.returncode == 2 and not os.path.exists(os.path.join(tmp, "a.md")),
+          r.stderr)
+    r = pantheon("review", "report", ref, "204", "ab12cd34", "--out", os.path.expanduser("~/x-report.md"))
+    r2 = pantheon("review", "report", ref, "204", "ab12cd34", "--out", "/etc/x-report.md")
+    check("report --out вне $TMPDIR и /private/tmp — код 2", r.returncode == 2 and r2.returncode == 2
+          and not os.path.exists("/etc/x-report.md"), r.stderr + r2.stderr)
+    # «Head:» отчёта не равен head последнего вердикта — отчёт не тот
+    verdict("reject", H1)
+    r = pantheon("review", "report", ref, "204", "ab12cd34")
+    check("report: Head отчёта ≠ head последнего вердикта пары — код 1", r.returncode == 1 and "не равен" in r.stderr,
+          r.stdout + r.stderr)
+    verdict("accept", H2)
+    # вердикт не argus и чужого PR пару не создаёт
+    verdict("accept", H2, a="ab12cd99" + "0" * 24, typ="talos")
+    verdict("accept", H2, a="ab12cd88" + "0" * 24, pr=999)
+    r = pantheon("review", "report", ref, "204", "ab12cd")
+    check("report: talos и чужой PR не считаются парой — совпадение одно", r.returncode == 0, r.stderr)
+    # транскрипт — симлинк: не читается
+    a2 = "c0de0000" + "0" * 24
+    verdict("accept", H2, a=a2)
+    real = os.path.join(tmp, "real.jsonl")
+    with open(real, "w") as fh:
+        fh.write(line([hb(f"Head: {H2}\nОТЧЁТ {ref}#204")]))
+    os.symlink(real, os.path.join(sdir, f"agent-{a2}.jsonl"))
+    r = pantheon("review", "report", ref, "204", "c0de0000")
+    check("report: транскрипт — симлинк, код 1", r.returncode == 1 and not r.stdout and "не найден" in r.stderr, r.stderr)
+    # две пары под один префикс — отказ
+    verdict("accept", H2, a="ab12cd35" + "0" * 24)
+    r = pantheon("review", "report", ref, "204", "ab12cd")
+    check("report: две пары под префикс — код 1", r.returncode == 1 and "несколько" in r.stderr, r.stderr)
+    # транскрипт в подпапке workflows
+    sess3, a3 = "7" * 64, "beef0000" + "0" * 24
+    verdict("accept", H2, a=a3, ss=sess3)
+    d3 = os.path.join(tmp, ".claude", "projects", "-y", sess3, "subagents", "workflows", "run1")
+    os.makedirs(d3)
+    with open(os.path.join(d3, f"agent-{a3}.jsonl"), "w") as fh:
+        fh.write(line([hb(f"Head: {H2}\nWF {ref}#204")]))
+    r = pantheon("review", "report", ref, "204", "beef0000")
+    check("report: подпапка workflows", r.returncode == 0 and "WF" in r.stdout, r.stderr)
+    # без Handback — последний длинный text; без отчёта — код 1
+    a4, a5 = "cafe0000" + "0" * 24, "dead0000" + "0" * 24
+    verdict("accept", H2, a=a4)
+    verdict("accept", H2, a=a5)
+    with open(os.path.join(sdir, f"agent-{a4}.jsonl"), "w") as fh:
+        fh.write(line([{"type": "text", "text": f"Head: {H2} Статус: готово. " + "т" * 500}]))
+        fh.write(line([{"type": "text", "text": "коротко"}]))
+    r = pantheon("review", "report", ref, "204", "cafe0000")
+    check("report: нет Handback — длинный text", r.returncode == 0 and "Статус: готово" in r.stdout, r.stderr)
+    with open(os.path.join(sdir, f"agent-{a5}.jsonl"), "w") as fh:
+        fh.write(line([{"type": "text", "text": "нет отчёта"}]))
+    r = pantheon("review", "report", ref, "204", "dead0000")
+    check("report: в транскрипте отчёта нет — код 1", r.returncode == 1 and "нет итогового отчёта" in r.stderr, r.stderr)
+    # только user-запись с длинным текстом и «#N» — не отчёт (фильтр type=assistant)
+    a6 = "f00d0000" + "0" * 24
+    verdict("accept", H2, a=a6)
+    with open(os.path.join(sdir, f"agent-{a6}.jsonl"), "w") as fh:
+        fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": f"Head: {H2} {ref}#204 " + "т" * 500}]}}) + "\n")
+    r = pantheon("review", "report", ref, "204", "f00d0000")
+    check("report: длинный text из user-записи — не отчёт, код 1", r.returncode == 1 and not r.stdout, r.stdout + r.stderr)
+    # один транскрипт в двух папках проектов — несколько файлов, код 1
+    sdir_b = os.path.join(tmp, ".claude", "projects", "-w-proj", sess, "subagents")
+    os.makedirs(sdir_b)
+    shutil.copy(fp, sdir_b)
+    r = pantheon("review", "report", ref, "204", "ab12cd34/5e55")
+    check("report: один agent_id+сессия в двух папках — код 1 со списком", r.returncode == 1 and "несколько раз" in r.stderr
+          and not r.stdout, r.stderr)
+    shutil.rmtree(sdir_b)
+    # вердикт без номера PR (pr: null) пару не создаёт
+    verdict("accept", H2, a="ab12cd77" + "0" * 24, pr=None)
+    r = pantheon("review", "report", ref, "204", "ab12cd7")
+    check("report: вердикт с pr null не создаёт пару — код 1", r.returncode == 1 and "нет вердикта" in r.stderr, r.stderr)
+    # соседняя папка с тем же началом имени, что $TMPDIR, — не «под $TMPDIR»
+    sib = tmp + "-sib"
+    os.makedirs(sib)
+    try:
+        r = pantheon("review", "report", ref, "204", "ab12cd34", "--out", os.path.join(sib, "x.md"))
+        check("report --out в соседней папке с общим префиксом $TMPDIR — код 2", r.returncode == 2
+              and not os.path.exists(os.path.join(sib, "x.md")), r.stderr)
+    finally:
+        shutil.rmtree(sib, ignore_errors=True)
+    for bad in (["x", "204", "ab12cd34"], [ref, "0", "ab12cd34"], [ref, "204", "zz"], [ref, "204"],
+                [ref, "204", "ab12cd34", "--out"], [ref, "204", "ab12cd34", "--x"]):
+        check(f"report {' '.join(bad)[:30]}: плохой формат — код 2", pantheon("review", "report", *bad).returncode == 2)
 
 
 if __name__ == "__main__":
