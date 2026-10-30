@@ -3787,6 +3787,10 @@ def check_gh_out(event, tool, tool_input):
                 "не разбираем; слова gh пиши прямо (metis-0596).")
     # своя копия репозитория — корень с .git, но не $HOME и не «/»; нет .git — только временные папки. Личное и .git
     # внутри неё _gh_out_problem не пускает (metis-0596)
+    # окно, чья папка запуска содержит личное (mnemo-brain: главная, координатор, субагент), наружу не публикует —
+    # тот же признак, что у check_push; по папке, а не по роли: policy.toml может не прочитаться (metis-0600)
+    _, _, pdir = who(event)
+    personal = any(_inside(x, [pdir]) for x in _norm(private_conf(load_policy())["paths"]))
     top = os.path.realpath(_git_top(cwd))
     roots = TEMP_ROOTS + ([top] if os.path.exists(os.path.join(top, ".git"))
                           and top not in (os.path.realpath(HOME), os.sep) else [])
@@ -3798,11 +3802,19 @@ def check_gh_out(event, tool, tool_input):
             return ("Правило gh-out: слово до подкоманды gh не вычислить (переменная, $(…)) — не понять, пишет ли "
                     "она в GitHub мимо песочницы (metis-0533).")
         for q, i in cands:
+            if personal and t[q] == "pr" and i is not None and t[i] == "merge":
+                # merge тоже идёт мимо песочницы (GH_PR_WRITE) и несёт текст (--body, --subject): окну с личным — нет
+                return ("Правило gh-out: gh pr merge окну с личным закрыто (SEC-13, metis-0600): --body и --subject "
+                        "уходят на GitHub, а слиять с этого окна нечего. Слияние — лид или владелец.")
             if t[q] == "pr" and i is not None and t[i] in GH_OUT_SUBS:
                 why = _gh_out_problem(t, cmd, cwd, win, roots, "своего направления")
                 if why:
                     return (f"Правило gh-out: gh pr {t[i]} идёт мимо песочницы, поэтому {why} (metis-0533). Описание "
                             "PR — в файл во временной папке или в своей копии репозитория и --body-file.")
+                if personal:
+                    return (f"Правило gh-out: gh pr {t[i]} окну с личным закрыто (SEC-13, metis-0600): оно видит me/ и "
+                            "выписки из веба и может сама вынести их в текст — третье свойство (наружу) ему не даём. "
+                            "Закоммить в свою ветку, PR и комментарий откроет лид или владелец.")
     return None
 
 
