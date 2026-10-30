@@ -428,6 +428,16 @@
   с телом), остаток — README guard. Итоги заявок в папках заявок старше суток проход удаляет сам. Роли dev-*, talos,
   лиды и argus называют `pantheon outside test --wait 590` и `pantheon outside serve --wait 120` в своих правилах;
   Stop разработчика засчитывает `pantheon outside test --wait N` как прогон проверки. Подробности — в шапке модуля.
+- `plugins/pantheon/lib/read.py` — чтение переписки по заявке с согласием владельца (metis-0267, 0508, 0385):
+  `pantheon read request --direction D (--folder ИМЯ | --chat id/@имя/ссылка/название)… --since --until --why`.
+  Чаты по указаниям находит плановый проход (`read run`, без модели) через источник-надстройку: путь к исполняемому
+  файлу и имя субагента-читателя — таблица `[read]` в `STATE/config.toml` (пишет владелец), контракт глаголов
+  resolve, export и verify — в шапке модуля. Мессенджера и скрипта в ядре нет: без `[read]` — «источников чтения
+  нет». Владелец видит в вопросе `[read-<rid>]` итоговый список чатов с числом сообщений, хеш согласия покрывает и
+  заявку, и этот список. Пределы на заявку — 31 день, 30 чатов, 3000 сообщений и 2 МБ выгрузок: больше — отказ с
+  числами (до вопроса, если источник считает сообщения, иначе после выгрузки, без обрезки). Разбор — один на заявку,
+  пункт ссылается на свой чат («чат K, #id»), цитату проверяет verify по выгрузке этого чата. Тест —
+  `plugins/pantheon/tests/test_read.py` (поддельный источник: папка, список, смесь, пустая папка, неизвестное имя).
 - `plugins/pantheon/hooks/dev-stop-verify.py` — Stop разработчика (в шапке ролей dev-*): красная проверка проекта
   возвращает, не больше трёх раз; очередь `heavy` — не возврат (DONE-02). Прогоном считается и
   `pantheon outside test --wait N` (без `--script`).
@@ -499,6 +509,7 @@
     python3 -I plugins/pantheon/tests/test_plugin_map.py   # карта плагинов и MCP: окна, роли, битая карта, неизвестное
     python3 -I plugins/pantheon/tests/test_start.py   # start, wake, roles build, approve, heavy, Stop-хук разработчика
     python3 -I plugins/pantheon/tests/test_outside.py # проверки вне окна: tests после «принять», заявки, dev-сервер, профиль
+    python3 -I plugins/pantheon/tests/test_read.py    # чтение переписки: папка, список, имена, согласие на список чатов, пределы
     python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры
     python3 -I plugins/pantheon/tests/test_culprits.py   # виновники памяти: тревога на эпизод, чей процесс, pantheon reap
     python3 -I plugins/pantheon/tests/test_probes.py  # замеры вне окна: плановый проход пишет probes.json, окно читает свежий, старый/битый — как раньше
