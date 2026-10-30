@@ -19,9 +19,11 @@ PLUGIN_ID = re.compile(r"[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+")
 OWN_MARKET = "agent-kit"
 
 
-def load(path):
+def load(path, windows=None, roles=None):
     """Карта из файла. ValueError с причиной: нет файла, битый TOML, не тот тип, плагин @agent-kit в каталоге, ключ
-    «оставить» вне каталога (опечатка молча выключила бы нужное)."""
+    «оставить» вне каталога (опечатка молча выключила бы нужное). windows и roles — множества известных имён окон и
+    ролей (None — не сверять): имя записи [window.X] или [role.X] вне них — опечатка, и запись молча не применилась
+    бы никогда (окно или роль остались бы «всё включено»)."""
     try:
         with open(path, "rb") as fh:
             raw = tomllib.load(fh)
@@ -44,7 +46,11 @@ def load(path):
         section = raw.get(kind, {})
         if not isinstance(section, dict):
             raise ValueError(f"карта плагинов: [{kind}] — таблица")
+        known = windows if kind == "window" else roles
         for name, entry in section.items():
+            if known is not None and name not in known:
+                raise ValueError(f"карта плагинов: [{kind}.{name}] — {'окна' if kind == 'window' else 'роли'} с таким "
+                                 "именем нет (опечатка: запись не применилась бы никогда)")
             if not isinstance(entry, dict) or set(entry) - set(keys):
                 raise ValueError(f"карта плагинов: [{kind}.{name}] — только ключи {', '.join(keys)}")
             keep = {}

@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _py311 import PY311
 
@@ -70,6 +71,7 @@ def pantheon(env, *args):
 
 
 M = load_mod()
+MNEMO = '[[direction]]\nname = "mnemo-brain"\nfolders = ["~/projects/kb"]\n'  # ключ [window.mnemo-brain] карты сверяется с реестром
 real = M.load(MAP)
 mn = real["window"]["mnemo-brain"]
 LSP = "pyright-lsp@claude-plugins-official"
@@ -103,6 +105,29 @@ for own in ("guard@agent-kit", "pantheon@agent-kit", "project-tools@agent-kit", 
           "agent-kit" in (bad(f'[catalog]\nplugins = ["a@b", "{own}"]\nmcp = []\n') or ""))
 check("плагин @builtin и чужой каталог с agent-kit в имени — не ошибка",
       bad('[catalog]\nplugins = ["x@builtin", "y@agent-kit-fork"]\nmcp = []\n') is None)
+# Д2: имя записи [window.X]/[role.X] сверяется с известными (опечатка в ключе не применилась бы никогда)
+write(os.path.join(ROOT, "names.toml"), CAT + '[window.hq]\nplugins = []\nmcp = []\n[role.r1]\nmcp = []\n')
+
+
+def names_err(windows, roles, text=None):
+    if text:
+        write(os.path.join(ROOT, "names2.toml"), text)
+    try:
+        M.load(os.path.join(ROOT, "names2.toml" if text else "names.toml"), windows, roles)
+    except ValueError as e:
+        return str(e)
+    return None
+
+
+check("имена записей известны — карта разбирается; windows и roles не заданы — не сверяются",
+      names_err({"hq"}, {"r1"}) is None and names_err(None, None) is None)
+e = names_err({"hq"}, {"r1"}, CAT + '[window.hqq]\nplugins = []\nmcp = []\n')
+check("опечатка в имени окна ([window.hqq]) — ValueError с именем", e and "[window.hqq]" in e, e)
+e = names_err({"hq"}, {"r1"}, CAT + '[role.r11]\nmcp = []\n')
+check("опечатка в имени роли ([role.r11]) — ValueError с именем", e and "[role.r11]" in e, e)
+check("имя из списка ролей не годится для окна и наоборот",
+      names_err({"hq"}, {"r1", "hqq"}, CAT + '[window.r1]\nplugins = []\nmcp = []\n')
+      and names_err({"hq", "r1"}, {"hq"}, CAT + '[role.r1]\nmcp = []\n'))
 try:
     M.load(os.path.join(ROOT, "нет-такого.toml"))
     missing = False
@@ -219,7 +244,7 @@ tmp2 = os.path.join(ROOT, "r")
 env2 = env_for(tmp2)
 write(os.path.join(env2["PANTHEON_HOME"], "directions.toml"),
       '[[direction]]\nname = "iris-demo"\nproject = "demo"\nfolders = ["~/projects/demo"]\ndoes = "Демо"\n'
-      'does_not = "Чужое"\nexamples = ["раз", "два", "три"]\nleads = ["hephaestus", "apollo"]\n')
+      'does_not = "Чужое"\nexamples = ["раз", "два", "три"]\nleads = ["hephaestus", "apollo"]\n' + MNEMO)
 os.makedirs(os.path.join(tmp2, "projects", "demo"))
 out = os.path.join(tmp2, "out")
 r = pantheon(env2, "roles", "build", "--out", out)
@@ -264,7 +289,7 @@ shutil.copytree(PLUGIN, plug, ignore=shutil.ignore_patterns("tests", "__pycache_
 write(os.path.join(plug, "plugins-by-role.toml"), CAT + '[window.hq]\nplugins = []\nmcp = ["опечатка"]\n')
 tmp3 = os.path.join(ROOT, "b")
 env3 = env_for(tmp3)
-write(os.path.join(env3["PANTHEON_HOME"], "directions.toml"), '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n')
+write(os.path.join(env3["PANTHEON_HOME"], "directions.toml"), '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n' + MNEMO)
 os.makedirs(os.path.join(tmp3, "projects", "br"))
 r = subprocess.run([PY311, "-I", os.path.join(plug, "lib", "run.py"), "domains", "build"], env=env3, capture_output=True,
                    text=True, timeout=180)
@@ -292,10 +317,18 @@ def build_plug(env_, what="domains"):
                           text=True, timeout=180)
 
 
+# тревога одна (Д1): вторая и третья сборка с той же битой картой не добавляют строк в alerts.md
+bad_lines = lambda: [x for x in open(alerts, encoding="utf-8").read().splitlines() if "карта плагинов" in x]
+n_bad = len(bad_lines())
+build_plug(env3)
+build_plug(env3)
+check("битая карта: повторные сборки не повторяют тревогу (строк в alerts.md столько же, сколько после первой)",
+      n_bad == 1 and len(bad_lines()) == 1, (n_bad, bad_lines()))
+
 # пробная сборка ролей (как role apply: alert=False) при битой карте — без тревоги и без метки
 tmp4 = os.path.join(ROOT, "p")
 env4 = env_for(tmp4)
-write(os.path.join(env4["PANTHEON_HOME"], "directions.toml"), '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n')
+write(os.path.join(env4["PANTHEON_HOME"], "directions.toml"), '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n' + MNEMO)
 r = build_plug(env4, ["--out", os.path.join(tmp4, "out")])
 al4 = os.path.join(env4["PANTHEON_HOME"], "alerts.md")
 check("битая карта, пробная сборка ролей: код 0, причина в stderr, тревоги и метки нет",
@@ -303,13 +336,33 @@ check("битая карта, пробная сборка ролей: код 0, 
       and not (os.path.exists(al4) and "карта плагинов" in open(al4, encoding="utf-8").read())
       and not os.path.isdir(os.path.join(env4["PANTHEON_STATE"], "once")), r.stderr[-300:])
 
+# опечатка в имени окна или роли настоящей карты (Д2): карта не применена, тревога plugin-map-bad называет запись
+real_map = open(MAP, encoding="utf-8").read()
+for typo, what in (("[window.mnemo-brain]", "[window.mnemo-brainn]"), ("[role.argus]", "[role.argu]")):
+    write(os.path.join(plug, "plugins-by-role.toml"), real_map.replace(typo, what, 1))
+    tmp7 = os.path.join(ROOT, "t" + str(len(what)))
+    env7 = env_for(tmp7)
+    write(os.path.join(env7["PANTHEON_HOME"], "directions.toml"),
+          '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n' + MNEMO)
+    os.makedirs(os.path.join(tmp7, "projects", "br"))
+    r = build_plug(env7)
+    hq7 = json.load(open(os.path.join(env7["PANTHEON_STATE"], "settings", "hq.json"))) if r.returncode == 0 else {}
+    al7 = os.path.join(env7["PANTHEON_HOME"], "alerts.md")
+    # окна проверяют имена окон, роли — имена ролей: карта с опечаткой в своём разделе отвергается своей сборкой
+    # (domains build включает и сборку ролей, поэтому тревога есть в обоих случаях)
+    check(f"опечатка {what} в карте: код 0, тревога называет запись"
+          + (", окна собраны без карты" if what.startswith("[window") else ""),
+          r.returncode == 0 and (what.startswith("[role") or "enabledPlugins" not in hq7) and os.path.exists(al7)
+          and what in open(al7, encoding="utf-8").read(), (r.stderr[-300:], what))
+shutil.copy(MAP, os.path.join(plug, "plugins-by-role.toml"))
+
 # guard@agent-kit в каталоге (проба argus-207): карта не применяется, guard и pantheon включены во всех окнах
 write(os.path.join(plug, "plugins-by-role.toml"),
       open(MAP, encoding="utf-8").read().replace('plugins = [\n  "typescript-lsp', 'plugins = [\n  "guard@agent-kit", '
                                                  '"pantheon@agent-kit",\n  "typescript-lsp', 1))
 tmp5 = os.path.join(ROOT, "g")
 env5 = env_for(tmp5)
-write(os.path.join(env5["PANTHEON_HOME"], "directions.toml"), '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n')
+write(os.path.join(env5["PANTHEON_HOME"], "directions.toml"), '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n' + MNEMO)
 os.makedirs(os.path.join(tmp5, "projects", "br"))
 r = build_plug(env5)
 sd5 = os.path.join(env5["PANTHEON_STATE"], "settings")
@@ -351,6 +404,33 @@ t6 = open(t6, encoding="utf-8").read() if os.path.exists(t6) else ""
 check("роль из карты с disallowedTools списком YAML: ошибка роли в stderr, шапка не тронута (список цел, mcp__ нет)",
       "talos.tmpl" in r.stderr and "списком YAML" in r.stderr and "disallowedTools:\n  - Edit\n---" in t6
       and "mcp__" not in t6, (r.stderr[-300:], t6[:200]))
+
+# Д5: settings.json владельца отслеживается `domains build --if-changed`: новый плагин в enabledPlugins -> сборка и тревога
+tmp8 = os.path.join(ROOT, "s")
+env8 = env_for(tmp8)
+write(os.path.join(env8["PANTHEON_HOME"], "directions.toml"),
+      '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n' + MNEMO)
+os.makedirs(os.path.join(tmp8, "projects", "br"))
+settings8 = os.path.join(tmp8, ".claude", "settings.json")
+write(settings8, json.dumps({"enabledPlugins": {NOTION: True}}))
+pantheon(env8, "domains", "build")
+dj = os.path.join(env8["PANTHEON_STATE"], "domains.json")
+time.sleep(1.2)
+pantheon(env8, "domains", "build", "--if-changed")  # сборка ролей дописывает файлы после отметки: одна доводка, дальше тихо
+built0 = json.load(open(dj)).get("built_ts")
+t0 = built0 - 100  # настройки старше сборки: пересборки нет (built_ts — целые секунды, mtime файлов дробные: ждём)
+os.utime(settings8, (t0, t0))
+time.sleep(1.2)
+pantheon(env8, "domains", "build", "--if-changed")
+check("--if-changed: настройки старше сборки — пересборки нет", json.load(open(dj)).get("built_ts") == built0)
+write(settings8, json.dumps({"enabledPlugins": {NOTION: True, "zz-new@some-market": True}}))
+t1 = built0 + 50
+os.utime(settings8, (t1, t1))
+r = pantheon(env8, "domains", "build", "--if-changed")
+al8 = os.path.join(env8["PANTHEON_HOME"], "alerts.md")
+check("--if-changed: settings.json новее сборки — пересборка и тревога plugin-map-unknown с именем плагина",
+      r.returncode == 0 and json.load(open(dj)).get("built_ts") != built0 and os.path.exists(al8)
+      and "zz-new@some-market" in open(al8, encoding="utf-8").read(), (r.stderr[-300:], built0))
 
 print(f"\n{len(total) - len(fails)} из {len(total)} прошли")
 sys.exit(1 if fails else 0)

@@ -307,10 +307,12 @@
   `mcp__<сервер>` у лишних MCP; ключ окна — его имя (`hq`, `hestia`, `workshop`, `job-*`, `mnemo-brain`), у остальных
   окон направлений — запись `direction`. Роль (`pantheon roles build`): недостающие `mcp__<сервер>` дописываются в
   `disallowedTools` шапки; ключ — имя шаблона. Чего нет в карте — окно, роль, плагин вне каталога — не трогается (всё
-  включено); `chrome-devtools` в каталоге нет (его подключают роли и project-tools). Опечатка в карте или битый файл —
+  включено); `chrome-devtools` в каталоге нет (его подключают роли и project-tools). Опечатка в карте (в «оставить», в имени окна или роли — имя сверяется с известными: окна
+  реестра и служебные для `domains build`, шаблоны ролей для `roles build`) или битый файл —
   карта не применяется, тревога `plugin-map-bad`; плагины `*@agent-kit` (guard, pantheon, project-tools) в `[catalog]` —
   тоже ошибка карты. `disallowedTools` шапки списком YAML карта не трогает — ошибка роли. Включённый у вас плагин вне
-  каталога (кроме `*@agent-kit` и `*@builtin`) — тревога `plugin-map-unknown`. Тест — `tests/test_plugin_map.py`.
+  каталога (кроме `*@agent-kit` и `*@builtin`) — тревога `plugin-map-unknown`; `~/.claude/settings.json` отслеживает
+  и `domains build --if-changed`, так что тревога приходит на ближайшем тике, а не только при ручной сборке. Тест — `tests/test_plugin_map.py`.
   Карта и `plugin_map.py` — ядро защит (metis-0598, решение владельца 30.10): PR, который их меняет, сливает владелец.
 - `plugins/pantheon/lib/autoclose.py` — автозакрытие задач при слиянии PR (metis-0308). Два прохода: `pantheon autoclose fetch`
   (отдельная задача расписания, предел 240 с на весь проход) спрашивает gh про слитые и открытые PR из `[merge_repos]` и пишет

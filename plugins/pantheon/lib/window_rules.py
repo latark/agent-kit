@@ -29,6 +29,17 @@ COORDINATOR_ALLOW = []
 # LEAD_DELIVERY_RULE (metis-0215) — сдача работы лидом без отказа классификатора; слияние остаётся за Gated Merge.
 # Направлению без [merge_repos] правил слияния и сдачи нет: запор guard его слияние и так не пустит.
 MERGE_REPO_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9._-]+")
+# Ядро защит — те же списки, что CORE_DIR и CORE_FILES шлюза guard (merge_gate.py) и merge.py; совпадение сверяют
+# test_window_rules и test_merge. Правило слияния ниже называет их все: прежний неполный список в тексте правила
+# расходился с шлюзом (metis-0601, Д3)
+CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_config.py",
+              "plugins/guard/managed-settings.json", "plugins/pantheon/lib/window_rules.py",
+              "plugins/pantheon/hooks/ctx.py", "plugins/pantheon/hooks/hooks.json", "plugins/pantheon/lib/merge.py",
+              "plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/plugins-by-role.toml",
+              ".claude-plugin/marketplace.json")
+CORE_DIR = ("plugins/guard", "plugins/pantheon/roles", ".github")
+CORE_TEXT = ("any path under " + ", ".join(f"`{d}/`" for d in CORE_DIR) + ", or one of the files "
+             + ", ".join(f"`{f}`" for f in CORE_FILES))
 GATED_MERGE_RULE = (
     "Pantheon Gated Merge: In a Pantheon direction window (a coordinator main session or its lead subagent "
     "`hephaestus-*` or `apollo-*`), `gh pr merge <N> --match-head-commit <40-hex sha>` with the repository given "
@@ -43,8 +54,8 @@ GATED_MERGE_RULE = (
     "itself rejects the merge if the PR head moved away from `--match-head-commit`. A merge the gate let through is "
     "a reviewed merge: the session's follow-up commands after it (`gh pr view`, `gh pr checks`, `git fetch`, "
     "`git pull`, `git log`) are routine, not a continuation of an unreviewed merge. PRs that touch the protection "
-    "core — any path under `plugins/guard/` or `plugins/pantheon/roles/`, `plugins/pantheon/lib/window_rules.py` "
-    "or `.claude-plugin/marketplace.json` — wait for the owner to merge them himself: guard refuses them, and this exception does not cover merging them any other way. It "
+    "core — " + CORE_TEXT + " — wait for the owner to merge them himself: guard refuses them, and this exception "
+    "does not cover merging them any other way. It "
     "covers only the command shape above: `--admin`, `--auto`, a merge without `--match-head-commit` or without an "
     "explicit `-R`/`--repo`, a merge through `gh api`, `GH_REPO`/`GH_HOST` overrides, `cd` or chained commands, "
     "or a repository outside this list are still judged by Merge Without Review.")

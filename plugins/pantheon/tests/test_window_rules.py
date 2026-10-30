@@ -114,6 +114,25 @@ def main():
                 os.environ[k] = v
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # Д3 (metis-0601): правило слияния называет всё ядро шлюза — и файлы, и папки, список один с merge.py и guard
+    def consts(path):
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        return {t.id: ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
+                for t in n.targets if isinstance(t, ast.Name) and t.id in ("CORE_FILES", "CORE_DIR")}
+
+    mine = consts(os.path.join(LIB, "merge.py"))
+    check("window_rules.py: CORE_FILES и CORE_DIR совпадают с merge.py",
+          {"CORE_FILES": tuple(w.CORE_FILES), "CORE_DIR": tuple(w.CORE_DIR)} == mine, mine)
+    if os.path.exists(GATE):
+        check("window_rules.py: CORE_FILES и CORE_DIR совпадают с merge_gate.py шлюза guard",
+              {"CORE_FILES": tuple(w.CORE_FILES), "CORE_DIR": tuple(w.CORE_DIR)} == consts(GATE))
+    rule = w.GATED_MERGE_RULE.format(repos="a/b")
+    miss = [x for x in (*w.CORE_FILES, *(d + "/" for d in w.CORE_DIR)) if f"`{x}`" not in rule]
+    check("GATED_MERGE_RULE называет каждый файл и папку ядра (пять путей metis-0598 и .github/ — тоже)",
+          not miss and all(f"`{x}`" in rule for x in (
+              "plugins/pantheon/hooks/ctx.py", "plugins/pantheon/hooks/hooks.json", "plugins/pantheon/lib/merge.py",
+              "plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/plugins-by-role.toml", ".github/")), miss)
+
     if os.path.exists(GATE):
         tree = ast.parse(open(GATE, encoding="utf-8").read())
         core = [ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
