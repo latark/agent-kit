@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Запуск hooks/guard.py для тестов так, чтобы результат не зависел от того, где их запускают (metis-0090).
+"""Запуск правил guard для тестов так, чтобы результат не зависел от того, где их запускают (metis-0090).
 
     python3 -I _guard_shim.py <путь к guard.py> [--strict|--managed]   (stdin — событие хука)
 
-guard.py не меняется; запуск — его же вход run_hook. Подменяется только обвязка:
+Грузится модуль правил guard_rules.py рядом с guard.py (metis-0148: guard.py — короткий вход, его решения «молчать»
+проверяет test_entry.py), запуск — его же вход run_hook. Правила не меняются; подменяется только обвязка:
 1. Временный HOME тестов лежит в $TMPDIR, а в окне агента это /tmp/claude-<uid>: guard считает /tmp и /private/tmp
    временными корнями (TEMP_ROOTS) и разрешает запись во всё, что внутри, — в том числе в ~/ai/pantheon тестового HOME.
    Для путей внутри HOME теста корни, в которых лежит сам HOME, из TEMP_ROOTS не берутся. Пути вне HOME
@@ -17,6 +18,7 @@ import socket
 import sys
 
 path, sys.argv = sys.argv[1], [sys.argv[1]] + sys.argv[2:]
+rules = os.path.join(os.path.dirname(path), "guard_rules.py")
 
 _real_getaddrinfo = socket.getaddrinfo
 
@@ -37,7 +39,7 @@ def _getaddrinfo(host, port, *a, **kw):
 
 socket.getaddrinfo = _getaddrinfo
 
-spec = importlib.util.spec_from_file_location("guard", path)
+spec = importlib.util.spec_from_file_location("guard", rules)
 g = importlib.util.module_from_spec(spec)
 sys.modules["guard"] = g
 spec.loader.exec_module(g)

@@ -6,7 +6,7 @@
   (strip, пустые убраны); roles и coordinators: пустой список — никого; paths: пустой список или без строк — умолчание;
 - окно (`pantheon domains build` на временном HOME): [private] coordinators = [] — окно mnemo-brain личное не открывает,
   умолчание — открывает; paths из policy.toml попадают в denyRead остальных окон, мусор в paths — умолчание;
-- DEFAULT_PRIVATE сверяется с guard.py рядом; в копии одного плагина (проверка установки) guard.py нет — skip.
+- DEFAULT_PRIVATE сверяется с guard_rules.py рядом; в копии одного плагина (проверка установки) его нет — skip.
 """
 import ast
 import atexit
@@ -123,19 +123,19 @@ def main():
           "~/projects/lone" not in reads(win("athena-shop")) and "~/projects/lone" in reads(win("mnemo-brain"))
           and "~/projects/lone" in reads(win("workshop")) and "no-tilde" not in json.dumps(win("workshop")))
 
-    # умолчание окна и умолчание guard не расходятся: guard.py только читаем (ast), не импортируем
+    # умолчание окна и умолчание guard не расходятся: guard_rules.py (правила guard, metis-0148) только читаем (ast)
     # Проверка установки (plugins-update) берёт копию одного плагина pantheon: соседнего guard там нет — сверку
     # пропускаем, а не падаем. В репозитории guard рядом есть, и сверка идёт; GUARD_PY задан — файл обязателен.
-    guard_py = os.environ.get("GUARD_PY") or os.path.join(os.path.dirname(PLUGIN), "guard", "hooks", "guard.py")
+    guard_py = os.environ.get("GUARD_PY") or os.path.join(os.path.dirname(PLUGIN), "guard", "hooks", "guard_rules.py")
     if not os.environ.get("GUARD_PY") and not os.path.isfile(guard_py):
-        print("skip DEFAULT_PRIVATE: guard.py рядом нет (копия одного плагина)")
+        print("skip DEFAULT_PRIVATE: guard_rules.py рядом нет (копия одного плагина)")
     else:
         gdef = None
         with open(guard_py, encoding="utf-8") as fh:
             for node in ast.parse(fh.read()).body:
                 if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "DEFAULT_PRIVATE" for t in node.targets):
                     gdef = ast.literal_eval(node.value)
-        check("DEFAULT_PRIVATE pantheon.py равен DEFAULT_PRIVATE guard.py (roles, coordinators, paths)",
+        check("DEFAULT_PRIVATE pantheon.py равен DEFAULT_PRIVATE guard_rules.py (roles, coordinators, paths)",
               gdef is not None and default == gdef)
 
     print(f"{sum(results)} из {len(results)} прошли")

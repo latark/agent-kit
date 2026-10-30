@@ -222,7 +222,7 @@ class Box:
 
 def guard_approves(b, repo, pr, sha, now=T0):
     """Настоящий шлюз guard: принимает ли строку согласия из owner-log этой коробки (часы шлюза — now)."""
-    code = ("import sys; sys.path.insert(0, %r); import guard; import merge_gate as m; "
+    code = ("import sys; sys.path.insert(0, %r); import guard_rules; import merge_gate as m; "
             "print(m.owner_approved(%r, %d, %r, now=%r))" % (GUARD_HOOKS, repo, pr, sha, now))
     r = subprocess.run([sys.executable, "-I", "-c", code], env={"HOME": b.home, "PATH": "/usr/bin:/bin"},
                        capture_output=True, text=True, timeout=60)

@@ -199,7 +199,7 @@ def accept(sha, repo=REPO, who="argus", age=0, pr=5):
 
 def gate_records():
     """Записи журнала глазами настоящего шлюза guard (merge_gate.read_records + _valid)."""
-    code = ("import sys, json; sys.path.insert(0, %r); import guard, merge_gate as m; "
+    code = ("import sys, json; sys.path.insert(0, %r); import guard_rules, merge_gate as m; "
             "print(json.dumps(m.read_records()))" % GUARD_HOOKS)
     r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True,
                        env={"HOME": HOME, "PATH": os.environ["PATH"]})
@@ -950,7 +950,7 @@ for p in (notes, link, day_res):
     os.remove(p)
 
 # --- 5. guard: команда роли не спрашивает и не считается dev-сервером -------------------------------------------
-code = ("import sys, json; sys.path.insert(0, %r); import guard as g; "
+code = ("import sys, json; sys.path.insert(0, %r); import guard_rules as g; "
         "print(json.dumps([g.check_dev_server('pantheon outside serve --wait 120', {}), "
         "g.check_dev_server('pnpm dev', {}) is not None, g.pantheon_cli('pantheon outside test --wait 300', %r)]))"
         % (GUARD_HOOKS, _ROOT))

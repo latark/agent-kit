@@ -2,7 +2,7 @@
 не сливают — PR ждёт слияния владельцем.
 
 Модуль без своего состояния: общие помощники (HOME, who, privileged, write_targets, _inside, _key…) берутся из
-guard.py через G — его присваивает guard.py при загрузке (`protect_config.G = <модуль guard>`). Пути считаются при
+guard_rules.py через G — его присваивает guard_rules.py при загрузке (`protect_config.G = <модуль guard>`). Пути считаются при
 вызове, а не при импорте: тесты подменяют HOME.
 
 protect-config: защиты правит только metis-pantheon — главная сессия координатора, чья папка запуска в её записи
@@ -24,7 +24,7 @@ claude-config: коммит в обход sync.sh отправил бы прав
 import os
 import re
 
-G = None  # модуль guard.py: присваивает guard.py при загрузке
+G = None  # модуль guard_rules.py: присваивает он сам при загрузке
 
 CLAUDE_ITEMS = ("hooks", "agents", "plugins", "pantheon", "settings.json", "settings.local.json", "sync.sh",
                 "statusline.sh", "bootstrap.sh", ".sync-held", ".sync-incoming", ".git", "tools", "CLAUDE.md", "rules",
