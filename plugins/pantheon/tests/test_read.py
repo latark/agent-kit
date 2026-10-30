@@ -404,7 +404,9 @@ def test_request_ok():
     check("request: вопрос — id чатов, число сообщений, даты, хеш; путь к списку названий — в карточке",
           (q or "").startswith(f"[read-{rid}] Разрешить выгрузку: чатов 1 — {CHAT} 10 сообщ.; "
                                "всего 10 сообщ.; 2026-10-18 — 2026-10-18, без вложений")
-          and re.search(r"хеш [0-9a-f]{12}$", q) and f"/read/{rid}/list.md`" in b.zeus_cards(), q)
+          and re.search(rf", названия чатов — файл \S+/read/{rid}/list\.md, хеш [0-9a-f]{{12}}$", q), q)
+    check("request: в карточке Зевса нет пути к list.md вне вопроса и просьбы его открыть",
+          b.zeus_cards().count("list.md") == 1 and "открывает" not in b.zeus_cards(), b.zeus_cards())
     lp = os.path.join(d, "list.md")
     names = b.names(rid)
     check("request: названия — в list.md 0600 с шапкой выгрузки, между метками",
@@ -421,7 +423,7 @@ def test_request_ok():
     check("request: этап requested, chats.json 0600, карточка с вопросом во входящих Зевса",
           st["phase"] == "requested" and st["chats"] == 1 and st.get("ask_card")
           and stat.S_IMODE(os.stat(os.path.join(d, "chats.json")).st_mode) == 0o600 and q in b.zeus_cards(), st)
-    check("request: владелец видит вопрос читателю", ", вопрос читателю: «о чём договорились по встрече», хеш " in q, q)
+    check("request: владелец видит вопрос читателю", ", вопрос читателю: «о чём договорились по встрече», названия чатов — файл " in q, q)
     return b, rid, q
 
 
@@ -429,7 +431,7 @@ def test_why_shown():
     b = Box()
     long = "прочитай " + "очень " * 60 + "ХВОСТ-ИНЪЕКЦИИ"
     r, rid, q = b.request(why=long)
-    shown = re.search(r"вопрос читателю: «(.*)», хеш [0-9a-f]{12}$", q or "")
+    shown = re.search(r"вопрос читателю: «(.*)», названия чатов — файл \S+, хеш [0-9a-f]{12}$", q or "")
     check("why: длинный — обрезан до 200 знаков с «…», одной строкой",
           r.returncode == 0 and shown and len(shown.group(1)) == 200 and shown.group(1).endswith("…")
           and "ХВОСТ-ИНЪЕКЦИИ" not in q and "\n" not in q, q)
@@ -942,7 +944,7 @@ def test_custom_profile():
     if rid:
         run(["read", "run"], T0 + 10)
     q = b.st(rid.group(1)).get("question") if rid else None
-    check("профиль brief: заявка принята, профиль в вопросе", q and ", профиль brief, вопрос читателю: «коротко», хеш " in q,
+    check("профиль brief: заявка принята, профиль в вопросе", q and ", профиль brief, вопрос читателю: «коротко», названия чатов — " in q,
           r.stdout + r.stderr)
     if not (q and rid):
         return
@@ -1102,16 +1104,20 @@ def test_unknown_name():
 
 def test_ambiguous_name():
     b = Box()
-    r, rid, q = b.request(specs=(("--chat", "торги"),))
+    nlog = os.path.join(b.tmp, "notify-amb.log")
+    r, rid, q = b.request(specs=(("--chat", "торги"),), extra={"PANTHEON_NOTIFY_LOG": nlog})
     ok, st = _refused(b, rid)
     check("несколько подходят: отказ, в причине число, без названий",
           ok and "«торги» — подходит несколько (2), нужно точнее" in st["reason"] and "Москва" not in st["reason"], st)
     cards = b.zeus_cards()
-    check("несколько подходят: в карточке Зевса только число и путь — без названий и id кандидатов",
-          "Подходящих чатов: 2" in cards and f"/read/{rid}/candidates.md" in cards and "Торги Москва" not in cards
+    check("несколько подходят: в карточке Зевса только число — без пути, названий и id кандидатов",
+          "Подходящих чатов: 2" in cards and "candidates.md" not in cards and "Торги Москва" not in cards
           and "Торги Питер" not in cards and TORGI[0] not in cards and TORGI[1] not in cards
           and "Торги" not in json.dumps(b.st(rid), ensure_ascii=False), cards)
     cp = os.path.join(b.folder(rid), "candidates.md")
+    nt = open(nlog, encoding="utf-8").read() if os.path.exists(nlog) else ""
+    check("несколько подходят: путь к candidates.md — уведомлением владельцу, без названий",
+          f"/read/{rid}/candidates.md" in nt and "подходит несколько чатов (2)" in nt and "Торги" not in nt, nt)
     c = b.names(rid, "candidates.md")
     check("несколько подходят: названия и id — в candidates.md 0600 с шапкой выгрузки, между метками",
           os.path.isfile(cp) and stat.S_IMODE(os.stat(cp).st_mode) == 0o600 and re.search(SIG, c)

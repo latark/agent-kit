@@ -44,11 +44,13 @@
 Этапы `read run` (состояние — state.json в папке заявки, журнал — STATE/logs/read.jsonl: только номер, числа, время):
   0. resolving → каждое указание — `resolve`. Найденные чаты (без повторов) — chats.json (0600): id, название, тип,
      число сообщений. Отказ (этап refused, причина с числами — в `read status` и карточкой во входящие Зевса): папка
-     пуста, имя не найдено, подходит несколько (в карточке — только число; названия и id кандидатов — candidates.md),
+     пуста, имя не найдено, подходит несколько (в карточке — только число; названия и id — candidates.md, путь к
+     нему — уведомлением владельцу),
      чатов больше MAX_CHATS, известных сообщений больше MAX_MESSAGES. Иначе — этап requested и карточка во входящих
      Зевса с вопросом дословно: «[read-<rid>] Разрешить выгрузку: чатов N — <id> M сообщ.; …; всего …; даты, без
-     вложений, …, хеш <12 знаков>»; путь к list.md с названиями — в карточке. Названия и типы чатов — от источника, то есть
-     от чужих людей: в карточку, вопрос, state.json и журнал они не идут (Зевс читает карточку без пометки tg-taint).
+     вложений, …, названия чатов — файл <путь к list.md>, хеш <12 знаков>». Названия и типы чатов — от источника, то есть
+     от чужих людей: в карточку, вопрос, state.json и журнал они не идут (Зевс читает карточку без пометки tg-taint);
+     у Зевса в карточке — только id и числа, путь к файлу владелец видит в самом вопросе (у отказа — в уведомлении).
      Их видит владелец в list.md (0600, шапка выгрузки и метки TG-: прочитавшую сессию помечает guard tg-taint);
      после «да» list.md удаляется вместе с началом выгрузки.
      Хеш согласия — от request.json и chats.json вместе (consent_hash): названия входят в хеш, владелец соглашается
@@ -384,12 +386,14 @@ def count_text(chats):
 
 def question(req, chats, h):
     """Вопрос владельцу — только id чатов и числа: названия от источника сюда не идут (вопрос и карточку с ним читает
-    Зевс без пометки tg-taint), они — в list.md заявки, путь к нему — в карточке."""
+    Зевс без пометки tg-taint), они — в list.md заявки: путь к нему — в самом вопросе, его видит владелец в окне
+    вопросов; в карточке отдельного пути и просьбы открыть нет."""
     listed = "; ".join(f"{c['id']} {c['messages'] if c.get('messages') is not None else '?'} сообщ." for c in chats)
     return (f"[read-{req['rid']}] Разрешить выгрузку: чатов {len(chats)} — {listed}; {count_text(chats)}; "
             f"{req['since']} — {req['until']}, без вложений, разбор для {req['direction']}"
             + (f", профиль {req['profile']}" if req.get("profile", "default") != "default" else "")
-            + f", вопрос читателю: «{why_shown(req['why'])}», хеш {h}")
+            + f", вопрос читателю: «{why_shown(req['why'])}», названия чатов — файл "
+              f"{short(os.path.join(folder(req['rid']), LIST_MD))}, хеш {h}")
 
 
 def write_names(d, name, head, rows):
@@ -755,27 +759,29 @@ def ask_resolve(src, d, req, spec, timeout):
 
 def refuse(rid, req, st, code, reason, candidates=None, **nums):
     """Честный отказ: этап refused, причина с числами — в state (её показывает `read status`) и карточкой во входящих
-    Зевса. Кандидаты «подходит несколько» — названия от источника: только в candidates.md (шапка выгрузки, tg-taint),
-    в карточке — их число и путь к файлу."""
+    Зевса. Кандидаты «подходит несколько» — названия от источника: только в candidates.md (шапка выгрузки, tg-taint);
+    путь к нему — уведомлением владельцу, в карточке — только число."""
     st.update(phase="refused", failed_at=int(P.now()), error=code, reason=reason)
     cpath = None
     if candidates:
         cpath = write_names(folder(rid), CANDIDATES_MD, f"Заявка read-{rid}: подходит несколько чатов",
                             [f"{label}: {c['id']} «{c['title']}» ({c['kind']})" for label, c in candidates])
         st["candidates"] = len(candidates)
-    st["card"] = refuse_card(rid, req, reason, len(candidates or []), cpath)
+        with contextlib.suppress(Exception):
+            P.notify(f"Заявка read-{rid}: подходит несколько чатов ({len(candidates)}) — список: {short(cpath)}",
+                     group=f"read-{rid}")
+    st["card"] = refuse_card(rid, req, reason, len(candidates or []))
     write_state(folder(rid), st)
     log(rid, "refused-" + code, **nums)
     return f"отказ — {reason}"
 
 
-def refuse_card(rid, req, reason, n_cand, cpath):
+def refuse_card(rid, req, reason, n_cand):
     text = (f"Заявка read-{rid} (направление {req['direction']}, заявила {req.get('by', '?')}) не выполнена: {reason}.\n\n"
             "Выгрузки не было. Новая заявка — `pantheon read request` с уточнёнными указаниями.")
     if n_cand:
-        text += (f"\n\nПодходящих чатов: {n_cand}. Их названия и id — файл `{short(cpath)}`: его открывает владелец сам, "
-                 "Зевсу и ролям не читать (названия — от чужих людей, файл помечает сессию guard tg-taint). В новую "
-                 "заявку — id нужного.")
+        text += (f"\n\nПодходящих чатов: {n_cand}. Их список владелец получил уведомлением; Зевсу и ролям файлы "
+                 "заявки не открывать. В новую заявку — id нужного.")
     try:
         tid, _ = P.tasks_mod().task_new(P.PANTHEON, P.now(), "inbox", f"Заявка на чтение переписки для "
                                         f"{req['direction']} не выполнена", owner="zeus", actor="плановый проход",
@@ -861,8 +867,8 @@ def ask_card(rid, req, chats, q):
     """Карточка во входящих Зевса: id чатов, числа и вопрос владельцу дословно — без названий. → id или None."""
     text = (f"Заявка read-{rid} от {req.get('by', '?')}: разбор переписки для {req['direction']}, "
             f"{req['since']} — {req['until']}. Плановый проход нашёл по указаниям чатов: {len(chats)}, "
-            f"{count_text(chats)}. Названия чатов — файл `{short(os.path.join(folder(rid), LIST_MD))}`: его открывает "
-            "владелец сам, Зевсу и ролям не читать (названия — от чужих людей, файл помечает сессию guard tg-taint).\n\n"
+            f"{count_text(chats)}. Названий чатов в карточке нет: они от чужих людей, путь к ним владелец видит в "
+            "самом вопросе. Зевсу и ролям файлы заявки не открывать.\n\n"
             "Спросить владельца окном вопросов, вопрос дословно (варианты «Да — выгрузить и разобрать» и «Нет»):\n\n"
             f"{q}\n\n"
             f"«Да» — выгрузку и один разбор на все чаты сделает плановый проход. Без ответа заявка удалится через "
