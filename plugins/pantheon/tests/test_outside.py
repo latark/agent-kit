@@ -903,6 +903,12 @@ check("check_request: время на час вперёд — отклонена
 check("check_request: время на час вперёд — отклонена (формат с секундами и поясом)",
       O.check_request({**_ok, "time": time.strftime(_fmt, time.localtime(time.time() + 3600))}, "r1"))
 
+check("serve_wait: заявка от CLI (время P.stamp) — вычитает прошедшее время",
+      O.serve_wait({"wait": 300, "time": time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() - 120))}) <= 200)
+check("_epoch: оба формата разбираются, мусор и пусто — None",
+      O._epoch({"time": "2026-10-30 10:00"}) is not None and O._epoch({"time": "2026-10-30T10:00:00+0300"}) is not None
+      and O._epoch({"time": "вчера"}) is None and O._epoch({}) is None)
+
 # --- sweep_quiet (metis-0606, Д-1 argus): сбой sweep посреди прогона не роняет тесты, в журнал — один раз ------------
 O.SWEEP_EVERY = 0.2
 O._SWEEP_ERR.clear()

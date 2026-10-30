@@ -970,17 +970,6 @@ def requests():
 FUTURE_SLACK = 60                   # заявка со временем позже now+60 с отклоняется (metis-0604)
 
 
-def _req_time(req):
-    """Время заявки в секундах: «ГГГГ-ММ-ДД ЧЧ:ММ» (P.stamp) или с секундами и поясом; не разобрать — None."""
-    t = str(req.get("time"))
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S%z"):
-        try:
-            return datetime.strptime(t, fmt).timestamp()
-        except ValueError:
-            pass
-    return None
-
-
 def check_request(req, rid):
     if not isinstance(req, dict) or req.get("v") != 1 or req.get("id") != rid:
         return "заявка не в формате (v1, id = имя файла)"
@@ -997,7 +986,7 @@ def check_request(req, rid):
     w = req.get("wait", 0)
     if not isinstance(w, int) or isinstance(w, bool) or not 0 <= w <= WAIT_MAX:
         return f"ожидание заявки — от 0 до {WAIT_MAX} секунд"
-    if req.get("time") is not None and (_req_time(req) or 0) > P.now() + FUTURE_SLACK:
+    if req.get("time") is not None and (_epoch(req) or 0) > P.now() + FUTURE_SLACK:
         return "время заявки — позже, чем сейчас на часах прохода"
     return None
 
@@ -1033,10 +1022,14 @@ def handle(qdir, window, rid, req):
 # --- тесты после «принять» ----------------------------------------------------------------------------------------
 
 def _epoch(rec):
-    try:
-        return datetime.strptime(str(rec.get("time")), "%Y-%m-%dT%H:%M:%S%z").timestamp()
-    except ValueError:
-        return None
+    """Время записи или заявки в секундах: «ГГГГ-ММ-ДД ЧЧ:ММ» (P.stamp, так пишет CLI) или «…T…:%S%z» (журнал шлюза);
+    не разобрать — None."""
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(str(rec.get("time")), fmt).timestamp()
+        except ValueError:
+            pass
+    return None
 
 
 def auto_todo(recs=None, t=None):
