@@ -2438,7 +2438,8 @@ def test_infra_check_hq_section():
 
 def test_infra_check_corpus_section():
     """infra-check: нет раздела [corpus] в policy.toml — строка НЕТ и тревога «corpus-role ничего не закрывает»;
-    раздел есть (и пустой) — без тревоги, тревога снята; policy.toml не TOML — без второй строки (metis-0182)."""
+    раздел со списком — без тревоги, тревога снята; пустой раздел при объявленном корпусе — как его нет (metis-0194);
+    policy.toml не TOML — без второй строки (metis-0182)."""
     import importlib.util
     sys.path.insert(0, os.path.join(ROOT, "lib"))
     import importlib
@@ -2456,11 +2457,13 @@ def test_infra_check_corpus_section():
         p.MANAGED, p.HOME, p.guard_script, p.agents_all = os.path.join(d, "none.json"), d, (lambda: ""), (lambda: [])
         p.alert_once = lambda key, value, text, *a, **k: calls.append(("alert", key, text))
         p.clear_once = lambda key: calls.append(("clear", key))
-        text = "в policy.toml нет раздела [corpus]: правило corpus-role ничего не закрывает"
+        text = "в policy.toml нет раздела [corpus] или он пуст: правило corpus-role ничего не закрывает"
         decl = '[hq]\nclosed_dirs = ["~/ai/corpus"]\n'
         for name, body in (("корпус в closed_dirs, нет раздела", decl),
                            ("папка x-corpus в closed_dirs, нет раздела", '[hq]\nclosed_dirs = ["~/projects/x-corpus"]\n'),
-                           ("корпус в closed_collections, нет раздела", '[hq]\nclosed_collections = ["corpus"]\n')):
+                           ("корпус в closed_collections, нет раздела", '[hq]\nclosed_collections = ["corpus"]\n'),
+                           ("корпус в closed_dirs, пустой [corpus]", decl + "[corpus]\n"),
+                           ("корпус в closed_dirs, [corpus] с пустыми списками", decl + "[corpus]\ncommands = []\n")):
             calls.clear()
             open(pol, "w").write(body)
             ok, lines = w.infra_check()
@@ -2468,7 +2471,8 @@ def test_infra_check_corpus_section():
                   and any(c[0] == "alert" and c[1] == "corpus-policy-missing" and c[2].startswith(text) for c in calls),
                   f"infra-check, {name}: нет строки НЕТ или тревоги про [corpus] ({lines}, {calls})")
         # metis-0253: чистая policy без [corpus] и без корпуса — тревоги нет, строки про [corpus] нет, старая снята
-        for name, body in (("нет policy.toml", None), ("нет раздела и корпуса", '[hq]\nclosed_dirs = ["~/ai/me"]\n')):
+        for name, body in (("нет policy.toml", None), ("нет раздела и корпуса", '[hq]\nclosed_dirs = ["~/ai/me"]\n'),
+                           ("пустой [corpus] без корпуса", "[hq]\n[corpus]\n")):
             calls.clear()
             if body is None:
                 os.remove(pol)
@@ -2479,8 +2483,8 @@ def test_infra_check_corpus_section():
                   and not any(c[0] == "alert" and c[1] == "corpus-policy-missing" for c in calls)
                   and ("clear", "corpus-policy-missing") in calls,
                   f"infra-check, {name}: лишняя тревога или строка про [corpus] ({lines}, {calls})")
-        for name, body in (("пустой [corpus]", "[hq]\n[corpus]\n"),
-                           ("[corpus] со списком", '[hq]\n[corpus]\ncommands = ["corpus-x"]\n')):
+        for name, body in (("[corpus] со списком", '[hq]\n[corpus]\ncommands = ["corpus-x"]\n'),
+                           ("корпус в closed_dirs, [corpus] со списком", decl + '[corpus]\nscripts = ["add.py"]\n')):
             calls.clear()
             open(pol, "w").write(body)
             _, lines = w.infra_check()

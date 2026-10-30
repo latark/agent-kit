@@ -17,7 +17,8 @@ claude-config: коммит в обход sync.sh отправил бы прав
 записи (cp -R x <репо>/.claude/, mv, tar -C, rsync: в неё можно положить settings.json и agents), .mcp.json, .git/hooks
 и .git/config. Цель выше .claude тоже (metis-0177): дерево, распакованное или скопированное в сам репозиторий или в
 папку над репозиториями (tar -x, unzip, ditto, cp -R, rsync -r/-a или «папка/», scp -r), и git clone в <репо>/.claude.
-Файлы с известными именами (curl -O, wget, patch, rsync одного файла) в корне репозитория — можно.
+Файлы с известными именами (curl -O, wget без -r и -m, patch, rsync одного файла) в корне репозитория — можно.
+С metis-0194 закрыты дыры ревью #35: rsync с «.», «папка/.» и -R, wget -r/-m, git checkout/restore поверх .claude, 7z -o.
 """
 
 import os
@@ -112,6 +113,21 @@ def _moved(cmds):
     return any(n in ("cd", "chdir", "pushd", "popd") for n, _ in cmds)
 
 
+def _cd_dirs(cmds, cwd):
+    """Папки, где может идти команда: папка события и цель каждого cd/chdir/pushd (относительная — от всех уже
+    известных: `cd app && cd ..`; без аргумента — HOME). Объединение, как у разбора Bash, а не порядок: для команд,
+    чьих целей разбор Bash не знает (7z), metis-0194. Неразобранная цель (`cd "$X"`) пропущена."""
+    out = [cwd]
+    for n, t in cmds:
+        if n not in ("cd", "chdir", "pushd"):
+            continue
+        arg = next((x for x in t if x is None or not x.startswith("-") or x == "-"), "$HOME")
+        if arg is None or arg == "-":
+            continue  # `cd -` — прошлая папка, она уже в списке
+        out += [p for p in (G._expand(arg, d) for d in list(out)) if p not in out]
+    return out
+
+
 def _tree_dests(cmds, cwd, targets):
     """Папки, в которые команда копирует дерево (cp -R, ditto, rsync -r/-a или источник «папка/», scp -r): последний
     операнд или -t. rsync без рекурсии и без «/» в конце источника кладёт отдельные файлы — это не дерево. После cd
@@ -131,9 +147,9 @@ def _tree_dests(cmds, cwd, targets):
                 dest = texts[i + 1]
             elif x.startswith("--target-directory="):
                 dest = x.split("=", 1)[1]
-        ops = [x for x in texts if not x.startswith("-")]
-        if base == "rsync" and not _recursive(texts, "ra") and not any(
-                x.endswith("/") for x in (ops if dest else ops[:-1])):
+        ops = _rsync_operands(texts) if base == "rsync" else [x for x in texts if not x.startswith("-")]
+        if base == "rsync" and not _rsync_tree(texts) and not any(
+                _dir_src(x) for x in (ops if dest else ops[:-1])):
             continue  # rsync a.txt . — отдельный файл, а не дерево
         dest = dest or (ops[-1] if len(ops) > 1 else None)
         if not dest or re.match(r"[^/]*:", dest):
@@ -144,6 +160,39 @@ def _tree_dests(cmds, cwd, targets):
         else:
             out.append(G._expand(w, cwd))
     return out
+
+
+# rsync: опции со значением отдельным словом — их значение не операнд (`rsync -a src/ . --exclude x`: папка — «.», metis-0194)
+RSYNC_VALUE_OPTS = {"--exclude", "--include", "--filter", "-f", "--exclude-from", "--include-from", "--files-from",
+                    "--log-file", "-e", "--rsh", "--rsync-path", "--port", "--timeout", "--contimeout", "--partial-dir",
+                    "--temp-dir", "-T", "--compare-dest", "--copy-dest", "--link-dest", "--backup-dir", "--suffix",
+                    "--chmod", "--chown", "--info", "--debug", "--max-size", "--min-size", "--bwlimit", "--out-format",
+                    "--password-file", "--address", "--sockopts", "--modify-window", "-B", "--block-size", "--iconv",
+                    "--usermap", "--groupmap", "--checksum-choice", "--cc", "--skip-compress", "--outbuf"}
+
+
+def _rsync_operands(texts):
+    out, skip = [], False
+    for x in texts:
+        if skip:
+            skip = False
+        elif x in RSYNC_VALUE_OPTS:
+            skip = True
+        elif not x.startswith("-"):
+            out.append(x)
+    return out
+
+
+def _rsync_tree(texts):
+    """rsync копирует дерево: рекурсия (-r, -a), относительные пути (-R, --relative, --files-from — они подразумевают -R:
+    `rsync -R .claude/settings.json .` кладёт .claude/ в корень, metis-0194)."""
+    return _recursive(texts, "raR") or any(x == "--relative" or x.startswith("--files-from") for x in texts)
+
+
+def _dir_src(x):
+    """Источник — папка: «.», «..», «папка/», «папка/.» или «папка/..» (без рекурсии rsync -d/--dirs кладёт её
+    содержимое — судим как дерево)."""
+    return x in (".", "..") or x.endswith(("/", "/.", "/.."))
 
 
 def _opt_dests(texts, short, long=()):
@@ -179,7 +228,16 @@ def _unpack_dests(cmds, cwd, targets):
                 continue
             dests = _opt_dests(texts, "-C", ("--directory",)) or ["."]
         elif base == "unzip":
+            if _unzip_lists(texts):
+                continue  # unzip -l/-t/-Z/-v/-p — только список, проверка или вывод в stdout: файлов нет
             dests = _opt_dests(texts, "-d") or ["."]
+        elif base in SEVEN_ZIP and next((x for x in texts if not x.startswith("-")), None) in ("x", "e"):
+            dests = _opt_dests(texts, "-o") or ["."]  # 7z x a.7z -o<папка>; без -o — cwd (metis-0194)
+            if moved:  # разбор Bash 7z не знает — целей «…» нет: относительную папку судим от каждой папки cd
+                for d in dests:
+                    w = d.replace("${HOME}", G.HOME).replace("$HOME", G.HOME)
+                    out += [G._expand(w, c) for c in _cd_dirs(cmds, cwd)]
+                continue
         elif base == "ditto" and any(x[:1] == "-" and x[1:2] != "-" and "x" in x for x in texts):
             ops = [x for x in texts if not x.startswith("-")]
             dests = ops[-1:] if len(ops) > 1 else []
@@ -191,6 +249,60 @@ def _unpack_dests(cmds, cwd, targets):
                 out += [os.path.dirname(p) for p in targets if os.path.basename(p) == G.ANY_FILE]
             else:
                 out.append(G._expand(w, cwd))
+    return out
+
+
+SEVEN_ZIP = ("7z", "7za", "7zz", "7zr")
+
+
+def _unzip_lists(texts):
+    """unzip с буквой -l, -t, -Z, -v или -p: список, проверка или вывод в stdout — файлы не пишутся. Значение -d
+    (слитно «-dПАПКА» или отдельным словом) не считается буквами."""
+    letters = set()
+    for x in texts:
+        if x.startswith("-") and not x.startswith("--") and not x.startswith("-d"):
+            letters |= set(x[1:])
+    return bool(letters & set("ltZvp"))
+
+
+def _mirror_dests(cmds, cwd, targets):
+    """wget -r / -m (--mirror): сайт кладёт дерево с путями из адреса (…/.claude/settings.json → ./.claude/…; с -nH
+    без папки хоста). Папка — -P или cwd (metis-0194). Одиночная загрузка (curl -O, wget без -r) — файл с известным
+    именем, её судят обычные правила."""
+    moved = _moved(cmds)
+    out = []
+    for name, texts in cmds:
+        if os.path.basename((name or "").rstrip("/")) != "wget" or any(x is None for x in texts):
+            continue
+        if not (_recursive(texts, "rm") or "--mirror" in texts):
+            continue
+        for d in _opt_dests(texts, "-P", ("--directory-prefix",)) or ["."]:
+            w = d.replace("${HOME}", G.HOME).replace("$HOME", G.HOME)
+            if moved and not os.path.isabs(os.path.expanduser(w)):
+                # цель wget у разбора Bash — «<папка>/…» от каждой папки cd (metis-0194)
+                out += [os.path.dirname(p) for p in targets if os.path.basename(p) == G.ANY_FILE]
+            else:
+                out.append(G._expand(w, cwd))
+    return out
+
+
+def _git_targets(cmds, cwd):
+    """git checkout и git restore переписывают пути в рабочей копии из индекса или коммита: `git checkout -- .claude/…`
+    поверх защищённого файла (metis-0194). Операнды — пути (и имена веток: лишняя проверка безвредна). Только
+    --staged меняет индекс, а не рабочую копию, — его не судим. `.` и папка репозитория — можно (решение лида по
+    ревью #204): возвращают только то, что уже в git, как reset --hard и checkout ветки."""
+    out = []
+    for name, texts in cmds:
+        if os.path.basename((name or "").rstrip("/")) != "git" or any(x is None for x in texts):
+            continue
+        parsed = G._git_sub(texts)
+        if not parsed or parsed[1] not in ("checkout", "restore"):
+            continue
+        gdir, sub, args = parsed
+        if sub == "restore" and ("--staged" in args or "-S" in args) and not ("--worktree" in args or "-W" in args):
+            continue
+        base = G._expand(gdir, cwd) if gdir else cwd
+        out += [G._expand(x, base) for x in args if x != "--" and not x.startswith("-")]
     return out
 
 
@@ -236,8 +348,12 @@ def check_protect_config(event, tool, tool_input):
            if G._inside(p, prot) or _settings_file(p, mk) or any(G._inside(x, [p]) for x in prot)]
     if tool == "Bash":
         cmds = G.bash_analysis(tool_input.get("command") or "", cwd)[1]
-        bad += [p for p in _tree_dests(cmds, cwd, targets) + _unpack_dests(cmds, cwd, targets)
-                if _repo_or_above(p) and p not in bad]
+        bad += [p for p in _tree_dests(cmds, cwd, targets) if _repo_or_above(p) and p not in bad]
+        # распаковка и зеркало кладут дерево и в саму папку .claude (7z x -o<репо>/.claude, metis-0194)
+        bad += [p for p in _unpack_dests(cmds, cwd, targets) + _mirror_dests(cmds, cwd, targets) if p not in bad and (
+            _repo_or_above(p) or _settings_file(p) or G._inside(p, prot))]
+        bad += [p for p in _git_targets(cmds, cwd) if p not in bad and (
+            G._inside(p, prot) or _settings_file(p) or any(G._inside(x, [p]) for x in prot))]
         bad += [p for p in _clone_dests(cmds, cwd) if p not in bad and (
             G._inside(p, prot) or _settings_file(p) or any(G._inside(x, [p]) for x in prot))]
     if not bad:

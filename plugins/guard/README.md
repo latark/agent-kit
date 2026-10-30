@@ -60,7 +60,7 @@ guard ловит **ошибки агента**: запись чужой памя
 числе `+ветка` — и удаления; `gh api` с записью — нет; `gh pr merge` — только главная сессия координатора или его лид в папках своего направления, защиты — только Метида или её лид; везде — через шлюз слияния: тесты, «принять» от argus и `--match-head-commit` на один SHA, подробно — раздел «Слияние PR»; координатор с личным в папке — mnemo-brain —
 не отправляет и не сливает сам; отправляют только свой репозиторий — папки своего направления), печать в терминал (terminal: osascript, tmux
 send-keys и т. п. — ввод от имени владельца), пополнение корпуса (corpus-role: подкоманды, скрипты и ключи в Связке — по списку из раздела `[corpus]` policy.toml,
-образец — в `policy.example.toml`; ни одной роли, только через посредника; Пританею корпус закрыт целиком; раздела нет — правило ничего не узнаёт, битый раздел — ролям Bash закрыт), launchd (launchd-env, metis-0298: ролям, субагентам и главной сессии окна роли (`PANTHEON_ROLE` задан, agent_type в событии нет) `launchctl` — только белый список для чтения: list, print, print-cache, print-disabled, getenv, blame, version, help, procinfo, hostinfo, managerpid, manageruid, managername; остальное — setenv, unsetenv, config, bootstrap, bootout, load, unload, submit, remove, kickstart, enable, disable, обёртки asuser и bsexec, вызов без подкоманды и неизвестное — отказ: окружение и службы launchd берёт плановый проход Пантеона; имя переменной и метка не важны; `swiftc` — только абсолютным `/usr/bin/swiftc`, путь сверяется у слова каждой команды (metis-0314); launchctl внутри `python3 -c`, `perl -e` и скриптов — ниже модели угроз, guard его не видит, как и launchctl внутри `pantheon` и `tg-readd`).
+образец — в `policy.example.toml`; ни одной роли, только через посредника; Пританею корпус закрыт целиком; раздела нет или все его списки пусты — правило ничего не узнаёт, а при корпусе, объявленном в `[hq]`, плановый проход тревожит: «нет раздела [corpus] или он пуст», metis-0194; битый раздел — ролям Bash закрыт), launchd (launchd-env, metis-0298: ролям, субагентам и главной сессии окна роли (`PANTHEON_ROLE` задан, agent_type в событии нет) `launchctl` — только белый список для чтения: list, print, print-cache, print-disabled, getenv, blame, version, help, procinfo, hostinfo, managerpid, manageruid, managername; остальное — setenv, unsetenv, config, bootstrap, bootout, load, unload, submit, remove, kickstart, enable, disable, обёртки asuser и bsexec, вызов без подкоманды и неизвестное — отказ: окружение и службы launchd берёт плановый проход Пантеона; имя переменной и метка не важны; `swiftc` — только абсолютным `/usr/bin/swiftc`, путь сверяется у слова каждой команды (metis-0314); launchctl внутри `python3 -c`, `perl -e` и скриптов — ниже модели угроз, guard его не видит, как и launchctl внутри `pantheon` и `tg-readd`).
 
 Узкие роли и защиты проекта:
 
@@ -82,6 +82,17 @@ send-keys и т. п. — ввод от имени владельца), попо�
     распаковка (`tar -x`, `unzip`, `ditto -x`), `cp -R`/`-a`, `ditto`, `scp -r`, `rsync -r`/`-a` или с источником `папка/`;
     `git clone` в `<репо>/.claude` тоже закрыт;
   - файлы с известными именами в корне репозитория можно: `curl -O`, `wget`, `patch -p1 -i x.diff`, `rsync a.txt .`, `cp a.txt .`;
+  - с metis-0194 закрыты ещё: `rsync` с источником `папка/.` или `.`, с `-R`/`--relative`/`--files-from` (они кладут
+    `.claude/…` как путь), опция после операндов (`rsync -a src/ . --exclude x`); `wget -r`/`-m` (сайт кладёт дерево
+    с путями из адреса; папка — `-P` или cwd); `7z x|e -o<папка>`; `git checkout`/`git restore` с путём `.claude/…` или
+    самой `.claude` (`--staged` — только индекс, не судим; `.` и папка репозитория — можно: возвращают только то, что уже
+    в git, как `reset --hard`); `unzip -d` в `.claude`. `unzip -l/-t/-Z/-v/-p` и
+    `7z a` ничего не пишут и не отказ. После `cd` (`cd <репо> && 7z x a.7z`, `wget -m`) относительную папку судим
+    от каждой папки cd и от папки события: `cd app && 7z x a.7z` из корня репозитория — тоже
+    отказ. Источник rsync `.`, `..`, `папка/..` — тоже дерево (`rsync -d . <репо>`);
+  - остаток: опции rsync со значением отдельным словом, которых нет в `RSYNC_VALUE_OPTS` (`--compress-level 9`,
+    `--max-delete 5`), читаются как операнд: `rsync -a src/ . --compress-level 9` даёт ложную цель «9» и проходит.
+    Слитная форма (`--compress-level=9`) судится верно. Не наращиваем: защита от ошибки, а не от обхода;
   - пустую папку `.claude` можно создать (`mkdir`, `install -d`), `install -d .claude/agents` — нет.
 - **`[private]` в policy.toml:** не таблица — всё по умолчанию; ключа нет или значение не список — умолчание; список — только его
   строки (без пробелов по краям, пустые и не строки отброшены). `roles` и `coordinators` пустым списком `[]` — никого.
@@ -470,7 +481,9 @@ SDK (`sdk`) флаг не снимают — так же журнал owner-log 
   и `uv run`, а пустыми — `uv run python` без скрипта и `node` без скрипта (`node`, `node -v`, `node -e 0` — `-e`/`-p` с литералами,
   `process.exit` и `console.log` литерала). Слово, которое разбор не вычислил (`python3 -I $UNSET/tests/run.py`), пустым не
   считается. Относительный путь (`./test`, `bin/test`) — скрипт проекта, а не программа из списка; `/usr/bin/true`
-  судится по имени.
+  судится по имени. С metis-0194 обёртки — ещё `command`, `exec` (`-a имя`), `npx`, `uvx` и `uv --directory x run`;
+  пустые — `command -v`/`-V` (печатает путь, а не запускает), `node -pe 1` и слова после кода `-e`/`-p`
+  (`node -pe 1 pytest`: это `process.argv`, а не скрипт), `node --check` без скрипта.
 - Вторая запись `tests` — от планового прохода Пантеона (`pantheon outside test` и тесты после «принять» argus,
   `plugins/pantheon/lib/outside.py`, [sb-simplify] п. 7), `by.agent_type` = `pantheon-outside`. Её пишет только
   проход вне окон: роли STATE закрыт, а команде под его профилем `sandbox-exec` — тоже. Запись есть только у проверки

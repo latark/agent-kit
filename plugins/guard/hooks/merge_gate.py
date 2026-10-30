@@ -77,6 +77,7 @@ import glob
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import subprocess
@@ -151,15 +152,19 @@ EMPTY_SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 # обёртки перед программой тестов: имя → флаги, за которыми идёт отдельное значение
 TEST_WRAPPERS = {"heavy": set(), "env": {"-u", "--unset", "-C", "--chdir"}, "time": set(),
                  "nice": {"-n", "--adjustment"}, "timeout": {"-s", "--signal", "-k", "--kill-after"},
+                 # оболочечные и пакетные обёртки (metis-0194): `command true`, `exec true`, `npx true`, `uvx true`
+                 "command": set(), "exec": {"-a"}, "npx": {"-p", "--package"},
+                 "uvx": {"--from", "--with", "-p", "--python", "--index", "--index-url"},
                  # `uv run <программа>` (metis-0177): uv run python без скрипта — такой же пустой python
                  "uv run": {"--with", "--with-editable", "--with-requirements", "-p", "--python", "--project",
                             "--directory", "--package", "--extra", "--group", "--only-group", "--no-group",
                             "--env-file", "--index", "--default-index", "-w"}}
+UV_VALUE_OPTS = {"--directory", "--project", "--config-file", "--cache-dir", "--color", "--python", "-p"}
 # присваивание перед программой (`CI=1 true`): оболочка его не запускает — судим программу за ним (metis-0177)
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # node без скрипта или с -e/-p из литералов, process.exit и console.log литерала — ничего не проверяет (metis-0177)
 EMPTY_NODE = {"node", "nodejs"}
-NODE_NOOP_ARGS = {"-", "-v", "--version", "-h", "--help"}
+NODE_NOOP_ARGS = {"-", "-v", "--version", "-h", "--help", "-c", "--check"}  # --check без скрипта читает stdin
 NODE_EVAL = {"-e", "--eval", "-p", "--print"}
 _JS_LIT = r"""(?:-?\d+(?:\.\d+)?|true|false|null|undefined|'[^'\\]*'|"[^"\\]*")"""
 NODE_NOOP_CODE = re.compile(rf"\s*(?:(?:{_JS_LIT}|process\.exit\(\s*{_JS_LIT}?\s*\)|console\.log\(\s*{_JS_LIT}?\s*\))"
@@ -481,13 +486,14 @@ def _program_at(argv):
         if name == "uv":
             j = i + 1
             while j < len(argv) and isinstance(argv[j], str) and argv[j].startswith("-") and argv[j] != "--":
-                j += 1  # общие флаги uv (--quiet, --offline)
+                # общие флаги uv (--quiet, --offline); с отдельным значением — --directory x, --project x (metis-0194)
+                j += 2 if argv[j] in UV_VALUE_OPTS else 1
             if j >= len(argv) or argv[j] != "run":
                 return i  # uv pip, uv sync … — сама программа uv
             i, name = j, "uv run"
         elif name not in TEST_WRAPPERS:
             return i
-        takes, i = TEST_WRAPPERS[name], i + 1
+        at, (takes, i) = i, (TEST_WRAPPERS[name], i + 1)
         while i < len(argv):
             a = argv[i]
             if not isinstance(a, str):
@@ -495,6 +501,8 @@ def _program_at(argv):
             if a == "--":
                 i += 1
                 break
+            if name == "command" and a[:1] == "-" and set(a[1:]) & {"v", "V"}:
+                return at  # `command -v pytest` печатает путь, а не запускает (metis-0194): программа — сам command
             if a in takes:
                 i += 2
             elif a.startswith("-") or (name == "env" and "=" in a):
@@ -583,17 +591,20 @@ def _relative(word):
 
 
 def _node_empty(args):
-    """Аргументы node без скрипта: только флаги из NODE_NOOP_ARGS и -e/-p с пустым кодом (`node -e 0`)."""
-    i = 0
+    """Аргументы node без скрипта: только флаги из NODE_NOOP_ARGS и -e/-p с пустым кодом (`node -e 0`). Слова после
+    кода -e/-p — process.argv, а не скрипт: `node -pe 1 pytest` печатает 1 (metis-0194)."""
+    i, evaled = 0, False
     while i < len(args):
         a = args[i]
         if not isinstance(a, str):
             return False
-        if a in NODE_EVAL:
-            code = args[i + 1] if i + 1 < len(args) else ""
+        if evaled and not a.startswith("-"):
+            return True
+        if a in NODE_EVAL or (a[:1] == "-" and a[1:2] != "-" and len(a) > 1 and set(a[1:]) <= {"p", "e"}):
+            code = args[i + 1] if i + 1 < len(args) else ""  # -pe 1: связка коротких флагов (metis-0194)
             if not isinstance(code, str) or not NODE_NOOP_CODE.fullmatch(code):
                 return False
-            i += 2
+            i, evaled = i + 2, True
         elif a in NODE_NOOP_ARGS:
             i += 1
         else:
@@ -615,6 +626,8 @@ def _empty_run(argv, depth=0):
         return None
     if not prog or (prog in EMPTY_TEST_PROGRAMS and not _relative(word)):
         return prog or "нет"
+    if prog == "command":  # _program_at остановился на нём — это `command -v/-V`: только печать пути
+        return "command -v"
     if prog in EMPTY_NODE and _node_empty(rest):
         return f"{prog} без тестов"
     if EMPTY_PYTHON.fullmatch(prog):
@@ -891,9 +904,7 @@ def _gh_json(args):
 
 def _is_core(path, core_files):
     """Ядро (metis-0092, решение владельца 15.10): папки CORE_DIR целиком без учёта регистра и отдельные файлы вне них."""
-    p = path.strip("/").casefold()
-    while p.startswith("./"):
-        p = p[2:].lstrip("/")
+    p = posixpath.normpath(path.strip("/") or ".").strip("/").casefold()  # ./, //, a/../b (metis-0194)
     return p in core_files or any(p == d or p.startswith(d + "/") for d in CORE_DIR)
 
 

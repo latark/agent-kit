@@ -22,7 +22,9 @@ old_ifs=$IFS
 IFS=:
 set -f
 for v in 3.14 3.13 3.12 3.11; do
-    for d in $DIRS:$FW/$v/bin:$PATH; do
+    # слова через пробел: двоеточие делит только раскрытые значения. Через `$DIRS:$FW…:$PATH` dash склеивал места
+    # списка в одно слово (metis-0194)
+    for d in $DIRS $FW/$v/bin $PATH; do
         case $d in
             /*) ;;
             *) continue ;;
