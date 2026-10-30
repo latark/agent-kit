@@ -364,6 +364,45 @@ for typo, what in (("[window.mnemo-brain]", "[window.mnemo-brainn]"), ("[role.ar
           not [f for f in os.listdir(once7) if f.startswith("plugin-map-name")] if os.path.isdir(once7) else True)
 shutil.copy(MAP, os.path.join(plug, "plugins-by-role.toml"))
 
+# две опечатки одного рода: по одной строке тревоги на запись после трёх сборок (метка своя у каждой записи)
+write(os.path.join(plug, "plugins-by-role.toml"), real_map + '\n[window.zz1]\nplugins = []\nmcp = []\n'
+      '[window.zz2]\nplugins = []\nmcp = []\n')
+tmp9 = os.path.join(ROOT, "two")
+env9 = env_for(tmp9)
+write(os.path.join(env9["PANTHEON_HOME"], "directions.toml"),
+      '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n' + MNEMO)
+os.makedirs(os.path.join(tmp9, "projects", "br"))
+for _ in range(3):
+    build_plug(env9)
+al9 = open(os.path.join(env9["PANTHEON_HOME"], "alerts.md"), encoding="utf-8").read().splitlines()
+check("две опечатки [window.zz1] и [window.zz2], три сборки: по одной строке тревоги на запись",
+      len([x for x in al9 if "[window.zz1]" in x]) == 1 and len([x for x in al9 if "[window.zz2]" in x]) == 1, al9)
+
+# роль только из личного слоя (~/.claude/agents) и из --src: запись [role.X] карты применяется, а не пропускается
+write(os.path.join(plug, "plugins-by-role.toml"), real_map + '\n[role.mine]\nmcp = []\n[role.fromsrc]\nmcp = ["qmd"]\n')
+tmp10 = os.path.join(ROOT, "mine")
+env10 = env_for(tmp10)
+write(os.path.join(env10["PANTHEON_HOME"], "directions.toml"),
+      '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n' + MNEMO)
+os.makedirs(os.path.join(tmp10, "projects", "br"))
+write(os.path.join(tmp10, ".claude", "agents", "mine.tmpl"), "---\nname: mine\ndescription: личная\n---\nтело\n")
+r = build_plug(env10)
+mine = os.path.join(tmp10, ".claude", "agents", "mine.md")
+mine_t = open(mine, encoding="utf-8").read() if os.path.exists(mine) else ""
+al10 = os.path.join(env10["PANTHEON_HOME"], "alerts.md")
+check("роль только из личного слоя ~/.claude/agents с [role.mine]: запись применена (mcp__qmd закрыт), тревоги нет",
+      r.returncode == 0 and "mcp__qmd" in (head(mine_t, "disallowedTools") or [])
+      and not (os.path.exists(al10) and "[role.mine]" in open(al10, encoding="utf-8").read()), (r.stderr[-300:], mine_t[:200]))
+src10 = os.path.join(tmp10, "mysrc")
+write(os.path.join(src10, "fromsrc.tmpl"), "---\nname: fromsrc\ndescription: из src\n---\nтело\n")
+r = build_plug(env10, ["--out", os.path.join(tmp10, "out"), "--src", src10])
+fs = os.path.join(tmp10, "out", "fromsrc.md")
+fs_t = open(fs, encoding="utf-8").read() if os.path.exists(fs) else ""
+check("roles build --src: роль только из src с [role.fromsrc] — запись применена (mcp__context7 закрыт), не пропущена",
+      r.returncode == 0 and "mcp__context7" in (head(fs_t, "disallowedTools") or []) and "[role.fromsrc]" not in r.stderr,
+      (r.stderr[-300:], fs_t[:200]))
+shutil.copy(MAP, os.path.join(plug, "plugins-by-role.toml"))
+
 # guard@agent-kit в каталоге (проба argus-207): карта не применяется, guard и pantheon включены во всех окнах
 write(os.path.join(plug, "plugins-by-role.toml"),
       open(MAP, encoding="utf-8").read().replace('plugins = [\n  "typescript-lsp', 'plugins = [\n  "guard@agent-kit", '
