@@ -324,13 +324,75 @@ def t_tree_hash_matches_pantheon():
     check("счёт дерева меняется от содержимого", R.tree_hash(d) != got)
 
 
+# Запрещённые в tests.yml ключи: подмена оболочки, окружения, каталога и сбоя прячет провал (metis-0597).
+WF_FORBIDDEN = {"shell", "defaults", "env", "container", "services", "working-directory", "continue-on-error"}
+_WF_WALK = (
+    "def w(o, a) case o when Hash then o.each { |k, v| a << k.to_s; w(v, a) } when Array then o.each { |x| w(x, a) } end; a end; "
+    "def v(o, key, a) case o when Hash then o.each { |k, x| a << x.to_s if k.to_s == key; v(x, key, a) } "
+    "when Array then o.each { |x| v(x, key, a) } end; a end; "
+    "d = begin YAML.load_file(ARGV[0], aliases: true) rescue ArgumentError; YAML.load_file(ARGV[0]) end; "
+    "steps = []; if d.is_a?(Hash) && d['jobs'].is_a?(Hash) then d['jobs'].each_value { |j| "
+    "steps.concat(j['steps']) if j.is_a?(Hash) && j['steps'].is_a?(Array) } end; "
+    "steps = steps.select { |s| s.is_a?(Hash) }; "
+    "puts JSON.generate({'keys' => w(d, []), 'refs' => v(d, 'ref', []), "
+    "'uses' => steps.map { |s| s['uses'] }.compact.map(&:to_s), "
+    "'step_ifs' => steps.select { |s| s.key?('if') }.map { |s| s['if'].to_s }})"
+)
+
+
+def wf_parse(path):
+    """Разбор workflow через ruby -ryaml: {'keys': все ключи mapping любого уровня (в т.ч. из escape, flow, merge-ключа
+    `<<`), 'refs': значения ref любого уровня, 'uses': uses шагов, 'step_ifs': if шагов} или (None, причина)."""
+    rb = shutil.which("ruby")
+    if not rb:
+        return None, "нет ruby"
+    r = subprocess.run([rb, "-rjson", "-ryaml", "-e", _WF_WALK, path], capture_output=True, text=True)
+    if r.returncode != 0:
+        return None, f"ruby код {r.returncode}: {r.stderr.strip()[-400:] or '(stderr пуст)'}"
+    return json.loads(r.stdout), ""
+
+
+def wf_step_bad(data):
+    """Шаг выключается через if или checkout берёт чужой ref — по разбору YAML."""
+    return bool(data["step_ifs"] or data["refs"])
+
+
+def t_wf_parse_selftest():
+    """Самотест разбора: формы, которые регулярка пропустила бы, обязаны быть пойманы (мутант forbidden=set() краснеет)."""
+    cases = {
+        "escape в ключе": ('jobs:\n  a:\n    "\\x65nv":\n      X: 1\n    steps: []\n', "env"),
+        "continue-on-error во flow-шаге": ("jobs:\n  a:\n    steps:\n      - {name: x, run: y, continue-on-error: true}\n",
+                                           "continue-on-error"),
+        "merge-ключ <<": ("jobs:\n  a:\n    steps:\n      - run: y\n        <<: {env: {X: 1}}\n", "env"),
+    }
+    d = tempfile.mkdtemp(prefix="wfself-")
+    for name, (text, want) in cases.items():
+        path = put(d, name.replace(" ", "_") + ".yml", text) or os.path.join(d, name.replace(" ", "_") + ".yml")
+        data, why = wf_parse(path)
+        check(f"wf_parse: {name} — ключ {want} найден и запрещён",
+              data is not None and want in data["keys"] and want in set(data["keys"]) & WF_FORBIDDEN, why or data)
+    path = os.path.join(d, "ok.yml")
+    put(d, "ok.yml", "jobs:\n  a:\n    if: x\n    steps:\n      - uses: a/b@1\n        with: {ref: main}\n"
+        "      - run: z\n        if: y\n")
+    data, why = wf_parse(path)
+    check("wf_parse: uses, ref, if шага — из разбора, if job-а не в step_ifs",
+          data == {"keys": data["keys"], "refs": ["main"], "uses": ["a/b@1"], "step_ifs": ["y"]} if data else False,
+          why or data)
+    check("wf_step_bad: if шага и ref пойманы, чистый файл — нет",
+          data is not None and wf_step_bad(data) and wf_step_bad({"step_ifs": [], "refs": ["x"]}) and not wf_step_bad({"step_ifs": [], "refs": []}), data)
+    bad = put(d, "bad.yml", "a: b: c\n") or os.path.join(d, "bad.yml")
+    data, why = wf_parse(bad)
+    check("wf_parse: битый YAML — None и причина из stderr ruby", data is None and "ruby код" in why and len(why) > 20, why)
+
+
 def t_workflows():
     """Право contents: write — только у release.yml; сторонние Action только по полному SHA; запуск — main."""
     names = sorted(n for n in os.listdir(WORKFLOWS) if n.endswith((".yml", ".yaml")))
     write = [n for n in names if re.search(r"^\s*[a-z-]+:\s*write\b", open(os.path.join(WORKFLOWS, n)).read(), re.M)]
     check("право на запись — только release.yml", write == ["release.yml"], write)
     text = open(os.path.join(WORKFLOWS, "release.yml")).read()
-    uses = re.findall(r"uses:\s*(\S+)", text)
+    rel, why = wf_parse(os.path.join(WORKFLOWS, "release.yml"))
+    uses = rel["uses"] if rel else None
     check("release.yml: Action только actions/checkout по 40 знакам SHA",
           uses and all(re.fullmatch(r"actions/checkout@[0-9a-f]{40}", u) for u in uses), uses)
     check("release.yml: общий permissions пуст, запись только у job", re.search(r"^permissions: \{\}$", text, re.M)
@@ -345,7 +407,8 @@ def t_workflows():
     # п. 8 (27.10): тесты до слияния — tests.yml (PR: затронутое на Linux; main: полный набор на macOS после слияния).
     # Красный прогон на main — сигнал откатывать: тик ставит выпуск без своего прогона тестов.
     text = open(os.path.join(WORKFLOWS, "tests.yml")).read()
-    uses = re.findall(r"uses:\s*(\S+)", text)
+    tst, why = wf_parse(os.path.join(WORKFLOWS, "tests.yml"))
+    uses = tst["uses"] if tst else None
     check("tests.yml: Action только checkout и setup-python по 40 знакам SHA",
           uses and all(re.fullmatch(r"actions/(checkout|setup-python)@[0-9a-f]{40}", u) for u in uses), uses)
     jobs = re.split(r"^jobs:\n", text, flags=re.M)[-1]
@@ -362,27 +425,15 @@ def t_workflows():
         capture_output=True, text=True) if rb else None
     check("workflows: каждый .yml разбирается как YAML (ruby -ryaml)", bad is not None and bad.returncode == 0,
           bad.stderr[-300:] if bad else "нет ruby")
-    # metis-0597 (долг argus B #198): ключи ищем в разборе YAML, а не регуляркой — экранированная ("\x65nv"),
-    # flow-форма ({env: x}) и кавычки ("env") дают тот же ключ после разбора. Все уровни, все mapping.
-    def wf_keys(path):
-        """Все ключи mapping любого уровня файла (ruby -ryaml) или None, если разбор упал."""
-        rb = shutil.which("ruby")
-        if not rb:
-            return None
-        walk = ("def w(o, a) case o when Hash then o.each { |k, v| a << k.to_s; w(v, a) } "
-                "when Array then o.each { |x| w(x, a) } end; a end; "
-                "puts JSON.generate(w(YAML.load_file(ARGV[0]), []))")
-        r = subprocess.run([rb, "-rjson", "-ryaml", "-e", walk, path], capture_output=True, text=True)
-        return json.loads(r.stdout) if r.returncode == 0 else None
-
-    keys = wf_keys(os.path.join(WORKFLOWS, "tests.yml"))
-    forbidden = {"shell", "defaults", "env", "container", "services", "working-directory", "continue-on-error"}
-    hit = sorted(set(keys) & forbidden) if keys is not None else None
+    # metis-0597 (долг argus B #198): ключи, if, ref, uses — из разбора YAML (wf_parse), а не регуляркой: экранированный
+    # ("\x65nv"), flow ({env: x}), кавычки и merge-ключ дают тот же ключ после разбора. Все уровни, все mapping.
+    keys = tst["keys"] if tst else None
+    hit = sorted(set(keys) & WF_FORBIDDEN) if keys is not None else None
     check("tests.yml: continue-on-error, shell, defaults, env, container, services, working-directory нигде нет "
           "(ключи из разбора YAML, любой уровень): подмена оболочки, окружения, каталога и сбоя прячет провал",
-          keys is not None and not hit, hit if hit is not None else "разбор YAML не удался (нет ruby или ошибка)")
+          keys is not None and not hit, hit if hit is not None else f"разбор YAML не удался: {why}")
     check("tests.yml: ни один шаг не выключается (`if:` только на уровне job), checkout не берёт чужой ref",
-          not re.search(r"^(      - |        )if:", text, re.M) and not re.search(r"^\s*(- )?ref:", text, re.M), text)
+          tst is not None and not wf_step_bad(tst), tst if tst else why)
     check("tests.yml: PR — job affected на закреплённом Linux (минута macOS ×10), полная история для merge-base",
           set(job) == {"affected", "full"} and re.search(r"^    if: github.event_name == 'pull_request'$", aff, re.M)
           and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", aff, re.M) and "fetch-depth: 0" in aff, job.keys())
@@ -425,7 +476,7 @@ def t_workflows():
 
 
 for t in (t_first_and_bump, t_rules, t_refuse, t_push_race, t_reconcile, t_first_parent, t_tree_hash_matches_pantheon,
-          t_workflows):
+          t_wf_parse_selftest, t_workflows):
     try:
         t()
     except Exception as e:  # noqa: BLE001 — падение случая — провал, остальные идут
