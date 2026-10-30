@@ -84,6 +84,8 @@ TEST = None
 # ядро защит (Д3) — как CORE_FILES и CORE_DIR шлюза guard (merge_gate.py); совпадение сверяет test_merge
 CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_config.py",
               "plugins/guard/managed-settings.json", "plugins/pantheon/lib/window_rules.py",
+              "plugins/pantheon/hooks/ctx.py", "plugins/pantheon/hooks/hooks.json", "plugins/pantheon/lib/merge.py",
+              "plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/plugins-by-role.toml",
               ".claude-plugin/marketplace.json")
 CORE_DIR = ("plugins/guard", "plugins/pantheon/roles", ".github")
 USAGE = "pantheon merge request|cancel <N> -R <owner/repo> | run [--click] | status"

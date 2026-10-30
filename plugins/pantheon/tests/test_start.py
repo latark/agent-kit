@@ -7,6 +7,7 @@ claude подменён скриптом в PATH: `claude agents --json --all` �
 """
 import json
 import os
+import re
 import subprocess
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -176,7 +177,7 @@ def main():
           and not os.path.exists(os.path.join(agents_dir, "hephaestus-old.md")))
     argus = open(os.path.join(agents_dir, "argus.md")).read() if os.path.exists(os.path.join(agents_dir, "argus.md")) else ""
     check("roles build: обычная роль из шаблона, общая часть подставлена и в роль, и в лида",
-          argus.startswith("---\nname: argus\n---\n<!-- собрано") and "Статус: готово" in argus and "Статус: готово" in text)
+          re.match(r"---\nname: argus\ndisallowedTools: [\w, -]+\n---\n<!-- собрано", argus) and "Статус: готово" in argus and "Статус: готово" in text)
     al = open(os.path.join(home, "alerts.md")).read() if os.path.exists(os.path.join(home, "alerts.md")) else ""
     check("roles build: шаблон с неизвестной частью не собран, тревога; чужой tg-reader.md не тронут",
           not os.path.exists(os.path.join(agents_dir, "iris.md")) and "нет части nope" in al

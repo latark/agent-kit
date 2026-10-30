@@ -429,7 +429,11 @@ SDK (`sdk`) флаг не снимают — так же журнал owner-log 
    `gh api repos/<repo>/pulls/N/files --paginate` (таймаут 6 с). Ядро защит — весь `plugins/guard/**` (без учёта
    регистра; решение владельца 15.10, metis-0092) и `.claude-plugin/marketplace.json` — откуда ставятся плагины,
    его подмена увела бы источник guard (metis-0115, guard 0.5.6). С guard 0.5.10 в ядре ещё общие роли
-   `plugins/pantheon/roles/**` и правила окон `plugins/pantheon/lib/window_rules.py` (metis-0174, 0182); проверяются и новый путь, и `previous_filename`, так что вынос
+   `plugins/pantheon/roles/**` и правила окон `plugins/pantheon/lib/window_rules.py` (metis-0174, 0182). С metis-0598
+   (решение владельца 30.10) — ещё журнал ваших слов и регистрация хуков Пантеона `plugins/pantheon/hooks/ctx.py` и
+   `plugins/pantheon/hooks/hooks.json`, слияние по Touch ID `plugins/pantheon/lib/merge.py`, карта плагинов и MCP
+   `plugins/pantheon/lib/plugin_map.py` и `plugins/pantheon/plugins-by-role.toml`; соседние файлы тех же папок — не
+   ядро. Проверяются и новый путь, и `previous_filename`, так что вынос
    файла из guard тоже виден. С metis-0404 в ядре и сборка окон в `plugins/pantheon/lib/pantheon.py`, но не весь файл:
    шлюз берёт старый и новый pantheon.py из папки слияния (base и head PR, одна merge-base) и сравнивает по AST
    функции `sandbox_build`, `domains_build`, `run_settings` и всё, что они транзитивно зовут и читают в этом файле,

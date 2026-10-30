@@ -174,7 +174,7 @@ def main():
           all("hestia" in agent_rules(d) and "hestia" not in agents_hook(d)[1] for d in (hq, ab, ts, mb)))
     check("чужие лиды — в deny у каждого координатора",
           "hephaestus-docs" in agent_rules(ab) and {"hephaestus-shop", "apollo-shop"} <= set(agent_rules(ts)))
-    reads = [x for x in hq["permissions"]["deny"] if not x.startswith("Agent(")]
+    reads = [x for x in hq["permissions"]["deny"] if not x.startswith(("Agent(", "mcp__"))]  # mcp__ — карта плагинов (metis-0238)
     check("hq: правила Read на месте (агентские правила — дописаны, не вместо)",
           reads and all(x.startswith("Read(") for x in reads))
     check("мастерская: без хука agents и без правил Agent(…) (вне P0-6)",
