@@ -1799,6 +1799,9 @@ def domains_build(if_changed=False):
         # пересобираются на новый путь (metis-0321, ревью 90a)
         watched = (reg_path, policy_path, os.path.join(HOME, ".claude", "projects"), AGENTS, CLAUDE_TMP, INSTALLED_PLUGINS,
                    _verified_path(),
+                   # и настройки владельца: enabledPlugins сверяется с каталогом карты плагинов (plugin-map-unknown
+                   # приходит только при сборке, metis-0601 Д5)
+                   os.path.join(HOME, ".claude", "settings.json"),
                    *(os.path.join(l, ".claude", fn) for l in launches if l for fn in PROJECT_SETTINGS_FILES))
         newest = max([os.path.getmtime(p) for p in watched if os.path.exists(p)] + [roles_newest()])
         # и пропавшее окно задачи расписания (P0-3): без него задача не идёт — в том числе сразу после обновления
@@ -1937,21 +1940,62 @@ def _plugin_map_mod():
 PLUGIN_MAP = _plugin_map_mod()
 
 
-def plugin_map_load(alert=True):
+def plugin_map_names(kind, src=None):
+    """Известные имена записей карты для сборки kind: «window» — окна (hq, hestia, workshop, direction, job-<роль
+    расписания>, имена направлений реестра), «roles» — роли (шаблоны .tmpl плагина и личного слоя). Возвращает пару
+    (окна, роли) для PLUGIN_MAP.load; имена другого рода и нечитаемый реестр — None (не сверять): каждая сборка
+    ловит опечатку в своих записях, а чужая не ломает её (roles build не зависит от реестра окон)."""
+    if kind == "roles":
+        roles = set()
+        for d in (os.path.join(PLUGIN, "roles"), PLUGIN_ROLES, AGENTS, src):
+            try:
+                roles |= {f[:-5] for f in os.listdir(d) if f.endswith(".tmpl")} if d else set()
+            except OSError:
+                pass
+        return None, roles
+    try:
+        with open(os.path.join(PANTHEON, "directions.toml"), "rb") as fh:
+            reg = tomllib.load(fh)
+        dirs = {d.get("name") for d in reg.get("direction") or [] if isinstance(d, dict)}
+    except (OSError, ValueError):
+        return None, None
+    return {"direction", "hq", "hestia", "workshop"} | {"job-" + r for r in JOB_ROLES} | dirs, None
+
+
+def plugin_map_load(alert=True, kind="window", src=None):
     """Карта из PLUGIN_MAP_FILE или None, если файл не читается или неверен: тогда окна и роли остаются как были (всё
     включено), а причина — в тревоге (alert) и в stderr: молча «не применено» было бы ложным «отключено». С alert ещё
     сверка с enabledPlugins пользователя (~/.claude/settings.json): включённый плагин вне каталога карта не выключает
     нигде — тревога plugin-map-unknown один раз на список; пробная сборка (alert=False) тревог не шлёт и не снимает."""
     try:
-        pmap = PLUGIN_MAP.load(PLUGIN_MAP_FILE)
+        pmap = PLUGIN_MAP.load(PLUGIN_MAP_FILE, *plugin_map_names(kind, src))
     except ValueError as e:
         print(f"plugins-by-role: {e} — карта не применена, у окон и ролей всё включено", file=sys.stderr)
         if alert:
             alert_once("plugin-map-bad", str(e), f"{e} — карта не применена, у окон и ролей всё включено (Метида)",
                        "pantheon")
         return None
+    for entry in pmap["skipped"]:  # неизвестное имя окна или роли: запись пропущена, остальная карта действует
+        print(f"plugins-by-role: запись {entry} — такого окна или роли нет, пропущена (опечатка или удалённое "
+              "направление); остальная карта действует", file=sys.stderr)
     if alert:
         clear_once("plugin-map-bad")
+        for entry in pmap["skipped"]:  # одна тревога на запись, повтор молчит
+            alert_once("plugin-map-name-" + entry, entry, f"plugins-by-role: запись {entry} — такого окна или роли "
+                       "нет, она не применяется (опечатка или удалённое направление); остальная карта действует "
+                       "(Метида)", "pantheon")
+        # запись исправлена или убрана — метка снята, следующая опечатка встревожит снова
+        stem = re.sub(r"[^\w.-]", "_", "plugin-map-name-")
+        try:
+            for f in os.listdir(path("once")):
+                if f.startswith(stem):
+                    mark = path("once", f)
+                    own = "[role." if kind == "roles" else "[window."  # чужого рода метку снимает своя сборка
+                    text = open(mark).read()
+                    if text.startswith(own) and text not in pmap["skipped"]:
+                        os.remove(mark)
+        except OSError:
+            pass
         try:
             with open(os.path.join(HOME, ".claude", "settings.json"), encoding="utf-8") as fh:
                 enabled = json.load(fh).get("enabledPlugins")
@@ -3503,7 +3547,7 @@ def roles_build(src=None, out=None, role_errors=None):
         reg = tomllib.load(fh)
     person, person_bad = person_values(reg)
     want, errors = {}, []
-    pmap = plugin_map_load(alert=not probe)
+    pmap = plugin_map_load(alert=not probe, kind="roles", src=src)
 
     def err(tmpl, text):
         errors.append(text)

@@ -19,9 +19,12 @@ PLUGIN_ID = re.compile(r"[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+")
 OWN_MARKET = "agent-kit"
 
 
-def load(path):
+def load(path, windows=None, roles=None):
     """Карта из файла. ValueError с причиной: нет файла, битый TOML, не тот тип, плагин @agent-kit в каталоге, ключ
-    «оставить» вне каталога (опечатка молча выключила бы нужное)."""
+    «оставить» вне каталога (опечатка молча выключила бы нужное). windows и roles — множества известных имён окон и
+    ролей (None — не сверять): запись [window.X] или [role.X] с неизвестным именем пропускается (не применяется) и
+    попадает в out["skipped"] как «[window.X]»; остальная карта действует. Отвергать всю карту нельзя: одна опечатка
+    или удалённое из реестра направление сняла бы ограничения со всех окон и ролей (fail-open)."""
     try:
         with open(path, "rb") as fh:
             raw = tomllib.load(fh)
@@ -39,12 +42,16 @@ def load(path):
                          "project-tools) карта не выключает, в каталоге их быть не может")
     if not (isinstance(mcp, list) and all(isinstance(x, str) and MCP_NAME.fullmatch(x) for x in mcp)):
         raise ValueError("карта плагинов: catalog.mcp — список имён серверов")
-    out = {"plugins": list(plugins), "mcp": list(mcp), "window": {}, "role": {}}
+    out = {"plugins": list(plugins), "mcp": list(mcp), "window": {}, "role": {}, "skipped": []}
     for kind, keys in (("window", ("plugins", "mcp")), ("role", ("mcp",))):
         section = raw.get(kind, {})
         if not isinstance(section, dict):
             raise ValueError(f"карта плагинов: [{kind}] — таблица")
+        known = windows if kind == "window" else roles
         for name, entry in section.items():
+            if known is not None and name not in known:
+                out["skipped"].append(f"[{kind}.{name}]")
+                continue
             if not isinstance(entry, dict) or set(entry) - set(keys):
                 raise ValueError(f"карта плагинов: [{kind}.{name}] — только ключи {', '.join(keys)}")
             keep = {}

@@ -460,6 +460,10 @@ def main():
     protected = os.path.join(real, "_parts", "protected.part")
     check("protected.part существует и собран в argus.md («Защищённые пути — их не трогает Codex»)",
           os.path.exists(protected) and "Защищённые пути — их не трогает Codex" in flat.get("argus.md", ""))
+    # metis-0601, Д4: карта плагинов — ядро защит (0598), argus видит её среди защищённых путей
+    check("protected.part и argus.md называют plugins/pantheon/lib/plugin_map.py и plugins/pantheon/plugins-by-role.toml",
+          all(x in read(protected) and x in flat.get("argus.md", "")
+              for x in ("plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/plugins-by-role.toml")))
     a = flat.get("argus.md", "")
     argus_rules = (
         ("второй argus и Opus — только ядро; список шлюза с origin/main", "Второй независимый argus и Opus — только PR, "
