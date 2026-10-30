@@ -109,6 +109,9 @@ if tail == ["run", "devtree"]:
         fh.write(f"{os.getpid()} {kid.pid}\n")
     time.sleep(600)
     os._exit(0)
+if tail == ["run", "nap"]:
+    time.sleep(1.5)
+    os._exit(0)
 if tail == ["run", "hold"]:
     end = time.time() + 120
     while time.time() < end and not os.path.exists(%r):
@@ -127,6 +130,12 @@ O.SANDBOX_EXEC = FAKE
 O.HEAVY = None
 O.READY_SEC = 15
 O.KILL_WAIT = 2
+# свой случайный ряд портов вместо 3200–3299: два test_outside сразу (argus и разработчик) иначе берут один порт, и
+# «сервер поднят» видит чужой слушатель (metis-0606)
+import random as _random  # noqa: E402
+DEFAULT_PORTS = O.SERVER_PORTS
+_pbase = _random.randrange(20000, 48000, 100)
+O.SERVER_PORTS = range(_pbase, _pbase + 100)
 
 
 def calls():
@@ -147,7 +156,7 @@ def git(d, *args):
 APP = os.path.join(HOME, "projects", "app")
 OTHER = os.path.join(HOME, "projects", "other")
 REPO = "latark/app"
-PKG = {"name": "app", "scripts": {"dev": "next dev", "bad": "x", "slow": "x", "lint": "x", "devtree": "x", "hold": "x"}}
+PKG = {"name": "app", "scripts": {"dev": "next dev", "bad": "x", "slow": "x", "lint": "x", "devtree": "x", "hold": "x", "nap": "x"}}
 
 
 def commit(d, files, msg):
@@ -574,7 +583,8 @@ rc, q, rid = role_request("athena-x", APP, "serve", "--minutes", "5")
 run_pass()
 res = O.load_result(q, rid) or {}
 port = res.get("port") or 0
-check("сервер: адрес http://127.0.0.1:<3200–3299>", res.get("state") == "serving" and 3200 <= port < 3300
+check("ряд портов сервера по умолчанию — 3200–3299", DEFAULT_PORTS == range(3200, 3300), DEFAULT_PORTS)
+check("сервер: адрес http://127.0.0.1:<порт из ряда>", res.get("state") == "serving" and port in O.SERVER_PORTS
       and res.get("url") == f"http://127.0.0.1:{port}", res)
 check("сервер отвечает по адресу", port_open(port))
 c = calls()[before:]
@@ -785,7 +795,9 @@ _kill_devtree()
 # «погаси прежний и подними новый»: новый ждёт место heavy --server, «стоп» прежнего приходит в это время
 q, rid_a = new_request("athena-x", "serve")
 run_pass()
-check("прежний сервер поднят", state(q, rid_a) == "serving")
+check("прежний сервер поднят, в servers.json — время старта его процесса",
+      state(q, rid_a) == "serving" and O.servers()[rid_a].get("started") == O.started(O.servers()[rid_a]["pid"])
+      and O.servers()[rid_a].get("started"), O.servers().get(rid_a))
 q, rid_b = serve_with_wait(15)
 
 
@@ -812,6 +824,67 @@ for _r in list(_srv):
     O.kill_group(_srv[_r]["pid"])
 O.save_servers({})
 O.HEAVY = None
+
+# --- номер процесса сервера занял чужой (metis-0606, Д-2 argus): не гасить ни его, ни его детей в своих группах ----
+_spawn = [sys.executable, "-c", "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', "
+          "'import time; time.sleep(60)'], start_new_session=True); time.sleep(60)"]
+alien = subprocess.Popen(_spawn)                                  # не глава группы: группа — наша, теста
+time.sleep(0.8)
+_ps = subprocess.run(["/bin/ps", "-axo", "pid=,ppid="], capture_output=True, text=True).stdout.split()
+_kid = [int(a) for a, b in zip(_ps[::2], _ps[1::2]) if int(b) == alien.pid]   # ребёнок в своей группе
+O.kill_group(alien.pid)
+check("kill_group по pid, который не глава группы: ни он, ни его ребёнок в своей группе не гаснут",
+      alien.poll() is None and _kid and all(pid_alive(p, 0) for p in _kid), (alien.poll(), _kid))
+O.save_servers({"20261030-000000-a1a1a1": {"pid": alien.pid, "port": 0, "until": 0, "qdir": None}})
+O.sweep()
+check("sweep: запись с чужим не-главой снята, процессы живы", not O.servers() and alien.poll() is None
+      and all(pid_alive(p, 0) for p in _kid), O.servers())
+for _p in _kid:
+    with __import__("contextlib").suppress(OSError):
+        os.kill(_p, 9)
+alien.kill()
+alien.wait()
+
+leader = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)   # глава своей группы, как heavy сервера
+time.sleep(0.3)
+O.save_servers({"20261030-000000-b2b2b2": {"pid": leader.pid, "started": "Thu Jan  1 00:00:00 1970", "port": 0,
+                                           "until": time.time() + 3600, "qdir": None}})
+check("номер сервера занял чужой процесс — серверу пора к гашению (sweep_due)", O.sweep_due())
+O.sweep()
+res = P.read_json(os.path.join(STATE, "outside", "runs", "20261030-000000-b2b2b2.json"), {})
+check("sweep: время старта не то — процесс не гасится, запись снята, причина «процесс завершился»",
+      leader.poll() is None and not O.servers() and res.get("why") == "процесс завершился", (leader.poll(), res))
+O.save_servers({"20261030-000000-c3c3c3": {"pid": leader.pid, "started": O.started(leader.pid), "port": 0,
+                                           "until": 0, "qdir": None}})
+O.sweep()
+check("sweep: время старта совпало — срок вышел, процесс погашен", leader.wait(timeout=10) is not None
+      and not O.servers())
+
+# --- sweep_quiet (metis-0606, Д-1 argus): сбой sweep посреди прогона не роняет тесты, в журнал — один раз ------------
+O.SWEEP_EVERY = 0.2
+O._SWEEP_ERR.clear()
+_log = os.path.join(STATE, "logs", "outside.jsonl")
+_n0 = sum(1 for _ in open(_log))
+_real_sweep = O.sweep
+
+
+def _boom(t=None):
+    raise ValueError("битый servers.json")
+
+
+O.sweep = _boom
+try:
+    res = O.run_test("20261030-000000-d4d4d4", APP, "nap", "athena-x", None, O.registry(None))
+except Exception as e:  # noqa: BLE001 — мутант без try: исключение вышло из run_test
+    res = {"state": f"исключение {type(e).__name__}: {e}"}
+finally:
+    O.sweep = _real_sweep
+    O.SWEEP_EVERY = 2
+_errs = [json.loads(x) for x in list(open(_log))[_n0:]]
+_errs = [x for x in _errs if x.get("kind") == "sweep-error"]
+check("sweep падает посреди прогона: тест дошёл, done с кодом 0, в журнале один sweep-error",
+      res.get("state") == "done" and res.get("code") == 0 and len(_errs) == 1
+      and "битый servers.json" in _errs[0].get("why", ""), (res.get("state"), res.get("code"), _errs))
 
 # --- 4а. уборка итогов в папках заявок (metis-0573): старше суток — удалить ---------------------------------------
 q = os.path.join(CACHE, "athena-x", "outside")

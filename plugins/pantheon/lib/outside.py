@@ -27,7 +27,8 @@ STATE/outside/queue. Имя окна проход берёт из места п�
 Проход (`outside run`, его запускает тик, когда есть дело; замок outside-run — по одному):
   1. Серверы: срок вышел, есть заявка «стоп» (<ID>.stop в той же папке) или процесс умер — группа процессов гаснет
      (SIGTERM, через 5 с SIGKILL) вместе с потомками, ушедшими в свою группу (turbo ставит её каждой задаче, next dev
-     в ней), итог «stopped»; порт после этого ещё отвечает — пометка в итоге. Пока проход занят тестами или ждёт
+     в ней), итог «stopped»; порт после этого ещё отвечает — пометка в итоге. Номер процесса сервера занял чужой
+     (время старта по ps не то, что записано при запуске) — запись снимается без гашения. Пока проход занят тестами или ждёт
      порт нового сервера, он смотрит серверы каждые 2 с (SWEEP_EVERY): «стоп» не ждёт конца прогонов (metis-0606).
   2. Заявки — по времени, сначала серверы, потом тесты. Заявка удаляется до запуска: одна заявка — один запуск.
   3. Тесты после «принять» argus: в журнале шлюза слияния (STATE/merge-gate/records.jsonl) «принять» не старше суток
@@ -464,7 +465,9 @@ def tail(log):
 
 def strays(pid):
     """[(pid, pgid)] потомков группы pid, ушедших в свою группу процессов: turbo ставит каждой задаче свою, и next dev
-    в ней переживал killpg группы сервера (metis-0606). Собирать до сигнала: после него сироты уходят к launchd."""
+    в ней переживал killpg группы сервера (metis-0606). Собирать до сигнала: после него сироты уходят к launchd.
+    Начало обхода — только члены группы pid: pid не глава (номер достался чужому процессу) и группы нет — [], как у
+    killpg, который такой группе ничего не шлёт."""
     try:
         out = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,pgid="], capture_output=True, text=True,
                              timeout=10).stdout
@@ -478,7 +481,7 @@ def strays(pid):
             continue
         kids.setdefault(pp, []).append(p)
         pgid[p] = g
-    seen, todo = set(), [pid] + [p for p, g in pgid.items() if g == pid]
+    seen, todo = set(), [p for p, g in pgid.items() if g == pid]
     while todo:
         p = todo.pop()
         if p in seen:
@@ -547,6 +550,25 @@ def sweep_quiet():
         if not _SWEEP_ERR:
             _SWEEP_ERR.append(e)
             log_event(kind="sweep-error", why=f"{type(e).__name__}: {e}")
+
+
+def started(pid):
+    """Время старта процесса по ps (lstart, LC_ALL=C) или None — процесса нет."""
+    try:
+        r = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True,
+                           timeout=10, env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"})
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return " ".join(r.stdout.split()) or None
+
+
+def foreign(pid, when):
+    """Номер pid сервера занял другой процесс: жив, а время старта не то, что записано при запуске. Такой не гасить —
+    только снять запись (metis-0606). Записи без времени (до этой правки) и умерший pid — не чужие."""
+    if not pid or not when:
+        return False
+    now = started(pid)
+    return now is not None and now != when
 
 
 def alive(pid):
@@ -792,7 +814,8 @@ def run_serve(rid, d, script, minutes, window, qdir, roots, wait=SERVE_QUEUE_MIN
                                        "log": log, "tail": tail(log), **({"busy": True} if busy else {})})
     until = P.now() + minutes * 60
     srv = servers()   # заново: sweep_quiet в ожидании порта мог погасить и убрать прежние
-    srv[rid] = {"pid": proc.pid, "port": port, "until": until, "qdir": qdir, "window": window, "dir": d, "tmp": tmp}
+    srv[rid] = {"pid": proc.pid, "started": started(proc.pid), "port": port, "until": until, "qdir": qdir,
+                "window": window, "dir": d, "tmp": tmp}
     save_servers(srv)
     log_event(id=rid, kind="serve", window=window, dir=d, port=port, ok=True, minutes=minutes)
     return save_result(qdir, rid, {"state": "serving", "kind": "serve", "cmd": line, "dir": d, "port": port,
@@ -821,11 +844,12 @@ def sweep(t=None):
     srv, n = servers(), 0
     for rid, s in list(srv.items()):
         pid = int(s.get("pid") or 0)
+        alien = foreign(pid, s.get("started"))
         why = ("срок вышел" if t >= float(s.get("until") or 0) else "заявка «стоп»" if _stop_asked(s.get("qdir"), rid)
-               else "процесс завершился" if not pid or not alive(pid) else None)
+               else "процесс завершился" if not pid or alien or not alive(pid) else None)
         if not why:
             continue
-        if pid:
+        if pid and not alien:
             kill_group(pid)
         if s.get("tmp"):
             shutil.rmtree(s["tmp"], ignore_errors=True)
@@ -856,7 +880,8 @@ def sweep_due(t=None):
     t = P.now() if t is None else t
     for rid, s in servers().items():
         pid = int(s.get("pid") or 0)
-        if t >= float(s.get("until") or 0) or _stop_asked(s.get("qdir"), rid) or not pid or not alive(pid):
+        if (t >= float(s.get("until") or 0) or _stop_asked(s.get("qdir"), rid) or not pid or not alive(pid)
+                or foreign(pid, s.get("started"))):
             return True
     return False
 
