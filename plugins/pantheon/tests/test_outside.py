@@ -802,7 +802,11 @@ dt = time.monotonic() - t0
 res = O.load_result(q, rid_b) or {}
 check("новый сервер ждёт место, «стоп» прежнего в это время — прежний гаснет, новый поднят до конца --wait",
       state(q, rid_a) == "stopped" and res.get("state") == "serving" and dt < 14, (state(q, rid_a), res, round(dt, 1)))
-check("servers.json — только новый: прежний не вернулся из старого снимка", set(O.servers()) == {rid_b}, O.servers())
+_stops = [json.loads(x) for x in open(os.path.join(STATE, "logs", "outside.jsonl"))]
+_stops = [x.get("why") for x in _stops if x.get("id") == rid_a and x.get("kind") == "stop"]
+check("servers.json — только новый: прежний не вернулся из старого снимка (один «стоп», причина — заявка)",
+      set(O.servers()) == {rid_b} and _stops == ["заявка «стоп»"]
+      and (O.load_result(q, rid_a) or {}).get("why") == "заявка «стоп»", (O.servers(), _stops))
 _srv = O.servers()
 for _r in list(_srv):
     O.kill_group(_srv[_r]["pid"])
