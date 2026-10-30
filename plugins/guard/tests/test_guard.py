@@ -414,6 +414,7 @@ def hestia_consent_checks(br, cases):
         "gh pr edit evil/repo#1 -R latark/agent-kit": "gh pr edit owner/repo#N",
         "gh -R latark/agent-kit pr create -t x": "-R до pr (форма не разбирается — отказ)",
         "GH_REPO=evil/repo gh pr create -R latark/agent-kit -t x": "GH_REPO",
+        "env -S 'A=1' gh pr create -R latark/agent-kit -t x": "env -S (metis-0596)",
     }
     ok_reads = ["git status", "gh pr view 1", "pantheon task show metis-0562"]
 
