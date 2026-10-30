@@ -22,8 +22,9 @@ OWN_MARKET = "agent-kit"
 def load(path, windows=None, roles=None):
     """Карта из файла. ValueError с причиной: нет файла, битый TOML, не тот тип, плагин @agent-kit в каталоге, ключ
     «оставить» вне каталога (опечатка молча выключила бы нужное). windows и roles — множества известных имён окон и
-    ролей (None — не сверять): имя записи [window.X] или [role.X] вне них — опечатка, и запись молча не применилась
-    бы никогда (окно или роль остались бы «всё включено»)."""
+    ролей (None — не сверять): запись [window.X] или [role.X] с неизвестным именем пропускается (не применяется) и
+    попадает в out["skipped"] как «[window.X]»; остальная карта действует. Отвергать всю карту нельзя: одна опечатка
+    или удалённое из реестра направление сняла бы ограничения со всех окон и ролей (fail-open)."""
     try:
         with open(path, "rb") as fh:
             raw = tomllib.load(fh)
@@ -41,7 +42,7 @@ def load(path, windows=None, roles=None):
                          "project-tools) карта не выключает, в каталоге их быть не может")
     if not (isinstance(mcp, list) and all(isinstance(x, str) and MCP_NAME.fullmatch(x) for x in mcp)):
         raise ValueError("карта плагинов: catalog.mcp — список имён серверов")
-    out = {"plugins": list(plugins), "mcp": list(mcp), "window": {}, "role": {}}
+    out = {"plugins": list(plugins), "mcp": list(mcp), "window": {}, "role": {}, "skipped": []}
     for kind, keys in (("window", ("plugins", "mcp")), ("role", ("mcp",))):
         section = raw.get(kind, {})
         if not isinstance(section, dict):
@@ -49,8 +50,8 @@ def load(path, windows=None, roles=None):
         known = windows if kind == "window" else roles
         for name, entry in section.items():
             if known is not None and name not in known:
-                raise ValueError(f"карта плагинов: [{kind}.{name}] — {'окна' if kind == 'window' else 'роли'} с таким "
-                                 "именем нет (опечатка: запись не применилась бы никогда)")
+                out["skipped"].append(f"[{kind}.{name}]")
+                continue
             if not isinstance(entry, dict) or set(entry) - set(keys):
                 raise ValueError(f"карта плагинов: [{kind}.{name}] — только ключи {', '.join(keys)}")
             keep = {}

@@ -105,29 +105,28 @@ for own in ("guard@agent-kit", "pantheon@agent-kit", "project-tools@agent-kit", 
           "agent-kit" in (bad(f'[catalog]\nplugins = ["a@b", "{own}"]\nmcp = []\n') or ""))
 check("плагин @builtin и чужой каталог с agent-kit в имени — не ошибка",
       bad('[catalog]\nplugins = ["x@builtin", "y@agent-kit-fork"]\nmcp = []\n') is None)
-# Д2: имя записи [window.X]/[role.X] сверяется с известными (опечатка в ключе не применилась бы никогда)
+# Д2: запись с неизвестным именем [window.X]/[role.X] пропускается (в skipped), остальная карта действует
 write(os.path.join(ROOT, "names.toml"), CAT + '[window.hq]\nplugins = []\nmcp = []\n[role.r1]\nmcp = []\n')
 
 
-def names_err(windows, roles, text=None):
+def names_load(windows, roles, text=None):
     if text:
         write(os.path.join(ROOT, "names2.toml"), text)
-    try:
-        M.load(os.path.join(ROOT, "names2.toml" if text else "names.toml"), windows, roles)
-    except ValueError as e:
-        return str(e)
-    return None
+    return M.load(os.path.join(ROOT, "names2.toml" if text else "names.toml"), windows, roles)
 
 
-check("имена записей известны — карта разбирается; windows и roles не заданы — не сверяются",
-      names_err({"hq"}, {"r1"}) is None and names_err(None, None) is None)
-e = names_err({"hq"}, {"r1"}, CAT + '[window.hqq]\nplugins = []\nmcp = []\n')
-check("опечатка в имени окна ([window.hqq]) — ValueError с именем", e and "[window.hqq]" in e, e)
-e = names_err({"hq"}, {"r1"}, CAT + '[role.r11]\nmcp = []\n')
-check("опечатка в имени роли ([role.r11]) — ValueError с именем", e and "[role.r11]" in e, e)
-check("имя из списка ролей не годится для окна и наоборот",
-      names_err({"hq"}, {"r1", "hqq"}, CAT + '[window.r1]\nplugins = []\nmcp = []\n')
-      and names_err({"hq", "r1"}, {"hq"}, CAT + '[role.r1]\nmcp = []\n'))
+n = names_load({"hq"}, {"r1"})
+check("имена записей известны — ничего не пропущено; windows и roles не заданы — не сверяются",
+      n["skipped"] == [] and names_load(None, None)["skipped"] == [] and "hq" in n["window"])
+n = names_load({"hq"}, {"r1"}, CAT + '[window.hqq]\nplugins = []\nmcp = []\n[window.hq]\nplugins = []\nmcp = []\n')
+check("опечатка в имени окна ([window.hqq]) — запись пропущена и названа, [window.hq] действует, карта не отвергнута",
+      n["skipped"] == ["[window.hqq]"] and "hqq" not in n["window"] and "hq" in n["window"], n)
+n = names_load({"hq"}, {"r1"}, CAT + '[role.r11]\nmcp = []\n[role.r1]\nmcp = []\n')
+check("опечатка в имени роли ([role.r11]) — запись пропущена и названа, [role.r1] действует",
+      n["skipped"] == ["[role.r11]"] and "r11" not in n["role"] and "r1" in n["role"], n)
+n = names_load({"hq"}, {"r1", "hqq"}, CAT + '[window.r1]\nplugins = []\nmcp = []\n')
+n2 = names_load({"hq", "r1"}, {"hq"}, CAT + '[role.r1]\nmcp = []\n')
+check("имя из списка ролей не годится для окна и наоборот", n["skipped"] == ["[window.r1]"] and n2["skipped"] == ["[role.r1]"])
 try:
     M.load(os.path.join(ROOT, "нет-такого.toml"))
     missing = False
@@ -336,7 +335,7 @@ check("битая карта, пробная сборка ролей: код 0, 
       and not (os.path.exists(al4) and "карта плагинов" in open(al4, encoding="utf-8").read())
       and not os.path.isdir(os.path.join(env4["PANTHEON_STATE"], "once")), r.stderr[-300:])
 
-# опечатка в имени окна или роли настоящей карты (Д2): карта не применена, тревога plugin-map-bad называет запись
+# опечатка в имени окна или роли настоящей карты (Д2): запись пропущена, тревога одна на запись, остальная карта действует
 real_map = open(MAP, encoding="utf-8").read()
 for typo, what in (("[window.mnemo-brain]", "[window.mnemo-brainn]"), ("[role.argus]", "[role.argu]")):
     write(os.path.join(plug, "plugins-by-role.toml"), real_map.replace(typo, what, 1))
@@ -346,14 +345,23 @@ for typo, what in (("[window.mnemo-brain]", "[window.mnemo-brainn]"), ("[role.ar
           '[[direction]]\nname = "athena-shop"\nfolders = ["~/projects/br"]\n' + MNEMO)
     os.makedirs(os.path.join(tmp7, "projects", "br"))
     r = build_plug(env7)
+    build_plug(env7)
+    build_plug(env7)
     hq7 = json.load(open(os.path.join(env7["PANTHEON_STATE"], "settings", "hq.json"))) if r.returncode == 0 else {}
+    ag7 = os.path.join(tmp7, ".claude", "agents", "dev-sonnet.md")
+    ds7 = open(ag7, encoding="utf-8").read() if os.path.exists(ag7) else ""
     al7 = os.path.join(env7["PANTHEON_HOME"], "alerts.md")
-    # окна проверяют имена окон, роли — имена ролей: карта с опечаткой в своём разделе отвергается своей сборкой
-    # (domains build включает и сборку ролей, поэтому тревога есть в обоих случаях)
-    check(f"опечатка {what} в карте: код 0, тревога называет запись"
-          + (", окна собраны без карты" if what.startswith("[window") else ""),
-          r.returncode == 0 and (what.startswith("[role") or "enabledPlugins" not in hq7) and os.path.exists(al7)
-          and what in open(al7, encoding="utf-8").read(), (r.stderr[-300:], what))
+    lines7 = [x for x in open(al7, encoding="utf-8").read().splitlines() if what in x] if os.path.exists(al7) else []
+    check(f"опечатка {what}: код 0, тревога с именем записи одна после трёх сборок, нет plugin-map-bad",
+          r.returncode == 0 and len(lines7) == 1 and "карта не применена" not in "".join(lines7), (r.stderr[-300:], lines7))
+    check(f"опечатка {what}: остальная карта действует (окно hq без LSP и с mcp__context7 в deny, dev-sonnet закрыт для jetbrains)",
+          hq7.get("enabledPlugins", {}).get(LSP) is False and "mcp__context7" in hq7["permissions"]["deny"]
+          and "mcp__jetbrains" in (head(ds7, "disallowedTools") or []), (sorted(hq7.get("enabledPlugins", {})), ds7[:200]))
+    write(os.path.join(plug, "plugins-by-role.toml"), real_map)  # запись исправлена: метка снята
+    build_plug(env7)
+    once7 = os.path.join(env7["PANTHEON_STATE"], "once")
+    check(f"запись {what} исправлена: метка тревоги снята",
+          not [f for f in os.listdir(once7) if f.startswith("plugin-map-name")] if os.path.isdir(once7) else True)
 shutil.copy(MAP, os.path.join(plug, "plugins-by-role.toml"))
 
 # guard@agent-kit в каталоге (проба argus-207): карта не применяется, guard и pantheon включены во всех окнах

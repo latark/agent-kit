@@ -1975,8 +1975,27 @@ def plugin_map_load(alert=True, kind="window"):
             alert_once("plugin-map-bad", str(e), f"{e} — карта не применена, у окон и ролей всё включено (Метида)",
                        "pantheon")
         return None
+    for entry in pmap["skipped"]:  # неизвестное имя окна или роли: запись пропущена, остальная карта действует
+        print(f"plugins-by-role: запись {entry} — такого окна или роли нет, пропущена (опечатка или удалённое "
+              "направление); остальная карта действует", file=sys.stderr)
     if alert:
         clear_once("plugin-map-bad")
+        for entry in pmap["skipped"]:  # одна тревога на запись, повтор молчит
+            alert_once("plugin-map-name-" + entry, entry, f"plugins-by-role: запись {entry} — такого окна или роли "
+                       "нет, она не применяется (опечатка или удалённое направление); остальная карта действует "
+                       "(Метида)", "pantheon")
+        # запись исправлена или убрана — метка снята, следующая опечатка встревожит снова
+        stem = re.sub(r"[^\w.-]", "_", "plugin-map-name-")
+        try:
+            for f in os.listdir(path("once")):
+                if f.startswith(stem):
+                    mark = path("once", f)
+                    own = "[role." if kind == "roles" else "[window."  # чужого рода метку снимает своя сборка
+                    text = open(mark).read()
+                    if text.startswith(own) and text not in pmap["skipped"]:
+                        os.remove(mark)
+        except OSError:
+            pass
         try:
             with open(os.path.join(HOME, ".claude", "settings.json"), encoding="utf-8") as fh:
                 enabled = json.load(fh).get("enabledPlugins")
