@@ -784,7 +784,8 @@ dt = time.monotonic() - t0
 check("стоп во время прогона тестов прохода: stopped за ≤10 с, тест ещё идёт",
       stopped and dt <= 10 and th.is_alive() and state(q, rid_t) == "running", (state(q, rid_s), round(dt, 1)))
 check("стоп: порт свободен, погашены heavy --server, «turbo» и задача в своей группе процессов",
-      O.port_free(port) and not any(pid_alive(p) for p in pids + [hv]) and rid_s not in O.servers()
+      # слушателя нет — не port_free: bind без SO_REUSEADDR (metis-0592) ловит TIME_WAIT после accept().close()
+      not port_open(port) and not any(pid_alive(p) for p in pids + [hv]) and rid_s not in O.servers()
       and not (O.load_result(q, rid_s) or {}).get("note"), [(p, pid_alive(p, 0)) for p in pids + [hv]])
 open(HOLD_RELEASE, "w").close()
 th.join(90)
@@ -854,6 +855,23 @@ O.sweep()
 res = P.read_json(os.path.join(STATE, "outside", "runs", "20261030-000000-b2b2b2.json"), {})
 check("sweep: время старта не то — процесс не гасится, запись снята, причина «процесс завершился»",
       leader.poll() is None and not O.servers() and res.get("why") == "процесс завершился", (leader.poll(), res))
+_tz = os.environ.get("TZ")
+_seen = set()
+for _z in ("Asia/Novosibirsk", "America/New_York", "UTC"):
+    os.environ["TZ"] = _z
+    time.tzset()
+    _seen.add(O.started(leader.pid))
+if _tz is None:
+    os.environ.pop("TZ")
+else:
+    os.environ["TZ"] = _tz
+time.tzset()
+_utc = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(leader.pid)], capture_output=True, text=True,
+                      env={"LC_ALL": "C", "TZ": "UTC", "PATH": "/usr/bin:/bin"}).stdout
+_ny = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(leader.pid)], capture_output=True, text=True,
+                     env={"LC_ALL": "C", "TZ": "America/New_York", "PATH": "/usr/bin:/bin"}).stdout
+check("время старта — в UTC и не зависит от пояса прохода: смена пояса не делает живой сервер чужим",
+      _seen == {" ".join(_utc.split())} and " ".join(_ny.split()) not in _seen, (_seen, _utc, _ny))
 O.save_servers({"20261030-000000-c3c3c3": {"pid": leader.pid, "started": O.started(leader.pid), "port": 0,
                                            "until": 0, "qdir": None}})
 O.sweep()

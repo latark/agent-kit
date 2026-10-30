@@ -553,10 +553,11 @@ def sweep_quiet():
 
 
 def started(pid):
-    """Время старта процесса по ps (lstart, LC_ALL=C) или None — процесса нет."""
+    """Время старта процесса по ps (lstart, LC_ALL=C, TZ=UTC: смена пояса или летнего времени за жизнь сервера иначе
+    меняет строку, и живой сервер сочли бы чужим) или None — процесса нет."""
     try:
         r = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True,
-                           timeout=10, env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"})
+                           timeout=10, env={"LC_ALL": "C", "TZ": "UTC", "PATH": "/usr/bin:/bin"})
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
     return " ".join(r.stdout.split()) or None
