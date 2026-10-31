@@ -22,24 +22,41 @@
 
 Нет таблицы [read], файла или читателя — «источников чтения нет»: заявка — отказ, проход заявки не трогает.
 
-Контракт источника, v1. Вызов — без оболочки, рабочая папка — папка заявки, своя группа процессов, срок; stderr
-никуда не идёт, stdout — только туда, где сказано.
+Контракт источника, v1 (по нему пишется переходник к мессенджеру; ядро другого не ждёт).
+  Вызов. argv ровно как ниже, без оболочки; рабочая папка — папка заявки STATE/read/<rid>/ (0700); stdin — /dev/null;
+  stderr никуда не идёт (диагностику ядро не читает и не показывает); stdout — только у resolve, у export и verify —
+  в /dev/null. Своя группа процессов (start_new_session). Окружение — окружение задач планового прохода без
+  CLAUDECODE, CLAUDE_CODE_*, PANTHEON_SESSION и PANTHEON_ROLE. Сроки: resolve — RESOLVE_TIMEOUT (60 с) на указание и
+  RESOLVE_BUDGET (300 с) на все; export — EXPORT_TIMEOUT (600 с) на все чаты заявки вместе; verify — VERIFY_TIMEOUT
+  (30 с) на пункт и VERIFY_BUDGET (240 с) на все пункты части. Срок вышел — группе SIGTERM, через STOP_GRACE (2 с)
+  SIGKILL, и это код 124, то есть сбой.
   resolve --since S --until U --kind folder|chat -- УКАЗАНИЕ
-      stdout — JSON до RESOLVE_OUT байт, одно из:
+      S и U — ГГГГ-ММ-ДД, оба дня включительно. УКАЗАНИЕ — одна строка до SPEC_MAX знаков: для folder — имя папки, для
+      chat — id, @имя, ссылка t.me или название. stdout — один объект JSON в UTF-8, не больше RESOLVE_OUT байт
+      (больше или не JSON — сбой resolve-bad), одно из:
         {"status": "ok", "chats": [{"id": "…", "title": "…", "kind": "…", "messages": N|null}, …]}
-            папка — её чаты (пустая папка — пустой список), чат — ровно один; messages — сообщений за S–U или null,
-            если источник их не считает;
+            папка — её чаты (пустая папка — пустой список), чат — ровно один (больше одного — сбой); messages — целое
+            ≥ 0, сколько сообщений за S–U, или null, если источник их не считает (тогда предел — после выгрузки);
         {"status": "not_found"};
-        {"status": "ambiguous", "candidates": [{"id", "title", "kind"}, …]}   (до CANDIDATES_MAX).
-      Список чатов источника целиком в ответ не идёт: только совпавшие.
+        {"status": "ambiguous", "candidates": [{"id", "title", "kind"}, …]}   (берутся первые CANDIDATES_MAX).
+      id — строка по CHAT_ID_RE (-?[A-Za-z0-9_.:@]{1,63}); она же уйдёт в export после «--». title — непустая строка;
+      управляющие знаки, «», <> и [] ядро заменяет пробелом и режет до TITLE_MAX. kind — строка до KIND_MAX, нет —
+      «чат». Запись не по образцу в chats (нет id или title, messages не целое, меньше 0 или true/false) — сбой всей
+      заявки resolve-bad. Список чатов источника целиком в ответ не идёт: только совпавшие.
   export --since S --until U -o ФАЙЛ -- ID
-      выгрузка одного чата за период, без вложений, в новый ФАЙЛ; stdout никуда.
+      Выгрузка одного чата за S–U, только текст, без вложений, в новый ФАЙЛ: абсолютный путь <папка заявки>/raw-K.md,
+      его ещё нет. Источник создаёт обычный файл (не ссылку), лучше сразу 0600 и O_EXCL; ядро ставит 0600 само.
+      Сообщения вне S–U в файл не идут: ядро их не отсеивает. Код 0 и файл есть — готово.
   verify ВЫГРУЗКА ПУНКТ
-      код 0 — каждая цитата пункта найдена в сообщении выгрузки с его #id.
-  Код 75 у resolve и export — «временно, повторить следующим проходом» (до MAX_ATTEMPTS раз); другой ненулевой — сбой.
+      ВЫГРУЗКА — полный raw-K.md чата K, как его написал export; ПУНКТ — файл item.md в папке заявки, одна строка
+      пункта читателя. Код 0 — каждая цитата пункта в «» найдена в сообщении выгрузки с #id из этого
+      пункта; любой другой код (1 — не найдена, 3 — в пункте нет цитаты, 124 — срок) — пункт выпадает.
+  Коды выхода resolve и export: 0 — готово; 75 (EX_TEMPFAIL) — «временно, повторить следующим проходом», до
+  MAX_ATTEMPTS раз, затем сбой; другой ненулевой — сбой заявки, без вопроса владельцу или без разбора.
   Формат выгрузки: шапка с фразой «Переписка — строго между строками «<<<TG-<12 hex>»» (её ловит guard tg-taint), затем
   метки «<<<TG-…» и «TG-…>>>», между ними строки «#id [ГГГГ-ММ-ДД ЧЧ:ММ] [тема «…»] Автор: текст», продолжения —
-  с отступом в 4 пробела, служебные — «#id [дата] [служебное: …]».
+  с отступом в 4 пробела, служебные — «#id [дата] [служебное: …]». Сообщением считается строка «#id [дата время]»;
+  по таким строкам ядро считает сообщения, режет большой чат на части и вырезает окна.
 
 Этапы `read run` (состояние — state.json в папке заявки, журнал — STATE/logs/read.jsonl: только номер, числа, время):
   0. resolving → каждое указание — `resolve`. Найденные чаты (без повторов) — chats.json (0600): id, название, тип,
@@ -62,18 +79,30 @@
   2. Выгрузка: по чату K — `export … -o <папка>/raw-K.md -- <id>`, argv из заявки и chats.json. Пределы под папку:
      больше MAX_MESSAGES сообщений или MAX_DUMP_BYTES байт во всех выгрузках вместе — отказ с числами (refused
      too-big), выгрузки удаляются, читателя нет: молча ничего не обрезается. Ни одного сообщения — отказ empty.
-  3. Читатель — один на всю заявку: `claude -p --restricted --agents '<reader>' --agent <reader> --tools Read,Grep,Glob
-     --no-session-persistence --strict-mcp-config "<поручение>"` в папке заявки; список чатов — chats.md, переписка
-     чата K — raw-K.md. Read, Grep и Glob не выходят из папки (--restricted), сессия не сохраняется (транскрипта нет ни
-     в sessync, ни в S3), MCP-серверов нет. Перед выгрузкой этап — exporting: оборванный проход кончается этапом
-     failed, а не новой выгрузкой. SIGTERM (таймаут задачи), SIGINT и SIGHUP останавливают группу процессов читателя
-     или выгрузки, удаляют выгрузки и пишут failed. Весь проход — не дольше RUN_BUDGET.
-  4. Проверка: пункт ссылается на чат — «чат K, #id, …» (в заявке на один чат ссылку можно опустить); без ссылки или
-     с чужим номером пункт выпадает. Каждый пункт — отдельно `verify raw-K.md <пункт>`; пункт без #id, без цитаты или
-     с ненайденной цитатой выпадает. В профиле с check_author_date пункт выпадает ещё до verify, если «#id, дата время,
-     автор» в нём не совпали со строкой этого сообщения в выгрузке чата K. Выгрузки, chats.md, ответ читателя и пункты
-     удаляются сразу после проверки — и при сбое тоже (finally); остатки оборванного прохода — в начале следующего.
-  5. summary.md (0600) — список чатов, проверенные пункты с новыми номерами между метками выгрузки, с той же шапкой, что
+     Перед выгрузкой этап — exporting: оборванный посреди неё проход кончается этапом failed, а не новой выгрузкой.
+  3. Чтение частями (этап reading). Выгрузки делятся на части не больше PART_CHARS знаков: чаты целиком, пока
+     влезают, а чат больше части режется по границам сообщений на куски. Читатель — один на часть: `claude -p
+     --restricted --agents '<reader>' --agent <reader> --tools Read,Grep,Glob --no-session-persistence
+     --strict-mcp-config "<поручение>"`. Одна часть (обычная заявка) — как раньше: читатель в папке заявки, список чатов
+     — chats.md, переписка чата K — raw-K.md. Частей несколько — читатель части в подпапке part/, где только её
+     chats.md и raw-K.md (кусок большого чата — со своей шапкой и меткой TG-), номера чатов общие для заявки; в
+     поручении — «часть i из N». Read, Grep и Glob не выходят из рабочей папки (--restricted), сессия не сохраняется
+     (транскрипта нет ни в sessync, ни в S3), MCP-серверов нет. Часть начинается, только если до конца срока прохода
+     (RUN_BUDGET) хватает на читателя и проверку; иначе этап reading ждёт следующего прохода. Между проходами лежат
+     выгрузки и items.md — проверенные пункты прочитанных частей (0600, шапка выгрузки), не дольше READING_TTL.
+     Читатель части не ответил или проход оборван посреди него (SIGKILL) — повтор следующим проходом, всего
+     PART_ATTEMPTS раз. Дальше, как и по сроку READING_TTL, при изменённых после «да» заявке или списке чатов,
+     пропавшей выгрузке или items.md не по образцу, — failed, выгрузки удаляются, новой выгрузки нет. SIGTERM (таймаут
+     задачи), SIGINT и SIGHUP останавливают группу процессов читателя или выгрузки, удаляют выгрузки и пишут failed.
+  4. Проверка: пункт ссылается на чат своей части — «чат K, #id, …» (в заявке на один чат ссылку можно опустить); без
+     ссылки или с номером чата не из этой части пункт выпадает. Каждый пункт — отдельно `verify raw-K.md <пункт>` по
+     полной выгрузке чата K; пункт без #id, без цитаты или с ненайденной цитатой выпадает. В профиле с
+     check_author_date пункт выпадает ещё до verify, если «#id, дата время, автор» в нём не совпали со строкой этого
+     сообщения в выгрузке чата K. Папка части, chats.md, ответ читателя и пункт удаляются сразу после её проверки;
+     выгрузки и items.md — после свода, при отказе и при сбое (finally); остатки оборванного прохода — в начале
+     следующего.
+  5. summary.md (0600) — свод: список чатов, проверенные пункты всех частей по порядку с новыми номерами между метками
+     выгрузки (у каждого — «чат K»), с той же шапкой, что
      у approved.md (сессию, открывшую файл, помечает guard tg-taint). Рецепт точности (Прометей 18.10, минимум): под
      каждым пунктом программа, а не модель, вырезает окно ±window сообщений его чата вокруг процитированного; раздел
      «Горячие без ссылки» — сообщения с числами, суммами, датами, «?» и «договорились», на которые не ссылается ни один
@@ -132,18 +161,24 @@ SCHEMA_KINDS = {"numbered"}                              # вид ответа �
 SPEC_KINDS = {"--folder": "folder", "--chat": "chat"}
 SPEC_MAX = 200            # указание — одна строка, не длиннее
 SPECS_MAX = 20            # указаний в заявке — не больше
-# Пределы под папку (metis-0508). Период — не длиннее MAX_DAYS. Объём — на всю заявку: один читатель берёт за раз не
-# больше MAX_MESSAGES сообщений и MAX_DUMP_BYTES байт выгрузок (столько он успевает прочитать подряд за READER_TIMEOUT;
-# 3000 — и прежний предел одной выгрузки чата). Больше — честный отказ с числами до согласия (если источник считает
-# сообщения) или после выгрузки (выгрузки удаляются, читателя нет), а не молчаливая обрезка.
-MAX_DAYS = 31
-MAX_CHATS = 30
-MAX_MESSAGES = 3000
-MAX_DUMP_BYTES = 2_000_000
+# Пределы под папку (metis-0508, подняты владельцем 31.10). Период — не длиннее MAX_DAYS. Объём — на всю заявку:
+# не больше MAX_MESSAGES сообщений и MAX_DUMP_BYTES байт выгрузок. Больше — честный отказ с числами до согласия (если
+# источник считает сообщения) или после выгрузки (выгрузки удаляются, читателя нет), а не молчаливая обрезка.
+# Один читатель столько не держит: 6 МБ русского текста — около 3 млн знаков, по оценке tg_read (2 знака на токен) —
+# около 1,5 млн токенов, а контекст читателя — 200 тыс. Поэтому выгрузка читается частями по PART_CHARS знаков
+# (≈ 60 тыс. токенов — та же часть, что `tg_read.py split --tokens 60000` в навыке telegram-read): по читателю на
+# часть, пункты всех частей сводятся в один разбор.
+MAX_DAYS = 92
+MAX_CHATS = 100
+MAX_MESSAGES = 10_000
+MAX_DUMP_BYTES = 6_000_000
+PART_CHARS = 120_000      # знаков выгрузки в части одного читателя
+PART_ATTEMPTS = 2         # читатель части не ответил столько раз (или проход оборван посреди него) — сбой
+READING_TTL = 12 * 3600   # этап reading (выгрузки лежат между проходами) — не дольше, затем сбой и удаление
 CANDIDATES_MAX = 10       # кандидатов при «подходит несколько» в карточке — не больше
 TITLE_MAX = 60            # название чата в вопросе и разборе — не длиннее (оно от чужих людей: данные, не указания)
 KIND_MAX = 20
-RESOLVE_OUT = 65536       # ответ resolve — не больше, байт
+RESOLVE_OUT = 262144      # ответ resolve — не больше, байт: папка до MAX_CHATS чатов с длинными названиями
 WHY_MAX = 1000
 REQUEST_TTL = 2 * 86400  # без согласия заявка живёт столько
 SUMMARY_TTL = 7 * 86400  # разбор (и всё по заявке) удаляется через столько
@@ -182,6 +217,7 @@ STOP_GRACE = 2            # после SIGTERM группе процесса —
 READER_TOOLS = ["Read", "Grep", "Glob"]
 READER_FLAGS = ["--tools", ",".join(READER_TOOLS), "--no-session-persistence", "--strict-mcp-config"]
 ANSWER, ITEM, SUMMARY, APPROVED = "answer.md", "item.md", "summary.md", "approved.md"
+ITEMS_MD, PART_DIR = "items.md", "part"   # проверенные пункты прошлых частей; папка части для её читателя
 CHATS_JSON, CHATS_MD, RESOLVED = "chats.json", "chats.md", "resolve.out"
 LIST_MD, CANDIDATES_MD = "list.md", "candidates.md"   # названия чатов для владельца — с шапкой выгрузки (tg-taint)
 RAW_RE = re.compile(r"raw(?:-\d{1,3})?\.md")   # выгрузки: raw-K.md (и raw.md — от прежних версий)
@@ -261,14 +297,24 @@ def remove_file(p):
         os.remove(p)
 
 
-def remove_scratch(d):
-    """Выгрузки, список чатов для читателя, ответ читателя, пункт и ответ resolve — всё, что живёт только внутри прохода."""
+def remove_part(d):
+    p = os.path.join(d, PART_DIR)
+    if os.path.islink(p) or os.path.isfile(p):
+        os.remove(p)
+    elif _real_dir(p):
+        shutil.rmtree(p)
+
+
+def remove_scratch(d, keep_dumps=False):
+    """Выгрузки, проверенные пункты частей, папка части, список чатов для читателя, ответ читателя, пункт и ответ
+    resolve — всё, что живёт только внутри прохода. keep_dumps — этап reading: выгрузки и items.md переживают проход."""
     try:
         names = os.listdir(d)
     except OSError:
         return
+    remove_part(d)
     for x in names:
-        if RAW_RE.fullmatch(x) or x in (CHATS_MD, ANSWER, ITEM, RESOLVED):
+        if x in (CHATS_MD, ANSWER, ITEM, RESOLVED) or (not keep_dumps and (RAW_RE.fullmatch(x) or x == ITEMS_MD)):
             remove_file(os.path.join(d, x))
 
 
@@ -843,7 +889,7 @@ def resolve_all(rid, req, st):
                       f"разделите папку на несколько заявок", chats=len(chats))
     if known > MAX_MESSAGES:
         return refuse(rid, req, st, "too-big", f"сообщений за период {known} в {len(chats)} чатах — больше предела "
-                      f"{MAX_MESSAGES} на заявку (один читатель за раз): сузьте период или число чатов",
+                      f"{MAX_MESSAGES} на заявку: сузьте период или число чатов",
                       chats=len(chats), messages=known)
     p = os.path.join(d, CHATS_JSON)
     remove_file(p)
@@ -917,10 +963,11 @@ def reader_agent(name):
     return {name: agent}
 
 
-def reader_argv(req, name):
-    """claude -p --restricted --agents <читатель> --agent <имя> --tools Read,Grep,Glob … "<поручение>"."""
+def reader_argv(req, name, note=""):
+    """claude -p --restricted --agents <читатель> --agent <имя> --tools Read,Grep,Glob … "<поручение>". note — о части
+    большой выгрузки, в конец поручения."""
     return ([claude_path(), "-p", "--restricted", "--agents", json.dumps(reader_agent(name), ensure_ascii=False),
-             "--agent", name] + READER_FLAGS + [reader_prompt(req)])
+             "--agent", name] + READER_FLAGS + [reader_prompt(req) + (f"\n\n{note}" if note else "")])
 
 
 def reader_prompt(req):
@@ -979,13 +1026,8 @@ def parse_dump(raw):
     """Выгрузка → сообщения [{id, date, time, author, text}] по порядку (между метками; меток нет — весь файл).
     Строка «#id [ГГГГ-ММ-ДД ЧЧ:ММ] [тема «…»] Имя (@user): текст», продолжения — с отступом в 4 пробела; у служебных
     («[служебное: …]») автора нет."""
-    lines = raw.split("\n")
-    s = next((i for i, ln in enumerate(lines) if re.fullmatch(r"<<<TG-[0-9a-f]+", ln)), None)
-    if s is not None:
-        end = next((i for i in range(len(lines) - 1, s, -1) if lines[i] == lines[s][3:] + ">>>"), len(lines))
-        lines = lines[s + 1:end]
     msgs = []
-    for ln in lines:
+    for ln in dump_lines(raw):
         m = MSG_RE.match(ln)
         if m:
             rest = TOPIC_RE.sub("", m.group(4), count=1)
@@ -1058,6 +1100,7 @@ def hot_all(groups):
 
 def fail(rid, st, error, event, **nums):
     st.update(phase="failed", failed_at=int(P.now()), error=error)
+    remove_scratch(folder(rid))   # сбой — конец заявки: выгрузки этапа reading тоже удаляются
     write_state(folder(rid), st)
     log(rid, event, **nums)
 
@@ -1075,13 +1118,12 @@ def chat_lines(chats, counts=None):
 
 
 def summarize(rid, req, chats, st):
-    """Выгрузка всех чатов → один читатель → проверка → summary.md. Выгрузки и ответ читателя удаляются всегда.
+    """Выгрузка всех чатов → пределы → план частей → этап reading и первые части в этом же проходе (read_parts).
     → событие.
 
     Перед выгрузкой этап — exporting и attempts+1: оборванный проход (SIGTERM — здесь же, SIGKILL — следующим
-    проходом) кончается этапом failed, а не новой выгрузкой по тому же «да»."""
+    проходом) кончается этапом failed, а не новой выгрузкой по тому же «да». Отказ и сбой удаляют выгрузки."""
     d = folder(rid)
-    answer, item = os.path.join(d, ANSWER), os.path.join(d, ITEM)
     try:
         src, reader = source()
     except ValueError as e:
@@ -1089,18 +1131,16 @@ def summarize(rid, req, chats, st):
     if left() < NEED:
         return "ждёт следующего прохода: до конца срока этого не хватит на выгрузку, читателя и проверку"
     try:
-        argv = reader_argv(req, reader)
+        reader_argv(req, reader)
     except ValueError:
         fail(rid, st, "reader-agent", "reader-agent")
         return f"нет определения читателя {reader} ({short(agent_path(reader))}) — выгрузки не было"
     st.update(phase="exporting", attempts=int(st.get("attempts") or 0) + 1, export_started=int(P.now()))
     write_state(d, st)
     remove_file(os.path.join(d, LIST_MD))   # список для согласия своё отслужил: названия дальше — в chats.md и разборе
-    n = len(chats)
-    msgs, items, ok, meta_bad, chat_bad, hot, extra = 0, [], [], 0, 0, 0, {}
-    schema = load_profile(req["profile"])[1]
+    n, msgs = len(chats), 0
     try:
-        dumps, size = [], 0
+        size, counts = 0, []
         ex_end = time.monotonic() + EXPORT_TIMEOUT
         for k, c in enumerate(chats, 1):
             raw = os.path.join(d, raw_name(k))
@@ -1117,75 +1157,278 @@ def summarize(rid, req, chats, st):
             os.chmod(raw, 0o600)
             size += os.path.getsize(raw)
             with open(raw, encoding="utf-8", errors="replace") as fh:
-                dumps.append(parse_dump(fh.read()))
-        counts = [len(x) for x in dumps]
+                counts.append(len(parse_dump(fh.read())))
         msgs = sum(counts)
         st.update(exported_at=int(P.now()), messages=msgs, dump_bytes=size, chat_messages=counts)
         if msgs > MAX_MESSAGES or size > MAX_DUMP_BYTES:
             remove_scratch(d)
             return refuse(rid, req, st, "too-big",
                           f"выгружено сообщений {msgs} ({size} байт) в {n} чатах — больше предела {MAX_MESSAGES} "
-                          f"сообщений и {MAX_DUMP_BYTES} байт на заявку (один читатель за раз); выгрузки удалены, "
-                          f"разбора нет: сузьте период или число чатов", chats=n, messages=msgs, bytes=size)
+                          f"сообщений и {MAX_DUMP_BYTES} байт на заявку; выгрузки удалены, разбора нет: сузьте период "
+                          f"или число чатов", chats=n, messages=msgs, bytes=size)
         if not msgs:
             remove_scratch(d)
             return refuse(rid, req, st, "empty", f"за период {req['since']} — {req['until']} в {n} чатах нет ни одного "
                           f"сообщения; разбора нет", chats=n, messages=0)
-        by_id = [{x["id"]: x for x in dump} for dump in dumps]
-        pos = [{x["id"]: i for i, x in enumerate(dump)} for dump in dumps]
-        write_new(os.path.join(d, CHATS_MD), chats_index(chats, counts, f"TG-{secrets.token_hex(6)}"))
-        fd = os.open(answer, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "w") as fh:
-            rc = call(argv, d, out=fh, timeout=READER_TIMEOUT)
-        if rc != 0:
-            fail(rid, st, f"reader-{rc}", "reader-failed", rc=rc, messages=msgs)
-            return f"читатель не ответил (код {rc})"
-        with open(answer, encoding="utf-8", errors="replace") as fh:
-            items = split_items(fh.read(), schema)
-        v_end = time.monotonic() + VERIFY_BUDGET
-        for text in items:
-            k = chat_of(text, n)
-            if k is None:
-                chat_bad += 1
-                continue
-            anchor = None
-            if schema.get("check_author_date"):
-                anchor = item_meta(text, by_id[k - 1])
-                if anchor is None:
-                    meta_bad += 1
-                    continue
-            remove_file(item)
-            write_new(item, text + "\n")
-            t = min(VERIFY_TIMEOUT, v_end - time.monotonic())
-            if t > 0 and call([src, "verify", os.path.join(d, raw_name(k)), item], d, timeout=t) == 0:
-                if anchor is None:
-                    anchor = next((int(x) for x in re.findall(r"#(\d+)", text) if int(x) in pos[k - 1]), None)
-                ok.append((text, k, anchor))
-        w = schema.get("window", 0)
-        for text, k, anchor in ok:
-            extra[text] = window_lines(dumps[k - 1], pos[k - 1][anchor], w) if w and anchor is not None else []
-        hot_list = []
-        if schema.get("hot"):
-            cited = [set() for _ in chats]
-            for text, k, _ in ok:
-                cited[k - 1] |= {int(x) for x in re.findall(r"#(\d+)", text)}
-            hot, hot_list = hot_all([(f"чат {k} · " if n > 1 else "", dumps[k - 1], cited[k - 1])
-                                     for k in range(1, n + 1)])
-        del dumps, by_id
+        parts = plan_parts([dump_blocks(read_text(os.path.join(d, raw_name(k)))) for k in range(1, n + 1)])
+        write_items(d, [])
+        st.update(phase="reading", reading_at=int(P.now()), parts=len(parts), parts_done=0, part_attempts=0,
+                  items_total=0, items_chat_bad=0, items_meta_bad=0)
+        write_state(d, st)
+        log(rid, "exported", chats=n, messages=msgs, bytes=size, parts=len(parts))
     except Interrupted:
         remove_scratch(d)
         fail(rid, st, "interrupted", "interrupted", messages=msgs)
         raise
-    finally:
+    except BaseException:
         remove_scratch(d)
+        raise
+    return read_parts(rid, req, chats, st)
+
+
+def read_text(p):
+    with open(p, encoding="utf-8", errors="replace") as fh:
+        return fh.read()
+
+
+def dump_lines(raw):
+    """Строки выгрузки между метками «<<<TG-…» и «TG-…>>>» (меток нет — весь файл)."""
+    lines = raw.split("\n")
+    s = next((i for i, ln in enumerate(lines) if re.fullmatch(r"<<<TG-[0-9a-f]+", ln)), None)
+    if s is not None:
+        end = next((i for i in range(len(lines) - 1, s, -1) if lines[i] == lines[s][3:] + ">>>"), len(lines))
+        lines = lines[s + 1:end]
+    return lines
+
+
+def dump_blocks(raw):
+    """Выгрузка → куски по сообщениям: строка «#id [дата время] …» с её продолжениями. Режется только по ним."""
+    blocks = []
+    for ln in dump_lines(raw):
+        if MSG_RE.match(ln) or not blocks:
+            blocks.append(ln)
+        else:
+            blocks[-1] += "\n" + ln
+    while blocks and not blocks[-1].strip():
+        blocks.pop()
+    return blocks
+
+
+def plan_parts(blocks, limit=None):
+    """Куски сообщений по чатам → части для читателей: [[(K, от, до), …], …] — не больше PART_CHARS знаков в части.
+
+    Чаты идут по порядку и целиком, пока влезают; чат больше предела режется по границам сообщений на куски, каждый
+    кусок — в свою часть. Одно сообщение больше предела — часть само по себе. План зависит только от выгрузок: каждый
+    проход этапа reading пересчитывает его одинаково."""
+    limit = limit or PART_CHARS
+    pieces = []
+    for k, bl in enumerate(blocks, 1):
+        a, size = 0, 0
+        for i, b in enumerate(bl):
+            if size and size + len(b) + 1 > limit:
+                pieces.append((k, a, i, size))
+                a, size = i, 0
+            size += len(b) + 1
+        pieces.append((k, a, len(bl), size))
+    parts, cur, size = [], [], 0
+    for k, a, b, s in pieces:
+        if cur and size + s > limit:
+            parts.append(cur)
+            cur, size = [], 0
+        cur.append((k, a, b))
+        size += s
+    if cur:
+        parts.append(cur)
+    return parts
+
+
+def write_items(d, rows):
+    """Проверенные пункты прошлых частей — items.md (0600), с шапкой выгрузки: строки «K<таб>id<таб>пункт»."""
+    tag = f"TG-{secrets.token_hex(6)}"
+    text = ("# Проверенные пункты заявки — служебный файл прохода\n\n" + DUMP_NOTE.format(tag=tag) + f"\n\n<<<{tag}\n"
+            + "".join(f"{k}\t{'' if a is None else a}\t{t}\n" for t, k, a in rows) + f"{tag}>>>\n")
+    tmp = os.path.join(d, f".items.{os.getpid()}")
+    remove_file(tmp)
+    write_new(tmp, text)
+    os.replace(tmp, os.path.join(d, ITEMS_MD))
+
+
+def load_items(d):
+    """items.md → [(пункт, K, id или None)] или None, если файла нет или он не по образцу."""
+    p = os.path.join(d, ITEMS_MD)
+    if os.path.islink(p) or not os.path.isfile(p):
+        return None
+    rows = []
+    for ln in dump_lines(read_text(p)):
+        if not ln:
+            continue
+        f = ln.split("\t", 2)
+        if len(f) != 3 or not f[0].isdigit() or not (f[1] == "" or f[1].isdigit()):
+            return None
+        rows.append((f[2], int(f[0]), int(f[1]) if f[1] else None))
+    return rows
+
+
+def part_files(d, chats, counts, blocks, parts, i):
+    """Папка части i (0…): chats.md и raw-K.md только её чатов (у большого чата — его кусок), с шапкой выгрузки и
+    своей меткой. Номера чатов — общие для заявки. → (папка, примечание к поручению)."""
+    p = os.path.join(d, PART_DIR)
+    remove_part(d)
+    os.mkdir(p, 0o700)
+    lines = []
+    for k, a, b in parts[i]:
+        c, bl = chats[k - 1], blocks[k - 1][a:b]
+        cuts = [(j, x) for j, part in enumerate(parts) for x in part if x[0] == k]
+        no = next(n for n, (j, x) in enumerate(cuts, 1) if j == i and x == (k, a, b))
+        tag = f"TG-{secrets.token_hex(6)}"
+        head = f"# Выгрузка: чат {k}" + (f", кусок {no} из {len(cuts)}" if len(cuts) > 1 else "")
+        write_new(os.path.join(p, raw_name(k)), head + "\n\n" + DUMP_NOTE.format(tag=tag) + f"\n\n<<<{tag}\n"
+                  + "".join(x + "\n" for x in bl) + f"{tag}>>>\n")
+        lines.append(f"чат {k} — «{c['title']}» ({c['kind']}), файл {raw_name(k)}, сообщений {counts[k - 1]}"
+                     + (f"; здесь кусок {no} из {len(cuts)}: {sum(1 for x in bl if MSG_RE.match(x))} сообщений"
+                        if len(cuts) > 1 else ""))
+    tag = f"TG-{secrets.token_hex(6)}"
+    write_new(os.path.join(p, CHATS_MD), "# Чаты этой части заявки\n\n" + DUMP_NOTE.format(tag=tag)
+              + f"\n\n<<<{tag}\n" + "\n".join(lines) + f"\n{tag}>>>\n")
+    note = (f"Выгрузка заявки большая и разбита на части по объёму: в этой папке часть {i + 1} из {len(parts)}. "
+            "В chats.md — только чаты этой части, номера чатов общие для всей заявки; у большого чата здесь может быть "
+            "лишь кусок его переписки. Разбирай только то, что в этой папке: пункты других частей программа сведёт "
+            "в один список сама. Ссылку «чат K» ставь в каждом пункте.")
+    return p, note
+
+
+def read_parts(rid, req, chats, st):
+    """Этап reading: по читателю на часть, пока до конца срока прохода хватает на читателя и проверку; проверенные
+    пункты копятся в items.md. Все части прочитаны — свод (finish). Не хватило срока — выгрузки остаются до следующего
+    прохода (не дольше READING_TTL). Читатель части не ответил — повтор следующим проходом, всего PART_ATTEMPTS раз,
+    затем сбой. → событие."""
+    d = folder(rid)
+    answer, item = os.path.join(d, ANSWER), os.path.join(d, ITEM)
+    try:
+        src, reader = source()
+    except ValueError as e:
+        return f"ждёт: {e}"   # выгрузки лежат до READING_TTL
+    try:
+        reader_argv(req, reader)
+    except ValueError:
+        fail(rid, st, "reader-agent", "reader-agent")
+        return f"нет определения читателя {reader} ({short(agent_path(reader))}) — выгрузки удалены"
+    n, keep = len(chats), False
+    schema = load_profile(req["profile"])[1]
+    try:
+        texts = []
+        for k in range(1, n + 1):
+            raw = os.path.join(d, raw_name(k))
+            if os.path.islink(raw) or not os.path.isfile(raw):
+                fail(rid, st, "dumps-lost", "dumps-lost", chat=k)
+                return f"выгрузка чата {k} пропала посреди разбора — сбой, новой выгрузки нет"
+            texts.append(read_text(raw))
+        dumps = [parse_dump(x) for x in texts]
+        blocks = [dump_blocks(x) for x in texts]
+        del texts
+        counts = [len(x) for x in dumps]
+        parts = plan_parts(blocks)
+        ok = load_items(d)
+        done = int(st.get("parts_done") or 0)
+        if len(parts) != st.get("parts") or ok is None or not 0 <= done <= len(parts):
+            fail(rid, st, "parts-bad", "parts-bad")
+            return "план частей или проверенные пункты не сходятся с выгрузками — сбой, новой выгрузки нет"
+        by_id = [{x["id"]: x for x in dump} for dump in dumps]
+        pos = [{x["id"]: i for i, x in enumerate(dump)} for dump in dumps]
+        while done < len(parts):
+            if int(st.get("part_attempts") or 0) >= PART_ATTEMPTS:
+                fail(rid, st, "reader-failed", "reader-failed", part=done + 1, messages=st.get("messages"))
+                return f"читатель части {done + 1} из {len(parts)} не ответил {PART_ATTEMPTS} раза — сбой, выгрузки удалены"
+            if left() < READER_TIMEOUT + VERIFY_BUDGET:
+                keep = True
+                log(rid, "reading-wait", parts=len(parts), done=done)
+                return f"читает частями: готово {done} из {len(parts)}, дальше — следующим проходом"
+            st["part_attempts"] = int(st.get("part_attempts") or 0) + 1
+            write_state(d, st)
+            if len(parts) == 1:   # всё в одной части — как прежде: читатель в папке заявки, выгрузки целиком
+                cwd, note = d, ""
+                remove_file(os.path.join(d, CHATS_MD))
+                write_new(os.path.join(d, CHATS_MD), chats_index(chats, counts, f"TG-{secrets.token_hex(6)}"))
+            else:
+                cwd, note = part_files(d, chats, counts, blocks, parts, done)
+            remove_file(answer)
+            fd = os.open(answer, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                rc = call(reader_argv(req, reader, note), cwd, out=fh, timeout=READER_TIMEOUT)
+            if rc != 0:
+                if st["part_attempts"] < PART_ATTEMPTS:
+                    keep = True
+                    log(rid, "reader-retry", rc=rc, part=done + 1, parts=len(parts))
+                    return f"читатель части {done + 1} из {len(parts)} не ответил (код {rc}) — повтор следующим проходом"
+                fail(rid, st, f"reader-{rc}", "reader-failed", rc=rc, part=done + 1, messages=st.get("messages"))
+                return f"читатель не ответил (код {rc}, часть {done + 1} из {len(parts)})"
+            items = split_items(read_text(answer), schema)
+            mine = {k for k, _, _ in parts[done]}
+            v_end = time.monotonic() + VERIFY_BUDGET
+            for text in items:
+                k = chat_of(text, n)
+                if k is None or k not in mine:
+                    st["items_chat_bad"] += 1
+                    continue
+                anchor = None
+                if schema.get("check_author_date"):
+                    anchor = item_meta(text, by_id[k - 1])
+                    if anchor is None:
+                        st["items_meta_bad"] += 1
+                        continue
+                remove_file(item)
+                write_new(item, text + "\n")
+                t = min(VERIFY_TIMEOUT, v_end - time.monotonic())
+                if t > 0 and call([src, "verify", os.path.join(d, raw_name(k)), item], d, timeout=t) == 0:
+                    if anchor is None:
+                        anchor = next((int(x) for x in re.findall(r"#(\d+)", text) if int(x) in pos[k - 1]), None)
+                    ok.append((text, k, anchor))
+            done += 1
+            st.update(items_total=st["items_total"] + len(items), parts_done=done, part_attempts=0)
+            write_items(d, ok)
+            write_state(d, st)
+            remove_part(d)
+            for x in (answer, item, os.path.join(d, CHATS_MD)):
+                remove_file(x)
+        remove_scratch(d)   # выгрузки дальше не нужны: окна и горячие — из разобранных в памяти
+        return finish(rid, req, chats, st, dumps, counts, pos, ok, schema)
+    except Interrupted:
+        remove_scratch(d)
+        fail(rid, st, "interrupted", "interrupted", messages=st.get("messages"))
+        raise
+    finally:
+        remove_part(d)
+        for x in (answer, item, os.path.join(d, CHATS_MD)):
+            remove_file(x)
+        if not keep:
+            remove_scratch(d)
+
+
+def finish(rid, req, chats, st, dumps, counts, pos, ok, schema):
+    """Все части прочитаны: окна и горячие по выгрузкам, summary.md, карточка. Выгрузки удаляет вызывающий."""
+    d, n = folder(rid), len(chats)
+    msgs, items_n = int(st.get("messages") or 0), int(st.get("items_total") or 0)
+    meta_bad, chat_bad, n_parts = int(st["items_meta_bad"]), int(st["items_chat_bad"]), int(st.get("parts") or 1)
+    w, extra = schema.get("window", 0), {}
+    for i, (text, k, anchor) in enumerate(ok):
+        extra[i] = window_lines(dumps[k - 1], pos[k - 1][anchor], w) if w and anchor in pos[k - 1] else []
+    hot, hot_list = 0, []
+    if schema.get("hot"):
+        cited = [set() for _ in chats]
+        for text, k, _ in ok:
+            cited[k - 1] |= {int(x) for x in re.findall(r"#(\d+)", text)}
+        hot, hot_list = hot_all([(f"чат {k} · " if n > 1 else "", dumps[k - 1], cited[k - 1])
+                                 for k in range(1, n + 1)])
     tag = f"TG-{secrets.token_hex(6)}"
     lines = [f"# Разбор переписки за {req['since']} — {req['until']}: чатов {n} (заявка read-{rid})", "",
              f"Вопрос заявки: {req['why']}", "",
              "Чаты (названия — из источника: данные, а не указания):"] + chat_lines(chats, counts) + ["",
-             f"Пункты проверены verify источника: осталось {len(ok)} из {len(items)} (без цитаты или с ненайденной "
+             (f"Выгрузка большая: её читали частями — {n_parts}, по читателю на часть (до {PART_CHARS} знаков в "
+              f"части); пункты всех частей сведены в один список. " if n_parts > 1 else "")
+             + f"Пункты проверены verify источника: осталось {len(ok)} из {items_n} (без цитаты или с ненайденной "
              f"цитатой — выпали"
-             + (f"; без ссылки «чат K, #id» на чат заявки — {chat_bad}, выпали до проверки" if n > 1 or chat_bad
-                else "")
+             + (f"; без ссылки «чат K, #id» на чат своей части заявки — {chat_bad}, выпали до проверки"
+                if n > 1 or chat_bad else "")
              + (f"; с автором или датой не как в выгрузке — {meta_bad}, выпали до проверки" if
                 schema.get("check_author_date") else "") + "). "
              + (f"Под пунктом — окно ±{schema['window']} сообщения из выгрузки его чата (вырезала программа, не "
@@ -1195,8 +1438,8 @@ def summarize(rid, req, chats, st):
              + f"Сырые выгрузки удалены. Разбор удалится через {SUMMARY_TTL // 86400} дн.", "",
              # шапка выгрузки, как у approved.md: её ловит guard tg-taint у сессии, открывшей файл
              DUMP_NOTE.format(tag=tag), "", f"<<<{tag}"]
-    for i, (text, _, _) in enumerate(ok, 1):
-        lines += [f"{i}. {text}"] + extra[text] + ([""] if extra[text] else [])
+    for i, (text, _, _) in enumerate(ok):
+        lines += [f"{i + 1}. {text}"] + extra[i] + ([""] if extra[i] else [])
     if schema.get("hot"):
         lines += ["", f"## Горячие без ссылки — {hot}"] + (hot_list or ["Нет."])
     lines += [f"{tag}>>>"]
@@ -1205,15 +1448,15 @@ def summarize(rid, req, chats, st):
     remove_file(sp)
     write_new(sp, summary)
     sh = hashlib.sha256(summary.encode("utf-8")).hexdigest()[:HASH_LEN]
-    st.update(phase="summarized", summary_at=int(P.now()), summary_hash=sh, items_total=len(items), items_ok=len(ok),
+    st.update(phase="summarized", summary_at=int(P.now()), summary_hash=sh, items_total=items_n, items_ok=len(ok),
               items_meta_bad=meta_bad, items_chat_bad=chat_bad, hot=hot)
     st["card"] = card(rid, req, st)
     write_state(d, st)
-    log(rid, "summary", chats=n, messages=msgs, items=len(items), ok=len(ok), meta_bad=meta_bad, chat_bad=chat_bad,
-        hot=hot)
+    log(rid, "summary", chats=n, messages=msgs, items=items_n, ok=len(ok), meta_bad=meta_bad, chat_bad=chat_bad,
+        hot=hot, parts=n_parts)
     with contextlib.suppress(Exception):
         P.notify("Разбор переписки по заявке готов — карточка во входящих Зевса", group=f"read-{rid}")
-    return f"разбор готов: чатов {n}, пунктов {len(ok)} из {len(items)}"
+    return f"разбор готов: чатов {n}, пунктов {len(ok)} из {items_n}" + (f", частей {n_parts}" if n_parts > 1 else "")
 
 
 def card(rid, req, st):
@@ -1313,9 +1556,11 @@ def deliver(rid, req, chats, st, nums, t_ok):
 def process(rid):
     d = folder(rid)
     t = P.now()
-    remove_scratch(d)   # остаток оборванного прохода: проход идёт под замком, значит, это не чужая работа
     req = read_json(os.path.join(d, "request.json"))
     st = read_json(os.path.join(d, "state.json")) or {"phase": "resolving", "attempts": 0}
+    # остаток оборванного прохода: проход идёт под замком, значит, это не чужая работа; на этапе reading выгрузки и
+    # проверенные пункты прошлых частей остаются — их читают следующие части
+    remove_scratch(d, keep_dumps=st.get("phase") == "reading")
     bad = validate(req) if req else "нет request.json"
     if bad or req.get("rid") != rid:
         if t - os.lstat(d).st_mtime > REQUEST_TTL:
@@ -1333,7 +1578,7 @@ def process(rid):
         return "согласия нет — заявка удалена"
     if phase == "resolving":
         return resolve_all(rid, req, st)
-    if phase in ("requested", "summarized"):
+    if phase in ("requested", "reading", "summarized"):
         chats = load_chats(d)
         if chats is None:
             fail(rid, st, "chats-bad", "chats-bad")
@@ -1348,6 +1593,14 @@ def process(rid):
             return "владелец отказал — заявка удалена"
         st.update(consent_seen=int(t), req_hash=consent_hash(req, chats))
         return summarize(rid, req, chats, st)
+    if phase == "reading":
+        if t - int(st.get("reading_at") or 0) > READING_TTL:
+            fail(rid, st, "reading-expired", "reading-expired", parts=st.get("parts"), done=st.get("parts_done"))
+            return "разбор частями не закончен за срок — сбой, выгрузки удалены"
+        if st.get("req_hash") != consent_hash(req, chats) or consent(req, chats) != "да":
+            fail(rid, st, "request-changed", "request-changed")
+            return "заявка изменилась после согласия или согласие снято — выгрузки удалены, разбора нет"
+        return read_parts(rid, req, chats, st)
     if phase == "summarized":
         if t - int(st.get("summary_at") or 0) > SUMMARY_TTL:
             remove_request(rid)
@@ -1429,7 +1682,8 @@ def cmd_status():
                 continue
             req = read_json(os.path.join(r, rid, "request.json")) or {}
             st = read_json(os.path.join(r, rid, "state.json")) or {}
-            nums = " ".join(f"{k} {st[k]}" for k in ("chats", "messages_known", "messages", "items_total", "items_ok")
+            nums = " ".join(f"{k} {st[k]}" for k in ("chats", "messages_known", "messages", "parts", "parts_done", "items_total",
+                                                       "items_ok")
                             if k in st)
             why = f"\t{st['reason']}" if st.get("phase") == "refused" and st.get("reason") else ""
             rows.append((f"read-{rid}\t{req.get('direction', '?')}\t{st.get('phase', '?')}\t{nums}".rstrip() + why))
