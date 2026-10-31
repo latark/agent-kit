@@ -280,6 +280,7 @@ answer и плановый проход, это скрипты, guard их не 
 - `cat`, `head`, `sed`, `grep`, `less`, `python` и т. п. с путём выгрузки в команде;
 - Read выгрузки: папка `tg-read` во временной папке (`$TMPDIR`, `/tmp`, `/var/folders`), файл из `-o`,
   `--files-dir` или `split --out-dir` этой сессии, части `*.partNN-of-NN.md` рядом с ним; Read файла с шапкой выгрузки;
+- Read, Grep content и `cat`/`tail`/`grep` по папке заявок `~/.local/state/pantheon/read/` — по пути, и с offset;
 - Grep в режиме content по выгрузкам. Режимы files_with_matches и count показывают имена и числа — флага нет.
 
 Не ставят: `status`, `chats`, `folders`, `topics`, `find`, `posts --quota`, `split`, `verify` и субагент

@@ -456,8 +456,44 @@ def test_hooks_json():
           len(ups) == 1 and all("onFailure" not in x for x in ups[0]["hooks"]))
 
 
+def test_read_requests():
+    """Папка заявок pantheon read (metis-0508): флаг — по пути, шапки выгрузки в выводе нет (offset, tail, grep)."""
+    part = {"type": "text", "file": {"content": "-100 «Вера» (личный)\nTG-0123456789ab>>>\n"}}
+    for name, mk in (
+            ("Read list.md с offset за шапкой", lambda h, d: post(h, "Read", {"file_path": d + "/list.md", "offset": 5},
+                                                                     part)),
+            ("Read candidates.md через ~", lambda h, d: post(h, "Read", {
+                "file_path": "~/.local/state/pantheon/read/20261030-0000-abcd/candidates.md", "limit": 2}, part)),
+            ("Grep content по папке заявки", lambda h, d: post(h, "Grep", {"pattern": "Вера", "path": d,
+                                                                            "output_mode": "content"},
+                                                                {"content": "list.md:7:-100 «Вера»"})),
+            ("tail -n 3 абсолютного пути", lambda h, d: bash(h, f"tail -n 3 {d}/list.md", stdout="-100 «Вера»")),
+            ("grep по ~/…/read", lambda h, d: bash(h, "grep Вера ~/.local/state/pantheon/read/20261030-0000-abcd/list.md",
+                                                   stdout="-100 «Вера»")),
+            ("sed по $HOME/…/read", lambda h, d: bash(
+                h, 'sed -n 5,9p "$HOME/.local/state/pantheon/read/20261030-0000-abcd/candidates.md"', stdout="x"))):
+        h = new_home()
+        d = os.path.join(h, ".local", "state", "pantheon", "read", "20261030-0000-abcd")
+        rc, _, err = mk(h, d)
+        check(f"заявки read: флаг ставит {name}", rc == 0 and flag(h), err[-200:])
+    for name, mk in (
+            ("ls папки заявок", lambda h, d: bash(h, f"ls -la {d}", stdout="list.md")),
+            ("Grep files_with_matches", lambda h, d: post(h, "Grep", {"pattern": "x", "path": d}, {"filenames": []})),
+            ("Read журнала pantheon и соседней папки readme", lambda h, d: [
+                post(h, "Read", {"file_path": os.path.join(h, ".local", "state", "pantheon", x)},
+                     {"type": "text", "file": {"content": "обычный текст"}}) for x in ("logs/read.jsonl", "readme/x.md")
+            ][-1]),
+            ("Read заявок другого HOME", lambda h, d: post(h, "Read", {
+                "file_path": "/nonexistent/.local/state/pantheon/read/r/list.md"},
+                {"type": "text", "file": {"content": "обычный текст"}}))):
+        h = new_home()
+        d = os.path.join(h, ".local", "state", "pantheon", "read", "20261030-0000-abcd")
+        rc, _, err = mk(h, d)
+        check(f"заявки read: флаг не ставит {name}", rc == 0 and not flag(h), err[-200:])
+
+
 if __name__ == "__main__":
-    for t in (test_sets, test_not_sets, test_asks, test_reads_pass, test_bypass_and_deny_wins,
+    for t in (test_sets, test_not_sets, test_read_requests, test_asks, test_reads_pass, test_bypass_and_deny_wins,
               test_clear_and_sessions, test_failures, test_hooks_json):
         t()
     print(f"\n{total - failed} из {total} прошли")
