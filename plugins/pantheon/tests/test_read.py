@@ -1518,6 +1518,13 @@ def test_request_92_days():
     check("request: ровно 92 дня — заявка принята", r.returncode == 0 and rid is not None, r.stdout + r.stderr)
 
 
+def test_reading_ttl_fits_worst_case():
+    """Худший случай: выгрузка на весь предел байт (знаков не больше байт), читатель каждой части — весь свой срок,
+    одна часть за проход — всё равно укладывается в READING_TTL."""
+    worst = -(-READ.MAX_DUMP_BYTES // READ.PART_CHARS) * (READ.READER_TIMEOUT + READ.VERIFY_BUDGET)
+    check("сроки: худший разбор частями ≤ READING_TTL", worst <= READ.READING_TTL, (worst, READ.READING_TTL))
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
