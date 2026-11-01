@@ -1799,7 +1799,7 @@ def t_ci_required(h):
     merge_case("без роли: PR 9 без записей тестов и argus, CI зелёный — проходит", h.pre(c9, **owner), True)
     merge_case("роль на том же PR 9 без записей — отказ (записи ей нужны)", h.pre(c9, pdir=kit), False)
     for c, how in ((f"gh pr merge 9 --merge", "без --match-head-commit (head PR)"),
-                   (f"gh pr merge 9 --admin --squash", "с --admin"),
+                   (f"gh pr merge --admin 9 --squash", "с --admin перед номером"),
                    (f"gh pr merge 9 -R latark/agent-kit --merge", "с -R"),
                    (f"cd {h.j(kit)} && gh pr merge 9 -R latark/agent-kit", "cd и -R")):
         merge_case(f"без роли: {how}, CI зелёный — проходит", h.pre(c, **owner), True)
