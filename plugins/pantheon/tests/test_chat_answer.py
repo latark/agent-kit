@@ -112,6 +112,11 @@ check("«да» при одном варианте → он", A.pick("да", "x-
       and A.pick("ок", "x-1", [("А", "Пушить")]) == 0)
 check("«да» / «нет», когда ровно один вариант начинается этим словом → он",
       A.pick("да", "x-1", YES_NO) == 0 and A.pick("Нет", "x-1", YES_NO) == 1 and A.pick("согласен", "x-1", YES_NO) == 0)
+check("«да» / «нет» — по первому слову варианта, а не по слову внутри текста",
+      A.pick("да", "x-1", [("1", "Да — пушить"), ("2", "Нет, не да")]) == 0
+      and A.pick("нет", "x-1", [("1", "Да, нет сомнений"), ("2", "Нет")]) == 1)
+check("многострочный ответ — не выбор, даже если после вежливых слов осталась одна буква",
+      A.pick("давай\nа", "metis-0384", OPTS) is None)
 check("«да», когда словом «да» начинаются два варианта → не выбор",
       A.pick("да", "x-1", [("1", "Да — сейчас"), ("2", "Да — завтра")]) is None)
 check("номер — только при номерах вариантов: «2» → второй, буква при номерах → не выбор",
@@ -229,11 +234,15 @@ def hook(tr, text, pid, **env):
                           text=True, timeout=60)
 
 
-def zeus():
+def read(path):
     try:
-        return open(os.path.join(LOG, "zeus.md"), encoding="utf-8").read()
+        return open(path, encoding="utf-8").read()
     except OSError:
         return ""
+
+
+def zeus():
+    return read(os.path.join(LOG, "zeus.md"))
 
 
 def fresh():
@@ -289,7 +298,7 @@ def weird(tr):
 log, r = case("weird", weird, "а")
 check("хук: сбой разбора ответа — код 0, обычная строка записана, ответа нет, причина в журнале хуков",
       r.returncode == 0 and "а\n" in log and "ответ в чате" not in log
-      and "ответ в чате не разобран" in open(os.path.join(state, "logs", "ctx-hooks.log"), encoding="utf-8").read(),
+      and "ответ в чате не разобран" in read(os.path.join(state, "logs", "ctx-hooks.log")),
       log + r.stderr)
 
 

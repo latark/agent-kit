@@ -86,7 +86,8 @@ FIELDS; by — имя окна по папке кэша, а не из файла
      Хеш согласия — от request.json и chats.json вместе (consent_hash): названия входят в хеш, владелец соглашается
      на этот список чатов, а не на указания.
   1. requested → согласие: ответ владельца в окне вопросов или в чате Зевса (owner-log/zeus.md, пометка «окно вопросов»
-     или «ответ в чате», её пишет хук, не роли) на вопрос, который начинается с [read-<rid>], не раньше времени заявки; в тексте вопроса — хеш,
+     или «ответ в чате», её пишет хук, не роли) на вопрос, который начинается с [read-<rid>], не раньше времени
+     заявки; в тексте вопроса — хеш,
      пересчитанный из request.json и chats.json сейчас, id каждого чата и обе даты. Последний такой ответ решает:
      «Да…» — выгрузка, «Нет…» — заявка удаляется. Ответа нет за REQUEST_TTL — заявка удаляется.
   2. Выгрузка: по чату K — `export … -o <папка>/raw-K.md -- <id>`, argv из заявки и chats.json. Пределы под папку:
@@ -788,7 +789,7 @@ def owner_answers(qid):
     for i, m in enumerate(heads):
         if not P.answers_mod().is_answer_head(m.group(2)):
             continue
-        body = P.answers_mod().answer_body(m.group(2), text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip())
+        body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
         q = own.match(body)
         a = re.search(r"^ответ: (.*)$", body, re.M)
         if not q or not a:
