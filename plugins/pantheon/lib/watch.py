@@ -4,7 +4,9 @@
                             `pantheon who` (COMM-14), ждущие и упавшие сессии Пантеона, давно не обновлённый и длинный
                             STATUS.md, swap и открытые подключения (COMM-13), виновники памяти в красной зоне — своп,
                             давление, нагрузка: процесс → чей → память → возраст, раз на эпизод (lib/culprits.py,
-                            metis-0568), копии worktree (QA-05), смена версии
+                            metis-0568), копии worktree (QA-05; node_modules и .next при проверке ссылок наружу — по верхнему уровню, metis-0616),
+                            кэши песочниц ~/Library/Caches/pantheon-sandbox/<окно>/{tmp,npm,corepack,logs} старше 7 дн. без процессов
+                            и потолок 5 ГБ с тревогой (metis-0620), смена версии
                             Claude Code (SCOUT-05, SEC-16), паузы по нагрузке (COST-04), самозапуск координаторов
                             (задачу с owner другой сессии не отдаёт, metis-0564), окна по вашему выбору «Да — запустить|перезапустить
                             <имя>» на вопрос pantheon launch-question в окне вопросов (metis-0523),
@@ -46,6 +48,8 @@ import hashlib
 import json
 import os
 import random
+import shutil
+import stat
 import re
 import subprocess
 import sys
@@ -276,6 +280,7 @@ def _watch(dry=False):
               ("swap", lambda: swap(agents, t)),
               ("виновники памяти", lambda: P.culprits_mod().watch_check(agents, t)),
               ("worktree", lambda: worktrees(agents, reg, doms, t)),
+              ("кэши песочниц", lambda: sandbox_sweep(t)),
               ("версия Claude Code", lambda: cc_version(t)),
               ("памятка Кто есть кто", lambda: P.who_is_who_alert()),
               ("паузы по нагрузке", lambda: pauses_clear(agents, reg, t)),
@@ -695,21 +700,30 @@ def _base_ref(root):
 
 
 WALK_LIMIT = 5000
+LINK_SKIP = ("node_modules", ".next")   # зависимости и сборка: большие, считаются отдельно (metis-0616)
+DEPS_LIMIT = 300000                     # записей внутри LINK_SKIP; больше — «не знаю» (None), копия не удаляется
 
 
 def outward_links(wt):
     """Символические ссылки копии, чья цель (realpath) лежит вне неё. Обход без перехода по ссылкам, папку .git
-    копии пропускаем. Допущение: больше WALK_LIMIT записей — копия считается небезопасной (None) и не удаляется.
-    Возвращает (число, первая как (путь относительно копии, цель)) или None при превышении."""
+    копии пропускаем. Записи внутри node_modules и .next (у слитой копии BA ~45 тыс. файлов) считаются отдельно, под
+    DEPS_LIMIT, остальные — под WALK_LIMIT. Превышение любого лимита — копия считается небезопасной (None, «не знаю»)
+    и не удаляется. Возвращает (число, первая как (путь относительно копии, цель)) или None."""
     root = os.path.realpath(wt)
-    n, first, seen = 0, None, 0
+    n, first, seen, deps = 0, None, 0, 0
     for d, dirs, files in os.walk(root, followlinks=False):
         if d == root and ".git" in dirs:
             dirs.remove(".git")
+        inside = any(part in LINK_SKIP for part in os.path.relpath(d, root).split(os.sep))
         for name in dirs + files:
-            seen += 1
-            if seen > WALK_LIMIT:
-                return None
+            if inside:
+                deps += 1
+                if deps > DEPS_LIMIT:
+                    return None
+            else:
+                seen += 1
+                if seen > WALK_LIMIT:
+                    return None
             p = os.path.join(d, name)
             if not os.path.islink(p):
                 continue
@@ -837,7 +851,7 @@ def worktrees(agents, registry, doms, t):
                     if clean and merged:
                         out = outward_links(wt)
                         if out is None or out[0]:
-                            what = ("обход длиннее %d записей" % WALK_LIMIT if out is None else
+                            what = ("обход длиннее лимита (%d / %d записей)" % (WALK_LIMIT, DEPS_LIMIT) if out is None else
                                     "ссылки наружу (%d, первая: %s → %s)" % (out[0], out[1][0],
                                                                          out[1][1].replace(P.HOME, "~")))
                             P.alert_once(f"watch-wt-{wt}", "links", f"копия {short} не убрана: в ней {what} — "
@@ -864,6 +878,148 @@ def worktrees(agents, registry, doms, t):
                 # без --expire: git worktree prune по умолчанию убирает записи без папки сразу (срок
                 # gc.worktreePruneExpire — только у gc); locked-записи git не трогает
                 _git("-C", root, "worktree", "prune")
+
+
+# --- кэши песочниц (metis-0620) ---------------------------------------------------------------------------------
+
+SANDBOX_DAYS = 7                  # запись кэша окна, которую не меняли и не держит процесс дольше, — убираем
+SANDBOX_CAP_MB = 5120             # потолок всего кэша песочниц: больше после уборки — тревога
+SANDBOX_PARTS = ("tmp", "npm", "corepack", "logs", "log")   # что чистим в <кэш>/<окно>/; остальное не трогаем
+SANDBOX_WALK = 200000             # обход возраста записи длиннее — считаем свежей
+
+
+def sandbox_root():
+    return os.path.join(P.HOME, "Library", "Caches", "pantheon-sandbox")
+
+
+def _open_paths():
+    """Пути, которые сейчас держат процессы (lsof -Fn: файлы, cwd, сокеты), или None, если lsof не ответил —
+    тогда ничего не удаляем."""
+    try:
+        r = subprocess.run(["lsof", "-nP", "-Fn"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not r.stdout:
+        return None
+    return {ln[1:] for ln in r.stdout.splitlines() if ln.startswith("n/")}
+
+
+def _tree_newer(path, lim):
+    """Менялось ли что-то в записи (сама, любая вложенная) позже lim. Без перехода по ссылкам; не уложились в
+    SANDBOX_WALK — считаем, что менялось."""
+    n, stack = 0, [path]
+    while stack:
+        cur = stack.pop()
+        try:
+            if os.lstat(cur).st_mtime > lim:
+                return True
+            if not os.path.isdir(cur) or os.path.islink(cur):
+                continue
+            with os.scandir(cur) as it:
+                for e in it:
+                    n += 1
+                    if n > SANDBOX_WALK:
+                        return True
+                    stack.append(e.path)
+        except OSError:
+            continue
+    return False
+
+
+def _open_dir(name, dir_fd=None):
+    """Открыть папку без перехода по ссылке (O_NOFOLLOW): ссылка вместо папки — OSError."""
+    return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+
+
+def sandbox_clean(root, t, opened, days=None):
+    """Убирает в <root>/<окно>/{tmp,npm,corepack,logs} прямые записи старше days дней, которых не держит процесс
+    (opened — множество путей из lsof). Окно может подменить папку ссылкой между проверкой и удалением (проход идёт
+    вне песочницы), поэтому корень, окно и часть открываются по дескрипторам с O_NOFOLLOW, а запись удаляется
+    относительно дескриптора части (rmtree/unlink с dir_fd): подмена уже ничего не перенаправит. Запись-ссылку
+    снимаем саму, цель не трогаем. Возраст и список читаем по пути — это только чтение. Возвращает (убрано записей,
+    не удалось убрать)."""
+    days = SANDBOX_DAYS if days is None else days
+    lim = t - days * 86400
+    removed, failed = 0, 0
+    root = os.path.realpath(root)
+    try:
+        root_fd = _open_dir(root)
+    except OSError:
+        return 0, 0
+    try:
+        for role in sorted(os.listdir(root_fd)):
+            try:
+                role_fd = _open_dir(role, root_fd)
+            except OSError:
+                continue
+            try:
+                for part in SANDBOX_PARTS:
+                    try:
+                        part_fd = _open_dir(part, role_fd)
+                    except OSError:
+                        continue
+                    try:
+                        for name in sorted(os.listdir(part_fd)):
+                            p = os.path.join(root, role, part, name)
+                            if _tree_newer(p, lim):
+                                continue
+                            if any(o == p or o.startswith(p + os.sep) for o in opened):
+                                continue
+                            try:
+                                st = os.stat(name, dir_fd=part_fd, follow_symlinks=False)
+                                if stat.S_ISDIR(st.st_mode):
+                                    shutil.rmtree(name, dir_fd=part_fd)
+                                else:
+                                    os.unlink(name, dir_fd=part_fd)
+                                removed += 1
+                            except OSError:
+                                with contextlib.suppress(OSError):
+                                    shutil.rmtree(name, ignore_errors=True, dir_fd=part_fd)
+                                try:
+                                    os.stat(name, dir_fd=part_fd, follow_symlinks=False)
+                                    failed += 1
+                                except OSError:
+                                    removed += 1
+                    finally:
+                        os.close(part_fd)
+            finally:
+                os.close(role_fd)
+    finally:
+        os.close(root_fd)
+    return removed, failed
+
+
+def sandbox_mb(root):
+    """Размер кэша песочниц, МБ (du -sk), или None."""
+    try:
+        r = subprocess.run(["du", "-sk", root], capture_output=True, text=True, timeout=120)
+        return int(r.stdout.split()[0]) // 1024
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+
+
+def sandbox_sweep(t):
+    """Плановая уборка кэшей окон ролей (в песочнице окна удалить чужое нельзя, дежурный — вне неё). Потолок —
+    SANDBOX_CAP_MB (env PANTHEON_SANDBOX_CAP_MB): после уборки больше — тревога раз в день."""
+    root = sandbox_root()
+    if not os.path.isdir(root):
+        return
+    opened = _open_paths()
+    if opened is not None:
+        removed, failed = sandbox_clean(root, t, opened)
+        if removed or failed:
+            P.alert(f"кэши песочниц: убрано записей {removed}" + (f", не удалось {failed}" if failed else "")
+                    + f" (старше {SANDBOX_DAYS} дн., без процессов)", "watch")
+    try:
+        cap = int(os.environ.get("PANTHEON_SANDBOX_CAP_MB") or SANDBOX_CAP_MB)
+    except ValueError:
+        cap = SANDBOX_CAP_MB
+    mb = sandbox_mb(root)
+    if mb is not None and mb > cap:
+        P.alert_once("watch-sandbox-cap", today(t), f"кэши песочниц {mb} МБ при потолке {cap} МБ даже после уборки "
+                     f"({root.replace(P.HOME, '~')}) — координатору: посмотреть, что держит место", "watch")
+    else:
+        P.clear_once("watch-sandbox-cap")
 
 
 def cc_version(t):
