@@ -606,6 +606,43 @@ os.utime(ho, (now - 400, now - 400))
 r = fresh_rewake([user("прочитай %s" % ho, "p1", now - 300)], role="")
 check("сессия без роли: первая, одно сообщение с HANDOFF.md старше него → чистый лист (правило только для ролей)",
       r.returncode == 0 and not r.stderr.strip(), r.stderr)
+
+# metis-0641, argus-238a Б: сессию разбудил хук, она сама сохранилась, потом вы написали «хочу clear» (или ничего)
+woke = [{"type": "user", "isSidechain": False, "timestamp": iso(now - 500), "isMeta": True,
+         "message": {"role": "user", "content": "уведомление хука"}},
+        assistant(now - 490, 0, [("Read", {"file_path": ho})]),
+        assistant(now - 480, 0, [("Write", {"file_path": ho, "content": "x"})])]
+os.utime(ho, (now - 480, now - 480))
+r = fresh_rewake(woke + [user("хочу clear", "w1", now - 400), assistant(now - 395)], role="", first=False)
+check("разбудили хуком → Read → Write HANDOFF → ваше «хочу clear» → ответ текстом → /clear будит", r.returncode == 2
+      and "handoff/topic/HANDOFF.md" in r.stderr, (r.returncode, r.stderr))
+r = fresh_rewake(woke, role="", first=False)
+check("разбудили хуком, сохранилась, вы не писали вовсе → /clear будит", r.returncode == 2
+      and "handoff/topic/HANDOFF.md" in r.stderr, (r.returncode, r.stderr))
+os.utime(ho, (now - 600, now - 600))
+r = fresh_rewake(woke + [user("хочу clear", "w1", now - 400), assistant(now - 395)], role="", first=False)
+check("то же, но файл старше первой записи сессии → чистый лист", r.returncode == 0 and not r.stderr.strip(), r.stderr)
+# ответ субагента (isSidechain) с инструментами работой основной сессии не считается
+os.utime(ho, (now - 280, now - 280))
+side = dict(assistant(now - 45, 0, [("Bash", {"command": "ls"})]), isSidechain=True)
+r = fresh_rewake([user("сохрани", "s1", now - 300), assistant(now - 290, 0, [("Write", {"file_path": ho, "content": "x"})]),
+                  user("хочу clear", "s2", now - 50), side, assistant(now - 40)], role="", first=False)
+check("инструменты субагента после «хочу clear» точку отсчёта не сдвигают → будит", r.returncode == 2
+      and "handoff/topic/HANDOFF.md" in r.stderr, (r.returncode, r.stderr))
+# ваше сообщение дальше хвоста (4 МБ): точка отсчёта — по всему файлу (last_owner_time)
+filler = [assistant(now - 250 + i * 0.1) for i in range(1)]
+filler[0]["message"]["content"] = [{"type": "text", "text": "я" * 2200000}]
+os.utime(ho, (now - 200, now - 200))
+r = fresh_rewake([user("сохрани", "l1", now - 300), assistant(now - 290, 0, [("Write", {"file_path": ho, "content": "x"})])]
+                 + filler, role="", first=False)
+check("ваше сообщение за пределами хвоста, файл новее него → будит", r.returncode == 2
+      and "handoff/topic/HANDOFF.md" in r.stderr, (r.returncode, r.stderr))
+os.utime(ho, (now - 350, now - 350))
+r = fresh_rewake([user("сохрани", "l1", now - 300), assistant(now - 290, 0, [("Write", {"file_path": ho, "content": "x"})])]
+                 + filler, role="", first=False)
+check("ваше сообщение за пределами хвоста, файл старше него → чистый лист", r.returncode == 0 and not r.stderr.strip(),
+      r.stderr)
+os.utime(ho, (now - 100, now - 100))
 os.utime(board, (now - 10, now - 10))
 
 # --- файл состояния после сжатия -----------------------------------------------------
