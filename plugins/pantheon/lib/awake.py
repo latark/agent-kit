@@ -531,6 +531,10 @@ INBOX_TEXT = ("Во входящих новое поручение Зевса, �
               "STATUS.md и эти файлы; поручение — цель этой сессии. Входящие разбери по своему правилу (итог — в файл, "
               "файл — в inbox/done/); что ждёт владельца — Зевсу строкой.")
 INBOX_QUIET = ("одна сессия за проход", "поднята в этом проходе")
+# Время поручения — позднее из mtime файла и первого прохода, увидевшего файл (отметка first): mtime ставит тот, кто
+# пишет, а первое появление — часы прохода. Проход идёт раз в 5 мин, поэтому окно слова — 15 мин и запас на 10 мин
+# до прохода. Так старое слово владельца не оживит файл с поддельным временем (ревью безопасности, 02.11)
+INBOX_SEEN_LAG = 600
 
 
 def zeus_order(path, name):
@@ -596,6 +600,7 @@ def inbox_wake(agents, registry, doms, t):
         return
     since = float(box["since"])
     seen = box.get("seen") if isinstance(box.get("seen"), dict) else {}
+    first = box.get("first") if isinstance(box.get("first"), dict) else {}
     off = P.hq_led()
     # поднятые этим проходом (самозапуск, разовый запуск) в снимке сессий ещё не видны, но место уже заняли
     running = sorted({d for d in doms if W.holders(d, agents, registry)}
@@ -603,7 +608,7 @@ def inbox_wake(agents, registry, doms, t):
     started = False
 
     def save():
-        box["seen"] = seen
+        box["seen"], box["first"] = seen, first
         marks["inbox"] = box
         P.write_json(marks_path(), marks)
 
@@ -611,8 +616,13 @@ def inbox_wake(agents, registry, doms, t):
         mine = seen.get(d) if isinstance(seen.get(d), dict) else {}
         orders, names = inbox_orders(d, since, mine)
         kept = {f: m for f, m in mine.items() if f in names}  # разобранные (ушли в done/) забываем
-        if kept != mine:
-            seen[d] = mine = kept
+        was = first.get(d) if isinstance(first.get(d), dict) else {}
+        met = {f: v for f, v in was.items() if f in names and f not in kept and isinstance(v, (int, float))}
+        for f, _ in orders:  # первое появление — до всех пропусков: занятая сессия тоже «видела» файл в этот проход
+            met.setdefault(f, t)
+        if kept != mine or met != was:
+            seen[d], first[d] = kept, met
+            mine = kept
             save()
         if not orders or d in off:
             continue
@@ -625,16 +635,18 @@ def inbox_wake(agents, registry, doms, t):
         for f, m in orders:
             if end is not None and m <= end:
                 mine[f] = m  # пришло до конца хода — сессия его видела
-            elif P.owner_spoke_before("zeus", m, P.OWNER_WORD_WINDOW):
+            elif P.owner_spoke_before("zeus", max(m, met.get(f, t)), P.OWNER_WORD_WINDOW + INBOX_SEEN_LAG):
                 word.append((f, m))
             else:
                 mine[f] = m
                 P.start_log(f"inbox-noword\t{d}\t{f}")
+                gap = (P.OWNER_WORD_WINDOW + INBOX_SEEN_LAG) // 60
                 P.alert_once(f"inbox-noword-{d}", f, f"поручения во входящих: {d} закончил ход, а во входящих поручение "
-                             f"Зевса {f} без вашего слова ему за {P.OWNER_WORD_WINDOW // 60} мин до файла — плановый "
-                             f"проход координатора не поднимает (metis-0261 А); поднять — ваше слово Зевсу или "
-                             f"pantheon start {d} из вашего терминала", "watch")
+                             f"Зевса {f} без вашего слова ему за {gap} мин до файла — плановый проход координатора не "
+                             f"поднимает (metis-0261 А); поднять — ваше слово Зевсу или pantheon start {d} из вашего "
+                             f"терминала", "watch")
         seen[d] = mine
+        first[d] = {f: v for f, v in met.items() if f not in mine}
         save()
         if not word:
             continue

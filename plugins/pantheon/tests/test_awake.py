@@ -934,6 +934,36 @@ def test_inbox_no_owner_word():
         check(not ib.starts, f"слово после файла засчитано: {ib.starts}")
 
 
+def test_inbox_seen_time():
+    # время поручения — позднее из mtime и первого прохода, увидевшего файл (ревью безопасности 02.11)
+    with Inbox() as ib:  # mtime подделан «под слово», а файл появился через 50 мин — старое слово его не оживит
+        ib.run(MON)
+        ib.word(MON + 100)
+        ib.order("hermes-site", "2026-10-19-1203-zeus-a.md", MON + 200)
+        ib.run(MON + 3000)
+        check(not ib.starts and "без вашего слова" in alerts_text(ib.e),
+              f"файл с подделанным mtime разбудил по старому слову: {ib.starts}")
+    with Inbox() as ib:  # честный файл: слово за 14 мин до файла, проход увидел его через 5 мин — будит
+        ib.run(MON)
+        ib.word(MON + 10)
+        ib.order("hermes-site", "2026-10-19-1203-zeus-a.md", MON + 850)
+        ib.run(MON + 1150)
+        check(len(ib.starts) == 1, f"запас на проход не действует: {ib.starts}")
+    with Inbox() as ib:  # первое появление помнится: шлюз держал 40 мин — слово считается от первого прохода
+        ib.run(MON)
+        ib.word(MON + 100)
+        ib.order("hermes-site", "2026-10-19-1203-zeus-a.md", MON + 200)
+        ib.e.gate_ok = (False, "недельный потолок")
+        ib.run(MON + 300)
+        ib.e.gate_ok = (True, None)
+        ib.run(MON + 2700)
+        check(len(ib.starts) == 1, f"после ожидания шлюза время файла сдвинулось на текущий проход: {ib.starts}")
+        AW.RESUMED.clear()
+        ib.run(MON + 3000)  # следующий проход забывает первое появление отмеченного файла
+        check(not AW.read_marks()["inbox"]["first"].get("hermes-site"),
+              f"отметка первого появления осталась у разобранного файла: {AW.read_marks()}")
+
+
 def test_inbox_gates():
     with Inbox() as ib:
         ib.run(MON)
