@@ -1760,6 +1760,43 @@ def t_hq_gh(h):
          hq("gh pr edit 5 --repo=latark/agent-kit --title x", role=None), True)
     case("hq: главная сессия окна без agent_type: gh pr view -R свой — можно",
          hq("gh pr view 5 -R latark/agent-kit", role=None), True)
+    # gh pr list (metis-0626, решение Метиды 01.11): -R из [merge_repos], флаги из списка, без --search и позиционных
+    for cmd in ("gh pr list -R latark/agent-kit", "gh pr list -R latark/agent-kit --json number,title",
+                "gh pr list --repo latark/broker --state open --limit 50 --base main --head feat --label ready "
+                "--author latark --assignee latark --json number,title --jq '.[].number' --draft --web",
+                "gh pr list --repo=latark/agent-kit --state=merged --limit=5 --base=main --head=feat --label=x "
+                "--author=y --assignee=z --json=number,title --jq=.[] --template={{.}}",
+                "gh pr list -R latark/agent-kit -s open -L 5 -B main -H feat -l ready -A latark -a latark "
+                "--json number -q '.[]' -t '{{.}}' -d -w",
+                "gh pr list -dL5 -Rlatark/agent-kit -sopen", "gh pr list --template '{{.}}' -R latark/agent-kit"):
+        case(f"hq: {cmd} — можно", hq(cmd), True)
+    case("hq: главная сессия окна без agent_type: gh pr list -R свой --json — можно",
+         hq("gh pr list -R latark/agent-kit --json number,title", role=None), True)
+    case("hq: gh -R свой pr list — можно", hq("gh -R latark/agent-kit pr list --state open", role=None), True)
+    case("hq: gh pr list без -R — отказ", hq("gh pr list --state open"), False, "gh pr list -R")
+    case("hq: gh pr list без -R (главная сессия) — отказ", hq("gh pr list", role=None), False, "-R")
+    case("hq: gh pr list -R без значения — отказ", hq("gh pr list -R"), False, "-R без репозитория")
+    for cmd in ("gh pr list -R torvalds/linux", "gh pr list --repo=torvalds/linux --state open",
+                "gh pr list -Rtorvalds/linux", "gh pr list -R latark/agent-kit -R torvalds/linux",
+                "gh -R torvalds/linux pr list"):
+        case(f"hq: {cmd} — чужой -R — отказ", hq(cmd, role=None), False, "нет в [merge_repos]")
+    for cmd in ("gh pr list -R latark/agent-kit --json number,comments", "gh pr list -R latark/agent-kit --json=comments",
+                "gh pr list -R latark/agent-kit --json reviews", "gh pr list -R latark/agent-kit --json latestReviews",
+                "gh pr list -R latark/agent-kit --comments"):
+        case(f"hq: {cmd} — отказ", hq(cmd), False, "обсуждений")
+    for cmd in ("gh pr list -R latark/agent-kit --search 'is:open x'", "gh pr list -R latark/agent-kit --search=x",
+                "gh pr list -R latark/agent-kit -S x", "gh pr list -R latark/agent-kit -Sx",
+                "gh pr list -R latark/agent-kit -dS x"):
+        case(f"hq: {cmd} — отказ (текст запроса уходит в GitHub)", hq(cmd), False, "--search/-S")
+    for cmd in ("gh pr list -R latark/agent-kit 5", "gh pr list 5 -R latark/agent-kit",
+                "gh pr list -R latark/agent-kit open", "gh pr list -R latark/agent-kit -- 5"):
+        case(f"hq: {cmd} — отказ", hq(cmd), False, "hq-gh")
+    case("hq: gh pr list позиционное слово — отказ", hq("gh pr list -R latark/agent-kit 5"), False, "позиционных")
+    case("hq: gh pr list --app — отказ (флага нет в списке)", hq("gh pr list -R latark/agent-kit --app x"), False,
+         "--app не разрешён")
+    case("hq: gh pr list -c — отказ", hq("gh pr list -R latark/agent-kit -c"), False, "флаг -c")
+    case("hq: gh pr list -i — отказ (короткий флаг не из списка)", hq("gh pr list -R latark/agent-kit -i 3"), False,
+         "флаг -i")
     # вне окна штаба поведение прежнее: правило hq-gh слияние не задевает
     d, r = h.pre("gh pr merge 5 --squash")
     check("координатор: gh pr merge — правило hq-gh не задевает", "hq-gh" not in r, r)

@@ -312,6 +312,149 @@ def test_autostart_owner_elsewhere_0564():
           f"0564: в задании координатору не те задачи: {text[-400:]}")
 
 
+def goal_transcript(e, a, cond, met=False):
+    """Транскрипт сессии a с целью /goal: запись goal_status, как её пишет Claude Code (attachment, met, condition)."""
+    d = os.path.join(e.home, ".claude", "projects", "".join(ch if ch.isalnum() else "-" for ch in a["cwd"]))
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, a["sessionId"] + ".jsonl")
+    with open(p, "a") as fh:
+        fh.write(json.dumps({"type": "attachment", "attachment": {"type": "goal_status", "met": met, "sentinel": True,
+                                                                  "condition": cond}}, ensure_ascii=False) + "\n")
+    return p
+
+
+def test_autostart_goal_released_on_handover_0631():
+    """metis-0631: окно поднято самозапуском с /goal по задачам mg-0001, mg-0002; mg-0001 передали другой сессии (owner
+    сменился) — за один проход цель снимается: прежняя сессия остановлена, новая того же имени с /goal по оставшейся
+    mg-0002 и следующей из очереди mg-0003, без mg-0001; тревога. Пока задачи окна на нём — «уже работает», ничего не
+    трогаем. Сделанная (done) и «ждёт» (waiting) цель не снимают. Ушли все и очереди нет — сессия остановлена и убрана
+    из списка (claude stop + rm). Сессию, которая ждёт вас (blocked), не трогаем — тревога."""
+    e = Env()
+    e.direction("mg-dir")
+    e.task("mg-0001", "mg-dir")
+    e.task("mg-0002", "mg-dir")
+    e.run("watch", t=T0)
+    e.board("mg-0001", T0 + 10)
+    e.board("mg-0002", T0 + 20)
+    e.run("watch", t=T0 + 60)
+    starts, text = _bg_text(e)
+    check(len(starts) == 1 and "Все: mg-0001, mg-0002." in text, f"0631: самозапуск не тот: {starts}")
+    goal = starts[0][-1]
+    check(goal.startswith("/goal "), f"0631: самозапуск без /goal: {goal[:80]}")
+    a = bg("mg-dir", "working", "a6a10631-1", pid=51, started=T0 + 61)
+    a["status"] = "busy"
+    a["cwd"] = os.path.join(e.home, "projects", "mg-dir")
+    e.agents([a])
+    goal_transcript(e, a, goal[len("/goal "):])
+    # задачи окна на нём, одна сделана, другая ждёт — цель не трогаем
+    e.task("mg-0001", "mg-dir", status="done")
+    e.task("mg-0002", "mg-dir", status="waiting", extra="waiting_on: human\nnext: ответ\n")
+    out = e.run("watch", "--dry-run", t=T0 + 400).stdout
+    check("цель окна" not in out, f"0631: цель снята без передачи: {out}")
+    e.run("watch", t=T0 + 400)
+    check(len(_bgs(e)) == 1 and not [c for c in e.calls() if c[:1] == ["stop"]],
+          f"0631: сессию тронули без передачи задачи: {e.calls()}")
+    # передача: owner mg-0001 — другая сессия; mg-0002 снова в работе у окна; в очереди появилась mg-0003
+    e.task("mg-0001", "mg-dir", status="doing", extra="owner: agent-kit-47\n")
+    e.task("mg-0002", "mg-dir", status="doing")
+    e.task("mg-0003", "mg-dir")
+    e.board("mg-0003", T0 + 500)
+    out = e.run("watch", "--dry-run", t=T0 + 600).stdout
+    check("mg-dir: цель окна на задачах, которые ушли: mg-0001 (ведёт agent-kit-47) — перезапустил бы с новой целью"
+          in out, f"0631: dry-run не говорит о снятии цели: {out}")
+    e.run("watch", t=T0 + 700, extra={"FAKE_STOP_MARK": "1"})
+    check(["stop", "a6a10631"] in e.calls(), f"0631: сессия на чужой задаче не остановлена: {e.calls()}")
+    starts = _bgs(e)
+    new = starts[-1][-1] if len(starts) == 2 else ""
+    check(new.startswith("/goal [Пантеон: смена цели]") and "Все: mg-0002, mg-0003." in new
+          and "Другие задачи и пункты эпика в эту цель не входят" in new and "a6a10631" in new,
+          f"0631: новая цель не та: {starts[-1:]}")
+    check("Все: mg-0001" not in new and "mg-0001, mg-0002" not in new, f"0631: переданная задача осталась в цели: {new}")
+    check("самозапуск mg-dir: цель окна снята — mg-0001 (ведёт agent-kit-47); окно перезапущено с новой целью"
+          in e.alerts(), f"0631: нет тревоги о смене цели: {e.alerts()[-400:]}")
+    rows = [r for r in _start_rows(e) if r[1:2] == ["fresh-start"]]
+    check(rows and rows[-1][2] == "mg-dir" and "ушли mg-0001" in rows[-1][-1], f"0631: нет строки fresh-start: {rows}")
+    # новая сессия с новой целью — следующий проход её не трогает
+    b = bg("mg-dir", "working", "b6b10631-2", pid=52, started=T0 + 701)
+    b["status"] = "busy"
+    b["cwd"] = a["cwd"]
+    e.agents([b])
+    goal_transcript(e, b, new[len("/goal "):])
+    e.run("watch", t=T0 + 1000)
+    check(len(_bgs(e)) == 2 and ["stop", "b6b10631"] not in e.calls(), f"0631: новую цель сняли снова: {e.calls()}")
+    # ушли все задачи цели, очереди нет — остановить и убрать из списка
+    for n in (2, 3):
+        e.task(f"mg-000{n}", "mg-dir", status="dropped" if n == 2 else "doing", extra="" if n == 2 else "owner: zeus\n")
+    e.run("watch", t=T0 + 1300, extra={"FAKE_STOP_MARK": "1"})
+    check(["stop", "b6b10631"] in e.calls() and ["rm", "b6b10631"] in e.calls() and len(_bgs(e)) == 2,
+          f"0631: без очереди сессия не остановлена или поднята новая: {e.calls()[-4:]}")
+    check("цель окна снята — mg-0002 (отменена), mg-0003 (ведёт zeus); новой задачи сейчас нет (очереди нет)"
+          in e.alerts(), f"0631: нет тревоги об остановке: {e.alerts()[-400:]}")
+    # ждёт вас (blocked) — не трогаем, тревога
+    e2 = Env()
+    e2.direction("mh-dir")
+    e2.task("mh-0001", "mh-dir", extra="owner: agent-kit-9\n")
+    c = bg("mh-dir", "blocked", "c6c10631-3", pid=53)
+    c["cwd"] = os.path.join(e2.home, "projects", "mh-dir")
+    e2.agents([c])
+    goal_transcript(e2, c, "[Пантеон: поручение от tick] Самозапуск дежурным по задачам: следующая: mh-0001. "
+                    "Все: mh-0001. Прочитай STATUS.md")
+    e2.run("watch", t=T0)
+    check(not [x for x in e2.calls() if x[:1] in (["stop"], ["--bg"])], f"0631: blocked тронули: {e2.calls()}")
+    check("сессия ждёт вас, сниму после ответа" in e2.alerts(), f"0631: нет тревоги blocked: {e2.alerts()[-300:]}")
+    # цель достигнута (met) — снимать нечего
+    goal_transcript(e2, c, "[Пантеон: поручение от tick] Самозапуск дежурным: Все: mh-0001.", met=True)
+    c["state"] = "working"
+    e2.agents([c])
+    e2.run("watch", t=T0 + 300)
+    check(not [x for x in e2.calls() if x[:1] in (["stop"], ["--bg"])], f"0631: снята достигнутая цель: {e2.calls()}")
+    # задачу перенесли в другое направление, а подъём закрыт (планировщик на паузе) — остановить без новой сессии
+    e2.direction("ot-dir")
+    e2.task("mh-0002", "ot-dir")
+    e2.task("mh-0003", "mh-dir")
+    e2.board("mh-0003", T0 + 310)
+    goal_transcript(e2, c, "[Пантеон: поручение от tick] Самозапуск дежурным: следующая: mh-0002. Все: mh-0002.")
+    open(e2.st("paused"), "w").write("x\n")
+    e2.run("watch", t=T0 + 400, extra={"FAKE_STOP_MARK": "1"})
+    check(["stop", "c6c10631"] in e2.calls() and ["rm", "c6c10631"] in e2.calls()
+          and not [x for x in e2.calls() if x[:1] == ["--bg"]], f"0631: на паузе не остановлена: {e2.calls()}")
+    check("mh-0002 (перенесена в ot-dir); новой задачи сейчас нет (весь планировщик на паузе)" in e2.alerts(),
+          f"0631: нет тревоги о переносе: {e2.alerts()[-400:]}")
+    # ревью argus Б2: ушедшая задача, а своя ещё в doing, подъём закрыт (пауза) — сессию не гасить, тревога «снимем»
+    e3 = Env()
+    e3.direction("mk-dir")
+    e3.task("mk-0001", "mk-dir", status="doing", extra="owner: agent-kit-5\n")
+    e3.task("mk-0002", "mk-dir", status="doing")
+    e3.board("mk-0001", T0 + 10)
+    e3.board("mk-0002", T0 + 20)
+    k = bg("mk-dir", "working", "d6d10631-4", pid=54, started=T0 + 30)
+    k["status"] = "busy"
+    k["cwd"] = os.path.join(e3.home, "projects", "mk-dir")
+    e3.agents([k])
+    goal_transcript(e3, k, "[Пантеон: поручение от tick] Самозапуск дежурным по задачам: следующая: mk-0001. "
+                    "Все: mk-0001, mk-0002. Прочитай STATUS.md")
+    open(e3.st("paused"), "w").write("x\n")
+    out = e3.run("watch", "--dry-run", t=T0 + 100).stdout
+    check("сессия ведёт свои mk-0002, сниму, когда подъём откроется: весь планировщик на паузе" in out,
+          f"0631 Б2: dry-run не тот: {out}")
+    e3.run("watch", t=T0 + 100, extra={"FAKE_STOP_MARK": "1"})
+    check(not [x for x in e3.calls() if x[:1] in (["stop"], ["rm"], ["--bg"])],
+          f"0631 Б2: сессию со своей задачей в doing остановили на паузе: {e3.calls()}")
+    check("цель окна на задачах, которые ушли: mk-0001 (ведёт agent-kit-5); сессия ведёт свои mk-0002 — снимем, когда "
+          "подъём откроется (весь планировщик на паузе)" in e3.alerts(), f"0631 Б2: нет тревоги: {e3.alerts()[-400:]}")
+    # ревью argus Б1: между снимком и блокировкой владелец поднял окно вручную — под блокировкой отказ, stop не зовётся
+    os.remove(e3.st("paused"))
+    manual = bg("mk-dir", "working", "e6e10631-5", pid=55, started=T0 + 150)
+    manual["status"] = "busy"
+    nxt = os.path.join(e3.tmp, "agents-next.json")
+    open(nxt, "w").write(json.dumps([k, manual]))
+    e3.run("watch", t=T0 + 200, extra={"FAKE_STOP_MARK": "1", "FAKE_AGENTS_NEXT": nxt})
+    check(not [x for x in e3.calls() if x[:1] in (["stop"], ["rm"], ["--bg"])],
+          f"0631 Б1: ручную сессию или старую тронули после повторной проверки: {e3.calls()}")
+    check("цель окна на задачах, которые ушли: mk-0001 (ведёт agent-kit-5) — смена отложена: уже работает" in e3.alerts(),
+          f"0631 Б1: нет тревоги об отложенной смене: {e3.alerts()[-400:]}")
+
+
 def _bg_text(e):
     starts = [c for c in e.calls() if c[:1] == ["--bg"]]
     return starts, " ".join(starts[0]) if starts else ""
@@ -2120,6 +2263,169 @@ def test_outward_links_walk_limit_0101():
     finally:
         w.WALK_LIMIT = saved
         shutil.rmtree(d, ignore_errors=True)
+
+
+def _mk_wt_files(d, n):
+    os.makedirs(d, exist_ok=True)
+    for i in range(n):
+        open(os.path.join(d, f"f{i}"), "w").close()
+
+
+def test_outward_links_skips_node_modules_0616():
+    """Копия с 6000 файлами в node_modules/.next не «небезопасна» по WALK_LIMIT; ссылка наружу на любой глубине
+    node_modules (в том числе .pnpm/x/node_modules/y) находится; зависимости больше DEPS_LIMIT — None («не знаю»);
+    6000 файлов вне зависимостей — по-прежнему None."""
+    import importlib
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    w = importlib.import_module("watch")
+    base = os.path.realpath(tempfile.mkdtemp(prefix="walk-", dir=os.environ.get("TMPDIR")))
+    outside = os.path.join(base, "outside")
+    os.makedirs(outside)
+    try:
+        def make(name):
+            d = os.path.join(base, name)
+            _mk_wt_files(os.path.join(d, "node_modules", ".pnpm", "x", "node_modules", "y"), 3000)
+            _mk_wt_files(os.path.join(d, ".next", "cache"), 3000)
+            os.symlink(os.path.join(d, "node_modules", ".pnpm", "x"), os.path.join(d, "node_modules", "inner"))
+            return d
+        clean = make("clean")
+        check(w.outward_links(clean) == (0, None), f"копия без ссылок: {w.outward_links(clean)}")
+        for i, rel in enumerate((("node_modules", "out"), ("node_modules", ".pnpm", "x", "node_modules", "out"),
+                                 ("node_modules", ".pnpm", "x", "node_modules", "y", "deep"),
+                                 (".next", "cache", "out"))):
+            d = make(f"bad{i}")
+            os.symlink(outside, os.path.join(d, *rel))
+            res = w.outward_links(d)
+            check(res and res[0] == 1 and res[1][1] == outside, f"ссылка наружу {rel} не найдена: {res}")
+        saved = w.DEPS_LIMIT
+        try:
+            w.DEPS_LIMIT = 100
+            check(w.outward_links(clean) is None, "зависимости больше DEPS_LIMIT не дали None")
+        finally:
+            w.DEPS_LIMIT = saved
+        plain = os.path.join(base, "plain")
+        _mk_wt_files(plain, 6000)
+        check(w.outward_links(plain) is None, "6000 файлов вне node_modules не дали None")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_sandbox_clean_0620():
+    """Уборка кэшей песочниц: старое без процессов уходит, свежее, занятое процессом и чужие папки остаются;
+    ссылка снимается сама, цель не тронута."""
+    import importlib
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    w = importlib.import_module("watch")
+    base = os.path.realpath(tempfile.mkdtemp(prefix="sbx-", dir=os.environ.get("TMPDIR")))
+    keep_out = os.path.join(base, "outside")
+    os.makedirs(keep_out)
+    open(os.path.join(keep_out, "k"), "w").write("x")
+    root = os.path.join(base, "cache")
+    now = time.time()
+    old = now - 20 * 86400
+
+    def entry(role, part, name, mtime, sub=True):
+        p = os.path.join(root, role, part, name)
+        os.makedirs(os.path.join(p, "deep") if sub else os.path.dirname(p), exist_ok=True)
+        f = p if not sub else os.path.join(p, "deep", "f")
+        open(f, "w").write("x") if sub else open(p, "w").write("x")
+        for q in ([p, os.path.join(p, "deep"), f] if sub else [p]):
+            os.utime(q, (mtime, mtime))
+        return p
+    try:
+        gone = entry("argus", "tmp", "old1", old)
+        gone2 = entry("argus", "npm", "old2", old)
+        gone3 = entry("argus", "logs", "x.log", old, sub=False)
+        fresh = entry("argus", "tmp", "fresh", now)
+        mixed = entry("argus", "tmp", "mixed", old)
+        os.utime(os.path.join(mixed, "deep", "f"), (now, now))  # внутри свежее — запись остаётся
+        held = entry("argus", "tmp", "held", old)
+        other = entry("argus", "work", "old", old)  # не из списка частей
+        link = os.path.join(root, "argus", "tmp", "lnk")
+        os.symlink(keep_out, link)
+        os.makedirs(os.path.join(root, "evil-role", "tmp"))
+        os.makedirs(os.path.join(keep_out, "tmp", "old"))
+        os.utime(os.path.join(keep_out, "tmp", "old"), (old, old))
+        os.utime(os.path.join(keep_out, "tmp"), (old, old))
+        os.symlink(keep_out, os.path.join(root, "linkrole"))
+        os.makedirs(os.path.join(root, "partlink"))
+        os.symlink(os.path.join(keep_out, "tmp"), os.path.join(root, "partlink", "tmp"))
+        removed, failed = w.sandbox_clean(root, now, {os.path.join(held, "deep", "f")}, days=7)
+        check(not os.path.exists(gone) and not os.path.exists(gone2) and not os.path.exists(gone3),
+              "старое не убрано")
+        check(all(os.path.exists(x) for x in (fresh, mixed, held, other)), "свежее, занятое или чужое убрано")
+        check(os.path.exists(os.path.join(keep_out, "k")), "цель ссылки тронута")
+        check(removed >= 3 and failed == 0, f"счётчики: {removed} {failed}")
+        # ссылка tmp/lnk сама свежая по lstat — остаётся; состаренную снимаем, цель цела
+        os.utime(link, (old, old), follow_symlinks=False)
+        w.sandbox_clean(root, now, set(), days=7)
+        check(not os.path.lexists(link) and os.path.exists(os.path.join(keep_out, "k")), "ссылка не снята или цель тронута")
+        check(not os.path.exists(held), "без процесса запись должна уйти")
+        # окно-ссылка не обходится вовсе
+        w.sandbox_clean(root, now + 99 * 86400, set(), days=7)
+        check(os.path.exists(os.path.join(keep_out, "k")) and os.path.isdir(os.path.join(keep_out, "tmp", "old")),
+              "обход через окно- или часть-ссылку тронул цель")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_sandbox_clean_swap_0620():
+    """Окно подменяет папку части ссылкой наружу между проверкой и удалением: цель снаружи цела."""
+    import importlib
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    w = importlib.import_module("watch")
+    base = os.path.realpath(tempfile.mkdtemp(prefix="sbx-", dir=os.environ.get("TMPDIR")))
+    try:
+        root = os.path.join(base, "cache")
+        part = os.path.join(root, "argus", "tmp")
+        os.makedirs(os.path.join(part, "old1"))
+        os.makedirs(os.path.join(base, "outside", "old1"))
+        open(os.path.join(base, "outside", "old1", "keep"), "w").write("x")
+        old = time.time() - 30 * 86400
+        for q in (os.path.join(part, "old1"), part):
+            os.utime(q, (old, old))
+        real_newer, swapped = w._tree_newer, []
+
+        def newer(path, lim):
+            r = real_newer(path, lim)
+            if not swapped:  # между проверкой возраста и удалением
+                swapped.append(1)
+                os.rename(part, part + "-moved")
+                os.symlink(os.path.join(base, "outside"), part)
+            return r
+        w._tree_newer = newer
+        try:
+            w.sandbox_clean(root, time.time(), set(), days=7)
+        finally:
+            w._tree_newer = real_newer
+        check(swapped and os.path.exists(os.path.join(base, "outside", "old1", "keep")),
+              "после подмены части ссылкой тронута цель снаружи")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_sandbox_cap_alert_0620():
+    """Дежурный: кэш выше потолка после уборки — строка в alerts.md; в пределах — нет; старое убирает проходом."""
+    e = Env()
+    root = os.path.join(e.home, "Library", "Caches", "pantheon-sandbox", "argus")
+    old_dir = os.path.join(root, "tmp", "old")
+    os.makedirs(old_dir)
+    open(os.path.join(old_dir, "big"), "wb").write(b"0" * 3 * 1024 * 1024)
+    fresh = os.path.join(root, "tmp", "fresh")
+    os.makedirs(fresh)
+    open(os.path.join(fresh, "big"), "wb").write(b"0" * 3 * 1024 * 1024)
+    old = T0 - 20 * 86400
+    for q in (old_dir, os.path.join(old_dir, "big")):
+        os.utime(q, (old, old))
+    r = e.run("watch", t=T0, extra={"PANTHEON_SANDBOX_CAP_MB": "1"})
+    check("кэши песочниц" in e.alerts() and "потолке 1 МБ" in e.alerts(), f"нет тревоги о потолке: {e.alerts()[-400:]}")
+    check(not os.path.exists(old_dir) and os.path.exists(fresh), "старое не убрано или свежее убрано")
+    e2 = Env()
+    r2 = os.path.join(e2.home, "Library", "Caches", "pantheon-sandbox", "argus", "tmp", "fresh")
+    os.makedirs(r2)
+    open(os.path.join(r2, "big"), "wb").write(b"0" * 1024 * 1024)
+    e2.run("watch", t=T0, extra={"PANTHEON_SANDBOX_CAP_MB": "100"})
+    check("потолке" not in e2.alerts(), "тревога при объёме в пределах потолка")
 
 
 def test_worktree_outside_and_prune_0118():

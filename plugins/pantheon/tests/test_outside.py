@@ -399,28 +399,31 @@ check("профиль: deny чтения < allow шаблонов .env < deny se
 def env_probe(profile):
     """Живая проба: (None, причина), если sandbox-exec не запускается; иначе список расхождений с ожиданием."""
     d = os.path.realpath(tempfile.mkdtemp(prefix="env-probe-", dir=_ROOT))
-    try:
-        for n in (".env", ".env.local", ".env.production.local", ".env.example.bak", ".env.example", ".env.sample",
-                  ".env.template"):
-            with open(os.path.join(d, n), "w") as fh:
-                fh.write("x")
-    except PermissionError as e:   # сам тест идёт под профилем прохода (`pantheon outside test`): .env* там закрыт
-        return None, f"файлы .env* не создать — тест уже под песочницей ({e.strerror})"
-    os.makedirs(os.path.join(d, "secrets"))
-    with open(os.path.join(d, "secrets", ".env.example"), "w") as fh:
-        fh.write("x")
     sb = os.path.join(d, "p.sb")
     with open(sb, "w") as fh:
         fh.write(profile)
 
     def run(*cmd):
         return subprocess.run(["/usr/bin/sandbox-exec", "-f", sb, *cmd], capture_output=True, text=True, cwd=d)
+    # metis-0634: сначала — запускается ли sandbox-exec, и только потом файлы .env*. Внутри песочницы (окно роли, сам
+    # проход outside) вложенный sandbox_apply запрещён, а профиль outside ещё и не даёт создать .env*: файлы первыми —
+    # PermissionError и весь файл тестов красный вместо «ПРОПУЩЕНО».
     try:
-        r = run("/bin/cat", ".env.example")
+        r = run("/usr/bin/true")
     except OSError as e:
         return None, str(e)
     if r.returncode != 0 and "sandbox_apply" in r.stderr:
         return None, r.stderr.strip()
+    try:
+        for n in (".env", ".env.local", ".env.production.local", ".env.example.bak", ".env.example", ".env.sample",
+                  ".env.template"):
+            with open(os.path.join(d, n), "w") as fh:
+                fh.write("x")
+    except PermissionError as e:   # тест под профилем прохода (`pantheon outside test`): .env* там закрыт
+        return None, f"файлы .env* не создать — тест уже под песочницей ({e.strerror})"
+    os.makedirs(os.path.join(d, "secrets"))
+    with open(os.path.join(d, "secrets", ".env.example"), "w") as fh:
+        fh.write("x")
     bad = []
     for n in (".env.example", ".env.sample", ".env.template"):
         if run("/bin/cat", n).returncode != 0:

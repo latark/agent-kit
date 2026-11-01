@@ -122,7 +122,7 @@ def collect(plugin):
             desc = json.load(fh).get("description", "")
         items.append((".claude-plugin/plugin.json", 1, desc))
     # роли, части ролей и шаблон ~/ai/pantheon читает человек (или они становятся его окном): все строки
-    for pattern in (("roles", "*.tmpl"), ("roles", "_parts", "*.part"), ("template", "pantheon", "*")):
+    for pattern in (("roles", "*.tmpl"), ("roles", "_parts", "*.part"), ("roles", "_ref", "*.md"), ("template", "pantheon", "*")):
         for p in sorted(glob.glob(os.path.join(plugin, *pattern))):
             if os.path.isfile(p):
                 items += [(os.path.relpath(p, plugin), n, t) for n, t in all_lines(p)]
