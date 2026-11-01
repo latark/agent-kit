@@ -50,7 +50,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon merge request|run|status|cancel   слияние PR ядра по Touch ID (metis-0285, lib/merge.py): заявка роли →
                                         плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA
   pantheon outside test|serve|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
-                                        тесты проекта или dev-сервер под sandbox-exec без ключей, браузеров и
+                                        тесты проекта или dev-сервер (своя копия на коммите, порт 4300–4399, не
+                                        больше двух) под sandbox-exec без ключей, браузеров и
                                         местного прокси → код и хвост журнала или адрес; после «принять» argus
                                         плановый проход сам гоняет тесты и пишет запись tests шлюза слияния
   pantheon traces [--markers ФАЙЛ] | install-hook   личные следы до push (lib/traces.py, metis-0414): та же проверка, что CI
@@ -4709,20 +4710,23 @@ def merge_kick():
 
 
 def outside_kick():
-    """Проверки вне окна роли ([sb-simplify] п. 7, lib/outside.py) — отдельным процессом: тесты идут минутами."""
-    try:
-        if locked("outside-run") or not outside_mod().pending():
-            return
-        if os.environ.get("PANTHEON_DRYRUN") == "1":
-            with open(path("dryrun.log"), "a") as fh:
-                fh.write(f"{int(now())} outside-run\n")
-            return
-        subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "outside", "run"], env=outside_mod().pass_env(),
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-    except Exception as e:  # сбой проверок не должен останавливать тик
-        alert_once("outside-kick", type(e).__name__, f"проверки вне окна: проход не запущен ({type(e).__name__}: {e})",
-                   "pantheon-tick")
+    """Проверки вне окна роли ([sb-simplify] п. 7, lib/outside.py) — два отдельных процесса со своими замками: проход
+    тестов (`outside run`, тесты идут минутами и часами) и проход серверов (`outside run --serve`, сторож живёт, пока
+    есть серверы). Сервер и «стоп» не ждут тестов (metis-0614)."""
+    for name, flag, due in (("outside-run", [], "pending_test"), ("outside-serve", ["--serve"], "pending_serve")):
+        try:
+            if locked(name) or not getattr(outside_mod(), due)():
+                continue
+            if os.environ.get("PANTHEON_DRYRUN") == "1":
+                with open(path("dryrun.log"), "a") as fh:
+                    fh.write(f"{int(now())} {name}\n")
+                continue
+            subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "outside", "run", *flag],
+                             env=outside_mod().pass_env(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+        except Exception as e:  # сбой проверок не должен останавливать тик
+            alert_once("outside-kick", type(e).__name__,
+                       f"проверки вне окна: проход {name} не запущен ({type(e).__name__}: {e})", "pantheon-tick")
 
 def build_app():
     """~/Applications/Доска.app: Spotlight «Доска» и значок в Dock открывают доску в Obsidian."""
