@@ -420,6 +420,39 @@ def test_autostart_goal_released_on_handover_0631():
           and not [x for x in e2.calls() if x[:1] == ["--bg"]], f"0631: на паузе не остановлена: {e2.calls()}")
     check("mh-0002 (перенесена в ot-dir); новой задачи сейчас нет (весь планировщик на паузе)" in e2.alerts(),
           f"0631: нет тревоги о переносе: {e2.alerts()[-400:]}")
+    # ревью argus Б2: ушедшая задача, а своя ещё в doing, подъём закрыт (пауза) — сессию не гасить, тревога «снимем»
+    e3 = Env()
+    e3.direction("mk-dir")
+    e3.task("mk-0001", "mk-dir", status="doing", extra="owner: agent-kit-5\n")
+    e3.task("mk-0002", "mk-dir", status="doing")
+    e3.board("mk-0001", T0 + 10)
+    e3.board("mk-0002", T0 + 20)
+    k = bg("mk-dir", "working", "d6d10631-4", pid=54, started=T0 + 30)
+    k["status"] = "busy"
+    k["cwd"] = os.path.join(e3.home, "projects", "mk-dir")
+    e3.agents([k])
+    goal_transcript(e3, k, "[Пантеон: поручение от tick] Самозапуск дежурным по задачам: следующая: mk-0001. "
+                    "Все: mk-0001, mk-0002. Прочитай STATUS.md")
+    open(e3.st("paused"), "w").write("x\n")
+    out = e3.run("watch", "--dry-run", t=T0 + 100).stdout
+    check("сессия ведёт свои mk-0002, сниму, когда подъём откроется: весь планировщик на паузе" in out,
+          f"0631 Б2: dry-run не тот: {out}")
+    e3.run("watch", t=T0 + 100, extra={"FAKE_STOP_MARK": "1"})
+    check(not [x for x in e3.calls() if x[:1] in (["stop"], ["rm"], ["--bg"])],
+          f"0631 Б2: сессию со своей задачей в doing остановили на паузе: {e3.calls()}")
+    check("цель окна на задачах, которые ушли: mk-0001 (ведёт agent-kit-5); сессия ведёт свои mk-0002 — снимем, когда "
+          "подъём откроется (весь планировщик на паузе)" in e3.alerts(), f"0631 Б2: нет тревоги: {e3.alerts()[-400:]}")
+    # ревью argus Б1: между снимком и блокировкой владелец поднял окно вручную — под блокировкой отказ, stop не зовётся
+    os.remove(e3.st("paused"))
+    manual = bg("mk-dir", "working", "e6e10631-5", pid=55, started=T0 + 150)
+    manual["status"] = "busy"
+    nxt = os.path.join(e3.tmp, "agents-next.json")
+    open(nxt, "w").write(json.dumps([k, manual]))
+    e3.run("watch", t=T0 + 200, extra={"FAKE_STOP_MARK": "1", "FAKE_AGENTS_NEXT": nxt})
+    check(not [x for x in e3.calls() if x[:1] in (["stop"], ["rm"], ["--bg"])],
+          f"0631 Б1: ручную сессию или старую тронули после повторной проверки: {e3.calls()}")
+    check("цель окна на задачах, которые ушли: mk-0001 (ведёт agent-kit-5) — смена отложена: уже работает" in e3.alerts(),
+          f"0631 Б1: нет тревоги об отложенной смене: {e3.alerts()[-400:]}")
 
 
 def _bg_text(e):
