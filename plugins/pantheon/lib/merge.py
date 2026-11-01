@@ -20,7 +20,8 @@ PR ядра защит (Д3) агенты не сливают: его слива
      записал их, по моделям транскрипта argus — metis-0176), рецензентов-«принять» не
      меньше двух, «вернуть» нет; проверки GitHub (CI) — тот же разбор ci_verdict, что у шлюза guard (metis-0633):
      обязательные из REQUIRED_CHECKS — запуск Actions от pull_request на этом SHA с SUCCESS (ci_runs_fetch, дубль —
-     худший итог), у репозитория без записи — все проверки rollup. CI ещё идёт, обязательной или любых проверок пока
+     худший итог; PR из форка — запуск с head_repository и head_branch его форка и ветки, ci_fork, metis-0649), у
+     репозитория без записи — все проверки rollup. CI ещё идёт, обязательной или любых проверок пока
      нет, запуски не получены — заявка ждёт; красная или SKIPPED — снята с тревогой.
      Список файлов PR (REST pulls/N/files) полон — иначе ждёт: окно показывает задетые файлы ядра, без списка их не
      показать. PR правит version в plugin.json плагина или трогает
@@ -279,10 +280,12 @@ def gh_path():
 
 
 def pr_view(repo, pr):
-    """{headRefOid, state, isDraft, title, baseRefName, statusCheckRollup, changedFiles} или None — gh не ответил."""
+    """{headRefOid, state, isDraft, title, baseRefName, statusCheckRollup, changedFiles, isCrossRepository,
+    headRepository, headRefName} или None — gh не ответил. Последние три — голова PR из форка (ci_fork, metis-0649)."""
     try:
         r = subprocess.run([gh_path(), "pr", "view", str(pr), "-R", repo, "--json",
-                            "headRefOid,state,isDraft,title,baseRefName,statusCheckRollup,changedFiles"],
+                            "headRefOid,state,isDraft,title,baseRefName,statusCheckRollup,changedFiles,"
+                            "isCrossRepository,headRepository,headRefName"],
                            capture_output=True, text=True, timeout=GH_TIMEOUT, env=gh_env())
         data = json.loads(r.stdout) if r.returncode == 0 else None
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -365,9 +368,9 @@ def is_core(path):
     return p in {c.casefold() for c in CORE_FILES} or any(p == d or p.startswith(d + "/") for d in CORE_DIR)
 
 
-# проверки GitHub на head PR (metis-0285, 0633): ci_verdict, ci_runs, required_checks, REQUIRED_CHECKS, CI_RUNS_API,
-# CI_OK, CI_WAIT и CI_NONE — дословно те же, что в шлюзе guard (plugins/guard/hooks/merge_gate.py): плагины порознь,
-# друг друга не импортируют, совпадение сверяет test_merge по AST. Правишь — правь оба
+# проверки GitHub на head PR (metis-0285, 0633, 0649): ci_verdict, ci_runs, ci_fork, required_checks, REQUIRED_CHECKS,
+# CI_RUNS_API, CI_OK, CI_WAIT и CI_NONE — дословно те же, что в шлюзе guard (plugins/guard/hooks/merge_gate.py):
+# плагины порознь, друг друга не импортируют, совпадение сверяет test_merge по AST. Правишь — правь оба
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
 CI_NONE = "проверки GitHub не получены"
@@ -391,19 +394,40 @@ def required_checks(repo, base):
     return tuple((w, j) for w, j, b in got if b is None or not isinstance(base, str) or b == base)
 
 
-def ci_runs(workflow_runs, check_runs, sha, pr):
+def ci_fork(view):
+    """Голова PR из форка по ответу gh pr view (metis-0649): None — isCrossRepository не true (PR из того же
+    репозитория), иначе (owner/name форка в нижнем регистре, ветка head) из headRepository.nameWithOwner и
+    headRefName; поле не строка — пустая строка на его месте, и ci_runs отвечает «не получены»."""
+    if not isinstance(view, dict) or view.get("isCrossRepository") is not True:
+        return None
+    repo, branch = view.get("headRepository"), view.get("headRefName")
+    name = repo.get("nameWithOwner") if isinstance(repo, dict) else None
+    return (name.lower() if isinstance(name, str) else "", branch if isinstance(branch, str) else "")
+
+
+def ci_runs(workflow_runs, check_runs, sha, pr, fork=None):
     """Запуски Actions PR pr на коммите sha с событием: [{workflowName, name, status, conclusion, event}] по ответам
     CI_RUNS_API (actions/runs и check-runs). Не идут в список: проверка без запуска Actions с тем же check_suite_id
     (стороннее приложение с тем же именем), чужой head_sha и запуск, в pull_requests которого нет этого PR (запуск
-    чужого PR на том же SHA). Ответ неполон (total_count больше полученного: per_page=100 без пагинации, скрытой
-    может быть красная запись) — строка «неполные данные CI»; не разобран — None."""
+    чужого PR на том же SHA). PR из форка (fork — ответ ci_fork, metis-0649): у его запусков GitHub pull_requests не
+    заполняет, поэтому засчитывается запуск от pull_request, у которого head_repository.full_name и head_branch —
+    форк и ветка этого PR (фильтру REST не верим, поля сверяются здесь); форк или ветка не получены — строка «не
+    получены». Ответ неполон (total_count больше полученного: per_page=100 без пагинации, скрытой может быть красная
+    запись) — строка «неполные данные CI»; не разобран — None."""
+    if fork is not None and not all(fork):
+        return f"{CI_NONE}: PR из форка, а его репозиторий или ветка head не получены (gh pr view)"
     try:
         wr, cr = workflow_runs["workflow_runs"], check_runs["check_runs"]
         if workflow_runs["total_count"] > len(wr) or check_runs["total_count"] > len(cr):
             return (f"{CI_NONE}: неполные данные CI — запусков {workflow_runs['total_count']} и проверок "
                     f"{check_runs['total_count']}, а получено {len(wr)} и {len(cr)}")
-        suites = {r["check_suite_id"]: r for r in wr
-                  if r["head_sha"] == sha and str(pr) in [str(p["number"]) for p in r["pull_requests"]]}
+        if fork is None:
+            suites = {r["check_suite_id"]: r for r in wr
+                      if r["head_sha"] == sha and str(pr) in [str(p["number"]) for p in r["pull_requests"]]}
+        else:
+            suites = {r["check_suite_id"]: r for r in wr
+                      if r["head_sha"] == sha and r["event"] == "pull_request"
+                      and r["head_repository"]["full_name"].lower() == fork[0] and r["head_branch"] == fork[1]}
         out = []
         for c in cr:
             run = suites.get(c["check_suite"]["id"])
@@ -475,9 +499,9 @@ def ci_verdict(rollup, required=(), runs=None):
     return "ok", "", notes
 
 
-def ci_runs_fetch(repo, pr, sha):
+def ci_runs_fetch(repo, pr, sha, fork=None):
     """Запуски Actions на head SHA с событием (metis-0633): два GET REST по CI_RUNS_API, список ci_runs или None —
-    gh не ответил или ответ не разобран."""
+    gh не ответил или ответ не разобран; fork — голова PR из форка (ci_fork, metis-0649)."""
     got = []
     for api in CI_RUNS_API:
         try:
@@ -488,7 +512,7 @@ def ci_runs_fetch(repo, pr, sha):
             return None
         if got[-1] is None:
             return None
-    return ci_runs(got[0], got[1], sha, pr)
+    return ci_runs(got[0], got[1], sha, pr, fork)
 
 
 def ci_state(rollup, required=(), runs=None):
@@ -535,7 +559,8 @@ def gate(repo, pr, sha, view):
     if len(latest) < MIN_ACCEPTS:
         return "fail", f"«принять» от argus на Opus — {len(latest)} из {MIN_ACCEPTS}"
     required = required_checks(repo, view.get("baseRefName"))
-    state, why = ci_state(view.get("statusCheckRollup"), required, ci_runs_fetch(repo, pr, sha) if required else None)
+    runs = ci_runs_fetch(repo, pr, sha, ci_fork(view)) if required else None
+    state, why = ci_state(view.get("statusCheckRollup"), required, runs)
     if state != "ok":
         return state, why
     return "ok", f"argus ×{len(latest)} ✓, CI ✓"

@@ -3143,6 +3143,7 @@ def check_owner_merge(event, tool_input):
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     _, cmds = bash_analysis(cmd, cwd)
     moved = any(n in ("cd", "chdir", "pushd", "popd") for n, _ in cmds)
+    notes = []  # предупреждения пропуска (metis-0650): едут возвратом, Allow
     for name, texts in cmds:
         if name == "gh" and _gh_parse(texts)[0]:
             return ("Правило push: gh — слово до подкоманды не вычислить (переменная, $(…)), а в команде есть merge: "
@@ -3157,7 +3158,8 @@ def check_owner_merge(event, tool_input):
             why = merge_gate.owner_ci_problem(cwd, moved, found[1])
             if why:
                 return f"Правило push: gh pr merge — {why}"
-    return None
+            notes.extend(merge_gate.notes_of(why))
+    return merge_gate.allow(notes)
 
 
 def check_push(event, tool, tool_input):
@@ -3176,6 +3178,7 @@ def check_push(event, tool, tool_input):
     if can_push and role == "domain-coordinator":
         if any(_inside(x, [pdir]) for x in _norm(private_conf(load_policy())["paths"])):
             can_push = False
+    notes = []  # предупреждения пропуска шлюза слияния (metis-0650): возврат Allow, а не состояние модуля
     for name, texts in cmds:
         if name == "gh" and _gh_parse(texts)[0]:
             return ("Правило push: gh — слово до подкоманды не вычислить (переменная, $(…)), а без него не понять, "
@@ -3196,6 +3199,7 @@ def check_push(event, tool, tool_input):
             why = merge_problem(role, sub, pdir, cwd, moved, args, tool_input.get("command") or "", event)
             if why:
                 return f"Правило push: gh pr merge — {why}"
+            notes.extend(merge_gate.notes_of(why))
             continue
         if name and os.path.basename(name.rstrip("/")) == "pantheon":
             why = review_problem(role, texts, tool_input.get("command") or "", bool(tool_input.get("run_in_background")))
@@ -3224,7 +3228,7 @@ def check_push(event, tool, tool_input):
             if why:
                 return (f"Правило push: {why}. Роли отправляют только свои ветки (develop — лид); в main и master "
                         "сливает владелец, принудительная отправка и удаление веток — тоже только он.")
-    return None
+    return merge_gate.allow(notes)
 
 
 def check_terminal(event, tool, tool_input):
@@ -4116,6 +4120,9 @@ def strict_window(check, event, tool, tool_input):
 
 
 def check_roles(event, tool, tool_input):
+    """Правила ролей по очереди: первый отказ — его текст. Иначе None или merge_gate.Allow — пропуск с
+    предупреждениями шлюза слияния этого события (metis-0650); отказ следующего правила их отбрасывает."""
+    notes = []
     for rule, check in (("private", check_private), ("cdp-role", check_cdp_role), ("push", check_push),
                         ("terminal", check_terminal), ("corpus-role", check_corpus_role),
                         ("tg-secret", check_tg_readd), ("launchd-env", check_launchd_env), ("hestia", check_hestia)):
@@ -4123,7 +4130,8 @@ def check_roles(event, tool, tool_input):
             reason = check(event, tool, tool_input)
             if reason:
                 return reason
-    return None
+            notes.extend(merge_gate.notes_of(reason))
+    return merge_gate.allow(notes)
 
 
 def strict(check, event, tool, tool_input):
@@ -4195,7 +4203,7 @@ def main(raw=None):
         return
     if name == "PreToolUse":
         tool_input = event.get("tool_input") or {}
-        reason = None
+        reason, notes = None, ()  # notes — предупреждения шлюза слияния только этого события (metis-0650)
         if "draft-role" not in OFF:
             reason = strict(check_draft_role, event, tool, tool_input)
         if not reason and tool in WINDOW_ONLY_TOOLS:
@@ -4217,6 +4225,7 @@ def main(raw=None):
                 reason = hard(check_tg_secret_file, tool_input)
         if not reason and (tool == "Bash" or tool in EDIT_TOOLS or tool in READ_TOOLS):
             reason = strict(check_roles, event, tool, tool_input)
+            notes = merge_gate.notes_of(reason)
         if not reason and "pantheon-acl" not in OFF and (tool == "Bash" or tool in EDIT_TOOLS):
             reason = strict(check_pantheon, event, tool, tool_input)
         if not reason and "protect-config" not in OFF and (tool == "Bash" or tool in EDIT_TOOLS):
@@ -4229,10 +4238,10 @@ def main(raw=None):
                 "permissionDecision": "deny",
                 "permissionDecisionReason": reason,
             }}, ensure_ascii=False))
-        elif merge_gate.NOTES:
-            # шлюз слияния пропустил, но есть красная необязательная проверка CI (metis-0633) — строка пользователю
-            print(json.dumps({"systemMessage": "guard, шлюз слияния: " + "; ".join(merge_gate.NOTES)},
-                             ensure_ascii=False))
+        elif notes:
+            # шлюз слияния пропустил, но есть красная необязательная проверка CI (metis-0633) — строка пользователю;
+            # предупреждения — из возврата проверки этого события, а не из модуля (metis-0650)
+            print(json.dumps({"systemMessage": "guard, шлюз слияния: " + "; ".join(notes)}, ensure_ascii=False))
     elif name == "Stop" and "nextjs" not in OFF:
         reason = soft(check_nextjs, event)
         if reason:
