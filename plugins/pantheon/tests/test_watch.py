@@ -3365,10 +3365,11 @@ def test_status_blocked_without_process_0250():
     out = e.run("status", t=T0).stdout
     check("ждут вас: th-dir" not in out and "без процесса: th-dir — ждать нечего" in out and "claude rm thththth" in out,
           f"снятая сессия висит «ждёт вас»: {out}")
-    check("ждут вас: hm-dir — выбрать: А — разрешить" in out, f"сессия с вопросом пропала из «ждут вас»: {out}")
+    # metis-0651: без процесса вообще (ни pid, ни реестра) сессия с вопросом — тоже призрак: имя не держит, вопрос виден
+    check("упали: hm-dir — выбрать: А — разрешить" in out, f"призрак с вопросом: вопрос не виден в «упали»: {out}")
     e.run("watch", t=T0)
-    check("th-dir (thththth) ждёт вас" not in e.alerts() and "hm-dir (hmhmhmhm) ждёт вас" in e.alerts(),
-          f"дежурный: тревога «ждёт вас» по снятой сессии: {e.alerts()}")
+    check("th-dir (thththth) ждёт вас" not in e.alerts() and "hm-dir (hmhmhmhm): процесс умер" in e.alerts()
+          and "ждала: выбрать: А — разрешить" in e.alerts(), f"дежурный: тревога по призраку с вопросом: {e.alerts()}")
     os.remove(os.path.join(e.home, ".claude", "daemon", "roster.json"))
     out = e.run("status", t=T0 + 60).stdout
     check("ждут вас: th-dir" in out, f"без реестра демона сессия объявлена снятой: {out}")
@@ -3697,6 +3698,39 @@ def test_watch_from_hq_window_autostarts_0261():
     st = json.load(open(e.st("autostart.json"))).get("hermes-q") or {}
     check(len(_bgs(e, "hermes-q")) == 1, f"0261 Q3: самозапуск из окна hq не пошёл: {e.calls()} {e.alerts()[-300:]}")
     check(not st.get("fails") and "код 2" not in e.alerts(), f"0261 Q3: сбой самозапуска: {st} {e.alerts()[-300:]}")
+
+
+def test_ghost_blocked_does_not_hold_name_0651():
+    """metis-0651: working/blocked без живого процесса (pid пуст или мёртв, в реестре демона нет) — призрак: имя не
+    держит, wake поднимает ту же сессию, тревога одна. С живым pid или процессом в реестре — по-прежнему держит."""
+    e = Env()
+    e.direction("zz-gh")
+    daemon = os.path.join(e.home, ".claude", "daemon")
+    os.makedirs(daemon, exist_ok=True)
+    roster = os.path.join(daemon, "roster.json")
+    json.dump({"workers": {"other": {"pid": 999999}}}, open(roster, "w"))
+    for state, pid in (("blocked", None), ("working", 999999), ("blocked", 0)):
+        e.agents([bg("zz-gh", state, "cccccccc-1", pid=pid)])
+        out = e.run("wake", "zz-gh", t=T0 + 60).stdout
+        check("не спит" not in out and "поднята" in out, f"0651: призрак {state}/{pid} держит имя: {out}")
+        check(["respawn", "cccccccc"] in e.calls(), f"0651: wake не продолжил сессию призрака: {e.calls()}")
+        open(e.log, "w").close()
+    # плановый проход: одна тревога, сколько бы проходов ни было
+    e.agents([bg("zz-gh", "blocked", "cccccccc-1")])
+    for i in range(3):
+        e.run("watch", t=T0 + 120 + i * 60)
+    check(e.alerts().count("процесс умер") == 1, f"0651: тревог о призраке не одна: {e.alerts()}")
+    # живые не ломаются: pid записи жив / живой процесс в реестре (задание блокирует имя) / реестра нет
+    for rec, ros in ((bg("zz-gh", "blocked", "cccccccc-1", pid=os.getpid()), {"workers": {}}),
+                     (bg("zz-gh", "working", "cccccccc-1"), {"workers": {"cccccccc": {"pid": os.getpid()}}})):
+        json.dump(ros, open(roster, "w"))
+        e.agents([rec])
+        out = e.run("wake", "zz-gh", t=T0 + 60).stdout
+        check("не спит" in out, f"0651: живой {rec['state']} не держит имя: {out}")
+    os.remove(roster)
+    e.agents([bg("zz-gh", "blocked", "cccccccc-1")])
+    out = e.run("wake", "zz-gh", t=T0 + 60).stdout
+    check("не спит" in out, f"0651: без реестра демона записи без pid верим (не утверждаем): {out}")
 
 
 if __name__ == "__main__":

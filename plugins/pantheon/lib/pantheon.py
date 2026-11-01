@@ -2941,6 +2941,8 @@ def reconcile_agents(data, workers=None):
     (2) Обратный случай: «blocked» без процесса и без вопроса (needs в state.json) — сессию снял Claude Code, ждать
     ей нечего (18.10, координатор без процесса весь день «ждёт вас»): noProcess. С вопросом — по-прежнему ждёт вас:
     ответ дойдёт через claude attach, он поднимет процесс.
+    (2а) Призрак (metis-0651): working/blocked без живого процесса вообще (ни pid записи, ни реестра) — state
+    становится failed, ghost=True: имя не держит, wake поднимает.
     (3) Причина для сводки: нет waitingFor — needs задания (blocked) или detail (failed)."""
     workers = daemon_workers() if workers is None else workers
     for a in data:
@@ -2956,6 +2958,15 @@ def reconcile_agents(data, workers=None):
         if (a.get("state") == "blocked" and workers is not None and not alive and not a.get("pid")
                 and js and not js.get("needs")):
             a["noProcess"] = True
+        # metis-0651: working/blocked без живого процесса — ни у записи, ни в реестре демона — призрак: процесс умер, а
+        # строка осталась (02.11 metis-pantheon лежало 1,5 ч: wake отвечал «есть процесс»). Считается упавшей: имя не
+        # держит, wake продолжает её же сессию. Реестр не читается — не утверждаем (workers None); из песочницы живой
+        # процесс даёт EPERM, а это «жив» (pid_alive).
+        if (a.get("state") in ("working", "blocked") and workers is not None and not alive
+                and not (a.get("pid") and pid_alive(a["pid"]))):  # pid 0: kill(0, 0) — своя группа, не доказательство
+            if a["state"] == "blocked" and not a.get("waitingFor") and js.get("needs"):
+                a["waitingFor"] = " ".join(str(js["needs"]).split())[:200]  # вопрос владельцу остаётся виден
+            a["listedState"], a["state"], a["ghost"] = a["state"], "failed", True
         if not a.get("waitingFor"):
             why = js.get("needs") if a.get("state") == "blocked" else js.get("detail") if a.get("state") == "failed" else None
             if why:

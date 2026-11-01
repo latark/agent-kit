@@ -484,6 +484,11 @@ def sessions(agents, doms, t=None):
             continue
         P.clear_fault(*(f"watch-{s}-{sid}" for s in word if s != state))
         why = blocked_why(a) if state == "blocked" else clean_why(a.get("waitingFor"))
+        if a.get("ghost"):  # metis-0651: процесс умер, запись осталась — одна тревога на сессию, пока призрак виден
+            P.alert_once(key, "ghost", f"{name} ({sid}): процесс умер, в claude agents осталась запись "
+                         f"«{a.get('listedState')}»" + (f", ждала: {why}" if why else "")
+                         + f" — имя свободно, поднять: pantheon wake {name}", "watch")
+            continue
         P.alert_once(key, state, f"{name} ({sid}) {word[state]}" + (f": {why}" if why else "")
                      + f" — claude attach {sid}", "watch")
         # ключ события — сессия и состояние: «упала» после «ждёт вас» — своё уведомление, вид — один на сессию
