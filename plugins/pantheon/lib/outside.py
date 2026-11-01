@@ -32,7 +32,13 @@
     отказ сразу, с причиной и кодом 75, без очереди heavy;
   - ключи — только dev-ключи из STATE/outside/env/<owner>__<repo>.env и <owner>__<repo>__<app>.env (KEY=VALUE),
     проход читает их сам и передаёт окружением процесса; в итоге — только имена. Профиль закрывает чтение .env* в
-    дереве и самой папки STATE/outside/env (серверы и тесты не читают ключи чужих проектов);
+    дереве и самой папки STATE/outside/env (серверы и тесты не читают ключи чужих проектов). <owner>__<repo> — из
+    origin клона реестра, а не из конфига папки роли. Остаток: окружение процесса читает процесс того же пользователя
+    (KERN_PROCARGS2); deny process-info* этого не закрывает (проба 01.11) — потому только dev-ключи;
+  - опора — клон реестра (metis-0614, проверка безопасности): .git-файл папки заявки принимается, только если ведёт в
+    <клон>/.git/worktrees/<имя> клона из папок окна (trusted_clone, без запуска git); конфиг клона с include*,
+    filter.*, extensions.worktreeConfig или командой в core.fsmonitor — отказ (unsafe_config); git прохода — с
+    GIT_SAFE (без fsmonitor, хуков, сети, подмодулей), копия — git --git-dir=<клон>/.git без ~/.gitconfig;
   - состояния: queued (заявка записана) → preparing (копия и зависимости) → starting (ждём порт) → serving →
     stopping → stopped; failed — с причиной;
   - «стоп» — файл <ID>.stop в папке заявок вызвавшего окна; проход ищет его во всех папках заявок, а не только в
@@ -300,11 +306,18 @@ def inside(p, roots):
     return any(p == r or p.startswith(r.rstrip("/") + "/") for r in roots)
 
 
+# git вне песочницы в папках, которые пишет роль: ни монитора файлов, ни хуков, ни сети, ни подмодулей (metis-0614).
+# -c перекрывает значения из конфига репозитория; фильтры и include так не снять — их отсекает unsafe_config.
+GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never",
+            "-c", "submodule.recurse=false")
+
+
 def git(d, *args, timeout=30):
-    """Вывод git в папке d (без GIT_* окружения); None — сбой."""
+    """Вывод git в папке d (без GIT_* окружения, с GIT_SAFE); None — сбой."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
-        r = subprocess.run(["git", "-C", d, *args], capture_output=True, text=True, timeout=timeout, env=env)
+        r = subprocess.run(["git", "-C", d, *GIT_SAFE, *args], capture_output=True, text=True, timeout=timeout,
+                           env=env)
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -948,24 +961,106 @@ def pick_port(taken):
 
 # --- копия заявки и ключи (metis-0614) -----------------------------------------------------------------------------
 
-def resolve_sha(d, ref):
-    """Полный SHA коммита ref в клоне папки d; нет такого коммита (или короткий неоднозначен) — None."""
-    out = (git(d, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}") or "").strip().lower()
+def _small(p, limit=4096):
+    """Текст обычного файла p (не ссылки) до limit байт; иначе None."""
+    try:
+        fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
+            return None
+        return os.read(fd, limit + 1).decode("utf-8", "replace")
+    finally:
+        os.close(fd)
+
+
+def trusted_clone(d):
+    """Клон папки d по файлам, без запуска git (metis-0614): .git-папка → клон d; .git-файл → только worktree клона —
+    gitdir <клон>/.git/worktrees/<имя>, его commondir ведёт на <клон>/.git, а gitdir — обратно на d/.git.
+    → (клон, его .git) или (None, причина). .git-файл, ведущий куда-то ещё, — отказ: такой конфиг пишет роль, а
+    .git/config клона окну роли закрыт (deny write ~/**/.git/config)."""
+    dotgit = os.path.join(d, ".git")
+    try:
+        st = os.lstat(dotgit)
+    except OSError:
+        return None, f"в {d} нет .git"
+    if stat.S_ISDIR(st.st_mode):
+        return d, os.path.realpath(dotgit)
+    m = re.fullmatch(r"gitdir: *(\S[^\n]*?) *\n?", _small(dotgit) or "") if stat.S_ISREG(st.st_mode) else None
+    if not m:
+        return None, f"{dotgit} — не папка и не ссылка gitdir"
+    gd = os.path.realpath(os.path.join(d, m.group(1)))
+    common = os.path.dirname(os.path.dirname(gd))
+    clone = os.path.dirname(common)
+    back = (_small(os.path.join(gd, "gitdir")) or "").strip()
+    cdir = (_small(os.path.join(gd, "commondir")) or "").strip()
+    if (os.path.basename(os.path.dirname(gd)) != "worktrees" or os.path.basename(common) != ".git"
+            or not _is_dir(os.path.join(clone, ".git")) or os.path.realpath(os.path.join(clone, ".git")) != common
+            or not cdir or os.path.realpath(os.path.join(gd, cdir)) != common
+            or not back or os.path.realpath(os.path.join(gd, back)) != os.path.realpath(dotgit)):
+        return None, f"{dotgit} ведёт на {gd} — это не worktree клона (<клон>/.git/worktrees/<имя>)"
+    return clone, common
+
+
+def git_env():
+    """Окружение git копии: только конфиг клона — ни системного, ни ~/.gitconfig, ни GIT_* тика, без вопросов."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
+    return env
+
+
+def git_dir(common, *args, timeout=30):
+    """git --git-dir=<.git клона> с GIT_SAFE и git_env(); вывод или None."""
+    try:
+        r = subprocess.run(["git", f"--git-dir={common}", *GIT_SAFE, *args], capture_output=True, text=True,
+                           timeout=timeout, env=git_env(), cwd=os.path.dirname(common), stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+FSMONITOR_OFF = {"", "false", "no", "off", "0", "true", "yes", "on", "1"}   # true — встроенный монитор git, не команда
+
+
+def unsafe_config(common):
+    """Ключи конфига клона, которые исполнят чужую команду у прохода и не перекрываются -c: include/includeIf (конфиг из
+    любого файла), filter.* (smudge/process при checkout), extensions.worktreeConfig (конфиг из папки worktree), команда в
+    core.fsmonitor. → причина отказа или None. Конфиг читается как файл (git config --file — без include)."""
+    out = git_dir(common, "config", "--file", os.path.join(common, "config"), "--list", "-z")
+    if out is None:
+        return f"конфиг {common}/config не прочитать"
+    bad = []
+    for item in out.split("\0"):
+        k, _, v = item.partition("\n")
+        k = k.lower()
+        if (k.startswith(("include.", "includeif.", "filter.")) or k == "extensions.worktreeconfig"
+                or (k == "core.fsmonitor" and v.strip().lower() not in FSMONITOR_OFF)):
+            bad.append(k)
+    if bad:
+        return f"в конфиге клона {common} — {', '.join(sorted(set(bad)))}: вне песочницы это исполнится, копию не делаю"
+    return None
+
+
+def origin_id(common):
+    """owner/repo из remote.origin.url конфига клона (только origin: остальные remote ключей не дают); нет — None."""
+    url = (git_dir(common, "config", "--file", os.path.join(common, "config"), "--get", "remote.origin.url")
+           or "").strip()
+    return remote_id(url) if url else None
+
+
+def resolve_sha(common, ref):
+    """Полный SHA коммита ref в клоне (его .git); нет такого коммита (или короткий неоднозначен) — None."""
+    out = (git_dir(common, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}") or "").strip().lower()
     return out if SHA_RE.fullmatch(out) else None
 
 
-def git_common(d):
-    """Общая папка .git клона (у worktree — папка основного клона): копию снимаем через неё, даже если папки заявки уже
-    нет (worktree субагента Claude Code удаляется с ним)."""
-    out = (git(d, "rev-parse", "--path-format=absolute", "--git-common-dir") or "").strip()
-    return os.path.realpath(out) if out else None
-
-
-def checkout(d, sha, work):
-    """git worktree add --detach work sha (без хуков проекта: проход идёт вне песочницы). → None или причина."""
+def checkout(common, sha, work):
+    """git worktree add --detach work sha в клоне common (GIT_SAFE, без ~/.gitconfig). → None или причина."""
     os.makedirs(os.path.dirname(work), mode=0o700, exist_ok=True)
-    if git(d, "-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach", work, sha, timeout=300) is None:
-        return f"копия на {sha[:12]} не создана (git worktree add в {d})"
+    if git_dir(common, "worktree", "add", "--detach", work, sha, timeout=300) is None:
+        return f"копия на {sha[:12]} не создана (git worktree add в {os.path.dirname(common)})"
     return None
 
 
@@ -974,10 +1069,8 @@ def remove_work(common, work):
     if not work or not inside(os.path.realpath(work), [work_root()]):
         return
     if common:
-        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         for args in (["worktree", "remove", "--force", work], ["worktree", "prune"]):
-            with contextlib.suppress(OSError, subprocess.SubprocessError):
-                subprocess.run(["git", f"--git-dir={common}", *args], capture_output=True, timeout=300, env=env)
+            git_dir(common, *args, timeout=300)
     shutil.rmtree(work, ignore_errors=True)
 
 
@@ -1016,10 +1109,11 @@ def parse_env(text):
     return out, skipped
 
 
-def env_names(d, app=None):
-    """Имена файлов ключей проекта папки d: <owner>__<repo>.env и, у приложения, <owner>__<repo>__<app>.env."""
+def env_names(repo, app=None):
+    """Имена файлов ключей проекта repo — owner/repo из origin клона реестра (origin_id), а не из конфига папки роли:
+    <owner>__<repo>.env и, у приложения, <owner>__<repo>__<app>.env."""
     names = []
-    for rid in remotes(d):
+    for rid in [repo] if repo else []:
         base = rid.replace("/", "__")
         names.append(base + ".env")
         if app and app != ".":
@@ -1027,10 +1121,10 @@ def env_names(d, app=None):
     return names
 
 
-def dev_keys(d, app=None):
+def dev_keys(repo, app=None):
     """→ (ключи, файлы, откуда взяты, пропущенные имена). Приложение перекрывает проект."""
     keys, used, skipped = {}, [], []
-    for name in env_names(d, app):
+    for name in env_names(repo, app):
         text = _env_file(name)
         if text is None:
             continue
@@ -1115,11 +1209,16 @@ def run_serve(rid, d, req, window, qdir):
     why = busy_why(servers())
     if why:
         return fail(why, busy=True)
-    ref = req.get("sha") or "HEAD"
-    sha = resolve_sha(d, ref)
+    clone, common = trusted_clone(d)   # resolve_dir уже проверил клон, реестр и конфиг (unsafe_config)
+    if not clone:
+        return fail(common)
+    ref = req.get("sha")
+    if not ref:
+        return fail("в заявке нет коммита — подай заново: pantheon outside serve")
+    sha = resolve_sha(common, ref)
     if not sha:
-        return fail(f"коммита {ref} нет в клоне {d}: сделай git fetch в своей копии и повтори")
-    common, work = git_common(d), os.path.join(work_root(), rid)
+        return fail(f"коммита {ref} нет в клоне {clone}: сделай git fetch в своей копии и повтори")
+    work = os.path.join(work_root(), rid)
     base.update({"sha": sha, "dir": work})
     save_result(qdir, rid, {"state": "preparing", **base})
     log, fd = new_log(rid)
@@ -1132,8 +1231,8 @@ def run_serve(rid, d, req, window, qdir):
 
     try:
         with contextlib.suppress(OSError):
-            os.write(fd, f"$ git worktree add --detach {work} {sha}  (из {d})\n".encode())
-        why = checkout(d, sha, work)
+            os.write(fd, f"$ git worktree add --detach {work} {sha}  (клон {clone}, заявка из {d})\n".encode())
+        why = checkout(common, sha, work)
         if why:
             raise RuntimeError(why)
         if tick():
@@ -1154,7 +1253,7 @@ def run_serve(rid, d, req, window, qdir):
         port = pick_port({int(v.get("port") or 0) for v in live.values()})
         if not port:
             raise RuntimeError(f"нет свободного порта {SERVER_PORTS.start}–{SERVER_PORTS.stop - 1}")
-        keys, used, skipped = dev_keys(d, app)
+        keys, used, skipped = dev_keys(origin_id(common), app)
         tmp = tempfile.mkdtemp(prefix="outside-")
         with contextlib.suppress(OSError):
             os.write(fd, f"$ PORT={port} {line}  (папка {cwd}; ключи: {', '.join(sorted(keys)) or 'нет'})\n".encode())
@@ -1206,7 +1305,7 @@ def run_serve(rid, d, req, window, qdir):
               keys=sorted(keys))
     notes = []
     if not used:
-        notes.append(f"dev-ключей нет: их кладут в {os.path.join(env_dir(), (env_names(d, app) or ['<owner>__<repo>.env'])[0])} "
+        notes.append(f"dev-ключей нет: их кладут в {os.path.join(env_dir(), (env_names(origin_id(common), app) or ['<owner>__<repo>.env'])[0])} "
                      "(KEY=VALUE) — .env.local папки серверу закрыт")
     if skipped:
         notes.append(f"служебные имена из файла ключей не переданы: {', '.join(sorted(set(skipped)))}")
@@ -1428,6 +1527,14 @@ def resolve_dir(req_dir, window):
     top = toplevel(d)
     if top != d:
         return None, f"папка {d} — не корень репозитория git"
+    clone, common = trusted_clone(d)   # metis-0614: .git-файл роли ведёт только в клон реестра
+    if not clone:
+        return None, common
+    if not inside(clone, roots):
+        return None, f"клон {clone} папки {d} — не из папок {'направления ' + window if window else 'реестра'}"
+    why = unsafe_config(common)
+    if why:
+        return None, why
     if not remotes(d):
         return None, f"у репозитория {d} нет remote — это не копия репозитория владельца"
     return d, roots

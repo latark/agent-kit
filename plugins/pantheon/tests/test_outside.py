@@ -952,7 +952,7 @@ check("parse_env: export, кавычки, комментарии, служебн
       == ({"A": "1 # x", "B": "2", "D": "q"}, ["HOME", "LD_PRELOAD"]))
 _envd = os.path.join(STATE, "outside", "env")
 os.symlink(os.path.join(_ROOT, "secret.json"), os.path.join(_envd, "latark__app.env"))
-check("файл ключей — ссылка: не читается", O.dev_keys(os.path.realpath(APP))[1] == [])
+check("файл ключей — ссылка: не читается", O.dev_keys("latark/app")[1] == [])
 os.remove(os.path.join(_envd, "latark__app.env"))
 prof = O.profile_text([os.path.realpath(APP)])
 check("профиль: папка dev-ключей закрыта на чтение",
@@ -996,6 +996,114 @@ check("check_request: коммит и приложение по образцу",
       O.check_request({"v": 1, "id": "r", "kind": "serve", "dir": "/x", "sha": "abc1234", "app": "@m/web"}, "r") is None
       and O.check_request({"v": 1, "id": "r", "kind": "serve", "dir": "/x", "sha": "abc"}, "r")
       and O.check_request({"v": 1, "id": "r", "kind": "serve", "dir": "/x", "app": "a b"}, "r"))
+
+# --- безопасность копии (metis-0614, находки фоновой проверки): .git-файл роли, конфиг клона, ключи только по origin --
+# Роль пишет свою папку целиком, в том числе .git-файл worktree, но не .git/config клона (окну закрыт ~/**/.git/config).
+kill_all_servers()
+_envd = os.path.join(STATE, "outside", "env")
+with open(os.path.join(_envd, "latark__other.env"), "w") as fh:
+    fh.write("OTHER_SECRET=other-secret\n")
+with open(os.path.join(_envd, "latark__app.env"), "w") as fh:
+    fh.write("APP_KEY=app-key\n")
+EVIL = os.path.join(_ROOT, "evil-repo")   # вне реестра; origin — чужой репозиторий с ключами
+os.makedirs(EVIL)
+git(EVIL, "init", "-q", "-b", "main")
+git(EVIL, "remote", "add", "origin", "https://github.com/latark/other.git")
+commit(EVIL, {"package.json": json.dumps(PKG), ".gitignore": "node_modules/\n"}, "e1")
+_wtd = os.path.join(APP, ".claude", "worktrees")
+os.makedirs(_wtd, exist_ok=True)
+
+
+def refused(window, folder, needle, label):
+    """Заявка serve из folder: failed с needle в причине, ничего не запущено, чужих ключей нигде нет."""
+    pre = len(calls())
+    q, rid = new_request(window, folder, "serve", "--minutes", "5")
+    serve_pass()
+    res = O.load_result(q, rid) or {}
+    check(label, res.get("state") == "failed" and needle in (res.get("why") or "") and len(calls()) == pre
+          and not os.path.isdir(work_of(rid)) and rid not in O.servers(), res)
+    return res
+
+
+# 1. .git-файл в папке направления ведёт в чужой gitdir (remote — другой репозиторий): отказ, ключей нет
+FAKE1 = os.path.join(_wtd, "fake1")
+os.makedirs(FAKE1)
+with open(os.path.join(FAKE1, ".git"), "w") as fh:
+    fh.write(f"gitdir: {os.path.join(EVIL, '.git')}\n")
+refused("athena-x", FAKE1, "не worktree клона", ".git-файл ведёт в чужой gitdir: отказ, ключей и копии нет")
+# 2. настоящий worktree чужого клона, положенный в папку направления: клон вне реестра — отказ
+FAKE2 = os.path.join(_wtd, "fake2")
+git(EVIL, "worktree", "add", "-q", "--detach", FAKE2)
+refused("athena-x", FAKE2, "не из папок направления", "worktree клона вне реестра в папке направления: отказ")
+# 3. gitdir, который роль завела в своей папке (bare-клон не по имени .git, конфиг пишет роль): отказ по устройству
+EVILB = os.path.join(APP, ".claude", "evilbare")
+subprocess.run(["git", "clone", "-q", "--bare", EVIL, EVILB], check=True, capture_output=True)
+FAKE3 = os.path.join(_wtd, "fake3")
+subprocess.run(["git", f"--git-dir={EVILB}", "worktree", "add", "-q", "--detach", FAKE3, "main"], check=True,
+               capture_output=True)
+refused("athena-x", FAKE3, "не worktree клона", "gitdir роли в папке направления (не <клон>/.git): отказ")
+check("trusted_clone: worktree клона принят, подделки — нет",
+      O.trusted_clone(os.path.realpath(FAKE2))[0] == os.path.realpath(EVIL)
+      and O.trusted_clone(os.path.realpath(FAKE1))[0] is None and O.trusted_clone(os.path.realpath(FAKE3))[0] is None
+      and O.trusted_clone(os.path.realpath(APP))[0] == os.path.realpath(APP))
+
+# 4. настоящий worktree клона реестра: сервер поднят, ключи — только по origin клона, лишний remote ничего не даёт
+git(APP, "remote", "add", "upstream", "https://github.com/latark/other.git")
+WT = os.path.join(_wtd, "wt-ok")
+git(APP, "worktree", "add", "-q", "--detach", WT)
+FAKE4 = os.path.join(_wtd, "fake4")   # .git-файл на gitdir чужого worktree: обратная ссылка не сходится
+os.makedirs(FAKE4)
+shutil.copy(os.path.join(WT, ".git"), os.path.join(FAKE4, ".git"))
+check("trusted_clone: .git-файл на gitdir другого worktree — отказ (обратная ссылка)",
+      O.trusted_clone(os.path.realpath(FAKE4))[0] is None and O.trusted_clone(os.path.realpath(WT))[0] == os.path.realpath(APP))
+shutil.rmtree(FAKE4)
+_pre = len(calls())
+q, rid = new_request("athena-x", WT, "serve", "--minutes", "5")
+serve_pass()
+res = O.load_result(q, rid) or {}
+_c = calls()[_pre:]
+_env = _c[-1]["env"] if _c else {}
+check("worktree клона реестра: сервер поднят из своей копии", res.get("state") == "serving"
+      and res.get("dir") == work_of(rid), res)
+check("ключи — только по origin клона: лишний remote чужого репозитория ключей не даёт",
+      res.get("keys") == ["APP_KEY"] and _env.get("APP_KEY") == "app-key" and "OTHER_SECRET" not in _env, res.get("keys"))
+check("origin_id: только origin", O.origin_id(os.path.realpath(os.path.join(APP, ".git"))) == "latark/app")
+kill_all_servers()
+git(APP, "remote", "remove", "upstream")
+git(APP, "worktree", "remove", "--force", WT)
+
+# 5. конфиг клона, исполняющий команду вне песочницы: core.fsmonitor с командой — отказ; head_state его не зовёт
+_mark = os.path.join(_ROOT, "fsmonitor-ran")
+_hook = os.path.join(_ROOT, "fsmonitor-hook")
+with open(_hook, "w") as fh:
+    fh.write(f"#!/bin/sh\ntouch {_mark}\nexit 1\n")
+os.chmod(_hook, 0o755)
+git(APP, "config", "core.fsmonitor", _hook)
+refused("athena-x", APP, "core.fsmonitor", "core.fsmonitor с командой в конфиге клона: отказ, копии нет")
+O.head_state(os.path.realpath(APP))
+O.toplevel(os.path.realpath(APP))
+check("git прохода не зовёт core.fsmonitor (GIT_SAFE)", not os.path.exists(_mark))
+subprocess.run(["git", "-C", APP, "status", "--porcelain"], capture_output=True)
+check("проба честная: голый git status монитор зовёт", os.path.exists(_mark))
+git(APP, "config", "core.fsmonitor", "true")
+check("core.fsmonitor=true (встроенный монитор git) — не отказ", O.unsafe_config(os.path.realpath(os.path.join(APP, ".git"))) is None)
+git(APP, "config", "--unset", "core.fsmonitor")
+_gd = os.path.realpath(os.path.join(APP, ".git"))
+for _k, _v in (("filter.x.smudge", "touch /tmp/x"), ("include.path", "/tmp/x.cfg"),
+               ("includeIf.gitdir:/.path", "/tmp/x.cfg"), ("extensions.worktreeConfig", "true")):
+    git(APP, "config", _k, _v)
+    check(f"конфиг клона с {_k}: отказ", _k.lower().split(".")[0] in (O.unsafe_config(_gd) or "").lower())
+    git(APP, "config", "--unset", _k)
+check("чистый конфиг клона — не отказ", O.unsafe_config(_gd) is None)
+
+for _p in (FAKE1, EVILB):
+    shutil.rmtree(_p, ignore_errors=True)
+for _p in (FAKE2, FAKE3):
+    shutil.rmtree(_p, ignore_errors=True)
+git(APP, "worktree", "prune")
+shutil.rmtree(os.path.join(APP, ".claude"), ignore_errors=True)
+for _n in ("latark__other.env", "latark__app.env"):
+    os.remove(os.path.join(_envd, _n))
 
 # --- сторож живёт своим проходом: «стоп» ≤10 с, пока проход тестов занят (metis-0606, 0614) -------------------------
 DEVTREE = DEVTREE_PIDS
