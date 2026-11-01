@@ -1,0 +1,43 @@
+{
+ "_source": "gh pr view 225 -R latark/agent-kit --json headRefOid,statusCheckRollup, 2026-11-01 (metis-0633, шаг 0): PR слит при красном CI; detailsUrl убран",
+ "headRefOid": "1369098cfe06b9ff3190dbdbec10ab36c81216be",
+ "baseRefName": "main",
+ "statusCheckRollup": [
+  {
+   "__typename": "CheckRun",
+   "completedAt": "2026-11-01T09:07:57Z",
+   "conclusion": "FAILURE",
+   "name": "affected",
+   "startedAt": "2026-11-01T09:00:02Z",
+   "status": "COMPLETED",
+   "workflowName": "tests"
+  },
+  {
+   "__typename": "CheckRun",
+   "completedAt": "2026-11-01T09:00:12Z",
+   "conclusion": "SUCCESS",
+   "name": "traces",
+   "startedAt": "2026-11-01T09:00:06Z",
+   "status": "COMPLETED",
+   "workflowName": "check-traces"
+  },
+  {
+   "__typename": "CheckRun",
+   "completedAt": "2026-11-01T09:00:06Z",
+   "conclusion": "SUCCESS",
+   "name": "traces",
+   "startedAt": "2026-11-01T07:59:58Z",
+   "status": "COMPLETED",
+   "workflowName": "check-traces"
+  },
+  {
+   "__typename": "CheckRun",
+   "completedAt": "2026-11-01T09:00:00Z",
+   "conclusion": "SKIPPED",
+   "name": "full",
+   "startedAt": "2026-11-01T09:00:00Z",
+   "status": "COMPLETED",
+   "workflowName": "tests"
+  }
+ ]
+}
