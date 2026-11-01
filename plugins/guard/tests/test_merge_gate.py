@@ -1823,6 +1823,16 @@ def t_ci_required(h):
                False, "один SHA из 40 знаков")
     merge_case("без роли: PR на другом коммите — отказ", h.pre(f"gh pr merge 9 --match-head-commit {'e' * 40}",
                                                                 **owner), False, "PR сейчас на другом коммите")
+    merge_case("без роли: подкоманда gh не вычисляется, в команде merge — отказ",
+               h.pre("gh $SUB merge 9", **owner), False, "слово до подкоманды не вычислить")
+    for c, how in ((f"GH_REPO=latark/tg-read {c9}", "GH_REPO= перед gh"), (f"env GH_HOST=h {c9}", "env GH_HOST="),
+                   (f"export GH_REPO=x; {c9}", "export GH_REPO")):
+        merge_case(f"без роли: {how} — отказ", h.pre(c, **owner), False, "без переменных GH_*")
+    for var in ("GH_REPO", "GH_HOST", "GH_CONFIG_DIR"):
+        merge_case(f"без роли: {var} в окружении — отказ", h.pre(c9, extra_env={var: "x"}, **owner), False,
+                   "без переменных GH_*")
+    merge_case("без роли: GH_TOKEN в окружении (не уводит) — проходит", h.pre(c9, extra_env={"GH_TOKEN": "x"}, **owner),
+               True)
     h.reset_log()
     merge_case("без роли: не слияние (gh pr view) — можно", h.pre("gh pr view 9", **owner), True)
     log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""

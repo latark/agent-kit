@@ -3144,8 +3144,16 @@ def check_owner_merge(event, tool_input):
     _, cmds = bash_analysis(cmd, cwd)
     moved = any(n in ("cd", "chdir", "pushd", "popd") for n, _ in cmds)
     for name, texts in cmds:
-        found = _gh_merge(texts) if name == "gh" and not _gh_parse(texts)[0] else None
+        if name == "gh" and _gh_parse(texts)[0]:
+            return ("Правило push: gh — слово до подкоманды не вычислить (переменная, $(…)), а в команде есть merge: "
+                    f"не понять, слияние ли это. Пиши подкоманду gh и флаги перед ней словами. {merge_gate.OWNER_CI}")
+        found = _gh_merge(texts) if name == "gh" else None
         if found is not None:
+            # та же проверка GH_*, что у правила hq-gh: GH_REPO, GH_HOST, GH_CONFIG_DIR уводят gh от сверенного репозитория
+            if _gh_env_assigned(cmd, cwd) or any(os.environ.get(v) for v in GH_REDIRECT_ENV):
+                return ("Правило push: gh pr merge — без переменных GH_* в команде и без GH_REPO, GH_HOST, "
+                        f"GH_CONFIG_DIR в окружении: они уводят gh от репозитория, на котором сверен CI. "
+                        f"{merge_gate.OWNER_CI}")
             why = merge_gate.owner_ci_problem(cwd, moved, found[1])
             if why:
                 return f"Правило push: gh pr merge — {why}"
