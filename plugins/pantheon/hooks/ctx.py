@@ -42,7 +42,14 @@
   ctx.py push        SessionStart, asyncRewake: после `claude respawn` будит сессию текстом из <STATE>/push/<sessionId>.txt
                      (кладёт pantheon; один раз, не старше 30 мин, ≤ 4000 знаков, только с пометкой «[Пантеон:»).
   ctx.py rewake      SessionStart clear, asyncRewake: если файл состояния обновлён после вашего последнего
-                     сообщения, будит Claude «прочитай и продолжай»; иначе /clear — обычный чистый лист.
+                     сообщения, будит Claude «прочитай и продолжай»; иначе /clear — обычный чистый лист. Реплики
+                     в конце, на которые ответ был только текстом, не в счёт; если работа шла без вашего сообщения
+                     перед ней (сессию разбудил хук), отсчёт — от первой записи сессии (metis-0641).
+                     Исключение (metis-0625): роль с файлом состояния (hq, координатор, мастерская) будится и со
+                     старым файлом, если прошлая сессия пустая: она первая в процессе (окно поднято заново, например
+                     после перезагрузки Mac) или в ней нет ни одного вашего сообщения, и при этом в ней не больше
+                     одного вашего сообщения и ни одной правки Write/Edit/MultiEdit/NotebookEdit. Такая сессия работы
+                     не дала, и сравнивать файл с её временем не с чем. Сессии без роли — по общему правилу.
 
 Файл состояния по роли (agent_type): hq — ~/ai/pantheon/board.md; domain-coordinator — STATUS.md направления в
 ~/ai/pantheon/directions/<имя>/ (направление — по папке запуска, как у guard); workshop —
@@ -275,6 +282,39 @@ def last_owner_time(path):
     return best
 
 
+def used_tools(d):
+    """Ответ основной сессии с вызовом инструмента. Поле message не словарь (строка в битой записи) — не ответ."""
+    m = d.get("message")
+    c = m.get("content") if isinstance(m, dict) else None
+    return d.get("type") == "assistant" and not d.get("isSidechain") and isinstance(c, list) and \
+        any(isinstance(b, dict) and b.get("type") == "tool_use" for b in c)
+
+
+def last_work_owner_time(path):
+    """Для rewake: время вашего последнего сообщения, после которого сессия работала (вызывала инструменты).
+    Хвостовые реплики, на которые она ответила только текстом («хочу сделать clear» → «можно, всё сохранено»),
+    файл состояния не меняют и точку отсчёта не сдвигают (01.11: сохранилась в 21:34, «хочу сделать clear» в 21:42 —
+    хук счёл файл старым и не разбудил). Таких реплик нет в хвосте — как last_owner_time.
+    Работа была, а вашего сообщения перед ней в хвосте нет (сессию разбудили rewake, pantheon wake или respawn, она
+    сама сохранилась, потом вы написали «хочу clear» или не писали вовсе) — время первой записи хвоста: файл,
+    сохранённый в той работе, новее него (metis-0641, argus-238a Б)."""
+    t, tools, first = None, False, None
+    for d in reversed(list(entries(tail_lines(path, 4000000)))):
+        first = iso_ts(d.get("timestamp")) or first
+        if used_tools(d):
+            tools = True
+        elif is_owner_entry(d):
+            t = iso_ts(d.get("timestamp"))
+            if tools:
+                return t
+    if t is None:
+        t = last_owner_time(path)  # в хвосте ваших сообщений нет — ищем по всему файлу
+        if t is None and tools:
+            return first  # вы не писали вовсе, а сессия работала: та же точка отсчёта
+        return t
+    return first if tools else t
+
+
 def prompt_entry(path, prompt_id, start=None):
     """Запись ввода в транскрипте по prompt_id (её пишет сам Claude Code)."""
     if not prompt_id:
@@ -451,6 +491,9 @@ def _text(content):
     return "\n".join(out)
 
 
+EDIT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+
+
 def handoff_candidates(d):
     """Пути HANDOFF.md, которые сессия сама писала (Write, Edit, перенаправление в Bash) или назвали вы.
     Файл, который модель только прочитала (например, в чужом репозитории), хук не предлагает: его текст стал бы
@@ -462,7 +505,7 @@ def handoff_candidates(d):
             if not isinstance(b, dict) or b.get("type") != "tool_use":
                 continue
             inp = b.get("input") or {}
-            if b.get("name") in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+            if b.get("name") in EDIT_TOOLS:
                 fp = inp.get("file_path") or inp.get("notebook_path")
                 if isinstance(fp, str) and os.path.basename(fp) == "HANDOFF.md":
                     found.append(fp)
@@ -1178,6 +1221,35 @@ def session_role(ev):
     return ""
 
 
+STATE_ROLES = ("hq", "domain-coordinator", "workshop")  # роли со своим файлом состояния (role_state_file)
+
+
+def did_no_work(path, max_owner):
+    """metis-0625: сессия не дала работы — не больше max_owner ваших сообщений и ни одной правки Write/Edit/MultiEdit/
+    NotebookEdit. Транскрипта нет — сессия закрыта до первого сообщения, работы тоже нет. Правку через Bash (python,
+    sed) хук не видит: такая сессия считается пустой, и rewake будит с файлом роли — лишнее чтение, а не потеря дел."""
+    owner = 0
+    try:
+        with open(path, "rb") as f:
+            for raw in f:
+                if b'"human"' not in raw and b'"tool_use"' not in raw:
+                    continue
+                for d in entries([raw]):
+                    if is_owner_entry(d):
+                        owner += 1
+                        if owner > max_owner:
+                            return False
+                    elif used_tools(d):
+                        if any(isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in EDIT_TOOLS
+                               for b in d["message"]["content"]):
+                            return False
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def rewake_message(ev):
     """Текст пробуждения или None, если будить не нужно."""
     if ctx_off() or automation() or ev.get("agent_id"):
@@ -1189,8 +1261,10 @@ def rewake_message(ev):
     path, desc = state_file(role, ev, prev["transcript"], inherited=remembered_state_file(prev))
     if not path or not os.path.isfile(path):
         return None
-    t_owner = last_owner_time(prev["transcript"])
-    if t_owner is None or os.path.getmtime(path) <= t_owner:
+    t_owner = last_work_owner_time(prev["transcript"])
+    # metis-0625: пустая прошлая сессия — первая в процессе с не больше чем одним вашим сообщением или любая без них
+    empty = role in STATE_ROLES and did_no_work(prev["transcript"], 1 if prev.get("first") else 0)
+    if not empty and (t_owner is None or os.path.getmtime(path) <= t_owner):
         return None
     remember_state_file(ev, path)
     return ("Контекст очищен (/clear), прошлый разговор сохранён в %s. Прочитай этот файл и продолжай со следующего "

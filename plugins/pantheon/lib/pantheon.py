@@ -1903,8 +1903,10 @@ GH_PR_WRITE = ["gh pr create *", "gh pr edit *", "gh pr merge *", "gh pr comment
 # штаб (metis-0247, «да» владельца 19.10 [zeus-0247-yes]): сети у окна нет, а gh в песочнице всё равно падает (TLS Go,
 # x509 -26276) — мимо неё только чтение PR и правка. Слияния здесь нет (решение Зевса 19.10, metis-0247 r4): gh pr
 # merge, gh api и прочий gh остаются в песочнице без сети и падают; guard (hq-gh) вдобавок отказывает слиянию в любой
-# форме — `gh -R o/r pr merge`, GH_REPO=…, gh api …/merge
-HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks") for tail in ("", " *")] + ["gh pr edit *"]
+# форме — `gh -R o/r pr merge`, GH_REPO=…, gh api …/merge. metis-0626 (решение Метиды 01.11): ещё gh pr list — без
+# списка открытых PR сводка доски устаревает; guard (hq-gh) пускает его только с -R из [merge_repos] и без --search.
+# gh pr diff и gh run — нет: лишний чужой текст в окне
+HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks", "list") for tail in ("", " *")] + ["gh pr edit *"]
 # git по SSH в песочнице macOS не работает, по HTTPS push упирается в помощник учётных данных: окну каждого направления
 # сетевые команды git — мимо неё; мастерской — только при SSH-remote. push в main/master, --force и --delete не
 # пускает guard (_PUSH_BAD)

@@ -235,6 +235,21 @@ check("профиль: deny чтения < allow шаблонов .env < deny se
 def env_probe(profile):
     """Живая проба: (None, причина), если sandbox-exec не запускается; иначе список расхождений с ожиданием."""
     d = os.path.realpath(tempfile.mkdtemp(prefix="env-probe-", dir=_ROOT))
+    sb = os.path.join(d, "p.sb")
+    with open(sb, "w") as fh:
+        fh.write(profile)
+
+    def run(*cmd):
+        return subprocess.run(["/usr/bin/sandbox-exec", "-f", sb, *cmd], capture_output=True, text=True, cwd=d)
+    # metis-0634: сначала — запускается ли sandbox-exec, и только потом файлы .env*. Внутри песочницы (окно роли, сам
+    # проход outside) вложенный sandbox_apply запрещён, а профиль outside ещё и не даёт создать .env*: файлы первыми —
+    # PermissionError и весь файл тестов красный вместо «ПРОПУЩЕНО».
+    try:
+        r = run("/usr/bin/true")
+    except OSError as e:
+        return None, str(e)
+    if r.returncode != 0 and "sandbox_apply" in r.stderr:
+        return None, r.stderr.strip()
     for n in (".env", ".env.local", ".env.production.local", ".env.example.bak", ".env.example", ".env.sample",
               ".env.template"):
         with open(os.path.join(d, n), "w") as fh:
@@ -242,18 +257,6 @@ def env_probe(profile):
     os.makedirs(os.path.join(d, "secrets"))
     with open(os.path.join(d, "secrets", ".env.example"), "w") as fh:
         fh.write("x")
-    sb = os.path.join(d, "p.sb")
-    with open(sb, "w") as fh:
-        fh.write(profile)
-
-    def run(*cmd):
-        return subprocess.run(["/usr/bin/sandbox-exec", "-f", sb, *cmd], capture_output=True, text=True, cwd=d)
-    try:
-        r = run("/bin/cat", ".env.example")
-    except OSError as e:
-        return None, str(e)
-    if r.returncode != 0 and "sandbox_apply" in r.stderr:
-        return None, r.stderr.strip()
     bad = []
     for n in (".env.example", ".env.sample", ".env.template"):
         if run("/bin/cat", n).returncode != 0:

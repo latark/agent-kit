@@ -62,27 +62,30 @@ import tempfile
 import time
 
 TIMEOUT = 600  # с на файл; медленным — свой предел в SLOW
-# Медленные файлы по замеру metis-0450 (последовательный прогон, 3.14): идут первыми, предел — свой, с.
-#   предел — 3 × время файла с округлением вверх до минуты, не меньше 180 с; в комментарии — замер 27.10, с.
+# Медленные файлы: идут первыми (по убыванию предела), предел — свой, с. metis-0634: пределы — по 31 полному прогону
+# прохода outside 30.10–01.11 (-j 3, процесс тика ProcessType Background, Mac под нагрузкой): 1.5 × наибольшего
+# зелёного времени файла с округлением вверх до минуты, не меньше 180 с. Прежние (3 × последовательного замера 27.10)
+# давали таймауты: test_merge_gate — 19 из 33 прогонов, test_watch — 10 из 31, test_read — 9 из 31.
+# В комментарии — медиана и наибольшее зелёное время в тех прогонах, с.
 SLOW = {
-    "pantheon/test_watch.py": 720,  # 231 — дольше всех: полный прогон не короче его
-    "guard/test_merge_gate.py": 480,  # 143
-    "pantheon/test_plugins_update.py": 420,  # 136
-    "guard/test_shell_diff.py": 420,  # 129
-    "pantheon/test_board.py": 360,  # 115
-    "pantheon/test_setup.py": 360,  # 113
-    "pantheon/test_start.py": 360,  # 105
-    "pantheon/test_sync_quarantine.py": 240,  # 70
-    "guard/test_guard.py": 600,  # 64; на Linux в Docker под нагрузкой 120-240 с, на 2-ядерном ubuntu-latest дольше
-    "pantheon/test_executors.py": 180,  # 57
-    "pantheon/test_tick.py": 180,  # 50
-    "pantheon/test_merge.py": 180,  # 53
-    "pantheon/test_notify.py": 180,  # 50
-    "pantheon/test_read.py": 180,  # 43
-    "pantheon/test_hooks.py": 180,  # 43
-    "pantheon/test_owner_log_gap.py": 180,  # 42
-    "pantheon/test_autoclose.py": 180,  # 36
-    "pantheon/test_board_metrics.py": 180,  # 31
+    "pantheon/test_watch.py": 1020,  # 516 / 666 — дольше всех: полный прогон не короче его
+    "guard/test_merge_gate.py": 900,  # 458 / 458 (зелёный один); один воркер под outside — 333-358
+    "guard/test_guard.py": 720,  # 336 / 442; на Linux в Docker под нагрузкой 120-240 с, на 2-ядерном ubuntu-latest дольше
+    "guard/test_shell_diff.py": 600,  # 254 / 390
+    "pantheon/test_plugins_update.py": 540,  # 170 / 346
+    "pantheon/test_setup.py": 480,  # 109 / 303
+    "pantheon/test_start.py": 480,  # 136 / 289
+    "pantheon/test_board.py": 360,  # 98 / 235
+    "pantheon/test_sync_quarantine.py": 360,  # 120 / 231
+    "pantheon/test_read.py": 300,  # 97 / 179
+    "pantheon/test_merge.py": 300,  # 86 / 171
+    "pantheon/test_hooks.py": 300,  # 64 / 163
+    "pantheon/test_executors.py": 240,  # 69 / 158
+    "pantheon/test_tick.py": 240,  # 56 / 160
+    "pantheon/test_owner_log_gap.py": 180,  # 41 / 80
+    "pantheon/test_notify.py": 180,  # 35 / 88
+    "pantheon/test_autoclose.py": 180,  # 22 / 69
+    "pantheon/test_board_metrics.py": 180,  # 19 / 42
 }
 # Файлы, которым параллель мешает: идут в конце по одному.
 SERIAL = ()
