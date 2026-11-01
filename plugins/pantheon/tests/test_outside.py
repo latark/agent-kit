@@ -58,6 +58,53 @@ def _kill_servers():
 
 
 _atexit.register(_kill_servers)  # раньше rmtree: atexit идёт с конца
+TEST_PROCS = []   # процессы, которые тест порождает сам в своих сессиях (сирота, «чужой», sleep)
+
+
+def fake_pids():
+    """Номера всех процессов заглушки sandbox-exec и задач «turbo» за прогон (пишут сами при старте)."""
+    try:
+        with open(os.path.join(_ROOT, "fake-pids")) as fh:
+            return [int(x) for x in fh.read().split()]
+    except (OSError, ValueError):
+        return []
+
+
+def still_alive(pid, grace=3):
+    """Жив ли процесс через grace с; своего зомби сперва прибрать — он уже не процесс."""
+    end = time.monotonic() + grace
+    while True:
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        if time.monotonic() >= end:
+            return True
+        time.sleep(0.1)
+
+
+def _kill_leftovers():
+    """Последний рубеж перед rmtree: всё, что тест породил, — SIGKILL (упавшая проверка не оставляет сирот)."""
+    for proc in TEST_PROCS:
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    for pid in fake_pids():
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+
+
+_atexit.register(_kill_leftovers)
 
 FAILS = []
 TOTAL = [0]
@@ -75,8 +122,26 @@ REC = os.path.join(_ROOT, "sandbox-calls.jsonl")
 FAKE = os.path.join(_ROOT, "fake-sandbox-exec")
 DEVTREE_PIDS = os.path.join(_ROOT, "devtree-pids")      # «turbo» и его задача (metis-0606)
 HOLD_RELEASE = os.path.join(_ROOT, "hold-release")      # тест «hold» идёт, пока нет этого файла
+FAKE_PIDS = os.path.join(_ROOT, "fake-pids")            # все процессы заглушки и задачи «turbo» — для проверки сирот
+# сторож сирот (metis-0614): заглушка и задача «turbo» живут в своих сессиях, и killpg раннера их не достаёт. Тест упал,
+# убит по таймауту или мутант не гасит сервер — они гаснут сами, когда нет процесса теста или его папки _ROOT
+WATCH = (f"import os as _o, threading as _th, time as _t\n"
+         f"def _watch():\n"
+         f"    while True:\n"
+         f"        _t.sleep(0.5)\n"
+         f"        try:\n"
+         f"            _o.kill({os.getpid()}, 0)\n"
+         f"        except ProcessLookupError:\n"
+         f"            _o._exit(0)\n"
+         f"        except OSError:\n"
+         f"            pass\n"
+         f"        if not _o.path.isdir({_ROOT!r}):\n"
+         f"            _o._exit(0)\n"
+         f"_th.Thread(target=_watch, daemon=True).start()\n"
+         f"with open({FAKE_PIDS!r}, 'a') as _fh:\n"
+         f"    _fh.write(str(_o.getpid()) + '\\n')\n")
 with open(FAKE, "w") as fh:
-    fh.write(f"#!{sys.executable}\n" + r'''
+    fh.write(f"#!{sys.executable}\n" + WATCH + (r'''
 import json, os, sys, time
 args = sys.argv[1:]
 assert args[0] == "-f", args
@@ -105,7 +170,7 @@ if tail == ["run", "devtree"]:
     # как turbo (metis-0606): задача — в своей сессии и группе процессов, на SIGTERM не гаснет и держит PORT; сам
     # «turbo» на SIGTERM выходит, задачу не гасит — killpg группы сервера её не достаёт
     import subprocess, signal
-    task = ("import os, signal, socket\n"
+    task = (WATCH + "import os, signal, socket\n"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
             "s = socket.socket(); s.bind(('127.0.0.1', int(os.environ['PORT']))); s.listen(64)\n"
             "while True:\n    s.accept()[0].close()\n")
@@ -130,7 +195,7 @@ if tail == ["run", "lint"] or cmd[1:2] in (["ci"], ["install"]):
     print("ok", cmd)
     os._exit(0)
 os.execvp(cmd[0], cmd)
-''' % (REC, DEVTREE_PIDS, HOLD_RELEASE))
+''' % (REC, DEVTREE_PIDS, HOLD_RELEASE)).replace("(WATCH + ", f"({WATCH!r} + "))
 os.chmod(FAKE, 0o755)
 O.SANDBOX_EXEC = FAKE
 O.HEAVY = None
@@ -1260,6 +1325,7 @@ def _gone(proc, timeout=5):
 
 _orphan = subprocess.Popen([sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
                             "time.sleep(120)"], cwd=work_of(rid_s), start_new_session=True)
+TEST_PROCS.append(_orphan)
 t0 = time.monotonic()
 rc, out = say("metis-y", "stop", rid_s)
 dt = time.monotonic() - t0
@@ -1302,6 +1368,7 @@ _real_prepare = O.prepare
 
 def _slow_prepare(d, rid, heavy=True, tick=None, timeout=O.TEST_TIMEOUT):
     p = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+    TEST_PROCS.append(p)
     say("athena-x", "stop", rid, "--wait", "0")
     try:
         return O.wait_proc(p, 30, tick)
@@ -1327,6 +1394,7 @@ check("стоп во время установки: установка прер�
 _spawn = [sys.executable, "-c", "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', "
           "'import time; time.sleep(60)'], start_new_session=True); time.sleep(60)"]
 alien = subprocess.Popen(_spawn)                                  # не глава группы: группа — наша, теста
+TEST_PROCS.append(alien)
 time.sleep(0.8)
 _ps = subprocess.run(["/bin/ps", "-axo", "pid=,ppid="], capture_output=True, text=True).stdout.split()
 _kid = [int(a) for a, b in zip(_ps[::2], _ps[1::2]) if int(b) == alien.pid]   # ребёнок в своей группе
@@ -1344,6 +1412,7 @@ alien.kill()
 alien.wait()
 
 leader = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)   # глава своей группы, как сервер
+TEST_PROCS.append(leader)
 time.sleep(0.3)
 O.save_servers({"20261030-000000-b2b2b2": {"pid": leader.pid, "started": "Thu Jan  1 00:00:00 1970", "port": 0,
                                            "until": time.time() + 3600, "qdir": None}})
@@ -1387,6 +1456,7 @@ check("sweep: время старта совпало — срок вышел, п
 
 # reap — только внутри папки копий: чужая папка не трогается
 _keep = subprocess.Popen(["/bin/sleep", "30"], cwd=os.path.realpath(APP), start_new_session=True)
+TEST_PROCS.append(_keep)
 check("reap вне папки копий ничего не гасит", O.reap(os.path.realpath(APP)) == 0 and pid_alive(_keep.pid, 0))
 _keep.kill()
 _keep.wait()
@@ -1498,6 +1568,12 @@ r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text
 got = json.loads(r.stdout) if r.returncode == 0 else None
 check("guard: `pantheon outside serve` — не dev-сервер (pnpm dev — да)", got and got[0] is None and got[1], r.stdout + r.stderr)
 check("guard: `pantheon outside test` — не привилегированная команда", got and got[2] == [], got)
+
+# --- 6. сироты (metis-0614): после всех серверов и стопов ни заглушки, ни задач «turbo» в живых --------------------
+kill_all_servers()
+_left = [p for p in fake_pids() if still_alive(p)]
+check("тесты не оставляют процессов: заглушка sandbox-exec и задачи «turbo» погашены", fake_pids() and not _left,
+      (_left, len(fake_pids())))
 
 print(f"{TOTAL[0] - len(FAILS)} из {TOTAL[0]} прошли")
 sys.exit(1 if FAILS else 0)
