@@ -3741,6 +3741,11 @@ def test_ghost_blocked_does_not_hold_name_0651():
         e.agents([rec])
         out = e.run("wake", "zz-gh", t=T0 + 60).stdout
         check("не спит" in out, f"0651: живой {rec['state']} не держит имя: {out}")
+    # только что запущенная (startedAt моложе минуты) ещё может не попасть в реестр демона — не призрак (pantheon start)
+    json.dump({"workers": {"other": {"pid": 999999}}}, open(roster, "w"))
+    e.agents([bg("zz-gh", "working", "cccccccc-1", started=T0 + 60 - 10)])
+    out = e.run("wake", "zz-gh", t=T0 + 60).stdout
+    check("не спит" in out, f"0651: свежая запись (10 с) не призрак: {out}")
     os.remove(roster)
     e.agents([bg("zz-gh", "blocked", "cccccccc-1")])
     out = e.run("wake", "zz-gh", t=T0 + 60).stdout
