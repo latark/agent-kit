@@ -60,13 +60,14 @@ MISSING = object()
 def rest_runs(view):
     """Ответы REST actions/runs?head_sha и commits/SHA/check-runs по rollup ответа gh pr view (metis-0633): каждая
     CheckRun — свой запуск Actions своего workflow; событие — поле "event" записи (по умолчанию pull_request), head —
-    headRefOid; StatusContext в REST запусков нет."""
+    headRefOid, PR — поле "prs" записи (по умолчанию 7, номер PR agent-kit в тестах); StatusContext в REST
+    запусков нет."""
     sha, rollup, runs, checks = view.get("headRefOid"), view.get("statusCheckRollup"), [], []
     for i, c in enumerate(rollup if isinstance(rollup, list) else []):
         if not isinstance(c, dict) or not ("conclusion" in c or "status" in c and "state" not in c):
             continue
         runs.append({"id": i, "name": c.get("workflowName"), "event": c.get("event", "pull_request"), "head_sha": sha,
-                     "check_suite_id": 1000 + i})
+                     "check_suite_id": 1000 + i, "pull_requests": [{"number": n} for n in c.get("prs", (7,))]})
         checks.append({"name": c.get("name"), "status": str(c.get("status") or "").lower(),
                        "conclusion": str(c["conclusion"]).lower() if c.get("conclusion") else None, "head_sha": sha,
                        "check_suite": {"id": 1000 + i}})
@@ -1620,11 +1621,13 @@ def _saved(pr, kind="rollup"):
         return json.load(fh)
 
 
-def _runs_on(saved, sha):
-    """Сохранённые ответы REST запусков с head_sha, заменённым на sha (SHA проверяемого PR в тесте)."""
+def _runs_on(saved, sha, pr):
+    """Сохранённые ответы REST запусков с head_sha, заменённым на sha, и PR pr, заменённым на 7 (PR в тесте)."""
     head = saved["check_runs"]["check_runs"][0]["head_sha"]
-    text = json.dumps([saved["workflow_runs"], saved["check_runs"]]).replace(head, sha)
-    return tuple(json.loads(text))
+    wr, cr = json.loads(json.dumps([saved["workflow_runs"], saved["check_runs"]]).replace(head, sha))
+    for r in wr["workflow_runs"]:
+        r["pull_requests"] = [{"number": 7} if p["number"] == pr else p for p in r["pull_requests"]]
+    return wr, cr
 
 
 def _pr_runs(rollup):
@@ -1713,7 +1716,27 @@ def t_ci_required(h):
     h.runs["agent-kit"] = (dict(runs, workflow_runs=other), checks)
     h.ci(GREEN_KIT, name="agent-kit")
     merge_case("required: запуски на другом SHA — не засчитаны, отказ", h.pre(cmd, pdir=kit), False, "не встали")
+    h.runs["agent-kit"] = (dict(runs, total_count=101), checks)
+    h.ci(GREEN_KIT, name="agent-kit")
+    merge_case("required: запусков больше, чем получено (total_count > len) — отказ «неполные данные»",
+               h.pre(cmd, pdir=kit), False, "неполные данные CI — запусков 101 и проверок 3, а получено 3 и 3")
+    merge_case("required: неполные данные — «повтори позже», а не «почини»", h.pre(cmd, pdir=kit), False,
+               "повтори слияние позже")
+    h.runs["agent-kit"] = (runs, dict(checks, total_count=4))
+    h.ci(GREEN_KIT, name="agent-kit")
+    merge_case("required: проверок больше, чем получено — отказ «неполные данные»", h.pre(cmd, pdir=kit), False,
+               "неполные данные CI — запусков 3 и проверок 4")
     h.runs.clear()
+    h.ci([dict(AFFECTED, prs=(8,)), dict(TRACES, prs=(8,))], name="agent-kit")
+    merge_case("required: зелёные запуски чужого PR #8 на том же SHA — не засчитаны, отказ", h.pre(cmd, pdir=kit),
+               False, "не встали (засчитывается запуск от pull_request на этом коммите): tests/affected, check-traces")
+    h.ci([dict(AFFECTED, prs=()), dict(TRACES, prs=())], name="agent-kit")
+    merge_case("required: запуски без PR (pull_requests пуст) — не засчитаны, отказ", h.pre(cmd, pdir=kit), False,
+               "не встали")
+    h.ci([dict(AFFECTED, prs=(8, 7)), TRACES], name="agent-kit")
+    merge_case("required: запуск с несколькими PR, среди них этот — засчитан", h.pre(cmd, pdir=kit), True)
+    h.ci([AFFECTED, TRACES, dict(AFFECTED, prs=(8,), conclusion="FAILURE")], name="agent-kit")
+    merge_case("required: красный запуск чужого PR на том же SHA — не мешает", h.pre(cmd, pdir=kit), True)
     h.ci([AFFECTED, TRACES, dict(TRACES, status="QUEUED", conclusion="")], name="agent-kit")
     merge_case("required: дубль traces (зелёная и идущая) — отказ «ещё идут»", h.pre(cmd, pdir=kit), False,
                "ещё идут: check-traces/traces")
@@ -1757,7 +1780,7 @@ def t_ci_required(h):
     # шаг 0: сохранённые ответы gh pr view и REST запусков PR 223 и 225 (01.11 слиты при красном CI сессией без роли)
     for pr, want in ((223, "tests/affected красная: FAILURE; проверка GitHub check-traces/traces красная: FAILURE"),
                      (225, "tests/affected красная: FAILURE")):
-        h.runs["agent-kit"] = _runs_on(_saved(pr, "runs"), sha)
+        h.runs["agent-kit"] = _runs_on(_saved(pr, "runs"), sha, pr)
         h.ci(_saved(pr)["statusCheckRollup"], name="agent-kit", baseRefName="main")
         merge_case(f"required: сохранённые ответы PR {pr} — отказ", h.pre(cmd, pdir=kit), False, want)
     h.runs.clear()
@@ -1851,10 +1874,19 @@ def t_ci_verdict_unit(h):
     check("ci_verdict: без обязательных запуски не читаются", v == ("ok", "", []), v)
     # ci_runs: связь check-runs с запусками Actions по check_suite_id и head_sha
     sha = "a" * 40
-    wr = {"workflow_runs": [{"name": "tests", "event": "pull_request", "head_sha": sha, "check_suite_id": 5},
-                            {"name": "check-traces", "event": "push", "head_sha": sha, "check_suite_id": 6},
-                            {"name": "tests", "event": "pull_request", "head_sha": "b" * 40, "check_suite_id": 7}]}
-    cr = {"check_runs": [{"name": "affected", "status": "completed", "conclusion": "success", "head_sha": sha,
+    mine = [{"number": 7}]
+    wr = {"total_count": 5, "workflow_runs": [
+        {"name": "tests", "event": "pull_request", "head_sha": sha, "check_suite_id": 5, "pull_requests": mine},
+        {"name": "check-traces", "event": "push", "head_sha": sha, "check_suite_id": 6, "pull_requests": mine},
+        {"name": "tests", "event": "pull_request", "head_sha": "b" * 40, "check_suite_id": 7, "pull_requests": mine},
+        {"name": "tests", "event": "pull_request", "head_sha": sha, "check_suite_id": 8,
+         "pull_requests": [{"number": 70}]},
+        {"name": "tests", "event": "pull_request", "head_sha": sha, "check_suite_id": 9, "pull_requests": []}]}
+    cr = {"total_count": 7, "check_runs": [
+                         {"name": "affected", "status": "completed", "conclusion": "failure", "head_sha": sha,
+                          "check_suite": {"id": 8}},
+                         {"name": "affected", "status": "completed", "conclusion": "failure", "head_sha": sha,
+                          "check_suite": {"id": 9}},{"name": "affected", "status": "completed", "conclusion": "success", "head_sha": sha,
                           "check_suite": {"id": 5}},
                          {"name": "traces", "status": "in_progress", "conclusion": None, "head_sha": sha,
                           "check_suite": {"id": 6}},
@@ -1864,28 +1896,50 @@ def t_ci_verdict_unit(h):
                           "check_suite": {"id": 7}},
                          {"name": "affected", "status": "completed", "conclusion": "success", "head_sha": "c" * 40,
                           "check_suite": {"id": 5}}]}
-    got = mg.ci_runs(wr, cr, sha)
-    check("ci_runs: запуск Actions на этом SHA — workflow, job, итог и событие",
+    got = mg.ci_runs(wr, cr, sha, 7)
+    check("ci_runs: запуск Actions этого PR на этом SHA — workflow, job, итог и событие (чужой PR и без PR — нет)",
           got == [{"workflowName": "tests", "name": "affected", "status": "completed", "conclusion": "success",
                    "event": "pull_request"},
                   {"workflowName": "check-traces", "name": "traces", "status": "in_progress", "conclusion": "",
                    "event": "push"}], got)
-    for bad, how in ((None, "None"), ({}, "без workflow_runs"),
-                     ({"workflow_runs": [{"name": "x"}]}, "без check_suite_id"),
-                     ({"workflow_runs": ["x"]}, "не словарь"), ({"workflow_runs": {"a": 1}}, "словарь вместо списка")):
-        check(f"ci_runs: ответ запусков {how} — None", mg.ci_runs(bad, cr, sha) is None, mg.ci_runs(bad, cr, sha))
-    for bad, how in (({"check_runs": [{"name": "x", "head_sha": sha}]}, "без check_suite"),
-                     ([], "список вместо словаря")):
-        check(f"ci_runs: ответ check-runs {how} — None", mg.ci_runs(wr, bad, sha) is None, mg.ci_runs(wr, bad, sha))
+    got = mg.ci_runs(wr, cr, sha, "7")
+    check("ci_runs: номер PR строкой — тот же итог", len(got or []) == 2, got)
+    check("ci_runs: другой PR — пусто", mg.ci_runs(wr, cr, sha, 8) == [], mg.ci_runs(wr, cr, sha, 8))
+    one = {"head_sha": sha, "check_suite_id": 5, "pull_requests": mine}
+    for bad, how in ((None, "None"), ({}, "без workflow_runs"), ({"workflow_runs": []}, "без total_count"),
+                     ({"total_count": 1, "workflow_runs": [{"name": "x"}]}, "без check_suite_id"),
+                     ({"total_count": 1, "workflow_runs": [{"head_sha": sha, "check_suite_id": 5}]},
+                      "без pull_requests"),
+                     ({"total_count": 1, "workflow_runs": [dict(one, pull_requests=[7])]}, "PR не словарь"),
+                     ({"total_count": "x", "workflow_runs": [one]}, "total_count не число"),
+                     ({"total_count": 1, "workflow_runs": ["x"]}, "не словарь"),
+                     ({"total_count": 1, "workflow_runs": {"a": 1}}, "словарь вместо списка")):
+        check(f"ci_runs: ответ запусков {how} — None", mg.ci_runs(bad, cr, sha, 7) is None, mg.ci_runs(bad, cr, sha, 7))
+    for bad, how in (({"total_count": 1, "check_runs": [{"name": "x", "head_sha": sha}]}, "без check_suite"),
+                     ({"check_runs": []}, "без total_count"), ([], "список вместо словаря")):
+        check(f"ci_runs: ответ check-runs {how} — None", mg.ci_runs(wr, bad, sha, 7) is None,
+              mg.ci_runs(wr, bad, sha, 7))
     check("ci_runs: пустые ответы — пустой список",
-          mg.ci_runs({"workflow_runs": []}, {"check_runs": []}, sha) == [])
+          mg.ci_runs({"total_count": 0, "workflow_runs": []}, {"total_count": 0, "check_runs": []}, sha, 7) == [])
+    for w, c, how in ((dict(wr, total_count=6), cr, "запусков"), (wr, dict(cr, total_count=8), "проверок"),
+                      (dict(wr, total_count=200), dict(cr, total_count=150), "обоих")):
+        got = mg.ci_runs(w, c, sha, 7)
+        check(f"ci_runs: total_count {how} больше полученного — строка «неполные данные CI»",
+              isinstance(got, str) and got.startswith(mg.CI_NONE) and "неполные данные CI" in got, got)
+    got = mg.ci_runs(dict(wr, total_count=200), cr, sha, 7)
+    v = mg.ci_verdict([AFFECTED, TRACES], req, got)
+    check("ci_verdict: неполные данные при обязательных — fail с этим текстом", v == ("fail", got, []), v)
+    v = mg.ci_verdict([AFFECTED, TRACES], (), got)
+    check("ci_verdict: неполные данные без обязательных — не читаются", v == ("ok", "", []), v)
+    check("ci_runs: total_count меньше полученного — разбор как обычно",
+          len(mg.ci_runs(dict(wr, total_count=1), cr, sha, 7) or []) == 2)
     v = V([AFFECTED, TRACES, "x"], req)
     check("ci_verdict: не словарь — fail", v[0] == "fail" and "не разобрана" in v[1], v)
     for pr, red, events in ((223, ["tests/affected", "check-traces/traces"], ["pull_request", "pull_request", "push"]),
                             (225, ["tests/affected"], ["pull_request", "pull_request", "push"])):
         saved, runs = _saved(pr), _saved(pr, "runs")
         head = saved["headRefOid"]
-        got = mg.ci_runs(runs["workflow_runs"], runs["check_runs"], head)
+        got = mg.ci_runs(runs["workflow_runs"], runs["check_runs"], head, pr)
         check(f"ci_runs: сохранённые запуски PR {pr} — 4 проверки, события как на GitHub",
               got is not None and len(got) == 4 and sorted({(g["workflowName"], g["event"]) for g in got}) ==
               sorted({("tests", "pull_request"), ("check-traces", "pull_request"), ("check-traces", "push")}), got)
@@ -1893,7 +1947,9 @@ def t_ci_verdict_unit(h):
         check(f"ci_verdict: сохранённые ответы PR {pr} — fail по {', '.join(red)}",
               v[0] == "fail" and all(f"{n} красная" in v[1] for n in red) and v[1].count("красная") == len(red), v)
         check(f"ci_runs: запуски PR {pr} на чужом SHA — пусто", mg.ci_runs(runs["workflow_runs"], runs["check_runs"],
-                                                                         "0" * 40) == [])
+                                                                         "0" * 40, pr) == [])
+        check(f"ci_runs: запуски PR {pr} для другого номера PR — пусто",
+              mg.ci_runs(runs["workflow_runs"], runs["check_runs"], head, pr + 1) == [])
     # обязательные имена — настоящие job workflows репозитория (сверка с файлами .github/workflows)
     wf_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(GUARD)))), ".github",
                           "workflows")

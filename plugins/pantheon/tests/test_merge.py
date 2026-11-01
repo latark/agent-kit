@@ -55,7 +55,7 @@ if sys.argv[1:3] == ["pr", "merge"]:
     sys.exit(int(open(p).read()) if os.path.exists(p) else 0)
 if sys.argv[1] == "api" and ("/actions/runs?" in sys.argv[2] or "/check-runs?" in sys.argv[2]):
     # запуски Actions (metis-0633): по rollup из gh-view.json, событие — поле "event" записи (по умолчанию
-    # pull_request); с gh-runs-fail — сбой
+    # pull_request), PR — поле "prs" (по умолчанию 7); с gh-runs-fail — сбой, gh-runs-total — total_count запусков
     if os.path.exists(os.path.join(rec, "gh-runs-fail")):
         sys.exit(1)
     v = json.load(open(os.path.join(rec, "gh-view.json")))
@@ -63,11 +63,14 @@ if sys.argv[1] == "api" and ("/actions/runs?" in sys.argv[2] or "/check-runs?" i
     for i, c in enumerate(v.get("statusCheckRollup") or []):
         if isinstance(c, dict) and "context" not in c:
             runs.append({"name": c.get("workflowName"), "event": c.get("event", "pull_request"), "head_sha": sha,
-                         "check_suite_id": 1000 + i})
+                         "check_suite_id": 1000 + i, "pull_requests": [{"number": n} for n in c.get("prs", [7])]})
             checks.append({"name": c.get("name"), "status": str(c.get("status") or "").lower(),
                            "conclusion": str(c["conclusion"]).lower() if c.get("conclusion") else None,
                            "head_sha": sha, "check_suite": {"id": 1000 + i}})
-    print(json.dumps({"workflow_runs": runs} if "/actions/runs?" in sys.argv[2] else {"check_runs": checks}))
+    total = os.path.join(rec, "gh-runs-total")
+    total = int(open(total).read()) if os.path.exists(total) else len(runs)
+    print(json.dumps({"total_count": total, "workflow_runs": runs} if "/actions/runs?" in sys.argv[2]
+                     else {"total_count": len(checks), "check_runs": checks}))
     sys.exit(0)
 if sys.argv[1] == "api" and "/pulls/" in sys.argv[2] and sys.argv[2].split("?")[0].endswith("/files"):
     p = os.path.join(rec, "gh-files.jsonl")
@@ -490,6 +493,19 @@ def test_ci_required_names():
     b.run()
     check("baseRefName нет: affected обязателен, его нет → окна нет, ждёт", not b.windows() and b.req() is not None,
           b.outs[-1])
+    b = Box()
+    b.request()
+    b.view(SHA, checks=[dict(c, prs=[8]) for c in ci("SUCCESS", "SUCCESS")])
+    b.run()
+    check("зелёные запуски чужого PR #8 на том же SHA → окна нет, ждёт", not b.windows() and b.req() is not None,
+          b.outs[-1])
+    b = Box()
+    b.request()
+    b.view(SHA)
+    b.set("gh-runs-total", 101)
+    b.run()
+    check("запусков больше, чем получено (total_count 101) → окна нет, заявка снята с тревогой «неполные данные»",
+          not b.windows() and not b.merges() and b.req() is None and "неполные данные CI" in b.alerts(), b.alerts())
 
 
 def test_timeout_retry():

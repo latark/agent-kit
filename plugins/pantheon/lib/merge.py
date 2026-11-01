@@ -391,14 +391,21 @@ def required_checks(repo, base):
     return tuple((w, j) for w, j, b in got if b is None or not isinstance(base, str) or b == base)
 
 
-def ci_runs(workflow_runs, check_runs, sha):
-    """Запуски Actions на коммите sha с событием: [{workflowName, name, status, conclusion, event}] по ответам
-    CI_RUNS_API (actions/runs и check-runs). Проверка без запуска Actions с тем же check_suite_id (стороннее приложение
-    с тем же именем) и чужой head_sha в список не идут; ответ не разобран — None."""
+def ci_runs(workflow_runs, check_runs, sha, pr):
+    """Запуски Actions PR pr на коммите sha с событием: [{workflowName, name, status, conclusion, event}] по ответам
+    CI_RUNS_API (actions/runs и check-runs). Не идут в список: проверка без запуска Actions с тем же check_suite_id
+    (стороннее приложение с тем же именем), чужой head_sha и запуск, в pull_requests которого нет этого PR (запуск
+    чужого PR на том же SHA). Ответ неполон (total_count больше полученного: per_page=100 без пагинации, скрытой
+    может быть красная запись) — строка «неполные данные CI»; не разобран — None."""
     try:
-        suites = {r["check_suite_id"]: r for r in workflow_runs["workflow_runs"] if r["head_sha"] == sha}
+        wr, cr = workflow_runs["workflow_runs"], check_runs["check_runs"]
+        if workflow_runs["total_count"] > len(wr) or check_runs["total_count"] > len(cr):
+            return (f"{CI_NONE}: неполные данные CI — запусков {workflow_runs['total_count']} и проверок "
+                    f"{check_runs['total_count']}, а получено {len(wr)} и {len(cr)}")
+        suites = {r["check_suite_id"]: r for r in wr
+                  if r["head_sha"] == sha and str(pr) in [str(p["number"]) for p in r["pull_requests"]]}
         out = []
-        for c in check_runs["check_runs"]:
+        for c in cr:
             run = suites.get(c["check_suite"]["id"])
             if run is not None and c["head_sha"] == sha:
                 out.append({"workflowName": str(run.get("name") or ""), "name": str(c.get("name") or ""),
@@ -414,11 +421,14 @@ def ci_verdict(rollup, required=(), runs=None):
     StatusContext — по state; ключ проверки — (workflowName, name) или context. Итог ключа — худший из его записей:
     дубль имени (push и pull_request на одном SHA) не прячет красную запись зелёной. required — обязательные
     (workflow, job): судятся только по runs (ci_runs) от события pull_request, зелёный итог — только SUCCESS; красная
-    или пропущенная — fail, нет такого запуска или идёт — wait, runs не получены — fail. Остальные проверки rollup
+    или пропущенная — fail, нет такого запуска или идёт — wait, runs не получены или неполны (строка) — fail.
+    Остальные проверки rollup
     дают только предупреждение о красной. required пуст — обязательна каждая проверка rollup (SUCCESS, NEUTRAL,
     SKIPPED), пустой rollup — empty."""
-    if not isinstance(rollup, list) or required and not isinstance(runs, list):
+    if not isinstance(rollup, list) or required and not isinstance(runs, (list, str)):
         return "fail", CI_NONE, []
+    if required and isinstance(runs, str):
+        return "fail", runs, []
     rank = {"ok": 0, "wait": 1, "fail": 2}
     seen, pr_runs = {}, {}  # ключ → (итог, слово итога, имя для текста)
     for c in rollup:
@@ -465,7 +475,7 @@ def ci_verdict(rollup, required=(), runs=None):
     return "ok", "", notes
 
 
-def ci_runs_fetch(repo, sha):
+def ci_runs_fetch(repo, pr, sha):
     """Запуски Actions на head SHA с событием (metis-0633): два GET REST по CI_RUNS_API, список ci_runs или None —
     gh не ответил или ответ не разобран."""
     got = []
@@ -478,7 +488,7 @@ def ci_runs_fetch(repo, sha):
             return None
         if got[-1] is None:
             return None
-    return ci_runs(got[0], got[1], sha)
+    return ci_runs(got[0], got[1], sha, pr)
 
 
 def ci_state(rollup, required=(), runs=None):
@@ -525,7 +535,7 @@ def gate(repo, pr, sha, view):
     if len(latest) < MIN_ACCEPTS:
         return "fail", f"«принять» от argus на Opus — {len(latest)} из {MIN_ACCEPTS}"
     required = required_checks(repo, view.get("baseRefName"))
-    state, why = ci_state(view.get("statusCheckRollup"), required, ci_runs_fetch(repo, sha) if required else None)
+    state, why = ci_state(view.get("statusCheckRollup"), required, ci_runs_fetch(repo, pr, sha) if required else None)
     if state != "ok":
         return state, why
     return "ok", f"argus ×{len(latest)} ✓, CI ✓"
