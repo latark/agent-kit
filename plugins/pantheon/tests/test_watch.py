@@ -2122,6 +2122,169 @@ def test_outward_links_walk_limit_0101():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def _mk_wt_files(d, n):
+    os.makedirs(d, exist_ok=True)
+    for i in range(n):
+        open(os.path.join(d, f"f{i}"), "w").close()
+
+
+def test_outward_links_skips_node_modules_0616():
+    """Копия с 6000 файлами в node_modules/.next не «небезопасна» по WALK_LIMIT; ссылка наружу на любой глубине
+    node_modules (в том числе .pnpm/x/node_modules/y) находится; зависимости больше DEPS_LIMIT — None («не знаю»);
+    6000 файлов вне зависимостей — по-прежнему None."""
+    import importlib
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    w = importlib.import_module("watch")
+    base = os.path.realpath(tempfile.mkdtemp(prefix="walk-", dir=os.environ.get("TMPDIR")))
+    outside = os.path.join(base, "outside")
+    os.makedirs(outside)
+    try:
+        def make(name):
+            d = os.path.join(base, name)
+            _mk_wt_files(os.path.join(d, "node_modules", ".pnpm", "x", "node_modules", "y"), 3000)
+            _mk_wt_files(os.path.join(d, ".next", "cache"), 3000)
+            os.symlink(os.path.join(d, "node_modules", ".pnpm", "x"), os.path.join(d, "node_modules", "inner"))
+            return d
+        clean = make("clean")
+        check(w.outward_links(clean) == (0, None), f"копия без ссылок: {w.outward_links(clean)}")
+        for i, rel in enumerate((("node_modules", "out"), ("node_modules", ".pnpm", "x", "node_modules", "out"),
+                                 ("node_modules", ".pnpm", "x", "node_modules", "y", "deep"),
+                                 (".next", "cache", "out"))):
+            d = make(f"bad{i}")
+            os.symlink(outside, os.path.join(d, *rel))
+            res = w.outward_links(d)
+            check(res and res[0] == 1 and res[1][1] == outside, f"ссылка наружу {rel} не найдена: {res}")
+        saved = w.DEPS_LIMIT
+        try:
+            w.DEPS_LIMIT = 100
+            check(w.outward_links(clean) is None, "зависимости больше DEPS_LIMIT не дали None")
+        finally:
+            w.DEPS_LIMIT = saved
+        plain = os.path.join(base, "plain")
+        _mk_wt_files(plain, 6000)
+        check(w.outward_links(plain) is None, "6000 файлов вне node_modules не дали None")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_sandbox_clean_0620():
+    """Уборка кэшей песочниц: старое без процессов уходит, свежее, занятое процессом и чужие папки остаются;
+    ссылка снимается сама, цель не тронута."""
+    import importlib
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    w = importlib.import_module("watch")
+    base = os.path.realpath(tempfile.mkdtemp(prefix="sbx-", dir=os.environ.get("TMPDIR")))
+    keep_out = os.path.join(base, "outside")
+    os.makedirs(keep_out)
+    open(os.path.join(keep_out, "k"), "w").write("x")
+    root = os.path.join(base, "cache")
+    now = time.time()
+    old = now - 20 * 86400
+
+    def entry(role, part, name, mtime, sub=True):
+        p = os.path.join(root, role, part, name)
+        os.makedirs(os.path.join(p, "deep") if sub else os.path.dirname(p), exist_ok=True)
+        f = p if not sub else os.path.join(p, "deep", "f")
+        open(f, "w").write("x") if sub else open(p, "w").write("x")
+        for q in ([p, os.path.join(p, "deep"), f] if sub else [p]):
+            os.utime(q, (mtime, mtime))
+        return p
+    try:
+        gone = entry("argus", "tmp", "old1", old)
+        gone2 = entry("argus", "npm", "old2", old)
+        gone3 = entry("argus", "logs", "x.log", old, sub=False)
+        fresh = entry("argus", "tmp", "fresh", now)
+        mixed = entry("argus", "tmp", "mixed", old)
+        os.utime(os.path.join(mixed, "deep", "f"), (now, now))  # внутри свежее — запись остаётся
+        held = entry("argus", "tmp", "held", old)
+        other = entry("argus", "work", "old", old)  # не из списка частей
+        link = os.path.join(root, "argus", "tmp", "lnk")
+        os.symlink(keep_out, link)
+        os.makedirs(os.path.join(root, "evil-role", "tmp"))
+        os.makedirs(os.path.join(keep_out, "tmp", "old"))
+        os.utime(os.path.join(keep_out, "tmp", "old"), (old, old))
+        os.utime(os.path.join(keep_out, "tmp"), (old, old))
+        os.symlink(keep_out, os.path.join(root, "linkrole"))
+        os.makedirs(os.path.join(root, "partlink"))
+        os.symlink(os.path.join(keep_out, "tmp"), os.path.join(root, "partlink", "tmp"))
+        removed, failed = w.sandbox_clean(root, now, {os.path.join(held, "deep", "f")}, days=7)
+        check(not os.path.exists(gone) and not os.path.exists(gone2) and not os.path.exists(gone3),
+              "старое не убрано")
+        check(all(os.path.exists(x) for x in (fresh, mixed, held, other)), "свежее, занятое или чужое убрано")
+        check(os.path.exists(os.path.join(keep_out, "k")), "цель ссылки тронута")
+        check(removed >= 3 and failed == 0, f"счётчики: {removed} {failed}")
+        # ссылка tmp/lnk сама свежая по lstat — остаётся; состаренную снимаем, цель цела
+        os.utime(link, (old, old), follow_symlinks=False)
+        w.sandbox_clean(root, now, set(), days=7)
+        check(not os.path.lexists(link) and os.path.exists(os.path.join(keep_out, "k")), "ссылка не снята или цель тронута")
+        check(not os.path.exists(held), "без процесса запись должна уйти")
+        # окно-ссылка не обходится вовсе
+        w.sandbox_clean(root, now + 99 * 86400, set(), days=7)
+        check(os.path.exists(os.path.join(keep_out, "k")) and os.path.isdir(os.path.join(keep_out, "tmp", "old")),
+              "обход через окно- или часть-ссылку тронул цель")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_sandbox_clean_swap_0620():
+    """Окно подменяет папку части ссылкой наружу между проверкой и удалением: цель снаружи цела."""
+    import importlib
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    w = importlib.import_module("watch")
+    base = os.path.realpath(tempfile.mkdtemp(prefix="sbx-", dir=os.environ.get("TMPDIR")))
+    try:
+        root = os.path.join(base, "cache")
+        part = os.path.join(root, "argus", "tmp")
+        os.makedirs(os.path.join(part, "old1"))
+        os.makedirs(os.path.join(base, "outside", "old1"))
+        open(os.path.join(base, "outside", "old1", "keep"), "w").write("x")
+        old = time.time() - 30 * 86400
+        for q in (os.path.join(part, "old1"), part):
+            os.utime(q, (old, old))
+        real_newer, swapped = w._tree_newer, []
+
+        def newer(path, lim):
+            r = real_newer(path, lim)
+            if not swapped:  # между проверкой возраста и удалением
+                swapped.append(1)
+                os.rename(part, part + "-moved")
+                os.symlink(os.path.join(base, "outside"), part)
+            return r
+        w._tree_newer = newer
+        try:
+            w.sandbox_clean(root, time.time(), set(), days=7)
+        finally:
+            w._tree_newer = real_newer
+        check(swapped and os.path.exists(os.path.join(base, "outside", "old1", "keep")),
+              "после подмены части ссылкой тронута цель снаружи")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_sandbox_cap_alert_0620():
+    """Дежурный: кэш выше потолка после уборки — строка в alerts.md; в пределах — нет; старое убирает проходом."""
+    e = Env()
+    root = os.path.join(e.home, "Library", "Caches", "pantheon-sandbox", "argus")
+    old_dir = os.path.join(root, "tmp", "old")
+    os.makedirs(old_dir)
+    open(os.path.join(old_dir, "big"), "wb").write(b"0" * 3 * 1024 * 1024)
+    fresh = os.path.join(root, "tmp", "fresh")
+    os.makedirs(fresh)
+    open(os.path.join(fresh, "big"), "wb").write(b"0" * 3 * 1024 * 1024)
+    old = T0 - 20 * 86400
+    for q in (old_dir, os.path.join(old_dir, "big")):
+        os.utime(q, (old, old))
+    r = e.run("watch", t=T0, extra={"PANTHEON_SANDBOX_CAP_MB": "1"})
+    check("кэши песочниц" in e.alerts() and "потолке 1 МБ" in e.alerts(), f"нет тревоги о потолке: {e.alerts()[-400:]}")
+    check(not os.path.exists(old_dir) and os.path.exists(fresh), "старое не убрано или свежее убрано")
+    e2 = Env()
+    r2 = os.path.join(e2.home, "Library", "Caches", "pantheon-sandbox", "argus", "tmp", "fresh")
+    os.makedirs(r2)
+    open(os.path.join(r2, "big"), "wb").write(b"0" * 1024 * 1024)
+    e2.run("watch", t=T0, extra={"PANTHEON_SANDBOX_CAP_MB": "100"})
+    check("потолке" not in e2.alerts(), "тревога при объёме в пределах потолка")
+
+
 def test_worktree_outside_and_prune_0118():
     """Копии вне .claude/worktrees: тревога после WORKTREE_DAYS, никогда не удаляются; запись без папки чистится."""
     e = Env()
