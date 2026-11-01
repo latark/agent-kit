@@ -212,6 +212,20 @@ try:
     os.makedirs(os.path.join(tmp, "dirpy", "ctx.py"))
     r = launch([os.path.join(tmp, "dirpy", "ctx.py")], real, json.dumps({"hook_event_name": "Stop"}))
     check("папка на месте скрипта → Stop: код 0", r.returncode == 0 and r.stderr == "", (r.returncode, r.stderr))
+    # файл есть, но не читается (chmod 0): Python тоже вышел бы с кодом 2 — ветка `! [ -r ]` запускателя
+    noread = os.path.join(tmp, "noread", "ctx.py")
+    os.makedirs(os.path.dirname(noread))
+    open(noread, "w").close()
+    os.chmod(noread, 0)
+    if os.geteuid() != 0:  # root читает и файл без прав — проверка там не о том
+        r = launch([noread], real, json.dumps({"hook_event_name": "Stop"}))
+        check("файл скрипта без прав чтения → Stop: код 0 без вывода",
+              r.returncode == 0 and r.stdout == "" and r.stderr == "", (r.returncode, r.stdout, r.stderr))
+        r = launch([noread, "maint-pre"], real, pre_ev)
+        check("файл скрипта без прав чтения → PreToolUse: код 2 с причиной",
+              r.returncode == 2 and "файла скрипта нет" in r.stderr and "Permission denied" not in r.stderr,
+              (r.returncode, r.stdout, r.stderr))
+    os.chmod(noread, 0o600)
     n0 = len(log_lines())
     r = launch(["x.py"], old, json.dumps({"hook_event_name": "Stop"}), iso)
     check("нет 3.11+ → строка launcher no-python в журнале",
