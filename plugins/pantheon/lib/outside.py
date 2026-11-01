@@ -29,7 +29,8 @@
     корневой скрипт; иначе отказ со списком. turbo.json проекта не правится;
   - порт — из ряда 4300–4399, не 3000, 3100–3199 (разработчики) и 3200–3299 (показ владельцу, прежний ряд);
   - не больше MAX_SERVERS (2) серверов сразу; давление памяти критичное — отказ любому, предупреждение — второму;
-    отказ сразу, с причиной и кодом 75, без очереди heavy;
+    отказ сразу, с причиной и кодом 75, без очереди heavy. У каждого сервера лимит памяти SERVER_MEM_MB (6 ГБ): RSS
+    группы сервера и её потомков в своих группах больше — сторож гасит его с причиной «память»;
   - ключи — только dev-ключи из STATE/outside/env/<owner>__<repo>.env и <owner>__<repo>__<app>.env (KEY=VALUE),
     проход читает их сам и передаёт окружением процесса; в итоге — только имена. Профиль закрывает чтение .env* в
     дереве и самой папки STATE/outside/env (серверы и тесты не читают ключи чужих проектов). <owner>__<repo> — из
@@ -37,8 +38,10 @@
     (KERN_PROCARGS2); deny process-info* этого не закрывает (проба 01.11) — потому только dev-ключи;
   - опора — клон реестра (metis-0614, проверка безопасности): .git-файл папки заявки принимается, только если ведёт в
     <клон>/.git/worktrees/<имя> клона из папок окна (trusted_clone, без запуска git); конфиг клона с include*,
-    filter.*, extensions.worktreeConfig или командой в core.fsmonitor — отказ (unsafe_config); git прохода — с
-    GIT_SAFE (без fsmonitor, хуков, сети, подмодулей), копия — git --git-dir=<клон>/.git без ~/.gitconfig. Клон,
+    filter.*, extensions.worktreeConfig, командой в core.fsmonitor или ключом-командой (*.command, *.textconv,
+    *.driver, *.helper, *.program, pager.*, alias.*) — отказ (unsafe_config); git прохода — с GIT_SAFE (без
+    fsmonitor, хуков, сети, подмодулей; status — --ignore-submodules=all: конфиг подмодуля окну открыт), копия —
+    git --git-dir=<клон>/.git без ~/.gitconfig. Тесты после «принять» берут копию и клон тоже через trusted_clone. Клон,
     common и gitdir проверяются один раз (resolve_dir; commondir у common, ссылки — отказ; подтверждает сам git), дальше
     папка — Repo, и git по ней идёт через --git-dir/--work-tree, а не через .git-файл. Остаток: commondir в
     <клон>/.git/worktrees/<имя>/ роль может переписать между проверкой и git теста — намеренный обход, граница — песочница;
@@ -56,7 +59,8 @@ STATE/outside/queue. Имя окна проход берёт из места п�
 Два прохода, оба запускает тик, когда у них есть дело; у каждого свой замок — сервер не ждёт тестов (metis-0614):
   `outside run --serve` (замок outside-serve) — серверы и сторож. Живёт, пока есть серверы или заявки serve (не дольше
   RESIDENT_MAX, потом тик зовёт заново), и каждые SWEEP_EVERY (2 с):
-  1. Сторож: срок вышел (аренда — until), есть «стоп» из любой папки заявок или процесс умер — состояние stopping,
+  1. Сторож: срок вышел (аренда — until), есть «стоп» из любой папки заявок, процесс умер или дерево сервера больше
+     лимита памяти — состояние stopping,
      группа процессов гаснет (SIGTERM, через 5 с SIGKILL) вместе с потомками, ушедшими в свою группу (turbo ставит её
      каждой задаче), и с любым своим процессом, у которого текущая папка — копия заявки (сирота next dev, ушедший к
      launchd до гашения); итог stopped, копия снимается. Порт после этого ещё отвечает — пометка в итоге. Номер
@@ -68,7 +72,8 @@ STATE/outside/queue. Имя окна проход берёт из места п�
   1. Заявки test — по времени. Заявка удаляется до запуска: одна заявка — один запуск; битые и подложенные — отказ.
   2. Тесты после «принять» argus: в журнале шлюза слияния (STATE/merge-gate/records.jsonl) «принять» не старше суток
      на (repo, SHA), а записи tests на этот SHA нет — проход ищет копию: корень папки реестра или его worktree внутри
-     папок реестра с HEAD = SHA и чистым деревом; нет такой, а коммит в клоне есть — временный worktree в
+     папок реестра с HEAD = SHA и чистым деревом (клон и worktree — через trusted_clone, как у заявок; .git-файл
+     worktree не в <клон>/.git/worktrees/<имя> — копия не берётся); нет такой, а коммит в клоне есть — временный worktree в
      ~/Library/Caches/pantheon-outside/wt (после прогона снимается; без node_modules сначала
      `<pm> install --frozen-lockfile`). Каждая пара (repo, SHA) — один раз (STATE/outside/auto.json); красные тесты и
      «нет копии» — тревога.
@@ -127,6 +132,7 @@ DENY_PORTS = (9222,) + tuple(range(9333, 9340)) + (6152, 6153)   # браузе�
 OWNER_PORTS = frozenset((3000,) + tuple(range(3100, 3300)))
 SERVER_PORTS = range(4300, 4400)    # ряд серверов прохода (metis-0614): не пересекается с портами владельца
 MAX_SERVERS = 2                     # решение владельца 01.11: не больше двух серверов сразу
+SERVER_MEM_MB = 6144                # и у каждого лимит памяти: RSS дерева сервера больше — сторож гасит (Mac 16 ГБ)
 SERVE_MIN, SERVE_MAX = 30, 120      # срок сервера, минуты
 TEST_TIMEOUT = 7200                 # с
 INSTALL_TIMEOUT = 900               # с: установка зависимостей копии сервера
@@ -365,7 +371,9 @@ WORKTREES_UNTRACKED = "?? .claude/worktrees/"
 def head_state(d):
     """(HEAD, дерево чистое) папки d; HEAD None — не git или нет коммитов."""
     h = (git(d, "rev-parse", "HEAD") or "").strip().lower()
-    st = git(d, "status", "--porcelain")
+    # без подмодулей: git status зашёл бы в каждый и прочёл его конфиг (<клон>/.git/modules/<имя>/config окну роли
+    # открыт на запись) — filter.* оттуда исполнился бы вне песочницы (metis-0614)
+    st = git(d, "status", "--porcelain", "--ignore-submodules=all")
     clean = st is not None and all(ln.startswith(WORKTREES_UNTRACKED) for ln in st.splitlines() if ln.strip())
     return (h if SHA_RE.fullmatch(h) else None), clean
 
@@ -627,32 +635,50 @@ def tail(log):
     return "\n".join(text.splitlines()[-TAIL_LINES:])[-TAIL_CHARS:]
 
 
-def strays(pid):
-    """[(pid, pgid)] потомков группы pid, ушедших в свою группу процессов: turbo ставит каждой задаче свою, и next dev
-    в ней переживал killpg группы сервера (metis-0606). Собирать до сигнала: после него сироты уходят к launchd.
-    Начало обхода — только члены группы pid: pid не глава (номер достался чужому процессу) и группы нет — [], как у
-    killpg, который такой группе ничего не шлёт."""
+def ps_table():
+    """{pid: (ppid, pgid, rss в КБ)} всех процессов по ps; сбой — {}."""
     try:
-        out = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,pgid="], capture_output=True, text=True,
+        out = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,pgid=,rss="], capture_output=True, text=True,
                              timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
-        return []
-    kids, pgid = {}, {}
+        return {}
+    table = {}
     for ln in out.splitlines():
         try:
-            p, pp, g = (int(x) for x in ln.split())
+            p, pp, g, rss = (int(x) for x in ln.split())
         except ValueError:
             continue
+        table[p] = (pp, g, rss)
+    return table
+
+
+def _tree(pid, table):
+    """Члены группы pid и все их потомки (в том числе в своих группах)."""
+    kids = {}
+    for p, (pp, _g, _r) in table.items():
         kids.setdefault(pp, []).append(p)
-        pgid[p] = g
-    seen, todo = set(), [p for p, g in pgid.items() if g == pid]
+    seen, todo = set(), [p for p, (_pp, g, _r) in table.items() if g == pid]
     while todo:
         p = todo.pop()
         if p in seen:
             continue
         seen.add(p)
         todo.extend(kids.get(p, ()))
-    return [(p, pgid[p]) for p in sorted(seen) if p in pgid and pgid[p] != pid]
+    return seen
+
+
+def strays(pid, table=None):
+    """[(pid, pgid)] потомков группы pid, ушедших в свою группу процессов: turbo ставит каждой задаче свою, и next dev
+    в ней переживал killpg группы сервера (metis-0606). Собирать до сигнала: после него сироты уходят к launchd.
+    Начало обхода — только члены группы pid: pid не глава (номер достался чужому процессу) и группы нет — [], как у
+    killpg, который такой группе ничего не шлёт."""
+    table = ps_table() if table is None else table
+    return [(p, table[p][1]) for p in sorted(_tree(pid, table)) if table[p][1] != pid]
+
+
+def tree_mb(pid, table):
+    """Память сервера, МБ: сумма RSS группы pid и её потомков, ушедших в свои группы (next dev под turbo)."""
+    return sum(table[p][2] for p in _tree(pid, table)) // 1024
 
 
 def _signal(pid, extra, sig):
@@ -1056,12 +1082,17 @@ def git_dir(common, *args, timeout=30):
 
 
 FSMONITOR_OFF = {"", "false", "no", "off", "0", "true", "yes", "on", "1"}   # true — встроенный монитор git, не команда
+# последнее слово ключа — команда, которую git может исполнить (core.sshCommand, diff.<x>.command, diff.<x>.textconv,
+# merge.<x>.driver, credential.helper, gpg.program, core.pager, core.editor…): у владельца в клонах реестра их нет
+# (сверка 01.11), а вне песочницы любая из них — чужой код у прохода
+EXEC_KEY_TAILS = ("command", "textconv", "driver", "helper", "program", "cmd", "pager", "editor", "askpass")
 
 
 def unsafe_config(common):
     """Ключи конфига клона, которые исполнят чужую команду у прохода и не перекрываются -c: include/includeIf (конфиг из
     любого файла), filter.* (smudge/process при checkout), extensions.worktreeConfig (конфиг из папки worktree), команда в
-    core.fsmonitor. → причина отказа или None. Конфиг читается как файл (git config --file — без include)."""
+    core.fsmonitor, ключи-команды (*.command, *.textconv, *.driver, *.helper, *.program, pager.*, alias.*).
+    → причина отказа или None. Конфиг читается как файл (git config --file — без include)."""
     out = git_dir(common, "config", "--file", os.path.join(common, "config"), "--list", "-z")
     if out is None:
         return f"конфиг {common}/config не прочитать"
@@ -1069,8 +1100,9 @@ def unsafe_config(common):
     for item in out.split("\0"):
         k, _, v = item.partition("\n")
         k = k.lower()
-        if (k.startswith(("include.", "includeif.", "filter.")) or k == "extensions.worktreeconfig"
-                or (k == "core.fsmonitor" and v.strip().lower() not in FSMONITOR_OFF)):
+        if (k.startswith(("include.", "includeif.", "filter.", "pager.", "alias.")) or k == "extensions.worktreeconfig"
+                or (k == "core.fsmonitor" and v.strip().lower() not in FSMONITOR_OFF)
+                or (k and k.rsplit(".", 1)[-1].endswith(EXEC_KEY_TAILS))):
             bad.append(k)
     if bad:
         return f"в конфиге клона {common} — {', '.join(sorted(set(bad)))}: вне песочницы это исполнится, копию не делаю"
@@ -1354,12 +1386,17 @@ def sweep(t=None, stops=None):
     """Серверы со сроком, «стопом» из любой папки заявок или умершим процессом — погасить. → число погашенных."""
     t = P.now() if t is None else t
     stops = stop_requests() if stops is None else stops
-    srv, n = servers(), 0
+    srv, n, table = servers(), 0, None
     for rid, s in list(srv.items()):
         pid = int(s.get("pid") or 0)
         alien = foreign(pid, s.get("started"))
         why = ("срок вышел" if t >= float(s.get("until") or 0) else "заявка «стоп»" if rid in stops
                else "процесс завершился" if not pid or alien or not alive(pid) else None)
+        if not why:
+            table = ps_table() if table is None else table   # один ps на круг сторожа
+            mb = tree_mb(pid, table)
+            if mb > SERVER_MEM_MB:
+                why = f"память: {mb} МБ — больше лимита {SERVER_MEM_MB} МБ на сервер"
         if not why:
             continue
         qdir, port = s.get("qdir"), int(s.get("port") or 0)
@@ -1627,25 +1664,39 @@ def auto_due():
     return m != P.read_json(root("auto.json"), {}).get("mtime")
 
 
+def trusted_repo(d):
+    """trusted_clone + Repo: папка d с проверенными клоном, common и gitdir; не прошла — None."""
+    clone, common, gitdir = trusted_clone(d)
+    return checked(d, clone, common, gitdir) if clone else None
+
+
 def find_checkout(repo, sha):
-    """Копия repo на sha с чистым деревом внутри папок реестра → (папка, клон, None); нет — (None, клон|None, причина)."""
+    """Копия repo на sha с чистым деревом внутри папок реестра → (папка, клон, None); нет — (None, клон|None, причина).
+    Папка и клон — Repo (metis-0614): клон реестра и worktree роли проверены trusted_clone, конфиг клона — unsafe_config,
+    git по ним — только через проверенный gitdir. Папка реестра с подложенным commondir в .git, worktree, чей .git-файл
+    ведёт не в <клон>/.git/worktrees/<имя>, — пропускаются: их git исполнил бы конфиг, который пишет роль."""
     roots = registry(None)
     clones = []
     for r in roots:
-        top = toplevel(r)
-        if top and top not in clones and inside(top, roots) and repo in remotes(top):
-            clones.append(top)
+        top = trusted_repo(r)
+        if (top is None or top != top.clone or top in clones or not inside(top, roots) or unsafe_config(top.common)
+                or repo not in remotes(top)):
+            continue
+        clones.append(top)
     for top in clones:
-        wt = git(top, "worktree", "list", "--porcelain") or ""
+        wt = git_dir(top.common, "worktree", "list", "--porcelain") or ""
         for block in wt.split("\n\n"):
             fields = dict(ln.split(" ", 1) for ln in block.splitlines() if " " in ln)
             p = os.path.realpath(fields.get("worktree", ""))
             if fields.get("HEAD", "").lower() == sha and p and inside(p, roots):
-                h, clean = head_state(p)
+                rp = trusted_repo(p)
+                if rp is None or rp.clone != top:
+                    continue
+                h, clean = head_state(rp)
                 if h == sha and clean:
-                    return p, top, None
+                    return rp, top, None
     for top in clones:
-        if git(top, "cat-file", "-e", f"{sha}^{{commit}}") is not None:
+        if git_dir(top.common, "cat-file", "-e", f"{sha}^{{commit}}") is not None:
             return None, top, None
     return None, None, (f"нет копии {repo} в папках реестра" if not clones else f"коммита {sha[:12]} нет в клоне {clones[0]}")
 
@@ -1656,11 +1707,10 @@ def run_auto(repo, sha):
     temp = None
     if not d and clone:
         temp = os.path.join(wt_root(), rid)
-        os.makedirs(os.path.dirname(temp), mode=0o700, exist_ok=True)
-        if git(clone, "worktree", "add", "--detach", temp, sha, timeout=120) is None:
-            temp, why = None, f"worktree на {sha[:12]} в {clone} не создан"
-        else:
-            d = temp
+        why = checkout(clone.common, sha, temp)
+        d = trusted_repo(os.path.realpath(temp)) if not why else None
+        if not d:
+            why = why or f"worktree на {sha[:12]} в {clone} не прошёл проверку"
     try:
         if not d:
             res = save_result(None, rid, {"state": "failed", "kind": "test", "auto": f"{repo}@{sha}", "why": why})
@@ -1672,7 +1722,9 @@ def run_auto(repo, sha):
             save_result(None, rid, res)
     finally:
         if temp:
-            git(clone, "worktree", "remove", "--force", temp, timeout=120)
+            git_dir(clone.common, "worktree", "remove", "--force", temp, timeout=120)
+            if os.path.isdir(temp) and inside(os.path.realpath(temp), [os.path.realpath(wt_root())]):
+                shutil.rmtree(temp, ignore_errors=True)
     a = P.read_json(root("auto.json"), {})
     a.setdefault("done", {})[f"{repo}@{sha}"] = {"time": P.stamp(), "id": rid, "state": res.get("state"),
                                                 "code": res.get("code"), "record": res.get("record", False)}

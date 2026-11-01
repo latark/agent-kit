@@ -9,7 +9,8 @@ tests, грязное дерево, команда меняет дерево, п
 мастерская, подложенная ссылка, скрипта нет — отказ; dev-сервер (metis-0614) — свой проход и сторож, своя копия на
 коммите (--sha), порт 4300–4399 мимо портов владельца, не больше двух и отказ при давлении памяти, монорепо и --app,
 dev-ключи из STATE окружением, «стоп» из любого окна и «нет такой заявки», отмена до запуска, срок, сирота по папке
-копии; окружение команды с нуля; профиль; тик зовёт каждый проход только по делу; `outside run` из окна Claude Code —
+копии, лимит памяти сервера; безопасность копии: .git-файл роли, конфиг клона с командами, подмодули, worktree для тестов
+после «принять» — через trusted_clone; окружение команды с нуля; профиль; тик зовёт каждый проход только по делу; `outside run` из окна Claude Code —
 отказ; guard не спрашивает.
 """
 import json
@@ -843,6 +844,27 @@ check("давление «предупреждение» и один серве�
 os.environ["PANTHEON_FAKE_PRESSURE"] = "1"
 kill_all_servers()
 
+# лимит памяти у каждого сервера (решение владельца 01.11): дерево сервера больше лимита — сторож гасит с причиной
+check("лимит памяти сервера по умолчанию — 6 ГБ", O.SERVER_MEM_MB == 6144)
+rc, q, rid = role_request("athena-x", APP, "serve")
+serve_pass()
+_srv = O.servers().get(rid) or {}
+port = (O.load_result(q, rid) or {}).get("port") or 0
+_mb = O.tree_mb(int(_srv.get("pid") or 0), O.ps_table())
+O.sweep()
+check("в пределах лимита сервер живёт, память дерева считается", rid in O.servers() and _mb > 0, (_mb, O.servers()))
+_real_mem = O.SERVER_MEM_MB
+O.SERVER_MEM_MB = 0
+try:
+    O.sweep()
+finally:
+    O.SERVER_MEM_MB = _real_mem
+res = O.load_result(q, rid) or {}
+check("дерево сервера больше лимита: погашен сам, причина «память», порт свободен, копия снята",
+      res.get("state") == "stopped" and "память" in res.get("why", "") and rid not in O.servers()
+      and not port_open(port) and not os.path.exists(work_of(rid)), res)
+kill_all_servers()
+
 # --sha: сервер на коммите PR, а не на HEAD папки (talos не входит в чужую worktree)
 rc, q, rid = role_request("athena-x", APP, "serve", "--sha", C1[:10])
 serve_pass()
@@ -1121,6 +1143,67 @@ for _k, _v in (("filter.x.smudge", "touch /tmp/x"), ("include.path", "/tmp/x.cfg
     check(f"конфиг клона с {_k}: отказ", _k.lower().split(".")[0] in (O.unsafe_config(_gd) or "").lower())
     git(APP, "config", "--unset", _k)
 check("чистый конфиг клона — не отказ", O.unsafe_config(_gd) is None)
+# ключи-команды (*.command и родня): вне песочницы любая из них — чужой код у прохода
+for _k in ("core.sshCommand", "diff.x.command", "diff.x.textconv", "merge.x.driver", "credential.helper",
+           "gpg.program", "core.pager", "pager.status", "alias.st", "core.alternateRefsCommand"):
+    git(APP, "config", _k, "touch /tmp/x")
+    check(f"конфиг клона с {_k}: отказ", _k.lower() in (O.unsafe_config(_gd) or "").lower(), O.unsafe_config(_gd))
+    git(APP, "config", "--unset", _k)
+git(APP, "config", "core.hooksPath", ".husky")   # -c core.hooksPath=/dev/null его перекрывает — не повод отказывать
+check("core.hooksPath и обычные ключи — не отказ", O.unsafe_config(_gd) is None, O.unsafe_config(_gd))
+git(APP, "config", "--unset", "core.hooksPath")
+
+# 6. подмодуль: его конфиг (<клон>/.git/modules/<имя>/config) окну роли открыт, git status прохода в него не заходит
+SUPER, SUBR = os.path.join(_ROOT, "super"), os.path.join(_ROOT, "subrepo")
+os.makedirs(SUPER)
+os.makedirs(SUBR)
+git(SUBR, "init", "-q", "-b", "main")
+commit(SUBR, {"f.txt": "data\n", ".gitattributes": "f.txt filter=evil\n"}, "s1")
+git(SUPER, "init", "-q", "-b", "main")
+commit(SUPER, {"a.txt": "a\n"}, "p1")
+subprocess.run(["git", "-C", SUPER, "-c", "protocol.file.allow=always", "submodule", "add", "-q", SUBR, "sub"],
+               check=True, capture_output=True)
+git(SUPER, "commit", "-q", "-m", "sub")
+_smark = os.path.join(_ROOT, "submodule-filter-ran")
+subprocess.run(["git", "config", "--file", os.path.join(SUPER, ".git", "modules", "sub", "config"),
+                "filter.evil.clean", f"touch {_smark}; cat"], check=True)
+_f = os.path.join(SUPER, "sub", "f.txt")
+os.utime(_f, (time.time() + 100,) * 2)   # индекс подмодуля устарел: status сверит содержимое через clean-фильтр
+_hs = O.head_state(os.path.realpath(SUPER))
+check("head_state не заходит в подмодуль: clean-фильтр из его конфига не исполнен", not os.path.exists(_smark)
+      and _hs[1] is True, _hs)
+subprocess.run(["git", "-C", SUPER, "status", "--porcelain"], capture_output=True)
+check("проба честная: голый git status фильтр подмодуля исполняет", os.path.exists(_smark))
+
+# 7. тесты после «принять»: worktree роли, чей .git-файл ведёт не в <клон>/.git/worktrees/<имя>, не берётся — его git
+# исполнил бы конфиг, который пишет роль; берётся временный worktree прохода
+_S = C1   # не HEAD клона: иначе find_checkout возьмёт сам клон
+WT7 = os.path.join(_wtd, "wt7")
+git(APP, "worktree", "add", "-q", "--detach", WT7, _S)
+_fc = O.find_checkout(REPO, _S)
+check("find_checkout: настоящий worktree клона реестра — Repo с gitdir клона",
+      isinstance(_fc[0], O.Repo) and _fc[0].clone == os.path.realpath(APP)
+      and _fc[0].gitdir.startswith(os.path.join(os.path.realpath(APP), ".git", "worktrees") + "/")
+      and isinstance(_fc[1], O.Repo), _fc)
+_EG = os.path.join(_ROOT, "evil-gitdir", "wt7")
+_real_gd = open(os.path.join(WT7, ".git")).read().split(":", 1)[1].strip()
+shutil.copytree(_real_gd, _EG)
+with open(os.path.join(_EG, "commondir"), "w") as fh:
+    fh.write(os.path.join(os.path.realpath(APP), ".git") + "\n")
+_saved7 = open(os.path.join(WT7, ".git")).read()
+with open(os.path.join(WT7, ".git"), "w") as fh:
+    fh.write(f"gitdir: {_EG}\n")
+check("проба честная: git по подложенному gitdir видит тот же HEAD и чистое дерево",
+      O.head_state(os.path.realpath(WT7)) == (_S, True), O.head_state(os.path.realpath(WT7)))
+_fc = O.find_checkout(REPO, _S)
+check("find_checkout: .git-файл worktree ведёт в gitdir роли — копия не берётся, только клон для временного worktree",
+      _fc[0] is None and _fc[1] == os.path.realpath(APP), _fc)
+with open(os.path.join(WT7, ".git"), "w") as fh:
+    fh.write(_saved7)
+git(APP, "worktree", "remove", "--force", WT7)
+shutil.rmtree(WT7, ignore_errors=True)
+shutil.rmtree(os.path.dirname(_EG), ignore_errors=True)
+git(APP, "worktree", "prune")
 
 for _p in (FAKE1, EVILB):
     shutil.rmtree(_p, ignore_errors=True)
