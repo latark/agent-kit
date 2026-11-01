@@ -1527,7 +1527,7 @@ def test_reading_ttl_fits_worst_case():
 
 # --- очередь окна роли (metis-0508): окну STATE закрыт, заявку заводит проход ----------------------------------------
 
-WIN = "themis-sources"
+WIN = "demo-window"
 
 
 def _win(b, name=WIN):
