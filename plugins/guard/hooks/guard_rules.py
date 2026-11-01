@@ -2515,8 +2515,8 @@ def check_pantheon(event, tool, tool_input):
 #   cdp-role (SEC-13, BROW-06) — демон браузера с вашими входами (127.0.0.1:9333–9339, cdp-daemon.mjs, пароль
 #            ~/.config/cdp-daemon/token): никому из ролей (CDP_READERS и CDP_ACTORS пусты, metis-0227). /close —
 #            никому из ролей: демон общий для всех сессий. Bash — по всему тексту команды (порт, имя демона, папка
-#            пароля); исключение (metis-0624) — слова только в значении флага-сообщения у одной простой команды без
-#            присваивания перед ней (metis-0630): git commit -m/-F, gh pr|issue create|edit|comment --body/--title/
+#            пароля); исключение (metis-0624) — слова только в значении флага-сообщения у одной простой команды, первое
+#            слово которой — ровно её имя (metis-0630: без X=…, env, time, exec, пути): git commit -m/-F, gh pr|issue create|edit|comment --body/--title/
 #            --body-file, pantheon task new|set --text/--note/--title… (_cdp_text_only, CDP_TEXT_CMDS); отказ Bash
 #            подсказывает это исключение (CDP_TEXT_HINT). Read, Grep и Glob папки пароля — отказ; Edit и
 #            Write исходников с этими словами правило не смотрит. Остаток: запуск своего скрипта, который сам ходит
@@ -2566,7 +2566,7 @@ CDP_TEXT_CMDS = {
 }
 # подсказка в отказе Bash (metis-0630): как написать о демоне в коммите, PR или задаче, не задев правило
 CDP_TEXT_HINT = ("\nСлова о демоне в тексте коммита, PR или задачи проходят, если это одна простая команда (без &&, |, "
-                 "$(…), 2>&1 и X=… перед ней), а текст стоит в -m/--body/--text/--note или в файле .md через "
+                 "$(…), 2>&1 и слов вроде X=… или env перед git, gh, pantheon), а текст стоит в -m/--body/--text/--note или в файле .md через "
                  "-F/--body-file; заголовок задачи — через --title.")
 CDP_TOKEN_DIR = os.path.join(HOME, ".config", "cdp-daemon")  # пароль демона (token) — в этой папке
 # WebFetch ролей — только наружу: адрес петли и локальной сети — это демон браузера или dev-сервер владельца
@@ -2826,18 +2826,20 @@ def _cdp_hit(word):
 def _cdp_text_only(cmd, cwd):
     """metis-0624: порт, пароль и имя демона стоят только значением флага-сообщения (CDP_TEXT_CMDS) у одной простой
     команды: git commit -m/-F, gh pr|issue create|edit|comment --body/--title/--body-file, pantheon task new|set
-    --text/--note/--title… и поле=текст в task new|set. Вне кавычек — ни ;, &, |, ни перенаправлений; перед именем
-    команды нет присваивания (GH_HOST=… gh, X=… git commit — metis-0630); каждое слово вычислено (без $(…) и
-    переменных); файл -F/--body-file — .md. Иначе — False, и правило смотрит весь текст."""
+    --text/--note/--title… и поле=текст в task new|set. Вне кавычек — ни ;, &, |, ни перенаправлений; первое слово
+    команды — ровно её имя, без присваивания, обёртки и пути перед ним (GH_HOST=… gh, env X=… git — metis-0630);
+    каждое слово вычислено (без $(…) и переменных); файл -F/--body-file — .md. Иначе — False, и правило смотрит весь текст."""
     bare = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", " ", cmd)
     if re.search(r"[;&|<>\n\r`\\'\"]", bare):
-        return False
-    if re.match(r"[\s(!]*[A-Za-z_]\w*\+?=", bare):  # присваивание перед командой — окружение команды не текст
         return False
     _, cmds = bash_analysis(cmd, cwd)
     if len(cmds) != 1 or not cmds[0][0]:
         return False
     name, args = cmds[0]
+    # первое слово — ровно git, gh или pantheon: присваивание (GH_HOST=…), обёртка (env, time, exec, !, (, {) и путь
+    # к команде перед ним — окружение и запуск, а не текст сообщения
+    if bare.split()[:1] != [name]:
+        return False
     spec = CDP_TEXT_CMDS.get(name)  # имя — уже basename в нижнем регистре (bash_analysis)
     if not spec:
         return False
