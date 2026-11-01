@@ -3358,7 +3358,9 @@ def test_status_blocked_without_process_0250():
     e = Env()
     e.direction("th-dir")
     e.direction("hm-dir")
-    e.agents([bg("th-dir", "blocked", "thththth-1"), bg("hm-dir", "blocked", "hmhmhmhm-1")])
+    e.agents([bg("th-dir", "blocked", "thththth-1"), bg("hm-dir", "blocked", "hmhmhmhm-1"),
+              bg("zeus", "done", "2e057e05-1", pid=32)])    # живой Зевс закончил ход: ему уходит «ждёт вас»
+    e.notify_mode(1200)
     _job(e, "thththth", state="blocked", detail="ждёт разрешения")
     _job(e, "hmhmhmhm", state="blocked", needs="выбрать: А — разрешить")
     _roster(e, {})
@@ -3370,6 +3372,12 @@ def test_status_blocked_without_process_0250():
     e.run("watch", t=T0)
     check("th-dir (thththth) ждёт вас" not in e.alerts() and "hm-dir (hmhmhmhm): процесс умер" in e.alerts()
           and "ждала: выбрать: А — разрешить" in e.alerts(), f"дежурный: тревога по призраку с вопросом: {e.alerts()}")
+    # metis-0651 (ревью argus Б1): призрак с вопросом по-прежнему «ждёт вас» — уведомление и передача Зевсу (metis-0250)
+    check("hm-dir ждёт вас: выбрать: А — разрешить" in e.sent(), f"призрак с вопросом: нет уведомления: {e.sent()!r}")
+    check("th-dir" not in e.sent(), f"снятая без вопроса сессия уведомила: {e.sent()!r}")
+    check([c for c in e.calls() if c[:1] == ["respawn"] and c[1] == "2e057e05"]
+          and "hmhmhmhm" in open(e.st("push", "2e057e05-1.txt"), encoding="utf-8").read(),
+          f"призрак с вопросом: Зевсу не передано: {e.calls()}")
     os.remove(os.path.join(e.home, ".claude", "daemon", "roster.json"))
     out = e.run("status", t=T0 + 60).stdout
     check("ждут вас: th-dir" in out, f"без реестра демона сессия объявлена снятой: {out}")

@@ -488,9 +488,13 @@ def sessions(agents, doms, t=None):
             P.alert_once(key, "ghost", f"{name} ({sid}): процесс умер, в claude agents осталась запись "
                          f"«{a.get('listedState')}»" + (f", ждала: {why}" if why else "")
                          + f" — имя свободно, поднять: pantheon wake {name}", "watch")
-            continue
-        P.alert_once(key, state, f"{name} ({sid}) {word[state]}" + (f": {why}" if why else "")
-                     + f" — claude attach {sid}", "watch")
+            if a.get("listedState") != "blocked" or not why:
+                continue
+            # призрак с вопросом владельцу по-прежнему «ждёт вас» (metis-0250): уведомление и передача Зевсу
+            state = "blocked"
+        else:
+            P.alert_once(key, state, f"{name} ({sid}) {word[state]}" + (f": {why}" if why else "")
+                         + f" — claude attach {sid}", "watch")
         # ключ события — сессия и состояние: «упала» после «ждёт вас» — своё уведомление, вид — один на сессию
         P.notify_soon(f"watch-{state}-{sid}", f"{name} {word[state]}" + (f": {why[:80]}" if why else ""),
                       group=f"session-{name}", once=True)
