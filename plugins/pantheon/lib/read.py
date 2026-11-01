@@ -4,10 +4,13 @@
                         --why "вопрос" [--profile default] [--steps reader,verify]
         заявка: папка STATE/read/<rid>/ (0700, вне git и коллекций qmd), request.json (0600). --folder и --chat
         повторяются в любом сочетании; УКАЗАНИЕ — id, @имя, ссылка или название, как их понимает источник. Чаты по
-        указаниям найдёт плановый проход; вопрос владельцу со списком чатов придёт карточкой во входящие Зевса
+        указаниям найдёт плановый проход; вопрос владельцу со списком чатов придёт карточкой во входящие Зевса.
+        Из окна роли (задан PANTHEON_TMP; STATE окну закрыт) — очередь окна <кэш окна>/read/<rid>.req.json (0600):
+        проход `read run` в начале забирает её, проверяет заново и ставит by по имени окна из папки кэша
   pantheon read run      проход по заявкам (задача планового прохода read-run; из окна Claude Code — отказ)
-  pantheon read status   заявки: номер, направление, этап, числа и причина отказа — без текста переписки
-  pantheon read cancel <rid>   удалить заявку и всё, что по ней есть
+  pantheon read status   заявки: номер, направление, этап, числа и причина отказа — без текста переписки (в окне роли —
+                         и заявки его очереди)
+  pantheon read cancel <rid>   удалить заявку и всё, что по ней есть (в окне роли — только из его очереди)
 
 Сырой текст переписки не попадает ни в одно окно с действиями: чаты находит и выгружает плановый проход (без модели и
 без оболочки), читает выгрузку отдельный процесс `claude -p` только с Read, Grep и Glob, цитаты проверяет источник,
@@ -57,6 +60,16 @@
   метки «<<<TG-…» и «TG-…>>>», между ними строки «#id [ГГГГ-ММ-ДД ЧЧ:ММ] [тема «…»] Автор: текст», продолжения —
   с отступом в 4 пробела, служебные — «#id [дата] [служебное: …]». Сообщением считается строка «#id [дата время]»;
   по таким строкам ядро считает сообщения, режет большой чат на части и вырезает окна.
+
+Очередь окна (metis-0508). Окну роли песочница закрывает запись в STATE, поэтому `read request` в окне (есть
+PANTHEON_TMP — папка tmp кэша окна ~/Library/Caches/pantheon-sandbox/<окно>) проверяет заявку и источник как обычно,
+отказ — сразу, а пишет заявку в соседнюю папку read/ кэша: <rid>.req.json, 0600, атомарно (временный файл и rename) —
+по образцу `pantheon outside`. `read run` (плановый проход, вне песочницы окон) под замком read, до остальных этапов,
+забирает файлы из read/ всех кэшей окон. Каждую заявку — заново: имя <rid>.req.json по RID_RE и тот же rid внутри; только
+обычный файл без перехода по ссылкам (lstat, O_NOFOLLOW, одна жёсткая ссылка), не больше QUEUE_MAX байт; поля — только
+FIELDS; by — имя окна по папке кэша, а не из файла; created — время прохода: «да» владельца, данное раньше, к ней не
+подходит; validate; номер не занят. Затем папка STATE/read/<rid> — так же, как у заявки вне окна. Файл из очереди
+удаляется в любом случае; плохая заявка — запись queue-bad-<код> в журнал (номер и код, без текста).
 
 Этапы `read run` (состояние — state.json в папке заявки, журнал — STATE/logs/read.jsonl: только номер, числа, время):
   0. resolving → каждое указание — `resolve`. Найденные чаты (без повторов) — chats.json (0600): id, название, тип,
@@ -223,6 +236,10 @@ CHATS_JSON, CHATS_MD, RESOLVED = "chats.json", "chats.md", "resolve.out"
 LIST_MD, CANDIDATES_MD = "list.md", "candidates.md"   # названия чатов для владельца — с шапкой выгрузки (tg-taint)
 RAW_RE = re.compile(r"raw(?:-\d{1,3})?\.md")   # выгрузки: raw-K.md (и raw.md — от прежних версий)
 WHY_SHOWN = 200           # столько знаков вопроса заявки видит владелец в вопросе [read-<rid>]
+QUEUE, QUEUE_SUFFIX = "read", ".req.json"   # очередь окна роли: <кэш окна>/read/<rid>.req.json
+QUEUE_MAX = 64 * 1024     # заявка в очереди окна — не больше, байт (указания и вопрос — меньше 16 КБ)
+QUEUE_TMP_TTL = 600       # недописанный временный файл окна (.<имя>.<pid>.<hex>) старше, с — мусор
+WINDOW_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")   # имя окна — папка кэша; оно же by заявки из очереди
 
 
 def set_core(mod):
@@ -606,21 +623,153 @@ def cmd_request(args):
     except ValueError as e:
         err(f"pantheon read request: отказ — {e}")
         return 2
-    ensure_root()
-    d = folder(rid)
-    os.mkdir(d, 0o700)
-    os.chmod(d, 0o700)
-    write_new(os.path.join(d, "request.json"), json.dumps(req, ensure_ascii=False, indent=1))
-    write_state(d, {"phase": "resolving", "attempts": 0})
-    log(rid, "request", specs=len(specs))
+    q = own_queue()
+    if q:   # окно роли: STATE ему закрыт — заявка в очередь окна, её заберёт `read run`
+        try:
+            p = queue_put(q, req)
+        except OSError as e:
+            err(f"pantheon read request: заявку не записать в очередь окна ({type(e).__name__}: {e})")
+            return 1
+        head = (f"Заявка read-{rid}: в очереди окна {short(p)}. Её заберёт плановый проход (задача read-run, раз в "
+                "2 мин): проверит заново и заведёт заявку; до того `pantheon read status` показывает её как «в очереди "
+                "окна».\n")
+    else:
+        head = f"Заявка read-{rid}: {short(create_request(req))}\n"
     folders = sum(1 for s in specs if s["kind"] == "folder")
-    print(f"Заявка read-{rid}: {short(d)}\n"
+    print(head +
           f"Указаний {len(specs)} (папок {folders}, чатов {len(specs) - folders}). Чаты по ним найдёт плановый проход "
           f"(задача read-run, без модели); список чатов с числом сообщений и вопрос владельцу «[read-{rid}] Разрешить "
           f"выгрузку…» придут карточкой во входящие Зевса. Отказ (не найдено, папка пуста, больше {MAX_CHATS} чатов "
           f"или {MAX_MESSAGES} сообщений) — с причиной в `pantheon read status`. Ответа владельца нет за "
           f"{REQUEST_TTL // 86400} дн. — заявка удаляется.")
     return 0
+
+
+def create_request(req):
+    """Папка заявки STATE/read/<rid> (0700), request.json и state.json (0600). FileExistsError — номер занят. → папка."""
+    ensure_root()
+    d = folder(req["rid"])
+    os.mkdir(d, 0o700)
+    os.chmod(d, 0o700)
+    write_new(os.path.join(d, "request.json"), json.dumps(req, ensure_ascii=False, indent=1))
+    write_state(d, {"phase": "resolving", "attempts": 0})
+    log(req["rid"], "request", specs=len(req["specs"]))
+    return d
+
+
+# --- очередь окна роли (metis-0508; файлы — помощниками lib/outside.py) ---------------------------------------------
+
+def own_queue():
+    """Очередь этого вызова: в окне роли — read/ рядом с PANTHEON_TMP (кэш окна), вне окна — None."""
+    tmp = os.environ.get("PANTHEON_TMP")
+    return os.path.join(os.path.dirname(os.path.realpath(tmp)), QUEUE) if tmp else None
+
+
+def queue_put(q, req):
+    """Заявка в очередь окна: <rid>.req.json, 0600, временный файл и rename (без перехода по ссылкам). → путь."""
+    o = P.outside_mod()
+    dfd = o._open_dir(q, create=True)
+    if dfd is None:
+        raise OSError(f"{short(q)} — не папка (или ссылка)")
+    try:
+        o._write_in(dfd, req["rid"] + QUEUE_SUFFIX, json.dumps(req, ensure_ascii=False, indent=1))
+    finally:
+        os.close(dfd)
+    return os.path.join(q, req["rid"] + QUEUE_SUFFIX)
+
+
+def window_queues():
+    """[(папка очереди, имя окна)] по кэшам окон: имя окна — по папке кэша, а не по окружению или тексту заявки."""
+    top = P.outside_mod().caches()
+    try:
+        names = sorted(os.listdir(top))
+    except OSError:
+        return []
+    return [(os.path.join(top, n, QUEUE), n) for n in names if _real_dir(os.path.join(top, n, QUEUE))]
+
+
+def _drop(dfd, name, st):
+    with contextlib.suppress(OSError):
+        if stat.S_ISDIR(st.st_mode):
+            shutil.rmtree(name, dir_fd=dfd)
+        else:
+            os.unlink(name, dir_fd=dfd)
+
+
+def take_one(o, dfd, name, window):
+    """Одна заявка очереди окна → 1 (заведена в STATE/read) или 0. Файл удаляется в любом случае."""
+    try:
+        st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return 0
+    rid = name[:-len(QUEUE_SUFFIX)] if name.endswith(QUEUE_SUFFIX) else None
+    if name.startswith(".") and not stat.S_ISDIR(st.st_mode):   # временный файл окна: rename ещё впереди
+        if time.time() - st.st_mtime > QUEUE_TMP_TTL:
+            _drop(dfd, name, st)
+            log(None, "queue-bad-tmp")
+        return 0
+    if rid is None or not RID_RE.fullmatch(rid):
+        _drop(dfd, name, st)
+        log(None, "queue-bad-name")
+        return 0
+    code, text = None, None
+    if stat.S_ISLNK(st.st_mode):
+        code = "link"
+    elif not stat.S_ISREG(st.st_mode):
+        code = "notfile"
+    elif st.st_size > QUEUE_MAX:
+        code = "big"
+    else:
+        text = o._read_in(dfd, name, QUEUE_MAX)   # O_NOFOLLOW, обычный файл, одна жёсткая ссылка, не больше предела
+        if text is None:
+            code = "unreadable"
+    _drop(dfd, name, st)   # одна заявка — один разбор
+    req = None
+    if code is None:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict) or data.get("rid") != rid:
+            code = "json"
+        else:
+            req = {k: data.get(k) for k in FIELDS}
+            req.update(by=window, created=int(P.now()))
+            if validate(req):
+                code = "invalid"
+    if code is None:
+        try:
+            create_request(req)
+        except FileExistsError:
+            code = "dup"
+    if code:
+        log(rid, "queue-bad-" + code, size=st.st_size)
+        return 0
+    return 1
+
+
+def take_queues():
+    """Начало `read run`: заявки из очередей окон ролей → STATE/read/<rid>. → число заведённых."""
+    o = P.outside_mod()
+    n = 0
+    for qdir, window in window_queues():
+        if not WINDOW_RE.fullmatch(window):
+            log(None, "queue-bad-window")
+            continue
+        dfd = o._open_dir(qdir)
+        if dfd is None:
+            log(None, "queue-bad-dir")
+            continue
+        try:
+            for name in sorted(os.listdir(dfd)):
+                try:
+                    n += take_one(o, dfd, name, window)
+                except Exception:  # одна заявка не останавливает другие; текста в журнале нет
+                    o._unlink_in(dfd, name)
+                    log(None, "queue-error")
+        finally:
+            os.close(dfd)
+    return n
 
 
 # --- ответы владельца -------------------------------------------------------------------------------------------------
@@ -1638,9 +1787,6 @@ def cmd_run():
     if "CLAUDECODE" in os.environ or "CLAUDE_CODE_ENTRYPOINT" in os.environ:
         err("pantheon read run: только плановый проход (задача read-run), не из окна Claude Code")
         return 2
-    r = root()
-    if not _real_dir(r):
-        return 0
     global DEADLINE
     DEADLINE = time.monotonic() + RUN_BUDGET
     old = {s: signal.signal(s, _on_signal) for s in STOP_SIGNALS}
@@ -1649,6 +1795,12 @@ def cmd_run():
         with P.lock("read", block=False) as got:
             if not got:
                 print("pantheon read run: идёт другой проход")
+                return 0
+            took = take_queues()   # заявки окон ролей — до разбора: им STATE закрыт (metis-0508)
+            if took:
+                print(f"pantheon read run: из очередей окон заведено заявок {took}")
+            r = root()
+            if not _real_dir(r):
                 return 0
             os.chmod(r, 0o700)
             rc = 0
@@ -1688,6 +1840,13 @@ def cmd_status():
                             if k in st)
             why = f"\t{st['reason']}" if st.get("phase") == "refused" and st.get("reason") else ""
             rows.append((f"read-{rid}\t{req.get('direction', '?')}\t{st.get('phase', '?')}\t{nums}".rstrip() + why))
+    q = own_queue()
+    if q and _real_dir(q):
+        for name in sorted(os.listdir(q)):
+            rid = name[:-len(QUEUE_SUFFIX)]
+            if name.endswith(QUEUE_SUFFIX) and RID_RE.fullmatch(rid):
+                req = read_json(os.path.join(q, name)) or {}
+                rows.append(f"read-{rid}\t{req.get('direction', '?')}\tв очереди окна — заберёт плановый проход")
     print("\n".join(rows) if rows else "заявок нет")
     return 0
 
@@ -1701,6 +1860,15 @@ def main(rest):
     if sub == "status" and len(rest) == 1:
         return cmd_status()
     rid = rest[1][5:] if len(rest) == 2 and rest[1].startswith("read-") else (rest[1] if len(rest) == 2 else "")
+    if sub == "cancel" and RID_RE.fullmatch(rid) and own_queue():   # окно роли: STATE закрыт — только своя очередь
+        p = os.path.join(own_queue(), rid + QUEUE_SUFFIX)
+        if not os.path.lexists(p):
+            err(f"pantheon read cancel: заявки read-{rid} нет в очереди окна; заявку, которую уже завёл плановый проход, "
+                f"удаляет владелец вне окна: pantheon read cancel {rid}")
+            return 1
+        remove_file(p)
+        print(f"заявка read-{rid} снята из очереди окна")
+        return 0
     if sub == "cancel" and RID_RE.fullmatch(rid):
         with P.lock("read"):
             remove_request(rid)
