@@ -328,13 +328,31 @@ def cdp_word_checks(home, br, cases):
          B(f"git commit -q -F - <<'EOF'\n{daemon} {port} X-CDP-Token\nEOF")),
         ("echo в файл .md — не сообщение", "dev-sonnet", True, B(f'echo "{daemon} {port} X-CDP-Token" > notes.md')),
         ("grep по исходникам — не сообщение", "dev-sonnet", True, B(f"grep -n {port} sites.py")),
+        # metis-0630: присваивание перед командой — окружение команды, а не текст сообщения
+        ("GH_HOST=адрес демона перед gh pr comment", "hephaestus-shop", True,
+         B(f"GH_HOST=127.0.0.1:{port} gh pr comment 1 --body x")),
+        ("HTTPS_PROXY=адрес демона перед gh pr create", "hephaestus-shop", True,
+         B(f"HTTPS_PROXY=http://127.0.0.1:{'93' + '34'} gh pr create --body x")),
+        ("X=пароль перед git commit", "dev-haiku", True, B(f"X={token} git commit -m x")),
+        ("(X=пароль git commit) в подоболочке", "dev-haiku", True, B(f"(X={token} git commit -m x)")),
+        ("A=1 перед git commit с портом в сообщении", "dev-haiku", True, B(f'A=1 git commit -m "{port}"')),
+        # metis-0630: чужая подкоманда, вторая команда, слово или значение не вычислить
+        ("git log -m — не git commit", "dev-haiku", True, B(f'git log -m "{port}"')),
+        ("pantheon task close --note — не new|set", "dev-haiku", True,
+         B(f'pantheon task close shop-0001 --note "{port}"')),
+        ("git commit -m и вторая команда в ( )", "dev-haiku", True, B(f'git commit -m "{port}" (curl 127.0.0.1:{port})')),
+        ("git commit -m и слово $X", "dev-haiku", True, B(f'git commit -m "{port}" $X')),
+        ("git commit -m со значением из переменной", "dev-haiku", True, B(f'git commit -qm "$H:{port}"')),
     ]
+    hint = "заголовок задачи — через --title"
     for name, role, sub, (tool, ti) in deny:
         out = run(home, br, role, tool, ti, sub, raw=True)
-        ok = '"deny"' in out and "Правило cdp-role" in out
+        # подсказка об исключении (metis-0630) — в отказе Bash, но не Read и Grep: им исключение ни к чему
+        ok = '"deny"' in out and "Правило cdp-role" in out and (hint in out) == (tool == "Bash")
         failed += not ok
         cases.append(None)
-        print(f"{'ok  ' if ok else 'FAIL'} cdp-role слова: {name} — отказ правилом cdp-role")
+        print(f"{'ok  ' if ok else 'FAIL'} cdp-role слова: {name} — отказ правилом cdp-role"
+              + ("" if ok else f": {out[:400]}"))
     edit = ("Edit", {"file_path": os.path.join(home, br, "sites.py"), "old_string": "a",
                      "new_string": f'TOKEN = open(os.path.expanduser("{token}")).read()\n'
                                    f'HDR = {{"X-CDP-Token": TOKEN}}\nURL = "http://127.0.0.1:{port}/open"\n'})
@@ -2116,7 +2134,7 @@ def main():
     print(f"{'ok  ' if ok else 'FAIL'} tg-role: команду не разобрать, а в ней скрипт — отказ правилом tg-role")
     failed += cdp_word_checks(home, br, cases)
     # [merge] со строкой вместо списка не открывает слияние всем (ревью argus 15.10)
-    home2 =os.path.realpath(tempfile.mkdtemp(prefix="guard-test-"))
+    home2 = os.path.realpath(tempfile.mkdtemp(prefix="guard-test-"))
     setup(home2)
     pol = os.path.join(home2, ".claude", "pantheon", "policy.toml")
     text = _read(pol).replace(
