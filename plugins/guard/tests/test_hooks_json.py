@@ -223,7 +223,8 @@ try:
               r.returncode == 0 and r.stdout == "" and r.stderr == "", (r.returncode, r.stdout, r.stderr))
         r = launch([noread, "maint-pre"], real, pre_ev)
         check("файл скрипта без прав чтения → PreToolUse: код 2 с причиной",
-              r.returncode == 2 and "файла скрипта нет" in r.stderr and "Permission denied" not in r.stderr,
+              r.returncode == 2 and "файла скрипта нет или он не читается" in r.stderr
+              and "Permission denied" not in r.stderr,
               (r.returncode, r.stdout, r.stderr))
     os.chmod(noread, 0o600)
     n0 = len(log_lines())
