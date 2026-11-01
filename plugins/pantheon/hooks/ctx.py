@@ -35,7 +35,7 @@
   ctx.py push        SessionStart, asyncRewake: после `claude respawn` будит сессию текстом из <STATE>/push/<sessionId>.txt
                      (кладёт pantheon; один раз, не старше 30 мин, ≤ 4000 знаков, только с пометкой «[Пантеон:»).
   ctx.py rewake      SessionStart clear, asyncRewake: если файл состояния обновлён после вашего последнего
-                     сообщения, будит Claude «прочитай и продолжай»; иначе /clear — обычный чистый лист.
+                     сообщения (реплики в конце, на которые ответ был только текстом, не в счёт), будит Claude «прочитай и продолжай»; иначе /clear — обычный чистый лист.
 
 Файл состояния по роли (agent_type): hq — ~/ai/pantheon/board.md; domain-coordinator — STATUS.md направления в
 ~/ai/pantheon/directions/<имя>/ (направление — по папке запуска, как у guard); workshop —
@@ -266,6 +266,29 @@ def last_owner_time(path):
     except OSError:
         return None
     return best
+
+
+def used_tools(d):
+    """Ответ основной сессии с вызовом инструмента."""
+    c = (d.get("message") or {}).get("content")
+    return d.get("type") == "assistant" and not d.get("isSidechain") and isinstance(c, list) and \
+        any(isinstance(b, dict) and b.get("type") == "tool_use" for b in c)
+
+
+def last_work_owner_time(path):
+    """Для rewake: время вашего последнего сообщения, после которого сессия работала (вызывала инструменты).
+    Хвостовые реплики, на которые она ответила только текстом («хочу сделать clear» → «можно, всё сохранено»),
+    файл состояния не меняют и точку отсчёта не сдвигают (01.11: сохранилась в 21:34, «хочу сделать clear» в 21:42 —
+    хук счёл файл старым и не разбудил). Таких реплик нет в хвосте — как last_owner_time."""
+    t, tools = None, False
+    for d in reversed(list(entries(tail_lines(path, 4000000)))):
+        if used_tools(d):
+            tools = True
+        elif is_owner_entry(d):
+            t = iso_ts(d.get("timestamp"))
+            if tools:
+                return t
+    return t if t is not None else last_owner_time(path)
 
 
 def prompt_entry(path, prompt_id, start=None):
@@ -1111,7 +1134,7 @@ def rewake_message(ev):
     path, desc = state_file(role, ev, prev["transcript"], inherited=remembered_state_file(prev))
     if not path or not os.path.isfile(path):
         return None
-    t_owner = last_owner_time(prev["transcript"])
+    t_owner = last_work_owner_time(prev["transcript"])
     if t_owner is None or os.path.getmtime(path) <= t_owner:
         return None
     remember_state_file(ev, path)

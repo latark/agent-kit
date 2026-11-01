@@ -428,6 +428,20 @@ check("файл старше вашего сообщения → чистый л
 os.utime(ho, (now - 100, now - 100))
 check("выключатель → без пробуждения", run("rewake", cleared, PANTHEON_CTX_OFF="1").returncode == 0)
 check("claude -p → без пробуждения", run("rewake", cleared, CLAUDE_CODE_ENTRYPOINT="sdk-py").returncode == 0)
+# 01.11: сохранилась, затем «хочу сделать clear» → ответ только текстом, файл не тронут — хук молчал
+append(prev, user("хочу сделать clear", "r2", now - 50))
+append(prev, assistant(now - 45))
+append(prev, user("ок, чищу", "r3", now - 40))
+append(prev, assistant(now - 35))
+r = run("rewake", cleared)
+check("реплики после сохранения с ответом только текстом → всё равно пробуждение", r.returncode == 2
+      and "~/ai/pantheon/handoff/topic/HANDOFF.md" in r.stderr, (r.returncode, r.stderr))
+append(prev, user("а ещё поправь", "r4", now - 30))
+append(prev, assistant(now - 25, 0, [("Read", {"file_path": "/x"})]))
+r = run("rewake", cleared)
+check("после сохранения была работа с инструментами → чистый лист", r.returncode == 0 and not r.stderr.strip(), r.stderr)
+prev = transcript("prev", [user("сделай шаг", "r1", now - 300),
+                           assistant(now - 200, 150000, [("Edit", {"file_path": ho, "old_string": "a", "new_string": "b"})])])
 rec_path = os.path.join(state, "ctx", "proc-%d.json" % os.getpid())
 rec = json.load(open(rec_path))
 rec["proc"] = "Thu Jan  1 00:00:00 1970"
