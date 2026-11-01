@@ -952,12 +952,12 @@ def chat_answer(name, t, tpath, entry, prompt, start):
     варианта) или «ответ в чате не распознан». Не вопрос — ничего. Сбой разбора — строка в журнал хуков, без записи."""
     try:
         text = previous_assistant_text(tpath, entry, start)
-        rec = answers_mod().chat_record(text, prompt) if text else None
+        recs = answers_mod().chat_record(text, prompt) if text else []
     except Exception as e:  # журнал ваших слов уже записан — разбор ответа его не роняет
         hook_log("owner-log", "ответ в чате не разобран: %s: %s" % (type(e).__name__, e))
         return
-    if rec is not None:
-        append_owner_line(name, t, rec[1], rec[0])
+    for note, body in recs:
+        append_owner_line(name, t, body, note)
 
 
 # --- штабу: новые тревоги и журналы (STATE-02) --------------------------------
