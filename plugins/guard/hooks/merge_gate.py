@@ -1374,14 +1374,15 @@ def ci_billing(runs, required, notes, jobs):
 def full_tests_record(repo, rec):
     """Запись tests — полный прогон этого репозитория (metis-0655): её команда — FULL_TESTS репозитория (имя без
     владельца, регистр не важен). Хук guard пишет всю команду `pantheon review test -- <команда>`, проход `pantheon
-    outside test` — саму команду (хвост `# …` — комментарий); `heavy` впереди не важен — проход ставит его сам.
+    outside test` — саму команду; `heavy` впереди не важен — проход ставит его сам. Комментарий — как в bash, только
+    «#» в начале слова (после пробела): хвост ` # …` снимается, а `слово#…` — часть слова, и команда уже другая.
     Другая команда, лишние слова (`&& …`, `; …`), нет строки в FULL_TESTS — не засчитывается."""
     want = FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower())
     cmd = rec.get("cmd") if isinstance(rec, dict) else None
     if not want or not isinstance(cmd, str):
         return False
     try:
-        got, need = shlex.split(cmd, comments=True), shlex.split(want)
+        got, need = shlex.split(re.sub(r"\s#.*\Z", "", cmd, flags=re.S)), shlex.split(want)
     except ValueError:
         return False
     if len(got) > 3 and os.path.basename(got[0].rstrip("/")) == "pantheon" and got[1:4] == ["review", "test", "--"]:
