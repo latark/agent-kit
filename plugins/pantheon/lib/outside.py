@@ -635,10 +635,13 @@ def tail(log):
     return "\n".join(text.splitlines()[-TAIL_LINES:])[-TAIL_CHARS:]
 
 
+PS = "/bin/ps"   # setuid: под sandbox-exec не запускается — test_outside, идущий через `outside test`, ставит свой
+
+
 def ps_table():
     """{pid: (ppid, pgid, rss в КБ)} всех процессов по ps; сбой — {}."""
     try:
-        out = subprocess.run(["/bin/ps", "-axo", "pid=,ppid=,pgid=,rss="], capture_output=True, text=True,
+        out = subprocess.run([PS, "-axo", "pid=,ppid=,pgid=,rss="], capture_output=True, text=True,
                              timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return {}
@@ -801,7 +804,7 @@ def started(pid):
     """Время старта процесса по ps (lstart, LC_ALL=C, TZ=UTC: смена пояса или летнего времени за жизнь сервера иначе
     меняет строку, и живой сервер сочли бы чужим) или None — процесса нет."""
     try:
-        r = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True,
+        r = subprocess.run([PS, "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True,
                            timeout=10, env={"LC_ALL": "C", "TZ": "UTC", "PATH": "/usr/bin:/bin"})
     except (OSError, subprocess.SubprocessError, ValueError):
         return None

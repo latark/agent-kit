@@ -209,6 +209,81 @@ _pbase = _random.randrange(20000, 48000, 100)
 O.SERVER_PORTS = range(_pbase, _pbase + 100)
 
 
+# setuid /bin/ps под sandbox-exec не запускается: test_outside, идущий через `pantheon outside test` (порты в окне
+# закрыты), иначе не видит групп, памяти и времени старта. Тогда — заменитель на libproc с тем же выводом
+# (pid, ppid, pgid, rss, lstart)
+PS_SHIM = os.path.join(_ROOT, "ps-shim")
+with open(PS_SHIM, "w") as fh:
+    fh.write(f"#!{sys.executable}\n" + r'''
+import ctypes, sys, time
+lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+U = ctypes.c_uint32
+
+
+class BSD(ctypes.Structure):   # struct proc_bsdinfo (sys/proc_info.h), PROC_PIDTBSDINFO = 3
+    _fields_ = [(n, U) for n in ("flags", "status", "xstatus", "pid", "ppid", "uid", "gid", "ruid", "rgid", "svuid",
+                                 "svgid", "rfu")] + [("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32)] + \
+               [(n, U) for n in ("nfiles", "pgid", "pjobc", "tdev", "tpgid")] + \
+               [("nice", ctypes.c_int32), ("start", ctypes.c_uint64), ("ustart", ctypes.c_uint64)]
+
+
+def info(pid):
+    b = BSD()
+    ok = lib.proc_pidinfo(pid, 3, ctypes.c_uint64(0), ctypes.byref(b), ctypes.sizeof(b)) == ctypes.sizeof(b)
+    return b if ok else None
+
+
+def rss_kb(pid):   # struct proc_taskinfo: pti_virtual_size, pti_resident_size, …; PROC_PIDTASKINFO = 4
+    t = (ctypes.c_uint64 * 12)()
+    ok = lib.proc_pidinfo(pid, 4, ctypes.c_uint64(0), ctypes.byref(t), ctypes.sizeof(t)) == ctypes.sizeof(t)
+    return t[1] // 1024 if ok else 0
+
+
+args, fields, only = sys.argv[1:], [], None
+for i, a in enumerate(args):
+    if a in ("-o", "-axo"):
+        fields = [f.rstrip("=") for f in args[i + 1].split(",")]
+    if a == "-p":
+        only = [int(args[i + 1])]
+if only is None:
+    n = lib.proc_listallpids(None, 0)
+    buf = (ctypes.c_int * (n + 256))()
+    got = lib.proc_listallpids(buf, ctypes.sizeof(buf))
+    only = list(buf)[:got]
+rows = []
+for pid in only:
+    b = info(pid)
+    if b is None:
+        continue
+    val = {"pid": str(b.pid), "ppid": str(b.ppid), "pgid": str(b.pgid),
+           "lstart": time.strftime("%a %b %e %H:%M:%S %Y", time.gmtime(b.start))}
+    if "rss" in fields:
+        val["rss"] = str(rss_kb(pid))
+    rows.append(" ".join(val[f] for f in fields))
+print("\n".join(rows))
+sys.exit(0 if rows else 1)
+''')
+os.chmod(PS_SHIM, 0o755)
+try:
+    _ps_ok = subprocess.run(["/bin/ps", "-o", "pid=", "-p", str(os.getpid())], capture_output=True).returncode == 0
+except OSError:
+    _ps_ok = False
+if not _ps_ok:
+    print("ЗАМЕНЕНО: /bin/ps под песочницей не запускается — группы и время старта по libproc (ps-shim)")
+    O.PS = PS_SHIM
+# заменитель отдаёт то же, что ps: иначе его поломку увидит только прогон под песочницей
+_me = os.getpid()
+_sh = subprocess.run([PS_SHIM, "-axo", "pid=,ppid=,pgid=,rss="], capture_output=True, text=True).stdout.split("\n")
+_row = next((ln.split() for ln in _sh if ln.split()[:1] == [str(_me)]), [])
+check("ps-shim: pid, ppid, pgid теста — как у ОС, rss больше нуля",
+      _row[:3] == [str(_me), str(os.getppid()), str(os.getpgrp())] and int(_row[3]) > 0, _row)
+if _ps_ok:
+    _real = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(_me)], capture_output=True, text=True,
+                           env={"LC_ALL": "C", "TZ": "UTC", "PATH": "/usr/bin:/bin"}).stdout.split()
+    _fake = subprocess.run([PS_SHIM, "-o", "lstart=", "-p", str(_me)], capture_output=True, text=True).stdout.split()
+    check("ps-shim: время старта — как у ps (UTC)", _real and _real == _fake, (_real, _fake))
+
+
 def calls():
     try:
         with open(REC) as fh:
@@ -1399,7 +1474,7 @@ _spawn = [sys.executable, "-c", "import subprocess, sys, time; subprocess.Popen(
 alien = subprocess.Popen(_spawn)                                  # не глава группы: группа — наша, теста
 TEST_PROCS.append(alien)
 time.sleep(0.8)
-_ps = subprocess.run(["/bin/ps", "-axo", "pid=,ppid="], capture_output=True, text=True).stdout.split()
+_ps = subprocess.run([O.PS, "-axo", "pid=,ppid="], capture_output=True, text=True).stdout.split()
 _kid = [int(a) for a, b in zip(_ps[::2], _ps[1::2]) if int(b) == alien.pid]   # ребёнок в своей группе
 O.kill_group(alien.pid)
 check("kill_group по pid, который не глава группы: ни он, ни его ребёнок в своей группе не гаснут",
