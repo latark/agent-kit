@@ -47,7 +47,8 @@
     папка — Repo, и git по ней идёт через --git-dir/--work-tree, а не через .git-файл. Остаток: commondir в
     <клон>/.git/worktrees/<имя>/ роль может переписать между проверкой и git теста — намеренный обход, граница — песочница;
   - состояния: queued (заявка записана) → preparing (копия и зависимости) → starting (ждём порт) → serving →
-    stopping → stopped; failed — с причиной;
+    stopping → stopped; failed — с причиной, и при любом сбое прохода посреди заявки (копия снята, а не preparing
+    до суток); копия без сервера старше WORK_ORPHAN_AGE (проход упал, Mac перезагрузился) снимается в конце круга;
   - «стоп» — файл <ID>.stop в папке заявок вызвавшего окна; проход ищет его во всех папках заявок, а не только в
     папке сервера (стоп из окна координатора доходит). Нет такой заявки — `stop` так и говорит, код 1.
 
@@ -142,6 +143,7 @@ KILL_WAIT = 5
 SWEEP_EVERY = 2                     # с: так часто сторож смотрит «стоп» и срок серверов (metis-0606, 0614)
 REQ_TTL = 15 * 60                   # с: заявка serve, пролежавшая дольше, не запускается
 STOP_ORPHAN_AGE = 60                # с: «стоп» без сервера и заявки старше — убирается
+WORK_ORPHAN_AGE = 600               # с: копия серверов без записи в servers.json старше — брошена, снимается
 STOP_WAIT = 20                      # с: `outside stop` ждёт итог по умолчанию
 RESIDENT_MAX = 3600                 # с: проход серверов живёт не дольше, потом его зовёт тик (новая версия кода)
 AUTO_TTL = 24 * 3600                # «принять» старше суток тесты сам не зовёт
@@ -1447,6 +1449,35 @@ def drop_orphan_stops(stops=None, t=None):
     return n
 
 
+def drop_orphan_work(t=None):
+    """Копии <ID> в work_root() без записи в servers.json и старше WORK_ORPHAN_AGE (mtime папки) — снять: процессы
+    в ней погасить (reap), папку удалить. Так уходят копии прохода, упавшего посреди заявки, или после перезагрузки
+    Mac. Зовёт только проход серверов под замком outside-serve, после своих заявок: своих копий в подготовке у него
+    в этот момент нет. Метаданные worktree в клоне остаются, их помечает prunable сам git. → число снятых."""
+    t = P.now() if t is None else t
+    root = work_root()
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return 0
+    live, n = set(servers()), 0
+    for name in names:
+        work = os.path.join(root, name)
+        if name in live or not ID_RE.fullmatch(name):
+            continue
+        try:
+            st = os.lstat(work)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(st.st_mode) or t - st.st_mtime < WORK_ORPHAN_AGE:
+            continue
+        reap(work)
+        remove_work(None, work)
+        log_event(id=name, kind="work-orphan", why="копия без сервера снята")
+        n += 1
+    return n
+
+
 def _stale(t=None):
     """[(папка заявок, имя)] — итоги <ID>.result.json и брошенные <ID>.stop старше RESULT_TTL (по mtime, обычные
     файлы, не ссылки); у живого сервера его файлы не трогаем."""
@@ -1825,7 +1856,7 @@ def cmd_run():
 
 
 def serve_round(t=None):
-    """Один круг прохода серверов: сторож, заявки serve, снова сторож, уборка брошенных «стопов»."""
+    """Один круг прохода серверов: сторож, заявки serve, снова сторож, уборка брошенных «стопов» и копий."""
     sweep(t)
     for _t, _k, qdir, window, rid, req in requests(("serve",)):
         where = stop_requests().get(rid)
@@ -1847,6 +1878,7 @@ def serve_round(t=None):
                 save_result(qdir, rid, {"state": "failed", "kind": "serve", "why": why})
         sweep()
     drop_orphan_stops()
+    drop_orphan_work()
 
 
 def cmd_run_serve(once=False):

@@ -1651,6 +1651,34 @@ check("сбой до копии (handle): обе заявки круга — fai
       and "сбой прохода: OSError" in _ra.get("why", "") and "сбой прохода" in _rb.get("why", "")
       and any(json.loads(x).get("kind") == "serve-error" for x in open(_log)), (_raised, _ra, _rb))
 
+# --- брошенные копии (Д1 argus #232): копия без сервера старше WORK_ORPHAN_AGE снимается в конце круга -------------
+kill_all_servers()
+_wr = os.path.join(os.path.realpath(HOME), "Library", "Caches", "pantheon-outside", "work")
+_OLD_T = time.time() - O.WORK_ORPHAN_AGE - 60
+_dirs = {k: os.path.join(_wr, n) for k, n in (("old", "20261101-000000-0a0a0a"), ("young", "20261101-000001-0b0b0b"),
+                                               ("live", "20261101-000002-0c0c0c"), ("odd", "notes"))}
+for _k, _d in _dirs.items():
+    os.makedirs(os.path.join(_d, "node_modules"), exist_ok=True)
+    if _k != "young":
+        os.utime(_d, (_OLD_T, _OLD_T))
+_sleeper = subprocess.Popen(["/bin/sleep", "60"], cwd=_dirs["old"], start_new_session=True)
+TEST_PROCS.append(_sleeper)
+_live_leader = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+TEST_PROCS.append(_live_leader)
+O.save_servers({os.path.basename(_dirs["live"]): {"pid": _live_leader.pid, "started": O.started(_live_leader.pid),
+                                                  "port": 0, "until": time.time() + 3600, "qdir": None,
+                                                  "work": _dirs["live"]}})
+serve_pass()
+check("брошенная копия старше 10 мин без сервера — снята, в журнале work-orphan",
+      not os.path.exists(_dirs["old"])
+      and any(json.loads(x).get("kind") == "work-orphan" for x in open(_log)), os.listdir(_wr))
+check_mac("брошенная копия: процесс с папкой в ней (lsof) погашен", MAC and _gone(_sleeper), _sleeper.poll())
+check("молодая копия, копия живого сервера и папка не по образцу ID — не тронуты",
+      all(os.path.isdir(_dirs[k]) for k in ("young", "live", "odd")), os.listdir(_wr))
+kill_all_servers()
+for _d in _dirs.values():
+    shutil.rmtree(_d, ignore_errors=True)
+
 # проход серверов только плановый
 os.environ["CLAUDECODE"] = "1"
 check("outside run --serve из окна Claude Code: код 2", O.main(["run", "--serve"]) == 2)
