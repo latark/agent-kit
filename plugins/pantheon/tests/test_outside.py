@@ -993,7 +993,7 @@ os.environ["PANTHEON_FAKE_PRESSURE"] = "1"
 kill_all_servers()
 
 # лимит памяти у каждого сервера (решение владельца 01.11): дерево сервера больше лимита — сторож гасит с причиной
-check("лимит памяти сервера по умолчанию — 6 ГБ", O.SERVER_MEM_MB == 6144)
+check("лимит памяти сервера по умолчанию — 4 ГБ (решение владельца 01.11)", O.SERVER_MEM_MB == 4096)
 rc, q, rid = role_request("athena-x", APP, "serve")
 serve_pass()
 _srv = O.servers().get(rid) or {}
