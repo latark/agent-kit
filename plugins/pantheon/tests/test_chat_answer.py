@@ -21,6 +21,7 @@ import tempfile
 import time
 import uuid
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _py311 import PY311  # noqa: E402 — CLI pantheon только на Python 3.11+
@@ -421,10 +422,85 @@ reap = os.path.join(state, "hestia-consent", "metis-0720.reap")
 check("consent в окне Гестии: «да» в чате на гашение процессов → метка <id>.reap с pid, как у окна вопросов",
       cr.returncode == 0 and os.path.isfile(reap) and "pids: 4242" in open(reap).read(), cr.stdout + cr.stderr)
 
+# Д1 (argus 01.11, мутант M15): гашение процессов — только окном вопросов или ответом в чате, не галочкой доски
+os.remove(reap)
+fresh()
+RQ = "[metis-0721] Погасить процессы Пантеона: pid 4343?"
+BOARD = os.path.join(LOG, "board.jsonl")
+# время доски — в поясе CLI (TZ в BASE), иначе порядок с записью хука зависит от пояса Mac
+board_t = datetime.fromtimestamp(time.time() - 60, ZoneInfo(BASE["TZ"])).strftime("%Y-%m-%dT%H:%M:%S")
+with open(BOARD, "w", encoding="utf-8") as fh:
+    fh.write(json.dumps({"kind": "answer", "id": "metis-0721", "question": RQ, "answer": "Да — погасить",
+                         "time": board_t},
+                        ensure_ascii=False) + "\n")
+cr = consent("metis-0721", PANTHEON_ROLE="hestia", PANTHEON_TASK="metis-0721")
+check("consent в окне Гестии: «да» на гашение галочкой доски → код 1, «галочкой на доске», меток нет",
+      cr.returncode == 1 and "галочкой на доске" in cr.stdout
+      and not os.path.exists(os.path.join(state, "hestia-consent", "metis-0721.reap"))
+      and not os.path.exists(os.path.join(state, "hestia-consent", "metis-0721")), cr.stdout + cr.stderr)
+tr = Tr("c-reap")
+tr.say(RQ + "\n1. Да — погасить\n2. Нет").end_turn()
+tr.owner("да или нет", "p-reap")
+hook(tr, "да или нет", "p-reap")
+cr = consent("metis-0721", PANTHEON_ROLE="hestia", PANTHEON_TASK="metis-0721")
+check("consent в окне Гестии: галочка доски на гашение и «не распознан» в чате → код 1, меток нет",
+      "· ответ в чате не распознан\nвопрос: [metis-0721]" in zeus() and cr.returncode == 1
+      and not os.path.exists(os.path.join(state, "hestia-consent", "metis-0721.reap")), cr.stdout + zeus())
+tr.say(RQ + "\n1. Да — погасить\n2. Нет").end_turn()
+tr.owner("1", "p-reap2")
+hook(tr, "1", "p-reap2")
+cr = consent("metis-0721", PANTHEON_ROLE="hestia", PANTHEON_TASK="metis-0721")
+check("consent в окне Гестии: после галочки доски — «1» в чате на гашение → метка <id>.reap",
+      cr.returncode == 0 and os.path.isfile(os.path.join(state, "hestia-consent", "metis-0721.reap")),
+      cr.stdout + cr.stderr)
+os.remove(BOARD)
+
+# Б1 (argus 01.11): варианты-буквы — ответ «а» в чате пишется «ответ: А — Да, пушить»; consent снимает метку варианта
+LETTERS = (  # id, варианты, ваш ответ, метка Гестии
+    ("metis-0730", "А — Да, пушить\nБ — Нет", "а", True),
+    ("metis-0731", "А — Да, пушить\nБ — Нет", "б", False),
+    ("metis-0732", "А — Да, но не сегодня\nБ — Нет", "а", False),
+    ("metis-0733", "А — Другое\nБ — Нет", "а", False),
+    ("metis-0734", "А — Отложить\nБ — Нет\nВ — Позже\nГ — Иначе\nД — Подумать", "д", False),
+    ("metis-0735", "А — Отложить\nБ — Нет\nВ — Позже\nГ — Иначе\nД — Да, пушить", "д", True),
+    ("metis-0736", "А — Да, сейчас\nБ — Да, завтра", "да", False),
+    ("metis-0737", "А — Да, сейчас\nБ — Да, завтра", "б", True),
+    ("metis-0738", "(а) Да, пушить\n(б) Нет", "давай вариант а", True),
+)
+for qid, opts, reply, want in LETTERS:
+    fresh()
+    tr = Tr("c-" + qid)
+    tr.say(f"[{qid}] Пушим ветку consent-chat?\n{opts}").end_turn()
+    tr.owner(reply, "p-" + qid)
+    hook(tr, reply, "p-" + qid)
+    cr = consent(qid, PANTHEON_ROLE="hestia", PANTHEON_TASK=qid)
+    mark = os.path.join(state, "hestia-consent", qid)
+    check(f"consent в окне Гестии: варианты «{opts.splitlines()[0][:16]}…», ответ «{reply}» → "
+          + ("код 0, метка" if want else "код 1, метки нет"),
+          (cr.returncode == 0) == want and os.path.isfile(mark) == want, zeus() + cr.stdout + cr.stderr)
+fresh()
+open(os.path.join(LOG, "zeus.md"), "w").write(
+    "## %s · окно вопросов\nвопрос: [metis-0739] Пушим ветку?\nответ: А — Да, пушить\n\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+cr = consent("metis-0739", PANTHEON_ROLE="hestia", PANTHEON_TASK="metis-0739")
+check("consent в окне Гестии: выбор «А — Да, пушить» в окне вопросов → метка, как и ответ в чате",
+      cr.returncode == 0 and os.path.isfile(os.path.join(state, "hestia-consent", "metis-0739")), cr.stdout + cr.stderr)
+
 # читатели в процессе: тот же журнал zeus.md
 os.environ.update({"HOME": home, "PANTHEON_HOME": pantheon, "PANTHEON_STATE": state, "PANTHEON_VIEW": view})
 P = load("pantheon_chat_test", os.path.join(LIB, "pantheon.py"))
 sys.modules["pantheon_chat_test"] = P
+# consent_is_yes: метка варианта (одна буква или номер и разделитель) снимается, остальное — как было
+for ans, want in (("А — Да, пушить", True), ("а — да", True), ("A — Да", True), ("1. Да — пушить", True),
+                  ("12. Да", True), ("б) Да", True), ("(а) Да", True), ("(а) — Да", True), ("В: да", True),
+                  ("Д — Да, пушить", True), ("Да — пушить", True), ("Да", True), ("Да, по consent", True),
+                  ("Б — Нет", False), ("А — Да, но не сегодня", False), ("А — Другое", False), ("Д — …", False),
+                  ("Д — Подумать", False), ("Нет", False), ("Другое", False), ("Да, но не сегодня", False),
+                  ("А — Б — Да", False), ("АБ — Да", False), ("Ад — да", False), ("123. Да", False), ("А да", False),
+                  ("А — Нет, да", False), ("А —", False), ("", False), ("ж", False)):
+    got = P.consent_is_yes(f"вопрос: [x-1] Пушим?\nответ: {ans}")
+    check(f"consent_is_yes: «ответ: {ans}» → {'да' if want else 'не да'}", got is want, got)
+check("consent_is_yes: без строки «ответ:» и None — не да",
+      P.consent_is_yes("вопрос: [x-1] А — Да") is False and P.consent_is_yes(None) is False)
 now = time.time()
 stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 60))
 
