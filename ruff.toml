@@ -1,13 +1,7 @@
 # Линтер ловит ошибки, а не стиль (metis-0265). Форматтер не используется. Запуск: ruff check . (версия — в workflow tests).
 target-version = "py314"
-# Имена, которые загрузчик pantheon._attach ставит в глобальные имена файлов plugins/pantheon/lib/*.py до выполнения
-# (см. шапку archive.py): P — модуль pantheon, остальные — функции из __all__ модулей lib, которыми пользуется
-# main() в pantheon.py. Без этого ruff считает их неопределёнными.
-builtins = [
-    "P", "review_cmd", "run_job", "jobs_show", "archive", "view", "commit", "sync_answers", "task_cmd", "start",
-    "OVER_CAP", "wake_hestia", "wake_lead", "wake", "role_cmd", "instructions_check", "approve", "consent",
-    "plugins_cmd", "service_run",
-]
+# Хуки запускает hooks/python.sh на 3.11+ (AGENTS.md): синтаксис 3.12+ там (type X = int, f-строки 3.12) краснеет.
+per-file-target-version = { "plugins/*/hooks/**" = "py311" }
 
 [lint]
 select = ["F", "E9", "B", "PLE"]
@@ -15,10 +9,21 @@ ignore = [
     "B904",  # raise ... from: цепочка исключений в сообщении выхода нам не нужна, правка 12 мест без выигрыша
     "B905",  # zip(strict=): везде zip по заведомо равным спискам, шум
     "B007",  # неиспользуемая переменная цикла: стиль, а не ошибка
-    "B023",  # замыкание в цикле: все 17 срабатываний вызываются тут же в том же проходе цикла (проверено выборочно)
 ]
 
 [lint.per-file-ignores]
+# P — модуль pantheon, остальные имена — функции из __all__ модулей lib, которыми пользуется main() в pantheon.py:
+# загрузчик pantheon._attach ставит их в глобальные имена файлов plugins/pantheon/lib/*.py до выполнения
+# (см. шапку archive.py), ruff считает их неопределёнными. Только эта папка; guard и остальное под полной F821.
+"plugins/pantheon/lib/*.py" = ["F821"]
+# B023 (замыкание в цикле): проверены все 17 срабатываний, замыкание вызывается тут же в том же проходе цикла.
+# По файлам, а не глобально: новая находка в другом месте должна краснеть.
+".github/scripts/release.py" = ["B023"]
+"plugins/guard/tests/test_merge_gate.py" = ["B023"]
+"plugins/pantheon/scripts/baseline.py" = ["B023"]
+"plugins/pantheon/scripts/effort.py" = ["B023"]
+"plugins/pantheon/tests/test_owner_cap.py" = ["B023"]
+"plugins/pantheon/tests/test_plugins_update.py" = ["B023"]
 # Тесты проверяют разбор невидимых и двунаправленных символов — они в данных теста намеренно.
 "plugins/pantheon/tests/test_board_text.py" = ["PLE2502"]
 "plugins/pantheon/scripts/config-check.py" = ["PLE2502"]

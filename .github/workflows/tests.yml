@@ -41,7 +41,7 @@ jobs:
           python-version: "3.14"
       - name: ruff check (правила — ruff.toml, версия закреплена; metis-0265)
         run: |
-          python3 -m pip install --disable-pip-version-check ruff==0.17.3
+          python3 -m pip install --disable-pip-version-check --require-hashes -r .github/ruff-requirements.txt
           ruff check .
 
   affected:
