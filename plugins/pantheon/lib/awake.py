@@ -522,7 +522,7 @@ def wake_waiting(agents, registry, doms, t):
 
 INBOX_ZEUS_NAME = re.compile(r"(?:^|[-_])zeus(?:[-_.]|$)")
 INBOX_ZEUS_FROM = re.compile(r"^(?:От|from)\s*:\s*(?:hq|zeus|Зевс)\b", re.I | re.M)
-INBOX_ZEUS_HEAD = re.compile(r"^#\s+(?:От\s+)?Зевса?\b", re.M)
+INBOX_ZEUS_HEAD = re.compile(r"#\s+(?:От\s+)?Зевса?\b")
 INBOX_SAFE = re.compile(r"[\w.-]{1,120}\.md")  # имя файла попадает в текст поручения — только простые имена
 INBOX_MAX_BYTES = 200_000
 INBOX_HEAD_BYTES = 4096
@@ -537,17 +537,28 @@ INBOX_QUIET = ("одна сессия за проход", "поднята в э�
 INBOX_SEEN_LAG = 600
 
 
+def zeus_head(text):
+    """Шапка файла входящих: блок front matter (--- … ---) или первые два абзаца — заголовок и строка «От:».
+    Письмо Зевса, процитированное ниже в находке другой роли, в шапку не попадает (ревью #247)."""
+    lines = text.lstrip("\ufeff").split("\n")
+    if lines[0].strip() == "---":
+        end = next((i for i, ln in enumerate(lines[1:], 1) if ln.strip() == "---"), None)
+        return "\n".join(lines[1:end]) if end else ""
+    paras = [x for x in re.split(r"\n[ \t]*\n", text.lstrip("\ufeff").strip()) if x.strip()]
+    return "\n\n".join(paras[:2])
+
+
 def zeus_order(path, name):
-    """Файл входящих — поручение Зевса: «zeus» словом в имени, строка «От: hq|Зевс» (или from: zeus) или заголовок
-    «# Зевс …» / «# От Зевса …» в первых 4 КБ. Находки других ролей и уведомления task new не от Зевса — нет."""
+    """Файл входящих — поручение Зевса: «zeus» словом в имени, строка «От: hq|Зевс» (или from: zeus) в шапке или
+    первая строка «# Зевс …» / «# От Зевса …». Находки других ролей и уведомления task new не от Зевса — нет."""
     if INBOX_ZEUS_NAME.search(name[:-3]):
         return True
     try:
         with open(path, "rb") as fh:
-            head = fh.read(INBOX_HEAD_BYTES).decode("utf-8", "replace")
+            text = fh.read(INBOX_HEAD_BYTES).decode("utf-8", "replace")
     except OSError:
         return False
-    return bool(INBOX_ZEUS_FROM.search(head) or INBOX_ZEUS_HEAD.search(head))
+    return bool(INBOX_ZEUS_FROM.search(zeus_head(text)) or INBOX_ZEUS_HEAD.match(text.lstrip("\ufeff").lstrip()))
 
 
 def inbox_orders(direction, since, seen):
@@ -576,7 +587,9 @@ def inbox_orders(direction, since, seen):
 
 
 def turn_end(a):
-    """Конец последнего хода сессии: последняя запись её транскрипта, иначе updatedAt из state.json, иначе её старт."""
+    """Конец последнего хода сессии: последняя запись её транскрипта, иначе updatedAt из state.json, иначе её старт.
+    mtime транскрипта Claude Code сдвигает и после хода (итоги, снятие простаивающей сессии) — поэтому решение
+    «после конца хода» inbox_wake принимает один раз на сессию и хранит (отметка after)."""
     tp = P.transcript_path(a)
     if tp:
         with contextlib.suppress(OSError):
@@ -586,6 +599,18 @@ def turn_end(a):
         return u
     s = a.get("startedAt")
     return float(s) / 1000 if isinstance(s, (int, float)) and s else None
+
+
+def night_packs(t):
+    """Ночь с одобренными пачками (metis-0284): идут только пачки, как у самозапуска → причина отказа или None.
+    Ночной модуль сломан или его нет — отказ, как у gate()."""
+    try:
+        packs = night_mod().pack_night(t)
+    except Exception as e:  # noqa: BLE001
+        return f"ночной модуль не ответил ({type(e).__name__}: {str(e)[:100]})"
+    if packs:
+        return "ночью идут только одобренные пачки (" + ", ".join(str(p.get("path")) for p in packs) + ")"
+    return None
 
 
 def inbox_wake(agents, registry, doms, t):
@@ -601,14 +626,18 @@ def inbox_wake(agents, registry, doms, t):
     since = float(box["since"])
     seen = box.get("seen") if isinstance(box.get("seen"), dict) else {}
     first = box.get("first") if isinstance(box.get("first"), dict) else {}
+    after = box.get("after") if isinstance(box.get("after"), dict) else {}
     off = P.hq_led()
     # поднятые этим проходом (самозапуск, разовый запуск) в снимке сессий ещё не видны, но место уже заняли
     running = sorted({d for d in doms if W.holders(d, agents, registry)}
                      | {d for d in RESUMED + W.ONESHOT_STARTED if d in doms})
+    # мастерская занимает общее место сессий Пантеона (SESSIONS_MAX), как у самозапуска
+    shop = sorted({a.get("name") for a in list(agents) + list(registry) if str(a.get("name") or "").startswith("daedalus-")
+                   and W.holders(a["name"], agents, registry)})
     started = False
 
     def save():
-        box["seen"], box["first"] = seen, first
+        box["seen"], box["first"], box["after"] = seen, first, after
         marks["inbox"] = box
         P.write_json(marks_path(), marks)
 
@@ -630,13 +659,18 @@ def inbox_wake(agents, registry, doms, t):
         if any(x.get("state") != "done" or not W.idle_holder(x) for x in hold):
             continue  # работает, ждёт вас или открыта во вкладке — поручение дойдёт до неё само
         rows = [a for a in agents if P.name_alias(d).fullmatch(str(a.get("name") or ""))]
-        end = turn_end(max(rows, key=lambda a: a.get("startedAt") or 0)) if rows else None
+        last = max(rows, key=lambda a: a.get("startedAt") or 0) if rows else None
+        end = turn_end(last) if last else None
+        key = f"{last.get('id')}:{last.get('startedAt')}" if last else ""
+        late = after.get(d) if isinstance(after.get(d), dict) else {}
+        late = {f: v for f, v in late.items() if f in names and f not in mine}  # другая сессия (ключ) — решает заново
         word = []
         for f, m in orders:
-            if end is not None and m <= end:
+            if late.get(f) != key and end is not None and m <= end:
                 mine[f] = m  # пришло до конца хода — сессия его видела
             elif P.owner_spoke_before("zeus", max(m, met.get(f, t)), P.OWNER_WORD_WINDOW + INBOX_SEEN_LAG):
                 word.append((f, m))
+                late[f] = key  # «после хода» решено: поздний сдвиг mtime транскрипта не спишет файл, пока ждёт шлюза
             else:
                 mine[f] = m
                 P.start_log(f"inbox-noword\t{d}\t{f}")
@@ -647,19 +681,29 @@ def inbox_wake(agents, registry, doms, t):
                              f"терминала", "watch")
         seen[d] = mine
         first[d] = {f: v for f, v in met.items() if f not in mine}
+        after[d] = {f: v for f, v in late.items() if f not in mine}
         save()
         if not word:
             continue
+        # шлюзы — в порядке самозапуска (watch.autostart): метка, пауза, главный Mac, пятичасовой лимит (wake_block);
+        # поднята этим проходом; ночь с одобренными пачками; место направлений и сессий; недельный потолок; одна за проход
         why = W.wake_block(d, agents, registry, auto=True, nudge=True)
         if not why and (d in RESUMED or d in W.ONESHOT_STARTED):
             why = "поднята в этом проходе"
-        if not why and started:
-            why = "одна сессия за проход — в следующий"
+        if not why:
+            why = night_packs(t)
         if not why and not hold and len(running) >= W.AUTOSTART_MAX:
             why = f"нет места: уже работают {', '.join(running)} (не больше {W.AUTOSTART_MAX} направлений)"
+        if not why and not hold and len(running) + len(shop) >= W.SESSIONS_MAX:
+            why = f"нет места: сессий Пантеона {len(running) + len(shop)} из {W.SESSIONS_MAX}"
         if not why:
             ok, gw = gate("wake", t, agents=agents, registry=registry)
             why = None if ok else f"недельный лимит: {gw}"
+        if not why and (started or RESUMED or W.ONESHOT_STARTED):  # общая с самозапуском и разовыми запусками
+            why = "одна сессия за проход — в следующий"
+        if not why:  # папки направления нет на этом Mac, нет в domains.json — start откажет кодом 2, как потолок
+            got = P.start_target(d, [])
+            why = f"pantheon start откажет: {got}" if isinstance(got, str) else None
         if why:  # файлы не отмечены: подъём — когда шлюз откроется
             if not why.startswith(INBOX_QUIET):
                 P.alert_once(f"inbox-wait-{d}", f"{datetime.fromtimestamp(t):%Y-%m-%d}-{why[:40]}",
@@ -674,7 +718,7 @@ def inbox_wake(agents, registry, doms, t):
         seen[d] = mine
         save()
         rc = W.start_new(d, INBOX_TEXT.format(files=files), "tick")
-        started = True
+        started = started or rc != P.START_REFUSED  # отказ места прохода не занимает: другие направления поднимаются
         if rc == 0:
             RESUMED.append(d)
             if not hold:
@@ -682,11 +726,15 @@ def inbox_wake(agents, registry, doms, t):
             P.start_log(f"inbox-wake\t{d}\t{', '.join(f for f, _ in word)}")
             P.alert(f"поручения во входящих: {d} закончил ход — поднят новой сессией с целью по поручению {files}",
                     "watch")
-        elif rc == P.START_REFUSED:  # потолок владельца закрыл запуск уже в pantheon start — повторить, когда откроется
+        elif rc == P.START_REFUSED:  # потолок закрыл запуск уже в pantheon start — повторить, когда gate("wake") откроет
             for f, _ in word:
                 mine.pop(f, None)
             seen[d] = mine
             save()
             P.start_log(f"inbox-refused\t{d}\t{word[0][0]}")
+            P.alert_once(f"inbox-refused-{d}", f"{datetime.fromtimestamp(t):%Y-%m-%d}",
+                         f"поручения во входящих: {d} — pantheon start отказал (код {rc}: недельный потолок или "
+                         f"направление не запускается на этом Mac, причина — logs/start.log), поручение {files}; повтор "
+                         f"в следующий проход", "watch")
         else:
             P.alert(f"поручения во входящих: {d} не поднялся (код {rc}), поручение {files}", "watch")
