@@ -1785,6 +1785,11 @@ def t_ci_required(h):
     r = _hook_out(h, cmd, kit)
     check("required: необязательная tests/full красная — проходит", decision(r)[0] == "allow", r.stdout + r.stderr)
     msg = json.loads(r.stdout).get("systemMessage", "") if r.stdout.strip() else ""
+    lint = dict(AFFECTED, workflowName="lint", name="lint", conclusion="FAILURE")
+    h.ci([AFFECTED, TRACES, lint], name="agent-kit", baseRefName="main")
+    merge_case("required: красный lint (нет ни в одном списке) — отказ (Д1 argus #235)", h.pre(cmd, pdir=kit), False,
+               "lint/lint красная: FAILURE (её нет ни в обязательных")
+    merge_case("без роли: красный lint — отказ", h.pre(cmd, role=None, pdir=kit), False, "lint/lint красная")
     check("required: необязательная красная — systemMessage с её именем",
           f"необязательная проверка GitHub tests/full красная: FAILURE на latark/agent-kit#7@{sha[:12]}" in msg,
           r.stdout)
@@ -2072,8 +2077,10 @@ def t_ci_verdict_unit(h):
     mg = _load_merge_gate("merge_gate_ci_req")
     req = mg.required_checks("latark/agent-kit", "main")
 
-    def V(rollup, required):
-        return mg.ci_verdict(rollup, required, _pr_runs(rollup))
+    opt = mg.optional_checks("latark/agent-kit")
+
+    def V(rollup, required, optional=()):
+        return mg.ci_verdict(rollup, required, _pr_runs(rollup), optional)
 
     check("required_checks: agent-kit в main — affected и traces",
           req == (("tests", "affected"), ("check-traces", "traces")), req)
@@ -2102,12 +2109,37 @@ def t_ci_verdict_unit(h):
     check("ci_verdict: красная важнее идущей", v[0] == "fail", v)
     v = V([dict(AFFECTED, conclusion="FAILURE")], req)
     check("ci_verdict: красная важнее отсутствующей", v[0] == "fail", v)
-    v = V([AFFECTED, TRACES, dict(RUN_OK, conclusion="FAILURE")], req)
-    check("ci_verdict: необязательная красная — ok и предупреждение",
+    v = V([AFFECTED, TRACES, dict(RUN_OK, conclusion="FAILURE")], req, [("", "check-traces")])
+    check("ci_verdict: необязательная (в optional) красная — ok и предупреждение",
           v[0] == "ok" and v[2] == ["необязательная проверка GitHub check-traces красная: FAILURE"], v)
+    # Д1 argus #235: красная проверка вне обязательных и вне optional (новый job lint на PR) — отказ, а не пропуск
+    v = V([AFFECTED, TRACES, dict(RUN_OK, conclusion="FAILURE")], req)
+    check("ci_verdict: красная вне обязательных и необязательных — fail с её именем",
+          v[0] == "fail" and "проверка GitHub check-traces красная: FAILURE (её нет ни в обязательных" in v[1]
+          and v[2] == [], v)
+    lint = dict(AFFECTED, workflowName="lint", name="lint", conclusion="FAILURE")
+    v = V([AFFECTED, TRACES, lint], req, opt)
+    check("ci_verdict: красный lint (его нет в списках agent-kit) — fail",
+          v[0] == "fail" and "lint/lint красная" in v[1], v)
+    v = V([AFFECTED, TRACES, dict(AFFECTED, name="full", conclusion="FAILURE")], req, opt)
+    check("ci_verdict: красная tests/full из OPTIONAL_CHECKS — ok и предупреждение",
+          v[0] == "ok" and v[2] == ["необязательная проверка GitHub tests/full красная: FAILURE"], v)
+    v = V([AFFECTED, TRACES, dict(lint, conclusion="SKIPPED"), dict(lint, name="x", status="QUEUED", conclusion=None)],
+          req, opt)
+    check("ci_verdict: проверка вне списков SKIPPED или идёт — ok (судится только красная)", v == ("ok", "", []), v)
+    v = V([dict(AFFECTED, conclusion="FAILURE"), TRACES, lint], req, opt)
+    check("ci_verdict: красные обязательная и вне списков — обе в тексте отказа",
+          v[0] == "fail" and "tests/affected красная" in v[1] and "lint/lint красная" in v[1], v)
+    check("optional_checks: agent-kit — tests/full, регистр и владелец не важны, другой репозиторий — пусто",
+          opt == (("tests", "full"),) and mg.optional_checks("X/Agent-Kit") == opt
+          and mg.optional_checks("latark/tg-read") == () and mg.optional_checks(None) == (), opt)
+    check("OPTIONAL_CHECKS: у каждой необязательной есть причина с номером задачи",
+          all(re.search(r"\b[a-z]+-\d{4}\b", why) for rows in mg.OPTIONAL_CHECKS.values() for _, _, why in rows),
+          mg.OPTIONAL_CHECKS)
     v = V([AFFECTED, TRACES, dict(RUN_OK, status="QUEUED", conclusion=None)], req)
     check("ci_verdict: необязательная идёт — ok без предупреждения", v == ("ok", "", []), v)
-    v = V([dict(AFFECTED, conclusion="FAILURE"), TRACES, dict(RUN_OK, conclusion="FAILURE")], req)
+    v = V([dict(AFFECTED, conclusion="FAILURE"), TRACES, dict(RUN_OK, conclusion="FAILURE")], req,
+          [("", "check-traces")])
     check("ci_verdict: при отказе предупреждение тоже отдаётся", v[0] == "fail" and len(v[2]) == 1, v)
     v = mg.ci_verdict([dict(RUN_OK, conclusion="FAILURE"), RUN_OK])
     check("ci_verdict: без обязательных — дубль зелёная после красной — fail", v[0] == "fail", v)
@@ -2241,6 +2273,18 @@ def t_ci_verdict_unit(h):
         else:
             check(f"REQUIRED_CHECKS: {wf} идёт на PR в {base}",
                   pr_on is not None and re.search(rf"branches:\s*\[\s*{re.escape(base)}\s*\]", pr_on.group(1)), on)
+    # обратная сверка (Д1 argus #235): каждый job workflow, который идёт на pull_request, — в REQUIRED_CHECKS или в
+    # OPTIONAL_CHECKS; новый job (lint) без строки в одном из списков краснеет здесь, а не проходит шлюз молча
+    listed = {(w, j) for w, j, _ in mg.REQUIRED_CHECKS["agent-kit"] + mg.OPTIONAL_CHECKS["agent-kit"]}
+    pr_jobs = set()
+    for wf, text in texts.items():
+        on, _, jobs = text.partition("\njobs:\n")
+        if re.search(r"^  pull_request:", on, re.M) or re.search(r"^on:.*\bpull_request\b", on, re.M):
+            pr_jobs |= {(wf, j) for j in re.findall(r"^  ([A-Za-z0-9_-]+):\s*$", jobs, re.M)}
+    check("workflows: каждый job на pull_request — в REQUIRED_CHECKS или OPTIONAL_CHECKS",
+          pr_jobs and pr_jobs <= listed, sorted(pr_jobs - listed))
+    check("OPTIONAL_CHECKS: каждая строка — настоящий job на pull_request",
+          {(w, j) for w, j, _ in mg.OPTIONAL_CHECKS["agent-kit"]} <= pr_jobs, sorted(pr_jobs))
 
 
 # голова PR из форка в ответе gh pr view (metis-0649): поля как у gh 2.103 (headRepository с nameWithOwner)

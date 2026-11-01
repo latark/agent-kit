@@ -490,10 +490,17 @@ def test_ci_required_names():
           [a[1:] for a in runs_calls], runs_calls)
     b = Box()
     b.request()
+    b.view(SHA, checks=ci("SUCCESS", "SUCCESS") + [dict(ci("SUCCESS", "SUCCESS", "FAILURE")[2], workflowName="tests",
+                                                         name="full")])
+    b.run()
+    check("красная необязательная (tests/full) при зелёных обязательных → окно и слияние",
+          len(b.windows()) == 1 and len(b.merges()) == 1, b.outs[-1])
+    b = Box()
+    b.request()
     b.view(SHA, checks=ci("SUCCESS", "SUCCESS", "FAILURE"))
     b.run()
-    check("красная необязательная при зелёных обязательных → окно и слияние",
-          len(b.windows()) == 1 and len(b.merges()) == 1, b.outs[-1])
+    check("красная вне обязательных и необязательных (other/job2) → окна нет, заявка снята (Д1 argus #235)",
+          not b.windows() and not b.merges() and "other/job2 красная" in b.alerts(), b.alerts())
     b = Box()
     b.request()
     b.view(SHA, checks=ci("SUCCESS", "SUCCESS") + [dict(ci("SUCCESS", "FAILURE")[1])])
@@ -818,7 +825,8 @@ def test_ci_fork():
 
 def test_ci_matches_guard():
     """metis-0633, 0649, 0655: разбор проверок GitHub один — ci_verdict, ci_runs, ci_fork, ci_billing_ids, ci_billing,
-    required_checks, REQUIRED_CHECKS, CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_OK, CI_WAIT и CI_NONE в merge.py
+    required_checks, optional_checks, REQUIRED_CHECKS, OPTIONAL_CHECKS (Д1 argus #235), CI_RUNS_API, CI_BILLING,
+    CI_ANNOTATIONS_API, CI_OK, CI_WAIT и CI_NONE в merge.py
     дословно те же, что в шлюзе guard (merge_gate.py): сверка по AST, без запуска кода."""
     import ast
 
@@ -827,17 +835,18 @@ def test_ci_matches_guard():
         got = {}
         for n in tree.body:
             if isinstance(n, ast.FunctionDef) and n.name in ("ci_verdict", "ci_runs", "ci_fork", "ci_billing_ids",
-                                                             "ci_billing", "required_checks"):
+                                                             "ci_billing", "required_checks", "optional_checks"):
                 got[n.name] = ast.dump(n)
             elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) \
-                    and n.targets[0].id in ("REQUIRED_CHECKS", "CI_RUNS_API", "CI_BILLING", "CI_ANNOTATIONS_API",
-                                            "CI_OK", "CI_WAIT", "CI_NONE"):
+                    and n.targets[0].id in ("REQUIRED_CHECKS", "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING",
+                                            "CI_ANNOTATIONS_API", "CI_OK", "CI_WAIT", "CI_NONE"):
                 got[n.targets[0].id] = ast.dump(n.value)
         return got
 
     mine, gate = parts(os.path.join(LIBDIR, "merge.py")), parts(os.path.join(GUARD_HOOKS, "merge_gate.py"))
-    names = ("ci_verdict", "ci_runs", "ci_fork", "ci_billing_ids", "ci_billing", "required_checks", "REQUIRED_CHECKS",
-             "CI_RUNS_API", "CI_BILLING", "CI_ANNOTATIONS_API", "CI_OK", "CI_WAIT", "CI_NONE")
+    names = ("ci_verdict", "ci_runs", "ci_fork", "ci_billing_ids", "ci_billing", "required_checks", "optional_checks",
+             "REQUIRED_CHECKS", "OPTIONAL_CHECKS", "CI_RUNS_API", "CI_BILLING", "CI_ANNOTATIONS_API", "CI_OK",
+             "CI_WAIT", "CI_NONE")
     check("merge.py и merge_gate.py: все части разбора CI есть в обоих", all(k in mine and k in gate for k in names),
           (sorted(mine), sorted(gate)))
     for k in names:

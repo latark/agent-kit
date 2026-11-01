@@ -371,7 +371,8 @@ def is_core(path):
 
 
 # проверки GitHub на head PR (metis-0285, 0633, 0649, 0655): ci_verdict, ci_runs, ci_fork, ci_billing_ids,
-# ci_billing, required_checks, REQUIRED_CHECKS, CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_OK, CI_WAIT и CI_NONE —
+# ci_billing, required_checks, optional_checks, REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API, CI_BILLING,
+# CI_ANNOTATIONS_API, CI_OK, CI_WAIT и CI_NONE —
 # дословно те же, что в шлюзе guard (plugins/guard/hooks/merge_gate.py): плагины порознь,
 # друг друга не импортируют, совпадение сверяет test_merge по AST. Правишь — правь оба
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -383,9 +384,15 @@ CI_NONE = "проверки GitHub не получены"
 # Совпадение с файлами workflows сверяет test_merge_gate. Обязательная засчитывается только по запуску Actions от
 # события pull_request на этом head (ci_runs) и только с итогом SUCCESS: SKIPPED закрыл бы её job, который не
 # запускался, push-запуск проверяет ветку без слияния с base, а NEUTRAL у job Actions не бывает — его ставят
-# сторонние приложения проверок. Нет такого запуска — «ещё не встала», а не пропуск; другие проверки репозитория —
-# только предупреждение. Репозиторий без записи — обязательна каждая проверка его rollup (SUCCESS/NEUTRAL/SKIPPED).
+# сторонние приложения проверок. Нет такого запуска — «ещё не встала», а не пропуск. Другие проверки репозитория:
+# красная из OPTIONAL_CHECKS — предупреждение, красная любая другая — отказ (Д1 argus #235: новый job на PR, не
+# внесённый ни в один список, не проходит шлюз молча). Репозиторий без записи — обязательна каждая проверка его rollup
+# (SUCCESS/NEUTRAL/SKIPPED).
 REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces", "traces", None))}
+# необязательные проверки (Д1 argus #235): имя репозитория без владельца → (workflow, job, почему необязательна — с
+# номером задачи). Каждый job workflows, который идёт на pull_request, — в REQUIRED_CHECKS или здесь: сверяет
+# test_merge_gate по файлам .github/workflows
+OPTIONAL_CHECKS = {"agent-kit": (("tests", "full", "metis-0633: на pull_request всегда SKIPPED, идёт после слияния"),)}
 # запуски Actions на head SHA: два GET REST (GraphQL — POST, его правило push ролям закрывает), связь — check_suite_id
 CI_RUNS_API = ("repos/{repo}/actions/runs?head_sha={sha}&per_page=100",
                "repos/{repo}/commits/{sha}/check-runs?per_page=100")
@@ -415,6 +422,11 @@ def ci_fork(view):
     repo, branch = view.get("headRepository"), view.get("headRefName")
     name = repo.get("nameWithOwner") if isinstance(repo, dict) else None
     return (name.lower() if isinstance(name, str) else "", branch if isinstance(branch, str) else "")
+
+
+def optional_checks(repo):
+    """Необязательные (workflow, job) repo (owner/name) из OPTIONAL_CHECKS: их красная — только предупреждение."""
+    return tuple((w, j) for w, j, _ in OPTIONAL_CHECKS.get(str(repo or "").rsplit("/", 1)[-1].lower(), ()))
 
 
 def ci_runs(workflow_runs, check_runs, sha, pr, fork=None):
@@ -490,15 +502,15 @@ def ci_billing(runs, required, notes):
             and str(a.get("message") or "").startswith(CI_BILLING) for a in notes[i]) for i in ids)
 
 
-def ci_verdict(rollup, required=(), runs=None):
+def ci_verdict(rollup, required=(), runs=None, optional=()):
     """(ok|wait|fail|empty, текст, предупреждения) по statusCheckRollup head PR. CheckRun — по status и conclusion,
     StatusContext — по state; ключ проверки — (workflowName, name) или context. Итог ключа — худший из его записей:
     дубль имени (push и pull_request на одном SHA) не прячет красную запись зелёной. required — обязательные
     (workflow, job): судятся только по runs (ci_runs) от события pull_request, зелёный итог — только SUCCESS; красная
     или пропущенная — fail, нет такого запуска или идёт — wait, runs не получены или неполны (строка) — fail.
-    Остальные проверки rollup
-    дают только предупреждение о красной. required пуст — обязательна каждая проверка rollup (SUCCESS, NEUTRAL,
-    SKIPPED), пустой rollup — empty."""
+    Остальные проверки rollup: красная из optional (optional_checks) — предупреждение, красная любая другая — fail
+    (Д1 argus #235). required пуст — обязательна каждая проверка rollup (SUCCESS, NEUTRAL, SKIPPED), пустой rollup —
+    empty."""
     if not isinstance(rollup, list) or required and not isinstance(runs, (list, str)):
         return "fail", CI_NONE, []
     if required and isinstance(runs, str):
@@ -533,10 +545,13 @@ def ci_verdict(rollup, required=(), runs=None):
     judge = pr_runs if required else seen
     if not must:
         return "empty", "", []
+    opt = [tuple(r) for r in optional]
     notes = [f"необязательная проверка GitHub {v[2]} красная: {v[1]}" for k, v in seen.items()
-             if k not in must and v[0] == "fail"]
+             if k not in must and k in opt and v[0] == "fail"]
     red = [f"проверка GitHub {judge[k][2]} {'красная' if judge[k][1] not in CI_OK else 'не прошла'}: {judge[k][1]}"
            for k in must if k in judge and judge[k][0] == "fail"]
+    red += [f"проверка GitHub {v[2]} красная: {v[1]} (её нет ни в обязательных, ни в необязательных — красная любая "
+            "проверка на PR — отказ)" for k, v in seen.items() if k not in must and k not in opt and v[0] == "fail"]
     if red:
         return "fail", "; ".join(red), notes
     missing = ["/".join(k) for k in must if k not in judge]
@@ -579,12 +594,12 @@ def ci_notes_fetch(repo, ids):
     return out
 
 
-def ci_state(rollup, required=(), runs=None):
+def ci_state(rollup, required=(), runs=None, optional=()):
     """(ok|wait|fail, текст) по ci_verdict. Проверок нет — wait: они ещё не встали; по 24 ч заявка всё равно гаснет.
     Обязательные есть, а запуски Actions не получены (runs None) — тоже wait: сбой gh не снимает заявку."""
     if required and runs is None:
         return "wait", "запуски Actions на head PR не получены"
-    state, why, _ = ci_verdict(rollup, required, runs)
+    state, why, _ = ci_verdict(rollup, required, runs, optional)
     if state == "empty":
         return "wait", "проверок GitHub пока нет"
     if state == "ok":
@@ -624,7 +639,7 @@ def gate(repo, pr, sha, view):
         return "fail", f"«принять» от argus на Opus — {len(latest)} из {MIN_ACCEPTS}"
     required = required_checks(repo, view.get("baseRefName"))
     runs = ci_runs_fetch(repo, pr, sha, ci_fork(view)) if required else None
-    state, why = ci_state(view.get("statusCheckRollup"), required, runs)
+    state, why = ci_state(view.get("statusCheckRollup"), required, runs, optional_checks(repo))
     if state == "fail":
         # CI не запускался из-за лимита минут или оплаты (metis-0655): запись тестов на этот SHA уже сверена выше —
         # она и засчитывается вместо CI, как в шлюзе guard (_billing_problem)
