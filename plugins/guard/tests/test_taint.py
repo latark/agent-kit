@@ -11,6 +11,10 @@ import json
 import os
 import subprocess
 import sys
+
+# Срок подпроцессов теста: на нагруженном Mac (проход outside, -j3, load 11-20) 10-30 с не хватает (metis-0634).
+# Срок самого guard (DEADLINE) это не меняет и им не проверяется.
+SUB_TIMEOUT = 60
 import tempfile
 import atexit as _atexit
 import shutil as _shutil
@@ -50,7 +54,7 @@ def hook(home, event, env=None):
     """(код, stdout, stderr) одного запуска taint.py."""
     e = {"HOME": home, "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TMPDIR": _ROOT, **(env or {})}
     r = subprocess.run([PY, "-I", TAINT], input=event if isinstance(event, str) else json.dumps(event),
-                       capture_output=True, text=True, env=e, timeout=15)
+                       capture_output=True, text=True, env=e, timeout=SUB_TIMEOUT)
     return r.returncode, r.stdout, r.stderr
 
 
@@ -343,7 +347,7 @@ def test_bypass_and_deny_wins():
     # субагенту в git push --force в main, taint на том же событии просит ask — итог deny. taint никогда не allow.
     ev = base(h, "PreToolUse", tool_name="Bash", tool_input={"command": "git push --force origin main"},
               agent_id="a1", agent_type="dev-opus")
-    g = subprocess.run([PY, "-I", SHIM, GUARD], input=json.dumps(ev), capture_output=True, text=True, timeout=15,
+    g = subprocess.run([PY, "-I", SHIM, GUARD], input=json.dumps(ev), capture_output=True, text=True, timeout=SUB_TIMEOUT,
                        env={"HOME": h, "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TMPDIR": "/nonexistent-tmp"})
     gd = "deny" if g.returncode == 2 else decision(g.stdout)
     td = decision(hook(h, ev)[1])

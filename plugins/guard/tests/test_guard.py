@@ -11,6 +11,10 @@ import re
 import shutil
 import subprocess
 import sys
+
+# Срок подпроцессов теста: на нагруженном Mac (проход outside, -j3, load 11-20) 10-30 с не хватает (metis-0634).
+# Срок самого guard (DEADLINE) это не меняет и им не проверяется.
+SUB_TIMEOUT = 60
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
@@ -263,7 +267,7 @@ def run(home, pdir, role, tool, tool_input, sub=False, cwd=None, raw=False, tuid
     env = {"HOME": home, "PATH": os.path.join(home, "fake-bin") + os.pathsep + os.environ["PATH"],
            "CLAUDE_PROJECT_DIR": os.path.join(home, pdir), "TMPDIR": "/nonexistent-tmp", **(penv or {})}
     r = subprocess.run([sys.executable, "-I", SHIM, GUARD], input=json.dumps(event), capture_output=True,
-                       text=True, env=env, timeout=10)
+                       text=True, env=env, timeout=SUB_TIMEOUT)
     out = r.stdout
     if r.returncode == 2:  # сбой (metis-0094): Claude Code понимает код 2 как отказ с причиной из stderr
         out = json.dumps({"hookSpecificOutput": {"permissionDecision": "deny", "exit2": True,
@@ -404,7 +408,7 @@ def old_python_checks(home, br, cases):
     policy.toml (до metis-0571 на 3.9 правило молча пропускало). Круг (запускатель вернул старый Python) — код 2."""
     failed = 0
     old = subprocess.run([OLD_PYTHON, "-c", "import sys; print(sys.version_info < (3, 11))"], capture_output=True,
-                         text=True, timeout=30).stdout.strip() if os.path.exists(OLD_PYTHON) else ""
+                         text=True, timeout=SUB_TIMEOUT).stdout.strip() if os.path.exists(OLD_PYTHON) else ""
     if old != "True":
         print(f"пропуск: {OLD_PYTHON} нет или он 3.11+ — перезапуск guard со старого Python не проверить")
         return 0
@@ -415,14 +419,14 @@ def old_python_checks(home, br, cases):
            "CLAUDE_PROJECT_DIR": os.path.join(home, br)}
     for label, extra in (("плагин", []), ("--managed", ["--managed"]), ("--strict", ["--strict"])):
         r = subprocess.run([OLD_PYTHON, GUARD] + extra, input=json.dumps(event), capture_output=True, text=True,
-                           env=env, timeout=30)
+                           env=env, timeout=SUB_TIMEOUT)
         ok = r.returncode == 0 and '"deny"' in r.stdout and "corpus-role" in r.stdout
         failed += not ok
         cases.append(None)
         print(f"{'ok  ' if ok else 'FAIL'} {OLD_PYTHON} (3.9) {label}: guard перезапущен на 3.11+, corpus-role закрыт"
               + ("" if ok else f": код {r.returncode} {r.stdout[:200]} {r.stderr[:300]}"))
     r = subprocess.run([OLD_PYTHON, GUARD], input=json.dumps(event), capture_output=True, text=True,
-                       env=dict(env, GUARD_PY_REEXEC="1"), timeout=30)
+                       env=dict(env, GUARD_PY_REEXEC="1"), timeout=SUB_TIMEOUT)
     ok = r.returncode == 2 and "нужен Python 3.11+" in r.stderr
     failed += not ok
     cases.append(None)
@@ -837,7 +841,7 @@ def failure_checks(home, env, cases):
         e = dict(env, CLAUDE_PROJECT_DIR=os.path.join(home, ak), **(penv or {}))
         t0 = time.monotonic()
         r = subprocess.run([sys.executable, "-I", SHIM, GUARD] + ([mode] if mode else []), input=stdin,
-                           capture_output=True, text=True, env=e, timeout=20)
+                           capture_output=True, text=True, env=e, timeout=SUB_TIMEOUT)
         return r, time.monotonic() - t0
 
     def check(name, ok, r=None):
@@ -908,7 +912,7 @@ def failure_checks(home, env, cases):
                                                 "tool_input": {"command": "ls"}}, 2),
                                 ("Stop", {"hook_event_name": "Stop"}, 0)):
             r = subprocess.run([sys.executable, "-I", os.path.join(lone, "guard.py")], input=json.dumps(ev),
-                               capture_output=True, text=True, env=env, timeout=20)
+                               capture_output=True, text=True, env=env, timeout=SUB_TIMEOUT)
             check(f"сбой загрузки guard ({what}), {label} — код {want} и причина",
                   r.returncode == want and "сбой загрузки" in r.stderr and "Traceback" not in r.stderr, r)
         shutil.rmtree(lone, ignore_errors=True)
@@ -2243,7 +2247,7 @@ def main():
             os.remove(stop_log)
         ev ={"hook_event_name": "Stop", "transcript_path": tp, "session_id": "s-test", "cwd": stop_home}
         r = subprocess.run([sys.executable, "-I", SHIM, GUARD], input=json.dumps(ev), capture_output=True, text=True,
-                           env=stop_env, timeout=10)
+                           env=stop_env, timeout=SUB_TIMEOUT)
         ok = r.returncode == 0 and '"block"' not in r.stdout and '"deny"' not in r.stdout \
             and not os.path.exists(stop_log)
         failed += not ok
@@ -2275,7 +2279,7 @@ def main():
                     '{"permissions": {"deny": ["Bash(x)"]}}', "битый json"):
         open(mf, "w").write(content)
         results.append(subprocess.run([sys.executable, "-I", probe, RULES, mf], capture_output=True, text=True,
-                                      env=env, timeout=10).stdout.strip())
+                                      env=env, timeout=SUB_TIMEOUT).stdout.strip())
     ok = results == ["True", "False", "False"]
     failed += not ok
     cases.append(None)
@@ -2306,7 +2310,7 @@ def main():
         ev = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": ti, "session_id": "s-test",
               "cwd": os.path.join(home, "ai/pantheon"), "agent_type": "hq"}
         outs[label] = subprocess.run([sys.executable, "-I", probe2, RULES, mf, json.dumps(ev)], capture_output=True,
-                                     text=True, env=menv, timeout=10).stdout
+                                     text=True, env=menv, timeout=SUB_TIMEOUT).stdout
     ok = '"deny"' in outs["Agent"] and "hq-telegram" in outs["Agent"] and '"deny"' in outs["Skill"] \
         and outs["Bash"].strip() == ""
     failed += not ok
@@ -2326,7 +2330,7 @@ def main():
     ev = {"hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input": {"subagent_type": "x", "prompt": "x"},
           "session_id": "s-test", "cwd": os.path.join(home, "ai/pantheon")}
     got = [subprocess.run([sys.executable, "-I", probe3, RULES, os.path.join(home, "no-managed.json"), json.dumps(ev)],
-                          capture_output=True, text=True, env=e, timeout=10) for e in (menv, env)]
+                          capture_output=True, text=True, env=e, timeout=SUB_TIMEOUT) for e in (menv, env)]
     ok = all(r.returncode == 2 and "сбой проверки окна" in r.stderr for r in got)
     failed += not ok
     cases.append(None)

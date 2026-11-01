@@ -14,6 +14,10 @@ import os
 import shutil
 import subprocess
 import sys
+
+# Срок подпроцессов теста: на нагруженном Mac (проход outside, -j3, load 11-20) 10-30 с не хватает (metis-0634).
+# Срок самого guard (DEADLINE) это не меняет и им не проверяется.
+SUB_TIMEOUT = 60
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -48,7 +52,7 @@ def run(role, command):
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home, "CLAUDE_PROJECT_DIR": home + "/proj",
            "TMPDIR": root}
     r = subprocess.run([sys.executable, "-I", SHIM, GUARD], input=json.dumps(ev), capture_output=True, text=True,
-                       env=env, timeout=30)
+                       env=env, timeout=SUB_TIMEOUT)
     return r.returncode, (r.stdout.strip() or r.stderr.strip())
 
 
