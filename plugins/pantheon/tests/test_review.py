@@ -46,8 +46,9 @@ def run_all(tmp):
            "PANTHEON_STATE": state, "TMPDIR": tmp, "PANTHEON_NO_NOTIFY": "1", "GIT_CONFIG_NOSYSTEM": "1",
            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
 
-    def pantheon(*args, cwd=tmp):
-        return subprocess.run([sys.executable, "-I", RUN_PY, *args], capture_output=True, text=True, env=env, cwd=cwd)
+    def pantheon(*args, cwd=tmp, extra=None):
+        return subprocess.run([sys.executable, "-I", RUN_PY, *args], capture_output=True, text=True,
+                              env=dict(env, **(extra or {})), cwd=cwd)
 
     def git(*args, cwd):
         return subprocess.run(["git", *args], capture_output=True, text=True, env=env, cwd=cwd)
@@ -422,9 +423,8 @@ def report_tests(tmp, pantheon):
     # /private/tmp»). Папок не создаём: отказ — до записи и до чтения журнала, realpath несуществующего пути — по тексту.
     fake_tmp = os.path.join("/var/empty", "review-tmp")
     sib = fake_tmp + "-sib"
-    r = subprocess.run([sys.executable, "-I", RUN_PY, "review", "report", ref, "204", "ab12cd34", "--out",
-                        os.path.join(sib, "x.md")], capture_output=True, text=True, env=dict(env, TMPDIR=fake_tmp),
-                       cwd=tmp)
+    r = pantheon("review", "report", ref, "204", "ab12cd34", "--out", os.path.join(sib, "x.md"),
+                 extra={"TMPDIR": fake_tmp})
     check("report --out в соседней папке с общим префиксом $TMPDIR — код 2", r.returncode == 2
           and "только под $TMPDIR" in r.stderr and not os.path.exists(os.path.join(sib, "x.md")), r.stderr)
     for bad in (["x", "204", "ab12cd34"], [ref, "0", "ab12cd34"], [ref, "204", "zz"], [ref, "204"],
