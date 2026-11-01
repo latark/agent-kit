@@ -18,9 +18,12 @@ PR ядра защит (Д3) агенты не сливают: его слива
   3. Репозиторий всё ещё в [merge_repos] metis-pantheon. Шлюз заново на тот же head: запись тестов шлюза на SHA; у
      каждого рецензента argus последний вердикт — «принять» с полным перечнем и на Opus (по ran и, если хук guard
      записал их, по моделям транскрипта argus — metis-0176), рецензентов-«принять» не
-     меньше двух, «вернуть» нет; проверки GitHub (CI) — все SUCCESS/NEUTRAL/SKIPPED. CI ещё идёт или проверок пока
-     нет — заявка ждёт; иначе снята с тревогой. Список файлов PR (REST pulls/N/files) полон — иначе ждёт: окно
-     показывает задетые файлы ядра, без списка их не показать. PR правит version в plugin.json плагина или трогает
+     меньше двух, «вернуть» нет; проверки GitHub (CI) — тот же разбор ci_verdict, что у шлюза guard (metis-0633):
+     обязательные из REQUIRED_CHECKS — запуск Actions от pull_request на этом SHA с SUCCESS (ci_runs_fetch, дубль —
+     худший итог), у репозитория без записи — все проверки rollup. CI ещё идёт, обязательной или любых проверок пока
+     нет, запуски не получены — заявка ждёт; красная или SKIPPED — снята с тревогой.
+     Список файлов PR (REST pulls/N/files) полон — иначе ждёт: окно показывает задетые файлы ядра, без списка их не
+     показать. PR правит version в plugin.json плагина или трогает
      .claude-plugin/releases.json — снята с тревогой (metis-0512: номер поднимает workflow release после слияния).
   4. Владелец у Mac (простой меньше PRESENT_SEC) — окно Touch ID: помощник pantheon-touchid (lib/touchid.swift,
      LocalAuthentication), в тексте — задетые файлы ядра, заголовок PR последним. После пальца, под замком
@@ -73,8 +76,6 @@ MIN_ACCEPTS = 2
 GH_TIMEOUT = 30
 MERGE_TIMEOUT = 120
 APPROVE_FILE = "merge-approve.log"
-CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
-CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
 SWIFTC = "/usr/bin/swiftc"           # абсолютный путь: PATH прохода подменяем (launchctl setenv)
 SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"   # PATH прохода, не из окружения
 # Тестовые подмены прохода: {"env": {имя: значение}} — переменные, которые проход берёт поверх чистого окружения, и
@@ -278,10 +279,10 @@ def gh_path():
 
 
 def pr_view(repo, pr):
-    """{headRefOid, state, isDraft, title, statusCheckRollup, changedFiles} или None — gh не ответил."""
+    """{headRefOid, state, isDraft, title, baseRefName, statusCheckRollup, changedFiles} или None — gh не ответил."""
     try:
         r = subprocess.run([gh_path(), "pr", "view", str(pr), "-R", repo, "--json",
-                            "headRefOid,state,isDraft,title,statusCheckRollup,changedFiles"],
+                            "headRefOid,state,isDraft,title,baseRefName,statusCheckRollup,changedFiles"],
                            capture_output=True, text=True, timeout=GH_TIMEOUT, env=gh_env())
         data = json.loads(r.stdout) if r.returncode == 0 else None
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -364,32 +365,143 @@ def is_core(path):
     return p in {c.casefold() for c in CORE_FILES} or any(p == d or p.startswith(d + "/") for d in CORE_DIR)
 
 
-def ci_state(rollup):
-    """(ok|wait|fail, текст). Проверок нет — wait: они ещё не встали; по 24 ч заявка всё равно гаснет."""
-    if not isinstance(rollup, list):
-        return "fail", "список проверок GitHub не получен"
-    if not rollup:
-        return "wait", "проверок GitHub пока нет"
-    waiting = []
+# проверки GitHub на head PR (metis-0285, 0633): ci_verdict, ci_runs, required_checks, REQUIRED_CHECKS, CI_RUNS_API,
+# CI_OK, CI_WAIT и CI_NONE — дословно те же, что в шлюзе guard (plugins/guard/hooks/merge_gate.py): плагины порознь,
+# друг друга не импортируют, совпадение сверяет test_merge по AST. Правишь — правь оба
+CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
+CI_NONE = "проверки GitHub не получены"
+# обязательные проверки (metis-0633): имя репозитория без владельца → (workflow, job, ветка base PR или None — любая).
+# Имена — из .github/workflows репозитория: tests.yml гоняет job affected только на PR в main (job full на PR всегда
+# SKIPPED — его здесь нет), check-traces.yml — job traces на любой PR (и на push: две записи traces на одном SHA).
+# Совпадение с файлами workflows сверяет test_merge_gate. Обязательная засчитывается только по запуску Actions от
+# события pull_request на этом head (ci_runs) и только с итогом SUCCESS: SKIPPED закрыл бы её job, который не
+# запускался, push-запуск проверяет ветку без слияния с base, а NEUTRAL у job Actions не бывает — его ставят
+# сторонние приложения проверок. Нет такого запуска — «ещё не встала», а не пропуск; другие проверки репозитория —
+# только предупреждение. Репозиторий без записи — обязательна каждая проверка его rollup (SUCCESS/NEUTRAL/SKIPPED).
+REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces", "traces", None))}
+# запуски Actions на head SHA: два GET REST (GraphQL — POST, его правило push ролям закрывает), связь — check_suite_id
+CI_RUNS_API = ("repos/{repo}/actions/runs?head_sha={sha}&per_page=100",
+               "repos/{repo}/commits/{sha}/check-runs?per_page=100")
+
+
+def required_checks(repo, base):
+    """Обязательные (workflow, job) для PR в repo (owner/name) с веткой base; base не строка — все записи."""
+    got = REQUIRED_CHECKS.get(str(repo or "").rsplit("/", 1)[-1].lower(), ())
+    return tuple((w, j) for w, j, b in got if b is None or not isinstance(base, str) or b == base)
+
+
+def ci_runs(workflow_runs, check_runs, sha, pr):
+    """Запуски Actions PR pr на коммите sha с событием: [{workflowName, name, status, conclusion, event}] по ответам
+    CI_RUNS_API (actions/runs и check-runs). Не идут в список: проверка без запуска Actions с тем же check_suite_id
+    (стороннее приложение с тем же именем), чужой head_sha и запуск, в pull_requests которого нет этого PR (запуск
+    чужого PR на том же SHA). Ответ неполон (total_count больше полученного: per_page=100 без пагинации, скрытой
+    может быть красная запись) — строка «неполные данные CI»; не разобран — None."""
+    try:
+        wr, cr = workflow_runs["workflow_runs"], check_runs["check_runs"]
+        if workflow_runs["total_count"] > len(wr) or check_runs["total_count"] > len(cr):
+            return (f"{CI_NONE}: неполные данные CI — запусков {workflow_runs['total_count']} и проверок "
+                    f"{check_runs['total_count']}, а получено {len(wr)} и {len(cr)}")
+        suites = {r["check_suite_id"]: r for r in wr
+                  if r["head_sha"] == sha and str(pr) in [str(p["number"]) for p in r["pull_requests"]]}
+        out = []
+        for c in cr:
+            run = suites.get(c["check_suite"]["id"])
+            if run is not None and c["head_sha"] == sha:
+                out.append({"workflowName": str(run.get("name") or ""), "name": str(c.get("name") or ""),
+                            "status": str(c.get("status") or ""), "conclusion": str(c.get("conclusion") or ""),
+                            "event": str(run.get("event") or "")})
+        return out
+    except (TypeError, KeyError, AttributeError):
+        return None
+
+
+def ci_verdict(rollup, required=(), runs=None):
+    """(ok|wait|fail|empty, текст, предупреждения) по statusCheckRollup head PR. CheckRun — по status и conclusion,
+    StatusContext — по state; ключ проверки — (workflowName, name) или context. Итог ключа — худший из его записей:
+    дубль имени (push и pull_request на одном SHA) не прячет красную запись зелёной. required — обязательные
+    (workflow, job): судятся только по runs (ci_runs) от события pull_request, зелёный итог — только SUCCESS; красная
+    или пропущенная — fail, нет такого запуска или идёт — wait, runs не получены или неполны (строка) — fail.
+    Остальные проверки rollup
+    дают только предупреждение о красной. required пуст — обязательна каждая проверка rollup (SUCCESS, NEUTRAL,
+    SKIPPED), пустой rollup — empty."""
+    if not isinstance(rollup, list) or required and not isinstance(runs, (list, str)):
+        return "fail", CI_NONE, []
+    if required and isinstance(runs, str):
+        return "fail", runs, []
+    rank = {"ok": 0, "wait": 1, "fail": 2}
+    seen, pr_runs = {}, {}  # ключ → (итог, слово итога, имя для текста)
     for c in rollup:
         if not isinstance(c, dict):
-            return "fail", "проверка GitHub не разобрана"
-        name = str(c.get("name") or c.get("context") or "?")[:60]
+            return "fail", f"{CI_NONE}: проверка не разобрана", []
         if "conclusion" in c or "status" in c and "state" not in c:   # CheckRun
             status, concl = str(c.get("status") or "").upper(), str(c.get("conclusion") or "").upper()
-            if status != "COMPLETED":
-                waiting.append(name)
-            elif concl not in CI_OK:
-                return "fail", f"проверка {name}: {concl or 'нет итога'}"
+            res = "wait" if status != "COMPLETED" else "ok" if concl in CI_OK else "fail"
+            word = (status or "нет статуса") if res == "wait" else (concl or "нет итога")
+            key = (str(c.get("workflowName") or ""), str(c.get("name") or ""))
         else:                                                            # StatusContext
             st = str(c.get("state") or "").upper()
-            if st in CI_WAIT:
-                waiting.append(name)
-            elif st not in CI_OK:
-                return "fail", f"проверка {name}: {st}"
-    if waiting:
-        return "wait", "проверки GitHub ещё идут: " + ", ".join(waiting)
-    return "ok", f"CI ✓ ({len(rollup)})"
+            res = "wait" if st in CI_WAIT else "ok" if st in CI_OK else "fail"
+            word = st or "нет статуса"
+            key = ("", str(c.get("context") or ""))
+        if key not in seen or rank[res] > rank[seen[key][0]]:
+            seen[key] = (res, word, ("/".join(k for k in key if k) or "?")[:60])
+    for c in runs or ():
+        if not isinstance(c, dict) or c.get("event") != "pull_request":
+            continue
+        status, concl = str(c.get("status") or "").upper(), str(c.get("conclusion") or "").upper()
+        res = "wait" if status != "COMPLETED" else "ok" if concl == "SUCCESS" else "fail"
+        word = (status or "нет статуса") if res == "wait" else (concl or "нет итога")
+        key = (str(c.get("workflowName") or ""), str(c.get("name") or ""))
+        if key not in pr_runs or rank[res] > rank[pr_runs[key][0]]:
+            pr_runs[key] = (res, word, "/".join(key)[:60])
+    must = [tuple(r) for r in required] or list(seen)
+    judge = pr_runs if required else seen
+    if not must:
+        return "empty", "", []
+    notes = [f"необязательная проверка GitHub {v[2]} красная: {v[1]}" for k, v in seen.items()
+             if k not in must and v[0] == "fail"]
+    red = [f"проверка GitHub {judge[k][2]} {'красная' if judge[k][1] not in CI_OK else 'не прошла'}: {judge[k][1]}"
+           for k in must if k in judge and judge[k][0] == "fail"]
+    if red:
+        return "fail", "; ".join(red), notes
+    missing = ["/".join(k) for k in must if k not in judge]
+    if missing:
+        return ("wait", "обязательные проверки GitHub ещё не встали (засчитывается запуск от pull_request на этом "
+                "коммите): " + ", ".join(missing), notes)
+    going = [judge[k][2] for k in must if judge[k][0] == "wait"]
+    if going:
+        return "wait", "проверки GitHub ещё идут: " + ", ".join(going), notes
+    return "ok", "", notes
+
+
+def ci_runs_fetch(repo, pr, sha):
+    """Запуски Actions на head SHA с событием (metis-0633): два GET REST по CI_RUNS_API, список ci_runs или None —
+    gh не ответил или ответ не разобран."""
+    got = []
+    for api in CI_RUNS_API:
+        try:
+            r = subprocess.run([gh_path(), "api", api.format(repo=repo, sha=sha)], capture_output=True, text=True,
+                               timeout=GH_TIMEOUT, env=gh_env())
+            got.append(json.loads(r.stdout) if r.returncode == 0 else None)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+        if got[-1] is None:
+            return None
+    return ci_runs(got[0], got[1], sha, pr)
+
+
+def ci_state(rollup, required=(), runs=None):
+    """(ok|wait|fail, текст) по ci_verdict. Проверок нет — wait: они ещё не встали; по 24 ч заявка всё равно гаснет.
+    Обязательные есть, а запуски Actions не получены (runs None) — тоже wait: сбой gh не снимает заявку."""
+    if required and runs is None:
+        return "wait", "запуски Actions на head PR не получены"
+    state, why, _ = ci_verdict(rollup, required, runs)
+    if state == "empty":
+        return "wait", "проверок GitHub пока нет"
+    if state == "ok":
+        return "ok", f"CI ✓ ({len(rollup)})"
+    return state, why
 
 
 # --- шлюз -----------------------------------------------------------------------------------------------------------
@@ -422,7 +534,8 @@ def gate(repo, pr, sha, view):
         return "fail", "у argus последний вердикт — «вернуть»"
     if len(latest) < MIN_ACCEPTS:
         return "fail", f"«принять» от argus на Opus — {len(latest)} из {MIN_ACCEPTS}"
-    state, why = ci_state(view.get("statusCheckRollup"))
+    required = required_checks(repo, view.get("baseRefName"))
+    state, why = ci_state(view.get("statusCheckRollup"), required, ci_runs_fetch(repo, pr, sha) if required else None)
     if state != "ok":
         return state, why
     return "ok", f"argus ×{len(latest)} ✓, CI ✓"

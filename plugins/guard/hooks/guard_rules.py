@@ -2583,7 +2583,8 @@ _PUSH_BAD = {"--all", "--mirror", "--delete", "-d", "--prune", "--force", "-f", 
 
 
 def limited(event):
-    """Роль Пантеона или любой субагент — правила шага 1.2 касаются их; ваша сессия без роли — нет."""
+    """Роль Пантеона или любой субагент — правила шага 1.2 касаются их; ваша сессия без роли — нет (кроме CI перед
+    gh pr merge: check_owner_merge, metis-0633)."""
     role, sub, pdir = who(event)
     return (is_pantheon_role(role) or sub), role, sub, pdir
 
@@ -3133,10 +3134,38 @@ def _gh_pr_sub(texts):
     return next(((q, i) for q, i in cands if texts[q] == "pr" and i is not None), None)
 
 
+def check_owner_merge(event, tool_input):
+    """Сессия без роли (окно владельца): из правил push — только CI перед gh pr merge (решение владельца 01.11,
+    metis-0633, merge_gate.owner_ci_problem). Команду без слова merge не разбираем: остальное в этой сессии не судим."""
+    cmd = tool_input.get("command") or ""
+    if "merge" not in cmd:
+        return None
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    _, cmds = bash_analysis(cmd, cwd)
+    moved = any(n in ("cd", "chdir", "pushd", "popd") for n, _ in cmds)
+    for name, texts in cmds:
+        if name == "gh" and _gh_parse(texts)[0]:
+            return ("Правило push: gh — слово до подкоманды не вычислить (переменная, $(…)), а в команде есть merge: "
+                    f"не понять, слияние ли это. Пиши подкоманду gh и флаги перед ней словами. {merge_gate.OWNER_CI}")
+        found = _gh_merge(texts) if name == "gh" else None
+        if found is not None:
+            # та же проверка GH_*, что у правила hq-gh: GH_REPO, GH_HOST, GH_CONFIG_DIR уводят gh от сверенного репозитория
+            if _gh_env_assigned(cmd, cwd) or any(os.environ.get(v) for v in GH_REDIRECT_ENV):
+                return ("Правило push: gh pr merge — без переменных GH_* в команде и без GH_REPO, GH_HOST, "
+                        f"GH_CONFIG_DIR в окружении: они уводят gh от репозитория, на котором сверен CI. "
+                        f"{merge_gate.OWNER_CI}")
+            why = merge_gate.owner_ci_problem(cwd, moved, found[1])
+            if why:
+                return f"Правило push: gh pr merge — {why}"
+    return None
+
+
 def check_push(event, tool, tool_input):
     ok, role, sub, pdir = limited(event)
-    if not ok or tool != "Bash":
+    if tool != "Bash":
         return None
+    if not ok:
+        return check_owner_merge(event, tool_input)
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     _, cmds = bash_analysis(tool_input.get("command") or "", cwd)
     moved = any(n in ("cd", "chdir", "pushd", "popd") for n, _ in cmds)
@@ -4200,6 +4229,10 @@ def main(raw=None):
                 "permissionDecision": "deny",
                 "permissionDecisionReason": reason,
             }}, ensure_ascii=False))
+        elif merge_gate.NOTES:
+            # шлюз слияния пропустил, но есть красная необязательная проверка CI (metis-0633) — строка пользователю
+            print(json.dumps({"systemMessage": "guard, шлюз слияния: " + "; ".join(merge_gate.NOTES)},
+                             ensure_ascii=False))
     elif name == "Stop" and "nextjs" not in OFF:
         reason = soft(check_nextjs, event)
         if reason:

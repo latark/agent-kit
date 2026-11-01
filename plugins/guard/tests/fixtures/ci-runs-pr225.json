@@ -1,0 +1,91 @@
+{
+ "_source": "gh api repos/latark/agent-kit/actions/runs?head_sha=1369098cfe06b9ff3190dbdbec10ab36c81216be и commits/1369098cfe06b9ff3190dbdbec10ab36c81216be/check-runs, 2026-11-01 (metis-0633): PR #225 слит при красном CI; оставлены поля, которые читает ci_runs; pull_requests — номер PR, как GitHub отдаёт его до слияния (после слияния поле пустое, проверено 01.11 на PR 230 открытом и 223/225 слитых)",
+ "workflow_runs": {
+  "total_count": 3,
+  "workflow_runs": [
+   {
+    "id": 41286977085,
+    "name": "check-traces",
+    "event": "pull_request",
+    "status": "completed",
+    "conclusion": "success",
+    "head_sha": "1369098cfe06b9ff3190dbdbec10ab36c81216be",
+    "check_suite_id": 111902645692,
+    "pull_requests": [
+     {
+      "number": 225
+     }
+    ]
+   },
+   {
+    "id": 41286977088,
+    "name": "tests",
+    "event": "pull_request",
+    "status": "completed",
+    "conclusion": "failure",
+    "head_sha": "1369098cfe06b9ff3190dbdbec10ab36c81216be",
+    "check_suite_id": 111902645706,
+    "pull_requests": [
+     {
+      "number": 225
+     }
+    ]
+   },
+   {
+    "id": 41286973448,
+    "name": "check-traces",
+    "event": "push",
+    "status": "completed",
+    "conclusion": "success",
+    "head_sha": "1369098cfe06b9ff3190dbdbec10ab36c81216be",
+    "check_suite_id": 111902635980,
+    "pull_requests": [
+     {
+      "number": 225
+     }
+    ]
+   }
+  ]
+ },
+ "check_runs": {
+  "total_count": 4,
+  "check_runs": [
+   {
+    "name": "full",
+    "status": "completed",
+    "conclusion": "skipped",
+    "head_sha": "1369098cfe06b9ff3190dbdbec10ab36c81216be",
+    "check_suite": {
+     "id": 111902645706
+    }
+   },
+   {
+    "name": "affected",
+    "status": "completed",
+    "conclusion": "failure",
+    "head_sha": "1369098cfe06b9ff3190dbdbec10ab36c81216be",
+    "check_suite": {
+     "id": 111902645706
+    }
+   },
+   {
+    "name": "traces",
+    "status": "completed",
+    "conclusion": "success",
+    "head_sha": "1369098cfe06b9ff3190dbdbec10ab36c81216be",
+    "check_suite": {
+     "id": 111902645692
+    }
+   },
+   {
+    "name": "traces",
+    "status": "completed",
+    "conclusion": "success",
+    "head_sha": "1369098cfe06b9ff3190dbdbec10ab36c81216be",
+    "check_suite": {
+     "id": 111902635980
+    }
+   }
+  ]
+ }
+}
