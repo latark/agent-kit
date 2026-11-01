@@ -482,16 +482,17 @@ def sessions(agents, doms, t=None):
             P.clear_once(key)
             P.clear_fault(*(f"watch-{s}-{sid}" for s in word))  # состояние снялось — следующее снова macOS
             continue
-        P.clear_fault(*(f"watch-{s}-{sid}" for s in word if s != state))
         why = blocked_why(a) if state == "blocked" else clean_why(a.get("waitingFor"))
+        ghost_asks = bool(a.get("ghost") and a.get("listedState") == "blocked" and why)
+        if ghost_asks:  # призрак с вопросом владельцу по-прежнему «ждёт вас» (metis-0250): состояние для уведомления
+            state = "blocked"  # считается до clear_fault, иначе каждый проход сбрасывал бы «watch-blocked-…» (ревью argus Б2)
+        P.clear_fault(*(f"watch-{s}-{sid}" for s in word if s != state))
         if a.get("ghost"):  # metis-0651: процесс умер, запись осталась — одна тревога на сессию, пока призрак виден
             P.alert_once(key, "ghost", f"{name} ({sid}): процесс умер, в claude agents осталась запись "
                          f"«{a.get('listedState')}»" + (f", ждала: {why}" if why else "")
                          + f" — имя свободно, поднять: pantheon wake {name}", "watch")
-            if a.get("listedState") != "blocked" or not why:
+            if not ghost_asks:
                 continue
-            # призрак с вопросом владельцу по-прежнему «ждёт вас» (metis-0250): уведомление и передача Зевсу
-            state = "blocked"
         else:
             P.alert_once(key, state, f"{name} ({sid}) {word[state]}" + (f": {why}" if why else "")
                          + f" — claude attach {sid}", "watch")

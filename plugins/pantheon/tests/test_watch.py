@@ -3378,6 +3378,12 @@ def test_status_blocked_without_process_0250():
     check([c for c in e.calls() if c[:1] == ["respawn"] and c[1] == "2e057e05"]
           and "hmhmhmhm" in open(e.st("push", "2e057e05-1.txt"), encoding="utf-8").read(),
           f"призрак с вопросом: Зевсу не передано: {e.calls()}")
+    # ревью argus Б2: следующие проходы (и через 20 мин) не повторяют ни уведомление, ни передачу Зевсу
+    for dt in (60, 120, 180, 1200):
+        e.run("watch", t=T0 + dt)
+    check(e.sent().count("hm-dir ждёт вас") == 1, f"призрак с вопросом: уведомление повторяется: {e.sent()!r}")
+    check(len([c for c in e.calls() if c[:1] == ["respawn"] and c[1] == "2e057e05"]) == 1,
+          f"призрак с вопросом: повторная передача Зевсу: {e.calls()}")
     os.remove(os.path.join(e.home, ".claude", "daemon", "roster.json"))
     out = e.run("status", t=T0 + 60).stdout
     check("ждут вас: th-dir" in out, f"без реестра демона сессия объявлена снятой: {out}")
