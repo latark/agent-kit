@@ -508,14 +508,15 @@ def main():
           [x for x in sw_hq if x == st_real or x.startswith(st_real + "/")]
           == [os.path.join(hq_rw, "locks"), os.path.join(hq_rw, "autostart-reset")]
           and not any(x.startswith(st_real + "/") for x in sa["sandbox"]["filesystem"]["allowWrite"]))
-    check("окно штаба: мимо песочницы — прежний список пульта и gh PR (view/checks/edit), без сетевого git "
-          "(metis-0064, metis-0247)",
+    check("окно штаба: мимо песочницы — прежний список пульта и gh PR (view/checks/list/edit), без сетевого git "
+          "(metis-0064, metis-0247, metis-0626)",
           hb["excludedCommands"] == ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheon wake *",
                                      "pantheon archive", "pantheon jobs *", "pantheon domains build",
                                      "pantheon roles build", "pantheon stop *", "pantheon resume *", "pantheon pause *",
                                      "pantheon restart *", "pantheon saved *", "pantheon who", "pantheon agents",
                                      "sessync find", "sessync find *",
-                                     "gh pr view", "gh pr view *", "gh pr checks", "gh pr checks *", "gh pr edit *"])
+                                     "gh pr view", "gh pr view *", "gh pr checks", "gh pr checks *", "gh pr list",
+                                     "gh pr list *", "gh pr edit *"])
     others = {n: load(n)["sandbox"]["excludedCommands"] for n in ("athena-shop", "metis-pantheon", "workshop",
                                                                     "mnemo-brain", "zz", "hestia")}
     others.update({f"job-{r}": load(f"job-{r}")["sandbox"]["excludedCommands"]
