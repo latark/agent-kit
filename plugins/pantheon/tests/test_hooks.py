@@ -642,6 +642,59 @@ r = fresh_rewake([user("сохрани", "l1", now - 300), assistant(now - 290, 
                  + filler, role="", first=False)
 check("ваше сообщение за пределами хвоста, файл старше него → чистый лист", r.returncode == 0 and not r.stderr.strip(),
       r.stderr)
+
+# metis-0652: к пробуждению — реплики прошлой сессии новее файла состояния (пересказ, не согласие)
+def say(t, text, **extra):
+    d = {"type": "assistant", "isSidechain": False, "timestamp": iso(t),
+         "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+    d.update(extra)
+    return d
+
+
+HEAD = "Реплики прошлой сессии"
+os.utime(ho, (now - 285, now - 285))
+r = fresh_rewake([
+    user("сделай ДО-РЕПЛИКА", "q1", now - 300), say(now - 295, "ответ-ДО"),
+    assistant(now - 290, 0, [("Write", {"file_path": ho, "content": "SECRET-WRITE"})]),
+    {"type": "user", "isSidechain": False, "timestamp": iso(now - 284), "toolUseResult": {"stdout": "SECRET-TOOL-OUT"},
+     "message": {"role": "user", "content": [{"type": "tool_result", "content": "SECRET-TOOL-OUT"}]}},
+    {"type": "assistant", "isSidechain": False, "timestamp": iso(now - 283), "message": {"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "SECRET-THINK"}, {"type": "tool_use", "name": "Bash", "input": {"command": "echo SECRET-IN"}}]}},
+    {"type": "user", "isSidechain": False, "timestamp": iso(now - 282), "message": {"role": "user", "content": [
+        {"type": "tool_result", "content": [{"type": "text", "text": "SECRET-TOOL-TEXT"}]}]}},
+    say(now - 281, "SECRET-SIDE", isSidechain=True),
+    user("SECRET-META", "q0", now - 280, meta=True),
+    user("SECRET-SLACK", "q0", now - 279, verifiedSlackHumanTurn=True),
+    say(now - 270, "сохранила, договорились на ВАРИАНТ-Б"),
+    user("хочу clear, вставлю: <pasted_content id=\"01\">SECRET-PASTE</pasted_content> и всё", "q2", now - 200),
+    say(now - 195, "можно, всё в файле")], role="", first=False)
+check("реплики после правки файла приложены, до неё — нет (metis-0652)", r.returncode == 2 and HEAD in r.stderr
+      and "ВАРИАНТ-Б" in r.stderr and "хочу clear" in r.stderr and "можно, всё в файле" in r.stderr
+      and "ДО-РЕПЛИКА" not in r.stderr and "ответ-ДО" not in r.stderr, (r.returncode, r.stderr))
+check("блок реплик помечен: пересказ, не слова владельца и не согласие", "пересказ" in r.stderr
+      and "не слова владельца и не согласие" in r.stderr and "— владелец, " in r.stderr and "— роль, " in r.stderr, r.stderr)
+check("вывод и вызовы инструментов, размышления, субагент, isMeta, Slack и текст вставки в блок не попадают",
+      "SECRET" not in r.stderr and "[вставка, 12 знаков]" in r.stderr, r.stderr)
+os.utime(ho, (now - 285, now - 285))
+many = [user("сохрани", "m0", now - 300), assistant(now - 290, 0, [("Write", {"file_path": ho, "content": "x"})])]
+for i in range(30):  # 30 реплик по 300 знаков, владелец и роль по очереди
+    text = "R%02d " % i + "ж" * 296
+    many.append(user(text, "m%d" % (i + 1), now - 250 + i) if i % 2 else say(now - 250 + i, text))
+r = fresh_rewake(many, role="", first=False)
+got = [i for i in range(30) if "R%02d " % i in r.stderr]
+whole = all(("R%02d " % i + "ж" * 296) in r.stderr for i in got)
+check("предел 3500 знаков: последние 11 реплик по 300 целиком, ранние опущены", r.returncode == 2
+      and got == list(range(19, 30)) and whole, (got, whole, len(r.stderr)))
+r = fresh_rewake(many[:2] + [say(now - 100, "НАЧАЛО " + "щ " * 3000 + "КОНЕЦ")], role="", first=False)
+tail = r.stderr[r.stderr.find("— роль, "):]
+check("одна свежая реплика длиннее предела → её конец с «[…]», не длиннее предела", r.returncode == 2
+      and "КОНЕЦ" in tail and "[…] " in tail and "НАЧАЛО" not in tail and len(tail) <= 3500 + 20, (len(tail), tail[:80]))
+os.utime(ho, (now - 480, now - 480))
+r = fresh_rewake(woke, role="", first=False)
+check("после правки файла реплик нет (только инструменты) → будит без блока реплик", r.returncode == 2
+      and HEAD not in r.stderr, r.stderr)
+r = fresh_rewake(woke + [say(now - 470, "сохранилась, жду")], role="", first=False)
+check("реплика роли после правки → блок с ней", HEAD in r.stderr and "сохранилась, жду" in r.stderr, r.stderr)
 os.utime(ho, (now - 100, now - 100))
 os.utime(board, (now - 10, now - 10))
 
