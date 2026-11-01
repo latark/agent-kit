@@ -38,7 +38,10 @@
   - опора — клон реестра (metis-0614, проверка безопасности): .git-файл папки заявки принимается, только если ведёт в
     <клон>/.git/worktrees/<имя> клона из папок окна (trusted_clone, без запуска git); конфиг клона с include*,
     filter.*, extensions.worktreeConfig или командой в core.fsmonitor — отказ (unsafe_config); git прохода — с
-    GIT_SAFE (без fsmonitor, хуков, сети, подмодулей), копия — git --git-dir=<клон>/.git без ~/.gitconfig;
+    GIT_SAFE (без fsmonitor, хуков, сети, подмодулей), копия — git --git-dir=<клон>/.git без ~/.gitconfig. Клон,
+    common и gitdir проверяются один раз (resolve_dir; commondir у common, ссылки — отказ; подтверждает сам git), дальше
+    папка — Repo, и git по ней идёт через --git-dir/--work-tree, а не через .git-файл. Остаток: commondir в
+    <клон>/.git/worktrees/<имя>/ роль может переписать между проверкой и git теста — намеренный обход, граница — песочница;
   - состояния: queued (заявка записана) → preparing (копия и зависимости) → starting (ждём порт) → serving →
     stopping → stopped; failed — с причиной;
   - «стоп» — файл <ID>.stop в папке заявок вызвавшего окна; проход ищет его во всех папках заявок, а не только в
@@ -312,11 +315,24 @@ GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c"
             "-c", "submodule.recurse=false")
 
 
+class Repo(str):
+    """Папка заявки после trusted_clone (resolve_dir): клон, его .git (common) и gitdir папки проверены один раз, git по
+    ней идёт с --git-dir=<gitdir> --work-tree=<папка> — .git-файл, который пишет роль, больше не читается."""
+    clone = common = gitdir = None
+
+
+def checked(d, clone, common, gitdir):
+    r = Repo(d)
+    r.clone, r.common, r.gitdir = clone, common, gitdir
+    return r
+
+
 def git(d, *args, timeout=30):
-    """Вывод git в папке d (без GIT_* окружения, с GIT_SAFE); None — сбой."""
+    """Вывод git в папке d (без GIT_* окружения, с GIT_SAFE; Repo — через проверенный gitdir); None — сбой."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    loc = ["-C", d] + ([f"--git-dir={d.gitdir}", f"--work-tree={d}"] if isinstance(d, Repo) else [])
     try:
-        r = subprocess.run(["git", "-C", d, *GIT_SAFE, *args], capture_output=True, text=True, timeout=timeout,
+        r = subprocess.run(["git", *loc, *GIT_SAFE, *args], capture_output=True, text=True, timeout=timeout,
                            env=env)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -977,31 +993,48 @@ def _small(p, limit=4096):
 
 
 def trusted_clone(d):
-    """Клон папки d по файлам, без запуска git (metis-0614): .git-папка → клон d; .git-файл → только worktree клона —
-    gitdir <клон>/.git/worktrees/<имя>, его commondir ведёт на <клон>/.git, а gitdir — обратно на d/.git.
-    → (клон, его .git) или (None, причина). .git-файл, ведущий куда-то ещё, — отказ: такой конфиг пишет роль, а
-    .git/config клона окну роли закрыт (deny write ~/**/.git/config)."""
+    """Клон папки d (настоящий путь) по файлам (metis-0614): .git-папка → клон d; .git-файл → только worktree клона —
+    gitdir <клон>/.git/worktrees/<имя>, его commondir ведёт на <клон>/.git, а gitdir — обратно на d/.git. У common нет
+    своего commondir, config — обычный файл, .git, worktrees и gitdir — не ссылки; итог подтверждает сам git
+    (rev-parse --git-dir --git-common-dir через этот gitdir). → (клон, common, gitdir) или (None, причина, None).
+    .git-файл, ведущий куда-то ещё, — отказ: такой gitdir и его конфиг пишет роль, а .git/config клона окну роли закрыт
+    (deny write ~/**/.git/config). Зовёт его только resolve_dir — один раз на заявку."""
+    def no(why):
+        return None, why, None
+
     dotgit = os.path.join(d, ".git")
     try:
         st = os.lstat(dotgit)
     except OSError:
-        return None, f"в {d} нет .git"
+        return no(f"папка {d} — не корень репозитория git (нет .git)")
     if stat.S_ISDIR(st.st_mode):
-        return d, os.path.realpath(dotgit)
-    m = re.fullmatch(r"gitdir: *(\S[^\n]*?) *\n?", _small(dotgit) or "") if stat.S_ISREG(st.st_mode) else None
-    if not m:
-        return None, f"{dotgit} — не папка и не ссылка gitdir"
-    gd = os.path.realpath(os.path.join(d, m.group(1)))
-    common = os.path.dirname(os.path.dirname(gd))
+        gd = common = dotgit
+    else:
+        m = re.fullmatch(r"gitdir: *(\S[^\n]*?) *\n?", _small(dotgit) or "") if stat.S_ISREG(st.st_mode) else None
+        if not m:
+            return no(f"{dotgit} — не папка и не ссылка gitdir")
+        gd = os.path.realpath(os.path.join(d, m.group(1)))
+        common = os.path.dirname(os.path.dirname(gd))
+        back = (_small(os.path.join(gd, "gitdir")) or "").strip()
+        cdir = (_small(os.path.join(gd, "commondir")) or "").strip()
+        if (os.path.basename(os.path.dirname(gd)) != "worktrees" or os.path.basename(common) != ".git"
+                or not cdir or os.path.realpath(os.path.join(gd, cdir)) != common
+                or not back or os.path.realpath(os.path.join(gd, back)) != os.path.realpath(dotgit)):
+            return no(f"{dotgit} ведёт на {gd} — это не worktree клона (<клон>/.git/worktrees/<имя>)")
     clone = os.path.dirname(common)
-    back = (_small(os.path.join(gd, "gitdir")) or "").strip()
-    cdir = (_small(os.path.join(gd, "commondir")) or "").strip()
-    if (os.path.basename(os.path.dirname(gd)) != "worktrees" or os.path.basename(common) != ".git"
-            or not _is_dir(os.path.join(clone, ".git")) or os.path.realpath(os.path.join(clone, ".git")) != common
-            or not cdir or os.path.realpath(os.path.join(gd, cdir)) != common
-            or not back or os.path.realpath(os.path.join(gd, back)) != os.path.realpath(dotgit)):
-        return None, f"{dotgit} ведёт на {gd} — это не worktree клона (<клон>/.git/worktrees/<имя>)"
-    return clone, common
+    if any(os.path.islink(x) for x in (common, os.path.join(common, "worktrees"), gd)) or not _is_dir(common):
+        return no(f"в пути {gd} — ссылка: git возьмёт не ту папку, что проверена")
+    if os.path.lexists(os.path.join(common, "commondir")):
+        return no(f"у {common} свой commondir — конфиг возьмётся из другой папки")
+    try:
+        if not stat.S_ISREG(os.lstat(os.path.join(common, "config")).st_mode):
+            return no(f"{common}/config — не обычный файл")
+    except OSError:
+        return no(f"нет {common}/config")
+    out = (git_dir(gd, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir") or "").split("\n")
+    if [os.path.realpath(x) for x in out[:2] if x] != [gd, common]:
+        return no(f"git видит у {d} другой gitdir или common, чем проверено")
+    return clone, common, gd
 
 
 def git_env():
@@ -1015,7 +1048,8 @@ def git_dir(common, *args, timeout=30):
     """git --git-dir=<.git клона> с GIT_SAFE и git_env(); вывод или None."""
     try:
         r = subprocess.run(["git", f"--git-dir={common}", *GIT_SAFE, *args], capture_output=True, text=True,
-                           timeout=timeout, env=git_env(), cwd=os.path.dirname(common), stdin=subprocess.DEVNULL)
+                           timeout=timeout, env=git_env(), cwd=os.path.dirname(os.path.realpath(common)),
+                           stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -1209,9 +1243,7 @@ def run_serve(rid, d, req, window, qdir):
     why = busy_why(servers())
     if why:
         return fail(why, busy=True)
-    clone, common = trusted_clone(d)   # resolve_dir уже проверил клон, реестр и конфиг (unsafe_config)
-    if not clone:
-        return fail(common)
+    clone, common = d.clone, d.common   # проверены в resolve_dir (trusted_clone, реестр, unsafe_config)
     ref = req.get("sha")
     if not ref:
         return fail("в заявке нет коммита — подай заново: pantheon outside serve")
@@ -1516,7 +1548,8 @@ def check_request(req, rid):
 
 
 def resolve_dir(req_dir, window):
-    """Папка заявки → (корень репозитория, папки реестра окна) или (None, причина)."""
+    """Папка заявки → (Repo — корень репозитория с проверенными клоном, common и gitdir, папки реестра окна) или
+    (None, причина). Клон проверяется здесь один раз; run_test и run_serve берут его из Repo, а не из .git папки."""
     roots = registry(window)
     if not roots:
         return None, (f"окно «{window}» — не направление из реестра: проверки вне окна только для папок направлений"
@@ -1524,12 +1557,10 @@ def resolve_dir(req_dir, window):
     d = os.path.realpath(req_dir)
     if not inside(d, roots):
         return None, f"папка {d} — не из папок {'направления ' + window if window else 'реестра'}"
-    top = toplevel(d)
-    if top != d:
-        return None, f"папка {d} — не корень репозитория git"
-    clone, common = trusted_clone(d)   # metis-0614: .git-файл роли ведёт только в клон реестра
+    clone, common, gitdir = trusted_clone(d)   # metis-0614: один раз; дальше git только через этот gitdir
     if not clone:
         return None, common
+    d = checked(d, clone, common, gitdir)
     if not inside(clone, roots):
         return None, f"клон {clone} папки {d} — не из папок {'направления ' + window if window else 'реестра'}"
     why = unsafe_config(common)

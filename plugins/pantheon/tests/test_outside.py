@@ -1070,7 +1070,33 @@ check("ключи — только по origin клона: лишний remote �
 check("origin_id: только origin", O.origin_id(os.path.realpath(os.path.join(APP, ".git"))) == "latark/app")
 kill_all_servers()
 git(APP, "remote", "remove", "upstream")
+# проверка и использование — одно: после resolve_dir git по папке идёт через проверенный gitdir, а не через .git-файл
+_r, _ = O.resolve_dir(WT, "athena-x")
+_saved = open(os.path.join(WT, ".git")).read()
+with open(os.path.join(WT, ".git"), "w") as fh:
+    fh.write(f"gitdir: {os.path.join(EVIL, '.git')}\n")
+check("подмена .git-файла после проверки: git заявки видит клон реестра, а не подложенный",
+      isinstance(_r, O.Repo) and O.remotes(_r) == ["latark/app"] and O.head_state(_r)[0] == git(APP, "rev-parse", "HEAD")
+      and O.remotes(os.path.realpath(WT)) == ["latark/other"], (O.remotes(_r), O.remotes(os.path.realpath(WT))))
+with open(os.path.join(WT, ".git"), "w") as fh:
+    fh.write(_saved)
 git(APP, "worktree", "remove", "--force", WT)
+# common со своим commondir, config — ссылка: отказ (git взял бы конфиг не из проверенного файла)
+_cd = os.path.join(APP, ".git", "commondir")
+with open(_cd, "w") as fh:
+    fh.write(os.path.join(EVIL, ".git") + "\n")
+check("у .git клона свой commondir — отказ", O.trusted_clone(os.path.realpath(APP))[0] is None
+      and "commondir" in (O.trusted_clone(os.path.realpath(APP))[1] or ""))
+os.remove(_cd)
+_cfg = os.path.join(APP, ".git", "config")
+shutil.copy(_cfg, _cfg + ".real")
+os.remove(_cfg)
+os.symlink(_cfg + ".real", _cfg)
+check("config клона — ссылка: отказ", O.trusted_clone(os.path.realpath(APP))[0] is None
+      and "обычный файл" in (O.trusted_clone(os.path.realpath(APP))[1] or ""))
+os.remove(_cfg)
+os.rename(_cfg + ".real", _cfg)
+check("после уборки клон снова принят", O.trusted_clone(os.path.realpath(APP))[0] == os.path.realpath(APP))
 
 # 5. конфиг клона, исполняющий команду вне песочницы: core.fsmonitor с командой — отказ; head_state его не зовёт
 _mark = os.path.join(_ROOT, "fsmonitor-ran")
