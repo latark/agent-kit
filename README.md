@@ -30,7 +30,10 @@
   Python ставит `pantheon-setup` (uv, Python 3.14); вручную — `brew install python@3.14`. Хуки guard и pantheon тоже
   идут на 3.11+ (metis-0571): их запускает `hooks/python.sh` — ищет `python3.14`…`python3.11` в `/opt/homebrew/bin`,
   `/usr/local/bin`, python.org и PATH, затем `python3` из PATH с проверкой версии. Не нашёл — PreToolUse
-  останавливает действие с кодом 2 и строкой «нужен Python 3.11+», остальные хуки молчат (код 0). guard.py, запущенный
+  останавливает действие с кодом 2 и строкой «нужен Python 3.11+», остальные хуки молчат (код 0). Так же — пропавший
+  файл скрипта хука (metis-0330): Python сам вышел бы с кодом 2, и Stop с UserPromptSubmit вставали бы во всех окнах.
+  Каждый такой отказ — строка `launcher` в `~/.local/state/pantheon/logs/guard-failures.log`. Хук отключают правкой
+  записи в hooks.json, а не переименованием файла. guard.py, запущенный
   старым `python3 guard.py` (managed settings до переустановки, старые настройки окон), на 3.9 сам перезапускается
   через `hooks/python.sh`. `pantheon infra-check` показывает строки «Python установки» и «запускатель хуков».
 - Установка для нового человека (macOS): `plugins/pantheon/bin/pantheon-setup` из клона agent-kit, одной командой.
