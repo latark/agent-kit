@@ -26,7 +26,7 @@
   ждёт человека) — «Ждёт вас», остальные — «Руками»; только id. Текстовые строки этих разделов в board.md блок не
   читает: пункт без карточки сюда не попадёт — заведите карточку (`pantheon task new --owner owner`);
 - STATUS.md направлений, правленные за сутки, — только имя направления и время правки;
-- ответы владельца — журнал owner-log: выбор в окне вопросов на вопрос «[id] …» (zeus.md, пометку ставит хук) и ответ
+- ответы владельца — журнал owner-log: выбор в окне вопросов или в чате на вопрос «[id] …» (zeus.md, пометку ставит хук) и ответ
   галочкой на карточке (board.jsonl), за сутки — [id], время и буква варианта (или да/нет). Блок — сводка для глаз, а не
   согласие: согласие проверяет только `pantheon consent <id>`.
 
@@ -65,6 +65,7 @@ YESNO_RE = re.compile(r"\s*(да|нет)\s*(?:$|[.,;:!—–-])", re.I)
 WORK = ("doing", "review", "waiting")
 STATUS_RU = {"doing": "в работе", "review": "на проверке", "waiting": "ждёт"}
 OWN_Q = re.compile(r"вопрос: \[([a-z0-9][a-z0-9-]{0,40})\]", re.I)
+ANSWER_HEADS = ("· окно вопросов", "· ответ в чате")  # = lib/answers.py HEADS (metis-0405; сверяет test_chat_answer)
 HEAD_LINE = "<!-- файл собирает плановый проход (pantheon board, metis-0397); руками не править — перезапишется -->"
 STAMP_RE = re.compile(r" · собрано \d\d\.\d\d \d\d:\d\d из \d+ файл\w*")
 
@@ -226,14 +227,14 @@ def variant(answer):
 
 def decisions(zeus_md, board_jsonl, t):
     """Ответы владельца за сутки: [(время, id, вариант, откуда)] — свежие первыми. Только журнал owner-log: выбор в
-    окне вопросов на вопрос «[id] …» и ответ галочкой на карточке (как у `pantheon consent`)."""
+    окне вопросов или в чате на вопрос «[id] …» и ответ галочкой на карточке (как у `pantheon consent`)."""
     out = []
     text = _read(zeus_md) or ""
     heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
     for i, m in enumerate(heads):
         body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
         q = OWN_Q.match(body)
-        if m.group(2).strip() != "· окно вопросов" or not q:
+        if m.group(2).strip() not in ANSWER_HEADS or not q:
             continue
         try:
             ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
@@ -241,7 +242,7 @@ def decisions(zeus_md, board_jsonl, t):
             continue
         a = re.search(r"^ответ: (.*)$", body, re.M)
         if a and 0 <= t - ts <= DAY:
-            out.append((ts, q.group(1).lower(), variant(a.group(1)), "окно вопросов"))
+            out.append((ts, q.group(1).lower(), variant(a.group(1)), m.group(2).strip()[2:]))
     for line in (_read(board_jsonl) or "").splitlines():
         try:
             rec = json.loads(line)

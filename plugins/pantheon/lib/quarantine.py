@@ -35,7 +35,8 @@ def sync_answers():
     if not waiting or not (os.path.exists(owner_log) or os.path.exists(ask_log)):
         return 0
     # как owner_answer в sync.sh (metis-0125): ответ — галочка на доске (board.jsonl) или выбор в окне вопросов Зевса
-    # (zeus.md: пометка «· окно вопросов», вопрос начинается с [<id>], не старше 7 дней); из двух берётся более поздний
+    # (zeus.md: пометка «· окно вопросов» или «· ответ в чате», вопрос начинается с [<id>], не старше 7 дней); из двух
+    # берётся более поздний
     found = {t: [] for t in waiting}
     lines = []
     try:
@@ -59,7 +60,7 @@ def sync_answers():
         text = ""
     heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
     for i, m in enumerate(heads):
-        if m.group(2).strip() != "· окно вопросов":
+        if not P.answers_mod().is_answer_head(m.group(2)):
             continue
         body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
         q, a = re.match(r"вопрос: \[([^\]\s]{1,40})\]", body, re.I), re.search(r"^ответ: (.*)$", body, re.M)

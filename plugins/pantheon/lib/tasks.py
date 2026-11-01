@@ -3696,14 +3696,17 @@ def _dec_time(m, t):
 
 
 def owner_ids(decisions_text, zeus_log_text, board_lines, t):
-    """[(метка времени, id)] из слов владельца: строки decisions.md с временем, вопросы окна вопросов, ответы на доске."""
+    """[(метка времени, id)] из слов владельца: строки decisions.md с временем, вопросы окна вопросов и ответы в чате,
+    ответы на доске."""
     out = []
     for ln in (decisions_text or "").split("\n"):
         m = DEC_LINE_RE.match(ln)
         ts = _dec_time(m, t) if m else None
         if ts is not None:
             out += [(ts, i) for i in DEC_ID_RE.findall(ln)]
-    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) · окно вопросов\s*$", zeus_log_text or "", re.M))
+    # ответ — пометки «окно вопросов» и «ответ в чате» (lib/answers.py HEADS, metis-0405); «… не распознан» — не ответ
+    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) · (?:окно вопросов|ответ в чате)\s*$",
+                             zeus_log_text or "", re.M))
     for k, m in enumerate(heads):
         end = heads[k + 1].start() if k + 1 < len(heads) else len(zeus_log_text)
         q = re.match(r"\s*вопрос: \[([a-z0-9][a-z0-9-]{0,40})\]", zeus_log_text[m.end():end])

@@ -31,7 +31,9 @@ cap_pct. Последняя ночь перед сбросом недели — 
 Вечер (только главный Mac, [sb-simplify] п. 10, решение владельца 28.10, вариант Б): фиксированного вопроса в 22:00 нет,
 ночь открывается только вашим ответом на вопрос о ночной пачке. Вопрос печатает `pantheon night ask <id> <направление>`:
 «[<id>] Ночь <ГГГГ-ММ-ДД>: пачка <путь от ~/ai/pantheon> sha256 <64 hex>?», варианты «Да — ночь <ГГГГ-ММ-ДД>» | «Нет»
-(дата — вечер ночи). Хук answer пишет выбор в owner-log/zeus.md с пометкой «окно вопросов». С ask_at до конца ночи
+(дата — вечер ночи). Хук answer пишет выбор в owner-log/zeus.md с пометкой «окно вопросов», хук owner-log — выбор
+варианта сообщением сразу после такого вопроса в чате с пометкой «ответ в чате» (metis-0405; служебные строки
+«вариант:», «дословно:» сверка не видит, lib/answers.py). С ask_at до конца ночи
 проход сверяет запись целиком: вопрос точно по шаблону, ответ — точно «Да — ночь <дата>», других строк нет, пачка по
 этому пути есть и её sha256 сейчас тот же, что в вопросе. Тогда пачка одобрена (packs), ночь разрешена (answer «да»,
 answer_at — время первого такого ответа) и открывается в start (ответ позже — в момент ответа). Любое отличие —
@@ -760,7 +762,7 @@ def night_answers(d, t):
     heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
     out = []
     for i, m in enumerate(heads):
-        if m.group(2).strip() != "· окно вопросов":
+        if not P.answers_mod().is_answer_head(m.group(2)):
             continue
         try:
             ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
@@ -768,7 +770,9 @@ def night_answers(d, t):
             continue
         if ts < lo or ts > t + 60:
             continue
-        r = night_parse(text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip(), d)
+        # ответ в чате (metis-0405) — без служебных строк «вариант:», «дословно:»: сверка та же, что у окна вопросов
+        r = night_parse(P.answers_mod().answer_body(
+            m.group(2), text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()), d)
         if r:
             out.append((f"{m.group(1)}|{r[0]}|{r[1]}", m.group(1), ts) + r)
     return out
