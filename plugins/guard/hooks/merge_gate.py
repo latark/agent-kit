@@ -1870,6 +1870,42 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                     f"{MERGE_OWNER}")
     return None
 
+OWNER_CI = ("слияние из сессии без роли проверяет только CI (решение владельца 01.11, metis-0633): записи тестов и "
+            "argus не нужны, а красный или незавершённый CI — отказ")
+
+
+def owner_ci_problem(cwd, moved, args):
+    """gh pr merge из сессии Claude без роли (окно владельца, metis-0633: #223 и #225 ушли так на красном CI) —
+    только проверка CI тем же _ci_problem, без записей тестов и argus, без [merge_repos] и прочих правил ролей.
+    Репозиторий — -R или remote папки cwd (не cd в команде), PR — ровно один номер, SHA — --match-head-commit, без
+    него — текущий head PR. Не понять, что сливается, или gh не ответил — отказ с тем, что указать. Текст или None."""
+    # --admin владельцу не закрыт (судим только CI), а _merge_args на нём обрывает разбор
+    _, repos, numbers, _, heads = _merge_args([a for a in args if a != "--admin" and not a.startswith("--admin=")])
+    if len(numbers) != 1:
+        return f"укажи один номер PR: без него CI не сверить. {OWNER_CI}"
+    pr = numbers[0]
+    if repos:
+        tails = {_repo_tail(_repo_arg(r)) for r in repos}
+    elif moved:
+        return f"с cd в команде укажи репозиторий: gh pr merge {pr} -R <owner/repo>. {OWNER_CI}"
+    else:
+        remotes, resolved = _git_remotes(cwd), _gh_resolved(cwd)
+        tails = {_repo_tail(r) for r in (remotes or []) + (resolved or [])}
+        if not remotes or resolved is None:
+            return f"не понять репозиторий папки — укажи -R <owner/repo>. {OWNER_CI}"
+    if len(tails) != 1:
+        return f"репозиторий не один ({', '.join(sorted(tails))}) — укажи -R <owner/repo>. {OWNER_CI}"
+    repo = tails.pop()
+    view = _pr_view(repo, pr)
+    if view is None:
+        return f"{CI_NONE}: gh pr view {pr} -R {repo} не ответил — повтори позже. {OWNER_CI}"
+    head = (heads[0] or "").lower() if len(heads) == 1 else str(view.get("headRefOid") or "").lower()
+    if len(heads) > 1 or not SHA_RE.fullmatch(head):
+        return f"--match-head-commit — один SHA из 40 знаков или без него. {OWNER_CI}"
+    why = _ci_problem(repo, pr, head, view)
+    return f"{why}. {OWNER_CI}" if why else None
+
+
 def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
     """gh pr merge (metis-0038, guard 0.5.0; запор P1-4, guard 0.5.4). Сливает главная сессия координатора
     направления или его лид (metis-0054): субагент hephaestus-<short> или apollo-<short>, где short — имя направления

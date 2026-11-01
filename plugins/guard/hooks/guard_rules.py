@@ -2583,7 +2583,8 @@ _PUSH_BAD = {"--all", "--mirror", "--delete", "-d", "--prune", "--force", "-f", 
 
 
 def limited(event):
-    """Роль Пантеона или любой субагент — правила шага 1.2 касаются их; ваша сессия без роли — нет."""
+    """Роль Пантеона или любой субагент — правила шага 1.2 касаются их; ваша сессия без роли — нет (кроме CI перед
+    gh pr merge: check_owner_merge, metis-0633)."""
     role, sub, pdir = who(event)
     return (is_pantheon_role(role) or sub), role, sub, pdir
 
@@ -3133,10 +3134,30 @@ def _gh_pr_sub(texts):
     return next(((q, i) for q, i in cands if texts[q] == "pr" and i is not None), None)
 
 
+def check_owner_merge(event, tool_input):
+    """Сессия без роли (окно владельца): из правил push — только CI перед gh pr merge (решение владельца 01.11,
+    metis-0633, merge_gate.owner_ci_problem). Команду без слова merge не разбираем: остальное в этой сессии не судим."""
+    cmd = tool_input.get("command") or ""
+    if "merge" not in cmd:
+        return None
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    _, cmds = bash_analysis(cmd, cwd)
+    moved = any(n in ("cd", "chdir", "pushd", "popd") for n, _ in cmds)
+    for name, texts in cmds:
+        found = _gh_merge(texts) if name == "gh" and not _gh_parse(texts)[0] else None
+        if found is not None:
+            why = merge_gate.owner_ci_problem(cwd, moved, found[1])
+            if why:
+                return f"Правило push: gh pr merge — {why}"
+    return None
+
+
 def check_push(event, tool, tool_input):
     ok, role, sub, pdir = limited(event)
-    if not ok or tool != "Bash":
+    if tool != "Bash":
         return None
+    if not ok:
+        return check_owner_merge(event, tool_input)
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     _, cmds = bash_analysis(tool_input.get("command") or "", cwd)
     moved = any(n in ("cd", "chdir", "pushd", "popd") for n, _ in cmds)

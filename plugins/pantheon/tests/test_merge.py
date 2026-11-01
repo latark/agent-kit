@@ -48,7 +48,13 @@ if sys.argv[1:3] == ["pr", "view"]:
     p = os.path.join(rec, "gh-view.json")
     if not os.path.exists(p):
         sys.exit(1)
-    print(open(p).read())
+    # как настоящий gh: только поля из --json (pr_view без baseRefName не получит его и из файла, argus М41)
+    raw, want = open(p).read(), sys.argv[sys.argv.index("--json") + 1].split(",") if "--json" in sys.argv else None
+    try:
+        v = json.loads(raw)
+    except ValueError:
+        v = None
+    print(json.dumps({k: x for k, x in v.items() if k in want}) if isinstance(v, dict) and want else raw)
     sys.exit(0)
 if sys.argv[1:3] == ["pr", "merge"]:
     p = os.path.join(rec, "gh-merge-rc")

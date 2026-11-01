@@ -1784,6 +1784,68 @@ def t_ci_required(h):
         h.ci(_saved(pr)["statusCheckRollup"], name="agent-kit", baseRefName="main")
         merge_case(f"required: сохранённые ответы PR {pr} — отказ", h.pre(cmd, pdir=kit), False, want)
     h.runs.clear()
+    # сессия без роли (окно владельца, решение 01.11 «Да, проверять CI»): только CI, без записей тестов и argus
+    owner = dict(role=None, pdir=kit)
+    for pr, want in ((223, "tests/affected красная"), (225, "tests/affected красная: FAILURE")):
+        h.runs["agent-kit"] = _runs_on(_saved(pr, "runs"), sha, pr)
+        h.ci(_saved(pr)["statusCheckRollup"], name="agent-kit", baseRefName="main")
+        merge_case(f"без роли: сохранённые ответы PR {pr} (слит так 01.11) — отказ", h.pre(cmd, **owner), False, want)
+    h.runs.clear()
+    merge_case("без роли: отказ называет правило сессии без роли", h.pre(cmd, **owner), False,
+               "слияние из сессии без роли проверяет только CI")
+    nine = [dict(AFFECTED, prs=(9,)), dict(TRACES, prs=(9,))]
+    h.ci(nine, name="agent-kit")
+    c9 = f"gh pr merge 9 --match-head-commit {sha} --merge"
+    merge_case("без роли: PR 9 без записей тестов и argus, CI зелёный — проходит", h.pre(c9, **owner), True)
+    merge_case("роль на том же PR 9 без записей — отказ (записи ей нужны)", h.pre(c9, pdir=kit), False)
+    for c, how in ((f"gh pr merge 9 --merge", "без --match-head-commit (head PR)"),
+                   (f"gh pr merge 9 --admin --squash", "с --admin"),
+                   (f"gh pr merge 9 -R latark/agent-kit --merge", "с -R"),
+                   (f"cd {h.j(kit)} && gh pr merge 9 -R latark/agent-kit", "cd и -R")):
+        merge_case(f"без роли: {how}, CI зелёный — проходит", h.pre(c, **owner), True)
+    merge_case("без роли: из папки tg-read с -R latark/agent-kit — судится agent-kit, зелёный — проходит",
+               h.pre("gh pr merge 9 -R latark/agent-kit", role=None), True)
+    h.ci([dict(nine[0], conclusion="FAILURE"), nine[1]], name="agent-kit")
+    merge_case("без роли: красная обязательная — отказ", h.pre(c9, **owner), False, "tests/affected красная: FAILURE")
+    merge_case("без роли: без --match-head-commit красная — отказ", h.pre("gh pr merge 9 --merge", **owner), False,
+               "tests/affected красная")
+    merge_case("без роли: из tg-read с -R latark/agent-kit красная — отказ",
+               h.pre("gh pr merge 9 -R latark/agent-kit", role=None), False, "tests/affected красная")
+    h.ci([nine[0], dict(nine[1], status="IN_PROGRESS", conclusion="")], name="agent-kit")
+    merge_case("без роли: обязательная идёт — отказ с командой ожидания", h.pre(c9, **owner), False,
+               "`gh pr checks 9 -R latark/agent-kit --watch`")
+    h.ci(nine, name="agent-kit")
+    merge_case("без роли: без номера PR — отказ", h.pre("gh pr merge --squash", **owner), False,
+               "укажи один номер PR")
+    merge_case("без роли: cd без -R — отказ", h.pre(f"cd {h.j(kit)} && gh pr merge 9", **owner), False,
+               "с cd в команде укажи репозиторий")
+    merge_case("без роли: --match-head-commit не SHA — отказ", h.pre("gh pr merge 9 --match-head-commit x", **owner),
+               False, "один SHA из 40 знаков")
+    merge_case("без роли: PR на другом коммите — отказ", h.pre(f"gh pr merge 9 --match-head-commit {'e' * 40}",
+                                                                **owner), False, "PR сейчас на другом коммите")
+    h.reset_log()
+    merge_case("без роли: не слияние (gh pr view) — можно", h.pre("gh pr view 9", **owner), True)
+    log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+    check("без роли: не слияние — gh не спрашивается", log == "", log)
+    h.ci(nine, name="agent-kit", raw="не json")
+    merge_case("без роли: gh pr view не ответил — отказ «повтори позже»", h.pre(c9, **owner), False,
+               "не ответил — повтори позже")
+    # Д3 argus #235: ответ запусков из двух JSON подряд — не один ответ, отказ (а не первый документ)
+    runs, checks = rest_runs(dict(h.view["agent-kit"], statusCheckRollup=GREEN_KIT))
+    h.runs["agent-kit"] = (json.dumps(runs) + json.dumps(runs), checks)
+    h.ci(GREEN_KIT, name="agent-kit")
+    merge_case("required: ответ запусков из двух JSON подряд — отказ «не получены»", h.pre(cmd, pdir=kit), False,
+               "проверки GitHub не получены")
+    h.runs["agent-kit"] = (runs, json.dumps(checks) + "\n" + json.dumps(checks))
+    h.ci(GREEN_KIT, name="agent-kit")
+    merge_case("required: ответ check-runs из двух JSON подряд — отказ", h.pre(cmd, pdir=kit), False,
+               "проверки GitHub не получены")
+    h.runs.clear()
+    # Д2 argus #235: CI пропустил с предупреждением, а отказ дала следующая проверка — systemMessage не печатается
+    h.ci([AFFECTED, TRACES, dict(full, conclusion="FAILURE")], name="agent-kit")
+    r = _hook_out(h, f"{cmd} && touch {h.records}", kit)
+    check("required: красная необязательная, отказ дала pantheon-acl — только отказ, без systemMessage",
+          decision(r)[0] == "deny" and "systemMessage" not in r.stdout and "pantheon-acl" in decision(r)[1], r.stdout)
     # другой репозиторий без записи в REQUIRED_CHECKS — как до 0633: обязательна каждая его проверка
     tg = h.sha["tg-read"]
     h.seed(rec("tests", "latark/tg-read", None, tg, "dev-opus"), rec("accept", "latark/tg-read", 3, tg))

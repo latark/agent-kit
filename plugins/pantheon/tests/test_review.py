@@ -213,7 +213,12 @@ def run_all(tmp):
     _P = _types.SimpleNamespace(review_records=lambda repo: [x for x in tally if x["sha"] == S5],
                                 review_accept_counts=_load("pantheon_for_test", LIB).review_accept_counts)
     _M.P = _P
-    view = {"state": "OPEN", "isDraft": False, "headRefOid": S5,
+    # запуски Actions (metis-0633) — подмена вместо настоящего gh: тест в сеть не ходит; обязательные agent-kit зелёные
+    _M.ci_runs_fetch = lambda repo, pr, sha: [
+        {"workflowName": w, "name": j, "status": "COMPLETED", "conclusion": "SUCCESS", "event": "pull_request"}
+        for w, j in (("tests", "affected"), ("check-traces", "traces"))] if (repo, pr, sha) == (
+            "latark/agent-kit", 40, S5) else None
+    view = {"state": "OPEN", "isDraft": False, "headRefOid": S5, "baseRefName": "main",
             "statusCheckRollup": [{"name": "tests", "status": "COMPLETED", "conclusion": "SUCCESS"}]}
     st, why = _M.gate("latark/agent-kit", 40, S5, view)
     check("merge.gate на том же журнале: Sonnet по транскрипту не в счёт, models_note — по --ran", st == "fail"
