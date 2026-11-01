@@ -36,6 +36,11 @@
                      (кладёт pantheon; один раз, не старше 30 мин, ≤ 4000 знаков, только с пометкой «[Пантеон:»).
   ctx.py rewake      SessionStart clear, asyncRewake: если файл состояния обновлён после вашего последнего
                      сообщения (реплики в конце, на которые ответ был только текстом, не в счёт), будит Claude «прочитай и продолжай»; иначе /clear — обычный чистый лист.
+                     Исключение (metis-0625): роль с файлом состояния (hq, координатор, мастерская) будится и со
+                     старым файлом, если прошлая сессия пустая: она первая в процессе (окно поднято заново, например
+                     после перезагрузки Mac) или в ней нет ни одного вашего сообщения, и при этом в ней не больше
+                     одного вашего сообщения и ни одной правки Write/Edit/MultiEdit/NotebookEdit. Такая сессия работы
+                     не дала, и сравнивать файл с её временем не с чем. Сессии без роли — по общему правилу.
 
 Файл состояния по роли (agent_type): hq — ~/ai/pantheon/board.md; domain-coordinator — STATUS.md направления в
 ~/ai/pantheon/directions/<имя>/ (направление — по папке запуска, как у guard); workshop —
@@ -269,8 +274,9 @@ def last_owner_time(path):
 
 
 def used_tools(d):
-    """Ответ основной сессии с вызовом инструмента."""
-    c = (d.get("message") or {}).get("content")
+    """Ответ основной сессии с вызовом инструмента. Поле message не словарь (строка в битой записи) — не ответ."""
+    m = d.get("message")
+    c = m.get("content") if isinstance(m, dict) else None
     return d.get("type") == "assistant" and not d.get("isSidechain") and isinstance(c, list) and \
         any(isinstance(b, dict) and b.get("type") == "tool_use" for b in c)
 
@@ -467,6 +473,9 @@ def _text(content):
     return "\n".join(out)
 
 
+EDIT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+
+
 def handoff_candidates(d):
     """Пути HANDOFF.md, которые сессия сама писала (Write, Edit, перенаправление в Bash) или назвали вы.
     Файл, который модель только прочитала (например, в чужом репозитории), хук не предлагает: его текст стал бы
@@ -478,7 +487,7 @@ def handoff_candidates(d):
             if not isinstance(b, dict) or b.get("type") != "tool_use":
                 continue
             inp = b.get("input") or {}
-            if b.get("name") in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+            if b.get("name") in EDIT_TOOLS:
                 fp = inp.get("file_path") or inp.get("notebook_path")
                 if isinstance(fp, str) and os.path.basename(fp) == "HANDOFF.md":
                     found.append(fp)
@@ -1123,6 +1132,35 @@ def session_role(ev):
     return ""
 
 
+STATE_ROLES = ("hq", "domain-coordinator", "workshop")  # роли со своим файлом состояния (role_state_file)
+
+
+def did_no_work(path):
+    """metis-0625: сессия не дала работы — не больше одного вашего сообщения и ни одной правки Write/Edit/MultiEdit/
+    NotebookEdit. Транскрипта нет — сессия закрыта до первого сообщения, работы тоже нет. Правку через Bash (python,
+    sed) хук не видит: такая сессия считается пустой, и rewake будит с файлом роли — лишнее чтение, а не потеря дел."""
+    owner = 0
+    try:
+        with open(path, "rb") as f:
+            for raw in f:
+                if b'"human"' not in raw and b'"tool_use"' not in raw:
+                    continue
+                for d in entries([raw]):
+                    if is_owner_entry(d):
+                        owner += 1
+                        if owner > 1:
+                            return False
+                    elif used_tools(d):
+                        if any(isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in EDIT_TOOLS
+                               for b in d["message"]["content"]):
+                            return False
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def rewake_message(ev):
     """Текст пробуждения или None, если будить не нужно."""
     if ctx_off() or automation() or ev.get("agent_id"):
@@ -1135,7 +1173,8 @@ def rewake_message(ev):
     if not path or not os.path.isfile(path):
         return None
     t_owner = last_work_owner_time(prev["transcript"])
-    if t_owner is None or os.path.getmtime(path) <= t_owner:
+    empty = role in STATE_ROLES and (prev.get("first") or t_owner is None) and did_no_work(prev["transcript"])
+    if not empty and (t_owner is None or os.path.getmtime(path) <= t_owner):
         return None
     remember_state_file(ev, path)
     return ("Контекст очищен (/clear), прошлый разговор сохранён в %s. Прочитай этот файл и продолжай со следующего "
