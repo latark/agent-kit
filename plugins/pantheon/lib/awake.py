@@ -14,6 +14,13 @@
   возобновление ждущих сессий
       сессия направления «ждёт вас», а в его очереди есть задача todo без блокера — разбудить (night.gate("wake")),
       не чаще раза в час на сессию.
+  поручения во входящих (metis-0276)
+      координатор закончил ход (done, без субагентов и фоновых команд) или его сессии нет, а в inbox/ направления —
+      поручение Зевса, написанное после конца его последнего хода и по вашему слову Зевсу (запись в owner-log/zeus.md
+      за 15 мин до файла, как у pantheon start --from zeus) — новая сессия `pantheon start <направление> --from tick`
+      с целью /goal по этому поручению. Шлюзы — те же, что у самозапуска и подъёма: wake_block (метка, пауза,
+      техперезапуск, главный Mac, пятичасовой лимит), night.gate("wake") с недельным потолком владельца, место для
+      новой сессии, одна за проход. Каждый файл будит один раз; файлы, лежавшие до первого прохода, — никого.
 
 Без sudo и pmset на запись: только `caffeinate`, `pmset -g batt`, `sysctl`, `ps`.
 """
@@ -22,6 +29,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import time
 from datetime import date, datetime, timedelta
@@ -504,3 +512,169 @@ def wake_waiting(agents, registry, doms, t):
             P.alert(f"возобновление ждущих сессий: {name} не поднялась (код {rc}), задача {tid}", "watch")
     if changed:
         P.write_json(marks_path(), marks)
+
+
+# --- поручения во входящих у закончившего ход координатора (metis-0276) ---------------------------------------------
+# 19.10: план дня пришёл координатору посреди поручения, сессия закончила ход, Claude Code снял процесс — и работа
+# стояла, пока кто-то не поднял её руками. Живую сессию поручение находит само (сообщение, цель NEW_ORDER_GOAL);
+# закончившую ход и снятую — поднимает этот проход: новая сессия с /goal по поручению, а не продолжение с прежней
+# достигнутой целью. Поручение — файл Зевса во входящих; без вашего слова Зевсу перед ним — только тревога (metis-0261 А).
+
+INBOX_ZEUS_NAME = re.compile(r"(?:^|[-_])zeus(?:[-_.]|$)")
+INBOX_ZEUS_FROM = re.compile(r"^(?:От|from)\s*:\s*(?:hq|zeus|Зевс)\b", re.I | re.M)
+INBOX_ZEUS_HEAD = re.compile(r"^#\s+(?:От\s+)?Зевса?\b", re.M)
+INBOX_SAFE = re.compile(r"[\w.-]{1,120}\.md")  # имя файла попадает в текст поручения — только простые имена
+INBOX_MAX_BYTES = 200_000
+INBOX_HEAD_BYTES = 4096
+INBOX_NAMED = 5
+INBOX_TEXT = ("Во входящих новое поручение Зевса, пришедшее после конца прошлого хода координатора: {files}. Прочитай "
+              "STATUS.md и эти файлы; поручение — цель этой сессии. Входящие разбери по своему правилу (итог — в файл, "
+              "файл — в inbox/done/); что ждёт владельца — Зевсу строкой.")
+INBOX_QUIET = ("одна сессия за проход", "поднята в этом проходе")
+
+
+def zeus_order(path, name):
+    """Файл входящих — поручение Зевса: «zeus» словом в имени, строка «От: hq|Зевс» (или from: zeus) или заголовок
+    «# Зевс …» / «# От Зевса …» в первых 4 КБ. Находки других ролей и уведомления task new не от Зевса — нет."""
+    if INBOX_ZEUS_NAME.search(name[:-3]):
+        return True
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(INBOX_HEAD_BYTES).decode("utf-8", "replace")
+    except OSError:
+        return False
+    return bool(INBOX_ZEUS_FROM.search(head) or INBOX_ZEUS_HEAD.search(head))
+
+
+def inbox_orders(direction, since, seen):
+    """Поручения Зевса во входящих направления, моложе since и ещё не отмеченные в seen ({файл: mtime}):
+    → ([(файл, mtime)] по времени, имена всех файлов входящих). Только обычные файлы .md верхнего уровня."""
+    ib = os.path.join(P.PANTHEON, "directions", direction, "inbox")
+    try:
+        names = os.listdir(ib)
+    except OSError:
+        return [], set()
+    out = []
+    for f in names:
+        if not f.endswith(".md") or f.startswith("."):
+            continue
+        p = os.path.join(ib, f)
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode) or st.st_mtime <= since or st.st_size > INBOX_MAX_BYTES:
+            continue
+        if seen.get(f) == st.st_mtime or not zeus_order(p, f):
+            continue
+        out.append((f, st.st_mtime))
+    return sorted(out, key=lambda x: (x[1], x[0])), set(names)
+
+
+def turn_end(a):
+    """Конец последнего хода сессии: последняя запись её транскрипта, иначе updatedAt из state.json, иначе её старт."""
+    tp = P.transcript_path(a)
+    if tp:
+        with contextlib.suppress(OSError):
+            return os.path.getmtime(tp)
+    u = parse_time(session_state(a).get("updatedAt"))
+    if u:
+        return u
+    s = a.get("startedAt")
+    return float(s) / 1000 if isinstance(s, (int, float)) and s else None
+
+
+def inbox_wake(agents, registry, doms, t):
+    """Координатор закончил ход или его сессии нет, а во входящих — новое поручение Зевса по вашему слову: поднять
+    новую сессию с целью по нему (pantheon start --from tick). Отметки — awake-marks.json, раздел inbox."""
+    W = P.watch_mod()
+    marks = read_marks()
+    box = marks.get("inbox") if isinstance(marks.get("inbox"), dict) else {}
+    if not isinstance(box.get("since"), (int, float)):  # первый проход: прежние файлы входящих никого не будят
+        marks["inbox"] = {"since": t, "seen": {}}
+        P.write_json(marks_path(), marks)
+        return
+    since = float(box["since"])
+    seen = box.get("seen") if isinstance(box.get("seen"), dict) else {}
+    off = P.hq_led()
+    # поднятые этим проходом (самозапуск, разовый запуск) в снимке сессий ещё не видны, но место уже заняли
+    running = sorted({d for d in doms if W.holders(d, agents, registry)}
+                     | {d for d in RESUMED + W.ONESHOT_STARTED if d in doms})
+    started = False
+
+    def save():
+        box["seen"] = seen
+        marks["inbox"] = box
+        P.write_json(marks_path(), marks)
+
+    for d in sorted(doms):
+        mine = seen.get(d) if isinstance(seen.get(d), dict) else {}
+        orders, names = inbox_orders(d, since, mine)
+        kept = {f: m for f, m in mine.items() if f in names}  # разобранные (ушли в done/) забываем
+        if kept != mine:
+            seen[d] = mine = kept
+            save()
+        if not orders or d in off:
+            continue
+        hold = W.holders(d, agents, registry)
+        if any(x.get("state") != "done" or not W.idle_holder(x) for x in hold):
+            continue  # работает, ждёт вас или открыта во вкладке — поручение дойдёт до неё само
+        rows = [a for a in agents if P.name_alias(d).fullmatch(str(a.get("name") or ""))]
+        end = turn_end(max(rows, key=lambda a: a.get("startedAt") or 0)) if rows else None
+        word = []
+        for f, m in orders:
+            if end is not None and m <= end:
+                mine[f] = m  # пришло до конца хода — сессия его видела
+            elif P.owner_spoke_before("zeus", m, P.OWNER_WORD_WINDOW):
+                word.append((f, m))
+            else:
+                mine[f] = m
+                P.start_log(f"inbox-noword\t{d}\t{f}")
+                P.alert_once(f"inbox-noword-{d}", f, f"поручения во входящих: {d} закончил ход, а во входящих поручение "
+                             f"Зевса {f} без вашего слова ему за {P.OWNER_WORD_WINDOW // 60} мин до файла — плановый "
+                             f"проход координатора не поднимает (metis-0261 А); поднять — ваше слово Зевсу или "
+                             f"pantheon start {d} из вашего терминала", "watch")
+        seen[d] = mine
+        save()
+        if not word:
+            continue
+        why = W.wake_block(d, agents, registry, auto=True, nudge=True)
+        if not why and (d in RESUMED or d in W.ONESHOT_STARTED):
+            why = "поднята в этом проходе"
+        if not why and started:
+            why = "одна сессия за проход — в следующий"
+        if not why and not hold and len(running) >= W.AUTOSTART_MAX:
+            why = f"нет места: уже работают {', '.join(running)} (не больше {W.AUTOSTART_MAX} направлений)"
+        if not why:
+            ok, gw = gate("wake", t, agents=agents, registry=registry)
+            why = None if ok else f"недельный лимит: {gw}"
+        if why:  # файлы не отмечены: подъём — когда шлюз откроется
+            if not why.startswith(INBOX_QUIET):
+                P.alert_once(f"inbox-wait-{d}", f"{datetime.fromtimestamp(t):%Y-%m-%d}-{why[:40]}",
+                             f"поручения во входящих: {d} ждёт подъёма — {why} (поручение {word[0][0]})", "watch")
+            continue
+        named = [f for f, _ in word if INBOX_SAFE.fullmatch(f)][:INBOX_NAMED]
+        files = ", ".join("inbox/" + f for f in named) or "файлы Зевса в inbox/"
+        if len(word) > len(named):
+            files += f" и ещё {len(word) - len(named)}"
+        for f, m in word:  # до запуска: проход могут оборвать по таймауту, повтора не будет
+            mine[f] = m
+        seen[d] = mine
+        save()
+        rc = W.start_new(d, INBOX_TEXT.format(files=files), "tick")
+        started = True
+        if rc == 0:
+            RESUMED.append(d)
+            if not hold:
+                running.append(d)
+            P.start_log(f"inbox-wake\t{d}\t{', '.join(f for f, _ in word)}")
+            P.alert(f"поручения во входящих: {d} закончил ход — поднят новой сессией с целью по поручению {files}",
+                    "watch")
+        elif rc == P.START_REFUSED:  # потолок владельца закрыл запуск уже в pantheon start — повторить, когда откроется
+            for f, _ in word:
+                mine.pop(f, None)
+            seen[d] = mine
+            save()
+            P.start_log(f"inbox-refused\t{d}\t{word[0][0]}")
+        else:
+            P.alert(f"поручения во входящих: {d} не поднялся (код {rc}), поручение {files}", "watch")
