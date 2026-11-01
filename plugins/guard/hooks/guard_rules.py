@@ -4181,6 +4181,10 @@ def main(raw=None):
                 "permissionDecision": "deny",
                 "permissionDecisionReason": reason,
             }}, ensure_ascii=False))
+        elif merge_gate.NOTES:
+            # шлюз слияния пропустил, но есть красная необязательная проверка CI (metis-0633) — строка пользователю
+            print(json.dumps({"systemMessage": "guard, шлюз слияния: " + "; ".join(merge_gate.NOTES)},
+                             ensure_ascii=False))
     elif name == "Stop" and "nextjs" not in OFF:
         reason = soft(check_nextjs, event)
         if reason:

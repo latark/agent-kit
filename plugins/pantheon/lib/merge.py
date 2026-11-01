@@ -18,9 +18,11 @@ PR ядра защит (Д3) агенты не сливают: его слива
   3. Репозиторий всё ещё в [merge_repos] metis-pantheon. Шлюз заново на тот же head: запись тестов шлюза на SHA; у
      каждого рецензента argus последний вердикт — «принять» с полным перечнем и на Opus (по ran и, если хук guard
      записал их, по моделям транскрипта argus — metis-0176), рецензентов-«принять» не
-     меньше двух, «вернуть» нет; проверки GitHub (CI) — все SUCCESS/NEUTRAL/SKIPPED. CI ещё идёт или проверок пока
-     нет — заявка ждёт; иначе снята с тревогой. Список файлов PR (REST pulls/N/files) полон — иначе ждёт: окно
-     показывает задетые файлы ядра, без списка их не показать. PR правит version в plugin.json плагина или трогает
+     меньше двух, «вернуть» нет; проверки GitHub (CI) — тот же разбор ci_verdict, что у шлюза guard (metis-0633):
+     обязательные из REQUIRED_CHECKS SUCCESS/NEUTRAL/SKIPPED (дубль имени — худший итог), у репозитория без записи — все
+     проверки. CI ещё идёт, обязательной или любых проверок пока нет — заявка ждёт; красная — снята с тревогой.
+     Список файлов PR (REST pulls/N/files) полон — иначе ждёт: окно показывает задетые файлы ядра, без списка их не
+     показать. PR правит version в plugin.json плагина или трогает
      .claude-plugin/releases.json — снята с тревогой (metis-0512: номер поднимает workflow release после слияния).
   4. Владелец у Mac (простой меньше PRESENT_SEC) — окно Touch ID: помощник pantheon-touchid (lib/touchid.swift,
      LocalAuthentication), в тексте — задетые файлы ядра, заголовок PR последним. После пальца, под замком
@@ -73,8 +75,6 @@ MIN_ACCEPTS = 2
 GH_TIMEOUT = 30
 MERGE_TIMEOUT = 120
 APPROVE_FILE = "merge-approve.log"
-CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
-CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
 SWIFTC = "/usr/bin/swiftc"           # абсолютный путь: PATH прохода подменяем (launchctl setenv)
 SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"   # PATH прохода, не из окружения
 # Тестовые подмены прохода: {"env": {имя: значение}} — переменные, которые проход берёт поверх чистого окружения, и
@@ -278,10 +278,10 @@ def gh_path():
 
 
 def pr_view(repo, pr):
-    """{headRefOid, state, isDraft, title, statusCheckRollup, changedFiles} или None — gh не ответил."""
+    """{headRefOid, state, isDraft, title, baseRefName, statusCheckRollup, changedFiles} или None — gh не ответил."""
     try:
         r = subprocess.run([gh_path(), "pr", "view", str(pr), "-R", repo, "--json",
-                            "headRefOid,state,isDraft,title,statusCheckRollup,changedFiles"],
+                            "headRefOid,state,isDraft,title,baseRefName,statusCheckRollup,changedFiles"],
                            capture_output=True, text=True, timeout=GH_TIMEOUT, env=gh_env())
         data = json.loads(r.stdout) if r.returncode == 0 else None
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -364,32 +364,76 @@ def is_core(path):
     return p in {c.casefold() for c in CORE_FILES} or any(p == d or p.startswith(d + "/") for d in CORE_DIR)
 
 
-def ci_state(rollup):
-    """(ok|wait|fail, текст). Проверок нет — wait: они ещё не встали; по 24 ч заявка всё равно гаснет."""
+# проверки GitHub на head PR (metis-0285, 0633): ci_verdict, required_checks, REQUIRED_CHECKS, CI_OK, CI_WAIT и
+# CI_NONE — дословно те же, что в шлюзе guard (plugins/guard/hooks/merge_gate.py): плагины ставятся порознь и
+# не импортируют друг друга, совпадение сверяет test_merge по AST. Правишь — правь оба
+CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
+CI_NONE = "проверки GitHub не получены"
+# обязательные проверки (metis-0633): имя репозитория без владельца → (workflow, job, ветка base PR или None — любая).
+# Имена — из .github/workflows репозитория: tests.yml гоняет job affected только на PR в main, check-traces.yml — job
+# traces на любой PR (и на push: две записи traces на одном SHA). Совпадение с файлами workflows сверяет
+# test_merge_gate. Обязательной нет в rollup — «ещё не встала», а не пропуск; другие проверки такого репозитория —
+# только предупреждение. Репозиторий без записи — обязательна каждая проверка его rollup (как до 0633).
+REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces", "traces", None))}
+
+
+def required_checks(repo, base):
+    """Обязательные (workflow, job) для PR в repo (owner/name) с веткой base; base не строка — все записи."""
+    got = REQUIRED_CHECKS.get(str(repo or "").rsplit("/", 1)[-1].lower(), ())
+    return tuple((w, j) for w, j, b in got if b is None or not isinstance(base, str) or b == base)
+
+
+def ci_verdict(rollup, required=()):
+    """(ok|wait|fail|empty, текст, предупреждения) по statusCheckRollup head PR. CheckRun — по status и conclusion,
+    StatusContext — по state; ключ проверки — (workflowName, name) или context. Итог ключа — худший из его записей:
+    дубль имени (push и pull_request на одном SHA) не прячет красную запись зелёной. required — обязательные
+    (workflow, job): красная — fail, нет в rollup или идёт — wait, остальные проверки дают только предупреждение о
+    красной. required пуст — обязательна каждая проверка rollup, пустой rollup — empty."""
     if not isinstance(rollup, list):
-        return "fail", "список проверок GitHub не получен"
-    if not rollup:
-        return "wait", "проверок GitHub пока нет"
-    waiting = []
+        return "fail", CI_NONE, []
+    rank = {"ok": 0, "wait": 1, "fail": 2}
+    seen = {}  # ключ → (итог, слово итога, имя для текста)
     for c in rollup:
         if not isinstance(c, dict):
-            return "fail", "проверка GitHub не разобрана"
-        name = str(c.get("name") or c.get("context") or "?")[:60]
+            return "fail", f"{CI_NONE}: проверка не разобрана", []
         if "conclusion" in c or "status" in c and "state" not in c:   # CheckRun
             status, concl = str(c.get("status") or "").upper(), str(c.get("conclusion") or "").upper()
-            if status != "COMPLETED":
-                waiting.append(name)
-            elif concl not in CI_OK:
-                return "fail", f"проверка {name}: {concl or 'нет итога'}"
+            res = "wait" if status != "COMPLETED" else "ok" if concl in CI_OK else "fail"
+            word = (status or "нет статуса") if res == "wait" else (concl or "нет итога")
+            key = (str(c.get("workflowName") or ""), str(c.get("name") or ""))
         else:                                                            # StatusContext
             st = str(c.get("state") or "").upper()
-            if st in CI_WAIT:
-                waiting.append(name)
-            elif st not in CI_OK:
-                return "fail", f"проверка {name}: {st}"
-    if waiting:
-        return "wait", "проверки GitHub ещё идут: " + ", ".join(waiting)
-    return "ok", f"CI ✓ ({len(rollup)})"
+            res = "wait" if st in CI_WAIT else "ok" if st in CI_OK else "fail"
+            word = st or "нет статуса"
+            key = ("", str(c.get("context") or ""))
+        if key not in seen or rank[res] > rank[seen[key][0]]:
+            seen[key] = (res, word, ("/".join(k for k in key if k) or "?")[:60])
+    must = [tuple(r) for r in required] or list(seen)
+    if not must:
+        return "empty", "", []
+    notes = [f"необязательная проверка GitHub {v[2]} красная: {v[1]}" for k, v in seen.items()
+             if k not in must and v[0] == "fail"]
+    red = [f"проверка GitHub {seen[k][2]} красная: {seen[k][1]}" for k in must if k in seen and seen[k][0] == "fail"]
+    if red:
+        return "fail", "; ".join(red), notes
+    missing = ["/".join(k) for k in must if k not in seen]
+    if missing:
+        return "wait", "обязательные проверки GitHub ещё не встали: " + ", ".join(missing), notes
+    going = [seen[k][2] for k in must if seen[k][0] == "wait"]
+    if going:
+        return "wait", "проверки GitHub ещё идут: " + ", ".join(going), notes
+    return "ok", "", notes
+
+
+def ci_state(rollup, required=()):
+    """(ok|wait|fail, текст) по ci_verdict. Проверок нет — wait: они ещё не встали; по 24 ч заявка всё равно гаснет."""
+    state, why, _ = ci_verdict(rollup, required)
+    if state == "empty":
+        return "wait", "проверок GitHub пока нет"
+    if state == "ok":
+        return "ok", f"CI ✓ ({len(rollup)})"
+    return state, why
 
 
 # --- шлюз -----------------------------------------------------------------------------------------------------------
@@ -422,7 +466,7 @@ def gate(repo, pr, sha, view):
         return "fail", "у argus последний вердикт — «вернуть»"
     if len(latest) < MIN_ACCEPTS:
         return "fail", f"«принять» от argus на Opus — {len(latest)} из {MIN_ACCEPTS}"
-    state, why = ci_state(view.get("statusCheckRollup"))
+    state, why = ci_state(view.get("statusCheckRollup"), required_checks(repo, view.get("baseRefName")))
     if state != "ok":
         return state, why
     return "ok", f"argus ×{len(latest)} ✓, CI ✓"

@@ -95,8 +95,14 @@ def script(path, body):
     return path
 
 
+# первые две проверки — обязательные agent-kit (REQUIRED_CHECKS, metis-0633): tests/affected и check-traces/traces
+CI_NAMES = (("tests", "affected"), ("check-traces", "traces"))
+
+
 def ci(*states):
-    return [{"__typename": "CheckRun", "name": f"job{i}", "status": "COMPLETED" if s != "PENDING" else "IN_PROGRESS",
+    return [{"__typename": "CheckRun", "workflowName": CI_NAMES[i][0] if i < len(CI_NAMES) else "other",
+             "name": CI_NAMES[i][1] if i < len(CI_NAMES) else f"job{i}",
+             "status": "COMPLETED" if s != "PENDING" else "IN_PROGRESS",
              "conclusion": s if s != "PENDING" else ""} for i, s in enumerate(states)]
 
 
@@ -154,13 +160,14 @@ class Box:
     def run(self, t=T0, click=False, extra=None, evil=None):
         return self.cli(["merge", "run"] + (["--click"] if click else []), t=t, extra=extra, evil=evil)
 
-    def view(self, sha, state="OPEN", draft=False, checks=None, title=TITLE, files=None, count=None):
+    def view(self, sha, state="OPEN", draft=False, checks=None, title=TITLE, files=None, count=None, base="main"):
         """Ответ gh pr view и REST pulls/N/files: files — имена или словари; count — changedFiles (по умолчанию
-        len(files))."""
+        len(files)); base — baseRefName (None — поля нет)."""
         files = FILES if files is None else files
         recs = [f if isinstance(f, dict) else {"filename": f, "status": "modified"} for f in files]
         with open(os.path.join(self.rec, "gh-view.json"), "w") as fh:
             json.dump({"headRefOid": sha, "state": state, "isDraft": draft, "title": title,
+                       **({} if base is None else {"baseRefName": base}),
                        "statusCheckRollup": ci("SUCCESS", "SKIPPED") if checks is None else checks,
                        "changedFiles": len(recs) if count is None else count}, fh)
         with open(os.path.join(self.rec, "gh-files.jsonl"), "w") as fh:
@@ -401,11 +408,44 @@ def test_ci_pending_and_presence():
     b.view(SHA, checks=[])
     b.run()
     check("проверок ещё нет → ждёт", not b.windows() and b.req() is not None, b.outs[-1])
+    b.view(SHA, checks=ci("SUCCESS"))
+    b.run()
+    check("обязательной check-traces/traces нет (metis-0633) → окна нет, ждёт", not b.windows() and b.req() is not None,
+          b.outs[-1])
     b.view(SHA)
     b.run(extra={"PANTHEON_FAKE_IDLE": "900"})
     check("владельца нет у Mac (простой 15 мин) → окна нет, ждёт", not b.windows() and b.req() is not None, b.outs[-1])
     b.run()
     check("CI зелёный и владелец у Mac → окно и слияние", len(b.windows()) == 1 and len(b.merges()) == 1, b.outs[-1])
+
+
+def test_ci_required_names():
+    """metis-0633: проход по Touch ID судит CI тем же ci_verdict, что шлюз: необязательная красная не мешает, дубль
+    обязательной с красной записью — отказ, PR не в main не ждёт tests/affected."""
+    b = Box()
+    b.request()
+    b.view(SHA, checks=ci("SUCCESS", "SUCCESS", "FAILURE"))
+    b.run()
+    check("красная необязательная при зелёных обязательных → окно и слияние",
+          len(b.windows()) == 1 and len(b.merges()) == 1, b.outs[-1])
+    b = Box()
+    b.request()
+    b.view(SHA, checks=ci("SUCCESS", "SUCCESS") + [dict(ci("SUCCESS", "FAILURE")[1])])
+    b.run()
+    check("дубль check-traces/traces (зелёная и красная) → окна нет, заявка снята",
+          not b.windows() and not b.merges() and b.req() is None and "traces красная" in b.alerts(), b.alerts())
+    b = Box()
+    b.request()
+    b.view(SHA, checks=ci("SUCCESS", "SUCCESS")[1:], base="feature-x")
+    b.run()
+    check("PR не в main: только traces зелёная → окно и слияние", len(b.windows()) == 1 and len(b.merges()) == 1,
+          b.outs[-1])
+    b = Box()
+    b.request()
+    b.view(SHA, checks=ci("SUCCESS", "SUCCESS")[1:], base=None)
+    b.run()
+    check("baseRefName нет: affected обязателен, его нет → окна нет, ждёт", not b.windows() and b.req() is not None,
+          b.outs[-1])
 
 
 def test_timeout_retry():
@@ -653,6 +693,39 @@ def test_core_matches_guard():
             % (GUARD_HOOKS, os.path.join(LIBDIR, "merge.py")))
     r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
     check("ядро merge.py == ядро merge_gate.py", r.stdout.strip() == "True", r.stdout + r.stderr)
+
+
+def test_ci_matches_guard():
+    """metis-0633: разбор проверок GitHub один — ci_verdict, required_checks, REQUIRED_CHECKS, CI_OK, CI_WAIT и CI_NONE
+    в merge.py дословно те же, что в шлюзе guard (merge_gate.py): сверка по AST, без запуска кода."""
+    import ast
+
+    def parts(path):
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        got = {}
+        for n in tree.body:
+            if isinstance(n, ast.FunctionDef) and n.name in ("ci_verdict", "required_checks"):
+                got[n.name] = ast.dump(n)
+            elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) \
+                    and n.targets[0].id in ("REQUIRED_CHECKS", "CI_OK", "CI_WAIT", "CI_NONE"):
+                got[n.targets[0].id] = ast.dump(n.value)
+        return got
+
+    mine, gate = parts(os.path.join(LIBDIR, "merge.py")), parts(os.path.join(GUARD_HOOKS, "merge_gate.py"))
+    names = ("ci_verdict", "required_checks", "REQUIRED_CHECKS", "CI_OK", "CI_WAIT", "CI_NONE")
+    check("merge.py и merge_gate.py: все части разбора CI есть в обоих", all(k in mine and k in gate for k in names),
+          (sorted(mine), sorted(gate)))
+    for k in names:
+        check(f"merge.py {k} == merge_gate.py {k}", mine.get(k) == gate.get(k) and k in mine, k)
+    code = ("import sys, importlib.util\n"
+            "s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
+            "s.loader.exec_module(m)\n"
+            "print(m.ci_state(m.ci_verdict and [], m.required_checks('o/agent-kit', 'main'))[0], "
+            "m.ci_state([], ())[0], m.ci_state([{'name': 'x', 'status': 'COMPLETED', 'conclusion': 'SUCCESS'}])[1])"
+            % os.path.join(LIBDIR, "merge.py"))
+    r = subprocess.run([PY311, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    check("ci_state: пусто при обязательных — wait, пусто без них — wait, зелёное — «CI ✓ (1)»",
+          r.stdout.split() == ["wait", "wait", "CI", "✓", "(1)"], r.stdout + r.stderr)
 
 
 PJ = "plugins/pantheon/.claude-plugin/plugin.json"
