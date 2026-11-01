@@ -121,6 +121,17 @@ def check(name, cond, extra=""):
         FAILS.append(name)
 
 
+MAC = sys.platform == "darwin"
+
+
+def check_mac(name, cond, extra=""):
+    """Случай про libproc или /usr/sbin/lsof macOS: вне macOS (CI на Linux) — строка «пропущено», а не проверка."""
+    if MAC:
+        check(name, cond, extra)
+    else:
+        print(f"пропущено: нужен macOS — {name}")
+
+
 # --- заглушка sandbox-exec: пишет argv и окружение, затем исполняет команду (или изображает npm) ------------------
 REC = os.path.join(_ROOT, "sandbox-calls.jsonl")
 FAKE = os.path.join(_ROOT, "fake-sandbox-exec")
@@ -277,15 +288,18 @@ if not _ps_ok:
     O.PS = PS_SHIM
 # заменитель отдаёт то же, что ps: иначе его поломку увидит только прогон под песочницей
 _me = os.getpid()
-_sh = subprocess.run([PS_SHIM, "-axo", "pid=,ppid=,pgid=,rss="], capture_output=True, text=True).stdout.split("\n")
+_sh = subprocess.run([PS_SHIM, "-axo", "pid=,ppid=,pgid=,rss="], capture_output=True,
+                     text=True).stdout.split("\n") if MAC else []
 _row = next((ln.split() for ln in _sh if ln.split()[:1] == [str(_me)]), [])
-check("ps-shim: pid, ppid, pgid теста — как у ОС, rss больше нуля",
-      _row[:3] == [str(_me), str(os.getppid()), str(os.getpgrp())] and int(_row[3]) > 0, _row)
-if _ps_ok:
+check_mac("ps-shim (libproc): pid, ppid, pgid теста — как у ОС, rss больше нуля",
+          _row[:3] == [str(_me), str(os.getppid()), str(os.getpgrp())] and int(_row[3]) > 0, _row)
+if not MAC:
+    print("пропущено: нужен macOS — ps-shim (libproc): время старта — как у ps (UTC)")
+elif _ps_ok:
     _real = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(_me)], capture_output=True, text=True,
                            env={"LC_ALL": "C", "TZ": "UTC", "PATH": "/usr/bin:/bin"}).stdout.split()
     _fake = subprocess.run([PS_SHIM, "-o", "lstart=", "-p", str(_me)], capture_output=True, text=True).stdout.split()
-    check("ps-shim: время старта — как у ps (UTC)", _real and _real == _fake, (_real, _fake))
+    check("ps-shim (libproc): время старта — как у ps (UTC)", _real and _real == _fake, (_real, _fake))
 
 
 def calls():
@@ -1414,10 +1428,12 @@ dt = time.monotonic() - t0
 check("стоп из другого окна при занятом проходе тестов: stopped за ≤10 с, `stop` дождался, код 0, тест идёт",
       rc == 0 and "stopped" in out and dt <= 10 and th_t.is_alive() and state(q, rid_t) == "running",
       (rc, out, round(dt, 1)))
-check("стоп: порт свободен, погашены сервер, «turbo», задача в своей группе и сирота по папке копии",
-      not port_open(port) and not any(pid_alive(p) for p in pids + [srvpid]) and _gone(_orphan)
+check("стоп: порт свободен, погашены сервер, «turbo» и задача в своей группе, копия снята",
+      not port_open(port) and not any(pid_alive(p) for p in pids + [srvpid])
       and rid_s not in O.servers() and not os.path.exists(work_of(rid_s)),
-      [(p, pid_alive(p, 0)) for p in pids + [srvpid]] + [_orphan.poll()])
+      [(p, pid_alive(p, 0)) for p in pids + [srvpid]])
+# сирота по папке копии ищется через /usr/sbin/lsof — путь macOS
+check_mac("стоп: сирота по папке копии (lsof) погашена", MAC and _gone(_orphan), _orphan.poll())
 th_s.join(15)
 check("сторож без серверов и заявок выходит сам", not th_s.is_alive())
 open(HOLD_RELEASE, "w").close()
@@ -1588,6 +1604,52 @@ _errs = [json.loads(x) for x in list(open(_log))[_n0:]]
 _errs = [x for x in _errs if x.get("kind") == "sweep-error"]
 check("sweep падает в сторожке: исключение не выходит, в журнале один sweep-error",
       _raised is None and len(_errs) == 1 and "битый servers.json" in _errs[0].get("why", ""), (_raised, _errs))
+
+# --- сбой посреди заявки serve (Д2 argus #232): итог failed, а не preparing до суток; копия снята; круг идёт дальше --
+kill_all_servers()
+_real_keys, _real_resolve = O.dev_keys, O.resolve_dir
+
+
+def _keys_boom(*a, **k):
+    raise ValueError("битый файл ключей")
+
+
+O.dev_keys = _keys_boom
+try:
+    q, rid = new_request("athena-x", APP, "serve")
+    _raised = None
+    try:
+        serve_pass()
+    except Exception as e:  # noqa: BLE001 — мутант без except Exception в run_serve
+        _raised = e
+finally:
+    O.dev_keys = _real_keys
+res = O.load_result(q, rid) or {}
+check("сбой в run_serve (ValueError): итог failed «сбой прохода», копия снята, сервера нет, проход не упал",
+      _raised is None and res.get("state") == "failed" and "сбой прохода: ValueError" in res.get("why", "")
+      and not os.path.exists(work_of(rid)) and rid not in O.servers(), (_raised, res))
+
+
+def _resolve_boom(*a, **k):
+    raise OSError("папка заявки пропала")
+
+
+O.resolve_dir = _resolve_boom
+try:
+    q, rid_a = new_request("athena-x", APP, "serve")
+    q, rid_b = new_request("athena-x", APP, "serve")
+    _raised = None
+    try:
+        serve_pass()
+    except Exception as e:  # noqa: BLE001 — мутант без try вокруг handle в serve_round
+        _raised = e
+finally:
+    O.resolve_dir = _real_resolve
+_ra, _rb = O.load_result(q, rid_a) or {}, O.load_result(q, rid_b) or {}
+check("сбой до копии (handle): обе заявки круга — failed «сбой прохода», в журнале serve-error, проход не упал",
+      _raised is None and _ra.get("state") == _rb.get("state") == "failed"
+      and "сбой прохода: OSError" in _ra.get("why", "") and "сбой прохода" in _rb.get("why", "")
+      and any(json.loads(x).get("kind") == "serve-error" for x in open(_log)), (_raised, _ra, _rb))
 
 # проход серверов только плановый
 os.environ["CLAUDECODE"] = "1"

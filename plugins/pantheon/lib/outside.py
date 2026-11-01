@@ -1347,6 +1347,8 @@ def run_serve(rid, d, req, window, qdir):
         cancelled = True
     except RuntimeError as e:
         why, busy = str(e), isinstance(e, Busy)
+    except Exception as e:  # noqa: BLE001 — любой сбой: сервер, копия и tmp сняты, итог failed, а не preparing
+        why = f"сбой прохода: {type(e).__name__}: {e}"
     finally:
         os.close(fd)
     if cancelled or why:
@@ -1837,7 +1839,12 @@ def serve_round(t=None):
             log_event(id=rid, kind="refused", window=window, why=why)
             save_result(qdir, rid, {"state": "failed", "kind": "serve", "why": why})
         else:
-            handle(qdir, window, rid, req)
+            try:
+                handle(qdir, window, rid, req)
+            except Exception as e:  # noqa: BLE001 — сбой до копии (папка, коммит, журнал): итог failed, круг идёт
+                why = f"сбой прохода: {type(e).__name__}: {e}"
+                log_event(id=rid, kind="serve-error", window=window, why=why)
+                save_result(qdir, rid, {"state": "failed", "kind": "serve", "why": why})
         sweep()
     drop_orphan_stops()
 
