@@ -59,6 +59,7 @@ PostToolUse (Bash:
                 (metis-0245); git push и gh pr create|edit — только при свежей метке «да» на задачу окна
                 (`pantheon consent`, metis-0562), -R и --body-file в gh ограничены, сети у окна нет;
   cdp-role    — демон браузера с вашими входами — никому из ролей (до Харона, metis-0077), /close — никому (SEC-13);
+                по всему тексту команды, кроме слов в сообщении git commit, gh pr|issue, pantheon task (metis-0624);
   push         — git push: координатор, лиды и мастерская, не в main и master; gh pr merge — главная сессия
                  координатора или его лид (hephaestus-/apollo-<направление> субагентом, metis-0054) в папках своего
                  направления (domains.json, [merge], [merge_client]); защиты — папки metis-pantheon и их
@@ -2511,9 +2512,15 @@ def check_pantheon(event, tool, tool_input):
 #            только роли из [private].roles (hq, chiron) и главная сессия координатора из [private].coordinators
 #            (mnemo-brain). Read, Grep, Glob, правки и Bash — по явным путям: это защита от случайности; в окнах
 #            ролей Bash к личному закрыт ещё и песочницей (denyRead).
-#   cdp-role (SEC-13, BROW-06) — демон браузера с вашими входами (127.0.0.1:9333–9339, cdp-daemon.mjs): только
-#            мастерская (действует после вашего «да»); prometheus и остальные — нет (metis-0087). /close — никому из ролей:
-#            демон общий для всех сессий.
+#   cdp-role (SEC-13, BROW-06) — демон браузера с вашими входами (127.0.0.1:9333–9339, cdp-daemon.mjs, пароль
+#            ~/.config/cdp-daemon/token): никому из ролей (CDP_READERS и CDP_ACTORS пусты, metis-0227). /close —
+#            никому из ролей: демон общий для всех сессий. Bash — по всему тексту команды (порт, имя демона, папка
+#            пароля); исключение (metis-0624) — слова только в значении флага-сообщения у одной простой команды:
+#            git commit -m/-F, gh pr|issue create|edit|comment --body/--title/--body-file, pantheon task new|set
+#            --text/--note/--title… (_cdp_text_only, CDP_TEXT_CMDS). Read, Grep и Glob папки пароля — отказ; Edit и
+#            Write исходников с этими словами правило не смотрит. Остаток: запуск своего скрипта, который сам ходит
+#            к демону (python3 sites.py), не отличить от любого запуска — его держит окно: местных портов у
+#            песочницы нет, пароль закрыт denyRead.
 #   push     (DONE-07, SEC-13) — git push: только координатор, лиды (hephaestus-*, apollo-*) и мастерская; в main и
 #            master — никто из ролей (в main сливаете вы); --all, --mirror, удаление и принудительная отправка — тоже
 #            нет. gh pr merge (metis-0038, guard 0.5.0) — только главная сессия domain-coordinator, без cd в
@@ -2543,6 +2550,20 @@ RECURSIVE = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "fd", "tar", "
 CDP_TARGET = re.compile(r"(?<![\w.])93(?:3[3-9])(?![\w.])|cdp-daemon", re.I)
 # отладочный порт самого браузера с отладкой (9222 или порт из DevToolsActivePort): мимо демона — никому из ролей
 CDP_DIRECT = re.compile(r"(?<![\w.])9222(?![\w.])|DevToolsActivePort|/devtools/(?:browser|page)/|remote-debugging", re.I)
+# metis-0624: шаблоны смотрят весь текст команды; исключение — слово стоит значением флага-сообщения у одной простой
+# команды git commit, gh pr|issue, pantheon task (_cdp_text_only). Флаг → вид значения: "text" — текст, "md" — файл .md
+CDP_TEXT_CMDS = {
+    "git": ({("commit",)}, {"-m": "text", "--message": "text", "-F": "md", "--file": "md"}, ()),
+    "gh": ({("pr", "create"), ("pr", "edit"), ("pr", "comment"), ("issue", "create"), ("issue", "edit"),
+            ("issue", "comment")},
+           {"-b": "text", "--body": "text", "-t": "text", "--title": "text", "-F": "md", "--body-file": "md"}, ()),
+    "pantheon": ({("task", "new"), ("task", "set")},
+                 {f: "text" for f in ("--title", "--text", "--body", "--note", "--question", "--why", "--option",
+                                      "--recommend", "--if-no-answer", "--done-when", "--mode-why", "--next", "--force")}
+                 | {"--body-file": "md"},
+                 ("result", "note", "title", "next", "question", "why", "recommend", "if_no_answer")),
+}
+CDP_TOKEN_DIR = os.path.join(HOME, ".config", "cdp-daemon")  # пароль демона (token) — в этой папке
 # WebFetch ролей — только наружу: адрес петли и локальной сети — это демон браузера или dev-сервер владельца
 LOCAL_URL = re.compile(r"^\w+://(?:[^/@]*@)?(?:localhost|[\d.]+|0x[0-9a-f]+|\[[0-9a-f:.]*\]|[^/:]*\.local)(?::\d+)?(?:/|$)",
                        re.I)
@@ -2782,19 +2803,90 @@ def _local_url(url):
     return False
 
 
+def _cdp_whole_text(cmd):
+    """Обращение к браузеру владельца по всему тексту команды → (вид, текст): "direct" — отладочный порт браузера
+    мимо демона, "daemon" — демон или его пароль, None — упоминаний нет."""
+    text = cmd + "\n" + re.sub(r"[\"'\\]", "", cmd)
+    if CDP_DIRECT.search(text):
+        return "direct", text
+    if CDP_TARGET.search(text):
+        return "daemon", text
+    return None, text
+
+
+def _cdp_hit(word):
+    return isinstance(word, str) and bool(CDP_DIRECT.search(word) or CDP_TARGET.search(word))
+
+
+def _cdp_text_only(cmd, cwd):
+    """metis-0624: порт, пароль и имя демона стоят только значением флага-сообщения (CDP_TEXT_CMDS) у одной простой
+    команды: git commit -m/-F, gh pr|issue create|edit|comment --body/--title/--body-file, pantheon task new|set
+    --text/--note/--title… и поле=текст в task set. Вне кавычек — ни ;, &, |, ни перенаправлений; каждое слово
+    вычислено (без $(…) и переменных); файл -F/--body-file — .md. Иначе — False, и правило смотрит весь текст."""
+    bare = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", " ", cmd)
+    if re.search(r"[;&|<>\n\r`\\'\"]", bare):
+        return False
+    _, cmds = bash_analysis(cmd, cwd)
+    if len(cmds) != 1 or not cmds[0][0]:
+        return False
+    name, args = cmds[0]
+    spec = CDP_TEXT_CMDS.get(os.path.basename(name)) if not _cdp_hit(name) else None
+    if not spec:
+        return False
+    subs, flags, fields = spec
+    depth = len(next(iter(subs)))
+    if tuple(args[:depth]) not in subs:
+        return False
+    i = depth
+    while i < len(args):
+        a, kind, value = args[i], None, None
+        if a is None or a == UNRESOLVED:  # слово не вычислить ($(…), переменная) — не исключение
+            return False
+        if a in flags:
+            kind, value, i = flags[a], (args[i + 1] if i + 1 < len(args) else None), i + 2
+        elif "=" in a and a.split("=", 1)[0] in flags:
+            kind, value, i = flags[a.split("=", 1)[0]], a.split("=", 1)[1], i + 1
+        elif re.fullmatch(r"-[A-Za-z]+", a) and "-" + a[-1] in flags:  # склейка коротких: git commit -qm "…"
+            kind, value, i = flags["-" + a[-1]], (args[i + 1] if i + 1 < len(args) else None), i + 2
+        elif "=" in a and a.split("=", 1)[0] in fields:  # pantheon task set ID result="…"
+            kind, value, i = "text", a.split("=", 1)[1], i + 1
+        else:
+            if _cdp_hit(a):
+                return False
+            i += 1
+            continue
+        if value is None or value == UNRESOLVED or (kind == "md" and not value.casefold().endswith(".md")):
+            return False
+    return True
+
+
 def check_cdp_role(event, tool, tool_input):
     ok, role, sub, _ = limited(event)
     if ok and tool == "WebFetch" and _local_url((tool_input.get("url") or "").strip()):
         return ("Правило cdp-role: WebFetch ролей — только в интернет; локальные адреса (демон браузера, чужой "
                 "dev-сервер) закрыты. Своё приложение — chrome-devtools в своей worktree.")
-    if not ok or tool != "Bash":
+    if not ok:
         return None
-    cmd = tool_input.get("command") or ""
-    cmd = cmd + "\n" + re.sub(r"[\"'\\]", "", cmd)
-    if CDP_DIRECT.search(cmd):
+    if tool in READ_TOOLS and tool != "WebFetch":
+        # пароль демона (metis-0624): Read, Grep и Glob по папке ~/.config/cdp-daemon; обход папки выше — нет, его
+        # держат denyRead песочницы и Read(~/.config/cdp-daemon/**) в настройках окна
+        if any(_inside(p, [CDP_TOKEN_DIR]) for p, _ in read_paths(event, tool, tool_input)):
+            kind, cmd = "daemon", ""
+        else:
+            return None
+    elif tool != "Bash":
+        return None
+    else:
+        cmd = tool_input.get("command") or ""
+        cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+        kind, text = _cdp_whole_text(cmd)
+        if kind and _cdp_text_only(cmd, cwd):
+            kind = None
+        cmd = text
+    if kind == "direct":
         return ("Правило cdp-role: прямое подключение к отладочному порту браузера владельца ролям закрыто — только через "
                 "общий демон (`curl 127.0.0.1:9333/…`), а к нему сейчас не допущена ни одна роль.")
-    if not CDP_TARGET.search(cmd):
+    if kind is None:
         return None
     if re.search(r"/close\b", cmd):
         return ("Правило cdp-role: /close выключает общий демон браузера у всех сессий — ролям нельзя. "
