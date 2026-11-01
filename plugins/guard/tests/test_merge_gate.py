@@ -3477,7 +3477,10 @@ def t_gh_out_private(h):
             case("--body-file .git/git-crypt/keys/default — отказ",
                  f"gh pr comment 5 {R} --body-file .git/git-crypt/keys/default", False)
             case("--body-file .git/config — отказ", f"gh pr edit 5 {R} --body-file .git/config", False, ".git")
-            case("-F .GIT/config (регистр) — отказ", f"gh pr edit 5 {R} -F .GIT/config", False, ".git")
+            if sys.platform == "darwin":  # только macOS: там .GIT и .git — одна папка; на Linux это другое имя (_key)
+                case("-F .GIT/config (регистр) — отказ", f"gh pr edit 5 {R} -F .GIT/config", False, ".git")
+            else:
+                print(f"skip gh-out mnemo ({who}): -F .GIT/config (регистр) — пропущено: нужна нечувствительная к регистру ФС (macOS)")
             case("-F ME/diary.md (регистр) — отказ", f"gh pr edit 5 {R} -F ME/diary.md", False)
             case("--body-file=~/ai/knowledge/me/diary.md — отказ",
                  f"gh pr comment 5 {R} --body-file=~/ai/knowledge/me/diary.md", False)
@@ -3557,7 +3560,11 @@ CASES_CORE = (t_opus_protect, t_opus_transcript)
 
 
 def main():
-    tmp = os.path.realpath(tempfile.mkdtemp(prefix="merge-gate-test-"))
+    # корень подменённого HOME не должен лежать в /tmp: guard считает /tmp временной папкой, и на Linux (mkdtemp -> /tmp)
+    # ~/.ssh, cwd без .git и $HOME с .git становились «внутри временных папок» — gh-out их пропускал. На macOS
+    # mkdtemp даёт /var/folders/…, вне /tmp; на Linux берём /var/tmp (его нет в TEMP_ROOTS)
+    base = None if not os.path.realpath(tempfile.gettempdir()).startswith(("/tmp", "/private/tmp")) else "/var/tmp"
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="merge-gate-test-", dir=base))
     try:
         h = Home(tmp)
         only = set(sys.argv[1:])
