@@ -109,7 +109,8 @@ if tail == ["run", "devtree"]:
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
             "s = socket.socket(); s.bind(('127.0.0.1', int(os.environ['PORT']))); s.listen(64)\n"
             "while True:\n    s.accept()[0].close()\n")
-    kid = subprocess.Popen([sys.executable, "-c", task], start_new_session=True)
+    # cwd="/": сирота по папке копии её не достаёт — гасит только обход потомков (strays), мутант без него красный
+    kid = subprocess.Popen([sys.executable, "-c", task], start_new_session=True, cwd="/")
     with open(%r, "a") as fh:
         fh.write(f"{os.getpid()} {kid.pid}\n")
     time.sleep(600)
@@ -1250,6 +1251,13 @@ check("сторож: сервер («turbo» → задача в своей гр
       up and port_open(port) and len(pids) == 2 and srvpid and th_t.is_alive() and th_s.is_alive(), (res, pids, srvpid))
 check("второй проход серверов при живом сторож — сразу выходит (замок)", serve_pass() == 0 and th_s.is_alive())
 # сирота: процесс с текущей папкой в копии, не потомок сервера и не в его группе (next dev, ушедший к launchd)
+def _gone(proc, timeout=5):
+    try:
+        return proc.wait(timeout=timeout) is not None
+    except subprocess.TimeoutExpired:
+        return False
+
+
 _orphan = subprocess.Popen([sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
                             "time.sleep(120)"], cwd=work_of(rid_s), start_new_session=True)
 t0 = time.monotonic()
@@ -1259,7 +1267,7 @@ check("стоп из другого окна при занятом проход�
       rc == 0 and "stopped" in out and dt <= 10 and th_t.is_alive() and state(q, rid_t) == "running",
       (rc, out, round(dt, 1)))
 check("стоп: порт свободен, погашены сервер, «turbo», задача в своей группе и сирота по папке копии",
-      not port_open(port) and not any(pid_alive(p) for p in pids + [srvpid]) and _orphan.wait(timeout=5) is not None
+      not port_open(port) and not any(pid_alive(p) for p in pids + [srvpid]) and _gone(_orphan)
       and rid_s not in O.servers() and not os.path.exists(work_of(rid_s)),
       [(p, pid_alive(p, 0)) for p in pids + [srvpid]] + [_orphan.poll()])
 th_s.join(15)
