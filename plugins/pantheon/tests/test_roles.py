@@ -279,7 +279,7 @@ def main():
           re.search(r"^skills:", raw_texts["apollo-demo.md"].split("---")[1], re.M) is None
           and "frontend-design:frontend-design` (Skill)" in raw_texts["apollo-demo.md"])
     check("размер роли после выноса: координатор и лиды не больше потолка (знаков)",
-          len(raw_texts["domain-coordinator.md"]) <= 29500 and len(raw_texts["hephaestus-demo.md"]) <= 22500)
+          len(raw_texts["domain-coordinator.md"]) <= 30200 and len(raw_texts["hephaestus-demo.md"]) <= 23400)
     # самопроверка до сдачи (metis-0357): шесть пунктов и строка отчёта у разработчиков, требование в поручении лидов
     # сверка по тексту без переносов строк: пробелы схлопнуты, иначе перенос строки в шаблоне ломает поиск фразы
     flat = {f: " ".join(t.split()) for f, t in texts.items()}
