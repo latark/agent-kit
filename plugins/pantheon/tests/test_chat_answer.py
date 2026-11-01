@@ -429,7 +429,7 @@ def zeus_write(*records):
 # ночь: вопрос `pantheon night ask` и «да» в чате
 N = P.night_mod()
 ev = date.fromtimestamp(now)
-rel, sha = "directions/metis-pantheon/night-pack.md", "a" * 64
+rel, sha = f"directions/metis-pantheon/night-{ev.isoformat()}-pack.md", "a" * 64
 nq, nyes, _ = N.night_question("metis-0710", ev, rel, sha)
 zeus_write(("ответ в чате", f"вопрос: {nq}\nответ: {nyes}\nвариант: 1\nдословно: да"))
 na = N.night_answers(ev, now)
