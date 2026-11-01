@@ -525,11 +525,11 @@ def main():
           "задач его нет",
           len(others) >= 7 and not any("sessync" in x for v in others.values() for x in v)
           and "sessync find *" in hb["excludedCommands"])
-    check("окно штаба: gh api, gh issue, gh run, gh repo, gh pr create/close/comment/merge, gh с флагами до "
-          "подкоманды, «gh *» и «gh pr *» — в песочнице (metis-0247)",
+    check("окно штаба: gh api, gh issue, gh run, gh repo, gh pr create/close/comment/merge/diff, gh с флагами до "
+          "подкоманды, «gh *» и «gh pr *» — в песочнице (metis-0247; gh pr list вышел из неё — metis-0626)",
           not any(x.startswith(("gh api", "gh issue", "gh run", "gh repo", "gh pr create", "gh pr close", "gh pr merge",
                                 "gh -",
-                                "gh pr comment", "gh pr review", "gh pr diff", "gh pr list"))
+                                "gh pr comment", "gh pr review", "gh pr diff", "gh pr status"))
                   or x in ("gh", "gh *", "gh pr", "gh pr *") for x in hb["excludedCommands"]))
     corp = "lecture-notes"
     check("окно штаба: корпус из [hq].closed_dirs закрыт для чтения — песочница и правило Read (SEC-13, решение 15.10)",

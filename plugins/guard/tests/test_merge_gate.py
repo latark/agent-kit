@@ -1770,7 +1770,8 @@ def t_hq_gh(h):
                 "--json number -q '.[]' -t '{{.}}' -d -w",
                 "gh pr list -dL5 -Rlatark/agent-kit -sopen", "gh pr list --template '{{.}}' -R latark/agent-kit"):
         case(f"hq: {cmd} — можно", hq(cmd), True)
-        case(f"hq: главная сессия окна без agent_type: {cmd} — можно", hq(cmd, role=None), True)
+    case("hq: главная сессия окна без agent_type: gh pr list -R свой --json — можно",
+         hq("gh pr list -R latark/agent-kit --json number,title", role=None), True)
     case("hq: gh -R свой pr list — можно", hq("gh -R latark/agent-kit pr list --state open", role=None), True)
     case("hq: gh pr list без -R — отказ", hq("gh pr list --state open"), False, "gh pr list -R")
     case("hq: gh pr list без -R (главная сессия) — отказ", hq("gh pr list", role=None), False, "-R")
