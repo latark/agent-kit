@@ -2515,9 +2515,10 @@ def check_pantheon(event, tool, tool_input):
 #   cdp-role (SEC-13, BROW-06) — демон браузера с вашими входами (127.0.0.1:9333–9339, cdp-daemon.mjs, пароль
 #            ~/.config/cdp-daemon/token): никому из ролей (CDP_READERS и CDP_ACTORS пусты, metis-0227). /close —
 #            никому из ролей: демон общий для всех сессий. Bash — по всему тексту команды (порт, имя демона, папка
-#            пароля); исключение (metis-0624) — слова только в значении флага-сообщения у одной простой команды:
-#            git commit -m/-F, gh pr|issue create|edit|comment --body/--title/--body-file, pantheon task new|set
-#            --text/--note/--title… (_cdp_text_only, CDP_TEXT_CMDS). Read, Grep и Glob папки пароля — отказ; Edit и
+#            пароля); исключение (metis-0624) — слова только в значении флага-сообщения у одной простой команды, первое
+#            слово которой — ровно её имя (metis-0630: без X=…, env, time, exec, пути): git commit -m/-F, gh pr|issue create|edit|comment --body/--title/
+#            --body-file, pantheon task new|set --text/--note/--title… (_cdp_text_only, CDP_TEXT_CMDS); отказ Bash
+#            подсказывает это исключение (CDP_TEXT_HINT). Read, Grep и Glob папки пароля — отказ; Edit и
 #            Write исходников с этими словами правило не смотрит. Остаток: запуск своего скрипта, который сам ходит
 #            к демону (python3 sites.py), не отличить от любого запуска — его держит окно: местных портов у
 #            песочницы нет, пароль закрыт denyRead.
@@ -2563,6 +2564,10 @@ CDP_TEXT_CMDS = {
                  | {"--body-file": "md"},
                  ("result", "note", "title", "next", "question", "why", "recommend", "if_no_answer")),
 }
+# подсказка в отказе Bash (metis-0630): как написать о демоне в коммите, PR или задаче, не задев правило
+CDP_TEXT_HINT = ("\nСлова о демоне в тексте коммита, PR или задачи проходят, если это одна простая команда (без &&, |, "
+                 "$(…), 2>&1 и слов вроде X=… или env перед git, gh, pantheon), а текст стоит в -m/--body/--text/--note или в файле .md через "
+                 "-F/--body-file; заголовок задачи — через --title.")
 CDP_TOKEN_DIR = os.path.join(HOME, ".config", "cdp-daemon")  # пароль демона (token) — в этой папке
 # WebFetch ролей — только наружу: адрес петли и локальной сети — это демон браузера или dev-сервер владельца
 LOCAL_URL = re.compile(r"^\w+://(?:[^/@]*@)?(?:localhost|[\d.]+|0x[0-9a-f]+|\[[0-9a-f:.]*\]|[^/:]*\.local)(?::\d+)?(?:/|$)",
@@ -2815,14 +2820,15 @@ def _cdp_whole_text(cmd):
 
 
 def _cdp_hit(word):
-    return isinstance(word, str) and bool(CDP_DIRECT.search(word) or CDP_TARGET.search(word))
+    return bool(CDP_DIRECT.search(word) or CDP_TARGET.search(word))
 
 
 def _cdp_text_only(cmd, cwd):
     """metis-0624: порт, пароль и имя демона стоят только значением флага-сообщения (CDP_TEXT_CMDS) у одной простой
     команды: git commit -m/-F, gh pr|issue create|edit|comment --body/--title/--body-file, pantheon task new|set
-    --text/--note/--title… и поле=текст в task set. Вне кавычек — ни ;, &, |, ни перенаправлений; каждое слово
-    вычислено (без $(…) и переменных); файл -F/--body-file — .md. Иначе — False, и правило смотрит весь текст."""
+    --text/--note/--title… и поле=текст в task new|set. Вне кавычек — ни ;, &, |, ни перенаправлений; первое слово
+    команды — ровно её имя, без присваивания, обёртки и пути перед ним (GH_HOST=… gh, env X=… git — metis-0630);
+    каждое слово вычислено (без $(…) и переменных); файл -F/--body-file — .md. Иначе — False, и правило смотрит весь текст."""
     bare = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", " ", cmd)
     if re.search(r"[;&|<>\n\r`\\'\"]", bare):
         return False
@@ -2830,7 +2836,11 @@ def _cdp_text_only(cmd, cwd):
     if len(cmds) != 1 or not cmds[0][0]:
         return False
     name, args = cmds[0]
-    spec = CDP_TEXT_CMDS.get(os.path.basename(name)) if not _cdp_hit(name) else None
+    # первое слово — ровно git, gh или pantheon: присваивание (GH_HOST=…), обёртка (env, time, exec, !, (, {) и путь
+    # к команде перед ним — окружение и запуск, а не текст сообщения
+    if bare.split()[:1] != [name]:
+        return False
+    spec = CDP_TEXT_CMDS.get(name)  # имя — уже basename в нижнем регистре (bash_analysis)
     if not spec:
         return False
     subs, flags, fields = spec
@@ -2840,7 +2850,7 @@ def _cdp_text_only(cmd, cwd):
     i = depth
     while i < len(args):
         a, kind, value = args[i], None, None
-        if a is None or a == UNRESOLVED:  # слово не вычислить ($(…), переменная) — не исключение
+        if a is None:  # слово не вычислить (переменная) — не исключение
             return False
         if a in flags:
             kind, value, i = flags[a], (args[i + 1] if i + 1 < len(args) else None), i + 2
@@ -2855,7 +2865,7 @@ def _cdp_text_only(cmd, cwd):
                 return False
             i += 1
             continue
-        if value is None or value == UNRESOLVED or (kind == "md" and not value.casefold().endswith(".md")):
+        if value is None or (kind == "md" and not value.casefold().endswith(".md")):
             return False
     return True
 
@@ -2883,9 +2893,10 @@ def check_cdp_role(event, tool, tool_input):
         if kind and _cdp_text_only(cmd, cwd):
             kind = None
         cmd = text
+    hint = CDP_TEXT_HINT if tool == "Bash" else ""
     if kind == "direct":
         return ("Правило cdp-role: прямое подключение к отладочному порту браузера владельца ролям закрыто — только через "
-                "общий демон (`curl 127.0.0.1:9333/…`), а к нему сейчас не допущена ни одна роль.")
+                "общий демон (`curl 127.0.0.1:9333/…`), а к нему сейчас не допущена ни одна роль." + hint)
     if kind is None:
         return None
     if re.search(r"/close\b", cmd):
@@ -2897,7 +2908,7 @@ def check_cdp_role(event, tool, tool_input):
         return None
     return (f"Правило cdp-role: роль «{role or 'субагент'}» не пользуется браузером с входами владельца (демон CDP). "
             "Сайт со входом владельца — Харон, после metis-0077; публичные страницы — веб-поиск prometheus без входов. "
-            "Проверить своё приложение на localhost — chrome-devtools-mcp --isolated или Playwright (talos).")
+            "Проверить своё приложение на localhost — chrome-devtools-mcp --isolated или Playwright (talos)." + hint)
 
 
 def push_foreign(texts, cwd, cmds, pdir):
