@@ -15,6 +15,10 @@ PR в основную ветку сливают только через шлю�
 
 Отказ guard называет запись, которой не хватает: добавь её, а не обходи.
 
+Тело PR называет каждую задачу, которую он закрывает: `Closes <id>` или списком `Closes metis-0522, metis-0534 и
+0535`. По этой строке плановый проход ставит задаче done при слиянии, и под общей веткой тоже (metis-0583). PR делает
+только часть задачи — слово «часть» в теле: задача остаётся открытой.
+
 Ядро защит в agent-kit — любой путь под `plugins/guard/` (там же шлюз слияния и protect-config) и
 `plugins/pantheon/roles/` (общие роли), `.github/` (workflow release с правом записи в main), правила autoMode и
 permissions окон `plugins/pantheon/lib/window_rules.py`, `.claude-plugin/marketplace.json` и с metis-0598 журнал ваших

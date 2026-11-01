@@ -3747,7 +3747,7 @@ def unlinked_decisions(tasks, decisions_text, zeus_log_text, board_lines, t, min
 
 # --- хвосты не теряются (metis-0504, исследование 26.10 разд. 5 пп. 6–7) ---------------------------------------------
 # Три тревоги тика рядом с «слово владельца без задачи» (стиль тот же: один раз на ключ, только о новых, первый проход
-# без тревоги; check в pantheon.py, файл tail-seen.json). (а) Строка журнала задачи со словами «хвост / остаток / не
+# — одна сводная тревога без перечня, metis-0572; check в pantheon.py, файл tail-seen.json). (а) Строка журнала задачи со словами «хвост / остаток / не
 # сделано / вынесен / позже» без id задачи в этой строке — только предупреждение (эвристика шумит), не блок.
 # (б) Файл knowledge/inbox старше суток, на имя которого не ссылается ни одна задача (source/from или текст);
 # отчёт с `findings: 0` в шапке — исключение. (в) directions/*/review-*.md с находкой класса Д (строка начинается с «Д»),
@@ -3755,7 +3755,9 @@ def unlinked_decisions(tasks, decisions_text, zeus_log_text, board_lines, t, min
 
 TAIL_DAYS = 7  # строка журнала старше — уже не для тика
 TAIL_FILE_HOURS = 24
-TAIL_RE = re.compile(r"хвост\w*|остат(?:ок|к\w+)|не сделан\w*|вынесен\w*|позже", re.I)
+# «остаток недели / лимита / дня» — запас времени или денег, а не недоделанная работа (metis-0572)
+TAIL_RE = re.compile(r"хвост\w*|остат(?:ок|к\w+)(?!\s+(?:недел|дн[яейю]|месяц|лимит|времен|бюджет|токен|минут|час))"
+                     r"|не сделан\w*|вынесен\w*|позже", re.I)
 TAIL_ID_RE = re.compile(r"(?<![\w-])[a-z][a-z0-9]*-\d{2,}(?!\w)")
 JOURNAL_LINE_RE = re.compile(r"^- (\d{4}-\d\d-\d\d \d\d:\d\d) — ([^:\n]*): (.*)$")
 TAIL_SKIP_ACTORS = ("check",)  # записи самого тика — не слова агента
@@ -3767,6 +3769,8 @@ TAIL_CLOSED_RE = re.compile(r"(?:закрыт|снят|устранён|устр
 TAIL_CLEAR_RE = re.compile(r"^(?:→|->|не задача:)", re.I)  # строка-погашение: «→ <id>» или «не задача: …» (metis-0572)
 TAIL_BARE_RE = re.compile(r"(?<![\w.-])\d{3,4}(?![\w.-])")  # id без префикса: «0366»
 TAIL_OPEN = ("todo", "doing", "review", "waiting")
+# строка открытой задачи «из ревью …» / «из review-…» дописывает в неё саму находки ревью, а не оставляет хвост
+TAIL_SELF_RE = re.compile(r"^(?:[\d.]+\s+[\d:x]+\s+)?из (?:ревью|review)(?![^\W\d_])", re.I)
 
 
 def _journal(body):
@@ -3787,7 +3791,8 @@ def _journal(body):
 def tail_lines(tasks, t, days=TAIL_DAYS):
     """[(id задачи, строка журнала)] со словами хвоста, не старше days дней. Строки самого тика (actor check) не считаются.
     Не хвост (metis-0572): в строке id другой существующей задачи (в том числе без префикса — «0366», если такая задача
-    одна) или «не задача:»; строка открытой задачи о ней самой (её id в строке); остаток закрыт позже в той же задаче
+    одна) или «не задача:»; строка открытой задачи о ней самой — её id в строке или «из ревью …» в начале (находки
+    дописаны в эту задачу); «остаток недели / лимита / дня» — запас, не работа; остаток закрыт позже в той же задаче
     (строка со словом хвоста и «закрыт/снят/устранён/выполнен…»; такая строка и сама не хвост); позже в той же задаче есть строка «→ …» или «не задача: …»
     — она гасит все прежние хвосты задачи (старую строку править не нужно)."""
     suffix = {}
@@ -3798,8 +3803,11 @@ def tail_lines(tasks, t, days=TAIL_DAYS):
         if head.get("type") != "task":
             continue
         jl = [x for x in _journal(body) if x[1] not in TAIL_SKIP_ACTORS]
+        is_open = head.get("status") in TAIL_OPEN
         for k, (ts, _, text, ln) in enumerate(jl):
             if ts is None or t - ts > days * 86400 or not TAIL_RE.search(text):
+                continue
+            if is_open and TAIL_SELF_RE.match(text.strip()):  # находки ревью дописаны в саму задачу (metis-0572)
                 continue
             # id гасит тревогу, только если такая задача есть и это не сама задача (review-113, x86-64, свой id — не хвост)
             if any(i != tid and i in tasks for i in TAIL_ID_RE.findall(text)):
@@ -3808,7 +3816,7 @@ def tail_lines(tasks, t, days=TAIL_DAYS):
                 continue
             if "не задача:" in text.lower() or TAIL_CLOSED_RE.search(text):  # строка о закрытии хвоста — не хвост
                 continue
-            if head.get("status") in TAIL_OPEN and tid in TAIL_ID_RE.findall(text):
+            if is_open and tid in TAIL_ID_RE.findall(text):
                 continue
             if any((TAIL_RE.search(x[2]) and TAIL_CLOSED_RE.search(x[2])) or TAIL_CLEAR_RE.match(x[2].strip())
                    for x in jl[k + 1:]):
