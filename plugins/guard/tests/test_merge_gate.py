@@ -1762,6 +1762,10 @@ def t_ci_required(h):
                "tests/affected красная: FAILURE; проверка GitHub check-traces/traces красная: TIMED_OUT")
     h.ci([dict(AFFECTED, conclusion="FAILURE"), dict(TRACES, status="QUEUED", conclusion="")], name="agent-kit")
     merge_case("required: красная и идущая — отказ по красной", h.pre(cmd, pdir=kit), False, "affected красная: FAILURE")
+    h.ci([dict(AFFECTED, conclusion="FAILURE"), TRACES], name="agent-kit")
+    d, why = h.pre(cmd, pdir=kit)
+    check("required: роль, красная — «новый коммит с новыми записями», без аварийного пути (Д2 argus #235)",
+          d == "deny" and "почини и сделай новый коммит с новыми записями" in why and "аварийный путь" not in why, why)
     h.ci([{"__typename": "StatusContext", "context": "affected", "state": "SUCCESS"}, TRACES], name="agent-kit")
     merge_case("required: StatusContext «affected» обязательную не заменяет — отказ", h.pre(cmd, pdir=kit), False,
                "коммите): tests/affected")
@@ -1862,6 +1866,63 @@ def t_ci_required(h):
     h.ci(nine, name="agent-kit", raw="не json")
     merge_case("без роли: gh pr view не ответил — отказ «повтори позже»", h.pre(c9, **owner), False,
                "не ответил — повтори позже")
+    # Д2 и Д4' argus #235: в пути без роли записей не просят — в отказе аварийный путь (терминал владельца)
+    h.ci([dict(nine[0], conclusion="FAILURE"), nine[1]], name="agent-kit")
+    d, why = h.pre(c9, **owner)
+    check("без роли: красная — без «новых записей», с аварийным путём в терминале владельца",
+          d == "deny" and "почини и сделай новый коммит; аварийный путь — `gh pr merge` в собственном терминале "
+          "владельца" in why and "с новыми записями" not in why, why)
+    tg = h.sha["tg-read"]
+    h.ci([], name="tg-read")
+    h.reset_wf()
+    h.wf(BASE, '[{"name": "check-traces.yml", "type": "file"}]')
+    d, why = h.pre("gh pr merge 3 -R latark/tg-read", role=None)
+    check("без роли: PR убирает workflows — аварийный путь вместо «сливает владелец»",
+          d == "deny" and "PR, который убирает workflows, — аварийный путь" in why and "сливает владелец" not in why,
+          why)
+    h.reset_wf()
+    # Д3 argus #235: что сливается — не понять (несколько номеров, несколько репозиториев, сбой gh-resolved) — отказ
+    h.ci(nine, name="agent-kit")
+    merge_case("без роли: два номера PR — отказ", h.pre("gh pr merge 9 10 --merge", **owner), False,
+               "укажи один номер PR")
+    merge_case("без роли: два разных -R — отказ", h.pre("gh pr merge 9 -R latark/agent-kit -R latark/tg-read",
+                                                        **owner), False, "репозиторий не один")
+    merge_case("без роли: -R дважды один и тот же — проходит",
+               h.pre("gh pr merge 9 -R latark/agent-kit --repo latark/agent-kit", **owner), True)
+    git(h.j(kit), "remote", "add", "up", "https://github.com/latark/tg-read")
+    try:
+        merge_case("без роли: у папки два remote разных репозиториев — отказ", h.pre("gh pr merge 9", **owner), False,
+                   "репозиторий не один")
+    finally:
+        git(h.j(kit), "remote", "remove", "up")
+    git(h.j(kit), "config", "remote.origin.gh-resolved", "")
+    try:
+        merge_case("без роли: gh-resolved не разобрать (сбой git config) — отказ", h.pre("gh pr merge 9", **owner), False,
+                   "не понять репозиторий папки")
+    finally:
+        git(h.j(kit), "config", "--unset", "remote.origin.gh-resolved")
+    merge_case("без роли: gh-resolved убран — снова проходит", h.pre("gh pr merge 9", **owner), True)
+    # Д1' argus #235: невычисленное слово (переменная, xargs) — отказ с понятным текстом, а не исключение в хуке
+    for c, how in (("gh pr merge $PR --merge", "номер — переменная"),
+                   ("gh pr merge 9 --match-head-commit $SHA", "SHA — переменная"),
+                   ("gh pr merge 9 -R $REPO", "-R — переменная"),
+                   ("gh pr merge 9 $(echo --squash)", "флаг — $(…)")):
+        d, why = h.pre(c, **owner)
+        check(f"без роли: {how} — отказ «слово не вычислить», не сбой хука",
+              d == "deny" and "слово команды не вычислить" in why and "check_roles" not in why, why)
+    d, why = h.pre("echo 9 | xargs gh pr merge", **owner)
+    check("без роли: xargs gh pr merge — отказ, не сбой хука", d == "deny" and "check_roles" not in why, why)
+    # Д2' argus #235: два слияния в одной команде — судится каждое: зелёный 9 и красный 10 — отказ
+    ten = [dict(AFFECTED, prs=(10,), conclusion="FAILURE"), dict(TRACES, prs=(10,))]
+    h.ci(nine + ten, name="agent-kit")
+    merge_case("без роли: одно слияние PR 9 при красном PR 10 рядом — проходит", h.pre(c9, **owner), True)
+    merge_case("без роли: зелёный 9 && красный 10 — отказ по 10",
+               h.pre(f"{c9} && gh pr merge 10 --match-head-commit {sha} --merge", **owner), False,
+               f"tests/affected красная: FAILURE на latark/agent-kit#10@")
+    merge_case("без роли: красный 10 && зелёный 9 — отказ по 10",
+               h.pre(f"gh pr merge 10 --match-head-commit {sha} --merge && {c9}", **owner), False,
+               f"tests/affected красная: FAILURE на latark/agent-kit#10@")
+    h.ci(nine, name="agent-kit")
     # Д3 argus #235: ответ запусков из двух JSON подряд — не один ответ, отказ (а не первый документ)
     runs, checks = rest_runs(dict(h.view["agent-kit"], statusCheckRollup=GREEN_KIT))
     h.runs["agent-kit"] = (json.dumps(runs) + json.dumps(runs), checks)

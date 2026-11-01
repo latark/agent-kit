@@ -1507,7 +1507,7 @@ def _billing_problem(repo, pr, sha):
             f"`pantheon review test -- {cmd}` (Bash не в фоне, timeout 600000 мс), затем повтори слияние"), ()
 
 
-def _ci_problem(repo, pr, sha, data):
+def _ci_problem(repo, pr, sha, data, owner=False):
     """Проверки GitHub на head PR зелёные — иначе текст отказа (metis-0297: 19.10 дважды ушёл PR с красной
     check-traces). data — ответ _pr_view; его rollup — проверки коммита headRefOid, а он сверяется с SHA из
     --match-head-commit: PR на другом коммите — отказ. Разбор — ci_verdict с обязательными проверками репозитория
@@ -1520,8 +1520,9 @@ def _ci_problem(repo, pr, sha, data):
     таймаут хука 10 с. Обязательных нет и проверок нет: пропуск, только если .github/workflows нет ни на head, ни на
     base PR (ответ 404 на оба): PR, который удаляет или переименовывает папку workflows, проверок не получает, а на
     base она есть (ревью argus 0297b). Сбой любого запроса — отказ; base спрашивается, только когда rollup пуст и на
-    head папки нет. Возврат — (текст отказа или None, предупреждения пропуска): их несёт возврат, а не модуль
-    (metis-0650)."""
+    head папки нет. owner — путь без роли (owner_ci_problem): записей там не просят, а в текстах отказа — аварийный
+    путь OWNER_EMERGENCY вместо «сливает владелец» (Д2, Д4' argus #235). Возврат — (текст отказа или None,
+    предупреждения пропуска): их несёт возврат, а не модуль (metis-0650)."""
     head = data.get("headRefOid")
     if not isinstance(head, str) or head.lower() != sha:
         return f"PR сейчас на другом коммите ({head}), а не на {sha} — проверки GitHub сверяются на проверенном SHA", ()
@@ -1533,6 +1534,8 @@ def _ci_problem(repo, pr, sha, data):
     if state == "fail":
         if ci_billing(runs, required, _ci_notes(repo, ci_billing_ids(runs, required))):
             return _billing_problem(repo, pr, sha)
+        if owner:
+            return f"{text} на {repo}#{pr}@{sha[:12]} — почини и сделай новый коммит; {OWNER_EMERGENCY}", ()
         return f"{text} на {repo}#{pr}@{sha[:12]} — почини и сделай новый коммит с новыми записями", ()
     if state == "wait":
         return f"{text} на {repo}#{pr}@{sha[:12]} — {CI_WATCH.format(pr=pr, repo=repo)}", ()
@@ -1546,9 +1549,10 @@ def _ci_problem(repo, pr, sha, data):
                 return (f"{CI_NONE}: проверок на {repo}#{pr} нет, а gh api не ответил, есть ли .github/workflows "
                         f"на {where} ({ref[:12]})"), ()
             if wf:
+                tail = (f"PR, который убирает workflows, — {OWNER_EMERGENCY}" if owner
+                        else "PR, который убирает workflows, сливает владелец")
                 return (f"проверки GitHub ещё не встали на {repo}#{pr}@{sha[:12]}: на {where} ({ref[:12]}) "
-                        ".github/workflows есть, а проверок нет — дождись и повтори слияние; PR, который убирает "
-                        "workflows, сливает владелец"), ()
+                        f".github/workflows есть, а проверок нет — дождись и повтори слияние; {tail}"), ()
     return None, tuple(f"{n} на {repo}#{pr}@{sha[:12]}" for n in notes)
 
 
@@ -2029,6 +2033,9 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                     f"{MERGE_OWNER}")
     return allow(notes)
 
+# аварийный путь (metis-0655): слияние, которое шлюз не пускает, а ждать нельзя, — владелец сам в своём терминале
+OWNER_EMERGENCY = ("аварийный путь — `gh pr merge` в собственном терминале владельца, вне Claude: guard его не "
+                   "проверяет")
 OWNER_CI = ("слияние из сессии без роли проверяет только CI (решение владельца 01.11, metis-0633): записи тестов и "
             "argus не нужны, а красный или незавершённый CI — отказ; CI не запускался из-за лимита минут — "
             "нужна запись `pantheon review test` на этом коммите (metis-0655)")
@@ -2038,8 +2045,12 @@ def owner_ci_problem(cwd, moved, args):
     """gh pr merge из сессии Claude без роли (окно владельца, metis-0633: #223 и #225 ушли так на красном CI) —
     только проверка CI тем же _ci_problem, без записей тестов и argus, без [merge_repos] и прочих правил ролей.
     Репозиторий — -R или remote папки cwd (не cd в команде), PR — ровно один номер, SHA — --match-head-commit, без
-    него — текущий head PR. Не понять, что сливается, или gh не ответил — отказ с тем, что указать. Текст, None или
-    Allow — пропуск с предупреждениями CI (metis-0650)."""
+    него — текущий head PR. Не понять, что сливается, или gh не ответил — отказ с тем, что указать. Слово команды не
+    вычислить (переменная, $(…), xargs — None в args) — отказ сразу (Д1' argus #235). Текст, None или Allow — пропуск
+    с предупреждениями CI (metis-0650)."""
+    if any(not isinstance(a, str) for a in args):
+        return (f"слово команды не вычислить (переменная, $(…), xargs) — укажи номер PR, -R и --match-head-commit "
+                f"буквально. {OWNER_CI}")
     # --admin владельцу не закрыт (судим только CI), а _merge_args на нём обрывает разбор
     _, repos, numbers, _, heads = _merge_args([a for a in args if a != "--admin" and not a.startswith("--admin=")])
     if len(numbers) != 1:
@@ -2063,7 +2074,7 @@ def owner_ci_problem(cwd, moved, args):
     head = (heads[0] or "").lower() if len(heads) == 1 else str(view.get("headRefOid") or "").lower()
     if len(heads) > 1 or not SHA_RE.fullmatch(head):
         return f"--match-head-commit — один SHA из 40 знаков или без него. {OWNER_CI}"
-    why, notes = _ci_problem(repo, pr, head, view)
+    why, notes = _ci_problem(repo, pr, head, view, owner=True)
     return f"{why}. {OWNER_CI}" if why else allow(notes)
 
 
