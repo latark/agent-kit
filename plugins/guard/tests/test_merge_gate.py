@@ -57,6 +57,22 @@ BG = dict(NORMAL, backgroundTaskId="bxyz")  # ответ фоновой: PostToo
 MISSING = object()
 
 
+def rest_runs(view):
+    """Ответы REST actions/runs?head_sha и commits/SHA/check-runs по rollup ответа gh pr view (metis-0633): каждая
+    CheckRun — свой запуск Actions своего workflow; событие — поле "event" записи (по умолчанию pull_request), head —
+    headRefOid; StatusContext в REST запусков нет."""
+    sha, rollup, runs, checks = view.get("headRefOid"), view.get("statusCheckRollup"), [], []
+    for i, c in enumerate(rollup if isinstance(rollup, list) else []):
+        if not isinstance(c, dict) or not ("conclusion" in c or "status" in c and "state" not in c):
+            continue
+        runs.append({"id": i, "name": c.get("workflowName"), "event": c.get("event", "pull_request"), "head_sha": sha,
+                     "check_suite_id": 1000 + i})
+        checks.append({"name": c.get("name"), "status": str(c.get("status") or "").lower(),
+                       "conclusion": str(c["conclusion"]).lower() if c.get("conclusion") else None, "head_sha": sha,
+                       "check_suite": {"id": 1000 + i}})
+    return {"total_count": len(runs), "workflow_runs": runs}, {"total_count": len(checks), "check_runs": checks}
+
+
 class Home:
     def __init__(self, root):
         self.root = root
@@ -89,6 +105,8 @@ class Home:
         # api …/contents/.github/workflows?ref=<sha> — с gh.wf.fail.<sha> 502, с gh.wf.<sha> его текст (код 0), иначе 404;
         # api …/pulls/N/files — $HOME/gh.files, с gh.api.fail — сбой, с gh.api.fail1 — сбой один раз (файл убирается)
         # api repos/o/<repo>/git/ref/heads/<ветка> — $HOME/gh.ref.<repo> (вершина base, metis-0404 Б1), нет файла — сбой
+        # api repos/o/<repo>/actions/runs?head_sha=… и …/commits/<sha>/check-runs — $HOME/gh.runs.<repo> и
+        # gh.checkruns.<repo> (rest_runs по rollup, metis-0633), нет файла — сбой
         with open(j("bin/gh"), "w") as fh:
             fh.write('#!/bin/sh\necho "$@" >> "$HOME/gh.log"\n[ -f "$HOME/gh.fail" ] && exit 1\n'
                      'case "$*" in\n'
@@ -98,6 +116,10 @@ class Home:
                      '[ -f "$HOME/gh.wf.$ref" ] && { cat "$HOME/gh.wf.$ref"; exit 0; }; '
                      'echo \'{"message":"Not Found","status":"404"}\'; echo "gh: Not Found (HTTP 404)" >&2; exit 1;;\n'
                      '*/git/ref/heads/*) r="$HOME/gh.ref.$(basename "${2%%/git/ref/*}")"; '
+                     '[ -f "$r" ] || exit 1; cat "$r"; exit 0;;\n'
+                     '*/actions/runs*) r="$HOME/gh.runs.$(basename "${2%%/actions/runs*}")"; '
+                     '[ -f "$r" ] || exit 1; cat "$r"; exit 0;;\n'
+                     '*/check-runs*) r="$HOME/gh.checkruns.$(basename "${2%%/commits/*}")"; '
                      '[ -f "$r" ] || exit 1; cat "$r"; exit 0;;\n'
                      'esac\n'
                      'if [ "$1" = api ]; then [ -f "$HOME/gh.api.fail1" ] && { rm -f "$HOME/gh.api.fail1"; exit 1; }; '
@@ -117,9 +139,11 @@ class Home:
         shutil.rmtree(self.j(".local/state/pantheon/merge-gate"), ignore_errors=True)
         shutil.rmtree(self.j(".local/state/pantheon/owner-log"), ignore_errors=True)
         for f in os.listdir(self.root):
-            if f.startswith(("gh.fail", "gh.log", "gh.api.fail", "gh.ci.fail", "gh.wf.", "gh.view.", "gh.ref.")):
+            if f.startswith(("gh.fail", "gh.log", "gh.api.fail", "gh.ci.fail", "gh.wf.", "gh.view.", "gh.ref.",
+                             "gh.runs.", "gh.checkruns.")):
                 os.remove(self.j(f))
         open(self.j("ai/pantheon/alerts.md"), "w").close()
+        self.runs = {}  # ответы REST запусков Actions (имя → (runs, check-runs) или "fail"); без записи — rest_runs
         self.tip = {}  # вершина ветки base от gh api …/git/ref/heads (имя → SHA, "fail" — сбой); без записи — baseRefOid
         self.view = {name: {"headRefOid": self.sha[name], "baseRefOid": BASE, "baseRefName": "main", "changedFiles": 0,
                             "statusCheckRollup": GREEN_KIT if name == "agent-kit" else GREEN} for name in self.sha}
@@ -143,6 +167,14 @@ class Home:
     def write_view(self, name, raw=None):
         with open(self.j("gh.view." + name), "w") as fh:
             fh.write(raw if raw is not None else json.dumps(self.view[name]))
+        for f in ("gh.runs." + name, "gh.checkruns." + name):
+            if os.path.exists(self.j(f)):
+                os.remove(self.j(f))
+        got = getattr(self, "runs", {}).get(name) or rest_runs(self.view[name])
+        if got != "fail":
+            for f, body in zip(("gh.runs." + name, "gh.checkruns." + name), got):
+                with open(self.j(f), "w") as fh:
+                    fh.write(body if isinstance(body, str) else json.dumps(body))
         tip = self.tip.get(name, self.view[name].get("baseRefOid"))
         if os.path.exists(self.j("gh.ref." + name)):
             os.remove(self.j("gh.ref." + name))
@@ -1430,9 +1462,9 @@ def t_ci(h):
     merge_case("CI: StatusContext ERROR — отказ", h.pre(cmd), False, "ci/legacy красная: ERROR")
     for status in ("IN_PROGRESS", "QUEUED", "PENDING", "WAITING"):
         h.ci([dict(RUN_OK, status=status, conclusion="")])
-        merge_case(f"CI: CheckRun {status} — отказ «дождись»", h.pre(cmd), False, "дождись")
+        merge_case(f"CI: CheckRun {status} — отказ «ещё идут»", h.pre(cmd), False, "ещё идут: check-traces")
     h.ci([RUN_OK, {"context": "ci/legacy", "state": "PENDING"}])
-    merge_case("CI: StatusContext PENDING — отказ «дождись»", h.pre(cmd), False, "ещё идут: ci/legacy")
+    merge_case("CI: StatusContext PENDING — отказ «ещё идут»", h.pre(cmd), False, "ещё идут: ci/legacy")
     h.ci([dict(RUN_OK, conclusion="SKIPPED"), dict(RUN_OK, name="lint", conclusion="NEUTRAL")])
     merge_case("CI: SKIPPED и NEUTRAL — проходит", h.pre(cmd), True)
     open(h.j("gh.ci.fail"), "w").close()
@@ -1513,7 +1545,7 @@ def t_ci(h):
     why = answer({"headRefOid": sha, "statusCheckRollup": [dict(RUN_OK, conclusion="FAILURE")]})
     check("_ci_problem: красный — отказ с именем", why and "check-traces" in why, why)
     why = answer({"headRefOid": sha, "statusCheckRollup": [dict(RUN_OK, status="PENDING")]})
-    check("_ci_problem: идёт — отказ «дождись»", why and "дождись" in why, why)
+    check("_ci_problem: идёт — отказ с командой ожидания", why and "ждать — командой вне хука" in why, why)
     why = answer({"headRefOid": sha})
     check("_ci_problem: нет rollup — «проверки GitHub не получены»", why and "проверки GitHub не получены" in why, why)
     empty = {"headRefOid": sha, "statusCheckRollup": []}
@@ -1582,15 +1614,31 @@ def _hook_out(h, cmd, pdir):
     return h.hook(event, pdir)
 
 
-def _saved(pr):
-    with open(os.path.join(FIXTURES, f"ci-rollup-pr{pr}.json"), encoding="utf-8") as fh:
+def _saved(pr, kind="rollup"):
+    """Сохранённый ответ GitHub по PR (шаг 0 metis-0633): rollup — gh pr view, runs — REST запусков Actions."""
+    with open(os.path.join(FIXTURES, f"ci-{kind}-pr{pr}.json"), encoding="utf-8") as fh:
         return json.load(fh)
 
 
+def _runs_on(saved, sha):
+    """Сохранённые ответы REST запусков с head_sha, заменённым на sha (SHA проверяемого PR в тесте)."""
+    head = saved["check_runs"]["check_runs"][0]["head_sha"]
+    text = json.dumps([saved["workflow_runs"], saved["check_runs"]]).replace(head, sha)
+    return tuple(json.loads(text))
+
+
+def _pr_runs(rollup):
+    """Запуски для ci_verdict по записям CheckRun rollup: событие — поле "event" записи, по умолчанию pull_request."""
+    return [{"workflowName": str(c.get("workflowName") or ""), "name": str(c.get("name") or ""),
+             "status": str(c.get("status") or ""), "conclusion": str(c.get("conclusion") or ""),
+             "event": c.get("event", "pull_request")} for c in rollup if isinstance(c, dict) and "context" not in c]
+
+
 def t_ci_required(h):
-    """metis-0633: обязательные проверки agent-kit по имени (REQUIRED_CHECKS) — нет её = «не встала», идёт = «дождись»
-    с командой ожидания вне хука, красная = отказ; дубль имени — худший итог; необязательная красная — пропуск с
-    предупреждением systemMessage. Шаг 0: сохранённые rollup PR 223 и 225 (слиты при красном CI) — отказ."""
+    """metis-0633: обязательные проверки agent-kit по имени (REQUIRED_CHECKS) — только запуск Actions от
+    pull_request на этом SHA и только SUCCESS: нет его (или только push) = «не встала», идёт = «дождись» с командой
+    ожидания вне хука, красная или SKIPPED = отказ; дубль имени — худший итог; необязательная красная — пропуск с
+    предупреждением systemMessage. Шаг 0: сохранённые ответы PR 223 и 225 (слиты при красном CI) — отказ."""
     kit, sha = "projects/agent-kit", h.sha["agent-kit"]
     h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"), rec("accept", "latark/agent-kit", 7, sha))
     cmd = f"gh pr merge 7 --match-head-commit {sha}"
@@ -1599,14 +1647,16 @@ def t_ci_required(h):
     merge_case("required: affected и traces зелёные, full пропущен — проходит", h.pre(cmd, pdir=kit), True)
     h.ci([TRACES, full], name="agent-kit")
     merge_case("required: нет tests/affected — отказ «не встали»", h.pre(cmd, pdir=kit), False,
-               "обязательные проверки GitHub ещё не встали: tests/affected")
+               "обязательные проверки GitHub ещё не встали (засчитывается запуск от pull_request на этом "
+               "коммите): tests/affected")
     merge_case("required: нет affected — в отказе команда ожидания вне хука", h.pre(cmd, pdir=kit), False, watch)
     h.ci([AFFECTED], name="agent-kit")
-    merge_case("required: нет check-traces/traces — отказ", h.pre(cmd, pdir=kit), False, "не встали: check-traces/traces")
+    merge_case("required: нет check-traces/traces — отказ", h.pre(cmd, pdir=kit), False,
+               "коммите): check-traces/traces")
     h.reset_log()
     h.ci([], name="agent-kit")
     merge_case("required: rollup пуст — отказ «не встали», а не пропуск по 404 workflows", h.pre(cmd, pdir=kit), False,
-               "не встали: tests/affected, check-traces/traces")
+               "коммите): tests/affected, check-traces/traces")
     log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
     check("required: rollup пуст — .github/workflows не спрашивает", "contents/.github/workflows" not in log, log)
     for status in ("QUEUED", "IN_PROGRESS", "PENDING", "WAITING"):
@@ -1615,11 +1665,55 @@ def t_ci_required(h):
                    f"проверки GitHub ещё идут: tests/affected на latark/agent-kit#7@{sha[:12]} — ждать")
     h.ci([dict(AFFECTED, status="IN_PROGRESS", conclusion=""), TRACES], name="agent-kit")
     merge_case("required: идёт — в отказе gh pr checks --watch", h.pre(cmd, pdir=kit), False, watch)
-    red_push = dict(TRACES, conclusion="FAILURE")
-    for rollup, how in (([AFFECTED, red_push, TRACES], "красная первой"), ([AFFECTED, TRACES, red_push], "красная второй")):
+    red_pr = dict(TRACES, conclusion="FAILURE")
+    for rollup, how in (([AFFECTED, red_pr, TRACES], "красная первой"), ([AFFECTED, TRACES, red_pr], "красная второй")):
         h.ci(rollup, name="agent-kit")
-        merge_case(f"required: дубль traces (push красная, PR зелёная, {how}) — отказ по худшей", h.pre(cmd, pdir=kit),
-                   False, "check-traces/traces красная: FAILURE")
+        merge_case(f"required: дубль traces от pull_request (красная и зелёная, {how}) — отказ по худшей",
+                   h.pre(cmd, pdir=kit), False, "check-traces/traces красная: FAILURE")
+    # событие: обязательную закрывает только запуск от pull_request (push проверяет ветку без слияния с base)
+    h.ci([AFFECTED, dict(TRACES, event="push")], name="agent-kit")
+    merge_case("required: traces только от push — отказ «не встали»", h.pre(cmd, pdir=kit), False,
+               "не встали (засчитывается запуск от pull_request на этом коммите): check-traces/traces")
+    h.ci([dict(AFFECTED, event="push"), dict(AFFECTED, event="workflow_dispatch"), TRACES], name="agent-kit")
+    merge_case("required: affected от push и workflow_dispatch — отказ «не встали»", h.pre(cmd, pdir=kit), False,
+               "этом коммите): tests/affected на")
+    h.ci([AFFECTED, dict(TRACES, event="push", conclusion="FAILURE"), TRACES], name="agent-kit")
+    merge_case("required: push-запуск traces красный, от pull_request зелёный — проходит", h.pre(cmd, pdir=kit), True)
+    # итог: обязательную закрывает только SUCCESS — SKIPPED (job не запускался) и NEUTRAL — отказ
+    for concl in ("SKIPPED", "NEUTRAL"):
+        h.ci([dict(AFFECTED, conclusion=concl), TRACES], name="agent-kit")
+        merge_case(f"required: affected {concl} — отказ", h.pre(cmd, pdir=kit), False,
+                   f"проверка GitHub tests/affected не прошла: {concl}")
+    h.ci([AFFECTED, TRACES, dict(AFFECTED, conclusion="SKIPPED", event="push")], name="agent-kit")
+    merge_case("required: SKIPPED от push при зелёном от pull_request — проходит", h.pre(cmd, pdir=kit), True)
+    # запуски берутся по SHA из --match-head-commit, два GET REST; сбой — отказ «не получены», а не пропуск
+    h.ci(GREEN_KIT, name="agent-kit")
+    h.reset_log()
+    merge_case("required: зелёные — проходит", h.pre(cmd, pdir=kit), True)
+    log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+    check("required: запуски спрошены по SHA — actions/runs?head_sha и commits/SHA/check-runs",
+          f"api repos/latark/agent-kit/actions/runs?head_sha={sha}&per_page=100" in log
+          and f"api repos/latark/agent-kit/commits/{sha}/check-runs?per_page=100" in log, log)
+    h.runs["agent-kit"] = "fail"
+    h.ci(GREEN_KIT, name="agent-kit")
+    merge_case("required: запуски Actions не получены — отказ", h.pre(cmd, pdir=kit), False,
+               "проверки GitHub не получены на latark/agent-kit#7")
+    merge_case("required: запуски не получены — «повтори позже», а не «почини»", h.pre(cmd, pdir=kit), False,
+               "повтори слияние позже")
+    h.runs["agent-kit"] = ('{"workflow_runs": [', "{}")
+    h.ci(GREEN_KIT, name="agent-kit")
+    merge_case("required: ответ запусков не JSON — отказ", h.pre(cmd, pdir=kit), False, "проверки GitHub не получены")
+    runs, checks = rest_runs(h.view["agent-kit"])
+    alien = [dict(c, check_suite={"id": 1}) for c in checks["check_runs"]]
+    h.runs["agent-kit"] = (runs, dict(checks, check_runs=alien))
+    h.ci(GREEN_KIT, name="agent-kit")
+    merge_case("required: проверка не от запуска Actions (чужой check_suite) — не засчитана, отказ",
+               h.pre(cmd, pdir=kit), False, "не встали")
+    other = [dict(r, head_sha="f" * 40) for r in runs["workflow_runs"]]
+    h.runs["agent-kit"] = (dict(runs, workflow_runs=other), checks)
+    h.ci(GREEN_KIT, name="agent-kit")
+    merge_case("required: запуски на другом SHA — не засчитаны, отказ", h.pre(cmd, pdir=kit), False, "не встали")
+    h.runs.clear()
     h.ci([AFFECTED, TRACES, dict(TRACES, status="QUEUED", conclusion="")], name="agent-kit")
     merge_case("required: дубль traces (зелёная и идущая) — отказ «ещё идут»", h.pre(cmd, pdir=kit), False,
                "ещё идут: check-traces/traces")
@@ -1630,22 +1724,22 @@ def t_ci_required(h):
     merge_case("required: красная и идущая — отказ по красной", h.pre(cmd, pdir=kit), False, "affected красная: FAILURE")
     h.ci([{"__typename": "StatusContext", "context": "affected", "state": "SUCCESS"}, TRACES], name="agent-kit")
     merge_case("required: StatusContext «affected» обязательную не заменяет — отказ", h.pre(cmd, pdir=kit), False,
-               "не встали: tests/affected")
+               "коммите): tests/affected")
     h.ci([dict(AFFECTED, workflowName="other"), TRACES], name="agent-kit")
     merge_case("required: job affected другого workflow не засчитывается — отказ", h.pre(cmd, pdir=kit), False,
-               "не встали: tests/affected")
+               "коммите): tests/affected")
     h.ci([dict(AFFECTED, workflowName=None), TRACES], name="agent-kit")
     merge_case("required: affected без workflowName не засчитывается — отказ", h.pre(cmd, pdir=kit), False,
-               "не встали: tests/affected")
+               "коммите): tests/affected")
     # ветка base: affected гоняется только на PR в main (tests.yml) — PR в другую ветку его не ждёт, traces — ждёт
     h.ci([TRACES], name="agent-kit", baseRefName="feature-x")
     merge_case("required: PR не в main — affected не обязателен, traces зелёная — проходит", h.pre(cmd, pdir=kit), True)
     h.ci([], name="agent-kit", baseRefName="feature-x")
     merge_case("required: PR не в main, rollup пуст — отказ по traces", h.pre(cmd, pdir=kit), False,
-               "не встали: check-traces/traces")
+               "коммите): check-traces/traces")
     h.ci([TRACES], name="agent-kit", baseRefName=None)
     merge_case("required: baseRefName нет — обязательны все, affected нет — отказ", h.pre(cmd, pdir=kit), False,
-               "не встали: tests/affected")
+               "коммите): tests/affected")
     # необязательная красная — пропуск и строка systemMessage; при отказе строки нет
     h.ci([AFFECTED, TRACES, dict(full, conclusion="FAILURE")], name="agent-kit", baseRefName="main")
     r = _hook_out(h, cmd, kit)
@@ -1660,12 +1754,13 @@ def t_ci_required(h):
     h.ci([dict(AFFECTED, conclusion="FAILURE"), TRACES, dict(full, conclusion="FAILURE")], name="agent-kit")
     r = _hook_out(h, cmd, kit)
     check("required: отказ — systemMessage нет", decision(r)[0] == "deny" and "systemMessage" not in r.stdout, r.stdout)
-    # шаг 0: сохранённые ответы gh pr view PR 223 и 225 (01.11 слиты при красном CI сессией без роли)
+    # шаг 0: сохранённые ответы gh pr view и REST запусков PR 223 и 225 (01.11 слиты при красном CI сессией без роли)
     for pr, want in ((223, "tests/affected красная: FAILURE; проверка GitHub check-traces/traces красная: FAILURE"),
                      (225, "tests/affected красная: FAILURE")):
-        saved = _saved(pr)
-        h.ci(saved["statusCheckRollup"], name="agent-kit", baseRefName="main")
-        merge_case(f"required: сохранённый rollup PR {pr} — отказ", h.pre(cmd, pdir=kit), False, want)
+        h.runs["agent-kit"] = _runs_on(_saved(pr, "runs"), sha)
+        h.ci(_saved(pr)["statusCheckRollup"], name="agent-kit", baseRefName="main")
+        merge_case(f"required: сохранённые ответы PR {pr} — отказ", h.pre(cmd, pdir=kit), False, want)
+    h.runs.clear()
     # другой репозиторий без записи в REQUIRED_CHECKS — как до 0633: обязательна каждая его проверка
     tg = h.sha["tg-read"]
     h.seed(rec("tests", "latark/tg-read", None, tg, "dev-opus"), rec("accept", "latark/tg-read", 3, tg))
@@ -1685,6 +1780,10 @@ def t_ci_verdict_unit(h):
     .github/workflows репозитория (имя workflow, job и ветка PR)."""
     mg = _load_merge_gate("merge_gate_ci_req")
     req = mg.required_checks("latark/agent-kit", "main")
+
+    def V(rollup, required):
+        return mg.ci_verdict(rollup, required, _pr_runs(rollup))
+
     check("required_checks: agent-kit в main — affected и traces",
           req == (("tests", "affected"), ("check-traces", "traces")), req)
     check("required_checks: регистр репозитория и владелец не важны",
@@ -1694,44 +1793,107 @@ def t_ci_verdict_unit(h):
     check("required_checks: base не строка — все", mg.required_checks("latark/agent-kit", None) == req)
     check("required_checks: другой репозиторий — пусто", mg.required_checks("latark/tg-read", "main") == ())
     check("required_checks: repo None — пусто", mg.required_checks(None, "main") == ())
-    v = mg.ci_verdict([AFFECTED, TRACES], req)
+    v = V([AFFECTED, TRACES], req)
     check("ci_verdict: обязательные зелёные — ok без предупреждений", v == ("ok", "", []), v)
-    v = mg.ci_verdict([TRACES], req)
-    check("ci_verdict: нет обязательной — wait «не встали»", v[0] == "wait" and "не встали: tests/affected" in v[1], v)
-    v = mg.ci_verdict([], req)
+    v = V([TRACES], req)
+    check("ci_verdict: нет обязательной — wait «не встали»", v[0] == "wait" and "коммите): tests/affected" in v[1], v)
+    v = V([], req)
     check("ci_verdict: пусто при обязательных — wait, а не empty", v[0] == "wait" and "не встали" in v[1], v)
-    v = mg.ci_verdict([dict(AFFECTED, status="IN_PROGRESS", conclusion=None), TRACES], req)
+    v = V([dict(AFFECTED, status="IN_PROGRESS", conclusion=None), TRACES], req)
     check("ci_verdict: обязательная идёт — wait «ещё идут»", v[0] == "wait" and "ещё идут: tests/affected" in v[1], v)
-    v = mg.ci_verdict([AFFECTED, TRACES, dict(TRACES, conclusion="FAILURE")], req)
+    v = V([AFFECTED, TRACES, dict(TRACES, conclusion="FAILURE")], req)
     check("ci_verdict: дубль — худший (fail)", v[0] == "fail" and "check-traces/traces красная" in v[1], v)
-    v = mg.ci_verdict([AFFECTED, dict(TRACES, conclusion="FAILURE"), TRACES], req)
+    v = V([AFFECTED, dict(TRACES, conclusion="FAILURE"), TRACES], req)
     check("ci_verdict: дубль, зелёная после красной — всё равно fail", v[0] == "fail", v)
-    v = mg.ci_verdict([AFFECTED, dict(TRACES, status="QUEUED", conclusion=None), TRACES], req)
+    v = V([AFFECTED, dict(TRACES, status="QUEUED", conclusion=None), TRACES], req)
     check("ci_verdict: дубль, идущая и зелёная — wait", v[0] == "wait", v)
-    v = mg.ci_verdict([dict(AFFECTED, conclusion="FAILURE"), dict(TRACES, status="QUEUED", conclusion=None)], req)
+    v = V([dict(AFFECTED, conclusion="FAILURE"), dict(TRACES, status="QUEUED", conclusion=None)], req)
     check("ci_verdict: красная важнее идущей", v[0] == "fail", v)
-    v = mg.ci_verdict([dict(AFFECTED, conclusion="FAILURE")], req)
+    v = V([dict(AFFECTED, conclusion="FAILURE")], req)
     check("ci_verdict: красная важнее отсутствующей", v[0] == "fail", v)
-    v = mg.ci_verdict([AFFECTED, TRACES, dict(RUN_OK, conclusion="FAILURE")], req)
+    v = V([AFFECTED, TRACES, dict(RUN_OK, conclusion="FAILURE")], req)
     check("ci_verdict: необязательная красная — ok и предупреждение",
           v[0] == "ok" and v[2] == ["необязательная проверка GitHub check-traces красная: FAILURE"], v)
-    v = mg.ci_verdict([AFFECTED, TRACES, dict(RUN_OK, status="QUEUED", conclusion=None)], req)
+    v = V([AFFECTED, TRACES, dict(RUN_OK, status="QUEUED", conclusion=None)], req)
     check("ci_verdict: необязательная идёт — ok без предупреждения", v == ("ok", "", []), v)
-    v = mg.ci_verdict([dict(AFFECTED, conclusion="FAILURE"), TRACES, dict(RUN_OK, conclusion="FAILURE")], req)
+    v = V([dict(AFFECTED, conclusion="FAILURE"), TRACES, dict(RUN_OK, conclusion="FAILURE")], req)
     check("ci_verdict: при отказе предупреждение тоже отдаётся", v[0] == "fail" and len(v[2]) == 1, v)
     v = mg.ci_verdict([dict(RUN_OK, conclusion="FAILURE"), RUN_OK])
     check("ci_verdict: без обязательных — дубль зелёная после красной — fail", v[0] == "fail", v)
     v = mg.ci_verdict([RUN_OK, {"context": "ci/legacy", "state": "PENDING"}])
     check("ci_verdict: без обязательных — StatusContext PENDING — wait", v[0] == "wait" and "ci/legacy" in v[1], v)
-    v = mg.ci_verdict([dict(AFFECTED, conclusion="SKIPPED"), dict(TRACES, conclusion="NEUTRAL")], req)
-    check("ci_verdict: SKIPPED и NEUTRAL у обязательных — ok", v[0] == "ok", v)
-    v = mg.ci_verdict([AFFECTED, TRACES, "x"], req)
+    v = V([dict(AFFECTED, conclusion="SKIPPED"), dict(TRACES, conclusion="NEUTRAL")], req)
+    check("ci_verdict: SKIPPED и NEUTRAL у обязательных — fail «не прошла», обе названы",
+          v[0] == "fail" and "tests/affected не прошла: SKIPPED" in v[1]
+          and "check-traces/traces не прошла: NEUTRAL" in v[1], v)
+    v = mg.ci_verdict([dict(AFFECTED, conclusion="SKIPPED"), dict(TRACES, conclusion="NEUTRAL")])
+    check("ci_verdict: без обязательных SKIPPED и NEUTRAL — ok (как до 0633)", v[0] == "ok", v)
+    v = mg.ci_verdict([AFFECTED, TRACES], req)
+    check("ci_verdict: обязательные есть, запусков нет (None) — fail «не получены»",
+          v[0] == "fail" and v[1] == mg.CI_NONE, v)
+    v = mg.ci_verdict([AFFECTED, TRACES], req, [])
+    check("ci_verdict: запусков пусто — wait «не встали» по обеим",
+          v[0] == "wait" and "tests/affected, check-traces/traces" in v[1], v)
+    v = mg.ci_verdict([AFFECTED, TRACES], req, _pr_runs([AFFECTED, dict(TRACES, event="push")]))
+    check("ci_verdict: traces только от push — wait «не встали»", v[0] == "wait" and "check-traces/traces" in v[1]
+          and "tests/affected" not in v[1], v)
+    v = mg.ci_verdict([AFFECTED, TRACES], req,
+                      _pr_runs([AFFECTED, TRACES, dict(TRACES, event="push", conclusion="FAILURE")]))
+    check("ci_verdict: красный push-запуск при зелёном от pull_request — ok", v == ("ok", "", []), v)
+    v = mg.ci_verdict([AFFECTED, TRACES], req, _pr_runs([AFFECTED, TRACES]) + ["x", None])
+    check("ci_verdict: мусор в запусках пропускается", v == ("ok", "", []), v)
+    v = mg.ci_verdict([], req, _pr_runs([AFFECTED, TRACES]))
+    check("ci_verdict: rollup пуст, запуски от pull_request зелёные — ok", v[0] == "ok", v)
+    v = mg.ci_verdict([AFFECTED, TRACES, dict(TRACES, conclusion="FAILURE")], req, _pr_runs([AFFECTED, TRACES]))
+    check("ci_verdict: красная обязательная в rollup (push), запуски от pull_request зелёные — ok без предупреждения",
+          v == ("ok", "", []), v)
+    v = mg.ci_verdict([AFFECTED, TRACES], (), _pr_runs([dict(AFFECTED, conclusion="FAILURE")]))
+    check("ci_verdict: без обязательных запуски не читаются", v == ("ok", "", []), v)
+    # ci_runs: связь check-runs с запусками Actions по check_suite_id и head_sha
+    sha = "a" * 40
+    wr = {"workflow_runs": [{"name": "tests", "event": "pull_request", "head_sha": sha, "check_suite_id": 5},
+                            {"name": "check-traces", "event": "push", "head_sha": sha, "check_suite_id": 6},
+                            {"name": "tests", "event": "pull_request", "head_sha": "b" * 40, "check_suite_id": 7}]}
+    cr = {"check_runs": [{"name": "affected", "status": "completed", "conclusion": "success", "head_sha": sha,
+                          "check_suite": {"id": 5}},
+                         {"name": "traces", "status": "in_progress", "conclusion": None, "head_sha": sha,
+                          "check_suite": {"id": 6}},
+                         {"name": "affected", "status": "completed", "conclusion": "success", "head_sha": sha,
+                          "check_suite": {"id": 99}},
+                         {"name": "affected", "status": "completed", "conclusion": "success", "head_sha": sha,
+                          "check_suite": {"id": 7}},
+                         {"name": "affected", "status": "completed", "conclusion": "success", "head_sha": "c" * 40,
+                          "check_suite": {"id": 5}}]}
+    got = mg.ci_runs(wr, cr, sha)
+    check("ci_runs: запуск Actions на этом SHA — workflow, job, итог и событие",
+          got == [{"workflowName": "tests", "name": "affected", "status": "completed", "conclusion": "success",
+                   "event": "pull_request"},
+                  {"workflowName": "check-traces", "name": "traces", "status": "in_progress", "conclusion": "",
+                   "event": "push"}], got)
+    for bad, how in ((None, "None"), ({}, "без workflow_runs"),
+                     ({"workflow_runs": [{"name": "x"}]}, "без check_suite_id"),
+                     ({"workflow_runs": ["x"]}, "не словарь"), ({"workflow_runs": {"a": 1}}, "словарь вместо списка")):
+        check(f"ci_runs: ответ запусков {how} — None", mg.ci_runs(bad, cr, sha) is None, mg.ci_runs(bad, cr, sha))
+    for bad, how in (({"check_runs": [{"name": "x", "head_sha": sha}]}, "без check_suite"),
+                     ([], "список вместо словаря")):
+        check(f"ci_runs: ответ check-runs {how} — None", mg.ci_runs(wr, bad, sha) is None, mg.ci_runs(wr, bad, sha))
+    check("ci_runs: пустые ответы — пустой список",
+          mg.ci_runs({"workflow_runs": []}, {"check_runs": []}, sha) == [])
+    v = V([AFFECTED, TRACES, "x"], req)
     check("ci_verdict: не словарь — fail", v[0] == "fail" and "не разобрана" in v[1], v)
-    for pr, red in ((223, ["tests/affected", "check-traces/traces"]), (225, ["tests/affected"])):
-        saved = _saved(pr)
-        v = mg.ci_verdict(saved["statusCheckRollup"], mg.required_checks("latark/agent-kit", saved["baseRefName"]))
-        check(f"ci_verdict: сохранённый rollup PR {pr} — fail по {', '.join(red)}",
-              v[0] == "fail" and all(f"{n} красная" in v[1] for n in red), v)
+    for pr, red, events in ((223, ["tests/affected", "check-traces/traces"], ["pull_request", "pull_request", "push"]),
+                            (225, ["tests/affected"], ["pull_request", "pull_request", "push"])):
+        saved, runs = _saved(pr), _saved(pr, "runs")
+        head = saved["headRefOid"]
+        got = mg.ci_runs(runs["workflow_runs"], runs["check_runs"], head)
+        check(f"ci_runs: сохранённые запуски PR {pr} — 4 проверки, события как на GitHub",
+              got is not None and len(got) == 4 and sorted({(g["workflowName"], g["event"]) for g in got}) ==
+              sorted({("tests", "pull_request"), ("check-traces", "pull_request"), ("check-traces", "push")}), got)
+        v = mg.ci_verdict(saved["statusCheckRollup"], mg.required_checks("latark/agent-kit", saved["baseRefName"]), got)
+        check(f"ci_verdict: сохранённые ответы PR {pr} — fail по {', '.join(red)}",
+              v[0] == "fail" and all(f"{n} красная" in v[1] for n in red) and v[1].count("красная") == len(red), v)
+        check(f"ci_runs: запуски PR {pr} на чужом SHA — пусто", mg.ci_runs(runs["workflow_runs"], runs["check_runs"],
+                                                                         "0" * 40) == [])
     # обязательные имена — настоящие job workflows репозитория (сверка с файлами .github/workflows)
     wf_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(GUARD)))), ".github",
                           "workflows")

@@ -53,6 +53,22 @@ if sys.argv[1:3] == ["pr", "view"]:
 if sys.argv[1:3] == ["pr", "merge"]:
     p = os.path.join(rec, "gh-merge-rc")
     sys.exit(int(open(p).read()) if os.path.exists(p) else 0)
+if sys.argv[1] == "api" and ("/actions/runs?" in sys.argv[2] or "/check-runs?" in sys.argv[2]):
+    # запуски Actions (metis-0633): по rollup из gh-view.json, событие — поле "event" записи (по умолчанию
+    # pull_request); с gh-runs-fail — сбой
+    if os.path.exists(os.path.join(rec, "gh-runs-fail")):
+        sys.exit(1)
+    v = json.load(open(os.path.join(rec, "gh-view.json")))
+    sha, runs, checks = v.get("headRefOid"), [], []
+    for i, c in enumerate(v.get("statusCheckRollup") or []):
+        if isinstance(c, dict) and "context" not in c:
+            runs.append({"name": c.get("workflowName"), "event": c.get("event", "pull_request"), "head_sha": sha,
+                         "check_suite_id": 1000 + i})
+            checks.append({"name": c.get("name"), "status": str(c.get("status") or "").lower(),
+                           "conclusion": str(c["conclusion"]).lower() if c.get("conclusion") else None,
+                           "head_sha": sha, "check_suite": {"id": 1000 + i}})
+    print(json.dumps({"workflow_runs": runs} if "/actions/runs?" in sys.argv[2] else {"check_runs": checks}))
+    sys.exit(0)
 if sys.argv[1] == "api" and "/pulls/" in sys.argv[2] and sys.argv[2].split("?")[0].endswith("/files"):
     p = os.path.join(rec, "gh-files.jsonl")
     if not os.path.exists(p):
@@ -168,7 +184,7 @@ class Box:
         with open(os.path.join(self.rec, "gh-view.json"), "w") as fh:
             json.dump({"headRefOid": sha, "state": state, "isDraft": draft, "title": title,
                        **({} if base is None else {"baseRefName": base}),
-                       "statusCheckRollup": ci("SUCCESS", "SKIPPED") if checks is None else checks,
+                       "statusCheckRollup": ci("SUCCESS", "SUCCESS") if checks is None else checks,
                        "changedFiles": len(recs) if count is None else count}, fh)
         with open(os.path.join(self.rec, "gh-files.jsonl"), "w") as fh:
             fh.write("".join(json.dumps(r) + "\n" for r in recs))
@@ -421,7 +437,35 @@ def test_ci_pending_and_presence():
 
 def test_ci_required_names():
     """metis-0633: проход по Touch ID судит CI тем же ci_verdict, что шлюз: необязательная красная не мешает, дубль
-    обязательной с красной записью — отказ, PR не в main не ждёт tests/affected."""
+    обязательной с красной записью — отказ, PR не в main не ждёт tests/affected; обязательную закрывает только запуск
+    от pull_request с SUCCESS (SKIPPED — отказ, только push — ждёт), сбой запросов запусков — ждёт."""
+    b = Box()
+    b.request()
+    b.view(SHA, checks=ci("SUCCESS", "SKIPPED"))
+    b.run()
+    check("обязательная traces SKIPPED → окна нет, заявка снята с тревогой",
+          not b.windows() and not b.merges() and b.req() is None and "traces не прошла: SKIPPED" in b.alerts(),
+          b.alerts())
+    b = Box()
+    b.request()
+    b.view(SHA, checks=ci("SUCCESS") + [dict(ci("SUCCESS", "SUCCESS")[1], event="push")])
+    b.run()
+    check("traces только от push → окна нет, ждёт", not b.windows() and b.req() is not None, b.outs[-1])
+    b = Box()
+    b.request()
+    b.view(SHA)
+    b.set("gh-runs-fail", "")
+    b.run()
+    check("запуски Actions не получены → окна нет, заявка ждёт (не снята)", not b.windows() and b.req() is not None,
+          b.outs[-1])
+    os.remove(os.path.join(b.rec, "gh-runs-fail"))
+    b.run()
+    check("запуски снова отвечают → окно и слияние", len(b.windows()) == 1 and len(b.merges()) == 1, b.outs[-1])
+    calls = [json.loads(x)["argv"] for x in open(os.path.join(b.rec, "gh-argv.jsonl"))]
+    runs_calls = [a for a in calls if a[0] == "api" and ("/actions/runs?" in a[1] or "/check-runs?" in a[1])]
+    check("запуски спрошены по SHA заявки", [f"repos/{REPO}/actions/runs?head_sha={SHA}&per_page=100"] in
+          [a[1:] for a in runs_calls] and [f"repos/{REPO}/commits/{SHA}/check-runs?per_page=100"] in
+          [a[1:] for a in runs_calls], runs_calls)
     b = Box()
     b.request()
     b.view(SHA, checks=ci("SUCCESS", "SUCCESS", "FAILURE"))
@@ -704,15 +748,16 @@ def test_ci_matches_guard():
         tree = ast.parse(open(path, encoding="utf-8").read())
         got = {}
         for n in tree.body:
-            if isinstance(n, ast.FunctionDef) and n.name in ("ci_verdict", "required_checks"):
+            if isinstance(n, ast.FunctionDef) and n.name in ("ci_verdict", "ci_runs", "required_checks"):
                 got[n.name] = ast.dump(n)
             elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) \
-                    and n.targets[0].id in ("REQUIRED_CHECKS", "CI_OK", "CI_WAIT", "CI_NONE"):
+                    and n.targets[0].id in ("REQUIRED_CHECKS", "CI_RUNS_API", "CI_OK", "CI_WAIT", "CI_NONE"):
                 got[n.targets[0].id] = ast.dump(n.value)
         return got
 
     mine, gate = parts(os.path.join(LIBDIR, "merge.py")), parts(os.path.join(GUARD_HOOKS, "merge_gate.py"))
-    names = ("ci_verdict", "required_checks", "REQUIRED_CHECKS", "CI_OK", "CI_WAIT", "CI_NONE")
+    names = ("ci_verdict", "ci_runs", "required_checks", "REQUIRED_CHECKS", "CI_RUNS_API", "CI_OK", "CI_WAIT",
+             "CI_NONE")
     check("merge.py и merge_gate.py: все части разбора CI есть в обоих", all(k in mine and k in gate for k in names),
           (sorted(mine), sorted(gate)))
     for k in names:
@@ -720,12 +765,17 @@ def test_ci_matches_guard():
     code = ("import sys, importlib.util\n"
             "s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
             "s.loader.exec_module(m)\n"
-            "print(m.ci_state(m.ci_verdict and [], m.required_checks('o/agent-kit', 'main'))[0], "
+            "req = m.required_checks('o/agent-kit', 'main')\n"
+            "ok = [{'workflowName': w, 'name': j, 'status': 'COMPLETED', 'conclusion': 'SUCCESS', "
+            "'event': 'pull_request'} for w, j in req]\n"
+            "print(m.ci_state([], req)[0], m.ci_state([], req, [])[0], m.ci_state([], req, ok)[0], "
+            "m.ci_state([], req, [dict(ok[0], conclusion='SKIPPED'), ok[1]])[0], "
             "m.ci_state([], ())[0], m.ci_state([{'name': 'x', 'status': 'COMPLETED', 'conclusion': 'SUCCESS'}])[1])"
             % os.path.join(LIBDIR, "merge.py"))
     r = subprocess.run([PY311, "-I", "-c", code], capture_output=True, text=True, timeout=60)
-    check("ci_state: пусто при обязательных — wait, пусто без них — wait, зелёное — «CI ✓ (1)»",
-          r.stdout.split() == ["wait", "wait", "CI", "✓", "(1)"], r.stdout + r.stderr)
+    check("ci_state: обязательные без запусков (None) — wait, запусков нет — wait, зелёные от pull_request — ok, "
+          "SKIPPED — fail; пусто без обязательных — wait, зелёное — «CI ✓ (1)»",
+          r.stdout.split() == ["wait", "wait", "ok", "fail", "wait", "CI", "✓", "(1)"], r.stdout + r.stderr)
 
 
 PJ = "plugins/pantheon/.claude-plugin/plugin.json"
