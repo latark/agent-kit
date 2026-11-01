@@ -43,8 +43,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         «Лимит» для сводки (lib/night.py)
   pantheon night ask <id> <направление> [ГГГГ-ММ-ДД]   вопрос о ночной пачке для окна вопросов Зевса: ночь
                                         открывается только по вашему «Да — ночь <дата>», sha256 пачки сверяется
-  pantheon read request|run|status|cancel   чтение личного чата по заявке (metis-0267, lib/read.py): заявка → ваше
-                                        «да» на [read-<rid>] → выгрузка и разбор плановым проходом → вы одобряете пункты
+  pantheon read request|run|status|cancel   чтение переписки по заявке (metis-0267, 0508, lib/read.py): папка, чаты
+                                        по имени, @имени или ссылке → проход находит чаты → ваше «да» на [read-<rid>]
+                                        со списком чатов → выгрузка и один разбор → вы одобряете пункты; источник —
+                                        надстройка из [read] в STATE/config.toml
   pantheon merge request|run|status|cancel   слияние PR ядра по Touch ID (metis-0285, lib/merge.py): заявка роли →
                                         плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA
   pantheon outside test|serve|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
