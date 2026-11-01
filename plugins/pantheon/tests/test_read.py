@@ -1525,6 +1525,170 @@ def test_reading_ttl_fits_worst_case():
     check("сроки: худший разбор частями ≤ READING_TTL", worst <= READ.READING_TTL, (worst, READ.READING_TTL))
 
 
+# --- очередь окна роли (metis-0508): окну STATE закрыт, заявку заводит проход ----------------------------------------
+
+WIN = "themis-sources"
+
+
+def _win(b, name=WIN):
+    """Окно роли: PANTHEON_TMP — папка tmp его кэша. → (окружение окна, папка очереди окна)."""
+    cache = os.path.join(b.home, "Library", "Caches", "pantheon-sandbox", name)
+    os.makedirs(os.path.join(cache, "tmp"), exist_ok=True)
+    return {"PANTHEON_TMP": os.path.join(cache, "tmp")}, os.path.join(cache, "read")
+
+
+def _win_request(b, extra, **kw):
+    a = {"direction": "demo-dir", "since": "2026-10-18", "until": "2026-10-18", "why": "о чём договорились по встрече"}
+    a.update(kw)
+    args = ["read", "request", "--folder", "Торги"]
+    for k, v in a.items():
+        args += ["--" + k, v]
+    os.chmod(b.state, 0o500)   # как песочница окна: запись в STATE закрыта
+    try:
+        r = b.cli(args, extra=extra)
+    finally:
+        os.chmod(b.state, 0o700)
+    m = re.search(r"Заявка read-(\S+):", r.stdout)
+    return r, (m.group(1) if m else None)
+
+
+def _queued(rid, **kw):
+    req = {"rid": rid, "direction": "demo-dir", "specs": [{"kind": "chat", "q": CHAT}], "since": "2026-10-18",
+           "until": "2026-10-18", "why": "о чём договорились", "profile": "default", "steps": ["reader", "verify"],
+           "by": "владелец", "created": T0}
+    req.update(kw)
+    return json.dumps(req, ensure_ascii=False)
+
+
+def _put(q, name, text):
+    os.makedirs(q, exist_ok=True)
+    p = os.path.join(q, name)
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return p
+
+
+def _events(b):
+    p = os.path.join(b.state, "logs", "read.jsonl")
+    if not os.path.exists(p):
+        return [], ""
+    text = open(p, encoding="utf-8").read()
+    return [json.loads(x) for x in text.splitlines() if x.strip()], text
+
+
+def test_window_queue_flow():
+    """Окно роли: заявка — в очередь окна (STATE не трогается), проход заводит её в STATE/read; by — имя окна по папке
+    кэша, а не из файла и не из окружения; created — время прохода."""
+    b = Box()
+    extra, q = _win(b)
+    r, rid = _win_request(b, extra)
+    p = os.path.join(q, f"{rid}.req.json")
+    check("окно: заявка принята в очередь окна, STATE не тронут", r.returncode == 0 and rid and os.path.isfile(p)
+          and "в очереди окна" in r.stdout and "плановый проход" in r.stdout
+          and not os.path.exists(os.path.join(b.state, "read")), r.stdout + r.stderr)
+    check("окно: файл очереди 0600, папка очереди 0700", os.path.isfile(p)
+          and stat.S_IMODE(os.stat(p).st_mode) == 0o600 and stat.S_IMODE(os.stat(q).st_mode) == 0o700)
+    s = b.cli(["read", "status"], extra=extra)
+    check("окно: status показывает заявку очереди", f"read-{rid}\tdemo-dir\tв очереди окна" in s.stdout, s.stdout)
+    data = json.loads(open(p, encoding="utf-8").read())
+    data.update(by="владелец", created=T0 - 10 * 86400)   # окно переписало свой файл
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(data, ensure_ascii=False))
+    r = b.run(T0 + 10, extra={"PANTHEON_SESSION": "zeus", "PANTHEON_ROLE": "zeus"})
+    d = b.folder(rid)
+    req = json.load(open(os.path.join(d, "request.json"), encoding="utf-8")) if os.path.isdir(d) else {}
+    check("проход: заявка из очереди заведена и разобрана, файл очереди удалён", os.path.isdir(d) and not os.path.exists(p)
+          and b.st(rid)["phase"] == "requested" and "из очередей окон заведено заявок 1" in r.stdout,
+          (r.stdout, r.stderr[-400:]))
+    check("проход: by — имя окна по папке кэша (не из файла и не из окружения)", req.get("by") == WIN, req)
+    check("проход: created — время прохода, а не из файла", req.get("created") == T0 + 10, req)
+    check("проход: заявка — те же указания, что подало окно",
+          req.get("specs") == [{"kind": "folder", "q": "Торги"}] and req.get("why") == "о чём договорились по встрече",
+          req)
+
+
+def test_window_queue_refusals():
+    """Проверки заявки в окне остаются: отказ сразу, в очередь ничего; cancel в окне снимает заявку из очереди."""
+    b = Box()
+    extra, q = _win(b)
+    for kw, why in ((dict(direction="nope"), "нет направления"), (dict(why="a <<< b"), "метка в why")):
+        r, rid = _win_request(b, extra, **kw)
+        check(f"окно: отказ сразу — {why}", r.returncode == 2 and rid is None
+              and (not os.path.isdir(q) or not os.listdir(q)), r.stdout + r.stderr)
+    b2 = Box(config=False)
+    extra2, q2 = _win(b2)
+    r, rid = _win_request(b2, extra2)
+    check("окно: нет источника — отказ сразу", r.returncode == 2 and "источников чтения нет" in r.stderr
+          and not os.path.isdir(q2), r.stdout + r.stderr)
+    r, rid = _win_request(b, extra)
+    c = b.cli(["read", "cancel", rid], extra=extra)
+    check("окно: cancel снимает заявку из очереди", c.returncode == 0 and not os.path.exists(os.path.join(q, f"{rid}.req.json")),
+          c.stdout + c.stderr)
+    c = b.cli(["read", "cancel", rid], extra=extra)
+    check("окно: cancel чужой или принятой заявки — отказ с подсказкой", c.returncode == 1 and "вне окна" in c.stderr,
+          c.stdout + c.stderr)
+
+
+def test_window_queue_bad_input():
+    """Проход заново проверяет каждую заявку очереди: дубль номера, ссылка вместо файла, жёсткая ссылка, мусор, не
+    JSON, чужой rid внутри, больше предела, не проходит validate — удаляется без заявки, в журнале только код."""
+    b = Box()
+    _, q = _win(b)
+    ok, dup = "20261015-1200-0a01", "20261015-1200-0a02"
+    b2_text = _queued(dup)
+    os.makedirs(os.path.join(b.state, "read", dup), mode=0o700)
+    with open(os.path.join(b.state, "read", dup, "request.json"), "w", encoding="utf-8") as fh:
+        fh.write(_queued(dup, direction="demo-dir", why="СТАРАЯ"))
+    _put(q, f"{ok}.req.json", _queued(ok))
+    _put(q, f"{dup}.req.json", b2_text)
+    target = _put(os.path.join(b.tmp, "elsewhere"), "real.json", _queued("20261015-1200-0a03"))
+    os.symlink(target, os.path.join(q, "20261015-1200-0a03.req.json"))
+    hard = _put(os.path.join(b.tmp, "elsewhere"), "hard.json", _queued("20261015-1200-0a04"))
+    os.link(hard, os.path.join(q, "20261015-1200-0a04.req.json"))
+    _put(q, "20261015-1200-0a05.req.json", "не json {")
+    _put(q, "20261015-1200-0a06.req.json", _queued("20261015-1200-0a99"))
+    big = json.loads(_queued("20261015-1200-0a07"))
+    big["pad"] = "x" * (READ.QUEUE_MAX + 10)
+    _put(q, "20261015-1200-0a07.req.json", json.dumps(big))
+    _put(q, "20261015-1200-0a08.req.json", _queued("20261015-1200-0a08", direction="nope"))
+    _put(q, "20261015-1200-0a09.req.json", _queued("20261015-1200-0a09", why="ВОПРОС-КАНАРЕЙКА <<<TG-x"))
+    _put(q, "garbage.txt", "МУСОР-КАНАРЕЙКА")
+    os.makedirs(os.path.join(q, "20261015-1200-0a10.req.json"))
+    fresh = _put(q, ".20261015-1200-0a11.req.json.1.abc", "{")
+    old = _put(q, ".20261015-1200-0a12.req.json.1.abc", "{")
+    os.utime(old, (time.time() - 3600, time.time() - 3600))
+    r = b.run(T0 + 10)
+    made = sorted(os.listdir(os.path.join(b.state, "read")))
+    check("плохой вход: заведена только годная заявка (и дубль не тронут)", made == [ok, dup], (made, r.stdout, r.stderr))
+    check("плохой вход: дубль номера не переписал прежнюю заявку", "СТАРАЯ" in open(
+        os.path.join(b.state, "read", dup, "request.json"), encoding="utf-8").read())
+    check("плохой вход: ссылка снята, её цель цела", os.path.isfile(target) and not os.path.lexists(
+        os.path.join(q, "20261015-1200-0a03.req.json")))
+    check("плохой вход: очередь пуста, кроме свежего временного файла окна", os.listdir(q) == [os.path.basename(fresh)],
+          os.listdir(q))
+    ev, text = _events(b)
+    codes = sorted(e["event"] for e in ev if e["event"].startswith("queue-"))
+    want = sorted(["queue-bad-dup", "queue-bad-link", "queue-bad-unreadable", "queue-bad-json", "queue-bad-json",
+                   "queue-bad-big", "queue-bad-invalid", "queue-bad-invalid", "queue-bad-name", "queue-bad-notfile",
+                   "queue-bad-tmp"])
+    check("плохой вход: в журнале — код каждой плохой заявки", codes == want, codes)
+    check("плохой вход: в журнале нет текста заявок", "КАНАРЕЙКА" not in text and "СТАРАЯ" not in text
+          and "Торги" not in text, text[-600:])
+    r2 = b.run(T0 + 20)
+    check("повторный проход: заявки из очереди не заводятся второй раз", sorted(os.listdir(os.path.join(b.state, "read")))
+          == [ok, dup] and "из очередей окон" not in r2.stdout, r2.stdout)
+
+
+def test_window_queue_bad_window_name():
+    """Имя окна берётся по папке кэша: папка не по образцу имени окна — заявки из неё не заводятся."""
+    b = Box()
+    _, q = _win(b, name="Bad.Name")
+    _put(q, "20261015-1200-0b01.req.json", _queued("20261015-1200-0b01"))
+    b.run(T0 + 10)
+    check("окно с именем не по образцу: заявки нет", not os.path.isdir(os.path.join(b.state, "read"))
+          or not os.listdir(os.path.join(b.state, "read")))
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
