@@ -18,7 +18,6 @@
 Без sudo и pmset на запись: только `caffeinate`, `pmset -g batt`, `sysctl`, `ps`.
 """
 import contextlib
-import json
 import os
 import re
 import signal

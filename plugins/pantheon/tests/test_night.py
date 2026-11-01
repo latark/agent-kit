@@ -23,7 +23,6 @@ tempfile.tempdir = _ROOT
 os.environ["TMPDIR"] = _ROOT
 _atexit.register(_shutil.rmtree, _ROOT, True)
 import importlib.util
-import time
 from datetime import date, datetime, timedelta
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -169,7 +168,7 @@ def test_snapshot_age():
     e2.watch(t)
     check("снимок недельного лимита" not in e2.alerts(), "120 мин — строка в тревогах, а порог 180")
     # нет снимка вовсе
-    e3 = Env()
+    Env()
     m = N.measure(t)
     check(not m["known"] and m["stale"] and "снимка нет" in m["why"], f"без снимка: {m}")
     # seven-day нет — неделя из последней строки week-usage
@@ -824,7 +823,7 @@ def test_oneshot_id_by_source_0284():
 
 def test_pack_text_home_prefix_0284():
     """Путь пачки в задании: «~» только вместо приставки HOME, а не первого вхождения (ревью argus, п. 4)."""
-    e = Env()
+    Env()
     saved = (P.HOME, P.PANTHEON)
     try:
         P.HOME, P.PANTHEON = "/h", "/x/h/pan"

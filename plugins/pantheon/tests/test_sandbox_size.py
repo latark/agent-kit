@@ -194,7 +194,7 @@ def main():
     big = ", ".join(f'"~/private/{"x" * 40}-{i}"' for i in range(1500))
     open(pol, "w").write(f"[private]\npaths = [{big}]\n")
     before = open(os.path.join(state, "settings", "athena-shop.json")).read()
-    r1, r2 = build(env), build(env)
+    r1, _ = build(env), build(env)
     alerts = open(os.path.join(home, "alerts.md")).read() if os.path.exists(os.path.join(home, "alerts.md")) else ""
     after = open(os.path.join(state, "settings", "athena-shop.json")).read()
     check("предохранитель: окно больше предела не пересобрано, прежний файл на месте, одна тревога",

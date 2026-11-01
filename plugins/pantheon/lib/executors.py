@@ -18,7 +18,6 @@ PANTHEON_CODEX_TIMEOUT_S (общий предел, 7200), PANTHEON_CODEX_HELLO_S
 (SIGTERM → SIGKILL, 5).
 """
 import fnmatch
-import hashlib
 import importlib.util
 import json
 import os

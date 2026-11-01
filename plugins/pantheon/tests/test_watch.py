@@ -1313,7 +1313,7 @@ def test_word_launch_0523():
         fh.write("[]")
     e.run("watch", t=T0 + 400 + 13 * 3600)
     check(not _bgs(e, "wl-two"), f"0523: запись старше 12 ч исполнена: {e.calls()}")
-    check("«окна по вашему ответу» упала" not in e.alerts(), f"0523: испорченный word-launch.json уронил проверку")
+    check("«окна по вашему ответу» упала" not in e.alerts(), "0523: испорченный word-launch.json уронил проверку")
     # шаблон печатает pantheon launch-question; чужой глагол, лишнее и неизвестное имя — код 2
     r = e.run("launch-question", "metis-0533", "запустить", "wl-two", t=T0)
     check(r.returncode == 0 and "вопрос: [metis-0533] Запустить wl-two?" in r.stdout

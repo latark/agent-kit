@@ -196,7 +196,6 @@ ENVF = ("import os, sys\nprint(repr((os.environ.get('HOME'), os.environ.get('TMP
 p = mkplugin({"test_env1.py": ENVF, "test_env2.py": ENVF})
 env = dict(os.environ, PANTHEON_STATE="/x", PANTHEON_HOME="/y", FORCE_COLOR="1")
 r = run(["--log-dir", os.path.join(_ROOT, "logs-env"), p], env=env)
-import ast  # noqa: E402
 seen = []
 for f in ("test_env1.py", "test_env2.py"):
     with open(os.path.join(_ROOT, "logs-env", os.path.basename(p) + "__" + f + ".log")) as fh:

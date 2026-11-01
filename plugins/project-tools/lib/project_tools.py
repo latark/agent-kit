@@ -358,7 +358,7 @@ def make_plan(root, is_git, update=(), accept=(), tolerant=False):
     user = read_json_quiet(os.path.join(HOME, ".claude", "settings.json"))
     try:
         cj = read_json(os.path.join(HOME, ".claude.json"))
-    except Broken as e:
+    except Broken:
         if not tolerant:
             raise
         cj = {}

@@ -236,7 +236,6 @@ import os
 import re
 import shlex
 import shutil
-import signal
 import socket
 import stat
 import subprocess
@@ -3147,7 +3146,7 @@ def _resume_session(name, a, text, origin):
         left = stop_and_rm(name, m.group(1), "copy-note")
         start_log(f"copy-removed\t{name}\t{m.group(1)}" + (f"\trefused {left}" if left else ""))
         alert(f"{name}: --resume сделал копию {m.group(1)} — исходная сессия {a.get('id')} ещё числится живой; "
-              + (f"копия убрана (claude stop + rm)" if not left else f"копию убрать не вышло ({left}) — claude agents, "
+              + ("копия убрана (claude stop + rm)" if not left else f"копию убрать не вышло ({left}) — claude agents, "
                  "лишнюю остановить"), "pantheon")
     elif r.returncode == 0:  # копию (исходная ещё живая) не разбираем сами — тревога выше, решает Зевс
         rm_previous(name, "--resume", before=before, keep={a.get("id")}, wait=True)
@@ -5834,7 +5833,7 @@ def check(paths=None, quiet=False):
                   + ", ".join(i for i, _, _ in stall[:TAIL_SHOWN]) + (f" и ещё {len(stall) - TAIL_SHOWN}" if len(stall) > TAIL_SHOWN else "")
                   + " (список — Доска/Хвосты.md)")
         field_errs, field_warns = T.board_problems(tasks_now, now(), night_end, autoclose_mod().open_pr_tasks(path("autoclose.json")))
-        field_errs = [(i, f"status done без closed — проставлен из updated") for i in fixed] + field_errs
+        field_errs = [(i, "status done без closed — проставлен из updated") for i in fixed] + field_errs
         for tid, text in field_errs:
             print(f"ОШИБКА · {tid}: {text}")
         for tid, text in field_warns:

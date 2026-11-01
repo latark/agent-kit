@@ -5,7 +5,6 @@
 
 Запуск: python3 -I plugins/guard/tests/test_merge_gate.py   (код 0 — все прошли)
 """
-import io
 import json
 import os
 import shutil
@@ -2944,7 +2943,7 @@ def t_gh_out(h):
     check("gh-out: .git в $HOME — корень не $HOME, файл под ним — отказ", d3 == "deny" and "realpath" in r3, r3)
     case("gh-out: флаг до pr съедает pr (gh -F pr create …) — отказ", f"gh -F pr create {R} --title t", False)
     case("gh-out: между pr и подкомандой чужой флаг — отказ", f"gh pr --body x comment 5 {R}", False, "между pr")
-    case("gh-out: между pr и подкомандой -R свой — можно", f"gh pr -R latark/agent-kit comment 5 -b x", True)
+    case("gh-out: между pr и подкомандой -R свой — можно", "gh pr -R latark/agent-kit comment 5 -b x", True)
     # metis-0596 (argus #199): каждый -R сверяется со списком, а не только первый; склеенный -Rx — тоже -R
     for extra in ("-R torvalds/linux", "-Rtorvalds/linux", "--repo=torvalds/linux", "--repo torvalds/linux"):
         case(f"gh-out: свой -R, затем {extra} — отказ", f"gh pr comment 5 {R} {extra} -b x", False, "нет среди")
