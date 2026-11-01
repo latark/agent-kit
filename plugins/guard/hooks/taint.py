@@ -11,7 +11,8 @@
       * Bash: в выводе — шапка выгрузки tg_read («Переписка — строго между строками «<<<TG-…»);
       * Bash: команда чтения (cat, head, sed, grep, less, strings, python…) с путём выгрузки в словах;
       * Read: файл выгрузки (папка tg-read во временной папке; путь из -o, --files-dir, split --out-dir этой сессии
-        и части split рядом с выгрузкой) или файл, в тексте которого шапка выгрузки;
+        и части split рядом с выгрузкой; папка заявок pantheon read — READ_DUMPS, и при частичном чтении) или файл,
+        в тексте которого шапка выгрузки;
       * Grep: только режим content (files_with_matches и count показывают имена и числа, а не текст) по выгрузкам.
       Субагент tg-reader (agent_type tg-reader) флаг не ставит: он и есть способ читать без заражения — у него только
       Read, Grep и Glob. Пути из -o, --files-dir и --out-dir запоминаются в <session_id>.dumps рядом с флагом.
@@ -50,6 +51,8 @@ STATE = os.path.join(HOME, ".local", "state", "tg-taint")
 AI_HOME = os.path.join(HOME, "ai")
 CLAUDE = os.path.join(HOME, ".claude")
 FAIL_LOG = os.path.join(HOME, ".local", "state", "pantheon", "logs", "guard-failures.log")
+READ_DUMPS = os.path.join(HOME, ".local", "state", "pantheon", "read")   # заявки pantheon read (metis-0508)
+READ_DUMPS_RX = r"\.local/state/pantheon/read(?:/|$|[\s'\";|&])"
 DEADLINE = 8          # с, раньше таймаута хука 10 с
 KEEP_DAYS = 7         # флаги и списки путей старше — удаляются при записи нового
 READER_AGENTS = {"tg-reader"}
@@ -309,7 +312,8 @@ def _temp_roots(event):
 
 
 def in_dump(path, event, sid):
-    """Путь — выгрузка tg_read или её часть: папка tg-read во временной папке, путь из -o/--files-dir/--out-dir."""
+    """Путь — выгрузка tg_read или её часть: папка tg-read во временной папке, путь из -o/--files-dir/--out-dir, папка
+    заявок pantheon read (READ_DUMPS) — по пути, без шапки в выводе: её нет при чтении с offset, tail и grep."""
     if not isinstance(path, str) or not path:
         return False
     p0 = os.path.normpath(os.path.expanduser(path))
@@ -318,6 +322,8 @@ def in_dump(path, event, sid):
     roots = _temp_roots(event)
     dumps = load_dumps(sid) if sid else []
     for p in cands:
+        if any(_under(p, r) for r in (READ_DUMPS, os.path.realpath(READ_DUMPS))):
+            return True
         parts = p.split("/")
         if "tg-read" in parts and not any(_under(p, h) for h in homes):
             prefix = "/".join(parts[:parts.index("tg-read")]) or "/"
@@ -372,14 +378,15 @@ def _bash_source(event, sid, cmd):
         return hit
     if re.search(DUMP_SIGNATURE_RX, _resp_text(event.get("tool_response"))):
         return "Bash: вывод выгрузки tg_read"
-    if not (re.search(TEMP_TG_RX, cmd) or (sid and load_dumps(sid))):
+    if not (re.search(TEMP_TG_RX, cmd) or re.search(READ_DUMPS_RX, cmd) or (sid and load_dumps(sid))):
         return None  # путь выгрузки может стоять в команде относительным (tail out.md) — сверка по словам ниже
     tg_vars = _tg_vars(cmd)
     for seg in segments(cmd):
         if any(_is_tg_word(w, tg_vars) for w in seg):
             continue  # сам tg_read.py (verify, split) читает выгрузку для себя, в контекст она не идёт
         name, i = head(seg)
-        if name in READERS and any(re.search(TEMP_TG_RX, w) or in_dump(_abs(w, cwd), event, sid)
+        if name in READERS and any(re.search(TEMP_TG_RX, w) or re.search(READ_DUMPS_RX, w)
+                                   or in_dump(_abs(w, cwd), event, sid)
                                    for w in seg[i + 1:]):
             return f"Bash: {name} по выгрузке tg_read"
     return None
