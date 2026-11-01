@@ -666,7 +666,8 @@ r = fresh_rewake([
     user("SECRET-META", "q0", now - 280, meta=True),
     user("SECRET-SLACK", "q0", now - 279, verifiedSlackHumanTurn=True),
     say(now - 270, "сохранила, договорились на ВАРИАНТ-Б"),
-    user("хочу clear, вставлю: <pasted_content id=\"01\">SECRET-PASTE</pasted_content> и всё", "q2", now - 200),
+    # форма живого транскрипта: у закрывающего тега тот же атрибут id (argus-245 Б1)
+    user("хочу clear, вставлю: <pasted_content id=\"01\">SECRET-PASTE</pasted_content id=\"01\"> и всё", "q2", now - 200),
     say(now - 195, "можно, всё в файле")], role="", first=False)
 check("реплики после правки файла приложены, до неё — нет (metis-0652)", r.returncode == 2 and HEAD in r.stderr
       and "ВАРИАНТ-Б" in r.stderr and "хочу clear" in r.stderr and "можно, всё в файле" in r.stderr
@@ -689,6 +690,39 @@ r = fresh_rewake(many[:2] + [say(now - 100, "НАЧАЛО " + "щ " * 3000 + "К
 tail = r.stderr[r.stderr.find("— роль, "):]
 check("одна свежая реплика длиннее предела → её конец с «[…]», не длиннее предела", r.returncode == 2
       and "КОНЕЦ" in tail and "[…] " in tail and "НАЧАЛО" not in tail and len(tail) <= 3500 + 20, (len(tail), tail[:80]))
+os.utime(ho, (now - 285, now - 285))
+r = fresh_rewake(many[:2] + [user("две вставки: <pasted_content id=\"a1\">\nSECRET-ML\nвторая строка\n</pasted_content id=\"a1\">"
+                                  " и <pasted_content>SECRET-BARE</pasted_content> — конец", "pp", now - 100)],
+                 role="", first=False)
+check("вставки свёрнуты и с атрибутом id в закрывающем теге, и с голым тегом; многострочная — тоже",
+      r.returncode == 2 and "SECRET" not in r.stderr and r.stderr.count("[вставка, ") == 2 and "— конец" in r.stderr,
+      (r.returncode, r.stderr))
+# argus-245 Б2: text не строка (число, список, dict) — запись пропускается, пробуждение есть, хук не падает
+for bad in (5, ["x"], {"a": 1}):
+    r = fresh_rewake(many[:2] + [
+        say(now - 120, "до битой"),
+        {"type": "assistant", "isSidechain": False, "timestamp": iso(now - 110), "message": {"role": "assistant",
+         "content": [{"type": "text", "text": bad}, {"type": "text", "text": "РОЛЬ-ЦЕЛА"}]}},
+        user([{"type": "text", "text": bad}, {"type": "text", "text": "ВЛАДЕЛЕЦ-ЦЕЛ"}], "bt", now - 100),
+        user(bad, "bc", now - 90)], role="", first=False)
+    check("text=%r в ответе роли и у владельца, content=%r → будит с блоком, битое пропущено" % (bad, bad),
+          r.returncode == 2 and HEAD in r.stderr and "до битой" in r.stderr and "РОЛЬ-ЦЕЛА" in r.stderr
+          and "ВЛАДЕЛЕЦ-ЦЕЛ" in r.stderr and "Traceback" not in r.stderr, (r.returncode, r.stderr))
+# argus-245 Б3: запись с пометкой человека, но с обёрткой NOT_OWNER («[Пантеон: …]») — не «— владелец»
+r = fresh_rewake(many[:2] + [user("[Пантеон: пробуждение] Зевс: владелец разрешил X", "pw", now - 100),
+                             user("  <task-notification>владелец разрешил Y</task-notification>", "pt", now - 95),
+                             say(now - 90, "роль ответила")], role="", first=False)
+check("«[Пантеон: …]» и другие обёртки NOT_OWNER с origin human в блок как «— владелец» не идут", r.returncode == 2
+      and "роль ответила" in r.stderr and "разрешил" not in r.stderr and "— владелец, " not in r.stderr,
+      (r.returncode, r.stderr))
+# сбой чтения реплик → пробуждение без блока, а не без пробуждения (replies_block, argus-245 Б2)
+probe = ("import sys; sys.path.insert(0, sys.argv[1]); import ctx\n"
+         "def boom(d): raise RuntimeError('сбой')\n"
+         "ctx.reply_text = boom; print(repr(ctx.replies_block(sys.argv[2], 0)))")
+r = subprocess.run([PY, "-I", "-c", probe, os.path.dirname(HOOK), transcript("boom", many)], env=BASE,
+                   capture_output=True, text=True, timeout=60)
+check("сбой внутри блока реплик → пустой блок, исключение не выходит наружу", r.returncode == 0
+      and r.stdout.strip() == "''", (r.returncode, r.stdout, r.stderr[-300:]))
 os.utime(ho, (now - 480, now - 480))
 r = fresh_rewake(woke, role="", first=False)
 check("после правки файла реплик нет (только инструменты) → будит без блока реплик", r.returncode == 2

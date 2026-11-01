@@ -1176,22 +1176,37 @@ def did_no_work(path, max_owner):
 
 
 REPLIES_MAX = 3500  # metis-0652: знаков реплик в пробуждении (владелец 02.11: «~3–4 тыс. с конца»)
-PASTED_RE = re.compile(r"<pasted_content\b[^>]*>(.*?)</pasted_content>", re.S)
+# закрывающий тег в настоящих транскриптах с атрибутом: </pasted_content id="…"> (argus-245 Б1)
+PASTED_RE = re.compile(r"<pasted_content\b[^>]*>(.*?)</pasted_content\b[^>]*>", re.S)
+
+
+def _str_text(content):
+    """Текст записи — только строки: content-строка или поля text блоков text. Не строка (число, список, dict)
+    пропускается, а не роняет join: битая запись не должна отнимать пробуждение (argus-245 Б2)."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(b["text"] for b in content
+                     if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str))
 
 
 def reply_text(d):
-    """(кто, текст) реплики для пробуждения или None. Владелец — только ввод с клавиатуры (is_owner_entry), вставки
-    свёрнуты до длины; роль — только текстовые блоки ответа основной сессии. Вызовы инструментов, их вывод
+    """(кто, текст) реплики для пробуждения или None. Владелец — только ввод с клавиатуры (is_owner_entry) без обёрток
+    NOT_OWNER (их owner-log тоже не пишет, argus-245 Б3), вставки свёрнуты до длины; роль — только текстовые блоки ответа основной сессии. Вызовы инструментов, их вывод
     (tool_result в записях user без origin human), размышления и ответы субагентов не берутся: в выводе бывают ключи
     из прочитанных файлов."""
     m = d.get("message")
     if not isinstance(m, dict):
         return None
     if is_owner_entry(d):
-        text = PASTED_RE.sub(lambda x: "[вставка, %d знаков]" % len(x.group(1)), _text(m.get("content")))
+        text = _str_text(m.get("content"))
+        if text.lstrip().startswith(NOT_OWNER):  # «[Пантеон: …]» и прочие обёртки — не владелец, как в owner-log
+            return None
+        text = PASTED_RE.sub(lambda x: "[вставка, %d знаков]" % len(x.group(1)), text)
         who = "владелец"
     elif d.get("type") == "assistant" and not d.get("isSidechain") and isinstance(m.get("content"), list):
-        text = "\n".join(b.get("text") or "" for b in m["content"] if isinstance(b, dict) and b.get("type") == "text")
+        text = _str_text(m["content"])
         who = "роль"
     else:
         return None
@@ -1227,7 +1242,15 @@ def replies_after(path, since, budget=REPLIES_MAX):
 
 
 def replies_block(path, since):
-    """Блок реплик для текста пробуждения или "" (реплик после since нет)."""
+    """Блок реплик для текста пробуждения или "" (реплик после since нет или чтение сбоило: тогда пробуждение
+    без блока, а не без пробуждения — argus-245 Б2)."""
+    try:
+        return _replies_block(path, since)
+    except Exception:
+        return ""
+
+
+def _replies_block(path, since):
     rs = replies_after(path, since)
     if not rs:
         return ""
