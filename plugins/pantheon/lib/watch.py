@@ -17,6 +17,9 @@
                             (waiting/dropped/удалён или без изменений > 24 ч) — тревога «ждёт зависший»; в цикле — тревога,
                             без запуска; с пересечением непустых touches с идущей в другом направлении (пустой touches
                             ничего не блокирует); любое ожидание — тревога «<id> — ждёт <id>…». Потолок — 3 параллельных исполнителя (`AUTOSTART_MAX` жёстче: потолок самозапуска — не больше двух направлений сразу)
+                            Цель окна (/goal самозапуска) держит задачу, которую передали другой сессии (owner),
+                            перенесли, вернули во входящие или отменили — окно перезапускается свежей сессией с новой
+                            целью; очереди нет — останавливается (metis-0631, goal_release)
   pantheon agents           только снимок `claude agents` (задача тика на каждый проход: строка статуса)
   pantheon revisits         задача тика раз в сутки (SCHED-10, DOC-03): «пора пересмотреть …» в alerts.md
   pantheon stop <имя>|--all, pantheon resume <имя>|--all                                      (SCHED-12)
@@ -1479,6 +1482,116 @@ def push_key(h, pos):
     return (spare, T._prio(h), o, pos)
 
 
+# --- цель окна на задаче, которую у окна забрали (metis-0631, слово владельца 01.11 «А — делаем») -------------------
+# Самозапуск поднимает координатора с /goal: «Самозапуск дежурным …: следующая: X. Все: X, Y. …» + TASK_GOAL. Цель — это
+# Stop-хук Claude Code с проверяющей моделью; она живёт в сессии и переживает respawn и --resume (документация /goal:
+# «Resume with an active goal»). Сказать живой фоновой сессии «/goal clear» нечем: push отдаёт текст хуком при старте
+# процесса, а не командой. Поэтому на каждом проходе: цель держателя имени — по его транскрипту (запись goal_status,
+# met = false); задачу из «Все:» передали другому исполнителю (owner — не окно и не его команда), перенесли в другое
+# направление, вернули во входящие или отменили — окно перезапускается свежей сессией с новой целью тем же
+# механизмом, что самозапуск (fresh_start: claude stop, имя свободно, claude --bg с /goal по оставшимся и следующим
+# задачам очереди). Очереди нет или подъём сейчас закрыт (лимит, пауза, ночь) — сессия останавливается и убирается из
+# списка (claude stop + rm, переписка остаётся): иначе продолжение вернуло бы старую цель. «Ждёт» (waiting) задачу не
+# забирает: туда её ставит сама сессия, и TASK_GOAL отпускает её отчётом «заблокировано». Сессию, которая ждёт вас
+# (blocked), и вкладку не трогаем — тревога.
+SELFSTART = "Самозапуск дежурным"
+GOAL_IDS = re.compile(SELFSTART + r".*?Все: ([a-z][a-z0-9-]*-\d{3,}(?:, [a-z][a-z0-9-]*-\d{3,})*)", re.S)
+GOAL_GONE = {"inbox": "вернули во входящие", "dropped": "отменена"}
+GOAL_TAIL = 4 * 1024 * 1024  # хвост транскрипта: goal_status пишется на каждом конце хода, крутящаяся сессия — там
+
+
+def session_goal(a):
+    """Активная цель сессии a по её транскрипту: условие последней записи goal_status, если цель не достигнута и не
+    снята (met, impossible, failed, cleared; «Goal cleared» от /goal clear). → текст или None."""
+    tp = P.transcript_path(a)
+    if not tp:
+        return None
+    cond = None
+    try:
+        with open(tp, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - GOAL_TAIL))
+            if size > GOAL_TAIL:
+                fh.readline()  # первая строка хвоста — обрывок
+            for raw in fh:
+                if b'"goal_status"' not in raw and b"Goal cleared" not in raw:
+                    continue
+                try:
+                    d = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(d, dict):
+                    continue
+                at = d.get("attachment")
+                if isinstance(at, dict) and at.get("type") == "goal_status":
+                    over = at.get("met") is True or any(at.get(k) for k in ("impossible", "failed", "cleared"))
+                    cond = None if over else (str(at.get("condition") or "") or None)
+                    continue
+                msg = d.get("message") if d.get("type") == "user" else None
+                body = msg.get("content") if isinstance(msg, dict) else None
+                if isinstance(body, str) and body.lstrip().startswith("<local-command-stdout>Goal cleared"):
+                    cond = None
+    except OSError:
+        return None
+    return cond
+
+
+def goal_ids(cond):
+    """Задачи цели самозапуска из её условия («Все: X, Y.») или [] — цель поставил не самозапуск."""
+    m = GOAL_IDS.search(str(cond or ""))
+    return m.group(1).split(", ") if m else []
+
+
+def goal_gone(h, d):
+    """Почему задачу цели окна d это окно больше не ведёт, или None (ведёт, сделана, ждёт; карточки нет)."""
+    if not h:
+        return None
+    o = owner_elsewhere(h, d)
+    if o:
+        return f"ведёт {o}"
+    if h.get("direction") and h.get("direction") != d:
+        return f"перенесена в {h.get('direction')}"
+    return GOAL_GONE.get(h.get("status"))
+
+
+def goal_release(d, hold, tasks):
+    """Снять ли цель окна d: → None (нечего снимать), текст (снять нельзя — почему) или {a, gone, keep}: a — держатель с
+    целью, gone — {задача: почему ушла}, keep — задачи цели, которые окно ещё ведёт (todo, doing)."""
+    for a in sorted(hold, key=lambda x: x.get("startedAt") or 0, reverse=True):
+        ids = goal_ids(session_goal(a)) if a.get("id") and a.get("sessionId") else []
+        gone = {i: w for i in ids for w in [goal_gone((tasks.get(i) or (None, {}, None))[1], d)] if w}
+        if not gone:
+            continue
+        what = ", ".join(f"{i} ({w})" for i, w in gone.items())
+        if any(not x.get("id") for x in hold):
+            return f"цель окна на задачах, которые ушли: {what} — снять нельзя, имя держит вкладка"
+        if any(x.get("state") == "blocked" for x in hold):
+            return f"цель окна на задачах, которые ушли: {what} — сессия ждёт вас, сниму после ответа"
+        keep = [i for i in ids if i not in gone and (tasks.get(i) or (None, {}, None))[1].get("status") in ("todo", "doing")]
+        return {"a": a, "gone": gone, "keep": keep, "what": what}
+    return None
+
+
+def goal_stop(d, swap, why):
+    """Снять цель без нового подъёма: claude stop + rm держателя (продолжение вернуло бы старую цель). Тревога."""
+    a = swap["a"]
+    left = P.stop_and_rm(d, a["id"], "goal-released")
+    P.start_log(f"goal-released\t{d}\t{a['id']}\t{why}" + (f"\t{P.refused_by(left)}: {left}" if left else ""))
+    P.alert_once(f"goal-released-{d}", a["id"], f"самозапуск {d}: цель окна снята — {swap['what']}; новой задачи сейчас "
+                 f"нет ({why}), сессия {a['id']} остановлена" + (f", из списка не убрана ({P.refused_by(left)}: {left})"
+                                                               if left else ""), "watch")
+
+
+def goal_recheck(d):
+    """Повторная проверка под блокировкой имени перед сменой цели: держатели имени d не мешают (их и меняем)."""
+    def again():
+        ag, reg = P.agents_all() or [], P.sessions_registry()
+        h = holders(d, ag, reg)
+        return wake_block(d, [a for a in ag if a not in h], [r for r in reg if r not in h], auto=True)
+    return again
+
+
 def autostart(agents, registry, doms, t, dry=False):
     say = print if dry else (lambda *_: None)
     st = {d: as_state(v) for d, v in P.read_json(P.path("autostart.json"), {}).items()}
@@ -1522,6 +1635,21 @@ def autostart(agents, registry, doms, t, dry=False):
         say(f"{d}: не отдаю координатору — задачи ведёт другая сессия (owner): {', '.join(v)}")
     say(f"решения владельца учитываются с {P.stamp(since)}; задачи с ними: "
         + ("; ".join(f"{d}: {', '.join(v)}" for d, v in sorted(want.items())) or "нет"))
+    release = {}  # metis-0631: окна, чья цель самозапуска держит задачу, которую у окна забрали
+    for d in sorted(doms) if tasks else ():
+        r = None if d in off else goal_release(d, holders(d, agents, registry), tasks)
+        if isinstance(r, str):
+            say(f"{d}: {r}")
+            if not dry:
+                P.alert_once(f"goal-stuck-{d}", r[:80], f"самозапуск {d}: {r}", "watch")
+        elif r:
+            release[d] = r
+            if not dry:
+                P.clear_once(f"goal-stuck-{d}")
+            v = want.setdefault(d, [])
+            v.extend(x for x in r["keep"] if x not in v)  # оставшиеся задачи цели — в новую цель, после очереди
+        elif not dry:
+            P.clear_once(f"goal-stuck-{d}")
     running = [d for d in doms if holders(d, agents, registry) or d in ONESHOT_STARTED]
     # ночь с одобренными пачками (metis-0284): ночью идут только пачки — их поднимают разовые запуски, а не отметки
     packs = P.night_mod().pack_night(t)
@@ -1532,6 +1660,7 @@ def autostart(agents, registry, doms, t, dry=False):
     for d, tids in sorted(want.items()):
         s = st.setdefault(d, {})
         hold = holders(d, agents, registry)
+        swap = release.get(d)
         # порядок и ожидание по depends_on/touches (metis-0248, шаг 2): сначала зависимости, при равенстве — отметки;
         # не отдаём ту, что ждёт незакрытую, зависшую, общие файлы с идущей у другого или стоит в цикле
         if tasks:
@@ -1560,25 +1689,30 @@ def autostart(agents, registry, doms, t, dry=False):
                 say(f"{d}: не отдаю {x} — {v}")
             tids = plan["go"]
             if not tids:
+                if swap:  # цель снимается, а дать окну нечего — остановить, чтобы не крутилось
+                    say(f"{d}: цель окна снята бы — {swap['what']}; очереди нет, сессия остановилась бы")
+                    if not dry:
+                        goal_stop(d, swap, "очереди нет")
                 continue
         # простаивающий держатель (metis-0212) — передать той же сессии то же задание, а не «уже работает»: Claude Code
         # сам перезапустил фоновую сессию и задания у неё нет (working + idle) или закончила ход с живым процессом (done)
-        poke = nudge_target(hold)
-        if hold and not poke:
+        poke = None if swap else nudge_target(hold)
+        if hold and not poke and not swap:
             say(f"{d}: уже работает")
             continue
         what = (f"{d}: закончила ход, а задачи с вашим решением ждут" if poke and poke.get("state") == "done"
                 else f"{d}: Claude Code сам перезапустил фоновую сессию, задания у неё нет")
-        why = wake_block(d, agents, registry, auto=True, nudge=bool(poke))
+        why = (wake_block(d, [a for a in agents if a not in hold], [r for r in registry if r not in hold], auto=True)
+               if swap else wake_block(d, agents, registry, auto=True, nudge=bool(poke)))
         if not why and d in ONESHOT_STARTED:
             why = "поднято разовым запуском в этом проходе"
         if not why and packs:
             why = "ночью идут только одобренные пачки (" + ", ".join(p["path"] for p in packs) + ")"
         if not why and s.get("gave_up"):
             why = f"самозапуск встал после сбоев (pantheon resume {d})"
-        if not why and not poke and len(running) >= AUTOSTART_MAX:  # передача места не занимает: сессия уже есть
+        if not why and not poke and not swap and len(running) >= AUTOSTART_MAX:  # передача места не занимает: сессия уже есть
             why = f"нет места: уже работают {', '.join(running)} (не больше {AUTOSTART_MAX} направлений)"
-        if not why and not poke and len(running) + len(shop) >= SESSIONS_MAX:
+        if not why and not poke and not swap and len(running) + len(shop) >= SESSIONS_MAX:
             why = f"нет места: сессий Пантеона {len(running) + len(shop)} из {SESSIONS_MAX}"
         # новое дело: жёлтая зона днём, тяжёлые, ночь и её бюджет, утро после 04:00 (metis-0127); передача задания —
         # тоже новое дело, а простаивающий держатель тяжёлым не считается (его working остался от прежнего процесса)
@@ -1586,7 +1720,7 @@ def autostart(agents, registry, doms, t, dry=False):
             ok, gw = P.night_mod().gate("autostart", t, [a for a in agents if a not in hold], registry)
             why = None if ok else f"недельный лимит: {gw}"
         nxt = float(s.get("next") or float(s.get("last") or 0) + AUTOSTART_BACKOFF)
-        if not why and t < nxt:
+        if not why and t < nxt and (not swap or s.get("swap") == swap["a"].get("id")):
             why = f"пауза между попытками до {P.stamp(nxt)[11:16]}"
         if not why and started:
             why = "одна сессия за проход — в следующий"
@@ -1599,6 +1733,12 @@ def autostart(agents, registry, doms, t, dry=False):
                 why = f"нет доверия к {got[2].replace(P.HOME, '~')} — одна интерактивная сессия claude там и «Да»"
         if not why:
             chosen.update({i: d for i in tids})
+        if dry and swap:
+            say(f"{d}: цель окна на задачах, которые ушли: {swap['what']} — " + (
+                f"перезапустил бы с новой целью (задачи {', '.join(tids[:5])})" if not why else
+                ("сменю в следующий проход" if why.startswith(("одна сессия", "пауза между")) else
+                 f"остановил бы сессию: {why}")))
+            continue
         if dry:
             if poke:
                 say(f"{what} — " + (f"передача задания ждёт: {why}" if why else
@@ -1610,6 +1750,10 @@ def autostart(agents, registry, doms, t, dry=False):
             P.clear_fault(f"autostart-gaveup-{d}")
         if got is not None and not isinstance(got, str) and not (why or "").startswith("нет доверия"):
             P.clear_fault(f"autostart-trust-{d}")  # доверие есть
+        if why and swap:  # смена цели закрыта: в следующий проход или остановить, чтобы не крутилось на чужой задаче
+            if not why.startswith(("одна сессия", "пауза между")):
+                goal_stop(d, swap, why)
+            continue
         if why:
             if s.get("gave_up"):  # самозапуск встал и держится — одна macOS, пока не снимут
                 P.notify_soon(f"autostart-gaveup-{d}", gave_up_note(d, s), group=f"autostart-{d}", once=True)
@@ -1622,12 +1766,23 @@ def autostart(agents, registry, doms, t, dry=False):
                 P.alert_once(f"autostart-wait-{d}", f"{today(t)}-{why[:40]}", f"самозапуск {d} ждёт: {why} (задачи "
                              f"{', '.join(tids[:3])})", "watch")
             continue
-        task = (f"Самозапуск дежурным по задачам с вашим решением (сначала зависимости, затем приоритет, порядок пачки и ваших отметок, запас последним; "
+        task = (f"{SELFSTART} по задачам с вашим решением (сначала зависимости, затем приоритет, порядок пачки и ваших отметок, запас последним; "
                 f"цепочку веди сама, не режь): следующая: {tids[0]}. Все: {', '.join(tids)}. Прочитай STATUS.md и "
                 "задачи, продолжай с первой по приоритету; что ждёт владельца — Зевсу строкой.")
         s.update(last=t, pending=True)
         P.write_json(P.path("autostart.json"), st)  # до запуска: проход могут оборвать по таймауту
-        if poke:  # тот же путь, что продолжение остановленной: claude respawn + текст для хука push (P.resume_session)
+        if swap:  # metis-0631: та же сессия цель не сменит — свежая сессия с /goal по новому списку (fresh_start)
+            s["swap"] = swap["a"].get("id")
+            P.write_json(P.path("autostart.json"), st)
+            gone = ", ".join(swap["gone"])
+            text = (task + f" Задачи {swap['what']} у этого окна больше не на тебе: их не веди и не закрывай, "
+                    "начатое по ним — строкой в STATUS.md.")
+            rc = P.fresh_start(d, swap["a"], P.fresh_text("смена цели", d, swap["a"].get("id"), text), "tick",
+                               recheck=goal_recheck(d), reason=f"цель самозапуска: ушли {gone}", goal=P.TASK_GOAL)
+            P.alert(f"самозапуск {d}: цель окна снята — {swap['what']}; " + (
+                f"окно перезапущено с новой целью (задачи {', '.join(tids[:5])})" if rc == 0 else
+                f"перезапуск с новой целью не вышел, код {rc}"), "watch")
+        elif poke:  # тот же путь, что продолжение остановленной: claude respawn + текст для хука push (P.resume_session)
             rc = P.resume_session(d, poke, task, "tick", recheck=recheck(d, True, nudge=True))[0]
             P.alert(f"{what} — " + (f"передал задание (задачи {', '.join(tids[:5])})" if rc == 0 else
                                     f"передать задание не вышло, код {rc}"), "watch")
@@ -1640,7 +1795,7 @@ def autostart(agents, registry, doms, t, dry=False):
             fail(d, s, t, f"код запуска {rc}")
         else:  # список сессий этого прохода её ещё не видит — «запрет сна Mac» держится по этой метке
             awake().RESUMED.append(d)
-        if not poke:
+        if not poke and not swap:
             running.append(d)
         started = True
     if not dry:
