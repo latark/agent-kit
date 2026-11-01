@@ -173,9 +173,10 @@ def fresh_target(name, origin):
     return (role, folder, run) if run else P.no_window_reason(window)
 
 
-def fresh_start(name, a, text, origin, recheck=None, reason=None):
+def fresh_start(name, a, text, origin, recheck=None, reason=None, goal=None):
     """Поднять имя свежей сессией (новый контекст, то же имя, окно роли) с текстом text. a — прежняя сессия из claude
-    agents (её id — в журнале и тексте); reason — почему свежей, в строку fresh-start журнала start.log. Та же
+    agents (её id — в журнале и тексте); reason — почему свежей, в строку fresh-start журнала start.log; goal —
+    условие цели координатора (по умолчанию COORDINATOR_GOAL, цель эпика; смена цели самозапуска — TASK_GOAL). Та же
     блокировка имени и повторная проверка, что у resume_session. → код."""
     with P.lock("start-" + name, block=False) as got_lock:
         if not got_lock:
@@ -185,10 +186,10 @@ def fresh_start(name, a, text, origin, recheck=None, reason=None):
         if why:
             P.start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
             return P.skipped(why)
-        return _fresh_start(name, a, text, origin, reason)
+        return _fresh_start(name, a, text, origin, reason, goal)
 
 
-def _fresh_start(name, a, text, origin, reason=None):
+def _fresh_start(name, a, text, origin, reason=None, goal=None):
     if os.environ.get("PANTHEON_DRYRUN") == "1":
         print(f"[fresh] {name} {a.get('id')} {origin}")
         return 0
@@ -200,7 +201,7 @@ def _fresh_start(name, a, text, origin, reason=None):
     if not str(text).startswith(P.START_MARK):
         text = f"{P.START_MARK} поручение от {origin}] {text}"
     if role == "domain-coordinator":
-        text = "/goal " + text + " " + COORDINATOR_GOAL  # как у pantheon start: Stop-хук с целью эпика (DONE-02)
+        text = "/goal " + text + " " + (goal or COORDINATOR_GOAL)  # как у pantheon start: Stop-хук с целью (DONE-02)
     agents = P.agents_all() or []
     live = P.live_copies(name, agents)
     if any(not x.get("id") for x in live):

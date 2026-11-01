@@ -312,6 +312,149 @@ def test_autostart_owner_elsewhere_0564():
           f"0564: в задании координатору не те задачи: {text[-400:]}")
 
 
+def goal_transcript(e, a, cond, met=False):
+    """Транскрипт сессии a с целью /goal: запись goal_status, как её пишет Claude Code (attachment, met, condition)."""
+    d = os.path.join(e.home, ".claude", "projects", "".join(ch if ch.isalnum() else "-" for ch in a["cwd"]))
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, a["sessionId"] + ".jsonl")
+    with open(p, "a") as fh:
+        fh.write(json.dumps({"type": "attachment", "attachment": {"type": "goal_status", "met": met, "sentinel": True,
+                                                                  "condition": cond}}, ensure_ascii=False) + "\n")
+    return p
+
+
+def test_autostart_goal_released_on_handover_0631():
+    """metis-0631: окно поднято самозапуском с /goal по задачам mg-0001, mg-0002; mg-0001 передали другой сессии (owner
+    сменился) — за один проход цель снимается: прежняя сессия остановлена, новая того же имени с /goal по оставшейся
+    mg-0002 и следующей из очереди mg-0003, без mg-0001; тревога. Пока задачи окна на нём — «уже работает», ничего не
+    трогаем. Сделанная (done) и «ждёт» (waiting) цель не снимают. Ушли все и очереди нет — сессия остановлена и убрана
+    из списка (claude stop + rm). Сессию, которая ждёт вас (blocked), не трогаем — тревога."""
+    e = Env()
+    e.direction("mg-dir")
+    e.task("mg-0001", "mg-dir")
+    e.task("mg-0002", "mg-dir")
+    e.run("watch", t=T0)
+    e.board("mg-0001", T0 + 10)
+    e.board("mg-0002", T0 + 20)
+    e.run("watch", t=T0 + 60)
+    starts, text = _bg_text(e)
+    check(len(starts) == 1 and "Все: mg-0001, mg-0002." in text, f"0631: самозапуск не тот: {starts}")
+    goal = starts[0][-1]
+    check(goal.startswith("/goal "), f"0631: самозапуск без /goal: {goal[:80]}")
+    a = bg("mg-dir", "working", "a6a10631-1", pid=51, started=T0 + 61)
+    a["status"] = "busy"
+    a["cwd"] = os.path.join(e.home, "projects", "mg-dir")
+    e.agents([a])
+    goal_transcript(e, a, goal[len("/goal "):])
+    # задачи окна на нём, одна сделана, другая ждёт — цель не трогаем
+    e.task("mg-0001", "mg-dir", status="done")
+    e.task("mg-0002", "mg-dir", status="waiting", extra="waiting_on: human\nnext: ответ\n")
+    out = e.run("watch", "--dry-run", t=T0 + 400).stdout
+    check("цель окна" not in out, f"0631: цель снята без передачи: {out}")
+    e.run("watch", t=T0 + 400)
+    check(len(_bgs(e)) == 1 and not [c for c in e.calls() if c[:1] == ["stop"]],
+          f"0631: сессию тронули без передачи задачи: {e.calls()}")
+    # передача: owner mg-0001 — другая сессия; mg-0002 снова в работе у окна; в очереди появилась mg-0003
+    e.task("mg-0001", "mg-dir", status="doing", extra="owner: agent-kit-47\n")
+    e.task("mg-0002", "mg-dir", status="doing")
+    e.task("mg-0003", "mg-dir")
+    e.board("mg-0003", T0 + 500)
+    out = e.run("watch", "--dry-run", t=T0 + 600).stdout
+    check("mg-dir: цель окна на задачах, которые ушли: mg-0001 (ведёт agent-kit-47) — перезапустил бы с новой целью"
+          in out, f"0631: dry-run не говорит о снятии цели: {out}")
+    e.run("watch", t=T0 + 700, extra={"FAKE_STOP_MARK": "1"})
+    check(["stop", "a6a10631"] in e.calls(), f"0631: сессия на чужой задаче не остановлена: {e.calls()}")
+    starts = _bgs(e)
+    new = starts[-1][-1] if len(starts) == 2 else ""
+    check(new.startswith("/goal [Пантеон: смена цели]") and "Все: mg-0002, mg-0003." in new
+          and "Другие задачи и пункты эпика в эту цель не входят" in new and "a6a10631" in new,
+          f"0631: новая цель не та: {starts[-1:]}")
+    check("Все: mg-0001" not in new and "mg-0001, mg-0002" not in new, f"0631: переданная задача осталась в цели: {new}")
+    check("самозапуск mg-dir: цель окна снята — mg-0001 (ведёт agent-kit-47); окно перезапущено с новой целью"
+          in e.alerts(), f"0631: нет тревоги о смене цели: {e.alerts()[-400:]}")
+    rows = [r for r in _start_rows(e) if r[1:2] == ["fresh-start"]]
+    check(rows and rows[-1][2] == "mg-dir" and "ушли mg-0001" in rows[-1][-1], f"0631: нет строки fresh-start: {rows}")
+    # новая сессия с новой целью — следующий проход её не трогает
+    b = bg("mg-dir", "working", "b6b10631-2", pid=52, started=T0 + 701)
+    b["status"] = "busy"
+    b["cwd"] = a["cwd"]
+    e.agents([b])
+    goal_transcript(e, b, new[len("/goal "):])
+    e.run("watch", t=T0 + 1000)
+    check(len(_bgs(e)) == 2 and ["stop", "b6b10631"] not in e.calls(), f"0631: новую цель сняли снова: {e.calls()}")
+    # ушли все задачи цели, очереди нет — остановить и убрать из списка
+    for n in (2, 3):
+        e.task(f"mg-000{n}", "mg-dir", status="dropped" if n == 2 else "doing", extra="" if n == 2 else "owner: zeus\n")
+    e.run("watch", t=T0 + 1300, extra={"FAKE_STOP_MARK": "1"})
+    check(["stop", "b6b10631"] in e.calls() and ["rm", "b6b10631"] in e.calls() and len(_bgs(e)) == 2,
+          f"0631: без очереди сессия не остановлена или поднята новая: {e.calls()[-4:]}")
+    check("цель окна снята — mg-0002 (отменена), mg-0003 (ведёт zeus); новой задачи сейчас нет (очереди нет)"
+          in e.alerts(), f"0631: нет тревоги об остановке: {e.alerts()[-400:]}")
+    # ждёт вас (blocked) — не трогаем, тревога
+    e2 = Env()
+    e2.direction("mh-dir")
+    e2.task("mh-0001", "mh-dir", extra="owner: agent-kit-9\n")
+    c = bg("mh-dir", "blocked", "c6c10631-3", pid=53)
+    c["cwd"] = os.path.join(e2.home, "projects", "mh-dir")
+    e2.agents([c])
+    goal_transcript(e2, c, "[Пантеон: поручение от tick] Самозапуск дежурным по задачам: следующая: mh-0001. "
+                    "Все: mh-0001. Прочитай STATUS.md")
+    e2.run("watch", t=T0)
+    check(not [x for x in e2.calls() if x[:1] in (["stop"], ["--bg"])], f"0631: blocked тронули: {e2.calls()}")
+    check("сессия ждёт вас, сниму после ответа" in e2.alerts(), f"0631: нет тревоги blocked: {e2.alerts()[-300:]}")
+    # цель достигнута (met) — снимать нечего
+    goal_transcript(e2, c, "[Пантеон: поручение от tick] Самозапуск дежурным: Все: mh-0001.", met=True)
+    c["state"] = "working"
+    e2.agents([c])
+    e2.run("watch", t=T0 + 300)
+    check(not [x for x in e2.calls() if x[:1] in (["stop"], ["--bg"])], f"0631: снята достигнутая цель: {e2.calls()}")
+    # задачу перенесли в другое направление, а подъём закрыт (планировщик на паузе) — остановить без новой сессии
+    e2.direction("ot-dir")
+    e2.task("mh-0002", "ot-dir")
+    e2.task("mh-0003", "mh-dir")
+    e2.board("mh-0003", T0 + 310)
+    goal_transcript(e2, c, "[Пантеон: поручение от tick] Самозапуск дежурным: следующая: mh-0002. Все: mh-0002.")
+    open(e2.st("paused"), "w").write("x\n")
+    e2.run("watch", t=T0 + 400, extra={"FAKE_STOP_MARK": "1"})
+    check(["stop", "c6c10631"] in e2.calls() and ["rm", "c6c10631"] in e2.calls()
+          and not [x for x in e2.calls() if x[:1] == ["--bg"]], f"0631: на паузе не остановлена: {e2.calls()}")
+    check("mh-0002 (перенесена в ot-dir); новой задачи сейчас нет (весь планировщик на паузе)" in e2.alerts(),
+          f"0631: нет тревоги о переносе: {e2.alerts()[-400:]}")
+    # ревью argus Б2: ушедшая задача, а своя ещё в doing, подъём закрыт (пауза) — сессию не гасить, тревога «снимем»
+    e3 = Env()
+    e3.direction("mk-dir")
+    e3.task("mk-0001", "mk-dir", status="doing", extra="owner: agent-kit-5\n")
+    e3.task("mk-0002", "mk-dir", status="doing")
+    e3.board("mk-0001", T0 + 10)
+    e3.board("mk-0002", T0 + 20)
+    k = bg("mk-dir", "working", "d6d10631-4", pid=54, started=T0 + 30)
+    k["status"] = "busy"
+    k["cwd"] = os.path.join(e3.home, "projects", "mk-dir")
+    e3.agents([k])
+    goal_transcript(e3, k, "[Пантеон: поручение от tick] Самозапуск дежурным по задачам: следующая: mk-0001. "
+                    "Все: mk-0001, mk-0002. Прочитай STATUS.md")
+    open(e3.st("paused"), "w").write("x\n")
+    out = e3.run("watch", "--dry-run", t=T0 + 100).stdout
+    check("сессия ведёт свои mk-0002, сниму, когда подъём откроется: весь планировщик на паузе" in out,
+          f"0631 Б2: dry-run не тот: {out}")
+    e3.run("watch", t=T0 + 100, extra={"FAKE_STOP_MARK": "1"})
+    check(not [x for x in e3.calls() if x[:1] in (["stop"], ["rm"], ["--bg"])],
+          f"0631 Б2: сессию со своей задачей в doing остановили на паузе: {e3.calls()}")
+    check("цель окна на задачах, которые ушли: mk-0001 (ведёт agent-kit-5); сессия ведёт свои mk-0002 — снимем, когда "
+          "подъём откроется (весь планировщик на паузе)" in e3.alerts(), f"0631 Б2: нет тревоги: {e3.alerts()[-400:]}")
+    # ревью argus Б1: между снимком и блокировкой владелец поднял окно вручную — под блокировкой отказ, stop не зовётся
+    os.remove(e3.st("paused"))
+    manual = bg("mk-dir", "working", "e6e10631-5", pid=55, started=T0 + 150)
+    manual["status"] = "busy"
+    nxt = os.path.join(e3.tmp, "agents-next.json")
+    open(nxt, "w").write(json.dumps([k, manual]))
+    e3.run("watch", t=T0 + 200, extra={"FAKE_STOP_MARK": "1", "FAKE_AGENTS_NEXT": nxt})
+    check(not [x for x in e3.calls() if x[:1] in (["stop"], ["rm"], ["--bg"])],
+          f"0631 Б1: ручную сессию или старую тронули после повторной проверки: {e3.calls()}")
+    check("цель окна на задачах, которые ушли: mk-0001 (ведёт agent-kit-5) — смена отложена: уже работает" in e3.alerts(),
+          f"0631 Б1: нет тревоги об отложенной смене: {e3.alerts()[-400:]}")
+
+
 def _bg_text(e):
     starts = [c for c in e.calls() if c[:1] == ["--bg"]]
     return starts, " ".join(starts[0]) if starts else ""

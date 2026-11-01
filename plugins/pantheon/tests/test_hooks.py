@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Хуки контекста и журнала ваших слов (hooks/ctx.py) на временных папках и синтетических транскриптах:
 журнал пишется только по пометке Claude Code «ввод владельца», расписание, другие сессии, субагенты и стартовое
-поручение — нет; подсказка «пора очистить» на порогах; пробуждение после /clear только при обновлённом файле
-состояния; файл состояния после сжатия; новые тревоги и журналы штабу.
+поручение — нет; подсказка «пора очистить» на порогах; пробуждение после /clear при обновлённом файле
+состояния и после пустой сессии роли (metis-0625); файл состояния после сжатия; новые тревоги и журналы штабу.
 
 Запуск: python3 -I plugins/pantheon/tests/test_hooks.py  (код выхода 0 — все прошли)
 """
@@ -428,6 +428,20 @@ check("файл старше вашего сообщения → чистый л
 os.utime(ho, (now - 100, now - 100))
 check("выключатель → без пробуждения", run("rewake", cleared, PANTHEON_CTX_OFF="1").returncode == 0)
 check("claude -p → без пробуждения", run("rewake", cleared, CLAUDE_CODE_ENTRYPOINT="sdk-py").returncode == 0)
+# 01.11: сохранилась, затем «хочу сделать clear» → ответ только текстом, файл не тронут — хук молчал
+append(prev, user("хочу сделать clear", "r2", now - 50))
+append(prev, assistant(now - 45))
+append(prev, user("ок, чищу", "r3", now - 40))
+append(prev, assistant(now - 35))
+r = run("rewake", cleared)
+check("реплики после сохранения с ответом только текстом → всё равно пробуждение", r.returncode == 2
+      and "~/ai/pantheon/handoff/topic/HANDOFF.md" in r.stderr, (r.returncode, r.stderr))
+append(prev, user("а ещё поправь", "r4", now - 30))
+append(prev, assistant(now - 25, 0, [("Read", {"file_path": "/x"})]))
+r = run("rewake", cleared)
+check("после сохранения была работа с инструментами → чистый лист", r.returncode == 0 and not r.stderr.strip(), r.stderr)
+prev = transcript("prev", [user("сделай шаг", "r1", now - 300),
+                           assistant(now - 200, 150000, [("Edit", {"file_path": ho, "old_string": "a", "new_string": "b"})])])
 rec_path = os.path.join(state, "ctx", "proc-%d.json" % os.getpid())
 rec = json.load(open(rec_path))
 rec["proc"] = "Thu Jan  1 00:00:00 1970"
@@ -542,6 +556,94 @@ try:
 finally:
     holder.kill()
     holder.wait()
+
+# metis-0625: окно Зевса поднято заново (перезагрузка Mac), сразу /clear. Прошлая сессия процесса — свежая и пустая,
+# доска старше её — раньше хук молчал. Теперь роль с файлом состояния просыпается всегда, если прошлая сессия не дала работы.
+def fresh_rewake(items, role="hq", first=True, missing=False, board_age=400):
+    """Новый процесс; его первая (или, при first=False, вторая) сессия с записями items; /clear → результат rewake."""
+    holder = subprocess.Popen(["sleep", "120"])
+    cp = str(holder.pid)
+    try:
+        if not first:
+            run("start", {"session_id": "f-0", "transcript_path": transcript("f0", [user("старт", "f0", now - 900)]),
+                          "source": "startup", "agent_type": role}, CLAUDE_PID=cp)
+        t1 = os.path.join(home, "tr", "f1-missing.jsonl") if missing else transcript("f1", items)
+        run("start", {"session_id": "f-1", "transcript_path": t1, "source": "startup", "agent_type": role}, CLAUDE_PID=cp)
+        os.utime(board, (now - board_age, now - board_age))
+        return run("rewake", {"session_id": "f-2", "transcript_path": transcript("f2", []), "source": "clear",
+                              "agent_type": role}, CLAUDE_PID=cp)
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+r = fresh_rewake([])
+check("новый процесс, первая сессия без сообщений, доска старше → /clear будит с доской (metis-0625)",
+      r.returncode == 2 and "board.md" in r.stderr, (r.returncode, r.stderr))
+r = fresh_rewake([], missing=True)
+check("первая сессия закрыта до первого сообщения (транскрипта нет) → будит с доской", r.returncode == 2
+      and "board.md" in r.stderr, (r.returncode, r.stderr))
+r = fresh_rewake([user("привет", "p1", now - 300), assistant(now - 290, 0, [("Read", {"file_path": board})])])
+check("первая сессия с одним вашим сообщением после доски, без правок → будит", r.returncode == 2
+      and "board.md" in r.stderr, (r.returncode, r.stderr))
+r = fresh_rewake([user("привет", "p1", now - 300), user("сделай шаг", "p2", now - 250)])
+check("первая сессия с двумя вашими сообщениями после доски → чистый лист, как раньше", r.returncode == 0
+      and not r.stderr.strip(), r.stderr)
+r = fresh_rewake([user("поправь", "p1", now - 300),
+                  assistant(now - 290, 0, [("Edit", {"file_path": os.path.join(home, "x.txt"), "old_string": "a", "new_string": "b"})])])
+check("первая сессия с правкой Edit, доска старше → чистый лист, как раньше", r.returncode == 0 and not r.stderr.strip(), r.stderr)
+r = fresh_rewake([user("привет", "p1", now - 300)], first=False)
+check("не первая сессия с одним вашим сообщением, доска старше → чистый лист, как раньше", r.returncode == 0
+      and not r.stderr.strip(), r.stderr)
+r = fresh_rewake([assistant(now - 290, 0, [("Read", {"file_path": board})])], first=False)
+check("не первая сессия без ваших сообщений (/clear сразу после пробуждения) → снова будит", r.returncode == 2
+      and "board.md" in r.stderr, (r.returncode, r.stderr))
+r = fresh_rewake([{"type": "assistant", "isSidechain": False, "timestamp": iso(now - 290), "message": "битая запись"},
+                  user("привет", "p1", now - 280)])
+check("запись с message-строкой не роняет хук (used_tools, argus-238b): пустая первая сессия → будит",
+      r.returncode == 2 and "board.md" in r.stderr and "Traceback" not in r.stderr, (r.returncode, r.stderr))
+os.utime(ho, (now - 400, now - 400))
+r = fresh_rewake([user("прочитай %s" % ho, "p1", now - 300)], role="")
+check("сессия без роли: первая, одно сообщение с HANDOFF.md старше него → чистый лист (правило только для ролей)",
+      r.returncode == 0 and not r.stderr.strip(), r.stderr)
+
+# metis-0641, argus-238a Б: сессию разбудил хук, она сама сохранилась, потом вы написали «хочу clear» (или ничего)
+woke = [{"type": "user", "isSidechain": False, "timestamp": iso(now - 500), "isMeta": True,
+         "message": {"role": "user", "content": "уведомление хука"}},
+        assistant(now - 490, 0, [("Read", {"file_path": ho})]),
+        assistant(now - 480, 0, [("Write", {"file_path": ho, "content": "x"})])]
+os.utime(ho, (now - 480, now - 480))
+r = fresh_rewake(woke + [user("хочу clear", "w1", now - 400), assistant(now - 395)], role="", first=False)
+check("разбудили хуком → Read → Write HANDOFF → ваше «хочу clear» → ответ текстом → /clear будит", r.returncode == 2
+      and "handoff/topic/HANDOFF.md" in r.stderr, (r.returncode, r.stderr))
+r = fresh_rewake(woke, role="", first=False)
+check("разбудили хуком, сохранилась, вы не писали вовсе → /clear будит", r.returncode == 2
+      and "handoff/topic/HANDOFF.md" in r.stderr, (r.returncode, r.stderr))
+os.utime(ho, (now - 600, now - 600))
+r = fresh_rewake(woke + [user("хочу clear", "w1", now - 400), assistant(now - 395)], role="", first=False)
+check("то же, но файл старше первой записи сессии → чистый лист", r.returncode == 0 and not r.stderr.strip(), r.stderr)
+# ответ субагента (isSidechain) с инструментами работой основной сессии не считается
+os.utime(ho, (now - 280, now - 280))
+side = dict(assistant(now - 45, 0, [("Bash", {"command": "ls"})]), isSidechain=True)
+r = fresh_rewake([user("сохрани", "s1", now - 300), assistant(now - 290, 0, [("Write", {"file_path": ho, "content": "x"})]),
+                  user("хочу clear", "s2", now - 50), side, assistant(now - 40)], role="", first=False)
+check("инструменты субагента после «хочу clear» точку отсчёта не сдвигают → будит", r.returncode == 2
+      and "handoff/topic/HANDOFF.md" in r.stderr, (r.returncode, r.stderr))
+# ваше сообщение дальше хвоста (4 МБ): точка отсчёта — по всему файлу (last_owner_time)
+filler = [assistant(now - 250 + i * 0.1) for i in range(1)]
+filler[0]["message"]["content"] = [{"type": "text", "text": "я" * 2200000}]
+os.utime(ho, (now - 200, now - 200))
+r = fresh_rewake([user("сохрани", "l1", now - 300), assistant(now - 290, 0, [("Write", {"file_path": ho, "content": "x"})])]
+                 + filler, role="", first=False)
+check("ваше сообщение за пределами хвоста, файл новее него → будит", r.returncode == 2
+      and "handoff/topic/HANDOFF.md" in r.stderr, (r.returncode, r.stderr))
+os.utime(ho, (now - 350, now - 350))
+r = fresh_rewake([user("сохрани", "l1", now - 300), assistant(now - 290, 0, [("Write", {"file_path": ho, "content": "x"})])]
+                 + filler, role="", first=False)
+check("ваше сообщение за пределами хвоста, файл старше него → чистый лист", r.returncode == 0 and not r.stderr.strip(),
+      r.stderr)
+os.utime(ho, (now - 100, now - 100))
+os.utime(board, (now - 10, now - 10))
 
 # --- файл состояния после сжатия -----------------------------------------------------
 st = os.path.join(pantheon, "directions", "alpha", "STATUS.md")

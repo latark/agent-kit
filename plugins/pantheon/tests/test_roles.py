@@ -241,6 +241,13 @@ def main():
         r = run("roles", "build", "--out", out)
         built = sorted(os.listdir(out)) if os.path.isdir(out) else []
         texts = {f: read(os.path.join(out, f)) for f in built}
+        # длинные редкие порядки вынесены в roles/_ref (metis-0386): роль называет файл, текст правил проверяем вместе
+        # с ним; ссылка на несуществующий файл _ref — красный
+        raw_texts = dict(texts)
+        for f in list(texts):
+            for m in re.finditer(r"roles/_ref/([\w.-]+\.md)", texts[f]):
+                rp = os.path.join(real, "_ref", m.group(1))
+                texts[f] += "\n" + (read(rp) if os.path.isfile(rp) else "")
         want = {t + ".md" for t in tmpls if t not in ("hephaestus", "apollo")} | {"hephaestus-demo.md", "apollo-demo.md"}
         check(f"общие шаблоны плагина {label}: собраны все роли, без ошибок, нет {{{{",
               r.returncode == 0 and not r.stderr.strip() and want <= set(built)
@@ -256,6 +263,23 @@ def main():
           all(x in texts.get("domain-coordinator.md", "") for x in (
               '--note "<вердикт: файл ревью, запись шлюза или ответ Зевса>"',
               "поле им ставь только после «принять» Зевса, до этого оставь пустым")))
+    # постоянный контекст ролей (metis-0386): длинные редкие порядки — в roles/_ref, роль называет файл и не держит текст
+    refs = sorted(os.listdir(os.path.join(real, "_ref")))
+    named = {m.group(1) for t in raw_texts.values() for m in re.finditer(r"roles/_ref/([\w.-]+\.md)", t)}
+    check("roles/_ref: каждый файл назван хотя бы в одной роли, каждое имя в ролях — существующий файл",
+          named == set(refs) and bool(refs))
+    for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md"):
+        check(f"{f}: «Повторный круг» и «Находки ревью: Б, Д, С» не в роли, а в _ref/merge-rounds.md; ссылка на файл есть",
+              "Повторный круг после возврата (metis-0420)" not in raw_texts[f]
+              and "Находки ревью: Б, Д, С" not in raw_texts[f] and "roles/_ref/merge-rounds.md" in raw_texts[f])
+    check("координатор: порядок приёмки ночи — в _ref/night-accept.md, в роли только ссылка",
+          "Итог по каждой задаче ночной пачки" not in raw_texts["domain-coordinator.md"]
+          and "roles/_ref/night-accept.md" in raw_texts["domain-coordinator.md"])
+    check("apollo: навык frontend-design не предзагружается шапкой (skills:), вызывается по требованию",
+          re.search(r"^skills:", raw_texts["apollo-demo.md"].split("---")[1], re.M) is None
+          and "frontend-design:frontend-design` (Skill)" in raw_texts["apollo-demo.md"])
+    check("размер роли после выноса: координатор и лиды не больше потолка (знаков)",
+          len(raw_texts["domain-coordinator.md"]) <= 30200 and len(raw_texts["hephaestus-demo.md"]) <= 23400)
     # самопроверка до сдачи (metis-0357): шесть пунктов и строка отчёта у разработчиков, требование в поручении лидов
     # сверка по тексту без переносов строк: пробелы схлопнуты, иначе перенос строки в шаблоне ломает поиск фразы
     flat = {f: " ".join(t.split()) for f, t in texts.items()}
@@ -363,7 +387,7 @@ def main():
          "<sha>»: пути отчётов не называй — argus опирается на последний свой отчёт по этому PR."),
         ("узкий повтор ведёт тот же argus, дельта с merge-коммитами, нет диффа — нет повтора", "Его ведёт тот же argus, "
          "тем же вызовом через SendMessage (в ядре — оба), по дельте; дельту он сверяет вместе с merge-коммитами, тесты "
-         "на новом head — запись шлюза, как в пункте 1. Нового диффа нет (head тот же) — повтора нет, argus не зови."),
+         "на новом head — запись шлюза, пункт 1 о шлюзе в разделе о слиянии твоей роли. Нового диффа нет (head тот же) — повтора нет, argus не зови."),
         ("вне ядра два круга формулировок — решает лид", "- Вне ядра: два круга подряд вернули только за формулировки, "
          "без бага, обхода и теста, — третьего полного круга не зови. Оставшиеся замечания по тексту решает лид или "
          "координатор и пишет решение в план эпика, у задачи без эпика — в её журнал."),
@@ -402,7 +426,7 @@ def main():
          "не совпало — он ставит «вернуть» с причиной «вернувший argus не продолжен — продолжи его», а не принимает "
          "сам."),
         ("повторный круг: шире или новые файлы — полный круг", "Дельта шире заявленной или "
-         "задевает новые файлы — он сам ведёт полный круг. Тесты на новом head — запись шлюза, как в пункте 1."),
+         "задевает новые файлы — он сам ведёт полный круг. Тесты на новом head — запись шлюза, пункт 1 о шлюзе в разделе о слиянии твоей роли."),
         ("вызов не продолжить — новый argus с отчётом прежнего (review report), по дельте (metis-0602)",
          "Вызов не продолжить (metis-0602): SendMessage отвечает «No transcript found» — после /clear, перезапуска, "
          "пауза дольше сессии. Это не повод для полного круга"),

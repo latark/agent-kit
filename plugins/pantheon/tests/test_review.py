@@ -5,6 +5,7 @@ HEAD и дерево те же, выход с её кодом и SHA; accept|rej
 Сама команда в журнал не пишет. Временный HOME, PANTHEON_HOME и PANTHEON_STATE; всё убирается в конце."""
 import json
 import os
+import pwd
 import shutil
 import subprocess
 import sys
@@ -45,8 +46,9 @@ def run_all(tmp):
            "PANTHEON_STATE": state, "TMPDIR": tmp, "PANTHEON_NO_NOTIFY": "1", "GIT_CONFIG_NOSYSTEM": "1",
            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
 
-    def pantheon(*args, cwd=tmp):
-        return subprocess.run([sys.executable, "-I", RUN_PY, *args], capture_output=True, text=True, env=env, cwd=cwd)
+    def pantheon(*args, cwd=tmp, extra=None):
+        return subprocess.run([sys.executable, "-I", RUN_PY, *args], capture_output=True, text=True,
+                              env=dict(env, **(extra or {})), cwd=cwd)
 
     def git(*args, cwd):
         return subprocess.run(["git", *args], capture_output=True, text=True, env=env, cwd=cwd)
@@ -213,7 +215,12 @@ def run_all(tmp):
     _P = _types.SimpleNamespace(review_records=lambda repo: [x for x in tally if x["sha"] == S5],
                                 review_accept_counts=_load("pantheon_for_test", LIB).review_accept_counts)
     _M.P = _P
-    view = {"state": "OPEN", "isDraft": False, "headRefOid": S5,
+    # запуски Actions (metis-0633) — подмена вместо настоящего gh: тест в сеть не ходит; обязательные agent-kit зелёные
+    _M.ci_runs_fetch = lambda repo, pr, sha: [
+        {"workflowName": w, "name": j, "status": "COMPLETED", "conclusion": "SUCCESS", "event": "pull_request"}
+        for w, j in (("tests", "affected"), ("check-traces", "traces"))] if (repo, pr, sha) == (
+            "latark/agent-kit", 40, S5) else None
+    view = {"state": "OPEN", "isDraft": False, "headRefOid": S5, "baseRefName": "main",
             "statusCheckRollup": [{"name": "tests", "status": "COMPLETED", "conclusion": "SUCCESS"}]}
     st, why = _M.gate("latark/agent-kit", 40, S5, view)
     check("merge.gate на том же журнале: Sonnet по транскрипту не в счёт, models_note — по --ran", st == "fail"
@@ -343,7 +350,10 @@ def report_tests(tmp, pantheon):
                  os.path.join(tmp, "b.md"))
     check("report: --out дважды — код 2, файлов нет", r.returncode == 2 and not os.path.exists(os.path.join(tmp, "a.md")),
           r.stderr)
-    r = pantheon("review", "report", ref, "204", "ab12cd34", "--out", os.path.expanduser("~/x-report.md"))
+    # metis-0634: домашняя папка — из базы пользователей, а не ~: run-tests даёт файлу HOME под своим TMPDIR, а под
+    # проходом outside тот лежит в /private/tmp — и «~/x-report.md» законно проходит как «под /private/tmp».
+    r = pantheon("review", "report", ref, "204", "ab12cd34", "--out",
+                 os.path.join(pwd.getpwuid(os.getuid()).pw_dir, "x-report.md"))
     r2 = pantheon("review", "report", ref, "204", "ab12cd34", "--out", "/etc/x-report.md")
     check("report --out вне $TMPDIR и /private/tmp — код 2", r.returncode == 2 and r2.returncode == 2
           and not os.path.exists("/etc/x-report.md"), r.stderr + r2.stderr)
@@ -413,15 +423,15 @@ def report_tests(tmp, pantheon):
     verdict("accept", H2, a="ab12cd77" + "0" * 24, pr=None)
     r = pantheon("review", "report", ref, "204", "ab12cd7")
     check("report: вердикт с pr null не создаёт пару — код 1", r.returncode == 1 and "нет вердикта" in r.stderr, r.stderr)
-    # соседняя папка с тем же началом имени, что $TMPDIR, — не «под $TMPDIR»
-    sib = tmp + "-sib"
-    os.makedirs(sib)
-    try:
-        r = pantheon("review", "report", ref, "204", "ab12cd34", "--out", os.path.join(sib, "x.md"))
-        check("report --out в соседней папке с общим префиксом $TMPDIR — код 2", r.returncode == 2
-              and not os.path.exists(os.path.join(sib, "x.md")), r.stderr)
-    finally:
-        shutil.rmtree(sib, ignore_errors=True)
+    # соседняя папка с тем же началом имени, что $TMPDIR, — не «под $TMPDIR». metis-0634: $TMPDIR здесь — вне
+    # /private/tmp (у run-tests под проходом outside временные папки лежат там, и любая соседняя прошла бы как «под
+    # /private/tmp»). Папок не создаём: отказ — до записи и до чтения журнала, realpath несуществующего пути — по тексту.
+    fake_tmp = os.path.join("/var/empty", "review-tmp")
+    sib = fake_tmp + "-sib"
+    r = pantheon("review", "report", ref, "204", "ab12cd34", "--out", os.path.join(sib, "x.md"),
+                 extra={"TMPDIR": fake_tmp})
+    check("report --out в соседней папке с общим префиксом $TMPDIR — код 2", r.returncode == 2
+          and "только под $TMPDIR" in r.stderr and not os.path.exists(os.path.join(sib, "x.md")), r.stderr)
     for bad in (["x", "204", "ab12cd34"], [ref, "0", "ab12cd34"], [ref, "204", "zz"], [ref, "204"],
                 [ref, "204", "ab12cd34", "--out"], [ref, "204", "ab12cd34", "--x"]):
         check(f"report {' '.join(bad)[:30]}: плохой формат — код 2", pantheon("review", "report", *bad).returncode == 2)

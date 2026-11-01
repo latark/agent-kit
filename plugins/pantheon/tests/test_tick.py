@@ -508,14 +508,15 @@ def main():
           [x for x in sw_hq if x == st_real or x.startswith(st_real + "/")]
           == [os.path.join(hq_rw, "locks"), os.path.join(hq_rw, "autostart-reset")]
           and not any(x.startswith(st_real + "/") for x in sa["sandbox"]["filesystem"]["allowWrite"]))
-    check("окно штаба: мимо песочницы — прежний список пульта и gh PR (view/checks/edit), без сетевого git "
-          "(metis-0064, metis-0247)",
+    check("окно штаба: мимо песочницы — прежний список пульта и gh PR (view/checks/list/edit), без сетевого git "
+          "(metis-0064, metis-0247, metis-0626)",
           hb["excludedCommands"] == ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheon wake *",
                                      "pantheon archive", "pantheon jobs *", "pantheon domains build",
                                      "pantheon roles build", "pantheon stop *", "pantheon resume *", "pantheon pause *",
                                      "pantheon restart *", "pantheon saved *", "pantheon who", "pantheon agents",
                                      "sessync find", "sessync find *",
-                                     "gh pr view", "gh pr view *", "gh pr checks", "gh pr checks *", "gh pr edit *"])
+                                     "gh pr view", "gh pr view *", "gh pr checks", "gh pr checks *", "gh pr list",
+                                     "gh pr list *", "gh pr edit *"])
     others = {n: load(n)["sandbox"]["excludedCommands"] for n in ("athena-shop", "metis-pantheon", "workshop",
                                                                     "mnemo-brain", "zz", "hestia")}
     others.update({f"job-{r}": load(f"job-{r}")["sandbox"]["excludedCommands"]
@@ -524,11 +525,11 @@ def main():
           "задач его нет",
           len(others) >= 7 and not any("sessync" in x for v in others.values() for x in v)
           and "sessync find *" in hb["excludedCommands"])
-    check("окно штаба: gh api, gh issue, gh run, gh repo, gh pr create/close/comment/merge, gh с флагами до "
-          "подкоманды, «gh *» и «gh pr *» — в песочнице (metis-0247)",
+    check("окно штаба: gh api, gh issue, gh run, gh repo, gh pr create/close/comment/merge/diff, gh с флагами до "
+          "подкоманды, «gh *» и «gh pr *» — в песочнице (metis-0247; gh pr list вышел из неё — metis-0626)",
           not any(x.startswith(("gh api", "gh issue", "gh run", "gh repo", "gh pr create", "gh pr close", "gh pr merge",
                                 "gh -",
-                                "gh pr comment", "gh pr review", "gh pr diff", "gh pr list"))
+                                "gh pr comment", "gh pr review", "gh pr diff", "gh pr status"))
                   or x in ("gh", "gh *", "gh pr", "gh pr *") for x in hb["excludedCommands"]))
     corp = "lecture-notes"
     check("окно штаба: корпус из [hq].closed_dirs закрыт для чтения — песочница и правило Read (SEC-13, решение 15.10)",
