@@ -2016,10 +2016,10 @@ def t_ci_billing(h):
     h.seed(rec("accept", "latark/agent-kit", 7, sha))
     merge_case("лимит, на SHA есть только «принять» argus, записи тестов нет — отказ", h.pre(cmd, **owner), False,
                "не запускался: лимит минут")
-    h.seed(rec("tests", "latark/agent-kit", None, "e" * 40, ""))
-    merge_case("лимит, запись тестов на другом SHA — отказ", h.pre(cmd, **owner), False, "не запускался: лимит минут")
-    h.seed(rec("tests", "latark/tg-read", None, sha, ""))
-    merge_case("лимит, запись на этом SHA, но другого репозитория — отказ", h.pre(cmd, **owner), False,
+    h.seed(full_rec("latark/agent-kit", "e" * 40))
+    merge_case("лимит, запись полного набора на другом SHA — отказ", h.pre(cmd, **owner), False, "не запускался: лимит минут")
+    h.seed(full_rec("latark/tg-read", sha))
+    merge_case("лимит, запись полного набора на этом SHA, но другого репозитория — отказ", h.pre(cmd, **owner), False,
                "не запускался: лимит минут")
     h.seed(rec("tests", "latark/agent-kit", None, sha, ""))
     merge_case("лимит, запись тестов на SHA с другой командой (не FULL_TESTS) — отказ", h.pre(cmd, **owner), False,
@@ -2185,6 +2185,9 @@ def t_ci_billing_unit(h):
             ("нет ответа по id", {}, False),
             ("ответ None (сбой gh)", {124603333231: None}, False),
             ("ответ — словарь, а не список", {124603333231: good[0]}, False),
+            ("ответ — число", {124603333231: 5}, False),
+            ("текст начинается с «The job», но другой",
+             {124603333231: [dict(good[0], message="The job was not started because the runner is offline")]}, False),
             ("уровень warning", {124603333231: [dict(good[0], annotation_level="warning")]}, False),
             ("путь не .github", {124603333231: [dict(good[0], path="tests/x.py")]}, False),
             ("текст не с начала", {124603333231: [dict(good[0], message="x " + good[0]["message"])]}, False),
@@ -2242,6 +2245,9 @@ def t_ci_billing_unit(h):
     got = mg._billing_problem("Latark/Agent-Kit", 7, sha)
     check("_billing_problem: -R в другом регистре (Latark/Agent-Kit) — запись засчитана",
           got[0] is None and len(got[1]) == 1, got)
+    mg.read_records = lambda: [dict(rec("accept", "latark/agent-kit", 7, sha), cmd=FULL_TESTS_CMD)]
+    check("_billing_problem: на SHA только «принять» (даже с командой полного набора) — отказ",
+          "не запускался: лимит минут" in (mg._billing_problem("latark/agent-kit", 7, sha)[0] or ""))
     mg.read_records = lambda: [rec("tests", "latark/agent-kit", None, sha, "")]
     check("_billing_problem: запись на SHA с другой командой — отказ с командой FULL_TESTS",
           f"`{FULL_TESTS_CMD}`" in (mg._billing_problem("latark/agent-kit", 7, sha)[0] or ""))
