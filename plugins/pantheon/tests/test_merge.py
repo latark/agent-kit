@@ -75,11 +75,20 @@ if sys.argv[1] == "api" and ("/actions/runs?" in sys.argv[2] or "/check-runs?" i
                          "head_branch": c.get("head_branch", "main")})
             checks.append({"name": c.get("name"), "status": str(c.get("status") or "").lower(),
                            "conclusion": str(c["conclusion"]).lower() if c.get("conclusion") else None,
-                           "head_sha": sha, "check_suite": {"id": 1000 + i}})
+                           "head_sha": sha, "check_suite": {"id": 1000 + i}, "id": 5000 + i,
+                           "output": {"annotations_count": len(c.get("notes") or [])}})
     total = os.path.join(rec, "gh-runs-total")
     total = int(open(total).read()) if os.path.exists(total) else len(runs)
     print(json.dumps({"total_count": total, "workflow_runs": runs} if "/actions/runs?" in sys.argv[2]
                      else {"total_count": len(checks), "check_runs": checks}))
+    sys.exit(0)
+if sys.argv[1] == "api" and "/check-runs/" in sys.argv[2] and "/annotations" in sys.argv[2]:
+    # аннотации проверки (metis-0655): id 5000+i — поле "notes" записи i rollup; с gh-notes-fail — сбой
+    if os.path.exists(os.path.join(rec, "gh-notes-fail")):
+        sys.exit(1)
+    i = int(sys.argv[2].split("/check-runs/")[1].split("/")[0]) - 5000
+    v = json.load(open(os.path.join(rec, "gh-view.json")))
+    print(json.dumps(v["statusCheckRollup"][i].get("notes") or []))
     sys.exit(0)
 if sys.argv[1] == "api" and "/pulls/" in sys.argv[2] and sys.argv[2].split("?")[0].endswith("/files"):
     p = os.path.join(rec, "gh-files.jsonl")
@@ -808,25 +817,27 @@ def test_ci_fork():
 
 
 def test_ci_matches_guard():
-    """metis-0633, 0649: разбор проверок GitHub один — ci_verdict, ci_runs, ci_fork, required_checks, REQUIRED_CHECKS,
-    CI_OK, CI_WAIT и CI_NONE в merge.py дословно те же, что в шлюзе guard (merge_gate.py): сверка по AST, без запуска
-    кода."""
+    """metis-0633, 0649, 0655: разбор проверок GitHub один — ci_verdict, ci_runs, ci_fork, ci_billing_ids, ci_billing,
+    required_checks, REQUIRED_CHECKS, CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_OK, CI_WAIT и CI_NONE в merge.py
+    дословно те же, что в шлюзе guard (merge_gate.py): сверка по AST, без запуска кода."""
     import ast
 
     def parts(path):
         tree = ast.parse(open(path, encoding="utf-8").read())
         got = {}
         for n in tree.body:
-            if isinstance(n, ast.FunctionDef) and n.name in ("ci_verdict", "ci_runs", "ci_fork", "required_checks"):
+            if isinstance(n, ast.FunctionDef) and n.name in ("ci_verdict", "ci_runs", "ci_fork", "ci_billing_ids",
+                                                             "ci_billing", "required_checks"):
                 got[n.name] = ast.dump(n)
             elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) \
-                    and n.targets[0].id in ("REQUIRED_CHECKS", "CI_RUNS_API", "CI_OK", "CI_WAIT", "CI_NONE"):
+                    and n.targets[0].id in ("REQUIRED_CHECKS", "CI_RUNS_API", "CI_BILLING", "CI_ANNOTATIONS_API",
+                                            "CI_OK", "CI_WAIT", "CI_NONE"):
                 got[n.targets[0].id] = ast.dump(n.value)
         return got
 
     mine, gate = parts(os.path.join(LIBDIR, "merge.py")), parts(os.path.join(GUARD_HOOKS, "merge_gate.py"))
-    names = ("ci_verdict", "ci_runs", "ci_fork", "required_checks", "REQUIRED_CHECKS", "CI_RUNS_API", "CI_OK", "CI_WAIT",
-             "CI_NONE")
+    names = ("ci_verdict", "ci_runs", "ci_fork", "ci_billing_ids", "ci_billing", "required_checks", "REQUIRED_CHECKS",
+             "CI_RUNS_API", "CI_BILLING", "CI_ANNOTATIONS_API", "CI_OK", "CI_WAIT", "CI_NONE")
     check("merge.py и merge_gate.py: все части разбора CI есть в обоих", all(k in mine and k in gate for k in names),
           (sorted(mine), sorted(gate)))
     for k in names:
@@ -845,6 +856,73 @@ def test_ci_matches_guard():
     check("ci_state: обязательные без запусков (None) — wait, запусков нет — wait, зелёные от pull_request — ok, "
           "SKIPPED — fail; пусто без обязательных — wait, зелёное — «CI ✓ (1)»",
           r.stdout.split() == ["wait", "wait", "ok", "fail", "wait", "CI", "✓", "(1)"], r.stdout + r.stderr)
+
+
+BILLING = ("The job was not started because recent account payments have failed or your spending limit needs to be "
+           "increased. Please check the 'Billing & plans' section in your settings")
+
+
+def billing_note(message=BILLING, level="failure", path=".github"):
+    """Аннотация проверки, как её отдаёт GitHub (сохранённый ответ PR #222, plugins/guard/tests/fixtures)."""
+    return {"path": path, "start_line": 1, "end_line": 1, "annotation_level": level, "title": "", "message": message,
+            "raw_details": ""}
+
+
+def test_ci_billing():
+    """metis-0655: CI не запускался из-за лимита минут или оплаты (FAILURE с аннотацией лимита у красных
+    обязательных) — проход засчитывает вместо CI запись тестов шлюза на SHA (она нужна и так) и сливает; окно
+    говорит об этом. Обычная красная, аннотация не та, сбой запроса аннотаций — заявка снята, как раньше."""
+    blocked = [dict(c, conclusion="FAILURE", notes=[billing_note()]) for c in ci("SUCCESS", "SUCCESS")]
+    b = Box()
+    b.request()
+    b.view(SHA, checks=blocked)
+    b.run()
+    w = b.windows()
+    check("лимит минут, запись тестов на SHA → окно и слияние",
+          len(w) == 1 and len(b.merges()) == 1 and "CI не запускался (лимит минут GitHub Actions) — засчитан местный "
+          f"прогон тестов на {SHA[:12]}" in w[0][0], (w, b.outs[-1]))
+    calls = [json.loads(x)["argv"] for x in open(os.path.join(b.rec, "gh-argv.jsonl"))]
+    check("аннотации спрошены по id каждой красной обязательной",
+          [f"repos/{REPO}/check-runs/5000/annotations?per_page=100"] in [a[1:] for a in calls]
+          and [f"repos/{REPO}/check-runs/5001/annotations?per_page=100"] in [a[1:] for a in calls], calls)
+    b = Box()
+    b.request()
+    b.view(SHA, checks=[ci("SUCCESS", "SUCCESS")[0], blocked[1]])
+    b.run()
+    check("лимит только у traces, affected зелёная → окно и слияние", len(b.merges()) == 1, b.outs[-1])
+    for name, checks, setup in (
+            ("обычная красная (Process completed with exit code 1.)",
+             [dict(blocked[0], notes=[billing_note("Process completed with exit code 1.")]), blocked[1]], None),
+            ("аннотация лимита уровня warning", [dict(blocked[0], notes=[billing_note(level="warning")]), blocked[1]],
+             None),
+            ("красная без аннотаций", [dict(blocked[0], notes=[]), blocked[1]], None),
+            ("TIMED_OUT с аннотацией лимита", [dict(blocked[0], conclusion="TIMED_OUT"), blocked[1]], None),
+            ("аннотации не получены", blocked, "gh-notes-fail")):
+        b = Box()
+        b.request()
+        b.view(SHA, checks=checks)
+        if setup:
+            b.set(setup, "")
+        b.run()
+        check(f"{name} → окна нет, заявка снята с тревогой",
+              not b.windows() and not b.merges() and b.req() is None and "красная" in b.alerts(), b.alerts())
+    b = Box()
+    b.request()
+    b.view(SHA, checks=[blocked[0], dict(blocked[1], status="IN_PROGRESS", conclusion="")])
+    b.run()
+    check("лимит у affected, traces идёт → не сливает", not b.windows() and not b.merges(), b.outs[-1])
+    b = Box()
+    b.records = []
+    b.add("accept", sid="s1", aid="a1")
+    b.add("accept", sid="s2", aid="a2")
+    b.add("tests", sha=SHA, who="")
+    b.request()                       # заявка принята на записи этого SHA, к проходу запись тестов только на SHA2
+    b.records = [r for r in b.records if r["kind"] != "tests"]
+    b.add("tests", sha=SHA2, who="")
+    b.view(SHA, checks=blocked)
+    b.run()
+    check("лимит, запись тестов только на другом SHA → окна нет, заявка снята",
+          not b.windows() and not b.merges() and "нет записи тестов шлюза" in b.alerts(), b.alerts())
 
 
 PJ = "plugins/pantheon/.claude-plugin/plugin.json"

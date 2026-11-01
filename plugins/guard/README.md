@@ -583,6 +583,51 @@ SDK (`sdk`) флаг не снимают — так же журнал owner-log 
      судится — путь роли её тоже не отказывает. `GIT_DIR`, `GIT_WORK_TREE`, `XDG_CONFIG_HOME`, `HOME` в команде или
      окружении меняют репозиторий и настройки gh — не проверяются.
 
+   **Три пути слияния: CI, запасной и аварийный (решение владельца 02.11, metis-0655).** Владелец пользуется
+   бесплатными минутами GitHub Actions приватного репозитория. Когда минуты кончаются, задачи Actions не стартуют, и
+   шлюз после metis-0633 отказывал бы всегда.
+   1. Основной — CI. Обязательные проверки зелёные на head PR, как описано выше.
+   2. Запасной — местный прогон вместо CI, когда CI не запускался из-за лимита минут или оплаты. Шлюз узнаёт этот
+      случай и вместо CI требует запись `pantheon review test` на этом же SHA и этом репозитории. Это тот же журнал
+      шлюза, что у ролей; запись делает хук guard в любой сессии, и в сессии без роли тоже. Есть запись — пропуск
+      со строкой «CI не запускался: лимит минут GitHub Actions, засчитан местный прогон». Нет — отказ с готовой
+      командой: для agent-kit это `pantheon review test -- heavy python3.14 -I plugins/pantheon/scripts/run-tests.py
+      -j 3 plugins/guard plugins/pantheon plugins/project-tools` в чистой копии на этом коммите (`FULL_TESTS` в
+      `merge_gate.py`). Запись на другом коммите не засчитывается. Тот же разбор — у слияния по Touch ID
+      (`plugins/pantheon/lib/merge.py`): запись тестов там нужна всегда, поэтому при лимите она и заменяет CI.
+   3. Аварийный — терминал владельца. `gh pr merge` в его собственном терминале, вне Claude Code, guard не видит и не
+      проверяет.
+
+   Любая другая красная, пропущенная или идущая проверка — отказ, как раньше.
+
+   **На чём основан признак лимита.** В документации GitHub текста этого случая нет. Страница
+   [GitHub Actions billing](https://docs.github.com/billing/managing-billing-for-github-actions/about-billing-for-github-actions)
+   говорит только «usage is blocked once you use up your quota», а
+   [Budgets](https://docs.github.com/en/billing/how-tos/set-up-budgets) — что при исчерпанном бюджете с «Stop usage»
+   «additional usage is blocked». Как такой запуск выглядит в API, видно по
+   [check runs](https://docs.github.com/en/rest/checks/runs?apiVersion=2022-11-28): у проверки есть `conclusion` и
+   `output.annotations_count`, а сами аннотации отдаёт `GET /repos/{owner}/{repo}/check-runs/{id}/annotations`.
+   Поэтому признак взят из ответа GitHub на PR #222, где 31.10 задачи не стартовали (сохранён в
+   `tests/fixtures/ci-runs-pr222.json` и `ci-rollup-pr222.json`). Там у job `steps` 0 и `runner_id` 0, а у проверки
+   conclusion `failure` и одна аннотация: уровень `failure`, путь `.github`, текст «The job was not started because
+   recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing &
+   plans' section in your settings». Тот же текст цитируют пользователи в
+   [community #209221](https://github.com/orgs/community/discussions/209221).
+
+   Признак — conclusion и текст аннотации вместе (`ci_billing_ids`, `ci_billing`, `CI_BILLING`):
+   - каждая обязательная проверка есть среди запусков от `pull_request` на этом SHA;
+   - каждая из них завершена с SUCCESS либо с FAILURE, и хотя бы одна — с FAILURE;
+   - у каждой FAILURE есть аннотации, и среди них — аннотация уровня `failure` на путь `.github`, текст которой
+     начинается с `CI_BILLING`.
+
+   Аннотации шлюз запрашивает одним GET на каждую такую проверку, у agent-kit — не больше двух. Запрос делается
+   только тогда, когда остальные условия уже выполнены. Сбой запроса или изменённый GitHub текст дают отказ, как
+   на обычной красной. Обычная красная (PR #225: аннотация «Process completed with exit code 1.») признак не даёт.
+
+   Остаток. Шаг тестов может напечатать ту же аннотацию (`::error::The job was not started…`): тогда шлюз примет его
+   за лимит, но запись тестов на этом SHA всё равно нужна. Шлюз не проверяет, что записан именно полный набор:
+   засчитывается любая запись `tests`, как и у ролей.
+
 **Как появляются записи.** Журнал пишет только хук guard на PostToolUse, после успешной простой команды
 `pantheon review <вид> …` — без `;`, `|`, `&`, `$(`, обратных кавычек, перенаправлений и переводов строки. Сама команда
 `pantheon review` (плагин pantheon) ничего не пишет: она проверяет формат и запускает тесты.

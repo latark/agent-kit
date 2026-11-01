@@ -68,7 +68,10 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    красная необязательная — пропуск со строкой systemMessage (предупреждение едет возвратом Allow до guard_rules.main,
    а не списком модуля — metis-0650). PR из форка (isCrossRepository): pull_requests у его запусков пуст, поэтому
    засчитывается запуск с head_repository и head_branch его форка и ветки (ci_fork, metis-0649). Ждать CI в хуке
-   нельзя (10 с): отказ даёт команду ожидания.
+   нельзя (10 с): отказ даёт команду ожидания. Запасной путь (metis-0655): красные обязательные — FAILURE с аннотацией
+   лимита минут или оплаты GitHub Actions (ci_billing, ещё GET аннотаций на каждую такую), остальные обязательные —
+   SUCCESS: вместо CI засчитывается запись tests на этот SHA (_billing_problem) — пропуск со строкой systemMessage, без
+   записи — отказ с командой.
 Модель argus guard берёт из его транскрипта, а не только со слов ran (metis-0176): Claude Code не передаёт путь к
 транскрипту субагента в PreToolUse/PostToolUse (agent_transcript_path — только в SubagentStop), он выводится из входа
 хука — transcript_path, session_id, agent_id — по раскладке Claude Code. Это защита от ошибки шаблона и от запуска
@@ -1215,7 +1218,8 @@ def _version_problem(files):
 
 # проверки GitHub на head PR (metis-0297, 0633, 0649). Разбор — ci_verdict, ci_runs, ci_fork и required_checks — один
 # код здесь и в plugins/pantheon/lib/merge.py (слияние по Touch ID): плагины ставятся порознь и не импортируют друг
-# друга, поэтому текст функций, REQUIRED_CHECKS, CI_RUNS_API, CI_OK, CI_WAIT и CI_NONE совпадает дословно — сверяет test_merge (AST)
+# друга, поэтому текст функций (и ci_billing_ids, ci_billing — metis-0655), REQUIRED_CHECKS, CI_RUNS_API, CI_BILLING,
+# CI_ANNOTATIONS_API, CI_OK, CI_WAIT и CI_NONE совпадает дословно — сверяет test_merge (AST)
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
 CI_NONE = "проверки GitHub не получены"
@@ -1231,6 +1235,15 @@ REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces",
 # запуски Actions на head SHA: два GET REST (GraphQL — POST, его правило push ролям закрывает), связь — check_suite_id
 CI_RUNS_API = ("repos/{repo}/actions/runs?head_sha={sha}&per_page=100",
                "repos/{repo}/commits/{sha}/check-runs?per_page=100")
+# CI не запускался из-за лимита минут или оплаты GitHub Actions (metis-0655). Признак — по ответам GitHub, а не по
+# памяти: в документации текста нет (docs.github.com: «usage is blocked», check-runs: conclusion и output), поэтому —
+# по сохранённому ответу PR #222 (31.10, plugins/guard/tests/fixtures/ci-runs-pr222.json):
+# проверка от Actions завершена с FAILURE, аннотация уровня failure на путь .github с этим текстом (запрос
+# CI_ANNOTATIONS_API — только к таким проверкам).
+# Текст поменяется — признака нет и отказ, как на любой красной
+CI_BILLING = ("The job was not started because recent account payments have failed or your spending limit needs to be "
+              "increased")
+CI_ANNOTATIONS_API = "repos/{repo}/check-runs/{id}/annotations?per_page=100"
 
 
 def required_checks(repo, base):
@@ -1251,7 +1264,8 @@ def ci_fork(view):
 
 
 def ci_runs(workflow_runs, check_runs, sha, pr, fork=None):
-    """Запуски Actions PR pr на коммите sha с событием: [{workflowName, name, status, conclusion, event}] по ответам
+    """Запуски Actions PR pr на коммите sha с событием: [{workflowName, name, status, conclusion, event, id,
+    annotations}] (id проверки и число её аннотаций — для ci_billing, metis-0655) по ответам
     CI_RUNS_API (actions/runs и check-runs). Не идут в список: проверка без запуска Actions с тем же check_suite_id
     (стороннее приложение с тем же именем), чужой head_sha и запуск, в pull_requests которого нет этого PR (запуск
     чужого PR на том же SHA). PR из форка (fork — ответ ci_fork, metis-0649): у его запусков GitHub pull_requests не
@@ -1277,12 +1291,49 @@ def ci_runs(workflow_runs, check_runs, sha, pr, fork=None):
         for c in cr:
             run = suites.get(c["check_suite"]["id"])
             if run is not None and c["head_sha"] == sha:
+                info = c.get("output") if isinstance(c.get("output"), dict) else {}
                 out.append({"workflowName": str(run.get("name") or ""), "name": str(c.get("name") or ""),
                             "status": str(c.get("status") or ""), "conclusion": str(c.get("conclusion") or ""),
-                            "event": str(run.get("event") or "")})
+                            "event": str(run.get("event") or ""), "id": c.get("id"),
+                            "annotations": info.get("annotations_count")})
         return out
     except (TypeError, KeyError, AttributeError):
         return None
+
+
+def ci_billing_ids(runs, required):
+    """id проверок, чьи аннотации нужны для признака «CI не запускался: лимит минут или оплата» (metis-0655): каждая
+    обязательная (required) есть среди runs от pull_request, у каждой её запись завершена с SUCCESS или с FAILURE,
+    id — целое и аннотации есть; хоть одна FAILURE. Иначе пусто: признака нет, и запросов аннотаций шлюз не делает."""
+    if not isinstance(runs, list):
+        return []
+    must, seen, ids = [tuple(r) for r in required], set(), []
+    for c in runs:
+        if not isinstance(c, dict) or c.get("event") != "pull_request":
+            continue
+        key = (str(c.get("workflowName") or ""), str(c.get("name") or ""))
+        if key not in must:
+            continue
+        seen.add(key)
+        status, concl = str(c.get("status") or "").upper(), str(c.get("conclusion") or "").upper()
+        if status == "COMPLETED" and concl == "SUCCESS":
+            continue
+        n = c.get("annotations")
+        if status != "COMPLETED" or concl != "FAILURE" or type(c.get("id")) is not int or type(n) is not int or n < 1:
+            return []
+        ids.append(c["id"])
+    return ids if all(k in seen for k in must) else []
+
+
+def ci_billing(runs, required, notes):
+    """CI не запускался из-за лимита минут или оплаты (metis-0655): ci_billing_ids не пуст и у каждой такой проверки
+    в notes ({id: ответ CI_ANNOTATIONS_API — список}) есть аннотация уровня failure на путь .github, текст которой
+    начинается с CI_BILLING. Ответа нет (сбой gh) или он не список — признака нет."""
+    ids = ci_billing_ids(runs, required)
+    return bool(ids) and isinstance(notes, dict) and all(
+        isinstance(notes.get(i), list) and any(
+            isinstance(a, dict) and a.get("annotation_level") == "failure" and a.get("path") == ".github"
+            and str(a.get("message") or "").startswith(CI_BILLING) for a in notes[i]) for i in ids)
 
 
 def ci_verdict(rollup, required=(), runs=None):
@@ -1406,12 +1457,49 @@ def _ci_runs(repo, pr, sha, fork=None):
     return ci_runs(got[0], got[1], sha, pr, fork)
 
 
+def _ci_notes(repo, ids):
+    """Аннотации проверок ids (metis-0655): {id: список по CI_ANNOTATIONS_API или None — сбой gh}. Один GET на
+    проверку из ci_billing_ids (обязательные красные с аннотациями — у agent-kit не больше двух); пусто —
+    запросов нет."""
+    return {i: _gh_json(["api", CI_ANNOTATIONS_API.format(repo=repo, id=i)]) for i in ids}
+
+
+# полный набор тестов для записи на запасном пути (metis-0655): имя репозитория без владельца → команда после
+# `pantheon review test --`; нет записи — шаблон в отказе
+FULL_TESTS = {"agent-kit": ("heavy python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard "
+                            "plugins/pantheon plugins/project-tools")}
+
+
+def _billing_problem(repo, pr, sha):
+    """Запасной путь (metis-0655, решение владельца 02.11): CI на head не запускался из-за лимита минут или оплаты
+    GitHub Actions (ci_billing) — вместо CI засчитывается запись tests на этот SHA и этот репозиторий из журнала
+    шлюза (ту же пишет хук guard на `pantheon review test` в любой сессии). Есть — пропуск с предупреждением; нет или
+    журнал не читается — отказ с командой записи. Возврат, как у _ci_problem, — (текст отказа или None,
+    предупреждения пропуска)."""
+    where = f"{repo}#{pr}@{sha[:12]}"
+    records = read_records()
+    if records is None:
+        return (f"CI на {where} не запускался (лимит минут или оплата GitHub Actions), а журнал записей тестов "
+                "~/.local/state/pantheon/merge-gate/records.jsonl не читается (симлинк или сбой) — местный прогон не "
+                "сверить"), ()
+    if any(r["kind"] == "tests" and r["sha"] == sha and repo.lower() in [x.lower() for x in r["repo"]]
+           for r in records):
+        return None, (f"CI не запускался: лимит минут GitHub Actions, засчитан местный прогон (запись `pantheon "
+                      f"review test`) на {where}",)
+    cmd = FULL_TESTS.get(repo.rsplit("/", 1)[-1].lower(), "<команда полного набора тестов>")
+    return (f"CI на {where} не запускался: лимит минут или оплата GitHub Actions (аннотация «{CI_BILLING}…»). "
+            f"Запасной путь — местный полный прогон с записью на этом коммите: в чистой копии на {sha[:12]} запусти "
+            f"`pantheon review test -- {cmd}` (Bash не в фоне, timeout 600000 мс), затем повтори слияние"), ()
+
+
 def _ci_problem(repo, pr, sha, data):
     """Проверки GitHub на head PR зелёные — иначе текст отказа (metis-0297: 19.10 дважды ушёл PR с красной
     check-traces). data — ответ _pr_view; его rollup — проверки коммита headRefOid, а он сверяется с SHA из
     --match-head-commit: PR на другом коммите — отказ. Разбор — ci_verdict с обязательными проверками репозитория
     (required_checks по baseRefName, metis-0633; их запуски — _ci_runs на этом SHA, засчитывается только
-    pull_request с SUCCESS): красная или пропущенная обязательная — отказ, нет её или идёт — отказ «дождись» с
+    pull_request с SUCCESS): красная или пропущенная обязательная — отказ, кроме CI, который не запускался из-за
+    лимита минут или оплаты (ci_billing по аннотациям красных, metis-0655): тогда _billing_problem — запись тестов на
+    этом SHA вместо CI; нет обязательной или идёт — отказ «дождись» с
     командой ожидания вне хука, красная необязательная — пропуск с предупреждением. Ждать в хуке нельзя:
     таймаут хука 10 с. Обязательных нет и проверок нет: пропуск, только если .github/workflows нет ни на head, ни на
     base PR (ответ 404 на оба): PR, который удаляет или переименовывает папку workflows, проверок не получает, а на
@@ -1427,6 +1515,8 @@ def _ci_problem(repo, pr, sha, data):
     if state == "fail" and text.startswith(CI_NONE):
         return f"{text} на {repo}#{pr}@{sha[:12]} — повтори слияние позже", ()
     if state == "fail":
+        if ci_billing(runs, required, _ci_notes(repo, ci_billing_ids(runs, required))):
+            return _billing_problem(repo, pr, sha)
         return f"{text} на {repo}#{pr}@{sha[:12]} — почини и сделай новый коммит с новыми записями", ()
     if state == "wait":
         return f"{text} на {repo}#{pr}@{sha[:12]} — {CI_WATCH.format(pr=pr, repo=repo)}", ()
@@ -1924,7 +2014,8 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
     return allow(notes)
 
 OWNER_CI = ("слияние из сессии без роли проверяет только CI (решение владельца 01.11, metis-0633): записи тестов и "
-            "argus не нужны, а красный или незавершённый CI — отказ")
+            "argus не нужны, а красный или незавершённый CI — отказ; CI не запускался из-за лимита минут — "
+            "нужна запись `pantheon review test` на этом коммите (metis-0655)")
 
 
 def owner_ci_problem(cwd, moved, args):

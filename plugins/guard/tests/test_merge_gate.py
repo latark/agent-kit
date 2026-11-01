@@ -62,7 +62,7 @@ def rest_runs(view):
     CheckRun — свой запуск Actions своего workflow; событие — поле "event" записи (по умолчанию pull_request), head —
     headRefOid, PR — поле "prs" записи (по умолчанию 7, номер PR agent-kit в тестах), репозиторий и ветка head —
     поля "head_repo" и "head_branch" (по умолчанию latark/agent-kit и main; PR из форка, metis-0649); StatusContext в
-    REST запусков нет."""
+    REST запусков нет. Проверка i — id 5000+i, её аннотации — поле "notes" записи (metis-0655, файл gh.notes.<id>)."""
     sha, rollup, runs, checks = view.get("headRefOid"), view.get("statusCheckRollup"), [], []
     for i, c in enumerate(rollup if isinstance(rollup, list) else []):
         if not isinstance(c, dict) or not ("conclusion" in c or "status" in c and "state" not in c):
@@ -73,7 +73,8 @@ def rest_runs(view):
                      "head_branch": c.get("head_branch", "main")})
         checks.append({"name": c.get("name"), "status": str(c.get("status") or "").lower(),
                        "conclusion": str(c["conclusion"]).lower() if c.get("conclusion") else None, "head_sha": sha,
-                       "check_suite": {"id": 1000 + i}})
+                       "check_suite": {"id": 1000 + i}, "id": 5000 + i,
+                       "output": {"annotations_count": len(c.get("notes") or ())}})
     return {"total_count": len(runs), "workflow_runs": runs}, {"total_count": len(checks), "check_runs": checks}
 
 
@@ -111,6 +112,7 @@ class Home:
         # api repos/o/<repo>/git/ref/heads/<ветка> — $HOME/gh.ref.<repo> (вершина base, metis-0404 Б1), нет файла — сбой
         # api repos/o/<repo>/actions/runs?head_sha=… и …/commits/<sha>/check-runs — $HOME/gh.runs.<repo> и
         # gh.checkruns.<repo> (rest_runs по rollup, metis-0633), нет файла — сбой
+        # api repos/o/<repo>/check-runs/<id>/annotations — $HOME/gh.notes.<id> (metis-0655), нет файла — сбой
         with open(j("bin/gh"), "w") as fh:
             fh.write('#!/bin/sh\necho "$@" >> "$HOME/gh.log"\n[ -f "$HOME/gh.fail" ] && exit 1\n'
                      'case "$*" in\n'
@@ -122,6 +124,8 @@ class Home:
                      '*/git/ref/heads/*) r="$HOME/gh.ref.$(basename "${2%%/git/ref/*}")"; '
                      '[ -f "$r" ] || exit 1; cat "$r"; exit 0;;\n'
                      '*/actions/runs*) r="$HOME/gh.runs.$(basename "${2%%/actions/runs*}")"; '
+                     '[ -f "$r" ] || exit 1; cat "$r"; exit 0;;\n'
+                     '*/check-runs/*/annotations*) x="${2#*/check-runs/}"; r="$HOME/gh.notes.${x%%/*}"; '
                      '[ -f "$r" ] || exit 1; cat "$r"; exit 0;;\n'
                      '*/check-runs*) r="$HOME/gh.checkruns.$(basename "${2%%/commits/*}")"; '
                      '[ -f "$r" ] || exit 1; cat "$r"; exit 0;;\n'
@@ -144,7 +148,7 @@ class Home:
         shutil.rmtree(self.j(".local/state/pantheon/owner-log"), ignore_errors=True)
         for f in os.listdir(self.root):
             if f.startswith(("gh.fail", "gh.log", "gh.api.fail", "gh.ci.fail", "gh.wf.", "gh.view.", "gh.ref.",
-                             "gh.runs.", "gh.checkruns.")):
+                             "gh.runs.", "gh.checkruns.", "gh.notes.")):
                 os.remove(self.j(f))
         open(self.j("ai/pantheon/alerts.md"), "w").close()
         self.runs = {}  # ответы REST запусков Actions (имя → (runs, check-runs) или "fail"); без записи — rest_runs
@@ -175,6 +179,11 @@ class Home:
             if os.path.exists(self.j(f)):
                 os.remove(self.j(f))
         got = getattr(self, "runs", {}).get(name) or rest_runs(self.view[name])
+        rollup = self.view[name].get("statusCheckRollup")
+        for i, c in enumerate(rollup if isinstance(rollup, list) else []):
+            if isinstance(c, dict) and "notes" in c:
+                with open(self.j(f"gh.notes.{5000 + i}"), "w") as fh:
+                    json.dump(c["notes"], fh)
         if got != "fail":
             for f, body in zip(("gh.runs." + name, "gh.checkruns." + name), got):
                 with open(self.j(f), "w") as fh:
@@ -1878,6 +1887,185 @@ def t_ci_required(h):
                "check-traces красная: FAILURE")
 
 
+def _notes_on(h, saved):
+    """Аннотации проверок из сохранённого ответа (metis-0655) — в файлы поддельного gh: gh.notes.<id>."""
+    for i, body in saved.get("annotations", {}).items():
+        with open(h.j(f"gh.notes.{i}"), "w") as fh:
+            json.dump(body, fh)
+
+
+def _owner_out(h, cmd, pdir):
+    """Сырой ответ хука на PreToolUse сессии без роли (для systemMessage при пропуске)."""
+    event = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": h.j(pdir),
+             "session_id": "s-owner", "tool_use_id": "toolu_" + uuid.uuid4().hex}
+    return h.hook(event, pdir)
+
+
+def t_ci_billing(h):
+    """metis-0655: CI не запускался из-за лимита минут или оплаты GitHub Actions (сохранённый ответ PR #222: FAILURE и
+    аннотация «The job was not started because …») — вместо CI нужна запись tests на этот SHA и этот репозиторий:
+    есть — пропуск со строкой systemMessage, нет (или на другом SHA, другом репозитории, журнал не читается) — отказ
+    с командой записи. Обычная красная (PR #225, «Process completed with exit code 1.») и сбой запроса аннотаций —
+    отказ, как раньше. Сессия без роли и роль."""
+    kit, sha = "projects/agent-kit", h.sha["agent-kit"]
+    cmd = f"gh pr merge 7 --match-head-commit {sha}"
+    owner = dict(role=None, pdir=kit)
+    full = ("`pantheon review test -- heavy python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard "
+            "plugins/pantheon plugins/project-tools`")
+
+    def saved(pr):
+        runs = _saved(pr, "runs")
+        h.runs["agent-kit"] = _runs_on(runs, sha, pr)
+        h.ci(_saved(pr)["statusCheckRollup"], name="agent-kit", baseRefName="main")
+        _notes_on(h, runs)
+
+    saved(222)
+    h.reset_log()
+    merge_case("лимит, записи тестов нет — отказ «не запускался» с командой записи", h.pre(cmd, **owner), False,
+               f"CI на latark/agent-kit#7@{sha[:12]} не запускался: лимит минут или оплата GitHub Actions")
+    merge_case("лимит, записи нет — в отказе готовая команда полного набора", h.pre(cmd, **owner), False, full)
+    log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+    check("лимит: аннотации спрошены у красных обязательных от pull_request (не у push)",
+          "api repos/latark/agent-kit/check-runs/124603333231/annotations?per_page=100" in log
+          and "check-runs/124603333226/annotations" in log and "124603302196" not in log, log)
+    h.seed(rec("accept", "latark/agent-kit", 7, sha))
+    merge_case("лимит, на SHA есть только «принять» argus, записи тестов нет — отказ", h.pre(cmd, **owner), False,
+               "не запускался: лимит минут")
+    h.seed(rec("tests", "latark/agent-kit", None, "e" * 40, ""))
+    merge_case("лимит, запись тестов на другом SHA — отказ", h.pre(cmd, **owner), False, "не запускался: лимит минут")
+    h.seed(rec("tests", "latark/tg-read", None, sha, ""))
+    merge_case("лимит, запись на этом SHA, но другого репозитория — отказ", h.pre(cmd, **owner), False,
+               "не запускался: лимит минут")
+    h.seed(rec("tests", "Latark/Agent-Kit", None, sha, ""))
+    r = _owner_out(h, cmd, kit)
+    msg = json.loads(r.stdout).get("systemMessage", "") if r.stdout.strip() else ""
+    check("лимит, запись тестов на этом SHA — без роли пропуск", decision(r)[0] == "allow", r.stdout + r.stderr)
+    check("лимит, пропуск — systemMessage «CI не запускался … засчитан местный прогон»",
+          f"CI не запускался: лимит минут GitHub Actions, засчитан местный прогон (запись `pantheon review test`) на "
+          f"latark/agent-kit#7@{sha[:12]}" in msg, r.stdout)
+    r = _hook_out(h, cmd, kit)
+    check("лимит, роль с записями тестов и argus — пропуск со строкой systemMessage",
+          decision(r)[0] == "allow" and "засчитан местный прогон" in r.stdout, r.stdout + r.stderr)
+    # обычная красная с аннотацией «Process completed with exit code 1.» — отказ и с записью тестов
+    saved(225)
+    h.reset_log()
+    merge_case("PR 225 (обычная красная) с записью тестов — без роли отказ", h.pre(cmd, **owner), False,
+               "tests/affected красная: FAILURE")
+    log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+    check("PR 225: аннотации красной affected спрошены, признака лимита нет", "check-runs/124790157366/annotations"
+          in log, log)
+    merge_case("PR 225 с записями — роль: отказ", h.pre(cmd, pdir=kit), False, "tests/affected красная: FAILURE")
+    saved(222)
+    os.remove(h.j("gh.notes.124603333226"))
+    merge_case("лимит, аннотации traces не получены — отказ по красной", h.pre(cmd, **owner), False,
+               "check-traces/traces красная: FAILURE")
+    h.runs.clear()
+    bill = _saved(222, "runs")["annotations"]["124603333231"]
+    aff_b, tr_b = dict(AFFECTED, conclusion="FAILURE", notes=bill), dict(TRACES, conclusion="FAILURE", notes=bill)
+    h.ci([AFFECTED, tr_b], name="agent-kit")
+    merge_case("лимит только у traces, affected зелёная, запись есть — пропуск", h.pre(cmd, **owner), True)
+    h.ci([aff_b, dict(TRACES, status="IN_PROGRESS", conclusion="")], name="agent-kit")
+    merge_case("лимит у affected, traces идёт — отказ по красной", h.pre(cmd, **owner), False,
+               "tests/affected красная: FAILURE")
+    h.ci([aff_b, dict(tr_b, conclusion="TIMED_OUT")], name="agent-kit")
+    merge_case("traces TIMED_OUT с аннотацией лимита — отказ", h.pre(cmd, **owner), False, "traces красная: TIMED_OUT")
+    h.ci([aff_b, tr_b], name="agent-kit")
+    merge_case("лимит у обеих (синтетика), запись есть — пропуск", h.pre(cmd, **owner), True)
+    # журнал записей не читается (папка — симлинк) — отказ, а не пропуск
+    d = h.j(".local/state/pantheon/merge-gate")
+    shutil.rmtree(d)
+    os.symlink(h.j("ai"), d)
+    try:
+        merge_case("лимит, журнал записей не читается — отказ", h.pre(cmd, **owner), False,
+                   "журнал записей тестов ~/.local/state/pantheon/merge-gate/records.jsonl не читается")
+    finally:
+        os.remove(d)
+
+
+def t_ci_billing_unit(h):
+    """metis-0655: ci_runs несёт id и число аннотаций; ci_billing_ids и ci_billing — каждое условие признака лимита."""
+    mg = _load_merge_gate("merge_gate_ci_billing")
+    req = mg.required_checks("latark/agent-kit", "main")
+    s222, s225 = _saved(222, "runs"), _saved(225, "runs")
+    sha = "6b7a70dc2f1ee50ef12894607aab72760220636a"
+    runs = mg.ci_runs(s222["workflow_runs"], s222["check_runs"], sha, 222)
+    notes = {int(k): v for k, v in s222["annotations"].items()}
+    check("ci_runs: id и annotations проверки в каждой записи",
+          {(r["name"], r["event"], r["id"], r["annotations"]) for r in runs} ==
+          {("full", "pull_request", 124603334301, 0), ("affected", "pull_request", 124603333231, 1),
+           ("traces", "pull_request", 124603333226, 2), ("traces", "push", 124603302196, 2)}, runs)
+    check("ci_runs: output не словарь — annotations None, а не сбой разбора",
+          mg.ci_runs(s222["workflow_runs"], dict(s222["check_runs"], check_runs=[
+              dict(c, output="x") for c in s222["check_runs"]["check_runs"]]), sha, 222)[0]["annotations"] is None)
+    ids = mg.ci_billing_ids(runs, req)
+    check("PR 222: id — красные обязательные от pull_request", sorted(ids) == [124603333226, 124603333231], ids)
+    check("PR 222: признак лимита есть", mg.ci_billing(runs, req, notes) is True)
+    sha225 = s225["check_runs"]["check_runs"][0]["head_sha"]
+    r225 = mg.ci_runs(s225["workflow_runs"], s225["check_runs"], sha225, 225)
+    check("PR 225: id красной affected спрашивается", mg.ci_billing_ids(r225, req) == [124790157366],
+          mg.ci_billing_ids(r225, req))
+    check("PR 225: «Process completed with exit code 1.» — признака нет",
+          mg.ci_billing(r225, req, {int(k): v for k, v in s225["annotations"].items()}) is False)
+    aff = next(r for r in runs if r["name"] == "affected")
+    tr = next(r for r in runs if r["name"] == "traces" and r["event"] == "pull_request")
+    ok_aff, ok_tr = dict(aff, conclusion="success"), dict(tr, conclusion="success")
+    cases = [
+        ("required пуст", runs, (), []),
+        ("runs не список (None)", None, req, []),
+        ("runs — строка неполных данных", "неполные", req, []),
+        ("все зелёные — FAILURE нет", [ok_aff, ok_tr], req, []),
+        ("traces только от push", [aff, dict(tr, event="push")], req, []),
+        ("нет traces", [aff], req, []),
+        ("красная необязательная tests/full с лимитом не в счёт",
+         [ok_aff, ok_tr, dict(aff, name="full", id=9)], req, []),
+        ("affected идёт", [dict(aff, status="in_progress", conclusion=""), tr], req, []),
+        ("affected идёт, а conclusion success", [dict(aff, status="in_progress", conclusion="success"), tr], req, []),
+        ("affected идёт, а conclusion failure", [dict(aff, status="in_progress", conclusion="failure"), tr], req, []),
+        ("affected TIMED_OUT", [dict(aff, conclusion="timed_out"), tr], req, []),
+        ("affected CANCELLED", [dict(aff, conclusion="cancelled"), tr], req, []),
+        ("affected SKIPPED", [dict(aff, conclusion="skipped"), ok_tr], req, []),
+        ("id None", [dict(aff, id=None), tr], req, []),
+        ("id строкой", [dict(aff, id="124603333231"), tr], req, []),
+        ("id True", [dict(aff, id=True), tr], req, []),
+        ("аннотаций 0", [dict(aff, annotations=0), tr], req, []),
+        ("аннотаций None", [dict(aff, annotations=None), tr], req, []),
+        ("аннотаций строкой", [dict(aff, annotations="1"), tr], req, []),
+        ("запись не словарь", ["x", aff, tr], req, [124603333231, 124603333226]),
+        ("лимит у affected, traces зелёная", [aff, ok_tr], req, [124603333231]),
+        ("регистр итога не важен", [dict(aff, status="COMPLETED", conclusion="FAILURE"), ok_tr], req, [124603333231]),
+    ]
+    for name, rs, rq, want in cases:
+        got = mg.ci_billing_ids(rs, rq)
+        check(f"ci_billing_ids: {name} → {want}", got == want, got)
+    one = [aff, ok_tr]
+    good = notes[124603333231]
+    for name, ns, want in (
+            ("аннотация лимита", {124603333231: good}, True),
+            ("лимит и ещё notice", {124603333231: notes[124603333226]}, True),
+            ("notes не словарь", [good], False),
+            ("нет ответа по id", {}, False),
+            ("ответ None (сбой gh)", {124603333231: None}, False),
+            ("ответ — словарь, а не список", {124603333231: good[0]}, False),
+            ("уровень warning", {124603333231: [dict(good[0], annotation_level="warning")]}, False),
+            ("путь не .github", {124603333231: [dict(good[0], path="tests/x.py")]}, False),
+            ("текст не с начала", {124603333231: [dict(good[0], message="x " + good[0]["message"])]}, False),
+            ("текст другой", {124603333231: [dict(good[0], message="Process completed with exit code 1.")]}, False),
+            ("текста нет", {124603333231: [dict(good[0], message=None)]}, False),
+            ("аннотация не словарь", {124603333231: ["The job was not started because"]}, False)):
+        got = mg.ci_billing(one, req, ns)
+        check(f"ci_billing: {name} → {want}", got is want, got)
+    check("ci_billing: две красные, лимит только у одной — признака нет",
+          mg.ci_billing(runs, req, dict(notes, **{124603333226: s225["annotations"]["124790157366"]})) is False)
+    check("ci_billing: ids пуст — признака нет", mg.ci_billing([ok_aff, ok_tr], req, notes) is False)
+    # _billing_problem: запись tests на SHA — без учёта регистра репозитория; предупреждение — строка пропуска
+    mg.read_records = lambda: [rec("tests", "latark/agent-kit", None, sha, "")]
+    got = mg._billing_problem("Latark/Agent-Kit", 7, sha)
+    check("_billing_problem: -R в другом регистре (Latark/Agent-Kit) — запись засчитана",
+          got[0] is None and len(got[1]) == 1, got)
+    check("_billing_problem: репозиторий без записи в FULL_TESTS — шаблон команды",
+          "`pantheon review test -- <команда полного набора тестов>`" in (mg._billing_problem("o/x", 7, sha)[0] or ""))
+
+
 def t_ci_verdict_unit(h):
     """metis-0633: ci_verdict и required_checks напрямую — каждая ветка разбора; REQUIRED_CHECKS сверены с
     .github/workflows репозитория (имя workflow, job и ветка PR)."""
@@ -1979,9 +2167,9 @@ def t_ci_verdict_unit(h):
     got = mg.ci_runs(wr, cr, sha, 7)
     check("ci_runs: запуск Actions этого PR на этом SHA — workflow, job, итог и событие (чужой PR и без PR — нет)",
           got == [{"workflowName": "tests", "name": "affected", "status": "completed", "conclusion": "success",
-                   "event": "pull_request"},
+                   "event": "pull_request", "id": None, "annotations": None},
                   {"workflowName": "check-traces", "name": "traces", "status": "in_progress", "conclusion": "",
-                   "event": "push"}], got)
+                   "event": "push", "id": None, "annotations": None}], got)
     got = mg.ci_runs(wr, cr, sha, "7")
     check("ci_runs: номер PR строкой — тот же итог", len(got or []) == 2, got)
     check("ci_runs: другой PR — пусто", mg.ci_runs(wr, cr, sha, 8) == [], mg.ci_runs(wr, cr, sha, 8))
@@ -3828,7 +4016,7 @@ CASES = [t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_old_sha, t_no_te
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_not_core, t_opus_transcript, t_ci,
-         t_ci_required, t_ci_verdict_unit, t_ci_fork_unit, t_ci_fork, t_notes_events,
+         t_ci_required, t_ci_verdict_unit, t_ci_fork_unit, t_ci_fork, t_notes_events, t_ci_billing, t_ci_billing_unit,
          t_core_touchid, t_core_0598, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
          t_carry_r4_gate, t_carry_r6, t_version_bump_refused, t_core_sandbox_unit, t_core_sandbox]
 

@@ -1,5 +1,5 @@
 {
- "_source": "gh api repos/latark/agent-kit/actions/runs?head_sha=1369098cfe06b9ff3190dbdbec10ab36c81216be и commits/1369098cfe06b9ff3190dbdbec10ab36c81216be/check-runs, 2026-11-01 (metis-0633): PR #225 слит при красном CI; оставлены поля, которые читает ci_runs; pull_requests — номер PR, как GitHub отдаёт его до слияния (после слияния поле пустое, проверено 01.11 на PR 230 открытом и 223/225 слитых)",
+ "_source": "gh api repos/latark/agent-kit/actions/runs?head_sha=1369098cfe06b9ff3190dbdbec10ab36c81216be и commits/1369098cfe06b9ff3190dbdbec10ab36c81216be/check-runs, 2026-11-01 (metis-0633): PR #225 слит при красном CI; оставлены поля, которые читает ci_runs; pull_requests — номер PR, как GitHub отдаёт его до слияния (после слияния поле пустое, проверено 01.11 на PR 230 открытом и 223/225 слитых); id, output проверок и annotations красной affected (check-runs/<id>/annotations) добавлены 02.11 (metis-0655): обычная красная — аннотация «Process completed with exit code 1.»",
  "workflow_runs": {
   "total_count": 3,
   "workflow_runs": [
@@ -57,6 +57,12 @@
     "head_sha": "1369098cfe06b9ff3190dbdbec10ab36c81216be",
     "check_suite": {
      "id": 111902645706
+    },
+    "id": 124790158062,
+    "output": {
+     "title": null,
+     "summary": null,
+     "annotations_count": 0
     }
    },
    {
@@ -66,6 +72,12 @@
     "head_sha": "1369098cfe06b9ff3190dbdbec10ab36c81216be",
     "check_suite": {
      "id": 111902645706
+    },
+    "id": 124790157366,
+    "output": {
+     "title": null,
+     "summary": null,
+     "annotations_count": 2
     }
    },
    {
@@ -75,6 +87,12 @@
     "head_sha": "1369098cfe06b9ff3190dbdbec10ab36c81216be",
     "check_suite": {
      "id": 111902645692
+    },
+    "id": 124790157158,
+    "output": {
+     "title": null,
+     "summary": null,
+     "annotations_count": 2
     }
    },
    {
@@ -84,7 +102,39 @@
     "head_sha": "1369098cfe06b9ff3190dbdbec10ab36c81216be",
     "check_suite": {
      "id": 111902635980
+    },
+    "id": 124790146395,
+    "output": {
+     "title": null,
+     "summary": null,
+     "annotations_count": 2
     }
+   }
+  ]
+ },
+ "annotations": {
+  "124790157366": [
+   {
+    "path": ".github",
+    "start_line": 3,
+    "start_column": null,
+    "end_line": 3,
+    "end_column": null,
+    "annotation_level": "warning",
+    "title": "",
+    "message": "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683, actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/",
+    "raw_details": ""
+   },
+   {
+    "path": ".github",
+    "start_line": 161,
+    "start_column": null,
+    "end_line": 161,
+    "end_column": null,
+    "annotation_level": "failure",
+    "title": "",
+    "message": "Process completed with exit code 1.",
+    "raw_details": ""
    }
   ]
  }

@@ -22,7 +22,9 @@ PR ядра защит (Д3) агенты не сливают: его слива
      обязательные из REQUIRED_CHECKS — запуск Actions от pull_request на этом SHA с SUCCESS (ci_runs_fetch, дубль —
      худший итог; PR из форка — запуск с head_repository и head_branch его форка и ветки, ci_fork, metis-0649), у
      репозитория без записи — все проверки rollup. CI ещё идёт, обязательной или любых проверок пока
-     нет, запуски не получены — заявка ждёт; красная или SKIPPED — снята с тревогой.
+     нет, запуски не получены — заявка ждёт; красная или SKIPPED — снята с тревогой, кроме CI, который не
+     запускался из-за лимита минут или оплаты GitHub Actions (ci_billing по аннотациям красных, metis-0655): тогда
+     вместо CI засчитывается та же запись тестов шлюза на SHA.
      Список файлов PR (REST pulls/N/files) полон — иначе ждёт: окно показывает задетые файлы ядра, без списка их не
      показать. PR правит version в plugin.json плагина или трогает
      .claude-plugin/releases.json — снята с тревогой (metis-0512: номер поднимает workflow release после слияния).
@@ -368,9 +370,10 @@ def is_core(path):
     return p in {c.casefold() for c in CORE_FILES} or any(p == d or p.startswith(d + "/") for d in CORE_DIR)
 
 
-# проверки GitHub на head PR (metis-0285, 0633, 0649): ci_verdict, ci_runs, ci_fork, required_checks, REQUIRED_CHECKS,
-# CI_RUNS_API, CI_OK, CI_WAIT и CI_NONE — дословно те же, что в шлюзе guard (plugins/guard/hooks/merge_gate.py):
-# плагины порознь, друг друга не импортируют, совпадение сверяет test_merge по AST. Правишь — правь оба
+# проверки GitHub на head PR (metis-0285, 0633, 0649, 0655): ci_verdict, ci_runs, ci_fork, ci_billing_ids,
+# ci_billing, required_checks, REQUIRED_CHECKS, CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_OK, CI_WAIT и CI_NONE —
+# дословно те же, что в шлюзе guard (plugins/guard/hooks/merge_gate.py): плагины порознь,
+# друг друга не импортируют, совпадение сверяет test_merge по AST. Правишь — правь оба
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
 CI_NONE = "проверки GitHub не получены"
@@ -386,6 +389,15 @@ REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces",
 # запуски Actions на head SHA: два GET REST (GraphQL — POST, его правило push ролям закрывает), связь — check_suite_id
 CI_RUNS_API = ("repos/{repo}/actions/runs?head_sha={sha}&per_page=100",
                "repos/{repo}/commits/{sha}/check-runs?per_page=100")
+# CI не запускался из-за лимита минут или оплаты GitHub Actions (metis-0655). Признак — по ответам GitHub, а не по
+# памяти: в документации текста нет (docs.github.com: «usage is blocked», check-runs: conclusion и output), поэтому —
+# по сохранённому ответу PR #222 (31.10, plugins/guard/tests/fixtures/ci-runs-pr222.json):
+# проверка от Actions завершена с FAILURE, аннотация уровня failure на путь .github с этим текстом (запрос
+# CI_ANNOTATIONS_API — только к таким проверкам).
+# Текст поменяется — признака нет и отказ, как на любой красной
+CI_BILLING = ("The job was not started because recent account payments have failed or your spending limit needs to be "
+              "increased")
+CI_ANNOTATIONS_API = "repos/{repo}/check-runs/{id}/annotations?per_page=100"
 
 
 def required_checks(repo, base):
@@ -406,7 +418,8 @@ def ci_fork(view):
 
 
 def ci_runs(workflow_runs, check_runs, sha, pr, fork=None):
-    """Запуски Actions PR pr на коммите sha с событием: [{workflowName, name, status, conclusion, event}] по ответам
+    """Запуски Actions PR pr на коммите sha с событием: [{workflowName, name, status, conclusion, event, id,
+    annotations}] (id проверки и число её аннотаций — для ci_billing, metis-0655) по ответам
     CI_RUNS_API (actions/runs и check-runs). Не идут в список: проверка без запуска Actions с тем же check_suite_id
     (стороннее приложение с тем же именем), чужой head_sha и запуск, в pull_requests которого нет этого PR (запуск
     чужого PR на том же SHA). PR из форка (fork — ответ ci_fork, metis-0649): у его запусков GitHub pull_requests не
@@ -432,12 +445,49 @@ def ci_runs(workflow_runs, check_runs, sha, pr, fork=None):
         for c in cr:
             run = suites.get(c["check_suite"]["id"])
             if run is not None and c["head_sha"] == sha:
+                info = c.get("output") if isinstance(c.get("output"), dict) else {}
                 out.append({"workflowName": str(run.get("name") or ""), "name": str(c.get("name") or ""),
                             "status": str(c.get("status") or ""), "conclusion": str(c.get("conclusion") or ""),
-                            "event": str(run.get("event") or "")})
+                            "event": str(run.get("event") or ""), "id": c.get("id"),
+                            "annotations": info.get("annotations_count")})
         return out
     except (TypeError, KeyError, AttributeError):
         return None
+
+
+def ci_billing_ids(runs, required):
+    """id проверок, чьи аннотации нужны для признака «CI не запускался: лимит минут или оплата» (metis-0655): каждая
+    обязательная (required) есть среди runs от pull_request, у каждой её запись завершена с SUCCESS или с FAILURE,
+    id — целое и аннотации есть; хоть одна FAILURE. Иначе пусто: признака нет, и запросов аннотаций шлюз не делает."""
+    if not isinstance(runs, list):
+        return []
+    must, seen, ids = [tuple(r) for r in required], set(), []
+    for c in runs:
+        if not isinstance(c, dict) or c.get("event") != "pull_request":
+            continue
+        key = (str(c.get("workflowName") or ""), str(c.get("name") or ""))
+        if key not in must:
+            continue
+        seen.add(key)
+        status, concl = str(c.get("status") or "").upper(), str(c.get("conclusion") or "").upper()
+        if status == "COMPLETED" and concl == "SUCCESS":
+            continue
+        n = c.get("annotations")
+        if status != "COMPLETED" or concl != "FAILURE" or type(c.get("id")) is not int or type(n) is not int or n < 1:
+            return []
+        ids.append(c["id"])
+    return ids if all(k in seen for k in must) else []
+
+
+def ci_billing(runs, required, notes):
+    """CI не запускался из-за лимита минут или оплаты (metis-0655): ci_billing_ids не пуст и у каждой такой проверки
+    в notes ({id: ответ CI_ANNOTATIONS_API — список}) есть аннотация уровня failure на путь .github, текст которой
+    начинается с CI_BILLING. Ответа нет (сбой gh) или он не список — признака нет."""
+    ids = ci_billing_ids(runs, required)
+    return bool(ids) and isinstance(notes, dict) and all(
+        isinstance(notes.get(i), list) and any(
+            isinstance(a, dict) and a.get("annotation_level") == "failure" and a.get("path") == ".github"
+            and str(a.get("message") or "").startswith(CI_BILLING) for a in notes[i]) for i in ids)
 
 
 def ci_verdict(rollup, required=(), runs=None):
@@ -515,6 +565,20 @@ def ci_runs_fetch(repo, pr, sha, fork=None):
     return ci_runs(got[0], got[1], sha, pr, fork)
 
 
+def ci_notes_fetch(repo, ids):
+    """Аннотации проверок ids (metis-0655): {id: список по CI_ANNOTATIONS_API или None — gh не ответил или ответ не
+    разобран}. ids — из ci_billing_ids; пусто — запросов нет."""
+    out = {}
+    for i in ids:
+        try:
+            r = subprocess.run([gh_path(), "api", CI_ANNOTATIONS_API.format(repo=repo, id=i)], capture_output=True,
+                               text=True, timeout=GH_TIMEOUT, env=gh_env())
+            out[i] = json.loads(r.stdout) if r.returncode == 0 else None
+        except (OSError, ValueError, subprocess.SubprocessError):
+            out[i] = None
+    return out
+
+
 def ci_state(rollup, required=(), runs=None):
     """(ok|wait|fail, текст) по ci_verdict. Проверок нет — wait: они ещё не встали; по 24 ч заявка всё равно гаснет.
     Обязательные есть, а запуски Actions не получены (runs None) — тоже wait: сбой gh не снимает заявку."""
@@ -561,6 +625,12 @@ def gate(repo, pr, sha, view):
     required = required_checks(repo, view.get("baseRefName"))
     runs = ci_runs_fetch(repo, pr, sha, ci_fork(view)) if required else None
     state, why = ci_state(view.get("statusCheckRollup"), required, runs)
+    if state == "fail":
+        # CI не запускался из-за лимита минут или оплаты (metis-0655): запись тестов на этот SHA уже сверена выше —
+        # она и засчитывается вместо CI, как в шлюзе guard (_billing_problem)
+        if ci_billing(runs, required, ci_notes_fetch(repo, ci_billing_ids(runs, required))):
+            return "ok", (f"argus ×{len(latest)} ✓, CI не запускался (лимит минут GitHub Actions) — засчитан местный "
+                          f"прогон тестов на {sha[:12]}")
     if state != "ok":
         return state, why
     return "ok", f"argus ×{len(latest)} ✓, CI ✓"
