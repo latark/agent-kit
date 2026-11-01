@@ -2230,6 +2230,13 @@ def t_ci_billing_unit(h):
             r["cmd"] = cmd
         check(f"full_tests_record: {name} → {want}", mg.full_tests_record(repo, r) is want, cmd)
     check("full_tests_record: запись не словарь — нет", mg.full_tests_record("o/agent-kit", "x") is False)
+    # _ci_jobs: ответ job — один объект JSON; _gh_json отдаёт его списком из одного значения
+    gh_json = mg._gh_json
+    for name, got, want in (("один объект", [idle], idle), ("два объекта подряд", [idle, idle], None),
+                            ("пусто", [], None), ("сбой gh", None, None)):
+        mg._gh_json = lambda a, got=got: got
+        check(f"_ci_jobs: {name} → {'job' if want else None}", mg._ci_jobs("o/r", [5]) == {5: want})
+    mg._gh_json = gh_json
     # _billing_problem: запись tests на SHA — без учёта регистра репозитория; предупреждение — строка пропуска
     mg.read_records = lambda: [full_rec("latark/agent-kit", sha)]
     got = mg._billing_problem("Latark/Agent-Kit", 7, sha)

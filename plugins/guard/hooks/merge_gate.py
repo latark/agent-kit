@@ -1525,8 +1525,13 @@ def _ci_notes(repo, ids):
 
 def _ci_jobs(repo, ids):
     """Данные job проверок ids (metis-0655): {id: ответ CI_JOBS_API или None — сбой gh}; id проверки = id job. Один
-    GET на проверку из ci_billing_ids; пусто — запросов нет."""
-    return {i: _gh_json(["api", CI_JOBS_API.format(repo=repo, id=i)]) for i in ids}
+    GET на проверку из ci_billing_ids; пусто — запросов нет. _gh_json отдаёт значения JSON подряд, а ответ job — один
+    объект: не ровно одно значение — None."""
+    out = {}
+    for i in ids:
+        got = _gh_json(["api", CI_JOBS_API.format(repo=repo, id=i)])
+        out[i] = got[0] if isinstance(got, list) and len(got) == 1 else None
+    return out
 
 
 def _billing_problem(repo, pr, sha):
