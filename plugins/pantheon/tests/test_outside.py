@@ -306,10 +306,13 @@ check("профиль: deny чтения < allow шаблонов .env < deny se
 def env_probe(profile):
     """Живая проба: (None, причина), если sandbox-exec не запускается; иначе список расхождений с ожиданием."""
     d = os.path.realpath(tempfile.mkdtemp(prefix="env-probe-", dir=_ROOT))
-    for n in (".env", ".env.local", ".env.production.local", ".env.example.bak", ".env.example", ".env.sample",
-              ".env.template"):
-        with open(os.path.join(d, n), "w") as fh:
-            fh.write("x")
+    try:
+        for n in (".env", ".env.local", ".env.production.local", ".env.example.bak", ".env.example", ".env.sample",
+                  ".env.template"):
+            with open(os.path.join(d, n), "w") as fh:
+                fh.write("x")
+    except PermissionError as e:   # сам тест идёт под профилем прохода (`pantheon outside test`): .env* там закрыт
+        return None, f"файлы .env* не создать — тест уже под песочницей ({e.strerror})"
     os.makedirs(os.path.join(d, "secrets"))
     with open(os.path.join(d, "secrets", ".env.example"), "w") as fh:
         fh.write("x")
