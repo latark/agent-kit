@@ -774,7 +774,7 @@ def serve_wait(req):
         return SERVE_QUEUE_MIN
     t = _epoch(req)
     left = w - (P.now() - t if t else 0)
-    return max(1, int(left))
+    return max(1, min(w, int(left)))   # время заявки в будущем не растит ожидание сверх --wait (metis-0604)
 
 
 def run_serve(rid, d, script, minutes, window, qdir, roots, wait=SERVE_QUEUE_MIN):
@@ -967,6 +967,9 @@ def requests():
     return out
 
 
+FUTURE_SLACK = 60                   # заявка со временем позже now+60 с отклоняется (metis-0604)
+
+
 def check_request(req, rid):
     if not isinstance(req, dict) or req.get("v") != 1 or req.get("id") != rid:
         return "заявка не в формате (v1, id = имя файла)"
@@ -983,6 +986,8 @@ def check_request(req, rid):
     w = req.get("wait", 0)
     if not isinstance(w, int) or isinstance(w, bool) or not 0 <= w <= WAIT_MAX:
         return f"ожидание заявки — от 0 до {WAIT_MAX} секунд"
+    if req.get("time") is not None and (_epoch(req) or 0) > P.now() + FUTURE_SLACK:
+        return "время заявки — позже, чем сейчас на часах прохода"
     return None
 
 
@@ -1017,8 +1022,15 @@ def handle(qdir, window, rid, req):
 # --- тесты после «принять» ----------------------------------------------------------------------------------------
 
 def _epoch(rec):
+    """Время записи или заявки в секундах: «…T…:%S%z» (журнал шлюза, заявки CLI) или «ГГГГ-ММ-ДД ЧЧ:ММ» (P.stamp,
+    заявки до этой правки) — у второго точность минута, берётся её конец, чтобы не занижать ожидание; не разобрать — None."""
+    t = str(rec.get("time"))
     try:
-        return datetime.strptime(str(rec.get("time")), "%Y-%m-%dT%H:%M:%S%z").timestamp()
+        return datetime.strptime(t, "%Y-%m-%dT%H:%M:%S%z").timestamp()
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(t, "%Y-%m-%d %H:%M").timestamp() + 59
     except ValueError:
         return None
 
@@ -1208,7 +1220,7 @@ def cmd_request(kind, args):
         err("pantheon outside: папка не репозиторий git — запускай из корня копии проекта")
         return 2
     rid = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
-    req = {"v": 1, "id": rid, "kind": kind, "dir": d, "time": P.stamp(),
+    req = {"v": 1, "id": rid, "kind": kind, "dir": d, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
            "by": " ".join((os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "").split())[:40]}
     if f.get("--script"):
         req["script"] = f["--script"]
