@@ -1,5 +1,5 @@
 {
- "_source": "gh api repos/latark/agent-kit/actions/runs?head_sha=6b7a70dc2f1ee50ef12894607aab72760220636a, commits/6b7a70dc2f1ee50ef12894607aab72760220636a/check-runs и check-runs/<id>/annotations каждой красной, 2026-11-02 (metis-0655): PR #222, задачи не запустились из-за лимита минут или оплаты (аннотация уровня failure с путём .github; у задачи steps 0, runner_id 0); оставлены поля, которые читает ci_runs, и output; pull_requests — номер PR, как GitHub отдаёт его до слияния (после слияния поле пустое); blob_href убран",
+ "_source": "gh api repos/latark/agent-kit/actions/runs?head_sha=6b7a70dc2f1ee50ef12894607aab72760220636a, commits/6b7a70dc2f1ee50ef12894607aab72760220636a/check-runs и check-runs/<id>/annotations каждой красной, 2026-11-02 (metis-0655): PR #222, задачи не запустились из-за лимита минут или оплаты (аннотация уровня failure с путём .github; у задачи steps 0, runner_id 0); оставлены поля, которые читает ci_runs, и output; pull_requests — номер PR, как GitHub отдаёт его до слияния (после слияния поле пустое); blob_href убран; jobs — gh api repos/latark/agent-kit/actions/jobs/<id> тех же проверок (id проверки = id job), 02.11, без ссылок и node_id",
  "workflow_runs": {
   "total_count": 3,
   "workflow_runs": [
@@ -174,5 +174,47 @@
     "raw_details": ""
    }
   ]
+ },
+ "jobs": {
+  "124603333231": {
+   "id": 124603333231,
+   "run_id": 41223700358,
+   "workflow_name": "tests",
+   "name": "affected",
+   "head_sha": "6b7a70dc2f1ee50ef12894607aab72760220636a",
+   "status": "completed",
+   "conclusion": "failure",
+   "created_at": "2026-10-31T17:16:14Z",
+   "started_at": "2026-10-31T17:16:14Z",
+   "completed_at": "2026-10-31T17:16:16Z",
+   "labels": [
+    "ubuntu-24.04"
+   ],
+   "runner_id": 0,
+   "runner_name": "",
+   "runner_group_id": 0,
+   "runner_group_name": "",
+   "steps": []
+  },
+  "124603333226": {
+   "id": 124603333226,
+   "run_id": 41223700389,
+   "workflow_name": "check-traces",
+   "name": "traces",
+   "head_sha": "6b7a70dc2f1ee50ef12894607aab72760220636a",
+   "status": "completed",
+   "conclusion": "failure",
+   "created_at": "2026-10-31T17:16:14Z",
+   "started_at": "2026-10-31T17:16:14Z",
+   "completed_at": "2026-10-31T17:16:16Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "runner_id": 0,
+   "runner_name": "",
+   "runner_group_id": 0,
+   "runner_group_name": "",
+   "steps": []
+  }
  }
 }

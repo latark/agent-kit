@@ -601,12 +601,17 @@ SDK (`sdk`) флаг не снимают — так же журнал owner-log 
    1. Основной — CI. Обязательные проверки зелёные на head PR, как описано выше.
    2. Запасной — местный прогон вместо CI, когда CI не запускался из-за лимита минут или оплаты. Шлюз узнаёт этот
       случай и вместо CI требует запись `pantheon review test` на этом же SHA и этом репозитории. Это тот же журнал
-      шлюза, что у ролей; запись делает хук guard в любой сессии, и в сессии без роли тоже. Есть запись — пропуск
-      со строкой «CI не запускался: лимит минут GitHub Actions, засчитан местный прогон». Нет — отказ с готовой
-      командой: для agent-kit это `pantheon review test -- heavy python3.14 -I plugins/pantheon/scripts/run-tests.py
-      -j 3 plugins/guard plugins/pantheon plugins/project-tools` в чистой копии на этом коммите (`FULL_TESTS` в
-      `merge_gate.py`). Запись на другом коммите не засчитывается. Тот же разбор — у слияния по Touch ID
-      (`plugins/pantheon/lib/merge.py`): запись тестов там нужна всегда, поэтому при лимите она и заменяет CI.
+      шлюза, что у ролей; запись делает хук guard в любой сессии, и в сессии без роли тоже. Засчитывается только
+      запись с командой полного набора репозитория (`FULL_TESTS` и `full_tests_record` в `merge_gate.py`). Для
+      agent-kit это `pantheon review test -- heavy python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3
+      plugins/guard plugins/pantheon plugins/project-tools`. Годится и запись прохода `pantheon outside test` с той же
+      командой: `heavy` впереди и хвост `# …` не важны. Лишние слова (`&& …`, `; …`, ещё флаг) и другой набор не
+      засчитываются.
+      Есть запись — пропуск со строкой «CI не запускался: лимит минут GitHub Actions, засчитан местный прогон». Нет —
+      отказ с этой командой для чистой копии на этом коммите; запись на другом коммите не засчитывается. У
+      репозитория нет строки в `FULL_TESTS` — запасного пути нет, отказ. Тот же разбор — у слияния по Touch ID
+      (`plugins/pantheon/lib/merge.py`): запись тестов там нужна всегда, а при лимите — запись именно полного набора.
+      На пути ролей с зелёным CI команда записи не сверяется, как и раньше: там тесты проверяет CI.
    3. Аварийный — терминал владельца. `gh pr merge` в его собственном терминале, вне Claude Code, guard не видит и не
       проверяет.
 
@@ -620,25 +625,41 @@ SDK (`sdk`) флаг не снимают — так же журнал owner-log 
    [check runs](https://docs.github.com/en/rest/checks/runs?apiVersion=2022-11-28): у проверки есть `conclusion` и
    `output.annotations_count`, а сами аннотации отдаёт `GET /repos/{owner}/{repo}/check-runs/{id}/annotations`.
    Поэтому признак взят из ответа GitHub на PR #222, где 31.10 задачи не стартовали (сохранён в
-   `tests/fixtures/ci-runs-pr222.json` и `ci-rollup-pr222.json`). Там у job `steps` 0 и `runner_id` 0, а у проверки
-   conclusion `failure` и одна аннотация: уровень `failure`, путь `.github`, текст «The job was not started because
-   recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing &
-   plans' section in your settings». Тот же текст цитируют пользователи в
-   [community #209221](https://github.com/orgs/community/discussions/209221).
+   `tests/fixtures/ci-runs-pr222.json` и `ci-rollup-pr222.json`). Там у проверки conclusion `failure` и одна
+   аннотация: уровень `failure`, путь `.github`, текст «The job was not started because recent account payments have
+   failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings».
+   Тот же текст цитируют пользователи в [community #209221](https://github.com/orgs/community/discussions/209221).
 
-   Признак — conclusion и текст аннотации вместе (`ci_billing_ids`, `ci_billing`, `CI_BILLING`):
+   Такую аннотацию может напечатать и сам job PR (`::error file=.github::The job was not started…`). Поэтому второе
+   условие — job не стартовал, а это поле пишет GitHub, а не код job. Данные job отдаёт
+   [workflow jobs](https://docs.github.com/en/rest/actions/workflow-jobs?apiVersion=2022-11-28):
+   `GET /repos/{owner}/{repo}/actions/jobs/{job_id}`, id проверки Actions равен id job. В схеме ответа `runner_id` —
+   «integer or null», `runner_name` — «string or null», `steps` — массив; словами документация их не описывает. У
+   обоих заблокированных job PR #222 `runner_id` 0, `runner_name` пусто, `steps` пуст. У обычной красной PR #225 —
+   номер раннера, имя «GitHub Actions …» и 8 шагов. Оба ответа сохранены в тех же файлах, поле `jobs`.
+
+   Признак — conclusion, текст аннотации и данные job вместе (`ci_billing_ids`, `ci_billing`, `ci_job_unstarted`,
+   `CI_BILLING`):
    - каждая обязательная проверка есть среди запусков от `pull_request` на этом SHA;
    - каждая из них завершена с SUCCESS либо с FAILURE, и хотя бы одна — с FAILURE;
    - у каждой FAILURE есть аннотации, и среди них — аннотация уровня `failure` на путь `.github`, текст которой
-     начинается с `CI_BILLING`.
+     начинается с `CI_BILLING`;
+   - job каждой FAILURE не стартовал: `runner_id` 0 или null, `runner_name` пусто или null, `steps` — пустой список.
 
-   Аннотации шлюз запрашивает одним GET на каждую такую проверку, у agent-kit — не больше двух. Запрос делается
-   только тогда, когда остальные условия уже выполнены. Сбой запроса или изменённый GitHub текст дают отказ, как
-   на обычной красной. Обычная красная (PR #225: аннотация «Process completed with exit code 1.») признак не даёт.
+   Аннотации и данные job шлюз запрашивает одним GET каждого вида на каждую такую проверку, у agent-kit — не больше
+   двух. Запросы делаются только тогда, когда остальные условия уже выполнены. Сбой запроса, изменённый GitHub текст
+   или job с раннером и шагами дают отказ, как на обычной красной. Обычная красная (PR #225: аннотация «Process
+   completed with exit code 1.», раннер и 8 шагов) признак не даёт.
 
-   Остаток. Шаг тестов может напечатать ту же аннотацию (`::error::The job was not started…`): тогда шлюз примет его
-   за лимит, но запись тестов на этом SHA всё равно нужна. Шлюз не проверяет, что записан именно полный набор:
-   засчитывается любая запись `tests`, как и у ролей.
+   Остаток (фоновая проверка безопасности 02.11, по модели угроз guard — не намеренный обход):
+   - GitHub поменяет поля job (раннер назначат и заблокированному) — признака нет, и шлюз отказывает. Это отказ, а не
+     пропуск.
+   - Сам прогон полного набора — местный, его код идёт из ветки PR: PR, который ослабил `run-tests.py` или тесты,
+     получит зелёную запись. Так же и на пути ролей; защита — ревью argus.
+   - Запись засчитывается по тексту команды, а не по составу прогона: файлы в `SKIP_NOT_MAC` и пропуски «нужен macOS»
+     на Mac идут, остальное — как в команде.
+   - При лимите минут красные проверки вне обязательных (например, новый job) не судятся отдельно: лимит блокирует
+     все job сразу, и признак требует его у всех обязательных.
 
 **Как появляются записи.** Журнал пишет только хук guard на PostToolUse, после успешной простой команды
 `pantheon review <вид> …` — без `;`, `|`, `&`, `$(`, обратных кавычек, перенаправлений и переводов строки. Сама команда

@@ -43,10 +43,11 @@
 7. Слияние идёт одним из трёх путей (решение владельца 02.11, metis-0655; подробно — README guard, п. 8).
    - Основной — CI: обязательные проверки зелёные на head PR, шлюз guard сверяет их сам.
    - Запасной — Actions не запускаются: кончились бесплатные минуты приватного репозитория, у проверок аннотация
-     «The job was not started because … spending limit …». Шлюз узнаёт этот случай и вместо CI требует запись
-     тестов на том же head. В чистой копии на head PR —
+     «The job was not started because … spending limit …», а job без раннера и шагов. Шлюз узнаёт этот случай и
+     вместо CI требует запись полного набора тестов на том же head. В чистой копии на head PR —
      `pantheon review test -- heavy python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard
-     plugins/pantheon plugins/project-tools` (не в фоне, timeout 600000); запись на другом коммите не засчитывается.
+     plugins/pantheon plugins/project-tools` (не в фоне, timeout 600000). Засчитывается только эта команда
+     (`FULL_TESTS` в `merge_gate.py`) и только на этом коммите.
      Полный прогон на слиянии с origin/main перед слиянием — как и раньше. После слияния выпуск — тем же скриптом в
      чистой копии main: `python3 -I .github/scripts/release.py --push` (решение владельца 28.10: не ждать и не
      платить). Коммит тот же, что у Action; плановый проход ставит его как обычно.

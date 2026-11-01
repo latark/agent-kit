@@ -23,8 +23,9 @@ PR ядра защит (Д3) агенты не сливают: его слива
      худший итог; PR из форка — запуск с head_repository и head_branch его форка и ветки, ci_fork, metis-0649), у
      репозитория без записи — все проверки rollup. CI ещё идёт, обязательной или любых проверок пока
      нет, запуски не получены — заявка ждёт; красная или SKIPPED — снята с тревогой, кроме CI, который не
-     запускался из-за лимита минут или оплаты GitHub Actions (ci_billing по аннотациям красных, metis-0655): тогда
-     вместо CI засчитывается та же запись тестов шлюза на SHA.
+     запускался из-за лимита минут или оплаты GitHub Actions (ci_billing по аннотациям красных и данным их job —
+     job не стартовал, metis-0655): тогда вместо CI засчитывается запись тестов шлюза на SHA с командой полного
+     набора FULL_TESTS (full_tests_record); нет такой — снята с тревогой.
      Список файлов PR (REST pulls/N/files) полон — иначе ждёт: окно показывает задетые файлы ядра, без списка их не
      показать. PR правит version в plugin.json плагина или трогает
      .claude-plugin/releases.json — снята с тревогой (metis-0512: номер поднимает workflow release после слияния).
@@ -371,8 +372,8 @@ def is_core(path):
 
 
 # проверки GitHub на head PR (metis-0285, 0633, 0649, 0655): ci_verdict, ci_runs, ci_fork, ci_billing_ids,
-# ci_billing, required_checks, optional_checks, REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API, CI_BILLING,
-# CI_ANNOTATIONS_API, CI_OK, CI_WAIT и CI_NONE —
+# ci_billing, ci_job_unstarted, full_tests_record, required_checks, optional_checks, REQUIRED_CHECKS, OPTIONAL_CHECKS,
+# CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API, FULL_TESTS, CI_OK, CI_WAIT и CI_NONE —
 # дословно те же, что в шлюзе guard (plugins/guard/hooks/merge_gate.py): плагины порознь,
 # друг друга не импортируют, совпадение сверяет test_merge по AST. Правишь — правь оба
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -401,10 +402,20 @@ CI_RUNS_API = ("repos/{repo}/actions/runs?head_sha={sha}&per_page=100",
 # по сохранённому ответу PR #222 (31.10, plugins/guard/tests/fixtures/ci-runs-pr222.json):
 # проверка от Actions завершена с FAILURE, аннотация уровня failure на путь .github с этим текстом (запрос
 # CI_ANNOTATIONS_API — только к таким проверкам).
-# Текст поменяется — признака нет и отказ, как на любой красной
+# Текст поменяется — признака нет и отказ, как на любой красной.
+# Аннотацию с тем же текстом может напечатать и сам job PR (`::error file=.github::…`), поэтому второе условие —
+# job не стартовал (CI_JOBS_API, id проверки = id job): раннера не было и шагов нет. Это поле пишет GitHub, а не код
+# job (docs.github.com/en/rest/actions/workflow-jobs: runner_id «integer or null», runner_name «string or null»,
+# steps — массив; у заблокированных job PR #222 — 0, "" и [], у обычной красной PR #225 — номер раннера и 8 шагов)
 CI_BILLING = ("The job was not started because recent account payments have failed or your spending limit needs to be "
               "increased")
 CI_ANNOTATIONS_API = "repos/{repo}/check-runs/{id}/annotations?per_page=100"
+CI_JOBS_API = "repos/{repo}/actions/jobs/{id}"
+# полный набор тестов для записи на запасном пути (metis-0655): имя репозитория без владельца → команда после
+# `pantheon review test --`. Засчитывается только запись с этой командой (full_tests_record); нет строки — запасного
+# пути у репозитория нет, отказ
+FULL_TESTS = {"agent-kit": ("heavy python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard "
+                            "plugins/pantheon plugins/project-tools")}
 
 
 def required_checks(repo, base):
@@ -491,15 +502,47 @@ def ci_billing_ids(runs, required):
     return ids if all(k in seen for k in must) else []
 
 
-def ci_billing(runs, required, notes):
+def ci_job_unstarted(job):
+    """Job не стартовал (metis-0655): ответ CI_JOBS_API — словарь, где runner_id 0 или null, runner_name пусто или
+    null и steps — пустой список. Ключа нет, тип другой, ответа нет — стартовал (признака лимита нет)."""
+    if not isinstance(job, dict) or "runner_id" not in job or "runner_name" not in job:
+        return False
+    rid = job["runner_id"]
+    return (rid is None or type(rid) is int and rid == 0) and job["runner_name"] in (None, "") \
+        and job.get("steps") == []
+
+
+def ci_billing(runs, required, notes, jobs):
     """CI не запускался из-за лимита минут или оплаты (metis-0655): ci_billing_ids не пуст и у каждой такой проверки
     в notes ({id: ответ CI_ANNOTATIONS_API — список}) есть аннотация уровня failure на путь .github, текст которой
-    начинается с CI_BILLING. Ответа нет (сбой gh) или он не список — признака нет."""
+    начинается с CI_BILLING, и её job в jobs ({id: ответ CI_JOBS_API}) не стартовал (ci_job_unstarted). Ответа нет
+    (сбой gh) или он не того типа — признака нет."""
     ids = ci_billing_ids(runs, required)
-    return bool(ids) and isinstance(notes, dict) and all(
+    return bool(ids) and isinstance(notes, dict) and isinstance(jobs, dict) and all(
         isinstance(notes.get(i), list) and any(
             isinstance(a, dict) and a.get("annotation_level") == "failure" and a.get("path") == ".github"
-            and str(a.get("message") or "").startswith(CI_BILLING) for a in notes[i]) for i in ids)
+            and str(a.get("message") or "").startswith(CI_BILLING) for a in notes[i])
+        and ci_job_unstarted(jobs.get(i)) for i in ids)
+
+
+def full_tests_record(repo, rec):
+    """Запись tests — полный прогон этого репозитория (metis-0655): её команда — FULL_TESTS репозитория (имя без
+    владельца, регистр не важен). Хук guard пишет всю команду `pantheon review test -- <команда>`, проход `pantheon
+    outside test` — саму команду (хвост `# …` — комментарий); `heavy` впереди не важен — проход ставит его сам.
+    Другая команда, лишние слова (`&& …`, `; …`), нет строки в FULL_TESTS — не засчитывается."""
+    want = FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower())
+    cmd = rec.get("cmd") if isinstance(rec, dict) else None
+    if not want or not isinstance(cmd, str):
+        return False
+    try:
+        got, need = shlex.split(cmd, comments=True), shlex.split(want)
+    except ValueError:
+        return False
+    if len(got) > 3 and os.path.basename(got[0].rstrip("/")) == "pantheon" and got[1:4] == ["review", "test", "--"]:
+        got = got[4:]
+    got = got[1:] if got[:1] and os.path.basename(got[0]) == "heavy" else got
+    need = need[1:] if need[:1] and os.path.basename(need[0]) == "heavy" else need
+    return got == need
 
 
 def ci_verdict(rollup, required=(), runs=None, optional=()):
@@ -594,6 +637,20 @@ def ci_notes_fetch(repo, ids):
     return out
 
 
+def ci_jobs_fetch(repo, ids):
+    """Данные job проверок ids (metis-0655): {id: ответ CI_JOBS_API или None — gh не ответил или ответ не разобран};
+    id проверки = id job. ids — из ci_billing_ids; пусто — запросов нет."""
+    out = {}
+    for i in ids:
+        try:
+            r = subprocess.run([gh_path(), "api", CI_JOBS_API.format(repo=repo, id=i)], capture_output=True,
+                               text=True, timeout=GH_TIMEOUT, env=gh_env())
+            out[i] = json.loads(r.stdout) if r.returncode == 0 else None
+        except (OSError, ValueError, subprocess.SubprocessError):
+            out[i] = None
+    return out
+
+
 def ci_state(rollup, required=(), runs=None, optional=()):
     """(ok|wait|fail, текст) по ci_verdict. Проверок нет — wait: они ещё не встали; по 24 ч заявка всё равно гаснет.
     Обязательные есть, а запуски Actions не получены (runs None) — тоже wait: сбой gh не снимает заявку."""
@@ -641,11 +698,16 @@ def gate(repo, pr, sha, view):
     runs = ci_runs_fetch(repo, pr, sha, ci_fork(view)) if required else None
     state, why = ci_state(view.get("statusCheckRollup"), required, runs, optional_checks(repo))
     if state == "fail":
-        # CI не запускался из-за лимита минут или оплаты (metis-0655): запись тестов на этот SHA уже сверена выше —
-        # она и засчитывается вместо CI, как в шлюзе guard (_billing_problem)
-        if ci_billing(runs, required, ci_notes_fetch(repo, ci_billing_ids(runs, required))):
-            return "ok", (f"argus ×{len(latest)} ✓, CI не запускался (лимит минут GitHub Actions) — засчитан местный "
-                          f"прогон тестов на {sha[:12]}")
+        # CI не запускался из-за лимита минут или оплаты (metis-0655): вместо CI засчитывается запись тестов на этот
+        # SHA с командой полного набора FULL_TESTS (full_tests_record), как в шлюзе guard (_billing_problem); нет
+        # такой записи или FULL_TESTS у репозитория — заявка снята по красной
+        ids = ci_billing_ids(runs, required)
+        if ci_billing(runs, required, ci_notes_fetch(repo, ids), ci_jobs_fetch(repo, ids)):
+            if any(r.get("kind") == "tests" and r.get("sha") == sha and full_tests_record(repo, r) for r in recs):
+                return "ok", (f"argus ×{len(latest)} ✓, CI не запускался (лимит минут GitHub Actions) — засчитан "
+                              f"местный прогон тестов на {sha[:12]}")
+            return "fail", (f"{why}; CI не запускался (лимит минут GitHub Actions), а записи полного набора тестов "
+                            f"(FULL_TESTS) на {sha[:12]} нет")
     if state != "ok":
         return state, why
     return "ok", f"argus ×{len(latest)} ✓, CI ✓"
