@@ -529,7 +529,13 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     # metis-0348: «blocked» без процесса и без вопроса (noProcess, reconcile_agents) — сессию снял Claude Code, ждать
     # ей нечего: она мёртвая и запуску не мешает, --restart и владелец не нужны. Её `claude rm` — rm_previous после
     # успешного старта новой. С вопросом (needs) noProcess не ставится — такая по-прежнему ждёт вас (отказ ниже).
-    dead = [a for a in live if a.get("noProcess") and a.get("id")]
+    # metis-0651: призрак (ghost) в списке уже failed и в live не входит: призрак с вопросом (был blocked, вопрос виден)
+    # по-прежнему ждёт вас — отказ как раньше; без вопроса он мёртвый и заменяется новой.
+    alias = P.name_alias(name)
+    ghosts = [a for a in agents or [] if a.get("ghost") and a.get("id") and alias.fullmatch(str(a.get("name") or ""))]
+    live += [a for a in ghosts if a.get("listedState") == "blocked" and a.get("waitingFor")]
+    dead = [a for a in live + ghosts if a.get("noProcess") and a.get("id")]
+    dead = [a for i, a in enumerate(dead) if a not in dead[:i]]
     if dead:
         live = [a for a in live if a not in dead]
         if not dry:

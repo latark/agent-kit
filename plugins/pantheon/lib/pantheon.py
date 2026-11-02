@@ -2942,6 +2942,10 @@ def reconcile_agents(data, workers=None):
     (2) Обратный случай: «blocked» без процесса и без вопроса (needs в state.json) — сессию снял Claude Code, ждать
     ей нечего (18.10, координатор без процесса весь день «ждёт вас»): noProcess. С вопросом — по-прежнему ждёт вас:
     ответ дойдёт через claude attach, он поднимет процесс.
+    (2а) Призрак (metis-0651): working/blocked без живого процесса вообще (ни pid записи, ни реестра) — state
+    становится failed, ghost=True: имя не держит, wake поднимает. Запись моложе минуты (или без startedAt) — не
+    призрак: новая сессия могла ещё не попасть в реестр демона. pantheon start: призрак с вопросом (был blocked) —
+    по-прежнему «ждёт вас», без вопроса — мёртвая (noProcess), заменяется новой.
     (3) Причина для сводки: нет waitingFor — needs задания (blocked) или detail (failed)."""
     workers = daemon_workers() if workers is None else workers
     for a in data:
@@ -2957,11 +2961,31 @@ def reconcile_agents(data, workers=None):
         if (a.get("state") == "blocked" and workers is not None and not alive and not a.get("pid")
                 and js and not js.get("needs")):
             a["noProcess"] = True
+        # metis-0651: working/blocked без живого процесса — ни у записи, ни в реестре демона — призрак: процесс умер, а
+        # строка осталась (02.11 metis-pantheon лежало 1,5 ч: wake отвечал «есть процесс»). Считается упавшей: имя не
+        # держит, wake продолжает её же сессию. Реестр не читается — не утверждаем (workers None); из песочницы живой
+        # процесс даёт EPERM, а это «жив» (pid_alive).
+        if (a.get("state") in ("working", "blocked") and workers is not None and not alive
+                and not (a.get("pid") and pid_alive(a["pid"]))  # pid 0: kill(0, 0) — своя группа, не доказательство
+                and not just_listed(a)):
+            if a["state"] == "blocked" and not a.get("waitingFor") and js.get("needs"):
+                a["waitingFor"] = " ".join(str(js["needs"]).split())[:200]  # вопрос владельцу остаётся виден
+            a["listedState"], a["state"], a["ghost"] = a["state"], "failed", True
         if not a.get("waitingFor"):
             why = js.get("needs") if a.get("state") == "blocked" else js.get("detail") if a.get("state") == "failed" else None
             if why:
                 a["waitingFor"] = " ".join(str(why).split())[:200]
     return data
+
+
+def just_listed(a, grace=60):
+    """Запись claude agents моложе grace секунд (startedAt в мс) или без даты: процесс мог ещё не попасть в реестр
+    демона (новая сессия после pantheon start) — призраком её не считаем (metis-0651)."""
+    try:
+        t = float(a.get("startedAt"))
+    except (TypeError, ValueError):
+        return True
+    return now() - t / 1000 < grace
 
 
 def pid_alive(pid):
@@ -3270,7 +3294,9 @@ def rm_previous(name, how, before=None, keep=(), loud=False, wait=False):
     for a in same:
         if a["id"] in kept:
             continue
-        has_process = a.get("state") in ("working", "blocked") or (a.get("pid") and a.get("state") not in ("stopped", "failed"))
+        # призрак (ghost, metis-0651) в списке «working/blocked», как и раньше: claude stop перед rm (metis-0348)
+        has_process = (a.get("state") in ("working", "blocked") or a.get("ghost")
+                       or (a.get("pid") and a.get("state") not in ("stopped", "failed")))
         reason = stop_and_rm(name, a["id"], how) if has_process else rm_session(a["id"], name=name, why=how)
         start_log(f"rm-previous\t{name}\t{a['id']}\t{a.get('state')}\t{how}")
         if reason:
