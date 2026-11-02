@@ -19,7 +19,8 @@ SUB_TIMEOUT = 60
 # Сроки внутри хука (metis-0719): под той же нагрузкой хук порой не укладывался в DEADLINE 8 с, а git в нём — в
 # timeout=3, и 1-3 случая из 1662 краснели не по своей вине. Загрузчик _cached_main поднимает их только вызовам из
 # теста (GUARD_TEST_DEADLINE, GUARD_TEST_SUB_TIMEOUT); код guard и бой не меняются. HOOK_DEADLINE < SUB_TIMEOUT: хук
-# успевает отказать сам, раньше, чем тест его погасит.
+# успевает отказать сам, раньше, чем тест его погасит. merge_gate, загруженный в процесс теста (_load_merge_gate: r4,
+# carry), получает тот же HOOK_SUB_TIMEOUT через _SlowSubprocess.
 HOOK_DEADLINE = 40
 HOOK_SUB_TIMEOUT = 20
 SLOW_GIT = 50  # с: «медленный git» дольше и HOOK_SUB_TIMEOUT, и HOOK_DEADLINE
