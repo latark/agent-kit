@@ -531,6 +531,16 @@ open(os.path.join(LOG, "zeus.md"), "w").write(win("[metis-0745] Пушим ве�
 cr = consent("metis-0745", PANTHEON_ROLE="hestia", PANTHEON_TASK="metis-0745")
 check("consent в окне Гестии: «нет» на другой вопрос того же id не отменяет «да» на первый → метка",
       cr.returncode == 0 and os.path.isfile(os.path.join(state, "hestia-consent", "metis-0745")), cr.stdout + cr.stderr)
+# metis-0656, Д1 argus: «да» на push, «да» на гашение, затем «нет» на гашение — метка push есть, метки .reap нет
+fresh()
+open(os.path.join(LOG, "zeus.md"), "w").write(
+    win("[metis-0746] Пушим ветку?", "А — Да, пушить", 300)
+    + win("[metis-0746] Погасить процессы Пантеона: pid 4747?", "А — Да, погасить", 200)
+    + win("[metis-0746] Погасить процессы Пантеона: pid 4747?", "Б — Нет", 60))
+cr = consent("metis-0746", PANTHEON_ROLE="hestia", PANTHEON_TASK="metis-0746")
+check("consent в окне Гестии: «да» на гашение, позже «нет» на гашение → метка push есть, <id>.reap нет",
+      cr.returncode == 0 and os.path.isfile(os.path.join(state, "hestia-consent", "metis-0746"))
+      and not os.path.exists(os.path.join(state, "hestia-consent", "metis-0746.reap")), cr.stdout + cr.stderr)
 for ans, want in (("А - Да", True), ("А – Да", True), ("Ё — да", True), ("ё - Да, пушить", True)):
     got = P.consent_is_yes(f"вопрос: [x-1] Пушим?\nответ: {ans}")
     check(f"consent_is_yes: «ответ: {ans}» → да", got is want, got)
