@@ -47,9 +47,24 @@ N = P.night_mod()
 PROBES = []  # вызовы пробного запроса (metis-0459): настоящий claude тесты не зовут никогда
 
 
+_REAL_PROBE_RUN = N.probe_run
+
+
 def _no_probe():
     PROBES.append(None)
-    return 127
+    return 127, ""
+
+
+# Настоящее событие `claude -p ok --model haiku --no-session-persistence --output-format stream-json --verbose`
+# (живой запуск 02.11, metis-0459), строки потока как отдаёт claude, ничего не дописано от руки.
+REAL_EVENT = (
+    '{"type":"system","subtype":"hook_response","hook_name":"SessionStart:startup"}\n'
+    '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1793635800,"rateLimitType":"five_hour",'
+    '"overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":'
+    '{"five_hour":{"utilization":0.1,"resetsAt":1793635800,"status":"allowed"},"seven_day":{"utilization":0.35,'
+    '"resetsAt":1793941200,"status":"allowed"}}},"uuid":"b7817d97-7946-40f8-acdd-299e8b2e3a7d",'
+    '"session_id":"8616cc57-76e0-4705-ae79-734af8a0cdd0"}\n'
+    '{"type":"result","subtype":"success","is_error":false}\n')
 
 
 N.probe_run = _no_probe
@@ -933,10 +948,9 @@ def test_probe_stale_snapshot_0459():
 
         def stub():
             PROBES.append(t)
-            if fresh:
-                e.resets = resets
-                e.at_line(t - 60, 0)
-            return 0
+            if fresh:  # настоящее событие, сроки подогнаны под время теста; снимок пишет сам probe_save
+                return 0, REAL_EVENT.replace("1793941200", str(int(resets))).replace("1793635800", str(int(t + 3600)))
+            return 0, ""
         N.probe_run = stub
         e.watch(t)
         N.probe_run = _no_probe
@@ -949,6 +963,10 @@ def test_probe_stale_snapshot_0459():
     check(len(run(e, hm("23:00"), fresh=True)) == 1, "старый снимок при одобренной ночи — пробного запроса нет")
     check(e.state_of().get("opened_at") == hm("23:00"), f"после зонда ночь не открылась: {e.state_of()}")
     check("зонд не освежил" not in e.alerts(), "зонд освежил, а тревога есть")
+    sd = open(os.path.join(e.sl, "seven-day")).read().split()
+    fh = open(os.path.join(e.sl, "five-hour")).read().split()
+    check(sd == ["35", str(int(resets)), str(int(hm("23:00")))] and fh[0] == "10" and fh[2] == str(int(hm("23:00"))),
+          f"снимок из события зонда: seven-day {sd}, five-hour {fh}")
     # зонд не помог: тревога, ночь закрыта, повтор не раньше чем через 30 мин
     e2 = Env()
     open_night(e2)
@@ -957,8 +975,12 @@ def test_probe_stale_snapshot_0459():
     check(len(run(e2, hm("23:00"))) == 1, "зонд не вызван")
     check("зонд не освежил снимок" in e2.alerts() and not e2.state_of().get("opened_at"),
           f"зонд не помог, а тревоги/закрытия нет: {e2.alerts()!r} {e2.state_of()}")
+    check(os.path.exists(P.once_path("night-probe")), "тревога night-probe не отмечена")
     check(run(e2, hm("23:10")) == [], "повторный зонд раньше 30 мин")
     check(len(run(e2, hm("23:31"))) == 1, "зонд не повторён через 30 мин")
+    # Д2: следующий зонд освежил — тревога снята (clear_once), при новом сбое будет снова
+    check(len(run(e2, hm("00:02"), fresh=True)) == 1, "зонд после сбоя не вызван")
+    check(not os.path.exists(P.once_path("night-probe")), "зонд освежил снимок, а отметка тревоги night-probe осталась")
     # нет одобрения / день / свежий снимок / пропущенная ночь — запроса нет
     e3 = Env()
     _add_pack(e3, "")
@@ -988,12 +1010,56 @@ def test_probe_stale_snapshot_0459():
     e6.resets = resets
     e6.at_line(hm("22:00") - 5 * 3600, 0)
     check(run(e6, hm("23:00")) == [], "зонд для пропущенной ночи")
+    # Д1: ночь закрыта (бюджет вышел) — зонда нет
+    e9 = Env()
+    open_night(e9)
+    st = e9.state_of()
+    st["closed"] = True
+    json.dump(st, open(os.path.join(e9.state, "night", EVENING.isoformat() + ".json"), "w"))
+    e9.resets = resets
+    e9.at_line(hm("22:00") - 5 * 3600, 0)
+    check(run(e9, hm("23:00")) == [], "зонд для закрытой ночи")
     # снимка нет вовсе при одобренной ночи — тоже зонд
     e7 = Env()
     open_night(e7)
     for f in os.listdir(e7.sl):
         os.unlink(os.path.join(e7.sl, f))
     check(len(run(e7, hm("23:00"))) == 1, "снимка нет — зонда нет")
+
+
+def test_probe_parse_save_0459():
+    """Разбор настоящего события зонда и запись снимка в формате строки статуса; кривое и лишнее не пишется."""
+    got = N.probe_parse(REAL_EVENT)
+    check(got == {"five_hour": (10.0, 1793635800), "seven_day": (35.0, 1793941200)}, f"разбор настоящего события: {got}")
+    one = REAL_EVENT.splitlines()[1]
+    check(N.probe_parse("не json\n" + one + "\n{оборвано") == got, "мусор вокруг события мешает разбору")
+    newer = one.replace('"utilization":0.35', '"utilization":0.3579')  # последнее событие побеждает; сотые, как pct2
+    check(N.probe_parse(one + "\n" + newer)["seven_day"][0] == 35.79, f"последнее событие: {N.probe_parse(one + chr(10) + newer)}")
+    for bad in ("", "{}", REAL_EVENT.splitlines()[0], one.replace('"unifiedWindows"', '"x"'),
+                one.replace('"utilization":0.35', '"utilization":35'),
+                one.replace('"utilization":0.35', '"utilization":"0.35"'),
+                one.replace('"utilization":0.35', '"utilization":true'),
+                one.replace('"resetsAt":1793941200', '"resetsAt":null')):
+        g = N.probe_parse(bad)
+        check("seven_day" not in g, f"кривое событие принято: {bad[:60]!r} → {g}")
+    check(N.probe_parse(one.replace('"utilization":0.35', '"utilization":35')).get("five_hour") == (10.0, 1793635800),
+          "неверное окно испортило соседнее")
+    e = Env()
+    t = hm("23:00")
+    saved = N.probe_save({"five_hour": (10.0, int(t) + 3600), "seven_day": (35.5, int(t) + 86400)}, t)
+    check(saved == ["five_hour", "seven_day"], f"записано: {saved}")
+    check(open(os.path.join(e.sl, "seven-day")).read() == f"35.5 {int(t) + 86400} {int(t)}\n"
+          and open(os.path.join(e.sl, "five-hour")).read() == f"10 {int(t) + 3600} {int(t)}\n", "формат файлов снимка")
+    check(sorted(os.listdir(e.sl)) == ["five-hour", "seven-day"], f"остались временные файлы: {os.listdir(e.sl)}")
+    check(N.probe_save({"seven_day": (35.0, int(t) - 1)}, t) == []
+          and open(os.path.join(e.sl, "seven-day")).read().startswith("35.5"), "сброс в прошлом записан")
+    check(N.snapshot()["week"][:2] == (35.5, float(int(t) + 86400)), f"snapshot() не читает записанное: {N.snapshot()}")
+    # настоящий probe_run при PANTHEON_DRYRUN=1 claude не зовёт: код 127 и пусто
+    os.environ["PANTHEON_DRYRUN"] = "1"
+    try:
+        check(_REAL_PROBE_RUN() == (127, ""), "probe_run в DRYRUN позвал claude")
+    finally:
+        os.environ.pop("PANTHEON_DRYRUN", None)
 
 
 def test_old_card_leaves_board_0459():
