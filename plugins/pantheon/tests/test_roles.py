@@ -615,6 +615,19 @@ def main():
           all("Самопроверка: разработчику — «в отчёте строка по шести пунктам самопроверки роли: сделано "
               "(доказательство), не применимо (почему) или по отчёту Codex: путь»" in texts.get(f, "")
               for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md", "hq.md")))
+    # metis-0583: автозакрытие закрывает задачу по «Closes <id>» в теле PR — правило у тех, кто открывает и сливает PR
+    closes_rule = ("Тело PR называет каждую задачу, которую он закрывает: `Closes <id>` или списком `Closes metis-0522, "
+                   "metis-0534 и 0535`. По этой строке плановый проход ставит задаче done при слиянии, и под общей веткой "
+                   "тоже (metis-0583). Слово «часть» в теле — все задачи PR остаются открытыми; если частичная только одна — отдельный "
+                   "PR или без Closes и без её номера в имени ветки.")
+    miss = [f for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md") if closes_rule not in flat.get(f, "")]
+    check("лиды и координатор: тело PR — «Closes <id>» списком, «часть» оставляет открытыми все задачи PR (metis-0583)"
+          + (f" (нет у: {miss})" if miss else ""), not miss)
+    # сама роль (без приклеенного _ref) несёт строку-ссылку: без неё правило Closes роль не увидит (argus #241 круг 2, Б1)
+    miss_raw = [f for f in ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md")
+                if "Тело PR: `Closes <id>, …` — подробности в `_ref/merge-rounds.md`" not in raw_texts.get(f, "")]
+    check("лиды и координатор: строка «Тело PR: Closes» в самой роли, не только в _ref (metis-0583)"
+          + (f" (нет у: {miss_raw})" if miss_raw else ""), not miss_raw)
     # effort argus (metis-0176): кто зовёт argus — вне ядра с effort medium, ядро и защиты — без параметра (high);
     # сам argus — на high в файле роли, знает правило и сверку модели шлюзом по транскрипту
     effort_rule = ("Модель и effort argus (metis-0176, упрощение п. 9, владелец 27.10; на ядре это второе исключение): в файле роли argus — Sonnet. "
