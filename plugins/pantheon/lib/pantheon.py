@@ -842,12 +842,18 @@ def notify(text, title="Пантеон", target=None, group=None):
         args = [tn, "-title", title, "-message", text, "-open", target or board_url()]
         if group:
             args += ["-group", "pantheon-" + re.sub(r"[^\w.-]", "_", group)[:60]]
-        r = subprocess.run(args, capture_output=True, timeout=15)
-        if r.returncode == 0:
-            return
+        try:
+            r = subprocess.run(args, capture_output=True, timeout=15)
+            if r.returncode == 0:
+                return
+        except subprocess.TimeoutExpired:  # зависший notifier не обрывает проход (metis-0709): пробуем osascript
+            pass
     esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
-    subprocess.run(["osascript", "-e", f'display notification "{esc(text)}" with title "{esc(title)}"'],
-                   capture_output=True, timeout=10)
+    try:
+        subprocess.run(["osascript", "-e", f'display notification "{esc(text)}" with title "{esc(title)}"'],
+                       capture_output=True, timeout=10)
+    except subprocess.TimeoutExpired:  # и он завис — уведомление потеряно, проход идёт дальше
+        pass
 
 
 # --- состояние Mac: пробуждение, питание, простой, лимит ------------------------
