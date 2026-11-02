@@ -390,7 +390,8 @@ def head_state(d):
     # без подмодулей: git status зашёл бы в каждый и прочёл его конфиг (<клон>/.git/modules/<имя>/config окну роли
     # открыт на запись) — filter.* оттуда исполнился бы вне песочницы (metis-0614)
     st = git(d, "status", "--porcelain", "--ignore-submodules=all")
-    clean = st is not None and all(ln.startswith(WORKTREES_UNTRACKED) for ln in st.splitlines() if ln.strip())
+    top = (git(d, "rev-parse", "--show-toplevel") or "").strip()
+    clean = P.tree_clean(st, top, (WORKTREES_UNTRACKED,))  # + ссылка node_modules (metis-0721)
     return (h if SHA_RE.fullmatch(h) else None), clean
 
 

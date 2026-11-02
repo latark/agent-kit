@@ -668,6 +668,36 @@ _dirty_case("отслеживаемый файл под worktrees с правк�
             lambda d: (_touch(d, ".claude/worktrees/t"), git(d, "add", "-f", ".claude/worktrees/t"),
                        git(d, "commit", "-q", "-m", "t"), _touch(d, ".claude/worktrees/t", "y")), False)
 
+# ссылка node_modules (metis-0721): только неотслеживаемая симлинка в корне, apps/*, packages/* — не грязь
+def _nm_link(rel):
+    return lambda d: (os.makedirs(os.path.dirname(os.path.join(d, rel)) or d, exist_ok=True),
+                      os.symlink("/nonexistent-target", os.path.join(d, rel)))
+
+
+_dirty_case("симлинк node_modules в корне — чисто", _nm_link("node_modules"), True)
+_dirty_case("симлинк apps/x/node_modules — чисто", lambda d: (_touch(d, "apps/x/p.json"), git(d, "add", "-A"),
+            git(d, "commit", "-q", "-m", "a"), _nm_link("apps/x/node_modules")(d)), True)
+_dirty_case("симлинк packages/y/node_modules — чисто", lambda d: (_touch(d, "packages/y/p.json"), git(d, "add", "-A"),
+            git(d, "commit", "-q", "-m", "a"), _nm_link("packages/y/node_modules")(d)), True)
+_dirty_case("симлинк в корне и ?? other.txt — грязно", lambda d: (_nm_link("node_modules")(d), _touch(d, "other.txt")), False)
+_dirty_case("папка node_modules с файлом — грязно", lambda d: _touch(d, "node_modules/f"), False)
+_dirty_case("файл node_modules — грязно", lambda d: _touch(d, "node_modules"), False)
+_dirty_case("симлинк с другим именем — грязно", _nm_link("modules"), False)
+_dirty_case("симлинк apps/x/y/node_modules глубже — грязно", _nm_link("apps/x/y/node_modules"), False)
+_dirty_case("симлинк nested/node_modules — грязно", _nm_link("nested/node_modules"), False)
+
+# та же функция без git init: разбор вывода status + проверка «это симлинк»
+_td = tempfile.mkdtemp(prefix="tc-", dir=os.environ.get("TMPDIR"))
+os.symlink("/nonexistent-target", os.path.join(_td, "node_modules"))
+os.makedirs(os.path.join(_td, "apps", "x", "node_modules"))
+os.symlink("/nonexistent-target", os.path.join(_td, "apps", "x", "y"))
+check("tree_clean: симлинк node_modules в корне", P.tree_clean("?? node_modules\n", _td) is True)
+check("tree_clean: папка apps/x/node_modules (не симлинк) — грязно", P.tree_clean("?? apps/x/node_modules\n", _td) is False)
+check("tree_clean: ссылка глубже — грязно", P.tree_clean("?? apps/x/y/node_modules\n", _td) is False)
+check("tree_clean: изменённый отслеживаемый — грязно", P.tree_clean(" M node_modules\n", _td) is False)
+check("tree_clean: None — грязно", P.tree_clean(None, _td) is False)
+shutil.rmtree(_td, ignore_errors=True)
+
 # подложенная ссылка вместо заявки — не читается и не исполняется
 q = os.path.join(CACHE, "athena-x", "outside")
 secret = os.path.join(_ROOT, "secret.json")
