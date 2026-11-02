@@ -512,6 +512,23 @@ def main():
           "без основания — «остаётся в цели окна»",
           all(got[tid][0] == 0 and (f"{tid}: {T.GOAL_OUT}" in got[tid][1]) == out
               and (f"{tid}: {T.GOAL_IN}" in got[tid][1]) == (not out) for tid, _, out in cases), got)
+    # argus-280b (Б): A ждёт B — «снята»; потом B закрыли или B сам ждёт без основания — `task set B` печатает GOAL_IN
+    # про A (и про ждущих A по цепочке), иначе последней строкой о A остаётся «снята» и A навсегда вне цели
+    fresh = lambda: new(env5, "--body", "Цель и готово").stdout.split()[0]
+    a1, b1, c3, a2, b2, a3, b3 = (fresh() for _ in range(7))
+    first = [wait_set(a1, f"waiting_on={b1}"), wait_set(c3, f"waiting_on={a1}"),
+             wait_set(a2, f"waiting_on={b2}"), wait_set(a3, f"waiting_on={b3}")]
+    drop_b = run(env5, "task", "set", b1, "status=dropped")
+    wait_b = wait_set(b2, "waiting_on=agent")
+    doing_b = run(env5, "task", "set", b3, "status=doing")
+    check("task set: блокер стал dropped или «ждёт» без основания — «<A>: остаётся в цели окна — блокер <B> <статус>» "
+          "про каждую ждущую его задачу и по цепочке; блокер doing — строки нет",
+          all(f[0] == 0 and T.GOAL_OUT in f[1] for f in first)
+          and drop_b.returncode == 0 and f"{a1}: {T.GOAL_IN} — блокер {b1} dropped" in drop_b.stdout
+          and f"{c3}: {T.GOAL_IN} — блокер {a1} waiting, цепочка до {b1}" in drop_b.stdout
+          and f"{a2}: {T.GOAL_IN} — блокер {b2} waiting" in wait_b[1]
+          and doing_b.returncode == 0 and a3 not in doing_b.stdout and T.GOAL_IN not in doing_b.stdout,
+          (first, drop_b.stdout, wait_b, doing_b.stdout))
     r = run(env5, "task", "set", new(env5, "--body", "Цель и готово").stdout.split()[0], "status=doing")
     check("task set doing — ни строки «снята», ни «остаётся» (doing в цели и так)",
           r.returncode == 0 and T.GOAL_OUT not in r.stdout and T.GOAL_IN not in r.stdout, r.stdout)

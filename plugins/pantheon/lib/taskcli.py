@@ -378,6 +378,9 @@ def task_cmd(rest):
                       else f"{tid}: {T.GOAL_IN} — «ждёт» снимает задачу с цели, только если waiting_on=human с question "
                            f"или waiting_on=<id другой задачи>, которая есть, не done/dropped и, если сама ждёт, "
                            f"снята с цели")
+            if {"status", "waiting_on", "question"} & set(changes):  # metis-0714 (argus-280b): «снята» у ждущих её — отменить
+                for did, blk, st in T.goal_held_dependents(tid, T.load_tasks(P.PANTHEON, T.WORK_TYPES)):
+                    print(f"{did}: {T.GOAL_IN} — блокер {blk} {st}" + ("" if blk == tid else f", цепочка до {tid}"))
             if changes.get("status") == "doing" and head.get("status") == "doing":
                 _warn_overlap(T, tid)
             if changes.get("status") in ("done", "dropped"):

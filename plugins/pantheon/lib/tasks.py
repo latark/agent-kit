@@ -443,6 +443,26 @@ def goal_released(head, tasks=None):
     return False
 
 
+def goal_held_dependents(tid, tasks):
+    """Задачи в «ждёт», чья цепочка waiting_on проходит через tid и которых цель теперь держит (metis-0714, argus-280b):
+    [(id, её блокер, статус блокера)]. `task set` по tid печатает про каждую строку GOAL_IN — иначе последней строкой о
+    задаче остаётся старое «снята с цели окна», хотя блокер уже done/dropped или сам ждёт без основания."""
+    tasks = tasks or {}
+    out = []
+    for did in sorted(tasks):
+        head = tasks[did][1] or {}
+        if did == tid or head.get("status") != "waiting":
+            continue
+        on, seen = str(head.get("waiting_on") or "").strip(), {did}
+        while on != tid and on in tasks and on not in seen:
+            seen.add(on)
+            nxt = tasks[on][1] or {}
+            on = str(nxt.get("waiting_on") or "").strip() if nxt.get("status") == "waiting" else ""
+        if on == tid and not goal_released(head, tasks):
+            blk = str(head.get("waiting_on") or "").strip()
+            out.append((did, blk, (tasks[blk][1] or {}).get("status")))
+    return out
+
 def option_warns(head):
     """Предупреждения по тексту options: пустые скобки, обрезанная сумма, «(совет)» в варианте про деньги или необратимое
     (совет — отдельным полем recommend, после вариантов). Не ошибка: задача пишется, автор видит строку."""
