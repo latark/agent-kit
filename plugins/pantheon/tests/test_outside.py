@@ -2255,6 +2255,23 @@ n1 = len(calls())
 res = kit_request()
 O.run_env = _re
 check("0732: другой python (env) — прогон, а не перенос", len(calls()) == n1 + 1 and not res.get("by_tree"), res)
+# сбой записи переноса (OSError) — не итог «записано», а обычный прогон
+git(KIT, "-c", "user.name=t", "commit", "-q", "--amend", "-m", "k6 третье сообщение")
+_at = O.append_tests
+
+
+def _at_fail(*a, **kw):
+    if kw.get("by_tree"):
+        raise OSError("сбой диска")
+    return _at(*a, **kw)
+
+
+O.append_tests = _at_fail
+n1 = len(calls())
+res = kit_request()
+O.append_tests = _at
+check("0732: запись переноса не легла (OSError) — прогон, итог по нему, а не «без прогона»",
+      len(calls()) == n1 + 1 and res.get("record") and not res.get("by_tree"), res)
 # команда — не полный набор репозитория: не переносится (latark/app нет в FULL_TESTS)
 git(APP, "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "app пусто")
 git(APP, "-c", "user.name=t", "commit", "-q", "--amend", "--allow-empty", "-m", "app пусто 2")
