@@ -59,8 +59,7 @@ S; t5=$(sed -n 's/^task=//p' .sync-incoming 2>/dev/null)
 check "чужая правка кода без пометки — вопрос" '[ -n "$t5" ] && grep -q "другого Mac" "$TASKS/$t5.md"'
 answer "$t5" "Откатить на всех Mac"; S
 check "«откатить на всех Mac» — откат ушёл с пометкой" '! remote sync-copy.sh | grep -q from-B && [ ! -f .sync-incoming ] && git log -1 --format=%B "origin/$BR" | grep -q "Карантин-одобрен: $t5"'
-# metis-0705 хвост: sync.sh:245/255 закрывают карточку «с другого Mac» без --force — отказ, карточка висит. Исправят — станет ok
-if grep -q "^status: done" "$TASKS/$t5.md"; then echo "ok   «откатить на всех Mac» — карточка закрыта"; else echo "xfail «откатить на всех Mac» — карточка $t5 не закрыта (sync.sh:245/255 без --force, metis-0705)"; fi
+check "«откатить на всех Mac» — карточка закрыта" 'grep -q "^status: done" "$TASKS/$t5.md"'
 git -C "$T/B" pull -q --rebase 2>/dev/null; echo "echo approved-B" >> "$T/B/sync-copy.sh"
 git -C "$T/B" commit -qam "sync: B
 
