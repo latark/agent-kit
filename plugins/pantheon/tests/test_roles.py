@@ -278,8 +278,10 @@ def main():
     check("apollo: навык frontend-design не предзагружается шапкой (skills:), вызывается по требованию",
           re.search(r"^skills:", raw_texts["apollo-demo.md"].split("---")[1], re.M) is None
           and "frontend-design:frontend-design` (Skill)" in raw_texts["apollo-demo.md"])
+    # metis-0271: +~400 знаков координатору — правила из decisions.md (findings, /clear между PR, модель угроз,
+    # «решение внесено, только когда оно в роли»); дубли (isolation, модель palamedes) сжаты, лидов потолок не поднят
     check("размер роли после выноса: координатор и лиды не больше потолка (знаков)",
-          len(raw_texts["domain-coordinator.md"]) <= 30200 and len(raw_texts["hephaestus-demo.md"]) <= 23400)
+          len(raw_texts["domain-coordinator.md"]) <= 30700 and len(raw_texts["hephaestus-demo.md"]) <= 23400)
     # самопроверка до сдачи (metis-0357): шесть пунктов и строка отчёта у разработчиков, требование в поручении лидов
     # сверка по тексту без переносов строк: пробелы схлопнуты, иначе перенос строки в шаблоне ломает поиск фразы
     flat = {f: " ".join(t.split()) for f, t in texts.items()}
@@ -366,14 +368,15 @@ def main():
         ("ядро — список один с шлюзом, два argus на Opus",
          "- Ядро — дифф трогает путь из списка «Ядро защит» выше. Список один, как у шлюза guard (`CORE_DIR` и "
          "`CORE_FILES` в `plugins/guard/hooks/merge_gate.py`; тест сверяет этот текст с кодом шлюза)."),
-        ("ядро — вызов с model opus и без effort", "В PR ядра — два независимых argus на Opus: вызов с параметром "
-         "`model: \"opus\"`, без `effort`."),
-        ("вне ядра — один argus на Sonnet, второго не зови, метка не добавляет",
+        # владелец 02.11 (metis-0271, В3): argus на Opus и вне ядра — Opus и high в файле роли, model в вызове нет
+        ("ядро — вызов без model и без effort", "В PR ядра — два независимых argus на Opus: вызов без `model` "
+         "и без `effort` (Opus и high из файла роли)."),
+        ("вне ядра — один argus на Opus, второго не зови, метка не добавляет",
          "- Остальное, в том числе остальные «Защищённые пути» (`plugins/pantheon/roles/_parts/protected.part`) — один "
-         "argus на Sonnet (модель из файла роли), с `effort: \"medium\"`. Второго не зови: сложность задачи и метка "
+         "argus на Opus (модель из файла роли), с `effort: \"medium\"`. Второго не зови: сложность задачи и метка "
          "«Сложная» этого не меняют."),
-        ("Sonnet вне ядра шлюз засчитывает, в ядре нет", "«Принять» на Sonnet вне ядра шлюз засчитывает; в PR ядра не "
-         "засчитает — тогда повтори на Opus."),
+        ("не Opus в ядре шлюз не засчитывает", "«Принять» не на Opus в PR ядра шлюз не засчитает — тогда повтори "
+         "на Opus."),
         ("второй (только ядро) не видит первого, строка «Второй argus»", "- Второй argus (только ядро) ищет только "
          "обходы и отчёта первого не видит. Принято, когда последний вердикт каждого позванного argus — «принять». "
          "Строка первого «Второй argus: нужен — ядро» — зови второго."),
@@ -450,7 +453,9 @@ def main():
                 # отчётов в узком повторе не от лида, модель argus не «всегда Opus»
                 "всегда два argus, при любом размере", "второй только на сложной задаче",
                 "Метка «Сложная: <почему>» в поручении может добавить", "отчёты: <пути отчётов всех argus",
-                "Модель argus не меняй: он всегда на Opus", "а на защитах — не меньше 2", "Вне защит — один argus")
+                "Модель argus не меняй: он всегда на Opus", "а на защитах — не меньше 2", "Вне защит — один argus",
+                # владелец 02.11 (metis-0271, В3): Sonnet у argus больше нет, model opus в вызове не нужен
+                "argus на Sonnet", "«Принять» на Sonnet", "`model: \"opus\"`, без `effort`")
     lead_release = ("PR в agent-kit не трогает `version` в `plugin.json` и `.claude-plugin/releases.json`",
                     "номер поднимает workflow release на main после слияния (metis-0512",
                     "`.github/` (workflow release с правом записи в main)")
@@ -490,11 +495,11 @@ def main():
               for x in ("plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/plugins-by-role.toml")))
     a = flat.get("argus.md", "")
     argus_rules = (
-        ("второй argus и Opus — только ядро; список шлюза с origin/main", "Второй независимый argus и Opus — только PR, "
+        ("второй argus — только ядро; список шлюза с origin/main", "Второй независимый argus — только PR, "
          "который задевает ядро. Ядро — список шлюза guard: `CORE_DIR` и `CORE_FILES` в "
          "`plugins/guard/hooks/merge_gate.py` и сборка окон `sandbox_build` в `plugins/pantheon/lib/pantheon.py`. "
          "Читай список с `origin/main`"),
-        ("вне ядра argus один, на Sonnet; сложность и метка второго не добавляют", "Вне ядра argus один, на Sonnet: "
+        ("вне ядра argus один; сложность и метка второго не добавляют", "Вне ядра argus один: "
          "сложность по диффу и метка «Сложная» в поручении второго не добавляют."),
         ("строка «Второй argus»", "строка «Второй argus: нужен — ядро: <пути>» или «Второй argus: не нужен — вне ядра, "
          "<строк, файлов>»"),
@@ -630,13 +635,14 @@ def main():
           + (f" (нет у: {miss_raw})" if miss_raw else ""), not miss_raw)
     # effort argus (metis-0176): кто зовёт argus — вне ядра с effort medium, ядро и защиты — без параметра (high);
     # сам argus — на high в файле роли, знает правило и сверку модели шлюзом по транскрипту
-    effort_rule = ("Модель и effort argus (metis-0176, упрощение п. 9, владелец 27.10; на ядре это второе исключение): в файле роли argus — Sonnet. "
+    # владелец 02.11 (metis-0271, В3): argus и вне ядра на Opus — Opus в файле роли, model в вызове не передают
+    effort_rule = ("Модель и effort argus (metis-0176, владелец 27.10 и 02.11): в файле роли argus — Opus и high. "
                    "Вне ядра защит зови его с параметром `effort: \"medium\"`, модель в вызове не передавай. PR, который "
-                   "задевает ядро защит, зови с `model: \"opus\"` и без параметра `effort` — на high из файла роли: ядро "
-                   "проверяют два argus на Opus, шлюз «принять» на другой модели в PR ядра не засчитает.")
+                   "задевает ядро защит, зови без `model` и `effort` — на Opus и high из файла роли: шлюз «принять» на "
+                   "другой модели в PR ядра не засчитает.")
     callers = ("hephaestus-demo.md", "apollo-demo.md", "domain-coordinator.md", "hq.md")
     miss = [f for f in callers if effort_rule not in flat.get(f, "")]
-    check("лиды, координатор и Зевс: argus вне ядра — Sonnet с effort medium, ядро — model opus без effort"
+    check("лиды, координатор и Зевс: argus вне ядра — Opus из файла роли с effort medium, ядро — без model и effort"
           + (f" (нет у: {miss})" if miss else ""), not miss)
     check("hq: каждый вопрос владельцу вопрос на решение начинается с «[<id>]», карточка — по «Вопрос на решение» (metis-0408)",
           "Вопрос владельцу на решение — в окне вопросов, в карточке, в сообщении — начинается с «[<id>]»"
@@ -651,13 +657,14 @@ def main():
           "терминала с `--over-cap`, или поднять потолок. Гестию будить можно: потолок её не держит;"
           in flat.get("hq.md", ""))
     argus_md = texts.get("argus.md", "")
-    check("argus: в файле роли effort: high и model: sonnet; знает, что вне ядра его зовут с medium, а шлюз сверяет "
+    check("argus: в файле роли effort: high и model: opus; знает, что вне ядра его зовут с medium, а шлюз сверяет "
           "модель с транскриптом",
-          "\neffort: high\n" in argus_md.split("---")[1] and "\nmodel: sonnet\n" in argus_md.split("---")[1]
-          and "Вне ядра тебя зовут с effort medium, на ядро — на Opus и без него, на high из файла роли."
+          "\neffort: high\n" in argus_md.split("---")[1] and "\nmodel: opus\n" in argus_md.split("---")[1]
+          and "Вне ядра тебя зовут с effort medium, на ядро — без него, на high из файла роли."
           in flat.get("argus.md", "")
           and "Шлюз сверяет модель из `--ran` с твоим транскриптом" in flat.get("argus.md", "")
-          and "вне ядра хватает любой модели, в том числе Sonnet" in flat.get("argus.md", ""))
+          and "вне ядра шлюз засчитает и другую модель" in flat.get("argus.md", "")
+          and "Sonnet" not in flat.get("argus.md", ""))
     # навык с model: внутри argus (metis-0413 п. 4): его ответы — в транскрипте argus на другой модели, шлюз откажет
     check("argus: в ядре навык с model: в шапке — только отдельным агентом",
           "В ядре не запускай навык с `model:` в шапке: его ответы ложатся в твой транскрипт на другой модели, и "
