@@ -2238,6 +2238,12 @@ def api_merge_args(words):
     if pos[:1] == [None]:
         return API_UNKNOWN
     unknown = None in pos or any(v is None for _, v in fields)
+    # адрес — первое позиционное слово, но невычислимое слово рядом может оказаться флагом и сдвинуть его
+    # (`gh api repos/o/r/issues/1 $X repos/o/r/pulls/7/merge -X PUT`): при лишнем слове любой известный адрес слияния
+    # или graphql среди позиционных слов и значений полей — отказ (фоновая проверка безопасности 02.11, круг 3)
+    if unknown and len(pos) > 1 and any(w and (api_merge_path(api_norm(w)) or API_GQL_PATH.search(api_norm(w)))
+                                        for w in pos[1:] + [v for _, v in fields]):
+        return API_UNKNOWN
     if any(v and API_MERGE_GQL.search(v) for _, v in fields):
         return (f"слияние через GraphQL (mergePullRequest, enablePullRequestAutoMerge, enqueuePullRequest) шлюз не "
                 f"разбирает — {API_MERGE_HINT}")

@@ -4392,6 +4392,12 @@ def t_owner_api_merge(h):
             (f"{base} --jq $J", "значение --jq — переменная, адрес слияния", "слово не вычислить"),
             (f"{base} $F", "лишнее слово — переменная, адрес слияния", "слово не вычислить"),
             ("gh api graphql -f query=\"$Q\"", "graphql: запрос — переменная", "слово не вычислить"),
+            # невычислимое слово может сдвинуть адрес: известный адрес слияния не первым словом — отказ
+            ("gh api $X repos/o/r/pulls/7/merge -X PUT", "первое слово — переменная, за ним адрес слияния",
+             "слово не вычислить"),
+            ("gh api repos/o/r/issues/1 $X repos/o/r/pulls/7/merge -X PUT", "адрес слияния за переменной",
+             "слово не вычислить"),
+            ("gh api repos/o/r/issues/1 $X graphql -X POST", "graphql за переменной", "слово не вычислить"),
             # связка коротких флагов с X, f или F — запись (metis-0681), шлюз её не разбирает
             ("gh api -iX PUT repos/latark/agent-kit/pulls/9/merge", "-iX PUT связкой", glued),
             ("gh api -iXPUT repos/latark/agent-kit/pulls/9/merge", "-iXPUT связкой", glued),
@@ -4469,6 +4475,9 @@ def t_owner_api_merge(h):
                    ("gh api $URL --jq .merged $F", "чтение: адрес и флаг из переменных, merge только в --jq"),
                    # Д2: невычислимое значение флага у записи не на слияние — пропуск
                    ("gh api -X POST repos/latark/agent-kit/issues/7/comments -f body=$B", "поле — переменная, merge нет"),
+                   ('gh api repos/o/r/issues/1/comments -f body="$B"', "поле в кавычках — переменная, без -X"),
+                   ("gh api repos/o/r/issues/1/comments -f body=see/repos/o/r/pulls/7/merge -f x=$Y",
+                    "адрес слияния в поле, переменная в другом поле, лишнего слова нет"),
                    ('gh api -X POST repos/latark/agent-kit/issues/7/comments -f body="$B merged"',
                     "поле — переменная со словом merge"),
                    ("gh api -H $H repos/latark/agent-kit/issues/1/comments -f body=x", "значение -H — переменная"),
