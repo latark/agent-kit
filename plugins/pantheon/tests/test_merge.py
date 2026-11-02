@@ -1414,6 +1414,8 @@ if mode == "cancel":
 if mode == "sleep":
     time.sleep(30)
     sys.exit(0)
+if mode == "lie":   # окно ответило «да», а файл не поставлен
+    sys.exit(0)
 script = sys.argv[-2]
 if mode == "swap":
     with open(open(os.path.join(rec, "managed-src")).read(), "w") as fh:
@@ -1575,6 +1577,13 @@ def test_managed_timeout_card():
     check("управляемые: касания нет (время вышло) → файл не тронут, карточка и тревога, повтор позже",
           mdest(b) == M_OLD and len(mcards(b)) == 1 and st.get("result") == "timeout"
           and "pantheon-managed" in b.alerts() and "ждало касания" in b.alerts(), (b.outs[-1], st, b.alerts()))
+    b = managed_box()
+    b.set("osascript-mode", "lie")
+    mrun(b)
+    st = mstate(b)
+    check("управляемые: окно ответило «да», а файл не тот — версия не записана, карточка и тревога",
+          mdest(b) == M_OLD and "installed" not in st and st.get("result") == "после касания файл не тот"
+          and len(mcards(b)) == 1, (b.outs[-1], st))
 
 
 def test_managed_swapped_source():
@@ -1612,11 +1621,14 @@ def test_managed_no_osascript_and_no_record():
           (b.outs[-1], b.alerts()))
     b = managed_box()
     os.remove(os.path.join(b.state, "plugins", "verified.json"))
+    once = os.path.join(b.state, "once")
     r, log = mkick(b)
     mrun(b)
     check("управляемые: guard не проверен (нет записи verified.json) — ни окна, ни карточки, ни тревоги о дереве",
           "merge-run" not in log and not b.calls("osascript") and not mcards(b) and mdest(b) == M_OLD
-          and "plugins-unverified" not in b.alerts() and "не проверено" not in b.alerts(), (log, b.alerts()))
+          and not any(f.startswith("plugins-unverified") for f in (os.listdir(once) if os.path.isdir(once) else []))
+          and "не проверено" not in b.alerts(),
+          (log, b.alerts()))
 
 
 def test_managed_owner_away():

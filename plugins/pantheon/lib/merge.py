@@ -911,18 +911,19 @@ def _settled(st, src, how):
 def managed_check():
     """Для тика: нужен ли проход ради управляемых настроек — поставленный файл есть, не совпадает с проверенным, и на
     эту версию окна не было последние MANAGED_RETRY. Файла в /Library нет — не отставание: первый раз его ставит
-    владелец (README guard). Совпал, а карточка «Руками» открыта (поставили командой) — закрыть её."""
+    владелец (README guard). Совпал, а карточка «Руками» открыта (поставили командой) — закрыть её.
+    → проверенный файл (путь, байты, версия), если проход нужен, иначе None."""
     src, cur = _managed_now()
-    if not src or cur is None:
-        return False
+    if not src:   # поставленного нет или не прочитать — src тоже None (_managed_now)
+        return None
     st = _mstate()
     if cur == src[1]:
         if st.get("task"):
             _settled(st, src, "командой")
-        return False
+        return None
     asked = st.get("asked")
     recent = isinstance(asked, (int, float)) and 0 <= P.now() - asked < MANAGED_RETRY
-    return not (st.get("sha") == hashlib.sha256(src[1]).hexdigest() and recent)
+    return None if st.get("sha") == hashlib.sha256(src[1]).hexdigest() and recent else src
 
 
 def root_script(src, dest, sha):
@@ -962,11 +963,9 @@ WHY_RU = {"refused": "вы отменили окно", "timeout": f"окно {MA
 
 def managed_pass():
     """Шаг прохода: отставание → окно → установка; без касания — карточка «Руками» и тревога. → строка для журнала."""
-    if not managed_check():
+    src = managed_check()
+    if not src:
         return "в порядке или окно на эту версию уже было"
-    src, cur = _managed_now()
-    if not src or cur is None or cur == src[1]:
-        return "в порядке"
     if P.idle_sec() > PRESENT_SEC:
         return "отстали — ждёт: вас нет у Mac"
     path_, data, version = src
