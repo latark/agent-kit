@@ -631,8 +631,17 @@ def test_lists_and_checked():
         check("владелец вернул в работу — тем же PR второй раз не закрываем; открытый PR ушёл — закрываем",
               T.read(pa)[0].get("status") == "doing" and text(pa).count("закрыта по слиянию PR #40") == 1
               and T.read(pd)[0].get("status") == "done", text(pa)[-300:])
+        # «часть» в теле PR из журнала: все пункты отмечены, но задача остаётся открытой, строка в журнал один раз
+        pk = with_journal("metis-0050", ok_body, extra="## Журнал\n\n- 2026-10-27 21:25 — агент: PR #46 слит\n")
+        prs3 = {"latark/agent-kit": [cpr(46, "e", "PR 1 из 2: часть задачи", T0 - 400)]}
+        for k in (500, 600):
+            A.save_state(cache, {"fetched": T0 + k, "merged": prs3, "open": {}, "errors": {}})
+            A.run(home, os.path.join(state, "autoclose.json"), cache, T0 + k, {"latark/agent-kit": {"metis-pantheon"}}, T)
+        check("close_checked: «часть» в теле PR — задача не закрыта, строка в журнале одна",
+              T.read(pk)[0].get("status") == "doing"
+              and text(pk).count("PR #46 (latark/agent-kit) слит, в теле «часть» — задача не закрыта") == 1, text(pk)[-300:])
         # сбой записи одной задачи (шапка не прошла проверку) — ошибка в errors, проход идёт дальше
-        pi = with_journal("metis-0048", ok_body, extra="## Журнал\n\n- 2026-10-27 21:25 — агент: PR #44 слит\n")
+        pi =with_journal("metis-0048", ok_body, extra="## Журнал\n\n- 2026-10-27 21:25 — агент: PR #44 слит\n")
         pj = with_journal("metis-0049", ok_body, extra="## Журнал\n\n- 2026-10-27 21:25 — агент: PR #45 слит\n")
         prs2 = {"latark/agent-kit": [cpr(44, "c", "", T0 - 600), cpr(45, "d", "", T0 - 500)]}
         A.save_state(cache, {"fetched": T0 + 400, "merged": prs2, "open": {}, "errors": {}})
