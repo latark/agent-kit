@@ -792,6 +792,13 @@ def test_new_order_goal():
         check(g.endswith(P.NEW_ORDER_GOAL), f"{name} без условия о новом поручении: {g!r}")
     check("перехожу к" in P.NEW_ORDER_GOAL and "пришедшее в сессию после её начала" in P.NEW_ORDER_GOAL,
           f"условие о новом поручении: {P.NEW_ORDER_GOAL!r}")
+    # metis-0714: задачу, которую сессия перевела в «ждёт», Stop-хук цели не требует; doing и todo — в цели
+    for name in ("TASK_GOAL", "COORDINATOR_GOAL"):
+        g = getattr(P, name)
+        check(g.endswith(P.WAITING_GOAL + P.NEW_ORDER_GOAL), f"{name} без условия о задаче в «ждёт»: {g!r}")
+    w = P.WAITING_GOAL
+    check("«ждёт» (waiting)" in w and "в цель больше не входит" in w and "не берут и не требуют" in w
+          and "в работе (doing) и в очереди (todo) — входят" in w, f"условие о задаче в «ждёт»: {w!r}")
     check(len("/goal [Пантеон: поручение от tick] " + "x" * 1500 + " " + P.TASK_GOAL) < 4000,
           "условие цели с поручением длиннее 4000 знаков (предел /goal)")
     role = " ".join(open(os.path.join(ROOT, "roles", "domain-coordinator.tmpl"), encoding="utf-8").read().split())
