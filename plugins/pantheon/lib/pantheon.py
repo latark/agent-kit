@@ -2676,7 +2676,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
     # записи туда ждёт опросом мест. Запись — только в эту папку (не во весь locks: там замки прохода и Touch ID),
     # «да» владельца 02.11 в окне agent-kit-62. Ссылка на месте папки — не даём: иначе запись ушла бы по ссылке
     queue = path("locks", HEAVY_QUEUE)
-    os.makedirs(queue, mode=0o700, exist_ok=True)
+    with contextlib.suppress(OSError):  # файл или висячая ссылка на месте папки — без записи, сборка окон идёт дальше
+        os.makedirs(queue, mode=0o700, exist_ok=True)
     queue = os.path.realpath(queue) if os.path.isdir(queue) and not os.path.islink(queue) else None
 
     def one(name, folders, own, compact, deny, allow=None, agents=None, direction=False, auto_allow=None):

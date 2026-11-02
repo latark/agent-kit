@@ -407,6 +407,17 @@ def main():
     awl = load("athena-shop")["sandbox"]["filesystem"]["allowWrite"]
     check("песочница: ссылка на месте heavy-queue — записи нет ни по ссылке, ни по цели",
           not any("heavy-queue" in x or x == os.path.realpath(os.path.join(tmp, "elsewhere")) for x in awl))
+    # висячая ссылка и файл на месте папки — сборка не падает, записи нет
+    os.unlink(os.path.join(state, "locks", "heavy-queue"))
+    os.symlink(os.path.join(tmp, "nowhere"), os.path.join(state, "locks", "heavy-queue"))
+    r1 = subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
+    aw1 = load("athena-shop")["sandbox"]["filesystem"]["allowWrite"]
+    os.unlink(os.path.join(state, "locks", "heavy-queue"))
+    open(os.path.join(state, "locks", "heavy-queue"), "w").close()
+    r2 = subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
+    aw2 = load("athena-shop")["sandbox"]["filesystem"]["allowWrite"]
+    check("песочница: висячая ссылка или файл на месте heavy-queue — сборка идёт, записи нет",
+          r1.returncode == 0 and r2.returncode == 0 and not any("heavy-queue" in x for x in aw1 + aw2))
     os.unlink(os.path.join(state, "locks", "heavy-queue"))
     _shutil.rmtree(wr)
     subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
