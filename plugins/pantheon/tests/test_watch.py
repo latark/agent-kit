@@ -3452,6 +3452,71 @@ def test_auto_rm_done_stopped_0250():
     check(e.alerts().count("a8a8a8a8 осталась") == 1, "тот же отказ — вторая тревога")
 
 
+def _hestia_env(task_status):
+    """Гестия с задачей: run-файл окна (куда его пишет wake hestia) держит PANTHEON_TASK, реестр демона есть."""
+    e = Env()
+    e.direction("athena-x")
+    e.task("athena-0071", "athena-x", status=task_status)
+    os.makedirs(e.st("settings", "run"), exist_ok=True)
+    json.dump({"env": {"PANTHEON_TASK": "athena-0071"}}, open(e.st("settings", "run", "hestia.json"), "w"))
+    _roster(e, {"other": {"pid": 999999}})
+    return e
+
+
+def _hestia_calls(e):
+    return [c for c in e.calls() if c[:1] in (["stop"], ["rm"]) and len(c) > 1 and c[1].startswith("h")]
+
+
+def test_hestia_reap_0671():
+    """metis-0671: плановый проход убирает Гестию (claude stop, затем rm) без метки stopped/hestia: (а) призрак без
+    процесса; (б) закончила ход (не working), а её задача закрыта. Не трогает: working, живую с открытой задачей,
+    запись моложе минуты, паузу планировщика."""
+    # (а) призрак: blocked без pid, процесса нет ни у записи, ни в реестре — при открытой задаче
+    e = _hestia_env("doing")
+    e.agents([bg("hestia", "blocked", "h1h1h1h1-1")])
+    e.run("watch", t=T0)
+    check(_hestia_calls(e) == [["stop", "h1h1h1h1"], ["rm", "h1h1h1h1"]], f"0671 а: призрак не убран: {e.calls()}")
+    check(not os.path.exists(e.st("stopped", "hestia")), "0671 а: поставлена метка stopped/hestia")
+    check("Гестия h1h1h1h1 убрана" in e.alerts(), f"0671 а: нет тревоги уборки: {e.alerts()}")
+    # (а1) призрак с мёртвым pid в записи: тот же результат
+    e = _hestia_env("doing")
+    e.agents([bg("hestia", "working", "h7h7h7h7-1", pid=999999)])
+    e.run("watch", t=T0)
+    check(_hestia_calls(e) == [["stop", "h7h7h7h7"], ["rm", "h7h7h7h7"]], f"0671 а1: призрак с pid не убран: {e.calls()}")
+    # (а2) мёртвая запись done без pid при открытой задаче: rm без stop
+    e = _hestia_env("doing")
+    e.agents([bg("hestia", "done", "h2h2h2h2-1")])
+    e.run("watch", t=T0)
+    check(_hestia_calls(e) == [["rm", "h2h2h2h2"]], f"0671 а2: done без pid не убрана: {e.calls()}")
+    # (б) процесс жив, ход закончен, задача закрыта — убрана; метки нет
+    e = _hestia_env("done")
+    e.agents([bg("hestia", "done", "h3h3h3h3-1", pid=os.getpid())])
+    e.run("watch", t=T0)
+    check(_hestia_calls(e) == [["stop", "h3h3h3h3"], ["rm", "h3h3h3h3"]], f"0671 б: закрытая задача: {e.calls()}")
+    check(not os.path.exists(e.st("stopped", "hestia")), "0671 б: поставлена метка stopped/hestia")
+    # задача неизвестна (run-файла нет), сессия не working — тоже убрана
+    e = _hestia_env("doing")
+    os.remove(e.st("settings", "run", "hestia.json"))
+    e.agents([bg("hestia", "done", "h4h4h4h4-1", pid=os.getpid())])
+    e.run("watch", t=T0)
+    check(len(_hestia_calls(e)) == 2, f"0671 б2: без задачи не убрана: {e.calls()}")
+    # не трогаем: working при любой задаче, done/blocked с процессом при открытой, свежая запись
+    for status, st, pid, started in (("doing", "working", os.getpid(), T0 - 100), ("done", "working", os.getpid(), T0 - 100),
+                                     ("review", "done", os.getpid(), T0 - 100), ("todo", "blocked", os.getpid(), T0 - 100),
+                                     ("done", "done", None, T0 - 10)):
+        e = _hestia_env(status)
+        e.agents([bg("hestia", st, "h5h5h5h5-1", pid=pid, started=started)])
+        e.run("watch", t=T0)
+        check(not _hestia_calls(e), f"0671 нет: тронута {status}/{st}/{pid}/{started}: {e.calls()}")
+        check(not os.path.exists(e.st("stopped", "hestia")), "0671: метка stopped/hestia")
+    # пауза планировщика — уборки нет
+    e = _hestia_env("doing")
+    e.agents([bg("hestia", "blocked", "h6h6h6h6-1")])
+    open(e.st("paused"), "w").write("x")
+    e.run("watch", t=T0)
+    check(not _hestia_calls(e), f"0671: уборка при паузе: {e.calls()}")
+
+
 BLK_SID = "b10c0001-aaaa"
 
 
