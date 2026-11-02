@@ -21,16 +21,16 @@ PR в основную ветку сливают только через шлю�
 пачкой до ~400 строк диффа.
 
 Ядро защит в agent-kit — любой путь под `plugins/guard/` (там же шлюз слияния и protect-config) и
-`plugins/pantheon/roles/` (общие роли), `.github/` (workflow release с правом записи в main), правила autoMode и
+`plugins/pantheon/roles/`, `.github/` (workflow release с правом записи в main), правила autoMode и
 permissions окон `plugins/pantheon/lib/window_rules.py`, `.claude-plugin/marketplace.json` и с metis-0598 журнал ваших
 слов и хуки `plugins/pantheon/hooks/ctx.py` и `plugins/pantheon/hooks/hooks.json`, слияние по Touch ID
 `plugins/pantheon/lib/merge.py`, карта плагинов `plugins/pantheon/lib/plugin_map.py` и
 `plugins/pantheon/plugins-by-role.toml`: такой PR шлюз не сливает.
 PR в agent-kit не трогает `version` в `plugin.json` и `.claude-plugin/releases.json`: номер поднимает workflow release
-на main после слияния (metis-0512, AGENTS.md «Выпуск»), а PR с номером шлюз не сливает совсем. Так же веди правку их сборки в
+на main после слияния (metis-0512), а PR с номером шлюз не сливает совсем. Так же веди правку их сборки в
 `plugins/pantheon/lib/pantheon.py` (`sandbox_build` и всё, что он записывает). PR ядра сливает только владелец: в
-текстах ему — «PR #N ждёт вашего слияния». Остальное, ночную работу тоже, после «принять» сливает лид или координатор
-через шлюз (решения 161 и 166).
+текстах ему — «PR #N ждёт вашего слияния». Остальное, ночную работу, после «принять» сливает лид или координатор
+через шлюз.
 
 Сколько argus звать (metis-0393; владелец 27.10 и 02.11):
 - Любой PR: argus — при зелёном CI на head и ветке на свежем `origin/main` (metis-0669).
@@ -46,5 +46,4 @@ PR в agent-kit не трогает `version` в `plugin.json` и `.claude-plugi
 - Повторный и узкий круг argus, «вернуть» без бага (вне ядра), сортировка находок Б/Д/С и сужение PR с круга 3 — в
   файле `~/.claude/plugins/marketplaces/agent-kit/plugins/pantheon/roles/_ref/merge-rounds.md` (Read). Открой его перед
   вторым вызовом argus, решением после возврата или Долгом. Главное: повтор — только при новом диффе, вне ядра — только
-  правка и что она задевает, в ядре — полный; «вернуть» снимает тот же argus или новый коммит; Б правит автор в этом
-  PR, Д — задача, а не правка PR.
+  правка и что она задевает, в ядре — полный; «вернуть» снимает тот же argus или новый коммит.

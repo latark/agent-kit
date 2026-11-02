@@ -347,6 +347,31 @@ def main():
     check("start: blocked без процесса, но с вопросом (needs) — ждёт вас: отказ как раньше, ничего не запускает и "
           "не удаляет (metis-0348)",
           r.returncode == 1 and "уже работает" in r.stderr and calls() == [])
+    # argus-249a Д1: призрак blocked с мёртвым pid, в задании только detail (он есть всегда) — вопроса нет, запуск
+    open(log, "w").close()
+    put(os.path.join(jobs_dead, "state.json"), {"state": "blocked", "detail": "Session ended"})
+    put(agents_file, [dict(blocked_dead[0], pid=999999)])
+    r = run("start", "athena-shop", "дальше")
+    c = [x["argv"] for x in calls()]
+    check("start: призрак blocked с мёртвым pid и detail без вопроса — запускает новую (argus-249a Д1)",
+          r.returncode == 0 and c and c[0][:1] == ["--bg"] and "уже работает" not in r.stderr)
+    # argus-249a Б1: живая фоновая с другим sessionId в реестре имён, совпал jobId — работает, не дублируем;
+    # тёзка с другим jobId — жизни этой записи не доказывает: призрак, запуск
+    sessions_dir = os.path.join(tmp, ".claude", "sessions")
+    os.makedirs(sessions_dir, exist_ok=True)
+    reg_file = os.path.join(sessions_dir, f"{os.getpid()}.json")
+    working_dead = [dict(blocked_dead[0], state="working")]
+    for job, ok in ((dead_id, False), ("b8other", True)):
+        open(log, "w").close()
+        put(os.path.join(jobs_dead, "state.json"), {"state": "working", "detail": "Session ended"})
+        put(agents_file, working_dead)
+        put(reg_file, {"pid": os.getpid(), "sessionId": "s-other", "jobId": job, "name": "athena-shop", "kind": "bg"})
+        r = run("start", "athena-shop", "дальше")
+        c = [x["argv"] for x in calls()]
+        check(f"start: запись реестра имён с jobId {job} — " + ("призрак, запуск" if ok else "уже работает"),
+              (r.returncode == 0 and c and c[0][:1] == ["--bg"]) if ok else
+              (r.returncode == 1 and "уже работает" in r.stderr and calls() == []))
+    os.remove(reg_file)
     os.remove(os.path.join(daemon_dir, "roster.json"))
     _shutil.rmtree(os.path.join(tmp, ".claude", "jobs"))
     alerts_md = os.path.join(home, "alerts.md")

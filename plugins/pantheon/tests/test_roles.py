@@ -278,10 +278,15 @@ def main():
     check("apollo: навык frontend-design не предзагружается шапкой (skills:), вызывается по требованию",
           re.search(r"^skills:", raw_texts["apollo-demo.md"].split("---")[1], re.M) is None
           and "frontend-design:frontend-design` (Skill)" in raw_texts["apollo-demo.md"])
-    # metis-0271: +~400 знаков координатору — правила из decisions.md (findings, /clear между PR, модель угроз,
-    # «решение внесено, только когда оно в роли»); дубли (isolation, модель palamedes) сжаты, лидов потолок не поднят
+    # размер координатора вырос по двум причинам: metis-0271 (+~400 — правила из decisions.md: findings, /clear между PR,
+    # модель угроз, «решение внесено, только когда оно в роли»; дубли сжаты) и metis-0665 (+100 — строка «перед раздачей —
+    # pantheon task overlap»; у лида уложилась в прежний потолок, лидов потолок не поднят)
     check("размер роли после выноса: координатор и лиды не больше потолка (знаков)",
           len(raw_texts["domain-coordinator.md"]) <= 30700 and len(raw_texts["hephaestus-demo.md"]) <= 23400)
+    for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
+        check(f"{f}: перед раздачей — pantheon task overlap, очередь или ветка от ветки PR, argus — только дельта (metis-0665)",
+              all(x in " ".join(raw_texts[f].split()) for x in ("Перед раздачей — `pantheon task overlap <id>`",
+                                                       "очередь или ветка от ветки PR", "argus — только дельта своего PR")))
     # самопроверка до сдачи (metis-0357): шесть пунктов и строка отчёта у разработчиков, требование в поручении лидов
     # сверка по тексту без переносов строк: пробелы схлопнуты, иначе перенос строки в шаблоне ломает поиск фразы
     flat = {f: " ".join(t.split()) for f, t in texts.items()}
