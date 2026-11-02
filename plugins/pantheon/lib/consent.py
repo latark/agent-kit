@@ -139,8 +139,13 @@ def consent(rest):
                       "сообщения людям, удаление — не по галочке, только окном вопросов или ответом в чате)",
                       f"вопрос: {q.strip()}\nответ: {a.strip()}"))
     found.sort(key=lambda x: x[0])
-    said_yes = any(consent_is_yes(body) for _, _, body in found)
-    last_yes = next(((head, body) for _, head, body in reversed(found) if consent_is_yes(body)), ("", ""))
+    # решает последний ответ на каждый вопрос: позднее «нет» на тот же вопрос отменяет прежнее «да» (metis-0656)
+    final = {}
+    for _, head, body in found:
+        final[body.split("\nответ:")[0].strip()] = (head, body)
+    said_yes = any(consent_is_yes(body) for _, body in final.values())
+    last_yes = next(((head, body) for _, head, body in reversed(found) if consent_is_yes(body)
+                     and final[body.split("\nответ:")[0].strip()][1] is body), ("", ""))
     reap_q = last_yes[1].split("\nответ:")[0]
     reap_q = reap_q if CONSENT_REAP_Q in reap_q else None
     found = [(head, body if len(body) <= CONSENT_MAX else body[:CONSENT_MAX] + "…") for _, head, body in found]
