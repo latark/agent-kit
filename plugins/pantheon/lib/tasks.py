@@ -34,6 +34,11 @@ COLUMNS = ["Входящие", HUMAN_WAIT, "Очередь", "В работе", 
 OWNER_TARGETS = {"Входящие": ("inbox", None), "Очередь": ("todo", None), "В работе": ("doing", None),
                  HUMAN_WAIT: ("waiting", "human"), "Готово": ("done", None), "Отменено": ("dropped", None)}
 ID_RE = re.compile(r"[a-z][a-z0-9]{1,11}-\d{3,}")
+# metis-0714, вариант А координатора (argus-280b): «ждёт» снимает задачу с цели окна (/goal), только если она ждёт владельца
+# с вопросом или другую задачу; блокер, названный сессией самой («agent», «ревью»), задачу в цели оставляет, как doing.
+# `task set` печатает одну из двух строк, а WAITING_GOAL в lib/sessions.py велит проверяющей модели верить только ей.
+GOAL_OUT = "снята с цели окна"
+GOAL_IN = "остаётся в цели окна"
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 DATETIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?")
 # поле → (тип, обязательно ли для task); типы: str, int, date, datetime, list
@@ -412,6 +417,18 @@ def _opt_cut(o):
     съеденная оболочкой: пробелы любой длины (и неразрывные) до «$» после числа не в счёт (metis-0240)."""
     return bool(_OPT_CUT.search(o)) or any(not o[:m.start()].rstrip()[-1:].isdigit() for m in _OPT_DOLLAR.finditer(o))
 _OPT_RISKY = re.compile(r"[₽$€]|\bруб|деньг|оплат|платеж|платёж|списан|необратим|удал|безвозврат", re.I)
+
+
+def goal_released(head):
+    """Уходит ли задача из цели окна (metis-0714): «ждёт» (waiting) владельца с вопросом — waiting_on=human и непустой
+    question — или другую задачу — waiting_on это id задачи, не своей. Любое другое «ждёт», doing и todo — в цели."""
+    head = head or {}
+    if head.get("status") != "waiting":
+        return False
+    on = str(head.get("waiting_on") or "").strip()
+    if on == "human":
+        return bool(str(head.get("question") or "").strip())
+    return bool(ID_RE.fullmatch(on)) and on != head.get("id")
 
 
 def option_warns(head):

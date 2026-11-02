@@ -477,6 +477,34 @@ def main():
           r.returncode == 2 and r2.returncode == 2 and "пусты" in r.stderr and read(tp5) == before,
           (r.returncode, r2.returncode, r.stderr))
 
+    # metis-0714, вариант А (argus-280b): цель окна отпускает «ждёт» только владельца с вопросом или другую задачу.
+    # Сессия, поставившая «ждёт» с блокером, выдуманным ею самой, получает «остаётся в цели окна» — и WAITING_GOAL
+    # (lib/sessions.py) велит проверяющей модели верить только строке «снята с цели окна».
+    def wait_set(tid, *fields):
+        r = run(env5, "task", "set", tid, "status=waiting", "next=ждать", *fields)
+        return r.returncode, r.stdout
+    ids = [new(env5, "--body", "Цель и готово").stdout.split()[0] for _ in range(6)]
+    cases = [(ids[0], ("waiting_on=human", "question=Какой вариант?", "why=нужно решение"), True),
+             (ids[1], ("waiting_on=metis-0001",), True),
+             (ids[2], ("waiting_on=agent",), False),
+             (ids[3], ("waiting_on=human",), False),
+             (ids[4], (f"waiting_on={ids[4]}",), False)]
+    got = {tid: wait_set(tid, *f) for tid, f, _ in cases}
+    check("task set waiting: human+question и id другой задачи — «снята с цели окна»; agent, human без вопроса, "
+          "своя же задача — «остаётся в цели окна»",
+          all(got[tid][0] == 0 and (f"{tid}: {T.GOAL_OUT}" in got[tid][1]) == out
+              and (f"{tid}: {T.GOAL_IN}" in got[tid][1]) == (not out) for tid, _, out in cases), got)
+    r = run(env5, "task", "set", ids[5], "status=doing")
+    check("task set doing — ни строки «снята», ни «остаётся» (doing в цели и так)",
+          r.returncode == 0 and T.GOAL_OUT not in r.stdout and T.GOAL_IN not in r.stdout, r.stdout)
+    rel = T.goal_released
+    check("goal_released: doing, todo, waiting agent — в цели; waiting human+question, waiting id — нет",
+          not rel({"status": "doing", "waiting_on": "human", "question": "?"}) and not rel({"status": "todo"})
+          and not rel({"status": "waiting", "waiting_on": "agent", "question": "?"})
+          and not rel({"status": "waiting", "waiting_on": "human", "question": "  "}) and not rel(None)
+          and rel({"status": "waiting", "waiting_on": "human", "question": "Что?"})
+          and rel({"status": "waiting", "waiting_on": "athena-0042", "id": "metis-0001"}))
+
     # чистые функции
     desc = T.has_description
     check("has_description: заголовок и журнал — нет; текст — да; чужой раздел — да",

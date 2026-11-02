@@ -797,8 +797,10 @@ def test_new_order_goal():
         g = getattr(P, name)
         check(g.endswith(P.WAITING_GOAL + P.NEW_ORDER_GOAL), f"{name} без условия о задаче в «ждёт»: {g!r}")
     w = P.WAITING_GOAL
-    check("«ждёт» (waiting)" in w and "в цель больше не входит" in w and "не берут и не требуют" in w
-          and "в работе (doing) и в очереди (todo) — входят" in w, f"условие о задаче в «ждёт»: {w!r}")
+    # строки, которым цель верит, — те же, что печатает `task set` (lib/tasks.py; поведение — test_task_keep.py)
+    T = P.tasks_mod()
+    check("«ждёт» (waiting)" in w and f"«<id>: {T.GOAL_OUT}»" in w and f"«{T.GOAL_IN}» или её нет — задача в цели" in w
+          and "в работе (doing) и в очереди (todo) — в цели" in w, f"условие о задаче в «ждёт»: {w!r}")
     check(len("/goal [Пантеон: поручение от tick] " + "x" * 1500 + " " + P.TASK_GOAL) < 4000,
           "условие цели с поручением длиннее 4000 знаков (предел /goal)")
     role = " ".join(open(os.path.join(ROOT, "roles", "domain-coordinator.tmpl"), encoding="utf-8").read().split())

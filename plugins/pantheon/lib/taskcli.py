@@ -371,6 +371,11 @@ def task_cmd(rest):
                 i += step
             p, head = T.task_set(P.PANTHEON, P.now(), tid, changes, note=note, body=new_body, force=force)
             print(f"{tid}: {head.get('status')} · {os.path.relpath(p, P.PANTHEON)}")
+            if head.get("status") == "waiting":  # metis-0714: строка для проверяющей модели цели окна (WAITING_GOAL)
+                print(f"{tid}: {T.GOAL_OUT} — ждёт " + ("ответа владельца на вопрос" if head.get("waiting_on") == "human"
+                                                       else f"задачу {head.get('waiting_on')}") if T.goal_released(head)
+                      else f"{tid}: {T.GOAL_IN} — «ждёт» снимает задачу с цели, только если waiting_on=human с question "
+                           f"или waiting_on=<id другой задачи>")
             if changes.get("status") == "doing" and head.get("status") == "doing":
                 _warn_overlap(T, tid)
             if changes.get("status") in ("done", "dropped"):
