@@ -449,6 +449,23 @@ r = run(["--base", "main", al])
 check("--base без --affected — отказ без прогона", r.returncode != 0 and "--base без --affected" in r.stdout
       and "файлов" not in r.stdout, r.stdout)
 
+# --- --only: только названные файлы (дозапуск прохода outside, metis-0735) ---
+r = run(["--only", "alpha/test_b.py,beta/test_c.py", a, b])
+check("--only: идут только названные файлы двух плагинов",
+      r.returncode == 0 and "файлов 2, ok 2, FAIL 0" in r.stdout and "alpha/test_a.py" not in r.stdout
+      and "ok   alpha/test_b.py" in r.stdout and "ok   beta/test_c.py" in r.stdout, r.stdout)
+r = run(["--only", "alpha/test_b.py", "--only", "beta/test_c.py", a, b])
+check("--only дважды — объединение", r.returncode == 0 and "файлов 2, ok 2" in r.stdout, r.stdout)
+r = run(["--only", "alpha/test_b.py,alpha/test_zz.py", a, b])
+check("--only: метки нет среди файлов — код 2 без прогона", r.returncode == 2 and "alpha/test_zz.py" in r.stdout
+      and "итого" not in r.stdout, r.stdout)
+r = run(["--only", "alpha/test_b.py,", a])
+check("--only: пустая метка — отказ без прогона", r.returncode not in (0, 2) and "пустая метка" in r.stdout
+      and "итого" not in r.stdout, r.stdout)
+r = run(["--only", "alpha/test_b.py", "--affected", a])
+check("--only с --affected — отказ без прогона", r.returncode != 0 and "--only с --affected" in r.stdout
+      and "итого" not in r.stdout, r.stdout)
+
 # --- устаревшая карта: файл тестов, изменённый после её сборки, идёт всегда (хеши в карте) ---
 Y2 = OK2 + "# правка после сборки карты\n"
 put(os.path.join(al, "tests", "test_y.py"), Y2)

@@ -120,10 +120,31 @@ vitest run»), строка .pantheon-verify из файла ветки (в кл
 env и той же командой засчитывается новому HEAD без прогона — запись той же формы с отметкой by_tree (коммит, чей
 прогон перенесён): rebase без конфликтов, правка сообщения. На тот же коммит запись уже есть — итог без прогона.
 Красный прогон записи не даёт, переносить нечего; записи хука guard (без tree) не переносятся.
+Дозапуск после красного полного набора (metis-0735, rerun_plan; «да» владельца 03.11). Каждый прогон полного набора
+(команда — FULL_TESTS, дерево чистое, HEAD тот же, без таймаута) проход пишет строкой в STATE/outside/full.jsonl:
+  {"v": 1, "time", "rid": id заявки, "repo": [owner/repo], "sha", "tree", "branch": ветка папки или null, "dir",
+   "cmd", "env", "code", "failed": [«плагин/test_x.py»] или null — итог run-tests не разобран (run_failed),
+   у дозапуска ещё "rerun_of", "files", "map"}.
+Красный прогон в журнал шлюза не идёт: там любая запись kind tests — «тесты прошли», поэтому список упавших — здесь.
+Следующая заявка полного набора на той же ветке гонит не весь набор, а `<команда> --only <файлы>`: упавшие в последнем
+полном прогоне ветки и затронутые диффом его коммит → HEAD (`git diff` двух коммитов: предок или после rebase — как
+есть) по карте affected-map.json рядом с раннером; выбор — select установленного run-tests.py, как у --affected. Опора
+— ветка папки, а не кэш autoclose (old_heads): кэш пишет fetch по расписанию, и только что закоммиченного HEAD в нём
+ещё нет; а связь с PR для верности не нужна — дифф считается от коммита опоры, каким бы он ни был. Опора — только
+прогон всего набора (без rerun_of): дозапуск гонял часть файлов, остальные на его коммите не шли, и цепочка
+накапливала бы ошибки карты от звена к звену; от настоящего прогона дифф покрывает всё после него за один шаг.
+Весь набор вместо дозапуска (причина — full_why итога), если: HEAD без ветки; полного прогона ветки нет, он зелёный,
+у него другая команда или env, нет списка упавших (старая запись, прерванный прогон), его коммита нет в клоне; дифф
+задевает файл вне карты или общий (FULL раннера), раннер, карту, bin/heavy, tests/_*.py любого плагина или
+.pantheon-verify; карта не читается или устарела (stale хоть один файл); упавших больше половины; выбор — весь набор;
+run-tests.py в HEAD не знает --only; сбой расчёта. Дозапуск зелёный и строки ok его вывода — ровно его файлы — запись
+tests на HEAD тем же путём append_tests с cmd = FULL_TESTS и полями rerun_of (id заявки опоры), files (прогнанные
+метки), map (sha256 affected-map.json HEAD). Шлюз guard её засчитывает как полный набор (merge_gate.py не менялся).
 Журналы: STATE/outside/runs/<ID>.log (вывод команды) и <ID>.json (итог), STATE/logs/outside.jsonl.
 """
 import contextlib
 import glob
+import hashlib
 import json
 import os
 import re
@@ -876,10 +897,11 @@ def read_records():
     return out
 
 
-def append_tests(repos, sha, cwd, line, window, rid, by_tree=None):
+def append_tests(repos, sha, cwd, line, window, rid, by_tree=None, rerun=None):
     """Строка tests в журнал шлюза — формат записи хука guard (merge_gate.record), by — проход. Сверх него — дерево
     коммита (tree) и скрытые входы прогона (env, run_env): по ним зелёный полный набор переносится на коммит с тем же
-    деревом (tree_record, metis-0732); by_tree — коммит, чей прогон перенесён (запись без своего прогона)."""
+    деревом (tree_record, metis-0732); by_tree — коммит, чей прогон перенесён (запись без своего прогона); rerun —
+    {rerun_of, files, map} зелёного дозапуска после красного полного набора (metis-0735, rerun_plan)."""
     d = os.path.dirname(records_file())
     if os.path.islink(d):
         raise OSError("merge-gate — ссылка")
@@ -893,6 +915,8 @@ def append_tests(repos, sha, cwd, line, window, rid, by_tree=None):
         rec.update(tree=tree, env=run_env(line))
     if by_tree:
         rec["by_tree"] = by_tree
+    if rerun:
+        rec.update(rerun_of=rerun["rerun_of"], files=list(rerun["files"]), map=rerun["map"])
     fd = os.open(records_file(), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         pre = os.fstat(fd).st_mtime
@@ -977,6 +1001,195 @@ def tree_record(rid, d, window, qdir):
     return None
 
 
+# --- дозапуск после красного полного набора (metis-0735) ----------------------------------------------------------
+
+# правка этих файлов меняет сам выбор тестов или их общую опору — дозапуск не годится, весь набор: раннер и карта
+# (их путь — из команды), heavy, общие модули тестов tests/_*.py любого плагина, строка проверки .pantheon-verify
+FORCE_FULL_RE = re.compile(r"(?:^|/)bin/heavy$|(?:^|/)tests/_[^/]*\.py$|^\.pantheon-verify$")
+# строки run-tests.py (report и summary): «ok   плагин/test_x.py · …», «FAIL плагин/test_x.py · …», последняя —
+# «итого: файлов N, ok A, FAIL B…»
+REPORT_RE = re.compile(r"(ok|FAIL)\s+([A-Za-z0-9_.-]+/test_[^\s/]+\.py) · ")
+TOTAL_RE = re.compile(r"итого: файлов (\d+), ok (\d+), FAIL (\d+)\b")
+LOG_MAX = 64 * 1024 * 1024
+_RUNNER = []
+
+
+def full_file():
+    """Журнал прогонов полного набора (metis-0735): пишет только проход, роли и команде под профилем STATE закрыт."""
+    return root("full.jsonl")
+
+
+def read_full():
+    try:
+        fd = os.open(full_file(), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return []
+    out = []
+    with os.fdopen(fd, "rb") as fh:
+        for raw in fh:
+            try:
+                e = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if isinstance(e, dict) and isinstance(e.get("rid"), str) and isinstance(e.get("repo"), list):
+                out.append(e)
+    return out
+
+
+def append_full(entry):
+    d = root()
+    if os.path.islink(d):
+        raise OSError("outside — ссылка")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    fd = os.open(full_file(), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, (json.dumps({"v": 1, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **entry},
+                                 ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def run_failed(text):
+    """Вывод run-tests.py → (метки ok, метки FAIL), отсортированные; None — итог не разобрать. Строки файлов — только
+    до хвостов упавших («===== …»: там вывод самих файлов, и в нём бывают свои ok/FAIL), последняя непустая строка —
+    итог, и числа в нём сходятся со строками: прерванный, убитый по таймауту или чужой вывод даёт None, а не пустой
+    список упавших."""
+    lines = text.splitlines()
+    last = next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
+    m = TOTAL_RE.match(last)
+    if not m:
+        return None
+    n, n_ok, n_fail = (int(x) for x in m.groups())
+    ok, fail = set(), set()
+    for ln in lines:
+        if ln.startswith("===== "):
+            break
+        r = REPORT_RE.match(ln)
+        if r:
+            (ok if r[1] == "ok" else fail).add(r[2])
+    if ok & fail or len(ok) != n_ok or len(fail) != n_fail or n_ok + n_fail != n:
+        return None
+    return sorted(ok), sorted(fail)
+
+
+def log_text(log):
+    try:
+        fd = os.open(log, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return ""
+    with os.fdopen(fd, "rb") as fh:
+        return fh.read(LOG_MAX).decode("utf-8", "replace")
+
+
+def runner_mod():
+    """scripts/run-tests.py установленного плагина (не ветки PR: код прохода вне песочницы — только свой): его select,
+    load_map, stale_tests и collect выбирают файлы дозапуска по карте так же, как --affected."""
+    if not _RUNNER:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_run_tests",
+                                                      os.path.join(P.PLUGIN, "scripts", "run-tests.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _RUNNER.append(mod)
+    return _RUNNER[0]
+
+
+def runner_args(cmd):
+    """Команда полного набора (без heavy) → (путь run-tests.py от корня, [папки плагинов]) или None: дозапуск умеет
+    только run-tests.py с папками и ключами -j/--timeout/--log-dir — без --affected, --base и --only."""
+    try:
+        words = shlex.split(re.sub(r"\s#.*\Z", "", cmd, flags=re.S))
+    except ValueError:
+        return None
+    i = next((k for k, w in enumerate(words) if os.path.basename(w) == "run-tests.py"), None)
+    if i is None:
+        return None
+    rest, dirs = iter(words[i + 1:]), []
+    for w in rest:
+        if w in ("-j", "--jobs", "--timeout", "--log-dir"):
+            if next(rest, None) is None:
+                return None
+        elif w.startswith("-"):
+            return None
+        else:
+            dirs.append(w)
+    rel = [words[i]] + dirs
+    if not dirs or any(os.path.isabs(x) or ".." in x.split("/") for x in rel):
+        return None
+    return os.path.normpath(words[i]), [os.path.normpath(x) for x in dirs]
+
+
+def branch_of(d):
+    return (git(d, "symbolic-ref", "-q", "--short", "HEAD") or "").strip() or None
+
+
+def rerun_plan(d, sha, argv, line, repos):
+    """Дозапуск вместо полного набора (metis-0735) → (план или None, почему весь набор). План — {rerun_of, prev, files,
+    map, ancestor, argv}: argv — команда полного набора с `--only <файлы>`. Опора — последний настоящий полный прогон
+    (не дозапуск) этого репозитория на той же ветке папки из журнала full.jsonl: красный, со списком упавших, с той же
+    командой и env. Файлы — упавшие в нём и затронутые диффом его коммит → HEAD (`git diff` двух коммитов как есть,
+    предок он или нет) по карте affected-map.json рядом с раннером, выбор — select раннера, как у --affected. Весь
+    набор, если дифф задевает файл вне карты или общий (FULL раннера), раннер, карту, heavy, tests/_*.py, .pantheon-verify;
+    карта не читается или устарела (хоть один файл тестов изменён после её сборки); упавших больше половины; дозапуск —
+    весь набор; run-tests.py в HEAD не знает --only."""
+    parsed = runner_args(argv[2]) if argv[:2] == ["/bin/sh", "-c"] and len(argv) == 3 else None
+    if not parsed:
+        return None, "команда полного набора — не run-tests.py с папками плагинов"
+    script, dirs = parsed
+    branch = branch_of(d)
+    if not branch:
+        return None, "HEAD без ветки — прошлый полный прогон не найти"
+    want = {r.lower() for r in repos}
+    prev = next((e for e in reversed(read_full()) if e.get("branch") == branch and not e.get("rerun_of")
+                 and want <= {str(r).lower() for r in e["repo"]}), None)
+    if not prev:
+        return None, f"на ветке {branch} ещё нет полного прогона"
+    pid, psha, failed = prev["rid"], prev.get("sha"), prev.get("failed")
+    if prev.get("code") == 0:
+        return None, f"последний полный прогон ветки ({pid}) зелёный"
+    if prev.get("cmd") != line or prev.get("env") != run_env(line):
+        return None, f"у прошлого полного прогона {pid} другая команда или env"
+    if not isinstance(failed, list) or not failed or not all(isinstance(x, str) for x in failed):
+        return None, f"в прошлом полном прогоне {pid} нет списка упавших файлов"
+    if not (isinstance(psha, str) and SHA_RE.fullmatch(psha)) or git(d, "cat-file", "-e", f"{psha}^{{commit}}") is None:
+        return None, f"коммита прошлого полного прогона {pid} нет в клоне"
+    if "--only" not in (_show(d, sha, script) or ""):
+        return None, f"{script} в HEAD не знает --only"
+    out = git(d, "diff", "--name-only", "--no-renames", "-z", psha, sha, "--")
+    if out is None:
+        return None, f"git diff {psha[:12]}..{sha[:12]} не удался"
+    changed = sorted({x for x in out.split("\0") if x})
+    mp = os.path.join(os.path.dirname(script), "affected-map.json")
+    forced = [x for x in changed if x in (script, mp) or FORCE_FULL_RE.search(x)]
+    if forced:
+        return None, f"дифф задевает {forced[0]}"
+    rt = runner_mod()
+    amap, why = rt.load_map(os.path.join(d, mp))
+    if amap is None:
+        return None, why
+    items = rt.collect([os.path.join(d, x) for x in dirs])
+    stale = rt.stale_tests(items, amap)
+    if stale:
+        return None, f"карта устарела: {len(stale)} файлов тестов изменены после её сборки ({stale[0]})"
+    chosen, unknown, _ = rt.select(changed, d, items, amap)
+    if unknown:
+        return None, f"дифф: {unknown[0][0]} — {unknown[0][1]}"
+    labels = {lb for _, lb in items}
+    if len(failed) * 2 > len(labels):
+        return None, f"упавших в прошлом полном прогоне {len(failed)} из {len(labels)} — больше половины"
+    files = sorted({x for x in failed if x in labels} | {lb for _, lb in chosen})
+    if not files or len(files) >= len(labels):
+        return None, "дозапуск — весь набор" if files else "дозапускать нечего"
+    try:
+        with open(os.path.join(d, mp), "rb") as fh:
+            mhash = hashlib.sha256(fh.read()).hexdigest()
+    except OSError as e:
+        return None, f"карту не прочесть: {e}"
+    return {"rerun_of": pid, "prev": psha, "files": files, "map": mhash,
+            "ancestor": git(d, "merge-base", "--is-ancestor", psha, sha) is not None,
+            "argv": argv[:2] + [argv[2] + " --only " + shlex.quote(",".join(files))]}, None
+
+
 # --- итоги --------------------------------------------------------------------------------------------------------
 
 def save_result(qdir, rid, res):
@@ -1020,15 +1233,28 @@ def run_test(rid, d, script, window, qdir, roots, record=True):
     argv, line = command(d, "test", script)
     if not argv:
         return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "why": line})
-    save_result(qdir, rid, {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d})
+    repos0 = remotes(d) if record else []
+    full = bool(repos0) and any(P.merge_mod().full_tests_record(r, {"cmd": line}) for r in repos0)
+    plan, full_why = None, None
+    if full:   # metis-0735: после красного полного набора — дозапуск упавших и затронутых
+        try:
+            plan, full_why = rerun_plan(d, sha, argv, line, repos0)
+        except Exception as e:   # сбой расчёта — не повод не гонять: весь набор
+            plan, full_why = None, f"дозапуск не рассчитан: {type(e).__name__}: {e}"
+    extra = {"rerun_of": plan["rerun_of"], "files": plan["files"]} if plan else \
+        ({"full_why": full_why} if full_why else {})
+    save_result(qdir, rid, {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d, **extra})
     log, fd = new_log(rid)
     tmp = tempfile.mkdtemp(prefix="outside-")
     code, timed_out = None, False
     try:
         with contextlib.suppress(OSError):
-            os.write(fd, f"$ {line}  (папка {d}, {sha})\n".encode())
+            os.write(fd, (f"$ {line}  (папка {d}, {sha})\n" + (
+                f"дозапуск после красного полного набора {plan['rerun_of']} на {plan['prev'][:12]}: "
+                f"{', '.join(plan['files'])}\n$ {plan['argv'][2]}\n" if plan else "")).encode())
         try:
-            proc = subprocess.Popen(wrap(argv, write_profile(roots)), cwd=d, env=sandbox_env(tmp, "test"),
+            proc = subprocess.Popen(wrap(plan["argv"] if plan else argv, write_profile(roots)), cwd=d,
+                                    env=sandbox_env(tmp, "test"),
                                     stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, start_new_session=True)
         except OSError as e:
             return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line,
@@ -1044,7 +1270,12 @@ def run_test(rid, d, script, window, qdir, roots, record=True):
         shutil.rmtree(tmp, ignore_errors=True)
     sha2, clean2 = head_state(d)
     res = {"state": "done", "kind": "test", "sha": sha, "code": code, "cmd": line, "dir": d, "log": log,
-           "tail": tail(log), "record": False}
+           "tail": tail(log), "record": False, **extra}
+    got = run_failed(log_text(log)) if full else None
+    if plan:
+        res["note"] = (f"дозапуск после красного полного набора {plan['rerun_of']} на {plan['prev'][:12]}: файлов "
+                       f"{len(plan['files'])}" + ("" if plan["ancestor"] else
+                                                   "; прошлый head не предок HEAD — дифф двух коммитов как есть"))
     if timed_out:
         res["why"] = f"тесты дольше {TEST_TIMEOUT} с — остановлены"
     elif sha2 != sha or not clean2:
@@ -1057,13 +1288,27 @@ def run_test(rid, d, script, window, qdir, roots, record=True):
             res["why"] = f"команда «{line}» ничего не проверяет — записи tests нет"
         elif not repos:
             res["why"] = "у репозитория нет remote — записи tests нет"
+        elif plan and (not got or got[1] or got[0] != plan["files"]):
+            res["why"] = (f"дозапуск: вывод run-tests не сошёлся со списком файлов ({len(plan['files'])}) — "
+                          "записи tests нет")
         else:
             try:
-                append_tests(repos, sha, d, line, window, rid)
+                append_tests(repos, sha, d, line, window, rid, rerun=plan)
                 res["record"] = True
             except OSError as e:
                 res["why"] = f"запись tests не сделана: {e}"
-    log_event(id=rid, kind="test", window=window, dir=d, sha=sha, code=code, record=res["record"])
+    if full and not timed_out and sha2 == sha and clean2:
+        # журнал полных прогонов: опора следующего дозапуска (только запись без rerun_of) и след самих дозапусков
+        entry = {"rid": rid, "repo": repos0, "sha": sha, "tree": tree_of(d, sha), "branch": branch_of(d), "dir": d,
+                 "cmd": line, "env": run_env(line), "code": code, "failed": got[1] if got else None}
+        if plan:
+            entry.update(rerun_of=plan["rerun_of"], files=plan["files"], map=plan["map"])
+        try:
+            append_full(entry)
+        except OSError as e:
+            res["note"] = (res.get("note", "") + "; " if res.get("note") else "") + f"журнал full.jsonl: {e}"
+    log_event(id=rid, kind="test", window=window, dir=d, sha=sha, code=code, record=res["record"],
+              **({"rerun_of": plan["rerun_of"]} if plan else {}))
     return save_result(qdir, rid, res)
 
 
@@ -2503,6 +2748,10 @@ def show(res):
               + (f", приложение {res['app']}" if res.get("app") else ""))
     if res.get("url"):
         print(f"адрес: {res['url']} до {res.get('until')} (погасить раньше: pantheon outside stop {res['id']})")
+    if res.get("rerun_of"):
+        print(f"дозапуск после красного полного набора {res['rerun_of']}: {', '.join(res.get('files') or [])}")
+    if res.get("full_why"):
+        print(f"полный набор, а не дозапуск: {res['full_why']}")
     if res.get("record"):
         print("запись tests для шлюза слияния сделана")
     if res.get("why"):
