@@ -3187,6 +3187,66 @@ def test_autostart_skip_not_failure_0708():
     check("самозапуск bb-dir ждёт: нет места" in e3.alerts(), f"0708: нет тревоги «нет места»: {e3.alerts()}")
 
 
+def _next_agents(e, lst):
+    """FAKE_AGENTS_NEXT: свежий claude agents под блокировкой имени (повторная проверка) видит lst."""
+    p = os.path.join(e.tmp, "agents-next.json")
+    json.dump(lst, open(p, "w"))
+    if os.path.exists(p + ".seen"):
+        os.remove(p + ".seen")
+    return {"FAKE_AGENTS_NEXT": p}
+
+
+def _resumed(e, sid):
+    """Сессию sid продолжили: claude respawn или --resume."""
+    return any(c[:2] == ["respawn", sid[:8]] or ("--resume" in c and sid in c) for c in e.calls())
+
+
+def test_skip_not_failure_other_paths_0708():
+    """metis-0708, находка: пропуск под блокировкой имени (SKIPPED, код 4) — не сбой и в трёх других путях подъёма.
+    Разовый запуск: не «не вышло, код 4» и без уведомления «не вышел» — запись снова ждёт до срока и идёт, когда окно
+    освободилось. Продолжение после паузы: не «не поднялась, код 4». Запуск по ответу владельца: не «не вышло, код 4»."""
+    # разовый запуск: остановленную сессию к подъёму сменила новая (повторная проверка — resume-skip)
+    e, oid = _oneshot_env()
+    e.agents([bg("athena-a", "stopped", "5ee70010-1")])
+    held = [bg("athena-a", "stopped", "5ee70010-1"), bg("athena-a", "working", "5ee70011-1", pid=48)]
+    e.run("watch", t=T0 + 660, extra=_next_agents(e, held))
+    rec = _oneshot_rec(e, oid)
+    check(not respawns(e) and not _resumed(e, "5ee70010-1") and "не вышло, код 4" not in e.alerts() and f"разовый запуск {oid} ждёт: пропуск" in e.alerts(),
+          f"0708: разовый запуск — пропуск засчитан сбоем: {e.calls()} {e.alerts()}")
+    check(not rec.get("done_at") and "пропуск" in str(rec.get("wait")),
+          f"0708: разовый запуск после пропуска погашен: {rec}")
+    check("не вышел" not in e.sent() and f"oneshot-{oid}" not in e.queued(),
+          f"0708: уведомление «не вышел» о пропуске: {e.sent()!r} {e.queued()}")
+    e.run("watch", t=T0 + 720)                                 # окно свободно — запись исполняется
+    check(_resumed(e, "5ee70010-1") and _oneshot_rec(e, oid).get("done_at"),
+          f"0708: разовый запуск после пропуска не пошёл: {e.calls()} {_oneshot_rec(e, oid)}")
+    # продолжение после паузы: остановленную паузой сессию к подъёму сменила новая
+    e2 = Env()
+    e2.direction("p1-dir")
+    e2.agents([bg("p1-dir", "working", "5ee70020-1", pid=41)])
+    e2.run("pause", "p1-dir", "--reason", "limit", "лимит 80", t=T0)
+    e2.agents([bg("p1-dir", "stopped", "5ee70020-1")])
+    nxt = _next_agents(e2, [bg("p1-dir", "stopped", "5ee70020-1"), bg("p1-dir", "working", "5ee70021-1", pid=42)])
+    e2.run("watch", t=T0 + 120, extra={"PANTHEON_FAKE_LIMIT": "20", **nxt})
+    check(not any("5ee70020-1" in c for c in e2.calls() if "--resume" in c)
+          and not os.path.exists(e2.st("pauses", "p1-dir.json")),
+          f"0708: после паузы поднята остановленная, хотя имя держат: {e2.calls()}")
+    check("не поднялась, код 4" not in e2.alerts() and "p1-dir после паузы: пропуск" in e2.alerts(),
+          f"0708: пропуск после паузы — ложная тревога: {e2.alerts()}")
+    # запуск по ответу владельца: окно поднял другой процесс между снимком и блокировкой
+    e3 = Env()
+    e3.direction("wl-dir")
+    e3.agents([bg("wl-dir", "stopped", "5ee70030-1")])
+    e3.run("watch", t=T0)
+    _zeus_answer(e3, T0 + 30, "[metis-0523] Запустить wl-dir?", "Да — запустить wl-dir")
+    e3.run("watch", t=T0 + 60, extra=_next_agents(e3, [bg("wl-dir", "stopped", "5ee70030-1"),
+                                                         bg("wl-dir", "working", "5ee70031-1", pid=43)]))
+    wl = [r for r in _start_rows(e3) if r[1:2] == ["word-launch"]]
+    check(not _bgs(e3, "wl-dir") and not _resumed(e3, "5ee70030-1") and wl and wl[-1][-1].startswith("пропуск"),
+          f"0708: запуск по ответу — пропуск не записан: {e3.calls()} {wl}")
+    check("не вышло, код 4" not in e3.alerts(), f"0708: запуск по ответу — ложная тревога: {e3.alerts()}")
+
+
 def test_autostart_nudge_week_limit_0212():
     """metis-0212, ревью argus-43: передача задания простаивающей сессии — новое дело и ждёт недельный лимит, как
     новый запуск (gate «autostart»): жёлтая зона днём, красная, снимок старше 30 мин — ни respawn, ни новой сессии,
