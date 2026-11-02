@@ -71,6 +71,10 @@ STATE/outside/queue. Имя окна проход берёт из места п�
      Во время копии, установки и ожидания порта сторож продолжает смотреть серверы, «стоп» своей заявки прерывает.
   3. «Стоп» без живого сервера и заявки старше минуты — убирается.
   `outside run` (замок outside-run) — тесты:
+  -1. Сторож (watchdog, до замка, metis-0723; тик будит и его): running дольше WATCH_RUNNING (TEST_TIMEOUT + 30 мин)
+     при живом заходе — заход (SIGKILL) и его группы процессов гаснут, итог failed «сторож: дольше N мин — снято»,
+     тревога; держателя замка не определить — только тревога. queued с лежащей .req.json дольше WATCH_QUEUED (4 ч) —
+     одна тревога на заявку (метка runs/<ID>.alerted), без снятия. outside status показывает итог.
   0. На старте итоги test: queued без .req.json старше 5 мин — failed «заявка потеряна»; running, записанный самим
      заходом в STATE/outside/runs, — failed «заход прерван» (захода под замком больше нет; итог — минимальный объект,
      подложенное окном не копируется; metis-0716). Порядок заявок — по времени из id, по кругу между окнами.
@@ -1978,7 +1982,7 @@ def _zombies(t=None):
 
 def pending_test():
     """Тику: дело проходу тестов — заявки test (и битые), новые записи шлюза, старые итоги."""
-    return bool(_queued_ids(("test",))) or auto_due() or bool(_stale()) or bool(_zombies())
+    return bool(_queued_ids(("test",))) or auto_due() or bool(_stale()) or bool(_zombies()) or bool(_watch_due())
 
 
 def pending_serve():
@@ -2088,10 +2092,118 @@ def recover_results(t=None):
     return n
 
 
+WATCH_RUNNING = TEST_TIMEOUT + 1800   # с: running дольше — заход завис; не меньше предела прогона TEST_TIMEOUT (metis-0723)
+WATCH_QUEUED = 4 * 3600               # с: queued с лежащей заявкой дольше — очередь стоит, тревога без снятия (metis-0723)
+
+
+def _run_holder():
+    """Номер процесса, держащего замок outside-run (lsof по файлу замка); нет или не определить → None."""
+    try:
+        out = subprocess.run([LSOF, "-t", P.path("locks", "outside-run.lock")], capture_output=True, text=True,
+                             timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    pids = [int(x) for x in out.split() if x.isdigit() and int(x) != os.getpid()]
+    return pids[0] if len(pids) == 1 else None
+
+
+def _mark(rid):
+    """Метка runs/<ID>.alerted: тревога о заявке уже была. → True, если метку поставили сейчас (первая тревога)."""
+    os.makedirs(root("runs"), mode=0o700, exist_ok=True)
+    try:
+        os.close(os.open(root("runs", rid + ".alerted"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+    except OSError:
+        return False
+    return True
+
+
+def _watch_due(t=None):
+    """[(вид, папка заявок, id)] того, что сторож должен разобрать: running теста в runs/ старше WATCH_RUNNING (по mtime
+    записи захода) и queued с лежащей .req.json старше WATCH_QUEUED, о котором ещё не было тревоги."""
+    t = P.now() if t is None else t
+    out = []
+    runs = root("runs")
+    for name in os.listdir(runs) if os.path.isdir(runs) else ():
+        rid = name[:-len(".json")]
+        if not name.endswith(".json") or not ID_RE.fullmatch(rid):
+            continue
+        res = P.read_json(os.path.join(runs, name), {})
+        try:
+            old = t - os.lstat(os.path.join(runs, name)).st_mtime > WATCH_RUNNING
+        except OSError:
+            continue
+        if (old and isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "running"
+                and not os.path.lexists(root("runs", rid + ".alerted"))):
+            out.append(("running", res.get("qdir"), rid))
+    for qdir, _ in queue_dirs():
+        dfd = _open_dir(qdir)
+        if dfd is None:
+            continue
+        try:
+            names = os.listdir(dfd)
+            for name in names:
+                rid = name[:-len(".result.json")]
+                if not name.endswith(".result.json") or not ID_RE.fullmatch(rid) or rid + ".req.json" not in names:
+                    continue
+                if os.path.lexists(root("runs", rid + ".alerted")):
+                    continue
+                res = _parse(_read_in(dfd, name, 1024 * 1024))
+                try:
+                    old = t - os.lstat(name, dir_fd=dfd).st_mtime > WATCH_QUEUED
+                except OSError:
+                    continue
+                if old and isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "queued":
+                    out.append(("queued", qdir, rid))
+        finally:
+            os.close(dfd)
+    return out
+
+
+def watchdog(t=None):
+    """Сторож заявок test (metis-0723); зовётся до замка, чтобы видеть и живой заход. running дольше WATCH_RUNNING при
+    живом заходе: заход (SIGKILL — итога за собой он не запишет) и его группы процессов гаснут, итог failed «сторож:
+    дольше N»; замок держит не определить — только тревога. queued с лежащей заявкой дольше WATCH_QUEUED: одна тревога
+    на заявку (метка runs/<ID>.alerted), без снятия. Захода нет — running чинит recover_results. → число."""
+    t = P.now() if t is None else t
+    n = 0
+    for kind, qdir, rid in _watch_due(t):
+        if kind == "queued":
+            why = f"сторож: заявка в очереди дольше {WATCH_QUEUED // 3600} ч, очередь стоит"
+            if _mark(rid):
+                P.alert(f"outside {rid}: {why} (pantheon outside status {rid})", who="outside")
+                log_event(id=rid, kind="watchdog", why=why)
+                n += 1
+            continue
+        if not P.locked("outside-run"):
+            continue                # захода нет — recover_results
+        holder = _run_holder()
+        if holder is None:
+            if _mark(rid):
+                P.alert(f"outside {rid}: running дольше {WATCH_RUNNING // 60} мин, заход не определить — снять "
+                        f"вручную", who="outside")
+            continue
+        why = f"сторож: дольше {WATCH_RUNNING // 60} мин — снято"
+        table = ps_table()
+        kids = [p for p, (pp, g, _r) in table.items() if pp == holder and g == p]
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(holder, signal.SIGKILL)
+        for k in kids:
+            kill_group(k)
+        qdirs = {q for q, _ in queue_dirs()}
+        targets = [qdir] if qdir in qdirs else [q for q in sorted(qdirs) if _result_running(q, rid)]
+        for q in targets or [None]:
+            save_result(q, rid, {"kind": "test", "state": "failed", "why": why})
+        log_event(id=rid, kind="watchdog", why=why)
+        P.alert(f"outside {rid}: {why}", who="outside")
+        n += 1
+    return n
+
+
 def cmd_run():
     """Проход тестов (замок outside-run): серверы не смотрит — их ведёт свой проход (metis-0614)."""
     if _in_claude():
         return 2
+    watchdog()      # до замка: живой заход с зависшим running виден только отсюда (metis-0723)
     with P.lock("outside-run", block=False) as got:
         if not got:
             return 0
