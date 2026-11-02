@@ -160,16 +160,16 @@ def main():
         # ссылка на месте папки очереди: heavy идёт и вне песочницы — в цели ничего не трогает
         victim = os.path.join(tmp, "victim")
         os.makedirs(victim)
-        for n, data in ((".env", "SECRET=1\n"), ("00000000000000000000-1", "1\n")):
+        for n, data in (("secret.txt", "SECRET=1\n"), ("00000000000000000000-1", "1\n")):
             with open(os.path.join(victim, n), "w") as f:
                 f.write(data)
         os.symlink(victim, qdir)
         r = run(state, "/bin/sh", "-c", "echo ran", wait_max=5)
         check("ссылка на месте папки очереди: команда выполнилась", r.returncode == 0 and "ran" in r.stdout,
               f"{r.returncode} {r.stderr!r}")
-        check("ссылка на папку: файлы цели целы, .env на месте",
-              sorted(os.listdir(victim)) == [".env", "00000000000000000000-1"]
-              and open(os.path.join(victim, ".env")).read() == "SECRET=1\n", str(sorted(os.listdir(victim))))
+        check("ссылка на папку: файлы цели целы, secret.txt на месте",
+              sorted(os.listdir(victim)) == ["00000000000000000000-1", "secret.txt"]
+              and open(os.path.join(victim, "secret.txt")).read() == "SECRET=1\n", str(sorted(os.listdir(victim))))
         t = H.Ticket()
         check("Ticket по ссылке на папку: билета нет", t.fd is None and not t.ahead())
         t.drop()
