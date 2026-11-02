@@ -535,13 +535,28 @@ def test_close_criteria():
         pf = put(home, "metis-pantheon", "metis-0015", body=two, created="2026-10-26")
         T.task_set(home, T0, "metis-0015", {"status": "done"})
         check("задача от 26.10 закрывается вручную без --force", T.read(pf)[0].get("status") == "done")
-        put(home, "metis-pantheon", "metis-0016", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n", created="2026-10-27")
+        p16 = put(home, "metis-pantheon", "metis-0016", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n", created="2026-10-27")
         try:
             T.task_set(home, T0, "metis-0016", {"status": "done"})
             err = ""
         except ValueError as e:
             err = str(e)
-        check("заглушка-подсказка — неотмеченный пункт", "неотмечено 1" in err, err)
+        check("заглушка-подсказка одна — не пункт, ручной done проходит (metis-0712)", err == "" and T.read(p16)[0].get("status") == "done", err)
+        p16b = put(home, "metis-pantheon", "metis-0020", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n- [ ] настоящий\n", created="2026-10-27")
+        try:
+            T.task_set(home, T0, "metis-0020", {"status": "done"})
+            err = ""
+        except ValueError as e:
+            err = str(e)
+        check("заглушка рядом с настоящим пунктом: «неотмечено 1» без заглушки", "неотмечено 1 " in err, err)
+        p16c = put(home, "metis-pantheon", "metis-0021", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + " ещё\n", created="2026-10-27")
+        check("похожий, но не дословный текст — пункт", T.unchecked_criteria(*T.read(p16c)) == 1)
+        pq = put(home, "metis-pantheon", "metis-0022", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n", created="2026-10-27")
+        pr2 = put(home, "metis-pantheon", "metis-0023", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n- [ ] настоящий\n", created="2026-10-27")
+        run_cache(home, state, T0, {"latark/agent-kit": [cpr(11, "metis-0022-x", "", T0 - 3600), cpr(12, "metis-0023-x", "", T0 - 3600)]})
+        check("слитый PR, только заглушка → done (metis-0712)", T.read(pq)[0].get("status") == "done", text(pq)[-300:])
+        check("слитый PR, заглушка + настоящий → review «неотмечено 1»", T.read(pr2)[0].get("status") == "review"
+              and "слит, неотмечено 1" in text(pr2), text(pr2)[-300:])
         # остаток: task split пишет result, по нему done проходит без --force
         ph = put(home, "metis-pantheon", "metis-0017", body=two, created="2026-10-27")
         nid, _ = T.task_split(home, T0, "metis-0017", "Второе")
