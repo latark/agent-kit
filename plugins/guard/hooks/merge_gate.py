@@ -73,6 +73,8 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    такую), остальные обязательные — SUCCESS: вместо CI засчитывается запись tests на этот SHA с командой полного
    набора FULL_TESTS (_billing_problem, full_tests_record) — пропуск со строкой systemMessage, без записи — отказ с
    командой, у репозитория без FULL_TESTS — отказ.
+Записи tests нет — отказ называет узкую команду репозитория из NARROW_TESTS (metis-0666): `--affected`
+run-tests.py в своей worktree без heavy; на основном пути она засчитывается, как любая непустая запись.
 Модель argus guard берёт из его транскрипта, а не только со слов ran (metis-0176): Claude Code не передаёт путь к
 транскрипту субагента в PreToolUse/PostToolUse (agent_transcript_path — только в SubagentStop), он выводится из входа
 хука — transcript_path, session_id, agent_id — по раскладке Claude Code. Это защита от ошибки шаблона и от запуска
@@ -1263,6 +1265,20 @@ CI_JOBS_API = "repos/{repo}/actions/jobs/{id}"
 FULL_TESTS = {"agent-kit": ("heavy python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard "
                             "plugins/pantheon plugins/project-tools")}
 
+# узкая запись тестов исполнителя (metis-0666, решение владельца 02.11): затронутые PR файлы тестов (--affected,
+# карта affected-map) в своей worktree, без очереди heavy — команда для подсказки в отказе «нет записи тестов».
+# Основной путь (CI зелёный) засчитывает любую непустую запись tests на SHA, эту тоже; запасной (CI без минут) — только
+# FULL_TESTS. Не в зеркале lib/merge.py: подсказка, а не правило
+NARROW_TESTS = {"agent-kit": ("python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 --affected --base origin/main "
+                              "plugins/guard plugins/pantheon plugins/project-tools")}
+
+
+def narrow_hint(repo):
+    """Строка отказа «нет записи тестов» с узкой командой репозитория из NARROW_TESTS; нет строки — пусто."""
+    cmd = NARROW_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower())
+    return (f" Узкая запись (затронутые тесты, своя worktree, без heavy): `pantheon review test -- {cmd}`." if cmd
+            else "")
+
 
 def required_checks(repo, base):
     """Обязательные (workflow, job) для PR в repo (owner/name) с веткой base; base не строка — все записи."""
@@ -1964,7 +1980,7 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                 f"записи не сверить. {MERGE_OWNER}")
     if not any(r["kind"] == "tests" and r["sha"] == sha and repo in [x.lower() for x in r["repo"]] for r in records):
         return (f"нет записи тестов на {repo}@{sha[:12]}: в чистом дереве на этом коммите запусти "
-                f"`pantheon review test -- <команда тестов>` (запишет хук guard). Тесты долгие: запускай "
+                f"`pantheon review test -- <команда тестов>` (запишет хук guard).{narrow_hint(repo)} Тесты долгие: запускай "
                 f"`pantheon review test` не в фоне, с timeout до 600000 мс (у Bash по умолчанию 120 с). Тестам нужен "
                 f"порт или сокет, которых в окне нет, — `pantheon outside test --wait 590` в той же копии (запись "
                 f"tests сделает плановый проход; dev-сервер — `pantheon outside serve --wait 120`). {advice}")
