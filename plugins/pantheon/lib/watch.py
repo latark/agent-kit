@@ -77,6 +77,7 @@ STALE_STATUS_DAYS = 2        # STATUS.md направления с задаче�
 AUTO_RM_AFTER = 2 * 3600     # уборка (metis-0250): закончила ход или остановлена дольше — claude rm
 AUTO_RM_RETRY = 86400        # rm отказал (неотправленная работа в worktree) — следующая попытка через сутки
 STATUS_MAX_LINES = 200       # STATUS.md длиннее — тревога (STATE-14)
+STALE_NOW_HOURS = 6          # раздел «Сейчас» в STATUS.md окна, у которого были ходы, старше — тревога и напоминание (metis-0707)
 SWAP_ALERT_GB = 4.0          # swap выше — тревога с открытыми подключениями (COMM-13); `pantheon status` — тот же порог
 SWAP_KEEP_DAYS = 15          # замеры swap: R-two-directions смотрит «две недели ниже порога»
 WORKTREE_DAYS = 3            # копия .claude/worktrees/* без живой сессии дольше — «забытая», тревога координатору
@@ -104,6 +105,11 @@ RESPAWN_IDLE_MIN = 15        # перезапуск после обновлен�
                              # и worktree окна — окно свободно (лид может ждать тесты; metis-0181)
 UNPAUSE_TEXT = ("[Пантеон: пауза по нагрузке снята] Тебя останавливали из-за лимита или памяти. Прочитай STATUS.md и "
                 "продолжай со следующего шага. Это не ответ владельца и не согласие.")
+STALE_NOW_TEXT = ("[Пантеон: «Сейчас» в STATUS.md устарел] Раздел «Сейчас» в STATUS.md направления не обновлялся "
+                  "больше {hours} ч, а ты работаешь. Обнови его по фактам (слитые PR, закрытые и взятые задачи) и "
+                  "продолжай. Это не ответ владельца и не согласие.")
+NOW_HEAD = re.compile(r"^##[ \t]+Сейчас\b(.*)$", re.M)
+NOW_STAMP = re.compile(r"\(\s*(\d{1,2})\.(\d{1,2})\s+(\d{1,2}):(\d)([\dxXхХ]|\d)\s*\)")
 
 
 def defaults():
@@ -289,7 +295,7 @@ def _watch(dry=False):
     checks = [("снимок", lambda: snapshot(agents, t)),
               ("метка перезапуска", lambda: maint_expire(t)),
               ("сессии", lambda: sessions(agents, doms, t)),
-              ("STATUS.md", lambda: status_files(doms, t)),
+              ("STATUS.md", lambda: status_files(doms, t, agents, reg)),
               ("swap", lambda: swap(agents, t)),
               ("виновники памяти", lambda: P.culprits_mod().watch_check(agents, t)),
               ("worktree", lambda: worktrees(agents, reg, doms, t)),
@@ -619,9 +625,84 @@ def hestia_reap(agents, t):
                         "claude --resume", "watch")
 
 
-def status_files(doms, t):
+def now_section_time(text, mtime, t):
+    """Когда обновлён раздел «Сейчас» STATUS.md (metis-0707): время из заголовка «## Сейчас (ДД.ММ ЧЧ:ММ)» (минуты
+    «Мx» — последняя из возможных, чтобы не тревожить зря); заголовок есть, а даты в нём нет — mtime файла; раздела
+    нет — None (нечего считать устаревшим). Год — текущий, дата из будущего — прошлого года."""
+    m = NOW_HEAD.search(text)
+    if not m:
+        return None
+    d = NOW_STAMP.search(m.group(1))
+    if not d:
+        return mtime
+    day, mon, hh, m10, m1 = d.groups()
+    mm = int(m10) * 10 + (int(m1) if m1.isdigit() else 9)
+    now = datetime.fromtimestamp(t)
+    try:
+        stamp = datetime(now.year, int(mon), int(day), int(hh), mm)
+        if stamp.timestamp() > t + 86400:
+            stamp = stamp.replace(year=now.year - 1)
+    except ValueError:
+        return mtime  # дата не календарная — как заголовок без даты
+    return stamp.timestamp()
+
+
+def window_turned_since(name, agents, registry, since):
+    """У окна name были ходы после since: транскрипт (иначе updatedAt из state.json) любого держателя имени новее."""
+    for a in holders(name, agents, registry):
+        if not a.get("sessionId"):
+            continue
+        last = None
+        tp = P.transcript_path(a)
+        if tp:
+            with contextlib.suppress(OSError):
+                last = os.path.getmtime(tp)
+        if last is None:
+            last = awake().parse_time(awake().session_state(a).get("updatedAt"))
+        if last is not None and last >= since:
+            return True
+    return False
+
+
+def stale_now(name, text, mtime, agents, registry, t):
+    """Раздел «Сейчас» окна, которое работает, старше STALE_NOW_HOURS (metis-0707): тревога один раз на заголовок и
+    сутки и напоминание роли (STALE_NOW_TEXT) — простаивающей живой сессии, тоже раз на заголовок и сутки; работающей
+    или ждущей вас напоминание не шлём: тревога есть. Окно без ходов за срок и обновлённый «Сейчас» — отметки снимаем."""
+    key, push = f"watch-now-{name}", f"watch-now-push-{name}"
+    stamp = now_section_time(text, mtime, t)
+    limit = STALE_NOW_HOURS * 3600
+    if stamp is None or t - stamp <= limit or not window_turned_since(name, agents, registry, t - limit):
+        P.clear_once(key)
+        P.clear_once(push)
+        return
+    head = NOW_HEAD.search(text).group(0).strip()
+    value = f"{today(t)}-{head}"
+    hours = (t - stamp) / 3600
+    P.alert_once(key, value, f"STATUS.md {name}: раздел «Сейчас» не обновлялся {hours:.0f} ч ({head}), а окно работает "
+                 "— обновить по фактам", "watch")
+    hold = holders(name, agents, registry)
+    poke = nudge_target(hold)
+    try:
+        if poke is None or open(P.once_path(push)).read() == value:
+            return
+    except OSError:
+        if poke is None:
+            return
+    if recheck(name, True, nudge=True)():
+        return  # будить сейчас нельзя (пауза, лимит, не главный Mac) — напомним в следующем проходе
+    rc = P.resume_session(name, poke, STALE_NOW_TEXT.format(hours=STALE_NOW_HOURS), "stale-now",
+                          recheck=recheck(name, True, nudge=True))[0]
+    if rc == 0:
+        os.makedirs(P.path("once"), exist_ok=True)
+        open(P.once_path(push), "w").write(value)
+    elif rc not in (P.NO_WINDOW, P.SKIPPED):
+        P.alert(f"STATUS.md {name}: напоминание про «Сейчас» не доставлено (код {rc})", "watch")
+
+
+def status_files(doms, t, agents=(), registry=()):
     """STATUS.md направления: с задачей «В работе» давно не обновлялся — состояние могло потеряться; длиннее 200 строк
-    — координатору перенести закрытое в archive/ (STATE-14)."""
+    — координатору перенести закрытое в archive/ (STATE-14); «Сейчас» старше STALE_NOW_HOURS у работающего окна —
+    тревога и напоминание роли (metis-0707)."""
     doing = set()
     with contextlib.suppress(Exception):
         doing = {h.get("direction") for _, h, _ in P.tasks_mod().load_tasks(P.PANTHEON).values()
@@ -630,9 +711,11 @@ def status_files(doms, t):
         p = os.path.join(P.PANTHEON, "directions", name, "STATUS.md")
         try:
             st = os.stat(p)
-            n = sum(1 for _ in open(p, encoding="utf-8", errors="replace"))
+            text = open(p, encoding="utf-8", errors="replace").read()
+            n = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
         except OSError:
             continue
+        stale_now(name, text, st.st_mtime, agents, registry, t)
         age = (t - st.st_mtime) / 86400
         if name in doing and age > STALE_STATUS_DAYS:
             P.alert_once(f"watch-status-{name}", today(t),
