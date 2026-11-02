@@ -3864,7 +3864,7 @@ def test_ghost_question_and_noprocess_0662():
 
 def test_registry_stale_record_249():
     """Ревью argus #249. Д1: запись реестра имён с тем же sessionId, но не того процесса — файл назван другим pid
-    (pid 1 жив всегда) или время старта процесса не совпало с procStart или ps не дал ответа (metis-0679) — призрака не прячет; совпало —
+    (pid 1 жив всегда) или время старта процесса не совпало с procStart — призрака не прячет; ps не дал ответа (metis-0679/0690) — «не знаю»: призрака не утверждаем, живого не гасим; совпало —
     прячет; то же для записи по jobId. Д2: мёртвая blocked-запись без вопроса при живой тёзке с другим sessionId — noProcess, без
     тревоги «ждёт вас». С2: pid 0 в реестре — не живой."""
     import json as _j
@@ -3886,7 +3886,7 @@ def test_registry_stale_record_249():
         (0, 0, None, None, True),                                             # pid 0 — группа, не процесс
         (me, me, "Mon Jan  1 00:00:00 2024", "Sun Nov  1 14:23:55 2026", True),  # pid занят другим процессом
         (me, me, "Sun Nov  1 14:23:55 2026", "Sun Nov  1 14:23:55 2026", False),  # тот самый процесс
-        (me, me, "Sun Nov  1 14:23:55 2026", "", True),                       # ps не ответил — не доказано (metis-0679)
+        (me, me, "Sun Nov  1 14:23:55 2026", "", False),                      # ps не ответил — «не знаю», не призрак (metis-0690)
         (me, me, None, "", False),                                            # procStart в записи нет — сверять нечего
     )
     for fname, pid, proc, ps_out, ghost in cases:
@@ -3909,11 +3909,11 @@ def test_registry_stale_record_249():
         got = "процесс умер" in e.alerts()
         check(got == ghost, f"Б1 jobId {job}: призрак {got}, а надо {ghost}: {e.alerts()[-300:]}")
     # metis-0679 (argus-249a Д1): тот же отбор для записи по jobId при чужом sessionId — файл не назван pid, procStart
-    # не тот, ps не ответил (в песочнице окна) — призрак; тот самый процесс — не призрак
+    # не тот, ps не ответил (в песочнице окна) — не призрак (metis-0690); тот самый процесс — не призрак
     same = "Sun Nov  1 14:23:55 2026"
     for fname, proc, ps_out, ghost in ((4242, None, None, True),
                                        (me, "Mon Jan  1 00:00:00 2024", same, True),
-                                       (me, same, "", True),
+                                       (me, same, "", False),  # ps недоступен — не призрак (metis-0690)
                                        (me, same, same, False)):
         e = _ghost_env("zz-rj", updated=T0 - 1000)
         e.agents([bg("zz-rj", "working", "cccccccc-1")])
