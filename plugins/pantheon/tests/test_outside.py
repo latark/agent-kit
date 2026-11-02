@@ -463,6 +463,10 @@ check("профиль: ~/.npmrc, ~/.netrc закрыты на чтение",
 HEAD_NOTE = "python3 t.py  # .pantheon-verify ветки (HEAD)"
 check("команда: строка .pantheon-verify без heavy, из ветки — с пометкой",
       O.command(os.path.realpath(APP), "test") == (["/bin/sh", "-c", "python3 t.py"], HEAD_NOTE))
+# metis-0653: строка `dev:` — только для исполнителя; outside берёт первую некомментарную строку
+commit(OTHER, {".pantheon-verify": "# полный\npython3 t.py\ndev: python3 narrow.py\n"}, "o2 dev-строка")
+check("команда: строка `dev:` .pantheon-verify outside не берёт — первая некомментарная",
+      O.command(os.path.realpath(OTHER), "test")[0] == ["/bin/sh", "-c", "python3 t.py"])
 check("команда: --script из package.json", O.command(os.path.realpath(APP), "test", "lint")[1] == "npm run lint")
 check("команда: скрипта нет — отказ", O.command(os.path.realpath(APP), "test", "nope")[0] is None)
 check("команда: сервер без скрипта dev — отказ", O.command(os.path.realpath(OTHER), "serve")[0] is None)

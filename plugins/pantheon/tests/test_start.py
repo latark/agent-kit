@@ -1342,6 +1342,25 @@ def main():
     transcript(("Edit", {"file_path": "a.txt"}, False), ("Bash", {"command": "pantheon outside test --wait 590"}, True))
     r = stop("dev-6")
     check("dev-stop: `pantheon outside test` красный или без итога (75) — выход 2", r.returncode == 2 and "красный" in r.stderr)
+    # metis-0653: строка `dev:` в точке ответвления — узкая проверка исполнителя вместо первой строки
+    open(os.path.join(repo, ".pantheon-verify"), "w").write("# проверка\npnpm test\ndev: pnpm test:narrow\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "dev-строка")
+    git("branch", "-f", "worktree-agent-2", "HEAD")
+    wt_old = wt
+    wt = os.path.join(tmp, "projects", "br", "wt-dev2")
+    git("worktree", "add", "-q", wt, "worktree-agent-2")
+    open(os.path.join(wt, "b.txt"), "w").write("x")
+    git("add", "-A", cwd=wt)
+    git("commit", "-q", "-m", "dev2", cwd=wt)
+    transcript(("Edit", {"file_path": "b.txt"}, False), ("Bash", {"command": "heavy pnpm test"}, False))
+    r = stop("dev-7")
+    check("dev-stop: есть строка `dev:` — полный набор (первая строка) прогоном не считается, ждёт узкую",
+          r.returncode == 2 and "heavy pnpm test:narrow" in r.stderr)
+    transcript(("Edit", {"file_path": "b.txt"}, False), ("Bash", {"command": "heavy pnpm test:narrow"}, False))
+    r = stop("dev-8")
+    check("dev-stop: прогон команды из строки `dev:` — отпускает", r.returncode == 0 and not r.stderr)
+    wt = wt_old
     for i, c in enumerate(("pantheon outside test", "pantheon outside test --wait 0",
                            "pantheon outside test --script lint --wait 590", "pantheon outside serve --wait 120",
                            "pantheon outside status 20261028-010101-abcdef")):

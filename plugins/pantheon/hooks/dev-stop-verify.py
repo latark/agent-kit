@@ -14,7 +14,8 @@ SubagentStop). Основа — stop-verify.sh одного из проекто�
 итога не дождался (красный).
 
 Какая проверка — по версии файлов в точке, от которой ответвилась ветка разработчика (не по его правкам):
-  1. первая строка .pantheon-verify в корне репозитория (её кладёт лид или координатор);
+  1. строка `dev: <команда>` .pantheon-verify в корне репозитория (узкая проверка исполнителя), иначе его первая
+     строка (её кладёт лид или координатор; это полный набор для записи шлюза);
   2. иначе скрипт test, а без него check из package.json — менеджером из packageManager или lock-файла;
   3. иначе pytest, если в pyproject.toml есть [tool.pytest] (через uv, если есть uv.lock).
 Нечем проверить или правок нет — не держит. Иначе — выход 2 с тем, что запустить; не больше трёх возвратов подряд
@@ -67,7 +68,11 @@ def verify_commands(root, base):
     """→ (как назвать, [варианты строки команды]) по файлам из точки ответвления base."""
     text = show(root, base, ".pantheon-verify")
     if text:
-        line = next((x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")), "")
+        rows = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
+        # строка `dev: <команда>` — узкая проверка исполнителя (metis-0653); первая строка остаётся полным набором,
+        # его берут запись шлюза и `pantheon outside` (lib/outside.py `dev:` не читает)
+        dev = next((x[4:].strip() for x in rows if x.startswith("dev:")), "")
+        line = dev or next((x for x in rows if not x.startswith("dev:")), "")
         if line:
             return line, [line]
     pkg = show(root, base, "package.json")

@@ -1,2 +1,4 @@
 # полный набор тестов трёх плагинов (AGENTS.md); heavy проход ставит сам
 python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard plugins/pantheon plugins/project-tools
+# dev: — узкая проверка исполнителя (hooks/dev-stop-verify.py, роли dev-*); запись шлюза и outside берут первую строку
+dev: python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 --affected plugins/guard plugins/pantheon plugins/project-tools
