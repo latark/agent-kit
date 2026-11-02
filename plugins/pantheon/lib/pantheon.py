@@ -2980,8 +2980,10 @@ def reconcile_agents(data, workers=None):
         alive = bool(wpid) and pid_alive(wpid)
         if not alive and workers is not None and a.get("state") in ("working", "blocked"):
             reg = sessions_registry() if reg is None else reg
-            in_reg = any(((a.get("sessionId") and r.get("sessionId") == a.get("sessionId"))
-                          or str(r.get("jobId") or "") == str(a["id"])) and reg_same_process(r) for r in reg)
+            mine = [reg_same_process(r) for r in reg
+                    if (a.get("sessionId") and r.get("sessionId") == a.get("sessionId"))
+                    or str(r.get("jobId") or "") == str(a["id"])]
+            in_reg = any(m is not False for m in mine)  # None — ps недоступен: «не знаю» тоже не призрак (metis-0690)
         else:
             in_reg = False
         if alive and not a.get("pid"):
@@ -3076,12 +3078,17 @@ def proc_started(pid):
 def reg_same_process(r):
     """Запись реестра имён написал тот процесс, что сейчас живёт под её pid: файл назван этим pid, а время старта
     процесса совпало с procStart записи. Устаревшая запись умершей сессии, чей pid занял другой процесс, жизнь не
-    доказывает (ревью argus #249 Д1). ps недоступен или procStart в записи нет — время не опровергает."""
+    доказывает (ревью argus #249 Д1). procStart в записи нет — сверять нечего, запись принимается (True). ps недоступен
+    (в песочнице окна он не идёт, metis-0679) при procStart в записи — третье состояние None, «не знаю» (metis-0690):
+    жизнь не доказана, но и призрака утверждать нельзя — ложный призрак хуже задержки (pantheon start из окна
+    остановил бы живого воркера). Решает tick из launchd, где ps есть. ps ответил и время чужое — False."""
     if str(r.get("file")) != f"{r.get('pid')}.json":
         return False
     want = " ".join(str(r.get("procStart") or "").split())
-    got = proc_started(r.get("pid")) if want else None
-    return not (want and got and got != want)
+    if not want:
+        return True
+    got = proc_started(r.get("pid"))
+    return None if got is None else got == want
 
 
 def name_alias(name):
