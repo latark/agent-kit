@@ -1,0 +1,43 @@
+{
+ "_source": "gh pr view 222 -R latark/agent-kit --json headRefOid,baseRefName,statusCheckRollup, 2026-11-02 (metis-0655): 31.10 17:16 задачи Actions не запустились из-за лимита минут или оплаты — все проверки FAILURE за 2 с; detailsUrl убран",
+ "baseRefName": "main",
+ "headRefOid": "6b7a70dc2f1ee50ef12894607aab72760220636a",
+ "statusCheckRollup": [
+  {
+   "__typename": "CheckRun",
+   "completedAt": "2026-10-31T17:16:16Z",
+   "conclusion": "FAILURE",
+   "name": "traces",
+   "startedAt": "2026-10-31T17:16:14Z",
+   "status": "COMPLETED",
+   "workflowName": "check-traces"
+  },
+  {
+   "__typename": "CheckRun",
+   "completedAt": "2026-10-31T17:16:08Z",
+   "conclusion": "FAILURE",
+   "name": "traces",
+   "startedAt": "2026-10-31T17:16:06Z",
+   "status": "COMPLETED",
+   "workflowName": "check-traces"
+  },
+  {
+   "__typename": "CheckRun",
+   "completedAt": "2026-10-31T17:16:16Z",
+   "conclusion": "FAILURE",
+   "name": "affected",
+   "startedAt": "2026-10-31T17:16:14Z",
+   "status": "COMPLETED",
+   "workflowName": "tests"
+  },
+  {
+   "__typename": "CheckRun",
+   "completedAt": "2026-10-31T17:16:14Z",
+   "conclusion": "SKIPPED",
+   "name": "full",
+   "startedAt": "2026-10-31T17:16:14Z",
+   "status": "COMPLETED",
+   "workflowName": "tests"
+  }
+ ]
+}
