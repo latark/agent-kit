@@ -899,6 +899,36 @@ def check_all(req):
     return "ok", why, view, paths
 
 
+def finger(req, rc=0):
+    """После пальца — одна заявка: (слит ли, текст итога). Окно было открыто до двух минут, а у пачки перед этой
+    заявкой ещё шли слияния прежних: отмена, новый «вернуть», новый коммит или правка [merge_repos] за это время — не
+    сливать. Сверка шлюза, строка согласия и снятие заявки — под замком merge-queue, как у request и cancel; слияние —
+    `gh pr merge --match-head-commit` того SHA, что в заявке."""
+    with P.lock("merge-queue"):
+        if not same_req(req):
+            return False, gone(req, rc)
+        state, why, _, _ = check_all(req)
+        if state != "ok":
+            os.remove(req_file(req["repo"], req["pr"]))
+            bad = f"после пальца условия изменились — {why}"
+        else:
+            bad = None
+            approve(req)
+            os.remove(req_file(req["repo"], req["pr"]))   # одно применение — до слияния, сбой gh её не вернёт
+    if bad:
+        log(req, "gate-after")
+        P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) по Touch ID: не слито, заявка снята — {bad}",
+                "pantheon-merge")
+        return False, f"снята: {bad}"
+    code, out = gh_merge(req)
+    log(req, "merged" if code == 0 else "merge-failed", rc=code)
+    if code != 0:
+        P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) после Touch ID не прошло: {out}. Согласие "
+                "записано — шлюз guard пустит слияние этого SHA в течение суток", "pantheon-merge")
+        return False, f"палец есть, gh pr merge упал ({code})"
+    return True, "слит"
+
+
 def process(req, click):
     t = P.now()
     if t - req["created"] > REQUEST_TTL:
@@ -922,31 +952,7 @@ def process(req, click):
         return "ждёт: помощника окна нет"
     log(req, "window", rc=rc, click=click)
     if rc == 0:
-        # окно было открыто до двух минут: отмена, новый «вернуть», новый коммит или правка [merge_repos] за это
-        # время — не сливать. Сверка и снятие заявки — под замком merge-queue, как у request и cancel
-        with P.lock("merge-queue"):
-            if not same_req(req):
-                return gone(req, rc)
-            state, why, _, _ = check_all(req)
-            if state != "ok":
-                os.remove(req_file(req["repo"], req["pr"]))
-                bad = f"после пальца условия изменились — {why}"
-            else:
-                bad = None
-                approve(req)
-                os.remove(req_file(req["repo"], req["pr"]))   # одно применение — до слияния, сбой gh её не вернёт
-        if bad:
-            log(req, "gate-after")
-            P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) по Touch ID: не слито, заявка снята — {bad}",
-                    "pantheon-merge")
-            return f"снята: {bad}"
-        code, out = gh_merge(req)
-        log(req, "merged" if code == 0 else "merge-failed", rc=code)
-        if code != 0:
-            P.alert(f"слияние {req['repo']}#{req['pr']} ({req['sha'][:7]}) после Touch ID не прошло: {out}. Согласие "
-                    "записано — шлюз guard пустит слияние этого SHA в течение суток", "pantheon-merge")
-            return f"палец есть, gh pr merge упал ({code})"
-        return "слит"
+        return finger(req, rc)[1]
     if rc == 1:
         return drop(req, "refused", "вы отказали")
     if rc == 3:
