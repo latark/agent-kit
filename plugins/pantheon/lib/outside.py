@@ -85,7 +85,8 @@ STATE/outside/queue. Имя окна проход берёт из места п�
      worktree не в <клон>/.git/worktrees/<имя> — копия не берётся); нет такой, а коммит в клоне есть — временный worktree в
      ~/Library/Caches/pantheon-outside/wt (после прогона снимается; без node_modules сначала
      `<pm> install --frozen-lockfile`). Каждая пара (repo, SHA) — один раз (STATE/outside/auto.json); красные тесты и
-     «нет копии» — тревога.
+     «нет копии» — тревога. Кэш PR пишет только primary-хост (`autoclose fetch`): на втором Mac кэша нет — автопрогонов нет.
+     «принять» раньше кэша (head ещё не в нём) журнал не закрывает: auto.json помнит кэш, новый кэш — новый просмотр.
   3. Уборка: итоги <ID>.result.json и брошенные <ID>.stop в папках заявок (кэш окна, STATE/outside/queue) старше
      суток (RESULT_TTL, по mtime) удаляются; файлы живого сервера — нет. Журналы в STATE/outside/runs не трогаются.
 Запуск: тесты — heavy sandbox-exec -f STATE/outside/profile.sb <команда> в папке репозитория, сервер — то же без heavy
@@ -1576,11 +1577,13 @@ def _gone(dfd, name):
     return False
 
 
-def requests(kinds=KINDS, limit=None):
+def requests(kinds=KINDS, limit=None, taken=None):
     """[(время, вид, qdir, окно, id, заявка)] по всем папкам — только заявки своих проходов (kinds): чужие остаются
     лежать (metis-0614: проход тестов не съедает заявки серверов и наоборот). Битые и подложенные — удаляются с итогом
     failed. Отдаются самые ранние limit заявок (все, если limit не задан) и только они снимаются с диска (metis-0716:
-    убитый заход не теряет остальные); заявка, которую снять не удалось, не отдаётся — иначе проход крутился бы на ней."""
+    убитый заход не теряет остальные); заявка, которую снять не удалось, не отдаётся — иначе проход крутился бы на ней.
+    taken — {qdir: сколько заявок окна уже взято в этом заходе}: начальный номер круга между окнами (limit=1 иначе
+    считал бы его с нуля при каждом вызове)."""
     found = []
     for qdir, window in queue_dirs():
         dfd = _open_dir(qdir)
@@ -1610,7 +1613,7 @@ def requests(kinds=KINDS, limit=None):
     # порядок — по времени из id (его ставит CLI и проверяет ID_RE; req["time"] пишет клиент), по кругу между окнами:
     # за круг одна заявка от окна (metis-0716), чтобы окно не вставало первым своими временами и не держало очередь
     found.sort(key=lambda x: x[4])
-    seen_n, ranked = {}, []
+    seen_n, ranked = dict(taken or {}), []
     for item in found:
         n = seen_n.get(item[2], 0)
         seen_n[item[2]] = n + 1
@@ -1731,11 +1734,10 @@ def open_heads(t=None):
             for r, prs in by_repo.items() if isinstance(prs, list) and r not in errs}
 
 
-def auto_todo(recs=None, t=None, heads=None):
-    """[(repo, sha)] — «принять» argus не старше AUTO_TTL, записи tests на (repo, SHA) нет, проход ещё не брался, и SHA —
-    head открытого PR (metis-0716: старый head давал 25 мин на коммит, которого в PR уже нет)."""
+def _auto_candidates(recs=None, t=None):
+    """[((repo, sha), epoch «принять»)] — «принять» argus не старше AUTO_TTL, записи tests на (repo, SHA) нет и проход
+    ещё не брался; head открытого PR здесь не смотрится (auto_todo добавляет это условие)."""
     t = P.now() if t is None else t
-    heads = open_heads(t) if heads is None else heads
     recs = read_records() if recs is None else recs
     done = (P.read_json(root("auto.json"), {}).get("done") or {})
     tested = {(str(x).lower(), r["sha"].lower()) for r in recs if r.get("kind") == "tests" for x in r["repo"]}
@@ -1749,10 +1751,24 @@ def auto_todo(recs=None, t=None, heads=None):
             continue
         for repo in r["repo"]:
             key = (str(repo).lower(), r["sha"].lower())
-            if (key not in tested and f"{key[0]}@{key[1]}" not in done and key not in out
-                    and key[1] in heads.get(key[0], ())):
-                out.append(key)
+            if key not in tested and f"{key[0]}@{key[1]}" not in done and all(key != k for k, _ in out):
+                out.append((key, e))
     return out
+
+
+def auto_todo(recs=None, t=None, heads=None):
+    """[(repo, sha)] — «принять» argus не старше AUTO_TTL, записи tests на (repo, SHA) нет, проход ещё не брался, и SHA —
+    head открытого PR (metis-0716: старый head давал 25 мин на коммит, которого в PR уже нет)."""
+    t = P.now() if t is None else t
+    heads = open_heads(t) if heads is None else heads
+    return [k for k, _ in _auto_candidates(recs, t) if k[1] in heads.get(k[0], ())]
+
+
+def cache_stamp():
+    """Метка кэша открытых PR (`fetched` из autoclose-prs.json; нет кэша — 0): auto.json помнит, на какой кэш смотрел."""
+    c = P.read_json(P.path("autoclose-prs.json"), {})
+    f = c.get("fetched") if isinstance(c, dict) else None
+    return 0 if isinstance(f, bool) or not isinstance(f, (int, float)) else f
 
 
 def auto_due():
@@ -1761,7 +1777,11 @@ def auto_due():
         m = os.stat(records_file()).st_mtime
     except OSError:
         return False
-    return m != P.read_json(root("auto.json"), {}).get("mtime")
+    a = P.read_json(root("auto.json"), {})
+    if m != a.get("mtime"):
+        return True
+    # «принять» отброшено, пока его head не было в кэше PR (кэш обновляется раз в 10 мин): кэш сменился — смотреть снова
+    return a.get("missed") is not None and cache_stamp() != a.get("missed")
 
 
 def trusted_repo(d):
@@ -1897,7 +1917,9 @@ def waiting_keys():
 
 def auto_pass(t=None, limit=None, skip=()):
     """Автопрогоны по auto_todo, не больше limit за вызов, без (repo, sha) из skip. «Просмотрено» (mtime журнала в
-    auto.json) пишется, только если взято всё: отложенное лимитом или skip остаётся для следующего захода (auto_due)."""
+    auto.json) пишется, только если взято всё: отложенное лимитом или skip остаётся для следующего захода (auto_due).
+    «принять», отброшенное только потому, что head ещё нет в кэше PR, журнал не закрывает: auto.json хранит метку кэша
+    (missed), и auto_due снова True, когда кэш обновился."""
     try:
         m = os.stat(records_file()).st_mtime
     except OSError:
@@ -1905,8 +1927,13 @@ def auto_pass(t=None, limit=None, skip=()):
     todo = [k for k in auto_todo(t=t) if k not in skip]
     cut = todo if limit is None else todo[:limit]
     if len(cut) == len(todo) and not skip:
+        heads = open_heads(t)
         a = P.read_json(root("auto.json"), {})
         a["mtime"] = m
+        stamp = cache_stamp()
+        # отброшено из-за кэша — только то, что принято позже кэша: кэш о нём ещё знать не мог
+        a["missed"] = stamp if any(k[1] not in heads.get(k[0], ()) and e > stamp
+                                   for k, e in _auto_candidates(t=t)) else None
         os.makedirs(root(), mode=0o700, exist_ok=True)
         P.write_json(root("auto.json"), a)
     return [run_auto(repo, sha) for repo, sha in cut]
@@ -1914,9 +1941,44 @@ def auto_pass(t=None, limit=None, skip=()):
 
 # --- тик и проходы -----------------------------------------------------------------------------------------------
 
+def _zombies(t=None):
+    """Итоги, которые чинит recover_results, но заход ради них не шёл: running в runs/ (живого захода нет — замок
+    outside-run свободен) и queued без .req.json старше LOST_AFTER. → число."""
+    t = P.now() if t is None else t
+    if P.locked("outside-run"):
+        return 0                    # заход жив: running — его, queued ещё разбирается
+    n = 0
+    runs = root("runs")
+    for name in os.listdir(runs) if os.path.isdir(runs) else ():
+        rid = name[:-len(".json")]
+        res = P.read_json(os.path.join(runs, name), {}) if name.endswith(".json") and ID_RE.fullmatch(rid) else {}
+        if isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "running":
+            n += 1
+    for qdir, _ in queue_dirs():
+        dfd = _open_dir(qdir)
+        if dfd is None:
+            continue
+        try:
+            names = os.listdir(dfd)
+            for name in names:
+                rid = name[:-len(".result.json")]
+                if not name.endswith(".result.json") or not ID_RE.fullmatch(rid) or rid + ".req.json" in names:
+                    continue
+                res = _parse(_read_in(dfd, name, 1024 * 1024))
+                try:
+                    old = t - os.lstat(name, dir_fd=dfd).st_mtime > LOST_AFTER
+                except OSError:
+                    continue
+                if old and isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "queued":
+                    n += 1
+        finally:
+            os.close(dfd)
+    return n
+
+
 def pending_test():
     """Тику: дело проходу тестов — заявки test (и битые), новые записи шлюза, старые итоги."""
-    return bool(_queued_ids(("test",))) or auto_due() or bool(_stale())
+    return bool(_queued_ids(("test",))) or auto_due() or bool(_stale()) or bool(_zombies())
 
 
 def pending_serve():
@@ -1946,11 +2008,12 @@ def run_test_queue():
     ждущей заявки не берётся — его прогонит заявка. Заход конечен: не больше MAX_ROUNDS кругов, взятая заявка не
     берётся второй раз."""
     had_req = autos = 0
-    seen = set()
+    seen, taken = set(), {}
     for _ in range(MAX_ROUNDS):
-        reqs = [r for r in requests(("test",), limit=1) if (r[2], r[4]) not in seen]
+        reqs = [r for r in requests(("test",), limit=1, taken=taken) if (r[2], r[4]) not in seen]
         for _t, _k, qdir, window, rid, req in reqs:
             seen.add((qdir, rid))
+            taken[qdir] = taken.get(qdir, 0) + 1
             handle(qdir, window, rid, req)
         if reqs:
             had_req = 1
@@ -1966,10 +2029,23 @@ def run_test_queue():
 LOST_AFTER = 300                    # с: итог queued без заявки старше этого — заявка потеряна (metis-0716)
 
 
+def _result_running(qdir, rid):
+    """В папке заявок qdir есть <rid>.result.json теста в состоянии running."""
+    dfd = _open_dir(qdir)
+    if dfd is None:
+        return False
+    try:
+        res = _parse(_read_in(dfd, rid + ".result.json", 1024 * 1024))
+    finally:
+        os.close(dfd)
+    return isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "running"
+
+
 def recover_results(t=None):
     """Под замком outside-run (захода больше нет): итог теста queued без .req.json старше LOST_AFTER — failed «заявка
     потеряна»; running — failed «заход прерван», но только то, что сам заход записал в STATE/outside/runs/<ID>.json
-    (файл из кэша окна роль может подложить). Итог пишется минимальным объектом из своих полей, чужое содержимое
+    (файл из кэша окна роль может подложить; у старых записей без qdir итог ищется во всех папках заявок, где он
+    тоже running). Итог пишется минимальным объектом из своих полей, чужое содержимое
     result.json не копируется. Serve не трогает: им ведёт свой проход. → число."""
     t = P.now() if t is None else t
     n = 0
@@ -2004,7 +2080,9 @@ def recover_results(t=None):
         res = P.read_json(os.path.join(runs, name), {}) if name.endswith(".json") and ID_RE.fullmatch(rid) else {}
         if isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "running":
             qd = res.get("qdir") if res.get("qdir") in qdirs else None
-            save_result(qd, rid, {"kind": "test", "state": "failed", "why": "заход прерван, подай заново"})
+            targets = [qd] if qd else [q for q in sorted(qdirs) if _result_running(q, rid)]   # старые записи без qdir
+            for q in targets or [None]:
+                save_result(q, rid, {"kind": "test", "state": "failed", "why": "заход прерван, подай заново"})
             log_event(id=rid, kind="recovered", why="заход прерван")
             n += 1
     return n

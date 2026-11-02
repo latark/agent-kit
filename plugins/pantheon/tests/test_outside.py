@@ -1773,7 +1773,7 @@ class Sim:
         names = ("requests", "handle", "run_auto", "auto_todo", "auto_due", "waiting_keys", "_queued_ids")
         saved = {n: getattr(O, n) for n in names}
 
-        def requests(kinds=(), limit=None):
+        def requests(kinds=(), limit=None, taken=None):
             q, self.queue = self.queue[:limit], self.queue[limit:] if limit else []
             return [("", "test", "qd", "w", r, {}) for r in q]
 
@@ -1852,6 +1852,12 @@ for r_, d_ in ((rid, q), (rid2, q2)):
     os.remove(os.path.join(d_, r_ + ".req.json"))
 check("ключей ждущих заявок больше нет", O.waiting_keys() == set())
 
+# автопрогон на ключе ждущей заявки не идёт (мутант skip=() в run_test_queue краснит этот тест)
+sim = Sim([("o/r", "z" * 40), ("o/r", "a" * 40)])
+sim.run(O.run_test_queue)
+check("run_test_queue: ключ ждущей заявки пропущен (skip=waiting_keys), соседний взят",
+      sim.ev == ["auto:a"] and ("o/r", "z" * 40) in sim.todo, sim.ev)
+
 # заявки по одной: убитый заход не теряет остальные (2а), неснимаемая заявка не крутит заход
 _h = O.handle
 got = []
@@ -1910,6 +1916,20 @@ order = [x[4] for x in O.requests(("test",))]
 check("круг между окнами: у окна две заявки раньше, но вторая идёт после заявки другого окна",
       order == ["20261102-120001-aaaaaa", "20261102-120003-bbbbbc", "20261102-120002-aaaaab"], order)
 
+# круг между окнами в основном пути (run_test_queue берёт по одной заявке): a1, b, a2, a3, а не a1, a2, a3, b
+mkreq(qa, "20261102-130001-aaaaaa", EARLY)
+mkreq(qa, "20261102-130002-aaaaab", EARLY)
+mkreq(qa, "20261102-130003-aaaaac", EARLY)
+mkreq(qb, "20261102-130004-bbbbbb", EARLY)
+_h, _got = O.handle, []
+O.handle = lambda qdir, window, rid, req: _got.append(rid[-6:])
+_ad = O.auto_due
+O.auto_due = lambda: False
+O.run_test_queue()
+O.handle, O.auto_due = _h, _ad
+check("run_test_queue: круг между окнами сквозь заходы limit=1 — a1, b, a2, a3",
+      _got == ["aaaaaa", "bbbbbb", "aaaaab", "aaaaac"], _got)
+
 # потерянная заявка и зомби running: чинит только заход под замком outside-run
 qa = os.path.join(CACHE, "athena-x", "outside")
 
@@ -1928,11 +1948,22 @@ with open(os.path.join(qa, "20261102-101010-cccccc.req.json"), "w") as fh:
     fh.write("{}")
 O.save_result(qa, "20261102-101010-dddddd", {"state": "running", "kind": "test", "sha": "a" * 40})   # как пишет заход
 put_result("20261102-101010-gggggg", {"state": "running", "kind": "test"}, age=900)   # подложено окном
+put_result("20261102-101010-a1a1a1", {"state": "running", "kind": "test"})   # старая запись runs/ без qdir
+P.write_json(O.root("runs", "20261102-101010-a1a1a1.json"), {"id": "20261102-101010-a1a1a1", "state": "running", "kind": "test"})
 put_result("20261102-101010-eeeeee", {"state": "queued", "kind": "serve"}, age=900)
 put_result("20261102-101010-ffffff", {"state": "running", "kind": "serve"}, age=900)
 P.write_json(O.root("runs", "20261102-101010-a0a0a0.json"), {"id": "20261102-101010-a0a0a0", "state": "running", "kind": "test"})
+_sv = (O._queued_ids, O.auto_due, O._stale)
+O._queued_ids, O.auto_due, O._stale = (lambda kinds=(): []), (lambda: False), (lambda t=None: [])
+check("тик: одни итоги-зомби (queued без заявки, running в runs/) — дело проходу тестов", O.pending_test() is True)
+with P.lock("outside-run", block=False):
+    check("тик: заход жив (замок взят) — зомби не повод для pending_test", O.pending_test() is False)
+O._queued_ids, O.auto_due, O._stale = _sv
+with P.lock("outside-run", block=False):
+    check("тик: заход жив (замок взят) — зомби не повод", not O._zombies())
 O.recover_results()
-st = {x: (O.load_result(qa, "20261102-101010-" + x) or {}) for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd", "eeeeee", "ffffff", "gggggg")}
+st = {x: (O.load_result(qa, "20261102-101010-" + x) or {}) for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd", "eeeeee", "ffffff", "gggggg", "a1a1a1")}
+check("после починки зомби в pending_test нет", not O._zombies())
 check("потеряна: queued без .req.json старше 5 мин → failed «заявка потеряна»",
       st["aaaaaa"].get("state") == "failed" and "потеряна" in st["aaaaaa"].get("why", ""), st["aaaaaa"])
 check("queued свежее 5 мин и queued с лежащей заявкой — не тронуты",
@@ -1946,17 +1977,61 @@ check("потерянная: чужие поля из result.json окна (url,
       set(st["aaaaaa"]) == {"id", "kind", "state", "why", "updated"}, st["aaaaaa"])
 check("serve (queued и running) проход тестов не трогает", st["eeeeee"].get("state") == "queued"
       and st["ffffff"].get("state") == "running", (st["eeeeee"], st["ffffff"]))
+check("старая запись runs/ без qdir: итог в очереди окна тоже стал failed (status не врёт running)",
+      st["a1a1a1"].get("state") == "failed" and "прерван" in st["a1a1a1"].get("why", ""), st["a1a1a1"])
 check("автопрогон running только в runs/ → failed",
       P.read_json(O.root("runs", "20261102-101010-a0a0a0.json"), {}).get("state") == "failed")
 O.save_result(qa, "20261102-101010-dddddd", {"state": "running", "kind": "test"})
 check("cmd_run (замок свободен) чинит зомби сам",
       run_pass() == 0 and O.load_result(qa, "20261102-101010-dddddd").get("state") == "failed")
-for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd", "eeeeee", "ffffff", "gggggg"):
+for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd", "eeeeee", "ffffff", "gggggg", "a1a1a1"):
     for ext in ("result.json", "req.json"):
         if os.path.exists(os.path.join(qa, f"20261102-101010-{x}.{ext}")):
             os.remove(os.path.join(qa, f"20261102-101010-{x}.{ext}"))
 os.remove(O.root("runs", "20261102-101010-a0a0a0.json"))
 os.remove(O.root("runs", "20261102-101010-dddddd.json"))
+os.remove(O.root("runs", "20261102-101010-a1a1a1.json"))
+
+# «принять» раньше кэша PR: журнал не считается просмотренным, пока кэш не обновили (Б1, argus 2-й круг)
+_cp = os.path.join(STATE, "autoclose-prs.json")
+_saved = open(_cp).read() if os.path.exists(_cp) else None
+LATE = "4" * 40
+accept(LATE, repo="latark/hh-late")
+c = json.load(open(_cp))
+c["open_prs"]["latark/hh-late"] = []          # кэш, снятый до коммита: head в нём ещё нет
+c["fetched"] = time.time() - 400
+json.dump(c, open(_cp, "w"))
+O.auto_pass()
+check("head «принять» ещё нет в кэше: автопрогона нет, журнал просмотрен (mtime записан)",
+      not [k for k in O.auto_todo() if k[0] == "latark/hh-late"] and not O.auto_due())
+c["open_prs"]["latark/hh-late"] = [{"number": 7, "head": LATE}]
+c["fetched"] = time.time()                    # кэш обновили, head в нём
+json.dump(c, open(_cp, "w"))
+check("кэш обновили с этим head: тик видит дело (pending_test), автопрогон в списке",
+      O.pending_test() and ("latark/hh-late", LATE) in O.auto_todo())
+ran = []
+_ra = O.run_auto
+O.run_auto = lambda repo, sha: ran.append((repo, sha)) or {"state": "done"}
+O.auto_pass()
+O.run_auto = _ra
+check("следующий проход запускает автопрогон на этот head", ("latark/hh-late", LATE) in ran, ran)
+check("после этого дела нет", not O.auto_due())
+# «принять» на закрытый PR (кэш свежее «принять», head нет) тик не будит при каждом обновлении кэша
+OLD2 = "5" * 40
+accept(OLD2, repo="latark/hh-gone", age=3600)
+c = json.load(open(_cp))
+c["open_prs"]["latark/hh-gone"] = []
+c["fetched"] = time.time()
+json.dump(c, open(_cp, "w"))
+O.auto_pass()
+c["fetched"] = time.time() + 1
+json.dump(c, open(_cp, "w"))
+check("head нет в свежем кэше (PR закрыт): обновление кэша проход не будит", not O.auto_due())
+if _saved is not None:
+    with open(_cp, "w") as fh:
+        fh.write(_saved)
+else:
+    os.remove(_cp)
 
 # автопрогон только на head открытого PR
 _cp = os.path.join(STATE, "autoclose-prs.json")
