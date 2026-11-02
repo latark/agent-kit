@@ -1387,13 +1387,14 @@ def card_ctx(tid, head, tasks, names, cross, t=None, night_end="08:00", open_prs
 # Story — карточка type story: название, ночь или день (night, due), бюджет (estimate). Задачи прикрепляются полем
 # parent (pantheon task attach/detach); сумма их оценок считается, а не вводится руками.
 
-PCT_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
+# число берём только перед «%» (пробел, в т. ч. неразрывный, необязателен): «17 ч ≈ 15 % доли» → 15, часы и даты — нет (metis-0654)
+PCT_RE = re.compile(r"(?<![\d.,])(\d+(?:[.,]\d+)?)[ \u00a0\u202f]*%")
 
 
 def pct(v):
-    """Оценка «0,5 % недели» → 0.5; без числа — None."""
+    """Оценка «0,5 % недели» → 0.5; без числа перед «%» — None."""
     m = PCT_RE.search(str(v or ""))
-    return float(m.group(0).replace(",", ".")) if m else None
+    return float(m.group(1).replace(",", ".")) if m else None
 
 
 def pct_text(x):
@@ -1594,7 +1595,7 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
     unknown = f"у {len(inf['unknown'])} из {inf['total']}" if inf["unknown"] else None
     card.update({"Пульт": link(f"{PROJECTS_DIR}/{project}|{project}") if project else None,
                  "Когда": _date(head.get("night"), 10) or _date(head.get("due"), 10),
-                 "Бюджет": head.get("estimate"),
+                 "Бюджет": head.get("estimate") if inf["budget"] is not None else None,
                  "Сумма оценок": pct_text(inf["sum"]) + (" ⚠ больше бюджета" if over else ""),
                  "Закрыто": f"{len(inf['closed'])} из {len(inf['ids'])}",
                  "Цепочка": [lk(i) for i in inf["chain"]] or None, "Параллельно": [lk(i) for i in inf["parallel"]] or None,
