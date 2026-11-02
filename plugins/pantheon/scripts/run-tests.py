@@ -69,16 +69,21 @@ TIMEOUT = 600  # с на файл; медленным — свой предел 
 # давали таймауты: test_merge_gate — 19 из 33 прогонов, test_watch — 10 из 31, test_read — 9 из 31.
 # В комментарии — медиана и наибольшее зелёное время в тех прогонах, с.
 SLOW = {
-    "pantheon/test_watch.py": 1020,  # 516 / 666 — дольше всех: полный прогон не короче его
+    # test_watch: 575 / 791 в 27 прогонах 01-03.11 (metis-0719): 1.5 × 791 → 1200. Спящих ожиданий нет — 524 запуска
+    # run.py по 0.25 с, время растёт с нагрузкой, как у test_merge_gate (0.9-1.0 его времени); 03.11 при load 17.8 —
+    # test_merge_gate 1051 с, test_watch убит на 1020
+    "pantheon/test_watch.py": 1200,
     "guard/test_merge_gate.py": 1200,  # 458 / 458; outside -j 3 02.11 — 766-825 с, раз 900 (таймаут), metis-0719
     "guard/test_guard.py": 720,  # 336 / 442; на Linux в Docker под нагрузкой 120-240 с, на 2-ядерном ubuntu-latest дольше
+    # test_read: 97 / 259, убит на 180 с 14 раз и на 300 с 4 раза из 80 прогонов (0731, п. 5): 1.5 × 259 мало.
+    # 600 ≈ 2.3 × 259 — во столько раз test_merge_gate под нагрузкой 03.11 дольше своей медианы (1051 / 458)
+    "pantheon/test_read.py": 600,
     "guard/test_shell_diff.py": 600,  # 254 / 390
     "pantheon/test_plugins_update.py": 540,  # 170 / 346
     "pantheon/test_setup.py": 480,  # 109 / 303
     "pantheon/test_start.py": 480,  # 136 / 289
     "pantheon/test_board.py": 360,  # 98 / 235
     "pantheon/test_sync_quarantine.py": 360,  # 120 / 231
-    "pantheon/test_read.py": 300,  # 97 / 179
     "pantheon/test_merge.py": 300,  # 86 / 171
     "pantheon/test_hooks.py": 300,  # 64 / 163
     "pantheon/test_executors.py": 240,  # 69 / 158

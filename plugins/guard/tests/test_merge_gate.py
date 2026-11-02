@@ -1162,11 +1162,27 @@ VANISHING_TESTS = ("python3 -I $TESTFILE", "python3 $TESTFILE", "heavy python3 -
                    "CI=1 python3 -I $TESTFILE", "uv run python $X", "node $X")
 
 
+class _SlowSubprocess:
+    """subprocess для merge_gate, загруженного в процесс теста (metis-0719): timeout у run не меньше HOOK_SUB_TIMEOUT,
+    как у хука через загрузчик _cached_main. Без этого git в _git_bytes (timeout=3) под нагрузкой outside не успевал,
+    и r4 видел отпечаток None вместо хеша. Остальное — настоящий subprocess."""
+
+    def __getattr__(self, name):
+        return getattr(subprocess, name)
+
+    @staticmethod
+    def run(*args, **kw):
+        if kw.get("timeout") is not None:
+            kw["timeout"] = max(kw["timeout"], HOOK_SUB_TIMEOUT)
+        return subprocess.run(*args, **kw)
+
+
 def _load_merge_gate(name):
     import importlib.util
     spec = importlib.util.spec_from_file_location(name, os.path.join(os.path.dirname(GUARD), "merge_gate.py"))
     mg = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mg)
+    mg.subprocess = _SlowSubprocess()  # только этот модуль: подпроцессы самого теста — с прежними сроками
     return mg
 
 
@@ -4316,6 +4332,16 @@ def t_test_floors(h):
           got == [str(HOOK_DEADLINE), "ждал"], got)
     got = run(dict(h.env("projects/tg-read"), GUARD_TEST_DEADLINE="", GUARD_TEST_SUB_TIMEOUT="x"))
     check("сроки хука в тесте: без переменных — DEADLINE 8 с и timeout как в коде", got == ["8", "таймаут"], got)
+    # merge_gate в процессе теста (r4, carry): git дольше боевого timeout=3 у _git_bytes — ответ, а не None
+    slow = h.j("slowgit")
+    os.makedirs(slow, exist_ok=True)
+    with open(os.path.join(slow, "git"), "w") as fh:
+        fh.write("#!/bin/sh\nsleep 3.5\necho medlenno\n")
+    os.chmod(os.path.join(slow, "git"), 0o755)
+    mg = _load_merge_gate("merge_gate_floors")
+    with _Env(PATH=slow + os.pathsep + os.environ["PATH"]):
+        got = mg._git_bytes(h.root, "rev-parse")
+    check(f"сроки в процессе теста: git в _git_bytes ждёт до {HOOK_SUB_TIMEOUT} с, а не 3", got == b"medlenno\n", got)
 
 
 CASES = [t_test_floors, t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_narrow_record, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
