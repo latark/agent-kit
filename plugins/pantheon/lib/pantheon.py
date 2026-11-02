@@ -48,7 +48,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         со списком чатов → выгрузка и один разбор → вы одобряете пункты; источник —
                                         надстройка из [read] в STATE/config.toml
   pantheon merge request|run|status|cancel   слияние PR ядра по Touch ID (metis-0285, lib/merge.py): заявка роли →
-                                        плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA
+                                        плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA;
+                                        `request N1 N2 … -R repo` — пачка: одно окно, сливает по очереди (metis-0668)
   pantheon outside test|serve|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
                                         тесты проекта или dev-сервер (своя копия на коммите, порт 4300–4399, не
                                         больше двух) под sandbox-exec без ключей, браузеров и

@@ -37,6 +37,7 @@ FULL_TESTS_CMD = ("pantheon review test -- heavy python3.14 -I plugins/pantheon/
 PR = 7
 SHA = "abcdef1" + "0" * 33
 SHA2 = "1234567" + "f" * 33
+SHA3 = "9abcdef" + "e" * 33
 TITLE = "guard: шлюз по Touch ID"
 
 # gh: view — из rec/gh-view.json (нет файла — код 1), merge — код из rec/gh-merge-rc; argv — в rec/gh-argv.jsonl
@@ -46,8 +47,25 @@ rec = os.environ["FAKE_REC"]
 with open(os.path.join(rec, "gh-argv.jsonl"), "a") as fh:
     fh.write(json.dumps({"argv": sys.argv[1:], "env": sorted(k for k in os.environ if k.startswith("GH_")),
                          "keys": sorted(os.environ)}) + "\n")
+def one(name, n):
+    # ответ на PR n (пачка, metis-0668): файл rec/<имя>-<n>.<расш>, если есть, иначе общий rec/<имя>.<расш>
+    stem, ext = os.path.splitext(name)
+    p = os.path.join(rec, f"{stem}-{n}{ext}")
+    return p if os.path.exists(p) else os.path.join(rec, name)
+
+
+def view_by_sha(sha):
+    # ответ gh pr view того PR, чей head — sha: файлы rec/gh-view-<n>.json пачки, иначе общий rec/gh-view.json
+    for f in sorted(os.listdir(rec)):
+        if f.startswith("gh-view-") and f.endswith(".json"):
+            v = json.load(open(os.path.join(rec, f)))
+            if v.get("headRefOid") == sha:
+                return v
+    return json.load(open(os.path.join(rec, "gh-view.json")))
+
+
 if sys.argv[1:3] == ["pr", "view"]:
-    p = os.path.join(rec, "gh-view.json")
+    p = one("gh-view.json", sys.argv[3])
     if not os.path.exists(p):
         sys.exit(1)
     # как настоящий gh: только поля из --json (pr_view без baseRefName не получит его и из файла, argus М41)
@@ -59,7 +77,7 @@ if sys.argv[1:3] == ["pr", "view"]:
     print(json.dumps({k: x for k, x in v.items() if k in want}) if isinstance(v, dict) and want else raw)
     sys.exit(0)
 if sys.argv[1:3] == ["pr", "merge"]:
-    p = os.path.join(rec, "gh-merge-rc")
+    p = one("gh-merge-rc", sys.argv[3])
     sys.exit(int(open(p).read()) if os.path.exists(p) else 0)
 if sys.argv[1] == "api" and ("/actions/runs?" in sys.argv[2] or "/check-runs?" in sys.argv[2]):
     # запуски Actions (metis-0633): по rollup из gh-view.json, событие — поле "event" записи (по умолчанию
@@ -67,12 +85,13 @@ if sys.argv[1] == "api" and ("/actions/runs?" in sys.argv[2] or "/check-runs?" i
     # форка, metis-0649); с gh-runs-fail — сбой, gh-runs-total — total_count запусков
     if os.path.exists(os.path.join(rec, "gh-runs-fail")):
         sys.exit(1)
-    v = json.load(open(os.path.join(rec, "gh-view.json")))
+    import re
+    v = view_by_sha(re.search(r"[0-9a-f]{40}", sys.argv[2]).group(0))
     sha, runs, checks = v.get("headRefOid"), [], []
     for i, c in enumerate(v.get("statusCheckRollup") or []):
         if isinstance(c, dict) and "context" not in c:
             runs.append({"name": c.get("workflowName"), "event": c.get("event", "pull_request"), "head_sha": sha,
-                         "check_suite_id": 1000 + i, "pull_requests": [{"number": n} for n in c.get("prs", [7])],
+                         "check_suite_id": 1000 + i, "pull_requests": [{"number": n} for n in c.get("prs", [v.get("_pr", 7)])],
                          "head_repository": {"full_name": c.get("head_repo", "latark/agent-kit")},
                          "head_branch": c.get("head_branch", "main")})
             checks.append({"name": c.get("name"), "status": str(c.get("status") or "").lower(),
@@ -103,7 +122,7 @@ if sys.argv[1] == "api" and "/actions/jobs/" in sys.argv[2]:
                                                               "steps": [{"name": "Set up job"}]}))
     sys.exit(0)
 if sys.argv[1] == "api" and "/pulls/" in sys.argv[2] and sys.argv[2].split("?")[0].endswith("/files"):
-    p = os.path.join(rec, "gh-files.jsonl")
+    p = one("gh-files.jsonl", sys.argv[2].split("/pulls/")[1].split("/")[0])
     if not os.path.exists(p):
         sys.exit(1)
     print(open(p).read(), end="")
@@ -210,17 +229,20 @@ class Box:
         return self.cli(["merge", "run"] + (["--click"] if click else []), t=t, extra=extra, evil=evil)
 
     def view(self, sha, state="OPEN", draft=False, checks=None, title=TITLE, files=None, count=None, base="main",
-             head=None):
+             head=None, pr=None):
         """Ответ gh pr view и REST pulls/N/files: files — имена или словари; count — changedFiles (по умолчанию
-        len(files)); base — baseRefName (None — поля нет); head — поля головы PR (isCrossRepository и др.)."""
+        len(files)); base — baseRefName (None — поля нет); head — поля головы PR (isCrossRepository и др.); pr —
+        ответ только этого PR (пачка, metis-0668), иначе общий для всех."""
+        sfx = "" if pr is None else f"-{pr}"
         files = FILES if files is None else files
         recs = [f if isinstance(f, dict) else {"filename": f, "status": "modified"} for f in files]
-        with open(os.path.join(self.rec, "gh-view.json"), "w") as fh:
+        with open(os.path.join(self.rec, f"gh-view{sfx}.json"), "w") as fh:
             json.dump({"headRefOid": sha, "state": state, "isDraft": draft, "title": title,
+                       **({} if pr is None else {"_pr": pr}),
                        **({} if base is None else {"baseRefName": base}),
                        "statusCheckRollup": ci("SUCCESS", "SUCCESS") if checks is None else checks,
                        "changedFiles": len(recs) if count is None else count, **(head or {})}, fh)
-        with open(os.path.join(self.rec, "gh-files.jsonl"), "w") as fh:
+        with open(os.path.join(self.rec, f"gh-files{sfx}.jsonl"), "w") as fh:
             fh.write("".join(json.dumps(r) + "\n" for r in recs))
 
     def set(self, name, value):
@@ -243,10 +265,10 @@ class Box:
         with open(os.path.join(d, "records.jsonl"), "w") as fh:
             fh.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in self.records))
 
-    def gate_ok(self, sha):
+    def gate_ok(self, sha, pr=PR):
         self.add("tests", sha=sha, who="")
-        self.add("accept", sha=sha, sid="s1", aid="a1")
-        self.add("accept", sha=sha, sid="s2", aid="a2")
+        self.add("accept", sha=sha, pr=pr, sid="s1", aid="a1")
+        self.add("accept", sha=sha, pr=pr, sid="s2", aid="a2")
 
     def calls(self, name):
         p = os.path.join(self.rec, name + "-argv.jsonl")
@@ -1389,6 +1411,203 @@ def test_env_home_link():
     check("HOME-ссылка: в команде щелчка HOME и bin/pantheon — realpath (current разрешён), не через ссылку",
           f"HOME={real}" in words and os.path.join(ver, "bin", "pantheon") in words and f"PANTHEON_PYTHON={PY311}" in words
           and not any(link in w for w in words), cmd or r.stderr)
+
+
+# --- пачка: одно окно на несколько PR (metis-0668) ----------------------------------------------------------------------
+
+BATCH_SHA = {7: SHA, 8: SHA2, 9: SHA3}
+
+
+def merge_argv(pr):
+    return ["pr", "merge", str(pr), "-R", REPO, "--match-head-commit", BATCH_SHA[pr], "--merge"]
+
+
+def batch_box(prs=(7, 8)):
+    """Коробка с PR prs: у каждого свой head (BATCH_SHA), свой ответ gh и пройденный шлюз на своём SHA."""
+    b = Box()
+    for pr in prs:
+        b.view(BATCH_SHA[pr], pr=pr, title=f"PR {pr}", files=["README.md", CORE_FILE] if pr == 7 else ["docs.md"])
+        if pr != PR:
+            b.gate_ok(BATCH_SHA[pr], pr=pr)
+    return b
+
+
+def request_batch(b, prs=(7, 8)):
+    return b.cli(["merge", "request"] + [str(n) for n in prs] + ["-R", REPO])
+
+
+def test_batch_one_window_merges_all():
+    b = batch_box()
+    r = request_batch(b)
+    r7, r8 = b.req(7), b.req(8)
+    check("пачка: заявка на каждый PR, batch — номера по порядку, время одно, SHA — head каждого",
+          r.returncode == 0 and r7 and r8 and r7["batch"] == r8["batch"] == [7, 8] and r7["created"] == r8["created"]
+          and r7["sha"] == SHA and r8["sha"] == SHA2 and "Пачка" in r.stdout, b.outs[-1])
+    check("пачка: окна и слияния нет до прохода", not b.windows() and not b.merges())
+    b.run()
+    w = b.windows()
+    text = w[0][0] if w else ""
+    check("пачка: одно окно на оба PR — номер, SHA и вердикт каждого, ядро, заголовки последними, не длиннее 400",
+          len(w) == 1 and f"#7 {SHA[:7]} argus ×2 ✓, CI ✓; #8 {SHA2[:7]} argus ×2 ✓, CI ✓." in text
+          and f"ядро: {CORE_FILE}" in text and text.index("ядро") < text.index("Заголовки: #7 «PR 7»; #8 «PR 8»")
+          and len(text) <= 400, w)
+    check("пачка: оба слиты по очереди, каждый с --match-head-commit своего head",
+          b.merges() == [merge_argv(7), merge_argv(8)], b.merges())
+    lines = b.approve_lines()
+    check("пачка: строка согласия на каждый PR и его SHA",
+          len(lines) == 2 and lines[0].endswith(f"merge-approve {REPO}#7 {SHA}")
+          and lines[1].endswith(f"merge-approve {REPO}#8 {SHA2}"), lines)
+    ok7, out7 = guard_approves(b, REPO, 7, SHA)
+    ok8, out8 = guard_approves(b, REPO, 8, SHA2)
+    check("пачка: шлюз guard принимает согласие на оба", ok7 and ok8, out7 + out8)
+    check("пачка: итог по каждому PR, заявки сняты",
+          f"{REPO}#7: слит" in b.outs[-1] and f"{REPO}#8: слит" in b.outs[-1] and b.req(7) is None and b.req(8) is None,
+          b.outs[-1])
+    b.run()
+    check("пачка: одно применение — второй проход окна не показывает", len(b.windows()) == 1 and len(b.merges()) == 2)
+
+
+def test_batch_second_gate_fails_after_finger():
+    """Второй PR пачки после пальца не прошёл шлюз: первый слит, второй и третий — нет, итог по каждому."""
+    rej = {"v": 1, "kind": "reject", "repo": [REPO], "pr": 8, "sha": SHA2,
+           "by": {"agent_type": "argus", "agent_id": "a9", "session_id": "s9"},
+           "checklist": {"opened": "x", "ran": "y", "unchecked": "z"}}
+    body = "open(os.path.join(state, 'merge-gate', 'records.jsonl'), 'a').write(%r)" % (json.dumps(rej) + "\n")
+    b = batch_box((7, 8, 9))
+    r = request_batch(b, (7, 8, 9))
+    script(b.touchid, window_script(body, 0))
+    b.run()
+    out = b.outs[-1]
+    check("отказ шлюза у #8 после пальца: окно одно, слит только #7",
+          r.returncode == 0 and len(b.windows()) == 1 and b.merges() == [merge_argv(7)], (out, b.merges()))
+    check("отказ шлюза у #8: согласие только на #7, заявки #8 и #9 сняты",
+          len(b.approve_lines()) == 1 and f"{REPO}#7 {SHA}" in b.approve_lines()[0]
+          and b.req(8) is None and b.req(9) is None, (b.approve_lines(), out))
+    check("отказ шлюза у #8: итог по каждому — слит, снята (почему), не тронут",
+          f"{REPO}#7: слит" in out and f"{REPO}#8: снята: после пальца условия изменились" in out
+          and f"{REPO}#9: снята: не слит: пачка остановлена на #8" in out, out)
+    check("отказ шлюза у #8: тревога с итогом — где остановлено, кто слит, кто не тронут",
+          "остановлено на #8" in b.alerts() and "Слиты: #7" in b.alerts() and "не тронуты" in b.alerts()
+          and "#9" in b.alerts(), b.alerts())
+    check("отказ шлюза у #8: журнал #9 — batch-stopped", "batch-stopped" in b.log(), b.log())
+
+
+def test_batch_merge_fails_stops_rest():
+    b = batch_box()
+    request_batch(b)
+    b.set("gh-merge-rc-7", 1)
+    b.run()
+    check("gh pr merge упал на #7: #8 не сливается и согласия на него нет",
+          b.merges() == [merge_argv(7)] and len(b.approve_lines()) == 1 and b.req(8) is None
+          and f"{REPO}#8: снята: не слит: пачка остановлена на #7" in b.outs[-1], (b.merges(), b.outs[-1]))
+
+
+def test_batch_request_all_or_nothing():
+    b = batch_box((7,))
+    b.view(SHA2, pr=8, title="PR 8", files=["docs.md"])   # у #8 нет ни тестов, ни «принять»
+    r = request_batch(b)
+    check("пачка: шлюз не пройден у #8 → заявок нет ни на один, в отказе — номер",
+          r.returncode != 0 and b.req(7) is None and b.req(8) is None and "#8" in r.stderr
+          and "ни на один" in r.stderr, r.stderr)
+    for args, name in (([7, 7], "повтор номера"), ([7, 8, 9, 10, 11, 12], "больше MAX_BATCH")):
+        r = b.cli(["merge", "request"] + [str(n) for n in args] + ["-R", REPO])
+        check(f"пачка: {name} → вызов не тот, заявок нет", r.returncode == 2 and b.req(7) is None, r.stderr)
+
+
+def test_batch_repeat_and_status_cancel():
+    b = batch_box()
+    request_batch(b)
+    r = request_batch(b)
+    check("пачка: повтор той же пачки — «уже стоит», время не сменилось",
+          r.returncode == 0 and "уже стоит" in r.stdout and b.req(7)["created"] == T0, r.stdout)
+    r = b.cli(["merge", "status"])
+    check("status: у заявок пачки — её номера", r.stdout.count("пачка #7,#8") == 2, r.stdout)
+    r = b.cli(["merge", "cancel", "8", "-R", REPO])
+    check("cancel одного PR пачки снимает всю пачку", r.returncode == 0 and b.req(7) is None and b.req(8) is None
+          and "вся пачка: #7" in r.stdout, r.stdout)
+
+
+def test_batch_broken_before_window():
+    b = batch_box()
+    request_batch(b)
+    os.remove(b.req_path(8))
+    b.run()
+    check("пачка неполна (заявку #8 удалили) → окна нет, #7 снята с тревогой",
+          not b.windows() and not b.merges() and b.req(7) is None and "неполна" in b.alerts() and "#8" in b.alerts(),
+          (b.outs[-1], b.alerts()))
+    b = batch_box()
+    request_batch(b)
+    b.request(pr=8, t=T0 + 5)   # одиночная заявка на #8 заменила заявку пачки
+    b.run(t=T0 + 10)
+    check("заявку #8 пачки заменили одиночной → #7 снята (пачка неполна), одиночная #8 слита своим окном",
+          b.merges() == [merge_argv(8)] and b.req(7) is None and len(b.windows()) == 1
+          and b.windows()[0][0].startswith(f"Слить {REPO}#8"), (b.outs[-1], b.merges()))
+
+
+def test_batch_gate_before_window():
+    b = batch_box()
+    request_batch(b)
+    b.view(SHA2, pr=8, draft=True, title="PR 8", files=["docs.md"])
+    b.run()
+    check("шлюз до окна: #8 стал черновиком → окна нет, сняты обе с тревогой «#8»",
+          not b.windows() and not b.merges() and b.req(7) is None and b.req(8) is None
+          and "#8: PR — черновик" in b.alerts(), (b.outs[-1], b.alerts()))
+    b = batch_box()
+    request_batch(b)
+    b.view(SHA2, pr=8, checks=ci("SUCCESS", "PENDING"), title="PR 8", files=["docs.md"])
+    b.run()
+    check("CI #8 идёт → окна нет, ждут обе", not b.windows() and b.req(7) and b.req(8)
+          and f"{REPO}#7: ждёт: #8: проверки GitHub ещё идут" in b.outs[-1], b.outs[-1])
+    b.view(SHA2, pr=8, title="PR 8", files=["docs.md"])
+    b.run()
+    check("CI #8 зелёный → одно окно, слиты обе", len(b.windows()) == 1 and b.merges() == [merge_argv(7), merge_argv(8)],
+          b.outs[-1])
+
+
+def test_batch_refusal_timeout_fallback():
+    b = batch_box()
+    request_batch(b)
+    b.set("touchid-rc", 1)
+    b.run()
+    check("пачка: «Не сливать» → слияния нет, сняты обе", len(b.windows()) == 1 and not b.merges()
+          and b.req(7) is None and b.req(8) is None and not b.approve_lines(), b.outs[-1])
+    b = batch_box()
+    request_batch(b)
+    b.set("touchid-rc", 3)
+    b.run()
+    check("пачка: окно без ответа → ждут обе с повтором", not b.merges() and b.req(7).get("wait_until")
+          and b.req(8).get("wait_until"), b.outs[-1])
+    b.set("touchid-rc", 0)
+    b.run(t=T0 + 60)
+    check("пачка: повтор не раньше 10 минут", len(b.windows()) == 1, b.windows())
+    b.run(t=T0 + 601)
+    check("пачка: через 10 минут — окно снова, слиты обе", len(b.windows()) == 2
+          and b.merges() == [merge_argv(7), merge_argv(8)], b.outs[-1])
+    b = batch_box()
+    request_batch(b)
+    b.set("touchid-rc", 2)
+    b.run()
+    note = open(b.notify_log).read() if os.path.exists(b.notify_log) else ""
+    check("пачка: окно не показать → одно уведомление на пачку, обе ждут щелчка",
+          note.count("merge run --click") == 1 and b.req(7).get("notified") and b.req(8).get("notified")
+          and not b.merges(), (note, b.outs[-1]))
+    b.set("touchid-rc", 0)
+    b.run(click=True)
+    check("пачка: щелчок → одно окно, слиты обе", len(b.windows()) == 2
+          and b.merges() == [merge_argv(7), merge_argv(8)], b.outs[-1])
+
+
+def test_batch_bad_field():
+    b = Box()
+    b.request()
+    p = b.req_path()
+    d = json.load(open(p))
+    d["batch"] = [8, 9]   # своего номера в пачке нет
+    json.dump(d, open(p, "w"))
+    b.run()
+    check("заявка с пачкой без своего номера — битая, удалена, окна нет", b.req() is None and not b.windows()
+          and "битая заявка" in b.outs[-1], b.outs[-1])
+
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
