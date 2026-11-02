@@ -977,6 +977,25 @@ def test_inbox_turn_end_decided_once():
         ib.e.gate_ok = (True, None)
         ib.run(MON + 1200)
         check(not ib.starts, f"новая сессия, видевшая файл, поднята снова: {ib.starts}")
+    for restart in (True, False):  # metis-0664, probe3: после решения «после хода» сессия снова работала и закончила ход
+        with Inbox() as ib:
+            a = ib.e.agent("hermes-site", "done")
+            ib.transcript(a, MON + 50)
+            ib.run(MON)
+            ib.word(MON + 100)
+            ib.order("hermes-site", "2026-10-19-1203-zeus-a.md", MON + 200)
+            ib.e.gate_ok = (False, "жёлтая зона днём")
+            ib.run(MON + 300)
+            a["state"] = "working"
+            ib.run(MON + 400)
+            if restart:
+                a["startedAt"] = (MON + 350) * 1000
+            a["state"] = "done"
+            ib.transcript(a, MON + 500)
+            ib.e.gate_ok = (True, None)
+            ib.run(MON + 600)
+            check(not ib.starts, f"сессия ({'новый процесс' if restart else 'тот же процесс'}) работала после файла, "
+                  f"а шлюз открылся: подъём по разобранному поручению {ib.starts}")
 
 
 def test_inbox_no_owner_word():
