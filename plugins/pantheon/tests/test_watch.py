@@ -3452,11 +3452,11 @@ def test_auto_rm_done_stopped_0250():
     check(e.alerts().count("a8a8a8a8 осталась") == 1, "тот же отказ — вторая тревога")
 
 
-def _hestia_env(task_status):
+def _hestia_env(task_status, extra=""):
     """Гестия с задачей: run-файл окна (куда его пишет wake hestia) держит PANTHEON_TASK, реестр демона есть."""
     e = Env()
     e.direction("athena-x")
-    e.task("athena-0071", "athena-x", status=task_status)
+    e.task("athena-0071", "athena-x", status=task_status, extra=extra)
     os.makedirs(e.st("settings", "run"), exist_ok=True)
     json.dump({"env": {"PANTHEON_TASK": "athena-0071"}}, open(e.st("settings", "run", "hestia.json"), "w"))
     _roster(e, {"other": {"pid": 999999}})
@@ -3465,6 +3465,49 @@ def _hestia_env(task_status):
 
 def _hestia_calls(e):
     return [c for c in e.calls() if c[:1] in (["stop"], ["rm"]) and len(c) > 1 and c[1].startswith("h")]
+
+
+def P_task_valid(e, status):
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+    import tasks
+    return (tasks.load_tasks(e.pantheon).get("athena-0071") or (0, {}, 0))[1].get("status") == status
+
+
+def test_hestia_reap_waiting_open_0677():
+    """metis-0677: задача окна Гестии waiting/inbox — открыта (ждёт consent владельца): живую сессию не гасим; done|dropped
+    — гасим. Неизвестная задача — по-прежнему гасим."""
+    for status in ("waiting", "inbox"):
+        e = _hestia_env(status, extra="next: ждём consent\nwaiting_on: human\n" if status == "waiting" else "")
+        e.agents([bg("hestia", "done", "h8h8h8h8-1", pid=os.getpid())])
+        check(P_task_valid(e, status), f"0677: тестовая задача {status} не загружается")
+        e.run("watch", t=T0)
+        check(not _hestia_calls(e), f"0677: {status} — Гестия убрана: {e.calls()}")
+    for status in ("done", "dropped"):
+        e = _hestia_env(status)
+        e.agents([bg("hestia", "done", "h9h9h9h9-1", pid=os.getpid())])
+        e.run("watch", t=T0)
+        check(_hestia_calls(e) == [["stop", "h9h9h9h9"], ["rm", "h9h9h9h9"]], f"0677: {status} не убрана: {e.calls()}")
+
+
+def test_stop_removes_ghost_0685():
+    """metis-0685: pantheon stop убирает и призрака (запись без процесса, reconcile_agents ставит ghost) — stop+rm, и число
+    остановленных его считает; живая копия и призрак одного имени — каждая по разу."""
+    e = Env()
+    e.direction("gh-dir")
+    _roster(e, {"other": 999999})
+    e.agents([bg("gh-dir", "blocked", "g1g1g1g1-1")])
+    r = e.run("stop", "gh-dir", t=T0)
+    c = e.calls()
+    check(["stop", "g1g1g1g1"] in c and ["rm", "g1g1g1g1"] in c, f"0685: призрак не убран: {c}")
+    check("остановлено сессий 1" in r.stdout, f"0685: призрак не посчитан: {r.stdout!r}")
+    e = Env()
+    e.direction("gh-dir")
+    _roster(e, {"other": 999999})
+    e.agents([bg("gh-dir", "blocked", "g2g2g2g2-1"), bg("gh-dir", "working", "g3g3g3g3-1", pid=os.getpid())])
+    r = e.run("stop", "gh-dir", t=T0)
+    c = e.calls()
+    check(c.count(["stop", "g2g2g2g2"]) == 1 and c.count(["stop", "g3g3g3g3"]) == 1 and "остановлено сессий 2" in r.stdout,
+          f"0685: призрак с живой копией: {c} {r.stdout!r}")
 
 
 def test_hestia_reap_0671():
