@@ -657,6 +657,9 @@ def inbox_wake(agents, registry, doms, t):
             continue
         hold = W.holders(d, agents, registry)
         if any(x.get("state") != "done" or not W.idle_holder(x) for x in hold):
+            if after.get(d):  # metis-0664: сессия сделала ход после файла — «после хода» было решено до него; решаем заново
+                after[d] = {}
+                save()
             continue  # работает, ждёт вас или открыта во вкладке — поручение дойдёт до неё само
         rows = [a for a in agents if P.name_alias(d).fullmatch(str(a.get("name") or ""))]
         last = max(rows, key=lambda a: a.get("startedAt") or 0) if rows else None
