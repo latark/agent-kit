@@ -9,8 +9,17 @@
 #      проверочного запуска нет: хук на каждое действие не платит лишним процессом. Относительные папки PATH пропускаются.
 #   2. python3 из PATH, если он 3.11+ (проверочный запуск): для версий новее списка.
 # Не нашёл — событие PreToolUse получает код 2 и причину в stderr: действие остановлено, а не пропущено молча.
-# Остальные события (PostToolUse, Stop, UserPromptSubmit, SessionStart) — код 0 без вывода: они ничего не защищают,
-# а код 2 на Stop или UserPromptSubmit сам мешал бы работе.
+# Остальные события (PostToolUse, Stop, UserPromptSubmit, SessionStart) — код 0 без вывода: код 2 на Stop или
+# UserPromptSubmit сам мешал бы работе. Защитой из них служат только Stop-хуки ролей (проверка перед сдачей, DONE-02):
+# без скрипта они отпускают разработчика без проверки, и след остаётся только строкой в журнале (ниже).
+# Так же — пропавший файл скрипта (metis-0330 F3: переименовали, удалили, сломанный кэш плагина). Python на нём
+# выходит с кодом 2, а Claude Code читает 2 как запрет: Stop не давал бы закончить ход, UserPromptSubmit глотал бы
+# сообщения владельца — во всех окнах сразу. Теперь до запуска: нет файла <…>.py или он не читается —
+# PreToolUse код 2 с причиной, остальные события код 0. Событие узнаётся по "hook_event_name" в stdin; пустой или
+# мусорный stdin считается не-PreToolUse (код 0): Claude Code это поле шлёт всегда. Хук отключают правкой записи
+# в hooks.json, а не переименованием файла.
+# Каждый такой отказ — строка «время<TAB>launcher<TAB>событие<TAB>что» в ~/.local/state/pantheon/logs/guard-failures.log
+# (без текста события): её считает сводка планового прохода, молчаливого кода 0 не бывает без следа.
 #
 # Копии файла — plugins/guard/hooks/python.sh и plugins/pantheon/hooks/python.sh: плагины ставятся порознь.
 # Тест guard tests/test_hooks_json.py сверяет, что копии одинаковые. Строки FW= и DIRS= тест подменяет.
@@ -45,11 +54,33 @@ if [ -z "$py" ]; then
     esac
 fi
 
-if [ -z "$py" ]; then
+# Отказ запускателя: причина $1 (для журнала), текст для PreToolUse $2. stdin читает только здесь — exec ниже
+# получает его нетронутым.
+fail() {
+    ev=other
     if /usr/bin/grep -Eq '"hook_event_name"[[:space:]]*:[[:space:]]*"PreToolUse"'; then
-        printf '%s\n' "хук ${1##*/}: нужен Python 3.11+, а его нет (python3.14…3.11 в /opt/homebrew/bin, /usr/local/bin, python.org и PATH; python3 из PATH старше 3.11). Действие остановлено. Поставить: brew install python@3.14. Системный /usr/bin/python3 на macOS — 3.9, он не подходит." >&2
+        ev=PreToolUse
+    fi
+    if [ -n "$HOME" ]; then
+        log=$HOME/.local/state/pantheon/logs
+        { /bin/mkdir -p "$log" && printf '%s\tlauncher\t%s\t%s\n' "$(/bin/date +%Y-%m-%dT%H:%M:%S)" "$ev" "$1" \
+            >>"$log/guard-failures.log"; } 2>/dev/null
+    fi
+    if [ "$ev" = PreToolUse ]; then
+        printf '%s\n' "$2" >&2
         exit 2
     fi
     exit 0
+}
+
+if [ -z "$py" ]; then
+    fail "no-python ${1##*/}" "хук ${1##*/}: нужен Python 3.11+, а его нет (python3.14…3.11 в /opt/homebrew/bin, /usr/local/bin, python.org и PATH; python3 из PATH старше 3.11). Действие остановлено. Поставить: brew install python@3.14. Системный /usr/bin/python3 на macOS — 3.9, он не подходит."
 fi
+case $1 in
+    *.py)
+        if ! [ -f "$1" ] || ! [ -r "$1" ]; then
+            fail "no-script ${1##*/}" "хук ${1##*/}: файла скрипта нет или он не читается ($1). Действие остановлено: защита не запустилась. Переустановить плагин: claude plugin update <плагин>@agent-kit; хук отключают правкой hooks.json, а не переименованием файла."
+        fi
+        ;;
+esac
 exec "$py" -I "$@"
