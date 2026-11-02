@@ -116,7 +116,9 @@ write = ["~/state/x"]
     check("запись в ~/.ssh не дана", not any(x.endswith("/.ssh") for x in a["sandbox"]["filesystem"]["allowWrite"]))
     check("excludedCommands не дан", "curl *" not in a["sandbox"]["excludedCommands"])
     check("write шаблоном не дан", not any("*" in x for x in a["sandbox"]["filesystem"]["allowWrite"]))
+    # grants.toml в STATE запись не даёт; сама сборка даёт только очередь heavy (metis-0659, «да» владельца 02.11)
     check("write в состояние Пантеона не дан", not any(x.startswith(os.path.realpath(state))
+                                                       and x != os.path.join(os.path.realpath(state), "locks", "heavy-queue")
                                                        for x in a["sandbox"]["filesystem"]["allowWrite"]))
     for n in ("hq", "hestia", "job-clio"):
         if os.path.isfile(os.path.join(out, n + ".json")):

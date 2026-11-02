@@ -315,6 +315,7 @@ def path(*parts):
 # hq_open: O_NOFOLLOW|O_NONBLOCK через дескриптор папки, затем fstat — обычный файл, одна ссылка, владелец — мы; иначе
 # UnsafeFile, и файл не тронут. Ждущий замок в hq-rw ждёт не дольше HQ_LOCK_WAIT: окно не повесит проход.
 HQ_RW = "hq-rw"
+HEAVY_QUEUE = "heavy-queue"  # папка билетов очереди heavy в STATE/locks (metis-0659)
 HQ_RW_DIRS = ("locks", "autostart-reset")
 HQ_LOCK_WAIT = float(os.environ.get("PANTHEON_HQ_LOCK_WAIT") or 60)  # с; переменная — для тестов
 # errno, которые даёт подложенная запись (ссылка, FIFO без читателя, папка, не папка на месте папки) — это UnsafeFile
@@ -2671,6 +2672,12 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
 
     memory = memory_dirs()
     pmap = plugin_map_load()
+    # очередь обёртки heavy по порядку прихода (metis-0659): билет — файл в STATE/locks/heavy-queue, окно роли без
+    # записи туда ждёт опросом мест. Запись — только в эту папку (не во весь locks: там замки прохода и Touch ID),
+    # «да» владельца 02.11 в окне agent-kit-62. Ссылка на месте папки — не даём: иначе запись ушла бы по ссылке
+    queue = path("locks", HEAVY_QUEUE)
+    os.makedirs(queue, mode=0o700, exist_ok=True)
+    queue = os.path.realpath(queue) if os.path.isdir(queue) and not os.path.islink(queue) else None
 
     def one(name, folders, own, compact, deny, allow=None, agents=None, direction=False, auto_allow=None):
         if direction:
@@ -2689,6 +2696,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                   f"{skipped}", file=sys.stderr)
         own_real = os.path.realpath(own) if os.path.isdir(own) and not os.path.islink(own) else None
         write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r] + memory
+        write += [queue] if queue else []  # в песочницу (Bash), не в правила Edit/Write
         cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
         ok = [r for r in real if r]
         # сетевой git: окну направления — всегда, мастерской — при SSH-remote (P0-4, metis-0064)

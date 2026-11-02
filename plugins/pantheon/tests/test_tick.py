@@ -377,6 +377,12 @@ def main():
           and real("projects/br") in aw and real("pantheon/directions/athena-shop") in aw
           and not any("~" in x or "agent-kit" in x for x in aw)
           and "~/**/.git/config" in box["filesystem"]["denyWrite"] and sa["autoCompactWindow"] == 200000)
+    hq = os.path.realpath(os.path.join(state, "locks", "heavy-queue"))
+    check("песочница: запись в очередь heavy (STATE/locks/heavy-queue) — у направлений и мастерской, не во весь locks "
+          "и не правилами Edit/Write (metis-0659)",
+          os.path.isdir(hq) and all(hq in w["sandbox"]["filesystem"]["allowWrite"] for w in (sa, sm, sw, sn, sz))
+          and not any(x == os.path.dirname(hq) for x in aw)
+          and not any("heavy-queue" in x for x in sa.get("permissions", {}).get("allow", [])))
     check("песочница: git push/fetch/pull мимо песочницы у каждого направления, и без SSH-remote (metis-0064)",
           all("git push *" in w["sandbox"]["excludedCommands"] and "git push" in w["sandbox"]["excludedCommands"]
               for w in (sa, sm, sn, sz)))
@@ -393,6 +399,15 @@ def main():
     swx = load("workshop")["sandbox"]["excludedCommands"]
     check("песочница: у мастерской при SSH-remote в ~/projects/workshop git push/fetch/pull мимо песочницы",
           all(c in swx for c in ("git push", "git push *", "git fetch", "git fetch *", "git pull", "git pull *")))
+    # ссылка на месте папки очереди — запись не даём (иначе она ушла бы по ссылке)
+    os.rmdir(hq)
+    os.makedirs(os.path.join(tmp, "elsewhere"), exist_ok=True)
+    os.symlink(os.path.join(tmp, "elsewhere"), os.path.join(state, "locks", "heavy-queue"))
+    subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
+    awl = load("athena-shop")["sandbox"]["filesystem"]["allowWrite"]
+    check("песочница: ссылка на месте heavy-queue — записи нет ни по ссылке, ни по цели",
+          not any("heavy-queue" in x or x == os.path.realpath(os.path.join(tmp, "elsewhere")) for x in awl))
+    os.unlink(os.path.join(state, "locks", "heavy-queue"))
     _shutil.rmtree(wr)
     subprocess.run([PY311, "-I", RUN_PY, "domains", "build"], env=env, capture_output=True)
     check("песочница: репозиторий с SSH-remote убран → у мастерской сетевого git снова нет",
@@ -507,7 +522,9 @@ def main():
           "настоящими путями; сама hq-rw, замки прохода (locks/), stopped/, owner-log/, autostart.json закрыты",
           [x for x in sw_hq if x == st_real or x.startswith(st_real + "/")]
           == [os.path.join(hq_rw, "locks"), os.path.join(hq_rw, "autostart-reset")]
-          and not any(x.startswith(st_real + "/") for x in sa["sandbox"]["filesystem"]["allowWrite"]))
+          # окно направления пишет в STATE только папку очереди heavy («да» владельца 02.11, metis-0659)
+          and [x for x in sa["sandbox"]["filesystem"]["allowWrite"] if x.startswith(st_real + "/")]
+          == [os.path.join(st_real, "locks", "heavy-queue")])
     check("окно штаба: мимо песочницы — прежний список пульта и gh PR (view/checks/list/edit), без сетевого git "
           "(metis-0064, metis-0247, metis-0626)",
           hb["excludedCommands"] == ["pantheon alert *", "pantheon start *", "pantheon wake", "pantheon wake *",
