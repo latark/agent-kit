@@ -15,8 +15,9 @@ heavy-cmd-2.lock. Свободного места нет — команда жд
 Очередь (metis-0659): места получают по порядку прихода, а не кто первым опросил место. Ждущая команда кладёт билет в
 locks/heavy-queue/ (имя — время прихода и pid) и держит на нём flock, пока жива; берёт место, только когда перед ней нет
 живого билета. Билеты умерших (блокировка снята системой, в том числе после kill -9) следующий в очереди убирает сам. Папку
-билетов создать или писать в неё нельзя (песочница) — билета нет, команда ждёт опросом мест, как раньше. Сервер
-(--server) в очередь не встаёт: его жетон отдельный.
+билетов создать или писать в неё нельзя (песочница) — билета нет, команда ждёт опросом мест, как раньше; так же
+при ссылке на месте папки. Чужое в папке, что не обычный файл (FIFO, папка), пропускается. Сервер (--server): за жетон
+сервера очереди нет (ждёт опросом), а за два места, как у любой команды, — по порядку прихода.
 HEAVY_WAIT_MAX=<с> — ждать места не дольше: не дождалась — код 75 без запуска (Stop-хук разработчика так отличает
 «очередь» от «красной проверки»). Python 3.9+.
 """
@@ -24,6 +25,7 @@ import contextlib
 import fcntl
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -33,6 +35,7 @@ LOCKS = os.path.join(os.path.realpath(os.environ.get("PANTHEON_STATE") or
 SLOTS = ("heavy-cmd-1", "heavy-cmd-2")
 SERVER = "heavy-server"  # жетон долгого процесса: держит его не больше одного сервера
 WAIT_EXIT = 75
+POLL = 0.5  # с между опросами мест
 
 QUEUE = "heavy-queue"  # папка билетов очереди на два места (metis-0659)
 TICKET_GRACE = 5  # с: билет только создан, блокировка на нём ещё не взят — не считаем умершим
@@ -45,57 +48,66 @@ class Ticket:
     нет, команда ждёт как раньше, опросом мест."""
 
     def __init__(self):
-        self.fd = self.path = None
+        self.fd = self.dfd = self.name = None
         qdir = os.path.join(LOCKS, QUEUE)
         try:
             os.makedirs(qdir, exist_ok=True)
-            self.path = os.path.join(qdir, f"{time.time_ns():020d}-{os.getpid()}")
-            self.fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            # папку открываем без перехода по ссылке и работаем через неё: heavy идёт и вне песочницы, а ссылка на месте
+            # heavy-queue иначе дала бы удалять файлы в чужой папке
+            self.dfd = os.open(qdir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            self.name = f"{time.time_ns():020d}-{os.getpid()}"
+            self.fd = os.open(self.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.dfd)
             fcntl.flock(self.fd, fcntl.LOCK_EX)
             os.write(self.fd, f"{os.getpid()}\n".encode())
         except OSError:
             self.drop()
 
     def ahead(self):
-        """Есть ли перед нами живой билет. Билеты умерших владельцев убирает."""
+        """Есть ли перед нами живой билет. Билеты умерших владельцев убирает. Не обычный файл в папке (FIFO,
+        устройство, папка, ссылка) пропускает: не открывает вслепую, не ждёт и не удаляет."""
         if self.fd is None:
             return False
-        qdir = os.path.dirname(self.path)
         try:
-            names = sorted(os.listdir(qdir))
+            names = sorted(os.listdir(self.dfd))
         except OSError:
             return False
-        mine = os.path.basename(self.path)
         for name in names:
-            if name >= mine:
+            if name >= self.name:
                 break
-            p = os.path.join(qdir, name)
             try:
-                fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
+                fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=self.dfd)
             except OSError:
                 continue
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return True  # владелец жив и держит блокировку
-            finally:
-                os.close(fd)
-            try:  # блокировка свободна: владелец умер — или билет только создан
-                st = os.stat(p)
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return True  # владелец жив и держит блокировку
+                except OSError:
+                    continue
+                # блокировка свободна: владелец умер — или билет только создан
                 if st.st_size > 0 or time.time() - st.st_mtime > TICKET_GRACE:
-                    os.unlink(p)
+                    with contextlib.suppress(OSError):
+                        os.unlink(name, dir_fd=self.dfd)
                 else:
                     return True
             except OSError:
                 pass
+            finally:
+                os.close(fd)
         return False
 
     def drop(self):
         if self.fd is not None:
             with contextlib.suppress(OSError):
-                os.unlink(self.path)
+                os.unlink(self.name, dir_fd=self.dfd)
             os.close(self.fd)
-        self.fd = self.path = None
+        if self.dfd is not None:
+            os.close(self.dfd)
+        self.fd = self.dfd = self.name = None
 
 
 def try_slot(names=SLOTS):
@@ -181,10 +193,10 @@ def main(argv):
                     print(f"heavy: {what} — не дождалась места за {int(waited)} с, команда не запускалась",
                           file=sys.stderr)
                     return WAIT_EXIT
-                if waited % 60 == 0:
-                    print(f"heavy: {what} — жду ({waited // 60} мин)", file=sys.stderr)
-                time.sleep(2)
-                waited += 2
+                if waited % 60 == 0:  # шаг опроса 0,5 с: освободившееся место берётся сразу, а не через 2 с
+                    print(f"heavy: {what} — жду ({int(waited // 60)} мин)", file=sys.stderr)
+                time.sleep(POLL)
+                waited += POLL
                 fd = None if ticket and ticket.ahead() else try_slot(names)[0]
         finally:
             if ticket:

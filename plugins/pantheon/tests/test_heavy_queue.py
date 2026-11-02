@@ -14,6 +14,7 @@ import importlib.machinery
 import importlib.util
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -75,7 +76,7 @@ def main():
         check("билет умершего лежит, пока впереди живой b", len(left()) == 3 and c.ahead(), str(left()))
         b.drop()
         check("умерший билет не блокирует и убран: перед c никого, остался только её билет",
-              not c.ahead() and left() == [os.path.basename(c.path)], str(left()))
+              not c.ahead() and left() == [c.name], str(left()))
         c.drop()
         check("все билеты сняты — папка пуста", left() == [], str(left()))
 
@@ -86,7 +87,7 @@ def main():
         check("живой билет впереди: места свободны, команда не запускалась (75)",
               r.returncode == 75 and "ran" not in r.stdout and "жду (0 мин)" in r.stderr and "не дождалась" in r.stderr,
               f"{r.returncode} {r.stdout!r} {r.stderr!r}")
-        check("не дождавшаяся команда свой билет убрала", left() == [os.path.basename(front.path)], str(left()))
+        check("не дождавшаяся команда свой билет убрала", left() == [front.name], str(left()))
         front.drop()
         r = run(state, "/bin/sh", "-c", "echo ran", wait_max=5)
         check("очередь пуста — команда идёт сразу, код выхода команды сохранён",
@@ -134,6 +135,55 @@ def main():
         check("папку билетов не создать — команда идёт опросом мест", r.returncode == 0 and "ran" in r.stdout,
               f"{r.returncode} {r.stderr!r}")
         os.unlink(qdir)
+
+        # FIFO в очереди (его мог положить кто угодно с записью в папку) не вешает команду и остаётся на месте
+        os.makedirs(qdir)
+        fifo = os.path.join(qdir, "00000000000000000001-1")
+        os.mkfifo(fifo)
+        env = {"PATH": os.environ["PATH"], "HOME": state, "PANTHEON_STATE": state}
+        p = subprocess.Popen([sys.executable, "-I", HEAVY, "/bin/sh", "-c", "echo ran"], env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            out, err = p.communicate(timeout=15)
+            hung = False
+        except subprocess.TimeoutExpired:
+            p.kill()  # SIGKILL
+            out, err = p.communicate()
+            hung = True
+        check("FIFO в очереди: команда не висит и выполнилась", not hung and p.returncode == 0 and "ran" in out,
+              f"hung={hung} {p.returncode} {out!r} {err!r}")
+        check("FIFO не удалён (удаляются только обычные файлы), билет команды снят",
+              left() == ["00000000000000000001-1"] and stat.S_ISFIFO(os.lstat(fifo).st_mode), str(left()))
+        os.unlink(fifo)
+        os.rmdir(qdir)
+
+        # ссылка на месте папки очереди: heavy идёт и вне песочницы — в цели ничего не трогает
+        victim = os.path.join(tmp, "victim")
+        os.makedirs(victim)
+        for n, data in ((".env", "SECRET=1\n"), ("00000000000000000000-1", "1\n")):
+            with open(os.path.join(victim, n), "w") as f:
+                f.write(data)
+        os.symlink(victim, qdir)
+        r = run(state, "/bin/sh", "-c", "echo ran", wait_max=5)
+        check("ссылка на месте папки очереди: команда выполнилась", r.returncode == 0 and "ran" in r.stdout,
+              f"{r.returncode} {r.stderr!r}")
+        check("ссылка на папку: файлы цели целы, .env на месте",
+              sorted(os.listdir(victim)) == [".env", "00000000000000000000-1"]
+              and open(os.path.join(victim, ".env")).read() == "SECRET=1\n", str(sorted(os.listdir(victim))))
+        t = H.Ticket()
+        check("Ticket по ссылке на папку: билета нет", t.fd is None and not t.ahead())
+        t.drop()
+        os.unlink(qdir)
+
+        # --server: за жетон очереди нет, за два места есть (порядок прихода)
+        front = H.Ticket()
+        r = run(state, "--server", "/bin/sh", "-c", "echo ran", wait_max=2)
+        check("--server стоит в очереди на места: живой билет впереди — 75, не запускалась",
+              r.returncode == 75 and "ran" not in r.stdout, f"{r.returncode} {r.stdout!r} {r.stderr!r}")
+        front.drop()
+        r = run(state, "--server", "/bin/sh", "-c", "echo ran", wait_max=5)
+        check("--server при пустой очереди идёт, билетов не осталось", r.returncode == 0 and "ran" in r.stdout
+              and left() == [], f"{r.returncode} {r.stderr!r} {left()}")
         print(f"({time.time() - t0:.0f} с)")
     finally:
         shutil.rmtree(tmp, True)

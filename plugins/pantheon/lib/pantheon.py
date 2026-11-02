@@ -1855,7 +1855,8 @@ def domains_build(if_changed=False):
     # живую сессию с проблемой проектных allow останавливает только путь тика (--if-changed): ручная сборка и тесты
     # зовут её с настоящим claude в PATH — claude stop из них остановил бы ваши сессии
     built = sandbox_build(domains, policy_path, stores, leads, stop_live=if_changed)
-    os.makedirs(path("locks", "heavy-queue"), exist_ok=True)  # билеты очереди обёртки heavy (metis-0659)
+    with contextlib.suppress(OSError):  # файл или ссылка на месте папки — не повод ронять сборку
+        os.makedirs(path("locks", "heavy-queue"), exist_ok=True)  # билеты очереди обёртки heavy (metis-0659)
     os.makedirs(path("locks"), exist_ok=True)
     for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):  # места обёртки heavy: роль в песочнице сама их не создаст
         open(path("locks", slot + ".lock"), "a").close()
@@ -4689,7 +4690,8 @@ def install():
             os.remove(link)
         os.symlink(os.path.join(CURRENT, "bin", cmd), link)
     link = os.path.join(HOME, ".local", "bin", "pantheon")
-    os.makedirs(path("locks", "heavy-queue"), exist_ok=True)  # билеты очереди обёртки heavy (metis-0659)
+    with contextlib.suppress(OSError):  # файл или ссылка на месте папки — не повод ронять сборку
+        os.makedirs(path("locks", "heavy-queue"), exist_ok=True)  # билеты очереди обёртки heavy (metis-0659)
     os.makedirs(path("locks"), exist_ok=True)
     for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):
         open(path("locks", slot + ".lock"), "a").close()
