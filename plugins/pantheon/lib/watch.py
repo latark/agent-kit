@@ -573,7 +573,7 @@ def hestia_reap(agents, t):
     закончившая ход). Убираем claude stop + rm (P.stop_and_rm, как pantheon stop) БЕЗ метки stopped/hestia: с ней
     следующий wake hestia отказал бы «остановлена вами». Убираем, если (а) процесса нет вовсе (ghost, либо
     done/stopped/failed без pid) или (б) задача окна (PANTHEON_TASK из settings/run/hestia.json, куда её кладёт wake
-    hestia) не открыта либо неизвестна, а сессия не working. Working с открытой задачей, blocked с живым процессом и
+    hestia) закрыта (done|dropped) либо неизвестна, а сессия не working. Working с открытой задачей, blocked с живым процессом и
     открытой задачей, запись моложе минуты и подъём под start-hestia — не трогаем. Переписка остаётся. Пауза
     планировщика и техперезапуск — как у auto_rm."""
     if dry() or P.maintenance_active() or os.path.exists(P.path("paused")):
@@ -586,7 +586,7 @@ def hestia_reap(agents, t):
     head = None
     if tid and P.tasks_mod().ID_RE.fullmatch(str(tid)):
         head = (P.tasks_mod().load_tasks(P.PANTHEON).get(tid) or (None, None, None))[1]
-    is_open = bool(head) and head.get("status") in ("todo", "doing", "review")
+    is_open = bool(head) and head.get("status") not in ("done", "dropped")  # waiting/inbox — открыта (metis-0677)
     with P.lock("start-hestia", block=False) as got:
         if not got:
             return  # wake hestia поднимает сессию прямо сейчас
@@ -2503,9 +2503,13 @@ def _stop_locked(name, agents, who):
     P.write_atomic(P.path("stopped", name), f"{P.stamp()} {who}\n")
     n = 0
     left = []
+    seen = set()
+    # metis-0685: призрак (reconcile_agents: ghost=True, процесса нет) тоже убираем — иначе stop отвечает «0» и запись висит
     for a in P.live_copies(name, agents, registry=[]) + [a for a in agents if a.get("name") == name
-                                                          and a.get("state") == "done" and a.get("pid")]:
-        if a.get("id"):
+                                                          and a.get("state") == "done" and a.get("pid")] \
+            + [a for a in agents if a.get("name") == name and a.get("ghost")]:
+        if a.get("id") and a["id"] not in seen:
+            seen.add(a["id"])
             reason = P.stop_and_rm(name, a["id"], "stop")  # metis-0239: без rm Claude Code сам перезапускает фоновую сессию
             P.start_log(f"stop\t{name}\t{a.get('name')}\t{a['id']}\t{who}")
             if reason:
