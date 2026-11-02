@@ -626,6 +626,12 @@ _DW_LINE = re.compile(rf"^\s*(?:#{{1,6}}\s*)?{DONE_WHEN}\s*:?\s*$", re.IGNORECAS
 _DW_ITEM = re.compile(r"^\s*[-*]\s*\[([ xXхХ])\]\s*(.*?)\s*$")
 
 
+def _is_stub(text):
+    """Текст пункта — заглушка шаблона (DONE_WHEN_HINT), с любыми пробелами внутри и по краям (metis-0711). Единственное
+    место сравнения: done_criteria, criteria_count, no_criteria и split узнают заглушку одинаково."""
+    return " ".join(str(text).split()) == DONE_WHEN_HINT
+
+
 def done_criteria(body, with_stub=False):
     """Пункты «Готово, когда» в теле → [(отмечен, текст)]. Раздел — строка «## Готово, когда» или «Готово, когда:», дальше
     чек-лист; кончается заголовком или любой строкой не из списка. Заглушка шаблона (DONE_WHEN_HINT) пунктом не считается
@@ -637,7 +643,7 @@ def done_criteria(body, with_stub=False):
             continue
         m = _DW_ITEM.match(ln)
         if m:
-            if with_stub or " ".join(m.group(2).split()) != DONE_WHEN_HINT:
+            if with_stub or not _is_stub(m.group(2)):
                 out.append((m.group(1) != " ", m.group(2)))
         elif ln.strip():
             break
@@ -802,7 +808,7 @@ def task_split(pantheon, t, tid, title, done_when=None, text=None, actor="аге
                          "верните direction задачи в направление её папки")
     if not str(title or "").strip():
         raise ValueError("нужен --title: название остатка")
-    items = [x for x in (done_when or []) if str(x).strip()] or [x for done, x in done_criteria(b0) if not done and x != DONE_WHEN_HINT]
+    items = [x for x in (done_when or []) if str(x).strip()] or [x for done, x in done_criteria(b0) if not done and not _is_stub(x)]
     fields = {k: h0[k] for k in ("owner", "parent", "mode", "mode_why", "priority", "executor") if h0.get(k) is not None}
     fields.update({k: v for k, v in (("mode", mode), ("mode_why", mode_why)) if v})  # у исходной в пачке нет режима — задаётся здесь
     fields.update({"from": "остаток", "source": tid, "tags": sorted({*(h0.get("tags") or []), REST_TAG})})
@@ -1077,7 +1083,7 @@ def direction_summary(tasks, names=()):
         c = out.setdefault(str(h.get("direction")), blank())
         c["open"] += 1
         c["no_pack"] += not in_pack(h, tasks)
-        c["no_criteria"] += not [x for _, x in done_criteria(b) if x != DONE_WHEN_HINT]
+        c["no_criteria"] += not [x for _, x in done_criteria(b) if not _is_stub(x)]
         if h.get("mode") in (None, ""):
             c["no_mode"] += 1
             c["no_mode_ids"].append(tid)
@@ -1424,7 +1430,7 @@ def outcomes(tasks):
 def criteria_count(body):
     """«N из M» отмеченных пунктов «Готово, когда» (metis-0506); только заглушка-подсказка — «не заданы»; раздела нет — None."""
     items = done_criteria(body, with_stub=True)
-    real = [ok for ok, text in items if text != DONE_WHEN_HINT]
+    real = [ok for ok, text in items if not _is_stub(text)]
     if real:
         return f"{sum(real)} из {len(real)}"
     return "не заданы" if items else None

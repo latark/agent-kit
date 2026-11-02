@@ -278,34 +278,76 @@ def load_gate():
     return None
 
 
-def sandbox_core(repo, p, env=None, gate=None):
+def base_tip(repo, branch, env=None, gate=None, timeout=90):
+    """Живая вершина ветки branch в repo (gh api repos/<repo>/ref heads/<branch>) — SHA коммита или None. Как _base_tip
+    шлюза, но gh берётся тем же путём, что у остального прохода (PANTHEON_GH, env прохода), а не из PATH (metis-0711, С1):
+    у плана PATH может быть без gh. Формат имени ветки и SHA — константы шлюза."""
+    gate = gate or load_gate()
+    if gate is None or not isinstance(branch, str) or not gate.BRANCH_RE.fullmatch(branch):
+        return None
+    got, _ = gh_json(["api", f"repos/{repo}/git/ref/heads/{branch}"], env, timeout=timeout)
+    ref = got if isinstance(got, dict) else {}
+    obj = ref.get("object") if isinstance(ref.get("object"), dict) else {}
+    sha = obj.get("sha")
+    if ref.get("ref") != "refs/heads/" + branch or obj.get("type") != "commit" or not isinstance(sha, str) \
+            or not gate.SHA_RE.fullmatch(sha.lower()):
+        return None
+    return sha.lower()
+
+
+def _norm_path(path):
+    p = str(path or "").strip("/").casefold()
+    while p.startswith("./"):
+        p = p[2:].lstrip("/")
+    return p
+
+
+def sandbox_core(repo, p, env=None, gate=None, left=None):
     """Открытый PR (строка gh pr list с files, headRefOid, baseRefOid, baseRefName) правит pantheon.py → задевает ли он
     сборку окон — тем же sandbox_build_changes, что шлюз guard (metis-0404, 0686). Не получить файлы, шлюз или
-    разобрать — True, как у шлюза: ядро. Файла pantheon.py в PR нет — False без запросов."""
+    разобрать — True, как у шлюза: ядро. Файла pantheon.py в PR нет — False без запросов. Переименование — ядро, как у
+    шлюза (metis-0711, Д2): старое имя в previous_filename или файл с changeType RENAMED/COPIED, у которого старый путь
+    gh pr list не отдаёт. left — остаток бюджета прохода, сек (fetch): каждый вызов gh ждёт не больше min(90, left()),
+    остаток не больше секунды — ядро (Д1)."""
     gate = gate or load_gate()
     if gate is None:
         return True
     want = gate.SANDBOX_BUILD_FILE
-    paths = [str(f.get("path") or "").strip("/").casefold() for f in p.get("files") or [] if isinstance(f, dict)]
+    files = [f for f in p.get("files") or [] if isinstance(f, dict)]
+    for f in files:
+        moved = str(f.get("changeType") or "").upper() in ("RENAMED", "COPIED") or f.get("previous_filename") is not None
+        if moved and (f.get("previous_filename") is None or want in (_norm_path(f.get("path")), _norm_path(f.get("previous_filename")))):
+            return True  # старый путь неизвестен или это pantheon.py: переименование — ядро
+    paths = [_norm_path(f.get("path")) for f in files]
     if want not in paths:
         return False
-    if not any(isinstance(f, dict) and f.get("path") == want for f in p.get("files") or []):
+    if not any(f.get("path") == want for f in files):
         return True  # другой регистр, как у шлюза
     head, base = (str(p.get(k) or "").lower() for k in ("headRefOid", "baseRefOid"))
     sha_re = re.compile(r"[0-9a-f]{40}")
     if not sha_re.fullmatch(head) or not sha_re.fullmatch(base):
         return True
-    mb = (gh_text(["api", f"repos/{repo}/compare/{base}...{head}", "--jq", ".merge_base_commit.sha"], env) or "").strip()
-    tip = gate._base_tip(repo, str(p.get("baseRefName") or ""))
+
+    def room():
+        return 90 if left is None else min(90, left())
+
+    def text(args):
+        to = room()
+        return gh_text(args, env, timeout=to) if to > 1 else None
+
+    mb = (text(["api", f"repos/{repo}/compare/{base}...{head}", "--jq", ".merge_base_commit.sha"]) or "").strip()
+    if room() <= 1:
+        return True
+    tip = base_tip(repo, str(p.get("baseRefName") or ""), env, gate, timeout=room())
     if not sha_re.fullmatch(mb) or tip is None:
         return True
 
     def blob(ref):
-        return gh_text(["api", f"repos/{repo}/contents/{want}?ref={ref}", "-H", "Accept: application/vnd.github.raw"], env)
+        return text(["api", f"repos/{repo}/contents/{want}?ref={ref}", "-H", "Accept: application/vnd.github.raw"])
 
     old, new = blob(mb), blob(head)
     tips = [blob(r) for r in dict.fromkeys((base, tip)) if r != mb]
-    if old is None or new is None or any(t is None for t in tips):
+    if old is None or new is None or any(x is None for x in tips):
         return True
     got = gate.sandbox_build_changes(old, new, *tips)
     return got is None or bool(got)
@@ -362,17 +404,19 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
                                    "ids": find_ids(p.get("headRefName"), p.get("body")),
                                    "closes": closing_ids(p.get("headRefName"), p.get("body")),
                                    "part": is_part(p.get("body")),
-                                   "core": open_core(repo, p, core, sandbox)}
+                                   "core": open_core(repo, p, core, sandbox, left)}
                                   for p in o if isinstance(p, dict) and isinstance(p.get("number"), int)]
     save_state(cache_file, {"fetched": t, "merged": merged, "open": opened, "open_prs": open_prs, "errors": errors})
     return errors
 
 
-def open_core(repo, p, core, sandbox):
+def open_core(repo, p, core, sandbox, left=None):
     """Задето ли ядро открытым PR: по путям (core) или сборкой окон в pantheon.py (sandbox)."""
     if core and any(core(f.get("path") or "") for f in p.get("files") or [] if isinstance(f, dict)):
         return True
-    return bool(sandbox) and bool(sandbox(repo, p))
+    if not sandbox:
+        return False
+    return bool(sandbox(repo, p) if left is None else sandbox(repo, p, left))
 
 
 def journal_has(path, T, needle):

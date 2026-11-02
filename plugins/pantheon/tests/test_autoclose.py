@@ -366,8 +366,8 @@ def test_open_core_sandbox_build():
 
     def not_core(path):
         return False
-    real_text, real_tip = A.gh_text, gate._base_tip
-    A.gh_text, gate._base_tip = fake_text, lambda repo, branch: tip
+    real_text, real_tip = A.gh_text, A.base_tip
+    A.gh_text, A.base_tip = fake_text, lambda repo, branch, *a, **k: tip
     try:
         pp = "plugins/pantheon/lib/pantheon.py"
         row = {"number": 7, "headRefOid": head, "baseRefOid": base, "baseRefName": "main", "files": [{"path": pp}]}
@@ -384,7 +384,72 @@ def test_open_core_sandbox_build():
         check("файлы pantheon.py не получить → ядро (как у шлюза)", A.sandbox_core("a/b", row, gate=gate) is True)
         check("путь ядра по списку путей остаётся ядром", A.open_core("a/b", only, lambda x: True, None) is True)
     finally:
-        A.gh_text, gate._base_tip = real_text, real_tip
+        A.gh_text, A.base_tip = real_text, real_tip
+
+
+def test_core_budget_and_rename():
+    """metis-0711: признак ядра в бюджете fetch (Д1), переименование pantheon.py (Д2), gh вершины ветки — из PANTHEON_GH (С1)."""
+    import hashlib
+    gate = A.load_gate()
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="autoclose-core-"))
+    try:
+        slow = os.path.join(tmp, "gh")
+        open(slow, "w").write("#!/bin/sh\ntouch \"$0.ran\"\nsleep 5\nexit 1\n")
+        os.chmod(slow, 0o755)
+        env = {"PATH": "/usr/bin:/bin", "PANTHEON_GH": slow}
+        pp = "plugins/pantheon/lib/pantheon.py"
+        sh = lambda n: hashlib.sha1(str(n).encode()).hexdigest()
+        row = {"number": 7, "headRefOid": sh("h"), "baseRefOid": sh("b"), "baseRefName": "main", "files": [{"path": pp}]}
+        end = time.monotonic() + 2.5
+        t0 = time.monotonic()
+        got = A.sandbox_core("a/b", row, env, gate=gate, left=lambda: end - time.monotonic())
+        el = time.monotonic() - t0
+        check("Д1: медленный gh в пределах бюджета fetch, PR — ядро", got is True and el < 4.0, f"{el:.1f} c {got}")
+        os.remove(slow + ".ran")
+        end = time.monotonic() + 0.5
+        t0 = time.monotonic()
+        got = A.sandbox_core("a/b", row, env, gate=gate, left=lambda: end - time.monotonic())
+        check("Д1: left() <= 1 — ядро без вызова gh", got is True and time.monotonic() - t0 < 1.0 and not os.path.exists(slow + ".ran"))
+
+        seen = []
+
+        def sb(r, p, left=None):
+            seen.append(left)
+            return False
+        tmp2, home, state, gh, env2 = make()
+        try:
+            write_gh(gh, "a/b", "open", [{"number": 1, "headRefName": "x", "body": "", "files": [{"path": pp}]}])
+            A.fetch(os.path.join(state, "p.json"), os.path.join(state, "s.json"), T0, ["a/b"], env=dict(env2), budget=60,
+                    core=lambda x: False, sandbox=sb)
+            check("Д1: fetch передаёт в sandbox остаток бюджета", len(seen) == 1 and callable(seen[0]) and 0 < seen[0]() <= 60, str(seen))
+        finally:
+            shutil.rmtree(tmp2, True)
+
+        n = {"gh": 0}
+        real_text = A.gh_text
+        A.gh_text = lambda *a, **k: n.__setitem__("gh", n["gh"] + 1)
+        try:
+            for name, files in (
+                    ("previous_filename = pantheon.py", [{"path": "plugins/pantheon/lib/old.py", "previous_filename": pp}]),
+                    ("pantheon.py ушёл (путь с ./ и регистром)", [{"path": "x.py", "previous_filename": "./Plugins/Pantheon/lib/pantheon.py"}]),
+                    ("changeType RENAMED, старый путь gh не отдаёт", [{"path": "plugins/pantheon/lib/other.py", "changeType": "RENAMED"}])):
+                check("Д2: переименование — ядро: " + name, A.sandbox_core("a/b", dict(row, files=files), env, gate=gate) is True)
+            check("Д2: обычная правка другого файла — не ядро",
+                  A.sandbox_core("a/b", dict(row, files=[{"path": "README.md", "changeType": "MODIFIED"}]), env, gate=gate) is False)
+        finally:
+            A.gh_text = real_text
+
+        # С1: gh вершины ветки — PANTHEON_GH, а не PATH
+        fake = os.path.join(tmp, "gh2")
+        tip = sh("t")
+        open(fake, "w").write("#!/bin/sh\necho '{\"ref\":\"refs/heads/main\",\"object\":{\"type\":\"commit\",\"sha\":\"%s\"}}'\n" % tip)
+        os.chmod(fake, 0o755)
+        check("С1: base_tip берёт gh из PANTHEON_GH (в PATH его нет)",
+              A.base_tip("a/b", "main", {"PATH": "/usr/bin:/bin", "PANTHEON_GH": fake}, gate) == tip)
+        check("С1: нет gh — None", A.base_tip("a/b", "main", {"PATH": "/nonexistent"}, gate) is None)
+        check("С1: плохое имя ветки — None", A.base_tip("a/b", "../x", {"PANTHEON_GH": fake}, gate) is None)
+    finally:
+        shutil.rmtree(tmp, True)
 
 
 def test_fetch_budget():
@@ -597,6 +662,10 @@ def test_close_criteria():
         check("metis-0712: слит PR, только заглушка → done", T.read(p20)[0].get("status") == "done", str(log) + str(errs))
         check("metis-0712: заглушка + настоящий неотмеченный → review «неотмечено 1» (заглушка не в счёт)",
               T.read(p21)[0].get("status") == "review" and "слит, неотмечено 1" in text(p21), text(p21)[-300:])
+        dbl = T.DONE_WHEN_HINT.replace(" ", "  ", 1)
+        p22 = put(home, "metis-pantheon", "metis-0022", body="Готово, когда:\n- [ ] " + dbl + "\n", created="2026-10-27")
+        T.task_set(home, T0, "metis-0022", {"status": "done"})
+        check("metis-0711: заглушка с двойным пробелом закрытие не держит", T.read(p22)[0].get("status") == "done")
         # остаток: task split пишет result, по нему done проходит без --force
         ph = put(home, "metis-pantheon", "metis-0017", body=two, created="2026-10-27")
         nid, _ = T.task_split(home, T0, "metis-0017", "Второе")
@@ -722,6 +791,7 @@ def main():
     test_mutants()
     test_open_core_sandbox_build()
     test_fetch_budget()
+    test_core_budget_and_rename()
     test_batch_needs_mode()
     test_off_warning()
     test_check()
