@@ -533,7 +533,7 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     # по-прежнему ждёт вас — отказ как раньше; без вопроса он мёртвый и заменяется новой.
     alias = P.name_alias(name)
     ghosts = [a for a in agents or [] if a.get("ghost") and a.get("id") and alias.fullmatch(str(a.get("name") or ""))]
-    live += [a for a in ghosts if a.get("listedState") == "blocked" and a.get("waitingFor")]
+    live += [a for a in ghosts if P.asks_owner(a)]  # detail задания вопросом не считается (argus-249a Б1)
     dead = [a for a in live + ghosts if a.get("noProcess") and a.get("id")]
     dead = [a for i, a in enumerate(dead) if a not in dead[:i]]
     if dead:
@@ -944,14 +944,14 @@ def _wake(dry, over=False):
             continue
         if os.path.exists(P.path("stopped", name)) or load_pause(name):
             continue
-        if P.asks_owner(a):  # metis-0662: призрак с вопросом поднимает ответ владельца, как у отказа pantheon start
-            print(f"пропуск: {name} — ждёт вашего ответа: claude attach {a.get('id')}")
-            continue
         newer = [b for b in agents if b.get("name") == name and (b.get("startedAt") or 0) > (a.get("startedAt") or 0)]
         if newer:
             continue  # эпик уже продолжен новой сессией с тем же именем
         tasks = open_tasks(name)
         if not tasks:
+            continue
+        if P.asks_owner(a):  # metis-0662: призрак с вопросом поднимает ответ владельца, как у отказа pantheon start
+            print(f"пропуск: {name} — ждёт вашего ответа: claude attach {a.get('id')}")
             continue
         fresh = P.fresh_reason(a)  # metis-0147 п. 2: большой контекст и остывший кэш — новая сессия с файла состояния
         how = (f"; свежей сессией ({fresh}), прочитает {' и '.join(P.tilde(p) for p in P.state_files(name))}" if fresh

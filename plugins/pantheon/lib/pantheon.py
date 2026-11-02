@@ -2959,7 +2959,8 @@ def reconcile_agents(data, workers=None):
     реестра демона — правлен меньше минуты назад (respawn: запись claude agents хранит старый startedAt, а процесс
     между снятием старого воркера и выдачей нового в реестре не виден) — не призрак; живой процесс этой сессии в
     реестре имён ~/.claude/sessions (тот же sessionId или фоновая с тем же именем) — тоже не призрак и не noProcess:
-    после перезапуска демона живой воркер может выпасть из roster.
+    после перезапуска демона живой воркер может выпасть из roster. Засчитывается только запись того же sessionId, и
+    только если её процесс тот самый (reg_same_process); тёзка с другим sessionId — другая сессия (ревью argus #249).
     (3) Причина для сводки: нет waitingFor — needs задания (blocked) или detail (failed)."""
     workers = daemon_workers() if workers is None else workers
     roster_at = roster_changed_at() if workers is not None else None
@@ -2972,8 +2973,7 @@ def reconcile_agents(data, workers=None):
         alive = bool(wpid) and pid_alive(wpid)
         if not alive and workers is not None and a.get("state") in ("working", "blocked"):
             reg = sessions_registry() if reg is None else reg
-            in_reg = any((a.get("sessionId") and r.get("sessionId") == a.get("sessionId"))
-                         or (r.get("kind") == "background" and a.get("name") and r.get("name") == a.get("name"))
+            in_reg = any(a.get("sessionId") and r.get("sessionId") == a.get("sessionId") and reg_same_process(r)
                          for r in reg)
         else:
             in_reg = False
@@ -2991,6 +2991,10 @@ def reconcile_agents(data, workers=None):
         if (a.get("state") in ("working", "blocked") and workers is not None and not alive
                 and not (a.get("pid") and pid_alive(a["pid"]))  # pid 0: kill(0, 0) — своя группа, не доказательство
                 and not in_reg and not just_listed(a, since=roster_at)):
+            # вопрос — needs задания или исходный waitingFor claude agents, а не detail (он в state.json есть всегда:
+            # ниже он ляжет в waitingFor упавшей); noProcess вопроса не имеет по определению (ревью argus-249a Б1)
+            if a["state"] == "blocked" and not a.get("noProcess") and (a.get("waitingFor") or js.get("needs")):
+                a["asks"] = True
             if a["state"] == "blocked" and not a.get("waitingFor") and js.get("needs"):
                 a["waitingFor"] = " ".join(str(js["needs"]).split())[:200]  # вопрос владельцу остаётся виден
             a["listedState"], a["state"], a["ghost"] = a["state"], "failed", True
@@ -3004,22 +3008,28 @@ def reconcile_agents(data, workers=None):
 def just_listed(a, grace=60, since=None):
     """Запись claude agents моложе grace секунд (startedAt в мс) или без даты: процесс мог ещё не попасть в реестр
     демона (новая сессия после pantheon start) — призраком её не считаем (metis-0651). since — время правки реестра
-    демона в с (roster_changed_at, metis-0662): моложе grace — тоже «только что»."""
+    демона в с (roster_changed_at, metis-0662): моложе grace — тоже «только что»; из будущего (часы, битая запись)
+    не учитывается, иначе призрак не нашёлся бы никогда."""
     try:
         t = float(a.get("startedAt")) / 1000
     except (TypeError, ValueError):
         return True
+    if since and since > now() + 300:
+        since = None
     return now() - max(t, since or 0) < grace
 
 
 def asks_owner(a):
     """Призрак с вопросом владельцу (metis-0651, 0662): процесс умер, а вопрос остался. Поднимает его ответ владельца
-    (claude attach), а не wake и не самозапуск — как отказ pantheon start."""
-    return bool(a.get("ghost") and a.get("listedState") == "blocked" and a.get("waitingFor"))
+    (claude attach), а не wake и не самозапуск — как отказ pantheon start. Флаг asks ставит reconcile_agents: был
+    blocked, не noProcess, есть needs задания или waitingFor из claude agents (detail вопросом не считается)."""
+    return bool(a.get("ghost") and a.get("asks"))
 
 
 def pid_alive(pid):
     try:
+        if int(pid) <= 0:  # 0 и минус — группа процессов, а не процесс: kill их «находит» всегда (ревью argus #249)
+            return False
         os.kill(int(pid), 0)
     except (OSError, ValueError, TypeError) as e:
         return isinstance(e, PermissionError)
@@ -3040,8 +3050,30 @@ def sessions_registry():
                 continue
             out.append({"name": rec.get("name"), "sessionId": rec.get("sessionId"), "pid": rec.get("pid"),
                         "kind": "interactive" if rec.get("kind") == "interactive" else "background",
-                        "cwd": rec.get("cwd"), "registry": True})
+                        "cwd": rec.get("cwd"), "registry": True, "procStart": rec.get("procStart"), "file": f})
     return out
+
+
+def proc_started(pid):
+    """Время старта процесса по ps (lstart — в том же виде пишет procStart реестр имён Claude Code) или None: ps не
+    запустился (в песочнице окна setuid-ps не идёт) или процесса нет."""
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=5,
+                           env={**os.environ, "LC_ALL": "C"})
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return None
+    return " ".join(r.stdout.split()) or None
+
+
+def reg_same_process(r):
+    """Запись реестра имён написал тот процесс, что сейчас живёт под её pid: файл назван этим pid, а время старта
+    процесса совпало с procStart записи. Устаревшая запись умершей сессии, чей pid занял другой процесс, жизнь не
+    доказывает (ревью argus #249 Д1). ps недоступен или procStart в записи нет — время не опровергает."""
+    if str(r.get("file")) != f"{r.get('pid')}.json":
+        return False
+    want = " ".join(str(r.get("procStart") or "").split())
+    got = proc_started(r.get("pid")) if want else None
+    return not (want and got and got != want)
 
 
 def name_alias(name):
@@ -3061,7 +3093,7 @@ def live_copies(name, agents, registry=None):
     known = {a.get("sessionId") for a in agents or []}
     for r in sessions_registry() if registry is None else registry:
         if r.get("kind") == "interactive" and r.get("sessionId") not in known and alias.fullmatch(str(r.get("name") or "")):
-            out.append({k: v for k, v in r.items() if k != "registry"})
+            out.append({k: v for k, v in r.items() if k not in ("registry", "procStart", "file")})
     return out
 
 

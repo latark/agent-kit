@@ -495,7 +495,7 @@ def sessions(agents, doms, t=None):
             P.clear_fault(*(f"watch-{s}-{sid}" for s in word))  # состояние снялось — следующее снова macOS
             continue
         why = blocked_why(a) if state == "blocked" else clean_why(a.get("waitingFor"))
-        ghost_asks = bool(a.get("ghost") and a.get("listedState") == "blocked" and why)
+        ghost_asks = P.asks_owner(a)  # вопрос — needs или waitingFor записи, а не detail задания (argus-249a Б1)
         if ghost_asks:  # призрак с вопросом владельцу по-прежнему «ждёт вас» (metis-0250): состояние для уведомления
             state = "blocked"  # считается до clear_fault, иначе каждый проход сбрасывал бы «watch-blocked-…» (ревью argus Б2)
         P.clear_fault(*(f"watch-{s}-{sid}" for s in word if s != state))
