@@ -1558,8 +1558,11 @@ def _billing_problem(repo, pr, sha):
                       f"review test`) на {where}",)
     return (f"CI на {where} не запускался: лимит минут или оплата GitHub Actions (аннотация «{CI_BILLING}…», job "
             f"не стартовал). Запасной путь — местный полный прогон с записью на этом коммите (засчитывается только "
-            f"эта команда): в чистой копии на {sha[:12]} запусти `pantheon review test -- {cmd}` (Bash не в фоне, "
-            "timeout 600000 мс), затем повтори слияние"), ()
+            f"эта команда: {cmd}). Основной способ: из корня чистой копии на {sha[:12]} запусти `pantheon outside "
+            "test --wait 590` (Bash не в фоне, timeout 600000 мс): прогон `.pantheon-verify` вне окна до 2 ч, запись "
+            "пишет плановый проход; код 75 — итога ещё нет, смотри `pantheon outside status <ID>`. Вариант — "
+            f"`pantheon review test -- {cmd}` (не в фоне: фоновый прогон записи не пишет, а полный набор с очередью "
+            "heavy бывает дольше 600 с). Затем повтори слияние"), ()
 
 
 def _ci_problem(repo, pr, sha, data, owner=False):

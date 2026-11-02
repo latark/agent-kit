@@ -44,11 +44,15 @@
    - Основной — CI: обязательные проверки зелёные на head PR, шлюз guard сверяет их сам.
    - Запасной — Actions не запускаются: кончились бесплатные минуты приватного репозитория, у проверок аннотация
      «The job was not started because … spending limit …», а job без раннера и шагов. Шлюз узнаёт этот случай и
-     вместо CI требует запись полного набора тестов на том же head. В чистой копии на head PR —
-     `pantheon review test -- heavy python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard
-     plugins/pantheon plugins/project-tools` (не в фоне, timeout 600000). Засчитывается только эта команда
-     (`FULL_TESTS` в `merge_gate.py`) и только на этом коммите.
-     Полный прогон на слиянии с origin/main перед слиянием — как и раньше. После слияния выпуск — тем же скриптом в
+     вместо CI требует запись полного набора тестов на том же head. Основной способ — из корня чистой копии на
+     head PR `pantheon outside test --wait 590` (Bash не в фоне, timeout 600000): плановый проход прогонит
+     `.pantheon-verify` вне окна (до 2 ч) и сам напишет запись; код 75 — итога ещё нет, ждать
+     `pantheon outside status <ID>`. Вариант — `pantheon review test -- heavy python3.14 -I
+     plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard plugins/pantheon plugins/project-tools` не в фоне:
+     фоновый прогон записи не пишет, а набор с очередью heavy бывает дольше предела Bash 600 с. Засчитывается только
+     эта команда (`FULL_TESTS` в `merge_gate.py`) и только запись на head PR.
+     Прогон на слиянии с origin/main перед слиянием — для себя, как и раньше: шлюз его не засчитывает, ему нужна
+     запись на head PR. После слияния выпуск — тем же скриптом в
      чистой копии main: `python3 -I .github/scripts/release.py --push` (решение владельца 28.10: не ждать и не
      платить). Коммит тот же, что у Action; плановый проход ставит его как обычно.
    - Аварийный — `gh pr merge` в собственном терминале владельца, вне Claude Code: guard его не проверяет.

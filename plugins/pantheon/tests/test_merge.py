@@ -973,6 +973,18 @@ def test_ci_billing():
         check(f"лимит, запись тестов на SHA — {name}, не FULL_TESTS → окна нет, заявка снята",
               not b.windows() and not b.merges() and "записи полного набора тестов (FULL_TESTS)" in b.alerts(),
               b.alerts())
+    b = Box()                         # Б1 argus #248: запись тестов на SHA есть (узкая), полный набор — только на SHA2
+    b.records = []
+    b.add("accept", sid="s1", aid="a1")
+    b.add("accept", sid="s2", aid="a2")
+    b.add("tests", sha=SHA, who="", cmd="pantheon review test -- python3.14 -I plugins/guard/tests/test_guard.py")
+    b.add("tests", sha=SHA2, who="")
+    b.request()
+    b.view(SHA, checks=blocked)
+    b.run()
+    check("лимит, на SHA узкая запись tests, полный набор только на SHA2 → окна нет, заявка снята",
+          not b.windows() and not b.merges() and b.req() is None
+          and "записи полного набора тестов (FULL_TESTS)" in b.alerts(), b.alerts())
     b = Box()
     b.records = []
     b.add("accept", sid="s1", aid="a1")

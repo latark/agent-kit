@@ -2006,6 +2006,8 @@ def t_ci_billing(h):
     merge_case("лимит, записи тестов нет — отказ «не запускался» с командой записи", h.pre(cmd, **owner), False,
                f"CI на latark/agent-kit#7@{sha[:12]} не запускался: лимит минут или оплата GitHub Actions")
     merge_case("лимит, записи нет — в отказе готовая команда полного набора", h.pre(cmd, **owner), False, full)
+    merge_case("лимит, записи нет — основной способ в отказе: pantheon outside test --wait 590",
+               h.pre(cmd, **owner), False, "`pantheon outside test --wait 590` (Bash не в фоне, timeout 600000 мс)")
     log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
     check("лимит: аннотации спрошены у красных обязательных от pull_request (не у push)",
           "api repos/latark/agent-kit/check-runs/124603333231/annotations?per_page=100" in log
