@@ -35,7 +35,7 @@ OWNER_TARGETS = {"Входящие": ("inbox", None), "Очередь": ("todo",
                  HUMAN_WAIT: ("waiting", "human"), "Готово": ("done", None), "Отменено": ("dropped", None)}
 ID_RE = re.compile(r"[a-z][a-z0-9]{1,11}-\d{3,}")
 # metis-0714, вариант А координатора (argus-280b): «ждёт» снимает задачу с цели окна (/goal), только если она ждёт владельца
-# с вопросом или другую задачу; блокер, названный сессией самой («agent», «ревью»), задачу в цели оставляет, как doing.
+# с вопросом или другую задачу, которая её правда держит (goal_released); блокер, названный сессией самой («agent», «ревью»), задачу в цели оставляет, как doing.
 # `task set` печатает одну из двух строк, а WAITING_GOAL в lib/sessions.py велит проверяющей модели верить только ей.
 GOAL_OUT = "снята с цели окна"
 GOAL_IN = "остаётся в цели окна"
@@ -419,16 +419,28 @@ def _opt_cut(o):
 _OPT_RISKY = re.compile(r"[₽$€]|\bруб|деньг|оплат|платеж|платёж|списан|необратим|удал|безвозврат", re.I)
 
 
-def goal_released(head):
+def goal_released(head, tasks=None):
     """Уходит ли задача из цели окна (metis-0714): «ждёт» (waiting) владельца с вопросом — waiting_on=human и непустой
-    question — или другую задачу — waiting_on это id задачи, не своей. Любое другое «ждёт», doing и todo — в цели."""
+    question — или другую задачу, которая её правда держит. tasks — хранилище {id: (путь, шапка, тело)} из load_tasks
+    (WORK_TYPES); без него «ждёт задачу» цель не отпускает. Блокер должен быть в хранилище и не done/dropped; блокер
+    сам в «ждёт» держит, только если goal_released верно и для него. Цепочка идёт по посещённым: своя задача, цикл
+    (c1↔c2), несуществующий id (metis-9999, чужое athena-0042) — задача в цели. Любое другое «ждёт», doing, todo — в цели."""
     head = head or {}
-    if head.get("status") != "waiting":
-        return False
-    on = str(head.get("waiting_on") or "").strip()
-    if on == "human":
-        return bool(str(head.get("question") or "").strip())
-    return bool(ID_RE.fullmatch(on)) and on != head.get("id")
+    tasks = tasks or {}
+    seen = set()
+    while head.get("status") == "waiting":
+        on = str(head.get("waiting_on") or "").strip()
+        if on == "human":
+            return bool(str(head.get("question") or "").strip())
+        seen.add(head.get("id"))
+        if not ID_RE.fullmatch(on) or on in seen or on not in tasks:
+            return False
+        head = tasks[on][1] or {}
+        if head.get("status") in ("done", "dropped"):
+            return False
+        if head.get("status") != "waiting":
+            return True
+    return False
 
 
 def option_warns(head):

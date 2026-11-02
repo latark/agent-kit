@@ -373,9 +373,11 @@ def task_cmd(rest):
             print(f"{tid}: {head.get('status')} · {os.path.relpath(p, P.PANTHEON)}")
             if head.get("status") == "waiting":  # metis-0714: строка для проверяющей модели цели окна (WAITING_GOAL)
                 print(f"{tid}: {T.GOAL_OUT} — ждёт " + ("ответа владельца на вопрос" if head.get("waiting_on") == "human"
-                                                       else f"задачу {head.get('waiting_on')}") if T.goal_released(head)
+                                                       else f"задачу {head.get('waiting_on')}")
+                      if T.goal_released(head, T.load_tasks(P.PANTHEON, T.WORK_TYPES))
                       else f"{tid}: {T.GOAL_IN} — «ждёт» снимает задачу с цели, только если waiting_on=human с question "
-                           f"или waiting_on=<id другой задачи>")
+                           f"или waiting_on=<id другой задачи>, которая есть, не done/dropped и, если сама ждёт, "
+                           f"снята с цели")
             if changes.get("status") == "doing" and head.get("status") == "doing":
                 _warn_overlap(T, tid)
             if changes.get("status") in ("done", "dropped"):

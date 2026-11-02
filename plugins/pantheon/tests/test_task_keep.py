@@ -489,21 +489,55 @@ def main():
              (ids[2], ("waiting_on=agent",), False),
              (ids[3], ("waiting_on=human",), False),
              (ids[4], (f"waiting_on={ids[4]}",), False)]
+    # пробы argus-280c: блокер, которого нет или который задачу уже не держит, цель не отпускает
+    more = [new(env5, "--body", "Цель и готово").stdout.split()[0] for _ in range(9)]
+    drop, chain_hq, chain_ok = more[6], more[7], more[8]
+    run(env5, "task", "set", drop, "status=dropped")
+    wait_set(chain_hq, "waiting_on=human")  # «ждёт» без вопроса — сама в цели
+    wait_set(chain_ok, "waiting_on=human", "question=Какой вариант?", "why=нужно решение")
+    c1, c2 = more[4], more[5]
+    wait_set(c2, f"waiting_on={c1}")  # c1 ещё не ждёт — c2 снята; c1 на c2 замыкает цикл
+    cases += [(more[0], ("waiting_on=metis-9999",), False),
+              (more[1], (f"waiting_on={drop}",), False),
+              (more[2], ("waiting_on=athena-0042",), False),
+              (more[3], ("waiting_on=metis-0001 и ревью",), False),
+              (c1, (f"waiting_on={c2}",), False),
+              (ids[5], (f"waiting_on={chain_hq}",), False)]
     got = {tid: wait_set(tid, *f) for tid, f, _ in cases}
+    chain = wait_set(new(env5, "--body", "Цель и готово").stdout.split()[0], f"waiting_on={chain_ok}")
+    check("task set waiting: блокер ждёт владельца с вопросом — цепочка отпускает, «снята с цели окна»",
+          chain[0] == 0 and T.GOAL_OUT in chain[1] and T.GOAL_IN not in chain[1], chain)
     check("task set waiting: human+question и id другой задачи — «снята с цели окна»; agent, human без вопроса, "
-          "своя же задача — «остаётся в цели окна»",
+          "своя же задача, metis-9999, athena-0042, dropped-блокер, «metis-0001 и ревью», цикл c1↔c2, блокер в «ждёт» "
+          "без основания — «остаётся в цели окна»",
           all(got[tid][0] == 0 and (f"{tid}: {T.GOAL_OUT}" in got[tid][1]) == out
               and (f"{tid}: {T.GOAL_IN}" in got[tid][1]) == (not out) for tid, _, out in cases), got)
-    r = run(env5, "task", "set", ids[5], "status=doing")
+    r = run(env5, "task", "set", new(env5, "--body", "Цель и готово").stdout.split()[0], "status=doing")
     check("task set doing — ни строки «снята», ни «остаётся» (doing в цели и так)",
           r.returncode == 0 and T.GOAL_OUT not in r.stdout and T.GOAL_IN not in r.stdout, r.stdout)
     rel = T.goal_released
-    check("goal_released: doing, todo, waiting agent — в цели; waiting human+question, waiting id — нет",
+    check("goal_released без хранилища: doing, todo, waiting agent, waiting id — в цели; waiting human+question — нет",
           not rel({"status": "doing", "waiting_on": "human", "question": "?"}) and not rel({"status": "todo"})
           and not rel({"status": "waiting", "waiting_on": "agent", "question": "?"})
           and not rel({"status": "waiting", "waiting_on": "human", "question": "  "}) and not rel(None)
           and rel({"status": "waiting", "waiting_on": "human", "question": "Что?"})
-          and rel({"status": "waiting", "waiting_on": "athena-0042", "id": "metis-0001"}))
+          and not rel({"status": "waiting", "waiting_on": "athena-0042", "id": "metis-0001"}))
+    def st(i, status, on=None, q=None):
+        return (f"/{i}.md", {"id": i, "status": status, "waiting_on": on, "question": q}, "")
+    store = {"ab-001": st("ab-001", "doing"), "ab-002": st("ab-002", "done"), "ab-003": st("ab-003", "dropped"),
+             "ab-004": st("ab-004", "waiting", "ab-005"), "ab-005": st("ab-005", "waiting", "ab-004"),
+             "ab-006": st("ab-006", "waiting", "agent"), "ab-007": st("ab-007", "waiting", "human", "Что?"),
+             "ab-008": st("ab-008", "waiting", "ab-007"), "ab-009": st("ab-009", "inbox"),
+             "ab-010": st("ab-010", "waiting", "ab-010")}
+    w = lambda on: {"id": "mb-001", "status": "waiting", "waiting_on": on}
+    check("goal_released с хранилищем: блокер есть и не done/dropped — снята; нет, done, dropped, цикл, блокер "
+          "ждёт без основания, своя петля, без хранилища — в цели; цепочка до вопроса владельцу — снята",
+          rel(w("ab-001"), store) and rel(w("ab-009"), store) and rel(w("ab-008"), store) and rel(w("ab-007"), store)
+          and not rel(w("ab-002"), store) and not rel(w("ab-003"), store) and not rel(w("ab-004"), store)
+          and not rel(w("ab-006"), store) and not rel(w("ab-010"), store) and not rel(w("metis-9999"), store)
+          and not rel(w("ab-001")) and not rel(w("ab-001 и ревью"), store)
+          and not rel(store["ab-004"][1], store) and not rel({"id": "ab-004", "status": "waiting", "waiting_on": "ab-004"},
+                                                                store))
 
     # чистые функции
     desc = T.has_description
