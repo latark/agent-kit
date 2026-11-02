@@ -668,12 +668,13 @@ def stale_now(name, text, mtime, agents, registry, t):
     """Раздел «Сейчас» окна, которое работает, старше STALE_NOW_HOURS (metis-0707): тревога один раз на заголовок и
     сутки и напоминание роли (STALE_NOW_TEXT) — простаивающей живой сессии, тоже раз на заголовок и сутки; работающей
     или ждущей вас напоминание не шлём: тревога есть. Окно без ходов за срок и обновлённый «Сейчас» — отметки снимаем."""
-    key, push = f"watch-now-{name}", f"watch-now-push-{name}"
+    key, push, fail = f"watch-now-{name}", f"watch-now-push-{name}", f"watch-now-fail-{name}"
     stamp = now_section_time(text, mtime, t)
     limit = STALE_NOW_HOURS * 3600
     if stamp is None or t - stamp <= limit or not window_turned_since(name, agents, registry, t - limit):
         P.clear_once(key)
         P.clear_once(push)
+        P.clear_once(fail)
         return
     head = NOW_HEAD.search(text).group(0).strip()
     value = f"{today(t)}-{head}"
@@ -692,11 +693,13 @@ def stale_now(name, text, mtime, agents, registry, t):
         return  # будить сейчас нельзя (пауза, лимит, не главный Mac) — напомним в следующем проходе
     rc = P.resume_session(name, poke, STALE_NOW_TEXT.format(hours=STALE_NOW_HOURS), "stale-now",
                           recheck=recheck(name, True, nudge=True))[0]
-    if rc == 0:
-        os.makedirs(P.path("once"), exist_ok=True)
-        open(P.once_path(push), "w").write(value)
-    elif rc not in (P.NO_WINDOW, P.SKIPPED):
-        P.alert(f"STATUS.md {name}: напоминание про «Сейчас» не доставлено (код {rc})", "watch")
+    if rc in (P.NO_WINDOW, P.SKIPPED):
+        return
+    # отметка и при неудаче: иначе каждый проход заново будит роль и шлёт новую тревогу (не чаще раза на заголовок и сутки)
+    os.makedirs(P.path("once"), exist_ok=True)
+    open(P.once_path(push), "w").write(value)
+    if rc != 0:
+        P.alert_once(fail, value, f"STATUS.md {name}: напоминание про «Сейчас» не доставлено (код {rc})", "watch")
 
 
 def status_files(doms, t, agents=(), registry=()):
@@ -715,7 +718,11 @@ def status_files(doms, t, agents=(), registry=()):
             n = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
         except OSError:
             continue
-        stale_now(name, text, st.st_mtime, agents, registry, t)
+        try:
+            stale_now(name, text, st.st_mtime, agents, registry, t)
+        except Exception as ex:  # сбой одного направления (таймаут resume_session и т. п.) не обрывает остальные
+            P.alert_once(f"watch-now-err-{name}", today(t), f"STATUS.md {name}: проверка «Сейчас» упала: "
+                         f"{type(ex).__name__}: {str(ex)[:120]}", "watch")
         age = (t - st.st_mtime) / 86400
         if name in doing and age > STALE_STATUS_DAYS:
             P.alert_once(f"watch-status-{name}", today(t),
