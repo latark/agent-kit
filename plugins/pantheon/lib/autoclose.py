@@ -10,7 +10,7 @@ metis-0534 и 0535» закрывает все три (metis-0583); упомин
 Слитый PR закрывает такую задачу: status done, closed —
 день слияния, release — «PR #N → коммит» (версия плагина, если PR поднял plugin.json), actual — из учёта по задачам
 (metrics/tasks.jsonl, metis-0294), нет замера — «нет замера»; в журнал задачи — строка с CLOSED_BY_MERGE.
-В теле PR слово «часть» — PR закрывает только часть задачи: задача не закрывается.
+В теле PR слово «часть» — PR закрывает только часть задачи: задача не закрывается (и close_checked, metis-0660).
 Неотмеченные пункты «Готово, когда» (задачи с T.CRITERIA_FROM, metis-0503): слитый PR без «часть» ставит review и
 строку «слит, неотмечено N», а не done — хвосты не теряются; закрыть — отметить пункты, `pantheon task split` или --force.
 Открытый PR, который так же закрывает задачу (без «часть»), ставит задаче todo/doing её направления review — один раз
@@ -436,7 +436,7 @@ def close_checked(pantheon, t, merged, repo_dirs, T, actual_for, log, errors, op
     (кэш fetch, репозиторий её направления), → done той же записью, что и по Closes (metis-0583). PR без Closes и под
     общей веткой (simplify-*) иначе оставляли задачу висеть в doing после слияния. Без пунктов «Готово, когда» не
     закрываем: «всё отмечено» нечем доказать; задачу с открытым PR (open_ids) — тоже: работа ещё идёт. Из нескольких
-    слитых PR журнала — последний по времени слияния."""
+    слитых PR журнала — последний по времени слияния; «часть» в его теле — задача остаётся открытой."""
     by_num = {}
     for repo, rows in sorted(merged.items()):
         if repo not in repo_dirs:
@@ -460,6 +460,12 @@ def close_checked(pantheon, t, merged, repo_dirs, T, actual_for, log, errors, op
             continue
         _, repo, pr = max(found, key=lambda x: (x[0], x[1]))
         try:
+            if is_part(pr.get("body")):  # «часть» в теле: PR делает не всю задачу — как в close_pr, не закрываем
+                note = f"PR #{pr['number']} ({repo}) слит, в теле «часть» — задача не закрыта"
+                if not journal_has(path, T, note):
+                    T.task_set(pantheon, t, tid, {}, actor="плановый проход", note=note)
+                    log.append(f"{tid}: PR #{pr['number']} слит, «часть» — не закрыта")
+                continue
             if close_done(pantheon, t, tid, (path, head, body), repo, pr, T, actual_for, CHECKED_WHY):
                 log.append(f"{tid}: закрыта — все пункты отмечены, PR #{pr['number']} ({repo}) слит")
         except ValueError as e:
