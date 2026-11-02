@@ -330,6 +330,28 @@ def cli():
     check("task claim: тоже предупреждает о пересечении", r.returncode == 0 and "пересекается по файлам" in r.stderr
           and "metis-0655" in r.stderr, r.stderr)
 
+    # task ready (metis-0667): предупреждение на пересечение с открытым PR, без пересечения — тишина
+    put(home, "metis-pantheon", "metis-0020", touches=[GATE])
+    put(home, "metis-pantheon", "metis-0021", touches=["docs/"])
+    os.remove(os.path.join(gh, "calls.log"))
+    r = pan(env, "task", "ready", "--direction", "metis-pantheon")
+    check("task ready: пересечение с PR #248 — «metis-0020: пересечение с PR #248 (файлы …)» в stderr, список в stdout цел",
+          r.returncode == 0 and f"metis-0020: пересечение с PR #248 (файлы {GATE}" in r.stderr
+          and "metis-0020\t" in r.stdout and "metis-0021\t" in r.stdout, (r.stdout, r.stderr))
+    check("task ready: без пересечения (docs/, нет touches) — про них ни слова; gh позван один раз на направление",
+          "metis-0021:" not in r.stderr and "metis-0011:" not in r.stderr and calls(gh).count("pr list") == 1,
+          (r.stderr, calls(gh)))
+    put(home, "metis-pantheon", "metis-0020", status="done", touches=[GATE])
+    os.remove(os.path.join(gh, "calls.log"))
+    r = pan(env, "task", "ready", "--direction", "metis-pantheon")
+    check("task ready: пересекающаяся задача ушла из todo — предупреждений нет", r.returncode == 0
+          and "пересечение с PR" not in r.stderr, r.stderr)
+    put(home, "metis-pantheon", "metis-0020", touches=[GATE])
+    os.remove(os.path.join(gh, "gh"))
+    r = pan(env, "task", "ready", "--direction", "metis-pantheon")
+    check("task ready: gh недоступен — «не проверено», код 0, список цел", r.returncode == 0
+          and "не проверено" in r.stderr and "metis-0020\t" in r.stdout, (r.stdout, r.stderr))
+
     # policy.toml нет — сказано, что открытые PR не проверены
     tmp2, home2, _, gh2, env2 = make(policy=None)
     put(home2, "metis-pantheon", "metis-0001", touches=[GATE])
