@@ -3123,6 +3123,70 @@ def test_autostart_nudge_guards_0212():
     check(["respawn", "c0ee7001"] in e.calls(), f"0212: без помех задание не передано: {e.calls()}")
 
 
+def test_autostart_skip_not_failure_0708():
+    """metis-0708: 02.11 21:46 проход увидел окно metis-pantheon простаивающим (working + idle между ходами), а под
+    блокировкой имени свежий claude agents показал его занятым (пришло сообщение, status busy): resume_session вернул
+    SKIPPED (код 4, resume-skip «уже работает»). Самозапуск счёл это сбоем — тревога «передать задание не вышло,
+    код 4», «сбой 2 из 3» и пауза 2 ч, третий такой пропуск остановил бы самозапуск направления. Пропуск — не сбой:
+    ни тревоги, ни счётчика, ни pending; то же у продолжения остановленной сессии (resume_or_start)."""
+    e, a = idle_env("sk-dir", "5ee70001-1")
+    nxt = os.path.join(e.tmp, "agents-next.json")
+    json.dump([dict(a, status="busy")], open(nxt, "w"))
+    e.run("watch", t=T0 + 120, extra={"FAKE_AGENTS_NEXT": nxt})
+    st = json.load(open(e.st("autostart.json"))).get("sk-dir", {})
+    check(not respawns(e) and "\tresume-skip\tsk-dir\t5ee70001\ttick\tуже работает" in _start_log(e),
+          f"0708: занятому окну передано задание: {e.calls()} {_start_log(e)!r}")
+    check("передать задание не вышло" not in e.alerts() and "сбой" not in e.alerts(),
+          f"0708: пропуск занятого окна — ложная тревога: {e.alerts()}")
+    check(not st.get("fails") and not st.get("pending") and not st.get("gave_up"),
+          f"0708: пропуск засчитан сбоем: {st}")
+    # три таких прохода подряд (каждый после паузы) — самозапуск не встаёт
+    for i in (1, 2, 3):
+        os.remove(nxt + ".seen")
+        e.run("watch", t=T0 + 120 + i * 4000, extra={"FAKE_AGENTS_NEXT": nxt})
+    st = json.load(open(e.st("autostart.json"))).get("sk-dir", {})
+    check(not st.get("fails") and not st.get("gave_up") and "остановлен после" not in e.alerts(),
+          f"0708: повторные пропуски остановили самозапуск: {st} {e.alerts()}")
+    # окно освободилось — задание передаётся, как раньше (metis-0212)
+    e.run("watch", t=T0 + 120 + 5 * 4000)
+    check(["respawn", "5ee70001"] in e.calls(), f"0708: свободному окну задание не передано: {e.calls()}")
+    # продолжение остановленной сессии: к подъёму имя уже держит новая — тоже пропуск, не «не вышло, код 4»
+    e2 = Env()
+    e2.direction("sr-dir")
+    e2.task("sr-0001", "sr-dir")
+    e2.run("watch", t=T0)
+    e2.board("sr-0001", T0 + 10)
+    e2.agents([bg("sr-dir", "stopped", "5ee70002-1")])
+    nxt2 = os.path.join(e2.tmp, "agents-next.json")
+    json.dump([bg("sr-dir", "stopped", "5ee70002-1"), bg("sr-dir", "working", "5ee70003-1", pid=45)], open(nxt2, "w"))
+    e2.run("watch", t=T0 + 120, extra={"FAKE_AGENTS_NEXT": nxt2})
+    st = json.load(open(e2.st("autostart.json"))).get("sr-dir", {})
+    check(not [c for c in e2.calls() if c[:1] in (["respawn"], ["--bg"])]
+          and "\tresume-skip\tsr-dir\t5ee70002\ttick\tуже работает" in _start_log(e2),
+          f"0708: остановленная поднята, хотя имя уже держат: {e2.calls()} {_start_log(e2)!r}")
+    check("не вышло, код 4" not in e2.alerts() and not st.get("fails") and not st.get("pending"),
+          f"0708: пропуск продолжения засчитан сбоем: {st} {e2.alerts()}")
+    # пропущенное имя держат — место занято: третье направление сверх AUTOSTART_MAX (2) в тот же проход не поднимается
+    e3 = Env()
+    for n in ("aa-dir", "bb-dir", "cc-dir"):
+        e3.direction(n)
+    for n in ("aa-dir", "bb-dir"):
+        e3.task(n[:2] + "-0001", n)
+    e3.run("watch", t=T0)
+    for n in ("aa-dir", "bb-dir"):
+        e3.board(n[:2] + "-0001", T0 + 10)
+    cc = dict(bg("cc-dir", "working", "5ee700cc-1", pid=46), status="busy")
+    e3.agents([bg("aa-dir", "stopped", "5ee700aa-1"), cc])
+    nxt3 = os.path.join(e3.tmp, "agents-next.json")
+    json.dump([bg("aa-dir", "stopped", "5ee700aa-1"), bg("aa-dir", "working", "5ee700ab-1", pid=47), cc],
+              open(nxt3, "w"))
+    e3.run("watch", t=T0 + 120, extra={"FAKE_AGENTS_NEXT": nxt3})
+    bb = json.load(open(e3.st("autostart.json"))).get("bb-dir", {})
+    check("\tresume-skip\taa-dir\t5ee700aa\ttick\tуже работает" in _start_log(e3) and not bb.get("last"),
+          f"0708: после пропуска поднято третье направление: {bb} {e3.calls()} {_start_log(e3)!r}")
+    check("самозапуск bb-dir ждёт: нет места" in e3.alerts(), f"0708: нет тревоги «нет места»: {e3.alerts()}")
+
+
 def test_autostart_nudge_week_limit_0212():
     """metis-0212, ревью argus-43: передача задания простаивающей сессии — новое дело и ждёт недельный лимит, как
     новый запуск (gate «autostart»): жёлтая зона днём, красная, снимок старше 30 мин — ни respawn, ни новой сессии,

@@ -2030,10 +2030,23 @@ def autostart(agents, registry, doms, t, dry=False):
                     f"перезапуск с новой целью не вышел, код {rc}"), "watch")
         elif poke:  # тот же путь, что продолжение остановленной: claude respawn + текст для хука push (P.resume_session)
             rc = P.resume_session(d, poke, task, "tick", recheck=recheck(d, True, nudge=True))[0]
-            P.alert(f"{what} — " + (f"передал задание (задачи {', '.join(tids[:5])})" if rc == 0 else
-                                    f"передать задание не вышло, код {rc}"), "watch")
         else:
             rc = resume_or_start(d, agents, task, origin="tick", auto=True)
+        if rc == P.SKIPPED:  # у смены цели (swap) пропуск разобран выше
+            # metis-0708: повторная проверка под блокировкой имени сказала «не надо» — окно между проходом и подъёмом
+            # получило ввод (уже работает), его остановили или поднимает другой процесс. Не запускали: не сбой и не
+            # успех — без тревоги и счётчика (строка resume-skip — в start.log). Раньше это шло «код 4» и сбоем:
+            # 02.11 «сбой 2 из 3» у работавшего metis-pantheon и пауза 2 ч, третий пропуск остановил бы самозапуск
+            say(f"{d}: пропуск — {P.SKIP_WHY}")
+            s["pending"] = False
+            P.write_json(P.path("autostart.json"), st)
+            if not poke:
+                running.append(d)  # имя держат или поднимают — место занято
+            continue
+        if poke:
+            P.alert(f"{what} — " + (f"передал задание (задачи {', '.join(tids[:5])})" if rc == 0 else
+                                    f"передать задание не вышло, код {rc}"), "watch")
+        elif not swap:
             P.alert(f"самозапуск: {d} по задачам {', '.join(tids[:5])} — " + ("запущен" if rc == 0 else
                                                                                f"не вышло, код {rc}"), "watch")
         # красная память запуск не откладывает ([sb-simplify] п. 5, metis-0523): pantheon start только предупреждает
