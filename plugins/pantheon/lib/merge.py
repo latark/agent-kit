@@ -38,6 +38,16 @@ PR ядра защит (Д3) агенты не сливают: его слива
      launchd не в сессии владельца) — запасной путь: уведомление один раз, щелчок по нему запускает
      `pantheon merge run --click` от имени владельца, и окно Touch ID показывается уже оттуда. Заявку сняли или
      заменили, пока окно открыто, — проход её не трогает: ни согласия, ни слияния, ни записи обратно.
+
+Управляемые настройки guard (metis-0710, «да» владельца 02.11 21:57). Тот же проход, под тем же замком: файл
+P.MANAGED (/Library/…/managed-settings.json) не совпал с managed-settings.json проверенного дерева guard
+(installed_dir: хеш дерева = verified.json) — владелец у Mac — системное окно прав администратора (osascript … with
+administrator privileges: Touch ID или пароль) «Обновить управляемые настройки guard до версии X». После касания root
+копирует файл рядом, сверяет sha256 с прочитанным проходом и переносит на место (root:wheel, 644). Отказ или
+MANAGED_WAIT без касания — карточка «Руками» с командой sudo install и тревога; окно на ту же версию — не чаще
+MANAGED_RETRY (STATE/managed-update.json). Файл совпал (по касанию или командой) — тик закрывает карточку. Файла в
+/Library нет — не отставание: первый раз его ставит владелец. Тик зовёт проход и без заявок, когда отстали
+(managed_check).
 Журнал — STATE/logs/merge.jsonl (репозиторий, номер, SHA, событие). Помощник — только STATE/bin/pantheon-touchid с
 отметкой sha256 исходника lib/touchid.swift рядом (иначе его пересобирает /usr/bin/swiftc с чистым окружением).
 
@@ -830,6 +840,169 @@ def fallback_notify(req, window):
     return r.returncode == 0
 
 
+# --- управляемые настройки guard (metis-0710) ---------------------------------------------------------------------
+# Решение владельца 02.11 (metis-managed-auto, «А — да, Touch ID»): файл /Library/…/managed-settings.json (P.MANAGED)
+# отстал от проверенного дерева guard (verified.json, installed_dir) — проход показывает системное окно прав
+# администратора macOS (Touch ID или пароль входа) «Обновить управляемые настройки guard до версии X». Права root даёт
+# только это окно: окно LocalAuthentication (touchid.swift) подтверждает владельца, но root не даёт. Файл ставит
+# скрипт root после касания: копия во временный файл рядом, сверка sha256 с проверенным файлом, chown, chmod, mv.
+# Отказ, время вышло или окно не показать — карточка «Руками» с командой sudo и тревога; на ту же версию окно снова не
+# раньше MANAGED_RETRY. Окно роли сюда не доходит: проход запускает только тик (cmd_run — отказ из окна Claude Code,
+# `pantheon merge run` ролям закрыт guard), а песочница окна не даёт ни osascript, ни записи в /Library.
+MANAGED_RETRY = 6 * 3600             # на ту же версию окно не чаще раза в 6 часов
+MANAGED_WAIT = 120                   # сколько окно ждёт пальца
+MANAGED_STATE = "managed-update.json"   # STATE: {sha, version, asked, result, task} и installed — что поставлено
+OSASCRIPT = "/usr/bin/osascript"     # абсолютный путь: PATH прохода подменяем (launchctl setenv)
+ROOT_OWNER = "0:0"                   # root:wheel; тестовая обвязка ставит свой uid:gid
+ASK_ROOT = ("on run argv", "do shell script (item 1 of argv) with prompt (item 2 of argv) with administrator privileges",
+            "end run")
+
+
+def managed_source():
+    """Проверенный файл: (путь, байты, версия) managed-settings.json из дерева guard, чей хеш совпал с verified.json
+    (installed_dir). Клон маркетплейса — никогда; проверенного дерева или файла нет — None. Записи о guard в
+    verified.json нет (guard не ставили) — None без тревоги installed_dir."""
+    d = P.installed_dir("guard") if P.verified_record("guard") else None
+    if not d:
+        return None
+    src = os.path.join(d, "managed-settings.json")
+    try:
+        with open(src, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    version = "?"
+    with contextlib.suppress(OSError, ValueError, AttributeError):
+        with open(os.path.join(d, ".claude-plugin", "plugin.json"), encoding="utf-8") as fh:
+            version = str(json.load(fh).get("version") or "?")[:40]
+    return src, data, version
+
+
+def _managed_now():
+    """(проверенный файл или None, байты поставленного или None — его нет или не прочитать). Поставленного нет — дерево
+    guard не сверяется вовсе."""
+    try:
+        with open(P.MANAGED, "rb") as fh:
+            cur = fh.read()
+    except OSError:
+        return None, None
+    return managed_source(), cur
+
+
+def _mstate():
+    st = P.read_json(P.path(MANAGED_STATE), {})
+    return st if isinstance(st, dict) else {}
+
+
+def _close_card(tid, result):
+    if tid:
+        with contextlib.suppress(Exception):   # карточку закрыли или удалили руками — не беда
+            P.tasks_mod().task_set(P.PANTHEON, P.now(), tid, {"status": "done", "result": result},
+                                   actor="плановый проход", force=result)
+
+
+def _settled(st, src, how):
+    """Поставленный файл совпал с проверенным: записать версию, закрыть карточку «Руками», если она была."""
+    _close_card(st.get("task"), f"управляемые настройки поставлены {how}")
+    P.write_json(P.path(MANAGED_STATE), {"installed": {"version": src[2], "sha": hashlib.sha256(src[1]).hexdigest(),
+                                                       "at": int(P.now()), "how": how}})
+
+
+def managed_check():
+    """Для тика: нужен ли проход ради управляемых настроек — поставленный файл есть, не совпадает с проверенным, и на
+    эту версию окна не было последние MANAGED_RETRY. Файла в /Library нет — не отставание: первый раз его ставит
+    владелец (README guard). Совпал, а карточка «Руками» открыта (поставили командой) — закрыть её."""
+    src, cur = _managed_now()
+    if not src or cur is None:
+        return False
+    st = _mstate()
+    if cur == src[1]:
+        if st.get("task"):
+            _settled(st, src, "командой")
+        return False
+    asked = st.get("asked")
+    recent = isinstance(asked, (int, float)) and 0 <= P.now() - asked < MANAGED_RETRY
+    return not (st.get("sha") == hashlib.sha256(src[1]).hexdigest() and recent)
+
+
+def root_script(src, dest, sha):
+    """Скрипт root: копия проверенного файла во временный рядом с dest, sha256 копии — тот, что сверил проход (файл
+    подменили после сверки — код 65, ничего не поставлено), владелец ROOT_OWNER, 644, замена одной операцией mv."""
+    q = shlex.quote
+    return (f"set -eu; umask 022; d={q(os.path.dirname(dest))}; /bin/mkdir -p \"$d\"; "
+            "t=$(/usr/bin/mktemp \"$d/.managed-settings.XXXXXX\"); trap '/bin/rm -f \"$t\"' EXIT; "
+            f"/bin/cat < {q(src)} > \"$t\"; "
+            f"[ \"$(/usr/bin/shasum -a 256 < \"$t\" | /usr/bin/cut -c1-64)\" = {sha} ] || exit 65; "
+            f"/usr/sbin/chown {ROOT_OWNER} \"$t\"; /bin/chmod 644 \"$t\"; /bin/mv -f \"$t\" {q(dest)}")
+
+
+def manual_command(src, dest):
+    q = shlex.quote
+    return (f"sudo mkdir -p {q(os.path.dirname(dest))} && sudo install -m 644 -o root -g wheel {q(src)} {q(dest)}")
+
+
+def ask_root(script, text):
+    """Окно прав администратора и скрипт от root после касания → ok | refused | timeout | no-window (код N)."""
+    argv = [OSASCRIPT] + [a for line in ASK_ROOT for a in ("-e", line)] + [script, text]
+    try:
+        r = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=MANAGED_WAIT)
+    except subprocess.TimeoutExpired:   # osascript убит — окно закрыто, касание позже не засчитывается
+        return "timeout"
+    except OSError as e:
+        return f"no-window ({type(e).__name__})"
+    if r.returncode == 0:
+        return "ok"
+    if "(-128)" in (r.stderr or ""):   # «Отменить» в окне: User canceled
+        return "refused"
+    return f"no-window (код {r.returncode}: {' '.join((r.stderr or '').split())[-120:]})"
+
+
+WHY_RU = {"refused": "вы отменили окно", "timeout": f"окно {MANAGED_WAIT} с ждало касания"}
+
+
+def managed_pass():
+    """Шаг прохода: отставание → окно → установка; без касания — карточка «Руками» и тревога. → строка для журнала."""
+    if not managed_check():
+        return "в порядке или окно на эту версию уже было"
+    src, cur = _managed_now()
+    if not src or cur is None or cur == src[1]:
+        return "в порядке"
+    if P.idle_sec() > PRESENT_SEC:
+        return "отстали — ждёт: вас нет у Mac"
+    path_, data, version = src
+    sha = hashlib.sha256(data).hexdigest()
+    st = _mstate()
+    res = ask_root(root_script(path_, P.MANAGED, sha), f"Обновить управляемые настройки guard до версии {version}")
+    if res == "ok":
+        try:
+            with open(P.MANAGED, "rb") as fh:
+                res = "ok" if fh.read() == data else "после касания файл не тот"
+        except OSError as e:
+            res = f"после касания файла нет ({type(e).__name__})"
+    if res == "ok":
+        _settled(st, src, "по касанию")
+        return f"обновлены до версии {version}"
+    cmd = manual_command(path_, P.MANAGED)
+    why = WHY_RU.get(res, res)
+    tid = st.get("task")
+    if tid and st.get("sha") != sha:   # карточка прошлой версии: команда в ней уже не та
+        _close_card(tid, f"заменена карточкой версии {version}")
+        tid = None
+    if not tid:
+        with contextlib.suppress(OSError, ValueError):
+            tid, _ = P.tasks_mod().task_new(
+                P.PANTHEON, P.now(), MERGE_DIRECTION, f"Обновить управляемые настройки guard до {version}",
+                owner="owner", actor="плановый проход", priority=1,
+                text=(f"Управляемые настройки ({P.MANAGED}) отстали от проверенной версии guard {version}. Окно прав "
+                      f"администратора не дало установить: {why}. Плановый проход спросит снова не раньше чем через "
+                      f"{MANAGED_RETRY // 3600} ч. Или в своём терминале:\n\n    {cmd}\n\n"
+                      "Карточка закроется сама, когда файл совпадёт с проверенным."))
+    P.write_json(P.path(MANAGED_STATE), dict(st, sha=sha, version=version, asked=int(P.now()), result=res, task=tid))
+    P.alert(f"управляемые настройки guard отстали от версии {version}: окно не дало установить ({why})"
+            + (f" — карточка {tid}" if tid else "") + f"; команда: {cmd}", "pantheon-managed")
+    return f"не обновлены ({why})" + (f", карточка {tid}" if tid else "")
+
+
 # --- команды --------------------------------------------------------------------------------------------------------
 
 def parse_target(args):
@@ -979,14 +1152,12 @@ def cmd_run(click=False):
         err(f"pantheon merge run: {why} — окружение прохода подменено (launchctl setenv?), прохода нет")
         return 2
     r = root()
-    if not _real_dir(r):
-        return 0
     with P.lock("merge-run", block=False) as got:
         if not got:
             print("pantheon merge run: идёт другой проход")
             return 0
         rc = 0
-        for f in sorted(os.listdir(r)):
+        for f in sorted(os.listdir(r)) if _real_dir(r) else []:
             p = os.path.join(r, f)
             if not FILE_RE.fullmatch(f):
                 continue
@@ -1005,6 +1176,13 @@ def cmd_run(click=False):
                 with contextlib.suppress(Exception):
                     drop(req, "error", f"сбой прохода ({type(e).__name__}: {e})", warn=True)
                 print(f"{req['repo']}#{req['pr']}: сбой ({type(e).__name__}) — заявка снята")
+        try:   # управляемые настройки guard (metis-0710) — тем же проходом, под тем же замком
+            print(f"управляемые настройки guard: {managed_pass()}")
+        except Exception as e:  # сбой не роняет проход; тревога — с причиной, повтор — следующим проходом
+            rc = 1
+            with contextlib.suppress(Exception):
+                P.alert(f"управляемые настройки guard: сбой прохода ({type(e).__name__}: {e})", "pantheon-managed")
+            print(f"управляемые настройки guard: сбой ({type(e).__name__})")
         return rc
 
 

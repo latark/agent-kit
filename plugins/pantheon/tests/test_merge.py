@@ -125,8 +125,13 @@ sys.exit(int(open(p).read()) if os.path.exists(p) else 0)
 
 # Тестовая обвязка прохода: подмены — атрибутом merge.TEST в её процессе (из окружения launchd его не включить),
 # переменные для прохода — из MERGE_TEST, который читает только обвязка
+# attrs — подмены атрибутов модулей в процессе обвязки (metis-0710): "p" — pantheon (MANAGED), "m" — merge
+# (OSASCRIPT, ROOT_OWNER, MANAGED_WAIT); /Library и настоящий osascript тесты не трогают
 HARNESS = ("import json, os, sys; sys.path.insert(0, %r); import pantheon as p; m = p.merge_mod(); "
-           "m.TEST = json.loads(os.environ.pop('MERGE_TEST')); sys.exit(p.main(sys.argv[1:]))" % LIBDIR)
+           "m.TEST = json.loads(os.environ.pop('MERGE_TEST')); "
+           "[setattr(mod, k, v) for mod, key in ((p, 'p'), (m, 'm')) "
+           "for k, v in (m.TEST.get('attrs') or {}).get(key, {}).items()]; "
+           "sys.exit(p.main(sys.argv[1:]))" % LIBDIR)
 
 FAILS = []
 
@@ -189,14 +194,14 @@ class Box:
         env.update(extra or {})
         return {k: v for k, v in env.items() if v is not None}
 
-    def cli(self, args, t=T0, extra=None, evil=None):
+    def cli(self, args, t=T0, extra=None, evil=None, attrs=None):
         env = self.env(t, extra)
         if args[:2] == ["merge", "run"]:
             # проход — через обвязку HARNESS: подмены (поддельный gh в PATH, часы, простой, журнал уведомлений) —
             # только атрибутом merge.TEST в её процессе (metis-0303). evil — то, что дописало бы в окружение
             # прохода launchd (launchctl setenv): проход его не берёт
             cmd = [PY311, "-I", "-c", HARNESS] + args
-            env = dict(env, **(evil or {}), MERGE_TEST=json.dumps({"env": env}))
+            env = dict(env, **(evil or {}), MERGE_TEST=json.dumps({"env": env, "attrs": attrs or {}}))
         else:
             cmd = [PY311, "-I", RUN_PY] + args
         r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=60)
@@ -206,8 +211,8 @@ class Box:
     def request(self, pr=PR, repo=REPO, t=T0):
         return self.cli(["merge", "request", str(pr), "-R", repo], t=t)
 
-    def run(self, t=T0, click=False, extra=None, evil=None):
-        return self.cli(["merge", "run"] + (["--click"] if click else []), t=t, extra=extra, evil=evil)
+    def run(self, t=T0, click=False, extra=None, evil=None, attrs=None):
+        return self.cli(["merge", "run"] + (["--click"] if click else []), t=t, extra=extra, evil=evil, attrs=attrs)
 
     def view(self, sha, state="OPEN", draft=False, checks=None, title=TITLE, files=None, count=None, base="main",
              head=None):
@@ -1389,6 +1394,238 @@ def test_env_home_link():
     check("HOME-ссылка: в команде щелчка HOME и bin/pantheon — realpath (current разрешён), не через ссылку",
           f"HOME={real}" in words and os.path.join(ver, "bin", "pantheon") in words and f"PANTHEON_PYTHON={PY311}" in words
           and not any(link in w for w in words), cmd or r.stderr)
+
+
+# --- управляемые настройки guard по Touch ID (metis-0710) ------------------------------------------------------------
+
+# окно прав администратора: argv — в rec/osascript-argv.jsonl; режим — rec/osascript-mode: ok (по умолчанию) —
+# скрипт root через /bin/sh -c, как do shell script; cancel — «Отменить» (-128); sleep — ответа нет; swap — после
+# сверки проходом проверенный файл подменили, затем скрипт root
+FAKE_OSASCRIPT = r"""
+import json, os, shutil, subprocess, sys, time
+rec = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(sys.argv[0]))), "rec")
+with open(os.path.join(rec, "osascript-argv.jsonl"), "a") as fh:
+    fh.write(json.dumps({"argv": sys.argv[1:]}) + "\n")
+p = os.path.join(rec, "osascript-mode")
+mode = open(p).read().strip() if os.path.exists(p) else "ok"
+if mode == "cancel":
+    sys.stderr.write("0:150: execution error: User canceled. (-128)\n")
+    sys.exit(1)
+if mode == "sleep":
+    time.sleep(30)
+    sys.exit(0)
+script = sys.argv[-2]
+if mode == "swap":
+    with open(open(os.path.join(rec, "managed-src")).read(), "w") as fh:
+        fh.write('{"evil": true}\n')
+if not os.path.exists("/usr/sbin/chown"):   # Linux CI: chown не в /usr/sbin
+    script = script.replace("/usr/sbin/chown", shutil.which("chown"))
+sys.exit(subprocess.run(["/bin/sh", "-c", script]).returncode)
+"""
+M_NEW = b'{"hooks": {"PreToolUse": []}, "v": "new"}\n'
+M_OLD = b'{"hooks": {}, "v": "old"}\n'
+M_VER = "0.5.99"
+
+
+def managed_box(installed=M_OLD):
+    """Коробка с проверенным деревом guard (installed_plugins.json и verified.json с его хешем), файлом «/Library»
+    во временной папке и поддельным osascript; installed=None — файла нет."""
+    b = Box()
+    tree = os.path.join(b.home, ".claude", "plugins", "cache", "agent-kit", "guard", M_VER)
+    os.makedirs(os.path.join(tree, ".claude-plugin"))
+    with open(os.path.join(tree, ".claude-plugin", "plugin.json"), "w") as fh:
+        json.dump({"name": "guard", "version": M_VER}, fh)
+    with open(os.path.join(tree, "managed-settings.json"), "wb") as fh:
+        fh.write(M_NEW)
+    with open(os.path.join(b.home, ".claude", "plugins", "installed_plugins.json"), "w") as fh:
+        json.dump({"plugins": {"guard@agent-kit": [{"scope": "user", "installPath": tree}]}}, fh)
+    b.tree = tree
+    mverify(b)
+    os.makedirs(os.path.join(b.pantheon, "directions", "metis-pantheon", "tasks"))
+    b.msrc = os.path.join(tree, "managed-settings.json")
+    b.set("managed-src", b.msrc)
+    b.mdest = os.path.join(b.tmp, "Library", "ClaudeCode", "managed-settings.json")
+    os.makedirs(os.path.dirname(b.mdest))
+    if installed is not None:
+        with open(b.mdest, "wb") as fh:
+            fh.write(installed)
+    b.osa = script(os.path.join(b.bin, "osascript-fake"), FAKE_OSASCRIPT)
+    b.mattrs = {"p": {"MANAGED": b.mdest},
+                "m": {"OSASCRIPT": b.osa, "ROOT_OWNER": f"{os.getuid()}:{os.getgid()}", "MANAGED_WAIT": 3}}
+    return b
+
+
+def mverify(b, version=M_VER):
+    """verified.json: дерево b.tree проверено (хеш считает сам pantheon)."""
+    code = ("import sys; sys.path.insert(0, %r); import pantheon as p; print(p._tree_hash(%r))"
+            % (LIBDIR, os.path.realpath(b.tree)))
+    r = subprocess.run([PY311, "-I", "-c", code], env=b.env(T0), capture_output=True, text=True, timeout=60)
+    os.makedirs(os.path.join(b.state, "plugins"), exist_ok=True)
+    with open(os.path.join(b.state, "plugins", "verified.json"), "w") as fh:
+        json.dump({"guard": {"hash": r.stdout.strip(), "path": b.tree, "version": version}}, fh)
+
+
+def mrun(b, t=T0, extra=None):
+    return b.run(t=t, extra=extra, attrs=b.mattrs)
+
+
+def mstate(b):
+    p = os.path.join(b.state, "managed-update.json")
+    return json.load(open(p)) if os.path.exists(p) else {}
+
+
+def mcards(b):
+    """Карточки направления защит: [(путь, текст)]."""
+    d = os.path.join(b.pantheon, "directions", "metis-pantheon", "tasks")
+    return [(os.path.join(d, f), open(os.path.join(d, f), encoding="utf-8").read()) for f in sorted(os.listdir(d))
+            if f.endswith(".md")]
+
+
+def mdest(b):
+    return open(b.mdest, "rb").read() if os.path.exists(b.mdest) else None
+
+
+def mkick(b, t=T0):
+    """Тик: merge_kick с файлом «/Library» коробки → (результат, строки dryrun.log этого вызова)."""
+    code = ("import sys; sys.path.insert(0, %r); import pantheon as p; p.MANAGED = %r; p.merge_kick()"
+            % (LIBDIR, b.mdest))
+    r = subprocess.run([PY311, "-I", "-c", code], env=b.env(t, {"PANTHEON_DRYRUN": "1"}), capture_output=True,
+                       text=True, timeout=60)
+    p = os.path.join(b.state, "dryrun.log")
+    log = open(p).read() if os.path.exists(p) else ""
+    if os.path.exists(p):
+        os.remove(p)
+    return r, log
+
+
+def test_managed_finger_installs():
+    b = managed_box()
+    r, log = mkick(b)
+    check("управляемые: отстали от проверенной версии — тик запускает проход", "merge-run" in log, r.stderr + log)
+    r = mrun(b)
+    wins = b.calls("osascript")
+    st = mstate(b)
+    check("управляемые: одно окно прав администратора с текстом «Обновить управляемые настройки guard до версии X»",
+          len(wins) == 1 and wins[0]["argv"][-1] == f"Обновить управляемые настройки guard до версии {M_VER}"
+          and "with administrator privileges" in " ".join(wins[0]["argv"]), (wins, b.outs[-1]))
+    check("управляемые: касание → файл поставлен (временная папка вместо /Library), 644, версия записана",
+          r.returncode == 0 and mdest(b) == M_NEW and oct(os.stat(b.mdest).st_mode & 0o777) == "0o644"
+          and st.get("installed", {}).get("version") == M_VER
+          and st["installed"].get("sha") == hashlib.sha256(M_NEW).hexdigest() and not mcards(b)
+          and "pantheon-managed" not in b.alerts(), (b.outs[-1], st, b.alerts()))
+    check("управляемые: временных файлов рядом не осталось",
+          os.listdir(os.path.dirname(b.mdest)) == ["managed-settings.json"], os.listdir(os.path.dirname(b.mdest)))
+    r, log = mkick(b)
+    mrun(b)
+    check("управляемые: после установки совпадают — тик прохода не запускает, окна больше нет",
+          "merge-run" not in log and len(b.calls("osascript")) == 1, (log, b.calls("osascript")))
+
+
+def test_managed_same_version_no_window():
+    b = managed_box(installed=M_NEW)
+    r, log = mkick(b)
+    mrun(b)
+    check("управляемые: версия совпадает — тик не запускает проход, окна и карточки нет",
+          "merge-run" not in log and not b.calls("osascript") and not mcards(b) and mdest(b) == M_NEW,
+          (log, b.calls("osascript"), b.outs[-1]))
+    b = managed_box(installed=None)
+    r, log = mkick(b)
+    mrun(b)
+    check("управляемые: файла в /Library нет — не отставание: окна нет (первый раз ставит владелец)",
+          "merge-run" not in log and not b.calls("osascript") and mdest(b) is None, (log, b.outs[-1]))
+
+
+def test_managed_refused_card_and_retry():
+    b = managed_box()
+    b.set("osascript-mode", "cancel")
+    mrun(b)
+    cards = mcards(b)
+    st = mstate(b)
+    text = cards[0][1] if cards else ""
+    check("управляемые: отказ → файл не тронут, карточка «Руками» (Кому — владелец, без вопроса) с командой sudo install",
+          mdest(b) == M_OLD and len(cards) == 1 and "owner: owner" in text and "question" not in text
+          and "sudo install -m 644 -o root -g wheel" in text and b.msrc in text and st.get("result") == "refused"
+          and st.get("asked") == T0, (b.outs[-1], cards, st))
+    check("управляемые: отказ → тревога с причиной и командой",
+          "pantheon-managed" in b.alerts() and "sudo install" in b.alerts() and "вы отменили окно" in b.alerts(),
+          b.alerts())
+    mrun(b, t=T0 + 3600)
+    r, log = mkick(b, t=T0 + 3600)
+    check("управляемые: раньше 6 ч — окна нет, тик прохода не запускает",
+          len(b.calls("osascript")) == 1 and "merge-run" not in log, (b.calls("osascript"), log))
+    mrun(b, t=T0 + 6 * 3600 + 1)
+    check("управляемые: через 6 ч — окно снова, вторая карточка не заводится",
+          len(b.calls("osascript")) == 2 and len(mcards(b)) == 1 and mstate(b).get("asked") == T0 + 6 * 3600 + 1,
+          (b.calls("osascript"), mcards(b)))
+    # владелец поставил командой из карточки: тик видит совпадение, закрывает карточку и пишет версию
+    with open(b.mdest, "wb") as fh:
+        fh.write(M_NEW)
+    r, log = mkick(b, t=T0 + 7 * 3600)
+    card = mcards(b)[0][1]
+    check("управляемые: поставили командой — карточка закрыта, версия записана, прохода нет",
+          "status: done" in card and mstate(b).get("installed", {}).get("version") == M_VER and "merge-run" not in log,
+          (card, mstate(b), r.stderr))
+
+
+def test_managed_timeout_card():
+    b = managed_box()
+    b.set("osascript-mode", "sleep")
+    mrun(b)
+    st = mstate(b)
+    check("управляемые: касания нет (время вышло) → файл не тронут, карточка и тревога, повтор позже",
+          mdest(b) == M_OLD and len(mcards(b)) == 1 and st.get("result") == "timeout"
+          and "pantheon-managed" in b.alerts() and "ждало касания" in b.alerts(), (b.outs[-1], st, b.alerts()))
+
+
+def test_managed_swapped_source():
+    b = managed_box()
+    b.set("osascript-mode", "swap")
+    mrun(b)
+    check("управляемые: проверенный файл подменили после сверки — root не ставит (sha256), карточка и тревога",
+          mdest(b) == M_OLD and len(mcards(b)) == 1 and "код 65" in str(mstate(b).get("result")),
+          (b.outs[-1], mstate(b)))
+
+
+def test_managed_new_version_replaces_card():
+    b = managed_box()
+    b.set("osascript-mode", "cancel")
+    mrun(b)
+    first = mcards(b)[0][0] if mcards(b) else ""
+    with open(b.msrc, "wb") as fh:   # выпуск guard: новый проверенный файл, новая версия
+        fh.write(b'{"hooks": {}, "v": "newer"}\n')
+    with open(os.path.join(b.tree, ".claude-plugin", "plugin.json"), "w") as fh:
+        json.dump({"name": "guard", "version": "0.5.100"}, fh)
+    mverify(b, "0.5.100")
+    mrun(b, t=T0 + 60)
+    cards = dict(mcards(b))
+    check("управляемые: новая версия — окно сразу, не через 6 ч; карточка прошлой версии закрыта, заведена новая",
+          len(b.calls("osascript")) == 2 and len(cards) == 2 and "status: done" in cards.get(first, "")
+          and any("0.5.100" in t and "status: done" not in t for t in cards.values()), (b.calls("osascript"), cards))
+
+
+def test_managed_no_osascript_and_no_record():
+    b = managed_box()
+    b.mattrs["m"]["OSASCRIPT"] = os.path.join(b.bin, "нет-такого")
+    mrun(b)
+    check("управляемые: окно не показать (нет osascript) — файл не тронут, карточка и тревога с причиной",
+          mdest(b) == M_OLD and len(mcards(b)) == 1 and "no-window (FileNotFoundError)" in b.alerts(),
+          (b.outs[-1], b.alerts()))
+    b = managed_box()
+    os.remove(os.path.join(b.state, "plugins", "verified.json"))
+    r, log = mkick(b)
+    mrun(b)
+    check("управляемые: guard не проверен (нет записи verified.json) — ни окна, ни карточки, ни тревоги о дереве",
+          "merge-run" not in log and not b.calls("osascript") and not mcards(b) and mdest(b) == M_OLD
+          and "plugins-unverified" not in b.alerts() and "не проверено" not in b.alerts(), (log, b.alerts()))
+
+
+def test_managed_owner_away():
+    b = managed_box()
+    mrun(b, extra={"PANTHEON_FAKE_IDLE": "100000"})
+    check("управляемые: вас нет у Mac — окна и карточки нет, попытка не засчитана",
+          not b.calls("osascript") and not mcards(b) and not mstate(b).get("asked") and mdest(b) == M_OLD,
+          (b.outs[-1], mstate(b)))
+
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
