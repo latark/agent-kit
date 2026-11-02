@@ -3187,6 +3187,47 @@ def test_autostart_skip_not_failure_0708():
     check("самозапуск bb-dir ждёт: нет места" in e3.alerts(), f"0708: нет тревоги «нет места»: {e3.alerts()}")
 
 
+def test_start_lost_race_skip_0717():
+    """metis-0717: плановый проход проверил снимок (имя свободно) и пошёл `pantheon start --from tick`, а под блокировкой
+    имени его уже держат (другой процесс поднимает или сессия уже стоит в списке) — проигранная гонка. Раньше код 1 и
+    ложная тревога «не вышло, код 1»; теперь код 4 (P.skipped), как у resume_session после metis-0708, и строка
+    start-busy / start-skip в start.log. Владелец (--from owner) и подложенная запись замка — по-прежнему код 1."""
+    e = Env()
+    e.direction("rc-dir")
+    lk = e.st("hq-rw", "locks")
+    os.makedirs(lk, exist_ok=True)
+    lp = os.path.join(lk, "start-rc-dir.lock")
+    holder = subprocess.Popen([PY311, "-I", "-c",
+                               "import fcntl,os,sys,time\nfd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT,0o600)\n"
+                               "fcntl.flock(fd,fcntl.LOCK_EX)\nprint('ok',flush=True)\ntime.sleep(60)", lp],
+                              stdout=subprocess.PIPE, text=True)
+    try:
+        check(holder.stdout.readline().strip() == "ok", "0717: держатель замка не взял замок")
+        r = e.run("start", "rc-dir", "--from", "tick", "задание", t=T0)
+        check(r.returncode == 4 and not _bgs(e, "rc-dir") and "\tstart-busy\trc-dir\ttick" in _start_log(e),
+              f"0717: гонка за замок имени — не код 4: {r.returncode} {r.stderr[-300:]} {_start_log(e)!r}")
+        r = e.run("start", "rc-dir", "--from", "owner", "задание", t=T0)
+        check(r.returncode == 1 and not _bgs(e, "rc-dir"), f"0717: владельцу замок занят — не код 1: {r.returncode}")
+    finally:
+        holder.kill()
+        holder.wait()
+    # живая копия под блокировкой: снимок до неё пуст, а теперь имя в списке
+    e.agents([bg("rc-dir", "working", "7170aaaa-1", pid=48)])
+    r = e.run("start", "rc-dir", "--from", "tick", "задание", t=T0 + 5)
+    check(r.returncode == 4 and not _bgs(e, "rc-dir") and "\tstart-skip\trc-dir\ttick\tуже работает" in _start_log(e),
+          f"0717: живая копия под замком — не код 4: {r.returncode} {r.stderr[-300:]} {_start_log(e)!r}")
+    r = e.run("start", "rc-dir", "--from", "owner", "задание", t=T0 + 6)
+    check(r.returncode == 1 and "уже работает" in r.stderr, f"0717: владельцу живая копия — не код 1: {r.returncode}")
+    # подложенная запись на месте замка — не гонка: код 1 даже у tick
+    e2 = Env()
+    e2.direction("rd-dir")
+    hl = e2.st("hq-rw", "locks")
+    os.makedirs(hl, exist_ok=True)
+    os.mkfifo(os.path.join(hl, "start-rd-dir.lock"))
+    r = e2.run("start", "rd-dir", "--from", "tick", t=T0)
+    check(r.returncode == 1 and "блокировка start-rd-dir не взята" in r.stderr, f"0717: fifo на месте замка у tick: {r.returncode} {r.stderr[-200:]}")
+
+
 def _next_agents(e, lst):
     """FAKE_AGENTS_NEXT: свежий claude agents под блокировкой имени (повторная проверка) видит lst."""
     p = os.path.join(e.tmp, "agents-next.json")
