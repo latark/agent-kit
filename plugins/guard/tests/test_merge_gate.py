@@ -371,6 +371,41 @@ def t_no_tests(h):
                False, "pantheon outside test --wait 590")
 
 
+NARROW_CMD = ("pantheon review test -- python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 --affected --base "
+              "origin/main plugins/guard plugins/pantheon plugins/project-tools")
+
+
+def t_narrow_record(h):
+    """metis-0666: узкая запись исполнителя (--affected в своей worktree, без heavy): хук пишет её на HEAD, шлюз на
+    основном пути (CI зелёный) засчитывает, отказ «нет записи тестов» называет эту команду; на запасном пути (CI без
+    минут) она не в счёт — там только FULL_TESTS."""
+    sha, kit = h.sha["agent-kit"], "projects/agent-kit"
+    merge = f"gh pr merge 7 --match-head-commit {sha}"
+    d, why = h.pre(NARROW_CMD, role="dev-opus", pdir=kit, agent_id="d1")
+    check("узкая команда: PreToolUse dev-opus — можно", d == "allow", why)
+    h.seed(rec("accept", "latark/agent-kit", 7, sha))
+    merge_case("нет записи тестов — отказ называет узкую команду", h.pre(merge, pdir=kit), False, f"`{NARROW_CMD}`")
+    merge_case("отказ про tg-read (нет в NARROW_TESTS) — без узкой подсказки, шаблон как раньше",
+               h.pre(f"gh pr merge 3 --match-head-commit {h.sha['tg-read']}"), False, "<команда тестов>` (запишет хук guard). Тесты")
+    h.post("pantheon review test -- true", "dev-opus", cwd=kit, agent_id="d1")
+    check("пустая команда рядом — записи нет, как раньше", [r for r in h.read() if r["kind"] == "tests"] == [], h.read())
+    h.post(NARROW_CMD, "dev-opus", cwd=kit, agent_id="d1")
+    tests = [r for r in h.read() if r["kind"] == "tests"]
+    check("узкую команду хук пишет записью tests на HEAD agent-kit", len(tests) == 1 and tests[0]["sha"] == sha
+          and tests[0]["repo"] == ["latark/agent-kit"] and tests[0]["cmd"] == NARROW_CMD
+          and tests[0]["by"].get("agent_type") == "dev-opus", tests)
+    merge_case("узкая запись, «принять» и зелёный CI — слияние проходит", h.pre(merge, pdir=kit), True)
+    mg = _load_merge_gate("merge_gate_narrow")
+    check("NARROW_TESTS agent-kit — команда узкой записи", "pantheon review test -- " + mg.NARROW_TESTS["agent-kit"]
+          == NARROW_CMD)
+    check("narrow_hint: репозиторий без строки — пусто", mg.narrow_hint("latark/tg-read") == "" and mg.narrow_hint(None) == "")
+    check("запасной путь: узкая запись не полный набор (full_tests_record)", mg.full_tests_record("latark/agent-kit",
+                                                                                                   tests[0]) is False)
+    mg.read_records = lambda: tests
+    got = mg._billing_problem("latark/agent-kit", 7, sha)[0] or ""
+    check("запасной путь: при одной узкой записи — отказ с командой FULL_TESTS", "pantheon review test -- heavy" in got, got)
+
+
 def t_author_is_reviewer(h):
     sha = h.sha["tg-read"]
     h.seed(rec("tests", "latark/tg-read", None, sha, "dev-opus"), rec("accept", "latark/tg-read", 3, sha, agent_id="L1"))
@@ -4247,7 +4282,7 @@ def t_gh_out_private(h):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-CASES = [t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
+CASES = [t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_narrow_record, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1,

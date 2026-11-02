@@ -176,18 +176,26 @@ MP = ("import os, sys, multiprocessing as mp\nfrom concurrent.futures import Pro
       "    rt = resource_tracker._resource_tracker._pid\n"
       "    open(sys.argv[0] + '.pid', 'w').write(' '.join(map(str, list(pool._processes) + [rt or 0])))\n"
       "    print('ok a'); print('1 из 1', flush=True)\n    os._exit(0)\n")
-p = mkplugin({"test_mp.py": MP})
-r = run([p])
-mp_pids = [int(x) for x in open(os.path.join(p, "tests", "test_mp.py.pid")).read().split() if x != "0"]
-time.sleep(0.5)
-left = [x for x in mp_pids if alive(x)]
-for x in left:  # не оставлять сирот и при провале проверки
-    try:
-        os.kill(x, signal.SIGKILL)
-    except OSError:
-        pass
-check("пул multiprocessing после выхода файла: воркеры и resource_tracker погашены",
-      r.returncode == 0 and len(mp_pids) >= 2 and not left, (r.stdout, mp_pids, left))
+try:  # песочница окна роли не даёт семафоры: ProcessPoolExecutor там падает на sysconf (metis-0666)
+    os.sysconf("SC_SEM_NSEMS_MAX")
+    _sem = True
+except PermissionError:
+    _sem = False
+if not _sem:
+    print("пропущено: песочница окна не даёт семафоры — пул multiprocessing после выхода файла")
+else:
+    p = mkplugin({"test_mp.py": MP})
+    r = run([p])
+    mp_pids = [int(x) for x in open(os.path.join(p, "tests", "test_mp.py.pid")).read().split() if x != "0"]
+    time.sleep(0.5)
+    left = [x for x in mp_pids if alive(x)]
+    for x in left:  # не оставлять сирот и при провале проверки
+        try:
+            os.kill(x, signal.SIGKILL)
+        except OSError:
+            pass
+    check("пул multiprocessing после выхода файла: воркеры и resource_tracker погашены",
+          r.returncode == 0 and len(mp_pids) >= 2 and not left, (r.stdout, mp_pids, left))
 
 # --- окружение файла: свой HOME и TMPDIR, без PANTHEON_*, -I, папка плагина ---
 ENVF = ("import os, sys\nprint(repr((os.environ.get('HOME'), os.environ.get('TMPDIR'), "
