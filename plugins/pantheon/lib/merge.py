@@ -41,8 +41,8 @@ PR ядра защит (Д3) агенты не сливают: его слива
      launchd не в сессии владельца) — запасной путь: уведомление один раз, щелчок по нему запускает
      `pantheon merge run --click` от имени владельца, и окно Touch ID показывается уже оттуда. Заявку сняли или
      заменили, пока окно открыто, — проход её не трогает: ни согласия, ни слияния, ни записи обратно.
-Пачка (metis-0668, process_batch) — одно окно на все её PR: в тексте — каждый PR с SHA и вердиктом шлюза по порядку,
-задетое ядро всех, заголовки последними. До окна пункты 1–3 — у каждого: неполна (одну заявку сняли или заменили) или
+Пачка (metis-0668, process_batch) — одно окно на все её PR: в тексте — сначала задетое ядро всех и число файлов, затем
+каждый PR с SHA и вердиктом шлюза по порядку, заголовки последними. До окна пункты 1–3 — у каждого: неполна (одну заявку сняли или заменили) или
 шлюз не пройден хоть у одного — сняты все с тревогой, ждёт один — ждут все. После пальца — по очереди, каждый как
 одна заявка в п. 4 (шлюз заново под замком, строка согласия, `gh pr merge --match-head-commit` своего SHA). Не слит
 один (шлюз, сбой gh, заявку сняли) — следующие не трогаются: ни согласия, ни слияния; их заявки сняты, тревога
@@ -102,7 +102,10 @@ CORE_FILES = ("plugins/guard/hooks/merge_gate.py", "plugins/guard/hooks/protect_
               "plugins/pantheon/lib/plugin_map.py", "plugins/pantheon/plugins-by-role.toml",
               ".claude-plugin/marketplace.json")
 CORE_DIR = ("plugins/guard", "plugins/pantheon/roles", ".github")
-MAX_BATCH = 5                        # PR в одной пачке: их список с вердиктами — в окне не длиннее 400 знаков
+MAX_BATCH = 5                        # PR в одной пачке: их номера, SHA и ядро — в окне не длиннее 400 знаков
+# вердикт шлюза на запасном пути (metis-0655); в окне пачки он короче — BILLING_SHORT (argus-263a Б1)
+BILLING_OK = "CI не запускался (лимит минут GitHub Actions) — засчитан местный прогон тестов на "
+BILLING_SHORT = "CI: лимит, тесты ✓"
 USAGE = ("pantheon merge request <N> [<N2> …] -R <owner/repo> | cancel <N> -R <owner/repo> | run [--click] | "
          "status")
 
@@ -743,8 +746,7 @@ def gate(repo, pr, sha, view):
         ids = ci_billing_ids(runs, required)
         if ci_billing(runs, required, ci_notes_fetch(repo, ids), ci_jobs_fetch(repo, ids)):
             if any(r.get("kind") == "tests" and r.get("sha") == sha and full_tests_record(repo, r) for r in recs):
-                return "ok", (f"argus ×{len(latest)} ✓, CI не запускался (лимит минут GitHub Actions) — засчитан "
-                              f"местный прогон тестов на {sha[:12]}")
+                return "ok", f"argus ×{len(latest)} ✓, {BILLING_OK}{sha[:12]}"
             return "fail", (f"{why}; CI не запускался (лимит минут GitHub Actions), а записи полного набора тестов "
                             f"(FULL_TESTS) на {sha[:12]} нет")
     if state != "ok":
@@ -814,24 +816,33 @@ def nums(reqs):
 
 
 def batch_window_text(reqs, views, whys, paths):
-    """Текст окна пачки (metis-0668): сначала список — номер, SHA и вердикт шлюза каждого PR в порядке слияния (его
-    пишет проход, не автор PR), затем задетые файлы ядра всех PR, заголовки авторов — последними, в кавычках и
-    коротко. Не длиннее 400 знаков — предел помощника окна."""
-    items = "; ".join(f"#{r['pr']} {r['sha'][:7]} {' '.join(str(w).split())[:48]}" for r, w in zip(reqs, whys))
-    head = (f"Слить по очереди {len(reqs)} PR {reqs[0]['repo']} — отказ шлюза у одного останавливает следующие: "
-            f"{items}.")
+    """Текст окна пачки (metis-0668): сначала задетые файлы ядра всех PR и число файлов — их владелец и
+    подтверждает, затем номер, SHA и вердикт шлюза каждого PR в порядке слияния (его пишет проход, не автор PR),
+    заголовки авторов — последними, в кавычках и коротко. Не длиннее 400 знаков — предел помощника окна. Ядро и
+    номера с SHA всех PR влезают при MAX_BATCH PR и любых вердиктах (argus-263a Б1): ядру — место за вычетом номеров
+    и коротких вердиктов, вердиктам — что осталось, поровну, вердикт запасного пути — коротко (BILLING_SHORT)."""
+    n = len(reqs)
+    head = f"Слить по очереди {n} PR {reqs[0]['repo']}, отказ шлюза у одного останавливает следующие."
     every = [x for p in paths for x in p]
     core = [x for x in dict.fromkeys(every) if is_core(x)]
+    pre = [f"#{r['pr']} {r['sha'][:7]}" for r in reqs]
+    fixed = len(" Вердикты: .") + sum(len(x) + 3 for x in pre)   # «#N sha7 » и «; » у каждого
+    room = max(400 - len(head) - fixed - n * len(f"argus ×2 ✓, {BILLING_SHORT}") - 40, 60)
     shown, size = [], 0
     for x in core:
-        if shown and size + len(x) > max(400 - len(head) - 60, 0):
+        if shown and size + len(x) > room:
             break
         shown.append(x)
         size += len(x) + 2
     more = f" и ещё {len(core) - len(shown)}" if len(core) > len(shown) else ""
     hit = f"ядро: {', '.join(shown)}{more}" if core else "ядро не задето"
+    top = f"{head} Файлов {len(set(every))}, {hit}."
+    per = min(48, max((400 - len(top) - fixed) // n, 0))
+    short = [re.sub(re.escape(BILLING_OK) + r"[0-9a-f]+", BILLING_SHORT, " ".join(str(w).split()))[:per]
+             for w in whys]
+    items = "; ".join(f"{x} {w}".rstrip() for x, w in zip(pre, short))
     titles = "; ".join(f"#{r['pr']} «{' '.join(str(v.get('title') or '').split())[:40]}»" for r, v in zip(reqs, views))
-    return f"{head} Файлов {len(set(every))}, {hit}. Заголовки: {titles}"[:400]
+    return f"{top} Вердикты: {items}. Заголовки: {titles}"[:400]
 
 
 def ask(text):
@@ -1088,7 +1099,7 @@ def drop_batch(reqs, event, why, warn=False):
 
 def process_batch(reqs, click):
     """Пачка заявок одной постановки (metis-0668) → [(заявка, итог)] по каждой. Как process, но окно одно на всю
-    пачку: в нём список PR с SHA и вердиктами шлюза. До окна: пачка в очереди неполна (одну сняли или заменили), шлюз
+    пачку: в нём ядро всех PR и список PR с SHA и вердиктами шлюза. До окна: пачка в очереди неполна (одну сняли или заменили), шлюз
     не пройден хоть у одного — сняты все с тревогой; ждёт хоть один — ждут все. После пальца — по очереди, каждый
     через finger (шлюз заново, строка согласия, gh pr merge --match-head-commit своего SHA); не слит один — следующие
     не трогаются: ни согласия, ни слияния, заявки сняты (палец был на всю пачку — нужна новая заявка)."""
@@ -1189,7 +1200,8 @@ def cmd_run(click=False):
         rc, seen = 0, set()
         for f in sorted(os.listdir(r)):
             p = os.path.join(r, f)
-            if not FILE_RE.fullmatch(f):
+            # заявку пачки уже разобрали с её первой — её файла может и не быть (слита, снята): не «битая» (argus-263a)
+            if not FILE_RE.fullmatch(f) or f in seen:
                 continue
             with P.lock("merge-queue"):
                 req = read_req(p)
@@ -1201,9 +1213,7 @@ def cmd_run(click=False):
             if req is None:
                 print(f"{f}: битая заявка — удалена")
                 continue
-            if (req["repo"], req["pr"]) in seen:
-                continue
-            seen.update((g["repo"], g["pr"]) for g in group)
+            seen.update(os.path.basename(req_file(g["repo"], g["pr"])) for g in group)
             try:
                 if req.get("batch"):
                     for g, res in process_batch(group, click):

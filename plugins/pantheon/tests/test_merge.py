@@ -1609,6 +1609,80 @@ def test_batch_bad_field():
           and "битая заявка" in b.outs[-1], b.outs[-1])
 
 
+def test_batch_seen_and_ttl():
+    """metis-0703 (argus-263a Д): заявки пачки, разобранные с её первой, проход не разбирает второй раз (seen) и не
+    зовёт «битыми»; пачка старше REQUEST_TTL снимается целиком без окна."""
+    b = batch_box()
+    request_batch(b)
+    b.run()
+    check("пачка слита: строки «битая заявка» про её вторую заявку нет", b.merges() == [merge_argv(7), merge_argv(8)]
+          and "битая" not in b.outs[-1], b.outs[-1])
+    b = batch_box()
+    request_batch(b)
+    b.set("touchid-rc", 3)
+    b.run(click=True)
+    check("щелчок, окно без ответа: одно окно на пачку за проход — вторую заявку не разбирают заново",
+          len(b.windows()) == 1 and b.req(7) and b.req(8), (b.windows(), b.outs[-1]))
+    b = batch_box()
+    request_batch(b)
+    b.run(t=T0 + 24 * 3600 + 1)
+    check("пачка старше 24 ч: окна и слияния нет, сняты обе, тревога «24 ч»",
+          not b.windows() and not b.merges() and b.req(7) is None and b.req(8) is None and "24 ч" in b.alerts(),
+          (b.outs[-1], b.alerts()))
+    b = batch_box()
+    request_batch(b)
+    b.run(t=T0 + 24 * 3600 - 60)
+    check("пачка до 24 ч — слита", b.merges() == [merge_argv(7), merge_argv(8)], b.outs[-1])
+
+
+def test_batch_max_fallback_window_core():
+    """argus-263a Б1: MAX_BATCH PR, CI у всех идёт запасным путём (лимит минут) — вердикты длинные, а список ядра и
+    число файлов в окне всё равно есть: владелец видит, что сливает ядро."""
+    prs = (7, 8, 9, 10, 11)
+    shas = {pr: "%07d" % pr + "c" * 33 for pr in prs}
+    core = {7: CORE_FILE, 8: "plugins/pantheon/lib/merge.py", 9: "plugins/guard/hooks/protect_config.py",
+            10: ".claude-plugin/marketplace.json", 11: "plugins/pantheon/hooks/hooks.json"}
+    blocked = [dict(c, conclusion="FAILURE", notes=[billing_note()], job=JOB_IDLE) for c in ci("SUCCESS", "SUCCESS")]
+    b = Box()
+    for pr in prs:
+        b.view(shas[pr], pr=pr, title=f"PR {pr}", files=["README.md", core[pr]])
+        b.gate_ok(shas[pr], pr=pr)
+    r = request_batch(b, prs)
+    for pr in prs:   # лимит минут — уже после постановки, как в test_ci_billing
+        b.view(shas[pr], pr=pr, title=f"Длинный заголовок PR {pr} " * 4, files=["README.md", core[pr]],
+               checks=blocked)
+    b.view(SHA, checks=blocked)   # аннотации и job поддельный gh берёт из общего ответа
+    b.set("touchid-rc", 1)   # окно и есть проверка; сливать не нужно
+    b.run()
+    w = b.windows()
+    text = w[0][0] if w else ""
+    check("MAX_BATCH PR, запасной путь: пачка поставлена, окно одно, вердикт запасного пути в нём",
+          r.returncode == 0 and len(w) == 1 and "лимит" in text, (r.stdout + r.stderr, w, b.outs[-1]))
+    check("MAX_BATCH PR, запасной путь: в окне ядро и число файлов, номер и SHA каждого PR, не длиннее 400",
+          "ядро: " in text and CORE_FILE in text and "Файлов 6" in text and len(text) <= 400
+          and all(f"#{pr} {shas[pr][:7]}" in text for pr in prs), text)
+    check("MAX_BATCH PR, запасной путь: ядро — до вердиктов", "ядро: " in text and "лимит" in text
+          and text.index("ядро: ") < text.index("лимит"), text)
+    check("MAX_BATCH PR, запасной путь: вердикт каждого — коротко и целиком",
+          all(f"#{pr} {shas[pr][:7]} argus ×2 ✓, CI: лимит, тесты ✓" in text for pr in prs), text)
+    # вердикты длинные и не запасного пути: короче делит их место поровну — номер и SHA последнего PR не обрезаны
+    code = ("import importlib.util, json, sys\n"
+            "s = importlib.util.spec_from_file_location('m', %r); m = importlib.util.module_from_spec(s); "
+            "s.loader.exec_module(m)\n"
+            "reqs = [{'repo': %r, 'pr': 1000 + i, 'sha': '%%07d' %% i + 'c' * 33} for i in range(m.MAX_BATCH)]\n"
+            "paths = [[c] for c in m.CORE_FILES[:m.MAX_BATCH]]\n"
+            "print(json.dumps(m.batch_window_text(reqs, [{'title': 'T' * 99}] * len(reqs), ['слово ' * 60] * len(reqs), "
+            "paths)))" % (os.path.join(LIBDIR, "merge.py"), REPO))
+    r = subprocess.run([PY311, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    try:
+        text = json.loads(r.stdout)
+    except ValueError:
+        text = ""
+    check("MAX_BATCH PR, длинные вердикты: ядро, номер и SHA каждого PR в окне, не длиннее 400",
+          "ядро: " in text and CORE_FILE in text and len(text) <= 400
+          and all(f"#{1000 + i} {'%07d' % i}" in text for i in range(5)), text or r.stderr)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
