@@ -2041,8 +2041,10 @@ def t_ci_billing(h):
     msg = json.loads(r.stdout).get("systemMessage", "") if r.stdout.strip() else ""
     check("лимит, запись тестов на этом SHA — без роли пропуск", decision(r)[0] == "allow", r.stdout + r.stderr)
     check("лимит, пропуск — systemMessage «CI не запускался … засчитан местный прогон»",
-          f"CI не запускался: лимит минут GitHub Actions, засчитан местный прогон (запись `pantheon review test`) на "
-          f"latark/agent-kit#7@{sha[:12]}" in msg, r.stdout)
+          f"CI не запускался: лимит минут GitHub Actions, засчитан местный прогон (запись полного набора тестов на "
+          f"этом коммите) на latark/agent-kit#7@{sha[:12]}" in msg, r.stdout)
+    check("лимит, пропуск — systemMessage не называет способ записи (review test или outside test, долг argus #248)",
+          "pantheon review test" not in msg and "outside test" not in msg, msg)
     r = _hook_out(h, cmd, kit)
     check("лимит, роль с записями тестов и argus — пропуск со строкой systemMessage",
           decision(r)[0] == "allow" and "засчитан местный прогон" in r.stdout, r.stdout + r.stderr)
@@ -2088,6 +2090,14 @@ def t_ci_billing(h):
     merge_case("traces TIMED_OUT с аннотацией лимита — отказ", h.pre(cmd, **owner), False, "traces красная: TIMED_OUT")
     h.ci([aff_b, tr_b], name="agent-kit")
     merge_case("лимит у обеих (синтетика), запись есть — пропуск", h.pre(cmd, **owner), True)
+    # С1 argus #248: на засчитанном запасном пути предупреждение о красной необязательной не теряется
+    h.ci([aff_b, tr_b, dict(AFFECTED, name="full", conclusion="FAILURE")], name="agent-kit")
+    for who, r in (("без роли", _owner_out(h, cmd, kit)), ("роль", _hook_out(h, cmd, kit))):
+        msg = json.loads(r.stdout).get("systemMessage", "") if r.stdout.strip() else ""
+        check(f"лимит + красная необязательная tests/full, {who}: пропуск, в systemMessage и лимит, и tests/full",
+              decision(r)[0] == "allow" and "засчитан местный прогон" in msg
+              and f"необязательная проверка GitHub tests/full красная: FAILURE на latark/agent-kit#7@{sha[:12]}" in msg,
+              r.stdout + r.stderr)
     # журнал записей не читается (папка — симлинк) — отказ, а не пропуск
     d = h.j(".local/state/pantheon/merge-gate")
     shutil.rmtree(d)
@@ -4247,7 +4257,160 @@ def t_gh_out_private(h):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-CASES = [t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
+def t_ci_fork_billing(h):
+    """Долг argus #248 (проба probe_fb.py): лимит минут у PR из форка. Запуски форка без номера PR засчитываются по
+    репозиторию и ветке head (metis-0649) и на запасном пути: запись полного набора есть — пропуск без роли со строкой
+    systemMessage; записи нет — отказ и без роли, и у роли. Лимит у чужого форка, чужой ветки или у не-форка без номера
+    PR — «ещё не встали»; форк без headRepository — «не получены»."""
+    kit, sha = "projects/agent-kit", h.sha["agent-kit"]
+    cmd = f"gh pr merge 7 --match-head-commit {sha}"
+    owner = dict(role=None, pdir=kit)
+
+    def fork_saved(repo="Ext/agent-kit", branch="feat", cross=True):
+        runs = _saved(222, "runs")
+        wr, cr = _runs_on(runs, sha, 222)
+        for r in wr["workflow_runs"]:
+            r["pull_requests"] = []
+            r["head_repository"] = {"full_name": repo}
+            r["head_branch"] = branch
+        h.runs["agent-kit"] = (wr, cr)
+        h.ci(_saved(222)["statusCheckRollup"], name="agent-kit", baseRefName="main",
+             **dict(FORK, isCrossRepository=cross))
+        _notes_on(h, runs)
+
+    fork_saved()
+    merge_case("форк + лимит, записи нет, без роли — отказ «не запускался»", h.pre(cmd, **owner), False,
+               "не запускался: лимит минут")
+    merge_case("форк + лимит, записи нет, роль — отказ «нет записи тестов»", h.pre(cmd, pdir=kit), False,
+               "нет записи тестов")
+    h.seed(full_rec("latark/agent-kit", sha))
+    merge_case("форк + лимит, запись полного набора — без роли пропуск", h.pre(cmd, **owner), True)
+    r = _owner_out(h, cmd, kit)
+    check("форк + лимит, без роли: systemMessage «засчитан местный прогон»", "засчитан местный прогон" in r.stdout,
+          r.stdout + r.stderr)
+    for how, kw in (("чужого форка на том же SHA", dict(repo="evil/agent-kit")),
+                    ("чужой ветки форка", dict(branch="other")),
+                    ("не форк, запуски без номера PR", dict(cross=False))):
+        fork_saved(**kw)
+        merge_case(f"лимит у {how}, запись есть — отказ «ещё не встали»", h.pre(cmd, **owner), False, "ещё не встали")
+    fork_saved()
+    h.view["agent-kit"]["headRepository"] = None
+    h.write_view("agent-kit")
+    merge_case("форк без headRepository, лимит, запись есть — отказ «не получены»", h.pre(cmd, **owner), False,
+               "не получены")
+    h.runs.clear()
+
+
+def t_full_tests_verify(h):
+    """Долг argus #248: команда полного набора FULL_TESTS["agent-kit"] (её засчитывает запасной путь) и первая строка
+    .pantheon-verify репозитория (её гоняет `pantheon outside test`) — один и тот же набор: без `heavy` и комментариев
+    слова совпадают, и full_tests_record засчитывает запись прохода с этой строкой."""
+    mg = _load_merge_gate("merge_gate_full_verify")
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    with open(os.path.join(root, ".pantheon-verify"), encoding="utf-8") as fh:
+        line = next((x.strip() for x in fh if x.strip() and not x.lstrip().startswith("#")), "")
+    want = mg.FULL_TESTS["agent-kit"].split()
+    got = line.split()
+    check(".pantheon-verify и FULL_TESTS: один набор (без heavy)",
+          [w for w in got if w != "heavy"] == [w for w in want if w != "heavy"], (line, want))
+    check(".pantheon-verify: запись прохода с его строкой засчитывается full_tests_record",
+          mg.full_tests_record("latark/agent-kit", {"cmd": line + "  # .pantheon-verify ветки (HEAD)"}), line)
+
+
+def t_owner_api_merge(h):
+    """metis-0663: сессия без роли — слияние через `gh api … PUT repos/O/R/pulls/N/merge` (-X PUT, -XPUT, --method PUT,
+    --method=PUT, флаг до api, плейсхолдеры {owner}/{repo}, поле sha) проходит ту же проверку CI, что gh pr merge;
+    GraphQL-слияние, несколько адресов, номер не числом — отказ; GET того же адреса и другие gh api — не судятся.
+    Фоновая проверка 02.11: слово merge ищется после разбора bash (`gh pr mer''ge`), алиас слияния — отказ."""
+    kit, sha = "projects/agent-kit", h.sha["agent-kit"]
+    owner = dict(role=None, pdir=kit)
+    nine = [dict(AFFECTED, prs=(9,)), dict(TRACES, prs=(9,))]
+    red = [dict(nine[0], conclusion="FAILURE"), nine[1]]
+    forms = (("-X PUT", "gh api -X PUT repos/latark/agent-kit/pulls/9/merge"),
+             ("-XPUT", "gh api -XPUT repos/latark/agent-kit/pulls/9/merge -f merge_method=merge"),
+             ("--method PUT после адреса", "gh api repos/latark/agent-kit/pulls/9/merge --method PUT"),
+             ("--method=put", "gh api --method=put /repos/latark/agent-kit/pulls/9/merge"),
+             ("-X PUT до api", "gh -X PUT api repos/latark/agent-kit/pulls/9/merge"),
+             ("поле без -X (POST)", "gh api repos/latark/agent-kit/pulls/9/merge -f merge_method=squash"),
+             ("кавычки внутри слова", "gh api -X PUT 'repos/latark/agent-kit/pulls/9/mer'ge"),
+             ("полный путь к gh", "/usr/local/bin/gh api -X PUT repos/latark/agent-kit/pulls/9/merge"),
+             ("плейсхолдеры {owner}/{repo}", "gh api -X PUT 'repos/{owner}/{repo}/pulls/9/merge'"),
+             ("поле sha", f"gh api -X PUT repos/latark/agent-kit/pulls/9/merge -f sha={sha}"),
+             ("поле -Fsha= слитно", f"gh api -X PUT repos/latark/agent-kit/pulls/9/merge -Fsha={sha}"),
+             ("поле --raw-field=sha=", f"gh api -X PUT repos/latark/agent-kit/pulls/9/merge --raw-field=sha={sha}"))
+    for how, c in forms:
+        h.ci(red, name="agent-kit")
+        merge_case(f"без роли: gh api {how}, CI красный — отказ", h.pre(c, **owner), False,
+                   "gh api …/pulls/N/merge — проверка GitHub tests/affected красная: FAILURE")
+        h.ci(nine, name="agent-kit")
+        merge_case(f"без роли: gh api {how}, CI зелёный — проходит", h.pre(c, **owner), True)
+    h.ci(nine, name="agent-kit")
+    base = "gh api -X PUT repos/latark/agent-kit/pulls/9/merge"
+    for c, how, why in (
+            (f"{base} -f sha={'e' * 40}", "поле sha — другой коммит", "PR сейчас на другом коммите"),
+            (f"{base} -f sha=abc", "поле sha не SHA", "один SHA из 40 знаков"),
+            (f"{base} -Fsha={'e' * 40}", "поле -Fsha= — другой коммит", "PR сейчас на другом коммите"),
+            (f"{base} --field sha={'e' * 40}", "поле --field sha= — другой коммит", "PR сейчас на другом коммите"),
+            (f"{base} --raw-field=sha={'e' * 40}", "поле --raw-field=sha= — другой коммит", "PR сейчас на другом коммите"),
+            ("gh pr $(echo merge) 9", "sub gh из $(…), merge только в сыром тексте", "слово до подкоманды не вычислить"),
+            ("gh $SUB mer''ge 9", "sub gh не вычислить, merge только после разбора", "слово до подкоманды не вычислить"),
+            (f"{base} -f sha={sha} -f sha={'e' * 40}", "два поля sha", "один SHA из 40 знаков"),
+            (f"{base} -f sha=$SHA", "поле sha — переменная", "слово не вычислить"),
+            ("gh api -X PUT repos/latark/agent-kit/pulls/$N/merge", "номер — переменная", "слово не вычислить"),
+            ("gh api -X $M repos/latark/agent-kit/pulls/9/merge", "метод — переменная", "слово не вычислить"),
+            ("gh api -X PUT repos/latark/agent-kit/pulls/x9/merge", "номер не число", "не число"),
+            ("gh api -X PUT repos/latark/agent-kit/pulls/9/merge -f body=/repos/latark/agent-kit/pulls/10/merge",
+             "два адреса слияния", "несколько адресов"),
+            ("gh api -X PUT 'repos/{owner}/agent-kit/pulls/9/merge'", "плейсхолдер вперемешку", "плейсхолдер"),
+            ("gh api graphql -f query='mutation{mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}'",
+             "GraphQL mergePullRequest", "GraphQL"),
+            ("gh api graphql -f query='mutation{enablePullRequestAutoMerge(input:{pullRequestId:\"x\"}){clientMutationId}}'",
+             "GraphQL enablePullRequestAutoMerge", "GraphQL"),
+            ("GH_REPO=latark/tg-read gh api -X PUT 'repos/{owner}/{repo}/pulls/9/merge'", "GH_REPO= перед gh",
+             "без переменных GH_*"),
+            (f"cd {h.j(kit)} && gh api -X PUT 'repos/{{owner}}/{{repo}}/pulls/9/merge'", "cd и плейсхолдеры",
+             "с cd в команде укажи репозиторий"),
+            ("gh alias set m 'pr merge'", "gh alias set со словом merge", "gh alias со словом merge"),
+            ("gh alias set --shell m 'gh pr mer''ge \"$1\"'", "gh alias set --shell с merge", "gh alias со словом merge")):
+        merge_case(f"без роли: {how} — отказ", h.pre(c, **owner), False, why)
+    merge_case("без роли: gh api -X PUT …/merge с GH_HOST в окружении — отказ",
+               h.pre(base, extra_env={"GH_HOST": "x"}, **owner), False, "без переменных GH_*")
+    h.reset_log()
+    for c, how in (("gh api repos/latark/agent-kit/pulls/9/merge", "GET адреса слияния (слит ли PR)"),
+                   ("gh api -X GET repos/latark/agent-kit/pulls/9/merge", "-X GET"),
+                   ("gh api -X PUT repos/latark/agent-kit/merges -f base=main -f head=feat", "…/merges (ветка в ветку)"),
+                   ("gh api -X POST repos/latark/agent-kit/issues/9/comments -f body=merged", "запись не на слияние"),
+                   ("gh api -X PUT repos/latark/agent-kit/pulls/9/merged", "…/merged, не …/merge"),
+                   ("gh api -X POST repos/latark/agent-kit/issues/7/comments -f body=see-myrepos/a/b/pulls/9/merge",
+                    "…repos/ не с начала слова и не после /"),
+                   ("gh alias list", "gh alias list"),
+                   ("gh alias", "gh alias без подкоманды"),
+                   ("gh alias delete m-merge", "gh alias delete со словом merge"),
+                   ("gh secret set merge_key --body x", "set со словом merge не у alias"),
+                   ("echo $X; echo merge", "невычислимое слово не у gh, merge в строке"),
+                   ("gh $SUB view 9", "подкоманда gh не вычисляется, merge нет"),
+                   ("gh api -X POST repos/latark/agent-kit/issues/7/comments -f body=$B", "запись с переменной, merge нет"),
+                   ("gi" "t merge --ff-only origin/main", "git merge (не gh)")):
+        merge_case(f"без роли: {how} — можно, CI не спрашивается", h.pre(c, **owner), True)
+    log = open(h.j("gh.log")).read() if os.path.exists(h.j("gh.log")) else ""
+    check("без роли: не слияние PR — gh не спрашивается", log == "", log)
+    # фоновая проверка 02.11: слово merge в сыром тексте разорвано кавычками — после разбора bash это gh pr merge
+    h.ci(red, name="agent-kit")
+    for c, how in (("gh pr mer''ge 9", "mer''ge"), ('gh pr "mer"ge 9', '"mer"ge'), ("gh pr me\\rge 9", "me\\rge"),
+                   ("S=merge; gh pr $S 9", "подкоманда из присвоения")):
+        merge_case(f"без роли: gh pr {how}, CI красный — отказ (предфильтр после разбора bash)", h.pre(c, **owner),
+                   False, "gh pr merge — проверка GitHub tests/affected красная")
+    h.ci(nine, name="agent-kit")
+    merge_case("без роли: gh pr mer''ge 9, CI зелёный — проходит", h.pre("gh pr mer''ge 9", **owner), True)
+    # у ролей алиас слияния — тот же отказ (gh api с записью ролям закрыт и так)
+    merge_case("роль: gh alias set m 'pr merge' — отказ", h.pre("gh alias set m 'pr merge'", pdir=kit), False,
+               "gh alias со словом merge")
+    merge_case("роль: gh alias set v 'pr view' — можно", h.pre("gh alias set v 'pr view'", pdir=kit), True)
+    merge_case("роль: gh api -X PUT …/merge — отказ правилом push, как раньше", h.pre(base, pdir=kit), False,
+               "gh api с записью")
+
+
+CASES = [t_ci_fork_billing, t_full_tests_verify, t_owner_api_merge, t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1,

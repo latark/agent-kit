@@ -1554,8 +1554,8 @@ def _billing_problem(repo, pr, sha):
                 "сверить"), ()
     if any(r["kind"] == "tests" and r["sha"] == sha and repo.lower() in [x.lower() for x in r["repo"]]
            and full_tests_record(repo, r) for r in records):
-        return None, (f"CI не запускался: лимит минут GitHub Actions, засчитан местный прогон (запись `pantheon "
-                      f"review test`) на {where}",)
+        return None, (f"CI не запускался: лимит минут GitHub Actions, засчитан местный прогон (запись полного набора "
+                      f"тестов на этом коммите) на {where}",)
     return (f"CI на {where} не запускался: лимит минут или оплата GitHub Actions (аннотация «{CI_BILLING}…», job "
             f"не стартовал). Запасной путь — местный полный прогон с записью на этом коммите (засчитывается только "
             f"эта команда: {cmd}). Основной способ: из корня чистой копии на {sha[:12]} запусти `pantheon outside "
@@ -1572,7 +1572,8 @@ def _ci_problem(repo, pr, sha, data, owner=False):
     (required_checks по baseRefName, metis-0633; их запуски — _ci_runs на этом SHA, засчитывается только
     pull_request с SUCCESS): красная или пропущенная обязательная — отказ, кроме CI, который не запускался из-за
     лимита минут или оплаты (ci_billing по аннотациям красных и данным их job, metis-0655): тогда _billing_problem —
-    запись полного набора тестов на этом SHA вместо CI; нет обязательной или идёт — отказ «дождись» с
+    запись полного набора тестов на этом SHA вместо CI, предупреждения о красных необязательных — вместе со строкой
+    о лимите (С1 argus #248); нет обязательной или идёт — отказ «дождись» с
     командой ожидания вне хука, красная из OPTIONAL_CHECKS — пропуск с предупреждением, красная вне обоих
     списков — отказ (Д1 argus #235). Ждать в хуке нельзя:
     таймаут хука 10 с. Обязательных нет и проверок нет: пропуск, только если .github/workflows нет ни на head, ни на
@@ -1592,7 +1593,9 @@ def _ci_problem(repo, pr, sha, data, owner=False):
     if state == "fail":
         ids = ci_billing_ids(runs, required)
         if ci_billing(runs, required, _ci_notes(repo, ids), _ci_jobs(repo, ids)):
-            return _billing_problem(repo, pr, sha)
+            # предупреждения о красных необязательных — и на запасном пути, рядом со строкой о лимите (С1 argus #248)
+            why, extra = _billing_problem(repo, pr, sha)
+            return (why, ()) if why else (None, extra + tuple(f"{n} на {repo}#{pr}@{sha[:12]}" for n in notes))
         if owner:
             return f"{text} на {repo}#{pr}@{sha[:12]} — почини и сделай новый коммит; {OWNER_EMERGENCY}", ()
         return f"{text} на {repo}#{pr}@{sha[:12]} — почини и сделай новый коммит с новыми записями", ()
@@ -2097,7 +2100,8 @@ OWNER_EMERGENCY = ("аварийный путь — `gh pr merge` в собст�
                    "проверяет")
 OWNER_CI = ("слияние из сессии без роли проверяет только CI (решение владельца 01.11, metis-0633): записи тестов и "
             "argus не нужны, а красный или незавершённый CI — отказ; CI не запускался из-за лимита минут — "
-            "нужна запись `pantheon review test` полного набора на этом коммите (metis-0655)")
+            "нужна запись полного набора тестов на этом коммите — `pantheon outside test` или `pantheon review test` "
+            "(metis-0655)")
 
 
 def owner_ci_problem(cwd, moved, args):
@@ -2135,6 +2139,49 @@ def owner_ci_problem(cwd, moved, args):
         return f"--match-head-commit — один SHA из 40 знаков или без него. {OWNER_CI}"
     why, notes = _ci_problem(repo, pr, head, view, owner=True)
     return f"{why}. {OWNER_CI}" if why else allow(notes)
+
+
+# Слияние PR через API (metis-0663): REST `PUT repos/{owner}/{repo}/pulls/{N}/merge` (поле sha — тот же смысл, что
+# --match-head-commit) и мутации GraphQL. Адрес ищется в любом слове gh api, как у правила hq-gh: путь в значении поля
+# тоже засчитывается — лишний отказ, а не пропуск. Ветка в ветку (`…/merges`, mergeBranch) — не PR, это push в base.
+API_MERGE_RE = re.compile(r"(?:^|/)repos/([^/?#\s]+)/([^/?#\s]+)/pulls/([^/?#\s]+)/merge(?![\w-])", re.I)
+API_MERGE_GQL = re.compile(r"\b(?:mergePullRequest|enablePullRequestAutoMerge)\b", re.I)
+API_FIELD_FLAGS = ("-f", "-F", "--field", "--raw-field")
+API_MERGE_HINT = ("сливай `gh pr merge N -R <owner/repo> --match-head-commit <SHA>` — его шлюз сверяет CI так же")
+
+
+def api_merge_args(words):
+    """Слова gh api с записью (без api; флаги до api тоже) → None — это не слияние PR; строка — отказ; список — слова
+    gh pr merge для owner_ci_problem: номер, -R owner/repo из адреса (у `{owner}/{repo}` -R нет — gh берёт репозиторий
+    папки, его так же находит owner_ci_problem), --match-head-commit из каждого поля sha (-f/-F/--field/--raw-field).
+    GraphQL (mergePullRequest, enablePullRequestAutoMerge), несколько адресов слияния, номер не числом, плейсхолдер
+    вперемешку с именем — отказ: что сливается, не понять."""
+    if any(isinstance(w, str) and API_MERGE_GQL.search(w) for w in words):
+        return f"слияние через GraphQL (mergePullRequest, enablePullRequestAutoMerge) шлюз не разбирает — {API_MERGE_HINT}"
+    hits = {m.groups() for w in words if isinstance(w, str) for m in API_MERGE_RE.finditer(w)}
+    if not hits:
+        return None
+    if len(hits) != 1:
+        return f"в команде несколько адресов …/pulls/<N>/merge — {API_MERGE_HINT}"
+    owner, name, pr = hits.pop()
+    if not PR_RE.fullmatch(pr):
+        return f"номер PR в адресе …/pulls/{pr}/merge — не число, CI не сверить — {API_MERGE_HINT}"
+    args = [pr]
+    if (owner, name) != ("{owner}", "{repo}"):
+        if "{" in owner + name or "}" in owner + name:
+            return f"репозиторий в адресе ({owner}/{name}) — плейсхолдер вперемешку с именем — {API_MERGE_HINT}"
+        args += ["-R", f"{owner}/{name}"]
+    for i, w in enumerate(words):
+        val = None
+        if w in API_FIELD_FLAGS:
+            val = words[i + 1] if i + 1 < len(words) else None
+        elif isinstance(w, str) and w.startswith(("--field=", "--raw-field=")):
+            val = w.split("=", 1)[1]
+        elif isinstance(w, str) and w.startswith(("-f", "-F")):
+            val = w[2:]
+        if isinstance(val, str) and val.startswith("sha="):
+            args += ["--match-head-commit", val[4:]]
+    return args
 
 
 def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
