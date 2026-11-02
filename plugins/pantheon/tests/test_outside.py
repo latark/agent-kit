@@ -2235,6 +2235,17 @@ n1 = len(calls())
 res = kit_request()
 check("0732: красный прогон не переносится — тот же tree после красного идёт заново",
       res.get("code") == 1 and not res.get("record") and len(calls()) == n1 + 1 and not tests_for(K5), res)
+# поле tree записи сверяется с git: запись другого коммита с чужим tree (подложено, сбой) не переносится
+with open(RECORDS, "a") as fh:
+    fh.write(json.dumps({"v": 1, "kind": "tests", "repo": ["latark/kit"], "pr": None, "sha": K3,
+                         "by": {"agent_type": "pantheon-outside", "agent_id": "", "session_id": "", "request": "x"},
+                         "cmd": rk1[-1]["cmd"], "tree": git(KIT, "rev-parse", f"{K5}^{{tree}}"),
+                         "env": O.run_env(rk1[-1]["cmd"])}) + "\n")
+git(KIT, "-c", "user.name=t", "commit", "-q", "--amend", "-m", "k5 ещё сообщение")
+n1 = len(calls())
+res = kit_request()
+check("0732: tree в записи не совпал с деревом её коммита по git — прогон, а не перенос",
+      len(calls()) == n1 + 1 and not res.get("by_tree"), res)
 K6 = commit(KIT, {"t.py": GREEN + "# k6\n"}, "k6")
 kit_request()
 git(KIT, "-c", "user.name=t", "commit", "-q", "--amend", "-m", "k6 другое сообщение")
@@ -2275,6 +2286,9 @@ ent = P.read_json(O.root("auto.json"), {}).get("done", {}).get(f"latark/kit@{K7}
 check("0733: ранний прогон идёт, пишет запись, в auto.json — early",
       [r.get("auto") for r in res] == [f"latark/kit@{K7}"] and tests_for(K7) and ent.get("early") is True, (res, ent))
 check("0733: после прохода кэш просмотрен (heads_seen), дела нет", not O.heads_due() and not O.auto_due())
+put_cache(prs={"latark/kit": [{"number": 9, "head": K2}]})   # head с записью tests, но не из done
+check("0733: новый кэш будит тик (auto_due); head с записью не гоняется, после прохода кэш просмотрен",
+      O.heads_due() and O.auto_due() and O.auto_pass() == [] and not O.heads_due() and not O.auto_due())
 K8 = commit(KIT, {"t.py": RED}, "k8 red")
 put_cache(prs={"latark/kit": [{"number": 9, "head": K8}]})
 res = O.auto_pass()
