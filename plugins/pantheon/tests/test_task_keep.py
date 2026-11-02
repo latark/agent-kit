@@ -528,13 +528,14 @@ def main():
              "ab-004": st("ab-004", "waiting", "ab-005"), "ab-005": st("ab-005", "waiting", "ab-004"),
              "ab-006": st("ab-006", "waiting", "agent"), "ab-007": st("ab-007", "waiting", "human", "Что?"),
              "ab-008": st("ab-008", "waiting", "ab-007"), "ab-009": st("ab-009", "inbox"),
-             "ab-010": st("ab-010", "waiting", "ab-010")}
+             "ab-010": st("ab-010", "waiting", "ab-010"), "ab-011": ("/ab-011.md", {}, "")}
     w = lambda on: {"id": "mb-001", "status": "waiting", "waiting_on": on}
     check("goal_released с хранилищем: блокер есть и не done/dropped — снята; нет, done, dropped, цикл, блокер "
           "ждёт без основания, своя петля, без хранилища — в цели; цепочка до вопроса владельцу — снята",
           rel(w("ab-001"), store) and rel(w("ab-009"), store) and rel(w("ab-008"), store) and rel(w("ab-007"), store)
           and not rel(w("ab-002"), store) and not rel(w("ab-003"), store) and not rel(w("ab-004"), store)
-          and not rel(w("ab-006"), store) and not rel(w("ab-010"), store) and not rel(w("metis-9999"), store)
+          and not rel(w("ab-006"), store) and not rel(w("ab-010"), store) and not rel(w("ab-011"), store)
+          and not rel(w("metis-9999"), store)
           and not rel(w("ab-001")) and not rel(w("ab-001 и ревью"), store)
           and not rel(store["ab-004"][1], store) and not rel({"id": "ab-004", "status": "waiting", "waiting_on": "ab-004"},
                                                                 store))

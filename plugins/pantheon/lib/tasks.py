@@ -436,7 +436,7 @@ def goal_released(head, tasks=None):
         if not ID_RE.fullmatch(on) or on in seen or on not in tasks:
             return False
         head = tasks[on][1] or {}
-        if head.get("status") in ("done", "dropped"):
+        if head.get("status") in ("done", "dropped") or head.get("status") not in STATUSES:
             return False
         if head.get("status") != "waiting":
             return True
