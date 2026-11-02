@@ -60,6 +60,16 @@ git -C "$T/B" commit -qam "sync: B
 
 Карантин-одобрен: metis-0099 abc"; git -C "$T/B" push -q 2>/dev/null; n_before=$(ntasks); S
 check "чужая правка с пометкой одобрения — без вопроса" '[ "$(ntasks)" = "$n_before" ] && [ ! -f .sync-incoming ] && grep -q approved-B sync-copy.sh'
+# 5б. metis-0454: проверка называет файлы, которых нет в индексе → дифф по списку пуст, не держать и не тревожить
+CUR="$T/.local/share/pantheon/current"; rm "$CUR"; mkdir -p "$CUR/scripts"
+printf '%s\n' 'import json' 'print(json.dumps({"flags": [{"file": "ghost.sh", "kind": "danger", "reason": "x"}], "files": {}, "card": {}}))' > "$CUR/scripts/config-check.py"
+mv "$T/.local/bin/pantheon" "$T/.local/bin/pantheon.real"
+printf '#!/bin/bash\necho "$@" >> "%s/pantheon-calls"\n' "$T" > "$T/.local/bin/pantheon"; chmod +x "$T/.local/bin/pantheon"
+echo "строка для README" >> README.md; ntasks_g=$(ntasks); S
+check "файлов списка нет в индексе — .sync-held не создан, тревоги и карточки нет" '[ ! -f .sync-held ] && ! grep -q alert "$T/pantheon-calls" 2>/dev/null && [ "$(ntasks)" = "$ntasks_g" ] && grep -q "дифф по списку пуст" sync.log'
+echo "ещё правка" >> README.md; S
+check "повторный запуск — по-прежнему ни метки, ни тревоги" '[ ! -f .sync-held ] && ! grep -q alert "$T/pantheon-calls" 2>/dev/null'
+mv "$T/.local/bin/pantheon.real" "$T/.local/bin/pantheon"; rm -rf "$CUR"; ln -s "$PLUGIN" "$CUR"
 # 6. без проверки (нет Пантеона) — как раньше
 rm "$T/.local/share/pantheon/current"; echo "echo plain" >> sync-copy.sh; S
 check "без проверки — уходит сразу" 'remote sync-copy.sh | grep -q plain && [ ! -f .sync-held ]'
