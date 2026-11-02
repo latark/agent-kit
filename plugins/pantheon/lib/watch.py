@@ -23,6 +23,9 @@
                             перенесли, вернули во входящие или отменили — окно перезапускается свежей сессией с новой
                             целью; очереди нет или подъём закрыт и своих задач нет — останавливается; имя держит
                             другая сессия — смена отложена (metis-0631, goal_release, goal_block)
+                            Поручения во входящих (lib/awake.py inbox_wake, metis-0276): координатор закончил ход или
+                            его сессии нет, а в inbox/ — поручение Зевса после конца хода и по вашему слову ему —
+                            новая сессия с /goal по поручению (pantheon start --from tick), под теми же шлюзами
   pantheon agents           только снимок `claude agents` (задача тика на каждый проход: строка статуса)
   pantheon revisits         задача тика раз в сутки (SCHED-10, DOC-03): «пора пересмотреть …» в alerts.md
   pantheon stop <имя>|--all, pantheon resume <имя>|--all                                      (SCHED-12)
@@ -297,6 +300,7 @@ def _watch(dry=False):
               ("самозапуск", lambda: autostart(agents, reg, doms, t)),
               ("возобновление после недельного лимита", lambda: awake().limit_resume(agents, reg, doms, t)),
               ("возобновление ждущих сессий", lambda: awake().wake_waiting(agents, reg, doms, t)),
+              ("поручения во входящих", lambda: awake().inbox_wake(agents, reg, doms, t)),
               ("запрет сна Mac", lambda: awake().keep_awake(agents, reg, doms, t)),
               ("журналы ваших слов", lambda: daily(t)),
               # последней: сессии, которые она уберёт, в этом проходе ещё в списке — подъём выше их уже не тронет
@@ -2166,6 +2170,12 @@ def resume_or_start(name, agents, text, origin, only_resume=False, auto=False):
         return P.resume_session(name, a, text, origin, recheck=recheck(name, auto))[0]
     if only_resume:
         return 1
+    return start_new(name, text, origin)
+
+
+def start_new(name, text, origin):
+    """Новая сессия через `pantheon start <имя> --from <origin> <text>`: у координатора — с /goal по поручению
+    (TASK_GOAL); закончившую ход прежнюю start останавливает сам. → код запуска."""
     if dry():
         print(f"[start] {name} --from {origin}")
         return 0
