@@ -3130,6 +3130,25 @@ def _gh_api(texts):
     return None if q is None else texts[:q] + texts[q + 1:]
 
 
+# флаги gh api (и gh до api) со значением отдельным словом — для _gh_api_path
+GH_API_VALUE = ("-X", "--method", "-f", "-F", "--field", "--raw-field", "-H", "--header", "--input", "-q", "--jq",
+                "-t", "--template", "-p", "--preview", "--cache", "-R", "--repo", "--hostname")
+
+
+def _gh_api_path(args):
+    """Адрес gh api — первое слово не флаг и не значение флага из GH_API_VALUE (слова api без «api», как у _gh_api);
+    "" — адреса нет; None — слово на месте адреса не вычислить ($URL, $(…))."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a is None or not a.startswith("-") or a == "-":
+            return a
+        if a == "--":
+            return args[i + 1] if i + 1 < len(args) else ""
+        i += 2 if a in GH_API_VALUE else 1
+    return ""
+
+
 def _gh_pr_sub(texts):
     """(индекс pr, индекс <sub>) у `gh [флаги] pr [флаги] <sub>` в строгой трактовке; None — не gh pr или sub нет."""
     _, cands = _gh_parse(texts)
@@ -3183,6 +3202,10 @@ def check_owner_merge(event, tool_input):
             jobs.append(("gh pr merge", found[1]))
         api = _gh_api(texts)
         if api is not None and _gh_api_writes(api):
+            # адрес записи не вычислить — отказ и без слова merge (фоновая проверка 02.11); чтение (GET) — как было
+            if _gh_api_path(api) is None and _gh_api_writes(["" if a is None else a for a in api]):
+                return ("Правило push: gh api с записью — адрес не вычислить (переменная, $(…)): не понять, слияние "
+                        "ли это. Пиши адрес словами. " + merge_gate.OWNER_CI)
             if None in api and here:
                 return ("Правило push: gh api с записью — слово не вычислить (переменная, $(…)), а в команде есть "
                         "merge: не понять, слияние ли это. Пиши адрес и поля словами. " + merge_gate.OWNER_CI)

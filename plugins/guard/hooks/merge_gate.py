@@ -2143,11 +2143,25 @@ def owner_ci_problem(cwd, moved, args):
 
 # Слияние PR через API (metis-0663): REST `PUT repos/{owner}/{repo}/pulls/{N}/merge` (поле sha — тот же смысл, что
 # --match-head-commit) и мутации GraphQL. Адрес ищется в любом слове gh api, как у правила hq-gh: путь в значении поля
-# тоже засчитывается — лишний отказ, а не пропуск. Ветка в ветку (`…/merges`, mergeBranch) — не PR, это push в base.
+# тоже засчитывается — лишний отказ, а не пропуск. Слово сверяется после api_norm (%XX, //, ./ — фоновая проверка
+# 02.11). Слово с …pulls/…/merge, которое в форму repos/O/R/pulls/N/merge не легло (`repositories/<id>/…`, `../`), —
+# отказ, а не пропуск. Ветка в ветку (`…/merges`, mergeBranch) — не PR, это push в base.
 API_MERGE_RE = re.compile(r"(?:^|/)repos/([^/?#\s]+)/([^/?#\s]+)/pulls/([^/?#\s]+)/merge(?![\w-])", re.I)
-API_MERGE_GQL = re.compile(r"\b(?:mergePullRequest|enablePullRequestAutoMerge)\b", re.I)
+API_MERGE_ANY = re.compile(r"(?:^|/)pulls/(?:[^?#\s]*/)?merge(?![\w-])", re.I)
+API_MERGE_GQL = re.compile(r"\b(?:mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest)\b", re.I)
 API_FIELD_FLAGS = ("-f", "-F", "--field", "--raw-field")
 API_MERGE_HINT = ("сливай `gh pr merge N -R <owner/repo> --match-head-commit <SHA>` — его шлюз сверяет CI так же")
+
+
+def api_norm(word):
+    """Слово gh api, как его поймёт сервер: %XX раскрыты, `//` схлопнуты, сегменты `./` убраны."""
+    w = re.sub(r"%([0-9A-Fa-f]{2})", lambda m: chr(int(m[1], 16)), word)  # без urllib.parse: +9 мс на вызов хука
+    w = re.sub(r"(?<!:)/{2,}", "/", w)
+    while True:
+        w2 = re.sub(r"(^|/)\.(?:/|$)", r"\1", w)
+        if w2 == w:
+            return w
+        w = w2
 
 
 def api_merge_args(words):
@@ -2155,10 +2169,22 @@ def api_merge_args(words):
     gh pr merge для owner_ci_problem: номер, -R owner/repo из адреса (у `{owner}/{repo}` -R нет — gh берёт репозиторий
     папки, его так же находит owner_ci_problem), --match-head-commit из каждого поля sha (-f/-F/--field/--raw-field).
     GraphQL (mergePullRequest, enablePullRequestAutoMerge), несколько адресов слияния, номер не числом, плейсхолдер
-    вперемешку с именем — отказ: что сливается, не понять."""
+    вперемешку с именем, слово с …pulls/…/merge не в этой форме — отказ: что сливается, не понять. Запрос graphql из
+    файла (`-F query=@f`, `--input`) — отказ: мутацию в файле шлюз не видит."""
+    words = [api_norm(w) if isinstance(w, str) else w for w in words]
     if any(isinstance(w, str) and API_MERGE_GQL.search(w) for w in words):
-        return f"слияние через GraphQL (mergePullRequest, enablePullRequestAutoMerge) шлюз не разбирает — {API_MERGE_HINT}"
+        return (f"слияние через GraphQL (mergePullRequest, enablePullRequestAutoMerge, enqueuePullRequest) шлюз не "
+                f"разбирает — {API_MERGE_HINT}")
+    if any(isinstance(w, str) and w.strip("/").lower() == "graphql" for w in words) and any(
+            isinstance(w, str) and (w == "--input" or w.startswith("--input=")
+                                    or (w in ("-F", "--field") and isinstance(nxt, str) and nxt.startswith("query=@"))
+                                    or w.startswith(("-Fquery=@", "--field=query=@")))
+            for w, nxt in zip(words, words[1:] + [None])):
+        return f"запрос graphql из файла (-F query=@…, --input) шлюз не проверяет — слияние ли это, не видно — {API_MERGE_HINT}"
     hits = {m.groups() for w in words if isinstance(w, str) for m in API_MERGE_RE.finditer(w)}
+    odd = [w for w in words if isinstance(w, str) and API_MERGE_ANY.search(w) and not API_MERGE_RE.search(w)]
+    if odd:
+        return f"адрес слияния не в форме repos/<owner>/<repo>/pulls/<N>/merge ({odd[0][:80]}) — {API_MERGE_HINT}"
     if not hits:
         return None
     if len(hits) != 1:
