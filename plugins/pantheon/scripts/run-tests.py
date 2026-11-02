@@ -45,8 +45,9 @@ Python 3.11+ (metis-0571); тот же скрипт гоняет workflow tests 
 и killpg его не достаёт; SIGKILL самому раннеру обработать нельзя — идущие файлы тогда доживают свой таймаут.
 
 Итог: строка на каждый файл по мере готовности (ok / FAIL, время, число проверок), затем выводы упавших файлов
-(хвост) и последняя строка — файлов, ok, FAIL, сумма проверок, время. Код выхода не 0, если: нет ни одного файла
-тестов, файл упал (код не 0), превысил таймаут, вышел с кодом 0 без строки итога (кроме старых файлов NO_SUMMARY)
+(все строки, кроме `ok` и пустых: упавшие проверки, трассировка и итог видны, где бы они ни были; больше NOT_OK_MAX —
+начало и конец; не кончается последней строкой вывода — ещё TAIL последних, metis-0719) и последняя строка — файлов,
+ok, FAIL, сумма проверок, время. Код выхода не 0, если: нет ни одного файла тестов, файл упал (код не 0), превысил таймаут, вышел с кодом 0 без строки итога (кроме старых файлов NO_SUMMARY)
 или с итогом без проверок, или раннер прерван сигналом. Число проверок файла — из его итоговой строки, без числа в ней — по строкам `ok`.
 Только stdlib.
 """
@@ -141,7 +142,10 @@ _SUMMARY_TOTAL = (
     (re.compile(r"(\d+)\s*команд\b"), lambda m: int(m[1])),
 )
 SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
-TAIL = 40  # строк вывода упавшего файла в итог
+# строк вывода упавшего файла в итог: все, кроме ok и пустых; больше — половина с начала и половина с конца. Хвоста
+# в 40 строк не хватало: test_merge_gate печатает 1662 строки, упавшая проверка — в середине (metis-0719)
+NOT_OK_MAX = 200
+TAIL = 5  # и последние строки вывода, если список не-ok ими не кончается
 
 
 class Interrupted(Exception):
@@ -607,12 +611,27 @@ def report(job, log_dir):
             fh.write(job.out)
 
 
+def not_ok(out, limit=NOT_OK_MAX):
+    """Строки вывода упавшего файла для итога: все, кроме `ok` и пустых, по порядку; больше limit — первые и последние
+    limit // 2 со строкой о пропуске между ними. → (строки, сколько всего не-ok)."""
+    lines = [ln.rstrip() for ln in ANSI.sub("", out).splitlines() if ln.strip() and not re.match(r"\s*ok\b", ln)]
+    if len(lines) <= limit:
+        return lines, len(lines)
+    half = limit // 2
+    return lines[:half] + [f"… пропущено {len(lines) - 2 * half} строк …"] + lines[-half:], len(lines)
+
+
 def summary(done, total_files, n, sec, skipped=0):
     bad = [j for j in done if not j.ok]
     for j in bad:
-        lines = j.out.rstrip("\n").splitlines()
-        print(f"\n===== {j.label} · {j.why} · последние {min(TAIL, len(lines))} строк =====")
-        print("\n".join(lines[-TAIL:]))
+        lines, total = not_ok(j.out)
+        print(f"\n===== {j.label} · {j.why} · строки не ok: {total} =====")
+        print("\n".join(lines))
+        # где файл остановился (таймаут, гибель посреди строк ok) — последние строки, если ими список не кончается
+        tail = [ln.rstrip() for ln in ANSI.sub("", j.out).splitlines() if ln.strip()][-TAIL:]
+        if tail and (not lines or lines[-1] != tail[-1]):
+            print(f"----- последние {len(tail)} строк -----")
+            print("\n".join(tail))
     slow = sorted(done, key=lambda j: -j.sec)[:5]
     print("\nмедленные: " + ", ".join(f"{j.label} {j.sec:.0f} с" for j in slow))
     checks_sum = sum(j.n for j in done)
