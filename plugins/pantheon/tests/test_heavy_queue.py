@@ -22,10 +22,12 @@ import time
 PLUGIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HEAVY = os.path.join(PLUGIN, "bin", "heavy")
 fails = []
+total = []
 
 
 def check(name, cond, extra=""):
     print(("ok   " if cond else "FAIL ") + name + (f" {extra}" if not cond else ""))
+    total.append(name)
     if not cond:
         fails.append(name)
 
@@ -135,7 +137,7 @@ def main():
         print(f"({time.time() - t0:.0f} с)")
     finally:
         shutil.rmtree(tmp, True)
-    print(f"тестов: {len(fails)} не прошло")
+    print(f"тестов: {len(total) - len(fails)} прошло, {len(fails)} не прошло")
     sys.exit(1 if fails else 0)
 
 
