@@ -1157,6 +1157,133 @@ def crossings(tasks, live=None):
     return {k: sorted(v) for k, v in out.items()}
 
 
+# --- пересечение внутри направления перед раздачей (metis-0665) ------------------------------------------------------
+# plan_batch сверяет touches только с идущими задачами других направлений. Внутри направления координатор раздаёт
+# задачи субагентам параллельно: 02.11 #246 и #248 правили одни файлы от одного main — у второго 20 конфликтов и лишний
+# круг двух argus. Здесь — сверка с живыми задачами своего направления и с файлами открытых PR его репозиториев.
+OVERLAP_LIVE = ("doing", "review")
+
+
+def _common(xs, ys):
+    """Общие области двух списков путей: из пересекающейся пары — более узкая (файл, а не его папка)."""
+    return sorted({_area(x) if len(_area(x)) >= len(_area(y)) else _area(y) for x in xs for y in ys if paths_cross(x, y)})
+
+
+def overlap_tasks(tasks, tid):
+    """Живые (doing, review) задачи направления tid с пересечением touches → [(id, статус, owner, [общие области])].
+    У задачи без touches — []: пересечение не проверить, об этом скажет overlap_text."""
+    head = tasks[tid][1]
+    mine, out = head.get("touches") or [], []
+    for oid, (_, h, _) in sorted(tasks.items()):
+        if oid == tid or h.get("type", "task") != "task" or h.get("direction") != head.get("direction"):
+            continue
+        if h.get("status") not in OVERLAP_LIVE:
+            continue
+        common = _common(mine, h.get("touches") or [])
+        if common:
+            out.append((oid, h.get("status"), h.get("owner") or "", common))
+    return out
+
+
+# Ветка, репозиторий и пути PR приходят из gh или кэша — чужой текст (автор PR): в готовые команды и строки вывода
+# идут только по строгому шаблону. Ветка не по шаблону → «<ветка PR>» и строка «отклонено»; путь с управляющим
+# знаком, переводом строки или длиннее OVERLAP_PATH_MAX — отброшен, число отброшенных — в строке PR.
+OVERLAP_BRANCH_RE = re.compile(r"[A-Za-z0-9._/-]{1,200}")
+OVERLAP_REPO_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9._-]{1,100}")
+OVERLAP_PATH_MAX = 400
+_LINE_BREAKS = {"\x7f", "\x85", "\u2028", "\u2029"}
+
+
+def overlap_name_ok(name, rx):
+    """Имя ветки или репозитория для команды: целиком по шаблону, без ведущего «-» (флаг) и без «..»."""
+    return isinstance(name, str) and bool(rx.fullmatch(name)) and not name.startswith("-") and ".." not in name
+
+
+def overlap_path_ok(path):
+    """Путь файла PR для вывода: строка до OVERLAP_PATH_MAX знаков без управляющих знаков и переводов строк."""
+    return (isinstance(path, str) and 0 < len(path) <= OVERLAP_PATH_MAX
+            and not any(ord(c) < 32 or c in _LINE_BREAKS for c in path))
+
+
+def overlap_prs(tid, head, prs):
+    """Открытые PR с файлами в областях задачи → [(pr, [общие файлы])]. prs — [{repo, number, branch, files, ids,
+    closes}]; PR самой задачи (её id в ветке или теле), PR без списка файлов и с номером не числом пропускаются. pr в
+    ответе — копия: branch и repo не по шаблону → None, files — только годные пути, dropped — сколько отброшено."""
+    mine, out = head.get("touches") or [], []
+    for pr in prs or []:
+        n = pr.get("number")
+        if tid in (pr.get("ids") or []) or not isinstance(pr.get("files"), list) or not isinstance(n, int) or isinstance(n, bool):
+            continue
+        files = [f for f in pr["files"] if overlap_path_ok(f)]
+        common = sorted({_area(f) for f in files if any(paths_cross(f, m) for m in mine)})
+        if common:
+            out.append((dict(pr, files=files, dropped=len(pr["files"]) - len(files) + int(pr.get("dropped") or 0),
+                             branch=pr.get("branch") if overlap_name_ok(pr.get("branch"), OVERLAP_BRANCH_RE) else None,
+                             repo=pr.get("repo") if overlap_name_ok(pr.get("repo"), OVERLAP_REPO_RE) else None), common))
+    return out
+
+
+def _list(xs, n=6):
+    return ", ".join(xs[:n]) + (f" и ещё {len(xs) - n}" if len(xs) > n else "")
+
+
+def overlap_text(tid, head, cross_tasks, cross_prs, notes=()):
+    """Предупреждение о пересечении строками (пусто — пересечений нет и сказать нечего). notes — строки о том, что не
+    проверено (gh не ответил, взят кэш, репозитории не заданы): их не глушим — «не молчать». Выбор с готовыми
+    командами: очередь (ждать слияния) или ветка от ветки PR (stacked PR) с argus только на дельту."""
+    lines = []
+    if not head.get("touches"):
+        lines.append(f"у {tid} нет touches — пересечение с соседями не проверить: задай области "
+                     f"(pantheon task set {tid} touches=путь,путь) и повтори pantheon task overlap {tid}")
+    lines += [f"не проверено: {n}" for n in notes]
+    if not cross_tasks and not cross_prs:
+        return lines
+    by_task = {}
+    for pr, _ in cross_prs:
+        for i in pr.get("ids") or []:
+            by_task.setdefault(i, []).append(pr)
+    lines.append(f"{tid} пересекается по файлам — это предупреждение, не запрет:")
+    for oid, st, owner, common in cross_tasks:
+        prs = by_task.get(oid) or []
+        lines.append(f"- задача {oid} ({st}{', ' + owner if owner else ''}"
+                     f"{', PR ' + ', '.join('#' + str(p.get('number')) for p in prs) if prs else ', открытого PR нет'}): {_list(common)}")
+    for pr, common in cross_prs:
+        ids = [i for i in pr.get("ids") or [] if i != tid]
+        lines.append(f"- PR #{pr.get('number')} {pr.get('repo') or '<репозиторий>'} (ветка {pr.get('branch') or '<ветка PR>'}"
+                     f"{', ' + ', '.join(ids) if ids else ''}): {_list(common)}"
+                     + (f" (отброшено путей не по форме: {pr['dropped']})" if pr.get("dropped") else ""))
+        if not pr.get("branch"):
+            lines.append(f"  имя ветки PR #{pr.get('number')} отклонено (не по шаблону) — в командах «<ветка PR>», "
+                         "возьми её из gh pr view")
+        if not pr.get("repo"):
+            lines.append(f"  имя репозитория PR #{pr.get('number')} отклонено (не owner/name) — в командах «<репозиторий>»")
+    lines.append("Выбор — один из двух, параллельно от main не начинать:")
+
+    def dep(*oids):  # depends_on= заменяет список: прежние зависимости остаются в команде
+        return ",".join(dict.fromkeys([*(head.get("depends_on") or []), *oids]))
+    for pr, _ in cross_prs:
+        n, repo, br = pr.get("number"), pr.get("repo") or "<репозиторий>", pr.get("branch") or "<ветка PR>"
+        lines += [f"  А — очередь: ждать слияния PR #{n}, затем начать от свежего main.",
+                  f"      gh pr view {n} -R {repo} --json state,mergedAt",
+                  "      git fetch origin && git switch -c " + tid + " origin/main"]
+        closes = [i for i in pr.get("closes") or [] if i != tid]
+        if closes:
+            lines.append(f"      пока ждёт: pantheon task set {tid} status=todo depends_on={dep(closes[0])}")
+        lines += [f"  Б — ветка от ветки (stacked PR): начать от ветки PR #{n}, свой PR — с базой его ветки.",
+                  f"      git fetch origin && git switch -c {tid} origin/{br}",
+                  f"      gh pr create -R {repo} --base {br} --title … --body-file …",
+                  f"      argus — только дельта своего PR: git diff origin/{br}...HEAD",
+                  f"      после слияния #{n} (--merge): gh pr edit <свой N> -R {repo} --base main — head тот же, записи "
+                  "шлюза в силе; конфликт с main — git merge origin/main, не rebase",
+                  f"      #{n} слит squash или rebase — «принять» на новый head не переносится: узкий круг argus на ту же дельту"]
+    bare = [oid for oid, _, _, _ in cross_tasks if not by_task.get(oid)]
+    if bare:
+        lines += [f"  Без открытого PR: {_list(bare)} — очередь: pantheon task set {tid} status=todo depends_on={dep(*bare)}",
+                  f"      или одному исполнителю по порядку; ветка от ветки — когда у задачи будет открытый PR (повтори "
+                  f"pantheon task overlap {tid})"]
+    return lines
+
+
 def open_deps(head, tasks):
     """Незакрытые зависимости задачи: id из depends_on, которые не done и не dropped (нет такой задачи — тоже ждёт)."""
     return [d for d in head.get("depends_on") or []
@@ -1387,13 +1514,14 @@ def card_ctx(tid, head, tasks, names, cross, t=None, night_end="08:00", open_prs
 # Story — карточка type story: название, ночь или день (night, due), бюджет (estimate). Задачи прикрепляются полем
 # parent (pantheon task attach/detach); сумма их оценок считается, а не вводится руками.
 
-PCT_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
+# число берём только перед «%» (пробел, в т. ч. неразрывный, необязателен): «17 ч ≈ 15 % доли» → 15, часы и даты — нет (metis-0654)
+PCT_RE = re.compile(r"(?<![\d.,])(\d+(?:[.,]\d+)?)[ \u00a0\u202f]*%")
 
 
 def pct(v):
-    """Оценка «0,5 % недели» → 0.5; без числа — None."""
+    """Оценка «0,5 % недели» → 0.5; без числа перед «%» — None."""
     m = PCT_RE.search(str(v or ""))
-    return float(m.group(0).replace(",", ".")) if m else None
+    return float(m.group(1).replace(",", ".")) if m else None
 
 
 def pct_text(x):
@@ -1594,7 +1722,7 @@ def render_story_card(head, body, src_rel, t, tasks, project=None, **kw):
     unknown = f"у {len(inf['unknown'])} из {inf['total']}" if inf["unknown"] else None
     card.update({"Пульт": link(f"{PROJECTS_DIR}/{project}|{project}") if project else None,
                  "Когда": _date(head.get("night"), 10) or _date(head.get("due"), 10),
-                 "Бюджет": head.get("estimate"),
+                 "Бюджет": head.get("estimate") if inf["budget"] is not None else None,
                  "Сумма оценок": pct_text(inf["sum"]) + (" ⚠ больше бюджета" if over else ""),
                  "Закрыто": f"{len(inf['closed'])} из {len(inf['ids'])}",
                  "Цепочка": [lk(i) for i in inf["chain"]] or None, "Параллельно": [lk(i) for i in inf["parallel"]] or None,
@@ -3696,14 +3824,17 @@ def _dec_time(m, t):
 
 
 def owner_ids(decisions_text, zeus_log_text, board_lines, t):
-    """[(метка времени, id)] из слов владельца: строки decisions.md с временем, вопросы окна вопросов, ответы на доске."""
+    """[(метка времени, id)] из слов владельца: строки decisions.md с временем, вопросы окна вопросов и ответы в чате,
+    ответы на доске."""
     out = []
     for ln in (decisions_text or "").split("\n"):
         m = DEC_LINE_RE.match(ln)
         ts = _dec_time(m, t) if m else None
         if ts is not None:
             out += [(ts, i) for i in DEC_ID_RE.findall(ln)]
-    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) · окно вопросов\s*$", zeus_log_text or "", re.M))
+    # ответ — пометки «окно вопросов» и «ответ в чате» (lib/answers.py HEADS, metis-0405); «… не распознан» — не ответ
+    heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) · (?:окно вопросов|ответ в чате)\s*$",
+                             zeus_log_text or "", re.M))
     for k, m in enumerate(heads):
         end = heads[k + 1].start() if k + 1 < len(heads) else len(zeus_log_text)
         q = re.match(r"\s*вопрос: \[([a-z0-9][a-z0-9-]{0,40})\]", zeus_log_text[m.end():end])
@@ -3747,7 +3878,7 @@ def unlinked_decisions(tasks, decisions_text, zeus_log_text, board_lines, t, min
 
 # --- хвосты не теряются (metis-0504, исследование 26.10 разд. 5 пп. 6–7) ---------------------------------------------
 # Три тревоги тика рядом с «слово владельца без задачи» (стиль тот же: один раз на ключ, только о новых, первый проход
-# без тревоги; check в pantheon.py, файл tail-seen.json). (а) Строка журнала задачи со словами «хвост / остаток / не
+# — одна сводная тревога без перечня, metis-0572; check в pantheon.py, файл tail-seen.json). (а) Строка журнала задачи со словами «хвост / остаток / не
 # сделано / вынесен / позже» без id задачи в этой строке — только предупреждение (эвристика шумит), не блок.
 # (б) Файл knowledge/inbox старше суток, на имя которого не ссылается ни одна задача (source/from или текст);
 # отчёт с `findings: 0` в шапке — исключение. (в) directions/*/review-*.md с находкой класса Д (строка начинается с «Д»),
@@ -3755,7 +3886,11 @@ def unlinked_decisions(tasks, decisions_text, zeus_log_text, board_lines, t, min
 
 TAIL_DAYS = 7  # строка журнала старше — уже не для тика
 TAIL_FILE_HOURS = 24
-TAIL_RE = re.compile(r"хвост\w*|остат(?:ок|к\w+)|не сделан\w*|вынесен\w*|позже", re.I)
+# «остаток недели / лимита / дня» — запас времени или денег, а не недоделанная работа (metis-0572); \b после слова — иначе
+# «остатком недели» обходит просмотр откатом \w+ на «остатко»; основы просмотра — только формы существительного:
+# «остаток недельного плана», «минутной проверки», «бюджетного модуля», «токенизатора», «временных файлов», «часть» — хвост
+TAIL_RE = re.compile(r"хвост\w*|остат(?:ок|к\w+)\b(?!\s+(?:недел(?:ь|я|и|е|ю|ей|ям|ями|ях)\b|дн(?:я|ей|ю|и|ям|ями|ях)\b|месяц(?:а|ы|е|у|ем|ев|ам|ами|ах)?\b|лимит(?:а|ы|е|у|ом|ов|ам|ами|ах)?\b|времени\b|бюджет(?:а|ы|е|у|ом|ов)?\b|токен(?:а|ы|е|у|ом|ов|ам|ами|ах)?\b|минут(?:а|ы|е|у|ой|ам|ами|ах)?\b|час(?:а|ов)?\b))"
+                     r"|не сделан\w*|вынесен\w*|позже", re.I)
 TAIL_ID_RE = re.compile(r"(?<![\w-])[a-z][a-z0-9]*-\d{2,}(?!\w)")
 JOURNAL_LINE_RE = re.compile(r"^- (\d{4}-\d\d-\d\d \d\d:\d\d) — ([^:\n]*): (.*)$")
 TAIL_SKIP_ACTORS = ("check",)  # записи самого тика — не слова агента
@@ -3767,6 +3902,8 @@ TAIL_CLOSED_RE = re.compile(r"(?:закрыт|снят|устранён|устр
 TAIL_CLEAR_RE = re.compile(r"^(?:→|->|не задача:)", re.I)  # строка-погашение: «→ <id>» или «не задача: …» (metis-0572)
 TAIL_BARE_RE = re.compile(r"(?<![\w.-])\d{3,4}(?![\w.-])")  # id без префикса: «0366»
 TAIL_OPEN = ("todo", "doing", "review", "waiting")
+# строка открытой задачи «из ревью …» / «из review-…» дописывает в неё саму находки ревью, а не оставляет хвост
+TAIL_SELF_RE = re.compile(r"^(?:[\d.]+\s+[\d:x]+\s+)?из (?:ревью|review)(?![^\W\d_])", re.I)
 
 
 def _journal(body):
@@ -3787,7 +3924,8 @@ def _journal(body):
 def tail_lines(tasks, t, days=TAIL_DAYS):
     """[(id задачи, строка журнала)] со словами хвоста, не старше days дней. Строки самого тика (actor check) не считаются.
     Не хвост (metis-0572): в строке id другой существующей задачи (в том числе без префикса — «0366», если такая задача
-    одна) или «не задача:»; строка открытой задачи о ней самой (её id в строке); остаток закрыт позже в той же задаче
+    одна) или «не задача:»; строка открытой задачи о ней самой — её id в строке или «из ревью …» в начале (находки
+    дописаны в эту задачу); «остаток недели / лимита / дня» — запас, не работа; остаток закрыт позже в той же задаче
     (строка со словом хвоста и «закрыт/снят/устранён/выполнен…»; такая строка и сама не хвост); позже в той же задаче есть строка «→ …» или «не задача: …»
     — она гасит все прежние хвосты задачи (старую строку править не нужно)."""
     suffix = {}
@@ -3798,8 +3936,11 @@ def tail_lines(tasks, t, days=TAIL_DAYS):
         if head.get("type") != "task":
             continue
         jl = [x for x in _journal(body) if x[1] not in TAIL_SKIP_ACTORS]
+        is_open = head.get("status") in TAIL_OPEN
         for k, (ts, _, text, ln) in enumerate(jl):
             if ts is None or t - ts > days * 86400 or not TAIL_RE.search(text):
+                continue
+            if is_open and TAIL_SELF_RE.match(text.strip()):  # находки ревью дописаны в саму задачу (metis-0572)
                 continue
             # id гасит тревогу, только если такая задача есть и это не сама задача (review-113, x86-64, свой id — не хвост)
             if any(i != tid and i in tasks for i in TAIL_ID_RE.findall(text)):
@@ -3808,7 +3949,7 @@ def tail_lines(tasks, t, days=TAIL_DAYS):
                 continue
             if "не задача:" in text.lower() or TAIL_CLOSED_RE.search(text):  # строка о закрытии хвоста — не хвост
                 continue
-            if head.get("status") in TAIL_OPEN and tid in TAIL_ID_RE.findall(text):
+            if is_open and tid in TAIL_ID_RE.findall(text):
                 continue
             if any((TAIL_RE.search(x[2]) and TAIL_CLOSED_RE.search(x[2])) or TAIL_CLEAR_RE.match(x[2].strip())
                    for x in jl[k + 1:]):

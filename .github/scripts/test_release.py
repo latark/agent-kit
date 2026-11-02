@@ -436,11 +436,11 @@ def t_workflows(wfdir=WORKFLOWS):
     jobs = re.split(r"^jobs:\n", text, flags=re.M)[-1]
     parts = re.split(r"^  (?=[a-z]+:\n)", jobs, flags=re.M)
     job = {m.group(1): part for part in parts if (m := re.match(r"([a-z]+):\n", part))}
-    aff, full, lint = job.get("affected", ""), job.get("full", ""), job.get("lint", "")
+    aff, full = job.get("affected", ""), job.get("full", "")
     check("tests.yml: только чтение, PR и push в main, ручной запуск, Python 3.14, без токена в checkout",
           re.search(r"^permissions:\n  contents: read$", text, re.M) and re.search(r"pull_request:\n\s+branches: \[main\]", text)
           and re.search(r"push:\n\s+branches: \[main\]", text) and "workflow_dispatch:" in text
-          and text.count('python-version: "3.14"') == 3 and text.count("persist-credentials: false") == 3, text)
+          and text.count('python-version: "3.14"') == 2 and text.count("persist-credentials: false") == 2, text)
     # YAML с «: » в простом скаляре GitHub не разбирает — workflow не запускается вовсе (так было после #192)
     rb = shutil.which("ruby")
     load = "ARGV.each { |f| begin YAML.load_file(f, aliases: true) rescue ArgumentError; YAML.load_file(f) end }"
@@ -458,7 +458,7 @@ def t_workflows(wfdir=WORKFLOWS):
     check("tests.yml: ни один шаг не выключается (`if:` только на уровне job), checkout не берёт чужой ref",
           tst is not None and not wf_step_bad(tst), tst if tst else why)
     check("tests.yml: PR — job affected на закреплённом Linux (минута macOS ×10), полная история для merge-base",
-          tst is not None and sorted(tst["jobs"]) == ["affected", "full", "lint"] and set(job) == {"lint", "affected", "full"}
+          tst is not None and sorted(tst["jobs"]) == ["affected", "full"] and set(job) == {"affected", "full"}
           and re.search(r"^    if: github.event_name == 'pull_request'$", aff, re.M)
           and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", aff, re.M) and "fetch-depth: 0" in aff, job.keys())
     check("tests.yml: push в main и ручной запуск — job full на закреплённом macOS, не на PR, не на коммите выпуска",
@@ -486,8 +486,15 @@ def t_workflows(wfdir=WORKFLOWS):
 
     call = ('python3 -I plugins/pantheon/scripts/run-tests.py --affected --base origin/main -j 3 '
             '--log-dir "$RUNNER_TEMP/tests" plugins/guard plugins/pantheon plugins/project-tools || code=$?')
-    ar = [ln for _, lines in runs(aff) for ln in lines]
-    check("tests.yml: affected — тесты скриптов выпуска, затем раннер --affected по трём плагинам; код 3 — успех, "
+    # metis-0265: первый шаг affected — ruff по закреплённой версии и хешам, провал не прячется
+    asteps = runs(aff)
+    lr = asteps[0][1] if asteps else []
+    check("tests.yml: affected — первым шагом ruff: ставится по хешам из .github/ruff-requirements.txt, затем ровно "
+          "`ruff check .` (без `|| true`, --exit-zero и других флагов)",
+          lr == ["python3 -m pip install --disable-pip-version-check --require-hashes -r .github/ruff-requirements.txt",
+                 "ruff check ."], asteps)
+    ar = [ln for _, lines in asteps[1:] for ln in lines]
+    check("tests.yml: affected — после ruff тесты скриптов выпуска, затем раннер --affected по трём плагинам; код 3 — успех, "
           "остальные коды — job красный (строки run целиком, без комментариев и лишних ветвей)",
           ar == ["python3 -I .github/scripts/test_release.py", "python3 --version", "code=0", call,
                  'if [ "$code" -eq 3 ]; then', 'echo "нечего гонять: изменения не задевают тесты"', "code=0", "fi",
@@ -496,15 +503,6 @@ def t_workflows(wfdir=WORKFLOWS):
     check("tests.yml: full — раннер по трём плагинам без --affected, код раннера — код job",
           fr == ["python3 --version", 'python3 -I plugins/pantheon/scripts/run-tests.py -j 3 --log-dir '
                  '"$RUNNER_TEMP/tests" plugins/guard plugins/pantheon plugins/project-tools'], fr)
-    # metis-0265: lint — ruff на каждый PR; закреплённые Linux, версия и хеши, провал не прячется
-    lr = [ln for _, lines in runs(lint) for ln in lines]
-    check("tests.yml: lint — только на PR, закреплённый ubuntu",
-          re.search(r"^    if: github.event_name == 'pull_request'$", lint, re.M)
-          and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", lint, re.M), lint)
-    check("tests.yml: lint — ruff ставится по хешам из .github/ruff-requirements.txt, затем ровно `ruff check .` "
-          "(без `|| true`, --exit-zero и других флагов)",
-          lr == ["python3 -m pip install --disable-pip-version-check --require-hashes -r .github/ruff-requirements.txt",
-                 "ruff check ."], lr)
     req = open(os.path.join(WORKFLOWS, "..", "ruff-requirements.txt"), encoding="utf-8").read()
     check("ruff-requirements.txt: ruff==<точная версия> и хеши sha256 колёс",
           re.search(r"^ruff==\d+\.\d+\.\d+ \\$", req, re.M) and len(re.findall(r"--hash=sha256:[0-9a-f]{64}", req)) >= 1, req)
@@ -551,18 +549,19 @@ def t_workflows_on_bad_copies():
         ("второй YAML-документ в tests.yml", dict(tests=real.rstrip("\n") + "\n---\na: 1\n"), "tests.yml: continue-on-error, shell"),
     ]
     cases += [
-        ("lint с --exit-zero", dict(tests=ins(real, "          ruff check .", "          ruff check . --exit-zero")),
-         "tests.yml: lint — ruff ставится"),
-        ("lint с || true", dict(tests=ins(real, "          ruff check .", "          ruff check . || true")),
-         "tests.yml: lint — ruff ставится"),
-        ("lint без закреплённых хешей", dict(tests=ins(real, " --require-hashes", "")),
-         "tests.yml: lint — ruff ставится"),
-        ("lint на push в main", dict(tests=ins(real, "  lint:\n    if: github.event_name == 'pull_request'",
-                                               "  lint:\n    if: github.event_name != 'pull_request'")),
-         "tests.yml: lint — только на PR"),
-        ("lint на ubuntu-latest", dict(tests=ins(real, "  lint:\n    if: github.event_name == 'pull_request'\n    runs-on: ubuntu-24.04",
-                                                  "  lint:\n    if: github.event_name == 'pull_request'\n    runs-on: ubuntu-latest")),
-         "tests.yml: lint — только на PR"),
+        ("ruff с --exit-zero", dict(tests=ins(real, "          ruff check .", "          ruff check . --exit-zero")),
+         "tests.yml: affected — первым шагом ruff"),
+        ("ruff с || true", dict(tests=ins(real, "          ruff check .", "          ruff check . || true")),
+         "tests.yml: affected — первым шагом ruff"),
+        ("ruff без закреплённых хешей", dict(tests=ins(real, " --require-hashes", "")),
+         "tests.yml: affected — первым шагом ruff"),
+        ("шага ruff нет в affected", dict(tests=ins(real, "          ruff check .\n", "")),
+         "tests.yml: affected — первым шагом ruff"),
+        ("ruff отдельным job lint (шлюз guard его не знает)",
+         dict(tests=ins(real, "  affected:\n", "  lint:\n    if: github.event_name == 'pull_request'\n"
+                                              "    runs-on: ubuntu-24.04\n    steps:\n      - run: ruff check .\n\n"
+                                              "  affected:\n")),
+         "tests.yml: PR — job affected"),
         ("второй job в release.yml", dict(release=rel_real.rstrip("\n") + "\n  evil-x:\n    runs-on: ubuntu-24.04\n"),
          "release.yml: ровно один job"),
     ]

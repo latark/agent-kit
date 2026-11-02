@@ -2582,7 +2582,8 @@ _PUSH_BAD = {"--all", "--mirror", "--delete", "-d", "--prune", "--force", "-f", 
 
 
 def limited(event):
-    """Роль Пантеона или любой субагент — правила шага 1.2 касаются их; ваша сессия без роли — нет."""
+    """Роль Пантеона или любой субагент — правила шага 1.2 касаются их; ваша сессия без роли — нет (кроме CI перед
+    gh pr merge: check_owner_merge, metis-0633)."""
     role, sub, pdir = who(event)
     return (is_pantheon_role(role) or sub), role, sub, pdir
 
@@ -3132,10 +3133,40 @@ def _gh_pr_sub(texts):
     return next(((q, i) for q, i in cands if texts[q] == "pr" and i is not None), None)
 
 
+def check_owner_merge(event, tool_input):
+    """Сессия без роли (окно владельца): из правил push — только CI перед gh pr merge (решение владельца 01.11,
+    metis-0633, merge_gate.owner_ci_problem). Команду без слова merge не разбираем: остальное в этой сессии не судим."""
+    cmd = tool_input.get("command") or ""
+    if "merge" not in cmd:
+        return None
+    cwd = os.path.realpath(event.get("cwd") or os.getcwd())
+    _, cmds = bash_analysis(cmd, cwd)
+    moved = any(n in ("cd", "chdir", "pushd", "popd") for n, _ in cmds)
+    notes = []  # предупреждения пропуска (metis-0650): едут возвратом, Allow
+    for name, texts in cmds:
+        if name == "gh" and _gh_parse(texts)[0]:
+            return ("Правило push: gh — слово до подкоманды не вычислить (переменная, $(…)), а в команде есть merge: "
+                    f"не понять, слияние ли это. Пиши подкоманду gh и флаги перед ней словами. {merge_gate.OWNER_CI}")
+        found = _gh_merge(texts) if name == "gh" else None
+        if found is not None:
+            # та же проверка GH_*, что у правила hq-gh: GH_REPO, GH_HOST, GH_CONFIG_DIR уводят gh от сверенного репозитория
+            if _gh_env_assigned(cmd, cwd) or any(os.environ.get(v) for v in GH_REDIRECT_ENV):
+                return ("Правило push: gh pr merge — без переменных GH_* в команде и без GH_REPO, GH_HOST, "
+                        f"GH_CONFIG_DIR в окружении: они уводят gh от репозитория, на котором сверен CI. "
+                        f"{merge_gate.OWNER_CI}")
+            why = merge_gate.owner_ci_problem(cwd, moved, found[1])
+            if why:
+                return f"Правило push: gh pr merge — {why}"
+            notes.extend(merge_gate.notes_of(why))
+    return merge_gate.allow(notes)
+
+
 def check_push(event, tool, tool_input):
     ok, role, sub, pdir = limited(event)
-    if not ok or tool != "Bash":
+    if tool != "Bash":
         return None
+    if not ok:
+        return check_owner_merge(event, tool_input)
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     _, cmds = bash_analysis(tool_input.get("command") or "", cwd)
     moved = any(n in ("cd", "chdir", "pushd", "popd") for n, _ in cmds)
@@ -3146,6 +3177,7 @@ def check_push(event, tool, tool_input):
     if can_push and role == "domain-coordinator":
         if any(_inside(x, [pdir]) for x in _norm(private_conf(load_policy())["paths"])):
             can_push = False
+    notes = []  # предупреждения пропуска шлюза слияния (metis-0650): возврат Allow, а не состояние модуля
     for name, texts in cmds:
         if name == "gh" and _gh_parse(texts)[0]:
             return ("Правило push: gh — слово до подкоманды не вычислить (переменная, $(…)), а без него не понять, "
@@ -3166,6 +3198,7 @@ def check_push(event, tool, tool_input):
             why = merge_problem(role, sub, pdir, cwd, moved, args, tool_input.get("command") or "", event)
             if why:
                 return f"Правило push: gh pr merge — {why}"
+            notes.extend(merge_gate.notes_of(why))
             continue
         if name and os.path.basename(name.rstrip("/")) == "pantheon":
             why = review_problem(role, texts, tool_input.get("command") or "", bool(tool_input.get("run_in_background")))
@@ -3194,7 +3227,7 @@ def check_push(event, tool, tool_input):
             if why:
                 return (f"Правило push: {why}. Роли отправляют только свои ветки (develop — лид); в main и master "
                         "сливает владелец, принудительная отправка и удаление веток — тоже только он.")
-    return None
+    return merge_gate.allow(notes)
 
 
 def check_terminal(event, tool, tool_input):
@@ -3374,13 +3407,15 @@ def check_hq_telegram(event, tool, tool_input):
     return None
 
 
-# hq-gh (metis-0247, ревью argus-69b, решение Метиды и Зевса 19.10). Окну штаба gh pr view/checks/edit выпущены
+# hq-gh (metis-0247, ревью argus-69b, решение Метиды и Зевса 19.10). Окну штаба gh pr view/checks/list/edit выпущены
 # мимо песочницы (pantheon HQ_GH), а у Зевса личное: без сужения он вынес бы личное в описание PR любого репозитория
 # (gh pr edit -R чужой --body-file ~/ai/knowledge/me/…) и принёс бы в окно чужой текст из веба (gh pr view -R чужой
 # --comments, SEC-13). В окне штаба (PANTHEON_ROLE=hq или agent_type hq — главная сессия и субагенты) любой gh pr:
 #   - только с явным -R/--repo, и каждый — owner/repo из [merge_repos] политики (любого направления); без -R gh взял бы
 #     репозиторий папки, его здесь не проверить. Любое GH_* в команде и GH_REPO, GH_HOST, GH_CONFIG_DIR в окружении — отказ;
 #   - PR — номером: адрес PR в аргументе gh берёт вместо -R;
+#   - gh pr list (metis-0626, решение Метиды 01.11) — без позиционных слов и только с флагами из HQ_GH_LIST_LONG и
+#     коротких HQ_GH_VALUE/HQ_GH_BOOL["list"]: --search/-S — отказ (текст запроса уходит в GitHub), прочее — тоже;
 #   - без обсуждений: --comments (-c) и --json с comments, reviews, latestReviews — чужой текст и в своём репозитории;
 #   - без личного в команде: те же пути, что правило private закрывает остальным ролям (--body-file, -F, $(cat …),
 #     перенаправление в обе стороны: `< личное`, `$(< личное)`), и значение флага в том же слове (--body-file=<путь>).
@@ -3390,8 +3425,13 @@ def check_hq_telegram(event, tool, tool_input):
 # главной сессии окна его нет — без этого отказа она для check_push владелец и слияние прошло бы мимо шлюза.
 # Координаторов и мастерскую правило не трогает.
 GH_REDIRECT_ENV = ("GH_REPO", "GH_HOST", "GH_CONFIG_DIR")  # уводят gh от -R: чужой репозиторий, хост, вход
-HQ_GH_VALUE = {"view": "Rqt", "checks": "Rqti", "edit": "RbFBmt"}  # короткие флаги со значением
-HQ_GH_BOOL = {"view": "cw", "checks": "w"}
+HQ_GH_VALUE = {"view": "Rqt", "checks": "Rqti", "edit": "RbFBmt", "list": "RsLBHlAaqt"}  # короткие флаги со значением
+HQ_GH_BOOL = {"view": "cw", "checks": "w", "list": "dw"}
+# gh pr list — только эти длинные флаги (со значением: и `--flag x`, и `--flag=x`); остальное, --search и --app тоже, — отказ
+HQ_GH_LIST_LONG = {"--repo", "--state", "--limit", "--base", "--head", "--label", "--author", "--assignee", "--json",
+                   "--jq", "--template"}
+HQ_GH_LIST_BOOL = {"--draft", "--web"}
+HQ_GH_SEARCH = "без --search/-S (текст запроса уходит в GitHub, metis-0626)"
 HQ_GH_LONG_VALUE = {"--repo", "--body", "--body-file", "--title", "--json", "--jq", "--template", "--base",
                     "--milestone", "--subject", "--author-email", "--match-head-commit", "--interval"}
 HQ_GH_DISCUSSION = re.compile(r"\b(?:comments|reviews|latestReviews)\b")
@@ -3427,6 +3467,14 @@ def _hq_gh_args(sub, args):
             if eq and HQ_GH_DISCUSSION.search(val):
                 return "без обсуждений (--json comments, reviews)", repos
             nxt = None if eq else "json"
+        elif sub == "list" and a.startswith("--"):
+            if flag == "--search":
+                return HQ_GH_SEARCH, repos
+            if flag in HQ_GH_LIST_BOOL:
+                continue
+            if flag not in HQ_GH_LIST_LONG:
+                return f"у gh pr list флаг {flag} не разрешён", repos
+            nxt = None if eq else "skip"
         elif a.startswith("--"):
             # --remove-milestone — булев, следующее слово не съедает (argus-69b3)
             if not eq and (flag in HQ_GH_LONG_VALUE
@@ -3437,6 +3485,8 @@ def _hq_gh_args(sub, args):
                 rest = a[2 + i:]
                 if sub == "view" and c == "c":
                     return "без обсуждений (-c, --comments)", repos
+                if sub == "list" and c == "S":
+                    return HQ_GH_SEARCH, repos
                 if c in value:
                     if c == "R":
                         rest = rest[1:] if rest.startswith("=") else rest
@@ -3447,6 +3497,8 @@ def _hq_gh_args(sub, args):
                     break
                 if c not in flags:
                     return f"флаг -{c} не разобрать", repos
+        elif sub == "list":
+            return f"у gh pr list нет позиционных слов ({a}) — только флаги", repos
         elif not re.fullmatch(r"#?\d+", a):
             return "PR указывай номером (адрес PR gh берёт вместо -R)", repos
     if nxt == "repo":
@@ -3491,8 +3543,8 @@ def check_hq_gh(event, tool, tool_input):
         if why:
             return f"{head}: {why}.{tail}"
         if not repos:
-            return (f"{head}: укажи репозиторий явно — gh pr {texts[i]} N -R <owner/repo> из [merge_repos] "
-                    f"policy.toml; без -R gh взял бы репозиторий папки, а его не проверить.{tail}")
+            return (f"{head}: укажи репозиторий явно — gh pr {texts[i]}{'' if texts[i] == 'list' else ' N'} -R "
+                    f"<owner/repo> из [merge_repos] policy.toml; без -R gh взял бы репозиторий папки, а его не проверить.{tail}")
         bad = [r for r in repos if not _merge_repo_ok(r, allowed)]
         if bad:
             known = "" if allowed else " (список [merge_repos] пуст или policy.toml не прочиталась)"
@@ -4067,6 +4119,9 @@ def strict_window(check, event, tool, tool_input):
 
 
 def check_roles(event, tool, tool_input):
+    """Правила ролей по очереди: первый отказ — его текст. Иначе None или merge_gate.Allow — пропуск с
+    предупреждениями шлюза слияния этого события (metis-0650); отказ следующего правила их отбрасывает."""
+    notes = []
     for rule, check in (("private", check_private), ("cdp-role", check_cdp_role), ("push", check_push),
                         ("terminal", check_terminal), ("corpus-role", check_corpus_role),
                         ("tg-secret", check_tg_readd), ("launchd-env", check_launchd_env), ("hestia", check_hestia)):
@@ -4074,7 +4129,8 @@ def check_roles(event, tool, tool_input):
             reason = check(event, tool, tool_input)
             if reason:
                 return reason
-    return None
+            notes.extend(merge_gate.notes_of(reason))
+    return merge_gate.allow(notes)
 
 
 def strict(check, event, tool, tool_input):
@@ -4146,7 +4202,7 @@ def main(raw=None):
         return
     if name == "PreToolUse":
         tool_input = event.get("tool_input") or {}
-        reason = None
+        reason, notes = None, ()  # notes — предупреждения шлюза слияния только этого события (metis-0650)
         if "draft-role" not in OFF:
             reason = strict(check_draft_role, event, tool, tool_input)
         if not reason and tool in WINDOW_ONLY_TOOLS:
@@ -4168,6 +4224,7 @@ def main(raw=None):
                 reason = hard(check_tg_secret_file, tool_input)
         if not reason and (tool == "Bash" or tool in EDIT_TOOLS or tool in READ_TOOLS):
             reason = strict(check_roles, event, tool, tool_input)
+            notes = merge_gate.notes_of(reason)
         if not reason and "pantheon-acl" not in OFF and (tool == "Bash" or tool in EDIT_TOOLS):
             reason = strict(check_pantheon, event, tool, tool_input)
         if not reason and "protect-config" not in OFF and (tool == "Bash" or tool in EDIT_TOOLS):
@@ -4180,6 +4237,10 @@ def main(raw=None):
                 "permissionDecision": "deny",
                 "permissionDecisionReason": reason,
             }}, ensure_ascii=False))
+        elif notes:
+            # шлюз слияния пропустил, но есть красная необязательная проверка CI (metis-0633) — строка пользователю;
+            # предупреждения — из возврата проверки этого события, а не из модуля (metis-0650)
+            print(json.dumps({"systemMessage": "guard, шлюз слияния: " + "; ".join(notes)}, ensure_ascii=False))
     elif name == "Stop" and "nextjs" not in OFF:
         reason = soft(check_nextjs, event)
         if reason:

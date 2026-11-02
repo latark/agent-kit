@@ -10,7 +10,7 @@ metis-0534 и 0535» закрывает все три (metis-0583); упомин
 Слитый PR закрывает такую задачу: status done, closed —
 день слияния, release — «PR #N → коммит» (версия плагина, если PR поднял plugin.json), actual — из учёта по задачам
 (metrics/tasks.jsonl, metis-0294), нет замера — «нет замера»; в журнал задачи — строка с CLOSED_BY_MERGE.
-В теле PR слово «часть» — PR закрывает только часть задачи: задача не закрывается.
+В теле PR слово «часть» — PR закрывает только часть задачи: задача не закрывается (и close_checked, metis-0660).
 Неотмеченные пункты «Готово, когда» (задачи с T.CRITERIA_FROM, metis-0503): слитый PR без «часть» ставит review и
 строку «слит, неотмечено N», а не done — хвосты не теряются; закрыть — отметить пункты, `pantheon task split` или --force.
 Открытый PR, который так же закрывает задачу (без «часть»), ставит задаче todo/doing её направления review — один раз
@@ -240,6 +240,13 @@ def open_pr_tasks(state_file):
     return set(st["open"]) if isinstance(st.get("open"), list) else None
 
 
+def _path_ok(path):
+    """Путь файла открытого PR для кэша (metis-0665): строка до 400 знаков без управляющих знаков и переводов строк —
+    чужой PR не вставит строки в вывод `pantheon task overlap`. Та же граница — tasks.overlap_path_ok."""
+    return (isinstance(path, str) and 0 < len(path) <= 400
+            and not any(ord(c) < 32 or c in "\x7f\x85\u2028\u2029" for c in path))
+
+
 def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=None):
     """Сетевой проход: gh по репозиториям → кэш cache_file. Только он зовёт gh; лёгкий тик (run) читает кэш.
     budget — секунд на весь проход: на каждый вызов gh остаётся не больше, чем осталось; не успел — ошибка по репозиторию.
@@ -282,7 +289,11 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
                             "number,headRefName,headRefOid,body,files"], env, timeout=min(90, left()))
             if isinstance(o, list):
                 opened[repo] = sorted({i for p in o if isinstance(p, dict) for i in find_ids(p.get("headRefName"), p.get("body"))})
+                # branch и files — сверке пересечения `pantheon task overlap` (metis-0665), когда gh в окне не отвечает
                 open_prs[repo] = [{"number": p.get("number"), "head": str(p.get("headRefOid") or "")[:40],
+                                   "branch": str(p.get("headRefName") or "")[:200],
+                                   "files": [f.get("path") for f in p.get("files") or []
+                                             if isinstance(f, dict) and _path_ok(f.get("path"))],
                                    "ids": find_ids(p.get("headRefName"), p.get("body")),
                                    "closes": closing_ids(p.get("headRefName"), p.get("body")),
                                    "part": is_part(p.get("body")),
@@ -425,7 +436,7 @@ def close_checked(pantheon, t, merged, repo_dirs, T, actual_for, log, errors, op
     (кэш fetch, репозиторий её направления), → done той же записью, что и по Closes (metis-0583). PR без Closes и под
     общей веткой (simplify-*) иначе оставляли задачу висеть в doing после слияния. Без пунктов «Готово, когда» не
     закрываем: «всё отмечено» нечем доказать; задачу с открытым PR (open_ids) — тоже: работа ещё идёт. Из нескольких
-    слитых PR журнала — последний по времени слияния."""
+    слитых PR журнала — последний по времени слияния; «часть» в его теле — задача остаётся открытой."""
     by_num = {}
     for repo, rows in sorted(merged.items()):
         if repo not in repo_dirs:
@@ -449,6 +460,12 @@ def close_checked(pantheon, t, merged, repo_dirs, T, actual_for, log, errors, op
             continue
         _, repo, pr = max(found, key=lambda x: (x[0], x[1]))
         try:
+            if is_part(pr.get("body")):  # «часть» в теле: PR делает не всю задачу — как в close_pr, не закрываем
+                note = f"PR #{pr['number']} ({repo}) слит, в теле «часть» — задача не закрыта"
+                if not journal_has(path, T, note):
+                    T.task_set(pantheon, t, tid, {}, actor="плановый проход", note=note)
+                    log.append(f"{tid}: PR #{pr['number']} слит, «часть» — не закрыта")
+                continue
             if close_done(pantheon, t, tid, (path, head, body), repo, pr, T, actual_for, CHECKED_WHY):
                 log.append(f"{tid}: закрыта — все пункты отмечены, PR #{pr['number']} ({repo}) слит")
         except ValueError as e:

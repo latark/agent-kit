@@ -117,6 +117,20 @@ def unit_checks():
     check("pct и pct_text: «0,5 % недели» → 0.5, 0.9 → «0,9 %»",
           T.pct("0,5 % недели") == 0.5 and T.pct("нет") is None and T.pct_text(0.9) == "0,9 %"
           and T.pct_text(1.0) == "1 %")
+    for src, want in (("17 ч ≈ 15 % доли проектов", 15.0), ("≈ 20 ч ≈ 18 %", 18.0), ("0,5 % недели", 0.5), ("~1 %", 1.0),
+                      ("0.5%", 0.5), ("1\u00a0%", 1.0), ("≈ 45 ч к бете, ≈ 15 ч после", None),
+                      ("считается в reports/backlog-review-2026-10-26.md", None), ("", None), (None, None)):
+        check(f"0654 pct({src!r}) → {want}", T.pct(src) == want, T.pct(src))
+    for est, label in (("считается в reports/backlog-review-2026-10-26.md", "без %"), (None, "пусто")):
+        tk = {"s-1": ("", {"type": "story", "id": "s-1", "title": "П", "status": "todo", "estimate": est}, ""),
+              "t-1": ("", {"type": "task", "id": "t-1", "title": "З", "status": "todo", "parent": "s-1", "estimate": "2 % недели"}, "")}
+        cd, bd = T.render_story_card(tk["s-1"][1], "", "x.md", T0, tk)
+        check(f"0654 пачка {label}: «бюджет не задан», без ⚠, Бюджет пуст",
+              "бюджет не задан" in bd and "⚠" not in bd and "⚠" not in cd["Сумма оценок"] and cd["Бюджет"] is None
+              and "бюджет не задан" in T.story_text("s-1", tk) and "больше бюджета" not in T.story_text("s-1", tk), bd)
+    tk["s-1"][1]["estimate"] = "1 % недели"
+    cd, bd = T.render_story_card(tk["s-1"][1], "", "x.md", T0, tk)
+    check("0654 бюджет 1 % при сумме 2 % — ⚠ и бюджет на месте", "⚠" in bd and cd["Бюджет"] == "1 % недели", bd)
     check("paths_cross: вложенные и та же — да, соседние и префикс имени — нет",
           T.paths_cross("plugins/pantheon/", "plugins/pantheon/lib/watch.py") and T.paths_cross("./a/b", "a/b/")
           and not T.paths_cross("plugins/pan", "plugins/pantheon") and not T.paths_cross("a/x", "a/y")

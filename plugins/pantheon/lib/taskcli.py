@@ -10,7 +10,7 @@ import sys
 __all__ = [
     "TASK_NEW_VALUE_FLAGS", "TASK_NEW_BOOL_FLAGS", "TASK_SPLIT_VALUE_FLAGS", "TASK_SET_VALUE_FLAGS",
     "TASK_REPEATABLE_FLAGS", "TASK_FLAG_ALIASES", "task_repeat_error", "task_flag_error", "task_body_arg",
-    "_read_or_empty", "task_new_notify", "task_cmd",
+    "_read_or_empty", "task_new_notify", "overlap_open_prs", "ready_overlap_lines", "overlap_lines", "task_cmd",
 ]
 
 
@@ -112,10 +112,142 @@ def task_new_notify(T, tid, direction, title, text):
         P.alert(f"новая задача {tid} ({direction}): уведомление в inbox не записано — {e.strerror or e}", "task-new")
 
 
+OVERLAP_GH_TIMEOUT = 30  # секунд на репозиторий: `task set status=doing` не должен висеть на сети
+
+
+def _merge_repos(direction):
+    """Репозитории направления из [merge_repos] policy.toml (как у автозакрытия) → (список, ошибка или None)."""
+    p = os.path.join(P.HOME, ".claude", "pantheon", "policy.toml")
+    try:
+        with open(p, "rb") as fh:
+            pol = P.tomllib.load(fh)
+    except FileNotFoundError:
+        return [], f"нет {p} — репозитории направления неизвестны, открытые PR не проверены"
+    except (OSError, ValueError) as e:
+        return [], f"{p} не читается ({type(e).__name__}) — открытые PR не проверены"
+    repos = (pol.get("merge_repos") or {}).get(direction) if isinstance(pol.get("merge_repos"), dict) else None
+    repos = [r for r in repos if isinstance(r, str) and r.strip()] if isinstance(repos, list) else []
+    T = P.tasks_mod()
+    ok = [r for r in repos if T.overlap_name_ok(r, T.OVERLAP_REPO_RE)]
+    if len(ok) < len(repos):  # имя не owner/name — в команды и вывод не идёт; само имя не печатаем
+        return ok, (f"в [merge_repos] {p} у {direction} отклонено имён не owner/name: {len(repos) - len(ok)} — "
+                    "их открытые PR не проверены")
+    return repos, None if repos else f"у {direction} нет репозиториев в [merge_repos] {p} — открытые PR не проверены"
+
+
+def _pr_files(T, raw):
+    """Пути файлов PR → (годные, сколько отброшено): путь с управляющим знаком, переводом строки или длиннее
+    T.OVERLAP_PATH_MAX в вывод не идёт — чужой PR не вставит строки в предупреждение."""
+    paths = [f for f in raw if isinstance(f, str)]
+    good = [f for f in paths if T.overlap_path_ok(f)]
+    return good, len(paths) - len(good)
+
+
+def _pr_row(A, T, repo, pr, raw_files, branch):
+    files, dropped = _pr_files(T, raw_files)
+    return {"repo": repo, "number": pr.get("number"), "branch": branch, "files": files, "dropped": dropped,
+            "ids": A.find_ids(branch, _body(pr)), "closes": A.closing_ids(branch, _body(pr))}
+
+
+def _body(pr):
+    body = pr.get("body")
+    return body if isinstance(body, str) else ""
+
+
+def _one_line(text):
+    """Ответ gh об ошибке — в одну строку без управляющих знаков."""
+    return " ".join("".join(c if c.isprintable() else " " for c in str(text)).split())[:200]
+
+
+def overlap_open_prs(direction):
+    """Открытые PR репозиториев направления с файлами (metis-0665) → (prs, notes). Сначала gh; не ответил — кэш
+    планового прохода autoclose-prs.json (open_prs с files и branch) и строка, что взят кэш и почему; нет и кэша —
+    строка «не проверено». Молча PR не пропускаются: notes уходят в вывод."""
+    A, T = P.autoclose_mod(), P.tasks_mod()
+    repos, err = _merge_repos(direction)
+    if not repos:
+        return [], [err]
+    env = {k: v for k, v in os.environ.items() if k not in ("GH_REPO", "GH_HOST")}
+    cache = P.read_json(P.path("autoclose-prs.json"), {})
+    cache = cache if isinstance(cache, dict) else {}  # кэш не словарь — как нет кэша
+    cached = cache.get("open_prs") if isinstance(cache.get("open_prs"), dict) else {}
+    fetched = cache.get("fetched")
+    prs, notes = [], [err] if err else []
+    for repo in repos:
+        data, gerr = A.gh_json(["pr", "list", "-R", repo, "--state", "open", "--limit", str(A.LIMIT), "--json",
+                                "number,headRefName,body,files"], env, timeout=OVERLAP_GH_TIMEOUT)
+        if not gerr and isinstance(data, list):
+            for pr in data:
+                if isinstance(pr, dict) and isinstance(pr.get("number"), int):
+                    files = [f.get("path") for f in pr.get("files") or [] if isinstance(f, dict)]
+                    prs.append(_pr_row(A, T, repo, pr, files, str(pr.get("headRefName") or "")))
+            continue
+        why = _one_line(gerr or "ответ gh — не список")
+        rows = cached.get(repo.lower())
+        if not isinstance(rows, list) or not isinstance(fetched, (int, float)):
+            notes.append(f"{repo}: gh не ответил ({why}), кэша планового прохода нет — проверь вручную: "
+                         f"gh pr list -R {repo} --state open --json number,headRefName,files")
+            continue
+        when = P.datetime.fromtimestamp(fetched).strftime("%d.%m %H:%M")
+        nofiles = [r.get("number") for r in rows if isinstance(r, dict) and not isinstance(r.get("files"), list)]
+        notes.append(f"{repo}: gh не ответил ({why}) — открытые PR из кэша планового прохода от {when}"
+                     + (f"; без списка файлов: {', '.join('#' + str(n) for n in nofiles)}" if nofiles else ""))
+        for r in rows:
+            if isinstance(r, dict) and isinstance(r.get("number"), int) and isinstance(r.get("files"), list):
+                files, dropped = _pr_files(T, r["files"])
+                prs.append({"repo": repo, "number": r["number"], "branch": str(r.get("branch") or ""),
+                            "files": files, "dropped": dropped,
+                            "ids": [i for i in r.get("ids") or [] if isinstance(i, str) and A.ID_RE.fullmatch(i)],
+                            "closes": [i for i in r.get("closes") or [] if isinstance(i, str) and A.ID_RE.fullmatch(i)]})
+    return prs, notes
+
+
+def overlap_lines(T, tid, quiet_clean=False):
+    """Строки предупреждения о пересечении задачи tid (metis-0665). quiet_clean — для `task set status=doing`: без
+    touches — одна короткая строка-подсказка, а не весь разбор."""
+    tasks = T.load_tasks(P.PANTHEON, T.WORK_TYPES)
+    head = tasks[tid][1]
+    if not head.get("touches"):
+        return T.overlap_text(tid, head, [], []) if not quiet_clean else [
+            f"у {tid} нет touches — пересечение с соседними задачами и открытыми PR не проверено "
+            f"(pantheon task overlap {tid} после touches=…)"]
+    prs, notes = overlap_open_prs(head.get("direction"))
+    return T.overlap_text(tid, head, T.overlap_tasks(tasks, tid), T.overlap_prs(tid, head, prs), notes)
+
+
+def _warn_overlap(T, tid):
+    """После взятия в работу — предупреждение в stderr; сбой сверки задачу не отменяет."""
+    try:
+        lines = overlap_lines(T, tid, quiet_clean=True)
+    except Exception as e:  # noqa: BLE001 — сверка — подсказка, запись уже сделана
+        lines = [f"сверка пересечения не прошла ({type(e).__name__}: {e}) — повтори pantheon task overlap {tid}"]
+    for ln in lines:
+        print(ln if ln.startswith((" ", "-")) else f"предупреждение · {ln}", file=sys.stderr)
+
+
+def ready_overlap_lines(T, rows):
+    """Для `task ready` (metis-0667): по строке на готовую задачу с touches, чьи области пересекаются с открытым PR →
+    "TID: пересечение с PR #N (файлы …)". Нет пересечений — пусто. Открытые PR берутся один раз на направление; нет
+    touches ни у кого — gh не зовётся. Строки «не проверено» (gh не ответил, нет policy) — один раз на направление."""
+    out, per_dir = [], {}
+    for tid, h in rows:
+        if not h.get("touches"):
+            continue
+        d = h.get("direction")
+        if d not in per_dir:
+            per_dir[d] = overlap_open_prs(d)
+            out += [f"не проверено: {n}" for n in per_dir[d][1]]
+        for pr, common in T.overlap_prs(tid, h, per_dir[d][0]):
+            more = f" и ещё {len(common) - 6}" if len(common) > 6 else ""
+            out.append(f"{tid}: пересечение с PR #{pr.get('number')} (файлы {', '.join(common[:6])}{more}) — "
+                       f"до взятия: pantheon task overlap {tid}")
+    return out
+
+
 def task_cmd(rest):
     T = P.tasks_mod()
     if not rest:
-        print("pantheon task new|set|show|ready|claim — справка: pantheon help", file=sys.stderr)
+        print("pantheon task new|set|show|ready|claim|overlap — справка: pantheon help", file=sys.stderr)
         return 2
     sub, args = rest[0], rest[1:]
 
@@ -239,6 +371,8 @@ def task_cmd(rest):
                 i += step
             p, head = T.task_set(P.PANTHEON, P.now(), tid, changes, note=note, body=new_body, force=force)
             print(f"{tid}: {head.get('status')} · {os.path.relpath(p, P.PANTHEON)}")
+            if changes.get("status") == "doing" and head.get("status") == "doing":
+                _warn_overlap(T, tid)
             if changes.get("status") in ("done", "dropped"):
                 P.metrics_on_close(T, tid)
             for w in T.option_warns({"options": changes.get("options")}):
@@ -313,11 +447,27 @@ def task_cmd(rest):
             sid = T.task_detach(P.PANTHEON, P.now(), args[0])
             print(f"{args[0]}: откреплена от пачки {sid}")
         elif sub == "ready":
-            for tid, h in T.ready(P.PANTHEON, P.now(), opt("--direction"), opt("--owner")):
+            rows = T.ready(P.PANTHEON, P.now(), opt("--direction"), opt("--owner"))
+            for tid, h in rows:
                 print(f"{tid}\t{T.PRIORITY.get(h.get('priority', 2), '')}\t{h.get('due') or '—'}\t{h.get('title')}")
+            try:  # сверка — подсказка в stderr: список задач и код выхода она не меняет
+                warns = ready_overlap_lines(T, [r for r in rows if r[1].get("type", "task") == "task"])
+            except Exception as e:  # noqa: BLE001
+                warns = [f"не проверено: сверка с открытыми PR не прошла ({type(e).__name__}: {e})"]
+            for ln in warns:
+                print(f"предупреждение · {ln}", file=sys.stderr)
         elif sub == "claim" and args and opt("--by"):
             p, head = T.task_claim(P.PANTHEON, P.now(), args[0], opt("--by"), float(opt("--hours") or 1))
             print(f"{args[0]}: взята {opt('--by')} до {head.get('claimed_until')}")
+            if head.get("status") == "doing":
+                _warn_overlap(T, args[0])
+        elif sub == "overlap" and len(args) == 1 and not args[0].startswith("--"):
+            tasks = T.load_tasks(P.PANTHEON, T.WORK_TYPES)
+            if args[0] not in tasks or tasks[args[0]][1].get("type", "task") != "task":
+                print(f"pantheon task overlap: нет задачи {args[0]}", file=sys.stderr)
+                return 1
+            lines = overlap_lines(T, args[0])
+            print("\n".join(lines) if lines else f"{args[0]}: пересечений с живыми задачами направления и открытыми PR нет")
         else:
             print(f"pantheon task: не понял «{' '.join(rest)}»", file=sys.stderr)
             return 2

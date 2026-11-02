@@ -17,11 +17,13 @@ import time
 from datetime import datetime
 
 __all__ = [
-    "FRESH_CTX", "FRESH_IDLE_MIN", "WAKE_TEXT", "COORDINATOR_GOAL", "TASK_GOAL", "OPEN_STATUSES", "load_pause",
+    "FRESH_CTX", "FRESH_IDLE_MIN", "WAKE_TEXT", "NEW_ORDER_GOAL", "COORDINATOR_GOAL", "TASK_GOAL", "OPEN_STATUSES",
+    "load_pause",
     "PUSH_MAX_AGE", "resume_session", "transcript_path", "session_context", "fresh_reason", "latest_zeus_handoff",
     "state_files", "fresh_text", "fresh_target", "fresh_start", "_fresh_start", "copies_message", "name_holders",
     "_holder_text", "wait_name_free", "check_new_name", "start_at", "start", "_start_session", "OWNER_WORD_WINDOW",
-    "OWNER_HEAD", "owner_spoke_recently", "CAPACITY_SESSIONS_DONE", "capacity_probe", "capacity_log", "NO_WORD_WHY",
+    "OWNER_HEAD", "owner_word_heads", "owner_spoke_recently", "owner_spoke_before", "CAPACITY_SESSIONS_DONE",
+    "capacity_probe", "capacity_log", "NO_WORD_WHY",
     "START_REFUSED", "START_DEFERRED", "OVER_CAP", "CAP_FREE", "start_gate", "open_tasks", "wake_recheck",
     "wake_hestia", "wake_lead", "wake", "capacity_note", "_wake",
 ]
@@ -36,14 +38,21 @@ FRESH_IDLE_MIN = 60
 
 WAKE_TEXT = (P.START_MARK + " пробуждение] Тебя прервало выключение или перезапуск. Сверь файл состояния и «начато» без "
              "«сделано» (не повторяй внешнее действие, пока не проверишь, что оно не ушло), затем продолжай задачу.")
+# metis-0276: новое поручение посреди сессии входит в цель. Сменить /goal живой фоновой сессии извне нечем (push отдаёт
+# текст хуком, а не командой; сообщение SendMessage — тоже текст), а проверяющая модель цели видит всю переписку. Поэтому
+# условие само говорит, что поручение Зевса или владельца, пришедшее позже, — часть цели, а «готово» с «перехожу к …»
+# цель не закрывает (19.10: план дня пришёл сообщением, отчёт «готово, перехожу к плану» отпустил сессию, работа встала)
+NEW_ORDER_GOAL = (" Поручение Зевса или владельца, пришедшее в сессию после её начала (сообщение или задание "
+                  "«[Пантеон: …]»), входит в цель: пока оно не сделано и не названо заблокированным, цель не достигнута. "
+                  "Отчёт «готово», который объявляет следующий шаг («перехожу к …»), а не делает его, цель не достигает.")
 COORDINATOR_GOAL = ("Цель достигнута, когда последний отчёт сессии — по формату отчёта роли, и либо «Статус: готово» и все "
                     "пункты чек-листа эпика в STATUS.md отмечены сделанными, либо «Статус: заблокировано» с названным "
-                    "блокером и вопросом владельцу или Зевсу.")
+                    "блокером и вопросом владельцу или Зевсу." + NEW_ORDER_GOAL)
 # поручение названо явно (одна задача, проверка) — цель по нему, а не по эпику: иначе Stop-хук не отпустит сессию, пока
 # не закрыт весь чек-лист, и короткая проверка разрастается в эпик (живой запуск athena-0001 15.10)
 TASK_GOAL = ("Цель достигнута, когда последний отчёт сессии — по формату отчёта роли, и либо «Статус: готово» и выполнен "
              "критерий «готово» этого поручения, либо «Статус: заблокировано» с названным блокером и вопросом владельцу "
-             "или Зевсу. Другие задачи и пункты эпика в эту цель не входят.")
+             "или Зевсу. Другие задачи и пункты эпика в эту цель не входят — кроме нового поручения." + NEW_ORDER_GOAL)
 
 
 OPEN_STATUSES = {"todo", "doing", "review"}  # «ждёт» не будят: ответа ещё нет
@@ -173,9 +182,10 @@ def fresh_target(name, origin):
     return (role, folder, run) if run else P.no_window_reason(window)
 
 
-def fresh_start(name, a, text, origin, recheck=None, reason=None):
+def fresh_start(name, a, text, origin, recheck=None, reason=None, goal=None):
     """Поднять имя свежей сессией (новый контекст, то же имя, окно роли) с текстом text. a — прежняя сессия из claude
-    agents (её id — в журнале и тексте); reason — почему свежей, в строку fresh-start журнала start.log. Та же
+    agents (её id — в журнале и тексте); reason — почему свежей, в строку fresh-start журнала start.log; goal —
+    условие цели координатора (по умолчанию COORDINATOR_GOAL, цель эпика; смена цели самозапуска — TASK_GOAL). Та же
     блокировка имени и повторная проверка, что у resume_session. → код."""
     with P.lock("start-" + name, block=False) as got_lock:
         if not got_lock:
@@ -185,10 +195,10 @@ def fresh_start(name, a, text, origin, recheck=None, reason=None):
         if why:
             P.start_log(f"fresh-skip\t{name}\t{a.get('id')}\t{origin}\t{why}")
             return P.skipped(why)
-        return _fresh_start(name, a, text, origin, reason)
+        return _fresh_start(name, a, text, origin, reason, goal)
 
 
-def _fresh_start(name, a, text, origin, reason=None):
+def _fresh_start(name, a, text, origin, reason=None, goal=None):
     if os.environ.get("PANTHEON_DRYRUN") == "1":
         print(f"[fresh] {name} {a.get('id')} {origin}")
         return 0
@@ -200,7 +210,7 @@ def _fresh_start(name, a, text, origin, reason=None):
     if not str(text).startswith(P.START_MARK):
         text = f"{P.START_MARK} поручение от {origin}] {text}"
     if role == "domain-coordinator":
-        text = "/goal " + text + " " + COORDINATOR_GOAL  # как у pantheon start: Stop-хук с целью эпика (DONE-02)
+        text = "/goal " + text + " " + (goal or COORDINATOR_GOAL)  # как у pantheon start: Stop-хук с целью (DONE-02)
     agents = P.agents_all() or []
     live = P.live_copies(name, agents)
     if any(not x.get("id") for x in live):
@@ -519,7 +529,13 @@ def _start_session(name, role, folder, window, default_task, rest, origin, dry, 
     # metis-0348: «blocked» без процесса и без вопроса (noProcess, reconcile_agents) — сессию снял Claude Code, ждать
     # ей нечего: она мёртвая и запуску не мешает, --restart и владелец не нужны. Её `claude rm` — rm_previous после
     # успешного старта новой. С вопросом (needs) noProcess не ставится — такая по-прежнему ждёт вас (отказ ниже).
-    dead = [a for a in live if a.get("noProcess") and a.get("id")]
+    # metis-0651: призрак (ghost) в списке уже failed и в live не входит: призрак с вопросом (был blocked, вопрос виден)
+    # по-прежнему ждёт вас — отказ как раньше; без вопроса он мёртвый и заменяется новой.
+    alias = P.name_alias(name)
+    ghosts = [a for a in agents or [] if a.get("ghost") and a.get("id") and alias.fullmatch(str(a.get("name") or ""))]
+    live += [a for a in ghosts if P.asks_owner(a)]  # detail задания вопросом не считается (argus-249a Б1)
+    dead = [a for a in live + ghosts if a.get("noProcess") and a.get("id")]
+    dead = [a for i, a in enumerate(dead) if a not in dead[:i]]
     if dead:
         live = [a for a in live if a not in dead]
         if not dry:
@@ -582,15 +598,21 @@ OWNER_WORD_WINDOW = 15 * 60
 OWNER_HEAD = re.compile(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", re.M)
 
 
-def owner_spoke_recently(session, window):
-    """Есть ли в ~/.local/state/pantheon/owner-log/<session>.md запись владельца не старше window секунд."""
+def owner_word_heads(session):
+    """Заголовки записей владельца «## ГГГГ-ММ-ДД ЧЧ:ММ:СС» в ~/.local/state/pantheon/owner-log/<session>.md (хвост
+    64 КБ), по порядку файла. Файла нет — []."""
     try:
         with open(P.path("owner-log", session + ".md"), "rb") as fh:
             fh.seek(0, 2)
             fh.seek(max(0, fh.tell() - 65536))
-            heads = OWNER_HEAD.findall(fh.read().decode("utf-8", "replace"))
+            return OWNER_HEAD.findall(fh.read().decode("utf-8", "replace"))
     except OSError:
-        return False
+        return []
+
+
+def owner_spoke_recently(session, window):
+    """Есть ли в ~/.local/state/pantheon/owner-log/<session>.md запись владельца не старше window секунд."""
+    heads = owner_word_heads(session)
     if not heads:
         return False
     try:
@@ -598,6 +620,17 @@ def owner_spoke_recently(session, window):
     except ValueError:
         return False
     return P.now() - last <= window
+
+
+def owner_spoke_before(session, t, window, slack=60):
+    """Сказал ли владелец в окне <session> что-то за window секунд до момента t (slack — запас на часы и запись хука).
+    metis-0276: поручение Зевса во входящих будит координатора, только если файл написан по свежему слову владельца —
+    то же правило, что у pantheon start --from zeus (metis-0261 А), но на время файла, а не на время подъёма."""
+    for h in owner_word_heads(session):
+        with contextlib.suppress(ValueError):
+            if t - window <= datetime.strptime(h, "%Y-%m-%d %H:%M:%S").timestamp() <= t + slack:
+                return True
+    return False
 
 
 CAPACITY_SESSIONS_DONE = ("stopped", "failed", "done")
@@ -916,6 +949,9 @@ def _wake(dry, over=False):
             continue  # эпик уже продолжен новой сессией с тем же именем
         tasks = open_tasks(name)
         if not tasks:
+            continue
+        if P.asks_owner(a):  # metis-0662: призрак с вопросом поднимает ответ владельца, как у отказа pantheon start
+            print(f"пропуск: {name} — ждёт вашего ответа: claude attach {a.get('id')}")
             continue
         fresh = P.fresh_reason(a)  # metis-0147 п. 2: большой контекст и остывший кэш — новая сессия с файла состояния
         how = (f"; свежей сессией ({fresh}), прочитает {' и '.join(P.tilde(p) for p in P.state_files(name))}" if fresh

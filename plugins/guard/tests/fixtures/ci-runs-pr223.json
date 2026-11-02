@@ -1,0 +1,91 @@
+{
+ "_source": "gh api repos/latark/agent-kit/actions/runs?head_sha=4329dd4a537156af9f5f399e3275fbe0ddac2f9f и commits/4329dd4a537156af9f5f399e3275fbe0ddac2f9f/check-runs, 2026-11-01 (metis-0633): PR #223 слит при красном CI; оставлены поля, которые читает ci_runs; pull_requests — номер PR, как GitHub отдаёт его до слияния (после слияния поле пустое, проверено 01.11 на PR 230 открытом и 223/225 слитых)",
+ "workflow_runs": {
+  "total_count": 3,
+  "workflow_runs": [
+   {
+    "id": 41282721401,
+    "name": "tests",
+    "event": "pull_request",
+    "status": "completed",
+    "conclusion": "failure",
+    "head_sha": "4329dd4a537156af9f5f399e3275fbe0ddac2f9f",
+    "check_suite_id": 111891869054,
+    "pull_requests": [
+     {
+      "number": 223
+     }
+    ]
+   },
+   {
+    "id": 41282721330,
+    "name": "check-traces",
+    "event": "pull_request",
+    "status": "completed",
+    "conclusion": "failure",
+    "head_sha": "4329dd4a537156af9f5f399e3275fbe0ddac2f9f",
+    "check_suite_id": 111891868926,
+    "pull_requests": [
+     {
+      "number": 223
+     }
+    ]
+   },
+   {
+    "id": 41282718151,
+    "name": "check-traces",
+    "event": "push",
+    "status": "completed",
+    "conclusion": "failure",
+    "head_sha": "4329dd4a537156af9f5f399e3275fbe0ddac2f9f",
+    "check_suite_id": 111891860820,
+    "pull_requests": [
+     {
+      "number": 223
+     }
+    ]
+   }
+  ]
+ },
+ "check_runs": {
+  "total_count": 4,
+  "check_runs": [
+   {
+    "name": "full",
+    "status": "completed",
+    "conclusion": "skipped",
+    "head_sha": "4329dd4a537156af9f5f399e3275fbe0ddac2f9f",
+    "check_suite": {
+     "id": 111891869054
+    }
+   },
+   {
+    "name": "affected",
+    "status": "completed",
+    "conclusion": "failure",
+    "head_sha": "4329dd4a537156af9f5f399e3275fbe0ddac2f9f",
+    "check_suite": {
+     "id": 111891869054
+    }
+   },
+   {
+    "name": "traces",
+    "status": "completed",
+    "conclusion": "failure",
+    "head_sha": "4329dd4a537156af9f5f399e3275fbe0ddac2f9f",
+    "check_suite": {
+     "id": 111891868926
+    }
+   },
+   {
+    "name": "traces",
+    "status": "completed",
+    "conclusion": "failure",
+    "head_sha": "4329dd4a537156af9f5f399e3275fbe0ddac2f9f",
+    "check_suite": {
+     "id": 111891860820
+    }
+   }
+  ]
+ }
+}

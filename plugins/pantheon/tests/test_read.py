@@ -89,6 +89,9 @@ if cmd == "resolve":
     if "resolve75" in mode:
         sys.exit(75)
     kind, q = sys.argv[sys.argv.index("--kind") + 1], sys.argv[sys.argv.index("--") + 1]
+    if "ambig0" in mode or "ambigint" in mode:
+        print(json.dumps({"status": "ambiguous", "candidates": [] if "ambig0" in mode else 5}))
+        sys.exit(0)
     if "badjson" in mode:
         print("не json")
         sys.exit(0)
@@ -113,6 +116,8 @@ if cmd == "export":
     body = CHATS[cid][2]
     if "big" in mode:
         body = ["#%d [2026-10-18 10:00] Бот: строка %d" % (i, i) for i in range(1, 5002)]
+    if "fat" in mode:   # 900 сообщений по 7000 байт: сообщений меньше предела, байт больше MAX_DUMP_BYTES
+        body = ["#%d [2026-10-18 10:00] Бот: %s" % (i, "x" * 7000) for i in range(1, 901)]
     if "emptyexport" in mode:
         body = []
     if "parts" in mode and cid in BIG:
@@ -1689,9 +1694,301 @@ def test_window_queue_bad_window_name():
           or not os.listdir(os.path.join(b.state, "read")))
 
 
+# --- metis-0622: долги ревью #222 и #223 ------------------------------------------------------------------------------
+
+def _consented(**kw):
+    b = Box()
+    r, rid, q = b.request(**kw)
+    b.answer(T0 + 60, q, "Да")
+    return b, rid, q
+
+
+def test_too_big_bytes_after_export():
+    """Предел байт (а не сообщений) срабатывает после выгрузки: отказ too-big с байтами, выгрузки удалены, читателя нет;
+    карточка Зевса не врёт, что выгрузки не было (а до выгрузки — так и пишет)."""
+    b, rid, q = _consented()
+    r = b.run(T0 + 120, extra={"FAKE_SRC_MODE": "fat"})
+    ok, st = _refused(b, rid)
+    check("6 МБ после выгрузки: отказ too-big по байтам, 900 сообщений — предел сообщений ни при чём",
+          ok and st["error"] == "too-big" and "выгружено сообщений 900" in st["reason"]
+          and f"{READ.MAX_DUMP_BYTES} байт" in st["reason"] and st["dump_bytes"] > READ.MAX_DUMP_BYTES
+          and st["messages"] == 900 <= READ.MAX_MESSAGES, (st, r.stdout))
+    check("6 МБ после выгрузки: выгрузок в папке нет, читателя нет",
+          sorted(os.listdir(b.folder(rid))) == ["chats.json", "request.json", "state.json"] and not b.calls("claude"),
+          os.listdir(b.folder(rid)))
+    card = b.zeus_cards()
+    check("отказ после выгрузки: карточка говорит «выгрузка была, но удалена», а не «Выгрузки не было»",
+          "Выгрузка была, но удалена" in card and "Выгрузки не было" not in card, card[-500:])
+    b2 = Box()
+    b2.request(specs=(("--folder", "Торги"),), extra={"FAKE_SRC_MODE": "huge"})
+    check("отказ до выгрузки: карточка по-прежнему «Выгрузки не было»",
+          "Выгрузки не было" in b2.zeus_cards() and "Выгрузка была" not in b2.zeus_cards())
+    b3, rid3, q3 = _consented()
+    b3.run(T0 + 120, extra={"FAKE_SRC_MODE": "emptyexport"})
+    check("пустая выгрузка: карточка тоже «выгрузка была, но удалена»", "Выгрузка была, но удалена" in b3.zeus_cards()
+          and "Выгрузки не было" not in b3.zeus_cards(), b3.zeus_cards()[-400:])
+
+
+def test_export_temp_gives_up():
+    """Источник на выгрузке всё время «временно» (75): MAX_ATTEMPTS проходов ждёт, на последнем — сбой export-75."""
+    b, rid, q = _consented()
+    phases = []
+    for i in range(READ.MAX_ATTEMPTS):
+        b.run(T0 + 120 + 60 * i, extra={"FAKE_SRC_MODE": "export75"})
+        phases.append((b.st(rid)["phase"], b.st(rid).get("error")))
+    check("выгрузка 75: первые MAX_ATTEMPTS-1 проходов ждут (requested), последний — сбой export-75",
+          phases[:-1] == [("requested", None)] * (READ.MAX_ATTEMPTS - 1) and phases[-1] == ("failed", "export-75"),
+          phases)
+    b.run(T0 + 120 + 60 * READ.MAX_ATTEMPTS)
+    check("выгрузка 75: после сбоя новой попытки нет, читателя нет", len(b.exports()) == READ.MAX_ATTEMPTS
+          and not b.calls("claude"), (len(b.exports()), b.st(rid)))
+
+
+LOG_RUN = r'''
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+import pantheon
+R = pantheon.read_mod()
+R.log("20261015-1200-0a01", "probe", n=3, f=1.5, yes=True, none=None, text="КАНАРЕЙКА-ТЕКСТ", lst=[1], obj={"a": 1})
+print(open(os.path.join(os.environ["PANTHEON_STATE"], "logs", "read.jsonl"), encoding="utf-8").read())
+'''
+
+
+def test_log_numbers_only():
+    """Журнал заявок: только числа, булевы и null — строки, списки и словари (текст переписки) в журнал не идут."""
+    b = Box()
+    r = subprocess.run([PY311, "-I", "-c", LOG_RUN, LIBDIR], env=b.env(T0), capture_output=True, text=True, timeout=60)
+    rec = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
+    check("log(): числа, булево и null записаны", rec.get("n") == 3 and rec.get("f") == 1.5 and rec.get("yes") is True
+          and "none" in rec and rec["none"] is None, (rec, r.stderr[-300:]))
+    check("log(): строка, список и словарь не записаны", "КАНАРЕЙКА" not in r.stdout and "text" not in rec
+          and "lst" not in rec and "obj" not in rec, rec)
+
+
+def test_resolve_ambiguous_malformed():
+    """«Подходит несколько» без годных кандидатов (пустой список) или кандидаты не списком — сбой resolve-bad один раз,
+    а не отказ «подходит несколько (0)» и не исключение на каждом проходе."""
+    for mode in ("ambig0", "ambigint"):
+        b = Box()
+        r, rid, q = b.request(extra={"FAKE_SRC_MODE": mode})
+        st = b.st(rid)
+        r2 = b.run(T0 + 30, extra={"FAKE_SRC_MODE": mode})
+        check(f"кандидаты ({mode}): сбой resolve-bad, вопроса и карточки отказа нет",
+              st["phase"] == "failed" and st["error"] == "resolve-bad" and q is None and not st.get("card")
+              and "подходит несколько" not in json.dumps(st, ensure_ascii=False) and not b.zeus_cards(), st)
+        check(f"кандидаты ({mode}): следующий проход спокоен — без исключения и без нового resolve",
+              "сбой (" not in b.resolved.stdout + r2.stdout and len(b.resolves()) == 1, (b.resolved.stdout, r2.stdout))
+
+
+def _many_items_box(n=1005):
+    b, rid, st, okq = _summarized_box()
+    d = b.folder(rid)
+    sp = os.path.join(d, "summary.md")
+    s = open(sp, encoding="utf-8").read()
+    head, rest = s.split("\n<<<TG-", 1)
+    tag = rest.split("\n", 1)[0]
+    body = "\n".join(f"{i}. пункт-номер-{i}" for i in range(1, n + 1))
+    s2 = head + "\n<<<TG-" + tag + "\n" + body + "\nTG-" + tag + ">>>\n"
+    with open(sp, "w", encoding="utf-8") as fh:
+        fh.write(s2)
+    import hashlib
+    old = st["summary_hash"]
+    st["summary_hash"] = hashlib.sha256(s2.encode("utf-8")).hexdigest()[:READ.HASH_LEN]
+    st["items_ok"] = n
+    with open(os.path.join(d, "state.json"), "w", encoding="utf-8") as fh:
+        json.dump(st, fh)
+    return b, rid, st, okq.replace(f"пунктов 4, хеш {old}", f"пунктов {n}, хеш {st['summary_hash']}")
+
+
+def test_deliver_1000_items():
+    """Пунктов больше 999: «все» передаёт все, «пункты 1001, 1003» — именно их (номер из 4 знаков не отбрасывается)."""
+    b, rid, st, okq = _many_items_box()
+    b.answer(T0 + 1200, okq, "все")
+    r = b.run(T0 + 1300)
+    ap = os.path.join(b.folder(rid), "approved.md")
+    text = open(ap, encoding="utf-8").read() if os.path.exists(ap) else ""
+    check("«все» при 1005 пунктах: переданы все, включая 1000+", b.st(rid).get("delivered") == list(range(1, 1006))
+          and "1005. пункт-номер-1005" in text and "999. пункт-номер-999" in text, (b.st(rid), r.stdout))
+    b, rid, st, okq = _many_items_box()
+    b.answer(T0 + 1200, okq, "пункты 1001, 1003")
+    b.run(T0 + 1300)
+    check("«пункты 1001, 1003»: переданы ровно они", b.st(rid).get("delivered") == [1001, 1003], b.st(rid))
+
+
+def test_items_not_duplicated_after_cut():
+    """Проход оборван между write_items и write_state: пункты части уже в items.md, а parts_done старый. Следующий
+    проход читает часть заново, но её пункты в своде один раз; устаревшая отметка (часть уже засчитана) пунктов не режет."""
+    b = Box()
+    rid = _parts_request(b)
+    b.run(T0 + 120, extra={"FAKE_SRC_MODE": "parts", "FAKE_CLAUDE_MODE": "failpart2"})
+    d = b.folder(rid)
+    ip = os.path.join(d, "items.md")
+    t = open(ip, encoding="utf-8").read()
+    tag = re.search(r"<<<(TG-[0-9a-f]{12})\n", t).group(1)
+    with open(ip, "w", encoding="utf-8") as fh:   # как после write_items части 2, до write_state
+        fh.write(t.replace(tag + ">>>\n", "1\t1\tсведение | ЧАСТЬ-2-ЧАТ-1 | чат 1, #1, 2026-10-18 10:00, Бот | «x»\n"
+                           + tag + ">>>\n"))
+    st = b.st(rid)
+    check("обрыв: перед частью записано, сколько пунктов было до неё", st["items_part"] == 1 and st["items_base"] == 1, st)
+    b.run(T0 + 240, extra={"FAKE_SRC_MODE": "parts"})
+    s = open(os.path.join(d, "summary.md"), encoding="utf-8").read()
+    got = re.findall(r"^\d+\. сведение \| (ЧАСТЬ-\d-ЧАТ-\d)", s, re.M)
+    check("обрыв: пункты части 2 не удвоены, остальные на месте",
+          got == ["ЧАСТЬ-1-ЧАТ-1", "ЧАСТЬ-2-ЧАТ-1", "ЧАСТЬ-3-ЧАТ-2", "ЧАСТЬ-3-ЧАТ-3"] and b.st(rid)["items_ok"] == 4,
+          (got, b.st(rid)))
+    b2 = Box()
+    rid2 = _parts_request(b2)
+    b2.run(T0 + 120, extra={"FAKE_SRC_MODE": "parts", "FAKE_CLAUDE_MODE": "failpart2"})
+    sp = os.path.join(b2.folder(rid2), "state.json")
+    s2 = json.load(open(sp))
+    s2.update(items_part=0, items_base=0)   # отметка от прошлой части: часть 1 уже засчитана, её пункты резать нельзя
+    with open(sp, "w") as fh:
+        json.dump(s2, fh)
+    b2.run(T0 + 240, extra={"FAKE_SRC_MODE": "parts"})
+    s3 = open(os.path.join(b2.folder(rid2), "summary.md"), encoding="utf-8").read()
+    check("устаревшая отметка: пункт засчитанной части 1 не потерян", "ЧАСТЬ-1-ЧАТ-1" in s3
+          and b2.st(rid2)["items_ok"] == 4, b2.st(rid2))
+
+
+def test_bad_request_on_reading_drops_dumps():
+    """request.json испорчен на этапе reading: выгрузки и items.md удаляются сразу, а не ждут READING_TTL."""
+    b = Box()
+    rid = _parts_request(b)
+    b.run(T0 + 120, extra={"FAKE_SRC_MODE": "parts", "FAKE_CLAUDE_MODE": "failpart2"})
+    d = b.folder(rid)
+    check("заранее: на reading лежат выгрузки", os.path.exists(os.path.join(d, "raw-1.md"))
+          and os.path.exists(os.path.join(d, "items.md")))
+    p = os.path.join(d, "request.json")
+    req = json.load(open(p))
+    req["direction"] = "nope"
+    with open(p, "w") as fh:
+        json.dump(req, fh)
+    r = b.run(T0 + 240, extra={"FAKE_SRC_MODE": "parts"})
+    check("заявка не по образцу на reading: выгрузок и items.md нет сразу, читателя нет",
+          sorted(os.listdir(d)) == ["chats.json", "request.json", "state.json"] and len(b.calls("claude")) == 2
+          and "не по образцу" in r.stdout, (os.listdir(d), r.stdout))
+
+
+def _two_requests(b):
+    """Заявки A (прочитана часть 1 из 3, читает) и B (позже по номеру, согласие дано) — оба «Три» в режиме parts."""
+    def req(t):
+        r = b.cli(["read", "request", "--folder", "Три", "--direction", "demo-dir", "--since", "2026-10-18",
+                   "--until", "2026-10-18", "--why", "что по лотам"], t=t)
+        return re.search(r"Заявка read-(\S+):", r.stdout).group(1)
+    a, c = req(T0), req(T0 + 3600)
+    b.run(T0 + 3610, extra={"FAKE_SRC_MODE": "parts"})
+    b.answer(T0 + 3620, b.st(a)["question"], "Да")
+    b.run(T0 + 3700, extra={"FAKE_SRC_MODE": "parts", "FAKE_CLAUDE_MODE": "failpart2"})
+    b.answer(T0 + 3710, b.st(c)["question"], "Да")
+    return a, c
+
+
+def test_reading_request_does_not_starve_others():
+    """Заявка в reading уходит в конец прохода; если за заявкой ещё читают, она берёт не больше одной части."""
+    b = Box()
+    a, c = _two_requests(b)
+    check("заранее: A читает (часть 1 из 3), B ждёт «да» — теперь с ним",
+          b.st(a)["phase"] == "reading" and b.st(a)["parts_done"] == 1 and b.st(c)["phase"] == "requested")
+    r = b.run(T0 + 3800, extra={"FAKE_SRC_MODE": "parts"})
+    out = r.stdout
+    check("порядок: заявка в reading — после остальных (B обработана раньше A, хотя номер больше)",
+          0 <= out.find(f"read-{c}:") < out.find(f"read-{a}:"), out)
+    check("бюджет: B читает одну часть и уступает (за ней A в reading), A, последняя, дочитывает и сводит",
+          b.st(c)["phase"] == "reading" and b.st(c)["parts_done"] == 1 and b.st(a)["phase"] == "summarized"
+          and "очередь других заявок" in out, (b.st(c), b.st(a), out))
+    r = b.run(T0 + 3900, extra={"FAKE_SRC_MODE": "parts"})
+    check("бюджет: следующий проход B, единственная в reading, дочитывает без лимита",
+          b.st(c)["phase"] == "summarized" and b.st(c)["parts_done"] == 3, (b.st(c), r.stdout))
+
+
+def test_queue_drops_foreign_fields():
+    """Из файла очереди берутся только поля FIELDS: лишние (этап, хеш, чужие ключи) в request.json не попадают."""
+    b = Box()
+    _, q = _win(b)
+    rid = "20261015-1200-0c01"
+    data = json.loads(_queued(rid))
+    data.update(phase="done", req_hash="abc", evil="ВНЕ-FIELDS", state={"phase": "summarized"}, items_ok=9)
+    _put(q, f"{rid}.req.json", json.dumps(data, ensure_ascii=False))
+    b.run(T0 + 10)
+    d = b.folder(rid)
+    req = json.load(open(os.path.join(d, "request.json"), encoding="utf-8")) if os.path.isdir(d) else {}
+    check("очередь: в request.json ровно поля FIELDS, чужих ключей нет", sorted(req) == sorted(READ.FIELDS), req)
+    check("очередь: заявка идёт обычным путём с этапа resolving/requested, не с подсунутого этапа",
+          b.st(rid)["phase"] in ("resolving", "requested") and "items_ok" not in b.st(rid), b.st(rid))
+
+
+def test_queue_per_window_limit():
+    """За проход из очереди одного окна берутся первые QUEUE_PASS_MAX файлов; остальные ждут следующего."""
+    b = Box()
+    _, q = _win(b)
+    n = READ.QUEUE_PASS_MAX + 5
+    rids = ["20261015-1200-%04x" % (0xd000 + i) for i in range(n)]
+    for rid in rids:
+        _put(q, f"{rid}.req.json", _queued(rid))
+    r = b.run(T0 + 10)
+    made = sorted(os.listdir(os.path.join(b.state, "read")))
+    check(f"предел окна: заведено ровно {READ.QUEUE_PASS_MAX} первых по имени, остальные 5 в очереди",
+          made == rids[:READ.QUEUE_PASS_MAX]
+          and sorted(os.listdir(q)) == [x + ".req.json" for x in rids[READ.QUEUE_PASS_MAX:]]
+          and f"заведено заявок {READ.QUEUE_PASS_MAX}" in r.stdout, (len(made), os.listdir(q), r.stdout))
+    r = b.run(T0 + 20)
+    check("предел окна: следующий проход забирает остаток",
+          sorted(os.listdir(os.path.join(b.state, "read"))) == rids and not os.listdir(q), (os.listdir(q), r.stdout))
+
+
+DEADLINE_RUN = r'''
+import sys
+sys.path.insert(0, sys.argv[1])
+import pantheon
+R = pantheon.read_mod()
+R.RUN_BUDGET = -1      # срок прохода вышел до начала
+sys.exit(pantheon.main(["read", "run"]))
+'''
+
+
+def test_queue_deadline_cut():
+    """Срок прохода вышел (DEADLINE) — очередь окна не разбирается: файлы лежат до следующего прохода, в журнале код."""
+    b = Box()
+    _, q = _win(b)
+    rid = "20261015-1200-0c02"
+    _put(q, f"{rid}.req.json", _queued(rid))
+    r = subprocess.run([PY311, "-I", "-c", DEADLINE_RUN, LIBDIR], env=b.env(T0 + 10), capture_output=True, text=True,
+                       timeout=60)
+    ev, _ = _events(b)
+    check("срок вышел: заявка осталась в очереди, STATE/read не создан, в журнале queue-deadline",
+          os.path.exists(os.path.join(q, f"{rid}.req.json")) and not os.path.exists(os.path.join(b.state, "read", rid))
+          and any(e["event"] == "queue-deadline" for e in ev), (os.listdir(q), ev, r.stdout, r.stderr[-300:]))
+    b.run(T0 + 20)
+    check("срок вышел: обычный следующий проход заводит заявку", os.path.isdir(b.folder(rid)))
+
+
+def test_queue_old_yes_does_not_count():
+    """Сквозное «старое да»: заявка из очереди заведена проходом в T0+120 (created в файле — T0), а «да» владельца
+    (с верным хешем, чатами и датами) дано в T0+60, между файлом и проходом: к ней оно не подходит, выгрузки нет."""
+    rid = "20261015-1200-0c03"
+    b = Box()
+    _, q = _win(b)
+    _put(q, f"{rid}.req.json", _queued(rid))                  # created в файле — T0
+    b.run(T0 + 120)                                           # проход заводит заявку: created = T0+120, а не T0 из файла
+    req = json.load(open(os.path.join(b.folder(rid), "request.json"), encoding="utf-8"))
+    chats = json.load(open(os.path.join(b.folder(rid), "chats.json"), encoding="utf-8"))
+    h_file = READ.consent_hash(dict(req, created=T0), chats)  # хеш заявки так, как её описывает сам файл очереди
+    # «да» в T0+60 — между файлом и проходом — на вопрос с хешем, посчитанным по created из файла
+    b.answer(T0 + 60, f"[read-{rid}] Разрешить выгрузку: чатов 1 — {CHAT} 10 сообщ.; 2026-10-18 — 2026-10-18, "
+             f"хеш {h_file}", "Да")
+    r = b.run(T0 + 130)
+    check("старое да: created — время прохода, да из T0+60 с хешем «по файлу» не подходит — выгрузки нет",
+          req["created"] == T0 + 120 and h_file != READ.consent_hash(req, chats) and b.st(rid)["phase"] == "requested"
+          and not b.exports() and "ждёт согласия" in r.stdout, (req, b.st(rid), r.stdout))
+    b.answer(T0 + 200, b.st(rid)["question"], "Да")
+    b.run(T0 + 210)
+    check("свежее да на настоящий вопрос после прохода: выгрузка идёт",
+          len(b.exports()) == 1 and b.st(rid)["phase"] == "summarized", b.st(rid))
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
+        if name.startswith("test_") and callable(fn) and (len(sys.argv) == 1 or name in sys.argv[1:]):   # имена в argv — выборка
             try:
                 fn()
             except Exception as e:  # падение одного случая — провал, остальные идут

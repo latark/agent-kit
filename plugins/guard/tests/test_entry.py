@@ -20,6 +20,10 @@ import os
 import shutil
 import subprocess
 import sys
+
+# Срок подпроцессов теста: на нагруженном Mac (проход outside, -j3, load 11-20) 10-30 с не хватает (metis-0634).
+# Срок самого guard (DEADLINE) это не меняет и им не проверяется.
+SUB_TIMEOUT = 60
 import tempfile
 import time
 
@@ -81,7 +85,7 @@ try:
     def entry(args, event, folder=HOOKS, extra=None):
         data = event if isinstance(event, str) else json.dumps(event)
         return subprocess.run(["/bin/sh", os.path.join(folder, "python.sh"), os.path.join(folder, "guard.py")] + args,
-                              input=data, capture_output=True, text=True, env=dict(env, **(extra or {})), timeout=30)
+                              input=data, capture_output=True, text=True, env=dict(env, **(extra or {})), timeout=SUB_TIMEOUT)
 
     r = entry([], ev, copy)
     tag = sys.implementation.cache_tag
@@ -137,7 +141,7 @@ try:
             e["PANTHEON_WINDOW"] = window
         data = raw if raw is not None else json.dumps(event)
         r = subprocess.run([sys.executable, "-I", "-c", PROBE, GUARD, json.dumps({"argv": argv, "set": conf or {}})],
-                           input=data, capture_output=True, text=True, env=e, timeout=30)
+                           input=data, capture_output=True, text=True, env=e, timeout=SUB_TIMEOUT)
         return r
 
     def ran(r):
@@ -290,7 +294,7 @@ try:
     p = subprocess.Popen([sys.executable, "-I", "-c", PROBE, GUARD, json.dumps({"argv": [], "set": {"DEADLINE": 1}})],
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     try:
-        p.wait(timeout=10)
+        p.wait(timeout=SUB_TIMEOUT)
     except subprocess.TimeoutExpired:
         p.kill()
         p.wait()

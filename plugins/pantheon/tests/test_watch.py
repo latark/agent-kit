@@ -312,6 +312,149 @@ def test_autostart_owner_elsewhere_0564():
           f"0564: в задании координатору не те задачи: {text[-400:]}")
 
 
+def goal_transcript(e, a, cond, met=False):
+    """Транскрипт сессии a с целью /goal: запись goal_status, как её пишет Claude Code (attachment, met, condition)."""
+    d = os.path.join(e.home, ".claude", "projects", "".join(ch if ch.isalnum() else "-" for ch in a["cwd"]))
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, a["sessionId"] + ".jsonl")
+    with open(p, "a") as fh:
+        fh.write(json.dumps({"type": "attachment", "attachment": {"type": "goal_status", "met": met, "sentinel": True,
+                                                                  "condition": cond}}, ensure_ascii=False) + "\n")
+    return p
+
+
+def test_autostart_goal_released_on_handover_0631():
+    """metis-0631: окно поднято самозапуском с /goal по задачам mg-0001, mg-0002; mg-0001 передали другой сессии (owner
+    сменился) — за один проход цель снимается: прежняя сессия остановлена, новая того же имени с /goal по оставшейся
+    mg-0002 и следующей из очереди mg-0003, без mg-0001; тревога. Пока задачи окна на нём — «уже работает», ничего не
+    трогаем. Сделанная (done) и «ждёт» (waiting) цель не снимают. Ушли все и очереди нет — сессия остановлена и убрана
+    из списка (claude stop + rm). Сессию, которая ждёт вас (blocked), не трогаем — тревога."""
+    e = Env()
+    e.direction("mg-dir")
+    e.task("mg-0001", "mg-dir")
+    e.task("mg-0002", "mg-dir")
+    e.run("watch", t=T0)
+    e.board("mg-0001", T0 + 10)
+    e.board("mg-0002", T0 + 20)
+    e.run("watch", t=T0 + 60)
+    starts, text = _bg_text(e)
+    check(len(starts) == 1 and "Все: mg-0001, mg-0002." in text, f"0631: самозапуск не тот: {starts}")
+    goal = starts[0][-1]
+    check(goal.startswith("/goal "), f"0631: самозапуск без /goal: {goal[:80]}")
+    a = bg("mg-dir", "working", "a6a10631-1", pid=51, started=T0 + 61)
+    a["status"] = "busy"
+    a["cwd"] = os.path.join(e.home, "projects", "mg-dir")
+    e.agents([a])
+    goal_transcript(e, a, goal[len("/goal "):])
+    # задачи окна на нём, одна сделана, другая ждёт — цель не трогаем
+    e.task("mg-0001", "mg-dir", status="done")
+    e.task("mg-0002", "mg-dir", status="waiting", extra="waiting_on: human\nnext: ответ\n")
+    out = e.run("watch", "--dry-run", t=T0 + 400).stdout
+    check("цель окна" not in out, f"0631: цель снята без передачи: {out}")
+    e.run("watch", t=T0 + 400)
+    check(len(_bgs(e)) == 1 and not [c for c in e.calls() if c[:1] == ["stop"]],
+          f"0631: сессию тронули без передачи задачи: {e.calls()}")
+    # передача: owner mg-0001 — другая сессия; mg-0002 снова в работе у окна; в очереди появилась mg-0003
+    e.task("mg-0001", "mg-dir", status="doing", extra="owner: agent-kit-47\n")
+    e.task("mg-0002", "mg-dir", status="doing")
+    e.task("mg-0003", "mg-dir")
+    e.board("mg-0003", T0 + 500)
+    out = e.run("watch", "--dry-run", t=T0 + 600).stdout
+    check("mg-dir: цель окна на задачах, которые ушли: mg-0001 (ведёт agent-kit-47) — перезапустил бы с новой целью"
+          in out, f"0631: dry-run не говорит о снятии цели: {out}")
+    e.run("watch", t=T0 + 700, extra={"FAKE_STOP_MARK": "1"})
+    check(["stop", "a6a10631"] in e.calls(), f"0631: сессия на чужой задаче не остановлена: {e.calls()}")
+    starts = _bgs(e)
+    new = starts[-1][-1] if len(starts) == 2 else ""
+    check(new.startswith("/goal [Пантеон: смена цели]") and "Все: mg-0002, mg-0003." in new
+          and "Другие задачи и пункты эпика в эту цель не входят" in new and "a6a10631" in new,
+          f"0631: новая цель не та: {starts[-1:]}")
+    check("Все: mg-0001" not in new and "mg-0001, mg-0002" not in new, f"0631: переданная задача осталась в цели: {new}")
+    check("самозапуск mg-dir: цель окна снята — mg-0001 (ведёт agent-kit-47); окно перезапущено с новой целью"
+          in e.alerts(), f"0631: нет тревоги о смене цели: {e.alerts()[-400:]}")
+    rows = [r for r in _start_rows(e) if r[1:2] == ["fresh-start"]]
+    check(rows and rows[-1][2] == "mg-dir" and "ушли mg-0001" in rows[-1][-1], f"0631: нет строки fresh-start: {rows}")
+    # новая сессия с новой целью — следующий проход её не трогает
+    b = bg("mg-dir", "working", "b6b10631-2", pid=52, started=T0 + 701)
+    b["status"] = "busy"
+    b["cwd"] = a["cwd"]
+    e.agents([b])
+    goal_transcript(e, b, new[len("/goal "):])
+    e.run("watch", t=T0 + 1000)
+    check(len(_bgs(e)) == 2 and ["stop", "b6b10631"] not in e.calls(), f"0631: новую цель сняли снова: {e.calls()}")
+    # ушли все задачи цели, очереди нет — остановить и убрать из списка
+    for n in (2, 3):
+        e.task(f"mg-000{n}", "mg-dir", status="dropped" if n == 2 else "doing", extra="" if n == 2 else "owner: zeus\n")
+    e.run("watch", t=T0 + 1300, extra={"FAKE_STOP_MARK": "1"})
+    check(["stop", "b6b10631"] in e.calls() and ["rm", "b6b10631"] in e.calls() and len(_bgs(e)) == 2,
+          f"0631: без очереди сессия не остановлена или поднята новая: {e.calls()[-4:]}")
+    check("цель окна снята — mg-0002 (отменена), mg-0003 (ведёт zeus); новой задачи сейчас нет (очереди нет)"
+          in e.alerts(), f"0631: нет тревоги об остановке: {e.alerts()[-400:]}")
+    # ждёт вас (blocked) — не трогаем, тревога
+    e2 = Env()
+    e2.direction("mh-dir")
+    e2.task("mh-0001", "mh-dir", extra="owner: agent-kit-9\n")
+    c = bg("mh-dir", "blocked", "c6c10631-3", pid=53)
+    c["cwd"] = os.path.join(e2.home, "projects", "mh-dir")
+    e2.agents([c])
+    goal_transcript(e2, c, "[Пантеон: поручение от tick] Самозапуск дежурным по задачам: следующая: mh-0001. "
+                    "Все: mh-0001. Прочитай STATUS.md")
+    e2.run("watch", t=T0)
+    check(not [x for x in e2.calls() if x[:1] in (["stop"], ["--bg"])], f"0631: blocked тронули: {e2.calls()}")
+    check("сессия ждёт вас, сниму после ответа" in e2.alerts(), f"0631: нет тревоги blocked: {e2.alerts()[-300:]}")
+    # цель достигнута (met) — снимать нечего
+    goal_transcript(e2, c, "[Пантеон: поручение от tick] Самозапуск дежурным: Все: mh-0001.", met=True)
+    c["state"] = "working"
+    e2.agents([c])
+    e2.run("watch", t=T0 + 300)
+    check(not [x for x in e2.calls() if x[:1] in (["stop"], ["--bg"])], f"0631: снята достигнутая цель: {e2.calls()}")
+    # задачу перенесли в другое направление, а подъём закрыт (планировщик на паузе) — остановить без новой сессии
+    e2.direction("ot-dir")
+    e2.task("mh-0002", "ot-dir")
+    e2.task("mh-0003", "mh-dir")
+    e2.board("mh-0003", T0 + 310)
+    goal_transcript(e2, c, "[Пантеон: поручение от tick] Самозапуск дежурным: следующая: mh-0002. Все: mh-0002.")
+    open(e2.st("paused"), "w").write("x\n")
+    e2.run("watch", t=T0 + 400, extra={"FAKE_STOP_MARK": "1"})
+    check(["stop", "c6c10631"] in e2.calls() and ["rm", "c6c10631"] in e2.calls()
+          and not [x for x in e2.calls() if x[:1] == ["--bg"]], f"0631: на паузе не остановлена: {e2.calls()}")
+    check("mh-0002 (перенесена в ot-dir); новой задачи сейчас нет (весь планировщик на паузе)" in e2.alerts(),
+          f"0631: нет тревоги о переносе: {e2.alerts()[-400:]}")
+    # ревью argus Б2: ушедшая задача, а своя ещё в doing, подъём закрыт (пауза) — сессию не гасить, тревога «снимем»
+    e3 = Env()
+    e3.direction("mk-dir")
+    e3.task("mk-0001", "mk-dir", status="doing", extra="owner: agent-kit-5\n")
+    e3.task("mk-0002", "mk-dir", status="doing")
+    e3.board("mk-0001", T0 + 10)
+    e3.board("mk-0002", T0 + 20)
+    k = bg("mk-dir", "working", "d6d10631-4", pid=54, started=T0 + 30)
+    k["status"] = "busy"
+    k["cwd"] = os.path.join(e3.home, "projects", "mk-dir")
+    e3.agents([k])
+    goal_transcript(e3, k, "[Пантеон: поручение от tick] Самозапуск дежурным по задачам: следующая: mk-0001. "
+                    "Все: mk-0001, mk-0002. Прочитай STATUS.md")
+    open(e3.st("paused"), "w").write("x\n")
+    out = e3.run("watch", "--dry-run", t=T0 + 100).stdout
+    check("сессия ведёт свои mk-0002, сниму, когда подъём откроется: весь планировщик на паузе" in out,
+          f"0631 Б2: dry-run не тот: {out}")
+    e3.run("watch", t=T0 + 100, extra={"FAKE_STOP_MARK": "1"})
+    check(not [x for x in e3.calls() if x[:1] in (["stop"], ["rm"], ["--bg"])],
+          f"0631 Б2: сессию со своей задачей в doing остановили на паузе: {e3.calls()}")
+    check("цель окна на задачах, которые ушли: mk-0001 (ведёт agent-kit-5); сессия ведёт свои mk-0002 — снимем, когда "
+          "подъём откроется (весь планировщик на паузе)" in e3.alerts(), f"0631 Б2: нет тревоги: {e3.alerts()[-400:]}")
+    # ревью argus Б1: между снимком и блокировкой владелец поднял окно вручную — под блокировкой отказ, stop не зовётся
+    os.remove(e3.st("paused"))
+    manual = bg("mk-dir", "working", "e6e10631-5", pid=55, started=T0 + 150)
+    manual["status"] = "busy"
+    nxt = os.path.join(e3.tmp, "agents-next.json")
+    open(nxt, "w").write(json.dumps([k, manual]))
+    e3.run("watch", t=T0 + 200, extra={"FAKE_STOP_MARK": "1", "FAKE_AGENTS_NEXT": nxt})
+    check(not [x for x in e3.calls() if x[:1] in (["stop"], ["rm"], ["--bg"])],
+          f"0631 Б1: ручную сессию или старую тронули после повторной проверки: {e3.calls()}")
+    check("цель окна на задачах, которые ушли: mk-0001 (ведёт agent-kit-5) — смена отложена: уже работает" in e3.alerts(),
+          f"0631 Б1: нет тревоги об отложенной смене: {e3.alerts()[-400:]}")
+
+
 def _bg_text(e):
     starts = [c for c in e.calls() if c[:1] == ["--bg"]]
     return starts, " ".join(starts[0]) if starts else ""
@@ -2122,6 +2265,169 @@ def test_outward_links_walk_limit_0101():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def _mk_wt_files(d, n):
+    os.makedirs(d, exist_ok=True)
+    for i in range(n):
+        open(os.path.join(d, f"f{i}"), "w").close()
+
+
+def test_outward_links_skips_node_modules_0616():
+    """Копия с 6000 файлами в node_modules/.next не «небезопасна» по WALK_LIMIT; ссылка наружу на любой глубине
+    node_modules (в том числе .pnpm/x/node_modules/y) находится; зависимости больше DEPS_LIMIT — None («не знаю»);
+    6000 файлов вне зависимостей — по-прежнему None."""
+    import importlib
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    w = importlib.import_module("watch")
+    base = os.path.realpath(tempfile.mkdtemp(prefix="walk-", dir=os.environ.get("TMPDIR")))
+    outside = os.path.join(base, "outside")
+    os.makedirs(outside)
+    try:
+        def make(name):
+            d = os.path.join(base, name)
+            _mk_wt_files(os.path.join(d, "node_modules", ".pnpm", "x", "node_modules", "y"), 3000)
+            _mk_wt_files(os.path.join(d, ".next", "cache"), 3000)
+            os.symlink(os.path.join(d, "node_modules", ".pnpm", "x"), os.path.join(d, "node_modules", "inner"))
+            return d
+        clean = make("clean")
+        check(w.outward_links(clean) == (0, None), f"копия без ссылок: {w.outward_links(clean)}")
+        for i, rel in enumerate((("node_modules", "out"), ("node_modules", ".pnpm", "x", "node_modules", "out"),
+                                 ("node_modules", ".pnpm", "x", "node_modules", "y", "deep"),
+                                 (".next", "cache", "out"))):
+            d = make(f"bad{i}")
+            os.symlink(outside, os.path.join(d, *rel))
+            res = w.outward_links(d)
+            check(res and res[0] == 1 and res[1][1] == outside, f"ссылка наружу {rel} не найдена: {res}")
+        saved = w.DEPS_LIMIT
+        try:
+            w.DEPS_LIMIT = 100
+            check(w.outward_links(clean) is None, "зависимости больше DEPS_LIMIT не дали None")
+        finally:
+            w.DEPS_LIMIT = saved
+        plain = os.path.join(base, "plain")
+        _mk_wt_files(plain, 6000)
+        check(w.outward_links(plain) is None, "6000 файлов вне node_modules не дали None")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_sandbox_clean_0620():
+    """Уборка кэшей песочниц: старое без процессов уходит, свежее, занятое процессом и чужие папки остаются;
+    ссылка снимается сама, цель не тронута."""
+    import importlib
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    w = importlib.import_module("watch")
+    base = os.path.realpath(tempfile.mkdtemp(prefix="sbx-", dir=os.environ.get("TMPDIR")))
+    keep_out = os.path.join(base, "outside")
+    os.makedirs(keep_out)
+    open(os.path.join(keep_out, "k"), "w").write("x")
+    root = os.path.join(base, "cache")
+    now = time.time()
+    old = now - 20 * 86400
+
+    def entry(role, part, name, mtime, sub=True):
+        p = os.path.join(root, role, part, name)
+        os.makedirs(os.path.join(p, "deep") if sub else os.path.dirname(p), exist_ok=True)
+        f = p if not sub else os.path.join(p, "deep", "f")
+        open(f, "w").write("x") if sub else open(p, "w").write("x")
+        for q in ([p, os.path.join(p, "deep"), f] if sub else [p]):
+            os.utime(q, (mtime, mtime))
+        return p
+    try:
+        gone = entry("argus", "tmp", "old1", old)
+        gone2 = entry("argus", "npm", "old2", old)
+        gone3 = entry("argus", "logs", "x.log", old, sub=False)
+        fresh = entry("argus", "tmp", "fresh", now)
+        mixed = entry("argus", "tmp", "mixed", old)
+        os.utime(os.path.join(mixed, "deep", "f"), (now, now))  # внутри свежее — запись остаётся
+        held = entry("argus", "tmp", "held", old)
+        other = entry("argus", "work", "old", old)  # не из списка частей
+        link = os.path.join(root, "argus", "tmp", "lnk")
+        os.symlink(keep_out, link)
+        os.makedirs(os.path.join(root, "evil-role", "tmp"))
+        os.makedirs(os.path.join(keep_out, "tmp", "old"))
+        os.utime(os.path.join(keep_out, "tmp", "old"), (old, old))
+        os.utime(os.path.join(keep_out, "tmp"), (old, old))
+        os.symlink(keep_out, os.path.join(root, "linkrole"))
+        os.makedirs(os.path.join(root, "partlink"))
+        os.symlink(os.path.join(keep_out, "tmp"), os.path.join(root, "partlink", "tmp"))
+        removed, failed = w.sandbox_clean(root, now, {os.path.join(held, "deep", "f")}, days=7)
+        check(not os.path.exists(gone) and not os.path.exists(gone2) and not os.path.exists(gone3),
+              "старое не убрано")
+        check(all(os.path.exists(x) for x in (fresh, mixed, held, other)), "свежее, занятое или чужое убрано")
+        check(os.path.exists(os.path.join(keep_out, "k")), "цель ссылки тронута")
+        check(removed >= 3 and failed == 0, f"счётчики: {removed} {failed}")
+        # ссылка tmp/lnk сама свежая по lstat — остаётся; состаренную снимаем, цель цела
+        os.utime(link, (old, old), follow_symlinks=False)
+        w.sandbox_clean(root, now, set(), days=7)
+        check(not os.path.lexists(link) and os.path.exists(os.path.join(keep_out, "k")), "ссылка не снята или цель тронута")
+        check(not os.path.exists(held), "без процесса запись должна уйти")
+        # окно-ссылка не обходится вовсе
+        w.sandbox_clean(root, now + 99 * 86400, set(), days=7)
+        check(os.path.exists(os.path.join(keep_out, "k")) and os.path.isdir(os.path.join(keep_out, "tmp", "old")),
+              "обход через окно- или часть-ссылку тронул цель")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_sandbox_clean_swap_0620():
+    """Окно подменяет папку части ссылкой наружу между проверкой и удалением: цель снаружи цела."""
+    import importlib
+    sys.path.insert(0, os.path.join(ROOT, "lib"))
+    w = importlib.import_module("watch")
+    base = os.path.realpath(tempfile.mkdtemp(prefix="sbx-", dir=os.environ.get("TMPDIR")))
+    try:
+        root = os.path.join(base, "cache")
+        part = os.path.join(root, "argus", "tmp")
+        os.makedirs(os.path.join(part, "old1"))
+        os.makedirs(os.path.join(base, "outside", "old1"))
+        open(os.path.join(base, "outside", "old1", "keep"), "w").write("x")
+        old = time.time() - 30 * 86400
+        for q in (os.path.join(part, "old1"), part):
+            os.utime(q, (old, old))
+        real_newer, swapped = w._tree_newer, []
+
+        def newer(path, lim):
+            r = real_newer(path, lim)
+            if not swapped:  # между проверкой возраста и удалением
+                swapped.append(1)
+                os.rename(part, part + "-moved")
+                os.symlink(os.path.join(base, "outside"), part)
+            return r
+        w._tree_newer = newer
+        try:
+            w.sandbox_clean(root, time.time(), set(), days=7)
+        finally:
+            w._tree_newer = real_newer
+        check(swapped and os.path.exists(os.path.join(base, "outside", "old1", "keep")),
+              "после подмены части ссылкой тронута цель снаружи")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_sandbox_cap_alert_0620():
+    """Дежурный: кэш выше потолка после уборки — строка в alerts.md; в пределах — нет; старое убирает проходом."""
+    e = Env()
+    root = os.path.join(e.home, "Library", "Caches", "pantheon-sandbox", "argus")
+    old_dir = os.path.join(root, "tmp", "old")
+    os.makedirs(old_dir)
+    open(os.path.join(old_dir, "big"), "wb").write(b"0" * 3 * 1024 * 1024)
+    fresh = os.path.join(root, "tmp", "fresh")
+    os.makedirs(fresh)
+    open(os.path.join(fresh, "big"), "wb").write(b"0" * 3 * 1024 * 1024)
+    old = T0 - 20 * 86400
+    for q in (old_dir, os.path.join(old_dir, "big")):
+        os.utime(q, (old, old))
+    e.run("watch", t=T0, extra={"PANTHEON_SANDBOX_CAP_MB": "1"})
+    check("кэши песочниц" in e.alerts() and "потолке 1 МБ" in e.alerts(), f"нет тревоги о потолке: {e.alerts()[-400:]}")
+    check(not os.path.exists(old_dir) and os.path.exists(fresh), "старое не убрано или свежее убрано")
+    e2 = Env()
+    r2 = os.path.join(e2.home, "Library", "Caches", "pantheon-sandbox", "argus", "tmp", "fresh")
+    os.makedirs(r2)
+    open(os.path.join(r2, "big"), "wb").write(b"0" * 1024 * 1024)
+    e2.run("watch", t=T0, extra={"PANTHEON_SANDBOX_CAP_MB": "100"})
+    check("потолке" not in e2.alerts(), "тревога при объёме в пределах потолка")
+
+
 def test_worktree_outside_and_prune_0118():
     """Копии вне .claude/worktrees: тревога после WORKTREE_DAYS, никогда не удаляются; запись без папки чистится."""
     e = Env()
@@ -3052,17 +3358,32 @@ def test_status_blocked_without_process_0250():
     e = Env()
     e.direction("th-dir")
     e.direction("hm-dir")
-    e.agents([bg("th-dir", "blocked", "thththth-1"), bg("hm-dir", "blocked", "hmhmhmhm-1")])
+    e.agents([bg("th-dir", "blocked", "thththth-1"), bg("hm-dir", "blocked", "hmhmhmhm-1"),
+              bg("zeus", "done", "2e057e05-1", pid=32)])    # живой Зевс закончил ход: ему уходит «ждёт вас»
+    e.notify_mode(1200)
     _job(e, "thththth", state="blocked", detail="ждёт разрешения")
     _job(e, "hmhmhmhm", state="blocked", needs="выбрать: А — разрешить")
     _roster(e, {})
     out = e.run("status", t=T0).stdout
     check("ждут вас: th-dir" not in out and "без процесса: th-dir — ждать нечего" in out and "claude rm thththth" in out,
           f"снятая сессия висит «ждёт вас»: {out}")
-    check("ждут вас: hm-dir — выбрать: А — разрешить" in out, f"сессия с вопросом пропала из «ждут вас»: {out}")
+    # metis-0651: без процесса вообще (ни pid, ни реестра) сессия с вопросом — тоже призрак: имя не держит, вопрос виден
+    check("упали: hm-dir — выбрать: А — разрешить" in out, f"призрак с вопросом: вопрос не виден в «упали»: {out}")
     e.run("watch", t=T0)
-    check("th-dir (thththth) ждёт вас" not in e.alerts() and "hm-dir (hmhmhmhm) ждёт вас" in e.alerts(),
-          f"дежурный: тревога «ждёт вас» по снятой сессии: {e.alerts()}")
+    check("th-dir (thththth) ждёт вас" not in e.alerts() and "hm-dir (hmhmhmhm): процесс умер" in e.alerts()
+          and "ждала: выбрать: А — разрешить" in e.alerts(), f"дежурный: тревога по призраку с вопросом: {e.alerts()}")
+    # metis-0651 (ревью argus Б1): призрак с вопросом по-прежнему «ждёт вас» — уведомление и передача Зевсу (metis-0250)
+    check("hm-dir ждёт вас: выбрать: А — разрешить" in e.sent(), f"призрак с вопросом: нет уведомления: {e.sent()!r}")
+    check("th-dir" not in e.sent(), f"снятая без вопроса сессия уведомила: {e.sent()!r}")
+    check([c for c in e.calls() if c[:1] == ["respawn"] and c[1] == "2e057e05"]
+          and "hmhmhmhm" in open(e.st("push", "2e057e05-1.txt"), encoding="utf-8").read(),
+          f"призрак с вопросом: Зевсу не передано: {e.calls()}")
+    # ревью argus Б2: следующие проходы (и через 20 мин) не повторяют ни уведомление, ни передачу Зевсу
+    for dt in (60, 120, 180, 1200):
+        e.run("watch", t=T0 + dt)
+    check(e.sent().count("hm-dir ждёт вас") == 1, f"призрак с вопросом: уведомление повторяется: {e.sent()!r}")
+    check(len([c for c in e.calls() if c[:1] == ["respawn"] and c[1] == "2e057e05"]) == 1,
+          f"призрак с вопросом: повторная передача Зевсу: {e.calls()}")
     os.remove(os.path.join(e.home, ".claude", "daemon", "roster.json"))
     out = e.run("status", t=T0 + 60).stdout
     check("ждут вас: th-dir" in out, f"без реестра демона сессия объявлена снятой: {out}")
@@ -3129,6 +3450,114 @@ def test_auto_rm_done_stopped_0250():
     e.run("watch", t=T0 + 10 + 86400 + 60, extra={"FAKE_RM_REFUSE": "a8a8a8a8"})
     check("a8a8a8a8" in [c[1] for c in e.calls() if c[:1] == ["rm"]][n + len(again):], "через сутки повтора нет")
     check(e.alerts().count("a8a8a8a8 осталась") == 1, "тот же отказ — вторая тревога")
+
+
+def _hestia_env(task_status, extra=""):
+    """Гестия с задачей: run-файл окна (куда его пишет wake hestia) держит PANTHEON_TASK, реестр демона есть."""
+    e = Env()
+    e.direction("athena-x")
+    e.task("athena-0071", "athena-x", status=task_status, extra=extra)
+    os.makedirs(e.st("settings", "run"), exist_ok=True)
+    json.dump({"env": {"PANTHEON_TASK": "athena-0071"}}, open(e.st("settings", "run", "hestia.json"), "w"))
+    _roster(e, {"other": {"pid": 999999}})
+    return e
+
+
+def _hestia_calls(e):
+    return [c for c in e.calls() if c[:1] in (["stop"], ["rm"]) and len(c) > 1 and c[1].startswith("h")]
+
+
+def P_task_valid(e, status):
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+    import tasks
+    return (tasks.load_tasks(e.pantheon).get("athena-0071") or (0, {}, 0))[1].get("status") == status
+
+
+def test_hestia_reap_waiting_open_0677():
+    """metis-0677: задача окна Гестии waiting/inbox — открыта (ждёт consent владельца): живую сессию не гасим; done|dropped
+    — гасим. Неизвестная задача — по-прежнему гасим."""
+    for status in ("waiting", "inbox"):
+        e = _hestia_env(status, extra="next: ждём consent\nwaiting_on: human\n" if status == "waiting" else "")
+        e.agents([bg("hestia", "done", "h8h8h8h8-1", pid=os.getpid())])
+        check(P_task_valid(e, status), f"0677: тестовая задача {status} не загружается")
+        e.run("watch", t=T0)
+        check(not _hestia_calls(e), f"0677: {status} — Гестия убрана: {e.calls()}")
+    for status in ("done", "dropped"):
+        e = _hestia_env(status)
+        e.agents([bg("hestia", "done", "h9h9h9h9-1", pid=os.getpid())])
+        e.run("watch", t=T0)
+        check(_hestia_calls(e) == [["stop", "h9h9h9h9"], ["rm", "h9h9h9h9"]], f"0677: {status} не убрана: {e.calls()}")
+
+
+def test_stop_removes_ghost_0685():
+    """metis-0685: pantheon stop убирает и призрака (запись без процесса, reconcile_agents ставит ghost) — stop+rm, и число
+    остановленных его считает; живая копия и призрак одного имени — каждая по разу."""
+    e = Env()
+    e.direction("gh-dir")
+    _roster(e, {"other": 999999})
+    e.agents([bg("gh-dir", "blocked", "g1g1g1g1-1")])
+    r = e.run("stop", "gh-dir", t=T0)
+    c = e.calls()
+    check(["stop", "g1g1g1g1"] in c and ["rm", "g1g1g1g1"] in c, f"0685: призрак не убран: {c}")
+    check("остановлено сессий 1" in r.stdout, f"0685: призрак не посчитан: {r.stdout!r}")
+    e = Env()
+    e.direction("gh-dir")
+    _roster(e, {"other": 999999})
+    e.agents([bg("gh-dir", "blocked", "g2g2g2g2-1"), bg("gh-dir", "working", "g3g3g3g3-1", pid=os.getpid())])
+    r = e.run("stop", "gh-dir", t=T0)
+    c = e.calls()
+    check(c.count(["stop", "g2g2g2g2"]) == 1 and c.count(["stop", "g3g3g3g3"]) == 1 and "остановлено сессий 2" in r.stdout,
+          f"0685: призрак с живой копией: {c} {r.stdout!r}")
+
+
+def test_hestia_reap_0671():
+    """metis-0671: плановый проход убирает Гестию (claude stop, затем rm) без метки stopped/hestia: (а) призрак без
+    процесса; (б) закончила ход (не working), а её задача закрыта. Не трогает: working, живую с открытой задачей,
+    запись моложе минуты, паузу планировщика."""
+    # (а) призрак: blocked без pid, процесса нет ни у записи, ни в реестре — при открытой задаче
+    e = _hestia_env("doing")
+    e.agents([bg("hestia", "blocked", "h1h1h1h1-1")])
+    e.run("watch", t=T0)
+    check(_hestia_calls(e) == [["stop", "h1h1h1h1"], ["rm", "h1h1h1h1"]], f"0671 а: призрак не убран: {e.calls()}")
+    check(not os.path.exists(e.st("stopped", "hestia")), "0671 а: поставлена метка stopped/hestia")
+    check("Гестия h1h1h1h1 убрана" in e.alerts(), f"0671 а: нет тревоги уборки: {e.alerts()}")
+    # (а1) призрак с мёртвым pid в записи: тот же результат
+    e = _hestia_env("doing")
+    e.agents([bg("hestia", "working", "h7h7h7h7-1", pid=999999)])
+    e.run("watch", t=T0)
+    check(_hestia_calls(e) == [["stop", "h7h7h7h7"], ["rm", "h7h7h7h7"]], f"0671 а1: призрак с pid не убран: {e.calls()}")
+    # (а2) мёртвая запись done без pid при открытой задаче: rm без stop
+    e = _hestia_env("doing")
+    e.agents([bg("hestia", "done", "h2h2h2h2-1")])
+    e.run("watch", t=T0)
+    check(_hestia_calls(e) == [["rm", "h2h2h2h2"]], f"0671 а2: done без pid не убрана: {e.calls()}")
+    # (б) процесс жив, ход закончен, задача закрыта — убрана; метки нет
+    e = _hestia_env("done")
+    e.agents([bg("hestia", "done", "h3h3h3h3-1", pid=os.getpid())])
+    e.run("watch", t=T0)
+    check(_hestia_calls(e) == [["stop", "h3h3h3h3"], ["rm", "h3h3h3h3"]], f"0671 б: закрытая задача: {e.calls()}")
+    check(not os.path.exists(e.st("stopped", "hestia")), "0671 б: поставлена метка stopped/hestia")
+    # задача неизвестна (run-файла нет), сессия не working — тоже убрана
+    e = _hestia_env("doing")
+    os.remove(e.st("settings", "run", "hestia.json"))
+    e.agents([bg("hestia", "done", "h4h4h4h4-1", pid=os.getpid())])
+    e.run("watch", t=T0)
+    check(len(_hestia_calls(e)) == 2, f"0671 б2: без задачи не убрана: {e.calls()}")
+    # не трогаем: working при любой задаче, done/blocked с процессом при открытой, свежая запись
+    for status, st, pid, started in (("doing", "working", os.getpid(), T0 - 100), ("done", "working", os.getpid(), T0 - 100),
+                                     ("review", "done", os.getpid(), T0 - 100), ("todo", "blocked", os.getpid(), T0 - 100),
+                                     ("done", "done", None, T0 - 10)):
+        e = _hestia_env(status)
+        e.agents([bg("hestia", st, "h5h5h5h5-1", pid=pid, started=started)])
+        e.run("watch", t=T0)
+        check(not _hestia_calls(e), f"0671 нет: тронута {status}/{st}/{pid}/{started}: {e.calls()}")
+        check(not os.path.exists(e.st("stopped", "hestia")), "0671: метка stopped/hestia")
+    # пауза планировщика — уборки нет
+    e = _hestia_env("doing")
+    e.agents([bg("hestia", "blocked", "h6h6h6h6-1")])
+    open(e.st("paused"), "w").write("x")
+    e.run("watch", t=T0)
+    check(not _hestia_calls(e), f"0671: уборка при паузе: {e.calls()}")
 
 
 BLK_SID = "b10c0001-aaaa"
@@ -3391,6 +3820,264 @@ def test_watch_from_hq_window_autostarts_0261():
     st = json.load(open(e.st("autostart.json"))).get("hermes-q") or {}
     check(len(_bgs(e, "hermes-q")) == 1, f"0261 Q3: самозапуск из окна hq не пошёл: {e.calls()} {e.alerts()[-300:]}")
     check(not st.get("fails") and "код 2" not in e.alerts(), f"0261 Q3: сбой самозапуска: {st} {e.alerts()[-300:]}")
+
+
+def test_ghost_blocked_does_not_hold_name_0651():
+    """metis-0651: working/blocked без живого процесса (pid пуст или мёртв, в реестре демона нет) — призрак: имя не
+    держит, wake поднимает ту же сессию, тревога одна. С живым pid или процессом в реестре — по-прежнему держит."""
+    e = Env()
+    e.direction("zz-gh")
+    daemon = os.path.join(e.home, ".claude", "daemon")
+    os.makedirs(daemon, exist_ok=True)
+    roster = os.path.join(daemon, "roster.json")
+    json.dump({"workers": {"other": {"pid": 999999}}}, open(roster, "w"))
+    for state, pid in (("blocked", None), ("working", 999999), ("blocked", 0)):
+        e.agents([bg("zz-gh", state, "cccccccc-1", pid=pid)])
+        out = e.run("wake", "zz-gh", t=T0 + 60).stdout
+        check("не спит" not in out and "поднята" in out, f"0651: призрак {state}/{pid} держит имя: {out}")
+        check(["respawn", "cccccccc"] in e.calls(), f"0651: wake не продолжил сессию призрака: {e.calls()}")
+        open(e.log, "w").close()
+    # плановый проход: одна тревога, сколько бы проходов ни было
+    e.agents([bg("zz-gh", "blocked", "cccccccc-1")])
+    for i in range(3):
+        e.run("watch", t=T0 + 120 + i * 60)
+    check(e.alerts().count("процесс умер") == 1, f"0651: тревог о призраке не одна: {e.alerts()}")
+    # живые не ломаются: pid записи жив / живой процесс в реестре (задание блокирует имя) / реестра нет
+    for rec, ros in ((bg("zz-gh", "blocked", "cccccccc-1", pid=os.getpid()), {"workers": {}}),
+                     (bg("zz-gh", "working", "cccccccc-1"), {"workers": {"cccccccc": {"pid": os.getpid()}}})):
+        json.dump(ros, open(roster, "w"))
+        e.agents([rec])
+        out = e.run("wake", "zz-gh", t=T0 + 60).stdout
+        check("не спит" in out, f"0651: живой {rec['state']} не держит имя: {out}")
+    # только что запущенная (startedAt моложе минуты) ещё может не попасть в реестр демона — не призрак (pantheon start)
+    json.dump({"workers": {"other": {"pid": 999999}}}, open(roster, "w"))
+    e.agents([bg("zz-gh", "working", "cccccccc-1", started=T0 + 60 - 10)])
+    out = e.run("wake", "zz-gh", t=T0 + 60).stdout
+    check("не спит" in out, f"0651: свежая запись (10 с) не призрак: {out}")
+    os.remove(roster)
+    e.agents([bg("zz-gh", "blocked", "cccccccc-1")])
+    out = e.run("wake", "zz-gh", t=T0 + 60).stdout
+    check("не спит" in out, f"0651: без реестра демона записи без pid верим (не утверждаем): {out}")
+
+
+
+def _ghost_env(name, updated=None):
+    """Окружение для призраков: реестр демона с чужим живым воркером (непустой, нашей сессии нет), правлен updated."""
+    e = Env()
+    e.direction(name)
+    daemon = os.path.join(e.home, ".claude", "daemon")
+    os.makedirs(daemon, exist_ok=True)
+    e.roster = os.path.join(daemon, "roster.json")
+    e.set_roster = lambda upd: json.dump({"updatedAt": None if upd is None else upd * 1000,
+                                          "workers": {"other": {"pid": 999999}}}, open(e.roster, "w"))
+    e.set_roster(updated)
+    return e
+
+
+def _reg(e, rec):
+    d = os.path.join(e.home, ".claude", "sessions")
+    os.makedirs(d, exist_ok=True)
+    json.dump({"pid": os.getpid(), "cwd": "/tmp", **rec}, open(os.path.join(d, f"{os.getpid()}.json"), "w"))
+
+
+def _job(e, sid, **st):
+    st.setdefault("detail", "Session ended")  # detail в state.json задания есть всегда (ревью argus-249a Б1)
+    d = os.path.join(e.home, ".claude", "jobs", sid)
+    os.makedirs(d, exist_ok=True)
+    json.dump(st, open(os.path.join(d, "state.json"), "w"))
+
+
+def _woke(e, sid="cccccccc"):
+    return [c for c in e.calls() if c[:2] == ["respawn", sid] or ("--resume" in c and any(sid in x for x in c))]
+
+
+def test_ghost_alive_proofs_0657_0662():
+    """metis-0657 Д1: pid записи, на который kill даёт EPERM (pid 1), — живой, имя держит. metis-0662 Д3: реестр
+    демона правлен меньше минуты назад (respawn: старый startedAt у записи) — не призрак. Д4: живой процесс сессии в
+    реестре имён ~/.claude/sessions (тот же sessionId) — не призрак и не noProcess; тёзка с другим sessionId — нет
+    (ревью argus #249 Д2)."""
+    t = T0 + 60
+    e = _ghost_env("zz-ga", updated=T0 - 1000)
+    # 0657 Д1: pid 1 — чужой процесс, kill(1, 0) → EPERM, это «жив»
+    e.agents([bg("zz-ga", "blocked", "cccccccc-1", pid=1)])
+    out = e.run("wake", "zz-ga", t=t).stdout
+    check("не спит" in out and not _woke(e), f"0657 Д1: pid с EPERM принят за призрак: {out} {e.calls()}")
+    # 0662 Д3: запись старая, реестр демона только что переписан (воркер меняется) — ждём, не призрак
+    e.agents([bg("zz-ga", "working", "cccccccc-1")])
+    e.set_roster(t - 5)
+    out = e.run("wake", "zz-ga", t=t).stdout
+    check("не спит" in out and not _woke(e), f"0662 Д3: свежая правка реестра демона — призрак: {out}")
+    e.set_roster(t - 120)  # правка давняя — призрак, как в 0651
+    out = e.run("wake", "zz-ga", t=t).stdout
+    check("поднята" in out and _woke(e), f"0662 Д3: давняя правка реестра — призрак не поднят: {out}")
+    open(e.log, "w").close()
+    # 0662 Д4: процесс этой сессии (тот же sessionId) жив в реестре имён, хотя в roster его нет
+    _reg(e, {"sessionId": "cccccccc-1", "name": "other-name", "kind": "bg"})
+    out = e.run("wake", "zz-ga", t=t).stdout
+    check("не спит" in out and not _woke(e), f"0662 Д4: живой по реестру имён принят за призрак: {out}")
+    # фоновая тёзка с другим sessionId — другая сессия: жизнь этой записи не доказывает, тревога о призраке есть
+    _reg(e, {"sessionId": "dddddddd-2", "name": "zz-ga", "kind": "bg"})
+    e.run("watch", t=t)
+    check("процесс умер" in e.alerts(), f"argus #249 Д2: тёзка с другим sessionId спрятала призрак: {e.alerts()}")
+    # вкладка с тем же именем — не доказательство жизни этой фоновой записи: призрак
+    _reg(e, {"sessionId": "dddddddd-2", "name": "zz-ga", "kind": "interactive"})
+    e.run("watch", t=t + 60)
+    check("процесс умер" in e.alerts(), f"0662 Д4: вкладка с тем же именем спрятала призрак: {e.alerts()}")
+    # noProcess (blocked без процесса и вопроса) не ставится, если процесс сессии жив в реестре имён
+    e2 = _ghost_env("zz-gb", updated=T0 - 1000)
+    _job(e2, "eeeeeeee", state="blocked")
+    _reg(e2, {"sessionId": "eeeeeeee-1", "name": "zz-gb", "kind": "bg"})
+    e2.agents([bg("zz-gb", "blocked", "eeeeeeee-1")])
+    e2.run("watch", t=t)
+    check("zz-gb (eeeeeeee) ждёт вас" in e2.alerts(), f"0662 Д4: живая по реестру имён — noProcess: {e2.alerts()}")
+
+
+def test_ghost_question_and_noprocess_0662():
+    """metis-0662 Д2/С1: призрак с вопросом не поднимается без ответа владельца — ни wake <имя>, ни общий wake, ни
+    самозапуск; тревога советует claude attach, как и отказ pantheon start. Д1: призрак без вопроса (noProcess) — без
+    тревоги, как у metis-0250, а wake его поднимает."""
+    t = T0 + 60
+    e = _ghost_env("zz-gq", updated=T0 - 1000)
+    e.task("zz-0001", "zz-gq", status="doing")
+    rec = dict(bg("zz-gq", "blocked", "cccccccc-1"), waitingFor="какую базу брать?")
+    e.agents([rec])
+    e.run("watch", t=t)
+    line = [ln for ln in e.alerts().splitlines() if "процесс умер" in ln]
+    check(line and "claude attach cccccccc" in line[0] and "pantheon wake" not in line[0],
+          f"0662 С1: тревога призрака с вопросом советует не то, что start: {line}")
+    out = e.run("wake", "zz-gq", t=t).stdout
+    check("ждёт вашего ответа" in out and "claude attach cccccccc" in out and not _woke(e),
+          f"0662 Д2: wake <имя> поднял призрак с вопросом: {out} {e.calls()}")
+    out = e.run("wake", t=t).stdout
+    check("ждёт вашего ответа" in out and not _woke(e), f"0662 Д2: общий wake поднял призрак с вопросом: {out}")
+    # самозапуск по решению владельца: призрак с вопросом не продолжается и новая сессия не идёт
+    e.task("zz-0002", "zz-gq")
+    e.board("zz-0002", t + 10)
+    e.run("watch", t=t + 60)
+    check(not _woke(e) and not _bgs(e, "zz-gq"), f"0662 Д2: самозапуск поднял призрак с вопросом: {e.calls()}")
+    # без вопроса тот же призрак самозапуск поднимает (контроль: проверка выше не пустая)
+    e.agents([bg("zz-gq", "blocked", "cccccccc-1")])
+    e.board("zz-0002", t + 70)
+    e.run("watch", t=t + 120)
+    check(_woke(e) or _bgs(e, "zz-gq"), f"0662 Д2: контроль — призрак без вопроса самозапуск не поднял: {e.calls()}")
+    # Д1: noProcess-призрак (задание есть, вопроса нет) — ни «ждёт вас», ни тревоги о призраке; wake поднимает
+    e2 = _ghost_env("zz-gn", updated=T0 - 1000)
+    _job(e2, "ffffffff", state="blocked")
+    e2.agents([bg("zz-gn", "blocked", "ffffffff-1")])
+    e2.run("watch", t=t)
+    check("zz-gn" not in e2.alerts(), f"0662 Д1: noProcess-призрак дал тревогу: {e2.alerts()}")
+    out = e2.run("wake", "zz-gn", t=t).stdout
+    check("поднята" in out and _woke(e2, "ffffffff"), f"0662 Д1: wake не поднял noProcess-призрак: {out}")
+
+
+def test_registry_stale_record_249():
+    """Ревью argus #249. Д1: запись реестра имён с тем же sessionId, но не того процесса — файл назван другим pid
+    (pid 1 жив всегда) или время старта процесса не совпало с procStart — призрака не прячет; ps не дал ответа (metis-0679/0690) — «не знаю»: призрака не утверждаем, живого не гасим; совпало —
+    прячет; то же для записи по jobId. Д2: мёртвая blocked-запись без вопроса при живой тёзке с другим sessionId — noProcess, без
+    тревоги «ждёт вас». С2: pid 0 в реестре — не живой."""
+    import json as _j
+    t = T0 + 60
+
+    def reg_file(e, fname, rec):
+        d = os.path.join(e.home, ".claude", "sessions")
+        os.makedirs(d, exist_ok=True)
+        _j.dump(rec, open(os.path.join(d, f"{fname}.json"), "w"))
+
+    def fake_ps(e, out):
+        p = os.path.join(e.bin, "ps")
+        open(p, "w").write("#!/bin/sh\n" + (f"echo '{out}'\n" if out else "exit 1\n"))
+        os.chmod(p, 0o755)
+
+    me = os.getpid()
+    cases = (  # (имя файла, pid записи, procStart, вывод ps, призрак?)
+        (4242, 1, None, None, True),                                          # файл не того pid
+        (0, 0, None, None, True),                                             # pid 0 — группа, не процесс
+        (me, me, "Mon Jan  1 00:00:00 2024", "Sun Nov  1 14:23:55 2026", True),  # pid занят другим процессом
+        (me, me, "Sun Nov  1 14:23:55 2026", "Sun Nov  1 14:23:55 2026", False),  # тот самый процесс
+        (me, me, "Sun Nov  1 14:23:55 2026", "", False),                      # ps не ответил — «не знаю», не призрак (metis-0690)
+        (me, me, None, "", False),                                            # procStart в записи нет — сверять нечего
+    )
+    for fname, pid, proc, ps_out, ghost in cases:
+        e = _ghost_env("zz-rs", updated=T0 - 1000)
+        e.agents([bg("zz-rs", "working", "cccccccc-1")])
+        reg_file(e, fname, dict(pid=pid, sessionId="cccccccc-1", name="zz-rs", kind="bg",
+                                **({"procStart": proc} if proc else {})))
+        if ps_out is not None:
+            fake_ps(e, ps_out)
+        out = e.run("wake", "zz-rs", t=t).stdout
+        got = "поднята" in out and bool(_woke(e))
+        check(got == ghost, f"Д1: файл {fname}, pid {pid}, procStart {proc!r}, ps {ps_out!r}: призрак {got}, "
+                            f"а надо {ghost}: {out.strip()[:160]}")
+    # argus-249a Б1: у живой фоновой sessionId в реестре бывает другим, совпадает jobId (= id записи claude agents)
+    for job, ghost in (("cccccccc", False), ("dddddddd", True)):
+        e = _ghost_env("zz-rj", updated=T0 - 1000)
+        e.agents([bg("zz-rj", "working", "cccccccc-1")])
+        _reg(e, dict(sessionId="ffffffff-9", jobId=job, name="zz-rj", kind="bg"))
+        e.run("watch", t=t)  # wake тут не мерило: живая фоновая тёзка держит имя в любом случае (holders)
+        got = "процесс умер" in e.alerts()
+        check(got == ghost, f"Б1 jobId {job}: призрак {got}, а надо {ghost}: {e.alerts()[-300:]}")
+    # metis-0679 (argus-249a Д1): тот же отбор для записи по jobId при чужом sessionId — файл не назван pid, procStart
+    # не тот, ps не ответил (в песочнице окна) — не призрак (metis-0690); тот самый процесс — не призрак
+    same = "Sun Nov  1 14:23:55 2026"
+    for fname, proc, ps_out, ghost in ((4242, None, None, True),
+                                       (me, "Mon Jan  1 00:00:00 2024", same, True),
+                                       (me, same, "", False),  # ps недоступен — не призрак (metis-0690)
+                                       (me, same, same, False)):
+        e = _ghost_env("zz-rj", updated=T0 - 1000)
+        e.agents([bg("zz-rj", "working", "cccccccc-1")])
+        reg_file(e, fname, dict(pid=me, sessionId="ffffffff-9", jobId="cccccccc", name="zz-rj", kind="bg",
+                                **({"procStart": proc} if proc else {})))
+        if ps_out is not None:
+            fake_ps(e, ps_out)
+        e.run("watch", t=t)
+        got = "процесс умер" in e.alerts()
+        check(got == ghost, f"Д1 jobId: файл {fname}, procStart {proc!r}, ps {ps_out!r}: призрак {got}, а надо "
+                            f"{ghost}: {e.alerts()[-300:]}")
+    # Д2: живая тёзка с другим sessionId не снимает noProcess с мёртвой blocked-записи без вопроса
+    e = _ghost_env("zz-nm", updated=T0 - 1000)
+    _job(e, "aaaaaaaa", state="blocked")
+    _reg(e, dict(sessionId="bbbbbbbb-2", name="zz-nm", kind="bg"))
+    e.agents([bg("zz-nm", "blocked", "aaaaaaaa-1"), bg("zz-nm", "working", "bbbbbbbb-2", pid=me, started=T0)])
+    e.run("watch", t=t)
+    bad = [ln for ln in e.alerts().splitlines() if "aaaaaaaa" in ln and "ждёт вас" in ln]
+    check(not bad, f"Д2: тёзка с другим sessionId — мёртвая запись «ждёт вас»: {bad}")
+
+
+def test_ghost_detail_is_not_question_0662():
+    """argus-249a Б1/Д1/Д2: detail задания (есть всегда) — не вопрос. Призрак blocked с мёртвым pid без needs, working-
+    призрак с detail — wake поднимает, тревога советует wake. Вопрос из needs задания — по-прежнему ждёт ответа.
+    Правка реестра демона из будущего не прячет призрак."""
+    t = T0 + 60
+    for state, pid in (("blocked", 999999), ("working", None)):
+        e = _ghost_env("zz-gd", updated=T0 - 1000)
+        _job(e, "cccccccc", state=state)
+        e.agents([bg("zz-gd", state, "cccccccc-1", pid=pid)])
+        e.run("watch", t=t)
+        line = [ln for ln in e.alerts().splitlines() if "процесс умер" in ln]
+        check(line and "pantheon wake zz-gd" in line[0] and "claude attach" not in line[0],
+              f"Б1: призрак {state}/{pid} с detail — тревога как у вопроса: {line}")
+        out = e.run("wake", "zz-gd", t=t).stdout
+        check("поднята" in out and _woke(e), f"Б1: призрак {state}/{pid} с detail не поднят wake: {out}")
+    # вопрос бывает только у blocked: working-призрак со старым needs в задании — wake поднимает (мутант m10);
+    # noProcess (blocked без процесса и needs) с причиной в waitingFor записи — не вопрос, wake поднимает
+    for state, rec_extra, job in (("working", {}, {"needs": "старый вопрос"}),
+                                  ("blocked", {"waitingFor": "причина из claude agents"}, {})):
+        e = _ghost_env("zz-gd", updated=T0 - 1000)
+        _job(e, "cccccccc", state=state, **job)
+        e.agents([dict(bg("zz-gd", state, "cccccccc-1"), **rec_extra)])
+        out = e.run("wake", "zz-gd", t=t).stdout
+        check("поднята" in out and _woke(e), f"Б1: {state} {rec_extra} {job} — принят за вопрос: {out}")
+    # контроль: вопрос в needs задания (waitingFor записи пуст) — ждёт ответа, wake не поднимает
+    e = _ghost_env("zz-gd", updated=T0 - 1000)
+    _job(e, "cccccccc", state="blocked", needs="какую ветку слить?")
+    e.agents([bg("zz-gd", "blocked", "cccccccc-1", pid=999999)])
+    out = e.run("wake", "zz-gd", t=t).stdout
+    check("ждёт вашего ответа" in out and not _woke(e), f"Б1: вопрос из needs не держит призрак: {out}")
+    # Д2: updatedAt реестра демона на час вперёд — не «только что», призрак находится
+    e = _ghost_env("zz-gd", updated=t + 3600)
+    e.agents([bg("zz-gd", "working", "cccccccc-1")])
+    out = e.run("wake", "zz-gd", t=t).stdout
+    check("поднята" in out and _woke(e), f"Д2: правка реестра из будущего спрятала призрак: {out}")
 
 
 if __name__ == "__main__":

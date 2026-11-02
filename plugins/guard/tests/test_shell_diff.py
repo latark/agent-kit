@@ -14,6 +14,10 @@ import shlex
 import shutil
 import subprocess
 import sys
+
+# Срок подпроцессов теста: на нагруженном Mac (проход outside, -j3, load 11-20) 10-30 с не хватает (metis-0634).
+# Срок самого guard (DEADLINE) это не меняет и им не проверяется.
+SUB_TIMEOUT = 60
 import tempfile
 # Все временные папки файла — внутри одной корневой, её убирает atexit при любом исходе (успех, провал, исключение);
 # TMPDIR — для подпроцессов, которые тоже создают временные папки. Общий TMPDIR остаётся чистым.
@@ -133,7 +137,7 @@ def guard_says(home, cmd, role):
     env = {"HOME": home, "PATH": os.environ["PATH"], "CLAUDE_PROJECT_DIR": os.path.join(home, PROJECT),
            "TMPDIR": os.path.join(home, "tmp")}
     r = subprocess.run([sys.executable, "-I", CACHED, GUARD], input=json.dumps(event), capture_output=True, text=True,
-                       env=env, timeout=20)
+                       env=env, timeout=SUB_TIMEOUT)
     return "deny" if r.returncode == 2 or '"deny"' in r.stdout else "allow"  # код 2 — сбой, отказ (metis-0094)
 
 
@@ -145,7 +149,7 @@ def shell_changes(home, shell, cmd):
     env = {"HOME": home, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": os.path.join(home, "tmp"), "LANG": "C"}
     args = [shell, "-f", "-c", cmd] if shell.endswith("zsh") else [shell, "--norc", "--noprofile", "-c", cmd]
     try:
-        subprocess.run(args, cwd=os.path.join(home, PROJECT), env=env, capture_output=True, timeout=10)
+        subprocess.run(args, cwd=os.path.join(home, PROJECT), env=env, capture_output=True, timeout=SUB_TIMEOUT)
     except subprocess.TimeoutExpired:
         pass
     after = snapshot(home)

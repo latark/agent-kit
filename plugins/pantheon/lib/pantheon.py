@@ -50,7 +50,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon merge request|run|status|cancel   слияние PR ядра по Touch ID (metis-0285, lib/merge.py): заявка роли →
                                         плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA
   pantheon outside test|serve|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
-                                        тесты проекта или dev-сервер под sandbox-exec без ключей, браузеров и
+                                        тесты проекта или dev-сервер (своя копия на коммите, порт 4300–4399, не
+                                        больше двух) под sandbox-exec без ключей, браузеров и
                                         местного прокси → код и хвост журнала или адрес; после «принять» argus
                                         плановый проход сам гоняет тесты и пишет запись tests шлюза слияния
   pantheon traces [--markers ФАЙЛ] | install-hook   личные следы до push (lib/traces.py, metis-0414): та же проверка, что CI
@@ -89,13 +90,19 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     в журнал — «текст задачи заменён (было N знаков…)»; неизвестный флаг и повтор флага, кроме --option, —
                     отказ, код 2
                     плановый проход (check --quiet): открытая задача без текста дольше часа — тревога; слово владельца с [id]
-                    (decisions.md, окно вопросов) дольше 30 мин без задачи — тревога один раз на id: связь — [id] в
+                    (decisions.md, окно вопросов, ответ в чате) дольше 30 мин без задачи — тревога один раз на id: связь — [id] в
                     тексте задачи до «## Журнал» (любой статус) или строка «не задача: [id] — причина» в decisions.md;
                     тревога называет до 12 новых id, остальные — следующим проходом; источник не прочитался — проход
                     пропущен; id в пометке — как в окне вопросов (бывает без дефиса). Пустые --option не варианты;
                     пустой --body/--body-file в task set — отказ, код 2; вопрос с текстом без --why/вариантов — предупреждение
   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
+                    ready в stderr предупреждает, если touches готовой задачи пересекаются с открытым PR (metis-0667)
+  pantheon task overlap ID   перед раздачей (metis-0665): touches задачи против живых (doing, review) задач её
+                    направления и файлов открытых PR его репозиториев ([merge_repos] policy.toml; gh, не ответил — кэш
+                    планового прохода, нет и его — строка «не проверено»); пересечение — выбор с командами: очередь
+                    (ждать слияния PR) или ветка от ветки PR, argus — только дельта. Предупреждение, не отказ: код 0.
+                    То же предупреждение — в stderr после task set ID status=doing и task claim
   pantheon task migrate-project [--write]   project карточек → имя проекта из directions.toml; без --write — сухой
                     прогон «id: было → станет», с --write — запись через task set со строкой в журнал (metis-0323)
   pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту
@@ -1902,8 +1909,10 @@ GH_PR_WRITE = ["gh pr create *", "gh pr edit *", "gh pr merge *", "gh pr comment
 # штаб (metis-0247, «да» владельца 19.10 [zeus-0247-yes]): сети у окна нет, а gh в песочнице всё равно падает (TLS Go,
 # x509 -26276) — мимо неё только чтение PR и правка. Слияния здесь нет (решение Зевса 19.10, metis-0247 r4): gh pr
 # merge, gh api и прочий gh остаются в песочнице без сети и падают; guard (hq-gh) вдобавок отказывает слиянию в любой
-# форме — `gh -R o/r pr merge`, GH_REPO=…, gh api …/merge
-HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks") for tail in ("", " *")] + ["gh pr edit *"]
+# форме — `gh -R o/r pr merge`, GH_REPO=…, gh api …/merge. metis-0626 (решение Метиды 01.11): ещё gh pr list — без
+# списка открытых PR сводка доски устаревает; guard (hq-gh) пускает его только с -R из [merge_repos] и без --search.
+# gh pr diff и gh run — нет: лишний чужой текст в окне
+HQ_GH = [f"gh pr {c}{tail}" for c in ("view", "checks", "list") for tail in ("", " *")] + ["gh pr edit *"]
 # git по SSH в песочнице macOS не работает, по HTTPS push упирается в помощник учётных данных: окну каждого направления
 # сетевые команды git — мимо неё; мастерской — только при SSH-remote. push в main/master, --force и --delete не
 # пускает guard (_PUSH_BAD)
@@ -2922,6 +2931,16 @@ def daemon_workers():
     return {str(k): w.get("pid") for k, w in d["workers"].items() if isinstance(w, dict)}
 
 
+def roster_changed_at():
+    """Когда демон последний раз переписал реестр (updatedAt roster.json, мс → с) или None. Демон пишет его при смене
+    воркеров (старт, respawn, самоперезапуск), а не по таймеру: свежая правка — процесс мог только что смениться."""
+    d = read_json(os.path.join(HOME, ".claude", "daemon", "roster.json"), None)
+    try:
+        return float(d.get("updatedAt")) / 1000
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 def claude_job_state(short):
     """state.json задания ~/.claude/jobs/<короткий id>/state.json (его пишет Claude Code, мы только читаем)."""
     if not re.fullmatch(r"[0-9a-zA-Z-]{4,64}", str(short or "")):
@@ -2938,21 +2957,55 @@ def reconcile_agents(data, workers=None):
     (2) Обратный случай: «blocked» без процесса и без вопроса (needs в state.json) — сессию снял Claude Code, ждать
     ей нечего (18.10, координатор без процесса весь день «ждёт вас»): noProcess. С вопросом — по-прежнему ждёт вас:
     ответ дойдёт через claude attach, он поднимет процесс.
+    (2а) Призрак (metis-0651): working/blocked без живого процесса вообще (ни pid записи, ни реестра) — state
+    становится failed, ghost=True: имя не держит, wake поднимает. Запись моложе минуты (или без startedAt) — не
+    призрак: новая сессия могла ещё не попасть в реестр демона. pantheon start: призрак с вопросом (был blocked) —
+    по-прежнему «ждёт вас», без вопроса — мёртвая (noProcess), заменяется новой. metis-0662: время берётся и из
+    реестра демона — правлен меньше минуты назад (respawn: запись claude agents хранит старый startedAt, а процесс
+    между снятием старого воркера и выдачей нового в реестре не виден) — не призрак; живой процесс этой сессии в
+    реестре имён ~/.claude/sessions — тоже не призрак и не noProcess: после перезапуска демона живой воркер может
+    выпасть из roster. Своя запись реестра — с jobId, равным id записи claude agents (у фоновой sessionId в реестре
+    бывает другим), или с тем же sessionId, и только если её процесс тот самый (reg_same_process). Тёзка по имени —
+    другая сессия, жизни этой записи не доказывает (ревью argus #249).
     (3) Причина для сводки: нет waitingFor — needs задания (blocked) или detail (failed)."""
     workers = daemon_workers() if workers is None else workers
+    roster_at = roster_changed_at() if workers is not None else None
+    reg = None  # реестр имён читается, только если нашлась сессия без процесса в roster
     for a in data:
         if not isinstance(a, dict) or a.get("kind") not in (None, "background") or not a.get("id"):
             continue
         js = claude_job_state(a["id"])
         wpid = (workers or {}).get(str(a["id"]))
         alive = bool(wpid) and pid_alive(wpid)
+        if not alive and workers is not None and a.get("state") in ("working", "blocked"):
+            reg = sessions_registry() if reg is None else reg
+            mine = [reg_same_process(r) for r in reg
+                    if (a.get("sessionId") and r.get("sessionId") == a.get("sessionId"))
+                    or str(r.get("jobId") or "") == str(a["id"])]
+            in_reg = any(m is not False for m in mine)  # None — ps недоступен: «не знаю» тоже не призрак (metis-0690)
+        else:
+            in_reg = False
         if alive and not a.get("pid"):
             a["pid"] = wpid
         if a.get("state") == "failed" and alive and js.get("state") in ("working", "blocked"):
             a["listedState"], a["state"] = "failed", js["state"]
         if (a.get("state") == "blocked" and workers is not None and not alive and not a.get("pid")
-                and js and not js.get("needs")):
+                and js and not js.get("needs") and not in_reg):
             a["noProcess"] = True
+        # metis-0651: working/blocked без живого процесса — ни у записи, ни в реестре демона — призрак: процесс умер, а
+        # строка осталась (02.11 metis-pantheon лежало 1,5 ч: wake отвечал «есть процесс»). Считается упавшей: имя не
+        # держит, wake продолжает её же сессию. Реестр не читается — не утверждаем (workers None); из песочницы живой
+        # процесс даёт EPERM, а это «жив» (pid_alive).
+        if (a.get("state") in ("working", "blocked") and workers is not None and not alive
+                and not (a.get("pid") and pid_alive(a["pid"]))  # pid 0: kill(0, 0) — своя группа, не доказательство
+                and not in_reg and not just_listed(a, since=roster_at)):
+            # вопрос — needs задания или исходный waitingFor claude agents, а не detail (он в state.json есть всегда:
+            # ниже он ляжет в waitingFor упавшей); noProcess вопроса не имеет по определению (ревью argus-249a Б1)
+            if a["state"] == "blocked" and not a.get("noProcess") and (a.get("waitingFor") or js.get("needs")):
+                a["asks"] = True
+            if a["state"] == "blocked" and not a.get("waitingFor") and js.get("needs"):
+                a["waitingFor"] = " ".join(str(js["needs"]).split())[:200]  # вопрос владельцу остаётся виден
+            a["listedState"], a["state"], a["ghost"] = a["state"], "failed", True
         if not a.get("waitingFor"):
             why = js.get("needs") if a.get("state") == "blocked" else js.get("detail") if a.get("state") == "failed" else None
             if why:
@@ -2960,8 +3013,31 @@ def reconcile_agents(data, workers=None):
     return data
 
 
+def just_listed(a, grace=60, since=None):
+    """Запись claude agents моложе grace секунд (startedAt в мс) или без даты: процесс мог ещё не попасть в реестр
+    демона (новая сессия после pantheon start) — призраком её не считаем (metis-0651). since — время правки реестра
+    демона в с (roster_changed_at, metis-0662): моложе grace — тоже «только что»; из будущего (часы, битая запись)
+    не учитывается, иначе призрак не нашёлся бы никогда."""
+    try:
+        t = float(a.get("startedAt")) / 1000
+    except (TypeError, ValueError):
+        return True
+    if since and since > now() + 300:
+        since = None
+    return now() - max(t, since or 0) < grace
+
+
+def asks_owner(a):
+    """Призрак с вопросом владельцу (metis-0651, 0662): процесс умер, а вопрос остался. Поднимает его ответ владельца
+    (claude attach), а не wake и не самозапуск — как отказ pantheon start. Флаг asks ставит reconcile_agents: был
+    blocked, не noProcess, есть needs задания или waitingFor из claude agents (detail вопросом не считается)."""
+    return bool(a.get("ghost") and a.get("asks"))
+
+
 def pid_alive(pid):
     try:
+        if int(pid) <= 0:  # 0 и минус — группа процессов, а не процесс: kill их «находит» всегда (ревью argus #249)
+            return False
         os.kill(int(pid), 0)
     except (OSError, ValueError, TypeError) as e:
         return isinstance(e, PermissionError)
@@ -2982,8 +3058,36 @@ def sessions_registry():
                 continue
             out.append({"name": rec.get("name"), "sessionId": rec.get("sessionId"), "pid": rec.get("pid"),
                         "kind": "interactive" if rec.get("kind") == "interactive" else "background",
-                        "cwd": rec.get("cwd"), "registry": True})
+                        "cwd": rec.get("cwd"), "registry": True, "procStart": rec.get("procStart"), "file": f,
+                        "jobId": rec.get("jobId")})
     return out
+
+
+def proc_started(pid):
+    """Время старта процесса по ps (lstart — в том же виде пишет procStart реестр имён Claude Code) или None: ps не
+    запустился (в песочнице окна setuid-ps не идёт) или процесса нет."""
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=5,
+                           env={**os.environ, "LC_ALL": "C"})
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return None
+    return " ".join(r.stdout.split()) or None
+
+
+def reg_same_process(r):
+    """Запись реестра имён написал тот процесс, что сейчас живёт под её pid: файл назван этим pid, а время старта
+    процесса совпало с procStart записи. Устаревшая запись умершей сессии, чей pid занял другой процесс, жизнь не
+    доказывает (ревью argus #249 Д1). procStart в записи нет — сверять нечего, запись принимается (True). ps недоступен
+    (в песочнице окна он не идёт, metis-0679) при procStart в записи — третье состояние None, «не знаю» (metis-0690):
+    жизнь не доказана, но и призрака утверждать нельзя — ложный призрак хуже задержки (pantheon start из окна
+    остановил бы живого воркера). Решает tick из launchd, где ps есть. ps ответил и время чужое — False."""
+    if str(r.get("file")) != f"{r.get('pid')}.json":
+        return False
+    want = " ".join(str(r.get("procStart") or "").split())
+    if not want:
+        return True
+    got = proc_started(r.get("pid"))
+    return None if got is None else got == want
 
 
 def name_alias(name):
@@ -3003,7 +3107,7 @@ def live_copies(name, agents, registry=None):
     known = {a.get("sessionId") for a in agents or []}
     for r in sessions_registry() if registry is None else registry:
         if r.get("kind") == "interactive" and r.get("sessionId") not in known and alias.fullmatch(str(r.get("name") or "")):
-            out.append({k: v for k, v in r.items() if k != "registry"})
+            out.append({k: v for k, v in r.items() if k not in ("registry", "procStart", "file", "jobId")})
     return out
 
 
@@ -3266,7 +3370,9 @@ def rm_previous(name, how, before=None, keep=(), loud=False, wait=False):
     for a in same:
         if a["id"] in kept:
             continue
-        has_process = a.get("state") in ("working", "blocked") or (a.get("pid") and a.get("state") not in ("stopped", "failed"))
+        # призрак (ghost, metis-0651) в списке «working/blocked», как и раньше: claude stop перед rm (metis-0348)
+        has_process = (a.get("state") in ("working", "blocked") or a.get("ghost")
+                       or (a.get("pid") and a.get("state") not in ("stopped", "failed")))
         reason = stop_and_rm(name, a["id"], how) if has_process else rm_session(a["id"], name=name, why=how)
         start_log(f"rm-previous\t{name}\t{a['id']}\t{a.get('state')}\t{how}")
         if reason:
@@ -4708,20 +4814,23 @@ def merge_kick():
 
 
 def outside_kick():
-    """Проверки вне окна роли ([sb-simplify] п. 7, lib/outside.py) — отдельным процессом: тесты идут минутами."""
-    try:
-        if locked("outside-run") or not outside_mod().pending():
-            return
-        if os.environ.get("PANTHEON_DRYRUN") == "1":
-            with open(path("dryrun.log"), "a") as fh:
-                fh.write(f"{int(now())} outside-run\n")
-            return
-        subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "outside", "run"], env=outside_mod().pass_env(),
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-    except Exception as e:  # сбой проверок не должен останавливать тик
-        alert_once("outside-kick", type(e).__name__, f"проверки вне окна: проход не запущен ({type(e).__name__}: {e})",
-                   "pantheon-tick")
+    """Проверки вне окна роли ([sb-simplify] п. 7, lib/outside.py) — два отдельных процесса со своими замками: проход
+    тестов (`outside run`, тесты идут минутами и часами) и проход серверов (`outside run --serve`, сторож живёт, пока
+    есть серверы). Сервер и «стоп» не ждут тестов (metis-0614)."""
+    for name, flag, due in (("outside-run", [], "pending_test"), ("outside-serve", ["--serve"], "pending_serve")):
+        try:
+            if locked(name) or not getattr(outside_mod(), due)():
+                continue
+            if os.environ.get("PANTHEON_DRYRUN") == "1":
+                with open(path("dryrun.log"), "a") as fh:
+                    fh.write(f"{int(now())} {name}\n")
+                continue
+            subprocess.Popen([os.path.join(PLUGIN, "bin", "pantheon"), "outside", "run", *flag],
+                             env=outside_mod().pass_env(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+        except Exception as e:  # сбой проверок не должен останавливать тик
+            alert_once("outside-kick", type(e).__name__,
+                       f"проверки вне окна: проход {name} не запущен ({type(e).__name__}: {e})", "pantheon-tick")
 
 def build_app():
     """~/Applications/Доска.app: Spotlight «Доска» и значок в Dock открывают доску в Obsidian."""
@@ -4906,10 +5015,10 @@ def owner_acts():
             text = fh.read()
     except OSError:
         text = ""
-    # как consent: пометку «окно вопросов» ставит хук answer, ответ — на вопрос, который начинается с [<id>]
+    # как consent: пометку «окно вопросов» или «ответ в чате» ставит хук, ответ — на вопрос, который начинается с [<id>]
     heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
     for i, m in enumerate(heads):
-        if m.group(2).strip() != "· окно вопросов":
+        if not answers_mod().is_answer_head(m.group(2)):
             continue
         body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
         q = re.match(r"вопрос: \[([^\]\s]{1,40})\]", body, re.I)
@@ -5120,6 +5229,21 @@ def tasks_mod():
         spec.loader.exec_module(_TASKS)
         _TASKS.set_root(PANTHEON)  # внутри ~/ai/pantheon — ввод-вывод без перехода по ссылкам
     return _TASKS
+
+
+_ANSWERS = None
+
+
+def answers_mod():
+    """lib/answers.py — какие записи owner-log считаются ответом владельца: окно вопросов и ответ в чате (metis-0405);
+    общий с хуком hooks/ctx.py."""
+    global _ANSWERS
+    if _ANSWERS is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_answers", os.path.join(LIB, "answers.py"))
+        _ANSWERS = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_ANSWERS)
+    return _ANSWERS
 
 
 BOARD = os.path.join(VIEW, "Доска")
@@ -5643,7 +5767,7 @@ def check_skills(paths=None, quiet=False):
 
 
 def _owner_answered(qid, since):
-    """Есть ли ответ владельца на вопрос по задаче qid позже since: выбор в окне вопросов (owner-log/zeus.md) или галочка на
+    """Есть ли ответ владельца на вопрос по задаче qid позже since: выбор в окне вопросов или в чате (owner-log/zeus.md) или галочка на
     доске (owner-log/board.jsonl) — те же признаки, что у `pantheon consent`. Журнал не читается — False."""
     try:
         with open(path("owner-log", "zeus.md"), encoding="utf-8") as fh:
@@ -5653,7 +5777,7 @@ def _owner_answered(qid, since):
     own = re.compile(r"вопрос: \[" + re.escape(qid) + r"\]", re.I)
     heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
     for i, m in enumerate(heads):
-        if m.group(2).strip() != "· окно вопросов":
+        if not answers_mod().is_answer_head(m.group(2)):
             continue
         body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
         try:
@@ -5997,8 +6121,10 @@ def tails_board(items):
 
 def tail_alert(T, items):
     """Тревоги «хвосты не теряются» (metis-0504): items — [(вид, ключ, место)], вид хвост | отчёт | ревью, место — id
-    задачи и строка журнала либо файл:строка. Стиль unlinked_alert: один раз на ключ, только о новых, первый проход
-    (файла STATE/tail-seen.json нет или он испорчен) только запоминает без тревоги. Записи о том, чего в наборе
+    задачи и строка журнала либо файл:строка. Стиль unlinked_alert: один раз на ключ, только о новых. Первый проход
+    (файла STATE/tail-seen.json нет или он испорчен) запоминает всё и даёт одну сводную тревогу — сколько хвостов
+    уже есть по видам и где список (Доска/Хвосты.md), без перечня: молча старые хвосты не пропадают (metis-0572), а
+    сотня строк не становится шумом. Записи о том, чего в наборе
     больше нет (хвост поправили, задачу завели), из файла уходят; по виду называется не больше TAIL_SHOWN."""
     p = path("tail-seen.json")
     try:
@@ -6025,6 +6151,13 @@ def tail_alert(T, items):
     if keep != seen:
         os.makedirs(STATE, exist_ok=True)
         write_atomic(p, json.dumps(keep, ensure_ascii=False, sort_keys=True))
+    if seen is None and keep:  # после записи: сбой записи — следующий проход снова первый, а не тревога каждый тик
+        by_kind = {}
+        for k in keep:
+            by_kind[k.split("|", 1)[0]] = by_kind.get(k.split("|", 1)[0], 0) + 1
+        alert(f"хвосты: слежение начато, уже есть {len(keep)} — "
+              + ", ".join(f"{TAIL_TEXT[kd].split(' (')[0]} {by_kind[kd]}" for kd in TAIL_TEXT if kd in by_kind)
+              + "; список — Доска/Хвосты.md, дальше тревога только о новых", "check")
 
 
 def _read_strict(p):

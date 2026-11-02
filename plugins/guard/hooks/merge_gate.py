@@ -62,7 +62,19 @@ STATE_DIR, PANTHEON, HOME, DOMAINS_FILE…) берутся через G — ег
    транскрипт найден, а моделей в нём нет — "models": [] и пометка NO_MODELS, в PR ядра accept не в счёт (metis-0413).
    Последним во всех режимах — проверки GitHub (metis-0297), один gh pr view на Д3 и проверки: PR на этом SHA, rollup зелёный;
    красная или идущая проверка, нет ответа gh — отказ; проверок нет — пропуск, только если .github/workflows нет ни на
-   head, ни на base PR.
+   head, ни на base PR. У репозитория из REQUIRED_CHECKS (agent-kit: tests/affected на PR в main, check-traces/traces —
+   metis-0633) обязательны эти имена, и закрывает их только запуск Actions от pull_request на этом SHA с SUCCESS
+   (два GET REST, _ci_runs): нет такого — отказ «ещё не встали», SKIPPED или красная — отказ, дубль — худший итог;
+   красная необязательная — пропуск со строкой systemMessage (предупреждение едет возвратом Allow до guard_rules.main,
+   а не списком модуля — metis-0650). PR из форка (isCrossRepository): pull_requests у его запусков пуст, поэтому
+   засчитывается запуск с head_repository и head_branch его форка и ветки (ci_fork, metis-0649). Ждать CI в хуке
+   нельзя (10 с): отказ даёт команду ожидания. Запасной путь (metis-0655): красные обязательные — FAILURE с аннотацией
+   лимита минут или оплаты GitHub Actions и job без раннера и шагов (ci_billing, ещё GET аннотаций и GET job на каждую
+   такую), остальные обязательные — SUCCESS: вместо CI засчитывается запись tests на этот SHA с командой полного
+   набора FULL_TESTS (_billing_problem, full_tests_record) — пропуск со строкой systemMessage, без записи — отказ с
+   командой, у репозитория без FULL_TESTS — отказ.
+Записи tests нет — отказ называет узкую команду репозитория из NARROW_TESTS (metis-0666): `--affected`
+run-tests.py в своей worktree без heavy; на основном пути она засчитывается, как любая непустая запись.
 Модель argus guard берёт из его транскрипта, а не только со слов ran (metis-0176): Claude Code не передаёт путь к
 транскрипту субагента в PreToolUse/PostToolUse (agent_transcript_path — только в SubagentStop), он выводится из входа
 хука — transcript_path, session_id, agent_id — по раскладке Claude Code. Это защита от ошибки шаблона и от запуска
@@ -1097,7 +1109,9 @@ def _sandbox_problem(cwd, repo, base, sha, branch=None):
     return None
 
 
-PR_VIEW_FIELDS = "headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup"
+# isCrossRepository, headRepository, headRefName — голова PR из форка для ci_fork (metis-0649)
+PR_VIEW_FIELDS = ("headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup,isCrossRepository,headRepository,"
+                  "headRefName")
 
 
 def _pr_view(repo, pr):
@@ -1205,38 +1219,255 @@ def _version_problem(files):
     return f"PR трогает номер версии: {', '.join(hit)}" if hit else None
 
 
-# проверки GitHub на head PR (metis-0297): разбор rollup — как ci_state в pantheon/lib/merge.py (PR #79, metis-0285)
+# проверки GitHub на head PR (metis-0297, 0633, 0649). Разбор — ci_verdict, ci_runs, ci_fork и required_checks — один
+# код здесь и в plugins/pantheon/lib/merge.py (слияние по Touch ID): плагины ставятся порознь и не импортируют друг
+# друга, поэтому текст функций (и ci_billing_ids, ci_billing, ci_job_unstarted, full_tests_record — metis-0655;
+# optional_checks), REQUIRED_CHECKS, OPTIONAL_CHECKS, CI_RUNS_API, CI_BILLING, CI_ANNOTATIONS_API, CI_JOBS_API,
+# FULL_TESTS, CI_OK, CI_WAIT и CI_NONE совпадает дословно — сверяет test_merge (AST)
 CI_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 CI_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", ""}
 CI_NONE = "проверки GitHub не получены"
+# обязательные проверки (metis-0633): имя репозитория без владельца → (workflow, job, ветка base PR или None — любая).
+# Имена — из .github/workflows репозитория: tests.yml гоняет job affected только на PR в main (job full на PR всегда
+# SKIPPED — его здесь нет), check-traces.yml — job traces на любой PR (и на push: две записи traces на одном SHA).
+# Совпадение с файлами workflows сверяет test_merge_gate. Обязательная засчитывается только по запуску Actions от
+# события pull_request на этом head (ci_runs) и только с итогом SUCCESS: SKIPPED закрыл бы её job, который не
+# запускался, push-запуск проверяет ветку без слияния с base, а NEUTRAL у job Actions не бывает — его ставят
+# сторонние приложения проверок. Нет такого запуска — «ещё не встала», а не пропуск. Другие проверки репозитория:
+# красная из OPTIONAL_CHECKS — предупреждение, красная любая другая — отказ (Д1 argus #235: новый job на PR, не
+# внесённый ни в один список, не проходит шлюз молча). Репозиторий без записи — обязательна каждая проверка его rollup
+# (SUCCESS/NEUTRAL/SKIPPED).
+REQUIRED_CHECKS = {"agent-kit": (("tests", "affected", "main"), ("check-traces", "traces", None))}
+# необязательные проверки (Д1 argus #235): имя репозитория без владельца → (workflow, job, почему необязательна — с
+# номером задачи). Каждый job workflows, который идёт на pull_request, — в REQUIRED_CHECKS или здесь: сверяет
+# test_merge_gate по файлам .github/workflows
+OPTIONAL_CHECKS = {"agent-kit": (("tests", "full", "metis-0633: на pull_request всегда SKIPPED, идёт после слияния"),)}
+# запуски Actions на head SHA: два GET REST (GraphQL — POST, его правило push ролям закрывает), связь — check_suite_id
+CI_RUNS_API = ("repos/{repo}/actions/runs?head_sha={sha}&per_page=100",
+               "repos/{repo}/commits/{sha}/check-runs?per_page=100")
+# CI не запускался из-за лимита минут или оплаты GitHub Actions (metis-0655). Признак — по ответам GitHub, а не по
+# памяти: в документации текста нет (docs.github.com: «usage is blocked», check-runs: conclusion и output), поэтому —
+# по сохранённому ответу PR #222 (31.10, plugins/guard/tests/fixtures/ci-runs-pr222.json):
+# проверка от Actions завершена с FAILURE, аннотация уровня failure на путь .github с этим текстом (запрос
+# CI_ANNOTATIONS_API — только к таким проверкам).
+# Текст поменяется — признака нет и отказ, как на любой красной.
+# Аннотацию с тем же текстом может напечатать и сам job PR (`::error file=.github::…`), поэтому второе условие —
+# job не стартовал (CI_JOBS_API, id проверки = id job): раннера не было и шагов нет. Это поле пишет GitHub, а не код
+# job (docs.github.com/en/rest/actions/workflow-jobs: runner_id «integer or null», runner_name «string or null»,
+# steps — массив; у заблокированных job PR #222 — 0, "" и [], у обычной красной PR #225 — номер раннера и 8 шагов)
+CI_BILLING = ("The job was not started because recent account payments have failed or your spending limit needs to be "
+              "increased")
+CI_ANNOTATIONS_API = "repos/{repo}/check-runs/{id}/annotations?per_page=100"
+CI_JOBS_API = "repos/{repo}/actions/jobs/{id}"
+# полный набор тестов для записи на запасном пути (metis-0655): имя репозитория без владельца → команда после
+# `pantheon review test --`. Засчитывается только запись с этой командой (full_tests_record); нет строки — запасного
+# пути у репозитория нет, отказ
+FULL_TESTS = {"agent-kit": ("heavy python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard "
+                            "plugins/pantheon plugins/project-tools")}
+
+# узкая запись тестов исполнителя (metis-0666, решение владельца 02.11): затронутые PR файлы тестов (--affected,
+# карта affected-map) в своей worktree, без очереди heavy — команда для подсказки в отказе «нет записи тестов».
+# Основной путь (CI зелёный) засчитывает любую непустую запись tests на SHA, эту тоже; запасной (CI без минут) — только
+# FULL_TESTS. Не в зеркале lib/merge.py: подсказка, а не правило
+NARROW_TESTS = {"agent-kit": ("python3.14 -I plugins/pantheon/scripts/run-tests.py -j 3 --affected --base origin/main "
+                              "plugins/guard plugins/pantheon plugins/project-tools")}
 
 
-def _ci_rollup(rollup):
-    """(ok|wait|fail|empty, текст) по statusCheckRollup: CheckRun — по status и conclusion, StatusContext — по state."""
-    if not isinstance(rollup, list):
-        return "fail", CI_NONE
-    if not rollup:
-        return "empty", ""
-    waiting = []
+def narrow_hint(repo):
+    """Строка отказа «нет записи тестов» с узкой командой репозитория из NARROW_TESTS; нет строки — пусто."""
+    cmd = NARROW_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower())
+    return (f" Узкая запись (затронутые тесты, своя worktree, без heavy): `pantheon review test -- {cmd}`." if cmd
+            else "")
+
+
+def required_checks(repo, base):
+    """Обязательные (workflow, job) для PR в repo (owner/name) с веткой base; base не строка — все записи."""
+    got = REQUIRED_CHECKS.get(str(repo or "").rsplit("/", 1)[-1].lower(), ())
+    return tuple((w, j) for w, j, b in got if b is None or not isinstance(base, str) or b == base)
+
+
+def ci_fork(view):
+    """Голова PR из форка по ответу gh pr view (metis-0649): None — isCrossRepository не true (PR из того же
+    репозитория), иначе (owner/name форка в нижнем регистре, ветка head) из headRepository.nameWithOwner и
+    headRefName; поле не строка — пустая строка на его месте, и ci_runs отвечает «не получены»."""
+    if not isinstance(view, dict) or view.get("isCrossRepository") is not True:
+        return None
+    repo, branch = view.get("headRepository"), view.get("headRefName")
+    name = repo.get("nameWithOwner") if isinstance(repo, dict) else None
+    return (name.lower() if isinstance(name, str) else "", branch if isinstance(branch, str) else "")
+
+
+def optional_checks(repo):
+    """Необязательные (workflow, job) repo (owner/name) из OPTIONAL_CHECKS: их красная — только предупреждение."""
+    return tuple((w, j) for w, j, _ in OPTIONAL_CHECKS.get(str(repo or "").rsplit("/", 1)[-1].lower(), ()))
+
+
+def ci_runs(workflow_runs, check_runs, sha, pr, fork=None):
+    """Запуски Actions PR pr на коммите sha с событием: [{workflowName, name, status, conclusion, event, id,
+    annotations}] (id проверки и число её аннотаций — для ci_billing, metis-0655) по ответам
+    CI_RUNS_API (actions/runs и check-runs). Не идут в список: проверка без запуска Actions с тем же check_suite_id
+    (стороннее приложение с тем же именем), чужой head_sha и запуск, в pull_requests которого нет этого PR (запуск
+    чужого PR на том же SHA). PR из форка (fork — ответ ci_fork, metis-0649): у его запусков GitHub pull_requests не
+    заполняет, поэтому засчитывается запуск от pull_request, у которого head_repository.full_name и head_branch —
+    форк и ветка этого PR (фильтру REST не верим, поля сверяются здесь); форк или ветка не получены — строка «не
+    получены». Ответ неполон (total_count больше полученного: per_page=100 без пагинации, скрытой может быть красная
+    запись) — строка «неполные данные CI»; не разобран — None."""
+    if fork is not None and not all(fork):
+        return f"{CI_NONE}: PR из форка, а его репозиторий или ветка head не получены (gh pr view)"
+    try:
+        wr, cr = workflow_runs["workflow_runs"], check_runs["check_runs"]
+        if workflow_runs["total_count"] > len(wr) or check_runs["total_count"] > len(cr):
+            return (f"{CI_NONE}: неполные данные CI — запусков {workflow_runs['total_count']} и проверок "
+                    f"{check_runs['total_count']}, а получено {len(wr)} и {len(cr)}")
+        if fork is None:
+            suites = {r["check_suite_id"]: r for r in wr
+                      if r["head_sha"] == sha and str(pr) in [str(p["number"]) for p in r["pull_requests"]]}
+        else:
+            suites = {r["check_suite_id"]: r for r in wr
+                      if r["head_sha"] == sha and r["event"] == "pull_request"
+                      and r["head_repository"]["full_name"].lower() == fork[0] and r["head_branch"] == fork[1]}
+        out = []
+        for c in cr:
+            run = suites.get(c["check_suite"]["id"])
+            if run is not None and c["head_sha"] == sha:
+                info = c.get("output") if isinstance(c.get("output"), dict) else {}
+                out.append({"workflowName": str(run.get("name") or ""), "name": str(c.get("name") or ""),
+                            "status": str(c.get("status") or ""), "conclusion": str(c.get("conclusion") or ""),
+                            "event": str(run.get("event") or ""), "id": c.get("id"),
+                            "annotations": info.get("annotations_count")})
+        return out
+    except (TypeError, KeyError, AttributeError):
+        return None
+
+
+def ci_billing_ids(runs, required):
+    """id проверок, чьи аннотации нужны для признака «CI не запускался: лимит минут или оплата» (metis-0655): каждая
+    обязательная (required) есть среди runs от pull_request, у каждой её запись завершена с SUCCESS или с FAILURE,
+    id — целое и аннотации есть; хоть одна FAILURE. Иначе пусто: признака нет, и запросов аннотаций шлюз не делает."""
+    if not isinstance(runs, list):
+        return []
+    must, seen, ids = [tuple(r) for r in required], set(), []
+    for c in runs:
+        if not isinstance(c, dict) or c.get("event") != "pull_request":
+            continue
+        key = (str(c.get("workflowName") or ""), str(c.get("name") or ""))
+        if key not in must:
+            continue
+        seen.add(key)
+        status, concl = str(c.get("status") or "").upper(), str(c.get("conclusion") or "").upper()
+        if status == "COMPLETED" and concl == "SUCCESS":
+            continue
+        n = c.get("annotations")
+        if status != "COMPLETED" or concl != "FAILURE" or type(c.get("id")) is not int or type(n) is not int or n < 1:
+            return []
+        ids.append(c["id"])
+    return ids if all(k in seen for k in must) else []
+
+
+def ci_job_unstarted(job):
+    """Job не стартовал (metis-0655): ответ CI_JOBS_API — словарь, где runner_id 0 или null, runner_name пусто или
+    null и steps — пустой список. Ключа нет, тип другой, ответа нет — стартовал (признака лимита нет)."""
+    if not isinstance(job, dict) or "runner_id" not in job or "runner_name" not in job:
+        return False
+    rid = job["runner_id"]
+    return (rid is None or type(rid) is int and rid == 0) and job["runner_name"] in (None, "") \
+        and job.get("steps") == []
+
+
+def ci_billing(runs, required, notes, jobs):
+    """CI не запускался из-за лимита минут или оплаты (metis-0655): ci_billing_ids не пуст и у каждой такой проверки
+    в notes ({id: ответ CI_ANNOTATIONS_API — список}) есть аннотация уровня failure на путь .github, текст которой
+    начинается с CI_BILLING, и её job в jobs ({id: ответ CI_JOBS_API}) не стартовал (ci_job_unstarted). Ответа нет
+    (сбой gh) или он не того типа — признака нет."""
+    ids = ci_billing_ids(runs, required)
+    return bool(ids) and isinstance(notes, dict) and isinstance(jobs, dict) and all(
+        isinstance(notes.get(i), list) and any(
+            isinstance(a, dict) and a.get("annotation_level") == "failure" and a.get("path") == ".github"
+            and str(a.get("message") or "").startswith(CI_BILLING) for a in notes[i])
+        and ci_job_unstarted(jobs.get(i)) for i in ids)
+
+
+def full_tests_record(repo, rec):
+    """Запись tests — полный прогон этого репозитория (metis-0655): её команда — FULL_TESTS репозитория (имя без
+    владельца, регистр не важен). Хук guard пишет всю команду `pantheon review test -- <команда>`, проход `pantheon
+    outside test` — саму команду; `heavy` впереди не важен — проход ставит его сам. Комментарий — как в bash, только
+    «#» в начале слова (после пробела): хвост ` # …` снимается, а `слово#…` — часть слова, и команда уже другая.
+    Другая команда, лишние слова (`&& …`, `; …`), нет строки в FULL_TESTS — не засчитывается."""
+    want = FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower())
+    cmd = rec.get("cmd") if isinstance(rec, dict) else None
+    if not want or not isinstance(cmd, str):
+        return False
+    try:
+        got, need = shlex.split(re.sub(r"\s#.*\Z", "", cmd, flags=re.S)), shlex.split(want)
+    except ValueError:
+        return False
+    if len(got) > 3 and os.path.basename(got[0].rstrip("/")) == "pantheon" and got[1:4] == ["review", "test", "--"]:
+        got = got[4:]
+    got = got[1:] if got[:1] and os.path.basename(got[0]) == "heavy" else got
+    need = need[1:] if need[:1] and os.path.basename(need[0]) == "heavy" else need
+    return got == need
+
+
+def ci_verdict(rollup, required=(), runs=None, optional=()):
+    """(ok|wait|fail|empty, текст, предупреждения) по statusCheckRollup head PR. CheckRun — по status и conclusion,
+    StatusContext — по state; ключ проверки — (workflowName, name) или context. Итог ключа — худший из его записей:
+    дубль имени (push и pull_request на одном SHA) не прячет красную запись зелёной. required — обязательные
+    (workflow, job): судятся только по runs (ci_runs) от события pull_request, зелёный итог — только SUCCESS; красная
+    или пропущенная — fail, нет такого запуска или идёт — wait, runs не получены или неполны (строка) — fail.
+    Остальные проверки rollup: красная из optional (optional_checks) — предупреждение, красная любая другая — fail
+    (Д1 argus #235). required пуст — обязательна каждая проверка rollup (SUCCESS, NEUTRAL, SKIPPED), пустой rollup —
+    empty."""
+    if not isinstance(rollup, list) or required and not isinstance(runs, (list, str)):
+        return "fail", CI_NONE, []
+    if required and isinstance(runs, str):
+        return "fail", runs, []
+    rank = {"ok": 0, "wait": 1, "fail": 2}
+    seen, pr_runs = {}, {}  # ключ → (итог, слово итога, имя для текста)
     for c in rollup:
         if not isinstance(c, dict):
-            return "fail", f"{CI_NONE}: проверка не разобрана"
-        name = str(c.get("name") or c.get("context") or "?")[:60]
+            return "fail", f"{CI_NONE}: проверка не разобрана", []
         if "conclusion" in c or "status" in c and "state" not in c:   # CheckRun
             status, concl = str(c.get("status") or "").upper(), str(c.get("conclusion") or "").upper()
-            if status != "COMPLETED":
-                waiting.append(name)
-            elif concl not in CI_OK:
-                return "fail", f"проверка GitHub {name} красная: {concl or 'нет итога'}"
+            res = "wait" if status != "COMPLETED" else "ok" if concl in CI_OK else "fail"
+            word = (status or "нет статуса") if res == "wait" else (concl or "нет итога")
+            key = (str(c.get("workflowName") or ""), str(c.get("name") or ""))
         else:                                                            # StatusContext
             st = str(c.get("state") or "").upper()
-            if st in CI_WAIT:
-                waiting.append(name)
-            elif st not in CI_OK:
-                return "fail", f"проверка GitHub {name} красная: {st}"
-    if waiting:
-        return "wait", "проверки GitHub ещё идут: " + ", ".join(waiting)
-    return "ok", ""
+            res = "wait" if st in CI_WAIT else "ok" if st in CI_OK else "fail"
+            word = st or "нет статуса"
+            key = ("", str(c.get("context") or ""))
+        if key not in seen or rank[res] > rank[seen[key][0]]:
+            seen[key] = (res, word, ("/".join(k for k in key if k) or "?")[:60])
+    for c in runs or ():
+        if not isinstance(c, dict) or c.get("event") != "pull_request":
+            continue
+        status, concl = str(c.get("status") or "").upper(), str(c.get("conclusion") or "").upper()
+        res = "wait" if status != "COMPLETED" else "ok" if concl == "SUCCESS" else "fail"
+        word = (status or "нет статуса") if res == "wait" else (concl or "нет итога")
+        key = (str(c.get("workflowName") or ""), str(c.get("name") or ""))
+        if key not in pr_runs or rank[res] > rank[pr_runs[key][0]]:
+            pr_runs[key] = (res, word, "/".join(key)[:60])
+    must = [tuple(r) for r in required] or list(seen)
+    judge = pr_runs if required else seen
+    if not must:
+        return "empty", "", []
+    opt = [tuple(r) for r in optional]
+    notes = [f"необязательная проверка GitHub {v[2]} красная: {v[1]}" for k, v in seen.items()
+             if k not in must and k in opt and v[0] == "fail"]
+    red = [f"проверка GitHub {judge[k][2]} {'красная' if judge[k][1] not in CI_OK else 'не прошла'}: {judge[k][1]}"
+           for k in must if k in judge and judge[k][0] == "fail"]
+    red += [f"проверка GitHub {v[2]} красная: {v[1]} (её нет ни в обязательных, ни в необязательных — красная любая "
+            "проверка на PR — отказ)" for k, v in seen.items() if k not in must and k not in opt and v[0] == "fail"]
+    if red:
+        return "fail", "; ".join(red), notes
+    missing = ["/".join(k) for k in must if k not in judge]
+    if missing:
+        return ("wait", "обязательные проверки GitHub ещё не встали (засчитывается запуск от pull_request на этом "
+                "коммите): " + ", ".join(missing), notes)
+    going = [judge[k][2] for k in must if judge[k][0] == "wait"]
+    if going:
+        return "wait", "проверки GitHub ещё идут: " + ", ".join(going), notes
+    return "ok", "", notes
 
 
 def _has_workflows(repo, sha):
@@ -1255,34 +1486,149 @@ def _has_workflows(repo, sha):
     return False if "(HTTP 404)" in (r.stderr or "") else None
 
 
-def _ci_problem(repo, pr, sha, data):
+class Allow:
+    """Пропуск с предупреждениями (красная необязательная проверка CI, metis-0633, 0650). Ложь, как None: проверки
+    по-прежнему пишут `if why:`, а предупреждения едут возвратом до guard_rules.main (check_push → check_roles →
+    main) и печатаются строкой systemMessage только в ответе того события, которое их дало. Изменяемого состояния
+    модуля нет: демон хуков (metis-0330) проверит много событий в одном процессе, и чужое предупреждение в ответ не
+    попадёт."""
+    __slots__ = ("notes",)
+
+    def __init__(self, notes):
+        self.notes = tuple(notes)
+
+    def __bool__(self):
+        return False
+
+    def __repr__(self):
+        return f"Allow({list(self.notes)!r})"
+
+
+def allow(notes):
+    """None без предупреждений, иначе Allow(notes)."""
+    notes = tuple(notes)
+    return Allow(notes) if notes else None
+
+
+def notes_of(result):
+    """Предупреждения пропуска: notes у Allow, у отказа (строка) и None — пусто."""
+    return result.notes if isinstance(result, Allow) else ()
+
+
+CI_WATCH = ("ждать — командой вне хука, не моделью: `gh pr checks {pr} -R {repo} --watch` (Bash не в фоне, timeout "
+            "до 600000 мс), затем повтори слияние")
+
+
+def _ci_runs(repo, pr, sha, fork=None):
+    """Запуски Actions на head SHA с событием (metis-0633): два GET REST по CI_RUNS_API, список ci_runs или None
+    (сбой gh, неразборный ответ); fork — голова PR из форка (ci_fork, metis-0649). Зовётся, только когда у
+    репозитория есть обязательные проверки."""
+    got = []
+    for api in CI_RUNS_API:
+        one = _gh_json(["api", api.format(repo=repo, sha=sha)])
+        if not (isinstance(one, list) and len(one) == 1):
+            return None
+        got.append(one[0])
+    return ci_runs(got[0], got[1], sha, pr, fork)
+
+
+def _ci_notes(repo, ids):
+    """Аннотации проверок ids (metis-0655): {id: список по CI_ANNOTATIONS_API или None — сбой gh}. Один GET на
+    проверку из ci_billing_ids (обязательные красные с аннотациями — у agent-kit не больше двух); пусто —
+    запросов нет."""
+    return {i: _gh_json(["api", CI_ANNOTATIONS_API.format(repo=repo, id=i)]) for i in ids}
+
+
+def _ci_jobs(repo, ids):
+    """Данные job проверок ids (metis-0655): {id: ответ CI_JOBS_API или None — сбой gh}; id проверки = id job. Один
+    GET на проверку из ci_billing_ids; пусто — запросов нет. _gh_json отдаёт значения JSON подряд, а ответ job — один
+    объект: не ровно одно значение — None."""
+    out = {}
+    for i in ids:
+        got = _gh_json(["api", CI_JOBS_API.format(repo=repo, id=i)])
+        out[i] = got[0] if isinstance(got, list) and len(got) == 1 else None
+    return out
+
+
+def _billing_problem(repo, pr, sha):
+    """Запасной путь (metis-0655, решение владельца 02.11): CI на head не запускался из-за лимита минут или оплаты
+    GitHub Actions (ci_billing) — вместо CI засчитывается запись tests на этот SHA и этот репозиторий из журнала
+    шлюза (ту же пишет хук guard на `pantheon review test` в любой сессии) с командой полного набора FULL_TESTS
+    (full_tests_record). Есть — пропуск с предупреждением; нет, журнал не читается или у репозитория нет FULL_TESTS —
+    отказ (с командой записи, если она известна). Возврат, как у _ci_problem, — (текст отказа или None,
+    предупреждения пропуска)."""
+    where = f"{repo}#{pr}@{sha[:12]}"
+    cmd = FULL_TESTS.get(repo.rsplit("/", 1)[-1].lower())
+    if not cmd:
+        return (f"CI на {where} не запускался (лимит минут или оплата GitHub Actions), а запасного пути у репозитория "
+                "нет: команды полного набора в FULL_TESTS (merge_gate.py) для него нет — подними лимит в GitHub "
+                f"Billing и перезапусти CI; {OWNER_EMERGENCY}"), ()
+    records = read_records()
+    if records is None:
+        return (f"CI на {where} не запускался (лимит минут или оплата GitHub Actions), а журнал записей тестов "
+                "~/.local/state/pantheon/merge-gate/records.jsonl не читается (симлинк или сбой) — местный прогон не "
+                "сверить"), ()
+    if any(r["kind"] == "tests" and r["sha"] == sha and repo.lower() in [x.lower() for x in r["repo"]]
+           and full_tests_record(repo, r) for r in records):
+        return None, (f"CI не запускался: лимит минут GitHub Actions, засчитан местный прогон (запись `pantheon "
+                      f"review test`) на {where}",)
+    return (f"CI на {where} не запускался: лимит минут или оплата GitHub Actions (аннотация «{CI_BILLING}…», job "
+            f"не стартовал). Запасной путь — местный полный прогон с записью на этом коммите (засчитывается только "
+            f"эта команда: {cmd}). Основной способ: из корня чистой копии на {sha[:12]} запусти `pantheon outside "
+            "test --wait 590` (Bash не в фоне, timeout 600000 мс): прогон `.pantheon-verify` вне окна до 2 ч, запись "
+            "пишет плановый проход; код 75 — итога ещё нет, смотри `pantheon outside status <ID>`. Вариант — "
+            f"`pantheon review test -- {cmd}` (не в фоне: фоновый прогон записи не пишет, а полный набор с очередью "
+            "heavy бывает дольше 600 с). Затем повтори слияние"), ()
+
+
+def _ci_problem(repo, pr, sha, data, owner=False):
     """Проверки GitHub на head PR зелёные — иначе текст отказа (metis-0297: 19.10 дважды ушёл PR с красной
-    check-traces). data — ответ _pr_view. PR на другом коммите, красная или идущая проверка — отказ. Проверок нет:
-    пропуск, только если .github/workflows нет ни на head, ни на base PR (ответ 404 на оба): PR, который удаляет или
-    переименовывает папку workflows, проверок не получает, а на base она есть (ревью argus 0297b). Сбой любого
-    запроса — отказ; base спрашивается, только когда rollup пуст и на head папки нет."""
+    check-traces). data — ответ _pr_view; его rollup — проверки коммита headRefOid, а он сверяется с SHA из
+    --match-head-commit: PR на другом коммите — отказ. Разбор — ci_verdict с обязательными проверками репозитория
+    (required_checks по baseRefName, metis-0633; их запуски — _ci_runs на этом SHA, засчитывается только
+    pull_request с SUCCESS): красная или пропущенная обязательная — отказ, кроме CI, который не запускался из-за
+    лимита минут или оплаты (ci_billing по аннотациям красных и данным их job, metis-0655): тогда _billing_problem —
+    запись полного набора тестов на этом SHA вместо CI; нет обязательной или идёт — отказ «дождись» с
+    командой ожидания вне хука, красная из OPTIONAL_CHECKS — пропуск с предупреждением, красная вне обоих
+    списков — отказ (Д1 argus #235). Ждать в хуке нельзя:
+    таймаут хука 10 с. Обязательных нет и проверок нет: пропуск, только если .github/workflows нет ни на head, ни на
+    base PR (ответ 404 на оба): PR, который удаляет или переименовывает папку workflows, проверок не получает, а на
+    base она есть (ревью argus 0297b). Сбой любого запроса — отказ; base спрашивается, только когда rollup пуст и на
+    head папки нет. owner — путь без роли (owner_ci_problem): записей там не просят, а в текстах отказа — аварийный
+    путь OWNER_EMERGENCY вместо «сливает владелец» (Д2, Д4' argus #235). Возврат — (текст отказа или None,
+    предупреждения пропуска): их несёт возврат, а не модуль (metis-0650)."""
     head = data.get("headRefOid")
     if not isinstance(head, str) or head.lower() != sha:
-        return f"PR сейчас на другом коммите ({head}), а не на {sha} — проверки GitHub сверяются на проверенном SHA"
-    state, text = _ci_rollup(data.get("statusCheckRollup"))
+        return f"PR сейчас на другом коммите ({head}), а не на {sha} — проверки GitHub сверяются на проверенном SHA", ()
+    required = required_checks(repo, data.get("baseRefName"))
+    runs = _ci_runs(repo, pr, sha, ci_fork(data)) if required else None
+    state, text, notes = ci_verdict(data.get("statusCheckRollup"), required, runs, optional_checks(repo))
+    if state == "fail" and text.startswith(CI_NONE):
+        return f"{text} на {repo}#{pr}@{sha[:12]} — повтори слияние позже", ()
     if state == "fail":
-        return f"{text} на {repo}#{pr}@{sha[:12]} — почини и сделай новый коммит с новыми записями"
+        ids = ci_billing_ids(runs, required)
+        if ci_billing(runs, required, _ci_notes(repo, ids), _ci_jobs(repo, ids)):
+            return _billing_problem(repo, pr, sha)
+        if owner:
+            return f"{text} на {repo}#{pr}@{sha[:12]} — почини и сделай новый коммит; {OWNER_EMERGENCY}", ()
+        return f"{text} на {repo}#{pr}@{sha[:12]} — почини и сделай новый коммит с новыми записями", ()
     if state == "wait":
-        return f"{text} на {repo}#{pr}@{sha[:12]} — дождись итога и повтори слияние"
+        return f"{text} на {repo}#{pr}@{sha[:12]} — {CI_WATCH.format(pr=pr, repo=repo)}", ()
     if state == "empty":
         base = data.get("baseRefOid")
         if not isinstance(base, str) or not SHA_RE.fullmatch(base.lower()):
-            return f"{CI_NONE}: проверок на {repo}#{pr} нет, а коммит base PR ({base}) не получен"
+            return f"{CI_NONE}: проверок на {repo}#{pr} нет, а коммит base PR ({base}) не получен", ()
         for ref, where in ((sha, "head PR"), (base.lower(), "base PR")):
             wf = _has_workflows(repo, ref)
             if wf is None:
                 return (f"{CI_NONE}: проверок на {repo}#{pr} нет, а gh api не ответил, есть ли .github/workflows "
-                        f"на {where} ({ref[:12]})")
+                        f"на {where} ({ref[:12]})"), ()
             if wf:
+                tail = (f"PR, который убирает workflows, — {OWNER_EMERGENCY}" if owner
+                        else "PR, который убирает workflows, сливает владелец")
                 return (f"проверки GitHub ещё не встали на {repo}#{pr}@{sha[:12]}: на {where} ({ref[:12]}) "
-                        ".github/workflows есть, а проверок нет — дождись и повтори слияние; PR, который убирает "
-                        "workflows, сливает владелец")
-    return None
+                        f".github/workflows есть, а проверок нет — дождись и повтори слияние; {tail}"), ()
+    return None, tuple(f"{n} на {repo}#{pr}@{sha[:12]}" for n in notes)
 
 
 def approve_file():
@@ -1606,7 +1952,8 @@ def _who(rec):
 
 
 def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advice, protect, cwd=None):
-    """Запор (P1-4): то, что проверено, — ровно то, что сливается. Текст отказа или None."""
+    """Запор (P1-4): то, что проверено, — ровно то, что сливается. Текст отказа, None или Allow — пропуск с
+    предупреждениями CI (metis-0650)."""
     if auto:
         return f"без --auto: сливается сейчас ровно проверенный PR, а не позже сам. {advice}"
     if len(numbers) != 1:
@@ -1633,7 +1980,7 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
                 f"записи не сверить. {MERGE_OWNER}")
     if not any(r["kind"] == "tests" and r["sha"] == sha and repo in [x.lower() for x in r["repo"]] for r in records):
         return (f"нет записи тестов на {repo}@{sha[:12]}: в чистом дереве на этом коммите запусти "
-                f"`pantheon review test -- <команда тестов>` (запишет хук guard). Тесты долгие: запускай "
+                f"`pantheon review test -- <команда тестов>` (запишет хук guard).{narrow_hint(repo)} Тесты долгие: запускай "
                 f"`pantheon review test` не в фоне, с timeout до 600000 мс (у Bash по умолчанию 120 с). Тестам нужен "
                 f"порт или сокет, которых в окне нет, — `pantheon outside test --wait 590` в той же копии (запись "
                 f"tests сделает плановый проход; dev-сервер — `pantheon outside serve --wait 120`). {advice}")
@@ -1746,7 +2093,7 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
         # только задетое ядро; сбой gh, неполный список файлов и другой head — отказ и со строкой
         if why and not (why.startswith(MERGE_CORE_HIT) and owner_approved(repo, pr, sha)):
             return f"{why}. {MERGE_PROTECT}"
-    why = _ci_problem(repo, pr, sha, view)
+    why, notes = _ci_problem(repo, pr, sha, view)
     if why:
         return f"{why}. {advice}"
     if carried:
@@ -1759,7 +2106,52 @@ def gate_problem(event, policy, repo_name, cmd_repos, numbers, auto, heads, advi
             return (f"перенос «принять» на {repo}#{pr}@{sha[:12]} не записать в журнал "
                     f"~/.local/state/pantheon/merge-gate/carry.jsonl ({e}) — без записи переноса шлюз не пускает. "
                     f"{MERGE_OWNER}")
-    return None
+    return allow(notes)
+
+# аварийный путь (metis-0655): слияние, которое шлюз не пускает, а ждать нельзя, — владелец сам в своём терминале
+OWNER_EMERGENCY = ("аварийный путь — `gh pr merge` в собственном терминале владельца, вне Claude: guard его не "
+                   "проверяет")
+OWNER_CI = ("слияние из сессии без роли проверяет только CI (решение владельца 01.11, metis-0633): записи тестов и "
+            "argus не нужны, а красный или незавершённый CI — отказ; CI не запускался из-за лимита минут — "
+            "нужна запись `pantheon review test` полного набора на этом коммите (metis-0655)")
+
+
+def owner_ci_problem(cwd, moved, args):
+    """gh pr merge из сессии Claude без роли (окно владельца, metis-0633: #223 и #225 ушли так на красном CI) —
+    только проверка CI тем же _ci_problem, без записей тестов и argus, без [merge_repos] и прочих правил ролей.
+    Репозиторий — -R или remote папки cwd (не cd в команде), PR — ровно один номер, SHA — --match-head-commit, без
+    него — текущий head PR. Не понять, что сливается, или gh не ответил — отказ с тем, что указать. Слово команды не
+    вычислить (переменная, $(…), xargs — None в args) — отказ сразу (Д1' argus #235). Текст, None или Allow — пропуск
+    с предупреждениями CI (metis-0650)."""
+    if any(not isinstance(a, str) for a in args):
+        return (f"слово команды не вычислить (переменная, $(…), xargs) — укажи номер PR, -R и --match-head-commit "
+                f"буквально. {OWNER_CI}")
+    # --admin владельцу не закрыт (судим только CI), а _merge_args на нём обрывает разбор
+    _, repos, numbers, _, heads = _merge_args([a for a in args if a != "--admin" and not a.startswith("--admin=")])
+    if len(numbers) != 1:
+        return f"укажи один номер PR: без него CI не сверить. {OWNER_CI}"
+    pr = numbers[0]
+    if repos:
+        tails = {_repo_tail(_repo_arg(r)) for r in repos}
+    elif moved:
+        return f"с cd в команде укажи репозиторий: gh pr merge {pr} -R <owner/repo>. {OWNER_CI}"
+    else:
+        remotes, resolved = _git_remotes(cwd), _gh_resolved(cwd)
+        tails = {_repo_tail(r) for r in (remotes or []) + (resolved or [])}
+        if not remotes or resolved is None:
+            return f"не понять репозиторий папки — укажи -R <owner/repo>. {OWNER_CI}"
+    if len(tails) != 1:
+        return f"репозиторий не один ({', '.join(sorted(tails))}) — укажи -R <owner/repo>. {OWNER_CI}"
+    repo = tails.pop()
+    view = _pr_view(repo, pr)
+    if view is None:
+        return f"{CI_NONE}: gh pr view {pr} -R {repo} не ответил — повтори позже. {OWNER_CI}"
+    head = (heads[0] or "").lower() if len(heads) == 1 else str(view.get("headRefOid") or "").lower()
+    if len(heads) > 1 or not SHA_RE.fullmatch(head):
+        return f"--match-head-commit — один SHA из 40 знаков или без него. {OWNER_CI}"
+    why, notes = _ci_problem(repo, pr, head, view, owner=True)
+    return f"{why}. {OWNER_CI}" if why else allow(notes)
+
 
 def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
     """gh pr merge (metis-0038, guard 0.5.0; запор P1-4, guard 0.5.4). Сливает главная сессия координатора
@@ -1768,7 +2160,8 @@ def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):
     защиты — те же правила. Режим: защиты — cwd в папках [coordinators] metis-pantheon или репозиторий команды (-R или
     remote папки cwd) совпадает с remote этих папок: только Метида или её лид; продукт ([merge_client]) и внутреннее
     (своё направление по domains.json, для совместимости — [merge]). Затем во всех режимах — запор (gate_problem).
-    Любой сбой (политика, реестр, git, журнал, gh) — отказ. Возвращает текст отказа (с тем, что делать) или None."""
+    Любой сбой (политика, реестр, git, журнал, gh) — отказ. Возвращает текст отказа (с тем, что делать), None или
+    Allow — пропуск с предупреждениями CI (metis-0650)."""
     lead = bool(sub) and role.startswith(G.PANTHEON_ROLE_PREFIXES)
     if not lead and (role != "domain-coordinator" or sub):
         return MERGE_CLOSED

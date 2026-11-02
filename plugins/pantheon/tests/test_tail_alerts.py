@@ -2,7 +2,8 @@
 """metis-0504: хвосты не теряются. Тик (check --quiet) поднимает три тревоги: (а) строка журнала задачи со словами
 «хвост / остаток / не сделано / вынесен / позже» без id задачи в строке (в `check` без --quiet — ещё и предупреждение
 «внимание», не ошибка); (б) файл knowledge/inbox старше суток без ссылки из задач (findings: 0 — исключение);
-(в) directions/*/review-*.md с находкой класса Д без ссылки из задач. Один раз на ключ, первый проход без тревоги.
+(в) directions/*/review-*.md с находкой класса Д без ссылки из задач. Один раз на ключ; первый проход — одна
+сводная тревога без перечня (metis-0572).
 
 Запуск: python3 -I plugins/pantheon/tests/test_tail_alerts.py  (код выхода 0 — все прошли)
 """
@@ -78,7 +79,11 @@ def put(path, text, age_h=48):
 
 
 def lines_with(home, word):
-    return [ln for ln in alerts_of(home).splitlines() if word in ln]
+    """Строки тревог со словом, кроме сводной тревоги первого прохода (её проверяют отдельно)."""
+    return [ln for ln in alerts_of(home).splitlines() if word in ln and SUMMARY not in ln]
+
+
+SUMMARY = "хвосты: слежение начато"
 
 
 def main():
@@ -103,9 +108,15 @@ def main():
 
     r = run(env, "check", "--quiet", t=T0 + 10)
     seen = json.loads(read(seen_p)) if os.path.exists(seen_p) else None
-    check("первый проход: тревог нет, всё запомнено в tail-seen.json",
+    check("первый проход: тревог по хвостам нет, всё запомнено в tail-seen.json",
           r.returncode == 0 and seen is not None and not lines_with(home, "в журнале") and not lines_with(home, "inbox")
           and not lines_with(home, "ревью") and any("research-old" in k for k in seen), (r.stderr, alerts_of(home), seen))
+    summ = [ln for ln in alerts_of(home).splitlines() if SUMMARY in ln]
+    check("0572: первый проход не молчит — одна сводная тревога: сколько всего и по видам, где список; без перечня",
+          len(summ) == 1 and seen is not None and f"уже есть {len(seen)} —" in summ[0]
+          and "хвост в журнале без задачи 1" in summ[0] and "ревью с находкой Д без задачи 1" in summ[0]
+          and "Доска/Хвосты.md" in summ[0] and "metis-0001" not in alerts_of(home)
+          and "research-old" not in alerts_of(home), (summ, seen))
     check("первый проход: кандидаты записаны, а findings: 0, ссылка, моложе суток, не-Д и ссылка из задач — нет",
           seen is not None and any("metis-0001" in k for k in seen) and any("review-1-argus" in k for k in seen)
           and not any(x in k for k in seen for x in ("research-zero", "research-linked", "research-young", "review-2",
@@ -131,7 +142,8 @@ def main():
     # --- второй проход не повторяет
     n = len(a.splitlines())
     run(env, "check", "--quiet", t=T0 + 120)
-    check("второй проход: тот же набор — тревоги не повторяются", len(alerts_of(home).splitlines()) == n)
+    check("второй проход: тот же набор — тревоги не повторяются, сводная тоже",
+          len(alerts_of(home).splitlines()) == n and sum(SUMMARY in ln for ln in alerts_of(home).splitlines()) == 1)
 
     # --- ссылка появилась: тревоги нет и ключ уходит из файла
     new(env, "разбор research-new.md и review-4-argus.md", t=T0 + 130)  # metis-0005
@@ -150,8 +162,9 @@ def main():
     put(os.path.join(inbox, "research-after-break.md"), "# c\n")
     open(seen_p, "w", encoding="utf-8").write("не json")
     run(env, "check", "--quiet", t=T0 + 200)
-    check("испорченный tail-seen.json — запомнено заново без тревоги",
-          "after-break" not in alerts_of(home) and "after-break" in read(seen_p))
+    check("испорченный tail-seen.json — запомнено заново, без перечня, одна новая сводная тревога",
+          "after-break" not in alerts_of(home) and "after-break" in read(seen_p)
+          and sum(SUMMARY in ln for ln in alerts_of(home).splitlines()) == 2)
 
     # --- больше 12 за проход: 12 + «и ещё», остаток — следующим проходом
     for i in range(14):
@@ -211,6 +224,30 @@ def main():
           and tl3([("10:00", "хвост → 0001")], own="x-0001") and tl3([("10:00", "хвост 12 штук")]))
     check("0572: «не задача: …» в самой строке гасит хвост",
           not tl3([("10:00", "остаток, не задача: шум")]) and tl3([("10:00", "остаток, шум")]))
+    check("0572: «из ревью …» в начале строки открытой задачи — находки дописаны в неё саму, не хвост",
+          not tl3([("10:00", "из ревью PR #154 (область: роли): Д2 не сделано Codex")])
+          and not tl3([("10:00", "23.10 22:1x из review-111-argus-b3: обёртка без хвоста")])
+          and not tl3([("10:00", "Из ревью 154: остаток")], status="waiting"))
+    check("0572: «из ревью» у закрытой задачи и не в начале строки — хвост",
+          tl3([("10:00", "из ревью PR #154: Д2 не сделано")], status="done")
+          and tl3([("10:00", "остаток из ревью PR #154")])
+          and tl3([("10:00", "23.10 остаток из review-111")]) and tl3([("10:00", "из ревьюера: остаток")]))
+    check("0572: «остаток недели / лимита / дня» — запас, не хвост; «остаток:» и другое слово хвоста в строке — хвост",
+          not tl3([("10:00", "у разработчика (владелец: израсходовать остаток недели)")])
+          and not tl3([("10:00", "остатка лимита хватит")]) and not tl3([("10:00", "Остаток дня — на ревью")])
+          and tl3([("10:00", "остаток: тест смысла")]) and tl3([("10:00", "остаток недели, хвост по resume")]))
+    check("0572: остаток времени/денег с любой формой слова — не хвост («остатком недели», «остатков лимита», «остаток месяца / "
+          "бюджета / токенов / минут / часов / времени»)",
+          not any(tl3([("10:00", x)]) for x in (
+              "остатком недели хватит", "остатков лимита хватит", "остаток месяца", "остаток бюджета", "остаток токенов",
+              "остаток минут", "остаток часов", "остаток часа", "остаток времени", "остатка дня", "остаток дней",
+              "остаток дню", "остаток недель", "остатком минуты")))
+    check("0572: «остаток временных файлов», «остаток часть тестов», «остатки тестов» — хвост (узкие основы)",
+          all(tl3([("10:00", x)]) for x in ("остаток временных файлов уберу", "остаток часть тестов", "остатки тестов",
+                                            "остаток частями", "остаток недельного плана перенесён",
+                                            "остаток минутной проверки", "остаток дневного прогона",
+                                            "остаток бюджетного модуля", "остаток токенизатора", "остаток лимитного теста",
+                                            "остаток месячного отчёта")))
     check("0572: позже строка «→ <id>» или «не задача: …» гасит прежние хвосты задачи; обычная строка — нет",
           not tl3([("10:00", "остался хвост"), ("11:00", "→ metis-0367")])
           and not tl3([("10:00", "остался хвост"), ("11:00", "не задача: шум")])
@@ -241,6 +278,37 @@ def main():
     run(env2, "check", "--quiet", t=T0 + 30)
     check("0572: после строки «не задача: …» Хвосты.md пустеет, файл не попадает на доску как карточка",
           "Нет — всё в порядке" in read(bp), read(bp))
+
+    tmp3, home3, state3, env3 = make()
+    new(env3, "задача без хвоста", t=T0)
+    run(env3, "check", "--quiet", t=T0 + 10)
+    check("0572: первый проход без хвостов — сводной тревоги нет, tail-seen.json пустой",
+          SUMMARY not in alerts_of(home3) and os.path.exists(os.path.join(state3, "tail-seen.json"))
+          and json.loads(read(os.path.join(state3, "tail-seen.json"))) == {}, alerts_of(home3))
+
+    # 0572 (Д3): разное число хвостов по видам — счёт в сводной тревоге по виду, а не «всегда 1»
+    tmp4, home4, state4, env4 = make()
+    inbox4 = os.path.join(tmp4, "ai", "knowledge", "inbox")
+    for i in range(3):
+        new(env4, f"задача {i}", t=T0)
+        run(env4, "task", "set", f"metis-000{i + 1}", "--note", "остался хвост", t=T0)
+    for i in range(2):
+        put(os.path.join(inbox4, f"research-n{i}.md"), "# a\n")
+    put(os.path.join(home4, "directions", "metis-pantheon", "review-9-argus.md"), "- Д · a.py:1 долг\n")
+    run(env4, "check", "--quiet", t=T0 + 10)
+    s4 = [ln for ln in alerts_of(home4).splitlines() if SUMMARY in ln]
+    check("0572: сводная тревога считает по видам: хвост 3, файл inbox 2, ревью 1, всего 6",
+          len(s4) == 1 and "уже есть 6 —" in s4[0] and "хвост в журнале без задачи 3" in s4[0]
+          and "файл inbox старше суток без задачи разбора 2" in s4[0] and "ревью с находкой Д без задачи 1" in s4[0], s4)
+
+    # 0572 (Д3): запись tail-seen.json упала — сводной тревоги нет (следующий проход снова первый), тик не падает молча
+    tmp5, home5, state5, env5 = make()
+    new(env5, "задача", t=T0)
+    run(env5, "task", "set", "metis-0001", "--note", "остался хвост", t=T0)
+    os.makedirs(os.path.join(state5, "tail-seen.json"))  # папка на месте файла: чтение и запись — OSError
+    r5 = run(env5, "check", "--quiet", t=T0 + 10)
+    check("0572: запись tail-seen.json упала — сводной тревоги «слежение начато» нет",
+          SUMMARY not in alerts_of(home5), (r5.returncode, r5.stderr[-300:], alerts_of(home5)))
 
     new(env2, "вторая", t=T0 + 40)
     run(env2, "check", "--quiet", t=T0 + 50)

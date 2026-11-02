@@ -69,7 +69,9 @@ PANTHEON_TMP — папка tmp кэша окна ~/Library/Caches/pantheon-sand
 обычный файл без перехода по ссылкам (lstat, O_NOFOLLOW, одна жёсткая ссылка), не больше QUEUE_MAX байт; поля — только
 FIELDS; by — имя окна по папке кэша, а не из файла; created — время прохода: «да» владельца, данное раньше, к ней не
 подходит; validate; номер не занят. Затем папка STATE/read/<rid> — так же, как у заявки вне окна. Файл из очереди
-удаляется в любом случае; плохая заявка — запись queue-bad-<код> в журнал (номер и код, без текста).
+удаляется в любом случае; плохая заявка — запись queue-bad-<код> в журнал (номер и код, без текста). За проход из
+очереди одного окна берутся первые QUEUE_PASS_MAX (20) файлов по имени, остальные ждут следующего; срок прохода вышел
+(DEADLINE) — разбор очередей прекращается (queue-deadline в журнале).
 
 Этапы `read run` (состояние — state.json в папке заявки, журнал — STATE/logs/read.jsonl: только номер, числа, время):
   0. resolving → каждое указание — `resolve`. Найденные чаты (без повторов) — chats.json (0600): id, название, тип,
@@ -85,8 +87,9 @@ FIELDS; by — имя окна по папке кэша, а не из файла
      после «да» list.md удаляется вместе с началом выгрузки.
      Хеш согласия — от request.json и chats.json вместе (consent_hash): названия входят в хеш, владелец соглашается
      на этот список чатов, а не на указания.
-  1. requested → согласие: ответ владельца в окне вопросов Зевса (owner-log/zeus.md, пометка «окно вопросов», его пишет
-     хук, не роли) на вопрос, который начинается с [read-<rid>], не раньше времени заявки; в тексте вопроса — хеш,
+  1. requested → согласие: ответ владельца в окне вопросов или в чате Зевса (owner-log/zeus.md, пометка «окно вопросов»
+     или «ответ в чате», её пишет хук, не роли) на вопрос, который начинается с [read-<rid>], не раньше времени
+     заявки; в тексте вопроса — хеш,
      пересчитанный из request.json и chats.json сейчас, id каждого чата и обе даты. Последний такой ответ решает:
      «Да…» — выгрузка, «Нет…» — заявка удаляется. Ответа нет за REQUEST_TTL — заявка удаляется.
   2. Выгрузка: по чату K — `export … -o <папка>/raw-K.md -- <id>`, argv из заявки и chats.json. Пределы под папку:
@@ -107,6 +110,11 @@ FIELDS; by — имя окна по папке кэша, а не из файла
      PART_ATTEMPTS раз. Дальше, как и по сроку READING_TTL, при изменённых после «да» заявке или списке чатов,
      пропавшей выгрузке или items.md не по образцу, — failed, выгрузки удаляются, новой выгрузки нет. SIGTERM (таймаут
      задачи), SIGINT и SIGHUP останавливают группу процессов читателя или выгрузки, удаляют выгрузки и пишут failed.
+     Проход оборван между записью items.md и state.json — часть читается заново, а её пункты не удваиваются (в state
+     — items_part и items_base: сколько пунктов было до части). Заявки идут по порядку номеров, но те, что читают
+     частями, — в конце; если за заявкой в проходе ещё читают или ждут «да», она читает не больше одной части за
+     проход (PARTS_CAP), чтобы не съесть срок у остальных. Заявка не по образцу (request.json) на этапе reading
+     теряет выгрузки сразу, а не по READING_TTL.
   4. Проверка: пункт ссылается на чат своей части — «чат K, #id, …» (в заявке на один чат ссылку можно опустить); без
      ссылки или с номером чата не из этой части пункт выпадает. Каждый пункт — отдельно `verify raw-K.md <пункт>` по
      полной выгрузке чата K; пункт без #id, без цитаты или с ненайденной цитатой выпадает. В профиле с
@@ -238,6 +246,7 @@ RAW_RE = re.compile(r"raw(?:-\d{1,3})?\.md")   # выгрузки: raw-K.md (и 
 WHY_SHOWN = 200           # столько знаков вопроса заявки видит владелец в вопросе [read-<rid>]
 QUEUE, QUEUE_SUFFIX = "read", ".req.json"   # очередь окна роли: <кэш окна>/read/<rid>.req.json
 QUEUE_MAX = 64 * 1024     # заявка в очереди окна — не больше, байт (указания и вопрос — меньше 16 КБ)
+QUEUE_PASS_MAX = 20       # файлов очереди одного окна, которые проход разбирает за раз (остальные — следующим проходом)
 QUEUE_TMP_TTL = 600       # недописанный временный файл окна (.<имя>.<pid>.<hex>) старше, с — мусор
 WINDOW_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")   # имя окна — папка кэша; оно же by заявки из очереди
 
@@ -419,11 +428,6 @@ def spec_label(spec):
 
 
 # --- заявка ---------------------------------------------------------------------------------------------------------
-
-def req_hash(req):
-    data = json.dumps({k: req.get(k) for k in FIELDS}, ensure_ascii=False, sort_keys=True)
-    return hashlib.sha256(data.encode("utf-8")).hexdigest()[:HASH_LEN]
-
 
 def consent_hash(req, chats):
     """Хеш, на который соглашается владелец: заявка и найденный список чатов вместе (id, название, тип, число
@@ -761,7 +765,10 @@ def take_queues():
             log(None, "queue-bad-dir")
             continue
         try:
-            for name in sorted(os.listdir(dfd)):
+            for name in sorted(os.listdir(dfd))[:QUEUE_PASS_MAX]:
+                if left() <= 0:   # срок прохода вышел: остальное — следующим
+                    log(None, "queue-deadline")
+                    return n
                 try:
                     n += take_one(o, dfd, name, window)
                 except Exception:  # одна заявка не останавливает другие; текста в журнале нет
@@ -775,7 +782,8 @@ def take_queues():
 # --- ответы владельца -------------------------------------------------------------------------------------------------
 
 def owner_answers(qid):
-    """[(время, вопрос после «[qid]», ответ)] из owner-log/zeus.md: только выбор в окне вопросов на вопрос «[qid] …»."""
+    """[(время, вопрос после «[qid]», ответ)] из owner-log/zeus.md: только выбор в окне вопросов или в чате (metis-0405)
+    на вопрос «[qid] …»."""
     try:
         with open(P.path("owner-log", "zeus.md"), encoding="utf-8") as fh:
             text = fh.read()
@@ -785,7 +793,7 @@ def owner_answers(qid):
     out = []
     heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
     for i, m in enumerate(heads):
-        if m.group(2).strip() != "· окно вопросов":
+        if not P.answers_mod().is_answer_head(m.group(2)):
             continue
         body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
         q = own.match(body)
@@ -879,6 +887,7 @@ class Interrupted(BaseException):
 
 
 DEADLINE = None   # time.monotonic(), до которого должен закончиться проход; ставит cmd_run
+PARTS_CAP = None  # частей за проход на одну заявку: None — сколько хватит срока; 1 — за ней в очереди ещё заявки (cmd_run)
 
 
 def left():
@@ -953,10 +962,11 @@ def ask_resolve(src, d, req, spec, timeout):
         remove_file(p)
 
 
-def refuse(rid, req, st, code, reason, candidates=None, **nums):
+def refuse(rid, req, st, code, reason, candidates=None, dumped=False, **nums):
     """Честный отказ: этап refused, причина с числами — в state (её показывает `read status`) и карточкой во входящих
     Зевса. Кандидаты «подходит несколько» — названия от источника: только в candidates.md (шапка выгрузки, tg-taint);
-    путь к нему — уведомлением владельцу, в карточке — только число."""
+    путь к нему — уведомлением владельцу, в карточке — только число. dumped — отказ после выгрузки: карточка не
+    говорит, что выгрузки не было."""
     st.update(phase="refused", failed_at=int(P.now()), error=code, reason=reason)
     cpath = None
     if candidates:
@@ -966,15 +976,16 @@ def refuse(rid, req, st, code, reason, candidates=None, **nums):
         with contextlib.suppress(Exception):
             P.notify(f"Заявка read-{rid}: подходит несколько чатов ({len(candidates)}) — список: {short(cpath)}",
                      group=f"read-{rid}")
-    st["card"] = refuse_card(rid, req, reason, len(candidates or []))
+    st["card"] = refuse_card(rid, req, reason, len(candidates or []), dumped)
     write_state(folder(rid), st)
     log(rid, "refused-" + code, **nums)
     return f"отказ — {reason}"
 
 
-def refuse_card(rid, req, reason, n_cand):
+def refuse_card(rid, req, reason, n_cand, dumped=False):
     text = (f"Заявка read-{rid} (направление {req['direction']}, заявила {req.get('by', '?')}) не выполнена: {reason}.\n\n"
-            "Выгрузки не было. Новая заявка — `pantheon read request` с уточнёнными указаниями.")
+            + ("Выгрузка была, но удалена, разбора нет. " if dumped else "Выгрузки не было. ")
+            + "Новая заявка — `pantheon read request` с уточнёнными указаниями.")
     if n_cand:
         text += (f"\n\nПодходящих чатов: {n_cand}. Их список владелец получил уведомлением; Зевсу и ролям файлы "
                  "заявки не открывать. В новую заявку — id нужного.")
@@ -1015,8 +1026,12 @@ def resolve_all(rid, req, st):
             problems.append(f"{label} — {'папки' if spec['kind'] == 'folder' else 'чата'} не нашлось")
             continue
         if status == "ambiguous":
-            got = [clean_chat(c, with_count=False) for c in (data.get("candidates") or [])[:CANDIDATES_MAX]]
+            raw = data.get("candidates")
+            got = [clean_chat(c, with_count=False) for c in raw[:CANDIDATES_MAX]] if isinstance(raw, list) else []
             got = [c for c in got if c]
+            if not got:   # не список или ни одной годной записи: «подходит несколько (0)» владельцу не скажешь
+                fail(rid, st, "resolve-bad", "resolve-failed", rc=0)
+                return "поиск чатов не удался (ответ источника не по контракту)"
             problems.append(f"{label} — подходит несколько ({len(got)}), нужно точнее")
             cands += [(label, c) for c in got]
             continue
@@ -1315,11 +1330,11 @@ def summarize(rid, req, chats, st):
             return refuse(rid, req, st, "too-big",
                           f"выгружено сообщений {msgs} ({size} байт) в {n} чатах — больше предела {MAX_MESSAGES} "
                           f"сообщений и {MAX_DUMP_BYTES} байт на заявку; выгрузки удалены, разбора нет: сузьте период "
-                          f"или число чатов", chats=n, messages=msgs, bytes=size)
+                          f"или число чатов", dumped=True, chats=n, messages=msgs, bytes=size)
         if not msgs:
             remove_scratch(d)
             return refuse(rid, req, st, "empty", f"за период {req['since']} — {req['until']} в {n} чатах нет ни одного "
-                          f"сообщения; разбора нет", chats=n, messages=0)
+                          f"сообщения; разбора нет", dumped=True, chats=n, messages=0)
         parts = plan_parts([dump_blocks(read_text(os.path.join(d, raw_name(k)))) for k in range(1, n + 1)])
         write_items(d, [])
         st.update(phase="reading", reading_at=int(P.now()), parts=len(parts), parts_done=0, part_attempts=0,
@@ -1463,7 +1478,7 @@ def read_parts(rid, req, chats, st):
     except ValueError:
         fail(rid, st, "reader-agent", "reader-agent")
         return f"нет определения читателя {reader} ({short(agent_path(reader))}) — выгрузки удалены"
-    n, keep = len(chats), False
+    n, keep, read_now = len(chats), False, 0
     schema = load_profile(req["profile"])[1]
     try:
         texts = []
@@ -1483,6 +1498,9 @@ def read_parts(rid, req, chats, st):
         if len(parts) != st.get("parts") or ok is None or not 0 <= done <= len(parts):
             fail(rid, st, "parts-bad", "parts-bad")
             return "план частей или проверенные пункты не сходятся с выгрузками — сбой, новой выгрузки нет"
+        base = st.get("items_base")
+        if st.get("items_part") == done and isinstance(base, int) and not isinstance(base, bool) and 0 <= base <= len(ok):
+            del ok[base:]   # проход оборван между write_items и write_state: пункты этой части уже записаны, читаем её заново
         by_id = [{x["id"]: x for x in dump} for dump in dumps]
         pos = [{x["id"]: i for i, x in enumerate(dump)} for dump in dumps]
         while done < len(parts):
@@ -1493,7 +1511,13 @@ def read_parts(rid, req, chats, st):
                 keep = True
                 log(rid, "reading-wait", parts=len(parts), done=done)
                 return f"читает частями: готово {done} из {len(parts)}, дальше — следующим проходом"
+            if PARTS_CAP and read_now >= PARTS_CAP:   # за этой заявкой в проходе ждут другие: им тоже нужен срок
+                keep = True
+                log(rid, "reading-yield", parts=len(parts), done=done)
+                return f"читает частями: готово {done} из {len(parts)}, остальное — следующим проходом (очередь других заявок)"
+            read_now += 1
             st["part_attempts"] = int(st.get("part_attempts") or 0) + 1
+            st.update(items_part=done, items_base=len(ok))   # сколько пунктов было до этой части — для повтора после обрыва
             write_state(d, st)
             if len(parts) == 1:   # всё в одной части — как прежде: читатель в папке заявки, выгрузки целиком
                 cwd, note = d, ""
@@ -1660,7 +1684,7 @@ def deliver(rid, req, chats, st, nums, t_ok):
             continue
         if re.fullmatch(r"TG-[0-9a-f]{12}>>>", line):
             break
-        m = re.match(r"(\d{1,3})\. (.+)$", line)
+        m = re.match(r"(\d+)\. (.+)$", line)
         if inside and m:
             items[int(m.group(1))] = m.group(2)
     chosen = [(k, items[k]) for k in sorted(nums) if k in items]
@@ -1713,6 +1737,7 @@ def process(rid):
     remove_scratch(d, keep_dumps=st.get("phase") == "reading")
     bad = validate(req) if req else "нет request.json"
     if bad or req.get("rid") != rid:
+        remove_scratch(d)   # заявка не по образцу — «да» на неё не действует: выгрузки этапа reading не ждут срока
         if t - os.lstat(d).st_mtime > REQUEST_TTL:
             remove_request(rid)
             log(rid, "removed-bad")
@@ -1787,7 +1812,7 @@ def cmd_run():
     if "CLAUDECODE" in os.environ or "CLAUDE_CODE_ENTRYPOINT" in os.environ:
         err("pantheon read run: только плановый проход (задача read-run), не из окна Claude Code")
         return 2
-    global DEADLINE
+    global DEADLINE, PARTS_CAP
     DEADLINE = time.monotonic() + RUN_BUDGET
     old = {s: signal.signal(s, _on_signal) for s in STOP_SIGNALS}
     rid = None
@@ -1804,9 +1829,14 @@ def cmd_run():
                 return 0
             os.chmod(r, 0o700)
             rc = 0
-            for rid in sorted(os.listdir(r)):
-                if not RID_RE.fullmatch(rid):
-                    continue
+            rids = [x for x in sorted(os.listdir(r)) if RID_RE.fullmatch(x)]
+            phases = {x: read_json(os.path.join(r, x, "state.json")) or {} for x in rids}
+            phases = {x: st.get("phase") for x, st in phases.items()}
+            rids.sort(key=lambda x: phases[x] == "reading")   # стабильно: заявки, что читают частями, — в конце
+            for i, rid in enumerate(rids):
+                # читающая заявка не съедает срок прохода у тех, что за ней: если дальше ещё читают или ждут «да», она
+                # читает не больше одной части (последняя в очереди — сколько хватит срока)
+                PARTS_CAP = 1 if any(phases[y] in ("reading", "requested") for y in rids[i + 1:]) else None
                 try:
                     print(f"read-{rid}: {process(rid)}")
                 except Exception as e:  # одна заявка не останавливает другие; текста в сообщении нет
@@ -1821,7 +1851,7 @@ def cmd_run():
         sys.stdout.flush()
         return 128 + int(e.args[0] if e.args else signal.SIGTERM)
     finally:
-        DEADLINE = None
+        DEADLINE = PARTS_CAP = None
         for s, h in old.items():
             signal.signal(s, h)
 

@@ -7,6 +7,10 @@
 Скрипты Python хуки запускают только запускателем hooks/python.sh (Python 3.11+), голого python3 в командах нет.
 Запускатель: выбирает 3.11+ и при /usr/bin/python3 (3.9) первым в PATH; без 3.11+ — код 2 на PreToolUse и код 0
 молча на остальных событиях; копии в guard и pantheon одинаковые.
+metis-0330 F3 («залипший код 2»): пропавший файл скрипта — тоже код 2 только на PreToolUse, на Stop, UserPromptSubmit,
+PostToolUse, SessionStart — код 0 (Python сам дал бы 2: Stop не заканчивал бы ход, сообщения владельца глотались бы во
+всех окнах). Проверка — и запускателем, и настоящими командами hooks.json guard и pantheon на корне плагина без .py.
+Каждый отказ запускателя — строка в guard-failures.log; висячая ссылка на интерпретатор пропускается.
 
 Запуск: python3 -I plugins/guard/tests/test_hooks_json.py
 """
@@ -114,6 +118,7 @@ try:
     known, fw, old = os.path.join(tmp, "known"), os.path.join(tmp, "fw"), os.path.join(tmp, "old")
     os.makedirs(known)
     os.makedirs(fw)
+    open(os.path.join(tmp, "s.py"), "w").close()  # скрипт на месте (cwd=tmp): запускатель проверяет его до exec
     fake(old, "python3", "exit 1")  # python3 из PATH старше 3.11: проверка версии не проходит
     iso = isolated(known, fw)
     pre_ev = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}})
@@ -179,6 +184,108 @@ try:
     r = launch(["s.py"], f"{first}:{old}", pre_ev, iso3)
     check("первое место в PATH (при пустых DIRS и FW): python3.14 берётся",
           r.stdout.strip() == "FIRST314 -I s.py", (r.stdout, r.stderr))
+    # --- metis-0330 F3: пропавший файл скрипта и висячий интерпретатор не «залипают» кодом 2 ----------------------
+    fail_log = os.path.join(tmp, ".local", "state", "pantheon", "logs", "guard-failures.log")
+
+    def log_lines():
+        try:
+            with open(fail_log, encoding="utf-8") as fh:
+                return fh.read().splitlines()
+        except OSError:
+            return []
+
+    real = os.path.dirname(sys.executable) + ":/usr/bin:/bin"
+    gone = os.path.join(tmp, "renamed", "guard.py")
+    r = launch([gone, "--strict"], real, pre_ev)
+    check("нет файла скрипта → PreToolUse: код 2, причина с именем файла",
+          r.returncode == 2 and "файла скрипта нет" in r.stderr and "guard.py" in r.stderr and r.stdout == ""
+          and "can't open file" not in r.stderr, (r.returncode, r.stdout, r.stderr))
+    check("нет файла скрипта → строка launcher в guard-failures.log",
+          any(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\tlauncher\tPreToolUse\tno-script guard\.py", ln)
+              for ln in log_lines()), log_lines())
+    for ev in ("Stop", "UserPromptSubmit", "PostToolUse", "SessionStart", "SubagentStop"):
+        r = launch([gone], real, json.dumps({"hook_event_name": ev, "session_id": "s"}))
+        check(f"нет файла скрипта → {ev}: код 0 без вывода (не залипший код 2)",
+              r.returncode == 0 and r.stdout == "" and r.stderr == "", (r.returncode, r.stdout, r.stderr))
+    check("нет файла скрипта на Stop → строка launcher other в журнале",
+          any(ln.endswith("\tlauncher\tother\tno-script guard.py") for ln in log_lines()), log_lines())
+    os.makedirs(os.path.join(tmp, "dirpy", "ctx.py"))
+    r = launch([os.path.join(tmp, "dirpy", "ctx.py")], real, json.dumps({"hook_event_name": "Stop"}))
+    check("папка на месте скрипта → Stop: код 0", r.returncode == 0 and r.stderr == "", (r.returncode, r.stderr))
+    # файл есть, но не читается (chmod 0): Python тоже вышел бы с кодом 2 — ветка `! [ -r ]` запускателя
+    noread = os.path.join(tmp, "noread", "ctx.py")
+    os.makedirs(os.path.dirname(noread))
+    open(noread, "w").close()
+    os.chmod(noread, 0)
+    if os.geteuid() != 0:  # root читает и файл без прав — проверка там не о том
+        r = launch([noread], real, json.dumps({"hook_event_name": "Stop"}))
+        check("файл скрипта без прав чтения → Stop: код 0 без вывода",
+              r.returncode == 0 and r.stdout == "" and r.stderr == "", (r.returncode, r.stdout, r.stderr))
+        r = launch([noread, "maint-pre"], real, pre_ev)
+        check("файл скрипта без прав чтения → PreToolUse: код 2 с причиной",
+              r.returncode == 2 and "файла скрипта нет или он не читается" in r.stderr
+              and "Permission denied" not in r.stderr,
+              (r.returncode, r.stdout, r.stderr))
+    os.chmod(noread, 0o600)
+    n0 = len(log_lines())
+    r = launch(["x.py"], old, json.dumps({"hook_event_name": "Stop"}), iso)
+    check("нет 3.11+ → строка launcher no-python в журнале",
+          len(log_lines()) == n0 + 1 and log_lines()[-1].endswith("\tlauncher\tother\tno-python x.py"), log_lines())
+    r = launch(["-c", PROBE], real)
+    check("-c без файла скрипта работает как раньше", r.returncode == 0 and re.fullmatch(r"\d+\.\d+", r.stdout.strip()),
+          (r.returncode, r.stdout, r.stderr))
+    script = os.path.join(tmp, "ok.py")
+    with open(script, "w") as fh:
+        fh.write("import sys; print('OK', sys.stdin.read()[:30])\n")
+    r = launch([script], real, '{"hook_event_name": "Stop"}')
+    check("файл скрипта на месте → stdin доходит до скрипта нетронутым",
+          r.returncode == 0 and r.stdout.strip() == 'OK {"hook_event_name": "Stop"}', (r.returncode, r.stdout, r.stderr))
+
+    # висячая ссылка python3.14 в известной папке (brew удалил Cellar) — пропускается, берётся следующий
+    dang_known, dang_path = os.path.join(tmp, "dangk"), os.path.join(tmp, "dangp")
+    os.makedirs(dang_known)
+    os.symlink(os.path.join(tmp, "Cellar-removed", "python3.14"), os.path.join(dang_known, "python3.14"))
+    fake(dang_path, "python3.13", 'echo "NEXT313 $*"')
+    iso4 = isolated(dang_known, os.path.join(tmp, "nofw2"))
+    r = launch(["s.py"], f"{dang_path}:{old}", pre_ev, iso4)
+    check("висячая ссылка python3.14 пропущена → python3.13 из PATH", r.stdout.strip() == "NEXT313 -I s.py",
+          (r.returncode, r.stdout, r.stderr))
+
+    # настоящие команды hooks.json на корне плагина, где .py пропали (переименование, сломанный кэш версии):
+    # PreToolUse — отказ с причиной (критичная защита не запустилась), остальные события — не код 2
+    state = os.path.join(tmp, "pstate")
+    os.makedirs(os.path.join(state, "push"))
+    with open(os.path.join(state, "maintenance.json"), "w") as fh:
+        fh.write("{}")
+    for plugin in ("guard", "pantheon"):
+        hj = os.path.join(ROOT, plugin, "hooks", "hooks.json")
+        if not os.path.exists(hj):
+            continue
+        root = os.path.join(tmp, "broken-" + plugin)
+        os.makedirs(os.path.join(root, "hooks"))
+        shutil.copy2(os.path.join(ROOT, plugin, "hooks", "python.sh"), os.path.join(root, "hooks", "python.sh"))
+        with open(hj, encoding="utf-8") as fh:
+            hooks = json.load(fh)["hooks"]
+        ran = 0
+        for event, groups in hooks.items():
+            for g in groups:
+                for h in g["hooks"]:
+                    if "python.sh" not in h["command"]:
+                        continue
+                    ran += 1
+                    env = {"PATH": real, "HOME": tmp, "CLAUDE_PLUGIN_ROOT": root, "PANTHEON_STATE": state}
+                    ev_json = json.dumps({"hook_event_name": event, "session_id": "s", "tool_name": "Bash",
+                                          "tool_input": {"command": "ls"}})
+                    r = subprocess.run(["/bin/sh", "-c", h["command"]], input=ev_json, env=env, capture_output=True,
+                                       text=True, timeout=60, cwd=tmp)
+                    tag = f"{plugin} {event} {h['command'].rsplit('/hooks/', 1)[-1][:40]}"
+                    if event == "PreToolUse":
+                        check(f"без .py: {tag} → код 2 с причиной", r.returncode == 2 and "файла скрипта нет" in r.stderr,
+                              (r.returncode, r.stderr))
+                    else:
+                        check(f"без .py: {tag} → код 0, не залипший 2", r.returncode == 0 and r.stderr == "",
+                              (r.returncode, r.stderr))
+        check(f"без .py: команды {plugin} через python.sh проверены ({ran})", ran >= 3, ran)
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
