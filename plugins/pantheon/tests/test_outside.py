@@ -359,6 +359,23 @@ def accept(sha, repo=REPO, who="argus", age=0, pr=5):
            "by": {"agent_type": who, "agent_id": "a", "session_id": "s"}, "cwd": APP, "time": t}
     with open(RECORDS, "a") as fh:
         fh.write(json.dumps(rec) + "\n")
+    open_pr(repo, sha)
+
+
+def open_pr(repo, sha):
+    """Кэш `autoclose fetch`: sha — head открытого PR (автопрогон берёт только такие, metis-0716)."""
+    cp = os.path.join(STATE, "autoclose-prs.json")
+    try:
+        with open(cp) as fh:
+            c = json.load(fh)
+    except (OSError, ValueError):
+        c = {}
+    prs = c.setdefault("open_prs", {}).setdefault(repo, [])
+    prs.append({"number": 100 + len(prs), "head": sha})
+    c["fetched"] = time.time()
+    c.setdefault("errors", {})
+    with open(cp, "w") as fh:
+        json.dump(c, fh)
 
 
 def gate_records():
@@ -1756,8 +1773,8 @@ class Sim:
         names = ("requests", "handle", "run_auto", "auto_todo", "auto_due", "waiting_keys", "_queued_ids")
         saved = {n: getattr(O, n) for n in names}
 
-        def requests(kinds=()):
-            q, self.queue = self.queue, []
+        def requests(kinds=(), limit=None):
+            q, self.queue = self.queue[:limit], self.queue[limit:] if limit else []
             return [("", "test", "qd", "w", r, {}) for r in q]
 
         def run_auto(repo, sha):
@@ -1816,6 +1833,7 @@ check("заявок нет: автопрогоны идут подряд, оче
 # ждущая заявка на тот же (repo, sha): автопрогон не дублируется; пропущенное не «просмотрено»
 HEADA = git(APP, "rev-parse", "HEAD")
 rc, q, rid = role_request("athena-x", APP, "test")
+time.sleep(1.1)   # id заявки начинается со времени: role_request берёт последнюю по имени
 rc2, q2, rid2 = role_request("athena-x", APP, "test", "--script", "lint")
 keys = O.waiting_keys()
 check("ждущая заявка test даёт ключ (repo, HEAD), заявка не снята; с --script ключа нет",
@@ -1833,6 +1851,107 @@ check("пропущенное не помечено просмотренным (
 for r_, d_ in ((rid, q), (rid2, q2)):
     os.remove(os.path.join(d_, r_ + ".req.json"))
 check("ключей ждущих заявок больше нет", O.waiting_keys() == set())
+
+# заявки по одной: убитый заход не теряет остальные (2а), неснимаемая заявка не крутит заход
+_h = O.handle
+got = []
+rc, q, r1 = role_request("athena-x", APP, "test")
+time.sleep(1.1)   # время заявки — с точностью до секунды: вторая позже первой
+rc, q, r2 = role_request("athena-x", APP, "test")
+
+
+def kill_after_first(qdir, window, rid, req):
+    got.append(rid)
+    raise SystemExit(9)   # заход убит посреди первой заявки
+
+
+O.handle = kill_after_first
+try:
+    O.run_test_queue()
+except SystemExit:
+    pass
+O.handle = _h
+check("заход прерван на первой заявке: её .req.json снят, вторая лежит в очереди",
+      got == [r1] and not os.path.exists(os.path.join(q, r1 + ".req.json"))
+      and os.path.exists(os.path.join(q, r2 + ".req.json")), (got, r1, r2))
+os.remove(os.path.join(q, r2 + ".req.json"))
+rc, q, r3 = role_request("athena-x", APP, "test")
+_u = O._unlink_in
+O._unlink_in = lambda dfd, name: None   # снять заявку не удаётся
+got = []
+O.handle = lambda qdir, window, rid, req: got.append(rid)
+t0 = time.time()
+O.run_test_queue()
+O.handle, O._unlink_in = _h, _u
+check("заявку не снять: заход заканчивается, заявка не запускается и не крутит цикл", got == [] and time.time() - t0 < 30, got)
+os.remove(os.path.join(q, r3 + ".req.json"))
+
+# потерянная заявка и зомби running: чинит только заход под замком outside-run
+qa = os.path.join(CACHE, "athena-x", "outside")
+
+
+def put_result(rid, res, age=0):
+    fp = os.path.join(qa, rid + ".result.json")
+    with open(fp, "w") as fh:
+        json.dump({"id": rid, **res}, fh)
+    os.utime(fp, (time.time() - age, time.time() - age))
+
+
+put_result("20261102-101010-aaaaaa", {"state": "queued", "kind": "test"}, age=900)
+put_result("20261102-101010-bbbbbb", {"state": "queued", "kind": "test"}, age=30)
+put_result("20261102-101010-cccccc", {"state": "queued", "kind": "test"}, age=900)
+with open(os.path.join(qa, "20261102-101010-cccccc.req.json"), "w") as fh:
+    fh.write("{}")
+put_result("20261102-101010-dddddd", {"state": "running", "kind": "test", "sha": "a" * 40}, age=900)
+put_result("20261102-101010-eeeeee", {"state": "queued", "kind": "serve"}, age=900)
+put_result("20261102-101010-ffffff", {"state": "running", "kind": "serve"}, age=900)
+P.write_json(O.root("runs", "20261102-101010-a0a0a0.json"), {"id": "20261102-101010-a0a0a0", "state": "running", "kind": "test"})
+O.recover_results()
+st = {x: (O.load_result(qa, "20261102-101010-" + x) or {}) for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd", "eeeeee", "ffffff")}
+check("потеряна: queued без .req.json старше 5 мин → failed «заявка потеряна»",
+      st["aaaaaa"].get("state") == "failed" and "потеряна" in st["aaaaaa"].get("why", ""), st["aaaaaa"])
+check("queued свежее 5 мин и queued с лежащей заявкой — не тронуты",
+      st["bbbbbb"].get("state") == "queued" and st["cccccc"].get("state") == "queued", (st["bbbbbb"], st["cccccc"]))
+check("зомби: running без захода → failed «заход прерван», поля итога сохранены",
+      st["dddddd"].get("state") == "failed" and "прерван" in st["dddddd"].get("why", "") and st["dddddd"].get("sha") == "a" * 40,
+      st["dddddd"])
+check("serve (queued и running) проход тестов не трогает", st["eeeeee"].get("state") == "queued"
+      and st["ffffff"].get("state") == "running", (st["eeeeee"], st["ffffff"]))
+check("автопрогон running только в runs/ → failed",
+      P.read_json(O.root("runs", "20261102-101010-a0a0a0.json"), {}).get("state") == "failed")
+put_result("20261102-101010-dddddd", {"state": "running", "kind": "test"}, age=900)
+check("cmd_run (замок свободен) чинит зомби сам",
+      run_pass() == 0 and O.load_result(qa, "20261102-101010-dddddd").get("state") == "failed")
+for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd", "eeeeee", "ffffff"):
+    for ext in ("result.json", "req.json"):
+        if os.path.exists(os.path.join(qa, f"20261102-101010-{x}.{ext}")):
+            os.remove(os.path.join(qa, f"20261102-101010-{x}.{ext}"))
+os.remove(O.root("runs", "20261102-101010-a0a0a0.json"))
+
+# автопрогон только на head открытого PR
+_cp = os.path.join(STATE, "autoclose-prs.json")
+_saved = open(_cp).read() if os.path.exists(_cp) else None
+OLDSHA, NEWSHA = "1" * 40, "2" * 40
+accept(OLDSHA, repo="latark/hh-old")
+accept(NEWSHA, repo="latark/hh-new")
+os.remove(_cp)
+open_pr("latark/hh-new", NEWSHA)
+open_pr("latark/hh-old", "3" * 40)   # PR ушёл вперёд: head уже другой
+todo = [k for k in O.auto_todo() if k[0].startswith("latark/hh-")]
+check("автопрогон: «принять» на старом head PR пропущено, на текущем — берётся", todo == [("latark/hh-new", NEWSHA)], todo)
+c = json.load(open(_cp))
+c["errors"] = {"latark/hh-new": "gh не ответил"}
+json.dump(c, open(_cp, "w"))
+check("gh не ответил по репозиторию: автопрогон пропущен", [k for k in O.auto_todo() if k[0] == "latark/hh-new"] == [])
+c["errors"] = {}
+c["fetched"] = time.time() - 2 * 3600
+json.dump(c, open(_cp, "w"))
+check("кэш PR старше часа: автопрогонов нет", [k for k in O.auto_todo() if k[0].startswith("latark/hh-")] == [])
+os.remove(_cp)
+check("кэша PR нет: автопрогонов нет", O.auto_todo() == [])
+if _saved is not None:
+    with open(_cp, "w") as fh:
+        fh.write(_saved)
 
 # --- 6. сироты (metis-0614): после всех серверов и стопов ни заглушки, ни задач «turbo» в живых --------------------
 kill_all_servers()
