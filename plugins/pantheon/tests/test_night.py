@@ -44,6 +44,15 @@ P = importlib.util.module_from_spec(_spec)
 sys.modules["pantheon_night_test"] = P
 _spec.loader.exec_module(P)
 N = P.night_mod()
+PROBES = []  # вызовы пробного запроса (metis-0459): настоящий claude тесты не зовут никогда
+
+
+def _no_probe():
+    PROBES.append(None)
+    return 127
+
+
+N.probe_run = _no_probe
 
 
 def check(cond, what):
@@ -912,6 +921,102 @@ def test_power_0284():
         for k, v in saved.items():
             if v is not None:
                 os.environ[k] = v
+
+
+def test_probe_stale_snapshot_0459():
+    """Снимок старше 3 ч, ночь одобрена: проход делает пробный запрос (заглушка), мерит заново и открывает ночь;
+    не освежило — тревога и закрыто; не чаще раза в 30 мин; без одобрения, днём, при свежем снимке — запроса нет."""
+    resets = hm("22:00") + 3 * 86400
+
+    def run(e, t, fresh=False):
+        PROBES.clear()
+
+        def stub():
+            PROBES.append(t)
+            if fresh:
+                e.resets = resets
+                e.at_line(t - 60, 0)
+            return 0
+        N.probe_run = stub
+        e.watch(t)
+        N.probe_run = _no_probe
+        return list(PROBES)
+
+    e = Env()
+    open_night(e)  # ответ «Да» есть, снимок 22:00
+    e.resets = resets
+    e.at_line(hm("22:00") - 4 * 3600, 0)  # снимок 4 ч назад
+    check(len(run(e, hm("23:00"), fresh=True)) == 1, "старый снимок при одобренной ночи — пробного запроса нет")
+    check(e.state_of().get("opened_at") == hm("23:00"), f"после зонда ночь не открылась: {e.state_of()}")
+    check("зонд не освежил" not in e.alerts(), "зонд освежил, а тревога есть")
+    # зонд не помог: тревога, ночь закрыта, повтор не раньше чем через 30 мин
+    e2 = Env()
+    open_night(e2)
+    e2.resets = resets
+    e2.at_line(hm("22:00") - 5 * 3600, 0)
+    check(len(run(e2, hm("23:00"))) == 1, "зонд не вызван")
+    check("зонд не освежил снимок" in e2.alerts() and not e2.state_of().get("opened_at"),
+          f"зонд не помог, а тревоги/закрытия нет: {e2.alerts()!r} {e2.state_of()}")
+    check(run(e2, hm("23:10")) == [], "повторный зонд раньше 30 мин")
+    check(len(run(e2, hm("23:31"))) == 1, "зонд не повторён через 30 мин")
+    # нет одобрения / день / свежий снимок / пропущенная ночь — запроса нет
+    e3 = Env()
+    _add_pack(e3, "")
+    e3.resets = resets
+    e3.at_line(hm("22:00") - 5 * 3600, 0)
+    check(run(e3, hm("23:00")) == [], "зонд без ответа «Да» о ночи")
+    e4 = Env()
+    open_night(e4)
+    e4.resets = resets
+    e4.at_line(day("14:00") - 5 * 3600, 0)
+    check(run(e4, day("14:00")) == [], "зонд днём")
+    e5 = Env()
+    open_night(e5)
+    e5.resets = resets
+    e5.at_line(hm("23:00") - 600, 0)
+    check(run(e5, hm("23:00")) == [], "зонд при свежем снимке")
+    e8 = Env()
+    open_night(e8)
+    e8.resets = resets
+    e8.at_line(hm("22:00") - 5 * 3600, 0)
+    check(run(e8, hm("22:10")) == [] and len(run(e8, hm("22:31"))) == 1, "зонд раньше чем за 30 мин до начала ночи или не за 30 мин")
+    e6 = Env()
+    open_night(e6)
+    st = e6.state_of()
+    st["skipped"] = "x"
+    json.dump(st, open(os.path.join(e6.state, "night", EVENING.isoformat() + ".json"), "w"))
+    e6.resets = resets
+    e6.at_line(hm("22:00") - 5 * 3600, 0)
+    check(run(e6, hm("23:00")) == [], "зонд для пропущенной ночи")
+    # снимка нет вовсе при одобренной ночи — тоже зонд
+    e7 = Env()
+    open_night(e7)
+    for f in os.listdir(e7.sl):
+        os.unlink(os.path.join(e7.sl, f))
+    check(len(run(e7, hm("23:00"))) == 1, "снимка нет — зонда нет")
+
+
+def test_old_card_leaves_board_0459():
+    """Закрытая проходом карточка вопроса о ночи (до выпуска): статус dropped, вопрос и варианты сняты — на доске в
+    «Ждёт вас» её нет (раньше: проверить при пробном прогоне, metis-0195)."""
+    e = Env()
+    e.resets = hm("22:00") + 3 * 86400
+    T = P.tasks_mod()
+    tid, _ = T.task_new(e.pantheon, hm("22:00"), "inbox", "Запустить сегодня на ночь выполнение задач?", owner="zeus",
+                        status="waiting", waiting_on="human", actor="плановый проход",
+                        question="Запустить ночь?", why="Ночь по расписанию", options=["Да — запустить", "Нет — пропустить"])
+    before = e.cards()[tid]
+    check(before.get("question") and before.get("options"), f"заготовка карточки без вопроса: {before}")
+    os.makedirs(os.path.join(e.state, "night"), exist_ok=True)
+    json.dump({"card_id": tid, "card_at": hm("22:00")},
+              open(os.path.join(e.state, "night", EVENING.isoformat() + ".json"), "w"))
+    e.at_line(hm("22:05"), 0)
+    e.watch(hm("22:05"))
+    after = e.cards()[tid]
+    check(after["status"] == "dropped" and not after.get("question") and not after.get("options")
+          and after.get("waiting_on") is None, f"карточка осталась с вопросом и вариантами: {after}")
+    waiting = [i for i, h in e.cards().items() if h.get("status") == "waiting" and h.get("waiting_on") == "human"]
+    check(tid not in waiting, f"карточка ночи в «Ждёт вас»: {waiting}")
 
 
 if __name__ == "__main__":
