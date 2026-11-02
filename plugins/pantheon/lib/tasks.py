@@ -628,7 +628,8 @@ _DW_ITEM = re.compile(r"^\s*[-*]\s*\[([ xXхХ])\]\s*(.*?)\s*$")
 
 def done_criteria(body):
     """Пункты «Готово, когда» в теле → [(отмечен, текст)]. Раздел — строка «## Готово, когда» или «Готово, когда:», дальше
-    чек-лист; кончается заголовком или любой строкой не из списка. Подсказка-заглушка считается пунктом."""
+    чек-лист; кончается заголовком или любой строкой не из списка. Заглушка шаблона (DONE_WHEN_HINT) пунктом не считается
+    (metis-0712): задача, где есть только она, — без критериев."""
     out, on = [], False
     for ln in (body or "").split("\n"):
         if not on:
@@ -636,14 +637,15 @@ def done_criteria(body):
             continue
         m = _DW_ITEM.match(ln)
         if m:
-            out.append((m.group(1) != " ", m.group(2)))
+            if " ".join(m.group(2).split()) != DONE_WHEN_HINT:
+                out.append((m.group(1) != " ", m.group(2)))
         elif ln.strip():
             break
     return out
 
 
 def unchecked_criteria(head, body):
-    """Число неотмеченных пунктов «Готово, когда» (заглушка-подсказка — тоже неотмеченный); 0 — у задач, созданных до CRITERIA_FROM."""
+    """Число неотмеченных пунктов «Готово, когда» (заглушка шаблона не пункт); 0 — у задач, созданных до CRITERIA_FROM."""
     if str(head.get("created") or "") < CRITERIA_FROM:
         return 0
     return sum(1 for done, _ in done_criteria(body) if not done)

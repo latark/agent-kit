@@ -585,13 +585,18 @@ def test_close_criteria():
         pf = put(home, "metis-pantheon", "metis-0015", body=two, created="2026-10-26")
         T.task_set(home, T0, "metis-0015", {"status": "done"})
         check("задача от 26.10 закрывается вручную без --force", T.read(pf)[0].get("status") == "done")
-        put(home, "metis-pantheon", "metis-0016", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n", created="2026-10-27")
-        try:
-            T.task_set(home, T0, "metis-0016", {"status": "done"})
-            err = ""
-        except ValueError as e:
-            err = str(e)
-        check("заглушка-подсказка — неотмеченный пункт", "неотмечено 1" in err, err)
+        p16 = put(home, "metis-pantheon", "metis-0016", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n", created="2026-10-27")
+        T.task_set(home, T0, "metis-0016", {"status": "done"})
+        check("metis-0712: заглушка шаблона не пункт — ручной done проходит", T.read(p16)[0].get("status") == "done")
+        # слитый PR с Closes, в «Готово, когда» только заглушка → done, не review
+        stub = "## Готово, когда\n\n- [ ] " + T.DONE_WHEN_HINT + "\n"
+        p20 = put(home, "metis-pantheon", "metis-0020", body=stub, created="2026-10-27")
+        p21 = put(home, "metis-pantheon", "metis-0021", body=stub + "- [ ] настоящий пункт\n", created="2026-10-27")
+        log, errs = run_cache(home, state, T0 + 20, {"latark/agent-kit": [
+            cpr(20, "x-1", "Closes metis-0020", T0 - 3600), cpr(21, "x-2", "Closes metis-0021", T0 - 3600)]})
+        check("metis-0712: слит PR, только заглушка → done", T.read(p20)[0].get("status") == "done", str(log) + str(errs))
+        check("metis-0712: заглушка + настоящий неотмеченный → review «неотмечено 1» (заглушка не в счёт)",
+              T.read(p21)[0].get("status") == "review" and "слит, неотмечено 1" in text(p21), text(p21)[-300:])
         # остаток: task split пишет result, по нему done проходит без --force
         ph = put(home, "metis-pantheon", "metis-0017", body=two, created="2026-10-27")
         nid, _ = T.task_split(home, T0, "metis-0017", "Второе")
