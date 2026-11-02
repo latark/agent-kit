@@ -146,7 +146,12 @@ def _pr_files(T, raw):
 def _pr_row(A, T, repo, pr, raw_files, branch):
     files, dropped = _pr_files(T, raw_files)
     return {"repo": repo, "number": pr.get("number"), "branch": branch, "files": files, "dropped": dropped,
-            "ids": A.find_ids(branch, pr.get("body") or ""), "closes": A.closing_ids(branch, pr.get("body") or "")}
+            "ids": A.find_ids(branch, _body(pr)), "closes": A.closing_ids(branch, _body(pr))}
+
+
+def _body(pr):
+    body = pr.get("body")
+    return body if isinstance(body, str) else ""
 
 
 def _one_line(text):
@@ -164,6 +169,7 @@ def overlap_open_prs(direction):
         return [], [err]
     env = {k: v for k, v in os.environ.items() if k not in ("GH_REPO", "GH_HOST")}
     cache = P.read_json(P.path("autoclose-prs.json"), {})
+    cache = cache if isinstance(cache, dict) else {}  # кэш не словарь — как нет кэша
     cached = cache.get("open_prs") if isinstance(cache.get("open_prs"), dict) else {}
     fetched = cache.get("fetched")
     prs, notes = [], [err] if err else []

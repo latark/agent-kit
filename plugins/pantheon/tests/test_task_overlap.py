@@ -286,7 +286,26 @@ def cli():
     check("ответ gh об ошибке с переводами строк и ESC — в одну строку, своих строк не вставил",
           r.returncode == 0 and line and "HTTP 502 - задача metis-0001 (вставка)" in line[0] and "\x1b" not in r.stdout
           and not any(ln.startswith("- задача metis-0001") for ln in r.stdout.splitlines()), r.stdout)
+    open(os.path.join(state, "autoclose-prs.json"), "w").write("[1, 2]")
+    r = pan(env, "task", "overlap", "metis-0001")
+    check("gh упал, кэш не словарь — как нет кэша: строка «кэша … нет», код 0",
+          r.returncode == 0 and "кэша планового прохода нет" in r.stdout, (r.stdout, r.stderr))
     os.remove(os.path.join(gh, "fail"))
+    gh_prs(gh, "latark/agent-kit", [dict(PR248, body=5)])
+    r = pan(env, "task", "overlap", "metis-0001")
+    check("тело PR не строка — PR всё равно сверен по файлам, без падения",
+          r.returncode == 0 and f"PR #248 latark/agent-kit (ветка ci-billing-0655): {GATE}" in r.stdout, (r.stdout, r.stderr))
+    gh_prs(gh, "latark/agent-kit", [PR248, PR250])
+    code = (f"import sys; sys.path.insert(0, {LIB!r}); import pantheon as P\n"
+            "def boom(*a, **k):\n    raise RuntimeError('сломано')\n"
+            "P.task_cmd.__globals__['overlap_lines'] = boom\n"
+            "sys.exit(P.task_cmd(['set', 'metis-0010', 'status=doing']))\n")
+    r = subprocess.run([PY311, "-I", "-c", code], env=dict(env, PANTHEON_NOW=str(T0)), capture_output=True, text=True,
+                       timeout=120)
+    check("сверка упала при status=doing — запись сделана, код 0, в stderr «сверка пересечения не прошла (RuntimeError…)»",
+          r.returncode == 0 and "предупреждение · сверка пересечения не прошла (RuntimeError: сломано)" in r.stderr
+          and "pantheon task overlap metis-0010" in r.stderr, (r.returncode, r.stderr[-500:]))
+    put(home, "metis-pantheon", "metis-0010", status="todo", touches=["docs/"])
 
     # task set status=doing — предупреждение в stderr, запись сделана, код 0
     os.remove(os.path.join(gh, "calls.log"))
