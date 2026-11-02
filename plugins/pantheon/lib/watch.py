@@ -207,6 +207,12 @@ def wake_block(name, agents, registry, auto, nudge=False):
     p = P.load_pause(name)
     if p:
         return f"пауза по нагрузке ({p.get('reason')})"
+    # metis-0662 Д2: призрак с вопросом не держит имя (процесса нет), но и не поднимается без ответа владельца — ни
+    # самозапуском, ни разовым запуском, ни после паузы, ни wake; pantheon start отказывает так же (sessions.py)
+    alias = P.name_alias(name)
+    asks = [a for a in agents if P.asks_owner(a) and alias.fullmatch(str(a.get("name") or ""))]
+    if asks:
+        return f"ждёт вашего ответа (процесс умер, вопрос остался): claude attach {asks[0].get('id')}"
     hold = holders(name, agents, registry)
     if hold and not (nudge and nudge_target(hold)):
         return "уже работает"
@@ -482,7 +488,9 @@ def sessions(agents, doms, t=None):
         if not sid or not is_pantheon(name, doms):
             continue
         key = f"watch-state-{sid}"
-        if state not in word or a.get("noProcess"):  # metis-0250: снятая Claude Code без вопроса — не «ждёт вас»
+        # metis-0250: снятая Claude Code без вопроса — не «ждёт вас» и без тревоги, и призраком тоже (metis-0662 Д1):
+        # ждать ей нечего, а поднимают её самозапуск, wake и pantheon start (заменяет новой)
+        if state not in word or a.get("noProcess"):
             P.clear_once(key)
             P.clear_fault(*(f"watch-{s}-{sid}" for s in word))  # состояние снялось — следующее снова macOS
             continue
@@ -494,7 +502,9 @@ def sessions(agents, doms, t=None):
         if a.get("ghost"):  # metis-0651: процесс умер, запись осталась — одна тревога на сессию, пока призрак виден
             P.alert_once(key, "ghost", f"{name} ({sid}): процесс умер, в claude agents осталась запись "
                          f"«{a.get('listedState')}»" + (f", ждала: {why}" if why else "")
-                         + f" — имя свободно, поднять: pantheon wake {name}", "watch")
+                         # metis-0662 С1: с вопросом wake и start не поднимают — совет тот же, что у отказа start
+                         + (f" — ждёт вашего ответа: claude attach {sid}" if ghost_asks
+                            else f" — имя свободно, поднять: pantheon wake {name}"), "watch")
             if not ghost_asks:
                 continue
         else:

@@ -944,6 +944,9 @@ def _wake(dry, over=False):
             continue
         if os.path.exists(P.path("stopped", name)) or load_pause(name):
             continue
+        if P.asks_owner(a):  # metis-0662: призрак с вопросом поднимает ответ владельца, как у отказа pantheon start
+            print(f"пропуск: {name} — ждёт вашего ответа: claude attach {a.get('id')}")
+            continue
         newer = [b for b in agents if b.get("name") == name and (b.get("startedAt") or 0) > (a.get("startedAt") or 0)]
         if newer:
             continue  # эпик уже продолжен новой сессией с тем же именем

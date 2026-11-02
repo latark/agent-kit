@@ -3752,6 +3752,114 @@ def test_ghost_blocked_does_not_hold_name_0651():
     check("не спит" in out, f"0651: без реестра демона записи без pid верим (не утверждаем): {out}")
 
 
+
+def _ghost_env(name, updated=None):
+    """Окружение для призраков: реестр демона с чужим живым воркером (непустой, нашей сессии нет), правлен updated."""
+    e = Env()
+    e.direction(name)
+    daemon = os.path.join(e.home, ".claude", "daemon")
+    os.makedirs(daemon, exist_ok=True)
+    e.roster = os.path.join(daemon, "roster.json")
+    e.set_roster = lambda upd: json.dump({"updatedAt": None if upd is None else upd * 1000,
+                                          "workers": {"other": {"pid": 999999}}}, open(e.roster, "w"))
+    e.set_roster(updated)
+    return e
+
+
+def _reg(e, rec):
+    d = os.path.join(e.home, ".claude", "sessions")
+    os.makedirs(d, exist_ok=True)
+    json.dump({"pid": os.getpid(), "cwd": "/tmp", **rec}, open(os.path.join(d, f"{os.getpid()}.json"), "w"))
+
+
+def _job(e, sid, **st):
+    d = os.path.join(e.home, ".claude", "jobs", sid)
+    os.makedirs(d, exist_ok=True)
+    json.dump(st, open(os.path.join(d, "state.json"), "w"))
+
+
+def _woke(e, sid="cccccccc"):
+    return [c for c in e.calls() if c[:2] == ["respawn", sid] or ("--resume" in c and any(sid in x for x in c))]
+
+
+def test_ghost_alive_proofs_0657_0662():
+    """metis-0657 Д1: pid записи, на который kill даёт EPERM (pid 1), — живой, имя держит. metis-0662 Д3: реестр
+    демона правлен меньше минуты назад (respawn: старый startedAt у записи) — не призрак. Д4: живой процесс сессии в
+    реестре имён ~/.claude/sessions (тот же sessionId или фоновая с тем же именем) — не призрак и не noProcess."""
+    t = T0 + 60
+    e = _ghost_env("zz-ga", updated=T0 - 1000)
+    # 0657 Д1: pid 1 — чужой процесс, kill(1, 0) → EPERM, это «жив»
+    e.agents([bg("zz-ga", "blocked", "cccccccc-1", pid=1)])
+    out = e.run("wake", "zz-ga", t=t).stdout
+    check("не спит" in out and not _woke(e), f"0657 Д1: pid с EPERM принят за призрак: {out} {e.calls()}")
+    # 0662 Д3: запись старая, реестр демона только что переписан (воркер меняется) — ждём, не призрак
+    e.agents([bg("zz-ga", "working", "cccccccc-1")])
+    e.set_roster(t - 5)
+    out = e.run("wake", "zz-ga", t=t).stdout
+    check("не спит" in out and not _woke(e), f"0662 Д3: свежая правка реестра демона — призрак: {out}")
+    e.set_roster(t - 120)  # правка давняя — призрак, как в 0651
+    out = e.run("wake", "zz-ga", t=t).stdout
+    check("поднята" in out and _woke(e), f"0662 Д3: давняя правка реестра — призрак не поднят: {out}")
+    open(e.log, "w").close()
+    # 0662 Д4: процесс этой сессии (тот же sessionId) жив в реестре имён, хотя в roster его нет
+    _reg(e, {"sessionId": "cccccccc-1", "name": "other-name", "kind": "bg"})
+    out = e.run("wake", "zz-ga", t=t).stdout
+    check("не спит" in out and not _woke(e), f"0662 Д4: живой по реестру имён принят за призрак: {out}")
+    # фоновая с тем же именем в реестре имён — имя держит живой процесс: тревоги о призраке нет
+    _reg(e, {"sessionId": "dddddddd-2", "name": "zz-ga", "kind": "bg"})
+    e.run("watch", t=t)
+    check("процесс умер" not in e.alerts(), f"0662 Д4: фоновая с тем же именем жива, а тревога о призраке: {e.alerts()}")
+    # вкладка с тем же именем — не доказательство жизни этой фоновой записи: призрак
+    _reg(e, {"sessionId": "dddddddd-2", "name": "zz-ga", "kind": "interactive"})
+    e.run("watch", t=t + 60)
+    check("процесс умер" in e.alerts(), f"0662 Д4: вкладка с тем же именем спрятала призрак: {e.alerts()}")
+    # noProcess (blocked без процесса и вопроса) не ставится, если процесс сессии жив в реестре имён
+    e2 = _ghost_env("zz-gb", updated=T0 - 1000)
+    _job(e2, "eeeeeeee", state="blocked")
+    _reg(e2, {"sessionId": "eeeeeeee-1", "name": "zz-gb", "kind": "bg"})
+    e2.agents([bg("zz-gb", "blocked", "eeeeeeee-1")])
+    e2.run("watch", t=t)
+    check("zz-gb (eeeeeeee) ждёт вас" in e2.alerts(), f"0662 Д4: живая по реестру имён — noProcess: {e2.alerts()}")
+
+
+def test_ghost_question_and_noprocess_0662():
+    """metis-0662 Д2/С1: призрак с вопросом не поднимается без ответа владельца — ни wake <имя>, ни общий wake, ни
+    самозапуск; тревога советует claude attach, как и отказ pantheon start. Д1: призрак без вопроса (noProcess) — без
+    тревоги, как у metis-0250, а wake его поднимает."""
+    t = T0 + 60
+    e = _ghost_env("zz-gq", updated=T0 - 1000)
+    e.task("zz-0001", "zz-gq", status="doing")
+    rec = dict(bg("zz-gq", "blocked", "cccccccc-1"), waitingFor="какую базу брать?")
+    e.agents([rec])
+    e.run("watch", t=t)
+    line = [ln for ln in e.alerts().splitlines() if "процесс умер" in ln]
+    check(line and "claude attach cccccccc" in line[0] and "pantheon wake" not in line[0],
+          f"0662 С1: тревога призрака с вопросом советует не то, что start: {line}")
+    out = e.run("wake", "zz-gq", t=t).stdout
+    check("ждёт вашего ответа" in out and "claude attach cccccccc" in out and not _woke(e),
+          f"0662 Д2: wake <имя> поднял призрак с вопросом: {out} {e.calls()}")
+    out = e.run("wake", t=t).stdout
+    check("ждёт вашего ответа" in out and not _woke(e), f"0662 Д2: общий wake поднял призрак с вопросом: {out}")
+    # самозапуск по решению владельца: призрак с вопросом не продолжается и новая сессия не идёт
+    e.task("zz-0002", "zz-gq")
+    e.board("zz-0002", t + 10)
+    e.run("watch", t=t + 60)
+    check(not _woke(e) and not _bgs(e, "zz-gq"), f"0662 Д2: самозапуск поднял призрак с вопросом: {e.calls()}")
+    # без вопроса тот же призрак самозапуск поднимает (контроль: проверка выше не пустая)
+    e.agents([bg("zz-gq", "blocked", "cccccccc-1")])
+    e.board("zz-0002", t + 70)
+    e.run("watch", t=t + 120)
+    check(_woke(e) or _bgs(e, "zz-gq"), f"0662 Д2: контроль — призрак без вопроса самозапуск не поднял: {e.calls()}")
+    # Д1: noProcess-призрак (задание есть, вопроса нет) — ни «ждёт вас», ни тревоги о призраке; wake поднимает
+    e2 = _ghost_env("zz-gn", updated=T0 - 1000)
+    _job(e2, "ffffffff", state="blocked")
+    e2.agents([bg("zz-gn", "blocked", "ffffffff-1")])
+    e2.run("watch", t=t)
+    check("zz-gn" not in e2.alerts(), f"0662 Д1: noProcess-призрак дал тревогу: {e2.alerts()}")
+    out = e2.run("wake", "zz-gn", t=t).stdout
+    check("поднята" in out and _woke(e2, "ffffffff"), f"0662 Д1: wake не поднял noProcess-призрак: {out}")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
