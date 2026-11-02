@@ -10,7 +10,7 @@ import sys
 __all__ = [
     "TASK_NEW_VALUE_FLAGS", "TASK_NEW_BOOL_FLAGS", "TASK_SPLIT_VALUE_FLAGS", "TASK_SET_VALUE_FLAGS",
     "TASK_REPEATABLE_FLAGS", "TASK_FLAG_ALIASES", "task_repeat_error", "task_flag_error", "task_body_arg",
-    "_read_or_empty", "task_new_notify", "overlap_open_prs", "overlap_lines", "task_cmd",
+    "_read_or_empty", "task_new_notify", "overlap_open_prs", "ready_overlap_lines", "overlap_lines", "task_cmd",
 ]
 
 
@@ -225,6 +225,25 @@ def _warn_overlap(T, tid):
         print(ln if ln.startswith((" ", "-")) else f"предупреждение · {ln}", file=sys.stderr)
 
 
+def ready_overlap_lines(T, rows):
+    """Для `task ready` (metis-0667): по строке на готовую задачу с touches, чьи области пересекаются с открытым PR →
+    "TID: пересечение с PR #N (файлы …)". Нет пересечений — пусто. Открытые PR берутся один раз на направление; нет
+    touches ни у кого — gh не зовётся. Строки «не проверено» (gh не ответил, нет policy) — один раз на направление."""
+    out, per_dir = [], {}
+    for tid, h in rows:
+        if not h.get("touches"):
+            continue
+        d = h.get("direction")
+        if d not in per_dir:
+            per_dir[d] = overlap_open_prs(d)
+            out += [f"не проверено: {n}" for n in per_dir[d][1]]
+        for pr, common in T.overlap_prs(tid, h, per_dir[d][0]):
+            more = f" и ещё {len(common) - 6}" if len(common) > 6 else ""
+            out.append(f"{tid}: пересечение с PR #{pr.get('number')} (файлы {', '.join(common[:6])}{more}) — "
+                       f"до взятия: pantheon task overlap {tid}")
+    return out
+
+
 def task_cmd(rest):
     T = P.tasks_mod()
     if not rest:
@@ -428,8 +447,15 @@ def task_cmd(rest):
             sid = T.task_detach(P.PANTHEON, P.now(), args[0])
             print(f"{args[0]}: откреплена от пачки {sid}")
         elif sub == "ready":
-            for tid, h in T.ready(P.PANTHEON, P.now(), opt("--direction"), opt("--owner")):
+            rows = T.ready(P.PANTHEON, P.now(), opt("--direction"), opt("--owner"))
+            for tid, h in rows:
                 print(f"{tid}\t{T.PRIORITY.get(h.get('priority', 2), '')}\t{h.get('due') or '—'}\t{h.get('title')}")
+            try:  # сверка — подсказка в stderr: список задач и код выхода она не меняет
+                warns = ready_overlap_lines(T, [r for r in rows if r[1].get("type", "task") == "task"])
+            except Exception as e:  # noqa: BLE001
+                warns = [f"не проверено: сверка с открытыми PR не прошла ({type(e).__name__}: {e})"]
+            for ln in warns:
+                print(f"предупреждение · {ln}", file=sys.stderr)
         elif sub == "claim" and args and opt("--by"):
             p, head = T.task_claim(P.PANTHEON, P.now(), args[0], opt("--by"), float(opt("--hours") or 1))
             print(f"{args[0]}: взята {opt('--by')} до {head.get('claimed_until')}")
