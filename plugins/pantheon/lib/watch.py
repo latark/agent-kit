@@ -304,6 +304,7 @@ def _watch(dry=False):
               ("запрет сна Mac", lambda: awake().keep_awake(agents, reg, doms, t)),
               ("журналы ваших слов", lambda: daily(t)),
               # последней: сессии, которые она уберёт, в этом проходе ещё в списке — подъём выше их уже не тронет
+              ("уборка Гестии", lambda: hestia_reap(agents, t)),
               ("уборка сессий", lambda: auto_rm(agents, doms, t))]
     failed = []
     for name, fn in checks:
@@ -565,6 +566,47 @@ def auto_rm(agents, doms, t):
         P.alert(f"уборка: убраны из фоновых сессий Claude Code (закончили ход или остановлены больше "
                 f"{AUTO_RM_AFTER // 3600} ч назад, или у имени уже есть живая): {', '.join(gone)}; переписка осталась — "
                 "claude --resume", "watch")
+
+
+def hestia_reap(agents, t):
+    """Уборка Гестии (metis-0671): служебная сессия hestia после задачи висит в claude agents (призрак без процесса,
+    закончившая ход). Убираем claude stop + rm (P.stop_and_rm, как pantheon stop) БЕЗ метки stopped/hestia: с ней
+    следующий wake hestia отказал бы «остановлена вами». Убираем, если (а) процесса нет вовсе (ghost, либо
+    done/stopped/failed без pid) или (б) задача окна (PANTHEON_TASK из settings/run/hestia.json, куда её кладёт wake
+    hestia) не открыта либо неизвестна, а сессия не working. Working с открытой задачей, blocked с живым процессом и
+    открытой задачей, запись моложе минуты и подъём под start-hestia — не трогаем. Переписка остаётся. Пауза
+    планировщика и техперезапуск — как у auto_rm."""
+    if dry() or P.maintenance_active() or os.path.exists(P.path("paused")):
+        return
+    cands = [a for a in agents if a.get("name") == "hestia" and a.get("kind") in (None, "background")
+             and re.fullmatch(r"[0-9a-zA-Z-]{4,64}", str(a.get("id") or "")) and not P.just_listed(a)]
+    if not cands:
+        return
+    tid = ((P.read_json(P.path("settings", "run", "hestia.json"), {}).get("env") or {}).get("PANTHEON_TASK") or "")
+    head = None
+    if tid and P.tasks_mod().ID_RE.fullmatch(str(tid)):
+        head = (P.tasks_mod().load_tasks(P.PANTHEON).get(tid) or (None, None, None))[1]
+    is_open = bool(head) and head.get("status") in ("todo", "doing", "review")
+    with P.lock("start-hestia", block=False) as got:
+        if not got:
+            return  # wake hestia поднимает сессию прямо сейчас
+        for a in cands:
+            sid = str(a["id"])
+            dead = (a.get("ghost")
+                    or (a.get("state") in ("done", "stopped", "failed") and not a.get("pid")))
+            if not dead and (a.get("state") == "working" or is_open):
+                continue
+            has_process = a.get("state") in ("working", "blocked") or a.get("ghost") or a.get("pid")
+            reason = P.stop_and_rm("hestia", sid, "hestia-reap") if has_process \
+                else P.rm_session(sid, tries=1, name="hestia", why="hestia-reap")
+            why = "нет процесса" if dead else f"задача {tid or '—'} не открыта"
+            P.start_log(f"hestia-reap\thestia\t{sid}\t{a.get('state')}\t{why}" + (f"\t{reason}" if reason else ""))
+            if reason:
+                P.alert_once(f"hestia-reap-{sid}", reason[:80], f"hestia: сессия {sid} осталась среди фоновых сессий "
+                             f"Claude Code (уборка, {P.refused_by(reason)}): {reason}", "watch")
+            else:
+                P.alert(f"уборка: Гестия {sid} убрана из фоновых сессий Claude Code ({why}); переписка осталась — "
+                        "claude --resume", "watch")
 
 
 def status_files(doms, t):
