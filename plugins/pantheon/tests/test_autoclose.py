@@ -337,6 +337,56 @@ def test_mutants():
         shutil.rmtree(tmp, True)
 
 
+def test_open_core_sandbox_build():
+    """metis-0686: сводка доски берёт «ядро» у шлюза guard — и правка функции сборки окон в pantheon.py ядро."""
+    import hashlib
+    gate = A.load_gate()
+    check("шлюз guard загружается из репозитория", gate is not None and hasattr(gate, "sandbox_build_changes"))
+    src = open(CLI, encoding="utf-8").read()
+    in_closure = src.replace("    try:\n        with open(policy_path, \"rb\") as fh:",
+                             "    _x = 1\n    try:\n        with open(policy_path, \"rb\") as fh:", 1)
+    outside = src.replace("def autoclose_cmd(rest):\n", "def autoclose_cmd(rest):\n    _y = 1\n", 1)
+    check("пробы правок отличаются от исходника", in_closure != src and outside != src)
+
+    def sha(n):
+        return hashlib.sha1(str(n).encode()).hexdigest()
+    base, head, mb, tip = sha("b"), sha("h"), sha("m"), sha("t")
+    state = {"new": src}
+    calls = []
+
+    def fake_text(args, env=None, timeout=90):
+        calls.append(args)
+        if "compare" in args[1]:
+            return mb + "\n"
+        ref = args[1].rsplit("ref=", 1)[1]
+        return state["new"] if ref == head else src
+
+    def sb(r, p):
+        return A.sandbox_core(r, p, gate=gate)
+
+    def not_core(path):
+        return False
+    real_text, real_tip = A.gh_text, gate._base_tip
+    A.gh_text, gate._base_tip = fake_text, lambda repo, branch: tip
+    try:
+        pp = "plugins/pantheon/lib/pantheon.py"
+        row = {"number": 7, "headRefOid": head, "baseRefOid": base, "baseRefName": "main", "files": [{"path": pp}]}
+        state["new"] = in_closure
+        check("PR правит функцию из замыкания sandbox_build → ядро", A.open_core("a/b", row, not_core, sb) is True)
+        state["new"] = outside
+        check("PR правит в pantheon.py другую функцию → не ядро", A.open_core("a/b", row, not_core, sb) is False)
+        n = len(calls)
+        only = {"number": 8, "files": [{"path": "plugins/pantheon/lib/autoclose.py"}]}
+        check("PR только с autoclose.py → не ядро, без запросов к gh",
+              A.open_core("a/b", only, not_core, sb) is False and len(calls) == n)
+        A.gh_text = lambda *a, **k: None
+        state["new"] = in_closure
+        check("файлы pantheon.py не получить → ядро (как у шлюза)", A.sandbox_core("a/b", row, gate=gate) is True)
+        check("путь ядра по списку путей остаётся ядром", A.open_core("a/b", only, lambda x: True, None) is True)
+    finally:
+        A.gh_text, gate._base_tip = real_text, real_tip
+
+
 def test_fetch_budget():
     tmp, home, state, gh, env = make()
     try:
@@ -665,6 +715,7 @@ def main():
     test_rules()
     test_reopen_and_eviction()
     test_mutants()
+    test_open_core_sandbox_build()
     test_fetch_budget()
     test_batch_needs_mode()
     test_off_warning()

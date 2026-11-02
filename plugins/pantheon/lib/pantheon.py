@@ -5586,7 +5586,7 @@ def autoclose_cmd(rest):
         return 0
     A = autoclose_mod()
     errors = A.fetch(path("autoclose-prs.json"), path("autoclose.json"), now(), sorted(repo_dirs), env=run_env(),
-                     core=merge_mod().is_core)
+                     core=merge_mod().is_core, sandbox=lambda r, p: A.sandbox_core(r, p, run_env()))
     autoclose_alerts(sorted(repo_dirs), errors)
     for k, v in sorted(errors.items()):
         print(f"автозакрытие · {k}: {v}", file=sys.stderr)
