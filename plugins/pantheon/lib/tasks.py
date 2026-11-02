@@ -1185,16 +1185,41 @@ def overlap_tasks(tasks, tid):
     return out
 
 
+# Ветка, репозиторий и пути PR приходят из gh или кэша — чужой текст (автор PR): в готовые команды и строки вывода
+# идут только по строгому шаблону. Ветка не по шаблону → «<ветка PR>» и строка «отклонено»; путь с управляющим
+# знаком, переводом строки или длиннее OVERLAP_PATH_MAX — отброшен, число отброшенных — в строке PR.
+OVERLAP_BRANCH_RE = re.compile(r"[A-Za-z0-9._/-]{1,200}")
+OVERLAP_REPO_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9._-]{1,100}")
+OVERLAP_PATH_MAX = 400
+_LINE_BREAKS = {"\x7f", "\x85", "\u2028", "\u2029"}
+
+
+def overlap_name_ok(name, rx):
+    """Имя ветки или репозитория для команды: целиком по шаблону, без ведущего «-» (флаг) и без «..»."""
+    return isinstance(name, str) and bool(rx.fullmatch(name)) and not name.startswith("-") and ".." not in name
+
+
+def overlap_path_ok(path):
+    """Путь файла PR для вывода: строка до OVERLAP_PATH_MAX знаков без управляющих знаков и переводов строк."""
+    return (isinstance(path, str) and 0 < len(path) <= OVERLAP_PATH_MAX
+            and not any(ord(c) < 32 or c in _LINE_BREAKS for c in path))
+
+
 def overlap_prs(tid, head, prs):
-    """Открытые PR с файлами в областях задачи → [(pr, [общие файлы])]. prs — [{repo, number, branch, title, files,
-    ids}]; PR самой задачи (её id в ветке или теле) и PR без списка файлов пропускаются."""
+    """Открытые PR с файлами в областях задачи → [(pr, [общие файлы])]. prs — [{repo, number, branch, files, ids,
+    closes}]; PR самой задачи (её id в ветке или теле), PR без списка файлов и с номером не числом пропускаются. pr в
+    ответе — копия: branch и repo не по шаблону → None, files — только годные пути, dropped — сколько отброшено."""
     mine, out = head.get("touches") or [], []
     for pr in prs or []:
-        if tid in (pr.get("ids") or []) or not isinstance(pr.get("files"), list):
+        n = pr.get("number")
+        if tid in (pr.get("ids") or []) or not isinstance(pr.get("files"), list) or not isinstance(n, int) or isinstance(n, bool):
             continue
-        common = sorted({_area(f) for f in pr["files"] if isinstance(f, str) and any(paths_cross(f, m) for m in mine)})
+        files = [f for f in pr["files"] if overlap_path_ok(f)]
+        common = sorted({_area(f) for f in files if any(paths_cross(f, m) for m in mine)})
         if common:
-            out.append((pr, common))
+            out.append((dict(pr, files=files, dropped=len(pr["files"]) - len(files) + int(pr.get("dropped") or 0),
+                             branch=pr.get("branch") if overlap_name_ok(pr.get("branch"), OVERLAP_BRANCH_RE) else None,
+                             repo=pr.get("repo") if overlap_name_ok(pr.get("repo"), OVERLAP_REPO_RE) else None), common))
     return out
 
 
@@ -1224,14 +1249,20 @@ def overlap_text(tid, head, cross_tasks, cross_prs, notes=()):
                      f"{', PR ' + ', '.join('#' + str(p.get('number')) for p in prs) if prs else ', открытого PR нет'}): {_list(common)}")
     for pr, common in cross_prs:
         ids = [i for i in pr.get("ids") or [] if i != tid]
-        lines.append(f"- PR #{pr.get('number')} {pr.get('repo')} (ветка {pr.get('branch') or '?'}"
-                     f"{', ' + ', '.join(ids) if ids else ''}): {_list(common)}")
+        lines.append(f"- PR #{pr.get('number')} {pr.get('repo') or '<репозиторий>'} (ветка {pr.get('branch') or '<ветка PR>'}"
+                     f"{', ' + ', '.join(ids) if ids else ''}): {_list(common)}"
+                     + (f" (отброшено путей не по форме: {pr['dropped']})" if pr.get("dropped") else ""))
+        if not pr.get("branch"):
+            lines.append(f"  имя ветки PR #{pr.get('number')} отклонено (не по шаблону) — в командах «<ветка PR>», "
+                         "возьми её из gh pr view")
+        if not pr.get("repo"):
+            lines.append(f"  имя репозитория PR #{pr.get('number')} отклонено (не owner/name) — в командах «<репозиторий>»")
     lines.append("Выбор — один из двух, параллельно от main не начинать:")
 
     def dep(*oids):  # depends_on= заменяет список: прежние зависимости остаются в команде
         return ",".join(dict.fromkeys([*(head.get("depends_on") or []), *oids]))
     for pr, _ in cross_prs:
-        n, repo, br = pr.get("number"), pr.get("repo"), pr.get("branch") or "<ветка PR>"
+        n, repo, br = pr.get("number"), pr.get("repo") or "<репозиторий>", pr.get("branch") or "<ветка PR>"
         lines += [f"  А — очередь: ждать слияния PR #{n}, затем начать от свежего main.",
                   f"      gh pr view {n} -R {repo} --json state,mergedAt",
                   "      git fetch origin && git switch -c " + tid + " origin/main"]

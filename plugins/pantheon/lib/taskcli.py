@@ -127,37 +127,56 @@ def _merge_repos(direction):
         return [], f"{p} не читается ({type(e).__name__}) — открытые PR не проверены"
     repos = (pol.get("merge_repos") or {}).get(direction) if isinstance(pol.get("merge_repos"), dict) else None
     repos = [r for r in repos if isinstance(r, str) and r.strip()] if isinstance(repos, list) else []
+    T = P.tasks_mod()
+    ok = [r for r in repos if T.overlap_name_ok(r, T.OVERLAP_REPO_RE)]
+    if len(ok) < len(repos):  # имя не owner/name — в команды и вывод не идёт; само имя не печатаем
+        return ok, (f"в [merge_repos] {p} у {direction} отклонено имён не owner/name: {len(repos) - len(ok)} — "
+                    "их открытые PR не проверены")
     return repos, None if repos else f"у {direction} нет репозиториев в [merge_repos] {p} — открытые PR не проверены"
 
 
-def _pr_row(A, repo, pr, files, branch):
-    return {"repo": repo, "number": pr.get("number"), "branch": branch, "files": files,
+def _pr_files(T, raw):
+    """Пути файлов PR → (годные, сколько отброшено): путь с управляющим знаком, переводом строки или длиннее
+    T.OVERLAP_PATH_MAX в вывод не идёт — чужой PR не вставит строки в предупреждение."""
+    paths = [f for f in raw if isinstance(f, str)]
+    good = [f for f in paths if T.overlap_path_ok(f)]
+    return good, len(paths) - len(good)
+
+
+def _pr_row(A, T, repo, pr, raw_files, branch):
+    files, dropped = _pr_files(T, raw_files)
+    return {"repo": repo, "number": pr.get("number"), "branch": branch, "files": files, "dropped": dropped,
             "ids": A.find_ids(branch, pr.get("body") or ""), "closes": A.closing_ids(branch, pr.get("body") or "")}
+
+
+def _one_line(text):
+    """Ответ gh об ошибке — в одну строку без управляющих знаков."""
+    return " ".join("".join(c if c.isprintable() else " " for c in str(text)).split())[:200]
 
 
 def overlap_open_prs(direction):
     """Открытые PR репозиториев направления с файлами (metis-0665) → (prs, notes). Сначала gh; не ответил — кэш
     планового прохода autoclose-prs.json (open_prs с files и branch) и строка, что взят кэш и почему; нет и кэша —
     строка «не проверено». Молча PR не пропускаются: notes уходят в вывод."""
-    A = P.autoclose_mod()
+    A, T = P.autoclose_mod(), P.tasks_mod()
     repos, err = _merge_repos(direction)
-    if err:
+    if not repos:
         return [], [err]
     env = {k: v for k, v in os.environ.items() if k not in ("GH_REPO", "GH_HOST")}
     cache = P.read_json(P.path("autoclose-prs.json"), {})
     cached = cache.get("open_prs") if isinstance(cache.get("open_prs"), dict) else {}
     fetched = cache.get("fetched")
-    prs, notes = [], []
+    prs, notes = [], [err] if err else []
     for repo in repos:
         data, gerr = A.gh_json(["pr", "list", "-R", repo, "--state", "open", "--limit", str(A.LIMIT), "--json",
                                 "number,headRefName,body,files"], env, timeout=OVERLAP_GH_TIMEOUT)
         if not gerr and isinstance(data, list):
             for pr in data:
                 if isinstance(pr, dict) and isinstance(pr.get("number"), int):
-                    files = [f.get("path") for f in pr.get("files") or [] if isinstance(f, dict) and isinstance(f.get("path"), str)]
-                    prs.append(_pr_row(A, repo, pr, files, str(pr.get("headRefName") or "")))
+                    files = [f.get("path") for f in pr.get("files") or [] if isinstance(f, dict)]
+                    prs.append(_pr_row(A, T, repo, pr, files, str(pr.get("headRefName") or "")))
             continue
-        why = gerr or "ответ gh — не список"
+        why = _one_line(gerr or "ответ gh — не список")
         rows = cached.get(repo.lower())
         if not isinstance(rows, list) or not isinstance(fetched, (int, float)):
             notes.append(f"{repo}: gh не ответил ({why}), кэша планового прохода нет — проверь вручную: "
@@ -169,10 +188,11 @@ def overlap_open_prs(direction):
                      + (f"; без списка файлов: {', '.join('#' + str(n) for n in nofiles)}" if nofiles else ""))
         for r in rows:
             if isinstance(r, dict) and isinstance(r.get("number"), int) and isinstance(r.get("files"), list):
+                files, dropped = _pr_files(T, r["files"])
                 prs.append({"repo": repo, "number": r["number"], "branch": str(r.get("branch") or ""),
-                            "files": [f for f in r["files"] if isinstance(f, str)],
-                            "ids": [i for i in r.get("ids") or [] if isinstance(i, str)],
-                            "closes": [i for i in r.get("closes") or [] if isinstance(i, str)]})
+                            "files": files, "dropped": dropped,
+                            "ids": [i for i in r.get("ids") or [] if isinstance(i, str) and A.ID_RE.fullmatch(i)],
+                            "closes": [i for i in r.get("closes") or [] if isinstance(i, str) and A.ID_RE.fullmatch(i)]})
     return prs, notes
 
 
