@@ -97,6 +97,11 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     пустой --body/--body-file в task set — отказ, код 2; вопрос с текстом без --why/вариантов — предупреждение
   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
+  pantheon task overlap ID   перед раздачей (metis-0665): touches задачи против живых (doing, review) задач её
+                    направления и файлов открытых PR его репозиториев ([merge_repos] policy.toml; gh, не ответил — кэш
+                    планового прохода, нет и его — строка «не проверено»); пересечение — выбор с командами: очередь
+                    (ждать слияния PR) или ветка от ветки PR, argus — только дельта. Предупреждение, не отказ: код 0.
+                    То же предупреждение — в stderr после task set ID status=doing и task claim
   pantheon task migrate-project [--write]   project карточек → имя проекта из directions.toml; без --write — сухой
                     прогон «id: было → станет», с --write — запись через task set со строкой в журнал (metis-0323)
   pantheon task migrate-batches [--dry-run]   поле batch «имя · место» → пачка (story) «имя», задача прикреплена по месту

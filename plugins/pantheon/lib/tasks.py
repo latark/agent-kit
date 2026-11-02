@@ -1157,6 +1157,133 @@ def crossings(tasks, live=None):
     return {k: sorted(v) for k, v in out.items()}
 
 
+# --- пересечение внутри направления перед раздачей (metis-0665) ------------------------------------------------------
+# plan_batch сверяет touches только с идущими задачами других направлений. Внутри направления координатор раздаёт
+# задачи субагентам параллельно: 02.11 #246 и #248 правили одни файлы от одного main — у второго 20 конфликтов и лишний
+# круг двух argus. Здесь — сверка с живыми задачами своего направления и с файлами открытых PR его репозиториев.
+OVERLAP_LIVE = ("doing", "review")
+
+
+def _common(xs, ys):
+    """Общие области двух списков путей: из пересекающейся пары — более узкая (файл, а не его папка)."""
+    return sorted({_area(x) if len(_area(x)) >= len(_area(y)) else _area(y) for x in xs for y in ys if paths_cross(x, y)})
+
+
+def overlap_tasks(tasks, tid):
+    """Живые (doing, review) задачи направления tid с пересечением touches → [(id, статус, owner, [общие области])].
+    У задачи без touches — []: пересечение не проверить, об этом скажет overlap_text."""
+    head = tasks[tid][1]
+    mine, out = head.get("touches") or [], []
+    for oid, (_, h, _) in sorted(tasks.items()):
+        if oid == tid or h.get("type", "task") != "task" or h.get("direction") != head.get("direction"):
+            continue
+        if h.get("status") not in OVERLAP_LIVE:
+            continue
+        common = _common(mine, h.get("touches") or [])
+        if common:
+            out.append((oid, h.get("status"), h.get("owner") or "", common))
+    return out
+
+
+# Ветка, репозиторий и пути PR приходят из gh или кэша — чужой текст (автор PR): в готовые команды и строки вывода
+# идут только по строгому шаблону. Ветка не по шаблону → «<ветка PR>» и строка «отклонено»; путь с управляющим
+# знаком, переводом строки или длиннее OVERLAP_PATH_MAX — отброшен, число отброшенных — в строке PR.
+OVERLAP_BRANCH_RE = re.compile(r"[A-Za-z0-9._/-]{1,200}")
+OVERLAP_REPO_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9._-]{1,100}")
+OVERLAP_PATH_MAX = 400
+_LINE_BREAKS = {"\x7f", "\x85", "\u2028", "\u2029"}
+
+
+def overlap_name_ok(name, rx):
+    """Имя ветки или репозитория для команды: целиком по шаблону, без ведущего «-» (флаг) и без «..»."""
+    return isinstance(name, str) and bool(rx.fullmatch(name)) and not name.startswith("-") and ".." not in name
+
+
+def overlap_path_ok(path):
+    """Путь файла PR для вывода: строка до OVERLAP_PATH_MAX знаков без управляющих знаков и переводов строк."""
+    return (isinstance(path, str) and 0 < len(path) <= OVERLAP_PATH_MAX
+            and not any(ord(c) < 32 or c in _LINE_BREAKS for c in path))
+
+
+def overlap_prs(tid, head, prs):
+    """Открытые PR с файлами в областях задачи → [(pr, [общие файлы])]. prs — [{repo, number, branch, files, ids,
+    closes}]; PR самой задачи (её id в ветке или теле), PR без списка файлов и с номером не числом пропускаются. pr в
+    ответе — копия: branch и repo не по шаблону → None, files — только годные пути, dropped — сколько отброшено."""
+    mine, out = head.get("touches") or [], []
+    for pr in prs or []:
+        n = pr.get("number")
+        if tid in (pr.get("ids") or []) or not isinstance(pr.get("files"), list) or not isinstance(n, int) or isinstance(n, bool):
+            continue
+        files = [f for f in pr["files"] if overlap_path_ok(f)]
+        common = sorted({_area(f) for f in files if any(paths_cross(f, m) for m in mine)})
+        if common:
+            out.append((dict(pr, files=files, dropped=len(pr["files"]) - len(files) + int(pr.get("dropped") or 0),
+                             branch=pr.get("branch") if overlap_name_ok(pr.get("branch"), OVERLAP_BRANCH_RE) else None,
+                             repo=pr.get("repo") if overlap_name_ok(pr.get("repo"), OVERLAP_REPO_RE) else None), common))
+    return out
+
+
+def _list(xs, n=6):
+    return ", ".join(xs[:n]) + (f" и ещё {len(xs) - n}" if len(xs) > n else "")
+
+
+def overlap_text(tid, head, cross_tasks, cross_prs, notes=()):
+    """Предупреждение о пересечении строками (пусто — пересечений нет и сказать нечего). notes — строки о том, что не
+    проверено (gh не ответил, взят кэш, репозитории не заданы): их не глушим — «не молчать». Выбор с готовыми
+    командами: очередь (ждать слияния) или ветка от ветки PR (stacked PR) с argus только на дельту."""
+    lines = []
+    if not head.get("touches"):
+        lines.append(f"у {tid} нет touches — пересечение с соседями не проверить: задай области "
+                     f"(pantheon task set {tid} touches=путь,путь) и повтори pantheon task overlap {tid}")
+    lines += [f"не проверено: {n}" for n in notes]
+    if not cross_tasks and not cross_prs:
+        return lines
+    by_task = {}
+    for pr, _ in cross_prs:
+        for i in pr.get("ids") or []:
+            by_task.setdefault(i, []).append(pr)
+    lines.append(f"{tid} пересекается по файлам — это предупреждение, не запрет:")
+    for oid, st, owner, common in cross_tasks:
+        prs = by_task.get(oid) or []
+        lines.append(f"- задача {oid} ({st}{', ' + owner if owner else ''}"
+                     f"{', PR ' + ', '.join('#' + str(p.get('number')) for p in prs) if prs else ', открытого PR нет'}): {_list(common)}")
+    for pr, common in cross_prs:
+        ids = [i for i in pr.get("ids") or [] if i != tid]
+        lines.append(f"- PR #{pr.get('number')} {pr.get('repo') or '<репозиторий>'} (ветка {pr.get('branch') or '<ветка PR>'}"
+                     f"{', ' + ', '.join(ids) if ids else ''}): {_list(common)}"
+                     + (f" (отброшено путей не по форме: {pr['dropped']})" if pr.get("dropped") else ""))
+        if not pr.get("branch"):
+            lines.append(f"  имя ветки PR #{pr.get('number')} отклонено (не по шаблону) — в командах «<ветка PR>», "
+                         "возьми её из gh pr view")
+        if not pr.get("repo"):
+            lines.append(f"  имя репозитория PR #{pr.get('number')} отклонено (не owner/name) — в командах «<репозиторий>»")
+    lines.append("Выбор — один из двух, параллельно от main не начинать:")
+
+    def dep(*oids):  # depends_on= заменяет список: прежние зависимости остаются в команде
+        return ",".join(dict.fromkeys([*(head.get("depends_on") or []), *oids]))
+    for pr, _ in cross_prs:
+        n, repo, br = pr.get("number"), pr.get("repo") or "<репозиторий>", pr.get("branch") or "<ветка PR>"
+        lines += [f"  А — очередь: ждать слияния PR #{n}, затем начать от свежего main.",
+                  f"      gh pr view {n} -R {repo} --json state,mergedAt",
+                  "      git fetch origin && git switch -c " + tid + " origin/main"]
+        closes = [i for i in pr.get("closes") or [] if i != tid]
+        if closes:
+            lines.append(f"      пока ждёт: pantheon task set {tid} status=todo depends_on={dep(closes[0])}")
+        lines += [f"  Б — ветка от ветки (stacked PR): начать от ветки PR #{n}, свой PR — с базой его ветки.",
+                  f"      git fetch origin && git switch -c {tid} origin/{br}",
+                  f"      gh pr create -R {repo} --base {br} --title … --body-file …",
+                  f"      argus — только дельта своего PR: git diff origin/{br}...HEAD",
+                  f"      после слияния #{n} (--merge): gh pr edit <свой N> -R {repo} --base main — head тот же, записи "
+                  "шлюза в силе; конфликт с main — git merge origin/main, не rebase",
+                  f"      #{n} слит squash или rebase — «принять» на новый head не переносится: узкий круг argus на ту же дельту"]
+    bare = [oid for oid, _, _, _ in cross_tasks if not by_task.get(oid)]
+    if bare:
+        lines += [f"  Без открытого PR: {_list(bare)} — очередь: pantheon task set {tid} status=todo depends_on={dep(*bare)}",
+                  f"      или одному исполнителю по порядку; ветка от ветки — когда у задачи будет открытый PR (повтори "
+                  f"pantheon task overlap {tid})"]
+    return lines
+
+
 def open_deps(head, tasks):
     """Незакрытые зависимости задачи: id из depends_on, которые не done и не dropped (нет такой задачи — тоже ждёт)."""
     return [d for d in head.get("depends_on") or []

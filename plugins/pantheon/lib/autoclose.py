@@ -240,6 +240,13 @@ def open_pr_tasks(state_file):
     return set(st["open"]) if isinstance(st.get("open"), list) else None
 
 
+def _path_ok(path):
+    """Путь файла открытого PR для кэша (metis-0665): строка до 400 знаков без управляющих знаков и переводов строк —
+    чужой PR не вставит строки в вывод `pantheon task overlap`. Та же граница — tasks.overlap_path_ok."""
+    return (isinstance(path, str) and 0 < len(path) <= 400
+            and not any(ord(c) < 32 or c in "\x7f\x85\u2028\u2029" for c in path))
+
+
 def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=None):
     """Сетевой проход: gh по репозиториям → кэш cache_file. Только он зовёт gh; лёгкий тик (run) читает кэш.
     budget — секунд на весь проход: на каждый вызов gh остаётся не больше, чем осталось; не успел — ошибка по репозиторию.
@@ -282,7 +289,11 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
                             "number,headRefName,headRefOid,body,files"], env, timeout=min(90, left()))
             if isinstance(o, list):
                 opened[repo] = sorted({i for p in o if isinstance(p, dict) for i in find_ids(p.get("headRefName"), p.get("body"))})
+                # branch и files — сверке пересечения `pantheon task overlap` (metis-0665), когда gh в окне не отвечает
                 open_prs[repo] = [{"number": p.get("number"), "head": str(p.get("headRefOid") or "")[:40],
+                                   "branch": str(p.get("headRefName") or "")[:200],
+                                   "files": [f.get("path") for f in p.get("files") or []
+                                             if isinstance(f, dict) and _path_ok(f.get("path"))],
                                    "ids": find_ids(p.get("headRefName"), p.get("body")),
                                    "closes": closing_ids(p.get("headRefName"), p.get("body")),
                                    "part": is_part(p.get("body")),
