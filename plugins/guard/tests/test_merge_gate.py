@@ -13,6 +13,10 @@ import shutil
 import stat
 import subprocess
 import sys
+
+# Срок подпроцессов теста: на нагруженном Mac (проход outside, -j3, load 11-20) 10-30 с не хватает (metis-0634).
+# Срок самого guard (DEADLINE) это не меняет и им не проверяется.
+SUB_TIMEOUT = 60
 import tempfile
 import time
 import uuid
@@ -246,7 +250,7 @@ class Home:
 
     def hook(self, event, pdir, mode=(), extra_env=None):
         return subprocess.run([sys.executable, "-I", CACHED, GUARD, *mode], input=json.dumps(event), capture_output=True,
-                              text=True, env=dict(self.env(pdir), **(extra_env or {})), timeout=20)
+                              text=True, env=dict(self.env(pdir), **(extra_env or {})), timeout=SUB_TIMEOUT)
 
     def pre(self, cmd, role="domain-coordinator", pdir="projects/tg-read", cwd=None, agent_id=None, session="s-coord",
             extra_env=None):
@@ -621,7 +625,7 @@ def t_managed(h):
              "session_id": "s-coord", "tool_use_id": "t1", "cwd": h.j("projects/tg-read"),
              "tool_input": {"command": f"pantheon review accept latark/tg-read 3 {sha}{CL}"}, "tool_response": NORMAL}
     r = subprocess.run([sys.executable, "-I", "-c", MANAGED_PROBE, RULES, mf, json.dumps(event)], capture_output=True,
-                       text=True, env=h.env("projects/tg-read"), timeout=20)
+                       text=True, env=h.env("projects/tg-read"), timeout=SUB_TIMEOUT)
     check("при активных управляемых настройках PostToolUse пишет",
           "active True" in r.stdout and [x["kind"] for x in h.read()] == ["accept"], r.stdout + r.stderr)
 
