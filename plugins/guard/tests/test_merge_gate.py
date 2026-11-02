@@ -4324,7 +4324,10 @@ def t_owner_api_merge(h):
     незнакомый флаг (`-XPUT`, `-fsha=`), `..` в адресе, адрес с pulls и merge не ровно в форме (полный адрес — только
     https://api.github.com/, --hostname — только github.com), graphql не ровно
     `graphql`, graphql из файла, мутация слияния — отказ. GET того же адреса и другие gh api — не судятся. Слово merge
-    ищется после разбора bash (`gh pr mer''ge`), алиас слияния — отказ."""
+    ищется после разбора bash (`gh pr mer''ge`), алиас слияния — отказ. Круг 2 (argus #257): репозиторий — из адреса,
+    а не из папки (Б1); GET с невычислимым словом не судится, merge в --jq и соседней команде не в счёт (Д1);
+    невычислимое значение флага — отказ только у слияния и graphql (Д2); записи в pulls/* без merge, имя репозитория и
+    ветки со словами pulls и merge — не слияние (Д3, Д5); связка `-iX PUT` — запись (metis-0681)."""
     kit, sha = "projects/agent-kit", h.sha["agent-kit"]
     owner = dict(role=None, pdir=kit)
     nine = [dict(AFFECTED, prs=(9,)), dict(TRACES, prs=(9,))]
@@ -4342,6 +4345,7 @@ def t_owner_api_merge(h):
              ("поле sha", f"gh api -X PUT repos/latark/agent-kit/pulls/9/merge -f sha={sha}"),
              ("поле --raw-field=sha=", f"gh api -X PUT repos/latark/agent-kit/pulls/9/merge --raw-field=sha={sha}"),
              ("флаги --paginate, --jq", "gh api --paginate -X PUT repos/latark/agent-kit/pulls/9/merge --jq .merged"),
+             ("флаг --allow-escape-sequences", "gh api --allow-escape-sequences -X PUT repos/latark/agent-kit/pulls/9/merge"),
              # адрес сверяется после api_norm — %XX, //, ./
              ("адрес в %XX", "gh api -X PUT repos%2Flatark%2Fagent-kit%2Fpulls%2F9%2F%6Derge"),
              ("адрес с //", "gh api -X PUT repos//latark/agent-kit//pulls/9//merge"),
@@ -4358,6 +4362,7 @@ def t_owner_api_merge(h):
     for c, how, why in (
             (f"{base} -f sha={'e' * 40}", "поле sha — другой коммит", "PR сейчас на другом коммите"),
             (f"{base} -f sha=abc", "поле sha не SHA", "один SHA из 40 знаков"),
+            (f"{base} -F sha=@f", "поле sha из файла -F sha=@f", "один SHA из 40 знаков"),
             (f"{base} --field sha={'e' * 40}", "поле --field sha= — другой коммит", "PR сейчас на другом коммите"),
             (f"{base} -F sha={'e' * 40}", "поле -F sha= — другой коммит", "PR сейчас на другом коммите"),
             (f"{base} --raw-field=sha={'e' * 40}", "поле --raw-field=sha= — другой коммит", "PR сейчас на другом коммите"),
@@ -4382,10 +4387,15 @@ def t_owner_api_merge(h):
             ("gh api $URL -f a=1", "адрес — переменная, поле (POST), merge нет", "слово не вычислить"),
             ("gh api -X POST -f a=1 -- $URL", "адрес — переменная после --", "слово не вычислить"),
             ("gh -R latark/agent-kit api --method PATCH \"$(cat u)\"", "адрес из $(…), флаг до api", "слово не вычислить"),
-            ("gh api -X POST repos/latark/agent-kit/issues/7/comments -f body=$B", "поле — переменная, merge нет",
-             "слово не вычислить"),
-            ("gh api -H $H repos/latark/agent-kit/issues/1/comments -f body=x", "значение -H — переменная",
-             "слово не вычислить"),
+            # невычислимое значение флага или лишнее слово — отказ у адреса слияния и graphql (Д2 argus #257)
+            (f"{base} -H $H", "значение -H — переменная, адрес слияния", "слово не вычислить"),
+            (f"{base} --jq $J", "значение --jq — переменная, адрес слияния", "слово не вычислить"),
+            (f"{base} $F", "лишнее слово — переменная, адрес слияния", "слово не вычислить"),
+            ("gh api graphql -f query=\"$Q\"", "graphql: запрос — переменная", "слово не вычислить"),
+            # связка коротких флагов с X, f или F — запись (metis-0681), шлюз её не разбирает
+            ("gh api -iX PUT repos/latark/agent-kit/pulls/9/merge", "-iX PUT связкой", glued),
+            ("gh api -iXPUT repos/latark/agent-kit/pulls/9/merge", "-iXPUT связкой", glued),
+            (f"{base} -iF sha={sha}", "-iF sha= связкой", glued),
             # адрес: .., не ровно форма
             ("gh api -X PUT repos/latark/agent-kit/pulls/9/../9/merge", "адрес с ..", "`..` в адресе"),
             ("gh api -X POST repos/latark/agent-kit/issues/7/../comments -f body=x", ".. не у слияния", "`..` в адресе"),
@@ -4414,6 +4424,10 @@ def t_owner_api_merge(h):
              "GraphQL enablePullRequestAutoMerge", "GraphQL"),
             ("gh api graphql -f query='mutation{enqueuePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}'",
              "GraphQL enqueuePullRequest (очередь слияния)", "GraphQL"),
+            ("gh api graphql -F query='mutation{mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}'",
+             "GraphQL mergePullRequest через -F", "GraphQL"),
+            ("gh api graphql --raw-field=query='mutation{mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}'",
+             "GraphQL mergePullRequest через --raw-field=", "GraphQL"),
             ("gh api graphql -F query=@q.graphql", "graphql: запрос из файла -F query=@", "graphql из файла"),
             ("gh api graphql --field query=@q.graphql", "graphql: запрос из файла --field query=@", "graphql из файла"),
             ("gh api graphql --field=query=@q.graphql", "graphql: запрос из файла --field=query=@", "graphql из файла"),
@@ -4445,6 +4459,32 @@ def t_owner_api_merge(h):
                    ("gh api $URL", "чтение по адресу из переменной"),
                    ("gh api $URL $F", "чтение: адрес и флаг из переменных, merge нет"),
                    ("gh api -X GET $URL -f q=1", "-X GET по адресу из переменной"),
+                   # Д1 argus #257: GET с невычислимым словом — не судится; merge в --jq и в соседней команде не в счёт
+                   ("gh api repos/latark/agent-kit/pulls/$N --jq .merged", "GET: номер — переменная, --jq .merged"),
+                   ('gh api "repos/$REPO/pulls/7" --jq .mergeable', "GET: репозиторий — переменная, --jq .mergeable"),
+                   ('gh api "repos/$REPO/commits/main" ; gi' 't merge --ff-only origin/main',
+                    "GET с переменной, слияние git соседней командой"),
+                   ("gh api repos/latark/agent-kit/pulls/$N/merge", "GET адреса слияния с номером-переменной"),
+                   ("gh api repos/latark/agent-kit/pulls/9/merge -H $H", "GET адреса слияния, заголовок — переменная"),
+                   ("gh api $URL --jq .merged $F", "чтение: адрес и флаг из переменных, merge только в --jq"),
+                   # Д2: невычислимое значение флага у записи не на слияние — пропуск
+                   ("gh api -X POST repos/latark/agent-kit/issues/7/comments -f body=$B", "поле — переменная, merge нет"),
+                   ('gh api -X POST repos/latark/agent-kit/issues/7/comments -f body="$B merged"',
+                    "поле — переменная со словом merge"),
+                   ("gh api -H $H repos/latark/agent-kit/issues/1/comments -f body=x", "значение -H — переменная"),
+                   ("gh api -X $M repos/latark/agent-kit/issues/1/comments -f body=x", "метод — переменная, не слияние"),
+                   # Д3: записи в pulls/* без merge — не слияние
+                   ("gh api -X PATCH repos/latark/agent-kit/pulls/9 -f title=x", "PATCH pulls/9"),
+                   ("gh api -X POST repos/latark/agent-kit/pulls/9/reviews -f event=APPROVE", "POST pulls/9/reviews"),
+                   ("gh api -X POST repos/latark/agent-kit/pulls/9/comments -f body=x", "POST pulls/9/comments"),
+                   # Д5: pulls и merge — по сегментам после repos/<owner>/<repo>/
+                   ("gh api -X POST repos/latark/merge-bot/pulls -f title=x -f head=a -f base=main",
+                    "POST repos/o/merge-bot/pulls (имя репозитория)"),
+                   ("gh api -X DELETE repos/latark/agent-kit/git/refs/heads/fix-pulls-merge",
+                    "DELETE ветки fix-pulls-merge"),
+                   ("gh api -X DELETE repos/latark/pulls/git/refs/heads/merge-fix",
+                    "DELETE ветки merge-fix в репозитории pulls"),
+                   ("gh api -X DELETE repos/latark/agent-kit/git/refs/heads/merge/pulls", "DELETE ветки merge/pulls"),
                    ("gh api graphql -f 'query={viewer{login}}'", "graphql запрос словами, без слияния"),
                    ("gh api graphql -f query=@q", "graphql -f (сырое поле, не файл)"),
                    ("gh alias list", "gh alias list"),
@@ -4471,6 +4511,19 @@ def t_owner_api_merge(h):
     merge_case("роль: gh alias set v 'pr view' — можно", h.pre("gh alias set v 'pr view'", pdir=kit), True)
     merge_case("роль: gh api -X PUT …/merge — отказ правилом push, как раньше", h.pre(base, pdir=kit), False,
                "gh api с записью")
+    # metis-0681: связка коротких флагов с X, f или F — запись и у роли
+    for c in ("gh api -iX PUT repos/latark/agent-kit/pulls/9/merge", "gh api -iXPUT repos/latark/agent-kit/pulls/9/merge",
+              f"{base} -iF sha={sha}"):
+        merge_case(f"роль: {c} — отказ правилом push", h.pre(c, pdir=kit), False, "gh api с записью")
+    # Б1 argus #257: репозиторий берётся из адреса (-R), а не из папки — из tg-read (CI зелёный) адрес agent-kit
+    # (CI красный) — отказ по CI agent-kit; плейсхолдеры {owner}/{repo} там же — CI tg-read, проходит
+    h.ci(red, name="agent-kit")
+    h.ci(GREEN, name="tg-read")
+    merge_case("без роли: из папки tg-read адрес agent-kit, CI agent-kit красный — отказ",
+               h.pre("gh api -X PUT repos/latark/agent-kit/pulls/9/merge", role=None, pdir="projects/tg-read"),
+               False, "tests/affected красная")
+    merge_case("без роли: из папки tg-read адрес {owner}/{repo}, CI tg-read зелёный — проходит",
+               h.pre("gh api -X PUT 'repos/{owner}/{repo}/pulls/9/merge'", role=None, pdir="projects/tg-read"), True)
 
 
 CASES = [t_ci_fork_billing, t_full_tests_verify, t_owner_api_merge, t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,

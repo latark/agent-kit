@@ -2929,7 +2929,10 @@ def push_foreign(texts, cwd, cmds, pdir):
 
 
 def _gh_api_writes(args):
-    """gh api … пишет: метод не GET, поля -f/-F/--input (gh тогда шлёт POST) или аргумент не разобрать."""
+    """gh api … пишет: метод не GET, поля -f/-F/--input (gh тогда шлёт POST) или аргумент не разобрать. Связка
+    коротких флагов с X, f или F (`-iX PUT`, `-iF a=b`) — тоже (metis-0681)."""
+    get = any(x in ("-X", "--method") and i2 + 1 < len(args) and (args[i2 + 1] or "").upper() == "GET"
+              for i2, x in enumerate(args))
     for i, a in enumerate(args):
         if a is None:
             return True
@@ -2942,8 +2945,13 @@ def _gh_api_writes(args):
                 return True
         elif a in ("-f", "-F", "--field", "--raw-field", "--input") or a.startswith(("--field=", "--raw-field=",
                                                                                       "--input=", "-f", "-F")):
-            if not any(x in ("-X", "--method") and i2 + 1 < len(args) and (args[i2 + 1] or "").upper() == "GET"
-                       for i2, x in enumerate(args)):
+            if not get:
+                return True
+        elif m := re.fullmatch(r"-i+([XfF])(.*)", a):
+            # связка коротких флагов (`-iX PUT`, `-iXPUT`, `-iF a=b`): pflag читает её по буквам, -i — без значения,
+            # дальше -X с методом или поле (metis-0681)
+            method = (m[2] or (args[i + 1] if i + 1 < len(args) else None)) if m[1] == "X" else None
+            if (m[1] != "X" and not get) or (m[1] == "X" and (method is None or method.upper() != "GET")):
                 return True
     return False
 
@@ -3158,7 +3166,8 @@ def check_owner_merge(event, tool_input):
     metis-0633, merge_gate.owner_ci_problem): gh pr merge и gh api с записью на …/pulls/N/merge — те же проверки
     (metis-0663, merge_gate.api_merge_args). Остальное в этой сессии не судим. Слово merge ищется в словах gh после
     разбора bash, а не в сыром тексте: `gh pr mer''ge` слова merge в тексте не содержит (фоновая проверка 02.11);
-    сырой текст — только для отказа, когда слово gh не вычислить."""
+    сырой текст — только для отказа, когда подкоманду gh не вычислить. У gh api — только слова этой gh, кроме фильтров
+    вывода (`--jq .merged`), и только когда невычислимое слово может оказаться флагом записи (Д1 argus #257)."""
     cmd = tool_input.get("command") or ""
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     _, cmds = bash_analysis(cmd, cwd)
@@ -3168,9 +3177,8 @@ def check_owner_merge(event, tool_input):
     for name, texts in cmds:
         if name != "gh":
             continue
-        here = said or any("merge" in (a or "").casefold() for a in texts)
         if _gh_parse(texts)[0]:
-            if here:
+            if said or any("merge" in (a or "").casefold() for a in texts):
                 return ("Правило push: gh — слово до подкоманды не вычислить (переменная, $(…)), а в команде есть "
                         "merge: не понять, слияние ли это. Пиши подкоманду gh и флаги перед ней словами. "
                         f"{merge_gate.OWNER_CI}")
@@ -3184,9 +3192,12 @@ def check_owner_merge(event, tool_input):
         api = _gh_api(texts)
         if api is not None and _gh_api_writes(api):
             # запись (метод не GET или поля) — одно правило fail closed merge_gate.api_merge_args (фоновая проверка
-            # 02.11); невычислимое слово, по которому записи не видно (`gh api $URL`), — отказ только при merge
+            # 02.11). Записи по словам не видно, есть только невычислимые слова — это GET: адрес или значение флага
+            # (`gh api repos/o/r/pulls/$N --jq .merged`) не судим; отказ — когда лишнее невычислимое слово может
+            # оказаться флагом записи (`gh api …/merge $F`) и merge есть в словах этой gh, кроме --jq/--template (Д1
+            # argus #257: слово merge в соседней команде строки и `.mergeable` в фильтре — не слияние)
             if not _gh_api_writes(["" if a is None else a for a in api]):
-                if here:
+                if merge_gate.api_loose(api) and merge_gate.api_says_merge(api):
                     return ("Правило push: gh api — слово не вычислить (переменная, $(…)), а в команде есть merge: не "
                             "понять, слияние ли это. Пиши адрес и флаги словами. " + merge_gate.OWNER_CI)
                 continue

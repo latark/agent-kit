@@ -2148,14 +2148,16 @@ def owner_ci_problem(cwd, moved, args):
 # формы той же природы — остаток README guard, а не новый разбор.
 API_FLAGS_VALUE = ("-X", "--method", "-f", "-F", "--field", "--raw-field", "-H", "--header", "--input", "-q", "--jq",
                    "-t", "--template", "-p", "--preview", "--cache", "-R", "--repo", "--hostname")
-API_FLAGS_BOOL = ("--paginate", "--slurp", "-i", "--include", "--silent", "--verbose")
+API_FLAGS_BOOL = ("--paginate", "--slurp", "-i", "--include", "--silent", "--verbose", "--allow-escape-sequences")
 API_FLAGS_EQ = tuple(f + "=" for f in API_FLAGS_VALUE if f.startswith("--"))
 API_FIELD_FLAGS = ("-f", "-F", "--field", "--raw-field")
+API_OUTPUT_FLAGS = ("-q", "--jq", "-t", "--template")  # фильтр вывода: значение — не адрес и не запрос
 API_REST_MERGE = re.compile(r"(?:https://api\.github\.com/|/)?repos/([^/?#\s]+)/([^/?#\s]+)/pulls/([^/?#\s]+)/merge",
                             re.I)
 API_GQL_PATH = re.compile(r"(?:^|/)graphql/?(?:$|[?#])", re.I)
 API_MERGE_GQL = re.compile(r"\b(?:mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest)\b", re.I)
 API_MERGE_HINT = ("сливай `gh pr merge N -R <owner/repo> --match-head-commit <SHA>` — его шлюз сверяет CI так же")
+API_UNKNOWN = f"слово не вычислить (переменная, $(…)) — {API_MERGE_HINT}"
 
 
 def api_norm(word):
@@ -2169,62 +2171,94 @@ def api_norm(word):
         w = w2
 
 
+def api_words(words):
+    """Слова gh api (без api; флаги до api тоже) → (pos, fields, bad): pos — позиционные слова по порядку (адрес —
+    первое, после `--` — все), fields — (флаг, значение) у флагов со значением, bad — первый склеенный или незнакомый
+    флаг (`-XPUT`, `-iX`, `-fsha=…`) или None. Невычислимое слово — None на своём месте: в pos или значением флага."""
+    pos, fields, bad, i = [], [], None, 0
+    while i < len(words):
+        w = words[i]
+        if w == "--":
+            pos += words[i + 1:]
+            break
+        if w is None or not w.startswith("-") or w == "-":
+            pos.append(w)
+            i += 1
+        elif w in API_FLAGS_VALUE and i + 1 < len(words):
+            fields.append((w, words[i + 1]))
+            i += 2
+        elif w in API_FLAGS_BOOL:
+            i += 1
+        elif w.startswith(API_FLAGS_EQ):
+            fields.append(tuple(w.split("=", 1)))
+            i += 1
+        else:
+            bad = bad or w
+            i += 1
+    return pos, fields, bad
+
+
+def api_loose(words):
+    """Невычислимое позиционное слово gh api рядом с другим (`gh api …/merge $F`, `gh api $URL $F`) может оказаться
+    флагом записи (-X PUT, -f …): по словам запись не видна, но и не исключена. Единственный адрес и значения флагов
+    (`gh api repos/o/r/pulls/$N --jq .merged`) флагом не станут — это чтение (Д1 argus #257)."""
+    pos = api_words(words)[0]
+    return None in pos and len(pos) > 1
+
+
+def api_says_merge(words):
+    """Слово merge в словах gh api, кроме значений фильтров вывода -q, --jq, -t, --template (`--jq .merged`)."""
+    pos, fields, bad = api_words(words)
+    return any("merge" in (w or "").casefold() for w in pos + [bad] + [v for f, v in fields if f not in API_OUTPUT_FLAGS])
+
+
+def api_merge_path(p):
+    """Адрес (после api_norm) похож на слияние PR: в сегментах после repos/<owner>/<repo>/ — во всём адресе, если такой
+    части нет, — есть сегмент pulls, а за ним сегмент со словом merge. Имя репозитория (`repos/o/merge-bot/pulls`) и
+    ветки (`…/git/refs/heads/fix-pulls-merge`) не в счёт (Д5 argus #257)."""
+    m = re.search(r"(?:^|/)repos/[^/?#]*/[^/?#]*", p, re.I)
+    segs = re.split(r"[/?#]", (p[m.end():] if m else p).lower())
+    return "pulls" in segs and any("merge" in s for s in segs[segs.index("pulls") + 1:])
+
+
 def api_merge_args(words):
     """Слова gh api с записью (без api; флаги до api тоже) → None — не слияние PR; строка — отказ; список — слова
     gh pr merge для owner_ci_problem: номер, -R owner/repo из адреса (у `{owner}/{repo}` -R нет — gh берёт репозиторий
     папки, его так же находит owner_ci_problem), --match-head-commit из каждого поля sha.
-    Отказ (fail closed): слово не вычислить; флаг склеенный (`-XPUT`, `-fsha=…`) или незнакомый; `..` в адресе;
-    адрес с pulls и merge — не ровно repos/<owner>/<repo>/pulls/<N>/merge (полный адрес — только
-    https://api.github.com/; CI сверяется на github.com), --hostname не github.com; адрес graphql — не ровно `graphql`, или поле
-    из файла (`-F x=@f`, `--input`), или мутация слияния (mergePullRequest, enablePullRequestAutoMerge,
-    enqueuePullRequest)."""
-    path, fields, i = None, [], 0
-    while i < len(words):
-        w = words[i]
-        if w is None:
-            return f"слово не вычислить (переменная, $(…)) — {API_MERGE_HINT}"
-        if w == "--":
-            rest = words[i + 1:]
-            if None in rest:
-                return f"слово не вычислить (переменная, $(…)) — {API_MERGE_HINT}"
-            path = path if path is not None else (rest[0] if rest else None)
-            break
-        if w.startswith("-") and w != "-":
-            if w in API_FLAGS_VALUE and i + 1 < len(words):
-                if words[i + 1] is None:
-                    return f"слово не вычислить (переменная, $(…)) — {API_MERGE_HINT}"
-                fields.append((w, words[i + 1]))
-                i += 2
-                continue
-            if w in API_FLAGS_BOOL:
-                i += 1
-                continue
-            if w.startswith(API_FLAGS_EQ):
-                fields.append(tuple(w.split("=", 1)))
-                i += 1
-                continue
-            return (f"флаг {w[:40]} шлюз не разбирает (склеенный или незнакомый) — пиши флаги отдельными словами: "
-                    f"-X PUT, -f sha=… — или {API_MERGE_HINT}")
-        if path is None:
-            path = w
-        i += 1
-    if any(API_MERGE_GQL.search(v) for _, v in fields):
+    Отказ (fail closed): адрес не вычислить; флаг склеенный (`-XPUT`, `-iX`, `-fsha=…`) или незнакомый; `..` в адресе;
+    адрес слияния (api_merge_path) — не ровно repos/<owner>/<repo>/pulls/<N>/merge (полный адрес — только
+    https://api.github.com/; CI сверяется на github.com), --hostname не github.com; адрес graphql — не ровно `graphql`,
+    или поле из файла (`-F x=@f`, `--input`), или мутация слияния (mergePullRequest, enablePullRequestAutoMerge,
+    enqueuePullRequest). Невычислимое значение флага или лишнее слово — отказ только у адреса слияния и graphql:
+    `-f body="$B"` на …/issues/N/comments слиянием не станет (Д2 argus #257)."""
+    pos, fields, bad = api_words(words)
+    if bad:
+        return (f"флаг {bad[:40]} шлюз не разбирает (склеенный или незнакомый) — пиши флаги отдельными словами: "
+                f"-X PUT, -f sha=… — или {API_MERGE_HINT}")
+    if pos[:1] == [None]:
+        return API_UNKNOWN
+    unknown = None in pos or any(v is None for _, v in fields)
+    if any(v and API_MERGE_GQL.search(v) for _, v in fields):
         return (f"слияние через GraphQL (mergePullRequest, enablePullRequestAutoMerge, enqueuePullRequest) шлюз не "
                 f"разбирает — {API_MERGE_HINT}")
-    p = api_norm(path or "")
+    p = api_norm(pos[0] if pos else "")
     if ".." in p:
         return f"`..` в адресе ({p[:80]}) шлюз не разбирает — {API_MERGE_HINT}"
     if API_GQL_PATH.search(p):
         if not re.fullmatch(r"/?graphql", p, re.I):
             return f"адрес graphql не в форме `graphql` ({p[:80]}) — {API_MERGE_HINT}"
+        if unknown:
+            return API_UNKNOWN
         if any(f in ("--input", "-F", "--field") and (f == "--input" or "=@" in v) for f, v in fields):
             return f"запрос graphql из файла (-F …=@файл, --input) шлюз не проверяет — слияние ли это, не видно — {API_MERGE_HINT}"
         return None
-    if not ("pulls" in p.lower() and "merge" in p.lower()):
+    if not api_merge_path(p):
         return None
+    if unknown:
+        return API_UNKNOWN
     m = API_REST_MERGE.fullmatch(p)
     if not m:
-        return f"адрес с pulls и merge не в форме repos/<owner>/<repo>/pulls/<N>/merge ({p[:80]}) — {API_MERGE_HINT}"
+        return f"адрес слияния не в форме repos/<owner>/<repo>/pulls/<N>/merge ({p[:80]}) — {API_MERGE_HINT}"
     host = [v for f, v in fields if f == "--hostname" and v.lower() != "github.com"]
     if host:
         return (f"--hostname {host[0][:40]} — проверка CI идёт по github.com, другой хост шлюз не сверяет — "
