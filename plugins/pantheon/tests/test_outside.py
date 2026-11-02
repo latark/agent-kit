@@ -2113,6 +2113,25 @@ for label, kw in (("кэша нет", None), ("кэш старше часа", {"
     res = O.load_result(qa, r_ok) or {}
     check(f"0726: {label} — прогон как раньше", res.get("state") == "done" and len(calls()) == n1 + 1, res)
 
+# Д3: SHA — бывший head PR #5 и при этом head другого открытого PR (#7) в том же кэше — не устарел, прогон
+put_cache(old_heads={"Latark/App": {HEADA: 5}},
+          prs={"Latark/App": [{"number": 5, "head": NEWH}, {"number": 7, "head": HEADA.upper()}]})
+n1 = len(calls())
+r_ok = one_request()
+run_pass()
+res = O.load_result(qa, r_ok) or {}
+check("0726: бывший head #5 стал head #7 — не устарел, прогон", res.get("state") == "done" and len(calls()) == n1 + 1, res)
+# force-push назад: PR #5 снова на старом head, old_heads его ещё помнит
+put_cache(old_heads={"Latark/App": {HEADA: 5}}, prs={"Latark/App": [{"number": 5, "head": HEADA}]})
+n1 = len(calls())
+r_ok = one_request()
+run_pass()
+res = O.load_result(qa, r_ok) or {}
+check("0726: force-push назад — старый head снова текущий, прогон", res.get("state") == "done" and len(calls()) == n1 + 1, res)
+put_cache(old_heads={"Latark/App": {HEADA: 5}},
+          prs={"Latark/App": [{"number": 5, "head": NEWH}, {"number": 7, "head": HEADA}]})
+check("0726: stale_head напрямую: head другого открытого PR — None", O.stale_head(APP, HEADA) is None)
+
 # дубли: три заявки на одну папку и одна с --script — идёт первая и lint, две другие failed «дубль <первая>»
 os.remove(_cp)
 n1 = len(calls())
@@ -2127,7 +2146,11 @@ check("0726: дубли на ту же папку — в работу одна (
       (st[r_d[0]], len(calls()) - n1))
 check("0726: остальные — failed «дубль <id первой>», с командой итога",
       all(st[r].get("state") == "failed" and st[r].get("why", "").startswith(f"дубль {r_d[0]}")
-          and f"pantheon outside status {r_d[0]}" in st[r]["why"] for r in r_d[1:]), [st[r] for r in r_d[1:]])
+          and f"итог у заявки {r_d[0]} в окне athena-x" in st[r]["why"] and "outside status" not in st[r]["why"]
+          for r in r_d[1:]), [st[r] for r in r_d[1:]])
+check("0726: снятый дубль и --wait: код 75 («итога ещё нет»), а не 1",
+      all(O.result_code(st[r]) == 75 for r in r_d[1:]) and O.result_code({"state": "failed", "why": "x"}) == 1,
+      [O.result_code(st[r]) for r in r_d[1:]])
 check("0726: заявка с другим --script — не дубль, идёт", st[r_dl].get("state") == "done", st[r_dl])
 check("0726: заявка чужого окна на ту же папку — не дубль (отказ «не из папок направления»)",
       "не из папок направления" in (O.load_result(qk, r_other) or {}).get("why", ""))
@@ -2147,6 +2170,37 @@ run_pass()
 check("0726: worktree того же репозитория на том же HEAD — дубль",
       (O.load_result(qa, r_b) or {}).get("why", "").startswith(f"дубль {r_a}") and len(calls()) == n1 + 1,
       (O.load_result(qa, r_b), len(calls()) - n1))
+# Д1: worktree того же репозитория на другом HEAD — не дубль
+WT2R = os.path.realpath(WT2)
+
+
+def req_dir(d):
+    one_request.n += 1
+    rid = f"20261103-0{one_request.n:05d}-c0c0c0"
+    with open(os.path.join(qa, rid + ".req.json"), "w") as fh:
+        json.dump({"v": 1, "id": rid, "kind": "test", "dir": d, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, fh)
+    return rid
+
+
+git(WT2R, "commit", "-q", "--allow-empty", "-m", "wt2 свой коммит")
+r_a = req_dir(APP)
+r_b = req_dir(WT2R)
+n1 = len(calls())
+run_pass()
+rb = O.load_result(qa, r_b) or {}
+check("0726: worktree того же репозитория на другом HEAD — не дубль, идёт своим прогоном",
+      rb.get("state") == "done" and not rb.get("dup") and len(calls()) == n1 + 2, (rb, len(calls()) - n1))
+# тот же HEAD, но дерево грязное — не дубль (итог — «дерево не чистое», а не «дубль»)
+git(WT2R, "reset", "-q", "--hard", HEADA)
+with open(os.path.join(WT2R, "dirty.txt"), "w") as fh:
+    fh.write("x")
+r_a = req_dir(APP)
+r_b = req_dir(WT2R)
+run_pass()
+rb = O.load_result(qa, r_b) or {}
+check("0726: тот же HEAD, дерево грязное — не дубль",
+      not rb.get("dup") and not rb.get("why", "").startswith("дубль") and "не чистое" in rb.get("why", ""), rb)
+os.remove(os.path.join(WT2R, "dirty.txt"))
 git(APP, "worktree", "remove", "--force", os.path.realpath(WT2))
 P.write_json(os.path.join(STATE, "domains.json"),
              {"domains": {"athena-x": ["~/projects/app"], "metis-y": ["~/projects/other"]}})
@@ -2282,6 +2336,19 @@ n1 = len(calls())
 run_pass()
 check("0732: команда не из FULL_TESTS — повторный head того же дерева гоняется",
       len(calls()) == n1 + 1 and not (O.load_result(qa, r_y) or {}).get("by_tree"), O.load_result(qa, r_y))
+
+# Д2: зелёная запись прохода с другой cmd на том же дереве не переносится — идёт прогон
+K8 = commit(KIT, {"t.py": GREEN + "# k8\n"}, "k8")
+_line = O.command(KIT, "test")[1]
+with open(RECORDS, "a") as fh:
+    fh.write(json.dumps({"v": 1, "kind": "tests", "repo": ["latark/kit"], "pr": None, "sha": K8,
+                         "by": {"agent_type": "pantheon-outside", "agent_id": "", "session_id": "", "request": "x"},
+                         "cmd": "heavy python3 other.py", "tree": git(KIT, "rev-parse", f"{K8}^{{tree}}"),
+                         "env": O.run_env(_line)}) + "\n")
+n1 = len(calls())
+res = kit_request()
+check("0732: запись прохода с другой cmd на том же дереве — прогон, а не перенос",
+      len(calls()) == n1 + 1 and res.get("record") and not res.get("by_tree") and "уже есть" not in res.get("note", ""), res)
 
 # 0733: ранний прогон — head открытого PR из кэша, только у репозитория с полным набором
 K7 = commit(KIT, {"t.py": GREEN + "# k7\n"}, "k7")

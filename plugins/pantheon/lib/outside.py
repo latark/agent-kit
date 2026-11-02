@@ -16,7 +16,7 @@
   pantheon outside run [--serve]         проход по заявкам — только плановый проход (из окна Claude Code — отказ):
                                          без флага — тесты, --serve — серверы и сторож
 --wait С — ждать итога до С секунд (не больше 590: у Bash окна предел 10 минут) и напечатать его; код выхода — код
-команды тестов, у сервера 0 — адрес готов, отказ — 1, отказ «занято» (два сервера, давление памяти) — 75, итога не
+команды тестов, у сервера 0 — адрес готов, отказ — 1, отказ «занято» (два сервера, давление памяти) — 75, снятый дубль — 75 (итог у первой заявки), итога не
 дождался — 75. Без --wait — номер заявки, итог — `pantheon outside status ID`.
 
 Сервер (metis-0614, решения владельца 01.11). Одна заявка — один сервер — своя папка — свой порт:
@@ -1807,7 +1807,7 @@ def before_test(qdir, window, rid, req, d):
     if why:
         log_event(id=rid, kind="refused", window=window, dir=d, sha=sha, why=why)
         return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "why": why})
-    drop_dupes(qdir, rid, req, d, sha)
+    drop_dupes(qdir, rid, req, d, sha, window)
     return None
 
 
@@ -1825,6 +1825,8 @@ def stale_head(d, sha, t=None):
         num = old.get(repo, {}).get(sha)
         if num is None or repo in errs:
             continue
+        if any(isinstance(p, dict) and str(p.get("head") or "").lower() == sha for p in prs.get(repo, ())):
+            continue   # sha сейчас head какого-то открытого PR (бывший head #1 стал head #2; force-push назад) — не устарел
         cur = next((str(p.get("head") or "").lower() for p in prs.get(repo, ())
                     if isinstance(p, dict) and p.get("number") == num), "")
         if cur and cur != sha:
@@ -1855,7 +1857,7 @@ def _queued_tests():
     return out
 
 
-def drop_dupes(qdir, rid, req, d, sha):
+def drop_dupes(qdir, rid, req, d, sha, window=None):
     """Ждущие заявки на ту же проверку, что заявка rid (её папка d на HEAD sha): тот же --script и та же папка или
     папка того же репозитория на том же чистом HEAD. Тесты идут на HEAD папки во время прогона, поэтому они прогнали бы
     то же самое ещё раз (metis-0726: 21 заявка на 11 worktree). Каждая снимается с диска с итогом failed «дубль
@@ -1877,9 +1879,11 @@ def drop_dupes(qdir, rid, req, d, sha):
         finally:
             os.close(dfd)
         if gone:
-            why = (f"дубль {rid}: та же проверка на {sha[:12]} идёт заявкой {rid} — её итог: pantheon outside status "
-                   f"{rid}")
-            save_result(q2, rid2, {"state": "failed", "kind": "test", "sha": sha, "why": why, "dup": rid})
+            # status чужого окна заявку rid не видит — подсказки status нет, только где искать итог
+            why = (f"дубль {rid}: та же проверка на {sha[:12]} идёт заявкой {rid} — итог у заявки {rid} в окне "
+                   f"{window or '?'}")
+            save_result(q2, rid2, {"state": "failed", "kind": "test", "sha": sha, "why": why, "dup": rid,
+                                   "dup_window": window})
             log_event(id=rid2, kind="refused", window=w2, why=why)
             n += 1
     return n
@@ -2512,6 +2516,8 @@ def show(res):
 def result_code(res):
     if res.get("state") == "serving":
         return 0
+    if res.get("state") == "failed" and res.get("dup"):
+        return 75   # снятый дубль: своего итога нет, он у первой заявки (в этом окне его не прочесть) — «итога ещё нет»
     if res.get("state") == "failed" and res.get("busy"):
         return 75   # два сервера уже идут или давление памяти — отказ «занято», как истёкшее ожидание
     if res.get("state") == "done" and isinstance(res.get("code"), int) and not res.get("why"):
