@@ -70,7 +70,7 @@ TIMEOUT = 600  # с на файл; медленным — свой предел 
 # В комментарии — медиана и наибольшее зелёное время в тех прогонах, с.
 SLOW = {
     "pantheon/test_watch.py": 1020,  # 516 / 666 — дольше всех: полный прогон не короче его
-    "guard/test_merge_gate.py": 900,  # 458 / 458 (зелёный один); один воркер под outside — 333-358
+    "guard/test_merge_gate.py": 1200,  # 458 / 458; outside -j 3 02.11 — 766-825 с, раз 900 (таймаут), metis-0719
     "guard/test_guard.py": 720,  # 336 / 442; на Linux в Docker под нагрузкой 120-240 с, на 2-ядерном ubuntu-latest дольше
     "guard/test_shell_diff.py": 600,  # 254 / 390
     "pantheon/test_plugins_update.py": 540,  # 170 / 346
