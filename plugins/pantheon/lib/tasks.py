@@ -626,7 +626,7 @@ _DW_LINE = re.compile(rf"^\s*(?:#{{1,6}}\s*)?{DONE_WHEN}\s*:?\s*$", re.IGNORECAS
 _DW_ITEM = re.compile(r"^\s*[-*]\s*\[([ xXхХ])\]\s*(.*?)\s*$")
 
 
-def done_criteria(body):
+def done_criteria(body, with_stub=False):
     """Пункты «Готово, когда» в теле → [(отмечен, текст)]. Раздел — строка «## Готово, когда» или «Готово, когда:», дальше
     чек-лист; кончается заголовком или любой строкой не из списка. Заглушка шаблона (DONE_WHEN_HINT) пунктом не считается
     (metis-0712): задача, где есть только она, — без критериев."""
@@ -637,7 +637,7 @@ def done_criteria(body):
             continue
         m = _DW_ITEM.match(ln)
         if m:
-            if " ".join(m.group(2).split()) != DONE_WHEN_HINT:
+            if with_stub or " ".join(m.group(2).split()) != DONE_WHEN_HINT:
                 out.append((m.group(1) != " ", m.group(2)))
         elif ln.strip():
             break
@@ -1423,7 +1423,7 @@ def outcomes(tasks):
 
 def criteria_count(body):
     """«N из M» отмеченных пунктов «Готово, когда» (metis-0506); только заглушка-подсказка — «не заданы»; раздела нет — None."""
-    items = done_criteria(body)
+    items = done_criteria(body, with_stub=True)
     real = [ok for ok, text in items if text != DONE_WHEN_HINT]
     if real:
         return f"{sum(real)} из {len(real)}"
