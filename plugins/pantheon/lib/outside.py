@@ -8,11 +8,15 @@
   pantheon outside test [--script ИМЯ] [--wait С]    проверка проекта на HEAD этой папки (дерево чистое; неотслеживаемый .claude/worktrees/ не в счёт): команда —
                                          первая строка .pantheon-verify (из origin/HEAD, иначе из HEAD), иначе скрипт
                                          test/check package.json, иначе pytest; --script — скрипт package.json
+                                         Тот же HEAD и та же папка, а прежняя заявка test (без --script) ещё в очереди или идёт —
+                                         новой не будет: команда печатает ID прежней и с --wait ждёт её итог (metis-0706)
   pantheon outside serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С]
                                          dev-сервер на коммите SHA (по умолчанию HEAD этой папки) из своей копии →
                                          адрес http://127.0.0.1:<порт 4300–4399>; гаснет сам через N минут (30, ≤120)
   pantheon outside status [ID]           итог заявки: состояние, код, адрес, хвост журнала (без ID — последние)
   pantheon outside stop ID [--wait С]    погасить сервер раньше срока (из любого окна) и дождаться итога (20 с)
+                                         тест, ещё лежащий заявкой в очереди своего окна, снимается: итог stopped; идущий тест
+                                         не гасится — идёт до конца
   pantheon outside run [--serve]         проход по заявкам — только плановый проход (из окна Claude Code — отказ):
                                          без флага — тесты, --serve — серверы и сторож
 --wait С — ждать итога до С секунд (не больше 590: у Bash окна предел 10 минут) и напечатать его; код выхода — код
@@ -288,6 +292,15 @@ def _write_in(dfd, name, text):
 def _unlink_in(dfd, name):
     with contextlib.suppress(OSError):
         os.unlink(name, dir_fd=dfd)
+
+
+def _take_in(dfd, name):
+    """Снять файл name; True — снят этим вызовом (другой проход его уже не возьмёт), False — его уже нет."""
+    try:
+        os.unlink(name, dir_fd=dfd)
+    except OSError:
+        return False
+    return True
 
 
 def log_event(**kw):
@@ -920,7 +933,8 @@ def run_test(rid, d, script, window, qdir, roots, record=True):
     argv, line = command(d, "test", script)
     if not argv:
         return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "why": line})
-    save_result(qdir, rid, {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d})
+    save_result(qdir, rid, {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d,
+                            **({"script": script} if script else {})})
     log, fd = new_log(rid)
     tmp = tempfile.mkdtemp(prefix="outside-")
     code, timed_out = None, False
@@ -1933,6 +1947,17 @@ def cmd_request(kind, args):
            "by": " ".join((os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "").split())[:40]}
     if f.get("--script"):
         req["script"] = f["--script"]
+    if kind == "test":   # metis-0706: коммит при заявке — по нему видно, что такой же тест уже ждёт или идёт
+        head, _clean = head_state(d)
+        if head:
+            req["sha"] = head
+            prev = live_test(d, head, f.get("--script"))
+            if prev:   # тот же head, та же папка, прежняя заявка жива — не плодить дубль: её ID и ждать её
+                print(f"заявка {prev[1]}: тот же коммит {head[:12]} в {d} уже в очереди или идёт — новой заявки нет")
+                if not wait:
+                    print(f"итог: pantheon outside status {prev[1]}")
+                    return 0
+                return wait_result(prev[0], prev[1], wait)
     if kind == "serve":
         req["minutes"] = minutes
         req["wait"] = wait
@@ -1962,7 +1987,8 @@ def cmd_request(kind, args):
             with contextlib.suppress(OSError):   # состояние queued — видно в status до прохода
                 _write_in(dfd, rid + ".result.json", json.dumps(
                     {"id": rid, "state": "queued", "kind": kind, "src": d, "updated": P.stamp(),
-                     **{k: req[k] for k in ("sha", "app") if req.get(k)}}, ensure_ascii=False, indent=1))
+                     **{k: req[k] for k in ("sha", "app", "script") if req.get(k)}}, ensure_ascii=False,
+                    indent=1))
         finally:
             os.close(dfd)
     except OSError as e:
@@ -1976,6 +2002,44 @@ def cmd_request(kind, args):
         print(f"итог: pantheon outside status {rid}")
         return 0
     return wait_result(q, rid, wait)
+
+
+def live_test(d, sha, script=None):
+    """(папка заявок, ID) живой заявки test на этот head и эту папку или None: в очереди (лежит .req.json) или идёт
+    (итог running свежее TEST_TIMEOUT). Смотрит все папки заявок; недоступную пропускает."""
+    d = os.path.realpath(d)
+    now = P.now()
+    for qdir, _w in queue_dirs():
+        dfd = _open_dir(qdir)
+        if dfd is None:
+            continue
+        try:
+            names = sorted(os.listdir(dfd), reverse=True)
+            for name in names:
+                if not name.endswith(".result.json"):
+                    continue
+                rid = name[:-len(".result.json")]
+                try:
+                    res = json.loads(_read_in(dfd, name, 1024 * 1024) or "")
+                except ValueError:
+                    continue
+                if not isinstance(res, dict) or res.get("kind") != "test" or res.get("sha") != sha \
+                        or res.get("script") != script:
+                    continue
+                where = res.get("src") or res.get("dir")
+                if not isinstance(where, str) or os.path.realpath(where) != d:
+                    continue
+                if res.get("state") == "queued" and (rid + ".req.json") in names:
+                    return qdir, rid
+                if res.get("state") == "running":
+                    t = _epoch({"time": res.get("updated")})
+                    if t is not None and now - t < TEST_TIMEOUT + 300:
+                        return qdir, rid
+        except OSError:
+            continue
+        finally:
+            os.close(dfd)
+    return None
 
 
 def load_result(q, rid):
@@ -2073,6 +2137,25 @@ def _known(q, rid):
     return (res if isinstance(res, dict) else None), rid in servers(), rid in {r for r, _ in _queued_ids()}
 
 
+def _cancel_queued_test(q, rid):
+    """Тест, ещё лежащий заявкой в своей папке q, снимается: заявка удалена, итог stopped (metis-0706). True — снят;
+    False — не тест, не здесь или проход уже взял (тогда он идёт до конца)."""
+    dfd = _open_dir(q)
+    if dfd is None:
+        return False
+    try:
+        req = _parse(_read_in(dfd, rid + ".req.json"))
+        if not isinstance(req, dict) or req.get("kind") != "test" or not _take_in(dfd, rid + ".req.json"):
+            return False
+    finally:
+        os.close(dfd)
+    save_result(q, rid, {"state": "stopped", "kind": "test", "why": "отменена до запуска",
+                         **{k: req[k] for k in ("sha",) if req.get(k)}})
+    log_event(id=rid, kind="stop", why="отменена до запуска")
+    print(f"{rid}: тест был в очереди — снят, итог stopped")
+    return True
+
+
 def cmd_stop(args):
     if not args or not ID_RE.fullmatch(args[0]):
         err("pantheon outside stop ID [--wait С]")
@@ -2090,7 +2173,9 @@ def cmd_stop(args):
     if not res and not live and not queued:
         print(f"{rid}: нет такой заявки — ни итога, ни сервера, ни заявки в очереди (status покажет свои)")
         return 1
-    if (res or {}).get("kind") == "test" and not live:
+    if queued and _cancel_queued_test(q, rid):
+        return 0
+    if (res or {}).get("kind") == "test" and not live and res.get("state") != "stopped":
         print(f"{rid}: это тесты, а не сервер — они идут до конца (не дольше {TEST_TIMEOUT // 60} мин)")
         return 1
     if res and res.get("state") in ("stopped", "failed", "done") and not live and not queued:

@@ -1169,6 +1169,83 @@ check("requests: проход серверов берёт serve, test остаё
 got = O.requests(("test",))
 check("requests: проход тестов берёт test", [x[4] for x in got] == [rid_ts])
 
+# metis-0706: не плодить дубли заявок test; тест в очереди снимается stop; --wait ждёт уже поданную заявку
+def dup_say(window, cwd, *args):
+    os.environ["PANTHEON_TMP"] = os.path.join(CACHE, window, "tmp")
+    old, buf = os.getcwd(), io.StringIO()
+    os.chdir(cwd)
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = O.main(list(args))
+    finally:
+        os.chdir(old)
+        os.environ.pop("PANTHEON_TMP")
+    return rc, buf.getvalue()
+
+
+def req_ids(q):
+    return sorted(n[:-9] for n in os.listdir(q) if n.endswith(".req.json")) if os.path.isdir(q) else []
+
+
+q, rid_a = new_request("athena-x", APP, "test")
+head_now = O.head_state(APP)[0]
+check("дубль: в заявке test записан head", (O.load_result(q, rid_a) or {}).get("sha") == head_now, O.load_result(q, rid_a))
+rc, out = dup_say("athena-x", APP, "test")
+check("дубль (а): тот же head и папка, прежняя в очереди — новой заявки нет, ID прежней в выводе, код 0",
+      rc == 0 and req_ids(q) == [rid_a] and rid_a in out, (rc, out, req_ids(q)))
+rc, out = dup_say("athena-x", APP, "test")
+check("дубль (а): и третья заявка не плодит", rc == 0 and req_ids(q) == [rid_a], (rc, req_ids(q)))
+rc, out = dup_say("athena-x", APP, "test", "--script", "lint")
+ids = req_ids(q)
+check("дубль (а): другой --script — отдельная заявка", rc == 0 and len(ids) == 2 and rid_a in ids, (rc, out, ids))
+for i in ids:
+    if i != rid_a:
+        os.unlink(os.path.join(q, i + ".req.json"))
+        O.save_result(q, i, {"state": "failed", "kind": "test", "why": "проба"})
+# заявка взята проходом и идёт (running, итог свежий) — тоже живая
+os.unlink(os.path.join(q, rid_a + ".req.json"))
+O.save_result(q, rid_a, {"state": "running", "kind": "test", "sha": head_now, "cmd": "x", "dir": APP})
+rc, out = dup_say("athena-x", APP, "test")
+check("дубль (а): прежний тест идёт (running) — новой заявки нет", rc == 0 and req_ids(q) == [] and rid_a in out,
+      (rc, out, req_ids(q)))
+rc, out = say("athena-x", "stop", rid_a, "--wait", "0")
+check("stop идущего теста — по-прежнему отказ «это тесты», код 1", rc == 1 and "это тесты" in out, (rc, out))
+# running старше срока теста — висяк, не блокирует
+O.save_result(q, rid_a, {"state": "running", "kind": "test", "sha": head_now, "cmd": "x", "dir": APP,
+                         "updated": "2020-01-01 00:00"})
+rc, out = dup_say("athena-x", APP, "test")
+ids = req_ids(q)
+check("дубль (а): висящий running старше срока не мешает — заявка новая", rc == 0 and len(ids) == 1 and ids[0] != rid_a,
+      (rc, out, ids))
+rid_b = ids[0]
+# другой head — отдельная заявка (регрессия)
+git(APP, "commit", "--allow-empty", "-q", "-m", "m0706")
+rc, out = dup_say("athena-x", APP, "test")
+ids = req_ids(q)
+check("регрессия: другой head — вторая заявка, обе в очереди", rc == 0 and len(ids) == 2 and rid_b in ids, (rc, out, ids))
+rid_c = next(i for i in ids if i != rid_b)
+check("регрессия: у второй свой head", (O.load_result(q, rid_c) or {}).get("sha") != head_now, O.load_result(q, rid_c))
+# (б) stop снимает тест, пока он в очереди
+rc, out = say("athena-x", "stop", rid_c, "--wait", "0")
+res = O.load_result(q, rid_c) or {}
+check("stop (б): тест в очереди снят — код 0, заявки нет, итог stopped «отменена»",
+      rc == 0 and rid_c not in req_ids(q) and res.get("state") == "stopped" and "отменена" in res.get("why", ""),
+      (rc, out, res))
+run_pass()
+check("stop (б): снятый тест проход не запускает, остальная очередь идёт",
+      (O.load_result(q, rid_c) or {}).get("state") == "stopped"
+      and (O.load_result(q, rid_b) or {}).get("state") in ("done", "failed"), (O.load_result(q, rid_c), O.load_result(q, rid_b)))
+rc, out = say("athena-x", "stop", rid_c, "--wait", "0")
+check("stop (б): повтор — «уже stopped», код 0", rc == 0 and "stopped" in out, (rc, out))
+git(APP, "reset", "-q", "--hard", head_now)
+# (в) --wait с уже поданной заявкой ждёт её итог
+q, rid_w = new_request("athena-x", APP, "test")
+threading.Timer(1.0, run_pass).start()
+rc, out = dup_say("athena-x", APP, "test", "--wait", "30")
+res = O.load_result(q, rid_w) or {}
+check("--wait (в): ждёт итог прежней заявки, новой нет, код — её кода",
+      res.get("state") in O.FINAL and req_ids(q) == [] and rc == O.result_code(res) and rid_w in out, (rc, out, res))
+
 # «стоп» без сервера и заявки: старый убирается, молодой ждёт
 _qa = os.path.join(CACHE, "athena-x", "outside")
 _orph, _young = os.path.join(_qa, "20261101-000000-0a0a0a.stop"), os.path.join(_qa, "20261101-000000-0b0b0b.stop")
