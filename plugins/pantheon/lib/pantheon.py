@@ -2958,9 +2958,10 @@ def reconcile_agents(data, workers=None):
     по-прежнему «ждёт вас», без вопроса — мёртвая (noProcess), заменяется новой. metis-0662: время берётся и из
     реестра демона — правлен меньше минуты назад (respawn: запись claude agents хранит старый startedAt, а процесс
     между снятием старого воркера и выдачей нового в реестре не виден) — не призрак; живой процесс этой сессии в
-    реестре имён ~/.claude/sessions (тот же sessionId или фоновая с тем же именем) — тоже не призрак и не noProcess:
-    после перезапуска демона живой воркер может выпасть из roster. Засчитывается только запись того же sessionId, и
-    только если её процесс тот самый (reg_same_process); тёзка с другим sessionId — другая сессия (ревью argus #249).
+    реестре имён ~/.claude/sessions — тоже не призрак и не noProcess: после перезапуска демона живой воркер может
+    выпасть из roster. Своя запись реестра — с jobId, равным id записи claude agents (у фоновой sessionId в реестре
+    бывает другим), или с тем же sessionId, и только если её процесс тот самый (reg_same_process). Тёзка по имени —
+    другая сессия, жизни этой записи не доказывает (ревью argus #249).
     (3) Причина для сводки: нет waitingFor — needs задания (blocked) или detail (failed)."""
     workers = daemon_workers() if workers is None else workers
     roster_at = roster_changed_at() if workers is not None else None
@@ -2973,8 +2974,8 @@ def reconcile_agents(data, workers=None):
         alive = bool(wpid) and pid_alive(wpid)
         if not alive and workers is not None and a.get("state") in ("working", "blocked"):
             reg = sessions_registry() if reg is None else reg
-            in_reg = any(a.get("sessionId") and r.get("sessionId") == a.get("sessionId") and reg_same_process(r)
-                         for r in reg)
+            in_reg = any(((a.get("sessionId") and r.get("sessionId") == a.get("sessionId"))
+                          or str(r.get("jobId") or "") == str(a["id"])) and reg_same_process(r) for r in reg)
         else:
             in_reg = False
         if alive and not a.get("pid"):
@@ -3050,7 +3051,8 @@ def sessions_registry():
                 continue
             out.append({"name": rec.get("name"), "sessionId": rec.get("sessionId"), "pid": rec.get("pid"),
                         "kind": "interactive" if rec.get("kind") == "interactive" else "background",
-                        "cwd": rec.get("cwd"), "registry": True, "procStart": rec.get("procStart"), "file": f})
+                        "cwd": rec.get("cwd"), "registry": True, "procStart": rec.get("procStart"), "file": f,
+                        "jobId": rec.get("jobId")})
     return out
 
 
@@ -3093,7 +3095,7 @@ def live_copies(name, agents, registry=None):
     known = {a.get("sessionId") for a in agents or []}
     for r in sessions_registry() if registry is None else registry:
         if r.get("kind") == "interactive" and r.get("sessionId") not in known and alias.fullmatch(str(r.get("name") or "")):
-            out.append({k: v for k, v in r.items() if k not in ("registry", "procStart", "file")})
+            out.append({k: v for k, v in r.items() if k not in ("registry", "procStart", "file", "jobId")})
     return out
 
 

@@ -3899,6 +3899,14 @@ def test_registry_stale_record_249():
         got = "поднята" in out and bool(_woke(e))
         check(got == ghost, f"Д1: файл {fname}, pid {pid}, procStart {proc!r}, ps {ps_out!r}: призрак {got}, "
                             f"а надо {ghost}: {out.strip()[:160]}")
+    # argus-249a Б1: у живой фоновой sessionId в реестре бывает другим, совпадает jobId (= id записи claude agents)
+    for job, ghost in (("cccccccc", False), ("dddddddd", True)):
+        e = _ghost_env("zz-rj", updated=T0 - 1000)
+        e.agents([bg("zz-rj", "working", "cccccccc-1")])
+        _reg(e, dict(sessionId="ffffffff-9", jobId=job, name="zz-rj", kind="bg"))
+        e.run("watch", t=t)  # wake тут не мерило: живая фоновая тёзка держит имя в любом случае (holders)
+        got = "процесс умер" in e.alerts()
+        check(got == ghost, f"Б1 jobId {job}: призрак {got}, а надо {ghost}: {e.alerts()[-300:]}")
     # Д2: живая тёзка с другим sessionId не снимает noProcess с мёртвой blocked-записи без вопроса
     e = _ghost_env("zz-nm", updated=T0 - 1000)
     _job(e, "aaaaaaaa", state="blocked")
