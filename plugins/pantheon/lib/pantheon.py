@@ -3070,12 +3070,14 @@ def proc_started(pid):
 def reg_same_process(r):
     """Запись реестра имён написал тот процесс, что сейчас живёт под её pid: файл назван этим pid, а время старта
     процесса совпало с procStart записи. Устаревшая запись умершей сессии, чей pid занял другой процесс, жизнь не
-    доказывает (ревью argus #249 Д1). ps недоступен или procStart в записи нет — время не опровергает."""
+    доказывает (ревью argus #249 Д1). procStart в записи нет — сверять нечего, запись принимается. ps недоступен
+    (в песочнице окна он не идёт, metis-0679) при procStart в записи — не доказано: запись не засчитывается, призрак не
+    прячется (tick из launchd ps видит — задержка, не потеря)."""
     if str(r.get("file")) != f"{r.get('pid')}.json":
         return False
     want = " ".join(str(r.get("procStart") or "").split())
     got = proc_started(r.get("pid")) if want else None
-    return not (want and got and got != want)
+    return not want or got == want
 
 
 def name_alias(name):

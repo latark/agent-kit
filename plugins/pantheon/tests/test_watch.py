@@ -3864,8 +3864,8 @@ def test_ghost_question_and_noprocess_0662():
 
 def test_registry_stale_record_249():
     """Ревью argus #249. Д1: запись реестра имён с тем же sessionId, но не того процесса — файл назван другим pid
-    (pid 1 жив всегда) или время старта процесса не совпало с procStart — призрака не прячет; совпало или ps не дал
-    ответа — прячет. Д2: мёртвая blocked-запись без вопроса при живой тёзке с другим sessionId — noProcess, без
+    (pid 1 жив всегда) или время старта процесса не совпало с procStart или ps не дал ответа (metis-0679) — призрака не прячет; совпало —
+    прячет; то же для записи по jobId. Д2: мёртвая blocked-запись без вопроса при живой тёзке с другим sessionId — noProcess, без
     тревоги «ждёт вас». С2: pid 0 в реестре — не живой."""
     import json as _j
     t = T0 + 60
@@ -3886,7 +3886,8 @@ def test_registry_stale_record_249():
         (0, 0, None, None, True),                                             # pid 0 — группа, не процесс
         (me, me, "Mon Jan  1 00:00:00 2024", "Sun Nov  1 14:23:55 2026", True),  # pid занят другим процессом
         (me, me, "Sun Nov  1 14:23:55 2026", "Sun Nov  1 14:23:55 2026", False),  # тот самый процесс
-        (me, me, "Sun Nov  1 14:23:55 2026", "", False),                      # ps не ответил — не опровергает
+        (me, me, "Sun Nov  1 14:23:55 2026", "", True),                       # ps не ответил — не доказано (metis-0679)
+        (me, me, None, "", False),                                            # procStart в записи нет — сверять нечего
     )
     for fname, pid, proc, ps_out, ghost in cases:
         e = _ghost_env("zz-rs", updated=T0 - 1000)
@@ -3907,6 +3908,23 @@ def test_registry_stale_record_249():
         e.run("watch", t=t)  # wake тут не мерило: живая фоновая тёзка держит имя в любом случае (holders)
         got = "процесс умер" in e.alerts()
         check(got == ghost, f"Б1 jobId {job}: призрак {got}, а надо {ghost}: {e.alerts()[-300:]}")
+    # metis-0679 (argus-249a Д1): тот же отбор для записи по jobId при чужом sessionId — файл не назван pid, procStart
+    # не тот, ps не ответил (в песочнице окна) — призрак; тот самый процесс — не призрак
+    same = "Sun Nov  1 14:23:55 2026"
+    for fname, proc, ps_out, ghost in ((4242, None, None, True),
+                                       (me, "Mon Jan  1 00:00:00 2024", same, True),
+                                       (me, same, "", True),
+                                       (me, same, same, False)):
+        e = _ghost_env("zz-rj", updated=T0 - 1000)
+        e.agents([bg("zz-rj", "working", "cccccccc-1")])
+        reg_file(e, fname, dict(pid=me, sessionId="ffffffff-9", jobId="cccccccc", name="zz-rj", kind="bg",
+                                **({"procStart": proc} if proc else {})))
+        if ps_out is not None:
+            fake_ps(e, ps_out)
+        e.run("watch", t=t)
+        got = "процесс умер" in e.alerts()
+        check(got == ghost, f"Д1 jobId: файл {fname}, procStart {proc!r}, ps {ps_out!r}: призрак {got}, а надо "
+                            f"{ghost}: {e.alerts()[-300:]}")
     # Д2: живая тёзка с другим sessionId не снимает noProcess с мёртвой blocked-записи без вопроса
     e = _ghost_env("zz-nm", updated=T0 - 1000)
     _job(e, "aaaaaaaa", state="blocked")
