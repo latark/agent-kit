@@ -1804,17 +1804,49 @@ def prepare(d, rid, heavy=True, tick=None, timeout=TEST_TIMEOUT):
     return code
 
 
-def auto_pass(t=None):
+def waiting_keys():
+    """{(repo, sha)} ждущих заявок test с проверкой проекта (без --script): на них заявка сама запишет tests, автопрогон
+    был бы вторым тем же прогоном (metis-0716). Заявки не снимаются; не разобрать — пропускается."""
+    out = set()
+    for qdir, window in queue_dirs():
+        dfd = _open_dir(qdir)
+        if dfd is None:
+            continue
+        try:
+            for name in sorted(os.listdir(dfd)):
+                if not name.endswith(".req.json"):
+                    continue
+                rid = name[:-len(".req.json")]
+                req = _parse(_read_in(dfd, name))
+                if (_req_kind(req) != "test" or req.get("script") or not ID_RE.fullmatch(rid)
+                        or check_request(req, rid)):
+                    continue
+                d, _roots = resolve_dir(req["dir"], window)
+                head = head_state(d)[0] if d else None
+                if head:
+                    out.update((r.lower(), head) for r in remotes(d))
+        except OSError:
+            pass
+        finally:
+            os.close(dfd)
+    return out
+
+
+def auto_pass(t=None, limit=None, skip=()):
+    """Автопрогоны по auto_todo, не больше limit за вызов, без (repo, sha) из skip. «Просмотрено» (mtime журнала в
+    auto.json) пишется, только если взято всё: отложенное лимитом или skip остаётся для следующего захода (auto_due)."""
     try:
         m = os.stat(records_file()).st_mtime
     except OSError:
         m = None
-    todo = auto_todo(t=t)
-    a = P.read_json(root("auto.json"), {})
-    a["mtime"] = m
-    os.makedirs(root(), mode=0o700, exist_ok=True)
-    P.write_json(root("auto.json"), a)
-    return [run_auto(repo, sha) for repo, sha in todo]
+    todo = [k for k in auto_todo(t=t) if k not in skip]
+    cut = todo if limit is None else todo[:limit]
+    if len(cut) == len(todo) and not skip:
+        a = P.read_json(root("auto.json"), {})
+        a["mtime"] = m
+        os.makedirs(root(), mode=0o700, exist_ok=True)
+        P.write_json(root("auto.json"), a)
+    return [run_auto(repo, sha) for repo, sha in cut]
 
 
 # --- тик и проходы -----------------------------------------------------------------------------------------------
@@ -1840,6 +1872,27 @@ def _in_claude():
     return False
 
 
+def run_test_queue():
+    """Заход прохода тестов (metis-0716): явные заявки test всегда раньше автопрогонов. Автопрогон идёт по одному
+    (около 25 мин), и после каждого очередь читается заново — заявка, поданная за это время, идёт следующей. Если
+    в заходе были заявки, автопрогон за заход — не больше одного: остальные ждут следующего захода (тик, auto_due),
+    чтобы очередь не стояла часами. Автопрогон на (repo, sha) ждущей заявки не берётся — его прогонит заявка."""
+    had_req = autos = 0
+    while True:
+        reqs = requests(("test",))
+        for _t, _k, qdir, window, rid, req in reqs:
+            handle(qdir, window, rid, req)
+        if reqs:
+            had_req = 1
+            continue
+        if (had_req and autos) or not auto_due():
+            break
+        if auto_pass(limit=1, skip=waiting_keys()):
+            autos += 1
+        elif not _queued_ids(("test",)):
+            break
+
+
 def cmd_run():
     """Проход тестов (замок outside-run): серверы не смотрит — их ведёт свой проход (metis-0614)."""
     if _in_claude():
@@ -1847,10 +1900,7 @@ def cmd_run():
     with P.lock("outside-run", block=False) as got:
         if not got:
             return 0
-        for _t, _k, qdir, window, rid, req in requests(("test",)):
-            handle(qdir, window, rid, req)
-        if auto_due():
-            auto_pass()
+        run_test_queue()
         prune()
     return 0
 

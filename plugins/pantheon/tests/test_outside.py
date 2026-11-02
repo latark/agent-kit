@@ -1744,6 +1744,96 @@ got = json.loads(r.stdout) if r.returncode == 0 else None
 check("guard: `pantheon outside serve` — не dev-сервер (pnpm dev — да)", got and got[0] is None and got[1], r.stdout + r.stderr)
 check("guard: `pantheon outside test` — не привилегированная команда", got and got[2] == [], got)
 
+# --- 5b. заявки раньше автопрогонов (metis-0716) -------------------------------------------------------------------
+class Sim:
+    """Подмена очереди и прогонов: порядок событий в журнале ev; hook срабатывает в каждом автопрогоне (заявка
+    «подана во время него»)."""
+
+    def __init__(self, todo, queue=(), hook=None):
+        self.todo, self.queue, self.hook, self.ev = list(todo), list(queue), hook, []
+
+    def run(self, runner):
+        names = ("requests", "handle", "run_auto", "auto_todo", "auto_due", "waiting_keys", "_queued_ids")
+        saved = {n: getattr(O, n) for n in names}
+
+        def requests(kinds=()):
+            q, self.queue = self.queue, []
+            return [("", "test", "qd", "w", r, {}) for r in q]
+
+        def run_auto(repo, sha):
+            self.ev.append("auto:" + sha[0])
+            self.todo.remove((repo, sha))
+            if self.hook:
+                self.hook(self)
+            return {"state": "done"}
+
+        O.requests, O.run_auto = requests, run_auto
+        O.handle = lambda qdir, window, rid, req: self.ev.append("req:" + rid)
+        O.auto_todo = lambda recs=None, t=None: list(self.todo)
+        O.auto_due = lambda: bool(self.todo)
+        O.waiting_keys = lambda: {("o/r", "z" * 40)}
+        O._queued_ids = lambda kinds=(): [(r, "test") for r in self.queue]
+        try:
+            runner()
+        finally:
+            for n, f in saved.items():
+                setattr(O, n, f)
+        return self.ev
+
+
+def old_order():
+    """Порядок до metis-0716: очередь читается раз, затем все автопрогоны подряд."""
+    for _t, _k, qdir, window, rid, req in O.requests(("test",)):
+        O.handle(qdir, window, rid, req)
+    if O.auto_due():
+        O.auto_pass()
+
+
+def push_r1(s):
+    s.queue.append("R1")
+
+
+T3 = [("o/r", c * 40) for c in "abc"]
+sim = Sim(T3, hook=push_r1)
+sim.run(O.run_test_queue)
+check("заявка, поданная во время автопрогона, идёт следующей, остальные автопрогоны ждут",
+      sim.ev == ["auto:a", "req:R1"] and len(sim.todo) == 2, sim.ev)
+sim = Sim(T3, hook=push_r1)
+sim.run(old_order)
+check("мутант: старый порядок — заявка уходит за все автопрогоны (тест выше красный)",
+      sim.ev != ["auto:a", "req:R1"], sim.ev)
+sim = Sim(T3, queue=["R0"])
+sim.run(O.run_test_queue)
+check("заявка в очереди с начала: сначала она, потом один автопрогон", sim.ev == ["req:R0", "auto:a"], sim.ev)
+sim = Sim(T3, queue=["R0"])
+sim.run(old_order)
+check("мутант: старый порядок при заявке — три автопрогона за заход", sim.ev == ["req:R0", "auto:a", "auto:b", "auto:c"],
+      sim.ev)
+sim = Sim(T3)
+sim.run(O.run_test_queue)
+check("заявок нет: автопрогоны идут подряд, очередь читается между ними", sim.ev == ["auto:a", "auto:b", "auto:c"], sim.ev)
+
+# ждущая заявка на тот же (repo, sha): автопрогон не дублируется; пропущенное не «просмотрено»
+HEADA = git(APP, "rev-parse", "HEAD")
+rc, q, rid = role_request("athena-x", APP, "test")
+rc2, q2, rid2 = role_request("athena-x", APP, "test", "--script", "lint")
+keys = O.waiting_keys()
+check("ждущая заявка test даёт ключ (repo, HEAD), заявка не снята; с --script ключа нет",
+      keys == {(REPO.lower(), HEADA)} and os.path.isfile(os.path.join(q, rid + ".req.json")), (keys, HEADA))
+ran = []
+_ra, _at = O.run_auto, O.auto_todo
+O.run_auto = lambda repo, sha: ran.append((repo, sha)) or {"state": "done"}
+O.auto_todo = lambda recs=None, t=None: [(REPO, HEADA), (REPO, "b" * 40)]
+mt = P.read_json(O.root("auto.json"), {}).get("mtime", "нет")
+O.auto_pass(skip=keys)
+O.run_auto, O.auto_todo = _ra, _at
+check("автопрогон на (repo, sha) ждущей заявки пропущен, соседний взят", ran == [(REPO, "b" * 40)], ran)
+check("пропущенное не помечено просмотренным (mtime журнала в auto.json не менялся)",
+      P.read_json(O.root("auto.json"), {}).get("mtime", "нет") == mt)
+for r_, d_ in ((rid, q), (rid2, q2)):
+    os.remove(os.path.join(d_, r_ + ".req.json"))
+check("ключей ждущих заявок больше нет", O.waiting_keys() == set())
+
 # --- 6. сироты (metis-0614): после всех серверов и стопов ни заглушки, ни задач «turbo» в живых --------------------
 kill_all_servers()
 _left = [p for p in fake_pids() if still_alive(p)]
