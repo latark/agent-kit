@@ -2151,7 +2151,7 @@ API_FLAGS_VALUE = ("-X", "--method", "-f", "-F", "--field", "--raw-field", "-H",
 API_FLAGS_BOOL = ("--paginate", "--slurp", "-i", "--include", "--silent", "--verbose")
 API_FLAGS_EQ = tuple(f + "=" for f in API_FLAGS_VALUE if f.startswith("--"))
 API_FIELD_FLAGS = ("-f", "-F", "--field", "--raw-field")
-API_REST_MERGE = re.compile(r"(?:https?://[^/?#]+(?:/api/v3)?/|/)?repos/([^/?#\s]+)/([^/?#\s]+)/pulls/([^/?#\s]+)/merge",
+API_REST_MERGE = re.compile(r"(?:https://api\.github\.com/|/)?repos/([^/?#\s]+)/([^/?#\s]+)/pulls/([^/?#\s]+)/merge",
                             re.I)
 API_GQL_PATH = re.compile(r"(?:^|/)graphql/?(?:$|[?#])", re.I)
 API_MERGE_GQL = re.compile(r"\b(?:mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest)\b", re.I)
@@ -2174,7 +2174,8 @@ def api_merge_args(words):
     gh pr merge для owner_ci_problem: номер, -R owner/repo из адреса (у `{owner}/{repo}` -R нет — gh берёт репозиторий
     папки, его так же находит owner_ci_problem), --match-head-commit из каждого поля sha.
     Отказ (fail closed): слово не вычислить; флаг склеенный (`-XPUT`, `-fsha=…`) или незнакомый; `..` в адресе;
-    адрес с pulls и merge — не ровно repos/<owner>/<repo>/pulls/<N>/merge; адрес graphql — не ровно `graphql`, или поле
+    адрес с pulls и merge — не ровно repos/<owner>/<repo>/pulls/<N>/merge (полный адрес — только
+    https://api.github.com/; CI сверяется на github.com), --hostname не github.com; адрес graphql — не ровно `graphql`, или поле
     из файла (`-F x=@f`, `--input`), или мутация слияния (mergePullRequest, enablePullRequestAutoMerge,
     enqueuePullRequest)."""
     path, fields, i = None, [], 0
@@ -2224,6 +2225,10 @@ def api_merge_args(words):
     m = API_REST_MERGE.fullmatch(p)
     if not m:
         return f"адрес с pulls и merge не в форме repos/<owner>/<repo>/pulls/<N>/merge ({p[:80]}) — {API_MERGE_HINT}"
+    host = [v for f, v in fields if f == "--hostname" and v.lower() != "github.com"]
+    if host:
+        return (f"--hostname {host[0][:40]} — проверка CI идёт по github.com, другой хост шлюз не сверяет — "
+                f"{API_MERGE_HINT}")
     owner, name, pr = m.groups()
     if not PR_RE.fullmatch(pr):
         return f"номер PR в адресе …/pulls/{pr}/merge — не число, CI не сверить — {API_MERGE_HINT}"

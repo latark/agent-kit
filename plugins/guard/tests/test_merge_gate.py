@@ -4321,7 +4321,8 @@ def t_owner_api_merge(h):
     """metis-0663: сессия без роли — слияние через `gh api … PUT repos/O/R/pulls/N/merge` (-X PUT, --method PUT,
     --method=PUT, флаг до api, полный адрес, плейсхолдеры {owner}/{repo}, поле sha) проходит ту же проверку CI, что
     gh pr merge. Фоновая проверка 02.11 — одно правило fail closed для записи gh api: невычислимое слово, склеенный или
-    незнакомый флаг (`-XPUT`, `-fsha=`), `..` в адресе, адрес с pulls и merge не ровно в форме, graphql не ровно
+    незнакомый флаг (`-XPUT`, `-fsha=`), `..` в адресе, адрес с pulls и merge не ровно в форме (полный адрес — только
+    https://api.github.com/, --hostname — только github.com), graphql не ровно
     `graphql`, graphql из файла, мутация слияния — отказ. GET того же адреса и другие gh api — не судятся. Слово merge
     ищется после разбора bash (`gh pr mer''ge`), алиас слияния — отказ."""
     kit, sha = "projects/agent-kit", h.sha["agent-kit"]
@@ -4337,6 +4338,7 @@ def t_owner_api_merge(h):
              ("полный путь к gh", "/usr/local/bin/gh api -X PUT repos/latark/agent-kit/pulls/9/merge"),
              ("полный адрес https://api.github.com/…", "gh api -X PUT https://api.github.com/repos/latark/agent-kit/pulls/9/merge"),
              ("плейсхолдеры {owner}/{repo}", "gh api -X PUT 'repos/{owner}/{repo}/pulls/9/merge'"),
+             ("--hostname github.com", "gh api --hostname github.com -X PUT repos/latark/agent-kit/pulls/9/merge"),
              ("поле sha", f"gh api -X PUT repos/latark/agent-kit/pulls/9/merge -f sha={sha}"),
              ("поле --raw-field=sha=", f"gh api -X PUT repos/latark/agent-kit/pulls/9/merge --raw-field=sha={sha}"),
              ("флаги --paginate, --jq", "gh api --paginate -X PUT repos/latark/agent-kit/pulls/9/merge --jq .merged"),
@@ -4393,6 +4395,18 @@ def t_owner_api_merge(h):
             ("gh api -X PUT repos/latark/agent-kit/pulls/9/merged", "…/merged", "не в форме"),
             ("gh api -X PUT 'repos/latark/agent-kit/pulls/9/merge?x=1'", "хвост ?x=1", "не в форме"),
             ("gh api -X PUT myrepos/latark/agent-kit/pulls/9/merge", "repos/ не с начала адреса", "не в форме"),
+            # хост: CI сверяется на github.com — полный адрес только https://api.github.com/, --hostname только github.com
+            ("gh api -X PUT https://ghe.example/api/v3/repos/latark/agent-kit/pulls/9/merge", "полный адрес GHE /api/v3",
+             "не в форме"),
+            ("gh api -X PUT https://ghe.example/repos/latark/agent-kit/pulls/9/merge", "полный адрес другого хоста",
+             "не в форме"),
+            ("gh api -X PUT http://api.github.com/repos/latark/agent-kit/pulls/9/merge", "http://", "не в форме"),
+            ("gh api --hostname ghe.example -X PUT repos/latark/agent-kit/pulls/9/merge", "--hostname другой хост",
+             "другой хост шлюз не сверяет"),
+            ("gh api --hostname=ghe.example -X PUT repos/latark/agent-kit/pulls/9/merge", "--hostname= другой хост",
+             "другой хост шлюз не сверяет"),
+            ("gh api --hostname github.com --hostname ghe.example -X PUT repos/latark/agent-kit/pulls/9/merge",
+             "два --hostname, второй чужой", "--hostname ghe.example"),
             # graphql
             ("gh api graphql -f query='mutation{mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}'",
              "GraphQL mergePullRequest", "GraphQL"),

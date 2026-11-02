@@ -587,8 +587,8 @@ SDK (`sdk`) флаг не снимают — так же журнал owner-log 
      «укажи номер PR, -R и --match-head-commit буквально» (Д1' argus #235), а не сбой хука.
    - Несколько `gh pr merge` в одной команде — судится каждое: один красный PR — отказ всей команды.
    - Слияние через API (metis-0663) — та же проверка CI. Это `gh api` с записью (метод не GET или поля `-f`, `-F`,
-     `--field`, `--raw-field`, `--input`) на адрес ровно `repos/<owner>/<repo>/pulls/<N>/merge`, с `/` или полным
-     `https://<хост>[/api/v3]/` впереди. Метод — `-X PUT`, `--method PUT`, `--method=put`, флаг до `api` или поле без
+     `--field`, `--raw-field`, `--input`) на адрес ровно `repos/<owner>/<repo>/pulls/<N>/merge`, с `/` или
+     `https://api.github.com/` впереди. Метод — `-X PUT`, `--method PUT`, `--method=put`, флаг до `api` или поле без
      `-X` (gh шлёт POST). Репозиторий берётся из адреса, у `{owner}/{repo}` — из папки, как без `-R`. Поле `sha` (`-f`,
      `-F`, `--field`, `--raw-field`, `--field=…`) работает как `--match-head-commit`. Адрес сверяется после раскрытия
      `%XX`, схлопывания `//` и сегментов `./` (`api_norm`). Разбор — `api_merge_args` в `merge_gate.py`.
@@ -600,6 +600,8 @@ SDK (`sdk`) флаг не снимают — так же журнал owner-log 
      - `..` в адресе;
      - адрес с `pulls` и `merge`, который не ровно форма выше (`repositories/<id>/…`, `…/merged`, `?x=1`), номер не
        числом, плейсхолдер вперемешку с именем (`{owner}/agent-kit`);
+     - другой хост: полный адрес не на `https://api.github.com/` (GHE, `/api/v3`, `http://`) и `--hostname` не
+       `github.com` — CI шлюз сверяет на github.com;
      - адрес graphql не ровно `graphql` (полный адрес, `graphql/`), поле из файла (`-F …=@файл`, `--input`), мутации
        `mergePullRequest`, `enablePullRequestAutoMerge`, `enqueuePullRequest` в полях.
      Чтение (`gh api …/pulls/N/merge` без записи — слит ли PR, `gh api $URL`) не судится; невычислимое слово, по
@@ -622,8 +624,8 @@ SDK (`sdk`) флаг не снимают — так же журнал owner-log 
        ошибка агента (решение координатора 02.11).
      - Слияние ветки в ветку (`gh api …/merges`, мутация `mergeBranch`) — не PR, а push в base: в этой сессии не
        судится.
-     - Хост из `-R host/owner/repo`, полного адреса `https://<хост>/api/v3/repos/…` и `--hostname` теряется: CI
-       сверяется на github.com.
+     - Хост из `-R host/owner/repo` у `gh pr merge` и удалённый репозиторий GHE за `{owner}/{repo}` теряются: CI
+       сверяется на github.com. У `gh api` другой хост — отказ.
      - Команда с невычислимым именем (`$X pr merge`) не судится — путь роли её тоже не отказывает.
      - `GIT_DIR`, `GIT_WORK_TREE`, `XDG_CONFIG_HOME`, `HOME` в команде или окружении меняют репозиторий и настройки
        gh — не проверяются.
