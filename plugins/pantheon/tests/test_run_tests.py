@@ -729,5 +729,27 @@ check("Linux: все файлы пропущены — код 3 «нечего �
       r.returncode == 3 and "skip pantheon/test_setup.py" in r.stdout and "нечего гонять" in r.stdout
       and "итого" not in r.stdout, (r.returncode, r.stdout))
 
+# --- metis-0728: файлы тестов идут через taskpolicy -c utility (macOS и есть бинарь), иначе как раньше ---
+TP = R.TASKPOLICY
+c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: p == TP)
+check("macOS и taskpolicy есть: команда начинается с taskpolicy -c utility",
+      c[:3] == [TP, "-c", "utility"] and c[3:] == ["py", "-I", os.path.join("tests", "test_x.py")], c)
+c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: False)
+check("macOS без taskpolicy: команда как раньше", c == ["py", "-I", os.path.join("tests", "test_x.py")], c)
+c = R.launch_cmd("py", "test_x.py", "linux", lambda p: True)
+check("Linux: taskpolicy нет, даже если бинарь есть", "taskpolicy" not in " ".join(c) and c[0] == "py", c)
+check("не macOS — строки QoS нет", R.qos_line(sys.executable, dict(os.environ), "linux") is None)
+if sys.platform == "darwin" and os.path.exists(TP):
+    q = R.qos_line(sys.executable, dict(os.environ))
+    check("macOS: строка QoS называет класс и для раннера, и для файла",
+          q and "раннер:" in q and "файл (taskpolicy -c utility):" in q and "проба не удалась" not in q
+          and "utility" in q.split("файл (")[1], q)
+    pl = mkplugin({"test_q.py": "import os\nprint('ok q', os.environ.get('RUN_TESTS_RUNNER'))\nprint('1/1')\n"}, "qq")
+    r = run([pl])
+    check("прогон печатает QoS-строку, а файлу виден RUN_TESTS_RUNNER=1",
+          "run-tests: QoS (доля CPU)" in r.stdout and "ok   qq/test_q.py" in r.stdout, r.stdout)
+else:
+    print("пропущено: нужен macOS — живая проба QoS")
+
 print(f"\n{total - len(fails)} из {total} прошли")
 sys.exit(1 if fails else 0)
