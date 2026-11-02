@@ -71,8 +71,9 @@ STATE/outside/queue. Имя окна проход берёт из места п�
      Во время копии, установки и ожидания порта сторож продолжает смотреть серверы, «стоп» своей заявки прерывает.
   3. «Стоп» без живого сервера и заявки старше минуты — убирается.
   `outside run` (замок outside-run) — тесты:
-  0. На старте итоги test: queued без .req.json старше 5 мин — failed «заявка потеряна»; running — failed «заход
-     прерван» (захода под замком больше нет; metis-0716).
+  0. На старте итоги test: queued без .req.json старше 5 мин — failed «заявка потеряна»; running, записанный самим
+     заходом в STATE/outside/runs, — failed «заход прерван» (захода под замком больше нет; итог — минимальный объект,
+     подложенное окном не копируется; metis-0716). Порядок заявок — по времени из id, по кругу между окнами.
   1. Заявки test — по времени, по одной (metis-0716): снимается с диска только запускаемая, очередь перечитывается
      после каждого дела — убитый заход не теряет остальные; не снявшаяся заявка не запускается. Одна заявка — один
      запуск; битые и подложенные — отказ. Заявки всегда раньше автопрогонов; были заявки — автопрогон за заход один
@@ -893,7 +894,7 @@ def save_result(qdir, rid, res):
     res = {"id": rid, "updated": P.stamp(), **res}
     text = json.dumps(res, ensure_ascii=False, indent=1)
     os.makedirs(root("runs"), mode=0o700, exist_ok=True)
-    P.write_json(root("runs", rid + ".json"), res)
+    P.write_json(root("runs", rid + ".json"), {**res, "qdir": qdir} if qdir else res)   # qdir — для recover_results
     if qdir:
         dfd = _open_dir(qdir)
         if dfd is not None:
@@ -1606,7 +1607,16 @@ def requests(kinds=KINDS, limit=None):
                 found.append((str(req.get("time") or ""), req["kind"], qdir, window, rid, req))
         finally:
             os.close(dfd)
-    found.sort(key=lambda x: x[0])
+    # порядок — по времени из id (его ставит CLI и проверяет ID_RE; req["time"] пишет клиент), по кругу между окнами:
+    # за круг одна заявка от окна (metis-0716), чтобы окно не вставало первым своими временами и не держало очередь
+    found.sort(key=lambda x: x[4])
+    seen_n, ranked = {}, []
+    for item in found:
+        n = seen_n.get(item[2], 0)
+        seen_n[item[2]] = n + 1
+        ranked.append((n, item[4], item))
+    ranked.sort(key=lambda x: x[:2])
+    found = [x[2] for x in ranked]
     out = []
     for item in found[:limit]:
         dfd = _open_dir(item[2])
@@ -1958,10 +1968,13 @@ LOST_AFTER = 300                    # с: итог queued без заявки с
 
 def recover_results(t=None):
     """Под замком outside-run (захода больше нет): итог теста queued без .req.json старше LOST_AFTER — failed «заявка
-    потеряна»; итог running — failed «заход прерван» (заход убит). Serve не трогает: им ведёт свой проход. → число."""
+    потеряна»; running — failed «заход прерван», но только то, что сам заход записал в STATE/outside/runs/<ID>.json
+    (файл из кэша окна роль может подложить). Итог пишется минимальным объектом из своих полей, чужое содержимое
+    result.json не копируется. Serve не трогает: им ведёт свой проход. → число."""
     t = P.now() if t is None else t
     n = 0
-    for qdir, _ in queue_dirs():
+    qdirs = {q for q, _ in queue_dirs()}
+    for qdir in sorted(qdirs):
         dfd = _open_dir(qdir)
         if dfd is None:
             continue
@@ -1972,29 +1985,26 @@ def recover_results(t=None):
                 if not name.endswith(".result.json") or not ID_RE.fullmatch(rid):
                     continue
                 res = _parse(_read_in(dfd, name, 1024 * 1024))
-                if not isinstance(res, dict) or res.get("kind") != "test":
+                if not isinstance(res, dict) or res.get("kind") != "test" or res.get("state") != "queued":
                     continue
                 try:
                     old = t - os.lstat(name, dir_fd=dfd).st_mtime > LOST_AFTER
                 except OSError:
                     continue
-                if res.get("state") == "queued" and old and rid + ".req.json" not in names:
+                if old and rid + ".req.json" not in names:
                     why = "заявка потеряна (заход прерван до запуска), подай заново"
-                elif res.get("state") == "running":
-                    why = "заход прерван, подай заново"
-                else:
-                    continue
-                save_result(qdir, rid, {**res, "state": "failed", "why": why})
-                log_event(id=rid, kind="recovered", why=why)
-                n += 1
+                    save_result(qdir, rid, {"kind": "test", "state": "failed", "why": why})
+                    log_event(id=rid, kind="recovered", why=why)
+                    n += 1
         finally:
             os.close(dfd)
     runs = root("runs")
-    for name in os.listdir(runs) if os.path.isdir(runs) else ():   # автопрогоны: итог только здесь
+    for name in os.listdir(runs) if os.path.isdir(runs) else ():
         rid = name[:-len(".json")]
         res = P.read_json(os.path.join(runs, name), {}) if name.endswith(".json") and ID_RE.fullmatch(rid) else {}
         if isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "running":
-            save_result(None, rid, {**res, "state": "failed", "why": "заход прерван, подай заново"})
+            qd = res.get("qdir") if res.get("qdir") in qdirs else None
+            save_result(qd, rid, {"kind": "test", "state": "failed", "why": "заход прерван, подай заново"})
             log_event(id=rid, kind="recovered", why="заход прерван")
             n += 1
     return n

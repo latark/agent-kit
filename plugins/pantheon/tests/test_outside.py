@@ -1886,6 +1886,30 @@ O.handle, O._unlink_in = _h, _u
 check("заявку не снять: заход заканчивается, заявка не запускается и не крутит цикл", got == [] and time.time() - t0 < 30, got)
 os.remove(os.path.join(q, r3 + ".req.json"))
 
+# порядок заявок: по времени из id и по кругу между окнами, req["time"] (пишет клиент) не в счёт
+qa = os.path.join(CACHE, "athena-x", "outside")
+qb = os.path.join(CACHE, "metis-y", "outside")
+
+
+def mkreq(qd, rid, when):
+    with open(os.path.join(qd, rid + ".req.json"), "w") as fh:
+        json.dump({"v": 1, "id": rid, "kind": "test", "dir": APP, "time": when}, fh)
+
+
+EARLY = "2000-01-01T00:00:00+0000"
+mkreq(qa, "20261102-120001-aaaaaa", EARLY)       # окно ставит себе давнее время
+mkreq(qa, "20261102-120002-aaaaab", EARLY)
+mkreq(qb, "20261102-120000-bbbbbb", time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+order = [x[4] for x in O.requests(("test",))]
+check("порядок заявок: по id, а не по времени клиента, по кругу между окнами (по одной от окна за круг)",
+      order == ["20261102-120000-bbbbbb", "20261102-120001-aaaaaa", "20261102-120002-aaaaab"], order)
+mkreq(qa, "20261102-120001-aaaaaa", EARLY)
+mkreq(qa, "20261102-120002-aaaaab", EARLY)
+mkreq(qb, "20261102-120003-bbbbbc", time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+order = [x[4] for x in O.requests(("test",))]
+check("круг между окнами: у окна две заявки раньше, но вторая идёт после заявки другого окна",
+      order == ["20261102-120001-aaaaaa", "20261102-120003-bbbbbc", "20261102-120002-aaaaab"], order)
+
 # потерянная заявка и зомби running: чинит только заход под замком outside-run
 qa = os.path.join(CACHE, "athena-x", "outside")
 
@@ -1897,36 +1921,42 @@ def put_result(rid, res, age=0):
     os.utime(fp, (time.time() - age, time.time() - age))
 
 
-put_result("20261102-101010-aaaaaa", {"state": "queued", "kind": "test"}, age=900)
+put_result("20261102-101010-aaaaaa", {"state": "queued", "kind": "test", "url": "http://evil", "note": "подложено окном"}, age=900)
 put_result("20261102-101010-bbbbbb", {"state": "queued", "kind": "test"}, age=30)
 put_result("20261102-101010-cccccc", {"state": "queued", "kind": "test"}, age=900)
 with open(os.path.join(qa, "20261102-101010-cccccc.req.json"), "w") as fh:
     fh.write("{}")
-put_result("20261102-101010-dddddd", {"state": "running", "kind": "test", "sha": "a" * 40}, age=900)
+O.save_result(qa, "20261102-101010-dddddd", {"state": "running", "kind": "test", "sha": "a" * 40})   # как пишет заход
+put_result("20261102-101010-gggggg", {"state": "running", "kind": "test"}, age=900)   # подложено окном
 put_result("20261102-101010-eeeeee", {"state": "queued", "kind": "serve"}, age=900)
 put_result("20261102-101010-ffffff", {"state": "running", "kind": "serve"}, age=900)
 P.write_json(O.root("runs", "20261102-101010-a0a0a0.json"), {"id": "20261102-101010-a0a0a0", "state": "running", "kind": "test"})
 O.recover_results()
-st = {x: (O.load_result(qa, "20261102-101010-" + x) or {}) for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd", "eeeeee", "ffffff")}
+st = {x: (O.load_result(qa, "20261102-101010-" + x) or {}) for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd", "eeeeee", "ffffff", "gggggg")}
 check("потеряна: queued без .req.json старше 5 мин → failed «заявка потеряна»",
       st["aaaaaa"].get("state") == "failed" and "потеряна" in st["aaaaaa"].get("why", ""), st["aaaaaa"])
 check("queued свежее 5 мин и queued с лежащей заявкой — не тронуты",
       st["bbbbbb"].get("state") == "queued" and st["cccccc"].get("state") == "queued", (st["bbbbbb"], st["cccccc"]))
-check("зомби: running без захода → failed «заход прерван», поля итога сохранены",
-      st["dddddd"].get("state") == "failed" and "прерван" in st["dddddd"].get("why", "") and st["dddddd"].get("sha") == "a" * 40,
-      st["dddddd"])
+check("зомби: running из runs/ (записал заход) → failed «заход прерван», итог — минимальный объект",
+      st["dddddd"].get("state") == "failed" and "прерван" in st["dddddd"].get("why", "")
+      and set(st["dddddd"]) == {"id", "kind", "state", "why", "updated"}, st["dddddd"])
+check("running, подложенный окном (в runs/ нет) — не тронут",
+      st["gggggg"].get("state") == "running", st["gggggg"])
+check("потерянная: чужие поля из result.json окна (url, note) в итог не копируются",
+      set(st["aaaaaa"]) == {"id", "kind", "state", "why", "updated"}, st["aaaaaa"])
 check("serve (queued и running) проход тестов не трогает", st["eeeeee"].get("state") == "queued"
       and st["ffffff"].get("state") == "running", (st["eeeeee"], st["ffffff"]))
 check("автопрогон running только в runs/ → failed",
       P.read_json(O.root("runs", "20261102-101010-a0a0a0.json"), {}).get("state") == "failed")
-put_result("20261102-101010-dddddd", {"state": "running", "kind": "test"}, age=900)
+O.save_result(qa, "20261102-101010-dddddd", {"state": "running", "kind": "test"})
 check("cmd_run (замок свободен) чинит зомби сам",
       run_pass() == 0 and O.load_result(qa, "20261102-101010-dddddd").get("state") == "failed")
-for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd", "eeeeee", "ffffff"):
+for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd", "eeeeee", "ffffff", "gggggg"):
     for ext in ("result.json", "req.json"):
         if os.path.exists(os.path.join(qa, f"20261102-101010-{x}.{ext}")):
             os.remove(os.path.join(qa, f"20261102-101010-{x}.{ext}"))
 os.remove(O.root("runs", "20261102-101010-a0a0a0.json"))
+os.remove(O.root("runs", "20261102-101010-dddddd.json"))
 
 # автопрогон только на head открытого PR
 _cp = os.path.join(STATE, "autoclose-prs.json")
