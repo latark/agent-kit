@@ -78,6 +78,10 @@ STATE/outside/queue. Имя окна проход берёт из места п�
      после каждого дела — убитый заход не теряет остальные; не снявшаяся заявка не запускается. Одна заявка — один
      запуск; битые и подложенные — отказ. Заявки всегда раньше автопрогонов; были заявки — автопрогон за заход один
      (остальные в следующем заходе); автопрогон на (repo, SHA) ждущей заявки не берётся; кругов не больше MAX_ROUNDS.
+     Перед стартом (before_test, metis-0726): HEAD папки — бывший head ещё открытого PR по кэшу autoclose-prs.json
+     (old_heads, его пишет `autoclose fetch`), а у PR сейчас другой head — failed «head устарел, подай на текущий» без
+     прогона (у --script — прогон; нет кэша, он старше часа — прогон как раньше); ждущие заявки на ту же проверку (тот
+     же --script, та же папка или папка того же репозитория на том же чистом HEAD) — failed «дубль <id>».
   2. Тесты после «принять» argus: в журнале шлюза слияния (STATE/merge-gate/records.jsonl) «принять» не старше суток
      на (repo, SHA), где SHA — head открытого PR по кэшу autoclose-prs.json (нет кэша, он старше часа или gh не
      ответил по репозиторию — не берётся), а записи tests на этот SHA нет — проход ищет копию: корень папки реестра или его worktree внутри
@@ -87,6 +91,9 @@ STATE/outside/queue. Имя окна проход берёт из места п�
      `<pm> install --frozen-lockfile`). Каждая пара (repo, SHA) — один раз (STATE/outside/auto.json); красные тесты и
      «нет копии» — тревога. Кэш PR пишет только primary-хост (`autoclose fetch`): на втором Mac кэша нет — автопрогонов нет.
      «принять» раньше кэша (head ещё не в нём) журнал не закрывает: auto.json помнит кэш, новый кэш — новый просмотр.
+     Ранний прогон (metis-0733): head открытого PR из кэша идёт так же сразу, не дожидаясь «принять», — только у
+     репозиториев с полным набором FULL_TESTS шлюза (зеркало lib/merge.py), после «принять»-ных и по одному; новый кэш
+     будит тик (auto.json heads_seen). Ранний красный — без тревоги (done с early), после «принять» идёт ещё раз.
   3. Уборка: итоги <ID>.result.json и брошенные <ID>.stop в папках заявок (кэш окна, STATE/outside/queue) старше
      суток (RESULT_TTL, по mtime) удаляются; файлы живого сервера — нет. Журналы в STATE/outside/runs не трогаются.
 Запуск: тесты — heavy sandbox-exec -f STATE/outside/profile.sb <команда> в папке репозитория, сервер — то же без heavy
@@ -108,6 +115,11 @@ vitest run»), строка .pantheon-verify из файла ветки (в кл
 (kind tests, repo — remote папки, pr null, sha), by.agent_type = "pantheon-outside". Пишет только проход: роль в
 своём окне STATE не пишет, а команда под профилем — тоже (deny file-write STATE). Хук guard на `pantheon review test`
 по-прежнему пишет свою запись; шлюз принимает любую из двух.
+Запись по дереву (metis-0732, tree_record): запись прохода несёт ещё tree (дерево коммита) и env (настоящий путь python
+команды и версия macOS). Зелёный полный набор (команда — FULL_TESTS репозитория) на коммите с тем же деревом, тем же
+env и той же командой засчитывается новому HEAD без прогона — запись той же формы с отметкой by_tree (коммит, чей
+прогон перенесён): rebase без конфликтов, правка сообщения. На тот же коммит запись уже есть — итог без прогона.
+Красный прогон записи не даёт, переносить нечего; записи хука guard (без tree) не переносятся.
 Журналы: STATE/outside/runs/<ID>.log (вывод команды) и <ID>.json (итог), STATE/logs/outside.jsonl.
 """
 import contextlib
@@ -864,8 +876,10 @@ def read_records():
     return out
 
 
-def append_tests(repos, sha, cwd, line, window, rid):
-    """Строка tests в журнал шлюза — формат записи хука guard (merge_gate.record), by — проход."""
+def append_tests(repos, sha, cwd, line, window, rid, by_tree=None):
+    """Строка tests в журнал шлюза — формат записи хука guard (merge_gate.record), by — проход. Сверх него — дерево
+    коммита (tree) и скрытые входы прогона (env, run_env): по ним зелёный полный набор переносится на коммит с тем же
+    деревом (tree_record, metis-0732); by_tree — коммит, чей прогон перенесён (запись без своего прогона)."""
     d = os.path.dirname(records_file())
     if os.path.islink(d):
         raise OSError("merge-gate — ссылка")
@@ -874,6 +888,11 @@ def append_tests(repos, sha, cwd, line, window, rid):
            "by": {"agent_type": "pantheon-outside", "agent_id": "", "session_id": "", "window": window or "",
                   "request": rid},
            "cwd": cwd, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tool_use_id": "", "cmd": line}
+    tree = tree_of(cwd, sha)
+    if tree:
+        rec.update(tree=tree, env=run_env(line))
+    if by_tree:
+        rec["by_tree"] = by_tree
     fd = os.open(records_file(), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         pre = os.fstat(fd).st_mtime
@@ -886,6 +905,76 @@ def append_tests(repos, sha, cwd, line, window, rid):
         a["mtime"] = post
         P.write_json(root("auto.json"), a)
     return rec
+
+
+# --- зелёная запись по дереву (metis-0732) ------------------------------------------------------------------------
+
+def tree_of(d, sha):
+    """Дерево коммита sha (`git rev-parse <sha>^{tree}`) в папке d или None."""
+    t = (git(d, "rev-parse", "--verify", "-q", f"{sha}^{{tree}}") or "").strip().lower()
+    return t if SHA_RE.fullmatch(t) else None
+
+
+def run_env(line):
+    """Скрытые входы прогона, которых нет в дереве: настоящий путь python команды (у Homebrew в нём версия:
+    Cellar/python@3.14/3.14.0/…) по PATH окружения команды и версия macOS. Другой python или macOS — запись по дереву
+    не переносится."""
+    import platform
+    exe = None
+    for w in line.split():
+        if re.fullmatch(r"python3(\.\d+)?", os.path.basename(w)):
+            exe = w if "/" in w else shutil.which(w, path=sandbox_env("", "test")["PATH"])
+            break
+    return {"python": os.path.realpath(exe) if exe else "", "os": platform.mac_ver()[0] or platform.release()}
+
+
+def full_cmd(repo):
+    """Команда полного набора репозитория — FULL_TESTS шлюза (зеркало в lib/merge.py) — или None."""
+    return P.merge_mod().FULL_TESTS.get(str(repo or "").rsplit("/", 1)[-1].lower())
+
+
+def tree_record(rid, d, window, qdir):
+    """Проверка проекта в d без прогона, если её зелёный полный набор уже есть на этом дереве (metis-0732): в журнале
+    шлюза — запись прохода (agent_type pantheon-outside) с той же командой, а она — полный набор репозитория
+    (full_tests_record), с тем же деревом (поле tree и `git rev-parse <её sha>^{tree}`), теми же скрытыми входами
+    (run_env) и репозиториями. На тот же коммит — итог done без новой записи; на другой (rebase без конфликтов, правка
+    сообщения) — запись tests на HEAD тем же путём append_tests с отметкой by_tree. Красный прогон записи не даёт —
+    переносить нечего. Дерево не чистое, такой записи нет, запись не легла — None: идёт обычный прогон."""
+    sha, clean = head_state(d)
+    if not sha or not clean:
+        return None
+    repos = remotes(d)
+    argv, line = command(d, "test")
+    m = P.merge_mod()
+    if not argv or not repos or not any(m.full_tests_record(r, {"cmd": line}) for r in repos):
+        return None
+    tree = tree_of(d, sha)
+    if not tree:
+        return None
+    env = run_env(line)
+    want = {r.lower() for r in repos}
+    for rec in reversed(read_records()):
+        by = rec.get("by") if isinstance(rec.get("by"), dict) else {}
+        if (rec.get("kind") != "tests" or by.get("agent_type") != "pantheon-outside" or rec.get("cmd") != line
+                or rec.get("tree") != tree or rec.get("env") != env
+                or not want <= {str(r).lower() for r in rec["repo"]}
+                or not SHA_RE.fullmatch(rec["sha"]) or tree_of(d, rec["sha"]) != tree):
+            continue
+        src = rec["by"].get("request") or "?"
+        res = {"state": "done", "kind": "test", "sha": sha, "code": 0, "cmd": line, "dir": d, "record": True,
+               "tree": tree, "by_tree": rec["sha"]}
+        if rec["sha"] == sha:
+            res["note"] = f"запись tests на {sha[:12]} уже есть (прогон {src}) — без прогона"
+        else:
+            try:
+                append_tests(repos, sha, d, line, window, rid, by_tree=rec["sha"])
+            except OSError:
+                return None
+            res["note"] = (f"по дереву {tree[:12]}: зелёный полный набор на {rec['sha'][:12]} (прогон {src}) — "
+                           f"запись на {sha[:12]} без прогона")
+        log_event(id=rid, kind="test", window=window, dir=d, sha=sha, code=0, record=True, by_tree=rec["sha"])
+        return save_result(qdir, rid, res)
+    return None
 
 
 # --- итоги --------------------------------------------------------------------------------------------------------
@@ -919,6 +1008,9 @@ def run_test(rid, d, script, window, qdir, roots, record=True):
     """Проверка проекта в папке d на её HEAD → итог. Запись tests — при коде 0 и том же чистом HEAD, только у проверки
     проекта: с --script записи нет."""
     record = record and not script
+    res = record and tree_record(rid, d, window, qdir)   # metis-0732: зелёный полный набор на этом дереве уже есть
+    if res:
+        return res
     sha, clean = head_state(d)
     if not sha:
         return save_result(qdir, rid, {"state": "failed", "kind": "test", "why": "папка не репозиторий git или нет коммитов"})
@@ -1696,7 +1788,101 @@ def handle(qdir, window, rid, req):
         return save_result(qdir, rid, {"state": "failed", "kind": req["kind"], "why": roots})
     if req["kind"] == "serve":
         return run_serve(rid, d, req, window, qdir)
+    res = before_test(qdir, window, rid, req, d)   # metis-0726: устаревший head, дубли
+    if res:
+        return res
     return run_test(rid, d, req.get("script"), window, qdir, registry(None) or roots, record=not req.get("script"))
+
+
+# --- перед стартом заявки test (metis-0726) ------------------------------------------------------------------------
+
+def before_test(qdir, window, rid, req, d):
+    """Перед прогоном заявки test в папке d: HEAD — бывший head открытого PR (stale_head) — итог failed без прогона
+    (только проверка проекта: --script — для себя, не для шлюза); иначе ждущие заявки на ту же проверку снимаются
+    (drop_dupes) и идёт прогон этой. Дерево не чистое или HEAD нет — None: отказ даст run_test."""
+    sha, clean = head_state(d)
+    if not sha or not clean:
+        return None
+    why = None if req.get("script") else stale_head(d, sha)
+    if why:
+        log_event(id=rid, kind="refused", window=window, dir=d, sha=sha, why=why)
+        return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "why": why})
+    drop_dupes(qdir, rid, req, d, sha)
+    return None
+
+
+def stale_head(d, sha, t=None):
+    """sha — бывший head ещё открытого PR репозитория папки d по кэшу `autoclose fetch` (old_heads, autoclose.
+    former_heads), а у PR сейчас другой head → причина отказа; кэша нет, он старше AUTO_HEADS_TTL, gh не ответил по
+    репозиторию, sha там нет (коммит ещё не пушили) — None: прогон как раньше."""
+    cache = _fresh_cache(t)
+    errs = {str(r).lower() for r in cache.get("errors") or {}} if isinstance(cache.get("errors"), dict) else set()
+    old = {str(r).lower(): v for r, v in (cache.get("old_heads") or {}).items() if isinstance(v, dict)} \
+        if isinstance(cache.get("old_heads"), dict) else {}
+    prs = {str(r).lower(): v for r, v in (cache.get("open_prs") or {}).items() if isinstance(v, list)} \
+        if isinstance(cache.get("open_prs"), dict) else {}
+    for repo in remotes(d):
+        num = old.get(repo, {}).get(sha)
+        if num is None or repo in errs:
+            continue
+        cur = next((str(p.get("head") or "").lower() for p in prs.get(repo, ())
+                    if isinstance(p, dict) and p.get("number") == num), "")
+        if cur and cur != sha:
+            return (f"head устарел, подай на текущий: {sha[:12]} — бывший head PR #{num} {repo}, сейчас head "
+                    f"{cur[:12]}; прогона не было")
+    return None
+
+
+def _queued_tests():
+    """[(qdir, окно, id, заявка)] ждущих заявок test в формате (check_request) — без снятия с диска."""
+    out = []
+    for qdir, window in queue_dirs():
+        dfd = _open_dir(qdir)
+        if dfd is None:
+            continue
+        try:
+            for name in sorted(os.listdir(dfd)):
+                rid = name[:-len(".req.json")]
+                if not name.endswith(".req.json") or not ID_RE.fullmatch(rid):
+                    continue
+                req = _parse(_read_in(dfd, name))
+                if _req_kind(req) == "test" and not check_request(req, rid):
+                    out.append((qdir, window, rid, req))
+        except OSError:
+            pass
+        finally:
+            os.close(dfd)
+    return out
+
+
+def drop_dupes(qdir, rid, req, d, sha):
+    """Ждущие заявки на ту же проверку, что заявка rid (её папка d на HEAD sha): тот же --script и та же папка или
+    папка того же репозитория на том же чистом HEAD. Тесты идут на HEAD папки во время прогона, поэтому они прогнали бы
+    то же самое ещё раз (metis-0726: 21 заявка на 11 worktree). Каждая снимается с диска с итогом failed «дубль
+    <rid>»; не снялась — остаётся. → число снятых."""
+    repos, me, n = set(remotes(d)), os.path.realpath(d), 0
+    for q2, w2, rid2, req2 in _queued_tests():
+        if (q2, rid2) == (qdir, rid) or (req2.get("script") or None) != (req.get("script") or None):
+            continue
+        d2, _roots = resolve_dir(req2["dir"], w2)
+        if d2 is None or not (os.path.realpath(d2) == me
+                              or head_state(d2) == (sha, True) and repos & set(remotes(d2))):
+            continue
+        dfd = _open_dir(q2)
+        if dfd is None:
+            continue
+        try:
+            _unlink_in(dfd, rid2 + ".req.json")
+            gone = _gone(dfd, rid2 + ".req.json")
+        finally:
+            os.close(dfd)
+        if gone:
+            why = (f"дубль {rid}: та же проверка на {sha[:12]} идёт заявкой {rid} — её итог: pantheon outside status "
+                   f"{rid}")
+            save_result(q2, rid2, {"state": "failed", "kind": "test", "sha": sha, "why": why, "dup": rid})
+            log_event(id=rid2, kind="refused", window=w2, why=why)
+            n += 1
+    return n
 
 
 # --- тесты после «принять» ----------------------------------------------------------------------------------------
@@ -1718,16 +1904,22 @@ def _epoch(rec):
 AUTO_HEADS_TTL = 3600               # с: кэш открытых PR старше часа — «gh не ответил», автопрогоны стоят (metis-0716)
 
 
+def _fresh_cache(t=None):
+    """Кэш `autoclose fetch` (STATE/autoclose-prs.json), если он не старше AUTO_HEADS_TTL; иначе {}."""
+    t = P.now() if t is None else t
+    cache = P.read_json(P.path("autoclose-prs.json"), {})
+    fetched = cache.get("fetched") if isinstance(cache, dict) else None
+    if isinstance(fetched, bool) or not isinstance(fetched, (int, float)) or not 0 <= t - fetched <= AUTO_HEADS_TTL:
+        return {}
+    return cache
+
+
 def open_heads(t=None):
     """{repo: {head}} открытых PR по кэшу `autoclose fetch` (STATE/autoclose-prs.json); репозитория в кэше нет (gh не
     ответил, ошибка), кэш не читается или старше AUTO_HEADS_TTL — репозитория нет в ответе (автопрогон его пропускает)."""
-    t = P.now() if t is None else t
-    cache = P.read_json(P.path("autoclose-prs.json"), {})
-    if not isinstance(cache, dict):
-        return {}
-    fetched, by_repo = cache.get("fetched"), cache.get("open_prs")
-    if (isinstance(fetched, bool) or not isinstance(fetched, (int, float)) or not 0 <= t - fetched <= AUTO_HEADS_TTL
-            or not isinstance(by_repo, dict)):
+    cache = _fresh_cache(t)
+    by_repo = cache.get("open_prs")
+    if not isinstance(by_repo, dict):
         return {}
     errs = cache.get("errors") if isinstance(cache.get("errors"), dict) else {}
     return {str(r).lower(): {str(p.get("head") or "").lower() for p in prs if isinstance(p, dict)}
@@ -1751,9 +1943,58 @@ def _auto_candidates(recs=None, t=None):
             continue
         for repo in r["repo"]:
             key = (str(repo).lower(), r["sha"].lower())
-            if key not in tested and f"{key[0]}@{key[1]}" not in done and all(key != k for k, _ in out):
+            if key not in tested and not _done_after_accept(done, key) and all(key != k for k, _ in out):
                 out.append((key, e))
     return out
+
+
+def _done_after_accept(done, key):
+    """(repo, sha) уже брался — кроме раннего прогона (до «принять», metis-0733) без записи: после «принять» он идёт ещё
+    раз, уже с тревогой о красном."""
+    e = done.get(f"{key[0]}@{key[1]}")
+    return e is not None and not (isinstance(e, dict) and e.get("early") and not e.get("record"))
+
+
+def accepted_keys(recs=None, t=None):
+    """{(repo, sha)} с «принять» argus не старше AUTO_TTL — есть ли тесты и брался ли проход, не важно."""
+    t = P.now() if t is None else t
+    out = set()
+    for r in read_records() if recs is None else recs:
+        by = r.get("by") if isinstance(r.get("by"), dict) else {}
+        e = _epoch(r) if r.get("kind") == "accept" and by.get("agent_type") == "argus" else None
+        if e is not None and 0 <= t - e <= AUTO_TTL:
+            out.update((str(x).lower(), r["sha"].lower()) for x in r["repo"])
+    return out
+
+
+def early_todo(recs=None, heads=None, done=None):
+    """[(repo, sha)] ранних прогонов (metis-0733): head открытого PR по кэшу `autoclose fetch` сразу, как он там
+    появился, не дожидаясь «принять» argus, — только у репозиториев с полным набором (full_cmd, FULL_TESTS шлюза), а не
+    у всех из [merge_repos]. Без записи tests на (repo, SHA), проход на нём ещё не брался."""
+    heads = open_heads() if heads is None else heads
+    out = []
+    if not any(full_cmd(r) for r in heads):
+        return out
+    recs = read_records() if recs is None else recs
+    done = (P.read_json(root("auto.json"), {}).get("done") or {}) if done is None else done
+    tested = {(str(x).lower(), r["sha"].lower()) for r in recs if r.get("kind") == "tests" for x in r["repo"]}
+    for repo in sorted(heads):
+        if not full_cmd(repo):
+            continue
+        for sha in sorted(heads[repo]):
+            if SHA_RE.fullmatch(sha) and (repo, sha) not in tested and f"{repo}@{sha}" not in done:
+                out.append((repo, sha))
+    return out
+
+
+def heads_due(a=None):
+    """Тику: в кэше открытых PR есть head для раннего прогона (early_todo без чтения журнала шлюза), а этот кэш проход
+    ещё не смотрел (auto.json heads_seen)."""
+    a = P.read_json(root("auto.json"), {}) if a is None else a
+    stamp = cache_stamp()
+    if not stamp or stamp == a.get("heads_seen"):
+        return False
+    return bool(early_todo(recs=[], done=a.get("done") or {}))
 
 
 def auto_todo(recs=None, t=None, heads=None):
@@ -1761,7 +2002,9 @@ def auto_todo(recs=None, t=None, heads=None):
     head открытого PR (metis-0716: старый head давал 25 мин на коммит, которого в PR уже нет)."""
     t = P.now() if t is None else t
     heads = open_heads(t) if heads is None else heads
-    return [k for k, _ in _auto_candidates(recs, t) if k[1] in heads.get(k[0], ())]
+    recs = read_records() if recs is None else recs
+    out = [k for k, _ in _auto_candidates(recs, t) if k[1] in heads.get(k[0], ())]
+    return out + [k for k in early_todo(recs, heads) if k not in out]   # metis-0733: после «принять»-ных
 
 
 def cache_stamp():
@@ -1772,12 +2015,15 @@ def cache_stamp():
 
 
 def auto_due():
-    """Тику: журнал шлюза менялся с прошлого прохода — пора смотреть «принять» без тестов."""
+    """Тику: журнал шлюза менялся с прошлого прохода — пора смотреть «принять» без тестов; или в новом кэше PR есть head
+    для раннего прогона (heads_due)."""
+    a = P.read_json(root("auto.json"), {})
+    if heads_due(a):
+        return True
     try:
         m = os.stat(records_file()).st_mtime
     except OSError:
         return False
-    a = P.read_json(root("auto.json"), {})
     if m != a.get("mtime"):
         return True
     # «принять» отброшено, пока его head не было в кэше PR (кэш обновляется раз в 10 мин): кэш сменился — смотреть снова
@@ -1822,6 +2068,10 @@ def find_checkout(repo, sha):
 
 
 def run_auto(repo, sha):
+    """Автопрогон на (repo, sha): после «принять» argus или ранний (metis-0733, «принять» на этот SHA ещё нет). Итог —
+    в auto.json done (у раннего — early); тревога о красном и «нет копии» — только после «принять»: ранний красный
+    после «принять» идёт ещё раз (_done_after_accept)."""
+    early = (repo, sha) not in accepted_keys()
     rid = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
     d, clone, why = find_checkout(repo, sha)
     temp = None
@@ -1847,9 +2097,10 @@ def run_auto(repo, sha):
                 shutil.rmtree(temp, ignore_errors=True)
     a = P.read_json(root("auto.json"), {})
     a.setdefault("done", {})[f"{repo}@{sha}"] = {"time": P.stamp(), "id": rid, "state": res.get("state"),
-                                                "code": res.get("code"), "record": res.get("record", False)}
+                                                "code": res.get("code"), "record": res.get("record", False),
+                                                **({"early": True} if early else {})}
     P.write_json(root("auto.json"), a)
-    if not res.get("record"):
+    if not res.get("record") and not early:
         P.alert(f"тесты после «принять» {repo}@{sha[:12]}: "
                 + (f"код {res.get('code')}" if res.get("code") is not None else "не запущены")
                 + (f" — {res['why']}" if res.get("why") else "") + f"; журнал: pantheon outside status {rid}",
@@ -1919,7 +2170,8 @@ def auto_pass(t=None, limit=None, skip=()):
     """Автопрогоны по auto_todo, не больше limit за вызов, без (repo, sha) из skip. «Просмотрено» (mtime журнала в
     auto.json) пишется, только если взято всё: отложенное лимитом или skip остаётся для следующего захода (auto_due).
     «принять», отброшенное только потому, что head ещё нет в кэше PR, журнал не закрывает: auto.json хранит метку кэша
-    (missed), и auto_due снова True, когда кэш обновился."""
+    (missed), и auto_due снова True, когда кэш обновился. Метка кэша для ранних прогонов (heads_seen) — так же."""
+    stamp = cache_stamp()   # до open_heads: кэш, обновлённый посреди прохода, не сочтётся просмотренным (metis-0726)
     try:
         m = os.stat(records_file()).st_mtime
     except OSError:
@@ -1930,7 +2182,7 @@ def auto_pass(t=None, limit=None, skip=()):
         heads = open_heads(t)
         a = P.read_json(root("auto.json"), {})
         a["mtime"] = m
-        stamp = cache_stamp()
+        a["heads_seen"] = stamp
         # отброшено из-за кэша — только то, что принято позже кэша: кэш о нём ещё знать не мог
         a["missed"] = stamp if any(k[1] not in heads.get(k[0], ()) and e > stamp
                                    for k, e in _auto_candidates(t=t)) else None

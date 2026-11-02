@@ -2058,6 +2058,256 @@ if _saved is not None:
     with open(_cp, "w") as fh:
         fh.write(_saved)
 
+# --- 5c. перед стартом заявки test: устаревший head и дубли (metis-0726) -------------------------------------------
+_cp = os.path.join(STATE, "autoclose-prs.json")
+_saved = open(_cp).read() if os.path.exists(_cp) else None
+qa = os.path.join(CACHE, "athena-x", "outside")
+HEADA = git(APP, "rev-parse", "HEAD")
+
+
+def put_cache(old_heads=None, prs=None, fetched=None, errors=None):
+    with open(_cp, "w") as fh:
+        json.dump({"fetched": time.time() if fetched is None else fetched, "open_prs": prs or {},
+                   "old_heads": old_heads or {}, "errors": errors or {}}, fh)
+
+
+def one_request(window=None, qd=None, rid=None, script=None):
+    """Заявка test на APP с id по счётчику (role_request берёт последнюю по имени, а время — секундами)."""
+    one_request.n += 1
+    rid = rid or f"20261103-0{one_request.n:05d}-c0c0c0"
+    req = {"v": 1, "id": rid, "kind": "test", "dir": APP, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    if script:
+        req["script"] = script
+    with open(os.path.join(qd or qa, rid + ".req.json"), "w") as fh:
+        json.dump(req, fh)
+    return rid
+
+
+one_request.n = 0
+NEWH = "9" * 40
+put_cache(old_heads={"Latark/App": {HEADA: 5}}, prs={"Latark/App": [{"number": 5, "head": NEWH}]})
+n0 = len(calls())
+r_st = one_request()
+run_pass()
+res = O.load_result(qa, r_st) or {}
+check("0726: HEAD папки — бывший head открытого PR, у PR другой head → failed «head устарел», прогона нет",
+      res.get("state") == "failed" and "head устарел, подай на текущий" in res.get("why", "")
+      and NEWH[:12] in res.get("why", "") and len(calls()) == n0, (res, len(calls()) - n0))
+r_lint = one_request(script="lint")
+run_pass()
+check("0726: --script на бывшем head идёт (проверка для себя, не для шлюза)",
+      (O.load_result(qa, r_lint) or {}).get("state") == "done" and len(calls()) == n0 + 1)
+for label, kw in (("кэша нет", None), ("кэш старше часа", {"fetched": time.time() - 2 * 3600}),
+                  ("gh не ответил по репозиторию", {"errors": {"latark/app": "x"}}),
+                  ("SHA не бывший head (коммит не пушили)", {"old": {"latark/app": {"8" * 40: 5}}}),
+                  ("PR закрыт (в open_prs его нет)", {"prs": {"latark/app": [{"number": 6, "head": NEWH}]}})):
+    if kw is None:
+        os.remove(_cp)
+    else:
+        put_cache(old_heads=kw.get("old", {"latark/app": {HEADA: 5}}),
+                  prs=kw.get("prs", {"latark/app": [{"number": 5, "head": NEWH}]}),
+                  fetched=kw.get("fetched"), errors=kw.get("errors"))
+    n1 = len(calls())
+    r_ok = one_request()
+    run_pass()
+    res = O.load_result(qa, r_ok) or {}
+    check(f"0726: {label} — прогон как раньше", res.get("state") == "done" and len(calls()) == n1 + 1, res)
+
+# дубли: три заявки на одну папку и одна с --script — идёт первая и lint, две другие failed «дубль <первая>»
+os.remove(_cp)
+n1 = len(calls())
+r_d = [one_request() for _ in range(3)]
+r_dl = one_request(script="lint")
+qk = os.path.join(CACHE, "metis-y", "outside")
+r_other = one_request(qd=qk)   # чужое окно: папка не его — отказ своим путём, не дубль
+run_pass()
+st = {r: O.load_result(qa, r) or {} for r in r_d + [r_dl]}
+check("0726: дубли на ту же папку — в работу одна (первая), прогон один",
+      st[r_d[0]].get("state") == "done" and st[r_d[0]].get("code") == 0 and len(calls()) == n1 + 2,
+      (st[r_d[0]], len(calls()) - n1))
+check("0726: остальные — failed «дубль <id первой>», с командой итога",
+      all(st[r].get("state") == "failed" and st[r].get("why", "").startswith(f"дубль {r_d[0]}")
+          and f"pantheon outside status {r_d[0]}" in st[r]["why"] for r in r_d[1:]), [st[r] for r in r_d[1:]])
+check("0726: заявка с другим --script — не дубль, идёт", st[r_dl].get("state") == "done", st[r_dl])
+check("0726: заявка чужого окна на ту же папку — не дубль (отказ «не из папок направления»)",
+      "не из папок направления" in (O.load_result(qk, r_other) or {}).get("why", ""))
+# другая папка того же репозитория на том же HEAD (worktree) — тоже дубль
+WT2 = os.path.join(APP, "..", "app-wt2")
+git(APP, "worktree", "add", "-q", "--detach", os.path.realpath(WT2), HEADA)
+P.write_json(os.path.join(STATE, "domains.json"),
+             {"domains": {"athena-x": ["~/projects/app", "~/projects/app-wt2"], "metis-y": ["~/projects/other"]}})
+r_a = one_request()
+one_request.n += 1
+r_b = f"20261103-0{one_request.n:05d}-c0c0c0"
+with open(os.path.join(qa, r_b + ".req.json"), "w") as fh:
+    json.dump({"v": 1, "id": r_b, "kind": "test", "dir": os.path.realpath(WT2),
+               "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, fh)
+n1 = len(calls())
+run_pass()
+check("0726: worktree того же репозитория на том же HEAD — дубль",
+      (O.load_result(qa, r_b) or {}).get("why", "").startswith(f"дубль {r_a}") and len(calls()) == n1 + 1,
+      (O.load_result(qa, r_b), len(calls()) - n1))
+git(APP, "worktree", "remove", "--force", os.path.realpath(WT2))
+P.write_json(os.path.join(STATE, "domains.json"),
+             {"domains": {"athena-x": ["~/projects/app"], "metis-y": ["~/projects/other"]}})
+
+# auto_pass: метка кэша читается до open_heads — кэш, обновлённый посреди прохода, не считается просмотренным
+T0 = NOW - 100   # «принять» ниже — от NOW (начало теста): позже кэша
+put_cache(prs={"latark/hh-mid": []}, fetched=T0)
+accept("6" * 40, repo="latark/hh-mid", age=50)   # «принять» после кэша T0, head в кэше нет
+c = json.load(open(_cp))
+c["open_prs"]["latark/hh-mid"] = []
+c["fetched"] = T0
+json.dump(c, open(_cp, "w"))
+_oh = O.open_heads
+
+
+def _bump(t=None):
+    out = _oh(t)
+    c2 = json.load(open(_cp))
+    c2["fetched"] = T0 + 80          # fetch переписал кэш посреди прохода
+    json.dump(c2, open(_cp, "w"))
+    return out
+
+
+O.open_heads = _bump
+O.auto_pass()
+O.open_heads = _oh
+a = P.read_json(O.root("auto.json"), {})
+check("0726: auto_pass — missed и heads_seen = метка кэша до open_heads (новый кэш будит тик)",
+      a.get("missed") == T0 and a.get("heads_seen") == T0 and O.auto_due(), (a.get("missed"), a.get("heads_seen"), T0))
+
+# --- 5d. запись по дереву (metis-0732) и ранние прогоны (metis-0733) ------------------------------------------------
+KIT = os.path.join(HOME, "projects", "kit")
+os.makedirs(KIT)
+git(KIT, "init", "-q", "-b", "main")
+git(KIT, "remote", "add", "origin", "git@github.com:latark/kit.git")
+os.makedirs(os.path.join(CACHE, "metis-k", "tmp"))
+P.write_json(os.path.join(STATE, "domains.json"),
+             {"domains": {"athena-x": ["~/projects/app"], "metis-y": ["~/projects/other"], "metis-k": ["~/projects/kit"]}})
+M = P.merge_mod()
+M.FULL_TESTS["kit"] = "heavy python3 t.py"   # полный набор этого репозитория для теста (у agent-kit — run-tests.py)
+K1 = commit(KIT, {"t.py": GREEN, ".pantheon-verify": "heavy python3 t.py\n"}, "k1")
+qkit = os.path.join(CACHE, "metis-k", "outside")
+
+
+def kit_request():
+    one_request.n += 1
+    rid = f"20261103-1{one_request.n:05d}-c0c0c0"
+    os.makedirs(qkit, exist_ok=True)
+    with open(os.path.join(qkit, rid + ".req.json"), "w") as fh:
+        json.dump({"v": 1, "id": rid, "kind": "test", "dir": KIT, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, fh)
+    run_pass()
+    return O.load_result(qkit, rid) or {}
+
+
+os.remove(_cp)
+n1 = len(calls())
+res = kit_request()
+rk1 = tests_for(K1)
+check("0732: прогон полного набора — запись с деревом и env (python, macOS)",
+      res.get("record") and len(calls()) == n1 + 1 and rk1 and rk1[-1].get("tree") == git(KIT, "rev-parse", f"{K1}^{{tree}}")
+      and rk1[-1]["env"].get("python") and "os" in rk1[-1]["env"], (res, rk1))
+git(KIT, "-c", "user.name=t", "commit", "-q", "--amend", "-m", "k1 другое сообщение")
+K2 = git(KIT, "rev-parse", "HEAD")
+n1 = len(calls())
+res = kit_request()
+rk2 = tests_for(K2)
+check("0732: новый head с тем же деревом — запись без прогона, отметка by_tree, шлюз её читает",
+      K2 != K1 and res.get("state") == "done" and res.get("code") == 0 and res.get("record")
+      and res.get("by_tree") == K1 and len(calls()) == n1 and len(rk2) == 1 and rk2[0].get("by_tree") == K1
+      and rk2[0]["by"]["agent_type"] == "pantheon-outside" and rk2[0]["pr"] is None
+      and rk2[0]["cmd"] == rk1[-1]["cmd"] and rk2[0]["tree"] == rk1[-1]["tree"], (res, rk2, len(calls()) - n1))
+n1 = len(calls())
+res = kit_request()
+check("0732: тот же head ещё раз — запись уже есть, без прогона и без новой строки",
+      res.get("state") == "done" and "уже есть" in res.get("note", "") and len(calls()) == n1 and len(tests_for(K2)) == 1,
+      res)
+K3 = commit(KIT, {"t.py": GREEN + "# k3\n"}, "k3")
+n1 = len(calls())
+res = kit_request()
+check("0732: другое дерево — прогон", res.get("record") and len(calls()) == n1 + 1 and not res.get("by_tree"), res)
+K4 = commit(KIT, {"t.py": RED}, "k4 red")
+res = kit_request()
+git(KIT, "-c", "user.name=t", "commit", "-q", "--amend", "-m", "k4 другое сообщение")
+K5 = git(KIT, "rev-parse", "HEAD")
+n1 = len(calls())
+res = kit_request()
+check("0732: красный прогон не переносится — тот же tree после красного идёт заново",
+      res.get("code") == 1 and not res.get("record") and len(calls()) == n1 + 1 and not tests_for(K5), res)
+K6 = commit(KIT, {"t.py": GREEN + "# k6\n"}, "k6")
+kit_request()
+git(KIT, "-c", "user.name=t", "commit", "-q", "--amend", "-m", "k6 другое сообщение")
+_re = O.run_env
+O.run_env = lambda line: {**_re(line), "python": "/other/python3.15"}
+n1 = len(calls())
+res = kit_request()
+O.run_env = _re
+check("0732: другой python (env) — прогон, а не перенос", len(calls()) == n1 + 1 and not res.get("by_tree"), res)
+# команда — не полный набор репозитория: не переносится (latark/app нет в FULL_TESTS)
+git(APP, "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "app пусто")
+git(APP, "-c", "user.name=t", "commit", "-q", "--amend", "--allow-empty", "-m", "app пусто 2")
+r_x = one_request()
+run_pass()
+r_y = one_request()
+n1 = len(calls())
+run_pass()
+check("0732: команда не из FULL_TESTS — повторный head того же дерева гоняется",
+      len(calls()) == n1 + 1 and not (O.load_result(qa, r_y) or {}).get("by_tree"), O.load_result(qa, r_y))
+
+# 0733: ранний прогон — head открытого PR из кэша, только у репозитория с полным набором
+K7 = commit(KIT, {"t.py": GREEN + "# k7\n"}, "k7")
+put_cache(prs={"latark/kit": [{"number": 9, "head": K7}], "latark/app": [{"number": 5, "head": "7" * 40}]})
+todo = O.auto_todo()
+check("0733: head открытого PR в кэше — в списке автопрогонов без «принять»; репозиторий без FULL_TESTS — нет",
+      ("latark/kit", K7) in todo and not [k for k in todo if k[0] == "latark/app"], todo)
+check("0733: тик видит дело (heads_due)", O.heads_due() and O.auto_due())
+accept("7" * 40, repo="latark/app")
+put_cache(prs={"latark/kit": [{"number": 9, "head": K7}], "latark/app": [{"number": 5, "head": "7" * 40}]})
+todo = O.auto_todo()
+check("0733: «принять»-ные — раньше ранних", todo.index(("latark/app", "7" * 40)) < todo.index(("latark/kit", K7)), todo)
+a = P.read_json(O.root("auto.json"), {})
+a.setdefault("done", {})["latark/app@" + "7" * 40] = {"state": "done", "record": True}
+P.write_json(O.root("auto.json"), a)
+al0 = alerts()
+res = O.auto_pass()
+ent = P.read_json(O.root("auto.json"), {}).get("done", {}).get(f"latark/kit@{K7}", {})
+check("0733: ранний прогон идёт, пишет запись, в auto.json — early",
+      [r.get("auto") for r in res] == [f"latark/kit@{K7}"] and tests_for(K7) and ent.get("early") is True, (res, ent))
+check("0733: после прохода кэш просмотрен (heads_seen), дела нет", not O.heads_due() and not O.auto_due())
+K8 = commit(KIT, {"t.py": RED}, "k8 red")
+put_cache(prs={"latark/kit": [{"number": 9, "head": K8}]})
+res = O.auto_pass()
+ent = P.read_json(O.root("auto.json"), {}).get("done", {}).get(f"latark/kit@{K8}", {})
+check("0733: ранний красный — без тревоги, в done early без записи",
+      res and res[0].get("code") == 1 and ent.get("early") and not ent.get("record") and alerts() == al0, (res, ent))
+check("0733: ранний красный второй раз сам не идёт", ("latark/kit", K8) not in O.auto_todo())
+accept(K8, repo="latark/kit")
+put_cache(prs={"latark/kit": [{"number": 9, "head": K8}]})
+check("0733: после «принять» ранний красный идёт ещё раз", O.auto_todo() == [("latark/kit", K8)], O.auto_todo())
+res = O.auto_pass()
+ent = P.read_json(O.root("auto.json"), {}).get("done", {}).get(f"latark/kit@{K8}", {})
+check("0733: прогон после «принять» — уже не early, красный даёт тревогу",
+      res and not ent.get("early") and alerts() != al0 and "latark/kit@" + K8[:12] in alerts(), ent)
+check("0733: красный после «принять» больше не повторяется", ("latark/kit", K8) not in O.auto_todo())
+# совместимость: старый auto.json без heads_seen и early читается, кэш без old_heads — тоже
+a = P.read_json(O.root("auto.json"), {})
+P.write_json(O.root("auto.json"), {"mtime": a.get("mtime"), "done": {k: {x: y for x, y in v.items() if x != "early"}
+                                                                         for k, v in a.get("done", {}).items()}})
+K9 = commit(KIT, {"t.py": GREEN + "# k9\n"}, "k9")
+with open(_cp, "w") as fh:
+    json.dump({"fetched": time.time(), "open_prs": {"latark/kit": [{"number": 9, "head": K9}]}, "errors": {}}, fh)
+check("0733: старый auto.json (без heads_seen, early) и кэш без old_heads — ранний прогон в списке, тик будится",
+      O.auto_due() and ("latark/kit", K9) in O.auto_todo() and O.stale_head(KIT, K9) is None)
+del M.FULL_TESTS["kit"]
+check("0733: репозиторий без FULL_TESTS — ранних прогонов нет", ("latark/kit", K9) not in O.auto_todo()
+      and not O.heads_due())
+if _saved is not None:
+    with open(_cp, "w") as fh:
+        fh.write(_saved)
+elif os.path.exists(_cp):
+    os.remove(_cp)
+
 # --- 6. сироты (metis-0614): после всех серверов и стопов ни заглушки, ни задач «turbo» в живых --------------------
 kill_all_servers()
 _left = [p for p in fake_pids() if still_alive(p)]
