@@ -437,7 +437,9 @@ def command(d, kind, script=None):
     if not text and not own:
         text, own = _show(d, "HEAD", ".pantheon-verify"), True
     if text:
-        line = next((x.strip() for x in text.splitlines() if x.strip() and not x.lstrip().startswith("#")), "")
+        # строка `dev:` — узкая проверка исполнителя для Stop-хука (metis-0653), здесь не команда проверки проекта
+        line = next((x.strip() for x in text.splitlines()
+                     if x.strip() and not x.lstrip().startswith("#") and not x.lstrip().startswith("dev:")), "")
         if line:
             words = line.split()
             while words and words[0] in ("heavy", "--server"):   # heavy проход ставит сам, снаружи профиля

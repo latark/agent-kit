@@ -99,6 +99,18 @@ def norm(cmd):
     return " ".join(str(cmd).split())
 
 
+AFFECTED = re.compile(r"run-tests\.py\b.*--affected\b")
+EXIT3 = re.compile(r"\s*Exit code 3\b")
+
+
+def result_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(str(c.get("text", "")) for c in content if isinstance(c, dict))
+    return ""
+
+
 def last_runs(transcript, variants):
     """По транскрипту: (был ли прогон проверки после последней правки, зелёный ли последний такой прогон)."""
     uses, results, order = {}, {}, []
@@ -122,14 +134,18 @@ def last_runs(transcript, variants):
                     uses[x.get("id")] = (x.get("name"), x.get("input") or {})
                     order.append(x.get("id"))
                 elif x.get("type") == "tool_result":
-                    results[x.get("tool_use_id")] = bool(x.get("is_error"))
+                    results[x.get("tool_use_id")] = (bool(x.get("is_error")), result_text(x.get("content")))
     last_edit, last_run = -1, None
     for i, uid in enumerate(order):
         name, inp = uses[uid]
         cmd = norm(inp.get("command", "")) if name == "Bash" else ""
         if name == "Bash" and (any(v in cmd for v in variants) or OUTSIDE_TEST.search(cmd)):
             if uid in results:
-                last_run = (i, not results[uid])
+                err, text = results[uid]
+                # run-tests.py --affected: код 3 — «нечего гонять» (правка не задевает тесты по карте), не падение
+                if err and AFFECTED.search(cmd) and EXIT3.match(text):
+                    err = False
+                last_run = (i, not err)
             continue
         if name in EDIT_TOOLS or (name == "Bash" and BASH_WRITES.search(cmd)):
             last_edit = i

@@ -771,11 +771,35 @@ def main():
               "pantheon outside test --wait 590" in text and "pantheon outside serve --wait 120" in text
               and "pantheon outside stop" in text)
     # metis-0653: полный набор исполнители и argus сами не гоняют; ожидание — Monitor; запускающий делает TaskStop
-    for f in devs + ["argus.tmpl"]:
+    for f in devs + ["argus.tmpl", "codex-dev.tmpl"]:
         text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
         check(f"{f[:-5]}: полный набор сам не гоняет, ждёт Monitor-ом, а не концом хода «жду» (metis-0653)",
               "полный набор тестов репозитория" in text.lower() and "не гоняй" in text and "Monitor с условием" in text
               and "словом «жду»" in text)
+    # persist.part (metis-0653): свою фоновую команду ждут Monitor-ом, субагента — концом хода; лиды говорят то же
+    for f in devs + ["codex-dev.tmpl", "workshop.tmpl"]:
+        text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
+        check(f"{f[:-5]}: persist — свою фоновую команду ждут Monitor-ом, субагента концом хода (metis-0653)",
+              "Свою фоновую команду ждут на переднем плане" in text and "Субагента, наоборот, ждут концом хода" in text)
+    # persist.part и dev.part проверяются порознь: workshop берёт persist без dev.part, dev-* — оба
+    wtext = " ".join(read(os.path.join(out_real, "workshop.md")).split())
+    check("workshop (persist.part без dev.part): своя фоновая команда — Monitor, субагент — концом хода; фразы dev.part нет",
+          "Свою фоновую команду ждут на переднем плане" in wtext and "Субагента, наоборот, ждут концом хода" in wtext
+          and "Есть строка `dev:`" not in wtext)
+    for f in devs:
+        check(f"{f[:-5]}: Bash уводит команду в фон через ~180 с — ждать Monitor/until, не timeout 600000 (metis-0653)",
+              "примерно через 180 с" in " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split()))
+    check("argus: Bash уводит команду в фон через ~180 с (metis-0653)",
+          "примерно через 180 с" in " ".join(read(os.path.join(out_real, "argus.md")).split()))
+    for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
+        check(f"{f}: persist — субагента ждут концом хода, не Monitor-ом (metis-0653)",
+              "Субагента, наоборот, ждут концом хода" in flat[f]
+              and ("закончи ход и жди уведомления" in flat[f] or f == "apollo-demo.md"))
+    # dev.part: запрет полного набора привязан к строке dev:
+    for f in devs:
+        text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
+        check(f"{f[:-5]}: полный набор не гоняй — только при строке `dev:`, без неё проверка — первая строка (metis-0653)",
+              "Есть строка `dev:`" in text and "Строки `dev:` нет" in text)
     for f in ("dev-opus", "dev-sonnet", "dev-haiku", "codex-dev"):
         text = " ".join(read(os.path.join(out_real, f + ".md")).split())
         check(f"{f}: пункт 6 самопроверки при долгом наборе — узкие тесты и «не проверял: полный набор»",

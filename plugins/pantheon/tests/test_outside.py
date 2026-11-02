@@ -467,6 +467,13 @@ check("команда: строка .pantheon-verify без heavy, из ветк
 commit(OTHER, {".pantheon-verify": "# полный\npython3 t.py\ndev: python3 narrow.py\n"}, "o2 dev-строка")
 check("команда: строка `dev:` .pantheon-verify outside не берёт — первая некомментарная",
       O.command(os.path.realpath(OTHER), "test")[0] == ["/bin/sh", "-c", "python3 t.py"])
+commit(OTHER, {".pantheon-verify": "# только узкая\ndev: python3 narrow.py\npython3 t.py\n"}, "o3 dev-строка первой")
+check("команда: `dev:` первой строкой пропускается, берётся следующая некомментарная",
+      O.command(os.path.realpath(OTHER), "test")[0] == ["/bin/sh", "-c", "python3 t.py"])
+commit(OTHER, {".pantheon-verify": "dev: python3 narrow.py\n"}, "o4 только dev")
+check("команда: только строка `dev:` — не команда, дальше package.json/pytest (здесь нечем — отказ)",
+      O.command(os.path.realpath(OTHER), "test")[0] is None)
+commit(OTHER, {".pantheon-verify": "python3 t.py\n"}, "o5 вернул")
 check("команда: --script из package.json", O.command(os.path.realpath(APP), "test", "lint")[1] == "npm run lint")
 check("команда: скрипта нет — отказ", O.command(os.path.realpath(APP), "test", "nope")[0] is None)
 check("команда: сервер без скрипта dev — отказ", O.command(os.path.realpath(OTHER), "serve")[0] is None)
