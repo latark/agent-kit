@@ -60,14 +60,17 @@ MISSING = object()
 def rest_runs(view):
     """Ответы REST actions/runs?head_sha и commits/SHA/check-runs по rollup ответа gh pr view (metis-0633): каждая
     CheckRun — свой запуск Actions своего workflow; событие — поле "event" записи (по умолчанию pull_request), head —
-    headRefOid, PR — поле "prs" записи (по умолчанию 7, номер PR agent-kit в тестах); StatusContext в REST
-    запусков нет."""
+    headRefOid, PR — поле "prs" записи (по умолчанию 7, номер PR agent-kit в тестах), репозиторий и ветка head —
+    поля "head_repo" и "head_branch" (по умолчанию latark/agent-kit и main; PR из форка, metis-0649); StatusContext в
+    REST запусков нет."""
     sha, rollup, runs, checks = view.get("headRefOid"), view.get("statusCheckRollup"), [], []
     for i, c in enumerate(rollup if isinstance(rollup, list) else []):
         if not isinstance(c, dict) or not ("conclusion" in c or "status" in c and "state" not in c):
             continue
         runs.append({"id": i, "name": c.get("workflowName"), "event": c.get("event", "pull_request"), "head_sha": sha,
-                     "check_suite_id": 1000 + i, "pull_requests": [{"number": n} for n in c.get("prs", (7,))]})
+                     "check_suite_id": 1000 + i, "pull_requests": [{"number": n} for n in c.get("prs", (7,))],
+                     "head_repository": {"full_name": c.get("head_repo", "latark/agent-kit")},
+                     "head_branch": c.get("head_branch", "main")})
         checks.append({"name": c.get("name"), "status": str(c.get("status") or "").lower(),
                        "conclusion": str(c["conclusion"]).lower() if c.get("conclusion") else None, "head_sha": sha,
                        "check_suite": {"id": 1000 + i}})
@@ -1539,7 +1542,10 @@ def t_ci(h):
         """wf — {ref: True | False | None} ответов _has_workflows; по умолчанию 404 везде."""
         asked.clear()
         mg._has_workflows = lambda repo, ref: asked.append(ref) or (wf or {}).get(ref, False)
-        return mg._ci_problem("latark/tg-read", 3, sha, dict({"baseRefOid": BASE}, **view))
+        why, notes = mg._ci_problem("latark/tg-read", 3, sha, dict({"baseRefOid": BASE}, **view))
+        check("_ci_problem: возврат (текст, предупреждения) — без красной необязательной предупреждений нет",
+              notes == (), notes)
+        return why
 
     check("_ci_problem: зелёный — None", answer({"headRefOid": sha, "statusCheckRollup": GREEN}) is None)
     check("_ci_problem: зелёный — workflows не спрашивает", asked == [], asked)
@@ -1571,9 +1577,11 @@ def t_ci(h):
     calls = []
     mg._gh_json = lambda args: calls.append(args) or [{"headRefOid": sha}]
     check("_pr_view: объект ответа", mg._pr_view("latark/tg-read", 3) == {"headRefOid": sha})
-    check("_pr_view: один вызов gh pr view с headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup",
+    check("_pr_view: один вызов gh pr view с headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup и полями "
+          "головы PR из форка (metis-0649)",
           calls == [["pr", "view", "3", "-R", "latark/tg-read", "--json",
-                     "headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup"]], calls)
+                     "headRefOid,baseRefOid,baseRefName,changedFiles,statusCheckRollup,isCrossRepository,"
+                     "headRepository,headRefName"]], calls)
     for got in (None, [], [["x"]], [{"a": 1}, {"b": 2}]):
         mg._gh_json = lambda args: got
         check(f"_pr_view: ответ {got!r} — None", mg._pr_view("latark/tg-read", 3) is None)
@@ -2045,6 +2053,167 @@ def t_ci_verdict_unit(h):
         else:
             check(f"REQUIRED_CHECKS: {wf} идёт на PR в {base}",
                   pr_on is not None and re.search(rf"branches:\s*\[\s*{re.escape(base)}\s*\]", pr_on.group(1)), on)
+
+
+# голова PR из форка в ответе gh pr view (metis-0649): поля как у gh 2.103 (headRepository с nameWithOwner)
+FORK = {"isCrossRepository": True, "headRepository": {"id": "R_x", "name": "agent-kit", "nameWithOwner": "Ext/agent-kit"},
+        "headRefName": "feat"}
+
+
+def _fork_runs(rollup, repo="Ext/agent-kit", branch="feat"):
+    """Записи rollup как запуски PR из форка (rest_runs): pull_requests пуст — GitHub его у форка не заполняет
+    (github/docs#22501), head — форк repo и ветка branch."""
+    return [dict(c, prs=(), head_repo=repo, head_branch=branch) for c in rollup]
+
+
+def t_ci_fork_unit(h):
+    """metis-0649: ci_fork и ci_runs для PR из форка напрямую — каждое условие сверки запуска (SHA, событие,
+    репозиторий head, ветка head) и ответ «не получены», когда форк или ветка неизвестны."""
+    mg = _load_merge_gate("merge_gate_ci_fork")
+    check("PR_VIEW_FIELDS: есть isCrossRepository, headRepository и headRefName",
+          {"isCrossRepository", "headRepository", "headRefName"} <= set(mg.PR_VIEW_FIELDS.split(",")),
+          mg.PR_VIEW_FIELDS)
+    check("ci_fork: isCrossRepository false — None", mg.ci_fork(dict(FORK, isCrossRepository=False)) is None)
+    check("ci_fork: isCrossRepository нет — None", mg.ci_fork({"headRefName": "feat"}) is None)
+    check("ci_fork: isCrossRepository строкой «true» — None", mg.ci_fork(dict(FORK, isCrossRepository="true")) is None)
+    check("ci_fork: ответ не словарь — None", mg.ci_fork(None) is None)
+    check("ci_fork: форк — (owner/name в нижнем регистре, ветка)", mg.ci_fork(FORK) == ("ext/agent-kit", "feat"),
+          mg.ci_fork(FORK))
+    check("ci_fork: headRepository нет — пустое имя", mg.ci_fork(dict(FORK, headRepository=None)) == ("", "feat"))
+    check("ci_fork: nameWithOwner нет — пустое имя",
+          mg.ci_fork(dict(FORK, headRepository={"name": "agent-kit"})) == ("", "feat"))
+    check("ci_fork: ветка не строка — пустая ветка", mg.ci_fork(dict(FORK, headRefName=None)) == ("ext/agent-kit", ""))
+    sha, fork = "a" * 40, ("ext/agent-kit", "feat")
+    one = {"name": "tests", "event": "pull_request", "head_sha": sha, "pull_requests": [],
+           "head_repository": {"full_name": "Ext/Agent-Kit"}, "head_branch": "feat"}
+    wr = {"total_count": 6, "workflow_runs": [
+        dict(one, check_suite_id=1),                                                  # засчитан: регистр имени любой
+        dict(one, check_suite_id=2, head_repository={"full_name": "evil/agent-kit"}),  # чужой форк
+        dict(one, check_suite_id=3, head_branch="other"),                              # чужая ветка того же форка
+        dict(one, check_suite_id=4, event="push"),                                     # не pull_request
+        dict(one, check_suite_id=5, head_sha="b" * 40),                                # чужой SHA у запуска
+        dict(one, check_suite_id=6, head_repository={"full_name": "latark/agent-kit"},
+             pull_requests=[{"number": 7}])]}                                          # base-репозиторий с номером PR
+    cr = {"total_count": 6, "check_runs": [{"name": f"job{i}", "status": "completed", "conclusion": "success",
+                                            "head_sha": sha, "check_suite": {"id": i}} for i in range(1, 7)]}
+    got = mg.ci_runs(wr, cr, sha, 7, fork)
+    check("ci_runs форк: засчитан только запуск pull_request с head этого форка и ветки на этом SHA",
+          [g["name"] for g in got or []] == ["job1"], got)
+    got = mg.ci_runs(wr, cr, sha, 7)
+    check("ci_runs не форк: как раньше — только запуск с номером PR в pull_requests",
+          [g["name"] for g in got or []] == ["job6"], got)
+    for bad in (("", "feat"), ("ext/agent-kit", "")):
+        got = mg.ci_runs(wr, cr, sha, 7, bad)
+        check(f"ci_runs форк {bad}: форк или ветка не получены — строка «не получены»",
+              isinstance(got, str) and got.startswith(mg.CI_NONE) and "из форка" in got, got)
+    v = mg.ci_verdict([AFFECTED, TRACES], mg.required_checks("latark/agent-kit", "main"),
+                      mg.ci_runs(wr, cr, sha, 7, ("", "feat")))
+    check("ci_verdict: форк не получен — fail с этим текстом", v[0] == "fail" and "из форка" in v[1], v)
+    bad = {"total_count": 1, "workflow_runs": [dict(one, check_suite_id=1, head_repository=None)]}
+    check("ci_runs форк: head_repository null у запуска на этом SHA — None (не разобран)",
+          mg.ci_runs(bad, cr, sha, 7, fork) is None)
+    no_pr = {"total_count": 1, "workflow_runs": [dict({k: v for k, v in one.items() if k != "pull_requests"},
+                                                      check_suite_id=1)]}
+    check("ci_runs форк: поле pull_requests не нужно",
+          [g["name"] for g in mg.ci_runs(no_pr, cr, sha, 7, fork) or []] == ["job1"])
+
+
+def t_ci_fork(h):
+    """metis-0649: PR из форка через хук. Зелёные запуски его head (форк и ветка) — пропуск и у роли, и в сессии без
+    роли; зелёные запуски чужого форка или чужой ветки на том же SHA — отказ «не встали»; форк не получен — отказ
+    «не получены»; обычный PR — как раньше, по pull_requests."""
+    kit, sha = "projects/agent-kit", h.sha["agent-kit"]
+    h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"), rec("accept", "latark/agent-kit", 7, sha))
+    cmd = f"gh pr merge 7 --match-head-commit {sha}"
+    owner = dict(role=None, pdir=kit)
+    green = [AFFECTED, TRACES]
+    h.ci(_fork_runs(green), name="agent-kit", **FORK)
+    merge_case("форк: зелёные запуски его head — проходит", h.pre(cmd, pdir=kit), True)
+    merge_case("форк: зелёные запуски его head, без роли — проходит", h.pre(cmd, **owner), True)
+    h.ci(_fork_runs(green, repo="evil/agent-kit"), name="agent-kit", **FORK)
+    merge_case("форк: зелёные запуски чужого форка на том же SHA — отказ", h.pre(cmd, pdir=kit), False,
+               "ещё не встали")
+    merge_case("форк: чужой форк, без роли — отказ", h.pre(cmd, **owner), False, "ещё не встали")
+    h.ci(_fork_runs(green, branch="other"), name="agent-kit", **FORK)
+    merge_case("форк: зелёные запуски чужой ветки того же форка — отказ", h.pre(cmd, pdir=kit), False,
+               "ещё не встали")
+    h.ci(_fork_runs(green) + [dict(TRACES, event="push", prs=(), head_repo="Ext/agent-kit", head_branch="feat")],
+         name="agent-kit", **FORK)
+    merge_case("форк: дубль от push рядом с зелёным pull_request — проходит", h.pre(cmd, pdir=kit), True)
+    h.ci(_fork_runs([AFFECTED]) + [dict(TRACES, event="push", prs=(), head_repo="Ext/agent-kit",
+                                        head_branch="feat")], name="agent-kit", **FORK)
+    merge_case("форк: traces только от push — отказ", h.pre(cmd, pdir=kit), False, "check-traces/traces")
+    h.ci(_fork_runs([AFFECTED, dict(TRACES, conclusion="FAILURE")]), name="agent-kit", **FORK)
+    merge_case("форк: красная обязательная — отказ", h.pre(cmd, pdir=kit), False, "check-traces/traces красная")
+    h.ci(_fork_runs(green), name="agent-kit", **dict(FORK, headRepository=None))
+    merge_case("форк: headRepository не получен — отказ «не получены»", h.pre(cmd, pdir=kit), False,
+               "PR из форка, а его репозиторий или ветка head не получены")
+    h.ci(_fork_runs(green), name="agent-kit", **dict(FORK, headRefName=None))
+    merge_case("форк: headRefName не получен — отказ «не получены»", h.pre(cmd, pdir=kit), False, "из форка")
+    h.ci(_fork_runs(green), name="agent-kit", **dict(FORK, isCrossRepository=False))
+    merge_case("не форк: запуски без номера PR (как у форка) — отказ, как раньше", h.pre(cmd, pdir=kit), False,
+               "ещё не встали")
+    h.ci(green, name="agent-kit", isCrossRepository=False, headRepository=None, headRefName=None)
+    merge_case("не форк: обычный PR — проходит, как раньше", h.pre(cmd, pdir=kit), True)
+
+
+# один процесс, несколько событий (metis-0650): main guard_rules по очереди, stdout каждого — отдельно
+NOTES_DRIVER = ("import contextlib, io, json, sys\n"
+                "hooks, events = sys.argv[1], sys.argv[2:]\n"
+                "sys.argv = [hooks + '/guard.py']\n"
+                "sys.path.insert(0, hooks)\n"
+                "import guard_rules\n"
+                "out = []\n"
+                "for e in events:\n"
+                "    buf = io.StringIO()\n"
+                "    with contextlib.redirect_stdout(buf):\n"
+                "        guard_rules.main(e.encode())\n"
+                "    out.append(buf.getvalue())\n"
+                "print(json.dumps(out))\n")
+
+
+def t_notes_events(h):
+    """metis-0650: предупреждение шлюза (красная необязательная проверка) едет возвратом проверки, а не списком
+    модуля: несколько событий в одном процессе (как будет в демоне хуков, metis-0330) — systemMessage второго без
+    предупреждений первого. И у роли, и в сессии без роли."""
+    kit, sha, tg = "projects/agent-kit", h.sha["agent-kit"], h.sha["tg-read"]
+    h.seed(rec("tests", "latark/agent-kit", None, sha, "dev-opus"), rec("accept", "latark/agent-kit", 7, sha))
+    full = dict(AFFECTED, name="full", conclusion="FAILURE")
+    h.ci([AFFECTED, TRACES, full], name="agent-kit")
+    note = f"необязательная проверка GitHub tests/full красная: FAILURE на latark/agent-kit#7@{sha[:12]}"
+
+    def ev(cmd, role="domain-coordinator"):
+        e = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": h.j(kit),
+             "session_id": "s-coord", "tool_use_id": "toolu_" + uuid.uuid4().hex}
+        if role:
+            e["agent_type"] = role
+        return json.dumps(e)
+
+    merge = f"gh pr merge 7 --match-head-commit {sha}"
+    events = [ev(merge), ev("git status"), ev(merge, role=None), ev(f"gh pr merge 3 -R latark/tg-read "
+                                                                     f"--match-head-commit {tg}", role=None)]
+    r = subprocess.run([sys.executable, "-I", "-c", NOTES_DRIVER, os.path.dirname(GUARD), *events],
+                       capture_output=True, text=True, env=h.env(kit), timeout=60)
+    try:
+        out = json.loads(r.stdout)
+    except ValueError:
+        out = None
+    check("один процесс: четыре события разобраны без сбоя", r.returncode == 0 and isinstance(out, list)
+          and len(out) == 4, r.stdout + r.stderr)
+    out = out if isinstance(out, list) and len(out) == 4 else ["", "", "", ""]
+
+    def msg(raw):
+        try:
+            return json.loads(raw).get("systemMessage", "") if raw.strip() else ""
+        except ValueError:
+            return raw
+
+    check("один процесс: 1-е событие (роль, слияние с красной необязательной) — systemMessage с предупреждением",
+          msg(out[0]).count(note) == 1 and '"deny"' not in out[0], out[0])
+    check("один процесс: 2-е событие (git status) — без вывода, предупреждение 1-го не попало", out[1] == "", out[1])
+    check("один процесс: 3-е событие (без роли, то же слияние) — предупреждение ровно одно, своё",
+          msg(out[2]).count(note) == 1 and '"deny"' not in out[2], out[2])
+    check("один процесс: 4-е событие (без роли, зелёный tg-read) — без вывода", out[3] == "", out[3])
 
 
 def ts(shift=0):
@@ -3659,7 +3828,7 @@ CASES = [t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_old_sha, t_no_te
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1,
          t_reviewers, t_unresolved_test_words, t_vanishing_test_words, t_merge_hints, t_opus_protect, t_opus_not_core, t_opus_transcript, t_ci,
-         t_ci_required, t_ci_verdict_unit,
+         t_ci_required, t_ci_verdict_unit, t_ci_fork_unit, t_ci_fork, t_notes_events,
          t_core_touchid, t_core_0598, t_carry_unit, t_carry_r2, t_carry_gate, t_carry_opus, t_carry_product, t_carry_r4,
          t_carry_r4_gate, t_carry_r6, t_version_bump_refused, t_core_sandbox_unit, t_core_sandbox]
 

@@ -61,7 +61,8 @@ if sys.argv[1:3] == ["pr", "merge"]:
     sys.exit(int(open(p).read()) if os.path.exists(p) else 0)
 if sys.argv[1] == "api" and ("/actions/runs?" in sys.argv[2] or "/check-runs?" in sys.argv[2]):
     # запуски Actions (metis-0633): по rollup из gh-view.json, событие — поле "event" записи (по умолчанию
-    # pull_request), PR — поле "prs" (по умолчанию 7); с gh-runs-fail — сбой, gh-runs-total — total_count запусков
+    # pull_request), PR — поле "prs" (по умолчанию 7), репозиторий и ветка head — "head_repo" и "head_branch" (PR из
+    # форка, metis-0649); с gh-runs-fail — сбой, gh-runs-total — total_count запусков
     if os.path.exists(os.path.join(rec, "gh-runs-fail")):
         sys.exit(1)
     v = json.load(open(os.path.join(rec, "gh-view.json")))
@@ -69,7 +70,9 @@ if sys.argv[1] == "api" and ("/actions/runs?" in sys.argv[2] or "/check-runs?" i
     for i, c in enumerate(v.get("statusCheckRollup") or []):
         if isinstance(c, dict) and "context" not in c:
             runs.append({"name": c.get("workflowName"), "event": c.get("event", "pull_request"), "head_sha": sha,
-                         "check_suite_id": 1000 + i, "pull_requests": [{"number": n} for n in c.get("prs", [7])]})
+                         "check_suite_id": 1000 + i, "pull_requests": [{"number": n} for n in c.get("prs", [7])],
+                         "head_repository": {"full_name": c.get("head_repo", "latark/agent-kit")},
+                         "head_branch": c.get("head_branch", "main")})
             checks.append({"name": c.get("name"), "status": str(c.get("status") or "").lower(),
                            "conclusion": str(c["conclusion"]).lower() if c.get("conclusion") else None,
                            "head_sha": sha, "check_suite": {"id": 1000 + i}})
@@ -185,16 +188,17 @@ class Box:
     def run(self, t=T0, click=False, extra=None, evil=None):
         return self.cli(["merge", "run"] + (["--click"] if click else []), t=t, extra=extra, evil=evil)
 
-    def view(self, sha, state="OPEN", draft=False, checks=None, title=TITLE, files=None, count=None, base="main"):
+    def view(self, sha, state="OPEN", draft=False, checks=None, title=TITLE, files=None, count=None, base="main",
+             head=None):
         """Ответ gh pr view и REST pulls/N/files: files — имена или словари; count — changedFiles (по умолчанию
-        len(files)); base — baseRefName (None — поля нет)."""
+        len(files)); base — baseRefName (None — поля нет); head — поля головы PR (isCrossRepository и др.)."""
         files = FILES if files is None else files
         recs = [f if isinstance(f, dict) else {"filename": f, "status": "modified"} for f in files]
         with open(os.path.join(self.rec, "gh-view.json"), "w") as fh:
             json.dump({"headRefOid": sha, "state": state, "isDraft": draft, "title": title,
                        **({} if base is None else {"baseRefName": base}),
                        "statusCheckRollup": ci("SUCCESS", "SUCCESS") if checks is None else checks,
-                       "changedFiles": len(recs) if count is None else count}, fh)
+                       "changedFiles": len(recs) if count is None else count, **(head or {})}, fh)
         with open(os.path.join(self.rec, "gh-files.jsonl"), "w") as fh:
             fh.write("".join(json.dumps(r) + "\n" for r in recs))
 
@@ -761,16 +765,59 @@ def test_core_matches_guard():
     check("ядро merge.py == ядро merge_gate.py", r.stdout.strip() == "True", r.stdout + r.stderr)
 
 
+FORK = {"isCrossRepository": True, "headRepository": {"id": "R_x", "name": "agent-kit", "nameWithOwner": "Ext/agent-kit"},
+        "headRefName": "feat"}
+
+
+def test_ci_fork():
+    """metis-0649: PR из форка — у его запусков pull_requests пуст; проход по Touch ID засчитывает запуск
+    pull_request с head этого форка и ветки (поля из gh pr view, их просит pr_view). Чужой форк или ветка на том же
+    SHA — ждёт; форк не получен — заявка снята с тревогой; обычный PR без номера в pull_requests — ждёт, как раньше."""
+    def fork_ci(repo="Ext/agent-kit", branch="feat"):
+        return [dict(c, prs=[], head_repo=repo, head_branch=branch) for c in ci("SUCCESS", "SUCCESS")]
+
+    b = Box()
+    b.request()
+    b.view(SHA, checks=fork_ci(), head=FORK)
+    b.run()
+    check("форк: зелёные запуски его head → окно и слияние", len(b.windows()) == 1 and len(b.merges()) == 1,
+          b.outs[-1])
+    for how, checks in (("чужого форка", fork_ci(repo="evil/agent-kit")), ("чужой ветки", fork_ci(branch="x"))):
+        b = Box()
+        b.request()
+        b.view(SHA, checks=checks, head=FORK)
+        b.run()
+        check(f"форк: зелёные запуски {how} на том же SHA → окна нет, ждёт", not b.windows() and b.req() is not None,
+              b.outs[-1])
+    b = Box()
+    b.request()
+    b.view(SHA, checks=fork_ci(), head=dict(FORK, headRepository={"id": "R_x"}))
+    b.run()
+    check("форк: nameWithOwner не получен → окна нет, заявка снята с тревогой «из форка»",
+          not b.windows() and not b.merges() and b.req() is None and "из форка" in b.alerts(), b.alerts())
+    b = Box()
+    b.request()
+    b.view(SHA, checks=fork_ci(), head=dict(FORK, isCrossRepository=False))
+    b.run()
+    check("не форк: запуски без номера PR → окна нет, ждёт (как раньше)", not b.windows() and b.req() is not None,
+          b.outs[-1])
+    calls = [json.loads(x)["argv"] for x in open(os.path.join(b.rec, "gh-argv.jsonl"))]
+    fields = [a[a.index("--json") + 1].split(",") for a in calls if a[:2] == ["pr", "view"]]
+    check("pr_view просит isCrossRepository, headRepository и headRefName",
+          fields and all({"isCrossRepository", "headRepository", "headRefName"} <= set(f) for f in fields), fields)
+
+
 def test_ci_matches_guard():
-    """metis-0633: разбор проверок GitHub один — ci_verdict, required_checks, REQUIRED_CHECKS, CI_OK, CI_WAIT и CI_NONE
-    в merge.py дословно те же, что в шлюзе guard (merge_gate.py): сверка по AST, без запуска кода."""
+    """metis-0633, 0649: разбор проверок GitHub один — ci_verdict, ci_runs, ci_fork, required_checks, REQUIRED_CHECKS,
+    CI_OK, CI_WAIT и CI_NONE в merge.py дословно те же, что в шлюзе guard (merge_gate.py): сверка по AST, без запуска
+    кода."""
     import ast
 
     def parts(path):
         tree = ast.parse(open(path, encoding="utf-8").read())
         got = {}
         for n in tree.body:
-            if isinstance(n, ast.FunctionDef) and n.name in ("ci_verdict", "ci_runs", "required_checks"):
+            if isinstance(n, ast.FunctionDef) and n.name in ("ci_verdict", "ci_runs", "ci_fork", "required_checks"):
                 got[n.name] = ast.dump(n)
             elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) \
                     and n.targets[0].id in ("REQUIRED_CHECKS", "CI_RUNS_API", "CI_OK", "CI_WAIT", "CI_NONE"):
@@ -778,7 +825,7 @@ def test_ci_matches_guard():
         return got
 
     mine, gate = parts(os.path.join(LIBDIR, "merge.py")), parts(os.path.join(GUARD_HOOKS, "merge_gate.py"))
-    names = ("ci_verdict", "ci_runs", "required_checks", "REQUIRED_CHECKS", "CI_RUNS_API", "CI_OK", "CI_WAIT",
+    names = ("ci_verdict", "ci_runs", "ci_fork", "required_checks", "REQUIRED_CHECKS", "CI_RUNS_API", "CI_OK", "CI_WAIT",
              "CI_NONE")
     check("merge.py и merge_gate.py: все части разбора CI есть в обоих", all(k in mine and k in gate for k in names),
           (sorted(mine), sorted(gate)))
