@@ -1452,7 +1452,7 @@ def owner_marked(since):
         text = open(P.path("owner-log", "zeus.md"), encoding="utf-8").read()
         heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
         for i, m in enumerate(heads):
-            if m.group(2).strip() != "· окно вопросов":
+            if not P.answers_mod().is_answer_head(m.group(2)):  # окно вопросов или ответ в чате (metis-0405)
                 continue
             try:
                 ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
@@ -1989,7 +1989,9 @@ def autostart(agents, registry, doms, t, dry=False):
 # --- окна по вашему ответу в окне вопросов (metis-0523, [sb-simplify] п. 5, решение владельца 27.10 «(а)») -----------
 # Вопрос — только по шаблону, его печатает `pantheon launch-question <id> запустить|перезапустить|вернуть <направление>`:
 # «[<id>] Запустить <имя>?» и варианты «Да — запустить <имя>» | «Нет». Ваш выбор хук answer пишет в owner-log/zeus.md с
-# пометкой «окно вопросов» — роли её не подделать. Плановый проход (вне песочницы окон) сверяет запись целиком: строка
+# пометкой «окно вопросов», выбор сообщением сразу после такого вопроса в чате хук owner-log пишет с пометкой «ответ в
+# чате» (metis-0405; служебные строки «вариант:», «дословно:» сверка не видит) — роли их не подделать. Плановый проход
+# (вне песочницы окон) сверяет запись целиком: строка
 # вопроса точно по шаблону, ответ — точно вариант «Да — <глагол> <имя>», других строк (заметки, свой текст) нет.
 # Любое отличие — отказ без запуска (ревью безопасности: намерение не выводится из свободного текста модели).
 # запустить — продолжение остановленной сессии или новая (как самозапуск), перезапустить — pantheon start --restart.
@@ -2048,7 +2050,7 @@ def word_orders(t):
     out = []
     heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
     for i, m in enumerate(heads):
-        if m.group(2).strip() != "· окно вопросов":
+        if not P.answers_mod().is_answer_head(m.group(2)):
             continue
         try:
             ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
@@ -2057,7 +2059,8 @@ def word_orders(t):
         if ts < since or ts > t + 60:
             continue
         body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
-        w = word_parse(body)
+        # ответ в чате (metis-0405) — без служебных строк «вариант:», «дословно:»: та же дословная сверка
+        w = word_parse(P.answers_mod().answer_body(m.group(2), body))
         if w:
             out.append((f"{m.group(1)}|{w[0]}|{w[2]}", m.group(1)) + w)
     return out

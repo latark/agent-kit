@@ -35,10 +35,10 @@ APPROVALS_HEAD = """# Заранее разрешённые действия м�
 
 
 # --- согласие через Зевса (metis-0022, решение 15.10) ---------------------------------
-# Вопрос владельцу задаёт Зевс (окном вопросов или карточкой «Нужен ответ» на доске). Ответ пишут не роли: хук — в
-# owner-log/zeus.md (ввод владельца, выбор в окне вопросов), тик — в owner-log/board.jsonl (галочка на карточке; текст
-# вопроса тик берёт из отмеченной карточки). Журналы личные — роли их не читают; эта команда отдаёт исполнителю только
-# записи с номером его вопроса.
+# Вопрос владельцу задаёт Зевс (окном вопросов, сообщением с вариантами или карточкой «Нужен ответ» на доске). Ответ
+# пишут не роли: хук — в owner-log/zeus.md (ввод владельца, выбор в окне вопросов, ответ в чате — metis-0405, решение
+# владельца 01.11), тик — в owner-log/board.jsonl (галочка на карточке; текст вопроса тик берёт из отмеченной
+# карточки). Журналы личные — роли их не читают; эта команда отдаёт исполнителю только записи с номером его вопроса.
 CONSENT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 CONSENT_MAX = 1500
 # вопрос `pantheon reap --apply` об остальном своём (lib/culprits.py): «да» на него — метка <id>.reap со списком pid
@@ -49,14 +49,22 @@ CONSENT_REAP_Q = "Погасить процессы Пантеона"
 CONSENT_ANSWER = re.compile(r"^ответ:[ \t]*(.*)$", re.M)
 CONSENT_YES = re.compile(r"да(?![\w-])", re.I)
 CONSENT_NO = re.compile(r"(?<![\w-])(?:не|нет|no)(?![\w-])", re.I)
+# метка варианта перед его текстом (metis-0405, Б1 argus): одна буква или номер, затем тире, точка, скобка или
+# двоеточие — «А — Да, пушить», «1. Да», «б) Нет»; или в скобках — «(а) Да». Так пишет ответ хук owner-log для
+# вариантов-букв в чате (lib/answers.py, chat_record) и так модель подписывает варианты в окне вопросов и на карточке.
+# Слово «Да» меткой не бывает: после «Д» идёт «а», а не разделитель
+CONSENT_LABEL = re.compile(r"(?:\((?:[а-яёa-z]|\d{1,2})\)\s*[—–.:-]?|(?:[а-яёa-z]|\d{1,2})\s*[—–.):-])\s*", re.I)
 
 
 def consent_is_yes(body):
-    """Явное «да» владельца в записи ответа: строка «ответ: …» начинается словом «да» и в ней нет «не», «нет»
-    («Да — отправить», «Да, по consent» — да; «Нет», «Да, но не сегодня», «Другое» — нет)."""
+    """Явное «да» владельца в записи ответа: текст варианта в строке «ответ: …» — без его метки «А — », «1. », «(б) »
+    в начале — начинается словом «да», и в строке нет «не», «нет» («Да — отправить», «А — Да, пушить», «Да, по consent»
+    — да; «Нет», «Б — Нет», «А — Да, но не сегодня», «Другое», «А — Другое» — нет). Метка снимается одна."""
     m = CONSENT_ANSWER.search(body or "")
     ans = m.group(1).strip() if m else ""
-    return bool(CONSENT_YES.match(ans)) and not CONSENT_NO.search(ans)
+    lab = CONSENT_LABEL.match(ans)
+    text = ans[lab.end():] if lab else ans
+    return bool(CONSENT_YES.match(text)) and not CONSENT_NO.search(ans)
 
 
 def consent(rest):
@@ -87,10 +95,13 @@ def consent(rest):
         print(f"pantheon consent: журнал не читается ({e}) — ответ проверить нельзя", file=sys.stderr)
         return 3
     word = re.compile(r"(?<![\w-])" + re.escape(qid) + r"(?![\w-])", re.I)
-    # ответ — только выбор в окне вопросов (пометку «окно вопросов» ставит хук answer, ввод владельца её не получает)
-    # на вопрос, который начинается с [<id>]; id в свободном тексте, цитате или заметке к чужому вопросу — не ответ
+    # ответ — выбор в окне вопросов (пометка «окно вопросов», хук answer) или однозначный выбор варианта сообщением прямо
+    # после вопроса Зевса с вариантами (пометка «ответ в чате», хук owner-log; lib/answers.py). Пометки ставит хук, ввод
+    # владельца их не получает. Вопрос начинается с [<id>]; id в свободном тексте, цитате, заметке к чужому вопросу и в
+    # записи «ответ в чате не распознан» — не ответ
     own = re.compile(r"вопрос: \[" + re.escape(qid) + r"\]", re.I)
-    since, found, mentions = P.now() - days * 86400, [], 0
+    since, found, mentions, unclear = P.now() - days * 86400, [], 0, 0
+    A = P.answers_mod()
     heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
     for i, m in enumerate(heads):
         body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
@@ -100,10 +111,11 @@ def consent(rest):
             continue
         if t < since:
             continue
-        if m.group(2).strip() == "· окно вопросов" and own.match(body):
-            found.append((t, m.group(1) + " · окно вопросов у Зевса", body))
+        if A.is_answer_head(m.group(2)) and own.match(body):
+            found.append((t, m.group(1) + " " + m.group(2).strip() + " у Зевса", body))
         elif word.search(body):
             mentions += 1
+            unclear += m.group(2).strip() == "· " + A.CHAT_NONE_NOTE and bool(own.match(body))
     try:
         with open(P.path("owner-log", "board.jsonl"), encoding="utf-8") as fh:
             board_lines = fh.read().splitlines()
@@ -124,7 +136,7 @@ def consent(rest):
                 or not isinstance(a, str) or re.search(r"%%|<", q):
             continue
         found.append((t, rec["time"][:19].replace("T", " ") + " · доска, галочка на карточке (деньги, публикации, "
-                      "сообщения людям, удаление — не по галочке, только окном вопросов)",
+                      "сообщения людям, удаление — не по галочке, только окном вопросов или ответом в чате)",
                       f"вопрос: {q.strip()}\nответ: {a.strip()}"))
     found.sort(key=lambda x: x[0])
     said_yes = any(consent_is_yes(body) for _, _, body in found)
@@ -132,18 +144,21 @@ def consent(rest):
     reap_q = last_yes[1].split("\nответ:")[0]
     reap_q = reap_q if CONSENT_REAP_Q in reap_q else None
     found = [(head, body if len(body) <= CONSENT_MAX else body[:CONSENT_MAX] + "…") for _, head, body in found]
-    hint = (f"\nУпоминаний {qid} в словах владельца без окна вопросов: {mentions} — это не ответ; попроси Зевса "
-            f"переспросить окном вопросов «[{qid}] …»." if mentions else "")
+    hint = (f"\nУпоминаний {qid} в словах владельца, которые не ответ: {mentions} (ответ — выбор в окне вопросов или "
+            f"одного варианта сообщением сразу после вопроса «[{qid}] …» с вариантами"
+            + (f"; ответ в чате не распознан: {unclear}" if unclear else "")
+            + f"); попроси Зевса переспросить окном вопросов «[{qid}] …»." if mentions else "")
     if not found:
-        print(f"ответа владельца на {qid} в окне вопросов Зевса и на доске за {days:g} дн. нет{hint}")
+        print(f"ответа владельца на {qid} в окне вопросов, в чате Зевса и на доске за {days:g} дн. нет{hint}")
         return 1
     if hestia and not said_yes:
         print(f"Ответ на {qid} есть, но это не «да» — метки для окна нет; наружу не иди, отчёт Зевсу.")
         for t, body in found:
             print(f"\n## {t}\n{body}")
         return 1
-    if hestia and reap_q is not None and "окно вопросов" not in last_yes[0]:
-        print(f"«Да» на {qid} о гашении процессов — галочкой на доске, а не в окне вопросов: метки нет, отчёт Зевсу.")
+    if hestia and reap_q is not None and not last_yes[0].endswith(" у Зевса"):
+        print(f"«Да» на {qid} о гашении процессов — галочкой на доске, а не в окне вопросов или в чате: метки нет, "
+              "отчёт Зевсу.")
         return 1
     if hestia:
         # метка «владелец ответил «да»»: по ней guard пускает окно Гестии в push и запись в PR на 2 часа, только для

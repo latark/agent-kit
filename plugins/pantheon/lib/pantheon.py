@@ -89,7 +89,7 @@ hosts = "primary" идут только на главном Mac (primary_host).
                     в журнал — «текст задачи заменён (было N знаков…)»; неизвестный флаг и повтор флага, кроме --option, —
                     отказ, код 2
                     плановый проход (check --quiet): открытая задача без текста дольше часа — тревога; слово владельца с [id]
-                    (decisions.md, окно вопросов) дольше 30 мин без задачи — тревога один раз на id: связь — [id] в
+                    (decisions.md, окно вопросов, ответ в чате) дольше 30 мин без задачи — тревога один раз на id: связь — [id] в
                     тексте задачи до «## Журнал» (любой статус) или строка «не задача: [id] — причина» в decisions.md;
                     тревога называет до 12 новых id, остальные — следующим проходом; источник не прочитался — проход
                     пропущен; id в пометке — как в окне вопросов (бывает без дефиса). Пустые --option не варианты;
@@ -4909,10 +4909,10 @@ def owner_acts():
             text = fh.read()
     except OSError:
         text = ""
-    # как consent: пометку «окно вопросов» ставит хук answer, ответ — на вопрос, который начинается с [<id>]
+    # как consent: пометку «окно вопросов» или «ответ в чате» ставит хук, ответ — на вопрос, который начинается с [<id>]
     heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
     for i, m in enumerate(heads):
-        if m.group(2).strip() != "· окно вопросов":
+        if not answers_mod().is_answer_head(m.group(2)):
             continue
         body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
         q = re.match(r"вопрос: \[([^\]\s]{1,40})\]", body, re.I)
@@ -5123,6 +5123,21 @@ def tasks_mod():
         spec.loader.exec_module(_TASKS)
         _TASKS.set_root(PANTHEON)  # внутри ~/ai/pantheon — ввод-вывод без перехода по ссылкам
     return _TASKS
+
+
+_ANSWERS = None
+
+
+def answers_mod():
+    """lib/answers.py — какие записи owner-log считаются ответом владельца: окно вопросов и ответ в чате (metis-0405);
+    общий с хуком hooks/ctx.py."""
+    global _ANSWERS
+    if _ANSWERS is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pantheon_answers", os.path.join(LIB, "answers.py"))
+        _ANSWERS = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_ANSWERS)
+    return _ANSWERS
 
 
 BOARD = os.path.join(VIEW, "Доска")
@@ -5646,7 +5661,7 @@ def check_skills(paths=None, quiet=False):
 
 
 def _owner_answered(qid, since):
-    """Есть ли ответ владельца на вопрос по задаче qid позже since: выбор в окне вопросов (owner-log/zeus.md) или галочка на
+    """Есть ли ответ владельца на вопрос по задаче qid позже since: выбор в окне вопросов или в чате (owner-log/zeus.md) или галочка на
     доске (owner-log/board.jsonl) — те же признаки, что у `pantheon consent`. Журнал не читается — False."""
     try:
         with open(path("owner-log", "zeus.md"), encoding="utf-8") as fh:
@@ -5656,7 +5671,7 @@ def _owner_answered(qid, since):
     own = re.compile(r"вопрос: \[" + re.escape(qid) + r"\]", re.I)
     heads = list(re.finditer(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", text, re.M))
     for i, m in enumerate(heads):
-        if m.group(2).strip() != "· окно вопросов":
+        if not answers_mod().is_answer_head(m.group(2)):
             continue
         body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)].strip()
         try:

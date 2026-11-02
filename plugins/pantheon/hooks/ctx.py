@@ -11,6 +11,13 @@
                      Ввод во время хода агента Claude Code пишет вложением queued_command (origin.kind = human,
                      metis-0028): сверка — точный текст, время ±3 мин, каждое вложение засчитывается один раз;
                      поле события source не «user» (расписание, /loop, пробуждение) — не пишется вовсе.
+                     Ответ в чате (metis-0405, решение владельца 01.11): если прямо перед вашим набранным вводом
+                     (не подсказка Claude, не ввод посреди хода) последнее сообщение ассистента этой сессии — вопрос
+                     с [id] и вариантами, а ввод однозначно выбирает один вариант, следом пишется запись с пометкой
+                     «ответ в чате» (вопрос, ответ — вариант, вариант, дословно ваш текст); её consent и другие
+                     читатели журнала берут так же, как выбор в окне вопросов. Выбор или сам вопрос не однозначен
+                     — запись «ответ в чате не распознан» с причиной (это не ответ). Правила разбора — шапка
+                     lib/answers.py.
   ctx.py answer      PostToolUse AskUserQuestion: ваш выбор в окне вопросов → журнал с пометкой «окно вопросов»
                      (metis-0022; по ней согласие выдаёт `pantheon consent <id>`). Закрытое по простою
                      (afkTimeoutMs) и частичное (followUp) — не пишется; свой текст в окне — строка без статуса ответа.
@@ -923,7 +930,78 @@ def cmd_owner_log(ev):
             return 0
         t = iso_ts(entry.get("timestamp")) or t
     append_owner_line(name, t, prompt, note)
+    if entry.get("promptSource") in (None, "typed"):
+        # ответ в чате (metis-0405): только набранный ввод с клавиатуры — не подсказка Claude и не ввод посреди хода
+        chat_answer(name, t, tpath, entry, prompt, start)
     return 0
+
+
+# --- ответ в чате (metis-0405, решение владельца 01.11) ---------------------------------------------------------
+
+CHAT_WALK = 400  # шагов по цепочке parentUuid назад от вашего ввода до сообщения ассистента
+
+
+def answers_mod():
+    """lib/answers.py — разбор вопроса с [id] и вашего выбора, общий с pantheon (consent и другие читатели журнала)."""
+    import importlib.util
+    lib = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
+    spec = importlib.util.spec_from_file_location("pantheon_answers", os.path.join(lib, "answers.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def previous_assistant_text(tpath, entry, start):
+    """Текст сообщения ассистента прямо перед вашим вводом entry — по цепочке parentUuid этой же сессии (транскрипт
+    пишет сам Claude Code). Служебные записи между ними (итог хода, вложения хуков) пропускаются. Перед вводом другой
+    ввод (запись user: ваш, другой сессии, результат инструмента, прерывание), ваш ввод в очереди хода или ход,
+    кончившийся вызовом инструмента, — None: вопрос был не прямо перед ответом."""
+    by_uuid = {}
+    for d in entries(lines_since(tpath, start or 0)):
+        if isinstance(d, dict) and d.get("uuid") and not d.get("isSidechain"):
+            by_uuid[d["uuid"]] = d
+    cur, texts, msg_id = by_uuid.get(entry.get("parentUuid")), [], None
+    for _ in range(CHAT_WALK):
+        if cur is None:
+            break
+        kind = cur.get("type")
+        if kind == "assistant":
+            m = cur.get("message") or {}
+            if msg_id is not None and m.get("id") != msg_id:
+                break  # предыдущее сообщение ассистента — уже не то, что перед вашим вводом
+            blocks = m.get("content")
+            if isinstance(blocks, str):
+                blocks = [{"type": "text", "text": blocks}]
+            blocks = [b for b in blocks if isinstance(b, dict)] if isinstance(blocks, list) else []
+            if any(b.get("type") == "tool_use" for b in blocks):
+                if msg_id is None:
+                    return None  # ход кончился вызовом инструмента, а не текстом
+                break
+            got = [b["text"] for b in blocks if b.get("type") == "text" and isinstance(b.get("text"), str)]
+            if got:
+                texts = got + texts
+                msg_id = m.get("id") or ""
+        elif msg_id is not None:
+            break
+        elif kind == "user":
+            return None
+        elif kind == "attachment" and (cur.get("attachment") or {}).get("type") == "queued_command":
+            return None
+        cur = by_uuid.get(cur.get("parentUuid"))
+    return "\n".join(texts) if texts else None
+
+
+def chat_answer(name, t, tpath, entry, prompt, start):
+    """Ваш ввод сразу после вопроса ассистента с [id] и вариантами → запись «ответ в чате» (однозначный выбор одного
+    варианта) или «ответ в чате не распознан». Не вопрос — ничего. Сбой разбора — строка в журнал хуков, без записи."""
+    try:
+        text = previous_assistant_text(tpath, entry, start)
+        recs = answers_mod().chat_record(text, prompt) if text else []
+    except Exception as e:  # журнал ваших слов уже записан — разбор ответа его не роняет
+        hook_log("owner-log", "ответ в чате не разобран: %s: %s" % (type(e).__name__, e))
+        return
+    for note, body in recs:
+        append_owner_line(name, t, body, note)
 
 
 # --- штабу: новые тревоги и журналы (STATE-02) --------------------------------
