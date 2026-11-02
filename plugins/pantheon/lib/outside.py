@@ -137,9 +137,11 @@ env и той же командой засчитывается новому HEAD
 у него другая команда или env, нет списка упавших (старая запись, прерванный прогон), его коммита нет в клоне; дифф
 задевает файл вне карты или общий (FULL раннера), раннер, карту, bin/heavy, tests/_*.py любого плагина или
 .pantheon-verify; карта не читается или устарела (stale хоть один файл); упавших больше половины; выбор — весь набор;
-run-tests.py в HEAD не знает --only; сбой расчёта. Дозапуск зелёный и строки ok его вывода — ровно его файлы — запись
+run-tests.py в HEAD не знает --only; опоре больше RERUN_MAX_AGE (24 ч) или время не разобрать; сбой расчёта. Дозапуск зелёный и строки ok его вывода — ровно его файлы — запись
 tests на HEAD тем же путём append_tests с cmd = FULL_TESTS и полями rerun_of (id заявки опоры), files (прогнанные
 метки), map (sha256 affected-map.json HEAD). Шлюз guard её засчитывает как полный набор (merge_gate.py не менялся).
+Остаток: test_hash раннера читает файл тестов целиком, без предела размера (и по ссылке) — файл-гигант в плагине растит
+память прохода; ссылки и размеры файлов дозапуск не проверяет.
 Журналы: STATE/outside/runs/<ID>.log (вывод команды) и <ID>.json (итог), STATE/logs/outside.jsonl.
 """
 import contextlib
@@ -188,6 +190,7 @@ WORK_ORPHAN_AGE = 600               # с: копия серверов без з�
 STOP_WAIT = 20                      # с: `outside stop` ждёт итог по умолчанию
 RESIDENT_MAX = 3600                 # с: проход серверов живёт не дольше, потом его зовёт тик (новая версия кода)
 AUTO_TTL = 24 * 3600                # «принять» старше суток тесты сам не зовёт
+RERUN_MAX_AGE = 24 * 3600          # с: опора дозапуска (полный прогон) старше суток — весь набор (metis-0735)
 RESULT_TTL = 24 * 3600              # итоги <ID>.result.json и брошенные <ID>.stop в папках заявок — сутки
 WAIT_MAX = 590
 TAIL_LINES, TAIL_CHARS = 40, 4000
@@ -990,8 +993,11 @@ def tree_record(rid, d, window, qdir):
         if rec["sha"] == sha:
             res["note"] = f"запись tests на {sha[:12]} уже есть (прогон {src}) — без прогона"
         else:
+            # дозапуск-источник переносит и свои поля: запись на новом коммите остаётся дозапуском (metis-0735)
+            rr = ({k: rec[k] for k in ("rerun_of", "files", "map")}
+                  if all(k in rec for k in ("rerun_of", "files", "map")) else None)
             try:
-                append_tests(repos, sha, d, line, window, rid, by_tree=rec["sha"])
+                append_tests(repos, sha, d, line, window, rid, by_tree=rec["sha"], rerun=rr)
             except OSError:
                 return None
             res["note"] = (f"по дереву {tree[:12]}: зелёный полный набор на {rec['sha'][:12]} (прогон {src}) — "
@@ -1147,6 +1153,12 @@ def rerun_plan(d, sha, argv, line, repos):
     pid, psha, failed = prev["rid"], prev.get("sha"), prev.get("failed")
     if prev.get("code") == 0:
         return None, f"последний полный прогон ветки ({pid}) зелёный"
+    try:
+        age = time.time() - datetime.strptime(str(prev.get("time")), "%Y-%m-%dT%H:%M:%S%z").timestamp()
+    except ValueError:
+        age = None
+    if age is None or age > RERUN_MAX_AGE:
+        return None, f"полному прогону {pid} больше {RERUN_MAX_AGE // 3600} ч или время не разобрать — весь набор"
     if prev.get("cmd") != line or prev.get("env") != run_env(line):
         return None, f"у прошлого полного прогона {pid} другая команда или env"
     if not isinstance(failed, list) or not failed or not all(isinstance(x, str) for x in failed):
@@ -1187,7 +1199,9 @@ def rerun_plan(d, sha, argv, line, repos):
         return None, f"карту не прочесть: {e}"
     return {"rerun_of": pid, "prev": psha, "files": files, "map": mhash,
             "ancestor": git(d, "merge-base", "--is-ancestor", psha, sha) is not None,
-            "argv": argv[:2] + [argv[2] + " --only " + shlex.quote(",".join(files))]}, None
+            # хвост-комментарий строки (« # …») срезан: иначе --only попал бы в комментарий и sh гнал весь набор
+            "argv": argv[:2] + [re.sub(r"\s#.*\Z", "", argv[2], flags=re.S) + " --only "
+                                + shlex.quote(",".join(files))]}, None
 
 
 # --- итоги --------------------------------------------------------------------------------------------------------

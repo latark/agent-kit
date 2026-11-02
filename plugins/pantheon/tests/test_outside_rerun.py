@@ -19,6 +19,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import subprocess as _sp
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -222,6 +224,32 @@ with contextlib.redirect_stdout(out):
 check("status: строка дозапуска с файлами", f"дозапуск после красного полного набора {R1}" in out.getvalue(),
       out.getvalue())
 
+# --- 3б. Д1: перенос по дереву сохраняет поля дозапуска ----------------------------------------------------------
+C3B = git("commit-tree", f"{C3}^{{tree}}", "-p", C3, "-m", "c3b: то же дерево")
+git("reset", "-q", "--hard", C3B)
+n0 = ncalls()
+r3b = run()
+rec3b = tests_for(C3B)
+check("перенос по дереву: без прогона, запись на новом коммите — дозапуск (rerun_of, files, map)",
+      r3b.get("by_tree") == C3 and ncalls() == n0 and len(rec3b) == 1 and rec3b[0].get("rerun_of") == R1
+      and rec3b[0].get("files") == LABELS[:2] and rec3b[0].get("map") == MAPH and rec3b[0].get("by_tree") == C3,
+      (r3b, rec3b))
+
+# --- 3в. Б1: хвост-комментарий в строке проверки не прячет --only -------------------------------------------------
+C3C = commit({"plugins/kit/lib/c.txt": "good3c\n"}, "c3c: c правка")
+_cmd = O.command
+O.command = lambda d, kind, script=None: (lambda a: (a[0][:2] + [a[0][2] + " # коммент"], a[1]) if a[0] else a)(
+    _cmd(d, kind, script))
+n0 = ncalls()
+r3c = run()
+O.command = _cmd
+rec3c = tests_for(C3C)
+check("хвост « # коммент» в строке: ключ --only вне комментария, гонится только план, запись tests есть",
+      r3c.get("rerun_of") == R1 and r3c.get("code") == 0 and r3c.get("record") and ncalls() == n0 + 1
+      and "# коммент" not in last_cmd()[-1] and last_cmd()[-1].endswith(" --only kit/test_a.py,kit/test_b.py,kit/test_c.py")
+      and len(rec3c) == 1 and rec3c[0].get("rerun_of") == R1, (r3c, last_cmd(), rec3c))
+git("reset", "-q", "--hard", C3)
+
 # --- 4. вывод дозапуска не сошёлся со списком файлов — записи нет ---------------------------------------------------
 C4 = commit({"plugins/kit/lib/c.txt": "good3\n"}, "c4: c правка")
 _rf = O.run_failed
@@ -234,6 +262,51 @@ check("дозапуск зелёный, но строки ok — не ровно
 p4, why = plan()
 check("опора та же после зелёного дозапуска: R1, дифф от C1 — a, b, c",
       p4 and p4["rerun_of"] == R1 and p4["files"] == LABELS[:3] and p4["ancestor"] is True, (p4, why))
+
+# --- 4б. Д2: код 0, а итога run-tests в выводе нет — записи нет ---------------------------------------------------
+C4B = commit({"plugins/kit/lib/d.txt": "good5\n"}, "c4b: d правка")
+_rf = O.run_failed
+O.run_failed = lambda text: None
+r4b = run()
+O.run_failed = _rf
+check("дозапуск, код 0, вывод без итога (run_failed None): записи tests нет, причина",
+      r4b.get("rerun_of") == R1 and r4b.get("code") == 0 and not r4b.get("record") and "не сошёлся" in r4b.get("why", "")
+      and not tests_for(C4B), r4b)
+
+# --- 4в. Д3: команда изменила HEAD / дерево, или таймаут — строки в full.jsonl и записи нет ----------------------------
+_hs, _wp = O.head_state, O.wait_proc
+FLAG = []
+
+
+def fake_wait(proc, timeout, tick=None):
+    FLAG.append(1)
+    if FAKE_MODE[0] == "timeout":
+        raise _sp.TimeoutExpired("x", 1)
+    return _wp(proc, timeout, tick)
+
+
+def fake_head(d):
+    s, c = _hs(d)
+    if not FLAG:
+        return s, c
+    return {"sha": ("0" * 40, c), "dirty": (s, False)}.get(FAKE_MODE[0], (s, c))
+
+
+FAKE_MODE = ["sha"]
+for mode in ("sha", "dirty", "timeout"):
+    git("reset", "-q", "--hard", C4B)
+    C4X = commit({"plugins/kit/lib/e.txt": f"good-{mode}\n"}, f"c4x: {mode}")
+    FLAG.clear()
+    FAKE_MODE[0] = mode
+    O.wait_proc = fake_wait
+    O.head_state = fake_head
+    nfull = len(full_log())
+    rx = run()
+    O.head_state, O.wait_proc = _hs, _wp
+    check(f"{mode}: в full.jsonl строки нет, записи tests нет", len(full_log()) == nfull and not tests_for(C4X)
+          and not rx.get("record"), (rx, len(full_log()), nfull))
+    check(f"{mode}: причина в итоге", ("дольше" if mode == "timeout" else "изменила HEAD") in rx.get("why", ""), rx)
+git("reset", "-q", "--hard", C4)
 
 # --- 5. весь набор вместо дозапуска: каждое условие ----------------------------------------------------------------
 
@@ -291,6 +364,16 @@ pr = with_prev("последняя строка ветки — дозапуск 
                rerun_of="x", failed=LABELS[1:2], sha=C4)
 check("опора не дозапуск: rerun_of R1, дифф от C1 (a, b, c)", pr and pr["rerun_of"] == R1 and pr["files"] == LABELS[:3],
       pr)
+
+pO = with_prev("строка другого репозитория на той же ветке опорой не становится", None, rid="inj-other",
+               repo=["latark/other"], failed=LABELS[3:], sha=C4)
+check("опора — R1, а не строка чужого repo", pO and pO["rerun_of"] == R1 and pO["files"] == LABELS[:3], pO)
+STAMP = "%Y-%m-%dT%H:%M:%S%z"
+with_prev("опоре больше суток", "больше 24 ч", rid="inj-old", failed=LABELS[3:], sha=C4,
+          time=time.strftime(STAMP, time.localtime(time.time() - 25 * 3600)))
+with_prev("время опоры не разобрать", "время не разобрать", rid="inj-bad", failed=LABELS[3:], sha=C4, time="вчера")
+with_prev("опоре 23 часа — дозапуск", None, rid="inj-fresh", failed=LABELS[3:], sha=C4,
+          time=time.strftime(STAMP, time.localtime(time.time() - 23 * 3600)))
 
 git("checkout", "-q", "--detach")
 p, why = plan()

@@ -436,6 +436,9 @@ def review_cmd(rest):
                 who += f" {str(by.get('agent_id') or '—')[:8]}/{str(by.get('session_id') or '—')[:8]}"
             print(f"{r.get('time', '?')}  {r.get('kind', '?'):<6}  {','.join(map(str, r['repo']))}{pr}  "
                   f"{str(r.get('sha', ''))[:12]}  {who}")
+            if r.get("kind") == "tests" and r.get("rerun_of"):
+                nf = len(r["files"]) if isinstance(r.get("files"), list) else 0
+                print(f"    дозапуск от {r['rerun_of']}, файлов {nf}")
             cl = r.get("checklist") if isinstance(r.get("checklist"), dict) else {}
             if r.get("kind") == "accept" and not all(isinstance(cl.get(k), str) and cl[k].strip()
                                                      for k in REVIEW_CHECKLIST):
