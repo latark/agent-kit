@@ -282,7 +282,11 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
                             "number,headRefName,headRefOid,body,files"], env, timeout=min(90, left()))
             if isinstance(o, list):
                 opened[repo] = sorted({i for p in o if isinstance(p, dict) for i in find_ids(p.get("headRefName"), p.get("body"))})
+                # branch и files — сверке пересечения `pantheon task overlap` (metis-0665), когда gh в окне не отвечает
                 open_prs[repo] = [{"number": p.get("number"), "head": str(p.get("headRefOid") or "")[:40],
+                                   "branch": str(p.get("headRefName") or "")[:200],
+                                   "files": [f.get("path") for f in p.get("files") or []
+                                             if isinstance(f, dict) and isinstance(f.get("path"), str)],
                                    "ids": find_ids(p.get("headRefName"), p.get("body")),
                                    "closes": closing_ids(p.get("headRefName"), p.get("body")),
                                    "part": is_part(p.get("body")),
