@@ -5279,36 +5279,119 @@ def board_registry(T):
     return projects, marks, T.project_registry(dirs)
 
 
+BOARD_BUDGET = float(os.environ.get("PANTHEON_BOARD_BUDGET") or 45)  # с на проход доски; предел задания — 60 (metis-0709)
+BOARD_NOTIFY_WAIT = 20.0  # с ждать блокировку notify: занята дольше — проход идёт без уведомлений, а не до таймаута
+BOARD_AUTO_MIN = 8.0  # с: осталось меньше — сводку board-auto.md этого прохода пропускаем, соберёт следующий
+
+
+class BoardClock:
+    """Время частей прохода доски (metis-0709): одна строка «доска-время: …» в журнале задания. Бюджет — сколько секунд
+    у прохода до предела задания: необязательное (ожидание блокировки, сводка) не берётся, если бюджет вышел."""
+
+    def __init__(self, budget):
+        self.t0, self.budget, self.parts, self.skipped, self.cur = time.monotonic(), budget, [], [], None
+
+    def left(self):
+        return self.budget - (time.monotonic() - self.t0)
+
+    @contextlib.contextmanager
+    def phase(self, name):
+        t = time.monotonic()
+        try:
+            yield
+        except BaseException:
+            self.cur = name  # прервали (SIGTERM, сбой) — строка назовёт часть
+            raise
+        finally:
+            self.parts.append((name, time.monotonic() - t))
+
+    def line(self):
+        out = " · ".join(f"{n} {d:.1f}" for n, d in self.parts)
+        if self.cur:
+            out += f" · прервано в «{self.cur}»"
+        if self.skipped:
+            out += " · пропущено: " + ", ".join(self.skipped)
+        return f"доска-время: {out} · итого {time.monotonic() - self.t0:.1f} с"
+
+
+@contextlib.contextmanager
+def lock_wait(name, wait):
+    """lock(name) с ожиданием не дольше wait секунд: не взяли — False, без зависания."""
+    end = time.monotonic() + wait
+    while True:
+        with lock(name, block=False) as got:
+            if got:
+                yield True
+                return
+        if time.monotonic() >= end:
+            yield False
+            return
+        time.sleep(0.2)
+
+
 def board():
-    """Доска владельца: ходы → задачи и журнал владельца, карточки ← задачи. Только на этом Mac, под блокировкой."""
+    """Доска владельца: ходы → задачи и журнал владельца, карточки ← задачи. Только на этом Mac, под блокировкой.
+    Время частей — одной строкой в вывод; бюджет BOARD_BUDGET, SIGTERM (таймаут задания) не теряет строку (metis-0709)."""
+    clock = BoardClock(BOARD_BUDGET)
+    def on_term(*_):
+        raise SystemExit(143)
+    try:
+        old = signal.signal(signal.SIGTERM, on_term)
+    except ValueError:  # не главный поток
+        old = None
+    try:
+        return _board(clock)
+    finally:
+        if old is not None:
+            signal.signal(signal.SIGTERM, old)
+        print(clock.line())
+
+
+def _board(clock):
     T = tasks_mod()
     sched = load_schedule()
     primary = not sched.get("primary_host") or sched.get("primary_host") == host()
     with lock("board", block=False) as got:
         if not got:
             return 0
-        projects, marks, registry = board_registry(T)
-        status_lines = board_status_sync(T) if primary else []
+        with clock.phase("реестр"):
+            projects, marks, registry = board_registry(T)
+        with clock.phase("статусы"):
+            status_lines = board_status_sync(T) if primary else []
         # политика уведомлений — под своей блокировкой на весь проход: сбои из run-job ждут, а не теряются
-        with lock("notify"):
-            pol = notify_policy(sched)
+        with clock.phase("замок-notify"):
+            nl = lock_wait("notify", min(BOARD_NOTIFY_WAIT, max(clock.left(), 0)))
+            held = nl.__enter__()
+        try:
+            if not held:
+                clock.skipped.append("уведомления (замок notify занят)")
+            pol = notify_policy(sched) if held else None
             night_end = "08:00"
             with contextlib.suppress(Exception):
                 night_end = night_mod().config()[1]["end"]
-            lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
-                                 night_end=night_end, open_prs=autoclose_mod().open_pr_tasks(path("autoclose.json")),
-                                 alert=lambda k, v, text, who="board", note=None: alert_once(k, v, text, who, note,
-                                                                                            policy=pol),
-                                 primary=primary, projects=projects, policy=pol, marks=marks, registry=registry,
-                                 **board_links())
-            pol.save()
-        once_dir = path("once")  # отметки «уже сообщали» старше 90 дней — убрать: папка не растёт без конца
-        for f in os.listdir(once_dir) if os.path.isdir(once_dir) else []:
-            fp = os.path.join(once_dir, f)
-            if now() - os.path.getmtime(fp) > 90 * 86400:
-                os.remove(fp)
+            with clock.phase("карточки"):
+                lines = T.board_sync(PANTHEON, BOARD, path("board.json"), path("owner-log", "board.jsonl"), now(),
+                                     night_end=night_end, open_prs=autoclose_mod().open_pr_tasks(path("autoclose.json")),
+                                     alert=lambda k, v, text, who="board", note=None: alert_once(
+                                         k, v, text, who, note if held else None, policy=pol),
+                                     primary=primary, projects=projects, policy=pol, marks=marks, registry=registry,
+                                     **board_links())
+            if pol is not None:
+                pol.save()
+        finally:
+            nl.__exit__(None, None, None)
+        with clock.phase("очистка"):
+            once_dir = path("once")  # отметки «уже сообщали» старше 90 дней — убрать: папка не растёт без конца
+            for f in os.listdir(once_dir) if os.path.isdir(once_dir) else []:
+                fp = os.path.join(once_dir, f)
+                if now() - os.path.getmtime(fp) > 90 * 86400:
+                    os.remove(fp)
         if primary:
-            board_auto_sync(T)
+            if clock.left() < BOARD_AUTO_MIN:
+                clock.skipped.append("сводка board-auto (бюджет)")
+            else:
+                with clock.phase("сводка"):
+                    board_auto_sync(T)
     for ln in status_lines + lines:
         print(ln)
     if primary and os.environ.get("PANTHEON_METRICS") != "0":
