@@ -182,7 +182,7 @@ SERVER_MEM_MB = 4096                # и у каждого лимит 4 ГБ (в
 SERVE_MIN, SERVE_MAX = 30, 120      # срок сервера, минуты
 TEST_TIMEOUT = 7200                 # с
 IDLE_TIMEOUT = 900                  # с: лог прогона не растёт, а дерево процессов почти не тратит CPU — завис, гасим (metis-0770)
-IDLE_CPU = 0.05                     # доля одного ядра: меньше за окно тишины — «почти не тратит»
+IDLE_CPU = 0.01                     # доля ядра: прирост user+sys дерева за окно меньше этого — «почти не тратит»
 INSTALL_TIMEOUT = 900               # с: установка зависимостей копии сервера
 READY_SEC = 90                      # сервер должен открыть порт за это время
 KILL_WAIT = 5
@@ -885,12 +885,14 @@ def wait_proc(proc, timeout, tick=None, idle_log=None):
     """proc.wait(timeout), а каждые SWEEP_EVERY с — tick(): у прохода серверов это сторож (sweep_quiet) и проверка
     «стопа» своей заявки — tick() вернул True — группа гаснет, ждём её конца (metis-0606, 0614). Тесты идут в своём
     проходе и серверы не смотрят. TimeoutExpired — как у proc.wait.
-    idle_log — сторож тишины (metis-0770): файл не растёт IDLE_TIMEOUT с и CPU дерева за это окно меньше IDLE_CPU
-    (CPU не узнать — судим по тишине) → SIGKILL группе и её потомкам, исключение Silent."""
+    idle_log — сторож тишины (metis-0770): файл не растёт IDLE_TIMEOUT с И прирост CPU-времени дерева (user+sys по ps)
+    за окно меньше IDLE_CPU от окна → SIGKILL группе и её потомкам, исключение Silent. Считающий без вывода (под
+    нагрузкой «0 % CPU» по ps — не зависание) не гасится; CPU не узнать — не гасим, предупреждение в журнал."""
     deadline = time.monotonic() + timeout
     step = min(SWEEP_EVERY, max(0.1, IDLE_TIMEOUT / 4)) if idle_log else SWEEP_EVERY
     size, grew = None, time.monotonic()
     base = None                      # (время, CPU дерева) на первом тихом шаге после роста лога
+    warned = False
     while True:
         try:
             return proc.wait(timeout=max(0.01, min(step, deadline - time.monotonic())))
@@ -908,19 +910,28 @@ def wait_proc(proc, timeout, tick=None, idle_log=None):
                 cur_size = size
             if cur_size != size:
                 size, grew, base = cur_size, now, None
-            elif now - grew >= IDLE_TIMEOUT:
+            elif base is None or base[1] is None:
+                base = (now, tree_cpu(proc.pid))
+                if base[1] is None and now - grew >= IDLE_TIMEOUT and not warned:
+                    warned = True    # CPU не узнать — не гасим, только предупреждение (раз за прогон)
+                    log_event(kind="test-silent-nocpu", log=idle_log,
+                              why=f"лог молчит {round(now - grew)} с, CPU дерева не узнать (ps) — не гашу")
+            elif now - grew >= IDLE_TIMEOUT and now - base[0] >= IDLE_TIMEOUT / 2:
                 cpu = tree_cpu(proc.pid)
-                if base is None or cpu is None or base[1] is None or (
-                        now - base[0] >= IDLE_TIMEOUT / 2 and (cpu - base[1]) / (now - base[0]) < IDLE_CPU):
+                if cpu is None:      # CPU не узнать — не гасим, только предупреждение (раз за прогон)
+                    if not warned:
+                        warned = True
+                        log_event(kind="test-silent-nocpu", log=idle_log,
+                                  why=f"лог молчит {round(now - grew)} с, CPU дерева не узнать (ps) — не гашу")
+                elif (cpu - base[1]) < IDLE_CPU * (now - base[0]):
                     last = last_line(idle_log)
                     extra = strays(proc.pid)
                     _signal(proc.pid, extra, signal.SIGKILL)
                     kill_group(proc.pid)
                     proc.wait()
                     raise Silent(now - grew, last)
-                base = (now, cpu)    # дерево работает без вывода — окно CPU заново
-            elif base is None:
-                base = (now, tree_cpu(proc.pid))
+                else:
+                    base = (now, cpu)   # дерево считает без вывода (load высокий — не зависание): окно заново
 
 
 _SWEEP_ERR = []

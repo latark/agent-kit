@@ -5,7 +5,7 @@
 Временный репозиторий, sandbox-exec подменён заглушкой, IDLE_TIMEOUT — 2 с. Проверяет: молчащий `sleep` гасится
 SIGKILL по тишине (state=failed, why «тишина … последний вывод: …», причина и в логе прогона, и в outside.jsonl,
 процесса нет); процесс, пишущий строку раз в 0,5 с, не гасится (его останавливает только общий TEST_TIMEOUT);
-молчащий, но тратящий CPU — не гасится; CPU не узнать (ps пуст) — судим по тишине; разбор времени ps.
+молчащий, но считающий (busy loop без вывода) — не гасится; CPU не узнать (ps пуст) — не гасим, предупреждение в журнал; разбор времени ps.
 """
 import atexit
 import json
@@ -117,10 +117,13 @@ check("молчит, но жжёт CPU — не гасится по тишине
 
 _ps = O.ps_table
 O.ps_table = lambda: {}
-res, dt = run("echo nops; " + SPIN, timeout=8)
+res, dt = run("echo nops; sleep 31338", timeout=7)
 O.ps_table = _ps
-check("ps недоступен, CPU не узнать — суд по тишине лога",
-      res.get("state") == "failed" and "тишина" in res.get("why", "") and "nops" in res["why"], res)
+check("ps недоступен, CPU не узнать — не гасим, только предупреждение в журнале",
+      res.get("state") == "done" and "дольше" in res.get("why", "") and "тишина" not in res.get("why", "")
+      and any(e.get("kind") == "test-silent-nocpu" for e in events()), (res, events()))
+check("tree_cpu узнаёт время процессов дерева (иначе тест «считает» ничего не доказывает)",
+      O.tree_cpu(os.getpgid(0)) is not None)
 
 check("разбор времени ps", O._cpu_secs("1:02.50") == 62.5 and O._cpu_secs("1:00:00") == 3600
       and O._cpu_secs("1-00:00:01") == 86401 and O._cpu_secs("x") is None)
