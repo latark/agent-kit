@@ -957,8 +957,10 @@ check("deferred субагента (agent_id) → ничего, отметка �
 r = run("deferred", dict(ms, hook_event_name="PostToolUse", tool_name="Read"), PANTHEON_CTX_OFF="1")
 check("deferred при PANTHEON_CTX_OFF=1 → ничего, отметка цела",
       r.stdout.strip() == "" and os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
-r = run("deferred", dict(ms, hook_event_name="PostToolUse", tool_name="Read"))
-check("deferred основной сессии после границы → файл передачи дел (PostToolUse), отметка снята",
+r = run("deferred", {k: v for k, v in dict(ms, hook_event_name="PostToolUse", tool_name="Read").items()
+                     if k != "transcript_path"})
+check("deferred основной сессии после границы (транскрипт — из отметки, в событии его нет) → файл передачи дел "
+      "(PostToolUse), отметка снята",
       "СЛИВА" in ctx_text(r) and json.loads(r.stdout)["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
       and not os.path.exists(defer_mark("s-ms")), r.stdout + r.stderr)
 r = run("deferred", dict(ms, hook_event_name="PostToolUse", tool_name="Read"))
