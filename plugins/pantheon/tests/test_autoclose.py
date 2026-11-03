@@ -438,7 +438,7 @@ def test_batch_needs_mode():
         r = pan(env, T0, "task", "set", tid, "--batch", "ночь · 3")
         check("task set --batch, когда mode уже в шапке — принят", r.returncode == 0, r.stderr)
         y, py, _ = new(env, home, T0, "demo", "Ещё")
-        s, ps, _ = new(env, home, T0, "demo", "Пачка", "--type", "story")
+        s, ps, _ = new(env, home, T0, "demo", "Пачка", "--type", "story", "--done-when", "пункт")
         r = pan(env, T0, "task", "attach", y, s)
         check("task attach задачи без mode — отказ", r.returncode != 0 and "mode" in r.stderr and "parent" not in text(py), r.stderr)
         pan(env, T0, "task", "set", y, "mode=parallel")
@@ -466,7 +466,7 @@ def run_check(env, t):
 def test_check():
     tmp, home, state, gh, env = make()
     try:
-        s, ps, _ = new(env, home, T0, "demo", "Пачка", "--type", "story", "--night", day(T0 - 3 * 86400))
+        s, ps, _ = new(env, home, T0, "demo", "Пачка", "--type", "story", "--done-when", "пункт", "--night", day(T0 - 3 * 86400))
         # 1. задача пачки без mode — ошибка с id
         put(home, "demo", "demo-0101", status="todo", parent=s)
         r = run_check(env, T0)

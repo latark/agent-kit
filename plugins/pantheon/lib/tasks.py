@@ -714,9 +714,10 @@ def check_source(pantheon, tid, source):
             raise ValueError(f"source {source}: нет такой задачи")
 
 
-def task_new(pantheon, t, direction, title, project=None, actor="агент", text=None, kind="task", done_when=None, created_note=None, **fields):
+def task_new(pantheon, t, direction, title, project=None, actor="агент", text=None, kind="task", done_when=None, created_note=None, need_story_criteria=False, **fields):
     """kind — task или story (пачка, metis-0069). done_when — пункты «Готово, когда» (metis-0502): критерии пишет автор при
-    создании; раздел есть всегда, без пунктов — с подсказкой."""
+    создании; раздел есть всегда, без пунктов — с подсказкой. need_story_criteria (CLI `task new`, metis-0766): story без
+    проверяемого пункта — отказ, заглушка DONE_WHEN_HINT пачку не закроет."""
     if kind not in WORK_TYPES:
         raise ValueError(f"тип {kind!r} — только {', '.join(WORK_TYPES)}")
     if not DIRECTION_RE.fullmatch(str(direction)):
@@ -729,6 +730,11 @@ def task_new(pantheon, t, direction, title, project=None, actor="агент", te
         check_source(pantheon, None, fields["source"])
     if done_when and (done_criteria(escape_desc(text)) or DONE_WHEN_HEAD in escape_desc(text).split("\n")):
         raise ValueError("в тексте уже есть «Готово, когда» с пунктами — пишите их либо там, либо в --done-when, не в обоих местах")
+    if need_story_criteria and kind == "story" and not (
+            [x for x in (done_when or []) if str(x).strip()]
+            or [x for _, x in done_criteria(escape_desc(text)) if x != DONE_WHEN_HINT]):
+        raise ValueError("у пачки (story) нет проверяемых пунктов «Готово, когда»: добавьте --done-when \"пункт\" "
+                         "(повторяемый) или раздел «## Готово, когда» с «- [ ] пункт» в --body; заглушка пачку не закроет (metis-0766)")
     project = resolve_project(pantheon, direction, project)  # metis-0323: только имя проекта из directions.toml
     tid = new_id(pantheon, direction)
     path = _file_for(pantheon, direction, tid)

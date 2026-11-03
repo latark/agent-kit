@@ -333,7 +333,8 @@ def task_cmd(rest):
                 print(f"pantheon task new: --type {opt('--type')} — только {' или '.join(T.WORK_TYPES)}", file=sys.stderr)
                 return 2
             tid, p = T.task_new(P.PANTHEON, P.now(), opt("--direction"), opt("--title"), project=opt("--project"),
-                                text=body_text, kind=opt("--type") or "task", done_when=opt("--done-when", True) or None, **fields)
+                                text=body_text, kind=opt("--type") or "task", done_when=opt("--done-when", True) or None,
+                                need_story_criteria=True, **fields)
             print(f"{tid} {os.path.relpath(p, P.PANTHEON)}")
             task_new_notify(T, tid, opt("--direction"), opt("--title"), body_text)
             for w in T.option_warns(fields):
