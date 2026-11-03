@@ -143,7 +143,7 @@ def main():
 
     # --- окна ---------------------------------------------------------------------------------------------------------
     want = {
-        "hq": (hq, ["prometheus", "clio", "chiron", "momus", "palamedes", "Explore"],
+        "hq": (hq, ["prometheus", "clio", "chiron", "momus", "palamedes", "charon", "Explore"],
                ["hephaestus-shop", "apollo-shop", "hephaestus-docs"] + MAIN + ["hestia"]),
         "athena-shop": (ab, ["hephaestus-shop", "apollo-shop"] + COORD,
                         ["chiron", "hestia"] + MAIN + ["hephaestus-docs"]),
