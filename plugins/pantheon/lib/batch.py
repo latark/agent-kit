@@ -40,32 +40,47 @@ def _story(sid):
 ID_IN = re.compile(r"(?<![\w-])[a-z][a-z0-9]{1,11}-\d{3,}(?![\w])")  # номер задачи, как ID_RE в autoclose.py
 
 
+PART_ID = re.compile(r"(?<!\w)часть\s+(" + ID_IN.pattern + ")", re.I)
+# слово «часть» в теле PR autoclose читает как «PR делает часть» и не закрывает НИ ОДНОЙ его задачи (PART_RE): в тело
+# оно не должно попасть ни из заголовка задачи, ни из нашего текста
+PART_WORD = re.compile(r"(?<!\w)часть(?!\w)", re.I)
+
+
 def branch_ids(cwd):
-    """Номера задач в коммитах ветки от origin/main: сообщения (и «Merge branch '<id>-…'»). None — git не ответил."""
+    """(номера задач в коммитах ветки от origin/main — сообщения и «Merge branch '<id>-…'»; номера, которые хоть один
+    коммит называет «часть <id>» — задача сделана не вся, Closes ей не ставим). None — git не ответил."""
     r = _git(["log", "--format=%B", "origin/" + BASE + "..HEAD"], cwd)
     if r.returncode != 0:
         return None
-    return set(ID_IN.findall(r.stdout))
+    return set(ID_IN.findall(r.stdout)), set(PART_ID.findall(r.stdout))
 
 
-def batch_body(sid, tasks, done_ids):
+def _plain(text):
+    return PART_WORD.sub("ч.", text)
+
+
+def batch_body(sid, tasks, done_ids, part_ids=()):
     """(заголовок, тело PR пачки): задачи по порядку пачки; Closes — открытым задачам (не story) с номером в коммитах
-    ветки (done_ids), прочие открытые — «не вошли», без Closes."""
+    ветки (done_ids), кроме названных в коммите «часть <id>» (part_ids) — они «частично»; прочие открытые — «не
+    вошли». Ни те, ни другие Closes не получают."""
     T = P.tasks_mod()
     head = tasks[sid][1]
     ids = [i for i in T.story_order(sid, tasks) if tasks[i][1].get("type") != "story"]
     opened = [i for i in ids if tasks[i][1].get("status") not in ("done", "dropped")]
-    shut = [i for i in opened if i in done_ids]
-    out = [i for i in opened if i not in done_ids]
-    lines = [f"Пачка {sid}: {T.one_line(head.get('title'))}", "", "Задачи пачки:"]
+    half = [i for i in opened if i in part_ids]
+    shut = [i for i in opened if i in done_ids and i not in half]
+    out = [i for i in opened if i not in done_ids and i not in half]
+    lines = [f"Пачка {sid}: {_plain(T.one_line(head.get('title')))}", "", "Задачи пачки:"]
     for i in ids:
         h = tasks[i][1]
-        mark = "в ветке" if i in shut else "не вошла" if i in out else h.get("status") or "?"
-        lines.append(f"- {i} · {mark} · {T.one_line(h.get('title'))}")
+        mark = "в ветке" if i in shut else "частично" if i in half else "не вошла" if i in out else h.get("status") or "?"
+        lines.append(f"- {i} · {mark} · {_plain(T.one_line(h.get('title')))}")
     if not ids:
         lines.append("- (задач нет)")
     if out:
         lines += ["", "Не вошли в ветку (коммитов с их номером нет), после слияния остаются открытыми: " + "; ".join(out)]
+    if half:
+        lines += ["", "Сделаны не целиком (коммит называет их неполными), после слияния остаются открытыми: " + "; ".join(half)]
     if shut:
         lines += ["", "Closes " + ", ".join(shut)]
     return f"Пачка {sid}: {T.one_line(head.get('title'))}"[:200], "\n".join(lines) + "\n"
@@ -108,11 +123,11 @@ def _pr(sid, tasks, cwd, dry):
     if cur.returncode != 0 or cur.stdout.strip() != br:
         print(f"pantheon batch pr: запускай из копии ветки {br} (сейчас: {cur.stdout.strip() or '?'})", file=sys.stderr)
         return 2
-    done_ids = branch_ids(cwd)
-    if done_ids is None:
+    found = branch_ids(cwd)
+    if found is None:
         print(f"pantheon batch pr: git log origin/{BASE}..HEAD не прошёл — Closes не из чего собрать", file=sys.stderr)
         return 1
-    title, body = batch_body(sid, tasks, done_ids)
+    title, body = batch_body(sid, tasks, *found)
     if dry:
         print(title + "\n\n" + body, end="")
         return 0
