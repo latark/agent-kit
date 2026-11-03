@@ -53,6 +53,11 @@ def unit():
           and T.criteria_count(f"## Готово, когда\n\n- [ ] {T.DONE_WHEN_HINT}\n") == "не заданы"
           and T.criteria_count("текст") is None,
           T.criteria_count("Готово, когда:\n- [x] а\n- [ ] б\n- [X] в\n"))
+    dbl = T.DONE_WHEN_HINT.replace(" ", "  ", 1)
+    check("metis-0711: заглушка с двойным пробелом — «не заданы», _is_stub один для всех",
+          T.criteria_count(f"## Готово, когда\n\n- [ ] {dbl}\n") == "не заданы" and T._is_stub(f" {dbl} ")
+          and not T._is_stub("другое") and T.unchecked_criteria({"created": "2026-10-27"}, f"## Готово, когда\n\n- [ ] {dbl}\n") == 0,
+          T.criteria_count(f"## Готово, когда\n\n- [ ] {dbl}\n"))
     # «Откуда», «Из чего», «Что вышло»
     tasks = {"metis-0001": ("", H("metis-0001"), ""),
              "metis-0002": ("", H("metis-0002", **{"from": "остаток", "source": "metis-0001"}), ""),
