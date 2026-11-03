@@ -3463,6 +3463,12 @@ def test_skip_not_failure_other_paths_0708():
           f"0708: разовый запуск после пропуска погашен: {rec}")
     check("не вышел" not in e.sent() and f"oneshot-{oid}" not in e.queued(),
           f"0708: уведомление «не вышел» о пропуске: {e.sent()!r} {e.queued()}")
+    # тот же пропуск ещё два прохода подряд — тревога «ждёт: пропуск» не повторяется (одна строка, а не строка на проход)
+    for dt in (690, 705):
+        e.run("watch", t=T0 + dt, extra=_next_agents(e, held))
+    n_wait = e.alerts().count(f"разовый запуск {oid} ждёт: пропуск")
+    check(n_wait == 1 and not _resumed(e, "5ee70010-1") and not _oneshot_rec(e, oid).get("done_at"),
+          f"0708: тревога «разовый запуск … ждёт: пропуск» {n_wait} раз за 3 прохода: {e.alerts()} {_oneshot_rec(e, oid)}")
     e.run("watch", t=T0 + 720)                                 # окно свободно — запись исполняется
     check(_resumed(e, "5ee70010-1") and _oneshot_rec(e, oid).get("done_at"),
           f"0708: разовый запуск после пропуска не пошёл: {e.calls()} {_oneshot_rec(e, oid)}")

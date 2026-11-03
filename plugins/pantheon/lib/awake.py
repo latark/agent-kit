@@ -12,8 +12,9 @@
       сессия Пантеона стоит «rate limited · resets <время>»: после сброса + 10 мин — один `claude respawn` с толчком;
       перед ним шлюз запуска ночного модуля (night.gate("respawn")).
   возобновление ждущих сессий
-      сессия направления «ждёт вас», а в его очереди есть задача todo без блокера — разбудить (night.gate("wake")),
-      не чаще раза в час на сессию.
+      сессия направления «ждёт вас», а в его очереди есть задача todo без блокера и не на другой сессии (owner —
+      направление, его команда или пусто, как у самозапуска) — разбудить (night.gate("wake")), не чаще раза в час на
+      сессию.
   поручения во входящих (metis-0276)
       координатор закончил ход (done, без субагентов и фоновых команд) или его сессии нет, а в inbox/ направления —
       поручение Зевса, написанное после конца его последнего хода и по вашему слову Зевсу (запись в owner-log/zeus.md
@@ -467,15 +468,19 @@ def owner_blockers(direction):
 
 def free_task(direction, t):
     """Первая задача направления, которую можно взять: todo, без чужой аренды и незакрытых depends_on (tasks.ready), без
-    waiting_on, не названная блокером в STATUS.md. Допущение: «трогает файлы ждущего PR» выражается waiting_on/depends_on."""
+    waiting_on, не названная блокером в STATUS.md и не на другой сессии (owner — не координатор и не его команда,
+    watch.owner_elsewhere, как у самозапуска, metis-0564). Допущение: «трогает файлы ждущего PR» выражается
+    waiting_on/depends_on. metis-0708: 02.11 21:23 ждущее окно metis-pantheon подняли с «возьми metis-0272», а её вела
+    agent-kit-47 — окно верно отказалось и встало без работы."""
     try:
         T = P.tasks_mod()
         ready = T.ready(P.PANTHEON, t, direction=direction)
+        elsewhere = P.watch_mod().owner_elsewhere
     except Exception:  # noqa: BLE001
         return None
     blocked = owner_blockers(direction)
     for tid, head in ready:
-        if tid in blocked or head.get("waiting_on"):
+        if tid in blocked or head.get("waiting_on") or elsewhere(head, direction):
             continue
         return tid
     return None
