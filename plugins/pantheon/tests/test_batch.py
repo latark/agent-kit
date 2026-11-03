@@ -72,11 +72,22 @@ git(repo, "remote", "add", "origin", origin)
 git(repo, "push", "-q", "origin", "main")
 main_sha = git(repo, "rev-parse", "HEAD")
 
-# поддельный gh: пишет argv построчно (NUL-разделитель) в файл
+# поддельный gh: каждый вызов — строка аргументов через NUL в gh.log; `pr list` отдаёт номер из open_pr (если есть)
 ghlog = os.path.join(tmp, "gh.log")
+openpr = os.path.join(tmp, "open_pr")
 open(os.path.join(bindir, "gh"), "w").write(
-    f"#!/bin/sh\nfor a in \"$@\"; do printf '%s\\0' \"$a\"; done > '{ghlog}'\necho https://github.com/x/y/pull/9\n")
+    "#!/bin/sh\n"
+    f"for a in \"$@\"; do printf '%s\\0' \"$a\"; done >> '{ghlog}'; printf '\\001' >> '{ghlog}'\n"
+    f"if [ \"$1 $2\" = 'pr list' ]; then cat '{openpr}' 2>/dev/null; exit 0; fi\n"
+    "echo https://github.com/x/y/pull/9\n")
 os.chmod(os.path.join(bindir, "gh"), 0o755)
+
+
+def gh_calls():
+    if not os.path.exists(ghlog):
+        return []
+    return [ln.split("\0")[:-1] for ln in open(ghlog).read().split("\x01") if ln]
+
 
 env = {"PATH": bindir + os.pathsep + os.environ["PATH"], "HOME": tmp, "PANTHEON_HOME": home, "PANTHEON_STATE": state,
        "PANTHEON_VIEW": view, "PANTHEON_HOST": "mac-a", "PANTHEON_DRYRUN": "1", "PANTHEON_NO_NOTIFY": "1",
@@ -109,28 +120,61 @@ check("start из копии пачки — тот же репозиторий, 
 
 # pr
 r = cli(repo, "batch", "pr", "metis-0900")
-check("pr не из ветки пачки → код 2, gh не зван", r.returncode == 2 and not os.path.exists(ghlog), r.stderr)
+check("pr не из ветки пачки → код 2, gh не зван", r.returncode == 2 and not gh_calls(), r.stderr)
 r = cli(wt, "batch", "pr", "metis-0900", "--dry-run")
-check("pr --dry-run: тело напечатано, gh не зван", r.returncode == 0 and "Closes" in r.stdout
-      and not os.path.exists(ghlog), r.stdout + r.stderr)
+check("pr --dry-run без коммитов задач: Closes нет, все открытые — «не вошли», gh не зван",
+      r.returncode == 0 and "Closes" not in r.stdout and "остаются открытыми: metis-0901; metis-0902" in r.stdout
+      and not gh_calls(), r.stdout + r.stderr)
+
+# работа 0901 — коммитом в ветке пачки, 0902 — влитой веткой задачи
+open(os.path.join(wt, "b.txt"), "w").write("b\n")
+git(wt, "add", "b.txt")
+git(wt, "commit", "-q", "-m", "metis-0901: первая")
+r = cli(wt, "batch", "pr", "metis-0900", "--dry-run")
 out = r.stdout
-check("тело: задачи пачки по порядку, чужой нет",
-      out.find("metis-0901") < out.find("metis-0902") < out.find("Closes") and "metis-0903" in out
-      and "metis-0904" not in out, out)
-check("тело: Closes — на открытые, без закрытой и без самой пачки",
-      "Closes metis-0901, metis-0902\n" in out and "Closes metis-0900" not in out, out)
+check("коммит с номером → Closes только ему, вторая — «не вошли»",
+      "Closes metis-0901\n" in out and "остаются открытыми: metis-0902" in out and "Closes metis-0901, metis-0902" not in out, out)
+check("тело: задачи пачки по порядку, закрытая без Closes, чужой нет",
+      out.find("metis-0901") < out.find("metis-0902") and "metis-0903" in out and "metis-0904" not in out
+      and "Closes metis-0900" not in out and "metis-0903" not in out.split("Closes", 1)[1], out)
+
+sys.path.insert(0, LIB)
+import autoclose as AC  # noqa: E402  — тот же разбор, что у планового прохода
+check("autoclose: тело с «не вошли» закрывает только metis-0901 (и id пачки из ветки — не задача)",
+      AC.closing_ids("batch/metis-0900", out.split("\n\n", 1)[1]) == ["metis-0900", "metis-0901"],
+      str(AC.closing_ids("batch/metis-0900", out)))
+
+git(wt, "switch", "-q", "-c", "metis-0902-vtoraya")
+open(os.path.join(wt, "c.txt"), "w").write("c\n")
+git(wt, "add", "c.txt")
+git(wt, "commit", "-q", "-m", "вторая задача")
+git(wt, "switch", "-q", "batch/metis-0900")
+git(wt, "merge", "-q", "--no-ff", "--no-edit", "metis-0902-vtoraya")
 r = cli(wt, "batch", "pr", "metis-0900")
-argv = open(ghlog).read().split("\0")[:-1] if os.path.exists(ghlog) else []
-check("pr: gh pr create --base main --head batch/metis-0900", r.returncode == 0 and argv[:7] == [
-    "pr", "create", "--base", "main", "--head", "batch/metis-0900", "--title"], str(argv))
-check("pr: заголовок и тело с Closes", len(argv) == 10 and argv[7].startswith("Пачка metis-0900")
-      and argv[8] == "--body" and "Closes metis-0901, metis-0902" in argv[9], str(argv))
+calls = gh_calls()
+create = [c for c in calls if c[:2] == ["pr", "create"]]
+check("pr: сначала gh pr list по ветке, затем create --base main --head batch/metis-0900",
+      r.returncode == 0 and len(calls) == 2 and calls[0][:4] == ["pr", "list", "--head", "batch/metis-0900"]
+      and len(create) == 1 and create[0][2:7] == ["--base", "main", "--head", "batch/metis-0900", "--title"], str(calls))
+check("влитая ветка metis-0902-… засчитана: Closes на обе",
+      bool(create) and create[0][7].startswith("Пачка metis-0900") and create[0][8] == "--body"
+      and "Closes metis-0901, metis-0902" in create[0][9] and "не вошли" not in create[0][9].lower(), str(create))
 check("pr: ссылка gh в выводе", "pull/9" in r.stdout, r.stdout)
 
+# PR уже открыт — повтор обновляет его тело, второго не создаёт
+os.remove(ghlog)
+open(openpr, "w").write("17\n")
+r = cli(wt, "batch", "pr", "metis-0900")
+calls = gh_calls()
+check("повтор при открытом PR → gh pr edit 17 с новым телом, create нет",
+      r.returncode == 0 and any(c[:3] == ["pr", "edit", "17"] and "Closes metis-0901, metis-0902" in c[-1] for c in calls)
+      and not any(c[:2] == ["pr", "create"] for c in calls), str(calls))
+
 # GH_REPO не доходит до gh
-open(os.path.join(bindir, "gh"), "w").write(f"#!/bin/sh\necho \"$GH_REPO\" > '{ghlog}'\n")
+open(os.path.join(bindir, "gh"), "w").write(f"#!/bin/sh\necho \"[$GH_REPO]\" >> '{ghlog}.env'\n")
 cli(wt, "batch", "pr", "metis-0900")
-check("pr: GH_REPO из окружения до gh не доходит", open(ghlog).read().strip() == "")
+check("pr: GH_REPO из окружения до gh не доходит",
+      os.path.exists(ghlog + ".env") and set(open(ghlog + ".env").read().split()) == {"[]"})
 
 r = subprocess.run([PY311, "-I", RUN_PY, "help"], env=env, capture_output=True, text=True)
 check("справка называет batch start|pr", "batch start|pr" in r.stdout)

@@ -1,8 +1,11 @@
 """Пантеон: пачка — одна ветка и один PR (metis-0757, решение владельца 03.11 [zeus-fast-2d]).
 
 `pantheon batch start <story>` — ветка batch/<story> от origin/main и worktree .claude/worktrees/batch-<story> в
-репозитории текущей папки. `pantheon batch pr <story>` — один PR этой ветки в main: в теле задачи пачки и строка
-Closes на открытые. Шлюз guard не трогается: PR пачки он проверяет как любой другой.
+репозитории текущей папки. `pantheon batch pr <story>` — один PR этой ветки в main (уже открыт — обновляет его тело).
+Closes в теле — только задачам пачки, чей номер есть в коммитах ветки от origin/main (сообщение коммита или имя влитой
+ветки): по Closes плановый проход (lib/autoclose.py) ставит задаче review при открытом PR и done при слиянии, и
+недоделанная задача не должна закрыться вместе с пачкой. Остальные открытые — списком «не вошли», без Closes.
+Шлюз guard не трогается: PR пачки он проверяет как любой другой.
 
 P — модуль pantheon: его ставит загрузчик pantheon._attach до выполнения этого файла.
 """
@@ -11,7 +14,7 @@ import re
 import subprocess
 import sys
 
-__all__ = ["BATCH_ID", "batch_branch", "batch_body", "batch_cmd"]
+__all__ = ["BATCH_ID", "batch_branch", "batch_body", "branch_ids", "batch_cmd"]
 
 BATCH_ID = re.compile(r"[a-z][a-z0-9-]{0,40}-\d{4}")
 BASE = "main"
@@ -34,18 +37,35 @@ def _story(sid):
     return tasks, None
 
 
-def batch_body(sid, tasks):
-    """(заголовок, тело PR пачки): задачи по порядку пачки, Closes — на незакрытые задачи (не story)."""
+ID_IN = re.compile(r"(?<![\w-])[a-z][a-z0-9]{1,11}-\d{3,}(?![\w])")  # номер задачи, как ID_RE в autoclose.py
+
+
+def branch_ids(cwd):
+    """Номера задач в коммитах ветки от origin/main: сообщения (и «Merge branch '<id>-…'»). None — git не ответил."""
+    r = _git(["log", "--format=%B", "origin/" + BASE + "..HEAD"], cwd)
+    if r.returncode != 0:
+        return None
+    return set(ID_IN.findall(r.stdout))
+
+
+def batch_body(sid, tasks, done_ids):
+    """(заголовок, тело PR пачки): задачи по порядку пачки; Closes — открытым задачам (не story) с номером в коммитах
+    ветки (done_ids), прочие открытые — «не вошли», без Closes."""
     T = P.tasks_mod()
     head = tasks[sid][1]
     ids = [i for i in T.story_order(sid, tasks) if tasks[i][1].get("type") != "story"]
+    opened = [i for i in ids if tasks[i][1].get("status") not in ("done", "dropped")]
+    shut = [i for i in opened if i in done_ids]
+    out = [i for i in opened if i not in done_ids]
     lines = [f"Пачка {sid}: {T.one_line(head.get('title'))}", "", "Задачи пачки:"]
     for i in ids:
         h = tasks[i][1]
-        lines.append(f"- {i} · {h.get('status') or '?'} · {T.one_line(h.get('title'))}")
+        mark = "в ветке" if i in shut else "не вошла" if i in out else h.get("status") or "?"
+        lines.append(f"- {i} · {mark} · {T.one_line(h.get('title'))}")
     if not ids:
         lines.append("- (задач нет)")
-    shut = [i for i in ids if tasks[i][1].get("status") not in ("done", "dropped")]
+    if out:
+        lines += ["", "Не вошли в ветку (коммитов с их номером нет), после слияния остаются открытыми: " + "; ".join(out)]
     if shut:
         lines += ["", "Closes " + ", ".join(shut)]
     return f"Пачка {sid}: {T.one_line(head.get('title'))}"[:200], "\n".join(lines) + "\n"
@@ -88,14 +108,26 @@ def _pr(sid, tasks, cwd, dry):
     if cur.returncode != 0 or cur.stdout.strip() != br:
         print(f"pantheon batch pr: запускай из копии ветки {br} (сейчас: {cur.stdout.strip() or '?'})", file=sys.stderr)
         return 2
-    title, body = batch_body(sid, tasks)
-    argv = ["gh", "pr", "create", "--base", BASE, "--head", br, "--title", title, "--body", body]
+    done_ids = branch_ids(cwd)
+    if done_ids is None:
+        print(f"pantheon batch pr: git log origin/{BASE}..HEAD не прошёл — Closes не из чего собрать", file=sys.stderr)
+        return 1
+    title, body = batch_body(sid, tasks, done_ids)
     if dry:
         print(title + "\n\n" + body, end="")
         return 0
     env = {k: v for k, v in os.environ.items() if k not in ("GH_REPO", "GH_HOST")}
-    r = subprocess.run(argv, cwd=cwd, env=env)
-    return r.returncode
+    have = subprocess.run(["gh", "pr", "list", "--head", br, "--state", "open", "--json", "number", "--jq", ".[0].number"],
+                          cwd=cwd, env=env, capture_output=True, text=True)
+    if have.returncode != 0:
+        print(f"pantheon batch pr: gh pr list не прошёл: {have.stderr.strip()[:300]}", file=sys.stderr)
+        return 1
+    num = have.stdout.strip()
+    if num.isdigit():
+        argv = ["gh", "pr", "edit", num, "--title", title, "--body", body]
+    else:
+        argv = ["gh", "pr", "create", "--base", BASE, "--head", br, "--title", title, "--body", body]
+    return subprocess.run(argv, cwd=cwd, env=env).returncode
 
 
 def batch_cmd(args, cwd=None):
