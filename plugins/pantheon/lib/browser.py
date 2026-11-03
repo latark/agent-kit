@@ -820,7 +820,7 @@ USAGE = """pantheon browser health|open|read|eval|click|type|submit|status [--br
   open URL                       открыть адрес (сайты reads.toml или «да» владельца по --task)
   read URL | read --here          текст и ссылки страницы
   eval URL EXPR | eval --here EXPR   выражение JS без побочных действий
-  click SELECTOR --task ID       флажок, переключатель, option, вкладка, ссылка сайта (кнопки — только submit)
+  click SELECTOR --task ID       флажок, переключатель, option, вкладка, ссылка сайта (отправка — submit)
   type SELECTOR TEXT --task ID   ввод в поле
   submit SELECTOR --task ID      отправка — только после «да» владельца на «[ID] Отправить форму на <сайт>? …»
   status [ID]                    итог заявки"""
