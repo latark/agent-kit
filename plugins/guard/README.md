@@ -684,7 +684,7 @@ SDK (`sdk`) флаг не снимают — так же журнал owner-log 
   судится по имени. С metis-0194 обёртки — ещё `command`, `exec` (`-a имя`), `npx`, `uvx` и `uv --directory x run`;
   пустые — `command -v`/`-V` (печатает путь, а не запускает), `node -pe 1` и слова после кода `-e`/`-p`
   (`node -pe 1 pytest`: это `process.argv`, а не скрипт), `node --check` без скрипта.
-- Вторая запись `tests` — от планового прохода Пантеона (`pantheon outside test` по заявке роли,
+- Вторая запись `tests` — от планового прохода Пантеона (`pantheon outside test` и тесты после «принять» argus,
   `plugins/pantheon/lib/outside.py`, [sb-simplify] п. 7), `by.agent_type` = `pantheon-outside`. Её пишет только
   проход вне окон: роли STATE закрыт, а команде под его профилем `sandbox-exec` — тоже. Запись есть только у проверки
   проекта (`.pantheon-verify`, иначе test/check package.json, иначе pytest), с `--script` и у dev-сервера её нет; команда

@@ -496,10 +496,49 @@ commit(B, {".pantheon-verify": "true\n"}, "ослабил проверку")
 git(B, "update-ref", "refs/remotes/origin/main", base)
 check("команда: .pantheon-verify из origin/main, правка ветки не действует", O.command(B, "test")[1] == "python3 t.py")
 
-# --- 2. без автопрогонов (решение владельца 03.11) -------------------------------------------------------------
-C4 = commit(APP, {"t.py": GREEN + "# c4\n"}, "c4")
+# --- 2. прямой путь: заявка test -> run_test в папке клона (автопрогонов нет, решение владельца 03.11) ----------------
+APPR = os.path.realpath(APP)
+
+
+def direct(rid):
+    return O.run_test(rid, APPR, None, "athena-x", None, [APPR])
+
+
+before = len(calls())
+res = direct("direct-c3")
+check("прямой прогон C3 (HEAD): код 0, запись есть", res.get("code") == 0 and res.get("record") is True, res)
+recs = tests_for(C3)
+check("запись tests принята настоящим шлюзом guard", len(recs) == 1, gate_records())
+r0 = recs[0] if recs else {}
+check("запись: команда и папка", r0.get("cmd") == HEAD_NOTE and r0.get("cwd") == APPR, r0)
+check("запись: repo по remote, pr null, by = проход, window",
+      r0.get("repo") == [REPO] and r0.get("pr") is None and r0.get("by", {}).get("agent_type") == "pantheon-outside"
+      and r0.get("by", {}).get("window") == "athena-x", r0)
+c = calls()[before:]
+check("прогон — под sandbox-exec с профилем STATE/outside/profile.sb",
+      len(c) == 1 and c[0]["profile"] == os.path.join(STATE, "outside", "profile.sb") and os.path.isfile(c[0]["profile"]), c)
+env = c[0]["env"] if c else {}
+check("окружение с нуля: нет GH_TOKEN, есть CI=1 и свой TMPDIR",
+      "GH_TOKEN" not in env and env.get("CI") == "1" and env.get("TMPDIR", "").startswith(_ROOT)
+      and env.get("HOME") == os.path.realpath(HOME), sorted(env))
+
+# красные тесты: записи нет, хвост журнала в итоге
+C4 = commit(APP, {"t.py": RED}, "c4 red")
+res = direct("direct-c4")
+check("красный: код 1, записи нет", res.get("code") == 1 and not tests_for(C4) and res.get("record") is False, res)
+check("красный: хвост журнала в итоге", "тест упал" in (res.get("tail") or ""), res)
+
+# команда портит дерево — записи нет
 C5 = commit(APP, {"t.py": "open('junk.txt', 'w').write('x')\n"}, "c5 пачкает")
+res = direct("direct-c5")
+check("команда изменила дерево: записи нет, причина названа",
+      not tests_for(C5) and res.get("code") == 0 and "изменила HEAD или дерево" in (res.get("why") or ""), res)
+os.remove(os.path.join(APP, "junk.txt"))
+
+# пустая команда в .pantheon-verify — записи нет
 C6 = commit(APP, {".pantheon-verify": "true\n"}, "c6 пустая проверка")
+res = direct("direct-c6")
+check("пустая команда (true): записи нет", not tests_for(C6) and "ничего не проверяет" in (res.get("why") or ""), res)
 C7 = commit(APP, {".pantheon-verify": "heavy python3 t.py\n", "t.py": GREEN}, "c7")
 
 # --- 3. заявка роли из окна -------------------------------------------------------------------------------------
