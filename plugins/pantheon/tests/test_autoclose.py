@@ -581,7 +581,8 @@ def test_close_criteria():
             err = ""
         except ValueError as e:
             err = str(e)
-        check("заглушка рядом с настоящим пунктом: «неотмечено 1» без заглушки", "неотмечено 1 " in err, err)
+        check("заглушка рядом с настоящим пунктом: «неотмечено 1» без заглушки",
+              "неотмечено 1 " in err and T.read(p16b)[0].get("status") != "done", err)
         p16c = put(home, "metis-pantheon", "metis-0021", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + " ещё\n", created="2026-10-27")
         check("похожий, но не дословный текст — пункт", T.unchecked_criteria(*T.read(p16c)) == 1)
         pq = put(home, "metis-pantheon", "metis-0022", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n", created="2026-10-27")
