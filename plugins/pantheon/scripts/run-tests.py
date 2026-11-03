@@ -45,8 +45,9 @@ Python 3.11+ (metis-0571); тот же скрипт гоняет workflow tests 
 и killpg его не достаёт; SIGKILL самому раннеру обработать нельзя — идущие файлы тогда доживают свой таймаут.
 
 Итог: строка на каждый файл по мере готовности (ok / FAIL, время, число проверок), затем выводы упавших файлов
-(хвост) и последняя строка — файлов, ok, FAIL, сумма проверок, время. Код выхода не 0, если: нет ни одного файла
-тестов, файл упал (код не 0), превысил таймаут, вышел с кодом 0 без строки итога (кроме старых файлов NO_SUMMARY)
+(все строки, кроме `ok` и пустых: упавшие проверки, трассировка и итог видны, где бы они ни были; больше NOT_OK_MAX —
+начало и конец; не кончается последней строкой вывода — ещё TAIL последних, metis-0719) и последняя строка — файлов,
+ok, FAIL, сумма проверок, время. Код выхода не 0, если: нет ни одного файла тестов, файл упал (код не 0), превысил таймаут, вышел с кодом 0 без строки итога (кроме старых файлов NO_SUMMARY)
 или с итогом без проверок, или раннер прерван сигналом. Число проверок файла — из его итоговой строки, без числа в ней — по строкам `ok`.
 Только stdlib.
 """
@@ -68,16 +69,21 @@ TIMEOUT = 600  # с на файл; медленным — свой предел 
 # давали таймауты: test_merge_gate — 19 из 33 прогонов, test_watch — 10 из 31, test_read — 9 из 31.
 # В комментарии — медиана и наибольшее зелёное время в тех прогонах, с.
 SLOW = {
-    "pantheon/test_watch.py": 1020,  # 516 / 666 — дольше всех: полный прогон не короче его
-    "guard/test_merge_gate.py": 900,  # 458 / 458 (зелёный один); один воркер под outside — 333-358
+    # test_watch: 575 / 791 в 27 прогонах 01-03.11 (metis-0719): 1.5 × 791 → 1200. Спящих ожиданий нет — 524 запуска
+    # run.py по 0.25 с, время растёт с нагрузкой, как у test_merge_gate (0.9-1.0 его времени); 03.11 при load 17.8 —
+    # test_merge_gate 1051 с, test_watch убит на 1020
+    "pantheon/test_watch.py": 1200,
+    "guard/test_merge_gate.py": 1200,  # 458 / 458; outside -j 3 02.11 — 766-825 с, раз 900 (таймаут), metis-0719
     "guard/test_guard.py": 720,  # 336 / 442; на Linux в Docker под нагрузкой 120-240 с, на 2-ядерном ubuntu-latest дольше
+    # test_read: 97 / 259, убит на 180 с 14 раз и на 300 с 4 раза из 80 прогонов (0731, п. 5): 1.5 × 259 мало.
+    # 600 ≈ 2.3 × 259 — во столько раз test_merge_gate под нагрузкой 03.11 дольше своей медианы (1051 / 458)
+    "pantheon/test_read.py": 600,
     "guard/test_shell_diff.py": 600,  # 254 / 390
     "pantheon/test_plugins_update.py": 540,  # 170 / 346
     "pantheon/test_setup.py": 480,  # 109 / 303
     "pantheon/test_start.py": 480,  # 136 / 289
     "pantheon/test_board.py": 360,  # 98 / 235
     "pantheon/test_sync_quarantine.py": 360,  # 120 / 231
-    "pantheon/test_read.py": 300,  # 97 / 179
     "pantheon/test_merge.py": 300,  # 86 / 171
     "pantheon/test_hooks.py": 300,  # 64 / 163
     "pantheon/test_executors.py": 240,  # 69 / 158
@@ -141,7 +147,10 @@ _SUMMARY_TOTAL = (
     (re.compile(r"(\d+)\s*команд\b"), lambda m: int(m[1])),
 )
 SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
-TAIL = 40  # строк вывода упавшего файла в итог
+# строк вывода упавшего файла в итог: все, кроме ok и пустых; больше — половина с начала и половина с конца. Хвоста
+# в 40 строк не хватало: test_merge_gate печатает 1662 строки, упавшая проверка — в середине (metis-0719)
+NOT_OK_MAX = 200
+TAIL = 5  # и последние строки вывода, если список не-ok ими не кончается
 
 
 class Interrupted(Exception):
@@ -607,12 +616,27 @@ def report(job, log_dir):
             fh.write(job.out)
 
 
+def not_ok(out, limit=NOT_OK_MAX):
+    """Строки вывода упавшего файла для итога: все, кроме `ok` и пустых, по порядку; больше limit — первые и последние
+    limit // 2 со строкой о пропуске между ними. → (строки, сколько всего не-ok)."""
+    lines = [ln.rstrip() for ln in ANSI.sub("", out).splitlines() if ln.strip() and not re.match(r"\s*ok\b", ln)]
+    if len(lines) <= limit:
+        return lines, len(lines)
+    half = limit // 2
+    return lines[:half] + [f"… пропущено {len(lines) - 2 * half} строк …"] + lines[-half:], len(lines)
+
+
 def summary(done, total_files, n, sec, skipped=0):
     bad = [j for j in done if not j.ok]
     for j in bad:
-        lines = j.out.rstrip("\n").splitlines()
-        print(f"\n===== {j.label} · {j.why} · последние {min(TAIL, len(lines))} строк =====")
-        print("\n".join(lines[-TAIL:]))
+        lines, total = not_ok(j.out)
+        print(f"\n===== {j.label} · {j.why} · строки не ok: {total} =====")
+        print("\n".join(lines))
+        # где файл остановился (таймаут, гибель посреди строк ok) — последние строки, если ими список не кончается
+        tail = [ln.rstrip() for ln in ANSI.sub("", j.out).splitlines() if ln.strip()][-TAIL:]
+        if tail and (not lines or lines[-1] != tail[-1]):
+            print(f"----- последние {len(tail)} строк -----")
+            print("\n".join(tail))
     slow = sorted(done, key=lambda j: -j.sec)[:5]
     print("\nмедленные: " + ", ".join(f"{j.label} {j.sec:.0f} с" for j in slow))
     checks_sum = sum(j.n for j in done)

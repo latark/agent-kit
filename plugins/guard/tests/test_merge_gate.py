@@ -15,8 +15,15 @@ import subprocess
 import sys
 
 # Срок подпроцессов теста: на нагруженном Mac (проход outside, -j3, load 11-20) 10-30 с не хватает (metis-0634).
-# Срок самого guard (DEADLINE) это не меняет и им не проверяется.
 SUB_TIMEOUT = 60
+# Сроки внутри хука (metis-0719): под той же нагрузкой хук порой не укладывался в DEADLINE 8 с, а git в нём — в
+# timeout=3, и 1-3 случая из 1662 краснели не по своей вине. Загрузчик _cached_main поднимает их только вызовам из
+# теста (GUARD_TEST_DEADLINE, GUARD_TEST_SUB_TIMEOUT); код guard и бой не меняются. HOOK_DEADLINE < SUB_TIMEOUT: хук
+# успевает отказать сам, раньше, чем тест его погасит. merge_gate, загруженный в процесс теста (_load_merge_gate: r4,
+# carry), получает тот же HOOK_SUB_TIMEOUT через _SlowSubprocess.
+HOOK_DEADLINE = 40
+HOOK_SUB_TIMEOUT = 20
+SLOW_GIT = 50  # с: «медленный git» дольше и HOOK_SUB_TIMEOUT, и HOOK_DEADLINE
 import tempfile
 import time
 import uuid
@@ -260,7 +267,8 @@ class Home:
 
     def env(self, pdir):
         return {"HOME": self.root, "PATH": self.j("bin") + os.pathsep + os.environ["PATH"],
-                "CLAUDE_PROJECT_DIR": self.j(pdir), "TMPDIR": "/nonexistent-tmp"}
+                "CLAUDE_PROJECT_DIR": self.j(pdir), "TMPDIR": "/nonexistent-tmp",
+                "GUARD_TEST_DEADLINE": str(HOOK_DEADLINE), "GUARD_TEST_SUB_TIMEOUT": str(HOOK_SUB_TIMEOUT)}
 
     def hook(self, event, pdir, mode=(), extra_env=None):
         return subprocess.run([sys.executable, "-I", CACHED, GUARD, *mode], input=json.dumps(event), capture_output=True,
@@ -1155,11 +1163,27 @@ VANISHING_TESTS = ("python3 -I $TESTFILE", "python3 $TESTFILE", "heavy python3 -
                    "CI=1 python3 -I $TESTFILE", "uv run python $X", "node $X")
 
 
+class _SlowSubprocess:
+    """subprocess для merge_gate, загруженного в процесс теста (metis-0719): timeout у run не меньше HOOK_SUB_TIMEOUT,
+    как у хука через загрузчик _cached_main. Без этого git в _git_bytes (timeout=3) под нагрузкой outside не успевал,
+    и r4 видел отпечаток None вместо хеша. Остальное — настоящий subprocess."""
+
+    def __getattr__(self, name):
+        return getattr(subprocess, name)
+
+    @staticmethod
+    def run(*args, **kw):
+        if kw.get("timeout") is not None:
+            kw["timeout"] = max(kw["timeout"], HOOK_SUB_TIMEOUT)
+        return subprocess.run(*args, **kw)
+
+
 def _load_merge_gate(name):
     import importlib.util
     spec = importlib.util.spec_from_file_location(name, os.path.join(os.path.dirname(GUARD), "merge_gate.py"))
     mg = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mg)
+    mg.subprocess = _SlowSubprocess()  # только этот модуль: подпроцессы самого теста — с прежними сроками
     return mg
 
 
@@ -3767,11 +3791,12 @@ def t_carry_r4_gate(h):
         os.remove(h.j(".gitconfig"))
     case("r4 шлюз: «принять» на P (base M1) не переносится на N1 при базе — ветке эпика", s["N1"], r4["epic"],
          [opus(s["P"]), tests(s["N1"])], False, "нет «принять»")
-    # таймаут git: diff --raw дольше 3 с — без переноса, хук укладывается в 8 с
+    # таймаут git: diff --raw дольше своего timeout — без переноса, хук отказывает сам, а не по сроку DEADLINE. В тесте
+    # timeout git поднят до HOOK_SUB_TIMEOUT (metis-0719), поэтому git спит дольше: SLOW_GIT > HOOK_DEADLINE
     wrap = h.j("gitwrap")
     os.makedirs(wrap, exist_ok=True)
     with open(os.path.join(wrap, "git"), "w") as fh:
-        fh.write('#!/bin/sh\ncase "$*" in *--raw*) [ -f "$HOME/git.slow" ] && exec sleep 9;; esac\n'
+        fh.write(f'#!/bin/sh\ncase "$*" in *--raw*) [ -f "$HOME/git.slow" ] && exec sleep {SLOW_GIT};; esac\n'
                  f'exec {shutil.which("git")} "$@"\n')
     os.chmod(os.path.join(wrap, "git"), 0o755)
     env = {"PATH": wrap + os.pathsep + h.j("bin") + os.pathsep + os.environ["PATH"]}
@@ -3781,7 +3806,8 @@ def t_carry_r4_gate(h):
                 tests(s["NA"])]
         got, took = case("r4 шлюз: git diff --raw дольше таймаута — «вернуть» в силе", s["NA"], s["M1"], recs, False,
                          "«вернуть» (reject)", extra_env=env)
-        check(f"r4 шлюз: таймаут git — хук за {took:.1f} с ≤ 8 с", took <= 8, took)
+        # без timeout у git хук ждал бы SLOW_GIT и гас по сроку HOOK_DEADLINE — тогда и причина ниже другая
+        check(f"r4 шлюз: таймаут git — хук за {took:.1f} с, не ждёт git {SLOW_GIT} с", took < HOOK_DEADLINE, took)
         check("r4 шлюз: таймаут git — причина в отказе", "не ответил" in got[1] or "дольше" in got[1], got[1])
     finally:
         os.remove(h.j("git.slow"))
@@ -4282,7 +4308,44 @@ def t_gh_out_private(h):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-CASES = [t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_narrow_record, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
+def t_test_floors(h):
+    """Сроки хука в тесте (metis-0719): окружение хука из теста поднимает DEADLINE и timeout подпроцессов через
+    загрузчик _cached_main; без переменных (пусто, не число) — сроки как в бою."""
+    script = h.j("floors.py")
+    with open(script, "w") as fh:
+        fh.write("import signal, subprocess\n"
+                 "signal.setitimer(signal.ITIMER_REAL, 8)\n"
+                 "left = signal.getitimer(signal.ITIMER_REAL)[0]\n"
+                 "signal.setitimer(signal.ITIMER_REAL, 0)\n"
+                 "try:\n"
+                 "    subprocess.run(['sleep', '2'], timeout=0.5)\n"
+                 "    sub = 'ждал'\n"
+                 "except subprocess.TimeoutExpired:\n"
+                 "    sub = 'таймаут'\n"
+                 "print(f'{left:.0f} {sub}')\n")
+
+    def run(env):
+        return subprocess.run([sys.executable, "-I", CACHED, script], capture_output=True, text=True, env=env,
+                              timeout=SUB_TIMEOUT).stdout.split()
+
+    got = run(h.env("projects/tg-read"))
+    check(f"сроки хука в тесте: DEADLINE не меньше {HOOK_DEADLINE} с, timeout не меньше {HOOK_SUB_TIMEOUT} с",
+          got == [str(HOOK_DEADLINE), "ждал"], got)
+    got = run(dict(h.env("projects/tg-read"), GUARD_TEST_DEADLINE="", GUARD_TEST_SUB_TIMEOUT="x"))
+    check("сроки хука в тесте: без переменных — DEADLINE 8 с и timeout как в коде", got == ["8", "таймаут"], got)
+    # merge_gate в процессе теста (r4, carry): git дольше боевого timeout=3 у _git_bytes — ответ, а не None
+    slow = h.j("slowgit")
+    os.makedirs(slow, exist_ok=True)
+    with open(os.path.join(slow, "git"), "w") as fh:
+        fh.write("#!/bin/sh\nsleep 3.5\necho medlenno\n")
+    os.chmod(os.path.join(slow, "git"), 0o755)
+    mg = _load_merge_gate("merge_gate_floors")
+    with _Env(PATH=slow + os.pathsep + os.environ["PATH"]):
+        got = mg._git_bytes(h.root, "rev-parse")
+    check(f"сроки в процессе теста: git в _git_bytes ждёт до {HOOK_SUB_TIMEOUT} с, а не 3", got == b"medlenno\n", got)
+
+
+CASES = [t_test_floors, t_gh_out, t_gh_out_private, t_hq_gh,t_pass_internal, t_narrow_record, t_old_sha, t_no_tests, t_author_is_reviewer, t_argus_commit, t_admin_auto, t_no_head,
          t_not_listed, t_core, t_verdict_role, t_reject_after_accept, t_product, t_not_simple, t_failure, t_dirty,
          t_managed, t_broken_journal, t_bg_flag, t_bg_task_id, t_bg_task_id_value, t_bad_response, t_fg_records, t_pre_background,
          t_pre_not_simple, t_checklist, t_empty_tests, t_core_paths, t_wrapped_review_test, t_core_marketplace, t_canary_b1,

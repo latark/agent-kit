@@ -103,6 +103,21 @@ check("падение: FAIL с кодом файла", re.search(r"FAIL \S+/test
 check("падение: хвост вывода упавшего", "FAIL два  деталь" in r.stdout and "итого: файлов 2, ok 1, FAIL 1" in r.stdout,
       r.stdout)
 
+# --- упавшая проверка в середине длинного вывода видна в итоге, строки ok — нет (metis-0719) ---
+p = mkplugin({"test_long.py": "for i in range(100): print(f'ok   до {i}')\nprint('FAIL середина  деталь')\n"
+              "for i in range(100): print(f'ok   после {i}')\nprint('200 из 201')\nraise SystemExit(1)\n"})
+r = run([p])
+sect = r.stdout.split("===== ", 1)[-1]
+check("падение в середине: FAIL-строка и итог файла в разделе упавшего",
+      "FAIL середина  деталь" in sect and "200 из 201" in sect and "строки не ok: 2" in sect, r.stdout)
+check("падение в середине: строк ok в разделе упавшего нет", "ok   после 99" not in sect and "ok   до 0" not in sect,
+      r.stdout)
+lines, n = R.not_ok("\n".join(f"FAIL {i}" for i in range(10)) + "\nok x\n\n", limit=4)
+check("not_ok: больше предела — начало, пропуск, конец",
+      n == 10 and lines == ["FAIL 0", "FAIL 1", "… пропущено 6 строк …", "FAIL 8", "FAIL 9"], lines)
+check("not_ok: в пределе — все не-ok по порядку, ANSI снят",
+      R.not_ok("\x1b[31mFAIL a\x1b[0m\nok b\n  ok c\nTraceback\n") == (["FAIL a", "Traceback"], 2))
+
 # --- гибель по сигналу: os._exit не 0 и SIGKILL самого себя ---
 p = mkplugin({"test_exit.py": "import os\nprint('ok a')\nos._exit(3)\n",
               "test_kill.py": "import os, signal\nprint('ok a')\nos.kill(os.getpid(), signal.SIGKILL)\n"})
