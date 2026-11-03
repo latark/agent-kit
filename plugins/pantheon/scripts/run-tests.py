@@ -71,7 +71,7 @@ import time
 
 TIMEOUT = 600  # с на файл; медленным — свой предел в SLOW
 # Медленные файлы: идут первыми (по убыванию предела), предел — свой, с. metis-0634: пределы — по 31 полному прогону
-# прохода outside 30.10–01.11 (-j 3, процесс тика ProcessType Background, Mac под нагрузкой): 1.5 × наибольшего
+# прохода outside 30.10–01.11 (-j 3, тогда процесс тика шёл с ProcessType Background (с metis-0728 — Standard), Mac под нагрузкой): 1.5 × наибольшего
 # зелёного времени файла с округлением вверх до минуты, не меньше 180 с. Прежние (3 × последовательного замера 27.10)
 # давали таймауты: test_merge_gate — 19 из 33 прогонов, test_watch — 10 из 31, test_read — 9 из 31.
 # В комментарии — медиана и наибольшее зелёное время в тех прогонах, с.
@@ -400,9 +400,10 @@ QOS_PROBE = (
 
 
 def launch_cmd(py, f, platform=None, exists=os.path.exists):
-    """Команда запуска одного файла. На macOS с taskpolicy — через `taskpolicy -c utility`: плановый проход идёт
-    из launchd с ProcessType Background, и без этого весь набор сидит в QoS background на E-ядрах (файл ×3 дольше,
-    metis-0728). На Linux и без taskpolicy — как раньше."""
+    """Команда запуска одного файла. На macOS с taskpolicy — через `taskpolicy -c utility`: тик шёл
+    из launchd с ProcessType Background и без этого весь набор сидел в QoS background на E-ядрах (файл ×3 дольше,
+    metis-0728). Тик теперь Standard, но на уже установленной машине plist старый до ручного `pantheon install`,
+    поэтому taskpolicy остаётся. На Linux и без taskpolicy — как раньше."""
     cmd = [py, "-I", os.path.join("tests", f)]
     if (sys.platform if platform is None else platform) == "darwin" and exists(TASKPOLICY):
         return [TASKPOLICY, "-c", "utility", *cmd]
