@@ -131,6 +131,19 @@ def run_all(tmp):
     r = pantheon("review", "status", "latark/other", "17")
     check("status — фильтр по репозиторию", r.returncode == 0 and "записей нет" in r.stdout)
 
+    # metis-0735: запись tests зелёного дозапуска — в status видно, что это дозапуск
+    trec = {"v": 1, "kind": "tests", "repo": ["latark/agent-kit"], "pr": 19, "sha": SHA, "cmd": "x",
+            "by": {"agent_type": "pantheon-outside"}, "time": "2026-10-15T20:00:00", "rerun_of": "20261103-000001-abcdef",
+            "files": ["kit/test_a.py", "kit/test_b.py"], "map": "m"}
+    with open(os.path.join(state, "merge-gate", "records.jsonl"), "a") as fh:
+        fh.write(json.dumps(trec) + "\n" + json.dumps(dict(trec, pr=20, rerun_of=None)) + "\n")
+    r = pantheon("review", "status", "latark/agent-kit", "19")
+    check("status: запись tests с rerun_of — «дозапуск от <id>, файлов 2»",
+          r.returncode == 0 and "дозапуск от 20261103-000001-abcdef, файлов 2" in r.stdout, r.stdout)
+    r = pantheon("review", "status", "latark/agent-kit", "20")
+    check("status: запись tests без rerun_of — строки дозапуска нет", r.returncode == 0 and "дозапуск" not in r.stdout
+          and "tests" in r.stdout, r.stdout)
+
     # metis-0393: итог по head — последний вердикт каждого argus (рецензент — сессия и agent_id, как у шлюза)
     opus = dict(full["checklist"], ran="модель: claude-opus-5-5, heavy pytest")
 

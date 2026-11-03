@@ -7,6 +7,9 @@
   --log-dir ПАПКА полный вывод каждого файла — в ПАПКА/<плагин>__<файл>.log
   --affected      только затронутое (metis-0451): файлы тестов, связанные с изменёнными файлами, по карте MAP
   --base REF      база для --affected (по умолчанию origin/main)
+  --only МЕТКИ    только эти файлы тестов, через запятую: «pantheon/test_a.py,guard/test_b.py» (метка — как в строках
+                  ok/FAIL); метки нет среди файлов папок — код 2 без прогона. Дозапуск прохода outside (metis-0735):
+                  упавшие в прошлом полном прогоне и затронутые диффом; с --affected — отказ
 
 Только затронутое — для агента во время правки и для PR; полный набор — без ключа (на main, в шлюзе и перед
 выпуском). Изменённые файлы — `git diff --no-renames` рабочего дерева от merge-base REF и HEAD, плюс новые файлы вне
@@ -430,7 +433,7 @@ class Job:
 
 
 def parse(argv):
-    opts = {"jobs": None, "timeout": None, "log_dir": None, "dirs": [], "affected": False, "base": None}
+    opts = {"jobs": None, "timeout": None, "log_dir": None, "dirs": [], "affected": False, "base": None, "only": None}
     it = iter(argv)
     for a in it:
         if a in ("-h", "--help"):
@@ -438,11 +441,16 @@ def parse(argv):
             sys.exit(0)
         elif a == "--affected":
             opts["affected"] = True
-        elif a in ("-j", "--jobs", "--timeout", "--log-dir", "--base"):
+        elif a in ("-j", "--jobs", "--timeout", "--log-dir", "--base", "--only"):
             v = next(it, None)
             if v is None:
                 sys.exit(f"run-tests: {a} без значения")
-            if a == "--log-dir":
+            if a == "--only":
+                labels = [x.strip() for x in v.split(",")]
+                if not all(labels):
+                    sys.exit(f"run-tests: --only {v!r} — пустая метка")
+                opts["only"] = (opts["only"] or []) + labels
+            elif a == "--log-dir":
                 opts["log_dir"] = v
             elif a == "--base":
                 opts["base"] = v
@@ -460,6 +468,8 @@ def parse(argv):
             opts["dirs"].append(a)
     if opts["base"] is not None and not opts["affected"]:
         sys.exit("run-tests: --base без --affected — полный прогон базы не требует")
+    if opts["only"] is not None and opts["affected"]:
+        sys.exit("run-tests: --only с --affected — выбирает что-то одно")
     return opts
 
 
@@ -515,6 +525,14 @@ def main(argv):
     if not items:
         print(f"run-tests: ни одного файла tests/test_*.py в {' '.join(opts['dirs'])} — нечего проверять")
         return 1
+    if opts["only"] is not None:
+        have = {label for _, label in items}
+        missing = sorted(set(opts["only"]) - have)
+        if missing:
+            print(f"run-tests: --only: нет файлов тестов {', '.join(missing)} в {' '.join(opts['dirs'])} — "
+                  "нечего гонять")
+            return 2
+        items = [it for it in items if it[1] in set(opts["only"])]
     if opts["affected"]:
         items, code = pick_affected(items, opts["dirs"], opts["base"] or "origin/main")
         if items is None:
