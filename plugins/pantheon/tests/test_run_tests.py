@@ -830,17 +830,18 @@ def main_with(files, fs=None, bind=None):
     return rc, buf.getvalue()
 WF = {"test_outside.py": OKF, "test_board.py": OKF}
 rc, out = main_with(WF)
+check("WINDOW_SKIP_CODE отличен от 3 и 0", R.WINDOW_SKIP_CODE not in (0, 1, 3))
 check("main: пробы проходят — код 0, ни skip, ни строки про окно", rc == 0 and "skip " not in out and "годится" not in out
       and "файлов 2, ok 2, FAIL 0;" in out, (rc, out))
 rc, out = main_with(WF, bind=lambda: "EPERM bind")
-check("main: bind закрыт — код 3, skip с причиной, строка «для записи полного набора не годится»",
-      rc == 3 and re.search(r"^skip pantheon/test_outside\.py · пропущено: .*EPERM bind", out, re.M)
+check("main: bind закрыт — код 4, skip с причиной, строка «для записи полного набора не годится»",
+      rc == 4 and re.search(r"^skip pantheon/test_outside\.py · пропущено: .*EPERM bind", out, re.M)
       and "пропущены файлы окна — для записи полного набора не годится" in out
       and "файлов 1, ok 1, FAIL 0, пропущено 1;" in out, (rc, out))
 rc, out = main_with(dict(WF, **{"test_board.py": "print('ok a')\nraise SystemExit(1)\n"}), bind=lambda: "EPERM bind")
-check("main: пропуск окна и FAIL — код 1, а не 3", rc == 1 and "FAIL pantheon/test_board.py" in out, (rc, out))
+check("main: пропуск окна и FAIL — код 1, а не 4", rc == 1 and "FAIL pantheon/test_board.py" in out, (rc, out))
 rc, out = main_with({"test_outside.py": OKF}, bind=lambda: "EPERM bind")
-check("main: пропущены все файлы окна — код 3, а не зелёный 0", rc == 3 and "для записи полного набора не годится" in out, (rc, out))
+check("main: пропущены все файлы окна — код 4 (не 3 «нечего гонять»), а не зелёный 0", rc == 4 and "для записи полного набора не годится" in out, (rc, out))
 ALT = os.path.join("/tmp", f"claude-{os.getuid()}")
 ALTR = os.path.join(ALT, "run-tests-")  # TMPDIR сам может лежать под ALT: различаем по префиксу запасного корня
 HOME_IN = ("import os\nok = {neg}os.environ['HOME'].startswith({alt!r})\nprint('ok h' if ok else 'FAIL home ' + os.environ['HOME'])\n"
@@ -855,8 +856,8 @@ if os.path.isdir(ALT):
 else:
     print("пропущено: нет /tmp/claude-<uid> — случай запасного корня в main")
 rc, out = main_with({"test_roles.py": OKF, "test_board.py": OKF}, fs=lambda b: "EPERM fs")
-check("main: запись закрыта везде — WINDOW_FS пропущен, board идёт, код 3",
-      rc == 3 and "skip pantheon/test_roles.py" in out and "ok   pantheon/test_board.py" in out
+check("main: запись закрыта везде — WINDOW_FS пропущен, board идёт, код 4",
+      rc == 4 and "skip pantheon/test_roles.py" in out and "ok   pantheon/test_board.py" in out
       and "файлов 1, ok 1, FAIL 0, пропущено 1;" in out, (rc, out))
 
 sd = tempfile.mkdtemp(prefix="stubs-")
