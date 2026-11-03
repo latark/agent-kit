@@ -11,6 +11,10 @@
                   ok/FAIL); метки нет среди файлов папок — код 2 без прогона. Дозапуск прохода outside (metis-0735):
                   упавшие в прошлом полном прогоне и затронутые диффом; с --affected — отказ
 
+На macOS с /usr/sbin/taskpolicy каждый файл идёт через `taskpolicy -c utility` (launchd держит плановый проход в QoS
+background, файл ×3 дольше, metis-0728); в начале прогона печатается строка «QoS (доля CPU)» — проба раннера и файла.
+Файлам виден RUN_TESTS_RUNNER=1 (test_shell_diff по нему берёт пул из двух процессов).
+
 Только затронутое — для агента во время правки и для PR; полный набор — без ключа (на main, в шлюзе и перед
 выпуском). Изменённые файлы — `git diff --no-renames` рабочего дерева от merge-base REF и HEAD, плюс новые файлы вне
 .gitignore. Карта MAP (scripts/affected-map.json) построена прогоном: какой файл тестов какой файл репозитория
@@ -381,6 +385,49 @@ def _killpg(pid, sig=signal.SIGKILL):
         return False
 
 
+TASKPOLICY = "/usr/sbin/taskpolicy"
+# Проба QoS: сколько тиков CPU процесс провёл в каждом классе (proc_pid_rusage, rusage_info_v4, ri_cpu_time_qos_*).
+QOS_PROBE = (
+    "import ctypes, struct, os\n"
+    "x = 0\n"
+    "for i in range(3000000): x += i % 7\n"
+    "b = ctypes.create_string_buffer(2048)\n"
+    "assert ctypes.CDLL('/usr/lib/libproc.dylib').proc_pid_rusage(os.getpid(), 4, b) == 0\n"
+    "n = ['default', 'maintenance', 'background', 'utility', 'legacy', 'user_initiated', 'user_interactive']\n"
+    "v = struct.unpack_from('7Q', b, 160)\n"
+    "t = sum(v) or 1\n"
+    "print(' '.join(f'{k} {100 * c // t}%' for k, c in zip(n, v) if c) or 'нет данных')\n")
+
+
+def launch_cmd(py, f, platform=None, exists=os.path.exists):
+    """Команда запуска одного файла. На macOS с taskpolicy — через `taskpolicy -c utility`: плановый проход идёт
+    из launchd с ProcessType Background, и без этого весь набор сидит в QoS background на E-ядрах (файл ×3 дольше,
+    metis-0728). На Linux и без taskpolicy — как раньше."""
+    cmd = [py, "-I", os.path.join("tests", f)]
+    if (sys.platform if platform is None else platform) == "darwin" and exists(TASKPOLICY):
+        return [TASKPOLICY, "-c", "utility", *cmd]
+    return cmd
+
+
+def qos_line(py, env, platform=None, exists=os.path.exists):
+    """Строка-самопроверка для лога: в каком классе QoS идёт CPU у раннера и у пробного процесса, запущенного так же,
+    как файлы тестов. «файл: utility …» — клемп launchd снят; «файл: background …» — не снят."""
+    if (sys.platform if platform is None else platform) != "darwin":
+        return None
+    def probe(cmd):
+        try:
+            r = subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, timeout=30)
+            out = r.stdout.decode("utf-8", "replace").strip()
+            return out if r.returncode == 0 and out else f"проба не удалась (код {r.returncode})"
+        except (OSError, subprocess.SubprocessError) as e:
+            return f"проба не удалась ({type(e).__name__})"
+    own = probe([py, "-I", "-c", QOS_PROBE])
+    cmd = [TASKPOLICY, "-c", "utility"] if exists(TASKPOLICY) else []
+    job = probe(cmd + [py, "-I", "-c", QOS_PROBE])
+    return f"run-tests: QoS (доля CPU) · раннер: {own} · файл ({'taskpolicy -c utility' if cmd else 'без taskpolicy'}): {job}"
+
+
 class Job:
     def __init__(self, pdir, label, py, root, env0, timeout, seq):
         self.pdir, self.label, self.timeout = pdir, label, timeout
@@ -392,7 +439,7 @@ class Job:
         self.fh = open(self.outpath, "wb")
         f = label.split("/", 1)[1]
         self.t0 = time.monotonic()
-        self.proc = subprocess.Popen([py, "-I", os.path.join("tests", f)], cwd=pdir,
+        self.proc = subprocess.Popen(launch_cmd(py, f), cwd=pdir,
                                      env={**env0, "HOME": home, "TMPDIR": tdir}, stdin=subprocess.DEVNULL,
                                      stdout=self.fh, stderr=subprocess.STDOUT, start_new_session=True)
         self.timed_out = False
@@ -555,7 +602,10 @@ def main(argv):
         os.makedirs(opts["log_dir"], exist_ok=True)
     env0 = {k: v for k, v in os.environ.items()
             if not k.startswith("PANTHEON_") and k not in ("FORCE_COLOR", "CLICOLOR_FORCE")}
-    env0.update({"NO_COLOR": "1", "PYTHON_COLORS": "0"})
+    env0.update({"NO_COLOR": "1", "PYTHON_COLORS": "0", "RUN_TESTS_RUNNER": "1"})
+    qos = qos_line(sys.executable, env0)
+    if qos:
+        print(qos, flush=True)
     root = tempfile.mkdtemp(prefix="run-tests-")
     stubs, stubbed = make_stubs(root)
     if stubs:
