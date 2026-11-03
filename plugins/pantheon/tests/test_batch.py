@@ -53,7 +53,7 @@ card(os.path.join(tdir, "metis-0901.md"), {"type": "task", "id": "metis-0901", "
                                            "parent": "metis-0900", **base})
 card(os.path.join(tdir, "metis-0902.md"), {"type": "task", "id": "metis-0902", "title": '"Вторая"', "status": "todo",
                                            "parent": "metis-0900", "depends_on": "[metis-0901]", **base})
-card(os.path.join(tdir, "metis-0903.md"), {"type": "task", "id": "metis-0903", "title": '"Готовая"', "status": "done",
+card(os.path.join(tdir, "metis-0903.md"), {"type": "task", "id": "metis-0903", "title": '"Готовая часть работы"', "status": "done",
                                            "parent": "metis-0900", **base})
 card(os.path.join(tdir, "metis-0904.md"), {"type": "task", "id": "metis-0904", "title": '"Чужая"', "status": "todo",
                                            **base})
@@ -169,6 +169,19 @@ calls = gh_calls()
 check("повтор при открытом PR → gh pr edit 17 с новым телом, create нет",
       r.returncode == 0 and any(c[:3] == ["pr", "edit", "17"] and "Closes metis-0901, metis-0902" in c[-1] for c in calls)
       and not any(c[:2] == ["pr", "create"] for c in calls), str(calls))
+
+# коммит «часть <id>» — задача сделана не вся: Closes ей нет, в теле нет слова «часть» (autoclose снял бы весь PR)
+open(os.path.join(wt, "d.txt"), "w").write("d\n")
+git(wt, "add", "d.txt")
+git(wt, "commit", "-q", "-m", "доработка, часть metis-0902")
+r = cli(wt, "batch", "pr", "metis-0900", "--dry-run")
+body = r.stdout.split("\n\n", 1)[1] if "\n\n" in r.stdout else ""
+check("«часть metis-0902» в коммите → Closes только metis-0901, 0902 — «не целиком»",
+      "Closes metis-0901\n" in body and "остаются открытыми: metis-0902" in body and "· частично ·" in body, body)
+check("тело без слова «часть» (и из заголовка задачи): autoclose.is_part — нет",
+      not AC.is_part(body) and "ч. работы" in body, body)
+check("autoclose по телу закрывает только metis-0901",
+      AC.closing_ids("batch/metis-0900", body) == ["metis-0900", "metis-0901"], str(AC.closing_ids("batch/metis-0900", body)))
 
 # GH_REPO не доходит до gh
 open(os.path.join(bindir, "gh"), "w").write(f"#!/bin/sh\necho \"[$GH_REPO]\" >> '{ghlog}.env'\n")
