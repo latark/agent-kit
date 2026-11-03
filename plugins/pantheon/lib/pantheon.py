@@ -4832,9 +4832,10 @@ MERGE_REQUEST_CMDS = ["pantheon merge request *", "pantheon merge status", "pant
 
 
 def merge_kick():
-    """Заявки на слияние по Touch ID (metis-0285) — отдельным процессом: окно ждёт пальца до двух минут, тик не ждёт."""
+    """Заявки на слияние по Touch ID (metis-0285) и отставшие управляемые настройки guard (metis-0710) — отдельным
+    процессом: окно ждёт пальца до двух минут, тик не ждёт."""
     try:
-        if not merge_mod().pending() or locked("merge-run"):
+        if not (merge_mod().pending() or merge_mod().managed_check()) or locked("merge-run"):
             return
         if os.environ.get("PANTHEON_DRYRUN") == "1":
             with open(path("dryrun.log"), "a") as fh:
