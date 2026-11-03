@@ -181,6 +181,8 @@ MAX_SERVERS = 2                     # решение владельца 01.11: �
 SERVER_MEM_MB = 4096                # и у каждого лимит 4 ГБ (владелец 01.11): RSS дерева сервера больше — сторож гасит
 SERVE_MIN, SERVE_MAX = 30, 120      # срок сервера, минуты
 TEST_TIMEOUT = 7200                 # с
+IDLE_TIMEOUT = 900                  # с: лог прогона не растёт, а дерево процессов почти не тратит CPU — завис, гасим (metis-0770)
+IDLE_CPU = 0.05                     # доля одного ядра: меньше за окно тишины — «почти не тратит»
 INSTALL_TIMEOUT = 900               # с: установка зависимостей копии сервера
 READY_SEC = 90                      # сервер должен открыть порт за это время
 KILL_WAIT = 5
@@ -828,20 +830,97 @@ def _pid_alive(p):
         return False
 
 
-def wait_proc(proc, timeout, tick=None):
+class Silent(Exception):
+    """Лог молчал IDLE_TIMEOUT с при почти нулевом CPU дерева: группа убита (SIGKILL), why — для итога."""
+
+    def __init__(self, secs, last):
+        self.secs, self.last = secs, last
+        mins = f"{round(secs / 60)} мин" if secs >= 60 else f"{round(secs)} с"
+        self.why = f"тишина {mins}, последний вывод: {last or '(пусто)'}"
+        super().__init__(self.why)
+
+
+def _cpu_secs(text):
+    """Время процессора ps («MM:SS.ss», «H:MM:SS», «D-HH:MM:SS») → секунды или None."""
+    try:
+        days, _, rest = text.rpartition("-")
+        total = 0.0
+        for part in rest.split(":"):
+            total = total * 60 + float(part)
+        return total + (int(days) * 86400 if days else 0)
+    except ValueError:
+        return None
+
+
+def tree_cpu(pid):
+    """Сумма CPU-секунд группы pid и её потомков (в своих группах тоже) по ps или None: ps недоступен (песочница) —
+    тогда судим только по тишине лога (metis-0770). Ушедшие за время опроса процессы счёт занижают — не страшно."""
+    table = ps_table()
+    pids = _tree(pid, table) if table else set()
+    if not pids:
+        return None
+    try:
+        out = subprocess.run([PS, "-axo", "pid=,time="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    total, seen = 0.0, False
+    for ln in out.splitlines():
+        parts = ln.split()
+        if len(parts) == 2 and parts[0].isdigit() and int(parts[0]) in pids:
+            c = _cpu_secs(parts[1])
+            if c is not None:
+                total, seen = total + c, True
+    return total if seen else None
+
+
+def last_line(log):
+    """Последняя непустая строка лога (до 200 знаков) или ''."""
+    for ln in reversed(tail(log).splitlines()):
+        if ln.strip():
+            return ln.strip()[:200]
+    return ""
+
+
+def wait_proc(proc, timeout, tick=None, idle_log=None):
     """proc.wait(timeout), а каждые SWEEP_EVERY с — tick(): у прохода серверов это сторож (sweep_quiet) и проверка
     «стопа» своей заявки — tick() вернул True — группа гаснет, ждём её конца (metis-0606, 0614). Тесты идут в своём
-    проходе и серверы не смотрят. TimeoutExpired — как у proc.wait."""
+    проходе и серверы не смотрят. TimeoutExpired — как у proc.wait.
+    idle_log — сторож тишины (metis-0770): файл не растёт IDLE_TIMEOUT с и CPU дерева за это окно меньше IDLE_CPU
+    (CPU не узнать — судим по тишине) → SIGKILL группе и её потомкам, исключение Silent."""
     deadline = time.monotonic() + timeout
+    step = min(SWEEP_EVERY, max(0.1, IDLE_TIMEOUT / 4)) if idle_log else SWEEP_EVERY
+    size, grew = None, time.monotonic()
+    base = None                      # (время, CPU дерева) на первом тихом шаге после роста лога
     while True:
         try:
-            return proc.wait(timeout=max(0.01, min(SWEEP_EVERY, deadline - time.monotonic())))
+            return proc.wait(timeout=max(0.01, min(step, deadline - time.monotonic())))
         except subprocess.TimeoutExpired:
             if time.monotonic() >= deadline:
                 raise
         if tick and tick():
             kill_group(proc.pid)
             return proc.wait()
+        if idle_log:
+            now = time.monotonic()
+            try:
+                cur_size = os.stat(idle_log).st_size
+            except OSError:
+                cur_size = size
+            if cur_size != size:
+                size, grew, base = cur_size, now, None
+            elif now - grew >= IDLE_TIMEOUT:
+                cpu = tree_cpu(proc.pid)
+                if base is None or cpu is None or base[1] is None or (
+                        now - base[0] >= IDLE_TIMEOUT / 2 and (cpu - base[1]) / (now - base[0]) < IDLE_CPU):
+                    last = last_line(idle_log)
+                    extra = strays(proc.pid)
+                    _signal(proc.pid, extra, signal.SIGKILL)
+                    kill_group(proc.pid)
+                    proc.wait()
+                    raise Silent(now - grew, last)
+                base = (now, cpu)    # дерево работает без вывода — окно CPU заново
+            elif base is None:
+                base = (now, tree_cpu(proc.pid))
 
 
 _SWEEP_ERR = []
@@ -1274,11 +1353,17 @@ def run_test(rid, d, script, window, qdir, roots, record=True):
             return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line,
                                            "why": f"команда не запустилась: {e}", "log": log})
         try:
-            code = wait_proc(proc, TEST_TIMEOUT)
+            code = wait_proc(proc, TEST_TIMEOUT, idle_log=log)
         except subprocess.TimeoutExpired:
             timed_out = True
             kill_group(proc.pid)
             code = proc.wait()
+        except Silent as e:      # завис без вывода и CPU: тот же журнал, что отказ запуска (metis-0770)
+            with contextlib.suppress(OSError):
+                os.write(fd, f"\n{e.why}\n".encode())
+            log_event(kind="test-silent", id=rid, why=e.why)
+            return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": sha, "cmd": line, "why": e.why,
+                                           "log": log, "tail": tail(log)})
     finally:
         os.close(fd)
         shutil.rmtree(tmp, ignore_errors=True)
