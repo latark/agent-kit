@@ -49,6 +49,9 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         надстройка из [read] в STATE/config.toml
   pantheon merge request|run|status|cancel   слияние PR ядра по Touch ID (metis-0285, lib/merge.py): заявка роли →
                                         плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA
+  pantheon batch start|pr <story>      пачка — одна ветка и один PR (lib/batch.py, metis-0757): start — ветка
+                                        batch/<story> от origin/main и копия .claude/worktrees/batch-<story>;
+                                        pr — один PR ветки в main, в теле задачи пачки и Closes (--dry-run — показать)
   pantheon outside test|serve|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
                                         тесты проекта или dev-сервер (своя копия на коммите, порт 4300–4399, не
                                         больше двух) под sandbox-exec без ключей, браузеров и
@@ -6566,6 +6569,7 @@ _attach("quarantine")
 _attach("instructions")
 _attach("rolecmd")
 _attach("sessions")
+_attach("batch")
 
 
 def main(argv):
@@ -6693,6 +6697,8 @@ def main(argv):
         return merge_mod().main(rest)
     if cmd == "outside":
         return outside_mod().main(rest)
+    if cmd == "batch":
+        return batch_cmd(rest)
     if cmd == "probes":
         return probes_cmd(rest)
     if cmd == "traces":
