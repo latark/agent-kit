@@ -13,16 +13,15 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   pantheon browser open URL [--task ID]                  открыть адрес в рабочей вкладке демона
   pantheon browser read (URL|--here) [--task ID]         текст страницы и ссылки (до 200 КБ)
   pantheon browser eval (URL|--here) EXPR [--task ID]    выражение JS в изолированном мире, без побочных действий
-  pantheon browser click SELECTOR --task ID              нажатие мышью: флажок, переключатель, вкладка, ссылка сайта
-  pantheon browser type SELECTOR TEXT --task ID          фокус на поле и ввод текста
-  pantheon browser submit SELECTOR --task ID             нажатие, которое отправляет форму, платит, пишет людям —
-                                                         только после «да» владельца (pantheon consent, ниже)
   pantheon browser status [ID]                           итог заявки или последние итоги
   pantheon browser run                                   проход вне окна: только тик, не окно Claude Code
 
   Общие ключи: --browser comet (по умолчанию) или chrome; --wait С — ждать итога до С секунд (по умолчанию 120, до 590;
   0 — не ждать). Код выхода: 0 — сделано, 1 — отказ или сбой (причина в последней строке), 2 — неверный вызов,
   75 — итога за --wait нет (pantheon browser status ID).
+
+  Только чтение. Нажатия, ввод и отправка формы (click, type, submit) вынесены в metis-0765: эти команды — отказ
+  «вынесено в metis-0765», код 2 (решение Метиды 03.11, круг 3 PR #290).
 
 Границы (решения владельца 15.10 и 03.11, decisions.md: Харон, `browse read`, allowLocalBinding; metis-0760):
 - Чтение (open, read, eval) — только сайты из `~/.claude/pantheon/reads.toml` (`domains = [...]`, поддомены тоже; файла
@@ -31,19 +30,14 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
   токеном (`--task ID`; example.com не открывает le.com). Адрес — печатные ASCII без «\\», «хост:порт» без %, [], @.
   Адрес вкладки сверяется после /open (нет поля url — отказ), в итоге read и после eval; чужой — about:blank и отказ.
   reads.toml правит владелец: зона ~/.claude/pantheon/ ролям закрыта.
-- Нажатия и ввод (click, type) — только с `--task ID` и на сайте, который можно читать. click — только по списку видов:
-  флажок, переключатель, option, вкладка (role=tab), ссылка на тот же сайт; вид берётся по точке нажатия
-  (elementFromPoint) и ближайшему интерактивному предку. Кнопки любого типа и всё прочее — отказ: это submit.
-- submit — только после «да» владельца окном вопросов на вопрос, который начинается ровно с «[ID] Отправить форму на
-  <сайт>?» и получен позже последнего type или click на этом браузере (по любой задаче) и позже прошлой отправки.
-  Одно «да» — одна отправка. Нет «да» — отказ с текстом вопроса, который роль просит задать Зевса. Деньги и переводы
-  Харон не делает вовсе (роль), капчу решает владелец.
 - eval — только изолированный мир демона (переменные страницы не видны); выражение с побочным действием (нажатие,
-  отправка, запросы, cookie и хранилища, присваивание, переход, вызов через prototype/call/apply, обращение к свойству
-  по строке) — отказ (eval_bad: EVAL_DENY и EVAL_COMPUTED). Это защита от ошибки агента и указаний со страницы, а не
-  от намеренного обхода (как guard, README guard): обход — правка роли, не шаблона.
-- Сырые /cmd, /events, /console и /close демона наружу не выходят: проход зовёт /cmd сам и только с
-  Input.dispatchMouseEvent и Input.insertText.
+  отправка, сброс и шаги полей формы, запросы, загрузка ресурса, cookie и хранилища, присваивание, переход, вызов через
+  prototype/call/apply, обращение к свойству по строке) — отказ (eval_bad: EVAL_DENY, EVAL_COMPUTED). `new` — только
+  URL, URLSearchParams, Date, Set, Map, RegExp и Intl.* (EVAL_NEW): new Audio, new FontFace, new Image и прочие
+  конструкторы с адресом выходят в сеть. Это защита от ошибки агента и указаний со страницы, а не от намеренного
+  обхода (как guard, README guard): обход — правка роли, не шаблона.
+- Сырые /cmd, /events, /console и /close демона наружу не выходят, и сам проход их не зовёт: только /health, /open,
+  /eval.
 - Демон не отвечает — проход уведомляет владельца (кто, что, какой сайт, задача; «нажмите Разрешить») и запускает его
   (`node cdp-daemon.mjs <браузер>`); повтор запуска не раньше чем через 10 мин. Первое обращение по задаче и сайту за
   6 ч — тоже уведомление.
@@ -90,12 +84,13 @@ DEFAULT_DOMAINS = (
     "forms.yandex.ru",                        # формы владельца (metis-0760, «Готово, когда» шага В)
 )                                             # решение владельца 15.10 (BROW-09): 15 сайтов чтения + forms.yandex.ru
 DEFAULT_WINDOWS = ("hq",)
-OPS = ("health", "open", "read", "eval", "click", "type", "submit")
-ACTS = ("click", "type", "submit")            # нажатия и ввод — только с задачей
+OPS = ("health", "open", "read", "eval")
+MOVED = ("click", "type", "submit")           # нажатия, ввод и отправка — metis-0765 (круг 3 PR #290: только чтение)
+MOVED_WHY = "вынесено в metis-0765: нажатия, ввод и отправка формы; здесь только чтение — health, open, read, eval"
 ID_RE = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
 WINDOW_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 TASK_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
-LIMITS = {"url": 2000, "expr": 4000, "selector": 300, "text": 4000}
+LIMITS = {"url": 2000, "expr": 4000}
 WAIT_DEFAULT, WAIT_MAX = 120, 590
 REQ_TTL = 300                                 # заявка старше 5 мин — сбой: роль уже не ждёт
 REQ_MAX = 32 * 1024
@@ -110,23 +105,22 @@ HTTP_TIMEOUT = 60
 READ_MAX = 4 * 1024 * 1024
 FINAL = ("done", "failed", "refused")
 
-# слова, при которых нажатие — отправка, публикация или сообщение (вторая линия K2: главная — список видов в locate_js)
-SUBMIT_WORDS = re.compile(r"отправ|оплат|оплач|купить|заказ|перевест|подписать|подтверд|опублик|размест|удалить|"
-                          r"сохранить|ответить|написать|подать|заявк|заброн|записат|связат|позвонит|отклик|"
-                          r"submit|send|pay\b|buy|order|checkout|publish|post\b|delete|save\b|reply|book\b|apply\b",
-                          re.I)
 # eval без побочных действий: шаблон ловит ошибку агента и указание со страницы, не намеренный обход (README guard).
-# Классы E1–E5 модели угроз (drafts/0760-threat-model.md); обфускация сверх этого — остаток, шаблон не наращивать
+# Классы E1–E7 модели угроз (drafts/0760-threat-model.md); обфускация сверх этого — остаток, шаблон не наращивать.
+# E6 (Б3 круга 2): загрузка ресурса — .load( (FontFace, media), addModule (worklet), fetchLater. E7 (Д3): форма не
+# меняется — .reset(, .stepUp(, .stepDown(, .requestClose(, .add( нового элемента в select
 EVAL_DENY = re.compile(r"""(?x)
     \.\s*(?:click|submit|requestSubmit|dispatchEvent|focus|blur|remove|removeChild|append|appendChild|prepend|
           replaceChild|replaceWith|replaceChildren|insertBefore|insertAdjacent\w*|before|after|setAttribute\w*|
           removeAttribute\w*|toggleAttribute|setItem|removeItem|assign|reload|open|write|writeln|showModal|close|
           play|pause|setRangeText|setSelectionRange|execCommand|sendBeacon|postMessage|pushState|replaceState|
-          defineProperty|defineProperties|setPrototypeOf|set|on[a-z]+)\s*\(
+          defineProperty|defineProperties|setPrototypeOf|set|on[a-z]+|
+          load|addModule|reset|stepUp|stepDown|requestClose)\s*\(
+  | \.\s*add\s*\(\s*(?:new\b|document\s*\.\s*createElement\b)
   | \.\s*(?:click|submit|requestSubmit|call|apply|bind)\b
   | (?<![\w$.])(?:open|close|print|alert|confirm|prompt|stop|focus|blur|postMessage|scroll|scrollTo|scrollBy|moveTo|
           moveBy|resizeTo|resizeBy)\s*\(
-  | \b(?:fetch|XMLHttpRequest|WebSocket|EventSource|eval|Function|import|setTimeout|setInterval|requestAnimationFrame|
+  | \b(?:fetch|fetchLater|XMLHttpRequest|WebSocket|EventSource|eval|Function|import|setTimeout|setInterval|requestAnimationFrame|
           requestIdleCallback|queueMicrotask|Worker|SharedWorker|Reflect|BroadcastChannel|MessageChannel|
           RTCPeerConnection|WebTransport|opener|prototype|constructor|__proto__|history|navigation)\b
   | \b(?:cookie|cookieStore|localStorage|sessionStorage|indexedDB|caches|serviceWorker|credentials|clipboard)\b
@@ -140,11 +134,16 @@ EVAL_DENY = re.compile(r"""(?x)
 # литерал массива ['h1', 'h2']) со строкой внутри
 EVAL_STRINGS = re.compile(r"""'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\$]|\\.|\$(?!\{))*`""")
 EVAL_COMPUTED = re.compile(r"[\w$)\]]\s*\[[^\[\]]*(?:''|\"\"|``)")
+# E6 (Б3): `new` — только по списку; new Audio(url), new FontFace(…, 'url(…)'), new Image, new Option и прочие — отказ.
+# На остове: «.new-badge» в строке селектора не мешает
+EVAL_NEW = re.compile(r"(?<![\w$.])new\b(?!\s*(?:URL|URLSearchParams|Date|Set|Map|RegExp|Intl\s*\.\s*[A-Za-z]+)"
+                      r"(?![\w$]|\s*\.))\s*[\w$.]*")
 
 
 def eval_bad(expr):
-    """Что в выражении eval — побочное действие или секрет (EVAL_DENY, EVAL_COMPUTED), или None."""
-    m = EVAL_DENY.search(expr) or EVAL_COMPUTED.search(EVAL_STRINGS.sub(lambda s: s.group(0)[0] * 2, expr))
+    """Что в выражении eval — побочное действие или секрет (EVAL_DENY, EVAL_COMPUTED, EVAL_NEW), или None."""
+    skel = EVAL_STRINGS.sub(lambda s: s.group(0)[0] * 2, expr)
+    m = EVAL_DENY.search(expr) or EVAL_COMPUTED.search(skel) or EVAL_NEW.search(skel)
     return m.group(0).strip() if m else None
 
 
@@ -288,11 +287,11 @@ def question_hosts(q):
     return {site_word(h.lower()) for h in HOST_TOKEN.findall(q)}
 
 
-def owner_yes(task, match, after=0.0):
+def owner_yes(task, match):
     """Время последнего «да» владельца на вопрос «[task] …» за CONSENT_DAYS, текст которого (без «вопрос: ») принял
-    match, и которое позже after; None — нет. Решает последний ответ на каждый вопрос (как pantheon consent). Только
+    match; None — нет. Решает последний ответ на каждый вопрос (как pantheon consent). Только
     ответы окна вопросов и ответа в чате — заголовок « у Зевса» (C1): галочка на доске браузеру не согласие
-    (decisions.md: деньги, публикации, сообщения людям — только окном вопросов)."""
+    (decisions.md: чужой сайт по задаче — только окном вопросов)."""
     try:
         found, _m, _u = P.consent_found(task, CONSENT_DAYS)
     except P.ConsentLogError as e:
@@ -303,7 +302,7 @@ def owner_yes(task, match, after=0.0):
     best = None
     for q, (t, head, body) in final.items():
         q = re.sub(r"^вопрос:\s*", "", q)
-        if head.endswith(" у Зевса") and t > after and P.consent_is_yes(body) and match(q):
+        if head.endswith(" у Зевса") and P.consent_is_yes(body) and match(q):
             best = max(best or t, t)
     return best
 
@@ -313,24 +312,11 @@ def site_word(host):
 
 
 def allowed(host, domains, task):
-    """Сайт можно читать и трогать: он в списке или по задаче есть «да» владельца на вопрос с этим хостом (токеном)."""
+    """Сайт можно читать: он в списке или по задаче есть «да» владельца на вопрос с этим хостом (токеном)."""
     if listed(host, domains):
         return True
     site = site_word(host)
     return bool(task) and owner_yes(task, lambda q: site in question_hosts(q)) is not None
-
-
-def bstate(browser):
-    """Форма на браузере (C4–C6): changed — последний type или click, submitted — последняя отправка. На браузер, а
-    не на задачу: ввод по одной задаче и отправка по другой со старым «да» — отказ."""
-    return P.read_json(root("state", browser + ".json"), {}) or {}
-
-
-def bstate_save(browser, **kw):
-    st = bstate(browser)
-    st.update(kw)
-    os.makedirs(root("state"), exist_ok=True)
-    P.write_json(root("state", browser + ".json"), st)
 
 
 # --- демон --------------------------------------------------------------------------------------------------------
@@ -378,7 +364,7 @@ def health(browser):
 
 
 def call(browser, path, body=None):
-    """Вызов демона с паролем → разобранный JSON (или строка). Только /health, /open, /eval и /cmd — из этого файла."""
+    """Вызов демона с паролем → разобранный JSON (или строка). Только /health, /open и /eval — из этого файла."""
     try:
         code, text = transport(BROWSERS[browser], "GET" if body is None else "POST", path, body, read_token())
     except ConnectionError as e:
@@ -481,73 +467,6 @@ READ_JS = ("(() => { const b = document.body; return { url: location.href, title
            ".map(a => [(a.innerText || '').trim().slice(0, 120), a.href]) }; })()" % (TEXT_MAX, LINKS_MAX))
 
 
-# click — только по списку видов (K, решение Метиды 15:27): флажок, переключатель, option, вкладка, ссылка того же сайта.
-# Вид решает не элемент селектора, а то, что под точкой нажатия (elementFromPoint), и его ближайший интерактивный
-# предок: span внутри кнопки отправки — кнопка (K1). Кнопки любого типа, поля, select и элементы без интерактивного
-# предка (обработчик на div, Авито) — отказ: это submit после «да» владельца
-CLICK_KINDS = ("checkbox", "radio", "option", "tab", "link")
-INTERACTIVE = ("a[href],button,input,select,option,textarea,label,summary,[contenteditable],[onclick],[role=button],"
-               "[role=link],[role=tab],[role=checkbox],[role=switch],[role=radio],[role=option],[role=menuitem],"
-               "[role=menuitemcheckbox],[role=menuitemradio],[role=combobox],[role=textbox]")
-ROLE_KINDS = {"tab": "tab", "checkbox": "checkbox", "switch": "checkbox", "radio": "radio", "option": "option",
-              "link": "link"}
-
-
-def locate_js(selector, focus=False):
-    s = json.dumps(selector)
-    return ("(() => { const e = document.querySelector(%s); if (!e) return null; "
-            "e.scrollIntoView({block: 'center', inline: 'center'}); %s const r = e.getBoundingClientRect(); "
-            "const x = r.left + r.width / 2, y = r.top + r.height / 2, p = document.elementFromPoint(x, y); "
-            "const hit = !!p && (p === e || e.contains(p)); "
-            "const k = (hit ? p : e).closest(%s); let kind = 'none', href = ''; "
-            "if (k) { const tag = k.tagName.toLowerCase(), role = (k.getAttribute('role') || '').toLowerCase(), "
-            "type = (k.getAttribute('type') || 'text').toLowerCase(); "
-            "if (tag === 'input') kind = (type === 'checkbox' || type === 'radio') ? type : 'input-' + type; "
-            "else if (tag === 'label') { const c = k.control; kind = c && c.tagName === 'INPUT' && "
-            "(c.type === 'checkbox' || c.type === 'radio') ? c.type : 'label'; } "
-            "else if (tag === 'option') kind = 'option'; "
-            "else if (tag === 'a' && (!role || role === 'link')) { kind = 'link'; href = k.href; } "
-            "else if (role) kind = (%s)[role] || 'role-' + role; "
-            "else kind = tag; } "
-            "return { x, y, w: r.width, h: r.height, hit, kind, href, tag: e.tagName.toLowerCase(), "
-            "label: ((k || e).innerText || (k || e).value || (k || e).getAttribute('aria-label') || (k || e).title || "
-            "'').trim().slice(0, 200), focused: document.activeElement === e }; })()") % (
-        s, "e.focus();" if focus else "", json.dumps(INTERACTIVE), json.dumps(ROLE_KINDS))
-
-
-def same_site(href, host):
-    """K5: ссылка http(s) на тот же сайт, что у страницы (www. не в счёт); javascript:, чужой хост — нет."""
-    try:
-        return isinstance(href, str) and site_word(url_host(href)) == site_word(host)
-    except Refuse:
-        return False
-
-
-def element(browser, selector, focus=False):
-    el = evaluate(browser, locate_js(selector, focus))
-    if not isinstance(el, dict):
-        raise Refuse(f"элемента {selector} на странице нет")
-    if not el.get("w") or not el.get("h"):
-        raise Refuse(f"элемент {selector} не виден (нулевой размер)")
-    return el
-
-
-def mouse_click(browser, x, y):
-    for kind in ("mouseMoved", "mousePressed", "mouseReleased"):
-        params = {"type": kind, "x": x, "y": y}
-        if kind != "mouseMoved":
-            params.update({"button": "left", "clickCount": 1})
-        call(browser, "/cmd", {"method": "Input.dispatchMouseEvent", "params": params, "target": "work"})
-
-
-def after_click(browser, domains, task):
-    """Куда привело нажатие: чужой сайт — вкладка закрывается, отказ."""
-    time.sleep(1)
-    url = here_url(browser)
-    page_check(browser, url, domains, task, "нажатие увело на")
-    return url
-
-
 def seen_notice(win, op, host, task):
     """Первое обращение по задаче и сайту за SEEN_TTL — уведомление владельцу (BROW-10: кто, что, сайт, задача)."""
     key = re.sub(r"[^a-z0-9.-]", "_", f"{task or '-'}.{host}")[:120]
@@ -571,6 +490,8 @@ def seen_notice(win, op, host, task):
 
 def check_req(req):
     """Поля заявки: типы и длины; Refuse — неверная заявка."""
+    if isinstance(req, dict) and req.get("op") in MOVED:
+        raise Refuse(f"{req['op']}: {MOVED_WHY}")
     if not isinstance(req, dict) or req.get("v") != 1 or req.get("op") not in OPS:
         raise Refuse("заявка не того вида")
     if req.get("browser") not in BROWSERS:
@@ -583,27 +504,12 @@ def check_req(req):
     if task is not None and (not isinstance(task, str) or not TASK_RE.fullmatch(task)):
         raise Refuse("--task — id задачи вида metis-0760")
     op = req["op"]
-    if op in ACTS and not task:
-        raise Refuse(f"{op} — только с --task ID: нажатия и ввод в пределах задачи")
-    if op in ("click", "type", "submit") and not req.get("selector"):
-        raise Refuse(f"{op}: нужен селектор")
-    if op == "type" and req.get("text") is None:
-        raise Refuse("type: нужен текст")
     if op == "eval" and not req.get("expr"):
         raise Refuse("eval: нужно выражение")
     if op in ("open",) and not req.get("url"):
         raise Refuse("open: нужен адрес")
     if op in ("read", "eval") and not (req.get("url") or req.get("here")):
         raise Refuse(f"{op}: нужен адрес или --here")
-
-
-def submit_head(task, host):
-    """Точное начало вопроса о submit (C3): «да» засчитывается, только если вопрос начинается ровно так."""
-    return f"[{task}] Отправить форму на {site_word(host)}?"
-
-
-def submit_question(task, host):
-    return submit_head(task, host) + " (что заполнено — в вопросе)"
 
 
 def execute(req, win, domains):
@@ -619,8 +525,8 @@ def execute(req, win, domains):
                         f"пароль демона у прохода {'есть' if tok else 'НЕТ'}"), ""
     bad = eval_bad(req["expr"]) if op == "eval" else None
     if bad:
-        raise Refuse(f"eval с побочным действием или секретом («{bad[:40]}») — только чтение страницы; нажатия — click, "
-                     "ввод — type")
+        raise Refuse(f"eval с побочным действием или секретом («{bad[:40]}») — только чтение страницы; нажатия, ввод и "
+                     "отправка — metis-0765")
     url = req.get("url")
     host = None
     if url:
@@ -651,49 +557,6 @@ def execute(req, win, domains):
         out = evaluate(b, req["expr"])
         page_check(b, here_url(b), domains, task, "после eval вкладка на")   # A6: переход скриптом до или во время
         return "done", out if isinstance(out, str) else json.dumps(out, ensure_ascii=False, indent=1), ""
-    if op == "type":
-        el = element(b, req["selector"], focus=True)
-        if not el.get("focused"):
-            raise Refuse(f"поле {req['selector']} не принимает фокус — ввод не сделан")
-        bstate_save(b, changed=P.now())                 # C4: до ввода — и сбой ввода снимает прежнее «да»
-        call(b, "/cmd", {"method": "Input.insertText", "params": {"text": req["text"]}, "target": "work"})
-        return "done", f"введено в {req['selector']} на {host}: {len(req['text'])} знаков", ""
-    if op == "click":
-        el = element(b, req["selector"])
-        kind, label = el.get("kind"), el.get("label") or ""
-        why = None
-        if el.get("hit") is not True:
-            why = "точка нажатия закрыта другим элементом"
-        elif kind not in CLICK_KINDS:
-            why = f"вид «{kind}» — не флажок, переключатель, option, вкладка или ссылка того же сайта"
-        elif kind == "link" and not same_site(el.get("href"), host):
-            why = f"ссылка ведёт не на {site_word(host)} ({str(el.get('href'))[:120]})"
-        elif kind in ("link", "tab") and SUBMIT_WORDS.search(label):
-            why = f"надпись «{label[:60]}» — отправка, публикация или сообщение"
-        if why:
-            raise Refuse(f"click {req['selector']}: {why} — нажатие кнопок и прочего только submit после «да» владельца: "
-                         f"{submit_question(task, host)}")
-        bstate_save(b, changed=P.now())                 # C5: флажок или выбор после «да» — новое «да» на submit
-        mouse_click(b, el["x"], el["y"])
-        now_url = after_click(b, domains, task)
-        return "done", f"нажато {req['selector']} ({kind}) на {host}; теперь {now_url}", ""
-    # submit (C1–C6): «да» окна вопросов на вопрос, который начинается ровно с submit_head, позже последнего type или
-    # click на этом браузере (по любой задаче) и позже прошлой отправки
-    st = bstate(b)
-    after = max(float(st.get("changed") or 0), float(st.get("submitted") or 0))
-    head = submit_head(task, host)
-    yes = owner_yes(task, lambda q: q.startswith(head), after)
-    if yes is None:
-        raise Refuse(f"submit без «да» владельца окном вопросов после последнего ввода или нажатия на этом браузере — "
-                     f"попроси Зевса спросить: «{submit_question(task, host)}» с вариантами «Да — отправить» / «Нет»; "
-                     f"проверка — pantheon consent {task}")
-    el = element(b, req["selector"])
-    if el.get("hit") is not True:
-        raise Refuse(f"submit {req['selector']}: точка нажатия закрыта другим элементом — отправка не сделана")
-    bstate_save(b, submitted=P.now())   # одно «да» — одна отправка (C6): снимаем до нажатия
-    mouse_click(b, el["x"], el["y"])
-    now_url = after_click(b, domains, task)
-    return "done", f"отправлено ({req['selector']}) на {host} по «да» владельца {P.stamp(yes)}; теперь {now_url}", ""
 
 
 def handle(text, win, cfg):
@@ -815,15 +678,13 @@ def kick():
 
 # --- заявка из окна ------------------------------------------------------------------------------------------------
 
-USAGE = """pantheon browser health|open|read|eval|click|type|submit|status [--browser comet|chrome] [--wait С] [--task ID]
+USAGE = """pantheon browser health|open|read|eval|status [--browser comet|chrome] [--wait С] [--task ID]
   health                         демон жив, браузер подключён
   open URL                       открыть адрес (сайты reads.toml или «да» владельца по --task)
   read URL | read --here          текст и ссылки страницы
   eval URL EXPR | eval --here EXPR   выражение JS без побочных действий
-  click SELECTOR --task ID       флажок, переключатель, option, вкладка, ссылка сайта (отправка — submit)
-  type SELECTOR TEXT --task ID   ввод в поле
-  submit SELECTOR --task ID      отправка — только после «да» владельца на «[ID] Отправить форму на <сайт>? …»
-  status [ID]                    итог заявки"""
+  status [ID]                    итог заявки
+  click, type, submit            вынесено в metis-0765 (нажатия, ввод, отправка формы) — отказ, код 2"""
 
 
 def parse(args):
@@ -842,6 +703,8 @@ def parse(args):
         else:
             pos.append(a)
         i += 1
+    if pos and pos[0] in MOVED:
+        raise ValueError(f"{pos[0]}: {MOVED_WHY}")
     if not pos or pos[0] not in OPS:
         raise ValueError("нет действия")
     op, rest = pos[0], pos[1:]
@@ -853,13 +716,10 @@ def parse(args):
         raise ValueError(f"--wait — от 0 до {WAIT_MAX}")
     req = {"v": 1, "op": op, "browser": opts["browser"], "task": opts["task"], "here": opts["here"]}
     need = {"health": [], "open": ["url"], "read": [] if opts["here"] else ["url"],
-            "eval": ["expr"] if opts["here"] else ["url", "expr"], "click": ["selector"], "submit": ["selector"],
-            "type": ["selector", "text"]}[op]
+            "eval": ["expr"] if opts["here"] else ["url", "expr"]}[op]
     if len(rest) != len(need):
         raise ValueError(f"{op}: ждём {' '.join(n.upper() for n in need) or 'без аргументов'}")
     req.update(zip(need, rest))
-    if op in ACTS and not opts["task"]:
-        raise ValueError(f"{op} — только с --task ID")
     check_req(req)
     return req, wait
 

