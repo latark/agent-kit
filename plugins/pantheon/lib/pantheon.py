@@ -5611,10 +5611,31 @@ def board_md_check(quiet):
             clear_once(f"check-board-md-{k}")
 
 
+def _file_mark(st):
+    """Отметка файла для сверки «не изменился ли»: inode (замена через rename), mtime в нс и размер."""
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+
+def _board_changed(board, seen):
+    """board.md уже не тот, что прочитан (metis-0780) → True и строка отказа в stderr."""
+    try:
+        cur = _file_mark(os.stat(board))
+    except OSError:
+        cur = None
+    if cur == seen:
+        return False
+    print("board.md изменился, повтори: pantheon board archive (ничего не записано)", file=sys.stderr)
+    return True
+
+
 def board_archive(rest):
     """`pantheon board archive [--days N]` (metis-0769): датированные блоки «Сейчас» и «Сессии и хозяйство» старше N дней
     (по умолчанию 7) — в ~/ai/pantheon/archive/ГГГГ-ММ.md; без потерь: сначала дописывается архив, потом board.md
-    заменяется целиком. Нечего переносить — файлы не тронуты."""
+    заменяется целиком. Нечего переносить — файлы не тронуты.
+    board.md правят и руками (Зевс, владелец) без замка pantheon-git, поэтому перед записью архива и перед заменой
+    board.md сверяются inode, mtime и размер с прочитанными (metis-0780): изменился — отказ «board.md изменился,
+    повтори», код 1, board.md не тронут, дописанное в архив откатывается. Остаток — правка в те же доли секунды
+    между последней сверкой и заменой."""
     M, days = boardmd_mod(), None
     args = list(rest)
     if args[:1] == ["--days"] and len(args) == 2 and args[1].isdigit():
@@ -5631,16 +5652,29 @@ def board_archive(rest):
     with lock("pantheon-git"):
         with open(board, encoding="utf-8") as fh:
             text = fh.read()
+            seen = _file_mark(os.fstat(fh.fileno()))
         kept, moved = M.split(text, now(), days)
         n = sum(len(v) for v in moved.values())
         if not n:
             print(f"board.md: блоков старше {days} дн. нет")
             return 0
+        if _board_changed(board, seen):
+            return 1
         os.makedirs(os.path.join(PANTHEON, "archive"), exist_ok=True)
         stamp = datetime.fromtimestamp(now()).strftime("%Y-%m-%d")
+        undo = {}   # архив → размер до дописывания (None — файла не было)
         for key, ls in sorted(moved.items()):
-            with open(os.path.join(PANTHEON, "archive", f"{key}.md"), "a", encoding="utf-8") as fh:
+            ap = os.path.join(PANTHEON, "archive", f"{key}.md")
+            undo[ap] = os.path.getsize(ap) if os.path.exists(ap) else None
+            with open(ap, "a", encoding="utf-8") as fh:
                 fh.write(f"\n<!-- из board.md, перенос {stamp} -->\n" + "\n".join(ls) + "\n")
+        if _board_changed(board, seen):
+            for ap, size in undo.items():
+                if size is None:
+                    os.remove(ap)
+                else:
+                    os.truncate(ap, size)
+            return 1
         write_atomic(board, kept)
     print(f"board.md: перенесено строк {n} в archive/{', '.join(k + '.md' for k in sorted(moved))}")
     return 0
