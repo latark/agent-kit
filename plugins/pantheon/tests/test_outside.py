@@ -1823,7 +1823,8 @@ _h = O.handle
 got = []
 rc, q, r1 = role_request("athena-x", APP, "test")
 time.sleep(1.1)   # время заявки — с точностью до секунды: вторая позже первой
-rc, q, r2 = role_request("athena-x", APP, "test")
+# metis-0706: такой же test (тот же head и папка) отдал бы второй заявке id первой — вторая нужна отдельная, с другим --script
+rc, q, r2 = role_request("athena-x", APP, "test", "--script", "lint")
 
 
 def kill_after_first(qdir, window, rid, req):
@@ -2010,8 +2011,8 @@ check("сторож: running дольше срока — due", O._watch_due() ==
 n = O.watchdog()
 h.wait(timeout=10)
 rs = O.load_result(qa, WR)
-check("сторож: running дольше срока при живом заходе → failed «сторож: дольше», заход и его группа убиты",
-      n == 1 and rs.get("state") == "failed" and "сторож: дольше" in rs.get("why", "") and not alive(h.pid) and not alive(kid)
+check("сторож: running дольше срока при живом заходе → failed «проверка заявок: дольше», заход и его группа убиты",
+      n == 1 and rs.get("state") == "failed" and "проверка заявок: дольше" in rs.get("why", "") and not alive(h.pid) and not alive(kid)
       and set(rs) == {"id", "kind", "state", "why", "updated"}, (n, rs))
 check("сторож: на снятие одна тревога, status видит итог", len(_alerts) == 2 and WR in _alerts[1]
       and P.read_json(O.root("runs", WR + ".json"), {}).get("state") == "failed", _alerts)

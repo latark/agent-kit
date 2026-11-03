@@ -2479,7 +2479,7 @@ def watchdog(t=None):
     n = 0
     for kind, qdir, rid in _watch_due(t):
         if kind == "queued":
-            why = f"сторож: заявка в очереди дольше {WATCH_QUEUED // 3600} ч, очередь стоит"
+            why = f"проверка заявок: заявка в очереди дольше {WATCH_QUEUED // 3600} ч, очередь стоит"
             if _mark(rid):
                 P.alert(f"outside {rid}: {why} (pantheon outside status {rid})", who="outside")
                 log_event(id=rid, kind="watchdog", why=why)
@@ -2493,7 +2493,7 @@ def watchdog(t=None):
                 P.alert(f"outside {rid}: running дольше {WATCH_RUNNING // 60} мин, заход не определить — снять "
                         f"вручную", who="outside")
             continue
-        why = f"сторож: дольше {WATCH_RUNNING // 60} мин — снято"
+        why = f"проверка заявок: дольше {WATCH_RUNNING // 60} мин — снято"
         table = ps_table()
         kids = [p for p, (pp, g, _r) in table.items() if pp == holder and g == p]
         with contextlib.suppress(ProcessLookupError, PermissionError):
