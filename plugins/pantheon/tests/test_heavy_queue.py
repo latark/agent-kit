@@ -7,13 +7,17 @@
   (процесс завершён через os._exit, замок снят системой) убирается и очередь не держит;
 - команда heavy: пока перед ней живой билет, свободное место она не занимает (код 75 по HEAVY_WAIT_MAX, без запуска);
   владелец билета умер или снял его — идёт, свой билет убирает; порядок двух ждущих — по приходу;
-- папку билетов создать нельзя — ждёт и идёт опросом мест, как раньше.
+- папку билетов создать нельзя — ждёт и идёт опросом мест, как раньше;
+- билет только создан (пустой, свежий, блокировки ещё нет) — впереди и не удаляется; пустой старый — убирается;
+- ждущая команда обновляет время билета; остановленная (SIGSTOP) с билетом старше TICKET_STALE очередь не держит,
+  а её билет остаётся; `heavy --status` считает только живые билеты.
 """
 import fcntl
 import importlib.machinery
 import importlib.util
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -80,6 +84,18 @@ def main():
         c.drop()
         check("все билеты сняты — папка пуста", left() == [], str(left()))
 
+        # билет только создан: файл пуст, блокировку владелец ещё не взял — это не умерший (TICKET_GRACE)
+        young = os.path.join(qdir, "00000000000000000002-2")
+        open(young, "w").close()
+        d = H.Ticket()
+        check("пустой свежий билет без блокировки впереди держит очередь и не удалён",
+              d.ahead() and os.path.exists(young), str(left()))
+        old = time.time() - H.TICKET_GRACE - 5
+        os.utime(young, (old, old))
+        check("пустой билет старше TICKET_GRACE — умерший: убран, очередь не держит",
+              not d.ahead() and not os.path.exists(young), str(left()))
+        d.drop()
+
         # команда heavy: перед ней живой билет — места свободны, но она ждёт
         front = H.Ticket()
         t0 = time.time()
@@ -105,7 +121,43 @@ def main():
         check("билет умершего впереди не держит команду", r.returncode == 0 and "ran" in r.stdout and left() == [],
               f"{r.returncode} {r.stderr!r} {left()}")
 
-        # порядок двух ждущих: оба места заняты, пришли A, потом B; места освободились — A первая
+        # обновление билета: смена времени запрещена (песочница) — время обновляет запись pid
+        f = H.Ticket()
+        fpath = os.path.join(qdir, f.name)
+        old = time.time() - 1000
+        os.utime(fpath, (old, old))
+        real_utime = os.utime
+
+        def no_utime(*_a, **_k):
+            raise PermissionError("utime запрещён")
+        H.os.utime = no_utime
+        try:
+            f.touch()
+        finally:
+            H.os.utime = real_utime
+        check("utime запрещён — билет обновлён записью pid", os.stat(fpath).st_mtime > time.time() - 60
+              and open(fpath).read() == f"{os.getpid()}\n", str(os.stat(fpath).st_mtime))
+        f.drop()
+
+        # --status: умерший билет не в счёт, живой — в счёте
+        pid = os.fork()
+        if pid == 0:
+            H.Ticket()
+            os._exit(0)
+        os.waitpid(pid, 0)
+        front = H.Ticket()
+        r = run(state, "--status")
+        check("--status: живой билет и умерший — в очереди 1", "очередь на места: 1" in r.stdout and len(left()) == 2,
+              f"{r.stdout!r} {left()}")
+        front.drop()
+        r = run(state, "--status")
+        check("--status: только умерший — очереди нет", "очередь на места" not in r.stdout, repr(r.stdout))
+        e = H.Ticket()
+        e.ahead()  # умерший впереди убирается при проверке очереди
+        e.drop()
+        check("умерший билет убран, очередь пуста перед следующим случаем", left() == [], str(left()))
+
+        # порядок трёх ждущих: оба места заняты, пришли A, B, C; освободилось одно место — идут по одному, A, B, C
         holds = []
         for n in ("heavy-cmd-1", "heavy-cmd-2"):
             fd = os.open(os.path.join(locks, n + ".lock"), os.O_RDONLY)
@@ -123,14 +175,61 @@ def main():
             while len(left()) < i and time.time() < deadline:
                 time.sleep(0.05)
         check("трое пришли — три билета", len(left()) == 3, str(left()))
-        for fd in holds:  # оба места свободны сразу: без очереди выиграл бы тот, чей опрос случился раньше
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+        # одно место свободно, второе держим: команды идут строго по одной, и порядок строк в order — порядок мест
+        # (при двух свободных A и B шли бы вместе, и строку первой мог записать любой). Без очереди место берёт тот,
+        # чей опрос случился раньше; живой билет впереди проверен выше детерминированно (код 75)
+        fcntl.flock(holds[0], fcntl.LOCK_UN)
+        os.close(holds[0])
         for p in procs:
-            p.wait(timeout=60)
+            p.wait(timeout=120)
+        fcntl.flock(holds[1], fcntl.LOCK_UN)
+        os.close(holds[1])
         got = open(order).read().split()
         check("порядок запуска — по приходу A, B, C", got == ["A", "B", "C"], str(got))
         check("после прогона билетов не осталось", left() == [], str(left()))
+
+        # застывший владелец (SIGSTOP) во главе очереди: ждущая команда обновляет время билета, остановленная — нет;
+        # билет старше TICKET_STALE очередь обходит и не удаляет
+        holds = []
+        for n in ("heavy-cmd-1", "heavy-cmd-2"):
+            fd = os.open(os.path.join(locks, n + ".lock"), os.O_RDONLY)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            holds.append(fd)
+        p1 = subprocess.Popen([sys.executable, "-I", HEAVY, "/bin/sh", "-c", "echo P1"], env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        deadline = time.time() + 30
+        while not left() and time.time() < deadline:
+            time.sleep(0.05)
+        tk = os.path.join(qdir, left()[0]) if left() else ""
+        stale = time.time() - H.TICKET_STALE - 60
+        if tk:
+            os.utime(tk, (stale, stale))
+        deadline = time.time() + 30
+        while tk and os.path.exists(tk) and os.stat(tk).st_mtime < stale + 30 and time.time() < deadline:
+            time.sleep(0.05)
+        check("ждущая команда обновляет время своего билета",
+              bool(tk) and os.path.exists(tk) and os.stat(tk).st_mtime > time.time() - 30, str(left()))
+        os.kill(p1.pid, signal.SIGSTOP)
+        os.waitpid(p1.pid, os.WUNTRACED)  # дождались остановки: после неё билет больше не обновится
+        if tk:
+            os.utime(tk, (stale, stale))
+        for fd in holds:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        try:
+            r = run(state, "/bin/sh", "-c", "echo ran", wait_max=15)
+            check("остановленный владелец с билетом старше TICKET_STALE не держит очередь: команда пошла",
+                  r.returncode == 0 and "ran" in r.stdout, f"{r.returncode} {r.stderr!r}")
+            check("билет остановленного не удалён (владелец жив)", bool(tk) and os.path.exists(tk), str(left()))
+            r = run(state, "--status")
+            check("--status: застывший билет не в счёте", "очередь на места" not in r.stdout, repr(r.stdout))
+        finally:
+            p1.kill()  # SIGKILL снимает и остановленный процесс
+            p1.wait(timeout=30)
+        e = H.Ticket()
+        e.ahead()  # билет убитого — умерший: убирается при проверке очереди
+        e.drop()
+        check("билет убитого владельца убран", left() == [], str(left()))
 
         # папку билетов создать нельзя (в песочнице) — старое поведение: опрос мест
         shutil.rmtree(qdir)
