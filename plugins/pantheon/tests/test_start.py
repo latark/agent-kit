@@ -1275,6 +1275,18 @@ def main():
           and peak == 2 and events.index("e") < [i for i, x in enumerate(events) if x == "s"][2])
     r = subprocess.run([sys.executable, "-I", HEAVY, "/bin/sh", "-c", "exit 7"], env=env, capture_output=True)
     check("heavy: код выхода команды сохраняется", r.returncode == 7)
+    # файл на месте heavy-queue: сборка не падает, места heavy создаёт (иначе heavy шёл бы без блокировки)
+    qpath = os.path.join(locks, "heavy-queue")
+    _shutil.rmtree(qpath, True)
+    for n in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):
+        if os.path.exists(os.path.join(locks, n + ".lock")):
+            os.unlink(os.path.join(locks, n + ".lock"))
+    open(qpath, "w").close()
+    r = run("domains", "build")
+    check("domains build: файл на месте heavy-queue — код 0, места heavy-cmd-*.lock созданы",
+          r.returncode == 0 and all(os.path.exists(os.path.join(locks, n + ".lock"))
+                                    for n in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server")))
+    os.unlink(qpath)
 
     # dev-stop-verify (DONE-02): код проекта не запускает, смотрит транскрипт разработчика
     repo = os.path.join(tmp, "projects", "br", "wt")
