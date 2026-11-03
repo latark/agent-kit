@@ -278,11 +278,11 @@ _hs, _wp = O.head_state, O.wait_proc
 FLAG = []
 
 
-def fake_wait(proc, timeout, tick=None):
+def fake_wait(proc, timeout, tick=None, **kw):
     FLAG.append(1)
     if FAKE_MODE[0] == "timeout":
         raise _sp.TimeoutExpired("x", 1)
-    return _wp(proc, timeout, tick)
+    return _wp(proc, timeout, tick, **kw)
 
 
 def fake_head(d):
