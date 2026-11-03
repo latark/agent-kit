@@ -2281,11 +2281,11 @@ def write_window(out_dir, name, data):
 
 def hq_project_dirs(domains, reg=None):
     """metis-0771: папки проектов направлений, закрытые окну hq (настоящие пути). Не закрыты metis-pantheon,
-    направления с coordinator = false (их ведёт Пританей), папки в ~/ai или содержащие ~/ai либо открытую папку
-    (~/projects у направления закрыл бы agent-kit) и папки вне HOME или в скрытых. То же считает guard
+    направления с coordinator = false (их ведёт Пританей), папки в ~/ai или PANTHEON или содержащие их либо открытую
+    папку (~/projects у направления закрыл бы agent-kit) и папки вне HOME или в скрытых. То же считает guard
     hq_project_roots — правило Read/Grep/Glob."""
     # Счёт — в hooks/ctx.py: тем же списком хук qmd-query закрывает штабу коллекции этих папок (metis-0778)
-    return ctx_mod().hq_project_dirs(domains, list(hq_led(reg)), HOME, AI_HOME)
+    return ctx_mod().hq_project_dirs(domains, list(hq_led(reg)), HOME, AI_HOME, PANTHEON)
 
 
 def _allow_blocked(a, denies):

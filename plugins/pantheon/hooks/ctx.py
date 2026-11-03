@@ -1747,13 +1747,15 @@ def hq_led_names(path=None):
             if isinstance(d, dict) and isinstance(d.get("name"), str) and d.get("coordinator") is False]
 
 
-def hq_project_dirs(doms, led, home=None, ai_home=None):
-    """Настоящие пути папок проектов, закрытых штабу. Не закрыты: metis-pantheon и `led`; папки в ~/ai или содержащие
-    ~/ai либо открытую папку (~/projects у направления закрыл бы agent-kit); вне HOME, сам HOME и скрытые папки
-    (~/.claude, ~/.local — окно штаба живёт ими). То же считает guard hq_project_roots."""
+def hq_project_dirs(doms, led, home=None, ai_home=None, pantheon=None):
+    """Настоящие пути папок проектов, закрытых штабу. Не закрыты: metis-pantheon и `led`; папки в ~/ai или в PANTHEON
+    (PANTHEON_HOME бывает вне ~/ai; папка-ссылка на него — тоже он) или содержащие их либо открытую папку (~/projects у
+    направления закрыл бы agent-kit); вне HOME, сам HOME и скрытые папки (~/.claude, ~/.local — окно штаба живёт ими).
+    То же считает guard hq_project_roots (у guard PANTHEON всегда внутри ~/ai)."""
     home = os.path.realpath(home or HOME)
     real = lambda xs: [os.path.realpath(os.path.expanduser(x)) for x in xs or [] if isinstance(x, str)]  # noqa: E731
-    opened = ([os.path.realpath(ai_home or os.path.join(HOME, "ai"))] + real(doms.get(HQ_OWN_DIRECTION))
+    opened = ([os.path.realpath(ai_home or os.path.join(HOME, "ai")), os.path.realpath(pantheon or PANTHEON)]
+              + real(doms.get(HQ_OWN_DIRECTION))
               + [p for n in led for p in real(doms.get(n))])
     out = []
     for name in sorted(doms):
