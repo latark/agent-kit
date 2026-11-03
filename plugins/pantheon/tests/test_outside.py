@@ -665,6 +665,36 @@ _dirty_case("отслеживаемый файл под worktrees с правк�
             lambda d: (_touch(d, ".claude/worktrees/t"), git(d, "add", "-f", ".claude/worktrees/t"),
                        git(d, "commit", "-q", "-m", "t"), _touch(d, ".claude/worktrees/t", "y")), False)
 
+# ссылка node_modules (metis-0721): только неотслеживаемая симлинка в корне, apps/*, packages/* — не грязь
+def _nm_link(rel):
+    return lambda d: (os.makedirs(os.path.dirname(os.path.join(d, rel)) or d, exist_ok=True),
+                      os.symlink("/nonexistent-target", os.path.join(d, rel)))
+
+
+_dirty_case("симлинк node_modules в корне — чисто", _nm_link("node_modules"), True)
+_dirty_case("симлинк apps/x/node_modules — чисто", lambda d: (_touch(d, "apps/x/p.json"), git(d, "add", "-A"),
+            git(d, "commit", "-q", "-m", "a"), _nm_link("apps/x/node_modules")(d)), True)
+_dirty_case("симлинк packages/y/node_modules — чисто", lambda d: (_touch(d, "packages/y/p.json"), git(d, "add", "-A"),
+            git(d, "commit", "-q", "-m", "a"), _nm_link("packages/y/node_modules")(d)), True)
+_dirty_case("симлинк в корне и ?? other.txt — грязно", lambda d: (_nm_link("node_modules")(d), _touch(d, "other.txt")), False)
+_dirty_case("папка node_modules с файлом — грязно", lambda d: _touch(d, "node_modules/f"), False)
+_dirty_case("файл node_modules — грязно", lambda d: _touch(d, "node_modules"), False)
+_dirty_case("симлинк с другим именем — грязно", _nm_link("modules"), False)
+_dirty_case("симлинк apps/x/y/node_modules глубже — грязно", _nm_link("apps/x/y/node_modules"), False)
+_dirty_case("симлинк nested/node_modules — грязно", _nm_link("nested/node_modules"), False)
+
+# та же функция без git init: разбор вывода status + проверка «это симлинк»
+_td = tempfile.mkdtemp(prefix="tc-", dir=os.environ.get("TMPDIR"))
+os.symlink("/nonexistent-target", os.path.join(_td, "node_modules"))
+os.makedirs(os.path.join(_td, "apps", "x", "node_modules"))
+os.symlink("/nonexistent-target", os.path.join(_td, "apps", "x", "y"))
+check("tree_clean: симлинк node_modules в корне", P.tree_clean("?? node_modules\n", _td) is True)
+check("tree_clean: папка apps/x/node_modules (не симлинк) — грязно", P.tree_clean("?? apps/x/node_modules\n", _td) is False)
+check("tree_clean: ссылка глубже — грязно", P.tree_clean("?? apps/x/y/node_modules\n", _td) is False)
+check("tree_clean: изменённый отслеживаемый — грязно", P.tree_clean(" M node_modules\n", _td) is False)
+check("tree_clean: None — грязно", P.tree_clean(None, _td) is False)
+shutil.rmtree(_td, ignore_errors=True)
+
 # подложенная ссылка вместо заявки — не читается и не исполняется
 q = os.path.join(CACHE, "athena-x", "outside")
 secret = os.path.join(_ROOT, "secret.json")
@@ -1164,6 +1194,83 @@ check("requests: проход серверов берёт serve, test остаё
       and os.path.isfile(os.path.join(q, rid_ts + ".req.json")) and not os.path.exists(os.path.join(q, rid_sv + ".req.json")))
 got = O.requests(("test",))
 check("requests: проход тестов берёт test", [x[4] for x in got] == [rid_ts])
+
+# metis-0706: не плодить дубли заявок test; тест в очереди снимается stop; --wait ждёт уже поданную заявку
+def dup_say(window, cwd, *args):
+    os.environ["PANTHEON_TMP"] = os.path.join(CACHE, window, "tmp")
+    old, buf = os.getcwd(), io.StringIO()
+    os.chdir(cwd)
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = O.main(list(args))
+    finally:
+        os.chdir(old)
+        os.environ.pop("PANTHEON_TMP")
+    return rc, buf.getvalue()
+
+
+def req_ids(q):
+    return sorted(n[:-9] for n in os.listdir(q) if n.endswith(".req.json")) if os.path.isdir(q) else []
+
+
+q, rid_a = new_request("athena-x", APP, "test")
+head_now = O.head_state(APP)[0]
+check("дубль: в заявке test записан head", (O.load_result(q, rid_a) or {}).get("sha") == head_now, O.load_result(q, rid_a))
+rc, out = dup_say("athena-x", APP, "test")
+check("дубль (а): тот же head и папка, прежняя в очереди — новой заявки нет, ID прежней в выводе, код 0",
+      rc == 0 and req_ids(q) == [rid_a] and rid_a in out, (rc, out, req_ids(q)))
+rc, out = dup_say("athena-x", APP, "test")
+check("дубль (а): и третья заявка не плодит", rc == 0 and req_ids(q) == [rid_a], (rc, req_ids(q)))
+rc, out = dup_say("athena-x", APP, "test", "--script", "lint")
+ids = req_ids(q)
+check("дубль (а): другой --script — отдельная заявка", rc == 0 and len(ids) == 2 and rid_a in ids, (rc, out, ids))
+for i in ids:
+    if i != rid_a:
+        os.unlink(os.path.join(q, i + ".req.json"))
+        O.save_result(q, i, {"state": "failed", "kind": "test", "why": "проба"})
+# заявка взята проходом и идёт (running, итог свежий) — тоже живая
+os.unlink(os.path.join(q, rid_a + ".req.json"))
+O.save_result(q, rid_a, {"state": "running", "kind": "test", "sha": head_now, "cmd": "x", "dir": APP})
+rc, out = dup_say("athena-x", APP, "test")
+check("дубль (а): прежний тест идёт (running) — новой заявки нет", rc == 0 and req_ids(q) == [] and rid_a in out,
+      (rc, out, req_ids(q)))
+rc, out = say("athena-x", "stop", rid_a, "--wait", "0")
+check("stop идущего теста — по-прежнему отказ «это тесты», код 1", rc == 1 and "это тесты" in out, (rc, out))
+# running старше срока теста — висяк, не блокирует
+O.save_result(q, rid_a, {"state": "running", "kind": "test", "sha": head_now, "cmd": "x", "dir": APP,
+                         "updated": "2020-01-01 00:00"})
+rc, out = dup_say("athena-x", APP, "test")
+ids = req_ids(q)
+check("дубль (а): висящий running старше срока не мешает — заявка новая", rc == 0 and len(ids) == 1 and ids[0] != rid_a,
+      (rc, out, ids))
+rid_b = ids[0]
+# другой head — отдельная заявка (регрессия)
+git(APP, "commit", "--allow-empty", "-q", "-m", "m0706")
+rc, out = dup_say("athena-x", APP, "test")
+ids = req_ids(q)
+check("регрессия: другой head — вторая заявка, обе в очереди", rc == 0 and len(ids) == 2 and rid_b in ids, (rc, out, ids))
+rid_c = next(i for i in ids if i != rid_b)
+check("регрессия: у второй свой head", (O.load_result(q, rid_c) or {}).get("sha") != head_now, O.load_result(q, rid_c))
+# (б) stop снимает тест, пока он в очереди
+rc, out = say("athena-x", "stop", rid_c, "--wait", "0")
+res = O.load_result(q, rid_c) or {}
+check("stop (б): тест в очереди снят — код 0, заявки нет, итог stopped «отменена»",
+      rc == 0 and rid_c not in req_ids(q) and res.get("state") == "stopped" and "отменена" in res.get("why", ""),
+      (rc, out, res))
+run_pass()
+check("stop (б): снятый тест проход не запускает, остальная очередь идёт",
+      (O.load_result(q, rid_c) or {}).get("state") == "stopped"
+      and (O.load_result(q, rid_b) or {}).get("state") in ("done", "failed"), (O.load_result(q, rid_c), O.load_result(q, rid_b)))
+rc, out = say("athena-x", "stop", rid_c, "--wait", "0")
+check("stop (б): повтор — «уже stopped», код 0", rc == 0 and "stopped" in out, (rc, out))
+git(APP, "reset", "-q", "--hard", head_now)
+# (в) --wait с уже поданной заявкой ждёт её итог
+q, rid_w = new_request("athena-x", APP, "test")
+threading.Timer(1.0, run_pass).start()
+rc, out = dup_say("athena-x", APP, "test", "--wait", "30")
+res = O.load_result(q, rid_w) or {}
+check("--wait (в): ждёт итог прежней заявки, новой нет, код — её кода",
+      res.get("state") in O.FINAL and req_ids(q) == [] and rc == O.result_code(res) and rid_w in out, (rc, out, res))
 
 # «стоп» без сервера и заявки: старый убирается, молодой ждёт
 _qa = os.path.join(CACHE, "athena-x", "outside")
@@ -1842,6 +1949,98 @@ for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd", "eeeeee", "ffffff", "gggggg", 
 os.remove(O.root("runs", "20261102-101010-a0a0a0.json"))
 os.remove(O.root("runs", "20261102-101010-dddddd.json"))
 os.remove(O.root("runs", "20261102-101010-a1a1a1.json"))
+
+# сторож (metis-0723): running дольше срока при живом заходе — снять; queued с заявкой дольше срока — одна тревога
+_alerts = []
+_pa = P.alert
+P.alert = lambda text, who="pantheon": _alerts.append(text)
+HOLD = ("import fcntl,os,subprocess,sys,time;"
+        "fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_APPEND);fcntl.flock(fd,fcntl.LOCK_EX);"
+        "k=subprocess.Popen(['sleep','300'],start_new_session=True,stdin=-3,stdout=-3,stderr=-3);print(k.pid,flush=True);time.sleep(300)")
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    time.sleep(0.05)
+    try:
+        return os.waitpid(pid, os.WNOHANG) == (0, 0)
+    except ChildProcessError:
+        return True
+
+
+def holder_start():
+    os.makedirs(P.path("locks"), exist_ok=True)
+    h = subprocess.Popen([sys.executable, "-I", "-c", HOLD, P.path("locks", "outside-run.lock")],
+                         stdout=subprocess.PIPE, text=True)
+    return h, int(h.stdout.readline())
+
+
+def age_runs(rid, age):
+    fp = O.root("runs", rid + ".json")
+    os.utime(fp, (time.time() - age, time.time() - age))
+
+
+WQ, WR, WF, WL = ("20261102-111111-" + x for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd"))
+put_result(WQ, {"state": "queued", "kind": "test"}, age=O.WATCH_QUEUED + 600)
+with open(os.path.join(qa, WQ + ".req.json"), "w") as fh:
+    fh.write("{}")
+put_result(WF, {"state": "queued", "kind": "test"}, age=O.WATCH_QUEUED - 600)    # срок не прошёл
+with open(os.path.join(qa, WF + ".req.json"), "w") as fh:
+    fh.write("{}")
+put_result(WL, {"state": "queued", "kind": "test"}, age=O.WATCH_QUEUED + 600)    # без заявки — не дело сторожа
+check("сторож: queued с заявкой дольше срока — due, моложе срока и без заявки — нет",
+      O._watch_due() == [("queued", qa, WQ)], O._watch_due())
+check("сторож: queued — одна тревога, итог не тронут",
+      O.watchdog() == 1 and len(_alerts) == 1 and WQ in _alerts[0] and O.load_result(qa, WQ).get("state") == "queued", _alerts)
+check("сторож: после тревоги queued не повод тику", not O._watch_due())
+check("сторож: повторные проходы (в том числе cmd_run) тревоги не повторяют",
+      O.watchdog() == 0 and run_pass() == 0 and len(_alerts) == 1, _alerts)
+O.save_result(qa, WR, {"state": "running", "kind": "test", "sha": "a" * 40})
+_h0 = O._run_holder
+h, kid = holder_start()
+O._run_holder = lambda: h.pid
+O.watchdog()
+check("сторож: running в пределах срока при живом заходе — не тронут",
+      O.load_result(qa, WR).get("state") == "running" and alive(h.pid) and alive(kid) and len(_alerts) == 1)
+age_runs(WR, O.WATCH_RUNNING + 60)
+check("сторож: running дольше срока — due", O._watch_due() == [("running", qa, WR)], O._watch_due())
+n = O.watchdog()
+h.wait(timeout=10)
+rs = O.load_result(qa, WR)
+check("сторож: running дольше срока при живом заходе → failed «сторож: дольше», заход и его группа убиты",
+      n == 1 and rs.get("state") == "failed" and "сторож: дольше" in rs.get("why", "") and not alive(h.pid) and not alive(kid)
+      and set(rs) == {"id", "kind", "state", "why", "updated"}, (n, rs))
+check("сторож: на снятие одна тревога, status видит итог", len(_alerts) == 2 and WR in _alerts[1]
+      and P.read_json(O.root("runs", WR + ".json"), {}).get("state") == "failed", _alerts)
+O.save_result(qa, WR, {"state": "running", "kind": "test"})
+age_runs(WR, O.WATCH_RUNNING + 60)
+O.watchdog()
+check("сторож: захода нет (замок свободен) — running не снимает, его чинит recover_results",
+      O.load_result(qa, WR).get("state") == "running" and len(_alerts) == 2)
+h, kid = holder_start()
+O._run_holder = lambda: None
+O.watchdog()
+O.watchdog()
+check("сторож: замок держит не определить — тревога раз, процесс не тронут, итог тот же",
+      len(_alerts) == 3 and alive(h.pid) and O.load_result(qa, WR).get("state") == "running", _alerts)
+O._run_holder = _h0
+if MAC:
+    check("_run_holder: lsof находит держателя замка", O._run_holder() == h.pid, O._run_holder())
+h.kill()
+h.wait()
+os.kill(kid, 9)
+P.alert = _pa
+for x in (WQ, WR, WF, WL):
+    for ext in ("result.json", "req.json"):
+        if os.path.exists(os.path.join(qa, f"{x}.{ext}")):
+            os.remove(os.path.join(qa, f"{x}.{ext}"))
+    for ext in ("json", "alerted"):
+        if os.path.exists(O.root("runs", f"{x}.{ext}")):
+            os.remove(O.root("runs", f"{x}.{ext}"))
+
 
 # --- тревога дежурному: «принять» argus без tests дольше часа; автопрогонов нет (решение владельца 03.11) ---------
 _cp = os.path.join(STATE, "autoclose-prs.json")

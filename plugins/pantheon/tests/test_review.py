@@ -79,6 +79,17 @@ def run_all(tmp):
     r = pantheon("review", "test", "--", "true", cwd=repo)
     check("test — грязное дерево: код 2, команда не запускалась", r.returncode == 2 and "не чистое" in r.stderr)
     git("checkout", "-q", "a.txt", cwd=repo)
+    # ссылка node_modules (metis-0721): в корне не мешает, папка с файлом — мешает
+    os.symlink("/nonexistent-target", os.path.join(repo, "node_modules"))
+    r = pantheon("review", "test", "--", "true", cwd=repo)
+    check("test — симлинк node_modules в корне: чисто, код 0", r.returncode == 0, r.stderr)
+    os.remove(os.path.join(repo, "node_modules"))
+    os.makedirs(os.path.join(repo, "node_modules"))
+    with open(os.path.join(repo, "node_modules", "f"), "w") as fh:
+        fh.write("x")
+    r = pantheon("review", "test", "--", "true", cwd=repo)
+    check("test — папка node_modules с файлом: код 2", r.returncode == 2 and "не чистое" in r.stderr)
+    shutil.rmtree(os.path.join(repo, "node_modules"))
     r = pantheon("review", "test", "--", "true", cwd=tmp)
     check("test — не git: код 2", r.returncode == 2)
     r = pantheon("review", "test", "true", cwd=repo)

@@ -8,11 +8,15 @@
   pantheon outside test [--script ИМЯ] [--wait С]    проверка проекта на HEAD этой папки (дерево чистое; неотслеживаемый .claude/worktrees/ не в счёт): команда —
                                          первая строка .pantheon-verify (из origin/HEAD, иначе из HEAD), иначе скрипт
                                          test/check package.json, иначе pytest; --script — скрипт package.json
+                                         Тот же HEAD и та же папка, а прежняя заявка test (без --script) ещё в очереди или идёт —
+                                         новой не будет: команда печатает ID прежней и с --wait ждёт её итог (metis-0706)
   pantheon outside serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С]
                                          dev-сервер на коммите SHA (по умолчанию HEAD этой папки) из своей копии →
                                          адрес http://127.0.0.1:<порт 4300–4399>; гаснет сам через N минут (30, ≤120)
   pantheon outside status [ID]           итог заявки: состояние, код, адрес, хвост журнала (без ID — последние)
   pantheon outside stop ID [--wait С]    погасить сервер раньше срока (из любого окна) и дождаться итога (20 с)
+                                         тест, ещё лежащий заявкой в очереди своего окна, снимается: итог stopped; идущий тест
+                                         не гасится — идёт до конца
   pantheon outside run [--serve]         проход по заявкам — только плановый проход (из окна Claude Code — отказ):
                                          без флага — тесты, --serve — серверы и сторож
 --wait С — ждать итога до С секунд (не больше 590: у Bash окна предел 10 минут) и напечатать его; код выхода — код
@@ -71,6 +75,10 @@ STATE/outside/queue. Имя окна проход берёт из места п�
      Во время копии, установки и ожидания порта сторож продолжает смотреть серверы, «стоп» своей заявки прерывает.
   3. «Стоп» без живого сервера и заявки старше минуты — убирается.
   `outside run` (замок outside-run) — тесты:
+  -1. Сторож (watchdog, до замка, metis-0723; тик будит и его): running дольше WATCH_RUNNING (TEST_TIMEOUT + 30 мин)
+     при живом заходе — заход (SIGKILL) и его группы процессов гаснут, итог failed «сторож: дольше N мин — снято»,
+     тревога; держателя замка не определить — только тревога. queued с лежащей .req.json дольше WATCH_QUEUED (4 ч) —
+     одна тревога на заявку (метка runs/<ID>.alerted), без снятия. outside status показывает итог.
   0. На старте итоги test: queued без .req.json старше 5 мин — failed «заявка потеряна»; running, записанный самим
      заходом в STATE/outside/runs, — failed «заход прерван» (захода под замком больше нет; итог — минимальный объект,
      подложенное окном не копируется; metis-0716). Порядок заявок — по времени из id, по кругу между окнами.
@@ -321,6 +329,15 @@ def _unlink_in(dfd, name):
         os.unlink(name, dir_fd=dfd)
 
 
+def _take_in(dfd, name):
+    """Снять файл name; True — снят этим вызовом (другой проход его уже не возьмёт), False — его уже нет."""
+    try:
+        os.unlink(name, dir_fd=dfd)
+    except OSError:
+        return False
+    return True
+
+
 def log_event(**kw):
     with contextlib.suppress(OSError):
         os.makedirs(os.path.join(P.STATE, "logs"), exist_ok=True)
@@ -408,7 +425,8 @@ def head_state(d):
     # без подмодулей: git status зашёл бы в каждый и прочёл его конфиг (<клон>/.git/modules/<имя>/config окну роли
     # открыт на запись) — filter.* оттуда исполнился бы вне песочницы (metis-0614)
     st = git(d, "status", "--porcelain", "--ignore-submodules=all")
-    clean = st is not None and all(ln.startswith(WORKTREES_UNTRACKED) for ln in st.splitlines() if ln.strip())
+    top = (git(d, "rev-parse", "--show-toplevel") or "").strip()
+    clean = P.tree_clean(st, top, (WORKTREES_UNTRACKED,))  # + ссылка node_modules (metis-0721)
     return (h if SHA_RE.fullmatch(h) else None), clean
 
 
@@ -1235,7 +1253,8 @@ def run_test(rid, d, script, window, qdir, roots, record=True):
             plan, full_why = None, f"дозапуск не рассчитан: {type(e).__name__}: {e}"
     extra = {"rerun_of": plan["rerun_of"], "files": plan["files"]} if plan else \
         ({"full_why": full_why} if full_why else {})
-    save_result(qdir, rid, {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d, **extra})
+    save_result(qdir, rid, {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d,
+                            **({"script": script} if script else {}), **extra})
     log, fd = new_log(rid)
     tmp = tempfile.mkdtemp(prefix="outside-")
     code, timed_out = None, False
@@ -2282,8 +2301,9 @@ def _zombies(t=None):
 
 
 def pending_test():
-    """Тику: дело проходу тестов — заявки test (и битые), старые итоги, «принять» без tests дольше ALERT_AFTER."""
-    return bool(_queued_ids(("test",))) or bool(_stale()) or bool(_zombies()) or bool(overdue_accepts())
+    """Тику: дело проходу тестов — заявки test (и битые), старые итоги, «принять» без tests дольше ALERT_AFTER, сторож."""
+    return (bool(_queued_ids(("test",))) or bool(_stale()) or bool(_zombies()) or bool(overdue_accepts())
+            or bool(_watch_due()))
 
 
 def pending_serve():
@@ -2383,10 +2403,118 @@ def recover_results(t=None):
     return n
 
 
+WATCH_RUNNING = TEST_TIMEOUT + 1800   # с: running дольше — заход завис; не меньше предела прогона TEST_TIMEOUT (metis-0723)
+WATCH_QUEUED = 4 * 3600               # с: queued с лежащей заявкой дольше — очередь стоит, тревога без снятия (metis-0723)
+
+
+def _run_holder():
+    """Номер процесса, держащего замок outside-run (lsof по файлу замка); нет или не определить → None."""
+    try:
+        out = subprocess.run([LSOF, "-t", P.path("locks", "outside-run.lock")], capture_output=True, text=True,
+                             timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    pids = [int(x) for x in out.split() if x.isdigit() and int(x) != os.getpid()]
+    return pids[0] if len(pids) == 1 else None
+
+
+def _mark(rid):
+    """Метка runs/<ID>.alerted: тревога о заявке уже была. → True, если метку поставили сейчас (первая тревога)."""
+    os.makedirs(root("runs"), mode=0o700, exist_ok=True)
+    try:
+        os.close(os.open(root("runs", rid + ".alerted"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+    except OSError:
+        return False
+    return True
+
+
+def _watch_due(t=None):
+    """[(вид, папка заявок, id)] того, что сторож должен разобрать: running теста в runs/ старше WATCH_RUNNING (по mtime
+    записи захода) и queued с лежащей .req.json старше WATCH_QUEUED, о котором ещё не было тревоги."""
+    t = P.now() if t is None else t
+    out = []
+    runs = root("runs")
+    for name in os.listdir(runs) if os.path.isdir(runs) else ():
+        rid = name[:-len(".json")]
+        if not name.endswith(".json") or not ID_RE.fullmatch(rid):
+            continue
+        res = P.read_json(os.path.join(runs, name), {})
+        try:
+            old = t - os.lstat(os.path.join(runs, name)).st_mtime > WATCH_RUNNING
+        except OSError:
+            continue
+        if (old and isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "running"
+                and not os.path.lexists(root("runs", rid + ".alerted"))):
+            out.append(("running", res.get("qdir"), rid))
+    for qdir, _ in queue_dirs():
+        dfd = _open_dir(qdir)
+        if dfd is None:
+            continue
+        try:
+            names = os.listdir(dfd)
+            for name in names:
+                rid = name[:-len(".result.json")]
+                if not name.endswith(".result.json") or not ID_RE.fullmatch(rid) or rid + ".req.json" not in names:
+                    continue
+                if os.path.lexists(root("runs", rid + ".alerted")):
+                    continue
+                res = _parse(_read_in(dfd, name, 1024 * 1024))
+                try:
+                    old = t - os.lstat(name, dir_fd=dfd).st_mtime > WATCH_QUEUED
+                except OSError:
+                    continue
+                if old and isinstance(res, dict) and res.get("kind") == "test" and res.get("state") == "queued":
+                    out.append(("queued", qdir, rid))
+        finally:
+            os.close(dfd)
+    return out
+
+
+def watchdog(t=None):
+    """Сторож заявок test (metis-0723); зовётся до замка, чтобы видеть и живой заход. running дольше WATCH_RUNNING при
+    живом заходе: заход (SIGKILL — итога за собой он не запишет) и его группы процессов гаснут, итог failed «сторож:
+    дольше N»; замок держит не определить — только тревога. queued с лежащей заявкой дольше WATCH_QUEUED: одна тревога
+    на заявку (метка runs/<ID>.alerted), без снятия. Захода нет — running чинит recover_results. → число."""
+    t = P.now() if t is None else t
+    n = 0
+    for kind, qdir, rid in _watch_due(t):
+        if kind == "queued":
+            why = f"сторож: заявка в очереди дольше {WATCH_QUEUED // 3600} ч, очередь стоит"
+            if _mark(rid):
+                P.alert(f"outside {rid}: {why} (pantheon outside status {rid})", who="outside")
+                log_event(id=rid, kind="watchdog", why=why)
+                n += 1
+            continue
+        if not P.locked("outside-run"):
+            continue                # захода нет — recover_results
+        holder = _run_holder()
+        if holder is None:
+            if _mark(rid):
+                P.alert(f"outside {rid}: running дольше {WATCH_RUNNING // 60} мин, заход не определить — снять "
+                        f"вручную", who="outside")
+            continue
+        why = f"сторож: дольше {WATCH_RUNNING // 60} мин — снято"
+        table = ps_table()
+        kids = [p for p, (pp, g, _r) in table.items() if pp == holder and g == p]
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(holder, signal.SIGKILL)
+        for k in kids:
+            kill_group(k)
+        qdirs = {q for q, _ in queue_dirs()}
+        targets = [qdir] if qdir in qdirs else [q for q in sorted(qdirs) if _result_running(q, rid)]
+        for q in targets or [None]:
+            save_result(q, rid, {"kind": "test", "state": "failed", "why": why})
+        log_event(id=rid, kind="watchdog", why=why)
+        P.alert(f"outside {rid}: {why}", who="outside")
+        n += 1
+    return n
+
+
 def cmd_run():
     """Проход тестов (замок outside-run): серверы не смотрит — их ведёт свой проход (metis-0614)."""
     if _in_claude():
         return 2
+    watchdog()      # до замка: живой заход с зависшим running виден только отсюда (metis-0723)
     with P.lock("outside-run", block=False) as got:
         if not got:
             return 0
@@ -2475,6 +2603,17 @@ def cmd_request(kind, args):
            "by": " ".join((os.environ.get("PANTHEON_SESSION") or os.environ.get("PANTHEON_ROLE") or "").split())[:40]}
     if f.get("--script"):
         req["script"] = f["--script"]
+    if kind == "test":   # metis-0706: коммит при заявке — по нему видно, что такой же тест уже ждёт или идёт
+        head, _clean = head_state(d)
+        if head:
+            req["sha"] = head
+            prev = live_test(d, head, f.get("--script"))
+            if prev:   # тот же head, та же папка, прежняя заявка жива — не плодить дубль: её ID и ждать её
+                print(f"заявка {prev[1]}: тот же коммит {head[:12]} в {d} уже в очереди или идёт — новой заявки нет")
+                if not wait:
+                    print(f"итог: pantheon outside status {prev[1]}")
+                    return 0
+                return wait_result(prev[0], prev[1], wait)
     if kind == "serve":
         req["minutes"] = minutes
         req["wait"] = wait
@@ -2504,7 +2643,8 @@ def cmd_request(kind, args):
             with contextlib.suppress(OSError):   # состояние queued — видно в status до прохода
                 _write_in(dfd, rid + ".result.json", json.dumps(
                     {"id": rid, "state": "queued", "kind": kind, "src": d, "updated": P.stamp(),
-                     **{k: req[k] for k in ("sha", "app") if req.get(k)}}, ensure_ascii=False, indent=1))
+                     **{k: req[k] for k in ("sha", "app", "script") if req.get(k)}}, ensure_ascii=False,
+                    indent=1))
         finally:
             os.close(dfd)
     except OSError as e:
@@ -2518,6 +2658,44 @@ def cmd_request(kind, args):
         print(f"итог: pantheon outside status {rid}")
         return 0
     return wait_result(q, rid, wait)
+
+
+def live_test(d, sha, script=None):
+    """(папка заявок, ID) живой заявки test на этот head и эту папку или None: в очереди (лежит .req.json) или идёт
+    (итог running свежее TEST_TIMEOUT). Смотрит все папки заявок; недоступную пропускает."""
+    d = os.path.realpath(d)
+    now = P.now()
+    for qdir, _w in queue_dirs():
+        dfd = _open_dir(qdir)
+        if dfd is None:
+            continue
+        try:
+            names = sorted(os.listdir(dfd), reverse=True)
+            for name in names:
+                if not name.endswith(".result.json"):
+                    continue
+                rid = name[:-len(".result.json")]
+                try:
+                    res = json.loads(_read_in(dfd, name, 1024 * 1024) or "")
+                except ValueError:
+                    continue
+                if not isinstance(res, dict) or res.get("kind") != "test" or res.get("sha") != sha \
+                        or res.get("script") != script:
+                    continue
+                where = res.get("src") or res.get("dir")
+                if not isinstance(where, str) or os.path.realpath(where) != d:
+                    continue
+                if res.get("state") == "queued" and (rid + ".req.json") in names:
+                    return qdir, rid
+                if res.get("state") == "running":
+                    t = _epoch({"time": res.get("updated")})
+                    if t is not None and now - t < TEST_TIMEOUT + 300:
+                        return qdir, rid
+        except OSError:
+            continue
+        finally:
+            os.close(dfd)
+    return None
 
 
 def load_result(q, rid):
@@ -2621,6 +2799,25 @@ def _known(q, rid):
     return (res if isinstance(res, dict) else None), rid in servers(), rid in {r for r, _ in _queued_ids()}
 
 
+def _cancel_queued_test(q, rid):
+    """Тест, ещё лежащий заявкой в своей папке q, снимается: заявка удалена, итог stopped (metis-0706). True — снят;
+    False — не тест, не здесь или проход уже взял (тогда он идёт до конца)."""
+    dfd = _open_dir(q)
+    if dfd is None:
+        return False
+    try:
+        req = _parse(_read_in(dfd, rid + ".req.json"))
+        if not isinstance(req, dict) or req.get("kind") != "test" or not _take_in(dfd, rid + ".req.json"):
+            return False
+    finally:
+        os.close(dfd)
+    save_result(q, rid, {"state": "stopped", "kind": "test", "why": "отменена до запуска",
+                         **{k: req[k] for k in ("sha",) if req.get(k)}})
+    log_event(id=rid, kind="stop", why="отменена до запуска")
+    print(f"{rid}: тест был в очереди — снят, итог stopped")
+    return True
+
+
 def cmd_stop(args):
     if not args or not ID_RE.fullmatch(args[0]):
         err("pantheon outside stop ID [--wait С]")
@@ -2638,7 +2835,9 @@ def cmd_stop(args):
     if not res and not live and not queued:
         print(f"{rid}: нет такой заявки — ни итога, ни сервера, ни заявки в очереди (status покажет свои)")
         return 1
-    if (res or {}).get("kind") == "test" and not live:
+    if queued and _cancel_queued_test(q, rid):
+        return 0
+    if (res or {}).get("kind") == "test" and not live and res.get("state") != "stopped":
         print(f"{rid}: это тесты, а не сервер — они идут до конца (не дольше {TEST_TIMEOUT // 60} мин)")
         return 1
     if res and res.get("state") in ("stopped", "failed", "done") and not live and not queued:
