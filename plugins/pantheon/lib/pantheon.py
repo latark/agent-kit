@@ -169,6 +169,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         --apply гасит только брошенное (worktree удалён, задача закрыта, сирота в
                                         папках Пантеона) и печатает вопрос «[id] …» об остальном своём; --pid — после
                                         «да» владельца, только процессы Пантеона (у Гестии — по `pantheon consent`)
+  pantheon reap --auto                  плановый проход раз в 30 мин (metis-0617): гасит только брошенное старше
+                                        30 мин — сироты multiprocessing и сироты в песочнице окна, процессы удалённых
+                                        worktree и закрытых задач, language server без живого claude; строка
+                                        «погашено: …» в alerts.md
   pantheon usage [дней]                 отчёт расхода в ~/ai/pantheon/metrics/usage/ (плановый проход раз в неделю);
                                         запись закрыта (окно роли) — отчёт в stdout, причина в stderr, код 1
   pantheon metrics sync|summary|run     учёт по задачам: строки закрытых задач в ~/ai/pantheon/metrics/tasks.jsonl
@@ -708,7 +712,7 @@ JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
                     "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder", "read", "autoclose",
-                    "archive", "batch-suggest"}
+                    "archive", "batch-suggest", "reap"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 # Окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` из schedule.toml идёт с песочницей
 # settings/job-<роль>.json (собирает sandbox_build), а не без неё. Роль вне таблицы тик не запускает. write — куда
@@ -788,6 +792,8 @@ def parse_command(cmd):
             return None  # задача прохода — только `batch-suggest run`; --force и task batch-suggest --apply — руками
         if argv[1] == "read" and argv[2:] != ["run"]:
             return None  # заявку подаёт окно, а не задача прохода; проход — только `read run`
+        if argv[1] == "reap" and argv[2:] != ["--auto"]:
+            return None  # проход гасит только брошенное (`reap --auto`, metis-0617); --apply и --pid — руками и Гестия
         return [os.path.join(PLUGIN, "bin", "pantheon")] + argv[1:]
     if argv[0] == "claude":
         if argv[1:2] != ["-p"]:
