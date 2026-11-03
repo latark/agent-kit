@@ -52,8 +52,8 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon outside test|serve|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
                                         тесты проекта или dev-сервер (своя копия на коммите, порт 4300–4399, не
                                         больше двух) под sandbox-exec без ключей, браузеров и
-                                        местного прокси → код и хвост журнала или адрес; после «принять» argus
-                                        плановый проход сам гоняет тесты и пишет запись tests шлюза слияния
+                                        местного прокси → код и хвост журнала или адрес; сам тесты после «принять»
+                                        argus не гоняет — заявку подаёт роль, дежурный тревожит через 1 ч
   pantheon traces [--markers ФАЙЛ] | install-hook   личные следы до push (lib/traces.py, metis-0414): та же проверка, что CI
                                         check-traces; маркеры — файл вне репозитория; нет файла — отказ, код 2; install-hook ставит pre-push
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl

@@ -495,15 +495,17 @@
   `extensions.worktreeConfig`, командой в `core.fsmonitor` или ключом-командой (`*.command`, `*.textconv`, `*.driver`,
   `*.helper`, `*.program`, `pager.*`, `alias.*`) — отказ; git прохода — с `core.fsmonitor=false`, без хуков,
   сети и подмодулей (`status --ignore-submodules=all`: конфиг подмодуля в `<клон>/.git/modules/` окну открыт), копия —
-  через `--git-dir` клона без `~/.gitconfig`; тесты после «принять» берут клон и worktree тоже через эту проверку. Файл
+  через `--git-dir` клона без `~/.gitconfig`. Файл
   ключей — по `origin` клона, а клон — только из папок окна заявки; другие remote ключей не дают. Остаток: ключи сервера лежат в окружении его процесса, а процесс того же пользователя читает его
   (`sysctl KERN_PROCARGS2`, как `ps -E`). `(deny process-info* (target others))` и запрет `sysctl-read` по имени этого
   не закрывают (проба 01.11 на Darwin 25), поэтому серверу — только dev-ключи. Остаток того же рода: роль пишет
   `<клон>/.git/worktrees/<имя>/` (окну закрыты только `.git/config` и `.git/hooks`) и между проверкой и git теста может
   переписать там `commondir`. Это намеренный обход, а не ошибка агента, и граница здесь — песочница (модель угроз —
   README guard). Разбор не наращивается.
-  После «принять» argus проход сам гоняет тесты этого SHA (копия реестра или временный worktree) и пишет запись tests
-  шлюза слияния (`by.agent_type` = `pantheon-outside`): роль её не напишет — STATE ей закрыт, команде под профилем тоже.
+  Автопрогонов нет (решение владельца 03.11): после «принять» argus проход тесты сам не гоняет — заявку на итоговый head
+  подаёт роль. Проход лишь тревожит дежурного: «принять» без записи tests дольше часа на head, который ещё открыт у PR,
+  — одна тревога на (repo, SHA) с номером PR. Запись tests шлюза слияния (`by.agent_type` = `pantheon-outside`) пишет
+  проход по заявке: роль её не напишет — STATE ей закрыт, команде под профилем тоже.
   Запись даёт только проверка проекта: с `--script` и у сервера её нет; команда видна в записи (у скрипта package.json —
   с телом), остаток — README guard. Итоги заявок в папках заявок старше суток проход удаляет сам. Роли dev-*, talos,
   лиды и argus называют `pantheon outside test --wait 590` и `pantheon outside serve --wait 120` в своих правилах;
@@ -593,7 +595,7 @@
     python3 -I plugins/pantheon/tests/test_roles_harness.py  # настоящие роли: урок с вердиктом, три правила, режим работы
     python3 -I plugins/pantheon/tests/test_plugin_map.py   # карта плагинов и MCP: окна, роли, битая карта, неизвестное
     python3 -I plugins/pantheon/tests/test_start.py   # start, wake, roles build, approve, heavy, Stop-хук разработчика
-    python3 -I plugins/pantheon/tests/test_outside.py # проверки вне окна: tests после «принять», заявки, dev-сервер, профиль
+    python3 -I plugins/pantheon/tests/test_outside.py # проверки вне окна: заявки на тесты, тревога о «принять» без tests, dev-сервер, профиль
     python3 -I plugins/pantheon/tests/test_read.py    # чтение переписки: папка, список, имена, согласие на список чатов, пределы
     python3 -I plugins/pantheon/tests/test_watch.py   # дежурный: самозапуск, сбои, паузы, стоп, техперезапуск, журналы, пересмотры
     python3 -I plugins/pantheon/tests/test_culprits.py   # виновники памяти: тревога на эпизод, чей процесс, pantheon reap
