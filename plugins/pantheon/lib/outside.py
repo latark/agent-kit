@@ -145,6 +145,7 @@ tests на HEAD тем же путём append_tests с cmd = FULL_TESTS и по�
 Журналы: STATE/outside/runs/<ID>.log (вывод команды) и <ID>.json (итог), STATE/logs/outside.jsonl.
 """
 import contextlib
+import errno
 import glob
 import hashlib
 import json
@@ -187,6 +188,8 @@ SWEEP_EVERY = 2                     # с: так часто сторож смо�
 REQ_TTL = 15 * 60                   # с: заявка serve, пролежавшая дольше, не запускается
 STOP_ORPHAN_AGE = 60                # с: «стоп» без сервера и заявки старше — убирается
 WORK_ORPHAN_AGE = 600               # с: копия серверов без записи в servers.json старше — брошена, снимается
+PREPARE_SPAWN_TRIES = 3             # запусков установки при временном отказе fork/exec
+SPAWN_RETRY_ERRNO = {errno.EAGAIN, errno.ETXTBSY, errno.ENOMEM}
 STOP_WAIT = 20                      # с: `outside stop` ждёт итог по умолчанию
 RESIDENT_MAX = 3600                 # с: проход серверов живёт не дольше, потом его зовёт тик (новая версия кода)
 AUTO_TTL = 24 * 3600                # «принять» старше суток дежурному уже не напоминается
@@ -2247,16 +2250,25 @@ def prepare(d, rid, heavy=True, tick=None, timeout=TEST_TIMEOUT):
     code = -1
     try:
         os.write(fd, f"$ {' '.join(argv)}  (зависимости свежего worktree)\n".encode())
-        proc = subprocess.Popen(wrap(argv, write_profile(registry(None)), heavy=heavy), cwd=d,
-                                env=sandbox_env(tmp, "test"), stdin=subprocess.DEVNULL, stdout=fd, stderr=fd,
-                                start_new_session=True)
+        for attempt in range(PREPARE_SPAWN_TRIES):
+            try:
+                proc = subprocess.Popen(wrap(argv, write_profile(registry(None)), heavy=heavy), cwd=d,
+                                        env=sandbox_env(tmp, "test"), stdin=subprocess.DEVNULL, stdout=fd, stderr=fd,
+                                        start_new_session=True)
+                break
+            except OSError as e:
+                # под нагрузкой fork/exec даёт временный отказ (EAGAIN, ETXTBSY): повтор, а не «код -1» (metis-0731)
+                if e.errno not in SPAWN_RETRY_ERRNO or attempt == PREPARE_SPAWN_TRIES - 1:
+                    raise
+                time.sleep(1 + attempt)
         try:
             code = wait_proc(proc, timeout, tick)
         except subprocess.TimeoutExpired:
             kill_group(proc.pid)
             proc.wait()
-    except (OSError, subprocess.SubprocessError):
-        pass
+    except (OSError, subprocess.SubprocessError) as e:
+        with contextlib.suppress(OSError):   # причина в журнал: «код -1» без неё не разобрать (metis-0731)
+            os.write(fd, f"установка не запустилась: {type(e).__name__}: {e}\n".encode())
     finally:
         os.close(fd)
         shutil.rmtree(tmp, ignore_errors=True)

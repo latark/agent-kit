@@ -1496,7 +1496,8 @@ def _gone(proc, timeout=5):
 
 
 _orphan = subprocess.Popen([sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-                            "time.sleep(120)"], cwd=work_of(rid_s), start_new_session=True)
+                            "time.sleep(120)"], cwd=work_of(rid_s) if os.path.isdir(work_of(rid_s)) else _ROOT,
+                           start_new_session=True)   # копии нет, если сервер не поднялся: FAIL выше, а не обрыв файла (metis-0731)
 TEST_PROCS.append(_orphan)
 t0 = time.monotonic()
 rc, out = say("metis-y", "stop", rid_s)
@@ -1563,6 +1564,43 @@ res = O.load_result(q, rid) or {}
 check("стоп во время установки: установка прервана, stopped без запуска сервера, копия снята",
       res.get("state") == "stopped" and dt < 15 and not pid_alive(_slow_prepare.pid, 0) and not O.servers()
       and not os.path.exists(work_of(rid)), (res, round(dt, 1)))
+
+# metis-0731: fork/exec под нагрузкой даёт временный отказ — установка зависимостей повторяется, а не падает «кодом -1»
+import errno as _errno
+_pd = tempfile.mkdtemp(prefix="prep-", dir=_ROOT)
+with open(os.path.join(_pd, "package.json"), "w") as fh:
+    fh.write('{"name": "p"}')
+_real_popen, _real_wrap, _real_sleep = subprocess.Popen, O.wrap, time.sleep
+
+
+def _prep_with(errnos):
+    """prepare() с Popen, отказывающим по очереди errnos; → (код, число запусков, журнал)."""
+    calls = []
+
+    def popen(argv, *a, **kw):
+        calls.append(argv)
+        if len(calls) <= len(errnos):
+            raise OSError(errnos[len(calls) - 1], os.strerror(errnos[len(calls) - 1]))
+        return _real_popen([sys.executable, "-c", "pass"], **{k: v for k, v in kw.items() if k != "env"})
+
+    rid_p = "20261103-000000-" + os.urandom(3).hex()
+    subprocess.Popen, O.wrap, time.sleep = popen, (lambda argv, *a, **kw: argv), (lambda t: None)
+    try:
+        code = O.prepare(_pd, rid_p)
+    finally:
+        subprocess.Popen, O.wrap, time.sleep = _real_popen, _real_wrap, _real_sleep
+    with open(O.root("runs", rid_p + ".log")) as fh:
+        return code, len(calls), fh.read()
+
+
+_code, _n, _log = _prep_with([_errno.EAGAIN, _errno.ETXTBSY])
+check("установка: временный отказ запуска (EAGAIN, ETXTBSY) — повтор, код 0", _code == 0 and _n == 3, (_code, _n, _log))
+_code, _n, _log = _prep_with([_errno.EAGAIN] * 3)
+check("установка: отказ на каждой попытке — код -1 после 3 запусков, причина в журнале",
+      _code == -1 and _n == 3 and "установка не запустилась: BlockingIOError" in _log, (_code, _n, _log))
+_code, _n, _log = _prep_with([_errno.ENOENT])
+check("установка: постоянный отказ (ENOENT) — без повтора, код -1, причина в журнале",
+      _code == -1 and _n == 1 and "установка не запустилась: FileNotFoundError" in _log, (_code, _n, _log))
 
 # --- номер процесса сервера занял чужой (metis-0606, Д-2 argus): не гасить ни его, ни его детей в своих группах ----
 _spawn = [sys.executable, "-c", "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', "
