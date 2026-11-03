@@ -25,7 +25,10 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
 
 Границы (решения владельца 15.10 и 03.11, decisions.md: Харон, `browse read`, allowLocalBinding; metis-0760):
 - Чтение (open, read, eval) — только сайты из `~/.claude/pantheon/reads.toml` (`domains = [...]`, поддомены тоже; файла
-  нет — 15 сайтов решения 15.10 и forms.yandex.ru, DEFAULT_DOMAINS). Другой сайт — только по задаче: «да» владельца
+  нет — 15 сайтов решения 15.10 и forms.yandex.ru, DEFAULT_DOMAINS). Другой сайт — если его хост есть в словах
+  владельца за 24 ч (решение 03.11, owner_said: журнал owner-log/*.md всех окон, его пишет хук; строка «вопрос:» ответа,
+  задачи, сообщения, страницы и доска — не слова владельца; ivan@mail.ru и путь адреса — не хост), первое чтение окном
+  сайта за 6 ч — уведомление «<окно> читает <сайт> — по вашим словам ЧЧ:ММ». Или по задаче: «да» владельца
   окном вопросов (или ответом в чате; галочка на доске — нет) на вопрос «[ID] …» за 7 дней, где этот хост стоит целым
   токеном (`--task ID`; example.com не открывает le.com). Адрес — печатные ASCII без «\\», «хост:порт» без %, [], @.
   Адрес вкладки сверяется после /open (нет поля url — отказ), в итоге read и после eval; чужой — about:blank и отказ.
@@ -55,6 +58,7 @@ STATE/logs/browser.jsonl. Проход запускает тик (kick), пок�
 чтобы следующая заявка шла без минуты ожидания тика.
 """
 import contextlib
+import datetime
 import json
 import os
 import re
@@ -438,12 +442,62 @@ def listed(host, domains):
     return any(h == d or h.endswith("." + d) for d in domains)
 
 
-HOST_TOKEN = re.compile(r"(?<![\w.-])[\w-]+(?:\.[\w-]+)+(?![\w-]|\.[\w-])")
+# хост — целый токен; после «@» — нет: ivan@mail.ru — почта, а не сайт mail.ru (C2, C7)
+HOST_TOKEN = re.compile(r"(?<![\w.@-])[\w-]+(?:\.[\w-]+)+(?![\w@-]|\.[\w-])")
+URL_TOKEN = re.compile(r"https?://[^\s<>\"'`]+", re.I)
 
 
 def question_hosts(q):
-    """Хосты в тексте вопроса — целые токены (C2): «example.com» не открывает le.com; www. снимается."""
-    return {site_word(h.lower()) for h in HOST_TOKEN.findall(q)}
+    """Хосты в тексте — из адресов http(s) (хост адреса, а не его путь) и целые токены вне адресов (C2): «example.com»
+    не открывает le.com, «ivan@mail.ru» не открывает mail.ru (C7); www. снимается."""
+    out = set()
+    for u in URL_TOKEN.findall(q or ""):
+        with contextlib.suppress(ValueError):
+            h = urlsplit(u).hostname
+            if h and "." in h:
+                out.add(site_word(h.lower().rstrip(".")))
+    return out | {site_word(h.lower()) for h in HOST_TOKEN.findall(URL_TOKEN.sub(" ", q or ""))}
+
+
+OWNER_WORDS_TTL = 24 * 3600                   # сайт вне списка — по словам владельца за 24 ч (решение 03.11, C8)
+OWNER_LOG_TAIL = 512 * 1024
+OWNER_ENTRY = re.compile(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$", re.M)
+
+
+def owner_said(site):
+    """Время последней записи владельца за OWNER_WORDS_TTL, где есть этот сайт (question_hosts), или None (C8).
+    Слова владельца — только журнал owner-log/*.md (все окна): его пишет хук, роли туда не пишут. У записи с пометкой
+    хука (ответ окном вопросов, ответ в чате) строка «вопрос: …» — текст Зевса, не владельца: не считается. Текст задач,
+    сообщений, страниц и board.jsonl (галочка доски) — не слова владельца."""
+    best, since = None, P.now() - OWNER_WORDS_TTL
+    try:
+        names = sorted(os.listdir(P.path("owner-log")))
+    except OSError:
+        return None
+    for name in names:
+        if not name.endswith(".md"):
+            continue
+        try:
+            with open(P.path("owner-log", name), "rb") as fh:
+                fh.seek(0, 2)
+                fh.seek(max(0, fh.tell() - OWNER_LOG_TAIL))
+                text = fh.read().decode("utf-8", "replace")
+        except OSError:
+            continue
+        heads = list(OWNER_ENTRY.finditer(text))
+        for i, m in enumerate(heads):
+            try:
+                t = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+            except ValueError:
+                continue
+            if t < since or t > P.now() + 60 or (best is not None and t <= best):
+                continue
+            body = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)]
+            if m.group(2).strip():
+                body = "\n".join(ln for ln in body.split("\n") if not ln.lstrip().startswith("вопрос:"))
+            if site in question_hosts(body):
+                best = t
+    return best
 
 
 def owner_yes(task, match):
@@ -471,11 +525,15 @@ def site_word(host):
 
 
 def allowed(host, domains, task):
-    """Сайт можно читать: он в списке или по задаче есть «да» владельца на вопрос с этим хостом (токеном)."""
+    """Почему сайт можно читать или None: "list" — он в списке, "task" — по задаче есть «да» владельца на вопрос с
+    этим хостом (токеном), ("owner", t) — хост в словах владельца за 24 ч (owner_said, C8; t — время записи)."""
     if listed(host, domains):
-        return True
+        return "list"
     site = site_word(host)
-    return bool(task) and owner_yes(task, lambda q: site in question_hosts(q)) is not None
+    if task and owner_yes(task, lambda q: site in question_hosts(q)) is not None:
+        return "task"
+    t = owner_said(site)
+    return ("owner", t) if t is not None else None
 
 
 # --- демон --------------------------------------------------------------------------------------------------------
@@ -626,8 +684,23 @@ READ_JS = ("(() => { const b = document.body; return { url: location.href, title
            ".map(a => [(a.innerText || '').trim().slice(0, 120), a.href]) }; })()" % (TEXT_MAX, LINKS_MAX))
 
 
-def seen_notice(win, op, host, task):
-    """Первое обращение по задаче и сайту за SEEN_TTL — уведомление владельцу (BROW-10: кто, что, сайт, задача)."""
+def seen_notice(win, op, host, task, why=None):
+    """Первое обращение по задаче и сайту за SEEN_TTL — уведомление владельцу (BROW-10: кто, что, сайт, задача). Сайт
+    по словам владельца (why = ("owner", t), C8) — своё: первое чтение окном сайта за SEEN_TTL — «<окно> читает <сайт>
+    — по вашим словам ЧЧ:ММ»."""
+    if isinstance(why, tuple):
+        mark = root("seen", re.sub(r"[^a-z0-9.-]", "_", f"owner.{win or '-'}.{host}")[:120])
+        with contextlib.suppress(OSError):
+            if P.now() - os.stat(mark).st_mtime < SEEN_TTL:
+                return
+        with contextlib.suppress(OSError):
+            os.makedirs(root("seen"), exist_ok=True)
+            with open(mark, "w", encoding="utf-8") as fh:
+                fh.write(P.stamp() + "\n")
+            os.utime(mark, (P.now(), P.now()))
+        notify_owner(f"{win or 'ваша сессия'} читает {site_word(host)} — по вашим словам "
+                     + datetime.datetime.fromtimestamp(why[1]).strftime("%H:%M"))
+        return
     key = re.sub(r"[^a-z0-9.-]", "_", f"{task or '-'}.{host}")[:120]
     mark = root("seen", key)
     with contextlib.suppress(OSError):
@@ -689,20 +762,21 @@ def execute(req, win, domains):
     host = None
     if url:
         host = url_host(url)
-        if not allowed(host, domains, task):
-            raise Refuse(f"сайта {host} нет в списке чтения (reads.toml) и «да» владельца на «[{task or 'ID'}] … {host} "
-                         "…» нет — список правит владелец или Зевс спрашивает по задаче")
+        why = allowed(host, domains, task)
+        if not why:
+            raise Refuse(f"сайта {host} нет в списке чтения (reads.toml), в ваших словах за 24 ч и «да» владельца на "
+                         f"«[{task or 'ID'}] … {host} …» нет — список правит владелец или Зевс спрашивает по задаче")
     ensure_daemon(b, f"Харон ({win or 'ваша сессия'}): {op} на {host or 'текущей вкладке'}"
                      + (f", задача {task}" if task else ""))
     if url:
-        seen_notice(win, op, host, task)
+        seen_notice(win, op, host, task, why)
         out = navigate(b, url, domains, task)
         if op == "open":
             return "done", f"открыто: {out.get('title') or ''} — {out.get('url') or url}" + (
                 " (загрузка не дождалась load)" if out.get("timedOut") else ""), ""
     else:
         host = page_check(b, here_url(b), domains, task, "во вкладке")
-        seen_notice(win, op, host, task)
+        seen_notice(win, op, host, task, allowed(host, domains, task))
     if op == "read":
         out = evaluate(b, READ_JS)
         if not isinstance(out, dict):

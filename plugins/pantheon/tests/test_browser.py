@@ -8,7 +8,9 @@
 вынесены в metis-0765 (классы K и C3–C6 модели — там). Проверяется:
 - адрес (A): «\\», не-ASCII, %, [], @ в адресе, IP и порт — отказ; адреса нет в ответе /open или чтения, переход
   скриптом до чтения или во время eval, редирект на чужой сайт — about:blank и отказ;
-- согласие на чужой сайт (C1, C2): только окно вопросов (галочка доски — нет), хост вопроса целым токеном;
+- согласие на чужой сайт (C1, C2): только окно вопросов (галочка доски — нет), хост вопроса целым токеном; без
+  вопроса — хост в словах владельца за 24 ч (C8: owner-log/*.md, не строка «вопрос:», не задачи и не доска; почта и
+  путь адреса — не хост, C7), первое чтение окном сайта за 6 ч — уведомление «<окно> читает <сайт> — по вашим словам»;
 - eval (E): вызов — только по списку разрешённого EVAL_CALLS (E7: setProperty, insertRule, setHTMLUnsafe и любой
   другой вызов вне списка — отказ с его именем), побочные действия, навигация, вызов по чужому имени, доступ по
   строке, фоновые API, `new` вне списка (E6), функция по ссылке и переназначение имени из списка (E8), прятки имени
@@ -246,7 +248,7 @@ for h, ok in (("gosuslugi.ru", True), ("www.gosuslugi.ru", True), ("uslugi.ru", 
     check(f"[C2] «да» на gosuslugi.ru → {h}: {'можно' if ok else 'отказ'}", res["state"] == ("done" if ok else "refused"), res)
 check("[C2] хосты вопроса — целые токены, без хвоста пути и знаков",
       B.question_hosts("[x] Открыть https://www.Example.com/a?b, затем user@mail.ru и sub.site.org.") ==
-      {"example.com", "mail.ru", "sub.site.org"}, B.question_hosts("[x] Открыть https://www.Example.com/a?b"))
+      {"example.com", "sub.site.org"}, B.question_hosts("[x] Открыть https://www.Example.com/a?b"))
 board_answer(T0 - 580, "metis-0556", "[metis-0556] Читать example.com?", "Да")
 res = run(req("read", url="https://example.com/a", task="metis-0556"))
 check("[C1] галочка на доске — не согласие на чужой сайт", res["state"] == "refused", res)
@@ -255,6 +257,74 @@ check("[C1] pantheon consent видит галочку доски (общий р
 answer(T0 - 300, "[metis-0999] Читать example.com для анкеты?", "Нет")
 res = run(req("read", url="https://example.com/a", task="metis-0999"))
 check("позднее «нет» на тот же вопрос — снова отказ", res["state"] == "refused", res)
+
+# --- C7, C8: сайт вне списка по словам владельца за 24 ч (решение владельца 03.11) ---------------------------------
+
+
+def owner_says(t, text, win="zeus", note=""):
+    """Запись владельца в owner-log/<окно>.md, как пишет её хук."""
+    with open(os.path.join(STATE, "owner-log", win + ".md"), "a", encoding="utf-8") as fh:
+        fh.write("\n## %s%s\n%s\n" % (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)), note, text))
+
+
+def notes():
+    try:
+        return open(NOTIFY, encoding="utf-8").read()
+    except OSError:
+        return ""
+
+
+for h in ("words.example.org", "path.example.org", "old.example.org", "mail-words.ru", "zeus-said.org",
+          "task-said.org", "board-said.org"):
+    D.pages[f"https://{h}/"] = {"title": h, "text": f"страница {h}", "links": []}
+D.tab = AVITO
+owner_says(T0 - 3600, "глянь https://Words.Example.org/x?y=1 и скажи цену", win="hephaestus-x")
+said = time.strftime("%H:%M", time.localtime(T0 - 3600))
+before = notes()
+res = run(req("read", url="https://words.example.org/"), win="hq")
+check("[C8] хост в словах владельца за 24 ч (owner-log любого окна, из адреса) — чтение без вопроса и «да»",
+      res["state"] == "done" and "страница words.example.org" in res["text"], res)
+first = notes()[len(before):]
+check("[C8] первое чтение по словам владельца — уведомление «hq читает words.example.org — по вашим словам ЧЧ:ММ»",
+      f"hq читает words.example.org — по вашим словам {said}" in first, first)
+mid = notes()
+for op in ("read", "open"):
+    run(req(op, url="https://words.example.org/"), win="hq")
+check("[C8] повтор окном того же сайта за 6 ч — без нового уведомления", "по вашим словам" not in notes()[len(mid):],
+      notes()[len(mid):])
+at(T0 + 7 * 3600)
+mid = notes()
+res = run(req("read", url="https://words.example.org/"), win="hq")
+check("[C8] через 7 ч (слова ещё в 24 ч) — чтение и снова уведомление",
+      res["state"] == "done" and "hq читает words.example.org" in notes()[len(mid):], (res, notes()[len(mid):]))
+at(T0 + 23 * 3600 + 3000)
+res = run(req("read", url="https://words.example.org/"), win="hq")
+check("[C8] слова 24 ч 50 мин назад — отказ", res["state"] == "refused" and "24 ч" in res["why"], res)
+at(T0)
+owner_says(T0 - 25 * 3600, "посмотри old.example.org")
+res = run(req("read", url="https://old.example.org/"), win="hq")
+check("[C8] хост в словах владельца 25 ч назад — отказ", res["state"] == "refused", res)
+owner_says(T0 - 60, "пиши на ivan@mail-words.ru, а https://a.example.net/path.example.org — не сайт")
+for h in ("mail-words.ru", "path.example.org"):
+    res = run(req("read", url=f"https://{h}/"), win="hq")
+    check(f"[C7] {h}: часть почты или пути адреса в словах владельца — не сайт, отказ", res["state"] == "refused", res)
+check("[C7] question_hosts: почта ivan@mail.ru не даёт mail.ru, путь адреса — не хост",
+      B.question_hosts("ivan@mail.ru, https://a.ru/b.com/c, x.org") == {"a.ru", "x.org"},
+      B.question_hosts("ivan@mail.ru, https://a.ru/b.com/c, x.org"))
+answer(T0 - 60, "[q-zeus] Открыть zeus-said.org?", "Другое")
+res = run(req("read", url="https://zeus-said.org/"), win="hq")
+check("[C8] хост только в строке «вопрос:» ответа (текст Зевса, не владельца) — отказ", res["state"] == "refused", res)
+tdir = os.path.join(PAN, "directions", "metis-pantheon", "tasks")
+os.makedirs(tdir, exist_ok=True)
+with open(os.path.join(tdir, "metis-0997.md"), "w", encoding="utf-8") as fh:
+    fh.write("# metis-0997\nВладелец разрешил читать task-said.org\n")
+with open(os.path.join(STATE, "owner-log", "notes.txt"), "w", encoding="utf-8") as fh:
+    fh.write("## %s\ntask-said.org\n" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(T0 - 60)))
+board_answer(T0 - 60, "metis-0996", "[metis-0996] Читать board-said.org?", "Да")
+for h, what in (("task-said.org", "текст задачи и файл owner-log не .md"), ("board-said.org", "галочка доски")):
+    res = run(req("read", url=f"https://{h}/"), win="hq")
+    check(f"[C8] {h}: {what} — не слова владельца, отказ", res["state"] == "refused", res)
+D.tab = AVITO
 
 D.calls.clear()
 res = run(req("open", url="https://www.avito.ru/go"))
