@@ -472,19 +472,52 @@ def fs_probe(base):
             shutil.rmtree(d, ignore_errors=True)
 
 
-def window_roots(root, labels):
+def window_roots(root, labels, probe=None):
     """(корень для файлов WINDOW_FS, причина пропуска или None, строка для вывода или None)."""
+    probe = probe or fs_probe
     if not any(lb in WINDOW_FS for lb in labels):
         return root, None, None
-    bad = fs_probe(root)
+    bad = probe(root)
     if not bad:
         return root, None, None
     alt = os.path.join("/tmp", f"claude-{os.getuid()}")
-    alt_bad = fs_probe(alt) if os.path.isdir(alt) else "папки нет"
+    alt_bad = probe(alt) if os.path.isdir(alt) else "папки нет"
     if not alt_bad:
         return (tempfile.mkdtemp(prefix="run-tests-", dir=alt), None,
                 f"run-tests: окно режет запись под {root} ({bad}) — файлы WINDOW_FS идут в {alt}")
     return None, f"окно режет запись `.claude/agents` и `.git/config`: {bad}; {alt}: {alt_bad}", None
+
+
+def bind_probe():
+    """Можно ли занять локальный порт → причина или None."""
+    try:
+        with socket.socket() as sk:
+            sk.bind(("127.0.0.1", 0))
+        return None
+    except OSError as e:
+        return str(e)
+
+
+def window_plan(root, labels, probe=None, bind=None):
+    """Что делать с файлами, зависящими от окна → (корень для WINDOW_FS, множество пропускаемых файлов, причина, строка).
+    Вне окна обе пробы проходят: корень прежний, пропускаемых нет, строк нет (набор идёт как раньше)."""
+    probe, bind = probe or fs_probe, bind or bind_probe
+    labels = set(labels)
+    froot, why, line = window_roots(root, labels, probe)
+    drop, reasons = set(), []
+    if why:
+        drop |= WINDOW_FS
+        reasons.append(why)
+    elif froot != root:
+        drop |= WINDOW_NOT_TMP
+        reasons.append("окно режет `.git/config` под tmp кэша окна, а файлу нужен репозиторий вне /tmp "
+                       "(guard считает /tmp временной папкой)")
+    if labels & WINDOW_BIND:
+        bad = bind()
+        if bad:
+            drop |= WINDOW_BIND
+            reasons.append(f"окно не даёт занять локальный порт ({bad})")
+    return froot, drop, "; ".join(reasons), line
 
 
 class Job:
@@ -671,21 +704,10 @@ def main(argv):
         env0["PATH"] = stubs + os.pathsep + env0.get("PATH", "")
         print(f"run-tests: не macOS — заглушки команд в PATH файлов: {', '.join(stubbed)}", flush=True)
     state = {"spawning": False, "pending": None}
-    froot, fskip, fline = window_roots(root, [lb for _, lb in par + ser])
+    froot, drop, fskip, fline = window_plan(root, [lb for _, lb in par + ser])
     if fline:
         print(fline, flush=True)
-    if froot != root:  # корень запасной (или его нет): файлам вне /tmp тут не место
-        fskip = fskip or ("окно режет `.git/config` под tmp кэша окна, а файлу нужен репозиторий вне /tmp "
-                          "(guard считает /tmp временной папкой)")
-    drop = WINDOW_FS if froot is None else WINDOW_NOT_TMP
-    if WINDOW_BIND & {lb for _, lb in par + ser}:
-        try:
-            with socket.socket() as probe_sock:
-                probe_sock.bind(("127.0.0.1", 0))
-        except OSError as e:
-            drop = drop | WINDOW_BIND
-            fskip = (fskip + "; " if fskip else "") + f"окно не даёт занять локальный порт ({e})"
-    if fskip:
+    if drop:
         gone = sorted({lb for _, lb in par + ser} & drop)
         for lb in gone:
             print(f"skip {lb} · пропущено: {fskip}", flush=True)
