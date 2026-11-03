@@ -82,6 +82,21 @@ for _name in filter(None, os.environ.get("GUARD_SHIM_BOOM", "").split(",")):
 if os.environ.get("GUARD_SHIM_HANG"):
     setattr(*_target(os.environ["GUARD_SHIM_HANG"]), _hang)
     g.DEADLINE = float(os.environ.get("GUARD_SHIM_DEADLINE") or 1)
+else:
+    # metis-0763: срок guard (DEADLINE 8 с) и сроки его git/gh (3 и 6 с) — боевые, под нагрузкой полного набора (-j 3
+    # и чужие сессии) их не хватало: проверка «Метида по записям запора — можно» получала deny (fail closed). Тест
+    # проверяет правила, а не скорость машины, поэтому здесь сроки не короче 45 с; боевой код не меняется, а проверка
+    # самого срока (GUARD_SHIM_HANG выше) идёт со своим коротким.
+    g.DEADLINE = max(g.DEADLINE, 45)
+    import subprocess
+    _real_run = subprocess.run
+
+    def _run(*a, **kw):
+        if kw.get("timeout") is not None:
+            kw["timeout"] = max(kw["timeout"], 40)
+        return _real_run(*a, **kw)
+
+    subprocess.run = _run
 if os.environ.get("GUARD_SHIM_MANAGED"):  # файл управляемых настроек вместо настоящего
     g.MANAGED_FILE, g.MARKET_GUARD = os.environ["GUARD_SHIM_MANAGED"], path
 
