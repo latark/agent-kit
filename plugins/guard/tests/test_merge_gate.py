@@ -443,7 +443,7 @@ def t_admin_auto(h):
     merge_case("без номера PR — отказ", h.pre(f"gh pr merge --match-head-commit {sha}"), False, "один номер PR")
     merge_case("два номера PR — отказ", h.pre(f"gh pr merge 3 4 --match-head-commit {sha}"), False, "один номер PR")
     # флаги gh до pr (metis-0247 r4, решение Зевса 19.10): шлюз узнаёт форму `gh -R o/r pr merge` и судит её как
-    # обычную; мутация «без разбора флагов до подкоманды» краснеет здесь
+    # обычную; мутация «без разбора флагов до подкоманды» убита здесь
     def gate(name, cmd, why):
         d, r = h.pre(cmd)
         check(name, d == "deny" and "Правило push: gh pr merge" in r and why in r, r)
@@ -2788,7 +2788,7 @@ def t_hq_gh(h):
          hq(f"gh pr edit 5 -R other-org/public --body-file {me}"), False)
     case("hq: обход 2 — gh pr view -R torvalds/linux --comments — отказ",
          hq("gh pr view 5 -R torvalds/linux --comments"), False)
-    # -R: только из [merge_repos]; мутация «без проверки -R» краснеет здесь
+    # -R: только из [merge_repos]; мутация «без проверки -R» убита здесь
     case("hq: gh pr view -R чужой (без --comments) — отказ", hq("gh pr view 5 -R torvalds/linux"), False,
          "нет в [merge_repos]")
     case("hq: gh pr view без -R — отказ (репозиторий папки не проверить)", hq("gh pr view 5"), False, "-R")
@@ -2802,7 +2802,7 @@ def t_hq_gh(h):
          False, "GH_REPO")
     case("hq: субагент в окне штаба, -R чужой — отказ",
          hq("gh pr view 5 -R torvalds/linux", role="general-purpose", agent_id="sub1"), False)
-    # обсуждения — и в своём репозитории (решение Зевса 19.10); мутация «без проверки --comments» краснеет здесь
+    # обсуждения — и в своём репозитории (решение Зевса 19.10); мутация «без проверки --comments» убита здесь
     case("hq: gh pr view -R свой --comments — отказ", hq("gh pr view 5 -R latark/agent-kit --comments"), False,
          "обсуждений")
     case("hq: gh pr view -R свой -c — отказ", hq("gh pr view 5 -R latark/agent-kit -c"), False,
@@ -2811,14 +2811,14 @@ def t_hq_gh(h):
          "обсуждений")
     case("hq: --json comments — отказ", hq("gh pr view 5 -R latark/agent-kit --json title,comments"), False,
          "обсуждений")
-    # личное — свой репозиторий, но путь в me/; мутация «без проверки private» краснеет здесь
+    # личное — свой репозиторий, но путь в me/; мутация «без проверки private» убита здесь
     for cmd in (f"gh pr edit 5 -R latark/agent-kit --body-file {me}", f"gh pr edit 5 -R latark/agent-kit -F {me}",
                 f"gh pr edit 5 -R latark/agent-kit --body-file={me}", f"gh pr edit 5 -R latark/agent-kit -F{me}",
                 f'gh pr edit 5 -R latark/agent-kit --body "$(cat {me})"',
                 f"cat {me} | gh pr edit 5 -R latark/agent-kit --body-file -"):
         case(f"hq: личное в команде с gh pr — отказ ({cmd})", hq(cmd), False, "личное (")
     # входное перенаправление (argus-69b2): цель `<` разбор не держал среди слов; мутация «цели < не учитываются»
-    # краснеет здесь. Перенаправления, которые уже ловились (`< <(cat …)`, `<<< "$(cat …)"`), — рядом, чтобы не сломать
+    # убита здесь. Перенаправления, которые уже ловились (`< <(cat …)`, `<<< "$(cat …)"`), — рядом, чтобы не сломать
     via_stdin = (f"gh pr edit 5 -R latark/agent-kit --body-file - < {me}",
                  f"gh pr edit 5 -R latark/agent-kit -F /dev/stdin < {me}",
                  f"gh pr edit 5 -R latark/agent-kit --body-file - 0< {me}",
@@ -2848,7 +2848,7 @@ def t_hq_gh(h):
     d, r = hq(f"gh pr merge 5 -R latark/agent-kit --match-head-commit {OLD} --merge")
     check("hq: gh pr merge -R свой (agent_type hq) — отказ", d == "deny" and ("hq-gh" in r or "Правило push" in r), r)
     # ревью 69m-b: главная сессия окна штаба без agent_type для push — владелец, merge_problem не зовётся; слияние
-    # окну штаба закрыто всегда. Мутация «проверка слияния в check_hq_gh убрана» краснеет здесь
+    # окну штаба закрыто всегда. Мутация «проверка слияния в check_hq_gh убрана» убита здесь
     merge_why = "слияние PR закрыто"
     for cmd in ("gh pr merge 5 -R latark/agent-kit", "gh pr merge 5 -R latark/agent-kit --squash",
                 "gh pr merge 5 -R latark/agent-kit --auto --squash", "gh pr merge 5 --repo latark/agent-kit --merge",
@@ -2880,7 +2880,7 @@ def t_hq_gh(h):
         d, r = hq(cmd, role=None)
         check(f"hq: главная сессия окна: {cmd} — правило слияния не задевает", merge_why not in r, r)
     # флаги gh до pr и GH_* перед командой (metis-0247 r4, решение Зевса 19.10) — тот же отказ, что gh pr merge;
-    # мутация «без разбора флагов до подкоманды» краснеет здесь
+    # мутация «без разбора флагов до подкоманды» убита здесь
     for cmd in ("gh -R o/r pr merge 1", "gh --repo=o/r pr merge 1 --admin", "GH_REPO=o/r gh pr merge 1",
                 "gh --hostname github.com pr merge 1", "gh -Ro/r pr merge 1", "gh --repo o/r pr merge 1 --auto",
                 "gh -R=o/r pr merge 1", "gh --hostname=github.com -R o/r pr merge 1", "env GH_REPO=o/r gh pr merge 1",
@@ -2961,7 +2961,7 @@ def t_hq_gh(h):
     d, r = h.pre("cat < notes.md")
     check("координатор: cat < <не личное> — можно", d == "allow", r)
     # argus-69b3: значение флага в том же слове — check_private с values=True и у координатора; мутация
-    # «values=False в check_private» краснеет здесь (через пробел ловилось и раньше — рядом, для сравнения)
+    # «values=False в check_private» убита здесь (через пробел ловилось и раньше — рядом, для сравнения)
     for path in (me, "$HOME/ai/knowledge/me/x.md", f"{h.root}/ai/knowledge/me/x.md"):
         for base in ("gh pr create -R other-org/public --title t", "gh pr edit 5 -R other-org/public",
                      "gh issue create -R other-org/public --title t", "gh issue edit 5 -R other-org/public"):

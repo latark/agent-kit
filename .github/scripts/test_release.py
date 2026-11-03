@@ -363,7 +363,7 @@ def wf_step_bad(data):
 
 
 def t_wf_parse_selftest():
-    """Самотест разбора: формы, которые регулярка пропустила бы, обязаны быть пойманы (мутант forbidden=set() краснеет)."""
+    """Самотест разбора: формы, которые регулярка пропустила бы, обязаны быть пойманы (мутант forbidden=set() убит)."""
     cases = {
         "escape в ключе": ('jobs:\n  a:\n    "\\x65nv":\n      X: 1\n    steps: []\n', "env"),
         "continue-on-error во flow-шаге": ("jobs:\n  a:\n    steps:\n      - {name: x, run: y, continue-on-error: true}\n",
@@ -537,7 +537,7 @@ def t_workflows(wfdir=WORKFLOWS):
 
 
 def t_workflows_on_bad_copies():
-    """Сами проверки t_workflows (не только wf_parse) краснеют на плохой копии workflows: мутант в месте вызова
+    """Сами проверки t_workflows (не только wf_parse) ловят плохую копию workflows: мутант в месте вызова
     (`set(keys) & set()`, снятый wf_step_bad, подменённый список uses) выживать не должен."""
     global count
     real = open(os.path.join(WORKFLOWS, "tests.yml"), encoding="utf-8").read()

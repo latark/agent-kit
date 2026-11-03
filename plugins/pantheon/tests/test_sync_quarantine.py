@@ -560,9 +560,9 @@ src = open(CHECK, encoding="utf-8").read()
 assert "def is_released(path, data):\n" in src
 with open(mut, "w", encoding="utf-8") as fh:
     fh.write(src.replace("def is_released(path, data):\n", "def is_released(path, data):\n    return True\n"))
-check("мутант «всегда пропускать»: правка в байт проходит без флагов (тест на неё красный)", r_diff.flags(mut) == [],
+check("мутант «всегда пропускать»: правка в байт проходит без флагов (мутант убит)", r_diff.flags(mut) == [],
       r_diff.flags(mut))
-check("мутант «всегда пропускать»: не слитый коммит проходит без флагов (тест красный)", r_nm.flags(mut) == [])
+check("мутант «всегда пропускать»: не слитый коммит проходит без флагов (мутант убит)", r_nm.flags(mut) == [])
 
 for tag, a, b in (("parents вместо parents[1:]", "parents[1:]", "parents"),
                   ("endswith вместо точного имени", "== OWNER_REPO", '.endswith("/agent-kit")')):

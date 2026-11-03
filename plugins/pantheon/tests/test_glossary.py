@@ -225,6 +225,15 @@ def main():
         want = sorted([("lib/a.py", 3), ("skills/x/SKILL.md", 2), ("roles/r.tmpl", 2), ("roles/_parts/p.part", 2),
                        ("template/pantheon/t.md", 2), ("guard/README.md", 2), ("guard/hooks/h.py", 2)])
         check("находки в roles, _parts, template/pantheon и guard", got == want, str(got))
+        # мутанты (metis-0785): цвет у мутанта — находка; «убит/выжил» рядом с цветом теста — чисто
+        mfile = os.path.join(fake, "roles", "_parts", "m.part")
+        with open(mfile, "w", encoding="utf-8") as fh:
+            fh.write("мутант строки 5 → тест красный\nтест красный на мутанте\nмутация «без -R» краснеет здесь\n"
+                     "Мутант выжил — тесты зелёные, в тестах дыра.\nОткат → тест красный, мутант строки 5 → убит.\n")
+        f, u = scan(fake, gloss, [])
+        got = sorted(n for r, n, *_ in f if r == "roles/_parts/m.part")
+        check("мутант в цвете — находка, «убит/выжил» — чисто", got == [1, 2, 3], str(got))
+        os.remove(mfile)
         with open(os.path.join(fake, "lib", "b.py"), "w", encoding="utf-8") as fh:
             fh.write('x = "подтолкни сессию"\ny = "вытолкнуть"\nz = "протолкнул"\nw = "толкаем"\n')
         f, u = scan(fake, gloss, [])
