@@ -5,6 +5,8 @@
 Closes в теле — только задачам пачки, чей номер есть в коммитах ветки от origin/main (сообщение коммита или имя влитой
 ветки): по Closes плановый проход (lib/autoclose.py) ставит задаче review при открытом PR и done при слиянии, и
 недоделанная задача не должна закрыться вместе с пачкой. Остальные открытые — списком «не вошли», без Closes.
+Задача с неотмеченным пунктом «Готово, когда» или заглушкой (metis-0767) тоже без Closes: слитый PR оставил бы её в
+review, а не в done; в stderr — «<id>: неотмечено N», строка тела «Не целиком, остаются открытыми».
 Шлюз guard не трогается: PR пачки он проверяет как любой другой.
 
 P — модуль pantheon: его ставит загрузчик pantheon._attach до выполнения этого файла.
@@ -59,6 +61,13 @@ def _plain(text):
     return PART_WORD.sub("ч.", text)
 
 
+def unchecked(tasks, tid):
+    """Число неотмеченных пунктов «Готово, когда» карточки; заглушка DONE_WHEN_HINT — тоже неотмечено (разбор —
+    T.done_criteria, тот же, по которому autoclose считает «неотмечено N»)."""
+    T = P.tasks_mod()
+    return sum(1 for done, _ in T.done_criteria(tasks[tid][2]) if not done)
+
+
 def batch_body(sid, tasks, done_ids, part_ids=()):
     """(заголовок, тело PR пачки): задачи по порядку пачки; Closes — открытым задачам (не story) с номером в коммитах
     ветки (done_ids), кроме названных в коммите «часть <id>» (part_ids) — они «частично»; прочие открытые — «не
@@ -68,7 +77,12 @@ def batch_body(sid, tasks, done_ids, part_ids=()):
     ids = [i for i in T.story_order(sid, tasks) if tasks[i][1].get("type") != "story"]
     opened = [i for i in ids if tasks[i][1].get("status") not in ("done", "dropped")]
     half = [i for i in opened if i in part_ids]
+    left = {i: unchecked(tasks, i) for i in opened if i in done_ids and i not in half}
+    left = {i: n for i, n in left.items() if n}
+    half += [i for i in opened if i in left]
     shut = [i for i in opened if i in done_ids and i not in half]
+    for i, n in left.items():
+        print(f"{i}: неотмечено {n} — отметь пункты в карточке или оставь открытой", file=sys.stderr)
     out = [i for i in opened if i not in done_ids and i not in half]
     lines = [f"Пачка {sid}: {_plain(T.one_line(head.get('title')))}", "", "Задачи пачки:"]
     for i in ids:
@@ -80,7 +94,7 @@ def batch_body(sid, tasks, done_ids, part_ids=()):
     if out:
         lines += ["", "Не вошли в ветку (коммитов с их номером нет), после слияния остаются открытыми: " + "; ".join(out)]
     if half:
-        lines += ["", "Сделаны не целиком (коммит называет их неполными), после слияния остаются открытыми: " + "; ".join(half)]
+        lines += ["", "Не целиком, остаются открытыми: " + "; ".join(half)]
     if shut:
         lines += ["", "Closes " + ", ".join(shut)]
     return f"Пачка {sid}: {T.one_line(head.get('title'))}"[:200], "\n".join(lines) + "\n"
