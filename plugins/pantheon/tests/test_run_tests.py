@@ -744,5 +744,12 @@ check("Linux: все файлы пропущены — код 3 «нечего �
       r.returncode == 3 and "skip pantheon/test_setup.py" in r.stdout and "нечего гонять" in r.stdout
       and "итого" not in r.stdout, (r.returncode, r.stdout))
 
+# настоящая карта: test_merge_gate читает .github/workflows (сверка OPTIONAL_CHECKS), правка workflow обязана его выбрать (#288)
+real_map = json.load(open(os.path.join(PLUGIN, "scripts", "affected-map.json"), encoding="utf-8"))
+gate = real_map["tests"].index("guard/test_merge_gate.py")
+for wf in ("tests.yml", "release.yml", "check-traces.yml"):
+    check(f"карта: .github/workflows/{wf} → guard/test_merge_gate.py",
+          gate in real_map["files"].get(".github/workflows/" + wf, []), real_map["files"].get(".github/workflows/" + wf))
+
 print(f"\n{total - len(fails)} из {total} прошли")
 sys.exit(1 if fails else 0)

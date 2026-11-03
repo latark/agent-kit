@@ -439,18 +439,38 @@ def t_workflows(wfdir=WORKFLOWS):
     aff = job.get("affected", "")
     check("tests.yml: только чтение, запуск только на PR в main, Python 3.14, без токена в checkout",
           re.search(r"^permissions:\n  contents: read$", text, re.M) and re.search(r"pull_request:\n\s+branches: \[main\]", text)
-          and re.search(r"^on:\n  pull_request:\n    branches: \[main\]\n\npermissions:", text, re.M)
-          and text.count('python-version: "3.14"') == 1 and text.count("persist-credentials: false") == 1, text)
+          and re.search(r"^on:\n  pull_request:\n    branches: \[main\]\n  workflow_dispatch:\n\npermissions:", text, re.M)
+          and text.count('python-version: "3.14"') == 2 and text.count("persist-credentials: false") == 2, text)
     # гибрид без macOS (03.11, metis-0688): macOS на GitHub выключен во всех workflow, полный набор на push не идёт
-    macos = [n for n in names if re.search(r"^\s*(-\s*)?runs-on:.*macos", open(os.path.join(wfdir, n)).read(), re.I | re.M)
-             or re.search(r"macos-|macos\b", re.sub(r"(?m)^\s*#.*$", "", open(os.path.join(wfdir, n)).read()), re.I)]
+    macos = [n for n in names if re.search(r"macos", re.sub(r"(?m)^\s*#.*$", "", open(os.path.join(wfdir, n)).read()), re.I)]
     check("workflows: ни одного runs-on: macos (квота Free, минута macOS ×10)", not macos, macos)
-    full_run = [n for n in names for ln in open(os.path.join(wfdir, n)).read().splitlines()
-                if "run-tests.py" in ln and "--affected" not in ln and not ln.lstrip().startswith("#")]
-    on_push = [n for n in names if re.search(r"^  (push|workflow_dispatch|schedule):", open(os.path.join(wfdir, n)).read(), re.M)
-               and n == "tests.yml"]
-    check("tests.yml: нет job, который гоняет полный набор (run-tests.py без --affected) и нет запуска на push, "
-          "dispatch, schedule", not full_run and not on_push, (full_run, on_push))
+    # полный набор тестов (run-tests.py без --affected, прямой запуск tests/test_*.py в обход раннера) — только в job с
+    # `if: github.event_name == 'workflow_dispatch'`, и только если workflow не запускается на push/schedule/_target; на
+    # pull_request такой job SKIPPED (шлюз держит его в OPTIONAL_CHECKS). Комментарии отрезаются до проверки; смотрим все файлы.
+    nocomment = lambda t: "\n".join(re.sub(r"(^|\s)#.*$", "", ln) for ln in t.splitlines())
+    full_bad = []
+    for n in names:
+        wtext = nocomment(open(os.path.join(wfdir, n)).read())
+        won, _, wjobs = wtext.partition("\njobs:\n")
+        for part in re.split(r"^  (?=[A-Za-z0-9_-]+:\s*$)", wjobs, flags=re.M):
+            lines = part.splitlines()
+            is_full = any(("run-tests.py" in ln and "--affected" not in ln)
+                          or re.search(r"tests/|test_[\w*?\[\]]*\.py", ln.replace(".github/scripts/test_release.py", ""))
+                          for ln in lines if re.match(r"\s+(- )?(run:|[^\s:]+ )|\s{8,}\S", ln) or "run:" in ln)
+            if not is_full:
+                continue
+            jname = lines[0].strip() if lines else "?"
+            if not re.search(r"^    if: github\.event_name == 'workflow_dispatch'$", part, re.M):
+                full_bad.append((n, "полный набор в job без if: workflow_dispatch", jname))
+            if re.search(r"\b(push|schedule|pull_request_target)\b", won):
+                full_bad.append((n, "workflow с полным набором запускается на push/schedule", jname))
+    check("полный набор тестов — только в job с if: github.event_name == 'workflow_dispatch' и в workflow без "
+          "push/schedule (комментарии не в счёт, все файлы workflows)", not full_bad, full_bad)
+    # runs-on — только закреплённый Linux (или ubuntu-latest у release и check-traces): выражение, список, matrix и
+    # self-hosted не пускаем
+    ro = [(n, m) for n in names for m in re.findall(r"^\s*runs-on:\s*(.*)$", nocomment(open(os.path.join(wfdir, n)).read()), re.M)
+          if not re.fullmatch(r"ubuntu-(\d\d\.\d\d|latest)", m.strip())]
+    check("workflows: runs-on — только ubuntu-NN.NN или ubuntu-latest (без выражений, списков, matrix)", not ro, ro)
     # YAML с «: » в простом скаляре GitHub не разбирает — workflow не запускается вовсе (так было после #192)
     rb = shutil.which("ruby")
     load = "ARGV.each { |f| begin YAML.load_file(f, aliases: true) rescue ArgumentError; YAML.load_file(f) end }"
@@ -467,10 +487,11 @@ def t_workflows(wfdir=WORKFLOWS):
           keys is not None and not hit, hit if hit is not None else f"разбор YAML не удался: {why}")
     check("tests.yml: ни один шаг не выключается (`if:` только на уровне job), checkout не берёт чужой ref",
           tst is not None and not wf_step_bad(tst), tst if tst else why)
-    check("tests.yml: PR — job affected на закреплённом Linux (минута macOS ×10), полная история для merge-base",
-          tst is not None and sorted(tst["jobs"]) == ["affected"] and set(job) == {"affected"}
+    check("tests.yml: PR — job affected на закреплённом Linux, full — ручной на Linux (минута macOS ×10), полная история для merge-base",
+          tst is not None and sorted(tst["jobs"]) == ["affected", "full"] and set(job) == {"affected", "full"}
           and re.search(r"^    if: github.event_name == 'pull_request'$", aff, re.M)
-          and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", aff, re.M) and "fetch-depth: 0" in aff, job.keys())
+          and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", aff, re.M) and "fetch-depth: 0" in aff
+          and re.search(r"^    runs-on: ubuntu-\d\d\.\d\d$", job.get("full", ""), re.M), job.keys())
 
     def runs(part):
         """[(имя шага, [строки run, продолжения через обратную косую склеены])]: строки целиком, комментарий — отдельная строка."""
@@ -507,11 +528,15 @@ def t_workflows_on_bad_copies():
     global count
     real = open(os.path.join(WORKFLOWS, "tests.yml"), encoding="utf-8").read()
     rel_real = open(os.path.join(WORKFLOWS, "release.yml"), encoding="utf-8").read()
+    tr_real = open(os.path.join(WORKFLOWS, "check-traces.yml"), encoding="utf-8").read()
 
-    def run_on(tests=None, release=None):
+    def run_on(tests=None, release=None, traces=None, extra=None):
         d = tempfile.mkdtemp(prefix="wfbad-")
         put(d, "tests.yml", tests if tests is not None else real)
         put(d, "release.yml", release if release is not None else rel_real)
+        put(d, "check-traces.yml", traces if traces is not None else tr_real)
+        for en, et in (extra or {}).items():
+            put(d, en, et)
         saved, n = list(fails), count
         fails.clear()
         try:
@@ -540,24 +565,55 @@ def t_workflows_on_bad_copies():
          "release.yml: checkout не берёт чужой репозиторий"),
         ("второй YAML-документ в tests.yml", dict(tests=real.rstrip("\n") + "\n---\na: 1\n"), "tests.yml: continue-on-error, shell"),
     ]
-    full_job = ("\n  full:\n    runs-on: %s\n    timeout-minutes: 45\n    steps:\n      - uses: actions/checkout@"
+    nofull = real.split("\n  full:\n")[0].rstrip("\n") + "\n"
+    full_job = ("\n  full:\n%s    runs-on: %s\n    timeout-minutes: 45\n    steps:\n      - uses: actions/checkout@"
                 "11bd71901bbe5b1630ceea73d27597364c9af683\n      - run: python3 -I plugins/pantheon/scripts/run-tests.py -j 3 "
                 "plugins/guard\n")
+    disp = "    if: github.event_name == 'workflow_dispatch'\n"
+    full_msg = "полный набор тестов — только в job"
+    full_msg_all = "полный набор тестов — только в job"
+    on_push_wf = ("name: full\non:\n  push:\n    branches: [main]\npermissions:\n  contents: read\njobs:\n  full:\n"
+                  "    runs-on: %s\n    steps:\n      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683\n"
+                  "      - run: %s\n")
     cases += [
-        ("job full на macos-15 в tests.yml", dict(tests=real.rstrip("\n") + "\n" + full_job % "macos-15"),
+        ("job full на macos-15 в tests.yml", dict(tests=nofull + full_job % (disp, "macos-15")),
          "workflows: ни одного runs-on: macos"),
         ("macos-15 в runs-on у affected", dict(tests=ins(real, "runs-on: ubuntu-24.04", "runs-on: macos-15")),
          "workflows: ни одного runs-on: macos"),
         ("runs-on: macos-15 в release.yml", dict(release=ins(rel_real, "runs-on: ubuntu-latest", "runs-on: macos-15")),
          "workflows: ни одного runs-on: macos"),
-        ("job full на ubuntu в tests.yml (полный набор)", dict(tests=real.rstrip("\n") + "\n" + full_job % "ubuntu-24.04"),
-         "tests.yml: нет job, который гоняет полный набор"),
-        ("push в main в tests.yml", dict(tests=ins(real, "  pull_request:\n    branches: [main]\n",
-                                                  "  pull_request:\n    branches: [main]\n  push:\n    branches: [main]\n")),
-         "tests.yml: нет job, который гоняет полный набор"),
-        ("workflow_dispatch в tests.yml", dict(tests=ins(real, "  pull_request:\n    branches: [main]\n",
-                                                        "  pull_request:\n    branches: [main]\n  workflow_dispatch:\n")),
-         "tests.yml: нет job, который гоняет полный набор"),
+        ("job full без if (идёт на PR)", dict(tests=nofull + full_job % ("", "ubuntu-24.04")), full_msg),
+        ("job full с if на push", dict(tests=nofull + full_job % ("    if: github.event_name == 'push'\n", "ubuntu-24.04")),
+         full_msg),
+        ("job full с if на pull_request", dict(tests=nofull + full_job % ("    if: github.event_name == 'pull_request'\n",
+                                                                         "ubuntu-24.04")), full_msg),
+        ("push в main в tests.yml при job full", dict(tests=ins(real, "  workflow_dispatch:\n",
+                                                               "  push:\n    branches: [main]\n  workflow_dispatch:\n")),
+         full_msg),
+        ("schedule в tests.yml при job full", dict(tests=ins(real, "  workflow_dispatch:\n",
+                                                            "  schedule:\n    - cron: '0 3 * * *'\n  workflow_dispatch:\n")),
+         full_msg),
+        ("tests.yml без workflow_dispatch", dict(tests=ins(real, "  workflow_dispatch:\n", "")), "tests.yml: только чтение"),
+        ("лишний триггер issues в on у tests.yml", dict(tests=ins(real, "  workflow_dispatch:\n", "  workflow_dispatch:\n  issues:\n")),
+         "tests.yml: только чтение"),
+        ("on: push с run-tests.py и '# --affected' в комментарии",
+         dict(extra={"full.yml": on_push_wf % ("ubuntu-24.04", "python3 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard  # --affected")}),
+         full_msg_all),
+        ("on: push, обход раннера: python3 -I plugins/*/tests/test_*.py",
+         dict(extra={"full.yml": on_push_wf % ("ubuntu-24.04", "for t in plugins/*/tests/test_*.py; do python3 -I $t; done")}),
+         full_msg_all),
+        ("полный набор в check-traces.yml на push",
+         dict(traces=tr_real.replace("      - name: Личных следов нет\n", "      - run: python3 -I plugins/pantheon/scripts/run-tests.py -j 3 plugins/guard\n"
+                                     "      - name: Личных следов нет\n", 1)), full_msg_all),
+        ("schedule в check-traces.yml с полным набором (в job full с dispatch)",
+         dict(traces=tr_real.replace("\njobs:\n", "\n  schedule:\n    - cron: '0 3 * * 1'\njobs:\n", 1).rstrip("\n") + "\n" + full_job.replace("\n  full:", "\n  full:", 1) % (disp, "ubuntu-24.04")),
+         full_msg_all),
+        ("runs-on: ${{ vars.RUNNER }}", dict(tests=ins(real, "runs-on: ubuntu-24.04", "runs-on: ${{ vars.RUNNER }}")),
+         "workflows: runs-on — только"),
+        ("matrix os: [macos-15]", dict(tests=ins(real, "    runs-on: ubuntu-24.04\n", "    strategy:\n      matrix:\n        os: [macos-15]\n    runs-on: ${{ matrix.os }}\n")),
+         "workflows: ни одного runs-on: macos"),
+        ("runs-on: [self-hosted, linux]", dict(tests=ins(real, "runs-on: ubuntu-24.04", "runs-on: [self-hosted, linux]")),
+         "workflows: runs-on — только"),
         ("второй job в release.yml", dict(release=rel_real.rstrip("\n") + "\n  evil-x:\n    runs-on: ubuntu-24.04\n"),
          "release.yml: ровно один job"),
     ]
