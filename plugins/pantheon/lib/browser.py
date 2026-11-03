@@ -25,7 +25,7 @@ allowLocalBinding не открываем (отказ 15.10). Поэтому о�
 
 Границы (решения владельца 15.10 и 03.11, decisions.md: Харон, `browse read`, allowLocalBinding; metis-0760):
 - Чтение (open, read, eval) — только сайты из `~/.claude/pantheon/reads.toml` (`domains = [...]`, поддомены тоже; файла
-  нет — 15 сайтов по умолчанию, DEFAULT_DOMAINS). Другой сайт — только по задаче: «да» владельца на вопрос «[ID] …» за
+  нет — 15 сайтов решения 15.10 и forms.yandex.ru, DEFAULT_DOMAINS). Другой сайт — только по задаче: «да» владельца на вопрос «[ID] …» за
   7 дней, где в тексте вопроса есть этот адрес (`--task ID`). Переход, который увёл на чужой сайт, закрывается
   (about:blank) и даёт отказ. reads.toml правит владелец: зона ~/.claude/pantheon/ ролям закрыта.
 - Нажатия и ввод (click, type) — только с `--task ID` и на сайте, который можно читать. Нажатие на кнопку отправки
@@ -81,7 +81,8 @@ DEFAULT_DOMAINS = (
     "avito.ru", "disk.yandex.ru", "app.krisp.ai", "consultant.ru", "api.duma.gov.ru", "nalog.gov.ru", "minfin.gov.ru",
     "wordstat.yandex.ru", "tbankrot.ru", "nspd.gov.ru", "cian.ru", "domclick.ru", "old.bankrot.fedresurs.ru",
     "tgstat.ru", "telemetr.me",
-)                                             # решение владельца 15.10 (BROW-09): 15 сайтов чтения
+    "forms.yandex.ru",                        # формы владельца (metis-0760, «Готово, когда» шага В)
+)                                             # решение владельца 15.10 (BROW-09): 15 сайтов чтения + forms.yandex.ru
 DEFAULT_WINDOWS = ("hq",)
 OPS = ("health", "open", "read", "eval", "click", "type", "submit")
 ACTS = ("click", "type", "submit")            # нажатия и ввод — только с задачей

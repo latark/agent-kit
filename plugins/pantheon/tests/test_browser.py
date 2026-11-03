@@ -65,6 +65,7 @@ class Daemon:
         self.up, self.tab, self.calls = True, "about:blank", []
         self.pages = {"https://www.avito.ru/x": {"title": "Авито", "text": "объявления", "links": [["Ещё", "https://www.avito.ru/y"]]},
                       "https://m.avito.ru/z": {"title": "м", "text": "м", "links": []},
+                      "https://forms.yandex.ru/u/abc/": {"title": "Анкета", "text": "поля анкеты", "links": []},
                       "https://example.com/a": {"title": "Пример", "text": "пример", "links": []}}
         self.redirect = {"https://www.avito.ru/go": "https://example.com/a"}
         self.elements = {"#send": {"sub": True, "label": "Отправить"}, "#more": {"sub": False, "label": "Показать ещё"},
@@ -159,6 +160,9 @@ D.calls.clear()
 res = run(req("read", url="https://example.com/a"))
 check("чужой сайт без задачи — отказ, демон не зван", res["state"] == "refused" and "нет в списке" in res["why"]
       and "/open" not in D.paths(), res)
+res = run(req("read", url="https://forms.yandex.ru/u/abc/"))
+check("forms.yandex.ru — в списке по умолчанию (metis-0760): read без задачи и без reads.toml",
+      "forms.yandex.ru" in B.DEFAULT_DOMAINS and res["state"] == "done" and "поля анкеты" in res["text"], res)
 res = run(req("read", url="https://evilavito.ru/a"))
 check("evilavito.ru — не поддомен avito.ru, отказ", res["state"] == "refused", res)
 for bad in ("http://127.0.0.1/", "https://user:pw@avito.ru/", "file:///etc/passwd", "https://avito.ru:8443/",
