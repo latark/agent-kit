@@ -597,7 +597,7 @@ def main():
     lines = [l for l in open(nlog, encoding="utf-8").read().split("\n") if l]
     check("уведомление «❓ Вопрос к вам» ведёт в карточку", any("Вопрос к вам: Выбрать тариф" in l and "open?path=%2F" in l and "file=" not in l and "%D0%92%D1%8B%D0%B1%D1%80" in l for l in lines))
     # путь в ссылке — файл карточки в копии вида (metis-0318): мутант «имя папки вместо пути» даёт другой path
-    from urllib.parse import unquote, urlsplit, parse_qs
+    from urllib.parse import urlsplit, parse_qs
     qlines = [l for l in lines if "Вопрос к вам: Выбрать тариф" in l]
     qurl = qlines[0].split("|")[2] if qlines and len(qlines[0].split("|")) > 2 else ""
     qpath = parse_qs(urlsplit(qurl).query).get("path", [""])[0]

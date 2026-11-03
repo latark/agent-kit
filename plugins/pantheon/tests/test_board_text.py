@@ -89,7 +89,7 @@ check("1. тот же текст, другой штамп (время, числ�
 check("1. текст изменился → written, временных файлов рядом не осталось",
       B.sync(auto, B.render(dict(data, week=12), T0 + 600)) == "written" and "Неделя: 12 %" in read(auto)
       and sorted(os.listdir(os.path.dirname(auto))) == ["board-auto.md"], os.listdir(os.path.dirname(auto)))
-check("1. clean убирает управляющие и bidi-знаки", B.clean("a‮b\u0007c​d\ne") == "a b c d e", B.clean("a‮b"))
+check("1. clean убирает управляющие и bidi-знаки", B.clean("a‮b\u0007c\u200bd\ne") == "a b c d e", B.clean("a‮b"))
 
 # --- 2. входы: чужой текст в блок не попадает ----------------------------------------------------------------------
 pan = os.path.join(ROOT, "u", "pantheon")

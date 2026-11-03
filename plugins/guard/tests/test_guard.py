@@ -995,7 +995,7 @@ def main():
          W(os.path.join(home, ".local/state/pantheon/owner-log/board.jsonl"))),
         *[(f"0044 без роли: {n} — можно", "allow", ".", "", False, x) for n, x in (
             ("Read карточки", R(os.path.join(home, "ai/pantheon-view/Доска/athena-0001 Вопрос.md"))),
-            ("cat доски и журнала", B(f"cat ~/ai/pantheon-view/Доска/*.md ~/.local/state/pantheon/owner-log/board.jsonl")),
+            ("cat доски и журнала", B("cat ~/ai/pantheon-view/Доска/*.md ~/.local/state/pantheon/owner-log/board.jsonl")),
             ("pantheon view и board", B("pantheon view; pantheon board")),
             ("pantheon task set", B("pantheon task set athena-0001 status=doing --note x")),
             ("остальной ~/.local/state/pantheon", W(os.path.join(home, ".local/state/pantheon/logs/x.log"))),

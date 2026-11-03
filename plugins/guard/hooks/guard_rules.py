@@ -628,7 +628,6 @@ def check_nextjs(event):
 # Предел: что пишет программа изнутри (python script.py, python -c, node -e, make, свой скрипт), guard не
 # видит. Это защита от ошибки агента, а не от намеренного обхода; настоящая граница — песочница (SEC-19).
 
-import hashlib
 import stat
 import unicodedata
 

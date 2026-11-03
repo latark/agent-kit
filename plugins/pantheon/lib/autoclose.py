@@ -28,7 +28,7 @@ import re
 import shutil
 import subprocess
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 ID_RE = re.compile(r"(?<![\w-])[a-z][a-z0-9]{1,11}-\d{3,}(?![\w])")
 PART_RE = re.compile(r"(?<!\w)часть(?!\w)", re.I)

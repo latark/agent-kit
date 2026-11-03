@@ -256,7 +256,6 @@ def run_all(tmp):
 
     # metis-0158: метка «ревью идёт»
     import time as _time
-    import shutil as _sh
 
     def at(t, *args):
         return subprocess.run([sys.executable, "-I", RUN_PY, *args], capture_output=True, text=True,

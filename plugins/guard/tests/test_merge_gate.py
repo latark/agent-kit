@@ -5,7 +5,6 @@
 
 Запуск: python3 -I plugins/guard/tests/test_merge_gate.py   (код 0 — все прошли)
 """
-import io
 import json
 import os
 import re
@@ -1892,9 +1891,9 @@ def t_ci_required(h):
     c9 = f"gh pr merge 9 --match-head-commit {sha} --merge"
     merge_case("без роли: PR 9 без записей тестов и argus, CI зелёный — проходит", h.pre(c9, **owner), True)
     merge_case("роль на том же PR 9 без записей — отказ (записи ей нужны)", h.pre(c9, pdir=kit), False)
-    for c, how in ((f"gh pr merge 9 --merge", "без --match-head-commit (head PR)"),
-                   (f"gh pr merge --admin 9 --squash", "с --admin перед номером"),
-                   (f"gh pr merge 9 -R latark/agent-kit --merge", "с -R"),
+    for c, how in (("gh pr merge 9 --merge", "без --match-head-commit (head PR)"),
+                   ("gh pr merge --admin 9 --squash", "с --admin перед номером"),
+                   ("gh pr merge 9 -R latark/agent-kit --merge", "с -R"),
                    (f"cd {h.j(kit)} && gh pr merge 9 -R latark/agent-kit", "cd и -R")):
         merge_case(f"без роли: {how}, CI зелёный — проходит", h.pre(c, **owner), True)
     merge_case("без роли: из папки tg-read с -R latark/agent-kit — судится agent-kit, зелёный — проходит",
@@ -1986,10 +1985,10 @@ def t_ci_required(h):
     merge_case("без роли: одно слияние PR 9 при красном PR 10 рядом — проходит", h.pre(c9, **owner), True)
     merge_case("без роли: зелёный 9 && красный 10 — отказ по 10",
                h.pre(f"{c9} && gh pr merge 10 --match-head-commit {sha} --merge", **owner), False,
-               f"tests/affected красная: FAILURE на latark/agent-kit#10@")
+               "tests/affected красная: FAILURE на latark/agent-kit#10@")
     merge_case("без роли: красный 10 && зелёный 9 — отказ по 10",
                h.pre(f"gh pr merge 10 --match-head-commit {sha} --merge && {c9}", **owner), False,
-               f"tests/affected красная: FAILURE на latark/agent-kit#10@")
+               "tests/affected красная: FAILURE на latark/agent-kit#10@")
     h.ci(nine, name="agent-kit")
     # Д3 argus #235: ответ запусков из двух JSON подряд — не один ответ, отказ (а не первый документ)
     runs, checks = rest_runs(dict(h.view["agent-kit"], statusCheckRollup=GREEN_KIT))
@@ -4114,7 +4113,7 @@ def t_gh_out(h):
     check("gh-out: .git в $HOME — корень не $HOME, файл под ним — отказ", d3 == "deny" and "realpath" in r3, r3)
     case("gh-out: флаг до pr съедает pr (gh -F pr create …) — отказ", f"gh -F pr create {R} --title t", False)
     case("gh-out: между pr и подкомандой чужой флаг — отказ", f"gh pr --body x comment 5 {R}", False, "между pr")
-    case("gh-out: между pr и подкомандой -R свой — можно", f"gh pr -R latark/agent-kit comment 5 -b x", True)
+    case("gh-out: между pr и подкомандой -R свой — можно", "gh pr -R latark/agent-kit comment 5 -b x", True)
     # metis-0596 (argus #199): каждый -R сверяется со списком, а не только первый; склеенный -Rx — тоже -R
     for extra in ("-R torvalds/linux", "-Rtorvalds/linux", "--repo=torvalds/linux", "--repo torvalds/linux"):
         case(f"gh-out: свой -R, затем {extra} — отказ", f"gh pr comment 5 {R} {extra} -b x", False, "нет среди")

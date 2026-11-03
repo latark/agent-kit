@@ -241,7 +241,7 @@ def _parts(path):
     if a == _ROOT or not a.startswith(_ROOT + os.sep):
         return None
     parts = a[len(_ROOT) + 1:].split(os.sep)
-    if any(x in ("", ".", "..") for x in parts):  # noqa: путь собран кодом, это страховка
+    if any(x in ("", ".", "..") for x in parts):  # путь собран кодом, это страховка
         raise ValueError(f"путь не по образцу: {path}")
     return parts
 

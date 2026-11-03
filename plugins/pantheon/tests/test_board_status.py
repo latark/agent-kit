@@ -275,7 +275,7 @@ for rnd in range(2):  # пачку закрыли руками — проход 
     rr = cli(["board"], T0 + 140 + rnd * 20)
     hand.append((head(sp).get("status"), rr.stdout))
 check("4. пачку, которую проход ставил в doing, закрыли руками — два прохода подряд статус done",
-      [h for h, _ in hand] == ["done", "done"] and f"вернули руками в done" in hand[0][1], hand)
+      [h for h, _ in hand] == ["done", "done"] and "вернули руками в done" in hand[0][1], hand)
 check("4. пачка в doing не проходом → отметка в её журнале без сдвига, проход печатает её",
       head(sp5).get("status") == "doing" and S.last_story_move(read(sp5)) == "doing"
       and f"статус · {s5}: doing, отметка в журнале" in r_first.stdout, (read(sp5), r_first.stdout))

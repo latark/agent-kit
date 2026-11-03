@@ -69,7 +69,6 @@ import re
 import subprocess
 import sys
 import time
-import urllib.parse
 from datetime import datetime
 
 HOME = os.path.expanduser("~")

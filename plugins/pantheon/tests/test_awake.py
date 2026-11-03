@@ -531,9 +531,8 @@ def test_limit_skips_stopped_and_paused():
 def test_pantheon_wake_sees_limited():
     e = Env()
     e.direction_tasks = e.task("hermes-site")  # открытая задача направления
-    a = e.limited("hermes-site")
+    e.limited("hermes-site")
     LIM = at(2026, 10, 19, 8, 0)
-    run = lambda t: (e.now(t), io.StringIO())
 
     def wake(t):
         e.now(t)
@@ -661,7 +660,7 @@ def test_wake_waiting_blockers():
     e = Env()
     e.agent("hermes-site", "blocked", needs="x")
     base = e.task("hermes-site", "основа")
-    dep = e.task("hermes-site", "зависимая", depends_on=[base])
+    e.task("hermes-site", "зависимая", depends_on=[base])
     free = AW.free_task("hermes-site", MON)
     check(free == base, f"первой должна быть основа: {free}")
     e2 = Env()

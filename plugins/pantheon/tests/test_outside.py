@@ -720,7 +720,6 @@ os.environ.pop("CLAUDE_CODE_ENTRYPOINT")
 
 # --- 4. dev-сервер (metis-0614): свой проход, своя копия на коммите, порт из ряда, не больше двух, стоп откуда угодно -
 import contextlib  # noqa: E402
-import fcntl  # noqa: E402
 import io  # noqa: E402
 import signal  # noqa: E402
 import threading  # noqa: E402

@@ -486,8 +486,15 @@ def t_workflows(wfdir=WORKFLOWS):
 
     call = ('python3 -I plugins/pantheon/scripts/run-tests.py --affected --base origin/main -j 3 '
             '--log-dir "$RUNNER_TEMP/tests" plugins/guard plugins/pantheon plugins/project-tools || code=$?')
-    ar = [ln for _, lines in runs(aff) for ln in lines]
-    check("tests.yml: affected — тесты скриптов выпуска, затем раннер --affected по трём плагинам; код 3 — успех, "
+    # metis-0265: первый шаг affected — ruff по закреплённой версии и хешам, провал не прячется
+    asteps = runs(aff)
+    lr = asteps[0][1] if asteps else []
+    check("tests.yml: affected — первым шагом ruff: ставится по хешам из .github/ruff-requirements.txt, затем ровно "
+          "`ruff check .` (без `|| true`, --exit-zero и других флагов)",
+          lr == ["python3 -m pip install --disable-pip-version-check --require-hashes -r .github/ruff-requirements.txt",
+                 "ruff check ."], asteps)
+    ar = [ln for _, lines in asteps[1:] for ln in lines]
+    check("tests.yml: affected — после ruff тесты скриптов выпуска, затем раннер --affected по трём плагинам; код 3 — успех, "
           "остальные коды — job красный (строки run целиком, без комментариев и лишних ветвей)",
           ar == ["python3 -I .github/scripts/test_release.py", "python3 --version", "code=0", call,
                  'if [ "$code" -eq 3 ]; then', 'echo "нечего гонять: изменения не задевают тесты"', "code=0", "fi",
@@ -496,7 +503,10 @@ def t_workflows(wfdir=WORKFLOWS):
     check("tests.yml: full — раннер по трём плагинам без --affected, код раннера — код job",
           fr == ["python3 --version", 'python3 -I plugins/pantheon/scripts/run-tests.py -j 3 --log-dir '
                  '"$RUNNER_TEMP/tests" plugins/guard plugins/pantheon plugins/project-tools'], fr)
-    check("tests.yml: ${{ }} не в run (инъекция)", not any("${{" in ln for ln in ar + fr), ar + fr)
+    req = open(os.path.join(WORKFLOWS, "..", "ruff-requirements.txt"), encoding="utf-8").read()
+    check("ruff-requirements.txt: ruff==<точная версия> и хеши sha256 колёс",
+          re.search(r"^ruff==\d+\.\d+\.\d+ \\$", req, re.M) and len(re.findall(r"--hash=sha256:[0-9a-f]{64}", req)) >= 1, req)
+    check("tests.yml: ${{ }} не в run (инъекция)", not any("${{" in ln for ln in ar + fr + lr), ar + fr + lr)
 
 
 def t_workflows_on_bad_copies():
@@ -539,6 +549,19 @@ def t_workflows_on_bad_copies():
         ("второй YAML-документ в tests.yml", dict(tests=real.rstrip("\n") + "\n---\na: 1\n"), "tests.yml: continue-on-error, shell"),
     ]
     cases += [
+        ("ruff с --exit-zero", dict(tests=ins(real, "          ruff check .", "          ruff check . --exit-zero")),
+         "tests.yml: affected — первым шагом ruff"),
+        ("ruff с || true", dict(tests=ins(real, "          ruff check .", "          ruff check . || true")),
+         "tests.yml: affected — первым шагом ruff"),
+        ("ruff без закреплённых хешей", dict(tests=ins(real, " --require-hashes", "")),
+         "tests.yml: affected — первым шагом ruff"),
+        ("шага ruff нет в affected", dict(tests=ins(real, "          ruff check .\n", "")),
+         "tests.yml: affected — первым шагом ruff"),
+        ("ruff отдельным job lint (шлюз guard его не знает)",
+         dict(tests=ins(real, "  affected:\n", "  lint:\n    if: github.event_name == 'pull_request'\n"
+                                              "    runs-on: ubuntu-24.04\n    steps:\n      - run: ruff check .\n\n"
+                                              "  affected:\n")),
+         "tests.yml: PR — job affected"),
         ("второй job в release.yml", dict(release=rel_real.rstrip("\n") + "\n  evil-x:\n    runs-on: ubuntu-24.04\n"),
          "release.yml: ровно один job"),
     ]
