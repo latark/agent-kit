@@ -515,6 +515,18 @@ def main():
     # argus-280b (Б): A ждёт B — «снята»; потом B закрыли или B сам ждёт без основания — `task set B` печатает GOAL_IN
     # про A (и про ждущих A по цепочке), иначе последней строкой о A остаётся «снята» и A навсегда вне цели
     fresh = lambda: new(env5, "--body", "Цель и готово").stdout.split()[0]
+    # цикл c1↔c2 уже в хранилище: обход цепочки ждущих при смене статуса чужой задачи не виснет (без `seen` — вечный
+    # цикл). Короткий предел и выход — иначе каждый следующий task set ждал бы по 300 с
+    try:
+        loop = subprocess.run([PY311, "-I", RUN_PY, "task", "set", fresh(), "status=doing"], capture_output=True,
+                              text=True, timeout=60, env=dict(env5, PANTHEON_NOW=str(T0)))
+    except subprocess.TimeoutExpired:
+        loop = None
+    check("task set при цикле ожиданий c1↔c2 в хранилище — заканчивается, код 0", loop and loop.returncode == 0,
+          loop and loop.stderr)
+    if loop is None:
+        print(f"\n{sum(results)}/{len(results)} — дальше task set повиснет так же, прогон остановлен")
+        sys.exit(1)
     a1, b1, c3, a2, b2, a3, b3 = (fresh() for _ in range(7))
     first = [wait_set(a1, f"waiting_on={b1}"), wait_set(c3, f"waiting_on={a1}"),
              wait_set(a2, f"waiting_on={b2}"), wait_set(a3, f"waiting_on={b3}")]
@@ -556,6 +568,12 @@ def main():
           and not rel(w("ab-001")) and not rel(w("ab-001 и ревью"), store)
           and not rel(store["ab-004"][1], store) and not rel({"id": "ab-004", "status": "waiting", "waiting_on": "ab-004"},
                                                                 store))
+    dep = T.goal_held_dependents
+    check("goal_held_dependents: ждущая в цикле — в списке с блокером и его статусом; снятая (цепочка до вопроса "
+          "владельцу) и ждущие не через tid — нет; цикл в стороне обход не вешает",
+          dep("ab-005", store) == [("ab-004", "ab-005", "waiting")] and dep("ab-007", store) == []
+          and dep("ab-002", store) == [] and dep("ab-001", store) == [] and dep("ab-001", None) == [],
+          (dep("ab-005", store), dep("ab-007", store)))
 
     # чистые функции
     desc = T.has_description
