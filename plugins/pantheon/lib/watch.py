@@ -1192,6 +1192,9 @@ def pauses_clear(agents, registry, t):
                 P.alert(f"{name} после паузы не продолжена: {why}", "watch")
                 continue
             got = resume_or_start(name, agents, UNPAUSE_TEXT, origin="tick", only_resume=True, auto=True)
+            if got == P.SKIPPED:  # metis-0708: повторная проверка под блокировкой имени сказала «не надо» — не сбой
+                P.alert(f"{name} после паузы: пропуск — {P.SKIP_WHY}", "watch")
+                continue
             P.alert(f"{name} после паузы: " + ("продолжена" if got == 0 else f"не поднялась, код {got}"), "watch")
 
 
@@ -1629,7 +1632,8 @@ def oneshots(agents, registry, doms, t):
     Запись гасится до запуска, повторный проход её не повторит. Пока нельзя (шлюз недели и ночи, сессия занята, одна
     за проход) — ждёт до срока; после срока гаснет с тревогой. Пачка ночи, изменённая после фиксации вечером, не запускается.
     Закрытый недельный запор — запись ждёт до срока (не гасится). Код возврата запуска ≠0: запись уже погашена
-    (повтора нет), владельцу — уведомление «не вышел»."""
+    (повтора нет), владельцу — уведомление «не вышел». Пропуск под блокировкой имени (код 4, metis-0708) — не сбой:
+    запись снова ждёт до срока."""
     N = P.night_mod()
     del ONESHOT_STARTED[:]
     started = False
@@ -1670,6 +1674,13 @@ def oneshots(agents, registry, doms, t):
             rc = P.resume_session(d, poke, it["text"], "tick", recheck=recheck(d, True, nudge=True))[0]
         else:
             rc = resume_or_start(d, agents, it["text"], origin="tick", auto=True)
+        if rc == P.SKIPPED:
+            # metis-0708: под блокировкой имени «не надо» (окно уже работает, его поднимает другой процесс) — задание не
+            # передано, но это не сбой: запись снова ждёт до срока, без уведомления «не вышел»
+            why = f"пропуск — {P.SKIP_WHY}"
+            N.oneshot_update(oid, t, done_at=None, result=None, wait=why)
+            P.alert(f"разовый запуск {oid} ждёт: {why} (срок {P.stamp(float(it['expires']))[11:]})", "watch")
+            continue
         # красная память запуск больше не откладывает ([sb-simplify] п. 5): pantheon start только предупреждает
         res = ("передано задание простаивающей сессии" if poke else "запущен") if rc == 0 else f"не вышло, код {rc}"
         N.oneshot_update(oid, t, result=res)
@@ -2030,10 +2041,23 @@ def autostart(agents, registry, doms, t, dry=False):
                     f"перезапуск с новой целью не вышел, код {rc}"), "watch")
         elif poke:  # тот же путь, что продолжение остановленной: claude respawn + текст для хука push (P.resume_session)
             rc = P.resume_session(d, poke, task, "tick", recheck=recheck(d, True, nudge=True))[0]
-            P.alert(f"{what} — " + (f"передал задание (задачи {', '.join(tids[:5])})" if rc == 0 else
-                                    f"передать задание не вышло, код {rc}"), "watch")
         else:
             rc = resume_or_start(d, agents, task, origin="tick", auto=True)
+        if rc == P.SKIPPED:  # у смены цели (swap) пропуск разобран выше
+            # metis-0708: повторная проверка под блокировкой имени сказала «не надо» — окно между проходом и подъёмом
+            # получило ввод (уже работает), его остановили или поднимает другой процесс. Не запускали: не сбой и не
+            # успех — без тревоги и счётчика (строка resume-skip — в start.log). Раньше это шло «код 4» и сбоем:
+            # 02.11 «сбой 2 из 3» у работавшего metis-pantheon и пауза 2 ч, третий пропуск остановил бы самозапуск
+            say(f"{d}: пропуск — {P.SKIP_WHY}")
+            s["pending"] = False
+            P.write_json(P.path("autostart.json"), st)
+            if not poke:
+                running.append(d)  # имя держат или поднимают — место занято
+            continue
+        if poke:
+            P.alert(f"{what} — " + (f"передал задание (задачи {', '.join(tids[:5])})" if rc == 0 else
+                                    f"передать задание не вышло, код {rc}"), "watch")
+        elif not swap:
             P.alert(f"самозапуск: {d} по задачам {', '.join(tids[:5])} — " + ("запущен" if rc == 0 else
                                                                                f"не вышло, код {rc}"), "watch")
         # красная память запуск не откладывает ([sb-simplify] п. 5, metis-0523): pantheon start только предупреждает
@@ -2197,6 +2221,8 @@ def _word_do(verb, name, qid, ts, ans, agents, registry):
     if P.live_copies(name, agents, registry=registry):
         return "уже работает — не трогаю (перезапуск — ответ на «перезапустить»)"
     rc = resume_or_start(name, agents, text, origin="tick")
+    if rc == P.SKIPPED:  # metis-0708: под блокировкой имени «не надо» (уже работает, поднимает другой) — не сбой
+        return f"пропуск: {P.SKIP_WHY}"
     if rc == 0:
         awake().RESUMED.append(name)
         ONESHOT_STARTED.append(name)  # самозапуск этого прохода направление не тронет
