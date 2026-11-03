@@ -1,9 +1,10 @@
 PR в основную ветку сливают только через шлюз слияния guard (merge gate). Он пустит, только если на head PR есть все
 записи:
-1. Тесты — `pantheon review test -- <команда тестов>` (например `-- heavy pnpm test`) в worktree на head PR с чистым
-   деревом: без оболочки, отдельным вызовом Bash, не в фоне; пустую команду (`true`, `echo`) шлюз не примет. В
-   изолированной сессии переключи свою worktree на ветку PR (`git switch <ветка>`, занята — `git switch --detach
-   <sha>`), иначе — EnterWorktree в папку под `.claude/worktrees/`. Не `cd`: с ним guard запись не сделает.
+1. Тесты — `pantheon review test -- <команда тестов>` в worktree на head PR с чистым деревом: без оболочки,
+   отдельным вызовом Bash, не в фоне; пустую (`true`, `echo`) шлюз не примет. В изолированной сессии переключи
+   worktree на ветку PR (`git switch <ветка>`, занята — `git switch --detach <sha>`), иначе — EnterWorktree в папку
+   под `.claude/worktrees/`. Не `cd`: с ним guard запись не сделает. Не переключить (`.claude/`) —
+   `pantheon outside test --sha <head> --wait 590`.
 2. «Принять» от argus с перечнем «открыл / запустил / не проверял» — запись `pantheon review accept …` он делает сам.
    Шлюз считает последний вердикт каждого argus на head (metis-0158): второго не зови, пока первый не ответил;
    «вернуть» снимает только тот же argus или новый коммит. Новый коммит — заново тесты, argus и для продукта talos.

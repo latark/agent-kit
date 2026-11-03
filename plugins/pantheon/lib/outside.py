@@ -10,6 +10,10 @@
                                          test/check package.json, иначе pytest; --script — скрипт package.json
                                          Тот же HEAD и та же папка, а прежняя заявка test (без --script) ещё в очереди или идёт —
                                          новой не будет: команда печатает ID прежней и с --wait ждёт её итог (metis-0706)
+  pantheon outside test --sha SHA [--script ИМЯ] [--wait С]
+                                         та же проверка на коммите SHA (7–40 знаков, есть в клоне) в своей копии, а не
+                                         в этой папке: ветку PR не переключить в worktree окна, если .claude/ проекта
+                                         отличается (запись туда закрыта, metis-0779); запись tests — на полный SHA
   pantheon outside serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С]
                                          dev-сервер на коммите SHA (по умолчанию HEAD этой папки) из своей копии →
                                          адрес http://127.0.0.1:<порт 4300–4399>; гаснет сам через N минут (30, ≤120)
@@ -50,6 +54,11 @@
     common и gitdir проверяются один раз (resolve_dir; commondir у common, ссылки — отказ; подтверждает сам git), дальше
     папка — Repo, и git по ней идёт через --git-dir/--work-tree, а не через .git-файл. Остаток: commondir в
     <клон>/.git/worktrees/<имя>/ роль может переписать между проверкой и git теста — намеренный обход, граница — песочница;
+  - тест на коммите (test --sha, metis-0779, run_test_at) — такая же копия <work>/test-<ID>: полное дерево, вместе с
+    .claude/ проекта; зависимости — `<pm> install` под профилем с heavy, дальше run_test в копии. Копия снимается после
+    прогона (reap, git worktree remove), брошенная (проход упал) — следующим проходом тестов под его замком. Запись
+    tests — на полный SHA, cwd — копия; бывший head открытого PR (stale_head) — отказ, как у test без --sha. Заявка
+    несёт pin: true; дубли (drop_dupes) её не снимают;
   - состояния: queued (заявка записана) → preparing (копия и зависимости) → starting (ждём порт) → serving →
     stopping → stopped; failed — с причиной, и при любом сбое прохода посреди заявки (копия снята, а не preparing
     до суток); копия без сервера старше WORK_ORPHAN_AGE (проход упал, Mac перезагрузился) снимается в конце круга;
@@ -217,7 +226,7 @@ SAFE_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sb
 RESERVED_ENV = {"HOME", "PATH", "TMPDIR", "PORT", "CI", "LANG", "SHELL", "USER", "LOGNAME", "PWD"}
 RESERVED_ENV_PREFIX = ("PANTHEON_", "DYLD_", "LD_")
 ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-USAGE = ("pantheon outside test [--script ИМЯ] [--wait С] | "
+USAGE = ("pantheon outside test [--sha SHA] [--script ИМЯ] [--wait С] | "
          "serve [--sha SHA] [--app ИМЯ] [--script ИМЯ] [--minutes N] [--wait С] | "
          "status [ID] | stop ID [--wait С] | run [--serve]")
 
@@ -1388,9 +1397,10 @@ def new_log(rid):
 
 # --- тесты --------------------------------------------------------------------------------------------------------
 
-def run_test(rid, d, script, window, qdir, roots, record=True):
+def run_test(rid, d, script, window, qdir, roots, record=True, src=None):
     """Проверка проекта в папке d на её HEAD → итог. Запись tests — при коде 0 и том же чистом HEAD, только у проверки
-    проекта: с --script записи нет."""
+    проекта: с --script записи нет. src — папка заявки, когда d — своя копия на коммите (test --sha, run_test_at): по
+    ней live_test находит идущую заявку."""
     record = record and not script
     res = record and tree_record(rid, d, window, qdir)   # metis-0732: зелёный полный набор на этом дереве уже есть
     if res:
@@ -1414,6 +1424,8 @@ def run_test(rid, d, script, window, qdir, roots, record=True):
             plan, full_why = None, f"дозапуск не рассчитан: {type(e).__name__}: {e}"
     extra = {"rerun_of": plan["rerun_of"], "files": plan["files"]} if plan else \
         ({"full_why": full_why} if full_why else {})
+    if src:
+        extra["src"] = src
     save_result(qdir, rid, {"state": "running", "kind": "test", "sha": sha, "cmd": line, "dir": d,
                             **({"script": script} if script else {}), **extra})
     log, fd = new_log(rid)
@@ -1488,6 +1500,69 @@ def run_test(rid, d, script, window, qdir, roots, record=True):
     log_event(id=rid, kind="test", window=window, dir=d, sha=sha, code=code, record=res["record"],
               **({"rerun_of": plan["rerun_of"]} if plan else {}))
     return save_result(qdir, rid, res)
+
+
+TEST_WORK = "test-"   # приставка копий test --sha в work_root(): drop_orphan_work (только ID) их не берёт
+
+
+def run_test_at(rid, d, req, window, qdir, roots):
+    """Проверка проекта на коммите заявки (test --sha, metis-0779) → итог. Окно роли не переключит свою worktree на
+    ветку PR, если в ней другой .claude/ проекта (запись туда закрыта), поэтому прогон идёт в своей копии: `git worktree
+    add --detach` клона d (проверен в resolve_dir) в work_root()/test-<ID>, зависимости (prepare), run_test в копии —
+    запись tests на полный SHA. Копия снимается всегда; бывший head открытого PR — отказ, как у test без --sha."""
+    script, common = req.get("script"), d.common
+    ref = req.get("sha")
+    base = {"kind": "test", "src": d, **({"script": script} if script else {})}
+
+    def fail(why, **kw):
+        log_event(id=rid, kind="refused", window=window, dir=d, why=why)
+        return save_result(qdir, rid, {"state": "failed", **base, "why": why, **kw})
+
+    sha = resolve_sha(common, ref) if ref else None
+    if not sha:
+        return fail(f"коммита {ref or '?'} нет в клоне {d.clone}: сделай git fetch в своей копии и повтори")
+    why = None if script else stale_head(d, sha)
+    if why:
+        return fail(why, sha=sha)
+    work = os.path.join(work_root(), TEST_WORK + rid)
+    save_result(qdir, rid, {"state": "running", **base, "sha": sha, "dir": work})
+    try:
+        why = checkout(common, sha, work)
+        if why:
+            return fail(why, sha=sha)
+        _clone, wcommon, wgitdir = trusted_clone(work)
+        if wcommon != common:
+            return fail(f"копия {work} — не worktree клона {d.clone}", sha=sha)
+        w = checked(work, d.clone, common, wgitdir)
+        code = prepare(w, rid, timeout=INSTALL_TIMEOUT)
+        if code not in (None, 0):
+            log = root("runs", rid + ".log")
+            return fail(f"установка зависимостей копии вышла с кодом {code}", sha=sha, log=log, tail=tail(log))
+        return run_test(rid, w, script, window, qdir, roots, record=not script, src=d)
+    finally:
+        reap(work)
+        remove_work(common, work)
+
+
+def drop_test_work():
+    """Копии test --sha (test-<ID>) в work_root() — снять: процессы в них погасить, папку удалить. Зовёт только проход
+    тестов под замком outside-run до своей очереди: прогона на копии в этот момент нет, всякая копия — от упавшего
+    прохода. Метаданные worktree в клоне остаются, их помечает prunable сам git. → число снятых."""
+    try:
+        names = os.listdir(work_root())
+    except OSError:
+        return 0
+    n = 0
+    for name in names:
+        work = os.path.join(work_root(), name)
+        if not (name.startswith(TEST_WORK) and ID_RE.fullmatch(name[len(TEST_WORK):])) or os.path.islink(work) \
+                or not os.path.isdir(work):
+            continue
+        reap(work)
+        remove_work(None, work)
+        log_event(id=name[len(TEST_WORK):], kind="work-orphan", why="копия теста без прогона снята")
+        n += 1
+    return n
 
 
 # --- серверы ------------------------------------------------------------------------------------------------------
@@ -2172,6 +2247,9 @@ def check_request(req, rid):
     sha = req.get("sha")
     if sha is not None and not (isinstance(sha, str) and SHORT_SHA_RE.fullmatch(sha)):
         return "коммит заявки — от 7 до 40 знаков 0-9a-f"
+    pin = req.get("pin")
+    if pin is not None and (pin is not True or req["kind"] != "test" or sha is None):
+        return "pin — только true, у заявки test с коммитом (test --sha)"
     app = req.get("app")
     if app is not None and not (isinstance(app, str) and APP_RE.fullmatch(app)):
         return "имя приложения не по образцу (имя пакета, @scope/имя, папка или «.»)"
@@ -2211,6 +2289,8 @@ def handle(qdir, window, rid, req):
         return save_result(qdir, rid, {"state": "failed", "kind": req["kind"], "why": roots})
     if req["kind"] == "serve":
         return run_serve(rid, d, req, window, qdir)
+    if req.get("pin"):   # test --sha (metis-0779): своя копия на коммите, а не HEAD папки
+        return run_test_at(rid, d, req, window, qdir, registry(None) or roots)
     res = before_test(qdir, window, rid, req, d)   # metis-0726: устаревший head, дубли
     if res:
         return res
@@ -2287,7 +2367,8 @@ def drop_dupes(qdir, rid, req, d, sha, window=None):
     <rid>»; не снялась — остаётся. → число снятых."""
     repos, me, n = set(remotes(d)), os.path.realpath(d), 0
     for q2, w2, rid2, req2 in _queued_tests():
-        if (q2, rid2) == (qdir, rid) or (req2.get("script") or None) != (req.get("script") or None):
+        if (q2, rid2) == (qdir, rid) or (req2.get("script") or None) != (req.get("script") or None) \
+                or req2.get("pin"):   # test --sha идёт на своём коммите, а не на HEAD папки (metis-0779)
             continue
         d2, _roots = resolve_dir(req2["dir"], w2)
         if d2 is None or not (os.path.realpath(d2) == me
@@ -2695,6 +2776,7 @@ def cmd_run():
         if not got:
             return 0
         recover_results()
+        drop_test_work()   # копии test --sha упавшего прохода (metis-0779): под замком прогона на них нет
         alert_overdue()
         run_test_queue()
         prune()
@@ -2760,7 +2842,7 @@ def _flags(args, allowed):
 
 
 def cmd_request(kind, args):
-    f = _flags(args, {"--script", "--wait"} | ({"--minutes", "--sha", "--app"} if kind == "serve" else set()))
+    f = _flags(args, {"--script", "--wait", "--sha"} | ({"--minutes", "--app"} if kind == "serve" else set()))
     if f is None:
         err(f"pantheon outside: {USAGE}")
         return 2
@@ -2780,7 +2862,17 @@ def cmd_request(kind, args):
     if f.get("--script"):
         req["script"] = f["--script"]
     if kind == "test":   # metis-0706: коммит при заявке — по нему видно, что такой же тест уже ждёт или идёт
-        head, _clean = head_state(d)
+        if f.get("--sha"):   # metis-0779: тест на этом коммите в своей копии прохода, полный SHA — здесь же
+            ref = f["--sha"].lower()
+            head = (git(d, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}") or "").strip().lower() \
+                if SHORT_SHA_RE.fullmatch(ref) else ""
+            if not SHA_RE.fullmatch(head):
+                err(f"pantheon outside: --sha {f['--sha']} — не коммит этой копии (7–40 знаков 0-9a-f; "
+                    "нет — сделай git fetch)")
+                return 2
+            req["pin"] = True
+        else:
+            head, _clean = head_state(d)
         if head:
             req["sha"] = head
             prev = live_test(d, head, f.get("--script"))
@@ -2830,6 +2922,8 @@ def cmd_request(kind, args):
     print(f"заявка {rid}: {kind} в {d}{at} — её исполнит плановый проход (раз в минуту)")
     if req.get("dirty"):
         print("в папке есть незакоммиченные правки — сервер поднимется на коммите, без них")
+    if req.get("pin"):
+        print("тест — в своей копии прохода на этом коммите; папка и её дерево не нужны")
     if not wait:
         print(f"итог: pantheon outside status {rid}")
         return 0
