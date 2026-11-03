@@ -5396,12 +5396,12 @@ def _board(clock):
         with clock.phase("статусы"):
             status_lines = board_status_sync(T) if primary else []
         # политика уведомлений — под своей блокировкой на весь проход: сбои из run-job ждут, а не теряются
-        with clock.phase("замок-notify"):
+        with clock.phase("блокировка-notify"):
             nl = lock_wait("notify", min(BOARD_NOTIFY_WAIT, max(clock.left(), 0)))
             held = nl.__enter__()
         try:
             if not held:
-                clock.skipped.append("уведомления (замок notify занят)")
+                clock.skipped.append("уведомления (блокировка notify занята)")
             pol = notify_policy(sched) if held else None
             night_end = "08:00"
             with contextlib.suppress(Exception):

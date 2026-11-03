@@ -58,9 +58,9 @@ ln = line_of(p.stdout)
 check("проход: код 0 и одна строка «доска-время»", p.returncode == 0 and ln is not None,
       (p.returncode, p.stdout[-300:], p.stderr[-300:]))
 check("в строке есть все части и итого",
-      ln and all(w in ln for w in ("реестр ", "статусы ", "замок-notify ", "карточки ", "сводка ", "итого ")), ln)
+      ln and all(w in ln for w in ("реестр ", "статусы ", "блокировка-notify ", "карточки ", "сводка ", "итого ")), ln)
 
-# 2. замок notify держит чужой процесс: проход ждёт не дольше BOARD_NOTIFY_WAIT, кода 124 нет
+# 2. блокировку notify держит чужой процесс: проход ждёт не дольше BOARD_NOTIFY_WAIT, кода 124 нет
 src = open(CLI, encoding="utf-8").read()
 wait = float(re.search(r"BOARD_NOTIFY_WAIT = ([0-9.]+)", src).group(1))
 fh = open(os.path.join(state, "locks", "notify.lock"), "a")
@@ -69,9 +69,9 @@ t0 = time.time()
 p = subprocess.run(argv, env=dict(ENV, PANTHEON_BOARD_BUDGET="3"), capture_output=True, text=True, timeout=60)
 dt = time.time() - t0
 ln = line_of(p.stdout)
-check("замок notify занят: код 0 за бюджет (3 с), а не за предел задания",
+check("блокировка notify занята: код 0 за бюджет (3 с), а не за предел задания",
       p.returncode == 0 and dt < 3 + 15, (p.returncode, round(dt, 1), p.stderr[-300:]))
-check("замок notify занят: строка времени называет пропуск уведомлений, карточки собраны",
+check("блокировка notify занята: строка времени называет пропуск уведомлений, карточки собраны",
       ln and "уведомления" in ln and "карточки " in ln and os.path.exists(os.path.join(state, "board.json")),
       (ln, os.listdir(state)))
 check("бюджет вышел: сводка board-auto пропущена", ln and "сводка board-auto" in ln, ln)
@@ -88,7 +88,7 @@ time.sleep(4)
 q.send_signal(signal.SIGTERM)
 out, err = q.communicate(timeout=30)
 ln = line_of(out)
-check("SIGTERM: строка времени с «прервано в «замок-notify»»", ln and "прервано в «замок-notify»" in ln,
+check("SIGTERM: строка времени с «прервано в «блокировка-notify»»", ln and "прервано в «блокировка-notify»" in ln,
       (ln, out[-200:], err[-200:]))
 fcntl.flock(fh, fcntl.LOCK_UN)
 fh.close()
