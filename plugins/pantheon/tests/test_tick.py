@@ -530,10 +530,10 @@ def main():
     sw_hq = hb["filesystem"]["allowWrite"]
     st_real = os.path.realpath(state)
     hq_rw = os.path.join(st_real, "hq-rw")
-    check("окно штаба (metis-0523, ревью безопасности): из STATE пишет только hq-rw/locks и hq-rw/autostart-reset — "
+    check("окно штаба (metis-0523, ревью безопасности): из STATE пишет только hq-rw/locks, hq-rw/autostart-reset и hq-rw/start-req (metis-0771) — "
           "настоящими путями; сама hq-rw, замки прохода (locks/), stopped/, owner-log/, autostart.json закрыты",
           [x for x in sw_hq if x == st_real or x.startswith(st_real + "/")]
-          == [os.path.join(hq_rw, "locks"), os.path.join(hq_rw, "autostart-reset")]
+          == [os.path.join(hq_rw, "locks"), os.path.join(hq_rw, "autostart-reset"), os.path.join(hq_rw, "start-req")]
           # окно направления пишет в STATE только папку очереди heavy («да» владельца 02.11, metis-0659)
           and [x for x in sa["sandbox"]["filesystem"]["allowWrite"] if x.startswith(st_real + "/")]
           == [os.path.join(st_real, "locks", "heavy-queue")])
