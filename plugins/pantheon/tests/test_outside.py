@@ -2483,6 +2483,71 @@ for label, spoil in (("сдвинула HEAD копии на другой зел
           and not [c for c in calls()[c0:] if "t.py" in " ".join(c["cmd"])]
           and len(tests_for(HEADE)) == n_e and not os.path.exists(test_work(rs)), res)
 
+# HEAD копии сдвинулся уже после первой проверки — перед прогоном (между tree_record и чтением HEAD) или во время
+# прогона: запись только на коммит заявки, на сдвинутый HEAD — никогда
+_tr, _wp = O.tree_record, O.wait_proc
+
+
+def _move_head(d):
+    git(str(d), "checkout", "-q", "--detach", HEADE)
+
+
+for label, attr, fake in (
+        ("перед прогоном", "tree_record", lambda rid, d, *a, **kw: (_move_head(d), _tr(rid, d, *a, **kw))[1]),
+        # wait_proc зовёт и установка (prepare) — HEAD двигаем только в прогоне теста (у него idle_log)
+        ("во время прогона", "wait_proc",
+         lambda proc, *a, **kw: (kw.get("idle_log") and _move_head(_cwd_of[0]), _wp(proc, *a, **kw))[1])):
+    _cwd_of = [None]
+    _rt = O.run_test
+    O.run_test = lambda rid, d, *a, **kw: (_cwd_of.__setitem__(0, str(d)), _rt(rid, d, *a, **kw))[1]
+    setattr(O, attr, fake)
+    n_e, n_g = len(tests_for(HEADE)), len(tests_for(CPG))
+    try:
+        qs, rs, res = sha_request(CPG, f"HEAD сдвинут {label}")
+    finally:
+        O.tree_record, O.wait_proc, O.run_test = _tr, _wp, _rt
+    check(f"0779: HEAD копии сдвинут {label} — записи нет ни на сдвинутый HEAD, ни на SHA заявки",
+          res.get("record") is not True and len(tests_for(HEADE)) == n_e and len(tests_for(CPG)) == n_g
+          and res.get("sha") == CPG and not os.path.exists(test_work(rs)), res)
+
+# остатки установки (фоновый процесс с cwd в копии) гаснут до прогона, а не только при уборке копии
+_bg = []
+
+
+def _prep_bg(d, rid, **kw):
+    code = _prep(d, rid, **kw)
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=str(d), start_new_session=True)
+    TEST_PROCS.append(p)
+    _bg.append(p)
+    return code
+
+
+_seen = []
+_rt = O.run_test
+O.prepare = _prep_bg
+O.run_test = lambda *a, **kw: (_seen.append(_bg[-1].poll() is not None or not still_alive(_bg[-1].pid, 0)),
+                               _rt(*a, **kw))[1]
+try:
+    qs, rs, res = sha_request(CPG, "остатки установки")
+finally:
+    O.prepare, O.run_test = _prep, _rt
+check_mac("0779: процесс установки с cwd в копии погашен до прогона теста (reap после prepare)",
+          _seen == [True] and res.get("code") == 0, (_seen, res))
+
+# tree_record копии — на коммите заявки, HEAD папки не читается: перенос по дереву на SHA, а не на HEAD
+git(KIT, "switch", "-q", "-c", "pr-0779")
+KA = commit(KIT, {"t.py": GREEN + "# ka\n"}, "ka")
+kit_request()   # зелёный полный набор на KA — запись с деревом
+git(KIT, "-c", "user.name=t", "commit", "-q", "--amend", "-m", "ka другое сообщение")
+KB = git(KIT, "rev-parse", "HEAD")
+git(KIT, "switch", "-q", "main")
+c0 = len(calls())
+res = O.tree_record("20261104-020202-c0c0c0", KIT, "metis-k", None, sha=KB)
+rkb = tests_for(KB)
+check("0779: tree_record(sha=) — запись на этот SHA по дереву, без прогона, HEAD папки другой",
+      git(KIT, "rev-parse", "HEAD") != KB and (res or {}).get("by_tree") == KA and (res or {}).get("sha") == KB
+      and len(rkb) == 1 and rkb[0].get("by_tree") == KA and len(calls()) == c0, (res, rkb))
+
 # неверный и чужой SHA — отказ на месте, заявки нет
 for bad, label in (("deadbeef1", "коммита нет в копии"), ("xyz;rm", "не по образцу"), (CPG[:5], "короче 7 знаков")):
     _q = os.path.join(CACHE, "athena-x", "outside")

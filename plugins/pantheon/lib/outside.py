@@ -55,8 +55,9 @@
     папка — Repo, и git по ней идёт через --git-dir/--work-tree, а не через .git-файл. Остаток: commondir в
     <клон>/.git/worktrees/<имя>/ роль может переписать между проверкой и git теста — намеренный обход, граница — песочница;
   - тест на коммите (test --sha, metis-0779, run_test_at) — такая же копия <work>/test-<ID>: полное дерево, вместе с
-    .claude/ проекта; зависимости — `<pm> install` под профилем с heavy, дальше run_test в копии (HEAD копии не SHA
-    заявки или дерево не чистое после установки — ни прогона, ни записи). Копия снимается после
+    .claude/ проекта; зависимости — `<pm> install` под профилем с heavy, остатки установки гаснут (reap), дальше run_test
+    в копии: HEAD не SHA заявки или дерево не чистое при любой проверке — ни прогона, ни записи; запись и перенос по
+    дереву (tree_record) — только на SHA заявки. Копия снимается после
     прогона (reap, git worktree remove), брошенная (проход упал) — следующим проходом тестов под его замком. Запись
     tests — на полный SHA, cwd — копия; бывший head открытого PR (stale_head) — отказ, как у test без --sha. Заявка
     несёт pin: true; дубли (drop_dupes) её не снимают;
@@ -1127,14 +1128,15 @@ def run_env(line):
     return {"python": os.path.realpath(exe) if exe else "", "os": platform.mac_ver()[0] or platform.release()}
 
 
-def tree_record(rid, d, window, qdir):
+def tree_record(rid, d, window, qdir, sha=None):
     """Проверка проекта в d без прогона, если её зелёный полный набор уже есть на этом дереве (metis-0732): в журнале
     шлюза — запись прохода (agent_type pantheon-outside) с той же командой, а она — полный набор репозитория
     (full_tests_record), с тем же деревом (поле tree и `git rev-parse <её sha>^{tree}`), теми же скрытыми входами
     (run_env) и репозиториями. На тот же коммит — итог done без новой записи; на другой (rebase без конфликтов, правка
     сообщения) — запись tests на HEAD тем же путём append_tests с отметкой by_tree. Красный прогон записи не даёт —
-    переносить нечего. Дерево не чистое, такой записи нет, запись не легла — None: идёт обычный прогон."""
-    sha, clean = head_state(d)
+    переносить нечего. Дерево не чистое, такой записи нет, запись не легла — None: идёт обычный прогон. sha — коммит
+    копии test --sha (metis-0779): запись — на него, HEAD и дерево папки не читаются (дерево коммита — из объектов git)."""
+    sha, clean = (sha, True) if sha else head_state(d)
     if not sha or not clean:
         return None
     repos = remotes(d)
@@ -1403,19 +1405,28 @@ def run_test(rid, d, script, window, qdir, roots, record=True, src=None, expect=
     проекта: с --script записи нет. src — папка заявки, когда d — своя копия на коммите (test --sha, run_test_at): по
     ней live_test находит идущую заявку. expect — коммит копии: HEAD не он или дерево не чистое (установка зависимостей
     сдвинула HEAD или правит дерево) — ни прогона, ни записи; после прогона HEAD и чистота сверяются как всегда."""
-    if expect:
-        sha, clean = head_state(d)
-        if sha != expect or not clean:
-            why = (f"копия {d} после установки зависимостей — не чистый коммит {expect[:12]} (HEAD {(sha or '?')[:12]}, "
-                   f"чистое: {'да' if clean else 'нет'}) — прогона и записи нет")
-            log_event(id=rid, kind="refused", window=window, dir=d, sha=expect, why=why)
-            return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": expect, "why": why,
-                                           **({"src": src} if src else {})})
+    def off(sha, clean):
+        """Копия ушла с коммита заявки (expect) → итог failed; иначе None."""
+        if not expect or (sha == expect and clean):
+            return None
+        why = (f"копия {d} — не чистый коммит заявки {expect[:12]} (HEAD {(sha or '?')[:12]}, "
+               f"чистое: {'да' if clean else 'нет'}) — прогона и записи нет")
+        log_event(id=rid, kind="refused", window=window, dir=d, sha=expect, why=why)
+        return save_result(qdir, rid, {"state": "failed", "kind": "test", "sha": expect, "why": why,
+                                       **({"src": src} if src else {})})
+
+    res = off(*head_state(d)) if expect else None
+    if res:
+        return res
     record = record and not script
-    res = record and tree_record(rid, d, window, qdir)   # metis-0732: зелёный полный набор на этом дереве уже есть
+    # metis-0732: зелёный полный набор на этом дереве уже есть; у копии — на коммите заявки, а не на HEAD
+    res = record and tree_record(rid, d, window, qdir, sha=expect)
     if res:
         return res
     sha, clean = head_state(d)
+    res = off(sha, clean)   # между проверками HEAD мог сдвинуться: дальше sha — только expect
+    if res:
+        return res
     if not sha:
         return save_result(qdir, rid, {"state": "failed", "kind": "test", "why": "папка не репозиторий git или нет коммитов"})
     if not clean:
@@ -1545,6 +1556,7 @@ def run_test_at(rid, d, req, window, qdir, roots):
             return fail(f"копия {work} — не worktree клона {d.clone}", sha=sha)
         w = checked(work, d.clone, common, wgitdir)
         code = prepare(w, rid, timeout=INSTALL_TIMEOUT)
+        reap(work)   # остатки установки (фоновые процессы lifecycle-скриптов) не двигают HEAD во время теста
         if code not in (None, 0):
             log = root("runs", rid + ".log")
             return fail(f"установка зависимостей копии вышла с кодом {code}", sha=sha, log=log, tail=tail(log))
