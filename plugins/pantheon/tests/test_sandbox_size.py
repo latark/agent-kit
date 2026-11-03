@@ -88,11 +88,28 @@ def main():
         os.makedirs(os.path.join(tasks, f"guard-test-{i:05d}"))
     for n in ("cfgcheck-00000", "watch-test-00000"):
         os.makedirs(os.path.join(tasks, n))
+    # metis-0286: запись в папки чужих сессий CLAUDE_TMP. Окно направления athena-shop — папка ~/projects/br; свои —
+    # она, её worktree и подпапки; чужие — общий префикс имени (brx), префикс своего имени (b), символ шаблона
+    br = dash(os.path.join(tmp, "projects", "br"))
+    os.makedirs(os.path.join(tmp, "projects", "workshop"))
+    wk = dash(os.path.join(tmp, "projects", "workshop"))
+    w_mine = [br, br + "--claude-worktrees-dev-1", br + "-app"]
+    w_foreign = [br + "x", br[:-1], dash(tmp) + "-projects-q[x", wk + "-t1", own]
+    w_temp = ["merge-root-ab12", "pytest-of-u", "tsx-501", "tmp.Xy12ab", "a[b"]  # не сессии: временные папки окон
+    w_odd = br[:-1] + "[r"  # расходится со своим ровно на «[» — шаблоном не выразить
+    for n in w_mine + w_foreign + w_temp + [w_odd, dash(tmp) + "-projects-zz00000"]:
+        os.makedirs(os.path.join(tasks, n), exist_ok=True)
     r = build(env)
     hq1 = json.load(open(os.path.join(state, "settings", "hq.json")))
     fs = hq1["sandbox"]["filesystem"]
     check("сборка прошла, hq.json собран", r.returncode == 0 and fs["denyRead"])
+    sa1 = json.load(open(os.path.join(state, "settings", "athena-shop.json")))
+    check("имя с символом шаблона не закрыто, а названо в выводе сборки; битого шаблона в denyWrite нет",
+          "[r" in r.stderr and not any("[" in x for x in sa1["sandbox"]["filesystem"]["denyWrite"]))
 
+    for i in range(2000):  # чужие сессии на те же префиксы, что при первой сборке: «-…-projects-z*», «-private-tmp-x*»
+        os.makedirs(os.path.join(tasks, f"{dash(tmp)}-projects-zz{i:05d}"), exist_ok=True)
+        os.makedirs(os.path.join(tasks, f"-private-tmp-x{i:05d}"))
     for i in range(50, 5000):
         os.makedirs(os.path.join(tasks, f"guard-test-{i:05d}"))
     for i in range(1, 300):
@@ -106,6 +123,38 @@ def main():
     check("5600 папок в /tmp/claude-<uid>: denyRead и правила Read штаба те же, что при 50 (не O(n))",
           r.returncode == 0 and fs2["denyRead"] == fs["denyRead"]
           and hq2["permissions"]["deny"] == hq1["permissions"]["deny"] and len(fs2["denyRead"]) < 80)
+
+    sa2 = json.load(open(os.path.join(state, "settings", "athena-shop.json")))
+    dw = sa2["sandbox"]["filesystem"]["denyWrite"]
+    tmp_dw = [x for x in dw if x.startswith(tasks + "/")]
+    print(f"     athena-shop: denyWrite {len(dw)} путей, из них CLAUDE_TMP {len(tmp_dw)}, {len(json.dumps(dw))} байт")
+    # сравнение — только записей CLAUDE_TMP: память ролей (agent-memory) появляется после первой сборки
+    tmp_dw1 = [x for x in sa1["sandbox"]["filesystem"]["denyWrite"] if x.startswith(tasks + "/")]
+    check("окно направления: 4000 новых чужих сессий в CLAUDE_TMP — denyWrite тот же, что до них (не O(n))",
+          r.returncode == 0 and tmp_dw == tmp_dw1 and 0 < len(tmp_dw) < 40)
+    wr_closed = lambda w, p: any(glob_re(x, sandbox=True).fullmatch(p) for x in w["sandbox"]["filesystem"]["denyWrite"])  # noqa: E731
+    inside = lambda n: [os.path.join(tasks, n, "x.sock"), os.path.join(tasks, n, "s1", "scratchpad", "f.txt")]  # noqa: E731
+    check("окно направления: запись в папки чужих сессий закрыта — общий префикс имени, префикс своего, «q[x», "
+          "мастерская, штаб, новые после сборки",
+          all(wr_closed(sa2, p) for n in w_foreign + [f"{dash(tmp)}-projects-zz01999", "-private-tmp-x01999"]
+              for p in inside(n)))
+    check("окно направления: свои папки (папка направления, её worktree и подпапка) открыты на запись",
+          not any(wr_closed(sa2, p) for n in w_mine for p in inside(n)))
+    check("окно направления: корень CLAUDE_TMP, файлы в нём и временные папки окон (tmp.*, mkdtemp, pytest, tsx) "
+          "открыты; имя на символе шаблона не закрыто",
+          not any(wr_closed(sa2, p) for p in [os.path.join(tasks, "zshAbC123"), os.path.join(tasks, br + "x")]
+                  + [q for n in w_temp + [w_odd] for q in inside(n)]))
+    wsh = json.load(open(os.path.join(state, "settings", "workshop.json")))
+    check("мастерская: папка задачи ~/projects/workshop/<задача> открыта, сессия направления закрыта",
+          not any(wr_closed(wsh, p) for p in inside(wk + "-t1")) and all(wr_closed(wsh, p) for p in inside(br)))
+    hqw = json.load(open(os.path.join(state, "settings", "hq.json")))
+    check("штаб: своя папка и worktree открыты на запись, сессия направления закрыта",
+          not any(wr_closed(hqw, p) for n in mine for p in inside(n)) and all(wr_closed(hqw, p) for p in inside(br)))
+    jobs = [f for f in sorted(os.listdir(os.path.join(state, "settings"))) if f.startswith("job-")]
+    job = json.load(open(os.path.join(state, "settings", jobs[0]))) if jobs else {"sandbox": {"filesystem": {}}}
+    check("задача расписания: папка запуска ~ открыта (без поддерева), сессия направления закрыта",
+          jobs and not any(wr_closed(job, p) for p in inside(dash(tmp)))
+          and all(wr_closed(job, p) for p in inside(br)))
 
     deny_sb = [glob_re(x, sandbox=True) for x in fs2["denyRead"] if x.startswith("/")]
     deny_sb += [glob_re("/" + x[len("Read(//"):-1], sandbox=True) for x in hq2["permissions"]["deny"]

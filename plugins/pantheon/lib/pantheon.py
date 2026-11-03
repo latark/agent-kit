@@ -2124,14 +2124,15 @@ GLOB_SAFE = re.compile(r"[A-Za-z0-9._-]+")
 
 def _others_globs(names, own, keep=()):
     """Папки чужих сессий среди names → немного шаблонов «<префикс>*» (и точных имён), ни один из которых не совпадает
-    со своими: own, own--claude-worktrees-* и имена на префиксы keep (они остаются открыты). Префикс — до первой
-    буквы, где имя расходится со всеми своими, поэтому тысячи guard-test-* дают один «g*»: список не растёт с числом
-    папок. Имя с символами шаблона пропускается — вернётся в skipped."""
-    wt = own + "--claude-worktrees-"
-    mine = (own, wt) + tuple(keep)
+    со своими: own (имя или список имён), own--claude-worktrees-* и имена на префиксы keep (они остаются открыты).
+    Префикс — до первой буквы, где имя расходится со всеми своими, поэтому тысячи guard-test-* дают один «g*»: список
+    не растёт с числом папок. Имя с символами шаблона пропускается — вернётся в skipped."""
+    owns = (own,) if isinstance(own, str) else tuple(own)
+    wts = tuple(o + "--claude-worktrees-" for o in owns)
+    mine = owns + wts + tuple(keep)
     out, skipped = set(), []
     for n in names:
-        if n == own or n.startswith(wt) or n.startswith(tuple(keep)):
+        if n in owns or n.startswith(wts + tuple(keep)):
             continue
         p = next((n[:i] for i in range(1, len(n) + 1) if not any(m.startswith(n[:i]) for m in mine)), None)
         x = n if p is None else p + "*"
@@ -2140,6 +2141,40 @@ def _others_globs(names, own, keep=()):
         else:
             skipped.append(n)
     return sorted(out), skipped
+
+
+def _dash(p):
+    """Имя папки сессии в CLAUDE_TMP и ~/.claude/projects, как его даёт Claude Code: настоящий путь папки запуска, где
+    всё, кроме букв и цифр, → «-»."""
+    return re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(os.path.expanduser(p)))
+
+
+_TMP_SKIPPED = set()
+
+
+def tmp_deny_write(tree, exact=()):
+    """denyWrite окна: содержимое папок чужих сессий в CLAUDE_TMP (metis-0286, вариант А по metis-0283, «да» владельца
+    19.10). CLAUDE_TMP — общий $TMPDIR песочниц всех окон: без запрета окно пишет, удаляет и переносит файлы в папках
+    чужих сессий (проба 0283 — перенос чужого сокета в свой кэш и connect).
+    - Чужие — только папки сессий Claude Code: их имя — путь папки запуска через «-», всегда с «-» в начале. Прочие
+      имена корня (mktemp -d — tmp.*, tempfile.mkdtemp(prefix=…), pytest-of-*, tsx-<uid>) — временные папки самих
+      окон: под шаблоном новая такая папка закрылась бы окну с момента создания, а тесты пишут в них.
+    - Свои: папки tree (allowWrite окна) вместе с поддеревом — сессия, запущенная в подпапке или своей worktree
+      (мастерская — ~/projects/workshop/<задача>); exact — только сама папка и её .claude/worktrees (задачи расписания
+      запускаются в ~). Цена: «-» в имени не отличить от «/», поэтому соседняя ~/projects/<своя>-<что-то> тоже открыта.
+    - Не перечислением папок (профиль Seatbelt — не больше 64 КБ), а шаблонами _others_globs, как denyRead штаба:
+      закрыто содержимое («<префикс>*/*» и поддерево), а не имена в корне: там лежат и временные файлы Bash."""
+    try:
+        names = [n for n in os.listdir(CLAUDE_TMP) if n.startswith("-")]
+    except OSError:
+        names = []
+    trees = [_dash(p) for p in tree]
+    globs, skipped = _others_globs(names, trees + [_dash(p) for p in exact], [t + "-" for t in trees])
+    new = [n for n in skipped if n not in _TMP_SKIPPED]
+    if new:
+        _TMP_SKIPPED.update(new)
+        print(f"песочница: имена с символами шаблона в {CLAUDE_TMP} не закрыты на запись: {new[:5]}", file=sys.stderr)
+    return [f"{CLAUDE_TMP}/{g}{tail}" for g in globs for tail in ("/*", "/*/**")]
 
 
 def sandbox_size(data):
@@ -2333,13 +2368,16 @@ def agents_window(data, allowed, deny, script):
     return data
 
 
-def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None):
+def role_settings(folders, own_dir, extra_write, cache, ssh, deny_read, compact=None, guard=None, auto_allow=None,
+                  tmp_own=()):
     allow = list(folders) + ([own_dir] if own_dir else []) + list(extra_write) + [cache]
     # .git/config и .git/hooks — внутри каждой разрешённой папки (её настоящим путём) и под ~ в целом
     # .claude/agents — роли агентов репозитория: guard protect-config закрывает запись хуком (guard 0.5.6, #26), но
     # Bash-запись мимо хука останавливает только песочница (metis-0140); и в worktree внутри репозитория тоже
     deny_write = ["~/**/.git/config", "~/**/.git/hooks"] + [f"{r}{sub}" for r in allow for sub in (
         "/.git/config", "/.git/hooks", "/**/.git/config", "/**/.git/hooks", "/.claude/agents", "/**/.claude/agents")]
+    # папки чужих сессий в общем $TMPDIR (metis-0286); свои — папки allow и tmp_own (папка запуска вне allow)
+    deny_write += tmp_deny_write(allow, tmp_own)
     data = {
         "_comment": "Собрано `pantheon domains build` из ~/ai/pantheon/directions.toml и policy.toml (SEC-19). Руками не править.",
         "env": {
@@ -2766,7 +2804,8 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                 print(f"песочница {name}: нет папки или ссылка — Bash туда не пишет: {p.replace(HOME, '~')}",
                       file=sys.stderr)
         cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
-        job = role_settings(own, None, memory, cache, False, private_paths, None, guard)
+        # тик запускает задачу в ~ (jobs.py, cwd=HOME): её папка в CLAUDE_TMP — «-<HOME>», без поддерева
+        job = role_settings(own, None, memory, cache, False, private_paths, None, guard, tmp_own=[HOME])
         job["sandbox"]["excludedCommands"] = list(JOB_EXCLUDED)
         job["sandbox"]["network"]["allowedDomains"] = []
         job["sandbox"]["filesystem"]["denyWrite"] += _deny_forms(private_paths)
