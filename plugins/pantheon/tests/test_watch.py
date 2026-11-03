@@ -30,6 +30,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, "lib", "pantheon.py")
 RUN_PY = os.path.join(os.path.dirname(LIB), "run.py")  # загрузчик, как bin/pantheon: .pyc (metis-0544)
 T0 = 1_792_000_000
+NIGHT_OFF = '[night]\nask_at = "00:00"\n[limits.night]\nstart = "00:00"\nend = "00:00"\n'
 FAILS = []
 
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
@@ -100,9 +101,7 @@ class Env:
         self.agents([])
         # ночной цикл (lib/night.py) здесь выключен: вопрос в 00:00 и конец ночи в 00:00 — ночи нет, днём только темп
         # недели; ночь и вопрос проверяет test_night.py
-        open(os.path.join(self.pantheon, "schedule.toml"), "w").write(
-            'primary_host = "mac-a"\n[defaults]\nlimit_max_pct = 70\n[night]\nask_at = "00:00"\n'
-            '[limits.night]\nstart = "00:00"\nend = "00:00"\n')
+        self.schedule('primary_host = "mac-a"\n[defaults]\nlimit_max_pct = 70\n')
         self.doms = {}
         self.week_pct, self.snap_age = 10.0, 0  # снимок недельного лимита в run(): зелёная зона, свежий
         # уведомления идут через политику (metis-0023): простой — явно, по умолчанию «вы у Mac»
@@ -114,6 +113,11 @@ class Env:
         # показывает): ~37 таких проходов — 430 с файла из 435, а в фоне тика (ProcessType Background) — за 600 с.
         # Тест, которому нужно настоящее ожидание, передаёт своё значение в extra.
         self.extra.update(QUICK)
+
+    def schedule(self, text):
+        """schedule.toml теста: text плюс выключенная ночь (вопрос и конец ночи в 00:00). Без этого ночь 23:00–08:00 по
+        умолчанию зависит от часового пояса машины, на которой идут тесты (metis-0459)."""
+        open(os.path.join(self.pantheon, "schedule.toml"), "w").write(text + NIGHT_OFF)
 
     def notify_mode(self, idle, quiet=None):
         """Простой (с) и тихие часы для политики уведомлений: quiet=None — без тихих часов (как днём),
@@ -1456,7 +1460,7 @@ def test_word_launch_0523():
         fh.write("[]")
     e.run("watch", t=T0 + 400 + 13 * 3600)
     check(not _bgs(e, "wl-two"), f"0523: запись старше 12 ч исполнена: {e.calls()}")
-    check("«окна по вашему ответу» упала" not in e.alerts(), f"0523: испорченный word-launch.json уронил проверку")
+    check("«окна по вашему ответу» упала" not in e.alerts(), "0523: испорченный word-launch.json уронил проверку")
     # шаблон печатает pantheon launch-question; чужой глагол, лишнее и неизвестное имя — код 2
     r = e.run("launch-question", "metis-0533", "запустить", "wl-two", t=T0)
     check(r.returncode == 0 and "вопрос: [metis-0533] Запустить wl-two?" in r.stdout
@@ -1957,11 +1961,44 @@ def test_oneshot_pack_and_hand_same_minute_0284():
           f"ручная запись не ушла или ушла пачка: {e.calls()}")
 
 
+_NIGHT_PROBE = r"""
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("pantheon_lib", sys.argv[1])
+P = importlib.util.module_from_spec(spec)
+sys.modules["pantheon_lib"] = P
+spec.loader.exec_module(P)
+N = P.night_mod()
+cfg = N.config()
+t = float(sys.argv[2])
+print(N.night_of(t, cfg), N.evening(t, cfg), N.evening(t + 7 * 3600, cfg))
+"""
+
+
+def test_schedule_night_off_0459():
+    """Тестовый schedule.toml выключает ночь: ни в каком часовом поясе T0 не ночь и не вечер (Env.schedule)."""
+    for off in (True, False):
+        e = Env()
+        if not off:  # контроль пробы: с ночью по умолчанию в поясе UTC+6 (T0 = 23:46) ночь видна
+            open(os.path.join(e.pantheon, "schedule.toml"), "w").write('primary_host = "mac-a"\n')
+        else:
+            e.schedule('primary_host = "mac-a"\n')
+        for tz in ("UTC", "Etc/GMT-6", "Etc/GMT+8", "Europe/Moscow"):
+            env = dict(os.environ, HOME=e.home, PANTHEON_HOME=e.pantheon, PANTHEON_STATE=e.state, TZ=tz,
+                       PANTHEON_HOST="mac-a")
+            r = subprocess.run([sys.executable, "-I", "-c", _NIGHT_PROBE, LIB, str(T0)],
+                               capture_output=True, text=True, env=env)
+            got = r.stdout.strip()
+            if off:
+                check(got == "None None None", f"в поясе {tz} T0 попал в ночь/вечер: {got!r} {r.stderr[-200:]}")
+            elif tz == "Etc/GMT-6":
+                check(got != "None None None", f"контроль: ночь по умолчанию в UTC+6 не видна: {got!r} {r.stderr[-200:]}")
+
+
 def test_isolation_and_watch_last():
     """Сбой одной проверки — тревога о ней, остальные идут; watch-last пишет время и упавшие."""
     e = Env()
     e.direction("iso-dir")
-    open(os.path.join(e.pantheon, "schedule.toml"), "w").write('primary_host = "mac-a"\n[defaults]\nswap_alert_gb = "x"\nlimit_max_pct = 70\n')
+    e.schedule('primary_host = "mac-a"\n[defaults]\nswap_alert_gb = "x"\nlimit_max_pct = 70\n')
     os.makedirs(e.st("swap.jsonl"))                             # запись замеров swap упадёт
     r = e.run("watch", t=T0)
     wl = json.load(open(e.st("watch-last")))
@@ -2066,7 +2103,7 @@ def test_revisits_repeat_and_edge():
 def test_tool04_limit_after_max_delay():
     """Задача на Claude после max_delay всё равно ждёт лимита; обычная — идёт."""
     e = Env()
-    open(os.path.join(e.pantheon, "schedule.toml"), "w").write(
+    e.schedule(
         'primary_host = "mac-a"\n[[job]]\nname = "clio-weekly"\ncommand = "claude -p --agent clio \\"проход\\""\n'
         'every = 10080\nclass = "heavy"\nclaude = true\nmax_delay = 60\n'
         '[[job]]\nname = "heavy-plain"\ncommand = "pantheon view"\nevery = 10080\nclass = "heavy"\nmax_delay = 60\n'
@@ -2417,7 +2454,7 @@ def test_sandbox_cap_alert_0620():
     old = T0 - 20 * 86400
     for q in (old_dir, os.path.join(old_dir, "big")):
         os.utime(q, (old, old))
-    r = e.run("watch", t=T0, extra={"PANTHEON_SANDBOX_CAP_MB": "1"})
+    e.run("watch", t=T0, extra={"PANTHEON_SANDBOX_CAP_MB": "1"})
     check("кэши песочниц" in e.alerts() and "потолке 1 МБ" in e.alerts(), f"нет тревоги о потолке: {e.alerts()[-400:]}")
     check(not os.path.exists(old_dir) and os.path.exists(fresh), "старое не убрано или свежее убрано")
     e2 = Env()

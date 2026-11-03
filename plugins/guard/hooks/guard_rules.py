@@ -72,7 +72,9 @@ PostToolUse (Bash:
                  alerts.md; защиты — ещё Д3: PR не задевает ядро (весь plugins/guard/**, casefold; файлы из
                  pulls/N/files с previous_filename), его сливает только владелец. Журнал пишет этот же хук на PostToolUse
                  (`pantheon review …`). argus не делает git commit, merge, rebase и другие правки истории. Любой сбой
-                 — отказ (DONE-07, metis-0027, themis-0015, metis-0038, metis-0071);
+                 — отказ (DONE-07, metis-0027, themis-0015, metis-0038, metis-0071). Сессия без роли — только CI
+                 перед gh pr merge и gh api с записью на …/pulls/N/merge (check_owner_merge, metis-0633, 0663);
+                 gh alias set со словом merge — отказ всем (алиас слияния шлюз не узнает);
   terminal     — роли не печатают в терминал: osascript, tmux send-keys, screen stuff (SEC-30).
   corpus-role  — роли не запускают пополнение корпуса (подкоманды пополнения и скрипты) и не читают его ключи
                  из Связки: только через посредника; штабу (hq) корпус закрыт целиком (metis-0021, 15.10). Имена
@@ -628,7 +630,6 @@ def check_nextjs(event):
 # Предел: что пишет программа изнутри (python script.py, python -c, node -e, make, свой скрипт), guard не
 # видит. Это защита от ошибки агента, а не от намеренного обхода; настоящая граница — песочница (SEC-19).
 
-import hashlib
 import stat
 import unicodedata
 
@@ -2584,7 +2585,7 @@ _PUSH_BAD = {"--all", "--mirror", "--delete", "-d", "--prune", "--force", "-f", 
 
 def limited(event):
     """Роль Пантеона или любой субагент — правила шага 1.2 касаются их; ваша сессия без роли — нет (кроме CI перед
-    gh pr merge: check_owner_merge, metis-0633)."""
+    слиянием PR через gh pr merge и gh api …/pulls/N/merge: check_owner_merge, metis-0633, 0663)."""
     role, sub, pdir = who(event)
     return (is_pantheon_role(role) or sub), role, sub, pdir
 
@@ -2927,7 +2928,10 @@ def push_foreign(texts, cwd, cmds, pdir):
 
 
 def _gh_api_writes(args):
-    """gh api … пишет: метод не GET, поля -f/-F/--input (gh тогда шлёт POST) или аргумент не разобрать."""
+    """gh api … пишет: метод не GET, поля -f/-F/--input (gh тогда шлёт POST) или аргумент не разобрать. Связка
+    коротких флагов с X, f или F (`-iX PUT`, `-iF a=b`) — тоже (metis-0681)."""
+    get = any(x in ("-X", "--method") and i2 + 1 < len(args) and (args[i2 + 1] or "").upper() == "GET"
+              for i2, x in enumerate(args))
     for i, a in enumerate(args):
         if a is None:
             return True
@@ -2940,8 +2944,13 @@ def _gh_api_writes(args):
                 return True
         elif a in ("-f", "-F", "--field", "--raw-field", "--input") or a.startswith(("--field=", "--raw-field=",
                                                                                       "--input=", "-f", "-F")):
-            if not any(x in ("-X", "--method") and i2 + 1 < len(args) and (args[i2 + 1] or "").upper() == "GET"
-                       for i2, x in enumerate(args)):
+            if not get:
+                return True
+        elif m := re.fullmatch(r"-i+([XfF])(.*)", a):
+            # связка коротких флагов (`-iX PUT`, `-iXPUT`, `-iF a=b`): pflag читает её по буквам, -i — без значения,
+            # дальше -X с методом или поле (metis-0681)
+            method = (m[2] or (args[i + 1] if i + 1 < len(args) else None)) if m[1] == "X" else None
+            if (m[1] != "X" and not get) or (m[1] == "X" and (method is None or method.upper() != "GET")):
                 return True
     return False
 
@@ -3134,30 +3143,77 @@ def _gh_pr_sub(texts):
     return next(((q, i) for q, i in cands if texts[q] == "pr" and i is not None), None)
 
 
+def _gh_alias_merge(texts):
+    """`gh alias set …` со словом merge (metis-0663): алиас слияния — подкоманда, которую шлюз не узнает (`gh m 7`),
+    поэтому заводить его — отказ. Уже заведённые алиасы, `gh alias import` из файла и расширения gh шлюз не читает
+    (остаток, README guard)."""
+    _, cands = _gh_parse(texts)
+    for q, _ in cands:
+        i = _gh_word(texts, q + 1, False) if texts[q] == "alias" else None
+        if i is not None and i < len(texts) and texts[i] == "set" \
+                and any("merge" in (a or "").casefold() for a in texts[i + 1:]):
+            return True
+    return False
+
+
+GH_ALIAS_MERGE = ("Правило push: gh alias со словом merge — алиас слияния шлюз слияния не узнает (`gh <алиас> N` для "
+                  "него не gh pr merge), metis-0663. Сливай самой командой gh pr merge.")
+
+
 def check_owner_merge(event, tool_input):
-    """Сессия без роли (окно владельца): из правил push — только CI перед gh pr merge (решение владельца 01.11,
-    metis-0633, merge_gate.owner_ci_problem). Команду без слова merge не разбираем: остальное в этой сессии не судим."""
+    """Сессия без роли (окно владельца): из правил push — только CI перед слиянием PR (решение владельца 01.11,
+    metis-0633, merge_gate.owner_ci_problem): gh pr merge и gh api с записью на …/pulls/N/merge — те же проверки
+    (metis-0663, merge_gate.api_merge_args). Остальное в этой сессии не судим. Слово merge ищется в словах gh после
+    разбора bash, а не в сыром тексте: `gh pr mer''ge` слова merge в тексте не содержит (фоновая проверка 02.11);
+    сырой текст — только для отказа, когда подкоманду gh не вычислить. У gh api — только слова этой gh, кроме фильтров
+    вывода (`--jq .merged`), и только когда невычислимое слово может оказаться флагом записи (Д1 argus #257)."""
     cmd = tool_input.get("command") or ""
-    if "merge" not in cmd:
-        return None
     cwd = os.path.realpath(event.get("cwd") or os.getcwd())
     _, cmds = bash_analysis(cmd, cwd)
     moved = any(n in ("cd", "chdir", "pushd", "popd") for n, _ in cmds)
+    said = "merge" in cmd.casefold()
     notes = []  # предупреждения пропуска (metis-0650): едут возвратом, Allow
     for name, texts in cmds:
-        if name == "gh" and _gh_parse(texts)[0]:
-            return ("Правило push: gh — слово до подкоманды не вычислить (переменная, $(…)), а в команде есть merge: "
-                    f"не понять, слияние ли это. Пиши подкоманду gh и флаги перед ней словами. {merge_gate.OWNER_CI}")
-        found = _gh_merge(texts) if name == "gh" else None
+        if name != "gh":
+            continue
+        if _gh_parse(texts)[0]:
+            if said or any("merge" in (a or "").casefold() for a in texts):
+                return ("Правило push: gh — слово до подкоманды не вычислить (переменная, $(…)), а в команде есть "
+                        "merge: не понять, слияние ли это. Пиши подкоманду gh и флаги перед ней словами. "
+                        f"{merge_gate.OWNER_CI}")
+            continue
+        if _gh_alias_merge(texts):
+            return GH_ALIAS_MERGE
+        jobs = []  # (что сливает, слова gh pr merge для owner_ci_problem)
+        found = _gh_merge(texts)
         if found is not None:
+            jobs.append(("gh pr merge", found[1]))
+        api = _gh_api(texts)
+        if api is not None and _gh_api_writes(api):
+            # запись (метод не GET или поля) — одно правило fail closed merge_gate.api_merge_args (фоновая проверка
+            # 02.11). Записи по словам не видно, есть только невычислимые слова — это GET: адрес или значение флага
+            # (`gh api repos/o/r/pulls/$N --jq .merged`) не судим; отказ — когда лишнее невычислимое слово может
+            # оказаться флагом записи (`gh api …/merge $F`) и merge есть в словах этой gh, кроме --jq/--template (Д1
+            # argus #257: слово merge в соседней команде строки и `.mergeable` в фильтре — не слияние)
+            if not _gh_api_writes(["" if a is None else a for a in api]):
+                if merge_gate.api_loose(api) and merge_gate.api_says_merge(api):
+                    return ("Правило push: gh api — слово не вычислить (переменная, $(…)), а в команде есть merge: не "
+                            "понять, слияние ли это. Пиши адрес и флаги словами. " + merge_gate.OWNER_CI)
+                continue
+            got = merge_gate.api_merge_args(api)
+            if isinstance(got, str):
+                return f"Правило push: gh api с записью — {got}. {merge_gate.OWNER_CI}"
+            if got is not None:
+                jobs.append(("gh api …/pulls/N/merge", got))
+        for what, args in jobs:
             # та же проверка GH_*, что у правила hq-gh: GH_REPO, GH_HOST, GH_CONFIG_DIR уводят gh от сверенного репозитория
             if _gh_env_assigned(cmd, cwd) or any(os.environ.get(v) for v in GH_REDIRECT_ENV):
-                return ("Правило push: gh pr merge — без переменных GH_* в команде и без GH_REPO, GH_HOST, "
+                return (f"Правило push: {what} — без переменных GH_* в команде и без GH_REPO, GH_HOST, "
                         f"GH_CONFIG_DIR в окружении: они уводят gh от репозитория, на котором сверен CI. "
                         f"{merge_gate.OWNER_CI}")
-            why = merge_gate.owner_ci_problem(cwd, moved, found[1])
+            why = merge_gate.owner_ci_problem(cwd, moved, args)
             if why:
-                return f"Правило push: gh pr merge — {why}"
+                return f"Правило push: {what} — {why}"
             notes.extend(merge_gate.notes_of(why))
     return merge_gate.allow(notes)
 
@@ -3183,6 +3239,8 @@ def check_push(event, tool, tool_input):
         if name == "gh" and _gh_parse(texts)[0]:
             return ("Правило push: gh — слово до подкоманды не вычислить (переменная, $(…)), а без него не понять, "
                     "слияние это или нет. Пиши подкоманду gh и флаги перед ней словами.")
+        if name == "gh" and _gh_alias_merge(texts):
+            return GH_ALIAS_MERGE
         api = _gh_api(texts) if name == "gh" else None
         if api is not None and _gh_api_writes(api):
             return ("Правило push: gh api с записью (POST, PUT, PATCH, DELETE) ролям закрыто — слияние, ветки и файлы "

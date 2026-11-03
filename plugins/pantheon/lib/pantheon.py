@@ -49,11 +49,14 @@ hosts = "primary" идут только на главном Mac (primary_host).
                                         надстройка из [read] в STATE/config.toml
   pantheon merge request|run|status|cancel   слияние PR ядра по Touch ID (metis-0285, lib/merge.py): заявка роли →
                                         плановый проход заново сверяет шлюз → окно Touch ID → gh pr merge этого SHA
+  pantheon batch start|pr <story>      пачка — одна ветка и один PR (lib/batch.py, metis-0757): start — ветка
+                                        batch/<story> от origin/main и копия .claude/worktrees/batch-<story>;
+                                        pr — один PR ветки в main, в теле задачи пачки и Closes (--dry-run — показать)
   pantheon outside test|serve|status|stop|run   проверка вне окна роли (lib/outside.py, [sb-simplify] п. 7):
                                         тесты проекта или dev-сервер (своя копия на коммите, порт 4300–4399, не
                                         больше двух) под sandbox-exec без ключей, браузеров и
-                                        местного прокси → код и хвост журнала или адрес; после «принять» argus
-                                        плановый проход сам гоняет тесты и пишет запись tests шлюза слияния
+                                        местного прокси → код и хвост журнала или адрес; сам тесты после «принять»
+                                        argus не гоняет — заявку подаёт роль, дежурный тревожит через 1 ч
   pantheon traces [--markers ФАЙЛ] | install-hook   личные следы до push (lib/traces.py, metis-0414): та же проверка, что CI
                                         check-traces; маркеры — файл вне репозитория; нет файла — отказ, код 2; install-hook ставит pre-push
   pantheon mmv [--days N]               минуты владельца на систему по дням (по меткам owner-log) → STATE/mmv.jsonl
@@ -98,6 +101,10 @@ hosts = "primary" идут только на главном Mac (primary_host).
   pantheon task show ID
   pantheon task ready [--direction D] [--owner O]   pantheon task claim ID --by КТО [--hours 1]
                     ready в stderr предупреждает, если touches готовой задачи пересекаются с открытым PR (metis-0667)
+  pantheon task batch-suggest [--direction D] [--json] [--apply]   (metis-0595) открытые задачи без пачки → «в существующую
+                    пачку», «новая пачка из N задач», «дубли — объединить?»: общие файлы, похожесть, ссылки, общий PR; без
+                    модели. Ничего не меняет; --apply прикрепляет только «уверенно» в существующую пачку
+  pantheon batch-suggest run [--force]  плановая сводка раз в 3–4 суток → Доска/Пачки-предложения.md (задача расписания)
   pantheon task overlap ID   перед раздачей (metis-0665): touches задачи против живых (doing, review) задач её
                     направления и файлов открытых PR его репозиториев ([merge_repos] policy.toml; gh, не ответил — кэш
                     планового прохода, нет и его — строка «не проверено»); пересечение — выбор с командами: очередь
@@ -243,7 +250,6 @@ import os
 import re
 import shlex
 import shutil
-import signal
 import socket
 import stat
 import subprocess
@@ -316,6 +322,7 @@ def path(*parts):
 # hq_open: O_NOFOLLOW|O_NONBLOCK через дескриптор папки, затем fstat — обычный файл, одна ссылка, владелец — мы; иначе
 # UnsafeFile, и файл не тронут. Ждущий замок в hq-rw ждёт не дольше HQ_LOCK_WAIT: окно не повесит проход.
 HQ_RW = "hq-rw"
+HEAVY_QUEUE = "heavy-queue"  # папка билетов очереди heavy в STATE/locks (metis-0659)
 HQ_RW_DIRS = ("locks", "autostart-reset")
 HQ_LOCK_WAIT = float(os.environ.get("PANTHEON_HQ_LOCK_WAIT") or 60)  # с; переменная — для тестов
 # errno, которые даёт подложенная запись (ссылка, FIFO без читателя, папка, не папка на месте папки) — это UnsafeFile
@@ -683,7 +690,7 @@ JOB_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 # Подкоманды pantheon, которые может запускать тик. Пульт (install, uninstall, jobs, run-job, tick, archive) — нет.
 TICK_SUBCOMMANDS = {"view", "commit", "domains", "watch", "revisits", "scout", "board", "sync-answers", "check",
                     "instructions", "agents", "usage", "qmd", "plugins", "reboot-reminder", "read", "autoclose",
-                    "archive"}
+                    "archive", "batch-suggest"}
 CLAUDE_VALUE_FLAGS = {"--agent", "--model", "--max-turns", "--name"}
 # Окна задач расписания (P0-3, metis-0063): `claude -p --agent <роль>` из schedule.toml идёт с песочницей
 # settings/job-<роль>.json (собирает sandbox_build), а не без неё. Роль вне таблицы тик не запускает. write — куда
@@ -759,6 +766,8 @@ def parse_command(cmd):
             return None  # install (claude mcp add уровня пользователя) и прочее — только руками
         if argv[1] == "plugins" and (argv[2:3] != ["update"] or any(a != "--quiet" for a in argv[3:])):
             return None
+        if argv[1] == "batch-suggest" and argv[2:] != ["run"]:
+            return None  # задача прохода — только `batch-suggest run`; --force и task batch-suggest --apply — руками
         if argv[1] == "read" and argv[2:] != ["run"]:
             return None  # заявку подаёт окно, а не задача прохода; проход — только `read run`
         return [os.path.join(PLUGIN, "bin", "pantheon")] + argv[1:]
@@ -1861,6 +1870,8 @@ def domains_build(if_changed=False):
     # живую сессию с проблемой проектных allow останавливает только путь тика (--if-changed): ручная сборка и тесты
     # зовут её с настоящим claude в PATH — claude stop из них остановил бы ваши сессии
     built = sandbox_build(domains, policy_path, stores, leads, stop_live=if_changed)
+    with contextlib.suppress(OSError):  # файл или ссылка на месте папки — не повод ронять сборку
+        os.makedirs(path("locks", "heavy-queue"), exist_ok=True)  # билеты очереди обёртки heavy (metis-0659)
     os.makedirs(path("locks"), exist_ok=True)
     for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):  # места обёртки heavy: роль в песочнице сама их не создаст
         open(path("locks", slot + ".lock"), "a").close()
@@ -2672,6 +2683,13 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
 
     memory = memory_dirs()
     pmap = plugin_map_load()
+    # очередь обёртки heavy по порядку прихода (metis-0659): билет — файл в STATE/locks/heavy-queue, окно роли без
+    # записи туда ждёт опросом мест. Запись — только в эту папку (не во весь locks: там замки прохода и Touch ID),
+    # «да» владельца 02.11 в окне agent-kit-62. Ссылка на месте папки — не даём: иначе запись ушла бы по ссылке
+    queue = path("locks", HEAVY_QUEUE)
+    with contextlib.suppress(OSError):  # файл или висячая ссылка на месте папки — без записи, сборка окон идёт дальше
+        os.makedirs(queue, mode=0o700, exist_ok=True)
+    queue = os.path.realpath(queue) if os.path.isdir(queue) and not os.path.islink(queue) else None
 
     def one(name, folders, own, compact, deny, allow=None, agents=None, direction=False, auto_allow=None):
         if direction:
@@ -2690,6 +2708,7 @@ def sandbox_build(domains, policy_path, stores=None, leads=None, stop_live=False
                   f"{skipped}", file=sys.stderr)
         own_real = os.path.realpath(own) if os.path.isdir(own) and not os.path.islink(own) else None
         write = [r for r in (_real_dir(p, ["~/.cache", "~/Library/Caches"], strict=True) for p in extra.get(name, [])) if r] + memory
+        write += [queue] if queue else []  # в песочницу (Bash), не в правила Edit/Write
         cache = _real_dir(f"{caches}/{name}", [caches], strict=True, create=True)
         ok = [r for r in real if r]
         # сетевой git: окну направления — всегда, мастерской — при SSH-remote (P0-4, metis-0064)
@@ -3251,7 +3270,7 @@ def _resume_session(name, a, text, origin):
         left = stop_and_rm(name, m.group(1), "copy-note")
         start_log(f"copy-removed\t{name}\t{m.group(1)}" + (f"\trefused {left}" if left else ""))
         alert(f"{name}: --resume сделал копию {m.group(1)} — исходная сессия {a.get('id')} ещё числится живой; "
-              + (f"копия убрана (claude stop + rm)" if not left else f"копию убрать не вышло ({left}) — claude agents, "
+              + ("копия убрана (claude stop + rm)" if not left else f"копию убрать не вышло ({left}) — claude agents, "
                  "лишнюю остановить"), "pantheon")
     elif r.returncode == 0:  # копию (исходная ещё живая) не разбираем сами — тревога выше, решает Зевс
         rm_previous(name, "--resume", before=before, keep={a.get("id")}, wait=True)
@@ -4765,6 +4784,8 @@ def install():
             os.remove(link)
         os.symlink(os.path.join(CURRENT, "bin", cmd), link)
     link = os.path.join(HOME, ".local", "bin", "pantheon")
+    with contextlib.suppress(OSError):  # файл или ссылка на месте папки — не повод ронять сборку
+        os.makedirs(path("locks", "heavy-queue"), exist_ok=True)  # билеты очереди обёртки heavy (metis-0659)
     os.makedirs(path("locks"), exist_ok=True)
     for slot in ("heavy-cmd-1", "heavy-cmd-2", "heavy-server"):
         open(path("locks", slot + ".lock"), "a").close()
@@ -5500,6 +5521,61 @@ def board_auto_watch(t, sched):
                    "смотреть задачу board: pantheon jobs, alerts.md", "pantheon-tick")
 
 
+def batchsuggest_mod():
+    """lib/batchsuggest.py — раскладка открытых задач по пачкам без модели (metis-0595)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pantheon_batchsuggest", os.path.join(LIB, "batchsuggest.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+BATCH_SUGGEST_EVERY = 3 * 86400  # задача расписания раз в 3,5 суток (every = 5040); команда сама не чаще раза в 3 суток
+
+
+def batch_suggest_run(rest):
+    """pantheon batch-suggest run [--force] — плановая сводка (metis-0595): предложения по пачкам для всех направлений
+    → Доска/Пачки-предложения.md (есть доска) и STATE/batch-suggest.md. Ничего не меняет в задачах. Раньше чем через
+    BATCH_SUGGEST_EVERY после прошлого прохода — пропуск (--force снимает). Тревога — одна строка, и только если среди
+    предложений есть ещё не виденные (ключи в STATE/batch-suggest.json)."""
+    if rest not in ([], ["run"], ["run", "--force"]):
+        print("использование: pantheon batch-suggest run [--force]", file=sys.stderr)
+        return 2
+    t, st = now(), read_json(path("batch-suggest.json"), {})
+    st = st if isinstance(st, dict) else {}
+    last = st.get("last")
+    if rest[-1:] != ["--force"] and isinstance(last, (int, float)) and 0 <= t - last < BATCH_SUGGEST_EVERY:
+        print(f"batch-suggest: прошлый проход {stamp(last)}, следующий не раньше {stamp(last + BATCH_SUGGEST_EVERY)}")
+        return 0
+    T, B = tasks_mod(), batchsuggest_mod()
+    tasks = T.load_tasks(PANTHEON, T.WORK_TYPES)
+    dirs = sorted({h.get("direction") for _, h, _ in tasks.values() if h.get("type") == "task" and h.get("direction")})
+    results = [B.suggest(tasks, d) for d in dirs]
+    results = [r for r in results if r["joins"] or r["groups"] or r["duplicates"]]
+    keys = sorted(k for r in results for k in B.keys(r))
+    seen = st.get("seen") if isinstance(st.get("seen"), list) else None
+    fresh = [k for k in keys if seen is None or k not in seen]
+    body = "\n\n".join(B.render(r) for r in results) or "Предложений нет."
+    text = ("# Пачки: предложения\n\nСчитает плановый проход без модели, раз в 3–4 суток (`pantheon task batch-suggest`). "
+            "Ничего не меняет: пачку ставит координатор — `pantheon task set ID parent=ПАЧКА` (для новой пачки сначала "
+            "`pantheon task new --type story`). «Уверенно» прикрепляет `pantheon task batch-suggest --apply`.\n\n"
+            f"Проход: {stamp(t)}\n\n```\n{body}\n```\n")
+    os.makedirs(STATE, exist_ok=True)
+    write_atomic(path("batch-suggest.md"), text)
+    if os.path.isdir(BOARD):
+        pp = os.path.join(BOARD, "Пачки-предложения.md")
+        old = open(pp, encoding="utf-8").read() if os.path.exists(pp) else ""
+        if old.split("Проход:")[-1].split("\n", 1)[-1] != text.split("Проход:")[-1].split("\n", 1)[-1]:
+            write_atomic(pp, text)  # время прохода само файл не меняет: пишется только при новом составе
+    write_json(path("batch-suggest.json"), {"last": t, "seen": keys})
+    if fresh:
+        n = {p: sum(1 for k in fresh if k.startswith(p + ":")) for p in ("group", "join", "dup")}
+        alert(f"пачки: новых предложений {len(fresh)} (новых пачек {n['group']}, в существующую {n['join']}, дублей "
+              f"{n['dup']}), список — Доска/Пачки-предложения.md", "pantheon-tick")
+    print(f"batch-suggest: предложений {len(keys)}, новых {len(fresh)}")
+    return 0
+
+
 def autoclose_mod():
     """lib/autoclose.py — закрытие задач при слиянии их PR (metis-0308)."""
     import importlib.util
@@ -5958,7 +6034,7 @@ def check(paths=None, quiet=False):
                   + ", ".join(i for i, _, _ in stall[:TAIL_SHOWN]) + (f" и ещё {len(stall) - TAIL_SHOWN}" if len(stall) > TAIL_SHOWN else "")
                   + " (список — Доска/Хвосты.md)")
         field_errs, field_warns = T.board_problems(tasks_now, now(), night_end, autoclose_mod().open_pr_tasks(path("autoclose.json")))
-        field_errs = [(i, f"status done без closed — проставлен из updated") for i in fixed] + field_errs
+        field_errs = [(i, "status done без closed — проставлен из updated") for i in fixed] + field_errs
         for tid, text in field_errs:
             print(f"ОШИБКА · {tid}: {text}")
         for tid, text in field_warns:
@@ -6493,6 +6569,7 @@ _attach("quarantine")
 _attach("instructions")
 _attach("rolecmd")
 _attach("sessions")
+_attach("batch")
 
 
 def main(argv):
@@ -6549,6 +6626,8 @@ def main(argv):
         return sync_answers()
     if cmd == "autoclose":
         return autoclose_cmd(rest)
+    if cmd == "batch-suggest":
+        return batch_suggest_run(rest)
     if cmd == "status":
         return status()
     if cmd == "check":
@@ -6618,6 +6697,8 @@ def main(argv):
         return merge_mod().main(rest)
     if cmd == "outside":
         return outside_mod().main(rest)
+    if cmd == "batch":
+        return batch_cmd(rest)
     if cmd == "probes":
         return probes_cmd(rest)
     if cmd == "traces":

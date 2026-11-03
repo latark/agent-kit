@@ -81,7 +81,7 @@ INJECTION = [
     re.compile(r"</?\s*(system|system-reminder|instructions)\s*>|BEGIN\s+SYSTEM|\bsystem\s+prompt\s*:", re.I),
     re.compile(r"\byou\s+are\s+now\b|\bnew\s+instructions\s*:|\bjailbreak\b", re.I),
 ]
-HIDDEN = re.compile("[​-‏‪-‮⁠-⁤⁦-⁩﻿\U000e0000-\U000e007f]")
+HIDDEN = re.compile("[\u200b-‏‪-‮⁠-⁤⁦-⁩﻿\U000e0000-\U000e007f]")
 B64 = re.compile(r"[A-Za-z0-9+/]{200,}={0,2}")
 SECRETS = [
     (re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"), "ключ Anthropic"),

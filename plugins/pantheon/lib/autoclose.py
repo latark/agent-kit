@@ -2,6 +2,8 @@
 
 Два прохода. fetch (`pantheon autoclose fetch`, отдельная задача расписания, с пределом времени FETCH_BUDGET на весь
 проход) спрашивает gh про слитые и открытые PR репозиториев из [merge_repos] policy.toml и пишет кэш STATE/autoclose-prs.json.
+В кэше же — бывшие head ещё открытых PR (old_heads, former_heads, metis-0726): по ним `pantheon outside` не гоняет
+тесты на коммит, который уже не head своего PR.
 run (лёгкий тик) читает только кэш, в сеть не ходит. Задачу (`<префикс>-NNNN`) закрывает только PR из репозитория её
 направления, и только если её номер в имени ветки или после «Closes/Fixes» в теле — там и списком: «Closes metis-0522,
 metis-0534 и 0535» закрывает все три (metis-0583); упоминание («См. также») не считается.
@@ -26,7 +28,7 @@ import re
 import shutil
 import subprocess
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 ID_RE = re.compile(r"(?<![\w-])[a-z][a-z0-9]{1,11}-\d{3,}(?![\w])")
 PART_RE = re.compile(r"(?<!\w)часть(?!\w)", re.I)
@@ -300,8 +302,36 @@ def fetch(cache_file, state_file, t, repos, env=None, budget=FETCH_BUDGET, core=
                                    "core": bool(core) and any(core(f.get("path") or "") for f in p.get("files") or []
                                                               if isinstance(f, dict))}
                                   for p in o if isinstance(p, dict) and isinstance(p.get("number"), int)]
-    save_state(cache_file, {"fetched": t, "merged": merged, "open": opened, "open_prs": open_prs, "errors": errors})
+    old_heads = former_heads(load_state(cache_file), open_prs)
+    save_state(cache_file, {"fetched": t, "merged": merged, "open": opened, "open_prs": open_prs, "errors": errors,
+                            "old_heads": old_heads})
     return errors
+
+
+OLD_HEADS_KEEP = 200   # бывших head на репозиторий в кэше: больше — самые старые уходят
+
+
+def former_heads(prev, open_prs):
+    """{repo: {sha: номер PR}} — бывшие head ещё открытых PR (metis-0726): прошлый кэш (его old_heads и head его
+    open_prs) минус нынешние head. По ним `pantheon outside` снимает заявку test на коммит, который уже не head своего
+    PR. PR закрыт или слит — его бывшие head уходят; репозиторий, про который gh не ответил (нет в open_prs), держит
+    прошлые. Порядок — от старых к новым, не больше OLD_HEADS_KEEP на репозиторий."""
+    prev = prev if isinstance(prev, dict) else {}
+    p_old = prev.get("old_heads") if isinstance(prev.get("old_heads"), dict) else {}
+    p_open = prev.get("open_prs") if isinstance(prev.get("open_prs"), dict) else {}
+    out = {r: v for r, v in p_old.items() if r not in open_prs and isinstance(v, dict)}
+    for repo, prs in open_prs.items():
+        cur = {p["number"]: p.get("head") for p in prs}
+        keep = {}
+        seen = list((p_old.get(repo) or {}).items()) if isinstance(p_old.get(repo), dict) else []
+        seen += [(p.get("head"), p.get("number")) for p in p_open.get(repo) or [] if isinstance(p, dict)]
+        for sha, num in seen:
+            if isinstance(sha, str) and sha and num in cur and cur[num] != sha:
+                keep.pop(sha, None)
+                keep[sha] = num
+        if keep:
+            out[repo] = dict(list(keep.items())[-OLD_HEADS_KEEP:])
+    return out
 
 
 def journal_has(path, T, needle):

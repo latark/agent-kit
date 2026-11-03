@@ -16,7 +16,7 @@ __all__ = [
     "REVIEW_SHA", "REVIEW_REPO", "REVIEW_PR", "REVIEW_USAGE", "REVIEW_CHECKLIST", "OPUS_RAN", "RAN_MODEL",
     "review_accept_full", "review_accept_counts", "_review_verdict", "_review_git", "_review_state", "review_records",
     "review_tally", "REVIEW_PENDING_TTL", "_review_pending_path", "_record_epoch", "review_pending", "review_cmd",
-    "REVIEW_AGENT", "REVIEW_HEAD", "review_find_transcripts", "review_last_report",
+    "REVIEW_AGENT", "REVIEW_HEAD", "review_find_transcripts", "review_last_report", "NODE_MODULES_LINK", "tree_clean",
 ]
 
 
@@ -112,11 +112,31 @@ def _review_git(*args):
     return r.stdout if r.returncode == 0 else None
 
 
+# Ссылка node_modules, которую разработчик кладёт в worktree для pnpm (metis-0721): в корне и в apps/*, packages/*.
+NODE_MODULES_LINK = re.compile(r"\?\? (?:(?:apps|packages)/[^/]+/)?node_modules")
+
+
+def tree_clean(status, top, ok_prefix=()):
+    """Дерево чистое по выводу `git status --porcelain` (общая для outside и review test, metis-0721). Строки с
+    ok_prefix не грязь. Неотслеживаемая СИМЛИНК node_modules в корне top и в apps/*, packages/* — тоже не грязь:
+    папка node_modules, файл с этим именем, ссылка глубже и ссылка с другим именем — грязь, как любая правка."""
+    if status is None:
+        return False
+    for ln in status.splitlines():
+        if not ln.strip() or ln.startswith(tuple(ok_prefix)):
+            continue
+        if NODE_MODULES_LINK.fullmatch(ln) and top and os.path.islink(os.path.join(top, ln[3:])):
+            continue
+        return False
+    return True
+
+
 def _review_state():
     """(HEAD, дерево чистое) текущей папки; HEAD None — не git или коммитов нет."""
     head = (_review_git("rev-parse", "HEAD") or "").strip().lower()
     status = _review_git("status", "--porcelain")
-    return (head if REVIEW_SHA.fullmatch(head) else None), (status is not None and not status.strip())
+    top = (_review_git("rev-parse", "--show-toplevel") or "").strip()
+    return (head if REVIEW_SHA.fullmatch(head) else None), tree_clean(status, top)
 
 
 REVIEW_AGENT = re.compile(r"([0-9a-f]{4,64})(?:/([0-9a-f]{4,64}))?", re.I)  # agent8[/сессия8], как в `review status`
@@ -436,6 +456,9 @@ def review_cmd(rest):
                 who += f" {str(by.get('agent_id') or '—')[:8]}/{str(by.get('session_id') or '—')[:8]}"
             print(f"{r.get('time', '?')}  {r.get('kind', '?'):<6}  {','.join(map(str, r['repo']))}{pr}  "
                   f"{str(r.get('sha', ''))[:12]}  {who}")
+            if r.get("kind") == "tests" and r.get("rerun_of"):
+                nf = len(r["files"]) if isinstance(r.get("files"), list) else 0
+                print(f"    дозапуск от {r['rerun_of']}, файлов {nf}")
             cl = r.get("checklist") if isinstance(r.get("checklist"), dict) else {}
             if r.get("kind") == "accept" and not all(isinstance(cl.get(k), str) and cl[k].strip()
                                                      for k in REVIEW_CHECKLIST):

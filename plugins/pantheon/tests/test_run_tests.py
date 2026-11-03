@@ -219,7 +219,6 @@ ENVF = ("import os, sys\nprint(repr((os.environ.get('HOME'), os.environ.get('TMP
 p = mkplugin({"test_env1.py": ENVF, "test_env2.py": ENVF})
 env = dict(os.environ, PANTHEON_STATE="/x", PANTHEON_HOME="/y", FORCE_COLOR="1")
 r = run(["--log-dir", os.path.join(_ROOT, "logs-env"), p], env=env)
-import ast  # noqa: E402
 seen = []
 for f in ("test_env1.py", "test_env2.py"):
     with open(os.path.join(_ROOT, "logs-env", os.path.basename(p) + "__" + f + ".log")) as fh:
@@ -463,6 +462,23 @@ os.remove(os.path.join(al, "tests", "test_bad.py"))
 r = run(["--base", "main", al])
 check("--base без --affected — отказ без прогона", r.returncode != 0 and "--base без --affected" in r.stdout
       and "файлов" not in r.stdout, r.stdout)
+
+# --- --only: только названные файлы (дозапуск прохода outside, metis-0735) ---
+r = run(["--only", "alpha/test_b.py,beta/test_c.py", a, b])
+check("--only: идут только названные файлы двух плагинов",
+      r.returncode == 0 and "файлов 2, ok 2, FAIL 0" in r.stdout and "alpha/test_a.py" not in r.stdout
+      and "ok   alpha/test_b.py" in r.stdout and "ok   beta/test_c.py" in r.stdout, r.stdout)
+r = run(["--only", "alpha/test_b.py", "--only", "beta/test_c.py", a, b])
+check("--only дважды — объединение", r.returncode == 0 and "файлов 2, ok 2" in r.stdout, r.stdout)
+r = run(["--only", "alpha/test_b.py,alpha/test_zz.py", a, b])
+check("--only: метки нет среди файлов — код 2 без прогона", r.returncode == 2 and "alpha/test_zz.py" in r.stdout
+      and "итого" not in r.stdout, r.stdout)
+r = run(["--only", "alpha/test_b.py,", a])
+check("--only: пустая метка — отказ без прогона", r.returncode not in (0, 2) and "пустая метка" in r.stdout
+      and "итого" not in r.stdout, r.stdout)
+r = run(["--only", "alpha/test_b.py", "--affected", a])
+check("--only с --affected — отказ без прогона", r.returncode != 0 and "--only с --affected" in r.stdout
+      and "итого" not in r.stdout, r.stdout)
 
 # --- устаревшая карта: файл тестов, изменённый после её сборки, идёт всегда (хеши в карте) ---
 Y2 = OK2 + "# правка после сборки карты\n"
@@ -743,6 +759,35 @@ r = run([p], env=PEN)
 check("Linux: все файлы пропущены — код 3 «нечего гонять», а не зелёный итог",
       r.returncode == 3 and "skip pantheon/test_setup.py" in r.stdout and "нечего гонять" in r.stdout
       and "итого" not in r.stdout, (r.returncode, r.stdout))
+
+# --- metis-0728: файлы тестов идут через taskpolicy -c utility (macOS и есть бинарь), иначе как раньше ---
+TP = R.TASKPOLICY
+c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: p == TP)
+check("macOS и taskpolicy есть: команда начинается с taskpolicy -c utility",
+      c[:3] == [TP, "-c", "utility"] and c[3:] == ["py", "-I", os.path.join("tests", "test_x.py")], c)
+c = R.launch_cmd("py", "test_x.py", "darwin", lambda p: False)
+check("macOS без taskpolicy: команда как раньше", c == ["py", "-I", os.path.join("tests", "test_x.py")], c)
+c = R.launch_cmd("py", "test_x.py", "linux", lambda p: True)
+check("Linux: taskpolicy нет, даже если бинарь есть", "taskpolicy" not in " ".join(c) and c[0] == "py", c)
+check("не macOS — строки QoS нет", R.qos_line(sys.executable, dict(os.environ), "linux") is None)
+if sys.platform == "darwin" and os.path.exists(TP):
+    q = R.qos_line(sys.executable, dict(os.environ))
+    check("macOS: строка QoS называет класс и для раннера, и для файла",
+          q and "раннер:" in q and "файл (taskpolicy -c utility):" in q and "проба не удалась" not in q
+          and "utility" in q.split("файл (")[1], q)
+    pl = mkplugin({"test_q.py": "import os\nprint('ok q', os.environ.get('RUN_TESTS_RUNNER'))\nprint('1/1')\n"}, "qq")
+    r = run([pl])
+    check("прогон печатает QoS-строку, а файлу виден RUN_TESTS_RUNNER=1",
+          "run-tests: QoS (доля CPU)" in r.stdout and "ok   qq/test_q.py" in r.stdout, r.stdout)
+else:
+    print("пропущено: нужен macOS — живая проба QoS")
+
+# настоящая карта: test_merge_gate читает .github/workflows (сверка OPTIONAL_CHECKS), правка workflow обязана его выбрать (#288)
+real_map = json.load(open(os.path.join(PLUGIN, "scripts", "affected-map.json"), encoding="utf-8"))
+gate = real_map["tests"].index("guard/test_merge_gate.py")
+for wf in ("tests.yml", "release.yml", "check-traces.yml"):
+    check(f"карта: .github/workflows/{wf} → guard/test_merge_gate.py",
+          gate in real_map["files"].get(".github/workflows/" + wf, []), real_map["files"].get(".github/workflows/" + wf))
 
 print(f"\n{total - len(fails)} из {total} прошли")
 sys.exit(1 if fails else 0)

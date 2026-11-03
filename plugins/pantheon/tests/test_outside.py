@@ -480,6 +480,17 @@ check("профиль: ~/.npmrc, ~/.netrc закрыты на чтение",
 HEAD_NOTE = "python3 t.py  # .pantheon-verify ветки (HEAD)"
 check("команда: строка .pantheon-verify без heavy, из ветки — с пометкой",
       O.command(os.path.realpath(APP), "test") == (["/bin/sh", "-c", "python3 t.py"], HEAD_NOTE))
+# metis-0653: строка `dev:` — только для исполнителя; outside берёт первую некомментарную строку
+commit(OTHER, {".pantheon-verify": "# полный\npython3 t.py\ndev: python3 narrow.py\n"}, "o2 dev-строка")
+check("команда: строка `dev:` .pantheon-verify outside не берёт — первая некомментарная",
+      O.command(os.path.realpath(OTHER), "test")[0] == ["/bin/sh", "-c", "python3 t.py"])
+commit(OTHER, {".pantheon-verify": "# только узкая\ndev: python3 narrow.py\npython3 t.py\n"}, "o3 dev-строка первой")
+check("команда: `dev:` первой строкой пропускается, берётся следующая некомментарная",
+      O.command(os.path.realpath(OTHER), "test")[0] == ["/bin/sh", "-c", "python3 t.py"])
+commit(OTHER, {".pantheon-verify": "dev: python3 narrow.py\n"}, "o4 только dev")
+check("команда: только строка `dev:` — не команда, дальше package.json/pytest (здесь нечем — отказ)",
+      O.command(os.path.realpath(OTHER), "test")[0] is None)
+commit(OTHER, {".pantheon-verify": "python3 t.py\n"}, "o5 вернул")
 check("команда: --script из package.json", O.command(os.path.realpath(APP), "test", "lint")[1] == "npm run lint")
 check("команда: скрипта нет — отказ", O.command(os.path.realpath(APP), "test", "nope")[0] is None)
 check("команда: сервер без скрипта dev — отказ", O.command(os.path.realpath(OTHER), "serve")[0] is None)
@@ -496,80 +507,49 @@ commit(B, {".pantheon-verify": "true\n"}, "ослабил проверку")
 git(B, "update-ref", "refs/remotes/origin/main", base)
 check("команда: .pantheon-verify из origin/main, правка ветки не действует", O.command(B, "test")[1] == "python3 t.py")
 
-# --- 2. тесты после «принять» -------------------------------------------------------------------------------------
+# --- 2. прямой путь: заявка test -> run_test в папке клона (автопрогонов нет, решение владельца 03.11) ----------------
+APPR = os.path.realpath(APP)
+
+
+def direct(rid):
+    return O.run_test(rid, APPR, None, "athena-x", None, [APPR])
+
+
 before = len(calls())
-accept(C3)
-check("тик: есть новое «принять» — проход нужен", O.pending())
-res = O.auto_pass()
-check("принять C3 (HEAD клона): один прогон", len(res) == 1 and res[0].get("code") == 0, res)
+res = direct("direct-c3")
+check("прямой прогон C3 (HEAD): код 0, запись есть", res.get("code") == 0 and res.get("record") is True, res)
 recs = tests_for(C3)
 check("запись tests принята настоящим шлюзом guard", len(recs) == 1, gate_records())
 r0 = recs[0] if recs else {}
-check("запись: repo по remote, pr null, by = проход",
-      r0.get("repo") == [REPO] and r0.get("pr") is None and r0.get("by", {}).get("agent_type") == "pantheon-outside", r0)
-check("запись: команда и папка", r0.get("cmd") == HEAD_NOTE and r0.get("cwd") == os.path.realpath(APP), r0)
+check("запись: команда и папка", r0.get("cmd") == HEAD_NOTE and r0.get("cwd") == APPR, r0)
+check("запись: repo по remote, pr null, by = проход, window",
+      r0.get("repo") == [REPO] and r0.get("pr") is None and r0.get("by", {}).get("agent_type") == "pantheon-outside"
+      and r0.get("by", {}).get("window") == "athena-x", r0)
 c = calls()[before:]
 check("прогон — под sandbox-exec с профилем STATE/outside/profile.sb",
       len(c) == 1 and c[0]["profile"] == os.path.join(STATE, "outside", "profile.sb") and os.path.isfile(c[0]["profile"]), c)
 env = c[0]["env"] if c else {}
 check("окружение с нуля: нет GH_TOKEN, есть CI=1 и свой TMPDIR",
-      "GH_TOKEN" not in env and env.get("CI") == "1" and env.get("TMPDIR", "").startswith(_ROOT) and env.get("HOME") == os.path.realpath(HOME), sorted(env))
-check("тик: «принять» разобрано — прохода нет", not O.pending())
-check("повтор прохода — без второго прогона", O.auto_pass() == [] and len(tests_for(C3)) == 1)
+      "GH_TOKEN" not in env and env.get("CI") == "1" and env.get("TMPDIR", "").startswith(_ROOT)
+      and env.get("HOME") == os.path.realpath(HOME), sorted(env))
 
-# коммит не на HEAD: временный worktree, зависимости, уборка
-before = len(calls())
-accept(C1)
-res = O.auto_pass()
-check("принять C1 (не HEAD): тесты прошли, запись есть", len(res) == 1 and len(tests_for(C1)) == 1, res)
-c = calls()[before:]
-wt = os.path.join(HOME, "Library", "Caches", "pantheon-outside", "wt")
-check("временный worktree вне STATE, сначала npm ci, потом тест",
-      len(c) == 2 and c[0]["cmd"] == ["npm", "ci"] and c[1]["cwd"].startswith(os.path.realpath(wt)), [x["cmd"] for x in c])
-check("временный worktree снят", not os.listdir(wt) and "pantheon-outside" not in git(APP, "worktree", "list"))
-check("клон не тронут: HEAD = C3", git(APP, "rev-parse", "HEAD") == C3)
-
-# красные тесты
-accept(C2)
-res = O.auto_pass()
-check("принять C2 (красный): записи нет", len(tests_for(C2)) == 0 and res and res[0].get("code") == 1, res)
-check("красный: тревога со ссылкой на журнал", f"{REPO}@{C2[:12]}" in alerts() and "pantheon outside status" in alerts())
-check("красный: хвост журнала в итоге", "тест упал" in (res[0].get("tail") or "") if res else False, res)
-
-# не берутся: чужой agent_type, старое, нет копии, уже есть tests
-accept(C1[:-1] + ("0" if C1[-1] != "0" else "1"), who="dev-opus")
-accept("e" * 40, age=2 * 86400)
-accept("f" * 40, repo="latark/nowhere")
-todo = O.auto_todo()
-check("не argus и старше суток — не берутся; нет копии — берётся", todo == [("latark/nowhere", "f" * 40)], todo)
-res = O.auto_pass()
-check("нет копии: тревога, записи нет", "нет копии latark/nowhere" in alerts() and not tests_for("f" * 40), res)
-
-# грязное дерево клона на HEAD: копия не годится, worktree на коммите — чистый
-C4 = commit(APP, {"t.py": GREEN + "# c4\n"}, "c4")
-with open(os.path.join(APP, "t.py"), "a") as fh:
-    fh.write("raise SystemExit(0)  # правка без коммита\n")
-accept(C4)
-before = len(calls())
-O.auto_pass()
-c = calls()[before:]
-check("грязный клон: тест идёт во временном worktree", c and c[-1]["cwd"] != os.path.realpath(APP) and len(tests_for(C4)) == 1,
-      [x["cwd"] for x in c])
-git(APP, "checkout", "--", "t.py")
+# красные тесты: записи нет, хвост журнала в итоге
+C4 = commit(APP, {"t.py": RED}, "c4 red")
+res = direct("direct-c4")
+check("красный: код 1, записи нет", res.get("code") == 1 and not tests_for(C4) and res.get("record") is False, res)
+check("красный: хвост журнала в итоге", "тест упал" in (res.get("tail") or ""), res)
 
 # команда портит дерево — записи нет
 C5 = commit(APP, {"t.py": "open('junk.txt', 'w').write('x')\n"}, "c5 пачкает")
-accept(C5)
-res = O.auto_pass()
+res = direct("direct-c5")
 check("команда изменила дерево: записи нет, причина названа",
-      not tests_for(C5) and "изменила HEAD или дерево" in (res[0].get("why") or ""), res)
+      not tests_for(C5) and res.get("code") == 0 and "изменила HEAD или дерево" in (res.get("why") or ""), res)
 os.remove(os.path.join(APP, "junk.txt"))
 
 # пустая команда в .pantheon-verify — записи нет
 C6 = commit(APP, {".pantheon-verify": "true\n"}, "c6 пустая проверка")
-accept(C6)
-res = O.auto_pass()
-check("пустая команда (true): записи нет", not tests_for(C6) and "ничего не проверяет" in (res[0].get("why") or ""), res)
+res = direct("direct-c6")
+check("пустая команда (true): записи нет", not tests_for(C6) and "ничего не проверяет" in (res.get("why") or ""), res)
 C7 = commit(APP, {".pantheon-verify": "heavy python3 t.py\n", "t.py": GREEN}, "c7")
 
 # --- 3. заявка роли из окна -------------------------------------------------------------------------------------
@@ -685,6 +665,36 @@ _dirty_case("отслеживаемый файл под worktrees с правк�
             lambda d: (_touch(d, ".claude/worktrees/t"), git(d, "add", "-f", ".claude/worktrees/t"),
                        git(d, "commit", "-q", "-m", "t"), _touch(d, ".claude/worktrees/t", "y")), False)
 
+# ссылка node_modules (metis-0721): только неотслеживаемая симлинка в корне, apps/*, packages/* — не грязь
+def _nm_link(rel):
+    return lambda d: (os.makedirs(os.path.dirname(os.path.join(d, rel)) or d, exist_ok=True),
+                      os.symlink("/nonexistent-target", os.path.join(d, rel)))
+
+
+_dirty_case("симлинк node_modules в корне — чисто", _nm_link("node_modules"), True)
+_dirty_case("симлинк apps/x/node_modules — чисто", lambda d: (_touch(d, "apps/x/p.json"), git(d, "add", "-A"),
+            git(d, "commit", "-q", "-m", "a"), _nm_link("apps/x/node_modules")(d)), True)
+_dirty_case("симлинк packages/y/node_modules — чисто", lambda d: (_touch(d, "packages/y/p.json"), git(d, "add", "-A"),
+            git(d, "commit", "-q", "-m", "a"), _nm_link("packages/y/node_modules")(d)), True)
+_dirty_case("симлинк в корне и ?? other.txt — грязно", lambda d: (_nm_link("node_modules")(d), _touch(d, "other.txt")), False)
+_dirty_case("папка node_modules с файлом — грязно", lambda d: _touch(d, "node_modules/f"), False)
+_dirty_case("файл node_modules — грязно", lambda d: _touch(d, "node_modules"), False)
+_dirty_case("симлинк с другим именем — грязно", _nm_link("modules"), False)
+_dirty_case("симлинк apps/x/y/node_modules глубже — грязно", _nm_link("apps/x/y/node_modules"), False)
+_dirty_case("симлинк nested/node_modules — грязно", _nm_link("nested/node_modules"), False)
+
+# та же функция без git init: разбор вывода status + проверка «это симлинк»
+_td = tempfile.mkdtemp(prefix="tc-", dir=os.environ.get("TMPDIR"))
+os.symlink("/nonexistent-target", os.path.join(_td, "node_modules"))
+os.makedirs(os.path.join(_td, "apps", "x", "node_modules"))
+os.symlink("/nonexistent-target", os.path.join(_td, "apps", "x", "y"))
+check("tree_clean: симлинк node_modules в корне", P.tree_clean("?? node_modules\n", _td) is True)
+check("tree_clean: папка apps/x/node_modules (не симлинк) — грязно", P.tree_clean("?? apps/x/node_modules\n", _td) is False)
+check("tree_clean: ссылка глубже — грязно", P.tree_clean("?? apps/x/y/node_modules\n", _td) is False)
+check("tree_clean: изменённый отслеживаемый — грязно", P.tree_clean(" M node_modules\n", _td) is False)
+check("tree_clean: None — грязно", P.tree_clean(None, _td) is False)
+shutil.rmtree(_td, ignore_errors=True)
+
 # подложенная ссылка вместо заявки — не читается и не исполняется
 q = os.path.join(CACHE, "athena-x", "outside")
 secret = os.path.join(_ROOT, "secret.json")
@@ -740,7 +750,6 @@ os.environ.pop("CLAUDE_CODE_ENTRYPOINT")
 
 # --- 4. dev-сервер (metis-0614): свой проход, своя копия на коммите, порт из ряда, не больше двух, стоп откуда угодно -
 import contextlib  # noqa: E402
-import fcntl  # noqa: E402
 import io  # noqa: E402
 import signal  # noqa: E402
 import threading  # noqa: E402
@@ -1186,6 +1195,83 @@ check("requests: проход серверов берёт serve, test остаё
 got = O.requests(("test",))
 check("requests: проход тестов берёт test", [x[4] for x in got] == [rid_ts])
 
+# metis-0706: не плодить дубли заявок test; тест в очереди снимается stop; --wait ждёт уже поданную заявку
+def dup_say(window, cwd, *args):
+    os.environ["PANTHEON_TMP"] = os.path.join(CACHE, window, "tmp")
+    old, buf = os.getcwd(), io.StringIO()
+    os.chdir(cwd)
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = O.main(list(args))
+    finally:
+        os.chdir(old)
+        os.environ.pop("PANTHEON_TMP")
+    return rc, buf.getvalue()
+
+
+def req_ids(q):
+    return sorted(n[:-9] for n in os.listdir(q) if n.endswith(".req.json")) if os.path.isdir(q) else []
+
+
+q, rid_a = new_request("athena-x", APP, "test")
+head_now = O.head_state(APP)[0]
+check("дубль: в заявке test записан head", (O.load_result(q, rid_a) or {}).get("sha") == head_now, O.load_result(q, rid_a))
+rc, out = dup_say("athena-x", APP, "test")
+check("дубль (а): тот же head и папка, прежняя в очереди — новой заявки нет, ID прежней в выводе, код 0",
+      rc == 0 and req_ids(q) == [rid_a] and rid_a in out, (rc, out, req_ids(q)))
+rc, out = dup_say("athena-x", APP, "test")
+check("дубль (а): и третья заявка не плодит", rc == 0 and req_ids(q) == [rid_a], (rc, req_ids(q)))
+rc, out = dup_say("athena-x", APP, "test", "--script", "lint")
+ids = req_ids(q)
+check("дубль (а): другой --script — отдельная заявка", rc == 0 and len(ids) == 2 and rid_a in ids, (rc, out, ids))
+for i in ids:
+    if i != rid_a:
+        os.unlink(os.path.join(q, i + ".req.json"))
+        O.save_result(q, i, {"state": "failed", "kind": "test", "why": "проба"})
+# заявка взята проходом и идёт (running, итог свежий) — тоже живая
+os.unlink(os.path.join(q, rid_a + ".req.json"))
+O.save_result(q, rid_a, {"state": "running", "kind": "test", "sha": head_now, "cmd": "x", "dir": APP})
+rc, out = dup_say("athena-x", APP, "test")
+check("дубль (а): прежний тест идёт (running) — новой заявки нет", rc == 0 and req_ids(q) == [] and rid_a in out,
+      (rc, out, req_ids(q)))
+rc, out = say("athena-x", "stop", rid_a, "--wait", "0")
+check("stop идущего теста — по-прежнему отказ «это тесты», код 1", rc == 1 and "это тесты" in out, (rc, out))
+# running старше срока теста — висяк, не блокирует
+O.save_result(q, rid_a, {"state": "running", "kind": "test", "sha": head_now, "cmd": "x", "dir": APP,
+                         "updated": "2020-01-01 00:00"})
+rc, out = dup_say("athena-x", APP, "test")
+ids = req_ids(q)
+check("дубль (а): висящий running старше срока не мешает — заявка новая", rc == 0 and len(ids) == 1 and ids[0] != rid_a,
+      (rc, out, ids))
+rid_b = ids[0]
+# другой head — отдельная заявка (регрессия)
+git(APP, "commit", "--allow-empty", "-q", "-m", "m0706")
+rc, out = dup_say("athena-x", APP, "test")
+ids = req_ids(q)
+check("регрессия: другой head — вторая заявка, обе в очереди", rc == 0 and len(ids) == 2 and rid_b in ids, (rc, out, ids))
+rid_c = next(i for i in ids if i != rid_b)
+check("регрессия: у второй свой head", (O.load_result(q, rid_c) or {}).get("sha") != head_now, O.load_result(q, rid_c))
+# (б) stop снимает тест, пока он в очереди
+rc, out = say("athena-x", "stop", rid_c, "--wait", "0")
+res = O.load_result(q, rid_c) or {}
+check("stop (б): тест в очереди снят — код 0, заявки нет, итог stopped «отменена»",
+      rc == 0 and rid_c not in req_ids(q) and res.get("state") == "stopped" and "отменена" in res.get("why", ""),
+      (rc, out, res))
+run_pass()
+check("stop (б): снятый тест проход не запускает, остальная очередь идёт",
+      (O.load_result(q, rid_c) or {}).get("state") == "stopped"
+      and (O.load_result(q, rid_b) or {}).get("state") in ("done", "failed"), (O.load_result(q, rid_c), O.load_result(q, rid_b)))
+rc, out = say("athena-x", "stop", rid_c, "--wait", "0")
+check("stop (б): повтор — «уже stopped», код 0", rc == 0 and "stopped" in out, (rc, out))
+git(APP, "reset", "-q", "--hard", head_now)
+# (в) --wait с уже поданной заявкой ждёт её итог
+q, rid_w = new_request("athena-x", APP, "test")
+threading.Timer(1.0, run_pass).start()
+rc, out = dup_say("athena-x", APP, "test", "--wait", "30")
+res = O.load_result(q, rid_w) or {}
+check("--wait (в): ждёт итог прежней заявки, новой нет, код — её кода",
+      res.get("state") in O.FINAL and req_ids(q) == [] and rc == O.result_code(res) and rid_w in out, (rc, out, res))
+
 # «стоп» без сервера и заявки: старый убирается, молодой ждёт
 _qa = os.path.join(CACHE, "athena-x", "outside")
 _orph, _young = os.path.join(_qa, "20261101-000000-0a0a0a.stop"), os.path.join(_qa, "20261101-000000-0b0b0b.stop")
@@ -1356,36 +1442,6 @@ check("head_state не заходит в подмодуль: clean-фильтр 
       and _hs[1] is True, _hs)
 subprocess.run(["git", "-C", SUPER, "status", "--porcelain"], capture_output=True)
 check("проба честная: голый git status фильтр подмодуля исполняет", os.path.exists(_smark))
-
-# 7. тесты после «принять»: worktree роли, чей .git-файл ведёт не в <клон>/.git/worktrees/<имя>, не берётся — его git
-# исполнил бы конфиг, который пишет роль; берётся временный worktree прохода
-_S = C1   # не HEAD клона: иначе find_checkout возьмёт сам клон
-WT7 = os.path.join(_wtd, "wt7")
-git(APP, "worktree", "add", "-q", "--detach", WT7, _S)
-_fc = O.find_checkout(REPO, _S)
-check("find_checkout: настоящий worktree клона реестра — Repo с gitdir клона",
-      isinstance(_fc[0], O.Repo) and _fc[0].clone == os.path.realpath(APP)
-      and _fc[0].gitdir.startswith(os.path.join(os.path.realpath(APP), ".git", "worktrees") + "/")
-      and isinstance(_fc[1], O.Repo), _fc)
-_EG = os.path.join(_ROOT, "evil-gitdir", "wt7")
-_real_gd = open(os.path.join(WT7, ".git")).read().split(":", 1)[1].strip()
-shutil.copytree(_real_gd, _EG)
-with open(os.path.join(_EG, "commondir"), "w") as fh:
-    fh.write(os.path.join(os.path.realpath(APP), ".git") + "\n")
-_saved7 = open(os.path.join(WT7, ".git")).read()
-with open(os.path.join(WT7, ".git"), "w") as fh:
-    fh.write(f"gitdir: {_EG}\n")
-check("проба честная: git по подложенному gitdir видит тот же HEAD и чистое дерево",
-      O.head_state(os.path.realpath(WT7)) == (_S, True), O.head_state(os.path.realpath(WT7)))
-_fc = O.find_checkout(REPO, _S)
-check("find_checkout: .git-файл worktree ведёт в gitdir роли — копия не берётся, только клон для временного worktree",
-      _fc[0] is None and _fc[1] == os.path.realpath(APP), _fc)
-with open(os.path.join(WT7, ".git"), "w") as fh:
-    fh.write(_saved7)
-git(APP, "worktree", "remove", "--force", WT7)
-shutil.rmtree(WT7, ignore_errors=True)
-shutil.rmtree(os.path.dirname(_EG), ignore_errors=True)
-git(APP, "worktree", "prune")
 
 for _p in (FAKE1, EVILB):
     shutil.rmtree(_p, ignore_errors=True)
@@ -1761,109 +1817,14 @@ got = json.loads(r.stdout) if r.returncode == 0 else None
 check("guard: `pantheon outside serve` — не dev-сервер (pnpm dev — да)", got and got[0] is None and got[1], r.stdout + r.stderr)
 check("guard: `pantheon outside test` — не привилегированная команда", got and got[2] == [], got)
 
-# --- 5b. заявки раньше автопрогонов (metis-0716) -------------------------------------------------------------------
-class Sim:
-    """Подмена очереди и прогонов: порядок событий в журнале ev; hook срабатывает в каждом автопрогоне (заявка
-    «подана во время него»)."""
-
-    def __init__(self, todo, queue=(), hook=None):
-        self.todo, self.queue, self.hook, self.ev = list(todo), list(queue), hook, []
-
-    def run(self, runner):
-        names = ("requests", "handle", "run_auto", "auto_todo", "auto_due", "waiting_keys", "_queued_ids")
-        saved = {n: getattr(O, n) for n in names}
-
-        def requests(kinds=(), limit=None, taken=None):
-            q, self.queue = self.queue[:limit], self.queue[limit:] if limit else []
-            return [("", "test", "qd", "w", r, {}) for r in q]
-
-        def run_auto(repo, sha):
-            self.ev.append("auto:" + sha[0])
-            self.todo.remove((repo, sha))
-            if self.hook:
-                self.hook(self)
-            return {"state": "done"}
-
-        O.requests, O.run_auto = requests, run_auto
-        O.handle = lambda qdir, window, rid, req: self.ev.append("req:" + rid)
-        O.auto_todo = lambda recs=None, t=None: list(self.todo)
-        O.auto_due = lambda: bool(self.todo)
-        O.waiting_keys = lambda: {("o/r", "z" * 40)}
-        O._queued_ids = lambda kinds=(): [(r, "test") for r in self.queue]
-        try:
-            runner()
-        finally:
-            for n, f in saved.items():
-                setattr(O, n, f)
-        return self.ev
-
-
-def old_order():
-    """Порядок до metis-0716: очередь читается раз, затем все автопрогоны подряд."""
-    for _t, _k, qdir, window, rid, req in O.requests(("test",)):
-        O.handle(qdir, window, rid, req)
-    if O.auto_due():
-        O.auto_pass()
-
-
-def push_r1(s):
-    s.queue.append("R1")
-
-
-T3 = [("o/r", c * 40) for c in "abc"]
-sim = Sim(T3, hook=push_r1)
-sim.run(O.run_test_queue)
-check("заявка, поданная во время автопрогона, идёт следующей, остальные автопрогоны ждут",
-      sim.ev == ["auto:a", "req:R1"] and len(sim.todo) == 2, sim.ev)
-sim = Sim(T3, hook=push_r1)
-sim.run(old_order)
-check("мутант: старый порядок — заявка уходит за все автопрогоны (тест выше красный)",
-      sim.ev != ["auto:a", "req:R1"], sim.ev)
-sim = Sim(T3, queue=["R0"])
-sim.run(O.run_test_queue)
-check("заявка в очереди с начала: сначала она, потом один автопрогон", sim.ev == ["req:R0", "auto:a"], sim.ev)
-sim = Sim(T3, queue=["R0"])
-sim.run(old_order)
-check("мутант: старый порядок при заявке — три автопрогона за заход", sim.ev == ["req:R0", "auto:a", "auto:b", "auto:c"],
-      sim.ev)
-sim = Sim(T3)
-sim.run(O.run_test_queue)
-check("заявок нет: автопрогоны идут подряд, очередь читается между ними", sim.ev == ["auto:a", "auto:b", "auto:c"], sim.ev)
-
-# ждущая заявка на тот же (repo, sha): автопрогон не дублируется; пропущенное не «просмотрено»
-HEADA = git(APP, "rev-parse", "HEAD")
-rc, q, rid = role_request("athena-x", APP, "test")
-time.sleep(1.1)   # id заявки начинается со времени: role_request берёт последнюю по имени
-rc2, q2, rid2 = role_request("athena-x", APP, "test", "--script", "lint")
-keys = O.waiting_keys()
-check("ждущая заявка test даёт ключ (repo, HEAD), заявка не снята; с --script ключа нет",
-      keys == {(REPO.lower(), HEADA)} and os.path.isfile(os.path.join(q, rid + ".req.json")), (keys, HEADA))
-ran = []
-_ra, _at = O.run_auto, O.auto_todo
-O.run_auto = lambda repo, sha: ran.append((repo, sha)) or {"state": "done"}
-O.auto_todo = lambda recs=None, t=None: [(REPO, HEADA), (REPO, "b" * 40)]
-mt = P.read_json(O.root("auto.json"), {}).get("mtime", "нет")
-O.auto_pass(skip=keys)
-O.run_auto, O.auto_todo = _ra, _at
-check("автопрогон на (repo, sha) ждущей заявки пропущен, соседний взят", ran == [(REPO, "b" * 40)], ran)
-check("пропущенное не помечено просмотренным (mtime журнала в auto.json не менялся)",
-      P.read_json(O.root("auto.json"), {}).get("mtime", "нет") == mt)
-for r_, d_ in ((rid, q), (rid2, q2)):
-    os.remove(os.path.join(d_, r_ + ".req.json"))
-check("ключей ждущих заявок больше нет", O.waiting_keys() == set())
-
-# автопрогон на ключе ждущей заявки не идёт (мутант skip=() в run_test_queue краснит этот тест)
-sim = Sim([("o/r", "z" * 40), ("o/r", "a" * 40)])
-sim.run(O.run_test_queue)
-check("run_test_queue: ключ ждущей заявки пропущен (skip=waiting_keys), соседний взят",
-      sim.ev == ["auto:a"] and ("o/r", "z" * 40) in sim.todo, sim.ev)
-
+# --- 5b. заявки по одной (metis-0716); автопрогонов нет (03.11) ---------------------------------------------------
 # заявки по одной: убитый заход не теряет остальные (2а), неснимаемая заявка не крутит заход
 _h = O.handle
 got = []
 rc, q, r1 = role_request("athena-x", APP, "test")
 time.sleep(1.1)   # время заявки — с точностью до секунды: вторая позже первой
-rc, q, r2 = role_request("athena-x", APP, "test")
+# metis-0706: такой же test (тот же head и папка) отдал бы второй заявке id первой — вторая нужна отдельная, с другим --script
+rc, q, r2 = role_request("athena-x", APP, "test", "--script", "lint")
 
 
 def kill_after_first(qdir, window, rid, req):
@@ -1923,10 +1884,8 @@ mkreq(qa, "20261102-130003-aaaaac", EARLY)
 mkreq(qb, "20261102-130004-bbbbbb", EARLY)
 _h, _got = O.handle, []
 O.handle = lambda qdir, window, rid, req: _got.append(rid[-6:])
-_ad = O.auto_due
-O.auto_due = lambda: False
 O.run_test_queue()
-O.handle, O.auto_due = _h, _ad
+O.handle = _h
 check("run_test_queue: круг между окнами сквозь заходы limit=1 — a1, b, a2, a3",
       _got == ["aaaaaa", "bbbbbb", "aaaaab", "aaaaac"], _got)
 
@@ -1953,12 +1912,12 @@ P.write_json(O.root("runs", "20261102-101010-a1a1a1.json"), {"id": "20261102-101
 put_result("20261102-101010-eeeeee", {"state": "queued", "kind": "serve"}, age=900)
 put_result("20261102-101010-ffffff", {"state": "running", "kind": "serve"}, age=900)
 P.write_json(O.root("runs", "20261102-101010-a0a0a0.json"), {"id": "20261102-101010-a0a0a0", "state": "running", "kind": "test"})
-_sv = (O._queued_ids, O.auto_due, O._stale)
-O._queued_ids, O.auto_due, O._stale = (lambda kinds=(): []), (lambda: False), (lambda t=None: [])
+_sv = (O._queued_ids, O.overdue_accepts, O._stale)
+O._queued_ids, O.overdue_accepts, O._stale = (lambda kinds=(): []), (lambda *a, **k: []), (lambda t=None: [])
 check("тик: одни итоги-зомби (queued без заявки, running в runs/) — дело проходу тестов", O.pending_test() is True)
 with P.lock("outside-run", block=False):
     check("тик: заход жив (замок взят) — зомби не повод для pending_test", O.pending_test() is False)
-O._queued_ids, O.auto_due, O._stale = _sv
+O._queued_ids, O.overdue_accepts, O._stale = _sv
 with P.lock("outside-run", block=False):
     check("тик: заход жив (замок взят) — зомби не повод", not O._zombies())
 O.recover_results()
@@ -1979,7 +1938,7 @@ check("serve (queued и running) проход тестов не трогает",
       and st["ffffff"].get("state") == "running", (st["eeeeee"], st["ffffff"]))
 check("старая запись runs/ без qdir: итог в очереди окна тоже стал failed (status не врёт running)",
       st["a1a1a1"].get("state") == "failed" and "прерван" in st["a1a1a1"].get("why", ""), st["a1a1a1"])
-check("автопрогон running только в runs/ → failed",
+check("running только в runs/ (без итога в очереди) → failed",
       P.read_json(O.root("runs", "20261102-101010-a0a0a0.json"), {}).get("state") == "failed")
 O.save_result(qa, "20261102-101010-dddddd", {"state": "running", "kind": "test"})
 check("cmd_run (замок свободен) чинит зомби сам",
@@ -1992,71 +1951,429 @@ os.remove(O.root("runs", "20261102-101010-a0a0a0.json"))
 os.remove(O.root("runs", "20261102-101010-dddddd.json"))
 os.remove(O.root("runs", "20261102-101010-a1a1a1.json"))
 
-# «принять» раньше кэша PR: журнал не считается просмотренным, пока кэш не обновили (Б1, argus 2-й круг)
+# сторож (metis-0723): running дольше срока при живом заходе — снять; queued с заявкой дольше срока — одна тревога
+_alerts = []
+_pa = P.alert
+P.alert = lambda text, who="pantheon": _alerts.append(text)
+HOLD = ("import fcntl,os,subprocess,sys,time;"
+        "fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_APPEND);fcntl.flock(fd,fcntl.LOCK_EX);"
+        "k=subprocess.Popen(['sleep','300'],start_new_session=True,stdin=-3,stdout=-3,stderr=-3);print(k.pid,flush=True);time.sleep(300)")
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    time.sleep(0.05)
+    try:
+        return os.waitpid(pid, os.WNOHANG) == (0, 0)
+    except ChildProcessError:
+        return True
+
+
+def holder_start():
+    os.makedirs(P.path("locks"), exist_ok=True)
+    h = subprocess.Popen([sys.executable, "-I", "-c", HOLD, P.path("locks", "outside-run.lock")],
+                         stdout=subprocess.PIPE, text=True)
+    return h, int(h.stdout.readline())
+
+
+def age_runs(rid, age):
+    fp = O.root("runs", rid + ".json")
+    os.utime(fp, (time.time() - age, time.time() - age))
+
+
+WQ, WR, WF, WL = ("20261102-111111-" + x for x in ("aaaaaa", "bbbbbb", "cccccc", "dddddd"))
+put_result(WQ, {"state": "queued", "kind": "test"}, age=O.WATCH_QUEUED + 600)
+with open(os.path.join(qa, WQ + ".req.json"), "w") as fh:
+    fh.write("{}")
+put_result(WF, {"state": "queued", "kind": "test"}, age=O.WATCH_QUEUED - 600)    # срок не прошёл
+with open(os.path.join(qa, WF + ".req.json"), "w") as fh:
+    fh.write("{}")
+put_result(WL, {"state": "queued", "kind": "test"}, age=O.WATCH_QUEUED + 600)    # без заявки — не дело сторожа
+check("сторож: queued с заявкой дольше срока — due, моложе срока и без заявки — нет",
+      O._watch_due() == [("queued", qa, WQ)], O._watch_due())
+check("сторож: queued — одна тревога, итог не тронут",
+      O.watchdog() == 1 and len(_alerts) == 1 and WQ in _alerts[0] and O.load_result(qa, WQ).get("state") == "queued", _alerts)
+check("сторож: после тревоги queued не повод тику", not O._watch_due())
+check("сторож: повторные проходы (в том числе cmd_run) тревоги не повторяют",
+      O.watchdog() == 0 and run_pass() == 0 and len(_alerts) == 1, _alerts)
+O.save_result(qa, WR, {"state": "running", "kind": "test", "sha": "a" * 40})
+_h0 = O._run_holder
+h, kid = holder_start()
+O._run_holder = lambda: h.pid
+O.watchdog()
+check("сторож: running в пределах срока при живом заходе — не тронут",
+      O.load_result(qa, WR).get("state") == "running" and alive(h.pid) and alive(kid) and len(_alerts) == 1)
+age_runs(WR, O.WATCH_RUNNING + 60)
+check("сторож: running дольше срока — due", O._watch_due() == [("running", qa, WR)], O._watch_due())
+n = O.watchdog()
+h.wait(timeout=10)
+rs = O.load_result(qa, WR)
+check("сторож: running дольше срока при живом заходе → failed «проверка заявок: дольше», заход и его группа убиты",
+      n == 1 and rs.get("state") == "failed" and "проверка заявок: дольше" in rs.get("why", "") and not alive(h.pid) and not alive(kid)
+      and set(rs) == {"id", "kind", "state", "why", "updated"}, (n, rs))
+check("сторож: на снятие одна тревога, status видит итог", len(_alerts) == 2 and WR in _alerts[1]
+      and P.read_json(O.root("runs", WR + ".json"), {}).get("state") == "failed", _alerts)
+O.save_result(qa, WR, {"state": "running", "kind": "test"})
+age_runs(WR, O.WATCH_RUNNING + 60)
+O.watchdog()
+check("сторож: захода нет (замок свободен) — running не снимает, его чинит recover_results",
+      O.load_result(qa, WR).get("state") == "running" and len(_alerts) == 2)
+h, kid = holder_start()
+O._run_holder = lambda: None
+O.watchdog()
+O.watchdog()
+check("сторож: замок держит не определить — тревога раз, процесс не тронут, итог тот же",
+      len(_alerts) == 3 and alive(h.pid) and O.load_result(qa, WR).get("state") == "running", _alerts)
+O._run_holder = _h0
+if MAC:
+    check("_run_holder: lsof находит держателя замка", O._run_holder() == h.pid, O._run_holder())
+h.kill()
+h.wait()
+os.kill(kid, 9)
+P.alert = _pa
+for x in (WQ, WR, WF, WL):
+    for ext in ("result.json", "req.json"):
+        if os.path.exists(os.path.join(qa, f"{x}.{ext}")):
+            os.remove(os.path.join(qa, f"{x}.{ext}"))
+    for ext in ("json", "alerted"):
+        if os.path.exists(O.root("runs", f"{x}.{ext}")):
+            os.remove(O.root("runs", f"{x}.{ext}"))
+
+
+# --- тревога дежурному: «принять» argus без tests дольше часа; автопрогонов нет (решение владельца 03.11) ---------
 _cp = os.path.join(STATE, "autoclose-prs.json")
 _saved = open(_cp).read() if os.path.exists(_cp) else None
-LATE = "4" * 40
-accept(LATE, repo="latark/hh-late")
-c = json.load(open(_cp))
-c["open_prs"]["latark/hh-late"] = []          # кэш, снятый до коммита: head в нём ещё нет
-c["fetched"] = time.time() - 400
-json.dump(c, open(_cp, "w"))
-O.auto_pass()
-check("head «принять» ещё нет в кэше: автопрогона нет, журнал просмотрен (mtime записан)",
-      not [k for k in O.auto_todo() if k[0] == "latark/hh-late"] and not O.auto_due())
-c["open_prs"]["latark/hh-late"] = [{"number": 7, "head": LATE}]
-c["fetched"] = time.time()                    # кэш обновили, head в нём
-json.dump(c, open(_cp, "w"))
-check("кэш обновили с этим head: тик видит дело (pending_test), автопрогон в списке",
-      O.pending_test() and ("latark/hh-late", LATE) in O.auto_todo())
-ran = []
-_ra = O.run_auto
-O.run_auto = lambda repo, sha: ran.append((repo, sha)) or {"state": "done"}
-O.auto_pass()
-O.run_auto = _ra
-check("следующий проход запускает автопрогон на этот head", ("latark/hh-late", LATE) in ran, ran)
-check("после этого дела нет", not O.auto_due())
-# «принять» на закрытый PR (кэш свежее «принять», head нет) тик не будит при каждом обновлении кэша
-OLD2 = "5" * 40
-accept(OLD2, repo="latark/hh-gone", age=3600)
-c = json.load(open(_cp))
-c["open_prs"]["latark/hh-gone"] = []
-c["fetched"] = time.time()
-json.dump(c, open(_cp, "w"))
-O.auto_pass()
-c["fetched"] = time.time() + 1
-json.dump(c, open(_cp, "w"))
-check("head нет в свежем кэше (PR закрыт): обновление кэша проход не будит", not O.auto_due())
+if os.path.exists(_cp):
+    os.remove(_cp)
+HEADA = commit(APP, {"t.py": GREEN + "# al-run\n"}, "al-run")   # коммит без записи tests
+accept(HEADA, repo="latark/al-run", age=7200)
+n0, pend0 = len(calls()), O.pending_test()
+run_pass()
+O.run_test_queue()
+check("проход без заявки тесты не запускает, даже при «принять» старше часа на открытом head: прогонов нет, записи нет",
+      len(calls()) == n0 and not tests_for(HEADA), (len(calls()) - n0, tests_for(HEADA)))
+for _n in ("auto_pass", "auto_todo", "run_auto", "auto_due", "early_todo", "heads_due", "find_checkout", "waiting_keys"):
+    check(f"автопрогонов нет: O.{_n} удалена", not hasattr(O, _n))
+a_ = P.read_json(O.root("auto.json"), {})
+check("«принять» старше часа + открытый head → дело для тика и одна тревога с repo@sha12 и номером PR",
+      pend0 and O.pending_test() is False and a_.get("alerted", {}).get(f"latark/al-run@{HEADA}")
+      and alerts().count(f"latark/al-run@{HEADA[:12]}") == 1 and "(PR #100)" in alerts(), (pend0, alerts()[-300:]))
+run_pass()
+run_pass()
+check("повторные проходы: тревога на (repo, sha) одна", alerts().count(f"latark/al-run@{HEADA[:12]}") == 1, alerts()[-400:])
+check("после тревоги тик не будится", not O.pending_test())
+
+AL = {c: c * 40 for c in "abcdefg"}
+accept(AL["a"], repo="latark/al-new", age=1800)
+check("«принять» 30 мин назад (<1 ч): ни дела, ни тревоги",
+      O.overdue_accepts() == [] and O.alert_overdue() == 0 and AL["a"][:12] not in alerts() and not O.pending_test())
+accept(AL["b"], repo="latark/al-tests", age=7200)
+with open(RECORDS, "a") as fh:
+    fh.write(json.dumps({"v": 1, "kind": "tests", "repo": ["latark/al-tests"], "pr": None, "sha": AL["b"],
+                         "by": {"agent_type": "pantheon-outside", "agent_id": "", "session_id": "", "request": "x"},
+                         "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}) + "\n")
+accept(AL["c"], repo="latark/al-dev", who="dev-opus", age=7200)
+accept(AL["d"], repo="latark/al-old", age=2 * 86400)
+check("есть запись tests, «принять» не от argus, старше суток: тревоги нет",
+      O.overdue_accepts() == [] and O.alert_overdue() == 0 and not any(AL[c][:12] in alerts() for c in "bcd"))
+accept(AL["e"], repo="latark/al-moved", age=7200)
+os.remove(_cp)
+open_pr("latark/al-moved", AL["f"])      # PR ушёл вперёд: «принять» было на другой head
+check("head уже не открыт у PR: тревоги нет", O.overdue_accepts() == [] and O.alert_overdue() == 0)
+os.remove(_cp)
+accept(AL["g"], repo="latark/al-nocache", age=7200)
+os.remove(_cp)
+check("кэша открытых PR нет: журнал не читается, тревоги нет", O.overdue_accepts() == [] and not O.pending_test())
+accept(AL["g"], repo="latark/al-stale", age=7200)
+c_ = json.load(open(_cp))
+c_["fetched"] = time.time() - 2 * 3600
+json.dump(c_, open(_cp, "w"))
+check("кэш старше часа (gh не ответил): тревоги нет", O.overdue_accepts() == [])
+c_["fetched"] = time.time()
+c_["errors"] = {"latark/al-stale": "gh не ответил"}
+json.dump(c_, open(_cp, "w"))
+check("gh не ответил по репозиторию: тревоги нет", O.overdue_accepts() == [])
 if _saved is not None:
     with open(_cp, "w") as fh:
         fh.write(_saved)
-else:
+elif os.path.exists(_cp):
     os.remove(_cp)
 
-# автопрогон только на head открытого PR
+# --- 5c. перед стартом заявки test: устаревший head и дубли (metis-0726) -------------------------------------------
 _cp = os.path.join(STATE, "autoclose-prs.json")
 _saved = open(_cp).read() if os.path.exists(_cp) else None
-OLDSHA, NEWSHA = "1" * 40, "2" * 40
-accept(OLDSHA, repo="latark/hh-old")
-accept(NEWSHA, repo="latark/hh-new")
+qa = os.path.join(CACHE, "athena-x", "outside")
+HEADA = git(APP, "rev-parse", "HEAD")
+
+
+def put_cache(old_heads=None, prs=None, fetched=None, errors=None):
+    with open(_cp, "w") as fh:
+        json.dump({"fetched": time.time() if fetched is None else fetched, "open_prs": prs or {},
+                   "old_heads": old_heads or {}, "errors": errors or {}}, fh)
+
+
+def one_request(window=None, qd=None, rid=None, script=None):
+    """Заявка test на APP с id по счётчику (role_request берёт последнюю по имени, а время — секундами)."""
+    one_request.n += 1
+    rid = rid or f"20261103-0{one_request.n:05d}-c0c0c0"
+    req = {"v": 1, "id": rid, "kind": "test", "dir": APP, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    if script:
+        req["script"] = script
+    with open(os.path.join(qd or qa, rid + ".req.json"), "w") as fh:
+        json.dump(req, fh)
+    return rid
+
+
+one_request.n = 0
+NEWH = "9" * 40
+put_cache(old_heads={"Latark/App": {HEADA: 5}}, prs={"Latark/App": [{"number": 5, "head": NEWH}]})
+n0 = len(calls())
+r_st = one_request()
+run_pass()
+res = O.load_result(qa, r_st) or {}
+check("0726: HEAD папки — бывший head открытого PR, у PR другой head → failed «head устарел», прогона нет",
+      res.get("state") == "failed" and "head устарел, подай на текущий" in res.get("why", "")
+      and NEWH[:12] in res.get("why", "") and len(calls()) == n0, (res, len(calls()) - n0))
+r_lint = one_request(script="lint")
+run_pass()
+check("0726: --script на бывшем head идёт (проверка для себя, не для шлюза)",
+      (O.load_result(qa, r_lint) or {}).get("state") == "done" and len(calls()) == n0 + 1)
+for label, kw in (("кэша нет", None), ("кэш старше часа", {"fetched": time.time() - 2 * 3600}),
+                  ("gh не ответил по репозиторию", {"errors": {"latark/app": "x"}}),
+                  ("SHA не бывший head (коммит не пушили)", {"old": {"latark/app": {"8" * 40: 5}}}),
+                  ("PR закрыт (в open_prs его нет)", {"prs": {"latark/app": [{"number": 6, "head": NEWH}]}})):
+    if kw is None:
+        os.remove(_cp)
+    else:
+        put_cache(old_heads=kw.get("old", {"latark/app": {HEADA: 5}}),
+                  prs=kw.get("prs", {"latark/app": [{"number": 5, "head": NEWH}]}),
+                  fetched=kw.get("fetched"), errors=kw.get("errors"))
+    n1 = len(calls())
+    r_ok = one_request()
+    run_pass()
+    res = O.load_result(qa, r_ok) or {}
+    check(f"0726: {label} — прогон как раньше", res.get("state") == "done" and len(calls()) == n1 + 1, res)
+
+# Д3: SHA — бывший head PR #5 и при этом head другого открытого PR (#7) в том же кэше — не устарел, прогон
+put_cache(old_heads={"Latark/App": {HEADA: 5}},
+          prs={"Latark/App": [{"number": 5, "head": NEWH}, {"number": 7, "head": HEADA.upper()}]})
+n1 = len(calls())
+r_ok = one_request()
+run_pass()
+res = O.load_result(qa, r_ok) or {}
+check("0726: бывший head #5 стал head #7 — не устарел, прогон", res.get("state") == "done" and len(calls()) == n1 + 1, res)
+# force-push назад: PR #5 снова на старом head, old_heads его ещё помнит
+put_cache(old_heads={"Latark/App": {HEADA: 5}}, prs={"Latark/App": [{"number": 5, "head": HEADA}]})
+n1 = len(calls())
+r_ok = one_request()
+run_pass()
+res = O.load_result(qa, r_ok) or {}
+check("0726: force-push назад — старый head снова текущий, прогон", res.get("state") == "done" and len(calls()) == n1 + 1, res)
+put_cache(old_heads={"Latark/App": {HEADA: 5}},
+          prs={"Latark/App": [{"number": 5, "head": NEWH}, {"number": 7, "head": HEADA}]})
+check("0726: stale_head напрямую: head другого открытого PR — None", O.stale_head(APP, HEADA) is None)
+
+# дубли: три заявки на одну папку и одна с --script — идёт первая и lint, две другие failed «дубль <первая>»
 os.remove(_cp)
-open_pr("latark/hh-new", NEWSHA)
-open_pr("latark/hh-old", "3" * 40)   # PR ушёл вперёд: head уже другой
-todo = [k for k in O.auto_todo() if k[0].startswith("latark/hh-")]
-check("автопрогон: «принять» на старом head PR пропущено, на текущем — берётся", todo == [("latark/hh-new", NEWSHA)], todo)
-c = json.load(open(_cp))
-c["errors"] = {"latark/hh-new": "gh не ответил"}
-json.dump(c, open(_cp, "w"))
-check("gh не ответил по репозиторию: автопрогон пропущен", [k for k in O.auto_todo() if k[0] == "latark/hh-new"] == [])
-c["errors"] = {}
-c["fetched"] = time.time() - 2 * 3600
-json.dump(c, open(_cp, "w"))
-check("кэш PR старше часа: автопрогонов нет", [k for k in O.auto_todo() if k[0].startswith("latark/hh-")] == [])
-os.remove(_cp)
-check("кэша PR нет: автопрогонов нет", O.auto_todo() == [])
+n1 = len(calls())
+r_d = [one_request() for _ in range(3)]
+r_dl = one_request(script="lint")
+qk = os.path.join(CACHE, "metis-y", "outside")
+r_other = one_request(qd=qk)   # чужое окно: папка не его — отказ своим путём, не дубль
+run_pass()
+st = {r: O.load_result(qa, r) or {} for r in r_d + [r_dl]}
+check("0726: дубли на ту же папку — в работу одна (первая), прогон один",
+      st[r_d[0]].get("state") == "done" and st[r_d[0]].get("code") == 0 and len(calls()) == n1 + 2,
+      (st[r_d[0]], len(calls()) - n1))
+check("0726: остальные — failed «дубль <id первой>», с командой итога",
+      all(st[r].get("state") == "failed" and st[r].get("why", "").startswith(f"дубль {r_d[0]}")
+          and f"итог у заявки {r_d[0]} в окне athena-x" in st[r]["why"] and "outside status" not in st[r]["why"]
+          for r in r_d[1:]), [st[r] for r in r_d[1:]])
+check("0726: снятый дубль и --wait: код 75 («итога ещё нет»), а не 1",
+      all(O.result_code(st[r]) == 75 for r in r_d[1:]) and O.result_code({"state": "failed", "why": "x"}) == 1,
+      [O.result_code(st[r]) for r in r_d[1:]])
+check("0726: заявка с другим --script — не дубль, идёт", st[r_dl].get("state") == "done", st[r_dl])
+check("0726: заявка чужого окна на ту же папку — не дубль (отказ «не из папок направления»)",
+      "не из папок направления" in (O.load_result(qk, r_other) or {}).get("why", ""))
+# другая папка того же репозитория на том же HEAD (worktree) — тоже дубль
+WT2 = os.path.join(APP, "..", "app-wt2")
+git(APP, "worktree", "add", "-q", "--detach", os.path.realpath(WT2), HEADA)
+P.write_json(os.path.join(STATE, "domains.json"),
+             {"domains": {"athena-x": ["~/projects/app", "~/projects/app-wt2"], "metis-y": ["~/projects/other"]}})
+r_a = one_request()
+one_request.n += 1
+r_b = f"20261103-0{one_request.n:05d}-c0c0c0"
+with open(os.path.join(qa, r_b + ".req.json"), "w") as fh:
+    json.dump({"v": 1, "id": r_b, "kind": "test", "dir": os.path.realpath(WT2),
+               "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, fh)
+n1 = len(calls())
+run_pass()
+check("0726: worktree того же репозитория на том же HEAD — дубль",
+      (O.load_result(qa, r_b) or {}).get("why", "").startswith(f"дубль {r_a}") and len(calls()) == n1 + 1,
+      (O.load_result(qa, r_b), len(calls()) - n1))
+# Д1: worktree того же репозитория на другом HEAD — не дубль
+WT2R = os.path.realpath(WT2)
+
+
+def req_dir(d):
+    one_request.n += 1
+    rid = f"20261103-0{one_request.n:05d}-c0c0c0"
+    with open(os.path.join(qa, rid + ".req.json"), "w") as fh:
+        json.dump({"v": 1, "id": rid, "kind": "test", "dir": d, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, fh)
+    return rid
+
+
+git(WT2R, "commit", "-q", "--allow-empty", "-m", "wt2 свой коммит")
+r_a = req_dir(APP)
+r_b = req_dir(WT2R)
+n1 = len(calls())
+run_pass()
+rb = O.load_result(qa, r_b) or {}
+check("0726: worktree того же репозитория на другом HEAD — не дубль, идёт своим прогоном",
+      rb.get("state") == "done" and not rb.get("dup") and len(calls()) == n1 + 2, (rb, len(calls()) - n1))
+# тот же HEAD, но дерево грязное — не дубль (итог — «дерево не чистое», а не «дубль»)
+git(WT2R, "reset", "-q", "--hard", HEADA)
+with open(os.path.join(WT2R, "dirty.txt"), "w") as fh:
+    fh.write("x")
+r_a = req_dir(APP)
+r_b = req_dir(WT2R)
+run_pass()
+rb = O.load_result(qa, r_b) or {}
+check("0726: тот же HEAD, дерево грязное — не дубль",
+      not rb.get("dup") and not rb.get("why", "").startswith("дубль") and "не чистое" in rb.get("why", ""), rb)
+os.remove(os.path.join(WT2R, "dirty.txt"))
+git(APP, "worktree", "remove", "--force", os.path.realpath(WT2))
+P.write_json(os.path.join(STATE, "domains.json"),
+             {"domains": {"athena-x": ["~/projects/app"], "metis-y": ["~/projects/other"]}})
+
+# --- 5d. запись по дереву (metis-0732) ------------------------------------------------
+KIT = os.path.join(HOME, "projects", "kit")
+os.makedirs(KIT)
+git(KIT, "init", "-q", "-b", "main")
+git(KIT, "remote", "add", "origin", "git@github.com:latark/kit.git")
+os.makedirs(os.path.join(CACHE, "metis-k", "tmp"))
+P.write_json(os.path.join(STATE, "domains.json"),
+             {"domains": {"athena-x": ["~/projects/app"], "metis-y": ["~/projects/other"], "metis-k": ["~/projects/kit"]}})
+M = P.merge_mod()
+M.FULL_TESTS["kit"] = "heavy python3 t.py"   # полный набор этого репозитория для теста (у agent-kit — run-tests.py)
+K1 = commit(KIT, {"t.py": GREEN, ".pantheon-verify": "heavy python3 t.py\n"}, "k1")
+qkit = os.path.join(CACHE, "metis-k", "outside")
+
+
+def kit_request():
+    one_request.n += 1
+    rid = f"20261103-1{one_request.n:05d}-c0c0c0"
+    os.makedirs(qkit, exist_ok=True)
+    with open(os.path.join(qkit, rid + ".req.json"), "w") as fh:
+        json.dump({"v": 1, "id": rid, "kind": "test", "dir": KIT, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, fh)
+    run_pass()
+    return O.load_result(qkit, rid) or {}
+
+
+if os.path.exists(_cp):
+    os.remove(_cp)
+n1 = len(calls())
+res = kit_request()
+rk1 = tests_for(K1)
+check("0732: прогон полного набора — запись с деревом и env (python, macOS)",
+      res.get("record") and len(calls()) == n1 + 1 and rk1 and rk1[-1].get("tree") == git(KIT, "rev-parse", f"{K1}^{{tree}}")
+      and rk1[-1]["env"].get("python") and "os" in rk1[-1]["env"], (res, rk1))
+git(KIT, "-c", "user.name=t", "commit", "-q", "--amend", "-m", "k1 другое сообщение")
+K2 = git(KIT, "rev-parse", "HEAD")
+n1 = len(calls())
+res = kit_request()
+rk2 = tests_for(K2)
+check("0732: новый head с тем же деревом — запись без прогона, отметка by_tree, шлюз её читает",
+      K2 != K1 and res.get("state") == "done" and res.get("code") == 0 and res.get("record")
+      and res.get("by_tree") == K1 and len(calls()) == n1 and len(rk2) == 1 and rk2[0].get("by_tree") == K1
+      and rk2[0]["by"]["agent_type"] == "pantheon-outside" and rk2[0]["pr"] is None
+      and rk2[0]["cmd"] == rk1[-1]["cmd"] and rk2[0]["tree"] == rk1[-1]["tree"], (res, rk2, len(calls()) - n1))
+n1 = len(calls())
+res = kit_request()
+check("0732: тот же head ещё раз — запись уже есть, без прогона и без новой строки",
+      res.get("state") == "done" and "уже есть" in res.get("note", "") and len(calls()) == n1 and len(tests_for(K2)) == 1,
+      res)
+K3 = commit(KIT, {"t.py": GREEN + "# k3\n"}, "k3")
+n1 = len(calls())
+res = kit_request()
+check("0732: другое дерево — прогон", res.get("record") and len(calls()) == n1 + 1 and not res.get("by_tree"), res)
+K4 = commit(KIT, {"t.py": RED}, "k4 red")
+res = kit_request()
+git(KIT, "-c", "user.name=t", "commit", "-q", "--amend", "-m", "k4 другое сообщение")
+K5 = git(KIT, "rev-parse", "HEAD")
+n1 = len(calls())
+res = kit_request()
+check("0732: красный прогон не переносится — тот же tree после красного идёт заново",
+      res.get("code") == 1 and not res.get("record") and len(calls()) == n1 + 1 and not tests_for(K5), res)
+# поле tree записи сверяется с git: запись другого коммита с чужим tree (подложено, сбой) не переносится
+with open(RECORDS, "a") as fh:
+    fh.write(json.dumps({"v": 1, "kind": "tests", "repo": ["latark/kit"], "pr": None, "sha": K3,
+                         "by": {"agent_type": "pantheon-outside", "agent_id": "", "session_id": "", "request": "x"},
+                         "cmd": rk1[-1]["cmd"], "tree": git(KIT, "rev-parse", f"{K5}^{{tree}}"),
+                         "env": O.run_env(rk1[-1]["cmd"])}) + "\n")
+git(KIT, "-c", "user.name=t", "commit", "-q", "--amend", "-m", "k5 ещё сообщение")
+n1 = len(calls())
+res = kit_request()
+check("0732: tree в записи не совпал с деревом её коммита по git — прогон, а не перенос",
+      len(calls()) == n1 + 1 and not res.get("by_tree"), res)
+K6 = commit(KIT, {"t.py": GREEN + "# k6\n"}, "k6")
+kit_request()
+git(KIT, "-c", "user.name=t", "commit", "-q", "--amend", "-m", "k6 другое сообщение")
+_re = O.run_env
+O.run_env = lambda line: {**_re(line), "python": "/other/python3.15"}
+n1 = len(calls())
+res = kit_request()
+O.run_env = _re
+check("0732: другой python (env) — прогон, а не перенос", len(calls()) == n1 + 1 and not res.get("by_tree"), res)
+# сбой записи переноса (OSError) — не итог «записано», а обычный прогон
+git(KIT, "-c", "user.name=t", "commit", "-q", "--amend", "-m", "k6 третье сообщение")
+_at = O.append_tests
+
+
+def _at_fail(*a, **kw):
+    if kw.get("by_tree"):
+        raise OSError("сбой диска")
+    return _at(*a, **kw)
+
+
+O.append_tests = _at_fail
+n1 = len(calls())
+res = kit_request()
+O.append_tests = _at
+check("0732: запись переноса не легла (OSError) — прогон, итог по нему, а не «без прогона»",
+      len(calls()) == n1 + 1 and res.get("record") and not res.get("by_tree"), res)
+# команда — не полный набор репозитория: не переносится (latark/app нет в FULL_TESTS)
+git(APP, "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "app пусто")
+git(APP, "-c", "user.name=t", "commit", "-q", "--amend", "--allow-empty", "-m", "app пусто 2")
+r_x = one_request()
+run_pass()
+r_y = one_request()
+n1 = len(calls())
+run_pass()
+check("0732: команда не из FULL_TESTS — повторный head того же дерева гоняется",
+      len(calls()) == n1 + 1 and not (O.load_result(qa, r_y) or {}).get("by_tree"), O.load_result(qa, r_y))
+
+# Д2: зелёная запись прохода с другой cmd на том же дереве не переносится — идёт прогон
+K8 = commit(KIT, {"t.py": GREEN + "# k8\n"}, "k8")
+_line = O.command(KIT, "test")[1]
+with open(RECORDS, "a") as fh:
+    fh.write(json.dumps({"v": 1, "kind": "tests", "repo": ["latark/kit"], "pr": None, "sha": K8,
+                         "by": {"agent_type": "pantheon-outside", "agent_id": "", "session_id": "", "request": "x"},
+                         "cmd": "heavy python3 other.py", "tree": git(KIT, "rev-parse", f"{K8}^{{tree}}"),
+                         "env": O.run_env(_line)}) + "\n")
+n1 = len(calls())
+res = kit_request()
+check("0732: запись прохода с другой cmd на том же дереве — прогон, а не перенос",
+      len(calls()) == n1 + 1 and res.get("record") and not res.get("by_tree") and "уже есть" not in res.get("note", ""), res)
+
 if _saved is not None:
     with open(_cp, "w") as fh:
         fh.write(_saved)
+elif os.path.exists(_cp):
+    os.remove(_cp)
 
 # --- 6. сироты (metis-0614): после всех серверов и стопов ни заглушки, ни задач «turbo» в живых --------------------
 kill_all_servers()

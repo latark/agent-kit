@@ -4,13 +4,14 @@ migrate-*). Сами задачи и доска — lib/tasks.py.
 Вынесено из pantheon.py (metis-0586) без изменения поведения. P — модуль pantheon: его ставит загрузчик
 pantheon._attach до выполнения этого файла, имена из __all__ становятся именами pantheon.
 """
+import json
 import os
 import sys
 
 __all__ = [
     "TASK_NEW_VALUE_FLAGS", "TASK_NEW_BOOL_FLAGS", "TASK_SPLIT_VALUE_FLAGS", "TASK_SET_VALUE_FLAGS",
     "TASK_REPEATABLE_FLAGS", "TASK_FLAG_ALIASES", "task_repeat_error", "task_flag_error", "task_body_arg",
-    "_read_or_empty", "task_new_notify", "overlap_open_prs", "ready_overlap_lines", "overlap_lines", "task_cmd",
+    "_read_or_empty", "task_new_notify", "overlap_open_prs", "ready_overlap_lines", "overlap_lines", "batch_suggest_cmd", "task_cmd",
 ]
 
 
@@ -242,6 +243,37 @@ def ready_overlap_lines(T, rows):
             out.append(f"{tid}: пересечение с PR #{pr.get('number')} (файлы {', '.join(common[:6])}{more}) — "
                        f"до взятия: pantheon task overlap {tid}")
     return out
+
+
+def batch_suggest_cmd(T, args, opt):
+    """pantheon task batch-suggest [--direction D] [--json] [--apply] (metis-0595): открытые задачи без пачки →
+    «в существующую пачку», «новая пачка», «дубли». Без модели и без записи; --apply прикрепляет (parent) только
+    предложения «в существующую пачку» с пометкой «уверенно»."""
+    bad = [a for i, a in enumerate(args) if a not in ("--json", "--apply", "--direction")
+           and not (i and args[i - 1] == "--direction")]
+    if bad or (("--direction" in args) and not opt("--direction")):
+        print(f"pantheon task batch-suggest: не понял «{' '.join(bad) or '--direction'}» — допустимы "
+              "--direction D, --json, --apply", file=sys.stderr)
+        return 2
+    B = P.batchsuggest_mod()
+    tasks = T.load_tasks(P.PANTHEON, T.WORK_TYPES)
+    dirs = [opt("--direction")] if opt("--direction") else sorted(
+        {h.get("direction") for _, h, _ in tasks.values() if h.get("type") == "task" and h.get("direction")})
+    results = [B.suggest(tasks, d) for d in dirs]
+    applied, skipped = [], []
+    if "--apply" in args:
+        for res in results:
+            d, s = B.apply(res, tasks, lambda tid, sid: T.task_attach(P.PANTHEON, P.now(), tid, sid))
+            applied += d
+            skipped += s
+    if "--json" in args:
+        print(json.dumps({"results": results, "applied": applied, "skipped": skipped}, ensure_ascii=False, indent=1))
+    else:
+        print("\n\n".join(B.render(r) for r in results if r["open_loose"] or r["joins"] or r["groups"]) or "открытых задач без пачки нет")
+        if "--apply" in args:
+            print(f"\nприкреплено: {len(applied)}" + "".join(f"\n  {x}" for x in applied)
+                  + "".join(f"\n  пропущено · {x}" for x in skipped))
+    return 0
 
 
 def task_cmd(rest):
@@ -478,6 +510,8 @@ def task_cmd(rest):
                 return 1
             lines = overlap_lines(T, args[0])
             print("\n".join(lines) if lines else f"{args[0]}: пересечений с живыми задачами направления и открытыми PR нет")
+        elif sub == "batch-suggest":
+            return batch_suggest_cmd(T, args, opt)
         else:
             print(f"pantheon task: не понял «{' '.join(rest)}»", file=sys.stderr)
             return 2

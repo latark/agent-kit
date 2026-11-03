@@ -1570,8 +1570,8 @@ def _billing_problem(repo, pr, sha):
                 "сверить"), ()
     if any(r["kind"] == "tests" and r["sha"] == sha and repo.lower() in [x.lower() for x in r["repo"]]
            and full_tests_record(repo, r) for r in records):
-        return None, (f"CI не запускался: лимит минут GitHub Actions, засчитан местный прогон (запись `pantheon "
-                      f"review test`) на {where}",)
+        return None, (f"CI не запускался: лимит минут GitHub Actions, засчитан местный прогон (запись полного набора "
+                      f"тестов на этом коммите) на {where}",)
     return (f"CI на {where} не запускался: лимит минут или оплата GitHub Actions (аннотация «{CI_BILLING}…», job "
             f"не стартовал). Запасной путь — местный полный прогон с записью на этом коммите (засчитывается только "
             f"эта команда: {cmd}). Основной способ: из корня чистой копии на {sha[:12]} запусти `pantheon outside "
@@ -1588,7 +1588,8 @@ def _ci_problem(repo, pr, sha, data, owner=False):
     (required_checks по baseRefName, metis-0633; их запуски — _ci_runs на этом SHA, засчитывается только
     pull_request с SUCCESS): красная или пропущенная обязательная — отказ, кроме CI, который не запускался из-за
     лимита минут или оплаты (ci_billing по аннотациям красных и данным их job, metis-0655): тогда _billing_problem —
-    запись полного набора тестов на этом SHA вместо CI; нет обязательной или идёт — отказ «дождись» с
+    запись полного набора тестов на этом SHA вместо CI, предупреждения о красных необязательных — вместе со строкой
+    о лимите (С1 argus #248); нет обязательной или идёт — отказ «дождись» с
     командой ожидания вне хука, красная из OPTIONAL_CHECKS — пропуск с предупреждением, красная вне обоих
     списков — отказ (Д1 argus #235). Ждать в хуке нельзя:
     таймаут хука 10 с. Обязательных нет и проверок нет: пропуск, только если .github/workflows нет ни на head, ни на
@@ -1608,7 +1609,9 @@ def _ci_problem(repo, pr, sha, data, owner=False):
     if state == "fail":
         ids = ci_billing_ids(runs, required)
         if ci_billing(runs, required, _ci_notes(repo, ids), _ci_jobs(repo, ids)):
-            return _billing_problem(repo, pr, sha)
+            # предупреждения о красных необязательных — и на запасном пути, рядом со строкой о лимите (С1 argus #248)
+            why, extra = _billing_problem(repo, pr, sha)
+            return (why, ()) if why else (None, extra + tuple(f"{n} на {repo}#{pr}@{sha[:12]}" for n in notes))
         if owner:
             return f"{text} на {repo}#{pr}@{sha[:12]} — почини и сделай новый коммит; {OWNER_EMERGENCY}", ()
         return f"{text} на {repo}#{pr}@{sha[:12]} — почини и сделай новый коммит с новыми записями", ()
@@ -2113,7 +2116,8 @@ OWNER_EMERGENCY = ("аварийный путь — `gh pr merge` в собст�
                    "проверяет")
 OWNER_CI = ("слияние из сессии без роли проверяет только CI (решение владельца 01.11, metis-0633): записи тестов и "
             "argus не нужны, а красный или незавершённый CI — отказ; CI не запускался из-за лимита минут — "
-            "нужна запись `pantheon review test` полного набора на этом коммите (metis-0655)")
+            "нужна запись полного набора тестов на этом коммите — `pantheon outside test` или `pantheon review test` "
+            "(metis-0655)")
 
 
 def owner_ci_problem(cwd, moved, args):
@@ -2151,6 +2155,148 @@ def owner_ci_problem(cwd, moved, args):
         return f"--match-head-commit — один SHA из 40 знаков или без него. {OWNER_CI}"
     why, notes = _ci_problem(repo, pr, head, view, owner=True)
     return f"{why}. {OWNER_CI}" if why else allow(notes)
+
+
+# Слияние PR через API (metis-0663): REST `PUT repos/{owner}/{repo}/pulls/{N}/merge` (поле sha — тот же смысл, что
+# --match-head-commit) и GraphQL. Для записи gh api в сессии без роли — одно правило fail closed (фоновая проверка
+# 02.11): шлюз разбирает только простую форму, всё прочее — отказ, а не пропуск. Адрес — после api_norm (%XX, //, ./).
+# Ветка в ветку (`…/merges`, mergeBranch) — не PR, это push в base. Модель угроз — ошибка агента, а не обход: новые
+# формы той же природы — остаток README guard, а не новый разбор.
+API_FLAGS_VALUE = ("-X", "--method", "-f", "-F", "--field", "--raw-field", "-H", "--header", "--input", "-q", "--jq",
+                   "-t", "--template", "-p", "--preview", "--cache", "-R", "--repo", "--hostname")
+API_FLAGS_BOOL = ("--paginate", "--slurp", "-i", "--include", "--silent", "--verbose", "--allow-escape-sequences")
+API_FLAGS_EQ = tuple(f + "=" for f in API_FLAGS_VALUE if f.startswith("--"))
+API_FIELD_FLAGS = ("-f", "-F", "--field", "--raw-field")
+API_OUTPUT_FLAGS = ("-q", "--jq", "-t", "--template")  # фильтр вывода: значение — не адрес и не запрос
+API_REST_MERGE = re.compile(r"(?:https://api\.github\.com/|/)?repos/([^/?#\s]+)/([^/?#\s]+)/pulls/([^/?#\s]+)/merge",
+                            re.I)
+API_GQL_PATH = re.compile(r"(?:^|/)graphql/?(?:$|[?#])", re.I)
+API_MERGE_GQL = re.compile(r"\b(?:mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest)\b", re.I)
+API_MERGE_HINT = ("сливай `gh pr merge N -R <owner/repo> --match-head-commit <SHA>` — его шлюз сверяет CI так же")
+API_UNKNOWN = f"слово не вычислить (переменная, $(…)) — {API_MERGE_HINT}"
+
+
+def api_norm(word):
+    """Слово gh api, как его поймёт сервер: %XX раскрыты, `//` схлопнуты, сегменты `./` убраны."""
+    w = re.sub(r"%([0-9A-Fa-f]{2})", lambda m: chr(int(m[1], 16)), word)  # без urllib.parse: +9 мс на вызов хука
+    w = re.sub(r"(?<!:)/{2,}", "/", w)
+    while True:
+        w2 = re.sub(r"(^|/)\.(?:/|$)", r"\1", w)
+        if w2 == w:
+            return w
+        w = w2
+
+
+def api_words(words):
+    """Слова gh api (без api; флаги до api тоже) → (pos, fields, bad): pos — позиционные слова по порядку (адрес —
+    первое, после `--` — все), fields — (флаг, значение) у флагов со значением, bad — первый склеенный или незнакомый
+    флаг (`-XPUT`, `-iX`, `-fsha=…`) или None. Невычислимое слово — None на своём месте: в pos или значением флага."""
+    pos, fields, bad, i = [], [], None, 0
+    while i < len(words):
+        w = words[i]
+        if w == "--":
+            pos += words[i + 1:]
+            break
+        if w is None or not w.startswith("-") or w == "-":
+            pos.append(w)
+            i += 1
+        elif w in API_FLAGS_VALUE and i + 1 < len(words):
+            fields.append((w, words[i + 1]))
+            i += 2
+        elif w in API_FLAGS_BOOL:
+            i += 1
+        elif w.startswith(API_FLAGS_EQ):
+            fields.append(tuple(w.split("=", 1)))
+            i += 1
+        else:
+            bad = bad or w
+            i += 1
+    return pos, fields, bad
+
+
+def api_loose(words):
+    """Невычислимое позиционное слово gh api рядом с другим (`gh api …/merge $F`, `gh api $URL $F`) может оказаться
+    флагом записи (-X PUT, -f …): по словам запись не видна, но и не исключена. Единственный адрес и значения флагов
+    (`gh api repos/o/r/pulls/$N --jq .merged`) флагом не станут — это чтение (Д1 argus #257)."""
+    pos = api_words(words)[0]
+    return None in pos and len(pos) > 1
+
+
+def api_says_merge(words):
+    """Слово merge в словах gh api, кроме значений фильтров вывода -q, --jq, -t, --template (`--jq .merged`)."""
+    pos, fields, bad = api_words(words)
+    return any("merge" in (w or "").casefold() for w in pos + [bad] + [v for f, v in fields if f not in API_OUTPUT_FLAGS])
+
+
+def api_merge_path(p):
+    """Адрес (после api_norm) похож на слияние PR: в сегментах после repos/<owner>/<repo>/ — во всём адресе, если такой
+    части нет, — есть сегмент pulls, а за ним сегмент со словом merge. Имя репозитория (`repos/o/merge-bot/pulls`) и
+    ветки (`…/git/refs/heads/fix-pulls-merge`) не в счёт (Д5 argus #257)."""
+    m = re.search(r"(?:^|/)repos/[^/?#]*/[^/?#]*", p, re.I)
+    segs = re.split(r"[/?#]", (p[m.end():] if m else p).lower())
+    return "pulls" in segs and any("merge" in s for s in segs[segs.index("pulls") + 1:])
+
+
+def api_merge_args(words):
+    """Слова gh api с записью (без api; флаги до api тоже) → None — не слияние PR; строка — отказ; список — слова
+    gh pr merge для owner_ci_problem: номер, -R owner/repo из адреса (у `{owner}/{repo}` -R нет — gh берёт репозиторий
+    папки, его так же находит owner_ci_problem), --match-head-commit из каждого поля sha.
+    Отказ (fail closed): адрес не вычислить; флаг склеенный (`-XPUT`, `-iX`, `-fsha=…`) или незнакомый; `..` в адресе;
+    адрес слияния (api_merge_path) — не ровно repos/<owner>/<repo>/pulls/<N>/merge (полный адрес — только
+    https://api.github.com/; CI сверяется на github.com), --hostname не github.com; адрес graphql — не ровно `graphql`,
+    или поле из файла (`-F x=@f`, `--input`), или мутация слияния (mergePullRequest, enablePullRequestAutoMerge,
+    enqueuePullRequest). Невычислимое значение флага или лишнее слово — отказ только у адреса слияния и graphql:
+    `-f body="$B"` на …/issues/N/comments слиянием не станет (Д2 argus #257)."""
+    pos, fields, bad = api_words(words)
+    if bad:
+        return (f"флаг {bad[:40]} шлюз не разбирает (склеенный или незнакомый) — пиши флаги отдельными словами: "
+                f"-X PUT, -f sha=… — или {API_MERGE_HINT}")
+    if pos[:1] == [None]:
+        return API_UNKNOWN
+    unknown = None in pos or any(v is None for _, v in fields)
+    # адрес — первое позиционное слово, но невычислимое слово рядом может оказаться флагом и сдвинуть его
+    # (`gh api repos/o/r/issues/1 $X repos/o/r/pulls/7/merge -X PUT`): при лишнем слове любой известный адрес слияния
+    # или graphql среди позиционных слов и значений полей — отказ (фоновая проверка безопасности 02.11, круг 3)
+    if unknown and len(pos) > 1 and any(w and (api_merge_path(api_norm(w)) or API_GQL_PATH.search(api_norm(w)))
+                                        for w in pos[1:] + [v for _, v in fields]):
+        return API_UNKNOWN
+    if any(v and API_MERGE_GQL.search(v) for _, v in fields):
+        return (f"слияние через GraphQL (mergePullRequest, enablePullRequestAutoMerge, enqueuePullRequest) шлюз не "
+                f"разбирает — {API_MERGE_HINT}")
+    p = api_norm(pos[0] if pos else "")
+    if ".." in p:
+        return f"`..` в адресе ({p[:80]}) шлюз не разбирает — {API_MERGE_HINT}"
+    if API_GQL_PATH.search(p):
+        if not re.fullmatch(r"/?graphql", p, re.I):
+            return f"адрес graphql не в форме `graphql` ({p[:80]}) — {API_MERGE_HINT}"
+        if unknown:
+            return API_UNKNOWN
+        if any(f in ("--input", "-F", "--field") and (f == "--input" or "=@" in v) for f, v in fields):
+            return f"запрос graphql из файла (-F …=@файл, --input) шлюз не проверяет — слияние ли это, не видно — {API_MERGE_HINT}"
+        return None
+    if not api_merge_path(p):
+        return None
+    if unknown:
+        return API_UNKNOWN
+    m = API_REST_MERGE.fullmatch(p)
+    if not m:
+        return f"адрес слияния не в форме repos/<owner>/<repo>/pulls/<N>/merge ({p[:80]}) — {API_MERGE_HINT}"
+    host = [v for f, v in fields if f == "--hostname" and v.lower() != "github.com"]
+    if host:
+        return (f"--hostname {host[0][:40]} — проверка CI идёт по github.com, другой хост шлюз не сверяет — "
+                f"{API_MERGE_HINT}")
+    owner, name, pr = m.groups()
+    if not PR_RE.fullmatch(pr):
+        return f"номер PR в адресе …/pulls/{pr}/merge — не число, CI не сверить — {API_MERGE_HINT}"
+    args = [pr]
+    if (owner, name) != ("{owner}", "{repo}"):
+        if "{" in owner + name or "}" in owner + name:
+            return f"репозиторий в адресе ({owner}/{name}) — плейсхолдер вперемешку с именем — {API_MERGE_HINT}"
+        args += ["-R", f"{owner}/{name}"]
+    for f, v in fields:
+        if f in API_FIELD_FLAGS and v.startswith("sha="):
+            args += ["--match-head-commit", v[4:]]
+    return args
 
 
 def merge_problem(role, sub, pdir, cwd, moved, args, cmd="", event=None):

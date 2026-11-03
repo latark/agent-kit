@@ -5,7 +5,6 @@
 Запуск: python3 -I plugins/pantheon/tests/test_migrate_batches.py  (код выхода 0 — все прошли)
 """
 import os
-import re
 import subprocess
 import sys
 import tempfile

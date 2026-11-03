@@ -351,6 +351,39 @@ def test_fetch_budget():
         shutil.rmtree(tmp, True)
 
 
+def test_former_heads():
+    """metis-0726: кэш помнит бывшие head ещё открытых PR — по ним outside снимает заявку test на устаревший head."""
+    h = lambda c: c * 40  # noqa: E731
+    prev = {"open_prs": {"a/b": [{"number": 1, "head": h("1")}, {"number": 2, "head": h("2")}], "c/d": []},
+            "old_heads": {"a/b": {h("0"): 1, h("9"): 3}, "e/f": {h("5"): 4}}}
+    now = {"a/b": [{"number": 1, "head": h("a")}, {"number": 2, "head": h("2")}], "c/d": []}
+    got = A.former_heads(prev, now)
+    check("former_heads: прошлый head PR #1 и его давний бывший — в old_heads; head PR #2 не менялся — нет; PR #3 закрыт — нет",
+          got.get("a/b") == {h("0"): 1, h("1"): 1}, got)
+    check("former_heads: репозиторий, про который gh не ответил (нет в open_prs), держит прошлые", got.get("e/f") == {h("5"): 4}, got)
+    check("former_heads: нет бывших — репозитория нет", "c/d" not in got, got)
+    check("former_heads: head вернулся (force-push назад) — уже не бывший",
+          A.former_heads({"old_heads": {"a/b": {h("1"): 1}}}, {"a/b": [{"number": 1, "head": h("1")}]}) == {})
+    check("former_heads: старый кэш без old_heads и мусор — не падает",
+          A.former_heads({}, now) == {} and A.former_heads(None, now) == {} and A.former_heads({"old_heads": [1]}, now) == {})
+    many = A.former_heads({"old_heads": {"a/b": {f"{i:040x}": 1 for i in range(A.OLD_HEADS_KEEP + 5)}}}, now)
+    check("former_heads: не больше OLD_HEADS_KEEP на репозиторий, уходят старые",
+          len(many["a/b"]) == A.OLD_HEADS_KEEP and f"{0:040x}" not in many["a/b"], len(many["a/b"]))
+    tmp, home, state, gh, env = make()
+    try:
+        cf = os.path.join(state, "p.json")
+        write_gh(gh, "a/b", "merged", [])
+        write_gh(gh, "a/b", "open", [{"number": 1, "headRefName": "x", "headRefOid": h("1"), "body": "", "files": []}])
+        A.fetch(cf, os.path.join(state, "s.json"), T0, ["a/b"], env=dict(env))
+        write_gh(gh, "a/b", "open", [{"number": 1, "headRefName": "x", "headRefOid": h("2"), "body": "", "files": []}])
+        A.fetch(cf, os.path.join(state, "s.json"), T0 + 600, ["a/b"], env=dict(env))
+        c = A.load_state(cf)
+        check("fetch: новый head PR — прошлый в old_heads кэша", c.get("old_heads") == {"a/b": {h("1"): 1}}
+              and c["open_prs"]["a/b"][0]["head"] == h("2"), c.get("old_heads"))
+    finally:
+        shutil.rmtree(tmp, True)
+
+
 def test_old_and_errors():
     tmp, home, state, gh, env = make()
     try:
@@ -535,13 +568,29 @@ def test_close_criteria():
         pf = put(home, "metis-pantheon", "metis-0015", body=two, created="2026-10-26")
         T.task_set(home, T0, "metis-0015", {"status": "done"})
         check("задача от 26.10 закрывается вручную без --force", T.read(pf)[0].get("status") == "done")
-        put(home, "metis-pantheon", "metis-0016", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n", created="2026-10-27")
+        p16 = put(home, "metis-pantheon", "metis-0016", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n", created="2026-10-27")
         try:
             T.task_set(home, T0, "metis-0016", {"status": "done"})
             err = ""
         except ValueError as e:
             err = str(e)
-        check("заглушка-подсказка — неотмеченный пункт", "неотмечено 1" in err, err)
+        check("заглушка-подсказка одна — не пункт, ручной done проходит (metis-0712)", err == "" and T.read(p16)[0].get("status") == "done", err)
+        p16b = put(home, "metis-pantheon", "metis-0020", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n- [ ] настоящий\n", created="2026-10-27")
+        try:
+            T.task_set(home, T0, "metis-0020", {"status": "done"})
+            err = ""
+        except ValueError as e:
+            err = str(e)
+        check("заглушка рядом с настоящим пунктом: «неотмечено 1» без заглушки",
+              "неотмечено 1 " in err and T.read(p16b)[0].get("status") != "done", err)
+        p16c = put(home, "metis-pantheon", "metis-0021", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + " ещё\n", created="2026-10-27")
+        check("похожий, но не дословный текст — пункт", T.unchecked_criteria(*T.read(p16c)) == 1)
+        pq = put(home, "metis-pantheon", "metis-0022", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n", created="2026-10-27")
+        pr2 = put(home, "metis-pantheon", "metis-0023", body="Готово, когда:\n- [ ] " + T.DONE_WHEN_HINT + "\n- [ ] настоящий\n", created="2026-10-27")
+        run_cache(home, state, T0, {"latark/agent-kit": [cpr(11, "metis-0022-x", "", T0 - 3600), cpr(12, "metis-0023-x", "", T0 - 3600)]})
+        check("слитый PR, только заглушка → done (metis-0712)", T.read(pq)[0].get("status") == "done", text(pq)[-300:])
+        check("слитый PR, заглушка + настоящий → review «неотмечено 1»", T.read(pr2)[0].get("status") == "review"
+              and "слит, неотмечено 1" in text(pr2), text(pr2)[-300:])
         # остаток: task split пишет result, по нему done проходит без --force
         ph = put(home, "metis-pantheon", "metis-0017", body=two, created="2026-10-27")
         nid, _ = T.task_split(home, T0, "metis-0017", "Второе")
@@ -666,6 +715,7 @@ def main():
     test_reopen_and_eviction()
     test_mutants()
     test_fetch_budget()
+    test_former_heads()
     test_batch_needs_mode()
     test_off_warning()
     test_check()

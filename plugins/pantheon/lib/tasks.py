@@ -246,7 +246,7 @@ def _parts(path):
     if a == _ROOT or not a.startswith(_ROOT + os.sep):
         return None
     parts = a[len(_ROOT) + 1:].split(os.sep)
-    if any(x in ("", ".", "..") for x in parts):  # noqa: путь собран кодом, это страховка
+    if any(x in ("", ".", "..") for x in parts):  # путь собран кодом, это страховка
         raise ValueError(f"путь не по образцу: {path}")
     return parts
 
@@ -692,10 +692,11 @@ def done_criteria(body):
 
 
 def unchecked_criteria(head, body):
-    """Число неотмеченных пунктов «Готово, когда» (заглушка-подсказка — тоже неотмеченный); 0 — у задач, созданных до CRITERIA_FROM."""
+    """Число неотмеченных пунктов «Готово, когда»; заглушка шаблона DONE_WHEN_HINT (строго по тексту) не пункт, metis-0712;
+    0 — у задач, созданных до CRITERIA_FROM. Одна функция для autoclose и `task set status=done`."""
     if str(head.get("created") or "") < CRITERIA_FROM:
         return 0
-    return sum(1 for done, _ in done_criteria(body) if not done)
+    return sum(1 for done, text in done_criteria(body) if not done and text != DONE_WHEN_HINT)
 
 
 def done_when_section(items):

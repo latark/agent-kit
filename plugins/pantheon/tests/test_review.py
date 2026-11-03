@@ -79,6 +79,17 @@ def run_all(tmp):
     r = pantheon("review", "test", "--", "true", cwd=repo)
     check("test — грязное дерево: код 2, команда не запускалась", r.returncode == 2 and "не чистое" in r.stderr)
     git("checkout", "-q", "a.txt", cwd=repo)
+    # ссылка node_modules (metis-0721): в корне не мешает, папка с файлом — мешает
+    os.symlink("/nonexistent-target", os.path.join(repo, "node_modules"))
+    r = pantheon("review", "test", "--", "true", cwd=repo)
+    check("test — симлинк node_modules в корне: чисто, код 0", r.returncode == 0, r.stderr)
+    os.remove(os.path.join(repo, "node_modules"))
+    os.makedirs(os.path.join(repo, "node_modules"))
+    with open(os.path.join(repo, "node_modules", "f"), "w") as fh:
+        fh.write("x")
+    r = pantheon("review", "test", "--", "true", cwd=repo)
+    check("test — папка node_modules с файлом: код 2", r.returncode == 2 and "не чистое" in r.stderr)
+    shutil.rmtree(os.path.join(repo, "node_modules"))
     r = pantheon("review", "test", "--", "true", cwd=tmp)
     check("test — не git: код 2", r.returncode == 2)
     r = pantheon("review", "test", "true", cwd=repo)
@@ -130,6 +141,19 @@ def run_all(tmp):
           and "без перечня" not in r.stdout)
     r = pantheon("review", "status", "latark/other", "17")
     check("status — фильтр по репозиторию", r.returncode == 0 and "записей нет" in r.stdout)
+
+    # metis-0735: запись tests зелёного дозапуска — в status видно, что это дозапуск
+    trec = {"v": 1, "kind": "tests", "repo": ["latark/agent-kit"], "pr": 19, "sha": SHA, "cmd": "x",
+            "by": {"agent_type": "pantheon-outside"}, "time": "2026-10-15T20:00:00", "rerun_of": "20261103-000001-abcdef",
+            "files": ["kit/test_a.py", "kit/test_b.py"], "map": "m"}
+    with open(os.path.join(state, "merge-gate", "records.jsonl"), "a") as fh:
+        fh.write(json.dumps(trec) + "\n" + json.dumps(dict(trec, pr=20, rerun_of=None)) + "\n")
+    r = pantheon("review", "status", "latark/agent-kit", "19")
+    check("status: запись tests с rerun_of — «дозапуск от <id>, файлов 2»",
+          r.returncode == 0 and "дозапуск от 20261103-000001-abcdef, файлов 2" in r.stdout, r.stdout)
+    r = pantheon("review", "status", "latark/agent-kit", "20")
+    check("status: запись tests без rerun_of — строки дозапуска нет", r.returncode == 0 and "дозапуск" not in r.stdout
+          and "tests" in r.stdout, r.stdout)
 
     # metis-0393: итог по head — последний вердикт каждого argus (рецензент — сессия и agent_id, как у шлюза)
     opus = dict(full["checklist"], ran="модель: claude-opus-5-5, heavy pytest")
@@ -243,7 +267,6 @@ def run_all(tmp):
 
     # metis-0158: метка «ревью идёт»
     import time as _time
-    import shutil as _sh
 
     def at(t, *args):
         return subprocess.run([sys.executable, "-I", RUN_PY, *args], capture_output=True, text=True,

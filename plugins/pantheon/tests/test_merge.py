@@ -998,6 +998,66 @@ def test_ci_billing():
           b.outs[-1])
 
 
+def test_ci_fork_billing():
+    """Долг argus #248: лимит минут у PR из форка. Запуски форка (pull_requests пуст) засчитываются по репозиторию и
+    ветке head и на запасном пути: запись полного набора на SHA — окно и слияние; только узкая запись — заявка снята.
+    Лимит у чужого форка, чужой ветки, у не-форка без номера PR — ждёт; nameWithOwner не получен — заявка снята."""
+    def fork_blocked(repo="Ext/agent-kit", branch="feat"):
+        return [dict(c, conclusion="FAILURE", notes=[billing_note()], job=JOB_IDLE, prs=[], head_repo=repo,
+                     head_branch=branch) for c in ci("SUCCESS", "SUCCESS")]
+
+    b = Box()
+    b.request()
+    b.view(SHA, checks=fork_blocked(), head=FORK)
+    b.run()
+    w = b.windows()
+    check("форк + лимит, запись полного набора → окно и слияние",
+          len(w) == 1 and len(b.merges()) == 1 and "засчитан местный прогон" in w[0][0], (w, b.outs[-1]))
+    b = Box()
+    b.records = []
+    b.add("accept", sid="s1", aid="a1")
+    b.add("accept", sid="s2", aid="a2")
+    b.add("tests", sha=SHA, who="", cmd="pantheon review test -- python3.14 -I plugins/guard/tests/test_guard.py")
+    b.request()
+    b.view(SHA, checks=fork_blocked(), head=FORK)
+    b.run()
+    check("форк + лимит, только узкая запись tests → окна нет, заявка снята",
+          not b.windows() and not b.merges() and b.req() is None
+          and "записи полного набора тестов (FULL_TESTS)" in b.alerts(), b.alerts())
+    for how, checks, head in (("чужого форка", fork_blocked(repo="evil/agent-kit"), FORK),
+                              ("чужой ветки форка", fork_blocked(branch="x"), FORK),
+                              ("не форка, запуски без номера PR", fork_blocked(), dict(FORK, isCrossRepository=False))):
+        b = Box()
+        b.request()
+        b.view(SHA, checks=checks, head=head)
+        b.run()
+        check(f"лимит у {how}, запись есть → окна нет, ждёт", not b.windows() and not b.merges()
+              and b.req() is not None, b.outs[-1])
+    b = Box()
+    b.request()
+    b.view(SHA, checks=fork_blocked(), head=dict(FORK, headRepository={"id": "R_x"}))
+    b.run()
+    check("форк без nameWithOwner + лимит → окна нет, заявка снята с тревогой «из форка»",
+          not b.windows() and not b.merges() and b.req() is None and "из форка" in b.alerts(), b.alerts())
+
+
+def test_ci_optional_notes():
+    """С1 argus #248: красная необязательная (tests/full из OPTIONAL_CHECKS) не теряется — текст пропуска в окне
+    называет её и на обычном пути с зелёным CI, и на запасном пути при лимите минут."""
+    full = dict(ci("SUCCESS")[0], name="full", conclusion="FAILURE")
+    blocked = [dict(c, conclusion="FAILURE", notes=[billing_note()], job=JOB_IDLE) for c in ci("SUCCESS", "SUCCESS")]
+    for how, checks, mark in (("зелёный CI", ci("SUCCESS", "SUCCESS") + [full], "CI ✓"),
+                              ("лимит минут, запись полного набора", blocked + [full], "засчитан местный прогон")):
+        b = Box()
+        b.request()
+        b.view(SHA, checks=checks)
+        b.run()
+        w = b.windows()
+        check(f"{how} + красная tests/full → окно и слияние, в тексте окна и итог, и tests/full",
+              len(w) == 1 and len(b.merges()) == 1 and mark in w[0][0]
+              and "необязательная проверка GitHub tests/full красная: FAILURE" in w[0][0], (w, b.outs[-1]))
+
+
 PJ = "plugins/pantheon/.claude-plugin/plugin.json"
 # случаи номера версии (metis-0512): (файлы PR, отказ?) — общие для прохода и шлюза guard
 VERSION_CASES = [

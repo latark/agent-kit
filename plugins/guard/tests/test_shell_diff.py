@@ -198,6 +198,8 @@ def run_all(all_cases):
     """Процессы, а в песочнице окна (ProcessPoolExecutor → os.sysconf("SC_SEM_NSEMS_MAX") → PermissionError) —
     потоки: работа — подпроцессы оболочек и guard, так что результат тот же, меняется только способ раздачи."""
     workers = max(2, (os.cpu_count() or 4) - 1)
+    if os.environ.get("RUN_TESTS_RUNNER"):  # запущен run-tests: он уже гоняет несколько файлов параллельно (metis-0728)
+        workers = 2
     try:
         with ProcessPoolExecutor(max_workers=workers) as pool:
             return list(pool.map(check, all_cases, chunksize=8))

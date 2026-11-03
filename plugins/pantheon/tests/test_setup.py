@@ -444,7 +444,7 @@ def main():
     old = git_out(env, pan, "rev-parse", "HEAD")
     env["FAIL_CMD"] = "gh repo"
     r1 = setup(env, "да\n", "--add", "backup")
-    s1 = git_out(env, pan, "rev-parse", "HEAD")
+    git_out(env, pan, "rev-parse", "HEAD")
     gc = ["git", "-C", pan, "-c", "user.name=t", "-c", "user.email=t@t"]
     with open(os.path.join(pan, "board.md"), "a", encoding="utf-8") as fh:
         fh.write("после первого снимка\n")
