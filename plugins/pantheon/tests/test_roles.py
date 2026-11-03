@@ -281,8 +281,9 @@ def main():
     # размер координатора вырос по двум причинам: metis-0271 (+~400 — правила из decisions.md: findings, /clear между PR,
     # модель угроз, «решение внесено, только когда оно в роли»; дубли сжаты) и metis-0665 (+100 — строка «перед раздачей —
     # pantheon task overlap»; у лида уложилась в прежний потолок, лидов потолок не поднят)
+    # metis-0653: +~450 — TaskStop после отчёта субагента (merge.part) и «ждать на переднем плане» (persist.part)
     check("размер роли после выноса: координатор и лиды не больше потолка (знаков)",
-          len(raw_texts["domain-coordinator.md"]) <= 30700 and len(raw_texts["hephaestus-demo.md"]) <= 23400)
+          len(raw_texts["domain-coordinator.md"]) <= 31200 and len(raw_texts["hephaestus-demo.md"]) <= 23900)
     for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
         check(f"{f}: перед раздачей — pantheon task overlap, очередь или ветка от ветки PR, argus — только дельта (metis-0665)",
               all(x in " ".join(raw_texts[f].split()) for x in ("Перед раздачей — `pantheon task overlap <id>`",
@@ -769,6 +770,44 @@ def main():
         check(f"{f[:-5]}: тестам с портом — pantheon outside test --wait 590, dev-серверу — serve --wait 120",
               "pantheon outside test --wait 590" in text and "pantheon outside serve --wait 120" in text
               and "pantheon outside stop" in text)
+    # metis-0653: полный набор исполнители и argus сами не гоняют; ожидание — Monitor; запускающий делает TaskStop
+    for f in devs + ["argus.tmpl", "codex-dev.tmpl"]:
+        text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
+        check(f"{f[:-5]}: полный набор сам не гоняет, ждёт Monitor-ом, а не концом хода «жду» (metis-0653)",
+              "полный набор тестов репозитория" in text.lower() and "не гоняй" in text and "Monitor с условием" in text
+              and "словом «жду»" in text)
+    # persist.part (metis-0653): свою фоновую команду ждут Monitor-ом, субагента — концом хода; лиды говорят то же
+    for f in devs + ["codex-dev.tmpl", "workshop.tmpl"]:
+        text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
+        check(f"{f[:-5]}: persist — свою фоновую команду ждут Monitor-ом, субагента концом хода (metis-0653)",
+              "Свою фоновую команду ждут на переднем плане" in text and "Субагента, наоборот, ждут концом хода" in text)
+    # persist.part и dev.part проверяются порознь: workshop берёт persist без dev.part, dev-* — оба
+    wtext = " ".join(read(os.path.join(out_real, "workshop.md")).split())
+    check("workshop (persist.part без dev.part): своя фоновая команда — Monitor, субагент — концом хода; фразы dev.part нет",
+          "Свою фоновую команду ждут на переднем плане" in wtext and "Субагента, наоборот, ждут концом хода" in wtext
+          and "Есть строка `dev:`" not in wtext)
+    for f in devs:
+        check(f"{f[:-5]}: Bash уводит команду в фон через ~180 с — ждать Monitor/until, не timeout 600000 (metis-0653)",
+              "примерно через 180 с" in " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split()))
+    check("argus: Bash уводит команду в фон через ~180 с (metis-0653)",
+          "примерно через 180 с" in " ".join(read(os.path.join(out_real, "argus.md")).split()))
+    for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
+        check(f"{f}: persist — субагента ждут концом хода, не Monitor-ом (metis-0653)",
+              "Субагента, наоборот, ждут концом хода" in flat[f]
+              and ("закончи ход и жди уведомления" in flat[f] or f == "apollo-demo.md"))
+    # dev.part: запрет полного набора привязан к строке dev:
+    for f in devs:
+        text = " ".join(read(os.path.join(out_real, f[:-5] + ".md")).split())
+        check(f"{f[:-5]}: полный набор не гоняй — только при строке `dev:`, без неё проверка — первая строка (metis-0653)",
+              "Есть строка `dev:`" in text and "Строки `dev:` нет" in text)
+    for f in ("dev-opus", "dev-sonnet", "dev-haiku", "codex-dev"):
+        text = " ".join(read(os.path.join(out_real, f + ".md")).split())
+        check(f"{f}: пункт 6 самопроверки при долгом наборе — узкие тесты и «не проверял: полный набор»",
+              "не проверял: полный набор" in text)
+    for f in ("domain-coordinator.md", "hephaestus-demo.md", "apollo-demo.md"):
+        text = flat[f]
+        check(f"{f}: после отчёта субагента — TaskStop его id, в передаче дел список живых (metis-0653)",
+              "сразу `TaskStop` его id" in text and "список живых субагентов" in text)
     talos_real = read(os.path.join(out_real, "talos.md"))
     check("talos: dev-сервер — pantheon outside serve --wait 120, гасит stop",
           "pantheon outside serve --wait 120" in talos_real and "pantheon outside stop" in talos_real)

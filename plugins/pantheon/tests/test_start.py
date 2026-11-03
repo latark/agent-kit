@@ -1304,11 +1304,12 @@ def main():
 
     def transcript(*steps):
         with open(tr, "w") as fh:
-            for i, (name, inp, err) in enumerate(steps):
+            for i, (name, inp, err, *out) in enumerate(steps):
                 fh.write(json.dumps({"type": "assistant", "message": {"content": [
                     {"type": "tool_use", "id": f"t{i}", "name": name, "input": inp}]}}) + "\n")
                 fh.write(json.dumps({"type": "user", "message": {"content": [
-                    {"type": "tool_result", "tool_use_id": f"t{i}", "is_error": err, "content": "x"}]}}) + "\n")
+                    {"type": "tool_result", "tool_use_id": f"t{i}", "is_error": err,
+                     "content": out[0] if out else "x"}]}}) + "\n")
 
     def stop(agent="dev-1"):
         ev = json.dumps({"cwd": wt, "agent_id": agent, "agent_type": "dev-sonnet", "hook_event_name": "SubagentStop",
@@ -1354,6 +1355,51 @@ def main():
     transcript(("Edit", {"file_path": "a.txt"}, False), ("Bash", {"command": "pantheon outside test --wait 590"}, True))
     r = stop("dev-6")
     check("dev-stop: `pantheon outside test` красный или без итога (75) — выход 2", r.returncode == 2 and "красный" in r.stderr)
+    # metis-0653: строка `dev:` в точке ответвления — узкая проверка исполнителя вместо первой строки
+    open(os.path.join(repo, ".pantheon-verify"), "w").write("# проверка\npnpm test\ndev: pnpm test:narrow\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "dev-строка")
+    git("branch", "-f", "worktree-agent-2", "HEAD")
+    wt_old = wt
+    wt = os.path.join(tmp, "projects", "br", "wt-dev2")
+    git("worktree", "add", "-q", wt, "worktree-agent-2")
+    open(os.path.join(wt, "b.txt"), "w").write("x")
+    git("add", "-A", cwd=wt)
+    git("commit", "-q", "-m", "dev2", cwd=wt)
+    transcript(("Edit", {"file_path": "b.txt"}, False), ("Bash", {"command": "heavy pnpm test"}, False))
+    r = stop("dev-7")
+    check("dev-stop: есть строка `dev:` — полный набор (первая строка) прогоном не считается, ждёт узкую",
+          r.returncode == 2 and "heavy pnpm test:narrow" in r.stderr)
+    transcript(("Edit", {"file_path": "b.txt"}, False), ("Bash", {"command": "heavy pnpm test:narrow"}, False))
+    r = stop("dev-8")
+    check("dev-stop: прогон команды из строки `dev:` — отпускает", r.returncode == 0 and not r.stderr)
+    # код 3 run-tests --affected («нечего гонять») — зелёный; другой код и другая команда — красный
+    open(os.path.join(repo, ".pantheon-verify"), "w").write("pnpm test\ndev: python3 -I run-tests.py --affected plugins/x\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "dev-строка affected")
+    git("branch", "-f", "worktree-agent-3", "HEAD")
+    wt_old2, wt = wt, os.path.join(tmp, "projects", "br", "wt-dev3")
+    git("worktree", "add", "-q", wt, "worktree-agent-3")
+    open(os.path.join(wt, "c.txt"), "w").write("x")
+    git("add", "-A", cwd=wt)
+    git("commit", "-q", "-m", "dev3", cwd=wt)
+    aff = "heavy python3 -I run-tests.py --affected plugins/x"
+    transcript(("Edit", {"file_path": "c.txt"}, False), ("Bash", {"command": aff}, True, "Exit code 3\nнечего гонять"))
+    r = stop("dev-9")
+    check("dev-stop: `run-tests.py --affected` код 3 («нечего гонять») — зелёный, отпускает", r.returncode == 0 and not r.stderr)
+    transcript(("Edit", {"file_path": "c.txt"}, False), ("Bash", {"command": aff}, True, "Exit code 1\nFAIL"))
+    r = stop("dev-10")
+    check("dev-stop: `run-tests.py --affected` код 1 — красный", r.returncode == 2 and "красный" in r.stderr)
+    # ветка разработчика сама дописала `dev: true` — хук берёт строку из точки ответвления, не из HEAD
+    open(os.path.join(wt, ".pantheon-verify"), "w").write("pnpm test\ndev: true\n")
+    git("add", "-A", cwd=wt)
+    git("commit", "-q", "-m", "подменил dev:", cwd=wt)
+    transcript(("Edit", {"file_path": "c.txt"}, False), ("Bash", {"command": "heavy true"}, False))
+    r = stop("dev-11")
+    check("dev-stop: `dev: true`, дописанная в коммите самой ветки, не засчитывается — выход 2",
+          r.returncode == 2 and "heavy python3 -I run-tests.py --affected plugins/x" in r.stderr)
+    wt = wt_old2
+    wt = wt_old
     for i, c in enumerate(("pantheon outside test", "pantheon outside test --wait 0",
                            "pantheon outside test --script lint --wait 590", "pantheon outside serve --wait 120",
                            "pantheon outside status 20261028-010101-abcdef")):
